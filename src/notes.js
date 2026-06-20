@@ -95,21 +95,38 @@ function renderNotes(){
 
 function exportNotes(){
   if(!State.notes.length){ showToast('沒有備註可匯出'); return; }
+  const makeBom=csv=>{ const BOM=new Uint8Array([0xEF,0xBB,0xBF]),body=new TextEncoder().encode(csv),out=new Uint8Array(BOM.length+body.length); out.set(BOM);out.set(body,BOM.length); return out; };
+
+  // 原始格式
   const csvF=v=>{ const s=String(v); return (s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s; };
   const lines=['狀態,時間,內容'];
   for(const n of State.notes){
-    const status=n.done?'V':'K';
     const time=secToEncore(n.time,State.fps);
     const content=(n.text||'').replace(/\r?\n/g,' ');
-    lines.push(`${csvF(status)},${csvF(time)},${csvF(content)}`);
+    lines.push(`${csvF(n.done?'V':'K')},${csvF(time)},${csvF(content)}`);
   }
-  const csv=lines.join('\r\n');
-  const BOM=new Uint8Array([0xEF,0xBB,0xBF]);
-  const body=new TextEncoder().encode(csv);
-  const out=new Uint8Array(BOM.length+body.length);
-  out.set(BOM); out.set(body,BOM.length);
-  downloadBytes(out,'notes.csv','text/csv;charset=utf-8');
-  setStatus('備註已匯出：notes.csv','ok');
+  downloadBytes(makeBom(lines.join('\r\n')),'notes.csv','text/csv;charset=utf-8');
+
+  // EDIUS Marker list 格式
+  const d=new Date();
+  const DAY=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const hh=v=>String(v).padStart(2,'0');
+  const dateStr=`${DAY[d.getDay()]} ${MON[d.getMonth()]} ${String(d.getDate()).padStart(2,' ')} ${hh(d.getHours())}:${hh(d.getMinutes())}:${hh(d.getSeconds())} ${d.getFullYear()}`;
+  const eLines=[
+    '# EDIUS Marker list',
+    '# Format Version 2',
+    `# Created Date : ${dateStr}`,
+    '#',
+    '# No, Position, Duration, Comment',
+  ];
+  State.notes.forEach((n,i)=>{
+    const time=secToEncore(n.time,State.fps);
+    const comment=(n.text||'').replace(/"/g,'""');
+    eLines.push(`${i+1},"${time}", ,"${comment}"`);
+  });
+  downloadBytes(makeBom(eLines.join('\r\n')),'notes_EDIUS.csv','text/csv;charset=utf-8');
+
+  setStatus('備註已匯出：notes.csv + notes_EDIUS.csv','ok');
 }
 
 export { addNote, renderNotes, exportNotes };
