@@ -19,8 +19,13 @@ function viewportW(){return tlScroll.clientWidth;}
 function timeToX(t){return (t-State.viewStart)*State.pxPerSec;}
 function xToTime(x){return State.viewStart + x/State.pxPerSec;}
 
+function tlTotal(){
+  const maxCueEnd=State.cues.length?Math.max(...State.cues.map(c=>c.end)):0;
+  const extra=Math.max(30,State.duration*0.15);
+  return Math.max(State.duration,maxCueEnd,1)+extra;
+}
 function layoutTimeline(){
-  const total=Math.max(State.duration,1);
+  const total=tlTotal();
   $('tlSpacer').style.width=(total*State.pxPerSec)+'px';
   const vw=viewportW();
   tlLayer.style.width=vw+'px';
@@ -262,7 +267,7 @@ function setZoom(px,centerTime){
   layoutTimeline();
   // 維持 center 在畫面內
   const target=c*State.pxPerSec - viewportW()/2;
-  tlScroll.scrollLeft=clamp(target,0,Math.max(0,State.duration*State.pxPerSec-viewportW()));
+  tlScroll.scrollLeft=clamp(target,0,Math.max(0,tlTotal()*State.pxPerSec-viewportW()));
   State.viewStart=tlScroll.scrollLeft/State.pxPerSec;
   drawTimeline();
 }

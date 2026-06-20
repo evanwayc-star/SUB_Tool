@@ -100,7 +100,7 @@ function ensurePlayheadVisible(){
   if(x<40 || x>vw-40){
     const newLeft=Math.max(0, t*State.pxPerSec - vw*0.3);
     tlScroll.scrollLeft=newLeft;
-    State.viewStart=newLeft/State.pxPerSec; // sync immediately so timeToX() sees the new position
+    State.viewStart=tlScroll.scrollLeft/State.pxPerSec; // read back actual (browser may clamp)
   }
 }
 
