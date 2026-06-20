@@ -8,11 +8,28 @@ import { updatePlayhead, drawRuler } from './timeline.js';
 import { recordHistory } from './history.js';
 import { ensurePlayheadVisible, showToast, setStatus, parseTimecodeInput } from './app.js';
 
+/* ===== 備註 active 狀態 ===== */
+let _activeNoteId=null;
+function setNoteActive(id){
+  if(_activeNoteId===id)return;
+  _activeNoteId=id;
+  const list=$('notesList'); if(!list)return;
+  list.querySelectorAll('.note-item').forEach(r=>r.classList.toggle('nt-active',r.dataset.id===id));
+}
+function updateNoteActive(t){
+  // 只有顯示的時間碼格數與備註相同（±半格）才顯示高亮
+  const W=0.5/(State.fps||24);
+  let best=null, bd=Infinity;
+  for(const n of State.notes){ const d=Math.abs(n.time-t); if(d<=W&&d<bd){bd=d;best=n;} }
+  setNoteActive(best?.id??null);
+}
+
 /* ===== 備註 ===== */
 function addNote(){
   const t=Media.vTime();
   const n={id:newId(),time:t,text:'',done:false};
   State.notes.push(n); State.notes.sort((a,b)=>a.time-b.time);
+  setNoteActive(n.id);
   $('notesPanel').classList.add('show'); renderNotes(); drawRuler();
   recordHistory('新增備註');
   setTimeout(()=>{
@@ -26,7 +43,7 @@ function renderNotes(){
   if(!State.notes.length){ el.innerHTML='<div class="empty">尚無備註<br>播放到某處 → 點「＋ 新增」</div>'; return; }
   el.innerHTML='';
   for(const n of State.notes){
-    const row=document.createElement('div'); row.className='note-item'+(n.done?' done':''); row.dataset.id=n.id;
+    const row=document.createElement('div'); row.className='note-item'+(n.done?' done':'')+(n.id===_activeNoteId?' nt-active':''); row.dataset.id=n.id;
     row.innerHTML=
       `<input type="checkbox" ${n.done?'checked':''}>`+
       `<span class="nt-time">${escapeHTML(secToEncore(n.time,State.fps))}</span>`+
@@ -41,7 +58,7 @@ function renderNotes(){
     timeEl.addEventListener('click',e=>{
       e.stopPropagation();
       if(timeEl.querySelector('input')) return;
-      Media.seek(n.time); updatePlayhead(); ensurePlayheadVisible();
+      setNoteActive(n.id); Media.seek(n.time); updatePlayhead(); ensurePlayheadVisible();
     });
     timeEl.addEventListener('dblclick',e=>{
       e.stopPropagation();
@@ -85,7 +102,7 @@ function renderNotes(){
     row.addEventListener('click',e=>{
       if(e.target.closest('input')||e.target.closest('.nt-del')||e.target.closest('.nt-time')) return;
       if(e.target===txt && txt.contentEditable==='true') return;
-      Media.seek(n.time); updatePlayhead(); ensurePlayheadVisible();
+      setNoteActive(n.id); Media.seek(n.time); updatePlayhead(); ensurePlayheadVisible();
     });
 
     row.querySelector('.nt-del').onclick=e=>{ e.stopPropagation(); State.notes=State.notes.filter(x=>x.id!==n.id); renderNotes(); recordHistory('刪除備註'); };
@@ -129,4 +146,4 @@ function exportNotes(){
   setStatus('備註已匯出：notes.csv + notes_EDIUS.csv','ok');
 }
 
-export { addNote, renderNotes, exportNotes };
+export { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive };

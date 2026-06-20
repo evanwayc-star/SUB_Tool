@@ -22,6 +22,7 @@ const State = {
   mediaSize: 0,
   muted:false, lastVol:1,
   mediaPath:null,
+  clipboard:[],  // copied cues for paste
 };
 /* 軌道工具 */
 function newTrack(name){ return {name:name||('軌道 '+(State.tracks.length+1)),visible:true,fontScale:1,posPct:10,align:'center',locked:false,color:'#ffffff'}; }

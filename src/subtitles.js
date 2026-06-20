@@ -4,7 +4,7 @@ import { State, isSel, newId, trackVisible } from './state.js';
 import { escapeHTML } from './util.js';
 import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
-import { renderCueBlocks, drawTimeline, updatePlayhead } from './timeline.js';
+import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
 import { renderAll, renderVideoSub, ensurePlayheadVisible, parseTimecodeInput, renderListTrackSel, showToast } from './app.js';
 import { recordHistory } from './history.js';
 import { showCueMenu } from './menus.js';
@@ -120,7 +120,7 @@ function renderSubList(){
   const overlaps=new Set();
   const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
   for(let i=0;i<timed.length;i++) for(let j=i+1;j<timed.length;j++){
-    if(timed[i].start<timed[j].end&&timed[j].start<timed[i].end){ overlaps.add(timed[i].id); overlaps.add(timed[j].id); }
+    if(timed[i].start<timed[j].end-1e-9&&timed[j].start<timed[i].end-1e-9){ overlaps.add(timed[i].id); overlaps.add(timed[j].id); }
   }
   const frag=document.createDocumentFragment();
   list.forEach((c,i)=>frag.appendChild(buildSubRow(c,i,overlaps)));
@@ -255,7 +255,7 @@ function selectCue(id,opts){
   const c=State.cues.find(x=>x.id===id);
   if(c && !opts.additive && !opts.range){
     const tk=c.track||0;
-    if(tk!==State.listTrack){ State.listTrack=tk; renderListTrackSel(); renderSubList(); }
+    if(tk!==State.listTrack){ State.listTrack=tk; renderListTrackSel(); renderSubList(); refreshTrackGutterActive(); }
   }
   refreshSelectionUI();
   if(opts.seek&&c&&c.timed!==false){ Media.seek(c.start); ensurePlayheadVisible(); }
@@ -341,6 +341,31 @@ function sortCues(){ State.cues.sort((a,b)=>{
   return at-bt;
 });}
 
+/* ===== 複製 / 貼上 ===================================================== */
+function copyCues(){
+  const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
+  if(!ids.length){ showToast('沒有選取的字幕'); return; }
+  State.clipboard=State.cues.filter(c=>ids.includes(c.id)).map(c=>({...c}));
+  showToast(`已複製 ${State.clipboard.length} 條字幕`);
+}
+function pasteCues(){
+  if(!State.clipboard?.length){ showToast('剪貼簿是空的'); return; }
+  const timedClip=State.clipboard.filter(c=>c.timed!==false);
+  const minStart=timedClip.length ? Math.min(...timedClip.map(c=>c.start)) : 0;
+  const delta=Media.vTime()-minStart;
+  const newCues=State.clipboard.map(c=>{
+    if(c.timed===false) return {...c, id:newId(), track:State.listTrack};
+    const s=Math.max(0, c.start+delta);
+    return {...c, id:newId(), track:State.listTrack, start:s, end:Math.max(s+0.001, c.end+delta)};
+  });
+  State.cues.push(...newCues);
+  sortCues();
+  State.selectedIds=newCues.map(c=>c.id);
+  State.selectedId=newCues[0].id;
+  renderAll(); refreshSelectionUI(); recordHistory('貼上字幕');
+  showToast(`已貼上 ${newCues.length} 條字幕`);
+}
+
 /* ===== 搜尋 / 取代 ===================================================== */
 function searchUpdate(){
   const inp=$('searchInput');
@@ -394,4 +419,5 @@ function updateSearchCount(){
 export { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel,
   addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode,
-  searchUpdate, searchNav, searchReplace, openInlineTimeEdit };
+  searchUpdate, searchNav, searchReplace, openInlineTimeEdit,
+  copyCues, pasteCues };

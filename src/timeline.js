@@ -4,7 +4,7 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel } from './state.js
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
-import { renderAll, renderVideoSub, renderListTrackSel, showToast, snapTargets, snapVal, neighborBounds, ensurePlayheadVisible, openNoteInPanel, openCueEditModal } from './app.js';
+import { renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, showToast, snapTargets, snapVal, neighborBounds, ensurePlayheadVisible, openNoteInPanel, openCueEditModal } from './app.js';
 import { jklReset } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
@@ -107,11 +107,11 @@ function renderTrackRows(){
   for(let tk=0;tk<State.trackCount;tk++){
     const vis=trackVisible(tk);
     const row=document.createElement('div');
-    row.className='tl-track'+(vis?'':' hidden-tk'); row.style.height=ROW_H+'px'; row.dataset.track=tk;
+    row.className='tl-track'+(vis?'':' hidden-tk')+(tk===State.listTrack?' tl-active':''); row.style.height=ROW_H+'px'; row.dataset.track=tk;
     tlTracks.appendChild(row);
     if(gut){
       const g=document.createElement('div');
-      g.className='tl-gtrack'+(vis?'':' hidden-tk'); g.style.height=ROW_H+'px'; g.dataset.track=tk;
+      g.className='tl-gtrack'+(vis?'':' hidden-tk')+(tk===State.listTrack?' tl-active':''); g.style.height=ROW_H+'px'; g.dataset.track=tk;
       const isLocked=!!State.tracks[tk].locked;
       g.innerHTML=`<span class="drag-handle" title="拖曳重排">⠿</span>`+
         `<button class="eye" title="顯示/隱藏此軌">${vis?'👁':'🙈'}</button>`+
@@ -120,6 +120,17 @@ function renderTrackRows(){
         `<button class="gdel" title="刪除此軌">✕</button>`;
       g.querySelector('.eye').onclick=(e)=>{e.stopPropagation();State.tracks[tk].visible=!vis;drawTimeline();renderVideoSub();};
       const nm=g.querySelector('.gname');
+      nm.addEventListener('click',e=>{
+        if(nm.contentEditable==='true') return;
+        e.stopPropagation();
+        State.listTrack=tk;
+        State.selectedIds=[]; State.selectedId=null;
+        $('stSel').textContent='';
+        const sel=$('listTrackSel'); if(sel)sel.value=String(tk);
+        renderTrackStyle();
+        renderAll();
+        refreshTrackGutterActive();
+      });
       nm.addEventListener('mousedown',e=>{
         if(e.detail>=2){
           e.preventDefault(); nm.contentEditable='true'; nm.focus();
@@ -143,6 +154,15 @@ function renderTrackRows(){
   }
   if(gut)gut.scrollTop=tlTracks.scrollTop;
   renderCueBlocks();
+}
+function refreshTrackGutterActive(){
+  const gut=$('tlGutterTracks'); if(!gut) return;
+  gut.querySelectorAll('.tl-gtrack').forEach(g=>{
+    g.classList.toggle('tl-active', +g.dataset.track===State.listTrack);
+  });
+  tlTracks.querySelectorAll('.tl-track').forEach(r=>{
+    r.classList.toggle('tl-active', +r.dataset.track===State.listTrack);
+  });
 }
 
 /* 軌道拖曳重排 */
@@ -443,4 +463,5 @@ tlScroll.addEventListener('wheel',e=>{
 
 export { RULER_H, WAVE_H, ROW_H, tracksTop, trackRowH, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
-  addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit };
+  addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit,
+  refreshTrackGutterActive };

@@ -6,13 +6,13 @@ import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel } from './state.js';
 import { Media, Wave } from './media.js';
-import { RULER_H, WAVE_H, ROW_H, tracksTop, trackRowH, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit } from './timeline.js';
+import { RULER_H, WAVE_H, ROW_H, tracksTop, trackRowH, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, refreshTrackGutterActive } from './timeline.js';
 import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
 import { Project } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
-import { addNote, renderNotes, exportNotes } from './notes.js';
+import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive } from './notes.js';
 
 
 
@@ -124,6 +124,8 @@ function rafLoop(){
     const act=State.cues.find(c=>c.timed!==false&&t>=c.start&&t<=c.end);
     if(act&&act.id!==State.activeId){ State.activeId=act.id; markActiveRow(act.id); }
     ensurePlayheadVisible();
+    // active 備註
+    if(State.notes.length&&$('notesPanel').classList.contains('show')) updateNoteActive(t);
     // buffer 音軌 drift 校正
     if(Media.ctx && Media.tracks.some(t=>t.kind==='buffer')){
       const expect=Media.startMediaTime+(Media.ctx.currentTime-Media.startCtxTime)*(video.playbackRate||1);
@@ -143,11 +145,11 @@ function markActiveRow(id){
 }
 video.addEventListener('play',()=>{Media.playing=true;$('playBtn').textContent='⏸';});
 video.addEventListener('pause',()=>{$('playBtn').textContent='▶';});
-video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();});
+video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
 video.addEventListener('ended',()=>{Media.pause();});
 
 /* seek bar */
-$('seekBar').addEventListener('input',e=>{ Media.seek((+e.target.value)/1000); });
+$('seekBar').addEventListener('input',e=>{ const t=(+e.target.value)/1000; Media.seek(t); updateNoteActive(t); });
 // rateSel removed from UI — speed controlled via JKL keys
 $('fpsSel').addEventListener('change',e=>setFps(+e.target.value||24));
 $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
@@ -600,7 +602,7 @@ function openCueEditModal(c){
 /* ===== UI 接線（區塊切換 / 樣式 / 分隔線 / 捲動同步 / 雙擊） ===== */
 function initUI(){
   // 軌道切換下拉
-  $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; searchUpdate(); renderTrackStyle(); });
+  $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; State.selectedIds=[]; State.selectedId=null; $('stSel').textContent=''; searchUpdate(); renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
   // 樣式控制（大小 / 位置 / 顏色）
   $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontScale=clamp(+e.target.value,0.5,3); renderVideoSub(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
@@ -746,13 +748,10 @@ function snapTargets(excludeIds){
 }
 function openNoteInPanel(n){
   $('notesPanel').classList.add('show');
+  setNoteActive(n.id);
   renderNotes();
   setTimeout(()=>{
-    const el=$('notesList')?.querySelector(`[data-id="${n.id}"]`);
-    if(!el)return;
-    el.scrollIntoView({block:'nearest'});
-    el.classList.add('nt-active');
-    setTimeout(()=>el.classList.remove('nt-active'),800);
+    $('notesList')?.querySelector(`[data-id="${n.id}"]`)?.scrollIntoView({block:'nearest'});
   },30);
 }
 function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of targets){const d=Math.abs(x-t); if(d<bd){bd=d;best=x;}} return best; }

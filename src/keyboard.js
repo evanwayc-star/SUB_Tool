@@ -4,11 +4,11 @@ import { State } from './state.js';
 import { clamp } from './util.js';
 import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
-import { addCue, selectCue, selectCueSingle, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI } from './subtitles.js';
+import { addCue, selectCue, selectCueSingle, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
 import { updatePlayhead, zoomFit, setZoom, drawTimeline } from './timeline.js';
 import { Project } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
-import { addNote, renderNotes } from './notes.js';
+import { addNote, renderNotes, updateNoteActive } from './notes.js';
 import { setStatus, closeModal, renderAll, ensurePlayheadVisible, renderVideoSub, showOsd, togglePanel } from './app.js';
 
 /* ===== JKL 穿梭輪 ======================================================= */
@@ -141,14 +141,14 @@ window.addEventListener('keydown',e=>{
     case 'o': e.preventDefault(); setOut(); break;
     case 'arrowleft':
       e.preventDefault();
-      if(e.ctrlKey||e.metaKey){ nudge(-5); }
+      if(e.ctrlKey||e.metaKey){ jumpToNote(-1); }
       else if(e.shiftKey){ nudge(-1); }
       else if(e.repeat){ if(_jklSpeed>=0){_jklSpeed=-1;jklApply();} }
       else nudge(-1/State.fps);
       break;
     case 'arrowright':
       e.preventDefault();
-      if(e.ctrlKey||e.metaKey){ nudge(5); }
+      if(e.ctrlKey||e.metaKey){ jumpToNote(1); }
       else if(e.shiftKey){ nudge(1); }
       else if(e.repeat){ if(_jklSpeed<=0){_jklSpeed=1;jklApply();} }
       else nudge(1/State.fps);
@@ -192,12 +192,23 @@ window.addEventListener('keydown',e=>{
       recordHistory('時間碼位移 P');
       setStatus(`P 位移 ${delta>=0?'+':''}${delta.toFixed(3)}s（${jCues.length} 條）`,'ok');
     } break;
-    case 'a': e.preventDefault(); togglePanel('historyPanel'); renderHistory(); break;
+    case 'a':
+      if(e.ctrlKey||e.metaKey){
+        e.preventDefault();
+        const tkCues=State.cues.filter(c=>(c.track||0)===State.listTrack);
+        if(tkCues.length){ State.selectedIds=tkCues.map(c=>c.id); State.selectedId=tkCues[0].id; refreshSelectionUI(); }
+      } else { e.preventDefault(); togglePanel('historyPanel'); renderHistory(); }
+      break;
     case 's':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); Project.save(); }
       else { e.preventDefault(); togglePanel('notesPanel'); renderNotes(); }
       break;
-    case 'v': case 'm': e.preventDefault(); addNote(); break;
+    case 'c': if(e.ctrlKey||e.metaKey){ e.preventDefault(); copyCues(); } break;
+    case 'v':
+      if(e.ctrlKey||e.metaKey){ e.preventDefault(); pasteCues(); }
+      else { e.preventDefault(); addNote(); }
+      break;
+    case 'm': e.preventDefault(); addNote(); break;
     case 'f': if(e.ctrlKey||e.metaKey){ e.preventDefault(); const sd=document.getElementById('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>document.getElementById('searchInput')?.focus(),20); } } break;
     case 'z':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); e.shiftKey?History.redo():History.undo(); }
@@ -210,14 +221,25 @@ window.addEventListener('keydown',e=>{
 window.addEventListener('keyup',e=>{
   if(e.key==='ArrowLeft'||e.key==='ArrowRight'){ if(_jklSpeed!==0)jklReset(); }
 });
-function nudge(d){ Media.seek(Media.vTime()+d); updatePlayhead(); ensurePlayheadVisible(); }
-function seekHome(){ Media.seek(0); updatePlayhead(); ensurePlayheadVisible(); }
-function seekEnd(){ Media.seek(State.duration||0); updatePlayhead(); ensurePlayheadVisible(); }
+function nudge(d){ const t=Media.vTime()+d; Media.seek(t); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(t); }
+function seekHome(){ Media.seek(0); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(0); }
+function seekEnd(){ const t=State.duration||0; Media.seek(t); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(t); }
+
+/* Ctrl+左/右：跳到上一個/下一個備註時間點 */
+function jumpToNote(dir){
+  if(!State.notes.length) return;
+  const t=Media.vTime(), EPS=1e-4;
+  let target=null;
+  if(dir>0){ for(const n of State.notes){ if(n.time>t+EPS&&(target===null||n.time<target.time))target=n; } }
+  else      { for(const n of State.notes){ if(n.time<t-EPS&&(target===null||n.time>target.time))target=n; } }
+  if(!target) return;
+  Media.seek(target.time); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(target.time);
+}
 
 /* Ctrl+上/下：跳到同軌上一句/下一句的起點並選取 */
 function jumpToAdjacentCue(dir){
   const sel=State.cues.find(c=>c.id===State.selectedId);
-  const track=sel?(sel.track||0):0;
+  const track=sel?(sel.track||0):State.listTrack;
   const list=State.cues.filter(c=>(c.track||0)===track);
   if(!list.length) return;
   let idx;
@@ -247,8 +269,8 @@ function stepBoundary(dir){
   const selCue=State.cues.find(c=>c.id===State.selectedId);
 
   if(!selCue){
-    // 無選取：找播放點附近最近邊界
-    const timed=State.cues.filter(c=>c.timed!==false);
+    // 無選取：找播放點附近最近邊界（限當前軌道）
+    const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
     if(!timed.length)return;
     const bnd=[]; for(const c of timed){bnd.push({c,edge:'start',t:c.start});bnd.push({c,edge:'end',t:c.end});}
     const t=Media.vTime();

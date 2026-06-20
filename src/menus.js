@@ -3,7 +3,7 @@ import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
 import { State, isSel } from './state.js';
 import { Media } from './media.js';
-import { addCue, addCueRelative, deleteSelected, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode } from './subtitles.js';
+import { addCue, addCueRelative, deleteSelected, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop } from './timeline.js';
 import { recordHistory } from './history.js';
 import { renderAudioTracks } from './app.js';
@@ -51,6 +51,9 @@ $('videoWrap').addEventListener('contextmenu',e=>{ e.preventDefault(); showPlaye
 function showCueMenu(x,y){
   const n=State.selectedIds.length||(State.selectedId?1:0);
   const items=[{heading:true,label:`已選 ${n} 條字幕`}];
+  items.push({label:`複製 ${n} 條字幕`,act:()=>copyCues()});
+  if(State.clipboard?.length) items.push({label:`貼上 ${State.clipboard.length} 條字幕`,act:()=>pasteCues()});
+  items.push({sep:true});
 
   // 單選空白字幕時，顯示文字位移選項
   if(n===1 && State.selectedId){
