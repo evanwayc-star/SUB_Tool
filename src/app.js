@@ -196,6 +196,7 @@ async function doAction(act){
     case 'exp-ass': exportSub('ass'); break;
     case 'exp-encore': exportSub('encore'); break;
     case 'exp-txt': exportSub('txt'); break;
+    case 'fps-convert': showFpsConvertDialog(); break;
     case 'shift-tc': togglePanel('shiftPanel'); break;
     case 'close-shift': $('shiftPanel').classList.remove('show'); break;
     case 'shift-back': applyTcShift(-1); break;
@@ -648,6 +649,55 @@ function initUI(){
   $('timelinePanel').addEventListener('mousedown',()=>{ const ae=document.activeElement; if(ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'))ae.blur(); },{capture:true});
   // 任何按鈕點擊後立即解除焦點，避免 Space/Enter 誤觸
   document.addEventListener('click',e=>{ const btn=e.target.closest('button'); if(btn)btn.blur(); },{capture:true});
+}
+
+/* ===== FPS 時間碼轉換 ===== */
+function showFpsConvertDialog(){
+  const tkIdx=State.listTrack;
+  const tk=State.tracks[tkIdx];
+  if(!tk){ showToast('請先選擇一個字幕軌道'); return; }
+  const FPS_OPTS=[23.976,24,25,29.97,30];
+  const opts=FPS_OPTS.map(f=>`<option value="${f}">${f===23.976?'23.976 (23.98)':f===29.97?'29.97':''+f}</option>`).join('');
+  const curFps=State.fps;
+  openModal('FPS 時間碼轉換',
+    `<div style="margin-bottom:12px;font-size:13px;color:var(--text-faint)">軌道：<b>${escapeHTML(tk.name)}</b></div>`+
+    `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">`+
+      `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">來源 FPS</div>`+
+        `<select id="fpsFrom" style="font-size:14px;padding:4px 8px">${opts}</select></div>`+
+      `<div style="font-size:20px;padding-top:18px;color:var(--text-faint)">→</div>`+
+      `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">目標 FPS</div>`+
+        `<select id="fpsTo" style="font-size:14px;padding:4px 8px">${opts}</select></div>`+
+    `</div>`+
+    `<div id="fpsPreview" style="margin-top:14px;font-size:12px;color:var(--text-faint)"></div>`,
+    [{label:'轉換',primary:true,act:()=>{
+      const from=+$('fpsFrom').value, to=+$('fpsTo').value;
+      if(from===to){ closeModal(); return; }
+      const ratio=from/to;
+      const cues=State.cues.filter(c=>(c.track||0)===tkIdx);
+      for(const c of cues){ c.start=Math.max(0,c.start*ratio); c.end=Math.max(c.start+0.001,c.end*ratio); }
+      // 更新 State.duration 為 max(影片片長, 最後字幕 end)
+      const maxEnd=Math.max(...State.cues.map(c=>c.end));
+      if(maxEnd>State.duration){ State.duration=maxEnd; $('tcDur').textContent=secToEncore(maxEnd,State.fps); }
+      closeModal(); sortCues(); renderAll(); layoutTimeline(); drawTimeline();
+      recordHistory(`FPS 轉換 ${from}→${to}`);
+      setStatus(`已將「${tk.name}」從 ${from}fps 轉換至 ${to}fps（${cues.length} 條）`,'ok');
+    }},{label:'取消',act:closeModal}]);
+  setTimeout(()=>{
+    // 預設 From = 目前專案 FPS
+    const fromSel=$('fpsFrom'), toSel=$('fpsTo');
+    const nearest=FPS_OPTS.reduce((a,b)=>Math.abs(b-curFps)<Math.abs(a-curFps)?b:a);
+    if(fromSel) fromSel.value=String(nearest);
+    const updatePreview=()=>{
+      const from=+fromSel?.value, to=+toSel?.value;
+      const p=$('fpsPreview'); if(!p)return;
+      if(from===to){ p.textContent='來源與目標相同，無需轉換。'; return; }
+      const ratio=from/to;
+      p.innerHTML=`比例 <b>${from}/${to} = ${ratio.toFixed(6)}</b>　·　例：1:00:00 → ${new Date(3600*ratio*1000).toISOString().slice(11,22)}`;
+    };
+    fromSel?.addEventListener('change',updatePreview);
+    toSel?.addEventListener('change',updatePreview);
+    updatePreview();
+  },30);
 }
 
 /* ===== 磁吸 / 防重疊 工具 ===== */
