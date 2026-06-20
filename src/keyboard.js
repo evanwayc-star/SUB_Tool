@@ -7,8 +7,9 @@ import { Media } from './media.js';
 import { addCue, selectCue, selectCueSingle, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI } from './subtitles.js';
 import { updatePlayhead, zoomFit, setZoom, drawTimeline } from './timeline.js';
 import { Project } from './project.js';
-import { History, recordHistory } from './history.js';
-import { setStatus, closeModal, renderAll, ensurePlayheadVisible, renderVideoSub, showOsd } from './app.js';
+import { History, recordHistory, renderHistory } from './history.js';
+import { addNote, renderNotes } from './notes.js';
+import { setStatus, closeModal, renderAll, ensurePlayheadVisible, renderVideoSub, showOsd, togglePanel } from './app.js';
 
 /* ===== JKL 穿梭輪 ======================================================= */
 /* _jklSpeed: 0=暫停, 1=正常播放, 2=2x播放, -1=1x倒帶, -2=2x倒帶 */
@@ -191,8 +192,13 @@ window.addEventListener('keydown',e=>{
       recordHistory('時間碼位移 P');
       setStatus(`P 位移 ${delta>=0?'+':''}${delta.toFixed(3)}s（${jCues.length} 條）`,'ok');
     } break;
+    case 'a': e.preventDefault(); togglePanel('historyPanel'); renderHistory(); break;
+    case 's':
+      if(e.ctrlKey||e.metaKey){ e.preventDefault(); Project.save(); }
+      else { e.preventDefault(); togglePanel('notesPanel'); renderNotes(); }
+      break;
+    case 'v': case 'm': e.preventDefault(); addNote(); break;
     case 'f': if(e.ctrlKey||e.metaKey){ e.preventDefault(); const sd=document.getElementById('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>document.getElementById('searchInput')?.focus(),20); } } break;
-    case 's': if(e.ctrlKey||e.metaKey){e.preventDefault();Project.save();} break;
     case 'z':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); e.shiftKey?History.redo():History.undo(); }
       else if(e.shiftKey){ e.preventDefault(); zoomFit(); } // Shift+Z = 適配

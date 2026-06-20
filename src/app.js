@@ -17,7 +17,7 @@ import { addNote, renderNotes, exportNotes } from './notes.js';
 
 
 /* 提供給子模組使用的膠合函式（app.js 為協調層） */
-export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput };
+export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput, togglePanel };
 
 /* ============================================================================
    SUB TOOL — 線上上字幕工具  (single-file, vanilla JS)

@@ -293,6 +293,7 @@ function zoomFit(){
 
 /* 時間軸滑鼠互動：時間尺拖曳=移動播放點 / 軌道空白拖曳=框選 / 拖區塊=移動換軌或縮放 */
 let drag=null;
+let _noteClickState=null; // 備註標記雙擊偵測 { id, t }
 tlScroll.addEventListener('mousedown',e=>{
   if(e.button!==0)return;
   hideCtx();
@@ -340,7 +341,12 @@ tlScroll.addEventListener('mousedown',e=>{
     if(y<=RULER_H && State.notes.length){
       const hitNote=State.notes.find(n=>Math.abs(timeToX(n.time)-x)<=9);
       if(hitNote){
-        openNoteInPanel(hitNote);
+        const now=performance.now();
+        if(_noteClickState&&_noteClickState.id===hitNote.id&&now-_noteClickState.t<400){
+          openNoteInPanel(hitNote); _noteClickState=null;
+        } else {
+          _noteClickState={id:hitNote.id,t:now};
+        }
         Media.seek(hitNote.time); updatePlayhead(); renderVideoSub(); ensurePlayheadVisible();
         e.preventDefault(); return;
       }
