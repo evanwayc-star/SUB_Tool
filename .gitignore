@@ -1,0 +1,4 @@
+node_modules/
+dist/
+.claude/
+_backup_index_monolith.html

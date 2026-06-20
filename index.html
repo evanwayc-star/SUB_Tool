@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SUB Tool — 線上上字幕工具</title>
+
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- ===== 選單列 ===== -->
+  <div class="menubar">
+    <div class="brand">SUB&nbsp;TOOL</div>
+
+    <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 檔案</button>
+    <div class="sep"></div>
+    <button class="icon" data-act="new" title="清空新建">🗑 開新檔案</button>
+    <div class="sep"></div>
+    <button class="icon" data-act="open-project" title="開啟專案 (.subtool)">📂 開啟檔案</button>
+    <div class="sep"></div>
+    <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 儲存專案</button>
+    <div class="sep"></div>
+    <button class="icon" data-act="open-media" title="匯入影音">🎬 開啟影音</button>
+    <div class="sep"></div>
+    <button class="icon" data-act="add-audio" title="加入音軌檔">🔊 載入外部音檔</button>
+    <div class="sep"></div>
+    <button class="icon" data-act="imp-auto" title="匯入字幕（自動辨識格式）">📄 匯入字幕</button>
+    <div class="sep"></div>
+    <button class="icon" data-act="exp-dialog" title="匯出字幕">💬 匯出字幕</button>
+
+    <div class="spacer"></div>
+
+    <div class="fps-box" title="影格率 (Adobe Encore 時碼換算用)">
+      FPS <select id="fpsSel">
+        <option value="23.976">23.98</option>
+        <option value="24" selected>24</option>
+        <option value="25">25</option>
+        <option value="29.97">29.97</option>
+        <option value="30">30</option>
+      </select>
+    </div>
+    <div class="sep"></div>
+    <button class="icon" data-act="help" title="鍵盤說明">⌨ 說明</button>
+  </div>
+
+  <!-- ===== 主體 ===== -->
+  <div class="main">
+    <!-- 左：影片 + 控制 + 音軌 -->
+    <div class="left">
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" playsinline></video>
+        <div class="vsublayer" id="videoSub"></div>
+        <div class="no-video" id="noVideo">
+          <b>尚未載入影音</b>
+          拖曳影片到此處，或點 <kbd>🎬 影音</kbd> 匯入<br>
+          支援 MP4 / MOV / MP3 / WAV（瀏覽器原生）<br>
+          MXF 等格式與多音軌將透過 ffmpeg 處理
+        </div>
+        <div class="speed-osd" id="speedOsd"></div>
+      </div>
+
+      <div class="transport">
+        <div class="btns">
+          <button class="icon" data-act="back5" title="後退 5 秒">⏮5</button>
+          <button class="icon" data-act="back1" title="後退 1 秒">⏮1</button>
+          <button class="icon" data-act="frame-back" title="後退 1 格 (←)">◀ǀ</button>
+          <button class="icon primary" id="playBtn" data-act="playpause" title="播放/暫停 (空白鍵)">▶</button>
+          <button class="icon" data-act="frame-fwd" title="前進 1 格 (→)">ǀ▶</button>
+          <button class="icon" data-act="fwd1" title="前進 1 秒">1⏭</button>
+          <button class="icon" data-act="fwd5" title="前進 5 秒">5⏭</button>
+        </div>
+        <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span> / <span id="tcDur">00:00:00:00</span></div>
+        <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
+      </div>
+
+      <div class="audio-tracks" id="audioTracks">
+        <div class="head">
+          <span>🎚 音軌</span>
+          <span id="atHint" class="spacer" style="color:var(--text-faint)">尚未載入音訊</span>
+          <button class="mini" data-act="add-audio" title="加入外部音軌檔">＋ 音軌檔</button>
+        </div>
+        <div id="atList"></div>
+      </div>
+    </div>
+
+    <div class="splitter-v" id="splitV" title="拖曳調整寬度"></div>
+
+    <!-- 右：字幕列表 -->
+    <div class="right" id="rightPanel">
+      <div class="rhead">
+        <span class="title">字幕列表</span>
+        <span class="count" id="subCount">0 條</span>
+        <select id="listTrackSel" title="切換顯示的字幕軌道" style="margin-left:auto;max-width:120px"></select>
+        <button class="icon" data-act="add-cue-above" title="於選取字幕上方新增空白">⬆＋</button>
+        <button class="icon" data-act="add-cue-below" title="於選取字幕下方新增空白">⬇＋</button>
+        <button class="icon" data-act="del-cue" title="刪除選取 (Del)">🗑</button>
+        <button class="icon" data-act="shift-tc" title="時間碼位移">⟷ 位移</button>
+        <button class="icon" data-act="copy-track" title="複製字幕軌道至新軌道">⧉ 複製</button>
+        <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)">🔍</button>
+        <button class="icon" data-act="check-panel" id="checkPanelBtn" title="字幕檢查">✓ 檢查</button>
+      </div>
+      <div class="check-panel" id="checkPanel" style="display:none">
+        <div class="cp-row cp-issue" id="cpOverlap"><span class="cp-label">時間碼重疊</span>：<span class="cp-nums"></span></div>
+        <div class="cp-row cp-issue" id="cpMulti"><span class="cp-label">字幕３行以上</span>：<span class="cp-nums"></span></div>
+        <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
+        <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span>：<span class="cp-nums"></span></div>
+        <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span>：<span class="cp-nums"></span></div>
+      </div>
+      <div class="sublist" id="sublist"></div>
+      <div class="track-style" id="trackStyle">
+        <div class="ts-row"><span class="ts-title" id="tsTitle">軌道樣式</span></div>
+        <div class="ts-row ts-controls">
+          <label>大小</label><select id="tsSizeSel"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><input type="number" id="tsSize" min="0.5" max="3" step="0.1" value="1" style="width:46px">×
+          <label>位置%</label><select id="tsPosSel"><option value="0">0</option><option value="10" selected>10</option><option value="50">50</option><option value="80">80</option></select><input type="number" id="tsPos" min="0" max="92" step="1" value="10" style="width:46px">
+          <label>顏色</label><input type="color" id="tsColor" value="#ffffff">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="splitter-h" id="splitH" title="拖曳調整高度"></div>
+
+  <!-- ===== 時間軸 ===== -->
+  <div class="timeline" id="timelinePanel">
+    <div class="tl-toolbar">
+      <span style="font-weight:600">⏱ 時間軸</span>
+      <button class="icon" data-act="add-track" title="新增字幕軌">＋ 軌道</button>
+      <div class="sep"></div>
+      <button class="icon" data-act="history" title="動作紀錄">🕘 紀錄</button>
+      <button class="icon" data-act="undo" title="復原 (Ctrl+Z)">↶</button>
+      <button class="icon" data-act="redo" title="重做 (Ctrl+Shift+Z)">↷</button>
+      <div class="sep"></div>
+      <button class="icon" data-act="notes" title="備註">📌 備註</button>
+      <button class="icon" data-act="add-note" title="新增備註">＋</button>
+      <div class="sep"></div>
+      <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 上字幕</button>
+      <div class="sep"></div>
+      <button class="icon" data-act="set-in" title="設定起點 (I)">In</button>
+      <button class="icon" data-act="set-out" title="設定終點 (O)">Out</button>
+      <span id="tlSel" class="tl-sel-info">無選取</span>
+      <div class="sep"></div>
+      <div class="zoom">
+        縮放 <button class="icon" data-act="zoom-out">－</button>
+        <input type="range" id="zoomBar" min="10" max="400" value="80" step="1" style="width:120px">
+        <button class="icon" data-act="zoom-in">＋</button>
+        <button class="icon" data-act="zoom-fit" title="顯示全部">適配</button>
+      </div>
+      <div class="spacer"></div>
+      <span class="hint">時間尺拖曳=移動播放點 · 軌道空白拖曳=框選 · 拖區塊移動/換軌 · 拖邊緣縮放</span>
+    </div>
+    <div class="tl-body">
+      <div class="tl-gutter" id="tlGutter">
+        <div class="tl-gutter-head">軌道<span class="spacer"></span><button class="mini gh-btn" data-act="toggle-all-vis" title="全部 顯示/隱藏">👁</button><button class="mini gh-btn" data-act="toggle-all-lock" title="全部 鎖定/解鎖">🔓</button></div>
+        <div class="tl-gutter-wave">🔊 波形</div>
+        <div id="tlGutterTracks"></div>
+      </div>
+      <div class="splitter-v" id="tlGutterSplitter" title="拖曳調整軌道欄寬度"></div>
+      <div class="tl-scroll" id="tlScroll">
+        <div class="tl-spacer" id="tlSpacer"></div>
+        <div class="tl-layer" id="tlLayer">
+          <canvas id="rulerCanvas"></canvas>
+          <canvas id="waveCanvas"></canvas>
+          <div class="tl-tracks" id="tlTracks"></div>
+          <div class="tl-rubber" id="tlRubber"></div>
+          <div class="tl-inpoint" id="tlInpoint" style="display:none"></div>
+          <div class="tl-playhead" id="tlPlayhead" style="left:0"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 狀態列 ===== -->
+  <div class="statusbar">
+    <span><span class="dot" id="stDot"></span><span id="stMsg">就緒</span></span>
+    <span id="stMedia"></span>
+    <div class="spacer"></div>
+    <span id="stEngine">音訊引擎：原生</span>
+    <span id="stSel"></span>
+  </div>
+</div>
+
+<!-- 浮動搜尋視窗 -->
+<div class="search-dialog" id="searchDialog" style="display:none">
+  <div class="sd-head" id="searchDialogHead">
+    🔍 搜尋 / 取代
+    <button class="sd-close" data-act="search-close" title="關閉">✕</button>
+  </div>
+  <div class="sr-row"><input type="text" id="searchInput" placeholder="搜尋… 多關鍵字用 || 分隔"><button class="mini" data-act="search-prev" title="上一個">↑</button><button class="mini" data-act="search-next" title="下一個">↓</button><span id="searchCount"></span></div>
+  <div class="sr-row"><input type="text" id="replaceInput" placeholder="取代為…"><button class="mini" data-act="replace-one">取代</button><button class="mini" data-act="replace-all">全取代</button></div>
+</div>
+
+<!-- hidden inputs -->
+<input type="file" id="fileMedia" accept="video/*,audio/*,.mxf,.mov,.mp4,.mkv,.mp3,.wav,.m4a,.aac" style="display:none">
+<input type="file" id="fileAudio" accept="audio/*,.wav,.mp3,.aac,.m4a,.flac,.ogg" style="display:none">
+<input type="file" id="fileProject" accept=".subtool,.json" style="display:none">
+<input type="file" id="fileSub" accept=".srt,.ass,.ssa,.txt" style="display:none">
+
+<div class="ctxmenu" id="ctxmenu"></div>
+
+<!-- 動作紀錄面板 -->
+<div class="float-panel" id="historyPanel">
+  <div class="fp-head"><span>🕘 動作紀錄</span>
+    <span class="spacer"></span>
+    <button class="icon" data-act="undo" title="復原 (Ctrl+Z)">↶</button>
+    <button class="icon" data-act="redo" title="重做 (Ctrl+Shift+Z)">↷</button>
+    <button class="fp-close" data-act="close-history">✕</button>
+  </div>
+  <div class="fp-body" id="historyList"></div>
+</div>
+
+<!-- 備註面板 -->
+<div class="float-panel" id="notesPanel">
+  <div class="fp-head"><span>📌 備註</span>
+    <span class="spacer"></span>
+    <button class="icon" data-act="export-notes" title="匯出備註為 CSV">⬇ 匯出</button>
+    <button class="icon" data-act="add-note" title="加入目前時間點的備註">＋ 新增</button>
+    <button class="fp-close" data-act="close-notes">✕</button>
+  </div>
+  <div class="fp-body" id="notesList"></div>
+</div>
+
+<!-- 時間碼位移面板 -->
+<div class="float-panel" id="shiftPanel">
+  <div class="fp-head"><span>⟷ 時間碼位移</span><span class="spacer"></span><button class="fp-close" data-act="close-shift">✕</button></div>
+  <div class="fp-body shift-body">
+    <select id="tcShiftSel">
+      <option value="track">當前軌道－所有字幕</option>
+      <option value="sel">當前軌道－已選擇的字幕</option>
+      <option value="all">所有軌道－所有字幕</option>
+    </select>
+    <div class="shift-row">
+      <input type="text" id="tcShiftInput" placeholder="00:00:02:00" title="時:分:秒:格">
+      <button class="icon" data-act="shift-back">◀ 往前</button>
+      <button class="icon" data-act="shift-fwd">往後 ▶</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- modal -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h3 id="modalTitle">說明</h3>
+    <div class="mbody" id="modalBody"></div>
+    <div class="mfoot" id="modalFoot"><button class="primary" data-act="modal-close">關閉</button></div>
+  </div>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
