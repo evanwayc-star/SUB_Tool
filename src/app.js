@@ -452,30 +452,59 @@ async function importDropped(f){
 function showHelp(){
   openModal('鍵盤快捷鍵 / 使用說明',
   `<b>三大區塊</b>：播放窗（左上）· 字幕列表（右）· 時間軸（下）。<br>`+
-  `<b>上字幕</b>：選一條字幕 → 播放到開始處按 <kbd>I</kbd>、結束處按 <kbd>O</kbd>。<br>`+
-  `<table class="keys">
-   <tr><td><kbd>空白鍵</kbd></td><td>播放 / 暫停</td></tr>
-   <tr><td><kbd>I</kbd></td><td>設定<b>被選字幕</b>的開始點＝目前播放點</td></tr>
-   <tr><td><kbd>O</kbd></td><td>設定<b>被選字幕</b>的結束點＝目前播放點</td></tr>
-   <tr><td><kbd>↓</kbd></td><td>步進到下一個邊界點：本句起點→本句終點→下句起點→下句終點…（落在哪句即選哪句）</td></tr>
-   <tr><td><kbd>↑</kbd></td><td>反向步進邊界點</td></tr>
-   <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>前/後一格（按住 Shift = 1 秒）</td></tr>
-   <tr><td><kbd>Enter</kbd></td><td>編輯文字 / 於下方新增空白字幕</td></tr>
-   <tr><td><kbd>Del</kbd></td><td>刪除選取（可多選）</td></tr>
-   <tr><td><kbd>Home</kbd>/<kbd>End</kbd></td><td>跳到開頭 / 結尾</td></tr>
-   <tr><td><kbd>-</kbd> / <kbd>+</kbd></td><td>時間軸縮小 / 放大</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>Z</kbd></td><td>時間軸「適配」(顯示全部)</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>復原上一步</td></tr>
+  `<b>上字幕流程</b>：選一條字幕 → 播到開始處按 <kbd>I</kbd>、播到結束處按 <kbd>O</kbd>。<br><br>`+
+  `<b>▍播放控制</b>
+  <table class="keys">
+   <tr><td><kbd>Space</kbd></td><td>播放 / 暫停</td></tr>
+   <tr><td><kbd>J</kbd></td><td>倒帶（每按一次加速：1× → 1.5× → 2× → 2.5× → 3× → 循環）</td></tr>
+   <tr><td><kbd>K</kbd></td><td>停止 / 暫停</td></tr>
+   <tr><td><kbd>L</kbd></td><td>正播加速（1× → 1.5× → 2× → 2.5× → 3× → 循環）</td></tr>
+   <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>前 / 後一格</td></tr>
+   <tr><td><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd></td><td>前 / 後 1 秒</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd><kbd>→</kbd></td><td>前 / 後 5 秒</td></tr>
+   <tr><td>按住 <kbd>←</kbd> / <kbd>→</kbd></td><td>1× 速度連續倒帶 / 正播（放開停止）</td></tr>
+   <tr><td><kbd>Home</kbd> / <kbd>Shift</kbd>+<kbd>↑</kbd></td><td>跳到開頭（00:00:00:00）</td></tr>
+   <tr><td><kbd>End</kbd> / <kbd>Shift</kbd>+<kbd>↓</kbd></td><td>跳到片尾</td></tr>
+  </table><br>`+
+  `<b>▍字幕操作</b>
+  <table class="keys">
+   <tr><td><kbd>I</kbd></td><td>設定被選字幕的<b>起點</b>＝目前播放點（無選取則新增一條）</td></tr>
+   <tr><td><kbd>O</kbd></td><td>設定被選字幕的<b>終點</b>＝目前播放點</td></tr>
+   <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>步進邊界點（起點→終點→下句起點…）</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+<kbd>↑</kbd></td><td>跳到<b>上一句</b>起點並選取</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+<kbd>↓</kbd></td><td>跳到<b>下一句</b>起點並選取</td></tr>
+   <tr><td><kbd>P</kbd></td><td>將選取字幕整批位移到播放點</td></tr>
+   <tr><td><kbd>Enter</kbd></td><td>開啟選取字幕的<b>文字編輯</b>視窗</td></tr>
+   <tr><td><kbd>Del</kbd> / <kbd>Backspace</kbd></td><td>刪除選取（支援多選）</td></tr>
+   <tr><td><kbd>Esc</kbd></td><td>取消所有選取 / 關閉上字幕模式</td></tr>
+  </table><br>`+
+  `<b>▍選取</b>
+  <table class="keys">
+   <tr><td><kbd>點選</kbd></td><td>選取單一字幕</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+點</td><td>多選 / 取消單一</td></tr>
+   <tr><td><kbd>Shift</kbd>+點</td><td>範圍選取（同軌道）</td></tr>
+  </table><br>`+
+  `<b>▍編輯視窗（修改字幕文字）</b>
+  <table class="keys">
+   <tr><td><kbd>Enter</kbd></td><td>確認修改</td></tr>
+   <tr><td><kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>換行</td></tr>
+   <tr><td><kbd>Esc</kbd></td><td>取消</td></tr>
+  </table><br>`+
+  `<b>▍其他快捷</b>
+  <table class="keys">
+   <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>復原</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>重做</td></tr>
-   <tr><td><kbd>Del</kbd></td><td>刪除選取（可多選）</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>儲存專案</td></tr>
-   </table>
-   <br><b>三區塊大小</b>：拖曳區塊之間的<b>分隔線</b>可調整字幕列表寬度、時間軸高度。<br>
-   <b>播放窗</b>：時間以「時:分:秒:格」顯示；控制鍵＝後退10/5秒、後退1格、播放、前進1格、前進5/10秒；畫面上<b>按右鍵</b> → 選音軌 / 播放速度；匯入時自動偵測 FPS（23.98/24/25/29.97/30）。<b>雙擊時間數字</b>可輸入時間（如 01235512→01:23:55:12、8:13→00:00:08:13；超過片長會提示）；<b>右鍵時間數字</b>可複製。<br>
-   <b>字幕列表</b>：上方<b>下拉選單</b>切換顯示軌道；下方可調該軌<b>字幕大小／位置／對齊</b>（多軌同時間字幕會疊加顯示，位置自行調整）；點選（<kbd>Ctrl</kbd>+點=多選、<kbd>Shift</kbd>+點=範圍）；右鍵移到其他軌道；<b>⬆＋ / ⬇＋</b> 上/下方新增。<br>
-   <b>時間軸</b>：<b>時間尺/波形</b>拖曳=移動播放點；<b>軌道空白按住拖曳</b>=框選；拖區塊=移動（上下拖換軌，會<b>磁吸</b>播放點與其他字幕邊界、且不會重疊）；拖邊緣=調整起訖；<b>雙擊區塊</b>可直接編輯文字。<br>
-   <b>🕘 紀錄 / 📌 備忘</b>：時間軸工具列開啟。動作紀錄可逐步復原/重做；備忘錄可在目前時間點<b>＋新增</b>、打勾確認、點時間跳轉。<br>
-   <b>軌道</b>：左欄 <b>＋軌道</b> 新增、<b>✕</b> 刪除、<b>👁</b> 顯示/隱藏、雙擊名稱改名；軌道過多時側邊出現捲動條；匯出時可勾選輸出哪些軌道。`);
+   <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>搜尋 / 取代</td></tr>
+   <tr><td><kbd>Shift</kbd>+<kbd>Z</kbd></td><td>時間軸適配（顯示全部）</td></tr>
+   <tr><td><kbd>-</kbd> / <kbd>+</kbd></td><td>時間軸縮小 / 放大</td></tr>
+  </table><br>`+
+  `<b>▍介面說明</b><br>`+
+  `<b>播放窗</b>：時間碼格式「時:分:秒:格」；<b>雙擊</b>時間數字可直接輸入（如 01235512→01:23:55:12）；<b>右鍵</b>時間數字可複製；畫面右鍵選音軌/速度；匯入影音時自動偵測 FPS（23.976/24/25/29.97/30）。<br>`+
+  `<b>字幕列表</b>：上方下拉切換軌道；下方調整字幕大小／位置／顏色；<b>⬆＋ / ⬇＋</b> 在上/下方新增；右鍵選單可移軌道、調整選取範圍。<br>`+
+  `<b>時間軸</b>：時間尺/波形拖曳＝移動播放點；軌道空白區按住拖曳＝框選；拖字幕區塊＝移動（支援換軌、磁吸、防重疊）；拖邊緣＝調整起訖；雙擊字幕＝編輯文字。<br>`+
+  `<b>軌道</b>：＋軌道 新增、✕ 刪除、👁 顯示/隱藏；雙擊名稱改名；拖曳 ⠿ 重排順序；匯出時多軌各自輸出獨立檔案。<br>`+
+  `<b>🕘 紀錄 / 📌 備忘</b>：時間軸工具列開啟浮動面板；備忘可點時間跳轉；時間碼位移面板可對選取字幕批次加減時間。`);
 }
 
 /* ===== 播放窗：自動偵測 FPS（網頁版，播放時取樣） ===== */

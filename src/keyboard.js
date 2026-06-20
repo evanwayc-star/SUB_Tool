@@ -154,18 +154,18 @@ window.addEventListener('keydown',e=>{
       break;
     case 'arrowup':
       e.preventDefault();
-      if(e.shiftKey){ Media.seek(0); updatePlayhead(); ensurePlayheadVisible(); }
+      if(e.shiftKey){ seekHome(); }
       else if(e.ctrlKey||e.metaKey){ jumpToAdjacentCue(-1); }
       else stepBoundary(-1);
       break;
     case 'arrowdown':
       e.preventDefault();
-      if(e.shiftKey){ Media.seek(State.duration||0); updatePlayhead(); ensurePlayheadVisible(); }
+      if(e.shiftKey){ seekEnd(); }
       else if(e.ctrlKey||e.metaKey){ jumpToAdjacentCue(1); }
       else stepBoundary(1);
       break;
-    case 'home': e.preventDefault(); Media.seek(0); break;
-    case 'end': e.preventDefault(); Media.seek(State.duration); break;
+    case 'home': e.preventDefault(); seekHome(); break;
+    case 'end': e.preventDefault(); seekEnd(); break;
     case 'enter': e.preventDefault(); { const sel=State.selectedId; if(sel){ const row=sublist.querySelector(`.sub-row[data-id="${sel}"]`); if(row)row.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window})); } } break;
     case 'delete': case 'backspace': if(State.selectedIds.length||State.selectedId){e.preventDefault();deleteSelected();} break;
     case 'escape':
@@ -205,6 +205,8 @@ window.addEventListener('keyup',e=>{
   if(e.key==='ArrowLeft'||e.key==='ArrowRight'){ if(_jklSpeed!==0)jklReset(); }
 });
 function nudge(d){ Media.seek(Media.vTime()+d); updatePlayhead(); ensurePlayheadVisible(); }
+function seekHome(){ Media.seek(0); updatePlayhead(); ensurePlayheadVisible(); }
+function seekEnd(){ Media.seek(State.duration||0); updatePlayhead(); ensurePlayheadVisible(); }
 
 /* Ctrl+上/下：跳到同軌上一句/下一句的起點並選取 */
 function jumpToAdjacentCue(dir){
