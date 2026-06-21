@@ -887,11 +887,13 @@ function init(){
   else setStatus('就緒 — 匯入影音或字幕開始','ok');
 }
 async function initDesktop(){
-  document.querySelector('.brand small').textContent='桌面版';
-  $('noVideo').innerHTML='<b>尚未載入影音</b>點 <kbd>🎬 影音</kbd> 匯入<br>桌面版支援 MP4 / MOV / <b>MXF</b> / MKV / 多音軌（系統 ffmpeg）<br>多音軌可同時混音播放，每軌獨立音量／獨奏';
+  const brand=document.querySelector('.brand');
+  if(brand && !brand.querySelector('small')){ const sm=document.createElement('small'); sm.style.cssText='opacity:.55;font-size:11px;margin-left:6px'; sm.textContent='桌面版'; brand.appendChild(sm); }
+  const nv=$('noVideo'); if(nv) nv.innerHTML='<b>尚未載入影音</b>點 <kbd>🎬 影音</kbd> 匯入<br>桌面版支援 MP4 / MOV / <b>MXF</b> / MKV / 多音軌（系統 ffmpeg）<br>多音軌可同時混音播放，每軌獨立音量／獨奏';
   try{
     const s=await DESK.status();
-    $('stEngine').textContent='引擎：'+(s.ffmpeg?'系統 ffmpeg ✓':'⚠ 未偵測到 ffmpeg');
+    const eng=$('stEngine');
+    if(eng){ const gpu=(s.venc&&s.venc!=='libx264')?(' · GPU '+String(s.venc).replace('h264_','').toUpperCase()):''; eng.textContent='引擎：'+(s.ffmpeg?'系統 ffmpeg ✓'+gpu:'⚠ 未偵測到 ffmpeg'); }
     if(!s.ffmpeg) openModal('未偵測到 ffmpeg',
       `桌面版的 MXF 轉檔與多音軌抽取需要系統安裝 <b>ffmpeg</b>。<br><br>`+
       `偵測位置：PATH、<code>C:\\Program Files\\FFMPEG\\bin\\</code> 等。<br>`+
