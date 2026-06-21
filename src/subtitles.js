@@ -241,6 +241,7 @@ function buildSubRow(c,i,overlaps){
     renderCheckPanel();
   });
   txt.addEventListener('keydown',e=>{
+    if(txt.contentEditable!=='true') return;
     if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); txt.blur(); }
     else if(e.key==='Escape'){ e.preventDefault(); txt.innerText=_orig; txt.blur(); }
     e.stopPropagation();
