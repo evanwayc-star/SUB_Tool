@@ -206,10 +206,12 @@ window.addEventListener('keydown',e=>{
     case 'd': e.preventDefault(); doAction('mixer'); break;
     case 'x':
       e.preventDefault();
-      { const t=Media.vTime();
+      if(!State.subMode){
+        const t=Media.vTime();
         const hit=State.cues.find(c=>(c.track||0)===State.listTrack&&c.timed!==false&&c.start<=t&&c.end>=t);
         if(hit) selectCue(hit.id,{seek:false});
-        else setStatus('目前時間點無字幕',''); }
+        else setStatus('目前時間點無字幕','');
+      }
       break;
     case 'c':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); copyCues(); }
