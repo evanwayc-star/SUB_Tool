@@ -96,7 +96,8 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .tc{font-variant-numeric:tabular-nums;font-family:"Consolas",monospace;font-size:13px;color:var(--text)}
 .tc .cur{color:var(--accent)}
 .transport .btns{display:flex;gap:4px}
-.transport input[type=range]{flex:1;accent-color:var(--accent)}
+.transport input[type=range]{flex:1;min-width:60px;accent-color:var(--accent)}
+.tp-btn{flex-shrink:0;padding:3px 8px;font-size:13px}
 /* 速度 OSD */
 .speed-osd{position:absolute;bottom:32%;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.72);color:#fff;font-size:26px;font-weight:700;font-family:"Consolas",monospace;padding:10px 24px;border-radius:8px;pointer-events:none;opacity:0;transition:opacity .15s;z-index:50;white-space:nowrap}
 .speed-osd.show{opacity:1}
@@ -220,7 +221,8 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .float-panel{position:fixed;right:16px;bottom:60px;width:320px;max-height:60vh;background:var(--panel2);
   border:1px solid var(--border2);border-radius:8px;box-shadow:var(--shadow);z-index:1400;display:none;flex-direction:column}
 .float-panel.show{display:flex}
-.float-panel .fp-head{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600}
+.float-panel .fp-head{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;cursor:grab;user-select:none}
+.float-panel .fp-head button{cursor:pointer}
 .float-panel .fp-head .spacer{flex:1}
 .float-panel .fp-close{background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:14px;padding:2px 6px}
 .float-panel .fp-close:hover{color:var(--red)}
@@ -279,7 +281,10 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .sr-row input{flex:1;min-width:0;font-size:12px}
 .sr-row .mini{padding:2px 6px;font-size:12px;flex-shrink:0}
 #searchCount{font-size:11px;color:var(--text-faint);white-space:nowrap;min-width:38px;text-align:center}
-.search-match{color:var(--red);font-weight:700}
+.search-match{color:#5b9fff;font-weight:700}
+.sub-row.search-hit{background:rgba(150,90,230,.15)}
+.sub-row.search-hit:hover{background:rgba(150,90,230,.22)}
+.sub-row.search-hit.sel{background:rgba(150,90,230,.28)}
 /* 軌道欄頭部按鈕 */
 .tl-gutter-head{gap:3px}
 .tl-gutter-head .gh-btn{padding:1px 4px;font-size:10px;background:none;border-color:transparent;color:var(--text-faint)}
@@ -316,7 +321,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .mx-peak{position:absolute;left:0;right:0;bottom:0;height:2px;background:#fff;opacity:.85}
 .mx-name{font-size:10px;color:var(--text-dim);max-width:46px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
 .mx-btns{display:flex;gap:3px}
-.mx-solo,.mx-mute{font-size:10px;width:20px;height:18px;line-height:1;padding:0;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:3px;cursor:pointer}
+.mx-solo,.mx-mute{font-size:13px;width:26px;height:22px;line-height:1;padding:0;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:3px;cursor:pointer}
 .mx-solo.on{background:#caa72e;color:#000;border-color:#caa72e}
 .mx-mute.on{background:var(--red);color:#fff;border-color:var(--red)}
 /* 時間軸工具列：選取狀態資訊 */
@@ -335,15 +340,22 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .tl-gtrack.tl-dragging{opacity:.4}
 .tl-gtrack.tl-drag-target{box-shadow:inset 0 2px 0 var(--accent)}
 /* 字幕檢查面板 */
-.check-panel{border-bottom:1px solid var(--border);background:#1a1a1e;padding:8px 14px;font-size:11px;font-family:"Consolas",monospace}
-.check-panel .cp-row{display:flex;align-items:baseline;gap:4px;margin:3px 0;line-height:1.6;color:var(--text-dim)}
+.check-float-panel{width:360px}
+.check-panel{padding:8px 14px;font-size:13px;font-family:"Consolas",monospace}
+.check-panel .cp-row{display:flex;align-items:baseline;gap:6px;margin:4px 0;line-height:1.7;color:var(--text-dim)}
 .check-panel .cp-issue .cp-label{color:var(--red)}
 .check-panel .cp-issue .cp-nums .cp-num{color:var(--red)}
-.check-panel .cp-label{min-width:6em;text-align:right;flex-shrink:0;white-space:nowrap}
+.check-panel .cp-label{min-width:7em;text-align:right;flex-shrink:0;white-space:nowrap}
 .check-panel .cp-nums{flex:1;word-break:break-all}
-.check-panel .cp-num{cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.check-panel .cp-num{cursor:pointer;text-decoration:underline;text-underline-offset:2px;padding:1px 3px;border-radius:3px}
 .check-panel .cp-num:hover{color:var(--accent)}
-.check-panel .cp-sep{color:var(--border2);margin:6px 0;letter-spacing:1px;font-size:10px}
+.check-panel .cp-sep{color:var(--border2);margin:6px 0;letter-spacing:1px}
+#cpBlank .cp-label,#cpBlank .cp-num{color:var(--green)}
+#cpTwo .cp-label,#cpTwo .cp-num{color:var(--cyan)}
+#cpBlank .cp-num:hover,#cpTwo .cp-num:hover{color:var(--accent)}
+#cpOverLen input[type="number"]{width:36px;margin:0 3px;padding:1px 3px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:11px;text-align:center;-moz-appearance:textfield}
+#cpOverLen input[type="number"]::-webkit-inner-spin-button{display:none}
+.sub-row .txt .over-len{color:var(--red);font-weight:bold}
 /* 字幕對調模式 */
 .sub-row.swap-src{outline:2px solid var(--cyan);outline-offset:-2px;background:#0d2a3a !important}
 .sublist.swap-mode{cursor:crosshair}

@@ -83,7 +83,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   },
   toEncore(cues,fps){
     return cues.filter(c=>c.timed!==false).map(c=>
-      `${secToEncore(c.start,fps)}\t${secToEncore(c.end,fps)}\t${(c.text||'').replace(/\n/g,' ')}`).join('\r\n')+'\r\n';
+      `${secToEncore(c.start,fps)} ${secToEncore(c.end,fps)} ${(c.text||'').replace(/\n/g,' ')}`).join('\r\n')+'\r\n';
   },
   /* ---- 純文字 ---- */
   parseTXT(text){

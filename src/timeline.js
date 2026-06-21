@@ -124,8 +124,7 @@ function renderTrackRows(){
         if(nm.contentEditable==='true') return;
         e.stopPropagation();
         State.listTrack=tk;
-        State.selectedIds=[]; State.selectedId=null;
-        $('stSel').textContent='';
+        if(!e.shiftKey){ State.selectedIds=[]; State.selectedId=null; $('stSel').textContent=''; }
         const sel=$('listTrackSel'); if(sel)sel.value=String(tk);
         renderTrackStyle();
         renderAll();
@@ -442,10 +441,12 @@ window.addEventListener('mouseup',e=>{
       State.selectedId=State.selectedIds[State.selectedIds.length-1]||null; State.activeEdge='start';
       refreshSelectionUI(); $('stSel').textContent='已選 '+State.selectedIds.length+' 條';
     }else{
-      // 點時間軸空白：跳轉並取消所有字幕選取
+      // 點時間軸空白：跳轉（Shift 時保留選取）
       Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); renderVideoSub();
-      State.selectedIds=[]; State.selectedId=null; State.activeEdge='start';
-      refreshSelectionUI(); $('stSel').textContent='';
+      if(!e.shiftKey){
+        State.selectedIds=[]; State.selectedId=null; State.activeEdge='start';
+        refreshSelectionUI(); $('stSel').textContent='';
+      }
     }
   }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; sortCues(); renderAll(); if(moved)recordHistory(m==='move'?'移動字幕':'調整字幕時間'); }
   drag=null;

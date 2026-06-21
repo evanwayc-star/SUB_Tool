@@ -7,7 +7,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from 
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel } from './state.js';
 import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, trackRowH, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, refreshTrackGutterActive } from './timeline.js';
-import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace } from './subtitles.js';
+import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
 import { Project } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
@@ -17,7 +17,7 @@ import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive } fr
 
 
 /* 提供給子模組使用的膠合函式（app.js 為協調層） */
-export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput, togglePanel };
+export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput, togglePanel, renderMixer, doAction };
 
 /* ============================================================================
    SUB TOOL — 線上上字幕工具  (single-file, vanilla JS)
@@ -75,8 +75,8 @@ function renderAudioTracks(){
     const row=document.createElement('div');row.className='atrack';
     row.innerHTML=
       `<span class="nm">${escapeHTML(tr.name)}</span>`+
-      `<button class="mini mute ${tr.muted?'':'on'}">${tr.muted?'靜音':'開'}</button>`+
-      `<button class="mini solo ${tr.solo?'on':''}">S</button>`+
+      `<button class="mini mute ${tr.muted?'on':''}" title="${tr.muted?'取消靜音':'靜音'}">${tr.muted?'🔇':'🔊'}</button>`+
+      `<button class="mini solo ${tr.solo?'on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">⊙</button>`+
       `<input type="range" min="0" max="1.5" step="0.01" value="${tr.volume}">`;
     const [muteBtn,soloBtn]=row.querySelectorAll('button');
     const vol=row.querySelector('input');
@@ -93,7 +93,12 @@ let _meterStrips=[];
 function renderMixer(){
   const wrap=$('mixerStrips'); if(!wrap)return;
   _meterStrips=[];
-  const real=Media.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='element');
+  const src=Media.activeSource;
+  const real=Media.tracks.filter(t=>{
+    if(!(t.kind==='buffer'||t.kind==='native'||t.kind==='element'))return false;
+    if(src!==null&&(t.source||'video')!==src)return false;
+    return true;
+  });
   if(!real.length){ wrap.innerHTML='<div class="empty" style="padding:14px;white-space:nowrap">尚無音訊聲道</div>'; return; }
   wrap.innerHTML='';
   for(const tr of real){
@@ -101,7 +106,7 @@ function renderMixer(){
     strip.innerHTML=
       `<div class="mx-meter"><div class="mx-mask"></div><div class="mx-peak"></div></div>`+
       `<div class="mx-name" title="${escapeHTML(tr.name)}">${escapeHTML(tr.name)}</div>`+
-      `<div class="mx-btns"><button class="mx-solo${tr.solo?' on':''}" title="獨奏">S</button><button class="mx-mute${tr.muted?' on':''}" title="靜音">M</button></div>`;
+      `<div class="mx-btns"><button class="mx-solo${tr.solo?' on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">⊙</button><button class="mx-mute${tr.muted?' on':''}" title="${tr.muted?'取消靜音':'靜音'}">${tr.muted?'🔇':'🔊'}</button></div>`;
     strip.querySelector('.mx-solo').onclick=()=>{ tr.solo=!tr.solo; Media.applyGains(); renderMixer(); renderAudioTracks(); };
     strip.querySelector('.mx-mute').onclick=()=>{ tr.muted=!tr.muted; Media.applyGains(); renderMixer(); renderAudioTracks(); };
     wrap.appendChild(strip);
@@ -174,7 +179,8 @@ function rafLoop(){
     }
     // element 音軌 drift 校正（多軌同步）
     for(const tr of Media.tracks){ if(tr.kind==='element'&&tr.el&&!tr.el.paused){
-      if(Math.abs(tr.el.currentTime - video.currentTime) > 0.12){ try{tr.el.currentTime=video.currentTime;}catch(e){} }
+      const ref=Media.vTime(); // mpv 模式時取 _mpvTime，否則取 video.currentTime
+      if(Math.abs(tr.el.currentTime - ref) > 0.12){ try{tr.el.currentTime=ref;}catch(e){} }
     }}
   }
   updateMeters();
@@ -188,6 +194,7 @@ function markActiveRow(id){
 video.addEventListener('play',()=>{Media.playing=true;$('playBtn').textContent='⏸';});
 video.addEventListener('pause',()=>{$('playBtn').textContent='▶';});
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
+window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});
 video.addEventListener('ended',()=>{Media.pause();});
 
 /* seek bar */
@@ -282,11 +289,14 @@ async function doAction(act){
     case 'toggle-all-vis': { const anyVis=State.tracks.some(t=>t.visible!==false); State.tracks.forEach(t=>t.visible=!anyVis); drawTimeline(); renderVideoSub(); } break;
     case 'toggle-all-lock': { const anyUnlocked=State.tracks.some(t=>!t.locked); State.tracks.forEach(t=>t.locked=anyUnlocked); drawTimeline(); } break;
     case 'copy-track': doCopyTrack(); break;
-    case 'check-panel': { const p=$('checkPanel'),btn=$('checkPanelBtn'); const show=p.style.display==='none'; p.style.display=show?'block':'none'; if(btn)btn.classList.toggle('sub-active',show); if(show)renderCheckPanel(); } break;
+    case 'check-panel': { const btn=$('checkPanelBtn'); const willShow=!$('checkPanel').classList.contains('show'); togglePanel('checkPanel'); if(btn)btn.classList.toggle('sub-active',willShow); if(willShow)renderCheckPanel(); } break;
+    case 'close-check': { $('checkPanel').classList.remove('show'); const btn=$('checkPanelBtn'); if(btn)btn.classList.remove('sub-active'); } break;
     case 'search-open': { const sd=$('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>$('searchInput')?.focus(),20); } } break;
     case 'search-close': { const sd=$('searchDialog'); if(sd)sd.style.display='none'; } break;
     case 'search-next': searchNav(1); break;
     case 'search-prev': searchNav(-1); break;
+    case 'search-clear': { $('searchInput').value=''; searchUpdate(); $('searchInput').focus(); } break;
+    case 'search-select-all': searchSelectAll(); break;
     case 'replace-one': searchReplace(false); break;
     case 'replace-all': searchReplace(true); break;
     case 'help': showHelp(); break;
@@ -322,7 +332,7 @@ function detectSubFormat(text, ext){
   if(ext==='ass'||ext==='ssa')return 'ass';
   if(/\[Script Info\]/i.test(text))return 'ass';
   if(/^\d+\r?\n\d{2}:\d{2}:\d{2}[,\.]\d{3}/m.test(text))return 'srt';
-  if(/\d{2}:\d{2}:\d{2}:\d{2}\t.*\d{2}:\d{2}:\d{2}:\d{2}/m.test(text))return 'encore';
+  if(/\d{1,2}:\d{2}:\d{2}:\d{2}[ \t]+\d{1,2}:\d{2}:\d{2}:\d{2}/m.test(text))return 'encore';
   return 'txt';
 }
 /* 匯入 / 匯出字幕 */
@@ -655,6 +665,9 @@ function initUI(){
   $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); });
   $('tsSizeSel').addEventListener('change',e=>{ const v=+e.target.value; $('tsSize').value=v; const i=State.listTrack; if(State.tracks[i]){ State.tracks[i].fontScale=v; renderVideoSub(); } e.target.blur(); });
   $('tsPosSel').addEventListener('change',e=>{ const v=+e.target.value; $('tsPos').value=v; const i=State.listTrack; if(State.tracks[i]){ State.tracks[i].posPct=v; renderVideoSub(); } e.target.blur(); });
+  // 字幕檢查：字數上限輸入
+  $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
+  $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋浮動視窗
   $('searchInput').addEventListener('input',()=>searchUpdate());
   $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){ searchNav(1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; } });
@@ -710,7 +723,7 @@ function showFpsConvertDialog(){
     `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">`+
       `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">來源 FPS</div>`+
         `<select id="fpsFrom" style="font-size:14px;padding:4px 8px">${opts}</select></div>`+
-      `<div style="font-size:20px;padding-top:18px;color:var(--text-faint)">→</div>`+
+      `<div style="padding-top:18px;display:flex;flex-direction:column;align-items:center;gap:2px"><span style="font-size:20px;color:var(--text-faint)">→</span><button id="fpsSwap" style="font-size:11px;padding:2px 6px;cursor:pointer" title="交換來源與目標">⇄ 交換</button></div>`+
       `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">目標 FPS</div>`+
         `<select id="fpsTo" style="font-size:14px;padding:4px 8px">${opts}</select></div>`+
     `</div>`+
@@ -742,6 +755,7 @@ function showFpsConvertDialog(){
     };
     fromSel?.addEventListener('change',updatePreview);
     toSel?.addEventListener('change',updatePreview);
+    $('fpsSwap')?.addEventListener('click',()=>{ const tmp=fromSel.value; fromSel.value=toSel.value; toSel.value=tmp; updatePreview(); });
     updatePreview();
   },30);
 }
@@ -871,6 +885,31 @@ function initExtras(){
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
   $('tcCur').addEventListener('contextmenu',e=>{ e.preventDefault();
     try{ navigator.clipboard.writeText(secToEncore(Media.vTime(),State.fps)); showToast('已複製時間碼'); }catch(err){} });
+  // 浮動面板拖曳（拖 fp-head 移動整個面板）
+  document.querySelectorAll('.float-panel').forEach(panel=>{
+    const head=panel.querySelector('.fp-head'); if(!head)return;
+    let ox=0,oy=0,sx=0,sy=0;
+    head.addEventListener('mousedown',e=>{
+      if(e.target.closest('button'))return;
+      e.preventDefault();
+      const r=panel.getBoundingClientRect();
+      panel.style.right='auto'; panel.style.bottom='auto';
+      panel.style.left=r.left+'px'; panel.style.top=r.top+'px';
+      ox=r.left; oy=r.top; sx=e.clientX; sy=e.clientY;
+      document.body.style.cursor='grabbing';
+      const mv=e2=>{
+        panel.style.left=clamp(ox+e2.clientX-sx,0,window.innerWidth-60)+'px';
+        panel.style.top=clamp(oy+e2.clientY-sy,0,window.innerHeight-40)+'px';
+      };
+      const up=()=>{
+        document.body.style.cursor='';
+        document.removeEventListener('mousemove',mv);
+        document.removeEventListener('mouseup',up);
+      };
+      document.addEventListener('mousemove',mv);
+      document.addEventListener('mouseup',up);
+    });
+  });
 }
 
 /* resize */

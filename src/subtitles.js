@@ -11,6 +11,7 @@ import { showCueMenu } from './menus.js';
 
 /* ===== 字幕對調模式 ================================================= */
 let _swapSource = null;
+let _checkLenLimit = 0; // 0=不檢查；> 0 = 每行超過此字數以紅粗體標示
 
 function enterSwapMode(id){
   _swapSource = id;
@@ -78,7 +79,7 @@ function updateTlSel(){
 }
 
 function renderCheckPanel(){
-  const panel=$('checkPanel'); if(!panel||panel.style.display==='none')return;
+  const panel=$('checkPanel'); if(!panel||!panel.classList.contains('show'))return;
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
   // 時間碼重疊
   const overlapSet=new Set();
@@ -87,21 +88,28 @@ function renderCheckPanel(){
     if(tmd[i].start<tmd[j].end&&tmd[j].start<tmd[i].end){overlapSet.add(tmd[i].id);overlapSet.add(tmd[j].id);}
   }
   const overlapNums=list.map((c,i)=>overlapSet.has(c.id)?i+1:null).filter(n=>n!==null);
-  // 多行
-  const multiNums=list.map((c,i)=>((c.text||'').match(/\n|\/\//g)||[]).length>=2?i+1:null).filter(n=>n!==null);
-  const twoNums  =list.map((c,i)=>((c.text||'').match(/\n|\/\//g)||[]).length===1?i+1:null).filter(n=>n!==null);
+  // 多行（排除空白字幕，避免純換行符被誤計）
+  const multiNums=list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n|\/\//g)||[]).length>=2?i+1:null;}).filter(n=>n!==null);
+  const twoNums  =list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n|\/\//g)||[]).length===1?i+1:null;}).filter(n=>n!==null);
   // 空白字幕
   const blankNums=list.map((c,i)=>!(c.text||'').trim()?i+1:null).filter(n=>n!==null);
+  // 超過字數
+  const lenEl=$('cpLenInput');
+  _checkLenLimit = lenEl ? (parseInt(lenEl.value)||0) : 0;
+  const overLenNums = _checkLenLimit
+    ? list.map((c,i)=>{ const t=c.text||''; return t.trim()&&t.split(/\n|\/\//).some(ln=>ln.length>_checkLenLimit)?i+1:null; }).filter(n=>n!==null)
+    : [];
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
-  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank');
+  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen');
   if(ro)ro.querySelector('.cp-nums').innerHTML=mkNums(overlapNums);
   if(rm)rm.querySelector('.cp-nums').innerHTML=mkNums(multiNums);
   if(r2)r2.querySelector('.cp-nums').innerHTML=mkNums(twoNums);
   if(rb)rb.querySelector('.cp-nums').innerHTML=mkNums(blankNums);
+  if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'—';
   panel.querySelectorAll('.cp-num').forEach(el=>{
     el.onclick=()=>{
       const idx=parseInt(el.dataset.idx)-1; const c=list[idx]; if(!c)return;
-      selectCue(c.id,{seek:false});
+      selectCue(c.id,{seek:true});
       const row=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);
       if(row)row.scrollIntoView({block:'center'});
     };
@@ -134,11 +142,20 @@ function lineCountClass(text){
   return n>=2?' multi-line':n===1?' two-line':'';
 }
 function _rowClass(text){ return !(text||'').trim()?'blank':lineCountClass(text).trim(); }
-function _txtInner(text){ return !(text||'').trim()?'<span class="blank-label">(空白字幕)</span>':txtHTML(text||''); }
+function _lineLenHTML(line){
+  if(!_checkLenLimit||line.length<=_checkLenLimit) return escapeHTML(line);
+  return escapeHTML(line.slice(0,_checkLenLimit))+`<span class="over-len">${escapeHTML(line.slice(_checkLenLimit))}</span>`;
+}
+function _txtInner(text){
+  if(!(text||'').trim()) return '<span class="blank-label">(空白字幕)</span>';
+  if(!_checkLenLimit) return txtHTML(text||'');
+  // 有字數限制：逐行套用，不套用搜尋高亮（兩者同時存在時以字數優先）
+  return (text||'').split(/\n|\/\//).map(_lineLenHTML).join('<br>');
+}
 function buildSubRow(c,i,overlaps){
   const row=document.createElement('div');
   const rc=_rowClass(c.text);
-  row.className='sub-row'+(rc?' '+rc:'')+(isSel(c.id)?' sel':'')+(c.id===State.selectedId?' primary':'')+(c.id===State.activeId?' active':'')+(overlaps?.has(c.id)?' overlap':'');
+  row.className='sub-row'+(rc?' '+rc:'')+(_searchMatches.includes(c.id)?' search-hit':'')+(isSel(c.id)?' sel':'')+(c.id===State.selectedId?' primary':'')+(c.id===State.activeId?' active':'')+(overlaps?.has(c.id)?' overlap':'');
   row.dataset.id=c.id;
   const timed=c.timed!==false;
   row.innerHTML=
@@ -212,7 +229,7 @@ function buildSubRow(c,i,overlaps){
   const txt=row.querySelector('.txt');
   let _orig=c.text||'';
   txt.addEventListener('input',()=>{
-    c.text=txt.innerText; _syncRowClass(); renderCueBlocks(); renderVideoSub();
+    c.text=txt.innerText; _syncRowClass(); renderCueBlocks(); renderVideoSub(); renderCheckPanel();
   });
   txt.addEventListener('blur',()=>{
     if(txt.contentEditable!=='true') return;
@@ -221,6 +238,7 @@ function buildSubRow(c,i,overlaps){
     txt.innerHTML=_txtInner(c.text);
     _syncRowClass();
     if((c.text||'')!==_orig) recordHistory('編輯字幕文字');
+    renderCheckPanel();
   });
   txt.addEventListener('keydown',e=>{
     if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); txt.blur(); }
@@ -415,9 +433,17 @@ function updateSearchCount(){
   if(!_searchTerms.length){ el.textContent=''; return; }
   el.textContent=_searchMatches.length?`${_searchIdx+1}/${_searchMatches.length}`:'無結果';
 }
+function searchSelectAll(){
+  if(!_searchMatches.length) return;
+  State.selectedIds=_searchMatches.slice();
+  State.selectedId=_searchMatches[_searchMatches.length-1];
+  State.activeEdge='start';
+  refreshSelectionUI();
+  const el=$('stSel'); if(el) el.textContent='已選 '+State.selectedIds.length+' 條';
+}
 
 export { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel,
   addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode,
-  searchUpdate, searchNav, searchReplace, openInlineTimeEdit,
+  searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,
   copyCues, pasteCues };

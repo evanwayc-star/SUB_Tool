@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const url = require('url');
+const net = require('net');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 
@@ -288,3 +289,107 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
 ipcMain.handle('fs:readB64', (e, p) => { try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; } });
+
+/* ============ mpv 媒體播放器整合（秒開非原生格式，無需等待 ffmpeg proxy 轉檔） ============
+   架構：spawn mpv → 透過 Windows named pipe 發送 JSON IPC 指令 → renderer 同步時碼
+   音訊：mpv 先播原生音訊；背景 ffmpeg 只抽音軌（無 proxy），完成後 element tracks 接管，mpv 靜音 */
+let _mpvExe = null;
+let _mpvProc = null;
+let _mpvClient = null;
+let _mpvReqId = 0;
+const _mpvCbs = new Map();
+let _mpvBuf = '';
+
+function detectMpv() {
+  if (_mpvExe) return _mpvExe;
+  const cands = [
+    process.env.MPV_PATH,
+    'mpv',
+    'C:\\Program Files\\mpv\\mpv.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'mpv', 'mpv.exe'),
+    path.join(os.homedir(), 'scoop', 'shims', 'mpv.exe'),
+    path.join(os.homedir(), 'scoop', 'apps', 'mpv', 'current', 'mpv.exe'),
+  ].filter(Boolean);
+  for (const c of cands) {
+    try { const r = spawnSync(c, ['--version'], { timeout: 3000, stdio: 'pipe' }); if (r.status === 0) { _mpvExe = c; return c; } } catch (e) {}
+  }
+  return null;
+}
+
+function mpvSend(cmd, wantReply = false) {
+  if (!_mpvClient) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const id = ++_mpvReqId;
+    if (wantReply) {
+      _mpvCbs.set(id, resolve);
+      setTimeout(() => { if (_mpvCbs.delete(id)) resolve(null); }, 5000);
+    } else { resolve(null); }
+    try { _mpvClient.write(JSON.stringify(wantReply ? { command: cmd, request_id: id } : { command: cmd }) + '\n'); }
+    catch (e) { if (wantReply) { _mpvCbs.delete(id); resolve(null); } }
+  });
+}
+
+function mpvConnectPipe(pipeName) {
+  return new Promise((resolve, reject) => {
+    let retries = 0;
+    const pipePath = '\\\\.\\pipe\\' + pipeName;
+    const tryConnect = () => {
+      const client = net.createConnection(pipePath);
+      client.once('connect', () => {
+        _mpvClient = client; _mpvBuf = '';
+        client.on('data', chunk => {
+          _mpvBuf += chunk.toString();
+          const lines = _mpvBuf.split('\n'); _mpvBuf = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const msg = JSON.parse(line);
+              if (typeof msg.request_id === 'number' && _mpvCbs.has(msg.request_id)) {
+                _mpvCbs.get(msg.request_id)(msg.data ?? null); _mpvCbs.delete(msg.request_id);
+              } else if (msg.event === 'property-change' || msg.event === 'end-file') {
+                mainWin?.webContents.send('mpv:event', msg);
+              }
+            } catch (e) {}
+          }
+        });
+        client.on('close', () => { _mpvClient = null; mainWin?.webContents.send('mpv:event', { event: 'disconnected' }); });
+        resolve(client);
+      });
+      client.once('error', () => {
+        if (retries < 20) { retries++; setTimeout(tryConnect, 300); }
+        else reject(new Error('mpv pipe connect timeout'));
+      });
+    };
+    tryConnect();
+  });
+}
+
+ipcMain.handle('mpv:detect', () => { const exe = detectMpv(); return { available: !!exe, exe }; });
+ipcMain.handle('mpv:launch', async (e, { src }) => {
+  if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
+  if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
+  const exe = detectMpv();
+  if (!exe) throw new Error('找不到 mpv，請安裝 mpv 或設定 MPV_PATH 環境變數（https://mpv.io）');
+  const pipeName = 'subtool-mpv-' + Date.now();
+  _mpvProc = spawn(exe, [
+    '--input-ipc-server=\\\\.\\pipe\\' + pipeName,
+    '--no-terminal', '--keep-open=yes', '--pause', '--hr-seek=yes', src
+  ], { detached: false, stdio: 'ignore' });
+  _mpvProc.on('close', () => { _mpvProc = null; });
+  await mpvConnectPipe(pipeName);
+  _mpvClient.write(JSON.stringify({ command: ['observe_property', 1, 'time-pos'] }) + '\n');
+  _mpvClient.write(JSON.stringify({ command: ['observe_property', 2, 'pause'] }) + '\n');
+  _mpvClient.write(JSON.stringify({ command: ['observe_property', 3, 'duration'] }) + '\n');
+  await new Promise(r => setTimeout(r, 400));
+  const duration = await mpvSend(['get_property', 'duration'], true);
+  return { ok: true, duration: typeof duration === 'number' ? duration : 0 };
+});
+ipcMain.handle('mpv:seek',  (e, t) => mpvSend(['seek', t, 'absolute']));
+ipcMain.handle('mpv:play',  ()     => mpvSend(['set_property', 'pause', false]));
+ipcMain.handle('mpv:pause', ()     => mpvSend(['set_property', 'pause', true]));
+ipcMain.handle('mpv:mute',  (e, v) => mpvSend(['set_property', 'mute', v]));
+ipcMain.handle('mpv:rate',  (e, r) => mpvSend(['set_property', 'speed', r]));
+ipcMain.handle('mpv:quit',  () => {
+  if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
+  if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
+});

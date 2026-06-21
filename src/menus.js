@@ -6,7 +6,7 @@ import { Media } from './media.js';
 import { addCue, addCueRelative, deleteSelected, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop } from './timeline.js';
 import { recordHistory } from './history.js';
-import { renderAudioTracks } from './app.js';
+import { renderAudioTracks, renderMixer, doAction } from './app.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -31,18 +31,23 @@ document.addEventListener('mousedown',e=>{ if(!ctx.contains(e.target))hideCtx();
 window.addEventListener('blur',hideCtx);
 window.addEventListener('resize',hideCtx);
 
-/* 播放窗右鍵：選音軌 / 播放速度 */
+/* 播放窗右鍵：音訊來源切換 + 播放速度 */
 function showPlayerMenu(x,y){
-  const real=Media.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='element'||t.kind==='nativeTrack');
-  const anySolo=real.some(t=>t.solo);
-  const items=[{heading:true,label:'音軌'}];
-  if(real.length===0)items.push({label:'（尚未載入音訊）'});
-  else{
-    items.push({label:'全部音軌（同時混音）',checked:!anySolo,act:()=>{real.forEach(t=>{t.solo=false;t.muted=false;});Media.applyGains();renderAudioTracks();}});
-    real.forEach(tr=>items.push({label:tr.name,checked:tr.solo,act:()=>{real.forEach(t=>t.solo=(t===tr));Media.applyGains();renderAudioTracks();}}));
+  const srcs=Media.getSources();
+  const active=Media.activeSource;
+  const items=[{heading:true,label:'音訊來源'}];
+  if(srcs.length===0){
+    items.push({label:'（尚未載入音訊）'});
+  } else {
+    for(const s of srcs)
+      items.push({label:s.label,checked:active===s.id,
+        act:()=>{ Media.switchSource(s.id); renderMixer(); }});
   }
+  items.push({sep:true});
+  items.push({label:'🔊 載入外部音檔…',act:()=>doAction('add-audio')});
   items.push({sep:true},{heading:true,label:'播放速度'});
-  [0.25,0.5,0.75,1,1.25,1.5,2].forEach(r=>items.push({label:r+'×',checked:(video.playbackRate||1)===r,act:()=>{Media.setRate(r);$('rateSel').value=String(r);}}));
+  [0.25,0.5,0.75,1,1.25,1.5,2].forEach(r=>items.push({label:r+'×',
+    checked:(video.playbackRate||1)===r,act:()=>Media.setRate(r)}));
   showCtx(x,y,items);
 }
 $('videoWrap').addEventListener('contextmenu',e=>{ e.preventDefault(); showPlayerMenu(e.clientX,e.clientY); });

@@ -21,8 +21,6 @@
     <div class="sep"></div>
     <button class="icon" data-act="open-media" title="匯入影音">🎬 開啟影音</button>
     <div class="sep"></div>
-    <button class="icon" data-act="add-audio" title="加入音軌檔">🔊 載入外部音檔</button>
-    <div class="sep"></div>
     <button class="icon" data-act="imp-auto" title="匯入字幕（自動辨識格式）">📄 匯入字幕</button>
     <div class="sep"></div>
     <button class="icon" data-act="exp-dialog" title="匯出字幕">💬 匯出字幕</button>
@@ -70,16 +68,13 @@
         </div>
         <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span> / <span id="tcDur">00:00:00:00</span></div>
         <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
+        <button class="icon tp-btn" data-act="mixer" title="混音器：逐聲道電平 / 獨奏 / 靜音">🎚</button>
+        <button class="icon tp-btn" data-act="add-audio" title="載入外部音檔（右鍵影片切換音訊來源）">🔊＋</button>
       </div>
 
-      <div class="audio-tracks" id="audioTracks">
-        <div class="head">
-          <span>🎚 音軌</span>
-          <span id="atHint" class="spacer" style="color:var(--text-faint)">尚未載入音訊</span>
-          <button class="mini" data-act="add-audio" title="加入外部音軌檔">＋ 音軌檔</button>
-        </div>
-        <div id="atList"></div>
-      </div>
+      <!-- 音軌清單已移入混音器浮動面板；保留隱藏佔位符供 JS 寫入 -->
+      <span id="atHint" hidden></span>
+      <div id="atList" hidden></div>
     </div>
 
     <div class="splitter-v" id="splitV" title="拖曳調整寬度"></div>
@@ -98,13 +93,6 @@
         <button class="icon" data-act="copy-track" title="複製字幕軌道至新軌道">⧉ 複製</button>
         <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)">🔍</button>
         <button class="icon" data-act="check-panel" id="checkPanelBtn" title="字幕檢查">✓ 檢查</button>
-      </div>
-      <div class="check-panel" id="checkPanel" style="display:none">
-        <div class="cp-row cp-issue" id="cpOverlap"><span class="cp-label">時間碼重疊</span>：<span class="cp-nums"></span></div>
-        <div class="cp-row cp-issue" id="cpMulti"><span class="cp-label">字幕３行以上</span>：<span class="cp-nums"></span></div>
-        <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
-        <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span>：<span class="cp-nums"></span></div>
-        <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span>：<span class="cp-nums"></span></div>
       </div>
       <div class="sublist" id="sublist"></div>
       <div class="track-style" id="trackStyle">
@@ -132,8 +120,6 @@
       <div class="sep"></div>
       <button class="icon" data-act="notes" title="備註">📌 備註</button>
       <button class="icon" data-act="add-note" title="新增備註">＋</button>
-      <button class="icon" data-act="mixer" title="混音器：逐聲道電平 / 獨奏 / 靜音">🎚 混音器</button>
-      <div class="sep"></div>
       <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 上字幕</button>
       <div class="sep"></div>
       <button class="icon" data-act="set-in" title="設定起點 (I)">In</button>
@@ -186,7 +172,7 @@
     🔍 搜尋 / 取代
     <button class="sd-close" data-act="search-close" title="關閉">✕</button>
   </div>
-  <div class="sr-row"><input type="text" id="searchInput" placeholder="搜尋… 多關鍵字用 || 分隔"><button class="mini" data-act="search-prev" title="上一個">↑</button><button class="mini" data-act="search-next" title="下一個">↓</button><span id="searchCount"></span></div>
+  <div class="sr-row"><input type="text" id="searchInput" placeholder="搜尋… 多關鍵字用 || 分隔"><button class="mini" data-act="search-clear" title="清除搜尋">✕</button><button class="mini" data-act="search-prev" title="上一個">↑</button><button class="mini" data-act="search-next" title="下一個">↓</button><button class="mini" data-act="search-select-all" title="全選所有符合的字幕">全選</button><span id="searchCount"></span></div>
   <div class="sr-row"><input type="text" id="replaceInput" placeholder="取代為…"><button class="mini" data-act="replace-one">取代</button><button class="mini" data-act="replace-all">全取代</button></div>
 </div>
 
@@ -207,6 +193,19 @@
     <button class="fp-close" data-act="close-history">✕</button>
   </div>
   <div class="fp-body" id="historyList"></div>
+</div>
+
+<!-- 字幕檢查面板 -->
+<div class="float-panel check-float-panel" id="checkPanel">
+  <div class="fp-head"><span>✓ 字幕檢查</span><span class="spacer"></span><button class="fp-close" data-act="close-check">✕</button></div>
+  <div class="fp-body check-panel">
+    <div class="cp-row cp-issue" id="cpOverlap"><span class="cp-label">時間碼重疊</span>：<span class="cp-nums"></span></div>
+    <div class="cp-row cp-issue" id="cpMulti"><span class="cp-label">字幕３行以上</span>：<span class="cp-nums"></span></div>
+    <div class="cp-row cp-issue" id="cpOverLen"><span class="cp-label">超過<input id="cpLenInput" type="number" min="1" max="9999" placeholder="—" title="輸入字數上限，超過的部分會以紅色粗體顯示">字</span>：<span class="cp-nums"></span></div>
+    <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
+    <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span>：<span class="cp-nums"></span></div>
+    <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span>：<span class="cp-nums"></span></div>
+  </div>
 </div>
 
 <!-- 備註面板 -->

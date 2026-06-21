@@ -105,7 +105,7 @@ function renderNotes(){
       setNoteActive(n.id); Media.seek(n.time); updatePlayhead(); ensurePlayheadVisible();
     });
 
-    row.querySelector('.nt-del').onclick=e=>{ e.stopPropagation(); State.notes=State.notes.filter(x=>x.id!==n.id); renderNotes(); recordHistory('刪除備註'); };
+    row.querySelector('.nt-del').onclick=e=>{ e.stopPropagation(); State.notes=State.notes.filter(x=>x.id!==n.id); renderNotes(); drawRuler(); recordHistory('刪除備註'); };
     el.appendChild(row);
   }
 }

@@ -9,7 +9,7 @@ import { updatePlayhead, zoomFit, setZoom, drawTimeline } from './timeline.js';
 import { Project } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, updateNoteActive } from './notes.js';
-import { setStatus, closeModal, renderAll, ensurePlayheadVisible, renderVideoSub, showOsd, togglePanel } from './app.js';
+import { setStatus, closeModal, renderAll, ensurePlayheadVisible, renderVideoSub, showOsd, togglePanel, doAction } from './app.js';
 
 /* ===== JKL 穿梭輪 ======================================================= */
 /* _jklSpeed: 0=暫停, 1=正常播放, 2=2x播放, -1=1x倒帶, -2=2x倒帶 */
@@ -168,7 +168,7 @@ window.addEventListener('keydown',e=>{
     case 'home': e.preventDefault(); seekHome(); break;
     case 'end': e.preventDefault(); seekEnd(); break;
     case 'enter': e.preventDefault(); { const sel=State.selectedId; if(sel){ const row=sublist.querySelector(`.sub-row[data-id="${sel}"]`); if(row)row.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window})); } } break;
-    case 'delete': case 'backspace': if(State.selectedIds.length||State.selectedId){e.preventDefault();deleteSelected();} break;
+    case 'delete': if(State.selectedIds.length||State.selectedId){e.preventDefault();deleteSelected();} break;
     case 'escape':
       cancelSwapMode();
       if(State.subMode){ e.preventDefault(); State.subMode=false;
@@ -203,16 +203,31 @@ window.addEventListener('keydown',e=>{
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); Project.save(); }
       else { e.preventDefault(); togglePanel('notesPanel'); renderNotes(); }
       break;
-    case 'c': if(e.ctrlKey||e.metaKey){ e.preventDefault(); copyCues(); } break;
+    case 'd': e.preventDefault(); doAction('mixer'); break;
+    case 'x':
+      e.preventDefault();
+      { const t=Media.vTime();
+        const hit=State.cues.find(c=>(c.track||0)===State.listTrack&&c.timed!==false&&c.start<=t&&c.end>=t);
+        if(hit) selectCue(hit.id,{seek:false});
+        else setStatus('目前時間點無字幕',''); }
+      break;
+    case 'c':
+      if(e.ctrlKey||e.metaKey){ e.preventDefault(); copyCues(); }
+      else { e.preventDefault(); setOut(); }
+      break;
     case 'v':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); pasteCues(); }
       else { e.preventDefault(); addNote(); }
       break;
     case 'm': e.preventDefault(); addNote(); break;
-    case 'f': if(e.ctrlKey||e.metaKey){ e.preventDefault(); const sd=document.getElementById('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>document.getElementById('searchInput')?.focus(),20); } } break;
+    case 'f':
+      if(e.ctrlKey||e.metaKey){ e.preventDefault(); const sd=document.getElementById('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>document.getElementById('searchInput')?.focus(),20); } }
+      else { e.preventDefault(); doAction('check-panel'); }
+      break;
     case 'z':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); e.shiftKey?History.redo():History.undo(); }
-      else if(e.shiftKey){ e.preventDefault(); zoomFit(); } // Shift+Z = 適配
+      else if(e.shiftKey){ e.preventDefault(); zoomFit(); }
+      else { e.preventDefault(); setIn(); }
       break;
     case '-': case '_': e.preventDefault(); setZoom(State.pxPerSec*0.77); break;
     case '+': case '=': e.preventDefault(); setZoom(State.pxPerSec*1.3); break;

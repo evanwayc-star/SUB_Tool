@@ -4,7 +4,7 @@ import { secToEncore } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName } from './util.js';
 import { setStatus, showToast, openModal, onDurationKnown, renderAudioTracks, detectFpsWeb } from './app.js';
-import { drawTimeline } from './timeline.js';
+import { drawTimeline, updatePlayhead } from './timeline.js';
 
 /* ===== 3. 媒體引擎 ==================================================== */
 const Media = {
@@ -18,6 +18,8 @@ const Media = {
   usingWebAudio:false, // 是否用 Web Audio 混音（多軌）
   ffmpeg:null, ffmpegLoading:null,
   objectURLs:[],
+  mpvMode:false, _mpvTime:0, _mpvDuration:0, _bgVersion:0,
+  activeSource:null, // null=全部混音；'video'=影片原音；'ext-xxx'=外部檔案
 
   ensureCtx(){
     if(!this.ctx){
@@ -43,11 +45,11 @@ const Media = {
       await new Promise((res)=>{ video.onloadedmetadata=res; if(video.readyState>=1)res(); });
       State.duration=video.duration||0;
       detectFpsWeb(); // 播放時自動偵測 FPS
-      // 用 Web Audio 接管原生音訊，方便音量/波形
-      this.ensureCtx();
-      const g=this.connectNativeAudio();
-      if(g){
-        this.tracks.push({id:'native',name:'內建音訊 (原生)',kind:'native',gain:g,muted:false,solo:false,volume:1});
+      // 用 Web Audio 接管原生音訊，L / R 分頻顯示於混音器
+      const stereoTracks=this._connectStereo();
+      if(stereoTracks){
+        this.tracks.push(...stereoTracks);
+        this.activeSource='video';
         this.usingWebAudio=false;
         setStatus('已載入原生影音','ok');
       }
@@ -99,20 +101,29 @@ const Media = {
 
   async addAudioFile(file){
     this.ensureCtx();
-    setStatus('解碼音軌中…','busy');
+    setStatus('載入音訊中…','busy');
     try{
-      const buf=await readFile(file);
-      const ab=await this.ctx.decodeAudioData(buf.slice(0));
-      const g=this.ctx.createGain(); g.connect(this.master);
-      this.tracks.push({id:'a'+Date.now(),name:file.name,kind:'buffer',buffer:ab,gain:g,muted:false,solo:false,volume:1,srcNode:null});
+      const src='ext-'+file.name;
+      const url=URL.createObjectURL(file); this.objectURLs.push(url);
+      const el=new Audio(); el.src=url; el.preload='auto';
+      await new Promise((r,rj)=>{
+        el.onloadedmetadata=r; if(el.readyState>=1)r();
+        el.onerror=()=>rj(new Error('無法讀取此音訊檔 ('+file.name+')'));
+        setTimeout(r,10000);
+      });
+      const node=this.ctx.createMediaElementSource(el);
+      const chCount=Math.max(1,node.channelCount||2);
+      const newTracks=this._splitToChannelTracks(node,src,el,chCount);
+      this.tracks.push(...newTracks);
+      this.switchSource(src);
       this.usingWebAudio=true;
-      // 切換為 Web Audio 主控：原生影片音訊靜音由 video.muted 控制
       this.syncMuteState();
-      if(ab.duration>State.duration){ State.duration=ab.duration; onDurationKnown(); }
+      if(el.duration>State.duration){ State.duration=el.duration; onDurationKnown(); }
+      if(!Wave.peaks) Wave.initLive();
       setStatus('音軌已加入','ok');
       renderAudioTracks();
-      if(this.playing){ this.stopBufferSources(); this.startBufferSources(video.currentTime); }
-    }catch(e){ setStatus('音軌解碼失敗：'+e.message,''); showToast('無法解碼此音訊檔'); }
+      if(this.playing) this.startElementSources(this.vTime());
+    }catch(e){ setStatus('音訊載入失敗：'+e.message,''); showToast('音訊載入失敗：'+e.message); }
   },
 
   /* --- 桌面 (Electron) 媒體：系統 ffmpeg，單次讀取多輸出，逐聲道音軌 + 電平表 --- */
@@ -133,13 +144,20 @@ const Media = {
     $('noVideo').style.display='none';
     this.ensureCtx();
 
+    // (mpv) 非原生格式或多音軌且偵測到 mpv：秒開，背景抽音軌
+    if((!canNative || audio.length>1) && DESK.mpv){
+      const mpvInfo=await DESK.mpv.detect();
+      if(mpvInfo.available){ await this._loadViaMpv(p,info); return; }
+    }
+
     // (A) 純原生 + 單一/無音軌：完全不需 ffmpeg，直讀最快
     if(canNative && audio.length<=1){
       video.src=await DESK.fileURL(p);
       await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,10000);});
       State.duration=video.duration||dur||0;
-      const g=this.connectNativeAudio();
-      if(g){ const tr={id:'native',name:'內建音訊 (原生)'+(audio[0]&&audio[0].lang?(' '+audio[0].lang):''),kind:'native',gain:g,muted:false,solo:false,volume:1}; this.attachMeter(tr,this.videoSrcNode); this.tracks.push(tr); }
+      const stereoTracks=this._connectStereo();
+      if(stereoTracks) this.tracks.push(...stereoTracks);
+      this.activeSource='video';
       this.usingWebAudio=false; this.syncMuteState(); renderAudioTracks();
       if(audio.length>0){
         setStatus('產生波形…','busy');
@@ -173,6 +191,7 @@ const Media = {
       this.attachMeter(tr,node);
       this.tracks.push(tr);
     }
+    this.activeSource='video';
     this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
 
     // 波形：用 ingest 產生的 8kHz 混音 wav
@@ -185,17 +204,126 @@ const Media = {
   },
   async addAudioFileDesktop(p){
     this.ensureCtx();
-    const el=new Audio(); el.src=await DESK.fileURL(p); el.preload='auto';
-    await new Promise(r=>{el.onloadedmetadata=r; if(el.readyState>=1)r(); setTimeout(r,10000);});
-    const node=this.ctx.createMediaElementSource(el);
-    const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-    const tr={id:'el'+Date.now(),name:baseName(p),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
-    this.attachMeter(tr,node); this.tracks.push(tr);
-    this.usingWebAudio=true; this.syncMuteState();
-    if(el.duration>State.duration){State.duration=el.duration;onDurationKnown();}
+    try{
+      const name=baseName(p);
+      const src='ext-'+name;
+      let chCount=2;
+      try{ const info=await DESK.probe(p); chCount=info?.audio?.[0]?.channels||2; }catch(e){}
+      const el=new Audio(); el.src=await DESK.fileURL(p); el.preload='auto';
+      await new Promise((r,rj)=>{
+        el.onloadedmetadata=r; if(el.readyState>=1)r();
+        el.onerror=()=>rj(new Error('音訊元素載入失敗：'+p));
+        setTimeout(r,10000);
+      });
+      const node=this.ctx.createMediaElementSource(el);
+      const newTracks=this._splitToChannelTracks(node,src,el,chCount);
+      this.tracks.push(...newTracks);
+      this.switchSource(src);
+      this.usingWebAudio=true; this.syncMuteState();
+      if(el.duration>State.duration){State.duration=el.duration;onDurationKnown();}
+      renderAudioTracks();
+      if(this.playing) this.startElementSources(this.vTime());
+      setStatus('音軌已加入','ok');
+    }catch(e){ setStatus('音軌載入失敗：'+e.message,''); showToast('無法載入音訊檔：'+e.message); }
+  },
+
+  /* --- mpv 即時開啟路徑（偵測到 mpv.exe 時使用，無需等 proxy 轉檔） --- */
+  async _loadViaMpv(p, info){
+    const dur=info?.duration||0;
+    const audio=info?.audio||[];
+    setStatus('啟動 mpv（秒開）…','busy');
+    let res;
+    try{ res=await DESK.mpv.launch({src:p}); }
+    catch(e){ showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); return; }
+    this.mpvMode=true; this._mpvTime=0;
+    this._mpvDuration=res.duration||dur||0;
+    State.duration=this._mpvDuration;
+    if(info?.video?.fps) setFps(info.video.fps);
+
+    // 影片區改為 mpv 佔位符
+    $('noVideo').style.display='none';
+    video.style.display='none';
+    let holder=document.getElementById('mpvHolder');
+    if(!holder){
+      holder=document.createElement('div'); holder.id='mpvHolder';
+      holder.style.cssText='display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--fg2);height:100%;';
+      holder.innerHTML='<div style="font-size:2.2em;opacity:.7">▶</div>'
+        +'<div style="font-size:.9em">mpv 播放視窗已開啟</div>'
+        +'<div style="font-size:.75em;opacity:.5">請將 mpv 視窗移至此處旁邊</div>';
+      video.parentElement?.appendChild(holder);
+    }
+    holder.style.display='flex';
+
+    // 監聽 mpv 事件（時碼同步 / 播放狀態）
+    DESK.mpv.onEvent(e=>{
+      if(e.event==='property-change'){
+        if(e.name==='time-pos'&&e.data!=null){
+          const prev=this._mpvTime; this._mpvTime=e.data;
+          // 直接更新 UI（確保暫停時在 mpv 視窗拖拉時我們的時碼也同步）
+          $('tcCur').textContent=secToEncore(e.data,State.fps);
+          $('seekBar').value=Math.round(e.data*1000);
+          updatePlayhead();
+          if(Math.abs(e.data-prev)>0.5) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:e.data}));
+        }
+        if(e.name==='pause'){
+          const paused=!!e.data;
+          if(paused&&this.playing){ this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶'; }
+          else if(!paused&&!this.playing){ this.ensureCtx(); this.startElementSources(this._mpvTime); this.playing=true; $('playBtn').textContent='⏸'; }
+        }
+        if(e.name==='duration'&&typeof e.data==='number'&&e.data>0){
+          this._mpvDuration=e.data; State.duration=e.data; onDurationKnown();
+        }
+      }
+      if(e.event==='end-file'&&this.mpvMode){ this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶'; }
+    });
+
     renderAudioTracks();
-    if(this.playing) this.startElementSources(video.currentTime);
-    setStatus('音軌已加入','ok');
+    setStatus('mpv 已就緒（秒開）— 已開啟 mpv 視窗','ok');
+    onDurationKnown();
+    Wave.initLive();
+
+    // 背景抽取音軌（不阻塞播放；完成後 element tracks 接管音訊，mpv 靜音）
+    if(audio.length>0){
+      this.ensureCtx();
+      this._bgAudioIngest(p,audio,dur);
+    }
+  },
+
+  async _bgAudioIngest(p, audio, dur){
+    const myVer=this._bgVersion;
+    setStatus('背景抽取音軌中（不影響播放）…','busy');
+    let res;
+    try{ res=await DESK.ingest({path:p,duration:dur,needsProxy:false,audio}); }
+    catch(e){ console.warn('bg audio ingest:',e); setStatus('音軌抽取失敗：'+e.message,''); return; }
+    if(this._bgVersion!==myVer) return; // 使用者已換另一個檔，丟棄結果
+
+    const chs=res.channels||[];
+    for(let i=0;i<chs.length;i++){
+      const el=new Audio(); el.src=await DESK.fileURL(chs[i].file); el.preload='auto';
+      await new Promise(r=>{el.onloadedmetadata=r;if(el.readyState>=1)r();setTimeout(r,10000);});
+      if(this._bgVersion!==myVer) return;
+      const node=this.ctx.createMediaElementSource(el);
+      const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
+      const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+      this.attachMeter(tr,node);
+      this.tracks.push(tr);
+    }
+    this.usingWebAudio=true; this.syncMuteState();
+    // element tracks 接管後，mpv 靜音（避免雙重音訊）
+    if(chs.length>0) DESK.mpv.mute(true).catch(()=>{});
+    if(this.playing) this.startElementSources(this._mpvTime);
+    renderAudioTracks();
+
+    if(res.wave){
+      try{
+        const b64=await DESK.readB64(res.wave);
+        if(b64&&this._bgVersion===myVer){
+          const ab=await this.ctx.decodeAudioData(b64ToBytes(b64).buffer);
+          Wave.live=false; Wave.compute(ab); drawTimeline();
+        }
+      }catch(e){}
+    }
+    setStatus('音軌與波形已就緒','ok');
   },
 
   /* --- ffmpeg.wasm --- */
@@ -310,6 +438,42 @@ const Media = {
     const g=this.ctx.createGain(); this.videoSrcNode.connect(g); g.connect(this.master);
     return g;
   },
+  /* 立體聲分頻：L / R 各自一條 native 音軌，可獨立靜音/獨奏/電平表 */
+  _connectStereo(){
+    this.ensureCtx();
+    if(!this.videoSrcNode){
+      try{ this.videoSrcNode=this.ctx.createMediaElementSource(video); }
+      catch(e){ console.warn('MediaElementSource',e); return null; }
+    } else { try{ this.videoSrcNode.disconnect(); }catch(e){} }
+    const splitter=this.ctx.createChannelSplitter(2);
+    const gL=this.ctx.createGain(), gR=this.ctx.createGain();
+    const merger=this.ctx.createChannelMerger(2);
+    this.videoSrcNode.connect(splitter);
+    splitter.connect(gL,0); splitter.connect(gR,1);
+    gL.connect(merger,0,0); gR.connect(merger,0,1);
+    merger.connect(this.master);
+    const mkAn=()=>{ const a=this.ctx.createAnalyser(); a.fftSize=1024; a.smoothingTimeConstant=0.3; return a; };
+    const anL=mkAn(), anR=mkAn();
+    splitter.connect(anL,0); splitter.connect(anR,1);
+    const mk=(id,nm,g,an)=>({id,name:nm,kind:'native',gain:g,muted:false,solo:false,volume:1,
+      analyser:an,_mbuf:new Float32Array(an.fftSize),level:0,peak:0,peakT:0});
+    return [mk('native-L','L 聲道',gL,anL), mk('native-R','R 聲道',gR,anR)];
+  },
+  /* 將 MediaElementSourceNode 按聲道分頻，回傳音軌陣列 */
+  _splitToChannelTracks(node, sourceName, el, chCount){
+    const n=Math.max(1,chCount);
+    const labels=n===1?['Mono']:n===2?['L','R']:n===6?['FL','FR','C','LFE','SL','SR']:Array.from({length:n},(_,i)=>`Ch${i+1}`);
+    const splitter=this.ctx.createChannelSplitter(n);
+    node.connect(splitter);
+    return labels.map((lbl,i)=>{
+      const g=this.ctx.createGain();
+      const an=this.ctx.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=0.3;
+      splitter.connect(an,i); splitter.connect(g,i); g.connect(this.master);
+      return {id:'ext'+Date.now()+i,name:lbl,kind:'element',source:sourceName,
+        el,gain:g,muted:false,solo:false,volume:1,
+        analyser:an,_mbuf:new Float32Array(an.fftSize),level:0,peak:0,peakT:0};
+    });
+  },
   /* 為音軌掛上電平表 analyser：取「源頭」訊號（與 mute/solo 無關），播放時即有資料，
      讓使用者就算某聲道沒開也能從表頭看出它有沒有內容 */
   attachMeter(tr, sourceNode){
@@ -325,6 +489,7 @@ const Media = {
   /* --- 虛擬播放（無媒體載入時）--- */
   _vTime: 0, _vStart: null,
   vTime(){
+    if(this.mpvMode) return this._mpvTime;
     if(!video.src){
       if(this._vStart!==null) return this._vTime+(performance.now()-this._vStart)/1000*(video.playbackRate||1);
       return this._vTime;
@@ -334,10 +499,19 @@ const Media = {
 
   /* --- 播放控制 --- */
   play(){
+    if(this.mpvMode){
+      this.ensureCtx();
+      DESK.mpv.play().catch(()=>{});
+      this.startElementSources(this._mpvTime);
+      this.playing=true; $('playBtn').textContent='⏸'; return;
+    }
     if(!video.src){
-      // 已在虛擬播放中：先把已累積的時間存回 _vTime，再重設計時起點
       if(this._vStart!==null) this._vTime=this.vTime();
-      this._vStart=performance.now(); this.playing=true; $('playBtn').textContent='⏸'; return;
+      this._vStart=performance.now();
+      this.ensureCtx();
+      if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(this._vTime);
+      this.startElementSources(this._vTime);
+      this.playing=true; $('playBtn').textContent='⏸'; return;
     }
     this.ensureCtx();
     if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(video.currentTime);
@@ -346,18 +520,36 @@ const Media = {
     this.playing=true; $('playBtn').textContent='⏸';
   },
   pause(){
+    if(this.mpvMode){
+      DESK.mpv.pause().catch(()=>{});
+      this.stopElementSources();
+      this.playing=false; $('playBtn').textContent='▶'; return;
+    }
     if(!video.src){
       if(this._vStart!==null){ this._vTime+=(performance.now()-this._vStart)/1000*(video.playbackRate||1); this._vStart=null; }
+      this.stopBufferSources(); this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶'; return;
     }
     video.pause(); this.stopBufferSources(); this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶';
   },
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t){
+    if(this.mpvMode){
+      t=clamp(t,0,this._mpvDuration||0);
+      this._mpvTime=t;
+      DESK.mpv.seek(t).catch(()=>{});
+      for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ try{tr.el.currentTime=clamp(t,0,tr.el.duration||t);}catch(e){} } }
+      $('tcCur').textContent=secToEncore(t,State.fps);
+      $('seekBar').value=Math.round(t*1000);
+      window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
+      return;
+    }
     if(!video.src){
       this._vTime=Math.max(0,t); if(this._vStart!==null)this._vStart=performance.now();
       $('tcCur').textContent=secToEncore(this._vTime,State.fps);
       $('seekBar').value=Math.round(this._vTime*1000);
+      for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ try{tr.el.currentTime=clamp(t,0,tr.el.duration||t);}catch(e){} } }
+      if(this.playing&&this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
       return;
     }
     t=clamp(t,0,State.duration||0); video.currentTime=t;
@@ -388,31 +580,60 @@ const Media = {
     for(const tr of this.tracks){ if(tr.srcNode){try{tr.srcNode.stop();}catch(e){} tr.srcNode=null;} }
   },
   syncMuteState(){
-    // 有混音(buffer/element)音軌時，原生影片音訊靜音，改由 Web Audio 播放
     const mix=this.hasMix();
     video.muted = mix ? true : State.muted;
-    const nat=this.tracks.find(t=>t.kind==='native');
-    if(nat&&nat.gain) nat.gain.gain.value = mix?0:(nat.muted?0:nat.volume);
     this.applyGains();
   },
   applyGains(){
-    const anySolo=this.tracks.some(t=>t.solo);
-    const mix=this.hasMix();
+    const anySolo=this.tracks.some(t=>t.solo&&!t._srcHidden);
+    // activeMix：solo 模式下看有無 mix 軌被 solo；否則看有無未靜音且未隱藏的 mix 軌
+    const activeMix = anySolo
+      ? this.tracks.some(t=>(t.kind==='buffer'||t.kind==='element')&&!t._srcHidden&&t.solo)
+      : this.tracks.some(t=>(t.kind==='buffer'||t.kind==='element')&&!t._srcHidden&&!t.muted);
     for(const tr of this.tracks){
+      if(tr._srcHidden){ if(tr.gain)tr.gain.gain.value=0; continue; }
       const audible = anySolo ? tr.solo : !tr.muted;
       if(tr.gain) tr.gain.gain.value = audible ? tr.volume : 0;
-      if(tr.kind==='native' && mix && !(anySolo && tr.solo)) tr.gain.gain.value=0;
+      // 只有當有「真正可聽見」的 mix 音軌時才壓制 native
+      if(tr.kind==='native' && activeMix && !(anySolo && tr.solo)) tr.gain.gain.value=0;
     }
     if(this.master) this.master.gain.value = State.muted?0:1;
   },
+  getSources(){
+    const seen=new Set(); const srcs=[];
+    for(const tr of this.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='element'||t.kind==='nativeTrack')){
+      const s=tr.source||'video';
+      if(!seen.has(s)){ seen.add(s); srcs.push({id:s, label:s==='video'?'影片音軌（原音）':s.replace(/^ext-/,'')}); }
+    }
+    return srcs;
+  },
+  switchSource(id){
+    this.activeSource=id;
+    for(const tr of this.tracks) tr._srcHidden=(id!==null && (tr.source||'video')!==id);
+    this.applyGains();
+    renderAudioTracks();
+  },
   setRate(r){
+    if(this.mpvMode){
+      video.playbackRate=r; // 保持同步供 startElementSources 使用
+      DESK.mpv.rate(r).catch(()=>{});
+      for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el)tr.el.playbackRate=r; }
+      return;
+    }
     // 虛擬模式中更改速度前，先把已累積時間存回 _vTime，重設計時起點，防止位置跳躍
     if(!video.src && this._vStart!==null){ this._vTime=this.vTime(); this._vStart=performance.now(); }
     video.playbackRate=r;
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el)tr.el.playbackRate=r; }
-    if(this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(video.currentTime); }
+    if(this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }
   },
   reset(){
+    if(this.mpvMode && DESK?.mpv){
+      DESK.mpv.quit().catch(()=>{});
+      this.mpvMode=false; this._mpvTime=0; this._mpvDuration=0;
+      video.style.display='';
+      const h=document.getElementById('mpvHolder'); if(h) h.style.display='none';
+    }
+    this._bgVersion++; this.activeSource=null; // 讓進行中的 _bgAudioIngest 知道要放棄；清除音源選擇
     this.stopBufferSources(); this.stopElementSources();
     for(const tr of this.tracks){ if(tr.el){try{tr.el.src='';}catch(e){}} }
     this.tracks=[]; this.usingWebAudio=false;

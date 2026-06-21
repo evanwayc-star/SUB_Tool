@@ -19,4 +19,15 @@ contextBridge.exposeInMainWorld('subtool', {
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   readB64:      (p) => ipcRenderer.invoke('fs:readB64', p),
   onProgress:   (cb) => ipcRenderer.on('task-progress', (e, d) => cb(d)),
+  mpv: {
+    detect:  ()      => ipcRenderer.invoke('mpv:detect'),
+    launch:  (opts)  => ipcRenderer.invoke('mpv:launch', opts),
+    seek:    (t)     => ipcRenderer.invoke('mpv:seek', t),
+    play:    ()      => ipcRenderer.invoke('mpv:play'),
+    pause:   ()      => ipcRenderer.invoke('mpv:pause'),
+    mute:    (v)     => ipcRenderer.invoke('mpv:mute', v),
+    rate:    (r)     => ipcRenderer.invoke('mpv:rate', r),
+    quit:    ()      => ipcRenderer.invoke('mpv:quit'),
+    onEvent: (cb)    => { ipcRenderer.removeAllListeners('mpv:event'); ipcRenderer.on('mpv:event', (_, d) => cb(d)); },
+  },
 });
