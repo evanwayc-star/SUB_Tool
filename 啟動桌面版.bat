@@ -1,33 +1,34 @@
 @echo off
-chcp 65001 >nul
 cd /d "%~dp0"
 title SUB Tool - Desktop
 
 where npm >nul 2>nul
 if errorlevel 1 (
-  echo [錯誤] 找不到 npm / Node.js。
-  echo 請先安裝 Node.js ^(https://nodejs.org^)，安裝後重新開機再執行本檔。
-  pause & exit /b 1
+  echo [ERROR] npm / Node.js not found in PATH.
+  echo Install Node.js from https://nodejs.org then reboot, and retry.
+  pause
+  exit /b 1
 )
 
 if not exist "node_modules" (
-  echo 首次執行：安裝相依套件中（需要 Node.js + 網路）...
+  echo First run: installing dependencies ^(needs Node.js + internet^)...
   call npm install
-  if errorlevel 1 ( echo [錯誤] npm install 失敗，請把上面訊息回報。 & pause & exit /b 1 )
+  if errorlevel 1 ( echo [ERROR] npm install failed. & pause & exit /b 1 )
 )
 
-echo 建置中...
+echo Building app...
 call npm run build
-if errorlevel 1 ( echo [錯誤] 建置失敗，請把上面訊息回報。 & pause & exit /b 1 )
+if errorlevel 1 ( echo [ERROR] build failed - see messages above. & pause & exit /b 1 )
 
 if not exist "node_modules\electron\dist\electron.exe" (
-  echo [錯誤] 找不到 electron（可能被防毒軟體刪除/隔離）。
-  echo 請執行：npm install electron --save-dev   並把 electron.exe 加入防毒白名單。
-  pause & exit /b 1
+  echo [ERROR] electron.exe missing ^(maybe removed/quarantined by antivirus^).
+  echo Run: npm install electron --save-dev   then whitelist electron.exe.
+  pause
+  exit /b 1
 )
 
-echo 啟動桌面版...（此視窗請保持開啟；關閉視窗即關閉程式）
+echo Launching desktop app... keep this window open; closing it closes the app.
 "node_modules\electron\dist\electron.exe" .
 echo.
-echo 程式已關閉（離開碼 %errorlevel%）。若是非預期關閉，請把上面訊息回報。
+echo App closed ^(exit code %errorlevel%^). If this was unexpected, copy the messages above.
 pause
