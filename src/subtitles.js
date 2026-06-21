@@ -276,7 +276,7 @@ function selectCue(id,opts){
     if(tk!==State.listTrack){ State.listTrack=tk; renderListTrackSel(); renderSubList(); refreshTrackGutterActive(); }
   }
   refreshSelectionUI();
-  if(opts.seek&&c&&c.timed!==false){ Media.seek(c.start); ensurePlayheadVisible(); }
+  if(opts.seek&&c&&c.timed!==false){ Media.seek(c.start); ensurePlayheadVisible(); renderVideoSub(); }
   const pc=State.cues.find(x=>x.id===State.selectedId);
   $('stSel').textContent=State.selectedIds.length?('已選 '+State.selectedIds.length+' 條'+(pc?(' · #'+(State.cues.indexOf(pc)+1)):'')):'';
   updatePlayhead();

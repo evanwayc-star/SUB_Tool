@@ -310,6 +310,12 @@ function zoomFit(){
   setZoom(pps,center);
 }
 
+/* 點擊任何地方都會確認正在編輯的軌道名稱（capture 階段先於 preventDefault） */
+document.addEventListener('mousedown',e=>{
+  const gn=document.querySelector('.gname[contenteditable="true"]');
+  if(gn&&!gn.contains(e.target)) gn.blur();
+},true);
+
 /* 時間軸滑鼠互動：時間尺拖曳=移動播放點 / 軌道空白拖曳=框選 / 拖區塊=移動換軌或縮放 */
 let drag=null;
 let _noteClickState=null; // 備註標記雙擊偵測 { id, t }

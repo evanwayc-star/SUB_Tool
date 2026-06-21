@@ -102,7 +102,7 @@ function autoAdvanceSubMode(){
   }
 }
 
-const editingText=()=>document.activeElement&&document.activeElement.classList.contains('txt');
+const editingText=()=>document.activeElement?.classList.contains('txt')&&document.activeElement.contentEditable==='true';
 window.addEventListener('keydown',e=>{
   if($('modalBg').classList.contains('show')){ if(e.key==='Escape')closeModal(); return; }
   if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;

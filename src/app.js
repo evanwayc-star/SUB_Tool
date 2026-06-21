@@ -622,9 +622,32 @@ function startInlineEdit(block,c){
 
 function openCueEditModal(c){
   const orig=c.text||'';
-  const trackName=State.tracks[c.track||0]?.name||'';
+  const trackIdx=c.track||0;
+  const trackName=State.tracks[trackIdx]?.name||'';
   const tc=`${secToEncore(c.start,State.fps)} → ${secToEncore(c.end,State.fps)}`;
-  const origDisplay=`<div style="white-space:pre-wrap;font-size:14px;font-family:inherit;color:var(--text);user-select:text;cursor:text;min-height:1.4em">${escapeHTML(orig)}</div>`;
+
+  // 找同 in 點的其他軌道字幕（容差 1 格）
+  const TOL=1/Math.max(State.fps||25,1);
+  const siblings=[];
+  State.tracks.forEach((tk,i)=>{
+    if(i===trackIdx)return;
+    const match=State.cues.find(oc=>(oc.track||0)===i&&Math.abs(oc.start-c.start)<=TOL);
+    if(match)siblings.push({trackName:tk.name,text:match.text||'',tkIdx:i});
+  });
+
+  const mkBlock=(label,text,btnId)=>
+    `<div style="margin-bottom:12px">`+
+      `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">`+
+        `<span style="font-size:12px;color:var(--text-faint)">${label}</span>`+
+        `<button id="${escapeHTML(btnId)}" style="font-size:11px;padding:1px 7px">複製</button>`+
+      `</div>`+
+      `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;min-height:2.2em">`+
+        `<div style="white-space:pre-wrap;font-size:14px;font-family:inherit;color:var(--text);user-select:text;cursor:text">${escapeHTML(text)}</div>`+
+      `</div>`+
+    `</div>`;
+
+  const sibHtml=siblings.map(s=>mkBlock('軌道：'+s.trackName,s.text,'cueEditCopySib'+s.tkIdx)).join('');
+
   const doConfirm=()=>{
     const val=$('cueEditTa').value;
     c.text=val; closeModal(); renderAll(); renderVideoSub();
@@ -632,24 +655,25 @@ function openCueEditModal(c){
   };
   openModal('修改字幕文字',
     `<div style="font-size:12px;color:var(--text-faint);margin-bottom:10px">${escapeHTML(trackName)} ｜ ${tc}</div>`+
-    `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">`+
-      `<span style="font-size:12px;color:var(--text-faint)">原文</span>`+
-      `<button id="cueEditCopy" style="font-size:11px;padding:1px 7px">複製</button>`+
-    `</div>`+
-    `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;margin-bottom:12px;min-height:2.2em">${origDisplay}</div>`+
+    `<div style="max-height:58vh;overflow-y:auto;padding-right:2px">`+
+    sibHtml+
+    mkBlock('原文',orig,'cueEditCopy')+
     `<div style="font-size:12px;color:var(--text-faint);margin-bottom:4px">修改 <span style="font-size:10px;opacity:.5">（Enter 確認 · Shift+Enter 換行）</span></div>`+
-    `<textarea id="cueEditTa" rows="4" style="width:100%;resize:vertical;font-size:14px;font-family:inherit;padding:6px;box-sizing:border-box"></textarea>`,
+    `<textarea id="cueEditTa" rows="4" style="width:100%;resize:vertical;font-size:14px;font-family:inherit;padding:6px;box-sizing:border-box"></textarea>`+
+    `</div>`,
     [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:closeModal}]);
   setTimeout(()=>{
     const ta=$('cueEditTa');
     if(ta){
       ta.value=orig; ta.focus(); ta.select();
-      ta.addEventListener('keydown',e=>{
-        if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); doConfirm(); }
-      });
+      ta.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doConfirm();} });
     }
+    siblings.forEach(s=>{
+      const btn=$('cueEditCopySib'+s.tkIdx);
+      if(btn) btn.addEventListener('click',()=>{ navigator.clipboard.writeText(s.text).then(()=>{btn.textContent='已複製';setTimeout(()=>btn.textContent='複製',1500);}); });
+    });
     const copyBtn=$('cueEditCopy');
-    if(copyBtn) copyBtn.addEventListener('click',()=>{ navigator.clipboard.writeText(orig).then(()=>{ copyBtn.textContent='已複製'; setTimeout(()=>copyBtn.textContent='複製',1500); }); });
+    if(copyBtn) copyBtn.addEventListener('click',()=>{ navigator.clipboard.writeText(orig).then(()=>{copyBtn.textContent='已複製';setTimeout(()=>copyBtn.textContent='複製',1500);}); });
   },30);
 }
 
