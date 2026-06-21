@@ -7,9 +7,10 @@ const fs = require('fs');
 const os = require('os');
 const url = require('url');
 const { spawn, spawnSync } = require('child_process');
+const crypto = require('crypto');
 
 let mainWin = null;
-let FFMPEG = null, FFPROBE = null;
+let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null;
 const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
@@ -28,6 +29,36 @@ function detect(bin, extra) {
 }
 function ensureTmp() { try { fs.mkdirSync(TMP, { recursive: true }); } catch (e) {} }
 function tmpPath(ext) { ensureTmp(); const p = path.join(TMP, `t${Date.now()}_${tmpSeq++}.${ext}`); tempFiles.add(p); return p; }
+
+/* ---- 偵測可用的硬體視訊編碼器（NVENC/QSV/AMF），否則退回 libx264 ---- */
+function detectVideoEncoder() {
+  if (!FFMPEG) return 'libx264';
+  const test = (name) => {
+    try {
+      const r = spawnSync(FFMPEG, ['-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=5:duration=0.2',
+        '-c:v', name, '-f', 'null', '-'], { timeout: 8000 });
+      return r.status === 0;
+    } catch (e) { return false; }
+  };
+  for (const enc of ['h264_nvenc', 'h264_qsv', 'h264_amf']) { if (test(enc)) return enc; }
+  return 'libx264';
+}
+/* 依選定編碼器回傳「轉檔預覽影片」用的視訊參數（品質導向、yuv420p 由呼叫端的 -vf 負責） */
+function vencArgs() {
+  switch (VENC) {
+    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '26', '-forced-idr', '1'];
+    case 'h264_qsv':   return ['-c:v', 'h264_qsv', '-global_quality', '26'];
+    case 'h264_amf':   return ['-c:v', 'h264_amf', '-rc', 'cqp', '-qp_i', '26', '-qp_p', '26'];
+    default:           return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26'];
+  }
+}
+
+/* ---- 媒體快取鍵：來源路徑 + 修改時間 + 大小（內容變了就重轉） ---- */
+function cacheKeyFor(src) {
+  try { const s = fs.statSync(src); return crypto.createHash('sha1').update(src + '|' + s.mtimeMs + '|' + s.size).digest('hex').slice(0, 16); }
+  catch (e) { return crypto.createHash('sha1').update(String(src)).digest('hex').slice(0, 16); }
+}
 
 /* ---- 執行 ffmpeg，並回報進度 ---- */
 function runFF(args, { onProgress, duration, sender, jobId, label } = {}) {
@@ -76,6 +107,9 @@ function createWindow() {
 app.whenReady().then(() => {
   FFMPEG = detect('ffmpeg');
   FFPROBE = detect('ffprobe');
+  VENC = detectVideoEncoder();
+  CACHE = path.join(app.getPath('userData'), 'mediacache');
+  try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
@@ -88,7 +122,7 @@ app.on('quit', () => {
 /* ============ IPC ============ */
 ipcMain.handle('app:status', () => ({
   isDesktop: true, ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE,
-  ffmpegPath: FFMPEG, ffprobePath: FFPROBE
+  ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: VENC
 }));
 
 ipcMain.handle('fs:fileURL', (e, p) => url.pathToFileURL(p).href);
@@ -161,19 +195,22 @@ ipcMain.handle('ffprobe', (e, p) => {
 
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {
   const out = tmpPath('mp4');
-  await runFF(['-y', '-i', src, '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-vf', 'scale=-2:720', '-movflags', '+faststart', out],
+  // 關鍵：必須 format=yuv420p，否則 4:2:2 / 10-bit 來源轉出的 proxy 仍是 Chromium 無法解碼的格式
+  await runFF(['-y', '-i', src, '-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), '-movflags', '+faststart', out],
     { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片' });
   return out;
 });
 
-ipcMain.handle('ffmpeg:extractAudio', async (e, { path: src, idx, duration }) => {
-  // 先嘗試無損 copy 成 m4a；失敗則改編 AAC
+ipcMain.handle('ffmpeg:extractAudio', async (e, { path: src, idx, duration, codec }) => {
   const out = tmpPath('m4a');
-  try {
-    await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'copy', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
-  } catch (err) {
-    await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'aac', '-b:a', '192k', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
+  // PCM 無法 copy 進 m4a（一定失敗），直接編 AAC；其餘編碼先試無損 copy，失敗才編 AAC
+  if (!/^pcm/i.test(codec || '')) {
+    try {
+      await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'copy', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
+      return out;
+    } catch (err) { /* 退回 AAC */ }
   }
+  await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'aac', '-b:a', '192k', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
   return out;
 });
 
@@ -185,3 +222,69 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   try { fs.unlinkSync(out); tempFiles.delete(out); } catch (e2) {}
   return buf.toString('base64');
 });
+
+/* ---- 單次讀取多輸出：整個來源檔只讀一遍，同時產生 proxy + 每聲道音訊 + 混音波形 ----
+   每聲道以 asplit 分流（不直接 -map 同一條 stream，避免 filtergraph 與 -map 雙重消費而 deadlock）。
+   結果存入持久快取（依 cacheKeyFor），重開同檔直接命中、秒開。 */
+ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio }) => {
+  const audioArr = Array.isArray(audio) ? audio : [];
+  const dir = path.join(CACHE || TMP, cacheKeyFor(src));
+  const metaPath = path.join(dir, 'meta.json');
+  // 快取命中：所有檔案都還在才採用
+  if (fs.existsSync(metaPath)) {
+    try {
+      const m = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      const ok = (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
+      if (ok) { if (e.sender) e.sender.send('task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true }); return Object.assign({ cached: true }, m); }
+    } catch (er) {}
+  }
+  fs.mkdirSync(dir, { recursive: true });
+
+  const fc = [];            // filter_complex 片段
+  const channels = [];      // {label, file}
+  const chMaps = [];        // 對應 channels 的 -map 值
+  const waveContribs = [];  // 各聲源對波形的貢獻（單聲道）
+  let ci = 0;
+  audioArr.forEach((a, i) => {
+    const ch = Math.max(1, a.channels || 1);
+    const base = a.title || a.lang || ('音軌 ' + (i + 1));
+    if (ch === 1) {
+      fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
+      channels.push({ label: base, file: path.join(dir, `ch${ci}.m4a`) });
+      chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
+    } else {
+      const pads = [];
+      for (let k = 0; k < ch; k++) pads.push(`sp${i}_${k}`);
+      fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
+      for (let k = 0; k < ch; k++) {
+        fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
+        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch${ci}.m4a`) });
+        chMaps.push(`[co${ci}]`); ci++;
+      }
+      const avg = (1 / ch).toFixed(4);
+      const sum = Array.from({ length: ch }, (_, k) => `${avg}*c${k}`).join('+');
+      fc.push(`[wv${i}]pan=mono|c0=${sum}[wm${i}]`);
+      waveContribs.push(`[wm${i}]`);
+    }
+  });
+
+  let waveLabel = null;
+  if (waveContribs.length === 1) waveLabel = waveContribs[0];
+  else if (waveContribs.length > 1) { fc.push(`${waveContribs.join('')}amix=inputs=${waveContribs.length}:normalize=0[wavemix]`); waveLabel = '[wavemix]'; }
+
+  const args = ['-y', '-i', src];
+  if (fc.length) args.push('-filter_complex', fc.join(';'));
+  let proxy = null;
+  if (needsProxy) { proxy = path.join(dir, 'proxy.mp4'); args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), '-movflags', '+faststart', proxy); }
+  channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '192k', c.file); });
+  let wave = null;
+  if (waveLabel) { wave = path.join(dir, 'wave.wav'); args.push('-map', waveLabel, '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', wave); }
+
+  await runFF(args, { sender: e.sender, duration, jobId: 'ingest', label: '讀取並轉檔（單次讀取）' });
+  const meta = { proxy, channels, wave };
+  try { fs.writeFileSync(metaPath, JSON.stringify(meta)); } catch (er) {}
+  return Object.assign({ cached: false }, meta);
+});
+
+/* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
+ipcMain.handle('fs:readB64', (e, p) => { try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; } });

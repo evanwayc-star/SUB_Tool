@@ -2,3 +2,8 @@ node_modules/
 dist/
 .claude/
 _backup_index_monolith.html
+影音檔案樣本/
+*.mxf
+*.mov
+*.mp4
+*.mkv

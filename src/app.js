@@ -68,7 +68,7 @@ function renderVideoSub(){
 }
 function renderAudioTracks(){
   const list=$('atList'); list.innerHTML='';
-  const real=Media.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='nativeTrack');
+  const real=Media.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='nativeTrack'||t.kind==='element');
   if(real.length===0){ $('atHint').textContent='尚未載入音訊'; return; }
   $('atHint').textContent=real.length+' 條音軌';
   for(const tr of real){
@@ -84,6 +84,47 @@ function renderAudioTracks(){
     soloBtn.onclick=()=>{tr.solo=!tr.solo;Media.applyGains();renderAudioTracks();};
     vol.oninput=()=>{tr.volume=+vol.value;Media.applyGains();};
     list.appendChild(row);
+  }
+  if($('mixerPanel')&&$('mixerPanel').classList.contains('show'))renderMixer();
+}
+
+/* ===== 混音器：逐聲道電平表 + 獨奏/靜音（浮動面板） ===== */
+let _meterStrips=[];
+function renderMixer(){
+  const wrap=$('mixerStrips'); if(!wrap)return;
+  _meterStrips=[];
+  const real=Media.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='element');
+  if(!real.length){ wrap.innerHTML='<div class="empty" style="padding:14px;white-space:nowrap">尚無音訊聲道</div>'; return; }
+  wrap.innerHTML='';
+  for(const tr of real){
+    const strip=document.createElement('div'); strip.className='mx-strip';
+    strip.innerHTML=
+      `<div class="mx-meter"><div class="mx-mask"></div><div class="mx-peak"></div></div>`+
+      `<div class="mx-name" title="${escapeHTML(tr.name)}">${escapeHTML(tr.name)}</div>`+
+      `<div class="mx-btns"><button class="mx-solo${tr.solo?' on':''}" title="獨奏">S</button><button class="mx-mute${tr.muted?' on':''}" title="靜音">M</button></div>`;
+    strip.querySelector('.mx-solo').onclick=()=>{ tr.solo=!tr.solo; Media.applyGains(); renderMixer(); renderAudioTracks(); };
+    strip.querySelector('.mx-mute').onclick=()=>{ tr.muted=!tr.muted; Media.applyGains(); renderMixer(); renderAudioTracks(); };
+    wrap.appendChild(strip);
+    _meterStrips.push({tr, mask:strip.querySelector('.mx-mask'), peak:strip.querySelector('.mx-peak')});
+  }
+}
+function updateMeters(){
+  const panel=$('mixerPanel'); if(!panel||!panel.classList.contains('show')||!_meterStrips.length)return;
+  const now=performance.now();
+  for(const s of _meterStrips){
+    const tr=s.tr; let lvl=0;
+    if(tr.analyser&&tr._mbuf){
+      tr.analyser.getFloatTimeDomainData(tr._mbuf);
+      let mx=0; const b=tr._mbuf; for(let i=0;i<b.length;i++){ const v=Math.abs(b[i]); if(v>mx)mx=v; }
+      lvl=mx;
+    }
+    tr.level=Math.max(lvl,(tr.level||0)*0.82); // 平滑衰減
+    const db=tr.level>1e-4?20*Math.log10(tr.level):-60;
+    const h=Math.max(0,Math.min(100,(db+60)/60*100));
+    s.mask.style.height=(100-h)+'%';
+    if(h>=(tr._peakH||0)){ tr._peakH=h; tr.peakT=now; }
+    else if(now-(tr.peakT||0)>900){ tr._peakH=Math.max(0,(tr._peakH||0)-1.6); }
+    s.peak.style.bottom=(tr._peakH||0)+'%';
   }
 }
 function onDurationKnown(){
@@ -136,6 +177,7 @@ function rafLoop(){
       if(Math.abs(tr.el.currentTime - video.currentTime) > 0.12){ try{tr.el.currentTime=video.currentTime;}catch(e){} }
     }}
   }
+  updateMeters();
   requestAnimationFrame(rafLoop);
 }
 function markActiveRow(id){
@@ -234,6 +276,8 @@ async function doAction(act){
     case 'notes': togglePanel('notesPanel'); renderNotes(); break;
     case 'add-note': addNote(); break;
     case 'close-notes': $('notesPanel').classList.remove('show'); break;
+    case 'mixer': togglePanel('mixerPanel'); renderMixer(); break;
+    case 'close-mixer': $('mixerPanel').classList.remove('show'); break;
     case 'export-notes': exportNotes(); break;
     case 'toggle-all-vis': { const anyVis=State.tracks.some(t=>t.visible!==false); State.tracks.forEach(t=>t.visible=!anyVis); drawTimeline(); renderVideoSub(); } break;
     case 'toggle-all-lock': { const anyUnlocked=State.tracks.some(t=>!t.locked); State.tracks.forEach(t=>t.locked=anyUnlocked); drawTimeline(); } break;

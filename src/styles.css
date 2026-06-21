@@ -305,6 +305,20 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
   background:rgba(210,40,40,.22) repeating-linear-gradient(-45deg,rgba(220,40,40,.75) 0,rgba(220,40,40,.75) 3px,transparent 3px,transparent 10px)}
 /* 備忘點擊反白 */
 .note-item.nt-active{background:rgba(255,210,60,.14)}
+/* 混音器：逐聲道電平表 */
+.mixer-panel{width:auto;max-width:92vw}
+.mixer-panel .fp-body{padding:8px 10px}
+.mixer-strips{display:flex;gap:8px;align-items:flex-end;overflow-x:auto}
+.mx-strip{display:flex;flex-direction:column;align-items:center;gap:5px;width:46px;flex:0 0 auto}
+.mx-meter{position:relative;width:24px;height:160px;border:1px solid var(--border);border-radius:3px;overflow:hidden;
+  background:linear-gradient(to top,#33c93a 0%,#33c93a 55%,#e6d23a 78%,#e0432a 100%)}
+.mx-mask{position:absolute;left:0;right:0;top:0;height:100%;background:#0d0d0f}
+.mx-peak{position:absolute;left:0;right:0;bottom:0;height:2px;background:#fff;opacity:.85}
+.mx-name{font-size:10px;color:var(--text-dim);max-width:46px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
+.mx-btns{display:flex;gap:3px}
+.mx-solo,.mx-mute{font-size:10px;width:20px;height:18px;line-height:1;padding:0;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:3px;cursor:pointer}
+.mx-solo.on{background:#caa72e;color:#000;border-color:#caa72e}
+.mx-mute.on{background:var(--red);color:#fff;border-color:var(--red)}
 /* 時間軸工具列：選取狀態資訊 */
 .tl-sel-info{font-size:11px;color:var(--text-dim);padding:2px 7px;white-space:nowrap;border-radius:4px;transition:background .15s}
 .tl-sel-info.sel-none{background:rgba(150,150,150,.15)}

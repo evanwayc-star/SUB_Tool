@@ -132,6 +132,7 @@
       <div class="sep"></div>
       <button class="icon" data-act="notes" title="備註">📌 備註</button>
       <button class="icon" data-act="add-note" title="新增備註">＋</button>
+      <button class="icon" data-act="mixer" title="混音器：逐聲道電平 / 獨奏 / 靜音">🎚 混音器</button>
       <div class="sep"></div>
       <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 上字幕</button>
       <div class="sep"></div>
@@ -217,6 +218,12 @@
     <button class="fp-close" data-act="close-notes">✕</button>
   </div>
   <div class="fp-body" id="notesList"></div>
+</div>
+
+<!-- 混音器面板 -->
+<div class="float-panel mixer-panel" id="mixerPanel">
+  <div class="fp-head"><span>🎚 混音器</span><span class="spacer"></span><button class="fp-close" data-act="close-mixer">✕</button></div>
+  <div class="fp-body"><div class="mixer-strips" id="mixerStrips"></div></div>
 </div>
 
 <!-- 時間碼位移面板 -->

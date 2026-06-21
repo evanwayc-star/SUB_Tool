@@ -115,7 +115,7 @@ const Media = {
     }catch(e){ setStatus('音軌解碼失敗：'+e.message,''); showToast('無法解碼此音訊檔'); }
   },
 
-  /* --- 桌面 (Electron) 媒體：系統 ffmpeg，多軌串流同步，無記憶體上限 --- */
+  /* --- 桌面 (Electron) 媒體：系統 ffmpeg，單次讀取多輸出，逐聲道音軌 + 電平表 --- */
   async loadDesktopMedia(p){
     this.reset();
     State.mediaPath=p; State.mediaName=baseName(p);
@@ -132,49 +132,56 @@ const Media = {
     const audio=info?info.audio:[];
     $('noVideo').style.display='none';
     this.ensureCtx();
-    // 影片畫面：原生直讀 file://，否則 ffmpeg 轉代理預覽片
-    if(canNative || !info || !info.video){
+
+    // (A) 純原生 + 單一/無音軌：完全不需 ffmpeg，直讀最快
+    if(canNative && audio.length<=1){
       video.src=await DESK.fileURL(p);
-    }else{
-      setStatus('轉檔預覽影片中（MXF/非原生）…','busy');
-      const proxy=await DESK.makeProxy(p,dur);
-      video.src=await DESK.fileURL(proxy);
+      await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,10000);});
+      State.duration=video.duration||dur||0;
+      const g=this.connectNativeAudio();
+      if(g){ const tr={id:'native',name:'內建音訊 (原生)'+(audio[0]&&audio[0].lang?(' '+audio[0].lang):''),kind:'native',gain:g,muted:false,solo:false,volume:1}; this.attachMeter(tr,this.videoSrcNode); this.tracks.push(tr); }
+      this.usingWebAudio=false; this.syncMuteState(); renderAudioTracks();
+      if(audio.length>0){
+        setStatus('產生波形…','busy');
+        try{ const wavB64=await DESK.waveAudio(p,dur); const ab=await this.ctx.decodeAudioData(b64ToBytes(wavB64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); }
+        catch(e){ console.warn('wave',e); Wave.initLive(); }
+      }
+      setStatus('媒體已載入（桌面模式，原生直讀）','ok'); onDurationKnown(); return;
     }
+
+    // (B) 非原生（需 proxy）或原生多音軌：單次讀取 ingest（整檔只讀一遍 → proxy + 每聲道 + 波形）
+    setStatus(canNative?'抽取多音軌（單次讀取）…':'讀取並轉檔中（單次讀取，大檔需數分鐘）…','busy');
+    let res;
+    try{ res=await DESK.ingest({ path:p, duration:dur, needsProxy:!canNative, audio }); }
+    catch(e){ console.error(e); showToast('讀取/轉檔失敗：'+e.message); setStatus('讀取/轉檔失敗',''); return; }
+    if(res.cached) setStatus('使用既有快取，秒開…','ok');
+
+    video.src=await DESK.fileURL(res.proxy||p);
     await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,10000);});
     State.duration=video.duration||dur||0;
-    // 音軌
-    if(audio.length<=1 && canNative){
-      const g=this.connectNativeAudio();
-      if(g)this.tracks.push({id:'native',name:'內建音訊 (原生)'+(audio[0]&&audio[0].lang?(' '+audio[0].lang):''),kind:'native',gain:g,muted:false,solo:false,volume:1});
-      this.usingWebAudio=false;
-    }else if(audio.length>=1){
-      video.muted=true;
-      for(let i=0;i<audio.length;i++){
-        setStatus(`抽取音軌 ${i+1}/${audio.length}…`,'busy');
-        const ap=await DESK.extractAudio(p,i,dur);
-        const el=new Audio(); el.src=await DESK.fileURL(ap); el.preload='auto';
-        await new Promise(r=>{el.onloadedmetadata=r; if(el.readyState>=1)r(); setTimeout(r,10000);});
-        const node=this.ctx.createMediaElementSource(el);
-        const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-        const a=audio[i];
-        this.tracks.push({id:'el'+i,name:'音軌 '+(i+1)+(a.lang?(' '+a.lang):'')+(a.title?(' '+a.title):'')+(a.channels?` (${a.channels}ch)`:''),
-          kind:'element',el,gain:g,muted:false,solo:false,volume:1});
-      }
-      this.usingWebAudio=true;
+    video.muted=true;
+
+    // 每聲道 → 各自一個 <audio> element 音軌 + 電平表 analyser
+    const chs=res.channels||[];
+    for(let i=0;i<chs.length;i++){
+      setStatus(`載入聲道 ${i+1}/${chs.length}…`,'busy');
+      const el=new Audio(); el.src=await DESK.fileURL(chs[i].file); el.preload='auto';
+      await new Promise(r=>{el.onloadedmetadata=r; if(el.readyState>=1)r(); setTimeout(r,10000);});
+      const node=this.ctx.createMediaElementSource(el);
+      const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
+      const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+      this.attachMeter(tr,node);
+      this.tracks.push(tr);
     }
-    this.syncMuteState(); renderAudioTracks();
-    // 波形：整片低取樣 (8kHz 單聲道) 由 ffmpeg 產生，記憶體友善
-    if(info&&audio.length>0){
-      setStatus('產生波形…','busy');
-      try{
-        const wavB64=await DESK.waveAudio(p,dur);
-        const ab=await this.ctx.decodeAudioData(b64ToBytes(wavB64).buffer);
-        if(ab.duration>State.duration){State.duration=ab.duration;}
-        Wave.live=false; Wave.compute(ab); drawTimeline();
-      }catch(e){ console.warn('wave',e); Wave.initLive(); }
-    }
-    setStatus('媒體已載入（桌面模式）','ok');
-    onDurationKnown();
+    this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
+
+    // 波形：用 ingest 產生的 8kHz 混音 wav
+    if(res.wave){
+      try{ const b64=await DESK.readB64(res.wave); if(b64){ const ab=await this.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); } else Wave.initLive(); }
+      catch(e){ console.warn('wave',e); Wave.initLive(); }
+    } else Wave.initLive();
+
+    setStatus('媒體已載入（桌面模式）','ok'); onDurationKnown();
   },
   async addAudioFileDesktop(p){
     this.ensureCtx();
@@ -182,7 +189,8 @@ const Media = {
     await new Promise(r=>{el.onloadedmetadata=r; if(el.readyState>=1)r(); setTimeout(r,10000);});
     const node=this.ctx.createMediaElementSource(el);
     const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-    this.tracks.push({id:'el'+Date.now(),name:baseName(p),kind:'element',el,gain:g,muted:false,solo:false,volume:1});
+    const tr={id:'el'+Date.now(),name:baseName(p),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+    this.attachMeter(tr,node); this.tracks.push(tr);
     this.usingWebAudio=true; this.syncMuteState();
     if(el.duration>State.duration){State.duration=el.duration;onDurationKnown();}
     renderAudioTracks();
@@ -301,6 +309,16 @@ const Media = {
     } else { try{ this.videoSrcNode.disconnect(); }catch(e){} }
     const g=this.ctx.createGain(); this.videoSrcNode.connect(g); g.connect(this.master);
     return g;
+  },
+  /* 為音軌掛上電平表 analyser：取「源頭」訊號（與 mute/solo 無關），播放時即有資料，
+     讓使用者就算某聲道沒開也能從表頭看出它有沒有內容 */
+  attachMeter(tr, sourceNode){
+    if(!this.ctx||!sourceNode)return;
+    try{
+      const an=this.ctx.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=0.3;
+      sourceNode.connect(an);
+      tr.analyser=an; tr._mbuf=new Float32Array(an.fftSize); tr.level=0; tr.peak=0; tr.peakT=0;
+    }catch(e){}
   },
   hasMix(){ return this.tracks.some(t=>t.kind==='buffer'||t.kind==='element'); },
 
