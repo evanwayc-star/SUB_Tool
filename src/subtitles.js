@@ -5,13 +5,14 @@ import { escapeHTML } from './util.js';
 import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
-import { renderAll, renderVideoSub, ensurePlayheadVisible, parseTimecodeInput, renderListTrackSel, showToast } from './app.js';
+import { renderAll, renderVideoSub, ensurePlayheadVisible, parseTimecodeInput, renderListTrackSel, showToast, ensureProjectSaved } from './app.js';
 import { recordHistory } from './history.js';
 import { showCueMenu } from './menus.js';
 
 /* ===== 字幕對調模式 ================================================= */
 let _swapSource = null;
 let _checkLenLimit = 0; // 0=不檢查；> 0 = 每行超過此字數以紅粗體標示
+let _checkContains = []; // 空陣列=不篩選；字串陣列=OR 條件關鍵字
 
 function enterSwapMode(id){
   _swapSource = id;
@@ -110,13 +111,21 @@ function renderCheckPanel(){
   const overLenNums = _checkLenLimit
     ? list.map((c,i)=>{ const t=c.text||''; return t.trim()&&t.split(/\n|\/\//).some(ln=>ln.length>_checkLenLimit)?i+1:null; }).filter(n=>n!==null)
     : [];
+  // 包含文字（|| 為 OR）
+  const containsRaw=($('cpContainsInput')||{}).value||'';
+  // 純空白詞（用來搜尋空格）保留原樣；有文字的詞才去掉裝飾性 ASCII 空格
+  _checkContains=containsRaw.split('||').map(s=>s.trim()===''?s:s.replace(/^[ ]+|[ ]+$/g,'')).filter(s=>s.length>0);
+  const containsNums=_checkContains.length
+    ? list.map((c,i)=>{ const t=(c.text||'').toLowerCase(); return _checkContains.some(kw=>t.includes(kw.toLowerCase()))?i+1:null; }).filter(n=>n!==null)
+    : [];
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
-  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen');
+  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains');
   if(ro)ro.querySelector('.cp-nums').innerHTML=mkNums(overlapNums);
   if(rm)rm.querySelector('.cp-nums').innerHTML=mkNums(multiNums);
   if(r2)r2.querySelector('.cp-nums').innerHTML=mkNums(twoNums);
   if(rb)rb.querySelector('.cp-nums').innerHTML=mkNums(blankNums);
   if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'—';
+  if(rc)rc.querySelector('.cp-nums').innerHTML=_checkContains.length?mkNums(containsNums):'—';
   panel.querySelectorAll('.cp-num').forEach(el=>{
     el.onclick=()=>{
       const idx=parseInt(el.dataset.idx)-1; const c=list[idx]; if(!c)return;
@@ -166,7 +175,8 @@ function _txtInner(text){
 function buildSubRow(c,i,overlaps){
   const row=document.createElement('div');
   const rc=_rowClass(c.text);
-  row.className='sub-row'+(rc?' '+rc:'')+(_searchMatches.includes(c.id)?' search-hit':'')+(isSel(c.id)?' sel':'')+(c.id===State.selectedId?' primary':'')+(c.id===State.activeId?' active':'')+(overlaps?.has(c.id)?' overlap':'');
+  const containsHit=_checkContains.length&&_checkContains.some(kw=>(c.text||'').toLowerCase().includes(kw.toLowerCase()));
+  row.className='sub-row'+(rc?' '+rc:'')+(_searchMatches.includes(c.id)?' search-hit':'')+(isSel(c.id)?' sel':'')+(c.id===State.selectedId?' primary':'')+(c.id===State.activeId?' active':'')+(overlaps?.has(c.id)?' overlap':'')+(containsHit?' contains-match':'');
   row.dataset.id=c.id;
   const timed=c.timed!==false;
   row.innerHTML=
@@ -187,15 +197,17 @@ function buildSubRow(c,i,overlaps){
 
   // 時間點點擊編輯
   if(timed){
-    row.querySelector('.tin').addEventListener('click',e=>{
+    row.querySelector('.tin').addEventListener('click',async e=>{
       e.stopPropagation();
+      await ensureProjectSaved();
       openInlineTimeEdit(row.querySelector('.tin'), c.start, t=>{
         c.start=Math.max(0,Math.min(t,c.end-0.001));
         sortCues(); renderAll(); renderVideoSub(); recordHistory('修改起點'+cueSuffix(c));
       });
     });
-    row.querySelector('.tout').addEventListener('click',e=>{
+    row.querySelector('.tout').addEventListener('click',async e=>{
       e.stopPropagation();
+      await ensureProjectSaved();
       openInlineTimeEdit(row.querySelector('.tout'), c.end, t=>{
         c.end=Math.max(c.start+0.001,t);
         sortCues(); renderAll(); renderVideoSub(); recordHistory('修改終點'+cueSuffix(c));
@@ -224,11 +236,12 @@ function buildSubRow(c,i,overlaps){
     const _ptInside=_alreadySel&&c.timed!==false&&_pt>=c.start&&_pt<=c.end;
     selectCue(c.id,{additive:e.ctrlKey||e.metaKey, range:e.shiftKey, seek:_noMod&&!_ptInside});
   });
-  row.addEventListener('dblclick',e=>{
+  row.addEventListener('dblclick',async e=>{
     if(e.ctrlKey||e.metaKey||e.shiftKey) return;
     // 時間點有自己的點擊處理，不在此觸發文字編輯
     if(e.target.closest('.tin')||e.target.closest('.tout')) return;
     e.preventDefault();
+    await ensureProjectSaved();
     const t=row.querySelector('.txt');
     _orig=c.text||'';
     t.innerText=c.text||''; // 清除搜尋高亮 span

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('subtool', {
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
   readB64:      (p) => ipcRenderer.invoke('fs:readB64', p),
+  writeProject: (p, b64) => ipcRenderer.invoke('fs:writeProject', { path: p, b64 }),
   cacheInfo:    () => ipcRenderer.invoke('cache:info'),
   cacheCleanOrphans: () => ipcRenderer.invoke('cache:cleanOrphans'),
   cacheClearAll: (src) => ipcRenderer.invoke('cache:clearAll', src),

@@ -453,6 +453,7 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
 ipcMain.handle('fs:readB64', (e, p) => { try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; } });
+ipcMain.handle('fs:writeProject', (e, { path: p, b64 }) => { try { fs.writeFileSync(p, Buffer.from(b64,'base64')); return p; } catch(err){ return null; } });
 
 /* ---- 邊轉邊播 ingest（MXF 等非原生格式秒開）：fragmented MP4 + 本機 HTTP 伺服器 ----
    video 轉成 fragmented MP4（empty_moov），前幾秒輸出後就可播放；音軌/波形同一 pass 在背景繼續。

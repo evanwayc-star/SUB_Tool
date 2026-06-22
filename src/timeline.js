@@ -4,7 +4,7 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from 
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
-import { renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, showToast, snapTargets, snapVal, neighborBounds, ensurePlayheadVisible, openNoteInPanel, openCueEditModal } from './app.js';
+import { renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, showToast, snapTargets, snapVal, neighborBounds, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, ensureProjectSaved, isProjectGuardDone } from './app.js';
 import { jklReset } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
@@ -401,6 +401,8 @@ tlScroll.addEventListener('mousedown',e=>{
   if(block){
     const c=State.cues.find(z=>z.id===block.dataset.id); if(!c)return;
     if(e.detail>=2 && !e.shiftKey){ selectCue(c.id); openCueEditModal(c); e.preventDefault(); return; }
+    // 第一次拖曳前的儲存守衛（同步，不 await，避免拖曳殘留問題）
+    if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; }
     if(State.tracks[c.track||0]?.locked){
       // 鎖定軌道：僅允許選取，不允許拖曳移動
       if(!isSel(c.id)) selectCue(c.id); e.preventDefault(); return;

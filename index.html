@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SUB Tool — 線上上字幕工具</title>
+<title>SUB TOOL</title>
 
 </head>
 <body>
@@ -11,7 +11,7 @@
 
   <!-- ===== 選單列 ===== -->
   <div class="menubar">
-    <div class="brand">SUB&nbsp;TOOL</div>
+    <div class="brand"><img id="brandLogo" alt="SUB TOOL"></div>
 
     <button class="icon" data-act="new" title="清空新建">🗑 開新專案</button>
     <div class="sep"></div>
@@ -202,6 +202,7 @@
     <div class="cp-row cp-issue" id="cpOverlap"><span class="cp-label">時間碼重疊</span>：<span class="cp-nums"></span></div>
     <div class="cp-row cp-issue" id="cpMulti"><span class="cp-label">字幕３行以上</span>：<span class="cp-nums"></span></div>
     <div class="cp-row cp-issue" id="cpOverLen"><span class="cp-label">超過<input id="cpLenInput" type="number" min="1" max="9999" placeholder="—" title="輸入字數上限，超過的部分會以紅色粗體顯示">字</span>：<span class="cp-nums"></span></div>
+    <div class="cp-row cp-issue cp-contains-row" id="cpContains"><span class="cp-label">包含文字</span><input id="cpContainsInput" type="text" value="  ||　　|| 　||　 " title="以 || 分隔多個關鍵字（OR 搜尋，不分大小寫）&#10;預設：連續兩個半形空白、兩個全形空白、半形+全形、全形+半形"><span class="cp-nums"></span></div>
     <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
     <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span>：<span class="cp-nums"></span></div>
     <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span>：<span class="cp-nums"></span></div>

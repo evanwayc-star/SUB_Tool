@@ -1,5 +1,6 @@
 /* SUB Tool — 應用主程式（後續逐步拆成更多模組） */
 "use strict";
+import _logoUrl from './logo.png';
 import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML } from './util.js';
 import { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
 import { SubFormats, splitN } from './formats.js';
@@ -9,7 +10,7 @@ import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, refreshTrackGutterActive } from './timeline.js';
 import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
-import { Project } from './project.js';
+import { Project, ensureProjectSaved, isProjectGuardDone, resetProject } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive } from './notes.js';
@@ -17,7 +18,7 @@ import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive } fr
 
 
 /* 提供給子模組使用的膠合函式（app.js 為協調層） */
-export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput, togglePanel, renderMixer, doAction, refreshMpvSubs };
+export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput, togglePanel, renderMixer, doAction, refreshMpvSubs, ensureProjectSaved, isProjectGuardDone };
 
 /* ============================================================================
    SUB TOOL — 線上上字幕工具  (single-file, vanilla JS)
@@ -340,7 +341,14 @@ async function doAction(act){
       if(IS_DESKTOP){ const r=await DESK.openProject(); if(r)Project.loadDesktop(r); }
       else { const f=await pickFile($('fileProject')); if(f)Project.load(f); } break;
     case 'save-project': Project.save(); break;
-    case 'new': if(confirm('清空目前專案？字幕將遺失（未存檔的話）。')){ State.cues=[];State.selectedId=null;State.selectedIds=[];State.listTrack=0;State.tracks=[];syncTrackCount();State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');renderListTrackSel();renderAll();drawTimeline(); } break;
+    case 'new': if(confirm('清空目前專案？字幕與備註將遺失（未存檔的話）。')){
+      State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
+      State.listTrack=0;State.tracks=[];syncTrackCount();
+      State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');
+      History.reset();resetProject();
+      renderListTrackSel();renderAll();renderNotes();drawTimeline();
+      setStatus('新專案','ok');
+    } break;
     case 'imp-auto': importSub(); break;
     case 'exp-dialog': showExportDialog(); break;
     case 'exp-srt': exportSub('srt'); break;
@@ -735,7 +743,8 @@ function renderTrackStyle(){
 }
 
 /* ===== 時間軸：雙擊字幕區塊內嵌編輯文字 ===== */
-function startInlineEdit(block,c){
+async function startInlineEdit(block,c){
+  await ensureProjectSaved();
   hideCtx();
   const ed=document.createElement('textarea'); ed.className='cue-inline-edit'; ed.value=c.text||'';
   const r=block.getBoundingClientRect(), lr=tlLayer.getBoundingClientRect();
@@ -752,7 +761,8 @@ function startInlineEdit(block,c){
   ed.addEventListener('dblclick',ev=>ev.stopPropagation());
 }
 
-function openCueEditModal(c){
+async function openCueEditModal(c){
+  await ensureProjectSaved();
   const orig=c.text||'';
   const trackIdx=c.track||0;
   const trackName=State.tracks[trackIdx]?.name||'';
@@ -848,6 +858,9 @@ function initUI(){
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());
+  // 字幕檢查：包含文字輸入
+  $('cpContainsInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
+  $('cpContainsInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋浮動視窗
   $('searchInput').addEventListener('input',()=>searchUpdate());
   $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){ searchNav(1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
@@ -1221,6 +1234,7 @@ window.addEventListener('resize',()=>{clearTimeout(rzT);rzT=setTimeout(()=>drawT
 /* 初始化 */
 function init(){
   State.fps=+$('fpsSel').value||24;
+  const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;
   initUI(); initExtras();
   renderAll(); layoutTimeline(); drawTimeline(); rafLoop();
   History.reset();
@@ -1229,7 +1243,7 @@ function init(){
 }
 async function initDesktop(){
   const brand=document.querySelector('.brand');
-  if(brand && !brand.querySelector('small')){ const sm=document.createElement('small'); sm.style.cssText='opacity:.55;font-size:11px;margin-left:6px'; sm.textContent='桌面版'; brand.appendChild(sm); }
+  if(brand && !brand.querySelector('small')){ const sm=document.createElement('small'); sm.style.cssText='opacity:.55;font-size:11px;margin-left:6px;vertical-align:middle'; sm.textContent='桌面版'; brand.appendChild(sm); }
   const nv=$('noVideo'); if(nv) nv.innerHTML='<b>尚未載入影音</b>點 <kbd>🎬 影音</kbd> 匯入<br>桌面版支援 MP4 / MOV / <b>MXF</b> / MKV / 多音軌（系統 ffmpeg）<br>多音軌可同時混音播放，每軌獨立音量／獨奏';
   try{
     const s=await DESK.status();

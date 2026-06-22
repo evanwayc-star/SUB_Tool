@@ -57,8 +57,9 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 /* ---------- 頂部選單列 ---------- */
 .menubar{display:flex;align-items:center;gap:6px;background:#161618;border-bottom:1px solid var(--border);
   padding:6px 10px;flex-wrap:wrap;min-height:46px}
-.brand{font-weight:800;letter-spacing:.5px;color:var(--accent);font-size:15px;margin-right:6px;white-space:nowrap}
-.brand small{color:var(--text-faint);font-weight:400;font-size:10px;margin-left:4px}
+.brand{display:flex;align-items:center;margin-right:6px;white-space:nowrap}
+.brand img{height:28px;width:auto;display:block}
+.brand small{color:var(--text-faint);font-weight:400;font-size:10px;margin-left:6px}
 .menubar .grp{display:flex;align-items:center;gap:4px}
 .fps-box{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px}
 .fps-box input{width:56px;text-align:center}
@@ -314,11 +315,11 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 /* 備忘點擊反白 */
 .note-item.nt-active{background:rgba(255,210,60,.14)}
 /* 混音器：逐聲道電平表 */
-.mixer-panel{width:auto;max-width:92vw;max-height:90vh}
-.mixer-panel .fp-body{padding:8px 10px;overflow-y:hidden}
-.mixer-toolbar{display:flex;gap:6px;margin-bottom:8px}
+.mixer-panel{min-width:340px;width:auto;max-width:92vw;max-height:90vh;overflow:hidden}
+.mixer-panel .fp-body{padding:8px 12px;overflow:hidden;box-sizing:border-box}
+.mixer-toolbar{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
 .mixer-toolbar .mini{flex:0 0 auto}
-.mixer-strips{display:flex;gap:6px;align-items:flex-end;overflow-x:auto}
+.mixer-strips{display:flex;gap:8px;align-items:flex-end;overflow-x:auto;overflow-y:hidden;padding-bottom:2px}
 .mx-strip{display:flex;flex-direction:column;align-items:center;gap:5px;width:50px;flex:0 0 auto}
 .mx-meter{position:relative;width:30px;height:220px;border:1px solid var(--border);border-radius:3px;overflow:hidden;
   background:linear-gradient(to top,#33c93a 0%,#33c93a 55%,#e6d23a 78%,#e0432a 100%)}
@@ -380,6 +381,13 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 #cpOverLen input[type="number"]{width:36px;margin:0 3px;padding:1px 3px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:11px;text-align:center;-moz-appearance:textfield}
 #cpOverLen input[type="number"]::-webkit-inner-spin-button{display:none}
 .sub-row .txt .over-len{color:var(--red);font-weight:bold}
+/* 包含文字篩選行 */
+.cp-contains-row{flex-wrap:wrap;row-gap:2px}
+.cp-contains-row input{flex:1;min-width:100px;padding:2px 6px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:12px;font-family:inherit}
+.cp-contains-row .cp-nums{flex-basis:100%;padding-left:calc(7em + 12px)}
+#cpContains .cp-label,#cpContains .cp-num{color:#caa72e}
+#cpContains .cp-num:hover{color:var(--accent)}
+.sub-row.contains-match{background:#2a2510}
 /* 字幕對調模式 */
 .sub-row.swap-src{outline:2px solid var(--cyan);outline-offset:-2px;background:#0d2a3a !important}
 .sublist.swap-mode{cursor:crosshair}

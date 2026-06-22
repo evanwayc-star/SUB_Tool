@@ -9,7 +9,7 @@ import { updatePlayhead, zoomFit, setZoom, drawTimeline } from './timeline.js';
 import { Project } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, updateNoteActive } from './notes.js';
-import { setStatus, closeModal, renderAll, ensurePlayheadVisible, renderVideoSub, showOsd, togglePanel, doAction } from './app.js';
+import { setStatus, closeModal, renderAll, ensurePlayheadVisible, renderVideoSub, showOsd, togglePanel, doAction, ensureProjectSaved } from './app.js';
 
 /* ===== JKL 穿梭輪 ======================================================= */
 /* _jklSpeed: 0=暫停, 1=正常播放, 2=2x播放, -1=1x倒帶, -2=2x倒帶 */
@@ -63,7 +63,8 @@ function jklReset(){
 
 /* ===== 7. 鍵盤 (I/O 上字幕) =========================================== */
 /* I = 設定目前被選字幕的「開始點」為播放點；無選取則新建一條 */
-function setIn(){
+async function setIn(){
+  await ensureProjectSaved();
   if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移',''); return; }
   const t=Media.vTime();
   let c=State.cues.find(x=>x.id===State.selectedId);
@@ -73,7 +74,8 @@ function setIn(){
   recordHistory('設定起點 I'+cueSuffix(c)); setStatus('起點 '+fmtClock(t),'ok');
 }
 /* O = 設定目前被選字幕的「結束點」為播放點 */
-function setOut(){
+async function setOut(){
+  await ensureProjectSaved();
   if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移',''); return; }
   const t=Media.vTime();
   const c=State.cues.find(x=>x.id===State.selectedId);
@@ -156,14 +158,14 @@ window.addEventListener('keydown',e=>{
     case 'arrowup':
       e.preventDefault();
       if(e.shiftKey){ seekHome(); }
-      else if(e.ctrlKey||e.metaKey){ jumpToAdjacentCue(-1); }
-      else stepBoundary(-1);
+      else if(e.ctrlKey||e.metaKey){ stepBoundary(-1); }
+      else jumpToAdjacentCue(-1);
       break;
     case 'arrowdown':
       e.preventDefault();
       if(e.shiftKey){ seekEnd(); }
-      else if(e.ctrlKey||e.metaKey){ jumpToAdjacentCue(1); }
-      else stepBoundary(1);
+      else if(e.ctrlKey||e.metaKey){ stepBoundary(1); }
+      else jumpToAdjacentCue(1);
       break;
     case 'home': e.preventDefault(); if(e.shiftKey) jumpToFirstLastCue(-1); else seekHome(); break;
     case 'end': e.preventDefault(); if(e.shiftKey) jumpToFirstLastCue(1); else seekEnd(); break;
