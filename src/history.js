@@ -1,5 +1,5 @@
 /* SUB Tool — 動作紀錄（復原 / 重做） */
-import { State, syncTrackCount } from './state.js';
+import { State, syncTrackCount, setFps } from './state.js';
 import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
 import { drawTimeline } from './timeline.js';
@@ -9,7 +9,7 @@ import { renderListTrackSel, renderAll, setStatus } from './app.js';
 /* ===== 動作紀錄（復原 / 重做） ===== */
 const History = {
   stack:[], hi:-1, max:120,
-  snap(){ return JSON.stringify({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount}); },
+  snap(){ return JSON.stringify({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,fps:State.fps}); },
   reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); },
   record(label){
     if(this.hi<this.stack.length-1)this.stack=this.stack.slice(0,this.hi+1); // 截斷未來
@@ -21,6 +21,7 @@ const History = {
     if(i<0||i>=this.stack.length)return;
     const d=JSON.parse(this.stack[i].snap);
     State.cues=d.cues; State.tracks=d.tracks; State.notes=d.notes||[]; syncTrackCount();
+    if(d.fps) setFps(d.fps);
     if(!State.cues.some(c=>c.id===State.selectedId)){ State.selectedId=null; State.selectedIds=[]; }
     else State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
     this.hi=i; renderListTrackSel(); renderAll(); drawTimeline(); renderNotes(); renderHistory();

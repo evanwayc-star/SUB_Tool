@@ -4,7 +4,7 @@ import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFil
 import { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
-import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel } from './state.js';
+import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix } from './state.js';
 import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, refreshTrackGutterActive } from './timeline.js';
 import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitles.js';
@@ -295,7 +295,7 @@ video.addEventListener('ended',()=>{Media.pause();});
 /* seek bar */
 $('seekBar').addEventListener('input',e=>{ const t=(+e.target.value)/1000; Media.seek(t); updateNoteActive(t); });
 // rateSel removed from UI — speed controlled via JKL keys
-$('fpsSel').addEventListener('change',e=>setFps(+e.target.value||24));
+$('fpsSel').addEventListener('change',e=>{ const prev=State.fps; setFps(+e.target.value||24); renderSubList(); renderNotes(); recordHistory(`切換 FPS ${prev}→${State.fps}`); });
 $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
 
 /* 狀態列 / toast / modal */
@@ -442,6 +442,17 @@ function detectSubFormat(text, ext){
   return 'txt';
 }
 /* 匯入 / 匯出字幕 */
+function _askFpsModal(){
+  return new Promise(resolve=>{
+    const opts=FPS_SET.map(f=>`<option value="${f}"${f===State.fps?' selected':''}>${f===23.976?'23.976 (23.98)':f===29.97?'29.97':''+f}</option>`).join('');
+    openModal('選擇影格率 (FPS)',
+      `<p style="margin:0 0 12px;font-size:13px;color:var(--text-faint)">尚未載入影片，請先設定字幕的影格率。</p>`+
+      `<label>FPS：<select id="importFpsSel" style="margin-left:6px">${opts}</select></label>`,
+      [{label:'確定',primary:true,act:()=>{ closeModal(); resolve(+$('importFpsSel').value); }},
+       {label:'取消',act:()=>{ closeModal(); resolve(null); }}]
+    );
+  });
+}
 async function importSub(){
   let text, fileName='';
   if(IS_DESKTOP){
@@ -450,6 +461,10 @@ async function importSub(){
   }else{
     const f=await pickFile($('fileSub')); if(!f)return;
     const buf=await readFile(f); text=decodeText(buf); fileName=f.name;
+  }
+  if(!State.mediaName){
+    const fps=await _askFpsModal(); if(fps===null)return;
+    setFps(fps);
   }
   const ext=(fileName.split('.').pop()||'').toLowerCase();
   const kind=detectSubFormat(text, ext);
@@ -728,7 +743,7 @@ function startInlineEdit(block,c){
   ed.style.width=Math.max(90,r.width)+'px'; ed.style.minHeight=r.height+'px';
   tlLayer.appendChild(ed); ed.focus(); ed.select();
   let done=false; const orig=c.text||'';
-  const commit=(save)=>{ if(done)return; done=true; if(save)c.text=ed.value; ed.remove(); renderAll(); renderVideoSub(); if(save&&(c.text||'')!==orig)recordHistory('編輯字幕文字'); };
+  const commit=(save)=>{ if(done)return; done=true; if(save)c.text=ed.value; ed.remove(); renderAll(); renderVideoSub(); if(save&&(c.text||'')!==orig)recordHistory('編輯字幕文字'+cueSuffix(c)); };
   ed.addEventListener('keydown',ev=>{ ev.stopPropagation();
     if(ev.key==='Enter'&&!ev.shiftKey){ ev.preventDefault(); commit(true); }
     else if(ev.key==='Escape'){ ev.preventDefault(); commit(false); } });
@@ -768,7 +783,7 @@ function openCueEditModal(c){
   const doConfirm=()=>{
     const val=$('cueEditTa').value;
     c.text=val; closeModal(); renderAll(); renderVideoSub();
-    if(val!==orig) recordHistory('編輯字幕文字');
+    if(val!==orig) recordHistory('編輯字幕文字'+cueSuffix(c));
   };
   openModal('修改字幕文字',
     `<div style="font-size:12px;color:var(--text-faint);margin-bottom:10px">${escapeHTML(trackName)} ｜ ${tc}</div>`+

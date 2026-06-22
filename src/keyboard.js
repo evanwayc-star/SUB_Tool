@@ -1,6 +1,6 @@
 /* SUB Tool — 鍵盤快捷鍵 + I/O 上字幕 + 邊界步進 + JKL 穿梭輪 */
 import { $, video, sublist } from './dom.js';
-import { State } from './state.js';
+import { State, cueSuffix } from './state.js';
 import { clamp } from './util.js';
 import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
@@ -70,7 +70,7 @@ function setIn(){
   if(!c){ c=addCue(t,t+2,'',0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 '+fmtClock(t),'ok'); return; }
   c.start=t; if(c.end<=c.start)c.end=c.start+0.5; c.timed=true;
   sortCues(); renderAll(); selectCue(c.id); State.activeEdge='start';
-  recordHistory('設定起點 I'); setStatus('起點 '+fmtClock(t),'ok');
+  recordHistory('設定起點 I'+cueSuffix(c)); setStatus('起點 '+fmtClock(t),'ok');
 }
 /* O = 設定目前被選字幕的「結束點」為播放點 */
 function setOut(){
@@ -81,7 +81,7 @@ function setOut(){
   if(t<=c.start){ setStatus('終點不得早於或等於起點',''); return; }
   c.end=t; c.timed=true;
   sortCues(); renderAll(); selectCue(c.id); State.activeEdge='end';
-  recordHistory('設定終點 O'); setStatus('終點 '+fmtClock(c.end),'ok');
+  recordHistory('設定終點 O'+cueSuffix(c)); setStatus('終點 '+fmtClock(c.end),'ok');
   autoAdvanceSubMode();
 }
 /* 上字幕模式：O 後自動選取下一句，全部完成則關閉模式 */

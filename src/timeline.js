@@ -1,6 +1,6 @@
 /* SUB Tool — 時間軸：渲染（尺/波形/軌道/區塊）與互動（拖曳/框選/縮放） */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js';
-import { State, trackVisible, newTrack, syncTrackCount, isSel } from './state.js';
+import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
@@ -151,14 +151,16 @@ function renderTrackRows(){
       resH.className='tl-resize-handle';
       resH.addEventListener('mousedown',e=>{
         e.preventDefault();e.stopPropagation();
+        const now=performance.now();
+        if(_lastHandleClick.tk===tk && now-_lastHandleClick.t<400){
+          _lastHandleClick={tk:-1,t:0};
+          if(State.tracks[tk])delete State.tracks[tk].height;
+          drawTimeline(); return;
+        }
+        _lastHandleClick={tk,t:now};
         _rowResize={type:'track',tk,startY:e.clientY,startH:trackH(tk)};
         document.addEventListener('mousemove',_onRowResizeMove);
         document.addEventListener('mouseup',_onRowResizeUp,{once:true});
-      });
-      resH.addEventListener('dblclick',e=>{
-        e.preventDefault();e.stopPropagation();
-        if(State.tracks[tk])State.tracks[tk].height=ROW_H;
-        drawTimeline();
       });
       g.appendChild(resH);
       // 拖曳重排
@@ -222,6 +224,7 @@ function _onTrackDragUp(){
 
 /* 軌道/波形高度拖曳縮放 */
 let _rowResize=null;
+let _lastHandleClick={tk:-1,t:0};
 function _doResize(type,tk){
   // .cue-block uses top:4px;bottom:4px, .cue-overlap uses top:0;bottom:0 →
   // both auto-scale with row height via CSS — no renderCueBlocks() needed during drag.
@@ -524,7 +527,7 @@ window.addEventListener('mouseup',e=>{
         refreshSelectionUI(); $('stSel').textContent='';
       }
     }
-  }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; sortCues(); renderAll(); if(moved)recordHistory(m==='move'?'移動字幕':'調整字幕時間'); }
+  }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; sortCues(); renderAll(); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
   drag=null;
 });
 

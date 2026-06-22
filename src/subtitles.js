@@ -1,6 +1,6 @@
 /* SUB Tool — 字幕列表：渲染、選取（多選）、新增/刪除、軌道切換/樣式 */
 import { $, sublist, video } from './dom.js';
-import { State, isSel, newId, trackVisible } from './state.js';
+import { State, isSel, newId, trackVisible, cueSuffix } from './state.js';
 import { escapeHTML } from './util.js';
 import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
@@ -191,14 +191,14 @@ function buildSubRow(c,i,overlaps){
       e.stopPropagation();
       openInlineTimeEdit(row.querySelector('.tin'), c.start, t=>{
         c.start=Math.max(0,Math.min(t,c.end-0.001));
-        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改起點');
+        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改起點'+cueSuffix(c));
       });
     });
     row.querySelector('.tout').addEventListener('click',e=>{
       e.stopPropagation();
       openInlineTimeEdit(row.querySelector('.tout'), c.end, t=>{
         c.end=Math.max(c.start+0.001,t);
-        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改終點');
+        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改終點'+cueSuffix(c));
       });
     });
   }
@@ -252,7 +252,7 @@ function buildSubRow(c,i,overlaps){
     txt.contentEditable='false';
     txt.innerHTML=_txtInner(c.text);
     _syncRowClass();
-    if((c.text||'')!==_orig) recordHistory('編輯字幕文字');
+    if((c.text||'')!==_orig) recordHistory('編輯字幕文字'+cueSuffix(c));
     renderCheckPanel();
   });
   txt.addEventListener('keydown',e=>{

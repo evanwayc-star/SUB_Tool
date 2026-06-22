@@ -43,4 +43,13 @@ const IS_DESKTOP = !!DESK;
 
 function isSel(id){ return State.selectedIds.includes(id); }
 
-export { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel };
+function cueSuffix(c){
+  if(!c) return '';
+  const tk=c.track||0;
+  const name=State.tracks[tk]?.name||('軌道 '+(tk+1));
+  const sorted=State.cues.filter(x=>(x.track||0)===tk).sort((a,b)=>a.start-b.start);
+  const idx=sorted.findIndex(x=>x.id===c.id);
+  return ` - ${name} - 第${idx+1}句`;
+}
+
+export { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix };
