@@ -165,8 +165,8 @@ window.addEventListener('keydown',e=>{
       else if(e.ctrlKey||e.metaKey){ jumpToAdjacentCue(1); }
       else stepBoundary(1);
       break;
-    case 'home': e.preventDefault(); seekHome(); break;
-    case 'end': e.preventDefault(); seekEnd(); break;
+    case 'home': e.preventDefault(); if(e.shiftKey) jumpToFirstLastCue(-1); else seekHome(); break;
+    case 'end': e.preventDefault(); if(e.shiftKey) jumpToFirstLastCue(1); else seekEnd(); break;
     case 'enter': e.preventDefault(); { const sel=State.selectedId; if(sel){ const row=sublist.querySelector(`.sub-row[data-id="${sel}"]`); if(row)row.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window})); } } break;
     case 'delete': if(State.selectedIds.length||State.selectedId){e.preventDefault();deleteSelected();} break;
     case 'escape':
@@ -251,6 +251,17 @@ function jumpToNote(dir){
   else      { for(const n of State.notes){ if(n.time<t-EPS&&(target===null||n.time>target.time))target=n; } }
   if(!target) return;
   Media.seek(target.time); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(target.time);
+}
+
+/* Shift+Home/End：跳到同軌第一句 / 最後一句並選取 */
+function jumpToFirstLastCue(dir){
+  const list=State.cues.filter(c=>(c.track||0)===State.listTrack&&c.timed!==false);
+  if(!list.length)return;
+  const target=dir<0?list[0]:list[list.length-1];
+  selectCueSingle(target.id,false);
+  Media.seek(target.start);
+  _pendingStep=null;
+  updatePlayhead();ensurePlayheadVisible();
 }
 
 /* Ctrl+上/下：跳到同軌上一句/下一句的起點並選取 */

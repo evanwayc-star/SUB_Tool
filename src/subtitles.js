@@ -56,7 +56,18 @@ function openInlineTimeEdit(el, curSec, onCommit){
   const fin = (commit) => {
     if(done) return; done = true;
     if(commit){
-      const t = parseTimecodeInput(inp.value);
+      const raw = inp.value.trim();
+      let t = null;
+      if(raw.startsWith('+') || raw.startsWith('-')){
+        const sign = raw.startsWith('-') ? -1 : 1;
+        const delta = parseTimecodeInput(raw.slice(1));
+        if(delta !== null){
+          t = curSec + sign * delta;
+          if(t < 0){ showToast('時間不能早於 00:00:00:00'); inp.remove(); el.textContent = origText; return; }
+        }
+      } else {
+        t = parseTimecodeInput(raw);
+      }
       if(t !== null){ onCommit(t); return; } // onCommit → renderAll rebuilds DOM
     }
     inp.remove(); el.textContent = origText;
@@ -207,7 +218,11 @@ function buildSubRow(c,i,overlaps){
     // 若已在文字編輯模式且點擊在 txt 內，讓瀏覽器自行定位游標
     if(txtEl && txtEl.contentEditable==='true' && (e.target===txtEl||txtEl.contains(e.target))) return;
     if(document.activeElement===txtEl) txtEl.blur();
-    selectCue(c.id,{additive:e.ctrlKey||e.metaKey, range:e.shiftKey, seek:!(e.ctrlKey||e.metaKey||e.shiftKey)});
+    const _noMod=!(e.ctrlKey||e.metaKey||e.shiftKey);
+    const _alreadySel=_noMod&&State.selectedId===c.id&&State.selectedIds.length===1;
+    const _pt=Media.vTime();
+    const _ptInside=_alreadySel&&c.timed!==false&&_pt>=c.start&&_pt<=c.end;
+    selectCue(c.id,{additive:e.ctrlKey||e.metaKey, range:e.shiftKey, seek:_noMod&&!_ptInside});
   });
   row.addEventListener('dblclick',e=>{
     if(e.ctrlKey||e.metaKey||e.shiftKey) return;
@@ -242,7 +257,8 @@ function buildSubRow(c,i,overlaps){
   });
   txt.addEventListener('keydown',e=>{
     if(txt.contentEditable!=='true') return;
-    if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); txt.blur(); }
+    if(e.key==='Enter'&&e.ctrlKey){ e.preventDefault(); splitCueAtCursor(c,txt); }
+    else if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); txt.blur(); }
     else if(e.key==='Escape'){ e.preventDefault(); txt.innerText=_orig; txt.blur(); }
     e.stopPropagation();
   });
@@ -441,6 +457,82 @@ function searchSelectAll(){
   State.activeEdge='start';
   refreshSelectionUI();
   const el=$('stSel'); if(el) el.textContent='已選 '+State.selectedIds.length+' 條';
+}
+
+/* ===== 拆分字幕（Ctrl+Enter） ==================================================
+   在 contenteditable txt 的游標處拆成兩句：
+   上句 in=原in / out=當下播放點；下句 in=當下播放點 / out=原out */
+function splitCueAtCursor(c, txtEl){
+  const sel=window.getSelection();
+  if(!sel.rangeCount)return;
+
+  // 用插入標記字元的方式取得游標在 innerText 中的位置（正確處理 <br>/<div> 換行）
+  const range=sel.getRangeAt(0).cloneRange();
+  range.collapse(true);
+  const MARK='\x01';
+  const markerNode=document.createTextNode(MARK);
+  range.insertNode(markerNode);
+
+  let raw=txtEl.innerText;
+  markerNode.parentNode.removeChild(markerNode);
+
+  let markerPos=raw.indexOf(MARK);
+  if(markerPos<0) markerPos=raw.length;
+
+  // 去掉 contenteditable 常附加的尾部 \n
+  let full=raw.replace(MARK,'');
+  if(full.endsWith('\n')&&!(c.text||'').endsWith('\n')){
+    full=full.slice(0,-1);
+    if(markerPos>full.length) markerPos=full.length;
+  }
+
+  const textBefore=full.slice(0,markerPos);
+  const textAfter=full.slice(markerPos);
+
+  const origEnd=c.end;
+  const isTimed=c.timed!==false;
+  if(isTimed){
+    const pt=Media.vTime();
+    if(pt<=c.start||pt>=c.end){
+      // 清理 DOM 標記後顯示提示，不執行拆分
+      showToast('播放點必須在字幕的起訖時間內才能拆句');
+      return;
+    }
+  }
+  let splitTime=0;
+  if(isTimed) splitTime=Media.vTime();
+
+  // 先關閉編輯模式（blur 事件觸發時 contentEditable 已為 false，守衛返回）
+  c.text=textBefore;
+  txtEl.contentEditable='false';
+
+  if(isTimed) c.end=splitTime;
+
+  const newCue={id:newId(),start:isTimed?splitTime:0,end:isTimed?origEnd:0,
+    text:textAfter,track:c.track||0,timed:isTimed};
+
+  const idx=State.cues.indexOf(c);
+  if(idx>=0) State.cues.splice(idx+1,0,newCue);
+  else State.cues.push(newCue);
+
+  sortCues(); renderAll(); recordHistory('拆分字幕');
+  selectCue(newCue.id,{seek:false});
+
+  // 自動進入下句的內嵌編輯，游標置於開頭
+  setTimeout(()=>{
+    const nr=sublist.querySelector(`.sub-row[data-id="${newCue.id}"]`);
+    if(!nr)return;
+    const nt=nr.querySelector('.txt');
+    if(!nt)return;
+    nt.innerText=textAfter;
+    nt.contentEditable='true';
+    nt.focus();
+    try{
+      const r=document.createRange(),s=window.getSelection();
+      r.setStart(nt,0); r.collapse(true);
+      s.removeAllRanges(); s.addRange(r);
+    }catch(_){}
+  },30);
 }
 
 export { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel,

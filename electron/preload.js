@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld('subtool', {
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
   readB64:      (p) => ipcRenderer.invoke('fs:readB64', p),
+  cacheInfo:    () => ipcRenderer.invoke('cache:info'),
+  cacheCleanOrphans: () => ipcRenderer.invoke('cache:cleanOrphans'),
+  cacheClearAll: (src) => ipcRenderer.invoke('cache:clearAll', src),
   onProgress:   (cb) => ipcRenderer.on('task-progress', (e, d) => cb(d)),
   mpv: {
     detect:    ()      => ipcRenderer.invoke('mpv:detect'),

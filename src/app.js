@@ -99,8 +99,11 @@ function renderVideoSub(){
 function renderAudioTracks(){
   const list=$('atList'); list.innerHTML='';
   const real=Media.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='nativeTrack'||t.kind==='element');
-  if(real.length===0){ $('atHint').textContent='尚未載入音訊'; return; }
-  $('atHint').textContent=real.length+' 條音軌';
+  // 準備中的占位推桿屬於影片音源；切到外部音源檢視時不顯示
+  const _showPending=(Media.activeSource===null||Media.activeSource==='video');
+  const pending=_showPending?(Media.pendingChannels||[]).filter(c=>!c.ready):[];
+  if(real.length===0 && pending.length===0){ $('atHint').textContent='尚未載入音訊'; if($('mixerPanel')&&$('mixerPanel').classList.contains('show'))renderMixer(); return; }
+  $('atHint').textContent=(real.length+pending.length)+' 條音軌'+(pending.length?'（準備中…）':'');
   for(const tr of real){
     const row=document.createElement('div');row.className='atrack';
     row.innerHTML=
@@ -113,6 +116,11 @@ function renderAudioTracks(){
     muteBtn.onclick=()=>{tr.muted=!tr.muted;Media.applyGains();renderAudioTracks();};
     soloBtn.onclick=()=>{tr.solo=!tr.solo;Media.applyGains();renderAudioTracks();};
     vol.oninput=()=>{tr.volume=+vol.value;Media.applyGains();};
+    list.appendChild(row);
+  }
+  for(const pc of pending){
+    const row=document.createElement('div');row.className='atrack pending';
+    row.innerHTML=`<span class="nm">${escapeHTML(pc.label)}</span><span class="prep"><span class="spin"></span>準備中</span>`;
     list.appendChild(row);
   }
   if($('mixerPanel')&&$('mixerPanel').classList.contains('show'))renderMixer();
@@ -129,7 +137,9 @@ function renderMixer(){
     if(src!==null&&(t.source||'video')!==src)return false;
     return true;
   });
-  if(!real.length){ wrap.innerHTML='<div class="empty" style="padding:14px;white-space:nowrap">尚無音訊聲道</div>'; return; }
+  const _showPending=(Media.activeSource===null||Media.activeSource==='video');
+  const pending=_showPending?(Media.pendingChannels||[]).filter(c=>!c.ready):[];
+  if(!real.length && !pending.length){ wrap.innerHTML='<div class="empty" style="padding:14px;white-space:nowrap">尚無音訊聲道</div>'; return; }
   wrap.innerHTML='';
   for(const tr of real){
     const strip=document.createElement('div'); strip.className='mx-strip';
@@ -151,6 +161,14 @@ function renderMixer(){
     wrap.appendChild(strip);
     _meterStrips.push({tr, mask:strip.querySelector('.mx-mask'), peak:strip.querySelector('.mx-peak')});
   }
+  for(const pc of pending){
+    const strip=document.createElement('div'); strip.className='mx-strip pending';
+    strip.innerHTML=
+      `<div class="mx-meter"><div class="mx-prep"><span class="spin"></span></div></div>`+
+      `<div class="mx-name" title="${escapeHTML(pc.label)}">${escapeHTML(pc.label)}</div>`+
+      `<div class="mx-btns"><div class="mx-preplabel">準備中…</div></div>`;
+    wrap.appendChild(strip);
+  }
 }
 function _mixerTracks(){
   const src=Media.activeSource;
@@ -162,6 +180,34 @@ function _mixerTracks(){
 }
 function mixerReset(){ for(const t of _mixerTracks()){ t.solo=false; t.muted=false; } Media.applyGains(); renderMixer(); renderAudioTracks(); }
 function mixerMuteAll(){ for(const t of _mixerTracks()){ t.solo=false; t.muted=true; } Media.applyGains(); renderMixer(); renderAudioTracks(); }
+
+/* ===== 快取管理對話框（桌面版） ===== */
+function _fmtBytes(n){ n=+n||0; if(n<1024)return n+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+' '+u[i]; }
+let _cacheDlgGen=0;
+async function openCacheDialog(){
+  const DESK=window.subtool;
+  if(!DESK||!DESK.cacheInfo){ showToast('快取管理僅在桌面版可用'); return; }
+  const myGen=++_cacheDlgGen;
+  openModal('🗂 轉檔快取','<div style="padding:6px 2px">讀取中…</div>',[{label:'關閉',primary:true,act:closeModal}]);
+  let info; try{ info=await DESK.cacheInfo(); }catch(e){ info={folders:0,bytes:0,root:''}; }
+  // 使用者在讀取期間已關閉（或又開了別的對話框）就不要把對話框彈回來
+  if(myGen!==_cacheDlgGen || !$('modalBg').classList.contains('show')) return;
+  const html=
+    `<div style="padding:4px 2px;line-height:1.9">`+
+    `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>`+
+    `<div style="font-size:11px;color:var(--muted);word-break:break-all;margin-top:2px">${escapeHTML(info.root||'')}</div>`+
+    `<div style="font-size:12px;color:var(--muted);margin-top:8px">說明：開啟影片時會把每個聲道與波形轉存到「影片同資料夾的 <code>.cache</code>」內，其他電腦讀取同一個檔案時可直接沿用、不必重算。此處管理的是本機的中央快取。</div>`+
+    `</div>`;
+  const buttons=[
+    {label:'清理孤兒檔',act:async()=>{ const r=await DESK.cacheCleanOrphans(); showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}`); openCacheDialog(); }},
+    {label:'全部清除',act:()=>{
+      openModal('確認清除','<div style="padding:6px 2px">將刪除所有中央快取，以及目前開啟影片旁的 .cache 資料夾。<br>下次開啟同檔需重新轉檔。確定？</div>',
+        [{label:'確定清除',primary:true,act:async()=>{ const r=await DESK.cacheClearAll(State.mediaPath||null); showToast(`已清除快取，釋放 ${_fmtBytes(r.bytes)}`); closeModal(); }},{label:'取消',act:openCacheDialog}]);
+    }},
+    {label:'關閉',primary:true,act:closeModal},
+  ];
+  openModal('🗂 轉檔快取',html,buttons);
+}
 function updateMeters(){
   const panel=$('mixerPanel'); if(!panel||!panel.classList.contains('show')||!_meterStrips.length)return;
   const now=performance.now();
@@ -344,6 +390,7 @@ async function doAction(act){
     case 'close-mixer': $('mixerPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'mixer-reset': mixerReset(); break;
     case 'mixer-muteall': mixerMuteAll(); break;
+    case 'cache-manage': openCacheDialog(); break;
     case 'export-notes': exportNotes(); break;
     case 'toggle-all-vis': { const anyVis=State.tracks.some(t=>t.visible!==false); State.tracks.forEach(t=>t.visible=!anyVis); drawTimeline(); renderVideoSub(); } break;
     case 'toggle-all-lock': { const anyUnlocked=State.tracks.some(t=>!t.locked); State.tracks.forEach(t=>t.locked=anyUnlocked); drawTimeline(); } break;
@@ -589,6 +636,8 @@ function showHelp(){
    <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>步進邊界點（起點→終點→下句起點…）</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>↑</kbd></td><td>跳到<b>上一句</b>起點並選取</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>↓</kbd></td><td>跳到<b>下一句</b>起點並選取</td></tr>
+   <tr><td><kbd>Shift</kbd>+<kbd>Home</kbd></td><td>選取<b>第一句</b>字幕，播放點跳到其起點</td></tr>
+   <tr><td><kbd>Shift</kbd>+<kbd>End</kbd></td><td>選取<b>最後一句</b>字幕，播放點跳到其起點</td></tr>
    <tr><td><kbd>P</kbd></td><td>將選取字幕整批位移到播放點</td></tr>
    <tr><td><kbd>Enter</kbd></td><td>開啟選取字幕的<b>文字編輯</b>視窗</td></tr>
    <tr><td><kbd>Del</kbd> / <kbd>Backspace</kbd></td><td>刪除選取（支援多選）</td></tr>
@@ -604,6 +653,7 @@ function showHelp(){
   <table class="keys">
    <tr><td><kbd>Enter</kbd></td><td>確認修改</td></tr>
    <tr><td><kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>換行</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td><b>拆分字幕</b>：游標前後文字各成一句，以目前播放點為分界時間碼</td></tr>
    <tr><td><kbd>Esc</kbd></td><td>取消</td></tr>
   </table><br>`+
   `<b>▍其他快捷</b>
@@ -725,7 +775,31 @@ function openCueEditModal(c){
     const ta=$('cueEditTa');
     if(ta){
       ta.value=orig; ta.focus(); ta.select();
-      ta.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doConfirm();} });
+      ta.addEventListener('keydown',e=>{
+      if(e.key==='Enter'&&e.ctrlKey){
+        e.preventDefault();
+        const offset=ta.selectionStart;
+        const full=ta.value;
+        const textBefore=full.slice(0,offset);
+        const textAfter=full.slice(offset);
+        const origEnd=c.end;
+        const isTimed=c.timed!==false;
+        if(isTimed){ const pt=Media.vTime(); if(pt<=c.start||pt>=c.end){ showToast('播放點必須在字幕的起訖時間內才能拆句'); return; } }
+        let splitTime=0;
+        if(isTimed){ splitTime=Media.vTime(); c.end=splitTime; }
+        c.text=textBefore;
+        const nc={id:newId(),start:isTimed?splitTime:0,end:isTimed?origEnd:0,
+          text:textAfter,track:c.track||0,timed:isTimed};
+        const cidx=State.cues.indexOf(c);
+        if(cidx>=0)State.cues.splice(cidx+1,0,nc); else State.cues.push(nc);
+        closeModal(); sortCues(); renderAll(); recordHistory('拆分字幕');
+        selectCue(nc.id,{seek:false});
+        setTimeout(()=>{
+          const nr=sublist.querySelector(`.sub-row[data-id="${nc.id}"]`);
+          if(nr)nr.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));
+        },30);
+      } else if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doConfirm();}
+    });
     }
     siblings.forEach(s=>{
       const btn=$('cueEditCopySib'+s.tkIdx);
@@ -1048,7 +1122,15 @@ function startTimeEdit(){
   span.textContent=''; span.appendChild(inp); inp.focus();
   let done=false;
   const fin=(commit)=>{ if(done)return; done=true; inp.remove(); span.textContent=secToEncore(Media.vTime(),State.fps);
-    if(commit){ const t=parseTimecodeInput(inp.value); if(t==null){ /* 空：不變 */ }
+    if(commit){
+      const raw=inp.value.trim(); let t=null;
+      if(raw.startsWith('+')||raw.startsWith('-')){
+        const sign=raw.startsWith('-')?-1:1;
+        const delta=parseTimecodeInput(raw.slice(1));
+        if(delta!==null){ t=Media.vTime()+sign*delta;
+          if(t<0){ showToast('時間不能早於 00:00:00:00'); return; } }
+      } else { t=parseTimecodeInput(raw); }
+      if(t==null){ /* 空：不變 */ }
       else if(t>State.duration+1e-6){ showToast('超過片長'); }
       else { Media.seek(t); updatePlayhead(); ensurePlayheadVisible(); } } };
   inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();fin(true);} else if(e.key==='Escape'){e.preventDefault();fin(false);} });

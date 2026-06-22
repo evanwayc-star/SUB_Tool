@@ -68,9 +68,97 @@ function vencArgs() {
 }
 
 /* ---- 媒體快取鍵：來源路徑 + 修改時間 + 大小（內容變了就重轉） ---- */
+/* 快取金鑰：以「檔名 + 大小 + 修改時間(秒)」計算，刻意不含完整路徑，
+   讓同一個檔案在不同電腦（不同磁碟代號 / 掛載點）也能算出相同金鑰、共用快取。 */
 function cacheKeyFor(src) {
-  try { const s = fs.statSync(src); return crypto.createHash('sha1').update(src + '|' + s.mtimeMs + '|' + s.size).digest('hex').slice(0, 16); }
-  catch (e) { return crypto.createHash('sha1').update(String(src)).digest('hex').slice(0, 16); }
+  try { const s = fs.statSync(src); return crypto.createHash('sha1').update(path.basename(src) + '|' + s.size + '|' + Math.floor(s.mtimeMs / 1000)).digest('hex').slice(0, 16); }
+  catch (e) { return crypto.createHash('sha1').update(path.basename(String(src))).digest('hex').slice(0, 16); }
+}
+/* 候選快取目錄：優先放在影片旁的 .cache/<金鑰>（可隨檔案被其他電腦讀取），
+   其次才用 userData/mediacache。讀取時依序找第一個有效的；寫入時找第一個可寫的。 */
+function cacheCandidates(src) {
+  const key = cacheKeyFor(src);
+  const list = [];
+  try { const vdir = path.dirname(src); if (vdir && vdir !== '.') list.push(path.join(vdir, '.cache', key)); } catch (e) {}
+  list.push(path.join(CACHE || TMP, key));
+  return list;
+}
+/* meta.json 內只存相對檔名（ch0.m4a 等）；讀取時依實際所在目錄解析成絕對路徑，確保跨電腦可用 */
+function resolveMeta(raw, dir) {
+  const r = (f) => f ? path.join(dir, path.basename(f)) : f;
+  return { proxy: r(raw.proxy), wave: r(raw.wave), channels: (raw.channels || []).map(c => ({ label: c.label, file: r(c.file) })) };
+}
+function metaToStore(meta) {
+  const b = (f) => f ? path.basename(f) : f;
+  return { proxy: b(meta.proxy), wave: b(meta.wave), channels: (meta.channels || []).map(c => ({ label: c.label, file: b(c.file) })) };
+}
+/* 原子寫入 meta.json（先寫 .tmp 再 rename），避免中途被中斷留下半寫入的損毀清單 */
+function writeMeta(metaPath, meta) {
+  try { const tmp = metaPath + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(metaToStore(meta))); fs.renameSync(tmp, metaPath); } catch (e) {}
+}
+function metaValid(m) {
+  return (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
+}
+/* 讀取快取：回傳第一個檔案完整的 {dir, meta}，否則 null */
+function readCache(src) {
+  for (const dir of cacheCandidates(src)) {
+    const metaPath = path.join(dir, 'meta.json');
+    if (!fs.existsSync(metaPath)) continue;
+    try { const m = resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir); if (metaValid(m)) return { dir, meta: m }; } catch (e) {}
+  }
+  return null;
+}
+function isDirWritable(dir) {
+  try { fs.mkdirSync(dir, { recursive: true }); const t = path.join(dir, '.wtest_' + process.pid); fs.writeFileSync(t, 'x'); fs.unlinkSync(t); return true; }
+  catch (e) { return false; }
+}
+/* 取得可寫的快取目錄（優先影片旁的 .cache）。
+   只有「.cache 是本程式新建的」才在 Windows 上設為隱藏——避免動到使用者既有的 .cache 資料夾。 */
+function writeCacheDir(src) {
+  for (const dir of cacheCandidates(src)) {
+    const parent = path.dirname(dir);
+    const isDotCache = process.platform === 'win32' && path.basename(parent) === '.cache';
+    const preExisted = isDotCache ? fs.existsSync(parent) : true;
+    if (isDirWritable(dir)) {
+      try { if (isDotCache && !preExisted) spawnSync('attrib', ['+h', parent], { timeout: 3000 }); } catch (e) {}
+      return dir;
+    }
+  }
+  return path.join(CACHE || TMP, cacheKeyFor(src));
+}
+/* ---- 快取管理：統計 / 清孤兒 / 全清 ---- */
+function dirSize(dir) {
+  let total = 0;
+  try { for (const f of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, f.name); if (f.isDirectory()) total += dirSize(p); else { try { total += fs.statSync(p).size; } catch (e) {} } } } catch (e) {}
+  return total;
+}
+function cacheInfo() {
+  const root = CACHE || TMP; let folders = 0, bytes = 0;
+  try { for (const f of fs.readdirSync(root, { withFileTypes: true })) { if (f.isDirectory()) { folders++; bytes += dirSize(path.join(root, f.name)); } } } catch (e) {}
+  return { root, folders, bytes };
+}
+/* 移除無效（缺 meta.json 或所引用檔案已不存在）的快取資料夾 */
+function cleanOrphans() {
+  const root = CACHE || TMP; let removed = 0, bytes = 0;
+  try {
+    for (const f of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!f.isDirectory()) continue;
+      const dir = path.join(root, f.name), metaPath = path.join(dir, 'meta.json');
+      // 只刪除「確定無效」的：沒有 meta.json，或 meta 能解析但引用的檔案已不存在。
+      // meta.json 存在但解析失敗（可能是中途中斷的半寫入）→ 保留，下次再判斷，避免誤刪整份有效快取。
+      let remove = false;
+      if (!fs.existsSync(metaPath)) remove = true;
+      else { try { if (!metaValid(resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir))) remove = true; } catch (e) { remove = false; } }
+      if (remove) { const sz = dirSize(dir); try { fs.rmSync(dir, { recursive: true, force: true }); removed++; bytes += sz; } catch (e) {} }
+    }
+  } catch (e) {}
+  return { removed, bytes };
+}
+function clearAllCache(currentSrc) {
+  const root = CACHE || TMP; let bytes = dirSize(root);
+  try { fs.rmSync(root, { recursive: true, force: true }); fs.mkdirSync(root, { recursive: true }); } catch (e) {}
+  if (currentSrc) { try { const ndir = path.join(path.dirname(currentSrc), '.cache', cacheKeyFor(currentSrc)); if (fs.existsSync(ndir)) { bytes += dirSize(ndir); fs.rmSync(ndir, { recursive: true, force: true }); } } catch (e) {} }
+  return { bytes };
 }
 
 /* ---- 執行 ffmpeg，並回報進度 ---- */
@@ -135,7 +223,7 @@ async function ensureHttpServer() {
     _hSrv = http.createServer((req, res) => {
       const id = decodeURIComponent(req.url.slice(1).split('?')[0]);
       const job = _hJobs.get(id);
-      if (!job) { res.writeHead(404); res.end(); return; }
+      if (!job || !job.filePath) { res.writeHead(404); res.end(); return; }
       const rf = req.headers.range;
       if (!rf) {
         res.writeHead(200, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' });
@@ -178,6 +266,7 @@ app.whenReady().then(() => {
   VENC = detectVideoEncoder();
   CACHE = path.join(app.getPath('userData'), 'mediacache');
   try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
+  try { cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
@@ -245,6 +334,11 @@ ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
   return r.filePath;
 });
 
+/* ---- 快取管理 ---- */
+ipcMain.handle('cache:info', () => cacheInfo());
+ipcMain.handle('cache:cleanOrphans', () => cleanOrphans());
+ipcMain.handle('cache:clearAll', (e, currentSrc) => clearAllCache(currentSrc));
+
 ipcMain.handle('ffprobe', (e, p) => {
   if (!FFPROBE) throw new Error('找不到 ffprobe');
   const r = spawnSync(FFPROBE, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', p], { maxBuffer: 1 << 24 });
@@ -279,13 +373,13 @@ ipcMain.handle('ffmpeg:extractAudio', async (e, { path: src, idx, duration, code
       return out;
     } catch (err) { /* 退回 AAC */ }
   }
-  await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'aac', '-b:a', '192k', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
+  await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'aac', '-b:a', '128k', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
   return out;
 });
 
 ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   const out = tmpPath('wav');
-  await runFF(['-y', '-i', src, '-map', '0:a:0', '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', out],
+  await runFF(['-y', '-i', src, '-map', '0:a:0', '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', out],
     { sender: e.sender, duration, jobId: 'wave', label: '產生波形' });
   const buf = fs.readFileSync(out);
   try { fs.unlinkSync(out); tempFiles.delete(out); } catch (e2) {}
@@ -297,16 +391,11 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
    結果存入持久快取（依 cacheKeyFor），重開同檔直接命中、秒開。 */
 ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio }) => {
   const audioArr = Array.isArray(audio) ? audio : [];
-  const dir = path.join(CACHE || TMP, cacheKeyFor(src));
+  // 快取命中（先找影片旁的 .cache，再找 userData）
+  const hit = readCache(src);
+  if (hit) { if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true }); return Object.assign({ cached: true }, hit.meta); }
+  const dir = writeCacheDir(src);
   const metaPath = path.join(dir, 'meta.json');
-  // 快取命中：所有檔案都還在才採用
-  if (fs.existsSync(metaPath)) {
-    try {
-      const m = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-      const ok = (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
-      if (ok) { if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true }); return Object.assign({ cached: true }, m); }
-    } catch (er) {}
-  }
   fs.mkdirSync(dir, { recursive: true });
 
   const fc = [];            // filter_complex 片段
@@ -319,7 +408,7 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
     const base = a.title || a.lang || ('音軌 ' + (i + 1));
     if (ch === 1) {
       fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
-      channels.push({ label: base, file: path.join(dir, `ch${ci}.m4a`) });
+      channels.push({ label: base, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`) });
       chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
     } else {
       const pads = [];
@@ -327,7 +416,7 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
       fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
       for (let k = 0; k < ch; k++) {
         fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
-        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch${ci}.m4a`) });
+        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`) });
         chMaps.push(`[co${ci}]`); ci++;
       }
       const avg = (1 / ch).toFixed(4);
@@ -345,13 +434,13 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
   if (fc.length) args.push('-filter_complex', fc.join(';'));
   let proxy = null;
   if (needsProxy) { proxy = path.join(dir, 'proxy.mp4'); args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), '-movflags', '+faststart', proxy); }
-  channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '192k', c.file); });
+  channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '128k', c.file); });
   let wave = null;
-  if (waveLabel) { wave = path.join(dir, 'wave.wav'); args.push('-map', waveLabel, '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', wave); }
+  if (waveLabel) { wave = path.join(dir, 'wave.wav'); args.push('-map', waveLabel, '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', wave); }
 
   await runFF(args, { sender: e.sender, duration, jobId: 'ingest', label: '讀取並轉檔（單次讀取）' });
   const meta = { proxy, channels, wave };
-  try { fs.writeFileSync(metaPath, JSON.stringify(meta)); } catch (er) {}
+  writeMeta(metaPath, meta);
   return Object.assign({ cached: false }, meta);
 });
 
@@ -363,23 +452,20 @@ ipcMain.handle('fs:readB64', (e, p) => { try { return fs.readFileSync(p).toStrin
    快取命中時行為與 ffmpeg:ingest 相同（秒開）。 */
 ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) => {
   const audioArr = Array.isArray(audio) ? audio : [];
-  const dir = path.join(CACHE || TMP, cacheKeyFor(src));
-  const metaPath = path.join(dir, 'meta.json');
   const port = await ensureHttpServer();
 
-  // 快取命中
-  if (fs.existsSync(metaPath)) {
-    try {
-      const m = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-      const ok = (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
-      if (ok) {
-        if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
-        const jid = 'c-' + cacheKeyFor(src);
-        _hJobs.set(jid, { filePath: m.proxy, done: true });
-        return Object.assign({ cached: true, streamUrl: `http://127.0.0.1:${port}/${jid}` }, m);
-      }
-    } catch (er) {}
+  // 快取命中（先找影片旁的 .cache，再找 userData）
+  // 注意：串流播放需要影片 proxy；mpv 路徑寫的快取是「純音軌」(proxy=null)，
+  // 對串流路徑而言不算命中，須往下重轉以產生 proxy（音軌/波形會一併重建）。
+  const hit = readCache(src);
+  if (hit && hit.meta.proxy && fs.existsSync(hit.meta.proxy)) {
+    if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
+    const jid = 'c-' + cacheKeyFor(src);
+    _hJobs.set(jid, { filePath: hit.meta.proxy, done: true });
+    return Object.assign({ cached: true, streamUrl: `http://127.0.0.1:${port}/${jid}` }, hit.meta);
   }
+  const dir = writeCacheDir(src);
+  const metaPath = path.join(dir, 'meta.json');
   fs.mkdirSync(dir, { recursive: true });
 
   // 與 ffmpeg:ingest 相同的音訊 filter_complex 建構
@@ -390,7 +476,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
     const base = a.title || a.lang || ('音軌 ' + (i + 1));
     if (ch === 1) {
       fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
-      channels.push({ label: base, file: path.join(dir, `ch${ci}.m4a`) });
+      channels.push({ label: base, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`) });
       chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
     } else {
       const pads = [];
@@ -398,7 +484,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
       fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
       for (let k = 0; k < ch; k++) {
         fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
-        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch${ci}.m4a`) });
+        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`) });
         chMaps.push(`[co${ci}]`); ci++;
       }
       const avg = (1 / ch).toFixed(4);
@@ -419,17 +505,17 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   // 關鍵：fragmented MP4 讓 browser 在 ffmpeg 還未結束時就能開始播放
   args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p',
     ...vencArgs(), '-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxy);
-  channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '192k', c.file); });
-  if (waveLabel) args.push('-map', waveLabel, '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', wave);
+  channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '128k', c.file); });
+  if (waveLabel) args.push('-map', waveLabel, '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', wave);
 
   const jid = 'l-' + Date.now();
   const job = { filePath: proxy, done: false, error: null };
   _hJobs.set(jid, job);
 
-  // 背景跑 ffmpeg（不 await）
-  runFF(args, { sender: e.sender, duration, jobId: 'ingest', label: '背景轉檔中' }).then(() => {
+  // 背景跑 ffmpeg（不 await）。用唯一 jobId 讓前端能辨識「是本次轉檔完成」而非其他工作。
+  runFF(args, { sender: e.sender, duration, jobId: jid, label: '背景轉檔中' }).then(() => {
     job.done = true;
-    try { fs.writeFileSync(metaPath, JSON.stringify({ proxy, channels, wave })); } catch (er) {}
+    writeMeta(metaPath, { proxy, channels, wave });
   }).catch(err => { job.done = true; job.error = err.message; });
 
   // 等到 proxy 檔案有足夠資料（至少 512KB）再回傳，確保 video.src 不會立刻失敗
@@ -440,7 +526,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
     await new Promise(r => setTimeout(r, 300));
   }
 
-  return { cached: false, streamUrl: `http://127.0.0.1:${port}/${jid}`, proxy, channels, wave };
+  return { cached: false, streamUrl: `http://127.0.0.1:${port}/${jid}`, proxy, channels, wave, ingestJobId: jid };
 });
 
 /* ============ mpv 媒體播放器整合（秒開非原生格式，無需等待 ffmpeg proxy 轉檔） ============

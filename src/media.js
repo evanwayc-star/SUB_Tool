@@ -20,6 +20,19 @@ const Media = {
   objectURLs:[],
   mpvMode:false, _mpvTime:0, _mpvDuration:0, _bgVersion:0,
   activeSource:null, // null=全部混音；'video'=影片原音；'ext-xxx'=外部檔案
+  pendingChannels:[], // 背景抽取音軌時的「準備中」聲道（讓混音器立即顯示推桿，逐一就緒）
+
+  // 由 ffprobe 的 audio[] 推算出每個聲道的標籤（須與 main.js ingest 的展開規則一致）
+  _expandChannels(audio){
+    const out=[];
+    (audio||[]).forEach((a,i)=>{
+      const ch=Math.max(1,a.channels||1);
+      const base=a.title||a.lang||('音軌 '+(i+1));
+      if(ch===1) out.push(base);
+      else for(let k=0;k<ch;k++) out.push(base+' · 聲道'+(k+1));
+    });
+    return out;
+  },
 
   ensureCtx(){
     if(!this.ctx){
@@ -170,46 +183,66 @@ const Media = {
     // (B) 非原生（需 proxy）或原生多音軌
     // 非原生且有 streamIngest：邊轉邊播（幾秒內可開始播放）
     if(!canNative && DESK.streamIngest){
+      const myVer=this._bgVersion; // 此次載入的版本；使用者中途換檔時用來放棄陳舊工作
       setStatus('讀取中（背景轉檔，即將可播放）…','busy');
       let res;
       try{ res=await DESK.streamIngest({ path:p, duration:dur, audio }); }
       catch(e){ console.error(e); showToast('讀取失敗：'+e.message); setStatus('讀取失敗',''); return; }
+      if(this._bgVersion!==myVer) return; // 已換檔
       if(res.cached) setStatus('使用既有快取，秒開…','ok');
 
       video.src=res.streamUrl;
       await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,15000);});
+      if(this._bgVersion!==myVer) return;
       State.duration=video.duration||dur||0;
       video.muted=true;
       this.activeSource='video';
+      // 混音器立即顯示「準備中」推桿
+      this.pendingChannels=this._expandChannels(audio).map(label=>({label,ready:false}));
       this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
       Wave.initLive(); onDurationKnown();
 
       // 載入音軌+波形的共用函式（快取立即執行，非快取等轉檔完成後執行）
       const self=this;
       const loadTracksAndWave=async(r)=>{
+        if(self._bgVersion!==myVer) return;
         const chs=r.channels||[];
-        for(let i=0;i<chs.length;i++){
-          setStatus(`載入聲道 ${i+1}/${chs.length}…`,'busy');
-          const el=new Audio(); el.src=await DESK.fileURL(chs[i].file); el.preload='auto';
-          await new Promise(r2=>{el.onloadedmetadata=r2; if(el.readyState>=1)r2(); setTimeout(r2,10000);});
-          const node=self.ctx.createMediaElementSource(el);
-          const g=self.ctx.createGain(); node.connect(g); g.connect(self.master);
-          const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
-          self.attachMeter(tr,node); self.tracks.push(tr);
-        }
+        try{
+          for(let i=0;i<chs.length;i++){
+            setStatus(`載入聲道 ${i+1}/${chs.length}…`,'busy');
+            const el=new Audio(); el.src=await DESK.fileURL(chs[i].file); el.preload='auto';
+            await new Promise(r2=>{el.onloadedmetadata=r2; if(el.readyState>=1)r2(); setTimeout(r2,10000);});
+            if(self._bgVersion!==myVer) return;
+            const node=self.ctx.createMediaElementSource(el);
+            const g=self.ctx.createGain(); node.connect(g); g.connect(self.master);
+            const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+            self.attachMeter(tr,node); self.tracks.push(tr);
+            if(self.pendingChannels[i]) self.pendingChannels[i].ready=true;
+            self.syncMuteState(); renderAudioTracks();
+          }
+        }finally{ if(self._bgVersion===myVer){ self.pendingChannels=[]; renderAudioTracks(); } }
+        if(self._bgVersion!==myVer) return;
         self.syncMuteState(); renderAudioTracks();
         if(r.wave){
-          try{ const b64=await DESK.readB64(r.wave); if(b64){ const ab=await self.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); } else Wave.initLive(); }
-          catch(e2){ console.warn('wave',e2); Wave.initLive(); }
+          try{ const b64=await DESK.readB64(r.wave); if(b64&&self._bgVersion===myVer){ const ab=await self.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); } else if(self._bgVersion===myVer) Wave.initLive(); }
+          catch(e2){ console.warn('wave',e2); if(self._bgVersion===myVer) Wave.initLive(); }
         }
-        setStatus('媒體已載入','ok');
+        if(self._bgVersion===myVer) setStatus('媒體已載入','ok');
       };
 
       if(res.cached){
         loadTracksAndWave(res);
       } else {
         setStatus('視訊播放就緒，音軌轉檔中（背景）…','busy');
-        window.addEventListener('desk:ingest-done', ()=>loadTracksAndWave(res), {once:true});
+        // 只在「本次轉檔工作」完成時才載入；用 ingestJobId 過濾其他工作的完成事件，並在換檔時移除
+        const handler=(ev)=>{
+          if(self._bgVersion!==myVer){ window.removeEventListener('desk:ingest-done',handler); self._ingestDoneHandler=null; return; }
+          if(res.ingestJobId && ev?.detail?.jobId && ev.detail.jobId!==res.ingestJobId) return; // 非本次轉檔，忽略
+          window.removeEventListener('desk:ingest-done',handler); self._ingestDoneHandler=null;
+          loadTracksAndWave(res);
+        };
+        this._ingestDoneHandler=handler;
+        window.addEventListener('desk:ingest-done', handler);
       }
       return;
     }
@@ -328,6 +361,8 @@ const Media = {
       if(e.event==='end-file'&&this.mpvMode){ this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶'; }
     });
 
+    // 混音器立即顯示「準備中」推桿（聲道數在 ffprobe 階段就已知）
+    this.pendingChannels = this._expandChannels(audio).map(label=>({label,ready:false}));
     renderAudioTracks();
     setStatus('媒體已載入（mpv 秒開，嵌入播放）','ok');
     onDurationKnown();
@@ -345,7 +380,7 @@ const Media = {
     setStatus('背景抽取音軌中（不影響播放）…','busy');
     let res;
     try{ res=await DESK.ingest({path:p,duration:dur,needsProxy:false,audio}); }
-    catch(e){ console.warn('bg audio ingest:',e); setStatus('音軌抽取失敗：'+e.message,''); return; }
+    catch(e){ if(this._bgVersion!==myVer) return; console.warn('bg audio ingest:',e); this.pendingChannels=[]; renderAudioTracks(); setStatus('音軌抽取失敗：'+e.message,''); return; }
     if(this._bgVersion!==myVer) return; // 使用者已換另一個檔，丟棄結果
 
     const chs=res.channels||[];
@@ -358,7 +393,11 @@ const Media = {
       const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
       this.attachMeter(tr,node);
       this.tracks.push(tr);
+      if(this.pendingChannels[i]) this.pendingChannels[i].ready=true; // 此聲道已就緒，推桿亮起
+      this.usingWebAudio=true; this.syncMuteState();
+      renderAudioTracks(); // 逐一就緒、即時更新
     }
+    this.pendingChannels=[];
     this.usingWebAudio=true; this.syncMuteState();
     // element tracks 接管後，mpv 靜音（避免雙重音訊）
     if(chs.length>0) DESK.mpv.mute(true).catch(()=>{});
@@ -686,6 +725,8 @@ const Media = {
       const vs=$('videoSub'); if(vs) vs.style.display='';
     }
     this._bgVersion++; this.activeSource=null; // 讓進行中的 _bgAudioIngest 知道要放棄；清除音源選擇
+    this.pendingChannels=[];
+    if(this._ingestDoneHandler){ window.removeEventListener('desk:ingest-done',this._ingestDoneHandler); this._ingestDoneHandler=null; }
     this.stopBufferSources(); this.stopElementSources();
     for(const tr of this.tracks){ if(tr.el){try{tr.el.src='';}catch(e){}} }
     this.tracks=[]; this.usingWebAudio=false;

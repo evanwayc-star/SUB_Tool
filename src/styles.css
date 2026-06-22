@@ -332,6 +332,15 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .mx-solo,.mx-mute{font-size:10px;width:100%;height:22px;line-height:1;padding:0;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:3px;cursor:pointer;white-space:nowrap}
 .mx-solo.on{background:#caa72e;color:#000;border-color:#caa72e}
 .mx-mute.on{background:var(--red);color:#fff;border-color:var(--red)}
+/* 混音器：準備中（背景抽取音軌時）的占位推桿 */
+.mx-strip.pending{opacity:.55}
+.mx-strip.pending .mx-meter{background:var(--panel2)}
+.mx-prep{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+.mx-preplabel{font-size:9px;color:var(--text-dim);text-align:center;white-space:nowrap}
+.atrack.pending{opacity:.65}
+.atrack.pending .prep{margin-left:auto;font-size:11px;color:var(--text-dim);display:flex;align-items:center;gap:5px;white-space:nowrap}
+.spin{display:inline-block;width:10px;height:10px;border:2px solid var(--text-dim);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 /* 時間軸工具列：選取狀態資訊 */
 .tl-sel-info{font-size:11px;color:var(--text-dim);padding:2px 7px;white-space:nowrap;border-radius:4px;transition:background .15s}
 .tl-sel-info.sel-none{background:rgba(150,150,150,.15)}
