@@ -16,7 +16,6 @@ function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
 function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
 function yToTrack(y){ let c=0; for(let i=0;i<State.trackCount;i++){ c+=trackH(i); if(y<c)return i; } return State.trackCount-1; }
 function tracksTop(){return RULER_H+waveH();}
-let trackRowH=()=>ROW_H;
 function tracksScrollTop(){ return tlTracks?tlTracks.scrollTop:0; }
 
 function viewportW(){return tlScroll.clientWidth;}
@@ -224,8 +223,11 @@ function _onTrackDragUp(){
 /* 軌道/波形高度拖曳縮放 */
 let _rowResize=null;
 function _doResize(type,tk){
+  // .cue-block uses top:4px;bottom:4px, .cue-overlap uses top:0;bottom:0 →
+  // both auto-scale with row height via CSS — no renderCueBlocks() needed during drag.
+  // Playhead is left-positioned, unaffected by height changes.
   if(type==='wave'){
-    const wh=waveH(),vw=viewportW();
+    const wh=waveH();
     const gutWave=document.querySelector('.tl-gutter-wave');
     if(gutWave)gutWave.style.height=wh+'px';
     waveCv.height=wh*devicePixelRatio; waveCv.style.height=wh+'px';
@@ -236,7 +238,6 @@ function _doResize(type,tk){
     const rows=tlTracks.querySelectorAll('.tl-track'); if(rows[tk])rows[tk].style.height=h+'px';
     const gRows=$('tlGutterTracks')?.querySelectorAll('.tl-gtrack'); if(gRows&&gRows[tk])gRows[tk].style.height=h+'px';
   }
-  renderCueBlocks(); updatePlayhead();
 }
 function _onRowResizeMove(e){
   if(!_rowResize)return;
@@ -244,7 +245,9 @@ function _onRowResizeMove(e){
   const dy=e.clientY-startY;
   if(type==='wave')State.waveH=Math.max(24,startH+dy);
   else if(State.tracks[tk])State.tracks[tk].height=Math.max(20,startH+dy);
-  _doResize(type,tk);
+  if(!_rowResize._raf){
+    _rowResize._raf=requestAnimationFrame(()=>{ _rowResize&&(_rowResize._raf=null); _doResize(type,tk); });
+  }
 }
 function _onRowResizeUp(){
   document.removeEventListener('mousemove',_onRowResizeMove);
@@ -535,7 +538,7 @@ tlScroll.addEventListener('wheel',e=>{
   }
 },{passive:false});
 
-export { RULER_H, WAVE_H, ROW_H, tracksTop, trackRowH, tracksScrollTop, viewportW, timeToX, xToTime,
+export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
   addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit,
   refreshTrackGutterActive };

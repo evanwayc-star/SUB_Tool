@@ -190,10 +190,10 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .tl-gtrack.hidden-tk .gname{opacity:.45;text-decoration:line-through}
 .tl-gtrack .gname{flex:1;font-size:11px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 3px}
 .tl-gtrack .gname:focus{outline:none;border-color:var(--accent);background:var(--panel)}
-.tl-gtrack .gdel{cursor:pointer;color:var(--text-faint);background:none;border:none;font-size:13px;padding:0 2px;opacity:0}
+.tl-gtrack .gdel{cursor:pointer;color:var(--text-faint);background:none;border:none;font-size:13px;padding:0 2px;opacity:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .gdel{opacity:.8}
 .tl-gtrack .gdel:hover{color:var(--red)}
-.tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0}
+.tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .glock{opacity:.8}
 .tl-gtrack .glock.locked{color:var(--accent);opacity:1}
 .tl-gtrack.tl-active{background:rgba(100,200,120,.18)}

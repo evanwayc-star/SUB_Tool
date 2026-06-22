@@ -208,17 +208,26 @@ const Media = {
         if(self._bgVersion!==myVer) return;
         const chs=r.channels||[];
         try{
-          for(let i=0;i<chs.length;i++){
-            setStatus(`載入聲道 ${i+1}/${chs.length}…`,'busy');
-            const el=new Audio(); el.src=await DESK.fileURL(chs[i].file); el.preload='auto';
-            await new Promise(r2=>{el.onloadedmetadata=r2; if(el.readyState>=1)r2(); setTimeout(r2,10000);});
+          if(chs.length){
+            setStatus(`載入 ${chs.length} 條聲道…`,'busy');
+            // 並行取得所有聲道的 file URL + 等待 metadata（避免 N 次序列 await）
+            const els=await Promise.all(chs.map(ch=>
+              DESK.fileURL(ch.file).then(url=>new Promise(res=>{
+                const el=new Audio(); el.src=url; el.preload='auto';
+                el.onloadedmetadata=()=>res(el); if(el.readyState>=1)res(el);
+                setTimeout(()=>res(el),10000);
+              }))
+            ));
             if(self._bgVersion!==myVer) return;
-            const node=self.ctx.createMediaElementSource(el);
-            const g=self.ctx.createGain(); node.connect(g); g.connect(self.master);
-            const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
-            self.attachMeter(tr,node); self.tracks.push(tr);
-            if(self.pendingChannels[i]) self.pendingChannels[i].ready=true;
-            self.syncMuteState(); renderAudioTracks();
+            for(let i=0;i<chs.length;i++){
+              const el=els[i]; if(!el) continue;
+              const node=self.ctx.createMediaElementSource(el);
+              const g=self.ctx.createGain(); node.connect(g); g.connect(self.master);
+              const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+              self.attachMeter(tr,node); self.tracks.push(tr);
+              if(self.pendingChannels[i]) self.pendingChannels[i].ready=true;
+              self.syncMuteState(); renderAudioTracks();
+            }
           }
         }finally{ if(self._bgVersion===myVer){ self.pendingChannels=[]; renderAudioTracks(); } }
         if(self._bgVersion!==myVer) return;
@@ -260,15 +269,22 @@ const Media = {
     video.muted=true;
 
     const chs=res.channels||[];
-    for(let i=0;i<chs.length;i++){
-      setStatus(`載入聲道 ${i+1}/${chs.length}…`,'busy');
-      const el=new Audio(); el.src=await DESK.fileURL(chs[i].file); el.preload='auto';
-      await new Promise(r=>{el.onloadedmetadata=r; if(el.readyState>=1)r(); setTimeout(r,10000);});
-      const node=this.ctx.createMediaElementSource(el);
-      const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-      const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
-      this.attachMeter(tr,node);
-      this.tracks.push(tr);
+    if(chs.length){
+      setStatus(`載入 ${chs.length} 條聲道…`,'busy');
+      const els=await Promise.all(chs.map(ch=>
+        DESK.fileURL(ch.file).then(url=>new Promise(r=>{
+          const el=new Audio(); el.src=url; el.preload='auto';
+          el.onloadedmetadata=()=>r(el); if(el.readyState>=1)r(el);
+          setTimeout(()=>r(el),10000);
+        }))
+      ));
+      for(let i=0;i<chs.length;i++){
+        const el=els[i]; if(!el) continue;
+        const node=this.ctx.createMediaElementSource(el);
+        const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
+        const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+        this.attachMeter(tr,node); this.tracks.push(tr);
+      }
     }
     this.activeSource='video';
     this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
@@ -384,18 +400,26 @@ const Media = {
     if(this._bgVersion!==myVer) return; // 使用者已換另一個檔，丟棄結果
 
     const chs=res.channels||[];
-    for(let i=0;i<chs.length;i++){
-      const el=new Audio(); el.src=await DESK.fileURL(chs[i].file); el.preload='auto';
-      await new Promise(r=>{el.onloadedmetadata=r;if(el.readyState>=1)r();setTimeout(r,10000);});
+    if(chs.length){
+      // 並行載入所有聲道，大幅縮短多聲道（8ch MXF 等）的等待時間
+      const els=await Promise.all(chs.map(ch=>
+        DESK.fileURL(ch.file).then(url=>new Promise(r=>{
+          const el=new Audio(); el.src=url; el.preload='auto';
+          el.onloadedmetadata=()=>r(el); if(el.readyState>=1)r(el);
+          setTimeout(()=>r(el),10000);
+        }))
+      ));
       if(this._bgVersion!==myVer) return;
-      const node=this.ctx.createMediaElementSource(el);
-      const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-      const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
-      this.attachMeter(tr,node);
-      this.tracks.push(tr);
-      if(this.pendingChannels[i]) this.pendingChannels[i].ready=true; // 此聲道已就緒，推桿亮起
-      this.usingWebAudio=true; this.syncMuteState();
-      renderAudioTracks(); // 逐一就緒、即時更新
+      for(let i=0;i<chs.length;i++){
+        const el=els[i]; if(!el) continue;
+        const node=this.ctx.createMediaElementSource(el);
+        const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
+        const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+        this.attachMeter(tr,node); this.tracks.push(tr);
+        if(this.pendingChannels[i]) this.pendingChannels[i].ready=true;
+        this.usingWebAudio=true; this.syncMuteState();
+        renderAudioTracks();
+      }
     }
     this.pendingChannels=[];
     this.usingWebAudio=true; this.syncMuteState();
