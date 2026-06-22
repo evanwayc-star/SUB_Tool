@@ -17,9 +17,13 @@ const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
 
-/* ---- 偵測 ffmpeg / ffprobe ---- */
+/* ---- 偵測 ffmpeg / ffprobe（優先使用內建版本，fallback 系統安裝） ---- */
 function detect(bin, extra) {
-  const cands = [process.env[bin.toUpperCase() + '_PATH'], bin,
+  const bundled = [
+    path.join(__dirname, 'ffmpeg', `${bin}.exe`),
+    path.join(process.resourcesPath || '', 'app.asar.unpacked', 'electron', 'ffmpeg', `${bin}.exe`),
+  ];
+  const cands = [...bundled, process.env[bin.toUpperCase() + '_PATH'], bin,
     `C:\\Program Files\\FFMPEG\\bin\\${bin}.exe`,
     `C:\\Program Files\\ffmpeg\\bin\\${bin}.exe`,
     `C:\\ffmpeg\\bin\\${bin}.exe`].concat(extra || []);
