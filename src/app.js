@@ -1158,6 +1158,7 @@ function initExtras(){
   $('durAdjTcInput')?.addEventListener('keydown',e=>e.stopPropagation());
   $('durAdjPctInput')?.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();applyDurAdjPct();} });
   $('durAdjMode')?.addEventListener('keydown',e=>e.stopPropagation());
+  $('waveSrcSel')?.addEventListener('change',e=>{ Wave.selectSource(+e.target.value); e.target.blur(); });
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
   $('tcCur').addEventListener('contextmenu',e=>{ e.preventDefault();
     try{ navigator.clipboard.writeText(secToEncore(Media.vTime(),State.fps)); showToast('已複製時間碼'); }catch(err){} });

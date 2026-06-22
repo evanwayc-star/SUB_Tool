@@ -224,7 +224,7 @@ const Media = {
         if(self._bgVersion!==myVer) return;
         self.syncMuteState(); renderAudioTracks();
         if(r.wave){
-          try{ const b64=await DESK.readB64(r.wave); if(b64&&self._bgVersion===myVer){ const ab=await self.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); } else if(self._bgVersion===myVer) Wave.initLive(); }
+          try{ const b64=await DESK.readB64(r.wave); if(b64&&self._bgVersion===myVer){ const ab=await self.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); Wave.registerSources(r.wave,chs); drawTimeline(); } else if(self._bgVersion===myVer) Wave.initLive(); }
           catch(e2){ console.warn('wave',e2); if(self._bgVersion===myVer) Wave.initLive(); }
         }
         if(self._bgVersion===myVer) setStatus('媒體已載入','ok');
@@ -274,7 +274,7 @@ const Media = {
     this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
 
     if(res.wave){
-      try{ const b64=await DESK.readB64(res.wave); if(b64){ const ab=await this.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); } else Wave.initLive(); }
+      try{ const b64=await DESK.readB64(res.wave); if(b64){ const ab=await this.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); Wave.registerSources(res.wave,chs); drawTimeline(); } else Wave.initLive(); }
       catch(e){ console.warn('wave',e); Wave.initLive(); }
     } else Wave.initLive();
 
@@ -409,7 +409,7 @@ const Media = {
         const b64=await DESK.readB64(res.wave);
         if(b64&&this._bgVersion===myVer){
           const ab=await this.ctx.decodeAudioData(b64ToBytes(b64).buffer);
-          Wave.live=false; Wave.compute(ab); drawTimeline();
+          Wave.live=false; Wave.compute(ab); Wave.registerSources(res.wave,chs); drawTimeline();
         }
       }catch(e){}
     }
@@ -733,6 +733,7 @@ const Media = {
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
     this.objectURLs.forEach(u=>{try{URL.revokeObjectURL(u);}catch(e){}}); this.objectURLs=[];
     State.duration=0;
+    Wave.live=false; Wave.peaks=null; Wave.clearSources();
   }
 };
 const FFMPEG_MAX_BYTES = 1.6e9; // 超過此大小不送 ffmpeg.wasm
@@ -759,6 +760,46 @@ async function canPlayNatively(file,vid){
 const Wave = {
   peaks:null,        // Float32Array [min0,max0,min1,max1,...]
   resolution:100,    // 每秒桶數
+
+  /* --- 多音源選擇（主混音 / 各聲道） --- */
+  sources:[],   // [{label, path, peaks}]
+  srcIdx:-1,
+
+  registerSources(wavePath, channels){
+    this.sources=[];
+    if(wavePath) this.sources.push({label:'主混音',path:wavePath,peaks:this.peaks});
+    (channels||[]).forEach((ch,i)=>{
+      this.sources.push({label:ch.label||('聲道 '+(i+1)),path:ch.file,peaks:null});
+    });
+    this.srcIdx=0;
+    this._renderSrcSel();
+  },
+  async selectSource(idx){
+    if(idx<0||idx>=this.sources.length) return;
+    this.srcIdx=idx;
+    const src=this.sources[idx];
+    if(src.peaks){ this.peaks=src.peaks; drawTimeline(); return; }
+    if(!DESK||!Media.ctx) return;
+    try{
+      const b64=await DESK.readB64(src.path);
+      if(!b64) return;
+      const ab=await Media.ctx.decodeAudioData(b64ToBytes(b64).buffer);
+      this.live=false; this.compute(ab);
+      src.peaks=this.peaks;
+      drawTimeline();
+    }catch(e){ console.warn('wave selectSource',e); }
+  },
+  clearSources(){
+    this.sources=[]; this.srcIdx=-1; this._renderSrcSel();
+  },
+  _renderSrcSel(){
+    const sel=$('waveSrcSel'); if(!sel) return;
+    const show=this.sources.length>1;
+    sel.innerHTML=this.sources.map((s,i)=>`<option value="${i}">${s.label}</option>`).join('');
+    sel.value=String(Math.max(0,this.srcIdx));
+    sel.style.display=show?'':'none';
+  },
+
   async fromFile(file){
     Media.ensureCtx();
     const buf=await readFile(file);
@@ -771,7 +812,9 @@ const Wave = {
   live:false,
   initLive(){ // 為長片配置空波形，播放時逐桶填入
     const len=Math.ceil(Math.max(State.duration,1)*this.resolution);
-    this.peaks=new Float32Array(len*2); this.live=true; drawTimeline();
+    this.peaks=new Float32Array(len*2); this.live=true;
+    this.clearSources();
+    drawTimeline();
     $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
   },
   captureLive(){ // 由 rafLoop 於播放時呼叫

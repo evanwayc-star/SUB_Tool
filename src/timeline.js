@@ -10,8 +10,12 @@ import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
 
 /* ===== 5. 時間軸 ====================================================== */
-const RULER_H=24, WAVE_H=48, ROW_H=40;
-function tracksTop(){return RULER_H+WAVE_H;}
+const RULER_H=24, WAVE_H=48, ROW_H=40;  // default/min values; actual stored in State
+function waveH(){ return State.waveH||WAVE_H; }
+function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
+function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
+function yToTrack(y){ let c=0; for(let i=0;i<State.trackCount;i++){ c+=trackH(i); if(y<c)return i; } return State.trackCount-1; }
+function tracksTop(){return RULER_H+waveH();}
 let trackRowH=()=>ROW_H;
 function tracksScrollTop(){ return tlTracks?tlTracks.scrollTop:0; }
 
@@ -31,9 +35,12 @@ function layoutTimeline(){
   tlLayer.style.width=vw+'px';
   rulerCv.width=vw*devicePixelRatio; rulerCv.height=RULER_H*devicePixelRatio;
   rulerCv.style.width=vw+'px'; rulerCv.style.height=RULER_H+'px';
-  waveCv.width=vw*devicePixelRatio; waveCv.height=WAVE_H*devicePixelRatio;
-  waveCv.style.width=vw+'px'; waveCv.style.height=WAVE_H+'px'; waveCv.style.top=RULER_H+'px';
+  const wh=waveH();
+  waveCv.width=vw*devicePixelRatio; waveCv.height=wh*devicePixelRatio;
+  waveCv.style.width=vw+'px'; waveCv.style.height=wh+'px'; waveCv.style.top=RULER_H+'px';
   tlTracks.style.top=tracksTop()+'px';
+  const gutWave=document.querySelector('.tl-gutter-wave');
+  if(gutWave) gutWave.style.height=wh+'px';
 }
 function drawRuler(){
   const ctx=rulerCv.getContext('2d'); const dpr=devicePixelRatio;
@@ -107,11 +114,11 @@ function renderTrackRows(){
   for(let tk=0;tk<State.trackCount;tk++){
     const vis=trackVisible(tk);
     const row=document.createElement('div');
-    row.className='tl-track'+(vis?'':' hidden-tk')+(tk===State.listTrack?' tl-active':''); row.style.height=ROW_H+'px'; row.dataset.track=tk;
+    row.className='tl-track'+(vis?'':' hidden-tk')+(tk===State.listTrack?' tl-active':''); row.style.height=trackH(tk)+'px'; row.dataset.track=tk;
     tlTracks.appendChild(row);
     if(gut){
       const g=document.createElement('div');
-      g.className='tl-gtrack'+(vis?'':' hidden-tk')+(tk===State.listTrack?' tl-active':''); g.style.height=ROW_H+'px'; g.dataset.track=tk;
+      g.className='tl-gtrack'+(vis?'':' hidden-tk')+(tk===State.listTrack?' tl-active':''); g.style.height=trackH(tk)+'px'; g.dataset.track=tk;
       const isLocked=!!State.tracks[tk].locked;
       g.innerHTML=`<span class="drag-handle" title="拖曳重排">⠿</span>`+
         `<button class="eye" title="顯示/隱藏此軌">${vis?'👁':'🙈'}</button>`+
@@ -140,6 +147,21 @@ function renderTrackRows(){
       nm.onblur=()=>{ nm.contentEditable='false'; State.tracks[tk].name=nm.innerText.trim()||('軌道 '+(tk+1)); renderListTrackSel(); };
       g.querySelector('.glock').onclick=(e)=>{e.stopPropagation();State.tracks[tk].locked=!State.tracks[tk].locked;renderTrackRows();};
       g.querySelector('.gdel').onclick=(e)=>{e.stopPropagation();removeTrack(tk);};
+      // 高度縮放把手
+      const resH=document.createElement('div');
+      resH.className='tl-resize-handle';
+      resH.addEventListener('mousedown',e=>{
+        e.preventDefault();e.stopPropagation();
+        _rowResize={type:'track',tk,startY:e.clientY,startH:trackH(tk)};
+        document.addEventListener('mousemove',_onRowResizeMove);
+        document.addEventListener('mouseup',_onRowResizeUp,{once:true});
+      });
+      resH.addEventListener('dblclick',e=>{
+        e.preventDefault();e.stopPropagation();
+        if(State.tracks[tk])State.tracks[tk].height=ROW_H;
+        drawTimeline();
+      });
+      g.appendChild(resH);
       // 拖曳重排
       g.querySelector('.drag-handle').addEventListener('mousedown',e=>{
         e.preventDefault(); e.stopPropagation();
@@ -171,7 +193,7 @@ function _onTrackDragMove(e){
   const gut=_trackDrag.gut;
   const gutRect=gut.getBoundingClientRect();
   const relY=e.clientY-gutRect.top;
-  let targetTk=clamp(Math.floor(relY/ROW_H),0,State.trackCount-1);
+  let targetTk=clamp(yToTrack(relY),0,State.trackCount-1);
   gut.querySelectorAll('.tl-gtrack').forEach((g,i)=>{
     g.classList.toggle('tl-drag-target',i===targetTk&&i!==_trackDrag.fromTk);
   });
@@ -198,6 +220,51 @@ function _onTrackDragUp(){
     syncTrackCount(); recordHistory('軌道重排'); renderAll(); renderListTrackSel();
   }
 }
+
+/* 軌道/波形高度拖曳縮放 */
+let _rowResize=null;
+function _doResize(type,tk){
+  if(type==='wave'){
+    const wh=waveH(),vw=viewportW();
+    const gutWave=document.querySelector('.tl-gutter-wave');
+    if(gutWave)gutWave.style.height=wh+'px';
+    waveCv.height=wh*devicePixelRatio; waveCv.style.height=wh+'px';
+    tlTracks.style.top=tracksTop()+'px';
+    drawWave();
+  }else{
+    const h=trackH(tk);
+    const rows=tlTracks.querySelectorAll('.tl-track'); if(rows[tk])rows[tk].style.height=h+'px';
+    const gRows=$('tlGutterTracks')?.querySelectorAll('.tl-gtrack'); if(gRows&&gRows[tk])gRows[tk].style.height=h+'px';
+  }
+  renderCueBlocks(); updatePlayhead();
+}
+function _onRowResizeMove(e){
+  if(!_rowResize)return;
+  const {type,tk,startY,startH}=_rowResize;
+  const dy=e.clientY-startY;
+  if(type==='wave')State.waveH=Math.max(24,startH+dy);
+  else if(State.tracks[tk])State.tracks[tk].height=Math.max(20,startH+dy);
+  _doResize(type,tk);
+}
+function _onRowResizeUp(){
+  document.removeEventListener('mousemove',_onRowResizeMove);
+  _rowResize=null;
+  drawTimeline();
+}
+// 波形列 resize handle（一次性）
+(()=>{
+  const gutWave=document.querySelector('.tl-gutter-wave'); if(!gutWave)return;
+  const h=document.createElement('div');
+  h.className='tl-resize-handle';
+  h.addEventListener('mousedown',e=>{
+    e.preventDefault();e.stopPropagation();
+    _rowResize={type:'wave',tk:-1,startY:e.clientY,startH:waveH()};
+    document.addEventListener('mousemove',_onRowResizeMove);
+    document.addEventListener('mouseup',_onRowResizeUp,{once:true});
+  });
+  h.addEventListener('dblclick',e=>{ e.preventDefault();e.stopPropagation(); State.waveH=WAVE_H; drawTimeline(); });
+  gutWave.appendChild(h);
+})();
 
 function renderCueBlocks(){
   tlTracks.querySelectorAll('.cue-block,.cue-overlap').forEach(e=>e.remove());
@@ -237,7 +304,7 @@ function renderCueBlocks(){
 function trackFromY(clientY){
   const rect=tlLayer.getBoundingClientRect();
   const y=clientY-rect.top-tracksTop()+tracksScrollTop();
-  return clamp(Math.floor(y/ROW_H),0,State.trackCount-1);
+  return yToTrack(Math.max(0,y));
 }
 function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); renderListTrackSel(); recordHistory('新增軌道'); }
 function removeTrack(i){
@@ -438,9 +505,9 @@ window.addEventListener('mouseup',e=>{
     if(drag.moved){
       const x1=clamp(e.clientX-rect.left,0,viewportW()), y1=e.clientY-rect.top;
       const ta=xToTime(Math.min(drag.x0,x1)), tb=xToTime(Math.max(drag.x0,x1));
-      const rh=trackRowH(), sc=tracksScrollTop();
-      const rowA=clamp(Math.floor((Math.min(drag.y0,y1)-tracksTop()+sc)/rh),0,State.trackCount-1);
-      const rowB=clamp(Math.floor((Math.max(drag.y0,y1)-tracksTop()+sc)/rh),0,State.trackCount-1);
+      const sc=tracksScrollTop();
+      const rowA=yToTrack(Math.max(0,Math.min(drag.y0,y1)-tracksTop()+sc));
+      const rowB=yToTrack(Math.max(0,Math.max(drag.y0,y1)-tracksTop()+sc));
       const hit=State.cues.filter(c=>c.timed!==false&&(c.track||0)>=rowA&&(c.track||0)<=rowB&&c.end>=ta&&c.start<=tb).map(c=>c.id);
       if(drag.additive){ for(const id of hit)if(!State.selectedIds.includes(id))State.selectedIds.push(id); }
       else State.selectedIds=hit;

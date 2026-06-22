@@ -67,12 +67,19 @@ function vencArgs() {
   }
 }
 
-/* ---- 媒體快取鍵：來源路徑 + 修改時間 + 大小（內容變了就重轉） ---- */
-/* 快取金鑰：以「檔名 + 大小 + 修改時間(秒)」計算，刻意不含完整路徑，
-   讓同一個檔案在不同電腦（不同磁碟代號 / 掛載點）也能算出相同金鑰、共用快取。 */
+/* ---- 媒體快取鍵：檔名 + 大小 + 前 1MB 內容雜湊（不含修改時間，跨電腦可共用快取） ---- */
 function cacheKeyFor(src) {
-  try { const s = fs.statSync(src); return crypto.createHash('sha1').update(path.basename(src) + '|' + s.size + '|' + Math.floor(s.mtimeMs / 1000)).digest('hex').slice(0, 16); }
-  catch (e) { return crypto.createHash('sha1').update(path.basename(String(src))).digest('hex').slice(0, 16); }
+  try {
+    const s = fs.statSync(src);
+    const readLen = Math.min(1024 * 1024, s.size);
+    const h = crypto.createHash('sha1').update(path.basename(src) + '|' + s.size + '|');
+    if (readLen > 0) {
+      const fd = fs.openSync(src, 'r');
+      try { const buf = Buffer.alloc(readLen); fs.readSync(fd, buf, 0, readLen, 0); h.update(buf); }
+      finally { fs.closeSync(fd); }
+    }
+    return h.digest('hex').slice(0, 16);
+  } catch (e) { return crypto.createHash('sha1').update(path.basename(String(src))).digest('hex').slice(0, 16); }
 }
 /* 候選快取目錄：優先放在影片旁的 .cache/<金鑰>（可隨檔案被其他電腦讀取），
    其次才用 userData/mediacache。讀取時依序找第一個有效的；寫入時找第一個可寫的。 */

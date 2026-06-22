@@ -180,7 +180,10 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .tl-body{flex:1;display:flex;min-height:0}
 .tl-gutter{width:138px;flex-shrink:0;background:var(--panel2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
 .tl-gutter-head{height:24px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 8px;font-size:10px;color:var(--text-faint)}
-.tl-gutter-wave{height:48px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 8px;font-size:10px;color:var(--text-faint)}
+.tl-gutter-wave{height:48px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 8px;gap:5px;font-size:10px;color:var(--text-faint);position:relative}
+.tl-gutter-wave select{margin-left:auto;font-size:10px;padding:1px 2px;height:20px;max-width:90px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:3px;cursor:pointer}
+.tl-resize-handle{position:absolute;bottom:0;left:0;right:0;height:4px;cursor:ns-resize;z-index:10}
+.tl-resize-handle:hover,.tl-resize-handle:active{background:rgba(100,120,255,.35)}
 #tlGutterTracks{flex:1;overflow-y:auto;overflow-x:hidden}
 .tl-gtrack{display:flex;align-items:center;gap:4px;padding:0 6px;border-bottom:1px solid #26262b;position:relative}
 .tl-gtrack .eye{cursor:pointer;font-size:14px;width:22px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
