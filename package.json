@@ -18,6 +18,9 @@
       "dist/**/*",
       "electron/**/*"
     ],
+    "asarUnpack": [
+      "electron/mpv/**"
+    ],
     "win": {
       "target": "portable"
     }

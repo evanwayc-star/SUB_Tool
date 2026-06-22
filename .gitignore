@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .claude/
+electron/mpv/
 _backup_index_monolith.html
 影音檔案樣本/
 *.mxf

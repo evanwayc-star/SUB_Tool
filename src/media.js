@@ -3,7 +3,7 @@ import { State, DESK, setFps } from './state.js';
 import { secToEncore } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName } from './util.js';
-import { setStatus, showToast, openModal, onDurationKnown, renderAudioTracks, detectFpsWeb } from './app.js';
+import { setStatus, showToast, openModal, onDurationKnown, renderAudioTracks, detectFpsWeb, refreshMpvSubs } from './app.js';
 import { drawTimeline, updatePlayhead } from './timeline.js';
 
 /* ===== 3. 媒體引擎 ==================================================== */
@@ -167,7 +167,54 @@ const Media = {
       setStatus('媒體已載入（桌面模式，原生直讀）','ok'); onDurationKnown(); return;
     }
 
-    // (B) 非原生（需 proxy）或原生多音軌：單次讀取 ingest（整檔只讀一遍 → proxy + 每聲道 + 波形）
+    // (B) 非原生（需 proxy）或原生多音軌
+    // 非原生且有 streamIngest：邊轉邊播（幾秒內可開始播放）
+    if(!canNative && DESK.streamIngest){
+      setStatus('讀取中（背景轉檔，即將可播放）…','busy');
+      let res;
+      try{ res=await DESK.streamIngest({ path:p, duration:dur, audio }); }
+      catch(e){ console.error(e); showToast('讀取失敗：'+e.message); setStatus('讀取失敗',''); return; }
+      if(res.cached) setStatus('使用既有快取，秒開…','ok');
+
+      video.src=res.streamUrl;
+      await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,15000);});
+      State.duration=video.duration||dur||0;
+      video.muted=true;
+      this.activeSource='video';
+      this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
+      Wave.initLive(); onDurationKnown();
+
+      // 載入音軌+波形的共用函式（快取立即執行，非快取等轉檔完成後執行）
+      const self=this;
+      const loadTracksAndWave=async(r)=>{
+        const chs=r.channels||[];
+        for(let i=0;i<chs.length;i++){
+          setStatus(`載入聲道 ${i+1}/${chs.length}…`,'busy');
+          const el=new Audio(); el.src=await DESK.fileURL(chs[i].file); el.preload='auto';
+          await new Promise(r2=>{el.onloadedmetadata=r2; if(el.readyState>=1)r2(); setTimeout(r2,10000);});
+          const node=self.ctx.createMediaElementSource(el);
+          const g=self.ctx.createGain(); node.connect(g); g.connect(self.master);
+          const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+          self.attachMeter(tr,node); self.tracks.push(tr);
+        }
+        self.syncMuteState(); renderAudioTracks();
+        if(r.wave){
+          try{ const b64=await DESK.readB64(r.wave); if(b64){ const ab=await self.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); } else Wave.initLive(); }
+          catch(e2){ console.warn('wave',e2); Wave.initLive(); }
+        }
+        setStatus('媒體已載入','ok');
+      };
+
+      if(res.cached){
+        loadTracksAndWave(res);
+      } else {
+        setStatus('視訊播放就緒，音軌轉檔中（背景）…','busy');
+        window.addEventListener('desk:ingest-done', ()=>loadTracksAndWave(res), {once:true});
+      }
+      return;
+    }
+
+    // (B2) 原生多音軌 或 無 streamIngest 時的原有路徑
     setStatus(canNative?'抽取多音軌（單次讀取）…':'讀取並轉檔中（單次讀取，大檔需數分鐘）…','busy');
     let res;
     try{ res=await DESK.ingest({ path:p, duration:dur, needsProxy:!canNative, audio }); }
@@ -179,7 +226,6 @@ const Media = {
     State.duration=video.duration||dur||0;
     video.muted=true;
 
-    // 每聲道 → 各自一個 <audio> element 音軌 + 電平表 analyser
     const chs=res.channels||[];
     for(let i=0;i<chs.length;i++){
       setStatus(`載入聲道 ${i+1}/${chs.length}…`,'busy');
@@ -194,7 +240,6 @@ const Media = {
     this.activeSource='video';
     this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
 
-    // 波形：用 ingest 產生的 8kHz 混音 wav
     if(res.wave){
       try{ const b64=await DESK.readB64(res.wave); if(b64){ const ab=await this.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); } else Wave.initLive(); }
       catch(e){ console.warn('wave',e); Wave.initLive(); }
@@ -228,31 +273,37 @@ const Media = {
   },
 
   /* --- mpv 即時開啟路徑（偵測到 mpv.exe 時使用，無需等 proxy 轉檔） --- */
+  _mpvRect(){ const vw=$('videoWrap'); const r=vw.getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height}; },
+  _startMpvBoundsFeeder(){
+    const send=()=>{ if(!this.mpvMode||!DESK?.mpv)return; DESK.mpv.setBounds(this._mpvRect()).catch(()=>{}); };
+    this._mpvBoundsSend=send;
+    try{ this._mpvRO=new ResizeObserver(send); this._mpvRO.observe($('videoWrap')); }catch(e){}
+    window.addEventListener('resize',send);
+    this._mpvBoundsTimer=setInterval(send,500); // 安全網：面板拖移/版面位移
+  },
+  _stopMpvBoundsFeeder(){
+    if(this._mpvRO){ try{this._mpvRO.disconnect();}catch(e){} this._mpvRO=null; }
+    if(this._mpvBoundsSend){ window.removeEventListener('resize',this._mpvBoundsSend); this._mpvBoundsSend=null; }
+    if(this._mpvBoundsTimer){ clearInterval(this._mpvBoundsTimer); this._mpvBoundsTimer=null; }
+  },
   async _loadViaMpv(p, info){
     const dur=info?.duration||0;
     const audio=info?.audio||[];
     setStatus('啟動 mpv（秒開）…','busy');
+    // 影片區清空為黑底，mpv 覆蓋視窗會貼合在此
+    $('noVideo').style.display='none';
+    video.style.display='none';
+    $('videoSub').style.display='none'; // 字幕改由 mpv/libass 渲染
     let res;
-    try{ res=await DESK.mpv.launch({src:p}); }
-    catch(e){ showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); return; }
+    try{ res=await DESK.mpv.launch({src:p, bounds:this._mpvRect()}); }
+    catch(e){ showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); $('videoSub').style.display=''; video.style.display=''; return; }
     this.mpvMode=true; this._mpvTime=0;
     this._mpvDuration=res.duration||dur||0;
     State.duration=this._mpvDuration;
     if(info?.video?.fps) setFps(info.video.fps);
 
-    // 影片區改為 mpv 佔位符
-    $('noVideo').style.display='none';
-    video.style.display='none';
-    let holder=document.getElementById('mpvHolder');
-    if(!holder){
-      holder=document.createElement('div'); holder.id='mpvHolder';
-      holder.style.cssText='display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--fg2);height:100%;';
-      holder.innerHTML='<div style="font-size:2.2em;opacity:.7">▶</div>'
-        +'<div style="font-size:.9em">mpv 播放視窗已開啟</div>'
-        +'<div style="font-size:.75em;opacity:.5">請將 mpv 視窗移至此處旁邊</div>';
-      video.parentElement?.appendChild(holder);
-    }
-    holder.style.display='flex';
+    this._startMpvBoundsFeeder();
+    refreshMpvSubs(); // 把目前字幕餵給 mpv
 
     // 監聽 mpv 事件（時碼同步 / 播放狀態）
     DESK.mpv.onEvent(e=>{
@@ -278,7 +329,7 @@ const Media = {
     });
 
     renderAudioTracks();
-    setStatus('mpv 已就緒（秒開）— 已開啟 mpv 視窗','ok');
+    setStatus('媒體已載入（mpv 秒開，嵌入播放）','ok');
     onDurationKnown();
     Wave.initLive();
 
@@ -628,10 +679,11 @@ const Media = {
   },
   reset(){
     if(this.mpvMode && DESK?.mpv){
+      this._stopMpvBoundsFeeder();
       DESK.mpv.quit().catch(()=>{});
       this.mpvMode=false; this._mpvTime=0; this._mpvDuration=0;
       video.style.display='';
-      const h=document.getElementById('mpvHolder'); if(h) h.style.display='none';
+      const vs=$('videoSub'); if(vs) vs.style.display='';
     }
     this._bgVersion++; this.activeSource=null; // 讓進行中的 _bgAudioIngest 知道要放棄；清除音源選擇
     this.stopBufferSources(); this.stopElementSources();

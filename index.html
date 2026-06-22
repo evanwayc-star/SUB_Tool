@@ -89,7 +89,7 @@
         <button class="icon" data-act="add-cue-below" title="於選取字幕下方新增空白">⬇＋</button>
         <button class="icon" data-act="del-cue" title="刪除選取 (Del)">🗑</button>
         <button class="icon" data-act="fps-convert" title="FPS 時間碼轉換">⇄ FPS</button>
-        <button class="icon" data-act="shift-tc" title="時間碼位移">⟷ 位移</button>
+        <button class="icon" data-act="shift-tc" title="時間碼位移 / 調整持續時間">⟷ 調整</button>
         <button class="icon" data-act="copy-track" title="複製字幕軌道至新軌道">⧉ 複製</button>
         <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)">🔍</button>
         <button class="icon" data-act="check-panel" id="checkPanelBtn" title="字幕檢查">✓ 檢查</button>
@@ -222,22 +222,46 @@
 <!-- 混音器面板 -->
 <div class="float-panel mixer-panel" id="mixerPanel">
   <div class="fp-head"><span>🎚 混音器</span><span class="spacer"></span><button class="fp-close" data-act="close-mixer">✕</button></div>
-  <div class="fp-body"><div class="mixer-strips" id="mixerStrips"></div></div>
+  <div class="fp-body">
+    <div class="mixer-toolbar"><button class="mini" data-act="mixer-reset" title="取消所有獨奏與靜音">重製</button><button class="mini" data-act="mixer-muteall" title="將所有軌道靜音">全靜音</button></div>
+    <div class="mixer-strips" id="mixerStrips"></div>
+  </div>
 </div>
 
-<!-- 時間碼位移面板 -->
+<!-- 調整面板 -->
 <div class="float-panel" id="shiftPanel">
-  <div class="fp-head"><span>⟷ 時間碼位移</span><span class="spacer"></span><button class="fp-close" data-act="close-shift">✕</button></div>
+  <div class="fp-head"><span>⟷ 調整</span><span class="spacer"></span><button class="fp-close" data-act="close-shift">✕</button></div>
   <div class="fp-body shift-body">
     <select id="tcShiftSel">
       <option value="track">當前軌道－所有字幕</option>
       <option value="sel">當前軌道－已選擇的字幕</option>
       <option value="all">所有軌道－所有字幕</option>
     </select>
-    <div class="shift-row">
-      <input type="text" id="tcShiftInput" placeholder="00:00:02:00" title="時:分:秒:格">
-      <button class="icon" data-act="shift-back">◀ 往前</button>
-      <button class="icon" data-act="shift-fwd">往後 ▶</button>
+    <div class="shift-tabs">
+      <button class="shift-tab active" data-tab="tc">時間碼位移</button>
+      <button class="shift-tab" data-tab="dur">調整持續時間</button>
+    </div>
+    <div class="shift-page" id="shiftPageTc">
+      <div class="shift-row">
+        <input type="text" id="tcShiftInput" placeholder="00:00:02:00" title="時:分:秒:格">
+        <button class="icon" data-act="shift-back">◀ 往前</button>
+        <button class="icon" data-act="shift-fwd">往後 ▶</button>
+      </div>
+    </div>
+    <div class="shift-page" id="shiftPageDur" style="display:none">
+      <select id="durAdjMode" style="width:100%">
+        <option value="tc">增減時長（時:分:秒:格）</option>
+        <option value="pct">設為百分比</option>
+      </select>
+      <div class="shift-row" id="durAdjTcRow">
+        <input type="text" id="durAdjTcInput" placeholder="00:00:01:00" title="時:分:秒:格">
+        <button class="icon" data-act="dur-adj-sub">－</button>
+        <button class="icon" data-act="dur-adj-add">＋</button>
+      </div>
+      <div class="shift-row" id="durAdjPctRow" style="display:none">
+        <input type="number" id="durAdjPctInput" min="1" max="999" value="100" placeholder="100" style="width:66px;text-align:center"> %
+        <button class="icon" data-act="dur-adj-pct">套用</button>
+      </div>
     </div>
   </div>
 </div>

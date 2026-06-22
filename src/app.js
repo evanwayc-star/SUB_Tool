@@ -17,7 +17,7 @@ import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive } fr
 
 
 /* 提供給子模組使用的膠合函式（app.js 為協調層） */
-export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput, togglePanel, renderMixer, doAction };
+export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput, togglePanel, renderMixer, doAction, refreshMpvSubs };
 
 /* ============================================================================
    SUB TOOL — 線上上字幕工具  (single-file, vanilla JS)
@@ -49,7 +49,37 @@ export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, 
 
 
 /* ===== 9. UI 接線 / 渲染 / 初始化 ==================================== */
-function renderAll(){ renderSubList(); renderCueBlocks(); renderVideoSub(); updateTlSel(); }
+function renderAll(){ renderSubList(); renderCueBlocks(); renderVideoSub(); updateTlSel(); refreshMpvSubs(); }
+/* mpv 嵌入模式：字幕改由 mpv/libass 渲染（DOM 疊層被覆蓋）。cue 變動時重建 .ass 餵給 mpv（防抖） */
+let _mpvSubT=null;
+function refreshMpvSubs(){
+  if(!Media.mpvMode || !window.subtool?.mpv) return;
+  clearTimeout(_mpvSubT);
+  _mpvSubT=setTimeout(()=>{
+    try{ window.subtool.mpv.subSet(SubFormats.toASS(State.cues,State.fps)).catch(()=>{}); }catch(e){}
+  },150);
+}
+/* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。
+   只在浮動面板/搜尋視窗「實際重疊」影片區域時才隱藏 mpv，不重疊時影片繼續顯示。 */
+function _syncMpvPanel(){
+  if(!Media.mpvMode || !window.subtool?.mpv) return;
+  const modalOpen=!!$('modalBg')?.classList.contains('show');
+  let hides=modalOpen;
+  if(!hides){
+    const vr=$('videoWrap')?.getBoundingClientRect();
+    if(vr){
+      const ov=(r)=>!(r.right<=vr.left||r.left>=vr.right||r.bottom<=vr.top||r.top>=vr.bottom);
+      for(const p of document.querySelectorAll('.float-panel.show')){
+        if(ov(p.getBoundingClientRect())){hides=true;break;}
+      }
+      if(!hides){
+        const sd=$('searchDialog');
+        if(sd&&(sd.style.display||'none')!=='none'&&ov(sd.getBoundingClientRect()))hides=true;
+      }
+    }
+  }
+  window.subtool.mpv.show(!hides).catch(()=>{});
+}
 function renderVideoSub(){
   const t=Media.vTime();
   // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
@@ -103,16 +133,35 @@ function renderMixer(){
   wrap.innerHTML='';
   for(const tr of real){
     const strip=document.createElement('div'); strip.className='mx-strip';
+    const vol=Math.round((tr.volume==null?1:tr.volume)*100);
     strip.innerHTML=
-      `<div class="mx-meter"><div class="mx-mask"></div><div class="mx-peak"></div></div>`+
+      `<div class="mx-meter"><div class="mx-mask"></div><div class="mx-peak"></div>`+
+        `<input class="mx-fader" type="range" min="0" max="100" step="1" value="${vol}" title="音量 ${vol}%">`+
+      `</div>`+
       `<div class="mx-name" title="${escapeHTML(tr.name)}">${escapeHTML(tr.name)}</div>`+
-      `<div class="mx-btns"><button class="mx-solo${tr.solo?' on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">⊙</button><button class="mx-mute${tr.muted?' on':''}" title="${tr.muted?'取消靜音':'靜音'}">${tr.muted?'🔇':'🔊'}</button></div>`;
+      `<div class="mx-btns">`+
+        `<button class="mx-solo${tr.solo?' on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">⊙ 獨奏</button>`+
+        `<button class="mx-mute${tr.muted?' on':''}" title="${tr.muted?'取消靜音':'靜音'}">${tr.muted?'🔇':'🔊'} 靜音</button>`+
+      `</div>`;
+    const fader=strip.querySelector('.mx-fader');
+    fader.oninput=()=>{ tr.volume=(+fader.value)/100; fader.title='音量 '+fader.value+'%'; Media.applyGains(); };
+    fader.addEventListener('mousedown',e=>e.stopPropagation()); // 不要觸發面板拖移
     strip.querySelector('.mx-solo').onclick=()=>{ tr.solo=!tr.solo; Media.applyGains(); renderMixer(); renderAudioTracks(); };
     strip.querySelector('.mx-mute').onclick=()=>{ tr.muted=!tr.muted; Media.applyGains(); renderMixer(); renderAudioTracks(); };
     wrap.appendChild(strip);
     _meterStrips.push({tr, mask:strip.querySelector('.mx-mask'), peak:strip.querySelector('.mx-peak')});
   }
 }
+function _mixerTracks(){
+  const src=Media.activeSource;
+  return Media.tracks.filter(t=>{
+    if(!(t.kind==='buffer'||t.kind==='native'||t.kind==='element'))return false;
+    if(src!==null&&(t.source||'video')!==src)return false;
+    return true;
+  });
+}
+function mixerReset(){ for(const t of _mixerTracks()){ t.solo=false; t.muted=false; } Media.applyGains(); renderMixer(); renderAudioTracks(); }
+function mixerMuteAll(){ for(const t of _mixerTracks()){ t.solo=false; t.muted=true; } Media.applyGains(); renderMixer(); renderAudioTracks(); }
 function updateMeters(){
   const panel=$('mixerPanel'); if(!panel||!panel.classList.contains('show')||!_meterStrips.length)return;
   const now=performance.now();
@@ -217,8 +266,13 @@ function openModal(title,html,buttons){
     btn.onclick=b.act; foot.appendChild(btn);
   });
   $('modalBg').classList.add('show');
+  // mpv 覆蓋視窗會蓋住置中的對話框，開啟對話框時先隱藏
+  if(Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(false).catch(()=>{});
 }
-function closeModal(){ $('modalBg').classList.remove('show'); }
+function closeModal(){
+  $('modalBg').classList.remove('show');
+  if(Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(true).catch(()=>{});
+}
 $('modalBg').addEventListener('mousedown',e=>{if(e.target===$('modalBg'))closeModal();});
 $('modalBg').addEventListener('keydown',e=>{
   if(e.key==='Enter' && e.target.tagName!=='TEXTAREA'){
@@ -249,9 +303,12 @@ async function doAction(act){
     case 'exp-txt': exportSub('txt'); break;
     case 'fps-convert': showFpsConvertDialog(); break;
     case 'shift-tc': togglePanel('shiftPanel'); break;
-    case 'close-shift': $('shiftPanel').classList.remove('show'); break;
+    case 'close-shift': $('shiftPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'shift-back': applyTcShift(-1); break;
     case 'shift-fwd': applyTcShift(1); break;
+    case 'dur-adj-sub': applyDurAdjTc(-1); break;
+    case 'dur-adj-add': applyDurAdjTc(1); break;
+    case 'dur-adj-pct': applyDurAdjPct(); break;
     case 'sub-mode':
       State.subMode=!State.subMode;
       { const smb=$('subModeBtn'); if(smb)smb.classList.toggle('sub-active',State.subMode); }
@@ -279,20 +336,22 @@ async function doAction(act){
     case 'undo': History.undo(); break;
     case 'redo': History.redo(); break;
     case 'history': togglePanel('historyPanel'); renderHistory(); break;
-    case 'close-history': $('historyPanel').classList.remove('show'); break;
+    case 'close-history': $('historyPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'notes': togglePanel('notesPanel'); renderNotes(); break;
     case 'add-note': addNote(); break;
-    case 'close-notes': $('notesPanel').classList.remove('show'); break;
+    case 'close-notes': $('notesPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'mixer': togglePanel('mixerPanel'); renderMixer(); break;
-    case 'close-mixer': $('mixerPanel').classList.remove('show'); break;
+    case 'close-mixer': $('mixerPanel').classList.remove('show'); _syncMpvPanel(); break;
+    case 'mixer-reset': mixerReset(); break;
+    case 'mixer-muteall': mixerMuteAll(); break;
     case 'export-notes': exportNotes(); break;
     case 'toggle-all-vis': { const anyVis=State.tracks.some(t=>t.visible!==false); State.tracks.forEach(t=>t.visible=!anyVis); drawTimeline(); renderVideoSub(); } break;
     case 'toggle-all-lock': { const anyUnlocked=State.tracks.some(t=>!t.locked); State.tracks.forEach(t=>t.locked=anyUnlocked); drawTimeline(); } break;
     case 'copy-track': doCopyTrack(); break;
     case 'check-panel': { const btn=$('checkPanelBtn'); const willShow=!$('checkPanel').classList.contains('show'); togglePanel('checkPanel'); if(btn)btn.classList.toggle('sub-active',willShow); if(willShow)renderCheckPanel(); } break;
-    case 'close-check': { $('checkPanel').classList.remove('show'); const btn=$('checkPanelBtn'); if(btn)btn.classList.remove('sub-active'); } break;
-    case 'search-open': { const sd=$('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>$('searchInput')?.focus(),20); } } break;
-    case 'search-close': { const sd=$('searchDialog'); if(sd)sd.style.display='none'; } break;
+    case 'close-check': { $('checkPanel').classList.remove('show'); const btn=$('checkPanelBtn'); if(btn)btn.classList.remove('sub-active'); _syncMpvPanel(); } break;
+    case 'search-open': { const sd=$('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>$('searchInput')?.focus(),20); _syncMpvPanel(); } } break;
+    case 'search-close': { const sd=$('searchDialog'); if(sd){ sd.style.display='none'; _syncMpvPanel(); } } break;
     case 'search-next': searchNav(1); break;
     case 'search-prev': searchNav(-1); break;
     case 'search-clear': { $('searchInput').value=''; searchUpdate(); $('searchInput').focus(); } break;
@@ -694,7 +753,7 @@ function initUI(){
   $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋浮動視窗
   $('searchInput').addEventListener('input',()=>searchUpdate());
-  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){ searchNav(1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; } });
+  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){ searchNav(1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
   $('replaceInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋視窗可拖曳
   { const head=$('searchDialogHead'), dlg=$('searchDialog');
@@ -712,8 +771,25 @@ function initUI(){
   tlTracks.addEventListener('scroll',()=>{ if(_sync)return; _sync=true; gt.scrollTop=tlTracks.scrollTop; _sync=false; },{passive:true});
   gt.addEventListener('scroll',()=>{ if(_sync)return; _sync=true; tlTracks.scrollTop=gt.scrollTop; _sync=false; },{passive:true});
   // 區塊分隔線：拖曳調整 字幕列表寬度 / 時間軸高度
+  const _LAYOUT_KEY='sub_layout_v2';
+  const saveLayout=()=>{
+    const gt=$('tlGutter');
+    localStorage.setItem(_LAYOUT_KEY,JSON.stringify({
+      rw:$('rightPanel').style.width||'',
+      th:$('timelinePanel').style.height||'',
+      gw:gt?gt.style.width||'':''
+    }));
+  };
+  const loadLayout=()=>{
+    try{
+      const d=JSON.parse(localStorage.getItem(_LAYOUT_KEY)||'{}');
+      if(d.rw) $('rightPanel').style.width=d.rw;
+      if(d.th) $('timelinePanel').style.height=d.th;
+      const gt=$('tlGutter'); if(d.gw&&gt) gt.style.width=d.gw;
+    }catch(_){}
+  };
   const dragSplit=(handle,onMove)=>{ handle.addEventListener('mousedown',e=>{ e.preventDefault();
-    const mv=ev=>onMove(ev); const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);drawTimeline();};
+    const mv=ev=>onMove(ev); const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);drawTimeline();saveLayout();};
     document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up); }); };
   const right=$('rightPanel'), tl=$('timelinePanel');
   dragSplit($('splitV'),ev=>{ right.style.width=clamp(window.innerWidth-ev.clientX-3,220,window.innerWidth-360)+'px'; });
@@ -723,10 +799,11 @@ function initUI(){
     if(sp&&gt){ let sx=0,sw=0;
       sp.addEventListener('mousedown',e=>{ e.preventDefault(); sx=e.clientX; sw=gt.offsetWidth;
         const mv=ev=>{ gt.style.width=clamp(sw+(ev.clientX-sx),60,360)+'px'; drawTimeline(); };
-        const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); };
+        const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); saveLayout(); };
         document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up); });
     }
   }
+  loadLayout();
   renderListTrackSel();
   // 點擊時間軸時解除輸入框焦點
   $('timelinePanel').addEventListener('mousedown',()=>{ const ae=document.activeElement; if(ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'))ae.blur(); },{capture:true});
@@ -871,9 +948,81 @@ function applyTcShift(sign){
   recordHistory('時間碼位移');
   setStatus(`已位移 ${delta>=0?'+':''}${delta.toFixed(3)}s（共 ${cues.length} 條）`,'ok');
 }
+function _durAdjCues(){
+  const scope=$('tcShiftSel').value;
+  if(scope==='sel'){
+    const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
+    return ids.map(id=>State.cues.find(c=>c.id===id)).filter(c=>c&&c.timed!==false);
+  }else if(scope==='track'){
+    return State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
+  }else{
+    return State.cues.filter(c=>c.timed!==false);
+  }
+}
+function _nextInPoint(c){
+  const track=c.track||0; let next=Infinity;
+  for(const oc of State.cues){
+    if(oc.timed===false||oc.id===c.id||(oc.track||0)!==track)continue;
+    if(oc.start>c.start&&oc.start<next)next=oc.start;
+  }
+  return next;
+}
+function applyDurAdjTc(sign){
+  const raw=($('durAdjTcInput').value||'').trim().replace(/^[+-]/,'');
+  const t=parseTimecodeInput(raw);
+  if(t==null||isNaN(t)||t<=0){ showToast('請輸入有效的時間碼（例如 00:00:01:00）'); return; }
+  const delta=sign*t;
+  const minDur=1/Math.max(State.fps||25,1);
+  const cues=_durAdjCues();
+  if(!cues.length){ showToast('沒有字幕可調整'); return; }
+  for(const c of cues){
+    const nextIn=_nextInPoint(c);
+    let newEnd=c.end+delta;
+    newEnd=Math.max(c.start+minDur,newEnd);
+    newEnd=Math.min(nextIn,newEnd);
+    c.end=newEnd;
+  }
+  sortCues(); renderAll(); drawTimeline();
+  recordHistory('調整持續時間');
+  setStatus(`已調整 ${cues.length} 條字幕的持續時間（${sign>0?'+':'−'}${t.toFixed(3)}s）`,'ok');
+}
+function applyDurAdjPct(){
+  const pct=+($('durAdjPctInput').value||'100');
+  if(isNaN(pct)||pct<=0){ showToast('請輸入有效的百分比（例如 150）'); return; }
+  const ratio=pct/100;
+  const minDur=1/Math.max(State.fps||25,1);
+  const cues=_durAdjCues();
+  if(!cues.length){ showToast('沒有字幕可調整'); return; }
+  for(const c of cues){
+    const nextIn=_nextInPoint(c);
+    let newEnd=c.start+(c.end-c.start)*ratio;
+    newEnd=Math.max(c.start+minDur,newEnd);
+    newEnd=Math.min(nextIn,newEnd);
+    c.end=newEnd;
+  }
+  sortCues(); renderAll(); drawTimeline();
+  recordHistory('調整持續時間');
+  setStatus(`已調整 ${cues.length} 條字幕的持續時間（${pct}%）`,'ok');
+}
+
+/* 開啟浮動面板時，若面板與影片重疊就自動推到影片右側，避免開啟時畫面變黑 */
+function _ensurePanelInRightArea(panel){
+  if(!Media.mpvMode||!window.subtool?.mpv) return;
+  const vr=$('videoWrap')?.getBoundingClientRect();
+  if(!vr) return;
+  const pr=panel.getBoundingClientRect();
+  if(pr.left < vr.right + 4){
+    panel.style.right='auto'; panel.style.bottom='auto';
+    panel.style.left=(vr.right+8)+'px';
+    panel.style.top=Math.max(50, Math.min(pr.top, window.innerHeight-120))+'px';
+  }
+}
 
 function togglePanel(id){ const p=$(id); const willShow=!p.classList.contains('show');
-  document.querySelectorAll('.float-panel.show').forEach(x=>x.classList.remove('show')); if(willShow)p.classList.add('show'); }
+  document.querySelectorAll('.float-panel.show').forEach(x=>x.classList.remove('show'));
+  if(willShow){ p.classList.add('show'); setTimeout(()=>{ _ensurePanelInRightArea(p); _syncMpvPanel(); },0); }
+  else _syncMpvPanel();
+}
 
 /* ===== 播放時間數字：雙擊輸入 / 右鍵複製 ===== */
 function parseTimecodeInput(str){
@@ -906,6 +1055,27 @@ function startTimeEdit(){
   inp.addEventListener('blur',()=>fin(true));
 }
 function initExtras(){
+  // 調整面板：分頁切換
+  document.querySelectorAll('.shift-tab').forEach(tab=>{
+    tab.addEventListener('click',e=>{
+      e.stopPropagation();
+      document.querySelectorAll('.shift-tab').forEach(t=>t.classList.remove('active'));
+      tab.classList.add('active');
+      const isTc=tab.dataset.tab==='tc';
+      $('shiftPageTc').style.display=isTc?'':'none';
+      $('shiftPageDur').style.display=isTc?'none':'';
+    });
+  });
+  // 調整持續時間：增減時長 vs 百分比 切換
+  $('durAdjMode')?.addEventListener('change',()=>{
+    const isTc=$('durAdjMode').value==='tc';
+    $('durAdjTcRow').style.display=isTc?'':'none';
+    $('durAdjPctRow').style.display=isTc?'none':'';
+  });
+  // 新輸入框鍵盤事件
+  $('durAdjTcInput')?.addEventListener('keydown',e=>e.stopPropagation());
+  $('durAdjPctInput')?.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();applyDurAdjPct();} });
+  $('durAdjMode')?.addEventListener('keydown',e=>e.stopPropagation());
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
   $('tcCur').addEventListener('contextmenu',e=>{ e.preventDefault();
     try{ navigator.clipboard.writeText(secToEncore(Media.vTime(),State.fps)); showToast('已複製時間碼'); }catch(err){} });
@@ -924,11 +1094,13 @@ function initExtras(){
       const mv=e2=>{
         panel.style.left=clamp(ox+e2.clientX-sx,0,window.innerWidth-60)+'px';
         panel.style.top=clamp(oy+e2.clientY-sy,0,window.innerHeight-40)+'px';
+        _syncMpvPanel();
       };
       const up=()=>{
         document.body.style.cursor='';
         document.removeEventListener('mousemove',mv);
         document.removeEventListener('mouseup',up);
+        _syncMpvPanel();
       };
       document.addEventListener('mousemove',mv);
       document.addEventListener('mouseup',up);
@@ -964,7 +1136,10 @@ async function initDesktop(){
       `原生 MP4/MOV/MP3/WAV 播放與字幕編輯不受影響。`);
     setStatus('就緒（桌面模式）— 可直接讀 MXF 與多音軌','ok');
   }catch(e){ setStatus('就緒（桌面模式）','ok'); }
-  DESK.onProgress(d=>{ if(!d.done && d.pct<100) setStatus((d.label||'處理中')+'… '+d.pct+'%','busy'); });
+  DESK.onProgress(d=>{
+    if(!d.done && d.pct<100) setStatus((d.label||'處理中')+'… '+d.pct+'%','busy');
+    if(d.done) window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:d}));
+  });
 }
 
 /* 開發用除錯把手（正式打包 import.meta.env.DEV=false 時不會輸出） */

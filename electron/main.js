@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const url = require('url');
 const net = require('net');
+const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 
@@ -30,6 +31,13 @@ function detect(bin, extra) {
 }
 function ensureTmp() { try { fs.mkdirSync(TMP, { recursive: true }); } catch (e) {} }
 function tmpPath(ext) { ensureTmp(); const p = path.join(TMP, `t${Date.now()}_${tmpSeq++}.${ext}`); tempFiles.add(p); return p; }
+/* WebContents 可能在視窗關閉後仍被呼叫（例如 mpv pipe close 回呼），必須先確認未銷毀 */
+function safeSend(wc, ch, data) {
+  try { if (wc && !wc.isDestroyed()) wc.send(ch, data); } catch (e) {}
+}
+function safeWinSend(win, ch, data) {
+  try { if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) win.webContents.send(ch, data); } catch (e) {}
+}
 
 /* ---- 偵測可用的硬體視訊編碼器（NVENC/QSV/AMF），否則退回 libx264 ---- */
 function detectVideoEncoder() {
@@ -72,12 +80,12 @@ function runFF(args, { onProgress, duration, sender, jobId, label } = {}) {
       const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s);
       if (m && duration && sender) {
         const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
-        sender.send('task-progress', { jobId, label, pct: Math.min(99, Math.round(t / duration * 100)) });
+        safeSend(sender, 'task-progress', { jobId, label, pct: Math.min(99, Math.round(t / duration * 100)) });
       }
     });
     p.on('error', rej);
     p.on('close', c => {
-      if (sender) sender.send('task-progress', { jobId, label, pct: 100, done: true });
+      if (sender) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
       c === 0 ? res(true) : rej(new Error('ffmpeg 結束碼 ' + c + '\n' + err.slice(-600)));
     });
   });
@@ -95,6 +103,14 @@ function createWindow() {
       webSecurity: false // 本機信任程式：允許 file:// 影音直接讀取
     }
   });
+  mainWin.maximize();
+  // 讓嵌入式 mpv 覆蓋視窗跟著主視窗移動 / 縮放 / 最小化
+  const reapplyMpv = () => { if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible && _mpvRect) applyMpvBounds(_mpvRect); };
+  mainWin.on('move', reapplyMpv);
+  mainWin.on('resize', reapplyMpv);
+  mainWin.on('restore', () => { if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible) { try { _mpvWin.show(); } catch (e) {} reapplyMpv(); } });
+  mainWin.on('minimize', () => { if (_mpvWin && !_mpvWin.isDestroyed()) { try { _mpvWin.hide(); } catch (e) {} } });
+  mainWin.on('closed', () => { destroyMpvWin(); });
   if (process.argv.includes('--dev')) {
     mainWin.loadURL('http://localhost:8777'); // 需先執行 npm run dev
     mainWin.webContents.openDevTools({ mode: 'detach' });
@@ -103,6 +119,53 @@ function createWindow() {
     const legacy = path.join(__dirname, '..', 'index.html');
     mainWin.loadFile(fs.existsSync(built) ? built : legacy);
   }
+}
+
+/* ---- 本機 HTTP 串流伺服器（MXF 等非原生格式邊轉邊播用） ---- */
+let _hSrv = null, _hPort = null;
+const _hJobs = new Map(); // id -> { filePath, done, error }
+
+async function ensureHttpServer() {
+  if (_hSrv) return _hPort;
+  return new Promise((resolve, reject) => {
+    _hSrv = http.createServer((req, res) => {
+      const id = decodeURIComponent(req.url.slice(1).split('?')[0]);
+      const job = _hJobs.get(id);
+      if (!job) { res.writeHead(404); res.end(); return; }
+      const rf = req.headers.range;
+      if (!rf) {
+        res.writeHead(200, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' });
+        const rd = fs.createReadStream(job.filePath);
+        rd.pipe(res, { end: false });
+        rd.on('end', () => {
+          if (job.done) { res.end(); return; }
+          const poll = () => { if (job.done || job.error) { res.end(); } else { setTimeout(poll, 400); } };
+          poll();
+        });
+        req.on('close', () => rd.destroy());
+        return;
+      }
+      const m = /bytes=(\d+)-(\d*)/.exec(rf);
+      if (!m) { res.writeHead(400); res.end(); return; }
+      const start = +m[1], reqEnd = m[2] ? +m[2] : undefined;
+      const tryRange = (n) => {
+        let sz = 0; try { sz = fs.statSync(job.filePath).size; } catch (e) {}
+        if (sz <= start && !job.done && n < 120) { setTimeout(() => tryRange(n + 1), 500); return; }
+        if (sz <= start) { res.writeHead(416); res.end(); return; }
+        const end = reqEnd !== undefined ? Math.min(reqEnd, sz - 1) : sz - 1;
+        const len = end - start + 1;
+        res.writeHead(206, {
+          'Content-Type': 'video/mp4',
+          'Content-Range': `bytes ${start}-${end}/${job.done ? sz : '*'}`,
+          'Content-Length': len, 'Accept-Ranges': 'bytes'
+        });
+        fs.createReadStream(job.filePath, { start, end }).pipe(res);
+      };
+      tryRange(0);
+    });
+    _hSrv.listen(0, '127.0.0.1', () => { _hPort = _hSrv.address().port; resolve(_hPort); });
+    _hSrv.on('error', reject);
+  });
 }
 
 app.whenReady().then(() => {
@@ -116,6 +179,7 @@ app.whenReady().then(() => {
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('quit', () => {
+  if (_mpvProc) { try { _mpvProc.kill(); } catch (e) {} _mpvProc = null; }
   for (const f of tempFiles) { try { fs.unlinkSync(f); } catch (e) {} }
   try { fs.rmdirSync(TMP, { recursive: true }); } catch (e) {}
 });
@@ -236,7 +300,7 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
     try {
       const m = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
       const ok = (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
-      if (ok) { if (e.sender) e.sender.send('task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true }); return Object.assign({ cached: true }, m); }
+      if (ok) { if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true }); return Object.assign({ cached: true }, m); }
     } catch (er) {}
   }
   fs.mkdirSync(dir, { recursive: true });
@@ -290,6 +354,91 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
 ipcMain.handle('fs:readB64', (e, p) => { try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; } });
 
+/* ---- 邊轉邊播 ingest（MXF 等非原生格式秒開）：fragmented MP4 + 本機 HTTP 伺服器 ----
+   video 轉成 fragmented MP4（empty_moov），前幾秒輸出後就可播放；音軌/波形同一 pass 在背景繼續。
+   快取命中時行為與 ffmpeg:ingest 相同（秒開）。 */
+ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) => {
+  const audioArr = Array.isArray(audio) ? audio : [];
+  const dir = path.join(CACHE || TMP, cacheKeyFor(src));
+  const metaPath = path.join(dir, 'meta.json');
+  const port = await ensureHttpServer();
+
+  // 快取命中
+  if (fs.existsSync(metaPath)) {
+    try {
+      const m = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      const ok = (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
+      if (ok) {
+        if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
+        const jid = 'c-' + cacheKeyFor(src);
+        _hJobs.set(jid, { filePath: m.proxy, done: true });
+        return Object.assign({ cached: true, streamUrl: `http://127.0.0.1:${port}/${jid}` }, m);
+      }
+    } catch (er) {}
+  }
+  fs.mkdirSync(dir, { recursive: true });
+
+  // 與 ffmpeg:ingest 相同的音訊 filter_complex 建構
+  const fc = [], channels = [], chMaps = [], waveContribs = [];
+  let ci = 0;
+  audioArr.forEach((a, i) => {
+    const ch = Math.max(1, a.channels || 1);
+    const base = a.title || a.lang || ('音軌 ' + (i + 1));
+    if (ch === 1) {
+      fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
+      channels.push({ label: base, file: path.join(dir, `ch${ci}.m4a`) });
+      chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
+    } else {
+      const pads = [];
+      for (let k = 0; k < ch; k++) pads.push(`sp${i}_${k}`);
+      fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
+      for (let k = 0; k < ch; k++) {
+        fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
+        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch${ci}.m4a`) });
+        chMaps.push(`[co${ci}]`); ci++;
+      }
+      const avg = (1 / ch).toFixed(4);
+      fc.push(`[wv${i}]pan=mono|c0=${Array.from({ length: ch }, (_, k) => `${avg}*c${k}`).join('+')}[wm${i}]`);
+      waveContribs.push(`[wm${i}]`);
+    }
+  });
+
+  let waveLabel = null;
+  if (waveContribs.length === 1) waveLabel = waveContribs[0];
+  else if (waveContribs.length > 1) { fc.push(`${waveContribs.join('')}amix=inputs=${waveContribs.length}:normalize=0[wavemix]`); waveLabel = '[wavemix]'; }
+
+  const proxy = path.join(dir, 'proxy.mp4');
+  const wave = waveLabel ? path.join(dir, 'wave.wav') : null;
+
+  const args = ['-y', '-i', src];
+  if (fc.length) args.push('-filter_complex', fc.join(';'));
+  // 關鍵：fragmented MP4 讓 browser 在 ffmpeg 還未結束時就能開始播放
+  args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p',
+    ...vencArgs(), '-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxy);
+  channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '192k', c.file); });
+  if (waveLabel) args.push('-map', waveLabel, '-ac', '1', '-ar', '8000', '-c:a', 'pcm_s16le', wave);
+
+  const jid = 'l-' + Date.now();
+  const job = { filePath: proxy, done: false, error: null };
+  _hJobs.set(jid, job);
+
+  // 背景跑 ffmpeg（不 await）
+  runFF(args, { sender: e.sender, duration, jobId: 'ingest', label: '背景轉檔中' }).then(() => {
+    job.done = true;
+    try { fs.writeFileSync(metaPath, JSON.stringify({ proxy, channels, wave })); } catch (er) {}
+  }).catch(err => { job.done = true; job.error = err.message; });
+
+  // 等到 proxy 檔案有足夠資料（至少 512KB）再回傳，確保 video.src 不會立刻失敗
+  const t0 = Date.now();
+  while (Date.now() - t0 < 60000) {
+    try { if (fs.statSync(proxy).size >= 524288) break; } catch (e2) {}
+    if (job.error) throw new Error('轉檔失敗：' + job.error);
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  return { cached: false, streamUrl: `http://127.0.0.1:${port}/${jid}`, proxy, channels, wave };
+});
+
 /* ============ mpv 媒體播放器整合（秒開非原生格式，無需等待 ffmpeg proxy 轉檔） ============
    架構：spawn mpv → 透過 Windows named pipe 發送 JSON IPC 指令 → renderer 同步時碼
    音訊：mpv 先播原生音訊；背景 ffmpeg 只抽音軌（無 proxy），完成後 element tracks 接管，mpv 靜音 */
@@ -299,10 +448,41 @@ let _mpvClient = null;
 let _mpvReqId = 0;
 const _mpvCbs = new Map();
 let _mpvBuf = '';
+// 嵌入式覆蓋視窗（無邊框子視窗，貼合影片面板；mpv 以 --wid 渲染進其中）
+let _mpvWin = null;
+let _mpvRect = null;       // 最近一次面板矩形（內容座標 DIP）
+let _mpvVisible = true;
+let _mpvSubFile = null;    // 餵給 mpv 的暫存 .ass 字幕檔
+let _mpvSubAdded = false;
+
+function applyMpvBounds(b) {
+  if (!_mpvWin || _mpvWin.isDestroyed() || !b || !mainWin) return;
+  _mpvRect = b;
+  try {
+    const cb = mainWin.getContentBounds(); // DIP，內容區左上角為原點
+    _mpvWin.setBounds({
+      x: Math.round(cb.x + b.x),
+      y: Math.round(cb.y + b.y),
+      width: Math.max(1, Math.round(b.w)),
+      height: Math.max(1, Math.round(b.h)),
+    });
+  } catch (e) {}
+}
+
+function destroyMpvWin() {
+  if (_mpvWin) { try { if (!_mpvWin.isDestroyed()) _mpvWin.destroy(); } catch (e) {} _mpvWin = null; }
+  _mpvRect = null; _mpvVisible = true; _mpvSubAdded = false; _mpvSubFile = null;
+}
 
 function detectMpv() {
   if (_mpvExe) return _mpvExe;
   const cands = [
+    // 內建（隨程式打包）— 優先，讓秒開成為預設行為
+    path.join(__dirname, 'mpv', 'mpv.exe'),
+    path.join(process.resourcesPath || '', 'app.asar.unpacked', 'electron', 'mpv', 'mpv.exe'),
+    path.join(process.resourcesPath || '', 'mpv', 'mpv.exe'),
+    path.join(process.resourcesPath || '', 'app', 'electron', 'mpv', 'mpv.exe'),
+    // 系統安裝
     process.env.MPV_PATH,
     'mpv',
     'C:\\Program Files\\mpv\\mpv.exe',
@@ -347,12 +527,12 @@ function mpvConnectPipe(pipeName) {
               if (typeof msg.request_id === 'number' && _mpvCbs.has(msg.request_id)) {
                 _mpvCbs.get(msg.request_id)(msg.data ?? null); _mpvCbs.delete(msg.request_id);
               } else if (msg.event === 'property-change' || msg.event === 'end-file') {
-                mainWin?.webContents.send('mpv:event', msg);
+                safeWinSend(mainWin, 'mpv:event', msg);
               }
             } catch (e) {}
           }
         });
-        client.on('close', () => { _mpvClient = null; mainWin?.webContents.send('mpv:event', { event: 'disconnected' }); });
+        client.on('close', () => { _mpvClient = null; safeWinSend(mainWin, 'mpv:event', { event: 'disconnected' }); });
         resolve(client);
       });
       client.once('error', () => {
@@ -364,18 +544,50 @@ function mpvConnectPipe(pipeName) {
   });
 }
 
-ipcMain.handle('mpv:detect', () => { const exe = detectMpv(); return { available: !!exe, exe }; });
-ipcMain.handle('mpv:launch', async (e, { src }) => {
+ipcMain.handle('mpv:detect', () => { const exe = detectMpv(); console.error('[mpv] detect ->', exe || '(not found)'); return { available: !!exe, exe }; });
+ipcMain.handle('mpv:launch', async (e, { src, bounds }) => {
   if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
+  destroyMpvWin();
   const exe = detectMpv();
   if (!exe) throw new Error('找不到 mpv，請安裝 mpv 或設定 MPV_PATH 環境變數（https://mpv.io）');
+
+  // 建立無邊框「透明」子視窗作為 mpv 的渲染宿主（--wid 嵌入），由 Electron 精準控制位置/大小。
+  // 透明很關鍵：否則 Chromium 會以不透明背景蓋住 mpv 的畫面 → 全黑。
+  _mpvWin = new BrowserWindow({
+    parent: mainWin, frame: false, show: true, transparent: true,
+    hasShadow: false, skipTaskbar: true, thickFrame: false,
+    resizable: false, movable: false, minimizable: false, maximizable: false,
+    fullscreenable: false, focusable: false, acceptFirstMouse: false,
+    webPreferences: { offscreen: false, backgroundThrottling: false },
+  });
+  try { _mpvWin.setMenu(null); } catch (e2) {}
+  _mpvWin.loadURL('data:text/html,<body style="margin:0;background:transparent"></body>');
+  _mpvVisible = true;
+  applyMpvBounds(bounds);
+
+  // 取得宿主視窗的原生 HWND（Win64 為 8-byte 指標）
+  const hb = _mpvWin.getNativeWindowHandle();
+  const hwnd = hb.length >= 8 ? hb.readBigUInt64LE(0).toString() : hb.readUInt32LE(0).toString();
+
+  // mpv stderr → 暫存記錄檔，方便診斷（嵌入失敗時可讀取）
+  const mpvLog = path.join(TMP, 'mpv-last.log'); ensureTmp();
+  let logStream = null; try { logStream = fs.createWriteStream(mpvLog); } catch (e2) {}
+
   const pipeName = 'subtool-mpv-' + Date.now();
   _mpvProc = spawn(exe, [
+    '--wid=' + hwnd,
     '--input-ipc-server=\\\\.\\pipe\\' + pipeName,
-    '--no-terminal', '--keep-open=yes', '--pause', '--hr-seek=yes', src
-  ], { detached: false, stdio: 'ignore' });
-  _mpvProc.on('close', () => { _mpvProc = null; });
+    '--no-config', '--no-terminal', '--no-osc',
+    '--no-input-default-bindings', '--input-vo-keyboard=no', '--cursor-autohide=no',
+    '--vo=gpu', '--gpu-context=d3d11', '--hwdec=auto',
+    '--keep-open=always', '--pause', '--hr-seek=yes', '--sid=no',
+    src,
+  ], { detached: false, stdio: ['ignore', 'ignore', logStream ? 'pipe' : 'ignore'] });
+  if (logStream && _mpvProc.stderr) _mpvProc.stderr.pipe(logStream);
+  console.error('[mpv] launch wid=' + hwnd + ' bounds=' + JSON.stringify(_mpvRect) + ' src=' + src);
+  _mpvProc.on('error', (err) => console.error('[mpv] spawn error:', err && err.message));
+  _mpvProc.on('close', (c) => { console.error('[mpv] proc closed, code=' + c); _mpvProc = null; });
   await mpvConnectPipe(pipeName);
   _mpvClient.write(JSON.stringify({ command: ['observe_property', 1, 'time-pos'] }) + '\n');
   _mpvClient.write(JSON.stringify({ command: ['observe_property', 2, 'pause'] }) + '\n');
@@ -383,6 +595,23 @@ ipcMain.handle('mpv:launch', async (e, { src }) => {
   await new Promise(r => setTimeout(r, 400));
   const duration = await mpvSend(['get_property', 'duration'], true);
   return { ok: true, duration: typeof duration === 'number' ? duration : 0 };
+});
+ipcMain.handle('mpv:setBounds', (e, b) => { applyMpvBounds(b); });
+ipcMain.handle('mpv:show', (e, v) => {
+  _mpvVisible = !!v;
+  if (!_mpvWin || _mpvWin.isDestroyed()) return;
+  if (v) { try { _mpvWin.show(); _mpvWin.moveTop(); } catch (e2) {} if (_mpvRect) applyMpvBounds(_mpvRect); }
+  else { try { _mpvWin.hide(); } catch (e2) {} }
+});
+// 餵字幕給 mpv（libass 渲染）：寫入暫存 .ass，首次 sub-add，之後 sub-reload
+ipcMain.handle('mpv:subSet', (e, assText) => {
+  if (!_mpvClient) return;
+  try {
+    if (!_mpvSubFile) { ensureTmp(); _mpvSubFile = path.join(TMP, 'subtool-mpv-' + Date.now() + '.ass'); tempFiles.add(_mpvSubFile); }
+    fs.writeFileSync(_mpvSubFile, assText || '', 'utf8');
+  } catch (e2) { return; }
+  if (!_mpvSubAdded) { mpvSend(['sub-add', _mpvSubFile, 'select']); _mpvSubAdded = true; }
+  else { mpvSend(['sub-reload']); }
 });
 ipcMain.handle('mpv:seek',  (e, t) => mpvSend(['seek', t, 'absolute']));
 ipcMain.handle('mpv:play',  ()     => mpvSend(['set_property', 'pause', false]));
@@ -392,4 +621,5 @@ ipcMain.handle('mpv:rate',  (e, r) => mpvSend(['set_property', 'speed', r]));
 ipcMain.handle('mpv:quit',  () => {
   if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
+  destroyMpvWin();
 });

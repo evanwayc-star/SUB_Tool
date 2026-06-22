@@ -77,7 +77,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 /* ---------- 主體 ---------- */
 .main{flex:1;display:flex;min-height:0;border-bottom:1px solid var(--border)}
 .left{flex:1;display:flex;flex-direction:column;min-width:0;background:#0d0d0f}
-.right{width:540px;min-width:260px;max-width:60%;display:flex;flex-direction:column;background:var(--panel);
+.right{width:570px;min-width:260px;max-width:60%;display:flex;flex-direction:column;background:var(--panel);
   border-left:1px solid var(--border)}
 
 /* 影片預覽 */
@@ -151,7 +151,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .sub-row.overlap .tin,.sub-row.overlap .tout{color:var(--red)}
 
 /* ---------- 時間軸 ---------- */
-.timeline{height:200px;display:flex;flex-direction:column;background:var(--panel);min-height:140px}
+.timeline{height:220px;display:flex;flex-direction:column;background:var(--panel);min-height:140px}
 .tl-toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--panel2)}
 .tl-toolbar .zoom{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px}
 .tl-toolbar .hint{color:var(--text-faint);font-size:11px}
@@ -311,17 +311,25 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 /* 備忘點擊反白 */
 .note-item.nt-active{background:rgba(255,210,60,.14)}
 /* 混音器：逐聲道電平表 */
-.mixer-panel{width:auto;max-width:92vw}
-.mixer-panel .fp-body{padding:8px 10px}
-.mixer-strips{display:flex;gap:8px;align-items:flex-end;overflow-x:auto}
-.mx-strip{display:flex;flex-direction:column;align-items:center;gap:5px;width:46px;flex:0 0 auto}
-.mx-meter{position:relative;width:24px;height:160px;border:1px solid var(--border);border-radius:3px;overflow:hidden;
+.mixer-panel{width:auto;max-width:92vw;max-height:90vh}
+.mixer-panel .fp-body{padding:8px 10px;overflow-y:hidden}
+.mixer-toolbar{display:flex;gap:6px;margin-bottom:8px}
+.mixer-toolbar .mini{flex:0 0 auto}
+.mixer-strips{display:flex;gap:6px;align-items:flex-end;overflow-x:auto}
+.mx-strip{display:flex;flex-direction:column;align-items:center;gap:5px;width:50px;flex:0 0 auto}
+.mx-meter{position:relative;width:30px;height:220px;border:1px solid var(--border);border-radius:3px;overflow:hidden;
   background:linear-gradient(to top,#33c93a 0%,#33c93a 55%,#e6d23a 78%,#e0432a 100%)}
 .mx-mask{position:absolute;left:0;right:0;top:0;height:100%;background:#0d0d0f}
 .mx-peak{position:absolute;left:0;right:0;bottom:0;height:2px;background:#fff;opacity:.85}
-.mx-name{font-size:10px;color:var(--text-dim);max-width:46px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
-.mx-btns{display:flex;gap:3px}
-.mx-solo,.mx-mute{font-size:13px;width:26px;height:22px;line-height:1;padding:0;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:3px;cursor:pointer}
+/* 音量推桿：直立、覆蓋在電平表上，把手為白色橫條 */
+.mx-fader{position:absolute;inset:0;width:100%;height:100%;margin:0;cursor:ns-resize;
+  -webkit-appearance:none;appearance:none;background:transparent;writing-mode:vertical-lr;direction:rtl}
+.mx-fader::-webkit-slider-runnable-track{background:transparent;border:0}
+.mx-fader::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:30px;height:6px;border-radius:2px;
+  background:#fff;border:1px solid #000;cursor:ns-resize;box-shadow:0 0 3px rgba(0,0,0,.8)}
+.mx-name{font-size:10px;color:var(--text-dim);max-width:50px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
+.mx-btns{display:flex;flex-direction:column;gap:3px;width:100%}
+.mx-solo,.mx-mute{font-size:10px;width:100%;height:22px;line-height:1;padding:0;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:3px;cursor:pointer;white-space:nowrap}
 .mx-solo.on{background:#caa72e;color:#000;border-color:#caa72e}
 .mx-mute.on{background:var(--red);color:#fff;border-color:var(--red)}
 /* 時間軸工具列：選取狀態資訊 */
@@ -329,11 +337,15 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .tl-sel-info.sel-none{background:rgba(150,150,150,.15)}
 .tl-sel-info.sel-one{background:rgba(240,200,0,.28);color:var(--text)}
 .tl-sel-info.sel-multi{background:rgba(240,100,140,.22);color:var(--text)}
-/* 時間碼位移面板 */
+/* 調整面板 */
 .shift-body{padding:10px 12px;display:flex;flex-direction:column;gap:8px}
 .shift-body select{width:100%;font-size:12px}
 .shift-row{display:flex;gap:6px;align-items:center}
-#tcShiftInput{width:106px;font-family:"Consolas",monospace;font-size:13px;text-align:center;letter-spacing:1px}
+#tcShiftInput,#durAdjTcInput{width:106px;font-family:"Consolas",monospace;font-size:13px;text-align:center;letter-spacing:1px}
+.shift-tabs{display:flex;gap:4px}
+.shift-tab{flex:1;font-size:11px;padding:4px 6px;border-radius:4px;cursor:pointer;text-align:center}
+.shift-tab.active{background:var(--accent);color:#1b1b1d;border-color:var(--accent-d)}
+.shift-page{display:flex;flex-direction:column;gap:6px}
 /* 軌道拖曳重排 */
 .tl-gtrack .drag-handle{cursor:grab;color:var(--text-faint);font-size:14px;padding:0 2px;user-select:none;opacity:0;flex-shrink:0}
 .tl-gtrack:hover .drag-handle{opacity:.6}
