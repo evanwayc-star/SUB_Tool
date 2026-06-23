@@ -321,7 +321,17 @@ function refreshSelectionUI(){
     r.classList.toggle('primary',r.dataset.id===State.selectedId);
   });
   const row=State.selectedId&&sublist.querySelector(`.sub-row[data-id="${State.selectedId}"]`);
-  if(row)row.scrollIntoView({block:'nearest'});
+  if(row){
+    if(State.subMode){
+      const sRect = sublist.getBoundingClientRect();
+      const rRect = row.getBoundingClientRect();
+      const rowHeight = rRect.height || 30;
+      const targetY = sRect.top + (rowHeight * 4);
+      sublist.scrollTop += (rRect.top - targetY);
+    } else {
+      row.scrollIntoView({block:'nearest'});
+    }
+  }
   renderCueBlocks();
   updateTlSel();
 }

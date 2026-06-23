@@ -334,7 +334,18 @@ function rafLoop(){
 function markActiveRow(id){
   sublist.querySelectorAll('.sub-row.active').forEach(r=>r.classList.remove('active'));
   const row=sublist.querySelector(`.sub-row[data-id="${id}"]`);
-  if(row){row.classList.add('active');row.scrollIntoView({block:'nearest'});}
+  if(row){
+    row.classList.add('active');
+    if(State.subMode){
+      const sRect = sublist.getBoundingClientRect();
+      const rRect = row.getBoundingClientRect();
+      const rowHeight = rRect.height || 30;
+      const targetY = sRect.top + (rowHeight * 4);
+      sublist.scrollTop += (rRect.top - targetY);
+    } else {
+      row.scrollIntoView({block:'nearest'});
+    }
+  }
 }
 video.addEventListener('play',()=>{Media.playing=true;$('playBtn').textContent='⏸';});
 video.addEventListener('pause',()=>{$('playBtn').textContent='▶';});

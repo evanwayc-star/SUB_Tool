@@ -182,7 +182,7 @@ const Media = {
           const ab=await this.ctx.decodeAudioData(buf); 
           try { DESK.cleanupAudio(wavPath); } catch(e) {}
           if(ab.duration>State.duration)State.duration=ab.duration; 
-          Wave.live=false; Wave.compute(ab); drawTimeline(); 
+          Wave.setFromBuffer(ab, 'video'); drawTimeline(); 
         }
         catch(e){ console.warn('wave',e); Wave.initLive(); }
       }
@@ -335,18 +335,7 @@ const Media = {
         const ab = await this.ctx.decodeAudioData(buf);
         try { DESK.cleanupAudio(wavPath); } catch(e) {}
         
-        Wave.sources = Wave.sources.filter(s => s.sourceId !== src);
-        const mixPeaks = Wave.compute(ab, -1);
-        Wave.sources.push({ label: '主混音', path: null, peaks: mixPeaks, sourceId: src });
-        
-        for(let i=0; i<ab.numberOfChannels; i++){
-          const chPeaks = Wave.compute(ab, i);
-          Wave.sources.push({ label: '音軌 ' + (i+1), path: null, peaks: chPeaks, sourceId: src });
-        }
-        
-        Wave.live=false;
-        Wave.peaks = mixPeaks;
-        Wave._renderSrcSel();
+        Wave.setFromBuffer(ab, src);
         setStatus('音軌與波形已加入','ok');
       } catch(e) { console.warn('waveAudio error', e); setStatus('音軌已加入','ok'); }
     }catch(e){ setStatus('音軌載入失敗：'+e.message,''); showToast('無法載入音訊檔：'+e.message); }
@@ -839,6 +828,19 @@ const Wave = {
     this.srcIdx=0;
     this._renderSrcSel();
   },
+  setFromBuffer(ab, sourceId = 'video') {
+    this.sources = this.sources.filter(s => s.sourceId !== sourceId);
+    const mixPeaks = this.compute(ab, -1);
+    this.sources.push({ label: '主混音', path: null, peaks: mixPeaks, sourceId });
+    for(let i=0; i<ab.numberOfChannels; i++){
+      const chPeaks = this.compute(ab, i);
+      this.sources.push({ label: '音軌 ' + (i+1), path: null, peaks: chPeaks, sourceId });
+    }
+    this.live = false;
+    this.peaks = mixPeaks;
+    this.srcIdx = this.sources.findIndex(s => s.sourceId === sourceId);
+    this._renderSrcSel();
+  },
   async selectSource(idx){
     if(idx<0||idx>=this.sources.length) return;
     this.srcIdx=idx;
@@ -902,7 +904,8 @@ const Wave = {
     }
   },
   fromTracks(){
-    const b=Media.tracks.find(t=>t.kind==='buffer'); if(b){this.compute(b.buffer);drawTimeline();}
+    const b=Media.tracks.find(t=>t.kind==='buffer'); 
+    if(b){ Wave.setFromBuffer(b.buffer, 'video'); drawTimeline(); }
   },
   compute(ab, chIdx = -1){
     const res=this.resolution;

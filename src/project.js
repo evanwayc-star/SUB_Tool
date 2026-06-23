@@ -20,13 +20,13 @@ function _defaultSaveName(){
 
 function _buildProjectData(){
   return {
-    app:'SUB Tool', version:1,
+    app:'SUB Tool', version:2,
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
     tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontScale:t.fontScale||1,posPct:t.posPct!=null?t.posPct:10,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'})),
     pxPerSec:State.pxPerSec,
     notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
-    cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:c.track||0,timed:c.timed!==false}))
+    cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false}))
   };
 }
 function _buildBytes(){ return encodeUTF16LE(JSON.stringify(_buildProjectData(),null,1)); }
@@ -106,7 +106,12 @@ const Project = {
     else { downloadBytes(bytes,name,'application/json'); _onSaved(null,name); }
   },
   apply(data){
-    State.cues=(data.cues||[]).map(c=>({id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:c.track||0,timed:c.timed!==false}));
+    const isV1 = (data.version || 1) === 1;
+    State.cues=(data.cues||[]).map(c=>{
+      let tk = c.track||0;
+      if (!isV1 && c.track !== undefined) tk = Math.max(0, c.track - 1);
+      return {id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:tk,timed:c.timed!==false};
+    });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
     const maxTk=State.cues.reduce((m,c)=>Math.max(m,c.track||0),0);
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontScale:t.fontScale||1,
