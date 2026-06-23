@@ -15,6 +15,7 @@
   "build": {
     "appId": "com.subtool.app",
     "productName": "SUB Tool",
+    "icon": "electron/logo.png",
     "directories": {
       "output": "release"
     },

@@ -46,7 +46,7 @@ function renderNotes(){
     const row=document.createElement('div'); row.className='note-item'+(n.done?' done':'')+(n.id===_activeNoteId?' nt-active':''); row.dataset.id=n.id;
     row.innerHTML=
       `<input type="checkbox" ${n.done?'checked':''}>`+
-      `<span class="nt-time">${escapeHTML(secToEncore(n.time,State.fps))}</span>`+
+      `<span class="nt-time">${escapeHTML(secToEncore(n.time,State.fps,State.dropFrame))}</span>`+
       `<span class="nt-text" contenteditable="false" spellcheck="false">${escapeHTML(n.text)}</span>`+
       `<button class="nt-del" title="刪除">✕</button>`;
 
@@ -118,7 +118,7 @@ function exportNotes(){
   const csvF=v=>{ const s=String(v); return (s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s; };
   const lines=['狀態,時間,內容'];
   for(const n of State.notes){
-    const time=secToEncore(n.time,State.fps);
+    const time=secToEncore(n.time,State.fps,State.dropFrame);
     const content=(n.text||'').replace(/\r?\n/g,' ');
     lines.push(`${csvF(n.done?'V':'K')},${csvF(time)},${csvF(content)}`);
   }
@@ -137,7 +137,7 @@ function exportNotes(){
     '# No, Position, Duration, Comment',
   ];
   State.notes.forEach((n,i)=>{
-    const time=secToEncore(n.time,State.fps);
+    const time=secToEncore(n.time,State.fps,State.dropFrame);
     const comment=(n.text||'').replace(/"/g,'""');
     eLines.push(`${i+1},"${time}", ,"${comment}"`);
   });

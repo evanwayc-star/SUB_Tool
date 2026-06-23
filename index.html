@@ -24,19 +24,20 @@
     <button class="icon" data-act="imp-auto" title="匯入字幕（自動辨識格式）">📄 匯入字幕</button>
     <div class="sep"></div>
     <button class="icon" data-act="exp-dialog" title="匯出字幕">💬 匯出字幕</button>
-
-    <div class="spacer"></div>
-
+    <div class="sep"></div>
     <div class="fps-box" title="影格率 (Adobe Encore 時碼換算用)">
       FPS <select id="fpsSel">
         <option value="23.976">23.98</option>
         <option value="24" selected>24</option>
         <option value="25">25</option>
-        <option value="29.97">29.97</option>
+        <option value="29.97df">29.97 (DF)</option>
+        <option value="29.97">29.97 (NDF)</option>
         <option value="30">30</option>
       </select>
     </div>
-    <div class="sep"></div>
+
+    <div class="spacer"></div>
+
     <button class="icon" data-act="help" title="鍵盤說明">⌨ 說明</button>
   </div>
 
@@ -138,7 +139,7 @@
     <div class="tl-body">
       <div class="tl-gutter" id="tlGutter">
         <div class="tl-gutter-head">軌道<span class="spacer"></span><button class="mini gh-btn" data-act="toggle-all-vis" title="全部 顯示/隱藏">👁</button><button class="mini gh-btn" data-act="toggle-all-lock" title="全部 鎖定/解鎖">🔓</button></div>
-        <div class="tl-gutter-wave">🔊 波形<select id="waveSrcSel" style="display:none" title="波形來源聲道"></select></div>
+        <div class="tl-gutter-wave">🔊 波形<select id="waveGlobalSrcSel" style="margin-left:auto;margin-right:8px;" title="切換音訊來源"></select><select id="waveSrcSel" style="display:none" title="波形來源聲道"></select></div>
         <div id="tlGutterTracks"></div>
       </div>
       <div class="splitter-v" id="tlGutterSplitter" title="拖曳調整軌道欄寬度"></div>
@@ -224,7 +225,7 @@
 <div class="float-panel mixer-panel" id="mixerPanel">
   <div class="fp-head"><span>🎚 混音器</span><span class="spacer"></span><button class="fp-close" data-act="close-mixer">✕</button></div>
   <div class="fp-body">
-    <div class="mixer-toolbar"><button class="mini" data-act="mixer-reset" title="取消所有獨奏與靜音">重製</button><button class="mini" data-act="mixer-muteall" title="將所有軌道靜音">全靜音</button><span class="spacer" style="flex:1"></span><button class="mini" data-act="cache-manage" title="管理轉檔快取（音軌／波形）">🗂 快取</button></div>
+    <div class="mixer-toolbar"><select id="mixerSrcSel" class="mini" style="margin-right:8px;" title="切換音訊來源"></select><button class="mini" data-act="mixer-reset" title="取消所有獨奏與靜音">重製</button><button class="mini" data-act="mixer-muteall" title="將所有軌道靜音">全靜音</button><span class="spacer" style="flex:1"></span><button class="mini" data-act="cache-manage" title="管理轉檔快取（音軌／波形）">🗂 快取</button></div>
     <div class="mixer-strips" id="mixerStrips"></div>
   </div>
 </div>

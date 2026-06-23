@@ -183,7 +183,7 @@ function buildSubRow(c,i,overlaps){
     `<div class="idx">${i+1}</div>`+
     `<div class="body">`+
       `<div class="times">`+
-        (timed?`<span class="tin">${secToEncore(c.start,State.fps)}</span> → <span class="tout">${secToEncore(c.end,State.fps)}</span>`
+        (timed?`<span class="tin">${secToEncore(c.start,State.fps,State.dropFrame)}</span> → <span class="tout">${secToEncore(c.end,State.fps,State.dropFrame)}</span>`
               :`<span class="untimed">未定時 — 用 I/O 標記</span>`)+
         (timed?`<span class="dur">${(c.end-c.start).toFixed(2)}s</span>`:``)+
       `</div>`+
@@ -283,7 +283,7 @@ function renderSubRow(id){
   const c=State.cues.find(x=>x.id===id); if(!c)return;
   const timed=c.timed!==false;
   const times=row.querySelector('.times');
-  if(timed)times.innerHTML=`<span class="tin">${secToEncore(c.start,State.fps)}</span> → <span class="tout">${secToEncore(c.end,State.fps)}</span><span class="dur">${(c.end-c.start).toFixed(2)}s</span>`;
+  if(timed)times.innerHTML=`<span class="tin">${secToEncore(c.start,State.fps,State.dropFrame)}</span> → <span class="tout">${secToEncore(c.end,State.fps,State.dropFrame)}</span><span class="dur">${(c.end-c.start).toFixed(2)}s</span>`;
   const txt=row.querySelector('.txt');
   if(txt&&txt.contentEditable!=='true') txt.innerHTML=_txtInner(c.text);
 }

@@ -195,7 +195,8 @@ function createWindow() {
   mainWin = new BrowserWindow({
     width: 1480, height: 920, minWidth: 1024, minHeight: 640,
     backgroundColor: '#1b1b1d', autoHideMenuBar: true,
-    title: 'SUB Tool — 上字幕工具',
+    title: 'SUB TOOL',
+    icon: path.join(__dirname, 'logo.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true, nodeIntegration: false,

@@ -57,7 +57,7 @@ function refreshMpvSubs(){
   if(!Media.mpvMode || !window.subtool?.mpv) return;
   clearTimeout(_mpvSubT);
   _mpvSubT=setTimeout(()=>{
-    try{ window.subtool.mpv.subSet(SubFormats.toASS(State.cues,State.fps)).catch(()=>{}); }catch(e){}
+    try{ window.subtool.mpv.subSet(SubFormats.toASS(State.cues,State.fps,State.tracks)).catch(()=>{}); }catch(e){}
   },150);
 }
 /* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。
@@ -87,12 +87,12 @@ function renderVideoSub(){
   let html='';
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
-    const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && t>=c.start && t<c.end);
+    const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && (t+0.001)>=c.start && (t+0.001)<c.end);
     if(!cur.length)continue;
     const st=State.tracks[tk]||{};
     const pct=st.posPct!=null?st.posPct:10, fs=st.fontScale||1, al=st.align||'center', col=st.color||'#ffffff';
     html+=`<div class="vsub-track" style="bottom:${pct}%;text-align:${al}">`+
-      cur.map((c,i)=>`<span class="line" style="font-size:calc(${fs} * clamp(11px,1.9vw,22px));color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'')}</span>`).join('<br>')+
+      cur.map((c,i)=>`<span class="line" style="font-size:calc(${fs} * clamp(14px,2.5vw,36px));color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'')}</span>`).join('<br>')+
       `</div>`;
   }
   $('videoSub').innerHTML=html;
@@ -133,6 +133,29 @@ function renderMixer(){
   const wrap=$('mixerStrips'); if(!wrap)return;
   _meterStrips=[];
   const src=Media.activeSource;
+
+  const sel=$('mixerSrcSel');
+  const selWave=$('waveGlobalSrcSel');
+  if(sel || selWave){
+    const srcs=Media.getSources();
+    const updateSel = (sNode) => {
+      if(!sNode)return;
+      if(srcs.length===0){ sNode.innerHTML='<option value="">(無音源)</option>'; sNode.disabled=true; }
+      else {
+        sNode.innerHTML='';
+        for(const s of srcs){
+          const opt=document.createElement('option');
+          opt.value=s.id; opt.textContent=s.label;
+          if(s.id===src) opt.selected=true;
+          sNode.appendChild(opt);
+        }
+        sNode.disabled=false;
+      }
+    };
+    updateSel(sel);
+    updateSel(selWave);
+  }
+
   const real=Media.tracks.filter(t=>{
     if(!(t.kind==='buffer'||t.kind==='native'||t.kind==='element'))return false;
     if(src!==null&&(t.source||'video')!==src)return false;
@@ -229,7 +252,7 @@ function updateMeters(){
   }
 }
 function onDurationKnown(){
-  $('tcDur').textContent=secToEncore(State.duration,State.fps);
+  $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
   $('seekBar').max=Math.max(1,Math.round(State.duration*1000));
   $('stMedia').textContent=State.mediaName?(State.mediaName+(State.mediaSize?(' · '+(State.mediaSize/1e6).toFixed(1)+'MB'):'')):'';
   if(State.pxPerSec*State.duration < viewportW()) zoomFit(); else drawTimeline();
@@ -243,12 +266,13 @@ function ensurePlayheadVisible(){
     const newLeft=Math.max(0, t*State.pxPerSec - vw*0.3);
     tlScroll.scrollLeft=newLeft;
     State.viewStart=tlScroll.scrollLeft/State.pxPerSec; // read back actual (browser may clamp)
+    drawRuler(); drawWave(); renderCueBlocks(); // sync immediately; don't wait for passive scroll event
   }
 }
 
 /* 影片事件 */
 video.addEventListener('timeupdate',()=>{
-  $('tcCur').textContent=secToEncore(video.currentTime,State.fps); // 時:分:秒:格
+  $('tcCur').textContent=secToEncore(video.currentTime,State.fps,State.dropFrame); // 時:分:秒:格
   $('seekBar').value=Math.round(video.currentTime*1000);
 });
 let rafOn=false, rafFrame=0;
@@ -257,15 +281,15 @@ function rafLoop(){
     const t=Media.vTime();
     // 無媒體時更新時間顯示
     if(!video.src){
-      $('tcCur').textContent=secToEncore(t,State.fps);
+      $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
       $('seekBar').value=Math.round(t*1000);
     }
+    ensurePlayheadVisible(); // scroll viewport first so State.viewStart is current
     updatePlayhead(); renderVideoSub();
     if(Wave.live){ Wave.captureLive(); if((rafFrame++ % 6)===0) drawWave(); }
     // active 字幕
-    const act=State.cues.find(c=>c.timed!==false&&t>=c.start&&t<=c.end);
+    const act=State.cues.find(c=>c.timed!==false&&(t+0.001)>=c.start&&(t+0.001)<=c.end);
     if(act&&act.id!==State.activeId){ State.activeId=act.id; markActiveRow(act.id); }
-    ensurePlayheadVisible();
     // active 備註
     if(State.notes.length&&$('notesPanel').classList.contains('show')) updateNoteActive(t);
     // buffer 音軌 drift 校正
@@ -296,7 +320,7 @@ video.addEventListener('ended',()=>{Media.pause();});
 /* seek bar */
 $('seekBar').addEventListener('input',e=>{ const t=(+e.target.value)/1000; Media.seek(t); updateNoteActive(t); });
 // rateSel removed from UI — speed controlled via JKL keys
-$('fpsSel').addEventListener('change',e=>{ const prev=State.fps; setFps(+e.target.value||24); renderSubList(); renderNotes(); recordHistory(`切換 FPS ${prev}→${State.fps}`); });
+$('fpsSel').addEventListener('change',e=>{ const prev=State.fps,prevDf=State.dropFrame; setFps(e.target.value); renderSubList(); renderNotes(); recordHistory(`切換 FPS ${prevDf?prev+'df':prev}→${State.fps+(State.dropFrame?'df':'')}`); e.target.blur(); });
 $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
 
 /* 狀態列 / toast / modal */
@@ -341,11 +365,17 @@ async function doAction(act){
       if(IS_DESKTOP){ const r=await DESK.openProject(); if(r)Project.loadDesktop(r); }
       else { const f=await pickFile($('fileProject')); if(f)Project.load(f); } break;
     case 'save-project': Project.save(); break;
-    case 'new': if(confirm('清空目前專案？字幕與備註將遺失（未存檔的話）。')){
+    case 'new': if(confirm('清空目前專案？字幕、備註與已載入的影音都將清除（未存檔的話）。')){
       State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
       State.listTrack=0;State.tracks=[];syncTrackCount();
       State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');
       History.reset();resetProject();
+      // 清除影音
+      video.pause(); video.src='';
+      State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
+      Media.reset();
+      const nv=$('noVideo'); if(nv) nv.style.display='';
+      onDurationKnown(); renderAudioTracks();
       renderListTrackSel();renderAll();renderNotes();drawTimeline();
       setStatus('新專案','ok');
     } break;
@@ -452,11 +482,15 @@ function detectSubFormat(text, ext){
 /* 匯入 / 匯出字幕 */
 function _askFpsModal(){
   return new Promise(resolve=>{
-    const opts=FPS_SET.map(f=>`<option value="${f}"${f===State.fps?' selected':''}>${f===23.976?'23.976 (23.98)':f===29.97?'29.97':''+f}</option>`).join('');
+    const FPS_OPTS=[
+      {v:'23.976',l:'23.98'},{v:'24',l:'24'},{v:'25',l:'25'},
+      {v:'29.97df',l:'29.97 (Drop-frame)'},{v:'29.97',l:'29.97 (Non-Drop-frame)'},{v:'30',l:'30'},
+    ];
+    const opts=FPS_OPTS.map(o=>`<option value="${o.v}"${o.v==='29.97'?' selected':''}>${o.l}</option>`).join('');
     openModal('選擇影格率 (FPS)',
       `<p style="margin:0 0 12px;font-size:13px;color:var(--text-faint)">尚未載入影片，請先設定字幕的影格率。</p>`+
       `<label>FPS：<select id="importFpsSel" style="margin-left:6px">${opts}</select></label>`,
-      [{label:'確定',primary:true,act:()=>{ closeModal(); resolve(+$('importFpsSel').value); }},
+      [{label:'確定',primary:true,act:()=>{ const val=$('importFpsSel').value; closeModal(); resolve(val); }},
        {label:'取消',act:()=>{ closeModal(); resolve(null); }}]
     );
   });
@@ -471,8 +505,8 @@ async function importSub(){
     const buf=await readFile(f); text=decodeText(buf); fileName=f.name;
   }
   if(!State.mediaName){
-    const fps=await _askFpsModal(); if(fps===null)return;
-    setFps(fps);
+    const fpsVal=await _askFpsModal(); if(fpsVal===null)return;
+    setFps(fpsVal);
   }
   const ext=(fileName.split('.').pop()||'').toLowerCase();
   const kind=detectSubFormat(text, ext);
@@ -480,7 +514,7 @@ async function importSub(){
   try{
     if(kind==='srt')parsed=SubFormats.parseSRT(text);
     else if(kind==='ass')parsed=SubFormats.parseASS(text);
-    else if(kind==='encore')parsed=SubFormats.parseEncore(text,State.fps);
+    else if(kind==='encore')parsed=SubFormats.parseEncore(text,State.fps,State.dropFrame);
     else parsed=SubFormats.parseTXT(text);
   }catch(e){ showToast('解析失敗：'+e.message); return; }
   if(parsed.length===0){ showToast('未解析到字幕（檢查格式/編碼）'); return; }
@@ -595,8 +629,8 @@ function doExport(kind,cues,trackName){
   const tkSuffix=trackName?'_'+trackName.replace(/[\\/:*?"<>|]/g,'_'):'';
   let text,ext;
   if(kind==='srt'){ text=SubFormats.toSRT(cues,State.fps); ext='.srt'; }
-  else if(kind==='ass'){ text=SubFormats.toASS(cues,State.fps); ext='.ass'; }
-  else if(kind==='encore'){ text=SubFormats.toEncore(cues,State.fps); ext='.txt'; }
+  else if(kind==='ass'){ text=SubFormats.toASS(cues,State.fps,State.tracks); ext='.ass'; }
+  else if(kind==='encore'){ text=SubFormats.toEncore(cues,State.fps,State.dropFrame); ext='.txt'; }
   else { text=SubFormats.toTXT(cues); ext='.txt'; }
   const bytes=encodeUTF16LE(text);
   const fname=base+tkSuffix+(kind==='encore'?'_encore':'')+ext;
@@ -713,8 +747,8 @@ function detectFpsWeb(){
     last=meta.mediaTime; frames++;
     if(deltas.length<12 && frames<60){ try{video.requestVideoFrameCallback(cb);}catch(e){} return; }
     if(deltas.length>=6){ deltas.sort((a,b)=>a-b); const med=deltas[deltas.length>>1]; const fps=Math.round(1/med);
-      if(fps>=10&&fps<=120){ State.fps=fps; $('fpsSel').value=String(snapFps(fps));
-        $('tcDur').textContent=secToEncore(State.duration,fps); $('tcCur').textContent=secToEncore(video.currentTime||0,fps);
+      if(fps>=10&&fps<=120){ State.fps=snapFps(fps); $('fpsSel').value=State.dropFrame?String(State.fps)+'df':String(State.fps);
+        $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame); $('tcCur').textContent=secToEncore(video.currentTime||0,State.fps,State.dropFrame);
         setStatus('偵測到影片 FPS：'+fps,'ok'); } }
   };
   try{ video.requestVideoFrameCallback(cb); }catch(e){}
@@ -766,7 +800,7 @@ async function openCueEditModal(c){
   const orig=c.text||'';
   const trackIdx=c.track||0;
   const trackName=State.tracks[trackIdx]?.name||'';
-  const tc=`${secToEncore(c.start,State.fps)} → ${secToEncore(c.end,State.fps)}`;
+  const tc=`${secToEncore(c.start,State.fps,State.dropFrame)} → ${secToEncore(c.end,State.fps,State.dropFrame)}`;
 
   // 找同 in 點的其他軌道字幕（容差 1 格）
   const TOL=1/Math.max(State.fps||25,1);
@@ -847,14 +881,19 @@ async function openCueEditModal(c){
 function initUI(){
   // 軌道切換下拉
   $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; State.selectedIds=[]; State.selectedId=null; $('stSel').textContent=''; searchUpdate(); renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
+  // 混音器音源切換
+  const mixerSrcSel=$('mixerSrcSel');
+  if(mixerSrcSel) mixerSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
+  const waveGlobalSrcSel=$('waveGlobalSrcSel');
+  if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
   // 樣式控制（大小 / 位置 / 顏色）
-  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontScale=clamp(+e.target.value,0.5,3); renderVideoSub(); });
+  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontScale=clamp(+e.target.value,0.5,3); renderVideoSub(); refreshMpvSubs(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
-  $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,92); renderVideoSub(); });
+  $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,92); renderVideoSub(); refreshMpvSubs(); });
   $('tsPos').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
-  $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); });
-  $('tsSizeSel').addEventListener('change',e=>{ const v=+e.target.value; $('tsSize').value=v; const i=State.listTrack; if(State.tracks[i]){ State.tracks[i].fontScale=v; renderVideoSub(); } e.target.blur(); });
-  $('tsPosSel').addEventListener('change',e=>{ const v=+e.target.value; $('tsPos').value=v; const i=State.listTrack; if(State.tracks[i]){ State.tracks[i].posPct=v; renderVideoSub(); } e.target.blur(); });
+  $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); refreshMpvSubs(); });
+  $('tsSizeSel').addEventListener('change',e=>{ const v=+e.target.value; $('tsSize').value=v; const i=State.listTrack; if(State.tracks[i]){ State.tracks[i].fontScale=v; renderVideoSub(); refreshMpvSubs(); } e.target.blur(); });
+  $('tsPosSel').addEventListener('change',e=>{ const v=+e.target.value; $('tsPos').value=v; const i=State.listTrack; if(State.tracks[i]){ State.tracks[i].posPct=v; renderVideoSub(); refreshMpvSubs(); } e.target.blur(); });
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());
@@ -947,7 +986,7 @@ function showFpsConvertDialog(){
       for(const c of cues){ c.start=Math.max(0,c.start*ratio); c.end=Math.max(c.start+0.001,c.end*ratio); }
       // 更新 State.duration 為 max(影片片長, 最後字幕 end)
       const maxEnd=Math.max(...State.cues.map(c=>c.end));
-      if(maxEnd>State.duration){ State.duration=maxEnd; $('tcDur').textContent=secToEncore(maxEnd,State.fps); }
+      if(maxEnd>State.duration){ State.duration=maxEnd; $('tcDur').textContent=secToEncore(maxEnd,State.fps,State.dropFrame); }
       closeModal(); sortCues(); renderAll(); layoutTimeline(); drawTimeline();
       recordHistory(`FPS 轉換 ${from}→${to}`);
       setStatus(`已將「${tk.name}」從 ${from}fps 轉換至 ${to}fps（${cues.length} 條）`,'ok');
@@ -1138,10 +1177,12 @@ function togglePanel(id){ const p=$(id); const willShow=!p.classList.contains('s
 function parseTimecodeInput(str){
   str=String(str).trim(); if(!str)return null;
   let h=0,m=0,s=0,f=0;
-  if(str.includes(':')){
-    const p=str.split(':').map(x=>parseInt(x,10)||0);
+  if(str.includes(':')||str.includes(';')){
+    const p=str.split(/[:;]/).map(x=>parseInt(x,10)||0);
     // 由右至左：格, 秒, 分, 時
     f=p[p.length-1]||0; s=p[p.length-2]||0; m=p[p.length-3]||0; h=p[p.length-4]||0;
+    if(State.dropFrame)
+      return encoreToSec(`${pad(h)}:${pad(m)}:${pad(s)};${pad(f)}`,State.fps,true);
   }else{
     if(!/^\d+$/.test(str))return null;
     const g=[]; let r=str; while(r.length>2){ g.unshift(r.slice(-2)); r=r.slice(0,-2); } g.unshift(r);
@@ -1157,7 +1198,7 @@ function startTimeEdit(){
   const inp=document.createElement('input'); inp.className='tc-edit'; inp.value=''; inp.placeholder=old;
   span.textContent=''; span.appendChild(inp); inp.focus();
   let done=false;
-  const fin=(commit)=>{ if(done)return; done=true; inp.remove(); span.textContent=secToEncore(Media.vTime(),State.fps);
+  const fin=(commit)=>{ if(done)return; done=true; inp.remove(); span.textContent=secToEncore(Media.vTime(),State.fps,State.dropFrame);
     if(commit){
       const raw=inp.value.trim(); let t=null;
       if(raw.startsWith('+')||raw.startsWith('-')){
@@ -1197,7 +1238,7 @@ function initExtras(){
   $('waveSrcSel')?.addEventListener('change',e=>{ Wave.selectSource(+e.target.value); e.target.blur(); });
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
   $('tcCur').addEventListener('contextmenu',e=>{ e.preventDefault();
-    try{ navigator.clipboard.writeText(secToEncore(Media.vTime(),State.fps)); showToast('已複製時間碼'); }catch(err){} });
+    try{ navigator.clipboard.writeText(secToEncore(Media.vTime(),State.fps,State.dropFrame)); showToast('已複製時間碼'); }catch(err){} });
   // 浮動面板拖曳（拖 fp-head 移動整個面板）
   document.querySelectorAll('.float-panel').forEach(panel=>{
     const head=panel.querySelector('.fp-head'); if(!head)return;

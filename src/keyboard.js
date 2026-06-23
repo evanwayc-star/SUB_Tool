@@ -42,7 +42,7 @@ function jklApply(){
       ensurePlayheadVisible();
       renderVideoSub();
       if(!video.src){
-        $('tcCur').textContent=secToEncore(Media.vTime(),State.fps);
+        $('tcCur').textContent=secToEncore(Media.vTime(),State.fps,State.dropFrame);
         $('seekBar').value=Math.round(Media.vTime()*1000);
       }
     }, 1000/fps);
@@ -157,18 +157,20 @@ window.addEventListener('keydown',e=>{
       break;
     case 'arrowup':
       e.preventDefault();
-      if(e.shiftKey){ seekHome(); }
+      if((e.ctrlKey||e.metaKey)&&e.shiftKey){ jumpToFirstLastCue(-1); }
+      else if(e.shiftKey){ seekHome(); }
       else if(e.ctrlKey||e.metaKey){ stepBoundary(-1); }
       else jumpToAdjacentCue(-1);
       break;
     case 'arrowdown':
       e.preventDefault();
-      if(e.shiftKey){ seekEnd(); }
+      if((e.ctrlKey||e.metaKey)&&e.shiftKey){ jumpToFirstLastCue(1); }
+      else if(e.shiftKey){ seekEnd(); }
       else if(e.ctrlKey||e.metaKey){ stepBoundary(1); }
       else jumpToAdjacentCue(1);
       break;
-    case 'home': e.preventDefault(); if(e.shiftKey) jumpToFirstLastCue(-1); else seekHome(); break;
-    case 'end': e.preventDefault(); if(e.shiftKey) jumpToFirstLastCue(1); else seekEnd(); break;
+    case 'home': e.preventDefault(); seekHome(); break;
+    case 'end': e.preventDefault(); seekEnd(); break;
     case 'enter': e.preventDefault(); { const sel=State.selectedId; if(sel){ const row=sublist.querySelector(`.sub-row[data-id="${sel}"]`); if(row)row.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window})); } } break;
     case 'delete': if(State.selectedIds.length||State.selectedId){e.preventDefault();deleteSelected();} break;
     case 'escape':

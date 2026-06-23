@@ -317,7 +317,20 @@ const Media = {
       if(el.duration>State.duration){State.duration=el.duration;onDurationKnown();}
       renderAudioTracks();
       if(this.playing) this.startElementSources(this.vTime());
-      setStatus('音軌已加入','ok');
+      setStatus('產生波形…','busy');
+      try {
+        const wavB64 = await DESK.waveAudio(p, el.duration);
+        const ab = await this.ctx.decodeAudioData(b64ToBytes(wavB64).buffer);
+        const srcObj = { label: name, path: null, peaks: null, sourceId: src };
+        Wave.sources.push(srcObj);
+        Wave.live=false;
+        const oldPeaks = Wave.peaks;
+        Wave.compute(ab);
+        srcObj.peaks = Wave.peaks;
+        Wave.peaks = oldPeaks;
+        Wave._renderSrcSel();
+        setStatus('音軌與波形已加入','ok');
+      } catch(e) { console.warn('waveAudio error', e); setStatus('音軌已加入','ok'); }
     }catch(e){ setStatus('音軌載入失敗：'+e.message,''); showToast('無法載入音訊檔：'+e.message); }
   },
 
@@ -360,7 +373,7 @@ const Media = {
         if(e.name==='time-pos'&&e.data!=null){
           const prev=this._mpvTime; this._mpvTime=e.data;
           // 直接更新 UI（確保暫停時在 mpv 視窗拖拉時我們的時碼也同步）
-          $('tcCur').textContent=secToEncore(e.data,State.fps);
+          $('tcCur').textContent=secToEncore(e.data,State.fps,State.dropFrame);
           $('seekBar').value=Math.round(e.data*1000);
           updatePlayhead();
           if(Math.abs(e.data-prev)>0.5) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:e.data}));
@@ -653,14 +666,14 @@ const Media = {
       this._mpvTime=t;
       DESK.mpv.seek(t).catch(()=>{});
       for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ try{tr.el.currentTime=clamp(t,0,tr.el.duration||t);}catch(e){} } }
-      $('tcCur').textContent=secToEncore(t,State.fps);
+      $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
       $('seekBar').value=Math.round(t*1000);
       window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
       return;
     }
     if(!video.src){
       this._vTime=Math.max(0,t); if(this._vStart!==null)this._vStart=performance.now();
-      $('tcCur').textContent=secToEncore(this._vTime,State.fps);
+      $('tcCur').textContent=secToEncore(this._vTime,State.fps,State.dropFrame);
       $('seekBar').value=Math.round(this._vTime*1000);
       for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ try{tr.el.currentTime=clamp(t,0,tr.el.duration||t);}catch(e){} } }
       if(this.playing&&this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
@@ -726,6 +739,12 @@ const Media = {
     for(const tr of this.tracks) tr._srcHidden=(id!==null && (tr.source||'video')!==id);
     this.applyGains();
     renderAudioTracks();
+    // 自動切換波形
+    let targetIdx = -1;
+    if(id === 'video' || id === null) targetIdx = Wave.sources.findIndex(s => (s.sourceId || 'video') === 'video');
+    else targetIdx = Wave.sources.findIndex(s => s.sourceId === id);
+    if(targetIdx >= 0) { Wave.selectSource(targetIdx); }
+    Wave._renderSrcSel();
   },
   setRate(r){
     if(this.mpvMode){
@@ -756,6 +775,8 @@ const Media = {
     this.tracks=[]; this.usingWebAudio=false;
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
     this.objectURLs.forEach(u=>{try{URL.revokeObjectURL(u);}catch(e){}}); this.objectURLs=[];
+    this.playing=false; this._vTime=0; this._vStart=null;
+    const pb=$('playBtn'); if(pb) pb.textContent='▶';
     State.duration=0;
     Wave.live=false; Wave.peaks=null; Wave.clearSources();
   }
@@ -789,11 +810,11 @@ const Wave = {
   sources:[],   // [{label, path, peaks}]
   srcIdx:-1,
 
-  registerSources(wavePath, channels){
+  registerSources(wavePath, channels, sourceId='video'){
     this.sources=[];
-    if(wavePath) this.sources.push({label:'主混音',path:wavePath,peaks:this.peaks});
+    if(wavePath) this.sources.push({label:'主混音',path:wavePath,peaks:this.peaks, sourceId});
     (channels||[]).forEach((ch,i)=>{
-      this.sources.push({label:ch.label||('聲道 '+(i+1)),path:ch.file,peaks:null});
+      this.sources.push({label:ch.label||('音軌 '+(i+1)),path:ch.file,peaks:null, sourceId});
     });
     this.srcIdx=0;
     this._renderSrcSel();
@@ -818,10 +839,16 @@ const Wave = {
   },
   _renderSrcSel(){
     const sel=$('waveSrcSel'); if(!sel) return;
-    const show=this.sources.length>1;
-    sel.innerHTML=this.sources.map((s,i)=>`<option value="${i}">${s.label}</option>`).join('');
-    sel.value=String(Math.max(0,this.srcIdx));
-    sel.style.display=show?'':'none';
+    const activeSrcId = Media.activeSource || 'video';
+    const matching = this.sources.map((s,i) => ({s, i}))
+        .filter(x => (x.s.sourceId || 'video') === activeSrcId);
+    const show = matching.length > 1;
+    sel.innerHTML = matching.map(x => `<option value="${x.i}">${x.s.label}</option>`).join('');
+    if(!matching.find(x => x.i === this.srcIdx) && matching.length > 0){
+      this.selectSource(matching[0].i);
+    }
+    sel.value = String(Math.max(0, this.srcIdx));
+    sel.style.display = show ? '' : 'none';
   },
 
   async fromFile(file){

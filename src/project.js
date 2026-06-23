@@ -1,5 +1,5 @@
 /* SUB Tool — 專案存讀 (.subtool) */
-import { State, IS_DESKTOP, DESK, snapFps, newId, ensureTrackCount } from './state.js';
+import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount } from './state.js';
 import { $ } from './dom.js';
 import { encodeUTF16LE, decodeText, bytesToB64, b64ToBytes, downloadBytes, readFile, escapeHTML } from './util.js';
 import { Media } from './media.js';
@@ -22,7 +22,7 @@ function _buildProjectData(){
   return {
     app:'SUB Tool', version:1,
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
-    fps:State.fps, duration:State.duration, trackCount:State.trackCount,
+    fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
     tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontScale:t.fontScale||1,posPct:t.posPct!=null?t.posPct:10,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'})),
     pxPerSec:State.pxPerSec,
     notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
@@ -107,7 +107,7 @@ const Project = {
   },
   apply(data){
     State.cues=(data.cues||[]).map(c=>({id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:c.track||0,timed:c.timed!==false}));
-    State.fps=snapFps(data.fps||24); if($('fpsSel'))$('fpsSel').value=String(State.fps);
+    setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
     const maxTk=State.cues.reduce((m,c)=>Math.max(m,c.track||0),0);
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontScale:t.fontScale||1,
       posPct:t.posPct!=null?t.posPct:(t.posV==='top'?90:t.posV==='middle'?50:10), align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'}));

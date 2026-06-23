@@ -9,6 +9,7 @@ const State = {
   trackCount: 0,       // = tracks.length（同步用）
   listTrack: 0,        // 字幕列表顯示的軌道
   fps: 24,
+  dropFrame: false,
   duration: 0,
   selectedId: null,    // 主選取（鍵盤/IO 對象）
   selectedIds: [],     // 多選集合
@@ -30,8 +31,13 @@ function syncTrackCount(){ State.trackCount=State.tracks.length; }
 /* 允許的影格率（下拉選單） */
 const FPS_SET=[23.976,24,25,29.97,30];
 function snapFps(v){ let best=24,bd=1e9; for(const f of FPS_SET){const d=Math.abs(f-v);if(d<bd){bd=d;best=f;}} return best; }
-function setFps(v){ State.fps=snapFps(v); const sel=$('fpsSel'); if(sel)sel.value=String(State.fps);
-  $('tcCur').textContent=secToEncore(video.currentTime||0,State.fps); $('tcDur').textContent=secToEncore(State.duration,State.fps); }
+function setFps(v){
+  let df=false;
+  if(typeof v==='string'&&v.endsWith('df')){ df=true; v=parseFloat(v); }
+  State.fps=snapFps(typeof v==='number'?v:parseFloat(v)||24); State.dropFrame=df;
+  const sel=$('fpsSel'); if(sel)sel.value=df?String(State.fps)+'df':String(State.fps);
+  $('tcCur').textContent=secToEncore(video.currentTime||0,State.fps,df); $('tcDur').textContent=secToEncore(State.duration,State.fps,df);
+}
 function ensureTrackCount(n){ while(State.tracks.length<n)State.tracks.push(newTrack()); syncTrackCount(); }
 function trackVisible(i){ return !State.tracks[i] || State.tracks[i].visible!==false; }
 let cueSeq = 1;
