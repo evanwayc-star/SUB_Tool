@@ -19,18 +19,38 @@ let _jklTimer = null;
 function jklClear(){
   if(_jklTimer){ clearInterval(_jklTimer); _jklTimer=null; }
 }
+function updateSpeedIndicator(){
+  const el = document.getElementById('speedIndicator');
+  if(!el) return;
+  if (_jklSpeed === 0 || _jklSpeed === 1) {
+    el.textContent = '1x';
+    el.style.color = 'var(--text-faint)';
+  } else if (_jklSpeed < 0) {
+    el.textContent = _jklSpeed + 'x';
+    el.style.color = '#ff4444';
+  } else {
+    el.textContent = _jklSpeed + 'x';
+    el.style.color = '#44ff44';
+  }
+}
+function resetPlaybackSpeed(){
+  jklClear();
+  _jklSpeed=0;
+  Media.setRate(1);
+  updateSpeedIndicator();
+}
 function jklApply(){
   jklClear();
   if(_jklSpeed===0){
     Media.pause();
-    video.playbackRate=1;
+    Media.setRate(1);
   } else if(_jklSpeed>0){
     Media.setRate(_jklSpeed);
     if(!Media.playing) Media.play();
   } else {
     // 負速度：暫停影片，用 interval 逐格倒退
     Media.pause();
-    video.playbackRate=1;
+    Media.setRate(1);
     const fps=30, step=Math.abs(_jklSpeed)/fps;
     const capturedSpeed=_jklSpeed;
     _jklTimer=setInterval(()=>{
@@ -52,13 +72,15 @@ function jklApply(){
   const osd=_jklSpeed===0?'⏸':(_jklSpeed>0?`▶ ${spd}×`:`◀ ${spd}×`);
   setStatus(label, _jklSpeed!==0?'ok':'');
   showOsd(osd);
+  updateSpeedIndicator();
 }
 /* 停止並重置 JKL（從外部呼叫，例如時間軸拖曳） */
 function jklReset(){
   jklClear();
   _jklSpeed=0;
   Media.pause();
-  video.playbackRate=1;
+  Media.setRate(1);
+  updateSpeedIndicator();
 }
 
 /* ===== 7. 鍵盤 (I/O 上字幕) =========================================== */
@@ -116,7 +138,7 @@ window.addEventListener('keydown',e=>{
   switch(k){
     case ' ':
       e.preventDefault();
-      jklClear(); _jklSpeed=0; video.playbackRate=1;
+      jklClear(); _jklSpeed=0; Media.setRate(1); updateSpeedIndicator();
       Media.toggle();
       break;
     case 'j': // 倒帶：-1 → -1.5 → -2 → -2.5 → -3 → 循環回 -1
@@ -130,6 +152,16 @@ window.addEventListener('keydown',e=>{
       jklApply(); break;
     case 'k': // 暫停
       e.preventDefault(); _jklSpeed=0; jklApply(); break;
+    case '2':
+      e.preventDefault();
+      jklClear(); _jklSpeed=0; video.playbackRate=1; Media.pause();
+      jumpToCueInMinusFrames(1, 5);
+      break;
+    case '5':
+      e.preventDefault();
+      jklClear(); _jklSpeed=0; video.playbackRate=1; Media.pause();
+      jumpToCueInMinusFrames(-1, 5);
+      break;
     case 'l': // 正播：1 → 1.5 → 2 → 2.5 → 3 → 循環回 1
       e.preventDefault();
       if(_jklSpeed<=0) _jklSpeed=1;
@@ -159,14 +191,20 @@ window.addEventListener('keydown',e=>{
       e.preventDefault();
       if((e.ctrlKey||e.metaKey)&&e.shiftKey){ jumpToFirstLastCue(-1); }
       else if(e.shiftKey){ seekHome(); }
-      else if(e.ctrlKey||e.metaKey){ stepBoundary(-1); }
+      else if(e.ctrlKey||e.metaKey){ 
+        if(Media.playing) Media.pause();
+        stepBoundary(-1); 
+      }
       else jumpToAdjacentCue(-1);
       break;
     case 'arrowdown':
       e.preventDefault();
       if((e.ctrlKey||e.metaKey)&&e.shiftKey){ jumpToFirstLastCue(1); }
       else if(e.shiftKey){ seekEnd(); }
-      else if(e.ctrlKey||e.metaKey){ stepBoundary(1); }
+      else if(e.ctrlKey||e.metaKey){ 
+        if(Media.playing) Media.pause();
+        stepBoundary(1); 
+      }
       else jumpToAdjacentCue(1);
       break;
     case 'home': e.preventDefault(); seekHome(); break;
@@ -280,6 +318,39 @@ function jumpToAdjacentCue(dir){
     idx=list.findIndex(c=>c.id===sel.id)+dir;
   } else {
     const t=Media.vTime();
+    if(dir<0){
+      idx=list.filter(c=>c.start<t-1e-4).length-1;
+      if(Media.playing) idx -= 1;
+    }
+    else      idx=list.findIndex(c=>c.start>t+1e-4);
+  }
+  idx=Math.max(0,Math.min(list.length-1,idx));
+  const target=list[idx];
+  if(!target) return;
+  if(Media.playing){
+    State.selectedId=null;
+    State.selectedIds=[];
+    refreshSelectionUI();
+    const stSel = document.getElementById('stSel');
+    if(stSel) stSel.textContent='';
+  } else {
+    selectCueSingle(target.id, false);
+  }
+  Media.seek(target.start);
+  _pendingStep=null;
+  updatePlayhead(); ensurePlayheadVisible();
+}
+
+function jumpToCueInMinusFrames(dir, frames){
+  const sel=State.cues.find(c=>c.id===State.selectedId);
+  const track=sel?(sel.track||0):State.listTrack;
+  const list=State.cues.filter(c=>(c.track||0)===track);
+  if(!list.length) return;
+  let idx;
+  if(sel){
+    idx=list.findIndex(c=>c.id===sel.id)+dir;
+  } else {
+    const t=Media.vTime();
     if(dir<0) idx=list.filter(c=>c.start<t-1e-4).length-1;
     else      idx=list.findIndex(c=>c.start>t+1e-4);
   }
@@ -287,7 +358,8 @@ function jumpToAdjacentCue(dir){
   const target=list[idx];
   if(!target) return;
   selectCueSingle(target.id, false);
-  Media.seek(target.start);
+  const targetTime = Math.max(0, target.start - (frames / State.fps));
+  Media.seek(targetTime);
   _pendingStep=null;
   updatePlayhead(); ensurePlayheadVisible();
 }
@@ -346,4 +418,4 @@ function stepBoundary(dir){
   ensurePlayheadVisible(); updatePlayhead();
 }
 
-export { setIn, setOut, nudge, stepBoundary, jklReset };
+export { setIn, setOut, nudge, stepBoundary, jklReset, resetPlaybackSpeed };

@@ -67,6 +67,7 @@
           <button class="icon" data-act="fwd1" title="前進 1 秒">1⏭</button>
           <button class="icon" data-act="fwd5" title="前進 5 秒">5⏭</button>
         </div>
+        <div id="speedIndicator" style="color:var(--text-faint); font-weight:600; font-size:13px; margin:0 4px; width:42px; text-align:center;">1x</div>
         <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span> / <span id="tcDur">00:00:00:00</span></div>
         <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
         <button class="icon tp-btn" data-act="mixer" title="混音器：逐聲道電平 / 獨奏 / 靜音">🎚</button>
@@ -216,6 +217,7 @@
     <span class="spacer"></span>
     <button class="icon" data-act="export-notes" title="匯出備註為 CSV">⬇ 匯出</button>
     <button class="icon" data-act="add-note" title="加入目前時間點的備註">＋ 新增</button>
+    <button class="icon" data-act="clear-notes" title="清除所有備註">🗑 清除全部</button>
     <button class="fp-close" data-act="close-notes">✕</button>
   </div>
   <div class="fp-body" id="notesList"></div>

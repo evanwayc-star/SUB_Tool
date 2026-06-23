@@ -57,6 +57,8 @@ const Media = {
     if(native){
       await new Promise((res)=>{ video.onloadedmetadata=res; if(video.readyState>=1)res(); });
       State.duration=video.duration||0;
+      State.videoWidth=video.videoWidth||0;
+      State.videoHeight=video.videoHeight||0;
       detectFpsWeb(); // 播放時自動偵測 FPS
       // 用 Web Audio 接管原生音訊，L / R 分頻顯示於混音器
       const stereoTracks=this._connectStereo();
@@ -148,6 +150,7 @@ const Media = {
     let info=null; try{ info=await DESK.probe(p); }catch(e){ showToast('ffprobe 失敗：'+e.message); }
     const dur=info?info.duration:0;
     if(info&&info.video&&info.video.fps){ setFps(info.video.fps); }
+    if(info&&info.video){ State.videoWidth=info.video.width||0; State.videoHeight=info.video.height||0; }
     const nativeCodecs=['h264','hevc','vp8','vp9','av1','mpeg4'];
     const vCodec=info&&info.video?info.video.codec:null;
     const ext=(State.mediaName.split('.').pop()||'').toLowerCase();
@@ -387,8 +390,8 @@ const Media = {
         }
         if(e.name==='pause'){
           const paused=!!e.data;
-          if(paused&&this.playing){ this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶'; }
-          else if(!paused&&!this.playing){ this.ensureCtx(); this.startElementSources(this._mpvTime); this.playing=true; $('playBtn').textContent='⏸'; }
+          if(paused&&this.playing){ this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶'; video.dispatchEvent(new Event('pause')); }
+          else if(!paused&&!this.playing){ this.ensureCtx(); this.startElementSources(this._mpvTime); this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); }
         }
         if(e.name==='duration'&&typeof e.data==='number'&&e.data>0){
           this._mpvDuration=e.data; State.duration=e.data; onDurationKnown();
@@ -639,7 +642,7 @@ const Media = {
       this.ensureCtx();
       DESK.mpv.play().catch(()=>{});
       this.startElementSources(this._mpvTime);
-      this.playing=true; $('playBtn').textContent='⏸'; return;
+      this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); return;
     }
     if(!video.src){
       if(this._vStart!==null) this._vTime=this.vTime();
@@ -647,7 +650,7 @@ const Media = {
       this.ensureCtx();
       if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(this._vTime);
       this.startElementSources(this._vTime);
-      this.playing=true; $('playBtn').textContent='⏸'; return;
+      this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); return;
     }
     this.ensureCtx();
     if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(video.currentTime);

@@ -113,11 +113,11 @@ const Project = {
       return {id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:tk,timed:c.timed!==false};
     });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
-    const maxTk=State.cues.reduce((m,c)=>Math.max(m,c.track||0),0);
+    const maxTk=State.cues.length > 0 ? State.cues.reduce((m,c)=>Math.max(m,c.track||0),0) : -1;
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontScale:t.fontScale||1,
       posPct:t.posPct!=null?t.posPct:(t.posV==='top'?90:t.posV==='middle'?50:10), align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'}));
     else State.tracks=[];
-    ensureTrackCount(Math.max(data.trackCount||1,maxTk+1));
+    ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:1, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));
     State.duration=data.duration||State.duration;
     State.pxPerSec=data.pxPerSec||80;

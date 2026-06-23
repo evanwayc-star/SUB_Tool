@@ -9,11 +9,11 @@ import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackC
 import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline.js';
 import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitles.js';
-import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
+import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
 import { Project, ensureProjectSaved, isProjectGuardDone, resetProject } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
-import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive } from './notes.js';
+import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 
 
 
@@ -57,7 +57,7 @@ function refreshMpvSubs(){
   if(!Media.mpvMode || !window.subtool?.mpv) return;
   clearTimeout(_mpvSubT);
   _mpvSubT=setTimeout(()=>{
-    try{ window.subtool.mpv.subSet(SubFormats.toASS(State.cues,State.fps,State.tracks)).catch(()=>{}); }catch(e){}
+    try{ window.subtool.mpv.subSet(SubFormats.toASS(State.cues,State.fps,State.tracks,State.videoWidth||video.videoWidth||1920,State.videoHeight||video.videoHeight||1080, window.innerWidth||1920, $('videoWrap')?.clientWidth||1000, $('videoWrap')?.clientHeight||562)).catch(()=>{}); }catch(e){}
   },150);
 }
 /* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。
@@ -85,14 +85,16 @@ function renderVideoSub(){
   const t=Media.vTime();
   // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
   let html='';
+  const baseFs = Math.max(14, Math.min(36, Math.round(($('videoWrap')?.clientWidth||1000) * 0.025)));
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
     const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && (t+0.001)>=c.start && (t+0.001)<c.end);
     if(!cur.length)continue;
     const st=State.tracks[tk]||{};
     const pct=st.posPct!=null?st.posPct:10, fs=st.fontScale||1, al=st.align||'center', col=st.color||'#ffffff';
-    html+=`<div class="vsub-track" style="bottom:${pct}%;text-align:${al}">`+
-      cur.map((c,i)=>`<span class="line" style="font-size:calc(${fs} * clamp(14px,2.5vw,36px));color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'')}</span>`).join('<br>')+
+    const fsPx = Math.round(baseFs * fs);
+    html+=`<div class="vsub-track" style="bottom:${pct}%;text-align:${al};letter-spacing:1px;font-weight:500;font-family:'思源黑體', 'Noto Sans TC', 'Source Han Sans TC', sans-serif;">`+
+      cur.map((c,i)=>`<span class="line" style="font-size:${fsPx}px;color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'')}</span>`).join('<br>')+
       `</div>`;
   }
   $('videoSub').innerHTML=html;
@@ -347,7 +349,15 @@ function markActiveRow(id){
     }
   }
 }
-video.addEventListener('play',()=>{Media.playing=true;$('playBtn').textContent='⏸';});
+video.addEventListener('play',()=>{
+  Media.playing=true;
+  $('playBtn').textContent='⏸';
+  State.selectedIds=[];
+  State.selectedId=null;
+  refreshSelectionUI();
+  const stSel = $('stSel');
+  if(stSel) stSel.textContent='';
+});
 video.addEventListener('pause',()=>{$('playBtn').textContent='▶';});
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
 window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});
@@ -435,7 +445,10 @@ async function doAction(act){
       if(State.subMode){ Media.play(); setStatus('🎯 上字幕模式 ON — 播放中，I 設起點，O 設終點後自動前進','ok'); }
       else { Media.pause(); setStatus('上字幕模式 OFF',''); }
       break;
-    case 'playpause': Media.toggle(); break;
+    case 'playpause': 
+      if(!Media.playing) resetPlaybackSpeed();
+      Media.toggle(); 
+      break;
     case 'seek-start': Media.seek(0); break;
     case 'back5': nudge(-5); break;
     case 'back1': nudge(-1); break;
@@ -459,6 +472,7 @@ async function doAction(act){
     case 'close-history': $('historyPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'notes': togglePanel('notesPanel'); renderNotes(); break;
     case 'add-note': addNote(); break;
+    case 'clear-notes': clearAllNotes(); break;
     case 'close-notes': $('notesPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'mixer': togglePanel('mixerPanel'); renderMixer(); break;
     case 'close-mixer': $('mixerPanel').classList.remove('show'); _syncMpvPanel(); break;
@@ -466,7 +480,7 @@ async function doAction(act){
     case 'mixer-muteall': mixerMuteAll(); break;
     case 'cache-manage': openCacheDialog(); break;
     case 'export-notes': exportNotes(); break;
-    case 'toggle-all-vis': { const anyVis=State.tracks.some(t=>t.visible!==false); State.tracks.forEach(t=>t.visible=!anyVis); drawTimeline(); renderVideoSub(); } break;
+    case 'toggle-all-vis': { const anyVis=State.tracks.some(t=>t.visible!==false); State.tracks.forEach(t=>t.visible=!anyVis); drawTimeline(); renderVideoSub(); refreshMpvSubs(); } break;
     case 'toggle-all-lock': { const anyUnlocked=State.tracks.some(t=>!t.locked); State.tracks.forEach(t=>t.locked=anyUnlocked); drawTimeline(); } break;
     case 'copy-track': doCopyTrack(); break;
     case 'check-panel': { const btn=$('checkPanelBtn'); const willShow=!$('checkPanel').classList.contains('show'); togglePanel('checkPanel'); if(btn)btn.classList.toggle('sub-active',willShow); if(willShow)renderCheckPanel(); } break;
@@ -686,7 +700,7 @@ function doExport(kind,cues,trackName){
   const tkSuffix=trackName?'_'+trackName.replace(/[\\/:*?"<>|]/g,'_'):'';
   let text,ext;
   if(kind==='srt'){ text=SubFormats.toSRT(cues,State.fps); ext='.srt'; }
-  else if(kind==='ass'){ text=SubFormats.toASS(cues,State.fps,State.tracks); ext='.ass'; }
+  else if(kind==='ass'){ text=SubFormats.toASS(cues,State.fps,State.tracks,State.videoWidth||video.videoWidth||1920,State.videoHeight||video.videoHeight||1080, window.innerWidth||1920, $('videoWrap')?.clientWidth||1000, $('videoWrap')?.clientHeight||562); ext='.ass'; }
   else if(kind==='encore'){ text=SubFormats.toEncore(cues,State.fps,State.dropFrame); ext='.txt'; }
   else { text=SubFormats.toTXT(cues); ext='.txt'; }
   const bytes=encodeUTF16LE(text);
@@ -1341,7 +1355,15 @@ function initExtras(){
 
 /* resize */
 let rzT;
-window.addEventListener('resize',()=>{clearTimeout(rzT);rzT=setTimeout(()=>drawTimeline(),120);});
+window.addEventListener('resize',()=>{clearTimeout(rzT);rzT=setTimeout(()=>{drawTimeline();renderVideoSub();},120);});
+
+/* 下拉選單/數字輸入選定後自動失焦，避免攔截鍵盤快捷鍵 */
+document.addEventListener('change',(e)=>{
+  const t=e.target;
+  if(t.tagName==='SELECT' || (t.tagName==='INPUT' && t.type==='number')){
+    setTimeout(()=>t.blur(),0);
+  }
+});
 
 /* 初始化 */
 function init(){

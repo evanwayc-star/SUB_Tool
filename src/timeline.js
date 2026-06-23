@@ -4,7 +4,7 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from 
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
-import { renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, showToast, snapTargets, snapVal, neighborBounds, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, ensureProjectSaved, isProjectGuardDone } from './app.js';
+import { renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, showToast, snapTargets, snapVal, neighborBounds, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, ensureProjectSaved, isProjectGuardDone, refreshMpvSubs } from './app.js';
 import { jklReset } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
@@ -124,7 +124,7 @@ function renderTrackRows(){
         `<span class="gname" contenteditable="false" spellcheck="false">${escapeHTML(State.tracks[tk].name)}</span>`+
         `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖':'鎖定'}此軌">${isLocked?'🔒':'🔓'}</button>`+
         `<button class="gdel" title="刪除此軌">✕</button>`;
-      g.querySelector('.eye').onclick=(e)=>{e.stopPropagation();State.tracks[tk].visible=!vis;drawTimeline();renderVideoSub();};
+      g.querySelector('.eye').onclick=(e)=>{e.stopPropagation();State.tracks[tk].visible=!vis;drawTimeline();renderVideoSub();refreshMpvSubs();};
       const nm=g.querySelector('.gname');
       nm.addEventListener('click',e=>{
         if(nm.contentEditable==='true') return;
@@ -314,7 +314,6 @@ function trackFromY(clientY){
 }
 function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); renderListTrackSel(); recordHistory('新增軌道'); }
 function removeTrack(i){
-  if(State.tracks.length<=1){ showToast('至少需保留一個軌道'); return; }
   const n=State.cues.filter(c=>(c.track||0)===i).length;
   if(n>0 && !confirm(`軌道「${State.tracks[i].name}」有 ${n} 條字幕，刪除軌道會一併刪除這些字幕，確定？`))return;
   State.cues=State.cues.filter(c=>(c.track||0)!==i);

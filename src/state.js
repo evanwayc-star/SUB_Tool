@@ -21,6 +21,8 @@ const State = {
   subMode: false,      // 上字幕模式（O 後自動前進到下一句）
   mediaName: null,
   mediaSize: 0,
+  videoWidth: 0,
+  videoHeight: 0,
   muted:false, lastVol:1,
   mediaPath:null,
   clipboard:[],  // copied cues for paste
