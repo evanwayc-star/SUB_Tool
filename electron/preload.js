@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('subtool', {
   makeProxy:    (p, duration) => ipcRenderer.invoke('ffmpeg:proxy', { path: p, duration }),
   extractAudio: (p, idx, duration, codec) => ipcRenderer.invoke('ffmpeg:extractAudio', { path: p, idx, duration, codec }),
   waveAudio:    (p, duration) => ipcRenderer.invoke('ffmpeg:waveAudio', { path: p, duration }),
+  cleanupAudio: (p) => ipcRenderer.invoke('ffmpeg:cleanup', { path: p }),
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
   readB64:      (p) => ipcRenderer.invoke('fs:readB64', p),

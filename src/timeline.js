@@ -23,7 +23,7 @@ function timeToX(t){return (t-State.viewStart)*State.pxPerSec;}
 function xToTime(x){return State.viewStart + x/State.pxPerSec;}
 
 function tlTotal(){
-  const maxCueEnd=State.cues.length?Math.max(...State.cues.map(c=>c.end)):0;
+  const maxCueEnd=State.cues.reduce((m,c)=>c.end>m?c.end:m, 0);
   const extra=Math.max(30,State.duration*0.15);
   return Math.max(State.duration,maxCueEnd,1)+extra;
 }
@@ -354,8 +354,8 @@ tlScroll.addEventListener('scroll',()=>{
 /* 時間軸縮放 */
 function setZoom(px,centerTime){
   const c = centerTime!=null?centerTime:Media.vTime();
-  State.pxPerSec=clamp(px,4,800);
-  $('zoomBar').value=clamp(State.pxPerSec,10,400);
+  State.pxPerSec=clamp(px,0.1,800);
+  $('zoomBar').value=clamp(State.pxPerSec,0.1,400);
   layoutTimeline();
   // 維持 center 在畫面內
   const target=c*State.pxPerSec - viewportW()/2;
@@ -381,6 +381,12 @@ function zoomFit(){
   const vt=Media.vTime();
   const center=clamp(vt,t0,t1);
   setZoom(pps,center);
+}
+function zoomFitVideo(){
+  const vw=viewportW(); if(!vw) return;
+  const dur=State.duration>0?State.duration:1;
+  const pps=(vw-40)/dur;
+  setZoom(pps, dur/2);
 }
 
 /* 點擊任何地方都會確認正在編輯的軌道名稱（capture 階段先於 preventDefault） */
@@ -545,5 +551,5 @@ tlScroll.addEventListener('wheel',e=>{
 
 export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
-  addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit,
+  addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo,
   refreshTrackGutterActive };

@@ -90,15 +90,21 @@ function updateTlSel(){
   el.classList.add(n===0?'sel-none':n===1?'sel-one':'sel-multi');
 }
 
+/* 重疊偵測：排序後只比較相鄰區間 O(N log N)，取代原本 O(N²) 的雙迴圈 */
+function _detectOverlaps(cues, eps=0){
+  const set=new Set();
+  const sorted=cues.filter(c=>c.timed!==false).slice().sort((a,b)=>a.start-b.start);
+  for(let i=0;i<sorted.length-1;i++){
+    if(sorted[i+1].start < sorted[i].end - eps){ set.add(sorted[i].id); set.add(sorted[i+1].id); }
+  }
+  return set;
+}
+
 function renderCheckPanel(){
   const panel=$('checkPanel'); if(!panel||!panel.classList.contains('show'))return;
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
   // 時間碼重疊
-  const overlapSet=new Set();
-  const tmd=list.filter(c=>c.timed!==false);
-  for(let i=0;i<tmd.length;i++) for(let j=i+1;j<tmd.length;j++){
-    if(tmd[i].start<tmd[j].end&&tmd[j].start<tmd[i].end){overlapSet.add(tmd[i].id);overlapSet.add(tmd[j].id);}
-  }
+  const overlapSet=_detectOverlaps(list);
   const overlapNums=list.map((c,i)=>overlapSet.has(c.id)?i+1:null).filter(n=>n!==null);
   // 多行（排除空白字幕，避免純換行符被誤計）
   const multiNums=list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n|\/\//g)||[]).length>=2?i+1:null;}).filter(n=>n!==null);
@@ -144,12 +150,9 @@ function renderSubList(){
     $('subCount').textContent=list.length+' 條'; return;
   }
   $('subCount').textContent=list.length+' 條';
-  // 偵測同軌道時間重疊
-  const overlaps=new Set();
+  // 偵測同軌道時間重疊（O(N log N)）
   const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
-  for(let i=0;i<timed.length;i++) for(let j=i+1;j<timed.length;j++){
-    if(timed[i].start<timed[j].end-1e-9&&timed[j].start<timed[i].end-1e-9){ overlaps.add(timed[i].id); overlaps.add(timed[j].id); }
-  }
+  const overlaps=_detectOverlaps(timed, 1e-9);
   const frag=document.createDocumentFragment();
   list.forEach((c,i)=>frag.appendChild(buildSubRow(c,i,overlaps)));
   sublist.appendChild(frag);

@@ -174,7 +174,16 @@ const Media = {
       this.usingWebAudio=false; this.syncMuteState(); renderAudioTracks();
       if(audio.length>0){
         setStatus('產生波形…','busy');
-        try{ const wavB64=await DESK.waveAudio(p,dur); const ab=await this.ctx.decodeAudioData(b64ToBytes(wavB64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); drawTimeline(); }
+        try{ 
+          const wavPath=await DESK.waveAudio(p,dur); 
+          const wavUrl=await DESK.fileURL(wavPath);
+          const res=await fetch(wavUrl);
+          const buf=await res.arrayBuffer();
+          const ab=await this.ctx.decodeAudioData(buf); 
+          try { DESK.cleanupAudio(wavPath); } catch(e) {}
+          if(ab.duration>State.duration)State.duration=ab.duration; 
+          Wave.live=false; Wave.compute(ab); drawTimeline(); 
+        }
         catch(e){ console.warn('wave',e); Wave.initLive(); }
       }
       setStatus('媒體已載入（桌面模式，原生直讀）','ok'); onDurationKnown(); return;
@@ -319,15 +328,24 @@ const Media = {
       if(this.playing) this.startElementSources(this.vTime());
       setStatus('產生波形…','busy');
       try {
-        const wavB64 = await DESK.waveAudio(p, el.duration);
-        const ab = await this.ctx.decodeAudioData(b64ToBytes(wavB64).buffer);
-        const srcObj = { label: name, path: null, peaks: null, sourceId: src };
-        Wave.sources.push(srcObj);
+        const wavPath = await DESK.waveAudio(p, el.duration);
+        const wavUrl = await DESK.fileURL(wavPath);
+        const res = await fetch(wavUrl);
+        const buf = await res.arrayBuffer();
+        const ab = await this.ctx.decodeAudioData(buf);
+        try { DESK.cleanupAudio(wavPath); } catch(e) {}
+        
+        Wave.sources = Wave.sources.filter(s => s.sourceId !== src);
+        const mixPeaks = Wave.compute(ab, -1);
+        Wave.sources.push({ label: '主混音', path: null, peaks: mixPeaks, sourceId: src });
+        
+        for(let i=0; i<ab.numberOfChannels; i++){
+          const chPeaks = Wave.compute(ab, i);
+          Wave.sources.push({ label: '音軌 ' + (i+1), path: null, peaks: chPeaks, sourceId: src });
+        }
+        
         Wave.live=false;
-        const oldPeaks = Wave.peaks;
-        Wave.compute(ab);
-        srcObj.peaks = Wave.peaks;
-        Wave.peaks = oldPeaks;
+        Wave.peaks = mixPeaks;
         Wave._renderSrcSel();
         setStatus('音軌與波形已加入','ok');
       } catch(e) { console.warn('waveAudio error', e); setStatus('音軌已加入','ok'); }
@@ -441,15 +459,17 @@ const Media = {
     if(this.playing) this.startElementSources(this._mpvTime);
     renderAudioTracks();
 
-    if(res.wave){
-      try{
-        const b64=await DESK.readB64(res.wave);
-        if(b64&&this._bgVersion===myVer){
-          const ab=await this.ctx.decodeAudioData(b64ToBytes(b64).buffer);
-          Wave.live=false; Wave.compute(ab); Wave.registerSources(res.wave,chs); drawTimeline();
-        }
-      }catch(e){}
-    }
+      if(res.wave){
+        try{
+          const wavUrl=await DESK.fileURL(res.wave);
+          const r=await fetch(wavUrl);
+          const buf=await r.arrayBuffer();
+          if(this._bgVersion===myVer){
+            const ab=await this.ctx.decodeAudioData(buf);
+            Wave.live=false; Wave.compute(ab); Wave.registerSources(res.wave,chs); drawTimeline();
+          }
+        }catch(e){}
+      }
     setStatus('音軌與波形已就緒','ok');
   },
 
@@ -681,7 +701,7 @@ const Media = {
     }
     t=clamp(t,0,State.duration||0); video.currentTime=t;
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ try{tr.el.currentTime=clamp(t,0,tr.el.duration||t);}catch(e){} } }
-    if(this.playing && this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
+    if(this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
   },
   startElementSources(offset){
     for(const tr of this.tracks){ if(tr.kind!=='element'||!tr.el)continue;
@@ -826,9 +846,10 @@ const Wave = {
     if(src.peaks){ this.peaks=src.peaks; drawTimeline(); return; }
     if(!DESK||!Media.ctx) return;
     try{
-      const b64=await DESK.readB64(src.path);
-      if(!b64) return;
-      const ab=await Media.ctx.decodeAudioData(b64ToBytes(b64).buffer);
+      const wavUrl = await DESK.fileURL(src.path);
+      const res = await fetch(wavUrl);
+      const buf = await res.arrayBuffer();
+      const ab=await Media.ctx.decodeAudioData(buf);
       this.live=false; this.compute(ab);
       src.peaks=this.peaks;
       drawTimeline();
@@ -883,23 +904,30 @@ const Wave = {
   fromTracks(){
     const b=Media.tracks.find(t=>t.kind==='buffer'); if(b){this.compute(b.buffer);drawTimeline();}
   },
-  compute(ab){
+  compute(ab, chIdx = -1){
     const res=this.resolution;
     const len=Math.ceil(ab.duration*res);
     const peaks=new Float32Array(len*2);
-    const ch0=ab.getChannelData(0);
-    const ch1=ab.numberOfChannels>1?ab.getChannelData(1):null;
+    const chData = [];
+    if (chIdx === -1) {
+      for(let c=0; c<ab.numberOfChannels; c++) chData.push(ab.getChannelData(c));
+    } else {
+      chData.push(ab.getChannelData(chIdx));
+    }
     const spb=ab.sampleRate/res; // samples per bucket
     for(let i=0;i<len;i++){
-      const s0=Math.floor(i*spb), s1=Math.min(ch0.length,Math.floor((i+1)*spb));
+      const s0=Math.floor(i*spb), s1=Math.min(chData[0].length,Math.floor((i+1)*spb));
       let mn=0,mx=0;
       for(let j=s0;j<s1;j++){
-        let v=ch0[j]; if(ch1)v=(v+ch1[j])*0.5;
+        let v=0;
+        for(let c=0; c<chData.length; c++) v += chData[c][j];
+        if (chData.length > 1) v /= chData.length;
         if(v<mn)mn=v; if(v>mx)mx=v;
       }
       peaks[i*2]=mn; peaks[i*2+1]=mx;
     }
     this.peaks=peaks;
+    return peaks;
   }
 };
 

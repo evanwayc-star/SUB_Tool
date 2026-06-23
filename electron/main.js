@@ -387,11 +387,13 @@ ipcMain.handle('ffmpeg:extractAudio', async (e, { path: src, idx, duration, code
 
 ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   const out = tmpPath('wav');
-  await runFF(['-y', '-i', src, '-map', '0:a:0', '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', out],
+  await runFF(['-y', '-i', src, '-map', '0:a:0', '-ar', '4000', '-c:a', 'pcm_s16le', out],
     { sender: e.sender, duration, jobId: 'wave', label: '產生波形' });
-  const buf = fs.readFileSync(out);
-  try { fs.unlinkSync(out); tempFiles.delete(out); } catch (e2) {}
-  return buf.toString('base64');
+  return out;
+});
+
+ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
+  try { fs.unlinkSync(p); tempFiles.delete(p); } catch (e2) {}
 });
 
 /* ---- 單次讀取多輸出：整個來源檔只讀一遍，同時產生 proxy + 每聲道音訊 + 混音波形 ----

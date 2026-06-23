@@ -7,7 +7,7 @@ import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix } from './state.js';
 import { Media, Wave } from './media.js';
-import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, refreshTrackGutterActive } from './timeline.js';
+import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline.js';
 import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
 import { Project, ensureProjectSaved, isProjectGuardDone, resetProject } from './project.js';
@@ -124,7 +124,31 @@ function renderAudioTracks(){
     row.innerHTML=`<span class="nm">${escapeHTML(pc.label)}</span><span class="prep"><span class="spin"></span>準備中</span>`;
     list.appendChild(row);
   }
+  renderAudioSources();
   if($('mixerPanel')&&$('mixerPanel').classList.contains('show'))renderMixer();
+}
+
+function renderAudioSources(){
+  const src=Media.activeSource;
+  const sel=$('mixerSrcSel');
+  const selWave=$('waveGlobalSrcSel');
+  if(!sel && !selWave) return;
+  const srcs=Media.getSources();
+  const updateSel = (sNode) => {
+    if(!sNode)return;
+    if(srcs.length===0){ sNode.innerHTML='<option value="">(無音源)</option>'; sNode.disabled=true; }
+    else {
+      sNode.innerHTML='';
+      for(const s of srcs){
+        const opt=document.createElement('option');
+        opt.value=s.id; opt.textContent=s.label;
+        if(s.id===src) opt.selected=true;
+        sNode.appendChild(opt);
+      }
+      sNode.disabled=false;
+    }
+  };
+  updateSel(sel); updateSel(selWave);
 }
 
 /* ===== 混音器：逐聲道電平表 + 獨奏/靜音（浮動面板） ===== */
@@ -133,28 +157,6 @@ function renderMixer(){
   const wrap=$('mixerStrips'); if(!wrap)return;
   _meterStrips=[];
   const src=Media.activeSource;
-
-  const sel=$('mixerSrcSel');
-  const selWave=$('waveGlobalSrcSel');
-  if(sel || selWave){
-    const srcs=Media.getSources();
-    const updateSel = (sNode) => {
-      if(!sNode)return;
-      if(srcs.length===0){ sNode.innerHTML='<option value="">(無音源)</option>'; sNode.disabled=true; }
-      else {
-        sNode.innerHTML='';
-        for(const s of srcs){
-          const opt=document.createElement('option');
-          opt.value=s.id; opt.textContent=s.label;
-          if(s.id===src) opt.selected=true;
-          sNode.appendChild(opt);
-        }
-        sNode.disabled=false;
-      }
-    };
-    updateSel(sel);
-    updateSel(selWave);
-  }
 
   const real=Media.tracks.filter(t=>{
     if(!(t.kind==='buffer'||t.kind==='native'||t.kind==='element'))return false;
@@ -255,7 +257,12 @@ function onDurationKnown(){
   $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
   $('seekBar').max=Math.max(1,Math.round(State.duration*1000));
   $('stMedia').textContent=State.mediaName?(State.mediaName+(State.mediaSize?(' · '+(State.mediaSize/1e6).toFixed(1)+'MB'):'')):'';
-  if(State.pxPerSec*State.duration < viewportW()) zoomFit(); else drawTimeline();
+  const vw=viewportW();
+  if(vw && State.duration>0){
+    const minPps = (vw-40)/State.duration;
+    $('zoomBar').min = Math.min(10, minPps).toFixed(3);
+  }
+  if(State.pxPerSec*State.duration < vw) zoomFitVideo(); else drawTimeline();
 }
 function ensurePlayheadVisible(){
   const t=Media.vTime();
@@ -275,7 +282,7 @@ video.addEventListener('timeupdate',()=>{
   $('tcCur').textContent=secToEncore(video.currentTime,State.fps,State.dropFrame); // 時:分:秒:格
   $('seekBar').value=Math.round(video.currentTime*1000);
 });
-let rafOn=false, rafFrame=0;
+let rafOn=false, rafFrame=0, _rafLastIdx=0;
 function rafLoop(){
   if(Media.playing){
     const t=Media.vTime();
@@ -287,8 +294,26 @@ function rafLoop(){
     ensurePlayheadVisible(); // scroll viewport first so State.viewStart is current
     updatePlayhead(); renderVideoSub();
     if(Wave.live){ Wave.captureLive(); if((rafFrame++ % 6)===0) drawWave(); }
-    // active 字幕
-    const act=State.cues.find(c=>c.timed!==false&&(t+0.001)>=c.start&&(t+0.001)<=c.end);
+    // active 字幕（快取游標，O(1) 命中常見路徑）
+    const _t=t+0.001;
+    let act=null;
+    if(_rafLastIdx>=0 && _rafLastIdx<State.cues.length){
+      const lc=State.cues[_rafLastIdx];
+      if(lc.timed!==false && _t>=lc.start && _t<=lc.end) act=lc;
+    }
+    if(!act){
+      // 檢查相鄰 ±2 條
+      const lo=Math.max(0,_rafLastIdx-2), hi=Math.min(State.cues.length-1,_rafLastIdx+2);
+      for(let i=lo;i<=hi;i++){
+        const c=State.cues[i]; if(c && c.timed!==false && _t>=c.start && _t<=c.end){ act=c; _rafLastIdx=i; break; }
+      }
+    }
+    if(!act){
+      // 完整搜尋（僅在跳轉等情境觸發）
+      for(let i=0;i<State.cues.length;i++){
+        const c=State.cues[i]; if(c.timed!==false && _t>=c.start && _t<=c.end){ act=c; _rafLastIdx=i; break; }
+      }
+    }
     if(act&&act.id!==State.activeId){ State.activeId=act.id; markActiveRow(act.id); }
     // active 備註
     if(State.notes.length&&$('notesPanel').classList.contains('show')) updateNoteActive(t);
@@ -447,8 +472,29 @@ async function doAction(act){
     case 'modal-close': closeModal(); break;
   }
 }
+let _repTimer=null, _repInterval=null, _repFired=false;
+const REP_ACTS=['back5','back1','frame-back','frame-fwd','fwd1','fwd5'];
+document.addEventListener('mousedown',e=>{
+  if(e.button!==0)return;
+  const b=e.target.closest('[data-act]');
+  if(b && REP_ACTS.includes(b.dataset.act)){
+    _repFired=false;
+    _repTimer=setTimeout(()=>{
+      _repInterval=setInterval(()=>{ doAction(b.dataset.act); _repFired=true; }, 100);
+    }, 400);
+  }
+});
+const stopRep=()=>{ clearTimeout(_repTimer); clearInterval(_repInterval); };
+document.addEventListener('mouseup', stopRep);
+document.addEventListener('mouseout', e=>{ if(e.target.closest&&e.target.closest('[data-act]'))stopRep(); });
+
 document.addEventListener('click',e=>{
-  const b=e.target.closest('[data-act]'); if(b){ doAction(b.dataset.act); }
+  const b=e.target.closest('[data-act]');
+  if(b){
+    b.blur();
+    if(_repFired && REP_ACTS.includes(b.dataset.act)){ _repFired=false; return; }
+    doAction(b.dataset.act);
+  }
   // 關閉下拉選單
   document.querySelectorAll('.menu.open').forEach(m=>{ if(!m.contains(e.target))m.classList.remove('open'); });
 });
@@ -884,8 +930,10 @@ function initUI(){
   // 混音器音源切換
   const mixerSrcSel=$('mixerSrcSel');
   if(mixerSrcSel) mixerSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
+  
   const waveGlobalSrcSel=$('waveGlobalSrcSel');
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
+
   // 樣式控制（大小 / 位置 / 顏色）
   $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontScale=clamp(+e.target.value,0.5,3); renderVideoSub(); refreshMpvSubs(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
@@ -985,17 +1033,29 @@ function showFpsConvertDialog(){
       const cues=State.cues.filter(c=>(c.track||0)===tkIdx);
       for(const c of cues){ c.start=Math.max(0,c.start*ratio); c.end=Math.max(c.start+0.001,c.end*ratio); }
       // 更新 State.duration 為 max(影片片長, 最後字幕 end)
-      const maxEnd=Math.max(...State.cues.map(c=>c.end));
+      const maxEnd=State.cues.reduce((m,c)=>c.end>m?c.end:m, 0);
       if(maxEnd>State.duration){ State.duration=maxEnd; $('tcDur').textContent=secToEncore(maxEnd,State.fps,State.dropFrame); }
       closeModal(); sortCues(); renderAll(); layoutTimeline(); drawTimeline();
       recordHistory(`FPS 轉換 ${from}→${to}`);
       setStatus(`已將「${tk.name}」從 ${from}fps 轉換至 ${to}fps（${cues.length} 條）`,'ok');
     }},{label:'取消',act:closeModal}]);
   setTimeout(()=>{
-    // 預設 From = 目前專案 FPS
     const fromSel=$('fpsFrom'), toSel=$('fpsTo');
     const nearest=FPS_OPTS.reduce((a,b)=>Math.abs(b-curFps)<Math.abs(a-curFps)?b:a);
-    if(fromSel) fromSel.value=String(nearest);
+    if(toSel) toSel.value=String(nearest);
+
+    if (fromSel && toSel) {
+      const setFromDefault = () => {
+        const t = +toSel.value;
+        if (t === 29.97) fromSel.value = "30";
+        else if (t === 23.976) fromSel.value = "24";
+        else if (t === 30) fromSel.value = "29.97";
+        else if (t === 24) fromSel.value = "23.976";
+      };
+      setFromDefault();
+      toSel.addEventListener('change', setFromDefault);
+    }
+
     const updatePreview=()=>{
       const from=+fromSel?.value, to=+toSel?.value;
       const p=$('fpsPreview'); if(!p)return;
@@ -1310,7 +1370,7 @@ if (import.meta.env && import.meta.env.DEV) {
     addCue, addCueRelative, deleteSelected, moveSelectedToTrack, addTrack, removeTrack,
     renderAll, drawTimeline, renderVideoSub, renderSubList, renderListTrackSel, renderTrackStyle,
     renderCueBlocks, trackFromY, secToEncore, secToSRT, secToASS, newId, ensureTrackCount,
-    syncTrackCount, sortCues, onDurationKnown, setZoom, zoomFit, showCueMenu, showPlayerMenu,
+    syncTrackCount, sortCues, onDurationKnown, setZoom, zoomFit, zoomFitVideo, showCueMenu, showPlayerMenu,
     History, recordHistory, renderHistory, addNote, renderNotes, togglePanel,
     parseTimecodeInput, snapVal, snapTargets, neighborBounds, setFps, snapFps, FPS_SET };
 }

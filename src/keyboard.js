@@ -5,7 +5,7 @@ import { clamp } from './util.js';
 import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
 import { addCue, selectCue, selectCueSingle, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
-import { updatePlayhead, zoomFit, setZoom, drawTimeline } from './timeline.js';
+import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline.js';
 import { Project } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, updateNoteActive } from './notes.js';
@@ -237,6 +237,7 @@ window.addEventListener('keydown',e=>{
       break;
     case '-': case '_': e.preventDefault(); setZoom(State.pxPerSec*0.77); break;
     case '+': case '=': e.preventDefault(); setZoom(State.pxPerSec*1.3); break;
+    case '\\': case '|': e.preventDefault(); zoomFitVideo(); break;
   }
 });
 window.addEventListener('keyup',e=>{
