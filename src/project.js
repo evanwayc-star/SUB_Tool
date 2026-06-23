@@ -55,7 +55,8 @@ async function _autoSave(){
   const bytes=_buildBytes();
   if(IS_DESKTOP && DESK.writeProject && _savePath){
     const dir=_savePath.replace(/[^\\/]+$/,'');
-    const res=await DESK.writeProject(dir+name, bytesToB64(bytes)).catch(()=>null);
+    const autoSaveDir=dir+'.subtool_AutoSave/';
+    const res=await DESK.writeProject(autoSaveDir+name, bytesToB64(bytes)).catch(()=>null);
     if(res) setStatus('自動備份：'+name,'ok');
   } else {
     downloadBytes(bytes, name, 'application/json');

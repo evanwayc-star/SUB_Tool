@@ -224,12 +224,12 @@ async function openCacheDialog(){
     `<div style="padding:4px 2px;line-height:1.9">`+
     `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>`+
     `<div style="font-size:11px;color:var(--muted);word-break:break-all;margin-top:2px">${escapeHTML(info.root||'')}</div>`+
-    `<div style="font-size:12px;color:var(--muted);margin-top:8px">說明：開啟影片時會把每個聲道與波形轉存到「影片同資料夾的 <code>.cache</code>」內，其他電腦讀取同一個檔案時可直接沿用、不必重算。此處管理的是本機的中央快取。</div>`+
+    `<div style="font-size:12px;color:var(--muted);margin-top:8px">說明：開啟影片時會把每個聲道與波形轉存到「影片同資料夾的 <code>.subtool_Cache</code>」內，其他電腦讀取同一個檔案時可直接沿用、不必重算。此處管理的是本機的中央快取。</div>`+
     `</div>`;
   const buttons=[
     {label:'清理孤兒檔',act:async()=>{ const r=await DESK.cacheCleanOrphans(); showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}`); openCacheDialog(); }},
     {label:'全部清除',act:()=>{
-      openModal('確認清除','<div style="padding:6px 2px">將刪除所有中央快取，以及目前開啟影片旁的 .cache 資料夾。<br>下次開啟同檔需重新轉檔。確定？</div>',
+      openModal('確認清除','<div style="padding:6px 2px">將刪除所有中央快取，以及目前開啟影片旁的 .subtool_Cache 資料夾。<br>下次開啟同檔需重新轉檔。確定？</div>',
         [{label:'確定清除',primary:true,act:async()=>{ const r=await DESK.cacheClearAll(State.mediaPath||null); showToast(`已清除快取，釋放 ${_fmtBytes(r.bytes)}`); closeModal(); }},{label:'取消',act:openCacheDialog}]);
     }},
     {label:'關閉',primary:true,act:closeModal},
@@ -547,7 +547,7 @@ function detectSubFormat(text, ext){
   if(ext==='ass'||ext==='ssa')return 'ass';
   if(/\[Script Info\]/i.test(text))return 'ass';
   if(/^\d+\r?\n\d{2}:\d{2}:\d{2}[,\.]\d{3}/m.test(text))return 'srt';
-  if(/\d{1,2}:\d{2}:\d{2}:\d{2}[ \t]+\d{1,2}:\d{2}:\d{2}:\d{2}/m.test(text))return 'encore';
+  if(/(\d{1,2}:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)[ \t]+(\d{1,2}:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)/m.test(text))return 'encore';
   return 'txt';
 }
 /* 匯入 / 匯出字幕 */

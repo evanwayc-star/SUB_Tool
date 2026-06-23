@@ -81,12 +81,12 @@ function cacheKeyFor(src) {
     return h.digest('hex').slice(0, 16);
   } catch (e) { return crypto.createHash('sha1').update(path.basename(String(src))).digest('hex').slice(0, 16); }
 }
-/* 候選快取目錄：優先放在影片旁的 .cache/<金鑰>（可隨檔案被其他電腦讀取），
+/* 候選快取目錄：優先放在影片旁的 .subtool_Cache/<金鑰>（可隨檔案被其他電腦讀取），
    其次才用 userData/mediacache。讀取時依序找第一個有效的；寫入時找第一個可寫的。 */
 function cacheCandidates(src) {
   const key = cacheKeyFor(src);
   const list = [];
-  try { const vdir = path.dirname(src); if (vdir && vdir !== '.') list.push(path.join(vdir, '.cache', key)); } catch (e) {}
+  try { const vdir = path.dirname(src); if (vdir && vdir !== '.') list.push(path.join(vdir, '.subtool_Cache', key)); } catch (e) {}
   list.push(path.join(CACHE || TMP, key));
   return list;
 }
@@ -119,15 +119,10 @@ function isDirWritable(dir) {
   try { fs.mkdirSync(dir, { recursive: true }); const t = path.join(dir, '.wtest_' + process.pid); fs.writeFileSync(t, 'x'); fs.unlinkSync(t); return true; }
   catch (e) { return false; }
 }
-/* 取得可寫的快取目錄（優先影片旁的 .cache）。
-   只有「.cache 是本程式新建的」才在 Windows 上設為隱藏——避免動到使用者既有的 .cache 資料夾。 */
+/* 取得可寫的快取目錄（優先影片旁的 .subtool_Cache）。 */
 function writeCacheDir(src) {
   for (const dir of cacheCandidates(src)) {
-    const parent = path.dirname(dir);
-    const isDotCache = process.platform === 'win32' && path.basename(parent) === '.cache';
-    const preExisted = isDotCache ? fs.existsSync(parent) : true;
     if (isDirWritable(dir)) {
-      try { if (isDotCache && !preExisted) spawnSync('attrib', ['+h', parent], { timeout: 3000 }); } catch (e) {}
       return dir;
     }
   }
@@ -164,7 +159,7 @@ function cleanOrphans() {
 function clearAllCache(currentSrc) {
   const root = CACHE || TMP; let bytes = dirSize(root);
   try { fs.rmSync(root, { recursive: true, force: true }); fs.mkdirSync(root, { recursive: true }); } catch (e) {}
-  if (currentSrc) { try { const ndir = path.join(path.dirname(currentSrc), '.cache', cacheKeyFor(currentSrc)); if (fs.existsSync(ndir)) { bytes += dirSize(ndir); fs.rmSync(ndir, { recursive: true, force: true }); } } catch (e) {} }
+  if (currentSrc) { try { const ndir = path.join(path.dirname(currentSrc), '.subtool_Cache', cacheKeyFor(currentSrc)); if (fs.existsSync(ndir)) { bytes += dirSize(ndir); fs.rmSync(ndir, { recursive: true, force: true }); } } catch (e) {} }
   return { bytes };
 }
 
@@ -401,7 +396,7 @@ ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
    結果存入持久快取（依 cacheKeyFor），重開同檔直接命中、秒開。 */
 ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio }) => {
   const audioArr = Array.isArray(audio) ? audio : [];
-  // 快取命中（先找影片旁的 .cache，再找 userData）
+  // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
   const hit = readCache(src);
   if (hit) { if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true }); return Object.assign({ cached: true }, hit.meta); }
   const dir = writeCacheDir(src);
@@ -448,6 +443,9 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
   let wave = null;
   if (waveLabel) { wave = path.join(dir, 'wave.wav'); args.push('-map', waveLabel, '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', wave); }
 
+  // 稍微延遲讓 mpv 優先取得檔案讀取權，避免 ffmpeg 瞬間佔滿磁碟 I/O 導致 mpv 播放無聲
+  await new Promise(r => setTimeout(r, 1000));
+  
   await runFF(args, { sender: e.sender, duration, jobId: 'ingest', label: '讀取並轉檔（單次讀取）' });
   const meta = { proxy, channels, wave };
   writeMeta(metaPath, meta);
@@ -456,7 +454,7 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
 ipcMain.handle('fs:readB64', (e, p) => { try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; } });
-ipcMain.handle('fs:writeProject', (e, { path: p, b64 }) => { try { fs.writeFileSync(p, Buffer.from(b64,'base64')); return p; } catch(err){ return null; } });
+ipcMain.handle('fs:writeProject', (e, { path: p, b64 }) => { try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, Buffer.from(b64,'base64')); return p; } catch(err){ return null; } });
 
 /* ---- 邊轉邊播 ingest（MXF 等非原生格式秒開）：fragmented MP4 + 本機 HTTP 伺服器 ----
    video 轉成 fragmented MP4（empty_moov），前幾秒輸出後就可播放；音軌/波形同一 pass 在背景繼續。
@@ -465,7 +463,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   const audioArr = Array.isArray(audio) ? audio : [];
   const port = await ensureHttpServer();
 
-  // 快取命中（先找影片旁的 .cache，再找 userData）
+  // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
   // 注意：串流播放需要影片 proxy；mpv 路徑寫的快取是「純音軌」(proxy=null)，
   // 對串流路徑而言不算命中，須往下重轉以產生 proxy（音軌/波形會一併重建）。
   const hit = readCache(src);
@@ -646,7 +644,7 @@ function mpvConnectPipe(pipeName) {
 }
 
 ipcMain.handle('mpv:detect', () => { const exe = detectMpv(); console.error('[mpv] detect ->', exe || '(not found)'); return { available: !!exe, exe }; });
-ipcMain.handle('mpv:launch', async (e, { src, bounds }) => {
+ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
   if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
   destroyMpvWin();
@@ -676,15 +674,24 @@ ipcMain.handle('mpv:launch', async (e, { src, bounds }) => {
   let logStream = null; try { logStream = fs.createWriteStream(mpvLog); } catch (e2) {}
 
   const pipeName = 'subtool-mpv-' + Date.now();
-  _mpvProc = spawn(exe, [
+  const mpvArgs = [
     '--wid=' + hwnd,
     '--input-ipc-server=\\\\.\\pipe\\' + pipeName,
     '--no-config', '--no-terminal', '--no-osc',
     '--no-input-default-bindings', '--input-vo-keyboard=no', '--cursor-autohide=no',
     '--vo=gpu', '--gpu-context=d3d11', '--hwdec=auto',
-    '--keep-open=always', '--pause', '--hr-seek=yes', '--sid=no',
-    src,
-  ], { detached: false, stdio: ['ignore', 'ignore', logStream ? 'pipe' : 'ignore'] });
+    '--keep-open=always', '--pause', '--hr-seek=yes', '--sid=no'
+  ];
+
+  if (Array.isArray(audio) && audio.length > 1) {
+    const aids = [];
+    for (let i = 0; i < audio.length; i++) aids.push(`[aid${i + 1}]`);
+    mpvArgs.push(`--lavfi-complex=${aids.join('')}amix=inputs=${audio.length}:normalize=0[ao]`);
+  }
+
+  mpvArgs.push(src);
+
+  _mpvProc = spawn(exe, mpvArgs, { detached: false, stdio: ['ignore', 'ignore', logStream ? 'pipe' : 'ignore'] });
   if (logStream && _mpvProc.stderr) _mpvProc.stderr.pipe(logStream);
   console.error('[mpv] launch wid=' + hwnd + ' bounds=' + JSON.stringify(_mpvRect) + ' src=' + src);
   _mpvProc.on('error', (err) => console.error('[mpv] spawn error:', err && err.message));

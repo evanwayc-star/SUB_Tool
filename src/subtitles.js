@@ -347,7 +347,7 @@ function addCueAfter(id){
 function addCueRelative(dir){
   const sel=State.cues.find(c=>c.id===State.selectedId);
   if(sel && sel.timed===false){
-    const c={id:newId(),start:0,end:0,text:'',track:sel.track||0,timed:false};
+    const c={id:newId(),start:sel.start,end:sel.end,text:'',track:sel.track||0,timed:false};
     State.cues.splice(State.cues.indexOf(sel)+(dir>0?1:0),0,c);
     renderAll(); selectCue(c.id); recordHistory('新增空白字幕');
     setTimeout(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));},30);
@@ -398,8 +398,7 @@ function shiftTextsUp(id){
 }
 
 function sortCues(){ State.cues.sort((a,b)=>{
-  const at=a.timed===false?Infinity:a.start, bt=b.timed===false?Infinity:b.start;
-  return at-bt;
+  return a.start - b.start;
 });}
 
 /* ===== 複製 / 貼上 ===================================================== */

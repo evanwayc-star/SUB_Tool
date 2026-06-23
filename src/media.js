@@ -367,7 +367,7 @@ const Media = {
     video.style.display='none';
     $('videoSub').style.display='none'; // 字幕改由 mpv/libass 渲染
     let res;
-    try{ res=await DESK.mpv.launch({src:p, bounds:this._mpvRect()}); }
+    try{ res=await DESK.mpv.launch({src:p, bounds:this._mpvRect(), audio}); }
     catch(e){ showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); $('videoSub').style.display=''; video.style.display=''; return; }
     this.mpvMode=true; this._mpvTime=0;
     this._mpvDuration=res.duration||dur||0;

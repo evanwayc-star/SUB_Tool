@@ -103,21 +103,39 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
   /* ---- Adobe Encore ---- */
   parseEncore(text,fps,df=false){
     const out=[]; const lines=text.replace(/\r/g,'').split('\n');
-    const re=/^\s*(\d{1,2}:\d{2}:\d{2}[:;]\d{2})\s+(\d{1,2}:\d{2}:\d{2}[:;]\d{2})\s+(.*)$/;
+    const re=/^\s*(\d{1,2}:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)\s+(\d{1,2}:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)\s+(.*)$/;
+    let lastTime = 0;
     for(const ln of lines){
       const m=ln.match(re); if(!m)continue;
-      out.push({start:encoreToSec(m[1],fps,df),end:encoreToSec(m[2],fps,df),text:m[3].replace(/\s{2,}/g,'\n').trim()});
+      const isUntimed = m[1]==='--:--:--:--' || m[2]==='--:--:--:--';
+      let start = 0, end = 0;
+      if(!isUntimed){
+        start = encoreToSec(m[1],fps,df);
+        end = encoreToSec(m[2],fps,df);
+        lastTime = end;
+      } else {
+        start = lastTime;
+        end = lastTime;
+      }
+      out.push({
+        start, end,
+        text: m[3].replace(/\s{2,}/g,'\n').trim(),
+        timed: isUntimed ? false : undefined
+      });
     }
     return out;
   },
   toEncore(cues,fps,df=false){
-    return cues.filter(c=>c.timed!==false).map(c=>
-      `${secToEncore(c.start,fps,df)} ${secToEncore(c.end,fps,df)} ${(c.text||'').replace(/\n/g,' ')}`).join('\r\n')+'\r\n';
+    return cues.map(c=>{
+      if(c.timed===false) return `--:--:--:-- --:--:--:-- ${(c.text||'').replace(/\n/g,' ')}`;
+      return `${secToEncore(c.start,fps,df)} ${secToEncore(c.end,fps,df)} ${(c.text||'').replace(/\n/g,' ')}`;
+    }).join('\r\n')+'\r\n';
   },
   /* ---- 純文字 ---- */
   parseTXT(text){
+    let t = 0;
     return text.replace(/\r/g,'').split('\n').map(l=>l.trim()).filter(l=>l.length)
-      .map(l=>({start:0,end:0,text:l,timed:false}));
+      .map(l=>{ const c={start:t,end:t,text:l,timed:false}; t+=0.001; return c; });
   },
   toTXT(cues){
     return cues.map(c=>(c.text||'')).join('\n')+'\n';
