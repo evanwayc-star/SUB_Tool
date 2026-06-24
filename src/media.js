@@ -414,9 +414,23 @@ const Media = {
       if(e.event==='property-change'){
         if(e.name==='time-pos'&&e.data!=null){
           const prev=this._mpvTime; this._mpvTime=e.data;
-          // 直接更新 UI（確保暫停時在 mpv 視窗拖拉時我們的時碼也同步）
-          $('tcCur').textContent=secToEncore(e.data,State.fps,State.dropFrame);
-          $('seekBar').value=Math.round(e.data*1000);
+          // 暫停時讓播放器時碼與時間軸播放點同源同格：
+          //  - 若 mpv 回報只是 seek 後的 settling 抖動（與權威 _lastSeekTime 差 <1.5 格），
+          //    維持 _lastSeekTime，避免用未對齊的原始時間經 secToEncore 進位多一格、
+          //    也避免拉偏權威值而破壞逐格精度；
+          //  - 若是大幅變動（例如在 mpv 視窗內拖拉），才吸附到最近格並更新 _lastSeekTime。
+          // 播放中則用原始時間平滑前進。
+          let t=e.data;
+          if(!this.playing){
+            const frame=1/(State.fps||25);
+            if(this._lastSeekTime!=null && Math.abs(e.data-this._lastSeekTime)<1.5*frame){
+              t=this._lastSeekTime;
+            } else {
+              t=snapTimeToFrame(e.data, State.fps, State.dropFrame); this._lastSeekTime=t;
+            }
+          }
+          $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
+          $('seekBar').value=Math.round(t*1000);
           updatePlayhead();
           if(Math.abs(e.data-prev)>0.5) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:e.data}));
         }

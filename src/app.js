@@ -261,6 +261,11 @@ video.addEventListener('play',()=>{
 });
 video.addEventListener('pause',()=>{
   $('playBtn').textContent='▶';
+  // 暫停時把時碼/seekBar 一併刷新為已對齊格的權威位置（與播放點同源），
+  // 避免殘留播放中最後一次未對齊的時間導致播放器比播放點多一格
+  const t=Media.displayTime();
+  $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
+  $('seekBar').value=Math.round(t*1000);
   updatePlayhead();
 });
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
