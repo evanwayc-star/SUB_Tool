@@ -6,7 +6,9 @@ import { escapeHTML, downloadBytes } from './util.js';
 import { Media } from './media.js';
 import { updatePlayhead, drawRuler } from './timeline.js';
 import { recordHistory } from './history.js';
-import { ensurePlayheadVisible, showToast, setStatus, parseTimecodeInput, openModal, closeModal } from './app.js';
+import { emit } from './events.js';
+import { parseTimecodeInput } from './tcparse.js';
+import { showToast, setStatus, openModal, closeModal } from './ui.js';
 import { showCtx } from './menus.js';
 
 /* ===== 備註 active 狀態 ===== */
@@ -82,7 +84,7 @@ function renderNotes(){
     timeEl.addEventListener('click',e=>{
       e.stopPropagation();
       if(timeEl.querySelector('input')) return;
-      setNoteActive(n.id); Media.seek(n.time); updatePlayhead(); ensurePlayheadVisible();
+      setNoteActive(n.id); Media.seek(n.time); updatePlayhead(); emit('playhead:ensure');
     });
     timeEl.addEventListener('dblclick',e=>{
       e.stopPropagation();
@@ -144,7 +146,7 @@ function renderNotes(){
         else { _selectedNoteIds.add(n.id); _lastSelectedNoteId=n.id; }
       } else {
         _selectedNoteIds.clear(); _selectedNoteIds.add(n.id); _lastSelectedNoteId=n.id;
-        Media.seek(n.time); updatePlayhead(); ensurePlayheadVisible();
+        Media.seek(n.time); updatePlayhead(); emit('playhead:ensure');
       }
       setNoteActive(n.id);
       _refreshNoteSelectionUI();

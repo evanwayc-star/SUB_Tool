@@ -6,7 +6,8 @@ import { Media } from './media.js';
 import { drawTimeline } from './timeline.js';
 import { History } from './history.js';
 import { renderNotes } from './notes.js';
-import { renderListTrackSel, renderAll, openModal, closeModal, showToast, setStatus } from './app.js';
+import { emit } from './events.js';
+import { openModal, closeModal, showToast, setStatus } from './ui.js';
 
 /* ===== 自動備份狀態 ===== */
 let _editGuardDone = false;  // 本 session 是否已顯示過「請先儲存」提示
@@ -124,7 +125,7 @@ const Project = {
     State.pxPerSec=data.pxPerSec||80;
     State.listTrack=0;
     State.selectedId=State.cues[0]?.id||null; State.selectedIds=State.selectedId?[State.selectedId]:[];
-    renderListTrackSel(); renderAll(); drawTimeline(); renderNotes(); History.reset();
+    emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); History.reset();
     setStatus('專案已載入','ok');
   },
   async load(file){

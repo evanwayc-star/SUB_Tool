@@ -5,7 +5,10 @@ import { escapeHTML } from './util.js';
 import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
-import { renderAll, renderVideoSub, ensurePlayheadVisible, parseTimecodeInput, renderListTrackSel, showToast, ensureProjectSaved } from './app.js';
+import { emit } from './events.js';
+import { parseTimecodeInput } from './tcparse.js';
+import { ensureProjectSaved } from './project.js';
+import { showToast } from './ui.js';
 import { recordHistory } from './history.js';
 import { showCueMenu } from './menus.js';
 
@@ -220,10 +223,10 @@ function selectCue(id,opts){
   const c=State.cues.find(x=>x.id===id);
   if(c && !opts.additive && !opts.range){
     const tk=c.track||0;
-    if(tk!==State.listTrack){ State.listTrack=tk; renderListTrackSel(); renderSubList(); refreshTrackGutterActive(); }
+    if(tk!==State.listTrack){ State.listTrack=tk; emit('render:listTrackSel'); renderSubList(); refreshTrackGutterActive(); }
   }
   refreshSelectionUI();
-  if(opts.seek&&c&&c.timed!==false){ Media.seek(c.start); ensurePlayheadVisible(); renderVideoSub(); }
+  if(opts.seek&&c&&c.timed!==false){ Media.seek(c.start); emit('playhead:ensure'); emit('render:videoSub'); }
   const pc=State.cues.find(x=>x.id===State.selectedId);
   $('stSel').textContent=State.selectedIds.length?('已選 '+State.selectedIds.length+' 條'+(pc?(' · #'+(State.cues.indexOf(pc)+1)):'')):'';
   updatePlayhead();
@@ -251,11 +254,11 @@ function refreshSelectionUI(){
 }
 function addCue(start,end,text,track){
   const c={id:newId(),start:start||0,end:end!=null?end:(start||0),text:text||'',track:track||0,timed:(start!=null&&end!=null)};
-  State.cues.push(c); sortCues(); renderAll(); selectCue(c.id); return c;
+  State.cues.push(c); sortCues(); emit('render:all'); selectCue(c.id); return c;
 }
 function addCueAfter(id){
   const c=addCue(null,null,'',0); c.timed=false; c.start=0;c.end=0;
-  renderAll(); selectCue(c.id);
+  emit('render:all'); selectCue(c.id);
   setTimeout(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));},30);
 }
 function addCueRelative(dir){
@@ -263,7 +266,7 @@ function addCueRelative(dir){
   if(sel && sel.timed===false){
     const c={id:newId(),start:sel.start,end:sel.end,text:'',track:sel.track||0,timed:false};
     State.cues.splice(State.cues.indexOf(sel)+(dir>0?1:0),0,c);
-    renderAll(); selectCue(c.id); recordHistory('新增空白字幕');
+    emit('render:all'); selectCue(c.id); recordHistory('新增空白字幕');
     setTimeout(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));},30);
     return c;
   }
@@ -283,7 +286,7 @@ function deleteSelected(){
   State.cues=State.cues.filter(c=>!ids.includes(c.id));
   State.selectedId=State.cues[Math.min(firstIdx,State.cues.length-1)]?.id||null;
   State.selectedIds=State.selectedId?[State.selectedId]:[]; State.activeEdge='start';
-  renderAll(); updateTlSel(); recordHistory('刪除字幕');
+  emit('render:all'); updateTlSel(); recordHistory('刪除字幕');
 }
 function deleteCue(id){ if(id){State.selectedIds=[id];State.selectedId=id;} deleteSelected(); }
 
@@ -296,7 +299,7 @@ function shiftTextsDown(id){
   while(start>0&&(list[start-1].text||'').trim())start--;
   for(let j=i;j>start;j--)list[j].text=list[j-1].text;
   list[start].text='';
-  renderAll(); recordHistory('上方字幕文字往下移動');
+  emit('render:all'); recordHistory('上方字幕文字往下移動');
 }
 
 function shiftTextsUp(id){
@@ -308,7 +311,7 @@ function shiftTextsUp(id){
   while(end<list.length-1&&(list[end+1].text||'').trim())end++;
   for(let j=i;j<end;j++)list[j].text=list[j+1].text;
   list[end].text='';
-  renderAll(); recordHistory('下方字幕文字往上移動');
+  emit('render:all'); recordHistory('下方字幕文字往上移動');
 }
 
 function sortCues(){ State.cues.sort((a,b)=>{
@@ -336,7 +339,7 @@ function pasteCues(){
   sortCues();
   State.selectedIds=newCues.map(c=>c.id);
   State.selectedId=newCues[0].id;
-  renderAll(); refreshSelectionUI(); recordHistory('貼上字幕');
+  emit('render:all'); refreshSelectionUI(); recordHistory('貼上字幕');
   showToast(`已貼上 ${newCues.length} 條字幕`);
 }
 
@@ -381,7 +384,7 @@ function searchReplace(all){
     }
     if(text!==orig){ c.text=text; count++; }
   }
-  if(count){ recordHistory(all?'全部取代':'取代字幕'); searchUpdate(); renderAll(); }
+  if(count){ recordHistory(all?'全部取代':'取代字幕'); searchUpdate(); emit('render:all'); }
 }
 
 function updateSearchCount(){
@@ -454,7 +457,7 @@ function splitCueAtCursor(c, txtEl){
   if(idx>=0) State.cues.splice(idx+1,0,newCue);
   else State.cues.push(newCue);
 
-  sortCues(); renderAll(); recordHistory('拆分字幕');
+  sortCues(); emit('render:all'); recordHistory('拆分字幕');
   selectCue(newCue.id,{seek:false});
 
   // 自動進入下句的內嵌編輯，游標置於開頭
@@ -488,12 +491,12 @@ sublist.addEventListener('click', async e => {
     if (tin) {
       openInlineTimeEdit(tin, c.start, t => {
         c.start = Math.max(0, Math.min(t, c.end - 0.001));
-        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改起點' + cueSuffix(c));
+        sortCues(); emit('render:all'); emit('render:videoSub'); recordHistory('修改起點' + cueSuffix(c));
       });
     } else {
       openInlineTimeEdit(tout, c.end, t => {
         c.end = Math.max(c.start + 0.001, t);
-        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改終點' + cueSuffix(c));
+        sortCues(); emit('render:all'); emit('render:videoSub'); recordHistory('修改終點' + cueSuffix(c));
       });
     }
   }
@@ -510,7 +513,7 @@ sublist.addEventListener('mousedown', e => {
     e.preventDefault();
     if (c.id !== _swapSource) {
       const src = State.cues.find(x => x.id === _swapSource);
-      if (src) { const tmp = src.text || ''; src.text = c.text || ''; c.text = tmp; renderAll(); recordHistory('字幕對調'); }
+      if (src) { const tmp = src.text || ''; src.text = c.text || ''; c.text = tmp; emit('render:all'); recordHistory('字幕對調'); }
     }
     cancelSwapMode(); return;
   }
@@ -561,7 +564,7 @@ sublist.addEventListener('input', e => {
   c.text = txt.innerText;
   const rc2 = _rowClass(c.text);
   row.classList.remove('blank', 'two-line', 'multi-line'); if (rc2) row.classList.add(rc2);
-  renderCueBlocks(); renderVideoSub(); renderCheckPanel();
+  renderCueBlocks(); emit('render:videoSub'); renderCheckPanel();
 });
 
 sublist.addEventListener('focusout', e => {

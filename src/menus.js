@@ -6,7 +6,8 @@ import { Media } from './media.js';
 import { addCue, addCueRelative, deleteSelected, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop } from './timeline.js';
 import { recordHistory } from './history.js';
-import { renderAudioTracks, renderMixer, doAction } from './app.js';
+import { emit } from './events.js';
+import { renderAudioTracks, renderMixer } from './mixer.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -44,7 +45,7 @@ function showPlayerMenu(x,y){
         act:()=>{ Media.switchSource(s.id); renderMixer(); }});
   }
   items.push({sep:true});
-  items.push({label:'🔊 載入外部音檔…',act:()=>doAction('add-audio')});
+  items.push({label:'🔊 載入外部音檔…',act:()=>emit('action','add-audio')});
   items.push({sep:true},{heading:true,label:'播放速度'});
   [0.25,0.5,0.75,1,1.25,1.5,2].forEach(r=>items.push({label:r+'×',
     checked:(video.playbackRate||1)===r,act:()=>Media.setRate(r)}));

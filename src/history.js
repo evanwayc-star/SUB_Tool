@@ -4,7 +4,8 @@ import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
 import { drawTimeline } from './timeline.js';
 import { renderNotes } from './notes.js';
-import { renderListTrackSel, renderAll, setStatus } from './app.js';
+import { emit } from './events.js';
+import { setStatus } from './ui.js';
 
 /* ===== 動作紀錄（復原 / 重做） ===== */
 const History = {
@@ -24,7 +25,7 @@ const History = {
     if(d.fps) setFps(d.dropFrame?String(d.fps)+'df':d.fps);
     if(!State.cues.some(c=>c.id===State.selectedId)){ State.selectedId=null; State.selectedIds=[]; }
     else State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
-    this.hi=i; renderListTrackSel(); renderAll(); drawTimeline(); renderNotes(); renderHistory();
+    this.hi=i; emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); renderHistory();
   },
   undo(){ if(this.hi>0){ this.restore(this.hi-1); setStatus('已復原','ok'); } else setStatus('沒有可復原的動作',''); },
   redo(){ if(this.hi<this.stack.length-1){ this.restore(this.hi+1); setStatus('已重做','ok'); } else setStatus('沒有可重做的動作',''); },

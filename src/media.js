@@ -1,10 +1,27 @@
 /* SUB Tool — 媒體引擎（影片 + Web Audio 多音軌 + ffmpeg）與波形 */
-import { State, DESK, setFps } from './state.js';
+import { State, DESK, setFps, snapFps } from './state.js';
 import { secToEncore } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName } from './util.js';
-import { setStatus, showToast, openModal, onDurationKnown, renderAudioTracks, detectFpsWeb, refreshMpvSubs } from './app.js';
+import { emit } from './events.js';
+import { setStatus, showToast, openModal } from './ui.js';
+import { renderAudioTracks } from './mixer.js';
 import { drawTimeline, updatePlayhead } from './timeline.js';
+
+/* ===== 播放窗：自動偵測 FPS（網頁版，播放時取樣） ===== */
+function detectFpsWeb(){
+  if(!('requestVideoFrameCallback' in HTMLVideoElement.prototype))return;
+  let last=null, deltas=[], frames=0;
+  const cb=(now,meta)=>{
+    if(last!=null){ const d=meta.mediaTime-last; if(d>0.0005)deltas.push(d); }
+    last=meta.mediaTime; frames++;
+    if(deltas.length<12 && frames<60){ try{video.requestVideoFrameCallback(cb);}catch(e){} return; }
+    if(deltas.length>=6){ deltas.sort((a,b)=>a-b); const med=deltas[deltas.length>>1]; const fps=Math.round(1/med);
+      if(fps>=10&&fps<=120){ setFps(String(snapFps(fps))); // 經 setFps 統一處理：偵測到的影格率一律視為非 Drop-frame，清除殘留的 dropFrame
+        setStatus('偵測到影片 FPS：'+fps,'ok'); } }
+  };
+  try{ video.requestVideoFrameCallback(cb); }catch(e){}
+}
 
 /* ===== 3. 媒體引擎 ==================================================== */
 const Media = {
@@ -82,7 +99,7 @@ const Media = {
       setStatus('格式非瀏覽器原生，啟動 ffmpeg…','busy');
       await this.transcodeAndExtract(file);
     }
-    onDurationKnown();
+    emit('duration:known');
   },
 
   async probeAndMaybeExtract(file){
@@ -133,7 +150,7 @@ const Media = {
       this.switchSource(src);
       this.usingWebAudio=true;
       this.syncMuteState();
-      if(el.duration>State.duration){ State.duration=el.duration; onDurationKnown(); }
+      if(el.duration>State.duration){ State.duration=el.duration; emit('duration:known'); }
       if(!Wave.peaks) Wave.initLive();
       setStatus('音軌已加入','ok');
       renderAudioTracks();
@@ -189,7 +206,7 @@ const Media = {
         }
         catch(e){ console.warn('wave',e); Wave.initLive(); }
       }
-      setStatus('媒體已載入（桌面模式，原生直讀）','ok'); onDurationKnown(); return;
+      setStatus('媒體已載入（桌面模式，原生直讀）','ok'); emit('duration:known'); return;
     }
 
     // (B) 非原生（需 proxy）或原生多音軌
@@ -212,7 +229,7 @@ const Media = {
       // 混音器立即顯示「準備中」推桿
       this.pendingChannels=this._expandChannels(audio).map(label=>({label,ready:false}));
       this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
-      Wave.initLive(); onDurationKnown();
+      Wave.initLive(); emit('duration:known');
 
       // 載入音軌+波形的共用函式（快取立即執行，非快取等轉檔完成後執行）
       const self=this;
@@ -306,7 +323,7 @@ const Media = {
       catch(e){ console.warn('wave',e); Wave.initLive(); }
     } else Wave.initLive();
 
-    setStatus('媒體已載入（桌面模式）','ok'); onDurationKnown();
+    setStatus('媒體已載入（桌面模式）','ok'); emit('duration:known');
   },
   async addAudioFileDesktop(p){
     this.ensureCtx();
@@ -326,7 +343,7 @@ const Media = {
       this.tracks.push(...newTracks);
       this.switchSource(src);
       this.usingWebAudio=true; this.syncMuteState();
-      if(el.duration>State.duration){State.duration=el.duration;onDurationKnown();}
+      if(el.duration>State.duration){State.duration=el.duration;emit('duration:known');}
       renderAudioTracks();
       if(this.playing) this.startElementSources(this.vTime());
       setStatus('產生波形…','busy');
@@ -384,7 +401,7 @@ const Media = {
     if(info?.video?.fps) setFps(info.video.fps);
 
     this._startMpvBoundsFeeder();
-    refreshMpvSubs(); // 把目前字幕餵給 mpv
+    emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
 
     // 監聽 mpv 事件（時碼同步 / 播放狀態）
     DESK.mpv.onEvent(e=>{
@@ -403,7 +420,7 @@ const Media = {
           else if(!paused&&!this.playing){ this.ensureCtx(); this.startElementSources(this._mpvTime); this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); }
         }
         if(e.name==='duration'&&typeof e.data==='number'&&e.data>0){
-          this._mpvDuration=e.data; State.duration=e.data; onDurationKnown();
+          this._mpvDuration=e.data; State.duration=e.data; emit('duration:known');
         }
       }
       if(e.event==='end-file'&&this.mpvMode){ this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶'; }
@@ -413,7 +430,7 @@ const Media = {
     this.pendingChannels = this._expandChannels(audio).map(label=>({label,ready:false}));
     renderAudioTracks();
     setStatus('媒體已載入（mpv 秒開，嵌入播放）','ok');
-    onDurationKnown();
+    emit('duration:known');
     Wave.initLive();
 
     // 背景抽取音軌（不阻塞播放；完成後 element tracks 接管音訊，mpv 靜音）
@@ -572,7 +589,7 @@ const Media = {
       this.usingWebAudio=true; this.syncMuteState();
       setStatus('轉檔完成','ok'); renderAudioTracks();
       Wave.fromTracks();
-      onDurationKnown();
+      emit('duration:known');
     }catch(e){ setStatus('轉檔失敗','');console.error(e);showToast('ffmpeg 轉檔失敗'); }
   },
 
@@ -890,7 +907,7 @@ const Wave = {
     Media.ensureCtx();
     const buf=await readFile(file);
     const ab=await Media.ctx.decodeAudioData(buf.slice(0));
-    if(ab.duration>State.duration){State.duration=ab.duration;onDurationKnown();}
+    if(ab.duration>State.duration){State.duration=ab.duration;emit('duration:known');}
     this.compute(ab); drawTimeline();
     setStatus('波形已產生','ok');
   },

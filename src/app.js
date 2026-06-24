@@ -7,18 +7,34 @@ import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix } from './state.js';
 import { Media, Wave } from './media.js';
-import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline.js';
+import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
-import { Project, ensureProjectSaved, isProjectGuardDone, resetProject } from './project.js';
+import { Project, ensureProjectSaved, resetProject } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
+import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
+import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
+import { showHelp } from './help.js';
+import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
+import { parseTimecodeInput } from './tcparse.js';
+import { on } from './events.js';
 
-
-
-/* 提供給子模組使用的膠合函式（app.js 為協調層） */
-export { setStatus, showToast, showOsd, openModal, closeModal, onDurationKnown, renderAudioTracks, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, detectFpsWeb, renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, snapTargets, snapVal, neighborBounds, parseTimecodeInput, togglePanel, renderMixer, doAction, refreshMpvSubs, ensureProjectSaved, isProjectGuardDone };
+/* app.js 為協調層：訂閱各模組發送的事件並呼叫對應的渲染/指令函式。
+   各模組只 emit、不再反向 import app.js，藉此切斷雙向相依。
+   （函式宣告會被 hoist，於此處註冊安全；emit 為同步呼叫，語意不變。） */
+on('render:all', renderAll);
+on('render:videoSub', renderVideoSub);
+on('render:listTrackSel', renderListTrackSel);
+on('render:trackStyle', renderTrackStyle);
+on('playhead:ensure', ensurePlayheadVisible);
+on('duration:known', onDurationKnown);
+on('mpv:refreshSubs', refreshMpvSubs);
+on('panel:toggle', togglePanel);
+on('note:openInPanel', openNoteInPanel);
+on('cue:openEdit', openCueEditModal);
+on('action', doAction);
 
 /* ============================================================================
    SUB TOOL — 線上上字幕工具  (single-file, vanilla JS)
@@ -105,115 +121,7 @@ function renderVideoSub(){
   _videoSubSig=sig;
   _videoSub.innerHTML=html;
 }
-function renderAudioTracks(){
-  const list=$('atList'); list.innerHTML='';
-  const real=Media.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='nativeTrack'||t.kind==='element');
-  // 準備中的占位推桿屬於影片音源；切到外部音源檢視時不顯示
-  const _showPending=(Media.activeSource===null||Media.activeSource==='video');
-  const pending=_showPending?(Media.pendingChannels||[]).filter(c=>!c.ready):[];
-  if(real.length===0 && pending.length===0){ $('atHint').textContent='尚未載入音訊'; if($('mixerPanel')&&$('mixerPanel').classList.contains('show'))renderMixer(); return; }
-  $('atHint').textContent=(real.length+pending.length)+' 條音軌'+(pending.length?'（準備中…）':'');
-  for(const tr of real){
-    const row=document.createElement('div');row.className='atrack';
-    row.innerHTML=
-      `<span class="nm">${escapeHTML(tr.name)}</span>`+
-      `<button class="mini mute ${tr.muted?'on':''}" title="${tr.muted?'取消靜音':'靜音'}">${tr.muted?'🔇':'🔊'}</button>`+
-      `<button class="mini solo ${tr.solo?'on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">⊙</button>`+
-      `<input type="range" min="0" max="1.5" step="0.01" value="${tr.volume}">`;
-    const [muteBtn,soloBtn]=row.querySelectorAll('button');
-    const vol=row.querySelector('input');
-    muteBtn.onclick=()=>{tr.muted=!tr.muted;Media.applyGains();renderAudioTracks();};
-    soloBtn.onclick=()=>{tr.solo=!tr.solo;Media.applyGains();renderAudioTracks();};
-    vol.oninput=()=>{tr.volume=+vol.value;Media.applyGains();};
-    list.appendChild(row);
-  }
-  for(const pc of pending){
-    const row=document.createElement('div');row.className='atrack pending';
-    row.innerHTML=`<span class="nm">${escapeHTML(pc.label)}</span><span class="prep"><span class="spin"></span>準備中</span>`;
-    list.appendChild(row);
-  }
-  renderAudioSources();
-  if($('mixerPanel')&&$('mixerPanel').classList.contains('show'))renderMixer();
-}
 
-function renderAudioSources(){
-  const src=Media.activeSource;
-  const sel=$('mixerSrcSel');
-  const selWave=$('waveGlobalSrcSel');
-  if(!sel && !selWave) return;
-  const srcs=Media.getSources();
-  const updateSel = (sNode) => {
-    if(!sNode)return;
-    if(srcs.length===0){ sNode.innerHTML='<option value="">(無音源)</option>'; sNode.disabled=true; }
-    else {
-      sNode.innerHTML='';
-      for(const s of srcs){
-        const opt=document.createElement('option');
-        opt.value=s.id; opt.textContent=s.label;
-        if(s.id===src) opt.selected=true;
-        sNode.appendChild(opt);
-      }
-      sNode.disabled=false;
-    }
-  };
-  updateSel(sel); updateSel(selWave);
-}
-
-/* ===== 混音器：逐聲道電平表 + 獨奏/靜音（浮動面板） ===== */
-let _meterStrips=[];
-function renderMixer(){
-  const wrap=$('mixerStrips'); if(!wrap)return;
-  _meterStrips=[];
-  const src=Media.activeSource;
-
-  const real=Media.tracks.filter(t=>{
-    if(!(t.kind==='buffer'||t.kind==='native'||t.kind==='element'))return false;
-    if(src!==null&&(t.source||'video')!==src)return false;
-    return true;
-  });
-  const _showPending=(Media.activeSource===null||Media.activeSource==='video');
-  const pending=_showPending?(Media.pendingChannels||[]).filter(c=>!c.ready):[];
-  if(!real.length && !pending.length){ wrap.innerHTML='<div class="empty" style="padding:14px;white-space:nowrap">尚無音訊聲道</div>'; return; }
-  wrap.innerHTML='';
-  for(const tr of real){
-    const strip=document.createElement('div'); strip.className='mx-strip';
-    const vol=Math.round((tr.volume==null?1:tr.volume)*100);
-    strip.innerHTML=
-      `<div class="mx-meter"><div class="mx-mask"></div><div class="mx-peak"></div>`+
-        `<input class="mx-fader" type="range" min="0" max="100" step="1" value="${vol}" title="音量 ${vol}%">`+
-      `</div>`+
-      `<div class="mx-name" title="${escapeHTML(tr.name)}">${escapeHTML(tr.name)}</div>`+
-      `<div class="mx-btns">`+
-        `<button class="mx-solo${tr.solo?' on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">⊙ 獨奏</button>`+
-        `<button class="mx-mute${tr.muted?' on':''}" title="${tr.muted?'取消靜音':'靜音'}">${tr.muted?'🔇':'🔊'} 靜音</button>`+
-      `</div>`;
-    const fader=strip.querySelector('.mx-fader');
-    fader.oninput=()=>{ tr.volume=(+fader.value)/100; fader.title='音量 '+fader.value+'%'; Media.applyGains(); };
-    fader.addEventListener('mousedown',e=>e.stopPropagation()); // 不要觸發面板拖移
-    strip.querySelector('.mx-solo').onclick=()=>{ tr.solo=!tr.solo; Media.applyGains(); renderMixer(); renderAudioTracks(); };
-    strip.querySelector('.mx-mute').onclick=()=>{ tr.muted=!tr.muted; Media.applyGains(); renderMixer(); renderAudioTracks(); };
-    wrap.appendChild(strip);
-    _meterStrips.push({tr, mask:strip.querySelector('.mx-mask'), peak:strip.querySelector('.mx-peak')});
-  }
-  for(const pc of pending){
-    const strip=document.createElement('div'); strip.className='mx-strip pending';
-    strip.innerHTML=
-      `<div class="mx-meter"><div class="mx-prep"><span class="spin"></span></div></div>`+
-      `<div class="mx-name" title="${escapeHTML(pc.label)}">${escapeHTML(pc.label)}</div>`+
-      `<div class="mx-btns"><div class="mx-preplabel">準備中…</div></div>`;
-    wrap.appendChild(strip);
-  }
-}
-function _mixerTracks(){
-  const src=Media.activeSource;
-  return Media.tracks.filter(t=>{
-    if(!(t.kind==='buffer'||t.kind==='native'||t.kind==='element'))return false;
-    if(src!==null&&(t.source||'video')!==src)return false;
-    return true;
-  });
-}
-function mixerReset(){ for(const t of _mixerTracks()){ t.solo=false; t.muted=false; } Media.applyGains(); renderMixer(); renderAudioTracks(); }
-function mixerMuteAll(){ for(const t of _mixerTracks()){ t.solo=false; t.muted=true; } Media.applyGains(); renderMixer(); renderAudioTracks(); }
 
 /* ===== 快取管理對話框（桌面版） ===== */
 function _fmtBytes(n){ n=+n||0; if(n<1024)return n+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+' '+u[i]; }
@@ -241,25 +149,6 @@ async function openCacheDialog(){
     {label:'關閉',primary:true,act:closeModal},
   ];
   openModal('🗂 轉檔快取',html,buttons);
-}
-function updateMeters(){
-  const panel=$('mixerPanel'); if(!panel||!panel.classList.contains('show')||!_meterStrips.length)return;
-  const now=performance.now();
-  for(const s of _meterStrips){
-    const tr=s.tr; let lvl=0;
-    if(tr.analyser&&tr._mbuf){
-      tr.analyser.getFloatTimeDomainData(tr._mbuf);
-      let mx=0; const b=tr._mbuf; for(let i=0;i<b.length;i++){ const v=Math.abs(b[i]); if(v>mx)mx=v; }
-      lvl=mx;
-    }
-    tr.level=Math.max(lvl,(tr.level||0)*0.82); // 平滑衰減
-    const db=tr.level>1e-4?20*Math.log10(tr.level):-60;
-    const h=Math.max(0,Math.min(100,(db+60)/60*100));
-    s.mask.style.height=(100-h)+'%';
-    if(h>=(tr._peakH||0)){ tr._peakH=h; tr.peakT=now; }
-    else if(now-(tr.peakT||0)>900){ tr._peakH=Math.max(0,(tr._peakH||0)-1.6); }
-    s.peak.style.bottom=(tr._peakH||0)+'%';
-  }
 }
 function onDurationKnown(){
   $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
@@ -374,34 +263,7 @@ $('seekBar').addEventListener('input',e=>{ const t=(+e.target.value)/1000; Media
 $('fpsSel').addEventListener('change',e=>{ const prev=State.fps,prevDf=State.dropFrame; setFps(e.target.value); renderSubList(); renderNotes(); recordHistory(`切換 FPS ${prevDf?prev+'df':prev}→${State.fps+(State.dropFrame?'df':'')}`); e.target.blur(); });
 $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
 
-/* 狀態列 / toast / modal */
-function setStatus(msg,kind){ $('stMsg').textContent=msg; const d=$('stDot'); d.className='dot'+(kind?(' '+kind):''); }
-let toastT;
-function showToast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),3500); }
-let _osdT;
-function showOsd(text){ const el=$('speedOsd'); if(!el)return; el.textContent=text; el.classList.add('show'); clearTimeout(_osdT); _osdT=setTimeout(()=>el.classList.remove('show'),1000); }
-function openModal(title,html,buttons){
-  $('modalTitle').textContent=title; $('modalBody').innerHTML=html;
-  const foot=$('modalFoot'); foot.innerHTML='';
-  (buttons||[{label:'關閉',primary:true,act:closeModal}]).forEach(b=>{
-    const btn=document.createElement('button'); btn.textContent=b.label; if(b.primary)btn.className='primary';
-    btn.onclick=b.act; foot.appendChild(btn);
-  });
-  $('modalBg').classList.add('show');
-  // mpv 覆蓋視窗會蓋住置中的對話框，開啟對話框時先隱藏
-  if(Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(false).catch(()=>{});
-}
-function closeModal(){
-  $('modalBg').classList.remove('show');
-  if(Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(true).catch(()=>{});
-}
-$('modalBg').addEventListener('mousedown',e=>{if(e.target===$('modalBg'))closeModal();});
-$('modalBg').addEventListener('keydown',e=>{
-  if(e.key==='Enter' && e.target.tagName!=='TEXTAREA'){
-    e.preventDefault(); e.stopPropagation();
-    $('modalFoot')?.querySelector('button.primary')?.click();
-  }
-},true);
+
 
 
 async function doAction(act){
@@ -541,294 +403,6 @@ document.querySelectorAll('.menu .items button').forEach(b=>b.addEventListener('
   b.closest('.menu').classList.remove('open');
 }));
 
-/* // 或 \\ 換行符號轉換（匯入後套用） */
-function convertLineBreaks(parsed){
-  for(const p of parsed){ if(p.text) p.text=p.text.replace(/\/\//g,'\n').replace(/\\\\/g,'\n'); }
-  return parsed;
-}
-/* 格式自動辨識 */
-function detectSubFormat(text, ext){
-  if(ext==='srt')return 'srt';
-  if(ext==='ass'||ext==='ssa')return 'ass';
-  if(/\[Script Info\]/i.test(text))return 'ass';
-  if(/^\d+\r?\n\d{2}:\d{2}:\d{2}[,\.]\d{3}/m.test(text))return 'srt';
-  if(/(\d{1,2}:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)[ \t]+(\d{1,2}:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)/m.test(text))return 'encore';
-  return 'txt';
-}
-/* 匯入 / 匯出字幕 */
-function _askFpsModal(){
-  return new Promise(resolve=>{
-    const FPS_OPTS=[
-      {v:'23.976',l:'23.98'},{v:'24',l:'24'},{v:'25',l:'25'},
-      {v:'29.97df',l:'29.97 (Drop-frame)'},{v:'29.97',l:'29.97 (Non-Drop-frame)'},{v:'30',l:'30'},
-    ];
-    const opts=FPS_OPTS.map(o=>`<option value="${o.v}"${o.v==='29.97'?' selected':''}>${o.l}</option>`).join('');
-    openModal('選擇影格率 (FPS)',
-      `<p style="margin:0 0 12px;font-size:13px;color:var(--text-faint)">尚未載入影片，請先設定字幕的影格率。</p>`+
-      `<label>FPS：<select id="importFpsSel" style="margin-left:6px">${opts}</select></label>`,
-      [{label:'確定',primary:true,act:()=>{ const val=$('importFpsSel').value; closeModal(); resolve(val); }},
-       {label:'取消',act:()=>{ closeModal(); resolve(null); }}]
-    );
-  });
-}
-async function importSub(){
-  let text, fileName='';
-  if(IS_DESKTOP){
-    const r=await DESK.importSub('any'); if(!r)return;
-    text=decodeText(b64ToBytes(r.b64).buffer); fileName=r.name||'';
-  }else{
-    const f=await pickFile($('fileSub')); if(!f)return;
-    const buf=await readFile(f); text=decodeText(buf); fileName=f.name;
-  }
-  if(!State.mediaName){
-    const fpsVal=await _askFpsModal(); if(fpsVal===null)return;
-    setFps(fpsVal);
-  }
-  const ext=(fileName.split('.').pop()||'').toLowerCase();
-  const kind=detectSubFormat(text, ext);
-  let parsed=[];
-  try{
-    if(kind==='srt')parsed=SubFormats.parseSRT(text);
-    else if(kind==='ass')parsed=SubFormats.parseASS(text);
-    else if(kind==='encore')parsed=SubFormats.parseEncore(text,State.fps,State.dropFrame);
-    else parsed=SubFormats.parseTXT(text);
-  }catch(e){ showToast('解析失敗：'+e.message); return; }
-  if(parsed.length===0){ showToast('未解析到字幕（檢查格式/編碼）'); return; }
-  convertLineBreaks(parsed);
-
-  _openImportModal(`匯入字幕到哪個軌道？（已辨識為 ${kind.toUpperCase()}，${parsed.length} 條）`, parsed, kind);
-}
-function _openImportModal(title, parsed, kind){
-  const trackOpts=State.tracks.map((tk,i)=>`<option value="${i}">軌道 ${i+1}：${escapeHTML(tk.name)}</option>`).join('');
-  const suggestName=kind.toUpperCase()+' 字幕';
-  openModal(title,
-    `<label style="display:block;padding:8px 0">目標軌道：<select id="importTkSel" style="margin-left:6px">${trackOpts}<option value="new" selected>＋ 新增軌道…</option></select></label>`+
-    `<div id="importNewTkRow" style="padding-bottom:8px">軌道名稱：<input type="text" id="importNewTkName" style="margin-left:6px;width:160px" value="${escapeHTML(suggestName)}"></div>`+
-    `<label style="display:block;padding-bottom:8px"><input type="checkbox" id="importAppend"> 附加（保留現有字幕）</label>`,
-    [{label:'匯入',primary:true,act:()=>{
-      const selVal=$('importTkSel').value;
-      let targetTk;
-      if(selVal==='new'){
-        const tkName=($('importNewTkName').value.trim())||('軌道 '+(State.tracks.length+1));
-        State.tracks.push(newTrack(tkName)); syncTrackCount();
-        targetTk=State.tracks.length-1;
-      }else{ targetTk=+selVal; }
-      const append=selVal==='new'||$('importAppend').checked;
-      closeModal();
-      const newCues=parsed.map(p=>({id:newId(),start:p.start||0,end:p.end||0,text:p.text||'',track:targetTk,
-        timed:p.timed!==false&&!(p.start===0&&p.end===0&&kind==='txt')}));
-      if(kind==='txt')newCues.forEach(c=>c.timed=false);
-      if(append){ State.cues.push(...newCues); }
-      else { State.cues=newCues; }
-      State.listTrack=targetTk;
-      State.selectedId=newCues[0]?.id||null; State.selectedIds=State.selectedId?[State.selectedId]:[];
-      sortCues(); renderListTrackSel(); renderAll();
-      { const maxEnd=State.cues.reduce((m,c)=>c.timed!==false?Math.max(m,c.end):m,0);
-        if(maxEnd>State.duration){State.duration=maxEnd;onDurationKnown();}else drawTimeline(); }
-      recordHistory('匯入字幕 '+kind.toUpperCase());
-      setStatus(`已匯入 ${parsed.length} 條字幕到「${State.tracks[targetTk]?.name}」(${kind.toUpperCase()})`, 'ok');
-      showToast(`匯入 ${parsed.length} 條字幕`);
-    }},{label:'取消',act:closeModal}]);
-  setTimeout(()=>{
-    const sel=$('importTkSel'), row=$('importNewTkRow'), nm=$('importNewTkName');
-    if(sel) sel.addEventListener('change',()=>{
-      const isNew=sel.value==='new';
-      row.style.display=isNew?'block':'none';
-      if(isNew){ nm.focus(); nm.select(); }
-    });
-  },20);
-}
-function showExportDialog(){
-  if(State.cues.length===0){ showToast('沒有字幕可匯出'); return; }
-  const fmtOpts=[['SRT (.srt)','srt'],['ASS (.ass)','ass'],['Adobe Encore (.txt)','encore'],['純文字 (.txt)','txt']]
-    .map(([label,val])=>`<option value="${val}">${label}</option>`).join('');
-  if(State.trackCount>1){
-    const trkBoxes='<div style="padding:6px 0 2px">選擇要匯出的軌道（每軌各自一個檔案）：</div>'+
-      State.tracks.map((tk,i)=>`<label style="display:block;padding:3px 0"><input type="checkbox" data-tk="${i}" checked> ${escapeHTML(tk.name)} <span style="color:var(--text-faint)">(${State.cues.filter(c=>(c.track||0)===i).length} 條)</span></label>`).join('');
-    openModal('匯出字幕',
-      `<label style="display:block;padding:4px 0">格式：<select id="expFmtSel" style="margin-left:6px">${fmtOpts}</select></label>${trkBoxes}`,
-      [{label:'匯出',primary:true,act:()=>{
-        const kind=$('expFmtSel').value;
-        const checked=[...document.querySelectorAll('#modalBody input[data-tk]')].filter(b=>b.checked).map(b=>+b.dataset.tk);
-        closeModal();
-        for(const i of checked){ const cues=State.cues.filter(c=>(c.track||0)===i); if(cues.length)doExport(kind,cues,State.tracks[i]?.name); }
-      }},{label:'取消',act:closeModal}]);
-  }else{
-    openModal('匯出字幕',
-      `<label style="display:block;padding:4px 0">格式：<select id="expFmtSel" style="margin-left:6px">${fmtOpts}</select></label>`,
-      [{label:'匯出',primary:true,act:()=>{ closeModal(); doExport($('expFmtSel').value,State.cues); }},{label:'取消',act:closeModal}]);
-  }
-}
-function showShiftTcDialog(){
-  openModal('時間碼位移',
-    `<div style="margin-bottom:8px">輸入位移量（<code>+</code> 往後、<code>-</code> 往前）<br>格式：±時:分:秒:格　例如 <code>+00:00:02:00</code> 或 <code>-1:30</code></div>`+
-    `<input id="tcShiftInput" placeholder="+00:00:02:00" style="width:200px;font-family:monospace;font-size:14px"><br>`+
-    `<label style="display:block;margin-top:8px">套用到：<select id="tcShiftSel" style="margin-left:6px">`+
-    `<option value="sel">已選取的字幕</option>`+
-    `<option value="track">目前軌道所有字幕</option>`+
-    `<option value="all">全部軌道所有字幕</option>`+
-    `</select></label>`,
-    [{label:'套用',primary:true,act:()=>{
-      const raw=$('tcShiftInput').value.trim();
-      const sign=raw.startsWith('-')?-1:1;
-      const t=parseTimecodeInput(raw.replace(/^[+-]/,''));
-      if(t==null||isNaN(t)){ showToast('無法解析時間碼'); return; }
-      const delta=sign*t;
-      const scope=$('tcShiftSel').value;
-      let cues;
-      if(scope==='sel'){
-        const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
-        cues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(c=>c&&c.timed!==false);
-      }else if(scope==='track'){
-        cues=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
-      }else{
-        cues=State.cues.filter(c=>c.timed!==false);
-      }
-      if(!cues.length){ showToast('沒有字幕可以位移'); return; }
-      for(const c of cues){ c.start=Math.max(0,c.start+delta); c.end=Math.max(c.start+0.001,c.end+delta); }
-      closeModal(); sortCues(); renderAll(); drawTimeline();
-      recordHistory('時間碼位移');
-      setStatus(`已位移 ${delta>=0?'+':''}${delta.toFixed(3)}s（共 ${cues.length} 條）`,'ok');
-    }},{label:'取消',act:closeModal}]);
-}
-function exportSub(kind){
-  if(State.cues.length===0){ showToast('沒有字幕可匯出'); return; }
-  if(State.trackCount>1){
-    for(let i=0;i<State.tracks.length;i++){
-      const cues=State.cues.filter(c=>(c.track||0)===i); if(cues.length)doExport(kind,cues,State.tracks[i]?.name);
-    }
-  }else doExport(kind,State.cues);
-}
-function doExport(kind,cues,trackName){
-  if(!cues.length){ showToast('所選軌道沒有字幕'); return; }
-  const base=(State.mediaName? State.mediaName.replace(/\.[^.]+$/,'') : 'subtitle');
-  const tkSuffix=trackName?'_'+trackName.replace(/[\\/:*?"<>|]/g,'_'):'';
-  let text,ext;
-  if(kind==='srt'){ text=SubFormats.toSRT(cues,State.fps); ext='.srt'; }
-  else if(kind==='ass'){ text=SubFormats.toASS(cues,State.fps,State.tracks,State.videoWidth||video.videoWidth||1920,State.videoHeight||video.videoHeight||1080, window.innerWidth||1920, $('videoWrap')?.clientWidth||1000, $('videoWrap')?.clientHeight||562); ext='.ass'; }
-  else if(kind==='encore'){ text=SubFormats.toEncore(cues,State.fps,State.dropFrame); ext='.txt'; }
-  else { text=SubFormats.toTXT(cues); ext='.txt'; }
-  const bytes=encodeUTF16LE(text);
-  const fname=base+tkSuffix+(kind==='encore'?'_encore':'')+ext;
-  if(IS_DESKTOP){
-    DESK.exportSub(fname,bytesToB64(bytes),ext.replace('.','')).then(pth=>{ if(pth){setStatus('已匯出：'+pth,'ok');showToast('已匯出 '+baseName(pth));} });
-  }else{
-    downloadBytes(bytes, fname, 'text/plain;charset=utf-16le');
-    setStatus(`已匯出 ${kind.toUpperCase()}（UTF-16 LE）`,'ok');
-    showToast(`已匯出 ${fname}`);
-  }
-}
-
-/* 拖放檔案 */
-['dragover','dragenter'].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();$('videoWrap').classList.add('dragover');}));
-['dragleave','drop'].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();if(ev!=='drop'&&e.relatedTarget)return;$('videoWrap').classList.remove('dragover');}));
-document.addEventListener('drop',async e=>{
-  e.preventDefault(); $('videoWrap').classList.remove('dragover');
-  const f=e.dataTransfer.files[0]; if(!f)return;
-  const ext=(f.name.split('.').pop()||'').toLowerCase();
-  if(['subtool','json'].includes(ext))Project.load(f);
-  else if(['srt','ass','ssa','txt'].includes(ext)){importDropped(f);}
-  else Media.loadVideoFile(f);
-});
-async function importDropped(f){
-  const buf=await readFile(f); const text=decodeText(buf);
-  const ext=(f.name.split('.').pop()||'').toLowerCase();
-  const kind=detectSubFormat(text,ext);
-  let parsed;
-  if(kind==='srt')parsed=SubFormats.parseSRT(text);
-  else if(kind==='ass')parsed=SubFormats.parseASS(text);
-  else if(kind==='encore')parsed=SubFormats.parseEncore(text,State.fps);
-  else parsed=SubFormats.parseTXT(text);
-  if(!parsed.length){showToast('未解析到字幕');return;}
-  convertLineBreaks(parsed);
-  _openImportModal(`拖入字幕（${kind.toUpperCase()}，${parsed.length} 條）`, parsed, kind);
-}
-
-/* 說明 */
-function showHelp(){
-  openModal('鍵盤快捷鍵 / 使用說明',
-  `<b>三大區塊</b>：播放窗（左上）· 字幕列表（右）· 時間軸（下）。<br>`+
-  `<b>上字幕流程</b>：選一條字幕 → 播到開始處按 <kbd>I</kbd>、播到結束處按 <kbd>O</kbd>。<br><br>`+
-  `<b>▍播放控制</b>
-  <table class="keys">
-   <tr><td><kbd>Space</kbd></td><td>播放 / 暫停</td></tr>
-   <tr><td><kbd>J</kbd></td><td>倒帶（每按一次加速：1× → 1.5× → 2× → 2.5× → 3× → 循環）</td></tr>
-   <tr><td><kbd>K</kbd></td><td>停止 / 暫停</td></tr>
-   <tr><td><kbd>L</kbd></td><td>正播加速（1× → 1.5× → 2× → 2.5× → 3× → 循環）</td></tr>
-   <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>前 / 後一格</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd></td><td>前 / 後 1 秒</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd><kbd>→</kbd></td><td>前 / 後 5 秒</td></tr>
-   <tr><td>按住 <kbd>←</kbd> / <kbd>→</kbd></td><td>1× 速度連續倒帶 / 正播（放開停止）</td></tr>
-   <tr><td><kbd>Home</kbd> / <kbd>Shift</kbd>+<kbd>↑</kbd></td><td>跳到開頭（00:00:00:00）</td></tr>
-   <tr><td><kbd>End</kbd> / <kbd>Shift</kbd>+<kbd>↓</kbd></td><td>跳到片尾</td></tr>
-  </table><br>`+
-  `<b>▍字幕操作</b>
-  <table class="keys">
-   <tr><td><kbd>I</kbd></td><td>設定被選字幕的<b>起點</b>＝目前播放點（無選取則新增一條）</td></tr>
-   <tr><td><kbd>O</kbd></td><td>設定被選字幕的<b>終點</b>＝目前播放點</td></tr>
-   <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>步進邊界點（起點 → 終點 → 下句起點…）</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>↑</kbd></td><td>跳到<b>上一句</b>起點並選取</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>↓</kbd></td><td>跳到<b>下一句</b>起點並選取</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>Home</kbd></td><td>選取目前軌道<b>第一句</b>字幕，播放點跳到其起點</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>End</kbd></td><td>選取目前軌道<b>最後一句</b>字幕，播放點跳到其起點</td></tr>
-   <tr><td><kbd>P</kbd></td><td>將選取字幕整批位移到播放點</td></tr>
-   <tr><td><kbd>Enter</kbd></td><td>開啟選取字幕的<b>文字編輯</b>視窗</td></tr>
-   <tr><td><kbd>Del</kbd> / <kbd>Backspace</kbd></td><td>刪除選取（支援多選）</td></tr>
-   <tr><td><kbd>Esc</kbd></td><td>取消所有選取 / 關閉上字幕模式</td></tr>
-  </table><br>`+
-  `<b>▍選取</b>
-  <table class="keys">
-   <tr><td><kbd>點選</kbd></td><td>選取單一字幕並跳到其起點；若已是單選且播放點在字幕範圍內，則不移動播放點</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+點</td><td>多選 / 取消單一</td></tr>
-   <tr><td><kbd>Shift</kbd>+點</td><td>範圍選取（同軌道）</td></tr>
-  </table><br>`+
-  `<b>▍文字編輯（字幕列表內嵌 ＆ 編輯視窗）</b>
-  <table class="keys">
-   <tr><td><kbd>Enter</kbd></td><td>確認並離開編輯</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>換行</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td><b>拆分字幕</b>：游標前文字留在原句（out 點 = 播放點），游標後文字移至新句（in 點 = 播放點）；播放點須在字幕起訖範圍內</td></tr>
-   <tr><td><kbd>Esc</kbd></td><td>取消 / 關閉視窗</td></tr>
-  </table><br>`+
-  `<b>▍時間碼輸入</b><br>`+
-  `所有時間輸入欄（字幕起訖點、播放點時間碼）皆支援以下格式：
-  <table class="keys">
-   <tr><td><code>01:23:45:12</code></td><td>絕對時間碼（時:分:秒:格）</td></tr>
-   <tr><td><code>1234512</code></td><td>緊湊格式，系統自動補位（= 01:23:45:12）</td></tr>
-   <tr><td><code>+100</code></td><td>相對<b>加</b>：在原時間上加 1 秒（100 = 1秒0格）</td></tr>
-   <tr><td><code>-200</code></td><td>相對<b>減</b>：在原時間上減 2 秒（結果不可早於 00:00:00:00）</td></tr>
-  </table><br>`+
-  `<b>▍其他快捷</b>
-  <table class="keys">
-   <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>復原</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>重做</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>儲存專案</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>搜尋 / 取代</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>Z</kbd></td><td>時間軸適配（顯示全部字幕）</td></tr>
-   <tr><td><kbd>-</kbd> / <kbd>+</kbd></td><td>時間軸縮小 / 放大</td></tr>
-  </table><br>`+
-  `<b>▍介面說明</b><br>`+
-  `<b>播放窗</b>：時間碼格式「時:分:秒:格」；<b>雙擊</b>時間數字可直接輸入（支援絕對時間碼或 +/- 相對位移）；<b>右鍵</b>時間數字可複製；畫面右鍵選音軌/速度；匯入影音時自動偵測 FPS（23.976/24/25/29.97/30）。<br>`+
-  `<b>字幕列表</b>：上方下拉切換軌道；下方調整字幕大小／位置／顏色；<b>⬆＋ / ⬇＋</b> 在上/下方新增；右鍵選單可移軌道、調整選取範圍；雙擊字幕起訖時間碼可直接編輯（支援 +/- 相對位移）。<br>`+
-  `<b>時間軸</b>：時間尺/波形區拖曳＝移動播放點；軌道空白區按住拖曳＝框選；拖字幕區塊＝移動（支援換軌、磁吸、防重疊）；拖邊緣＝調整起訖；雙擊字幕＝編輯文字；🔊 波形列右側下拉選單可切換顯示的音源聲道。<br>`+
-  `<b>軌道</b>：＋軌道 新增、✕ 刪除、👁 顯示/隱藏；雙擊名稱改名；拖曳 ⠿ 重排順序；<b>拖曳軌道列或波形列底部邊框</b>可調整列高，雙擊邊框復位預設高度；匯出時多軌各自輸出獨立檔案。<br>`+
-  `<b>🕘 紀錄 / 📌 備忘</b>：時間軸工具列開啟浮動面板；備忘可點時間跳轉；時間碼位移面板可對選取字幕批次加減時間。`);
-}
-
-/* ===== 播放窗：自動偵測 FPS（網頁版，播放時取樣） ===== */
-function detectFpsWeb(){
-  if(!('requestVideoFrameCallback' in HTMLVideoElement.prototype))return;
-  let last=null, deltas=[], frames=0;
-  const cb=(now,meta)=>{
-    if(last!=null){ const d=meta.mediaTime-last; if(d>0.0005)deltas.push(d); }
-    last=meta.mediaTime; frames++;
-    if(deltas.length<12 && frames<60){ try{video.requestVideoFrameCallback(cb);}catch(e){} return; }
-    if(deltas.length>=6){ deltas.sort((a,b)=>a-b); const med=deltas[deltas.length>>1]; const fps=Math.round(1/med);
-      if(fps>=10&&fps<=120){ State.fps=snapFps(fps); $('fpsSel').value=State.dropFrame?String(State.fps)+'df':String(State.fps);
-        $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame); $('tcCur').textContent=secToEncore(video.currentTime||0,State.fps,State.dropFrame);
-        setStatus('偵測到影片 FPS：'+fps,'ok'); } }
-  };
-  try{ video.requestVideoFrameCallback(cb); }catch(e){}
-}
 
 /* ===== 字幕列表：軌道切換下拉 + 樣式面板 ===== */
 function renderListTrackSel(){
@@ -1038,68 +612,6 @@ function initUI(){
   document.addEventListener('click',e=>{ const btn=e.target.closest('button'); if(btn)btn.blur(); },{capture:true});
 }
 
-/* ===== FPS 時間碼轉換 ===== */
-function showFpsConvertDialog(){
-  const tkIdx=State.listTrack;
-  const tk=State.tracks[tkIdx];
-  if(!tk){ showToast('請先選擇一個字幕軌道'); return; }
-  const FPS_OPTS=[23.976,24,25,29.97,30];
-  const opts=FPS_OPTS.map(f=>`<option value="${f}">${f===23.976?'23.976 (23.98)':f===29.97?'29.97':''+f}</option>`).join('');
-  const curFps=State.fps;
-  openModal('FPS 時間碼轉換',
-    `<div style="margin-bottom:12px;font-size:13px;color:var(--text-faint)">軌道：<b>${escapeHTML(tk.name)}</b></div>`+
-    `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">`+
-      `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">來源 FPS</div>`+
-        `<select id="fpsFrom" style="font-size:14px;padding:4px 8px">${opts}</select></div>`+
-      `<div style="padding-top:18px;display:flex;flex-direction:column;align-items:center;gap:2px"><span style="font-size:20px;color:var(--text-faint)">→</span><button id="fpsSwap" style="font-size:11px;padding:2px 6px;cursor:pointer" title="交換來源與目標">⇄ 交換</button></div>`+
-      `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">目標 FPS</div>`+
-        `<select id="fpsTo" style="font-size:14px;padding:4px 8px">${opts}</select></div>`+
-    `</div>`+
-    `<div id="fpsPreview" style="margin-top:14px;font-size:12px;color:var(--text-faint)"></div>`,
-    [{label:'轉換',primary:true,act:()=>{
-      const from=+$('fpsFrom').value, to=+$('fpsTo').value;
-      if(from===to){ closeModal(); return; }
-      const ratio=from/to;
-      const cues=State.cues.filter(c=>(c.track||0)===tkIdx);
-      for(const c of cues){ c.start=Math.max(0,c.start*ratio); c.end=Math.max(c.start+0.001,c.end*ratio); }
-      // 更新 State.duration 為 max(影片片長, 最後字幕 end)
-      const maxEnd=State.cues.reduce((m,c)=>c.end>m?c.end:m, 0);
-      if(maxEnd>State.duration){ State.duration=maxEnd; $('tcDur').textContent=secToEncore(maxEnd,State.fps,State.dropFrame); }
-      closeModal(); sortCues(); renderAll(); layoutTimeline(); drawTimeline();
-      recordHistory(`FPS 轉換 ${from}→${to}`);
-      setStatus(`已將「${tk.name}」從 ${from}fps 轉換至 ${to}fps（${cues.length} 條）`,'ok');
-    }},{label:'取消',act:closeModal}]);
-  setTimeout(()=>{
-    const fromSel=$('fpsFrom'), toSel=$('fpsTo');
-    const nearest=FPS_OPTS.reduce((a,b)=>Math.abs(b-curFps)<Math.abs(a-curFps)?b:a);
-    if(toSel) toSel.value=String(nearest);
-
-    if (fromSel && toSel) {
-      const setFromDefault = () => {
-        const t = +toSel.value;
-        if (t === 29.97) fromSel.value = "30";
-        else if (t === 23.976) fromSel.value = "24";
-        else if (t === 30) fromSel.value = "29.97";
-        else if (t === 24) fromSel.value = "23.976";
-      };
-      setFromDefault();
-      toSel.addEventListener('change', setFromDefault);
-    }
-
-    const updatePreview=()=>{
-      const from=+fromSel?.value, to=+toSel?.value;
-      const p=$('fpsPreview'); if(!p)return;
-      if(from===to){ p.textContent='來源與目標相同，無需轉換。'; return; }
-      const ratio=from/to;
-      p.innerHTML=`比例 <b>${from}/${to} = ${ratio.toFixed(6)}</b>　·　例：1:00:00 → ${new Date(3600*ratio*1000).toISOString().slice(11,22)}`;
-    };
-    fromSel?.addEventListener('change',updatePreview);
-    toSel?.addEventListener('change',updatePreview);
-    $('fpsSwap')?.addEventListener('click',()=>{ const tmp=fromSel.value; fromSel.value=toSel.value; toSel.value=tmp; updatePreview(); });
-    updatePreview();
-  },30);
-}
-
 /* ===== 磁吸 / 防重疊 工具 ===== */
 /* ===== 複製軌道 ===== */
 function doCopyTrack(){
@@ -1138,12 +650,6 @@ function _execCopyTrack(srcIdx, withText){
   showToast(`已複製到「${name}」（${srcCues.length} 條）`);
 }
 
-function snapTargets(excludeIds){
-  const arr=[Media.vTime()];
-  for(const c of State.cues){ if(c.timed===false||excludeIds.has(c.id))continue; arr.push(c.start,c.end); }
-  for(const n of State.notes) arr.push(n.time);
-  return arr;
-}
 function openNoteInPanel(n){
   $('notesPanel').classList.add('show');
   setNoteActive(n.id);
@@ -1152,98 +658,6 @@ function openNoteInPanel(n){
     $('notesList')?.querySelector(`[data-id="${n.id}"]`)?.scrollIntoView({block:'nearest'});
   },30);
 }
-function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of targets){const d=Math.abs(x-t); if(d<bd){bd=d;best=x;}} return best; }
-function neighborBounds(os,oe,track,excludeIds){
-  let prevEnd=0,nextStart=Infinity;
-  for(const c of State.cues){
-    if(c.timed===false||excludeIds.has(c.id)||(c.track||0)!==track)continue;
-    if(c.start>=oe-1e-6){ if(c.start<nextStart)nextStart=c.start; }
-    else if(c.end<=os+1e-6){ if(c.end>prevEnd)prevEnd=c.end; }
-  }
-  return {prevEnd,nextStart};
-}
-
-
-
-
-function applyTcShift(sign){
-  const raw=($('tcShiftInput').value||'').trim().replace(/^[+-]/,'');
-  const t=parseTimecodeInput(raw);
-  if(t==null||isNaN(t)||t<=0){ showToast('請輸入有效的時間碼（例如 00:00:02:00）'); return; }
-  const delta=sign*t;
-  const scope=$('tcShiftSel').value;
-  let cues;
-  if(scope==='sel'){
-    const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
-    cues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(c=>c&&c.timed!==false);
-  }else if(scope==='track'){
-    cues=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
-  }else{
-    cues=State.cues.filter(c=>c.timed!==false);
-  }
-  if(!cues.length){ showToast('沒有字幕可以位移'); return; }
-  for(const c of cues){ c.start=Math.max(0,c.start+delta); c.end=Math.max(c.start+0.001,c.end+delta); }
-  sortCues(); renderAll(); drawTimeline();
-  recordHistory('時間碼位移');
-  setStatus(`已位移 ${delta>=0?'+':''}${delta.toFixed(3)}s（共 ${cues.length} 條）`,'ok');
-}
-function _durAdjCues(){
-  const scope=$('tcShiftSel').value;
-  if(scope==='sel'){
-    const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
-    return ids.map(id=>State.cues.find(c=>c.id===id)).filter(c=>c&&c.timed!==false);
-  }else if(scope==='track'){
-    return State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
-  }else{
-    return State.cues.filter(c=>c.timed!==false);
-  }
-}
-function _nextInPoint(c){
-  const track=c.track||0; let next=Infinity;
-  for(const oc of State.cues){
-    if(oc.timed===false||oc.id===c.id||(oc.track||0)!==track)continue;
-    if(oc.start>c.start&&oc.start<next)next=oc.start;
-  }
-  return next;
-}
-function applyDurAdjTc(sign){
-  const raw=($('durAdjTcInput').value||'').trim().replace(/^[+-]/,'');
-  const t=parseTimecodeInput(raw);
-  if(t==null||isNaN(t)||t<=0){ showToast('請輸入有效的時間碼（例如 00:00:01:00）'); return; }
-  const delta=sign*t;
-  const minDur=1/Math.max(State.fps||25,1);
-  const cues=_durAdjCues();
-  if(!cues.length){ showToast('沒有字幕可調整'); return; }
-  for(const c of cues){
-    const nextIn=_nextInPoint(c);
-    let newEnd=c.end+delta;
-    newEnd=Math.max(c.start+minDur,newEnd);
-    newEnd=Math.min(nextIn,newEnd);
-    c.end=newEnd;
-  }
-  sortCues(); renderAll(); drawTimeline();
-  recordHistory('調整持續時間');
-  setStatus(`已調整 ${cues.length} 條字幕的持續時間（${sign>0?'+':'−'}${t.toFixed(3)}s）`,'ok');
-}
-function applyDurAdjPct(){
-  const pct=+($('durAdjPctInput').value||'100');
-  if(isNaN(pct)||pct<=0){ showToast('請輸入有效的百分比（例如 150）'); return; }
-  const ratio=pct/100;
-  const minDur=1/Math.max(State.fps||25,1);
-  const cues=_durAdjCues();
-  if(!cues.length){ showToast('沒有字幕可調整'); return; }
-  for(const c of cues){
-    const nextIn=_nextInPoint(c);
-    let newEnd=c.start+(c.end-c.start)*ratio;
-    newEnd=Math.max(c.start+minDur,newEnd);
-    newEnd=Math.min(nextIn,newEnd);
-    c.end=newEnd;
-  }
-  sortCues(); renderAll(); drawTimeline();
-  recordHistory('調整持續時間');
-  setStatus(`已調整 ${cues.length} 條字幕的持續時間（${pct}%）`,'ok');
-}
-
 /* 開啟浮動面板時，若面板與影片重疊就自動推到影片右側，避免開啟時畫面變黑 */
 function _ensurePanelInRightArea(panel){
   if(!Media.mpvMode||!window.subtool?.mpv) return;
@@ -1264,26 +678,6 @@ function togglePanel(id){ const p=$(id); const willShow=!p.classList.contains('s
 }
 
 /* ===== 播放時間數字：雙擊輸入 / 右鍵複製 ===== */
-function parseTimecodeInput(str){
-  str=String(str).trim(); if(!str)return null;
-  let h=0,m=0,s=0,f=0;
-  if(str.includes(':')||str.includes(';')){
-    const p=str.split(/[:;]/).map(x=>parseInt(x,10)||0);
-    // 由右至左：格, 秒, 分, 時
-    f=p[p.length-1]||0; s=p[p.length-2]||0; m=p[p.length-3]||0; h=p[p.length-4]||0;
-    if(State.dropFrame)
-      return encoreToSec(`${pad(h)}:${pad(m)}:${pad(s)};${pad(f)}`,State.fps,true);
-  }else{
-    if(!/^\d+$/.test(str))return null;
-    const g=[]; let r=str; while(r.length>2){ g.unshift(r.slice(-2)); r=r.slice(0,-2); } g.unshift(r);
-    // g = [..., mm, ss, ff]  （由右至左對應 格/秒/分/時）
-    f=+(g[g.length-1]||0); s=+(g[g.length-2]||0); m=+(g[g.length-3]||0); h=+(g[g.length-4]||0);
-    if(State.dropFrame)
-      return encoreToSec(`${pad(h)}:${pad(m)}:${pad(s)};${pad(f)}`,State.fps,true);
-  }
-  const fpsR=Math.round(State.fps)||24;
-  return h*3600 + m*60 + s + Math.min(f,fpsR-1)/State.fps;
-}
 function startTimeEdit(){
   const span=$('tcCur'); if(span.querySelector('input'))return;
   const old=span.textContent;

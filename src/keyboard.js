@@ -6,10 +6,11 @@ import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
 import { addCue, selectCue, selectCueSingle, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline.js';
-import { Project } from './project.js';
+import { Project, ensureProjectSaved } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, updateNoteActive } from './notes.js';
-import { setStatus, closeModal, renderAll, ensurePlayheadVisible, renderVideoSub, showOsd, togglePanel, doAction, ensureProjectSaved } from './app.js';
+import { emit } from './events.js';
+import { setStatus, closeModal, showOsd } from './ui.js';
 
 /* ===== JKL 穿梭輪 ======================================================= */
 /* _jklSpeed: 0=暫停, 1=正常播放, 2=2x播放, -1=1x倒帶, -2=2x倒帶 */
@@ -59,8 +60,8 @@ function jklApply(){
       if(t<=0){ jklClear(); _jklSpeed=0; setStatus('已到開頭',''); return; }
       Media.seek(Math.max(0,t-step));
       updatePlayhead();
-      ensurePlayheadVisible();
-      renderVideoSub();
+      emit('playhead:ensure');
+      emit('render:videoSub');
       if(!video.src){
         $('tcCur').textContent=secToEncore(Media.vTime(),State.fps,State.dropFrame);
         $('seekBar').value=Math.round(Media.vTime()*1000);
@@ -92,7 +93,7 @@ async function setIn(){
   let c=State.cues.find(x=>x.id===State.selectedId);
   if(!c){ c=addCue(t,t+2,'',0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 '+fmtClock(t),'ok'); return; }
   c.start=t; if(c.end<=c.start)c.end=c.start+0.5; c.timed=true;
-  sortCues(); renderAll(); selectCue(c.id); State.activeEdge='start';
+  sortCues(); emit('render:all'); selectCue(c.id); State.activeEdge='start';
   recordHistory('設定起點 I'+cueSuffix(c)); setStatus('起點 '+fmtClock(t),'ok');
 }
 /* O = 設定目前被選字幕的「結束點」為播放點 */
@@ -104,7 +105,7 @@ async function setOut(){
   if(!c){ setStatus('請先選擇字幕（或按 I 新建）',''); return; }
   if(t<=c.start){ setStatus('終點不得早於或等於起點',''); return; }
   c.end=t; c.timed=true;
-  sortCues(); renderAll(); selectCue(c.id); State.activeEdge='end';
+  sortCues(); emit('render:all'); selectCue(c.id); State.activeEdge='end';
   recordHistory('設定終點 O'+cueSuffix(c)); setStatus('終點 '+fmtClock(c.end),'ok');
   autoAdvanceSubMode();
 }
@@ -230,7 +231,7 @@ window.addEventListener('keydown',e=>{
       const minStart=Math.min(...jCues.map(c=>c.start));
       const jt=Media.vTime(), delta=jt-minStart;
       for(const jc of jCues){ jc.start=Math.max(0,jc.start+delta); jc.end=Math.max(jc.start+0.001,jc.end+delta); }
-      sortCues(); renderAll(); drawTimeline();
+      sortCues(); emit('render:all'); drawTimeline();
       recordHistory('時間碼位移 P');
       setStatus(`P 位移 ${delta>=0?'+':''}${delta.toFixed(3)}s（${jCues.length} 條）`,'ok');
     } break;
@@ -239,13 +240,13 @@ window.addEventListener('keydown',e=>{
         e.preventDefault();
         const tkCues=State.cues.filter(c=>(c.track||0)===State.listTrack);
         if(tkCues.length){ State.selectedIds=tkCues.map(c=>c.id); State.selectedId=tkCues[0].id; refreshSelectionUI(); }
-      } else { e.preventDefault(); togglePanel('historyPanel'); renderHistory(); }
+      } else { e.preventDefault(); emit('panel:toggle','historyPanel'); renderHistory(); }
       break;
     case 's':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); Project.save(); }
-      else { e.preventDefault(); togglePanel('notesPanel'); renderNotes(); }
+      else { e.preventDefault(); emit('panel:toggle','notesPanel'); renderNotes(); }
       break;
-    case 'd': e.preventDefault(); doAction('mixer'); break;
+    case 'd': e.preventDefault(); emit('action','mixer'); break;
     case 'x':
       e.preventDefault();
       if(!State.subMode){
@@ -266,7 +267,7 @@ window.addEventListener('keydown',e=>{
     case 'm': e.preventDefault(); addNote(); break;
     case 'f':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); const sd=document.getElementById('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>document.getElementById('searchInput')?.focus(),20); } }
-      else { e.preventDefault(); doAction('check-panel'); }
+      else { e.preventDefault(); emit('action','check-panel'); }
       break;
     case 'z':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); e.shiftKey?History.redo():History.undo(); }
@@ -281,9 +282,9 @@ window.addEventListener('keydown',e=>{
 window.addEventListener('keyup',e=>{
   if(e.key==='ArrowLeft'||e.key==='ArrowRight'){ if(_jklSpeed!==0)jklReset(); }
 });
-function nudge(d){ const t=Media.vTime()+d; Media.seek(t); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(t); }
-function seekHome(){ Media.seek(0); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(0); }
-function seekEnd(){ const t=State.duration||0; Media.seek(t); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(t); }
+function nudge(d){ const t=Media.vTime()+d; Media.seek(t); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(t); }
+function seekHome(){ Media.seek(0); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(0); }
+function seekEnd(){ const t=State.duration||0; Media.seek(t); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(t); }
 
 /* Ctrl+左/右：跳到上一個/下一個備註時間點 */
 function jumpToNote(dir){
@@ -293,7 +294,7 @@ function jumpToNote(dir){
   if(dir>0){ for(const n of State.notes){ if(n.time>t+EPS&&(target===null||n.time<target.time))target=n; } }
   else      { for(const n of State.notes){ if(n.time<t-EPS&&(target===null||n.time>target.time))target=n; } }
   if(!target) return;
-  Media.seek(target.time); updatePlayhead(); ensurePlayheadVisible(); updateNoteActive(target.time);
+  Media.seek(target.time); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(target.time);
 }
 
 /* Shift+Home/End：跳到同軌第一句 / 最後一句並選取 */
@@ -304,7 +305,7 @@ function jumpToFirstLastCue(dir){
   selectCueSingle(target.id,false);
   Media.seek(target.start);
   _pendingStep=null;
-  updatePlayhead();ensurePlayheadVisible();
+  updatePlayhead();emit('playhead:ensure');
 }
 
 /* Ctrl+上/下：跳到同軌上一句/下一句的起點並選取 */
@@ -338,7 +339,7 @@ function jumpToAdjacentCue(dir){
   }
   Media.seek(target.start);
   _pendingStep=null;
-  updatePlayhead(); ensurePlayheadVisible();
+  updatePlayhead(); emit('playhead:ensure');
 }
 
 function jumpToCueInMinusFrames(dir, frames){
@@ -361,7 +362,7 @@ function jumpToCueInMinusFrames(dir, frames){
   const targetTime = Math.max(0, target.start - (frames / State.fps));
   Media.seek(targetTime);
   _pendingStep=null;
-  updatePlayhead(); ensurePlayheadVisible();
+  updatePlayhead(); emit('playhead:ensure');
 }
 
 /* 上下鍵步進邏輯：
@@ -383,7 +384,7 @@ function stepBoundary(dir){
     if(dir>0){idx=bnd.findIndex(b=>b.t>t+1e-4);if(idx<0)idx=bnd.length-1;}
     else{idx=0;for(let i=0;i<bnd.length;i++){if(bnd[i].t<t-1e-4)idx=i;}}
     const b=bnd[idx]; selectCueSingle(b.c.id); State.activeEdge=b.edge;
-    Media.seek(b.t); _pendingStep=null; ensurePlayheadVisible(); updatePlayhead(); return;
+    Media.seek(b.t); _pendingStep=null; emit('playhead:ensure'); updatePlayhead(); return;
   }
 
   // 只考慮被選字幕所在軌道
@@ -395,7 +396,7 @@ function stepBoundary(dir){
   // 有預覽中的字幕且方向相同 → 確認切換
   if(_pendingStep && _pendingStep.dir===dir && Math.abs(Media.vTime()-_pendingStep.t)<0.5){
     selectCueSingle(_pendingStep.cueId); State.activeEdge=_pendingStep.edge;
-    _pendingStep=null; ensurePlayheadVisible(); updatePlayhead(); return;
+    _pendingStep=null; emit('playhead:ensure'); updatePlayhead(); return;
   }
   _pendingStep=null;
 
@@ -415,7 +416,7 @@ function stepBoundary(dir){
   } else {
     selectCueSingle(b.c.id); State.activeEdge=b.edge;
   }
-  ensurePlayheadVisible(); updatePlayhead();
+  emit('playhead:ensure'); updatePlayhead();
 }
 
 export { setIn, setOut, nudge, stepBoundary, jklReset, resetPlaybackSpeed };

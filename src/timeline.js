@@ -4,7 +4,9 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from 
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
-import { renderAll, renderVideoSub, renderListTrackSel, renderTrackStyle, showToast, snapTargets, snapVal, neighborBounds, ensurePlayheadVisible, openNoteInPanel, openCueEditModal, ensureProjectSaved, isProjectGuardDone, refreshMpvSubs } from './app.js';
+import { emit } from './events.js';
+import { ensureProjectSaved, isProjectGuardDone } from './project.js';
+import { showToast } from './ui.js';
 import { jklReset } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
@@ -124,7 +126,7 @@ function renderTrackRows(){
         `<span class="gname" contenteditable="false" spellcheck="false">${escapeHTML(State.tracks[tk].name)}</span>`+
         `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖':'鎖定'}此軌">${isLocked?'🔒':'🔓'}</button>`+
         `<button class="gdel" title="刪除此軌">✕</button>`;
-      g.querySelector('.eye').onclick=(e)=>{e.stopPropagation();State.tracks[tk].visible=!vis;drawTimeline();renderVideoSub();refreshMpvSubs();};
+      g.querySelector('.eye').onclick=(e)=>{e.stopPropagation();State.tracks[tk].visible=!vis;drawTimeline();emit('render:videoSub');emit('mpv:refreshSubs');};
       const nm=g.querySelector('.gname');
       nm.addEventListener('click',e=>{
         if(nm.contentEditable==='true') return;
@@ -132,8 +134,8 @@ function renderTrackRows(){
         State.listTrack=tk;
         if(!e.shiftKey){ State.selectedIds=[]; State.selectedId=null; $('stSel').textContent=''; }
         const sel=$('listTrackSel'); if(sel)sel.value=String(tk);
-        renderTrackStyle();
-        renderAll();
+        emit('render:trackStyle');
+        emit('render:all');
         refreshTrackGutterActive();
       });
       nm.addEventListener('mousedown',e=>{
@@ -143,7 +145,7 @@ function renderTrackRows(){
         }
       });
       nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=State.tracks[tk].name;nm.blur();} };
-      nm.onblur=()=>{ nm.contentEditable='false'; State.tracks[tk].name=nm.innerText.trim()||('軌道 '+(tk+1)); renderListTrackSel(); };
+      nm.onblur=()=>{ nm.contentEditable='false'; State.tracks[tk].name=nm.innerText.trim()||('軌道 '+(tk+1)); emit('render:listTrackSel'); };
       g.querySelector('.glock').onclick=(e)=>{e.stopPropagation();State.tracks[tk].locked=!State.tracks[tk].locked;renderTrackRows();};
       g.querySelector('.gdel').onclick=(e)=>{e.stopPropagation();removeTrack(tk);};
       // 高度縮放把手
@@ -218,7 +220,7 @@ function _onTrackDragUp(){
       if(fromTk<toTk){ if(tk===fromTk)c.track=toTk; else if(tk>fromTk&&tk<=toTk)c.track=tk-1; }
       else { if(tk===fromTk)c.track=toTk; else if(tk>=toTk&&tk<fromTk)c.track=tk+1; }
     }
-    syncTrackCount(); recordHistory('軌道重排'); renderAll(); renderListTrackSel();
+    syncTrackCount(); recordHistory('軌道重排'); emit('render:all'); emit('render:listTrackSel');
   }
 }
 
@@ -312,7 +314,7 @@ function trackFromY(clientY){
   const y=clientY-rect.top-tracksTop()+tracksScrollTop();
   return yToTrack(Math.max(0,y));
 }
-function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); renderListTrackSel(); recordHistory('新增軌道'); }
+function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); emit('render:listTrackSel'); recordHistory('新增軌道'); }
 function removeTrack(i){
   const n=State.cues.filter(c=>(c.track||0)===i).length;
   if(n>0 && !confirm(`軌道「${State.tracks[i].name}」有 ${n} 條字幕，刪除軌道會一併刪除這些字幕，確定？`))return;
@@ -322,14 +324,14 @@ function removeTrack(i){
   if(State.listTrack===i)State.listTrack=-1; else if(State.listTrack>i)State.listTrack--;
   State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
   if(!State.cues.some(c=>c.id===State.selectedId)){State.selectedId=State.selectedIds[0]||null;State.activeEdge='start';}
-  renderListTrackSel(); renderAll(); drawTimeline(); recordHistory('刪除軌道');
+  emit('render:listTrackSel'); emit('render:all'); drawTimeline(); recordHistory('刪除軌道');
 }
 /* 把選取的字幕移到指定軌道（或位移 delta） */
 function moveSelectedToTrack(target){
   const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
   if(!ids.length)return;
   for(const id of ids){ const c=State.cues.find(x=>x.id===id); if(c)c.track=clamp(target,0,State.trackCount-1); }
-  renderAll(); drawTimeline(); recordHistory('移動至軌道');
+  emit('render:all'); drawTimeline(); recordHistory('移動至軌道');
 }
 
 function updatePlayhead(){
@@ -405,7 +407,7 @@ tlScroll.addEventListener('mousedown',e=>{
   const x=e.clientX-rect.left, y=e.clientY-rect.top;
   if(block){
     const c=State.cues.find(z=>z.id===block.dataset.id); if(!c)return;
-    if(e.detail>=2 && !e.shiftKey){ selectCue(c.id); openCueEditModal(c); e.preventDefault(); return; }
+    if(e.detail>=2 && !e.shiftKey){ selectCue(c.id); emit('cue:openEdit', c); e.preventDefault(); return; }
     // 第一次拖曳前的儲存守衛（同步，不 await，避免拖曳殘留問題）
     if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; }
     if(State.tracks[c.track||0]?.locked){
@@ -448,16 +450,16 @@ tlScroll.addEventListener('mousedown',e=>{
       if(hitNote){
         const now=performance.now();
         if(_noteClickState&&_noteClickState.id===hitNote.id&&now-_noteClickState.t<400){
-          openNoteInPanel(hitNote); _noteClickState=null;
+          emit('note:openInPanel', hitNote); _noteClickState=null;
         } else {
           _noteClickState={id:hitNote.id,t:now};
         }
-        Media.seek(hitNote.time); updatePlayhead(); renderVideoSub(); ensurePlayheadVisible();
+        Media.seek(hitNote.time); updatePlayhead(); emit('render:videoSub'); emit('playhead:ensure');
         e.preventDefault(); return;
       }
     }
     jklReset(); // 播放中拖曳時間尺 → 暫停
-    Media.seek(xToTime(x)); updatePlayhead(); renderVideoSub();
+    Media.seek(xToTime(x)); updatePlayhead(); emit('render:videoSub');
     drag={mode:'scrub'}; e.preventDefault(); return;
   }
   drag={mode:'rubber',startX:e.clientX,startY:e.clientY,x0:x,y0:y,moved:false,additive:e.ctrlKey||e.metaKey};
@@ -466,7 +468,7 @@ tlScroll.addEventListener('mousedown',e=>{
 window.addEventListener('mousemove',e=>{
   if(!drag)return;
   const rect=tlLayer.getBoundingClientRect();
-  if(drag.mode==='scrub'){ Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); renderVideoSub(); return; }
+  if(drag.mode==='scrub'){ Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub'); return; }
   if(Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)drag.moved=true;
   if(drag.mode==='rubber'){
     const x1=clamp(e.clientX-rect.left,0,viewportW()), y1=clamp(e.clientY-rect.top,0,tlLayer.clientHeight);
@@ -545,13 +547,13 @@ window.addEventListener('mouseup',e=>{
       refreshSelectionUI(); $('stSel').textContent='已選 '+State.selectedIds.length+' 條';
     }else{
       // 點時間軸空白：跳轉（Shift 時保留選取）
-      Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); renderVideoSub();
+      Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub');
       if(!e.shiftKey){
         State.selectedIds=[]; State.selectedId=null; State.activeEdge='start';
         refreshSelectionUI(); $('stSel').textContent='';
       }
     }
-  }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; sortCues(); renderAll(); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
+  }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; sortCues(); emit('render:all'); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
   drag=null;
 });
 
@@ -565,7 +567,25 @@ tlScroll.addEventListener('wheel',e=>{
   }
 },{passive:false});
 
+/* ===== 磁吸 / 防重疊 工具（時間軸拖曳專用） ===== */
+function snapTargets(excludeIds){
+  const arr=[Media.vTime()];
+  for(const c of State.cues){ if(c.timed===false||excludeIds.has(c.id))continue; arr.push(c.start,c.end); }
+  for(const n of State.notes) arr.push(n.time);
+  return arr;
+}
+function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of targets){const d=Math.abs(x-t); if(d<bd){bd=d;best=x;}} return best; }
+function neighborBounds(os,oe,track,excludeIds){
+  let prevEnd=0,nextStart=Infinity;
+  for(const c of State.cues){
+    if(c.timed===false||excludeIds.has(c.id)||(c.track||0)!==track)continue;
+    if(c.start>=oe-1e-6){ if(c.start<nextStart)nextStart=c.start; }
+    else if(c.end<=os+1e-6){ if(c.end>prevEnd)prevEnd=c.end; }
+  }
+  return {prevEnd,nextStart};
+}
+
 export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
   addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo,
-  refreshTrackGutterActive };
+  refreshTrackGutterActive, snapTargets, snapVal, neighborBounds };

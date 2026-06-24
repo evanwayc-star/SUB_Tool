@@ -18,7 +18,7 @@ const SubFormats = {
     }
     return out;
   },
-  toSRT(cues,fps){
+  toSRT(cues){
     return cues.filter(c=>c.timed!==false).map((c,i)=>
       `${i+1}\n${secToSRT(c.start)} --> ${secToSRT(c.end)}\n${c.text||''}`).join('\n\n')+'\n';
   },
