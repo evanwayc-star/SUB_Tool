@@ -59,8 +59,9 @@ function showHelp(){
    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>重做</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>儲存專案</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>搜尋 / 取代</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>Z</kbd></td><td>時間軸適配（顯示全部字幕）</td></tr>
-   <tr><td><kbd>-</kbd> / <kbd>+</kbd></td><td>時間軸縮小 / 放大</td></tr>
+   <tr><td><kbd>-</kbd> / <kbd>=</kbd></td><td>時間軸縮小 / 放大（<kbd>Ctrl</kbd>+滾輪亦可）</td></tr>
+   <tr><td><kbd>]</kbd></td><td>時間軸適配（顯示全部字幕）</td></tr>
+   <tr><td><kbd>\\</kbd></td><td>時間軸適配（顯示完整影片長度）</td></tr>
   </table><br>`+
   `<b>▍介面說明</b><br>`+
   `<b>播放窗</b>：時間碼格式「時:分:秒:格」；<b>雙擊</b>時間數字可直接輸入（支援絕對時間碼或 +/- 相對位移）；<b>右鍵</b>時間數字可複製；畫面右鍵選音軌/速度；匯入影音時自動偵測 FPS（23.976/24/25/29.97/30）。<br>`+
