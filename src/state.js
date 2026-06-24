@@ -1,4 +1,8 @@
-/* SUB Tool — 全域狀態 + 軌道/影格率 模型 */
+/* SUB Tool — 全域狀態 + 軌道/影格率 模型
+   State：唯一的可變狀態來源（cues 字幕、tracks 軌道、notes 備忘、選取集、fps/dropFrame、
+   時間軸視窗 viewStart/pxPerSec、媒體資訊…）。各模組直接讀寫 State，再 emit 觸發重繪。
+   工具：newTrack/syncTrackCount/ensureTrackCount(軌道)、snapFps/setFps(影格率，setFps 會一併
+   更新 UI 並依 'df' 後綴設定 dropFrame)、newId(遞增 cue id)、isSel/cueSuffix、DESK/IS_DESKTOP(Electron 偵測)。 */
 import { $, video } from './dom.js';
 import { secToEncore } from './time.js';
 

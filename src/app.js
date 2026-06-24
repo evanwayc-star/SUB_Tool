@@ -1,4 +1,9 @@
-/* SUB Tool — 應用主程式（後續逐步拆成更多模組） */
+/* SUB Tool — 協調層 / 進入點（非 hub）
+   職責：載入並組裝各模組、訂閱事件匯流排(events.js)、處理影片事件、指令分派(doAction)、
+   面板與選單接線、初始化(init/initDesktop)。
+   架構重點：其他模組「不再 import app.js」——它們以 emit(...) 發送事件，由本檔以 on(...) 訂閱
+   後呼叫對應的渲染/指令函式（renderAll、renderVideoSub、onDurationKnown、doAction… 見下方註冊區）。
+   渲染協調函式(renderAll/renderVideoSub/ensurePlayheadVisible…)仍定義於此並供本檔內部直接呼叫。 */
 "use strict";
 import _logoUrl from './logo.png';
 import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML } from './util.js';
