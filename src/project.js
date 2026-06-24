@@ -124,7 +124,7 @@ const Project = {
     State.duration=data.duration||State.duration;
     State.pxPerSec=data.pxPerSec||80;
     State.listTrack=0;
-    State.selectedId=State.cues[0]?.id||null; State.selectedIds=State.selectedId?[State.selectedId]:[];
+    State.selectedId=null; State.selectedIds=[]; // 開啟專案後預設不選取任何字幕
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); History.reset();
     setStatus('專案已載入','ok');
   },
