@@ -27,7 +27,7 @@ function showCtx(x,y,items){
   ctx.style.left=Math.max(6,Math.min(x,window.innerWidth-w-6))+'px';
   ctx.style.top=Math.max(6,Math.min(y,window.innerHeight-h-6))+'px';
 }
-document.addEventListener('mousedown',e=>{ if(!ctx.contains(e.target))hideCtx(); },true);
+document.addEventListener('mousedown',e=>{ if(e.button===2)return; if(!ctx.contains(e.target))hideCtx(); },true);
 window.addEventListener('blur',hideCtx);
 window.addEventListener('resize',hideCtx);
 

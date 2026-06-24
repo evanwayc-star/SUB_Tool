@@ -277,7 +277,7 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 app.on('quit', () => {
   if (_mpvProc) { try { _mpvProc.kill(); } catch (e) {} _mpvProc = null; }
   for (const f of tempFiles) { try { fs.unlinkSync(f); } catch (e) {} }
-  try { fs.rmdirSync(TMP, { recursive: true }); } catch (e) {}
+  try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}
 });
 
 /* ============ IPC ============ */

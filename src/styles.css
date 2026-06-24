@@ -159,7 +159,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .tl-toolbar .hint{color:var(--text-faint);font-size:11px}
 .tl-scroll{flex:1;overflow-x:auto;overflow-y:hidden;position:relative;background:#161618}
 .tl-spacer{height:1px}
-.tl-layer{position:sticky;left:0;top:0;height:100%}
+.tl-layer{position:sticky;left:0;top:0;height:100%;will-change:transform}
 #rulerCanvas{position:absolute;left:0;top:0;display:block;background:#1d1d20;border-bottom:1px solid var(--border)}
 #waveCanvas{position:absolute;left:0;display:block;background:#141416}
 .tl-tracks{position:absolute;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden}
@@ -170,7 +170,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .cue-block.sel{background:var(--cue-sel);border-color:#fff;color:#1b1b1d;z-index:5}
 .cue-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
 .cue-block .edge.l{left:0}.cue-block .edge.r{right:0}
-.tl-playhead{position:absolute;top:0;bottom:0;width:2px;background:var(--accent);z-index:10;pointer-events:none}
+.tl-playhead{position:absolute;top:0;bottom:0;width:2px;background:var(--accent);z-index:10;pointer-events:none;will-change:left}
 .tl-playhead::before{content:"";position:absolute;top:0;left:-5px;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid var(--accent)}
 .tl-inpoint{position:absolute;top:0;bottom:0;width:2px;background:var(--green);z-index:9;pointer-events:none;opacity:.9}
 .cue-block.multi{outline:2px solid var(--accent);outline-offset:-2px}

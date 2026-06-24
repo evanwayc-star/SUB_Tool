@@ -8,7 +8,7 @@ const SubFormats = {
   parseSRT(text){
     const out=[]; const blocks=text.replace(/\r/g,'').split(/\n{2,}/);
     for(const blk of blocks){
-      const lines=blk.split('\n').filter(l=>l.length||true);
+      const lines=blk.split('\n');
       let i=0; while(i<lines.length && /^\s*\d+\s*$/.test(lines[i]))i++;
       const tline=lines[i]; if(!tline||!tline.includes('-->'))continue;
       const [a,b]=tline.split('-->');

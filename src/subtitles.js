@@ -156,7 +156,6 @@ function renderSubList(){
   const frag=document.createDocumentFragment();
   list.forEach((c,i)=>frag.appendChild(buildSubRow(c,i,overlaps)));
   sublist.appendChild(frag);
-  sublist.onkeydown=e=>{ if(e.key==='ArrowUp'||e.key==='ArrowDown')e.preventDefault(); };
   renderCheckPanel();
 }
 
@@ -193,91 +192,6 @@ function buildSubRow(c,i,overlaps){
       `<div class="txt" contenteditable="false" spellcheck="false">${_txtInner(c.text)}</div>`+
     `</div>`+
     (State.trackCount>1?`<div class="tk">軌${(c.track||0)+1}</div>`:``);
-  function _syncRowClass(){
-    const rc2=_rowClass(c.text);
-    row.classList.remove('blank','two-line','multi-line'); if(rc2)row.classList.add(rc2);
-  }
-
-  // 時間點點擊編輯
-  if(timed){
-    row.querySelector('.tin').addEventListener('click',async e=>{
-      e.stopPropagation();
-      await ensureProjectSaved();
-      openInlineTimeEdit(row.querySelector('.tin'), c.start, t=>{
-        c.start=Math.max(0,Math.min(t,c.end-0.001));
-        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改起點'+cueSuffix(c));
-      });
-    });
-    row.querySelector('.tout').addEventListener('click',async e=>{
-      e.stopPropagation();
-      await ensureProjectSaved();
-      openInlineTimeEdit(row.querySelector('.tout'), c.end, t=>{
-        c.end=Math.max(c.start+0.001,t);
-        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改終點'+cueSuffix(c));
-      });
-    });
-  }
-
-  row.addEventListener('mousedown',e=>{
-    if(e.button===2) return;
-    // 字幕對調模式：點選目標字幕
-    if(_swapSource!==null){
-      e.preventDefault();
-      if(c.id!==_swapSource){
-        const src=State.cues.find(x=>x.id===_swapSource);
-        if(src){ const tmp=src.text||''; src.text=c.text||''; c.text=tmp; renderAll(); recordHistory('字幕對調'); }
-      }
-      cancelSwapMode(); return;
-    }
-    const txtEl=row.querySelector('.txt');
-    // 若已在文字編輯模式且點擊在 txt 內，讓瀏覽器自行定位游標
-    if(txtEl && txtEl.contentEditable==='true' && (e.target===txtEl||txtEl.contains(e.target))) return;
-    if(document.activeElement===txtEl) txtEl.blur();
-    const _noMod=!(e.ctrlKey||e.metaKey||e.shiftKey);
-    const _alreadySel=_noMod&&State.selectedId===c.id&&State.selectedIds.length===1;
-    const _pt=Media.vTime();
-    const _ptInside=_alreadySel&&c.timed!==false&&_pt>=c.start&&_pt<=c.end;
-    selectCue(c.id,{additive:e.ctrlKey||e.metaKey, range:e.shiftKey, seek:_noMod&&!_ptInside});
-  });
-  row.addEventListener('dblclick',async e=>{
-    if(e.ctrlKey||e.metaKey||e.shiftKey) return;
-    // 時間點有自己的點擊處理，不在此觸發文字編輯
-    if(e.target.closest('.tin')||e.target.closest('.tout')) return;
-    e.preventDefault();
-    await ensureProjectSaved();
-    const t=row.querySelector('.txt');
-    _orig=c.text||'';
-    t.innerText=c.text||''; // 清除搜尋高亮 span
-    t.contentEditable='true'; t.focus();
-    try{ const r=document.createRange(),s=window.getSelection(); r.selectNodeContents(t); r.collapse(false); s.removeAllRanges(); s.addRange(r); }catch(_){}
-  });
-  row.addEventListener('contextmenu',e=>{ e.preventDefault();
-    if(!isSel(c.id))selectCue(c.id);
-    else { State.selectedId=c.id; refreshSelectionUI(); }
-    showCueMenu(e.clientX,e.clientY);
-  });
-
-  const txt=row.querySelector('.txt');
-  let _orig=c.text||'';
-  txt.addEventListener('input',()=>{
-    c.text=txt.innerText; _syncRowClass(); renderCueBlocks(); renderVideoSub(); renderCheckPanel();
-  });
-  txt.addEventListener('blur',()=>{
-    if(txt.contentEditable!=='true') return;
-    c.text=txt.innerText;
-    txt.contentEditable='false';
-    txt.innerHTML=_txtInner(c.text);
-    _syncRowClass();
-    if((c.text||'')!==_orig) recordHistory('編輯字幕文字'+cueSuffix(c));
-    renderCheckPanel();
-  });
-  txt.addEventListener('keydown',e=>{
-    if(txt.contentEditable!=='true') return;
-    if(e.key==='Enter'&&e.ctrlKey){ e.preventDefault(); splitCueAtCursor(c,txt); }
-    else if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); txt.blur(); }
-    else if(e.key==='Escape'){ e.preventDefault(); txt.innerText=_orig; txt.blur(); }
-    e.stopPropagation();
-  });
   return row;
 }
 
@@ -559,6 +473,128 @@ function splitCueAtCursor(c, txtEl){
     }catch(_){}
   },30);
 }
+
+/* ===== 統一的事件代理 (Event Delegation) ================================= */
+sublist.addEventListener('click', async e => {
+  const tin = e.target.closest('.tin');
+  const tout = e.target.closest('.tout');
+  if (tin || tout) {
+    e.stopPropagation();
+    const row = e.target.closest('.sub-row');
+    if (!row) return;
+    const c = State.cues.find(x => x.id === row.dataset.id);
+    if (!c || c.timed === false) return;
+    await ensureProjectSaved();
+    if (tin) {
+      openInlineTimeEdit(tin, c.start, t => {
+        c.start = Math.max(0, Math.min(t, c.end - 0.001));
+        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改起點' + cueSuffix(c));
+      });
+    } else {
+      openInlineTimeEdit(tout, c.end, t => {
+        c.end = Math.max(c.start + 0.001, t);
+        sortCues(); renderAll(); renderVideoSub(); recordHistory('修改終點' + cueSuffix(c));
+      });
+    }
+  }
+});
+
+sublist.addEventListener('mousedown', e => {
+  if (e.button === 2) return;
+  const row = e.target.closest('.sub-row');
+  if (!row) return;
+  const c = State.cues.find(x => x.id === row.dataset.id);
+  if (!c) return;
+
+  if (_swapSource !== null) {
+    e.preventDefault();
+    if (c.id !== _swapSource) {
+      const src = State.cues.find(x => x.id === _swapSource);
+      if (src) { const tmp = src.text || ''; src.text = c.text || ''; c.text = tmp; renderAll(); recordHistory('字幕對調'); }
+    }
+    cancelSwapMode(); return;
+  }
+  const txtEl = row.querySelector('.txt');
+  if (txtEl && txtEl.contentEditable === 'true' && (e.target === txtEl || txtEl.contains(e.target))) return;
+  if (document.activeElement === txtEl) txtEl.blur();
+  const _noMod = !(e.ctrlKey || e.metaKey || e.shiftKey);
+  const _alreadySel = _noMod && State.selectedId === c.id && State.selectedIds.length === 1;
+  const _pt = Media.vTime();
+  const _ptInside = _alreadySel && c.timed !== false && _pt >= c.start && _pt <= c.end;
+  selectCue(c.id, { additive: e.ctrlKey || e.metaKey, range: e.shiftKey, seek: _noMod && !_ptInside });
+});
+
+sublist.addEventListener('dblclick', async e => {
+  if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (e.target.closest('.tin') || e.target.closest('.tout')) return;
+  const row = e.target.closest('.sub-row');
+  if (!row) return;
+  const c = State.cues.find(x => x.id === row.dataset.id);
+  if (!c) return;
+  e.preventDefault();
+  await ensureProjectSaved();
+  const t = row.querySelector('.txt');
+  t.dataset.orig = c.text || '';
+  t.innerText = c.text || ''; // 清除搜尋高亮 span
+  t.contentEditable = 'true'; t.focus();
+  try { const r = document.createRange(), s = window.getSelection(); r.selectNodeContents(t); r.collapse(false); s.removeAllRanges(); s.addRange(r); } catch (_) {}
+});
+
+sublist.addEventListener('contextmenu', e => {
+  const row = e.target.closest('.sub-row');
+  if (!row) return;
+  const c = State.cues.find(x => x.id === row.dataset.id);
+  if (!c) return;
+  e.preventDefault();
+  if (!isSel(c.id)) selectCue(c.id);
+  else { State.selectedId = c.id; refreshSelectionUI(); }
+  showCueMenu(e.clientX, e.clientY);
+});
+
+sublist.addEventListener('input', e => {
+  const txt = e.target.closest('.txt');
+  if (!txt) return;
+  const row = txt.closest('.sub-row');
+  if (!row) return;
+  const c = State.cues.find(x => x.id === row.dataset.id);
+  if (!c) return;
+  c.text = txt.innerText;
+  const rc2 = _rowClass(c.text);
+  row.classList.remove('blank', 'two-line', 'multi-line'); if (rc2) row.classList.add(rc2);
+  renderCueBlocks(); renderVideoSub(); renderCheckPanel();
+});
+
+sublist.addEventListener('focusout', e => {
+  const txt = e.target.closest('.txt');
+  if (!txt || txt.contentEditable !== 'true') return;
+  const row = txt.closest('.sub-row');
+  if (!row) return;
+  const c = State.cues.find(x => x.id === row.dataset.id);
+  if (!c) return;
+  c.text = txt.innerText;
+  txt.contentEditable = 'false';
+  txt.innerHTML = _txtInner(c.text);
+  const rc2 = _rowClass(c.text);
+  row.classList.remove('blank', 'two-line', 'multi-line'); if (rc2) row.classList.add(rc2);
+  const orig = txt.dataset.orig || '';
+  if ((c.text || '') !== orig) recordHistory('編輯字幕文字' + cueSuffix(c));
+  renderCheckPanel();
+});
+
+sublist.addEventListener('keydown', e => {
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); return; }
+  const txt = e.target.closest('.txt');
+  if (!txt || txt.contentEditable !== 'true') return;
+  const row = txt.closest('.sub-row');
+  if (!row) return;
+  const c = State.cues.find(x => x.id === row.dataset.id);
+  if (!c) return;
+
+  if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); splitCueAtCursor(c, txt); }
+  else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); txt.blur(); }
+  else if (e.key === 'Escape') { e.preventDefault(); txt.innerText = txt.dataset.orig || ''; txt.blur(); }
+  e.stopPropagation();
+});
 
 export { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel,
   addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, shiftTextsDown, shiftTextsUp,

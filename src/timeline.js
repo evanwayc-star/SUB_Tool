@@ -508,7 +508,24 @@ window.addEventListener('mousemove',e=>{
     const sn=snapVal(ne,drag.snaps,drag.thr); if(sn>=drag.c.start+0.05 && sn<=it.nextStart) ne=sn;
     drag.c.end=ne;
   }
-  renderCueBlocks(); if(drag.c)renderSubRow(drag.c.id);
+  
+  // 優化：拖曳期間只更新樣式，不全量重繪
+  const rows = tlTracks.querySelectorAll('.tl-track');
+  for (const it of drag.grp) {
+    const el = tlTracks.querySelector(`.cue-block[data-id="${it.c.id}"]`);
+    if (el) {
+      el.style.left = timeToX(it.c.start) + 'px';
+      el.style.width = Math.max(2, (it.c.end - it.c.start) * State.pxPerSec) + 'px';
+      const targetRow = rows[Math.min(it.c.track || 0, rows.length - 1)];
+      if (targetRow && el.parentElement !== targetRow) {
+        targetRow.appendChild(el);
+      }
+    }
+  }
+  // 拖曳時暫時隱藏重疊提示區塊，放開滑鼠時會隨 renderAll 重新計算
+  tlTracks.querySelectorAll('.cue-overlap').forEach(e => e.style.display = 'none');
+  
+  if(drag.c) renderSubRow(drag.c.id);
 });
 window.addEventListener('mouseup',e=>{
   if(!drag)return;

@@ -1,5 +1,5 @@
 /* SUB Tool — 備註 */
-import { $, video } from './dom.js';
+import { $ } from './dom.js';
 import { State, newId } from './state.js';
 import { secToEncore } from './time.js';
 import { escapeHTML, downloadBytes } from './util.js';

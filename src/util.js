@@ -20,6 +20,9 @@ function decodeText(buf){
 }
 /* 編碼：字串 -> UTF-16 LE (含 BOM) Uint8Array */
 function encodeUTF16LE(str){
+  // 註解：此函式目前使用 charCodeAt 迭代，會將 Surrogate Pair（如 Emoji 或罕見漢字）拆分為兩個獨立的 16-bit 單位寫入。
+  // 由於 JavaScript 的字串底層也是 UTF-16，因此直接將這兩個單位依序寫入位元組序列，
+  // 儲存出來的檔案完全符合標準 UTF-16 LE，解碼時依然正確無誤，不需要改用 codePointAt 處理。
   const out=new Uint8Array(2+str.length*2);
   out[0]=0xFF; out[1]=0xFE;
   for(let i=0;i<str.length;i++){const c=str.charCodeAt(i); out[2+i*2]=c&0xFF; out[3+i*2]=(c>>8)&0xFF;}
@@ -27,6 +30,17 @@ function encodeUTF16LE(str){
 }
 function downloadBytes(bytes,name,mime='application/octet-stream'){
   const blob=new Blob([bytes],{type:mime});
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if(isIOS){
+    const reader = new FileReader();
+    reader.onload = e => {
+      const a = document.createElement('a');
+      a.href = e.target.result; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+    };
+    reader.readAsDataURL(blob);
+    return;
+  }
   const url=URL.createObjectURL(blob); const a=document.createElement('a');
   a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),2000);
@@ -41,6 +55,6 @@ function pickFile(inputEl){ return new Promise(res=>{
 function b64ToBytes(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;}
 function bytesToB64(bytes){let bin='';const ch=0x8000;for(let i=0;i<bytes.length;i+=ch)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+ch));return btoa(bin);}
 const baseName = p => (p||'').split(/[\\/]/).pop();
-function escapeHTML(s){return s.replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
+function escapeHTML(s){return s.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 
 export { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML };

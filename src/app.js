@@ -81,11 +81,14 @@ function _syncMpvPanel(){
   }
   window.subtool.mpv.show(!hides).catch(()=>{});
 }
+const _videoSub = $('videoSub');
+const _videoWrap = $('videoWrap');
+let _videoSubSig = '';
 function renderVideoSub(){
   const t=Media.vTime();
   // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
-  let html='';
-  const baseFs = Math.max(14, Math.min(36, Math.round(($('videoWrap')?.clientWidth||1000) * 0.025)));
+  const baseFs = Math.max(14, Math.min(36, Math.round((_videoWrap?.clientWidth||1000) * 0.025)));
+  let html='', sig='';
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
     const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && (t+0.001)>=c.start && (t+0.001)<c.end);
@@ -93,11 +96,14 @@ function renderVideoSub(){
     const st=State.tracks[tk]||{};
     const pct=st.posPct!=null?st.posPct:10, fs=st.fontScale||1, al=st.align||'center', col=st.color||'#ffffff';
     const fsPx = Math.round(baseFs * fs);
+    sig+=tk+'|'+fsPx+'|'+col+'|'+pct+'|'+al+'|'+cur.map(c=>c.id+'='+c.text).join(',')+';';
     html+=`<div class="vsub-track" style="bottom:${pct}%;text-align:${al};letter-spacing:1px;font-weight:500;font-family:'思源黑體', 'Noto Sans TC', 'Source Han Sans TC', sans-serif;">`+
       cur.map((c,i)=>`<span class="line" style="font-size:${fsPx}px;color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'')}</span>`).join('<br>')+
       `</div>`;
   }
-  $('videoSub').innerHTML=html;
+  if(sig===_videoSubSig) return;
+  _videoSubSig=sig;
+  _videoSub.innerHTML=html;
 }
 function renderAudioTracks(){
   const list=$('atList'); list.innerHTML='';
@@ -275,7 +281,7 @@ function ensurePlayheadVisible(){
     const newLeft=Math.max(0, t*State.pxPerSec - vw*0.3);
     tlScroll.scrollLeft=newLeft;
     State.viewStart=tlScroll.scrollLeft/State.pxPerSec; // read back actual (browser may clamp)
-    drawRuler(); drawWave(); renderCueBlocks(); // sync immediately; don't wait for passive scroll event
+    drawRuler(); drawWave(); renderCueBlocks(); updatePlayhead(); // sync immediately; don't wait for passive scroll event
   }
 }
 
@@ -339,11 +345,8 @@ function markActiveRow(id){
   if(row){
     row.classList.add('active');
     if(State.subMode){
-      const sRect = sublist.getBoundingClientRect();
-      const rRect = row.getBoundingClientRect();
-      const rowHeight = rRect.height || 30;
-      const targetY = sRect.top + (rowHeight * 4);
-      sublist.scrollTop += (rRect.top - targetY);
+      const rowH = row.offsetHeight || 30;
+      sublist.scrollTop = row.offsetTop - rowH * 4;
     } else {
       row.scrollIntoView({block:'nearest'});
     }
@@ -352,11 +355,13 @@ function markActiveRow(id){
 video.addEventListener('play',()=>{
   Media.playing=true;
   $('playBtn').textContent='⏸';
-  State.selectedIds=[];
-  State.selectedId=null;
-  refreshSelectionUI();
-  const stSel = $('stSel');
-  if(stSel) stSel.textContent='';
+  if(!State.subMode){
+    State.selectedIds=[];
+    State.selectedId=null;
+    refreshSelectionUI();
+    const stSel = $('stSel');
+    if(stSel) stSel.textContent='';
+  }
 });
 video.addEventListener('pause',()=>{$('playBtn').textContent='▶';});
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
@@ -1273,6 +1278,8 @@ function parseTimecodeInput(str){
     const g=[]; let r=str; while(r.length>2){ g.unshift(r.slice(-2)); r=r.slice(0,-2); } g.unshift(r);
     // g = [..., mm, ss, ff]  （由右至左對應 格/秒/分/時）
     f=+(g[g.length-1]||0); s=+(g[g.length-2]||0); m=+(g[g.length-3]||0); h=+(g[g.length-4]||0);
+    if(State.dropFrame)
+      return encoreToSec(`${pad(h)}:${pad(m)}:${pad(s)};${pad(f)}`,State.fps,true);
   }
   const fpsR=Math.round(State.fps)||24;
   return h*3600 + m*60 + s + Math.min(f,fpsR-1)/State.fps;

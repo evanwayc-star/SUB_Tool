@@ -143,7 +143,7 @@ const Project = {
     let data; try{ data=JSON.parse(decodeText(b64ToBytes(r.b64).buffer)); }catch(e){ showToast('無法解析專案檔'); return; }
     this.apply(data);
     // 載入既有專案時記錄儲存路徑，自動備份用
-    if(r.path){ _savePath=r.path; _saveBaseName=r.path.replace(/\\/g,'/').split('/').pop().replace(/\.subtool$/i,''); }
+    if(r.path){ _savePath=r.path; _saveBaseName=r.path.replace(/\\/g,'/').split('/').pop().replace(/\.subtool$/i,''); if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave,3*60*1000); }
     const mp=data.media&&data.media.path;
     if(mp){
       const st=await DESK.stat(mp);

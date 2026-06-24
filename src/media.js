@@ -245,7 +245,7 @@ const Media = {
         if(self._bgVersion!==myVer) return;
         self.syncMuteState(); renderAudioTracks();
         if(r.wave){
-          try{ const b64=await DESK.readB64(r.wave); if(b64&&self._bgVersion===myVer){ const ab=await self.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); Wave.registerSources(r.wave,chs); drawTimeline(); } else if(self._bgVersion===myVer) Wave.initLive(); }
+          try{ const u=await DESK.fileURL(r.wave); const fb=await fetch(u); const buf=await fb.arrayBuffer(); if(self._bgVersion===myVer){ Wave.live=false; const pk=Wave.computeFromWav(buf); Wave.registerSources(r.wave,chs); if(pk)Wave.sources[0].peaks=pk; drawTimeline(); } else if(self._bgVersion===myVer) Wave.initLive(); }
           catch(e2){ console.warn('wave',e2); if(self._bgVersion===myVer) Wave.initLive(); }
         }
         if(self._bgVersion===myVer) setStatus('媒體已載入','ok');
@@ -335,10 +335,19 @@ const Media = {
         const wavUrl = await DESK.fileURL(wavPath);
         const res = await fetch(wavUrl);
         const buf = await res.arrayBuffer();
-        const ab = await this.ctx.decodeAudioData(buf);
         try { DESK.cleanupAudio(wavPath); } catch(e) {}
         
-        Wave.setFromBuffer(ab, src);
+        const pk = Wave.computeFromWav(buf);
+        if(pk) {
+          Wave.sources = Wave.sources.filter(s => s.sourceId !== src);
+          Wave.sources.push({ label: '主混音', path: null, peaks: pk, sourceId: src });
+          Wave.live = false;
+          Wave.srcIdx = Wave.sources.findIndex(s => s.sourceId === src);
+          Wave._renderSrcSel();
+        } else {
+          const ab = await this.ctx.decodeAudioData(buf);
+          Wave.setFromBuffer(ab, src);
+        }
         setStatus('音軌與波形已加入','ok');
       } catch(e) { console.warn('waveAudio error', e); setStatus('音軌已加入','ok'); }
     }catch(e){ setStatus('音軌載入失敗：'+e.message,''); showToast('無法載入音訊檔：'+e.message); }
@@ -351,7 +360,7 @@ const Media = {
     this._mpvBoundsSend=send;
     try{ this._mpvRO=new ResizeObserver(send); this._mpvRO.observe($('videoWrap')); }catch(e){}
     window.addEventListener('resize',send);
-    this._mpvBoundsTimer=setInterval(send,500); // 安全網：面板拖移/版面位移
+    this._mpvBoundsTimer=setInterval(send,1000); // 安全網：面板拖移/版面位移，放寬至 1000ms 減少耗能
   },
   _stopMpvBoundsFeeder(){
     if(this._mpvRO){ try{this._mpvRO.disconnect();}catch(e){} this._mpvRO=null; }
@@ -933,6 +942,40 @@ const Wave = {
       peaks[i*2]=mn; peaks[i*2+1]=mx;
     }
     this.peaks=peaks;
+    return peaks;
+  },
+  computeFromWav(arrayBuffer){
+    const view = new DataView(arrayBuffer);
+    if(view.byteLength < 44 || view.getUint32(0, false) !== 0x52494646) return null;
+    const numChannels = view.getUint16(22, true);
+    const sampleRate = view.getUint32(24, true);
+    let offset = 12;
+    while(offset < view.byteLength) {
+      const chunkId = view.getUint32(offset, false);
+      const chunkSize = view.getUint32(offset + 4, true);
+      if(chunkId === 0x64617461) { offset += 8; break; }
+      offset += 8 + chunkSize;
+    }
+    const samples = new Int16Array(arrayBuffer, offset, Math.floor((arrayBuffer.byteLength - offset)/2));
+    const numSamples = samples.length / numChannels;
+    const res = this.resolution;
+    const len = Math.ceil((numSamples / sampleRate) * res);
+    const peaks = new Float32Array(len * 2);
+    const spb = sampleRate / res;
+    for(let i=0; i<len; i++){
+      const s0 = Math.floor(i * spb);
+      const s1 = Math.min(numSamples, Math.floor((i+1) * spb));
+      let mn = 0, mx = 0;
+      for(let j=s0; j<s1; j++){
+        let v = 0;
+        for(let c=0; c<numChannels; c++) v += samples[j * numChannels + c];
+        v = (v / numChannels) / 32768.0;
+        if(v < mn) mn = v;
+        if(v > mx) mx = v;
+      }
+      peaks[i*2] = mn; peaks[i*2+1] = mx;
+    }
+    this.peaks = peaks;
     return peaks;
   }
 };
