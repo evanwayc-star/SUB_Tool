@@ -322,9 +322,10 @@ async function doAction(act){
       if(State.subMode){ Media.play(); setStatus('🎯 上字幕模式 ON — 播放中，I 設起點，O 設終點後自動前進','ok'); }
       else { Media.pause(); setStatus('上字幕模式 OFF',''); }
       break;
-    case 'playpause': 
-      if(!Media.playing) resetPlaybackSpeed();
-      Media.toggle(); 
+    case 'playpause':
+      resetPlaybackSpeed(); // 重置 JKL 穿梭速度回 1x（清掉殘留的倍率）
+      Media.toggle();
+      setStatus(Media.playing?'▶ 正播':'⏸ 暫停', Media.playing?'ok':''); // 狀態列同步播放/暫停（非僅 JKL）
       break;
     case 'seek-start': Media.seek(0); break;
     case 'back5': nudge(-5); break;
