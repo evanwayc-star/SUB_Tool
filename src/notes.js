@@ -58,12 +58,18 @@ function addNote(){
 
 function clearAllNotes(){
   if(!State.notes.length){ showToast('沒有備註可清除'); return; }
-  if(!confirm(`確定要清除全部 ${State.notes.length} 條備註嗎？`)) return;
-  State.notes=[];
-  _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
-  renderNotes(); drawRuler();
-  recordHistory('清除所有備註');
-  showToast('已清除所有備註');
+  // Fix #15：改用 openModal，風格一致且在 Electron 中不會被系統 confirm 截取
+  openModal('清除所有備註',
+    `<p>確定要清除全部 <b>${State.notes.length}</b> 條備註嗎？</p>`,
+    [{label:'取消',act:closeModal},
+     {label:'確定清除',primary:true,act:()=>{
+       closeModal();
+       State.notes=[];
+       _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
+       renderNotes(); drawRuler();
+       recordHistory('清除所有備註');
+       showToast('已清除所有備註');
+     }}]);
 }
 
 function renderNotes(){
@@ -192,10 +198,22 @@ function _showNoteCtx(x,y){
   }
   items.push({sep:true});
   items.push({label:'🗑 刪除選取備註',act:()=>{
-    if(cnt>1 && !confirm(`確定要刪除 ${cnt} 條備註嗎？`)) return;
-    State.notes=State.notes.filter(n=>!_selectedNoteIds.has(n.id));
-    _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
-    renderNotes(); drawRuler(); recordHistory('刪除備註');
+    // Fix #15：cnt>1 時改用 openModal 取代 confirm()，風格一致
+    if(cnt>1){
+      openModal(`刪除 ${cnt} 條備註`,
+        `<p>確定要刪除選取的 <b>${cnt}</b> 條備註嗎？</p>`,
+        [{label:'取消',act:closeModal},
+         {label:'確定刪除',primary:true,act:()=>{
+           closeModal();
+           State.notes=State.notes.filter(n=>!_selectedNoteIds.has(n.id));
+           _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
+           renderNotes(); drawRuler(); recordHistory('刪除備註');
+         }}]);
+    } else {
+      State.notes=State.notes.filter(n=>!_selectedNoteIds.has(n.id));
+      _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
+      renderNotes(); drawRuler(); recordHistory('刪除備註');
+    }
   }});
   showCtx(x,y,items);
 }

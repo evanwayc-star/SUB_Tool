@@ -145,13 +145,10 @@ window.addEventListener('keydown',e=>{
       Media.toggle();
       setStatus(Media.playing?'▶ 正播':'⏸ 暫停', Media.playing?'ok':''); // 狀態列同步播放/暫停（非僅 JKL）
       break;
-    case 'j': // 倒帶：-1 → -1.5 → -2 → -2.5 → -3（到頂維持 -3，不循環）
+    case 'j': // 倒帶：-1 → -5 (每階 -0.5)
       e.preventDefault();
       if(_jklSpeed>=0) _jklSpeed=-1;
-      else if(_jklSpeed===-1) _jklSpeed=-1.5;
-      else if(_jklSpeed===-1.5) _jklSpeed=-2;
-      else if(_jklSpeed===-2) _jklSpeed=-2.5;
-      else _jklSpeed=-3; // -2.5 → -3；已在 -3 則維持（封頂）
+      else _jklSpeed=Math.max(-5, _jklSpeed-0.5);
       jklApply(); break;
     case 'k': // 暫停
       e.preventDefault(); _jklSpeed=0; jklApply(); break;
@@ -165,13 +162,10 @@ window.addEventListener('keydown',e=>{
       jklClear(); _jklSpeed=0; video.playbackRate=1; Media.pause();
       jumpToCueInMinusFrames(-1, 5);
       break;
-    case 'l': // 正播：1 → 1.5 → 2 → 2.5 → 3（到頂維持 3，不循環）
+    case 'l': // 正播：1 → 5 (每階 0.5)
       e.preventDefault();
       if(_jklSpeed<=0) _jklSpeed=1;
-      else if(_jklSpeed===1) _jklSpeed=1.5;
-      else if(_jklSpeed===1.5) _jklSpeed=2;
-      else if(_jklSpeed===2) _jklSpeed=2.5;
-      else _jklSpeed=3; // 2.5 → 3；已在 3 則維持（封頂）
+      else _jklSpeed=Math.min(5, _jklSpeed+0.5);
       jklApply(); break;
     case 'i': e.preventDefault(); setIn(); break;
     case 'o': e.preventDefault(); setOut(); break;

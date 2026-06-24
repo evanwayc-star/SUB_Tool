@@ -2,7 +2,7 @@
 import { State, setFps, newTrack, syncTrackCount, newId, IS_DESKTOP, DESK } from './state.js';
 import { $, video } from './dom.js';
 import { decodeText, b64ToBytes, readFile, pickFile, encodeUTF16LE, bytesToB64, downloadBytes, baseName, escapeHTML } from './util.js';
-import { secToEncore } from './time.js';
+import { secToEncore, snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
 import { Media } from './media.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
@@ -86,8 +86,11 @@ function _openImportModal(title, parsed, kind){
       }else{ targetTk=+selVal; }
       const append=selVal==='new'||$('importAppend').checked;
       closeModal();
-      const newCues=parsed.map(p=>({id:newId(),start:p.start||0,end:p.end||0,text:p.text||'',track:targetTk,
-        timed:p.timed!==false&&!(p.start===0&&p.end===0&&kind==='txt')}));
+      const newCues=parsed.map(p=>{
+        const s = snapTimeToFrame(p.start||0, State.fps, State.dropFrame);
+        const e = snapTimeToFrame(p.end||0, State.fps, State.dropFrame);
+        return {id:newId(), start:s, end:e, text:p.text||'', track:targetTk, timed:p.timed!==false&&!(p.start===0&&p.end===0&&kind==='txt')};
+      });
       if(kind==='txt')newCues.forEach(c=>c.timed=false);
       if(append){ State.cues.push(...newCues); }
       else { State.cues=newCues; }
@@ -267,8 +270,8 @@ function applyTcShift(sign){
   recordHistory('時間碼位移');
   setStatus(`已位移 ${delta>=0?'+':''}${delta.toFixed(3)}s（共 ${cues.length} 條）`,'ok');
 }
-function _durAdjCues(){
-  const scope=$('tcShiftSel').value;
+// Fix #13：從隱含讀取 DOM 改為接受 scope 參數，方便測試與未來複用
+function _durAdjCues(scope){
   if(scope==='sel'){
     const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
     return ids.map(id=>State.cues.find(c=>c.id===id)).filter(c=>c&&c.timed!==false);
@@ -292,7 +295,7 @@ function applyDurAdjTc(sign){
   if(t==null||isNaN(t)||t<=0){ showToast('請輸入有效的時間碼（例如 00:00:01:00）'); return; }
   const delta=sign*t;
   const minDur=1/Math.max(State.fps||25,1);
-  const cues=_durAdjCues();
+  const cues=_durAdjCues($('tcShiftSel').value);
   if(!cues.length){ showToast('沒有字幕可調整'); return; }
   for(const c of cues){
     const nextIn=_nextInPoint(c);
@@ -310,7 +313,7 @@ function applyDurAdjPct(){
   if(isNaN(pct)||pct<=0){ showToast('請輸入有效的百分比（例如 150）'); return; }
   const ratio=pct/100;
   const minDur=1/Math.max(State.fps||25,1);
-  const cues=_durAdjCues();
+  const cues=_durAdjCues($('tcShiftSel').value);
   if(!cues.length){ showToast('沒有字幕可調整'); return; }
   for(const c of cues){
     const nextIn=_nextInPoint(c);

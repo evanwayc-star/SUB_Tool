@@ -133,4 +133,7 @@ function updateMeters(){
   }
 }
 
-export { renderAudioTracks, renderAudioSources, renderMixer, mixerReset, mixerMuteAll, updateMeters };
+// Fix #10：供 Media.reset() 呼叫，清除過時的音軌參照，避免 rafLoop 讀取廢棄 analyser
+function clearMeterStrips(){ _meterStrips=[]; }
+
+export { renderAudioTracks, renderAudioSources, renderMixer, mixerReset, mixerMuteAll, updateMeters, clearMeterStrips };

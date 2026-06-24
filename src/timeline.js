@@ -6,7 +6,7 @@ import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
 import { emit } from './events.js';
 import { ensureProjectSaved, isProjectGuardDone } from './project.js';
-import { showToast } from './ui.js';
+import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
@@ -302,7 +302,7 @@ function renderCueBlocks(){
     tc.sort((a,b)=>a.start-b.start);
     for(let i=0;i<tc.length-1;i++){
       for(let j=i+1;j<tc.length;j++){
-        if(tc[j].start>=tc[i].end)break;
+        if(tc[j].start>=tc[i].end - 0.001)break;
         const os=tc[j].start, oe=Math.min(tc[i].end,tc[j].end);
         if(oe<=t0||os>=t1)continue;
         const vs=Math.max(os,t0), ve=Math.min(oe,t1);
@@ -322,14 +322,22 @@ function trackFromY(clientY){
 function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); emit('render:listTrackSel'); recordHistory('新增軌道'); }
 function removeTrack(i){
   const n=State.cues.filter(c=>(c.track||0)===i).length;
-  if(n>0 && !confirm(`軌道「${State.tracks[i].name}」有 ${n} 條字幕，刪除軌道會一併刪除這些字幕，確定？`))return;
-  State.cues=State.cues.filter(c=>(c.track||0)!==i);
-  State.cues.forEach(c=>{ if((c.track||0)>i)c.track=(c.track||0)-1; });
-  State.tracks.splice(i,1); syncTrackCount();
-  if(State.listTrack===i)State.listTrack=-1; else if(State.listTrack>i)State.listTrack--;
-  State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
-  if(!State.cues.some(c=>c.id===State.selectedId)){State.selectedId=State.selectedIds[0]||null;State.activeEdge='start';}
-  emit('render:listTrackSel'); emit('render:all'); drawTimeline(); recordHistory('刪除軌道');
+  const doRemove=()=>{
+    State.cues=State.cues.filter(c=>(c.track||0)!==i);
+    State.cues.forEach(c=>{ if((c.track||0)>i)c.track=(c.track||0)-1; });
+    State.tracks.splice(i,1); syncTrackCount();
+    if(State.listTrack===i)State.listTrack=-1; else if(State.listTrack>i)State.listTrack--;
+    State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
+    if(!State.cues.some(c=>c.id===State.selectedId)){State.selectedId=State.selectedIds[0]||null;State.activeEdge='start';}
+    emit('render:listTrackSel'); emit('render:all'); drawTimeline(); recordHistory('刪除軌道');
+  };
+  // Fix #15：改用 openModal，避免 confirm() 在 Electron 中被截取或樣式不一致
+  if(n>0){
+    openModal(`刪除軌道「${escapeHTML(State.tracks[i].name)}」`,
+      `<p>此軌道有 <b>${n}</b> 條字幕，刪除後一併移除。確定繼續？</p>`,
+      [{label:'取消',act:closeModal},
+       {label:'確定刪除',primary:true,act:()=>{ closeModal(); doRemove(); }}]);
+  } else { doRemove(); }
 }
 /* 把選取的字幕移到指定軌道（或位移 delta） */
 function moveSelectedToTrack(target){
@@ -349,6 +357,10 @@ function updatePlayhead(){
 function drawTimeline(){
   layoutTimeline(); drawRuler(); drawWave(); renderTrackRows(); updatePlayhead();
 }
+// Fix #9：不重建 renderTrackRows 的輕量版，供捲動/播放以外的重繪使用
+function redrawTimeline(){
+  drawRuler(); drawWave(); renderCueBlocks(); updatePlayhead();
+}
 /* 時間軸捲動 */
 tlScroll.addEventListener('scroll',()=>{
   State.viewStart=tlScroll.scrollLeft/State.pxPerSec;
@@ -361,8 +373,8 @@ tlScroll.addEventListener('scroll',()=>{
 /* 時間軸縮放 */
 function setZoom(px,centerTime){
   const c = centerTime!=null?centerTime:Media.vTime();
-  State.pxPerSec=clamp(px,0.1,800);
-  $('zoomBar').value=clamp(State.pxPerSec,0.1,400);
+  State.pxPerSec=clamp(px,0.1,4000);
+  $('zoomBar').value=clamp(State.pxPerSec,0.1,4000);
   layoutTimeline();
   // 維持 center 在畫面內
   const target=c*State.pxPerSec - viewportW()/2;
@@ -445,7 +457,7 @@ tlScroll.addEventListener('mousedown',e=>{
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
       .map(cc=>{ const b=neighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; });
-    drag={c,mode,startX:e.clientX,startY:e.clientY,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
+    drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
       snaps:snapTargets(exSet), thr:8/State.pxPerSec};
     e.preventDefault(); return;
   }
@@ -468,23 +480,28 @@ tlScroll.addEventListener('mousedown',e=>{
     Media.seek(snapFrame(xToTime(x))); updatePlayhead(); emit('render:videoSub');
     drag={mode:'scrub'}; e.preventDefault(); return;
   }
-  drag={mode:'rubber',startX:e.clientX,startY:e.clientY,x0:x,y0:y,moved:false,additive:e.ctrlKey||e.metaKey};
+  drag={mode:'rubber',startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,x0:x,y0:y,moved:false,additive:e.ctrlKey||e.metaKey};
   e.preventDefault();
 });
-window.addEventListener('mousemove',e=>{
+let _autoScrollId = null;
+
+const _handleDragUpdate = (e) => {
   if(!drag)return;
   const rect=tlLayer.getBoundingClientRect();
   if(drag.mode==='scrub'){ Media.seek(snapFrame(xToTime(e.clientX-rect.left))); updatePlayhead(); emit('render:videoSub'); return; }
-  if(Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)drag.moved=true;
+  if(drag.mode==='move'||drag.mode==='l'||drag.mode==='r'||drag.mode==='rubber'){
+    if(Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)drag.moved=true;
+  }
   if(drag.mode==='rubber'){
+    const currentX0 = drag.x0 - (tlScroll.scrollLeft - drag.startScroll);
     const x1=clamp(e.clientX-rect.left,0,viewportW()), y1=clamp(e.clientY-rect.top,0,tlLayer.clientHeight);
     const rb=$('tlRubber'); rb.style.display='block';
-    rb.style.left=Math.min(drag.x0,x1)+'px'; rb.style.top=Math.min(drag.y0,y1)+'px';
-    rb.style.width=Math.abs(x1-drag.x0)+'px'; rb.style.height=Math.abs(y1-drag.y0)+'px';
+    rb.style.left=Math.min(currentX0,x1)+'px'; rb.style.top=Math.min(drag.y0,y1)+'px';
+    rb.style.width=Math.abs(x1-currentX0)+'px'; rb.style.height=Math.abs(y1-drag.y0)+'px';
     return;
   }
   if(!drag.moved) return; // 未超過門檻：單擊不應移動/縮放字幕
-  let dt=(e.clientX-drag.startX)/State.pxPerSec;
+  let dt=(e.clientX-drag.startX + (tlScroll.scrollLeft - drag.startScroll))/State.pxPerSec;
   if(drag.mode==='move'){
     // 防重疊：限制 dt 使每條都不越過同軌鄰居
     for(const it of drag.grp){
@@ -534,15 +551,41 @@ window.addEventListener('mousemove',e=>{
   tlTracks.querySelectorAll('.cue-overlap').forEach(e => e.style.display = 'none');
   
   if(drag.c) renderSubRow(drag.c.id);
+};
+
+window.addEventListener('mousemove',e=>{
+  if(!drag)return;
+  drag.lastEvent = e;
+  drag.lastClientX = e.clientX;
+  _handleDragUpdate(e);
+  if(!_autoScrollId) {
+    const _autoScroll = () => {
+      if(!drag) { _autoScrollId = null; return; }
+      const r = tlScroll.getBoundingClientRect();
+      const cx = drag.lastClientX;
+      let dx = 0;
+      if (cx < r.left + 30) dx = -15;
+      else if (cx > r.right - 30) dx = 15;
+      if (dx !== 0) {
+        tlScroll.scrollLeft += dx;
+        if(drag.lastEvent) _handleDragUpdate(drag.lastEvent);
+      }
+      _autoScrollId = requestAnimationFrame(_autoScroll);
+    };
+    _autoScrollId = requestAnimationFrame(_autoScroll);
+  }
 });
+
 window.addEventListener('mouseup',e=>{
   if(!drag)return;
+  if(_autoScrollId) { cancelAnimationFrame(_autoScrollId); _autoScrollId = null; }
   if(drag.mode==='rubber'){
     $('tlRubber').style.display='none';
     const rect=tlLayer.getBoundingClientRect();
     if(drag.moved){
+      const currentX0 = drag.x0 - (tlScroll.scrollLeft - drag.startScroll);
       const x1=clamp(e.clientX-rect.left,0,viewportW()), y1=e.clientY-rect.top;
-      const ta=xToTime(Math.min(drag.x0,x1)), tb=xToTime(Math.max(drag.x0,x1));
+      const ta=xToTime(Math.min(currentX0,x1)), tb=xToTime(Math.max(currentX0,x1));
       const sc=tracksScrollTop();
       const rowA=yToTrack(Math.max(0,Math.min(drag.y0,y1)-tracksTop()+sc));
       const rowB=yToTrack(Math.max(0,Math.max(drag.y0,y1)-tracksTop()+sc));
@@ -601,5 +644,5 @@ function neighborBounds(os,oe,track,excludeIds){
 
 export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
-  addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo,
+  addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, redrawTimeline, setZoom, zoomFit, zoomFitVideo,
   refreshTrackGutterActive, snapTargets, snapVal, neighborBounds };

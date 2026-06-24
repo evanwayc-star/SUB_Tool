@@ -1,11 +1,12 @@
 /* SUB Tool — 媒體引擎（影片 + Web Audio 多音軌 + ffmpeg）與波形 */
+let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { State, DESK, setFps, snapFps } from './state.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName } from './util.js';
 import { emit } from './events.js';
 import { setStatus, showToast, openModal } from './ui.js';
-import { renderAudioTracks } from './mixer.js';
+import { renderAudioTracks, clearMeterStrips } from './mixer.js';
 import { drawTimeline, updatePlayhead } from './timeline.js';
 
 /* ===== 播放窗：自動偵測 FPS（網頁版，播放時取樣） ===== */
@@ -92,7 +93,12 @@ const Media = {
         Wave.fromFile(file).catch(()=>Wave.initLive());
       }else{
         Wave.initLive();
-        showToast('檔案較大：波形將於播放時逐步產生（或可另載入音訊檔）');
+        // Fix #18：區分 500MB-1.6GB（可播放但波形受限）與更大檔案的提示
+        if(file.size <= FFMPEG_MAX_BYTES){
+          showToast('檔案較大（>500MB）：波形將逐步產生。如需完整波形，可另載入音訊檔。');
+        }else{
+          showToast('檔案較大：波形將於播放時逐步產生（或可另載入音訊檔）');
+        }
       }
     }else{
       // 非原生格式：ffmpeg 轉檔給預覽 + 抽音軌
@@ -377,7 +383,7 @@ const Media = {
     this._mpvBoundsSend=send;
     try{ this._mpvRO=new ResizeObserver(send); this._mpvRO.observe($('videoWrap')); }catch(e){}
     window.addEventListener('resize',send);
-    this._mpvBoundsTimer=setInterval(send,1000); // 安全網：面板拖移/版面位移，放寬至 1000ms 減少耗能
+    this._mpvBoundsTimer=setInterval(send,2000); // Fix #17：安全網（面板拖移），降至 2000ms 減少 IPC 呼叫
   },
   _stopMpvBoundsFeeder(){
     if(this._mpvRO){ try{this._mpvRO.disconnect();}catch(e){} this._mpvRO=null; }
@@ -458,7 +464,8 @@ const Media = {
           setTimeout(()=>r(el),10000);
         }))
       ));
-      if(this._bgVersion!==myVer) return;
+      // Fix #12：bail-out 前清空已建立的 Audio 元素 src，停止背景緩衝
+      if(this._bgVersion!==myVer) { els.forEach(el=>{ if(el) try{el.src='';}catch(e){} }); return; }
       for(let i=0;i<chs.length;i++){
         const el=els[i]; if(!el) continue;
         const node=this.ctx.createMediaElementSource(el);
@@ -498,9 +505,14 @@ const Media = {
     this.ffmpegLoading=(async()=>{
       setStatus('載入 ffmpeg.wasm（首次需下載 ~25MB）…','busy');
       try{
-        await loadScript('https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js');
+        // Fix #3：優先使用 jsDelivr（更穩定），fallback unpkg
+        const CDN_JSDELIVR='https://cdn.jsdelivr.net/npm/@ffmpeg';
+        const CDN_UNPKG='https://unpkg.com/@ffmpeg';
+        let baseUrl=CDN_JSDELIVR;
+        try{ await loadScript(CDN_JSDELIVR+'/ffmpeg@0.11.6/dist/ffmpeg.min.js'); }
+        catch(e){ await loadScript(CDN_UNPKG+'/ffmpeg@0.11.6/dist/ffmpeg.min.js'); baseUrl=CDN_UNPKG; }
         const { createFFmpeg } = window.FFmpeg;
-        const ff=createFFmpeg({ log:false, corePath:'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js' });
+        const ff=createFFmpeg({ log:false, corePath:baseUrl+'/core@0.11.0/dist/ffmpeg-core.js' });
         await ff.load();
         this.ffmpeg=ff;
         $('stEngine').textContent='音訊引擎：ffmpeg.wasm';
@@ -527,27 +539,31 @@ const Media = {
     return {aCount,vCount,log};
   },
   async extractAllAudio(file,count){
+    let ff;
     try{
-      const ff=await this.loadFFmpeg();
+      ff=await this.loadFFmpeg();
       this.ensureCtx();
       const data=new Uint8Array(await readFile(file));
       ff.FS('writeFile','in.media',data);
-      // 移除既有 buffer 音軌、保留 native gain（但靜音）
       for(let i=0;i<count;i++){
         setStatus(`抽取音軌 ${i+1}/${count}…`,'busy');
-        const outName=`a${i}.wav`;
-        await ff.run('-i','in.media','-map',`0:a:${i}`,'-ac','2','-ar','48000',outName);
-        const wav=ff.FS('readFile',outName);
+        await ff.run('-i','in.media','-map',`0:a:${i}`,'-ac','2','-ar','48000',`a${i}.wav`);
+        const wav=ff.FS('readFile',`a${i}.wav`);
         const ab=await this.ctx.decodeAudioData(wav.buffer.slice(0));
         const g=this.ctx.createGain(); g.connect(this.master);
         this.tracks.push({id:'ex'+i,name:'抽取音軌 '+(i+1),kind:'buffer',buffer:ab,gain:g,muted:false,solo:false,volume:1});
-        try{ ff.FS('unlink',outName); }catch(e){}
       }
-      try{ ff.FS('unlink','in.media'); }catch(e){}
       this.usingWebAudio=true; this.syncMuteState();
       setStatus('多音軌抽取完成','ok'); renderAudioTracks();
       if(this.playing){ this.stopBufferSources(); this.startBufferSources(video.currentTime); }
-    }catch(e){ setStatus('音軌抽取失敗','');console.error(e); }
+    }catch(e){ setStatus('音軌抽取失敗','');console.error(e);
+    }finally{
+      // Fix #5：不論成功或失敗都清除 ffmpeg 虛擬 FS，防記憶體洩漏與後續「file already exists」
+      if(ff){
+        try{ ff.FS('unlink','in.media'); }catch(e){}
+        for(let i=0;i<count;i++) try{ ff.FS('unlink',`a${i}.wav`); }catch(e){}
+      }
+    }
   },
   async transcodeAndExtract(file){
     if(file.size>FFMPEG_MAX_BYTES){
@@ -634,7 +650,7 @@ const Media = {
       const g=this.ctx.createGain();
       const an=this.ctx.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=0.3;
       splitter.connect(an,i); splitter.connect(g,i); g.connect(this.master);
-      return {id:'ext'+Date.now()+i,name:lbl,kind:'element',source:sourceName,
+      return {id:'ext'+(_extTrackIdCounter++),name:lbl,kind:'element',source:sourceName,
         el,gain:g,muted:false,solo:false,volume:1,
         analyser:an,_mbuf:new Float32Array(an.fftSize),level:0,peak:0,peakT:0};
     });
@@ -754,7 +770,13 @@ const Media = {
     }
   },
   stopBufferSources(){
-    for(const tr of this.tracks){ if(tr.srcNode){try{tr.srcNode.stop();}catch(e){} tr.srcNode=null;} }
+    for(const tr of this.tracks){
+      if(tr.srcNode){
+        try{tr.srcNode.stop();}catch(e){}
+        try{tr.srcNode.disconnect();}catch(e){} // Fix #7：切斷 AudioGraph 參照，讓 AudioBuffer 盡快被 GC
+        tr.srcNode=null;
+      }
+    }
   },
   scrubAudio(t, duration = 0.15) {
     if(this.playing || State.muted) return;
@@ -899,8 +921,15 @@ const Media = {
     this.pendingChannels=[];
     if(this._ingestDoneHandler){ window.removeEventListener('desk:ingest-done',this._ingestDoneHandler); this._ingestDoneHandler=null; }
     this.stopBufferSources(); this.stopElementSources();
-    for(const tr of this.tracks){ if(tr.el){try{tr.el.src='';}catch(e){}} }
+    for(const tr of this.tracks){
+      if(tr.el){
+        // Fix #4：清除 scrubAudio 建立的隱藏 video 元素，避免跨檔案累積記憶體洩漏
+        if(tr.el._scrubEl){ try{tr.el._scrubEl.src=''; tr.el._scrubEl=null;}catch(e){} }
+        try{tr.el.src='';}catch(e){}
+      }
+    }
     this.tracks=[]; this.usingWebAudio=false;
+    clearMeterStrips(); // Fix #10：清除 mixer 的舊音軌參照，避免 rafLoop 讀取廢棄 analyser
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
     this.objectURLs.forEach(u=>{try{URL.revokeObjectURL(u);}catch(e){}}); this.objectURLs=[];
     this.playing=false; this._vTime=0; this._vStart=null;
@@ -966,11 +995,14 @@ const Wave = {
     const src=this.sources[idx];
     if(src.peaks){ this.peaks=src.peaks; drawTimeline(); return; }
     if(!DESK||!Media.ctx) return;
+    const myIdx=idx; // Fix #11：快照索引作取消令牌，防止非同步競爭覆蓋結果
     try{
       const wavUrl = await DESK.fileURL(src.path);
       const res = await fetch(wavUrl);
       const buf = await res.arrayBuffer();
+      if(this.srcIdx !== myIdx) return; // 已切換至其他音源，丟棄結果
       const ab=await Media.ctx.decodeAudioData(buf);
+      if(this.srcIdx !== myIdx) return; // 解碼期間再次確認
       this.live=false; this.compute(ab);
       src.peaks=this.peaks;
       drawTimeline();

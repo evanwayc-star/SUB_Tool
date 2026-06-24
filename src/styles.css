@@ -166,7 +166,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .tl-track{position:relative;left:0;border-bottom:1px solid #26262b}
 .cue-block{position:absolute;top:4px;bottom:4px;background:var(--cue);border:1px solid var(--cyan-d);border-radius:4px;
   overflow:hidden;cursor:grab;display:flex;align-items:center;padding:0 6px;font-size:11px;color:#fff;
-  box-shadow:0 1px 3px rgba(0,0,0,.4)}
+  box-shadow:0 1px 3px rgba(0,0,0,.4);box-sizing:border-box}
 .cue-block.sel{background:var(--cue-sel);border-color:#fff;color:#1b1b1d;z-index:5}
 .cue-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
 .cue-block .edge.l{left:0}.cue-block .edge.r{right:0}

@@ -15,8 +15,16 @@ const History = {
   record(label){
     const newSnap = this.snap();
     if(this.hi >= 0) {
-      const oldSnap = this.stack[this.hi].snap;
-      if(JSON.stringify(newSnap) === JSON.stringify(oldSnap)) return;
+      const old = this.stack[this.hi].snap;
+      // Fix #8：先做 O(1) 結構比對；只有結構相同時才 fallback 到深層 JSON 比對，
+      // 避免千條字幕的大型專案在每次操作後序列化整個 State。
+      const structSame = old.cues.length === newSnap.cues.length
+        && old.tracks.length === newSnap.tracks.length
+        && old.notes.length === newSnap.notes.length
+        && old.fps === newSnap.fps
+        && old.dropFrame === newSnap.dropFrame;
+      if(!structSame){ /* 結構有變動，直接記錄 */ }
+      else if(JSON.stringify(newSnap) === JSON.stringify(old)) return;
     }
     if(this.hi<this.stack.length-1)this.stack=this.stack.slice(0,this.hi+1);
     this.stack.push({label,snap:newSnap});

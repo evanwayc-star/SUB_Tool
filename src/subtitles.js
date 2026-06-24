@@ -93,12 +93,17 @@ function updateTlSel(){
   el.classList.add(n===0?'sel-none':n===1?'sel-one':'sel-multi');
 }
 
-/* 重疊偵測：排序後只比較相鄰區間 O(N log N)，取代原本 O(N²) 的雙迴圈 */
-function _detectOverlaps(cues, eps=0){
+/* Fix #1：雙層掃描正確偵測所有重疊（含「長字幕包住多短字幕」的情況）。
+   對每條 sorted[i]，向後掃到 sorted[j].start >= sorted[i].end 為止，
+   期間所有 j 均與 i 重疊。O(N + K) 其中 K 為重疊對數，對一般字幕數量很快。 */
+function _detectOverlaps(cues, eps=0.001){
   const set=new Set();
   const sorted=cues.filter(c=>c.timed!==false).slice().sort((a,b)=>a.start-b.start);
-  for(let i=0;i<sorted.length-1;i++){
-    if(sorted[i+1].start < sorted[i].end - eps){ set.add(sorted[i].id); set.add(sorted[i+1].id); }
+  for(let i=0;i<sorted.length;i++){
+    for(let j=i+1;j<sorted.length;j++){
+      if(sorted[j].start >= sorted[i].end - eps) break; // 已排序，後面不可能再重疊
+      set.add(sorted[i].id); set.add(sorted[j].id);
+    }
   }
   return set;
 }
@@ -162,7 +167,7 @@ function renderSubList(){
   $('subCount').textContent=list.length+' 條';
   // 偵測同軌道時間重疊（O(N log N)）
   const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
-  const overlaps=_detectOverlaps(timed, 1e-9);
+  const overlaps=_detectOverlaps(timed, 0.001);
   const frag=document.createDocumentFragment();
   list.forEach((c,i)=>frag.appendChild(buildSubRow(c,i,overlaps)));
   sublist.appendChild(frag);
@@ -271,7 +276,8 @@ function addCue(start,end,text,track){
 function addCueAfter(id){
   const c=addCue(null,null,'',0); c.timed=false; c.start=0;c.end=0;
   emit('render:all'); selectCue(c.id);
-  setTimeout(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));},30);
+  // Fix #16：RAF 取代 30ms 魔術數字，DOM 已在 emit 同步更新完成，RAF 確保瀏覽器已繪製
+  requestAnimationFrame(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));});
 }
 function addCueRelative(dir){
   const sel=State.cues.find(c=>c.id===State.selectedId);
@@ -279,7 +285,7 @@ function addCueRelative(dir){
     const c={id:newId(),start:sel.start,end:sel.end,text:'',track:sel.track||0,timed:false};
     State.cues.splice(State.cues.indexOf(sel)+(dir>0?1:0),0,c);
     emit('render:all'); selectCue(c.id); recordHistory('新增空白字幕');
-    setTimeout(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));},30);
+    requestAnimationFrame(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));});
     return c;
   }
   const tk=sel?(sel.track||0):0;
@@ -287,7 +293,7 @@ function addCueRelative(dir){
   if(sel){ if(dir>0){ start=sel.end; end=sel.end+2; } else { end=sel.start; start=Math.max(0,sel.start-2); } }
   else { start=Media.vTime(); end=start+2; }
   const c=addCue(start,end,'',tk); recordHistory(dir>0?'下方新增字幕':'上方新增字幕');
-  setTimeout(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));},30);
+  requestAnimationFrame(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));});
   return c;
 }
 function deleteSelected(){
@@ -326,9 +332,8 @@ function shiftTextsUp(id){
   emit('render:all'); recordHistory('下方字幕文字往上移動');
 }
 
-function sortCues(){ State.cues.sort((a,b)=>{
-  return a.start - b.start;
-});}
+// Fix #14：加入 id 作次排序鍵，確保相同起點的字幕排列穩定
+function sortCues(){ State.cues.sort((a,b)=>{ return a.start - b.start || (a.id < b.id ? -1 : 1); }); }
 
 /* ===== 複製 / 貼上 ===================================================== */
 function copyCues(){
@@ -472,8 +477,8 @@ function splitCueAtCursor(c, txtEl){
   sortCues(); emit('render:all'); recordHistory('拆分字幕');
   selectCue(newCue.id,{seek:false});
 
-  // 自動進入下句的內嵌編輯，游標置於開頭
-  setTimeout(()=>{
+  // 自動進入下句的內嵌編輯，游標置於開頭（Fix #16：RAF 取代 30ms 魔術數字）
+  requestAnimationFrame(()=>{
     const nr=sublist.querySelector(`.sub-row[data-id="${newCue.id}"]`);
     if(!nr)return;
     const nt=nr.querySelector('.txt');

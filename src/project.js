@@ -60,7 +60,15 @@ async function _autoSave(){
     const res=await DESK.writeProject(autoSaveDir+name, bytesToB64(bytes)).catch(()=>null);
     if(res) setStatus('自動備份：'+name,'ok');
   } else {
-    downloadBytes(bytes, name, 'application/json');
+    // Fix #2：瀏覽器版改用 localStorage 避免每 3 分鐘觸發下載干擾工作流
+    try{
+      localStorage.setItem('subtool_autosave_data', bytesToB64(bytes));
+      localStorage.setItem('subtool_autosave_name', name);
+      setStatus('自動備份已存（瀏覽器本地）','ok');
+    }catch(e){
+      // localStorage 額度已滿時靜默失敗，不干擾使用者
+      console.warn('auto-save localStorage failed:', e);
+    }
   }
 }
 
@@ -108,7 +116,8 @@ const Project = {
     else { downloadBytes(bytes,name,'application/json'); _onSaved(null,name); }
   },
   apply(data){
-    const isV1 = (data.version || 1) === 1;
+    // Fix #19：明確排除 undefined/null，避免 version:0 被誤判為 v1（0 是 falsy）
+    const isV1 = data.version === undefined || data.version === null || data.version === 1;
     State.cues=(data.cues||[]).map(c=>{
       let tk = c.track||0;
       if (!isV1 && c.track !== undefined) tk = Math.max(0, c.track - 1);
