@@ -10,9 +10,11 @@ O,,Set Out Point,設定字幕終點
 ArrowLeft,,Nudge Left (1 Frame),播放點往左平移1格
 ArrowLeft,Shift,Nudge Left (1 Sec),播放點往左平移1秒
 ArrowLeft,Ctrl/Cmd,Prev Note,跳至上一個備忘錄
+ArrowLeft,Ctrl/Cmd+Shift,Nudge Left (5 Sec),播放點往左平移5秒
 ArrowRight,,Nudge Right (1 Frame),播放點往右平移1格
 ArrowRight,Shift,Nudge Right (1 Sec),播放點往右平移1秒
 ArrowRight,Ctrl/Cmd,Next Note,跳至下一個備忘錄
+ArrowRight,Ctrl/Cmd+Shift,Nudge Right (5 Sec),播放點往右平移5秒
 ArrowUp,,Prev Cue,跳至上一條字幕
 ArrowUp,Ctrl/Cmd,Step Boundary Prev,跳轉至上一個字幕邊界
 ArrowUp,Shift,Seek Home,回到開頭

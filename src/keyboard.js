@@ -175,17 +175,19 @@ window.addEventListener('keydown',e=>{
     case 'o': e.preventDefault(); setOut(); break;
     case 'arrowleft':
       e.preventDefault();
-      if(e.ctrlKey||e.metaKey){ jumpToNote(-1); }
-      else if(e.shiftKey){ nudge(-1); }
+      if((e.ctrlKey||e.metaKey)&&e.shiftKey){ nudge(-5); }   // Ctrl+Shift = 後退 5 秒
+      else if(e.ctrlKey||e.metaKey){ jumpToNote(-1); }       // Ctrl = 跳到上一個備註點
+      else if(e.shiftKey){ nudge(-1); }                      // Shift = 後退 1 秒
       else if(e.repeat){ if(_jklSpeed>=0){_jklSpeed=-1;jklApply();} }
-      else nudge(-1/State.fps);
+      else nudge(-1/State.fps);                              // 後退 1 格
       break;
     case 'arrowright':
       e.preventDefault();
-      if(e.ctrlKey||e.metaKey){ jumpToNote(1); }
-      else if(e.shiftKey){ nudge(1); }
+      if((e.ctrlKey||e.metaKey)&&e.shiftKey){ nudge(5); }    // Ctrl+Shift = 前進 5 秒
+      else if(e.ctrlKey||e.metaKey){ jumpToNote(1); }        // Ctrl = 跳到下一個備註點
+      else if(e.shiftKey){ nudge(1); }                       // Shift = 前進 1 秒
       else if(e.repeat){ if(_jklSpeed<=0){_jklSpeed=1;jklApply();} }
-      else nudge(1/State.fps);
+      else nudge(1/State.fps);                               // 前進 1 格
       break;
     case 'arrowup':
       e.preventDefault();
