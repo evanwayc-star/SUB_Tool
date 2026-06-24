@@ -709,7 +709,7 @@ const Media = {
     this._lastSeekTime=null;
   },
   pause(){
-    this._lastSeekTime = this.vTime(); // 鎖定暫停瞬間的時間，避免瀏覽器引擎後續微小滑行導致播放點跳動
+    this._lastSeekTime = snapTimeToFrame(this.vTime(), State.fps, State.dropFrame); // snap 到最近格邊界，確保播放點對齊刻度
     if(this.mpvMode){
       DESK.mpv.pause().catch(()=>{});
       this.stopElementSources();
@@ -880,7 +880,7 @@ const Media = {
     const seen=new Set(); const srcs=[];
     for(const tr of this.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='element'||t.kind==='nativeTrack')){
       const s=tr.source||'video';
-      if(!seen.has(s)){ seen.add(s); srcs.push({id:s, label:s==='video'?'影片音軌（原音）':s.replace(/^ext-/,'')}); }
+      if(!seen.has(s)){ seen.add(s); srcs.push({id:s, label:s==='video'?'影片原音':s.replace(/^ext-/,'')}); }
     }
     return srcs;
   },

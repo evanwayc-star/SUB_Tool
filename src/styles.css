@@ -41,6 +41,10 @@ button:disabled{opacity:.4;cursor:not-allowed}
 button:focus,button:focus-visible{outline:none}
 button.icon{padding:5px 8px}
 button.icon.sub-active{background:var(--accent);color:#1b1b1d;border-color:var(--accent-d)}
+button.open-proj-btn{background:#7a2545;border-color:#a33160;color:#ffd6e4}
+button.open-proj-btn:hover{background:#9a2f57;border-color:#c2457a}
+button.del-btn{color:#e05555;border-color:rgba(220,60,60,.3)}
+button.del-btn:hover{background:#e05555;color:#fff;border-color:#e05555}
 button[data-act="open-media"]{background:rgba(255,220,80,.18);border-color:rgba(220,180,0,.35)}
 button[data-act="open-media"]:hover{background:rgba(255,220,80,.32)}
 button[data-act="imp-auto"]{background:rgba(60,200,100,.16);border-color:rgba(30,160,60,.35)}
@@ -95,7 +99,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 
 /* transport */
 .transport{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--panel);border-top:1px solid var(--border)}
-.tc{font-variant-numeric:tabular-nums;font-family:"Consolas",monospace;font-size:13px;color:var(--text)}
+.tc{font-variant-numeric:tabular-nums;font-family:"Consolas",monospace;font-size:17px;color:var(--text)}
 .tc .cur{color:var(--accent)}
 .transport .btns{display:flex;gap:4px}
 .transport input[type=range]{flex:1;min-width:60px;accent-color:var(--accent)}
@@ -110,7 +114,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
   position:sticky;top:0;background:var(--panel);border-bottom:1px solid var(--border)}
 .atrack{display:flex;align-items:center;gap:8px;padding:5px 12px;border-bottom:1px solid var(--border)}
 .atrack .nm{flex:1;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.atrack .mini{padding:2px 7px;font-size:10px;border-radius:3px}
+.atrack .mini{padding:3px 11px;font-size:12px;border-radius:4px;font-weight:700;letter-spacing:.04em;min-width:30px;text-align:center}
 .atrack .mini.on{background:var(--accent);color:#1b1b1d;border-color:var(--accent-d)}
 .atrack .mini.solo.on{background:var(--green);border-color:#2a9c68}
 .atrack input[type=range]{width:80px;accent-color:var(--cyan)}
@@ -139,14 +143,23 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .sub-row .tk{font-size:9px;color:var(--text-faint);border:1px solid var(--border2);border-radius:3px;padding:0 4px;align-self:flex-start}
 .sublist .empty{padding:40px 20px;text-align:center;color:var(--text-faint);font-size:12px;line-height:1.7}
 .rhead{flex-wrap:wrap}
-.track-style{flex-shrink:0;border-top:1px solid var(--border);background:var(--panel2);padding:8px 10px}
-.track-style .ts-row{display:flex;align-items:center;gap:6px;margin:5px 0;font-size:12px;color:var(--text-dim)}
-.track-style .ts-row label{color:var(--text-faint);font-size:11px}
-.track-style .ts-title{font-weight:600;color:var(--text);font-size:12px}
+.track-style{flex-shrink:0;border-top:1px solid var(--border);background:var(--panel2);padding:4px 10px}
+.ts-line{display:flex;align-items:center;gap:5px;white-space:nowrap;overflow-x:auto;font-size:12px;color:var(--text-dim);min-height:28px}
+.ts-title{font-weight:600;color:var(--text);font-size:12px;flex-shrink:0}
+.ts-sep{color:var(--border);padding:0 1px;user-select:none;flex-shrink:0}
+.ts-label{color:var(--text-faint);font-size:11px;flex-shrink:0}
+.ts-unit{color:var(--text-faint);font-size:11px;flex-shrink:0}
+.ts-btngrp{display:flex;gap:2px;flex-shrink:0}
+.ts-preset{padding:1px 7px;font-size:11px;border-radius:3px;background:var(--panel3);color:var(--text-dim);cursor:pointer;border:1px solid transparent;line-height:18px}
+.ts-preset:hover{color:var(--text);background:var(--panel)}
+.ts-preset.active{background:var(--accent);color:#fff}
+.ts-colors{display:flex;gap:3px;align-items:center;flex-shrink:0}
+.ts-clr{width:16px;height:16px;border-radius:3px;border:1.5px solid var(--border);cursor:pointer;padding:0;flex-shrink:0;transition:border-color .1s}
+.ts-clr:hover{border-color:var(--text-dim)}
+.ts-clr.active{border-color:var(--accent);box-shadow:0 0 0 1.5px var(--accent)}
 .track-style.disabled{opacity:.45;pointer-events:none}
-.track-style input[type=number]{width:54px;text-align:center}
-.track-style input[type=color]{width:36px;height:22px;padding:1px 2px;cursor:pointer;border-radius:3px}
-.track-style .ts-controls{gap:6px;flex-wrap:wrap}
+.track-style input[type=number]{width:38px;text-align:center;font-size:11px;padding:1px 3px}
+.track-style input[type=color]{width:28px;height:22px;padding:1px 2px;cursor:pointer;border-radius:3px;flex-shrink:0}
 /* 字幕時間重疊警告 */
 .sub-row.overlap{background:rgba(230,80,80,.12)}
 .sub-row.overlap:hover{background:rgba(230,80,80,.2)}
@@ -154,9 +167,10 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 
 /* ---------- 時間軸 ---------- */
 .timeline{height:280px;display:flex;flex-direction:column;background:var(--panel);min-height:160px}
-.tl-toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--panel2)}
+.tl-toolbar{display:flex;align-items:center;flex-wrap:nowrap;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--panel2);overflow:hidden}
 .tl-toolbar .zoom{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px}
 .tl-toolbar .hint{color:var(--text-faint);font-size:11px}
+@media(max-width:1100px){.tl-toolbar .lbl,.tl-toolbar .hint{display:none}}
 .tl-scroll{flex:1;overflow-x:auto;overflow-y:hidden;position:relative;background:#161618}
 .tl-spacer{height:1px}
 .tl-layer{position:sticky;left:0;top:0;height:100%;will-change:transform}
@@ -335,8 +349,9 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
   background:#fff;border:1px solid #000;cursor:ns-resize;box-shadow:0 0 3px rgba(0,0,0,.8)}
 .mx-name{font-size:10px;color:var(--text-dim);max-width:50px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
 .mx-btns{display:flex;flex-direction:column;gap:3px;width:100%}
-.mx-solo,.mx-mute{font-size:10px;width:100%;height:22px;line-height:1;padding:0;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:3px;cursor:pointer;white-space:nowrap}
-.mx-solo.on{background:#caa72e;color:#000;border-color:#caa72e}
+.mx-solo,.mx-mute{font-size:12px;font-weight:700;letter-spacing:.04em;width:100%;height:30px;line-height:1;padding:0 4px;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:4px;cursor:pointer;white-space:nowrap;transition:background .12s,color .12s}
+.mx-solo:hover,.mx-mute:hover{color:var(--text)}
+.mx-solo.on{background:#c9a72e;color:#000;border-color:#c9a72e}
 .mx-mute.on{background:var(--red);color:#fff;border-color:var(--red)}
 /* 混音器：準備中（背景抽取音軌時）的占位推桿 */
 .mx-strip.pending{opacity:.55}

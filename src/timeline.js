@@ -3,6 +3,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
+import { encoreParts } from './time.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
 import { emit } from './events.js';
 import { ensureProjectSaved, isProjectGuardDone } from './project.js';
@@ -48,26 +49,58 @@ function layoutTimeline(){
   const gutWave=document.querySelector('.tl-gutter-wave');
   if(gutWave) gutWave.style.height=wh+'px';
 }
+// 次刻度等分數：依 step 與 fps 動態計算，確保每個次刻度落在格邊界
+function minorDiv(step){
+  const fps=State.fps||25; const nf=Math.round(step*fps);
+  if(step<1&&Math.abs(nf-step*fps)<0.01){
+    if(nf<=1)return 1; // 1格步距：不畫次刻度
+    for(const d of[5,4,3,2,1])if(nf%d===0)return d; // 最大整除數 ≤5
+    return 1;
+  }
+  const t={1:4,2:4,5:5,10:5,15:3,30:6,60:4,120:4,300:5,600:5,1800:6,3600:6};
+  return t[step]||5;
+}
+
 function drawRuler(){
   const ctx=rulerCv.getContext('2d'); const dpr=devicePixelRatio;
   ctx.save();ctx.scale(dpr,dpr);
   const vw=viewportW();
   ctx.clearRect(0,0,vw,RULER_H);
   ctx.fillStyle='#1d1d20';ctx.fillRect(0,0,vw,RULER_H);
-  // 選擇刻度間隔
-  const targetPx=80; let step=niceStep(targetPx/State.pxPerSec);
+  const targetPx=80;
+  const step=niceStep(targetPx/State.pxPerSec);
   const t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
+  ctx.lineWidth=1;
+
+  // 次刻度（用整數索引避免浮點累積誤差）
+  const div=minorDiv(step);
+  if(div>1){
+    ctx.beginPath();ctx.strokeStyle='#2a2a30';
+    const firstMinorIdx=Math.ceil(t0*div/step);
+    for(let mi=firstMinorIdx;;mi++){
+      const t=(mi*step)/div;
+      if(t>t1+step/(div*2))break;
+      if(mi%div===0)continue; // 主刻度位置跳過，下方另行繪製
+      const x=timeToX(t); if(x<0||x>vw)continue;
+      ctx.moveTo(x,RULER_H-4);ctx.lineTo(x,RULER_H);
+    }
+    ctx.stroke();
+  }
+
+  // 主刻度 + 時間標籤（同樣用整數索引）
+  ctx.beginPath();ctx.strokeStyle='#3a3a40';
   ctx.fillStyle='#8a8a92';ctx.font='10px Consolas,monospace';ctx.textBaseline='middle';
-  ctx.strokeStyle='#3a3a40';ctx.beginPath();
-  let first=Math.ceil(t0/step)*step;
-  for(let t=first;t<=t1;t+=step){
+  const firstMajorIdx=Math.ceil(t0/step);
+  for(let mi=firstMajorIdx;;mi++){
+    const t=mi*step;
+    if(t>t1+step*0.01)break;
     const x=timeToX(t);
-    ctx.moveTo(x,RULER_H-7);ctx.lineTo(x,RULER_H);
-    ctx.fillText(fmtTick(t),x+3,RULER_H/2);
-    // 次刻度
+    ctx.moveTo(x,RULER_H-9);ctx.lineTo(x,RULER_H);
+    ctx.fillText(fmtTick(t,step),x+3,RULER_H/2);
   }
   ctx.stroke();
-  // 備忘標記（可點擊橘色三角，較大）
+
+  // 備忘標記（可點擊橘色三角）
   if(State.notes.length){
     for(const n of State.notes){
       const nx=timeToX(n.time); if(nx<-10||nx>vw+10)continue;
@@ -78,13 +111,34 @@ function drawRuler(){
   }
   ctx.restore();
 }
-function niceStep(s){ // 給定每像素秒數，回傳漂亮刻度秒
-  const steps=[0.04,0.1,0.2,0.5,1,2,5,10,15,30,60,120,300,600,1800,3600];
-  for(const v of steps)if(v>=s)return v; return 3600;
+function niceStep(s){ // 給定目標秒數，回傳漂亮刻度間隔（次秒用格對齊步距）
+  const fps=State.fps||25, f=1/fps;
+  // 次秒範圍：用格倍數確保刻度落在格邊界
+  if(s<0.95){
+    for(const n of[1,2,3,5,6,10,12,15,20,24,25,30]){
+      const step=n*f; if(step>0.95)break; if(step>=s)return step;
+    }
+  }
+  for(const v of[1,2,5,10,15,30,60,120,300,600,1800,3600])if(v>=s)return v;
+  return 3600;
 }
-function fmtTick(s){
-  if(s<60)return s.toFixed(s<10?(s%1?2:0):0).replace(/\.00$/,'')+'s';
-  return `${pad(s/60)}:${pad(s%60)}`;
+// 時間軸刻度標籤：依縮放層級自動選擇精度
+// 時:分:秒:格 一律走 encoreParts（與播放器同一套數影格換算），
+// 確保刻度標籤與播放器時碼完全一致 —— 29.97 非DF 等漂移情況也對得上。
+// 格對齊步距（step*fps≈整數 且 step<1）→ SS:FF；step>=1 → SS s / M:SS / H:MM:SS
+function fmtTick(s, step){
+  const fps=State.fps||25;
+  const p=encoreParts(s, fps, State.dropFrame);
+  // 格精度：step<1 且為格倍數（允許浮點誤差 1%）
+  if(step!=null&&step<1&&Math.abs(step*fps-Math.round(step*fps))<0.01){
+    const fr=pad(p.ff);
+    if(p.hh>0)return`${p.hh}:${pad(p.mm)}:${pad(p.ss)}:${fr}`;
+    if(p.mm>0)return`${p.mm}:${pad(p.ss)}:${fr}`;
+    return`${p.ss}:${fr}`;
+  }
+  if(p.hh>0)return`${p.hh}:${pad(p.mm)}:${pad(p.ss)}`;
+  if(p.mm>0)return`${p.mm}:${pad(p.ss)}`;
+  return`${p.ss}s`;
 }
 function drawWave(){
   const ctx=waveCv.getContext('2d');const dpr=devicePixelRatio;

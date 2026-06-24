@@ -433,9 +433,10 @@ function renderTrackStyle(){
   $('tsTitle').textContent='「'+tk.name+'」樣式';
   const sz=tk.fontScale||1; $('tsSize').value=sz;
   const pp=tk.posPct!=null?tk.posPct:10; $('tsPos').value=pp;
-  $('tsColor').value=tk.color||'#ffffff';
-  const szSel=$('tsSizeSel'); if(szSel){ const sv=String(sz); szSel.value=[...szSel.options].some(o=>o.value===sv)?sv:'1'; }
-  const psSel=$('tsPosSel'); if(psSel){ const pv=String(pp); psSel.value=[...psSel.options].some(o=>o.value===pv)?pv:'10'; }
+  const col=(tk.color||'#ffffff').toLowerCase(); $('tsColor').value=col;
+  panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===sz));
+  panel.querySelectorAll('.ts-preset[data-ts-pos]').forEach(b=>b.classList.toggle('active',+b.dataset.tsPos===pp));
+  panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===col));
 }
 
 /* ===== 時間軸：雙擊字幕區塊內嵌編輯文字 ===== */
@@ -572,13 +573,21 @@ function initUI(){
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
 
   // 樣式控制（大小 / 位置 / 顏色）
-  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontScale=clamp(+e.target.value,0.5,3); renderVideoSub(); refreshMpvSubs(); });
+  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontScale=clamp(+e.target.value,0.5,5); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
-  $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,92); renderVideoSub(); refreshMpvSubs(); });
+  $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,92); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsPos').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
-  $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); refreshMpvSubs(); });
-  $('tsSizeSel').addEventListener('change',e=>{ const v=+e.target.value; $('tsSize').value=v; const i=State.listTrack; if(State.tracks[i]){ State.tracks[i].fontScale=v; renderVideoSub(); refreshMpvSubs(); } e.target.blur(); });
-  $('tsPosSel').addEventListener('change',e=>{ const v=+e.target.value; $('tsPos').value=v; const i=State.listTrack; if(State.tracks[i]){ State.tracks[i].posPct=v; renderVideoSub(); refreshMpvSubs(); } e.target.blur(); });
+  $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
+  // 預設按鈕（大小 / 位置 / 顏色）— 委派事件到面板
+  $('trackStyle').addEventListener('click',e=>{
+    const i=State.listTrack; if(!State.tracks[i])return;
+    const sz=e.target.closest('.ts-preset[data-ts-size]');
+    if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontScale=v; $('tsSize').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    const ps=e.target.closest('.ts-preset[data-ts-pos]');
+    if(ps){ const v=+ps.dataset.tsPos; State.tracks[i].posPct=v; $('tsPos').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    const cl=e.target.closest('.ts-clr');
+    if(cl){ const v=cl.dataset.color; State.tracks[i].color=v; $('tsColor').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); }
+  });
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());

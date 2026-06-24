@@ -20,8 +20,9 @@ function secToASS(s){
   if(s<0)s=0; const cs=Math.floor(s*100 + 0.0001); // 避免浮點數四捨五入導致 ASS 時間大於實際影格時間，造成 MPV 晚一格
   return `${Math.floor(cs/360000)}:${pad((cs/6000)%60)}:${pad((cs/100)%60)}.${pad(cs%100,2)}`;
 }
-/* 秒 → Encore 時碼(時:分:秒:格)。df=true 時用 SMPTE 29.97 Drop-frame，分隔符為 ';' */
-function secToEncore(s,fps,df=false){
+/* 秒 → Encore 時碼分量(時/分/秒/格)。所有「數影格」的時碼顯示都應走這裡，
+   確保播放器、時間軸刻度等各處對同一秒數得到完全一致的時:分:秒:格。 */
+function encoreParts(s,fps,df=false){
   if(s<0)s=0;
   if(df && Math.abs(fps-29.97)<0.01){
     // SMPTE 29.97 DF：實際影格號 n（30000/1001 fps）→ 顯示用的 30fps 時碼號 a。
@@ -33,14 +34,20 @@ function secToEncore(s,fps,df=false){
     const a=n+2*(D*9+adj);                          // 加回被丟掉的格數 → 顯示時碼號
     const ff=a%30, rest=Math.floor(a/30);
     const ss=rest%60, mm=Math.floor(rest/60)%60, hh=Math.floor(rest/3600);
-    return `${pad(hh)}:${pad(mm)}:${pad(ss)};${pad(ff)}`;
+    return {hh,mm,ss,ff,df:true};
   }
   // 非 DF：整數 fps 四捨五入，逐位進位
+  const fpsR=Math.round(fps);
   let tf=Math.round(s*fps);
-  const ff=tf%Math.round(fps); tf=Math.floor(tf/Math.round(fps));
+  const ff=tf%fpsR; tf=Math.floor(tf/fpsR);
   const ss=tf%60; tf=Math.floor(tf/60);
   const mm=tf%60; const hh=Math.floor(tf/60);
-  return `${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`;
+  return {hh,mm,ss,ff,df:false};
+}
+/* 秒 → Encore 時碼(時:分:秒:格)。df=true 時用 SMPTE 29.97 Drop-frame，分隔符為 ';' */
+function secToEncore(s,fps,df=false){
+  const p=encoreParts(s,fps,df);
+  return `${pad(p.hh)}:${pad(p.mm)}:${pad(p.ss)}${p.df?';':':'}${pad(p.ff)}`;
 }
 /* 時碼 -> 秒 */
 function srtToSec(t){
@@ -71,4 +78,4 @@ function snapTimeToFrame(t, fps, df=false) {
   return Math.round(t*fps)/fps;
 }
 
-export { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, snapTimeToFrame };
+export { fmtClock, secToSRT, secToASS, secToEncore, encoreParts, srtToSec, assToSec, encoreToSec, snapTimeToFrame };

@@ -15,7 +15,7 @@
 
     <button class="icon" data-act="new" title="清空新建">🗑 開新專案</button>
     <div class="sep"></div>
-    <button class="icon" data-act="open-project" title="開啟專案 (.subtool)">📂 開啟專案</button>
+    <button class="icon open-proj-btn" data-act="open-project" title="開啟專案 (.subtool)">📂 開啟專案</button>
     <div class="sep"></div>
     <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 儲存專案</button>
     <div class="sep"></div>
@@ -89,7 +89,8 @@
         <select id="listTrackSel" title="切換顯示的字幕軌道" style="margin-left:auto;max-width:120px"></select>
         <button class="icon" data-act="add-cue-above" title="於選取字幕上方新增空白">⬆＋</button>
         <button class="icon" data-act="add-cue-below" title="於選取字幕下方新增空白">⬇＋</button>
-        <button class="icon" data-act="del-cue" title="刪除選取 (Del)">🗑</button>
+        <button class="icon" data-act="del-cue" title="刪除選取 (Del)">✕</button>
+        <div class="sep"></div>
         <button class="icon" data-act="fps-convert" title="FPS 時間碼轉換">⇄ FPS</button>
         <button class="icon" data-act="shift-tc" title="時間碼位移 / 調整持續時間">⟷ 調整</button>
         <button class="icon" data-act="copy-track" title="複製字幕軌道至新軌道">⧉ 複製</button>
@@ -98,11 +99,34 @@
       </div>
       <div class="sublist" id="sublist"></div>
       <div class="track-style" id="trackStyle">
-        <div class="ts-row"><span class="ts-title" id="tsTitle">軌道樣式</span></div>
-        <div class="ts-row ts-controls">
-          <label>大小</label><select id="tsSizeSel"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><input type="number" id="tsSize" min="0.5" max="3" step="0.1" value="1" style="width:46px">×
-          <label>位置%</label><select id="tsPosSel"><option value="0">0</option><option value="10" selected>10</option><option value="50">50</option><option value="80">80</option></select><input type="number" id="tsPos" min="0" max="92" step="1" value="10" style="width:46px">
-          <label>顏色</label><input type="color" id="tsColor" value="#ffffff">
+        <div class="ts-line">
+          <span class="ts-title" id="tsTitle">軌道樣式</span>
+          <span class="ts-sep">│</span>
+          <span class="ts-label">大小</span>
+          <div class="ts-btngrp">
+            <button class="ts-preset" data-ts-size="1">1×</button>
+            <button class="ts-preset" data-ts-size="1.25">1.25×</button>
+            <button class="ts-preset" data-ts-size="1.5">1.5×</button>
+          </div>
+          <input type="number" id="tsSize" min="0.5" max="5" step="0.1" value="1"><span class="ts-unit">×</span>
+          <span class="ts-sep">│</span>
+          <span class="ts-label">位置</span>
+          <div class="ts-btngrp">
+            <button class="ts-preset" data-ts-pos="90">上</button>
+            <button class="ts-preset" data-ts-pos="50">中</button>
+            <button class="ts-preset" data-ts-pos="10">下</button>
+          </div>
+          <input type="number" id="tsPos" min="0" max="92" step="1" value="10"><span class="ts-unit">%</span>
+          <span class="ts-sep">│</span>
+          <span class="ts-label">顏色</span>
+          <input type="color" id="tsColor" value="#ffffff">
+          <div class="ts-colors">
+            <button class="ts-clr" data-color="#ffffff" title="白" style="background:#ffffff"></button>
+            <button class="ts-clr" data-color="#ff3333" title="紅" style="background:#ff3333"></button>
+            <button class="ts-clr" data-color="#3399ff" title="藍" style="background:#3399ff"></button>
+            <button class="ts-clr" data-color="#ffee00" title="黃" style="background:#ffee00"></button>
+            <button class="ts-clr" data-color="#44cc66" title="綠" style="background:#44cc66"></button>
+          </div>
         </div>
       </div>
     </div>
@@ -114,15 +138,15 @@
   <div class="timeline" id="timelinePanel">
     <div class="tl-toolbar">
       <span style="font-weight:600">⏱ 時間軸</span>
-      <button class="icon" data-act="add-track" title="新增字幕軌">＋ 軌道</button>
+      <button class="icon" data-act="add-track" title="新增字幕軌">＋ <span class="lbl">軌道</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="history" title="動作紀錄">🕘 紀錄</button>
+      <button class="icon" data-act="history" title="動作紀錄">🕘 <span class="lbl">紀錄</span></button>
       <button class="icon" data-act="undo" title="復原 (Ctrl+Z)">↶</button>
       <button class="icon" data-act="redo" title="重做 (Ctrl+Shift+Z)">↷</button>
       <div class="sep"></div>
-      <button class="icon" data-act="notes" title="備註">📌 備註</button>
+      <button class="icon" data-act="notes" title="備註">📌 <span class="lbl">備註</span></button>
       <button class="icon" data-act="add-note" title="新增備註">＋</button>
-      <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 上字幕</button>
+      <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span class="lbl">上字幕</span></button>
       <div class="sep"></div>
       <button class="icon" data-act="set-in" title="設定起點 (I)">In</button>
       <button class="icon" data-act="set-out" title="設定終點 (O)">Out</button>

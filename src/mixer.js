@@ -15,8 +15,8 @@ function renderAudioTracks(){
     const row=document.createElement('div');row.className='atrack';
     row.innerHTML=
       `<span class="nm">${escapeHTML(tr.name)}</span>`+
-      `<button class="mini mute ${tr.muted?'on':''}" title="${tr.muted?'取消靜音':'靜音'}">${tr.muted?'🔇':'🔊'}</button>`+
-      `<button class="mini solo ${tr.solo?'on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">⊙</button>`+
+      `<button class="mini mute ${tr.muted?'on':''}" title="${tr.muted?'取消靜音':'靜音'}">M</button>`+
+      `<button class="mini solo ${tr.solo?'on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">S</button>`+
       `<input type="range" min="0" max="1.5" step="0.01" value="${tr.volume}">`;
     const [muteBtn,soloBtn]=row.querySelectorAll('button');
     const vol=row.querySelector('input');
@@ -82,8 +82,8 @@ function renderMixer(){
       `</div>`+
       `<div class="mx-name" title="${escapeHTML(tr.name)}">${escapeHTML(tr.name)}</div>`+
       `<div class="mx-btns">`+
-        `<button class="mx-solo${tr.solo?' on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">⊙ 獨奏</button>`+
-        `<button class="mx-mute${tr.muted?' on':''}" title="${tr.muted?'取消靜音':'靜音'}">${tr.muted?'🔇':'🔊'} 靜音</button>`+
+        `<button class="mx-solo${tr.solo?' on':''}" title="${tr.solo?'取消獨奏':'獨奏'}">S &nbsp;獨奏</button>`+
+        `<button class="mx-mute${tr.muted?' on':''}" title="${tr.muted?'取消靜音':'靜音'}">M &nbsp;靜音</button>`+
       `</div>`;
     const fader=strip.querySelector('.mx-fader');
     fader.oninput=()=>{ tr.volume=(+fader.value)/100; fader.title='音量 '+fader.value+'%'; Media.applyGains(); };
