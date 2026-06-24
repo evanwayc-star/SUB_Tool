@@ -358,9 +358,9 @@ function pasteCues(){
 /* ===== 搜尋 / 取代 ===================================================== */
 function searchUpdate(){
   const inp=$('searchInput');
-  const raw=(inp?inp.value:'').trim();
+  const raw=inp?inp.value:'';
   if(!raw){ _searchTerms=[]; _searchMatches=[]; _searchIdx=-1; updateSearchCount(); renderSubList(); return; }
-  _searchTerms=raw.split('||').map(s=>s.trim()).filter(Boolean);
+  _searchTerms=raw.split('||').filter(s=>s.length>0);
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
   _searchMatches=list.filter(c=>{
     const text=(c.text||'').toLowerCase();

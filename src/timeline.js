@@ -567,9 +567,11 @@ window.addEventListener('mouseup',e=>{
 tlScroll.addEventListener('wheel',e=>{
   if(e.ctrlKey||e.metaKey){
     e.preventDefault();
-    const rect=tlLayer.getBoundingClientRect();
-    const ct=xToTime(e.clientX-rect.left);
-    setZoom(State.pxPerSec*(e.deltaY<0?1.15:0.87),ct);
+    const factor = Math.pow(2, -e.deltaY / 500);
+    setZoom(State.pxPerSec * factor);
+  } else if(Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+    e.preventDefault();
+    tlScroll.scrollLeft += e.deltaY;
   }
 },{passive:false});
 
