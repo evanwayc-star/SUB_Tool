@@ -1,7 +1,7 @@
 {
   "name": "sub-tool",
-  "version": "1.0.0",
-  "description": "SUB Tool — 線上/桌面上字幕工具 (Arctime 風格)",
+  "version": "2.3",
+  "description": "SUB Tool 上字幕工具",
   "author": "Evan",
   "main": "electron/main.js",
   "scripts": {

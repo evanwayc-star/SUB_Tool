@@ -12,7 +12,7 @@ function secToSRT(s){
   return `${pad(ms/3600000)}:${pad((ms/60000)%60)}:${pad((ms/1000)%60)},${pad(ms%1000,3)}`;
 }
 function secToASS(s){
-  if(s<0)s=0; const cs=Math.round(s*100); // ASS 使用百分秒
+  if(s<0)s=0; const cs=Math.floor(s*100 + 0.0001); // 避免浮點數四捨五入導致 ASS 時間大於實際影格時間，造成 MPV 晚一格
   return `${Math.floor(cs/360000)}:${pad((cs/6000)%60)}:${pad((cs/100)%60)}.${pad(cs%100,2)}`;
 }
 function secToEncore(s,fps,df=false){

@@ -114,7 +114,7 @@ function renderVideoSub(){
     const fsPx = Math.round(baseFs * fs);
     sig+=tk+'|'+fsPx+'|'+col+'|'+pct+'|'+al+'|'+cur.map(c=>c.id+'='+c.text).join(',')+';';
     html+=`<div class="vsub-track" style="bottom:${pct}%;text-align:${al};letter-spacing:1px;font-weight:500;font-family:'思源黑體', 'Noto Sans TC', 'Source Han Sans TC', sans-serif;">`+
-      cur.map((c,i)=>`<span class="line" style="font-size:${fsPx}px;color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'')}</span>`).join('<br>')+
+      cur.map((c,i)=>`<span class="line" style="font-size:${fsPx}px;color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'').replace(/\n/g,'<br>')}</span>`).join('<br>')+
       `</div>`;
   }
   if(sig===_videoSubSig) return;

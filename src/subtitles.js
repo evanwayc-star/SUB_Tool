@@ -2,7 +2,7 @@
 import { $, sublist, video } from './dom.js';
 import { State, isSel, newId, trackVisible, cueSuffix } from './state.js';
 import { escapeHTML } from './util.js';
-import { fmtClock, secToEncore } from './time.js';
+import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
 import { emit } from './events.js';
@@ -110,21 +110,21 @@ function renderCheckPanel(){
   const overlapSet=_detectOverlaps(list);
   const overlapNums=list.map((c,i)=>overlapSet.has(c.id)?i+1:null).filter(n=>n!==null);
   // 多行（排除空白字幕，避免純換行符被誤計）
-  const multiNums=list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n|\/\//g)||[]).length>=2?i+1:null;}).filter(n=>n!==null);
-  const twoNums  =list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n|\/\//g)||[]).length===1?i+1:null;}).filter(n=>n!==null);
+  const multiNums=list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n/g)||[]).length>=2?i+1:null;}).filter(n=>n!==null);
+  const twoNums  =list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n/g)||[]).length===1?i+1:null;}).filter(n=>n!==null);
   // 空白字幕
   const blankNums=list.map((c,i)=>!(c.text||'').trim()?i+1:null).filter(n=>n!==null);
   // 頭尾空白
   const trimNums=list.map((c,i)=>{
     const t=c.text||'';
-    if(t.match(/^[ 　]+|[ 　]+$/)) return i+1;
+    if(t.match(/^[ 　]+|[ 　]+$/m)) return i+1;
     return null;
   }).filter(n=>n!==null);
   // 超過字數
   const lenEl=$('cpLenInput');
   _checkLenLimit = lenEl ? (parseInt(lenEl.value)||0) : 0;
   const overLenNums = _checkLenLimit
-    ? list.map((c,i)=>{ const t=c.text||''; return t.trim()&&t.split(/\n|\/\//).some(ln=>ln.length>_checkLenLimit)?i+1:null; }).filter(n=>n!==null)
+    ? list.map((c,i)=>{ const t=c.text||''; return t.trim()&&t.split(/\n/).some(ln=>ln.length>_checkLenLimit)?i+1:null; }).filter(n=>n!==null)
     : [];
   // 包含文字（|| 為 OR）
   const containsRaw=($('cpContainsInput')||{}).value||'';
@@ -180,9 +180,9 @@ function _lineLenHTML(line){
 }
 function _txtInner(text){
   if(!(text||'').trim()) return '<span class="blank-label">(空白字幕)</span>';
-  if(!_checkLenLimit) return txtHTML(text||'').replace(/\n|\/\//g, '<br>');
+  if(!_checkLenLimit) return txtHTML(text||'').replace(/\n/g, '<br>');
   // 有字數限制：逐行套用，不套用搜尋高亮（兩者同時存在時以字數優先）
-  return (text||'').split(/\n|\/\//).map(_lineLenHTML).join('<br>');
+  return (text||'').split(/\n/).map(_lineLenHTML).join('<br>');
 }
 function buildSubRow(c,i,overlaps){
   const row=document.createElement('div');
@@ -236,7 +236,7 @@ function selectCue(id,opts){
   if(opts.seek&&c&&c.timed!==false){
     const t = Media.displayTime();
     if(t < c.start || t > c.end){
-      Media.seek(c.start); emit('playhead:ensure'); emit('render:videoSub');
+      Media.seek(snapTimeToFrame(c.start, State.fps, State.dropFrame)); emit('playhead:ensure'); emit('render:videoSub');
     }
   }
   const pc=State.cues.find(x=>x.id===State.selectedId);
@@ -580,7 +580,7 @@ sublist.addEventListener('input', e => {
   c.text = val;
   const rc2 = _rowClass(c.text);
   row.classList.remove('blank', 'two-line', 'multi-line'); if (rc2) row.classList.add(rc2);
-  renderCueBlocks(); emit('render:videoSub'); renderCheckPanel();
+  renderCueBlocks(); emit('render:videoSub'); emit('mpv:refreshSubs'); renderCheckPanel();
 });
 
 sublist.addEventListener('focusout', e => {
@@ -605,7 +605,7 @@ function trimTrackSpaces() {
   State.cues.forEach(c => {
     if ((c.track || 0) === State.listTrack) {
       const orig = c.text || '';
-      const trimmed = orig.replace(/^[ 　]+|[ 　]+$/g, '');
+      const trimmed = orig.replace(/^[ 　]+|[ 　]+$/gm, '');
       if (orig !== trimmed) {
         c.text = trimmed;
         changed++;

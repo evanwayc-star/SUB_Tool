@@ -1,6 +1,6 @@
 /* SUB Tool — 媒體引擎（影片 + Web Audio 多音軌 + ffmpeg）與波形 */
 import { State, DESK, setFps, snapFps } from './state.js';
-import { secToEncore } from './time.js';
+import { secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName } from './util.js';
 import { emit } from './events.js';
@@ -709,6 +709,7 @@ const Media = {
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t){
     t=clamp(t,0,State.duration||0);
+    t=snapTimeToFrame(t, State.fps, State.dropFrame); // 確保每次 seek 皆精準對齊影格，避免浮點誤差導致 +1 格
     this._lastSeekTime=t;
     if(this.mpvMode){
       t=clamp(t,0,this._mpvDuration||0);

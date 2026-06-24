@@ -1,7 +1,7 @@
 /* SUB Tool — 時間軸：渲染（尺/波形/軌道/區塊）與互動（拖曳/框選/縮放） */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js';
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from './state.js';
-import { clamp, pad, escapeHTML, formatSpaces } from './util.js';
+import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
 import { emit } from './events.js';
@@ -292,7 +292,7 @@ function renderCueBlocks(){
     el.style.left=timeToX(c.start)+'px';
     el.style.width=Math.max(2,(c.end-c.start)*State.pxPerSec)+'px';
     el.dataset.id=c.id;
-    el.innerHTML='<div class="edge l"></div>'+formatSpaces(escapeHTML((c.text||'').replace(/\n/g,' ')))+'<div class="edge r"></div>';
+    el.innerHTML='<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;">'+escapeHTML(c.text||'').replace(/\n/g,'<br>')+'</div><div class="edge r"></div>';
     row.appendChild(el);
   }
   // 重疊區域：粉紅底色
