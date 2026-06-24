@@ -13,7 +13,7 @@ const SubFormats = {
       const tline=lines[i]; if(!tline||!tline.includes('-->'))continue;
       const [a,b]=tline.split('-->');
       const start=srtToSec(a), end=srtToSec(b);
-      const txt=lines.slice(i+1).join('\n').trim();
+      const txt=lines.slice(i+1).join('\n').replace(/\\\\|\/\//g, '\n').trim();
       out.push({start,end,text:txt});
     }
     return out;
@@ -38,7 +38,7 @@ const SubFormats = {
         const parts=splitN(rest,nText-1);
         const rec={}; f.forEach((k,idx)=>rec[k]=parts[idx]!==undefined?parts[idx]:'');
         let raw=rec.text||'';
-        const txt=raw.replace(/\{[^}]*\}/g,'').replace(/\\N/gi,'\n').replace(/\\h/g,' ').trim();
+        const txt=raw.replace(/\{[^}]*\}/g,'').replace(/\\N/gi,'\n').replace(/\\h/g,' ').replace(/\\\\|\/\//g, '\n').trim();
         let track=0;
         const nm=(rec.name||'').match(/atg?(\d+)/i); if(nm)track=Math.max(0,+nm[1]-1);
         else if(/^\d+$/.test(rec.layer))track=clamp(+rec.layer,0,9);
@@ -119,7 +119,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       }
       out.push({
         start, end,
-        text: m[3].replace(/\s{2,}/g,'\n').trim(),
+        text: m[3].replace(/\s{2,}/g,'\n').replace(/\\\\|\/\//g, '\n').trim(),
         timed: isUntimed ? false : undefined
       });
     }
@@ -127,18 +127,18 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
   },
   toEncore(cues,fps,df=false){
     return cues.map(c=>{
-      if(c.timed===false) return `--:--:--:-- --:--:--:-- ${(c.text||'').replace(/\n/g,' ')}`;
-      return `${secToEncore(c.start,fps,df)} ${secToEncore(c.end,fps,df)} ${(c.text||'').replace(/\n/g,' ')}`;
+      if(c.timed===false) return `--:--:--:-- --:--:--:-- ${(c.text||'').replace(/\n/g,'\\\\')}`;
+      return `${secToEncore(c.start,fps,df)} ${secToEncore(c.end,fps,df)} ${(c.text||'').replace(/\n/g,'\\\\')}`;
     }).join('\r\n')+'\r\n';
   },
   /* ---- 純文字 ---- */
   parseTXT(text){
     let t = 0;
     return text.replace(/\r/g,'').split('\n').map(l=>l.trim()).filter(l=>l.length)
-      .map(l=>{ const c={start:t,end:t,text:l,timed:false}; t+=0.001; return c; });
+      .map(l=>{ const c={start:t,end:t,text:l.replace(/\\\\|\/\//g, '\n'),timed:false}; t+=0.001; return c; });
   },
   toTXT(cues){
-    return cues.map(c=>(c.text||'')).join('\n')+'\n';
+    return cues.map(c=>(c.text||'').replace(/\n/g, '\\\\')).join('\n')+'\n';
   }
 };
 /* 把字串以逗號切成 n 段，第 n 段含其餘全部 */

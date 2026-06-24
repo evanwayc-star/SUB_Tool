@@ -2,13 +2,13 @@
 "use strict";
 import _logoUrl from './logo.png';
 import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML } from './util.js';
-import { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
+import { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, snapTimeToFrame } from './time.js';
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix } from './state.js';
 import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
-import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitles.js';
+import { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
 import { Project, ensureProjectSaved, resetProject } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
@@ -176,13 +176,15 @@ function ensurePlayheadVisible(){
 
 /* 影片事件 */
 video.addEventListener('timeupdate',()=>{
-  $('tcCur').textContent=secToEncore(video.currentTime,State.fps,State.dropFrame); // 時:分:秒:格
-  $('seekBar').value=Math.round(video.currentTime*1000);
+  let t = Media.displayTime();
+  $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame); // 時:分:秒:格
+  $('seekBar').value=Math.round(t*1000);
+  if(!Media.playing) updatePlayhead();
 });
 let rafOn=false, rafFrame=0, _rafLastIdx=0;
 function rafLoop(){
   if(Media.playing){
-    const t=Media.vTime();
+    const t=Media.displayTime();
     // 無媒體時更新時間顯示
     if(!video.src){
       $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
@@ -252,7 +254,10 @@ video.addEventListener('play',()=>{
     if(stSel) stSel.textContent='';
   }
 });
-video.addEventListener('pause',()=>{$('playBtn').textContent='▶';});
+video.addEventListener('pause',()=>{
+  $('playBtn').textContent='▶';
+  updatePlayhead();
+});
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
 window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});
 video.addEventListener('ended',()=>{Media.pause();});
@@ -360,6 +365,7 @@ async function doAction(act){
     case 'search-select-all': searchSelectAll(); break;
     case 'replace-one': searchReplace(false); break;
     case 'replace-all': searchReplace(true); break;
+    case 'trim-track': trimTrackSpaces(); break;
     case 'help': showHelp(); break;
     case 'modal-close': closeModal(); break;
   }
@@ -468,14 +474,17 @@ async function openCueEditModal(c){
         `<button id="${escapeHTML(btnId)}" style="font-size:11px;padding:1px 7px">複製</button>`+
       `</div>`+
       `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;min-height:2.2em">`+
-        `<div style="white-space:pre-wrap;font-size:14px;font-family:inherit;color:var(--text);user-select:text;cursor:text">${escapeHTML(text)}</div>`+
+        `<div id="${btnId==='cueEditCopy'?'cueEditOrig':''}" style="white-space:pre-wrap;font-size:14px;font-family:inherit;color:var(--text);user-select:text;cursor:text">${escapeHTML(text).replace(/\n/g, '<br>')}</div>`+
       `</div>`+
     `</div>`;
 
   const sibHtml=siblings.map(s=>mkBlock('軌道：'+s.trackName,s.text,'cueEditCopySib'+s.tkIdx)).join('');
 
   const doConfirm=()=>{
-    const val=$('cueEditTa').value;
+    const ta=$('cueEditTa');
+    if(!ta) return;
+    let val=ta.innerText;
+    if(val.endsWith('\n') && !orig.endsWith('\n')) val=val.slice(0,-1);
     c.text=val; closeModal(); renderAll(); renderVideoSub();
     if(val!==orig) recordHistory('編輯字幕文字'+cueSuffix(c));
   };
@@ -485,20 +494,38 @@ async function openCueEditModal(c){
     sibHtml+
     mkBlock('原文',orig,'cueEditCopy')+
     `<div style="font-size:12px;color:var(--text-faint);margin-bottom:4px">修改 <span style="font-size:10px;opacity:.5">（Enter 確認 · Shift+Enter 換行）</span></div>`+
-    `<textarea id="cueEditTa" rows="4" style="width:100%;resize:vertical;font-size:14px;font-family:inherit;padding:6px;box-sizing:border-box"></textarea>`+
+    `<div id="cueEditTa" contenteditable="true" style="width:100%;min-height:5em;border:1px solid var(--border);border-radius:4px;background:var(--bg);font-size:14px;font-family:inherit;padding:6px;box-sizing:border-box;color:var(--text);overflow-y:auto;outline:none"></div>`+
     `</div>`,
     [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:closeModal}]);
   setTimeout(()=>{
     const ta=$('cueEditTa');
     if(ta){
-      ta.value=orig; ta.focus(); ta.select();
+      ta.dataset.orig=orig;
+      ta.innerHTML=escapeHTML(orig).replace(/\n/g, '<br>');
+      ta.focus();
+      try { const r = document.createRange(), s = window.getSelection(); r.selectNodeContents(ta); s.removeAllRanges(); s.addRange(r); } catch (_) {}
+      
       ta.addEventListener('keydown',e=>{
       if(e.key==='Enter'&&e.ctrlKey){
         e.preventDefault();
-        const offset=ta.selectionStart;
-        const full=ta.value;
-        const textBefore=full.slice(0,offset);
-        const textAfter=full.slice(offset);
+        const sel=window.getSelection();
+        if(!sel.rangeCount)return;
+        const range=sel.getRangeAt(0).cloneRange();
+        range.collapse(true);
+        const MARK='\x01';
+        const markerNode=document.createTextNode(MARK);
+        range.insertNode(markerNode);
+        let raw=ta.innerText;
+        markerNode.parentNode.removeChild(markerNode);
+        let markerPos=raw.indexOf(MARK);
+        if(markerPos<0) markerPos=raw.length;
+        let full=raw.replace(MARK,'');
+        if(full.endsWith('\n')&&!orig.endsWith('\n')){
+          full=full.slice(0,-1);
+          if(markerPos>full.length) markerPos=full.length;
+        }
+        const textBefore=full.slice(0,markerPos);
+        const textAfter=full.slice(markerPos);
         const origEnd=c.end;
         const isTimed=c.timed!==false;
         if(isTimed){ const pt=Media.vTime(); if(pt<=c.start||pt>=c.end){ showToast('播放點必須在字幕的起訖時間內才能拆句'); return; } }
@@ -554,7 +581,7 @@ function initUI(){
   $('cpContainsInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋浮動視窗
   $('searchInput').addEventListener('input',()=>searchUpdate());
-  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){ searchNav(1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
+  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing) return; if(e.key==='Enter'){ searchNav(1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
   $('replaceInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋視窗可拖曳
   { const head=$('searchDialogHead'), dlg=$('searchDialog');

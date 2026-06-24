@@ -114,6 +114,12 @@ function renderCheckPanel(){
   const twoNums  =list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n|\/\//g)||[]).length===1?i+1:null;}).filter(n=>n!==null);
   // 空白字幕
   const blankNums=list.map((c,i)=>!(c.text||'').trim()?i+1:null).filter(n=>n!==null);
+  // 頭尾空白
+  const trimNums=list.map((c,i)=>{
+    const t=c.text||'';
+    if(t.match(/^[ 　]+|[ 　]+$/)) return i+1;
+    return null;
+  }).filter(n=>n!==null);
   // 超過字數
   const lenEl=$('cpLenInput');
   _checkLenLimit = lenEl ? (parseInt(lenEl.value)||0) : 0;
@@ -128,9 +134,10 @@ function renderCheckPanel(){
     ? list.map((c,i)=>{ const t=(c.text||'').toLowerCase(); return _checkContains.some(kw=>t.includes(kw.toLowerCase()))?i+1:null; }).filter(n=>n!==null)
     : [];
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
-  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains');
+  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rt=$('cpTrim');
   if(ro)ro.querySelector('.cp-nums').innerHTML=mkNums(overlapNums);
   if(rm)rm.querySelector('.cp-nums').innerHTML=mkNums(multiNums);
+  if(rt)rt.querySelector('.cp-nums').innerHTML=mkNums(trimNums);
   if(r2)r2.querySelector('.cp-nums').innerHTML=mkNums(twoNums);
   if(rb)rb.querySelector('.cp-nums').innerHTML=mkNums(blankNums);
   if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'—';
@@ -173,7 +180,7 @@ function _lineLenHTML(line){
 }
 function _txtInner(text){
   if(!(text||'').trim()) return '<span class="blank-label">(空白字幕)</span>';
-  if(!_checkLenLimit) return txtHTML(text||'');
+  if(!_checkLenLimit) return txtHTML(text||'').replace(/\n|\/\//g, '<br>');
   // 有字數限制：逐行套用，不套用搜尋高亮（兩者同時存在時以字數優先）
   return (text||'').split(/\n|\/\//).map(_lineLenHTML).join('<br>');
 }
@@ -226,7 +233,12 @@ function selectCue(id,opts){
     if(tk!==State.listTrack){ State.listTrack=tk; emit('render:listTrackSel'); renderSubList(); refreshTrackGutterActive(); }
   }
   refreshSelectionUI();
-  if(opts.seek&&c&&c.timed!==false){ Media.seek(c.start); emit('playhead:ensure'); emit('render:videoSub'); }
+  if(opts.seek&&c&&c.timed!==false){
+    const t = Media.displayTime();
+    if(t < c.start || t > c.end){
+      Media.seek(c.start); emit('playhead:ensure'); emit('render:videoSub');
+    }
+  }
   const pc=State.cues.find(x=>x.id===State.selectedId);
   $('stSel').textContent=State.selectedIds.length?('已選 '+State.selectedIds.length+' 條'+(pc?(' · #'+(State.cues.indexOf(pc)+1)):'')):'';
   updatePlayhead();
@@ -538,7 +550,7 @@ sublist.addEventListener('dblclick', async e => {
   await ensureProjectSaved();
   const t = row.querySelector('.txt');
   t.dataset.orig = c.text || '';
-  t.innerText = c.text || ''; // 清除搜尋高亮 span
+  t.innerHTML = escapeHTML(c.text || '').replace(/\n/g, '<br>');
   t.contentEditable = 'true'; t.focus();
   try { const r = document.createRange(), s = window.getSelection(); r.selectNodeContents(t); r.collapse(false); s.removeAllRanges(); s.addRange(r); } catch (_) {}
 });
@@ -557,11 +569,15 @@ sublist.addEventListener('contextmenu', e => {
 sublist.addEventListener('input', e => {
   const txt = e.target.closest('.txt');
   if (!txt) return;
+
   const row = txt.closest('.sub-row');
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
   if (!c) return;
-  c.text = txt.innerText;
+  
+  let val = txt.innerText;
+  if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
+  c.text = val;
   const rc2 = _rowClass(c.text);
   row.classList.remove('blank', 'two-line', 'multi-line'); if (rc2) row.classList.add(rc2);
   renderCueBlocks(); emit('render:videoSub'); renderCheckPanel();
@@ -584,6 +600,28 @@ sublist.addEventListener('focusout', e => {
   renderCheckPanel();
 });
 
+function trimTrackSpaces() {
+  let changed = 0;
+  State.cues.forEach(c => {
+    if ((c.track || 0) === State.listTrack) {
+      const orig = c.text || '';
+      const trimmed = orig.replace(/^[ 　]+|[ 　]+$/g, '');
+      if (orig !== trimmed) {
+        c.text = trimmed;
+        changed++;
+      }
+    }
+  });
+  if (changed) {
+    emit('render:all');
+    emit('render:videoSub');
+    recordHistory(`Trim頭尾空白 (${changed}條)`);
+    if ($('checkPanel') && $('checkPanel').classList.contains('show')) renderCheckPanel();
+  } else {
+    showToast('目前軌道沒有需要 Trim 的空白');
+  }
+}
+
 sublist.addEventListener('keydown', e => {
   if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); return; }
   const txt = e.target.closest('.txt');
@@ -601,6 +639,6 @@ sublist.addEventListener('keydown', e => {
 
 export { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel,
   addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, shiftTextsDown, shiftTextsUp,
-  enterSwapMode, cancelSwapMode,
+  enterSwapMode, cancelSwapMode, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,
   copyCues, pasteCues };

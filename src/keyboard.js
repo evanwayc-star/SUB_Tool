@@ -269,9 +269,9 @@ window.addEventListener('keydown',e=>{
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); const sd=document.getElementById('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>document.getElementById('searchInput')?.focus(),20); } }
       else { e.preventDefault(); emit('action','check-panel'); }
       break;
+    case ']': e.preventDefault(); zoomFit(); break;
     case 'z':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); e.shiftKey?History.redo():History.undo(); }
-      else if(e.shiftKey){ e.preventDefault(); zoomFit(); }
       else { e.preventDefault(); setIn(); }
       break;
     case '-': case '_': e.preventDefault(); setZoom(State.pxPerSec*0.77); break;

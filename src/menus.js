@@ -113,11 +113,14 @@ function showCueMenu(x,y){
   }
 
   // 字幕對調
-  if(State.selectedId)
+  if(State.selectedId){
     items.push({label:'⇄ 字幕對調',act:()=>enterSwapMode(State.selectedId)});
+    items.push({sep:true});
+  }
 
   if(State.trackCount>1){
-    items.push({sep:true},{heading:true,label:'移動到軌道'});
+    if(!State.selectedId) items.push({sep:true});
+    items.push({heading:true,label:'移動到軌道'});
     State.tracks.forEach((tk,i)=>items.push({label:'→ '+tk.name,act:()=>moveSelectedToTrack(i)}));
     items.push({sep:true});
   }

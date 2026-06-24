@@ -1,7 +1,7 @@
 /* SUB Tool — 時間軸：渲染（尺/波形/軌道/區塊）與互動（拖曳/框選/縮放） */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js';
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from './state.js';
-import { clamp, pad, escapeHTML } from './util.js';
+import { clamp, pad, escapeHTML, formatSpaces } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
 import { emit } from './events.js';
@@ -21,7 +21,12 @@ function tracksTop(){return RULER_H+waveH();}
 function tracksScrollTop(){ return tlTracks?tlTracks.scrollTop:0; }
 
 function viewportW(){return tlScroll.clientWidth;}
-function timeToX(t){return (t-State.viewStart)*State.pxPerSec;}
+function snapFrame(t){
+  if(!State.fps) return t;
+  if(State.dropFrame && Math.abs(State.fps-29.97)<0.01) return Math.round(t*30000/1001)*1001/30000;
+  return Math.round(t*State.fps)/State.fps;
+}
+function timeToX(t){ return (t - State.viewStart)*State.pxPerSec; }
 function xToTime(x){return State.viewStart + x/State.pxPerSec;}
 
 function tlTotal(){
@@ -287,7 +292,7 @@ function renderCueBlocks(){
     el.style.left=timeToX(c.start)+'px';
     el.style.width=Math.max(2,(c.end-c.start)*State.pxPerSec)+'px';
     el.dataset.id=c.id;
-    el.innerHTML='<div class="edge l"></div>'+escapeHTML((c.text||'').replace(/\n/g,' '))+'<div class="edge r"></div>';
+    el.innerHTML='<div class="edge l"></div>'+formatSpaces(escapeHTML((c.text||'').replace(/\n/g,' ')))+'<div class="edge r"></div>';
     row.appendChild(el);
   }
   // 重疊區域：粉紅底色
@@ -335,7 +340,8 @@ function moveSelectedToTrack(target){
 }
 
 function updatePlayhead(){
-  const x=timeToX(Media.vTime());
+  let t = Media.displayTime();
+  const x=timeToX(t);
   $('tlPlayhead').style.left=x+'px';
   if(State.inPoint!=null){ const ip=$('tlInpoint'); ip.style.display='block'; ip.style.left=timeToX(State.inPoint)+'px'; }
   else $('tlInpoint').style.display='none';
@@ -459,7 +465,7 @@ tlScroll.addEventListener('mousedown',e=>{
       }
     }
     jklReset(); // 播放中拖曳時間尺 → 暫停
-    Media.seek(xToTime(x)); updatePlayhead(); emit('render:videoSub');
+    Media.seek(snapFrame(xToTime(x))); updatePlayhead(); emit('render:videoSub');
     drag={mode:'scrub'}; e.preventDefault(); return;
   }
   drag={mode:'rubber',startX:e.clientX,startY:e.clientY,x0:x,y0:y,moved:false,additive:e.ctrlKey||e.metaKey};
@@ -468,7 +474,7 @@ tlScroll.addEventListener('mousedown',e=>{
 window.addEventListener('mousemove',e=>{
   if(!drag)return;
   const rect=tlLayer.getBoundingClientRect();
-  if(drag.mode==='scrub'){ Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub'); return; }
+  if(drag.mode==='scrub'){ Media.seek(snapFrame(xToTime(e.clientX-rect.left))); updatePlayhead(); emit('render:videoSub'); return; }
   if(Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)drag.moved=true;
   if(drag.mode==='rubber'){
     const x1=clamp(e.clientX-rect.left,0,viewportW()), y1=clamp(e.clientY-rect.top,0,tlLayer.clientHeight);
@@ -498,17 +504,17 @@ window.addEventListener('mousemove',e=>{
     }
     const minOt=Math.min(...drag.grp.map(g=>g.ot)), maxOt=Math.max(...drag.grp.map(g=>g.ot));
     const dTk=clamp(trackFromY(e.clientY)-drag.ot, -minOt, State.trackCount-1-maxOt);
-    for(const it of drag.grp){ const len=it.oe-it.os; it.c.start=it.os+dt; it.c.end=it.c.start+len; it.c.track=it.ot+dTk; }
+    for(const it of drag.grp){ const len=it.oe-it.os; it.c.start=snapFrame(it.os+dt); it.c.end=snapFrame(it.c.start+len); it.c.track=it.ot+dTk; }
   }else if(drag.mode==='l'){
     const it=drag.grp[0];
     let ns=clamp(it.os+dt, it.prevEnd, drag.c.end-0.05);
     const sn=snapVal(ns,drag.snaps,drag.thr); if(sn>=it.prevEnd && sn<=drag.c.end-0.05) ns=sn;
-    drag.c.start=ns;
+    drag.c.start=snapFrame(ns);
   }else if(drag.mode==='r'){
     const it=drag.grp[0];
     let ne=clamp(drag.oe+dt, drag.c.start+0.05, it.nextStart);
     const sn=snapVal(ne,drag.snaps,drag.thr); if(sn>=drag.c.start+0.05 && sn<=it.nextStart) ne=sn;
-    drag.c.end=ne;
+    drag.c.end=snapFrame(ne);
   }
   
   // 優化：拖曳期間只更新樣式，不全量重繪
@@ -569,7 +575,7 @@ tlScroll.addEventListener('wheel',e=>{
 
 /* ===== 磁吸 / 防重疊 工具（時間軸拖曳專用） ===== */
 function snapTargets(excludeIds){
-  const arr=[Media.vTime()];
+  const arr=[snapFrame(Media.displayTime())];
   for(const c of State.cues){ if(c.timed===false||excludeIds.has(c.id))continue; arr.push(c.start,c.end); }
   for(const n of State.notes) arr.push(n.time);
   return arr;

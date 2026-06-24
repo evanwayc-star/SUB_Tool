@@ -92,7 +92,7 @@ function _openImportModal(title, parsed, kind){
       if(append){ State.cues.push(...newCues); }
       else { State.cues=newCues; }
       State.listTrack=targetTk;
-      State.selectedId=newCues[0]?.id||null; State.selectedIds=State.selectedId?[State.selectedId]:[];
+      if(!append){ State.selectedId=null; State.selectedIds=[]; }
       sortCues(); emit('render:listTrackSel'); emit('render:all');
       { const maxEnd=State.cues.reduce((m,c)=>c.timed!==false?Math.max(m,c.end):m,0);
         if(maxEnd>State.duration){State.duration=maxEnd;emit('duration:known');}else drawTimeline(); }

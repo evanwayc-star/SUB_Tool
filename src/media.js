@@ -653,6 +653,7 @@ const Media = {
 
   /* --- 虛擬播放（無媒體載入時）--- */
   _vTime: 0, _vStart: null,
+  _lastSeekTime: null,
   vTime(){
     if(this.mpvMode) return this._mpvTime;
     if(!video.src){
@@ -660,6 +661,12 @@ const Media = {
       return this._vTime;
     }
     return video.currentTime||0;
+  },
+  displayTime(){
+    if(!this.playing && this._lastSeekTime !== null) {
+      return this._lastSeekTime;
+    }
+    return this.vTime();
   },
 
   /* --- 播放控制 --- */
@@ -683,8 +690,10 @@ const Media = {
     this.startElementSources(video.currentTime);
     video.play();
     this.playing=true; $('playBtn').textContent='⏸';
+    this._lastSeekTime=null;
   },
   pause(){
+    this._lastSeekTime = this.vTime(); // 鎖定暫停瞬間的時間，避免瀏覽器引擎後續微小滑行導致播放點跳動
     if(this.mpvMode){
       DESK.mpv.pause().catch(()=>{});
       this.stopElementSources();
@@ -699,6 +708,8 @@ const Media = {
   },
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t){
+    t=clamp(t,0,State.duration||0);
+    this._lastSeekTime=t;
     if(this.mpvMode){
       t=clamp(t,0,this._mpvDuration||0);
       this._mpvTime=t;
@@ -717,7 +728,7 @@ const Media = {
       if(this.playing&&this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
       return;
     }
-    t=clamp(t,0,State.duration||0); video.currentTime=t;
+    video.currentTime=t;
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ try{tr.el.currentTime=clamp(t,0,tr.el.duration||t);}catch(e){} } }
     if(this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
   },

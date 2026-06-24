@@ -52,4 +52,10 @@ function encoreToSec(t,fps,df=false){
   return hh*3600+mm*60+ss+ff/fps;
 }
 
-export { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec };
+function snapTimeToFrame(t, fps, df=false) {
+  if(!fps) return t;
+  if(df && Math.abs(fps-29.97)<0.01) return Math.round(t*30000/1001)*1001/30000;
+  return Math.round(t*fps)/fps;
+}
+
+export { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, snapTimeToFrame };

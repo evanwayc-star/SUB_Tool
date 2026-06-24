@@ -1,0 +1,49 @@
+Key,Modifier,Action,Description (ZH)
+Space,,Toggle Play/Pause,播放或暫停
+J,,Rewind,倒帶 (-1x 到 -3x)
+K,,Pause,暫停
+L,,Forward,正播 (1x 到 3x)
+2,,Prev Cue (-5 frames),退回至前一字幕並提早5格
+5,,Next Cue (-5 frames),跳至下一字幕並提早5格
+I,,Set In Point,設定字幕起點 (或新建)
+O,,Set Out Point,設定字幕終點
+ArrowLeft,,Nudge Left (1 Frame),播放點往左平移1格
+ArrowLeft,Shift,Nudge Left (1 Sec),播放點往左平移1秒
+ArrowLeft,Ctrl/Cmd,Prev Note,跳至上一個備忘錄
+ArrowRight,,Nudge Right (1 Frame),播放點往右平移1格
+ArrowRight,Shift,Nudge Right (1 Sec),播放點往右平移1秒
+ArrowRight,Ctrl/Cmd,Next Note,跳至下一個備忘錄
+ArrowUp,,Prev Cue,跳至上一條字幕
+ArrowUp,Ctrl/Cmd,Step Boundary Prev,跳轉至上一個字幕邊界
+ArrowUp,Shift,Seek Home,回到開頭
+ArrowUp,Ctrl/Cmd+Shift,First Cue,跳至軌道第一條字幕
+ArrowDown,,Next Cue,跳至下一條字幕
+ArrowDown,Ctrl/Cmd,Step Boundary Next,跳轉至下一個字幕邊界
+ArrowDown,Shift,Seek End,到達影片結尾
+ArrowDown,Ctrl/Cmd+Shift,Last Cue,跳至軌道最後一條字幕
+Home,,Seek Home,回到開頭
+End,,Seek End,到達影片結尾
+Enter,,Confirm,確認
+Delete,,Delete Selected,刪除被選取的字幕
+Escape,,Cancel / Deselect,取消選取、關閉彈窗或關閉上字幕模式
+P,,Shift Timecode,時間碼整體位移
+A,,Toggle History Panel,打開/關閉歷史紀錄面板
+A,Ctrl/Cmd,Select All in Track,全選當前軌道字幕
+S,,Toggle Notes Panel,打開/關閉備忘錄面板
+S,Ctrl/Cmd,Save Project,儲存專案
+D,,Open Mixer,開啟混音器面板
+X,,Select Cue at Playhead,選取目前播放點所在的字幕
+C,,Set Out Point,設定字幕終點
+C,Ctrl/Cmd,Copy Cues,複製選取字幕
+V,,Add Note,新增備忘錄
+V,Ctrl/Cmd,Paste Cues,貼上字幕
+M,,Add Note,新增備忘錄
+F,,Check Panel,打開檢查面板
+F,Ctrl/Cmd,Search,打開搜尋框
+],,Zoom Fit,縮放時間軸至適合大小
+Z,,Set In Point,設定字幕起點 (或新建)
+Z,Ctrl/Cmd,Undo,復原
+Z,Ctrl/Cmd+Shift,Redo,重做
+-,,Zoom Out,縮小時間軸
++,,Zoom In,放大時間軸
+\,,Zoom Fit Video,縮放時間軸以完整顯示影片長度
