@@ -7,7 +7,7 @@ import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitl
 import { emit } from './events.js';
 import { ensureProjectSaved, isProjectGuardDone } from './project.js';
 import { showToast } from './ui.js';
-import { jklReset } from './keyboard.js';
+import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
 
@@ -563,15 +563,21 @@ window.addEventListener('mouseup',e=>{
   drag=null;
 });
 
-/* 滾輪縮放（Ctrl）/ 平移 */
+/* 滾輪縮放（Ctrl）/ 平移 / 逐格 */
 tlScroll.addEventListener('wheel',e=>{
   if(e.ctrlKey||e.metaKey){
     e.preventDefault();
     const factor = Math.pow(2, -e.deltaY / 500);
     setZoom(State.pxPerSec * factor);
-  } else if(Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+  } else if(e.shiftKey) {
     e.preventDefault();
-    tlScroll.scrollLeft += e.deltaY;
+    tlScroll.scrollLeft += (e.deltaY || e.deltaX);
+  } else if(Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    // 原生觸控板水平滑動，讓瀏覽器自然處理平移
+  } else {
+    e.preventDefault();
+    const frames = e.deltaY > 0 ? 1 : -1;
+    nudge(frames / (State.fps || 30));
   }
 },{passive:false});
 

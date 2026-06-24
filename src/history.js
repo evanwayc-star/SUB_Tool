@@ -13,8 +13,13 @@ const History = {
   snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,fps:State.fps,dropFrame:State.dropFrame}); },
   reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); },
   record(label){
-    if(this.hi<this.stack.length-1)this.stack=this.stack.slice(0,this.hi+1); // 截斷未來
-    this.stack.push({label,snap:this.snap()});
+    const newSnap = this.snap();
+    if(this.hi >= 0) {
+      const oldSnap = this.stack[this.hi].snap;
+      if(JSON.stringify(newSnap) === JSON.stringify(oldSnap)) return;
+    }
+    if(this.hi<this.stack.length-1)this.stack=this.stack.slice(0,this.hi+1);
+    this.stack.push({label,snap:newSnap});
     if(this.stack.length>this.max){ this.stack.shift(); }
     this.hi=this.stack.length-1; renderHistory();
   },
