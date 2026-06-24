@@ -756,6 +756,84 @@ const Media = {
   stopBufferSources(){
     for(const tr of this.tracks){ if(tr.srcNode){try{tr.srcNode.stop();}catch(e){} tr.srcNode=null;} }
   },
+  scrubAudio(t, duration = 0.15) {
+    if(this.playing || State.muted) return;
+    
+    let hasWebAudioMix = false;
+    if(this.ctx){
+      for(const tr of this.tracks){
+        if(tr._srcHidden) continue;
+        if(tr.kind==='buffer'){
+          const audible = this.tracks.some(x=>x.solo) ? tr.solo : !tr.muted;
+          if(audible) {
+            if(tr._scrubNode) { try{tr._scrubNode.stop();}catch(e){} }
+            try{
+              const src=this.ctx.createBufferSource(); src.buffer=tr.buffer;
+              src.playbackRate.value=video.playbackRate||1;
+              src.connect(tr.gain);
+              src.start(0, clamp(t,0,tr.buffer.duration), duration);
+              tr._scrubNode = src;
+              hasWebAudioMix = true;
+            }catch(e){}
+          }
+        }
+      }
+    }
+    
+    const scrubEl = (el) => {
+       if(!el.src) return;
+       if(!el._scrubEl) {
+           el._scrubEl = document.createElement('video');
+           el._scrubEl.preload = 'auto';
+       }
+       
+       const doPlay = () => {
+           el._scrubEl.playbackRate = el.playbackRate || 1;
+           el._scrubEl.currentTime = clamp(t, 0, el.duration || t);
+           el._scrubEl.volume = State.muted ? 0 : 1;
+           const p = el._scrubEl.play();
+           if(p !== undefined) {
+             p.then(() => {
+               clearTimeout(el._scrubTimer);
+               el._scrubTimer = setTimeout(() => { el._scrubEl.pause(); }, 150);
+             }).catch((err)=>{
+               console.warn("Scrub play error:", err);
+             });
+           }
+       };
+
+       if(el._scrubEl.src !== el.src) {
+           el._scrubEl.src = el.src;
+           el._scrubEl.onloadedmetadata = () => {
+               el._scrubEl.onloadedmetadata = null;
+               doPlay();
+           };
+       } else if (el._scrubEl.readyState >= 1) {
+           doPlay();
+       } else {
+           el._scrubEl.onloadedmetadata = () => {
+               el._scrubEl.onloadedmetadata = null;
+               doPlay();
+           };
+       }
+    };
+
+    const anySolo = this.tracks.some(tr=>tr.solo&&!tr._srcHidden);
+    const activeMix = anySolo
+      ? this.tracks.some(tr=>(tr.kind==='buffer'||tr.kind==='element')&&!tr._srcHidden&&tr.solo)
+      : this.tracks.some(tr=>(tr.kind==='buffer'||tr.kind==='element')&&!tr._srcHidden&&!tr.muted);
+      
+    if (!activeMix && (this.activeSource==='video' || this.activeSource===null)) {
+       scrubEl(video);
+    }
+    for(const tr of this.tracks){
+      if(tr._srcHidden) continue;
+      if(tr.kind==='element' && tr.el){
+         const audible = anySolo ? tr.solo : !tr.muted;
+         if (audible) scrubEl(tr.el);
+      }
+    }
+  },
   syncMuteState(){
     const mix=this.hasMix();
     video.muted = mix ? true : State.muted;

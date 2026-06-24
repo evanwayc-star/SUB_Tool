@@ -58,7 +58,8 @@ function jklApply(){
       if(_jklSpeed!==capturedSpeed){ jklClear(); return; }
       const t=Media.vTime();
       if(t<=0){ jklClear(); _jklSpeed=0; setStatus('已到開頭',''); return; }
-      Media.seek(Math.max(0,t-step));
+      const newT = Math.max(0,t-step);
+      Media.seek(newT);
       updatePlayhead();
       emit('playhead:ensure');
       emit('render:videoSub');
@@ -66,6 +67,7 @@ function jklApply(){
         $('tcCur').textContent=secToEncore(Media.vTime(),State.fps,State.dropFrame);
         $('seekBar').value=Math.round(Media.vTime()*1000);
       }
+      Media.scrubAudio(newT, Math.max(step, 0.08));
     }, 1000/fps);
   }
   const spd=Math.abs(_jklSpeed);
@@ -283,7 +285,16 @@ window.addEventListener('keydown',e=>{
 window.addEventListener('keyup',e=>{
   if(e.key==='ArrowLeft'||e.key==='ArrowRight'){ if(_jklSpeed!==0)jklReset(); }
 });
-function nudge(d){ const t=Media.vTime()+d; Media.seek(t); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(t); }
+function nudge(d){ 
+  const t=Media.vTime()+d; 
+  Media.seek(t); 
+  updatePlayhead(); 
+  emit('playhead:ensure'); 
+  updateNoteActive(t); 
+  if (!Media.playing && Math.abs(d) < 0.2) {
+    Media.scrubAudio(t);
+  }
+}
 function seekHome(){ Media.seek(0); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(0); }
 function seekEnd(){ const t=State.duration||0; Media.seek(t); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(t); }
 
