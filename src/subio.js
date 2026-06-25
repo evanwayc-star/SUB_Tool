@@ -247,8 +247,15 @@ function showFpsConvertDialog(){
       const from=+$('fpsFrom').value, to=+$('fpsTo').value;
       if(from===to){ closeModal(); return; }
       const ratio=from/to;
+      const fr=1/Math.max(State.fps||25,1);
       const cues=State.cues.filter(c=>(c.track||0)===tkIdx);
-      for(const c of cues){ c.start=Math.max(0,c.start*ratio); c.end=Math.max(c.start+0.001,c.end*ratio); }
+      // 縮放後務必對齊影格：否則列表時碼(四捨五入到整格)與時間軸區塊(原始秒數)會差一格
+      for(const c of cues){
+        c.start=snapTimeToFrame(Math.max(0,c.start*ratio), State.fps, State.dropFrame);
+        let ne=snapTimeToFrame(c.end*ratio, State.fps, State.dropFrame);
+        if(ne<c.start+fr) ne=c.start+fr;
+        c.end=ne;
+      }
       // 更新 State.duration 為 max(影片片長, 最後字幕 end)
       const maxEnd=State.cues.reduce((m,c)=>c.end>m?c.end:m, 0);
       if(maxEnd>State.duration){ State.duration=maxEnd; $('tcDur').textContent=secToEncore(maxEnd,State.fps,State.dropFrame); }
@@ -356,7 +363,8 @@ function applyDurAdjPct(){
   if(!cues.length){ showToast('沒有字幕可調整'); return; }
   for(const c of cues){
     const nextIn=_nextInPoint(c);
-    let newEnd=c.start+(c.end-c.start)*ratio;
+    // 縮放後對齊影格，避免區塊邊緣落在格與格之間
+    let newEnd=snapTimeToFrame(c.start+(c.end-c.start)*ratio, State.fps, State.dropFrame);
     newEnd=Math.max(c.start+minDur,newEnd);
     newEnd=Math.min(nextIn,newEnd);
     c.end=newEnd;
