@@ -16,6 +16,7 @@ let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null;
 const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
+let _currentIngestProc = null; // S1: 追蹤目前執行中的 ingest ffmpeg，換檔時強制 kill
 
 /* ---- 偵測 ffmpeg / ffprobe（優先使用內建版本，fallback 系統安裝） ---- */
 function detect(bin, extra) {
@@ -163,11 +164,15 @@ function clearAllCache(currentSrc) {
   return { bytes };
 }
 
+/* S2: 有 GPU 編碼器時啟用來源端硬體解碼（加速讀取 4K/MXF），對 -i 前插入 */
+function hwdecArgs() { return VENC && VENC !== 'libx264' ? ['-hwaccel', 'auto'] : []; }
+
 /* ---- 執行 ffmpeg，並回報進度 ---- */
-function runFF(args, { onProgress, duration, sender, jobId, label } = {}) {
+function runFF(args, { onProgress, duration, sender, jobId, label, onProcess } = {}) {
   return new Promise((res, rej) => {
     if (!FFMPEG) return rej(new Error('找不到 ffmpeg'));
     const p = spawn(FFMPEG, args);
+    if (onProcess) onProcess(p);
     let err = '';
     p.stderr.on('data', d => {
       const s = d.toString(); err += s; if (err.length > 8000) err = err.slice(-8000);
@@ -395,6 +400,8 @@ ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
    每聲道以 asplit 分流（不直接 -map 同一條 stream，避免 filtergraph 與 -map 雙重消費而 deadlock）。
    結果存入持久快取（依 cacheKeyFor），重開同檔直接命中、秒開。 */
 ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio }) => {
+  // S1: 強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源
+  if (_currentIngestProc) { try { _currentIngestProc.kill(); } catch (e2) {} _currentIngestProc = null; }
   const audioArr = Array.isArray(audio) ? audio : [];
   // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
   const hit = readCache(src);
@@ -435,7 +442,7 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
   if (waveContribs.length === 1) waveLabel = waveContribs[0];
   else if (waveContribs.length > 1) { fc.push(`${waveContribs.join('')}amix=inputs=${waveContribs.length}:normalize=0[wavemix]`); waveLabel = '[wavemix]'; }
 
-  const args = ['-y', '-i', src];
+  const args = ['-y', ...hwdecArgs(), '-i', src]; // S2: hwaccel 加速來源解碼
   if (fc.length) args.push('-filter_complex', fc.join(';'));
   let proxy = null;
   if (needsProxy) { proxy = path.join(dir, 'proxy.mp4'); args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), '-movflags', '+faststart', proxy); }
@@ -445,8 +452,9 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
 
   // 稍微延遲讓 mpv 優先取得檔案讀取權，避免 ffmpeg 瞬間佔滿磁碟 I/O 導致 mpv 播放無聲
   await new Promise(r => setTimeout(r, 1000));
-  
-  await runFF(args, { sender: e.sender, duration, jobId: 'ingest', label: '讀取並轉檔（單次讀取）' });
+
+  await runFF(args, { sender: e.sender, duration, jobId: 'ingest', label: '讀取並轉檔（單次讀取）', onProcess: p => { _currentIngestProc = p; } }); // S1: 記錄 proc
+  _currentIngestProc = null;
   const meta = { proxy, channels, wave };
   writeMeta(metaPath, meta);
   return Object.assign({ cached: false }, meta);
@@ -460,6 +468,8 @@ ipcMain.handle('fs:writeProject', (e, { path: p, b64 }) => { try { fs.mkdirSync(
    video 轉成 fragmented MP4（empty_moov），前幾秒輸出後就可播放；音軌/波形同一 pass 在背景繼續。
    快取命中時行為與 ffmpeg:ingest 相同（秒開）。 */
 ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) => {
+  // S1: 強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源
+  if (_currentIngestProc) { try { _currentIngestProc.kill(); } catch (e2) {} _currentIngestProc = null; }
   const audioArr = Array.isArray(audio) ? audio : [];
   const port = await ensureHttpServer();
 
@@ -509,7 +519,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   const proxy = path.join(dir, 'proxy.mp4');
   const wave = waveLabel ? path.join(dir, 'wave.wav') : null;
 
-  const args = ['-y', '-i', src];
+  const args = ['-y', ...hwdecArgs(), '-i', src]; // S2: hwaccel 加速來源解碼
   if (fc.length) args.push('-filter_complex', fc.join(';'));
   // 關鍵：fragmented MP4 讓 browser 在 ffmpeg 還未結束時就能開始播放
   args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p',
@@ -522,15 +532,14 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   _hJobs.set(jid, job);
 
   // 背景跑 ffmpeg（不 await）。用唯一 jobId 讓前端能辨識「是本次轉檔完成」而非其他工作。
-  runFF(args, { sender: e.sender, duration, jobId: jid, label: '背景轉檔中' }).then(() => {
-    job.done = true;
-    writeMeta(metaPath, { proxy, channels, wave });
-  }).catch(err => { job.done = true; job.error = err.message; });
+  runFF(args, { sender: e.sender, duration, jobId: jid, label: '背景轉檔中', onProcess: p => { _currentIngestProc = p; } }) // S1: 記錄 proc
+    .then(() => { _currentIngestProc = null; job.done = true; writeMeta(metaPath, { proxy, channels, wave }); })
+    .catch(err => { _currentIngestProc = null; job.done = true; job.error = err.message; });
 
-  // 等到 proxy 檔案有足夠資料（至少 512KB）再回傳，確保 video.src 不會立刻失敗
+  // S3: 縮小閾值至 128KB（empty_moov 寫完即可播，不需等到 512KB）
   const t0 = Date.now();
   while (Date.now() - t0 < 60000) {
-    try { if (fs.statSync(proxy).size >= 524288) break; } catch (e2) {}
+    try { if (fs.statSync(proxy).size >= 131072) break; } catch (e2) {}
     if (job.error) throw new Error('轉檔失敗：' + job.error);
     await new Promise(r => setTimeout(r, 300));
   }

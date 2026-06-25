@@ -328,7 +328,8 @@ const Media = {
     this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
 
     if(res.wave){
-      try{ const b64=await DESK.readB64(res.wave); if(b64){ const ab=await this.ctx.decodeAudioData(b64ToBytes(b64).buffer); if(ab.duration>State.duration)State.duration=ab.duration; Wave.live=false; Wave.compute(ab); Wave.registerSources(res.wave,chs); drawTimeline(); } else Wave.initLive(); }
+      // FIX: 改用 fileURL+fetch+computeFromWav，與 streamIngest 路徑一致（避免 readB64 塞爆 IPC + decodeAudioData 耗盡記憶體）
+      try{ const buf=await fetch(await DESK.fileURL(res.wave)).then(r=>r.arrayBuffer()); Wave.live=false; const pk=Wave.computeFromWav(buf); Wave.registerSources(res.wave,chs); if(pk)Wave.sources[0].peaks=pk; drawTimeline(); }
       catch(e){ console.warn('wave',e); Wave.initLive(); }
     } else Wave.initLive();
 

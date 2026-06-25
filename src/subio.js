@@ -12,6 +12,8 @@ import { drawTimeline, layoutTimeline } from './timeline.js';
 import { Project } from './project.js';
 import { emit } from './events.js';
 import { parseTimecodeInput } from './tcparse.js';
+import { buildXLSX } from './xlsxExport.js';
+import { doExportNotesGeneral, doExportNotesEdius } from './notes.js';
 
 function convertLineBreaks(parsed){
   for(const p of parsed){ if(p.text) p.text=p.text.replace(/\/\//g,'\n').replace(/\\\\/g,'\n'); }
@@ -113,28 +115,51 @@ function _openImportModal(title, parsed, kind){
   },20);
 }
 function showExportDialog(){
-  if(State.cues.length===0){ showToast('沒有字幕可匯出'); return; }
-  const fmtOpts=[['SRT (.srt)','srt'],['ASS (.ass)','ass'],['Adobe Encore (.txt)','encore'],['純文字 (.txt)','txt']]
-    .map(([label,val])=>`<option value="${val}">${label}</option>`).join('');
-  if(State.trackCount>1){
-    const trkBoxes='<div style="padding:6px 0 2px">選擇要匯出的軌道（每軌各自一個檔案）：</div>'+
-      State.tracks.map((tk,i)=>`<label style="display:block;padding:3px 0"><input type="checkbox" data-tk="${i}" checked> ${escapeHTML(tk.name)} <span style="color:var(--text-faint)">(${State.cues.filter(c=>(c.track||0)===i).length} 條)</span></label>`).join('');
-    openModal('匯出字幕',
-      `<label style="display:block;padding:4px 0">格式：<select id="expFmtSel" style="margin-left:6px">${fmtOpts}</select></label>${trkBoxes}`,
-      [{label:'匯出',primary:true,act:()=>{
-        const kind=$('expFmtSel').value;
-        const checked=[...document.querySelectorAll('#modalBody input[data-tk]')].filter(b=>b.checked).map(b=>+b.dataset.tk);
-        closeModal();
-        for(const i of checked){ const cues=State.cues.filter(c=>(c.track||0)===i); if(cues.length)doExport(kind,cues,State.tracks[i]?.name); }
-      }},{label:'取消',act:closeModal}]);
-  }else{
-    openModal('匯出字幕',
-      `<label style="display:block;padding:4px 0">格式：<select id="expFmtSel" style="margin-left:6px">${fmtOpts}</select></label>`,
-      [{label:'匯出',primary:true,act:()=>{ closeModal(); doExport($('expFmtSel').value,State.cues); }},{label:'取消',act:closeModal}]);
-  }
+  if(!State.cues.length&&!State.notes.length){ showToast('沒有字幕或備註可匯出'); return; }
+
+  const sec=(title,body)=>`<div style="margin-bottom:14px"><div style="font-size:11px;font-weight:600;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px">${title}</div>${body}</div>`;
+  const cb=(attrs,label)=>`<label style="display:block;padding:3px 0;cursor:pointer"><input type="checkbox" ${attrs}> ${label}</label>`;
+
+  let html=sec('字幕格式',
+    [['encore','Adobe Encore (.txt)',true],['srt','SRT (.srt)',false],['ass','ASS (.ass)',false],['txt','純文字 (.txt)',false],['xlsx','Excel (.xlsx)',false]]
+      .map(([v,l,d])=>cb(`data-fmt="${v}"${d?' checked':''}`,escapeHTML(l))).join(''));
+
+  if(State.cues.length&&State.trackCount>1)
+    html+=sec('軌道',
+      State.tracks.map((tk,i)=>cb(`data-tk="${i}" checked`,`${escapeHTML(tk.name)} <span style="color:var(--text-faint)">(${State.cues.filter(c=>(c.track||0)===i).length} 條)</span>`)).join('')
+      +`<div style="font-size:11px;color:var(--text-faint);margin-top:4px">Excel 會將所有勾選軌道合為一個檔案，每軌一個分頁</div>`);
+
+  if(State.notes.length)
+    html+=sec(`備註（${State.notes.length} 條）`,
+      cb('id="expNotesEdius"','Edius 格式')+cb('id="expNotesGeneral"','一般格式'));
+
+  openModal('匯出',html,[{label:'匯出',primary:true,act:()=>{
+    const fmts=[...document.querySelectorAll('[data-fmt]')].filter(b=>b.checked).map(b=>b.dataset.fmt);
+    const tks=State.cues.length&&State.trackCount>1?[...document.querySelectorAll('[data-tk]')].filter(b=>b.checked).map(b=>+b.dataset.tk):null;
+    const notesE=document.getElementById('expNotesEdius')?.checked;
+    const notesG=document.getElementById('expNotesGeneral')?.checked;
+    if(!fmts.length&&!notesE&&!notesG){showToast('請至少勾選一個格式');return;}
+    if(fmts.length&&tks!==null&&!tks.length){showToast('請至少勾選一個軌道');return;}
+    closeModal();
+    for(const fmt of fmts){
+      if(fmt==='xlsx'){
+        const list=tks?tks.map(i=>({name:State.tracks[i]?.name||('軌道'+(i+1)),cues:State.cues.filter(c=>(c.track||0)===i)})).filter(t=>t.cues.length):[{name:State.tracks[0]?.name||'軌道 1',cues:State.cues}];
+        doExportXLSX(list);
+      }else{
+        if(tks){for(const i of tks){const cues=State.cues.filter(c=>(c.track||0)===i);if(cues.length)doExport(fmt,cues,State.tracks[i]?.name);}}
+        else{doExport(fmt,State.cues);}
+      }
+    }
+    if(notesE)doExportNotesEdius();
+    if(notesG)doExportNotesGeneral();
+  }},{label:'取消',act:closeModal}]);
 }
 function exportSub(kind){
   if(State.cues.length===0){ showToast('沒有字幕可匯出'); return; }
+  if(kind==='xlsx'){
+    const list=State.tracks.map((tk,i)=>({name:tk.name,cues:State.cues.filter(c=>(c.track||0)===i)})).filter(t=>t.cues.length);
+    doExportXLSX(list); return;
+  }
   if(State.trackCount>1){
     for(let i=0;i<State.tracks.length;i++){
       const cues=State.cues.filter(c=>(c.track||0)===i); if(cues.length)doExport(kind,cues,State.tracks[i]?.name);
@@ -158,6 +183,20 @@ function doExport(kind,cues,trackName){
     downloadBytes(bytes, fname, 'text/plain;charset=utf-16le');
     setStatus(`已匯出 ${kind.toUpperCase()}（UTF-16 LE）`,'ok');
     showToast(`已匯出 ${fname}`);
+  }
+}
+
+function doExportXLSX(trackDataList){
+  if(!trackDataList.length){ showToast('所選軌道沒有字幕'); return; }
+  const bytes=buildXLSX(trackDataList,State.fps,State.dropFrame);
+  const base=(State.mediaName?State.mediaName.replace(/\.[^.]+$/,''):'subtitle');
+  const fname=base+'.xlsx';
+  if(IS_DESKTOP){
+    DESK.exportSub(fname,bytesToB64(bytes),'xlsx').then(pth=>{ if(pth){setStatus('已匯出：'+pth,'ok');showToast('已匯出 '+baseName(pth));} });
+  }else{
+    downloadBytes(bytes,fname,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    setStatus('已匯出 XLSX（'+trackDataList.length+' 個分頁）','ok');
+    showToast('已匯出 '+fname);
   }
 }
 

@@ -248,40 +248,47 @@ function _batchEditNotes(){
   }, 50);
 }
 
-function exportNotes(){
-  if(!State.notes.length){ showToast('沒有備註可匯出'); return; }
-  const makeBom=csv=>{ const BOM=new Uint8Array([0xEF,0xBB,0xBF]),body=new TextEncoder().encode(csv),out=new Uint8Array(BOM.length+body.length); out.set(BOM);out.set(body,BOM.length); return out; };
+const _makeBom=csv=>{const BOM=new Uint8Array([0xEF,0xBB,0xBF]),body=new TextEncoder().encode(csv),out=new Uint8Array(BOM.length+body.length);out.set(BOM);out.set(body,BOM.length);return out;};
 
-  // 原始格式
-  const csvF=v=>{ const s=String(v); return (s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s; };
+function doExportNotesGeneral(){
+  if(!State.notes.length)return;
+  const csvF=v=>{const s=String(v);return(s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s;};
   const lines=['狀態,時間,內容'];
   for(const n of State.notes){
     const time=secToEncore(n.time,State.fps,State.dropFrame);
     const content=(n.text||'').replace(/\r?\n/g,' ');
     lines.push(`${csvF(n.done?'V':'K')},${csvF(time)},${csvF(content)}`);
   }
-  downloadBytes(makeBom(lines.join('\r\n')),'notes.csv','text/csv;charset=utf-8');
+  downloadBytes(_makeBom(lines.join('\r\n')),'notes.csv','text/csv;charset=utf-8');
+}
 
-  // EDIUS Marker list 格式
+function doExportNotesEdius(){
+  if(!State.notes.length)return;
   const d=new Date();
   const DAY=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const hh=v=>String(v).padStart(2,'0');
   const dateStr=`${DAY[d.getDay()]} ${MON[d.getMonth()]} ${String(d.getDate()).padStart(2,' ')} ${hh(d.getHours())}:${hh(d.getMinutes())}:${hh(d.getSeconds())} ${d.getFullYear()}`;
-  const eLines=[
-    '# EDIUS Marker list',
-    '# Format Version 2',
-    `# Created Date : ${dateStr}`,
-    '#',
-    '# No, Position, Duration, Comment',
-  ];
+  const eLines=['# EDIUS Marker list','# Format Version 2',`# Created Date : ${dateStr}`,'#','# No, Position, Duration, Comment'];
   State.notes.forEach((n,i)=>{
     const time=secToEncore(n.time,State.fps,State.dropFrame);
-    const comment=(n.text||'').replace(/"/g,'""');
-    eLines.push(`${i+1},"${time}", ,"${comment}"`);
+    eLines.push(`${i+1},"${time}", ,"${(n.text||'').replace(/"/g,'""')}"`);
   });
-  downloadBytes(makeBom(eLines.join('\r\n')),'notes_EDIUS.csv','text/csv;charset=utf-8');
-
-  setStatus('備註已匯出：notes.csv + notes_EDIUS.csv','ok');
+  downloadBytes(_makeBom(eLines.join('\r\n')),'notes_EDIUS.csv','text/csv;charset=utf-8');
 }
 
-export { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes };
+function exportNotes(){
+  if(!State.notes.length){ showToast('沒有備註可匯出'); return; }
+  const cb=(id,label,chk)=>`<label style="display:block;padding:3px 0;cursor:pointer"><input type="checkbox" id="${id}"${chk?' checked':''}> ${label}</label>`;
+  openModal('匯出備註',
+    cb('expNoteEdius','Edius 格式',true)+cb('expNoteGeneral','一般格式',false),
+    [{label:'匯出',primary:true,act:()=>{
+      const e=document.getElementById('expNoteEdius')?.checked;
+      const g=document.getElementById('expNoteGeneral')?.checked;
+      if(!e&&!g){showToast('請至少勾選一種格式');return;}
+      closeModal();
+      if(e)doExportNotesEdius();
+      if(g)doExportNotesGeneral();
+    }},{label:'取消',act:closeModal}],{width:'240px'});
+}
+
+export { addNote, renderNotes, exportNotes, doExportNotesGeneral, doExportNotesEdius, setNoteActive, updateNoteActive, clearAllNotes };
