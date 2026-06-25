@@ -267,6 +267,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
   font-size:11px;color:var(--text-dim)}
 .statusbar .dot{width:7px;height:7px;border-radius:50%;background:var(--text-faint);display:inline-block;margin-right:4px}
 .statusbar .dot.ok{background:var(--green)}
+.statusbar .dot.err{background:var(--red)}
 .statusbar .dot.busy{background:var(--accent);animation:pulse 1s infinite}
 @keyframes pulse{50%{opacity:.3}}
 

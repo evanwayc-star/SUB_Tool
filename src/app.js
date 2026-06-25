@@ -297,20 +297,27 @@ async function doAction(act){
       if(IS_DESKTOP){ const r=await DESK.openProject(); if(r)Project.loadDesktop(r); }
       else { const f=await pickFile($('fileProject')); if(f)Project.load(f); } break;
     case 'save-project': Project.save(); break;
-    case 'new': if(confirm('清空目前專案？字幕、備註與已載入的影音都將清除（未存檔的話）。')){
-      State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
-      State.listTrack=0;State.tracks=[];ensureTrackCount(1);
-      State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');
-      History.reset();resetProject();_firstLoad=true;
-      // 清除影音
-      video.pause(); video.src='';
-      State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
-      Media.reset();
-      const nv=$('noVideo'); if(nv) nv.style.display='';
-      onDurationKnown(); renderAudioTracks();
-      renderListTrackSel();renderAll();renderNotes();drawTimeline();
-      setStatus('新專案','ok');
-    } break;
+    case 'new':
+      // Fix #15 同款：破壞性動作改用 openModal，風格一致且 Electron 不會截取原生 confirm
+      openModal('開新專案',
+        '<p>確定清空目前專案？字幕、備註與已載入的影音都將清除（未存檔的話）。</p>',
+        [{label:'取消',act:closeModal},
+         {label:'確定清空',primary:true,act:()=>{
+           closeModal();
+           State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
+           State.listTrack=0;State.tracks=[];ensureTrackCount(1);
+           State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');
+           History.reset();resetProject();_firstLoad=true;
+           // 清除影音
+           video.pause(); video.src='';
+           State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
+           Media.reset();
+           const nv=$('noVideo'); if(nv) nv.style.display='';
+           onDurationKnown(); renderAudioTracks();
+           renderListTrackSel();renderAll();renderNotes();drawTimeline();
+           setStatus('新專案','ok');
+         }}]);
+      break;
     case 'imp-auto': importSub(); break;
     case 'exp-dialog': showExportDialog(); break;
     case 'exp-srt': exportSub('srt'); break;

@@ -8,7 +8,7 @@ import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive
 import { emit } from './events.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
-import { showToast } from './ui.js';
+import { showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
 import { showCueMenu } from './menus.js';
 
@@ -296,15 +296,26 @@ function addCueRelative(dir){
   requestAnimationFrame(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));});
   return c;
 }
-function deleteSelected(){
-  const ids=State.selectedIds.length?State.selectedIds.slice():[State.selectedId].filter(Boolean);
-  if(!ids.length)return;
+function _doDeleteCues(ids){
   const idxs=ids.map(id=>State.cues.findIndex(c=>c.id===id)).filter(i=>i>=0);
   const firstIdx=idxs.length?Math.min(...idxs):0;
   State.cues=State.cues.filter(c=>!ids.includes(c.id));
   State.selectedId=State.cues[Math.min(firstIdx,State.cues.length-1)]?.id||null;
   State.selectedIds=State.selectedId?[State.selectedId]:[]; State.activeEdge='start';
   emit('render:all'); updateTlSel(); recordHistory('刪除字幕');
+}
+function deleteSelected(){
+  const ids=State.selectedIds.length?State.selectedIds.slice():[State.selectedId].filter(Boolean);
+  if(!ids.length)return;
+  // 比照備註多選刪除（notes.js）：>1 條先 openModal 確認，避免 Ctrl+A 後誤觸 Del 清空整軌
+  if(ids.length>1){
+    openModal(`刪除 ${ids.length} 條字幕`,
+      `<p>確定要刪除選取的 <b>${ids.length}</b> 條字幕嗎？</p>`,
+      [{label:'取消',act:closeModal},
+       {label:'確定刪除',primary:true,act:()=>{ closeModal(); _doDeleteCues(ids); }}]);
+    return;
+  }
+  _doDeleteCues(ids);
 }
 function deleteCue(id){ if(id){State.selectedIds=[id];State.selectedId=id;} deleteSelected(); }
 

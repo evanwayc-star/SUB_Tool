@@ -90,7 +90,7 @@ function jklReset(){
 /* I = 設定目前被選字幕的「開始點」為播放點；無選取則新建一條 */
 async function setIn(){
   await ensureProjectSaved();
-  if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移',''); return; }
+  if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移','err'); return; }
   const t=Media.vTime();
   let c=State.cues.find(x=>x.id===State.selectedId);
   if(!c){ c=addCue(t,t+2,'',0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 '+fmtClock(t),'ok'); return; }
@@ -101,11 +101,11 @@ async function setIn(){
 /* O = 設定目前被選字幕的「結束點」為播放點 */
 async function setOut(){
   await ensureProjectSaved();
-  if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移',''); return; }
+  if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移','err'); return; }
   const t=Media.vTime();
   const c=State.cues.find(x=>x.id===State.selectedId);
-  if(!c){ setStatus('請先選擇字幕（或按 I 新建）',''); return; }
-  if(t<=c.start){ setStatus('終點不得早於或等於起點',''); return; }
+  if(!c){ setStatus('請先選擇字幕（或按 I 新建）','err'); return; }
+  if(t<=c.start){ setStatus('終點不得早於或等於起點','err'); return; }
   c.end=t; c.timed=true;
   sortCues(); emit('render:all'); selectCue(c.id); State.activeEdge='end';
   recordHistory('設定終點 O'+cueSuffix(c)); setStatus('終點 '+fmtClock(c.end),'ok');
@@ -120,7 +120,7 @@ function autoAdvanceSubMode(){
   const idx=trackCues.findIndex(c=>c.id===State.selectedId);
   if(idx>=0&&idx<trackCues.length-1){
     selectCueSingle(trackCues[idx+1].id,false);
-    setStatus('🎯 上字幕模式：下一句選中 — 按 I 設起點','ok');
+    setStatus(`🎯 上字幕 ${idx+2}/${trackCues.length} — 按 I 設起點`,'ok');
   }else{
     State.subMode=false;
     const btn=$('subModeBtn'); if(btn)btn.classList.remove('sub-active');
@@ -208,6 +208,7 @@ window.addEventListener('keydown',e=>{
     case 'home': e.preventDefault(); seekHome(); break;
     case 'end': e.preventDefault(); seekEnd(); break;
     case 'enter': e.preventDefault(); { const sel=State.selectedId; if(sel){ const row=sublist.querySelector(`.sub-row[data-id="${sel}"]`); if(row)row.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window})); } } break;
+    case 'backspace':
     case 'delete': if(State.selectedIds.length||State.selectedId){e.preventDefault();deleteSelected();} break;
     case 'escape':
       cancelSwapMode();
@@ -250,7 +251,7 @@ window.addEventListener('keydown',e=>{
         const t=Media.vTime();
         const hit=State.cues.find(c=>(c.track||0)===State.listTrack&&c.timed!==false&&c.start<=t&&c.end>=t);
         if(hit) selectCue(hit.id,{seek:false});
-        else setStatus('目前時間點無字幕','');
+        else setStatus('目前時間點無字幕','err');
       }
       break;
     case 'c':
