@@ -1,2 +1,0 @@
-# Windows .bat must use CRLF or cmd.exe can refuse to run them (flash-close).
-*.bat text eol=crlf
