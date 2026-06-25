@@ -32,7 +32,7 @@ FPS-SYNC
 於是時碼秒數會比牆鐘秒數**慢約 0.1%**：
 
 - 1 小時 ≈ 慢 3.6 秒
-- 1 小時 33 分 ≈ 慢 約 5.5 秒
+- 1 小時 33 分 ≈ 慢約 5.5 秒
 
 所以同一個牆鐘位置，**播放器時碼**（數影格）會顯示得比「真實秒數換算」小。
 **這是正常、且是業界標準行為**（Premiere、各 NLE 同樣如此）。要讓時碼≈牆鐘，才需要切到 DF。
@@ -46,20 +46,24 @@ FPS-SYNC
 維護時請把這 6 條當鐵律。違反任何一條都會造成「差一格 / 對不上刻度」。
 
 ### (I1) FPS 一律「實測」，**絕不依檔名判斷**
+
 - 網頁版：`detectFpsWeb()`（`media.js`）用 `requestVideoFrameCallback` 量真實影格時間戳的中位數。
 - 桌面版：`DESK.probe()`（ffprobe）→ `info.video.fps`。
 - 都會經 `snapFps()` 對齊到允許集合 `[23.976, 24, 25, 29.97, 30]`，存進 `State.fps` / `State.dropFrame`。
 - **檔名可能寫錯**（真實案例：檔名標 `24FPS…30P`，實際是 29.97fps）。檔名只能當「線索」，不可當依據。
 
 ### (I2) 「秒 → 時:分:秒:格」只有一個換算來源：`encoreParts()`
+
 - 位於 `time.js`。`secToEncore()`（播放器 `tcCur`、字幕列表、匯出）與 `timeline.js` 的 `fmtTick()`（時間軸刻度）**都呼叫它**。
 - **不要**在任何地方自己用 `Math.floor(s/3600)…` 拼時碼。曾經 `fmtTick` 這樣做，導致時間軸刻度顯示「真實秒數」而播放器顯示「數影格時碼」，在 1:33 處兩者差約 5 秒（見第 4 節 Bug A）。
 
 ### (I3) 影格格網只有一個：`snapTimeToFrame()`
+
 - 位於 `time.js`。`seek()`、`pause()`、時間軸拖曳（`timeline.js` 的 `snapFrame`）、逐格步進都用它對齊。
 - 確保播放點永遠落在整格、且與刻度同格。
 
 ### (I4) 「靜止讀數」必須同源於 `displayTime()`，**不可直接讀原始播放時間**
+
 - `Media.displayTime()`（`media.js`）是**權威播放位置**：
   - 暫停時回傳 `_lastSeekTime`（已對齊影格）。
   - 播放中才回傳 `vTime()`（原始時間，為了平滑移動）。
@@ -67,10 +71,12 @@ FPS-SYNC
 - **不可**直接用 `video.currentTime` 或 mpv 的 `e.data`：seek 後瀏覽器 / mpv 會把實際位置「沉降」到相鄰格，原始時間經 `secToEncore` 進位就會比播放點多一格（見 Bug C）。
 
 ### (I5) 逐格步進以 `displayTime()` 為基準
+
 - `nudge()`（`keyboard.js`）用 `Media.displayTime() + d`，**不是** `vTime() + d`。
 - 因為 `vTime()` 帶有瀏覽器沉降的浮點 ε，`+1格` 後再 `round` 會被放大成跳兩格 / 退不動（29.97 尤甚，見 Bug B）。
 
 ### (I6) 不可用「原始播放時間」覆蓋權威值 `_lastSeekTime`
+
 - mpv 暫停時會持續回報 `time-pos`（原始時間，可能偏離格網半格多）。
 - 處理時：若只是 seek 後的沉降抖動（與 `_lastSeekTime` 相差 **< 1.5 格**）→ **維持** `_lastSeekTime`；
   只有大幅變動（例如在 mpv 視窗內拖拉）才 `snapTimeToFrame` 並更新 `_lastSeekTime`。
@@ -99,16 +105,19 @@ FPS-SYNC
 ## 4. 已修過的 Bug 案例（避免再犯）
 
 ### Bug A — 時間軸刻度與播放器時碼差幾秒（越後面差越多）
+
 - **現象**：1:33 處播放器顯示 `01:33:13`，時間軸刻度顯示 `1:33:18`，差約 5 秒。
 - **原因**：`fmtTick` 自己用「真實秒數」拼時碼，而播放器用 `secToEncore`（數影格）。29.97 非 DF 兩者本就漂移。
 - **修法**：`fmtTick` 改走 `encoreParts`（I2）。整數 fps 不受影響；29.97 漂移情況兩者一致。
 
 ### Bug B — 逐格：右鍵跳兩格、左鍵退不動
+
 - **現象**：在高時碼（如 01:23:15）按右鍵一次前進兩格，按左鍵又彈回原位。
 - **原因**：`nudge` 用 `vTime()`（原始 `video.currentTime`），seek 後瀏覽器把它落在「下一格」≈ 超前一格；`±1格` 再 `round` 被放大。
 - **修法**：`nudge` 改用 `displayTime()`（I5）。在自己的整數格網上 ±1，`seek` 的 snap 變冪等。
 
 ### Bug C — 播放器時碼比時間軸播放點多一格（與 FPS 正確與否無關）
+
 - **現象**：正確的 29.97 NDF 專案、未載入字幕，播放器 `01:26:21:04` vs 播放點 `1:26:21:03`。
 - **原因**：
   - mpv 模式：`tcCur` 用 mpv 回報的**原始時間** `e.data`，而播放點用 `displayTime()`（已對齊格）。seek 後 mpv 沉降約 0.6 格 → `secToEncore` 進位多一格。

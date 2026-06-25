@@ -1,112 +1,66 @@
-# SUB Tool — 架構與程式碼說明文件
+# SUB Tool — 技術架構說明
 
-> 版本：v2.8.0｜最後更新：2026-06-25
-
----
-
-## 目錄
-
-1. [專案概述](#1-專案概述)
-2. [整體架構](#2-整體架構)
-3. [模組職責](#3-模組職責)
-4. [模組相依關係](#4-模組相依關係)
-5. [資料流](#5-資料流)
-6. [Electron 與瀏覽器雙模式差異](#6-electron-與瀏覽器雙模式差異)
-7. [關鍵流程說明](#7-關鍵流程說明)
-   - [字幕渲染流程](#71-字幕渲染流程)
-   - [時間軸互動流程](#72-時間軸互動流程)
-   - [音訊混音流程](#73-音訊混音流程)
-   - [匯入匯出流程](#74-匯入匯出流程)
-   - [I/O 上字幕流程](#75-io-上字幕流程)
-   - [Undo/Redo 流程](#76-undoredo-流程)
+> 版本：v2.8.0 之後｜最後更新：2026-06-25
 
 ---
 
-## 1. 專案概述
+## 1. 專案概覽
 
-SUB Tool 是一款 **Arctime 風格的多軌字幕編輯工具**，以 Vite + ES Modules 架構開發，支援兩種執行模式：
-
-| 模式 | 執行方式 | 限制 |
-|------|---------|------|
-| **瀏覽器版** | 雙擊 `dist/index.html` 或 `npm run dev` | MXF 受 1.6 GB 記憶體限制；多軌需 ffmpeg.wasm（需網路） |
-| **Electron 桌面版** | `啟動桌面版.bat` / `npm run electron:dev` | 呼叫系統 ffmpeg，可直讀 MXF、多軌、超大檔 |
-
-建置輸出：`npm run build` → `dist/index.html`（vite-plugin-singlefile，單一可雙擊執行的 HTML）。
+本專案採 **Vite + 原生 ES 模組**（無框架），以 `vite-plugin-singlefile` 打包成**單一 HTML**（JS/CSS 內嵌），同時支援網頁版與 Electron 桌面版。共 **22 個 ES 模組**，以「事件匯流排 + 單向依賴」解耦。
 
 ---
 
-## 2. 整體架構
+## 2. 模組清單
 
-```
-src/
- ├── main.js          ← Vite 進入點（引入 styles.css + app.js）
- ├── app.js           ← 協調層（非 hub：訂閱事件、接線 UI、init）
- │
- ├── ── 葉模組（零或僅向下相依）──
- ├── dom.js           ← DOM 元素參照
- ├── util.js          ← 純工具函式（數值/編碼/檔案）
- ├── time.js          ← 時碼換算（秒 ↔ SRT/ASS/Encore/DF）
- ├── tcparse.js       ← 時碼輸入解析（字串 → 秒）
- ├── events.js        ← 同步事件匯流排（on/emit）
- │
- ├── ── 領域模組 ──
- ├── state.js         ← 全域可變狀態（cues/tracks/FPS/選取…）
- ├── formats.js       ← SRT/ASS/Encore/TXT 解析與序列化
- ├── media.js         ← 媒體引擎（影片 + Web Audio + ffmpeg）＋ Wave
- ├── timeline.js      ← Canvas 時間軸渲染與拖曳互動
- ├── subtitles.js     ← 字幕列表 CRUD / 選取 / 搜尋取代
- ├── keyboard.js      ← 鍵盤快捷鍵 + I/O 上字幕 + JKL 穿梭
- ├── subio.js         ← 匯入/匯出/拖放/FPS 轉換/時間碼位移
- ├── project.js       ← .subtool 專案存讀 + 自動備份
- ├── history.js       ← Undo/Redo（structuredClone 快照）
- ├── notes.js         ← 備忘錄面板（時間點標記）
- ├── mixer.js         ← 音軌列表 + 混音器 + 電平表 UI
- ├── menus.js         ← 右鍵選單（播放窗 / 字幕 / 時間軸）
- ├── ui.js            ← UI 基本元件（狀態列/Toast/OSD/對話框）
- └── help.js          ← 說明對話框
-
-electron/
- ├── main.js          ← Electron 主程序（IPC：ffmpeg/mpv/檔案對話框）
- └── preload.js       ← contextBridge → window.subtool（安全橋接）
-```
-
-### 架構核心原則
-
-- **`app.js` 不再是 hub**：其他模組不 `import app.js`，而是呼叫 `emit(event)` → `app.js` 以 `on(event, handler)` 訂閱後執行對應函式。這斷開了雙向循環相依。
-- **`events.js` 為同步匯流排**：`emit` 同步執行所有 handler，語意等同直接呼叫（無非同步延遲）。
-- **`State` 為唯一可變狀態來源**：各模組直接讀寫 `State`，變動後透過 `emit('render:all')` 等事件觸發重繪，不使用框架的響應式系統。
+| 模組 | 約行數 | 職責 |
+|------|--------|------|
+| `app.js` | ~860 | 協調層：訂閱事件、影片事件、`doAction` 指令分派、`init` |
+| `events.js` | ~30 | 同步事件匯流排（`on`/`emit`）— 解耦核心 |
+| `state.js` | ~80 | 全域狀態 `State` + 軌道/FPS 模型 + `DESK` 偵測 |
+| `dom.js` | ~30 | DOM 元素參照 |
+| `util.js` | ~80 | 純工具：clamp/pad、UTF 編解碼、escapeHTML |
+| `time.js` | ~90 | 秒↔時碼換算（SRT/ASS/Encore，含 29.97 Drop-frame） |
+| `tcparse.js` | ~50 | 時碼輸入字串解析（葉模組） |
+| `formats.js` | ~320 | 字幕格式 解析/序列化（SRT/ASS/Encore/TXT） |
+| `ui.js` | ~90 | 基本 UI 元件：status/toast/OSD/Modal |
+| `media.js` | ~1142 | 媒體引擎（影片 + Web Audio 多音軌 + ffmpeg/mpv）、Wave |
+| `mixer.js` | ~120 | 音軌列表 + 逐聲道電平表 |
+| `timeline.js` | ~702 | 時間軸：尺/波形/軌道/區塊 渲染 + 拖曳/框選/縮放 |
+| `subtitles.js` | ~649 | 字幕列表：渲染、選取、新增/刪除、軌道切換、拆分 |
+| `keyboard.js` | ~431 | 鍵盤快捷鍵 + I/O 上字幕 + JKL 穿梭輪 |
+| `subio.js` | ~330 | 字幕匯入/匯出/拖放、FPS 轉換、時碼位移 |
+| `notes.js` | ~180 | 備忘錄（時間點標記，匯出 CSV / EDIUS） |
+| `menus.js` | ~80 | 右鍵選單（音軌/速度/移軌） |
+| `history.js` | ~80 | Undo/Redo（structuredClone 快照，最多 120 步） |
+| `project.js` | ~200 | 專案存讀（`.subtool`）+ 自動備份 |
+| `help.js` | ~120 | 說明 / 快捷鍵對話框（純內容） |
 
 ---
 
-## 3. 模組職責
-
-### `main.js`（進入點）
-Vite 的模組根目錄進入點，僅兩行：引入 CSS 與 `app.js`。
-
----
+## 3. 各模組詳細說明
 
 ### `app.js`（協調層，~860 行）
-**職責**：組裝所有模組、訂閱事件、影片事件處理、`doAction` 指令分派、面板/選單接線、`init` / `initDesktop`。
 
-**不**負責任何渲染邏輯——只負責「知道哪個事件要呼叫哪個函式」。
-
-**關鍵函式**：
+唯一訂閱 `events.js` 事件的模組。不暴露公開 API，只作「監聽 → 呼叫對應函式」。
 
 | 函式 | 說明 |
 |------|------|
-| `renderAll()` | 呼叫 `renderSubList` + `renderCueBlocks` + `renderVideoSub` + `updateTlSel` |
-| `renderVideoSub()` | 更新 `#videoSub` 疊層，顯示播放點當下的字幕文字 |
-| `onDurationKnown()` | 影片/音訊片長確認後，更新 seekBar、時碼顯示、時間軸 |
-| `doAction(name)` | 集中指令分派（open-media, add-track, mixer, export 等） |
+| `renderAll()` | 全量重繪：renderSubList + drawTimeline + renderVideoSub + 播放頭 |
+| `renderVideoSub()` | 更新 `#videoSub` 疊層（依播放點篩選 + escapeHTML） |
+| `onDurationKnown()` | 媒體載入完成：`_firstLoad` 為真時 `zoomFitVideo()` 自動縮放；之後條件式縮放 |
+| `resetProject()` | 清空 State、重置歷史、重置 `_firstLoad`（新專案流程） |
+| `zoomFitVideo()` | 縮放時間軸以完整顯示影片長度（或已建字幕範圍） |
+| `doAction(name)` | 集中指令分派（open-media、add-track、mixer、export 等） |
 | `ensurePlayheadVisible()` | 播放點超出視窗時自動捲動 |
-| `refreshMpvSubs()` | mpv 模式下，字幕變動時重建 .ass 餵給 mpv（防抖 100ms） |
-| `rafLoop()` | requestAnimationFrame 主迴圈：播放中更新時碼/seekBar/波形即時擷取/電平表 |
-| `init()` | 瀏覽器模式初始化（載入拖放、FPS 選單、面板接線…） |
-| `initDesktop()` | Electron 模式初始化（呼叫 `DESK` IPC：ffmpeg 路徑、開啟對話框） |
+| `refreshMpvSubs()` | mpv 模式：字幕變動時重建 .ass 餵給 mpv（防抖 100ms） |
+| `rafLoop()` | `requestAnimationFrame` 主迴圈：播放中更新時碼/seekBar/波形/電平表 |
+| `init()` | 瀏覽器模式初始化（含 `ensureTrackCount(1)` 確保預設軌道存在） |
+| `initDesktop()` | Electron 模式初始化（IPC 狀態查詢、桌面功能接線） |
 
 ---
 
 ### `dom.js`（DOM 元素參照）
+
 ```js
 const $ = id => document.getElementById(id);
 const video    // <video id="video">
@@ -121,6 +75,7 @@ const sublist  // 字幕列表 <div>
 ---
 
 ### `util.js`（純工具）
+
 | 函式 | 說明 |
 |------|------|
 | `clamp(v,a,b)` | 數值夾緊 |
@@ -134,6 +89,7 @@ const sublist  // 字幕列表 <div>
 ---
 
 ### `time.js`（時碼換算）
+
 | 函式 | 說明 |
 |------|------|
 | `fmtClock(s)` | 秒 → `00:00:00.000`（UI 顯示） |
@@ -144,11 +100,12 @@ const sublist  // 字幕列表 <div>
 | `encoreToSec(t,fps,df)` | Encore 時碼 → 秒（Drop-frame 反運算） |
 | `snapTimeToFrame(t,fps,df)` | 秒數對齊最近影格邊界（**唯一**影格格網） |
 
-> **FPS / 時碼一致性**：播放器時碼、字幕列表、時間軸刻度、播放點為何要、以及如何永遠對齊（含 29.97 NDF 漂移、逐格、mpv 沉降等踩雷與修法），見 [`FPS_時碼一致性.md`](FPS_時碼一致性.md)。程式碼關鍵點以 `FPS-SYNC` 標記，可全域搜尋。
+> **FPS / 時碼一致性**：播放器時碼、字幕列表、時間軸刻度、播放點如何永遠對齊（含 29.97 NDF 漂移、逐格、mpv 沉降等踩雷與修法），見 [`FPS_時碼一致性.md`](FPS_時碼一致性.md)。程式碼關鍵點以 `FPS-SYNC` 標記，可全域搜尋。
 
 ---
 
 ### `tcparse.js`（時碼輸入解析）
+
 `parseTimecodeInput(str) → 秒`
 
 支援格式：
@@ -159,9 +116,10 @@ const sublist  // 字幕列表 <div>
 ---
 
 ### `events.js`（同步事件匯流排）
+
 ```js
-on(evt, fn)    // 訂閱
-emit(evt, ...args) // 同步觸發所有 handler
+on(evt, fn)         // 訂閱
+emit(evt, ...args)  // 同步觸發所有 handler
 ```
 
 **事件清單**：
@@ -209,6 +167,7 @@ State = {
 - `newTrack(name)` — 建立軌道物件
 - `setFps(v)` — 設定影格率（同步更新 UI 下拉選單與時碼顯示）
 - `snapFps(v)` — 將任意 fps 值對齊到允許集合（23.976/24/25/29.97/30）
+- `ensureTrackCount(n)` — 確保至少有 n 條軌道（新專案/init 用）
 - `DESK` — Electron `window.subtool` 橋接物件（`null` 表示瀏覽器模式）
 - `IS_DESKTOP` — 布林，是否為 Electron 模式
 
@@ -235,6 +194,7 @@ State = {
 ### `media.js`（媒體引擎，~1142 行）
 
 #### Media 物件
+
 管理影片播放、Web Audio 多軌混音、ffmpeg 整合。
 
 **音軌種類**（`track.kind`）：
@@ -246,20 +206,16 @@ State = {
 | `buffer` | AudioBuffer（ffmpeg.wasm 解碼後存入記憶體） |
 | `nativeTrack` | 瀏覽器原生多音軌（少數瀏覽器支援） |
 
-**播放狀態機**：
-```
-[無媒體] ─── loadVideoFile/loadDesktopMedia ──→ [有媒體]
-                                                  ↕ play/pause
-                                               [播放中]
-```
-
 **虛擬播放模式**（`video.src` 為空時）：
 - 以 `performance.now()` 計時模擬播放位置
 - `_vTime` + `_vStart` 維護當前時間
 
 **seek 精準對齊**：每次 `seek(t)` 都呼叫 `snapTimeToFrame(t, fps, df)` 確保落在整格。
 
+**空專案 seek**：`State.duration === 0` 時允許 `Math.max(0, t)` 而不 clamp 至 0，讓空專案可移動播放點先排字幕。
+
 #### Wave 物件
+
 波形峰值資料管理。
 
 | 方法 | 說明 |
@@ -269,13 +225,14 @@ State = {
 | `initLive()` | 長片模式：初始化空白峰值陣列，播放時由 `captureLive()` 逐桶填入 |
 | `captureLive()` | 由 `rafLoop` 呼叫，從 AnalyserNode 擷取即時波形 |
 | `registerSources(wavePath, channels)` | 記錄多音源（主混音 + 各聲道），驅動波形來源選擇器 |
-| `selectSource(idx)` | 切換顯示哪個聲道的波形（延遲解碼） |
+| `selectSource(idx)` | 切換顯示哪個聲道的波形（延遲解碼，含競爭條件保護） |
 
 ---
 
 ### `timeline.js`（時間軸，~702 行）
 
 #### 座標系統
+
 ```
 Y軸：
   0               RULER_H(24px)    → 尺（Canvas）
@@ -292,13 +249,16 @@ X軸：
 | 函式 | 說明 |
 |------|------|
 | `drawTimeline()` | 全量重繪（layout + ruler + wave + track rows + playhead） |
+| `redrawTimeline()` | 輕量重繪（ruler + wave + cue blocks + playhead，不重建軌道列） |
 | `drawRuler()` | Canvas 繪製時間尺刻度與備忘三角標記 |
 | `drawWave()` | Canvas 繪製波形（逐像素查峰值桶，跨桶取極值） |
 | `renderTrackRows()` | DOM 重建軌道列、gutter（名稱/眼睛/鎖定/拖曳把手） |
 | `renderCueBlocks()` | DOM 重建字幕區塊（含磁吸/重疊偵測） |
 | `updatePlayhead()` | 僅移動播放頭位置（非全量重繪） |
+| `tlTotal()` | 時間軸總長度：`max(duration, maxCueEnd) + extra`；無影片無字幕時預設 600s（10 分鐘） |
 
 #### 拖曳互動
+
 `mousedown` → 判斷目標（字幕區塊邊緣/中心、時間尺、空白軌道）→ 設定 `drag` 狀態：
 - `move`：群組移動（多選），磁吸播放點 + 其他字幕邊界，防同軌重疊
 - `l`/`r`：縮放左/右邊界，同樣磁吸
@@ -312,6 +272,7 @@ X軸：
 ### `subtitles.js`（字幕列表，~649 行）
 
 #### 字幕資料結構
+
 ```js
 {
   id: 'c1',          // 唯一 id（newId() 遞增）
@@ -332,23 +293,18 @@ X軸：
 | `selectCue(id, opts)` | 選取邏輯（單選/加選/範圍選，自動切換列表軌道） |
 | `addCue(start,end,text,track)` | 新增字幕，自動排序 |
 | `deleteSelected()` | 刪除選取（刪後自動選相鄰條目） |
-| `splitCueAtCursor(c, txtEl)` | Ctrl+Enter 在游標處拆分字幕（插入 U+0001 標記字元取得游標位置） |
+| `splitCueAtCursor(c, txtEl)` | Ctrl+Enter 在游標處拆分字幕 |
 | `searchUpdate()` | 搜尋（支援 `||` OR 多條件），高亮並選取第一個結果 |
 | `copyCues()` / `pasteCues()` | 複製貼上（貼上時以播放點為基準位移時碼） |
 
-#### 字幕列表事件代理
-`sublist` 以事件代理（Event Delegation）處理：
-- `click` → 時碼欄位內嵌編輯（`openInlineTimeEdit`）
-- `mousedown` → 選取邏輯（含 Ctrl/Shift 多選）
-- `dblclick` → 開啟 `contenteditable` 文字編輯
-- `contextmenu` → 字幕右鍵選單
-- `input` / `focusout` → 即時同步 `c.text`、觸發重繪
+字幕列表以**事件代理**（Event Delegation）處理：click（時碼內嵌編輯）、mousedown（選取）、dblclick（文字編輯）、contextmenu（右鍵選單）、input/focusout（同步 `c.text`）。
 
 ---
 
 ### `keyboard.js`（鍵盤 + I/O + JKL，~431 行）
 
 #### JKL 穿梭輪
+
 ```
 J 鍵：-1 → -5（每按一次 -0.5）— 負速度以 setInterval 逐格倒退
 K 鍵：暫停（_jklSpeed = 0）
@@ -363,10 +319,10 @@ L 鍵：+1 → +5（每按一次 +0.5）— 正速度以 Media.setRate 加速
 | `I` | 設定選取字幕起點（無選取則新建） |
 | `O` / `C` | 設定選取字幕終點（上字幕模式下自動跳下一句） |
 | `←/→` | 逐格跳（1格）；+Shift = 1秒；+Ctrl+Shift = 5秒 |
-| `↑/↓` | 跳到相鄰字幕起點；+Ctrl = 步進邊界（start→end→next） |
-| `Ctrl+↑/↓` | `stepBoundary`：在起/訖邊界間逐步移動（含「預覽」機制，同向再按一次才切換選取） |
+| `↑/↓` | 跳到相鄰字幕起點 |
+| `Ctrl+↑/↓` | 步進邊界點（起點→終點→下句起點…） |
 | `Shift+↑/↓` | 跳到影片開頭/結尾 |
-| `Ctrl+Shift+↑/↓` | 跳到同軌第一/最後字幕（`jumpToFirstLastCue`） |
+| `Ctrl+Shift+↑/↓` | 跳到同軌第一/最後字幕 |
 | `P` | 多選位移：將選取字幕整體移到播放點 |
 | `Delete` | 刪除選取 |
 | `Ctrl+Z/Shift+Ctrl+Z` | Undo/Redo |
@@ -409,9 +365,10 @@ L 鍵：+1 → +5（每按一次 +0.5）— 正速度以 Media.setRate 加速
   "cues": [{ "start": 10.5, "end": 13.2, "text": "...", "track": 1, "timed": true }]
 }
 ```
+
 注意：`cues.track` 在 v2 格式中為 **1-based**（載入時 -1 轉為 0-based）。
 
-**自動備份**：第一次編輯前顯示「請先儲存」提示（`ensureProjectSaved`），儲存後每 3 分鐘自動備份一次。桌面版寫入專案旁的 `.subtool_AutoSave/` 子目錄；瀏覽器版改存入 `localStorage`（`subtool_autosave_data` / `_name`，靜默更新，避免每 3 分鐘觸發下載；額度滿時靜默失敗）。
+**自動備份**：第一次編輯前顯示「請先儲存」提示（`ensureProjectSaved`），儲存後每 3 分鐘自動備份一次。桌面版寫入專案旁的 `.subtool_AutoSave/` 子目錄；瀏覽器版改存入 `localStorage`（靜默更新，額度不足時靜默失敗）。
 
 ---
 
@@ -419,11 +376,11 @@ L 鍵：+1 → +5（每按一次 +0.5）— 正速度以 Media.setRate 加速
 
 ```js
 History = {
-  stack: [],  // [{label, snap}]，最多 120 步
-  hi: -1,     // 目前所在位置
-  snap()      // structuredClone(State.cues + tracks + notes + fps)
-  record(label)  // 比對前後狀態，相同則不記錄
-  restore(i)     // 還原到第 i 步
+  stack: [],    // [{label, snap}]，最多 120 步
+  hi: -1,       // 目前所在位置
+  snap()        // structuredClone(State.cues + tracks + notes + fps)
+  record(label) // O(1) 結構比對後才 JSON 比對；相同則不記錄
+  restore(i)    // 還原到第 i 步
   undo() / redo()
 }
 ```
@@ -470,23 +427,18 @@ History = {
 
 ---
 
-### `help.js`（說明對話框）
-`showHelp()` — 以 `openModal` 渲染鍵盤快捷鍵說明表格。
-
----
-
 ## 4. 模組相依關係
 
 ```
-                       events.js ←──────────────────────────────┐
-                          ↓ on/emit                              │
-              ┌───────── app.js ──────────────────────────┐     │
-              │   (協調層，訂閱所有事件)                   │     │
-              │                                           │     │
-    dom.js  util.js  time.js  tcparse.js                 │     │
-      ↑        ↑        ↑         ↑                      │     │
-      └────────┴────────┴─────────┘                      │     │
-              state.js ─────────────────────────────────────────┘
+                       events.js ←─────────────────────────────────┐
+                          ↓ on/emit                                 │
+              ┌───────── app.js ────────────────────────────┐      │
+              │   (協調層，訂閱所有事件)                     │      │
+              │                                             │      │
+    dom.js  util.js  time.js  tcparse.js                   │      │
+      ↑        ↑        ↑         ↑                        │      │
+      └────────┴────────┴─────────┘                        │      │
+              state.js ────────────────────────────────────────────┘
               ↑    ↑    ↑    ↑    ↑    ↑    ↑    ↑    ↑
           formats  ui  media timeline subtitles keyboard subio
                          ↑       ↑        ↑       ↑      ↑
@@ -542,6 +494,7 @@ emit('duration:known') → app.js → onDurationKnown → 更新 UI
 ## 6. Electron 與瀏覽器雙模式差異
 
 ### 偵測方式
+
 ```js
 // state.js
 const DESK = window.subtool?.isDesktop ? window.subtool : null;
@@ -560,43 +513,12 @@ const IS_DESKTOP = !!DESK;
 | **匯入字幕** | `FileReader` | `DESK.importSub()` IPC |
 | **匯出字幕** | `URL.createObjectURL` 觸發下載 | `DESK.exportSub()` IPC 寫檔至磁碟 |
 | **存/讀專案** | 下載檔案 | `DESK.saveProject()` / `loadProject()` IPC |
-| **自動備份** | 每 3 分鐘靜默存入 `localStorage`（不再觸發下載） | 每 3 分鐘寫入 `.subtool_AutoSave/` 子目錄 |
+| **自動備份** | 每 3 分鐘靜默存入 `localStorage` | 每 3 分鐘寫入 `.subtool_AutoSave/` 子目錄 |
 | **Video 安全性** | `webSecurity: true`（受 CORS 限制） | `webSecurity: false`（允許 `file://` 媒體） |
 
 ### `window.subtool`（Electron contextBridge）
-由 `electron/preload.js` 透過 `contextBridge.exposeInMainWorld` 暴露，提供：
 
-```
-window.subtool = {
-  isDesktop: true,
-  openMedia()              → 系統開檔對話框，回傳路徑
-  probe(path)              → ffprobe：duration/fps/video/audio 資訊
-  stat(path)               → 檔案是否存在 + 大小
-  fileURL(path)            → 本地路徑 → 可播放的 URL
-  ingest({path,audio,...}) → 系統 ffmpeg：轉 proxy + 抽聲道 + 波形（單次多輸出）
-  streamIngest({...})      → 邊轉邊播（快取機制：hash 比對，相同檔案秒開）
-  waveAudio(path, dur)     → 抽取 8kHz mono WAV
-  importSub(ext)           → 系統開檔（字幕）
-  exportSub(name,b64,ext)  → 系統儲存（字幕）
-  saveProject(name,b64)    → 系統儲存（.subtool）
-  loadProject()            → 系統開檔（.subtool）
-  writeProject(path,b64)   → 直接寫入指定路徑（自動備份用）
-  readB64(path)            → 讀檔回 base64
-  cleanupAudio(path)       → 刪除暫存音訊檔
-  mpv: {                   → mpv 整合（僅在偵測到 mpv.exe 時可用）
-    detect()               → 檢查 mpv 是否可用
-    launch({src,bounds,audio}) → 啟動 mpv 嵌入播放
-    play/pause/seek/rate/mute/quit/setBounds/onEvent/show
-  }
-}
-```
-
-### Electron 主程序（`electron/main.js`）關鍵行為
-- **ffmpeg/ffprobe 偵測**：優先內建（`electron/ffmpeg/*.exe`），fallback 系統安裝或常見路徑
-- **硬體加速**：嘗試 NVENC/QSV/AMF，fallback libx264；`-pix_fmt yuv420p` 確保瀏覽器相容
-- **ingest 快取**：以 `MD5(path + size + mtime)` 為 key，命中則直接回傳已有檔案（秒開）
-- **streamIngest 邊播邊轉**：先回傳 HLS 或分段 mp4 URL 供 `<video>` 播放，ffmpeg 在背景繼續處理；完成後 `desk:ingest-done` 事件載入音軌
-- **tempFiles 清理**：程序退出時刪除所有暫存檔（`TMP = %TEMP%/subtool_cache`）
+由 `electron/preload.js` 透過 `contextBridge.exposeInMainWorld` 暴露。完整 IPC 通道列表見 [`ELECTRON_MAINTENANCE.md`](ELECTRON_MAINTENANCE.md) 第 2 節。
 
 ---
 
@@ -606,27 +528,23 @@ window.subtool = {
 
 字幕在兩個地方渲染：**字幕列表**（側欄 DOM）與**影片疊層**（`#videoSub` 絕對定位 div）。
 
-#### 影片疊層渲染（`renderVideoSub`）
-```
-1. 取得當前播放時間 t = Media.displayTime()
-2. 對每個可見軌道，篩選 c.start <= t <= c.end 的字幕
-3. 依軌道 posPct（距底部百分比）計算垂直位置
-4. 設定 #videoSub div 的 innerHTML（escapeHTML + \n → <br>）
-```
+**影片疊層渲染（`renderVideoSub`）**：
+1. 取得當前播放時間 `t = Media.displayTime()`
+2. 對每個可見軌道，篩選 `c.start <= t <= c.end` 的字幕
+3. 依軌道 `posPct`（距底部百分比）計算垂直位置
+4. 設定 `#videoSub` div 的 innerHTML（escapeHTML + `\n` → `<br>`）
 
-#### mpv 模式字幕渲染（`refreshMpvSubs`）
-```
-1. 以 SubFormats.toASS(State.cues, fps, tracks, ...) 序列化全部字幕
+**mpv 模式字幕渲染（`refreshMpvSubs`）**：
+1. 以 `SubFormats.toASS(State.cues, fps, tracks, ...)` 序列化全部字幕
 2. base64 編碼後透過 IPC 傳給 Electron 主程序
-3. 主程序呼叫 mpv.loadSubtitles(b64) → 寫入暫存 .ass → mpv --sub-file 載入
-```
+3. 主程序呼叫 mpv `sub-reload` → 載入暫存 .ass 檔案
+
 防抖 100ms 避免快速連續輸入時頻繁重建。
 
 ---
 
-### 7.2 時間軸互動流程
+### 7.2 時間軸字幕區塊拖曳
 
-#### 字幕區塊拖曳（move 模式）
 ```
 mousedown on .cue-block
   → 計算所有被拖字幕的 {prevEnd, nextStart}（neighborBounds）
@@ -648,9 +566,8 @@ mouseup
 
 ---
 
-### 7.3 音訊混音流程
+### 7.3 音訊混音 Web Audio 圖形
 
-#### Web Audio 圖形
 ```
 video element
   └→ createMediaElementSource
@@ -664,108 +581,16 @@ video element
   └→ createMediaElementSource
        └→ ChannelSplitter(N)
            ├→ GainNode(ch0) → master
-           ├→ ...
+           ...
            └→ AnalyserNode(chN)
-
-ffmpeg 抽取 buffer
-  └→ AudioBuffer
-       └→ createBufferSource（每次 play 重建）
-            └→ GainNode → master
 ```
 
-#### 靜音/獨奏邏輯（`applyGains`）
+**靜音/獨奏邏輯（`applyGains`）**：
 ```
 anySolo = tracks.some(t => t.solo && !t._srcHidden)
-activeMix = 是否有可聽見的 mix 軌（element/buffer）
-
 for each track:
   audible = anySolo ? track.solo : !track.muted
   gain.value = audible ? track.volume : 0
-
-  if kind === 'native' && activeMix && !solo:
-    gain.value = 0  ← mix 音軌存在時壓制原生音訊，避免雙重聲音
-
+  if kind === 'native' && activeMix: gain.value = 0  // 有 mix 軌則壓制原生音
 master.gain.value = State.muted ? 0 : 1
 ```
-
-#### 音源切換（`switchSource`）
-切換「影片原音」或「外部音檔 N」時，非目標音源的軌道設 `_srcHidden = true`，`applyGains` 將其 gain 設為 0。
-
----
-
-### 7.4 匯入匯出流程
-
-#### 匯入
-```
-importSub()
-  → 取得文字（pickFile 或 DESK.importSub IPC）
-  → 若無影片，彈窗詢問 FPS
-  → detectSubFormat → 解析（parseSRT / parseASS / parseEncore / parseTXT）
-  → convertLineBreaks（// 或 \\ → \n）
-  → _openImportModal：選目標軌道（新增或現有）
-  → snapTimeToFrame 對齊每條 start/end
-  → 寫入 State.cues → sortCues → emit('render:all')
-```
-
-#### 匯出
-```
-showExportDialog()
-  → 選格式（SRT/ASS/Encore/TXT）
-  → 多軌：勾選要匯出的軌道
-  → doExport(kind, cues, trackName)
-    → 序列化（toSRT / toASS / toEncore / toTXT）
-    → encodeUTF16LE（統一 UTF-16 LE + BOM 輸出）
-    → Web: downloadBytes → 瀏覽器下載
-    → Desktop: DESK.exportSub IPC → 系統另存對話框
-```
-
----
-
-### 7.5 I/O 上字幕流程
-
-```
-播放中或暫停
-  → 按 I：setIn()
-    → ensureProjectSaved()（首次編輯前）
-    → 無選取：addCue(t, t+2, '', 0)（新建 2 秒空白字幕）
-    → 有選取：c.start = t，若 end <= start 則 end = start + 0.5
-
-  → 按 O：setOut()
-    → c.end = t
-    → 若 subMode（上字幕模式）：autoAdvanceSubMode()
-      → 自動選取同軌下一條字幕
-      → 最後一條完成後關閉 subMode
-```
-
-#### 上字幕模式（`State.subMode`）
-適合「先建好空白字幕框，邊看邊標時間」的工作流：
-1. 匯入純文字字幕（所有字幕 `timed=false`）
-2. 開啟上字幕模式（`subModeBtn`）
-3. 播放影片：看到字幕對應畫面時按 I → O
-4. O 後自動跳下一條，直到全部完成
-
----
-
-### 7.6 Undo/Redo 流程
-
-```
-任何狀態變更函式最後呼叫 recordHistory('動作描述')
-  → History.snap()：structuredClone(cues + tracks + notes + fps)
-  → 比對與前一步是否相同（JSON.stringify）
-  → 不同：push 到 stack，hi++
-
-Ctrl+Z → History.undo()
-  → History.restore(hi-1)
-    → structuredClone 還原 State.cues / tracks / notes
-    → setFps（若影格率有變）
-    → emit('render:all') + drawTimeline() + renderNotes()
-
-Ctrl+Shift+Z → History.redo()
-  → History.restore(hi+1)
-```
-
-歷史面板（`A` 鍵開關）顯示所有步驟，點擊可直接跳到任意步驟。
-
----
-
-*文件由 Claude Code 根據原始碼自動分析整理，如有程式碼更新請同步維護此文件。*
