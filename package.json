@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "electron": "vite build && electron .",
     "electron:dev": "electron . --dev",
-    "dist": "vite build && electron-builder"
+    "dist": "vite build && electron-builder",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "build": {
     "appId": "com.subtool.app",
@@ -36,7 +38,9 @@
     "electron-builder": "^25.1.8",
     "eslint": "^10.5.0",
     "globals": "^17.6.0",
+    "jsdom": "^29.1.1",
     "vite": "^5.4.10",
-    "vite-plugin-singlefile": "^2.0.3"
+    "vite-plugin-singlefile": "^2.0.3",
+    "vitest": "^4.1.9"
   }
 }
