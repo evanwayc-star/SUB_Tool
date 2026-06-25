@@ -1,6 +1,8 @@
 參考資料/
 .claude/
 release/
+.gitignore
+.gitattributes
 *.mxf
 *.mov
 *.mp4
@@ -8,6 +10,7 @@ release/
 *.mp3
 *.wav
 *.m4a
+
 
 # Dependencies and executables
 node_modules/
