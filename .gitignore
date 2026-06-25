@@ -1,10 +1,6 @@
 參考資料/
 .claude/
-dist/
 release/
-node_modules/
-electron/mpv/
-electron/ffmpeg/
 *.mxf
 *.mov
 *.mp4
@@ -12,3 +8,9 @@ electron/ffmpeg/
 *.mp3
 *.wav
 *.m4a
+
+# Dependencies and executables
+node_modules/
+electron/ffmpeg/
+electron/mpv/
+*.exe
