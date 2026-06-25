@@ -339,10 +339,15 @@ function renderCueBlocks(){
   tlTracks.querySelectorAll('.cue-block,.cue-overlap').forEach(e=>e.remove());
   const rows=[...tlTracks.querySelectorAll('.tl-track')];
   const vw=viewportW(); const t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
+  // P2：單趟 O(N) 依「邏輯軌道」分桶（取代每軌各跑一次 State.cues.filter 的 O(tracks×N)），
+  // 同一趟順便建立可見區塊。重疊掃描改用分桶結果。
+  const byTrack=new Map();
   for(const c of State.cues){
     if(c.timed===false)continue;
-    if(c.end<t0||c.start>t1)continue;
-    const row=rows[Math.min(c.track||0,rows.length-1)]; if(!row)continue;
+    const tk=c.track||0;
+    let arr=byTrack.get(tk); if(!arr){ arr=[]; byTrack.set(tk,arr); } arr.push(c);
+    if(c.end<t0||c.start>t1)continue; // 視窗裁切後才建 DOM
+    const row=rows[Math.min(tk,rows.length-1)]; if(!row)continue;
     const el=document.createElement('div');
     el.className='cue-block'+(isSel(c.id)?' sel':'')+(isSel(c.id)&&State.selectedIds.length>1?' multi':'')+(c.id===State.selectedId?' primary':'');
     el.style.left=timeToX(c.start)+'px';
@@ -351,10 +356,9 @@ function renderCueBlocks(){
     el.innerHTML='<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;">'+escapeHTML(c.text||'').replace(/\n/g,'<br>')+'</div><div class="edge r"></div>';
     row.appendChild(el);
   }
-  // 重疊區域：粉紅底色
-  for(let tk=0;tk<State.trackCount;tk++){
+  // 重疊區域：粉紅底色（用分桶結果，雙層 break；保留每桶排序以防 State.cues 暫時未排序）
+  for(const [tk,tc] of byTrack){
     const row=rows[Math.min(tk,rows.length-1)]; if(!row)continue;
-    const tc=State.cues.filter(c=>c.timed!==false&&(c.track||0)===tk);
     tc.sort((a,b)=>a.start-b.start);
     for(let i=0;i<tc.length-1;i++){
       for(let j=i+1;j<tc.length;j++){
@@ -512,9 +516,10 @@ tlScroll.addEventListener('mousedown',e=>{
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
-      .map(cc=>{ const b=neighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; });
+      .map(cc=>{ const b=neighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
       snaps:snapTargets(exSet), thr:8/State.pxPerSec};
+    tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
   }
   if(y<tracksTop()){ // 時間尺 + 波形帶：拖曳移動播放點
@@ -590,10 +595,10 @@ const _handleDragUpdate = (e) => {
     drag.c.end=snapFrame(ne);
   }
   
-  // 優化：拖曳期間只更新樣式，不全量重繪
+  // P3：拖曳期間只更新樣式，用 mousedown 快取的 element 參照（免每 frame 字串選擇器、免全掃 overlap）
   const rows = tlTracks.querySelectorAll('.tl-track');
   for (const it of drag.grp) {
-    const el = tlTracks.querySelector(`.cue-block[data-id="${it.c.id}"]`);
+    const el = it.el;
     if (el) {
       el.style.left = timeToX(it.c.start) + 'px';
       el.style.width = Math.max(2, (it.c.end - it.c.start) * State.pxPerSec) + 'px';
@@ -603,9 +608,6 @@ const _handleDragUpdate = (e) => {
       }
     }
   }
-  // 拖曳時暫時隱藏重疊提示區塊，放開滑鼠時會隨 renderAll 重新計算
-  tlTracks.querySelectorAll('.cue-overlap').forEach(e => e.style.display = 'none');
-  
   if(drag.c) renderSubRow(drag.c.id);
 };
 

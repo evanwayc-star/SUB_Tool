@@ -582,6 +582,13 @@ sublist.addEventListener('contextmenu', e => {
   showCueMenu(e.clientX, e.clientY);
 });
 
+// P6：打字時把「重算類」工作（時間軸區塊全軌 filter+sort+重疊重算、檢查面板 7 趟全軌掃描）
+// 防抖合併，避免每個字元都全軌重算；該列文字回顯與影片字幕維持即時。
+let _heavyEditT = null;
+function _debouncedHeavyEdit() {
+  clearTimeout(_heavyEditT);
+  _heavyEditT = setTimeout(() => { renderCueBlocks(); renderCheckPanel(); }, 120);
+}
 sublist.addEventListener('input', e => {
   const txt = e.target.closest('.txt');
   if (!txt) return;
@@ -590,13 +597,14 @@ sublist.addEventListener('input', e => {
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
   if (!c) return;
-  
+
   let val = txt.innerText;
   if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
   c.text = val;
   const rc2 = _rowClass(c.text);
   row.classList.remove('blank', 'two-line', 'multi-line'); if (rc2) row.classList.add(rc2);
-  renderCueBlocks(); emit('render:videoSub'); emit('mpv:refreshSubs'); renderCheckPanel();
+  emit('render:videoSub'); emit('mpv:refreshSubs'); // 即時
+  _debouncedHeavyEdit();                            // 防抖：時間軸區塊 + 檢查面板
 });
 
 sublist.addEventListener('focusout', e => {
