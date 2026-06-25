@@ -18,6 +18,25 @@ const tempFiles = new Set();
 let tmpSeq = 0;
 let _currentIngestProc = null; // S1: 追蹤目前執行中的 ingest ffmpeg，換檔時強制 kill
 
+/* S1：IPC 路徑白名單 — 僅允許存取「快取根」與「使用者本 session 透過對話框開過或
+   經 ffmpeg/ffprobe 處理過的媒體所在目錄」。防止 renderer 被惡意字幕/專案檔注入後，
+   透過 fs:readB64 / fs:writeProject / fs:fileURL 讀寫磁碟任意位置。
+   注意：屬桌面(Electron)專屬強化，需在桌面版實機煙霧測試（開 MXF、存專案、重載含媒體的專案）。 */
+const _allowedDirs = new Set();
+function allowDir(p) { try { if (p) _allowedDirs.add(path.resolve(p)); } catch (e) {} }
+function allowFileDir(p) { try { if (typeof p === 'string' && p) allowDir(path.dirname(p)); } catch (e) {} }
+function isAllowedPath(p) {
+  if (typeof p !== 'string' || !p) return false;
+  let rp; try { rp = path.resolve(p); } catch (e) { return false; }
+  const roots = [CACHE, TMP, ..._allowedDirs]
+    .filter(Boolean)
+    .map(r => { try { return path.resolve(r); } catch (e) { return null; } })
+    .filter(Boolean);
+  return roots.some(root => rp === root || rp.startsWith(root + path.sep));
+}
+/* S5：不可猜測的串流 job id（取代 Date.now() / 可推導的 cacheKey） */
+function newJobId(prefix) { return prefix + crypto.randomBytes(12).toString('hex'); }
+
 /* ---- 偵測 ffmpeg / ffprobe（優先使用內建版本，fallback 系統安裝） ---- */
 function detect(bin, extra) {
   const bundled = [
@@ -211,6 +230,11 @@ function createWindow() {
   mainWin.on('restore', () => { if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible) { try { _mpvWin.show(); } catch (e) {} reapplyMpv(); } });
   mainWin.on('minimize', () => { if (_mpvWin && !_mpvWin.isDestroyed()) { try { _mpvWin.hide(); } catch (e) {} } });
   mainWin.on('closed', () => { destroyMpvWin(); });
+  // S2：補齊 Electron 安全基線 — 拒絕開新視窗、限制導航只能停在本機應用頁（與 dev 的 localhost）
+  mainWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWin.webContents.on('will-navigate', (ev, u) => {
+    if (!(u.startsWith('file:') || u.startsWith('http://localhost:8777'))) ev.preventDefault();
+  });
   if (process.argv.includes('--dev')) {
     mainWin.loadURL('http://localhost:8777'); // 需先執行 npm run dev
     mainWin.webContents.openDevTools({ mode: 'detach' });
@@ -257,7 +281,7 @@ async function ensureHttpServer() {
         res.writeHead(206, {
           'Content-Type': 'video/mp4',
           'Content-Range': `bytes ${start}-${end}/${job.done ? sz : '*'}`,
-          'Content-Length': len, 'Accept-Ranges': 'bytes'
+          'Content-Length': len, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' // S5
         });
         fs.createReadStream(job.filePath, { start, end }).pipe(res);
       };
@@ -291,7 +315,7 @@ ipcMain.handle('app:status', () => ({
   ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: VENC
 }));
 
-ipcMain.handle('fs:fileURL', (e, p) => url.pathToFileURL(p).href);
+ipcMain.handle('fs:fileURL', (e, p) => { if (!isAllowedPath(p)) { console.warn('[sec] fileURL blocked:', p); return null; } return url.pathToFileURL(p).href; });
 ipcMain.handle('fs:stat', (e, p) => { try { const s = fs.statSync(p); return { exists: true, size: s.size }; } catch (err) { return { exists: false }; } });
 
 ipcMain.handle('dialog:openMedia', async () => {
@@ -302,14 +326,18 @@ ipcMain.handle('dialog:openMedia', async () => {
       { name: '全部', extensions: ['*'] }
     ]
   });
-  return r.canceled ? null : r.filePaths[0];
+  if (r.canceled) return null;
+  allowFileDir(r.filePaths[0]); // S1：把開啟媒體的目錄加入白名單
+  return r.filePaths[0];
 });
 ipcMain.handle('dialog:openAudio', async () => {
   const r = await dialog.showOpenDialog(mainWin, {
     title: '加入音軌檔', properties: ['openFile', 'multiSelections'],
     filters: [{ name: '音訊', extensions: ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg'] }]
   });
-  return r.canceled ? [] : r.filePaths;
+  if (r.canceled) return [];
+  r.filePaths.forEach(allowFileDir); // S1
+  return r.filePaths;
 });
 
 ipcMain.handle('dialog:openProject', async () => {
@@ -318,12 +346,14 @@ ipcMain.handle('dialog:openProject', async () => {
     filters: [{ name: 'SUB Tool 專案', extensions: ['subtool', 'json'] }]
   });
   if (r.canceled) return null;
+  allowFileDir(r.filePaths[0]); // S1：專案目錄（含旁邊的媒體/autosave）加入白名單
   const buf = fs.readFileSync(r.filePaths[0]);
   return { path: r.filePaths[0], b64: buf.toString('base64') };
 });
 ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
   const r = await dialog.showSaveDialog(mainWin, { title: '儲存專案', defaultPath: name, filters: [{ name: 'SUB Tool 專案', extensions: ['subtool'] }] });
   if (r.canceled) return null;
+  allowFileDir(r.filePath); // S1
   fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
   return r.filePath;
 });
@@ -349,6 +379,7 @@ ipcMain.handle('cache:clearAll', (e, currentSrc) => clearAllCache(currentSrc));
 
 ipcMain.handle('ffprobe', (e, p) => {
   if (!FFPROBE) throw new Error('找不到 ffprobe');
+  allowFileDir(p); // S1：探測過的媒體目錄加入白名單（涵蓋從專案重載、未經對話框的媒體路徑）
   const r = spawnSync(FFPROBE, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', p], { maxBuffer: 1 << 24 });
   if (r.status !== 0) throw new Error('ffprobe 失敗');
   const j = JSON.parse(r.stdout.toString());
@@ -400,6 +431,7 @@ ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
    每聲道以 asplit 分流（不直接 -map 同一條 stream，避免 filtergraph 與 -map 雙重消費而 deadlock）。
    結果存入持久快取（依 cacheKeyFor），重開同檔直接命中、秒開。 */
 ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio }) => {
+  allowFileDir(src); // S1
   // S1: 強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源
   if (_currentIngestProc) { try { _currentIngestProc.kill(); } catch (e2) {} _currentIngestProc = null; }
   const audioArr = Array.isArray(audio) ? audio : [];
@@ -461,13 +493,18 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
 });
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
-ipcMain.handle('fs:readB64', (e, p) => { try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; } });
-ipcMain.handle('fs:writeProject', (e, { path: p, b64 }) => { try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, Buffer.from(b64,'base64')); return p; } catch(err){ return null; } });
+ipcMain.handle('fs:readB64', (e, p) => { if (!isAllowedPath(p)) { console.warn('[sec] readB64 blocked:', p); return null; } try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; } });
+ipcMain.handle('fs:writeProject', (e, { path: p, b64 }) => {
+  // S1：限副檔名 + 路徑白名單（autosave 落在媒體目錄旁，已於開檔時加入白名單）
+  if (!/\.(subtool|json)$/i.test(p || '') || !isAllowedPath(p)) { console.warn('[sec] writeProject blocked:', p); return null; }
+  try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, Buffer.from(b64, 'base64')); return p; } catch (err) { return null; }
+});
 
 /* ---- 邊轉邊播 ingest（MXF 等非原生格式秒開）：fragmented MP4 + 本機 HTTP 伺服器 ----
    video 轉成 fragmented MP4（empty_moov），前幾秒輸出後就可播放；音軌/波形同一 pass 在背景繼續。
    快取命中時行為與 ffmpeg:ingest 相同（秒開）。 */
 ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) => {
+  allowFileDir(src); // S1
   // S1: 強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源
   if (_currentIngestProc) { try { _currentIngestProc.kill(); } catch (e2) {} _currentIngestProc = null; }
   const audioArr = Array.isArray(audio) ? audio : [];
@@ -479,7 +516,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   const hit = readCache(src);
   if (hit && hit.meta.proxy && fs.existsSync(hit.meta.proxy)) {
     if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
-    const jid = 'c-' + cacheKeyFor(src);
+    const jid = newJobId('c-'); // S5: 不可猜測
     _hJobs.set(jid, { filePath: hit.meta.proxy, done: true });
     return Object.assign({ cached: true, streamUrl: `http://127.0.0.1:${port}/${jid}` }, hit.meta);
   }
@@ -527,7 +564,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '128k', c.file); });
   if (waveLabel) args.push('-map', waveLabel, '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', wave);
 
-  const jid = 'l-' + Date.now();
+  const jid = newJobId('l-'); // S5: 不可猜測
   const job = { filePath: proxy, done: false, error: null };
   _hJobs.set(jid, job);
 
