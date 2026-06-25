@@ -1,8 +1,6 @@
 參考資料/
 .claude/
 release/
-.gitignore
-.gitattributes
 *.mxf
 *.mov
 *.mp4
