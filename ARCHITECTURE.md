@@ -1,6 +1,6 @@
 # SUB Tool — 架構與程式碼說明文件
 
-> 版本：v2.8.0｜最後更新：2026-06-24
+> 版本：v2.8.0｜最後更新：2026-06-25
 
 ---
 
@@ -85,7 +85,7 @@ Vite 的模組根目錄進入點，僅兩行：引入 CSS 與 `app.js`。
 
 ---
 
-### `app.js`（協調層，~812 行）
+### `app.js`（協調層，~860 行）
 **職責**：組裝所有模組、訂閱事件、影片事件處理、`doAction` 指令分派、面板/選單接線、`init` / `initDesktop`。
 
 **不**負責任何渲染邏輯——只負責「知道哪個事件要呼叫哪個函式」。
@@ -139,9 +139,12 @@ const sublist  // 字幕列表 <div>
 | `fmtClock(s)` | 秒 → `00:00:00.000`（UI 顯示） |
 | `secToSRT(s)` | 秒 → SRT 時碼（`,` 分隔毫秒） |
 | `secToASS(s)` | 秒 → ASS 時碼（`.` 分隔百分秒） |
+| `encoreParts(s,fps,df)` | 秒 → 時碼分量 `{hh,mm,ss,ff}`（**唯一**換算來源，`secToEncore`/時間軸刻度共用） |
 | `secToEncore(s,fps,df)` | 秒 → Encore 時碼（H:M:S:F），支援 SMPTE 29.97 Drop-frame |
 | `encoreToSec(t,fps,df)` | Encore 時碼 → 秒（Drop-frame 反運算） |
-| `snapTimeToFrame(t,fps,df)` | 秒數對齊最近影格邊界 |
+| `snapTimeToFrame(t,fps,df)` | 秒數對齊最近影格邊界（**唯一**影格格網） |
+
+> **FPS / 時碼一致性**：播放器時碼、字幕列表、時間軸刻度、播放點為何要、以及如何永遠對齊（含 29.97 NDF 漂移、逐格、mpv 沉降等踩雷與修法），見 [`FPS_時碼一致性.md`](FPS_時碼一致性.md)。程式碼關鍵點以 `FPS-SYNC` 標記，可全域搜尋。
 
 ---
 
@@ -229,7 +232,7 @@ State = {
 
 ---
 
-### `media.js`（媒體引擎，~1091 行）
+### `media.js`（媒體引擎，~1142 行）
 
 #### Media 物件
 管理影片播放、Web Audio 多軌混音、ffmpeg 整合。
@@ -270,7 +273,7 @@ State = {
 
 ---
 
-### `timeline.js`（時間軸，~637 行）
+### `timeline.js`（時間軸，~702 行）
 
 #### 座標系統
 ```
@@ -306,7 +309,7 @@ X軸：
 
 ---
 
-### `subtitles.js`（字幕列表，~645 行）
+### `subtitles.js`（字幕列表，~649 行）
 
 #### 字幕資料結構
 ```js
@@ -343,7 +346,7 @@ X軸：
 
 ---
 
-### `keyboard.js`（鍵盤 + I/O + JKL，~429 行）
+### `keyboard.js`（鍵盤 + I/O + JKL，~431 行）
 
 #### JKL 穿梭輪
 ```
@@ -374,7 +377,7 @@ L 鍵：+1 → +5（每按一次 +0.5）— 正速度以 Media.setRate 加速
 
 ---
 
-### `subio.js`（匯入/匯出，~331 行）
+### `subio.js`（匯入/匯出，~330 行）
 
 **格式自動辨識** (`detectSubFormat`)：依副檔名優先，次以文字特徵（`[Script Info]` → ASS；`\d+ --> \d+` → SRT；時碼模式 → Encore；其餘 → TXT）。
 
@@ -408,7 +411,7 @@ L 鍵：+1 → +5（每按一次 +0.5）— 正速度以 Media.setRate 加速
 ```
 注意：`cues.track` 在 v2 格式中為 **1-based**（載入時 -1 轉為 0-based）。
 
-**自動備份**：第一次編輯前顯示「請先儲存」提示（`ensureProjectSaved`），儲存後每 3 分鐘自動備份到 `.subtool_AutoSave/` 子目錄。
+**自動備份**：第一次編輯前顯示「請先儲存」提示（`ensureProjectSaved`），儲存後每 3 分鐘自動備份一次。桌面版寫入專案旁的 `.subtool_AutoSave/` 子目錄；瀏覽器版改存入 `localStorage`（`subtool_autosave_data` / `_name`，靜默更新，避免每 3 分鐘觸發下載；額度滿時靜默失敗）。
 
 ---
 
@@ -557,7 +560,7 @@ const IS_DESKTOP = !!DESK;
 | **匯入字幕** | `FileReader` | `DESK.importSub()` IPC |
 | **匯出字幕** | `URL.createObjectURL` 觸發下載 | `DESK.exportSub()` IPC 寫檔至磁碟 |
 | **存/讀專案** | 下載檔案 | `DESK.saveProject()` / `loadProject()` IPC |
-| **自動備份** | 每 3 分鐘觸發瀏覽器下載 | 每 3 分鐘寫入 `.subtool_AutoSave/` 子目錄 |
+| **自動備份** | 每 3 分鐘靜默存入 `localStorage`（不再觸發下載） | 每 3 分鐘寫入 `.subtool_AutoSave/` 子目錄 |
 | **Video 安全性** | `webSecurity: true`（受 CORS 限制） | `webSecurity: false`（允許 `file://` 媒體） |
 
 ### `window.subtool`（Electron contextBridge）

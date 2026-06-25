@@ -280,8 +280,9 @@ window.addEventListener('keyup',e=>{
   if(e.key==='ArrowLeft'||e.key==='ArrowRight'){ if(_jklSpeed!==0)jklReset(); }
 });
 function nudge(d){
-  // 以權威播放點（暫停時為已對齊幀格的 _lastSeekTime）為基準，避免讀 video.currentTime
-  // 的浮點 ε 經 seek 重新 round 後被放大，造成逐格時跳兩格／退不動（29.97fps 尤甚）
+  // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點（暫停時為已對齊幀格的 _lastSeekTime）
+  // 為基準，避免讀 video.currentTime 的浮點 ε 經 seek 重新 round 後被放大，
+  // 造成逐格時跳兩格／退不動（29.97fps 尤甚）
   const t=Media.displayTime()+d;
   Media.seek(t);
   updatePlayhead(); 

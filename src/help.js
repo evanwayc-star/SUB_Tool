@@ -8,9 +8,10 @@ function showHelp(){
   `<b>▍播放控制</b>
   <table class="keys">
    <tr><td><kbd>Space</kbd></td><td>播放 / 暫停</td></tr>
-   <tr><td><kbd>J</kbd></td><td>倒帶（每按一次加速：1× → 1.5× → 2× → 2.5× → 3×，到頂維持 3×）</td></tr>
+   <tr><td><kbd>J</kbd></td><td>倒帶穿梭（每按一次加速：1× → 1.5× → 2× …每階 0.5×，最高 5×）</td></tr>
    <tr><td><kbd>K</kbd></td><td>停止 / 暫停</td></tr>
-   <tr><td><kbd>L</kbd></td><td>正播加速（1× → 1.5× → 2× → 2.5× → 3×，到頂維持 3×）</td></tr>
+   <tr><td><kbd>L</kbd></td><td>正播穿梭（每按一次加速：1× → 1.5× → 2× …每階 0.5×，最高 5×）</td></tr>
+   <tr><td><kbd>2</kbd> / <kbd>5</kbd></td><td>跳到 下一句 / 上一句 字幕起點「前 5 格」（pre-roll 預覽）</td></tr>
    <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>前 / 後一格</td></tr>
    <tr><td><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd></td><td>前 / 後 1 秒</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd></td><td>前 / 後 5 秒</td></tr>
@@ -21,13 +22,12 @@ function showHelp(){
   </table><br>`+
   `<b>▍字幕操作</b>
   <table class="keys">
-   <tr><td><kbd>I</kbd></td><td>設定被選字幕的<b>起點</b>＝目前播放點（無選取則新增一條）</td></tr>
-   <tr><td><kbd>O</kbd></td><td>設定被選字幕的<b>終點</b>＝目前播放點</td></tr>
-   <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>步進邊界點（起點 → 終點 → 下句起點…）</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>↑</kbd></td><td>跳到<b>上一句</b>起點並選取</td></tr>
-   <tr><td><kbd>Ctrl</kbd>+<kbd>↓</kbd></td><td>跳到<b>下一句</b>起點並選取</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>Home</kbd></td><td>選取目前軌道<b>第一句</b>字幕，播放點跳到其起點</td></tr>
-   <tr><td><kbd>Shift</kbd>+<kbd>End</kbd></td><td>選取目前軌道<b>最後一句</b>字幕，播放點跳到其起點</td></tr>
+   <tr><td><kbd>I</kbd>（或 <kbd>Z</kbd>）</td><td>設定被選字幕的<b>起點</b>＝目前播放點（無選取則新增一條）</td></tr>
+   <tr><td><kbd>O</kbd>（或 <kbd>C</kbd>）</td><td>設定被選字幕的<b>終點</b>＝目前播放點</td></tr>
+   <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>跳到同軌<b>上一句 / 下一句</b>起點並選取</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd></td><td>步進邊界點（起點 → 終點 → 下句起點…，反向亦然；同向再按一次才切換選取）</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd></td><td>跳到目前軌道<b>第一句 / 最後一句</b>並選取</td></tr>
+   <tr><td><kbd>X</kbd></td><td>選取目前播放點所在的字幕（<b>不</b>移動播放點）</td></tr>
    <tr><td><kbd>P</kbd></td><td>將選取字幕整批位移到播放點</td></tr>
    <tr><td><kbd>Enter</kbd></td><td>開啟選取字幕的<b>文字編輯</b>視窗</td></tr>
    <tr><td><kbd>Del</kbd> / <kbd>Backspace</kbd></td><td>刪除選取（支援多選）</td></tr>
@@ -53,6 +53,13 @@ function showHelp(){
    <tr><td><code>1234512</code></td><td>緊湊格式，系統自動補位（= 01:23:45:12）</td></tr>
    <tr><td><code>+100</code></td><td>相對<b>加</b>：在原時間上加 1 秒（100 = 1秒0格）</td></tr>
    <tr><td><code>-200</code></td><td>相對<b>減</b>：在原時間上減 2 秒（結果不可早於 00:00:00:00）</td></tr>
+  </table><br>`+
+  `<b>▍面板 / 工具</b>
+  <table class="keys">
+   <tr><td><kbd>A</kbd> / <kbd>S</kbd> / <kbd>D</kbd> / <kbd>F</kbd></td><td>開關 動作紀錄 / 備忘錄 / 混音器 / 字幕檢查 面板</td></tr>
+   <tr><td><kbd>M</kbd>（或 <kbd>V</kbd>）</td><td>新增備忘錄（記下目前播放時間點）</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>全選目前軌道字幕</td></tr>
+   <tr><td><kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd></td><td>複製 / 貼上字幕（貼上以播放點為基準）</td></tr>
   </table><br>`+
   `<b>▍其他快捷</b>
   <table class="keys">

@@ -1,10 +1,10 @@
 Key,Modifier,Action,Description (ZH)
 Space,,Toggle Play/Pause,播放或暫停
-J,,Rewind,倒帶 (-1x 到 -3x)
+J,,Rewind,倒帶 (-1x 到 -5x，每階 0.5x)
 K,,Pause,暫停
-L,,Forward,正播 (1x 到 3x)
-2,,Prev Cue (-5 frames),退回至前一字幕並提早5格
-5,,Next Cue (-5 frames),跳至下一字幕並提早5格
+L,,Forward,正播 (1x 到 5x，每階 0.5x)
+2,,Next Cue (-5 frames),跳至下一字幕起點前5格 (pre-roll)
+5,,Prev Cue (-5 frames),退回至上一字幕起點前5格 (pre-roll)
 I,,Set In Point,設定字幕起點 (或新建)
 O,,Set Out Point,設定字幕終點
 ArrowLeft,,Nudge Left (1 Frame),播放點往左平移1格

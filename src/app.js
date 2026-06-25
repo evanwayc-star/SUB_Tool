@@ -74,6 +74,7 @@ on('action', doAction);
 function renderAll(){ renderSubList(); renderCueBlocks(); renderVideoSub(); updateTlSel(); refreshMpvSubs(); }
 /* mpv 嵌入模式：字幕改由 mpv/libass 渲染（DOM 疊層被覆蓋）。cue 變動時重建 .ass 餵給 mpv（防抖） */
 let _mpvSubT=null;
+let _firstLoad=true; // 第一次載入影片或字幕時自動 zoomFitVideo；新專案後重置
 function refreshMpvSubs(){
   if(!Media.mpvMode || !window.subtool?.mpv) return;
   clearTimeout(_mpvSubT);
@@ -164,7 +165,9 @@ function onDurationKnown(){
     const minPps = (vw-40)/State.duration;
     $('zoomBar').min = Math.min(10, minPps).toFixed(3);
   }
-  if(State.pxPerSec*State.duration < vw) zoomFitVideo(); else drawTimeline();
+  if(_firstLoad && State.duration>0){ zoomFitVideo(); _firstLoad=false; }
+  else if(State.pxPerSec*State.duration < vw) zoomFitVideo();
+  else drawTimeline();
 }
 function ensurePlayheadVisible(){
   const t=Media.vTime();
@@ -181,6 +184,7 @@ function ensurePlayheadVisible(){
 
 /* 影片事件 */
 video.addEventListener('timeupdate',()=>{
+  // FPS-SYNC（詳見 FPS_時碼一致性.md）：tcCur/seekBar/播放點都以 displayTime() 為唯一來源
   let t = Media.displayTime();
   $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame); // 時:分:秒:格
   $('seekBar').value=Math.round(t*1000);
@@ -261,8 +265,8 @@ video.addEventListener('play',()=>{
 });
 video.addEventListener('pause',()=>{
   $('playBtn').textContent='▶';
-  // 暫停時把時碼/seekBar 一併刷新為已對齊格的權威位置（與播放點同源），
-  // 避免殘留播放中最後一次未對齊的時間導致播放器比播放點多一格
+  // FPS-SYNC（詳見 FPS_時碼一致性.md）：暫停時把時碼/seekBar 一併刷新為已對齊格的權威位置
+  // （與播放點同源），避免殘留播放中最後一次未對齊的時間導致播放器比播放點多一格
   const t=Media.displayTime();
   $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
   $('seekBar').value=Math.round(t*1000);
@@ -295,9 +299,9 @@ async function doAction(act){
     case 'save-project': Project.save(); break;
     case 'new': if(confirm('清空目前專案？字幕、備註與已載入的影音都將清除（未存檔的話）。')){
       State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
-      State.listTrack=0;State.tracks=[];syncTrackCount();
+      State.listTrack=0;State.tracks=[];ensureTrackCount(1);
       State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');
-      History.reset();resetProject();
+      History.reset();resetProject();_firstLoad=true;
       // 清除影音
       video.pause(); video.src='';
       State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
@@ -817,6 +821,7 @@ document.addEventListener('change',(e)=>{
 function init(){
   State.fps=+$('fpsSel').value||24;
   const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;
+  ensureTrackCount(1);
   initUI(); initExtras();
   renderAll(); layoutTimeline(); drawTimeline(); rafLoop();
   History.reset();

@@ -3,7 +3,14 @@
      秒→時碼  fmtClock(UI 顯示) / secToSRT / secToASS / secToEncore
      時碼→秒  srtToSec / assToSec / encoreToSec
      snapTimeToFrame：把任意秒數對齊到最近的影格邊界
-   注意 Drop-frame(DF)僅適用 29.97fps；df 旗標由 State.dropFrame 決定。 */
+   注意 Drop-frame(DF)僅適用 29.97fps；df 旗標由 State.dropFrame 決定。
+
+   ┌─ FPS-SYNC（FPS / 時碼一致性）★ 改這裡前務必先讀 FPS_時碼一致性.md ──────────┐
+   │ encoreParts() 是「秒 → 時:分:秒:格」的【唯一】換算來源；secToEncore（播放器、 │
+   │ 字幕列表、匯出）與 timeline.js 的 fmtTick（時間軸刻度）都共用它，三者才會永遠一致。│
+   │ snapTimeToFrame() 是【唯一】的影格格網；seek/pause/拖曳/逐格都用它對齊。          │
+   │ 千萬不要在別處自行用 Math.floor(s/3600)…拼時碼，或自訂格網——會造成差一格。        │
+   └──────────────────────────────────────────────────────────────────┘ */
 import { pad } from './util.js';
 
 /* 秒 -> 各格式時碼 */
@@ -20,8 +27,10 @@ function secToASS(s){
   if(s<0)s=0; const cs=Math.floor(s*100 + 0.0001); // 避免浮點數四捨五入導致 ASS 時間大於實際影格時間，造成 MPV 晚一格
   return `${Math.floor(cs/360000)}:${pad((cs/6000)%60)}:${pad((cs/100)%60)}.${pad(cs%100,2)}`;
 }
-/* 秒 → Encore 時碼分量(時/分/秒/格)。所有「數影格」的時碼顯示都應走這裡，
-   確保播放器、時間軸刻度等各處對同一秒數得到完全一致的時:分:秒:格。 */
+/* FPS-SYNC：秒 → Encore 時碼分量(時/分/秒/格)。所有「數影格」的時碼顯示都【必須】走這裡，
+   確保播放器、字幕列表、時間軸刻度等各處對同一秒數得到完全一致的時:分:秒:格。
+   非 DF 的 29.97 會刻意「數影格」而非「數真實秒數」，因此長時碼會比牆鐘秒數慢幾秒——
+   這是非 drop-frame 時碼的正常特性（詳見 FPS_時碼一致性.md）。 */
 function encoreParts(s,fps,df=false){
   if(s<0)s=0;
   if(df && Math.abs(fps-29.97)<0.01){
@@ -71,7 +80,8 @@ function encoreToSec(t,fps,df=false){
   return hh*3600+mm*60+ss+ff/fps;
 }
 
-/* 把秒數對齊到最近的影格邊界（拖曳/設點後用，確保落在整格上） */
+/* FPS-SYNC：把秒數對齊到最近的影格邊界（唯一的影格格網；seek/pause/拖曳/逐格都用它，
+   確保播放點永遠落在整格上、且與時間軸刻度同格。詳見 FPS_時碼一致性.md） */
 function snapTimeToFrame(t, fps, df=false) {
   if(!fps) return t;
   if(df && Math.abs(fps-29.97)<0.01) return Math.round(t*30000/1001)*1001/30000;

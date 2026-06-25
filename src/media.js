@@ -9,7 +9,10 @@ import { setStatus, showToast, openModal } from './ui.js';
 import { renderAudioTracks, clearMeterStrips } from './mixer.js';
 import { drawTimeline, updatePlayhead } from './timeline.js';
 
-/* ===== 播放窗：自動偵測 FPS（網頁版，播放時取樣） ===== */
+/* ===== 播放窗：自動偵測 FPS（網頁版，播放時取樣） =====
+   FPS-SYNC：影格率一律【實測】——這裡用 requestVideoFrameCallback 量真實影格時間戳，
+   桌面版則用 ffprobe（DESK.probe → info.video.fps）。【絕不可依檔名判斷 FPS】，
+   因為檔名可能寫錯（例：標 24FPS 實為 29.97）。詳見 FPS_時碼一致性.md。 */
 function detectFpsWeb(){
   if(!('requestVideoFrameCallback' in HTMLVideoElement.prototype))return;
   let last=null, deltas=[], frames=0;
@@ -414,7 +417,7 @@ const Media = {
       if(e.event==='property-change'){
         if(e.name==='time-pos'&&e.data!=null){
           const prev=this._mpvTime; this._mpvTime=e.data;
-          // 暫停時讓播放器時碼與時間軸播放點同源同格：
+          // FPS-SYNC（詳見 FPS_時碼一致性.md）：暫停時讓播放器時碼與時間軸播放點同源同格：
           //  - 若 mpv 回報只是 seek 後的 settling 抖動（與權威 _lastSeekTime 差 <1.5 格），
           //    維持 _lastSeekTime，避免用未對齊的原始時間經 secToEncore 進位多一格、
           //    也避免拉偏權威值而破壞逐格精度；
@@ -692,6 +695,9 @@ const Media = {
     }
     return video.currentTime||0;
   },
+  // FPS-SYNC：播放點的【權威位置】。暫停時回傳已對齊影格的 _lastSeekTime，播放中才回傳原始
+  // 時間。所有「靜止」讀數（播放器時碼 tcCur、時間軸播放點、seekBar）都【必須】以此為來源，
+  // 不可直接讀 video.currentTime / mpv e.data，否則會與刻度差一格。詳見 FPS_時碼一致性.md。
   displayTime(){
     if(!this.playing && this._lastSeekTime !== null) {
       return this._lastSeekTime;
@@ -723,7 +729,7 @@ const Media = {
     this._lastSeekTime=null;
   },
   pause(){
-    this._lastSeekTime = snapTimeToFrame(this.vTime(), State.fps, State.dropFrame); // snap 到最近格邊界，確保播放點對齊刻度
+    this._lastSeekTime = snapTimeToFrame(this.vTime(), State.fps, State.dropFrame); // FPS-SYNC：snap 到最近格，確保暫停點對齊刻度
     if(this.mpvMode){
       DESK.mpv.pause().catch(()=>{});
       this.stopElementSources();
@@ -738,8 +744,9 @@ const Media = {
   },
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t){
-    t=clamp(t,0,State.duration||0);
-    t=snapTimeToFrame(t, State.fps, State.dropFrame); // 確保每次 seek 皆精準對齊影格，避免浮點誤差導致 +1 格
+    // 有影片時才設上限；無影片時允許任意位置（空專案先排字幕）
+    t = State.duration > 0 ? clamp(t, 0, State.duration) : Math.max(0, t);
+    t=snapTimeToFrame(t, State.fps, State.dropFrame); // FPS-SYNC：每次 seek 皆精準對齊影格，避免浮點誤差導致 +1 格
     this._lastSeekTime=t;
     if(this.mpvMode){
       t=clamp(t,0,this._mpvDuration||0);
