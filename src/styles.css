@@ -11,7 +11,7 @@
   --border2:#46464d;
   --text:#e6e6e8;
   --text-dim:#9a9aa2;
-  --text-faint:#6b6b73;
+  --text-faint:#8a8a93;  /* 調亮以達 WCAG AA：列表秒數/時長/提示等功能性文字 */
   --accent:#f0a020;      /* 橘色強調 (Arctime 風) */
   --accent-d:#c8821a;
   --cyan:#3fa9f5;        /* 波形 */
@@ -398,7 +398,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 #cpBlank .cp-num:hover,#cpTwo .cp-num:hover{color:var(--accent)}
 #cpOverLen input[type="number"]{width:36px;margin:0 3px;padding:1px 3px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:11px;text-align:center;-moz-appearance:textfield}
 #cpOverLen input[type="number"]::-webkit-inner-spin-button{display:none}
-.sub-row .txt .over-len{color:var(--red);font-weight:bold}
+.sub-row .txt .over-len{color:var(--red);font-weight:bold;text-decoration:underline wavy var(--red)}
 /* 包含文字篩選行 */
 .cp-contains-row{flex-wrap:wrap;row-gap:2px}
 .cp-contains-row input{flex:1;min-width:100px;padding:2px 6px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:12px;font-family:inherit}

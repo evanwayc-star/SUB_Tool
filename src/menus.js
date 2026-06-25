@@ -18,11 +18,12 @@ function showCtx(x,y,items){
     let d;
     if(it.sep){ d=document.createElement('div'); d.className='msep'; }
     else if(it.heading){ d=document.createElement('div'); d.className='lbl'; d.textContent=it.label; }
-    else { d=document.createElement('div'); d.className='ci';
+    else { d=document.createElement('div'); d.className='ci'; d.setAttribute('role','menuitem');
       d.innerHTML=escapeHTML(it.label)+(it.checked?'<span class="chk">✓</span>':'');
       d.onclick=()=>{ hideCtx(); it.act&&it.act(); }; }
     ctx.appendChild(d);
   }
+  ctx.setAttribute('role','menu');
   ctx.classList.add('show');
   const w=ctx.offsetWidth,h=ctx.offsetHeight;
   ctx.style.left=Math.max(6,Math.min(x,window.innerWidth-w-6))+'px';

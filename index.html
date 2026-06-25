@@ -121,11 +121,11 @@
           <span class="ts-label">顏色</span>
           <input type="color" id="tsColor" value="#ffffff">
           <div class="ts-colors">
-            <button class="ts-clr" data-color="#ffffff" title="白" style="background:#ffffff"></button>
-            <button class="ts-clr" data-color="#ff3333" title="紅" style="background:#ff3333"></button>
-            <button class="ts-clr" data-color="#3399ff" title="藍" style="background:#3399ff"></button>
-            <button class="ts-clr" data-color="#ffee00" title="黃" style="background:#ffee00"></button>
-            <button class="ts-clr" data-color="#44cc66" title="綠" style="background:#44cc66"></button>
+            <button class="ts-clr" data-color="#ffffff" title="白" aria-label="字幕顏色：白" style="background:#ffffff"></button>
+            <button class="ts-clr" data-color="#ff3333" title="紅" aria-label="字幕顏色：紅" style="background:#ff3333"></button>
+            <button class="ts-clr" data-color="#3399ff" title="藍" aria-label="字幕顏色：藍" style="background:#3399ff"></button>
+            <button class="ts-clr" data-color="#ffee00" title="黃" aria-label="字幕顏色：黃" style="background:#ffee00"></button>
+            <button class="ts-clr" data-color="#44cc66" title="綠" aria-label="字幕顏色：綠" style="background:#44cc66"></button>
           </div>
         </div>
       </div>
@@ -184,7 +184,7 @@
 
   <!-- ===== 狀態列 ===== -->
   <div class="statusbar">
-    <span><span class="dot" id="stDot"></span><span id="stMsg">就緒</span></span>
+    <span><span class="dot" id="stDot"></span><span id="stMsg" role="status" aria-live="polite">就緒</span></span>
     <span id="stMedia"></span>
     <div class="spacer"></div>
     <span id="stEngine">音訊引擎：原生</span>
@@ -295,11 +295,11 @@
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <!-- modal -->
 <div class="modal-bg" id="modalBg">
-  <div class="modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <h3 id="modalTitle">說明</h3>
     <div class="mbody" id="modalBody"></div>
     <div class="mfoot" id="modalFoot"><button class="primary" data-act="modal-close">關閉</button></div>

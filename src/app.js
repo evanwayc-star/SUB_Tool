@@ -825,11 +825,19 @@ document.addEventListener('change',(e)=>{
 });
 
 /* 初始化 */
+function applyAriaLabels(){
+  // X1：純圖示按鈕多半只有 title，報讀器在 button 模式下不穩定念出 title；
+  // 啟動時把 title 複製成 aria-label，一次覆蓋整份靜態工具列。
+  document.querySelectorAll('button[title]:not([aria-label])').forEach(b=>{
+    const t=(b.getAttribute('title')||'').trim();
+    if(t) b.setAttribute('aria-label', t);
+  });
+}
 function init(){
   State.fps=+$('fpsSel').value||24;
   const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;
   ensureTrackCount(1);
-  initUI(); initExtras();
+  initUI(); initExtras(); applyAriaLabels();
   renderAll(); layoutTimeline(); drawTimeline(); rafLoop();
   History.reset();
   if(IS_DESKTOP) initDesktop();
