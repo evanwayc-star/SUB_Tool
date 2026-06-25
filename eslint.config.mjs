@@ -7,7 +7,7 @@ export default [
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',
-      globals: { ...globals.browser, structuredClone: 'readonly' },
+      globals: { ...globals.browser, structuredClone: 'readonly', __APP_VERSION__: 'readonly' },
     },
     rules: {
       'no-undef': 'error',

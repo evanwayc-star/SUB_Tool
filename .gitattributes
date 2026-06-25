@@ -1,2 +1,6 @@
 # Windows .bat must use CRLF or cmd.exe can refuse to run them (flash-close).
 *.bat text eol=crlf
+
+# B4：dist/index.html 是 vite 內嵌打包產物，每次 build 整檔變動。
+# 標為 generated 並關閉 diff，讓 PR review 收斂、避免無語意的巨大 diff。
+dist/index.html -diff linguist-generated

@@ -11,6 +11,7 @@
     "electron": "vite build && electron .",
     "electron:dev": "electron . --dev",
     "dist": "vite build && electron-builder",
+    "lint": "eslint src",
     "test": "vitest run",
     "test:watch": "vitest"
   },

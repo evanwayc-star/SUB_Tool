@@ -2,7 +2,9 @@
 import { openModal } from './ui.js';
 
 function showHelp(){
+  const ver = (typeof __APP_VERSION__ !== 'undefined') ? __APP_VERSION__ : '';
   openModal('鍵盤快捷鍵 / 使用說明',
+  (ver ? `<div style="color:var(--text-faint);font-size:12px;margin-bottom:8px">SUB Tool v${ver}</div>` : '')+
   `<b>三大區塊</b>：播放窗（左上）· 字幕列表（右）· 時間軸（下）。<br>`+
   `<b>上字幕流程</b>：選一條字幕 → 播到開始處按 <kbd>I</kbd>、播到結束處按 <kbd>O</kbd>。<br><br>`+
   `<b>▍播放控制</b>

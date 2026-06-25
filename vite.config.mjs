@@ -1,5 +1,9 @@
 import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
+import { readFileSync } from 'fs';
+
+// B2：版本單一來源 — 從 package.json 注入 __APP_VERSION__，web 與桌面皆同源，發版只改 package.json
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
 // S3：CSP 縱深防禦。只在「打包」時注入（dev 的 HMR 需要 eval/ws，故不套用），
 // 內嵌 script/style 需 'unsafe-inline'；ffmpeg.wasm（web 版）需 'wasm-unsafe-eval'
@@ -30,6 +34,7 @@ function injectCSP() {
 // 開發：vite（HMR）；打包：輸出單一可雙擊的 dist/index.html（含內嵌 JS/CSS）
 export default defineConfig({
   base: './',
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   plugins: [injectCSP(), viteSingleFile()],
   server: { port: 8777, host: true },
   preview: { port: 8777, host: true },
