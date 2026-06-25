@@ -22,7 +22,7 @@ import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, cle
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
 import { showHelp } from './help.js';
-import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
+import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState } from './subio.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { on } from './events.js';
 
@@ -40,6 +40,12 @@ on('panel:toggle', togglePanel);
 on('note:openInPanel', openNoteInPanel);
 on('cue:openEdit', openCueEditModal);
 on('action', doAction);
+// A1：fps 變更後的 DOM 同步（原本在 state.setFps 內，現下沉到此處，state.js 不再相依 DOM）
+on('fps:changed', ()=>{
+  const sel=$('fpsSel'); if(sel) sel.value=State.dropFrame?String(State.fps)+'df':String(State.fps);
+  $('tcCur').textContent=secToEncore(video.currentTime||0,State.fps,State.dropFrame);
+  $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
+});
 
 /* ============================================================================
    SUB TOOL — 線上上字幕工具  (single-file, vanilla JS)
@@ -79,7 +85,7 @@ function refreshMpvSubs(){
   if(!Media.mpvMode || !window.subtool?.mpv) return;
   clearTimeout(_mpvSubT);
   _mpvSubT=setTimeout(()=>{
-    try{ window.subtool.mpv.subSet(SubFormats.toASS(State.cues,State.fps,State.tracks,State.videoWidth||video.videoWidth||1920,State.videoHeight||video.videoHeight||1080, window.innerWidth||1920, $('videoWrap')?.clientWidth||1000, $('videoWrap')?.clientHeight||562)).catch(()=>{}); }catch(e){}
+    try{ window.subtool.mpv.subSet(toASSFromState(State.cues)).catch(()=>{}); }catch(e){}
   },150);
 }
 /* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。

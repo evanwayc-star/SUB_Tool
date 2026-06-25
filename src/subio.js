@@ -172,13 +172,25 @@ function exportSub(kind) {
     }
   } else doExport(kind, State.cues);
 }
+// A3：toASS 的 8 個參數（含視窗/視訊尺寸後援）集中在一處，避免 app.js（mpv 預覽）與
+// 此處（匯出 .ass）兩份引數列重複、後援值漂移導致預覽與匯出的字幕排版對不上。
+function toASSFromState(cues) {
+  return SubFormats.toASS(
+    cues, State.fps, State.tracks,
+    State.videoWidth || video.videoWidth || 1920,
+    State.videoHeight || video.videoHeight || 1080,
+    window.innerWidth || 1920,
+    $('videoWrap')?.clientWidth || 1000,
+    $('videoWrap')?.clientHeight || 562
+  );
+}
 function doExport(kind, cues, trackName) {
   if (!cues.length) { showToast('所選軌道沒有字幕'); return; }
   const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
   const tkSuffix = trackName ? '_' + trackName.replace(/[\\/:*?"<>|]/g, '_') : '';
   let text, ext;
   if (kind === 'srt') { text = SubFormats.toSRT(cues); ext = '.srt'; }
-  else if (kind === 'ass') { text = SubFormats.toASS(cues, State.fps, State.tracks, State.videoWidth || video.videoWidth || 1920, State.videoHeight || video.videoHeight || 1080, window.innerWidth || 1920, $('videoWrap')?.clientWidth || 1000, $('videoWrap')?.clientHeight || 562); ext = '.ass'; }
+  else if (kind === 'ass') { text = toASSFromState(cues); ext = '.ass'; }
   else if (kind === 'encore') { text = SubFormats.toEncore(cues, State.fps, State.dropFrame); ext = '.txt'; }
   else { text = SubFormats.toTXT(cues); ext = '.txt'; }
   const bytes = encodeUTF16LE(text);
@@ -308,16 +320,8 @@ function applyTcShift(sign) {
   const t = parseTimecodeInput(raw);
   if (t == null || isNaN(t) || t <= 0) { showToast('請輸入有效的時間碼（例如 00:00:02:00）'); return; }
   const delta = sign * t;
-  const scope = $('tcShiftSel').value;
-  let cues;
-  if (scope === 'sel') {
-    const ids = State.selectedIds.length ? State.selectedIds : [State.selectedId].filter(Boolean);
-    cues = ids.map(id => State.cues.find(c => c.id === id)).filter(c => c && c.timed !== false);
-  } else if (scope === 'track') {
-    cues = State.cues.filter(c => c.timed !== false && (c.track || 0) === State.listTrack);
-  } else {
-    cues = State.cues.filter(c => c.timed !== false);
-  }
+  // A5：複用既有 _durAdjCues（Fix #13 已抽出），消除重複的 sel/track/all 取 cues 邏輯
+  const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可以位移'); return; }
   for (const c of cues) { c.start = Math.max(0, c.start + delta); c.end = Math.max(c.start + 0.001, c.end + delta); }
   sortCues(); emit('render:all'); drawTimeline();
@@ -382,4 +386,4 @@ function applyDurAdjPct() {
   setStatus(`已調整 ${cues.length} 條字幕的持續時間（${pct}%）`, 'ok');
 }
 
-export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct };
+export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState };

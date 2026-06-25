@@ -3,8 +3,7 @@
    時間軸視窗 viewStart/pxPerSec、媒體資訊…）。各模組直接讀寫 State，再 emit 觸發重繪。
    工具：newTrack/syncTrackCount/ensureTrackCount(軌道)、snapFps/setFps(影格率，setFps 會一併
    更新 UI 並依 'df' 後綴設定 dropFrame)、newId(遞增 cue id)、isSel/cueSuffix、DESK/IS_DESKTOP(Electron 偵測)。 */
-import { $, video } from './dom.js';
-import { secToEncore } from './time.js';
+import { emit } from './events.js';
 
 const State = {
   cues: [],            // {id,start,end,text,track}
@@ -37,20 +36,24 @@ function syncTrackCount(){ State.trackCount=State.tracks.length; }
 /* 允許的影格率（下拉選單） */
 const FPS_SET=[23.976,24,25,29.97,30];
 function snapFps(v){ let best=24,bd=1e9; for(const f of FPS_SET){const d=Math.abs(f-v);if(d<bd){bd=d;best=f;}} return best; }
-function setFps(v){
+// A1：純函式 — 只改 State、零 DOM 相依，可在 node 環境單元測試
+function applyFps(v){
   let df=false;
   if(typeof v==='string'&&v.endsWith('df')){ df=true; v=parseFloat(v); }
   State.fps=snapFps(typeof v==='number'?v:parseFloat(v)||24); State.dropFrame=df;
-  const sel=$('fpsSel'); if(sel)sel.value=df?String(State.fps)+'df':String(State.fps);
-  $('tcCur').textContent=secToEncore(video.currentTime||0,State.fps,df); $('tcDur').textContent=secToEncore(State.duration,State.fps,df);
+  return { fps:State.fps, dropFrame:State.dropFrame };
 }
+// 套用後發出事件；DOM 同步（fpsSel/tcCur/tcDur）改由 app.js 的 'fps:changed' 訂閱負責，
+// 切斷 state.js → dom.js 的隱性相依。
+function setFps(v){ const r=applyFps(v); emit('fps:changed', r); return r; }
 function ensureTrackCount(n){ while(State.tracks.length<n)State.tracks.push(newTrack()); syncTrackCount(); }
 function trackVisible(i){ return !State.tracks[i] || State.tracks[i].visible!==false; }
 let cueSeq = 1;
 const newId = () => 'c' + (cueSeq++);
 
 /* 桌面 (Electron) 整合：偵測 preload 暴露的 window.subtool */
-const DESK = (window.subtool && window.subtool.isDesktop) ? window.subtool : null;
+const _subtool = (typeof window !== 'undefined') ? window.subtool : null;
+const DESK = (_subtool && _subtool.isDesktop) ? _subtool : null;
 const IS_DESKTOP = !!DESK;
 
 function isSel(id){ return State.selectedIds.includes(id); }
@@ -64,4 +67,4 @@ function cueSuffix(c){
   return ` - ${name} - 第${idx+1}句`;
 }
 
-export { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix };
+export { State, newTrack, syncTrackCount, FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix };
