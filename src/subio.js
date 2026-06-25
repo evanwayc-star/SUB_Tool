@@ -14,6 +14,7 @@ import { emit } from './events.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { buildXLSX } from './xlsxExport.js';
 import { doExportNotesGeneral, doExportNotesEdius } from './notes.js';
+import { t } from './i18n.js';
 
 function convertLineBreaks(parsed) {
   for (const p of parsed) { if (p.text) p.text = p.text.replace(/\/\//g, '\n').replace(/\\\\/g, '\n'); }
@@ -185,7 +186,8 @@ function toASSFromState(cues) {
   );
 }
 function doExport(kind, cues, trackName) {
-  if (!cues.length) { showToast('所選軌道沒有字幕'); return; }
+  // X4 phase 1：示範把使用者可見文案包成 t(...)（zh 下原樣顯示，未來語言查表）
+  if (!cues.length) { showToast(t('所選軌道沒有字幕')); return; }
   const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
   const tkSuffix = trackName ? '_' + trackName.replace(/[\\/:*?"<>|]/g, '_') : '';
   let text, ext;
@@ -196,11 +198,11 @@ function doExport(kind, cues, trackName) {
   const bytes = encodeUTF16LE(text);
   const fname = base + tkSuffix + (kind === 'encore' ? '_encore' : '') + ext;
   if (IS_DESKTOP) {
-    DESK.exportSub(fname, bytesToB64(bytes), ext.replace('.', '')).then(pth => { if (pth) { setStatus('已匯出：' + pth, 'ok'); showToast('已匯出 ' + baseName(pth)); } });
+    DESK.exportSub(fname, bytesToB64(bytes), ext.replace('.', '')).then(pth => { if (pth) { setStatus(t('已匯出：{0}', pth), 'ok'); showToast(t('已匯出 {0}', baseName(pth))); } });
   } else {
     downloadBytes(bytes, fname, 'text/plain;charset=utf-16le');
-    setStatus(`已匯出 ${kind.toUpperCase()}（UTF-16 LE）`, 'ok');
-    showToast(`已匯出 ${fname}`);
+    setStatus(t('已匯出 {0}（UTF-16 LE）', kind.toUpperCase()), 'ok');
+    showToast(t('已匯出 {0}', fname));
   }
 }
 
