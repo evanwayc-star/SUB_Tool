@@ -291,7 +291,10 @@ $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
 
 
 
+// A4：純關閉面板的 case 改用資料表，消除重複的 classList.remove('show')+_syncMpvPanel()
+const CLOSE_PANELS = { 'close-shift':'shiftPanel', 'close-history':'historyPanel', 'close-notes':'notesPanel', 'close-mixer':'mixerPanel' };
 async function doAction(act){
+  if(CLOSE_PANELS[act]){ $(CLOSE_PANELS[act]).classList.remove('show'); _syncMpvPanel(); return; }
   switch(act){
     case 'open-media':
       if(IS_DESKTOP){ const p=await DESK.openMedia(); if(p)Media.loadDesktopMedia(p); }
@@ -332,7 +335,6 @@ async function doAction(act){
     case 'exp-txt': exportSub('txt'); break;
     case 'fps-convert': showFpsConvertDialog(); break;
     case 'shift-tc': togglePanel('shiftPanel'); break;
-    case 'close-shift': $('shiftPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'shift-back': applyTcShift(-1); break;
     case 'shift-fwd': applyTcShift(1); break;
     case 'dur-adj-sub': applyDurAdjTc(-1); break;
@@ -369,13 +371,10 @@ async function doAction(act){
     case 'undo': History.undo(); break;
     case 'redo': History.redo(); break;
     case 'history': togglePanel('historyPanel'); renderHistory(); break;
-    case 'close-history': $('historyPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'notes': togglePanel('notesPanel'); renderNotes(); break;
     case 'add-note': addNote(); break;
     case 'clear-notes': clearAllNotes(); break;
-    case 'close-notes': $('notesPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'mixer': togglePanel('mixerPanel'); renderMixer(); break;
-    case 'close-mixer': $('mixerPanel').classList.remove('show'); _syncMpvPanel(); break;
     case 'mixer-reset': mixerReset(); break;
     case 'mixer-muteall': mixerMuteAll(); break;
     case 'cache-manage': openCacheDialog(); break;
