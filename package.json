@@ -1,6 +1,6 @@
 {
   "name": "sub-tool",
-  "version": "2.8.0",
+  "version": "2.8.5",
   "description": "SUB Tool 上字幕工具",
   "author": "Evan",
   "main": "electron/main.js",
