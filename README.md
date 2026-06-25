@@ -1,6 +1,6 @@
 # SUB Tool — 多軌時間軸上字幕工具
 
-字幕編輯器，同一份 `dist/index.html` 同時支援**網頁版**與 **Electron 桌面版**。
+上字幕編輯器，同一份 `dist/index.html` 同時支援**網頁版**與 **Electron 桌面版**。
 
 ## 功能摘要
 
