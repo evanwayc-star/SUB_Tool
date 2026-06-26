@@ -61,6 +61,9 @@ function openInlineTimeEdit(el, curSec, onCommit){
     if(done) return; done = true;
     if(commit){
       const raw = inp.value.trim();
+      if(raw === origText || raw === '--:--:--:--' || raw === ''){
+        inp.remove(); el.textContent = origText; return;
+      }
       let t = null;
       if(raw.startsWith('+') || raw.startsWith('-')){
         const sign = raw.startsWith('-') ? -1 : 1;
@@ -87,11 +90,7 @@ function openInlineTimeEdit(el, curSec, onCommit){
 
 /* ===== 6. 字幕列表 ==================================================== */
 function updateTlSel(){
-  const el=$('tlSel'); if(!el)return;
-  const n=State.selectedIds.length;
-  el.textContent=n===0?'無選取':`已選 ${n} 條`;
-  el.classList.remove('sel-none','sel-one','sel-multi');
-  el.classList.add(n===0?'sel-none':n===1?'sel-one':'sel-multi');
+  // Synchronized via MutationObserver in app.js
 }
 
 /* Fix #1：雙層掃描正確偵測所有重疊（含「長字幕包住多短字幕」的情況）。
@@ -139,8 +138,12 @@ function renderCheckPanel(){
   const containsNums=_checkContains.length
     ? list.map((c,i)=>{ const t=(c.text||'').toLowerCase(); return _checkContains.some(kw=>t.includes(kw.toLowerCase()))?i+1:null; }).filter(n=>n!==null)
     : [];
+  // 無時間碼
+  const noTimeNums=list.map((c,i)=>c.timed===false?i+1:null).filter(n=>n!==null);
+  
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
-  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rt=$('cpTrim');
+  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rt=$('cpTrim'),rn=$('cpNoTime');
+  if(rn)rn.querySelector('.cp-nums').innerHTML=mkNums(noTimeNums);
   if(ro)ro.querySelector('.cp-nums').innerHTML=mkNums(overlapNums);
   if(rm)rm.querySelector('.cp-nums').innerHTML=mkNums(multiNums);
   if(rt)rt.querySelector('.cp-nums').innerHTML=mkNums(trimNums);
@@ -181,7 +184,16 @@ function lineCountClass(text){
   const n=((text||'').match(/\n|\/\//g)||[]).length;
   return n>=2?' multi-line':n===1?' two-line':'';
 }
-function _rowClass(text){ return !(text||'').trim()?'blank':lineCountClass(text).trim(); }
+function _rowClass(c){
+  const classes = [];
+  if(c.timed===false) classes.push('no-time');
+  if(!(c.text||'').trim()) classes.push('blank');
+  else {
+    const lc = lineCountClass(c.text).trim();
+    if(lc) classes.push(lc);
+  }
+  return classes.join(' ');
+}
 function _lineLenHTML(line){
   if(!_checkLenLimit||line.length<=_checkLenLimit) return escapeHTML(line);
   return escapeHTML(line.slice(0,_checkLenLimit))+`<span class="over-len">${escapeHTML(line.slice(_checkLenLimit))}</span>`;
@@ -193,7 +205,7 @@ function _txtInner(text){
   return (text||'').split(/\n/).map(_lineLenHTML).join('<br>');
 }
 function _subRowHTML(c,i,overlaps){
-  const rc=_rowClass(c.text);
+  const rc=_rowClass(c);
   const containsHit=_checkContains.length&&_checkContains.some(kw=>(c.text||'').toLowerCase().includes(kw.toLowerCase()));
   const cls='sub-row'+(rc?' '+rc:'')+(_searchMatches.includes(c.id)?' search-hit':'')+(isSel(c.id)?' sel':'')+(c.id===State.selectedId?' primary':'')+(c.id===State.activeId?' active':'')+(overlaps?.has(c.id)?' overlap':'')+(containsHit?' contains-match':'');
   const timed=c.timed!==false;
@@ -201,8 +213,8 @@ function _subRowHTML(c,i,overlaps){
     `<div class="idx">${i+1}</div>`+
     `<div class="body">`+
       `<div class="times">`+
-        (timed?`<span class="tin">${secToEncore(c.start,State.fps,State.dropFrame)}</span> → <span class="tout">${secToEncore(c.end,State.fps,State.dropFrame)}</span>`
-              :`<span class="untimed">未定時 — 用 I/O 標記</span>`)+
+         (timed?`<span class="tin">${secToEncore(c.start,State.fps,State.dropFrame)}</span> → <span class="tout">${secToEncore(c.end,State.fps,State.dropFrame)}</span>`
+               :`<span class="tin untimed">--:--:--:--</span> → <span class="tout untimed">--:--:--:--</span>`)+
         (timed?`<span class="dur">${(c.end-c.start).toFixed(2)}s</span>`:``)+
       `</div>`+
       `<div class="txt" contenteditable="false" spellcheck="false">${_txtInner(c.text)}</div>`+
@@ -216,7 +228,8 @@ function renderSubRow(id){
   const c=State.cues.find(x=>x.id===id); if(!c)return;
   const timed=c.timed!==false;
   const times=row.querySelector('.times');
-  if(timed)times.innerHTML=`<span class="tin">${secToEncore(c.start,State.fps,State.dropFrame)}</span> → <span class="tout">${secToEncore(c.end,State.fps,State.dropFrame)}</span><span class="dur">${(c.end-c.start).toFixed(2)}s</span>`;
+   if(timed)times.innerHTML=`<span class="tin">${secToEncore(c.start,State.fps,State.dropFrame)}</span> → <span class="tout">${secToEncore(c.end,State.fps,State.dropFrame)}</span><span class="dur">${(c.end-c.start).toFixed(2)}s</span>`;
+   else times.innerHTML=`<span class="tin untimed">--:--:--:--</span> → <span class="tout untimed">--:--:--:--</span>`;
   const txt=row.querySelector('.txt');
   if(txt&&txt.contentEditable!=='true') txt.innerHTML=_txtInner(c.text);
 }
@@ -239,10 +252,21 @@ function selectCue(id,opts){
     if(tk!==State.listTrack){ State.listTrack=tk; emit('render:listTrackSel'); renderSubList(); refreshTrackGutterActive(); }
   }
   refreshSelectionUI();
-  if(opts.seek&&c&&c.timed!==false){
-    const t = Media.displayTime();
-    if(t < c.start || t > c.end){
-      Media.seek(snapTimeToFrame(c.start, State.fps, State.dropFrame)); emit('playhead:ensure'); emit('render:videoSub');
+  if(opts.seek&&c){
+    if(c.timed!==false){
+      const t = Media.displayTime();
+      if(t < c.start || t > c.end){
+        Media.seek(snapTimeToFrame(c.start, State.fps, State.dropFrame)); emit('playhead:ensure'); emit('render:videoSub');
+      }
+    }else{
+      const tkCues = State.cues.filter(x=>(x.track||0)===(c.track||0));
+      const idx = tkCues.findIndex(x=>x.id===c.id);
+      if(idx>0){
+        let prev = tkCues[idx-1];
+        if(prev.timed!==false){
+          Media.seek(snapTimeToFrame(prev.end, State.fps, State.dropFrame)); emit('playhead:ensure'); emit('render:videoSub');
+        }
+      }
     }
   }
   const pc=State.cues.find(x=>x.id===State.selectedId);
@@ -255,6 +279,24 @@ function selectCueSingle(id,seek){ selectCue(id,{seek}); }
 // 順序變了（start 跨過鄰居）才退回全列重建以保持正確。
 function commitCueTimeEdit(c, edge){
   const tk=c.track||0;
+
+  if (edge === 'start' || edge === 'both' || !edge) {
+    const idx = State.cues.indexOf(c);
+    if (idx !== -1) {
+      let nextIdx = idx + 1;
+      let offset = 0.001;
+      while (nextIdx < State.cues.length) {
+        const nextC = State.cues[nextIdx];
+        if ((nextC.track || 0) !== tk) { nextIdx++; continue; }
+        if (nextC.timed !== false) break;
+        nextC.start = c.start + offset;
+        nextC.end = nextC.start;
+        offset += 0.001;
+        nextIdx++;
+      }
+    }
+  }
+
   const order=()=>State.cues.filter(x=>(x.track||0)===tk).map(x=>x.id).join(',');
   const before=order();
   sortCues();
@@ -528,27 +570,7 @@ function splitCueAtCursor(c, txtEl){
 
 /* ===== 統一的事件代理 (Event Delegation) ================================= */
 sublist.addEventListener('click', async e => {
-  const tin = e.target.closest('.tin');
-  const tout = e.target.closest('.tout');
-  if (tin || tout) {
-    e.stopPropagation();
-    const row = e.target.closest('.sub-row');
-    if (!row) return;
-    const c = State.cues.find(x => x.id === row.dataset.id);
-    if (!c || c.timed === false) return;
-    await ensureProjectSaved();
-    if (tin) {
-      openInlineTimeEdit(tin, c.start, t => {
-        c.start = Math.max(0, Math.min(t, c.end - 0.001));
-        commitCueTimeEdit(c, 'start'); recordHistory('修改起點' + cueSuffix(c)); // 同 I/O：順序不變則局部更新
-      });
-    } else {
-      openInlineTimeEdit(tout, c.end, t => {
-        c.end = Math.max(c.start + 0.001, t);
-        commitCueTimeEdit(c, 'end'); recordHistory('修改終點' + cueSuffix(c));
-      });
-    }
-  }
+  // Only handle clicks not related to tin/tout which are now dblclick
 });
 
 sublist.addEventListener('mousedown', e => {
@@ -578,7 +600,40 @@ sublist.addEventListener('mousedown', e => {
 
 sublist.addEventListener('dblclick', async e => {
   if (e.ctrlKey || e.metaKey || e.shiftKey) return;
-  if (e.target.closest('.tin') || e.target.closest('.tout')) return;
+  const tin = e.target.closest('.tin');
+  const tout = e.target.closest('.tout');
+  if (tin || tout) {
+    e.stopPropagation();
+    const row = e.target.closest('.sub-row');
+    if (!row) return;
+    const c = State.cues.find(x => x.id === row.dataset.id);
+    if (!c) return;
+    await ensureProjectSaved();
+    if (tin) {
+      openInlineTimeEdit(tin, c.start || 0, t => {
+        c.start = Math.max(0, t);
+        if (c.timed === false) {
+          c.end = c.start + 1.0;
+          c.timed = true;
+        } else {
+          c.start = Math.min(c.start, c.end - 0.001);
+        }
+        commitCueTimeEdit(c, 'start'); recordHistory('修改起點' + cueSuffix(c));
+      });
+    } else {
+      openInlineTimeEdit(tout, c.end || 0, t => {
+        c.end = Math.max((c.start || 0) + 0.001, t);
+        let edge = 'end';
+        if (c.timed === false) {
+          c.start = Math.max(0, c.end - 1.0);
+          c.timed = true;
+          edge = 'both';
+        }
+        commitCueTimeEdit(c, edge); recordHistory('修改終點' + cueSuffix(c));
+      });
+    }
+    return;
+  }
   const row = e.target.closest('.sub-row');
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);

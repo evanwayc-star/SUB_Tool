@@ -24,7 +24,7 @@ function _buildProjectData(){
     app:'SUB Tool', version:2,
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
-    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontScale:t.fontScale||1,posPct:t.posPct!=null?t.posPct:10,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'})),
+    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontScale:t.fontScale||1,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'})),
     pxPerSec:State.pxPerSec,
     notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
     cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false}))
@@ -111,11 +111,23 @@ function resetProject(){
 const Project = {
   save(){
     const bytes=_buildBytes();
+    if(IS_DESKTOP && _savePath){
+      DESK.writeProject(_savePath, bytesToB64(bytes)).then(pth=>{
+        if(pth){ _onSaved(pth); setStatus('已儲存專案', 'ok'); showToast('已儲存專案'); }
+        else showToast('儲存專案失敗，請嘗試「另存新檔」');
+      });
+    } else {
+      this.saveAs();
+    }
+  },
+  saveAs(){
+    const bytes=_buildBytes();
     const name=_defaultSaveName();
-    if(IS_DESKTOP){ DESK.saveProject(name,bytesToB64(bytes)).then(pth=>{ if(pth) _onSaved(pth); }); }
+    if(IS_DESKTOP){ DESK.saveProject(name,bytesToB64(bytes)).then(pth=>{ if(pth) { _onSaved(pth); setStatus('已另存新檔', 'ok'); showToast('已另存新檔'); } }); }
     else { downloadBytes(bytes,name,'application/json'); _onSaved(null,name); }
   },
   apply(data){
+    _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
     // Fix #19：明確排除 undefined/null，避免 version:0 被誤判為 v1（0 是 falsy）
     const isV1 = data.version === undefined || data.version === null || data.version === 1;
     State.cues=(data.cues||[]).map(c=>{
@@ -126,7 +138,7 @@ const Project = {
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
     const maxTk=State.cues.length > 0 ? State.cues.reduce((m,c)=>Math.max(m,c.track||0),0) : -1;
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontScale:t.fontScale||1,
-      posPct:t.posPct!=null?t.posPct:(t.posV==='top'?90:t.posV==='middle'?50:10), align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'}));
+      posPct:t.posPct!=null?t.posPct:(t.posV==='top'?15:t.posV==='middle'?50:100), align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'}));
     else State.tracks=[];
     ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:1, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));

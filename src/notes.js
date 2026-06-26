@@ -250,8 +250,8 @@ function _batchEditNotes(){
 
 const _makeBom=csv=>{const BOM=new Uint8Array([0xEF,0xBB,0xBF]),body=new TextEncoder().encode(csv),out=new Uint8Array(BOM.length+body.length);out.set(BOM);out.set(body,BOM.length);return out;};
 
-function doExportNotesGeneral(){
-  if(!State.notes.length)return;
+function getNotesGeneralFileData(){
+  if(!State.notes.length)return null;
   const csvF=v=>{const s=String(v);return(s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s;};
   const lines=['狀態,時間,內容'];
   for(const n of State.notes){
@@ -259,11 +259,18 @@ function doExportNotesGeneral(){
     const content=(n.text||'').replace(/\r?\n/g,' ');
     lines.push(`${csvF(n.done?'V':'K')},${csvF(time)},${csvF(content)}`);
   }
-  downloadBytes(_makeBom(lines.join('\r\n')),'notes.csv','text/csv;charset=utf-8');
+  const bytes = _makeBom(lines.join('\r\n'));
+  return { name: 'notes.csv', content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-8' };
 }
 
-function doExportNotesEdius(){
-  if(!State.notes.length)return;
+function doExportNotesGeneral(){
+  const f = getNotesGeneralFileData();
+  if(!f) return;
+  downloadBytes(b64ToBytes(f.content), f.name, f.mime);
+}
+
+function getNotesEdiusFileData(){
+  if(!State.notes.length)return null;
   const d=new Date();
   const DAY=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const hh=v=>String(v).padStart(2,'0');
@@ -273,8 +280,16 @@ function doExportNotesEdius(){
     const time=secToEncore(n.time,State.fps,State.dropFrame);
     eLines.push(`${i+1},"${time}", ,"${(n.text||'').replace(/"/g,'""')}"`);
   });
-  downloadBytes(_makeBom(eLines.join('\r\n')),'notes_EDIUS.csv','text/csv;charset=utf-8');
+  const bytes = _makeBom(eLines.join('\r\n'));
+  return { name: 'notes_EDIUS.csv', content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-8' };
 }
+
+function doExportNotesEdius(){
+  const f = getNotesEdiusFileData();
+  if(!f) return;
+  downloadBytes(b64ToBytes(f.content), f.name, f.mime);
+}
+
 
 function exportNotes(){
   if(!State.notes.length){ showToast('沒有備註可匯出'); return; }
@@ -291,4 +306,4 @@ function exportNotes(){
     }},{label:'取消',act:closeModal}],{width:'240px'});
 }
 
-export { addNote, renderNotes, exportNotes, doExportNotesGeneral, doExportNotesEdius, setNoteActive, updateNoteActive, clearAllNotes };
+export { addNote, renderNotes, exportNotes, doExportNotesGeneral, doExportNotesEdius, getNotesGeneralFileData, getNotesEdiusFileData, setNoteActive, updateNoteActive, clearAllNotes };

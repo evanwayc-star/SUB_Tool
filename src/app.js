@@ -115,17 +115,17 @@ let _videoSubSig = '';
 function renderVideoSub(){
   const t=Media.vTime();
   // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
-  const baseFs = Math.max(14, Math.min(36, Math.round((_videoWrap?.clientWidth||1000) * 0.025)));
+  const baseFs = Math.max(14, Math.min(45, Math.round((_videoWrap?.clientWidth||1000) * 0.035)));
   let html='', sig='';
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
     const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && (t+0.001)>=c.start && (t+0.001)<c.end);
     if(!cur.length)continue;
     const st=State.tracks[tk]||{};
-    const pct=st.posPct!=null?st.posPct:10, fs=st.fontScale||1, al=st.align||'center', col=st.color||'#ffffff';
+    const pct=st.posPct!=null?st.posPct:100, fs=st.fontScale||1, al=st.align||'center', col=st.color||'#ffffff';
     const fsPx = Math.round(baseFs * fs);
     sig+=tk+'|'+fsPx+'|'+col+'|'+pct+'|'+al+'|'+cur.map(c=>c.id+'='+c.text).join(',')+';';
-    html+=`<div class="vsub-track" style="bottom:${pct}%;text-align:${al};letter-spacing:1px;font-weight:500;font-family:'思源黑體', 'Noto Sans TC', 'Source Han Sans TC', sans-serif;">`+
+    html+=`<div class="vsub-track" style="top:${pct}%;transform:translateY(-${pct}%);text-align:${al};letter-spacing:1px;font-weight:500;font-family:'思源黑體', 'Noto Sans TC', 'Source Han Sans TC', sans-serif;">`+
       cur.map((c,i)=>`<span class="line" style="font-size:${fsPx}px;color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'').replace(/\n/g,'<br>')}</span>`).join('<br>')+
       `</div>`;
   }
@@ -261,31 +261,63 @@ function markActiveRow(id){
 video.addEventListener('play',()=>{
   Media.playing=true;
   $('playBtn').textContent='⏸';
-  if(!State.subMode){
-    State.selectedIds=[];
-    State.selectedId=null;
-    refreshSelectionUI();
-    const stSel = $('stSel');
-    if(stSel) stSel.textContent='';
-  }
+  // 播放中不要取消目前選擇的字幕
 });
 video.addEventListener('pause',()=>{
   $('playBtn').textContent='▶';
-  // FPS-SYNC（詳見 FPS_時碼一致性.md）：暫停時把時碼/seekBar 一併刷新為已對齊格的權威位置
-  // （與播放點同源），避免殘留播放中最後一次未對齊的時間導致播放器比播放點多一格
   const t=Media.displayTime();
   $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
   $('seekBar').value=Math.round(t*1000);
   updatePlayhead();
+  
+  if (!State.subMode && State.selectedId) {
+    const c = State.cues.find(x => x.id === State.selectedId);
+    if (c) {
+      const tkCues = State.cues.filter(x => (x.track || 0) === (c.track || 0));
+      const idx = tkCues.findIndex(x => x.id === c.id);
+      const nextCue = idx >= 0 && idx < tkCues.length - 1 ? tkCues[idx + 1] : null;
+      const targetOut = nextCue ? nextCue.end : c.end;
+      if (t > targetOut) {
+        State.selectedIds=[];
+        State.selectedId=null;
+        refreshSelectionUI();
+        const stSel = $('stSel');
+        if(stSel) stSel.textContent='';
+      }
+    }
+  }
 });
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
 window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});
 video.addEventListener('ended',()=>{Media.pause();});
 
+/* 影片視窗與時間碼 滾輪逐格播放 */
+['videoWrap', 'tcCur'].forEach(id => {
+  $(id)?.addEventListener('wheel', e => {
+    e.preventDefault();
+    const frames = e.deltaY > 0 ? 1 : -1;
+    nudge(frames / (State.fps || 30));
+  }, {passive: false});
+});
+
 /* seek bar */
 $('seekBar').addEventListener('input',e=>{ const t=(+e.target.value)/1000; Media.seek(t); updateNoteActive(t); });
 // rateSel removed from UI — speed controlled via JKL keys
-$('fpsSel').addEventListener('change',e=>{ const prev=State.fps,prevDf=State.dropFrame; setFps(e.target.value); renderSubList(); renderNotes(); recordHistory(`切換 FPS ${prevDf?prev+'df':prev}→${State.fps+(State.dropFrame?'df':'')}`); e.target.blur(); });
+$('fpsSel').addEventListener('change',e=>{
+  const prev=State.fps,prevDf=State.dropFrame;
+  setFps(e.target.value);
+  State.cues.forEach(c => {
+    c.start = snapTimeToFrame(c.start, State.fps, State.dropFrame);
+    c.end = snapTimeToFrame(c.end, State.fps, State.dropFrame);
+  });
+  State.notes.forEach(n => {
+    n.time = snapTimeToFrame(n.time, State.fps, State.dropFrame);
+  });
+  renderAll();
+  renderNotes();
+  recordHistory(`切換 FPS ${prevDf?prev+'df':prev}→${State.fps+(State.dropFrame?'df':'')}`);
+  e.target.blur();
+});
 $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
 
 
@@ -306,6 +338,7 @@ async function doAction(act){
       if(IS_DESKTOP){ const r=await DESK.openProject(); if(r)Project.loadDesktop(r); }
       else { const f=await pickFile($('fileProject')); if(f)Project.load(f); } break;
     case 'save-project': Project.save(); break;
+    case 'save-as-project': Project.saveAs(); break;
     case 'new':
       // Fix #15 同款：破壞性動作改用 openModal，風格一致且 Electron 不會截取原生 confirm
       openModal('開新專案',
@@ -395,6 +428,15 @@ async function doAction(act){
     case 'trim-track': trimTrackSpaces(); break;
     case 'help': showHelp(); break;
     case 'modal-close': closeModal(); break;
+    case 'toggle-overwrite':
+      State.overwriteMode = !State.overwriteMode;
+      const owBtns = document.querySelectorAll('.ow-toggle-btn');
+      owBtns.forEach(btn => {
+        btn.textContent = State.overwriteMode ? '🔓 可覆蓋' : '🔒 不可覆蓋';
+        btn.classList.toggle('primary', State.overwriteMode);
+      });
+      setStatus(`覆蓋模式：${State.overwriteMode ? '解鎖 (可自由重疊)' : '鎖定 (不可覆蓋)'}`, 'ok');
+      break;
   }
 }
 let _repTimer=null, _repInterval=null, _repFired=false;
@@ -452,9 +494,9 @@ function renderTrackStyle(){
   panel.classList.remove('disabled');
   const tk=State.tracks[i];
   $('tsTitle').textContent='「'+tk.name+'」樣式';
-  const sz=tk.fontScale||1; $('tsSize').value=sz;
-  const pp=tk.posPct!=null?tk.posPct:10; $('tsPos').value=pp;
-  const col=(tk.color||'#ffffff').toLowerCase(); $('tsColor').value=col;
+  const sz=tk.fontScale||1; if(document.activeElement!==$('tsSize')) $('tsSize').value=sz;
+  const pp=tk.posPct!=null?tk.posPct:100; if(document.activeElement!==$('tsPos')) $('tsPos').value=pp;
+  const col=(tk.color||'#ffffff').toLowerCase(); if(document.activeElement!==$('tsColor')) $('tsColor').value=col;
   panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===sz));
   panel.querySelectorAll('.ts-preset[data-ts-pos]').forEach(b=>b.classList.toggle('active',+b.dataset.tsPos===pp));
   panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===col));
@@ -596,7 +638,7 @@ function initUI(){
   // 樣式控制（大小 / 位置 / 顏色）
   $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontScale=clamp(+e.target.value,0.5,5); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
-  $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,92); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
+  $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,100); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsPos').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   // 預設按鈕（大小 / 位置 / 顏色）— 委派事件到面板
@@ -634,6 +676,30 @@ function initUI(){
   let _sync=false; const gt=$('tlGutterTracks');
   tlTracks.addEventListener('scroll',()=>{ if(_sync)return; _sync=true; gt.scrollTop=tlTracks.scrollTop; _sync=false; },{passive:true});
   gt.addEventListener('scroll',()=>{ if(_sync)return; _sync=true; tlTracks.scrollTop=gt.scrollTop; _sync=false; },{passive:true});
+  // 同步右下角狀態列的選取狀態至中間時間軸工具列
+  const stSel = $('stSel'), tlSel = $('tlSel');
+  if(stSel && tlSel) {
+    const updateTl = () => {
+      const txt = stSel.textContent;
+      if(!txt || txt==='未選取') {
+        tlSel.textContent = '未選取';
+        tlSel.className = 'sel-none';
+        stSel.className = 'sel-none';
+        if(txt !== '未選取') stSel.textContent = '未選取';
+      } else {
+        tlSel.textContent = txt;
+        if(txt.includes('已選 1 條')) {
+           tlSel.className = 'sel-one';
+           stSel.className = 'sel-one';
+        } else {
+           tlSel.className = 'sel-multi';
+           stSel.className = 'sel-multi';
+        }
+      }
+    };
+    new MutationObserver(updateTl).observe(stSel, { childList: true, characterData: true, subtree: true });
+    updateTl(); // initial sync
+  }
   // 區塊分隔線：拖曳調整 字幕列表寬度 / 時間軸高度
   const _LAYOUT_KEY='sub_layout_v2';
   const saveLayout=()=>{
@@ -671,8 +737,11 @@ function initUI(){
   renderListTrackSel();
   // 點擊時間軸時解除輸入框焦點
   $('timelinePanel').addEventListener('mousedown',()=>{ const ae=document.activeElement; if(ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'))ae.blur(); },{capture:true});
+
   // 任何按鈕點擊後立即解除焦點，避免 Space/Enter 誤觸
   document.addEventListener('click',e=>{ const btn=e.target.closest('button'); if(btn)btn.blur(); },{capture:true});
+
+
 }
 
 /* ===== 磁吸 / 防重疊 工具 ===== */
@@ -699,7 +768,7 @@ function _execCopyTrack(srcIdx, withText){
   const names=State.tracks.map(t=>t.name);
   while(names.includes(name)) name=base+(n++);
   // 複製軌道屬性
-  const tk={name, visible:true, fontScale:srcTrack.fontScale||1, posPct:srcTrack.posPct||10,
+  const tk={name, visible:true, fontScale:srcTrack.fontScale||1, posPct:srcTrack.posPct!=null?srcTrack.posPct:100,
              align:srcTrack.align||'center', locked:false, color:srcTrack.color||'#ffffff'};
   const newIdx=State.tracks.length;
   State.tracks.push(tk); syncTrackCount();

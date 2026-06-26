@@ -46,11 +46,13 @@ const Media = {
   // 由 ffprobe 的 audio[] 推算出每個聲道的標籤（須與 main.js ingest 的展開規則一致）
   _expandChannels(audio){
     const out=[];
+    let globalCh = 1;
     (audio||[]).forEach((a,i)=>{
       const ch=Math.max(1,a.channels||1);
-      const base=a.title||a.lang||('音軌 '+(i+1));
-      if(ch===1) out.push(base);
-      else for(let k=0;k<ch;k++) out.push(base+' · 聲道'+(k+1));
+      for(let k=0;k<ch;k++) {
+        out.push(`聲道${globalCh}`);
+        globalCh++;
+      }
     });
     return out;
   },
@@ -690,7 +692,7 @@ const Media = {
   _lastSeekTime: null,
   vTime(){
     if(this.mpvMode) return this._mpvTime;
-    if(!video.src){
+    if(!video.hasAttribute('src')){
       if(this._vStart!==null) return this._vTime+(performance.now()-this._vStart)/1000*(video.playbackRate||1);
       return this._vTime;
     }
@@ -714,7 +716,7 @@ const Media = {
       this.startElementSources(this._mpvTime);
       this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); return;
     }
-    if(!video.src){
+    if(!video.hasAttribute('src')){
       if(this._vStart!==null) this._vTime=this.vTime();
       this._vStart=performance.now();
       this.ensureCtx();
@@ -736,7 +738,7 @@ const Media = {
       this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶'; return;
     }
-    if(!video.src){
+    if(!video.hasAttribute('src')){
       if(this._vStart!==null){ this._vTime+=(performance.now()-this._vStart)/1000*(video.playbackRate||1); this._vStart=null; }
       this.stopBufferSources(); this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶'; return;
@@ -759,7 +761,7 @@ const Media = {
       window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
       return;
     }
-    if(!video.src){
+    if(!video.hasAttribute('src')){
       this._vTime=Math.max(0,t); if(this._vStart!==null)this._vStart=performance.now();
       $('tcCur').textContent=secToEncore(this._vTime,State.fps,State.dropFrame);
       $('seekBar').value=Math.round(this._vTime*1000);
@@ -926,7 +928,7 @@ const Media = {
       return;
     }
     // 虛擬模式中更改速度前，先把已累積時間存回 _vTime，重設計時起點，防止位置跳躍
-    if(!video.src && this._vStart!==null){ this._vTime=this.vTime(); this._vStart=performance.now(); }
+    if(!video.hasAttribute('src') && this._vStart!==null){ this._vTime=this.vTime(); this._vStart=performance.now(); }
     video.playbackRate=r;
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el)tr.el.playbackRate=r; }
     if(this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }

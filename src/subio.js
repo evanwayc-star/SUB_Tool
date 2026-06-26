@@ -13,7 +13,7 @@ import { Project } from './project.js';
 import { emit } from './events.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { buildXLSX } from './xlsxExport.js';
-import { doExportNotesGeneral, doExportNotesEdius } from './notes.js';
+import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
 import { t } from './i18n.js';
 
 function convertLineBreaks(parsed) {
@@ -147,32 +147,88 @@ function showExportDialog() {
       if (!fmts.length && !notesE && !notesG) { showToast('請至少勾選一個格式'); return; }
       if (fmts.length && tks !== null && !tks.length) { showToast('請至少勾選一個軌道'); return; }
       closeModal();
+      const filesToExport = [];
       for (const fmt of fmts) {
         if (fmt === 'xlsx') {
           const list = tks ? tks.map(i => ({ name: State.tracks[i]?.name || ('軌道' + (i + 1)), cues: State.cues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length) : [{ name: State.tracks[0]?.name || '軌道 1', cues: State.cues }];
-          doExportXLSX(list);
+          const f = getXLSXFileData(list); if (f) filesToExport.push(f);
         } else {
-          if (tks) { for (const i of tks) { const cues = State.cues.filter(c => (c.track || 0) === i); if (cues.length) doExport(fmt, cues, State.tracks[i]?.name); } }
-          else { doExport(fmt, State.cues); }
+          if (tks) {
+            for (const i of tks) {
+              const cues = State.cues.filter(c => (c.track || 0) === i);
+              if (cues.length) { const f = getFileData(fmt, cues, State.tracks[i]?.name); if (f) filesToExport.push(f); }
+            }
+          } else {
+            const f = getFileData(fmt, State.cues); if (f) filesToExport.push(f);
+          }
         }
       }
-      if (notesE) doExportNotesEdius();
-      if (notesG) doExportNotesGeneral();
+      if (notesE) { const f = getNotesEdiusFileData(); if (f) filesToExport.push(f); }
+      if (notesG) { const f = getNotesGeneralFileData(); if (f) filesToExport.push(f); }
+      executeBatchExport(filesToExport);
     }
   }, { label: '取消', act: closeModal }]);
 }
 function exportSub(kind) {
   if (State.cues.length === 0) { showToast('沒有字幕可匯出'); return; }
+  const filesToExport = [];
   if (kind === 'xlsx') {
     const list = State.tracks.map((tk, i) => ({ name: tk.name, cues: State.cues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length);
-    doExportXLSX(list); return;
-  }
-  if (State.trackCount > 1) {
-    for (let i = 0; i < State.tracks.length; i++) {
-      const cues = State.cues.filter(c => (c.track || 0) === i); if (cues.length) doExport(kind, cues, State.tracks[i]?.name);
+    const f = getXLSXFileData(list); if (f) filesToExport.push(f);
+  } else {
+    if (State.trackCount > 1) {
+      for (let i = 0; i < State.tracks.length; i++) {
+        const cues = State.cues.filter(c => (c.track || 0) === i);
+        if (cues.length) { const f = getFileData(kind, cues, State.tracks[i]?.name); if (f) filesToExport.push(f); }
+      }
+    } else {
+      const f = getFileData(kind, State.cues); if (f) filesToExport.push(f);
     }
-  } else doExport(kind, State.cues);
+  }
+  executeBatchExport(filesToExport);
 }
+function executeBatchExport(files) {
+  if (!files.length) return;
+  if (!IS_DESKTOP) {
+    files.forEach(f => downloadBytes(b64ToBytes(f.content), f.name, f.mime || 'application/octet-stream'));
+    setStatus(`已下載 ${files.length} 個檔案`, 'ok');
+    showToast(`已下載 ${files.length} 個檔案`);
+    return;
+  }
+  if (files.length === 1) {
+    const f = files[0];
+    DESK.exportSub(f.name, f.content, f.ext).then(pth => {
+      if (pth) { setStatus(`已匯出：${pth}`, 'ok'); showToast(`已匯出 ${baseName(pth)}`); }
+    });
+  } else {
+    DESK.exportDirectory(files).then(dir => {
+      if (dir) { setStatus(`已批次匯出 ${files.length} 個檔案至：${dir}`, 'ok'); showToast(`已批次匯出 ${files.length} 個檔案`); }
+    });
+  }
+}
+
+function getFileData(kind, cues, trackName) {
+  if (!cues.length) return null;
+  const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
+  const tkSuffix = trackName ? '_' + trackName.replace(/[\\/:*?"<>|]/g, '_') : '';
+  let text, ext;
+  if (kind === 'srt') { text = SubFormats.toSRT(cues); ext = 'srt'; }
+  else if (kind === 'ass') { text = toASSFromState(cues); ext = 'ass'; }
+  else if (kind === 'encore') { text = SubFormats.toEncore(cues, State.fps, State.dropFrame); ext = 'txt'; }
+  else { text = SubFormats.toTXT(cues); ext = 'txt'; }
+  const bytes = encodeUTF16LE(text);
+  const fname = base + tkSuffix + (kind === 'encore' ? '_encore' : '') + '.' + ext;
+  return { name: fname, content: bytesToB64(bytes), ext: ext, mime: 'text/plain;charset=utf-16le' };
+}
+
+function getXLSXFileData(trackDataList) {
+  if (!trackDataList.length) return null;
+  const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);
+  const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
+  const fname = base + '.xlsx';
+  return { name: fname, content: bytesToB64(bytes), ext: 'xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+}
+
 // A3：toASS 的 8 個參數（含視窗/視訊尺寸後援）集中在一處，避免 app.js（mpv 預覽）與
 // 此處（匯出 .ass）兩份引數列重複、後援值漂移導致預覽與匯出的字幕排版對不上。
 function toASSFromState(cues) {
@@ -185,30 +241,9 @@ function toASSFromState(cues) {
     $('videoWrap')?.clientHeight || 562
   );
 }
-function doExport(kind, cues, trackName) {
-  // X4 phase 1：示範把使用者可見文案包成 t(...)（zh 下原樣顯示，未來語言查表）
-  if (!cues.length) { showToast(t('所選軌道沒有字幕')); return; }
-  const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
-  const tkSuffix = trackName ? '_' + trackName.replace(/[\\/:*?"<>|]/g, '_') : '';
-  let text, ext;
-  if (kind === 'srt') { text = SubFormats.toSRT(cues); ext = '.srt'; }
-  else if (kind === 'ass') { text = toASSFromState(cues); ext = '.ass'; }
-  else if (kind === 'encore') { text = SubFormats.toEncore(cues, State.fps, State.dropFrame); ext = '.txt'; }
-  else { text = SubFormats.toTXT(cues); ext = '.txt'; }
-  const bytes = encodeUTF16LE(text);
-  const fname = base + tkSuffix + (kind === 'encore' ? '_encore' : '') + ext;
-  if (IS_DESKTOP) {
-    DESK.exportSub(fname, bytesToB64(bytes), ext.replace('.', '')).then(pth => { if (pth) { setStatus(t('已匯出：{0}', pth), 'ok'); showToast(t('已匯出 {0}', baseName(pth))); } });
-  } else {
-    downloadBytes(bytes, fname, 'text/plain;charset=utf-16le');
-    setStatus(t('已匯出 {0}（UTF-16 LE）', kind.toUpperCase()), 'ok');
-    showToast(t('已匯出 {0}', fname));
-  }
-}
 
 function doExportXLSX(trackDataList) {
   if (!trackDataList.length) { showToast('所選軌道沒有字幕'); return; }
-  const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);
   const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
   const fname = base + '.xlsx';
   if (IS_DESKTOP) {

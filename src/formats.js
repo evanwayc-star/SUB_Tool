@@ -79,8 +79,8 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
     } else {
       tracks.forEach((tk, i) => {
         const fs = Math.round(baseFontSize * (tk.fontScale || 1));
-        const pp = tk.posPct != null ? tk.posPct : 10;
-        const mv = Math.round(vwh * (pp / 100));
+        const pp = tk.posPct != null ? tk.posPct : 100;
+        const mv = Math.round(vwh * ((100 - pp) / 100));
         const col = hexToAss(tk.color || '#ffffff');
         styles += `Style: Track${i},${defFont},${fs},${col},&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${mv},1\n`;
       });

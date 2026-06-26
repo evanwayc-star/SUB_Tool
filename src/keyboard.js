@@ -2,7 +2,7 @@
 import { $, video, sublist } from './dom.js';
 import { State, cueSuffix } from './state.js';
 import { clamp } from './util.js';
-import { fmtClock, secToEncore } from './time.js';
+import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
 import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline.js';
@@ -152,16 +152,11 @@ window.addEventListener('keydown',e=>{
       jklApply(); break;
     case 'k': // 暫停
       e.preventDefault(); _jklSpeed=0; jklApply(); break;
-    case '2':
-      e.preventDefault();
-      jklClear(); _jklSpeed=0; video.playbackRate=1; Media.pause();
-      jumpToCueInMinusFrames(1, 5);
-      break;
-    case '5':
-      e.preventDefault();
-      jklClear(); _jklSpeed=0; video.playbackRate=1; Media.pause();
-      jumpToCueInMinusFrames(-1, 5);
-      break;
+    case '1': e.preventDefault(); setZoom(State.pxPerSec*0.77); break;
+    case '2': e.preventDefault(); setZoom(State.pxPerSec*1.3); break;
+    case '7': e.preventDefault(); emit('action', 'history'); break;
+    case '8': e.preventDefault(); emit('action', 'notes'); break;
+    case '9': e.preventDefault(); emit('action', 'check-panel'); break;
     case 'l': // 正播：1 → 5 (每階 0.5)
       e.preventDefault();
       if(_jklSpeed<=0) _jklSpeed=1;
@@ -189,21 +184,21 @@ window.addEventListener('keydown',e=>{
       e.preventDefault();
       if((e.ctrlKey||e.metaKey)&&e.shiftKey){ jumpToFirstLastCue(-1); }
       else if(e.shiftKey){ seekHome(); }
-      else if(e.ctrlKey||e.metaKey){ 
+      else if(e.ctrlKey||e.metaKey){ jumpToAdjacentCue(-1); }
+      else {
         if(Media.playing) Media.pause();
-        stepBoundary(-1); 
+        stepBoundary(-1);
       }
-      else jumpToAdjacentCue(-1);
       break;
     case 'arrowdown':
       e.preventDefault();
       if((e.ctrlKey||e.metaKey)&&e.shiftKey){ jumpToFirstLastCue(1); }
       else if(e.shiftKey){ seekEnd(); }
-      else if(e.ctrlKey||e.metaKey){ 
+      else if(e.ctrlKey||e.metaKey){ jumpToAdjacentCue(1); }
+      else {
         if(Media.playing) Media.pause();
-        stepBoundary(1); 
+        stepBoundary(1);
       }
-      else jumpToAdjacentCue(1);
       break;
     case 'home': e.preventDefault(); seekHome(); break;
     case 'end': e.preventDefault(); seekEnd(); break;
@@ -219,9 +214,12 @@ window.addEventListener('keydown',e=>{
         e.preventDefault();
         State.selectedId=null; State.selectedIds=[];
         refreshSelectionUI();
+        const stSel = document.getElementById('stSel');
+        if(stSel) stSel.textContent='';
       }
       break;
-    case 'p': e.preventDefault(); {
+    case 'p':
+    case 'e': e.preventDefault(); {
       const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
       if(!ids.length)break;
       const jCues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(c=>c&&c.timed!==false);
@@ -238,20 +236,43 @@ window.addEventListener('keydown',e=>{
         e.preventDefault();
         const tkCues=State.cues.filter(c=>(c.track||0)===State.listTrack);
         if(tkCues.length){ State.selectedIds=tkCues.map(c=>c.id); State.selectedId=tkCues[0].id; refreshSelectionUI(); }
-      } else { e.preventDefault(); emit('panel:toggle','historyPanel'); renderHistory(); }
+      } else {
+        e.preventDefault();
+        if(State.selectedId){
+          const c = State.cues.find(x => x.id === State.selectedId);
+          if(c && c.timed !== false){
+            Media.seek(c.start); updatePlayhead(); emit('playhead:ensure'); emit('render:videoSub');
+          }
+        }
+      }
       break;
     case 's':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); Project.save(); }
-      else { e.preventDefault(); emit('panel:toggle','notesPanel'); renderNotes(); }
+      else {
+        e.preventDefault();
+        if(State.selectedId){
+          const c = State.cues.find(x => x.id === State.selectedId);
+          if(c && c.timed !== false){
+            Media.seek(c.end); updatePlayhead(); emit('playhead:ensure'); emit('render:videoSub');
+          }
+        }
+      }
       break;
-    case 'd': e.preventDefault(); emit('action','mixer'); break;
+    case 'd': break;
+    case 'q': e.preventDefault(); setIn(); break;
+    case 'w': e.preventDefault(); setOut(); break;
     case 'x':
       e.preventDefault();
-      if(!State.subMode){
-        const t=Media.vTime();
-        const hit=State.cues.find(c=>(c.track||0)===State.listTrack&&c.timed!==false&&c.start<=t&&c.end>=t);
-        if(hit) selectCue(hit.id,{seek:false});
-        else setStatus('目前時間點無字幕','err');
+      {
+        const t = Media.vTime();
+        const tk = State.listTrack || 0;
+        const c = State.cues.find(cx => (cx.track || 0) === tk && cx.timed !== false && cx.start <= t && cx.end > t);
+        if (c) {
+          selectCueSingle(c.id, false);
+          setStatus('已選取目前字幕', 'ok');
+        } else {
+          setStatus('目前時間點沒有字幕', '');
+        }
       }
       break;
     case 'c':
@@ -265,12 +286,16 @@ window.addEventListener('keydown',e=>{
     case 'm': e.preventDefault(); addNote(); break;
     case 'f':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); const sd=document.getElementById('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>document.getElementById('searchInput')?.focus(),20); } }
-      else { e.preventDefault(); emit('action','check-panel'); }
       break;
     case ']': e.preventDefault(); zoomFit(); break;
     case 'z':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); e.shiftKey?History.redo():History.undo(); }
-      else { e.preventDefault(); setIn(); }
+      else { e.preventDefault(); emit('action','toggle-overwrite'); }
+      break;
+    case '`':
+      e.preventDefault();
+      if(window._lastZoomMode === 'fit') { zoomFitVideo(); window._lastZoomMode = 'video'; }
+      else { zoomFit(); window._lastZoomMode = 'fit'; }
       break;
     case '-': case '_': e.preventDefault(); setZoom(State.pxPerSec*0.77); break;
     case '+': case '=': e.preventDefault(); setZoom(State.pxPerSec*1.3); break;

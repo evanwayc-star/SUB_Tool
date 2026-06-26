@@ -372,6 +372,22 @@ ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
   return r.filePath;
 });
 
+ipcMain.handle('dialog:exportDirectory', async (e, files) => {
+  const r = await dialog.showOpenDialog(mainWin, {
+    title: '選擇匯出資料夾',
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (r.canceled || r.filePaths.length === 0) return null;
+  const dir = r.filePaths[0];
+  allowDir(dir);
+  for (const f of files) {
+    if (f.name && f.b64) {
+      fs.writeFileSync(path.join(dir, f.name), Buffer.from(f.b64, 'base64'));
+    }
+  }
+  return dir;
+});
+
 /* ---- 快取管理 ---- */
 ipcMain.handle('cache:info', () => cacheInfo());
 ipcMain.handle('cache:cleanOrphans', () => cleanOrphans());

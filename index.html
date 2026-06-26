@@ -18,6 +18,7 @@
     <button class="icon open-proj-btn" data-act="open-project" title="開啟專案 (.subtool)">📂 開啟專案</button>
     <div class="sep"></div>
     <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 儲存專案</button>
+    <button class="icon" data-act="save-as-project" title="另存新檔">💾 另存新檔</button>
     <div class="sep"></div>
     <button class="icon" data-act="open-media" title="匯入影音">🎬 開啟影音</button>
     <div class="sep"></div>
@@ -95,7 +96,7 @@
         <button class="icon" data-act="shift-tc" title="時間碼位移 / 調整持續時間">⟷ 調整</button>
         <button class="icon" data-act="copy-track" title="複製字幕軌道至新軌道">⧉ 複製</button>
         <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)">🔍</button>
-        <button class="icon" data-act="check-panel" id="checkPanelBtn" title="字幕檢查">✓ 檢查</button>
+        <button class="icon" data-act="check-panel" id="checkPanelBtn" title="字幕檢查 (9)">✓ 檢查</button>
       </div>
       <div class="sublist" id="sublist"></div>
       <div class="track-style" id="trackStyle">
@@ -112,11 +113,11 @@
           <span class="ts-sep">│</span>
           <span class="ts-label">位置</span>
           <div class="ts-btngrp">
-            <button class="ts-preset" data-ts-pos="90">上</button>
+            <button class="ts-preset" data-ts-pos="15">上</button>
             <button class="ts-preset" data-ts-pos="50">中</button>
-            <button class="ts-preset" data-ts-pos="10">下</button>
+            <button class="ts-preset" data-ts-pos="100">下</button>
           </div>
-          <input type="number" id="tsPos" min="0" max="92" step="1" value="10"><span class="ts-unit">%</span>
+          <input type="number" id="tsPos" min="0" max="100" step="1" value="100"><span class="ts-unit">%</span>
           <span class="ts-sep">│</span>
           <span class="ts-label">顏色</span>
           <input type="color" id="tsColor" value="#ffffff">
@@ -140,17 +141,19 @@
       <span style="font-weight:600">⏱ 時間軸</span>
       <button class="icon" data-act="add-track" title="新增字幕軌">＋ <span class="lbl">軌道</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="history" title="動作紀錄">🕘 <span class="lbl">紀錄</span></button>
+      <button class="icon" data-act="history" title="動作紀錄 (7)">🕘 <span class="lbl">紀錄</span></button>
       <button class="icon" data-act="undo" title="復原 (Ctrl+Z)">↶</button>
       <button class="icon" data-act="redo" title="重做 (Ctrl+Shift+Z)">↷</button>
       <div class="sep"></div>
-      <button class="icon" data-act="notes" title="備註">📌 <span class="lbl">備註</span></button>
+      <button class="icon" data-act="notes" title="備註 (8)">📌 <span class="lbl">備註</span></button>
       <button class="icon" data-act="add-note" title="新增備註">＋</button>
       <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span class="lbl">上字幕</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="set-in" title="設定起點 (I)">In</button>
-      <button class="icon" data-act="set-out" title="設定終點 (O)">Out</button>
-      <span id="tlSel" class="tl-sel-info">無選取</span>
+      <button class="icon" data-act="set-in" title="設定起點 (Q)">In</button>
+      <button class="icon" data-act="set-out" title="設定終點 (W)">Out</button>
+      <div class="sep"></div>
+      <button class="ow-toggle-btn" id="overwriteToggleBtn" data-act="toggle-overwrite" title="切換覆蓋狀態 (Z)">🔒 不可覆蓋</button>
+      <span id="tlSel">未選取</span>
       <div class="sep"></div>
       <div class="zoom">
         縮放 <button class="icon" data-act="zoom-out">－</button>
@@ -177,6 +180,7 @@
           <div class="tl-rubber" id="tlRubber"></div>
           <div class="tl-inpoint" id="tlInpoint" style="display:none"></div>
           <div class="tl-playhead" id="tlPlayhead" style="left:0"></div>
+          <div id="tlSnapGuide" style="display:none;position:absolute;top:0;bottom:0;width:2px;background:#44ff44;box-shadow:0 0 6px #44ff44;z-index:999;pointer-events:none;"></div>
         </div>
       </div>
     </div>
@@ -188,6 +192,7 @@
     <span id="stMedia"></span>
     <div class="spacer"></div>
     <span id="stEngine">音訊引擎：原生</span>
+    <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" title="切換覆蓋狀態 (Z)">🔒 不可覆蓋</button>
     <span id="stSel"></span>
   </div>
 </div>
@@ -225,6 +230,7 @@
 <div class="float-panel check-float-panel" id="checkPanel">
   <div class="fp-head"><span>✓ 字幕檢查</span><span class="spacer"></span><button class="fp-close" data-act="close-check">✕</button></div>
   <div class="fp-body check-panel">
+    <div class="cp-row cp-issue" id="cpNoTime"><span class="cp-label">[無時間碼]</span>：<span class="cp-nums"></span></div>
     <div class="cp-row cp-issue" id="cpOverlap"><span class="cp-label">時間碼重疊</span>：<span class="cp-nums"></span></div>
     <div class="cp-row cp-issue" id="cpMulti"><span class="cp-label">字幕３行以上</span>：<span class="cp-nums"></span></div>
     <div class="cp-row cp-issue" id="cpTrim"><span class="cp-label">頭尾為空白</span><button class="mini" data-act="trim-track" title="自動刪除該軌道所有頭尾空白">Trim</button>：<span class="cp-nums"></span></div>

@@ -368,6 +368,8 @@ function renderCueBlocks(){
         const vs=Math.max(os,t0), ve=Math.min(oe,t1);
         const ov=document.createElement('div'); ov.className='cue-overlap';
         ov.style.left=timeToX(vs)+'px'; ov.style.width=Math.max(2,(ve-vs)*State.pxPerSec)+'px';
+        ov.dataset.id1 = tc[i].id;
+        ov.dataset.id2 = tc[j].id;
         row.appendChild(ov);
       }
     }
@@ -480,7 +482,24 @@ let _noteClickState=null; // 備註標記雙擊偵測 { id, t }
 tlScroll.addEventListener('mousedown',e=>{
   if(e.button!==0)return;
   hideCtx();
-  const block=e.target.closest('.cue-block');
+  const overlap=e.target.closest('.cue-overlap');
+  let block=e.target.closest('.cue-block');
+  
+  if(overlap){
+    const id1 = overlap.dataset.id1;
+    const id2 = overlap.dataset.id2;
+    const idx1 = State.cues.findIndex(c=>c.id===id1);
+    const idx2 = State.cues.findIndex(c=>c.id===id2);
+    const bottomId = idx1 < idx2 ? id1 : id2;
+    const topId = idx1 < idx2 ? id2 : id1;
+    
+    let targetId = bottomId;
+    if(State.selectedId === bottomId) targetId = topId;
+    else if(State.selectedId === topId) targetId = bottomId;
+    
+    block = tlTracks.querySelector(`.cue-block[data-id="${targetId}"]`);
+  }
+
   const rect=tlLayer.getBoundingClientRect();
   const x=e.clientX-rect.left, y=e.clientY-rect.top;
   if(block){
@@ -518,7 +537,7 @@ tlScroll.addEventListener('mousedown',e=>{
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
       .map(cc=>{ const b=neighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
-      snaps:snapTargets(exSet), thr:8/State.pxPerSec};
+      snaps:snapTargets(exSet), thr:20/State.pxPerSec};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
   }
@@ -538,8 +557,12 @@ tlScroll.addEventListener('mousedown',e=>{
       }
     }
     jklReset(); // 播放中拖曳時間尺 → 暫停
-    Media.seek(snapFrame(xToTime(x))); updatePlayhead(); emit('render:videoSub');
-    drag={mode:'scrub'}; e.preventDefault(); return;
+    const snaps = snapTargets(new Set());
+    const thr = 20/State.pxPerSec;
+    const t = xToTime(x);
+    const sn = snapVal(t, snaps, thr);
+    Media.seek(sn !== t ? sn : snapFrame(t)); updatePlayhead(); emit('render:videoSub');
+    drag={mode:'scrub', snaps, thr}; e.preventDefault(); return;
   }
   drag={mode:'rubber',startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,x0:x,y0:y,moved:false,additive:e.ctrlKey||e.metaKey};
   e.preventDefault();
@@ -549,7 +572,13 @@ let _autoScrollId = null;
 const _handleDragUpdate = (e) => {
   if(!drag)return;
   const rect=tlLayer.getBoundingClientRect();
-  if(drag.mode==='scrub'){ Media.seek(snapFrame(xToTime(e.clientX-rect.left))); updatePlayhead(); emit('render:videoSub'); return; }
+  if(drag.mode==='scrub'){
+    const t = xToTime(e.clientX-rect.left);
+    const sn = snapVal(t, drag.snaps, drag.thr);
+    Media.seek(sn !== t ? sn : snapFrame(t));
+    updatePlayhead(); emit('render:videoSub'); 
+    updateSnapGuide(null); return;
+  }
   if(drag.mode==='move'||drag.mode==='l'||drag.mode==='r'||drag.mode==='rubber'){
     if(Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)drag.moved=true;
   }
@@ -565,34 +594,51 @@ const _handleDragUpdate = (e) => {
   let dt=(e.clientX-drag.startX + (tlScroll.scrollLeft - drag.startScroll))/State.pxPerSec;
   if(drag.mode==='move'){
     // 防重疊：限制 dt 使每條都不越過同軌鄰居
-    for(const it of drag.grp){
-      const minDt=it.prevEnd-it.os, maxDt=(it.nextStart===Infinity?Infinity:it.nextStart-it.oe);
-      if(dt<minDt)dt=minDt; if(maxDt!==Infinity&&dt>maxDt)dt=maxDt;
+    if(!State.overwriteMode){
+      for(const it of drag.grp){
+        const minDt=it.prevEnd-it.os, maxDt=(it.nextStart===Infinity?Infinity:it.nextStart-it.oe);
+        if(dt<minDt)dt=minDt; if(maxDt!==Infinity&&dt>maxDt)dt=maxDt;
+      }
     }
     const minOs=Math.min(...drag.grp.map(g=>g.os)); if(minOs+dt<0)dt=-minOs;
     // 磁吸（單選時依主字幕起/訖 → 播放點與其他字幕邊界）
+    let targetSn = null;
     if(drag.grp.length===1){
       const it=drag.grp[0], len=it.oe-it.os, ns=it.os+dt;
       const s1=snapVal(ns,drag.snaps,drag.thr), s2=snapVal(ns+len,drag.snaps,drag.thr);
-      let snapped=ns; if(s1!==ns)snapped=s1; else if(s2!==ns+len)snapped=s2-len;
+      let snapped=ns; 
+      if(s1!==ns) { snapped=s1; targetSn=s1; } 
+      else if(s2!==ns+len) { snapped=s2-len; targetSn=s2; }
       let sdt=snapped-it.os;
-      const minDt=it.prevEnd-it.os, maxDt=(it.nextStart===Infinity?Infinity:it.nextStart-it.oe);
-      if(sdt<minDt)sdt=minDt; if(maxDt!==Infinity&&sdt>maxDt)sdt=maxDt; if(it.os+sdt<0)sdt=-it.os;
+      if(!State.overwriteMode){
+        const minDt=it.prevEnd-it.os, maxDt=(it.nextStart===Infinity?Infinity:it.nextStart-it.oe);
+        if(sdt<minDt)sdt=minDt; if(maxDt!==Infinity&&sdt>maxDt)sdt=maxDt;
+      }
+      if(it.os+sdt<0)sdt=-it.os;
       dt=sdt;
     }
+    updateSnapGuide(targetSn);
     const minOt=Math.min(...drag.grp.map(g=>g.ot)), maxOt=Math.max(...drag.grp.map(g=>g.ot));
     const dTk=clamp(trackFromY(e.clientY)-drag.ot, -minOt, State.trackCount-1-maxOt);
     for(const it of drag.grp){ const len=it.oe-it.os; it.c.start=snapFrame(it.os+dt); it.c.end=snapFrame(it.c.start+len); it.c.track=it.ot+dTk; }
   }else if(drag.mode==='l'){
     const it=drag.grp[0];
-    let ns=clamp(it.os+dt, it.prevEnd, drag.c.end-0.05);
-    const sn=snapVal(ns,drag.snaps,drag.thr); if(sn>=it.prevEnd && sn<=drag.c.end-0.05) ns=sn;
+    let ns=State.overwriteMode ? Math.max(0, it.os+dt) : clamp(it.os+dt, it.prevEnd, drag.c.end-0.05);
+    const sn=snapVal(ns,drag.snaps,drag.thr);
+    let targetSn = null;
+    if(State.overwriteMode){ if(sn>=0 && sn<=drag.c.end-0.05) { ns=sn; targetSn=sn; } }
+    else { if(sn>=it.prevEnd && sn<=drag.c.end-0.05) { ns=sn; targetSn=sn; } }
     drag.c.start=snapFrame(ns);
+    updateSnapGuide(targetSn);
   }else if(drag.mode==='r'){
     const it=drag.grp[0];
-    let ne=clamp(drag.oe+dt, drag.c.start+0.05, it.nextStart);
-    const sn=snapVal(ne,drag.snaps,drag.thr); if(sn>=drag.c.start+0.05 && sn<=it.nextStart) ne=sn;
+    let ne=State.overwriteMode ? (drag.oe+dt) : clamp(drag.oe+dt, drag.c.start+0.05, it.nextStart);
+    const sn=snapVal(ne,drag.snaps,drag.thr);
+    let targetSn = null;
+    if(State.overwriteMode){ if(sn>=drag.c.start+0.05) { ne=sn; targetSn=sn; } }
+    else { if(sn>=drag.c.start+0.05 && sn<=it.nextStart) { ne=sn; targetSn=sn; } }
     drag.c.end=snapFrame(ne);
+    updateSnapGuide(targetSn);
   }
   
   // P3：拖曳期間只更新樣式，用 mousedown 快取的 element 參照（免每 frame 字串選擇器、免全掃 overlap）
@@ -610,6 +656,32 @@ const _handleDragUpdate = (e) => {
   }
   if(drag.c) renderSubRow(drag.c.id);
 };
+
+function updateSnapGuide(snTime = null) {
+  const sg = document.getElementById('tlSnapGuide');
+  if(!sg) return;
+  if(snTime !== null) {
+    sg.style.display = 'block';
+    sg.style.left = timeToX(snTime) + 'px';
+  } else {
+    sg.style.display = 'none';
+  }
+}
+
+tlLayer.addEventListener('mousemove', e => {
+  if (drag) return; // dragging handles its own snap guide
+  const rect = tlLayer.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const t = xToTime(x);
+  const thr = 20 / State.pxPerSec;
+  const snaps = snapTargets(new Set());
+  const sn = snapVal(t, snaps, thr);
+  if (sn !== t) updateSnapGuide(sn);
+  else updateSnapGuide(null);
+});
+tlLayer.addEventListener('mouseleave', () => {
+  if (!drag) updateSnapGuide(null);
+});
 
 window.addEventListener('mousemove',e=>{
   if(!drag)return;
@@ -636,6 +708,7 @@ window.addEventListener('mousemove',e=>{
 
 window.addEventListener('mouseup',e=>{
   if(!drag)return;
+  updateSnapGuide(null);
   if(_autoScrollId) { cancelAnimationFrame(_autoScrollId); _autoScrollId = null; }
   if(drag.mode==='rubber'){
     $('tlRubber').style.display='none';
