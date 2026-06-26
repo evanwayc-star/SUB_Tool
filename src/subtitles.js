@@ -168,9 +168,11 @@ function renderSubList(){
   // 偵測同軌道時間重疊（O(N log N)）
   const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
   const overlaps=_detectOverlaps(timed, 0.001);
-  const frag=document.createDocumentFragment();
-  list.forEach((c,i)=>frag.appendChild(buildSubRow(c,i,overlaps)));
-  sublist.appendChild(frag);
+  // perf：一次組好整份 HTML 字串再單次 innerHTML（取代每列 createElement+innerHTML）。
+  // 列互動全為 sublist 層級事件委派，批次 innerHTML 不影響任何事件；1500 列由 ~167ms 大幅下降。
+  let html='';
+  for(let i=0;i<list.length;i++) html+=_subRowHTML(list[i],i,overlaps);
+  sublist.innerHTML=html;
   renderCheckPanel();
 }
 
@@ -189,14 +191,12 @@ function _txtInner(text){
   // 有字數限制：逐行套用，不套用搜尋高亮（兩者同時存在時以字數優先）
   return (text||'').split(/\n/).map(_lineLenHTML).join('<br>');
 }
-function buildSubRow(c,i,overlaps){
-  const row=document.createElement('div');
+function _subRowHTML(c,i,overlaps){
   const rc=_rowClass(c.text);
   const containsHit=_checkContains.length&&_checkContains.some(kw=>(c.text||'').toLowerCase().includes(kw.toLowerCase()));
-  row.className='sub-row'+(rc?' '+rc:'')+(_searchMatches.includes(c.id)?' search-hit':'')+(isSel(c.id)?' sel':'')+(c.id===State.selectedId?' primary':'')+(c.id===State.activeId?' active':'')+(overlaps?.has(c.id)?' overlap':'')+(containsHit?' contains-match':'');
-  row.dataset.id=c.id;
+  const cls='sub-row'+(rc?' '+rc:'')+(_searchMatches.includes(c.id)?' search-hit':'')+(isSel(c.id)?' sel':'')+(c.id===State.selectedId?' primary':'')+(c.id===State.activeId?' active':'')+(overlaps?.has(c.id)?' overlap':'')+(containsHit?' contains-match':'');
   const timed=c.timed!==false;
-  row.innerHTML=
+  return `<div class="${cls}" data-id="${c.id}">`+
     `<div class="idx">${i+1}</div>`+
     `<div class="body">`+
       `<div class="times">`+
@@ -206,8 +206,8 @@ function buildSubRow(c,i,overlaps){
       `</div>`+
       `<div class="txt" contenteditable="false" spellcheck="false">${_txtInner(c.text)}</div>`+
     `</div>`+
-    (State.trackCount>1?`<div class="tk">軌${(c.track||0)+1}</div>`:``);
-  return row;
+    (State.trackCount>1?`<div class="tk">軌${(c.track||0)+1}</div>`:``)+
+  `</div>`;
 }
 
 function renderSubRow(id){
@@ -661,7 +661,7 @@ sublist.addEventListener('keydown', e => {
   e.stopPropagation();
 });
 
-export { renderSubList, renderCheckPanel, buildSubRow, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel,
+export { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel,
   addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,
