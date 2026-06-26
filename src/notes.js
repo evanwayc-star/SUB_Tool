@@ -7,7 +7,7 @@
 import { $ } from './dom.js';
 import { State, newId } from './state.js';
 import { secToEncore } from './time.js';
-import { escapeHTML, downloadBytes } from './util.js';
+import { escapeHTML, downloadBytes, tcKeyAllowed } from './util.js';
 import { Media } from './media.js';
 import { updatePlayhead, drawRuler } from './timeline.js';
 import { recordHistory } from './history.js';
@@ -113,7 +113,7 @@ function renderNotes(){
         }
         inp.remove(); timeEl.textContent=origText;
       };
-      inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();fin(true);} else if(e.key==='Escape'){e.preventDefault();fin(false);} });
+      inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();fin(true);} else if(e.key==='Escape'){e.preventDefault();fin(false);} else if(!tcKeyAllowed(e))e.preventDefault(); });
       inp.addEventListener('blur',()=>fin(true));
       inp.addEventListener('mousedown',e=>e.stopPropagation());
     });

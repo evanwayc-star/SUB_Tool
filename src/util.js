@@ -57,4 +57,13 @@ function bytesToB64(bytes){let bin='';const ch=0x8000;for(let i=0;i<bytes.length
 const baseName = p => (p||'').split(/[\\/]/).pop();
 function escapeHTML(s){return s.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 
-export { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML };
+/* 時間碼輸入框按鍵過濾：只允許數字與 : ; + -，以及編輯/導覽鍵與 Ctrl/Cmd 組合（複製貼上/全選）。
+   其餘按鍵（字母 i/o 等）一律不接受 → 不打入字元、也不觸發任何動作。回傳 true=允許。 */
+const _TC_NAV=['Backspace','Delete','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','Tab','Enter','Escape'];
+function tcKeyAllowed(e){
+  if(e.ctrlKey||e.metaKey)return true;
+  if(_TC_NAV.includes(e.key))return true;
+  return !(e.key.length===1 && !/[0-9:;+\-]/.test(e.key));
+}
+
+export { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML, tcKeyAllowed };

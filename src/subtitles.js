@@ -1,7 +1,7 @@
 /* SUB Tool — 字幕列表：渲染、選取（多選）、新增/刪除、軌道切換/樣式 */
 import { $, sublist, video } from './dom.js';
 import { State, isSel, newId, trackVisible, cueSuffix } from './state.js';
-import { escapeHTML } from './util.js';
+import { escapeHTML, tcKeyAllowed } from './util.js';
 import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
@@ -79,6 +79,7 @@ function openInlineTimeEdit(el, curSec, onCommit){
   inp.addEventListener('keydown', e=>{ e.stopPropagation();
     if(e.key==='Enter'){ e.preventDefault(); fin(true); }
     else if(e.key==='Escape'){ e.preventDefault(); fin(false); }
+    else if(!tcKeyAllowed(e)) e.preventDefault(); // 只允許數字與 : ; + -（i/o 等其他鍵忽略）
   });
   inp.addEventListener('blur', ()=>fin(true));
   inp.addEventListener('mousedown', e=>e.stopPropagation());

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { clamp, pad, decodeText, encodeUTF16LE, b64ToBytes, bytesToB64, baseName, escapeHTML } from '../src/util.js';
+import { clamp, pad, decodeText, encodeUTF16LE, b64ToBytes, bytesToB64, baseName, escapeHTML, tcKeyAllowed } from '../src/util.js';
 
 describe('clamp / pad', () => {
   it('clamp 夾在範圍內', () => {
@@ -50,6 +50,23 @@ describe('encodeUTF16LE <-> decodeText round-trip', () => {
     for (const s of ['hello', '字幕測試', 'Mixed 混合 123']) {
       expect(decodeText(encodeUTF16LE(s).buffer)).toBe(s);
     }
+  });
+});
+
+describe('tcKeyAllowed（時間碼輸入過濾）', () => {
+  const k = (key, mods = {}) => tcKeyAllowed({ key, ...mods });
+  it('允許數字與 : ; + -', () => {
+    for (const c of ['0', '5', '9', ':', ';', '+', '-']) expect(k(c)).toBe(true);
+  });
+  it('擋掉字母（含 i / o）', () => {
+    for (const c of ['i', 'o', 'a', 'Z', '.', '/', ' ']) expect(k(c)).toBe(false);
+  });
+  it('允許編輯/導覽鍵與 Enter/Esc', () => {
+    for (const c of ['Backspace', 'Delete', 'ArrowLeft', 'Home', 'Tab', 'Enter', 'Escape']) expect(k(c)).toBe(true);
+  });
+  it('允許 Ctrl/Cmd 組合（複製貼上/全選）', () => {
+    expect(k('a', { ctrlKey: true })).toBe(true);
+    expect(k('v', { metaKey: true })).toBe(true);
   });
 });
 
