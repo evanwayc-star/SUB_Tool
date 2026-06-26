@@ -539,12 +539,12 @@ sublist.addEventListener('click', async e => {
     if (tin) {
       openInlineTimeEdit(tin, c.start, t => {
         c.start = Math.max(0, Math.min(t, c.end - 0.001));
-        sortCues(); emit('render:all'); emit('render:videoSub'); recordHistory('修改起點' + cueSuffix(c));
+        commitCueTimeEdit(c, 'start'); recordHistory('修改起點' + cueSuffix(c)); // 同 I/O：順序不變則局部更新
       });
     } else {
       openInlineTimeEdit(tout, c.end, t => {
         c.end = Math.max(c.start + 0.001, t);
-        sortCues(); emit('render:all'); emit('render:videoSub'); recordHistory('修改終點' + cueSuffix(c));
+        commitCueTimeEdit(c, 'end'); recordHistory('修改終點' + cueSuffix(c));
       });
     }
   }
