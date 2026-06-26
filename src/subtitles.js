@@ -249,6 +249,26 @@ function selectCue(id,opts){
   updatePlayhead();
 }
 function selectCueSingle(id,seek){ selectCue(id,{seek}); }
+// I/O 提交：只動了一條 cue 的起訖。排序後若「該軌顯示順序不變」，用局部更新（更新該列時碼 +
+// 重算重疊 class，不重建整列 DOM），把上字幕在大量字幕下每次 I/O 的全列重建（~150ms@1500）省掉；
+// 順序變了（start 跨過鄰居）才退回全列重建以保持正確。
+function commitCueTimeEdit(c, edge){
+  const tk=c.track||0;
+  const order=()=>State.cues.filter(x=>(x.track||0)===tk).map(x=>x.id).join(',');
+  const before=order();
+  sortCues();
+  if(tk===State.listTrack && before===order()){
+    renderSubRow(c.id);
+    const ov=_detectOverlaps(State.cues.filter(x=>x.timed!==false&&(x.track||0)===tk), 0.001);
+    for(const row of sublist.children){ const id=row.dataset?.id; if(id) row.classList.toggle('overlap', ov.has(id)); }
+    renderCheckPanel();
+    emit('render:videoSub'); emit('mpv:refreshSubs');
+  } else {
+    emit('render:all');
+  }
+  selectCue(c.id);            // 內含 refreshSelectionUI → renderCueBlocks + updateTlSel
+  State.activeEdge=edge;
+}
 function refreshSelectionUI(){
   sublist.querySelectorAll('.sub-row').forEach(r=>{
     r.classList.toggle('sel',isSel(r.dataset.id));
@@ -661,7 +681,7 @@ sublist.addEventListener('keydown', e => {
   e.stopPropagation();
 });
 
-export { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel,
+export { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel,
   addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,

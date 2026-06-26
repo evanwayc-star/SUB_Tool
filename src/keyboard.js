@@ -4,7 +4,7 @@ import { State, cueSuffix } from './state.js';
 import { clamp } from './util.js';
 import { fmtClock, secToEncore } from './time.js';
 import { Media } from './media.js';
-import { addCue, selectCue, selectCueSingle, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
+import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline.js';
 import { Project, ensureProjectSaved } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
@@ -95,7 +95,7 @@ async function setIn(){
   let c=State.cues.find(x=>x.id===State.selectedId);
   if(!c){ c=addCue(t,t+2,'',0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 '+fmtClock(t),'ok'); return; }
   c.start=t; if(c.end<=c.start)c.end=c.start+0.5; c.timed=true;
-  sortCues(); emit('render:all'); selectCue(c.id); State.activeEdge='start';
+  commitCueTimeEdit(c,'start'); // 局部更新（順序不變時不重建整列）
   recordHistory('設定起點 I'+cueSuffix(c)); setStatus('起點 '+fmtClock(t),'ok');
 }
 /* O = 設定目前被選字幕的「結束點」為播放點 */
@@ -107,7 +107,7 @@ async function setOut(){
   if(!c){ setStatus('請先選擇字幕（或按 I 新建）','err'); return; }
   if(t<=c.start){ setStatus('終點不得早於或等於起點','err'); return; }
   c.end=t; c.timed=true;
-  sortCues(); emit('render:all'); selectCue(c.id); State.activeEdge='end';
+  commitCueTimeEdit(c,'end'); // 局部更新（end 不影響排序，必走局部）
   recordHistory('設定終點 O'+cueSuffix(c)); setStatus('終點 '+fmtClock(c.end),'ok');
   autoAdvanceSubMode();
 }
