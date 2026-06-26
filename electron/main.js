@@ -404,8 +404,9 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
   const dir = r.filePaths[0];
   allowDir(dir);
   for (const f of files) {
-    if (f.name && f.b64) {
-      fs.writeFileSync(path.join(dir, f.name), Buffer.from(f.b64, 'base64'));
+    const data = f.content || f.b64;
+    if (f.name && data) {
+      fs.writeFileSync(path.join(dir, f.name), Buffer.from(data, 'base64'));
     }
   }
   return dir;
