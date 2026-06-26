@@ -434,6 +434,6 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 #stSel.sel-none, #tlSel.sel-none { background:rgba(150,150,150,.15); color:var(--text-dim); }
 #stSel.sel-one, #tlSel.sel-one { background:rgba(240,160,32,.25); color:var(--accent); }
 #stSel.sel-multi, #tlSel.sel-multi { background:rgba(240,100,140,.25); color:#ffcccc; }
-.ow-toggle-btn { background:rgba(240,100,140,.25); color:#ff99cc; border:none; cursor:pointer; outline:none; }
-.ow-toggle-btn.primary { background:rgba(60,140,255,.2); color:#6af; }
+.ow-toggle-btn { background:rgba(40,180,80,.25); color:#6f6; border:none; cursor:pointer; outline:none; }
+.ow-toggle-btn.primary { background:rgba(240,100,140,.25); color:#ff99cc; }
 .ow-toggle-btn:hover { filter:brightness(1.2); }
