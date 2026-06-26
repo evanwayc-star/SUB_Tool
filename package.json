@@ -19,6 +19,14 @@
     "appId": "com.subtool.app",
     "productName": "SUB Tool",
     "icon": "electron/logo.png",
+    "fileAssociations": [
+      {
+        "ext": "subtool",
+        "name": "SUB Tool Project",
+        "description": "SUB Tool Project File",
+        "role": "Editor"
+      }
+    ],
     "directories": {
       "output": "release"
     },

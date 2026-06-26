@@ -936,6 +936,22 @@ async function initDesktop(){
     if(!d.done && d.pct<100) setStatus((d.label||'處理中')+'… '+d.pct+'%','busy');
     if(d.done) window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:d}));
   });
+  
+  const handleStartupFile = async (file) => {
+    if (!file) return;
+    try {
+      const b64 = await DESK.readB64(file);
+      if (b64) Project.loadDesktop({ path: file, b64 });
+      else setStatus('無法讀取專案檔內容');
+    } catch(e) { console.error(e); }
+  };
+  
+  if (DESK.getStartupFile) {
+    DESK.getStartupFile().then(handleStartupFile);
+  }
+  if (DESK.onOpenFile) {
+    DESK.onOpenFile(handleStartupFile);
+  }
 }
 
 /* 開發用除錯把手（正式打包 import.meta.env.DEV=false 時不會輸出） */

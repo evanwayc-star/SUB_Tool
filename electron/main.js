@@ -292,6 +292,14 @@ async function ensureHttpServer() {
   });
 }
 
+let startupFile = null;
+app.on('open-file', (e, path) => {
+  e.preventDefault();
+  startupFile = path;
+  allowFileDir(path);
+  if (_mainWin) _mainWin.webContents.send('app:open-file', path);
+});
+
 app.whenReady().then(() => {
   FFMPEG = detect('ffmpeg');
   FFPROBE = detect('ffprobe');
@@ -310,6 +318,21 @@ app.on('quit', () => {
 });
 
 /* ============ IPC ============ */
+ipcMain.handle('app:getStartupFile', () => {
+  let fileToOpen = null;
+  if (startupFile) fileToOpen = startupFile;
+  else if (process.platform === 'win32' || process.platform === 'linux') {
+    const args = process.argv.slice(app.isPackaged ? 1 : 2);
+    const fileArg = args.find(a => !a.startsWith('-') && (a.endsWith('.subtool') || a.endsWith('.json')));
+    if (fileArg) fileToOpen = fileArg;
+  }
+  if (fileToOpen) {
+    allowFileDir(fileToOpen);
+    return fileToOpen;
+  }
+  return null;
+});
+
 ipcMain.handle('app:status', () => ({
   isDesktop: true, ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE,
   ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: VENC
