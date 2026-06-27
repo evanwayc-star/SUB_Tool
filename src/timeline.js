@@ -4,7 +4,7 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from 
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { encoreParts } from './time.js';
-import { selectCue, refreshSelectionUI, renderSubRow, sortCues } from './subtitles.js';
+import { selectCue, refreshSelectionUI, renderSubRow, sortCues, sweepContainedCues } from './subtitles.js';
 import { emit } from './events.js';
 import { ensureProjectSaved, isProjectGuardDone } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
@@ -434,7 +434,7 @@ tlScroll.addEventListener('scroll',()=>{
 
 /* 時間軸縮放 */
 function setZoom(px,centerTime){
-  const c = centerTime!=null?centerTime:Media.vTime();
+  const c = centerTime!=null?centerTime:Media.displayTime();
   State.pxPerSec=clamp(px,0.1,4000);
   $('zoomBar').value=clamp(State.pxPerSec,0.1,4000);
   layoutTimeline();
@@ -459,7 +459,7 @@ function zoomFit(){
   const ideal=(vw-40)/dur;
   const pps=clamp(Math.max(ideal,MIN_PPS),4,800);
   // 以播放點為中心（夾在字幕範圍內）—— 確保播放點可見
-  const vt=Media.vTime();
+  const vt=Media.displayTime();
   const center=clamp(vt,t0,t1);
   setZoom(pps,center);
 }
@@ -733,7 +733,7 @@ window.addEventListener('mouseup',e=>{
         refreshSelectionUI(); $('stSel').textContent='';
       }
     }
-  }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; sortCues(); emit('render:all'); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
+  }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; if(moved) sweepContainedCues(drag.grp.map(x=>x.c)); sortCues(); emit('render:all'); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
   drag=null;
 });
 

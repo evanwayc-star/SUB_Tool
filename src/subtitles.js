@@ -277,8 +277,33 @@ function selectCueSingle(id,seek){ selectCue(id,{seek}); }
 // I/O 提交：只動了一條 cue 的起訖。排序後若「該軌顯示順序不變」，用局部更新（更新該列時碼 +
 // 重算重疊 class，不重建整列 DOM），把上字幕在大量字幕下每次 I/O 的全列重建（~150ms@1500）省掉；
 // 順序變了（start 跨過鄰居）才退回全列重建以保持正確。
+export function sweepContainedCues(changedCues) {
+  if (!State.overwriteMode || State.overwriteKeep) return false;
+  let deletedCount = 0;
+  for (const c of changedCues) {
+    if (!c || c.timed === false) continue;
+    const tk = c.track || 0;
+    for (let i = State.cues.length - 1; i >= 0; i--) {
+      const b = State.cues[i];
+      if (b.id !== c.id && (b.track || 0) === tk && b.timed !== false) {
+        if (b.start >= c.start - 0.001 && b.end <= c.end + 0.001) {
+          State.cues.splice(i, 1);
+          deletedCount++;
+        }
+      }
+    }
+  }
+  if (deletedCount > 0) {
+    State.selectedIds = State.selectedIds.filter(id => State.cues.find(cue => cue.id === id));
+    if (!State.cues.find(cue => cue.id === State.selectedId)) State.selectedId = State.selectedIds[0] || null;
+    return true;
+  }
+  return false;
+}
+
 function commitCueTimeEdit(c, edge){
   const tk=c.track||0;
+  sweepContainedCues([c]);
 
   if (edge === 'start' || edge === 'both' || !edge) {
     const idx = State.cues.indexOf(c);

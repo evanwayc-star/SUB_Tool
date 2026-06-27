@@ -30,9 +30,10 @@ const State = {
   mediaPath:null,
   clipboard:[],  // copied cues for paste
   overwriteMode: false, // 允許重疊（不可覆蓋/可覆蓋）
+  overwriteKeep: true,  // 可覆蓋模式下：true=保留被包含句, false=刪除被包含句
 };
 /* 軌道工具 */
-function newTrack(name){ return {name:name||('軌道 '+(State.tracks.length+1)),visible:true,fontScale:1,posPct:100,align:'center',locked:false,color:'#ffffff'}; }
+function newTrack(name){ return {name:name||('軌道 '+(State.tracks.length+1)),visible:true,fontScale:1,posPct:90,align:'center',locked:false,color:'#ffffff'}; }
 function syncTrackCount(){ State.trackCount=State.tracks.length; }
 /* 允許的影格率（下拉選單） */
 const FPS_SET=[23.976,24,25,29.97,30];

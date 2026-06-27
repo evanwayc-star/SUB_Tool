@@ -229,7 +229,18 @@ function createWindow() {
   mainWin.on('resize', reapplyMpv);
   mainWin.on('restore', () => { if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible) { try { _mpvWin.show(); } catch (e) {} reapplyMpv(); } });
   mainWin.on('minimize', () => { if (_mpvWin && !_mpvWin.isDestroyed()) { try { _mpvWin.hide(); } catch (e) {} } });
+  let isClosing = false;
+  mainWin.on('close', (e) => {
+    if (!isClosing && mainWin.webContents) {
+      e.preventDefault();
+      mainWin.webContents.send('app:request-close');
+    }
+  });
   mainWin.on('closed', () => { destroyMpvWin(); });
+  ipcMain.handle('app:close', () => {
+    isClosing = true;
+    if (mainWin && !mainWin.isDestroyed()) mainWin.close();
+  });
   // S2：補齊 Electron 安全基線 — 拒絕開新視窗、限制導航只能停在本機應用頁（與 dev 的 localhost）
   mainWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWin.webContents.on('will-navigate', (ev, u) => {

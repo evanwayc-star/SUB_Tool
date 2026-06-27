@@ -14,6 +14,7 @@ let _editGuardDone = false;  // 本 session 是否已顯示過「請先儲存」
 let _savePath      = null;   // 上次儲存的完整路徑（desktop only）
 let _saveBaseName  = null;   // 基礎名稱（不含副檔名），自動備份用
 let _autoSaveTimer = null;
+let _lastSavedDataStr = null; // 用於判斷專案是否被修改
 
 function _defaultSaveName(){
   return (State.mediaName ? State.mediaName.replace(/\.[^.]+$/,'') : 'project')+'.subtool';
@@ -47,6 +48,7 @@ function _onSaved(fullPath, webName){
     _saveBaseName=(webName||'').replace(/\.subtool$/i,'');
     setStatus('專案已儲存：'+webName,'ok');
   }
+  _lastSavedDataStr = JSON.stringify(_buildProjectData());
   if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave, 3*60*1000);
 }
 
@@ -104,7 +106,14 @@ function resetProject(){
   _editGuardDone=false;
   _savePath=null;
   _saveBaseName=null;
+  _lastSavedDataStr=null;
   if(_autoSaveTimer){ clearInterval(_autoSaveTimer); _autoSaveTimer=null; }
+}
+
+function isProjectDirty() {
+  if (State.cues.length === 0 && State.notes.length === 0) return false;
+  if (!_lastSavedDataStr) return true;
+  return JSON.stringify(_buildProjectData()) !== _lastSavedDataStr;
 }
 
 /* ===== 8. 專案 .subtool ============================================== */
@@ -147,6 +156,7 @@ const Project = {
     State.listTrack=0;
     State.selectedId=null; State.selectedIds=[]; // 開啟專案後預設不選取任何字幕
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); History.reset();
+    _lastSavedDataStr = JSON.stringify(_buildProjectData());
     setStatus('專案已載入','ok');
   },
   async load(file){
@@ -177,4 +187,4 @@ const Project = {
   }
 };
 
-export { Project, ensureProjectSaved, isProjectGuardDone, resetProject };
+export { Project, ensureProjectSaved, isProjectGuardDone, resetProject, isProjectDirty };

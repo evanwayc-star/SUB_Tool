@@ -23,8 +23,11 @@ function secToSRT(s){
   if(s<0)s=0; const ms=Math.round(s*1000);
   return `${pad(ms/3600000)}:${pad((ms/60000)%60)}:${pad((ms/1000)%60)},${pad(ms%1000,3)}`;
 }
-function secToASS(s){
-  if(s<0)s=0; const cs=Math.floor(s*100 + 0.0001); // 避免浮點數四捨五入導致 ASS 時間大於實際影格時間，造成 MPV 晚一格
+function secToASS(s, fps=25){
+  if(s<=0) return "0:00:00.00";
+  const halfFrame = 0.5 / Math.max(fps || 25, 1);
+  const shifted = Math.max(0, s - halfFrame); // 提早半格，絕對確保 mpv_time >= ASS_time
+  const cs = Math.floor(shifted * 100);
   return `${Math.floor(cs/360000)}:${pad((cs/6000)%60)}:${pad((cs/100)%60)}.${pad(cs%100,2)}`;
 }
 /* FPS-SYNC：秒 → Encore 時碼分量(時/分/秒/格)。所有「數影格」的時碼顯示都【必須】走這裡，

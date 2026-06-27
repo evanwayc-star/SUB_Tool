@@ -115,9 +115,9 @@
           <div class="ts-btngrp">
             <button class="ts-preset" data-ts-pos="15">上</button>
             <button class="ts-preset" data-ts-pos="50">中</button>
-            <button class="ts-preset" data-ts-pos="100">下</button>
+            <button class="ts-preset" data-ts-pos="90">下</button>
           </div>
-          <input type="number" id="tsPos" min="0" max="100" step="1" value="100"><span class="ts-unit">%</span>
+          <input type="number" id="tsPos" min="0" max="100" step="1" value="90"><span class="ts-unit">%</span>
           <span class="ts-sep">│</span>
           <span class="ts-label">顏色</span>
           <input type="color" id="tsColor" value="#ffffff">
@@ -149,17 +149,18 @@
       <button class="icon" data-act="add-note" title="新增備註">＋</button>
       <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span class="lbl">上字幕</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="set-in" title="設定起點 (Q)">In</button>
-      <button class="icon" data-act="set-out" title="設定終點 (W)">Out</button>
+      <button class="icon" data-act="set-in" title="設定起點 (Q)" style="width: 44px; justify-content: center;">In</button>
+      <button class="icon" data-act="set-out" title="設定終點 (W)" style="width: 44px; justify-content: center;">Out</button>
       <div class="sep"></div>
-      <button class="ow-toggle-btn" id="overwriteToggleBtn" data-act="toggle-overwrite" title="切換覆蓋狀態 (Z)">🔒 不可覆蓋</button>
+      <button class="ow-toggle-btn" id="overwriteToggleBtn" data-act="toggle-overwrite" title="切換覆蓋狀態 (Z)">🔒 不覆蓋</button>
+      <button class="ow-keep-btn" id="overwriteKeepBtn" data-act="toggle-ow-keep" title="當新字幕完全覆蓋其他字幕時的處理方式" style="display:none">⭕ 保留</button>
       <span id="tlSel">未選取</span>
       <div class="sep"></div>
       <div class="zoom">
         縮放 <button class="icon" data-act="zoom-out">－</button>
         <input type="range" id="zoomBar" min="0.1" max="400" value="80" step="0.1" style="width:120px">
         <button class="icon" data-act="zoom-in">＋</button>
-        <button class="icon" data-act="zoom-fit" title="顯示全部">適配</button>
+        <button class="icon" data-act="zoom-fit" title="自適應縮放 (切換字幕範圍 / 影片全長, 快捷鍵 `)">自適應</button>
       </div>
       <div class="spacer"></div>
       <span class="hint">時間尺拖曳=移動播放點 · 軌道空白拖曳=框選 · 拖區塊移動/換軌 · 拖邊緣縮放</span>
@@ -192,7 +193,8 @@
     <span id="stMedia"></span>
     <div class="spacer"></div>
     <span id="stEngine">音訊引擎：原生</span>
-    <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" title="切換覆蓋狀態 (Z)">🔒 不可覆蓋</button>
+    <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" title="切換覆蓋狀態 (Z)">🔒 不覆蓋</button>
+    <button class="ow-keep-btn" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep" title="當新字幕完全覆蓋其他字幕時的處理方式" style="display:none">⭕ 保留</button>
     <span id="stSel"></span>
   </div>
 </div>

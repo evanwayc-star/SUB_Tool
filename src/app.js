@@ -15,7 +15,7 @@ import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
-import { Project, ensureProjectSaved, resetProject } from './project.js';
+import { Project, ensureProjectSaved, resetProject, isProjectDirty } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
@@ -113,16 +113,17 @@ const _videoSub = $('videoSub');
 const _videoWrap = $('videoWrap');
 let _videoSubSig = '';
 function renderVideoSub(){
-  const t=Media.vTime();
+  const t=Media.displayTime();
+  const halfFrame = 0.5 / Math.max(State.fps || 25, 1);
   // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
-  const baseFs = Math.max(14, Math.min(45, Math.round((_videoWrap?.clientWidth||1000) * 0.035)));
+  const baseFs = Math.max(14, Math.round((_videoSub?.clientWidth||1920) * 0.035));
   let html='', sig='';
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
-    const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && (t+0.001)>=c.start && (t+0.001)<c.end);
+    const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && (t+halfFrame)>=c.start && (t+halfFrame)<c.end);
     if(!cur.length)continue;
     const st=State.tracks[tk]||{};
-    const pct=st.posPct!=null?st.posPct:100, fs=st.fontScale||1, al=st.align||'center', col=st.color||'#ffffff';
+    const pct=st.posPct!=null?st.posPct:90, fs=st.fontScale||1, al=st.align||'center', col=st.color||'#ffffff';
     const fsPx = Math.round(baseFs * fs);
     sig+=tk+'|'+fsPx+'|'+col+'|'+pct+'|'+al+'|'+cur.map(c=>c.id+'='+c.text).join(',')+';';
     html+=`<div class="vsub-track" style="top:${pct}%;transform:translateY(-${pct}%);text-align:${al};letter-spacing:1px;font-weight:500;font-family:'思源黑體', 'Noto Sans TC', 'Source Han Sans TC', sans-serif;">`+
@@ -176,7 +177,7 @@ function onDurationKnown(){
   else drawTimeline();
 }
 function ensurePlayheadVisible(){
-  const t=Media.vTime();
+  const t=Media.displayTime();
   const vw=viewportW();
   if(!vw) return;
   const x=timeToX(t);
@@ -400,7 +401,10 @@ async function doAction(act){
     case 'add-track': addTrack(); break;
     case 'zoom-in': setZoom(State.pxPerSec*1.3); break;
     case 'zoom-out': setZoom(State.pxPerSec*0.77); break;
-    case 'zoom-fit': zoomFit(); break;
+    case 'zoom-fit': 
+      if(window._lastZoomMode === 'fit') { zoomFitVideo(); window._lastZoomMode = 'video'; }
+      else { zoomFit(); window._lastZoomMode = 'fit'; }
+      break;
     case 'undo': History.undo(); break;
     case 'redo': History.redo(); break;
     case 'history': togglePanel('historyPanel'); renderHistory(); break;
@@ -432,10 +436,21 @@ async function doAction(act){
       State.overwriteMode = !State.overwriteMode;
       const owBtns = document.querySelectorAll('.ow-toggle-btn');
       owBtns.forEach(btn => {
-        btn.textContent = State.overwriteMode ? '🔓 可覆蓋' : '🔒 不可覆蓋';
-        btn.classList.toggle('primary', State.overwriteMode);
-      });
+      btn.textContent = State.overwriteMode ? '🔓 可覆蓋' : '🔒 不覆蓋';
+      btn.classList.toggle('primary', State.overwriteMode);
+    });
+    document.querySelectorAll('.ow-keep-btn').forEach(btn => {
+      btn.style.display = State.overwriteMode ? 'inline-block' : 'none';
+    });
       setStatus(`覆蓋模式：${State.overwriteMode ? '解鎖 (可自由重疊)' : '鎖定 (不可覆蓋)'}`, 'ok');
+      break;
+    case 'toggle-ow-keep':
+      State.overwriteKeep = !State.overwriteKeep;
+    document.querySelectorAll('.ow-keep-btn').forEach(btn => {
+      btn.textContent = State.overwriteKeep ? '⭕ 保留' : '❌ 刪除';
+      btn.classList.toggle('del', !State.overwriteKeep);
+    });
+      setStatus(`完全覆蓋時：${State.overwriteKeep ? '保留' : '刪除'} 被包含的字幕`, 'ok');
       break;
   }
 }
@@ -495,7 +510,7 @@ function renderTrackStyle(){
   const tk=State.tracks[i];
   $('tsTitle').textContent='「'+tk.name+'」樣式';
   const sz=tk.fontScale||1; if(document.activeElement!==$('tsSize')) $('tsSize').value=sz;
-  const pp=tk.posPct!=null?tk.posPct:100; if(document.activeElement!==$('tsPos')) $('tsPos').value=pp;
+  const pp=tk.posPct!=null?tk.posPct:90; if(document.activeElement!==$('tsPos')) $('tsPos').value=pp;
   const col=(tk.color||'#ffffff').toLowerCase(); if(document.activeElement!==$('tsColor')) $('tsColor').value=col;
   panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===sz));
   panel.querySelectorAll('.ts-preset[data-ts-pos]').forEach(b=>b.classList.toggle('active',+b.dataset.tsPos===pp));
@@ -598,9 +613,9 @@ async function openCueEditModal(c){
         const textAfter=full.slice(markerPos);
         const origEnd=c.end;
         const isTimed=c.timed!==false;
-        if(isTimed){ const pt=Media.vTime(); if(pt<=c.start||pt>=c.end){ showToast('播放點必須在字幕的起訖時間內才能拆句'); return; } }
+        if(isTimed){ const pt=Media.displayTime(); if(pt<=c.start||pt>=c.end){ showToast('播放點必須在字幕的起訖時間內才能拆句'); return; } }
         let splitTime=0;
-        if(isTimed){ splitTime=Media.vTime(); c.end=splitTime; }
+        if(isTimed){ splitTime=Media.displayTime(); c.end=splitTime; }
         c.text=textBefore;
         const nc={id:newId(),start:isTimed?splitTime:0,end:isTimed?origEnd:0,
           text:textAfter,track:c.track||0,timed:isTimed};
@@ -768,7 +783,7 @@ function _execCopyTrack(srcIdx, withText){
   const names=State.tracks.map(t=>t.name);
   while(names.includes(name)) name=base+(n++);
   // 複製軌道屬性
-  const tk={name, visible:true, fontScale:srcTrack.fontScale||1, posPct:srcTrack.posPct!=null?srcTrack.posPct:100,
+  const tk={name, visible:true, fontScale:srcTrack.fontScale||1, posPct:srcTrack.posPct!=null?srcTrack.posPct:90,
              align:srcTrack.align||'center', locked:false, color:srcTrack.color||'#ffffff'};
   const newIdx=State.tracks.length;
   State.tracks.push(tk); syncTrackCount();
@@ -816,13 +831,13 @@ function startTimeEdit(){
   const inp=document.createElement('input'); inp.className='tc-edit'; inp.value=''; inp.placeholder=old;
   span.textContent=''; span.appendChild(inp); inp.focus();
   let done=false;
-  const fin=(commit)=>{ if(done)return; done=true; inp.remove(); span.textContent=secToEncore(Media.vTime(),State.fps,State.dropFrame);
+  const fin=(commit)=>{ if(done)return; done=true; inp.remove(); span.textContent=secToEncore(Media.displayTime(),State.fps,State.dropFrame);
     if(commit){
       const raw=inp.value.trim(); let t=null;
       if(raw.startsWith('+')||raw.startsWith('-')){
         const sign=raw.startsWith('-')?-1:1;
         const delta=parseTimecodeInput(raw.slice(1));
-        if(delta!==null){ t=Media.vTime()+sign*delta;
+        if(delta!==null){ t=Media.displayTime()+sign*delta;
           if(t<0){ showToast('時間不能早於 00:00:00:00'); return; } }
       } else { t=parseTimecodeInput(raw); }
       if(t==null){ /* 空：不變 */ }
@@ -856,7 +871,7 @@ function initExtras(){
   $('waveSrcSel')?.addEventListener('change',e=>{ Wave.selectSource(+e.target.value); e.target.blur(); });
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
   $('tcCur').addEventListener('contextmenu',e=>{ e.preventDefault();
-    try{ navigator.clipboard.writeText(secToEncore(Media.vTime(),State.fps,State.dropFrame)); showToast('已複製時間碼'); }catch(err){} });
+    try{ navigator.clipboard.writeText(secToEncore(Media.displayTime(),State.fps,State.dropFrame)); showToast('已複製時間碼'); }catch(err){} });
   // 浮動面板拖曳（拖 fp-head 移動整個面板）
   document.querySelectorAll('.float-panel').forEach(panel=>{
     const head=panel.querySelector('.fp-head'); if(!head)return;
@@ -951,6 +966,19 @@ async function initDesktop(){
   }
   if (DESK.onOpenFile) {
     DESK.onOpenFile(handleStartupFile);
+  }
+  if (DESK.onAppRequestClose) {
+    DESK.onAppRequestClose(() => {
+      if (isProjectDirty()) {
+        openModal('儲存變更', '關閉前是否要儲存專案？', [
+          {label: '儲存', primary: true, act: () => { Project.save(); setTimeout(()=>DESK.closeApp(), 500); }},
+          {label: '不儲存', act: () => { DESK.closeApp(); }},
+          {label: '取消', act: () => { closeModal(); }}
+        ]);
+      } else {
+        DESK.closeApp();
+      }
+    });
   }
 }
 

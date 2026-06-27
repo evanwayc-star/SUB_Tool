@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('subtool', {
   cacheCleanOrphans: () => ipcRenderer.invoke('cache:cleanOrphans'),
   cacheClearAll: (src) => ipcRenderer.invoke('cache:clearAll', src),
   getStartupFile: () => ipcRenderer.invoke('app:getStartupFile'),
+  onAppRequestClose: (cb) => ipcRenderer.on('app:request-close', () => cb()),
+  closeApp: () => ipcRenderer.invoke('app:close'),
   onOpenFile:    (cb) => ipcRenderer.on('app:open-file', (e, path) => cb(path)),
   onProgress:   (cb) => ipcRenderer.on('task-progress', (e, d) => cb(d)),
   mpv: {

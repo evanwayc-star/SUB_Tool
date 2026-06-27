@@ -4,7 +4,7 @@ import { State, cueSuffix } from './state.js';
 import { clamp } from './util.js';
 import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
-import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
+import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues, sweepContainedCues } from './subtitles.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline.js';
 import { Project, ensureProjectSaved } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
@@ -227,6 +227,7 @@ window.addEventListener('keydown',e=>{
       const minStart=Math.min(...jCues.map(c=>c.start));
       const jt=Media.vTime(), delta=jt-minStart;
       for(const jc of jCues){ jc.start=Math.max(0,jc.start+delta); jc.end=Math.max(jc.start+0.001,jc.end+delta); }
+      sweepContainedCues(jCues);
       sortCues(); emit('render:all'); drawTimeline();
       recordHistory('時間碼位移 P');
       setStatus(`P 位移 ${delta>=0?'+':''}${delta.toFixed(3)}s（${jCues.length} 條）`,'ok');

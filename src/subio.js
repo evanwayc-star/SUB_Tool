@@ -5,7 +5,8 @@ import { decodeText, b64ToBytes, readFile, pickFile, encodeUTF16LE, bytesToB64, 
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
 import { Media } from './media.js';
-import { openModal, closeModal, showToast, setStatus } from './ui.js';
+import { setStatus, showToast, openModal, closeModal } from './ui.js';
+import { sweepContainedCues } from './subtitles.js';
 import { recordHistory } from './history.js';
 import { sortCues } from './subtitles.js';
 import { drawTimeline, layoutTimeline } from './timeline.js';
@@ -234,11 +235,7 @@ function getXLSXFileData(trackDataList) {
 function toASSFromState(cues) {
   return SubFormats.toASS(
     cues, State.fps, State.tracks,
-    State.videoWidth || video.videoWidth || 1920,
-    State.videoHeight || video.videoHeight || 1080,
-    window.innerWidth || 1920,
-    $('videoWrap')?.clientWidth || 1000,
-    $('videoWrap')?.clientHeight || 562
+    1920, 1080, 1920, 1920, 1080
   );
 }
 
@@ -361,6 +358,7 @@ function applyTcShift(sign) {
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可以位移'); return; }
   for (const c of cues) { c.start = Math.max(0, c.start + delta); c.end = Math.max(c.start + 0.001, c.end + delta); }
+  sweepContainedCues(cues);
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('時間碼位移');
   setStatus(`已位移 ${delta >= 0 ? '+' : ''}${delta.toFixed(3)}s（共 ${cues.length} 條）`, 'ok');

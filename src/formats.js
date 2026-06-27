@@ -70,7 +70,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       return `&H00${c.slice(4,6)}${c.slice(2,4)}${c.slice(0,2)}`;
     };
 
-    const targetPx = Math.max(14, Math.min(36, ww * 0.025));
+    const targetPx = Math.max(14, Math.round(ww * 0.035));
     const baseFontSize = Math.round(targetPx);
     const spacing = 1.0;
     const defMarginV = Math.round(vwh * 0.1);
@@ -79,7 +79,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
     } else {
       tracks.forEach((tk, i) => {
         const fs = Math.round(baseFontSize * (tk.fontScale || 1));
-        const pp = tk.posPct != null ? tk.posPct : 100;
+        const pp = tk.posPct != null ? tk.posPct : 90;
         const mv = Math.round(vwh * ((100 - pp) / 100));
         const col = hexToAss(tk.color || '#ffffff');
         styles += `Style: Track${i},${defFont},${fs},${col},&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${mv},1\n`;
@@ -96,7 +96,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
     }).map(c=>{
       const txt=(c.text||'').replace(/\n/g,'\\N');
       const st = (tracks && tracks.length > (c.track||0)) ? `Track${c.track||0}` : 'Default';
-      return `Dialogue: ${c.track||0},${secToASS(c.start)},${secToASS(c.end)},${st},atg${(c.track||0)+1},0,0,0,,${txt}`;
+      return `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${st},atg${(c.track||0)+1},0,0,0,,${txt}`;
     }).join('\n');
     return head+styles+eventsHead+body+'\n';
   },

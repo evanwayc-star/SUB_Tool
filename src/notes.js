@@ -7,7 +7,7 @@
 import { $ } from './dom.js';
 import { State, newId } from './state.js';
 import { secToEncore } from './time.js';
-import { escapeHTML, downloadBytes, tcKeyAllowed } from './util.js';
+import { escapeHTML, downloadBytes, tcKeyAllowed, bytesToB64, b64ToBytes } from './util.js';
 import { Media } from './media.js';
 import { updatePlayhead, drawRuler } from './timeline.js';
 import { recordHistory } from './history.js';

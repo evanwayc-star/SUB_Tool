@@ -735,6 +735,7 @@ const Media = {
     this._lastSeekTime = snapTimeToFrame(this.vTime(), State.fps, State.dropFrame); // FPS-SYNC：snap 到最近格，確保暫停點對齊刻度
     if(this.mpvMode){
       DESK.mpv.pause().catch(()=>{});
+      DESK.mpv.seek(this._lastSeekTime).catch(()=>{});
       this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶'; return;
     }
@@ -744,6 +745,7 @@ const Media = {
       this.playing=false; $('playBtn').textContent='▶'; return;
     }
     video.pause(); this.stopBufferSources(); this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶';
+    try { video.currentTime = this._lastSeekTime; } catch(e) {}
   },
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t){
