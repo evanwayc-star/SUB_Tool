@@ -281,7 +281,7 @@ function _onTrackDragUp(){
       if(fromTk<toTk){ if(tk===fromTk)c.track=toTk; else if(tk>fromTk&&tk<=toTk)c.track=tk-1; }
       else { if(tk===fromTk)c.track=toTk; else if(tk>=toTk&&tk<fromTk)c.track=tk+1; }
     }
-    syncTrackCount(); recordHistory('軌道重排'); emit('render:all'); emit('render:listTrackSel');
+    syncTrackCount(); recordHistory('軌道重排'); emit('render:all'); emit('render:listTrackSel'); drawTimeline();
   }
 }
 
