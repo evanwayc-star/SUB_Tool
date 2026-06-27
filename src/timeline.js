@@ -765,10 +765,15 @@ function snapTargets(excludeIds){
 function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of targets){const d=Math.abs(x-t); if(d<bd){bd=d;best=x;}} return best; }
 function neighborBounds(os,oe,track,excludeIds){
   let prevEnd=0,nextStart=Infinity;
+  const oMid = (os + oe) / 2;
   for(const c of State.cues){
     if(c.timed===false||excludeIds.has(c.id)||(c.track||0)!==track)continue;
-    if(c.start>=oe-1e-6){ if(c.start<nextStart)nextStart=c.start; }
-    else if(c.end<=os+1e-6){ if(c.end>prevEnd)prevEnd=c.end; }
+    const cMid = (c.start + c.end) / 2;
+    if(cMid < oMid){
+      if(c.end > prevEnd) prevEnd = c.end;
+    } else {
+      if(c.start < nextStart) nextStart = c.start;
+    }
   }
   return {prevEnd,nextStart};
 }

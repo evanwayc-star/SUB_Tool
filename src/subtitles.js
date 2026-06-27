@@ -320,21 +320,42 @@ function selectCueSingle(id,seek){ selectCue(id,{seek}); }
 // 順序變了（start 跨過鄰居）才退回全列重建以保持正確。
 export function sweepContainedCues(changedCues) {
   if (!State.overwriteMode || State.overwriteKeep) return false;
-  let deletedCount = 0;
+  let changed = false;
+  const snapF = (t) => snapTimeToFrame(t, State.fps, State.dropFrame);
   for (const c of changedCues) {
     if (!c || c.timed === false) continue;
     const tk = c.track || 0;
     for (let i = State.cues.length - 1; i >= 0; i--) {
       const b = State.cues[i];
-      if (b.id !== c.id && (b.track || 0) === tk && b.timed !== false) {
+      if (b.id === c.id || (b.track || 0) !== tk || b.timed === false) continue;
+      
+      // 檢查是否重疊
+      if (b.end > c.start + 0.001 && b.start < c.end - 0.001) {
         if (b.start >= c.start - 0.001 && b.end <= c.end + 0.001) {
+          // 完全被包含 -> 刪除
           State.cues.splice(i, 1);
-          deletedCount++;
+          changed = true;
+        } else if (b.start < c.start - 0.001 && b.end > c.end + 0.001) {
+          // c 完全包含在 b 裡面 -> b 被一分為二
+          const newB = JSON.parse(JSON.stringify(b));
+          newB.id = newId();
+          newB.start = snapF(c.end);
+          b.end = snapF(c.start);
+          State.cues.splice(i + 1, 0, newB);
+          changed = true;
+        } else if (b.end > c.start + 0.001 && b.start <= c.start + 0.001) {
+          // 覆蓋到 b 的後半部 -> 裁切 b 的 end
+          b.end = snapF(c.start);
+          changed = true;
+        } else if (b.start < c.end - 0.001 && b.end >= c.end - 0.001) {
+          // 覆蓋到 b 的前半部 -> 裁切 b 的 start
+          b.start = snapF(c.end);
+          changed = true;
         }
       }
     }
   }
-  if (deletedCount > 0) {
+  if (changed) {
     State.selectedIds = State.selectedIds.filter(id => State.cues.find(cue => cue.id === id));
     if (!State.cues.find(cue => cue.id === State.selectedId)) State.selectedId = State.selectedIds[0] || null;
     return true;
