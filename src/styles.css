@@ -39,6 +39,9 @@ button.primary{background:var(--accent);border-color:var(--accent-d);color:#1b1b
 button.primary:hover{background:var(--accent-d)}
 button:disabled{opacity:.4;cursor:not-allowed}
 button:focus,button:focus-visible{outline:none}
+button.auto-select-btn, button.ow-toggle-btn { width: 86px; justify-content: center; }
+button.auto-select-btn{background:rgba(50, 130, 220, 0.25);border-color:rgba(40, 110, 200, 0.4);color:var(--text);}
+button.auto-select-btn.on{background:rgba(220, 170, 0, 0.25);border-color:rgba(190, 140, 0, 0.4);color:var(--text);}
 button.icon{padding:5px 8px}
 button.icon.sub-active{background:var(--accent);color:#1b1b1d;border-color:var(--accent-d)}
 button.open-proj-btn{background:#7a2545;border-color:#a33160;color:#ffd6e4}

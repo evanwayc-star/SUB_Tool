@@ -149,7 +149,7 @@ const Project = {
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontScale:t.fontScale||1,
       posPct:t.posPct!=null?t.posPct:(t.posV==='top'?15:t.posV==='middle'?50:100), align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'}));
     else State.tracks=[];
-    ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:1, maxTk+1));
+    ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:0, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));
     State.duration=data.duration||State.duration;
     State.pxPerSec=data.pxPerSec||80;

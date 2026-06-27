@@ -13,7 +13,8 @@ function showHelp(){
    <tr><td><kbd>J</kbd></td><td>倒帶穿梭（每按一次加速：1× → 1.5× → 2× …每階 0.5×，最高 5×）</td></tr>
    <tr><td><kbd>K</kbd></td><td>停止 / 暫停</td></tr>
    <tr><td><kbd>L</kbd></td><td>正播穿梭（每按一次加速：1× → 1.5× → 2× …每階 0.5×，最高 5×）</td></tr>
-   <tr><td><kbd>5</kbd></td><td>退回至上一句字幕起點「前 5 格」（pre-roll 預覽）</td></tr>
+   <tr><td><kbd>Numpad 5</kbd></td><td>退回至上一句字幕起點「前 5 格」（pre-roll 預覽）</td></tr>
+   <tr><td><kbd>Numpad 2</kbd></td><td>退回至下一句字幕起點「前 5 格」（pre-roll 預覽）</td></tr>
    <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>前 / 後一格</td></tr>
    <tr><td><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd></td><td>前 / 後 1 秒</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd></td><td>前 / 後 5 秒</td></tr>
@@ -25,14 +26,17 @@ function showHelp(){
   `<b>▍字幕操作</b>
   <table class="keys">
    <tr><td><kbd>I</kbd> / <kbd>Q</kbd></td><td>設定被選字幕的<b>起點</b>＝目前播放點（無選取則新增一條）</td></tr>
-   <tr><td><kbd>O</kbd> / <kbd>W</kbd> / <kbd>C</kbd></td><td>設定被選字幕的<b>終點</b>＝目前播放點</td></tr>
-   <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>跳轉至同軌<b>上 / 下一個字幕邊界</b></td></tr>
+   <tr><td><kbd>O</kbd> / <kbd>W</kbd></td><td>設定被選字幕的<b>終點</b>＝目前播放點</td></tr>
+   <tr><td><kbd>↑</kbd> / <kbd>E</kbd> | <kbd>↓</kbd> / <kbd>D</kbd></td><td>跳轉至同軌<b>上 / 下一個字幕邊界</b></td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd></td><td>跳到同軌<b>上一句 / 下一句</b>起點並選取</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd></td><td>跳到目前軌道<b>第一句 / 最後一句</b>並選取</td></tr>
    <tr><td><kbd>A</kbd></td><td>將播放點移至目前選擇字幕的起點</td></tr>
    <tr><td><kbd>S</kbd></td><td>將播放點移至目前選擇字幕的終點</td></tr>
-   <tr><td><kbd>X</kbd></td><td>選取目前播放點所在的對應字幕</td></tr>
-   <tr><td><kbd>P</kbd> / <kbd>E</kbd></td><td>將選取字幕整批位移</td></tr>
+   <tr><td><kbd>Z</kbd></td><td>切換播放時自動選取對應字幕</td></tr>
+   <tr><td><kbd>X</kbd></td><td>切換覆蓋狀態（鎖定/解鎖）</td></tr>
+   <tr><td><kbd>C</kbd></td><td>切換覆蓋時「保留/刪除」原有字幕模式</td></tr>
+   <tr><td><kbd>G</kbd></td><td>選取目前播放點所在的字幕</td></tr>
+   <tr><td><kbd>P</kbd> / <kbd>R</kbd></td><td>將選取字幕整批位移</td></tr>
    <tr><td><kbd>Enter</kbd></td><td>開啟選取字幕的<b>文字編輯</b>視窗</td></tr>
    <tr><td><kbd>Del</kbd> / <kbd>Backspace</kbd></td><td>刪除選取（支援多選）</td></tr>
    <tr><td><kbd>Esc</kbd></td><td>取消所有選取 / 關閉上字幕模式</td></tr>
@@ -71,15 +75,12 @@ function showHelp(){
    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>重做</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>儲存專案</td></tr>
    <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>搜尋 / 取代</td></tr>
-   <tr><td><kbd>Z</kbd></td><td>切換覆蓋模式（鎖定/解鎖）</td></tr>
   </table><br>`+
   `<b>▍時間軸縮放</b>
   <table class="keys">
    <tr><td><kbd>-</kbd> / <kbd>1</kbd></td><td>縮小（<kbd>Ctrl</kbd>+滾輪亦可）</td></tr>
    <tr><td><kbd>=</kbd> / <kbd>+</kbd> / <kbd>2</kbd></td><td>放大</td></tr>
-   <tr><td><kbd>]</kbd></td><td>適配（顯示全部字幕）</td></tr>
-   <tr><td><kbd>\\</kbd></td><td>適配（顯示完整影片長度）</td></tr>
-   <tr><td><kbd>\`</kbd></td><td>切換適配模式（全部字幕 ↔ 完整影片）</td></tr>
+   <tr><td><kbd>\\</kbd> / <kbd>\`</kbd></td><td>切換適配模式（全部字幕 ↔ 完整影片）</td></tr>
   </table><br>`+
   `<b>▍介面說明</b><br>`+
   `<b>播放窗</b>：時間碼格式「時:分:秒:格」；<b>雙擊</b>時間數字可直接輸入（支援絕對時間碼或 +/- 相對位移）；<b>右鍵</b>時間數字可複製；畫面右鍵選音軌/速度；匯入影音時自動偵測 FPS（23.976/24/25/29.97/30）。<br>`+

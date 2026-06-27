@@ -694,8 +694,8 @@ window.addEventListener('mousemove',e=>{
       const r = tlScroll.getBoundingClientRect();
       const cx = drag.lastClientX;
       let dx = 0;
-      if (cx < r.left + 30) dx = -15;
-      else if (cx > r.right - 30) dx = 15;
+      if (cx < r.left + 60) dx = -Math.min(80, Math.max(20, (r.left + 60 - cx)));
+      else if (cx > r.right - 60) dx = Math.min(80, Math.max(20, (cx - (r.right - 60))));
       if (dx !== 0) {
         tlScroll.scrollLeft += dx;
         if(drag.lastEvent) _handleDragUpdate(drag.lastEvent);

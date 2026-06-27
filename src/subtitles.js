@@ -1,6 +1,6 @@
 /* SUB Tool — 字幕列表：渲染、選取（多選）、新增/刪除、軌道切換/樣式 */
 import { $, sublist, video } from './dom.js';
-import { State, isSel, newId, trackVisible, cueSuffix } from './state.js';
+import { State, isSel, newId, trackVisible, cueSuffix, ensureTrackCount } from './state.js';
 import { escapeHTML, tcKeyAllowed } from './util.js';
 import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
@@ -23,12 +23,53 @@ function enterSwapMode(id){
   const srcRow=sublist.querySelector(`.sub-row[data-id="${id}"]`);
   if(srcRow)srcRow.classList.add('swap-src');
   sublist.classList.add('swap-mode');
-  showToast('字幕對調模式：點選目標字幕（Esc 取消）');
+  showToast('文字交換模式：點選目標字幕（Esc 取消）');
 }
 function cancelSwapMode(){
   _swapSource=null;
   sublist.querySelectorAll('.sub-row').forEach(r=>r.classList.remove('swap-src'));
   sublist.classList.remove('swap-mode');
+}
+
+function swapAdjacentCues(id, dir){
+  const cue = State.cues.find(c => c.id === id);
+  if (!cue) return;
+  const tk = cue.track || 0;
+  const list = State.cues.filter(c => (c.track || 0) === tk);
+  const idx = list.findIndex(c => c.id === id);
+  if (idx < 0) return;
+  
+  let targetIdx = idx + dir;
+  if (targetIdx < 0 || targetIdx >= list.length) return;
+  
+  const targetCue = list[targetIdx];
+  if (cue.timed === false || targetCue.timed === false) {
+    const tmp = cue.text; cue.text = targetCue.text; targetCue.text = tmp;
+    emit('render:all'); recordHistory('相鄰換位');
+    return;
+  }
+  
+  const cue1 = dir === -1 ? targetCue : cue;
+  const cue2 = dir === -1 ? cue : targetCue;
+  
+  const dur1 = cue1.end - cue1.start;
+  const dur2 = cue2.end - cue2.start;
+  const gap = cue2.start - cue1.end;
+  
+  const newStart2 = cue1.start;
+  const newEnd2 = newStart2 + dur2;
+  const newStart1 = newEnd2 + gap;
+  const newEnd1 = newStart1 + dur1;
+  
+  cue2.start = newStart2;
+  cue2.end = newEnd2;
+  
+  cue1.start = newStart1;
+  cue1.end = newEnd1;
+  
+  sortCues();
+  emit('render:all');
+  recordHistory('相鄰換位');
 }
 
 /* ===== 搜尋狀態 ===================================================== */
@@ -358,6 +399,8 @@ function refreshSelectionUI(){
   updateTlSel();
 }
 function addCue(start,end,text,track){
+  const added = ensureTrackCount((track||0)+1);
+  if(added){ drawTimeline(); emit('render:listTrackSel'); }
   const c={id:newId(),start:start||0,end:end!=null?end:(start||0),text:text||'',track:track||0,timed:(start!=null&&end!=null)};
   State.cues.push(c); sortCues(); emit('render:all'); selectCue(c.id); return c;
 }
@@ -609,7 +652,7 @@ sublist.addEventListener('mousedown', e => {
     e.preventDefault();
     if (c.id !== _swapSource) {
       const src = State.cues.find(x => x.id === _swapSource);
-      if (src) { const tmp = src.text || ''; src.text = c.text || ''; c.text = tmp; emit('render:all'); recordHistory('字幕對調'); }
+      if (src) { const tmp = src.text || ''; src.text = c.text || ''; c.text = tmp; emit('render:all'); recordHistory('文字交換'); }
     }
     cancelSwapMode(); return;
   }
@@ -764,6 +807,6 @@ sublist.addEventListener('keydown', e => {
 
 export { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel,
   addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, shiftTextsDown, shiftTextsUp,
-  enterSwapMode, cancelSwapMode, trimTrackSpaces,
+  enterSwapMode, cancelSwapMode, swapAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,
   copyCues, pasteCues };

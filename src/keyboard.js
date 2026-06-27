@@ -153,7 +153,15 @@ window.addEventListener('keydown',e=>{
     case 'k': // 暫停
       e.preventDefault(); _jklSpeed=0; jklApply(); break;
     case '1': e.preventDefault(); setZoom(State.pxPerSec*0.77); break;
-    case '2': e.preventDefault(); setZoom(State.pxPerSec*1.3); break;
+    case '2': 
+      e.preventDefault();
+      if(e.code === 'Numpad2') jumpToCueInMinusFrames(1, 5);
+      else setZoom(State.pxPerSec*1.3);
+      break;
+    case '5':
+      e.preventDefault();
+      if(e.code === 'Numpad5') jumpToCueInMinusFrames(-1, 5);
+      break;
     case '7': e.preventDefault(); emit('action', 'history'); break;
     case '8': e.preventDefault(); emit('action', 'notes'); break;
     case '9': e.preventDefault(); emit('action', 'check-panel'); break;
@@ -181,6 +189,7 @@ window.addEventListener('keydown',e=>{
       else nudge(1/State.fps);                               // 前進 1 格
       break;
     case 'arrowup':
+    case 'e':
       e.preventDefault();
       if((e.ctrlKey||e.metaKey)&&e.shiftKey){ jumpToFirstLastCue(-1); }
       else if(e.shiftKey){ seekHome(); }
@@ -191,6 +200,7 @@ window.addEventListener('keydown',e=>{
       }
       break;
     case 'arrowdown':
+    case 'd':
       e.preventDefault();
       if((e.ctrlKey||e.metaKey)&&e.shiftKey){ jumpToFirstLastCue(1); }
       else if(e.shiftKey){ seekEnd(); }
@@ -219,7 +229,7 @@ window.addEventListener('keydown',e=>{
       }
       break;
     case 'p':
-    case 'e': e.preventDefault(); {
+    case 'r': e.preventDefault(); {
       const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
       if(!ids.length)break;
       const jCues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(c=>c&&c.timed!==false);
@@ -248,7 +258,11 @@ window.addEventListener('keydown',e=>{
       }
       break;
     case 's':
-      if(e.ctrlKey||e.metaKey){ e.preventDefault(); Project.save(); }
+      if(e.ctrlKey||e.metaKey){
+        e.preventDefault();
+        if(e.shiftKey) Project.saveAs();
+        else Project.save();
+      }
       else {
         e.preventDefault();
         if(State.selectedId){
@@ -259,28 +273,33 @@ window.addEventListener('keydown',e=>{
         }
       }
       break;
-    case 'd':
-      e.preventDefault();
-      {
-        const t = Media.vTime();
-        const tk = State.listTrack || 0;
-        const c = State.cues.find(cx => (cx.track || 0) === tk && cx.timed !== false && cx.start <= t && cx.end > t);
-        if (c) {
-          selectCueSingle(c.id, false);
-          setStatus('已選取目前字幕', 'ok');
-        } else {
-          setStatus('目前時間點沒有字幕', '');
-        }
-      }
-      break;
+
     case 'q': e.preventDefault(); setIn(); break;
     case 'w': e.preventDefault(); setOut(); break;
+    case 'z':
+      if((e.ctrlKey||e.metaKey)&&e.shiftKey){ e.preventDefault(); emit('action','redo'); }
+      else if(e.ctrlKey||e.metaKey){ e.preventDefault(); emit('action','undo'); }
+      else { e.preventDefault(); emit('action','toggle-auto-select'); }
+      break;
     case 'x':
       e.preventDefault();
-      emit('action', 'toggle-ow-keep');
+      emit('action', 'toggle-overwrite');
       break;
     case 'c':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); copyCues(); }
+      else { e.preventDefault(); emit('action', 'toggle-ow-keep'); }
+      break;
+    case 'g':
+      e.preventDefault();
+      const t = Media.vTime();
+      const tk = State.listTrack || 0;
+      const c = State.cues.find(cx => (cx.track || 0) === tk && cx.timed !== false && cx.start <= t && cx.end > t);
+      if (c) {
+        selectCueSingle(c.id, false);
+        setStatus('已選取目前字幕', 'ok');
+      } else {
+        setStatus('目前時間點沒有字幕', '');
+      }
       break;
     case 'v':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); pasteCues(); }
@@ -290,11 +309,12 @@ window.addEventListener('keydown',e=>{
     case 'f':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); const sd=document.getElementById('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>document.getElementById('searchInput')?.focus(),20); } }
       break;
-    case ']': e.preventDefault(); zoomFit(); break;
     case 'z':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); e.shiftKey?History.redo():History.undo(); }
       else { e.preventDefault(); emit('action','toggle-overwrite'); }
       break;
+    case '\\':
+    case '|':
     case '`':
       e.preventDefault();
       if(window._lastZoomMode === 'fit') { zoomFitVideo(); window._lastZoomMode = 'video'; }
@@ -302,7 +322,6 @@ window.addEventListener('keydown',e=>{
       break;
     case '-': case '_': e.preventDefault(); setZoom(State.pxPerSec*0.77); break;
     case '+': case '=': e.preventDefault(); setZoom(State.pxPerSec*1.3); break;
-    case '\\': case '|': e.preventDefault(); zoomFitVideo(); break;
   }
 });
 window.addEventListener('keyup',e=>{
@@ -403,58 +422,82 @@ function jumpToCueInMinusFrames(dir, frames){
   updatePlayhead(); emit('playhead:ensure');
 }
 
-/* 上下鍵步進邏輯：
-   - 只看被選字幕所在軌道的字幕
-   - 向下：A.end → B.start(預覽，仍選A) → B.start(確認，切選B) → B.end → C.start(預覽) → ...
-   - 向上：C.start → B.end(預覽，仍選C) → B.end(確認，切選B) → B.start → A.end(預覽) → ... */
-let _pendingStep=null; // { cueId, edge, t, dir } — 等待確認的下一句
-
 function stepBoundary(dir){
-  const selCue=State.cues.find(c=>c.id===State.selectedId);
+  const t = Media.vTime();
+  const EPS = 0.05; // 50ms寬容度，避免播放器時間小數點誤差
 
-  if(!selCue){
-    // 無選取：找播放點附近最近邊界（限當前軌道）
-    const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
-    if(!timed.length)return;
-    const bnd=[]; for(const c of timed){bnd.push({c,edge:'start',t:c.start});bnd.push({c,edge:'end',t:c.end});}
-    const t=Media.vTime();
-    let idx;
-    if(dir>0){idx=bnd.findIndex(b=>b.t>t+1e-4);if(idx<0)idx=bnd.length-1;}
-    else{idx=0;for(let i=0;i<bnd.length;i++){if(bnd[i].t<t-1e-4)idx=i;}}
-    const b=bnd[idx]; selectCueSingle(b.c.id); State.activeEdge=b.edge;
-    Media.seek(b.t); _pendingStep=null; emit('playhead:ensure'); updatePlayhead(); return;
+  const selTrack = State.listTrack;
+  const timed = State.cues.filter(c => c.timed !== false && (c.track || 0) === selTrack);
+  if (!timed.length) return;
+
+  const selIdx = timed.findIndex(c => c.id === State.selectedId);
+  let c = selIdx >= 0 ? timed[selIdx] : null;
+  let cIdx = selIdx;
+
+  // 如果播放點已經不在被選取的字幕範圍內（包含邊界寬容度），代表被手動拖走了，這時放棄當前選取，改依時間 t 尋找
+  if (c && (t < c.start - EPS || t > c.end + EPS)) {
+    c = null;
+    cIdx = -1;
   }
 
-  // 只考慮被選字幕所在軌道
-  const selTrack=selCue.track||0;
-  const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===selTrack);
-  if(!timed.length)return;
-  const bnd=[]; for(const c of timed){bnd.push({c,edge:'start',t:c.start});bnd.push({c,edge:'end',t:c.end});}
+  let targetId = null;
+  let targetEdge = 'start';
+  let targetTime = 0;
 
-  // 有預覽中的字幕且方向相同 → 確認切換
-  if(_pendingStep && _pendingStep.dir===dir && Math.abs(Media.vTime()-_pendingStep.t)<0.5){
-    selectCueSingle(_pendingStep.cueId); State.activeEdge=_pendingStep.edge;
-    _pendingStep=null; emit('playhead:ensure'); updatePlayhead(); return;
-  }
-  _pendingStep=null;
-
-  const ci=timed.findIndex(c=>c.id===State.selectedId);
-  const curIdx=ci*2+(State.activeEdge==='end'?1:0);
-  const nextIdx=clamp(curIdx+dir,0,bnd.length-1);
-  if(nextIdx===curIdx)return;
-  const b=bnd[nextIdx];
-  Media.seek(b.t);
-
-  if(b.c.id===State.selectedId){
-    State.activeEdge=b.edge; // 同一字幕內移動
-  } else if(dir>0 && b.edge==='start'){
-    _pendingStep={cueId:b.c.id, edge:b.edge, t:b.t, dir}; // 向下預覽：先到B.start，不切換選取
-  } else if(dir<0 && b.edge==='end'){
-    _pendingStep={cueId:b.c.id, edge:b.edge, t:b.t, dir}; // 向上預覽：先到B.end，不切換選取
+  if (dir > 0) {
+    if (!c) {
+      const bnd = [];
+      for (const cue of timed) { bnd.push({id: cue.id, edge: 'start', t: cue.start}); bnd.push({id: cue.id, edge: 'end', t: cue.end}); }
+      bnd.sort((a,b) => a.t - b.t);
+      const nextBnd = bnd.find(b => b.t > t + EPS);
+      if (nextBnd) { targetId = nextBnd.id; targetEdge = nextBnd.edge; targetTime = nextBnd.t; }
+    } else {
+      if (t < c.start - EPS) {
+        targetId = c.id; targetEdge = 'start'; targetTime = c.start;
+      } else if (t < c.end - EPS) {
+        targetId = c.id; targetEdge = 'end'; targetTime = c.end;
+      } else {
+        if (cIdx < timed.length - 1) {
+          const next = timed[cIdx + 1];
+          targetId = next.id; targetEdge = 'start'; targetTime = next.start;
+        } else {
+          return;
+        }
+      }
+    }
   } else {
-    selectCueSingle(b.c.id); State.activeEdge=b.edge;
+    if (!c) {
+      const bnd = [];
+      for (const cue of timed) { bnd.push({id: cue.id, edge: 'start', t: cue.start}); bnd.push({id: cue.id, edge: 'end', t: cue.end}); }
+      bnd.sort((a,b) => a.t - b.t);
+      let prevBnd = null;
+      for (let i = bnd.length - 1; i >= 0; i--) {
+        if (bnd[i].t < t - EPS) { prevBnd = bnd[i]; break; }
+      }
+      if (prevBnd) { targetId = prevBnd.id; targetEdge = prevBnd.edge; targetTime = prevBnd.t; }
+    } else {
+      if (t > c.end + EPS) {
+        targetId = c.id; targetEdge = 'end'; targetTime = c.end;
+      } else if (t > c.start + EPS) {
+        targetId = c.id; targetEdge = 'start'; targetTime = c.start;
+      } else {
+        if (cIdx > 0) {
+          const prev = timed[cIdx - 1];
+          targetId = prev.id; targetEdge = 'end'; targetTime = prev.end;
+        } else {
+          return;
+        }
+      }
+    }
   }
-  emit('playhead:ensure'); updatePlayhead();
+
+  if (targetId) {
+    selectCueSingle(targetId);
+    State.activeEdge = targetEdge;
+    Media.seek(targetTime);
+    emit('playhead:ensure');
+    updatePlayhead();
+  }
 }
 
 export { setIn, setOut, nudge, stepBoundary, jklReset, resetPlaybackSpeed };

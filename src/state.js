@@ -14,6 +14,7 @@ const State = {
   fps: 24,
   dropFrame: false,
   duration: 0,
+  autoSelect: false,   // 播放時是否自動選取對應字幕
   selectedId: null,    // 主選取（鍵盤/IO 對象）
   selectedIds: [],     // 多選集合
   activeEdge: 'start', // 上下鍵步進中目前停在 start 或 end
@@ -48,7 +49,12 @@ function applyFps(v){
 // 套用後發出事件；DOM 同步（fpsSel/tcCur/tcDur）改由 app.js 的 'fps:changed' 訂閱負責，
 // 切斷 state.js → dom.js 的隱性相依。
 function setFps(v){ const r=applyFps(v); emit('fps:changed', r); return r; }
-function ensureTrackCount(n){ while(State.tracks.length<n)State.tracks.push(newTrack()); syncTrackCount(); }
+function ensureTrackCount(n){ 
+  let added = false;
+  while(State.tracks.length<n){ State.tracks.push(newTrack()); added = true; }
+  syncTrackCount();
+  return added;
+}
 function trackVisible(i){ return !State.tracks[i] || State.tracks[i].visible!==false; }
 let cueSeq = 1;
 const newId = () => 'c' + (cueSeq++);

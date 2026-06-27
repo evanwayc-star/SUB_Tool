@@ -230,6 +230,18 @@ function rafLoop(){
       }
     }
     if(act&&act.id!==State.activeId){ State.activeId=act.id; markActiveRow(act.id); }
+
+    // 自動選取邏輯
+    if(State.autoSelect) {
+      const tk = State.listTrack || 0;
+      if (act && (act.track || 0) === tk && act.id !== State.selectedId) {
+        const editing = document.activeElement && document.activeElement.classList.contains('txt') && document.activeElement.contentEditable === 'true';
+        if (!editing) {
+          selectCueSingle(act.id, false);
+        }
+      }
+    }
+
     // active 備註
     if(State.notes.length&&$('notesPanel').classList.contains('show')) updateNoteActive(t);
     // buffer 音軌 drift 校正
@@ -348,7 +360,7 @@ async function doAction(act){
          {label:'確定清空',primary:true,act:()=>{
            closeModal();
            State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
-           State.listTrack=0;State.tracks=[];ensureTrackCount(1);
+           State.listTrack=0;State.tracks=[];ensureTrackCount(0);
            State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');
            History.reset();resetProject();_firstLoad=true;
            // 清除影音
@@ -432,6 +444,15 @@ async function doAction(act){
     case 'trim-track': trimTrackSpaces(); break;
     case 'help': showHelp(); break;
     case 'modal-close': closeModal(); break;
+    case 'toggle-auto-select':
+      State.autoSelect = !State.autoSelect;
+      const asBtns = document.querySelectorAll('.auto-select-btn');
+      asBtns.forEach(btn => {
+        btn.textContent = State.autoSelect ? '自動選取' : '不自動選取';
+        btn.classList.toggle('on', State.autoSelect);
+      });
+      setStatus(`播放時自動選取：${State.autoSelect ? '開' : '關'}`, 'ok');
+      break;
     case 'toggle-overwrite':
       State.overwriteMode = !State.overwriteMode;
       const owBtns = document.querySelectorAll('.ow-toggle-btn');
@@ -925,7 +946,6 @@ function applyAriaLabels(){
 function init(){
   State.fps=+$('fpsSel').value||24;
   const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;
-  ensureTrackCount(1);
   initUI(); initExtras(); applyAriaLabels();
   renderAll(); layoutTimeline(); drawTimeline(); rafLoop();
   History.reset();
