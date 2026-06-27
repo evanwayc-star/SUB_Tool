@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SUB TOOL</title>
-
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
 <div class="app" id="app">
@@ -156,8 +158,10 @@
       <button class="icon" data-act="set-out" title="設定終點 (W)" style="width: 44px; justify-content: center;">Out</button>
       <div class="sep"></div>
       <button class="auto-select-btn" id="autoSelectToggleBtn" data-act="toggle-auto-select" title="播放時自動選取對應字幕 (Z)">不自動選取</button>
+      <div class="sep"></div>
       <button class="ow-toggle-btn" id="overwriteToggleBtn" data-act="toggle-overwrite" title="切換覆蓋狀態 (X)">🔒 不覆蓋</button>
-      <button class="ow-keep-btn" id="overwriteKeepBtn" data-act="toggle-ow-keep" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)" style="display:none">⭕ 保留</button>
+      <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtn" data-act="toggle-ow-keep" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)">⭕ 保留</button>
+      <div class="sep"></div>
       <span id="tlSel">未選取</span>
       <div class="sep"></div>
       <div class="zoom">
@@ -197,9 +201,12 @@
     <span id="stMedia"></span>
     <div class="spacer"></div>
     <span id="stEngine">音訊引擎：原生</span>
+    <div class="sep"></div>
     <button class="auto-select-btn" id="autoSelectToggleBtnStatus" data-act="toggle-auto-select" title="播放時自動選取對應字幕 (Z)">不自動選取</button>
+    <div class="sep"></div>
     <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" title="切換覆蓋狀態 (X)">🔒 不覆蓋</button>
-    <button class="ow-keep-btn" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)" style="display:none">⭕ 保留</button>
+    <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)">⭕ 保留</button>
+    <div class="sep"></div>
     <span id="stSel"></span>
   </div>
 </div>

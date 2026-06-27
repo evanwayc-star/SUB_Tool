@@ -466,7 +466,7 @@ async function doAction(act){
       btn.classList.toggle('primary', State.overwriteMode);
     });
     document.querySelectorAll('.ow-keep-btn').forEach(btn => {
-      btn.style.display = State.overwriteMode ? 'inline-block' : 'none';
+      btn.classList.toggle('inactive-mode', !State.overwriteMode);
     });
       setStatus(`覆蓋模式：${State.overwriteMode ? '解鎖 (可自由重疊)' : '鎖定 (不可覆蓋)'}`, 'ok');
       break;

@@ -1,6 +1,6 @@
 {
   "name": "sub-tool",
-  "version": "3.5.0",
+  "version": "3.6.0",
   "description": "SUB Tool 上字幕工具",
   "author": "Evan",
   "main": "electron/main.js",
@@ -50,7 +50,7 @@
     }
   },
   "devDependencies": {
-    "electron": "^32.2.0",
+    "electron": "^32.3.3",
     "electron-builder": "^25.1.8",
     "eslint": "^10.5.0",
     "globals": "^17.6.0",
