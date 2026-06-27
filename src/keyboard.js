@@ -259,10 +259,7 @@ window.addEventListener('keydown',e=>{
         }
       }
       break;
-    case 'd': break;
-    case 'q': e.preventDefault(); setIn(); break;
-    case 'w': e.preventDefault(); setOut(); break;
-    case 'x':
+    case 'd':
       e.preventDefault();
       {
         const t = Media.vTime();
@@ -276,9 +273,14 @@ window.addEventListener('keydown',e=>{
         }
       }
       break;
+    case 'q': e.preventDefault(); setIn(); break;
+    case 'w': e.preventDefault(); setOut(); break;
+    case 'x':
+      e.preventDefault();
+      emit('action', 'toggle-ow-keep');
+      break;
     case 'c':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); copyCues(); }
-      else { e.preventDefault(); setOut(); }
       break;
     case 'v':
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); pasteCues(); }

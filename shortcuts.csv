@@ -19,14 +19,14 @@ A,,Jump to Cue Start,將播放點移至選擇字幕的起點
 A,Ctrl/Cmd,Select All in Track,全選當前軌道字幕
 S,,Jump to Cue End,將播放點移至選擇字幕的終點
 S,Ctrl/Cmd,Save Project,儲存專案
-D,,(Unassigned),無功能
+D,,Select Current Cue,選取目前播放點所在的字幕
 F,,Check Panel,打開檢查面板
 F,Ctrl/Cmd,Search,打開搜尋框
-Z,,Toggle Overwrite Mode,切換覆蓋模式 (可自由重疊/不可覆蓋)
+Z,,Toggle Overwrite Mode,切換不覆蓋/可覆蓋狀態
 Z,Ctrl/Cmd,Undo,復原
 Z,Ctrl/Cmd+Shift,Redo,重做
-X,,Select Current Cue,選取目前播放點所在的字幕
-C,,Set Out Point,設定字幕終點
+X,,Toggle Overwrite Keep Mode,切換保留/刪除狀態
+C,,(Unassigned),無功能
 C,Ctrl/Cmd,Copy Cues,複製選取字幕
 V,,Add Note,新增備忘錄
 V,Ctrl/Cmd,Paste Cues,貼上字幕
