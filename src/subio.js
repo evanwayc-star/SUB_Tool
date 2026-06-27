@@ -241,6 +241,7 @@ function toASSFromState(cues) {
 
 function doExportXLSX(trackDataList) {
   if (!trackDataList.length) { showToast('所選軌道沒有字幕'); return; }
+  const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);
   const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
   const fname = base + '.xlsx';
   if (IS_DESKTOP) {

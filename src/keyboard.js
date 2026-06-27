@@ -361,7 +361,6 @@ function jumpToFirstLastCue(dir){
   const target=dir<0?list[0]:list[list.length-1];
   selectCueSingle(target.id,false);
   Media.seek(target.start);
-  _pendingStep=null;
   updatePlayhead();emit('playhead:ensure');
 }
 
@@ -395,7 +394,6 @@ function jumpToAdjacentCue(dir){
     selectCueSingle(target.id, false);
   }
   Media.seek(target.start);
-  _pendingStep=null;
   updatePlayhead(); emit('playhead:ensure');
 }
 
@@ -418,7 +416,6 @@ function jumpToCueInMinusFrames(dir, frames){
   selectCueSingle(target.id, false);
   const targetTime = Math.max(0, target.start - (frames / State.fps));
   Media.seek(targetTime);
-  _pendingStep=null;
   updatePlayhead(); emit('playhead:ensure');
 }
 
