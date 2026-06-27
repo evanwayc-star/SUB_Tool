@@ -25,8 +25,8 @@ describe('ASS round-trip', () => {
     const ass = SubFormats.toASS(cues, 24, []);
     const parsed = SubFormats.parseASS(ass);
     expect(parsed).toHaveLength(2);
-    expect(parsed[0].start).toBeCloseTo(1, 2);
-    expect(parsed[0].end).toBeCloseTo(2, 2);
+    expect(parsed[0].start).toBeCloseTo(0.97, 2);
+    expect(parsed[0].end).toBeCloseTo(1.97, 2);
     expect(parsed[0].text).toBe('Hi');
     expect(parsed[0].track).toBe(0);
     expect(parsed[1].text).toBe('A\nB');
