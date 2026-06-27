@@ -214,7 +214,7 @@ function createWindow() {
   mainWin = new BrowserWindow({
     width: 1480, height: 920, minWidth: 1024, minHeight: 640,
     backgroundColor: '#1b1b1d', autoHideMenuBar: true,
-    title: 'SUB TOOL',
+    title: `SUB TOOL v${app.getVersion()}`,
     icon: path.join(__dirname, 'logo.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -308,19 +308,36 @@ app.on('open-file', (e, path) => {
   e.preventDefault();
   startupFile = path;
   allowFileDir(path);
-  if (_mainWin) _mainWin.webContents.send('app:open-file', path);
+  if (mainWin) mainWin.webContents.send('app:open-file', path);
 });
 
-app.whenReady().then(() => {
-  FFMPEG = detect('ffmpeg');
-  FFPROBE = detect('ffprobe');
-  VENC = detectVideoEncoder();
-  CACHE = path.join(app.getPath('userData'), 'mediacache');
-  try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
-  try { cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
-  createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-});
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    if (mainWin) {
+      if (mainWin.isMinimized()) mainWin.restore();
+      mainWin.focus();
+      const fileArg = commandLine.find(a => !a.startsWith('-') && (a.endsWith('.subtool') || a.endsWith('.json')));
+      if (fileArg) {
+        allowFileDir(fileArg);
+        mainWin.webContents.send('app:open-file', fileArg);
+      }
+    }
+  });
+
+  app.whenReady().then(() => {
+    FFMPEG = detect('ffmpeg');
+    FFPROBE = detect('ffprobe');
+    VENC = detectVideoEncoder();
+    CACHE = path.join(app.getPath('userData'), 'mediacache');
+    try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
+    try { cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
+    createWindow();
+    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  });
+}
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('quit', () => {
   if (_mpvProc) { try { _mpvProc.kill(); } catch (e) {} _mpvProc = null; }

@@ -39,7 +39,14 @@
       "electron/ffmpeg/**"
     ],
     "win": {
-      "target": "zip"
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SUB Tool"
     }
   },
   "devDependencies": {

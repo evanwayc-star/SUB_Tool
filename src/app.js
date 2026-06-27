@@ -26,6 +26,11 @@ import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcSh
 import { parseTimecodeInput } from './tcparse.js';
 import { on } from './events.js';
 
+if (typeof __APP_VERSION__ !== 'undefined') {
+  const el = document.getElementById('appVersion');
+  if (el) el.textContent = 'v' + __APP_VERSION__;
+}
+
 /* app.js 為協調層：訂閱各模組發送的事件並呼叫對應的渲染/指令函式。
    各模組只 emit、不再反向 import app.js，藉此切斷雙向相依。
    （函式宣告會被 hoist，於此處註冊安全；emit 為同步呼叫，語意不變。） */
