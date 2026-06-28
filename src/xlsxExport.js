@@ -175,18 +175,19 @@ function stylesXml() {
     + `<border><left style="medium"><color indexed="64"/></left><right style="medium"><color indexed="64"/></right><top/><bottom/><diagonal/></border>`
     + `</borders>`
     + `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment vertical="center"/></xf></cellStyleXfs>`
-    // xf 0=預設  1=標頭（黃底紅粗字四邊框）  2=資料（Arial無底色左右框）
-    + `<cellXfs>`
+    // xf 0=預設  1=標頭（黃底紅粗字四邊框）  2=資料（Arial無底色左右框） 3=純文字（無框無底）
+    + `<cellXfs count="4">`
     + `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"><alignment vertical="center"/></xf>`
     + `<xf numFmtId="49" fontId="1" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>`
     + `<xf numFmtId="49" fontId="0" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>`
+    + `<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>`
     + `</cellXfs>`
     + `</styleSheet>`;
 }
 
 function sheetXml(headerLabel, cues, fps, dropFrame) {
-  // 欄寬：A 欄（時碼）28，B 欄（字幕）60
-  const colDefs = `<cols><col min="1" max="1" width="28" customWidth="1"/><col min="2" max="2" width="60" customWidth="1"/></cols>`;
+  // 欄寬：A 欄（時碼）28，B 欄（字幕）60，套用 style="3" 強制設定為純文字格式
+  const colDefs = `<cols><col min="1" max="1" width="28" customWidth="1" style="3"/><col min="2" max="2" width="60" customWidth="1" style="3"/><col min="3" max="16384" width="11" style="3"/></cols>`;
   const rows = [
     // 標頭列：黃底紅粗字四邊框（s="1"），列高 17.25
     `<row r="1" ht="17.25" customHeight="1">`

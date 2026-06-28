@@ -50,10 +50,10 @@ npm run dev
 npm run electron:dev    # 連 dev server + 開 DevTools
 ```
 
-## 打包免安裝版（選用）
+## 打包安裝檔（exe）
 
 ```bash
-npm run dist    # electron-builder → release/ 下的 win zip
+npm run dist    # electron-builder → release/ 下的 win exe 安裝檔
 ```
 
 ## 文件索引

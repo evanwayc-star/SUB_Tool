@@ -15,6 +15,7 @@ import { emit } from './events.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { showToast, setStatus, openModal, closeModal } from './ui.js';
 import { showCtx } from './menus.js';
+import { executeBatchExport } from './subio.js';
 
 /* ===== 備註 active 狀態 ===== */
 let _activeNoteId=null;
@@ -259,8 +260,9 @@ function getNotesGeneralFileData(){
     const content=(n.text||'').replace(/\r?\n/g,' ');
     lines.push(`${csvF(n.done?'V':'K')},${csvF(time)},${csvF(content)}`);
   }
+  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
   const bytes = _makeBom(lines.join('\r\n'));
-  return { name: 'notes.csv', content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-8' };
+  return { name: `ST_${projName}_notes.csv`, content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-8' };
 }
 
 function doExportNotesGeneral(){
@@ -280,8 +282,9 @@ function getNotesEdiusFileData(){
     const time=secToEncore(n.time,State.fps,State.dropFrame);
     eLines.push(`${i+1},"${time}", ,"${(n.text||'').replace(/"/g,'""')}"`);
   });
+  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
   const bytes = _makeBom(eLines.join('\r\n'));
-  return { name: 'notes_EDIUS.csv', content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-8' };
+  return { name: `ST_${projName}_notes_Edius.csv`, content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-8' };
 }
 
 function doExportNotesEdius(){
@@ -301,8 +304,19 @@ function exportNotes(){
       const g=document.getElementById('expNoteGeneral')?.checked;
       if(!e&&!g){showToast('請至少勾選一種格式');return;}
       closeModal();
-      if(e)doExportNotesEdius();
-      if(g)doExportNotesGeneral();
+      
+      const filesToExport = [];
+      if(e) {
+        const f = getNotesEdiusFileData();
+        if(f) filesToExport.push(f);
+      }
+      if(g) {
+        const f = getNotesGeneralFileData();
+        if(f) filesToExport.push(f);
+      }
+      if(filesToExport.length > 0) {
+        executeBatchExport(filesToExport);
+      }
     }},{label:'取消',act:closeModal}],{width:'240px'});
 }
 

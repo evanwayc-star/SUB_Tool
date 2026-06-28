@@ -139,8 +139,29 @@ function showExportDialog() {
     html += sec(`備註（${State.notes.length} 條）`,
       cb('id="expNotesEdius"', 'Edius 格式') + cb('id="expNotesGeneral"', '一般格式'));
 
-  openModal('匯出', html, [{
-    label: '匯出', primary: true, act: () => {
+  openModal('匯出', html, [
+    {
+      label: '預設', act: () => {
+        const fmts = document.querySelectorAll('[data-fmt]');
+        for (let i = 0; i < fmts.length; i++) fmts[i].checked = (fmts[i].getAttribute('data-fmt') === 'encore');
+        const tks = document.querySelectorAll('[data-tk]');
+        for (let i = 0; i < tks.length; i++) tks[i].checked = true;
+        const ne = document.getElementById('expNotesEdius'); if(ne) ne.checked = false;
+        const ng = document.getElementById('expNotesGeneral'); if(ng) ng.checked = false;
+      }
+    },
+    {
+      label: '全選', act: () => {
+        const fmts = document.querySelectorAll('[data-fmt]');
+        for (let i = 0; i < fmts.length; i++) fmts[i].checked = true;
+        const tks = document.querySelectorAll('[data-tk]');
+        for (let i = 0; i < tks.length; i++) tks[i].checked = true;
+        const ne = document.getElementById('expNotesEdius'); if(ne) ne.checked = true;
+        const ng = document.getElementById('expNotesGeneral'); if(ng) ng.checked = true;
+      }
+    },
+    {
+      label: '匯出', primary: true, act: () => {
       const fmts = [...document.querySelectorAll('[data-fmt]')].filter(b => b.checked).map(b => b.dataset.fmt);
       const tks = State.cues.length && State.trackCount > 1 ? [...document.querySelectorAll('[data-tk]')].filter(b => b.checked).map(b => +b.dataset.tk) : null;
       const notesE = document.getElementById('expNotesEdius')?.checked;
@@ -169,6 +190,7 @@ function showExportDialog() {
       executeBatchExport(filesToExport);
     }
   }, { label: '取消', act: closeModal }]);
+
 }
 function exportSub(kind) {
   if (State.cues.length === 0) { showToast('沒有字幕可匯出'); return; }
@@ -210,23 +232,34 @@ function executeBatchExport(files) {
 
 function getFileData(kind, cues, trackName) {
   if (!cues.length) return null;
-  const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
-  const tkSuffix = trackName ? '_' + trackName.replace(/[\\/:*?"<>|]/g, '_') : '';
-  let text, ext;
-  if (kind === 'srt') { text = SubFormats.toSRT(cues); ext = 'srt'; }
-  else if (kind === 'ass') { text = toASSFromState(cues); ext = 'ass'; }
-  else if (kind === 'encore') { text = SubFormats.toEncore(cues, State.fps, State.dropFrame); ext = 'txt'; }
-  else { text = SubFormats.toTXT(cues); ext = 'txt'; }
+  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
+  const tkName = trackName ? trackName.replace(/[\\/:*?"<>|]/g, '_') : '軌道';
+  let text, ext, fname;
+  if (kind === 'srt') { 
+    text = SubFormats.toSRT(cues); ext = 'srt'; 
+    fname = `ST_${projName}_SUB_${tkName}.srt`;
+  }
+  else if (kind === 'ass') { 
+    text = toASSFromState(cues); ext = 'ass'; 
+    fname = `ST_${projName}_SUB_${tkName}.ass`;
+  }
+  else if (kind === 'encore') { 
+    text = SubFormats.toEncore(cues, State.fps, State.dropFrame); ext = 'txt'; 
+    fname = `ST_${projName}_SUB_${tkName}.txt`;
+  }
+  else { 
+    text = SubFormats.toTXT(cues); ext = 'txt'; 
+    fname = `ST_${projName}_SUB_${tkName}-NoTC.txt`;
+  }
   const bytes = encodeUTF16LE(text);
-  const fname = base + tkSuffix + (kind === 'encore' ? '_encore' : '') + '.' + ext;
   return { name: fname, content: bytesToB64(bytes), ext: ext, mime: 'text/plain;charset=utf-16le' };
 }
 
 function getXLSXFileData(trackDataList) {
   if (!trackDataList.length) return null;
   const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);
-  const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
-  const fname = base + '.xlsx';
+  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
+  const fname = `ST_${projName}_SUB.xlsx`;
   return { name: fname, content: bytesToB64(bytes), ext: 'xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
 }
 
@@ -242,8 +275,8 @@ function toASSFromState(cues) {
 function doExportXLSX(trackDataList) {
   if (!trackDataList.length) { showToast('所選軌道沒有字幕'); return; }
   const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);
-  const base = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle');
-  const fname = base + '.xlsx';
+  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
+  const fname = `ST_${projName}_SUB.xlsx`;
   if (IS_DESKTOP) {
     DESK.exportSub(fname, bytesToB64(bytes), 'xlsx').then(pth => { if (pth) { setStatus('已匯出：' + pth, 'ok'); showToast('已匯出 ' + baseName(pth)); } });
   } else {
@@ -422,4 +455,4 @@ function applyDurAdjPct() {
   setStatus(`已調整 ${cues.length} 條字幕的持續時間（${pct}%）`, 'ok');
 }
 
-export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState };
+export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport };
