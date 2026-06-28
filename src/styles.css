@@ -130,7 +130,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .right .rhead{display:flex;align-items:center;gap:4px;padding:6px 8px;border-bottom:1px solid var(--border);background:var(--panel2)}
 .right .rhead .title{font-weight:600;font-size:13px;white-space:nowrap}
 .right .rhead .count{color:var(--text-faint);font-size:11px}
-.sublist{flex:1;overflow:auto}
+.sublist{flex:1;overflow:auto;position:relative}
 .sub-row{display:flex;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer;align-items:flex-start;transition:background 0.15s ease}
 .sub-row:hover{background:var(--panel2)}
 .sub-row.active{box-shadow:inset 3px 0 0 var(--cue);background:rgba(42,117,211,0.12)}
@@ -139,7 +139,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .sub-row .idx{width:26px;color:var(--text-faint);font-size:11px;text-align:right;padding-top:2px;flex-shrink:0;font-variant-numeric:tabular-nums}
 .sub-row .body{flex:1;min-width:0}
 .sub-row .times{display:flex;gap:6px;font-family:"JetBrains Mono","Consolas",monospace;font-size:11px;color:var(--text-dim);margin-bottom:3px;align-items:center}
-.sub-row .times .dur{color:var(--text-faint);margin-left:auto}
+.sub-row .times .dur{color:var(--text-faint);margin-left:8px}
 .sub-row .times .untimed{color:var(--red)}
 .sub-row .txt{font-size:16px;line-height:1.4;white-space:pre-wrap;word-break:break-word;color:var(--text);min-height:18px;
   border:1px solid transparent;border-radius:4px;padding:2px 4px}
@@ -224,22 +224,25 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 
 /* 右鍵選單（播放窗音軌/速度、軌道、字幕移動） */
 .ctxmenu{position:fixed;background:var(--panel2);border:1px solid var(--border2);border-radius:6px;box-shadow:var(--shadow);
-  z-index:1500;padding:4px;min-width:170px;max-width:90vw;display:none;font-size:12px;max-height:70vh;overflow:auto}
+  z-index:1500;padding:6px;min-width:180px;max-width:90vw;display:none;font-size:14px;max-height:70vh;overflow:auto}
 /* 區塊分隔線 (可拖曳調整大小) */
 .splitter-v{width:5px;flex-shrink:0;cursor:col-resize;background:var(--border)}
 .splitter-v:hover{background:var(--accent)}
 .splitter-h{height:5px;flex-shrink:0;cursor:row-resize;background:var(--border)}
 .splitter-h:hover{background:var(--accent)}
 .ctxmenu.show{display:block}
-.ctxmenu .ci{padding:6px 12px;border-radius:4px;cursor:pointer;display:flex;align-items:center;gap:8px;white-space:nowrap;color:var(--text)}
+.ctxmenu .ci{padding:8px 14px;border-radius:4px;cursor:pointer;display:flex;align-items:center;gap:8px;white-space:nowrap;color:var(--text)}
 .ctxmenu .ci:hover{background:var(--accent);color:#1b1b1d}
-.ctxmenu .lbl{font-size:10px;color:var(--text-faint);padding:6px 12px 2px}
+.ctxmenu .c-icon{width:22px;font-size:15px;text-align:center;display:inline-block;flex-shrink:0}
+.ctxmenu .c-text{flex:1}
+.ctxmenu .lbl{font-size:11px;color:var(--text-faint);padding:8px 14px 4px}
 .ctxmenu .ci .chk{margin-left:auto}
 .ctxmenu .msep{height:1px;background:var(--border);margin:4px 6px}
 .tc .cur{cursor:pointer;border-radius:3px;padding:0 2px}
 .tc .cur:hover{background:var(--panel3)}
-.tc-edit{font-family:"JetBrains Mono","Consolas",monospace;font-size:13px;background:var(--panel);color:var(--accent);
-  border:1px solid var(--border2);border-radius:4px;padding:0 4px;width:130px;outline:none;transition:border-color 0.15s ease}
+.tc-edit{font-family:"JetBrains Mono","Consolas",monospace;font-size:11px;background:var(--panel);color:var(--accent);
+  border:1px solid var(--border2);border-radius:3px;padding:1px 2px;width:80px;outline:none;transition:border-color 0.15s ease}
+.tc .tc-edit{font-size:17px;width:150px;height:26px;border-radius:4px;padding:0 4px}
 .tc-edit:focus{border-color:var(--accent)}
 
 /* 浮動面板（動作紀錄 / 備忘錄） */
@@ -389,11 +392,12 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .tl-sel-info.sel-multi{background:rgba(240,100,140,.22);color:var(--text)}
 /* 調整面板 */
 .shift-body{padding:10px 12px;display:flex;flex-direction:column;gap:8px}
-.shift-body select{width:100%;font-size:12px}
+.shift-body select{width:100%;font-size:14px;padding:6px}
 .shift-row{display:flex;gap:6px;align-items:center}
-#tcShiftInput,#durAdjTcInput{width:106px;font-family:"Consolas",monospace;font-size:13px;text-align:center;letter-spacing:1px}
+.shift-row button{font-size:14px;padding:6px 12px}
+#tcShiftInput,#durAdjTcInput{width:130px;font-family:"Consolas",monospace;font-size:15px;text-align:center;letter-spacing:1px;padding:6px 8px}
 .shift-tabs{display:flex;gap:4px}
-.shift-tab{flex:1;font-size:11px;padding:4px 6px;border-radius:4px;cursor:pointer;text-align:center}
+.shift-tab{flex:1;font-size:13px;padding:6px 8px;border-radius:4px;cursor:pointer;text-align:center}
 .shift-tab.active{background:var(--accent);color:#1b1b1d;border-color:var(--accent-d)}
 .shift-page{display:flex;flex-direction:column;gap:6px}
 /* 軌道拖曳重排 */

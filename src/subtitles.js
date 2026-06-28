@@ -95,7 +95,7 @@ function openInlineTimeEdit(el, curSec, onCommit){
   if(el.querySelector('input')) return;
   const origText = el.textContent;
   const inp = document.createElement('input');
-  inp.className = 'tc-edit'; inp.style.width = '98px'; inp.value = origText;
+  inp.className = 'tc-edit'; inp.style.width = '80px'; inp.value = origText;
   el.textContent = ''; el.appendChild(inp); inp.focus(); inp.select();
   let done = false;
   const fin = (commit) => {
@@ -292,7 +292,7 @@ function selectCue(id,opts){
     const tk=c.track||0;
     if(tk!==State.listTrack){ State.listTrack=tk; emit('render:listTrackSel'); renderSubList(); refreshTrackGutterActive(); }
   }
-  refreshSelectionUI();
+  refreshSelectionUI(opts);
   if(opts.seek&&c){
     if(c.timed!==false){
       const t = Media.displayTime();
@@ -396,22 +396,23 @@ function commitCueTimeEdit(c, edge){
   } else {
     emit('render:all');
   }
-  selectCue(c.id);            // 內含 refreshSelectionUI → renderCueBlocks + updateTlSel
+  selectCue(c.id, { preventScroll: edge === 'start' });            // 內含 refreshSelectionUI → renderCueBlocks + updateTlSel
   State.activeEdge=edge;
 }
-function refreshSelectionUI(){
+function refreshSelectionUI(opts={}){
   sublist.querySelectorAll('.sub-row').forEach(r=>{
     r.classList.toggle('sel',isSel(r.dataset.id));
     r.classList.toggle('primary',r.dataset.id===State.selectedId);
   });
   const row=State.selectedId&&sublist.querySelector(`.sub-row[data-id="${State.selectedId}"]`);
-  if(row){
+  if(row && !opts.preventScroll){
     if(State.subMode){
-      const sRect = sublist.getBoundingClientRect();
-      const rRect = row.getBoundingClientRect();
-      const rowHeight = rRect.height || 30;
-      const targetY = sRect.top + (rowHeight * 4);
-      sublist.scrollTop += (rRect.top - targetY);
+      const allRows = Array.from(sublist.querySelectorAll('.sub-row'));
+      const idx = allRows.indexOf(row);
+      if (idx !== -1) {
+        const targetRow = allRows[Math.max(0, idx - 4)];
+        sublist.scrollTop = targetRow.offsetTop;
+      }
     } else {
       row.scrollIntoView({block:'nearest'});
     }
@@ -470,6 +471,23 @@ function deleteSelected(){
   _doDeleteCues(ids);
 }
 function deleteCue(id){ if(id){State.selectedIds=[id];State.selectedId=id;} deleteSelected(); }
+
+function clearSelectedCuesTime() {
+  const ids=State.selectedIds.length?State.selectedIds.slice():[State.selectedId].filter(Boolean);
+  if(!ids.length)return;
+  let changed = false;
+  ids.forEach(id => {
+    const c = State.cues.find(x => x.id === id);
+    if (c && c.timed !== false) {
+      c.timed = false;
+      changed = true;
+    }
+  });
+  if (changed) {
+    emit('render:all');
+    recordHistory('清除字幕時間點');
+  }
+}
 
 function shiftTextsDown(id){
   const c=State.cues.find(x=>x.id===id); if(!c||(c.text||'').trim())return;
@@ -827,7 +845,7 @@ sublist.addEventListener('keydown', e => {
 });
 
 export { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel,
-  addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, shiftTextsDown, shiftTextsUp,
+  addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,
   copyCues, pasteCues };

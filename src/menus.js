@@ -3,7 +3,7 @@ import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
 import { State, isSel } from './state.js';
 import { Media } from './media.js';
-import { addCue, addCueRelative, deleteSelected, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, copyCues, pasteCues } from './subtitles.js';
+import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop } from './timeline.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';
@@ -19,7 +19,11 @@ function showCtx(x,y,items){
     if(it.sep){ d=document.createElement('div'); d.className='msep'; }
     else if(it.heading){ d=document.createElement('div'); d.className='lbl'; d.textContent=it.label; }
     else { d=document.createElement('div'); d.className='ci'; d.setAttribute('role','menuitem');
-      d.innerHTML=escapeHTML(it.label)+(it.checked?'<span class="chk">✓</span>':'');
+      let icon = '';
+      let text = it.label;
+      const match = text.match(/^([⬆⬇⇄⇅→⏱🗑✂↓↑])\s*(.*)$/u);
+      if (match) { icon = match[1]; text = match[2]; }
+      d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`+(it.checked?'<span class="chk">✓</span>':'');
       d.onclick=()=>{ hideCtx(); it.act&&it.act(); }; }
     ctx.appendChild(d);
   }
@@ -147,7 +151,10 @@ function showCueMenu(x,y){
   }
   items.push({label:'⬆ 上方新增空白字幕',act:()=>addCueRelative(-1)});
   items.push({label:'⬇ 下方新增空白字幕',act:()=>addCueRelative(1)});
-  items.push({sep:true},{label:'🗑 刪除選取',act:()=>deleteSelected()});
+  items.push({sep:true});
+  items.push({label:'⏱ 清除字幕時間點',act:()=>clearSelectedCuesTime()});
+  items.push({sep:true});
+  items.push({label:'🗑 刪除字幕',act:()=>deleteSelected()});
   showCtx(x,y,items);
 }
 /* 時間軸區塊右鍵 / 空白軌道區右鍵 */

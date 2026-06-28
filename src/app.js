@@ -265,15 +265,12 @@ function rafLoop(){
 }
 function markActiveRow(id){
   sublist.querySelectorAll('.sub-row.active').forEach(r=>r.classList.remove('active'));
+  if (State.subMode) return;
+  
   const row=sublist.querySelector(`.sub-row[data-id="${id}"]`);
   if(row){
     row.classList.add('active');
-    if(State.subMode){
-      const rowH = row.offsetHeight || 30;
-      sublist.scrollTop = row.offsetTop - rowH * 4;
-    } else {
-      row.scrollIntoView({block:'nearest'});
-    }
+    row.scrollIntoView({block:'nearest'});
   }
 }
 video.addEventListener('play',()=>{
@@ -891,7 +888,23 @@ function initExtras(){
     $('durAdjPctRow').style.display=isTc?'none':'';
   });
   // 新輸入框鍵盤事件
-  $('durAdjTcInput')?.addEventListener('keydown',e=>e.stopPropagation());
+  const formatTcInput = (el) => {
+    if(!el) return;
+    const raw = el.value.trim().replace(/^[+-]/, '');
+    const sign = el.value.trim().startsWith('-') ? '-' : (el.value.trim().startsWith('+') ? '+' : '');
+    const t = parseTimecodeInput(raw);
+    if (t !== null) el.value = sign + secToEncore(t, State.fps, State.dropFrame);
+  };
+  ['tcShiftInput', 'durAdjTcInput'].forEach(id => {
+    const el = $(id);
+    if(el) {
+      el.addEventListener('blur', () => formatTcInput(el));
+      el.addEventListener('keydown', e => {
+        e.stopPropagation();
+        if (e.key === 'Enter') { e.preventDefault(); formatTcInput(el); }
+      });
+    }
+  });
   $('durAdjPctInput')?.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();applyDurAdjPct();} });
   $('durAdjMode')?.addEventListener('keydown',e=>e.stopPropagation());
   $('waveSrcSel')?.addEventListener('change',e=>{ Wave.selectSource(+e.target.value); e.target.blur(); });
