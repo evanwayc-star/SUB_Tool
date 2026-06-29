@@ -1,53 +1,65 @@
-# SUB Tool 專案審查報告
+# SUB Tool 專案與程式碼審查報告
 
-我已經徹底檢視了 `SUB_Tool` 的原始碼架構、前後端（Electron 與 Vanilla JS）邏輯、效能最佳化實作，以及安全性設計。
+> 審查工具：`code-review-skill` (Universal Quality Guide, Architecture Review Guide, Performance Review Guide)
+> 審查日期：2026-06-29
 
-整體來說，這是一個**架構非常扎實且效能極佳**的專案。開發者（您）在不用任何大型框架（如 React / Vue）的限制下，把原生 JavaScript 發揮到了極致，尤其是針對大量 DOM 節點的渲染優化以及影音轉檔的資源調度都處理得非常漂亮。
-
-以下是我歸納的詳細審查結果與未來可以強化的潛在問題點：
-
-## 🌟 架構亮點與優良設計
-
-### 1. 卓越的效能優化 (Performance)
-* **批次 DOM 更新與事件代理**：在 `subtitles.js` 中，透過 `_subRowHTML` 先組合字串再一次性 `innerHTML` 更新（取代逐個建立節點），讓 1500 行字幕的渲染時間降至極低；並且充分使用了 `Event Delegation`（將事件綁定在 `sublist` 容器上）。
-* **渲染防抖 (Debounce / RAF)**：在打字輸入時使用 `_debouncedHeavyEdit` 延遲觸發時間軸重繪；在拖曳時間軸時使用 `requestAnimationFrame`（`_handleDragUpdate`），以及直接操作快取的 Element 節點 (`drag.grp[0].el`) 而不是每幀查詢 DOM，確保了 60fps 順暢拖曳。
-* **演算法提速**：`_detectOverlaps` 利用字幕已排序 (`sorted`) 的特性，在迴圈中設定提早 `break` 條件，巧妙避開了 $O(N^2)$ 的效能陷阱。
-
-### 2. 聰明的影音後端架構 (Electron / FFmpeg / mpv)
-* **mpv 無縫嵌入**：利用 Electron `BrowserWindow` 的無邊框、透明特性疊加，再透過 `--wid` 參數將原生 mpv 播放器視窗渲染進去。完美解決了 Web 原生不支援 MXF 或特定編碼的痛點，不需要即時轉碼整個畫面。
-* **Fragmented MP4 邊轉邊播**：在 `ffmpeg:streamIngest` 中使用了 `empty_moov` 與本地 HTTP Server (`127.0.0.1`) 串流，讓使用者不需要等待整部影片轉檔完畢就能直接開始看。
-* **硬體加速自動偵測**：自動偵測 NVENC / QSV / AMF 進行轉碼，大幅減少 CPU 負載。
-
-### 3. 安全性防護 (Security)
-* **IPC 路徑白名單**：Electron `main.js` 實作了 `_allowedDirs` 機制，嚴格限制 Renderer 進程只能讀寫專案目錄或快取目錄，防範任意路徑寫入（Path Traversal）漏洞。
-* **Content-Security-Policy (CSP)**：在 `vite.config.mjs` 打包階段自動注入嚴格的 CSP 標籤。
-* **XSS 防護**：自製的 `escapeHTML` 工具函式被確實運用在每一處使用者輸入（文字、檔名），避免惡意程式碼注入。
+本報告針對 SUB Tool 的架構設計、效能表現、狀態管理與程式碼品質進行深度審查，並提出後續可改善的方向。
 
 ---
 
-## 🔍 潛在問題與未來改善建議
+## 1. 架構審查 (Architecture & Design)
 
-雖然程式已經非常穩健，但隨著功能擴充，有幾個地方可以考慮進行重構或改善：
+### 🟢 [praise] 優秀的單向依賴與模組解耦
+專案採用原生的 ES Modules，並引入了 `events.js` 作為統一的事件匯流排 (Event Bus)。這項設計非常成功地解決了循環依賴 (Circular Dependency) 的問題：
+- 底層模組（如 `subtitles.js`, `timeline.js`）只需 `emit('render:all')`，不需反向 `import app.js`。
+- `app.js` 專職擔任協調層 (Coordinator)，集中處理事件訂閱與渲染分派。
+- **評價**：高度符合 Single Responsibility Principle，在沒有框架支援下，維持了極佳的程式碼整潔度。
 
-### 1. 巨大檔案 (Monolithic Files) 的維護性
-* **問題**：`electron/main.js` (848 行)、`src/timeline.js` (785 行) 與 `src/subtitles.js` (834 行) 的程式碼較長，內部邏輯（如介面操作、繪製、核心計算）有些交織。
-* **建議**：
-  * 可將 mpv 相關的 IPC 與生命週期管理獨立拆分到 `electron/mpv.js`。
-  * `timeline.js` 可拆分為 `timeline-render.js`（專注 Canvas 畫圖）與 `timeline-interact.js`（專注滑鼠拖曳與縮放）。
-
-### 2. 全域狀態管理 (State Management)
-* **問題**：目前的 `State` 是一個單純的 Object，每次修改後必須手動呼叫 `emit('render:all')` 或是特定的 render 函式。如果未來有新成員加入開發，很容易忘記呼叫而導致畫面與資料不同步（Desync）。
-* **建議**：不一定要引進大框架，但可以考慮使用原生的 JavaScript `Proxy` 將 `State` 包裝起來，當特定屬性（如 `cues`）變動時「自動」觸發事件，減少心智負擔。
-
-### 3. Node.js 版本鎖定
-* **問題**：這次發生的 CI 錯誤就是因為本機環境（Node 24）與 GitHub Actions 預設環境（Node 20）產生了 `package-lock.json` 版本不匹配的問題。
-* **建議**：可以在 `package.json` 中加入 `engines` 欄位宣告支援版本，或是在專案根目錄新增 `.nvmrc` 檔案，讓團隊成員或雲端環境能自動切換到統一的版本。
-
-### 4. 缺乏端對端 (E2E) 測試
-* **問題**：目前有很好的 Unit Tests（利用 Vitest 測試 `formats`, `time`, `util` 等純邏輯模組），但針對「拖曳時間軸」、「點擊新增軌道」等與 DOM 強烈耦合的操作缺乏自動化測試。
-* **建議**：可考慮引入 **Playwright** 等端對端測試工具，撰寫幾個關鍵的自動化腳本（如開啟專案 -> 拖曳字幕 -> 驗證 DOM 位置），能大幅降低未來重構時踩雷的風險。
+### 🟡 [important] 狀態可變性 (State Mutability) 的潛在風險
+目前 `state.js` 中的 `State` 物件是全域可變 (Global Mutable) 的。
+- 任何模組都可以直接修改 `State.cues` 或 `State.fps`。
+- `history.js` 採用 `structuredClone` 進行全量快照，雖然實作簡單可靠，但在字幕數量極大 (如 2000+ 句) 時，每次按鍵或移動的 `recordHistory` 會造成明顯的記憶體與 CPU 開銷。
+- **建議**：雖然目前專案規模尚可接受，但未來可考慮引入 Immutable 資料結構概念，或針對 `cues` 實作局部差異備份 (Diff-based Undo/Redo)，取代深拷貝。
 
 ---
 
-### 💡 總結
-這是一個完成度極高的高品質工具！目前的架構完全能夠撐起現有的業務需求，且效能表現會比市面上許多用 Electron 包裝的笨重網頁應用來得好很多。上述建議主要是針對「未來擴展」與「維護性」的防患未然。如果有哪一項建議您覺得想現在就開始著手（例如**加入 Proxy 狀態管理**或是**切割主程式**），我隨時可以為您進行實作！
+## 2. 效能審查 (Performance)
+
+### 🟢 [praise] 拖曳互動的效能優化 (DOM 更新策略)
+在 `timeline.js` 中處理字幕區塊拖曳時，實作了非常好的效能優化：
+- `mousemove` 時僅更新 `.cue-block` 的 inline-style (`style.left`/`style.width`)，並沒有觸發耗時的 `renderAll()`。
+- 直到 `mouseup` 才執行全量重繪與排序。
+- **評價**：這是避免 Layout Thrashing 與大量 Reflow 的標準最佳實踐。
+
+### 🟡 [important] 頻繁的全量渲染 (Render All)
+目前很多操作（例如新增字幕、刪除字幕）都會觸發 `renderAll()`，這會重建整個字幕列表 DOM 以及時間軸。
+- 在萬句字幕的情況下，`innerHTML` 重建 `sublist` 可能會造成 UI 卡頓。
+- **建議 (Eventual)**：針對 `subtitles.js` 的列表渲染，可以實作「虛擬列表 (Virtual Scrolling/Windowing)」，只渲染目前捲動視窗內可見的字幕列，大幅降低 DOM 節點數量。
+
+### 🟡 [important] Web Audio 資源釋放 (Memory Leaks)
+在 `mixer.js` 與 `media.js` 切換音軌時，雖然有建立 `GainNode` 和 `AnalyserNode`，但需要特別注意切換影片或重置專案時，是否有確實呼叫 `disconnect()` 與關閉舊的 `AudioContext`。
+- **建議**：在 `resetProject()` 流程中加入明確的 Audio Node 清理機制，防止長駐運作下的記憶體洩漏。
+
+---
+
+## 3. 程式碼品質與安全性 (Code Quality & Security)
+
+### 🟢 [praise] 跨平台防呆機制
+程式碼中充滿了對瀏覽器與 Electron 雙模式的良好判斷（透過 `IS_DESKTOP` 與 `DESK`），並在 Web 模式下限制了 ffmpeg 的處理大小，桌面模式下則自動切換為系統 ffmpeg 與 mpv 播放器，這項策略非常務實且安全。
+
+### 💡 [suggestion] 魔法字串 (Magic Strings)
+在 `events.js` 和各處呼叫 `emit()` 時，使用了大量的字串（例如 `'render:all'`, `'duration:known'`）。
+- **建議**：可以考慮在 `events.js` 內宣告一個常數物件 `export const EVENTS = { RENDER_ALL: 'render:all', ... }`，以減少打字錯誤導致的 bug。
+
+### 💡 [suggestion] 防範 XSS 攻擊
+在 `renderVideoSub` 中已經有使用 `escapeHTML`，這非常重要。不過在 `subtitles.js` 渲染列表時，建議也全面檢查是否所有使用者輸入的字幕文字 (`c.text`) 都已經經過跳脫再寫入 `innerHTML`。
+
+---
+
+## 4. 總結與決策 (Summary)
+
+**結論**：專案架構清晰、模組化程度高， Vanilla JS 的實作展現了扎實的基礎功底。特別是在時間軸與影片時碼同步的處理上（29.97 Drop-frame）非常嚴謹。
+目前程式碼品質處於健康狀態（**Approved ✅**），無需進行破壞性的緊急重構。
+
+**後續文件更新計畫**：
+由於程式碼邏輯與現有架構設計高度吻合，接下來我將對 `README.md` 及 `docs/` 下的所有文件進行優化與對齊，確保文件能 100% 反映這些優秀的設計。

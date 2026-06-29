@@ -123,8 +123,8 @@ function _openImportModal(title, parsed, kind) {
 function showExportDialog() {
   if (!State.cues.length && !State.notes.length) { showToast('沒有字幕或備註可匯出'); return; }
 
-  const sec = (title, body) => `<div style="margin-bottom:14px"><div style="font-size:11px;font-weight:600;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px">${title}</div>${body}</div>`;
-  const cb = (attrs, label) => `<label style="display:block;padding:3px 0;cursor:pointer"><input type="checkbox" ${attrs}> ${label}</label>`;
+  const sec = (title, body) => `<div style="margin-bottom:20px"><div style="font-size:14px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">${title}</div>${body}</div>`;
+  const cb = (attrs, label) => `<label style="display:flex;align-items:center;padding:6px 0;cursor:pointer;font-size:15px;color:#e2e2e2;"><input type="checkbox" ${attrs} style="transform:scale(1.2);margin-right:8px;"> ${label}</label>`;
 
   let html = sec('字幕格式',
     [['encore', 'Adobe Encore (.txt)', true], ['srt', 'SRT (.srt)', false], ['ass', 'ASS (.ass)', false], ['txt', '純文字 (.txt)', false], ['xlsx', 'Excel (.xlsx)', false]]
@@ -133,7 +133,7 @@ function showExportDialog() {
   if (State.cues.length && State.trackCount > 1)
     html += sec('軌道',
       State.tracks.map((tk, i) => cb(`data-tk="${i}" checked`, `${escapeHTML(tk.name)} <span style="color:var(--text-faint)">(${State.cues.filter(c => (c.track || 0) === i).length} 條)</span>`)).join('')
-      + `<div style="font-size:11px;color:var(--text-faint);margin-top:4px">Excel 會將所有勾選軌道合為一個檔案，每軌一個分頁</div>`);
+      + `<div style="font-size:13px;color:var(--text-faint);margin-top:8px">Excel 會將所有勾選軌道合為一個檔案，每軌一個分頁</div>`);
 
   if (State.notes.length)
     html += sec(`備註（${State.notes.length} 條）`,

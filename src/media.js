@@ -906,7 +906,7 @@ const Media = {
     const seen=new Set(); const srcs=[];
     for(const tr of this.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='element'||t.kind==='nativeTrack')){
       const s=tr.source||'video';
-      if(!seen.has(s)){ seen.add(s); srcs.push({id:s, label:s==='video'?'影片原音':s.replace(/^ext-/,'')}); }
+      if(!seen.has(s)){ seen.add(s); srcs.push({id:s, label:s==='video'?'原音':s.replace(/^ext-/,'')}); }
     }
     return srcs;
   },

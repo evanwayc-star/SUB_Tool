@@ -124,6 +124,7 @@ function autoAdvanceSubMode(){
   }else{
     State.subMode=false;
     const btn=$('subModeBtn'); if(btn)btn.classList.remove('sub-active');
+    document.body.classList.remove('sub-mode-on');
     jklReset();
     setStatus('🎯 上字幕模式：所有字幕完成 ✓','ok');
   }
@@ -219,6 +220,7 @@ window.addEventListener('keydown',e=>{
       cancelSwapMode();
       if(State.subMode){ e.preventDefault(); State.subMode=false;
         const esb=$('subModeBtn'); if(esb)esb.classList.remove('sub-active');
+        document.body.classList.remove('sub-mode-on');
         jklReset(); setStatus('上字幕模式已關閉',''); }
       if(State.selectedId||State.selectedIds.length){
         e.preventDefault();

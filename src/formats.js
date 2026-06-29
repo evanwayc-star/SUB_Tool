@@ -70,21 +70,19 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       return `&H00${c.slice(4,6)}${c.slice(2,4)}${c.slice(0,2)}`;
     };
 
-    const targetPx = Math.max(14, Math.round(ww * 0.035));
-    const baseFontSize = Math.round(targetPx);
     const spacing = 1.0;
     const defMarginV = Math.round(vwh * 0.1);
     if (!tracks || !tracks.length) {
-      styles += `Style: Default,${defFont},${baseFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${defMarginV},1\n`;
+      styles += `Style: Default,${defFont},60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${defMarginV},1\n`;
     } else {
       tracks.forEach((tk, i) => {
-        const fs = Math.round(baseFontSize * (tk.fontScale || 1));
+        const fs = tk.fontSize || 60;
         const pp = tk.posPct != null ? tk.posPct : 90;
         const mv = Math.round(vwh * ((100 - pp) / 100));
         const col = hexToAss(tk.color || '#ffffff');
         styles += `Style: Track${i},${defFont},${fs},${col},&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${mv},1\n`;
       });
-      styles += `Style: Default,${defFont},${baseFontSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${defMarginV},1\n`;
+      styles += `Style: Default,${defFont},60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${defMarginV},1\n`;
     }
 
     const eventsHead = `\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;

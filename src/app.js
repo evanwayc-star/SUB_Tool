@@ -121,15 +121,16 @@ function renderVideoSub(){
   const t=Media.displayTime();
   const halfFrame = 0.5 / Math.max(State.fps || 25, 1);
   // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
-  const baseFs = Math.max(14, Math.round((_videoSub?.clientWidth||1920) * 0.035));
+  const playerWidth = _videoSub?.clientWidth||1920;
+  const ratio = playerWidth / 1920;
   let html='', sig='';
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
     const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && (t+halfFrame)>=c.start && (t+halfFrame)<c.end);
     if(!cur.length)continue;
     const st=State.tracks[tk]||{};
-    const pct=st.posPct!=null?st.posPct:90, fs=st.fontScale||1, al=st.align||'center', col=st.color||'#ffffff';
-    const fsPx = Math.round(baseFs * fs);
+    const pct=st.posPct!=null?st.posPct:90, fs=st.fontSize||60, al=st.align||'center', col=st.color||'#ffffff';
+    const fsPx = Math.max(12, Math.round(fs * ratio));
     sig+=tk+'|'+fsPx+'|'+col+'|'+pct+'|'+al+'|'+cur.map(c=>c.id+'='+c.text).join(',')+';';
     html+=`<div class="vsub-track" style="top:${pct}%;transform:translateY(-${pct}%);text-align:${al};letter-spacing:1px;font-weight:500;font-family:'思源黑體', 'Noto Sans TC', 'Source Han Sans TC', sans-serif;">`+
       cur.map((c,i)=>`<span class="line" style="font-size:${fsPx}px;color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'').replace(/\n/g,'<br>')}</span>`).join('<br>')+
@@ -364,9 +365,10 @@ async function doAction(act){
            State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
            State.listTrack=0;State.tracks=[];ensureTrackCount(0);
            State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');
+           document.body.classList.remove('sub-mode-on');
            History.reset();resetProject();_firstLoad=true;
            // 清除影音
-           video.pause(); video.src='';
+           video.pause(); video.removeAttribute('src'); video.load();
            State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
            Media.reset();
            const nv=$('noVideo'); if(nv) nv.style.display='';
@@ -391,6 +393,7 @@ async function doAction(act){
     case 'sub-mode':
       State.subMode=!State.subMode;
       { const smb=$('subModeBtn'); if(smb)smb.classList.toggle('sub-active',State.subMode); }
+      document.body.classList.toggle('sub-mode-on', State.subMode);
       if(State.subMode){ Media.play(); setStatus('🎯 上字幕模式 ON — 播放中，I 設起點，O 設終點後自動前進','ok'); }
       else { Media.pause(); setStatus('上字幕模式 OFF',''); }
       break;
@@ -470,7 +473,7 @@ async function doAction(act){
     case 'toggle-ow-keep':
       State.overwriteKeep = !State.overwriteKeep;
     document.querySelectorAll('.ow-keep-btn').forEach(btn => {
-      btn.textContent = State.overwriteKeep ? '⭕ 保留' : '❌ 刪除';
+      btn.textContent = State.overwriteKeep ? '🟢 保留' : '❌ 刪除';
       btn.classList.toggle('del', !State.overwriteKeep);
     });
       setStatus(`完全覆蓋時：${State.overwriteKeep ? '保留' : '刪除'} 被包含的字幕`, 'ok');
@@ -532,7 +535,7 @@ function renderTrackStyle(){
   panel.classList.remove('disabled');
   const tk=State.tracks[i];
   $('tsTitle').textContent='「'+tk.name+'」樣式';
-  const sz=tk.fontScale||1; if(document.activeElement!==$('tsSize')) $('tsSize').value=sz;
+  const sz=tk.fontSize||60; if(document.activeElement!==$('tsSize')) $('tsSize').value=sz;
   const pp=tk.posPct!=null?tk.posPct:90; if(document.activeElement!==$('tsPos')) $('tsPos').value=pp;
   const col=(tk.color||'#ffffff').toLowerCase(); if(document.activeElement!==$('tsColor')) $('tsColor').value=col;
   panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===sz));
@@ -674,7 +677,7 @@ function initUI(){
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
 
   // 樣式控制（大小 / 位置 / 顏色）
-  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontScale=clamp(+e.target.value,0.5,5); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
+  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontSize=clamp(+e.target.value,10,300); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,100); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsPos').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
@@ -683,7 +686,7 @@ function initUI(){
   $('trackStyle').addEventListener('click',e=>{
     const i=State.listTrack; if(!State.tracks[i])return;
     const sz=e.target.closest('.ts-preset[data-ts-size]');
-    if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontScale=v; $('tsSize').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontSize=v; $('tsSize').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
     const ps=e.target.closest('.ts-preset[data-ts-pos]');
     if(ps){ const v=+ps.dataset.tsPos; State.tracks[i].posPct=v; $('tsPos').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
     const cl=e.target.closest('.ts-clr');

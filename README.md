@@ -62,11 +62,12 @@ npm run dist    # electron-builder → release/ 下的 win exe 安裝檔
 
 | 文件 | 說明 |
 |------|------|
-| [docs/#使用說明.md](docs/%23使用說明.md) | 使用者操作手冊、快捷鍵、字幕格式 |
-| [docs/#開發說明.md](docs/%23開發說明.md) | 開發環境、npm 指令、模組結構 |
-| [docs/#驗證說明.md](docs/%23驗證說明.md) | 桌面版大檔 / 混音器驗證清單 |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模組架構、資料流、關鍵函式 |
-| [docs/ELECTRON_MAINTENANCE.md](docs/ELECTRON_MAINTENANCE.md) | Electron IPC / ffmpeg / mpv 維護指南 |
-| [docs/FPS_時碼一致性.md](docs/FPS_%E6%99%82%E7%A2%BC%E4%B8%80%E8%87%B4%E6%80%A7.md) | FPS / 時碼設計原則（維護者必讀） |
-| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 版本歷史 |
+| [使用說明.md](docs/使用說明.md) | 使用者操作手冊、快捷鍵、字幕格式 |
+| [開發說明.md](docs/開發說明.md) | 開發環境、npm 指令、模組結構 |
+| [驗證說明.md](docs/驗證說明.md) | 桌面版大檔 / 混音器驗證清單 |
+| [技術架構說明.md](docs/技術架構說明.md) | 模組架構、資料流、關鍵函式 |
+| [Electron 維護手冊.md](docs/Electron%20維護手冊.md) | Electron IPC / ffmpeg / mpv 維護指南 |
+| [FPS_時碼一致性.md](docs/FPS_時碼一致性.md) | FPS / 時碼設計原則（維護者必讀） |
+| [版本變更紀錄.md](docs/版本變更紀錄.md) | 版本歷史 |
+| [project_review.md](project_review.md) | **[NEW]** 專案與程式碼深度審查報告 |
 | [shortcuts.csv](shortcuts.csv) | 完整快捷鍵對照表（CSV） |

@@ -25,7 +25,7 @@ function _buildProjectData(){
     app:'SUB Tool', version:2,
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
-    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontScale:t.fontScale||1,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'})),
+    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||60,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'})),
     pxPerSec:State.pxPerSec,
     notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
     cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false}))
@@ -146,8 +146,8 @@ const Project = {
     });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
     const maxTk=State.cues.length > 0 ? State.cues.reduce((m,c)=>Math.max(m,c.track||0),0) : -1;
-    if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontScale:t.fontScale||1,
-      posPct:t.posPct!=null?t.posPct:(t.posV==='top'?15:t.posV==='middle'?50:100), align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'}));
+    if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontSize:t.fontSize||(t.fontScale?Math.round(60*t.fontScale):60),
+      posPct:t.posPct!=null?t.posPct:90,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'}));
     else State.tracks=[];
     ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:0, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));
