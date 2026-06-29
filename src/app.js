@@ -350,6 +350,8 @@ $('fpsSel').addEventListener('change',e=>{
   });
   renderAll();
   renderNotes();
+  Media.seek(Media.displayTime());
+  drawTimeline();
   recordHistory(`切換 FPS ${prevDf?prev+'df':prev}→${State.fps+(State.dropFrame?'df':'')}`);
   e.target.blur();
 });

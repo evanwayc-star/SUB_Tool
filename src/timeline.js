@@ -361,8 +361,10 @@ function renderCueBlocks(){
     const row=rows[Math.min(tk,rows.length-1)]; if(!row)continue;
     const el=document.createElement('div');
     el.className='cue-block'+(isSel(c.id)?' sel':'')+(isSel(c.id)&&State.selectedIds.length>1?' multi':'')+(c.id===State.selectedId?' primary':'');
-    el.style.left=timeToX(c.start)+'px';
-    el.style.width=Math.max(2,(c.end-c.start)*State.pxPerSec)+'px';
+    const x1 = timeToX(c.start);
+    const x2 = timeToX(c.end);
+    el.style.left = x1 + 'px';
+    el.style.width = Math.max(2, x2 - x1) + 'px';
     el.dataset.id=c.id;
     el.innerHTML='<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;">'+escapeHTML(c.text||'').replace(/\n/g,'<br>')+'</div><div class="edge r"></div>';
     row.appendChild(el);
@@ -378,7 +380,10 @@ function renderCueBlocks(){
         if(oe<=t0||os>=t1)continue;
         const vs=Math.max(os,t0), ve=Math.min(oe,t1);
         const ov=document.createElement('div'); ov.className='cue-overlap';
-        ov.style.left=timeToX(vs)+'px'; ov.style.width=Math.max(2,(ve-vs)*State.pxPerSec)+'px';
+        const x1 = timeToX(vs);
+        const x2 = timeToX(ve);
+        ov.style.left = x1 + 'px';
+        ov.style.width = Math.max(2, x2 - x1) + 'px';
         ov.dataset.id1 = tc[i].id;
         ov.dataset.id2 = tc[j].id;
         row.appendChild(ov);
@@ -615,12 +620,13 @@ const _handleDragUpdate = (e) => {
     const minOs=Math.min(...drag.grp.map(g=>g.os)); if(minOs+dt<0)dt=-minOs;
     // 磁吸（單選時依主字幕起/訖 → 播放點與其他字幕邊界）
     let targetSn = null;
+    let snapAnchor = 'start';
     if(drag.grp.length===1){
       const it=drag.grp[0], len=it.oe-it.os, ns=it.os+dt;
       const s1=snapVal(ns,drag.snaps,currentThr), s2=snapVal(ns+len,drag.snaps,currentThr);
       let snapped=ns; 
-      if(s1!==ns) { snapped=s1; targetSn=s1; } 
-      else if(s2!==ns+len) { snapped=s2-len; targetSn=s2; }
+      if(s1!==ns) { snapped=s1; targetSn=s1; snapAnchor='start'; } 
+      else if(s2!==ns+len) { snapped=s2-len; targetSn=s2; snapAnchor='end'; }
       let sdt=snapped-it.os;
       if(!State.overwriteMode){
         const minDt=it.prevEnd-it.os, maxDt=(it.nextStart===Infinity?Infinity:it.nextStart-it.oe);
@@ -632,7 +638,17 @@ const _handleDragUpdate = (e) => {
     updateSnapGuide(targetSn);
     const minOt=Math.min(...drag.grp.map(g=>g.ot)), maxOt=Math.max(...drag.grp.map(g=>g.ot));
     const dTk=clamp(trackFromY(e.clientY)-drag.ot, -minOt, State.trackCount-1-maxOt);
-    for(const it of drag.grp){ const len=it.oe-it.os; it.c.start=snapFrame(it.os+dt); it.c.end=snapFrame(it.c.start+len); it.c.track=it.ot+dTk; }
+    for(const it of drag.grp){
+      const len=it.oe-it.os;
+      if (snapAnchor === 'end') {
+        it.c.end = snapFrame(it.oe+dt);
+        it.c.start = snapFrame(it.c.end-len);
+      } else {
+        it.c.start = snapFrame(it.os+dt);
+        it.c.end = snapFrame(it.c.start+len);
+      }
+      it.c.track=it.ot+dTk;
+    }
   }else if(drag.mode==='l'){
     const it=drag.grp[0];
     let ns=State.overwriteMode ? Math.max(0, it.os+dt) : clamp(it.os+dt, it.prevEnd, drag.c.end-0.05);
@@ -658,8 +674,10 @@ const _handleDragUpdate = (e) => {
   for (const it of drag.grp) {
     const el = it.el;
     if (el) {
-      el.style.left = timeToX(it.c.start) + 'px';
-      el.style.width = Math.max(2, (it.c.end - it.c.start) * State.pxPerSec) + 'px';
+      const x1 = timeToX(it.c.start);
+      const x2 = timeToX(it.c.end);
+      el.style.left = x1 + 'px';
+      el.style.width = Math.max(2, x2 - x1) + 'px';
       const targetRow = rows[Math.min(it.c.track || 0, rows.length - 1)];
       if (targetRow && el.parentElement !== targetRow) {
         targetRow.appendChild(el);

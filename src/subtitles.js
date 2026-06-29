@@ -458,8 +458,8 @@ function addCueRelative(dir){
   }
   const tk=sel?(sel.track||0):0;
   let start,end;
-  if(sel){ if(dir>0){ start=sel.end; end=sel.end+2; } else { end=sel.start; start=Math.max(0,sel.start-2); } }
-  else { start=Media.vTime(); end=start+2; }
+  if(sel){ if(dir>0){ start=sel.end; end=snapTimeToFrame(sel.end+2, State.fps, State.dropFrame); } else { end=sel.start; start=Math.max(0,snapTimeToFrame(sel.start-2, State.fps, State.dropFrame)); } }
+  else { start=snapTimeToFrame(Media.vTime(), State.fps, State.dropFrame); end=snapTimeToFrame(start+2, State.fps, State.dropFrame); }
   const c=addCue(start,end,'',tk); recordHistory(dir>0?'下方新增字幕':'上方新增字幕');
   requestAnimationFrame(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));});
   return c;
