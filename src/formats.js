@@ -20,7 +20,7 @@ const SubFormats = {
   },
   toSRT(cues){
     return cues.filter(c=>c.timed!==false).map((c,i)=>
-      `${i+1}\n${secToSRT(c.start)} --> ${secToSRT(c.end)}\n${c.text||''}`).join('\n\n')+'\n';
+      `${i+1}\n${secToSRT(c.start)} --> ${secToSRT(c.end)}\n${c.text||''}`).join('\n\n').replace(/\r?\n/g, '\r\n')+'\r\n\r\n';
   },
   /* ---- ASS ---- */
   parseASS(text){
