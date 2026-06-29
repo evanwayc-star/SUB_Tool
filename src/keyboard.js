@@ -91,10 +91,10 @@ function jklReset(){
 async function setIn(){
   await ensureProjectSaved();
   if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移','err'); return; }
-  const t=Media.vTime();
+  let t=snapTimeToFrame(Media.vTime(), State.fps, State.dropFrame);
   let c=State.cues.find(x=>x.id===State.selectedId);
-  if(!c){ c=addCue(t,t+2,'',0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 '+fmtClock(t),'ok'); return; }
-  c.start=t; if(c.end<=c.start)c.end=c.start+0.5; c.timed=true;
+  if(!c){ c=addCue(t,snapTimeToFrame(t+2, State.fps, State.dropFrame),'',0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 '+fmtClock(t),'ok'); return; }
+  c.start=t; if(c.end<=c.start)c.end=snapTimeToFrame(c.start+0.5, State.fps, State.dropFrame); c.timed=true;
   commitCueTimeEdit(c,'start'); // 局部更新（順序不變時不重建整列）
   recordHistory('設定起點 I'+cueSuffix(c)); setStatus('起點 '+fmtClock(t),'ok');
 }
@@ -102,7 +102,7 @@ async function setIn(){
 async function setOut(){
   await ensureProjectSaved();
   if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移','err'); return; }
-  const t=Media.vTime();
+  let t=snapTimeToFrame(Media.vTime(), State.fps, State.dropFrame);
   const c=State.cues.find(x=>x.id===State.selectedId);
   if(!c){ setStatus('請先選擇字幕（或按 I 新建）','err'); return; }
   if(t<=c.start){ setStatus('終點不得早於或等於起點','err'); return; }
