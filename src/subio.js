@@ -6,7 +6,7 @@ import { secToEncore, snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
 import { Media } from './media.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
-import { sweepContainedCues } from './subtitles.js';
+import { sweepContainedCues, snapAllCuesToFrames } from './subtitles.js';
 import { recordHistory } from './history.js';
 import { sortCues } from './subtitles.js';
 import { drawTimeline, layoutTimeline } from './timeline.js';
@@ -92,13 +92,16 @@ function _openImportModal(title, parsed, kind) {
         const append = selVal === 'new' || $('importAppend').checked;
         closeModal();
         const newCues = parsed.map(p => {
-          const s = snapTimeToFrame(p.start || 0, State.fps, State.dropFrame);
-          const e = snapTimeToFrame(p.end || 0, State.fps, State.dropFrame);
+          const s = p.start || 0;
+          const e = p.end || 0;
           return { id: newId(), start: s, end: e, text: p.text || '', track: targetTk, timed: p.timed !== false && !(p.start === 0 && p.end === 0 && kind === 'txt') };
         });
         if (kind === 'txt') newCues.forEach(c => c.timed = false);
         if (append) { State.cues.push(...newCues); }
         else { State.cues = newCues; }
+        
+        snapAllCuesToFrames();
+        
         State.listTrack = targetTk;
         if (!append) { State.selectedId = null; State.selectedIds = []; }
         sortCues(); emit('render:listTrackSel'); emit('render:all');

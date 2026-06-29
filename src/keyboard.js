@@ -315,6 +315,7 @@ window.addEventListener('keydown',e=>{
       if(e.ctrlKey||e.metaKey){ e.preventDefault(); e.shiftKey?History.redo():History.undo(); }
       else { e.preventDefault(); emit('action','toggle-overwrite'); }
       break;
+    case '*':
     case '\\':
     case '|':
     case '`':

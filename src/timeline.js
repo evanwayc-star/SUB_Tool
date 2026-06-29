@@ -5,6 +5,7 @@ import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { encoreParts } from './time.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues, sweepContainedCues } from './subtitles.js';
+import { snapTimeToFrame } from './time.js';
 import { emit } from './events.js';
 import { ensureProjectSaved, isProjectGuardDone } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
@@ -23,9 +24,7 @@ function tracksScrollTop(){ return tlTracks?tlTracks.scrollTop:0; }
 
 function viewportW(){return tlScroll.clientWidth;}
 function snapFrame(t){
-  if(!State.fps) return t;
-  if(State.dropFrame && Math.abs(State.fps-29.97)<0.01) return Math.round(t*30000/1001)*1001/30000;
-  return Math.round(t*State.fps)/State.fps;
+  return snapTimeToFrame(t, State.fps, State.dropFrame);
 }
 function timeToX(t){ return (t - State.viewStart)*State.pxPerSec; }
 function xToTime(x){return State.viewStart + x/State.pxPerSec;}
@@ -53,8 +52,13 @@ function layoutTimeline(){
 }
 // 次刻度等分數：依 step 與 fps 動態計算，確保每個次刻度落在格邊界
 function minorDiv(step){
-  const fps=State.fps||25; const nf=Math.round(step*fps);
-  if(step<1&&Math.abs(nf-step*fps)<0.01){
+  const fps=State.fps||25; 
+  let exactFps = fps;
+  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
+  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
+  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  const nf=Math.round(step*exactFps);
+  if(step<1&&Math.abs(nf-step*exactFps)<0.01){
     if(nf<=1)return 1; // 1格步距：不畫次刻度
     for(const d of[5,4,3,2,1])if(nf%d===0)return d; // 最大整除數 ≤5
     return 1;
@@ -80,7 +84,8 @@ function drawRuler(){
     ctx.beginPath();ctx.strokeStyle='#2a2a30';
     const firstMinorIdx=Math.ceil(t0*div/step);
     for(let mi=firstMinorIdx;;mi++){
-      const t=(mi*step)/div;
+      let t=(mi*step)/div;
+      t = snapFrame(t);
       if(t>t1+step/(div*2))break;
       if(mi%div===0)continue; // 主刻度位置跳過，下方另行繪製
       const x=timeToX(t); if(x<0||x>vw)continue;
@@ -91,10 +96,11 @@ function drawRuler(){
 
   // 主刻度 + 時間標籤（同樣用整數索引）
   ctx.beginPath();ctx.strokeStyle='#3a3a40';
-  ctx.fillStyle='#8a8a92';ctx.font='10px Consolas,monospace';ctx.textBaseline='middle';
+  ctx.fillStyle='#8a8a92';ctx.font='10px "Noto Sans Mono CJK TC",Consolas,monospace';ctx.textBaseline='middle';
   const firstMajorIdx=Math.ceil(t0/step);
   for(let mi=firstMajorIdx;;mi++){
-    const t=mi*step;
+    let t=mi*step;
+    t = snapFrame(t);
     if(t>t1+step*0.01)break;
     const x=timeToX(t);
     ctx.moveTo(x,RULER_H-9);ctx.lineTo(x,RULER_H);
@@ -114,7 +120,12 @@ function drawRuler(){
   ctx.restore();
 }
 function niceStep(s){ // 給定目標秒數，回傳漂亮刻度間隔（次秒用格對齊步距）
-  const fps=State.fps||25, f=1/fps;
+  const fps=State.fps||25;
+  let exactFps = fps;
+  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
+  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
+  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  const f=1/exactFps;
   // 次秒範圍：用格倍數確保刻度落在格邊界
   if(s<0.95){
     for(const n of[1,2,3,5,6,10,12,15,20,24,25,30]){
@@ -537,7 +548,7 @@ tlScroll.addEventListener('mousedown',e=>{
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
       .map(cc=>{ const b=neighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
-      snaps:snapTargets(exSet), thr:20/State.pxPerSec};
+      snaps:snapTargets(exSet)};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
   }
@@ -558,11 +569,11 @@ tlScroll.addEventListener('mousedown',e=>{
     }
     jklReset(); // 播放中拖曳時間尺 → 暫停
     const snaps = snapTargets(new Set());
-    const thr = 20/State.pxPerSec;
+    const currentThr = e.altKey ? 0 : 8/State.pxPerSec;
     const t = xToTime(x);
-    const sn = snapVal(t, snaps, thr);
+    const sn = snapVal(t, snaps, currentThr);
     Media.seek(sn !== t ? sn : snapFrame(t)); updatePlayhead(); emit('render:videoSub');
-    drag={mode:'scrub', snaps, thr}; e.preventDefault(); return;
+    drag={mode:'scrub', snaps}; e.preventDefault(); return;
   }
   drag={mode:'rubber',startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,x0:x,y0:y,moved:false,additive:e.ctrlKey||e.metaKey};
   e.preventDefault();
@@ -572,9 +583,10 @@ let _autoScrollId = null;
 const _handleDragUpdate = (e) => {
   if(!drag)return;
   const rect=tlLayer.getBoundingClientRect();
+  const currentThr = e.altKey ? 0 : 8 / State.pxPerSec;
   if(drag.mode==='scrub'){
     const t = xToTime(e.clientX-rect.left);
-    const sn = snapVal(t, drag.snaps, drag.thr);
+    const sn = snapVal(t, drag.snaps, currentThr);
     Media.seek(sn !== t ? sn : snapFrame(t));
     updatePlayhead(); emit('render:videoSub'); 
     updateSnapGuide(null); return;
@@ -605,7 +617,7 @@ const _handleDragUpdate = (e) => {
     let targetSn = null;
     if(drag.grp.length===1){
       const it=drag.grp[0], len=it.oe-it.os, ns=it.os+dt;
-      const s1=snapVal(ns,drag.snaps,drag.thr), s2=snapVal(ns+len,drag.snaps,drag.thr);
+      const s1=snapVal(ns,drag.snaps,currentThr), s2=snapVal(ns+len,drag.snaps,currentThr);
       let snapped=ns; 
       if(s1!==ns) { snapped=s1; targetSn=s1; } 
       else if(s2!==ns+len) { snapped=s2-len; targetSn=s2; }
@@ -624,7 +636,7 @@ const _handleDragUpdate = (e) => {
   }else if(drag.mode==='l'){
     const it=drag.grp[0];
     let ns=State.overwriteMode ? Math.max(0, it.os+dt) : clamp(it.os+dt, it.prevEnd, drag.c.end-0.05);
-    const sn=snapVal(ns,drag.snaps,drag.thr);
+    const sn=snapVal(ns,drag.snaps,currentThr);
     let targetSn = null;
     if(State.overwriteMode){ if(sn>=0 && sn<=drag.c.end-0.05) { ns=sn; targetSn=sn; } }
     else { if(sn>=it.prevEnd && sn<=drag.c.end-0.05) { ns=sn; targetSn=sn; } }
@@ -633,7 +645,7 @@ const _handleDragUpdate = (e) => {
   }else if(drag.mode==='r'){
     const it=drag.grp[0];
     let ne=State.overwriteMode ? (drag.oe+dt) : clamp(drag.oe+dt, drag.c.start+0.05, it.nextStart);
-    const sn=snapVal(ne,drag.snaps,drag.thr);
+    const sn=snapVal(ne,drag.snaps,currentThr);
     let targetSn = null;
     if(State.overwriteMode){ if(sn>=drag.c.start+0.05) { ne=sn; targetSn=sn; } }
     else { if(sn>=drag.c.start+0.05 && sn<=it.nextStart) { ne=sn; targetSn=sn; } }
@@ -673,9 +685,9 @@ tlLayer.addEventListener('mousemove', e => {
   const rect = tlLayer.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const t = xToTime(x);
-  const thr = 20 / State.pxPerSec;
+  const currentThr = e.altKey ? 0 : 8 / State.pxPerSec;
   const snaps = snapTargets(new Set());
-  const sn = snapVal(t, snaps, thr);
+  const sn = snapVal(t, snaps, currentThr);
   if (sn !== t) updateSnapGuide(sn);
   else updateSnapGuide(null);
 });
