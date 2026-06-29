@@ -31,6 +31,21 @@ function cancelSwapMode(){
   sublist.classList.remove('swap-mode');
 }
 
+export function snapAllCuesToFrames() {
+  if (!State.fps) return false;
+  let changed = false;
+  for (const c of State.cues) {
+    if (c.timed === false) continue;
+    const ns = snapTimeToFrame(c.start, State.fps, State.dropFrame);
+    const ne = snapTimeToFrame(c.end, State.fps, State.dropFrame);
+    if (Math.abs(ns - c.start) > 1e-6 || Math.abs(ne - c.end) > 1e-6) {
+      c.start = ns; c.end = ne;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function swapAdjacentCues(id, dir){
   const cue = State.cues.find(c => c.id === id);
   if (!cue) return;
@@ -513,8 +528,20 @@ function shiftTextsUp(id){
   emit('render:all'); recordHistory('下方字幕文字往上移動');
 }
 
-// Fix #14：加入 id 作次排序鍵，確保相同起點的字幕排列穩定
-function sortCues(){ State.cues.sort((a,b)=>{ return a.start - b.start || (a.id < b.id ? -1 : 1); }); }
+function sortCues() {
+  const timedIndices = [];
+  const timedCues = [];
+  State.cues.forEach((c, i) => {
+    if (c.timed !== false) {
+      timedIndices.push(i);
+      timedCues.push(c);
+    }
+  });
+  timedCues.sort((a, b) => { return a.start - b.start || (a.id < b.id ? -1 : 1); });
+  for (let i = 0; i < timedIndices.length; i++) {
+    State.cues[timedIndices[i]] = timedCues[i];
+  }
+}
 
 /* ===== 複製 / 貼上 ===================================================== */
 function copyCues(){

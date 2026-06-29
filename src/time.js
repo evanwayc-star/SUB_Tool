@@ -36,24 +36,40 @@ function secToASS(s, fps=25){
    這是非 drop-frame 時碼的正常特性（詳見 FPS_時碼一致性.md）。 */
 function encoreParts(s,fps,df=false){
   if(s<0)s=0;
-  if(df && Math.abs(fps-29.97)<0.01){
-    // SMPTE 29.97 DF：實際影格號 n（30000/1001 fps）→ 顯示用的 30fps 時碼號 a。
-    // 規則：每分鐘開頭丟掉 ;00、;01 兩格，但每 10 分鐘那一刻不丟。
-    // 每 10 分鐘 = 17982 個實際影格；每 1 分鐘補回 2 格、每 10 分鐘區塊補 2*9 格。
-    const n=Math.round(s*30000/1001);              // 實際影格序號
-    const D=Math.floor(n/17982), F=n%17982;        // D=完整 10 分鐘區塊數，F=區塊內餘格
-    const adj=F<2?0:Math.floor((F-2)/1798);        // 區塊內已跨過的「丟格分鐘」數
-    const a=n+2*(D*9+adj);                          // 加回被丟掉的格數 → 顯示時碼號
-    const ff=a%30, rest=Math.floor(a/30);
-    const ss=rest%60, mm=Math.floor(rest/60)%60, hh=Math.floor(rest/3600);
+  
+  let exactFps = fps;
+  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
+  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
+  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  
+  const timebase = Math.round(exactFps);
+
+  if(df && Math.abs(exactFps - 30000/1001) < 0.01){
+    const n = Math.round(s * exactFps);
+    const D = Math.floor(n / 17982), F = n % 17982;
+    const adj = F < 2 ? 0 : Math.floor((F - 2) / 1798);
+    const a = n + 2 * (D * 9 + adj);
+    const ff = a % timebase, rest = Math.floor(a / timebase);
+    const ss = rest % 60, mm = Math.floor(rest / 60) % 60, hh = Math.floor(rest / 3600);
     return {hh,mm,ss,ff,df:true};
   }
-  // 非 DF：整數 fps 四捨五入，逐位進位
-  const fpsR=Math.round(fps);
-  let tf=Math.round(s*fps);
-  const ff=tf%fpsR; tf=Math.floor(tf/fpsR);
-  const ss=tf%60; tf=Math.floor(tf/60);
-  const mm=tf%60; const hh=Math.floor(tf/60);
+  
+  if (df && Math.abs(exactFps - 60000/1001) < 0.01) {
+    const n = Math.round(s * exactFps);
+    const D = Math.floor(n / 35964), F = n % 35964;
+    const adj = F < 4 ? 0 : Math.floor((F - 4) / 3596);
+    const a = n + 4 * (D * 9 + adj);
+    const ff = a % timebase, rest = Math.floor(a / timebase);
+    const ss = rest % 60, mm = Math.floor(rest / 60) % 60, hh = Math.floor(rest / 3600);
+    return {hh,mm,ss,ff,df:true};
+  }
+
+  // 非 DF
+  const n = Math.round(s * exactFps);
+  let tf = n;
+  const ff = tf % timebase; tf = Math.floor(tf / timebase);
+  const ss = tf % 60; tf = Math.floor(tf / 60);
+  const mm = tf % 60; const hh = Math.floor(tf / 60);
   return {hh,mm,ss,ff,df:false};
 }
 /* 秒 → Encore 時碼(時:分:秒:格)。df=true 時用 SMPTE 29.97 Drop-frame，分隔符為 ';' */
@@ -74,21 +90,42 @@ function assToSec(t){
 function encoreToSec(t,fps,df=false){
   const m=t.trim().match(/(\d+):(\d+):(\d+)[:;](\d+)/); if(!m)return 0;
   const hh=+m[1],mm=+m[2],ss=+m[3],ff=+m[4];
-  if(df && Math.abs(fps-29.97)<0.01){
-    // 反推實際影格號 n：先當成 30fps 算總格數，再扣掉每分鐘丟的 2 格（每 10 分鐘那刻不扣）
+  
+  let exactFps = fps;
+  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
+  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
+  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  
+  const timebase = Math.round(exactFps);
+
+  if(df && Math.abs(exactFps - 30000/1001) < 0.01){
     const totalMin=60*hh+mm;
-    const n=30*3600*hh+30*60*mm+30*ss+ff-2*(totalMin-Math.floor(totalMin/10));
-    return n*1001/30000;
+    const n = timebase * 3600 * hh + timebase * 60 * mm + timebase * ss + ff - 2 * (totalMin - Math.floor(totalMin / 10));
+    return n / exactFps;
   }
-  return hh*3600+mm*60+ss+ff/fps;
+  
+  if (df && Math.abs(exactFps - 60000/1001) < 0.01) {
+    const totalMin=60*hh+mm;
+    const n = timebase * 3600 * hh + timebase * 60 * mm + timebase * ss + ff - 4 * (totalMin - Math.floor(totalMin / 10));
+    return n / exactFps;
+  }
+  
+  // Non-Drop Frame (NDF)
+  const n = (hh * 3600 + mm * 60 + ss) * timebase + ff;
+  return n / exactFps;
 }
 
 /* FPS-SYNC：把秒數對齊到最近的影格邊界（唯一的影格格網；seek/pause/拖曳/逐格都用它，
    確保播放點永遠落在整格上、且與時間軸刻度同格。詳見 FPS_時碼一致性.md） */
 function snapTimeToFrame(t, fps, df=false) {
   if(!fps) return t;
-  if(df && Math.abs(fps-29.97)<0.01) return Math.round(t*30000/1001)*1001/30000;
-  return Math.round(t*fps)/fps;
+  
+  let exactFps = fps;
+  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
+  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
+  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  
+  return Math.round(t * exactFps) / exactFps;
 }
 
 export { fmtClock, secToSRT, secToASS, secToEncore, encoreParts, srtToSec, assToSec, encoreToSec, snapTimeToFrame };

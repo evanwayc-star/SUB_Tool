@@ -13,7 +13,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from 
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix } from './state.js';
 import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
-import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces } from './subtitles.js';
+import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
 import { Project, ensureProjectSaved, resetProject, isProjectDirty } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
@@ -50,6 +50,14 @@ on('fps:changed', ()=>{
   const sel=$('fpsSel'); if(sel) sel.value=State.dropFrame?String(State.fps)+'df':String(State.fps);
   $('tcCur').textContent=secToEncore(video.currentTime||0,State.fps,State.dropFrame);
   $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
+  
+  setTimeout(() => {
+    if(snapAllCuesToFrames()){
+      renderSubList();
+      renderTimeline();
+      emit('subtitles:changed');
+    }
+  }, 0);
 });
 
 /* ============================================================================
@@ -119,14 +127,25 @@ const _videoWrap = $('videoWrap');
 let _videoSubSig = '';
 function renderVideoSub(){
   const t=Media.displayTime();
-  const halfFrame = 0.5 / Math.max(State.fps || 25, 1);
+  const fps = State.fps || 25;
+  let exactFps = fps;
+  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
+  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
+  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  const currentFrame = Math.round(t * exactFps);
+
   // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
   const playerWidth = _videoSub?.clientWidth||1920;
   const ratio = playerWidth / 1920;
   let html='', sig='';
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
-    const cur=State.cues.filter(c=>(c.track||0)===tk && c.timed!==false && (t+halfFrame)>=c.start && (t+halfFrame)<c.end);
+    const cur=State.cues.filter(c => {
+      if ((c.track||0)!==tk || c.timed===false) return false;
+      const startFrame = Math.round(c.start * exactFps);
+      const endFrame = Math.round(c.end * exactFps);
+      return currentFrame >= startFrame && currentFrame < endFrame;
+    });
     if(!cur.length)continue;
     const st=State.tracks[tk]||{};
     const pct=st.posPct!=null?st.posPct:90, fs=st.fontSize||60, al=st.align||'center', col=st.color||'#ffffff';

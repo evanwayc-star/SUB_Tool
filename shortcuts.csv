@@ -56,6 +56,6 @@ End,,Seek End,到達影片結尾
 Enter,,Confirm,確認
 Delete,,Delete Selected,刪除被選取的字幕
 Escape,,Cancel / Deselect,取消選取、關閉彈窗或關閉上字幕模式
-` / \,,Toggle Zoom Fit,切換時間軸縮放模式 (顯示全部/影片全長)
+` / \ / *,,Toggle Zoom Fit,切換時間軸縮放模式 (顯示全部/影片全長)
 -,,Zoom Out,縮小時間軸
 +,,Zoom In,放大時間軸
