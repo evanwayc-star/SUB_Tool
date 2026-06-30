@@ -70,4 +70,3 @@ npm run dist    # electron-builder → release/ 下的 win exe 安裝檔
 | [FPS_時碼一致性.md](docs/FPS_時碼一致性.md) | FPS / 時碼設計原則（維護者必讀） |
 | [版本變更紀錄.md](docs/版本變更紀錄.md) | 版本歷史 |
 | [project_review.md](project_review.md) | **[NEW]** 專案與程式碼深度審查報告 |
-| [shortcuts.csv](shortcuts.csv) | 完整快捷鍵對照表（CSV） |

@@ -10,7 +10,7 @@ import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFil
 import { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, snapTimeToFrame } from './time.js';
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
-import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix } from './state.js';
+import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys } from './state.js';
 import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames } from './subtitles.js';
@@ -21,10 +21,10 @@ import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
-import { showHelp } from './help.js';
+import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState } from './subio.js';
-import { parseTimecodeInput } from './tcparse.js';
-import { on } from './events.js';
+import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
+import { on, emit } from './events.js';
 
 if (typeof __APP_VERSION__ !== 'undefined') {
   const el = document.getElementById('appVersion');
@@ -415,7 +415,7 @@ async function doAction(act){
       State.subMode=!State.subMode;
       { const smb=$('subModeBtn'); if(smb)smb.classList.toggle('sub-active',State.subMode); }
       document.body.classList.toggle('sub-mode-on', State.subMode);
-      if(State.subMode){ Media.play(); setStatus('🎯 上字幕模式 ON — 播放中，I 設起點，O 設終點後自動前進','ok'); }
+      if(State.subMode){ setStatus('🎯 上字幕模式 ON — I 設起點，O 設終點後自動前進','ok'); }
       else { Media.pause(); setStatus('上字幕模式 OFF',''); }
       break;
     case 'playpause':
@@ -468,7 +468,7 @@ async function doAction(act){
     case 'replace-one': searchReplace(false); break;
     case 'replace-all': searchReplace(true); break;
     case 'trim-track': trimTrackSpaces(); break;
-    case 'help': showHelp(); break;
+    case 'settings': showSettingsModal(); break;
     case 'modal-close': closeModal(); break;
     case 'toggle-auto-select':
       State.autoSelect = !State.autoSelect;
@@ -478,6 +478,7 @@ async function doAction(act){
         btn.classList.toggle('on', State.autoSelect);
       });
       setStatus(`播放時自動選取：${State.autoSelect ? '開' : '關'}`, 'ok');
+      saveConfig();
       break;
     case 'toggle-overwrite':
       State.overwriteMode = !State.overwriteMode;
@@ -490,14 +491,16 @@ async function doAction(act){
       btn.classList.toggle('inactive-mode', !State.overwriteMode);
     });
       setStatus(`覆蓋模式：${State.overwriteMode ? '解鎖 (可自由重疊)' : '鎖定 (不可覆蓋)'}`, 'ok');
+      saveConfig();
       break;
     case 'toggle-ow-keep':
       State.overwriteKeep = !State.overwriteKeep;
     document.querySelectorAll('.ow-keep-btn').forEach(btn => {
-      btn.textContent = State.overwriteKeep ? '🟢 保留' : '❌ 刪除';
+      btn.textContent = State.overwriteKeep ? '⚪ 保留' : '❌ 刪除';
       btn.classList.toggle('del', !State.overwriteKeep);
     });
       setStatus(`完全覆蓋時：${State.overwriteKeep ? '保留' : '刪除'} 被包含的字幕`, 'ok');
+      saveConfig();
       break;
   }
 }
@@ -658,9 +661,10 @@ async function openCueEditModal(c){
         }
         const textBefore=full.slice(0,markerPos);
         const textAfter=full.slice(markerPos);
+        if (!textBefore.trim() || !textAfter.trim()) { showToast('不能在句首或句尾切分，以免產生空白字幕'); return; }
         const origEnd=c.end;
         const isTimed=c.timed!==false;
-        if(isTimed){ const pt=Media.displayTime(); if(pt<=c.start||pt>=c.end){ showToast('播放點必須在字幕的起訖時間內才能拆句'); return; } }
+        if(isTimed){ const pt=Media.displayTime(); if(pt < c.start + 0.05 || pt > c.end - 0.05){ showToast('切分點距離起訖太近，或是超出了字幕範圍'); return; } }
         let splitTime=0;
         if(isTimed){ splitTime=Media.displayTime(); c.end=splitTime; }
         c.text=textBefore;
@@ -923,6 +927,7 @@ function initExtras(){
     const el = $(id);
     if(el) {
       el.addEventListener('blur', () => formatTcInput(el));
+      setupTimecodeInput(el);
       el.addEventListener('keydown', e => {
         e.stopPropagation();
         if (e.key === 'Enter') { e.preventDefault(); formatTcInput(el); }
@@ -985,7 +990,27 @@ function applyAriaLabels(){
     if(t) b.setAttribute('aria-label', t);
   });
 }
-function init(){
+
+function updateConfigUI() {
+  document.querySelectorAll('.auto-select-btn').forEach(btn => {
+    btn.textContent = State.autoSelect ? '自動選取' : '不自動選取';
+    btn.classList.toggle('on', State.autoSelect);
+  });
+  document.querySelectorAll('.ow-toggle-btn').forEach(btn => {
+    btn.textContent = State.overwriteMode ? '🔓 可覆蓋' : '🔒 不覆蓋';
+    btn.classList.toggle('primary', State.overwriteMode);
+  });
+  document.querySelectorAll('.ow-keep-btn').forEach(btn => {
+    btn.classList.toggle('inactive-mode', !State.overwriteMode);
+    btn.textContent = State.overwriteKeep ? '⚪ 保留' : '❌ 刪除';
+    btn.classList.toggle('del', !State.overwriteKeep);
+  });
+}
+
+async function init(){
+  await loadConfig();
+  await loadKeys();
+  updateConfigUI();
   State.fps=+$('fpsSel').value||24;
   const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;
   initUI(); initExtras(); applyAriaLabels();
@@ -1010,8 +1035,11 @@ async function initDesktop(){
     setStatus('就緒（桌面模式）— 可直接讀 MXF 與多音軌','ok');
   }catch(e){ setStatus('就緒（桌面模式）','ok'); }
   DESK.onProgress(d=>{
-    if(!d.done && d.pct<100) setStatus((d.label||'處理中')+'… '+d.pct+'%','busy');
-    if(d.done) window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:d}));
+    if(!d.done && d.pct<100) setStatus((d.label||'處理中')+'… '+d.pct+'%','busy','lock');
+    if(d.done) {
+      setStatus('轉檔完成', 'ok', 'unlock');
+      window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:d}));
+    }
   });
   
   const handleStartupFile = async (file) => {

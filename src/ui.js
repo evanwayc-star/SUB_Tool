@@ -5,7 +5,12 @@ import { Media } from './media.js';
 /* 狀態列 / toast / modal */
 // X6：狀態點除顏色外提供文字等價（aria-label），供報讀器與非顏色辨識
 const _DOT_LABEL={ ok:'就緒', err:'錯誤', busy:'處理中', '':'閒置' };
-function setStatus(msg,kind){
+let _statusLocked = false;
+function setStatus(msg, kind, force = false){
+  if (_statusLocked && !force) return;
+  if (force === 'lock') _statusLocked = true;
+  else if (force === 'unlock') _statusLocked = false;
+  
   $('stMsg').textContent=msg;
   const d=$('stDot'); d.className='dot'+(kind?(' '+kind):'');
   d.setAttribute('aria-label', _DOT_LABEL[kind||''] ?? '');
@@ -63,7 +68,7 @@ $('modalBg').addEventListener('keydown',e=>{
     }
     return;
   }
-  if(e.key==='Enter' && e.target.tagName!=='TEXTAREA'){
+  if(e.key==='Enter' && e.target.tagName!=='TEXTAREA' && !e.target.isContentEditable){
     e.preventDefault(); e.stopPropagation();
     $('modalFoot')?.querySelector('button.primary')?.click();
   }

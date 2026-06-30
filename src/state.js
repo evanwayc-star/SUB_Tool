@@ -64,6 +64,124 @@ const _subtool = (typeof window !== 'undefined') ? window.subtool : null;
 const DESK = (_subtool && _subtool.isDesktop) ? _subtool : null;
 const IS_DESKTOP = !!DESK;
 
+async function loadConfig() {
+  if (DESK && DESK.configLoad) {
+    try {
+      const conf = await DESK.configLoad();
+      if (typeof conf.autoSelect === 'boolean') State.autoSelect = conf.autoSelect;
+      if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
+      if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
+    } catch (e) { console.error('Failed to load config', e); }
+  } else {
+    try {
+      const saved = localStorage.getItem('subtool_config');
+      if (saved) {
+        const conf = JSON.parse(saved);
+        if (typeof conf.autoSelect === 'boolean') State.autoSelect = conf.autoSelect;
+        if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
+        if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
+      }
+    } catch (e) {}
+  }
+}
+
+function saveConfig() {
+  const data = {
+    autoSelect: State.autoSelect,
+    overwriteMode: State.overwriteMode,
+    overwriteKeep: State.overwriteKeep
+  };
+  if (DESK && DESK.configSave) {
+    DESK.configSave(data).catch(e => console.error('Failed to save config', e));
+  } else {
+    try {
+      localStorage.setItem('subtool_config', JSON.stringify(data));
+    } catch (e) {}
+  }
+}
+
+State.defaultKeymap = {
+  'toggle_play_pause': [{key:' '}],
+  'rewind': [{key:'j'}],
+  'pause': [{key:'k'}],
+  'forward': [{key:'l'}],
+  'zoom_out': [{key:'1'}, {key:'-'}, {code:'NumpadSubtract'}],
+  'zoom_in': [{key:'2'}, {key:'+'}, {code:'NumpadAdd'}],
+  'zoom_fit': [{key:'*'}, {key:'\\'}, {key:'|'}, {key:'`'}],
+  'prev_cue_5f': [{key:'5', code:'Numpad5'}],
+  'next_cue_5f': [{key:'2', code:'Numpad2'}],
+  'toggle_history': [{key:'7'}],
+  'toggle_notes': [{key:'8'}],
+  'toggle_check_panel': [{key:'9'}],
+  'search': [{key:'f', ctrl:true}],
+  'toggle_sub_mode': [{key:'y'}],
+  'set_in': [{key:'i'}, {key:'q'}],
+  'set_out': [{key:'o'}, {key:'w'}],
+  'nudge_left_1f': [{key:'arrowleft'}],
+  'nudge_left_1s': [{key:'arrowleft', shift:true}],
+  'nudge_left_5s': [{key:'arrowleft', ctrl:true, shift:true}],
+  'nudge_right_1f': [{key:'arrowright'}],
+  'nudge_right_1s': [{key:'arrowright', shift:true}],
+  'nudge_right_5s': [{key:'arrowright', ctrl:true, shift:true}],
+  'prev_note': [{key:'arrowleft', ctrl:true}],
+  'next_note': [{key:'arrowright', ctrl:true}],
+  'seek_home': [{key:'home'}, {key:'arrowup', shift:true}],
+  'seek_end': [{key:'end'}, {key:'arrowdown', shift:true}],
+  'step_boundary_prev': [{key:'arrowup'}, {key:'e'}],
+  'step_boundary_next': [{key:'arrowdown'}, {key:'d'}],
+  'first_cue': [{key:'arrowup', ctrl:true, shift:true}],
+  'last_cue': [{key:'arrowdown', ctrl:true, shift:true}],
+  'prev_cue': [{key:'arrowup', ctrl:true}],
+  'next_cue': [{key:'arrowdown', ctrl:true}],
+  'jump_cue_start': [{key:'a'}],
+  'jump_cue_end': [{key:'s'}],
+  'select_all': [{key:'a', ctrl:true}],
+  'save_project': [{key:'s', ctrl:true}],
+  'save_as': [{key:'s', ctrl:true, shift:true}],
+  'delete_selected': [{key:'delete'}],
+  'cancel': [{key:'escape'}],
+  'confirm': [{key:'enter'}],
+  'newline': [{key:'enter', shift:true}],
+  'split_cue': [{key:'enter', ctrl:true}],
+  'shift_timecode': [{key:'p'}, {key:'r'}],
+  'undo': [{key:'z', ctrl:true}],
+  'redo': [{key:'z', ctrl:true, shift:true}],
+  'toggle_auto_select': [{key:'z'}],
+  'toggle_overwrite': [{key:'x'}],
+  'toggle_overwrite_keep': [{key:'c'}],
+  'copy_cues': [{key:'c', ctrl:true}],
+  'paste_cues': [{key:'v', ctrl:true}],
+  'select_current': [{key:'g'}],
+  'add_note': [{key:'v'}, {key:'m'}],
+  'confirm': [{key:'enter'}],
+};
+State.keymap = JSON.parse(JSON.stringify(State.defaultKeymap));
+
+async function loadKeys() {
+  let loaded = null;
+  if (DESK && DESK.keysLoad) {
+    try { loaded = await DESK.keysLoad(); } catch(e) {}
+  } else {
+    try {
+      const saved = localStorage.getItem('subtool_keys');
+      if (saved) loaded = JSON.parse(saved);
+    } catch(e) {}
+  }
+  if (loaded && Object.keys(loaded).length > 0) {
+    State.keymap = Object.assign(JSON.parse(JSON.stringify(State.defaultKeymap)), loaded);
+  }
+}
+
+function saveKeys() {
+  if (DESK && DESK.keysSave) {
+    DESK.keysSave(State.keymap).catch(e => console.error('Failed to save keys', e));
+  } else {
+    try {
+      localStorage.setItem('subtool_keys', JSON.stringify(State.keymap));
+    } catch(e) {}
+  }
+}
+
 function isSel(id){ return State.selectedIds.includes(id); }
 
 function cueSuffix(c){
@@ -75,4 +193,4 @@ function cueSuffix(c){
   return ` - ${name} - 第${idx+1}句`;
 }
 
-export { State, newTrack, syncTrackCount, FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix };
+export { State, newTrack, syncTrackCount, FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys };

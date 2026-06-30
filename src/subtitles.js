@@ -6,11 +6,11 @@ import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
 import { emit } from './events.js';
-import { parseTimecodeInput } from './tcparse.js';
+import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { showCueMenu } from './menus.js';
+import { showCueMenu, showCtx } from './menus.js';
 
 /* ===== 字幕對調模式 ================================================= */
 let _swapSource = null;
@@ -111,6 +111,7 @@ function openInlineTimeEdit(el, curSec, onCommit){
   const origText = el.textContent;
   const inp = document.createElement('input');
   inp.className = 'tc-edit'; inp.style.width = '80px'; inp.value = origText;
+  setupTimecodeInput(inp);
   el.textContent = ''; el.appendChild(inp); inp.focus(); inp.select();
   let done = false;
   const fin = (commit) => {
@@ -655,14 +656,18 @@ function splitCueAtCursor(c, txtEl){
 
   const textBefore=full.slice(0,markerPos);
   const textAfter=full.slice(markerPos);
+  if (!textBefore.trim() || !textAfter.trim()) {
+    showToast('不能在句首或句尾切分，以免產生空白字幕');
+    return;
+  }
 
   const origEnd=c.end;
   const isTimed=c.timed!==false;
   if(isTimed){
     const pt=Media.vTime();
-    if(pt<=c.start||pt>=c.end){
+    if(pt < c.start + 0.05 || pt > c.end - 0.05){
       // 清理 DOM 標記後顯示提示，不執行拆分
-      showToast('播放點必須在字幕的起訖時間內才能拆句');
+      showToast('切分點距離起訖太近，或是超出了字幕範圍');
       return;
     }
   }
@@ -786,6 +791,13 @@ sublist.addEventListener('contextmenu', e => {
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
   if (!c) return;
+
+  const txtEl = e.target.closest('.txt');
+  if (txtEl && txtEl.contentEditable === 'true') {
+    e.stopPropagation();
+    return;
+  }
+
   e.preventDefault();
   if (!isSel(c.id)) selectCue(c.id);
   else { State.selectedId = c.id; refreshSelectionUI(); }
