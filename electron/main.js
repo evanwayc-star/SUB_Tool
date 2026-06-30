@@ -499,8 +499,7 @@ ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
    每聲道以 asplit 分流（不直接 -map 同一條 stream，避免 filtergraph 與 -map 雙重消費而 deadlock）。
    結果存入持久快取（依 cacheKeyFor），重開同檔直接命中、秒開。 */
 function getConfigPath() {
-  const baseDir = app.isPackaged ? path.dirname(process.execPath) : app.getAppPath();
-  const configDir = path.join(baseDir, '.config');
+  const configDir = app.isPackaged ? path.join(app.getPath('userData'), 'config') : path.join(app.getAppPath(), '.config');
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
   return path.join(configDir, 'settings.json');
 }
@@ -524,8 +523,7 @@ ipcMain.handle('config:save', (e, data) => {
 });
 
 function getKeysPath() {
-  const baseDir = app.isPackaged ? path.dirname(process.execPath) : app.getAppPath();
-  const configDir = path.join(baseDir, '.config');
+  const configDir = app.isPackaged ? path.join(app.getPath('userData'), 'config') : path.join(app.getAppPath(), '.config');
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
   return path.join(configDir, 'key.json');
 }
