@@ -293,6 +293,20 @@ function renderSubRow(id){
 
 function selectCue(id,opts){
   opts=opts||{};
+  // 清理可能殘留的超長預設字幕
+  let changed = false;
+  State.cues.forEach(cue => {
+    if (cue._tempEnd && cue.id !== id) {
+      cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
+      delete cue._tempEnd;
+      changed = true;
+    }
+  });
+  if (changed) {
+    emit('render:videoSub'); emit('mpv:refreshSubs');
+    emit('render:all');
+  }
+
   if(opts.additive){
     const i=State.selectedIds.indexOf(id);
     if(i>=0)State.selectedIds.splice(i,1); else State.selectedIds.push(id);
@@ -530,17 +544,43 @@ function shiftTextsUp(id){
 }
 
 function sortCues() {
-  const timedIndices = [];
-  const timedCues = [];
-  State.cues.forEach((c, i) => {
+  if (State.subMode) return;
+
+  const trackTime = {};
+  const anchorIdx = {};
+
+  const mapped = State.cues.map((c, i) => {
+    const tk = c.track || 0;
     if (c.timed !== false) {
-      timedIndices.push(i);
-      timedCues.push(c);
+      trackTime[tk] = c.start;
+      anchorIdx[tk] = i; // Group anchored by this timed cue
     }
+    const effectiveTime = trackTime[tk] !== undefined ? trackTime[tk] : -Infinity;
+    const anchor = anchorIdx[tk] !== undefined ? anchorIdx[tk] : -1;
+    return { c, i, effectiveTime, anchor };
   });
-  timedCues.sort((a, b) => { return a.start - b.start || (a.id < b.id ? -1 : 1); });
-  for (let i = 0; i < timedIndices.length; i++) {
-    State.cues[timedIndices[i]] = timedCues[i];
+
+  mapped.sort((a, b) => {
+    if (a.effectiveTime !== b.effectiveTime) {
+      return a.effectiveTime - b.effectiveTime;
+    }
+    // Same effective time.
+    // If they belong to different anchors (e.g. two timed cues with same start time)
+    if (a.anchor !== b.anchor) {
+      const anchorCueA = a.anchor === -1 ? null : State.cues[a.anchor];
+      const anchorCueB = b.anchor === -1 ? null : State.cues[b.anchor];
+      if (anchorCueA && anchorCueB && anchorCueA.start === anchorCueB.start) {
+          return anchorCueA.id < anchorCueB.id ? -1 : 1;
+      }
+      return a.anchor - b.anchor;
+    }
+    // Same anchor group (e.g. a timed cue and its following untimed cues)
+    // Preserve their original relative order
+    return a.i - b.i;
+  });
+
+  for (let i = 0; i < mapped.length; i++) {
+    State.cues[i] = mapped[i].c;
   }
 }
 
@@ -823,8 +863,9 @@ sublist.addEventListener('input', e => {
   let val = txt.innerText;
   if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
   c.text = val;
-  const rc2 = _rowClass(c.text);
-  row.classList.remove('blank', 'two-line', 'multi-line'); if (rc2) row.classList.add(rc2);
+  const rc2 = _rowClass(c);
+  row.classList.remove('no-time', 'blank', 'two-line', 'multi-line'); 
+  if (rc2) rc2.split(' ').filter(Boolean).forEach(cls => row.classList.add(cls));
   emit('render:videoSub'); emit('mpv:refreshSubs'); // 即時
   _debouncedHeavyEdit();                            // 防抖：時間軸區塊 + 檢查面板
 });
@@ -839,8 +880,9 @@ sublist.addEventListener('focusout', e => {
   c.text = txt.innerText;
   txt.contentEditable = 'false';
   txt.innerHTML = _txtInner(c.text);
-  const rc2 = _rowClass(c.text);
-  row.classList.remove('blank', 'two-line', 'multi-line'); if (rc2) row.classList.add(rc2);
+  const rc2 = _rowClass(c);
+  row.classList.remove('no-time', 'blank', 'two-line', 'multi-line'); 
+  if (rc2) rc2.split(' ').filter(Boolean).forEach(cls => row.classList.add(cls));
   const orig = txt.dataset.orig || '';
   if ((c.text || '') !== orig) recordHistory('編輯字幕文字' + cueSuffix(c));
   renderCheckPanel();

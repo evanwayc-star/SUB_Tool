@@ -362,7 +362,7 @@ $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
 
 // A4：純關閉面板的 case 改用資料表，消除重複的 classList.remove('show')+_syncMpvPanel()
 const CLOSE_PANELS = { 'close-shift':'shiftPanel', 'close-history':'historyPanel', 'close-notes':'notesPanel', 'close-mixer':'mixerPanel' };
-async function doAction(act){
+async function doAction(act, force = false){
   if(CLOSE_PANELS[act]){ $(CLOSE_PANELS[act]).classList.remove('show'); _syncMpvPanel(); return; }
   switch(act){
     case 'open-media':
@@ -385,8 +385,7 @@ async function doAction(act){
            closeModal();
            State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
            State.listTrack=0;State.tracks=[];ensureTrackCount(0);
-           State.subMode=false;const smb=$('subModeBtn');if(smb)smb.classList.remove('sub-active');
-           document.body.classList.remove('sub-mode-on');
+           if(State.subMode) doAction('sub-mode');
            History.reset();resetProject();_firstLoad=true;
            // 清除影音
            video.pause(); video.removeAttribute('src'); video.load();
@@ -415,8 +414,66 @@ async function doAction(act){
       State.subMode=!State.subMode;
       { const smb=$('subModeBtn'); if(smb)smb.classList.toggle('sub-active',State.subMode); }
       document.body.classList.toggle('sub-mode-on', State.subMode);
-      if(State.subMode){ setStatus('🎯 上字幕模式 ON — I 設起點，O 設終點後自動前進','ok'); }
-      else { Media.pause(); setStatus('上字幕模式 OFF',''); }
+      if(State.subMode){ 
+        State._prevAutoSelect = State.autoSelect;
+        State._prevOverwriteMode = State.overwriteMode;
+        State._prevOverwriteKeep = State.overwriteKeep;
+        if (State.autoSelect) doAction('toggle-auto-select', true);
+        if (State.overwriteMode) doAction('toggle-overwrite', true);
+        if (!State.overwriteKeep) doAction('toggle-ow-keep', true);
+        
+        // 擷取當時的完整字幕 ID 順序
+        State._subModeSequence = State.cues.map(c => c.id);
+        // 追蹤 subMode 期間被 I 鍵設定的字幕 ID（退出時作為安全網清理依據）
+        State._subModeTouchedIds = new Set();
+
+        setStatus('🎯 上字幕模式 ON — I 設起點，O 設終點後自動前進','ok');
+      }
+      else { 
+        if (State._prevAutoSelect !== undefined && State.autoSelect !== State._prevAutoSelect) {
+           doAction('toggle-auto-select', true);
+        }
+        if (State._prevOverwriteMode !== undefined && State.overwriteMode !== State._prevOverwriteMode) {
+           doAction('toggle-overwrite', true);
+        }
+        if (State._prevOverwriteKeep !== undefined && State.overwriteKeep !== State._prevOverwriteKeep) {
+           doAction('toggle-ow-keep', true);
+        }
+        
+        // 清理殘留的未閉合超長字幕
+        let changed = false;
+        // 第一層：清理帶有 _tempEnd 標記的字幕
+        State.cues.forEach(cue => {
+          if (cue._tempEnd) {
+            cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
+            delete cue._tempEnd;
+            changed = true;
+          }
+        });
+        // 第二層安全網：檢查所有在 subMode 期間被 I 鍵觸碰過的字幕
+        // 即使 _tempEnd 已被意外清除，若 end 仍然異常長（>10 分鐘），也修正回來
+        if (State._subModeTouchedIds && State._subModeTouchedIds.size > 0) {
+          const maxReasonableDur = 600; // 10 分鐘，超過視為異常
+          State.cues.forEach(cue => {
+            if (State._subModeTouchedIds.has(cue.id)) {
+              const dur = cue.end - cue.start;
+              if (dur > maxReasonableDur) {
+                cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
+                changed = true;
+              }
+            }
+          });
+          delete State._subModeTouchedIds;
+        }
+        // 脫離上字幕模式後強制重新排序，並觸發重繪
+        sortCues();
+        if (changed) {
+          emit('render:videoSub'); emit('mpv:refreshSubs');
+        }
+        emit('render:all');
+
+        Media.pause(); setStatus('上字幕模式 OFF',''); 
+      }
       break;
     case 'playpause':
       resetPlaybackSpeed(); // 重置 JKL 穿梭速度回 1x（清掉殘留的倍率）
@@ -471,6 +528,7 @@ async function doAction(act){
     case 'settings': showSettingsModal(); break;
     case 'modal-close': closeModal(); break;
     case 'toggle-auto-select':
+      if (State.subMode && !force) { setStatus('上字幕模式中強制關閉自動選取', 'err'); break; }
       State.autoSelect = !State.autoSelect;
       const asBtns = document.querySelectorAll('.auto-select-btn');
       asBtns.forEach(btn => {
@@ -481,6 +539,7 @@ async function doAction(act){
       saveConfig();
       break;
     case 'toggle-overwrite':
+      if (State.subMode && !force) { setStatus('上字幕模式中強制鎖定不可覆蓋', 'err'); break; }
       State.overwriteMode = !State.overwriteMode;
       const owBtns = document.querySelectorAll('.ow-toggle-btn');
       owBtns.forEach(btn => {
@@ -494,11 +553,12 @@ async function doAction(act){
       saveConfig();
       break;
     case 'toggle-ow-keep':
+      if (State.subMode && !force) { setStatus('上字幕模式中強制鎖定保留', 'err'); break; }
       State.overwriteKeep = !State.overwriteKeep;
-    document.querySelectorAll('.ow-keep-btn').forEach(btn => {
-      btn.textContent = State.overwriteKeep ? '⚪ 保留' : '❌ 刪除';
-      btn.classList.toggle('del', !State.overwriteKeep);
-    });
+      document.querySelectorAll('.ow-keep-btn').forEach(btn => {
+        btn.textContent = State.overwriteKeep ? '⚪ 保留' : '❌ 刪除';
+        btn.classList.toggle('del', !State.overwriteKeep);
+      });
       setStatus(`完全覆蓋時：${State.overwriteKeep ? '保留' : '刪除'} 被包含的字幕`, 'ok');
       saveConfig();
       break;
