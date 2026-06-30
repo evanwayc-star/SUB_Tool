@@ -395,7 +395,7 @@ function applyTcShift(sign) {
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可以位移'); return; }
   for (const c of cues) { c.start = Math.max(0, c.start + delta); c.end = Math.max(c.start + 0.001, c.end + delta); }
-  sweepContainedCues(cues);
+  // sweepContainedCues(cues);
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('時間碼位移');
   setStatus(`已位移 ${delta >= 0 ? '+' : ''}${delta.toFixed(3)}s（共 ${cues.length} 條）`, 'ok');
@@ -429,6 +429,7 @@ function applyDurAdjTc(sign) {
   if (!cues.length) { showToast('沒有字幕可調整'); return; }
   for (const c of cues) {
     const nextIn = _nextInPoint(c);
+    if (c.end > nextIn) continue;
     let newEnd = c.end + delta;
     newEnd = Math.max(c.start + minDur, newEnd);
     newEnd = Math.min(nextIn, newEnd);
@@ -447,6 +448,7 @@ function applyDurAdjPct() {
   if (!cues.length) { showToast('沒有字幕可調整'); return; }
   for (const c of cues) {
     const nextIn = _nextInPoint(c);
+    if (c.end > nextIn) continue;
     // 縮放後對齊影格，避免區塊邊緣落在格與格之間
     let newEnd = snapTimeToFrame(c.start + (c.end - c.start) * ratio, State.fps, State.dropFrame);
     newEnd = Math.max(c.start + minDur, newEnd);
