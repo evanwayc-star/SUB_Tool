@@ -94,7 +94,25 @@ async function setIn(){
   let t=snapTimeToFrame(Media.vTime(), State.fps, State.dropFrame);
   let c=State.cues.find(x=>x.id===State.selectedId);
   if(!c){ c=addCue(t,snapTimeToFrame(t+2, State.fps, State.dropFrame),'',0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 '+fmtClock(t),'ok'); return; }
-  c.start=t; if(c.end<=c.start)c.end=snapTimeToFrame(c.start+0.5, State.fps, State.dropFrame); c.timed=true;
+  const wasUntimed = c.timed === false;
+  c.start=t; 
+  if (State.subMode) {
+    // 先清理其他 _tempEnd 字幕（確保同一時間最多一條帶 _tempEnd）
+    State.cues.forEach(cue => {
+      if (cue._tempEnd && cue.id !== c.id) {
+        cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
+        delete cue._tempEnd;
+      }
+    });
+    c.end = (State.duration && State.duration > c.start) ? State.duration : c.start + 3600;
+    c._tempEnd = true;
+    // 記錄此字幕曾被 I 鍵設定，用於退出 subMode 時安全網清理
+    if (!State._subModeTouchedIds) State._subModeTouchedIds = new Set();
+    State._subModeTouchedIds.add(c.id);
+  } else if(wasUntimed || c.end<=c.start) {
+    c.end=snapTimeToFrame(c.start+0.5, State.fps, State.dropFrame);
+  }
+  c.timed=true;
   commitCueTimeEdit(c,'start'); // 局部更新（順序不變時不重建整列）
   recordHistory('設定起點 I'+cueSuffix(c)); setStatus('起點 '+fmtClock(t),'ok');
 }
@@ -105,26 +123,47 @@ async function setOut(){
   let t=snapTimeToFrame(Media.vTime(), State.fps, State.dropFrame);
   const c=State.cues.find(x=>x.id===State.selectedId);
   if(!c){ setStatus('請先選擇字幕（或按 I 新建）','err'); return; }
-  if(t<=c.start){ setStatus('終點不得早於或等於起點','err'); return; }
-  c.end=t; c.timed=true;
+  
+  const wasUntimed = c.timed === false;
+  if (wasUntimed) {
+    c.end = t;
+    c.start = snapTimeToFrame(Math.max(0, t - 0.5), State.fps, State.dropFrame);
+  } else {
+    if(t<=c.start){ setStatus('終點不得早於或等於起點','err'); return; }
+    c.end = t;
+  }
+  
+  c.timed=true;
+  delete c._tempEnd;
   commitCueTimeEdit(c,'end'); // 局部更新（end 不影響排序，必走局部）
   recordHistory('設定終點 O'+cueSuffix(c)); setStatus('終點 '+fmtClock(c.end),'ok');
   autoAdvanceSubMode();
 }
 /* 上字幕模式：O 後自動選取下一句，全部完成則關閉模式 */
 function autoAdvanceSubMode(){
-  if(!State.subMode)return;
-  const sel=State.cues.find(c=>c.id===State.selectedId); if(!sel)return;
-  const tk=sel.track||0;
-  const trackCues=State.cues.filter(c=>(c.track||0)===tk);
-  const idx=trackCues.findIndex(c=>c.id===State.selectedId);
-  if(idx>=0&&idx<trackCues.length-1){
-    selectCueSingle(trackCues[idx+1].id,false);
-    setStatus(`🎯 上字幕 ${idx+2}/${trackCues.length} — 按 I 設起點`,'ok');
-  }else{
-    selectCueSingle(null);
-    setStatus('🎯 上字幕模式：已無下一句，取消選取 ✓','ok');
+  if(!State.subMode || !State._subModeSequence) return;
+  
+  const seq = State._subModeSequence;
+  const currIdx = seq.indexOf(State.selectedId);
+  
+  if (currIdx >= 0) {
+    let nextIdx = currIdx + 1;
+    while (nextIdx < seq.length) {
+      const nextId = seq[nextIdx];
+      // 確保該 ID 仍存在，並且與當前選擇同軌道
+      const nextCue = State.cues.find(c => c.id === nextId);
+      const currCue = State.cues.find(c => c.id === State.selectedId);
+      if (nextCue && currCue && (nextCue.track || 0) === (currCue.track || 0)) {
+        selectCueSingle(nextId, false);
+        setStatus(`🎯 上字幕 (依原順序) — 按 I 設起點`,'ok');
+        return;
+      }
+      nextIdx++;
+    }
   }
+
+  selectCueSingle(null);
+  setStatus('🎯 上字幕模式：已無下一句，取消選取 ✓','ok');
 }
 
 const editingText=()=>document.activeElement?.classList.contains('txt')&&document.activeElement.contentEditable==='true';
@@ -245,10 +284,7 @@ window.addEventListener('keydown',e=>{
     case 'delete_selected': if(State.selectedIds.length||State.selectedId){e.preventDefault();deleteSelected();} break;
     case 'cancel':
       cancelSwapMode();
-      if(State.subMode){ e.preventDefault(); State.subMode=false;
-        const esb=$('subModeBtn'); if(esb)esb.classList.remove('sub-active');
-        document.body.classList.remove('sub-mode-on');
-        jklReset(); setStatus('上字幕模式已關閉',''); }
+      if(State.subMode){ e.preventDefault(); emit('action', 'sub-mode'); jklReset(); }
       if(State.selectedId||State.selectedIds.length){
         e.preventDefault();
         State.selectedId=null; State.selectedIds=[];
