@@ -254,7 +254,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tc .tc-edit{font-size:17px;width:150px;height:26px;border-radius:4px;padding:0 4px}
 .tc-edit:focus{border-color:var(--accent)}
 
-/* 浮動面板（動作紀錄 / 備忘錄） */
+/* 浮動面板（動作紀錄 / 備註） */
 .float-panel{position:fixed;right:16px;bottom:60px;width:320px;max-height:60vh;background:var(--panel2);
   border:1px solid var(--border2);border-radius:8px;box-shadow:var(--shadow);z-index:1400;display:none;flex-direction:column}
 .float-panel.show{display:flex}

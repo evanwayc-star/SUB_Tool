@@ -8,7 +8,7 @@ import { emit } from './events.js';
 const State = {
   cues: [],            // {id,start,end,text,track}
   tracks: [],          // 字幕軌道
-  notes: [],           // 備忘錄 {id,time,text,done}
+  notes: [],           // 備註 {id,time,text,done}
   trackCount: 0,       // = tracks.length（同步用）
   listTrack: 0,        // 字幕列表顯示的軌道
   fps: 24,
@@ -106,8 +106,8 @@ State.defaultKeymap = {
   'pause': [{key:'k'}],
   'forward': [{key:'l'}],
   'zoom_out': [{key:'1'}, {key:'-'}, {code:'NumpadSubtract'}],
-  'zoom_in': [{key:'2'}, {key:'+'}, {code:'NumpadAdd'}],
-  'zoom_fit': [{key:'*'}, {key:'\\'}, {key:'|'}, {key:'`'}],
+  'zoom_in': [{key:'2'}, {key:'='}, {code:'NumpadAdd'}],
+  'zoom_fit': [{key:'`'}, {key:'\\'}, {code:'NumpadMultiply'}],
   'prev_cue_5f': [{key:'5', code:'Numpad5'}],
   'next_cue_5f': [{key:'2', code:'Numpad2'}],
   'toggle_history': [{key:'7'}],

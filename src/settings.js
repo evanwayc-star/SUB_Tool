@@ -18,8 +18,8 @@ const actionCategories = [
       'nudge_right_1f': '播放點往右平移1格',
       'nudge_right_1s': '播放點往右平移1秒',
       'nudge_right_5s': '播放點往右平移5秒',
-      'prev_note': '跳至上一個備忘錄',
-      'next_note': '跳至下一個備忘錄',
+      'prev_note': '跳至上一個備註',
+      'next_note': '跳至下一個備註',
       'seek_home': '回到開頭',
       'seek_end': '到達影片結尾',
     }
@@ -60,7 +60,7 @@ const actionCategories = [
       'toggle_history': '打開/關閉紀錄視窗',
       'toggle_notes': '打開/關閉備註視窗',
       'toggle_check_panel': '打開/關閉字幕檢查視窗',
-      'add_note': '新增備忘錄',
+      'add_note': '新增備註',
       'select_all': '全選當前軌道字幕',
       'copy_cues': '複製選取字幕',
       'paste_cues': '貼上字幕',
@@ -94,10 +94,15 @@ function formatKeyBind(bind) {
   if (bind.shift) parts.push('Shift');
   if (bind.alt) parts.push('Alt');
   if (bind.code && bind.code.startsWith('Numpad')) {
-    parts.push(bind.code);
+    const nmap = { 'NumpadAdd':'Num +', 'NumpadSubtract':'Num -', 'NumpadMultiply':'Num *', 'NumpadDivide':'Num /', 'NumpadEnter':'Num Enter', 'NumpadDecimal':'Num .' };
+    parts.push(nmap[bind.code] || bind.code.replace('Numpad', 'Num '));
   } else if (bind.key) {
     if (bind.key === ' ') parts.push('Space');
     else if (bind.key === 'escape') parts.push('Esc');
+    else if (bind.key === 'arrowup') parts.push('↑');
+    else if (bind.key === 'arrowdown') parts.push('↓');
+    else if (bind.key === 'arrowleft') parts.push('←');
+    else if (bind.key === 'arrowright') parts.push('→');
     else parts.push(bind.key.charAt(0).toUpperCase() + bind.key.slice(1));
   }
   return parts.join(' + ');
