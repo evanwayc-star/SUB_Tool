@@ -498,6 +498,54 @@ ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
 /* ---- 單次讀取多輸出：整個來源檔只讀一遍，同時產生 proxy + 每聲道音訊 + 混音波形 ----
    每聲道以 asplit 分流（不直接 -map 同一條 stream，避免 filtergraph 與 -map 雙重消費而 deadlock）。
    結果存入持久快取（依 cacheKeyFor），重開同檔直接命中、秒開。 */
+function getConfigPath() {
+  const baseDir = app.isPackaged ? path.dirname(process.execPath) : app.getAppPath();
+  const configDir = path.join(baseDir, '.config');
+  if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
+  return path.join(configDir, 'settings.json');
+}
+
+ipcMain.handle('config:load', () => {
+  try {
+    const p = getConfigPath();
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch(e) { console.error('[config] load err', e); }
+  return {};
+});
+
+ipcMain.handle('config:save', (e, data) => {
+  try {
+    const p = getConfigPath();
+    const current = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
+    const merged = { ...current, ...data };
+    fs.writeFileSync(p, JSON.stringify(merged, null, 2), 'utf8');
+    return true;
+  } catch(e) { console.error('[config] save err', e); return false; }
+});
+
+function getKeysPath() {
+  const baseDir = app.isPackaged ? path.dirname(process.execPath) : app.getAppPath();
+  const configDir = path.join(baseDir, '.config');
+  if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
+  return path.join(configDir, 'key.json');
+}
+
+ipcMain.handle('keys:load', () => {
+  try {
+    const p = getKeysPath();
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch(e) { console.error('[keys] load err', e); }
+  return {};
+});
+
+ipcMain.handle('keys:save', (e, data) => {
+  try {
+    const p = getKeysPath();
+    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
+    return true;
+  } catch(e) { console.error('[keys] save err', e); return false; }
+});
+
 ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio }) => {
   allowFileDir(src); // S1
   // S1: 強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源

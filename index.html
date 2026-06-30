@@ -48,7 +48,7 @@
 
       <div class="spacer"></div>
 
-      <button class="icon" data-act="help" title="鍵盤說明">⌨ 說明</button>
+      <button class="icon" data-act="settings" title="自訂快捷鍵">⚙ 設定</button>
     </div>
 
     <!-- ===== 主體 ===== -->
@@ -83,7 +83,7 @@
           <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span> / <span
               id="tcDur">00:00:00:00</span></div>
           <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
-          <button class="icon tp-btn" data-act="mixer" title="混音器：逐聲道電平 / 獨奏 / 靜音">🎚</button>
+          <button class="icon tp-btn" data-act="mixer" title="混音器：逐聲道電平 / 獨奏 / 靜音">🎚 混音器</button>
           <button class="icon tp-btn" data-act="add-audio" title="載入外部音檔（右鍵影片切換音訊來源）">🔊＋</button>
         </div>
 
@@ -163,6 +163,7 @@
         <div class="sep"></div>
         <button class="icon" data-act="notes" title="備註 (8)">📌 <span class="lbl">備註</span></button>
         <button class="icon" data-act="add-note" title="新增備註">＋</button>
+        <div class="sep"></div>
         <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span
             class="lbl">上字幕</span></button>
         <div class="sep"></div>
@@ -170,14 +171,6 @@
           style="width: 44px; justify-content: center;">In</button>
         <button class="icon" data-act="set-out" title="設定終點 (W)"
           style="width: 44px; justify-content: center;">Out</button>
-        <div class="sep"></div>
-        <button class="auto-select-btn" id="autoSelectToggleBtn" data-act="toggle-auto-select"
-          title="播放時自動選取對應字幕 (Z)">不自動選取</button>
-        <div class="sep"></div>
-        <button class="ow-toggle-btn" id="overwriteToggleBtn" data-act="toggle-overwrite" title="切換覆蓋狀態 (X)">🔒
-          不覆蓋</button>
-        <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtn" data-act="toggle-ow-keep"
-          title="當新字幕完全覆蓋其他字幕時的處理方式 (C)">⭕ 保留</button>
         <div class="sep"></div>
         <span id="tlSel">未選取</span>
         <div class="sep"></div>
@@ -230,7 +223,7 @@
       <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" title="切換覆蓋狀態 (X)">🔒
         不覆蓋</button>
       <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep"
-        title="當新字幕完全覆蓋其他字幕時的處理方式 (C)">⭕ 保留</button>
+        title="當新字幕完全覆蓋其他字幕時的處理方式 (C)">⚪ 保留</button>
       <div class="sep"></div>
       <span id="stSel"></span>
     </div>
@@ -334,7 +327,7 @@
       </div>
       <div class="shift-page" id="shiftPageTc">
         <div class="shift-row">
-          <input type="text" id="tcShiftInput" placeholder="00:00:02:00" title="時:分:秒:格">
+          <input type="text" id="tcShiftInput" value="00:00:00:00" placeholder="00:00:00:00" title="時:分:秒:格">
           <button class="icon" data-act="shift-back">◀ 往前</button>
           <button class="icon" data-act="shift-fwd">往後 ▶</button>
         </div>
@@ -345,7 +338,7 @@
           <option value="pct">設為百分比</option>
         </select>
         <div class="shift-row" id="durAdjTcRow">
-          <input type="text" id="durAdjTcInput" placeholder="00:00:01:00" title="時:分:秒:格">
+          <input type="text" id="durAdjTcInput" value="00:00:00:00" placeholder="00:00:00:00" title="時:分:秒:格">
           <button class="icon" data-act="dur-adj-sub">－</button>
           <button class="icon" data-act="dur-adj-add">＋</button>
         </div>
