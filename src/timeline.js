@@ -558,7 +558,7 @@ tlScroll.addEventListener('mousedown',e=>{
     e.preventDefault(); return;
   }
   if(y<tracksTop()){ // 時間尺 + 波形帶：拖曳移動播放點
-    // 備忘錄標記點擊偵測（時間尺範圍內 ±9px）
+    // 備註標記點擊偵測（時間尺範圍內 ±9px）
     if(y<=RULER_H && State.notes.length){
       const hitNote=State.notes.find(n=>Math.abs(timeToX(n.time)-x)<=9);
       if(hitNote){

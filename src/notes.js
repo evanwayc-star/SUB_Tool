@@ -1,4 +1,4 @@
-/* SUB Tool — 備忘錄面板（時間點標記）
+/* SUB Tool — 備註面板（時間點標記）
    每條 note = {id,time,text,done}，存於 State.notes 並隨專案存檔。
    功能：新增(記下目前播放點)、內嵌編輯時間/文字、多選(Ctrl/Shift)、右鍵批次編輯/標記/刪除、
    播放中高亮最接近的 note(updateNoteActive)、時間尺橘色三角標記(drawRuler)、
