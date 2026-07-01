@@ -8,6 +8,7 @@ import { selectCue, refreshSelectionUI, renderSubRow, sortCues, sweepContainedCu
 import { snapTimeToFrame } from './time.js';
 import { emit } from './events.js';
 import { ensureProjectSaved, isProjectGuardDone } from './project.js';
+import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps } from './time.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
@@ -53,10 +54,7 @@ function layoutTimeline(){
 // 次刻度等分數：依 step 與 fps 動態計算，確保每個次刻度落在格邊界
 function minorDiv(step){
   const fps=State.fps||25; 
-  let exactFps = fps;
-  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
-  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
-  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  let exactFps = getExactFps(fps);
   const nf=Math.round(step*exactFps);
   if(step<1&&Math.abs(nf-step*exactFps)<0.01){
     if(nf<=1)return 1; // 1格步距：不畫次刻度
@@ -121,10 +119,7 @@ function drawRuler(){
 }
 function niceStep(s){ // 給定目標秒數，回傳漂亮刻度間隔（次秒用格對齊步距）
   const fps=State.fps||25;
-  let exactFps = fps;
-  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
-  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
-  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  let exactFps = getExactFps(fps);
   const f=1/exactFps;
   // 次秒範圍：用格倍數確保刻度落在格邊界
   if(s<0.95){

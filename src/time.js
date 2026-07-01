@@ -34,13 +34,19 @@ function secToASS(s, fps=25){
    確保播放器、字幕列表、時間軸刻度等各處對同一秒數得到完全一致的時:分:秒:格。
    非 DF 的 29.97 會刻意「數影格」而非「數真實秒數」，因此長時碼會比牆鐘秒數慢幾秒——
    這是非 drop-frame 時碼的正常特性（詳見 FPS_時碼一致性.md）。 */
-function encoreParts(s,fps,df=false){
-  if(s<0)s=0;
-  
+export function getExactFps(fps) {
+  if(!fps) return 30;
   let exactFps = fps;
   if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
   else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
   else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  return exactFps;
+}
+
+function encoreParts(s,fps,df=false){
+  if(s<0)s=0;
+  
+  let exactFps = getExactFps(fps);
   
   const timebase = Math.round(exactFps);
 
@@ -91,10 +97,7 @@ function encoreToSec(t,fps,df=false){
   const m=t.trim().match(/(\d+):(\d+):(\d+)[:;](\d+)/); if(!m)return 0;
   const hh=+m[1],mm=+m[2],ss=+m[3],ff=+m[4];
   
-  let exactFps = fps;
-  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
-  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
-  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  let exactFps = getExactFps(fps);
   
   const timebase = Math.round(exactFps);
 
@@ -120,10 +123,7 @@ function encoreToSec(t,fps,df=false){
 function snapTimeToFrame(t, fps, df=false) {
   if(!fps) return t;
   
-  let exactFps = fps;
-  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
-  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
-  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  let exactFps = getExactFps(fps);
   
   return Math.round(t * exactFps) / exactFps;
 }
