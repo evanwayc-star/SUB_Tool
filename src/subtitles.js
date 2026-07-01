@@ -87,6 +87,47 @@ function swapAdjacentCues(id, dir){
   recordHistory('相鄰換位');
 }
 
+function mergeAdjacentCues(id, dir){
+  const cue = State.cues.find(c => c.id === id);
+  if (!cue) return;
+  const tk = cue.track || 0;
+  const list = State.cues.filter(c => (c.track || 0) === tk);
+  const idx = list.findIndex(c => c.id === id);
+  if (idx < 0) return;
+  
+  let targetIdx = idx + dir;
+  if (targetIdx < 0 || targetIdx >= list.length) return;
+  
+  const targetCue = list[targetIdx];
+  const cue1 = dir === -1 ? targetCue : cue;
+  const cue2 = dir === -1 ? cue : targetCue;
+  
+  const t1 = (cue1.text || '').trim();
+  const t2 = (cue2.text || '').trim();
+  const newText = t1 && t2 ? `${t1} ${t2}` : `${t1}${t2}`;
+
+  cue1.text = newText;
+  
+  if (cue1.timed !== false && cue2.timed !== false) {
+    cue1.end = cue2.end;
+  }
+  
+  const idx2 = State.cues.findIndex(c => c.id === cue2.id);
+  if (idx2 >= 0) State.cues.splice(idx2, 1);
+  
+  if (State.selectedId === cue2.id) {
+    State.selectedId = cue1.id;
+    State.selectedIds = [cue1.id];
+  } else if (State.selectedIds.includes(cue2.id)) {
+    State.selectedIds = State.selectedIds.filter(x => x !== cue2.id);
+    if (!State.selectedIds.includes(cue1.id)) State.selectedIds.push(cue1.id);
+  }
+
+  sortCues();
+  emit('render:all');
+  recordHistory('合併字幕');
+}
+
 /* ===== 搜尋狀態 ===================================================== */
 let _searchTerms = [];
 let _searchMatches = []; // cue ids of matches in list order
@@ -927,6 +968,6 @@ sublist.addEventListener('keydown', e => {
 
 export { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel,
   addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
-  enterSwapMode, cancelSwapMode, swapAdjacentCues, trimTrackSpaces,
+  enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,
   copyCues, pasteCues };

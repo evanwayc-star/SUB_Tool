@@ -3,7 +3,7 @@ import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
 import { State, isSel } from './state.js';
 import { Media } from './media.js';
-import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, copyCues, pasteCues } from './subtitles.js';
+import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop } from './timeline.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';
@@ -117,10 +117,8 @@ function showCueMenu(x,y){
     }
   }
 
-  // 文字交換與相鄰換位
+  // 文字交換與合併
   if(State.selectedId){
-    items.push({label:'⇄ 文字交換',act:()=>enterSwapMode(State.selectedId)});
-    
     const selCue=State.cues.find(c=>c.id===State.selectedId);
     if(selCue){
       const tk=selCue.track||0;
@@ -128,6 +126,18 @@ function showCueMenu(x,y){
       const i=list.findIndex(c=>c.id===State.selectedId);
       const hasPrev = i > 0;
       const hasNext = i >= 0 && i < list.length - 1;
+      
+      if (hasPrev || hasNext) {
+        if (hasPrev) {
+          items.push({label:'↑ 與上句合併',act:()=>mergeAdjacentCues(selCue.id, -1)});
+        }
+        if (hasNext) {
+          items.push({label:'↓ 與下句合併',act:()=>mergeAdjacentCues(selCue.id, 1)});
+        }
+        items.push({sep:true});
+      }
+      
+      items.push({label:'⇄ 文字交換',act:()=>enterSwapMode(State.selectedId)});
       
       if (hasPrev || hasNext) {
         items.push({sep:true});
@@ -139,7 +149,6 @@ function showCueMenu(x,y){
         }
       }
     }
-    
     items.push({sep:true});
   }
 
