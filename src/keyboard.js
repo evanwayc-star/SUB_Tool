@@ -91,7 +91,7 @@ function jklReset(){
 async function setIn(){
   await ensureProjectSaved();
   if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移','err'); return; }
-  let t=snapTimeToFrame(Media.vTime(), State.fps, State.dropFrame);
+  let t=snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
   let c=State.cues.find(x=>x.id===State.selectedId);
   if(!c){ c=addCue(t,snapTimeToFrame(t+2, State.fps, State.dropFrame),'',0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 '+fmtClock(t),'ok'); return; }
   const wasUntimed = c.timed === false;
@@ -120,7 +120,7 @@ async function setIn(){
 async function setOut(){
   await ensureProjectSaved();
   if(State.selectedIds.length>1){ setStatus('多選模式 — 請用 P 鍵整體位移','err'); return; }
-  let t=snapTimeToFrame(Media.vTime(), State.fps, State.dropFrame);
+  let t=snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
   const c=State.cues.find(x=>x.id===State.selectedId);
   if(!c){ setStatus('請先選擇字幕（或按 I 新建）','err'); return; }
   
@@ -299,7 +299,7 @@ window.addEventListener('keydown',e=>{
       const jCues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(c=>c&&c.timed!==false);
       if(!jCues.length)break;
       const minStart=Math.min(...jCues.map(c=>c.start));
-      const jt=Media.vTime(), delta=jt-minStart;
+      const jt=Media.displayTime(), delta=jt-minStart;
       for(const jc of jCues){ jc.start=Math.max(0,jc.start+delta); jc.end=Math.max(jc.start+0.001,jc.end+delta); }
       sweepContainedCues(jCues);
       sortCues(); emit('render:all'); drawTimeline();
@@ -315,7 +315,7 @@ window.addEventListener('keydown',e=>{
     case 'paste_cues': e.preventDefault(); pasteCues(); break;
     case 'select_current':
       e.preventDefault();
-      const t = Media.vTime();
+      const t = Media.displayTime();
       const tk = State.listTrack || 0;
       const cx = State.cues.find(cx => (cx.track || 0) === tk && cx.timed !== false && cx.start <= t && cx.end > t);
       if (cx) { selectCueSingle(cx.id, false); setStatus('已選取目前字幕', 'ok'); }
@@ -347,7 +347,7 @@ function seekEnd(){ const t=State.duration||0; Media.seek(t); updatePlayhead(); 
 /* Ctrl+左/右：跳到上一個/下一個備註時間點 */
 function jumpToNote(dir){
   if(!State.notes.length) return;
-  const t=Media.vTime(), EPS=1e-4;
+  const t=Media.displayTime(), EPS=1e-4;
   let target=null;
   if(dir>0){ for(const n of State.notes){ if(n.time>t+EPS&&(target===null||n.time<target.time))target=n; } }
   else      { for(const n of State.notes){ if(n.time<t-EPS&&(target===null||n.time>target.time))target=n; } }
@@ -375,7 +375,7 @@ function jumpToAdjacentCue(dir){
   if(sel){
     idx=list.findIndex(c=>c.id===sel.id)+dir;
   } else {
-    const t=Media.vTime();
+    const t=Media.displayTime();
     if(dir<0){
       idx=list.filter(c=>c.start<t-1e-4).length-1;
       if(Media.playing) idx -= 1;
@@ -407,7 +407,7 @@ function jumpToCueInMinusFrames(dir, frames){
   if(sel){
     idx=list.findIndex(c=>c.id===sel.id)+dir;
   } else {
-    const t=Media.vTime();
+    const t=Media.displayTime();
     if(dir<0) idx=list.filter(c=>c.start<t-1e-4).length-1;
     else      idx=list.findIndex(c=>c.start>t+1e-4);
   }
@@ -421,7 +421,7 @@ function jumpToCueInMinusFrames(dir, frames){
 }
 
 function stepBoundary(dir){
-  const t = Media.vTime();
+  const t = Media.displayTime();
   const EPS = 0.05; // 50ms寬容度，避免播放器時間小數點誤差
 
   const selTrack = State.listTrack;
