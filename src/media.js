@@ -429,7 +429,7 @@ const Media = {
           let t=e.data;
           if(!this.playing){
             const frame=1/(State.fps||25);
-            if(this._lastSeekTime!=null && Math.abs(e.data-this._lastSeekTime)<1.5*frame){
+            if(this._lastSeekTime!=null && Math.abs(e.data-this._lastSeekTime)<2.5*frame){
               t=this._lastSeekTime;
             } else {
               t=snapTimeToFrame(e.data, State.fps, State.dropFrame); this._lastSeekTime=t;

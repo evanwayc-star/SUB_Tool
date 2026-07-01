@@ -7,7 +7,7 @@
 "use strict";
 import _logoUrl from './logo.png';
 import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML } from './util.js';
-import { fmtClock, secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, snapTimeToFrame } from './time.js';
+import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assToSec, encoreToSec, snapTimeToFrame } from './time.js';
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys } from './state.js';
@@ -128,10 +128,7 @@ let _videoSubSig = '';
 function renderVideoSub(){
   const t=Media.displayTime();
   const fps = State.fps || 25;
-  let exactFps = fps;
-  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
-  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
-  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  let exactFps = getExactFps(fps);
   const currentFrame = Math.round(t * exactFps);
 
   // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
@@ -331,7 +328,7 @@ video.addEventListener('ended',()=>{Media.pause();});
   $(id)?.addEventListener('wheel', e => {
     e.preventDefault();
     const frames = e.deltaY > 0 ? 1 : -1;
-    nudge(frames / (State.fps || 30));
+    nudge(frames / getExactFps(State.fps || 30));
   }, {passive: false});
 });
 

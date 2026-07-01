@@ -2,7 +2,7 @@
 import { $, video, sublist } from './dom.js';
 import { State, cueSuffix } from './state.js';
 import { clamp } from './util.js';
-import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
+import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
 import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues, sweepContainedCues } from './subtitles.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline.js';
@@ -239,14 +239,14 @@ window.addEventListener('keydown',e=>{
     case 'nudge_left_1f':
       e.preventDefault();
       if(e.repeat){ if(_jklSpeed>=0){_jklSpeed=-1;jklApply();} }
-      else nudge(-1/State.fps);
+      else nudge(-1/getExactFps(State.fps||30));
       break;
     case 'nudge_left_1s': e.preventDefault(); nudge(-1); break;
     case 'nudge_left_5s': e.preventDefault(); nudge(-5); break;
     case 'nudge_right_1f':
       e.preventDefault();
       if(e.repeat){ if(_jklSpeed<=0){_jklSpeed=1;jklApply();} }
-      else nudge(1/State.fps);
+      else nudge(1/getExactFps(State.fps||30));
       break;
     case 'nudge_right_1s': e.preventDefault(); nudge(1); break;
     case 'nudge_right_5s': e.preventDefault(); nudge(5); break;
@@ -254,6 +254,8 @@ window.addEventListener('keydown',e=>{
     case 'next_note': e.preventDefault(); jumpToNote(1); break;
     case 'seek_home': e.preventDefault(); seekHome(); break;
     case 'seek_end': e.preventDefault(); seekEnd(); break;
+    case 'prev_frame': e.preventDefault(); if(Media.playing) Media.pause(); nudge(-1/getExactFps(State.fps||30)); break;
+    case 'next_frame': e.preventDefault(); if(Media.playing) Media.pause(); nudge(1/getExactFps(State.fps||30)); break;
     case 'step_boundary_prev': e.preventDefault(); if(Media.playing) Media.pause(); stepBoundary(-1); break;
     case 'step_boundary_next': e.preventDefault(); if(Media.playing) Media.pause(); stepBoundary(1); break;
     case 'first_cue': e.preventDefault(); jumpToFirstLastCue(-1); break;
