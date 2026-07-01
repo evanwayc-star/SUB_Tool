@@ -474,7 +474,7 @@ function addCueRelative(dir){
   const tk=sel?(sel.track||0):0;
   let start,end;
   if(sel){ if(dir>0){ start=sel.end; end=snapTimeToFrame(sel.end+2, State.fps, State.dropFrame); } else { end=sel.start; start=Math.max(0,snapTimeToFrame(sel.start-2, State.fps, State.dropFrame)); } }
-  else { start=snapTimeToFrame(Media.vTime(), State.fps, State.dropFrame); end=snapTimeToFrame(start+2, State.fps, State.dropFrame); }
+  else { start=snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame); end=snapTimeToFrame(start+2, State.fps, State.dropFrame); }
   const c=addCue(start,end,'',tk); recordHistory(dir>0?'下方新增字幕':'上方新增字幕');
   requestAnimationFrame(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));});
   return c;
@@ -595,7 +595,7 @@ function pasteCues(){
   if(!State.clipboard?.length){ showToast('剪貼簿是空的'); return; }
   const timedClip=State.clipboard.filter(c=>c.timed!==false);
   const minStart=timedClip.length ? Math.min(...timedClip.map(c=>c.start)) : 0;
-  const delta=Media.vTime()-minStart;
+  const delta=Media.displayTime()-minStart;
   const newCues=State.clipboard.map(c=>{
     if(c.timed===false) return {...c, id:newId(), track:State.listTrack};
     const s=Math.max(0, c.start+delta);
@@ -704,7 +704,7 @@ function splitCueAtCursor(c, txtEl){
   const origEnd=c.end;
   const isTimed=c.timed!==false;
   if(isTimed){
-    const pt=Media.vTime();
+    const pt=Media.displayTime();
     if(pt < c.start + 0.05 || pt > c.end - 0.05){
       // 清理 DOM 標記後顯示提示，不執行拆分
       showToast('切分點距離起訖太近，或是超出了字幕範圍');
@@ -712,7 +712,7 @@ function splitCueAtCursor(c, txtEl){
     }
   }
   let splitTime=0;
-  if(isTimed) splitTime=Media.vTime();
+  if(isTimed) splitTime=Media.displayTime();
 
   // 先關閉編輯模式（blur 事件觸發時 contentEditable 已為 false，守衛返回）
   c.text=textBefore;
@@ -772,7 +772,7 @@ sublist.addEventListener('mousedown', e => {
   if (document.activeElement === txtEl) txtEl.blur();
   const _noMod = !(e.ctrlKey || e.metaKey || e.shiftKey);
   const _alreadySel = _noMod && State.selectedId === c.id && State.selectedIds.length === 1;
-  const _pt = Media.vTime();
+  const _pt = Media.displayTime();
   const _ptInside = _alreadySel && c.timed !== false && _pt >= c.start && _pt <= c.end;
   selectCue(c.id, { additive: e.ctrlKey || e.metaKey, range: e.shiftKey, seek: _noMod && !_ptInside });
 });
