@@ -277,7 +277,13 @@ window.addEventListener('keydown',e=>{
     case 'select_all':
       e.preventDefault();
       const tkCues=State.cues.filter(c=>(c.track||0)===State.listTrack);
-      if(tkCues.length){ State.selectedIds=tkCues.map(c=>c.id); State.selectedId=tkCues[0].id; refreshSelectionUI(); }
+      if(tkCues.length){
+        State.selectedIds=tkCues.map(c=>c.id);
+        State.selectedId=tkCues[0].id;
+        refreshSelectionUI();
+        const stSel = document.getElementById('stSel');
+        if(stSel) stSel.textContent = '已選 '+State.selectedIds.length+' 條';
+      }
       break;
     case 'save_project': e.preventDefault(); Project.save(); break;
     case 'save_as': e.preventDefault(); Project.saveAs(); break;
