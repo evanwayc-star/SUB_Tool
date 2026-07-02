@@ -11,7 +11,11 @@ import { renderAudioTracks, renderMixer } from './mixer.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
-function hideCtx(){ ctx.classList.remove('show'); ctx.innerHTML=''; }
+function hideCtx(){
+  const was=ctx.classList.contains('show');
+  ctx.classList.remove('show'); ctx.innerHTML='';
+  if(was) emit('mpv:sync'); // 選單若曾讓 mpv 讓位，關閉時恢復（僅在真的有開過才發，避免每次 mousedown 都打 IPC）
+}
 function showCtx(x,y,items){
   ctx.innerHTML='';
   for(const it of items){
@@ -32,6 +36,7 @@ function showCtx(x,y,items){
   const w=ctx.offsetWidth,h=ctx.offsetHeight;
   ctx.style.left=Math.max(6,Math.min(x,window.innerWidth-w-6))+'px';
   ctx.style.top=Math.max(6,Math.min(y,window.innerHeight-h-6))+'px';
+  emit('mpv:sync'); // 定位完成後重算：選單若與影片重疊，讓 mpv 讓位（否則 mpv 為 OS 子視窗會蓋住選單）
 }
 document.addEventListener('mousedown',e=>{ if(e.button===2)return; if(!ctx.contains(e.target))hideCtx(); },true);
 window.addEventListener('blur',hideCtx);

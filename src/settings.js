@@ -1,6 +1,7 @@
 import { $, sublist } from './dom.js';
 import { State, saveKeys } from './state.js';
 import { setStatus } from './ui.js';
+import { emit } from './events.js';
 
 const actionCategories = [
   {
@@ -281,6 +282,7 @@ export function showSettingsModal() {
     </div>
   `;
   document.body.appendChild(modal);
+  emit('mpv:sync'); // mpv 是 OS 層子視窗會蓋住本對話框，開啟期間讓 mpv 讓位
 
   const tbody = document.getElementById('settingsTbody');
   renderSettingsTable(tbody);
@@ -292,6 +294,7 @@ export function showSettingsModal() {
 
   document.getElementById('settingsCancelBtn').onclick = () => {
     modal.remove();
+    emit('mpv:sync');
   };
 
   document.getElementById('settingsSaveBtn').onclick = () => {
@@ -302,6 +305,7 @@ export function showSettingsModal() {
     State.keymap = tempKeymap;
     saveKeys();
     modal.remove();
+    emit('mpv:sync');
     setStatus('快捷鍵設定已儲存', 'ok');
   };
 }

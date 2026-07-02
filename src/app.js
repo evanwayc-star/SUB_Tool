@@ -45,6 +45,7 @@ on('panel:toggle', togglePanel);
 on('note:openInPanel', openNoteInPanel);
 on('cue:openEdit', openCueEditModal);
 on('action', doAction);
+on('mpv:sync', _syncMpvPanel); // 自訂視窗（快捷鍵設定、右鍵選單）開閉時重算 mpv 讓位
 // A1：fps 變更後的 DOM 同步（原本在 state.setFps 內，現下沉到此處，state.js 不再相依 DOM）
 on('fps:changed', ()=>{
   const sel=$('fpsSel'); if(sel) sel.value=State.dropFrame?String(State.fps)+'df':String(State.fps);
@@ -105,7 +106,10 @@ function refreshMpvSubs(){
 function _syncMpvPanel(){
   if(!Media.mpvMode || !window.subtool?.mpv) return;
   const modalOpen=!!$('modalBg')?.classList.contains('show');
-  let hides=modalOpen;
+  // 快捷鍵設定是獨立於 modalBg 的自訂對話框（settings.js 自建 #settingsModal），
+  // 同樣會被 mpv 蓋住，開啟期間一律讓位
+  const settingsOpen=!!document.getElementById('settingsModal');
+  let hides=modalOpen||settingsOpen;
   if(!hides){
     const vr=$('videoWrap')?.getBoundingClientRect();
     if(vr){
@@ -116,6 +120,11 @@ function _syncMpvPanel(){
       if(!hides){
         const sd=$('searchDialog');
         if(sd&&(sd.style.display||'none')!=='none'&&ov(sd.getBoundingClientRect()))hides=true;
+      }
+      if(!hides){
+        // 右鍵選單常直接開在影片上（播放窗右鍵切音源/速度），重疊時也讓位
+        const cm=$('ctxmenu');
+        if(cm&&cm.classList.contains('show')&&ov(cm.getBoundingClientRect()))hides=true;
       }
     }
   }
