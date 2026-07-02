@@ -166,12 +166,14 @@ function autoAdvanceSubMode(){
   setStatus('🎯 上字幕模式：已無下一句，取消選取 ✓','ok');
 }
 
-const editingText=()=>document.activeElement?.classList.contains('txt')&&document.activeElement.contentEditable==='true';
 window.addEventListener('keydown',e=>{
   if($('modalBg').classList.contains('show')){ if(e.key==='Escape')closeModal(); return; }
+  // 快捷鍵設定是獨立於 modalBg 的自訂對話框：開啟期間全域快捷鍵一律不作用（避免 Enter/Space 在背後觸發播放）
+  if(document.getElementById('settingsModal'))return;
   if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
-  if(editingText()){
-    // 編輯字幕時僅允許少數快捷
+  if(document.activeElement?.isContentEditable){
+    // 任何 contenteditable 編輯中（字幕列表 .txt、修改字幕視窗、軌道名稱、備註等）
+    // 皆交由編輯器自身處理，全域快捷鍵不作用
     return;
   }
   function matchAction(ev) {

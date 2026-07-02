@@ -706,6 +706,9 @@ async function openCueEditModal(c){
       try { const r = document.createRange(), s = window.getSelection(); r.selectNodeContents(ta); s.removeAllRanges(); s.addRange(r); } catch (_) {}
       
       ta.addEventListener('keydown',e=>{
+      // Enter 系列一律擋住冒泡：確認/切分會同步關閉 modal，若讓事件繼續傳到 window 的
+      // 快捷鍵處理器，modal 已不在、同一下 Enter 會再觸發 toggle_play_pause 造成雙重動作
+      if(e.key==='Enter') e.stopPropagation();
       if(e.key==='Enter'&&e.ctrlKey){
         e.preventDefault();
         const sel=window.getSelection();
