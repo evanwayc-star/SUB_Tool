@@ -104,10 +104,13 @@ function buildZip(files) {
 
 /* ---- XML helpers ---- */
 function xmlEsc(s) {
+  // 也用於屬性值（如 <sheet name="...">）：引號必須跳脫，否則含 " 的軌道名會產生非法 XML
   return String(s ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 /* ---- XLSX XML 組件 ---- */

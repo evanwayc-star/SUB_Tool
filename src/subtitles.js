@@ -136,14 +136,30 @@ let _searchIdx = -1;
 function escRe(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
 
 function txtHTML(text){
-  if(!_searchTerms.length) return escapeHTML(text||'');
-  let result = escapeHTML(text||'');
+  const raw = text||'';
+  if(!_searchTerms.length) return escapeHTML(raw);
+  // 兩階段：先在「純文字」上收集所有命中區間並合併，再一次性包標記。
+  // （逐詞對已含 <span> 標記的結果字串再跑 regex，會命中標記本身——例如詞含 s/a/n——拆壞 HTML）
+  const ranges=[];
   for(const term of _searchTerms){
     if(!term) continue;
-    const re = new RegExp(escRe(escapeHTML(term)),'gi');
-    result = result.replace(re, m=>`<span class="search-match">${m}</span>`);
+    const re = new RegExp(escRe(term),'gi');
+    let m; while((m=re.exec(raw))){ if(!m[0].length){ re.lastIndex++; continue; } ranges.push([m.index, m.index+m[0].length]); }
   }
-  return result;
+  if(!ranges.length) return escapeHTML(raw);
+  ranges.sort((a,b)=>a[0]-b[0]);
+  const merged=[ranges[0].slice()];
+  for(let i=1;i<ranges.length;i++){
+    const last=merged[merged.length-1];
+    if(ranges[i][0]<=last[1]) last[1]=Math.max(last[1],ranges[i][1]);
+    else merged.push(ranges[i].slice());
+  }
+  let out='', pos=0;
+  for(const [s,e] of merged){
+    out+=escapeHTML(raw.slice(pos,s))+`<span class="search-match">${escapeHTML(raw.slice(s,e))}</span>`;
+    pos=e;
+  }
+  return out+escapeHTML(raw.slice(pos));
 }
 
 /* ===== 時間點內嵌編輯 =============================================== */
@@ -496,12 +512,6 @@ function addCue(start,end,text,track){
   if(added){ drawTimeline(); emit('render:listTrackSel'); }
   const c={id:newId(),start:start||0,end:end!=null?end:(start||0),text:text||'',track:track||0,timed:(start!=null&&end!=null)};
   State.cues.push(c); sortCues(); emit('render:all'); selectCue(c.id); return c;
-}
-function addCueAfter(id){
-  const c=addCue(null,null,'',0); c.timed=false; c.start=0;c.end=0;
-  emit('render:all'); selectCue(c.id);
-  // Fix #16：RAF 取代 30ms 魔術數字，DOM 已在 emit 同步更新完成，RAF 確保瀏覽器已繪製
-  requestAnimationFrame(()=>{const r=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);if(r)r.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));});
 }
 function addCueRelative(dir){
   const sel=State.cues.find(c=>c.id===State.selectedId);
@@ -918,7 +928,10 @@ sublist.addEventListener('focusout', e => {
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
   if (!c) return;
-  c.text = txt.innerText;
+  // 與 input 事件相同的守衛：contenteditable 尾端 <br> 會讓 innerText 多出結尾 \n
+  let val = txt.innerText;
+  if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
+  c.text = val;
   txt.contentEditable = 'false';
   txt.innerHTML = _txtInner(c.text);
   const rc2 = _rowClass(c);
@@ -967,7 +980,7 @@ sublist.addEventListener('keydown', e => {
 });
 
 export { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel,
-  addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
+  addCue, addCueRelative, deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,
   copyCues, pasteCues };

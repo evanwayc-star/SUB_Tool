@@ -6,7 +6,7 @@ import { secToEncore, snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
 import { Media } from './media.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
-import { sweepContainedCues, snapAllCuesToFrames } from './subtitles.js';
+import { snapAllCuesToFrames } from './subtitles.js';
 import { recordHistory } from './history.js';
 import { sortCues } from './subtitles.js';
 import { drawTimeline, layoutTimeline } from './timeline.js';
@@ -298,6 +298,15 @@ document.addEventListener('drop', async e => {
   const ext = (f.name.split('.').pop() || '').toLowerCase();
   if (['subtool', 'json'].includes(ext)) Project.load(f);
   else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
+  else if (IS_DESKTOP && DESK.getFilePath) {
+    // 桌面版：拖放影音必須與「🎬 影音」按鈕走同一條桌面路徑（ffprobe 實測 FPS、
+    // 系統 ffmpeg 轉檔/多音軌、mpv 秒開）——否則 MXF 等非原生格式會落到
+    // ffmpeg.wasm 的 1.6GB 上限而「沒有觸發轉檔」。路徑經 preload 的
+    // webUtils.getPathForFile 解析（Electron 32 起 File.path 已移除）；
+    // 解析失敗時退回瀏覽器路徑。後續 ffprobe 會把該目錄加入 S1 白名單（main.js）。
+    const p = DESK.getFilePath(f);
+    if (p) Media.loadDesktopMedia(p); else Media.loadVideoFile(f);
+  }
   else Media.loadVideoFile(f);
 });
 async function importDropped(f) {
@@ -395,7 +404,7 @@ function applyTcShift(sign) {
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可以位移'); return; }
   for (const c of cues) { c.start = Math.max(0, c.start + delta); c.end = Math.max(c.start + 0.001, c.end + delta); }
-  // sweepContainedCues(cues);
+  // v4.2.0 政策：位移不再自動裁切/刪除被重疊的鄰居字幕（keyboard.js 的 P 位移同此政策）
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('時間碼位移');
   setStatus(`已位移 ${delta >= 0 ? '+' : ''}${delta.toFixed(3)}s（共 ${cues.length} 條）`, 'ok');
@@ -427,17 +436,20 @@ function applyDurAdjTc(sign) {
   const minDur = 1 / Math.max(State.fps || 25, 1);
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可調整'); return; }
+  let adjusted = 0, skipped = 0;
   for (const c of cues) {
     const nextIn = _nextInPoint(c);
-    if (c.end > nextIn) continue;
+    // 只在「加長」時跳過已重疊的字幕——否則 min(nextIn) 夾限會反把它縮短；
+    // 「縮短」（負 delta）照常執行，夾限順勢把重疊修復到 nextIn。
+    if (delta > 0 && c.end > nextIn) { skipped++; continue; }
     let newEnd = c.end + delta;
     newEnd = Math.max(c.start + minDur, newEnd);
     newEnd = Math.min(nextIn, newEnd);
-    c.end = newEnd;
+    if (newEnd !== c.end) { c.end = newEnd; adjusted++; }
   }
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('調整持續時間');
-  setStatus(`已調整 ${cues.length} 條字幕的持續時間（${sign > 0 ? '+' : '−'}${t.toFixed(3)}s）`, 'ok');
+  setStatus(`已調整 ${adjusted} 條字幕的持續時間（${sign > 0 ? '+' : '−'}${t.toFixed(3)}s${skipped ? `，跳過 ${skipped} 條已重疊` : ''}）`, 'ok');
 }
 function applyDurAdjPct() {
   const pct = +($('durAdjPctInput').value || '100');
@@ -446,18 +458,20 @@ function applyDurAdjPct() {
   const minDur = 1 / Math.max(State.fps || 25, 1);
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可調整'); return; }
+  let adjusted = 0, skipped = 0;
   for (const c of cues) {
     const nextIn = _nextInPoint(c);
-    if (c.end > nextIn) continue;
+    // 只在「放大」（>100%）時跳過已重疊的字幕；縮小照常執行，夾限順勢修復重疊
+    if (ratio > 1 && c.end > nextIn) { skipped++; continue; }
     // 縮放後對齊影格，避免區塊邊緣落在格與格之間
     let newEnd = snapTimeToFrame(c.start + (c.end - c.start) * ratio, State.fps, State.dropFrame);
     newEnd = Math.max(c.start + minDur, newEnd);
     newEnd = Math.min(nextIn, newEnd);
-    c.end = newEnd;
+    if (newEnd !== c.end) { c.end = newEnd; adjusted++; }
   }
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('調整持續時間');
-  setStatus(`已調整 ${cues.length} 條字幕的持續時間（${pct}%）`, 'ok');
+  setStatus(`已調整 ${adjusted} 條字幕的持續時間（${pct}%${skipped ? `，跳過 ${skipped} 條已重疊` : ''}）`, 'ok');
 }
 
 export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport };

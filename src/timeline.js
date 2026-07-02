@@ -287,6 +287,11 @@ function _onTrackDragUp(){
       if(fromTk<toTk){ if(tk===fromTk)c.track=toTk; else if(tk>fromTk&&tk<=toTk)c.track=tk-1; }
       else { if(tk===fromTk)c.track=toTk; else if(tk>=toTk&&tk<fromTk)c.track=tk+1; }
     }
+    // listTrack 也用同一套規則重對應——否則列表會停在「舊索引位置」上、顯示成搬進來的另一條軌
+    { const lt=State.listTrack;
+      if(lt===fromTk) State.listTrack=toTk;
+      else if(fromTk<toTk && lt>fromTk && lt<=toTk) State.listTrack=lt-1;
+      else if(fromTk>toTk && lt>=toTk && lt<fromTk) State.listTrack=lt+1; }
     syncTrackCount(); recordHistory('軌道重排'); emit('render:all'); emit('render:listTrackSel'); drawTimeline();
   }
 }

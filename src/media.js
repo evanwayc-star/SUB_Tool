@@ -20,8 +20,10 @@ function detectFpsWeb(){
     if(last!=null){ const d=meta.mediaTime-last; if(d>0.0005)deltas.push(d); }
     last=meta.mediaTime; frames++;
     if(deltas.length<12 && frames<60){ try{video.requestVideoFrameCallback(cb);}catch(e){} return; }
-    if(deltas.length>=6){ deltas.sort((a,b)=>a-b); const med=deltas[deltas.length>>1]; const fps=Math.round(1/med);
-      if(fps>=10&&fps<=120){ setFps(String(snapFps(fps))); // 經 setFps 統一處理：偵測到的影格率一律視為非 Drop-frame，清除殘留的 dropFrame
+    if(deltas.length>=6){ deltas.sort((a,b)=>a-b); const med=deltas[deltas.length>>1]; const raw=1/med;
+      // 不可先 Math.round：整數化會把 29.97→30、23.976→24，毀掉 NTSC 分數影格率的偵測；
+      // 直接把實測值交給 snapFps 對齊到支援集合（23.976/24/25/29.97/30）
+      if(raw>=10&&raw<=120){ const fps=snapFps(raw); setFps(String(fps)); // 經 setFps 統一處理：偵測到的影格率一律視為非 Drop-frame，清除殘留的 dropFrame
         setStatus('偵測到影片 FPS：'+fps,'ok'); } }
   };
   try{ video.requestVideoFrameCallback(cb); }catch(e){}
@@ -273,7 +275,7 @@ const Media = {
         if(self._bgVersion!==myVer) return;
         self.syncMuteState(); renderAudioTracks();
         if(r.wave){
-          try{ const u=await DESK.fileURL(r.wave); const fb=await fetch(u); const buf=await fb.arrayBuffer(); if(self._bgVersion===myVer){ Wave.live=false; const pk=Wave.computeFromWav(buf); Wave.registerSources(r.wave,chs); if(pk)Wave.sources[0].peaks=pk; drawTimeline(); } else if(self._bgVersion===myVer) Wave.initLive(); }
+          try{ const u=await DESK.fileURL(r.wave); const fb=await fetch(u); const buf=await fb.arrayBuffer(); if(self._bgVersion===myVer){ const pk=Wave.computeFromWav(buf); if(pk){ Wave.live=false; Wave.registerSources(r.wave,chs); Wave.sources[0].peaks=pk; drawTimeline(); } else Wave.initLive(); } }
           catch(e2){ console.warn('wave',e2); if(self._bgVersion===myVer) Wave.initLive(); }
         }
         if(self._bgVersion===myVer) setStatus('媒體已載入','ok');
@@ -602,7 +604,7 @@ const Media = {
       const data=new Uint8Array(await readFile(file));
       ff.FS('writeFile','in.media',data);
       const probe=await (async()=>{ let log='';ff.setLogger(({message})=>log+=message+'\n');try{await ff.run('-i','in.media');}catch(e){}ff.setLogger(()=>{});return log;})();
-      const aCount=(probe.match(/Stream #\d+:\d+.*: Audio:/g)||[]).length||1;
+      const aCount=(probe.match(/Stream #\d+:\d+.*: Audio:/g)||[]).length; // 0=無音軌：跳過抽取，不可 ||1 強抽（會整段誤報「轉檔失敗」）
       setStatus('轉檔預覽影片中…','busy');
       await ff.run('-i','in.media','-c:v','libx264','-preset','ultrafast','-crf','26','-an','-movflags','+faststart','prev.mp4');
       const mp4=ff.FS('readFile','prev.mp4');

@@ -1,9 +1,12 @@
 /* SUB Tool — preload：以 contextBridge 安全暴露桌面能力給前端 (window.subtool) */
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('subtool', {
   isDesktop: true,
   status:       () => ipcRenderer.invoke('app:status'),
+  // 拖放的 File 物件 → 絕對路徑（Electron 32 起 File.path 已移除，官方替代為 webUtils.getPathForFile）。
+  // 只接受真正的 File 物件，無法被字串偽造；解析失敗回 null，呼叫端退回瀏覽器路徑。
+  getFilePath:  (file) => { try { return webUtils.getPathForFile(file) || null; } catch (e) { return null; } },
   fileURL:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:fileURL', p); },
   stat:         (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:stat', p); },
   openMedia:    () => ipcRenderer.invoke('dialog:openMedia'),

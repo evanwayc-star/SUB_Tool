@@ -153,7 +153,6 @@ State.defaultKeymap = {
   'paste_cues': [{key:'v', ctrl:true}],
   'select_current': [{key:'g'}],
   'add_note': [{key:'v'}, {key:'m'}],
-  'confirm': [{key:'enter'}],
 };
 State.keymap = JSON.parse(JSON.stringify(State.defaultKeymap));
 

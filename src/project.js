@@ -118,22 +118,24 @@ function isProjectDirty() {
 
 /* ===== 8. 專案 .subtool ============================================== */
 const Project = {
+  // save/saveAs 回傳 Promise<路徑|名稱|null>：null=失敗或使用者取消。
+  // 呼叫端（如關閉前儲存流程）可 await 確認真正寫入完成後再繼續。
   save(){
     const bytes=_buildBytes();
     if(IS_DESKTOP && _savePath){
-      DESK.writeProject(_savePath, bytesToB64(bytes)).then(pth=>{
-        if(pth){ _onSaved(pth); setStatus('已儲存專案', 'ok'); showToast('已儲存專案'); }
-        else showToast('儲存專案失敗，請嘗試「另存新檔」');
+      return DESK.writeProject(_savePath, bytesToB64(bytes)).then(pth=>{
+        if(pth){ _onSaved(pth); setStatus('已儲存專案', 'ok'); showToast('已儲存專案'); return pth; }
+        showToast('儲存專案失敗，請嘗試「另存新檔」'); return null;
       });
     } else {
-      this.saveAs();
+      return this.saveAs();
     }
   },
   saveAs(){
     const bytes=_buildBytes();
     const name=_defaultSaveName();
-    if(IS_DESKTOP){ DESK.saveProject(name,bytesToB64(bytes)).then(pth=>{ if(pth) { _onSaved(pth); setStatus('已另存新檔', 'ok'); showToast('已另存新檔'); } }); }
-    else { downloadBytes(bytes,name,'application/json'); _onSaved(null,name); }
+    if(IS_DESKTOP){ return DESK.saveProject(name,bytesToB64(bytes)).then(pth=>{ if(pth) { _onSaved(pth); setStatus('已另存新檔', 'ok'); showToast('已另存新檔'); } return pth||null; }); }
+    downloadBytes(bytes,name,'application/json'); _onSaved(null,name); return Promise.resolve(name);
   },
   apply(data){
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示

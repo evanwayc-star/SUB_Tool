@@ -13,7 +13,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from 
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys } from './state.js';
 import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
-import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueAfter, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames } from './subtitles.js';
+import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
 import { Project, ensureProjectSaved, resetProject, isProjectDirty } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
@@ -54,8 +54,7 @@ on('fps:changed', ()=>{
   setTimeout(() => {
     if(snapAllCuesToFrames()){
       renderSubList();
-      renderTimeline();
-      emit('subtitles:changed');
+      drawTimeline();
     }
   }, 0);
 });
@@ -891,7 +890,7 @@ function _execCopyTrack(srcIdx, withText){
   const names=State.tracks.map(t=>t.name);
   while(names.includes(name)) name=base+(n++);
   // 複製軌道屬性
-  const tk={name, visible:true, fontScale:srcTrack.fontScale||1, posPct:srcTrack.posPct!=null?srcTrack.posPct:90,
+  const tk={name, visible:true, fontSize:srcTrack.fontSize||60, posPct:srcTrack.posPct!=null?srcTrack.posPct:90,
              align:srcTrack.align||'center', locked:false, color:srcTrack.color||'#ffffff'};
   const newIdx=State.tracks.length;
   State.tracks.push(tk); syncTrackCount();
@@ -1118,7 +1117,8 @@ async function initDesktop(){
     DESK.onAppRequestClose(() => {
       if (isProjectDirty()) {
         openModal('儲存變更', '關閉前是否要儲存專案？', [
-          {label: '儲存', primary: true, act: () => { Project.save(); setTimeout(()=>DESK.closeApp(), 500); }},
+          // 等儲存真正完成（拿到路徑）才關閉；使用者取消存檔對話框則回到編輯畫面，避免資料遺失
+          {label: '儲存', primary: true, act: async () => { const pth = await Project.save(); if (pth) DESK.closeApp(); else closeModal(); }},
           {label: '不儲存', act: () => { DESK.closeApp(); }},
           {label: '取消', act: () => { closeModal(); }}
         ]);

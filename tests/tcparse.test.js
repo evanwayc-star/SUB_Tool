@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 // tcparse -> state -> dom 連鎖相依，dom.js 在載入時即呼叫 document.getElementById，
 // 故此檔需要 jsdom 環境（見稽核 T6：根因為 dom.js 的 import-time 副作用）。
-import { describe, it, expect, beforeEach } from 'vitest';
+// 另：tcparse 的 setupTimecodeInput 需要 menus.js 的 showCtx，而 menus→media→ui/timeline
+// 整條 UI 鏈在載入時就對 DOM 元素掛監聽器（jsdom 空頁面為 null 會直接拋錯），
+// 這裡只測純解析函式，故將 menus.js 以空實作隔離。
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+vi.mock('../src/menus.js', () => ({ showCtx: () => {} }));
 import { State } from '../src/state.js';
 import { parseTimecodeInput } from '../src/tcparse.js';
 

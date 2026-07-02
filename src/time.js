@@ -37,9 +37,12 @@ function secToASS(s, fps=25){
 export function getExactFps(fps) {
   if(!fps) return 30;
   let exactFps = fps;
-  if (Math.abs(fps - 29.97) < 0.05) exactFps = 30000 / 1001;
-  else if (Math.abs(fps - 23.976) < 0.05) exactFps = 24000 / 1001;
-  else if (Math.abs(fps - 59.94) < 0.05) exactFps = 60000 / 1001;
+  // 容差必須 < 0.024（24 與 23.976 的距離）：0.05 會把整數 24→23.976、30→29.97 全部誤判，
+  // 造成所有 24/30fps 專案時碼漂移（每小時 ~3.6 秒）。0.01 足以涵蓋 ffprobe/mpv 回報的
+  // 29.97002997、23.976023976、23.98 等實測值，又不會碰到相鄰整數影格率。
+  if (Math.abs(fps - 29.97) < 0.01) exactFps = 30000 / 1001;
+  else if (Math.abs(fps - 23.976) < 0.01) exactFps = 24000 / 1001;
+  else if (Math.abs(fps - 59.94) < 0.01) exactFps = 60000 / 1001;
   return exactFps;
 }
 
