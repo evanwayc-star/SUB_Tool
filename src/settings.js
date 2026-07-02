@@ -50,7 +50,7 @@ const actionCategories = [
   {
     name: '文字編輯',
     actions: {
-      'confirm': '確認並離開編輯 / 開啟編輯',
+      // 編輯中的 Enter（確認離開）為 contenteditable 內建行為，不在 keymap；開啟編輯＝雙擊列表列
       'newline': '換行',
       'split_cue': '切分字幕',
     }
@@ -121,7 +121,7 @@ function renderSettingsTable(tbody) {
   }
 
   const fixedActions = [
-    'confirm', 'newline', 'split_cue',
+    'newline', 'split_cue',
     'select_all', 'copy_cues', 'paste_cues',
     'delete_selected', 'cancel',
     'save_project', 'save_as',

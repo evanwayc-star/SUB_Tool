@@ -101,7 +101,9 @@ function saveConfig() {
 }
 
 State.defaultKeymap = {
-  'toggle_play_pause': [{key:' '}],
+  // Enter 在非編輯狀態下＝播放/暫停（編輯中的 Enter 由 contenteditable handler 處理：確認離開/換行/切分）；
+  // 開啟字幕文字編輯改以雙擊列表列
+  'toggle_play_pause': [{key:' '}, {key:'enter'}],
   'rewind': [{key:'j'}],
   'pause': [{key:'k'}],
   'forward': [{key:'l'}],
@@ -184,6 +186,7 @@ function _migrateKeymap(km){
     toggle_check_panel: '[{"key":"9"}]',
     prev_cue_5f:        '[{"key":"5","code":"Numpad5"}]',
     next_cue_5f:        '[{"key":"2","code":"Numpad2"}]',
+    toggle_play_pause:  '[{"key":" "}]', // v4.4.3：Enter 併入播放/暫停
   };
   for(const [act, oldJson] of Object.entries(OLD)){
     try{
@@ -191,6 +194,8 @@ function _migrateKeymap(km){
         km[act] = JSON.parse(JSON.stringify(State.defaultKeymap[act]));
     }catch(e){}
   }
+  // v4.4.3：confirm（Enter 開啟編輯）已移除，Enter 讓給播放/暫停；編輯中行為不受 keymap 控制
+  delete km.confirm;
 }
 
 function saveKeys() {

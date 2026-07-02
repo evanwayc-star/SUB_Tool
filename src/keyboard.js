@@ -336,7 +336,6 @@ window.addEventListener('keydown',e=>{
       else { setStatus('目前時間點沒有字幕', ''); }
       break;
     case 'add_note': e.preventDefault(); addNote(); break;
-    case 'confirm': e.preventDefault(); { const sel=State.selectedId; if(sel){ const row=sublist.querySelector(`.sub-row[data-id="${sel}"]`); if(row)row.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window})); } } break;
   }
 });
 window.addEventListener('keyup',e=>{
