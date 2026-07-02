@@ -40,6 +40,7 @@ Main (main.js)
 | `status()` | `app:status` | R→M | 回傳 `{ffmpeg, venc, mpv}` 狀態 |
 | `fileURL(path)` | `fs:fileURL` | R→M | 本地路徑 → 可播放 URL |
 | `stat(path)` | `fs:stat` | R→M | 回傳 `{exists, size}` |
+| `getFilePath(file)` | —（preload 內直接呼叫 `webUtils.getPathForFile`，無 IPC） | R | 拖放的 `File` 物件 → 絕對路徑。Electron 32 起 `File.path` 已移除；只接受真正的 File 物件、失敗回 `null`。供拖放影音走桌面載入路徑（`loadDesktopMedia`） |
 | `readB64(path)` | `fs:readB64` | R→M | 讀檔回 base64 字串 |
 | `writeProject(path, b64)` | `fs:writeProject` | R→M | 直接寫入指定路徑（自動備份用） |
 | `openMedia()` | `dialog:openMedia` | R→M | 系統開檔對話框（影音），回傳路徑 |
@@ -66,7 +67,7 @@ Main (main.js)
 | `mpv.mute(v)` | `mpv:mute` | R→M | 靜音切換 |
 | `mpv.rate(r)` | `mpv:rate` | R→M | 播放速率 |
 | `mpv.setBounds(b)` | `mpv:setBounds` | R→M | 更新 mpv 覆蓋視窗位置與大小 |
-| `mpv.show(v)` | `mpv:show` | R→M | 顯示 / 隱藏 mpv 視窗 |
+| `mpv.show(v)` | `mpv:show` | R→M | 顯示 / 隱藏 mpv 視窗。mpv 為 OS 層子視窗、HTML z-index 蓋不過：前端 `_syncMpvPanel()`（app.js）在對話框（含快捷鍵設定）、重疊影片的浮動面板／搜尋視窗／右鍵選單開啟時自動呼叫此方法讓位，關閉後恢復（`mpv:sync` 事件） |
 | `mpv.subSet(ass)` | `mpv:subSet` | R→M | 餵入 ASS 字幕（防抖 100ms） |
 | `mpv.quit()` | `mpv:quit` | R→M | 關閉 mpv |
 | `mpv.onEvent(cb)` | `mpv:event` | M→R | mpv 事件推播（`time-pos`, `duration`, `pause`, `eof` 等） |
