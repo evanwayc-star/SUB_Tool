@@ -108,11 +108,14 @@ State.defaultKeymap = {
   'zoom_out': [{key:'1'}, {key:'-'}, {code:'NumpadSubtract'}],
   'zoom_in': [{key:'2'}, {key:'='}, {code:'NumpadAdd'}],
   'zoom_fit': [{key:'`'}, {key:'\\'}, {code:'NumpadMultiply'}],
-  'prev_cue_5f': [{key:'5', code:'Numpad5'}],
-  'next_cue_5f': [{key:'2', code:'Numpad2'}],
-  'toggle_history': [{key:'7'}],
-  'toggle_notes': [{key:'8'}],
-  'toggle_check_panel': [{key:'9'}],
+  // 主鍵盤與數字鍵盤分離：數字鍵盤一律以 code（NumpadX）綁定，主鍵盤數字以 key 綁定。
+  // matchAction（keyboard.js）配合此約定：含 code 的綁定只比對 code；
+  // 數字鍵盤產生的字元鍵不會命中 key 綁定（所以 zoom_in 的 '2' 只吃主鍵盤 2）。
+  'prev_cue_5f': [{code:'Numpad5'}],
+  'next_cue_5f': [{code:'Numpad2'}],
+  'toggle_history': [{code:'Numpad7'}],
+  'toggle_notes': [{code:'Numpad8'}],
+  'toggle_check_panel': [{code:'Numpad9'}],
   'search': [{key:'f', ctrl:true}],
   'toggle_sub_mode': [{key:'y'}],
   'set_in': [{key:'i'}, {key:'q'}],
@@ -168,6 +171,25 @@ async function loadKeys() {
   }
   if (loaded && Object.keys(loaded).length > 0) {
     State.keymap = Object.assign(JSON.parse(JSON.stringify(State.defaultKeymap)), loaded);
+    _migrateKeymap(State.keymap);
+  }
+}
+
+/* 鍵位遷移（v4.4.2 主鍵盤/數字鍵盤分離）：舊存檔裡的「舊版預設綁定」改為新的 Numpad code 形式。
+   只在綁定仍等於舊版預設值時轉換，使用者自訂過的一律不動。 */
+function _migrateKeymap(km){
+  const OLD = {
+    toggle_history:     '[{"key":"7"}]',
+    toggle_notes:       '[{"key":"8"}]',
+    toggle_check_panel: '[{"key":"9"}]',
+    prev_cue_5f:        '[{"key":"5","code":"Numpad5"}]',
+    next_cue_5f:        '[{"key":"2","code":"Numpad2"}]',
+  };
+  for(const [act, oldJson] of Object.entries(OLD)){
+    try{
+      if(JSON.stringify(km[act]) === oldJson)
+        km[act] = JSON.parse(JSON.stringify(State.defaultKeymap[act]));
+    }catch(e){}
   }
 }
 

@@ -180,6 +180,11 @@ window.addEventListener('keydown',e=>{
     const ctrl = ev.ctrlKey || ev.metaKey;
     const shift = ev.shiftKey;
     const alt = ev.altKey;
+    // 數字鍵盤（NumLock 開）的字元鍵 key 值與主鍵盤相同（Numpad2 → '2'），
+    // 若允許命中 key 綁定，會先撞上主鍵盤數字的動作（如 zoom_in 的 '2'）。
+    // 故：數字鍵盤字元鍵只能以 code 綁定；key.length>1 的（NumpadEnter→'enter'、
+    // NumLock 關時 Numpad2→'arrowdown'）不受限，照常走 key 綁定。
+    const numpadChar = code && code.startsWith('Numpad') && key.length === 1;
 
     for (const [action, binds] of Object.entries(State.keymap)) {
       if (!binds) continue;
@@ -187,7 +192,8 @@ window.addEventListener('keydown',e=>{
         if (!!bind.ctrl !== ctrl) continue;
         if (!!bind.shift !== shift) continue;
         if (!!bind.alt !== alt) continue;
-        if (bind.code && bind.code === code) return action;
+        if (bind.code) { if (bind.code === code) return action; continue; } // 含 code 的綁定只比對 code
+        if (numpadChar) continue;
         if (bind.key && bind.key === key) return action;
       }
     }
