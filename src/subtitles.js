@@ -383,7 +383,10 @@ function selectCue(id,opts){
   if(opts.seek&&c){
     if(c.timed!==false){
       const t = Media.displayTime();
-      if(t < c.start || t > c.end){
+      // 字幕作用區間為 [start, end)：播放點正好落在 end 時字幕已不在播放中，
+      // 視為「範圍外」→ 回到 in 點（否則選無時間碼字幕先把播放點移到前一句 end，
+      // 再選該前一句時會卡在 end、不回 in 點）。
+      if(t < c.start || t >= c.end){
         Media.seek(snapTimeToFrame(c.start, State.fps, State.dropFrame)); emit('playhead:ensure'); emit('render:videoSub');
       }
     }else{
