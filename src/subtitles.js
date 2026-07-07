@@ -233,6 +233,18 @@ function renderCheckPanel(){
   const twoNums  =list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n/g)||[]).length===1?i+1:null;}).filter(n=>n!==null);
   // 空白字幕
   const blankNums=list.map((c,i)=>!(c.text||'').trim()?i+1:null).filter(n=>n!==null);
+  
+  // 連續相同
+  const consecutiveIdenticalSet = new Set();
+  for(let i=1; i<list.length; i++){
+    const t1 = (list[i-1].text||'').trim();
+    const t2 = (list[i].text||'').trim();
+    if(t1 && t1 === t2){
+      consecutiveIdenticalSet.add(i);
+      consecutiveIdenticalSet.add(i+1);
+    }
+  }
+  const consecutiveIdenticalNums = Array.from(consecutiveIdenticalSet).sort((a,b)=>a-b);
   // 頭尾空白
   const trimNums=list.map((c,i)=>{
     const t=c.text||'';
@@ -256,13 +268,14 @@ function renderCheckPanel(){
   const noTimeNums=list.map((c,i)=>c.timed===false?i+1:null).filter(n=>n!==null);
   
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
-  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rt=$('cpTrim'),rn=$('cpNoTime');
+  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rt=$('cpTrim'),rn=$('cpNoTime'),rci=$('cpConsecutiveIdentical');
   if(rn)rn.querySelector('.cp-nums').innerHTML=mkNums(noTimeNums);
   if(ro)ro.querySelector('.cp-nums').innerHTML=mkNums(overlapNums);
   if(rm)rm.querySelector('.cp-nums').innerHTML=mkNums(multiNums);
   if(rt)rt.querySelector('.cp-nums').innerHTML=mkNums(trimNums);
   if(r2)r2.querySelector('.cp-nums').innerHTML=mkNums(twoNums);
   if(rb)rb.querySelector('.cp-nums').innerHTML=mkNums(blankNums);
+  if(rci)rci.querySelector('.cp-nums').innerHTML=mkNums(consecutiveIdenticalNums);
   if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'—';
   if(rc)rc.querySelector('.cp-nums').innerHTML=_checkContains.length?mkNums(containsNums):'—';
   panel.querySelectorAll('.cp-num').forEach(el=>{
