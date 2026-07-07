@@ -245,6 +245,14 @@ function renderCheckPanel(){
     }
   }
   const consecutiveIdenticalNums = Array.from(consecutiveIdenticalSet).sort((a,b)=>a-b);
+  
+  // SRT標籤
+  const bNums=list.map((c,i)=>/<\/?b>/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
+  const iNums=list.map((c,i)=>/<\/?i>/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
+  const uNums=list.map((c,i)=>/<\/?u>/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
+  const fontNums=list.map((c,i)=>/<\/?font/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
+  const posNums=list.map((c,i)=>/\{\\an\d\}/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
+  
   // 頭尾空白
   const trimNums=list.map((c,i)=>{
     const t=c.text||'';
@@ -269,6 +277,7 @@ function renderCheckPanel(){
   
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
   const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rt=$('cpTrim'),rn=$('cpNoTime'),rci=$('cpConsecutiveIdentical');
+  const sb=$('cpSrtB'),si=$('cpSrtI'),su=$('cpSrtU'),sf=$('cpSrtFont'),sp=$('cpSrtPos');
   if(rn)rn.querySelector('.cp-nums').innerHTML=mkNums(noTimeNums);
   if(ro)ro.querySelector('.cp-nums').innerHTML=mkNums(overlapNums);
   if(rm)rm.querySelector('.cp-nums').innerHTML=mkNums(multiNums);
@@ -276,6 +285,11 @@ function renderCheckPanel(){
   if(r2)r2.querySelector('.cp-nums').innerHTML=mkNums(twoNums);
   if(rb)rb.querySelector('.cp-nums').innerHTML=mkNums(blankNums);
   if(rci)rci.querySelector('.cp-nums').innerHTML=mkNums(consecutiveIdenticalNums);
+  if(sb)sb.querySelector('.cp-nums').innerHTML=mkNums(bNums);
+  if(si)si.querySelector('.cp-nums').innerHTML=mkNums(iNums);
+  if(su)su.querySelector('.cp-nums').innerHTML=mkNums(uNums);
+  if(sf)sf.querySelector('.cp-nums').innerHTML=mkNums(fontNums);
+  if(sp)sp.querySelector('.cp-nums').innerHTML=mkNums(posNums);
   if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'—';
   if(rc)rc.querySelector('.cp-nums').innerHTML=_checkContains.length?mkNums(containsNums):'—';
   panel.querySelectorAll('.cp-num').forEach(el=>{

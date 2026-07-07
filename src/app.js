@@ -530,6 +530,17 @@ async function doAction(act, force = false){
     case 'replace-one': searchReplace(false); break;
     case 'replace-all': searchReplace(true); break;
     case 'trim-track': trimTrackSpaces(); break;
+    case 'remove-srt-tags': {
+      let changed = false;
+      State.cues.forEach(c => {
+        if (c.text) {
+          const nt = c.text.replace(/<[^>]+>|\{\\[^}]+\}/g, '');
+          if (nt !== c.text) { c.text = nt; changed = true; }
+        }
+      });
+      if (changed) { recordHistory('清除 SRT 標籤'); emit('render:all'); setStatus('已清除所有標籤', 'ok'); }
+      else { setStatus('未發現可清除的標籤', ''); }
+    } break;
     case 'settings': showSettingsModal(); break;
     case 'modal-close': closeModal(); break;
     case 'toggle-auto-select':
