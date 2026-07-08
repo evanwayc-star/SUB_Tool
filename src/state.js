@@ -159,6 +159,7 @@ State.defaultKeymap = {
   'paste_cues': [{key:'v', ctrl:true}],
   'select_current': [{key:'g'}],
   'add_note': [{key:'v'}, {key:'m'}],
+  'split_clip': [{key:'k', ctrl:true}], // 在播放點切割影片段（影片序列）
 };
 State.keymap = JSON.parse(JSON.stringify(State.defaultKeymap));
 

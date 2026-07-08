@@ -87,13 +87,35 @@ const Seq = {
     const e = this.end();
     if(Math.abs((State.duration || 0) - e) > 1e-9){ State.duration = e; emit('duration:known'); }
   },
-  /* 歷史快照（僅幾何：位置/修剪；clip 成員與媒體資源不入 undo） */
-  snapshot(){ return State.clips.map(c => ({ id: c.id, in: c.in, out: c.out, offset: c.offset })); },
+  /* 歷史快照：幾何 + 成員（切割/移除/加入才能正確 undo）。
+     peaks（Float32Array）不入快照（大且可再共享）；還原時依來源（path/url）從現存 clip 重新連結。 */
+  snapshot(){
+    return State.clips.map(c => ({ id: c.id, name: c.name, path: c.path || null,
+      web: c.web ? { url: c.web.url } : null, dur: c.dur, fps: c.fps || 0,
+      primary: !!c.primary, audioSrc: c.audioSrc || null,
+      in: c.in, out: c.out, offset: c.offset }));
+  },
   restore(list){
     if(!Array.isArray(list)) return;
+    if(list.length === 0){
+      // 快照建立於影片載入前（如「初始」）：媒體載入不入 undo →
+      // 保留主媒體片段並還原為載入時的完整狀態，而非清空序列
+      const pri = State.clips.find(c => c.primary);
+      State.clips.length = 0;
+      if(pri){ pri.in = 0; pri.out = pri.dur; pri.offset = 0; State.clips.push(pri); }
+      this.sort(); this.recomputeDuration(); return;
+    }
+    const old = new Map(State.clips.map(c => [c.id, c]));
+    const peaksBySrc = new Map();
+    for(const c of State.clips){ const k = c.path || (c.web && c.web.url); if(k && c.peaks && !peaksBySrc.has(k)) peaksBySrc.set(k, c.peaks); }
+    State.clips.length = 0;
     for(const s of list){
-      const c = this.byId(s.id);
-      if(c){ c.in = s.in; c.out = s.out; c.offset = s.offset; }
+      const ex = old.get(s.id);
+      if(ex){ ex.in = s.in; ex.out = s.out; ex.offset = s.offset; State.clips.push(ex); }
+      else{
+        const k = s.path || (s.web && s.web.url);
+        State.clips.push({ ...s, web: s.web ? { url: s.web.url } : null, peaks: (k && peaksBySrc.get(k)) || null });
+      }
     }
     this.sort(); this.recomputeDuration();
   },

@@ -68,6 +68,12 @@ const actionCategories = [
     }
   },
   {
+    name: '影片序列',
+    actions: {
+      'split_clip': '在播放點切割影片段',
+    }
+  },
+  {
     name: '時間軸縮放',
     actions: {
       'zoom_out': '縮小時間軸',

@@ -182,7 +182,23 @@ tlScroll.addEventListener('contextmenu',e=>{
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
     const items=[{heading:true,label:'🎬 '+c.name}];
+    // 播放頭在此段內 → 可就地切割（等同 Ctrl+K）
+    const pt=Media.displayTime();
+    if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
     items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
+    // 相鄰段交換（依時間軸順序；保留兩段之間的間距）
+    const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
+    const idx=sorted.indexOf(c);
+    const swap=(a,b)=>{ // a=前段 b=後段
+      const gap=b.offset-Seq.clipEnd(a), start=a.offset;
+      b.offset=start; a.offset=start+Seq.len(b)+gap;
+      Seq.sort(); Seq.recomputeDuration();
+      recordHistory('影片段交換');
+      Media.seek(Math.min(Media.displayTime(), State.duration||0));
+      drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+    };
+    if(idx>0) items.push({label:'◀ 與前一段交換',act:()=>swap(sorted[idx-1], c)});
+    if(idx<sorted.length-1) items.push({label:'▶ 與後一段交換',act:()=>swap(c, sorted[idx+1])});
     if(trimmed) items.push({label:'↺ 重設修剪（還原完整長度）',act:()=>{
       const save={in:c.in,out:c.out};
       c.in=0; c.out=c.dur;
@@ -190,10 +206,10 @@ tlScroll.addEventListener('contextmenu',e=>{
       if(ov){ c.in=save.in; c.out=save.out; showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return; }
       Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name); drawTimeline();
     }});
-    if(!c.primary){
+    if(State.clips.length>1){
       items.push({sep:true});
       items.push({label:'🗑 從序列移除',act:()=>{
-        if(Media.removeClip(c.id)){ recordHistory('移除影片：'+c.name); drawTimeline(); }
+        if(Media.removeClip(c.id)){ recordHistory('移除影片段：'+c.name); drawTimeline(); }
       }});
     }
     showCtx(e.clientX,e.clientY,items);

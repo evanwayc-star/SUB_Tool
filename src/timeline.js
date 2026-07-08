@@ -179,7 +179,8 @@ function drawWave(){
     let pk=Wave.peaks, bT=t;
     if(seqMode){
       const c=Seq.clipAt(t); if(!c) continue;
-      pk=c.peaks || (c.primary ? Wave.peaks : null); if(!pk) continue;
+      // 主媒體來源（含其切割片段，audioSrc==='video'）用 Wave.peaks；其他來源用各自的 peaks
+      pk=c.peaks || ((c.primary || c.audioSrc==='video') ? Wave.peaks : null); if(!pk) continue;
       bT=Seq.toSource(t, c);
     }
     if(!pk) continue;

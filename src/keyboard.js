@@ -338,6 +338,7 @@ window.addEventListener('keydown',e=>{
       else { setStatus('目前時間點沒有字幕', ''); }
       break;
     case 'add_note': e.preventDefault(); addNote(); break;
+    case 'split_clip': e.preventDefault(); Media.splitClipAt(Media.displayTime()); break;
   }
 });
 window.addEventListener('keyup',e=>{

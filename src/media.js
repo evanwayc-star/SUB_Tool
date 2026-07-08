@@ -414,7 +414,7 @@ const Media = {
     let res;
     try{ res=await DESK.mpv.launch({src:p, bounds:this._mpvRect(), audio}); }
     catch(e){ showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); $('videoSub').style.display=''; video.style.display=''; return; }
-    this.mpvMode=true; this._mpvTime=0;
+    this.mpvMode=true; this._mpvTime=0; this._mpvPath=p;
     this._mpvDuration=res.duration||dur||0;
     State.duration=this._mpvDuration;
     if(info?.video?.fps) setFps(info.video.fps);
@@ -756,9 +756,10 @@ const Media = {
     return c ? Seq.toTimeline(this.vTime(), c) : this.vTime();
   },
   /* 依 clip 切換「可聽見」的音軌集合：clip 綁定的（'video' 或 'clip:*'）只留當前 clip，
-     ext-*（外部參考音檔）不受影響、永遠跟時間軸 */
+     ext-*（外部參考音檔）不受影響、永遠跟時間軸。
+     audioSrc：同一來源檔切割出的片段共用同一組音軌（'video'＝主媒體、'clip:<原始id>'＝加入的影片） */
   _applyClipAudio(c){
-    const src = c.primary ? 'video' : ('clip:' + c.id);
+    const src = c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id));
     this.activeSource = src;
     for(const tr of this.tracks){
       const s = tr.source || 'video';
@@ -793,8 +794,11 @@ const Media = {
       if(this.mpvMode){
         if(c.path && DESK?.mpv?.loadfile){
           this.stopElementSources();
-          const r = await DESK.mpv.loadfile(c.path).catch(()=>null);
-          if(r && r.duration) Seq.updateSourceDur(c, r.duration);
+          if(this._mpvPath !== c.path){ // 不同來源檔才需 loadfile（同檔切割片段只 seek，近乎無縫）
+            const r = await DESK.mpv.loadfile(c.path).catch(()=>null);
+            if(r && r.duration) Seq.updateSourceDur(c, r.duration);
+            this._mpvPath = c.path;
+          }
           this._mpvTime = localT;
           DESK.mpv.seek(localT).catch(()=>{});
           emit('mpv:refreshSubs'); // 換 clip 後字幕需以新映射重擠（app.js 會做 offset 位移）
@@ -860,14 +864,31 @@ const Media = {
   },
   /* 第一支影片載入完成時登錄為 primary clip（reset() 已清空舊序列） */
   _registerPrimary(meta){
-    const c = Seq.add({ ...meta, primary: true, offset: 0 });
+    const c = Seq.add({ ...meta, primary: true, audioSrc: 'video', offset: 0 });
     this.activeClipId = c.id;
-    // 開啟專案時還原其餘 clip（桌面：以路徑重建；幾何取自專案檔）
+    // 開啟專案時還原其餘 clip（桌面：以路徑重建；同一來源的切割片段共用資源、只 ingest 一次）
     const pend = State._pendingClips; delete State._pendingClips;
     if(DESK && Array.isArray(pend)){
-      const pri = pend.find(x=>x.primary);
+      const pri = pend.find(x=>x.primary) || pend.find(x=>x.path===c.path);
       if(pri){ c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0; Seq.sort(); Seq.recomputeDuration(); }
-      (async()=>{ for(const pc of pend){ if(pc.primary || !pc.path) continue; await this.addClipDesktop(pc.path, pc).catch(()=>{}); } })();
+      (async()=>{
+        const made = new Map(); if(c.path) made.set(c.path, c); // 來源路徑 → 首段（提供共用資源）
+        for(const pc of pend){
+          if(pc === pri || !pc.path) continue;
+          const base = made.get(pc.path);
+          if(base){ // 同來源的切割片段：直接建 clip 共用資源
+            const piece = Seq.add({ name: pc.name || base.name, path: base.path, web: base.web || null,
+              dur: base.dur, fps: base.fps || 0, peaks: base.peaks,
+              audioSrc: base.audioSrc || ('clip:' + base.id),
+              in: pc.in ?? 0, out: Math.min(pc.out ?? base.dur, base.dur), offset: pc.offset ?? undefined });
+            if(pc.offset != null) piece.offset = pc.offset;
+          } else {
+            const added = await this.addClipDesktop(pc.path, pc).catch(()=>null);
+            if(added) made.set(pc.path, added);
+          }
+        }
+        Seq.sort(); Seq.recomputeDuration(); drawTimeline();
+      })();
     }
     return c;
   },
@@ -900,6 +921,7 @@ const Media = {
     const meta = { name: baseName(p), path: p, dur, fps };
     if(!this.mpvMode){ try{ meta.web = { url: await DESK.fileURL(p) }; }catch(e){} }
     const c = Seq.add(meta);
+    c.audioSrc = 'clip:' + c.id; // 此來源的音軌識別（切割片段將共用）
     if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; Seq.sort(); Seq.recomputeDuration(); }
     drawTimeline();
     emit('history:record', '加入影片：' + c.name);
@@ -955,6 +977,7 @@ const Media = {
     });
     if(!dur){ showToast('無法讀取此影片，未加入'); setStatus('', ''); URL.revokeObjectURL(url); return; }
     const c = Seq.add({ name: f.name, web: { url }, dur });
+    c.audioSrc = 'clip:' + c.id;
     drawTimeline();
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}`, 'ok');
@@ -978,18 +1001,44 @@ const Media = {
     } else showToast('檔案較大：此段不產生波形（可另載入音訊檔）');
     return c;
   },
-  /* 自序列移除 clip（primary 不可移除；資源一併清理） */
+  /* 在播放點切割影片段（Ctrl+K）：一段變兩段，共用來源（音軌/波形/播放資源） */
+  splitClipAt(t){
+    if(!this.seqOn()){ showToast('尚未載入影片'); return false; }
+    t = snapTimeToFrame(t, State.fps, State.dropFrame);
+    const c = Seq.clipAt(t);
+    if(!c){ showToast('播放點不在任何影片段上'); return false; }
+    const cut = Seq.toSource(t, c);
+    const MIN = 0.2;
+    if(cut < c.in + MIN || cut > c.out - MIN){ showToast('切點太靠近段落邊界'); return false; }
+    Seq.add({
+      name: c.name, path: c.path || null, web: c.web || null, dur: c.dur, fps: c.fps || 0,
+      peaks: c.peaks, // 共用來源波形（來源時間索引，兩段各取自己的窗）
+      audioSrc: c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id)),
+      in: cut, out: c.out, offset: t,
+    });
+    c.out = cut;
+    Seq.sort(); Seq.recomputeDuration();
+    drawTimeline();
+    emit('history:record', '切割影片：' + c.name);
+    setStatus(`已於 ${secToEncore(t, State.fps, State.dropFrame)} 切割「${c.name}」`, 'ok');
+    return true;
+  },
+  /* 自序列移除 clip（至少保留一段；音軌僅在無其他片段共用時清理） */
   removeClip(id){
     const c = Seq.byId(id); if(!c) return false;
-    if(c.primary){ showToast('第一支影片無法移除（請用「開新專案」或載入取代）'); return false; }
-    this.tracks = this.tracks.filter(tr => {
-      if(tr.source === 'clip:' + id){
-        try{ if(tr.el){ tr.el.pause(); tr.el.src = ''; } }catch(e){}
-        try{ tr.gain && tr.gain.disconnect(); }catch(e){}
-        return false;
-      }
-      return true;
-    });
+    if(State.clips.length <= 1){ showToast('序列至少需保留一段（請用「開新專案」或載入取代）'); return false; }
+    const src = c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id));
+    const stillUsed = State.clips.some(o => o !== c && (o.audioSrc || (o.primary ? 'video' : ('clip:' + o.id))) === src);
+    if(!stillUsed && src.startsWith('clip:')){
+      this.tracks = this.tracks.filter(tr => {
+        if(tr.source === src){
+          try{ if(tr.el){ tr.el.pause(); tr.el.src = ''; } }catch(e){}
+          try{ tr.gain && tr.gain.disconnect(); }catch(e){}
+          return false;
+        }
+        return true;
+      });
+    }
     if(this.activeClipId === id) this.activeClipId = null;
     Seq.remove(id);
     this.seek(Math.min(this.displayTime(), State.duration || 0)); // 重新解析目前位置（可能已成間隙）
@@ -1333,7 +1382,7 @@ const Media = {
     this.objectURLs.forEach(u=>{try{URL.revokeObjectURL(u);}catch(e){}}); this.objectURLs=[];
     this.playing=false; this._vTime=0; this._vStart=null;
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）
-    Seq.clear(); this.activeClipId=null;
+    Seq.clear(); this.activeClipId=null; this._mpvPath=null;
     this._gap=false; this._gapT=0; this._gapStart=null; this._seqSwitching=false;
     video.style.visibility='';
     const pb=$('playBtn'); if(pb) pb.textContent='▶';
@@ -1452,8 +1501,9 @@ const Wave = {
   },
   captureLive(){ // 由 rafLoop 於播放時呼叫
     if(!this.live||!this.peaks||!Media.analyser)return;
-    // 序列：Wave.peaks 屬 primary clip（來源時間索引）；非 primary 播放中或間隙時不得寫入（會污染 primary 波形）
-    if(Media.seqOn()){ const c=Media._activeClip(); if(Media._gap || !c || !c.primary) return; }
+    // 序列：Wave.peaks 屬主媒體來源（來源時間索引）；非主媒體片段播放中或間隙時不得寫入（會污染波形）。
+    // 主媒體切割出的片段（audioSrc==='video'）寫入是正確的——同一來源、同一索引域。
+    if(Media.seqOn()){ const c=Media._activeClip(); if(Media._gap || !c || (c.audioSrc||(c.primary?'video':''))!=='video') return; }
     const buf=Media._anBuf; Media.analyser.getFloatTimeDomainData(buf);
     let mn=0,mx=0; for(let i=0;i<buf.length;i++){const v=buf[i]; if(v<mn)mn=v; if(v>mx)mx=v;}
     const t=video.currentTime||0; const b=Math.floor(t*this.resolution);
