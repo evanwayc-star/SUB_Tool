@@ -13,9 +13,16 @@ import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
+import { Seq } from './sequence.js';
 
 /* ===== 5. 時間軸 ====================================================== */
 const RULER_H=24, WAVE_H=64, ROW_H=64;  // default/min values; actual stored in State
+
+/* 影片序列區塊層：覆蓋在波形列上（動態建立，免改 index.html）。
+   容器 pointer-events:none、區塊本身 auto——空白波形處仍可拖曳捲動/框選。 */
+const tlClips=document.createElement('div');
+tlClips.id='tlClips';
+tlLayer.appendChild(tlClips);
 function waveH(){ return State.waveH||WAVE_H; }
 function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
 function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
@@ -47,6 +54,7 @@ function layoutTimeline(){
   const wh=waveH();
   waveCv.width=vw*devicePixelRatio; waveCv.height=wh*devicePixelRatio;
   waveCv.style.width=vw+'px'; waveCv.style.height=wh+'px'; waveCv.style.top=RULER_H+'px';
+  tlClips.style.top=RULER_H+'px'; tlClips.style.height=wh+'px';
   tlTracks.style.top=tracksTop()+'px';
   const gutWave=document.querySelector('.tl-gutter-wave');
   if(gutWave) gutWave.style.height=wh+'px';
@@ -159,17 +167,29 @@ function drawWave(){
     const dx0=Math.max(0,timeToX(0)), dx1=Math.min(vw,timeToX(State.duration));
     if(dx1>dx0){ ctx.fillStyle='#1a2530'; ctx.fillRect(dx0,0,dx1-dx0,h); }
   }
-  if(!Wave.peaks){ctx.restore();return;}
+  const seqMode=Seq.active();
+  if(!Wave.peaks && !seqMode){ctx.restore();return;}
   const mid=h/2, amp=h*0.46;
   ctx.strokeStyle='#3fa9f5';ctx.globalAlpha=0.9;ctx.beginPath();
-  const res=Wave.resolution, peaks=Wave.peaks, n=peaks.length/2;
+  const res=Wave.resolution;
   for(let x=0;x<vw;x++){
-    const t=xToTime(x); const b=Math.floor(t*res);
+    const t=xToTime(x);
+    // 序列模式：像素時間 → 所在 clip 的來源時間，取該 clip 的 peaks（primary 沿用 Wave.peaks，
+    // 含播放中即時擷取）。間隙處無波形。
+    let pk=Wave.peaks, bT=t;
+    if(seqMode){
+      const c=Seq.clipAt(t); if(!c) continue;
+      pk=c.peaks || (c.primary ? Wave.peaks : null); if(!pk) continue;
+      bT=Seq.toSource(t, c);
+    }
+    if(!pk) continue;
+    const n=pk.length/2;
+    const b=Math.floor(bT*res);
     if(b<0||b>=n)continue;
-    let mn=peaks[b*2],mx=peaks[b*2+1];
+    let mn=pk[b*2],mx=pk[b*2+1];
     // 若一像素跨多桶，取極值
-    const t2=xToTime(x+1); const b2=Math.min(n-1,Math.floor(t2*res));
-    for(let k=b+1;k<=b2;k++){ if(peaks[k*2]<mn)mn=peaks[k*2]; if(peaks[k*2+1]>mx)mx=peaks[k*2+1]; }
+    const b2=Math.min(n-1,Math.floor((bT+(xToTime(x+1)-t))*res));
+    for(let k=b+1;k<=b2;k++){ if(pk[k*2]<mn)mn=pk[k*2]; if(pk[k*2+1]>mx)mx=pk[k*2+1]; }
     ctx.moveTo(x+0.5,mid-mx*amp);ctx.lineTo(x+0.5,mid-mn*amp);
   }
   ctx.stroke();
@@ -346,7 +366,30 @@ function _onRowResizeUp(){
   gutWave.appendChild(h);
 })();
 
+/* 影片序列區塊（波形列上）：位置=offset、寬=修剪後長度；拖曳移動、拖邊緣修剪、右鍵選單 */
+function renderClipBlocks(){
+  tlClips.innerHTML='';
+  if(!Seq.active()) return;
+  const vw=viewportW(); const t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
+  for(const c of State.clips){
+    const s=c.offset, e=Seq.clipEnd(c);
+    if(e<t0||s>t1) continue;
+    const el=document.createElement('div');
+    el.className='clip-block'+(c.id===Media.activeClipId?' active':'');
+    const x1=timeToX(s), x2=timeToX(e);
+    el.style.left=x1+'px'; el.style.width=Math.max(6,x2-x1)+'px';
+    el.dataset.clipId=c.id;
+    const trimmed=c.in>0.01||c.out<c.dur-0.01;
+    el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}</div><div class="edge r"></div>`;
+    el.title=`${c.name}\n位置 ${secToEncore(s,State.fps,State.dropFrame)} → ${secToEncore(e,State.fps,State.dropFrame)}`+
+      `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
+      `\n拖曳＝移動｜拖左右邊緣＝修剪｜右鍵＝選單`;
+    tlClips.appendChild(el);
+  }
+}
+
 function renderCueBlocks(){
+  renderClipBlocks(); // 波形列上的影片區塊與字幕區塊同步重繪（捲動/縮放/全繪路徑共用此入口）
   tlTracks.querySelectorAll('.cue-block,.cue-overlap').forEach(e=>e.remove());
   const rows=[...tlTracks.querySelectorAll('.tl-track')];
   const vw=viewportW(); const t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
@@ -498,6 +541,20 @@ let _noteClickState=null; // 備註標記雙擊偵測 { id, t }
 tlScroll.addEventListener('mousedown',e=>{
   if(e.button!==0)return;
   hideCtx();
+  /* 影片序列區塊：拖曳=移動 offset、拖左右邊緣=修剪 in/out（不可與相鄰影片重疊） */
+  const clipEl=e.target.closest('.clip-block');
+  if(clipEl){
+    const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
+    if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; }
+    if(e.detail<2) jklReset(); // 播放中拖動影片區塊 → 先暫停（映射不可邊播邊變）
+    const nb=Seq.neighborBounds(c);
+    const mode=e.target.classList.contains('edge')?(e.target.classList.contains('l')?'clip-l':'clip-r'):'clip-move';
+    drag={mode, clip:c, clipEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft, moved:false,
+      os:c.offset, oin:c.in, oout:c.out,
+      leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+(c.out-c.in)), // 右鄰左緣（時間軸）
+      nb, snaps:[...snapTargets(new Set()), ...Seq.snapEdges(c.id)]};
+    e.preventDefault(); return;
+  }
   const overlap=e.target.closest('.cue-overlap');
   let block=e.target.closest('.cue-block');
   
@@ -596,7 +653,7 @@ const _handleDragUpdate = (e) => {
     updatePlayhead(); emit('render:videoSub'); 
     updateSnapGuide(null); return;
   }
-  if(drag.mode==='move'||drag.mode==='l'||drag.mode==='r'||drag.mode==='rubber'){
+  if(drag.mode!=='scrub'){ // 含 cue 模式與 clip-move/clip-l/clip-r
     if(Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)drag.moved=true;
   }
   if(drag.mode==='rubber'){
@@ -609,6 +666,45 @@ const _handleDragUpdate = (e) => {
   }
   if(!drag.moved) return; // 未超過門檻：單擊不應移動/縮放字幕
   let dt=(e.clientX-drag.startX + (tlScroll.scrollLeft - drag.startScroll))/State.pxPerSec;
+  /* ---- 影片序列區塊拖曳 ---- */
+  if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
+    const c=drag.clip, minL=0.2; // 最短保留 0.2s
+    let tgt=null;
+    if(drag.mode==='clip-move'){
+      let no=drag.os+dt;
+      const L=drag.oout-drag.oin;
+      const s1=snapVal(no,drag.snaps,currentThr), s2=snapVal(no+L,drag.snaps,currentThr);
+      if(s1!==no){ no=s1; tgt=s1; } else if(s2!==no+L){ no=s2-L; tgt=s2; }
+      no=clamp(no, drag.nb.lo, drag.nb.hi); if(no<0)no=0;
+      c.offset=snapFrame(no);
+    } else if(drag.mode==='clip-l'){
+      // 修剪左緣：offset 與 in 同步位移 d；界線＝in≥0、留 minL、不越左鄰
+      let d=dt;
+      d=Math.max(d, -drag.oin, drag.leftLim-drag.os);
+      d=Math.min(d, (drag.oout-minL)-drag.oin);
+      let nl=drag.os+d;
+      const sn=snapVal(nl,drag.snaps,currentThr);
+      if(sn!==nl){ const cd=sn-drag.os;
+        if(cd>=-drag.oin-1e-9 && cd<=(drag.oout-minL)-drag.oin+1e-9 && sn>=drag.leftLim-1e-9){ d=cd; nl=sn; tgt=sn; } }
+      nl=snapFrame(Math.max(0,nl)); d=nl-drag.os;
+      c.offset=nl; c.in=Math.max(0, drag.oin+d);
+    } else {
+      // 修剪右緣：out∈[in+minL, dur]；時間軸右緣不越右鄰
+      let edge=drag.os+(drag.oout+dt-drag.oin); // 時間軸右緣
+      const maxEdge=Math.min(drag.rightLim, drag.os+(c.dur-drag.oin));
+      const minEdge=drag.os+minL;
+      edge=clamp(edge,minEdge,maxEdge);
+      const sn=snapVal(edge,drag.snaps,currentThr);
+      if(sn!==edge && sn>=minEdge-1e-9 && sn<=maxEdge+1e-9){ edge=sn; tgt=sn; }
+      edge=snapFrame(edge);
+      c.out=clamp(drag.oin+(edge-drag.os), drag.oin+minL, c.dur);
+    }
+    updateSnapGuide(tgt);
+    const x1=timeToX(c.offset), x2=timeToX(Seq.clipEnd(c));
+    drag.clipEl.style.left=x1+'px'; drag.clipEl.style.width=Math.max(6,x2-x1)+'px';
+    drawWave(); // 波形跟著區塊走
+    return;
+  }
   if(drag.mode==='move'){
     // 防重疊：限制 dt 使每條都不越過同軌鄰居
     if(!State.overwriteMode){
@@ -763,6 +859,16 @@ window.addEventListener('mouseup',e=>{
         refreshSelectionUI(); $('stSel').textContent='';
       }
     }
+  }else if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
+    const moved=drag.moved, m=drag.mode, c=drag.clip;
+    Seq.sort(); Seq.recomputeDuration();
+    if(moved){
+      recordHistory(m==='clip-move'?('移動影片：'+c.name):('修剪影片：'+c.name));
+      // 幾何變了 → 以目前播放頭重新解析映射（active clip 可能移走/縮短成間隙）
+      Media.seek(Math.min(Media.displayTime(), State.duration||0));
+      emit('render:videoSub'); emit('mpv:refreshSubs');
+    }
+    drawTimeline();
   }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; if(moved) sweepContainedCues(drag.grp.map(x=>x.c)); sortCues(); emit('render:all'); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
   drag=null;
 });

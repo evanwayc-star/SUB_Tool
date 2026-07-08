@@ -4,7 +4,9 @@ import { escapeHTML } from './util.js';
 import { State, isSel } from './state.js';
 import { Media } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
-import { moveSelectedToTrack, xToTime, trackFromY, tracksTop } from './timeline.js';
+import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline } from './timeline.js';
+import { Seq } from './sequence.js';
+import { showToast } from './ui.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';
 import { renderAudioTracks, renderMixer } from './mixer.js';
@@ -173,6 +175,30 @@ function showCueMenu(x,y){
 }
 /* 時間軸區塊右鍵 / 空白軌道區右鍵 */
 tlScroll.addEventListener('contextmenu',e=>{
+  /* 影片序列區塊右鍵 */
+  const clipEl=e.target.closest('.clip-block');
+  if(clipEl){
+    e.preventDefault();
+    const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
+    const trimmed=c.in>0.01||c.out<c.dur-0.01;
+    const items=[{heading:true,label:'🎬 '+c.name}];
+    items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
+    if(trimmed) items.push({label:'↺ 重設修剪（還原完整長度）',act:()=>{
+      const save={in:c.in,out:c.out};
+      c.in=0; c.out=c.dur;
+      const ov=State.clips.some(o=>o!==c && o.offset < Seq.clipEnd(c) - 1e-6 && Seq.clipEnd(o) > c.offset + 1e-6);
+      if(ov){ c.in=save.in; c.out=save.out; showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return; }
+      Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name); drawTimeline();
+    }});
+    if(!c.primary){
+      items.push({sep:true});
+      items.push({label:'🗑 從序列移除',act:()=>{
+        if(Media.removeClip(c.id)){ recordHistory('移除影片：'+c.name); drawTimeline(); }
+      }});
+    }
+    showCtx(e.clientX,e.clientY,items);
+    return;
+  }
   const block=e.target.closest('.cue-block');
   const rect=tlLayer.getBoundingClientRect();
   const y=e.clientY-rect.top;

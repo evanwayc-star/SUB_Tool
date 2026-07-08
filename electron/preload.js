@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('subtool', {
     detect:    ()      => ipcRenderer.invoke('mpv:detect'),
     launch:    (opts)  => ipcRenderer.invoke('mpv:launch', opts),
     seek:      (t)     => ipcRenderer.invoke('mpv:seek', t),
+    loadfile:  (p)     => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('mpv:loadfile', p); },
     play:      ()      => ipcRenderer.invoke('mpv:play'),
     pause:     ()      => ipcRenderer.invoke('mpv:pause'),
     mute:      (v)     => ipcRenderer.invoke('mpv:mute', v),

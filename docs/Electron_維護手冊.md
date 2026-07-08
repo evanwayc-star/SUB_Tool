@@ -62,7 +62,8 @@ Main (main.js)
 | `onProgress(cb)` | `task-progress` | M→R | ffmpeg 進度推播 `{jobId, label, pct, done}` |
 | `mpv.detect()` | `mpv:detect` | R→M | 檢查 mpv 是否可用 |
 | `mpv.launch(opts)` | `mpv:launch` | R→M | 啟動 mpv 嵌入播放（`{src, bounds, audio}`） |
-| `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置 |
+| `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置（**來源時間**；影片序列的時間軸↔來源映射在前端 media.js 處理） |
+| `mpv.loadfile(p)` | `mpv:loadfile` | R→M | 影片序列跨段切換：同一 mpv 實例換檔（保留 --wid 嵌入與屬性），輪詢 duration 就緒後回傳 `{duration}`；路徑受 S1 白名單管制 |
 | `mpv.play()` / `mpv.pause()` | `mpv:play` / `mpv:pause` | R→M | 播放 / 暫停 |
 | `mpv.mute(v)` | `mpv:mute` | R→M | 靜音切換 |
 | `mpv.rate(r)` | `mpv:rate` | R→M | 播放速率 |

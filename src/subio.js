@@ -304,10 +304,11 @@ document.addEventListener('drop', async e => {
     // ffmpeg.wasm 的 1.6GB 上限而「沒有觸發轉檔」。路徑經 preload 的
     // webUtils.getPathForFile 解析（Electron 32 起 File.path 已移除）；
     // 解析失敗時退回瀏覽器路徑。後續 ffprobe 會把該目錄加入 S1 白名單（main.js）。
+    // 已有影片時 openIncoming 會詢問「加入序列」或「取代」。
     const p = DESK.getFilePath(f);
-    if (p) Media.loadDesktopMedia(p); else Media.loadVideoFile(f);
+    if (p) Media.openIncoming({ path: p }); else Media.openIncoming({ file: f });
   }
-  else Media.loadVideoFile(f);
+  else Media.openIncoming({ file: f });
 });
 async function importDropped(f) {
   const buf = await readFile(f); const text = decodeText(buf);

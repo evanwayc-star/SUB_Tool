@@ -46,6 +46,7 @@ on('note:openInPanel', openNoteInPanel);
 on('cue:openEdit', openCueEditModal);
 on('action', doAction);
 on('mpv:sync', _syncMpvPanel); // 自訂視窗（快捷鍵設定、右鍵選單）開閉時重算 mpv 讓位
+on('history:record', recordHistory); // 供 media.js 等低階模組記錄歷史（避免 media→history 循環相依）
 // A1：fps 變更後的 DOM 同步（原本在 state.setFps 內，現下沉到此處，state.js 不再相依 DOM）
 on('fps:changed', ()=>{
   const sel=$('fpsSel'); if(sel) sel.value=State.dropFrame?String(State.fps)+'df':String(State.fps);
@@ -98,7 +99,17 @@ function refreshMpvSubs(){
   if(!Media.mpvMode || !window.subtool?.mpv) return;
   clearTimeout(_mpvSubT);
   _mpvSubT=setTimeout(()=>{
-    try{ window.subtool.mpv.subSet(toASSFromState(State.cues)).catch(()=>{}); }catch(e){}
+    try{
+      // 序列：mpv/libass 以【來源時間】渲染字幕，而 cue 時碼為【時間軸時間】——
+      // 依當前 clip 的映射（來源 = 時間軸 - offset + in）整批平移後再餵給 mpv
+      let cs=State.cues;
+      const c=Media.seqOn() ? Media._activeClip() : null;
+      if(c && (c.offset!==0 || c.in!==0)){
+        const sh=c.in - c.offset;
+        cs=State.cues.map(x=>x.timed===false?x:{...x, start:x.start+sh, end:x.end+sh});
+      }
+      window.subtool.mpv.subSet(toASSFromState(cs)).catch(()=>{});
+    }catch(e){}
   },150);
 }
 /* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。
@@ -109,7 +120,8 @@ function _syncMpvPanel(){
   // 快捷鍵設定是獨立於 modalBg 的自訂對話框（settings.js 自建 #settingsModal），
   // 同樣會被 mpv 蓋住，開啟期間一律讓位
   const settingsOpen=!!document.getElementById('settingsModal');
-  let hides=modalOpen||settingsOpen;
+  // 序列間隙（時間軸上無影片的區段）：畫面應為黑 → mpv 讓位
+  let hides=modalOpen||settingsOpen||!!Media._gap;
   if(!hides){
     const vr=$('videoWrap')?.getBoundingClientRect();
     if(vr){
@@ -230,9 +242,10 @@ video.addEventListener('timeupdate',()=>{
 let rafOn=false, rafFrame=0, _rafLastIdx=0;
 function rafLoop(){
   if(Media.playing){
+    Media.seqTick(); // 影片序列：段尾切換 / 間隙進出 / 序列結尾停止
     const t=Media.displayTime();
-    // 無媒體時更新時間顯示
-    if(!video.src){
+    // 無媒體時更新時間顯示；序列間隙中影片暫停無 timeupdate，也由此更新
+    if(!video.src || Media._gap){
       $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
       $('seekBar').value=Math.round(t*1000);
     }
@@ -274,14 +287,14 @@ function rafLoop(){
 
     // active 備註
     if(State.notes.length&&$('notesPanel').classList.contains('show')) updateNoteActive(t);
-    // buffer 音軌 drift 校正
-    if(Media.ctx && Media.tracks.some(t=>t.kind==='buffer')){
+    // buffer 音軌 drift 校正（序列間隙中不校正——影片已暫停，重啟音源會誤出聲）
+    if(Media.ctx && !Media._gap && Media.tracks.some(t=>t.kind==='buffer'&&!t._srcHidden)){
       const expect=Media.startMediaTime+(Media.ctx.currentTime-Media.startCtxTime)*(video.playbackRate||1);
       if(Math.abs(expect-video.currentTime)>0.25){ Media.stopBufferSources(); Media.startBufferSources(video.currentTime); }
     }
-    // element 音軌 drift 校正（多軌同步）
+    // element 音軌 drift 校正（多軌同步）：clip 綁定音軌對「來源時間」、ext-* 參考音對「時間軸時間」
     for(const tr of Media.tracks){ if(tr.kind==='element'&&tr.el&&!tr.el.paused){
-      const ref=Media.vTime(); // mpv 模式時取 _mpvTime，否則取 video.currentTime
+      const ref=(tr.source||'').startsWith('ext-') ? Media.tlTime() : Media.vTime();
       if(Math.abs(tr.el.currentTime - ref) > 0.12){ try{tr.el.currentTime=ref;}catch(e){} }
     }}
   }
@@ -329,7 +342,7 @@ video.addEventListener('pause',()=>{
 });
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
 window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});
-video.addEventListener('ended',()=>{Media.pause();});
+video.addEventListener('ended',()=>{ if(Media.seqContinueAtEnd()) return; Media.pause(); }); // 序列有後續→推進不暫停
 
 /* 影片視窗與時間碼 滾輪逐格播放 */
 ['videoWrap', 'tcCur'].forEach(id => {
@@ -371,8 +384,9 @@ async function doAction(act, force = false){
   if(CLOSE_PANELS[act]){ $(CLOSE_PANELS[act]).classList.remove('show'); _syncMpvPanel(); return; }
   switch(act){
     case 'open-media':
-      if(IS_DESKTOP){ const p=await DESK.openMedia(); if(p)Media.loadDesktopMedia(p); }
-      else { const f=await pickFile($('fileMedia')); if(f)Media.loadVideoFile(f); } break;
+      // 已有影片時 openIncoming 會詢問「加入序列」或「取代」
+      if(IS_DESKTOP){ const p=await DESK.openMedia(); if(p)Media.openIncoming({path:p}); }
+      else { const f=await pickFile($('fileMedia')); if(f)Media.openIncoming({file:f}); } break;
     case 'add-audio':
       if(IS_DESKTOP){ const ps=await DESK.openAudio(); for(const p of (ps||[]))await Media.addAudioFileDesktop(p); }
       else { const f=await pickFile($('fileAudio')); if(f)Media.addAudioFile(f); } break;

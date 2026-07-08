@@ -881,6 +881,21 @@ ipcMain.handle('mpv:subSet', (e, assText) => {
   if (!_mpvSubAdded) { mpvSend(['sub-add', _mpvSubFile, 'select']); _mpvSubAdded = true; }
   else { mpvSend(['sub-reload']); }
 });
+/* 影片序列：切換至另一支影片（同一 mpv 實例換檔，沿用 --wid 嵌入視窗與各屬性）。
+   loadfile 為非同步：輪詢 duration 直到新檔就緒（最多 8 秒），回傳實測時長。
+   pause/mute 等屬性跨 loadfile 保留；播放狀態由 renderer 於 loadfile 後統一設定。 */
+ipcMain.handle('mpv:loadfile', async (e, p) => {
+  if (!isAllowedPath(p)) { console.warn('[sec] mpv loadfile blocked:', p); return null; }
+  if (!_mpvClient) return null;
+  await mpvSend(['set_property', 'pause', true]);
+  await mpvSend(['loadfile', p, 'replace'], true);
+  for (let i = 0; i < 80; i++) {
+    const d = await mpvSend(['get_property', 'duration'], true);
+    if (typeof d === 'number' && d > 0) return { ok: true, duration: d };
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return { ok: true, duration: 0 };
+});
 ipcMain.handle('mpv:seek',  (e, t) => mpvSend(['seek', t, 'absolute']));
 ipcMain.handle('mpv:play',  ()     => mpvSend(['set_property', 'pause', false]));
 ipcMain.handle('mpv:pause', ()     => mpvSend(['set_property', 'pause', true]));

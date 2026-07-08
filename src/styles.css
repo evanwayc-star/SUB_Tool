@@ -199,6 +199,17 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .cue-block.sel{background:var(--cue-sel);border-color:var(--text);color:#1b1b1d;z-index:5}
 .cue-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
 .cue-block .edge.l{left:0}.cue-block .edge.r{right:0}
+/* 影片序列區塊（波形列上）：容器不吃事件、區塊本身可拖 */
+#tlClips{position:absolute;left:0;right:0;z-index:4;pointer-events:none}
+.clip-block{position:absolute;top:2px;bottom:2px;pointer-events:auto;cursor:grab;box-sizing:border-box;
+  background:rgba(46,89,132,.40);border:1px solid #3fa9f5;border-radius:4px;overflow:hidden;
+  display:flex;align-items:flex-start;padding:1px 8px;color:#bfe3ff;font-size:11px}
+.clip-block:hover{background:rgba(56,109,160,.48)}
+.clip-block.active{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.clip-block .clip-label{pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.7}
+.clip-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
+.clip-block .edge.l{left:0}.clip-block .edge.r{right:0}
+.clip-block .edge:hover{background:rgba(100,170,255,.45)}
 .tl-playhead{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--accent);z-index:10;pointer-events:none;will-change:left}
 .tl-playhead::before{content:"";position:absolute;top:0;left:-5px;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid var(--accent)}
 .tl-inpoint{position:absolute;top:0;bottom:0;width:2px;background:var(--green);z-index:9;pointer-events:none;opacity:.9}
