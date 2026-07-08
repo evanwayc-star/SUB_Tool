@@ -66,7 +66,6 @@ npm run dist    # electron-builder → release/ 下的 win exe 安裝檔
 | [開發說明.md](docs/開發說明.md) | 開發環境、npm 指令、模組結構 |
 | [驗證說明.md](docs/驗證說明.md) | 桌面版大檔 / 混音器驗證清單 |
 | [技術架構說明.md](docs/技術架構說明.md) | 模組架構、資料流、關鍵函式 |
-| [Electron 維護手冊.md](docs/Electron%20維護手冊.md) | Electron IPC / ffmpeg / mpv 維護指南 |
+| [Electron_維護手冊.md](docs/Electron_維護手冊.md) | Electron IPC / ffmpeg / mpv 維護指南 |
 | [FPS_時碼一致性.md](docs/FPS_時碼一致性.md) | FPS / 時碼設計原則（維護者必讀） |
 | [版本變更紀錄.md](docs/版本變更紀錄.md) | 版本歷史 |
-| [project_review.md](project_review.md) | **[NEW]** 專案與程式碼深度審查報告 |

@@ -202,6 +202,6 @@ npm run dist    # vite build + electron-builder
 
 ## 8. 變更紀錄
 
-各版本詳細變更請見 [`CHANGELOG.md`](CHANGELOG.md)。
+各版本詳細變更請見 [`版本變更紀錄.md`](版本變更紀錄.md)。
 
 每次修改 IPC 通道或架構後，請同步更新本文件第 2 節通道列表。
