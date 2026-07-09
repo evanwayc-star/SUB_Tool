@@ -472,6 +472,11 @@ const Media = {
       }
       if(e.event==='end-file'&&this.mpvMode){
         if(this._seqSwitching) return; // loadfile 造成的舊檔 end-file
+        if(e.reason==='error'){ // mpv 播放失敗（解碼/濾鏡錯誤）：浮上來，不當成段尾推進
+          this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶';
+          setStatus('mpv 播放失敗（解碼或濾鏡錯誤）','err'); showToast('mpv 播放此影片段失敗');
+          return;
+        }
         // 序列：來源播到底（out===dur）→ 若還有後續，推進而非停止
         const c=this.seqOn()?this._activeClip():null;
         if(c && this.playing){ this._mpvTime=c.out; if(this.seqContinueAtEnd()) return; }
@@ -795,7 +800,11 @@ const Media = {
         if(c.path && DESK?.mpv?.loadfile){
           this.stopElementSources();
           if(this._mpvPath !== c.path){ // 不同來源檔才需 loadfile（同檔切割片段只 seek，近乎無縫）
-            const r = await DESK.mpv.loadfile(c.path).catch(()=>null);
+            const r = await DESK.mpv.loadfile(c.path).catch(err=>{ console.error('mpv loadfile', err); return null; });
+            if(!r || r.ok === false){ // 無聲失敗要浮上來（先前被吞掉，看起來像「無法播放」）
+              setStatus(`mpv 無法載入「${c.name}」`, 'err');
+              showToast(`mpv 無法載入影片段「${c.name}」（格式不支援或檔案無法讀取）`);
+            }
             if(r && r.duration) Seq.updateSourceDur(c, r.duration);
             this._mpvPath = c.path;
           }

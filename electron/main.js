@@ -897,15 +897,21 @@ ipcMain.handle('mpv:subSet', (e, assText) => {
    pause/mute 等屬性跨 loadfile 保留；播放狀態由 renderer 於 loadfile 後統一設定。 */
 ipcMain.handle('mpv:loadfile', async (e, p) => {
   if (!isAllowedPath(p)) { console.warn('[sec] mpv loadfile blocked:', p); return null; }
-  if (!_mpvClient) return null;
+  if (!_mpvClient) { console.error('[mpv] loadfile: no client'); return null; }
   await mpvSend(['set_property', 'pause', true]);
+  // 關鍵：啟動時可能帶 --lavfi-complex=[aid1][aid2]...amix（主影片多音軌混音）。
+  // 換到音軌數不同的檔案時，該全域濾鏡引用不存在的音軌 → 濾鏡圖失敗、整段無法播放。
+  // 換檔前一律清空（新段音訊先走 mpv 預設音軌；元素音軌就緒後會接管並靜音 mpv）。
+  await mpvSend(['set_property', 'lavfi-complex', '']);
+  console.error('[mpv] loadfile:', p);
   await mpvSend(['loadfile', p, 'replace'], true);
   for (let i = 0; i < 80; i++) {
     const d = await mpvSend(['get_property', 'duration'], true);
     if (typeof d === 'number' && d > 0) return { ok: true, duration: d };
     await new Promise(r => setTimeout(r, 100));
   }
-  return { ok: true, duration: 0 };
+  console.error('[mpv] loadfile: duration not ready after 8s:', p);
+  return { ok: false, duration: 0 };
 });
 ipcMain.handle('mpv:seek',  (e, t) => mpvSend(['seek', t, 'absolute']));
 ipcMain.handle('mpv:play',  ()     => mpvSend(['set_property', 'pause', false]));

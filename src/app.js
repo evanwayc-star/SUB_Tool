@@ -1166,8 +1166,9 @@ async function initDesktop(){
   }
 }
 
-/* 開發用除錯把手（正式打包 import.meta.env.DEV=false 時不會輸出） */
-if (import.meta.env && import.meta.env.DEV) {
+/* 除錯把手：一律暴露（單機工具無安全疑慮）。
+   桌面版遇到問題時可開 DevTools 以 window.SUB 檢視狀態，遠端診斷也依賴它。 */
+{
   window.SUB = { State, Media, Wave, SubFormats, Project,
     selectCue, selectCueSingle, refreshSelectionUI, isSel, stepBoundary, setIn, setOut,
     addCue, addCueRelative, deleteSelected, moveSelectedToTrack, addTrack, removeTrack,
