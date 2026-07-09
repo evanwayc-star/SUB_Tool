@@ -544,10 +544,21 @@ ipcMain.handle('keys:save', (e, data) => {
   } catch(e) { console.error('[keys] save err', e); return false; }
 });
 
-ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio }) => {
+ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio, queue }) => {
   allowFileDir(src); // S1
-  // S1: 強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源
-  if (_currentIngestProc) { try { _currentIngestProc.kill(); } catch (e2) {} _currentIngestProc = null; }
+  // queue=false（取代式載入）：強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源。
+  // queue=true（影片序列「加入」）：不可殺前一個——那可能是正在餵播放器的 streamIngest
+  // 背景轉檔或主媒體的音軌抽取（殺掉會讓播放直接中斷）；改為排隊、待其完成後執行。
+  if (!queue && _currentIngestProc) { try { _currentIngestProc.kill(); } catch (e2) {} _currentIngestProc = null; }
+  if (queue) {
+    const p = _ingestQueueTail.then(() => _runIngest(e, { src, duration, needsProxy, audio }));
+    _ingestQueueTail = p.catch(() => null); // 佇列不因單一失敗而中斷；失敗仍 reject 給 renderer
+    return p;
+  }
+  return _runIngest(e, { src, duration, needsProxy, audio });
+});
+let _ingestQueueTail = Promise.resolve(); // 序列加入的 ingest 串行排隊（不與播放中的轉檔搶 I/O）
+async function _runIngest(e, { src, duration, needsProxy, audio }) {
   const audioArr = Array.isArray(audio) ? audio : [];
   // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
   const hit = readCache(src);
@@ -604,7 +615,7 @@ ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, aud
   const meta = { proxy, channels, wave };
   writeMeta(metaPath, meta);
   return Object.assign({ cached: false }, meta);
-});
+}
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
 ipcMain.handle('fs:readB64', (e, p) => { if (!isAllowedPath(p)) { console.warn('[sec] readB64 blocked:', p); return null; } try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; } });

@@ -801,6 +801,11 @@ const Media = {
           }
           this._mpvTime = localT;
           DESK.mpv.seek(localT).catch(()=>{});
+          // mpv 靜音隨「當前段是否已有元素音軌」同步：有→靜音（元素接管），無→出聲
+          //（否則主媒體音軌就緒後 mute(true) 會讓沒有元素音軌的新段完全無聲）
+          const _srcKey = c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id));
+          const _hasEls = this.tracks.some(tr => (tr.source||'video') === _srcKey && tr.kind === 'element');
+          DESK.mpv.mute(_hasEls || State.muted).catch(()=>{});
           emit('mpv:refreshSubs'); // 換 clip 後字幕需以新映射重擠（app.js 會做 offset 位移）
           if(resume){ DESK.mpv.play().catch(()=>{}); this.startElementSources(localT, Seq.toTimeline(localT, c)); }
           else DESK.mpv.pause().catch(()=>{});
@@ -933,9 +938,11 @@ const Media = {
   async _clipIngest(c, info){
     const myVer = this._bgVersion;
     this.ensureCtx();
-    let res; try{ res = await DESK.ingest({ path: c.path, duration: c.dur, needsProxy: false, audio: info?.audio || [] }); }
-    catch(e){ if(this._bgVersion === myVer) setStatus('影片音訊抽取失敗：' + e.message, ''); return; }
-    if(this._bgVersion !== myVer || !Seq.byId(c.id)) return;
+    // queue:true —— 不可搶佔/殺掉進行中的 ingest（可能正是餵播放器的 streamIngest 背景轉檔
+    // 或主媒體音軌抽取，殺掉會讓播放中斷）；改為排入佇列、依序執行
+    let res; try{ res = await DESK.ingest({ path: c.path, duration: c.dur, needsProxy: false, audio: info?.audio || [], queue: true }); }
+    catch(e){ if(this._bgVersion === myVer) setStatus('影片音訊抽取失敗：' + (e?.message||e), ''); return; }
+    if(!res || this._bgVersion !== myVer || !Seq.byId(c.id)) return;
     const chs = res.channels || [];
     if(chs.length){
       const els = await Promise.all(chs.map(ch =>
@@ -956,6 +963,11 @@ const Media = {
       }
       // 依目前 active clip 重新套用可聽集合（新加入的預設隱藏，除非它正是 active）
       const ac = this._activeClip(); if(ac) this._applyClipAudio(ac);
+      // 若正在播這個新段：元素音軌接管 → mpv 靜音並啟動元素
+      if(this.mpvMode && ac && (ac.audioSrc || '') === ('clip:' + c.id)){
+        DESK.mpv.mute(true).catch(()=>{});
+        if(this.playing) this._restartElements();
+      }
     }
     if(res.wave){
       try{
