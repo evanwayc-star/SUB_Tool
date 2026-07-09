@@ -672,11 +672,13 @@ const _handleDragUpdate = (e) => {
     const c=drag.clip, minL=0.2; // 最短保留 0.2s
     let tgt=null;
     if(drag.mode==='clip-move'){
+      // 自由拖移（如一般剪輯軟體）：不受鄰居夾限，可放到時間軸任意位置；
+      // 重疊在放開時由 Seq.resolveOverlaps 以插入語義解算（被壓到的段落連鎖右推）
       let no=drag.os+dt;
       const L=drag.oout-drag.oin;
       const s1=snapVal(no,drag.snaps,currentThr), s2=snapVal(no+L,drag.snaps,currentThr);
       if(s1!==no){ no=s1; tgt=s1; } else if(s2!==no+L){ no=s2-L; tgt=s2; }
-      no=clamp(no, drag.nb.lo, drag.nb.hi); if(no<0)no=0;
+      if(no<0)no=0;
       c.offset=snapFrame(no);
     } else if(drag.mode==='clip-l'){
       // 修剪左緣：offset 與 in 同步位移 d；界線＝in≥0、留 minL、不越左鄰
@@ -862,6 +864,7 @@ window.addEventListener('mouseup',e=>{
     }
   }else if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
     const moved=drag.moved, m=drag.mode, c=drag.clip;
+    if(moved && m==='clip-move') Seq.resolveOverlaps(c); // 自由拖放：壓到的段落連鎖右推（插入語義）
     Seq.sort(); Seq.recomputeDuration();
     if(moved){
       recordHistory(m==='clip-move'?('移動影片：'+c.name):('修剪影片：'+c.name));

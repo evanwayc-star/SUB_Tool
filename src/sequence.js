@@ -75,6 +75,18 @@ const Seq = {
     }
     return { lo, hi: Math.max(lo, hi) };
   },
+  /* 自由拖放後的重疊解算（插入語義）：依 offset 排序（同位時被拖段優先佔位），
+     由左至右掃描——只在「真的重疊」時把後面的段推到前段結尾（連鎖推擠），空隙保留不壓縮。
+     結果：拖到另一段的左半＝插到它前面（它被右推）；拖到右半＝落在它後面。 */
+  resolveOverlaps(moved){
+    const sorted = [...State.clips].sort((a, b) => (a.offset - b.offset) || (a === moved ? -1 : b === moved ? 1 : 0));
+    let prevEnd = -Infinity;
+    for(const c of sorted){
+      if(c.offset < prevEnd - EPS) c.offset = prevEnd;
+      prevEnd = Math.max(prevEnd, this.clipEnd(c));
+    }
+    this.sort(); this.recomputeDuration();
+  },
   /* 磁吸目標：其他 clip 的邊緣 */
   snapEdges(excludeId){
     const arr = [];
