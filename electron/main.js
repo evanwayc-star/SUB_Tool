@@ -192,9 +192,12 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
     if (!FFMPEG) return rej(new Error('找不到 ffmpeg'));
     const p = spawn(FFMPEG, args, cwd ? { cwd } : {});
     if (onProcess) onProcess(p);
-    let err = '';
+    let err = '';       // 尾端（錯誤訊息用；會被截斷）
+    const maps = [];    // 串流對應行（出現在輸出開頭，需單獨保留，否則被 err 截斷丟失）
     p.stderr.on('data', d => {
       const s = d.toString(); err += s; if (err.length > 8000) err = err.slice(-8000);
+      // 例：Stream #0:0 -> #0:0 (mpeg2video (native) -> h264 (h264_nvenc))
+      for (const mm of s.matchAll(/Stream #\d+:\d+ -> #\d+:\d+ \(([^\n]*)\)/g)) if (maps.length < 8) maps.push(mm[1]);
       const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s);
       if (m && duration && sender) {
         const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
@@ -204,7 +207,7 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
     p.on('error', rej);
     p.on('close', c => {
       if (sender) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
-      c === 0 ? res(true) : rej(new Error('ffmpeg 結束碼 ' + c + '\n' + err.slice(-600)));
+      c === 0 ? res({ tail: err, maps }) : rej(new Error('ffmpeg 結束碼 ' + c + '\n' + err.slice(-600)));
     });
   });
 }
@@ -492,12 +495,24 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assT
   const encode = isPro ? proresArgs() : [...vencArgs(), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'];
   const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', vfinal, '-map', '[ac]', '-r', String(R), ...encode, outPath];
 
+  // 進度標籤即顯示本次實際送出的編碼器（GPU 或 CPU），使用者在狀態列就看得到
+  const planned = isPro ? 'prores_ks' : (VENC || 'libx264');
+  const isGpu = !isPro && planned !== 'libx264';
+  const label = `匯出 ${isPro ? 'ProRes 422 HQ' : 'MP4'}（${isGpu ? 'GPU ' + planned.replace('h264_', '').toUpperCase() : 'CPU ' + planned}）`;
+  let usedEncoder = planned;
+  const t0 = Date.now();
   try {
-    await runFF(args, { sender: e.sender, duration: duration || 0, jobId: 'export', label: (isPro ? '匯出 ProRes' : '匯出 MP4'), cwd: TMP });
+    const rr = await runFF(args, { sender: e.sender, duration: duration || 0, jobId: 'export', label, cwd: TMP });
+    // ffmpeg 的串流對應行是「實際使用」的地面真相（非我們的猜測）：
+    //   例 "mpeg2video (native) -> h264 (h264_nvenc)" → 取箭頭右側括號內的編碼器
+    const vmap = (rr.maps || []).find(m => /->/.test(m) && /h264|prores|hevc/i.test(m));
+    const em = vmap && /->\s*[^(]*\(([^)]+)\)\s*$/.exec(vmap.trim());
+    if (em) usedEncoder = em[1].trim();
   } finally {
     if (assName) { try { fs.unlinkSync(path.join(TMP, assName)); } catch (e2) {} }
   }
-  return outPath;
+  // 回傳 ffmpeg 實際使用的編碼器與耗時，供 renderer 顯示「這次真的用了 GPU 沒有」
+  return { outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder), elapsedMs: Date.now() - t0 };
 });
 
 ipcMain.handle('dialog:exportDirectory', async (e, files) => {

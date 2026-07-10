@@ -1121,7 +1121,19 @@ async function initDesktop(){
   try{
     const s=await DESK.status();
     const eng=$('stEngine');
-    if(eng){ const gpu=(s.venc&&s.venc!=='libx264')?(' · GPU '+String(s.venc).replace('h264_','').toUpperCase()):''; eng.textContent='引擎：'+(s.ffmpeg?'系統 ffmpeg ✓'+gpu:'⚠ 未偵測到 ffmpeg'); }
+    if(eng){
+      const hasGpu = !!(s.venc && s.venc !== 'libx264');
+      eng.innerHTML = '引擎：' + (s.ffmpeg
+        ? '系統 ffmpeg ✓' + (hasGpu
+            ? ` · <b style="color:var(--green)">GPU ${String(s.venc).replace('h264_','').toUpperCase()}</b>`
+            : ' · <span style="color:var(--text-faint)">CPU 編碼</span>')
+        : '⚠ 未偵測到 ffmpeg');
+      eng.title = s.ffmpeg
+        ? (hasGpu
+            ? `已偵測到 GPU 編碼器：${s.venc}\n· MP4（H.264）匯出：使用 GPU 編碼\n· ProRes 422 HQ 匯出：CPU 編碼（ffmpeg 無 GPU ProRes 編碼器）\n· 來源解碼：嘗試硬體加速\n匯出完成後，狀態列會顯示本次「實際使用」的編碼器。`
+            : '未偵測到 GPU 編碼器，H.264 將以 CPU（libx264）編碼。')
+        : '未偵測到 ffmpeg';
+    }
     if(!s.ffmpeg) openModal('未偵測到 ffmpeg',
       `桌面版的 MXF 轉檔與多音軌抽取需要系統安裝 <b>ffmpeg</b>。<br><br>`+
       `偵測位置：PATH、<code>C:\\Program Files\\FFMPEG\\bin\\</code> 等。<br>`+

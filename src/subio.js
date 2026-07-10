@@ -330,7 +330,7 @@ async function _runExportVideo(items, format) {
   setStatus(`匯出影片中（${format === 'prores' ? 'ProRes 422 HQ' : 'MP4'}）…`, 'busy', 'lock');
   showToast('開始匯出影片，時間依長度與格式而定…');
   try {
-    const out = await DESK.exportVideo({
+    const r = await DESK.exportVideo({
       items,
       width: State.videoWidth || 1920,
       height: State.videoHeight || 1080,
@@ -340,8 +340,12 @@ async function _runExportVideo(items, format) {
       duration: Seq.end(),
       defaultName: `ST_${projName}_${format === 'prores' ? 'ProRes422HQ' : 'H264'}`,
     });
-    setStatus(out ? ('已匯出影片：' + out) : '已取消匯出', out ? 'ok' : '', 'unlock');
-    if (out) showToast('影片已匯出：' + baseName(out));
+    if (!r) { setStatus('已取消匯出', '', 'unlock'); return; }
+    // r.encoder 為 ffmpeg 實際使用的編碼器（從其輸出解析），非事前猜測
+    const acc = r.gpu ? `GPU ${r.encoder}` : `CPU ${r.encoder}`;
+    const secs = (r.elapsedMs / 1000).toFixed(1);
+    setStatus(`已匯出影片（${acc}，耗時 ${secs}s）：${r.outPath}`, 'ok', 'unlock');
+    showToast(`影片已匯出（${acc}）：${baseName(r.outPath)}`);
   } catch (e) {
     setStatus('影片匯出失敗：' + (e?.message || e), '', 'unlock');
     showToast('影片匯出失敗：' + (e?.message || e));
