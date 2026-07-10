@@ -419,6 +419,7 @@ async function doAction(act, force = false){
     case 'imp-auto': importSub(); break;
     case 'exp-dialog': showExportDialog(); break;
     case 'exp-video': showExportVideoDialog(); break;
+    case 'split-clip': Media.splitClipAt(Media.displayTime()); break; // 同 Ctrl+K：在播放點切割影片段
     case 'exp-srt': exportSub('srt'); break;
     case 'exp-ass': exportSub('ass'); break;
     case 'exp-encore': exportSub('encore'); break;
