@@ -456,7 +456,10 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assT
   for (const it of (items || [])) {
     const vl = `v${k}`, al = `a${k}`;
     if (it.type === 'clip') {
-      inputs.push('-i', it.path);
+      // 硬體解碼（每個輸入各自指定；auto 會在不支援的編碼自動退回軟解）。
+      // 用 auto 而非 -hwaccel_output_format：解碼後的影格留在系統記憶體，
+      // 後續 scale/pad/concat 等 CPU 濾鏡才能直接使用。
+      inputs.push('-hwaccel', 'auto', '-i', it.path);
       const idx = ii++;
       // 影像：trim→對齊 PTS→統一 fps→等比縮放置中補黑→SAR=1
       fc.push(`[${idx}:v]trim=start=${it.in}:end=${it.out},setpts=PTS-STARTPTS,fps=${R},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1[${vl}]`);

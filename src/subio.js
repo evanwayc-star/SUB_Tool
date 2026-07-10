@@ -290,7 +290,8 @@ function _buildExportItems() {
   }
   return items;
 }
-function showExportVideoDialog() {
+const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
+async function showExportVideoDialog() {
   if (!IS_DESKTOP || !DESK.exportVideo) { showToast('影片匯出僅在桌面版可用'); return; }
   if (!Seq.active()) { showToast('尚未載入影片'); return; }
   const items = _buildExportItems();
@@ -299,13 +300,21 @@ function showExportVideoDialog() {
   const gapCount = items.filter(i => i.type === 'gap').length;
   const visSubTracks = State.tracks.filter((tk, i) => tk.visible !== false && State.cues.some(c => (c.track || 0) === i && c.timed !== false)).length;
   const total = Seq.end();
+  // 顯示實際會用到的編碼器（H.264 可走 GPU；ProRes 無 GPU 編碼器，一律 CPU）
+  let venc = null; try { venc = (await DESK.status())?.venc; } catch (e) {}
+  const gpu = venc && venc !== 'libx264';
+  const mp4Note = gpu ? `GPU 加速（${_VENC_LABEL[venc] || venc}）` : 'CPU（libx264，未偵測到 GPU 編碼器）';
   openModal('匯出影片',
     `<div style="font-size:13px;line-height:1.9">` +
     `<div>序列：<b>${clipCount}</b> 段影片${gapCount ? `、<b>${gapCount}</b> 段間隙（黑畫面）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
     `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
     `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>` +
-    `<div style="margin-top:12px">格式：<label style="margin-left:6px"><input type="radio" name="expVfmt" value="prores" checked> ProRes 422 HQ（.mov，剪輯母帶）</label>` +
-    `<label style="margin-left:14px"><input type="radio" name="expVfmt" value="mp4"> MP4（H.264，交付/預覽）</label></div>` +
+    `<div style="margin-top:12px">格式：</div>` +
+    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="prores" checked> ProRes 422 HQ（.mov，剪輯母帶）` +
+    `<span style="color:var(--text-faint);font-size:12px">— CPU 編碼（ffmpeg 無 GPU ProRes 編碼器）</span></label>` +
+    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="mp4"> MP4（H.264，交付/預覽）` +
+    `<span style="color:${gpu ? 'var(--green)' : 'var(--text-faint)'};font-size:12px">— ${mp4Note}</span></label>` +
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:6px">來源解碼一律嘗試硬體加速（不支援時自動退回軟解）。</div>` +
     `</div>`,
     [{ label: '匯出', primary: true, act: () => {
         const fmt = (document.querySelector('input[name="expVfmt"]:checked') || {}).value || 'prores';
