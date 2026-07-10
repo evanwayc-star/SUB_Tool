@@ -22,7 +22,7 @@ import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, cle
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
 import { showSettingsModal } from './settings.js';
-import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState } from './subio.js';
+import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { on, emit } from './events.js';
 
@@ -418,6 +418,7 @@ async function doAction(act, force = false){
       break;
     case 'imp-auto': importSub(); break;
     case 'exp-dialog': showExportDialog(); break;
+    case 'exp-video': showExportVideoDialog(); break;
     case 'exp-srt': exportSub('srt'); break;
     case 'exp-ass': exportSub('ass'); break;
     case 'exp-encore': exportSub('encore'); break;
@@ -1115,6 +1116,7 @@ async function init(){
 async function initDesktop(){
   const brand=document.querySelector('.brand');
   if(brand && !brand.querySelector('small')){ const sm=document.createElement('small'); sm.style.cssText='opacity:.55;font-size:11px;margin-left:6px;vertical-align:middle'; sm.textContent='桌面版'; brand.appendChild(sm); }
+  document.querySelectorAll('.desktop-only').forEach(el=>{ el.style.display=''; }); // 顯示桌面專屬功能（匯出影片等）
   const nv=$('noVideo'); if(nv) nv.innerHTML='<b>尚未載入影音</b>點 <kbd>🎬 影音</kbd> 匯入<br>桌面版支援 MP4 / MOV / <b>MXF</b> / MKV / 多音軌（系統 ffmpeg）<br>多音軌可同時混音播放，每軌獨立音量／獨奏';
   try{
     const s=await DESK.status();

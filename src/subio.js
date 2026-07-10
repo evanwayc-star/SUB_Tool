@@ -15,6 +15,7 @@ import { emit } from './events.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { buildXLSX } from './xlsxExport.js';
 import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
+import { Seq } from './sequence.js';
 import { t } from './i18n.js';
 
 function convertLineBreaks(parsed) {
@@ -275,6 +276,69 @@ function toASSFromState(cues) {
   );
 }
 
+/* ===== 匯出影片（序列）：ProRes 422 HQ / MP4，燒錄可見軌字幕，各段原音混入 =====
+   桌面版專屬（需系統 ffmpeg）。輸出時間軸＝序列時間軸，故字幕（時間軸時碼）與輸出對齊。 */
+function _buildExportItems() {
+  const clips = [...State.clips].filter(c => c.path).sort((a, b) => a.offset - b.offset);
+  if (!clips.length) return null;
+  const items = []; let cursor = 0;
+  const EPS = 0.01;
+  for (const c of clips) {
+    if (c.offset > cursor + EPS) items.push({ type: 'gap', dur: +(c.offset - cursor).toFixed(3) }); // 段間間隙＝黑畫面
+    items.push({ type: 'clip', path: c.path, in: +c.in.toFixed(3), out: +c.out.toFixed(3) });
+    cursor = c.offset + Seq.len(c);
+  }
+  return items;
+}
+function showExportVideoDialog() {
+  if (!IS_DESKTOP || !DESK.exportVideo) { showToast('影片匯出僅在桌面版可用'); return; }
+  if (!Seq.active()) { showToast('尚未載入影片'); return; }
+  const items = _buildExportItems();
+  if (!items) { showToast('沒有可匯出的影片段（此序列的影片缺少來源路徑）'); return; }
+  const clipCount = items.filter(i => i.type === 'clip').length;
+  const gapCount = items.filter(i => i.type === 'gap').length;
+  const visSubTracks = State.tracks.filter((tk, i) => tk.visible !== false && State.cues.some(c => (c.track || 0) === i && c.timed !== false)).length;
+  const total = Seq.end();
+  openModal('匯出影片',
+    `<div style="font-size:13px;line-height:1.9">` +
+    `<div>序列：<b>${clipCount}</b> 段影片${gapCount ? `、<b>${gapCount}</b> 段間隙（黑畫面）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
+    `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>` +
+    `<div style="margin-top:12px">格式：<label style="margin-left:6px"><input type="radio" name="expVfmt" value="prores" checked> ProRes 422 HQ（.mov，剪輯母帶）</label>` +
+    `<label style="margin-left:14px"><input type="radio" name="expVfmt" value="mp4"> MP4（H.264，交付/預覽）</label></div>` +
+    `</div>`,
+    [{ label: '匯出', primary: true, act: () => {
+        const fmt = (document.querySelector('input[name="expVfmt"]:checked') || {}).value || 'prores';
+        closeModal(); _runExportVideo(items, fmt);
+      } },
+     { label: '取消', act: closeModal }]);
+}
+async function _runExportVideo(items, format) {
+  const visCues = State.cues; // toASSFromState 內部依軌道可見性過濾，時碼為時間軸時間＝輸出時間
+  const assText = toASSFromState(visCues);
+  const hasVisSub = /\nDialogue:/.test(assText);
+  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_')[0];
+  setStatus(`匯出影片中（${format === 'prores' ? 'ProRes 422 HQ' : 'MP4'}）…`, 'busy', 'lock');
+  showToast('開始匯出影片，時間依長度與格式而定…');
+  try {
+    const out = await DESK.exportVideo({
+      items,
+      width: State.videoWidth || 1920,
+      height: State.videoHeight || 1080,
+      fps: State.fps || 25,
+      assText: hasVisSub ? assText : null,
+      format,
+      duration: Seq.end(),
+      defaultName: `ST_${projName}_${format === 'prores' ? 'ProRes422HQ' : 'H264'}`,
+    });
+    setStatus(out ? ('已匯出影片：' + out) : '已取消匯出', out ? 'ok' : '', 'unlock');
+    if (out) showToast('影片已匯出：' + baseName(out));
+  } catch (e) {
+    setStatus('影片匯出失敗：' + (e?.message || e), '', 'unlock');
+    showToast('影片匯出失敗：' + (e?.message || e));
+  }
+}
+
 function doExportXLSX(trackDataList) {
   if (!trackDataList.length) { showToast('所選軌道沒有字幕'); return; }
   const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);
@@ -475,4 +539,4 @@ function applyDurAdjPct() {
   setStatus(`已調整 ${adjusted} 條字幕的持續時間（${pct}%${skipped ? `，跳過 ${skipped} 條已重疊` : ''}）`, 'ok');
 }
 
-export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport };
+export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport, showExportVideoDialog };

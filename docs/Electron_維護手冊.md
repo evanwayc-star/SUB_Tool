@@ -49,6 +49,7 @@ Main (main.js)
 | `saveProject(name, b64)` | `dialog:saveProject` | R→M | 另存 `.subtool` 專案，回傳儲存路徑 |
 | `importSub(kind)` | `dialog:importSub` | R→M | 開啟字幕檔，回傳 `{b64, name}` |
 | `exportSub(name, b64, ext)` | `dialog:exportSub` | R→M | 儲存字幕檔，回傳儲存路徑 |
+| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 匯出影片序列：`{items[],width,height,fps,assText,format:'prores'\|'mp4',duration,defaultName,outPath?}`。單一 filtergraph 串接各段＋燒字幕（ass 濾鏡，cwd=TMP 避開路徑跳脫）＋ ProRes422HQ/H.264 編碼；`outPath` 未給則彈存檔對話框。回傳輸出路徑或 null |
 | `probe(path)` | `ffprobe` | R→M | ffprobe 探測，回傳 `{duration, fps, video, audio[]}` |
 | `makeProxy(path, dur)` | `ffmpeg:proxy` | R→M | 轉製 720p proxy（非即時，阻塞） |
 | `extractAudio(path, idx, dur, codec)` | `ffmpeg:extractAudio` | R→M | 抽取單一聲道 |

@@ -187,10 +187,10 @@ function clearAllCache(currentSrc) {
 function hwdecArgs() { return VENC && VENC !== 'libx264' ? ['-hwaccel', 'auto'] : []; }
 
 /* ---- 執行 ffmpeg，並回報進度 ---- */
-function runFF(args, { onProgress, duration, sender, jobId, label, onProcess } = {}) {
+function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cwd } = {}) {
   return new Promise((res, rej) => {
     if (!FFMPEG) return rej(new Error('找不到 ffmpeg'));
-    const p = spawn(FFMPEG, args);
+    const p = spawn(FFMPEG, args, cwd ? { cwd } : {});
     if (onProcess) onProcess(p);
     let err = '';
     p.stderr.on('data', d => {
@@ -421,6 +421,80 @@ ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
   if (r.canceled) return null;
   fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
   return r.filePath;
+});
+
+/* ---- 匯出影片序列（ProRes 422 HQ / MP4 H.264；燒錄可見軌字幕；各段原音混入其時段） ----
+   items：依時間軸順序的陣列，clip={type:'clip',path,in,out} 或 gap={type:'gap',dur}。
+   單一 filtergraph：各段 trim→fps→scale/pad 到 WxH，間隙用 color/anullsrc 生成，concat 串接，
+   最後以 ass 濾鏡燒字幕（用 cwd 讓字幕檔以 basename 引用，避開 Windows 路徑跳脫地獄）。 */
+function proresArgs() { return ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le', '-c:a', 'pcm_s16le']; }
+function hasAudioStream(p) {
+  try { const r = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', p], { timeout: 8000 }); return !!(r.stdout && r.stdout.toString().trim()); }
+  catch (e) { return true; } // 探測失敗時假設有音訊（較常見）
+}
+ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assText, format, duration, defaultName, outPath: presetOut }) => {
+  if (!FFMPEG) throw new Error('找不到 ffmpeg');
+  const isPro = format === 'prores';
+  const ext = isPro ? 'mov' : 'mp4';
+  let outPath = presetOut || null; // 有指定輸出路徑則跳過對話框（測試/批次用）
+  if (!outPath) {
+    const r = await dialog.showSaveDialog(mainWin, {
+      title: '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
+      filters: [{ name: isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)', extensions: [ext] }],
+    });
+    if (r.canceled) return null;
+    outPath = r.filePath;
+  }
+  allowFileDir(outPath);
+  (items || []).forEach(it => { if (it.type === 'clip' && it.path) allowFileDir(it.path); });
+
+  const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
+  const R = fps || 25;
+  ensureTmp();
+  const inputs = [], fc = [], seg = [];
+  let ii = 0, k = 0;
+  for (const it of (items || [])) {
+    const vl = `v${k}`, al = `a${k}`;
+    if (it.type === 'clip') {
+      inputs.push('-i', it.path);
+      const idx = ii++;
+      // 影像：trim→對齊 PTS→統一 fps→等比縮放置中補黑→SAR=1
+      fc.push(`[${idx}:v]trim=start=${it.in}:end=${it.out},setpts=PTS-STARTPTS,fps=${R},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1[${vl}]`);
+      // 音訊：有音軌則 trim，無則以靜音填滿該段長度
+      const dur = Math.max(0.001, it.out - it.in);
+      if (hasAudioStream(it.path))
+        fc.push(`[${idx}:a]atrim=start=${it.in}:end=${it.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[${al}]`);
+      else
+        fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${dur},asetpts=PTS-STARTPTS[${al}]`);
+    } else { // gap：黑畫面 + 靜音
+      const d = Math.max(0.001, it.dur || 0);
+      fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${d},setsar=1[${vl}]`);
+      fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${d},asetpts=PTS-STARTPTS[${al}]`);
+    }
+    seg.push(`[${vl}][${al}]`);
+    k++;
+  }
+  if (!seg.length) throw new Error('沒有可匯出的影片段');
+  fc.push(`${seg.join('')}concat=n=${seg.length}:v=1:a=1[vc][ac]`);
+
+  // 燒錄字幕（可見軌）：ass 濾鏡讀取暫存 .ass；以 cwd=TMP + basename 引用避開路徑跳脫
+  let vfinal = '[vc]', assName = null;
+  if (assText && assText.trim()) {
+    assName = 'export_' + Date.now() + '.ass';
+    fs.writeFileSync(path.join(TMP, assName), assText, 'utf8');
+    fc.push(`[vc]ass=${assName}[vout]`);
+    vfinal = '[vout]';
+  }
+
+  const encode = isPro ? proresArgs() : [...vencArgs(), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'];
+  const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', vfinal, '-map', '[ac]', '-r', String(R), ...encode, outPath];
+
+  try {
+    await runFF(args, { sender: e.sender, duration: duration || 0, jobId: 'export', label: (isPro ? '匯出 ProRes' : '匯出 MP4'), cwd: TMP });
+  } finally {
+    if (assName) { try { fs.unlinkSync(path.join(TMP, assName)); } catch (e2) {} }
+  }
+  return outPath;
 });
 
 ipcMain.handle('dialog:exportDirectory', async (e, files) => {
