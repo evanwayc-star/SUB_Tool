@@ -4,7 +4,7 @@ import { escapeHTML } from './util.js';
 import { State, isSel } from './state.js';
 import { Media } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
-import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline } from './timeline.js';
+import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip } from './timeline.js';
 import { Seq } from './sequence.js';
 import { showToast } from './ui.js';
 import { recordHistory } from './history.js';
@@ -180,6 +180,7 @@ tlScroll.addEventListener('contextmenu',e=>{
   if(clipEl){
     e.preventDefault();
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
+    selectClip(c.id); // 右鍵即選取（高亮，之後可直接 Del / 上下鍵切換）
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
     const items=[{heading:true,label:'🎬 '+c.name}];
     // 播放頭在此段內 → 可就地切割（等同 Ctrl+K）

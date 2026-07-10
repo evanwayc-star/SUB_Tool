@@ -20,9 +20,8 @@ const RULER_H=24, WAVE_H=64, ROW_H=64;  // default/min values; actual stored in 
 
 /* 影片序列區塊層：覆蓋在波形列上（動態建立，免改 index.html）。
    容器 pointer-events:none、區塊本身 auto——空白波形處仍可拖曳捲動/框選。 */
-const tlClips=document.createElement('div');
-tlClips.id='tlClips';
-tlLayer.appendChild(tlClips);
+// 冪等：若已存在（熱更新/重複 import）則重用，避免產生重複的 #tlClips 疊層
+const tlClips=document.getElementById('tlClips')||(()=>{ const d=document.createElement('div'); d.id='tlClips'; tlLayer.appendChild(d); return d; })();
 function waveH(){ return State.waveH||WAVE_H; }
 function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
 function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
@@ -376,7 +375,7 @@ function renderClipBlocks(){
     const s=c.offset, e=Seq.clipEnd(c);
     if(e<t0||s>t1) continue;
     const el=document.createElement('div');
-    el.className='clip-block'+(c.id===Media.activeClipId?' active':'');
+    el.className='clip-block'+(c.id===Media.activeClipId?' active':'')+(c.id===State.selectedClipId?' selected':'');
     const x1=timeToX(s), x2=timeToX(e);
     el.style.left=x1+'px'; el.style.width=Math.max(6,x2-x1)+'px';
     el.dataset.clipId=c.id;
@@ -386,6 +385,52 @@ function renderClipBlocks(){
       `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
       `\n拖曳＝移動｜拖左右邊緣＝修剪｜右鍵＝選單`;
     tlClips.appendChild(el);
+  }
+}
+
+/* ===== 影片段選取（點選高亮、上下鍵切換、Del 刪除；行為比照字幕列） ===== */
+function selectClip(id, opts={}){
+  const c=Seq.byId(id); if(!c) return;
+  State.selectedClipId=id;
+  State.selectedId=null; State.selectedIds=[]; // 與字幕選取互斥（避免 Del/上下鍵語意衝突）
+  refreshSelectionUI(); // 清除字幕列高亮
+  $('stSel').textContent='已選影片段：'+c.name;
+  if(opts.seek){ Media.seek(c.offset); emit('playhead:ensure'); emit('render:videoSub'); }
+  renderClipBlocks();
+}
+function clearClipSelection(){
+  if(State.selectedClipId==null) return;
+  State.selectedClipId=null;
+  $('stSel').textContent='';
+  renderClipBlocks();
+}
+/* 上/下鍵：切換到上一段/下一段（依時間軸順序），選取並把播放頭移到段首 */
+function navigateClip(dir){
+  const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
+  if(!sorted.length) return;
+  let idx=sorted.findIndex(c=>c.id===State.selectedClipId);
+  if(idx<0){ // 尚無選取：從播放頭所在（或最接近）的段開始
+    const t=Media.displayTime();
+    idx=sorted.findIndex(c=>c.id===Media.activeClipId);
+    if(idx<0){ idx=0; for(let i=0;i<sorted.length;i++){ if(sorted[i].offset<=t+1e-4) idx=i; } }
+  } else {
+    idx=Math.max(0, Math.min(sorted.length-1, idx+dir));
+  }
+  selectClip(sorted[idx].id, {seek:true});
+}
+/* 刪除選取的影片段（至少保留一段），並選取相鄰段方便連續刪除 */
+function deleteSelectedClip(){
+  const id=State.selectedClipId; if(id==null) return;
+  const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
+  const idx=sorted.findIndex(c=>c.id===id);
+  const c=Seq.byId(id);
+  if(Media.removeClip(id)){
+    recordHistory('刪除影片段：'+(c?c.name:''));
+    const rest=[...State.clips].sort((a,b)=>a.offset-b.offset);
+    const next=rest[Math.min(idx, rest.length-1)];
+    if(next){ State.selectedClipId=next.id; $('stSel').textContent='已選影片段：'+next.name; }
+    else State.selectedClipId=null;
+    drawTimeline();
   }
 }
 
@@ -546,7 +591,8 @@ tlScroll.addEventListener('mousedown',e=>{
   const clipEl=e.target.closest('.clip-block');
   if(clipEl){
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
-    if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; }
+    selectClip(c.id); // 點擊即選取（非破壞性，先做——不受存檔守衛擋住）
+    if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; } // 拖曳/修剪前先存檔
     if(e.detail<2) jklReset(); // 播放中拖動影片區塊 → 先暫停（映射不可邊播邊變）
     const nb=Seq.neighborBounds(c);
     const mode=e.target.classList.contains('edge')?(e.target.classList.contains('l')?'clip-l':'clip-r'):'clip-move';
@@ -859,19 +905,20 @@ window.addEventListener('mouseup',e=>{
       Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub');
       if(!e.shiftKey){
         State.selectedIds=[]; State.selectedId=null; State.activeEdge='start';
+        clearClipSelection();
         refreshSelectionUI(); $('stSel').textContent='';
       }
     }
+    if(drag.moved) clearClipSelection(); // 框選字幕時取消影片段選取
   }else if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
     const moved=drag.moved, m=drag.mode, c=drag.clip;
-    if(moved && m==='clip-move') Seq.resolveOverlaps(c); // 自由拖放：壓到的段落連鎖右推（插入語義）
+    if(!moved){ selectClip(c.id); drag=null; return; } // 未拖動＝點選該影片段（高亮，供上下鍵/Del）
+    if(m==='clip-move') Seq.resolveOverlaps(c); // 自由拖放：壓到的段落連鎖右推（插入語義）
     Seq.sort(); Seq.recomputeDuration();
-    if(moved){
-      recordHistory(m==='clip-move'?('移動影片：'+c.name):('修剪影片：'+c.name));
-      // 幾何變了 → 以目前播放頭重新解析映射（active clip 可能移走/縮短成間隙）
-      Media.seek(Math.min(Media.displayTime(), State.duration||0));
-      emit('render:videoSub'); emit('mpv:refreshSubs');
-    }
+    recordHistory(m==='clip-move'?('移動影片：'+c.name):('修剪影片：'+c.name));
+    // 幾何變了 → 以目前播放頭重新解析映射（active clip 可能移走/縮短成間隙）
+    Media.seek(Math.min(Media.displayTime(), State.duration||0));
+    emit('render:videoSub'); emit('mpv:refreshSubs');
     drawTimeline();
   }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; if(moved) sweepContainedCues(drag.grp.map(x=>x.c)); sortCues(); emit('render:all'); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
   drag=null;
@@ -921,4 +968,5 @@ function neighborBounds(os,oe,track,excludeIds){
 export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
   addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, redrawTimeline, setZoom, zoomFit, zoomFitVideo,
-  refreshTrackGutterActive, snapTargets, snapVal, neighborBounds };
+  refreshTrackGutterActive, snapTargets, snapVal, neighborBounds,
+  selectClip, clearClipSelection, navigateClip, deleteSelectedClip };

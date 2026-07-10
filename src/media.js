@@ -1403,7 +1403,7 @@ const Media = {
     this.objectURLs.forEach(u=>{try{URL.revokeObjectURL(u);}catch(e){}}); this.objectURLs=[];
     this.playing=false; this._vTime=0; this._vStart=null;
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）
-    Seq.clear(); this.activeClipId=null; this._mpvPath=null;
+    Seq.clear(); this.activeClipId=null; this._mpvPath=null; State.selectedClipId=null;
     this._gap=false; this._gapT=0; this._gapStart=null; this._seqSwitching=false;
     video.style.visibility='';
     const pb=$('playBtn'); if(pb) pb.textContent='▶';

@@ -33,6 +33,7 @@ const State = {
   overwriteMode: false, // 允許重疊（不可覆蓋/可覆蓋）
   overwriteKeep: true,  // 可覆蓋模式下：true=保留被包含句, false=刪除被包含句
   clips: [],            // 影片序列（時間軸上的影片區塊）：見 sequence.js
+  selectedClipId: null, // 目前選取的影片段（點選後可用上下鍵切換、Del 刪除）
 };
 /* 軌道工具 */
 function newTrack(name){ return {name:name||('軌道 '+(State.tracks.length+1)),visible:true,fontSize:60,posPct:90,align:'center',locked:false,color:'#ffffff'}; }
