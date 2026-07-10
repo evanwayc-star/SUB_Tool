@@ -291,6 +291,7 @@ function _buildExportItems() {
   return items;
 }
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
+let _lastVbrMbps = 5; // MP4 影片位元率（Mbps）；預設 5M，同一 session 記住上次設定
 async function showExportVideoDialog() {
   if (!IS_DESKTOP || !DESK.exportVideo) { showToast('影片匯出僅在桌面版可用'); return; }
   if (!Seq.active()) { showToast('尚未載入影片'); return; }
@@ -314,20 +315,38 @@ async function showExportVideoDialog() {
     `<span style="color:var(--text-faint);font-size:12px">— CPU 編碼（ffmpeg 無 GPU ProRes 編碼器）</span></label>` +
     `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="mp4"> MP4（H.264，交付/預覽）` +
     `<span style="color:${gpu ? 'var(--green)' : 'var(--text-faint)'};font-size:12px">— ${mp4Note}</span></label>` +
-    `<div style="color:var(--text-faint);font-size:12px;margin-top:6px">來源解碼一律嘗試硬體加速（不支援時自動退回軟解）。</div>` +
+    `<div id="expVbrRow" style="display:none;padding:6px 0 0 22px">影片位元率：` +
+    `<input type="number" id="expVbr" min="0.1" max="200" step="0.5" value="${_lastVbrMbps}" style="width:74px;margin:0 4px"> Mbps` +
+    `<span style="color:var(--text-faint);font-size:12px;margin-left:8px">音訊固定 192 kbps AAC</span></div>` +
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:6px">ProRes 為固定品質，無位元率設定。來源解碼一律嘗試硬體加速（不支援時自動退回軟解）。</div>` +
     `</div>`,
     [{ label: '匯出', primary: true, act: () => {
         const fmt = (document.querySelector('input[name="expVfmt"]:checked') || {}).value || 'prores';
-        closeModal(); _runExportVideo(items, fmt);
+        let kbps = null;
+        if (fmt === 'mp4') {
+          const mbps = parseFloat(($('expVbr') || {}).value);
+          if (!(mbps > 0)) { showToast('請輸入有效的位元率（Mbps）'); return; }
+          _lastVbrMbps = Math.min(200, Math.max(0.1, mbps));
+          kbps = Math.round(_lastVbrMbps * 1000);
+        }
+        closeModal(); _runExportVideo(items, fmt, kbps);
       } },
      { label: '取消', act: closeModal }]);
+  // 位元率欄位只在選 MP4 時出現
+  setTimeout(() => {
+    const row = $('expVbrRow');
+    const sync = () => { const f = (document.querySelector('input[name="expVfmt"]:checked') || {}).value; if (row) row.style.display = (f === 'mp4') ? '' : 'none'; };
+    document.querySelectorAll('input[name="expVfmt"]').forEach(el => el.addEventListener('change', sync));
+    sync();
+  }, 20);
 }
-async function _runExportVideo(items, format) {
+async function _runExportVideo(items, format, videoKbps) {
   const visCues = State.cues; // toASSFromState 內部依軌道可見性過濾，時碼為時間軸時間＝輸出時間
   const assText = toASSFromState(visCues);
   const hasVisSub = /\nDialogue:/.test(assText);
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_')[0];
-  setStatus(`匯出影片中（${format === 'prores' ? 'ProRes 422 HQ' : 'MP4'}）…`, 'busy', 'lock');
+  const fmtLabel = format === 'prores' ? 'ProRes 422 HQ' : `MP4 ${(videoKbps / 1000).toFixed(1)}Mbps`;
+  setStatus(`匯出影片中（${fmtLabel}）…`, 'busy', 'lock');
   showToast('開始匯出影片，時間依長度與格式而定…');
   try {
     const r = await DESK.exportVideo({
@@ -337,15 +356,17 @@ async function _runExportVideo(items, format) {
       fps: State.fps || 25,
       assText: hasVisSub ? assText : null,
       format,
+      videoKbps,
       duration: Seq.end(),
       defaultName: `ST_${projName}_${format === 'prores' ? 'ProRes422HQ' : 'H264'}`,
     });
     if (!r) { setStatus('已取消匯出', '', 'unlock'); return; }
     // r.encoder 為 ffmpeg 實際使用的編碼器（從其輸出解析），非事前猜測
     const acc = r.gpu ? `GPU ${r.encoder}` : `CPU ${r.encoder}`;
+    const br = r.videoKbps ? `，${(r.videoKbps / 1000).toFixed(1)}Mbps` : '';
     const secs = (r.elapsedMs / 1000).toFixed(1);
-    setStatus(`已匯出影片（${acc}，耗時 ${secs}s）：${r.outPath}`, 'ok', 'unlock');
-    showToast(`影片已匯出（${acc}）：${baseName(r.outPath)}`);
+    setStatus(`已匯出影片（${acc}${br}，耗時 ${secs}s）：${r.outPath}`, 'ok', 'unlock');
+    showToast(`影片已匯出（${acc}${br}）：${baseName(r.outPath)}`);
   } catch (e) {
     setStatus('影片匯出失敗：' + (e?.message || e), '', 'unlock');
     showToast('影片匯出失敗：' + (e?.message || e));

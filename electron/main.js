@@ -431,11 +431,22 @@ ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
    單一 filtergraph：各段 trim→fps→scale/pad 到 WxH，間隙用 color/anullsrc 生成，concat 串接，
    最後以 ass 濾鏡燒字幕（用 cwd 讓字幕檔以 basename 引用，避開 Windows 路徑跳脫地獄）。 */
 function proresArgs() { return ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le', '-c:a', 'pcm_s16le']; }
+/* 匯出用的 H.264 參數：以「目標位元率」編碼（vencArgs() 是畫質模式 CQ/CRF，供轉檔 proxy 用，不可混用）。
+   各編碼器的速率控制旗標不同；maxrate=目標、bufsize=2×目標 → 近似封頂 VBR，位元率穩定可預測。 */
+function vencArgsBitrate(kbps) {
+  const b = kbps + 'k', buf = (kbps * 2) + 'k';
+  switch (VENC) {
+    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-b:v', b, '-maxrate', b, '-bufsize', buf];
+    case 'h264_qsv':   return ['-c:v', 'h264_qsv', '-b:v', b, '-maxrate', b, '-bufsize', buf];
+    case 'h264_amf':   return ['-c:v', 'h264_amf', '-rc', 'vbr_peak', '-b:v', b, '-maxrate', b, '-bufsize', buf];
+    default:           return ['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', b, '-maxrate', b, '-bufsize', buf];
+  }
+}
 function hasAudioStream(p) {
   try { const r = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', p], { timeout: 8000 }); return !!(r.stdout && r.stdout.toString().trim()); }
   catch (e) { return true; } // 探測失敗時假設有音訊（較常見）
 }
-ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assText, format, duration, defaultName, outPath: presetOut }) => {
+ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps }) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
   const isPro = format === 'prores';
   const ext = isPro ? 'mov' : 'mp4';
@@ -492,13 +503,16 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assT
     vfinal = '[vout]';
   }
 
-  const encode = isPro ? proresArgs() : [...vencArgs(), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'];
+  // MP4：以使用者指定的目標位元率編碼（音訊固定 192k AAC）；ProRes 為固定品質，無位元率設定
+  const kbps = Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
+  const encode = isPro ? proresArgs() : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'];
   const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', vfinal, '-map', '[ac]', '-r', String(R), ...encode, outPath];
 
-  // 進度標籤即顯示本次實際送出的編碼器（GPU 或 CPU），使用者在狀態列就看得到
+  // 進度標籤即顯示本次實際送出的編碼器（GPU 或 CPU）與位元率，使用者在狀態列就看得到
   const planned = isPro ? 'prores_ks' : (VENC || 'libx264');
   const isGpu = !isPro && planned !== 'libx264';
-  const label = `匯出 ${isPro ? 'ProRes 422 HQ' : 'MP4'}（${isGpu ? 'GPU ' + planned.replace('h264_', '').toUpperCase() : 'CPU ' + planned}）`;
+  const accel = isGpu ? 'GPU ' + planned.replace('h264_', '').toUpperCase() : 'CPU ' + planned;
+  const label = `匯出 ${isPro ? 'ProRes 422 HQ' : 'MP4 ' + (kbps / 1000).toFixed(1) + 'Mbps'}（${accel}）`;
   let usedEncoder = planned;
   const t0 = Date.now();
   try {
@@ -512,7 +526,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assT
     if (assName) { try { fs.unlinkSync(path.join(TMP, assName)); } catch (e2) {} }
   }
   // 回傳 ffmpeg 實際使用的編碼器與耗時，供 renderer 顯示「這次真的用了 GPU 沒有」
-  return { outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder), elapsedMs: Date.now() - t0 };
+  return { outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder), elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps };
 });
 
 ipcMain.handle('dialog:exportDirectory', async (e, files) => {
