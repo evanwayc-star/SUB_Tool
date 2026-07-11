@@ -591,12 +591,14 @@ tlScroll.addEventListener('mousedown',e=>{
   const clipEl=e.target.closest('.clip-block');
   if(clipEl){
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
+    const mode=e.target.classList.contains('edge')?(e.target.classList.contains('l')?'clip-l':'clip-r'):'clip-move'; // 需在 selectClip 重繪前判斷（用 e.target 的 class）
     selectClip(c.id); // 點擊即選取（非破壞性，先做——不受存檔守衛擋住）
     if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; } // 拖曳/修剪前先存檔
     if(e.detail<2) jklReset(); // 播放中拖動影片區塊 → 先暫停（映射不可邊播邊變）
     const nb=Seq.neighborBounds(c);
-    const mode=e.target.classList.contains('edge')?(e.target.classList.contains('l')?'clip-l':'clip-r'):'clip-move';
-    drag={mode, clip:c, clipEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft, moved:false,
+    // selectClip 內 renderClipBlocks() 已把原 clipEl 重建成新節點；必須重抓，否則拖曳更新的是脫離 DOM 的孤兒（框不動、只有波形動）
+    const liveEl=tlClips.querySelector(`.clip-block[data-clip-id="${c.id}"]`)||clipEl;
+    drag={mode, clip:c, clipEl:liveEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft, moved:false,
       os:c.offset, oin:c.in, oout:c.out,
       leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+(c.out-c.in)), // 右鄰左緣（時間軸）
       nb, snaps:[...snapTargets(new Set()), ...Seq.snapEdges(c.id)]};
