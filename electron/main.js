@@ -460,7 +460,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assT
     outPath = r.filePath;
   }
   allowFileDir(outPath);
-  (items || []).forEach(it => { if (it.type === 'clip' && it.path) allowFileDir(it.path); });
+  (items || []).forEach(it => { if (it.type === 'clip' && it.path) allowFileDir(it.path); (it.audio || []).forEach(a => a.file && allowFileDir(a.file)); });
 
   const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
   const R = fps || 25;
@@ -477,12 +477,31 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assT
       const idx = ii++;
       // 影像：trim→對齊 PTS→統一 fps→等比縮放置中補黑→SAR=1
       fc.push(`[${idx}:v]trim=start=${it.in}:end=${it.out},setpts=PTS-STARTPTS,fps=${R},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1[${vl}]`);
-      // 音訊：有音軌則 trim，無則以靜音填滿該段長度
+      // 音訊：
+      //  - it.audio 為陣列（來自混音器）：依可聽聲道檔混音（靜音/獨奏已在 renderer 過濾，音量在此套用）；
+      //    空陣列＝全靜音。逐聲道檔為 mono，套音量後 amix 相加、再 pan 成 stereo（比照混音器把 mono 置中）。
+      //  - it.audio 為 undefined（無逐聲道檔）：回退用來源原音。
       const dur = Math.max(0.001, it.out - it.in);
-      if (hasAudioStream(it.path))
+      if (Array.isArray(it.audio)) {
+        if (!it.audio.length) {
+          fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${dur},asetpts=PTS-STARTPTS[${al}]`);
+        } else {
+          const mono = [];
+          it.audio.forEach((ch, j) => {
+            inputs.push('-i', ch.file);
+            const aidx = ii++;
+            fc.push(`[${aidx}:a]atrim=start=${it.in}:end=${it.out},asetpts=PTS-STARTPTS,aresample=48000,volume=${ch.volume}[${vl}m${j}]`);
+            mono.push(`[${vl}m${j}]`);
+          });
+          fc.push(mono.length > 1
+            ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,pan=stereo|FL=c0|FR=c0[${al}]`
+            : `${mono[0]}pan=stereo|FL=c0|FR=c0[${al}]`);
+        }
+      } else if (hasAudioStream(it.path)) {
         fc.push(`[${idx}:a]atrim=start=${it.in}:end=${it.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[${al}]`);
-      else
+      } else {
         fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${dur},asetpts=PTS-STARTPTS[${al}]`);
+      }
     } else { // gap：黑畫面 + 靜音
       const d = Math.max(0.001, it.dur || 0);
       fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${d},setsar=1[${vl}]`);

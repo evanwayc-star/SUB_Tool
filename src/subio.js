@@ -276,8 +276,18 @@ function toASSFromState(cues) {
   );
 }
 
-/* ===== 匯出影片（序列）：ProRes 422 HQ / MP4，燒錄可見軌字幕，各段原音混入 =====
+/* ===== 匯出影片（序列）：ProRes 422 HQ / MP4，燒錄可見軌字幕，音訊依混音器設定輸出 =====
    桌面版專屬（需系統 ffmpeg）。輸出時間軸＝序列時間軸，故字幕（時間軸時碼）與輸出對齊。 */
+/* 依混音器狀態算出某影片段要輸出哪些聲道（比照 applyGains：有獨奏則只留獨奏，否則留未靜音；套用音量）。
+   回傳 [{file,volume}...]（空陣列＝全靜音）；若該來源沒有逐聲道檔（原生 L/R 或網頁）則回 undefined＝用來源原音。 */
+function _clipAudioSpec(c) {
+  const srcKey = c.audioSrc || (c.primary ? 'video' : 'clip:' + c.id);
+  const tks = Media.tracks.filter(t => (t.source || 'video') === srcKey && t.file && (t.kind === 'element' || t.kind === 'buffer'));
+  if (!tks.length) return undefined; // 無逐聲道檔 → 回退來源原音
+  const anySolo = tks.some(t => t.solo);
+  return tks.filter(t => (anySolo ? t.solo : !t.muted) && (t.volume || 0) > 0)
+            .map(t => ({ file: t.file, volume: +(t.volume != null ? t.volume : 1).toFixed(3) }));
+}
 function _buildExportItems() {
   const clips = [...State.clips].filter(c => c.path).sort((a, b) => a.offset - b.offset);
   if (!clips.length) return null;
@@ -285,13 +295,28 @@ function _buildExportItems() {
   const EPS = 0.01;
   for (const c of clips) {
     if (c.offset > cursor + EPS) items.push({ type: 'gap', dur: +(c.offset - cursor).toFixed(3) }); // 段間間隙＝黑畫面
-    items.push({ type: 'clip', path: c.path, in: +c.in.toFixed(3), out: +c.out.toFixed(3) });
+    items.push({ type: 'clip', path: c.path, in: +c.in.toFixed(3), out: +c.out.toFixed(3), audio: _clipAudioSpec(c) });
     cursor = c.offset + Seq.len(c);
   }
   return items;
 }
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
 let _lastVbrMbps = 5; // MP4 影片位元率（Mbps）；預設 5M，同一 session 記住上次設定
+/* 對話框摘要：目前序列各來源會輸出幾條聲道（供使用者匯出前確認混音器狀態） */
+function _mixerSummary() {
+  const srcs = new Set(State.clips.map(c => c.audioSrc || (c.primary ? 'video' : 'clip:' + c.id)));
+  let audible = 0, total = 0, hasFileSrc = false;
+  for (const s of srcs) {
+    const tks = Media.tracks.filter(t => (t.source || 'video') === s && t.file);
+    if (!tks.length) continue;
+    hasFileSrc = true;
+    const anySolo = tks.some(t => t.solo);
+    total += tks.length;
+    audible += tks.filter(t => (anySolo ? t.solo : !t.muted) && (t.volume || 0) > 0).length;
+  }
+  if (!hasFileSrc) return '';
+  return `：目前 <b>${audible}</b>/${total} 條聲道會發聲`;
+}
 async function showExportVideoDialog() {
   if (!IS_DESKTOP || !DESK.exportVideo) { showToast('影片匯出僅在桌面版可用'); return; }
   if (!Seq.active()) { showToast('尚未載入影片'); return; }
@@ -310,6 +335,8 @@ async function showExportVideoDialog() {
     `<div>序列：<b>${clipCount}</b> 段影片${gapCount ? `、<b>${gapCount}</b> 段間隙（黑畫面）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
     `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
     `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>` +
+    `<div style="margin-top:4px">音訊：<b>依混音器設定輸出</b>${_mixerSummary()}</div>` +
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（靜音／獨奏／音量比照播放；未抽出逐聲道的來源則輸出原音）</div>` +
     `<div style="margin-top:12px">格式：</div>` +
     `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="prores" checked> ProRes 422 HQ（.mov，剪輯母帶）` +
     `<span style="color:var(--text-faint);font-size:12px">— CPU 編碼（ffmpeg 無 GPU ProRes 編碼器）</span></label>` +

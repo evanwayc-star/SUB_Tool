@@ -418,6 +418,20 @@ function navigateClip(dir){
   }
   selectClip(sorted[idx].id, {seek:true});
 }
+/* 關閉選取影片段「前方」的空白：把它往左移到緊貼前一段結尾；前面沒有素材則移到 00:00:00:00 */
+function closeClipGapLeft(){
+  const id=State.selectedClipId; if(id==null) return;
+  const c=Seq.byId(id); if(!c) return;
+  const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
+  const idx=sorted.findIndex(x=>x.id===id);
+  const target = idx>0 ? Seq.clipEnd(sorted[idx-1]) : 0; // 前一段結尾，或序列開頭
+  if(Math.abs(c.offset - target) < 1e-4) return; // 已無空白
+  c.offset = target;
+  Seq.sort(); Seq.recomputeDuration();
+  recordHistory('關閉前方空白：'+c.name);
+  Media.seek(Math.min(Media.displayTime(), State.duration||0)); // 幾何變了→重新解析映射
+  drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+}
 /* 刪除選取的影片段（至少保留一段），並選取相鄰段方便連續刪除 */
 function deleteSelectedClip(){
   const id=State.selectedClipId; if(id==null) return;
@@ -971,4 +985,4 @@ export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
   addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, redrawTimeline, setZoom, zoomFit, zoomFitVideo,
   refreshTrackGutterActive, snapTargets, snapVal, neighborBounds,
-  selectClip, clearClipSelection, navigateClip, deleteSelectedClip };
+  selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft };

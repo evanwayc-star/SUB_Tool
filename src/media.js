@@ -269,7 +269,7 @@ const Media = {
               const el=els[i]; if(!el) continue;
               const node=self.ctx.createMediaElementSource(el);
               const g=self.ctx.createGain(); node.connect(g); g.connect(self.master);
-              const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+              const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1,file:chs[i].file};
               self.attachMeter(tr,node); self.tracks.push(tr);
               if(self.pendingChannels[i]) self.pendingChannels[i].ready=true;
               self.syncMuteState(); renderAudioTracks();
@@ -329,7 +329,7 @@ const Media = {
         const el=els[i]; if(!el) continue;
         const node=this.ctx.createMediaElementSource(el);
         const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-        const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+        const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1,file:chs[i].file};
         this.attachMeter(tr,node); this.tracks.push(tr);
       }
     }
@@ -522,7 +522,7 @@ const Media = {
         const el=els[i]; if(!el) continue;
         const node=this.ctx.createMediaElementSource(el);
         const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-        const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1};
+        const tr={id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',el,gain:g,muted:false,solo:false,volume:1,file:chs[i].file};
         this.attachMeter(tr,node); this.tracks.push(tr);
         if(this.pendingChannels[i]) this.pendingChannels[i].ready=true;
         this.usingWebAudio=true; this.syncMuteState();
@@ -967,7 +967,7 @@ const Media = {
         const node = this.ctx.createMediaElementSource(el);
         const g = this.ctx.createGain(); node.connect(g); g.connect(this.master);
         const tr = { id: 'cl-' + c.id + '-' + i, name: c.name + '·' + (chs[i].label || ('軌 ' + (i + 1))),
-          kind: 'element', source: 'clip:' + c.id, el, gain: g, muted: false, solo: false, volume: 1 };
+          kind: 'element', source: 'clip:' + c.id, el, gain: g, muted: false, solo: false, volume: 1, file: chs[i].file };
         this.attachMeter(tr, node); this.tracks.push(tr);
       }
       // 依目前 active clip 重新套用可聽集合（新加入的預設隱藏，除非它正是 active）

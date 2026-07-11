@@ -5,7 +5,7 @@ import { clamp } from './util.js';
 import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
 import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
-import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, navigateClip, deleteSelectedClip, clearClipSelection } from './timeline.js';
+import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, navigateClip, deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './timeline.js';
 import { Project, ensureProjectSaved } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, updateNoteActive } from './notes.js';
@@ -176,12 +176,13 @@ window.addEventListener('keydown',e=>{
     // 皆交由編輯器自身處理，全域快捷鍵不作用
     return;
   }
-  // 影片段已選取：上下鍵切換段、Del 刪除、Esc 取消（比照字幕列；左右鍵仍保留給逐格移動）
+  // 影片段已選取：上下鍵切換段、Del 刪除、Backspace 關閉前方空白、Esc 取消（左右鍵仍保留給逐格移動）
   if(State.selectedClipId!=null){
     const k=e.key;
     if(k==='ArrowUp'){ e.preventDefault(); navigateClip(-1); return; }
     if(k==='ArrowDown'){ e.preventDefault(); navigateClip(1); return; }
-    if(k==='Delete'||k==='Backspace'){ e.preventDefault(); deleteSelectedClip(); return; }
+    if(k==='Backspace'){ e.preventDefault(); closeClipGapLeft(); return; } // 移到前一段結尾／序列開頭
+    if(k==='Delete'){ e.preventDefault(); deleteSelectedClip(); return; }
     if(k==='Escape'){ e.preventDefault(); clearClipSelection(); return; }
   }
   function matchAction(ev) {
