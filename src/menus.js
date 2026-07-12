@@ -187,8 +187,17 @@ tlScroll.addEventListener('contextmenu',e=>{
     const pt=Media.displayTime();
     if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
     items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
-    // 相鄰段交換（依時間軸順序；保留兩段之間的間距）
-    const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
+    // 移到上／下一層視訊軌（多軌疊層：上層覆蓋下層）
+    const moveTrack=(dv)=>{
+      Seq.moveToTrack(c, (c.vtrack||0)+dv);
+      recordHistory('影片段移到 V'+((c.vtrack||0)+1));
+      Media.seek(Math.min(Media.displayTime(), State.duration||0));
+      drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+    };
+    items.push({label:`⬆ 移到上層視訊軌（V${(c.vtrack||0)+2}）`,act:()=>moveTrack(1)});
+    if((c.vtrack||0)>0) items.push({label:`⬇ 移到下層視訊軌（V${(c.vtrack||0)}）`,act:()=>moveTrack(-1)});
+    // 相鄰段交換（同一視訊軌內、依時間軸順序；保留兩段之間的間距）
+    const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset);
     const idx=sorted.indexOf(c);
     const swap=(a,b)=>{ // a=前段 b=後段
       const gap=b.offset-Seq.clipEnd(a), start=a.offset;
@@ -198,8 +207,8 @@ tlScroll.addEventListener('contextmenu',e=>{
       Media.seek(Math.min(Media.displayTime(), State.duration||0));
       drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
     };
-    if(idx>0) items.push({label:'◀ 與前一段交換',act:()=>swap(sorted[idx-1], c)});
-    if(idx<sorted.length-1) items.push({label:'▶ 與後一段交換',act:()=>swap(c, sorted[idx+1])});
+    if(idx>0) items.push({label:'◀ 與前一段交換（同軌）',act:()=>swap(sorted[idx-1], c)});
+    if(idx<sorted.length-1) items.push({label:'▶ 與後一段交換（同軌）',act:()=>swap(c, sorted[idx+1])});
     if(trimmed) items.push({label:'↺ 重設修剪（還原完整長度）',act:()=>{
       const save={in:c.in,out:c.out};
       c.in=0; c.out=c.dur;

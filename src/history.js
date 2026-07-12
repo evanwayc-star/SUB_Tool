@@ -12,7 +12,7 @@ import { setStatus } from './ui.js';
 const History = {
   stack:[], hi:-1, max:120,
   // clipGeo：只快照影片區塊的幾何（位置/修剪）；clip 成員增減與媒體資源不入 undo（資源無法還原）
-  snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,fps:State.fps,dropFrame:State.dropFrame,clipGeo:Seq.snapshot()}); },
+  snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,fps:State.fps,dropFrame:State.dropFrame,clipGeo:Seq.snapshot()}); },
   reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); },
   record(label){
     const newSnap = this.snap();
@@ -24,6 +24,7 @@ const History = {
         && old.tracks.length === newSnap.tracks.length
         && old.notes.length === newSnap.notes.length
         && (old.clipGeo?.length || 0) === (newSnap.clipGeo?.length || 0)
+        && (old.videoTracks?.length || 0) === (newSnap.videoTracks?.length || 0)
         && old.fps === newSnap.fps
         && old.dropFrame === newSnap.dropFrame;
       if(!structSame){ /* 結構有變動，直接記錄 */ }
@@ -38,7 +39,8 @@ const History = {
     if(i<0||i>=this.stack.length)return;
     const d=structuredClone(this.stack[i].snap);
     State.cues=d.cues; State.tracks=d.tracks; State.notes=d.notes||[]; syncTrackCount();
-    Seq.restore(d.clipGeo); // 影片區塊幾何（位置/修剪）
+    State.videoTracks = (Array.isArray(d.videoTracks)&&d.videoTracks.length) ? d.videoTracks : [{name:'視訊軌 1',visible:true,locked:false}];
+    Seq.restore(d.clipGeo); // 影片區塊幾何（位置/修剪）；compact 會補足 videoTracks 涵蓋現有片段
     if(d.fps) setFps(d.dropFrame?String(d.fps)+'df':d.fps);
     if(!State.cues.some(c=>c.id===State.selectedId)){ State.selectedId=null; State.selectedIds=[]; }
     else State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));

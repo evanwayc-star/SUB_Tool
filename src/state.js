@@ -32,12 +32,20 @@ const State = {
   clipboard:[],  // copied cues for paste
   overwriteMode: false, // 允許重疊（不可覆蓋/可覆蓋）
   overwriteKeep: true,  // 可覆蓋模式下：true=保留被包含句, false=刪除被包含句
-  clips: [],            // 影片序列（時間軸上的影片區塊）：見 sequence.js
+  clips: [],            // 影片序列（時間軸上的影片區塊，含 vtrack 視訊軌）：見 sequence.js
   selectedClipId: null, // 目前選取的影片段（點選後可用上下鍵切換、Del 刪除）
+  videoTracks: [{name:'視訊軌 1',visible:true,locked:false}], // 視訊軌（獨立成列，比照字幕軌 tracks[]；索引越大越上層＝越優先覆蓋）
+  audioExpanded: {},    // 音訊軌（每音源一列）是否展開成各聲道控制列：{ srcId: true }
 };
 /* 軌道工具 */
 function newTrack(name){ return {name:name||('軌道 '+(State.tracks.length+1)),visible:true,fontSize:60,posPct:90,align:'center',locked:false,color:'#ffffff'}; }
 function syncTrackCount(){ State.trackCount=State.tracks.length; }
+/* 視訊軌工具（比照字幕軌）：newVideoTrack 建一條、ensureVideoTrackCount 補足數量（只增不減）、
+   videoTrackVisible 顯示查詢、resetVideoTracks 回到單軌初始。索引 0＝最底/基底，越大越上層。 */
+function newVideoTrack(name){ return {name:name||('視訊軌 '+(State.videoTracks.length+1)),visible:true,locked:false}; }
+function ensureVideoTrackCount(n){ let added=false; while(State.videoTracks.length<n){ State.videoTracks.push(newVideoTrack()); added=true; } return added; }
+function videoTrackVisible(i){ return !State.videoTracks[i] || State.videoTracks[i].visible!==false; }
+function resetVideoTracks(){ State.videoTracks=[{name:'視訊軌 1',visible:true,locked:false}]; }
 /* 允許的影格率（下拉選單） */
 const FPS_SET=[23.976,24,25,29.97,30];
 function snapFps(v){ let best=24,bd=1e9; for(const f of FPS_SET){const d=Math.abs(f-v);if(d<bd){bd=d;best=f;}} return best; }
@@ -222,4 +230,4 @@ function cueSuffix(c){
   return ` - ${name} - 第${idx+1}句`;
 }
 
-export { State, newTrack, syncTrackCount, FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys };
+export { State, newTrack, syncTrackCount, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys };

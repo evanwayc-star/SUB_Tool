@@ -1,6 +1,6 @@
 /* SUB Tool — 時間軸：渲染（尺/波形/軌道/區塊）與互動（拖曳/框選/縮放） */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js';
-import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix } from './state.js';
+import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks } from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { encoreParts } from './time.js';
@@ -18,15 +18,39 @@ import { Seq } from './sequence.js';
 /* ===== 5. 時間軸 ====================================================== */
 const RULER_H=24, WAVE_H=64, ROW_H=64;  // default/min values; actual stored in State
 
-/* 影片序列區塊層：覆蓋在波形列上（動態建立，免改 index.html）。
-   容器 pointer-events:none、區塊本身 auto——空白波形處仍可拖曳捲動/框選。 */
-// 冪等：若已存在（熱更新/重複 import）則重用，避免產生重複的 #tlClips 疊層
-const tlClips=document.getElementById('tlClips')||(()=>{ const d=document.createElement('div'); d.id='tlClips'; tlLayer.appendChild(d); return d; })();
+/* 影片序列：獨立視訊軌列容器（在波形上方），與字幕軌列同一套「列＋列頭」機制。
+   容器 pointer-events:none、片段本身 auto——空白處仍可拖曳捲動/框選。 */
+const tlVtracks=document.getElementById('tlVtracks');
+const VROW_H=44;  // 視訊軌列預設高度
 function waveH(){ return State.waveH||WAVE_H; }
 function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
 function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
 function yToTrack(y){ let c=0; for(let i=0;i<State.trackCount;i++){ c+=trackH(i); if(y<c)return i; } return State.trackCount-1; }
-function tracksTop(){return RULER_H+waveH();}
+/* 視訊軌：數量、每軌高度、總高（無影片序列時為 0＝不佔空間，維持純字幕版面）。
+   顯示由上而下：disp0＝最高軌（vtrack 最大）；vtrackTop 回傳某軌在容器內的 y。 */
+function vtrackCount(){ return Math.max(1, State.videoTracks.length); }
+function vtrackH(v){ return State.videoTracks[v]?.height||VROW_H; }
+function vtracksHeight(){ if(!Seq.active())return 0; let h=0; const N=vtrackCount(); for(let v=0;v<N;v++)h+=vtrackH(v); return h; }
+function vtrackTop(v){ const N=vtrackCount(); let top=0; for(let disp=0;disp<N;disp++){ const vv=N-1-disp; if(vv===v)return top; top+=vtrackH(vv); } return 0; }
+/* 補足 videoTracks 以涵蓋現有片段的最高軌（只增不減；每次全繪前呼叫，確保軌列與片段一致） */
+function syncVideoTracks(){ let m=0; for(const c of State.clips) m=Math.max(m,(c.vtrack||0)+1); ensureVideoTrackCount(m); }
+/* 音訊軌列（階段2）：把序列片段依音源分組，每音源一條波形列（取代舊的單一波形）。
+   無序列時高度為 0（維持純字幕版面）。audioRowLayout 回各列 {srcId,label,clips,y0,h}。 */
+const AROW_H=52, ACH_H=26;
+function audioRowLayout(){
+  if(!Seq.active()) return [];
+  const rows=[]; let y=0;
+  for(const g of Media.audioSources()){
+    const chs=Media.sourceChannels(g.srcId);
+    const expandable=chs.length>1;
+    const expanded=expandable && !!State.audioExpanded[g.srcId];
+    rows.push({kind:'source', srcId:g.srcId, label:g.label, clips:g.clips, expandable, expanded, y0:y, h:AROW_H}); y+=AROW_H;
+    if(expanded) chs.forEach(tr=>{ rows.push({kind:'channel', srcId:g.srcId, label:tr.name, track:tr, y0:y, h:ACH_H}); y+=ACH_H; });
+  }
+  return rows;
+}
+function atracksHeight(){ return audioRowLayout().reduce((s,r)=>s+r.h,0); }
+function tracksTop(){return RULER_H+vtracksHeight()+atracksHeight();}
 function tracksScrollTop(){ return tlTracks?tlTracks.scrollTop:0; }
 
 function viewportW(){return tlScroll.clientWidth;}
@@ -50,13 +74,14 @@ function layoutTimeline(){
   tlLayer.style.width=vw+'px';
   rulerCv.width=vw*devicePixelRatio; rulerCv.height=RULER_H*devicePixelRatio;
   rulerCv.style.width=vw+'px'; rulerCv.style.height=RULER_H+'px';
-  const wh=waveH();
-  waveCv.width=vw*devicePixelRatio; waveCv.height=wh*devicePixelRatio;
-  waveCv.style.width=vw+'px'; waveCv.style.height=wh+'px'; waveCv.style.top=RULER_H+'px';
-  tlClips.style.top=RULER_H+'px'; tlClips.style.height=wh+'px';
+  const vh=vtracksHeight();
+  const ah=atracksHeight();
+  waveCv.width=vw*devicePixelRatio; waveCv.height=Math.max(1,ah)*devicePixelRatio;
+  waveCv.style.width=vw+'px'; waveCv.style.height=ah+'px'; waveCv.style.top=(RULER_H+vh)+'px'; waveCv.style.display=ah>0?'block':'none';
+  if(tlVtracks){ tlVtracks.style.top=RULER_H+'px'; tlVtracks.style.height=vh+'px'; tlVtracks.style.display=vh>0?'block':'none'; }
   tlTracks.style.top=tracksTop()+'px';
-  const gutWave=document.querySelector('.tl-gutter-wave');
-  if(gutWave) gutWave.style.height=wh+'px';
+  const gutWave=document.querySelector('.tl-gutter-wave'); if(gutWave) gutWave.style.display='none';
+  const gutA=$('tlGutterAtracks'); if(gutA) gutA.style.height=ah+'px';
 }
 // 次刻度等分數：依 step 與 fps 動態計算，確保每個次刻度落在格邊界
 function minorDiv(step){
@@ -155,46 +180,51 @@ function fmtTick(s, step){
   if(p.mm>0)return`${p.mm}:${pad(p.ss)}`;
   return`${p.ss}s`;
 }
+/* 波形：逐音訊軌列（每音源一條帶）繪製；每帶畫該音源各片段、各用自己的 peaks（依 offset/in 對映來源時間）。
+   取代舊的「單一波形＝基底軌」畫法——音訊現在也是多軌獨立成列。 */
 function drawWave(){
   const ctx=waveCv.getContext('2d');const dpr=devicePixelRatio;
-  const vw=viewportW(); const h=waveCv.height/dpr;
+  const vw=viewportW(); const H=waveCv.height/dpr;
   ctx.save();ctx.scale(dpr,dpr);
-  ctx.clearRect(0,0,vw,h);
-  ctx.fillStyle='#141416';ctx.fillRect(0,0,vw,h);
-  // 影片長度底色
+  ctx.clearRect(0,0,vw,H);
+  ctx.fillStyle='#141416';ctx.fillRect(0,0,vw,H);
+  const rows=audioRowLayout(); if(!rows.length){ ctx.restore(); return; }
+  for(const r of rows){
+    if(r.kind==='channel'){
+      // 展開的聲道控制列：薄底 + 底線（波形保留在音源列，聲道列僅提供逐聲道 靜音/獨奏/音量）
+      ctx.fillStyle='#12181e'; ctx.fillRect(0,r.y0,vw,r.h);
+      ctx.strokeStyle='#222d36';ctx.globalAlpha=1;ctx.beginPath();ctx.moveTo(0,r.y0+r.h-0.5);ctx.lineTo(vw,r.y0+r.h-0.5);ctx.stroke();
+    } else _drawWaveBand(ctx, r, vw);
+  }
+  ctx.restore();
+}
+function _drawWaveBand(ctx, row, vw){
+  const y0=row.y0, h=row.h, mid=y0+h/2, amp=h*0.44;
+  // 影片長度底色（此帶）
   if(State.duration>0){
     const dx0=Math.max(0,timeToX(0)), dx1=Math.min(vw,timeToX(State.duration));
-    if(dx1>dx0){ ctx.fillStyle='#1a2530'; ctx.fillRect(dx0,0,dx1-dx0,h); }
+    if(dx1>dx0){ ctx.fillStyle='#1a2530'; ctx.fillRect(dx0,y0,dx1-dx0,h); }
   }
-  const seqMode=Seq.active();
-  if(!Wave.peaks && !seqMode){ctx.restore();return;}
-  const mid=h/2, amp=h*0.46;
-  ctx.strokeStyle='#3fa9f5';ctx.globalAlpha=0.9;ctx.beginPath();
   const res=Wave.resolution;
+  const muted=Media.sourceMuted(row.srcId);
+  ctx.strokeStyle=muted?'#4a5560':'#3fa9f5';ctx.globalAlpha=muted?0.55:0.9;ctx.beginPath();
   for(let x=0;x<vw;x++){
     const t=xToTime(x);
-    // 序列模式：像素時間 → 所在 clip 的來源時間，取該 clip 的 peaks（primary 沿用 Wave.peaks，
-    // 含播放中即時擷取）。間隙處無波形。
-    let pk=Wave.peaks, bT=t;
-    if(seqMode){
-      const c=Seq.clipAt(t); if(!c) continue;
-      // 主媒體來源（含其切割片段，audioSrc==='video'）用 Wave.peaks；其他來源用各自的 peaks
-      pk=c.peaks || ((c.primary || c.audioSrc==='video') ? Wave.peaks : null); if(!pk) continue;
-      bT=Seq.toSource(t, c);
-    }
-    if(!pk) continue;
-    const n=pk.length/2;
-    const b=Math.floor(bT*res);
+    let cc=null; for(const c of row.clips){ if(t>=c.offset-1e-6 && t<Seq.clipEnd(c)-1e-6){ cc=c; break; } }
+    if(!cc) continue;
+    const pk=cc.peaks || ((cc.primary || cc.audioSrc==='video') ? Wave.peaks : null); if(!pk) continue;
+    const bT=Seq.toSource(t, cc);
+    const n=pk.length/2; const b=Math.floor(bT*res);
     if(b<0||b>=n)continue;
     let mn=pk[b*2],mx=pk[b*2+1];
-    // 若一像素跨多桶，取極值
     const b2=Math.min(n-1,Math.floor((bT+(xToTime(x+1)-t))*res));
     for(let k=b+1;k<=b2;k++){ if(pk[k*2]<mn)mn=pk[k*2]; if(pk[k*2+1]>mx)mx=pk[k*2+1]; }
     ctx.moveTo(x+0.5,mid-mx*amp);ctx.lineTo(x+0.5,mid-mn*amp);
   }
   ctx.stroke();
   ctx.globalAlpha=1;ctx.strokeStyle='#23232a';ctx.beginPath();ctx.moveTo(0,mid);ctx.lineTo(vw,mid);ctx.stroke();
-  ctx.restore();
+  // 帶底分隔線
+  ctx.strokeStyle='#2b3947';ctx.beginPath();ctx.moveTo(0,y0+h-0.5);ctx.lineTo(vw,y0+h-0.5);ctx.stroke();
 }
 function renderTrackRows(){
   tlTracks.innerHTML='';
@@ -330,6 +360,9 @@ function _doResize(type,tk){
     waveCv.height=wh*devicePixelRatio; waveCv.style.height=wh+'px';
     tlTracks.style.top=tracksTop()+'px';
     drawWave();
+  }else if(type==='vtrack'){
+    // 視訊軌高度改變會牽動波形與字幕軌位置 → 直接整體重繪
+    drawTimeline();
   }else{
     const h=trackH(tk);
     const rows=tlTracks.querySelectorAll('.tl-track'); if(rows[tk])rows[tk].style.height=h+'px';
@@ -341,6 +374,7 @@ function _onRowResizeMove(e){
   const {type,tk,startY,startH}=_rowResize;
   const dy=e.clientY-startY;
   if(type==='wave')State.waveH=Math.max(24,startH+dy);
+  else if(type==='vtrack'){ if(State.videoTracks[tk])State.videoTracks[tk].height=Math.max(24,startH+dy); }
   else if(State.tracks[tk])State.tracks[tk].height=Math.max(20,startH+dy);
   if(!_rowResize._raf){
     _rowResize._raf=requestAnimationFrame(()=>{ _rowResize&&(_rowResize._raf=null); _doResize(type,tk); });
@@ -366,26 +400,120 @@ function _onRowResizeUp(){
   gutWave.appendChild(h);
 })();
 
-/* 影片序列區塊（波形列上）：位置=offset、寬=修剪後長度；拖曳移動、拖邊緣修剪、右鍵選單 */
+/* 影片序列：把各段畫進「對應視訊軌列」（各軌獨立成列，比照字幕軌）。
+   先在 tlVtracks 內建立每軌的列 .vtrack-row（由上而下：最高軌在最上面），再把片段放入其列。
+   片段位置＝offset、寬＝修剪後長度；拖曳移動、拖邊緣修剪、右鍵選單。 */
 function renderClipBlocks(){
-  tlClips.innerHTML='';
+  if(!tlVtracks) return;
+  tlVtracks.innerHTML='';
   if(!Seq.active()) return;
+  const N=vtrackCount();
+  // 每軌一列（top→bottom：disp0＝最高軌 vtrack=N-1）
+  const rowByV=[];
+  for(let disp=0; disp<N; disp++){
+    const v=N-1-disp;
+    const row=document.createElement('div');
+    row.className='vtrack-row'+(videoTrackVisible(v)?'':' hidden-tk');
+    row.style.top=vtrackTop(v)+'px'; row.style.height=vtrackH(v)+'px'; row.dataset.vtrack=v;
+    tlVtracks.appendChild(row); rowByV[v]=row;
+  }
+  // 片段進列
   const vw=viewportW(); const t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
   for(const c of State.clips){
     const s=c.offset, e=Seq.clipEnd(c);
     if(e<t0||s>t1) continue;
+    const v=c.vtrack||0; const row=rowByV[v]||rowByV[0]; if(!row) continue;
     const el=document.createElement('div');
     el.className='clip-block'+(c.id===Media.activeClipId?' active':'')+(c.id===State.selectedClipId?' selected':'');
     const x1=timeToX(s), x2=timeToX(e);
     el.style.left=x1+'px'; el.style.width=Math.max(6,x2-x1)+'px';
-    el.dataset.clipId=c.id;
+    el.dataset.clipId=c.id; el.dataset.vtrack=v;
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
     el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}</div><div class="edge r"></div>`;
-    el.title=`${c.name}\n位置 ${secToEncore(s,State.fps,State.dropFrame)} → ${secToEncore(e,State.fps,State.dropFrame)}`+
+    el.title=`${c.name}（${State.videoTracks[v]?.name||('視訊軌 V'+(v+1))}）\n位置 ${secToEncore(s,State.fps,State.dropFrame)} → ${secToEncore(e,State.fps,State.dropFrame)}`+
       `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
-      `\n拖曳＝移動｜拖左右邊緣＝修剪｜右鍵＝選單`;
-    tlClips.appendChild(el);
+      `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪｜右鍵＝選單`;
+    row.appendChild(el);
   }
+}
+/* 由 tlVtracks 內的 y 座標推算滑鼠所在的 vtrack（由上而下逐列量測，支援各軌不同高度） */
+function clipTrackFromY(clientY){
+  if(!tlVtracks) return 0;
+  const rect=tlVtracks.getBoundingClientRect();
+  const N=vtrackCount();
+  let y=clientY-rect.top; if(y<0)y=0;
+  let acc=0;
+  for(let disp=0; disp<N; disp++){ const v=N-1-disp; const h=vtrackH(v); if(y<acc+h) return v; acc+=h; }
+  return 0; // 落在最底層
+}
+
+/* 視訊軌列頭（左側 gutter；比照字幕軌）：眼睛(顯示切換)/名稱(雙擊改名)/＋(上方新增軌)/✕(刪除軌)/高度把手。
+   由上而下＝最高軌在上（與右側列一致）。無影片序列時不顯示（維持純字幕版面）。 */
+function renderVtrackGutter(){
+  const gut=$('tlGutterVtracks'); if(!gut) return;
+  gut.innerHTML='';
+  if(!Seq.active()) return;
+  const N=vtrackCount();
+  for(let disp=0; disp<N; disp++){
+    const v=N-1-disp;
+    const meta=State.videoTracks[v]||(State.videoTracks[v]={name:'視訊軌 '+(v+1),visible:true,locked:false});
+    const vis=videoTrackVisible(v);
+    const g=document.createElement('div');
+    g.className='vgtrack'+(vis?'':' hidden-tk'); g.style.height=vtrackH(v)+'px'; g.dataset.vtrack=v;
+    g.innerHTML=`<span class="vlabel">V${v+1}</span>`+
+      `<button class="eye" title="顯示/隱藏此視訊軌（預覽）">${vis?'👁':'🚫'}</button>`+
+      `<span class="gname" contenteditable="false" spellcheck="false">${escapeHTML(meta.name)}</span>`+
+      `<button class="gadd" title="在上方新增視訊軌">＋</button>`+
+      `<button class="gdel" title="刪除此視訊軌">✕</button>`;
+    g.querySelector('.eye').onclick=(e)=>{ e.stopPropagation(); meta.visible=!vis; drawTimeline(); emit('render:videoSub'); };
+    const nm=g.querySelector('.gname');
+    nm.addEventListener('mousedown',e=>{
+      if(e.detail>=2){ e.preventDefault(); nm.contentEditable='true'; nm.focus();
+        try{const r=document.createRange(),s=window.getSelection();r.selectNodeContents(nm);s.removeAllRanges();s.addRange(r);}catch(_){}
+      }
+    });
+    nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
+    nm.onblur=()=>{ nm.contentEditable='false'; meta.name=nm.innerText.trim()||('視訊軌 '+(v+1)); };
+    g.querySelector('.gadd').onclick=(e)=>{ e.stopPropagation(); addVideoTrack(v+1); };
+    g.querySelector('.gdel').onclick=(e)=>{ e.stopPropagation(); removeVideoTrack(v); };
+    const resH=document.createElement('div');
+    resH.className='tl-resize-handle';
+    resH.addEventListener('mousedown',e=>{
+      e.preventDefault();e.stopPropagation();
+      _rowResize={type:'vtrack',tk:v,startY:e.clientY,startH:vtrackH(v)};
+      document.addEventListener('mousemove',_onRowResizeMove);
+      document.addEventListener('mouseup',_onRowResizeUp,{once:true});
+    });
+    g.appendChild(resH);
+    gut.appendChild(g);
+  }
+}
+/* 在指定索引插入一條新視訊軌（idx＝插入位置；原本 vtrack≥idx 的片段整體上移一軌） */
+function addVideoTrack(idx){
+  idx=clamp(idx==null?State.videoTracks.length:idx, 0, State.videoTracks.length);
+  State.videoTracks.splice(idx,0,newVideoTrack());
+  for(const c of State.clips){ if((c.vtrack||0)>=idx) c.vtrack=(c.vtrack||0)+1; }
+  Seq.sort(); drawTimeline(); recordHistory('新增視訊軌'); emit('render:videoSub');
+}
+/* 刪除指定視訊軌（連同其片段）；至少保留一軌，且不刪含主影片的軌 */
+function removeVideoTrack(v){
+  if(State.videoTracks.length<=1){ showToast('至少保留一條視訊軌'); return; }
+  const clipsOn=State.clips.filter(c=>(c.vtrack||0)===v);
+  if(clipsOn.some(c=>c.primary)){ showToast('此視訊軌含主影片，無法刪除'); return; }
+  const doRemove=()=>{
+    for(const c of clipsOn) Media.removeClip(c.id);         // removeClip 會處理 Seq 與音軌清理
+    for(const c of State.clips){ if((c.vtrack||0)>v) c.vtrack=(c.vtrack||0)-1; } // 上方軌下移一軌
+    State.videoTracks.splice(v,1);
+    if(!State.videoTracks.length) resetVideoTracks();
+    Seq.sort(); Seq.recomputeDuration();
+    drawTimeline(); recordHistory('刪除視訊軌'); emit('render:videoSub'); emit('mpv:refreshSubs');
+  };
+  if(clipsOn.length){
+    openModal(`刪除視訊軌「${escapeHTML(State.videoTracks[v].name)}」`,
+      `<p>此視訊軌有 <b>${clipsOn.length}</b> 段影片，刪除後一併移除。確定繼續？</p>`,
+      [{label:'取消',act:closeModal},
+       {label:'確定刪除',primary:true,act:()=>{ closeModal(); doRemove(); }}]);
+  } else doRemove();
 }
 
 /* ===== 影片段選取（點選高亮、上下鍵切換、Del 刪除；行為比照字幕列） ===== */
@@ -422,9 +550,9 @@ function navigateClip(dir){
 function closeClipGapLeft(){
   const id=State.selectedClipId; if(id==null) return;
   const c=Seq.byId(id); if(!c) return;
-  const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
+  const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset); // 同一視訊軌內
   const idx=sorted.findIndex(x=>x.id===id);
-  const target = idx>0 ? Seq.clipEnd(sorted[idx-1]) : 0; // 前一段結尾，或序列開頭
+  const target = idx>0 ? Seq.clipEnd(sorted[idx-1]) : 0; // 前一段（同軌）結尾，或軌道開頭
   if(Math.abs(c.offset - target) < 1e-4) return; // 已無空白
   c.offset = target;
   Seq.sort(); Seq.recomputeDuration();
@@ -448,6 +576,46 @@ function deleteSelectedClip(){
   }
 }
 
+/* 音訊軌列頭（每音源一列，可展開成各聲道）：
+   音源列＝🔊 名稱 ＋ 靜音 M／獨奏 S／音量（聚合套用到該音源的所有聲道）＋展開鈕（多聲道時）；
+   聲道列＝逐聲道 名稱 ＋ 靜音 M／獨奏 S／音量（直接操作該聲道 Media.tracks 項目）。 */
+function renderAtrackGutter(){
+  const gut=$('tlGutterAtracks'); if(!gut) return;
+  gut.innerHTML='';
+  const refreshMixer=()=>{ renderAtrackGutter(); drawWave(); };
+  for(const r of audioRowLayout()){
+    const g=document.createElement('div'); g.style.height=r.h+'px';
+    if(r.kind==='channel'){
+      const tr=r.track; const vol=Math.round((tr.volume==null?1:tr.volume)*100);
+      g.className='awtrack child'; g.dataset.src=r.srcId;
+      g.innerHTML=`<span class="awname" title="${escapeHTML(r.label)}">${escapeHTML(r.label)}</span>`+
+        `<button class="awm${tr.muted?' on':''}" title="靜音此聲道">M</button>`+
+        `<button class="aws${tr.solo?' on':''}" title="獨奏此聲道">S</button>`+
+        `<input class="awvol" type="range" min="0" max="150" step="1" value="${vol}" title="音量 ${vol}%">`;
+      g.querySelector('.awm').onclick=(e)=>{ e.stopPropagation(); tr.muted=!tr.muted; Media.applyGains(); refreshMixer(); };
+      g.querySelector('.aws').onclick=(e)=>{ e.stopPropagation(); tr.solo=!tr.solo; Media.applyGains(); refreshMixer(); };
+      const vv=g.querySelector('.awvol');
+      vv.oninput=()=>{ tr.volume=(+vv.value)/100; vv.title='音量 '+vv.value+'%'; Media.applyGains(); };
+      vv.addEventListener('mousedown',e=>e.stopPropagation());
+      gut.appendChild(g); continue;
+    }
+    const muted=Media.sourceMuted(r.srcId), solo=Media.sourceSolo(r.srcId), vol=Math.round(Media.sourceVolume(r.srcId)*100);
+    g.className='awtrack'; g.dataset.src=r.srcId;
+    g.innerHTML=(r.expandable?`<button class="expander" title="展開/收合各聲道">${r.expanded?'▼':'▶'}</button>`:`<span class="expander"></span>`)+
+      `<span class="awicon">🔊</span>`+
+      `<span class="awname" title="${escapeHTML(r.label)}">${escapeHTML(r.label)}</span>`+
+      `<button class="awm${muted?' on':''}" title="靜音此音訊軌">M</button>`+
+      `<button class="aws${solo?' on':''}" title="獨奏此音訊軌">S</button>`+
+      `<input class="awvol" type="range" min="0" max="150" step="1" value="${vol}" title="音量 ${vol}%">`;
+    if(r.expandable) g.querySelector('.expander').onclick=(e)=>{ e.stopPropagation(); State.audioExpanded[r.srcId]=!r.expanded; drawTimeline(); };
+    g.querySelector('.awm').onclick=(e)=>{ e.stopPropagation(); Media.toggleSourceMute(r.srcId); refreshMixer(); };
+    g.querySelector('.aws').onclick=(e)=>{ e.stopPropagation(); Media.toggleSourceSolo(r.srcId); refreshMixer(); };
+    const vv=g.querySelector('.awvol');
+    vv.oninput=()=>{ Media.setSourceVolume(r.srcId,(+vv.value)/100); vv.title='音量 '+vv.value+'%'; };
+    vv.addEventListener('mousedown',e=>e.stopPropagation());
+    gut.appendChild(g);
+  }
+}
 function renderCueBlocks(){
   renderClipBlocks(); // 波形列上的影片區塊與字幕區塊同步重繪（捲動/縮放/全繪路徑共用此入口）
   tlTracks.querySelectorAll('.cue-block,.cue-overlap').forEach(e=>e.remove());
@@ -536,7 +704,7 @@ function updatePlayhead(){
   else $('tlInpoint').style.display='none';
 }
 function drawTimeline(){
-  layoutTimeline(); drawRuler(); drawWave(); renderTrackRows(); updatePlayhead();
+  syncVideoTracks(); layoutTimeline(); drawRuler(); drawWave(); renderVtrackGutter(); renderAtrackGutter(); renderTrackRows(); updatePlayhead();
 }
 // Fix #9：不重建 renderTrackRows 的輕量版，供捲動/播放以外的重繪使用
 function redrawTimeline(){
@@ -611,7 +779,7 @@ tlScroll.addEventListener('mousedown',e=>{
     if(e.detail<2) jklReset(); // 播放中拖動影片區塊 → 先暫停（映射不可邊播邊變）
     const nb=Seq.neighborBounds(c);
     // selectClip 內 renderClipBlocks() 已把原 clipEl 重建成新節點；必須重抓，否則拖曳更新的是脫離 DOM 的孤兒（框不動、只有波形動）
-    const liveEl=tlClips.querySelector(`.clip-block[data-clip-id="${c.id}"]`)||clipEl;
+    const liveEl=(tlVtracks&&tlVtracks.querySelector(`.clip-block[data-clip-id="${c.id}"]`))||clipEl;
     drag={mode, clip:c, clipEl:liveEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft, moved:false,
       os:c.offset, oin:c.in, oout:c.out,
       leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+(c.out-c.in)), // 右鄰左緣（時間軸）
@@ -742,6 +910,9 @@ const _handleDragUpdate = (e) => {
       if(s1!==no){ no=s1; tgt=s1; } else if(s2!==no+L){ no=s2-L; tgt=s2; }
       if(no<0)no=0;
       c.offset=snapFrame(no);
+      // 上下拖曳＝換視訊軌（於現有軌間移動；要新增軌請用列頭的＋）
+      const nv=clipTrackFromY(e.clientY);
+      if(nv!==(c.vtrack||0)) c.vtrack=nv;
     } else if(drag.mode==='clip-l'){
       // 修剪左緣：offset 與 in 同步位移 d；界線＝in≥0、留 minL、不越左鄰
       let d=dt;
@@ -767,6 +938,11 @@ const _handleDragUpdate = (e) => {
     updateSnapGuide(tgt);
     const x1=timeToX(c.offset), x2=timeToX(Seq.clipEnd(c));
     drag.clipEl.style.left=x1+'px'; drag.clipEl.style.width=Math.max(6,x2-x1)+'px';
+    // 換軌時把片段移入對應視訊軌列（top/height 由 CSS 相對列自動決定）
+    if(drag.mode==='clip-move' && tlVtracks){
+      const row=tlVtracks.querySelector(`.vtrack-row[data-vtrack="${c.vtrack||0}"]`);
+      if(row && drag.clipEl.parentElement!==row) row.appendChild(drag.clipEl);
+    }
     drawWave(); // 波形跟著區塊走
     return;
   }
@@ -929,7 +1105,7 @@ window.addEventListener('mouseup',e=>{
   }else if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
     const moved=drag.moved, m=drag.mode, c=drag.clip;
     if(!moved){ selectClip(c.id); drag=null; return; } // 未拖動＝點選該影片段（高亮，供上下鍵/Del）
-    if(m==='clip-move') Seq.resolveOverlaps(c); // 自由拖放：壓到的段落連鎖右推（插入語義）
+    if(m==='clip-move'){ Seq.resolveOverlaps(c); Seq.compact(); } // 自由拖放：同軌連鎖右推；收斂空的頂部視訊軌
     Seq.sort(); Seq.recomputeDuration();
     recordHistory(m==='clip-move'?('移動影片：'+c.name):('修剪影片：'+c.name));
     // 幾何變了 → 以目前播放頭重新解析映射（active clip 可能移走/縮短成間隙）

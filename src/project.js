@@ -1,5 +1,5 @@
 /* SUB Tool — 專案存讀 (.subtool) */
-import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount } from './state.js';
+import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount, ensureVideoTrackCount, resetVideoTracks } from './state.js';
 import { $ } from './dom.js';
 import { encodeUTF16LE, decodeText, bytesToB64, b64ToBytes, downloadBytes, readFile, escapeHTML } from './util.js';
 import { Media } from './media.js';
@@ -27,8 +27,10 @@ function _buildProjectData(){
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
     tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||60,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'})),
     pxPerSec:State.pxPerSec,
-    // 影片序列（v4.5.0）：各段的來源路徑與幾何；網頁版無路徑（開啟時需手動重加）
-    clips:State.clips.map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,fps:c.fps||0,primary:!!c.primary})),
+    // 影片序列（v4.5.0；v4.10.0 起含多視訊軌）：各段的來源路徑與幾何；網頁版無路徑（開啟時需手動重加）
+    videoTracks:State.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked})),
+    videoTrackCount:State.videoTracks.length||1, // 向下相容：舊版讀取用
+    clips:State.clips.map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary})),
     notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
     cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false}))
   };
@@ -156,6 +158,10 @@ const Project = {
     ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:0, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));
     // 影片序列：先暫存，待第一支影片載入完成（Media._registerPrimary）時還原幾何並補載其餘段
+    // 視訊軌：新版存 videoTracks 陣列（名稱/顯示/鎖定）；舊版只有 videoTrackCount → 補足空軌
+    if(Array.isArray(data.videoTracks) && data.videoTracks.length)
+      State.videoTracks = data.videoTracks.map((t,i)=>({name:t.name||('視訊軌 '+(i+1)),visible:t.visible!==false,locked:!!t.locked}));
+    else { resetVideoTracks(); ensureVideoTrackCount(Math.max(1, data.videoTrackCount || 1)); }
     State._pendingClips = (Array.isArray(data.clips) && data.clips.length) ? data.clips : null;
     if(!State._pendingClips) delete State._pendingClips;
     State.duration=data.duration||State.duration;

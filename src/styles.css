@@ -199,8 +199,10 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .cue-block.sel{background:var(--cue-sel);border-color:var(--text);color:#1b1b1d;z-index:5}
 .cue-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
 .cue-block .edge.l{left:0}.cue-block .edge.r{right:0}
-/* 影片序列區塊（波形列上）：容器不吃事件、區塊本身可拖 */
-#tlClips{position:absolute;left:0;right:0;z-index:4;pointer-events:none}
+/* 影片序列：獨立視訊軌列（比照字幕軌，各軌一列）；容器不吃事件、區塊本身可拖 */
+#tlVtracks{position:absolute;left:0;right:0;z-index:4;pointer-events:none;overflow:hidden;background:rgba(30,44,60,.16)}
+.vtrack-row{position:absolute;left:0;right:0;border-bottom:1px solid #2b3947;pointer-events:none;box-sizing:border-box}
+.vtrack-row.hidden-tk{opacity:.28}
 .clip-block{position:absolute;top:2px;bottom:2px;pointer-events:auto;cursor:grab;box-sizing:border-box;
   background:rgba(46,89,132,.40);border:1px solid #3fa9f5;border-radius:4px;overflow:hidden;
   display:flex;align-items:flex-start;padding:1px 8px;color:#bfe3ff;font-size:11px}
@@ -227,6 +229,31 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-resize-handle{position:absolute;bottom:0;left:0;right:0;height:4px;cursor:ns-resize;z-index:10}
 .tl-resize-handle:hover,.tl-resize-handle:active{background:rgba(100,120,255,.35)}
 #tlGutterTracks{flex:1;overflow-y:auto;overflow-x:hidden}
+/* 視訊軌列頭（比照字幕軌 gutter，帶輕藍色調以區分）：眼睛/名稱/新增(＋)/刪除(✕)/高度把手 */
+#tlGutterVtracks{flex-shrink:0}
+.vgtrack{display:flex;align-items:center;gap:3px;padding:0 6px;border-bottom:1px solid #2b3947;position:relative;box-sizing:border-box;background:rgba(46,89,132,.12)}
+.vgtrack .vlabel{font-size:10px;color:#7fb0dd;flex-shrink:0;font-weight:600}
+.vgtrack .eye{cursor:pointer;font-size:13px;width:20px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
+.vgtrack.hidden-tk .gname{opacity:.45;text-decoration:line-through}
+.vgtrack .gname{flex:1;font-size:11px;color:#bfe3ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 3px}
+.vgtrack .gname:focus{outline:none;border-color:var(--accent);background:var(--panel)}
+.vgtrack .gadd{cursor:pointer;background:none;border:none;font-size:14px;padding:0 2px;color:var(--text-faint);flex-shrink:0;opacity:.7;transition:color .15s}
+.vgtrack .gadd:hover{color:var(--accent);opacity:1}
+.vgtrack .gdel{cursor:pointer;background:none;border:none;font-size:13px;padding:0 2px;color:var(--text-faint);flex-shrink:0;opacity:0;transition:opacity .15s,color .15s}
+.vgtrack:hover .gdel{opacity:.8}
+.vgtrack .gdel:hover{color:var(--red)}
+/* 音訊軌列頭（每音源一列；🔊 名稱＋靜音 M／獨奏 S／音量）：比照混音器色調 */
+#tlGutterAtracks{flex-shrink:0}
+.awtrack{display:flex;align-items:center;gap:3px;padding:0 6px;border-bottom:1px solid #22303a;position:relative;box-sizing:border-box;background:rgba(30,44,60,.28)}
+.awtrack .awicon{font-size:12px;flex-shrink:0;opacity:.8}
+.awtrack .awname{flex:1;min-width:0;font-size:11px;color:#cfe6ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.awtrack .awm,.awtrack .aws{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border,#3a3f47);border-radius:3px;font-size:10px;width:18px;height:18px;line-height:1;padding:0;color:var(--text-dim);flex-shrink:0}
+.awtrack .awm.on{background:var(--red,#e05353);border-color:var(--red,#e05353);color:#fff}
+.awtrack .aws.on{background:#e0a53e;border-color:#e0a53e;color:#1b1b1d}
+.awtrack .awvol{width:52px;flex-shrink:0;accent-color:#3fa9f5}
+.awtrack .expander{cursor:pointer;background:none;border:none;color:var(--text-faint);font-size:10px;width:14px;flex-shrink:0;padding:0}
+.awtrack.child{background:rgba(30,44,60,.16)}
+.awtrack.child .awname{padding-left:12px;color:#a9c7dd}
 .tl-gtrack{display:flex;align-items:center;gap:4px;padding:0 6px;border-bottom:1px solid #26262b;position:relative}
 .tl-gtrack .eye{cursor:pointer;font-size:14px;width:22px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
 .tl-gtrack.hidden-tk .gname{opacity:.45;text-decoration:line-through}

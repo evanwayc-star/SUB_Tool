@@ -191,6 +191,8 @@
           <div class="tl-gutter-head">軌道<span class="spacer"></span><button class="mini gh-btn"
               data-act="toggle-all-vis" title="全部 顯示/隱藏">👁</button><button class="mini gh-btn"
               data-act="toggle-all-lock" title="全部 鎖定/解鎖">🔓</button></div>
+          <div id="tlGutterVtracks"></div>
+          <div id="tlGutterAtracks"></div>
           <div class="tl-gutter-wave">🔊 波形<select id="waveGlobalSrcSel" style="margin-left:auto;margin-right:8px;"
               title="切換音訊來源"></select><select id="waveSrcSel" style="display:none" title="波形來源聲道"></select></div>
           <div id="tlGutterTracks"></div>
@@ -200,6 +202,7 @@
           <div class="tl-spacer" id="tlSpacer"></div>
           <div class="tl-layer" id="tlLayer">
             <canvas id="rulerCanvas"></canvas>
+            <div class="tl-vtracks" id="tlVtracks"></div>
             <canvas id="waveCanvas"></canvas>
             <div class="tl-tracks" id="tlTracks"></div>
             <div class="tl-rubber" id="tlRubber"></div>

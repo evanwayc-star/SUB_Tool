@@ -1,6 +1,6 @@
 /* SUB Tool — 媒體引擎（影片 + Web Audio 多音軌 + ffmpeg）與波形 */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
-import { State, DESK, setFps, snapFps } from './state.js';
+import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks } from './state.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
@@ -884,7 +884,7 @@ const Media = {
     const pend = State._pendingClips; delete State._pendingClips;
     if(DESK && Array.isArray(pend)){
       const pri = pend.find(x=>x.primary) || pend.find(x=>x.path===c.path);
-      if(pri){ c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0; Seq.sort(); Seq.recomputeDuration(); }
+      if(pri){ c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0; c.vtrack = pri.vtrack || 0; Seq.sort(); Seq.recomputeDuration(); }
       (async()=>{
         const made = new Map(); if(c.path) made.set(c.path, c); // 來源路徑 → 首段（提供共用資源）
         for(const pc of pend){
@@ -892,7 +892,7 @@ const Media = {
           const base = made.get(pc.path);
           if(base){ // 同來源的切割片段：直接建 clip 共用資源
             const piece = Seq.add({ name: pc.name || base.name, path: base.path, web: base.web || null,
-              dur: base.dur, fps: base.fps || 0, peaks: base.peaks,
+              dur: base.dur, fps: base.fps || 0, peaks: base.peaks, vtrack: pc.vtrack || 0,
               audioSrc: base.audioSrc || ('clip:' + base.id),
               in: pc.in ?? 0, out: Math.min(pc.out ?? base.dur, base.dur), offset: pc.offset ?? undefined });
             if(pc.offset != null) piece.offset = pc.offset;
@@ -936,7 +936,7 @@ const Media = {
     if(!this.mpvMode){ try{ meta.web = { url: await DESK.fileURL(p) }; }catch(e){} }
     const c = Seq.add(meta);
     c.audioSrc = 'clip:' + c.id; // 此來源的音軌識別（切割片段將共用）
-    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; Seq.sort(); Seq.recomputeDuration(); }
+    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } Seq.sort(); Seq.recomputeDuration(); }
     drawTimeline();
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}（背景抽取音訊與波形…）`, 'busy');
@@ -1061,7 +1061,7 @@ const Media = {
       });
     }
     if(this.activeClipId === id) this.activeClipId = null;
-    Seq.remove(id);
+    Seq.remove(id); Seq.compact(); // 移除後收斂空的頂部視訊軌
     this.seek(Math.min(this.displayTime(), State.duration || 0)); // 重新解析目前位置（可能已成間隙）
     renderAudioTracks();
     return true;
@@ -1352,6 +1352,28 @@ const Media = {
     }
     return srcs;
   },
+  /* ===== 音訊軌列（階段2）：把序列片段依 audioSrc 分組，每組＝一條音訊軌（一個音源） =====
+     'video'＝主影片原音（含其切割片段，共用同一音源）；'clip:x'＝各自加入的影片音訊。
+     依時間軸首次出現排序，供時間軸畫「每音源一條波形列」。 */
+  audioSources(){
+    const map=new Map();
+    for(const c of State.clips){
+      const s=c.audioSrc || (c.primary?'video':('clip:'+c.id));
+      let g=map.get(s); if(!g){ g={srcId:s, clips:[], firstOff:c.offset}; map.set(s,g); }
+      g.clips.push(c); if(c.offset<g.firstOff)g.firstOff=c.offset;
+    }
+    const arr=[...map.values()].sort((a,b)=>a.firstOff-b.firstOff);
+    for(const g of arr) g.label = g.srcId==='video' ? '原音（主影片）' : (g.clips[0]?.name || g.srcId.replace(/^clip:/,'片段 '));
+    return arr;
+  },
+  /* 某音源的混音器聲道（Media.tracks 內 source 相符者）；音源層級的 靜音/獨奏/音量＝對其所有聲道聚合套用 */
+  sourceChannels(srcId){ return this.tracks.filter(t=>(t.source||'video')===srcId && (t.kind==='buffer'||t.kind==='native'||t.kind==='element'||t.kind==='nativeTrack')); },
+  sourceMuted(srcId){ const ch=this.sourceChannels(srcId); return ch.length>0 && ch.every(t=>t.muted); },
+  toggleSourceMute(srcId){ const ch=this.sourceChannels(srcId); const m=!(ch.length>0&&ch.every(t=>t.muted)); for(const t of ch)t.muted=m; this.applyGains(); renderAudioTracks(); },
+  sourceSolo(srcId){ const ch=this.sourceChannels(srcId); return ch.length>0 && ch.some(t=>t.solo); },
+  toggleSourceSolo(srcId){ const ch=this.sourceChannels(srcId); const s=!(ch.length>0&&ch.some(t=>t.solo)); for(const t of ch)t.solo=s; this.applyGains(); renderAudioTracks(); },
+  sourceVolume(srcId){ const ch=this.sourceChannels(srcId); return ch.length? ch.reduce((m,t)=>Math.max(m,t.volume==null?1:t.volume),0) : 1; },
+  setSourceVolume(srcId,v){ for(const t of this.sourceChannels(srcId))t.volume=v; this.applyGains(); },
   switchSource(id){
     this.activeSource=id;
     for(const tr of this.tracks) tr._srcHidden=(id!==null && (tr.source||'video')!==id);
@@ -1403,7 +1425,7 @@ const Media = {
     this.objectURLs.forEach(u=>{try{URL.revokeObjectURL(u);}catch(e){}}); this.objectURLs=[];
     this.playing=false; this._vTime=0; this._vStart=null;
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）
-    Seq.clear(); this.activeClipId=null; this._mpvPath=null; State.selectedClipId=null;
+    Seq.clear(); this.activeClipId=null; this._mpvPath=null; State.selectedClipId=null; resetVideoTracks();
     this._gap=false; this._gapT=0; this._gapStart=null; this._seqSwitching=false;
     video.style.visibility='';
     const pb=$('playBtn'); if(pb) pb.textContent='▶';

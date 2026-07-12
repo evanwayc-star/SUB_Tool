@@ -1,16 +1,19 @@
-/* SUB Tool — 影片序列模型（時間軸上的影片區塊）
+/* SUB Tool — 影片序列模型（時間軸上的影片區塊，v4.10.0 起支援多視訊軌）
    每個 clip = { id, name, path(桌面)|web:{url}(網頁), dur(來源總長), in, out(修剪), offset(時間軸位置),
+                 vtrack(視訊軌索引，0=最底/基底，數字越大越上層＝越優先覆蓋),
                  fps(來源實測), peaks(波形 Float32Array|null), primary(第一支影片) }
    時間域約定：
      - 「時間軸時間 t」= 全工具的權威時間（字幕/播放頭/時碼都用它）
      - 「來源時間 s」 = 影片檔內部時間；s = t - offset + in
-   不變量：clip 彼此在時間軸上不重疊；offset ≥ 0；0 ≤ in < out ≤ dur。
-   單一 clip 且 offset=0、in=0 時映射為恆等 → 與舊版行為完全相容。 */
-import { State } from './state.js';
+   不變量：同一 vtrack 的 clip 彼此不重疊（不同軌可重疊＝疊層）；offset ≥ 0；0 ≤ in < out ≤ dur。
+   單一 clip 且 offset=0、in=0、vtrack=0 時映射為恆等 → 與舊版行為完全相容。
+   ★ clipAt(t) 回傳「最上層」的作用中 clip（top-occludes）；播放預覽即顯示它。 */
+import { State, ensureVideoTrackCount, videoTrackVisible } from './state.js';
 import { emit } from './events.js';
 
 let _clipSeq = 1;
 const EPS = 1e-6;
+const vt = c => c.vtrack || 0;
 
 const Seq = {
   /* ---- 查詢 ---- */
@@ -22,12 +25,18 @@ const Seq = {
   end(){ return State.clips.reduce((m, c) => Math.max(m, this.clipEnd(c)), 0); },
   byId(id){ return State.clips.find(c => c.id === id) || null; },
   primary(){ return State.clips.find(c => c.primary) || State.clips[0] || null; },
-  /* 時間軸時間 t 落在哪個 clip（半開區間 [offset, end)） */
-  clipAt(t){
-    for(const c of State.clips){ if(t >= c.offset - EPS && t < this.clipEnd(c) - EPS) return c; }
-    return null;
-  },
-  /* t 之後（不含）下一個開始的 clip；間隙播放時用來得知何時切入 */
+  /* 視訊軌數：至少 State.videoTracks.length，且涵蓋現有 clip 的最高軌 */
+  trackCount(){ let m = 0; for(const c of State.clips) m = Math.max(m, vt(c) + 1); return Math.max(State.videoTracks.length || 1, m); },
+  trackClips(v){ return State.clips.filter(c => vt(c) === v); },
+  trackEnd(v){ return this.trackClips(v).reduce((m, c) => Math.max(m, this.clipEnd(c)), 0); },
+  isActiveAt(c, t){ return t >= c.offset - EPS && t < this.clipEnd(c) - EPS; },
+  /* 指定軌上，t 所在的 clip */
+  clipAtOnTrack(t, v){ for(const c of State.clips){ if(vt(c) === v && this.isActiveAt(c, t)) return c; } return null; },
+  /* t 所在、所有軌的作用中 clip（依 vtrack 由下而上排序，供匯出疊層與音訊混音） */
+  clipsAt(t){ return State.clips.filter(c => this.isActiveAt(c, t)).sort((a, b) => vt(a) - vt(b)); },
+  /* ★ 最上層「可見」的作用中 clip（top-occludes）：播放預覽顯示它；隱藏的視訊軌不列入（跳到下一層） */
+  clipAt(t){ const a = this.clipsAt(t); for(let i = a.length - 1; i >= 0; i--){ if(videoTrackVisible(vt(a[i]))) return a[i]; } return null; },
+  /* t 之後（不含）下一個開始的 clip（任一軌）；間隙播放時用來得知何時有內容切入 */
   nextAfter(t){
     let best = null;
     for(const c of State.clips){ if(c.offset > t + EPS && (!best || c.offset < best.offset)) best = c; }
@@ -39,9 +48,9 @@ const Seq = {
 
   /* ---- 變更 ---- */
   add(meta){
-    const c = { id: 'clip' + (_clipSeq++), in: 0, peaks: null, primary: false, ...meta };
+    const c = { id: 'clip' + (_clipSeq++), in: 0, vtrack: 0, peaks: null, primary: false, ...meta };
     if(c.out == null) c.out = c.dur;
-    if(c.offset == null) c.offset = this.end();   // 預設接在序列尾端
+    if(c.offset == null) c.offset = this.trackEnd(vt(c));   // 預設接在「同軌」尾端
     State.clips.push(c);
     this.sort(); this.recomputeDuration();
     return c;
@@ -52,7 +61,7 @@ const Seq = {
     this.recomputeDuration();
   },
   clear(){ State.clips.length = 0; },
-  sort(){ State.clips.sort((a, b) => a.offset - b.offset); },
+  sort(){ State.clips.sort((a, b) => (vt(a) - vt(b)) || (a.offset - b.offset)); },
   /* 來源實際長度更新（mpv/元素回報比 probe 準時）：未修剪過的 out 跟著延伸 */
   updateSourceDur(c, dur){
     if(!dur || Math.abs(dur - c.dur) < 0.01) return;
@@ -63,23 +72,25 @@ const Seq = {
     if(c.in >= c.out) c.in = Math.max(0, c.out - 0.2);
     this.recomputeDuration();
   },
-  /* 拖曳邊界：回傳 clip 於「時間軸」上可移動的 offset 範圍（不與鄰居重疊；拖曳開始時計算一次） */
-  neighborBounds(c){
+  /* 拖曳邊界：回傳 clip 於「時間軸」上可移動的 offset 範圍（只受【同軌】鄰居限制；拖曳開始時計算一次） */
+  neighborBounds(c, v){
+    v = (v === undefined) ? vt(c) : v;
     const L = this.len(c);
     let lo = 0, hi = Infinity;
     for(const o of State.clips){
-      if(o === c) continue;
+      if(o === c || vt(o) !== v) continue;
       const oEnd = this.clipEnd(o);
       if(oEnd <= c.offset + EPS) lo = Math.max(lo, oEnd);                    // 左鄰的右緣
       if(o.offset >= this.clipEnd(c) - EPS) hi = Math.min(hi, o.offset - L); // 右鄰的左緣 − 自身長度
     }
     return { lo, hi: Math.max(lo, hi) };
   },
-  /* 自由拖放後的重疊解算（插入語義）：依 offset 排序（同位時被拖段優先佔位），
-     由左至右掃描——只在「真的重疊」時把後面的段推到前段結尾（連鎖推擠），空隙保留不壓縮。
-     結果：拖到另一段的左半＝插到它前面（它被右推）；拖到右半＝落在它後面。 */
+  /* 自由拖放後的重疊解算（插入語義）：只在【被拖 clip 所在軌】內處理。
+     同軌依 offset 排序（同位時被拖段優先），由左至右掃描——真的重疊才把後面段推到前段結尾。
+     不同軌可自由重疊（＝疊層），不受影響。 */
   resolveOverlaps(moved){
-    const sorted = [...State.clips].sort((a, b) => (a.offset - b.offset) || (a === moved ? -1 : b === moved ? 1 : 0));
+    const v = vt(moved);
+    const sorted = this.trackClips(v).sort((a, b) => (a.offset - b.offset) || (a === moved ? -1 : b === moved ? 1 : 0));
     let prevEnd = -Infinity;
     for(const c of sorted){
       if(c.offset < prevEnd - EPS) c.offset = prevEnd;
@@ -87,7 +98,16 @@ const Seq = {
     }
     this.sort(); this.recomputeDuration();
   },
-  /* 磁吸目標：其他 clip 的邊緣 */
+  /* 把 clip 移到指定 vtrack（並在新軌解算重疊）；不足則補足視訊軌（只增不減） */
+  moveToTrack(c, v){
+    v = Math.max(0, Math.round(v));
+    c.vtrack = v;
+    ensureVideoTrackCount(v + 1);
+    this.resolveOverlaps(c);
+  },
+  /* 補足視訊軌數以涵蓋現有 clip 的最高軌（只增不減；空軌由使用者手動刪除，比照字幕軌） */
+  compact(){ let m = 0; for(const c of State.clips) m = Math.max(m, vt(c) + 1); ensureVideoTrackCount(m); },
+  /* 磁吸目標：所有軌 clip 的邊緣（跨軌對齊很實用） */
   snapEdges(excludeId){
     const arr = [];
     for(const c of State.clips){ if(c.id === excludeId) continue; arr.push(c.offset, this.clipEnd(c)); }
@@ -105,7 +125,7 @@ const Seq = {
     return State.clips.map(c => ({ id: c.id, name: c.name, path: c.path || null,
       web: c.web ? { url: c.web.url } : null, dur: c.dur, fps: c.fps || 0,
       primary: !!c.primary, audioSrc: c.audioSrc || null,
-      in: c.in, out: c.out, offset: c.offset }));
+      in: c.in, out: c.out, offset: c.offset, vtrack: vt(c) }));
   },
   restore(list){
     if(!Array.isArray(list)) return;
@@ -123,13 +143,13 @@ const Seq = {
     State.clips.length = 0;
     for(const s of list){
       const ex = old.get(s.id);
-      if(ex){ ex.in = s.in; ex.out = s.out; ex.offset = s.offset; State.clips.push(ex); }
+      if(ex){ ex.in = s.in; ex.out = s.out; ex.offset = s.offset; ex.vtrack = s.vtrack || 0; State.clips.push(ex); }
       else{
         const k = s.path || (s.web && s.web.url);
-        State.clips.push({ ...s, web: s.web ? { url: s.web.url } : null, peaks: (k && peaksBySrc.get(k)) || null });
+        State.clips.push({ ...s, vtrack: s.vtrack || 0, web: s.web ? { url: s.web.url } : null, peaks: (k && peaksBySrc.get(k)) || null });
       }
     }
-    this.sort(); this.recomputeDuration();
+    this.sort(); this.compact(); this.recomputeDuration();
   },
 };
 
