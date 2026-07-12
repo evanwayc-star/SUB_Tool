@@ -288,17 +288,22 @@ function _clipAudioSpec(c) {
   return tks.filter(t => (anySolo ? t.solo : !t.muted) && (t.volume || 0) > 0)
             .map(t => ({ file: t.file, volume: +(t.volume != null ? t.volume : 1).toFixed(3) }));
 }
-function _buildExportItems() {
-  const clips = [...State.clips].filter(c => c.path).sort((a, b) => a.offset - b.offset);
+/* 匯出資料（v4.11.0 多軌合成）：送扁平片段清單（各含 vtrack 與音訊規格）＋視訊軌順序（由下而上）＋總長。
+   主程序據此：每視訊軌各建整條時間軸（片段放 offset、間隙透明），由下而上 overlay 疊層；
+   所有片段音訊各自 adelay 到 offset 後 amix（全軌混音）。單軌序列為此法之特例，結果與舊版一致。 */
+function _buildExportData() {
+  const clips = [...State.clips].filter(c => c.path);
   if (!clips.length) return null;
-  const items = []; let cursor = 0;
-  const EPS = 0.01;
-  for (const c of clips) {
-    if (c.offset > cursor + EPS) items.push({ type: 'gap', dur: +(c.offset - cursor).toFixed(3) }); // 段間間隙＝黑畫面
-    items.push({ type: 'clip', path: c.path, in: +c.in.toFixed(3), out: +c.out.toFixed(3), audio: _clipAudioSpec(c) });
-    cursor = c.offset + Seq.len(c);
-  }
-  return items;
+  const list = clips.map(c => ({
+    path: c.path, in: +c.in.toFixed(3), out: +c.out.toFixed(3),
+    offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0, audio: _clipAudioSpec(c),
+  }));
+  const vtOrder = [...new Set(list.map(c => c.vtrack))].sort((a, b) => a - b); // 由下而上（vtrack 小＝底層先畫）
+  const videoTracks = vtOrder.map(vt => {
+    const t = State.videoTracks[vt] || {};
+    return { vt, scale: +(t.scale != null ? t.scale : 1), posX: +(t.posX != null ? t.posX : 0.5), posY: +(t.posY != null ? t.posY : 0.5), opacity: +(t.opacity != null ? t.opacity : 1) };
+  });
+  return { clips: list, videoTracks, duration: +Seq.end().toFixed(3) };
 }
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
 let _lastVbrMbps = 5; // MP4 影片位元率（Mbps）；預設 5M，同一 session 記住上次設定
@@ -320,10 +325,10 @@ function _mixerSummary() {
 async function showExportVideoDialog() {
   if (!IS_DESKTOP || !DESK.exportVideo) { showToast('影片匯出僅在桌面版可用'); return; }
   if (!Seq.active()) { showToast('尚未載入影片'); return; }
-  const items = _buildExportItems();
-  if (!items) { showToast('沒有可匯出的影片段（此序列的影片缺少來源路徑）'); return; }
-  const clipCount = items.filter(i => i.type === 'clip').length;
-  const gapCount = items.filter(i => i.type === 'gap').length;
+  const data = _buildExportData();
+  if (!data) { showToast('沒有可匯出的影片段（此序列的影片缺少來源路徑）'); return; }
+  const clipCount = data.clips.length;
+  const vtrackCount = data.videoTracks.length;
   const visSubTracks = State.tracks.filter((tk, i) => tk.visible !== false && State.cues.some(c => (c.track || 0) === i && c.timed !== false)).length;
   const total = Seq.end();
   // 顯示實際會用到的編碼器（H.264 可走 GPU；ProRes 無 GPU 編碼器，一律 CPU）
@@ -332,7 +337,7 @@ async function showExportVideoDialog() {
   const mp4Note = gpu ? `GPU 加速（${_VENC_LABEL[venc] || venc}）` : 'CPU（libx264，未偵測到 GPU 編碼器）';
   openModal('匯出影片',
     `<div style="font-size:13px;line-height:1.9">` +
-    `<div>序列：<b>${clipCount}</b> 段影片${gapCount ? `、<b>${gapCount}</b> 段間隙（黑畫面）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
+    `<div>序列：<b>${clipCount}</b> 段影片${vtrackCount > 1 ? `、<b>${vtrackCount}</b> 條視訊軌（由下而上疊合，上層覆蓋下層）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
     `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
     `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>` +
     `<div style="margin-top:4px">音訊：<b>依混音器設定輸出</b>${_mixerSummary()}</div>` +
@@ -356,7 +361,7 @@ async function showExportVideoDialog() {
           _lastVbrMbps = Math.min(200, Math.max(0.1, mbps));
           kbps = Math.round(_lastVbrMbps * 1000);
         }
-        closeModal(); _runExportVideo(items, fmt, kbps);
+        closeModal(); _runExportVideo(data, fmt, kbps);
       } },
      { label: '取消', act: closeModal }]);
   // 位元率欄位只在選 MP4 時出現
@@ -367,7 +372,7 @@ async function showExportVideoDialog() {
     sync();
   }, 20);
 }
-async function _runExportVideo(items, format, videoKbps) {
+async function _runExportVideo(data, format, videoKbps) {
   const visCues = State.cues; // toASSFromState 內部依軌道可見性過濾，時碼為時間軸時間＝輸出時間
   const assText = toASSFromState(visCues);
   const hasVisSub = /\nDialogue:/.test(assText);
@@ -377,14 +382,15 @@ async function _runExportVideo(items, format, videoKbps) {
   showToast('開始匯出影片，時間依長度與格式而定…');
   try {
     const r = await DESK.exportVideo({
-      items,
+      clips: data.clips,
+      videoTracks: data.videoTracks,
       width: State.videoWidth || 1920,
       height: State.videoHeight || 1080,
       fps: State.fps || 25,
       assText: hasVisSub ? assText : null,
       format,
       videoKbps,
-      duration: Seq.end(),
+      duration: data.duration,
       defaultName: `ST_${projName}_${format === 'prores' ? 'ProRes422HQ' : 'H264'}`,
     });
     if (!r) { setStatus('已取消匯出', '', 'unlock'); return; }

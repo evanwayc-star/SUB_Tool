@@ -446,7 +446,7 @@ function hasAudioStream(p) {
   try { const r = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', p], { timeout: 8000 }); return !!(r.stdout && r.stdout.toString().trim()); }
   catch (e) { return true; } // 探測失敗時假設有音訊（較常見）
 }
-ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps }) => {
+ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps }) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
   const isPro = format === 'prores';
   const ext = isPro ? 'mov' : 'mp4';
@@ -460,65 +460,91 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { items, width, height, fps, assT
     outPath = r.filePath;
   }
   allowFileDir(outPath);
-  (items || []).forEach(it => { if (it.type === 'clip' && it.path) allowFileDir(it.path); (it.audio || []).forEach(a => a.file && allowFileDir(a.file)); });
+  (clips || []).forEach(c => { if (c.path) allowFileDir(c.path); (c.audio || []).forEach(a => a.file && allowFileDir(a.file)); });
 
   const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
   const R = fps || 25;
   ensureTmp();
-  const inputs = [], fc = [], seg = [];
-  let ii = 0, k = 0;
-  for (const it of (items || [])) {
-    const vl = `v${k}`, al = `a${k}`;
-    if (it.type === 'clip') {
-      // 硬體解碼（每個輸入各自指定；auto 會在不支援的編碼自動退回軟解）。
-      // 用 auto 而非 -hwaccel_output_format：解碼後的影格留在系統記憶體，
-      // 後續 scale/pad/concat 等 CPU 濾鏡才能直接使用。
-      inputs.push('-hwaccel', 'auto', '-i', it.path);
-      const idx = ii++;
-      // 影像：trim→對齊 PTS→統一 fps→等比縮放置中補黑→SAR=1
-      fc.push(`[${idx}:v]trim=start=${it.in}:end=${it.out},setpts=PTS-STARTPTS,fps=${R},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1[${vl}]`);
-      // 音訊：
-      //  - it.audio 為陣列（來自混音器）：依可聽聲道檔混音（靜音/獨奏已在 renderer 過濾，音量在此套用）；
-      //    空陣列＝全靜音。逐聲道檔為 mono，套音量後 amix 相加、再 pan 成 stereo（比照混音器把 mono 置中）。
-      //  - it.audio 為 undefined（無逐聲道檔）：回退用來源原音。
-      const dur = Math.max(0.001, it.out - it.in);
-      if (Array.isArray(it.audio)) {
-        if (!it.audio.length) {
-          fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${dur},asetpts=PTS-STARTPTS[${al}]`);
-        } else {
-          const mono = [];
-          it.audio.forEach((ch, j) => {
-            inputs.push('-i', ch.file);
-            const aidx = ii++;
-            fc.push(`[${aidx}:a]atrim=start=${it.in}:end=${it.out},asetpts=PTS-STARTPTS,aresample=48000,volume=${ch.volume}[${vl}m${j}]`);
-            mono.push(`[${vl}m${j}]`);
-          });
-          fc.push(mono.length > 1
-            ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,pan=stereo|FL=c0|FR=c0[${al}]`
-            : `${mono[0]}pan=stereo|FL=c0|FR=c0[${al}]`);
-        }
-      } else if (hasAudioStream(it.path)) {
-        fc.push(`[${idx}:a]atrim=start=${it.in}:end=${it.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[${al}]`);
-      } else {
-        fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${dur},asetpts=PTS-STARTPTS[${al}]`);
-      }
-    } else { // gap：黑畫面 + 靜音
-      const d = Math.max(0.001, it.dur || 0);
-      fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${d},setsar=1[${vl}]`);
-      fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${d},asetpts=PTS-STARTPTS[${al}]`);
+  // ===== 多軌合成 filtergraph（v4.11.0）=====
+  //  影像：每視訊軌各自 concat 成整條時間軸（片段放 offset、間隙【透明】），再由下而上 overlay 疊到黑底；
+  //        上層片段覆蓋下層（比照預覽 top-occludes），透明間隙讓下層透出。
+  //  音訊：所有片段各自套混音器音量後 adelay 到自身 offset，再全部 amix（全軌混音）。
+  //  單軌、無重疊的序列＝此法之特例，結果與舊版 concat 相同。
+  const list = clips || [];
+  if (!list.length) throw new Error('沒有可匯出的影片段');
+  const inputs = [], fc = [];
+  const D = Math.max(0.05, +duration || 0);
+  const EPS = 0.01;
+  // 1) 每片段一個影像輸入（音訊回退共用同一輸入）；索引 === 片段序號 i
+  list.forEach((c) => { inputs.push('-hwaccel', 'auto', '-i', c.path); });
+  let ii = list.length; // 之後的逐聲道音訊檔輸入從此接續編號
+  // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
+  fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${D.toFixed(3)},format=yuv420p,setsar=1[base]`);
+  const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
+  let baseLabel = '[base]';
+  vtracks.forEach((T, ti) => {
+    const vt = T.vt || 0;
+    const scale = Math.max(0.02, Math.min(1, +T.scale || 1));
+    const opacity = Math.max(0, Math.min(1, T.opacity == null ? 1 : +T.opacity));
+    const px = Math.max(0, Math.min(1, T.posX == null ? 0.5 : +T.posX));
+    const py = Math.max(0, Math.min(1, T.posY == null ? 0.5 : +T.posY));
+    const SW = Math.max(2, Math.round(scale * W)), SH = Math.max(2, Math.round(scale * H)); // 此軌影格尺寸（PiP 時縮小）
+    const trk = list.map((c, i) => ({ c, i })).filter(x => (x.c.vtrack || 0) === vt).sort((a, b) => a.c.offset - b.c.offset);
+    if (!trk.length) return;
+    const segs = []; let cursor = 0, si = 0;
+    const gap = (gd) => { const L = `t${ti}s${si++}`; fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${(+gd).toFixed(3)},format=yuva420p,setsar=1[${L}]`); segs.push(`[${L}]`); };
+    for (const { c, i } of trk) {
+      if (c.offset > cursor + EPS) gap(c.offset - cursor);
+      const L = `t${ti}s${si++}`;
+      // 縮放到此軌尺寸（等比、透明補邊，讓非填滿處露出下層），統一 fps/SAR、加 alpha
+      fc.push(`[${i}:v]trim=start=${c.in}:end=${c.out},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1[${L}]`);
+      segs.push(`[${L}]`);
+      cursor = c.offset + Math.max(0.001, c.out - c.in);
     }
-    seg.push(`[${vl}][${al}]`);
-    k++;
-  }
-  if (!seg.length) throw new Error('沒有可匯出的影片段');
-  fc.push(`${seg.join('')}concat=n=${seg.length}:v=1:a=1[vc][ac]`);
+    if (cursor < D - EPS) gap(D - cursor);
+    let trkLabel;
+    if (segs.length > 1) { trkLabel = `[trkV${ti}]`; fc.push(`${segs.join('')}concat=n=${segs.length}:v=1:a=0${trkLabel}`); }
+    else { trkLabel = segs[0]; }
+    if (opacity < 0.999) { const ol = `[trkO${ti}]`; fc.push(`${trkLabel}format=yuva420p,colorchannelmixer=aa=${opacity.toFixed(3)}${ol}`); trkLabel = ol; } // 透明度
+    const out = `[ov${ti}]`;
+    // 位置：px/py 0..1 → 以 overlay 表達式對映（scale=1 時 W-w=0＝滿版；PiP 時定位縮小影格）
+    fc.push(`${baseLabel}${trkLabel}overlay=x=(W-w)*${px.toFixed(4)}:y=(H-h)*${py.toFixed(4)}:eof_action=pass:format=auto${out}`);
+    baseLabel = out;
+  });
+  const vc = baseLabel; // 疊層後的最終影像標籤
+  // 3) 音訊：每片段套混音器音量 → adelay 到 offset → 全部 amix
+  const aLabels = [];
+  list.forEach((c, i) => {
+    let al = null;
+    if (Array.isArray(c.audio)) {
+      if (!c.audio.length) return; // 全靜音 → 此片段不發聲
+      const mono = [];
+      c.audio.forEach((ch, j) => {
+        inputs.push('-i', ch.file); const aidx = ii++;
+        fc.push(`[${aidx}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,volume=${ch.volume}[am${i}_${j}]`);
+        mono.push(`[am${i}_${j}]`);
+      });
+      al = `[aa${i}]`;
+      fc.push(mono.length > 1
+        ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,pan=stereo|FL=c0|FR=c0${al}`
+        : `${mono[0]}pan=stereo|FL=c0|FR=c0${al}`);
+    } else if (hasAudioStream(c.path)) {
+      al = `[aa${i}]`;
+      fc.push(`[${i}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+    } else return;
+    const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
+    fc.push(`${al}adelay=${offMs}:all=1[ad${i}]`);
+    aLabels.push(`[ad${i}]`);
+  });
+  if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${D.toFixed(3)},aresample=48000[ac]`);
+  else fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS[ac]`);
 
   // 燒錄字幕（可見軌）：ass 濾鏡讀取暫存 .ass；以 cwd=TMP + basename 引用避開路徑跳脫
-  let vfinal = '[vc]', assName = null;
+  let vfinal = vc, assName = null;
   if (assText && assText.trim()) {
     assName = 'export_' + Date.now() + '.ass';
     fs.writeFileSync(path.join(TMP, assName), assText, 'utf8');
-    fc.push(`[vc]ass=${assName}[vout]`);
+    fc.push(`${vc}ass=${assName}[vout]`);
     vfinal = '[vout]';
   }
 

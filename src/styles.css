@@ -242,6 +242,12 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .vgtrack .gdel{cursor:pointer;background:none;border:none;font-size:13px;padding:0 2px;color:var(--text-faint);flex-shrink:0;opacity:0;transition:opacity .15s,color .15s}
 .vgtrack:hover .gdel{opacity:.8}
 .vgtrack .gdel:hover{color:var(--red)}
+.vgtrack .gpip{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s}
+.vgtrack:hover .gpip{opacity:.9}
+.vgtrack .gpip.on{opacity:1;filter:drop-shadow(0 0 3px var(--accent))}
+.pipPos{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border2,#3a3f47);color:var(--text-dim);border-radius:3px;font-size:13px;padding:0;line-height:1}
+.pipPos:hover{border-color:var(--accent)}
+.pipPos.on{background:var(--accent);color:#fff;border-color:var(--accent)}
 /* 音訊軌列頭（每音源一列；🔊 名稱＋靜音 M／獨奏 S／音量）：比照混音器色調 */
 #tlGutterAtracks{flex-shrink:0}
 .awtrack{display:flex;align-items:center;gap:3px;padding:0 6px;border-bottom:1px solid #22303a;position:relative;box-sizing:border-box;background:rgba(30,44,60,.28)}
