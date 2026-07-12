@@ -429,7 +429,8 @@ function renderClipBlocks(){
     el.style.left=x1+'px'; el.style.width=Math.max(6,x2-x1)+'px';
     el.dataset.clipId=c.id; el.dataset.vtrack=v;
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
-    el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}</div><div class="edge r"></div>`;
+    const hasFade=(c.fadeIn>0||c.fadeOut>0);
+    el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}${hasFade?' ⌁':''}</div><div class="edge r"></div>`;
     el.title=`${c.name}（${State.videoTracks[v]?.name||('視訊軌 V'+(v+1))}）\n位置 ${secToEncore(s,State.fps,State.dropFrame)} → ${secToEncore(e,State.fps,State.dropFrame)}`+
       `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
       `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪｜右鍵＝選單`;
@@ -545,6 +546,30 @@ function showVtrackComposite(v){
     if(op) op.oninput=()=>{ const e=$('pipOpV'); if(e)e.textContent=op.value+'%'; };
     if(sc) sc.oninput=()=>{ const e=$('pipScV'); if(e)e.textContent=sc.value+'%'; };
     document.querySelectorAll('#pipGrid .pipPos').forEach(b=>b.onclick=(ev)=>{ ev.preventDefault(); document.querySelectorAll('#pipGrid .pipPos').forEach(x=>x.classList.remove('on')); b.classList.add('on'); });
+  },0);
+}
+/* 影片段轉場（階段5）：淡入／淡出（秒）——匯出時影像 alpha 淡變＋音訊 afade 同步。
+   淡到透明會露出下層／黑底；上層片段與下層重疊時的淡變即為軌間溶接（crossfade）。 */
+function showClipFade(c){
+  if(!c) return;
+  const len=Math.max(0.1, Seq.len(c));
+  const maxF=Math.max(0.1, Math.min(5, +len.toFixed(1)));
+  const fi=Math.min(+(c.fadeIn||0), maxF), fo=Math.min(+(c.fadeOut||0), maxF);
+  openModal(`淡入淡出（轉場）— ${escapeHTML(c.name||'')}`,
+    `<div style="font-size:13px;line-height:2.2">`+
+    `<div>淡入：<input type="range" id="cfIn" min="0" max="${maxF}" step="0.1" value="${fi}" style="width:180px;vertical-align:middle"> <span id="cfInV">${fi.toFixed(1)}s</span></div>`+
+    `<div>淡出：<input type="range" id="cfOut" min="0" max="${maxF}" step="0.1" value="${fo}" style="width:180px;vertical-align:middle"> <span id="cfOutV">${fo.toFixed(1)}s</span></div>`+
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">淡入從透明漸顯、淡出漸隱到透明（露出下層／黑底），音訊同步淡變。<b>匯出時生效</b>。若此片段在上層視訊軌且與下層重疊，淡變即為<b>軌間溶接</b>。</div>`+
+    `</div>`,
+    [{label:'清除',act:()=>{ c.fadeIn=0; c.fadeOut=0; closeModal(); drawTimeline(); recordHistory('清除轉場：'+(c.name||'')); }},
+     {label:'套用',primary:true,act:()=>{
+        c.fadeIn=Math.max(0,Math.min(maxF,+$('cfIn').value)); c.fadeOut=Math.max(0,Math.min(maxF,+$('cfOut').value));
+        closeModal(); drawTimeline(); recordHistory('轉場：'+(c.name||''));
+     }}]);
+  setTimeout(()=>{
+    const a=$('cfIn'), b=$('cfOut');
+    if(a) a.oninput=()=>{ const e=$('cfInV'); if(e)e.textContent=(+a.value).toFixed(1)+'s'; };
+    if(b) b.oninput=()=>{ const e=$('cfOutV'); if(e)e.textContent=(+b.value).toFixed(1)+'s'; };
   },0);
 }
 
@@ -1193,4 +1218,4 @@ export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
   addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, redrawTimeline, setZoom, zoomFit, zoomFitVideo,
   refreshTrackGutterActive, snapTargets, snapVal, neighborBounds,
-  selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft };
+  selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft, showClipFade };

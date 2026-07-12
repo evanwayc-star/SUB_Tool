@@ -297,6 +297,7 @@ function _buildExportData() {
   const list = clips.map(c => ({
     path: c.path, in: +c.in.toFixed(3), out: +c.out.toFixed(3),
     offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0, audio: _clipAudioSpec(c),
+    fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
   }));
   const vtOrder = [...new Set(list.map(c => c.vtrack))].sort((a, b) => a - b); // 由下而上（vtrack 小＝底層先畫）
   const videoTracks = vtOrder.map(vt => {

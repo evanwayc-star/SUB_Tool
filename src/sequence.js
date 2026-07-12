@@ -125,7 +125,7 @@ const Seq = {
     return State.clips.map(c => ({ id: c.id, name: c.name, path: c.path || null,
       web: c.web ? { url: c.web.url } : null, dur: c.dur, fps: c.fps || 0,
       primary: !!c.primary, audioSrc: c.audioSrc || null,
-      in: c.in, out: c.out, offset: c.offset, vtrack: vt(c) }));
+      in: c.in, out: c.out, offset: c.offset, vtrack: vt(c), fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0 }));
   },
   restore(list){
     if(!Array.isArray(list)) return;
@@ -143,7 +143,7 @@ const Seq = {
     State.clips.length = 0;
     for(const s of list){
       const ex = old.get(s.id);
-      if(ex){ ex.in = s.in; ex.out = s.out; ex.offset = s.offset; ex.vtrack = s.vtrack || 0; State.clips.push(ex); }
+      if(ex){ ex.in = s.in; ex.out = s.out; ex.offset = s.offset; ex.vtrack = s.vtrack || 0; ex.fadeIn = s.fadeIn || 0; ex.fadeOut = s.fadeOut || 0; State.clips.push(ex); }
       else{
         const k = s.path || (s.web && s.web.url);
         State.clips.push({ ...s, vtrack: s.vtrack || 0, web: s.web ? { url: s.web.url } : null, peaks: (k && peaksBySrc.get(k)) || null });

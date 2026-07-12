@@ -884,7 +884,7 @@ const Media = {
     const pend = State._pendingClips; delete State._pendingClips;
     if(DESK && Array.isArray(pend)){
       const pri = pend.find(x=>x.primary) || pend.find(x=>x.path===c.path);
-      if(pri){ c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0; c.vtrack = pri.vtrack || 0; Seq.sort(); Seq.recomputeDuration(); }
+      if(pri){ c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0; c.vtrack = pri.vtrack || 0; c.fadeIn = pri.fadeIn || 0; c.fadeOut = pri.fadeOut || 0; Seq.sort(); Seq.recomputeDuration(); }
       (async()=>{
         const made = new Map(); if(c.path) made.set(c.path, c); // 來源路徑 → 首段（提供共用資源）
         for(const pc of pend){
@@ -893,7 +893,7 @@ const Media = {
           if(base){ // 同來源的切割片段：直接建 clip 共用資源
             const piece = Seq.add({ name: pc.name || base.name, path: base.path, web: base.web || null,
               dur: base.dur, fps: base.fps || 0, peaks: base.peaks, vtrack: pc.vtrack || 0,
-              audioSrc: base.audioSrc || ('clip:' + base.id),
+              audioSrc: base.audioSrc || ('clip:' + base.id), fadeIn: pc.fadeIn || 0, fadeOut: pc.fadeOut || 0,
               in: pc.in ?? 0, out: Math.min(pc.out ?? base.dur, base.dur), offset: pc.offset ?? undefined });
             if(pc.offset != null) piece.offset = pc.offset;
           } else {
@@ -936,7 +936,7 @@ const Media = {
     if(!this.mpvMode){ try{ meta.web = { url: await DESK.fileURL(p) }; }catch(e){} }
     const c = Seq.add(meta);
     c.audioSrc = 'clip:' + c.id; // 此來源的音軌識別（切割片段將共用）
-    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } Seq.sort(); Seq.recomputeDuration(); }
+    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; Seq.sort(); Seq.recomputeDuration(); }
     drawTimeline();
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}（背景抽取音訊與波形…）`, 'busy');

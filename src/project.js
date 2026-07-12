@@ -31,7 +31,8 @@ function _buildProjectData(){
     videoTracks:State.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked,
       ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})})),
     videoTrackCount:State.videoTracks.length||1, // 向下相容：舊版讀取用
-    clips:State.clips.map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary})),
+    clips:State.clips.map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,
+      ...(c.fadeIn?{fadeIn:c.fadeIn}:{}),...(c.fadeOut?{fadeOut:c.fadeOut}:{})})),
     notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
     cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false}))
   };

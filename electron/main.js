@@ -497,7 +497,12 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
       if (c.offset > cursor + EPS) gap(c.offset - cursor);
       const L = `t${ti}s${si++}`;
       // 縮放到此軌尺寸（等比、透明補邊，讓非填滿處露出下層），統一 fps/SAR、加 alpha
-      fc.push(`[${i}:v]trim=start=${c.in}:end=${c.out},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1[${L}]`);
+      const fi = Math.max(0, +c.fadeIn || 0), fo = Math.max(0, +c.fadeOut || 0), clen = Math.max(0.001, c.out - c.in);
+      let vchain = `[${i}:v]trim=start=${c.in}:end=${c.out},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
+      // 轉場：淡入/淡出（fade alpha＝淡到透明，讓下層/黑底露出→軌間溶接）
+      if (fi > 0) vchain += `,fade=t=in:st=0:d=${Math.min(fi, clen).toFixed(3)}:alpha=1`;
+      if (fo > 0) vchain += `,fade=t=out:st=${Math.max(0, clen - Math.min(fo, clen)).toFixed(3)}:d=${Math.min(fo, clen).toFixed(3)}:alpha=1`;
+      fc.push(`${vchain}[${L}]`);
       segs.push(`[${L}]`);
       cursor = c.offset + Math.max(0.001, c.out - c.in);
     }
@@ -533,7 +538,14 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
       fc.push(`[${i}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
     } else return;
     const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
-    fc.push(`${al}adelay=${offMs}:all=1[ad${i}]`);
+    // 轉場：音訊淡入/淡出（與影像同步）
+    const afi = Math.max(0, +c.fadeIn || 0), afo = Math.max(0, +c.fadeOut || 0), aclen = Math.max(0.001, c.out - c.in);
+    const afParts = [];
+    if (afi > 0) afParts.push(`afade=t=in:st=0:d=${Math.min(afi, aclen).toFixed(3)}`);
+    if (afo > 0) afParts.push(`afade=t=out:st=${Math.max(0, aclen - Math.min(afo, aclen)).toFixed(3)}:d=${Math.min(afo, aclen).toFixed(3)}`);
+    let asrc = al;
+    if (afParts.length) { const afl = `[af${i}]`; fc.push(`${al}${afParts.join(',')}${afl}`); asrc = afl; }
+    fc.push(`${asrc}adelay=${offMs}:all=1[ad${i}]`);
     aLabels.push(`[ad${i}]`);
   });
   if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${D.toFixed(3)},aresample=48000[ac]`);

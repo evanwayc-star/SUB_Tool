@@ -4,7 +4,7 @@ import { escapeHTML } from './util.js';
 import { State, isSel } from './state.js';
 import { Media } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
-import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip } from './timeline.js';
+import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade } from './timeline.js';
 import { Seq } from './sequence.js';
 import { showToast } from './ui.js';
 import { recordHistory } from './history.js';
@@ -196,6 +196,7 @@ tlScroll.addEventListener('contextmenu',e=>{
     };
     items.push({label:`⬆ 移到上層視訊軌（V${(c.vtrack||0)+2}）`,act:()=>moveTrack(1)});
     if((c.vtrack||0)>0) items.push({label:`⬇ 移到下層視訊軌（V${(c.vtrack||0)}）`,act:()=>moveTrack(-1)});
+    items.push({label:`🎞 淡入淡出（轉場）${(c.fadeIn>0||c.fadeOut>0)?' ✓':''}…`,act:()=>showClipFade(c)});
     // 相鄰段交換（同一視訊軌內、依時間軸順序；保留兩段之間的間距）
     const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset);
     const idx=sorted.indexOf(c);
