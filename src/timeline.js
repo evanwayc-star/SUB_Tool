@@ -572,6 +572,41 @@ function showClipFade(c){
     if(b) b.oninput=()=>{ const e=$('cfOutV'); if(e)e.textContent=(+b.value).toFixed(1)+'s'; };
   },0);
 }
+/* 交叉溶接（階段5.1）：把此片段移到上一層視訊軌、提前與「同軌前一段」尾端重疊 T 秒，
+   前段淡出／此段淡入＝交叉溶接。完全複用「多軌 overlay＋淡變」的匯出（不改 filtergraph）。 */
+function _prevTrackClip(c){
+  return Seq.trackClips(c.vtrack||0).filter(x=>x!==c && x.offset < c.offset - 1e-4).sort((a,b)=>b.offset-a.offset)[0] || null;
+}
+function crossfadeWithPrev(c, T){
+  const prev=_prevTrackClip(c);
+  if(!prev){ showToast('前面沒有可溶接的片段（同一視訊軌）'); return; }
+  T=Math.max(0.1, Math.min(T, Seq.len(c), Seq.len(prev)));
+  const prevEnd=Seq.clipEnd(prev);
+  const nv=(c.vtrack||0)+1; c.vtrack=nv; ensureVideoTrackCount(nv+1);
+  c.offset=Math.max(0, prevEnd - T);
+  // 只淡入上層（此段）：下層(前段)維持不透明當底，重疊處 50%A+50%B＝乾淨溶接（避免經過黑而變暗）
+  c.fadeIn=T;
+  Seq.sort(); Seq.recomputeDuration();
+  recordHistory('交叉溶接：'+(prev.name||'')+'→'+(c.name||''));
+  Media.seek(Math.min(Media.displayTime(), State.duration||0));
+  drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+  showToast(`已建立交叉溶接 ${T.toFixed(1)}s（${prev.name} → ${c.name}）`);
+}
+function showCrossfade(c){
+  if(!c) return;
+  const prev=_prevTrackClip(c);
+  if(!prev){ showToast('前面沒有可溶接的片段（同一視訊軌）'); return; }
+  const maxT=Math.max(0.2, Math.min(3, Seq.len(c), Seq.len(prev)));
+  const defT=Math.min(1, maxT);
+  openModal(`交叉溶接 — ${escapeHTML(prev.name||'')} → ${escapeHTML(c.name||'')}`,
+    `<div style="font-size:13px;line-height:2.1">`+
+    `<div>溶接時間：<input type="range" id="xfT" min="0.2" max="${maxT.toFixed(1)}" step="0.1" value="${defT.toFixed(1)}" style="width:180px;vertical-align:middle"> <span id="xfTV">${defT.toFixed(1)}s</span></div>`+
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">會把此片段移到<b>上一層視訊軌</b>並提前與前一段尾端重疊，兩段在重疊處淡出／淡入＝交叉溶接（匯出時合成）。</div>`+
+    `</div>`,
+    [{label:'取消',act:closeModal},
+     {label:'建立溶接',primary:true,act:()=>{ const T=+$('xfT').value; closeModal(); crossfadeWithPrev(c, T); }}]);
+  setTimeout(()=>{ const s=$('xfT'); if(s)s.oninput=()=>{ const e=$('xfTV'); if(e)e.textContent=(+s.value).toFixed(1)+'s'; }; },0);
+}
 
 /* ===== 影片段選取（點選高亮、上下鍵切換、Del 刪除；行為比照字幕列） ===== */
 function selectClip(id, opts={}){
@@ -1218,4 +1253,4 @@ export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
   addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, redrawTimeline, setZoom, zoomFit, zoomFitVideo,
   refreshTrackGutterActive, snapTargets, snapVal, neighborBounds,
-  selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft, showClipFade };
+  selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade };
