@@ -763,12 +763,24 @@ const Media = {
   /* 依 clip 切換「可聽見」的音軌集合：clip 綁定的（'video' 或 'clip:*'）只留當前 clip，
      ext-*（外部參考音檔）不受影響、永遠跟時間軸。
      audioSrc：同一來源檔切割出的片段共用同一組音軌（'video'＝主媒體、'clip:<原始id>'＝加入的影片） */
-  _applyClipAudio(c){
+  /* 音源 srcId 在時間軸時間 t 的來源時間（取該音源於 t 作用中的片段）；無則 null */
+  _srcLocalT(srcId, t){
+    for(const cl of State.clips){
+      const s = cl.audioSrc || (cl.primary ? 'video' : ('clip:' + cl.id));
+      if(s === srcId && Seq.isActiveAt(cl, t)) return Seq.toSource(t, cl);
+    }
+    return null;
+  },
+  _applyClipAudio(c, t){
     const src = c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id));
     this.activeSource = src;
+    // 疊合試聽：所有在該時間點【作用中】的片段音源都可聽（不只最上層），其餘才靜音。
+    const tt = (t != null) ? t : (this.seqOn() ? Seq.toTimeline(this.vTime(), c) : this.vTime());
+    const audible = new Set([src]);
+    for(const cl of Seq.clipsAt(tt)) audible.add(cl.audioSrc || (cl.primary ? 'video' : ('clip:' + cl.id)));
     for(const tr of this.tracks){
       const s = tr.source || 'video';
-      if(s === 'video' || s.startsWith('clip:')) tr._srcHidden = (s !== src);
+      if(s === 'video' || s.startsWith('clip:')) tr._srcHidden = !audible.has(s);
     }
     this.applyGains(); renderAudioTracks();
   },
@@ -795,7 +807,9 @@ const Media = {
       this.activeClipId = c.id;
       this._leaveGap();
       this.stopBufferSources(); // buffer 音軌隸屬 primary：換段先停，resume 時依 _srcHidden 決定是否重啟
-      this._applyClipAudio(c);
+      const _tl = Seq.toTimeline(localT, c);
+      this._applyClipAudio(c, _tl);
+      this._lastOverlapKey = Seq.clipsAt(_tl).map(x=>x.id).join('|'); // 與 seqTick 疊合偵測同步，避免切段後多餘重同步
       if(this.mpvMode){
         if(c.path && DESK?.mpv?.loadfile){
           this.stopElementSources();
@@ -858,6 +872,16 @@ const Media = {
     }
     const c = this._activeClip();
     if(!c){ const hit = Seq.clipAt(t); if(hit) this._ensureClip(hit, Seq.toSource(t, hit), true); else this._enterGap(t); return; }
+    // 疊合試聽：作用中片段集合變化 → 重設可聽音源並同步各自 element/buffer（讓滑入/滑出重疊的片段跟著出/停聲）。
+    // okey 相同時不動，避免逐幀 churn；不改變影像的 active clip。
+    const okey = Seq.clipsAt(t).map(x=>x.id).join('|');
+    if(okey !== this._lastOverlapKey){
+      this._lastOverlapKey = okey;
+      this._applyClipAudio(c, t);
+      this.startElementSources(this.vTime(), t);
+      this.stopBufferSources();
+      if(this.tracks.some(x=>x.kind==='buffer'&&!x._srcHidden)) this.startBufferSources(this.vTime());
+    }
     const end = Seq.clipEnd(c);
     if(t >= end - 0.02){
       const nxt = Seq.clipAt(end + 0.001);
@@ -1200,10 +1224,14 @@ const Media = {
   // localT=當前 clip 的來源時間；tlT=時間軸時間（ext-* 參考音用；未給則同 localT）。
   // 序列模式：被 _srcHidden 的（其他 clip / 已切換音源）不播，避免多段音訊同時出聲。
   startElementSources(localT, tlT){
-    if(tlT === undefined) tlT = localT;
+    if(tlT === undefined) tlT = this.seqOn() ? this.tlTime() : localT;
     for(const tr of this.tracks){ if(tr.kind!=='element'||!tr.el)continue;
       if(tr._srcHidden) continue;
-      const off = (tr.source||'').startsWith('ext-') ? tlT : localT;
+      const s = tr.source || 'video';
+      let off;
+      if(s.startsWith('ext-')) off = tlT;                                   // 外部參考音：跟時間軸
+      else if(this.seqOn()){ const lt = this._srcLocalT(s, tlT); if(lt == null) continue; off = lt; } // 各音源對到自己片段的來源時間（疊合時各自同步）
+      else off = localT;
       try{ tr.el.currentTime=clamp(off,0,tr.el.duration||off); tr.el.playbackRate=video.playbackRate||1; tr.el.play(); }catch(e){} }
   },
   // 音源切換／clip 切換後，若正在播放需重啟可聽元素（先前隱藏者已被跳過、未在播）
@@ -1218,15 +1246,18 @@ const Media = {
   },
   startBufferSources(offset){
     if(!this.ctx)return;
-    this.startCtxTime=this.ctx.currentTime; this.startMediaTime=offset;
+    // buffer 音軌隸屬 primary（'video'）：疊合時對到 primary 片段【自己的】來源時間（非最上層片段的）
+    let off = offset;
+    if(this.seqOn()){ const lt = this._srcLocalT('video', this.tlTime()); if(lt != null) off = lt; }
+    this.startCtxTime=this.ctx.currentTime; this.startMediaTime=off;
     for(const tr of this.tracks){
       if(tr.kind!=='buffer')continue;
-      if(tr._srcHidden)continue; // 序列：非當前 clip 的 buffer 音軌不播（buffer 隸屬 primary）
+      if(tr._srcHidden)continue; // 序列：無作用中片段的 buffer 音軌不播（buffer 隸屬 primary）
       try{
         const src=this.ctx.createBufferSource(); src.buffer=tr.buffer;
         src.playbackRate.value=video.playbackRate||1;
         src.connect(tr.gain); tr.srcNode=src;
-        src.start(0, clamp(offset,0,tr.buffer.duration));
+        src.start(0, clamp(off,0,tr.buffer.duration));
       }catch(e){}
     }
   },
