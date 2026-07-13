@@ -21,7 +21,7 @@ const RULER_H=24, WAVE_H=64, ROW_H=64;  // default/min values; actual stored in 
 /* 影片序列：獨立視訊軌列容器（在波形上方），與字幕軌列同一套「列＋列頭」機制。
    容器 pointer-events:none、片段本身 auto——空白處仍可拖曳捲動/框選。 */
 const tlVtracks=document.getElementById('tlVtracks');
-const VROW_H=44;  // 視訊軌列預設高度
+const VROW_H=64;  // 視訊軌列預設高度（含區塊內波形）
 function waveH(){ return State.waveH||WAVE_H; }
 function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
 function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
@@ -435,7 +435,31 @@ function renderClipBlocks(){
       `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
       `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪｜右鍵＝選單`;
     row.appendChild(el);
+    // 區塊內波形：畫該段音波（依 in/out 對映區塊寬）＝視訊軌兼音波軌
+    const pk=c.peaks || ((c.primary||c.audioSrc==='video') ? Wave.peaks : null);
+    if(pk && pk.length){
+      const Wpx=Math.max(6,x2-x1), Hpx=Math.max(10, vtrackH(v)-6);
+      const cv=document.createElement('canvas'); cv.className='clip-wave';
+      cv.width=Math.max(1,Math.round(Wpx*devicePixelRatio)); cv.height=Math.max(1,Math.round(Hpx*devicePixelRatio));
+      _drawClipWave(cv, c, pk, Wpx, Hpx);
+      el.insertBefore(cv, el.firstChild);
+    }
   }
+}
+/* 在片段區塊內畫該段音波（來源時間 in..out 對映到區塊寬 0..Wpx） */
+function _drawClipWave(cv, c, pk, Wpx, Hpx){
+  const ctx=cv.getContext('2d'); const dpr=devicePixelRatio;
+  ctx.save(); ctx.scale(dpr,dpr);
+  const mid=Hpx/2, amp=Hpx*0.42, res=Wave.resolution, n=pk.length/2, dur=Math.max(1e-6,c.out-c.in);
+  ctx.strokeStyle='rgba(190,230,255,.5)'; ctx.lineWidth=1; ctx.beginPath();
+  for(let x=0;x<Wpx;x++){
+    const bT=c.in+(x/Wpx)*dur; const b=Math.floor(bT*res); if(b<0||b>=n) continue;
+    let mn=pk[b*2], mx=pk[b*2+1];
+    const b2=Math.min(n-1, Math.floor((c.in+((x+1)/Wpx)*dur)*res));
+    for(let k=b+1;k<=b2;k++){ if(pk[k*2]<mn)mn=pk[k*2]; if(pk[k*2+1]>mx)mx=pk[k*2+1]; }
+    ctx.moveTo(x+0.5, mid-mx*amp); ctx.lineTo(x+0.5, mid-mn*amp);
+  }
+  ctx.stroke(); ctx.restore();
 }
 /* 由 tlVtracks 內的 y 座標推算滑鼠所在的 vtrack（由上而下逐列量測，支援各軌不同高度） */
 function clipTrackFromY(clientY){
