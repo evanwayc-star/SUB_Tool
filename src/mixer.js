@@ -5,7 +5,7 @@ import { Media } from './media.js';
 
 function renderAudioTracks(){
   const list=$('atList'); list.innerHTML='';
-  const real=Media.tracks.filter(t=>t.kind==='buffer'||t.kind==='native'||t.kind==='nativeTrack'||t.kind==='element');
+  const real=Media.tracks.filter(t=>(t.kind==='buffer'||t.kind==='native'||t.kind==='nativeTrack'||t.kind==='element')&&!t._altPrimary);
   // 準備中的占位推桿屬於影片音源；切到外部音源檢視時不顯示
   const _showPending=(Media.activeSource===null||Media.activeSource==='video');
   const pending=_showPending?(Media.pendingChannels||[]).filter(c=>!c.ready):[];
@@ -66,6 +66,7 @@ function renderMixer(){
 
   const real=Media.tracks.filter(t=>{
     if(!(t.kind==='buffer'||t.kind==='native'||t.kind==='element'))return false;
+    if(t._altPrimary)return false; // 獨立主影片音訊播放器：不在混音器另列（其 M/S/音量隨 'video' 音源）
     if(src!==null&&(t.source||'video')!==src)return false;
     return true;
   });
@@ -106,6 +107,7 @@ function _mixerTracks(){
   const src=Media.activeSource;
   return Media.tracks.filter(t=>{
     if(!(t.kind==='buffer'||t.kind==='native'||t.kind==='element'))return false;
+    if(t._altPrimary)return false; // 獨立主影片音訊播放器：不在混音器另列（其 M/S/音量隨 'video' 音源）
     if(src!==null&&(t.source||'video')!==src)return false;
     return true;
   });

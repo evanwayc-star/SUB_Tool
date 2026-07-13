@@ -771,14 +771,53 @@ const Media = {
     }
     return null;
   },
+  /* seek 時把各 clip 綁定 element 音軌同步到【自己音源】的來源時間（疊合時各段 offset 不同，不能一律用 active 的 local） */
+  _syncSeqElements(t){
+    for(const tr of this.tracks){
+      if(tr.kind!=='element'||!tr.el) continue;
+      if(tr._srcHidden || (tr.source||'').startsWith('ext-')) continue;
+      const lt = this._srcLocalT(tr.source || 'video', t);
+      if(lt == null) continue;
+      try{ tr.el.currentTime = clamp(lt, 0, tr.el.duration || lt); }catch(e){}
+    }
+  },
+  /* 原生主影片（source 'video' 僅有 native 音軌、無獨立 element/buffer）疊合試聽用的獨立播放器：
+     建一個 <audio> 載入主影片檔、接進混音圖。重疊時 native 會被其他片段 element 的 activeMix 抑制而消失，
+     改用此獨立播放器播主影片聲音（見 _applyClipAudio 的 _srcHidden 判定；MXF 等已有獨立音軌者不建）。 */
+  _ensureAltPrimaryEl(){
+    if(!this.ctx) return null;
+    let tr = this.tracks.find(t => t._altPrimary);
+    if(tr) return tr;
+    if(this.tracks.some(t => (t.source||'video')==='video' && (t.kind==='element'||t.kind==='buffer'))) return null; // 已有獨立音軌
+    const pri = Seq.primary(); const url = pri && pri.web && pri.web.url; if(!url) return null;
+    try{
+      const el = new Audio(); el.src = url; el.preload='auto';
+      // 載入完成後校正一次：建立當下檔案常尚未載入，seek 不準（會慢/停在低點）→ ready 後重對來源時間
+      el.addEventListener('canplay', ()=>{
+        const at = this.tracks.find(x=>x._altPrimary);
+        if(this.playing && at && !at._srcHidden){ const lt=this._srcLocalT('video', this.tlTime());
+          if(lt!=null){ try{ el.currentTime=clamp(lt,0,el.duration||lt); el.playbackRate=video.playbackRate||1; el.play(); }catch(e){} } }
+      }, {once:true});
+      const node = this.ctx.createMediaElementSource(el);
+      const g = this.ctx.createGain(); node.connect(g); g.connect(this.master);
+      tr = { id:'altpri', name:'主影片音訊', kind:'element', el, gain:g, muted:false, solo:false, volume:1, source:'video', _altPrimary:true, _srcHidden:true };
+      this.tracks.push(tr);
+      return tr;
+    }catch(e){ console.warn('altPrimary', e); return null; }
+  },
   _applyClipAudio(c, t){
     const src = c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id));
     this.activeSource = src;
     // 疊合試聽：所有在該時間點【作用中】的片段音源都可聽（不只最上層），其餘才靜音。
     const tt = (t != null) ? t : (this.seqOn() ? Seq.toTimeline(this.vTime(), c) : this.vTime());
+    const act = Seq.clipsAt(tt);
     const audible = new Set([src]);
-    for(const cl of Seq.clipsAt(tt)) audible.add(cl.audioSrc || (cl.primary ? 'video' : ('clip:' + cl.id)));
+    for(const cl of act) audible.add(cl.audioSrc || (cl.primary ? 'video' : ('clip:' + cl.id)));
+    // 原生主影片處於重疊時 → 用獨立 <audio> 播其聲音（native 會被 activeMix 抑制）
+    const videoOverlap = audible.has('video') && act.length > 1;
+    if(videoOverlap) this._ensureAltPrimaryEl();
     for(const tr of this.tracks){
+      if(tr._altPrimary){ tr._srcHidden = !videoOverlap; continue; }
       const s = tr.source || 'video';
       if(s === 'video' || s.startsWith('clip:')) tr._srcHidden = !audible.has(s);
     }
@@ -1188,13 +1227,13 @@ const Media = {
       if(this.mpvMode){
         this._mpvTime=local;
         DESK.mpv.seek(local).catch(()=>{});
-        for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el&&!tr._srcHidden&&!(tr.source||'').startsWith('ext-')){ try{tr.el.currentTime=clamp(local,0,tr.el.duration||local);}catch(e){} } }
+        this._syncSeqElements(t);
         window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
         return;
       }
       if(video.hasAttribute('src')){
         video.currentTime=local;
-        for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el&&!tr._srcHidden&&!(tr.source||'').startsWith('ext-')){ try{tr.el.currentTime=clamp(local,0,tr.el.duration||local);}catch(e){} } }
+        this._syncSeqElements(t);
         if(this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(local); }
         return;
       }
@@ -1226,11 +1265,11 @@ const Media = {
   startElementSources(localT, tlT){
     if(tlT === undefined) tlT = this.seqOn() ? this.tlTime() : localT;
     for(const tr of this.tracks){ if(tr.kind!=='element'||!tr.el)continue;
-      if(tr._srcHidden) continue;
+      if(tr._srcHidden){ try{ tr.el.pause(); }catch(e){} continue; }        // 隱藏音軌暫停（換段/離開重疊/主影片非重疊時停聲）
       const s = tr.source || 'video';
       let off;
       if(s.startsWith('ext-')) off = tlT;                                   // 外部參考音：跟時間軸
-      else if(this.seqOn()){ const lt = this._srcLocalT(s, tlT); if(lt == null) continue; off = lt; } // 各音源對到自己片段的來源時間（疊合時各自同步）
+      else if(this.seqOn()){ const lt = this._srcLocalT(s, tlT); if(lt == null){ try{ tr.el.pause(); }catch(e){} continue; } off = lt; } // 各音源對到自己片段來源時間；無作用片段則停
       else off = localT;
       try{ tr.el.currentTime=clamp(off,0,tr.el.duration||off); tr.el.playbackRate=video.playbackRate||1; tr.el.play(); }catch(e){} }
   },

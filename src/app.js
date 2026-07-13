@@ -292,9 +292,14 @@ function rafLoop(){
       const expect=Media.startMediaTime+(Media.ctx.currentTime-Media.startCtxTime)*(video.playbackRate||1);
       if(Math.abs(expect-video.currentTime)>0.25){ Media.stopBufferSources(); Media.startBufferSources(video.currentTime); }
     }
-    // element 音軌 drift 校正（多軌同步）：clip 綁定音軌對「來源時間」、ext-* 參考音對「時間軸時間」
+    // element 音軌 drift 校正（多軌同步）：ext-* 參考音對「時間軸時間」；clip 綁定音軌對【各自音源】的來源時間
+    // （疊合時各段 offset 不同，不能一律用 active clip 的 vTime，否則下層/主影片音軌會被拉到上層的來源時間）
     for(const tr of Media.tracks){ if(tr.kind==='element'&&tr.el&&!tr.el.paused){
-      const ref=(tr.source||'').startsWith('ext-') ? Media.tlTime() : Media.vTime();
+      const s=tr.source||'';
+      let ref;
+      if(s.startsWith('ext-')) ref=Media.tlTime();
+      else if(Media.seqOn()){ const lt=Media._srcLocalT(s||'video', Media.tlTime()); if(lt==null) continue; ref=lt; }
+      else ref=Media.vTime();
       if(Math.abs(tr.el.currentTime - ref) > 0.12){ try{tr.el.currentTime=ref;}catch(e){} }
     }}
   }
