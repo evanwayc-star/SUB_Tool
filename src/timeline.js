@@ -37,18 +37,11 @@ function syncVideoTracks(){ let m=0; for(const c of State.clips) m=Math.max(m,(c
 /* 音訊軌列（階段2）：把序列片段依音源分組，每音源一條波形列（取代舊的單一波形）。
    無序列時高度為 0（維持純字幕版面）。audioRowLayout 回各列 {srcId,label,clips,y0,h}。 */
 const AROW_H=52, ACH_H=26;
-function audioRowLayout(){
-  if(!Seq.active()) return [];
-  const rows=[]; let y=0;
-  for(const g of Media.audioSources()){
-    const chs=Media.sourceChannels(g.srcId);
-    const expandable=chs.length>1;
-    const expanded=expandable && !!State.audioExpanded[g.srcId];
-    rows.push({kind:'source', srcId:g.srcId, label:g.label, clips:g.clips, expandable, expanded, y0:y, h:AROW_H}); y+=AROW_H;
-    if(expanded) chs.forEach(tr=>{ rows.push({kind:'channel', srcId:g.srcId, label:tr.name, track:tr, y0:y, h:ACH_H}); y+=ACH_H; });
-  }
-  return rows;
-}
+/* v4.15.0：音訊不再另成獨立列——每個影音軌列（視訊軌）的列頭直接含混音 M/S/音量，
+   波形也已畫在片段區塊內。故此處回空＝時間軸上不再有獨立音訊波形列。 */
+function audioRowLayout(){ return []; }
+/* 某視訊軌所屬的音源（取該軌上任一片段的 audioSrc）；供軌列列頭的混音控制用 */
+function _vtrackSrc(v){ const c=State.clips.find(x=>(x.vtrack||0)===v && x.path); return c ? (c.audioSrc||(c.primary?'video':'clip:'+c.id)) : null; }
 function atracksHeight(){ return audioRowLayout().reduce((s,r)=>s+r.h,0); }
 function tracksTop(){return RULER_H+vtracksHeight()+atracksHeight();}
 function tracksScrollTop(){ return tlTracks?tlTracks.scrollTop:0; }
@@ -486,12 +479,19 @@ function renderVtrackGutter(){
     const g=document.createElement('div');
     g.className='vgtrack'+(vis?'':' hidden-tk'); g.style.height=vtrackH(v)+'px'; g.dataset.vtrack=v;
     const hasComp = (meta.scale != null && meta.scale < 0.999) || (meta.opacity != null && meta.opacity < 0.999);
-    g.innerHTML=`<span class="vlabel">V${v+1}</span>`+
-      `<button class="eye" title="顯示/隱藏此視訊軌（預覽）">${vis?'👁':'🚫'}</button>`+
-      `<span class="gname" contenteditable="false" spellcheck="false">${escapeHTML(meta.name)}</span>`+
-      `<button class="gpip${hasComp?' on':''}" title="合成設定（子母畫面／透明度，匯出時生效）">🎨</button>`+
-      `<button class="gadd" title="在上方新增視訊軌">＋</button>`+
-      `<button class="gdel" title="刪除此視訊軌">✕</button>`;
+    // 此軌音源的混音控制（M/S/音量）——影音合一：一列＝影片區塊＋波形＋混音
+    const src=_vtrackSrc(v);
+    const muted=src&&Media.sourceMuted(src), solo=src&&Media.sourceSolo(src), vol=src?Math.round(Media.sourceVolume(src)*100):100;
+    const mixHtml = src ? `<button class="awm${muted?' on':''}" title="靜音此軌音訊">M</button><button class="aws${solo?' on':''}" title="獨奏此軌音訊">S</button><input class="awvol" type="range" min="0" max="150" step="1" value="${vol}" title="音量 ${vol}%">` : '';
+    g.innerHTML=`<div class="vgrow1">`+
+        `<span class="vlabel">V${v+1}</span>`+
+        `<button class="eye" title="顯示/隱藏此軌（預覽）">${vis?'👁':'🚫'}</button>`+
+        `<span class="gname" contenteditable="false" spellcheck="false" title="${escapeHTML(meta.name)}">${escapeHTML(meta.name)}</span>`+
+        `<button class="gpip${hasComp?' on':''}" title="合成設定（子母畫面／透明度，匯出時生效）">🎨</button>`+
+        `<button class="gadd" title="在上方新增軌">＋</button>`+
+        `<button class="gdel" title="刪除此軌">✕</button>`+
+      `</div>`+
+      `<div class="vgrow2">${mixHtml || '<span class="vgnoaud">（此軌無音訊）</span>'}</div>`;
     g.querySelector('.eye').onclick=(e)=>{ e.stopPropagation(); meta.visible=!vis; drawTimeline(); emit('render:videoSub'); };
     const nm=g.querySelector('.gname');
     nm.addEventListener('mousedown',e=>{
@@ -504,6 +504,11 @@ function renderVtrackGutter(){
     g.querySelector('.gpip').onclick=(e)=>{ e.stopPropagation(); showVtrackComposite(v); };
     g.querySelector('.gadd').onclick=(e)=>{ e.stopPropagation(); addVideoTrack(v+1); };
     g.querySelector('.gdel').onclick=(e)=>{ e.stopPropagation(); removeVideoTrack(v); };
+    if(src){
+      g.querySelector('.awm').onclick=(e)=>{ e.stopPropagation(); Media.toggleSourceMute(src); renderVtrackGutter(); drawTimeline(); };
+      g.querySelector('.aws').onclick=(e)=>{ e.stopPropagation(); Media.toggleSourceSolo(src); renderVtrackGutter(); drawTimeline(); };
+      const vv=g.querySelector('.awvol'); vv.oninput=()=>{ Media.setSourceVolume(src,(+vv.value)/100); vv.title='音量 '+vv.value+'%'; }; vv.addEventListener('mousedown',e=>e.stopPropagation());
+    }
     const resH=document.createElement('div');
     resH.className='tl-resize-handle';
     resH.addEventListener('mousedown',e=>{

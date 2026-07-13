@@ -223,7 +223,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
   color:var(--text);border:2px solid var(--accent);border-radius:4px;padding:2px 6px;resize:none;outline:none;box-shadow:var(--shadow)}
 /* 時間軸：左側軌道欄 (眼睛開關) */
 .tl-body{flex:1;display:flex;min-height:0}
-.tl-gutter{width:138px;flex-shrink:0;background:var(--panel2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.tl-gutter{width:158px;flex-shrink:0;background:var(--panel2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
 .tl-gutter-head{height:24px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 8px;font-size:10px;color:var(--text-faint)}
 .tl-gutter-wave{height:48px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 8px;gap:5px;font-size:12px;color:var(--text-faint);position:relative}
 .tl-gutter-wave select{margin-left:auto;font-size:12px;padding:1px 4px;height:22px;max-width:100px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:3px;cursor:pointer}
@@ -232,7 +232,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 #tlGutterTracks{flex:1;overflow-y:auto;overflow-x:hidden}
 /* 視訊軌列頭（比照字幕軌 gutter，帶輕藍色調以區分）：眼睛/名稱/新增(＋)/刪除(✕)/高度把手 */
 #tlGutterVtracks{flex-shrink:0}
-.vgtrack{display:flex;align-items:center;gap:3px;padding:0 6px;border-bottom:1px solid #2b3947;position:relative;box-sizing:border-box;background:rgba(46,89,132,.12)}
+.vgtrack{display:flex;flex-direction:column;justify-content:center;gap:2px;padding:2px 6px;border-bottom:1px solid #2b3947;position:relative;box-sizing:border-box;background:rgba(46,89,132,.12)}
+.vgtrack .vgrow1,.vgtrack .vgrow2{display:flex;align-items:center;gap:3px;min-width:0}
+.vgtrack .vgnoaud{font-size:10px;color:var(--text-faint)}
 .vgtrack .vlabel{font-size:10px;color:#7fb0dd;flex-shrink:0;font-weight:600}
 .vgtrack .eye{cursor:pointer;font-size:13px;width:20px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
 .vgtrack.hidden-tk .gname{opacity:.45;text-decoration:line-through}
@@ -243,6 +245,10 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .vgtrack .gdel{cursor:pointer;background:none;border:none;font-size:13px;padding:0 2px;color:var(--text-faint);flex-shrink:0;opacity:0;transition:opacity .15s,color .15s}
 .vgtrack:hover .gdel{opacity:.8}
 .vgtrack .gdel:hover{color:var(--red)}
+.vgtrack .awm,.vgtrack .aws{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border,#3a3f47);border-radius:3px;font-size:10px;width:18px;height:18px;line-height:1;padding:0;color:var(--text-dim);flex-shrink:0}
+.vgtrack .awm.on{background:var(--red,#e05353);border-color:var(--red,#e05353);color:#fff}
+.vgtrack .aws.on{background:#e0a53e;border-color:#e0a53e;color:#1b1b1d}
+.vgtrack .awvol{width:44px;flex-shrink:0;accent-color:#3fa9f5}
 .vgtrack .gpip{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s}
 .vgtrack:hover .gpip{opacity:.9}
 .vgtrack .gpip.on{opacity:1;filter:drop-shadow(0 0 3px var(--accent))}
