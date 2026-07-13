@@ -210,7 +210,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .clip-block.active{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
 .clip-block.selected{border-color:#fff;background:rgba(80,140,200,.62);box-shadow:0 0 0 2px var(--accent),0 1px 4px rgba(0,0,0,.5);z-index:6;color:#fff}
 .clip-block .clip-label{pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.7;position:relative;z-index:1;text-shadow:0 1px 2px rgba(0,0,0,.7)}
-.clip-wave{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:0}
+.clip-wave{position:absolute;top:0;height:100%;pointer-events:none;z-index:0}
 .clip-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
 .clip-block .edge.l{left:0}.clip-block .edge.r{right:0}
 .clip-block .edge:hover{background:rgba(100,170,255,.45)}

@@ -428,29 +428,36 @@ function renderClipBlocks(){
       `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
       `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪｜右鍵＝選單`;
     row.appendChild(el);
-    // 區塊內波形：畫該段音波（依 in/out 對映區塊寬）＝視訊軌兼音波軌
+    // 區塊內波形：只畫【可視範圍】那段（高倍縮放時區塊會超寬，canvas 若設為整塊寬會超過瀏覽器上限而變白）。
+    // 把 canvas 寬度夾到視窗內、定位在可視起點；再依畫布 px 反推來源時間繪製。
     const pk=c.peaks || ((c.primary||c.audioSrc==='video') ? Wave.peaks : null);
     if(pk && pk.length){
-      const Wpx=Math.max(6,x2-x1), Hpx=Math.max(10, vtrackH(v)-6);
-      const cv=document.createElement('canvas'); cv.className='clip-wave';
-      cv.width=Math.max(1,Math.round(Wpx*devicePixelRatio)); cv.height=Math.max(1,Math.round(Hpx*devicePixelRatio));
-      _drawClipWave(cv, c, pk, Wpx, Hpx);
-      el.insertBefore(cv, el.firstChild);
+      const vx0=Math.max(0,x1), vx1=Math.min(vw,x2), cvw=Math.round(vx1-vx0);
+      if(cvw>=1){
+        const Hpx=Math.max(10, vtrackH(v)-4);
+        const cv=document.createElement('canvas'); cv.className='clip-wave';
+        cv.width=Math.max(1,Math.round(cvw*devicePixelRatio)); cv.height=Math.max(1,Math.round(Hpx*devicePixelRatio));
+        cv.style.left=(vx0-x1)+'px'; cv.style.width=cvw+'px';
+        _drawClipWave(cv, c, pk, cvw, Hpx, vx0);
+        el.insertBefore(cv, el.firstChild);
+      }
     }
   }
 }
-/* 在片段區塊內畫該段音波（來源時間 in..out 對映到區塊寬 0..Wpx） */
-function _drawClipWave(cv, c, pk, Wpx, Hpx){
+/* 在片段區塊內畫該段音波：畫布覆蓋片段的【可視範圍】，x0abs＝畫布左緣的絕對時間軸 px；
+   逐畫布像素以 xToTime 反推來源時間 → 取 peaks（縮放時畫布寬≤視窗，不會超過 canvas 上限）。 */
+function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs){
   const ctx=cv.getContext('2d'); const dpr=devicePixelRatio;
   ctx.save(); ctx.scale(dpr,dpr);
-  const mid=Hpx/2, amp=Hpx*0.42, res=Wave.resolution, n=pk.length/2, dur=Math.max(1e-6,c.out-c.in);
+  const mid=Hpx/2, amp=Hpx*0.42, res=Wave.resolution, n=pk.length/2;
   ctx.strokeStyle='rgba(190,230,255,.5)'; ctx.lineWidth=1; ctx.beginPath();
-  for(let x=0;x<Wpx;x++){
-    const bT=c.in+(x/Wpx)*dur; const b=Math.floor(bT*res); if(b<0||b>=n) continue;
+  for(let cx=0; cx<cvw; cx++){
+    const bT=c.in+(xToTime(x0abs+cx)-c.offset);
+    const b=Math.floor(bT*res); if(b<0||b>=n) continue;
     let mn=pk[b*2], mx=pk[b*2+1];
-    const b2=Math.min(n-1, Math.floor((c.in+((x+1)/Wpx)*dur)*res));
+    const b2=Math.min(n-1, Math.floor((c.in+(xToTime(x0abs+cx+1)-c.offset))*res));
     for(let k=b+1;k<=b2;k++){ if(pk[k*2]<mn)mn=pk[k*2]; if(pk[k*2+1]>mx)mx=pk[k*2+1]; }
-    ctx.moveTo(x+0.5, mid-mx*amp); ctx.lineTo(x+0.5, mid-mn*amp);
+    ctx.moveTo(cx+0.5, mid-mx*amp); ctx.lineTo(cx+0.5, mid-mn*amp);
   }
   ctx.stroke(); ctx.restore();
 }
