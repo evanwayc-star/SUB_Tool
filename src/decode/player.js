@@ -13,6 +13,7 @@ import { State } from '../state.js';
 import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
 import { emit } from '../events.js';
+import { showToast } from '../ui.js';
 import { demuxFile } from './demux.js';
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
@@ -67,8 +68,11 @@ class SourceStream {
       this.dec.configure(cfg);
       this.state = 'ready';
     }catch(e){
-      console.warn('[WC] 來源載入失敗（fallback <video>）:', String(e && e.message || e));
+      const msg = String(e && e.message || e);
+      console.warn('[WC] 來源載入失敗（fallback 原樣顯示）:', msg);
       this.state = 'failed';
+      // 讓使用者知道為什麼疊加/溶接沒有出現（每個來源只提示一次；匯出不受影響）
+      try{ showToast('⚠ 此影片無法即時合成預覽（' + (/過大/.test(msg) ? '檔案過大' : '格式不支援') + '）——預覽顯示原樣，匯出不受影響'); }catch(e2){}
     }
   }
 

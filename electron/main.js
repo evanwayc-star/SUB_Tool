@@ -728,8 +728,13 @@ let _ingestQueueTail = Promise.resolve(); // 序列加入的 ingest 串行排隊
 async function _runIngest(e, { src, duration, needsProxy, audio }) {
   const audioArr = Array.isArray(audio) ? audio : [];
   // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
+  // v4.23.x 修：v4.22 前的舊快取沒有 proxy——needsProxy 時視同未命中重轉（否則 WebCodecs
+  // 預覽引擎永遠拿不到 proxy、無法接管 mpv 畫面 → 疊加/溶接預覽整組失效）
   const hit = readCache(src);
-  if (hit) { if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true }); return Object.assign({ cached: true }, hit.meta); }
+  if (hit && (!needsProxy || (hit.meta && hit.meta.proxy && fs.existsSync(hit.meta.proxy)))) {
+    if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
+    return Object.assign({ cached: true }, hit.meta);
+  }
   const dir = writeCacheDir(src);
   const metaPath = path.join(dir, 'meta.json');
   fs.mkdirSync(dir, { recursive: true });

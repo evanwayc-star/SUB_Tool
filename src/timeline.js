@@ -664,7 +664,8 @@ function clearClipSelection(){
   $('stSel').textContent='';
   renderClipBlocks();
 }
-/* 上/下鍵：切換到上一段/下一段（依時間軸順序），選取並把播放頭移到段首 */
+/* 上/下鍵：切換到上一段/下一段（依時間軸順序），選取並把播放頭移到段首。
+   邊界延續（v4.23.x）：已在第一段再按上＝跳到影片頭（該段開頭）；已在最後一段再按下＝跳到影片尾（序列結尾）。 */
 function navigateClip(dir){
   const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset).filter(c=>!State.videoTracks[c.vtrack||0]?.locked); // 跳過鎖定軌
   if(!sorted.length) return;
@@ -673,10 +674,16 @@ function navigateClip(dir){
     const t=Media.displayTime();
     idx=sorted.findIndex(c=>c.id===Media.activeClipId);
     if(idx<0){ idx=0; for(let i=0;i<sorted.length;i++){ if(sorted[i].offset<=t+1e-4) idx=i; } }
-  } else {
-    idx=Math.max(0, Math.min(sorted.length-1, idx+dir));
+    selectClip(sorted[idx].id, {seek:true});
+    return;
   }
-  selectClip(sorted[idx].id, {seek:true});
+  const ni=idx+dir;
+  if(ni<0){ Media.seek(sorted[0].offset); emit('playhead:ensure'); emit('render:videoSub'); return; } // 第一段再上＝影片頭
+  if(ni>=sorted.length){ // 最後段再下＝影片尾（序列結尾；退一格避免落在結尾外）
+    const end=Math.max(0, Seq.end() - 1/(State.fps||25));
+    Media.seek(end); emit('playhead:ensure'); emit('render:videoSub'); return;
+  }
+  selectClip(sorted[ni].id, {seek:true});
 }
 /* 關閉選取影片段「前方」的空白：把它往左移到緊貼前一段結尾；前面沒有素材則移到 00:00:00:00 */
 function closeClipGapLeft(){
