@@ -417,7 +417,7 @@ function renderClipBlocks(){
     if(e<t0||s>t1) continue;
     const v=c.vtrack||0; const row=rowByV[v]||rowByV[0]; if(!row) continue;
     const el=document.createElement('div');
-    el.className='clip-block'+(c.id===Media.activeClipId?' active':'')+(c.id===State.selectedClipId?' selected':'');
+    el.className='clip-block'+(c.id===Media.activeClipId?' active':'')+(c.id===State.selectedClipId?' selected':'')+(State.videoTracks[v]?.locked?' locked':'');
     const x1=timeToX(s), x2=timeToX(e);
     el.style.left=x1+'px'; el.style.width=Math.max(6,x2-x1)+'px';
     el.dataset.clipId=c.id; el.dataset.vtrack=v;
@@ -486,6 +486,7 @@ function renderVtrackGutter(){
     const g=document.createElement('div');
     g.className='vgtrack'+(vis?'':' hidden-tk'); g.style.height=vtrackH(v)+'px'; g.dataset.vtrack=v;
     const hasComp = (meta.scale != null && meta.scale < 0.999) || (meta.opacity != null && meta.opacity < 0.999);
+    const isLocked = !!meta.locked;
     // 此軌音源的混音控制（M/S/音量）——影音合一：一列＝影片區塊＋波形＋混音
     const src=_vtrackSrc(v);
     const muted=src&&Media.sourceMuted(src), solo=src&&Media.sourceSolo(src), vol=src?Math.round(Media.sourceVolume(src)*100):100;
@@ -494,6 +495,7 @@ function renderVtrackGutter(){
         `<span class="vlabel">V${v+1}</span>`+
         `<button class="eye" title="顯示/隱藏此軌（預覽）">${vis?'👁':'🚫'}</button>`+
         `<span class="gname" contenteditable="false" spellcheck="false" title="${escapeHTML(meta.name)}">${escapeHTML(meta.name)}</span>`+
+        `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌（禁止移動／修剪／切割／選取片段）'}">${isLocked?'🔒':'🔓'}</button>`+
         `<button class="gpip${hasComp?' on':''}" title="合成設定（子母畫面／透明度，匯出時生效）">🎨</button>`+
         `<button class="gadd" title="在上方新增軌">＋</button>`+
         `<button class="gdel" title="刪除此軌">✕</button>`+
@@ -508,6 +510,7 @@ function renderVtrackGutter(){
     });
     nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
     nm.onblur=()=>{ nm.contentEditable='false'; meta.name=nm.innerText.trim()||('視訊軌 '+(v+1)); };
+    g.querySelector('.glock').onclick=(e)=>{ e.stopPropagation(); meta.locked=!meta.locked; if(meta.locked){ const sc=Seq.byId(State.selectedClipId); if(sc&&(sc.vtrack||0)===v) clearClipSelection(); } drawTimeline(); };
     g.querySelector('.gpip').onclick=(e)=>{ e.stopPropagation(); showVtrackComposite(v); };
     g.querySelector('.gadd').onclick=(e)=>{ e.stopPropagation(); addVideoTrack(v+1); };
     g.querySelector('.gdel').onclick=(e)=>{ e.stopPropagation(); removeVideoTrack(v); };
@@ -647,6 +650,7 @@ function showCrossfade(c){
 /* ===== 影片段選取（點選高亮、上下鍵切換、Del 刪除；行為比照字幕列） ===== */
 function selectClip(id, opts={}){
   const c=Seq.byId(id); if(!c) return;
+  if(!opts.force && State.videoTracks[c.vtrack||0]?.locked) return; // 鎖定軌：不可選取中間的影像片段
   State.selectedClipId=id;
   State.selectedId=null; State.selectedIds=[]; // 與字幕選取互斥（避免 Del/上下鍵語意衝突）
   refreshSelectionUI(); // 清除字幕列高亮
@@ -662,7 +666,7 @@ function clearClipSelection(){
 }
 /* 上/下鍵：切換到上一段/下一段（依時間軸順序），選取並把播放頭移到段首 */
 function navigateClip(dir){
-  const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
+  const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset).filter(c=>!State.videoTracks[c.vtrack||0]?.locked); // 跳過鎖定軌
   if(!sorted.length) return;
   let idx=sorted.findIndex(c=>c.id===State.selectedClipId);
   if(idx<0){ // 尚無選取：從播放頭所在（或最接近）的段開始
@@ -694,6 +698,7 @@ function deleteSelectedClip(){
   const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
   const idx=sorted.findIndex(c=>c.id===id);
   const c=Seq.byId(id);
+  if(c && State.videoTracks[c.vtrack||0]?.locked){ showToast('此視訊軌已鎖定，無法刪除片段'); return; }
   if(Media.removeClip(id)){
     recordHistory('刪除影片段：'+(c?c.name:''));
     const rest=[...State.clips].sort((a,b)=>a.offset-b.offset);
@@ -901,6 +906,7 @@ tlScroll.addEventListener('mousedown',e=>{
   const clipEl=e.target.closest('.clip-block');
   if(clipEl){
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
+    if(State.videoTracks[c.vtrack||0]?.locked){ e.preventDefault(); return; } // 鎖定軌：禁止選取／移動／修剪
     const mode=e.target.classList.contains('edge')?(e.target.classList.contains('l')?'clip-l':'clip-r'):'clip-move'; // 需在 selectClip 重繪前判斷（用 e.target 的 class）
     selectClip(c.id); // 點擊即選取（非破壞性，先做——不受存檔守衛擋住）
     if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; } // 拖曳/修剪前先存檔
@@ -1040,7 +1046,7 @@ const _handleDragUpdate = (e) => {
       c.offset=snapFrame(no);
       // 上下拖曳＝換視訊軌（於現有軌間移動；要新增軌請用列頭的＋）
       const nv=clipTrackFromY(e.clientY);
-      if(nv!==(c.vtrack||0)) c.vtrack=nv;
+      if(nv!==(c.vtrack||0) && !State.videoTracks[nv]?.locked) c.vtrack=nv; // 不可放入鎖定軌
     } else if(drag.mode==='clip-l'){
       // 修剪左緣：offset 與 in 同步位移 d；界線＝in≥0、留 minL、不越左鄰
       let d=dt;

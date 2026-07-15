@@ -216,6 +216,11 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .clip-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
 .clip-block .edge.l{left:0}.clip-block .edge.r{right:0}
 .clip-block .edge:hover{background:rgba(100,170,255,.45)}
+/* 鎖定軌片段：不可移動／修剪／切割／選取——虛線框＋斜紋、游標維持一般、邊緣拖曳停用 */
+.clip-block.locked{cursor:default;border-style:dashed;border-color:#6b7a8a}
+.clip-block.locked:hover{background:rgba(46,89,132,.40)}
+.clip-block.locked::after{content:'';position:absolute;inset:0;pointer-events:none;z-index:3;background:repeating-linear-gradient(45deg,rgba(0,0,0,.30) 0 5px,transparent 5px 11px)}
+.clip-block.locked .edge{cursor:default;pointer-events:none}
 .tl-playhead{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--accent);z-index:10;pointer-events:none;will-change:left}
 .tl-playhead::before{content:"";position:absolute;top:0;left:-5px;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid var(--accent)}
 .tl-inpoint{position:absolute;top:0;bottom:0;width:2px;background:var(--green);z-index:9;pointer-events:none;opacity:.9}
@@ -254,6 +259,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .vgtrack .gpip{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s}
 .vgtrack:hover .gpip{opacity:.9}
 .vgtrack .gpip.on{opacity:1;filter:drop-shadow(0 0 3px var(--accent))}
+.vgtrack .glock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s,color .15s}
+.vgtrack .glock:hover{opacity:1}
+.vgtrack .glock.locked{color:var(--accent);opacity:1}
 .pipPos{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border2,#3a3f47);color:var(--text-dim);border-radius:3px;font-size:13px;padding:0;line-height:1}
 .pipPos:hover{border-color:var(--accent)}
 .pipPos.on{background:var(--accent);color:#fff;border-color:var(--accent)}

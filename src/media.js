@@ -1117,6 +1117,7 @@ const Media = {
     t = snapTimeToFrame(t, State.fps, State.dropFrame);
     const c = Seq.clipAt(t);
     if(!c){ showToast('播放點不在任何影片段上'); return false; }
+    if(State.videoTracks[c.vtrack||0]?.locked){ showToast('此視訊軌已鎖定，無法切割'); return false; }
     const cut = Seq.toSource(t, c);
     const MIN = 0.2;
     if(cut < c.in + MIN || cut > c.out - MIN){ showToast('切點太靠近段落邊界'); return false; }

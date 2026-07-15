@@ -180,6 +180,7 @@ tlScroll.addEventListener('contextmenu',e=>{
   if(clipEl){
     e.preventDefault();
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
+    if(State.videoTracks[c.vtrack||0]?.locked){ showCtx(e.clientX,e.clientY,[{label:'🔒 此視訊軌已鎖定'}]); return; }
     selectClip(c.id); // 右鍵即選取（高亮，之後可直接 Del / 上下鍵切換）
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
     const items=[{heading:true,label:'🎬 '+c.name}];
@@ -189,7 +190,9 @@ tlScroll.addEventListener('contextmenu',e=>{
     items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
     // 移到上／下一層視訊軌（多軌疊層：上層覆蓋下層）
     const moveTrack=(dv)=>{
-      Seq.moveToTrack(c, (c.vtrack||0)+dv);
+      const tv=(c.vtrack||0)+dv;
+      if(State.videoTracks[tv]?.locked){ showToast('目標視訊軌已鎖定，無法移入'); return; }
+      Seq.moveToTrack(c, tv);
       recordHistory('影片段移到 V'+((c.vtrack||0)+1));
       Media.seek(Math.min(Media.displayTime(), State.duration||0));
       drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
