@@ -1081,6 +1081,7 @@ ipcMain.handle('mpv:play',  ()     => mpvSend(['set_property', 'pause', false]))
 ipcMain.handle('mpv:pause', ()     => mpvSend(['set_property', 'pause', true]));
 ipcMain.handle('mpv:mute',  (e, v) => mpvSend(['set_property', 'mute', v]));
 ipcMain.handle('mpv:rate',  (e, r) => mpvSend(['set_property', 'speed', r]));
+ipcMain.handle('mpv:brightness', (e, v) => mpvSend(['set_property', 'brightness', Math.max(-100, Math.min(0, Math.round(v)))])); // 淡出入黑預覽：-100＝最暗、0＝正常
 ipcMain.handle('mpv:quit',  () => {
   if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }

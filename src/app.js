@@ -303,6 +303,7 @@ function rafLoop(){
       if(Math.abs(tr.el.currentTime - ref) > 0.12){ try{tr.el.currentTime=ref;}catch(e){} }
     }}
   }
+  try{ Media.applyPreviewFade(); }catch(e){} // 預覽淡出入黑提示（每幀，含暫停/捲動時）
   updateMeters();
   requestAnimationFrame(rafLoop);
 }

@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('subtool', {
     pause:     ()      => ipcRenderer.invoke('mpv:pause'),
     mute:      (v)     => ipcRenderer.invoke('mpv:mute', v),
     rate:      (r)     => ipcRenderer.invoke('mpv:rate', r),
+    brightness:(v)     => ipcRenderer.invoke('mpv:brightness', v),
     setBounds: (b)     => ipcRenderer.invoke('mpv:setBounds', b),
     show:      (v)     => ipcRenderer.invoke('mpv:show', v),
     subSet:    (ass)   => ipcRenderer.invoke('mpv:subSet', ass),

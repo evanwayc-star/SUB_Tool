@@ -760,6 +760,32 @@ const Media = {
     const c = this._activeClip();
     return c ? Seq.toTimeline(this.vTime(), c) : this.vTime();
   },
+  /* 預覽淡出入黑「黑暗程度」0..1：依最上層片段的淡入/淡出與該視訊軌透明度計算（間隙本就是黑，回 0 不另疊） */
+  previewFadeDarkness(){
+    if(!this.seqOn() || this._gap) return 0;
+    const c = this._activeClip(); if(!c) return 0;
+    const t = this.tlTime();
+    let vis = 1;
+    const fi = +c.fadeIn || 0, fo = +c.fadeOut || 0, s = c.offset, e = Seq.clipEnd(c);
+    if(fi > 0 && t < s + fi) vis = Math.min(vis, Math.max(0, (t - s) / fi));
+    if(fo > 0 && t > e - fo) vis = Math.min(vis, Math.max(0, (e - t) / fo));
+    const vt = State.videoTracks[c.vtrack || 0];
+    if(vt && vt.opacity != null && vt.opacity < 1) vis *= Math.max(0, vt.opacity);
+    return clamp(1 - vis, 0, 1);
+  },
+  /* 每幀套用預覽淡出入黑：原生用黑幕 opacity；mpv 用 brightness（-100＝最暗，僅在變動時送 IPC） */
+  applyPreviewFade(){
+    const d = this.previewFadeDarkness();
+    const ov = $('previewFade');
+    if(this.mpvMode){
+      const b = Math.round(-100 * d);
+      if(b !== this._mpvBright){ this._mpvBright = b; try{ DESK?.mpv?.brightness(b); }catch(e){} }
+      if(ov && ov.style.opacity !== '0') ov.style.opacity = '0';
+    }else{
+      if(ov){ const sv = d.toFixed(3); if(ov.style.opacity !== sv) ov.style.opacity = sv; }
+      if(this._mpvBright){ this._mpvBright = 0; try{ DESK?.mpv?.brightness(0); }catch(e){} }
+    }
+  },
   /* 依 clip 切換「可聽見」的音軌集合：clip 綁定的（'video' 或 'clip:*'）只留當前 clip，
      ext-*（外部參考音檔）不受影響、永遠跟時間軸。
      audioSrc：同一來源檔切割出的片段共用同一組音軌（'video'＝主媒體、'clip:<原始id>'＝加入的影片） */
