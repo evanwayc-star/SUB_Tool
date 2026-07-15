@@ -12,6 +12,7 @@ import { clamp } from '../util.js';
 import { State } from '../state.js';
 import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
+import { emit } from '../events.js';
 import { demuxFile } from './demux.js';
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
@@ -56,6 +57,9 @@ class SourceStream {
       this.cfg = cfg; this.chunks = chunks;
       this.frames = []; this.fedIdx = -1; this._flushed = false;
       this.frameDurUs = chunks[0].duration || 33e3;
+      // 串流最早呈現時間：B-frames 編碼（如 nvenc proxy）首幀 cts 常 >0（reorder 延遲）。
+      // 呈現目標須夾到此下界，否則 t=0 會被「後退」誤判 → 無限 reseek、decoder 永遠吐不出 frame。
+      this.startUs = Math.min(...chunks.slice(0, 8).map(c => c.timestamp));
       this.dec = new VideoDecoder({
         output: (f)=>{ this.frames.push(f); },   // 只收；清理集中在 request()（避免 close 到呈現中的 frame）
         error: (e)=>{ console.error('[WC] decoder error:', e && (e.message||e)); this.state = 'failed'; },
@@ -92,6 +96,7 @@ class SourceStream {
     if(this.state === 'idle'){ this.load(); return null; }
     if(this.state !== 'ready') return null;
     const cs = this.chunks, half = this.frameDurUs/2;
+    if(tUs < this.startUs) tUs = this.startUs; // 目標早於串流首幀 → 呈現首幀（勿誤判為後退）
 
     // 跳轉偵測（對長/短 GOP 皆最優）：
     //  ①尚未開始 ②後退：目標早於「本輪已解/可達」最早點（frames[0]，尚無輸出則用本輪起點 chunk）
@@ -142,16 +147,38 @@ export const WCPreview = {
     return true;
   },
 
+  /* 來源 url 解析：mpv 模式主媒體（含切割片段）走 proxy；原生走 clip.web / video 元素來源。 */
+  _clipUrl(c, isTop){
+    if(Media.mpvMode){
+      if(c.path && c.path === Media._wcProxyPath) return Media._wcProxyUrl;
+      if((c.audioSrc || 'video') === 'video' || c.primary) return Media._wcProxyUrl;
+      return (c.web && c.web.url) || null; // mpv 模式下加入的檔目前無 proxy/web → 該層不可解
+    }
+    return (c.web && c.web.url) || (isTop ? (video.currentSrc || video.src) : null) || null;
+  },
+
+  /* mpv 畫面接管開關：WC 能呈現時隱藏 mpv 視窗、改用 HTML 字幕；讓回時還原 libass。 */
+  _setTakeover(v){
+    v = !!v;
+    if((Media._wcTakeover || false) === v) return;
+    Media._wcTakeover = v;
+    const vs = $('videoSub'); if(vs) vs.style.display = v ? '' : 'none'; // mpv 模式限定（原生不經此函式）
+    emit('mpv:sync'); // _syncMpvPanel 讓 mpv 視窗讓位／回歸
+  },
+
+  _hideCanvas(){ if(this.canvas.style.display !== 'none') this.canvas.style.display = 'none'; },
+
   /* rafLoop 每幀呼叫（含暫停/捲動）。 */
   tick(){
     if(!this._ensure()) return;
-    const on = this.enabled && !Media.mpvMode && Media.seqOn();
+    const mpv = Media.mpvMode;
+    const on = this.enabled && Media.seqOn() && (!mpv || !!Media._wcProxyUrl); // mpv：proxy 就緒才可接管
     if(!on){
-      if(this.canvas.style.display !== 'none') this.canvas.style.display = 'none';
+      this._hideCanvas();
       if(this.sources.size && !Media.seqOn()) this.disposeAll(); // 媒體已卸載 → 釋放 demux/解碼資源
-      this.mode = 'off'; return;
+      if(mpv) this._setTakeover(false);
+      Media._wcComposited = false; this.mode = 'off'; return;
     }
-    if(this.canvas.style.display !== '') this.canvas.style.display = '';
 
     // 尺寸同步（wrap 客座尺寸 × dpr）
     const wrap = this.canvas.parentElement;
@@ -159,52 +186,74 @@ export const WCPreview = {
     if(!w || !h) return;
     const dpr = window.devicePixelRatio || 1;
     const bw = Math.round(w*dpr), bh = Math.round(h*dpr);
-    if(this.canvas.width !== bw || this.canvas.height !== bh){ this.canvas.width = bw; this.canvas.height = bh; }
-
-    const ctx = this.ctx;
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, bw, bh);
-    Media._wcComposited = false; // 本幀是否由 WC 真合成呈現（供 applyPreviewFade 抑制黑幕；fade 已由合成承擔）
-    if(Media._gap){ this.mode = 'black'; this.lastPresentedUs = null; return; }
+    const resized = (this.canvas.width !== bw || this.canvas.height !== bh);
 
     const t = Media.tlTime();
-    // 階段2：多軌合成——所有作用中片段（clipsAt 已依 vtrack 由下而上排序），逐層疊上
-    const acts = Seq.clipsAt(t).filter(c => State.videoTracks[c.vtrack||0]?.visible !== false);
-    if(!acts.length){ this.mode = 'black'; this.lastPresentedUs = null; return; }
+    const acts = Media._gap ? [] : Seq.clipsAt(t).filter(c => State.videoTracks[c.vtrack||0]?.visible !== false);
 
-    let painted = 0, lastTs = null, lastUrl = null;
-    let base = null; // 主 contain 區（＝匯出的 W×H 虛擬畫布；第一個可畫層決定，其後各層都定位其內）
+    // 第一遍：逐層取得 frame（多軌合成；clipsAt 已由下而上排序）
+    const layers = [];
+    let topBlocked = null; // mpv：'nourl'＝頂層不可解（讓回 mpv）；'decoding'＝頂層解碼中（保留上一幀）
     for(const c of acts){
-      const url = (c.web && c.web.url) || (c === acts[acts.length-1] ? (video.currentSrc || video.src) : null);
-      if(!url) continue;
+      const isTop = (c === acts[acts.length-1]);
+      const url = this._clipUrl(c, isTop);
+      if(!url){ if(mpv && isTop) topBlocked = 'nourl'; continue; }
       const key = url + '#' + (c.vtrack||0);
       let ss = this.sources.get(key);
       if(!ss){ ss = new SourceStream(url); this.sources.set(key, ss); }
+      if(ss.state === 'failed'){ if(mpv && isTop) topBlocked = 'nourl'; continue; } // 不可解（如 mpv 下加入的非原生檔）
       const su = Math.round(clamp(Seq.toSource(t, c), c.in, Math.max(c.in, c.out - 1/120)) * 1e6);
-      let f = ss.request(su), sw, sh, srcEl;
-      if(f){ srcEl = f; sw = f.displayWidth || f.codedWidth; sh = f.displayHeight || f.codedHeight; }
-      else if(acts.length === 1 && video.readyState >= 2 && (video.videoWidth||0) > 0){
-        // 單層未就緒 → 畫 video 元素（與舊版所見相同）；多層時跳過該層（解碼就緒即出現）
-        srcEl = video; sw = video.videoWidth; sh = video.videoHeight;
-      }else continue;
-      if(!base){ const s0 = Math.min(bw/sw, bh/sh); const w0 = Math.round(sw*s0), h0 = Math.round(sh*s0);
-                 base = { x:(bw-w0)>>1, y:(bh-h0)>>1, w:w0, h:h0 }; }
-      // 軌合成參數（與 ffmpeg:exportVideo 對齊）：scale=大小、posX/posY=(可用空間)*比例、opacity；再乘片段淡入淡出
+      const f = ss.request(su);
       const vt = State.videoTracks[c.vtrack||0] || {};
-      const sc = vt.scale != null ? vt.scale : 1;
       const alpha = (vt.opacity != null ? vt.opacity : 1) * this._clipFadeAlpha(c, t);
-      if(alpha <= 0.003) { painted++; continue; } // 全透明：視為已處理（下層已見）
-      const s1 = Math.min(base.w/sw, base.h/sh) * sc;
-      const dw = Math.max(1, Math.round(sw*s1)), dh = Math.max(1, Math.round(sh*s1));
+      if(f) layers.push({ src:f, sw:f.displayWidth||f.codedWidth, sh:f.displayHeight||f.codedHeight, vt, alpha, ts:f.timestamp, url });
+      else if(!mpv && acts.length === 1 && video.readyState >= 2 && (video.videoWidth||0) > 0)
+        layers.push({ src:video, sw:video.videoWidth, sh:video.videoHeight, vt, alpha, ts:null, url:null }); // 原生單層 fallback
+      else if(mpv && isTop) topBlocked = 'decoding';
+    }
+
+    if(mpv){
+      if(topBlocked === 'nourl'){ this._setTakeover(false); this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return; }
+      if(topBlocked === 'decoding'){
+        if(Media._wcTakeover && !resized){ Media._wcComposited = true; return; } // 已接管：保留上一幀（避免黑閃/mpv 閃）
+        if(!Media._wcTakeover){ this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return; } // 未接管：mpv 續播
+      }
+      if(!layers.length && !Media._gap){ this._setTakeover(false); this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return; }
+    }
+
+    if(this.canvas.style.display !== '') this.canvas.style.display = '';
+    if(resized){ this.canvas.width = bw; this.canvas.height = bh; }
+    const ctx = this.ctx;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, bw, bh);
+    Media._wcComposited = false;
+
+    if(Media._gap || !acts.length){ // 間隙／無作用層＝黑（mpv 下接管黑幕，gap 機制本就隱藏 mpv）
+      if(mpv) this._setTakeover(true);
+      this.mode = 'black'; this.lastPresentedUs = null; return;
+    }
+
+    // 第二遍：由下而上繪製（與 ffmpeg:exportVideo 對齊：scale＝大小、posX/posY＝(可用空間)×比例、opacity×fade）
+    let base = null, painted = 0, lastTs = null, lastUrl = null;
+    for(const L of layers){
+      if(L.alpha <= 0.003){ painted++; continue; } // 全透明：視為已處理（下層已見）
+      if(!base){ const s0 = Math.min(bw/L.sw, bh/L.sh); const w0 = Math.round(L.sw*s0), h0 = Math.round(L.sh*s0);
+                 base = { x:(bw-w0)>>1, y:(bh-h0)>>1, w:w0, h:h0 }; }
+      const vt = L.vt, sc = vt.scale != null ? vt.scale : 1;
+      const s1 = Math.min(base.w/L.sw, base.h/L.sh) * sc;
+      const dw = Math.max(1, Math.round(L.sw*s1)), dh = Math.max(1, Math.round(L.sh*s1));
       const px = vt.posX != null ? vt.posX : 0.5, py = vt.posY != null ? vt.posY : 0.5;
-      const dx = base.x + Math.round((base.w - dw) * px), dy = base.y + Math.round((base.h - dh) * py);
-      ctx.globalAlpha = clamp(alpha, 0, 1);
-      try{ ctx.drawImage(srcEl, dx, dy, dw, dh); painted++; if(srcEl !== video){ lastTs = f.timestamp; lastUrl = url; } }catch(e){}
+      ctx.globalAlpha = clamp(L.alpha, 0, 1);
+      try{ ctx.drawImage(L.src, base.x + Math.round((base.w - dw) * px), base.y + Math.round((base.h - dh) * py), dw, dh);
+           painted++; if(L.ts != null){ lastTs = L.ts; lastUrl = L.url; } }catch(e){}
       ctx.globalAlpha = 1;
     }
-    if(painted && lastTs != null){ this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media._wcComposited = true; }
-    else if(painted){ this.mode = 'video'; this.lastPresentedUs = null; }   // 僅 video fallback 層
-    else if(video.readyState >= 2 && (video.videoWidth||0) > 0){
-      // 全層未就緒（解碼中）→ 整幅退回 video 畫面，避免黑閃
+    if(painted && lastTs != null){
+      this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media._wcComposited = true;
+      if(mpv) this._setTakeover(true);
+    }
+    else if(painted){ this.mode = 'video'; this.lastPresentedUs = null; }   // 僅原生 fallback 層
+    else if(!mpv && video.readyState >= 2 && (video.videoWidth||0) > 0){
+      // 原生全層未就緒（解碼中）→ 整幅退回 video 畫面，避免黑閃
       const sw = video.videoWidth, sh = video.videoHeight;
       const s = Math.min(bw/sw, bh/sh); const dw = Math.round(sw*s), dh = Math.round(sh*s);
       try{ ctx.drawImage(video, (bw-dw)>>1, (bh-dh)>>1, dw, dh); }catch(e){}

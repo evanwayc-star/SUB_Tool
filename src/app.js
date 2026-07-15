@@ -123,7 +123,8 @@ function _syncMpvPanel(){
   // 同樣會被 mpv 蓋住，開啟期間一律讓位
   const settingsOpen=!!document.getElementById('settingsModal');
   // 序列間隙（時間軸上無影片的區段）：畫面應為黑 → mpv 讓位
-  let hides=modalOpen||settingsOpen||!!Media._gap;
+  // WC 接管（proxy 就緒、WebCodecs 合成呈現中）：mpv 視窗一律讓位（僅供時鐘＋聲音兜底）
+  let hides=modalOpen||settingsOpen||!!Media._gap||!!Media._wcTakeover;
   if(!hides){
     const vr=$('videoWrap')?.getBoundingClientRect();
     if(vr){

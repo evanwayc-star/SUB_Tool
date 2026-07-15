@@ -87,6 +87,10 @@ function vencArgs() {
   }
 }
 
+/* proxy 專用短 GOP（每 0.5s 一個 keyframe）：WebCodecs 預覽 seek 需從最近 keyframe 重解，
+   短 GOP 讓任意 seek 幾乎即時；檔案略大可接受（僅 720p proxy，不影響匯出）。 */
+function proxyGopArgs() { return ['-force_key_frames', 'expr:gte(t,n_forced*0.5)']; }
+
 /* ---- 媒體快取鍵：檔名 + 大小 + 前 1MB 內容雜湊（不含修改時間，跨電腦可共用快取） ---- */
 function cacheKeyFor(src) {
   try {
@@ -629,7 +633,7 @@ ipcMain.handle('ffprobe', (e, p) => {
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {
   const out = tmpPath('mp4');
   // 關鍵：必須 format=yuv420p，否則 4:2:2 / 10-bit 來源轉出的 proxy 仍是 Chromium 無法解碼的格式
-  await runFF(['-y', '-i', src, '-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), '-movflags', '+faststart', out],
+  await runFF(['-y', '-i', src, '-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), ...proxyGopArgs(), '-movflags', '+faststart', out],
     { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片' });
   return out;
 });
@@ -765,7 +769,7 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
   const args = ['-y', ...hwdecArgs(), '-i', src]; // S2: hwaccel 加速來源解碼
   if (fc.length) args.push('-filter_complex', fc.join(';'));
   let proxy = null;
-  if (needsProxy) { proxy = path.join(dir, 'proxy.mp4'); args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), '-movflags', '+faststart', proxy); }
+  if (needsProxy) { proxy = path.join(dir, 'proxy.mp4'); args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), ...proxyGopArgs(), '-movflags', '+faststart', proxy); }
   channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '128k', c.file); });
   let wave = null;
   if (waveLabel) { wave = path.join(dir, 'wave.wav'); args.push('-map', waveLabel, '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', wave); }

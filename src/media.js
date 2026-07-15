@@ -502,9 +502,17 @@ const Media = {
     const myVer=this._bgVersion;
     setStatus('背景抽取音軌中（不影響播放）…','busy');
     let res;
-    try{ res=await DESK.ingest({path:p,duration:dur,needsProxy:false,audio}); }
+    // needsProxy:true（v4.22 WebCodecs 階段5）：mpv 路徑同 pass 一併產 720p proxy——
+    // proxy 就緒後 WebCodecs 預覽引擎接管畫面（即時多軌合成），mpv 退居時鐘＋兜底
+    try{ res=await DESK.ingest({path:p,duration:dur,needsProxy:true,audio}); }
     catch(e){ if(this._bgVersion!==myVer) return; console.warn('bg audio ingest:',e); this.pendingChannels=[]; renderAudioTracks(); setStatus('音軌抽取失敗：'+e.message,''); return; }
     if(this._bgVersion!==myVer) return; // 使用者已換另一個檔，丟棄結果
+    if(res.proxy){
+      try{
+        const u=await DESK.fileURL(res.proxy);
+        if(this._bgVersion===myVer){ this._wcProxyUrl=u; this._wcProxyPath=p; } // WCPreview 憑此接管 mpv 畫面
+      }catch(e){ console.warn('proxy url:',e); }
+    }
 
     const chs=res.channels||[];
     if(chs.length){
@@ -777,8 +785,8 @@ const Media = {
   applyPreviewFade(){
     const ov = $('previewFade');
     // WebCodecs 真合成呈現中（WCPreview 每幀設旗標）：淡變/透明度已由 canvas 逐層 alpha 承擔，
-    // 黑幕須歸零否則雙重變暗；mpv 模式不受影響（照走 brightness）。
-    if(!this.mpvMode && this._wcComposited){
+    // 黑幕與 mpv brightness 都歸零否則雙重變暗（mpv 模式下 WC 接管時 mpv 視窗已隱藏）。
+    if(this._wcComposited){
       if(ov && ov.style.opacity !== '0') ov.style.opacity = '0';
       if(this._mpvBright){ this._mpvBright = 0; try{ DESK?.mpv?.brightness(0); }catch(e){} }
       return;
@@ -1029,7 +1037,9 @@ const Media = {
     if(fps && Math.abs(snapFps(fps) - State.fps) > 0.002)
       showToast(`注意：${baseName(p)} 為 ${fps}fps，與序列 ${State.fps}${State.dropFrame?'df':''}fps 不同——時碼以序列 FPS 為準`);
     const meta = { name: baseName(p), path: p, dur, fps };
-    if(!this.mpvMode){ try{ meta.web = { url: await DESK.fileURL(p) }; }catch(e){} }
+    // 一律附 web url（v4.22）：mpv 模式下 WebCodecs 預覽引擎也能直接解「加入的原生檔」做即時合成
+    //（非原生加入檔 demux 會失敗 → WCPreview 視同不可解、讓回 mpv 顯示，無害）
+    try{ meta.web = { url: await DESK.fileURL(p) }; }catch(e){}
     const c = Seq.add(meta);
     c.audioSrc = 'clip:' + c.id; // 此來源的音軌識別（切割片段將共用）
     if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; Seq.sort(); Seq.recomputeDuration(); }
@@ -1513,6 +1523,7 @@ const Media = {
       const vs=$('videoSub'); if(vs) vs.style.display='';
     }
     this._bgVersion++; this.activeSource=null; // 讓進行中的 _bgAudioIngest 知道要放棄；清除音源選擇
+    this._wcProxyUrl=null; this._wcProxyPath=null; this._wcTakeover=false; // WC 接管狀態隨媒體卸載歸零
     this.pendingChannels=[];
     if(this._ingestDoneHandler){ window.removeEventListener('desk:ingest-done',this._ingestDoneHandler); this._ingestDoneHandler=null; }
     this.stopBufferSources(); this.stopElementSources();
