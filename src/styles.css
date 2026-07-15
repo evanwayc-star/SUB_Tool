@@ -287,6 +287,12 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-gtrack .gdel{cursor:pointer;color:var(--text-faint);background:none;border:none;font-size:13px;padding:0 2px;opacity:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .gdel{opacity:.8}
 .tl-gtrack .gdel:hover{color:var(--red)}
+/* v4.23 字幕樣式面板：切換鈕（B/I/直/底）與第二三行控件 */
+.track-style .ts-toggle{cursor:pointer;background:var(--bg-2,#20242b);border:1px solid var(--line,#3a4150);border-radius:4px;color:var(--text-dim);font-size:12px;min-width:24px;padding:2px 6px;transition:all .15s}
+.track-style .ts-toggle:hover{color:var(--text)}
+.track-style .ts-toggle.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.track-style select{background:var(--bg-2,#20242b);border:1px solid var(--line,#3a4150);border-radius:4px;color:var(--text);font-size:12px;padding:2px 4px;max-width:150px}
+.track-style input[type=color]{width:26px;height:22px;padding:0;border:1px solid var(--line,#3a4150);border-radius:4px;background:none;cursor:pointer}
 .tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .glock{opacity:.8}
 .tl-gtrack .glock.locked{color:var(--accent);opacity:1}

@@ -25,7 +25,12 @@ function _buildProjectData(){
     app:'SUB Tool', version:2,
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
-    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||60,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'})),
+    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||60,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff',
+      // v4.23 樣式擴充欄位：存在才寫（舊版讀到未知鍵會忽略，向後相容）
+      ...(t.font!=null?{font:t.font}:{}),...(t.bold!=null?{bold:t.bold}:{}),...(t.italic!=null?{italic:t.italic}:{}),
+      ...(t.letterSpacing!=null?{letterSpacing:t.letterSpacing}:{}),...(t.lineSpacing!=null?{lineSpacing:t.lineSpacing}:{}),
+      ...(t.outline!=null?{outline:t.outline}:{}),...(t.outlineColor!=null?{outlineColor:t.outlineColor}:{}),...(t.shadow!=null?{shadow:t.shadow}:{}),
+      ...(t.vertical!=null?{vertical:t.vertical}:{}),...(t.bgBox!=null?{bgBox:t.bgBox}:{}),...(t.bgColor!=null?{bgColor:t.bgColor}:{}),...(t.bgAlpha!=null?{bgAlpha:t.bgAlpha}:{})})),
     pxPerSec:State.pxPerSec,
     // 影片序列（v4.5.0；v4.10.0 起含多視訊軌）：各段的來源路徑與幾何；網頁版無路徑（開啟時需手動重加）
     videoTracks:State.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked,
@@ -34,7 +39,8 @@ function _buildProjectData(){
     clips:State.clips.map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,
       ...(c.fadeIn?{fadeIn:c.fadeIn}:{}),...(c.fadeOut?{fadeOut:c.fadeOut}:{})})),
     notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
-    cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false}))
+    cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false,
+      ...(c.style&&Object.keys(c.style).length?{style:c.style}:{})})) // v4.23 逐句樣式覆蓋（有才存）
   };
 }
 function _buildBytes(){ return encodeUTF16LE(JSON.stringify(_buildProjectData(),null,1)); }
@@ -150,12 +156,18 @@ const Project = {
     State.cues=(data.cues||[]).map(c=>{
       let tk = c.track||0;
       if (!isV1 && c.track !== undefined) tk = Math.max(0, c.track - 1);
-      return {id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:tk,timed:c.timed!==false};
+      return {id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:tk,timed:c.timed!==false,
+        ...(c.style&&typeof c.style==='object'?{style:{...c.style}}:{})}; // v4.23 逐句樣式覆蓋
     });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
     const maxTk=State.cues.length > 0 ? State.cues.reduce((m,c)=>Math.max(m,c.track||0),0) : -1;
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontSize:t.fontSize||(t.fontScale?Math.round(60*t.fontScale):60),
-      posPct:t.posPct!=null?t.posPct:90,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff'}));
+      posPct:t.posPct!=null?t.posPct:90,align:t.align||'center',locked:!!t.locked,color:t.color||'#ffffff',
+      // v4.23 樣式擴充：舊專案缺欄位＝不寫（effStyle 以預設後援）
+      ...(t.font!=null?{font:t.font}:{}),...(t.bold!=null?{bold:t.bold}:{}),...(t.italic!=null?{italic:t.italic}:{}),
+      ...(t.letterSpacing!=null?{letterSpacing:t.letterSpacing}:{}),...(t.lineSpacing!=null?{lineSpacing:t.lineSpacing}:{}),
+      ...(t.outline!=null?{outline:t.outline}:{}),...(t.outlineColor!=null?{outlineColor:t.outlineColor}:{}),...(t.shadow!=null?{shadow:t.shadow}:{}),
+      ...(t.vertical!=null?{vertical:t.vertical}:{}),...(t.bgBox!=null?{bgBox:t.bgBox}:{}),...(t.bgColor!=null?{bgColor:t.bgColor}:{}),...(t.bgAlpha!=null?{bgAlpha:t.bgAlpha}:{})}));
     else State.tracks=[];
     ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:0, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));

@@ -20,6 +20,7 @@ import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
+import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
@@ -154,7 +155,7 @@ function renderVideoSub(){
   let exactFps = getExactFps(fps);
   const currentFrame = Math.round(t * exactFps);
 
-  // 每個可見軌道各依其 posPct 疊加顯示（高度由使用者自行調整）
+  // 每個可見軌道各依其樣式疊加顯示（v4.23：樣式一律走 substyle.effStyle——與 ASS/mpv/匯出同構）
   const playerWidth = _videoSub?.clientWidth||1920;
   const ratio = playerWidth / 1920;
   let html='', sig='';
@@ -167,12 +168,32 @@ function renderVideoSub(){
       return currentFrame >= startFrame && currentFrame < endFrame;
     });
     if(!cur.length)continue;
-    const st=State.tracks[tk]||{};
-    const pct=st.posPct!=null?st.posPct:90, fs=st.fontSize||60, al=st.align||'center', col=st.color||'#ffffff';
-    const fsPx = Math.max(12, Math.round(fs * ratio));
-    sig+=tk+'|'+fsPx+'|'+col+'|'+pct+'|'+al+'|'+cur.map(c=>c.id+'='+c.text).join(',')+';';
-    html+=`<div class="vsub-track" style="top:${pct}%;transform:translateY(-${pct}%);text-align:${al};letter-spacing:1px;font-weight:500;font-family:'思源黑體', 'Noto Sans TC', 'Source Han Sans TC', sans-serif;">`+
-      cur.map((c,i)=>`<span class="line" style="font-size:${fsPx}px;color:${i===0?col:'#ff4444'}">${escapeHTML(c.text||'').replace(/\n/g,'<br>')}</span>`).join('<br>')+
+    const trk=State.tracks[tk]||{};
+    const tst=effStyle(null, trk);
+    // 容器定位：橫書＝現狀（top+translate、text-align）；直書＝頂錨、align 決定水平位置
+    let contStyle;
+    if(tst.vertical){
+      const x = tst.align==='left' ? 'left:6%;right:auto;text-align:left'
+              : tst.align==='right' ? 'right:6%;left:auto;text-align:right'
+              : 'left:50%;right:auto;transform:translateX(-50%);text-align:center';
+      contStyle=`top:${tst.posPct}%;${x};padding:0;`;
+    }else{
+      contStyle=`top:${tst.posPct}%;transform:translateY(-${tst.posPct}%);text-align:${tst.align};`;
+    }
+    sig+=tk+'|'+contStyle+'|'+cur.map(c=>c.id+'='+c.text+'|'+(c.style?JSON.stringify(c.style):'')).join(',')+'|'+JSON.stringify(tst)+';';
+    html+=`<div class="vsub-track" style="${contStyle}">`+
+      cur.map((c,i)=>{
+        const st=effStyle(c, trk);
+        let css=styleToCss(st, ratio);
+        if(st.shadow<=0) css+='text-shadow:none;';             // 蓋掉 .line class 的預設六向描邊
+        if(!st.bgBox) css+='padding:2px 10px;background:transparent;';
+        else if(st.vertical) css+='padding:8px 3px;';
+        if(i>0) css+='color:#ff4444;';                          // 同時第二句重疊警示（維持既有行為）
+        const inner = st.vertical
+          ? verticalChars(c.text||'').map(ch=>escapeHTML(ch)).join('<br>')
+          : escapeHTML(c.text||'').replace(/\n/g,'<br>');
+        return `<span class="line" style="${css}">${inner}</span>`;
+      }).join('<br>')+
       `</div>`;
   }
   if(sig===_videoSubSig) return;
@@ -661,12 +682,25 @@ function renderTrackStyle(){
   panel.classList.remove('disabled');
   const tk=State.tracks[i];
   $('tsTitle').textContent='「'+tk.name+'」樣式';
-  const sz=tk.fontSize||60; if(document.activeElement!==$('tsSize')) $('tsSize').value=sz;
-  const pp=tk.posPct!=null?tk.posPct:90; if(document.activeElement!==$('tsPos')) $('tsPos').value=pp;
-  const col=(tk.color||'#ffffff').toLowerCase(); if(document.activeElement!==$('tsColor')) $('tsColor').value=col;
-  panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===sz));
-  panel.querySelectorAll('.ts-preset[data-ts-pos]').forEach(b=>b.classList.toggle('active',+b.dataset.tsPos===pp));
-  panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===col));
+  const st=effStyle(null, tk); // 生效值（缺欄位以預設後援）
+  const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
+  setV('tsSize',st.fontSize); setV('tsPos',st.posPct); setV('tsColor',(st.color||'#ffffff').toLowerCase());
+  setV('tsOutline',st.outline); setV('tsOutlineColor',st.outlineColor); setV('tsShadow',st.shadow);
+  setV('tsSpacing',st.letterSpacing); setV('tsLineSp',st.lineSpacing);
+  setV('tsBgColor',st.bgColor); setV('tsBgAlpha',Math.round(st.bgAlpha*100));
+  // 字型：不在清單的（自訂）動態補一個 option
+  const fsel=$('tsFont');
+  if(fsel){ if(![...fsel.options].some(o=>o.value===st.font||o.text===st.font)){
+      const o=document.createElement('option'); o.text=st.font; o.value=st.font; fsel.insertBefore(o, fsel.querySelector('[value="__custom"]')); }
+    if(document.activeElement!==fsel) fsel.value=st.font; }
+  $('tsBold')?.classList.toggle('active',!!st.bold); $('tsItalic')?.classList.toggle('active',!!st.italic);
+  $('tsVertical')?.classList.toggle('active',!!st.vertical); $('tsBgBox')?.classList.toggle('active',!!st.bgBox);
+  panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===st.fontSize));
+  panel.querySelectorAll('.ts-preset[data-ts-pos]').forEach(b=>b.classList.toggle('active',+b.dataset.tsPos===st.posPct));
+  panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===(st.color||'').toLowerCase()));
+  // 常用樣式下拉重建
+  const psel=$('tsPresetSel');
+  if(psel){ const cur=psel.value; psel.innerHTML='<option value="">— 套用 —</option>'+getPresets().map(p=>`<option>${escapeHTML(p.name)}</option>`).join(''); psel.value=cur||''; }
 }
 
 /* ===== 時間軸：雙擊字幕區塊內嵌編輯文字 ===== */
@@ -717,13 +751,45 @@ async function openCueEditModal(c){
 
   const sibHtml=siblings.map(s=>mkBlock('軌道：'+s.trackName,s.text,'cueEditCopySib'+s.tkIdx)).join('');
 
+  // v4.23 逐句樣式覆蓋：欄位定義（key, 標籤, 類型）——bool 用 select(開/關)、其餘勾選＋輸入
+  const COV_FIELDS=[
+    ['color','顏色','color'],['fontSize','字級','num'],['bold','粗體','bool'],['italic','斜體','bool'],
+    ['outline','框線','num'],['outlineColor','框線色','color'],['shadow','陰影','num'],
+    ['letterSpacing','字距','num'],['lineSpacing','行距','num'],['font','字型','text'],['vertical','直書','bool'],
+  ];
+  const effNow=effStyle(c, State.tracks[trackIdx]||null);
+  const covRow=([k,label,type])=>{
+    const has=!!(c.style&&c.style[k]!=null);
+    const v=has?c.style[k]:effNow[k];
+    let inp;
+    if(type==='color') inp=`<input type="color" id="covV_${k}" value="${v}" style="width:26px;height:20px;padding:0">`;
+    else if(type==='num') inp=`<input type="number" id="covV_${k}" value="${v}" step="${k==='lineSpacing'?0.1:0.5}" style="width:56px">`;
+    else if(type==='bool') inp=`<select id="covV_${k}"><option value="1"${v?' selected':''}>開</option><option value="0"${!v?' selected':''}>關</option></select>`;
+    else inp=`<input type="text" id="covV_${k}" value="${escapeHTML(String(v))}" style="width:90px">`;
+    return `<label style="display:flex;align-items:center;gap:4px;white-space:nowrap"><input type="checkbox" id="covK_${k}"${has?' checked':''}>${label}</label>${inp}`;
+  };
+  const covHtml=
+    `<details id="cueStyleOv"${c.style?' open':''} style="margin-top:10px;border:1px solid var(--border);border-radius:4px;padding:6px 8px">`+
+    `<summary style="cursor:pointer;font-size:12px;color:var(--text-faint)">✱ 樣式覆蓋（僅此句；未勾選＝繼承軌道樣式）</summary>`+
+    `<div style="display:grid;grid-template-columns:auto auto auto auto;gap:8px 14px;padding:10px 2px 4px;font-size:12px;align-items:center">`+
+    COV_FIELDS.map(covRow).join('')+
+    `</div><button id="covClear" style="font-size:11px;margin-top:6px">清除全部覆蓋</button></details>`;
   const doConfirm=()=>{
     const ta=$('cueEditTa');
     if(!ta) return;
     let val=ta.innerText;
     if(val.endsWith('\n') && !orig.endsWith('\n')) val=val.slice(0,-1);
-    c.text=val; closeModal(); renderAll(); renderVideoSub();
-    if(val!==orig) recordHistory('編輯字幕文字'+cueSuffix(c));
+    // 收集樣式覆蓋（勾選的欄位）
+    const style={}; const origStyle=JSON.stringify(c.style||null);
+    for(const [k,,type] of COV_FIELDS){
+      const on=$('covK_'+k), vi=$('covV_'+k);
+      if(!on||!on.checked||!vi) continue;
+      style[k]= type==='num' ? +vi.value : type==='bool' ? (vi.value==='1') : vi.value;
+    }
+    if(Object.keys(style).length) c.style=style; else delete c.style;
+    const styleChanged=JSON.stringify(c.style||null)!==origStyle;
+    c.text=val; closeModal(); renderAll(); renderVideoSub(); if(styleChanged) refreshMpvSubs();
+    if(val!==orig||styleChanged) recordHistory('編輯字幕'+(styleChanged?'（含樣式覆蓋）':'文字')+cueSuffix(c));
   };
   openModal('修改字幕文字',
     `<div style="font-size:12px;color:var(--text-faint);margin-bottom:10px">${escapeHTML(trackName)} ｜ ${tc}</div>`+
@@ -732,6 +798,7 @@ async function openCueEditModal(c){
     mkBlock('原文',orig,'cueEditCopy')+
     `<div style="font-size:12px;color:var(--text-faint);margin-bottom:4px">修改 <span style="font-size:10px;opacity:.5">（Enter 確認 · Shift+Enter 換行）</span></div>`+
     `<div id="cueEditTa" contenteditable="true" style="width:100%;min-height:5em;border:1px solid var(--border);border-radius:4px;background:var(--bg);font-size:14px;font-family:inherit;padding:6px;box-sizing:border-box;color:var(--text);overflow-y:auto;outline:none"></div>`+
+    covHtml+
     `</div>`,
     [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:closeModal}]);
   setTimeout(()=>{
@@ -792,6 +859,13 @@ async function openCueEditModal(c){
     });
     const copyBtn=$('cueEditCopy');
     if(copyBtn) copyBtn.addEventListener('click',()=>{ navigator.clipboard.writeText(orig).then(()=>{copyBtn.textContent='已複製';setTimeout(()=>copyBtn.textContent='複製',1500);}); });
+    // 樣式覆蓋區：清除鈕＋鍵盤事件不外洩（避免觸發全域快捷鍵）
+    const ov=$('cueStyleOv');
+    if(ov){
+      ov.addEventListener('keydown',e=>e.stopPropagation());
+      const cl=$('covClear');
+      if(cl) cl.addEventListener('click',e=>{ e.preventDefault(); ov.querySelectorAll('input[type=checkbox]').forEach(x=>x.checked=false); });
+    }
   },30);
 }
 
@@ -812,6 +886,55 @@ function initUI(){
   $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,100); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsPos').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
+  // v4.23 樣式擴充：通用 setter（寫軌道欄位 → 三路重繪）；數字/顏色/切換各自包裝
+  const tsSet=(k,v)=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i][k]=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); };
+  const tsNum=(id,k,lo,hi)=>{ const el=$(id); if(!el)return;
+    el.addEventListener('input',e=>tsSet(k, clamp(+e.target.value, lo, hi)));
+    el.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} }); };
+  const tsToggle=(id,k)=>{ const el=$(id); if(!el)return;
+    el.addEventListener('click',()=>{ const i=State.listTrack; if(!State.tracks[i])return; tsSet(k, !effStyle(null,State.tracks[i])[k]); }); };
+  tsNum('tsOutline','outline',0,10); tsNum('tsShadow','shadow',0,10);
+  tsNum('tsSpacing','letterSpacing',0,30); tsNum('tsLineSp','lineSpacing',1,3);
+  $('tsOutlineColor').addEventListener('input',e=>tsSet('outlineColor',e.target.value));
+  $('tsBgColor').addEventListener('input',e=>tsSet('bgColor',e.target.value));
+  $('tsBgAlpha').addEventListener('input',e=>tsSet('bgAlpha', clamp(+e.target.value,0,100)/100));
+  $('tsBgAlpha').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
+  tsToggle('tsBold','bold'); tsToggle('tsItalic','italic');
+  tsToggle('tsVertical','vertical'); tsToggle('tsBgBox','bgBox');
+  $('tsFont').addEventListener('change',e=>{
+    if(e.target.value==='__custom'){
+      const cur=effStyle(null,State.tracks[State.listTrack]||null).font;
+      const name=prompt('輸入字型名稱（需已安裝於系統；匯出燒入亦用此字型）', cur);
+      if(name&&name.trim()) tsSet('font', name.trim()); else renderTrackStyle();
+    } else tsSet('font', e.target.value);
+  });
+  // 常用樣式庫：存 / 套用 / 管理（跨專案，存 config）
+  $('tsPresetSave').addEventListener('click',()=>{
+    const i=State.listTrack; if(!State.tracks[i])return;
+    const name=prompt('常用樣式名稱', State.tracks[i].name+' 樣式'); if(!name||!name.trim())return;
+    const list=[...getPresets()]; const nm=name.trim();
+    const style=trackStyleSnapshot(State.tracks[i]);
+    const ex=list.findIndex(p=>p.name===nm);
+    if(ex>=0) list[ex]={name:nm,style}; else list.push({name:nm,style});
+    savePresets(list); renderTrackStyle(); showToast('已儲存常用樣式：'+nm);
+  });
+  $('tsPresetSel').addEventListener('change',e=>{
+    const i=State.listTrack, v=e.target.value; e.target.value='';
+    if(!v||!State.tracks[i])return;
+    const p=getPresets().find(x=>x.name===v); if(!p)return;
+    Object.assign(State.tracks[i], p.style);
+    renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); recordHistory('套用常用樣式：'+v);
+  });
+  $('tsPresetMgr').addEventListener('click',()=>{
+    const list=getPresets();
+    if(!list.length){ showToast('尚無常用樣式；先用「☆ 存為常用」建立'); return; }
+    const rows=list.map((p,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--line,#333)">`+
+      `<span style="flex:1">${escapeHTML(p.name)}</span>`+
+      `<button class="ts-preset" data-pre-ren="${i}">改名</button><button class="ts-preset" data-pre-del="${i}">刪除</button></div>`).join('');
+    openModal('⚙ 常用樣式管理', `<div style="max-height:300px;overflow:auto">${rows}</div>`, [{label:'關閉',primary:true,act:closeModal}]);
+    setTimeout(()=>{ document.querySelectorAll('[data-pre-del]').forEach(b=>b.onclick=()=>{ const l=[...getPresets()]; l.splice(+b.dataset.preDel,1); savePresets(l); closeModal(); renderTrackStyle(); showToast('已刪除'); });
+      document.querySelectorAll('[data-pre-ren]').forEach(b=>b.onclick=()=>{ const l=[...getPresets()]; const p=l[+b.dataset.preRen]; const nn=prompt('新名稱',p.name); if(nn&&nn.trim()){ p.name=nn.trim(); savePresets(l); closeModal(); renderTrackStyle(); } }); },0);
+  });
   // 預設按鈕（大小 / 位置 / 顏色）— 委派事件到面板
   $('trackStyle').addEventListener('click',e=>{
     const i=State.listTrack; if(!State.tracks[i])return;
@@ -1120,6 +1243,7 @@ async function init(){
   const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;
   initUI(); initExtras(); applyAriaLabels();
   renderAll(); layoutTimeline(); drawTimeline(); rafLoop();
+  loadPresets().then(()=>renderTrackStyle()).catch(()=>{}); // v4.23 常用樣式庫（config 持久化）
   History.reset();
   if(IS_DESKTOP) initDesktop();
   else setStatus('就緒 — 匯入影音或字幕開始','ok');
@@ -1203,6 +1327,7 @@ async function initDesktop(){
     History, recordHistory, renderHistory, addNote, renderNotes, togglePanel,
     parseTimecodeInput, snapVal, snapTargets, neighborBounds, setFps, snapFps, FPS_SET };
   window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview }; // 階段0 PoC＋階段1 預覽（驗證/診斷入口）
+  window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot }; // v4.23 字幕樣式（驗證/診斷入口）
 }
 
 init();

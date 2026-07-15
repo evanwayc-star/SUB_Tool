@@ -1,6 +1,7 @@
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
+import { effStyle, styleToAssStyleLine, cueAssTags, verticalChars, assJoinLines } from './substyle.js';
 
 /* ===== 2. 字幕格式 解析 / 序列化 ====================================== */
 const SubFormats = {
@@ -61,28 +62,14 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 `;
+    // 樣式行/文字轉換一律走 substyle.js（v4.23）：軌道樣式全欄位（字型/粗斜/字距/框線/陰影/直書/背景塊）＋
+    // 逐句覆蓋（inline override）＋直書逐字＋行距墊高——與 HTML 預覽同構（同吃 effStyle）。
     let styles = '';
-    const defFont = "思源黑體";
-    const hexToAss = (hex) => {
-      if (!hex) return '&H00FFFFFF';
-      const c = hex.replace('#', '');
-      if (c.length !== 6) return '&H00FFFFFF';
-      return `&H00${c.slice(4,6)}${c.slice(2,4)}${c.slice(0,2)}`;
-    };
-
-    const spacing = 1.0;
-    const defMarginV = Math.round(vwh * 0.1);
     if (!tracks || !tracks.length) {
-      styles += `Style: Default,${defFont},60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${defMarginV},1\n`;
+      styles += styleToAssStyleLine('Default', effStyle(null, null), vwh) + '\n';
     } else {
-      tracks.forEach((tk, i) => {
-        const fs = tk.fontSize || 60;
-        const pp = tk.posPct != null ? tk.posPct : 90;
-        const mv = Math.round(vwh * ((100 - pp) / 100));
-        const col = hexToAss(tk.color || '#ffffff');
-        styles += `Style: Track${i},${defFont},${fs},${col},&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${mv},1\n`;
-      });
-      styles += `Style: Default,${defFont},60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100.0,100.0,${spacing},0.0,1,2,0,2,135,135,${defMarginV},1\n`;
+      tracks.forEach((tk, i) => { styles += styleToAssStyleLine(`Track${i}`, effStyle(null, tk), vwh) + '\n'; });
+      styles += styleToAssStyleLine('Default', effStyle(null, null), vwh) + '\n';
     }
 
     const eventsHead = `\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
@@ -92,9 +79,13 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       if(tracks && tracks[tk] && tracks[tk].visible === false) return false;
       return true;
     }).map(c=>{
-      const txt=(c.text||'').replace(/\n/g,'\\N');
-      const st = (tracks && tracks.length > (c.track||0)) ? `Track${c.track||0}` : 'Default';
-      return `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${st},atg${(c.track||0)+1},0,0,0,,${txt}`;
+      const trk = (tracks && tracks.length > (c.track||0)) ? tracks[c.track||0] : null;
+      const st = effStyle(c, trk);
+      const lines = st.vertical ? verticalChars(c.text || '')
+                                : String(c.text || '').replace(/\r/g, '').split('\n');
+      const txt = cueAssTags(c.style) + assJoinLines(lines, st);
+      const styName = trk ? `Track${c.track||0}` : 'Default';
+      return `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styName},atg${(c.track||0)+1},0,0,0,,${txt}`;
     }).join('\n');
     return head+styles+eventsHead+body+'\n';
   },

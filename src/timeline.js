@@ -770,7 +770,7 @@ function renderCueBlocks(){
     el.style.left = x1 + 'px';
     el.style.width = Math.max(2, x2 - x1) + 'px';
     el.dataset.id=c.id;
-    el.innerHTML='<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;">'+escapeHTML(c.text||'').replace(/\n/g,'<br>')+'</div><div class="edge r"></div>';
+    el.innerHTML='<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;">'+(c.style?'<span title="此句有樣式覆蓋" style="color:var(--accent)">✱ </span>':'')+escapeHTML(c.text||'').replace(/\n/g,'<br>')+'</div><div class="edge r"></div>';
     row.appendChild(el);
   }
   // 重疊區域：粉紅底色（用分桶結果，雙層 break；保留每桶排序以防 State.cues 暫時未排序）

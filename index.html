@@ -148,6 +148,38 @@
                 style="background:#44cc66"></button>
             </div>
           </div>
+          <div class="ts-line">
+            <span class="ts-label">字型</span>
+            <select id="tsFont" title="字幕字型">
+              <option>思源黑體</option><option>微軟正黑體</option><option>標楷體</option>
+              <option>新細明體</option><option>思源宋體</option><option>Noto Serif TC</option><option>Arial</option>
+              <option value="__custom">自訂…</option>
+            </select>
+            <button class="ts-toggle" id="tsBold" title="粗體"><b>B</b></button>
+            <button class="ts-toggle" id="tsItalic" title="斜體"><i>I</i></button>
+            <span class="ts-sep">│</span>
+            <span class="ts-label">框線</span>
+            <input type="number" id="tsOutline" min="0" max="10" step="0.5" value="2" title="框線厚度 px">
+            <input type="color" id="tsOutlineColor" value="#000000" title="框線顏色">
+            <span class="ts-label">陰影</span>
+            <input type="number" id="tsShadow" min="0" max="10" step="0.5" value="0" title="陰影大小 px">
+            <span class="ts-sep">│</span>
+            <span class="ts-label">字距</span>
+            <input type="number" id="tsSpacing" min="0" max="30" step="0.5" value="1" title="字元間距 px（直書不適用）">
+            <span class="ts-label">行距</span>
+            <input type="number" id="tsLineSp" min="1" max="3" step="0.1" value="1" title="行高倍數（直書＝字間隔）">
+            <span class="ts-sep">│</span>
+            <button class="ts-toggle" id="tsVertical" title="直書（逐字直排；原文換行以全形空格代替）">直</button>
+            <button class="ts-toggle" id="tsBgBox" title="背景色塊">底</button>
+            <input type="color" id="tsBgColor" value="#000000" title="背景色">
+            <input type="number" id="tsBgAlpha" min="0" max="100" step="5" value="50" title="背景不透明度 %"><span class="ts-unit">%</span>
+          </div>
+          <div class="ts-line">
+            <span class="ts-label">常用樣式</span>
+            <select id="tsPresetSel" title="套用常用樣式到此軌"><option value="">— 套用 —</option></select>
+            <button class="ts-preset" id="tsPresetSave" title="把目前軌道樣式存為常用樣式">☆ 存為常用</button>
+            <button class="ts-preset" id="tsPresetMgr" title="管理常用樣式（改名／刪除）">⚙ 管理</button>
+          </div>
         </div>
       </div>
     </div>
