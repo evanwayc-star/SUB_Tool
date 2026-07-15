@@ -18,6 +18,8 @@ import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboa
 import { Project, ensureProjectSaved, resetProject, isProjectDirty } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
+import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
+import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
@@ -304,6 +306,7 @@ function rafLoop(){
     }}
   }
   try{ Media.applyPreviewFade(); }catch(e){} // 預覽淡出入黑提示（每幀，含暫停/捲動時）
+  try{ WCPreview.tick(); }catch(e){} // WebCodecs 預覽畫面（每幀；未就緒/失敗自動 fallback 畫 video）
   updateMeters();
   requestAnimationFrame(rafLoop);
 }
@@ -1198,6 +1201,7 @@ async function initDesktop(){
     syncTrackCount, sortCues, onDurationKnown, setZoom, zoomFit, zoomFitVideo, showCueMenu, showPlayerMenu,
     History, recordHistory, renderHistory, addNote, renderNotes, togglePanel,
     parseTimecodeInput, snapVal, snapTargets, neighborBounds, setFps, snapFps, FPS_SET };
+  window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview }; // 階段0 PoC＋階段1 預覽（驗證/診斷入口）
 }
 
 init();
