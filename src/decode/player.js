@@ -9,6 +9,7 @@
    階段2 起 tick() 將依 Seq.clipsAt(t) 擴充為多軌由下而上合成（opacity/PiP/fade/crossfade）。 */
 import { $, video } from '../dom.js';
 import { clamp } from '../util.js';
+import { State } from '../state.js';
 import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
 import { demuxFile } from './demux.js';
@@ -17,7 +18,29 @@ const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺�
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
 const SIZE_CAP = 600 * 1024 * 1024; // 階段1 整檔 demux 上限；更大檔 fallback video（proxy 階段解除）
 
-/* 單一來源檔的 demux＋串流解碼器。frames[] 依呈現序遞增；呈現中的 frame 屬本物件、呼叫端勿 close。 */
+/* demux 結果快取（url → Promise<{config,chunks}>）：同一來源疊在多條軌時，chunks 共享、decoder 各自。 */
+const _demuxCache = new Map();
+function demuxCached(url){
+  let p = _demuxCache.get(url);
+  if(!p){
+    p = (async()=>{
+      const resp = await fetch(url);
+      const len = +resp.headers.get('content-length') || 0;
+      if(len > SIZE_CAP){ try{ resp.body && resp.body.cancel(); }catch(e){} throw new Error('檔案過大（上限 600MB）'); }
+      const ab = await resp.arrayBuffer();
+      if(ab.byteLength > SIZE_CAP) throw new Error('檔案過大');
+      const r = await demuxFile(ab);
+      if(!r.chunks.length) throw new Error('無視訊樣本');
+      return r;
+    })();
+    p.catch(()=>{ _demuxCache.delete(url); }); // 失敗不留快取（換檔/暫時性錯誤可重試）
+    _demuxCache.set(url, p);
+  }
+  return p;
+}
+
+/* 單一來源檔的串流解碼器（每「作用層」一個：同 url 疊多軌時各自獨立游標，demux 共享）。
+   frames[] 依呈現序遞增；呈現中的 frame 屬本物件、呼叫端勿 close。 */
 class SourceStream {
   constructor(url){ this.url = url; this.state = 'idle'; /* idle|loading|ready|failed */ }
 
@@ -25,13 +48,7 @@ class SourceStream {
     if(this.state !== 'idle') return;
     this.state = 'loading';
     try{
-      const resp = await fetch(this.url);
-      const len = +resp.headers.get('content-length') || 0;
-      if(len > SIZE_CAP){ try{ resp.body && resp.body.cancel(); }catch(e){} throw new Error('檔案過大（階段1 上限 600MB）'); }
-      const ab = await resp.arrayBuffer();
-      if(ab.byteLength > SIZE_CAP) throw new Error('檔案過大');
-      const { config, chunks } = await demuxFile(ab);
-      if(!chunks.length) throw new Error('無視訊樣本');
+      const { config, chunks } = await demuxCached(this.url);
       // 預設軟解（穩定優先，720p 軟解 >3000fps；部分環境硬解連續解碼會卡住——見 decoder.js 註記）
       const cfg = Object.assign({ optimizeForLatency: true, hardwareAcceleration: 'prefer-software' }, config);
       const sup = await VideoDecoder.isConfigSupported(cfg);
@@ -146,37 +163,62 @@ export const WCPreview = {
 
     const ctx = this.ctx;
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, bw, bh);
+    Media._wcComposited = false; // 本幀是否由 WC 真合成呈現（供 applyPreviewFade 抑制黑幕；fade 已由合成承擔）
     if(Media._gap){ this.mode = 'black'; this.lastPresentedUs = null; return; }
 
     const t = Media.tlTime();
-    const c = Media._activeClip ? Media._activeClip() : Seq.clipAt(t);
-    if(!c){ this.mode = 'black'; this.lastPresentedUs = null; return; }
-    const su = Math.round(clamp(Seq.toSource(t, c), c.in, Math.max(c.in, c.out - 1/120)) * 1e6);
-    const url = (c.web && c.web.url) || video.currentSrc || video.src || null;
+    // 階段2：多軌合成——所有作用中片段（clipsAt 已依 vtrack 由下而上排序），逐層疊上
+    const acts = Seq.clipsAt(t).filter(c => State.videoTracks[c.vtrack||0]?.visible !== false);
+    if(!acts.length){ this.mode = 'black'; this.lastPresentedUs = null; return; }
 
-    let f = null;
-    if(url){
-      let ss = this.sources.get(url);
-      if(!ss){ ss = new SourceStream(url); this.sources.set(url, ss); }
-      f = ss.request(su);
+    let painted = 0, lastTs = null, lastUrl = null;
+    let base = null; // 主 contain 區（＝匯出的 W×H 虛擬畫布；第一個可畫層決定，其後各層都定位其內）
+    for(const c of acts){
+      const url = (c.web && c.web.url) || (c === acts[acts.length-1] ? (video.currentSrc || video.src) : null);
+      if(!url) continue;
+      const key = url + '#' + (c.vtrack||0);
+      let ss = this.sources.get(key);
+      if(!ss){ ss = new SourceStream(url); this.sources.set(key, ss); }
+      const su = Math.round(clamp(Seq.toSource(t, c), c.in, Math.max(c.in, c.out - 1/120)) * 1e6);
+      let f = ss.request(su), sw, sh, srcEl;
+      if(f){ srcEl = f; sw = f.displayWidth || f.codedWidth; sh = f.displayHeight || f.codedHeight; }
+      else if(acts.length === 1 && video.readyState >= 2 && (video.videoWidth||0) > 0){
+        // 單層未就緒 → 畫 video 元素（與舊版所見相同）；多層時跳過該層（解碼就緒即出現）
+        srcEl = video; sw = video.videoWidth; sh = video.videoHeight;
+      }else continue;
+      if(!base){ const s0 = Math.min(bw/sw, bh/sh); const w0 = Math.round(sw*s0), h0 = Math.round(sh*s0);
+                 base = { x:(bw-w0)>>1, y:(bh-h0)>>1, w:w0, h:h0 }; }
+      // 軌合成參數（與 ffmpeg:exportVideo 對齊）：scale=大小、posX/posY=(可用空間)*比例、opacity；再乘片段淡入淡出
+      const vt = State.videoTracks[c.vtrack||0] || {};
+      const sc = vt.scale != null ? vt.scale : 1;
+      const alpha = (vt.opacity != null ? vt.opacity : 1) * this._clipFadeAlpha(c, t);
+      if(alpha <= 0.003) { painted++; continue; } // 全透明：視為已處理（下層已見）
+      const s1 = Math.min(base.w/sw, base.h/sh) * sc;
+      const dw = Math.max(1, Math.round(sw*s1)), dh = Math.max(1, Math.round(sh*s1));
+      const px = vt.posX != null ? vt.posX : 0.5, py = vt.posY != null ? vt.posY : 0.5;
+      const dx = base.x + Math.round((base.w - dw) * px), dy = base.y + Math.round((base.h - dh) * py);
+      ctx.globalAlpha = clamp(alpha, 0, 1);
+      try{ ctx.drawImage(srcEl, dx, dy, dw, dh); painted++; if(srcEl !== video){ lastTs = f.timestamp; lastUrl = url; } }catch(e){}
+      ctx.globalAlpha = 1;
     }
-    if(f){
-      this._paint(f, f.displayWidth || f.codedWidth, f.displayHeight || f.codedHeight);
-      this.mode = 'wc'; this.lastPresentedUs = f.timestamp; this.lastSrcKey = url;
-    }else if(video.readyState >= 2 && (video.videoWidth||0) > 0){
-      this._paint(video, video.videoWidth, video.videoHeight);   // fallback：與舊版所見相同
+    if(painted && lastTs != null){ this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media._wcComposited = true; }
+    else if(painted){ this.mode = 'video'; this.lastPresentedUs = null; }   // 僅 video fallback 層
+    else if(video.readyState >= 2 && (video.videoWidth||0) > 0){
+      // 全層未就緒（解碼中）→ 整幅退回 video 畫面，避免黑閃
+      const sw = video.videoWidth, sh = video.videoHeight;
+      const s = Math.min(bw/sw, bh/sh); const dw = Math.round(sw*s), dh = Math.round(sh*s);
+      try{ ctx.drawImage(video, (bw-dw)>>1, (bh-dh)>>1, dw, dh); }catch(e){}
       this.mode = 'video'; this.lastPresentedUs = null;
-    }else{
-      this.mode = 'black'; this.lastPresentedUs = null;
-    }
+    }else{ this.mode = 'black'; this.lastPresentedUs = null; }
   },
 
-  _paint(src, sw, sh){
-    if(!sw || !sh) return;
-    const cw = this.canvas.width, ch = this.canvas.height;
-    const s = Math.min(cw/sw, ch/sh);
-    const dw = Math.round(sw*s), dh = Math.round(sh*s);
-    try{ this.ctx.drawImage(src, Math.round((cw-dw)/2), Math.round((ch-dh)/2), dw, dh); }catch(e){}
+  /* 片段淡入/淡出在 t 的可見度（與 media.js previewFadeDarkness / 匯出 fade=alpha=1 同公式） */
+  _clipFadeAlpha(c, t){
+    let vis = 1;
+    const fi = +c.fadeIn||0, fo = +c.fadeOut||0, s = c.offset, e = Seq.clipEnd(c);
+    if(fi > 0 && t < s + fi) vis = Math.min(vis, Math.max(0, (t - s) / fi));
+    if(fo > 0 && t > e - fo) vis = Math.min(vis, Math.max(0, (e - t) / fo));
+    return vis;
   },
 
   setEnabled(v){

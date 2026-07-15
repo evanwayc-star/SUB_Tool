@@ -571,7 +571,7 @@ function showVtrackComposite(v){
     `<div>透明度：<input type="range" id="pipOp" min="0" max="100" value="${op}" style="width:170px;vertical-align:middle"> <span id="pipOpV">${op}%</span></div>`+
     `<div>大小（子母畫面）：<input type="range" id="pipSc" min="10" max="100" value="${sc}" style="width:170px;vertical-align:middle"> <span id="pipScV">${sc}%</span></div>`+
     `<div style="margin-top:6px;display:flex;align-items:center;gap:8px">位置：<div id="pipGrid" style="display:inline-grid;grid-template-columns:repeat(3,32px);grid-auto-rows:28px;gap:3px">${grid}</div></div>`+
-    `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">大小 100%＝滿版（覆蓋下層）；小於 100% 即為子母畫面，位置生效。<b>此設定於匯出時合成</b>（預覽仍顯示最上層）。</div>`+
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">大小 100%＝滿版（覆蓋下層）；小於 100% 即為子母畫面，位置生效。<b>預覽即時顯示合成結果</b>（與匯出一致）。</div>`+
     `</div>`,
     [{label:'重設',act:()=>{ delete t.scale; delete t.opacity; delete t.posX; delete t.posY; closeModal(); drawTimeline(); recordHistory('重設合成設定'); }},
      {label:'套用',primary:true,act:()=>{

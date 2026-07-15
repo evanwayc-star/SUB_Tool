@@ -775,8 +775,15 @@ const Media = {
   },
   /* 每幀套用預覽淡出入黑：原生用黑幕 opacity；mpv 用 brightness（-100＝最暗，僅在變動時送 IPC） */
   applyPreviewFade(){
-    const d = this.previewFadeDarkness();
     const ov = $('previewFade');
+    // WebCodecs 真合成呈現中（WCPreview 每幀設旗標）：淡變/透明度已由 canvas 逐層 alpha 承擔，
+    // 黑幕須歸零否則雙重變暗；mpv 模式不受影響（照走 brightness）。
+    if(!this.mpvMode && this._wcComposited){
+      if(ov && ov.style.opacity !== '0') ov.style.opacity = '0';
+      if(this._mpvBright){ this._mpvBright = 0; try{ DESK?.mpv?.brightness(0); }catch(e){} }
+      return;
+    }
+    const d = this.previewFadeDarkness();
     if(this.mpvMode){
       const b = Math.round(-100 * d);
       if(b !== this._mpvBright){ this._mpvBright = b; try{ DESK?.mpv?.brightness(b); }catch(e){} }

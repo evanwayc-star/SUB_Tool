@@ -305,8 +305,8 @@ function rafLoop(){
       if(Math.abs(tr.el.currentTime - ref) > 0.12){ try{tr.el.currentTime=ref;}catch(e){} }
     }}
   }
-  try{ Media.applyPreviewFade(); }catch(e){} // 預覽淡出入黑提示（每幀，含暫停/捲動時）
   try{ WCPreview.tick(); }catch(e){} // WebCodecs 預覽畫面（每幀；未就緒/失敗自動 fallback 畫 video）
+  try{ Media.applyPreviewFade(); }catch(e){} // 預覽淡出入黑提示（每幀；WC 真合成時被抑制——tick 先設旗標）
   updateMeters();
   requestAnimationFrame(rafLoop);
 }
