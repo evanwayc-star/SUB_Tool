@@ -294,8 +294,11 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .track-style .ts-toggle.active{background:var(--accent);border-color:var(--accent);color:#fff}
 .track-style select{background:var(--bg-2,#20242b);border:1px solid var(--line,#3a4150);border-radius:4px;color:var(--text);font-size:12px;padding:2px 4px;max-width:150px}
 .track-style input[type=color]{width:26px;height:22px;padding:0;border:1px solid var(--line,#3a4150);border-radius:4px;background:none;cursor:pointer}
-/* v4.24 字幕列表右側樣式摘要 chip */
-.sub-row .sub-sty{display:flex;flex-wrap:wrap;gap:3px;align-items:center;margin-top:3px;font-size:9px;color:var(--text-faint);line-height:1.5}
+/* v4.25.5 字幕列表右側：樣式摘要 chip（固定欄）＋ 常用樣式名稱（固定欄） */
+.sub-row .sub-sty{display:flex;flex-wrap:wrap;gap:3px;align-items:center;align-self:center;width:150px;flex:0 0 150px;font-size:9px;color:var(--text-faint);line-height:1.5}
+.sub-row .sub-styname{width:96px;flex:0 0 96px;align-self:center;font-size:10px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.sub-row .sub-styname .nm{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border2);border-radius:3px;padding:0 5px;line-height:1.6}
+.sub-row .sub-styname .ov{color:var(--accent);font-weight:600}
 .sub-row .sub-sty .sw{display:inline-block;width:9px;height:9px;border-radius:2px;border:1px solid rgba(255,255,255,.3);flex-shrink:0}
 .sub-row .sub-sty .tg{display:inline-block;min-width:12px;text-align:center;padding:0 2px;border-radius:2px;background:rgba(255,255,255,.06);opacity:.45;font-weight:400;font-style:normal}
 .sub-row .sub-sty .tg.on{background:var(--accent);color:#fff;opacity:1}

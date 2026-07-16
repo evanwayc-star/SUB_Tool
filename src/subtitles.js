@@ -10,7 +10,28 @@ import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { effStyle } from './substyle.js';
+import { effStyle, getPresets, STYLE_DEFAULTS } from './substyle.js';
+
+/* 該句的「常用樣式名稱」：軌樣式完全吻合某個已存的常用樣式 → 顯示其名；有逐句覆蓋 → 「自訂」；
+   皆非 → 留白。以軌為單位比對並快取（字幕上千條時避免逐句重算）；renderSubList 每次重繪前清空。 */
+const _presetNameCache = new Map();
+export function clearPresetNameCache(){ _presetNameCache.clear(); }
+function _trackPresetName(tk){
+  if(_presetNameCache.has(tk)) return _presetNameCache.get(tk);
+  const st = effStyle(null, State.tracks[tk] || null);
+  let name = '';
+  for(const p of getPresets()){
+    const ps = p.style || {};
+    if(Object.keys(STYLE_DEFAULTS).every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k])){ name = p.name; break; }
+  }
+  _presetNameCache.set(tk, name);
+  return name;
+}
+function styleNameHtml(c){
+  if(c.style && Object.keys(c.style).length) return `<span class="ov" title="此句有逐句樣式覆蓋">✱ 自訂</span>`;
+  const n = _trackPresetName(c.track || 0);
+  return n ? `<span class="nm" title="常用樣式：${escapeHTML(n)}">${escapeHTML(n)}</span>` : '';
+}
 
 /* 字幕列表右側樣式摘要（依序：字級/位置/顏色/字型/粗/斜/框線/框線色/陰影/字距/行距/直/底/透明度）。
    有逐句覆蓋標 ✱；切換類（B/I/直/底）暗＝關、亮＝開。 */
@@ -322,6 +343,7 @@ function renderCheckPanel(){
 
 function renderSubList(){
   sublist.innerHTML='';
+  _presetNameCache.clear(); // 軌樣式／常用樣式庫可能已變 → 重新比對名稱
   const list = State.cues.filter(c=>(c.track||0)===State.listTrack);
   if(list.length===0){
     sublist.innerHTML='<div class="empty">'+(State.cues.length?'此軌道沒有字幕':'尚無字幕<br><br>· 匯入字幕檔，或<br>· 選一條字幕後按 <b>I</b>/<b>O</b> 設定起訖<br>· 或點 <b>⬆＋ / ⬇＋</b> 新增')+'</div>';
@@ -377,8 +399,9 @@ function _subRowHTML(c,i,overlaps){
         (timed?`<span class="dur">${(c.end-c.start).toFixed(2)}s</span>`:``)+
       `</div>`+
       `<div class="txt" contenteditable="false" spellcheck="false">${_txtInner(c.text)}</div>`+
-      `<div class="sub-sty">${styleSummaryHtml(c)}</div>`+
     `</div>`+
+    `<div class="sub-sty">${styleSummaryHtml(c)}</div>`+
+    `<div class="sub-styname">${styleNameHtml(c)}</div>`+
     (State.trackCount>1?`<div class="tk">軌${(c.track||0)+1}</div>`:``)+
   `</div>`;
 }
