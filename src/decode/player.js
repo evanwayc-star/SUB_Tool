@@ -18,7 +18,8 @@ import { demuxFile } from './demux.js';
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
-const SIZE_CAP = 600 * 1024 * 1024; // 階段1 整檔 demux 上限；更大檔 fallback video（proxy 階段解除）
+// 整檔 demux 上限（v4.25.1 提高到 1.5GB：長片的 720p proxy 約 1GB/2小時；再大需改串流式 demux）
+const SIZE_CAP = 1500 * 1024 * 1024;
 
 /* demux 結果快取（url → Promise<{config,chunks}>）：同一來源疊在多條軌時，chunks 共享、decoder 各自。 */
 const _demuxCache = new Map();
@@ -232,13 +233,12 @@ export const WCPreview = {
       else if(mpv && isTop) topBlocked = 'decoding';
     }
 
-    if(mpv){
-      if(topBlocked === 'nourl'){ this._setTakeover(false); this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return; }
-      if(topBlocked === 'decoding'){
-        if(Media._wcTakeover && !resized){ Media._wcComposited = true; return; } // 已接管：保留上一幀（避免黑閃/mpv 閃）
-        if(!Media._wcTakeover){ this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return; } // 未接管：mpv 續播
-      }
-      if(!layers.length && !Media._gap){ this._setTakeover(false); this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return; }
+    // 【v4.25.1 關鍵】只有「完全沒有任何層可解」才讓回 mpv。讓回會連帶把 HTML 字幕層藏起來
+    // （mpv 模式字幕改由 libass 顯示）→ 症狀＝「上層解不了／疊加後字幕整個不見」。
+    // 上層解不了但下層可解時：繼續用 WC 合成【可解的層】並保持接管，字幕照常顯示。
+    if(mpv && !layers.length && !Media._gap){
+      if(topBlocked === 'decoding' && Media._wcTakeover && !resized){ Media._wcComposited = true; return; } // 已接管：保留上一幀防閃
+      this._setTakeover(false); this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return;
     }
 
     if(this.canvas.style.display !== '') this.canvas.style.display = '';
