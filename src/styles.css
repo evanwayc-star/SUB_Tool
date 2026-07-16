@@ -294,16 +294,36 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .track-style .ts-toggle.active{background:var(--accent);border-color:var(--accent);color:#fff}
 .track-style select{background:var(--bg-2,#20242b);border:1px solid var(--line,#3a4150);border-radius:4px;color:var(--text);font-size:12px;padding:2px 4px;max-width:150px}
 .track-style input[type=color]{width:26px;height:22px;padding:0;border:1px solid var(--line,#3a4150);border-radius:4px;background:none;cursor:pointer}
-/* v4.25.5 字幕列表右側：樣式摘要 chip（固定欄）＋ 常用樣式名稱（固定欄） */
-.sub-row .sub-sty{display:flex;flex-wrap:wrap;gap:3px;align-items:center;align-self:center;width:150px;flex:0 0 150px;font-size:9px;color:var(--text-faint);line-height:1.5}
-.sub-row .sub-styname{width:96px;flex:0 0 96px;align-self:center;font-size:10px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
-.sub-row .sub-styname .nm{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border2);border-radius:3px;padding:0 5px;line-height:1.6}
-.sub-row .sub-styname .ov{color:var(--accent);font-weight:600}
-.sub-row .sub-sty .sw{display:inline-block;width:9px;height:9px;border-radius:2px;border:1px solid rgba(255,255,255,.3);flex-shrink:0}
-.sub-row .sub-sty .tg{display:inline-block;min-width:12px;text-align:center;padding:0 2px;border-radius:2px;background:rgba(255,255,255,.06);opacity:.45;font-weight:400;font-style:normal}
-.sub-row .sub-sty .tg.on{background:var(--accent);color:#fff;opacity:1}
-.sub-row .sub-sty .fn{max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sub-row .sub-sty .ov{color:var(--accent);font-weight:700}
+/* v4.25.6 字幕列表右側：樣式摘要（分組膠囊）＋ 常用樣式名稱徽章。
+   密而有序：數字等寬對齊、顏色用圓點、開關用膠囊（填色＝開），組間以留白分隔而非框線。 */
+.sub-row .sub-sty{
+  display:flex;flex-direction:column;align-items:flex-start;align-self:center;gap:3px;
+  width:172px;flex:0 0 172px;
+  font-size:9px;line-height:1.6;
+  font-variant-numeric:tabular-nums;letter-spacing:.02em;
+}
+.sub-row .sub-sty .r1,.sub-row .sub-sty .r2{display:flex;align-items:center;gap:7px;white-space:nowrap}
+.sub-row .sub-sty .r1{color:var(--text-dim)}    /* 主要：字級/位置/顏色/字型/粗斜 */
+.sub-row .sub-sty .r2{color:var(--text-faint)}  /* 細節：框線/陰影/間距/直/底 —— 較淡，不搶戲 */
+.sub-row .sub-sty .g{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
+.sub-row .sub-sty .n{font-style:normal;font-weight:500;color:var(--text-dim)}
+.sub-row .sub-sty .lbl,.sub-row .sub-sty .sep{opacity:.45}
+.sub-row .sub-sty .pos{font-style:normal;font-weight:500;color:var(--text-dim)}
+.sub-row .sub-sty .fn{max-width:66px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}
+.sub-row .sub-sty .sw{width:8px;height:8px;border-radius:50%;border:1px solid rgba(255,255,255,.22);flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
+.sub-row .sub-sty .tg{
+  display:inline-flex;align-items:center;justify-content:center;min-width:14px;height:13px;padding:0 3px;
+  border-radius:7px;font-size:8px;font-weight:600;font-style:normal;
+  background:transparent;color:var(--text-faint);border:1px solid var(--border2);
+}
+.sub-row .sub-sty .tg.on{background:var(--accent);border-color:var(--accent);color:#0d0d0d}
+.sub-row .sub-styname{width:92px;flex:0 0 92px;align-self:center;overflow:hidden;text-align:left}
+.sub-row .sub-styname .nm{
+  display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:9px;font-weight:500;letter-spacing:.02em;line-height:1.8;padding:0 8px;border-radius:9px;
+  background:rgba(217,119,6,.1);border:1px solid rgba(217,119,6,.28);color:var(--accent);
+}
+.sub-row .sub-styname .ov{font-size:9px;font-weight:600;color:var(--accent);opacity:.85}
 .tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .glock{opacity:.8}
 .tl-gtrack .glock.locked{color:var(--accent);opacity:1}

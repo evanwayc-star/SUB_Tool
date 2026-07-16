@@ -37,17 +37,24 @@ function styleNameHtml(c){
    有逐句覆蓋標 ✱；切換類（B/I/直/底）暗＝關、亮＝開。 */
 function styleSummaryHtml(c){
   const st=effStyle(c, State.tracks[c.track||0]||null);
-  const sw=hex=>`<i class="sw" style="background:${hex}"></i>`;
-  const tg=(label,on)=>`<b class="tg${on?' on':''}">${label}</b>`;
+  const sw=(hex,t)=>`<i class="sw" style="background:${hex}" title="${t}"></i>`;
+  const tg=(label,on,t)=>`<b class="tg${on?' on':''}" title="${t}：${on?'開':'關'}">${label}</b>`;
+  const n=(v,t)=>`<b class="n" title="${t}">${v}</b>`;
   const va={top:'上',middle:'中',bottom:'下'}[st.valign||'bottom'];
   const al={left:'左',center:'中',right:'右'}[st.align||'center'];
-  return `<span class="v">${st.fontSize}</span><span class="v">${va}${al}</span>${sw(st.color)}`+
-    `<span class="fn" title="${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+
-    tg('B',st.bold)+tg('I',st.italic)+
-    `<span class="v" title="框線">${st.outline}</span>${sw(st.outlineColor)}<span class="v" title="陰影">${st.shadow}</span>`+
-    `<span class="v" title="字距">${st.letterSpacing}</span><span class="v" title="行距">${st.lineSpacing}</span>`+
-    tg('直',st.vertical)+tg('底',st.bgBox)+sw(st.bgColor)+`<span class="v" title="透明度">${Math.round(st.bgAlpha*100)}</span>`+
-    (c.style&&Object.keys(c.style).length?`<span class="ov" title="此句有樣式覆蓋">✱</span>`:'');
+  // 兩行固定分層（不用自動換行——換行點會隨內容跑掉、行間對不齊）：
+  // 第一行＝主要（字級/位置/顏色/字型/粗斜），第二行＝細節（框線/陰影/間距/直書/底色），較淡。
+  return `<span class="r1">`+
+      `<span class="g">${n(st.fontSize,'字級')}<b class="pos" title="位置：垂直${va}／水平${al}">${va}${al}</b></span>`+
+      `<span class="g">${sw(st.color,'文字顏色')}<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span></span>`+
+      `<span class="g">${tg('B',st.bold,'粗體')}${tg('I',st.italic,'斜體')}</span>`+
+    `</span>`+
+    `<span class="r2">`+
+      `<span class="g"><span class="lbl">框</span>${n(st.outline,'框線粗細')}${sw(st.outlineColor,'框線顏色')}</span>`+
+      `<span class="g"><span class="lbl">影</span>${n(st.shadow,'陰影')}</span>`+
+      `<span class="g"><span class="lbl">距</span>${n(st.letterSpacing,'字距')}<span class="sep">/</span>${n(st.lineSpacing,'行距')}</span>`+
+      `<span class="g">${tg('直',st.vertical,'直書')}${tg('底',st.bgBox,'背景色塊')}${sw(st.bgColor,'背景色')}${n(Math.round(st.bgAlpha*100),'背景不透明度 %')}</span>`+
+    `</span>`;
 }
 import { showCueMenu, showCtx } from './menus.js';
 
