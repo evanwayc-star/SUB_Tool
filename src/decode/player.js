@@ -228,17 +228,19 @@ export const WCPreview = {
       const vt = State.videoTracks[c.vtrack||0] || {};
       const alpha = (vt.opacity != null ? vt.opacity : 1) * this._clipFadeAlpha(c, t);
       if(f) layers.push({ src:f, sw:f.displayWidth||f.codedWidth, sh:f.displayHeight||f.codedHeight, vt, alpha, ts:f.timestamp, url });
-      else if(!mpv && acts.length === 1 && video.readyState >= 2 && (video.videoWidth||0) > 0)
-        layers.push({ src:video, sw:video.videoWidth, sh:video.videoHeight, vt, alpha, ts:null, url:null }); // 原生單層 fallback
-      else if(mpv && isTop) topBlocked = 'decoding';
+      else if(isTop) topBlocked = 'decoding'; // 頂層未就緒（原生與 mpv 同）
     }
 
-    // 【v4.25.1 關鍵】只有「完全沒有任何層可解」才讓回 mpv。讓回會連帶把 HTML 字幕層藏起來
-    // （mpv 模式字幕改由 libass 顯示）→ 症狀＝「上層解不了／疊加後字幕整個不見」。
-    // 上層解不了但下層可解時：繼續用 WC 合成【可解的層】並保持接管，字幕照常顯示。
-    if(mpv && !layers.length && !Media._gap){
-      if(topBlocked === 'decoding' && Media._wcTakeover && !resized){ Media._wcComposited = true; return; } // 已接管：保留上一幀防閃
-      this._setTakeover(false); this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return;
+    // 【v4.25.2 關鍵】完全沒有任何層可解（來源解不動／仍在載入）→ **隱藏 canvas**，讓底下的
+    // <video>（原生）或 mpv 自己顯示畫面。canvas 是不透明的：留著畫黑會整個蓋住 →
+    // 症狀＝「看得到字幕、看不到影像」。原生模式字幕層照常可見；mpv 模式才需讓回（字幕改由 libass）。
+    // 上層解不動但下層可解時不走這裡：繼續合成可解的層並保持接管，字幕照常（v4.25.1）。
+    if(!layers.length && !Media._gap){
+      if(mpv){
+        if(topBlocked === 'decoding' && Media._wcTakeover && !resized){ Media._wcComposited = true; return; } // 已接管：保留上一幀防閃
+        this._setTakeover(false);
+      }
+      this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return;
     }
 
     if(this.canvas.style.display !== '') this.canvas.style.display = '';
@@ -271,13 +273,9 @@ export const WCPreview = {
       this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media._wcComposited = true;
       if(mpv) this._setTakeover(true);
     }
-    else if(painted){ this.mode = 'video'; this.lastPresentedUs = null; }   // 僅原生 fallback 層
-    else if(!mpv && video.readyState >= 2 && (video.videoWidth||0) > 0){
-      // 原生全層未就緒（解碼中）→ 整幅退回 video 畫面，避免黑閃
-      const sw = video.videoWidth, sh = video.videoHeight;
-      const s = Math.min(bw/sw, bh/sh); const dw = Math.round(sw*s), dh = Math.round(sh*s);
-      try{ ctx.drawImage(video, (bw-dw)>>1, (bh-dh)>>1, dw, dh); }catch(e){}
-      this.mode = 'video'; this.lastPresentedUs = null;
+    else if(painted){ // 全部層皆全透明（淡出到底）＝黑畫面，屬正確結果
+      this.mode = 'black'; this.lastPresentedUs = null; Media._wcComposited = true;
+      if(mpv) this._setTakeover(true);
     }else{ this.mode = 'black'; this.lastPresentedUs = null; }
   },
 
