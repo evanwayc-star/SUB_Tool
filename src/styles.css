@@ -297,33 +297,33 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* v4.25.6 字幕列表右側：樣式摘要（分組膠囊）＋ 常用樣式名稱徽章。
    密而有序：數字等寬對齊、顏色用圓點、開關用膠囊（填色＝開），組間以留白分隔而非框線。 */
 .sub-row .sub-sty{
-  display:flex;flex-direction:column;align-items:flex-start;align-self:center;gap:3px;
-  width:172px;flex:0 0 172px;
-  font-size:9px;line-height:1.6;
-  font-variant-numeric:tabular-nums;letter-spacing:.02em;
+  display:flex;flex-direction:column;align-items:flex-start;align-self:center;gap:4px;
+  width:210px;flex:0 0 210px;
+  font-size:11px;line-height:1.6;
+  font-variant-numeric:tabular-nums;letter-spacing:.01em;
 }
-.sub-row .sub-sty .r1,.sub-row .sub-sty .r2{display:flex;align-items:center;gap:7px;white-space:nowrap}
+.sub-row .sub-sty .r1,.sub-row .sub-sty .r2{display:flex;align-items:center;gap:8px;white-space:nowrap}
 .sub-row .sub-sty .r1{color:var(--text-dim)}    /* 主要：字級/位置/顏色/字型/粗斜 */
 .sub-row .sub-sty .r2{color:var(--text-faint)}  /* 細節：框線/陰影/間距/直/底 —— 較淡，不搶戲 */
 .sub-row .sub-sty .g{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
 .sub-row .sub-sty .n{font-style:normal;font-weight:500;color:var(--text-dim)}
 .sub-row .sub-sty .lbl,.sub-row .sub-sty .sep{opacity:.45}
 .sub-row .sub-sty .pos{font-style:normal;font-weight:500;color:var(--text-dim)}
-.sub-row .sub-sty .fn{max-width:66px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}
-.sub-row .sub-sty .sw{width:8px;height:8px;border-radius:50%;border:1px solid rgba(255,255,255,.22);flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
+.sub-row .sub-sty .fn{max-width:78px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}
+.sub-row .sub-sty .sw{width:10px;height:10px;border-radius:50%;border:1px solid rgba(255,255,255,.25);flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
 .sub-row .sub-sty .tg{
-  display:inline-flex;align-items:center;justify-content:center;min-width:14px;height:13px;padding:0 3px;
-  border-radius:7px;font-size:8px;font-weight:600;font-style:normal;
+  display:inline-flex;align-items:center;justify-content:center;min-width:17px;height:16px;padding:0 4px;
+  border-radius:8px;font-size:10px;font-weight:600;font-style:normal;
   background:transparent;color:var(--text-faint);border:1px solid var(--border2);
 }
 .sub-row .sub-sty .tg.on{background:var(--accent);border-color:var(--accent);color:#0d0d0d}
-.sub-row .sub-styname{width:92px;flex:0 0 92px;align-self:center;overflow:hidden;text-align:left}
+.sub-row .sub-styname{width:104px;flex:0 0 104px;align-self:center;overflow:hidden;text-align:left}
 .sub-row .sub-styname .nm{
   display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  font-size:9px;font-weight:500;letter-spacing:.02em;line-height:1.8;padding:0 8px;border-radius:9px;
+  font-size:11px;font-weight:500;letter-spacing:.01em;line-height:1.8;padding:1px 9px;border-radius:10px;
   background:rgba(217,119,6,.1);border:1px solid rgba(217,119,6,.28);color:var(--accent);
 }
-.sub-row .sub-styname .ov{font-size:9px;font-weight:600;color:var(--accent);opacity:.85}
+.sub-row .sub-styname .ov{font-size:11px;font-weight:600;color:var(--accent);opacity:.9}
 .tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .glock{opacity:.8}
 .tl-gtrack .glock.locked{color:var(--accent);opacity:1}

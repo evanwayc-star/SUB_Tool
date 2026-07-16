@@ -26,6 +26,7 @@ function _buildProjectData(){
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
     tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||60,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',valign:t.valign||'bottom',locked:!!t.locked,color:t.color||'#ffffff',
+      ...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{}),
       // v4.23 樣式擴充欄位：存在才寫（舊版讀到未知鍵會忽略，向後相容）
       ...(t.font!=null?{font:t.font}:{}),...(t.bold!=null?{bold:t.bold}:{}),...(t.italic!=null?{italic:t.italic}:{}),
       ...(t.letterSpacing!=null?{letterSpacing:t.letterSpacing}:{}),...(t.lineSpacing!=null?{lineSpacing:t.lineSpacing}:{}),
@@ -163,6 +164,7 @@ const Project = {
     const maxTk=State.cues.length > 0 ? State.cues.reduce((m,c)=>Math.max(m,c.track||0),0) : -1;
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontSize:t.fontSize||(t.fontScale?Math.round(60*t.fontScale):60),
       posPct:t.posPct!=null?t.posPct:90,align:t.align||'center',valign:t.valign||'bottom',locked:!!t.locked,color:t.color||'#ffffff',
+      ...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{}),
       // v4.23 樣式擴充：舊專案缺欄位＝不寫（effStyle 以預設後援）
       ...(t.font!=null?{font:t.font}:{}),...(t.bold!=null?{bold:t.bold}:{}),...(t.italic!=null?{italic:t.italic}:{}),
       ...(t.letterSpacing!=null?{letterSpacing:t.letterSpacing}:{}),...(t.lineSpacing!=null?{lineSpacing:t.lineSpacing}:{}),

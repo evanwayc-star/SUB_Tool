@@ -205,11 +205,11 @@ function renderVideoSub(){
     if(!cur.length)continue;
     const trk=State.tracks[tk]||{};
     const tst=effStyle(null, trk);
-    // 容器定位（直排由 .line 的 writing-mode 處理）：valign 定垂直錨、align 定水平、posPct 微調
-    const va=tst.valign||'bottom';
-    const contStyle = va==='middle' ? `top:50%;transform:translateY(-50%);text-align:${tst.align};`
-                    : va==='top'    ? `top:${tst.posPct}%;transform:none;text-align:${tst.align};`
-                    : `top:${tst.posPct}%;transform:translateY(-${tst.posPct}%);text-align:${tst.align};`;
+    // 容器定位（v4.26 座標制，與 ASS \pos(x,y)＋Alignment 同構）：
+    // posX/posY＝畫面百分比座標；align/valign＝錨點（文字塊的哪一側對齊該座標）→ translate 補償。
+    const ax = { left:'0', center:'-50%', right:'-100%' }[tst.align||'center'];
+    const ay = { top:'0', middle:'-50%', bottom:'-100%' }[tst.valign||'bottom'];
+    const contStyle = `left:${tst.posX}%;right:auto;top:${tst.posY}%;transform:translate(${ax},${ay});text-align:${tst.align};padding:0;`;
     sig+=tk+'|'+contStyle+'|'+cur.map(c=>c.id+'='+c.text+'|'+(c.style?JSON.stringify(c.style):'')).join(',')+'|'+JSON.stringify(tst)+';';
     html+=`<div class="vsub-track" style="${contStyle}">`+
       cur.map((c,i)=>{
@@ -713,7 +713,7 @@ function renderTrackStyle(){
   $('tsTitle').textContent='「'+tk.name+'」樣式';
   const st=effStyle(null, tk); // 生效值（缺欄位以預設後援）
   const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
-  setV('tsSize',st.fontSize); setV('tsPos',st.posPct); setV('tsColor',(st.color||'#ffffff').toLowerCase());
+  setV('tsSize',st.fontSize); setV('tsPosX',st.posX); setV('tsPosY',st.posY); setV('tsColor',(st.color||'#ffffff').toLowerCase());
   setV('tsOutline',st.outline); setV('tsOutlineColor',st.outlineColor); setV('tsShadow',st.shadow);
   setV('tsSpacing',st.letterSpacing); setV('tsLineSp',st.lineSpacing);
   setV('tsBgColor',st.bgColor); setV('tsBgAlpha',Math.round(st.bgAlpha*100));
@@ -915,8 +915,12 @@ function initUI(){
   // 樣式控制（大小 / 位置 / 顏色）
   $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontSize=clamp(+e.target.value,10,300); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
-  $('tsPos').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].posPct=clamp(+e.target.value,0,100); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
-  $('tsPos').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
+  // 位置＝畫面百分比座標（v4.26）：X 水平、Y 垂直
+  ['tsPosX','tsPosY'].forEach(id=>{
+    const key = id==='tsPosX' ? 'posX' : 'posY';
+    $(id).addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i][key]=clamp(+e.target.value,0,100); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
+    $(id).addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
+  });
   $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   // v4.23 樣式擴充：通用 setter（寫軌道欄位 → 三路重繪）；數字/顏色/切換各自包裝
   const tsSet=(k,v)=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i][k]=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); };
@@ -972,13 +976,15 @@ function initUI(){
     const i=State.listTrack; if(!State.tracks[i])return;
     const sz=e.target.closest('.ts-preset[data-ts-size]');
     if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontSize=v; $('tsSize').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    // 上/中/下、左/中/右＝設定座標的快捷（同時設錨點與 X/Y 座標；之後仍可用數值框微調）
     const vg=e.target.closest('.ts-preset[data-ts-valign]');
-    if(vg){ const v=vg.dataset.tsValign; State.tracks[i].valign=v;
-      // 選上/中/下時同步一個合理的 posPct 預設（仍可用數字微調）
-      if(v==='top') State.tracks[i].posPct=10; else if(v==='middle') State.tracks[i].posPct=50; else State.tracks[i].posPct=90;
-      $('tsPos').value=State.tracks[i].posPct; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    if(vg){ const v=vg.dataset.tsValign; const t=State.tracks[i];
+      t.valign=v; t.posY = v==='top' ? 10 : v==='middle' ? 50 : 90;
+      renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
     const ag=e.target.closest('.ts-preset[data-ts-align]');
-    if(ag){ State.tracks[i].align=ag.dataset.tsAlign; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    if(ag){ const a=ag.dataset.tsAlign; const t=State.tracks[i];
+      t.align=a; t.posX = a==='left' ? 10 : a==='center' ? 50 : 90;
+      renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
     const cl=e.target.closest('.ts-clr');
     if(cl){ const v=cl.dataset.color; State.tracks[i].color=v; $('tsColor').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); }
   });

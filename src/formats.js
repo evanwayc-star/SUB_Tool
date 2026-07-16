@@ -1,7 +1,7 @@
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
-import { effStyle, styleToAssStyleLine, cueAssTags, verticalChars, assJoinLines } from './substyle.js';
+import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, verticalChars, assJoinLines } from './substyle.js';
 
 /* ===== 2. 字幕格式 解析 / 序列化 ====================================== */
 const SubFormats = {
@@ -83,7 +83,8 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       const st = effStyle(c, trk);
       const lines = st.vertical ? verticalChars(c.text || '')
                                 : String(c.text || '').replace(/\r/g, '').split('\n');
-      const txt = cueAssTags(c.style) + assJoinLines(lines, st);
+      // \pos 精確落點（畫面百分比座標）＋逐句覆蓋 tags；錨點由 Style 的 Alignment 決定
+      const txt = cueAssPos(st, vww, vwh) + cueAssTags(c.style) + assJoinLines(lines, st);
       const styName = trk ? `Track${c.track||0}` : 'Default';
       return `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styName},atg${(c.track||0)+1},0,0,0,,${txt}`;
     }).join('\n');

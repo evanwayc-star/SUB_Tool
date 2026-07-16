@@ -17,7 +17,9 @@ export const STYLE_DEFAULTS = {
   shadow: 0,            // px 陰影（ASS Shadow / CSS text-shadow 右下偏移）
   vertical: false,      // 直書（單列逐字換行；原文換行以全形空格取代）
   bgBox: false, bgColor: '#000000', bgAlpha: 0.5, // 背景色塊（ASS BorderStyle=3；限軌級）
-  posPct: 90, align: 'center', valign: 'bottom', // align＝水平(左中右)、valign＝垂直(上中下)
+  // 位置＝畫面百分比座標（v4.26）：posX/posY 決定字幕落點，align/valign 是「錨點」（文字塊的哪一側對齊該座標）。
+  // 對應 ASS 的 \pos(x,y) ＋ Alignment(\an)；HTML 則為 left/top ＋ translate。舊專案的 posPct 自動當 posY。
+  posX: 50, posY: 90, align: 'center', valign: 'bottom',
 };
 
 /* 逐句覆蓋允許的欄位（位置/對齊/背景塊屬軌道級語義，不入逐句） */
@@ -26,7 +28,10 @@ export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letter
 /* 生效樣式：預設 ⊕ 軌道 ⊕ 逐句覆蓋（cue 可為 null＝取軌道樣式） */
 export function effStyle(cue, track){
   const st = Object.assign({}, STYLE_DEFAULTS);
-  if(track) for(const k in STYLE_DEFAULTS){ if(track[k] != null) st[k] = track[k]; }
+  if(track){
+    for(const k in STYLE_DEFAULTS){ if(track[k] != null) st[k] = track[k]; }
+    if(track.posY == null && track.posPct != null) st.posY = track.posPct; // 舊專案：posPct→posY
+  }
   if(cue && cue.style) for(const k of CUE_STYLE_KEYS){ if(cue.style[k] != null) st[k] = cue.style[k]; }
   return st;
 }
@@ -74,20 +79,29 @@ export function hexToAssColor(hex, alpha01){
 
 /* 軌道生效樣式 → ASS Style 行（V4+ 欄位序）。name=樣式名；vwh=PlayResY（MarginV 換算用） */
 export function styleToAssStyleLine(name, st, vwh){
-  // Alignment 1-9（numpad）＝ 垂直基數(下1/中4/上7) ＋ 水平(左0/中1/右2)；直書一律上錨
+  // Alignment 1-9（numpad）＝ 垂直基數(下1/中4/上7) ＋ 水平(左0/中1/右2)；直書一律上錨。
+  // 實際落點由每句的 \pos(x,y) 決定（見 cueAssPos），故 MarginV 僅作為無 \pos 時的後援。
   const va = st.vertical ? 'top' : (st.valign || 'bottom');
   const vbase = { top: 7, middle: 4, bottom: 1 }[va];
   const acol = { left: 0, center: 1, right: 2 }[st.align];
   const alignN = vbase + (acol != null ? acol : 1);
   const mv = va === 'middle' ? 0
-           : va === 'top' ? Math.round(vwh * (st.posPct / 100))          // 距頂
-           : Math.round(vwh * ((100 - st.posPct) / 100));                // 距底
+           : va === 'top' ? Math.round(vwh * (st.posY / 100))            // 距頂
+           : Math.round(vwh * ((100 - st.posY) / 100));                  // 距底
   const borderStyle = st.bgBox ? 3 : 1;
   const backCol = st.bgBox ? hexToAssColor(st.bgColor, st.bgAlpha) : '&H00000000';
   const shadowV = st.bgBox ? Math.max(1, st.shadow) : st.shadow; // BorderStyle=3 需 Outline/Shadow 撐出色塊範圍
   return `Style: ${name},${st.font},${st.fontSize},${hexToAssColor(st.color)},&H00FFFFFF,${hexToAssColor(st.outlineColor)},${backCol},`+
     `${st.bold ? 1 : 0},${st.italic ? 1 : 0},0,0,100.0,100.0,${st.vertical ? 0 : st.letterSpacing},0.0,`+
     `${borderStyle},${st.outline},${shadowV},${alignN},135,135,${mv},1`;
+}
+
+/* 畫面座標 → ASS `{\pos(x,y)}`（相對 PlayResX/Y）。錨點由 Style 的 Alignment 決定，
+   兩者合起來＝「文字塊的哪一側」對齊「畫面上的哪一點」，與 HTML 的 left/top＋translate 同構。 */
+export function cueAssPos(st, vww, vwh){
+  const x = Math.round((st.posX / 100) * vww);
+  const y = Math.round((st.posY / 100) * vwh);
+  return `{\\pos(${x},${y})}`;
 }
 
 /* 逐句覆蓋（diff＝cue.style）→ ASS inline override tags（貼在 Dialogue 文字最前）。無覆蓋回空字串 */

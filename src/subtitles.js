@@ -45,7 +45,7 @@ function styleSummaryHtml(c){
   // 兩行固定分層（不用自動換行——換行點會隨內容跑掉、行間對不齊）：
   // 第一行＝主要（字級/位置/顏色/字型/粗斜），第二行＝細節（框線/陰影/間距/直書/底色），較淡。
   return `<span class="r1">`+
-      `<span class="g">${n(st.fontSize,'字級')}<b class="pos" title="位置：垂直${va}／水平${al}">${va}${al}</b></span>`+
+      `<span class="g">${n(st.fontSize,'字級')}<b class="pos" title="座標 X${st.posX}%／Y${st.posY}%（錨點：垂直${va}／水平${al}）">${st.posX},${st.posY}</b></span>`+
       `<span class="g">${sw(st.color,'文字顏色')}<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span></span>`+
       `<span class="g">${tg('B',st.bold,'粗體')}${tg('I',st.italic,'斜體')}</span>`+
     `</span>`+
