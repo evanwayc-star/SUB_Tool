@@ -219,9 +219,10 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .clip-block .edge.l{left:0}.clip-block .edge.r{right:0}
 .clip-block .edge:hover{background:rgba(100,170,255,.45)}
 /* 鎖定軌片段：不可移動／修剪／切割／選取——虛線框＋斜紋、游標維持一般、邊緣拖曳停用 */
-.clip-block.locked{cursor:default;border-style:dashed;border-color:#6b7a8a}
+/* 鎖定軌片段：僅以邊框＋右上角鎖圖示標示，不覆蓋內容（斜紋會蓋住波形圖，已移除） */
+.clip-block.locked{cursor:default;border-style:dashed;border-color:#8794a5}
 .clip-block.locked:hover{background:rgba(46,89,132,.40)}
-.clip-block.locked::after{content:'';position:absolute;inset:0;pointer-events:none;z-index:3;background:repeating-linear-gradient(45deg,rgba(0,0,0,.30) 0 5px,transparent 5px 11px)}
+.clip-block.locked::after{content:'🔒';position:absolute;top:0;right:3px;font-size:10px;line-height:1.4;opacity:.75;pointer-events:none;z-index:3;text-shadow:0 0 2px #000}
 .clip-block.locked .edge{cursor:default;pointer-events:none}
 .tl-playhead{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--accent);z-index:10;pointer-events:none;will-change:left}
 .tl-playhead::before{content:"";position:absolute;top:0;left:-5px;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid var(--accent)}
@@ -293,6 +294,13 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .track-style .ts-toggle.active{background:var(--accent);border-color:var(--accent);color:#fff}
 .track-style select{background:var(--bg-2,#20242b);border:1px solid var(--line,#3a4150);border-radius:4px;color:var(--text);font-size:12px;padding:2px 4px;max-width:150px}
 .track-style input[type=color]{width:26px;height:22px;padding:0;border:1px solid var(--line,#3a4150);border-radius:4px;background:none;cursor:pointer}
+/* v4.24 字幕列表右側樣式摘要 chip */
+.sub-row .sub-sty{display:flex;flex-wrap:wrap;gap:3px;align-items:center;margin-top:3px;font-size:9px;color:var(--text-faint);line-height:1.5}
+.sub-row .sub-sty .sw{display:inline-block;width:9px;height:9px;border-radius:2px;border:1px solid rgba(255,255,255,.3);flex-shrink:0}
+.sub-row .sub-sty .tg{display:inline-block;min-width:12px;text-align:center;padding:0 2px;border-radius:2px;background:rgba(255,255,255,.06);opacity:.45;font-weight:400;font-style:normal}
+.sub-row .sub-sty .tg.on{background:var(--accent);color:#fff;opacity:1}
+.sub-row .sub-sty .fn{max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub-row .sub-sty .ov{color:var(--accent);font-weight:700}
 .tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .glock{opacity:.8}
 .tl-gtrack .glock.locked{color:var(--accent);opacity:1}

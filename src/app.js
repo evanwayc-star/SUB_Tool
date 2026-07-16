@@ -150,6 +150,8 @@ const _videoSub = $('videoSub');
 const _videoWrap = $('videoWrap');
 let _videoSubSig = '';
 function renderVideoSub(){
+  // 防禦①：非 mpv（或 WC 已接管）時字幕層必須可見——避免被 mpv 載入殘留的 display:none 卡住而「完全不顯示」
+  if(_videoSub && (!Media.mpvMode || Media._wcTakeover) && _videoSub.style.display==='none') _videoSub.style.display='';
   const t=Media.displayTime();
   const fps = State.fps || 25;
   let exactFps = getExactFps(fps);
@@ -159,6 +161,7 @@ function renderVideoSub(){
   const playerWidth = _videoSub?.clientWidth||1920;
   const ratio = playerWidth / 1920;
   let html='', sig='';
+  try{
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
     const cur=State.cues.filter(c => {
@@ -170,32 +173,26 @@ function renderVideoSub(){
     if(!cur.length)continue;
     const trk=State.tracks[tk]||{};
     const tst=effStyle(null, trk);
-    // 容器定位：橫書＝現狀（top+translate、text-align）；直書＝頂錨、align 決定水平位置
-    let contStyle;
-    if(tst.vertical){
-      const x = tst.align==='left' ? 'left:6%;right:auto;text-align:left'
-              : tst.align==='right' ? 'right:6%;left:auto;text-align:right'
-              : 'left:50%;right:auto;transform:translateX(-50%);text-align:center';
-      contStyle=`top:${tst.posPct}%;${x};padding:0;`;
-    }else{
-      contStyle=`top:${tst.posPct}%;transform:translateY(-${tst.posPct}%);text-align:${tst.align};`;
-    }
+    // 容器定位（直排由 .line 的 writing-mode 處理）：valign 定垂直錨、align 定水平、posPct 微調
+    const va=tst.valign||'bottom';
+    const contStyle = va==='middle' ? `top:50%;transform:translateY(-50%);text-align:${tst.align};`
+                    : va==='top'    ? `top:${tst.posPct}%;transform:none;text-align:${tst.align};`
+                    : `top:${tst.posPct}%;transform:translateY(-${tst.posPct}%);text-align:${tst.align};`;
     sig+=tk+'|'+contStyle+'|'+cur.map(c=>c.id+'='+c.text+'|'+(c.style?JSON.stringify(c.style):'')).join(',')+'|'+JSON.stringify(tst)+';';
     html+=`<div class="vsub-track" style="${contStyle}">`+
       cur.map((c,i)=>{
         const st=effStyle(c, trk);
         let css=styleToCss(st, ratio);
         if(st.shadow<=0) css+='text-shadow:none;';             // 蓋掉 .line class 的預設六向描邊
-        if(!st.bgBox) css+='padding:2px 10px;background:transparent;';
-        else if(st.vertical) css+='padding:8px 3px;';
+        if(!st.bgBox) css+='background:transparent;';
+        css+= st.bgBox ? 'padding:.15em .4em;' : 'padding:2px 10px;';
         if(i>0) css+='color:#ff4444;';                          // 同時第二句重疊警示（維持既有行為）
-        const inner = st.vertical
-          ? verticalChars(c.text||'').map(ch=>escapeHTML(ch)).join('<br>')
-          : escapeHTML(c.text||'').replace(/\n/g,'<br>');
+        const inner = escapeHTML(c.text||'').replace(/\n/g,'<br>'); // 直書由 writing-mode 自動分列（多行=多列）
         return `<span class="line" style="${css}">${inner}</span>`;
       }).join('<br>')+
       `</div>`;
   }
+  }catch(err){ console.error('[videoSub] 渲染錯誤（保留上次畫面）:', err); return; } // 防禦②：單次出錯不清空字幕、下次重試
   if(sig===_videoSubSig) return;
   _videoSubSig=sig;
   _videoSub.innerHTML=html;
@@ -696,7 +693,10 @@ function renderTrackStyle(){
   $('tsBold')?.classList.toggle('active',!!st.bold); $('tsItalic')?.classList.toggle('active',!!st.italic);
   $('tsVertical')?.classList.toggle('active',!!st.vertical); $('tsBgBox')?.classList.toggle('active',!!st.bgBox);
   panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===st.fontSize));
-  panel.querySelectorAll('.ts-preset[data-ts-pos]').forEach(b=>b.classList.toggle('active',+b.dataset.tsPos===st.posPct));
+  panel.querySelectorAll('.ts-preset[data-ts-valign]').forEach(b=>b.classList.toggle('active',b.dataset.tsValign===(st.valign||'bottom')));
+  panel.querySelectorAll('.ts-preset[data-ts-align]').forEach(b=>b.classList.toggle('active',b.dataset.tsAlign===(st.align||'center')));
+  // 底色未啟用時把色框/透明度變暗（消除「改了 bgColor 卻沒反應」的困惑——需先按「底」）
+  const bgOn=!!st.bgBox; ['tsBgColor','tsBgAlpha'].forEach(id=>{ const el=$(id); if(el){ el.style.opacity=bgOn?'1':'.4'; el.title=(el.title||'').replace(/（未啟用.*$/,'')+(bgOn?'':'（未啟用：先按「底」）'); } });
   panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===(st.color||'').toLowerCase()));
   // 常用樣式下拉重建
   const psel=$('tsPresetSel');
@@ -940,8 +940,13 @@ function initUI(){
     const i=State.listTrack; if(!State.tracks[i])return;
     const sz=e.target.closest('.ts-preset[data-ts-size]');
     if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontSize=v; $('tsSize').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
-    const ps=e.target.closest('.ts-preset[data-ts-pos]');
-    if(ps){ const v=+ps.dataset.tsPos; State.tracks[i].posPct=v; $('tsPos').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    const vg=e.target.closest('.ts-preset[data-ts-valign]');
+    if(vg){ const v=vg.dataset.tsValign; State.tracks[i].valign=v;
+      // 選上/中/下時同步一個合理的 posPct 預設（仍可用數字微調）
+      if(v==='top') State.tracks[i].posPct=10; else if(v==='middle') State.tracks[i].posPct=50; else State.tracks[i].posPct=90;
+      $('tsPos').value=State.tracks[i].posPct; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    const ag=e.target.closest('.ts-preset[data-ts-align]');
+    if(ag){ State.tracks[i].align=ag.dataset.tsAlign; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
     const cl=e.target.closest('.ts-clr');
     if(cl){ const v=cl.dataset.color; State.tracks[i].color=v; $('tsColor').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); }
   });

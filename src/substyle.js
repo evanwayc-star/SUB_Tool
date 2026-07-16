@@ -17,7 +17,7 @@ export const STYLE_DEFAULTS = {
   shadow: 0,            // px 陰影（ASS Shadow / CSS text-shadow 右下偏移）
   vertical: false,      // 直書（單列逐字換行；原文換行以全形空格取代）
   bgBox: false, bgColor: '#000000', bgAlpha: 0.5, // 背景色塊（ASS BorderStyle=3；限軌級）
-  posPct: 90, align: 'center',
+  posPct: 90, align: 'center', valign: 'bottom', // align＝水平(左中右)、valign＝垂直(上中下)
 };
 
 /* 逐句覆蓋允許的欄位（位置/對齊/背景塊屬軌道級語義，不入逐句） */
@@ -39,7 +39,10 @@ export function styleToCss(st, ratio){
     `font-family:'${st.font}','Noto Sans TC','Source Han Sans TC',sans-serif;`+
     `font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'};`+
     `line-height:${st.lineSpacing};`;
-  if(!st.vertical && st.letterSpacing) css += `letter-spacing:${(st.letterSpacing * r).toFixed(1)}px;`;
+  if(st.letterSpacing) css += `letter-spacing:${(st.letterSpacing * r).toFixed(1)}px;`;
+  // 直書：瀏覽器原生直排——多行(<br>)自動分列(右→左)、CJK 標點自動轉直排字形；
+  // letter-spacing＝字間(縱)、line-height＝列間(橫)語義自動對。
+  if(st.vertical) css += `writing-mode:vertical-rl;text-orientation:mixed;`;
   if(st.outline > 0){
     // ASS outline 向外擴 N px；CSS stroke 置中描邊 → 寬度 2N 視覺對應，paint-order 讓筆畫墊在填色後
     css += `-webkit-text-stroke:${(st.outline * 2 * r).toFixed(1)}px ${st.outlineColor};paint-order:stroke fill;`;
@@ -71,12 +74,14 @@ export function hexToAssColor(hex, alpha01){
 
 /* 軌道生效樣式 → ASS Style 行（V4+ 欄位序）。name=樣式名；vwh=PlayResY（MarginV 換算用） */
 export function styleToAssStyleLine(name, st, vwh){
-  const mv = st.vertical
-    ? Math.round(vwh * (st.posPct / 100))            // 直書：上錨（7/8/9），MarginV=距頂
-    : Math.round(vwh * ((100 - st.posPct) / 100));   // 橫書：下錨（1/2/3），MarginV=距底
-  const alignN = st.vertical
-    ? ({ left: 7, center: 8, right: 9 })[st.align] || 8
-    : ({ left: 1, center: 2, right: 3 })[st.align] || 2;
+  // Alignment 1-9（numpad）＝ 垂直基數(下1/中4/上7) ＋ 水平(左0/中1/右2)；直書一律上錨
+  const va = st.vertical ? 'top' : (st.valign || 'bottom');
+  const vbase = { top: 7, middle: 4, bottom: 1 }[va];
+  const acol = { left: 0, center: 1, right: 2 }[st.align];
+  const alignN = vbase + (acol != null ? acol : 1);
+  const mv = va === 'middle' ? 0
+           : va === 'top' ? Math.round(vwh * (st.posPct / 100))          // 距頂
+           : Math.round(vwh * ((100 - st.posPct) / 100));                // 距底
   const borderStyle = st.bgBox ? 3 : 1;
   const backCol = st.bgBox ? hexToAssColor(st.bgColor, st.bgAlpha) : '&H00000000';
   const shadowV = st.bgBox ? Math.max(1, st.shadow) : st.shadow; // BorderStyle=3 需 Outline/Shadow 撐出色塊範圍

@@ -10,6 +10,24 @@ import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
+import { effStyle } from './substyle.js';
+
+/* 字幕列表右側樣式摘要（依序：字級/位置/顏色/字型/粗/斜/框線/框線色/陰影/字距/行距/直/底/透明度）。
+   有逐句覆蓋標 ✱；切換類（B/I/直/底）暗＝關、亮＝開。 */
+function styleSummaryHtml(c){
+  const st=effStyle(c, State.tracks[c.track||0]||null);
+  const sw=hex=>`<i class="sw" style="background:${hex}"></i>`;
+  const tg=(label,on)=>`<b class="tg${on?' on':''}">${label}</b>`;
+  const va={top:'上',middle:'中',bottom:'下'}[st.valign||'bottom'];
+  const al={left:'左',center:'中',right:'右'}[st.align||'center'];
+  return `<span class="v">${st.fontSize}</span><span class="v">${va}${al}</span>${sw(st.color)}`+
+    `<span class="fn" title="${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+
+    tg('B',st.bold)+tg('I',st.italic)+
+    `<span class="v" title="框線">${st.outline}</span>${sw(st.outlineColor)}<span class="v" title="陰影">${st.shadow}</span>`+
+    `<span class="v" title="字距">${st.letterSpacing}</span><span class="v" title="行距">${st.lineSpacing}</span>`+
+    tg('直',st.vertical)+tg('底',st.bgBox)+sw(st.bgColor)+`<span class="v" title="透明度">${Math.round(st.bgAlpha*100)}</span>`+
+    (c.style&&Object.keys(c.style).length?`<span class="ov" title="此句有樣式覆蓋">✱</span>`:'');
+}
 import { showCueMenu, showCtx } from './menus.js';
 
 /* ===== 字幕對調模式 ================================================= */
@@ -359,6 +377,7 @@ function _subRowHTML(c,i,overlaps){
         (timed?`<span class="dur">${(c.end-c.start).toFixed(2)}s</span>`:``)+
       `</div>`+
       `<div class="txt" contenteditable="false" spellcheck="false">${_txtInner(c.text)}</div>`+
+      `<div class="sub-sty">${styleSummaryHtml(c)}</div>`+
     `</div>`+
     (State.trackCount>1?`<div class="tk">軌${(c.track||0)+1}</div>`:``)+
   `</div>`;
