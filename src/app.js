@@ -20,7 +20,7 @@ import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
-import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot } from './substyle.js'; // v4.23 字幕樣式系統
+import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
@@ -1281,6 +1281,16 @@ async function init(){
   initUI(); initExtras(); applyAriaLabels();
   renderAll(); layoutTimeline(); drawTimeline(); rafLoop();
   loadPresets().then(()=>renderTrackStyle()).catch(()=>{}); // v4.23 常用樣式庫（config 持久化）
+  // v4.25.4 字幕字型：掃 <專案根>/font/ → 注入 @font-face → 填字型下拉（預覽與匯出同一份字型）
+  loadFonts().then(fonts=>{
+    const sel=$('tsFont'); if(!sel) return;
+    if(fonts.length){
+      const cur=sel.value;
+      sel.innerHTML=fonts.map(f=>`<option>${escapeHTML(f.name)}</option>`).join('')+'<option value="__custom">自訂…</option>';
+      if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
+    }
+    renderVideoSub(); renderTrackStyle();
+  }).catch(()=>{});
   History.reset();
   if(IS_DESKTOP) initDesktop();
   else setStatus('就緒 — 匯入影音或字幕開始','ok');
@@ -1364,7 +1374,7 @@ async function initDesktop(){
     History, recordHistory, renderHistory, addNote, renderNotes, togglePanel,
     parseTimecodeInput, snapVal, snapTargets, neighborBounds, setFps, snapFps, FPS_SET };
   window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview }; // 階段0 PoC＋階段1 預覽（驗證/診斷入口）
-  window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot }; // v4.23 字幕樣式（驗證/診斷入口）
+  window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts }; // v4.23 字幕樣式（驗證/診斷入口）
 }
 
 init();

@@ -7,7 +7,7 @@
 /* 樣式欄位與預設值（軌道級；逐句覆蓋為其子集）。
    舊專案/既有軌道缺欄位時由 effStyle 後援——newTrack 不需要加欄位、零遷移。 */
 export const STYLE_DEFAULTS = {
-  font: '思源黑體',
+  font: '台北黑體',
   bold: true, italic: false,
   fontSize: 60, color: '#ffffff',
   letterSpacing: 1,     // px 字距（ASS Spacing / CSS letter-spacing）；直書時不適用（逐字換行）
@@ -151,6 +151,34 @@ export function savePresets(list){
     else localStorage.setItem(LS_KEY, JSON.stringify(list));
   }catch(e){}
 }
+/* ---- 字幕字型（v4.25.4）：桌面版掃 <專案根>/font/，注入 @font-face 供預覽；
+   匯出（libass）由主程序以 fontsdir 指向同一資料夾 → 預覽＝燒錄同一份字型。 ---- */
+let _fonts = null; // [{name,file}]
+export function getFonts(){ return _fonts || []; }
+export async function loadFonts(){
+  if(_fonts) return _fonts;
+  _fonts = [];
+  try{
+    const DESK = window.subtool;
+    if(!DESK || !DESK.fontsList) return _fonts;
+    const r = await DESK.fontsList();
+    const list = (r && r.fonts) || [];
+    // 以 FontFace API 直接餵位元組註冊——CSS `@font-face{src:url('file://…')}` 會被
+    // Chromium 擋下（"A network error occurred"），即使 webSecurity 關閉亦然。
+    for(const f of list){
+      try{
+        const url = await DESK.fileURL(f.file);
+        const buf = await (await fetch(url)).arrayBuffer();
+        const face = new FontFace(f.name, buf);
+        await face.load();
+        document.fonts.add(face);
+        _fonts.push(f);
+      }catch(e){ console.warn('[fonts] 載入失敗：' + f.name, String(e && e.message || e)); }
+    }
+  }catch(e){ console.warn('[fonts] load', e); }
+  return _fonts;
+}
+
 /* 從軌道取可存為 preset 的樣式子集（不含 name/visible/locked 等非樣式欄位） */
 export function trackStyleSnapshot(track){
   const st = effStyle(null, track), out = {};

@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('subtool', {
   getFilePath:  (file) => { try { return webUtils.getPathForFile(file) || null; } catch (e) { return null; } },
   fileURL:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:fileURL', p); },
   stat:         (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:stat', p); },
+  fontsList:    () => ipcRenderer.invoke('fonts:list'), // v4.25.4 字幕字型：掃 <專案根>/font/
   openMedia:    () => ipcRenderer.invoke('dialog:openMedia'),
   openAudio:    () => ipcRenderer.invoke('dialog:openAudio'),
   openProject:  () => ipcRenderer.invoke('dialog:openProject'),

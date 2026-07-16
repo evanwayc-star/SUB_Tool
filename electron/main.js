@@ -560,7 +560,11 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   if (assText && assText.trim()) {
     assName = 'export_' + Date.now() + '.ass';
     fs.writeFileSync(path.join(TMP, assName), assText, 'utf8');
-    fc.push(`${vc}ass=${assName}[vout]`);
+    // v4.25.4：fontsdir 指向 <專案根>/font → 燒錄用的字型與預覽（@font-face 同一批檔）一致，
+    // 不必先安裝到系統。冒號/反斜線需跳脫（filtergraph 參數語法）。
+    const fdir = fontsRoot();
+    const fdirArg = fdir ? ':fontsdir=' + fdir.replace(/\\/g, '/').replace(/:/g, '\\:') : '';
+    fc.push(`${vc}ass=${assName}${fdirArg}[vout]`);
     vfinal = '[vout]';
   }
 
@@ -656,6 +660,41 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   await runFF(['-y', '-i', src, '-map', '0:a:0', '-ar', '4000', '-c:a', 'pcm_s16le', out],
     { sender: e.sender, duration, jobId: 'wave', label: '產生波形' });
   return out;
+});
+
+/* ---- 字幕字型（v4.25.4）：掃描 <專案根>/font/ ----
+   每個子資料夾名＝字型名（如「台北黑體」），內含 .ttf/.otf/.ttc/.woff2 任一即採用；
+   根目錄下的字型檔也收（檔名去副檔名當字型名）。renderer 用它注入 @font-face（預覽），
+   匯出（libass）則以 fontsdir 指向同一資料夾 → 預覽與燒錄同一份字型。 */
+function fontsRoot() {
+  const cands = [
+    path.join(__dirname, '..', 'font'),                                   // dev：專案根/font
+    path.join(process.resourcesPath || '', 'font'),                       // 打包：resources/font
+    path.join(path.dirname(app.getPath('exe')), 'font'),                  // 打包：安裝目錄/font
+  ];
+  for (const d of cands) { try { if (fs.existsSync(d) && fs.statSync(d).isDirectory()) return d; } catch (e) {} }
+  return null;
+}
+const FONT_EXT = /\.(ttf|otf|ttc|woff2?)$/i;
+ipcMain.handle('fonts:list', () => {
+  const root = fontsRoot();
+  if (!root) return { root: null, fonts: [] };
+  allowDir(root); // 納入路徑白名單，renderer 才能取 fileURL 讀字型位元組（FontFace 註冊）
+  const out = [];
+  const pushFile = (name, file) => { if (!out.some(f => f.name === name)) out.push({ name, file }); };
+  try {
+    for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
+      const full = path.join(root, ent.name);
+      if (ent.isDirectory()) {
+        let hit = null;
+        try { hit = fs.readdirSync(full).find(f => FONT_EXT.test(f)); } catch (e) {}
+        if (hit) { allowDir(full); pushFile(ent.name, path.join(full, hit)); } // 資料夾名＝字型名
+      } else if (FONT_EXT.test(ent.name)) {
+        pushFile(ent.name.replace(FONT_EXT, ''), full);
+      }
+    }
+  } catch (e) { console.error('[fonts] list', e); }
+  return { root, fonts: out };
 });
 
 ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
@@ -1025,6 +1064,8 @@ ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
     '--vo=gpu', '--gpu-context=d3d11', '--hwdec=auto',
     '--keep-open=always', '--pause', '--hr-seek=yes', '--sid=no'
   ];
+  // v4.25.4：libass 也用 <專案根>/font 的字型（與預覽 @font-face／匯出 fontsdir 同一批檔，不必裝進系統）
+  { const fdir = fontsRoot(); if (fdir) mpvArgs.push('--sub-fonts-dir=' + fdir, '--embeddedfonts=no'); }
 
   if (Array.isArray(audio) && audio.length > 1) {
     const aids = [];
