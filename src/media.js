@@ -1055,9 +1055,17 @@ const Media = {
     this.ensureCtx();
     // queue:true —— 不可搶佔/殺掉進行中的 ingest（可能正是餵播放器的 streamIngest 背景轉檔
     // 或主媒體音軌抽取，殺掉會讓播放中斷）；改為排入佇列、依序執行
-    let res; try{ res = await DESK.ingest({ path: c.path, duration: c.dur, needsProxy: false, audio: info?.audio || [], queue: true }); }
+    // needsProxy:true（v4.25）：加入的片段一律備 720p 短 GOP proxy——原檔可能非原生（ProRes/MXF）
+    // 或過大（>600MB WebCodecs 讀不進來）；沒有 proxy 時預覽引擎解不了它 →【無法參與疊層合成】
+    // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
+    let res; try{ res = await DESK.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
     catch(e){ if(this._bgVersion === myVer) setStatus('影片音訊抽取失敗：' + (e?.message||e), ''); return; }
     if(!res || this._bgVersion !== myVer || !Seq.byId(c.id)) return;
+    if(res.proxy){
+      try{ const u = await DESK.fileURL(res.proxy);
+        if(this._bgVersion === myVer && Seq.byId(c.id)){ c.proxyUrl = u; emit('render:videoSub'); }
+      }catch(e){ console.warn('clip proxy url:', e); }
+    }
     const chs = res.channels || [];
     if(chs.length){
       const els = await Promise.all(chs.map(ch =>

@@ -151,8 +151,10 @@ export const WCPreview = {
     return true;
   },
 
-  /* 來源 url 解析：mpv 模式主媒體（含切割片段）走 proxy；原生走 clip.web / video 元素來源。 */
+  /* 來源 url 解析：加入的片段優先用自己的 proxy（v4.25：原檔可能非原生或過大 → 引擎解不了）；
+     mpv 模式主媒體（含切割片段）走主 proxy；原生走 clip.web / video 元素來源。 */
   _clipUrl(c, isTop){
+    if(c.proxyUrl) return c.proxyUrl;
     if(Media.mpvMode){
       if(c.path && c.path === Media._wcProxyPath) return Media._wcProxyUrl;
       if((c.audioSrc || 'video') === 'video' || c.primary) return Media._wcProxyUrl;
@@ -194,6 +196,20 @@ export const WCPreview = {
 
     const t = Media.tlTime();
     const acts = Media._gap ? [] : Seq.clipsAt(t).filter(c => State.videoTracks[c.vtrack||0]?.visible !== false);
+
+    // 預熱（v4.25）：即將作用（t..t+PRELOAD_S）的片段先開始載入——否則播放進入疊層區時上層還在
+    // fetch/demux，那一刻只畫得出下層（要暫停等它載完才出現）＝「播放時不會切到最上層」。
+    const PRELOAD_S = 3;
+    for(const c of State.clips){
+      if(acts.indexOf(c) >= 0) continue;
+      if(c.offset > t + PRELOAD_S || Seq.clipEnd(c) <= t) continue;
+      if(State.videoTracks[c.vtrack||0]?.visible === false) continue;
+      const url = this._clipUrl(c, false); if(!url) continue;
+      const key = url + '#' + (c.vtrack||0);
+      let ss = this.sources.get(key);
+      if(!ss){ ss = new SourceStream(url); this.sources.set(key, ss); }
+      if(ss.state === 'idle') ss.load();
+    }
 
     // 第一遍：逐層取得 frame（多軌合成；clipsAt 已由下而上排序）
     const layers = [];
