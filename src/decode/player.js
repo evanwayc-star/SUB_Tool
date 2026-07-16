@@ -175,6 +175,10 @@ export const WCPreview = {
 
   _hideCanvas(){ if(this.canvas.style.display !== 'none') this.canvas.style.display = 'none'; },
 
+  /* 目前合成畫面的來源解析度（第一個可畫層＝base 層）。字幕層據此對齊實際畫面區域，
+     讓字幕大小/位置不隨各片解析度或畫面比例（16:9／2.39:1…）而跑掉。無合成時回 null。 */
+  stageSize(){ return (this._stageW && this._stageH) ? { w:this._stageW, h:this._stageH } : null; },
+
   /* rafLoop 每幀呼叫（含暫停/捲動）。 */
   tick(){
     if(!this._ensure()) return;
@@ -258,8 +262,16 @@ export const WCPreview = {
     let base = null, painted = 0, lastTs = null, lastUrl = null;
     for(const L of layers){
       if(L.alpha <= 0.003){ painted++; continue; } // 全透明：視為已處理（下層已見）
-      if(!base){ const s0 = Math.min(bw/L.sw, bh/L.sh); const w0 = Math.round(L.sw*s0), h0 = Math.round(L.sh*s0);
-                 base = { x:(bw-w0)>>1, y:(bh-h0)>>1, w:w0, h:h0 }; }
+      // 【v4.25.3】畫布＝專案輸出解析度（State.videoWidth/Height，與 ffmpeg:exportVideo 同一張畫布），
+      // 不是「第一層的解析度」——否則換到不同比例/解析度的片時整個畫面區跟著變，
+      // 字幕大小也跟著跳（症狀＝「字幕在各個影片上大小不同」）。各層再 contain 進這張畫布（比例不同就留黑邊，與匯出一致）。
+      if(!base){
+        const pw = State.videoWidth || L.sw, ph = State.videoHeight || L.sh;
+        const s0 = Math.min(bw/pw, bh/ph);
+        const w0 = Math.round(pw*s0), h0 = Math.round(ph*s0);
+        base = { x:(bw-w0)>>1, y:(bh-h0)>>1, w:w0, h:h0 };
+        this._stageW = pw; this._stageH = ph; // 供字幕層對齊畫面區（見 app.js _stageRect）
+      }
       const vt = L.vt, sc = vt.scale != null ? vt.scale : 1;
       const s1 = Math.min(base.w/L.sw, base.h/L.sh) * sc;
       const dw = Math.max(1, Math.round(L.sw*s1)), dh = Math.max(1, Math.round(L.sh*s1));

@@ -149,6 +149,25 @@ function _syncMpvPanel(){
 const _videoSub = $('videoSub');
 const _videoWrap = $('videoWrap');
 let _videoSubSig = '';
+/* 影片畫面在 videoWrap 內的實際顯示區（contain）。字幕層對齊它 ——
+   否則字幕框固定 16:9，遇到不同比例的片（2.39:1 電影 vs 16:9）畫面高度不同，
+   字幕卻照同一個框換算 →「字幕大小在各個影片上不一樣」。回 null＝取不到來源尺寸。 */
+function _stageRect(){
+  if(!_videoWrap) return null;
+  const W = _videoWrap.clientWidth, H = _videoWrap.clientHeight;
+  if(!W || !H) return null;
+  // 專案輸出解析度優先（與匯出同一張畫布 → 字幕大小不隨各片解析度/比例改變）
+  let vw = State.videoWidth || 0, vh = State.videoHeight || 0;
+  if(!vw || !vh){
+    const ss = WCPreview.stageSize && WCPreview.stageSize();
+    if(ss){ vw = ss.w; vh = ss.h; }
+    else if(video.videoWidth){ vw = video.videoWidth; vh = video.videoHeight; }
+  }
+  if(!vw || !vh) return null;
+  const s = Math.min(W/vw, H/vh);
+  const dw = Math.max(1, Math.round(vw*s)), dh = Math.max(1, Math.round(vh*s));
+  return { x: Math.round((W-dw)/2), y: Math.round((H-dh)/2), w: dw, h: dh };
+}
 function renderVideoSub(){
   // 防禦①：非 mpv（或 WC 已接管）時字幕層必須可見——避免被 mpv 載入殘留的 display:none 卡住而「完全不顯示」
   if(_videoSub && (!Media.mpvMode || Media._wcTakeover) && _videoSub.style.display==='none') _videoSub.style.display='';
@@ -157,10 +176,23 @@ function renderVideoSub(){
   let exactFps = getExactFps(fps);
   const currentFrame = Math.round(t * exactFps);
 
+  // 字幕層對齊影片實際畫面區（v4.25.3）：大小/位置以「畫面」為基準，各片比例不同也一致
+  const rect = _stageRect();
+  if(rect && _videoSub){
+    const key = rect.x+'|'+rect.y+'|'+rect.w+'|'+rect.h;
+    if(_videoSub.dataset.rect !== key){
+      _videoSub.dataset.rect = key;
+      const st = _videoSub.style; // 逐項設定（不可用 cssText：會清掉 display，破壞 mpv/接管的顯示控制）
+      st.position='absolute'; st.left=rect.x+'px'; st.top=rect.y+'px';
+      st.width=rect.w+'px'; st.height=rect.h+'px';
+      st.right='auto'; st.bottom='auto'; st.margin='0';
+      st.aspectRatio='auto'; st.maxWidth='none'; st.maxHeight='none';
+    }
+  }
   // 每個可見軌道各依其樣式疊加顯示（v4.23：樣式一律走 substyle.effStyle——與 ASS/mpv/匯出同構）
-  const playerWidth = _videoSub?.clientWidth||1920;
+  const playerWidth = (rect && rect.w) || _videoSub?.clientWidth || 1920;
   const ratio = playerWidth / 1920;
-  let html='', sig='';
+  let html='', sig=(rect ? rect.w+'x'+rect.h : '')+';'; // 畫面區變動（換片/不同比例/視窗縮放）須重繪
   try{
   for(let tk=0; tk<State.trackCount; tk++){
     if(!trackVisible(tk))continue;
