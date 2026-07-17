@@ -13,7 +13,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from 
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys } from './state.js';
 import { Media, Wave } from './media.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
-import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames } from './subtitles.js';
+import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
 import { Project, ensureProjectSaved, resetProject, isProjectDirty } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
@@ -237,6 +237,13 @@ function renderVideoSub(){
   _videoSub.innerHTML=html;
 }
 
+/* 軌道樣式改動後的統一重繪：預覽畫面／mpv 字幕／樣式面板／字幕列表的樣式摘要。
+   ── 一律走這裡（v4.29.5）：這四處本來各自散在九個呼叫點，漏掉列表摘要 → 面板改了框線、
+      座標，列表卻還顯示舊值（要等別的操作觸發整份重繪才會補上，看起來像「只有某些欄位會更新」）。 */
+function styleChanged(){
+  renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); refreshStyleSummaries();
+}
+
 /* 在預覽窗裡直接拖曳字幕定位（v4.28）：滑鼠位移換算成 posX/posY 百分比寫回軌道樣式，
    面板數字即時跟著跑，放開時同步 mpv／記入還原點；匯出自然一致（同一份 effStyle）。
    Alt＋拖曳＝繞文字塊中心旋轉（Shift 吸附 15°）——與面板「角度」同一個欄位。
@@ -253,7 +260,9 @@ function _subDragMove(e){
     trk.posX = clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100);
     trk.posY = clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100);
   }
-  renderVideoSub(); renderTrackStyle(); // mpv 留到放開才推（每次移動重送 ASS 太貴）
+  // 拖曳中只更新預覽與面板數字；mpv 與列表摘要留到放開才做
+  // （每次移動重送 ASS／重寫上千列摘要都太貴）
+  renderVideoSub(); renderTrackStyle();
   e.preventDefault();
 }
 function _subDragEnd(e){
@@ -261,7 +270,7 @@ function _subDragEnd(e){
   _subDrag = null;
   _videoSub.classList.remove('dragging');
   try{ _videoSub.releasePointerCapture(e.pointerId); }catch(err){}
-  refreshMpvSubs(); renderTrackStyle();
+  refreshMpvSubs(); renderTrackStyle(); refreshStyleSummaries(); // 座標變了 → 列表摘要要跟上
   recordHistory(d.rot ? '旋轉字幕' : '移動字幕位置'); // 一次拖曳＝一個還原點（record 內部會去重）
 }
 _videoSub?.addEventListener('pointerdown', e => {
@@ -968,7 +977,7 @@ function initUI(){
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
 
   // 樣式控制（大小 / 位置 / 顏色）
-  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontSize=clamp(+e.target.value,10,300); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
+  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontSize=clamp(+e.target.value,10,300); styleChanged(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   // 座標＝像素（UI 以影片像素輸入；內部存百分比→換影片解析度時字幕不跑掉）
   ['tsPosX','tsPosY'].forEach(id=>{
@@ -977,13 +986,13 @@ function initUI(){
       const i=State.listTrack; if(!State.tracks[i])return;
       const span = isX ? (State.videoWidth||1920) : (State.videoHeight||1080);
       State.tracks[i][key] = clamp((+e.target.value / span) * 100, 0, 100);
-      renderVideoSub(); refreshMpvSubs(); renderTrackStyle();
+      styleChanged();
     });
     $(id).addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   });
-  $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
+  $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; styleChanged(); });
   // v4.23 樣式擴充：通用 setter（寫軌道欄位 → 三路重繪）；數字/顏色/切換各自包裝
-  const tsSet=(k,v)=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i][k]=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); };
+  const tsSet=(k,v)=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i][k]=v; styleChanged(); };
   const tsNum=(id,k,lo,hi)=>{ const el=$(id); if(!el)return;
     el.addEventListener('input',e=>tsSet(k, clamp(+e.target.value, lo, hi)));
     el.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} }); };
@@ -1020,7 +1029,7 @@ function initUI(){
     if(!v||!State.tracks[i])return;
     const p=getPresets().find(x=>x.name===v); if(!p)return;
     Object.assign(State.tracks[i], p.style);
-    renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); recordHistory('套用常用樣式：'+v);
+    styleChanged(); recordHistory('套用常用樣式：'+v);
   });
   $('tsPresetMgr').addEventListener('click',()=>{
     const list=getPresets();
@@ -1045,7 +1054,7 @@ function initUI(){
       [{label:'取消',act:closeModal},{label:`清除 ${hits.length} 句的覆蓋`,primary:true,act:()=>{
         closeModal();
         for(const c of hits) delete c.style;
-        renderVideoSub(); refreshMpvSubs(); renderSubList(); drawTimeline(); // renderSubList 內部會清樣式名快取
+        styleChanged(); drawTimeline(); // 摘要就地更新（不整份重繪，捲動位置留在原處）；時間軸重畫掉 ✱ 標記
         recordHistory('全軌統一樣式（清除 '+hits.length+' 句覆蓋）');
         showToast('已清除 '+hits.length+' 句的逐句覆蓋');
       }}]);
@@ -1054,14 +1063,14 @@ function initUI(){
   $('trackStyle').addEventListener('click',e=>{
     const i=State.listTrack; if(!State.tracks[i])return;
     const sz=e.target.closest('.ts-preset[data-ts-size]');
-    if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontSize=v; $('tsSize').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontSize=v; $('tsSize').value=v; styleChanged(); return; }
     // 對齊＝多行/多句彼此的對齊方式（同時決定文字塊以哪一側對齊座標）；位置一律由 X/Y 數值決定
     const vg=e.target.closest('.ts-preset[data-ts-valign]');
-    if(vg){ State.tracks[i].valign=vg.dataset.tsValign; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    if(vg){ State.tracks[i].valign=vg.dataset.tsValign; styleChanged(); return; }
     const ag=e.target.closest('.ts-preset[data-ts-align]');
-    if(ag){ State.tracks[i].align=ag.dataset.tsAlign; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    if(ag){ State.tracks[i].align=ag.dataset.tsAlign; styleChanged(); return; }
     const cl=e.target.closest('.ts-clr');
-    if(cl){ const v=cl.dataset.color; State.tracks[i].color=v; $('tsColor').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); }
+    if(cl){ const v=cl.dataset.color; State.tracks[i].color=v; $('tsColor').value=v; styleChanged(); }
   });
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
