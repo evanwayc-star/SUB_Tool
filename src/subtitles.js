@@ -10,7 +10,7 @@ import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { effStyle, getPresets, STYLE_DEFAULTS, colorName, posToPx } from './substyle.js';
+import { effStyle, getPresets, STYLE_DEFAULTS, colorName, posToPx } from './substyle.js'; // colorName 只用在色點的 title
 
 /* 該句的「常用樣式名稱」：軌樣式完全吻合某個已存的常用樣式 → 顯示其名；有逐句覆蓋 → 「自訂」；
    皆非 → 留白。以軌為單位比對並快取（字幕上千條時避免逐句重算）；renderSubList 每次重繪前清空。 */
@@ -33,37 +33,35 @@ function styleNameHtml(c){
   return n ? `<span class="nm" title="常用樣式：${escapeHTML(n)}">${escapeHTML(n)}</span>` : '';
 }
 
-/* 字幕列表右側樣式摘要（依序：字級/位置/顏色/字型/粗/斜/框線/框線色/陰影/字距/行距/直/底/透明度）。
-   有逐句覆蓋標 ✱；切換類（B/I/直/底）暗＝關、亮＝開。 */
 /* 樣式摘要（兩行，以 | 分隔，欄位順序依規格）：
-   行1：字級 | 上下對齊 | 左右對齊 | 字型 | 文字色 | 框線粗細-框線色
-   行2：粗體 | 斜體 | 陰影 | 座標(X,Y 像素) | 角度 | 直式/橫式 | 底色-不透明度 | 字距/行距 */
+   行1：字 字級 | 上下對齊 | 左右對齊 | 字型 | 色● | 邊●-粗細
+   行2：座標(X,Y 像素) | 角度 N | 直式/橫式 | 底●-不透明度% | 距 字距 / 行距
+   顏色一律只給色點（色名寫出來會是一排中文，反而蓋過真正在看的數值）；色名留在 title。
+   「底」亮＝底色塊開、暗＝關。有逐句覆蓋另由 styleNameHtml 標 ✱。 */
 function styleSummaryHtml(c){
   const st=effStyle(c, State.tracks[c.track||0]||null);
-  const sw=(hex,t)=>`<i class="sw" style="background:${hex}" title="${t}"></i>`;
-  const cn=(hex)=>{ const nm=colorName(hex); return nm?`<span class="cn">${nm}</span>`:''; };
+  const sw=(hex,t)=>`<i class="sw" style="background:${hex}" title="${t}：${colorName(hex)||hex}"></i>`;
   const tg=(label,on,t)=>`<b class="tg${on?' on':''}" title="${t}：${on?'開':'關'}">${label}</b>`;
   const n=(v,t)=>`<b class="n" title="${t}">${v}</b>`;
+  const lbl=t=>`<span class="lbl">${t}</span>`;
   const sep=`<span class="sp">|</span>`;
   const va={top:'上對齊',middle:'中對齊',bottom:'下對齊'}[st.valign||'bottom'];
   const al={left:'左對齊',center:'中對齊',right:'右對齊'}[st.align||'center'];
   const p=posToPx(st);
   return `<span class="r1">`+
-      n(st.fontSize,'字級')+sep+
+      `<span class="g" title="字級">${lbl('字')}${n(st.fontSize,'字級')}</span>`+sep+
       `<span title="多行／多句的垂直對齊">${va}</span>`+sep+
       `<span title="多行／多句的水平對齊">${al}</span>`+sep+
       `<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+sep+
-      `<span class="g" title="文字顏色">${cn(st.color)}${sw(st.color,'文字顏色')}</span>`+sep+
-      `<span class="g" title="框線：粗細 ${st.outline}">${n(st.outline,'框線粗細')}<span class="sp2">-</span>${cn(st.outlineColor)}${sw(st.outlineColor,'框線顏色')}</span>`+
+      `<span class="g" title="文字顏色">${lbl('色')}${sw(st.color,'文字顏色')}</span>`+sep+
+      `<span class="g" title="框線：粗細 ${st.outline}">${lbl('邊')}${sw(st.outlineColor,'框線顏色')}<span class="sp2">-</span>${n(st.outline,'框線粗細')}</span>`+
     `</span>`+
     `<span class="r2">`+
-      tg('粗體',st.bold,'粗體')+sep+tg('斜體',st.italic,'斜體')+sep+
-      `<span class="g" title="陰影">${n(st.shadow,'陰影')}</span>`+sep+
       `<span class="g" title="座標（像素，文字塊${al==='中對齊'&&va==='中對齊'?'中心':'錨點'}）">座標(${p.x},${p.y})</span>`+sep+
-      `<span class="g" title="旋轉角度">${n(st.angle,'角度')}度</span>`+sep+
+      `<span class="g" title="旋轉角度">${lbl('角度')}${n(st.angle,'角度')}</span>`+sep+
       `<span title="排版方向">${st.vertical?'直式':'橫式'}</span>`+sep+
-      `<span class="g" title="底色／不透明度">${tg('底',st.bgBox,'背景色塊')}${cn(st.bgColor)}${sw(st.bgColor,'背景色')}<span class="sp2">-</span>${n(Math.round(st.bgAlpha*100),'不透明度')}%</span>`+sep+
-      `<span class="g" title="字距／行距"><span class="lbl">距</span>${n(st.letterSpacing,'字距')}<span class="sp2">/</span>${n(st.lineSpacing,'行距')}</span>`+
+      `<span class="g" title="底色／不透明度">${tg('底',st.bgBox,'背景色塊')}${sw(st.bgColor,'背景色')}<span class="sp2">-</span>${n(Math.round(st.bgAlpha*100),'不透明度')}${lbl('%')}</span>`+sep+
+      `<span class="g" title="字距／行距">${lbl('距')}${n(st.letterSpacing,'字距')}<span class="sp2">/</span>${n(st.lineSpacing,'行距')}</span>`+
     `</span>`;
 }
 import { showCueMenu, showCtx } from './menus.js';

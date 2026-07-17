@@ -312,13 +312,11 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .sub-sty .r1,.sub-row .sub-sty .r2{display:flex;align-items:center;gap:6px;white-space:nowrap}
 .sub-row .sub-sty .sp{opacity:.28;font-weight:300}
 .sub-row .sub-sty .sp2{opacity:.4;margin:0 1px}
-.sub-row .sub-sty .cn{color:var(--text-dim)}
-.sub-row .sub-sty .r1{color:var(--text-dim)}    /* 主要：字級/位置/顏色/字型/粗斜 */
-.sub-row .sub-sty .r2{color:var(--text-faint)}  /* 細節：框線/陰影/間距/直/底 —— 較淡，不搶戲 */
+.sub-row .sub-sty .r1{color:var(--text-dim)}    /* 主要：字級/對齊/字型/顏色/框線 */
+.sub-row .sub-sty .r2{color:var(--text-faint)}  /* 細節：座標/角度/直橫/底色/間距 —— 較淡，不搶戲 */
 .sub-row .sub-sty .g{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
 .sub-row .sub-sty .n{font-style:normal;font-weight:500;color:var(--text-dim)}
-.sub-row .sub-sty .lbl,.sub-row .sub-sty .sep{opacity:.45}
-.sub-row .sub-sty .pos{font-style:normal;font-weight:500;color:var(--text-dim)}
+.sub-row .sub-sty .lbl{opacity:.45}  /* 欄位標籤（字/色/邊/底/角度/距/%）：讓數值本身跳出來 */
 .sub-row .sub-sty .fn{max-width:78px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}
 .sub-row .sub-sty .sw{width:10px;height:10px;border-radius:50%;border:1px solid rgba(255,255,255,.25);flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
 .sub-row .sub-sty .tg{
