@@ -210,8 +210,9 @@ function renderVideoSub(){
     const ax = { left:'0', center:'-50%', right:'-100%' }[tst.align||'center'];
     const ay = { top:'0', middle:'-50%', bottom:'-100%' }[tst.valign||'bottom'];
     const contStyle = `left:${tst.posX}%;right:auto;top:${tst.posY}%;transform:translate(${ax},${ay});text-align:${tst.align};padding:0;`;
-    sig+=tk+'|'+contStyle+'|'+cur.map(c=>c.id+'='+c.text+'|'+(c.style?JSON.stringify(c.style):'')).join(',')+'|'+JSON.stringify(tst)+';';
-    html+=`<div class="vsub-track" style="${contStyle}">`+
+    const grab = trk.locked ? '' : ' drag'; // 鎖定軌不可拖
+    sig+=tk+'|'+contStyle+grab+'|'+cur.map(c=>c.id+'='+c.text+'|'+(c.style?JSON.stringify(c.style):'')).join(',')+'|'+JSON.stringify(tst)+';';
+    html+=`<div class="vsub-track${grab}" data-tk="${tk}"${grab?' title="拖曳＝移動位置／Alt＋拖曳＝旋轉（按住 Shift 吸附 15°）"':''} style="${contStyle}">`+
       cur.map((c,i)=>{
         const st=effStyle(c, trk);
         let css=styleToCss(st, ratio);
@@ -230,6 +231,52 @@ function renderVideoSub(){
   _videoSub.innerHTML=html;
 }
 
+/* 在預覽窗裡直接拖曳字幕定位（v4.28）：滑鼠位移換算成 posX/posY 百分比寫回軌道樣式，
+   面板數字即時跟著跑，放開時同步 mpv／記入還原點；匯出自然一致（同一份 effStyle）。
+   Alt＋拖曳＝繞文字塊中心旋轉（Shift 吸附 15°）——與面板「角度」同一個欄位。
+   ── 換算基準是畫面實際顯示區 _stageRect()（非 videoWrap）：不同比例的片拖起來才等效。 */
+let _subDrag = null;
+function _subDragMove(e){
+  const d = _subDrag; if(!d) return;
+  const trk = State.tracks[d.tk]; if(!trk) return;
+  if(d.rot){
+    let ang = d.angle + (Math.atan2(e.clientY-d.cy, e.clientX-d.cx)*180/Math.PI - d.a0);
+    if(e.shiftKey) ang = Math.round(ang/15)*15;
+    trk.angle = Math.round(((ang+180)%360+360)%360-180); // 收斂到 -180~180＝面板欄位範圍
+  }else{
+    trk.posX = clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100);
+    trk.posY = clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100);
+  }
+  renderVideoSub(); renderTrackStyle(); // mpv 留到放開才推（每次移動重送 ASS 太貴）
+  e.preventDefault();
+}
+function _subDragEnd(e){
+  const d = _subDrag; if(!d) return;
+  _subDrag = null;
+  _videoSub.classList.remove('dragging');
+  try{ _videoSub.releasePointerCapture(e.pointerId); }catch(err){}
+  refreshMpvSubs(); renderTrackStyle();
+  recordHistory(d.rot ? '旋轉字幕' : '移動字幕位置'); // 一次拖曳＝一個還原點（record 內部會去重）
+}
+_videoSub?.addEventListener('pointerdown', e => {
+  if(e.button !== 0) return;
+  const el = e.target.closest?.('.vsub-track.drag'); if(!el) return;
+  const tk = +el.dataset.tk, trk = State.tracks[tk];
+  const rect = _stageRect();
+  if(!trk || trk.locked || !rect?.w || !rect?.h) return;
+  const st = effStyle(null, trk), box = el.getBoundingClientRect();
+  const cx = box.left+box.width/2, cy = box.top+box.height/2;
+  _subDrag = { tk, rect, rot: e.altKey, x0: e.clientX, y0: e.clientY,
+    posX: st.posX, posY: st.posY, angle: st.angle||0, cx, cy,
+    a0: Math.atan2(e.clientY-cy, e.clientX-cx)*180/Math.PI };
+  // 捕獲掛在圖層上：.vsub-track 每次重繪都被換掉，捕在它身上會當場斷線
+  try{ _videoSub.setPointerCapture(e.pointerId); }catch(err){}
+  _videoSub.classList.add('dragging');
+  e.preventDefault();
+});
+_videoSub?.addEventListener('pointermove', _subDragMove);
+_videoSub?.addEventListener('pointerup', _subDragEnd);
+_videoSub?.addEventListener('pointercancel', _subDragEnd);
 
 /* ===== 快取管理對話框（桌面版） ===== */
 function _fmtBytes(n){ n=+n||0; if(n<1024)return n+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+' '+u[i]; }
@@ -1382,7 +1429,8 @@ async function initDesktop(){
     renderCueBlocks, trackFromY, secToEncore, secToSRT, secToASS, newId, ensureTrackCount,
     syncTrackCount, sortCues, onDurationKnown, setZoom, zoomFit, zoomFitVideo, showCueMenu, showPlayerMenu,
     History, recordHistory, renderHistory, addNote, renderNotes, togglePanel,
-    parseTimecodeInput, snapVal, snapTargets, neighborBounds, setFps, snapFps, FPS_SET };
+    parseTimecodeInput, snapVal, snapTargets, neighborBounds, setFps, snapFps, FPS_SET,
+    toASSFromState, _stageRect }; // 三路一致診斷：ASS 產出＋字幕層座標基準（畫面實際顯示區）
   window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview }; // 階段0 PoC＋階段1 預覽（驗證/診斷入口）
   window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts }; // v4.23 字幕樣式（驗證/診斷入口）
 }
