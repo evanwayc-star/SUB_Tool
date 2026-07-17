@@ -8,7 +8,7 @@ import { State } from './state.js';
 /* 樣式欄位與預設值（軌道級；逐句覆蓋為其子集）。
    舊專案/既有軌道缺欄位時由 effStyle 後援——newTrack 不需要加欄位、零遷移。 */
 export const STYLE_DEFAULTS = {
-  font: '台北黑體',
+  font: '更紗黑體', // 預設字型＝font/ 底下的資料夾名（v4.29.4 由台北黑體改為更紗黑體）
   bold: true, italic: false,
   fontSize: 60, color: '#ffffff',
   letterSpacing: 1,     // px 字距（ASS Spacing / CSS letter-spacing）；直書時不適用（逐字換行）
