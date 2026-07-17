@@ -209,7 +209,10 @@ function renderVideoSub(){
     // posX/posY＝畫面百分比座標；align/valign＝錨點（文字塊的哪一側對齊該座標）→ translate 補償。
     const ax = { left:'0', center:'-50%', right:'-100%' }[tst.align||'center'];
     const ay = { top:'0', middle:'-50%', bottom:'-100%' }[tst.valign||'bottom'];
-    const contStyle = `left:${tst.posX}%;right:auto;top:${tst.posY}%;transform:translate(${ax},${ay});text-align:${tst.align};padding:0;`;
+    // text-align 作用在「行內軸」：橫書＝水平（吃 align），直書＝垂直（要吃 valign）。
+    // 直書餵 align 會變成拿左右對齊去排上下 → 與 ASS 的逐列 \an(上8/中5/下2) 對不起來。
+    const ta = tst.vertical ? ({ top:'start', middle:'center', bottom:'end' })[tst.valign||'bottom'] : tst.align;
+    const contStyle = `left:${tst.posX}%;right:auto;top:${tst.posY}%;transform:translate(${ax},${ay});text-align:${ta};padding:0;`;
     const grab = trk.locked ? '' : ' drag'; // 鎖定軌不可拖
     sig+=tk+'|'+contStyle+grab+'|'+cur.map(c=>c.id+'='+c.text+'|'+(c.style?JSON.stringify(c.style):'')).join(',')+'|'+JSON.stringify(tst)+';';
     html+=`<div class="vsub-track${grab}" data-tk="${tk}"${grab?' title="拖曳＝移動位置／Alt＋拖曳＝旋轉（按住 Shift 吸附 15°）"':''} style="${contStyle}">`+
@@ -218,7 +221,10 @@ function renderVideoSub(){
         let css=styleToCss(st, ratio);
         if(st.shadow<=0) css+='text-shadow:none;';             // 蓋掉 .line class 的預設六向描邊
         if(!st.bgBox) css+='background:transparent;';
-        css+= st.bgBox ? 'padding:.15em .4em;' : 'padding:2px 10px;';
+        // padding 會把文字往內推 → 與 ASS 錯位（ASS 的 BorderStyle=3 是把色塊往【外】長，文字不動）。
+        // 置中對齊時左右抵銷看不出來，靠左/靠右就整塊偏移；且固定 px 不隨 ratio 縮放＝位置還會跟著視窗跑。
+        // 故：無色塊＝完全不留白；有色塊＝以等量負 margin 抵銷，色塊往外長、文字位置不動。
+        css+= st.bgBox ? 'padding:.15em .4em;margin:-.15em -.4em;' : 'padding:0;';
         if(i>0) css+='color:#ff4444;';                          // 同時第二句重疊警示（維持既有行為）
         const inner = escapeHTML(c.text||'').replace(/\n/g,'<br>'); // 直書由 writing-mode 自動分列（多行=多列）
         return `<span class="line" style="${css}">${inner}</span>`;
@@ -1025,6 +1031,24 @@ function initUI(){
     openModal('⚙ 常用樣式管理', `<div style="max-height:300px;overflow:auto">${rows}</div>`, [{label:'關閉',primary:true,act:closeModal}]);
     setTimeout(()=>{ document.querySelectorAll('[data-pre-del]').forEach(b=>b.onclick=()=>{ const l=[...getPresets()]; l.splice(+b.dataset.preDel,1); savePresets(l); closeModal(); renderTrackStyle(); showToast('已刪除'); });
       document.querySelectorAll('[data-pre-ren]').forEach(b=>b.onclick=()=>{ const l=[...getPresets()]; const p=l[+b.dataset.preRen]; const nn=prompt('新名稱',p.name); if(nn&&nn.trim()){ p.name=nn.trim(); savePresets(l); closeModal(); renderTrackStyle(); } }); },0);
+  });
+  /* 全軌統一：清掉本軌所有「逐句樣式覆蓋」，讓每句都回到軌道樣式。
+     ── 軌道樣式本來就是全軌生效；唯一會脫隊的就是設過覆蓋的句子（列表標 ✱ 自訂）。
+        本鈕＝那些句子的一鍵歸隊，而非「把樣式複製到每一句」。 */
+  $('tsUnify')?.addEventListener('click',()=>{
+    const i=State.listTrack; const trk=State.tracks[i]; if(!trk)return;
+    const hits=State.cues.filter(c=>(c.track||0)===i && c.style && Object.keys(c.style).length);
+    if(!hits.length){ showToast('本軌沒有逐句覆蓋——所有字幕已經都跟著軌道樣式了'); return; }
+    openModal('⇩ 全軌統一', `<div style="font-size:13px;line-height:1.7">`+
+      `「${escapeHTML(trk.name)}」有 <b style="color:var(--accent)">${hits.length}</b> 句設了逐句樣式覆蓋。<br>`+
+      `清除後，這些句子會改用上方的軌道樣式（可 <b>Ctrl+Z</b> 復原）。</div>`,
+      [{label:'取消',act:closeModal},{label:`清除 ${hits.length} 句的覆蓋`,primary:true,act:()=>{
+        closeModal();
+        for(const c of hits) delete c.style;
+        renderVideoSub(); refreshMpvSubs(); renderSubList(); drawTimeline(); // renderSubList 內部會清樣式名快取
+        recordHistory('全軌統一樣式（清除 '+hits.length+' 句覆蓋）');
+        showToast('已清除 '+hits.length+' 句的逐句覆蓋');
+      }}]);
   });
   // 預設按鈕（大小 / 位置 / 顏色）— 委派事件到面板
   $('trackStyle').addEventListener('click',e=>{

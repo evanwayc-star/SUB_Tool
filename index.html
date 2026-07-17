@@ -120,8 +120,8 @@
             <span class="ts-sep">│</span>
             <span class="ts-label">大小</span>
             <div class="ts-btngrp">
+              <button class="ts-preset" data-ts-size="50">50</button>
               <button class="ts-preset" data-ts-size="60">60</button>
-              <button class="ts-preset" data-ts-size="80">80</button>
             </div>
             <input type="number" id="tsSize" min="10" max="300" step="1" value="60"><span class="ts-unit">px</span>
             <span class="ts-sep">│</span>
@@ -151,12 +151,8 @@
                 style="background:#ffffff"></button>
               <button class="ts-clr" data-color="#ff3333" title="紅" aria-label="字幕顏色：紅"
                 style="background:#ff3333"></button>
-              <button class="ts-clr" data-color="#3399ff" title="藍" aria-label="字幕顏色：藍"
-                style="background:#3399ff"></button>
               <button class="ts-clr" data-color="#ffee00" title="黃" aria-label="字幕顏色：黃"
                 style="background:#ffee00"></button>
-              <button class="ts-clr" data-color="#44cc66" title="綠" aria-label="字幕顏色：綠"
-                style="background:#44cc66"></button>
             </div>
           </div>
           <div class="ts-line">
@@ -190,6 +186,8 @@
             <select id="tsPresetSel" title="套用常用樣式到此軌"><option value="">— 套用 —</option></select>
             <button class="ts-preset" id="tsPresetSave" title="把目前軌道樣式存為常用樣式">☆ 存為常用</button>
             <button class="ts-preset" id="tsPresetMgr" title="管理常用樣式（改名／刪除）">⚙ 管理</button>
+            <span class="ts-sep">│</span>
+            <button class="ts-preset" id="tsUnify" title="清除本軌所有「逐句樣式覆蓋」，讓每一句都回到上面這組軌道樣式">⇩ 全軌統一</button>
           </div>
         </div>
       </div>

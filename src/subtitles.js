@@ -33,15 +33,23 @@ function styleNameHtml(c){
   return n ? `<span class="nm" title="常用樣式：${escapeHTML(n)}">${escapeHTML(n)}</span>` : '';
 }
 
+/* 色票膠囊上的文字色：依背景亮度選深或淺——白底白字、黑底黑字都會整個消失。 */
+function inkOn(hex){
+  const h=String(hex||'').replace('#','');
+  const r=parseInt(h.slice(0,2),16)||0, g=parseInt(h.slice(2,4),16)||0, b=parseInt(h.slice(4,6),16)||0;
+  return (0.299*r + 0.587*g + 0.114*b) > 140 ? '#111' : '#fff';
+}
+
 /* 樣式摘要（兩行，以 | 分隔，欄位順序依規格）：
-   行1：字 字級 | 上下對齊 | 左右對齊 | 字型 | 色● | 邊●-粗細
-   行2：座標(X,Y 像素) | 角度 N | 直式/橫式 | 底●-不透明度% | 距 字距 / 行距
-   顏色一律只給色點（色名寫出來會是一排中文，反而蓋過真正在看的數值）；色名留在 title。
-   「底」亮＝底色塊開、暗＝關。有逐句覆蓋另由 styleNameHtml 標 ✱。 */
+   行1：字 字級 | 上下對齊 | 左右對齊 | 字型 | [色] | [框] 粗細 | B | I
+   行2：座標(X,Y 像素) | 角度 N° | 直式/橫式 | [底] 不透明度% | 距 字距 / 行距
+   [色][框][底]＝【填該顏色的膠囊】，標籤與色票合一（比「標籤＋色點」省一半寬度）；
+   色名留在 title。B/I 與「底」亮＝開、暗＝關。有逐句覆蓋另由 styleNameHtml 標 ✱。 */
 function styleSummaryHtml(c){
   const st=effStyle(c, State.tracks[c.track||0]||null);
-  const sw=(hex,t)=>`<i class="sw" style="background:${hex}" title="${t}：${colorName(hex)||hex}"></i>`;
-  const tg=(label,on,t)=>`<b class="tg${on?' on':''}" title="${t}：${on?'開':'關'}">${label}</b>`;
+  const cp=(label,hex,t,on)=>`<b class="cp${on===false?' off':''}" style="background:${hex};color:${inkOn(hex)}"`+
+    ` title="${t}：${colorName(hex)||hex}${on===false?'（未啟用）':''}">${label}</b>`;
+  const tg=(label,on,t,cls)=>`<b class="tg${on?' on':''}${cls?' '+cls:''}" title="${t}：${on?'開':'關'}">${label}</b>`;
   const n=(v,t)=>`<b class="n" title="${t}">${v}</b>`;
   const lbl=t=>`<span class="lbl">${t}</span>`;
   const sep=`<span class="sp">|</span>`;
@@ -53,14 +61,15 @@ function styleSummaryHtml(c){
       `<span title="多行／多句的垂直對齊">${va}</span>`+sep+
       `<span title="多行／多句的水平對齊">${al}</span>`+sep+
       `<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+sep+
-      `<span class="g" title="文字顏色">${lbl('色')}${sw(st.color,'文字顏色')}</span>`+sep+
-      `<span class="g" title="框線：粗細 ${st.outline}">${lbl('邊')}${sw(st.outlineColor,'框線顏色')}<span class="dash">-</span>${n(st.outline,'框線粗細')}</span>`+
+      cp('色',st.color,'文字顏色')+sep+
+      `<span class="g" title="框線粗細 ${st.outline}">${cp('框',st.outlineColor,'框線顏色')}${n(st.outline,'框線粗細')}</span>`+sep+
+      tg('B',st.bold,'粗體')+sep+tg('I',st.italic,'斜體','it')+
     `</span>`+
     `<span class="r2">`+
       `<span class="g" title="座標（像素，文字塊${al==='中對齊'&&va==='中對齊'?'中心':'錨點'}）">座標(${p.x},${p.y})</span>`+sep+
-      `<span class="g" title="旋轉角度">${lbl('角度')}${n(st.angle,'角度')}</span>`+sep+
+      `<span class="g" title="旋轉角度">${lbl('角度')}${n(st.angle,'角度')}<span class="lbl deg">°</span></span>`+sep+
       `<span title="排版方向">${st.vertical?'直式':'橫式'}</span>`+sep+
-      `<span class="g" title="底色／不透明度">${tg('底',st.bgBox,'背景色塊')}${sw(st.bgColor,'背景色')}<span class="dash">-</span>${n(Math.round(st.bgAlpha*100),'不透明度')}${lbl('%')}</span>`+sep+
+      `<span class="g" title="底色／不透明度">${cp('底',st.bgColor,'背景色塊',!!st.bgBox)}${n(Math.round(st.bgAlpha*100),'不透明度')}${lbl('%')}</span>`+sep+
       `<span class="g" title="字距／行距">${lbl('距')}${n(st.letterSpacing,'字距')}<span class="sp2">/</span>${n(st.lineSpacing,'行距')}</span>`+
     `</span>`;
 }

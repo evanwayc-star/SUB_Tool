@@ -49,9 +49,11 @@ export function styleToCss(st, ratio){
     `font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'};`+
     `line-height:${st.lineSpacing};`;
   if(st.letterSpacing) css += `letter-spacing:${(st.letterSpacing * r).toFixed(1)}px;`;
-  // 直書：瀏覽器原生直排——多行(<br>)自動分列(右→左)、CJK 標點自動轉直排字形；
+  // 直書：瀏覽器原生直排——多行(<br)自動分列、CJK 標點自動轉直排字形；
   // letter-spacing＝字間(縱)、line-height＝列間(橫)語義自動對。
-  if(st.vertical) css += `writing-mode:vertical-rl;text-orientation:mixed;`;
+  // vertical-【lr】＝第一行在最左、往右排（非 CJK 書籍的右→左傳統）。
+  // ASS 端 verticalAssCols() 依同一方向逐列定位——改這裡務必同時改那裡。
+  if(st.vertical) css += `writing-mode:vertical-lr;text-orientation:mixed;`;
   if(st.angle) css += `transform:rotate(${st.angle}deg);transform-origin:center center;`; // 繞文字塊中心旋轉
   if(st.outline > 0){
     // ASS outline 向外擴 N px；CSS stroke 置中描邊 → 寬度 2N 視覺對應，paint-order 讓筆畫墊在填色後
@@ -110,7 +112,8 @@ export function styleToAssStyleLine(name, st, vwh){
   const borderStyle = st.bgBox ? 3 : 1;
   const backCol = st.bgBox ? hexToAssColor(st.bgColor, st.bgAlpha) : '&H00000000';
   const shadowV = st.bgBox ? Math.max(1, st.shadow) : st.shadow; // BorderStyle=3 需 Outline/Shadow 撐出色塊範圍
-  return `Style: ${name},${st.font},${st.fontSize},${hexToAssColor(st.color)},&H00FFFFFF,${hexToAssColor(st.outlineColor)},${backCol},`+
+  // Fontname 走 assFontName()：ASS 要的是字型檔內部家族名，不是 UI 的資料夾名
+  return `Style: ${name},${assFontName(st.font)},${st.fontSize},${hexToAssColor(st.color)},&H00FFFFFF,${hexToAssColor(st.outlineColor)},${backCol},`+
     `${st.bold ? 1 : 0},${st.italic ? 1 : 0},0,0,100.0,100.0,${st.vertical ? 0 : st.letterSpacing},${(-(st.angle || 0)).toFixed(1)},`+
     `${borderStyle},${st.outline},${shadowV},${alignN},135,135,${mv},1`;
 }
@@ -127,7 +130,7 @@ export function cueAssPos(st, vww, vwh){
 export function cueAssTags(diff){
   if(!diff) return '';
   let t = '';
-  if(diff.font != null) t += `\\fn${diff.font}`;
+  if(diff.font != null) t += `\\fn${assFontName(diff.font)}`; // 同 Style：ASS 認的是內部家族名
   if(diff.fontSize != null) t += `\\fs${diff.fontSize}`;
   if(diff.color != null) t += `\\c${hexToAssColor(diff.color)}&`;
   if(diff.bold != null) t += `\\b${diff.bold ? 1 : 0}`;
@@ -140,14 +143,14 @@ export function cueAssTags(diff){
   return t ? `{${t}}` : '';
 }
 
-/* ---- 直書（單列逐字）：直排標點映射；原文換行 → 全形空格（第一版單列，多列直排留待後續） ---- */
+/* ---- 直書：直排標點映射 ---- */
 const VERT_PUNCT = {
   '，':'︐','。':'︒','、':'︑','：':'︓','；':'︔','！':'︕','？':'︖',
   '「':'﹁','」':'﹂','『':'﹃','』':'﹄','（':'﹙','）':'﹚','《':'︽','》':'︾',
   '〈':'︿','〉':'﹀','【':'︻','】':'︼','…':'⋮','—':'｜','–':'｜','ー':'｜',
   ',':'︐','.':'︒','!':'︕','?':'︖',':':'︓',';':'︔','(':'﹙',')':'﹚','~':'｜',
 };
-/* 回傳逐字陣列（已映射直排標點；\n→全形空格）。ASS 端 join('\\N')、HTML 端每字 escape 後 join('<br>') */
+/* 回傳逐字陣列（已映射直排標點；\n→全形空格）。HTML 端每字 escape 後 join('<br>') */
 export function verticalChars(text){
   const flat = String(text || '').replace(/\r/g, '').replace(/\n/g, '　');
   const out = [];
@@ -156,12 +159,39 @@ export function verticalChars(text){
 }
 
 /* 行距 hack：ASS 無行距欄位——行間插入一個「高度=gapPx 的 \h 空白行」，之後恢復字級 fsPx。
-   直書＝每字之間插（lineSpacing 在直書＝字間隔）。lineSpacing<=1 時原樣不動。 */
+   lineSpacing<=1 時原樣不動。 */
 export function assJoinLines(lines, st){
   const fs = st.fontSize;
   const gap = Math.round((Math.max(1, st.lineSpacing) - 1) * fs);
   if(gap <= 0) return lines.join('\\N');
   return lines.join(`\\N{\\fs${gap}}\\h\\N{\\fs${fs}}`);
+}
+
+/* 直書單列：逐字換行；字與字之間插入「高度＝字距」的空白行。
+   （Style 的 Spacing 是「行內字距」，逐字換行後每字自成一行 → 對它無效，故走同一套墊高 hack） */
+export function assJoinVertical(chars, st){
+  const gap = Math.round(st.letterSpacing || 0);
+  if(gap <= 0) return chars.join('\\N');
+  return chars.join(`\\N{\\fs${gap}}\\h\\N{\\fs${st.fontSize}}`);
+}
+
+/* 直書 → ASS 多列：ASS 沒有 writing-mode，故【一列一個 Dialogue】自己排。
+   回 [{chars, x, y, an}]，列序左→右（第一行在最左，與 HTML 的 vertical-lr 同構）。
+
+   ── y 不自己算：交給 libass。valign→\an（上8/中5/下2）讓每列各自貼齊同一條基準線，
+      正好等於「多列之間上／中／下對齊」的語義。各列長度不同、且 ASS 行高並非剛好等於
+      字級，硬估文字高度必歪——這樣就完全不必估。
+   ── x 自己算：列距＝fontSize×lineSpacing，恰為 CSS `line-height:<number>` 在直書時的
+      水平步進 → 與預覽同一個數。整塊寬 W＝列數×列距，再依 align 決定哪一側對齊 posX
+      （對應 HTML 容器的 translate 補償）。 */
+export function verticalAssCols(st, text, vww, vwh){
+  const cols = String(text || '').replace(/\r/g, '').split('\n').map(l => verticalChars(l));
+  const colW = st.fontSize * Math.max(1, st.lineSpacing);
+  const W = cols.length * colW;
+  const X = (st.posX / 100) * vww, Y = Math.round((st.posY / 100) * vwh);
+  const left = st.align === 'left' ? X : st.align === 'right' ? X - W : X - W / 2;
+  const an = { top: 8, middle: 5, bottom: 2 }[st.valign || 'bottom'];
+  return cols.map((chars, i) => ({ chars, x: Math.round(left + i * colW + colW / 2), y: Y, an }));
 }
 
 /* ---- 常用樣式庫（跨專案；桌面存 config.json、網頁存 localStorage） ---- */
@@ -185,10 +215,20 @@ export function savePresets(list){
     else localStorage.setItem(LS_KEY, JSON.stringify(list));
   }catch(e){}
 }
-/* ---- 字幕字型（v4.25.4）：桌面版掃 <專案根>/font/，注入 @font-face 供預覽；
+/* ---- 字幕字型（v4.25.4）：桌面版掃 <專案根>/font/，以 FontFace 註冊供預覽；
    匯出（libass）由主程序以 fontsdir 指向同一資料夾 → 預覽＝燒錄同一份字型。 ---- */
-let _fonts = null; // [{name,file}]
+let _fonts = null; // [{name:資料夾名（UI／CSS 用）, file, family:檔案內部家族名（ASS 用）}]
 export function getFonts(){ return _fonts || []; }
+
+/* 資料夾名 → ASS Fontname（v4.29.3 修）。
+   ── libass／fontconfig 只認字型檔【內部的家族名】；我們 UI 用的是使用者自取的資料夾名
+      （「台北黑體」vs 檔內的 "Taipei Sans TC Beta"）。直接把資料夾名填進 ASS，libass 找不到
+      就【靜默】退回系統字型 → 匯出／mpv 與預覽字型不同，且毫無錯誤訊息。
+   不在自備清單者（使用者自填的系統字型名）原樣傳回。 */
+export function assFontName(name){
+  const f = getFonts().find(x => x.name === name);
+  return (f && f.family) || name;
+}
 export async function loadFonts(){
   if(_fonts) return _fonts;
   _fonts = [];

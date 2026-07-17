@@ -1,7 +1,7 @@
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
-import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, verticalChars, assJoinLines } from './substyle.js';
+import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols } from './substyle.js';
 
 /* ===== 2. 字幕格式 解析 / 序列化 ====================================== */
 const SubFormats = {
@@ -81,12 +81,19 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
     }).map(c=>{
       const trk = (tracks && tracks.length > (c.track||0)) ? tracks[c.track||0] : null;
       const st = effStyle(c, trk);
-      const lines = st.vertical ? verticalChars(c.text || '')
-                                : String(c.text || '').replace(/\r/g, '').split('\n');
-      // \pos 精確落點（畫面百分比座標）＋逐句覆蓋 tags；錨點由 Style 的 Alignment 決定
-      const txt = cueAssPos(st, vww, vwh) + cueAssTags(c.style) + assJoinLines(lines, st);
       const styName = trk ? `Track${c.track||0}` : 'Default';
-      return `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styName},atg${(c.track||0)+1},0,0,0,,${txt}`;
+      const tags = cueAssTags(c.style);
+      const head = `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styName},atg${(c.track||0)+1},0,0,0,,`;
+      // 直書：ASS 無 writing-mode → 一列一個 Dialogue、逐列自己定位（見 verticalAssCols）。
+      // 每列以 inline \an 覆蓋 Style 的 Alignment（Style 是整軌共用的，做不到逐列）。
+      if(st.vertical){
+        return verticalAssCols(st, c.text || '', vww, vwh)
+          .map(col => `${head}{\\an${col.an}\\pos(${col.x},${col.y})}${tags}${assJoinVertical(col.chars, st)}`)
+          .join('\n');
+      }
+      // \pos 精確落點（畫面百分比座標）＋逐句覆蓋 tags；錨點由 Style 的 Alignment 決定
+      const lines = String(c.text || '').replace(/\r/g, '').split('\n');
+      return head + cueAssPos(st, vww, vwh) + tags + assJoinLines(lines, st);
     }).join('\n');
     return head+styles+eventsHead+body+'\n';
   },

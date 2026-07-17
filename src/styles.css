@@ -319,15 +319,25 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .sub-sty .r2{color:var(--text-faint)}  /* 細節：座標/角度/直橫/底色/間距 —— 較淡，不搶戲 */
 .sub-row .sub-sty .g{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
 .sub-row .sub-sty .n{font-style:normal;font-weight:500;color:var(--text-dim)}
-.sub-row .sub-sty .lbl{opacity:.45}  /* 欄位標籤（字/色/邊/底/角度/距/%）：讓數值本身跳出來 */
+.sub-row .sub-sty .lbl{opacity:.45}  /* 欄位標籤（字／角度／距／%）：讓數值本身跳出來 */
+.sub-row .sub-sty .deg{margin-left:-3px}  /* 度數符號要黏著數字（抵掉 .g 的 flex gap）：0° 不是 0 ° */
 .sub-row .sub-sty .fn{max-width:78px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}
 .sub-row .sub-sty .sw{width:10px;height:10px;border-radius:50%;border:1px solid rgba(255,255,255,.25);flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
+/* 色票膠囊：膠囊本身就填該顏色、標籤壓在上面（標籤＋色點合一）。
+   固定描邊＝深淺兩端的顏色都框得出來（純黑塊在深色列上、純白塊在淺色主題上都不會糊掉）。 */
+.sub-row .sub-sty .cp{
+  display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:16px;padding:0 5px;
+  border-radius:8px;font-size:10px;font-weight:700;font-style:normal;flex-shrink:0;
+  border:1px solid rgba(255,255,255,.5);box-shadow:0 0 0 1px rgba(0,0,0,.5);
+}
+.sub-row .sub-sty .cp.off{opacity:.32}  /* 底色塊未啟用 */
 .sub-row .sub-sty .tg{
   display:inline-flex;align-items:center;justify-content:center;min-width:17px;height:16px;padding:0 4px;
   border-radius:8px;font-size:10px;font-weight:600;font-style:normal;
   background:transparent;color:var(--text-faint);border:1px solid var(--border2);
 }
 .sub-row .sub-sty .tg.on{background:var(--accent);border-color:var(--accent);color:#0d0d0d}
+.sub-row .sub-sty .tg.it{font-style:italic}  /* 斜體鈕自己就長得斜——不必再標「斜體」二字 */
 .sub-row .sub-styname{flex:1 1 140px;min-width:120px;align-self:center;overflow:hidden;text-align:left;padding-left:4px}
 .sub-row .sub-styname .nm{
   display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;

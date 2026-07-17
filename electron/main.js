@@ -676,12 +676,65 @@ function fontsRoot() {
   return null;
 }
 const FONT_EXT = /\.(ttf|otf|ttc|woff2?)$/i;
+
+/* 讀出字型檔【內部的家族名】（sfnt name table）供 ASS Fontname 使用。
+   ── 為什麼非讀不可（v4.29.3 修）：ASS 的 Fontname 是給 libass／fontconfig 比對用的，它們只認
+      字型檔內部的家族名；我們 UI 顯示的是【資料夾名】（使用者自己取，例如「台北黑體」，
+      而檔案內部其實叫 "Taipei Sans TC Beta"）。直接把資料夾名填進 ASS → libass 找不到 →
+      靜默退回系統字型（實測全部退到微軟正黑體）→ 匯出/mpv 與預覽字型不同，且毫無錯誤訊息。
+   ── 為什麼是 nameID 1 而非 16：libass 的目錄字型供應者走 FreeType 的 face->family_name，
+      那就是 nameID 1。取 16（typographic family）會漏掉權重字尾——例如思源黑體的
+      nameID1="Noto Sans CJK TC Regular"、nameID16="Noto Sans CJK TC"，填 16 一樣配不到（實測）。
+   ── 取英文（Windows platform 3 / lang 0x0409）：FreeType 亦以英文名為 family_name。 */
+function fontFamilyOf(file) {
+  let fd = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    const read = (pos, len) => { const b = Buffer.alloc(len); fs.readSync(fd, b, 0, len, pos); return b; };
+    let base = 0;
+    if (read(0, 4).toString('latin1') === 'ttcf') base = read(12, 4).readUInt32BE(0); // TTC＝字型集合，取第一個 face
+    const numTables = read(base + 4, 2).readUInt16BE(0);
+    let nameOff = 0, nameLen = 0;
+    for (let i = 0; i < numTables; i++) {
+      const e = read(base + 12 + i * 16, 16);
+      if (e.toString('latin1', 0, 4) === 'name') { nameOff = e.readUInt32BE(8); nameLen = e.readUInt32BE(12); break; }
+    }
+    if (!nameOff || !nameLen) return null;
+    const t = read(nameOff, nameLen);
+    const count = t.readUInt16BE(2), strOff = t.readUInt16BE(4);
+    const cand = {}; // `${nameID}|${英文?1:0}` → 字串
+    for (let i = 0; i < count; i++) {
+      const r = 6 + i * 12;
+      if (r + 12 > t.length) break;
+      const pid = t.readUInt16BE(r), lid = t.readUInt16BE(r + 4);
+      const nid = t.readUInt16BE(r + 6), len = t.readUInt16BE(r + 8), off = t.readUInt16BE(r + 10);
+      if (nid !== 1 && nid !== 16) continue;
+      const raw = t.subarray(strOff + off, strOff + off + len);
+      if (!raw.length) continue;
+      // platform 3(Windows)/0(Unicode) 為 UTF-16BE；1(Mac) 為單 byte
+      const s = (pid === 3 || pid === 0)
+        ? Buffer.from(raw).swap16().toString('utf16le').replace(/\0/g, '')
+        : raw.toString('latin1');
+      if (!s.trim()) continue;
+      const en = (pid === 3 && lid === 0x0409) || (pid === 1 && lid === 0) ? 1 : 0;
+      const k = `${nid}|${en}`;
+      if (!cand[k]) cand[k] = s.trim();
+    }
+    return cand['1|1'] || cand['16|1'] || cand['1|0'] || cand['16|0'] || null;
+  } catch (e) { console.error('[fonts] family', file, e.message); return null; }
+  finally { if (fd != null) try { fs.closeSync(fd); } catch (e2) {} }
+}
+
 ipcMain.handle('fonts:list', () => {
   const root = fontsRoot();
   if (!root) return { root: null, fonts: [] };
   allowDir(root); // 納入路徑白名單，renderer 才能取 fileURL 讀字型位元組（FontFace 註冊）
   const out = [];
-  const pushFile = (name, file) => { if (!out.some(f => f.name === name)) out.push({ name, file }); };
+  // name＝資料夾名（UI／CSS FontFace 用）；family＝檔案內部家族名（ASS Fontname 用，見 fontFamilyOf）
+  const pushFile = (name, file) => {
+    if (out.some(f => f.name === name)) return;
+    out.push({ name, file, family: fontFamilyOf(file) || name });
+  };
   try {
     for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
       const full = path.join(root, ent.name);
