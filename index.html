@@ -134,16 +134,12 @@
             <input type="number" id="tsShadow" min="0" max="10" step="0.5" value="0" title="陰影大小 px">
             <span class="ts-sep">│</span>
             <span class="ts-label" title="多行／多句字幕彼此的對齊方式">對齊</span>
-            <div class="ts-btngrp">
-              <button class="ts-preset" data-ts-align="left">左</button>
-              <button class="ts-preset" data-ts-align="center">中</button>
-              <button class="ts-preset" data-ts-align="right">右</button>
-            </div>
-            <div class="ts-btngrp">
-              <button class="ts-preset" data-ts-valign="top">上</button>
-              <button class="ts-preset" data-ts-valign="middle">中</button>
-              <button class="ts-preset" data-ts-valign="bottom">下</button>
-            </div>
+            <select id="tsAlign" title="左右對齊">
+              <option value="left">左</option><option value="center">中</option><option value="right">右</option>
+            </select>
+            <select id="tsValign" title="上下對齊">
+              <option value="top">上</option><option value="middle">中</option><option value="bottom">下</option>
+            </select>
             <span class="ts-sep">│</span>
             <button class="ts-toggle" id="tsBold" title="粗體"><b>B</b></button>
             <button class="ts-toggle" id="tsItalic" title="斜體"><i>I</i></button>

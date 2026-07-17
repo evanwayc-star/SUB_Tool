@@ -74,4 +74,24 @@ $('modalBg').addEventListener('keydown',e=>{
   }
 },true);
 
-export { setStatus, showToast, showOsd, openModal, closeModal };
+/* 取代 window.prompt：Electron 停用了原生 prompt（呼叫會拋
+   "prompt() is and will not be supported."）→ 任何靠 prompt 取名字的功能都會【靜默失敗】
+   （v4.32.2 前的「存為常用／改名／自訂字型」正是如此）。此為 modal 版，回傳 Promise<string|null>
+   （確定＝去頭尾空白後的字串；取消／空字串＝null）。 */
+function promptModal(title, label, defVal = '', { placeholder = '', okLabel = '確定' } = {}){
+  return new Promise(resolve => {
+    const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+    let done = false;
+    const finish = v => { if(done) return; done = true; closeModal(); resolve(v); };
+    openModal(title,
+      `<div style="font-size:13px;color:var(--text-dim);margin-bottom:8px">${esc(label)}</div>`+
+      `<input type="text" id="__promptInput" value="${esc(defVal)}" placeholder="${esc(placeholder)}" `+
+      `style="width:100%;box-sizing:border-box;font-size:14px;padding:7px 9px;background:var(--bg2);`+
+      `border:1px solid var(--border2);border-radius:5px;color:var(--text)">`,
+      [{ label: okLabel, primary: true, act: () => { const v = ($('__promptInput')?.value || '').trim(); finish(v || null); } },
+       { label: '取消', act: () => finish(null) }]);
+    setTimeout(() => { const el = $('__promptInput'); if(el){ el.focus(); el.select(); } }, 30);
+  });
+}
+
+export { setStatus, showToast, showOsd, openModal, closeModal, promptModal };

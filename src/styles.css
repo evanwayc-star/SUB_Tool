@@ -169,8 +169,8 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .idx{width:26px;color:var(--text-faint);font-size:11px;text-align:right;padding-top:2px;flex-shrink:0;font-variant-numeric:tabular-nums}
 .sub-row .body{flex:1;min-width:0}
-.sub-row .times{display:flex;gap:6px;font-family:"JetBrains Mono","Segoe UI Variable","Consolas",monospace;font-size:11px;color:var(--text-dim);margin-bottom:3px;align-items:center}
-.sub-row .times .dur{color:var(--text-faint);margin-left:8px}
+.sub-row .times{display:flex;gap:4px;font-family:"JetBrains Mono","Segoe UI Variable","Consolas",monospace;font-size:10.5px;letter-spacing:-.2px;color:var(--text-dim);margin-bottom:3px;align-items:center}
+.sub-row .times .dur{color:var(--text-faint);margin-left:6px}
 .sub-row .times .untimed{color:var(--red)}
 .sub-row .txt{font-size:16px;line-height:1.4;white-space:pre-wrap;word-break:break-word;color:var(--text);min-height:18px;
   border:1px solid transparent;border-radius:4px;padding:2px 4px}
@@ -314,11 +314,12 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .track-style input[type=color]{width:26px;height:22px;padding:0;border:1px solid var(--line,#3a4150);border-radius:4px;background:none;cursor:pointer}
 /* v4.25.6 字幕列表右側：樣式摘要（分組膠囊）＋ 常用樣式名稱徽章。
    密而有序：數字等寬對齊、顏色用圓點、開關用膠囊（填色＝開），組間以留白分隔而非框線。 */
-/* 摘要吃掉文字右側原本的大片空白（文字區收窄但保底寬度，摘要與名稱往左展開） */
-.sub-row .body{flex:1 1 200px;min-width:190px;max-width:330px}
+/* 摘要吃掉文字右側原本的大片空白：body 寬度固定＝時間碼那行的寬度（不隨字幕長短伸縮），
+   摘要緊接其後。body 太窄會讓中文字幕逐字換行成直排（v4.32.2 曾誤犯），故給足固定寬。 */
+.sub-row .body{flex:0 0 275px;min-width:0;max-width:275px}
 .sub-row .sub-sty{
   display:flex;flex-direction:column;align-items:flex-start;align-self:center;gap:4px;
-  flex:0 0 auto;margin-left:24px;  /* 與文字區稍微拉開（.body 的寬度是被時間碼那行撐出來的） */
+  flex:0 0 auto;margin-left:10px;  /* v4.32.2 空白由 24→10px（時間碼那行也縮字級，整體更緊） */
   font-size:11px;line-height:1.6;
   font-variant-numeric:tabular-nums;letter-spacing:.01em;
 }

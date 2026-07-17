@@ -22,7 +22,7 @@ import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackD
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
-import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
+import { setStatus, showToast, showOsd, openModal, closeModal, promptModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
 import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
@@ -823,8 +823,7 @@ function renderTrackStyle(){
   $('tsBold')?.classList.toggle('active',!!st.bold); $('tsItalic')?.classList.toggle('active',!!st.italic);
   $('tsVertical')?.classList.toggle('active',!!st.vertical); $('tsBgBox')?.classList.toggle('active',!!st.bgBox);
   panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===st.fontSize));
-  panel.querySelectorAll('.ts-preset[data-ts-valign]').forEach(b=>b.classList.toggle('active',b.dataset.tsValign===(st.valign||'bottom')));
-  panel.querySelectorAll('.ts-preset[data-ts-align]').forEach(b=>b.classList.toggle('active',b.dataset.tsAlign===(st.align||'center')));
+  setV('tsAlign', st.align||'center'); setV('tsValign', st.valign||'bottom');
   // 底色未啟用時把色框/透明度變暗（消除「改了 bgColor 卻沒反應」的困惑——需先按「底」）
   const bgOn=!!st.bgBox; ['tsBgColor','tsBgAlpha'].forEach(id=>{ const el=$(id); if(el){ el.style.opacity=bgOn?'1':'.4'; el.title=(el.title||'').replace(/（未啟用.*$/,'')+(bgOn?'':'（未啟用：先按「底」）'); } });
   panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===(st.color||'').toLowerCase()));
@@ -1054,20 +1053,21 @@ function initUI(){
   $('tsBgAlpha').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   tsToggle('tsBold','bold'); tsToggle('tsItalic','italic');
   tsToggle('tsVertical','vertical'); tsToggle('tsBgBox','bgBox');
-  $('tsFont').addEventListener('change',e=>{
+  $('tsFont').addEventListener('change',async e=>{
     if(e.target.value==='__custom'){
       const t=styleTarget();
       const cur=t?effStyle(t.cue,t.trk).font:'';
-      const name=prompt('輸入字型名稱（需已安裝於系統；匯出燒入亦用此字型）', cur);
-      if(name&&name.trim()) tsSet('font', name.trim()); else renderTrackStyle();
+      const name=await promptModal('自訂字型','字型名稱（需已安裝於系統；匯出燒入亦用此字型）',cur);
+      if(name) tsSet('font', name); else renderTrackStyle();
     } else tsSet('font', e.target.value);
   });
   // 常用樣式庫：存 / 套用 / 管理（跨專案，存 config）
   // 存＝面板目前顯示的那組生效樣式（選取句 or 整軌）；套用＝同樣寫回面板當前的對象
-  $('tsPresetSave').addEventListener('click',()=>{
+  $('tsPresetSave').addEventListener('click',async()=>{
     const t=styleTarget(); if(!t)return;
-    const name=prompt('常用樣式名稱', t.trk.name+' 樣式'); if(!name||!name.trim())return;
-    const list=[...getPresets()]; const nm=name.trim();
+    const nm=await promptModal('存為常用樣式','取一個名字（同名會覆蓋）', t.trk.name+' 樣式');
+    if(!nm)return;
+    const list=[...getPresets()];
     const style=styleSnapshot(effStyle(t.cue, t.trk));
     const ex=list.findIndex(p=>p.name===nm);
     if(ex>=0) list[ex]={name:nm,style}; else list.push({name:nm,style});
@@ -1081,15 +1081,41 @@ function initUI(){
     else Object.assign(t.trk, p.style);
     styleChanged(); recordHistory('套用常用樣式：'+v);
   });
-  $('tsPresetMgr').addEventListener('click',()=>{
+  /* 常用樣式管理：每列＝小色票預覽＋名稱＋套用/改名/刪除。事件用委派（一次綁在 modalBody），
+     操作後就地重繪列表、不關視窗（可連續管理）。 */
+  const _presetSwatch=st=>`<span style="display:inline-block;min-width:30px;padding:2px 7px;border-radius:4px;`+
+    `font-size:12px;font-weight:${st.bold?700:400};font-style:${st.italic?'italic':'normal'};`+
+    `background:${st.bgBox?st.bgColor:'#222'};color:${st.color};`+
+    `border:1px solid rgba(255,255,255,.2);${st.outline>0?`text-shadow:0 0 2px ${st.outlineColor},0 0 2px ${st.outlineColor};`:''}">字</span>`;
+  function _renderPresetMgr(){
     const list=getPresets();
-    if(!list.length){ showToast('尚無常用樣式；先用「☆ 存為常用」建立'); return; }
-    const rows=list.map((p,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--line,#333)">`+
-      `<span style="flex:1">${escapeHTML(p.name)}</span>`+
-      `<button class="ts-preset" data-pre-ren="${i}">改名</button><button class="ts-preset" data-pre-del="${i}">刪除</button></div>`).join('');
-    openModal('⚙ 常用樣式管理', `<div style="max-height:300px;overflow:auto">${rows}</div>`, [{label:'關閉',primary:true,act:closeModal}]);
-    setTimeout(()=>{ document.querySelectorAll('[data-pre-del]').forEach(b=>b.onclick=()=>{ const l=[...getPresets()]; l.splice(+b.dataset.preDel,1); savePresets(l); closeModal(); renderTrackStyle(); showToast('已刪除'); });
-      document.querySelectorAll('[data-pre-ren]').forEach(b=>b.onclick=()=>{ const l=[...getPresets()]; const p=l[+b.dataset.preRen]; const nn=prompt('新名稱',p.name); if(nn&&nn.trim()){ p.name=nn.trim(); savePresets(l); closeModal(); renderTrackStyle(); } }); },0);
+    const body=$('modalBody'); if(!body)return;
+    if(!list.length){ body.innerHTML=`<div style="color:var(--text-faint);font-size:13px;padding:20px 0;text-align:center">尚無常用樣式。<br>在樣式面板調好後，按「☆ 存為常用」即可建立。</div>`; return; }
+    body.innerHTML=`<div style="max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:2px">`+
+      list.map((p,i)=>{ const st=Object.assign({},STYLE_DEFAULTS,p.style||{});
+        return `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border)">`+
+          _presetSwatch(st)+
+          `<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(p.name)}</span>`+
+          `<button class="ts-preset" data-pre-apply="${i}" title="套用到目前選取的字幕（或整軌）">套用</button>`+
+          `<button class="ts-preset" data-pre-ren="${i}">改名</button>`+
+          `<button class="ts-preset" data-pre-del="${i}" style="color:var(--red,#e66)">刪除</button></div>`;
+      }).join('')+`</div>`;
+  }
+  $('tsPresetMgr').addEventListener('click',()=>{
+    if(!getPresets().length){ showToast('尚無常用樣式；先用「☆ 存為常用」建立'); return; }
+    openModal('⚙ 常用樣式管理','',[{label:'關閉',primary:true,act:closeModal}]);
+    _renderPresetMgr();
+  });
+  $('modalBody').addEventListener('click',async e=>{
+    const applyB=e.target.closest('[data-pre-apply]');
+    const renB=e.target.closest('[data-pre-ren]');
+    const delB=e.target.closest('[data-pre-del]');
+    if(applyB){ const p=getPresets()[+applyB.dataset.preApply]; const t=styleTarget();
+      if(p&&t){ if(t.cue) t.cue.style=Object.assign(t.cue.style||{},p.style); else Object.assign(t.trk,p.style);
+        styleChanged(); recordHistory('套用常用樣式：'+p.name); showToast('已套用：'+p.name); } return; }
+    if(renB){ const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;
+      const nn=await promptModal('改名','新名稱',p.name); if(nn){ p.name=nn; savePresets(l); renderTrackStyle(); _renderPresetMgr(); } return; }
+    if(delB){ const l=[...getPresets()]; l.splice(+delB.dataset.preDel,1); savePresets(l); renderTrackStyle(); _renderPresetMgr(); showToast('已刪除'); }
   });
   /* 全軌統一：清掉本軌所有「逐句樣式覆蓋」，讓每句都回到軌道樣式。
      ── 軌道樣式本來就是全軌生效；唯一會脫隊的就是設過覆蓋的句子（列表標 ✱ 自訂）。
@@ -1117,18 +1143,16 @@ function initUI(){
         showToast('已把'+來源+'的樣式套用到整條軌道');
       }}]);
   });
-  // 預設按鈕（大小 / 對齊 / 顏色）— 委派事件到面板；一律經 tsSet（選取句 or 整軌）
+  // 大小快捷鈕 / 顏色色票 — 委派點擊；一律經 tsSet（選取句 or 整軌）
   $('trackStyle').addEventListener('click',e=>{
     const sz=e.target.closest('.ts-preset[data-ts-size]');
     if(sz){ tsSet('fontSize', +sz.dataset.tsSize); return; }
-    // 對齊＝多行/多句彼此的對齊方式（同時決定文字塊以哪一側對齊座標）；位置一律由 X/Y 數值決定
-    const vg=e.target.closest('.ts-preset[data-ts-valign]');
-    if(vg){ tsSet('valign', vg.dataset.tsValign); return; }
-    const ag=e.target.closest('.ts-preset[data-ts-align]');
-    if(ag){ tsSet('align', ag.dataset.tsAlign); return; }
     const cl=e.target.closest('.ts-clr');
     if(cl) tsSet('color', cl.dataset.color);
   });
+  // 對齊改下拉（v4.32.2）：左右／上下＝多行多句彼此的對齊方式；位置一律由 X/Y 數值決定
+  $('tsAlign')?.addEventListener('change',e=>tsSet('align', e.target.value));
+  $('tsValign')?.addEventListener('change',e=>tsSet('valign', e.target.value));
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());
