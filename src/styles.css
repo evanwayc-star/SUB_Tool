@@ -2,12 +2,11 @@
    SUB Tool  —  Arctime 風格線上上字幕工具
    單一 HTML 檔，雙擊瀏覽器開啟即可使用
    ============================================================ */
-@font-face {
-  font-family: 'Noto Sans Mono CJK TC';
-  src: url('/fonts/NotoSansMonoCJKtc-Regular.otf') format('opentype');
-  font-weight: normal;
-  font-style: normal;
-}
+/* 註：這裡曾有一條 `@font-face { src: url('/fonts/NotoSansMonoCJKtc-Regular.otf') }`，已移除——
+   它在打包後必定失效（file:// 下 `/fonts/…` 會解析成磁碟根目錄，且 Chromium 擋 file:// 的
+   @font-face，這正是字幕字型改用 FontFace API 餵位元組的原因，見 substyle.loadFonts()）。
+   唯一的使用者是時間軸刻度 `ctx.font`，它本來就有 Consolas/monospace 後援。
+   為此扛的 16MB 字型檔（public/fonts→dist/fonts）已一併從版控與歷史移除。 */
 :root{
   --bg:#080808;          /* Pure Dark Gray/Black */
   --panel:#121212;       /* Material Dark Gray */
