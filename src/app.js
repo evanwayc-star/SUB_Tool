@@ -18,7 +18,7 @@ import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboa
 import { Project, ensureProjectSaved, resetProject, isProjectDirty } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
-import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
+import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts, posToPx } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
@@ -1431,7 +1431,8 @@ async function initDesktop(){
     History, recordHistory, renderHistory, addNote, renderNotes, togglePanel,
     parseTimecodeInput, snapVal, snapTargets, neighborBounds, setFps, snapFps, FPS_SET,
     toASSFromState, _stageRect }; // 三路一致診斷：ASS 產出＋字幕層座標基準（畫面實際顯示區）
-  window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview }; // 階段0 PoC＋階段1 預覽（驗證/診斷入口）
+  window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview,
+    demuxIndex: _wcDemuxIndex, SampleReader: _wcSampleReader }; // 階段0 PoC＋階段1 預覽＋v4.29 串流式 demux（驗證/診斷入口）
   window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts }; // v4.23 字幕樣式（驗證/診斷入口）
 }
 

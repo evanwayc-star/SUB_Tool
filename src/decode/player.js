@@ -14,27 +14,41 @@ import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
 import { emit } from '../events.js';
 import { showToast } from '../ui.js';
-import { demuxFile } from './demux.js';
+import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
-// 整檔 demux 上限（v4.25.1 提高到 1.5GB：長片的 720p proxy 約 1GB/2小時；再大需改串流式 demux）
+// 整檔 demux 上限——【僅退路用】（moov 不在檔頭／不支援 Range 的來源）。
+// 主路 demuxIndex 只讀檔頭建索引、位元組按需抓，記憶體與影片長度脫鉤，不受此限。
 const SIZE_CAP = 1500 * 1024 * 1024;
 
-/* demux 結果快取（url → Promise<{config,chunks}>）：同一來源疊在多條軌時，chunks 共享、decoder 各自。 */
+/* 來源解析快取（url → Promise<{config,index,keyIdx,reader}>）：同一來源疊在多條軌時，
+   索引與位元組視窗共享、decoder 各自。 */
 const _demuxCache = new Map();
 function demuxCached(url){
   let p = _demuxCache.get(url);
   if(!p){
     p = (async()=>{
+      // 主路：串流式（只讀檔頭 moov 建索引）——長片 proxy 動輒 2–4GB，整檔路吃不下
+      try{
+        const r = await demuxIndex(url);
+        if(!r.index.length) throw new Error('無視訊樣本');
+        return { config:r.config, index:r.index, keyIdx:r.keyIdx, reader:new SampleReader(url, r.index, r.maxEnd), streaming:true };
+      }catch(e){
+        console.warn('[WC] 串流式索引失敗，退回整檔:', e && (e.message||e));
+      }
+      // 退路：整檔抽出（moov 不在檔頭的外來檔／不支援 Range 的來源）
       const resp = await fetch(url);
       const len = +resp.headers.get('content-length') || 0;
-      if(len > SIZE_CAP){ try{ resp.body && resp.body.cancel(); }catch(e){} throw new Error('檔案過大（上限 600MB）'); }
+      if(len > SIZE_CAP){ try{ resp.body && resp.body.cancel(); }catch(e){} throw new Error('檔案過大'); }
       const ab = await resp.arrayBuffer();
       if(ab.byteLength > SIZE_CAP) throw new Error('檔案過大');
       const r = await demuxFile(ab);
       if(!r.chunks.length) throw new Error('無視訊樣本');
-      return r;
+      const keyIdx = [];
+      r.chunks.forEach((c,i)=>{ if(c.type==='key') keyIdx.push(i); });
+      if(!keyIdx.length) keyIdx.push(0);
+      return { config:r.config, index:r.chunks, keyIdx, reader:new MemReader(r.chunks), streaming:false };
     })();
     p.catch(()=>{ _demuxCache.delete(url); }); // 失敗不留快取（換檔/暫時性錯誤可重試）
     _demuxCache.set(url, p);
@@ -51,17 +65,17 @@ class SourceStream {
     if(this.state !== 'idle') return;
     this.state = 'loading';
     try{
-      const { config, chunks } = await demuxCached(this.url);
+      const { config, index, keyIdx, reader } = await demuxCached(this.url);
       // 預設軟解（穩定優先，720p 軟解 >3000fps；部分環境硬解連續解碼會卡住——見 decoder.js 註記）
       const cfg = Object.assign({ optimizeForLatency: true, hardwareAcceleration: 'prefer-software' }, config);
       const sup = await VideoDecoder.isConfigSupported(cfg);
       if(!sup.supported) throw new Error('VideoDecoder 不支援 ' + config.codec);
-      this.cfg = cfg; this.chunks = chunks;
+      this.cfg = cfg; this.chunks = index; this.keyIdx = keyIdx; this.reader = reader;
       this.frames = []; this.fedIdx = -1; this._flushed = false;
-      this.frameDurUs = chunks[0].duration || 33e3;
+      this.frameDurUs = index[0].duration || 33e3;
       // 串流最早呈現時間：B-frames 編碼（如 nvenc proxy）首幀 cts 常 >0（reorder 延遲）。
       // 呈現目標須夾到此下界，否則 t=0 會被「後退」誤判 → 無限 reseek、decoder 永遠吐不出 frame。
-      this.startUs = Math.min(...chunks.slice(0, 8).map(c => c.timestamp));
+      this.startUs = Math.min(...index.slice(0, 8).map(c => c.timestamp));
       this.dec = new VideoDecoder({
         output: (f)=>{ this.frames.push(f); },   // 只收；清理集中在 request()（避免 close 到呈現中的 frame）
         error: (e)=>{ console.error('[WC] decoder error:', e && (e.message||e)); this.state = 'failed'; },
@@ -77,12 +91,15 @@ class SourceStream {
     }
   }
 
+  /* 目標時間所屬 GOP 的關鍵幀 chunk 索引。keyIdx 上二分搜尋——每幀每層都要問，
+     長片（2 小時＝17 萬顆樣本）逐顆線性掃會直接吃掉整個 frame budget。 */
   _keyBefore(tUs){
-    let k = 0;
-    for(let i=0;i<this.chunks.length;i++){
-      const c = this.chunks[i];
-      if(c.type==='key' && c.timestamp<=tUs) k = i;
-      else if(c.timestamp > tUs) break;
+    const ki = this.keyIdx, cs = this.chunks;
+    let lo = 0, hi = ki.length - 1, k = ki[0];
+    while(lo <= hi){
+      const m = (lo + hi) >> 1;
+      if(cs[ki[m]].timestamp <= tUs){ k = ki[m]; lo = m + 1; }
+      else hi = m - 1;
     }
     return k;
   }
@@ -113,14 +130,19 @@ class SourceStream {
                      : (this.fedIdx > 0 ? cs[this._fedFrom].timestamp : null);
     if(this.fedIdx < 0 || (earliestTs != null && tUs < earliestTs - half) || ki > this.fedIdx) this._reseek(tUs);
 
-    // 餵：直到「最後已解 frame」涵蓋 t+lookahead、或 decoder 佇列滿、或檔尾
+    // 餵：直到「最後已解 frame」涵蓋 t+lookahead、或 decoder 佇列滿、或檔尾、或位元組還沒到
+    let starved = false;
     while(this.fedIdx < cs.length && this.dec.decodeQueueSize < MAX_QUEUE){
       const lastOutTs = this.frames.length ? this.frames[this.frames.length-1].timestamp : -1;
       if(lastOutTs >= tUs + LOOKAHEAD_US) break;
+      // 串流式：位元組按需抓，尚未到位就這幀先不餵（下一幀再來；期間沿用上一張畫面）
+      const data = this.reader.data(this.fedIdx);
+      if(!data){ this.reader.ensure(this.fedIdx); starved = true; break; }
       const c = cs[this.fedIdx++];
-      try{ this.dec.decode(new EncodedVideoChunk({ type:c.type, timestamp:c.timestamp, duration:c.duration, data:c.data })); }
+      try{ this.dec.decode(new EncodedVideoChunk({ type:c.type, timestamp:c.timestamp, duration:c.duration, data })); }
       catch(e){ console.error('[WC] decode err:', e && (e.message||e)); this.state='failed'; return null; }
     }
+    if(!starved) this.reader.ensure(this.fedIdx); // 預取下一個視窗（播放時永遠領先游標一格）
     if(this.fedIdx >= cs.length && !this._flushed){ this._flushed = true; this.dec.flush().catch(()=>{}); } // 檔尾 drain
 
     // 挑 frame：最後一個 ts ≤ t＋半幀；都還沒解到但第一張已很近（<200ms）→ 先用它避免黑幀
@@ -134,7 +156,9 @@ class SourceStream {
   dispose(){
     try{ this.dec && this.dec.close(); }catch(e){}
     if(this.frames) for(const f of this.frames){ try{ f.close(); }catch(e){} }
-    this.frames = []; this.chunks = null; this.state = 'failed';
+    this.frames = []; this.chunks = null; this.keyIdx = null;
+    this.reader = null; // 視窗位元組隨 reader 一起放掉（reader 由 _demuxCache 持有、同來源共用）
+    this.state = 'failed';
   }
 }
 

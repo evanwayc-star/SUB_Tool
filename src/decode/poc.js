@@ -58,3 +58,4 @@ export async function pocTest(url, opts){
 
 // 供 PoC 分步診斷（window.SUB.WC）
 export { demuxFile, TrackDecoder };
+export { demuxIndex, SampleReader } from './demux.js'; // v4.29 串流式：索引＋按需取位元組
