@@ -26,11 +26,14 @@ export const STYLE_DEFAULTS = {
   angle: 0, // 旋轉角度（度，順時針為正；繞文字塊中心）→ ASS Style Angle／\frz（逆時針故取負）、CSS rotate
 };
 
-/* 逐句覆蓋允許的欄位。
-   posX/posY 自 v4.30 納入（在預覽窗直接拖某一句＝只挪那一句，其餘不動）。
-   align/valign 與背景色塊仍屬軌道級語義：對齊是「多句彼此怎麼排」，逐句設沒有意義；
-   ASS 的 BorderStyle 也無 inline tag 可逐句覆蓋。 */
-export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letterSpacing','lineSpacing','outline','outlineColor','shadow','vertical','angle','posX','posY'];
+/* 逐句覆蓋允許的欄位＝樣式面板改得動的全部（v4.31：面板預設就是在改「選取的那一句」）。
+   posX/posY 自 v4.30 納入（在預覽窗直接拖某一句＝只挪那一句）。
+   align/valign 走逐句 \an；背景色塊（bgBox/bgColor/bgAlpha）ASS 只有 Style 行表達得出來、
+   沒有 inline tag → 由 formats.js 為有覆蓋的句子額外生一條 Style（見 STYLE_ONLY_KEYS）。 */
+export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letterSpacing','lineSpacing','outline','outlineColor','shadow','vertical','angle','posX','posY','align','valign','bgBox','bgColor','bgAlpha'];
+
+/* 只有 ASS Style 行表達得出來的欄位（無對應 inline tag）→ 該句得自帶一條 Style */
+export const STYLE_ONLY_KEYS = ['bgBox','bgColor','bgAlpha'];
 
 /* 生效樣式：預設 ⊕ 軌道 ⊕ 逐句覆蓋（cue 可為 null＝取軌道樣式） */
 export function effStyle(cue, track){
@@ -42,6 +45,11 @@ export function effStyle(cue, track){
   if(cue && cue.style) for(const k of CUE_STYLE_KEYS){ if(cue.style[k] != null) st[k] = cue.style[k]; }
   return st;
 }
+
+/* ASS 的虛擬畫布（PlayResX/Y）。字級／框線／陰影都是相對 【PlayResY（高）】換算的
+   （ScaledBorderAndShadow: yes），座標則相對兩軸。HTML 預覽必須用同一組數字換算，
+   否則預覽與 mpv／匯出對不上。ASS 匯出端（subio.toASSFromState）吃的也是這個常數。 */
+export const ASS_PLAY_RES = { x: 1920, y: 1080 };
 
 /* 文字塊的錨點（align/valign 決定塊的哪一側貼齊座標）。
    HTML 用它做兩件事：容器的 translate 補償、旋轉支點（transform-origin）。 */
@@ -111,6 +119,14 @@ export function hexToAssColor(hex, alpha01){
   const v = c.length === 6 ? c : 'ffffff';
   const aa = alpha01 == null ? '00' : Math.round((1 - Math.max(0, Math.min(1, alpha01))) * 255).toString(16).padStart(2, '0').toUpperCase();
   return `&H${aa}${v.slice(4,6)}${v.slice(2,4)}${v.slice(0,2)}`.toUpperCase();
+}
+
+/* 生效樣式 → ASS Alignment（\an 的 1-9 numpad）＝ 垂直基數(下1/中4/上7) ＋ 水平(左0/中1/右2)。
+   Style 行與逐句 \an 共用，避免兩處各算一次而漂掉。 */
+export function assAlignN(st){
+  const vbase = { top: 7, middle: 4, bottom: 1 }[st.valign || 'bottom'];
+  const acol = { left: 0, center: 1, right: 2 }[st.align];
+  return vbase + (acol != null ? acol : 1);
 }
 
 /* 軌道生效樣式 → ASS Style 行（V4+ 欄位序）。name=樣式名；vwh=PlayResY（MarginV 換算用） */
@@ -269,8 +285,12 @@ export async function loadFonts(){
 }
 
 /* 從軌道取可存為 preset 的樣式子集（不含 name/visible/locked 等非樣式欄位） */
-export function trackStyleSnapshot(track){
-  const st = effStyle(null, track), out = {};
+export function trackStyleSnapshot(track){ return styleSnapshot(effStyle(null, track)); }
+
+/* 生效樣式 → 可存入常用樣式庫的純物件：只挑 STYLE_DEFAULTS 的欄位，
+   濾掉軌道自己的 name／visible／locked 等非樣式屬性。 */
+export function styleSnapshot(st){
+  const out = {};
   for(const k in STYLE_DEFAULTS) out[k] = st[k];
   return out;
 }

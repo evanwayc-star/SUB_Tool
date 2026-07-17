@@ -4,6 +4,7 @@ import { $, video } from './dom.js';
 import { decodeText, b64ToBytes, readFile, pickFile, encodeUTF16LE, bytesToB64, downloadBytes, baseName, escapeHTML } from './util.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
+import { ASS_PLAY_RES } from './substyle.js'; // ASS 虛擬畫布：與 HTML 預覽的縮放基準共用同一組
 import { Media } from './media.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { snapAllCuesToFrames } from './subtitles.js';
@@ -269,11 +270,11 @@ function getXLSXFileData(trackDataList) {
 
 // A3：toASS 的 8 個參數（含視窗/視訊尺寸後援）集中在一處，避免 app.js（mpv 預覽）與
 // 此處（匯出 .ass）兩份引數列重複、後援值漂移導致預覽與匯出的字幕排版對不上。
+// PlayRes 走 substyle 的 ASS_PLAY_RES 常數：HTML 預覽的縮放基準吃的是同一組數字，
+// 兩邊各寫一份遲早會漂（字級／框線／陰影全都相對 PlayResY 換算）。
 function toASSFromState(cues) {
-  return SubFormats.toASS(
-    cues, State.fps, State.tracks,
-    1920, 1080, 1920, 1920, 1080
-  );
+  const { x: RX, y: RY } = ASS_PLAY_RES;
+  return SubFormats.toASS(cues, State.fps, State.tracks, RX, RY, RX, RX, RY);
 }
 
 /* ===== 匯出影片（序列）：ProRes 422 HQ / MP4，燒錄可見軌字幕，音訊依混音器設定輸出 =====

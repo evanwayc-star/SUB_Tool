@@ -1,7 +1,7 @@
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
-import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols } from './substyle.js';
+import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, STYLE_ONLY_KEYS } from './substyle.js';
 
 /* ===== 2. 字幕格式 解析 / 序列化 ====================================== */
 const SubFormats = {
@@ -73,15 +73,26 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
     }
 
     const eventsHead = `\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
-    const body=cues.filter(c=>{
+    const vis=cues.filter(c=>{
       if(c.timed===false) return false;
       const tk = c.track || 0;
       if(tracks && tracks[tk] && tracks[tk].visible === false) return false;
       return true;
-    }).map(c=>{
-      const trk = (tracks && tracks.length > (c.track||0)) ? tracks[c.track||0] : null;
+    });
+    // 背景色塊只有 Style 行表達得出來（BorderStyle/BackColour 無 inline tag）→ 有覆蓋到它的句子
+    // 各自帶一條專屬 Style。其餘欄位一律走 inline tag，不必為每句生 Style。
+    const trkOf = c => (tracks && tracks.length > (c.track||0)) ? tracks[c.track||0] : null;
+    const ownStyle = new Map(); // cue.id → Style 名
+    for(const c of vis){
+      if(!c.style || !STYLE_ONLY_KEYS.some(k => c.style[k] != null)) continue;
+      const nm = `Cue_${String(c.id).replace(/[^A-Za-z0-9_]/g,'')}`;
+      ownStyle.set(c.id, nm);
+      styles += styleToAssStyleLine(nm, effStyle(c, trkOf(c)), vwh) + '\n';
+    }
+    const body=vis.map(c=>{
+      const trk = trkOf(c);
       const st = effStyle(c, trk);
-      const styName = trk ? `Track${c.track||0}` : 'Default';
+      const styName = ownStyle.get(c.id) || (trk ? `Track${c.track||0}` : 'Default');
       const tags = cueAssTags(c.style);
       const head = `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styName},atg${(c.track||0)+1},0,0,0,,`;
       // 直書：ASS 無 writing-mode → 一列一個 Dialogue、逐列自己定位（見 verticalAssCols）。
@@ -91,9 +102,13 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
           .map(col => `${head}{\\an${col.an}\\pos(${col.x},${col.y})}${tags}${assJoinVertical(col.chars, st)}`)
           .join('\n');
       }
-      // \pos 精確落點（畫面百分比座標）＋逐句覆蓋 tags；錨點由 Style 的 Alignment 決定
+      // \pos 精確落點（畫面百分比座標）＋逐句覆蓋 tags。
+      // 錨點預設由 Style 的 Alignment 決定；該句自己覆蓋了對齊 → 補一個 inline \an
+      // （Style 是整軌共用的，改它會動到別句）。
+      const anOv = (c.style && (c.style.align != null || c.style.valign != null) && !ownStyle.has(c.id))
+        ? `{\\an${assAlignN(st)}}` : '';
       const lines = String(c.text || '').replace(/\r/g, '').split('\n');
-      return head + cueAssPos(st, vww, vwh) + tags + assJoinLines(lines, st);
+      return head + anOv + cueAssPos(st, vww, vwh) + tags + assJoinLines(lines, st);
     }).join('\n');
     return head+styles+eventsHead+body+'\n';
   },

@@ -618,6 +618,7 @@ function refreshSelectionUI(opts={}){
   }
   renderCueBlocks();
   updateTlSel();
+  emit('render:trackStyle'); // v4.31：面板改的是「選取中的那一句」→ 換選取就得換面板顯示的對象
 }
 function addCue(start,end,text,track){
   const added = ensureTrackCount((track||0)+1);

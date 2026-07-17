@@ -20,7 +20,7 @@ import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
-import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
+import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
@@ -40,6 +40,7 @@ if (typeof __APP_VERSION__ !== 'undefined') {
 on('render:all', renderAll);
 on('render:videoSub', renderVideoSub);
 on('render:listTrackSel', renderListTrackSel);
+on('render:trackStyle', renderTrackStyle); // 換選取字幕 → 樣式面板換對象（v4.31）
 on('render:trackStyle', renderTrackStyle);
 on('playhead:ensure', ensurePlayheadVisible);
 on('duration:known', onDurationKnown);
@@ -190,8 +191,11 @@ function renderVideoSub(){
     }
   }
   // 每個可見軌道各依其樣式疊加顯示（v4.23：樣式一律走 substyle.effStyle——與 ASS/mpv/匯出同構）
-  const playerWidth = (rect && rect.w) || _videoSub?.clientWidth || 1920;
-  const ratio = playerWidth / 1920;
+  // 縮放基準＝畫面【高】/ PlayResY：ASS 的 Fontsize／Outline／Shadow 都是相對 PlayResY 換算的。
+  // 舊版用「寬 / PlayResX」——16:9 時寬高等比例所以剛好對得上，一遇到別的比例就整個歪掉：
+  // 實測 2.35:1 的片字級佔畫面高 9.9%，而 16:9 與 ASS 都是 7.41%（大了 33%，且與匯出不符）。
+  const stageH = (rect && rect.h) || _videoSub?.clientHeight || ASS_PLAY_RES.y;
+  const ratio = stageH / ASS_PLAY_RES.y;
   let html='', sig=(rect ? rect.w+'x'+rect.h : '')+';'; // 畫面區變動（換片/不同比例/視窗縮放）須重繪
   try{
   for(let tk=0; tk<State.trackCount; tk++){
@@ -785,13 +789,25 @@ function renderListTrackSel(){
   sel.value=String(prev);
   renderTrackStyle();
 }
+/* 樣式面板的編輯對象（v4.31）：【選取中的那一句】；沒選任何句子時才退回整軌。
+   ── 使用者要的是「改樣式只影響這一句，要套到全部才按『全軌統一』」。 */
+function styleTarget(){
+  const i=State.listTrack, trk=State.tracks[i];
+  if(!trk) return null;
+  const cue=State.cues.find(c=>c.id===State.selectedId && (c.track||0)===i) || null;
+  return { i, trk, cue };
+}
+
 function renderTrackStyle(){
-  const panel=$('trackStyle'); const i=State.listTrack;
-  if(!State.tracks[i]){ panel.classList.add('disabled'); $('tsTitle').textContent='軌道樣式'; return; }
+  const panel=$('trackStyle'); const t=styleTarget();
+  if(!t){ panel.classList.add('disabled'); $('tsTitle').textContent='字幕樣式'; return; }
   panel.classList.remove('disabled');
-  const tk=State.tracks[i];
-  $('tsTitle').textContent='「'+tk.name+'」樣式';
-  const st=effStyle(null, tk); // 生效值（缺欄位以預設後援）
+  const { trk, cue }=t;
+  const idx=cue ? State.cues.filter(c=>(c.track||0)===State.listTrack).indexOf(cue)+1 : 0;
+  $('tsTitle').textContent = cue ? `第 ${idx} 句樣式` : `「${trk.name}」整軌樣式`;
+  $('tsTitle').title = cue ? '改動只影響這一句；要套用到整軌請按「⇩ 全軌統一」' : '沒有選取字幕 → 改動套用到整條軌道';
+  panel.classList.toggle('per-cue', !!cue);
+  const st=effStyle(cue, trk); // 生效值（缺欄位以預設後援）
   const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
   setV('tsSize',st.fontSize); setV('tsColor',(st.color||'#ffffff').toLowerCase());
   { const p=posToPx(st); setV('tsPosX',p.x); setV('tsPosY',p.y); } // 座標以像素呈現（內部為百分比）
@@ -1004,30 +1020,33 @@ function initUI(){
   const waveGlobalSrcSel=$('waveGlobalSrcSel');
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
 
-  // 樣式控制（大小 / 位置 / 顏色）
-  $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontSize=clamp(+e.target.value,10,300); styleChanged(); });
+  /* 唯一的樣式寫入點（v4.31）：有選取字幕 → 寫該句的逐句覆蓋；沒選 → 寫整軌。
+     ── 面板九個控件本來各自 `State.tracks[i][k]=v`，等於「改樣式一律套全軌」。 */
+  const tsSet=(k,v)=>{
+    const t=styleTarget(); if(!t)return;
+    if(t.cue){ t.cue.style=t.cue.style||{}; t.cue.style[k]=v; }
+    else t.trk[k]=v;
+    styleChanged();
+  };
+  $('tsSize').addEventListener('input',e=>tsSet('fontSize', clamp(+e.target.value,10,300)));
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   // 座標＝像素（UI 以影片像素輸入；內部存百分比→換影片解析度時字幕不跑掉）
   ['tsPosX','tsPosY'].forEach(id=>{
     const isX = id==='tsPosX', key = isX ? 'posX' : 'posY';
     $(id).addEventListener('input',e=>{
-      const i=State.listTrack; if(!State.tracks[i])return;
       const span = isX ? (State.videoWidth||1920) : (State.videoHeight||1080);
-      State.tracks[i][key] = clamp((+e.target.value / span) * 100, 0, 100);
-      styleChanged();
+      tsSet(key, clamp((+e.target.value / span) * 100, 0, 100));
     });
     $(id).addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   });
-  $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; styleChanged(); });
-  // v4.23 樣式擴充：通用 setter（寫軌道欄位 → 三路重繪）；數字/顏色/切換各自包裝
-  const tsSet=(k,v)=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i][k]=v; styleChanged(); };
+  $('tsColor').addEventListener('input',e=>tsSet('color', e.target.value));
   const tsNum=(id,k,lo,hi)=>{ const el=$(id); if(!el)return;
     el.addEventListener('input',e=>tsSet(k, clamp(+e.target.value, lo, hi)));
     el.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} }); };
   const tsToggle=(id,k)=>{ const el=$(id); if(!el)return;
-    el.addEventListener('click',()=>{ const i=State.listTrack; if(!State.tracks[i])return; tsSet(k, !effStyle(null,State.tracks[i])[k]); }); };
+    el.addEventListener('click',()=>{ const t=styleTarget(); if(!t)return; tsSet(k, !effStyle(t.cue, t.trk)[k]); }); };
   tsNum('tsOutline','outline',0,10); tsNum('tsShadow','shadow',0,10);
-  tsNum('tsAngle','angle',-180,180); // 旋轉角度（度，順時針為正；繞文字塊中心）
+  tsNum('tsAngle','angle',-180,180); // 旋轉角度（度，順時針為正；繞錨點）
   tsNum('tsSpacing','letterSpacing',0,30); tsNum('tsLineSp','lineSpacing',1,3);
   $('tsOutlineColor').addEventListener('input',e=>tsSet('outlineColor',e.target.value));
   $('tsBgColor').addEventListener('input',e=>tsSet('bgColor',e.target.value));
@@ -1037,26 +1056,29 @@ function initUI(){
   tsToggle('tsVertical','vertical'); tsToggle('tsBgBox','bgBox');
   $('tsFont').addEventListener('change',e=>{
     if(e.target.value==='__custom'){
-      const cur=effStyle(null,State.tracks[State.listTrack]||null).font;
+      const t=styleTarget();
+      const cur=t?effStyle(t.cue,t.trk).font:'';
       const name=prompt('輸入字型名稱（需已安裝於系統；匯出燒入亦用此字型）', cur);
       if(name&&name.trim()) tsSet('font', name.trim()); else renderTrackStyle();
     } else tsSet('font', e.target.value);
   });
   // 常用樣式庫：存 / 套用 / 管理（跨專案，存 config）
+  // 存＝面板目前顯示的那組生效樣式（選取句 or 整軌）；套用＝同樣寫回面板當前的對象
   $('tsPresetSave').addEventListener('click',()=>{
-    const i=State.listTrack; if(!State.tracks[i])return;
-    const name=prompt('常用樣式名稱', State.tracks[i].name+' 樣式'); if(!name||!name.trim())return;
+    const t=styleTarget(); if(!t)return;
+    const name=prompt('常用樣式名稱', t.trk.name+' 樣式'); if(!name||!name.trim())return;
     const list=[...getPresets()]; const nm=name.trim();
-    const style=trackStyleSnapshot(State.tracks[i]);
+    const style=styleSnapshot(effStyle(t.cue, t.trk));
     const ex=list.findIndex(p=>p.name===nm);
     if(ex>=0) list[ex]={name:nm,style}; else list.push({name:nm,style});
     savePresets(list); renderTrackStyle(); showToast('已儲存常用樣式：'+nm);
   });
   $('tsPresetSel').addEventListener('change',e=>{
-    const i=State.listTrack, v=e.target.value; e.target.value='';
-    if(!v||!State.tracks[i])return;
+    const t=styleTarget(), v=e.target.value; e.target.value='';
+    if(!v||!t)return;
     const p=getPresets().find(x=>x.name===v); if(!p)return;
-    Object.assign(State.tracks[i], p.style);
+    if(t.cue){ t.cue.style=Object.assign(t.cue.style||{}, p.style); } // 只套這一句
+    else Object.assign(t.trk, p.style);
     styleChanged(); recordHistory('套用常用樣式：'+v);
   });
   $('tsPresetMgr').addEventListener('click',()=>{
@@ -1073,32 +1095,39 @@ function initUI(){
      ── 軌道樣式本來就是全軌生效；唯一會脫隊的就是設過覆蓋的句子（列表標 ✱ 自訂）。
         本鈕＝那些句子的一鍵歸隊，而非「把樣式複製到每一句」。 */
   $('tsUnify')?.addEventListener('click',()=>{
-    const i=State.listTrack; const trk=State.tracks[i]; if(!trk)return;
-    const hits=State.cues.filter(c=>(c.track||0)===i && c.style && Object.keys(c.style).length);
-    if(!hits.length){ showToast('本軌沒有逐句覆蓋——所有字幕已經都跟著軌道樣式了'); return; }
+    const t=styleTarget(); if(!t)return;
+    const { i, trk, cue }=t;
+    const others=State.cues.filter(c=>(c.track||0)===i && c!==cue);
+    const ovs=others.filter(c=>c.style && Object.keys(c.style).length).length;
+    const st=effStyle(cue, trk);
+    const idx=cue ? State.cues.filter(c=>(c.track||0)===i).indexOf(cue)+1 : 0;
+    const 來源 = cue ? `第 ${idx} 句` : '目前';
+    if(!others.length){ showToast('本軌只有這一句'); return; }
     openModal('⇩ 全軌統一', `<div style="font-size:13px;line-height:1.7">`+
-      `「${escapeHTML(trk.name)}」有 <b style="color:var(--accent)">${hits.length}</b> 句設了逐句樣式覆蓋。<br>`+
-      `清除後，這些句子會改用上方的軌道樣式（可 <b>Ctrl+Z</b> 復原）。</div>`,
-      [{label:'取消',act:closeModal},{label:`清除 ${hits.length} 句的覆蓋`,primary:true,act:()=>{
+      `把<b style="color:var(--accent)">${來源}的樣式</b>套用到「${escapeHTML(trk.name)}」的<b>全部 ${others.length+ (cue?1:0)} 句</b>。<br>`+
+      (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會一併被覆蓋。<br>` : '')+
+      `<span style="color:var(--text-faint)">位置與角度也會一起統一（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
+      [{label:'取消',act:closeModal},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
         closeModal();
-        for(const c of hits) delete c.style;
-        styleChanged(); drawTimeline(); // 摘要就地更新（不整份重繪，捲動位置留在原處）；時間軸重畫掉 ✱ 標記
-        recordHistory('全軌統一樣式（清除 '+hits.length+' 句覆蓋）');
-        showToast('已清除 '+hits.length+' 句的逐句覆蓋');
+        // 生效樣式寫進軌道當共同基準，再清掉全軌的逐句覆蓋（含這一句）→ 每句都長一樣
+        for(const k of Object.keys(STYLE_DEFAULTS)) trk[k]=st[k];
+        for(const c of State.cues) if((c.track||0)===i) delete c.style;
+        styleChanged(); drawTimeline(); // 摘要就地更新（捲動位置留在原處）；時間軸重畫掉 ✱ 標記
+        recordHistory('全軌統一樣式（'+來源+' → 全軌）');
+        showToast('已把'+來源+'的樣式套用到整條軌道');
       }}]);
   });
-  // 預設按鈕（大小 / 位置 / 顏色）— 委派事件到面板
+  // 預設按鈕（大小 / 對齊 / 顏色）— 委派事件到面板；一律經 tsSet（選取句 or 整軌）
   $('trackStyle').addEventListener('click',e=>{
-    const i=State.listTrack; if(!State.tracks[i])return;
     const sz=e.target.closest('.ts-preset[data-ts-size]');
-    if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontSize=v; $('tsSize').value=v; styleChanged(); return; }
+    if(sz){ tsSet('fontSize', +sz.dataset.tsSize); return; }
     // 對齊＝多行/多句彼此的對齊方式（同時決定文字塊以哪一側對齊座標）；位置一律由 X/Y 數值決定
     const vg=e.target.closest('.ts-preset[data-ts-valign]');
-    if(vg){ State.tracks[i].valign=vg.dataset.tsValign; styleChanged(); return; }
+    if(vg){ tsSet('valign', vg.dataset.tsValign); return; }
     const ag=e.target.closest('.ts-preset[data-ts-align]');
-    if(ag){ State.tracks[i].align=ag.dataset.tsAlign; styleChanged(); return; }
+    if(ag){ tsSet('align', ag.dataset.tsAlign); return; }
     const cl=e.target.closest('.ts-clr');
-    if(cl){ const v=cl.dataset.color; State.tracks[i].color=v; $('tsColor').value=v; styleChanged(); }
+    if(cl) tsSet('color', cl.dataset.color);
   });
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
@@ -1494,7 +1523,7 @@ async function initDesktop(){
     toASSFromState, _stageRect }; // 三路一致診斷：ASS 產出＋字幕層座標基準（畫面實際顯示區）
   window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview,
     demuxIndex: _wcDemuxIndex, SampleReader: _wcSampleReader }; // 階段0 PoC＋階段1 預覽＋v4.29 串流式 demux（驗證/診斷入口）
-  window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts }; // v4.23 字幕樣式（驗證/診斷入口）
+  window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, savePresets, styleSnapshot, loadFonts, getFonts, anchorPct }; // v4.23 字幕樣式（驗證/診斷入口）
 }
 
 init();
