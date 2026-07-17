@@ -686,7 +686,7 @@ const FONT_EXT = /\.(ttf|otf|ttc|woff2?)$/i;
       那就是 nameID 1。取 16（typographic family）會漏掉權重字尾——例如思源黑體的
       nameID1="Noto Sans CJK TC Regular"、nameID16="Noto Sans CJK TC"，填 16 一樣配不到（實測）。
    ── 取英文（Windows platform 3 / lang 0x0409）：FreeType 亦以英文名為 family_name。 */
-function fontFamilyOf(file) {
+function fontNamesOf(file) {
   let fd = null;
   try {
     fd = fs.openSync(file, 'r');
@@ -694,12 +694,24 @@ function fontFamilyOf(file) {
     let base = 0;
     if (read(0, 4).toString('latin1') === 'ttcf') base = read(12, 4).readUInt32BE(0); // TTC＝字型集合，取第一個 face
     const numTables = read(base + 4, 2).readUInt16BE(0);
-    let nameOff = 0, nameLen = 0;
+    let nameOff = 0, nameLen = 0, os2Off = 0;
     for (let i = 0; i < numTables; i++) {
       const e = read(base + 12 + i * 16, 16);
-      if (e.toString('latin1', 0, 4) === 'name') { nameOff = e.readUInt32BE(8); nameLen = e.readUInt32BE(12); break; }
+      const tag = e.toString('latin1', 0, 4);
+      if (tag === 'name') { nameOff = e.readUInt32BE(8); nameLen = e.readUInt32BE(12); }
+      else if (tag === 'OS/2') { os2Off = e.readUInt32BE(8); }
     }
-    if (!nameOff || !nameLen) return null;
+    // OS/2：usWeightClass（400=Regular／700=Bold）＋ fsSelection bit0＝斜體。
+    // ── 為什麼不能只看 name table 的 subfamily：CJK 字型每個字重各自是一個「家族」，
+    //    subfamily 一律寫 Regular（例如 Noto Sans CJK TC Black 的 nameID2 也是 "Regular"），
+    //    光看它分不出 Black 與 Regular。
+    let weight = 0, italic = false;
+    if (os2Off) {
+      const o = read(os2Off, 64);
+      weight = o.readUInt16BE(4);
+      italic = !!(o.readUInt16BE(62) & 1);
+    }
+    if (!nameOff || !nameLen) return { family: null, subfamily: '', weight, italic };
     const t = read(nameOff, nameLen);
     const count = t.readUInt16BE(2), strOff = t.readUInt16BE(4);
     const cand = {}; // `${nameID}|${英文?1:0}` → 字串
@@ -708,7 +720,7 @@ function fontFamilyOf(file) {
       if (r + 12 > t.length) break;
       const pid = t.readUInt16BE(r), lid = t.readUInt16BE(r + 4);
       const nid = t.readUInt16BE(r + 6), len = t.readUInt16BE(r + 8), off = t.readUInt16BE(r + 10);
-      if (nid !== 1 && nid !== 16) continue;
+      if (nid !== 1 && nid !== 2 && nid !== 16) continue; // 1=家族 2=樣式(Regular/Bold/Italic…) 16=排版家族
       const raw = t.subarray(strOff + off, strOff + off + len);
       if (!raw.length) continue;
       // platform 3(Windows)/0(Unicode) 為 UTF-16BE；1(Mac) 為單 byte
@@ -720,9 +732,35 @@ function fontFamilyOf(file) {
       const k = `${nid}|${en}`;
       if (!cand[k]) cand[k] = s.trim();
     }
-    return cand['1|1'] || cand['16|1'] || cand['1|0'] || cand['16|0'] || null;
-  } catch (e) { console.error('[fonts] family', file, e.message); return null; }
+    return {
+      family: cand['1|1'] || cand['16|1'] || cand['1|0'] || cand['16|0'] || null,
+      subfamily: cand['2|1'] || cand['2|0'] || '',
+      weight, italic,
+    };
+  } catch (e) { console.error('[fonts] names', file, e.message); return null; }
   finally { if (fd != null) try { fs.closeSync(fd); } catch (e2) {} }
+}
+const fontFamilyOf = f => (fontNamesOf(f) || {}).family || null;
+
+/* 一個資料夾放了多個字重時，挑【最接近 Regular(400) 且非斜體】那一個當代表。
+   ── 舊版是 readdir 的第一個＝按檔名排序的第一個。使用者把整組字重丟進資料夾後：
+      思源黑體／宋體挑到 Black（連 ASS 家族名都變成 "Noto Sans CJK TC Black"）、
+      更紗黑體挑到 bold.ttf——而更紗各字重的家族名相同，於是【預覽是粗體、匯出卻是 Regular】，
+      三路當場不一致，且毫無徵兆（實測）。
+   ── 判準用 OS/2 的 usWeightClass 而非 subfamily：見 fontNamesOf 的說明。 */
+function pickRegularFace(dir, files) {
+  const cands = files.filter(f => FONT_EXT.test(f));
+  if (cands.length <= 1) return cands[0] || null;
+  let best = null, bestScore = Infinity;
+  for (const f of cands) {
+    const m = fontNamesOf(path.join(dir, f)) || {};
+    const italic = m.italic || /italic|oblique/i.test(f);
+    // 距離 400 越近越好；斜體重罰（大於任何字重差距）；讀不到 OS/2 時以檔名含 regular 為輔
+    const w = m.weight || (/(^|[-_ ])regular([-_. ]|$)/i.test(f) ? 400 : 1000);
+    const score = Math.abs(w - 400) + (italic ? 10000 : 0);
+    if (score < bestScore) { bestScore = score; best = f; }
+  }
+  return best || cands[0];
 }
 
 ipcMain.handle('fonts:list', () => {
@@ -740,7 +778,7 @@ ipcMain.handle('fonts:list', () => {
       const full = path.join(root, ent.name);
       if (ent.isDirectory()) {
         let hit = null;
-        try { hit = fs.readdirSync(full).find(f => FONT_EXT.test(f)); } catch (e) {}
+        try { hit = pickRegularFace(full, fs.readdirSync(full)); } catch (e) {}
         if (hit) { allowDir(full); pushFile(ent.name, path.join(full, hit)); } // 資料夾名＝字型名
       } else if (FONT_EXT.test(ent.name)) {
         pushFile(ent.name.replace(FONT_EXT, ''), full);
