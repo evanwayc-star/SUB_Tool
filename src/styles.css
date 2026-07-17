@@ -305,12 +305,15 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .body{flex:1 1 200px;min-width:190px;max-width:330px}
 .sub-row .sub-sty{
   display:flex;flex-direction:column;align-items:flex-start;align-self:center;gap:4px;
-  flex:0 0 auto;
+  flex:0 0 auto;margin-left:24px;  /* 與文字區稍微拉開（.body 的寬度是被時間碼那行撐出來的） */
   font-size:11px;line-height:1.6;
   font-variant-numeric:tabular-nums;letter-spacing:.01em;
 }
 .sub-row .sub-sty .r1,.sub-row .sub-sty .r2{display:flex;align-items:center;gap:6px;white-space:nowrap}
-.sub-row .sub-sty .sp{opacity:.28;font-weight:300}
+.sub-row .sub-sty .sp{opacity:.55;font-weight:300}  /* 欄位分隔 |：要看得見才有分欄的意義 */
+/* 「邊 ●-2」「底 ●-50%」的 - 要黏住兩側（負 margin 抵掉 .g 的 3px flex gap）；
+   「距 1 / 1」的 / 則照規格留空 —— 兩者語意不同，別共用同一個 class。 */
+.sub-row .sub-sty .dash{opacity:.4;margin:0 -2px}
 .sub-row .sub-sty .sp2{opacity:.4;margin:0 1px}
 .sub-row .sub-sty .r1{color:var(--text-dim)}    /* 主要：字級/對齊/字型/顏色/框線 */
 .sub-row .sub-sty .r2{color:var(--text-faint)}  /* 細節：座標/角度/直橫/底色/間距 —— 較淡，不搶戲 */

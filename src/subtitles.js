@@ -54,13 +54,13 @@ function styleSummaryHtml(c){
       `<span title="多行／多句的水平對齊">${al}</span>`+sep+
       `<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+sep+
       `<span class="g" title="文字顏色">${lbl('色')}${sw(st.color,'文字顏色')}</span>`+sep+
-      `<span class="g" title="框線：粗細 ${st.outline}">${lbl('邊')}${sw(st.outlineColor,'框線顏色')}<span class="sp2">-</span>${n(st.outline,'框線粗細')}</span>`+
+      `<span class="g" title="框線：粗細 ${st.outline}">${lbl('邊')}${sw(st.outlineColor,'框線顏色')}<span class="dash">-</span>${n(st.outline,'框線粗細')}</span>`+
     `</span>`+
     `<span class="r2">`+
       `<span class="g" title="座標（像素，文字塊${al==='中對齊'&&va==='中對齊'?'中心':'錨點'}）">座標(${p.x},${p.y})</span>`+sep+
       `<span class="g" title="旋轉角度">${lbl('角度')}${n(st.angle,'角度')}</span>`+sep+
       `<span title="排版方向">${st.vertical?'直式':'橫式'}</span>`+sep+
-      `<span class="g" title="底色／不透明度">${tg('底',st.bgBox,'背景色塊')}${sw(st.bgColor,'背景色')}<span class="sp2">-</span>${n(Math.round(st.bgAlpha*100),'不透明度')}${lbl('%')}</span>`+sep+
+      `<span class="g" title="底色／不透明度">${tg('底',st.bgBox,'背景色塊')}${sw(st.bgColor,'背景色')}<span class="dash">-</span>${n(Math.round(st.bgAlpha*100),'不透明度')}${lbl('%')}</span>`+sep+
       `<span class="g" title="字距／行距">${lbl('距')}${n(st.letterSpacing,'字距')}<span class="sp2">/</span>${n(st.lineSpacing,'行距')}</span>`+
     `</span>`;
 }
