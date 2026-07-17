@@ -25,7 +25,7 @@ function _buildProjectData(){
     app:'SUB Tool', version:2,
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
-    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||60,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',valign:t.valign||'bottom',locked:!!t.locked,color:t.color||'#ffffff',
+    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||80,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',valign:t.valign||'bottom',locked:!!t.locked,color:t.color||'#ffffff',
       ...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{}),
       // v4.23 樣式擴充欄位：存在才寫（舊版讀到未知鍵會忽略，向後相容）
       ...(t.font!=null?{font:t.font}:{}),...(t.bold!=null?{bold:t.bold}:{}),...(t.italic!=null?{italic:t.italic}:{}),

@@ -1246,7 +1246,7 @@ function _execCopyTrack(srcIdx, withText){
   const names=State.tracks.map(t=>t.name);
   while(names.includes(name)) name=base+(n++);
   // 複製軌道屬性
-  const tk={name, visible:true, fontSize:srcTrack.fontSize||60, posPct:srcTrack.posPct!=null?srcTrack.posPct:90,
+  const tk={name, visible:true, fontSize:srcTrack.fontSize||80, posPct:srcTrack.posPct!=null?srcTrack.posPct:90,
              align:srcTrack.align||'center', locked:false, color:srcTrack.color||'#ffffff'};
   const newIdx=State.tracks.length;
   State.tracks.push(tk); syncTrackCount();

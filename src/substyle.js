@@ -10,7 +10,7 @@ import { State } from './state.js';
 export const STYLE_DEFAULTS = {
   font: '更紗黑體', // 預設字型＝font/ 底下的資料夾名（v4.29.4 由台北黑體改為更紗黑體）
   bold: true, italic: false,
-  fontSize: 60, color: '#ffffff',
+  fontSize: 80, color: '#ffffff',
   letterSpacing: 1,     // px 字距（ASS Spacing / CSS letter-spacing）；直書時不適用（逐字換行）
   lineSpacing: 1.0,     // 行高倍數 1.0~3.0（CSS line-height；ASS 行間墊高 hack）；直書時＝字與字的間隔
   outline: 2,           // px 框線厚度（ASS Outline / CSS text-stroke）
