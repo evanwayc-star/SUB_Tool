@@ -20,7 +20,7 @@ import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
-import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts } from './substyle.js'; // v4.23 字幕樣式系統
+import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts, posToPx } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
@@ -713,7 +713,9 @@ function renderTrackStyle(){
   $('tsTitle').textContent='「'+tk.name+'」樣式';
   const st=effStyle(null, tk); // 生效值（缺欄位以預設後援）
   const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
-  setV('tsSize',st.fontSize); setV('tsPosX',st.posX); setV('tsPosY',st.posY); setV('tsColor',(st.color||'#ffffff').toLowerCase());
+  setV('tsSize',st.fontSize); setV('tsColor',(st.color||'#ffffff').toLowerCase());
+  { const p=posToPx(st); setV('tsPosX',p.x); setV('tsPosY',p.y); } // 座標以像素呈現（內部為百分比）
+  setV('tsAngle',st.angle);
   setV('tsOutline',st.outline); setV('tsOutlineColor',st.outlineColor); setV('tsShadow',st.shadow);
   setV('tsSpacing',st.letterSpacing); setV('tsLineSp',st.lineSpacing);
   setV('tsBgColor',st.bgColor); setV('tsBgAlpha',Math.round(st.bgAlpha*100));
@@ -915,10 +917,15 @@ function initUI(){
   // 樣式控制（大小 / 位置 / 顏色）
   $('tsSize').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].fontSize=clamp(+e.target.value,10,300); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
-  // 位置＝畫面百分比座標（v4.26）：X 水平、Y 垂直
+  // 座標＝像素（UI 以影片像素輸入；內部存百分比→換影片解析度時字幕不跑掉）
   ['tsPosX','tsPosY'].forEach(id=>{
-    const key = id==='tsPosX' ? 'posX' : 'posY';
-    $(id).addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i][key]=clamp(+e.target.value,0,100); renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
+    const isX = id==='tsPosX', key = isX ? 'posX' : 'posY';
+    $(id).addEventListener('input',e=>{
+      const i=State.listTrack; if(!State.tracks[i])return;
+      const span = isX ? (State.videoWidth||1920) : (State.videoHeight||1080);
+      State.tracks[i][key] = clamp((+e.target.value / span) * 100, 0, 100);
+      renderVideoSub(); refreshMpvSubs(); renderTrackStyle();
+    });
     $(id).addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   });
   $('tsColor').addEventListener('input',e=>{ const i=State.listTrack; if(!State.tracks[i])return; State.tracks[i].color=e.target.value; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); });
@@ -930,6 +937,7 @@ function initUI(){
   const tsToggle=(id,k)=>{ const el=$(id); if(!el)return;
     el.addEventListener('click',()=>{ const i=State.listTrack; if(!State.tracks[i])return; tsSet(k, !effStyle(null,State.tracks[i])[k]); }); };
   tsNum('tsOutline','outline',0,10); tsNum('tsShadow','shadow',0,10);
+  tsNum('tsAngle','angle',-180,180); // 旋轉角度（度，順時針為正；繞文字塊中心）
   tsNum('tsSpacing','letterSpacing',0,30); tsNum('tsLineSp','lineSpacing',1,3);
   $('tsOutlineColor').addEventListener('input',e=>tsSet('outlineColor',e.target.value));
   $('tsBgColor').addEventListener('input',e=>tsSet('bgColor',e.target.value));
@@ -976,15 +984,11 @@ function initUI(){
     const i=State.listTrack; if(!State.tracks[i])return;
     const sz=e.target.closest('.ts-preset[data-ts-size]');
     if(sz){ const v=+sz.dataset.tsSize; State.tracks[i].fontSize=v; $('tsSize').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
-    // 上/中/下、左/中/右＝設定座標的快捷（同時設錨點與 X/Y 座標；之後仍可用數值框微調）
+    // 對齊＝多行/多句彼此的對齊方式（同時決定文字塊以哪一側對齊座標）；位置一律由 X/Y 數值決定
     const vg=e.target.closest('.ts-preset[data-ts-valign]');
-    if(vg){ const v=vg.dataset.tsValign; const t=State.tracks[i];
-      t.valign=v; t.posY = v==='top' ? 10 : v==='middle' ? 50 : 90;
-      renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    if(vg){ State.tracks[i].valign=vg.dataset.tsValign; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
     const ag=e.target.closest('.ts-preset[data-ts-align]');
-    if(ag){ const a=ag.dataset.tsAlign; const t=State.tracks[i];
-      t.align=a; t.posX = a==='left' ? 10 : a==='center' ? 50 : 90;
-      renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
+    if(ag){ State.tracks[i].align=ag.dataset.tsAlign; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); return; }
     const cl=e.target.closest('.ts-clr');
     if(cl){ const v=cl.dataset.color; State.tracks[i].color=v; $('tsColor').value=v; renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); }
   });

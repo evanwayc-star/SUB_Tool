@@ -296,13 +296,18 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .track-style input[type=color]{width:26px;height:22px;padding:0;border:1px solid var(--line,#3a4150);border-radius:4px;background:none;cursor:pointer}
 /* v4.25.6 字幕列表右側：樣式摘要（分組膠囊）＋ 常用樣式名稱徽章。
    密而有序：數字等寬對齊、顏色用圓點、開關用膠囊（填色＝開），組間以留白分隔而非框線。 */
+/* 摘要吃掉文字右側原本的大片空白（文字區收窄但保底寬度，摘要與名稱往左展開） */
+.sub-row .body{flex:1 1 200px;min-width:190px;max-width:330px}
 .sub-row .sub-sty{
   display:flex;flex-direction:column;align-items:flex-start;align-self:center;gap:4px;
-  width:210px;flex:0 0 210px;
+  flex:0 0 auto;
   font-size:11px;line-height:1.6;
   font-variant-numeric:tabular-nums;letter-spacing:.01em;
 }
-.sub-row .sub-sty .r1,.sub-row .sub-sty .r2{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.sub-row .sub-sty .r1,.sub-row .sub-sty .r2{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.sub-row .sub-sty .sp{opacity:.28;font-weight:300}
+.sub-row .sub-sty .sp2{opacity:.4;margin:0 1px}
+.sub-row .sub-sty .cn{color:var(--text-dim)}
 .sub-row .sub-sty .r1{color:var(--text-dim)}    /* 主要：字級/位置/顏色/字型/粗斜 */
 .sub-row .sub-sty .r2{color:var(--text-faint)}  /* 細節：框線/陰影/間距/直/底 —— 較淡，不搶戲 */
 .sub-row .sub-sty .g{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
@@ -317,7 +322,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
   background:transparent;color:var(--text-faint);border:1px solid var(--border2);
 }
 .sub-row .sub-sty .tg.on{background:var(--accent);border-color:var(--accent);color:#0d0d0d}
-.sub-row .sub-styname{width:104px;flex:0 0 104px;align-self:center;overflow:hidden;text-align:left}
+.sub-row .sub-styname{flex:1 1 140px;min-width:120px;align-self:center;overflow:hidden;text-align:left;padding-left:4px}
 .sub-row .sub-styname .nm{
   display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-size:11px;font-weight:500;letter-spacing:.01em;line-height:1.8;padding:1px 9px;border-radius:10px;

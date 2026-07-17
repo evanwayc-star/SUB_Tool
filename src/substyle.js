@@ -3,6 +3,7 @@
    ── 鐵律：HTML 預覽與 ASS（mpv／匯出燒入共用 toASSFromState）必須同構——
    兩路都【只】吃 effStyle() 的結果，任何新欄位都要同時接兩路。 */
 "use strict";
+import { State } from './state.js';
 
 /* 樣式欄位與預設值（軌道級；逐句覆蓋為其子集）。
    舊專案/既有軌道缺欄位時由 effStyle 後援——newTrack 不需要加欄位、零遷移。 */
@@ -17,13 +18,16 @@ export const STYLE_DEFAULTS = {
   shadow: 0,            // px 陰影（ASS Shadow / CSS text-shadow 右下偏移）
   vertical: false,      // 直書（單列逐字換行；原文換行以全形空格取代）
   bgBox: false, bgColor: '#000000', bgAlpha: 0.5, // 背景色塊（ASS BorderStyle=3；限軌級）
-  // 位置＝畫面百分比座標（v4.26）：posX/posY 決定字幕落點，align/valign 是「錨點」（文字塊的哪一側對齊該座標）。
-  // 對應 ASS 的 \pos(x,y) ＋ Alignment(\an)；HTML 則為 left/top ＋ translate。舊專案的 posPct 自動當 posY。
+  // 位置＝畫面座標（內部存百分比＝解析度無關、專案可攜；UI／摘要以像素顯示）。
+  // align/valign＝多行多句的對齊方式，同時也是文字塊對齊到座標的那一側（ASS \an 的語義）：
+  //   align=center + valign=middle → 座標正好是文字塊的正中心。
+  // 對應 ASS `\pos(x,y)`＋Alignment；HTML 為 left/top＋translate。舊專案的 posPct 自動當 posY。
   posX: 50, posY: 90, align: 'center', valign: 'bottom',
+  angle: 0, // 旋轉角度（度，順時針為正；繞文字塊中心）→ ASS Style Angle／\frz（逆時針故取負）、CSS rotate
 };
 
 /* 逐句覆蓋允許的欄位（位置/對齊/背景塊屬軌道級語義，不入逐句） */
-export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letterSpacing','lineSpacing','outline','outlineColor','shadow','vertical'];
+export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letterSpacing','lineSpacing','outline','outlineColor','shadow','vertical','angle'];
 
 /* 生效樣式：預設 ⊕ 軌道 ⊕ 逐句覆蓋（cue 可為 null＝取軌道樣式） */
 export function effStyle(cue, track){
@@ -48,6 +52,7 @@ export function styleToCss(st, ratio){
   // 直書：瀏覽器原生直排——多行(<br>)自動分列(右→左)、CJK 標點自動轉直排字形；
   // letter-spacing＝字間(縱)、line-height＝列間(橫)語義自動對。
   if(st.vertical) css += `writing-mode:vertical-rl;text-orientation:mixed;`;
+  if(st.angle) css += `transform:rotate(${st.angle}deg);transform-origin:center center;`; // 繞文字塊中心旋轉
   if(st.outline > 0){
     // ASS outline 向外擴 N px；CSS stroke 置中描邊 → 寬度 2N 視覺對應，paint-order 讓筆畫墊在填色後
     css += `-webkit-text-stroke:${(st.outline * 2 * r).toFixed(1)}px ${st.outlineColor};paint-order:stroke fill;`;
@@ -62,6 +67,20 @@ export function styleToCss(st, ratio){
   }
   return css;
 }
+/* 常見色的中文名（樣式摘要用；非清單內的顏色只顯示色點、不硬湊名稱） */
+const COLOR_NAMES = {
+  '#ffffff':'白色','#000000':'黑色','#ff0000':'紅色','#ff3333':'紅色','#00ff00':'綠色','#44cc66':'綠色',
+  '#0000ff':'藍色','#3399ff':'藍色','#ffff00':'黃色','#ffee00':'黃色','#ff00ff':'洋紅','#00ffff':'青色',
+  '#808080':'灰色','#cccccc':'淺灰','#333333':'深灰','#ffa500':'橘色','#800080':'紫色',
+};
+export function colorName(hex){ return COLOR_NAMES[String(hex||'').toLowerCase()] || ''; }
+
+/* 樣式的畫面像素座標（內部存百分比＝解析度無關、專案可攜；UI 與摘要顯示像素） */
+export function posToPx(st){
+  const VW = State.videoWidth || 1920, VH = State.videoHeight || 1080;
+  return { x: Math.round(st.posX / 100 * VW), y: Math.round(st.posY / 100 * VH), VW, VH };
+}
+
 export function hexToRgba(hex, a){
   const c = (hex || '#000000').replace('#', '');
   const v = c.length === 6 ? c : '000000';
@@ -92,7 +111,7 @@ export function styleToAssStyleLine(name, st, vwh){
   const backCol = st.bgBox ? hexToAssColor(st.bgColor, st.bgAlpha) : '&H00000000';
   const shadowV = st.bgBox ? Math.max(1, st.shadow) : st.shadow; // BorderStyle=3 需 Outline/Shadow 撐出色塊範圍
   return `Style: ${name},${st.font},${st.fontSize},${hexToAssColor(st.color)},&H00FFFFFF,${hexToAssColor(st.outlineColor)},${backCol},`+
-    `${st.bold ? 1 : 0},${st.italic ? 1 : 0},0,0,100.0,100.0,${st.vertical ? 0 : st.letterSpacing},0.0,`+
+    `${st.bold ? 1 : 0},${st.italic ? 1 : 0},0,0,100.0,100.0,${st.vertical ? 0 : st.letterSpacing},${(-(st.angle || 0)).toFixed(1)},`+
     `${borderStyle},${st.outline},${shadowV},${alignN},135,135,${mv},1`;
 }
 
@@ -117,6 +136,7 @@ export function cueAssTags(diff){
   if(diff.outline != null) t += `\\bord${diff.outline}`;
   if(diff.outlineColor != null) t += `\\3c${hexToAssColor(diff.outlineColor)}&`;
   if(diff.shadow != null) t += `\\shad${diff.shadow}`;
+  if(diff.angle != null) t += `\\frz${-diff.angle}`; // ASS \frz 逆時針為正 → 取負
   return t ? `{${t}}` : '';
 }
 
