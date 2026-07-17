@@ -26,8 +26,11 @@ export const STYLE_DEFAULTS = {
   angle: 0, // 旋轉角度（度，順時針為正；繞文字塊中心）→ ASS Style Angle／\frz（逆時針故取負）、CSS rotate
 };
 
-/* 逐句覆蓋允許的欄位（位置/對齊/背景塊屬軌道級語義，不入逐句） */
-export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letterSpacing','lineSpacing','outline','outlineColor','shadow','vertical','angle'];
+/* 逐句覆蓋允許的欄位。
+   posX/posY 自 v4.30 納入（在預覽窗直接拖某一句＝只挪那一句，其餘不動）。
+   align/valign 與背景色塊仍屬軌道級語義：對齊是「多句彼此怎麼排」，逐句設沒有意義；
+   ASS 的 BorderStyle 也無 inline tag 可逐句覆蓋。 */
+export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letterSpacing','lineSpacing','outline','outlineColor','shadow','vertical','angle','posX','posY'];
 
 /* 生效樣式：預設 ⊕ 軌道 ⊕ 逐句覆蓋（cue 可為 null＝取軌道樣式） */
 export function effStyle(cue, track){
@@ -39,6 +42,15 @@ export function effStyle(cue, track){
   if(cue && cue.style) for(const k of CUE_STYLE_KEYS){ if(cue.style[k] != null) st[k] = cue.style[k]; }
   return st;
 }
+
+/* 文字塊的錨點（align/valign 決定塊的哪一側貼齊座標）。
+   HTML 用它做兩件事：容器的 translate 補償、旋轉支點（transform-origin）。 */
+const ANCHOR_X = { left: 0, center: 50, right: 100 };
+const ANCHOR_Y = { top: 0, middle: 50, bottom: 100 };
+export function anchorPct(st){
+  return { x: ANCHOR_X[st.align] ?? 50, y: ANCHOR_Y[st.valign] ?? 100 };
+}
+function originOf(st){ const a = anchorPct(st); return `${a.x}% ${a.y}%`; }
 
 /* ---- HTML 預覽（videoSub 每句 span 的 inline CSS；容器只管定位/對齊，由呼叫端處理） ---- */
 export function styleToCss(st, ratio){
@@ -54,7 +66,10 @@ export function styleToCss(st, ratio){
   // vertical-【lr】＝第一行在最左、往右排（非 CJK 書籍的右→左傳統）。
   // ASS 端 verticalAssCols() 依同一方向逐列定位——改這裡務必同時改那裡。
   if(st.vertical) css += `writing-mode:vertical-lr;text-orientation:mixed;`;
-  if(st.angle) css += `transform:rotate(${st.angle}deg);transform-origin:center center;`; // 繞文字塊中心旋轉
+  // 旋轉支點＝【錨點】，不是文字塊中心：ASS 的 \frz 繞 \org 轉，而 \org 預設就是 \pos 那一點
+  // （＝Alignment 指定的那一角）。用 center center 會與匯出／mpv 轉出不同結果——只有
+  // align=center+valign=middle 時兩者才恰好重合，難怪預設值下看起來像是對的。
+  if(st.angle) css += `transform:rotate(${st.angle}deg);transform-origin:${originOf(st)};`;
   if(st.outline > 0){
     // ASS outline 向外擴 N px；CSS stroke 置中描邊 → 寬度 2N 視覺對應，paint-order 讓筆畫墊在填色後
     css += `-webkit-text-stroke:${(st.outline * 2 * r).toFixed(1)}px ${st.outlineColor};paint-order:stroke fill;`;

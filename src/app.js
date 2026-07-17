@@ -20,7 +20,7 @@ import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
-import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts, posToPx } from './substyle.js'; // v4.23 字幕樣式系統
+import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, loadPresets, getPresets, savePresets, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
@@ -204,32 +204,44 @@ function renderVideoSub(){
     });
     if(!cur.length)continue;
     const trk=State.tracks[tk]||{};
-    const tst=effStyle(null, trk);
-    // 容器定位（v4.26 座標制，與 ASS \pos(x,y)＋Alignment 同構）：
-    // posX/posY＝畫面百分比座標；align/valign＝錨點（文字塊的哪一側對齊該座標）→ translate 補償。
-    const ax = { left:'0', center:'-50%', right:'-100%' }[tst.align||'center'];
-    const ay = { top:'0', middle:'-50%', bottom:'-100%' }[tst.valign||'bottom'];
-    // text-align 作用在「行內軸」：橫書＝水平（吃 align），直書＝垂直（要吃 valign）。
-    // 直書餵 align 會變成拿左右對齊去排上下 → 與 ASS 的逐列 \an(上8/中5/下2) 對不起來。
-    const ta = tst.vertical ? ({ top:'start', middle:'center', bottom:'end' })[tst.valign||'bottom'] : tst.align;
-    const contStyle = `left:${tst.posX}%;right:auto;top:${tst.posY}%;transform:translate(${ax},${ay});text-align:${ta};padding:0;`;
     const grab = trk.locked ? '' : ' drag'; // 鎖定軌不可拖
-    sig+=tk+'|'+contStyle+grab+'|'+cur.map(c=>c.id+'='+c.text+'|'+(c.style?JSON.stringify(c.style):'')).join(',')+'|'+JSON.stringify(tst)+';';
-    html+=`<div class="vsub-track${grab}" data-tk="${tk}"${grab?' title="拖曳＝移動位置／Alt＋拖曳＝旋轉（按住 Shift 吸附 15°）"':''} style="${contStyle}">`+
-      cur.map((c,i)=>{
-        const st=effStyle(c, trk);
-        let css=styleToCss(st, ratio);
-        if(st.shadow<=0) css+='text-shadow:none;';             // 蓋掉 .line class 的預設六向描邊
-        if(!st.bgBox) css+='background:transparent;';
-        // padding 會把文字往內推 → 與 ASS 錯位（ASS 的 BorderStyle=3 是把色塊往【外】長，文字不動）。
-        // 置中對齊時左右抵銷看不出來，靠左/靠右就整塊偏移；且固定 px 不隨 ratio 縮放＝位置還會跟著視窗跑。
-        // 故：無色塊＝完全不留白；有色塊＝以等量負 margin 抵銷，色塊往外長、文字位置不動。
-        css+= st.bgBox ? 'padding:.15em .4em;margin:-.15em -.4em;' : 'padding:0;';
-        if(i>0) css+='color:#ff4444;';                          // 同時第二句重疊警示（維持既有行為）
-        const inner = escapeHTML(c.text||'').replace(/\n/g,'<br>'); // 直書由 writing-mode 自動分列（多行=多列）
-        return `<span class="line" style="${css}">${inner}</span>`;
-      }).join('<br>')+
+    // v4.30：【一句一個容器】——座標已可逐句覆蓋（在預覽窗拖某一句＝只挪那一句），
+    // 各句的 posX/posY 可能不同，無法再共用一個軌級容器。
+    // 同時也修掉一項預覽與 ASS 的落差：同軌同時段的多句，ASS 本來就是各自 \pos 疊著畫，
+    // 舊版預覽卻用 <br> 把它們串成一疊 → 看到的跟燒出來的不一樣（第二句仍標紅示警）。
+    // 同時段多句「疊在同一點」才是錯（看起來會糊成一團）→ 標紅示警。
+    // v4.30 起座標可逐句覆蓋，同時出現在【不同位置】是正常用法（例如角落註記＋底部對白），
+    // 不能再像舊版那樣一律把第 2 句之後全染紅。
+    const seen=new Set();
+    const collide=cur.map(c=>{ const s=effStyle(c,trk); const k=s.posX.toFixed(2)+','+s.posY.toFixed(2);
+      const dup=seen.has(k); seen.add(k); return dup; });
+    cur.forEach((c,i)=>{
+      const st=effStyle(c, trk);
+      // 容器定位（v4.26 座標制，與 ASS \pos(x,y)＋Alignment 同構）：
+      // posX/posY＝畫面百分比座標；align/valign＝錨點（文字塊的哪一側對齊該座標）→ translate 補償。
+      const a = anchorPct(st);
+      // text-align 作用在「行內軸」：橫書＝水平（吃 align），直書＝垂直（要吃 valign）。
+      // 直書餵 align 會變成拿左右對齊去排上下 → 與 ASS 的逐列 \an(上8/中5/下2) 對不起來。
+      const ta = st.vertical ? ({ top:'start', middle:'center', bottom:'end' })[st.valign||'bottom'] : st.align;
+      const contStyle = `left:${st.posX}%;right:auto;top:${st.posY}%;transform:translate(${-a.x}%,${-a.y}%);text-align:${ta};padding:0;`;
+      let css=styleToCss(st, ratio);
+      if(st.shadow<=0) css+='text-shadow:none;';             // 蓋掉 .line class 的預設六向描邊
+      if(!st.bgBox) css+='background:transparent;';
+      // padding 會把文字往內推 → 與 ASS 錯位（ASS 的 BorderStyle=3 是把色塊往【外】長，文字不動）。
+      // 置中對齊時左右抵銷看不出來，靠左/靠右就整塊偏移；且固定 px 不隨 ratio 縮放＝位置還會跟著視窗跑。
+      // 故：無色塊＝完全不留白；有色塊＝以等量負 margin 抵銷，色塊往外長、文字位置不動。
+      css+= st.bgBox ? 'padding:.15em .4em;margin:-.15em -.4em;' : 'padding:0;';
+      if(collide[i]) css+='color:#ff4444;';                   // 與前一句落在同一點＝會糊在一起
+      const inner = escapeHTML(c.text||'').replace(/\n/g,'<br>'); // 直書由 writing-mode 自動分列（多行=多列）
+      sig+=tk+'|'+c.id+'|'+contStyle+grab+'|'+collide[i]+'|'+c.text+'|'+JSON.stringify(st)+';';
+      html+=`<div class="vsub-track${grab}" data-tk="${tk}" data-cue="${c.id}"`+
+        (grab?' title="拖曳＝移動這一句／頂端把手＝旋轉"':'')+` style="${contStyle}">`+
+        `<span class="line" style="${css}">${inner}</span>`+
+        // 旋轉把手：滑鼠移到該句才浮出（見 styles.css）。放在容器內、隨容器定位，
+        // 但【不】隨文字一起轉——轉起來把手會跑掉、抓不住。
+        (grab?`<i class="rot" title="拖曳＝旋轉（按住 Shift 吸附 15°）"></i>`:'')+
       `</div>`;
+    });
   }
   }catch(err){ console.error('[videoSub] 渲染錯誤（保留上次畫面）:', err); return; } // 防禦②：單次出錯不清空字幕、下次重試
   if(sig===_videoSubSig) return;
@@ -244,25 +256,27 @@ function styleChanged(){
   renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); refreshStyleSummaries();
 }
 
-/* 在預覽窗裡直接拖曳字幕定位（v4.28）：滑鼠位移換算成 posX/posY 百分比寫回軌道樣式，
-   面板數字即時跟著跑，放開時同步 mpv／記入還原點；匯出自然一致（同一份 effStyle）。
-   Alt＋拖曳＝繞文字塊中心旋轉（Shift 吸附 15°）——與面板「角度」同一個欄位。
-   ── 換算基準是畫面實際顯示區 _stageRect()（非 videoWrap）：不同比例的片拖起來才等效。 */
+/* 在預覽窗裡直接擺放【單一句】字幕（v4.30）：拖字幕＝移動、拖頂端把手＝旋轉（Shift 吸附 15°）。
+   ── 寫的是【該句的逐句覆蓋】(cue.style.posX/posY/angle)，不動軌道樣式：拖哪一句就只有那句跑，
+      其餘不受影響（列表標 ✱ 自訂）。整軌的標準位置仍用面板的 X／Y。
+   ── 換算基準是畫面實際顯示區 _stageRect()（非 videoWrap）：不同比例的片拖起來才等效。
+   ── 旋轉支點取【錨點】而非方塊中心，與 ASS 的 \frz 繞 \org(=\pos) 同構（見 substyle.originOf）。 */
 let _subDrag = null;
 function _subDragMove(e){
   const d = _subDrag; if(!d) return;
-  const trk = State.tracks[d.tk]; if(!trk) return;
+  const cue = d.cue; if(!cue) return;
+  cue.style = cue.style || {};
   if(d.rot){
-    let ang = d.angle + (Math.atan2(e.clientY-d.cy, e.clientX-d.cx)*180/Math.PI - d.a0);
+    let ang = d.angle + (Math.atan2(e.clientY-d.py, e.clientX-d.px)*180/Math.PI - d.a0);
     if(e.shiftKey) ang = Math.round(ang/15)*15;
-    trk.angle = Math.round(((ang+180)%360+360)%360-180); // 收斂到 -180~180＝面板欄位範圍
+    cue.style.angle = Math.round(((ang+180)%360+360)%360-180); // 收斂到 -180~180＝面板欄位範圍
   }else{
-    trk.posX = clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100);
-    trk.posY = clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100);
+    cue.style.posX = clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100);
+    cue.style.posY = clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100);
   }
-  // 拖曳中只更新預覽與面板數字；mpv 與列表摘要留到放開才做
+  // 拖曳中只重繪預覽；mpv 與列表摘要留到放開才做
   // （每次移動重送 ASS／重寫上千列摘要都太貴）
-  renderVideoSub(); renderTrackStyle();
+  renderVideoSub();
   e.preventDefault();
 }
 function _subDragEnd(e){
@@ -270,20 +284,24 @@ function _subDragEnd(e){
   _subDrag = null;
   _videoSub.classList.remove('dragging');
   try{ _videoSub.releasePointerCapture(e.pointerId); }catch(err){}
-  refreshMpvSubs(); renderTrackStyle(); refreshStyleSummaries(); // 座標變了 → 列表摘要要跟上
-  recordHistory(d.rot ? '旋轉字幕' : '移動字幕位置'); // 一次拖曳＝一個還原點（record 內部會去重）
+  refreshMpvSubs(); refreshStyleSummaries(); drawTimeline(); // 座標／角度變了 → 摘要與 ✱ 標記要跟上
+  recordHistory((d.rot ? '旋轉字幕' : '移動字幕位置')+cueSuffix(d.cue)); // 一次拖曳＝一個還原點
 }
 _videoSub?.addEventListener('pointerdown', e => {
   if(e.button !== 0) return;
   const el = e.target.closest?.('.vsub-track.drag'); if(!el) return;
-  const tk = +el.dataset.tk, trk = State.tracks[tk];
+  const trk = State.tracks[+el.dataset.tk];
+  const cue = State.cues.find(c => c.id === el.dataset.cue);
   const rect = _stageRect();
-  if(!trk || trk.locked || !rect?.w || !rect?.h) return;
-  const st = effStyle(null, trk), box = el.getBoundingClientRect();
-  const cx = box.left+box.width/2, cy = box.top+box.height/2;
-  _subDrag = { tk, rect, rot: e.altKey, x0: e.clientX, y0: e.clientY,
-    posX: st.posX, posY: st.posY, angle: st.angle||0, cx, cy,
-    a0: Math.atan2(e.clientY-cy, e.clientX-cx)*180/Math.PI };
+  if(!trk || !cue || trk.locked || !rect?.w || !rect?.h) return;
+  const st = effStyle(cue, trk), box = el.getBoundingClientRect();
+  const a = anchorPct(st);
+  // 旋轉支點＝錨點在畫面上的實際位置（與 CSS transform-origin／ASS \org 同一點），
+  // 不是方塊中心——支點取錯，把手轉起來文字會用另一個圓心跑掉。
+  const px = box.left + box.width*a.x/100, py = box.top + box.height*a.y/100;
+  _subDrag = { cue, rect, rot: !!e.target.closest('.rot'), x0: e.clientX, y0: e.clientY,
+    posX: st.posX, posY: st.posY, angle: st.angle||0, px, py,
+    a0: Math.atan2(e.clientY-py, e.clientX-px)*180/Math.PI };
   // 捕獲掛在圖層上：.vsub-track 每次重繪都被換掉，捕在它身上會當場斷線
   try{ _videoSub.setPointerCapture(e.pointerId); }catch(err){}
   _videoSub.classList.add('dragging');
@@ -818,8 +836,10 @@ async function startInlineEdit(block,c){
   ed.addEventListener('dblclick',ev=>ev.stopPropagation());
 }
 
+let _covCleared=false; // 本次開窗有沒有按過「清除全部覆蓋」（決定要不要連座標／角度一起清）
 async function openCueEditModal(c){
   await ensureProjectSaved();
+  _covCleared=false;
   const orig=c.text||'';
   const trackIdx=c.track||0;
   const trackName=State.tracks[trackIdx]?.name||'';
@@ -875,8 +895,14 @@ async function openCueEditModal(c){
     if(!ta) return;
     let val=ta.innerText;
     if(val.endsWith('\n') && !orig.endsWith('\n')) val=val.slice(0,-1);
-    // 收集樣式覆蓋（勾選的欄位）
+    // 收集樣式覆蓋（勾選的欄位）。
+    // ── 這裡是把 c.style【整個重建】，所以本視窗沒有控件的覆蓋欄位必須先原樣搬過來：
+    //    座標／角度是在預覽窗拖出來的，這裡沒有對應欄位，不保留的話「開一下視窗按確定」
+    //    就會把拖好的位置與角度默默清掉（angle 自 v4.27 起即有此問題）。
+    //    使用者若要清掉它們，走「清除全部覆蓋」（見下方 covClear，會連同這些一起清）。
     const style={}; const origStyle=JSON.stringify(c.style||null);
+    const managed=new Set(COV_FIELDS.map(f=>f[0]));
+    if(c.style && !_covCleared) for(const k of CUE_STYLE_KEYS){ if(!managed.has(k) && c.style[k]!=null) style[k]=c.style[k]; }
     for(const [k,,type] of COV_FIELDS){
       const on=$('covK_'+k), vi=$('covV_'+k);
       if(!on||!on.checked||!vi) continue;
@@ -960,7 +986,9 @@ async function openCueEditModal(c){
     if(ov){
       ov.addEventListener('keydown',e=>e.stopPropagation());
       const cl=$('covClear');
-      if(cl) cl.addEventListener('click',e=>{ e.preventDefault(); ov.querySelectorAll('input[type=checkbox]').forEach(x=>x.checked=false); });
+      // 「清除全部覆蓋」＝連同本視窗沒有控件的座標／角度一起清（見存檔處的 _covCleared）
+      if(cl) cl.addEventListener('click',e=>{ e.preventDefault(); _covCleared=true;
+        ov.querySelectorAll('input[type=checkbox]').forEach(x=>x.checked=false); });
     }
   },30);
 }
