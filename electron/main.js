@@ -560,10 +560,15 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   if (assText && assText.trim()) {
     assName = 'export_' + Date.now() + '.ass';
     fs.writeFileSync(path.join(TMP, assName), assText, 'utf8');
-    // v4.25.4：fontsdir 指向 <專案根>/font → 燒錄用的字型與預覽（@font-face 同一批檔）一致，
-    // 不必先安裝到系統。冒號/反斜線需跳脫（filtergraph 參數語法）。
+    // v4.25.4：fontsdir 指向 <專案根>/font → 燒錄用的字型與預覽（FontFace 同一批檔）一致，
+    // 不必先安裝到系統。
+    // ── 磁碟機冒號要跳【兩層】(v4.31.2 修)：filtergraph 先拆選項、選項值再拆一次，
+    //    所以字面上得是 `C\\:/...`。只寫一個反斜線（舊版）→ ffmpeg 把 `:` 當成選項分隔符、
+    //    整條 filterchain 解析失敗 → 匯出直接掛掉（實測 spawn 無 shell 介入亦然，
+    //    不是 shell 吃掉跳脫字元）。此路徑僅在 font/ 存在時才加，因此 v4.27.0 把字型
+    //    打進安裝包之後，安裝版的匯出才開始壞。
     const fdir = fontsRoot();
-    const fdirArg = fdir ? ':fontsdir=' + fdir.replace(/\\/g, '/').replace(/:/g, '\\:') : '';
+    const fdirArg = fdir ? ':fontsdir=' + fdir.replace(/\\/g, '/').replace(/:/g, '\\\\:') : '';
     fc.push(`${vc}ass=${assName}${fdirArg}[vout]`);
     vfinal = '[vout]';
   }
