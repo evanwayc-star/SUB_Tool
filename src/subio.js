@@ -308,7 +308,18 @@ function _buildExportData() {
   return { clips: list, videoTracks, duration: +Seq.end().toFixed(3) };
 }
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
-let _lastVbrMbps = 5; // MP4 影片位元率（Mbps）；預設 5M，同一 session 記住上次設定
+/* MP4 交付碼率的合理建議值（Mbps）＝像素數 × fps × 0.12 bit ÷ 1e6（H.264 中高品質經驗值）。
+   ── v4.32：舊版固定預設 5Mbps、不看解析度 → 4K 用 5Mbps 會嚴重壓縮、畫面像被壓過
+      （使用者回報「輸出像 proxy 品質」的真正成因之一）。實測 5Mbps→45Mbps 的 4K 匯出，
+      前者的細節區明顯有色塊/馬賽克感。
+   對照（0.12 係數）：720p@30≈4、1080p@30≈7、1080p@60≈15、4K@30≈30、4K@60≈60 Mbps。
+   夾在 4~120 之間（下限 4 避免低解析度也被壓爛）。 */
+function _suggestMbps() {
+  const w = State.videoWidth || 1920, h = State.videoHeight || 1080, fps = State.fps || 30;
+  const mbps = (w * h * fps * 0.12) / 1e6;
+  return Math.round(Math.max(4, Math.min(120, mbps)));
+}
+let _lastVbrMbps = null; // 使用者手動改過的碼率（同一 session 記住）；null＝用依解析度的建議值
 /* 對話框摘要：目前序列各來源會輸出幾條聲道（供使用者匯出前確認混音器狀態） */
 function _mixerSummary() {
   const srcs = new Set(State.clips.map(c => c.audioSrc || (c.primary ? 'video' : 'clip:' + c.id)));
@@ -350,8 +361,8 @@ async function showExportVideoDialog() {
     `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="mp4"> MP4（H.264，交付/預覽）` +
     `<span style="color:${gpu ? 'var(--green)' : 'var(--text-faint)'};font-size:12px">— ${mp4Note}</span></label>` +
     `<div id="expVbrRow" style="display:none;padding:6px 0 0 22px">影片位元率：` +
-    `<input type="number" id="expVbr" min="0.1" max="200" step="0.5" value="${_lastVbrMbps}" style="width:74px;margin:0 4px"> Mbps` +
-    `<span style="color:var(--text-faint);font-size:12px;margin-left:8px">音訊固定 192 kbps AAC</span></div>` +
+    `<input type="number" id="expVbr" min="0.1" max="200" step="0.5" value="${_lastVbrMbps || _suggestMbps()}" style="width:74px;margin:0 4px"> Mbps` +
+    `<span style="color:var(--text-faint);font-size:12px;margin-left:8px">建議 <b>${_suggestMbps()}</b>（依 ${State.videoWidth || 1920}×${State.videoHeight || 1080}）· 音訊 192k AAC</span></div>` +
     `<div style="color:var(--text-faint);font-size:12px;margin-top:6px">ProRes 為固定品質，無位元率設定。來源解碼一律嘗試硬體加速（不支援時自動退回軟解）。</div>` +
     `</div>`,
     [{ label: '匯出', primary: true, act: () => {
