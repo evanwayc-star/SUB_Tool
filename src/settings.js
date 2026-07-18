@@ -1,7 +1,8 @@
 import { $, sublist } from './dom.js';
-import { State, saveKeys } from './state.js';
-import { setStatus } from './ui.js';
+import { State, saveKeys, DESK, IS_DESKTOP } from './state.js';
+import { setStatus, showToast } from './ui.js';
 import { emit } from './events.js';
+import { downloadBytes, pickFile, readFile, decodeText, bytesToB64 } from './util.js';
 
 const actionCategories = [
   {
@@ -282,9 +283,12 @@ export function showSettingsModal() {
       </div>
       <div class="settings-footer">
         <button id="settingsRestoreBtn" class="btn" style="margin-right:auto;">還原預設</button>
+        <button id="settingsExportBtn" class="btn" title="把目前這份快捷鍵設定存成 .json 檔">⭳ 匯出</button>
+        <button id="settingsImportBtn" class="btn" title="從 .json 檔載入快捷鍵設定（需按「儲存」才生效）">⭱ 匯入</button>
         <button id="settingsCancelBtn" class="btn">取消</button>
         <button id="settingsSaveBtn" class="btn primary">儲存</button>
       </div>
+      <input type="file" id="settingsImportFile" accept="application/json,.json" hidden>
     </div>
   `;
   document.body.appendChild(modal);
@@ -296,6 +300,39 @@ export function showSettingsModal() {
   document.getElementById('settingsRestoreBtn').onclick = () => {
     tempKeymap = JSON.parse(JSON.stringify(State.defaultKeymap));
     renderSettingsTable(tbody);
+  };
+
+  // 匯出：把目前編輯中的這份 keymap 存成 json（桌面走原生存檔對話框、網頁走下載）
+  document.getElementById('settingsExportBtn').onclick = async () => {
+    const json = JSON.stringify({ _type: 'subtool-keymap', version: 1, keymap: tempKeymap }, null, 2);
+    const bytes = new TextEncoder().encode(json);
+    const name = 'SUBTool_快捷鍵.json';
+    try {
+      if (IS_DESKTOP && DESK.exportSub) {
+        const p = await DESK.exportSub(name, bytesToB64(bytes), 'json');
+        if (p) showToast('已匯出快捷鍵：' + p.split(/[\\/]/).pop());
+      } else { downloadBytes(bytes, name, 'application/json'); showToast('已匯出快捷鍵設定'); }
+    } catch (e) { setStatus('匯出失敗：' + (e?.message || e), 'err'); }
+  };
+
+  // 匯入：讀 json → 驗證 → 併到預設 keymap（缺項用預設補、未知動作忽略）→ 重繪表格（需按「儲存」才寫入）
+  document.getElementById('settingsImportBtn').onclick = async () => {
+    const f = await pickFile(document.getElementById('settingsImportFile')); if (!f) return;
+    try {
+      const obj = JSON.parse(decodeText(await readFile(f)));
+      const km = obj && obj.keymap ? obj.keymap : obj; // 相容：直接是 keymap 物件也收
+      if (!km || typeof km !== 'object' || Array.isArray(km)) throw new Error('格式不符（不是快捷鍵設定檔）');
+      // 只採用「本版本認得的動作」，值須為綁定陣列；其餘一律以預設補齊
+      const merged = JSON.parse(JSON.stringify(State.defaultKeymap));
+      let applied = 0;
+      for (const act of Object.keys(merged)) {
+        if (Array.isArray(km[act])) { merged[act] = km[act].filter(b => b && typeof b === 'object'); applied++; }
+      }
+      if (!applied) throw new Error('檔案裡沒有可用的快捷鍵綁定');
+      tempKeymap = merged;
+      renderSettingsTable(tbody);
+      showToast(`已匯入 ${applied} 項快捷鍵；按「儲存」才會生效`);
+    } catch (e) { setStatus('匯入失敗：' + (e?.message || e), 'err'); showToast('匯入失敗：' + (e?.message || e)); }
   };
 
   document.getElementById('settingsCancelBtn').onclick = () => {

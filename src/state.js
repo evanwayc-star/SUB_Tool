@@ -81,6 +81,7 @@ async function loadConfig() {
       if (typeof conf.autoSelect === 'boolean') State.autoSelect = conf.autoSelect;
       if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
       if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
+      if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
     } catch (e) { console.error('Failed to load config', e); }
   } else {
     try {
@@ -90,6 +91,7 @@ async function loadConfig() {
         if (typeof conf.autoSelect === 'boolean') State.autoSelect = conf.autoSelect;
         if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
         if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
+        if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
       }
     } catch (e) {}
   }
@@ -99,7 +101,8 @@ function saveConfig() {
   const data = {
     autoSelect: State.autoSelect,
     overwriteMode: State.overwriteMode,
-    overwriteKeep: State.overwriteKeep
+    overwriteKeep: State.overwriteKeep,
+    safeFrame: State.safeFrame
   };
   if (DESK && DESK.configSave) {
     DESK.configSave(data).catch(e => console.error('Failed to save config', e));

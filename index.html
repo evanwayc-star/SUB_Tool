@@ -60,6 +60,7 @@
           <video id="video" playsinline></video>
           <canvas class="preview-canvas" id="previewCanvas"></canvas>
           <div class="preview-fade" id="previewFade"></div>
+          <canvas class="safe-frame" id="safeFrame"></canvas>
           <div class="vsublayer" id="videoSub"></div>
           <div class="no-video" id="noVideo">
             <b>尚未載入影音</b>
@@ -86,6 +87,7 @@
           <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span> / <span
               id="tcDur">00:00:00:00</span></div>
           <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
+          <button class="icon tp-btn" data-act="safe-frame" id="safeFrameBtn" title="安全框：90%／80% 安全區＋中心十字線（僅預覽參考，不燒入匯出）">⊹ 安全框</button>
           <button class="icon tp-btn" data-act="mixer" title="混音器：逐聲道電平 / 獨奏 / 靜音">🎚 混音器</button>
           <button class="icon tp-btn" data-act="add-audio" title="載入外部音檔（右鍵影片切換音訊來源）">🔊＋</button>
         </div>

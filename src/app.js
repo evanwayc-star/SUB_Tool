@@ -169,7 +169,49 @@ function _stageRect(){
   const dw = Math.max(1, Math.round(vw*s)), dh = Math.max(1, Math.round(vh*s));
   return { x: Math.round((W-dw)/2), y: Math.round((H-dh)/2), w: dw, h: dh };
 }
+/* 安全框（v4.33）：90%／80% 安全區＋中心十字線，疊在 videoWrap 上供構圖參考。
+   ── 僅預覽：畫在獨立的 #safeFrame canvas，【不】經 ffmpeg 燒入匯出。
+   ── 對齊影片實際顯示區 _stageRect()（與字幕層同一個框），不同比例的片都貼合畫面。
+   由 renderVideoSub 每幀呼叫（rafLoop／resize／seek 都會觸發）→ 自動跟著畫面對齊。 */
+const _safeFrame = $('safeFrame');
+function drawSafeFrame(){
+  if(!_safeFrame) return;
+  const on = !!State.safeFrame;
+  _safeFrame.classList.toggle('on', on);
+  if(!on) return;
+  const wrap = _videoWrap; if(!wrap) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  const bw = Math.round(W*dpr), bh = Math.round(H*dpr);
+  if(_safeFrame.width !== bw || _safeFrame.height !== bh){ _safeFrame.width = bw; _safeFrame.height = bh; }
+  const ctx = _safeFrame.getContext('2d');
+  ctx.clearRect(0, 0, bw, bh);
+  const r = _stageRect(); if(!r || !r.w || !r.h) return; // 尚無影片 → 只清空
+  const x = r.x*dpr, y = r.y*dpr, w = r.w*dpr, h = r.h*dpr;
+  ctx.lineWidth = Math.max(1, dpr);
+  // 90%／80% 安全區（置中內縮）
+  const box = (pct, color, dash)=>{
+    const iw = w*pct, ih = h*pct, ix = x+(w-iw)/2, iy = y+(h-ih)/2;
+    ctx.strokeStyle = color; ctx.setLineDash(dash||[]);
+    ctx.strokeRect(Math.round(ix)+0.5, Math.round(iy)+0.5, Math.round(iw), Math.round(ih));
+  };
+  box(0.90, 'rgba(255,255,255,.55)', []);          // 90% 動作安全框（實線）
+  box(0.80, 'rgba(255,220,90,.7)', [6*dpr,5*dpr]); // 80% 字幕/標題安全框（黃虛線）
+  // 中心十字線
+  ctx.setLineDash([]); ctx.strokeStyle = 'rgba(255,255,255,.35)';
+  const cx = Math.round(x+w/2)+0.5, cy = Math.round(y+h/2)+0.5;
+  ctx.beginPath(); ctx.moveTo(cx, y); ctx.lineTo(cx, y+h);        // 垂直中線
+  ctx.moveTo(x, cy); ctx.lineTo(x+w, cy); ctx.stroke();          // 水平中線
+}
+function toggleSafeFrame(){
+  State.safeFrame = !State.safeFrame;
+  $('safeFrameBtn')?.classList.toggle('active', State.safeFrame);
+  drawSafeFrame(); saveConfig();
+  showToast(State.safeFrame ? '安全框：開（90%／80%＋中心十字，僅預覽）' : '安全框：關');
+}
+
 function renderVideoSub(){
+  drawSafeFrame(); // 安全框跟著畫面每幀對齊（開關關閉時只清空、成本極低）
   // 防禦①：非 mpv（或 WC 已接管）時字幕層必須可見——避免被 mpv 載入殘留的 display:none 卡住而「完全不顯示」
   if(_videoSub && (!Media.mpvMode || Media._wcTakeover) && _videoSub.style.display==='none') _videoSub.style.display='';
   const t=Media.displayTime();
@@ -671,6 +713,7 @@ async function doAction(act, force = false){
     case 'notes': togglePanel('notesPanel'); renderNotes(); break;
     case 'add-note': addNote(); break;
     case 'clear-notes': clearAllNotes(); break;
+    case 'safe-frame': toggleSafeFrame(); break;
     case 'mixer': togglePanel('mixerPanel'); renderMixer(); break;
     case 'mixer-reset': mixerReset(); break;
     case 'mixer-muteall': mixerMuteAll(); break;
@@ -1446,6 +1489,7 @@ function updateConfigUI() {
 async function init(){
   await loadConfig();
   await loadKeys();
+  $('safeFrameBtn')?.classList.toggle('active', !!State.safeFrame); // 安全框開關狀態還原（v4.33）
   updateConfigUI();
   State.fps=+$('fpsSel').value||24;
   const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;

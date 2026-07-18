@@ -101,12 +101,19 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 
 /* 影片預覽 */
 .video-wrap{flex:1;display:flex;align-items:center;justify-content:center;position:relative;min-height:0;background:#000;overflow:hidden}
-#video{max-width:100%;max-height:100%;background:#000;display:block}
+/* object-fit:contain 填滿 videoWrap 並保比例（內部留黑邊）→ 原生影片的實際顯示區
+   ＝_stageRect()＝字幕層＝安全框，四者對齊。舊寫法只有 max-width/height：小於視窗的影片
+   會停在原生尺寸不放大，導致字幕／安全框（用 _stageRect）跟畫面對不上（v4.33 修）。 */
+#video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 .vsublayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;}
 /* WebCodecs 預覽畫布：不透明蓋住 video（video 仍出聲＋當時鐘）；previewFade/videoSub 依 DOM 順序疊其上 */
 .preview-canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none}
 /* 預覽淡出入黑提示（淡入/淡出/軌透明度）：疊在原生影片上（mpv 走獨立視窗，改用 brightness） */
 .preview-fade{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;z-index:1}
+/* 安全框：疊在影片與字幕之上的參考線 canvas（僅預覽，不燒入匯出）。預設隱藏 */
+.safe-frame{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2;display:none}
+.safe-frame.on{display:block}
+#safeFrameBtn.active{background:var(--accent);border-color:var(--accent);color:#0d0d0d}
 /* 字幕塊可直接抓著拖（.vsublayer 是 pointer-events:none，這裡開回來；旋轉後的 .line
    由 CSS transform 自動連命中區一起轉，抓視覺位置就抓得到）。鎖定軌不給抓＝無 .drag */
 .vsub-track{position:absolute;left:0;right:0;padding:0 6%}
@@ -319,7 +326,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .body{flex:0 0 275px;min-width:0;max-width:275px}
 .sub-row .sub-sty{
   display:flex;flex-direction:column;align-items:flex-start;align-self:center;gap:4px;
-  flex:0 0 auto;margin-left:10px;  /* v4.32.2 空白由 24→10px（時間碼那行也縮字級，整體更緊） */
+  flex:0 0 auto;margin-left:40px;  /* v4.33：往右挪，右側本來就有空間（v4.32.2 曾縮到 10px 太貼文字） */
   font-size:11px;line-height:1.6;
   font-variant-numeric:tabular-nums;letter-spacing:.01em;
 }
