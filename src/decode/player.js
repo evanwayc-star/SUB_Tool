@@ -59,7 +59,7 @@ function demuxCached(url){
 /* 單一來源檔的串流解碼器（每「作用層」一個：同 url 疊多軌時各自獨立游標，demux 共享）。
    frames[] 依呈現序遞增；呈現中的 frame 屬本物件、呼叫端勿 close。 */
 class SourceStream {
-  constructor(url){ this.url = url; this.state = 'idle'; /* idle|loading|ready|failed */ }
+  constructor(url){ this.url = url; this.state = 'idle'; /* idle|loading|ready|failed */ this._discarded = false; }
 
   async load(){
     if(this.state !== 'idle') return;
@@ -111,6 +111,7 @@ class SourceStream {
     this.frames = []; this._flushed = false;
     this.fedIdx = this._keyBefore(tUs);
     this._fedFrom = this.fedIdx; // 本輪解碼路徑起點（判斷「目標是否早於本輪可達範圍」用）
+    this._discarded = false;
   }
 
   /* 每幀呼叫：推進解碼並回傳「最接近且不晚於 tUs」的 frame（無則 null）。 */
@@ -126,9 +127,12 @@ class SourceStream {
     //  （若目標在前方但同一 GOP 內＝keyframe 不在前方 → 不 reseek，繼續向前餵即會到；
     //    切勿用「目標 vs 已餵位置」距離判斷——長 GOP 從頭重解時會每幀誤判成再跳轉而無限重來）
     const ki = this._keyBefore(tUs);
-    const earliestTs = this.frames.length ? this.frames[0].timestamp
-                     : (this.fedIdx > 0 ? cs[this._fedFrom].timestamp : null);
-    if(this.fedIdx < 0 || (earliestTs != null && tUs < earliestTs - half) || ki > this.fedIdx) this._reseek(tUs);
+    const earliestTs = this.frames.length ? this.frames[0].timestamp : null;
+    // 如果目標所需的最早關鍵影格小於本輪餵入起點，代表絕對往回跳轉了 GOP；
+    // 否則在同一個 GOP 內，只有當我們已經開始丟棄舊影格，且目標時間早於目前可達的最早影格時，才算是後退。
+    const seekBack = (this._fedFrom != null && ki < this._fedFrom) ||
+                     (earliestTs != null && tUs < earliestTs - half && this._discarded);
+    if(this.fedIdx < 0 || seekBack || ki > this.fedIdx) this._reseek(tUs);
 
     // 餵：直到「最後已解 frame」涵蓋 t+lookahead、或 decoder 佇列滿、或檔尾、或位元組還沒到
     let starved = false;
@@ -148,8 +152,15 @@ class SourceStream {
     // 挑 frame：最後一個 ts ≤ t＋半幀；都還沒解到但第一張已很近（<200ms）→ 先用它避免黑幀
     let best = null;
     for(const f of this.frames){ if(f.timestamp <= tUs + half) best = f; else break; }
-    if(!best && this.frames.length && this.frames[0].timestamp - tUs < 200e3) best = this.frames[0];
-    if(best){ while(this.frames.length && this.frames[0] !== best){ const f = this.frames.shift(); try{ f.close(); }catch(e){} } }
+    // 放寬對首幀的容忍度到 1000ms，避免某些 proxy mp4 的 pts 偏移過大導致完全無法接管
+    if(!best && this.frames.length && this.frames[0].timestamp - tUs < 1000e3) best = this.frames[0];
+    if(best){
+      while(this.frames.length && this.frames[0] !== best){
+        const f = this.frames.shift();
+        try{ f.close(); }catch(e){}
+        this._discarded = true;
+      }
+    }
     return best;
   }
 
@@ -193,7 +204,12 @@ export const WCPreview = {
     v = !!v;
     if((Media._wcTakeover || false) === v) return;
     Media._wcTakeover = v;
-    const vs = $('videoSub'); if(vs) vs.style.display = v ? '' : 'none'; // mpv 模式限定（原生不經此函式）
+    // mpv 回來顯示時仍保留透明 DOM 命中層，否則暫停畫面切回 mpv 後字幕又無法直接拖曳。
+    const vs = $('videoSub');
+    if(vs){
+      vs.style.display='';
+      vs.classList.toggle('mpv-hit-layer', !v);
+    }
     emit('mpv:sync'); // _syncMpvPanel 讓 mpv 視窗讓位／回歸
   },
 
@@ -207,7 +223,9 @@ export const WCPreview = {
   tick(){
     if(!this._ensure()) return;
     const mpv = Media.mpvMode;
-    const on = this.enabled && Media.seqOn() && (!mpv || !!Media._wcProxyUrl); // mpv：proxy 就緒才可接管
+    // mpv 模式下，即使沒有全域的 Media._wcProxyUrl，也必須放行，
+    // 以便後續能夠透過片段的 c.proxyUrl 進行解碼與接管
+    const on = this.enabled && Media.seqOn();
     if(!on){
       this._hideCanvas();
       if(this.sources.size && !Media.seqOn()) this.disposeAll(); // 媒體已卸載 → 釋放 demux/解碼資源
@@ -225,6 +243,19 @@ export const WCPreview = {
 
     const t = Media.tlTime();
     const acts = Media._gap ? [] : Seq.clipsAt(t).filter(c => State.videoTracks[c.vtrack||0]?.visible !== false);
+
+    // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
+    // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
+    const needsComposite = acts.length > 1 || acts.some(c => {
+      const vt=State.videoTracks[c.vtrack||0]||{};
+      return (c.fadeIn||0)>0 || (c.fadeOut||0)>0 ||
+        (vt.scale != null && Math.abs(vt.scale-1)>0.001) ||
+        (vt.opacity != null && vt.opacity<0.999);
+    });
+    if(mpv && acts.length && !needsComposite){
+      this._hideCanvas(); this._setTakeover(false);
+      Media._wcComposited=false; this.mode='mpv'; return;
+    }
 
     // 預熱（v4.25）：即將作用（t..t+PRELOAD_S）的片段先開始載入——否則播放進入疊層區時上層還在
     // fetch/demux，那一刻只畫得出下層（要暫停等它載完才出現）＝「播放時不會切到最上層」。
@@ -263,7 +294,7 @@ export const WCPreview = {
     // <video>（原生）或 mpv 自己顯示畫面。canvas 是不透明的：留著畫黑會整個蓋住 →
     // 症狀＝「看得到字幕、看不到影像」。原生模式字幕層照常可見；mpv 模式才需讓回（字幕改由 libass）。
     // 上層解不動但下層可解時不走這裡：繼續合成可解的層並保持接管，字幕照常（v4.25.1）。
-    if(!layers.length && !Media._gap){
+    if(!layers.length && !Media._gap && acts.length > 0){
       if(mpv){
         if(topBlocked === 'decoding' && Media._wcTakeover && !resized){ Media._wcComposited = true; return; } // 已接管：保留上一幀防閃
         this._setTakeover(false);

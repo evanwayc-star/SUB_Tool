@@ -78,17 +78,26 @@ export function styleToCss(st, ratio){
   // （＝Alignment 指定的那一角）。用 center center 會與匯出／mpv 轉出不同結果——只有
   // align=center+valign=middle 時兩者才恰好重合，難怪預設值下看起來像是對的。
   if(st.angle) css += `transform:rotate(${st.angle}deg);transform-origin:${originOf(st)};`;
-  if(st.outline > 0){
-    // ASS outline 向外擴 N px；CSS stroke 置中描邊 → 寬度 2N 視覺對應，paint-order 讓筆畫墊在填色後
-    css += `-webkit-text-stroke:${(st.outline * 2 * r).toFixed(1)}px ${st.outlineColor};paint-order:stroke fill;`;
-  }
-  if(st.shadow > 0){
-    const d = (st.shadow * r).toFixed(1);
-    css += `text-shadow:${d}px ${d}px ${(st.shadow * r * 0.6).toFixed(1)}px rgba(0,0,0,.85);`;
-  }
   if(st.bgBox){
-    css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:.12em .35em;border-radius:.08em;`+
+    // 在 ASS 中 BorderStyle=3 時，Outline 轉為控制底色 padding，不再畫字體外框
+    const pad = (0.12 * fs + (st.outline || 0) * r).toFixed(1);
+    const padH = (0.35 * fs + (st.outline || 0) * r).toFixed(1);
+    css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;border-radius:.08em;`+
            `box-decoration-break:clone;-webkit-box-decoration-break:clone;`;
+    // Shadow 轉為底色色塊的陰影
+    if(st.shadow > 0){
+      const d = (st.shadow * r).toFixed(1);
+      css += `box-shadow:${d}px ${d}px 0px rgba(0,0,0,.85);`;
+    }
+  } else {
+    if(st.outline > 0){
+      // ASS outline 向外擴 N px；CSS stroke 置中描邊 → 寬度 2N 視覺對應，paint-order 讓筆畫墊在填色後
+      css += `-webkit-text-stroke:${(st.outline * 2 * r).toFixed(1)}px ${st.outlineColor};paint-order:stroke fill;`;
+    }
+    if(st.shadow > 0){
+      const d = (st.shadow * r).toFixed(1);
+      css += `text-shadow:${d}px ${d}px ${(st.shadow * r * 0.6).toFixed(1)}px rgba(0,0,0,.85);`;
+    }
   }
   return css;
 }

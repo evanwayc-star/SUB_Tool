@@ -98,12 +98,19 @@ on('fps:changed', ()=>{
 function renderAll(){ renderSubList(); renderCueBlocks(); renderVideoSub(); updateTlSel(); refreshMpvSubs(); }
 /* mpv 嵌入模式：字幕改由 mpv/libass 渲染（DOM 疊層被覆蓋）。cue 變動時重建 .ass 餵給 mpv（防抖） */
 let _mpvSubT=null;
+let _lastMpvSubSend=0;
+let _revealMpvSubsAfterRefresh=false;
 let _firstLoad=true; // 第一次載入影片或字幕時自動 zoomFitVideo；新專案後重置
-function refreshMpvSubs(){
+function refreshMpvSubs(revealAfter=false, live=false){
   if(!Media.mpvMode || !window.subtool?.mpv) return;
+  if(revealAfter===true) _revealMpvSubsAfterRefresh=true;
   clearTimeout(_mpvSubT);
-  _mpvSubT=setTimeout(()=>{
+  // 一般變更維持防抖；直接拖曳則節流到約 12fps，讓 mpv/libass 仍可即時預覽位置，
+  // 又不會每個 pointermove 都重載一次 ASS。
+  const delay=live ? Math.max(0,80-(performance.now()-_lastMpvSubSend)) : 150;
+  _mpvSubT=setTimeout(async()=>{
     try{
+      _lastMpvSubSend=performance.now();
       // 序列：mpv/libass 以【來源時間】渲染字幕，而 cue 時碼為【時間軸時間】——
       // 依當前 clip 的映射（來源 = 時間軸 - offset + in）整批平移後再餵給 mpv
       let cs=State.cues;
@@ -112,9 +119,27 @@ function refreshMpvSubs(){
         const sh=c.in - c.offset;
         cs=State.cues.map(x=>x.timed===false?x:{...x, start:x.start+sh, end:x.end+sh});
       }
-      window.subtool.mpv.subSet(toASSFromState(cs)).catch(()=>{});
+      let assStr = toASSFromState(cs);
+      if(State.safeFrame) {
+        const sf = [];
+        // 以 1920x1080 畫布為基準產生四邊矩形邊框
+        // 90%
+        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFFFFF&\\3a&H77&\\bord1}m 96 54 l 1824 54 l 1824 1026 l 96 1026`);
+        // 80%
+        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&H5ADCF0&\\3a&H55&\\bord2}m 192 108 l 1728 108 l 1728 972 l 192 972`);
+        // 中心十字線 (垂直、水平)
+        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(960,0)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m -1 0 l 1 0 l 1 1080 l -1 1080`);
+        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,540)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m 0 -1 l 1920 -1 l 1920 1 l 0 1`);
+        assStr += '\n' + sf.join('\n') + '\n';
+      }
+      await window.subtool.mpv.subSet(assStr);
+      // 只在拖曳結束時才重新露出 mpv/libass 字幕，避免舊位置與 DOM 預覽重疊。
+      if(_revealMpvSubsAfterRefresh){
+        _revealMpvSubsAfterRefresh=false;
+        window.subtool.mpv.subVisible?.(true).catch(()=>{});
+      }
     }catch(e){}
-  },150);
+  },delay);
 }
 /* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。
    只在浮動面板/搜尋視窗「實際重疊」影片區域時才隱藏 mpv，不重疊時影片繼續顯示。 */
@@ -158,6 +183,23 @@ function _syncMpvPanel(){
 const _videoSub = $('videoSub');
 const _videoWrap = $('videoWrap');
 let _videoSubSig = '';
+let _mpvSubtitleDrag = false;
+let _hoveredSubEl = null;
+function _sendMpvSubtitleGuide(el){
+  const mpv=window.subtool?.mpv;
+  if(!mpv?.setGuide) return;
+  if(!el || !Media.mpvMode || Media._wcTakeover || _mpvSubtitleDrag){ mpv.setGuide(null).catch(()=>{}); return; }
+  const wrap=_videoWrap?.getBoundingClientRect(), box=el.getBoundingClientRect();
+  if(!wrap || !box.width || !box.height){ mpv.setGuide(null).catch(()=>{}); return; }
+  mpv.setGuide({ x:box.left-wrap.left-3, y:box.top-wrap.top-3, w:box.width+6, h:box.height+6 }).catch(()=>{});
+}
+function _setSubtitleHover(el){
+  if(el===_hoveredSubEl) return;
+  _hoveredSubEl?.classList.remove('hovering');
+  _hoveredSubEl=el||null;
+  _hoveredSubEl?.classList.add('hovering');
+  _sendMpvSubtitleGuide(_hoveredSubEl);
+}
 /* 影片畫面在 videoWrap 內的實際顯示區（contain）。字幕層對齊它 ——
    否則字幕框固定 16:9，遇到不同比例的片（2.39:1 電影 vs 16:9）畫面高度不同，
    字幕卻照同一個框換算 →「字幕大小在各個影片上不一樣」。回 null＝取不到來源尺寸。 */
@@ -165,20 +207,20 @@ function _stageRect(){
   if(!_videoWrap) return null;
   const W = _videoWrap.clientWidth, H = _videoWrap.clientHeight;
   if(!W || !H) return null;
-  // 專案輸出解析度優先（與匯出同一張畫布 → 字幕大小不隨各片解析度/比例改變）
   let vw = State.videoWidth || 0, vh = State.videoHeight || 0;
   if(!vw || !vh){
     const ss = WCPreview.stageSize && WCPreview.stageSize();
     if(ss){ vw = ss.w; vh = ss.h; }
     else if(video.videoWidth){ vw = video.videoWidth; vh = video.videoHeight; }
   }
-  if(!vw || !vh) return null;
+  // 未載入影片（純編輯字幕）時，預設給 1920x1080 比例，讓安全框與拖曳功能仍能正常運作
+  if(!vw || !vh){ vw = 1920; vh = 1080; }
   const s = Math.min(W/vw, H/vh);
   const dw = Math.max(1, Math.round(vw*s)), dh = Math.max(1, Math.round(vh*s));
   return { x: Math.round((W-dw)/2), y: Math.round((H-dh)/2), w: dw, h: dh };
 }
 /* 安全框（v4.33）：90%／80% 安全區＋中心十字線，疊在 videoWrap 上供構圖參考。
-   ── 僅預覽：畫在獨立的 #safeFrame canvas，【不】經 ffmpeg 燒入匯出。
+   ── 僅預覽：畫在獨立的 #safeFrame，【不】經 ffmpeg 燒入匯出。
    ── 對齊影片實際顯示區 _stageRect()（與字幕層同一個框），不同比例的片都貼合畫面。
    由 renderVideoSub 每幀呼叫（rafLoop／resize／seek 都會觸發）→ 自動跟著畫面對齊。 */
 const _safeFrame = $('safeFrame');
@@ -187,41 +229,36 @@ function drawSafeFrame(){
   const on = !!State.safeFrame;
   _safeFrame.classList.toggle('on', on);
   if(!on) return;
-  const wrap = _videoWrap; if(!wrap) return;
-  const dpr = window.devicePixelRatio || 1;
-  const W = wrap.clientWidth, H = wrap.clientHeight;
-  const bw = Math.round(W*dpr), bh = Math.round(H*dpr);
-  if(_safeFrame.width !== bw || _safeFrame.height !== bh){ _safeFrame.width = bw; _safeFrame.height = bh; }
-  const ctx = _safeFrame.getContext('2d');
-  ctx.clearRect(0, 0, bw, bh);
-  const r = _stageRect(); if(!r || !r.w || !r.h) return; // 尚無影片 → 只清空
-  const x = r.x*dpr, y = r.y*dpr, w = r.w*dpr, h = r.h*dpr;
-  ctx.lineWidth = Math.max(1, dpr);
-  // 90%／80% 安全區（置中內縮）
-  const box = (pct, color, dash)=>{
-    const iw = w*pct, ih = h*pct, ix = x+(w-iw)/2, iy = y+(h-ih)/2;
-    ctx.strokeStyle = color; ctx.setLineDash(dash||[]);
-    ctx.strokeRect(Math.round(ix)+0.5, Math.round(iy)+0.5, Math.round(iw), Math.round(ih));
-  };
-  box(0.90, 'rgba(255,255,255,.55)', []);          // 90% 動作安全框（實線）
-  box(0.80, 'rgba(255,220,90,.7)', [6*dpr,5*dpr]); // 80% 字幕/標題安全框（黃虛線）
-  // 中心十字線
-  ctx.setLineDash([]); ctx.strokeStyle = 'rgba(255,255,255,.35)';
-  const cx = Math.round(x+w/2)+0.5, cy = Math.round(y+h/2)+0.5;
-  ctx.beginPath(); ctx.moveTo(cx, y); ctx.lineTo(cx, y+h);        // 垂直中線
-  ctx.moveTo(x, cy); ctx.lineTo(x+w, cy); ctx.stroke();          // 水平中線
+  
+  const r = _stageRect(); if(!r || !r.w || !r.h) return;
+  // 將 safeFrame 對齊畫面顯示區 _stageRect()
+  const key = r.x+'|'+r.y+'|'+r.w+'|'+r.h;
+  if(_safeFrame.dataset.rect !== key){
+    _safeFrame.dataset.rect = key;
+    const st = _safeFrame.style;
+    st.left = r.x+'px'; st.top = r.y+'px';
+    st.width = r.w+'px'; st.height = r.h+'px';
+    st.right = 'auto'; st.bottom = 'auto'; st.margin = '0';
+  }
 }
 function toggleSafeFrame(){
   State.safeFrame = !State.safeFrame;
   $('safeFrameBtn')?.classList.toggle('active', State.safeFrame);
-  drawSafeFrame(); saveConfig();
+  drawSafeFrame(); saveConfig(); refreshMpvSubs();
   showToast(State.safeFrame ? '安全框：開（90%／80%＋中心十字，僅預覽）' : '安全框：關');
 }
 
+let _lastStageH = 0;
 function renderVideoSub(){
-  drawSafeFrame(); // 安全框跟著畫面每幀對齊（開關關閉時只清空、成本極低）
-  // 防禦①：非 mpv（或 WC 已接管）時字幕層必須可見——避免被 mpv 載入殘留的 display:none 卡住而「完全不顯示」
-  if(_videoSub && (!Media.mpvMode || Media._wcTakeover) && _videoSub.style.display==='none') _videoSub.style.display='';
+  drawSafeFrame(); // 安全框跟著畫面每幀對齊
+  // mpv 是 OS 層子視窗：保留透明的 DOM 命中層才可直接點字幕拖曳；真正的字幕仍由 libass 顯示。
+  // 拖曳期間則暫時隱藏 libass，改用可見 DOM 預覽新位置（見 _subDragMove）。
+  const mpvHitLayer=!!(Media.mpvMode && !Media._wcTakeover && !_mpvSubtitleDrag);
+  if(_videoSub){
+    _videoSub.classList.toggle('mpv-hit-layer', mpvHitLayer);
+    if((!Media.mpvMode || Media._wcTakeover || mpvHitLayer || _mpvSubtitleDrag) && _videoSub.style.display==='none') _videoSub.style.display='';
+  }
+  if(!mpvHitLayer) _sendMpvSubtitleGuide(null);
   const t=Media.displayTime();
   const fps = State.fps || 25;
   let exactFps = getExactFps(fps);
@@ -244,21 +281,31 @@ function renderVideoSub(){
   // 縮放基準＝畫面【高】/ PlayResY：ASS 的 Fontsize／Outline／Shadow 都是相對 PlayResY 換算的。
   // 舊版用「寬 / PlayResX」——16:9 時寬高等比例所以剛好對得上，一遇到別的比例就整個歪掉：
   // 實測 2.35:1 的片字級佔畫面高 9.9%，而 16:9 與 ASS 都是 7.41%（大了 33%，且與匯出不符）。
-  const stageH = (rect && rect.h) || _videoSub?.clientHeight || ASS_PLAY_RES.y;
+  const stageH = (rect && rect.h) || _videoSub?.clientHeight || _lastStageH || ASS_PLAY_RES.y;
+  if (stageH > 0) _lastStageH = stageH; // 記住有效的畫面高，避免開啟對話框時 _videoSub 失去高度導致 fallback 回原尺吋放大
   const ratio = stageH / ASS_PLAY_RES.y;
   let html='', sig=(rect ? rect.w+'x'+rect.h : '')+';'; // 畫面區變動（換片/不同比例/視窗縮放）須重繪
   try{
-  for(let tk=0; tk<State.trackCount; tk++){
-    if(!trackVisible(tk))continue;
-    const cur=State.cues.filter(c => {
-      if ((c.track||0)!==tk || c.timed===false) return false;
-      const startFrame = Math.round(c.start * exactFps);
-      const endFrame = Math.round(c.end * exactFps);
-      return currentFrame >= startFrame && currentFrame < endFrame;
-    });
-    if(!cur.length)continue;
-    const trk=State.tracks[tk]||{};
-    const grab = trk.locked ? '' : ' drag'; // 鎖定軌不可拖
+    let tks = [];
+    for(let tk=0; tk<State.trackCount; tk++) if(trackVisible(tk)) tks.push(tk);
+    if(_presetEdit) tks = [0];
+
+    for(const tk of tks){
+      let cur = [], trk = {};
+      if(_presetEdit){
+        cur = [{ id: 'draft_preview', text: '這是一段範例字幕\n（Sample Text）', style: {} }];
+        trk = _presetEdit.draft;
+      }else{
+        cur = State.cues.filter(c => {
+          if ((c.track||0)!==tk || c.timed===false) return false;
+          const startFrame = Math.round(c.start * exactFps);
+          const endFrame = Math.round(c.end * exactFps);
+          return currentFrame >= startFrame && currentFrame < endFrame;
+        });
+        if(!cur.length)continue;
+        trk=State.tracks[tk]||{};
+      }
+      const grab = (_presetEdit || !trk.locked) ? ' drag' : ''; // 草稿可拖，鎖定軌不可拖
     // v4.30：【一句一個容器】——座標已可逐句覆蓋（在預覽窗拖某一句＝只挪那一句），
     // 各句的 posX/posY 可能不同，無法再共用一個軌級容器。
     // 同時也修掉一項預覽與 ASS 的落差：同軌同時段的多句，ASS 本來就是各自 \pos 疊著畫，
@@ -301,16 +348,26 @@ function renderVideoSub(){
   if(sig===_videoSubSig) return;
   _videoSubSig=sig;
   _videoSub.innerHTML=html;
+  // 重繪會換掉原本的 DOM 節點；拖曳中直接接回新節點，讓原生提示框跟著位置走，
+  // 非拖曳時則清掉過期的 hover 引導，等下一次指標移動再計算。
+  if(_hoveredSubEl && !_hoveredSubEl.isConnected){
+    const dragEl=_subDrag?.cue ? _videoSub.querySelector(`.vsub-track.drag[data-cue="${_subDrag.cue.id}"]`) : null;
+    _setSubtitleHover(dragEl||null);
+  }
 }
 
 /* 軌道樣式改動後的統一重繪：預覽畫面／mpv 字幕／樣式面板／字幕列表的樣式摘要。
    ── 一律走這裡（v4.29.5）：這四處本來各自散在九個呼叫點，漏掉列表摘要 → 面板改了框線、
       座標，列表卻還顯示舊值（要等別的操作觸發整份重繪才會補上，看起來像「只有某些欄位會更新」）。 */
 function styleChanged(){
+  if(_presetEdit){
+    renderVideoSub(); renderTrackStyle();
+    return;
+  }
   renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); refreshStyleSummaries();
 }
 
-/* 在預覽窗裡直接擺放【單一句】字幕（v4.30）：拖字幕＝移動、拖頂端把手＝旋轉（Shift 吸附 15°）。
+/* 在預覽窗裡直接擺放【單一句】字幕（v4.30）：拖字幕＝移動、拖頂端把手＝旋轉（Shift 吸附 15°，Alt 直接旋轉）。
    ── 寫的是【該句的逐句覆蓋】(cue.style.posX/posY/angle)，不動軌道樣式：拖哪一句就只有那句跑，
       其餘不受影響（列表標 ✱ 自訂）。整軌的標準位置仍用面板的 X／Y。
    ── 換算基準是畫面實際顯示區 _stageRect()（非 videoWrap）：不同比例的片拖起來才等效。
@@ -319,43 +376,66 @@ let _subDrag = null;
 function _subDragMove(e){
   const d = _subDrag; if(!d) return;
   const cue = d.cue; if(!cue) return;
-  cue.style = cue.style || {};
+  const targetObj = _presetEdit ? _presetEdit.draft : (cue.style = cue.style || {});
   if(d.rot){
     let ang = d.angle + (Math.atan2(e.clientY-d.py, e.clientX-d.px)*180/Math.PI - d.a0);
     if(e.shiftKey) ang = Math.round(ang/15)*15;
-    cue.style.angle = Math.round(((ang+180)%360+360)%360-180); // 收斂到 -180~180＝面板欄位範圍
+    targetObj.angle = Math.round(((ang+180)%360+360)%360-180); // 收斂到 -180~180＝面板欄位範圍
   }else{
-    cue.style.posX = clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100);
-    cue.style.posY = clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100);
+    targetObj.posX = clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100);
+    targetObj.posY = clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100);
   }
+  if(_presetEdit) renderTrackStyle(); // 同步更新樣式面板
   // 拖曳中只重繪預覽；mpv 與列表摘要留到放開才做
   // （每次移動重送 ASS／重寫上千列摘要都太貴）
   renderVideoSub();
+  // mpv 的原生影片蓋在 DOM 預覽之上；拖曳時節流重送 ASS，讓畫面上的真正字幕與安全框
+  // 持續可見並跟著移動，而不是等放開才跳到新位置。
+  if(Media.mpvMode && !Media._wcTakeover) refreshMpvSubs(false,true);
   e.preventDefault();
 }
 function _subDragEnd(e){
   const d = _subDrag; if(!d) return;
   _subDrag = null;
+  const restoreMpvSubs=_mpvSubtitleDrag;
+  _mpvSubtitleDrag=false;
   _videoSub.classList.remove('dragging');
   try{ _videoSub.releasePointerCapture(e.pointerId); }catch(err){}
-  refreshMpvSubs(); refreshStyleSummaries(); drawTimeline(); // 座標／角度變了 → 摘要與 ✱ 標記要跟上
+  if(restoreMpvSubs){
+    _videoSub.classList.add('mpv-hit-layer');
+    refreshMpvSubs(true);
+  }else refreshMpvSubs();
+  // pointer capture 期間事件目標會是 videoSub，放開後重新綁定新 DOM 節點，讓原生提示框留在字幕上。
+  const nextEl=_videoSub?.querySelector(`.vsub-track.drag[data-cue="${d.cue.id}"]`);
+  _setSubtitleHover(nextEl||null);
+  refreshStyleSummaries(); drawTimeline(); // 座標／角度變了 → 摘要與 ✱ 標記要跟上
   recordHistory((d.rot ? '旋轉字幕' : '移動字幕位置')+cueSuffix(d.cue)); // 一次拖曳＝一個還原點
 }
 _videoSub?.addEventListener('pointerdown', e => {
   if(e.button !== 0) return;
   const el = e.target.closest?.('.vsub-track.drag'); if(!el) return;
-  const trk = State.tracks[+el.dataset.tk];
-  const cue = State.cues.find(c => c.id === el.dataset.cue);
+  _setSubtitleHover(el);
+  let trk, cue;
+  if(_presetEdit && el.dataset.cue === 'draft_preview'){
+    trk = _presetEdit.draft;
+    cue = { style: {} }; // 臨時空物件
+  }else{
+    trk = State.tracks[+el.dataset.tk];
+    cue = State.cues.find(c => c.id === el.dataset.cue);
+  }
   const rect = _stageRect();
   if(!trk || !cue || trk.locked || !rect?.w || !rect?.h) return;
-  const st = effStyle(cue, trk), box = el.getBoundingClientRect();
+  const st = _presetEdit ? _presetEdit.draft : effStyle(cue, trk);
+  const box = el.getBoundingClientRect();
   const a = anchorPct(st);
   // 旋轉支點＝錨點在畫面上的實際位置（與 CSS transform-origin／ASS \org 同一點），
   // 不是方塊中心——支點取錯，把手轉起來文字會用另一個圓心跑掉。
   const px = box.left + box.width*a.x/100, py = box.top + box.height*a.y/100;
-  _subDrag = { cue, rect, rot: !!e.target.closest('.rot'), x0: e.clientX, y0: e.clientY,
+  _subDrag = { cue, rect, rot: e.altKey || !!e.target.closest('.rot'), x0: e.clientX, y0: e.clientY,
     posX: st.posX, posY: st.posY, angle: st.angle||0, px, py,
     a0: Math.atan2(e.clientY-py, e.clientX-px)*180/Math.PI };
+  // 不隱藏 mpv/libass：安全框也在同一層，隱藏會讓拖曳期間字幕與安全框一起消失。
+  // _subDragMove 會以節流方式即時同步新座標給 mpv。
   // 捕獲掛在圖層上：.vsub-track 每次重繪都被換掉，捕在它身上會當場斷線
   try{ _videoSub.setPointerCapture(e.pointerId); }catch(err){}
   _videoSub.classList.add('dragging');
@@ -364,6 +444,8 @@ _videoSub?.addEventListener('pointerdown', e => {
 _videoSub?.addEventListener('pointermove', _subDragMove);
 _videoSub?.addEventListener('pointerup', _subDragEnd);
 _videoSub?.addEventListener('pointercancel', _subDragEnd);
+_videoWrap?.addEventListener('pointermove', e => { if(!_subDrag) _setSubtitleHover(e.target.closest?.('.vsub-track.drag')||null); });
+_videoWrap?.addEventListener('pointerleave', () => { if(!_subDrag) _setSubtitleHover(null); });
 
 /* ===== 快取管理對話框（桌面版） ===== */
 function _fmtBytes(n){ n=+n||0; if(n<1024)return n+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+' '+u[i]; }
@@ -857,9 +939,8 @@ let _presetEdit = null;
 function styleTarget(){
   const i=State.listTrack, trk=State.tracks[i];
   if(!trk) return null;
-  // 編輯常用樣式期間：不管有沒有選字幕，一律改軌道（＝那組樣式的草稿），否則改動會跑進
-  // 逐句覆蓋、存回 preset 時抓不到。
-  if(_presetEdit) return { i, trk, cues: [], cue: null };
+  // 編輯常用樣式期間：攔截樣式目標，導向獨立的草稿 (draft)
+  if(_presetEdit) return { i: _presetEdit.trackIdx, trk: _presetEdit.draft, cues: [], cue: null };
   const ids=State.selectedIds && State.selectedIds.length ? State.selectedIds
           : (State.selectedId ? [State.selectedId] : []);
   const cues=ids.length ? State.cues.filter(c=>(c.track||0)===i && ids.includes(c.id)) : [];
@@ -1143,7 +1224,7 @@ function initUI(){
     const style=styleSnapshot(effStyle(t.cue, t.trk));
     const ex=list.findIndex(p=>p.name===nm);
     if(ex>=0) list[ex]={name:nm,style}; else list.push({name:nm,style});
-    savePresets(list); renderTrackStyle(); showToast('已儲存常用樣式：'+nm);
+    savePresets(list); renderTrackStyle(); refreshStyleSummaries(); showToast('已儲存常用樣式：'+nm);
   });
   $('tsPresetSel').addEventListener('change',e=>{
     const t=styleTarget(), v=e.target.value; e.target.value='';
@@ -1163,7 +1244,11 @@ function initUI(){
     // 清單＝內建（第一筆，不可改名／刪除）＋使用者自訂
     const list=getAllPresets();
     const body=$('modalBody'); if(!body)return;
-    body.innerHTML=`<div style="max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:2px">`+
+    body.innerHTML=`<div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:10px;padding:0 4px">`+
+      `<button class="btn" id="preExportBtn" title="把自訂樣式存成 .json 檔">⭳ 匯出</button>`+
+      `<button class="btn" id="preImportBtn" title="讀取 .json 檔並加入樣式庫">⭱ 匯入</button>`+
+      `</div>`+
+      `<div style="max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:2px">`+
       list.map((p,i)=>{ const st=Object.assign({},STYLE_DEFAULTS,p.style||{});
         // data-pre-ren/del 帶的是【使用者清單】的索引（扣掉前面的內建筆數），與 getPresets() 對得上
         const ui=i-BUILTIN_PRESETS.length;
@@ -1200,26 +1285,22 @@ function initUI(){
     State.tracks.forEach((tk,i)=>{ if(tk && _sameStyle(effStyle(null,tk),old)) targets.tracks.push(i); });
     for(const c of State.cues) if(c.style && Object.keys(c.style).length &&
       _sameStyle(effStyle(c,State.tracks[c.track||0]||null),old)) targets.cues.push(c);
-    _presetEdit={ name:p.name, ui, before:styleSnapshot(effStyle(null,t.trk)), trackIdx:t.i, targets, old };
-    Object.assign(t.trk, p.style);                    // 暫借目前軌當草稿（即時預覽）
+    _presetEdit={ name:p.name, ui, trackIdx:t.i, targets, old, draft: Object.assign({}, old) };
     closeModal();
     $('tsEditBar').hidden=false; $('tsEditName').textContent=p.name;
     styleChanged();
   }
   function _presetEditEnd(save){
     const E=_presetEdit; if(!E)return;
-    const trk=State.tracks[E.trackIdx];
-    const draft = trk ? styleSnapshot(effStyle(null,trk)) : null;
+    const draft = E.draft;
     _presetEdit=null; $('tsEditBar').hidden=true;      // 先清旗標，styleTarget 才回正常行為
-    if(!save || !draft){ if(trk) Object.assign(trk,E.before); styleChanged(); showToast('已取消編輯'); return; }
+    if(!save || !draft){ styleChanged(); showToast('已取消編輯'); return; }
     const list=[...getPresets()]; const p=list[E.ui];
     if(p){ p.style=draft; savePresets(list); }
     // 同步：進入前就符合舊樣式的，一起換成新樣式
     let n=0;
     for(const i of E.targets.tracks){ if(State.tracks[i]){ Object.assign(State.tracks[i],draft); n++; } }
     for(const c of E.targets.cues){ c.style=Object.assign({},draft); n++; }
-    // 目前這軌只是借來當畫布：本來就不符合舊樣式的話，還原它，別被順手改掉
-    if(trk && !E.targets.tracks.includes(E.trackIdx)) Object.assign(trk,E.before);
     styleChanged(); recordHistory('編輯常用樣式：'+E.name);
     showToast(`已更新「${E.name}」` + (n?`，同步 ${n} 處`:'（目前沒有套用它的字幕）'));
   }
@@ -1230,6 +1311,59 @@ function initUI(){
     const editB=e.target.closest('[data-pre-edit]');
     const renB=e.target.closest('[data-pre-ren]');
     const delB=e.target.closest('[data-pre-del]');
+    const expB=e.target.closest('#preExportBtn');
+    const impB=e.target.closest('#preImportBtn');
+
+    function _importPresets(j){
+      if(!Array.isArray(j)){ showToast('檔案格式不符：非樣式陣列'); return; }
+      const list = [...getPresets()];
+      let count = 0;
+      j.forEach(p => {
+        if(p.name && p.style && !isBuiltinPresetName(p.name)){
+          const ex = list.findIndex(x=>x.name===p.name);
+          if(ex>=0) list[ex]=p; else list.push(p);
+          count++;
+        }
+      });
+      if(count>0){
+        savePresets(list); _renderPresetMgr(); renderTrackStyle(); refreshStyleSummaries();
+        showToast(`已匯入 ${count} 組樣式`);
+      }else{
+        showToast('找不到可匯入的樣式');
+      }
+    }
+
+    if(expB){
+      const presets = getPresets(); // 只匯出自訂樣式
+      if(!presets.length){ showToast('沒有自訂樣式可匯出'); return; }
+      const str = JSON.stringify(presets, null, 2);
+      const bytes = new TextEncoder().encode(str);
+      const name = `presets_${new Date().toISOString().replace(/\\D/g,'').slice(0,14)}.json`;
+      if(IS_DESKTOP && DESK.exportSub){
+        DESK.exportSub(name, bytesToB64(bytes), 'json').then(p=>{
+          if(p) showToast('已匯出樣式：' + p.split(/[\\\\/]/).pop());
+        });
+      }else{
+        downloadBytes(bytes, name, 'application/json'); showToast('已匯出樣式設定');
+      }
+      return;
+    }
+    if(impB){
+      if(IS_DESKTOP && DESK.importSub){
+        DESK.importSub('json').then(r=>{
+          if(!r||!r.path||!r.content)return;
+          try{ const j=JSON.parse(new TextDecoder().decode(b64ToBytes(r.content))); _importPresets(j); }catch(err){ showToast('讀取失敗：格式錯誤'); }
+        });
+      }else{
+        const fi=document.createElement('input'); fi.type='file'; fi.accept='.json';
+        fi.onchange=async()=>{
+          if(!fi.files[0])return;
+          try{ const j=JSON.parse(await fi.files[0].text()); _importPresets(j); }catch(err){ showToast('讀取失敗：格式錯誤'); }
+        };
+        fi.click();
+      }
+      return;
+    }
     if(editB){ _presetEditBegin(+editB.dataset.preEdit); return; }
     if(applyB){ const p=getAllPresets()[+applyB.dataset.preApply]; const t=styleTarget();
       if(p&&t){ if(t.cues.length) for(const c of t.cues) c.style=Object.assign(c.style||{},p.style); else Object.assign(t.trk,p.style);
@@ -1237,8 +1371,8 @@ function initUI(){
     if(renB){ const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;
       const nn=await promptModal('改名','新名稱',p.name); if(!nn)return;
       if(isBuiltinPresetName(nn)){ showToast('這是內建樣式的保留名稱，請換一個'); return; }
-      p.name=nn; savePresets(l); renderTrackStyle(); _renderPresetMgr(); return; }
-    if(delB){ const l=[...getPresets()]; l.splice(+delB.dataset.preDel,1); savePresets(l); renderTrackStyle(); _renderPresetMgr(); showToast('已刪除'); }
+      p.name=nn; savePresets(l); renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); return; }
+    if(delB){ const l=[...getPresets()]; l.splice(+delB.dataset.preDel,1); savePresets(l); renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); showToast('已刪除'); }
   });
   /* 全軌統一：清掉本軌所有「逐句樣式覆蓋」，讓每句都回到軌道樣式。
      ── 軌道樣式本來就是全軌生效；唯一會脫隊的就是設過覆蓋的句子（列表標 ✱ 自訂）。

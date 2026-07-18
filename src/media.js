@@ -415,6 +415,8 @@ const Media = {
     try{ res=await DESK.mpv.launch({src:p, bounds:this._mpvRect(), audio}); }
     catch(e){ showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); $('videoSub').style.display=''; video.style.display=''; return; }
     this.mpvMode=true; this._mpvTime=0; this._mpvPath=p;
+    // mpv 顯示時仍要建立透明的 DOM 字幕命中層，才能直接拖曳字幕。
+    emit('render:videoSub');
     this._mpvDuration=res.duration||dur||0;
     State.duration=this._mpvDuration;
     if(info?.video?.fps) setFps(info.video.fps);
@@ -510,7 +512,11 @@ const Media = {
     if(res.proxy){
       try{
         const u=await DESK.fileURL(res.proxy);
-        if(this._bgVersion===myVer){ this._wcProxyUrl=u; this._wcProxyPath=p; } // WCPreview 憑此接管 mpv 畫面
+        if(this._bgVersion===myVer){ 
+          this._wcProxyUrl=u; 
+          this._wcProxyPath=p; 
+          this.seek(this.displayTime()); // 強制全域跳躍以觸發 WCPreview 接管與解碼
+        }
       }catch(e){ console.warn('proxy url:',e); }
     }
 
@@ -1063,7 +1069,7 @@ const Media = {
     if(!res || this._bgVersion !== myVer || !Seq.byId(c.id)) return;
     if(res.proxy){
       try{ const u = await DESK.fileURL(res.proxy);
-        if(this._bgVersion === myVer && Seq.byId(c.id)){ c.proxyUrl = u; emit('render:videoSub'); }
+        if(this._bgVersion === myVer && Seq.byId(c.id)){ c.proxyUrl = u; this.seek(this.displayTime()); }
       }catch(e){ console.warn('clip proxy url:', e); }
     }
     const chs = res.channels || [];

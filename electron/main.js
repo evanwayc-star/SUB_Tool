@@ -1027,10 +1027,27 @@ const _mpvCbs = new Map();
 let _mpvBuf = '';
 // 嵌入式覆蓋視窗（無邊框子視窗，貼合影片面板；mpv 以 --wid 渲染進其中）
 let _mpvWin = null;
+let _mpvGuideWin = null;  // 疊在 mpv 上方的透明輔助層（字幕拖曳虛線框／旋轉點）
 let _mpvRect = null;       // 最近一次面板矩形（內容座標 DIP）
 let _mpvVisible = true;
+let _mpvGuide = null;
 let _mpvSubFile = null;    // 餵給 mpv 的暫存 .ass 字幕檔
 let _mpvSubAdded = false;
+
+const MPV_GUIDE_HTML = `<!doctype html><html><head><style>
+html,body,svg{width:100%;height:100%;margin:0;overflow:hidden;background:transparent;pointer-events:none}
+#guide{display:none} rect{fill:none;stroke:rgba(255,255,255,.88);stroke-width:1;stroke-dasharray:5 4}
+line{stroke:rgba(255,255,255,.65);stroke-width:1} circle{fill:#f0a020;stroke:#fff;stroke-width:2}
+</style></head><body><svg id="svg"><g id="guide"><rect id="box"/><line id="stem"/><circle id="dot" r="7"/></g></svg><script>
+let current=null; const svg=document.getElementById('svg'), guide=document.getElementById('guide');
+const draw=()=>{ const g=current; if(!g){guide.style.display='none';return;} const w=innerWidth,h=innerHeight;
+  svg.setAttribute('viewBox','0 0 '+w+' '+h); document.getElementById('box').setAttribute('x',g.x); document.getElementById('box').setAttribute('y',g.y);
+  document.getElementById('box').setAttribute('width',g.w); document.getElementById('box').setAttribute('height',g.h);
+  const cx=g.x+g.w/2, cy=g.y-19, stem=document.getElementById('stem'), dot=document.getElementById('dot');
+  stem.setAttribute('x1',cx);stem.setAttribute('y1',cy+7);stem.setAttribute('x2',cx);stem.setAttribute('y2',g.y-2);
+  dot.setAttribute('cx',cx);dot.setAttribute('cy',cy);guide.style.display='block'; };
+window.setGuide=(g)=>{current=g;draw();}; addEventListener('resize',draw);
+</script></body></html>`;
 
 function applyMpvBounds(b) {
   if (!_mpvWin || _mpvWin.isDestroyed() || !b || !mainWin) return;
@@ -1043,12 +1060,41 @@ function applyMpvBounds(b) {
       width: Math.max(1, Math.round(b.w)),
       height: Math.max(1, Math.round(b.h)),
     });
+    if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) {
+      _mpvGuideWin.setBounds({
+        x: Math.round(cb.x + b.x),
+        y: Math.round(cb.y + b.y),
+        width: Math.max(1, Math.round(b.w)),
+        height: Math.max(1, Math.round(b.h)),
+      });
+    }
   } catch (e) {}
 }
 
 function destroyMpvWin() {
   if (_mpvWin) { try { if (!_mpvWin.isDestroyed()) _mpvWin.destroy(); } catch (e) {} _mpvWin = null; }
-  _mpvRect = null; _mpvVisible = true; _mpvSubAdded = false; _mpvSubFile = null;
+  if (_mpvGuideWin) { try { if (!_mpvGuideWin.isDestroyed()) _mpvGuideWin.destroy(); } catch (e) {} _mpvGuideWin = null; }
+  _mpvRect = null; _mpvVisible = true; _mpvGuide = null; _mpvSubAdded = false; _mpvSubFile = null;
+}
+
+function showMpvGuide() {
+  if (!_mpvVisible || !_mpvGuide || !_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
+  try { _mpvGuideWin.showInactive(); _mpvGuideWin.moveTop(); } catch (e) {}
+}
+
+function setMpvGuide(raw) {
+  const vals = raw && [raw.x, raw.y, raw.w, raw.h];
+  if (!vals || vals.some(v => !Number.isFinite(v)) || raw.w <= 0 || raw.h <= 0) {
+    _mpvGuide = null;
+    if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e) {} }
+    return;
+  }
+  _mpvGuide = { x: +raw.x, y: +raw.y, w: +raw.w, h: +raw.h };
+  if (!_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
+  try {
+    _mpvGuideWin.webContents.executeJavaScript(`window.setGuide(${JSON.stringify(_mpvGuide)})`, true).catch(() => {});
+    showMpvGuide();
+  } catch (e) {}
 }
 
 function detectMpv() {
@@ -1138,8 +1184,24 @@ ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
     fullscreenable: false, focusable: false, acceptFirstMouse: false,
     webPreferences: { offscreen: false, backgroundThrottling: false },
   });
+  // mpv 是獨立原生子視窗，若攔截滑鼠事件，底下 renderer 的字幕拖曳層永遠收不到
+  // pointerdown。mpv 已停用預設滑鼠控制，因此所有滑鼠事件都應穿透到主視窗。
+  try { _mpvWin.setIgnoreMouseEvents(true, { forward: true }); } catch (e2) {}
   try { _mpvWin.setMenu(null); } catch (e2) {}
   _mpvWin.loadURL('data:text/html,<body style="margin:0;background:transparent"></body>');
+  // DOM 位於 mpv 子視窗下方，CSS 的 hover 外框無法顯示；另建無輸入的透明原生層顯示它。
+  _mpvGuideWin = new BrowserWindow({
+    parent: mainWin, frame: false, show: false, transparent: true,
+    hasShadow: false, skipTaskbar: true, thickFrame: false,
+    resizable: false, movable: false, minimizable: false, maximizable: false,
+    fullscreenable: false, focusable: false,
+    webPreferences: { offscreen: false, backgroundThrottling: false },
+  });
+  // 提示層絕不可接收或轉送滑鼠事件：forward:true 會讓最上層 Chromium 視窗吃掉
+  // pointer move，導致底下的字幕拖曳層必須靠隱藏影片才恢復。單純忽略才會一路穿透。
+  try { _mpvGuideWin.setIgnoreMouseEvents(true); } catch (e2) {}
+  try { _mpvGuideWin.setMenu(null); } catch (e2) {}
+  await _mpvGuideWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(MPV_GUIDE_HTML));
   _mpvVisible = true;
   applyMpvBounds(bounds);
 
@@ -1188,9 +1250,16 @@ ipcMain.handle('mpv:setBounds', (e, b) => { applyMpvBounds(b); });
 ipcMain.handle('mpv:show', (e, v) => {
   _mpvVisible = !!v;
   if (!_mpvWin || _mpvWin.isDestroyed()) return;
-  if (v) { try { _mpvWin.show(); _mpvWin.moveTop(); } catch (e2) {} if (_mpvRect) applyMpvBounds(_mpvRect); }
-  else { try { _mpvWin.hide(); } catch (e2) {} }
+  if (v) {
+    try { _mpvWin.show(); _mpvWin.moveTop(); } catch (e2) {}
+    if (_mpvRect) applyMpvBounds(_mpvRect);
+    showMpvGuide();
+  } else {
+    try { _mpvWin.hide(); } catch (e2) {}
+    if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e2) {} }
+  }
 });
+ipcMain.handle('mpv:setGuide', (e, guide) => setMpvGuide(guide));
 // 餵字幕給 mpv（libass 渲染）：寫入暫存 .ass，首次 sub-add，之後 sub-reload
 ipcMain.handle('mpv:subSet', (e, assText) => {
   if (!_mpvClient) return;
@@ -1201,6 +1270,9 @@ ipcMain.handle('mpv:subSet', (e, assText) => {
   if (!_mpvSubAdded) { mpvSend(['sub-add', _mpvSubFile, 'select']); _mpvSubAdded = true; }
   else { mpvSend(['sub-reload']); }
 });
+// 字幕拖曳時由 renderer 暫時以 DOM 預覽新位置；隱藏 libass 可避免兩份字幕重疊，
+// 放開後再重新顯示已同步的 mpv 字幕。影片本身持續可見。
+ipcMain.handle('mpv:subVisible', (e, v) => mpvSend(['set_property', 'sub-visibility', !!v]));
 /* 影片序列：切換至另一支影片（同一 mpv 實例換檔，沿用 --wid 嵌入視窗與各屬性）。
    loadfile 為非同步：輪詢 duration 直到新檔就緒（最多 8 秒），回傳實測時長。
    pause/mute 等屬性跨 loadfile 保留；播放狀態由 renderer 於 loadfile 後統一設定。 */

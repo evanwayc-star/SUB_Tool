@@ -110,9 +110,13 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .preview-canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none}
 /* 預覽淡出入黑提示（淡入/淡出/軌透明度）：疊在原生影片上（mpv 走獨立視窗，改用 brightness） */
 .preview-fade{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;z-index:1}
-/* 安全框：疊在影片與字幕之上的參考線 canvas（僅預覽，不燒入匯出）。預設隱藏 */
-.safe-frame{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2;display:none}
+/* 安全框：疊在影片與字幕之上的參考線（僅預覽，不燒入匯出）。預設隱藏 */
+.safe-frame{position:absolute;inset:0;pointer-events:none;z-index:2;display:none}
 .safe-frame.on{display:block}
+.sf-90 { position:absolute; left:5%; top:5%; right:5%; bottom:5%; border:1px solid rgba(255,255,255,.55); }
+.sf-80 { position:absolute; left:10%; top:10%; right:10%; bottom:10%; border:2px dashed rgba(255,220,90,.7); }
+.sf-cx { position:absolute; left:50%; top:0; bottom:0; width:1px; background:rgba(255,255,255,.35); transform:translateX(-50%); }
+.sf-cy { position:absolute; top:50%; left:0; right:0; height:1px; background:rgba(255,255,255,.35); transform:translateY(-50%); }
 #safeFrameBtn.active{background:var(--accent);border-color:var(--accent);color:#0d0d0d}
 /* 字幕塊可直接抓著拖（.vsublayer 是 pointer-events:none，這裡開回來；旋轉後的 .line
    由 CSS transform 自動連命中區一起轉，抓視覺位置就抓得到）。鎖定軌不給抓＝無 .drag */
@@ -122,20 +126,26 @@ input:focus,select:focus{outline:none;border-color:var(--accent)}
 .vsublayer.dragging{user-select:none}
 /* 滑鼠移上去才浮出：虛線框（看得出可拖的範圍）＋頂端旋轉把手。
    平常完全不畫，預覽畫面保持乾淨。 */
-.vsub-track.drag:hover{outline:1px dashed rgba(255,255,255,.55);outline-offset:3px}
+.vsub-track.drag:hover,.vsub-track.drag.hovering{outline:1px dashed rgba(255,255,255,.55);outline-offset:3px}
 .vsub-track .rot{display:none}
-.vsub-track.drag:hover .rot,.vsublayer.dragging .vsub-track.drag .rot{
+.vsub-track.drag:hover .rot,.vsub-track.drag.hovering .rot,.vsublayer.dragging .vsub-track.drag .rot{
   display:block;position:absolute;left:50%;top:-26px;width:14px;height:14px;margin-left:-7px;
   border-radius:50%;background:var(--accent);border:2px solid #fff;cursor:crosshair;
   box-shadow:0 0 0 1px rgba(0,0,0,.6);
 }
 /* 把手到文字的連接線（讓人一眼看出它屬於這句、且是「轉」不是「移」） */
-.vsub-track.drag:hover .rot::after{
+.vsub-track.drag:hover .rot::after,.vsub-track.drag.hovering .rot::after{
   content:'';position:absolute;left:50%;top:14px;width:1px;height:12px;margin-left:-.5px;
   background:rgba(255,255,255,.55);
 }
+/* mpv 的畫面是原生子視窗，不能被 HTML 疊層覆蓋。保留同尺寸的透明字幕命中層，
+   讓點擊仍可命中可拖曳的字幕；開始拖曳後會切回一般 DOM 預覽。 */
+.vsublayer.mpv-hit-layer .line{
+  color:transparent !important;background:transparent !important;
+  -webkit-text-stroke:0 transparent !important;text-shadow:none !important;box-shadow:none !important;
+}
 .vsub-track .line{display:inline-block;background:transparent;color:#fff;font-size:clamp(14px,2.6vw,30px);
-  line-height:1.3;padding:2px 10px;border-radius:3px;white-space:pre-wrap;
+  line-height:1.3;padding:2px 10px;border-radius:3px;white-space:pre;
   text-shadow: 0 0 2px #000, 0 0 2px #000, 1px 1px 2px #000, -1px -1px 2px #000, 1px -1px 2px #000, -1px 1px 2px #000;}
 .no-video{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-faint);text-align:center;padding:30px;font-size:13px;width:80%;pointer-events:none}
 .no-video b{display:block;color:var(--text-dim);font-size:15px;margin-bottom:8px}

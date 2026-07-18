@@ -16,21 +16,40 @@ import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx } from './s
    皆非 → 留白。以軌為單位比對並快取（字幕上千條時避免逐句重算）；renderSubList 每次重繪前清空。 */
 const _presetNameCache = new Map();
 export function clearPresetNameCache(){ _presetNameCache.clear(); }
-function _trackPresetName(tk){
-  if(_presetNameCache.has(tk)) return _presetNameCache.get(tk);
-  const st = effStyle(null, State.tracks[tk] || null);
+function _getPresetNameForStyle(st){
+  // 建立序列化字串作為快取 key (確保屬性順序一致)
+  let key = '';
+  const keys = Object.keys(STYLE_DEFAULTS);
+  for(const k of keys) key += st[k] + '|';
+  
+  if(_presetNameCache.has(key)) return _presetNameCache.get(key);
+  
   let name = '';
   for(const p of getAllPresets()){
     const ps = p.style || {};
-    if(Object.keys(STYLE_DEFAULTS).every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k])){ name = p.name; break; }
+    if(keys.every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k])){ name = p.name; break; }
   }
-  _presetNameCache.set(tk, name);
+  _presetNameCache.set(key, name);
   return name;
 }
+
 function styleNameHtml(c){
-  if(c.style && Object.keys(c.style).length) return `<span class="ov" title="此句有逐句樣式覆蓋">✱ 自訂</span>`;
-  const n = _trackPresetName(c.track || 0);
-  return n ? `<span class="nm" title="常用樣式：${escapeHTML(n)}">${escapeHTML(n)}</span>` : '';
+  const isOv = c.style && Object.keys(c.style).length > 0;
+  const st = effStyle(c, State.tracks[c.track || 0] || null);
+  const n = _getPresetNameForStyle(st);
+  
+  if (n) {
+    if (isOv) {
+      // 雖然有覆蓋，但最終樣式吻合某個常用樣式
+      return `<span class="ov" title="此句有逐句樣式覆蓋，等同常用樣式：${escapeHTML(n)}">✱ ${escapeHTML(n)}</span>`;
+    } else {
+      return `<span class="nm" title="常用樣式：${escapeHTML(n)}">${escapeHTML(n)}</span>`;
+    }
+  } else {
+    // 找不到符合的常用樣式
+    if (isOv) return `<span class="ov" title="此句有逐句樣式覆蓋">✱ 自訂</span>`;
+    return '';
+  }
 }
 
 /* 色票膠囊上的文字色：依背景亮度選深或淺——白底白字、黑底黑字都會整個消失。 */
@@ -58,19 +77,20 @@ function styleSummaryHtml(c){
   const p=posToPx(st);
   return `<span class="r1">`+
       `<span class="g" title="字級">${lbl('字')}${n(st.fontSize,'字級')}</span>`+sep+
+      tg('B',st.bold,'粗體')+' '+tg('I',st.italic,'斜體','it')+sep+
       `<span title="多行／多句的垂直對齊">${va}</span>`+sep+
       `<span title="多行／多句的水平對齊">${al}</span>`+sep+
-      `<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+sep+
+      (st.vertical ? `<span title="排版方向" class="tg on">直</span>`+sep : '')+
       cp('色',st.color,'文字顏色')+sep+
-      `<span class="g" title="框線粗細 ${st.outline}">${cp('框',st.outlineColor,'框線顏色')}${n(st.outline,'框線粗細')}</span>`+sep+
-      tg('B',st.bold,'粗體')+sep+tg('I',st.italic,'斜體','it')+
+      `<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+
     `</span>`+
     `<span class="r2">`+
       `<span class="g" title="座標（像素，文字塊${al==='中對齊'&&va==='中對齊'?'中心':'錨點'}）">座標(${p.x},${p.y})</span>`+sep+
-      `<span class="g" title="旋轉角度">${lbl('角度')}${n(st.angle,'角度')}<span class="lbl deg">°</span></span>`+sep+
-      `<span title="排版方向">${st.vertical?'直式':'橫式'}</span>`+sep+
-      `<span class="g" title="底色／不透明度">${cp('底',st.bgColor,'背景色塊',!!st.bgBox)}${n(Math.round(st.bgAlpha*100),'不透明度')}${lbl('%')}</span>`+sep+
-      `<span class="g" title="字距／行距">${lbl('距')}${n(st.letterSpacing,'字距')}<span class="sp2">/</span>${n(st.lineSpacing,'行距')}</span>`+
+      `<span class="g" title="旋轉角度">${lbl('角度')}${n(st.angle,'角度')}</span>`+sep+
+      `<span class="g" title="字距／行距">${lbl('距')}${n(st.letterSpacing,'字距')}<span class="sp2">/</span>${n(st.lineSpacing,'行距')}</span>`+sep+
+      `<span class="g" title="框線粗細 ${st.outline}">${cp('框',st.outlineColor,'框線顏色')}${n(st.outline,'框線粗細')}</span>`+sep+
+      `<span class="g" title="陰影 ${st.shadow}">${lbl('影')}${n(st.shadow,'陰影')}</span>`+sep+
+      `<span class="g" title="底色／不透明度">${cp('底',st.bgColor,'背景色塊',!!st.bgBox)}${n(Math.round(st.bgAlpha*100),'不透明度')}${lbl('%')}</span>`+
     `</span>`;
 }
 import { showCueMenu, showCtx } from './menus.js';
