@@ -887,10 +887,11 @@ function renderTrackStyle(){
   setV('tsOutline',st.outline); setV('tsOutlineColor',st.outlineColor); setV('tsShadow',st.shadow);
   setV('tsSpacing',st.letterSpacing); setV('tsLineSp',st.lineSpacing);
   setV('tsBgColor',st.bgColor); setV('tsBgAlpha',Math.round(st.bgAlpha*100));
-  // 字型：不在清單的（自訂）動態補一個 option
+  // 字型不在清單時動態補一個 option（舊專案存過已移除／改名的字型；不補的話下拉會顯示
+  // 別的字型，看起來像被偷改）
   const fsel=$('tsFont');
   if(fsel){ if(![...fsel.options].some(o=>o.value===st.font||o.text===st.font)){
-      const o=document.createElement('option'); o.text=st.font; o.value=st.font; fsel.insertBefore(o, fsel.querySelector('[value="__custom"]')); }
+      const o=document.createElement('option'); o.text=st.font; o.value=st.font; fsel.appendChild(o); }
     if(document.activeElement!==fsel) fsel.value=st.font; }
   $('tsBold')?.classList.toggle('active',!!st.bold); $('tsItalic')?.classList.toggle('active',!!st.italic);
   $('tsVertical')?.classList.toggle('active',!!st.vertical); $('tsBgBox')?.classList.toggle('active',!!st.bgBox);
@@ -1128,14 +1129,9 @@ function initUI(){
   $('tsBgAlpha').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   tsToggle('tsBold','bold'); tsToggle('tsItalic','italic');
   tsToggle('tsVertical','vertical'); tsToggle('tsBgBox','bgBox');
-  $('tsFont').addEventListener('change',async e=>{
-    if(e.target.value==='__custom'){
-      const t=styleTarget();
-      const cur=t?effStyle(t.cue,t.trk).font:'';
-      const name=await promptModal('自訂字型','字型名稱（需已安裝於系統；匯出燒入亦用此字型）',cur);
-      if(name) tsSet('font', name); else renderTrackStyle();
-    } else tsSet('font', e.target.value);
-  });
+  // 字型只從 font/ 掃出來的清單選（v4.34.4 拿掉「自訂…」——手打系統字型名匯出時常配不到，
+  // 見鐵律 §0.3；要多一個字型就往 font/ 放一個資料夾）
+  $('tsFont').addEventListener('change',e=>tsSet('font', e.target.value));
   // 常用樣式庫：存 / 套用 / 管理（跨專案，存 config）
   // 存＝面板目前顯示的那組生效樣式（選取句 or 整軌）；套用＝同樣寫回面板當前的對象
   $('tsPresetSave').addEventListener('click',async()=>{
@@ -1585,7 +1581,7 @@ async function init(){
     const sel=$('tsFont'); if(!sel) return;
     if(fonts.length){
       const cur=sel.value;
-      sel.innerHTML=fonts.map(f=>`<option>${escapeHTML(f.name)}</option>`).join('')+'<option value="__custom">自訂…</option>';
+      sel.innerHTML=fonts.map(f=>`<option>${escapeHTML(f.name)}</option>`).join('');
       if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
     }
     renderVideoSub(); renderTrackStyle();
