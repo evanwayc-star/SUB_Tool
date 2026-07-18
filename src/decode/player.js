@@ -271,7 +271,11 @@ export const WCPreview = {
       this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return;
     }
 
-    if(this.canvas.style.display !== '') this.canvas.style.display = '';
+    // 【必須寫死 'block'，不可用 ''】：.preview-canvas 的 CSS 基礎規則就是 display:none，
+    // 清掉 inline 樣式會回退到那條規則 → 畫布永遠不顯示。而 _wcTakeover 又會讓 mpv 讓位，
+    // 結果兩邊都不見＝黑畫面只剩 HTML 字幕層（v4.33.2 修；此 bug 自 WebCodecs 預覽上線起就在，
+    // 因為過去驗證都用 getImageData 讀畫布像素——隱藏的畫布照樣讀得到——所以測不出來）。
+    if(this.canvas.style.display !== 'block') this.canvas.style.display = 'block';
     if(resized){ this.canvas.width = bw; this.canvas.height = bh; }
     const ctx = this.ctx;
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, bw, bh);

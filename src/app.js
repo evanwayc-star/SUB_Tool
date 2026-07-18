@@ -120,7 +120,15 @@ function refreshMpvSubs(){
    只在浮動面板/搜尋視窗「實際重疊」影片區域時才隱藏 mpv，不重疊時影片繼續顯示。 */
 function _syncMpvPanel(){
   if(!Media.mpvMode || !window.subtool?.mpv) return;
-  const modalOpen=!!$('modalBg')?.classList.contains('show');
+  // 對話框比照浮動面板：只有【真的蓋到影片區】才讓位。keepVideo 的對話框（編輯字幕文字）
+  // 靠右停、不重疊 → mpv 續留，編輯時看得到畫面（v4.33.2；否則 openModal 的 keepVideo 會被這裡蓋掉）
+  const _mb=$('modalBg');
+  let modalOpen=false;
+  if(_mb?.classList.contains('show')){
+    const mEl=_mb.querySelector('.modal'), vr0=$('videoWrap')?.getBoundingClientRect();
+    const mr=mEl?.getBoundingClientRect();
+    modalOpen = !(mr && vr0) || !(mr.right<=vr0.left||mr.left>=vr0.right||mr.bottom<=vr0.top||mr.top>=vr0.bottom);
+  }
   // 快捷鍵設定是獨立於 modalBg 的自訂對話框（settings.js 自建 #settingsModal），
   // 同樣會被 mpv 蓋住，開啟期間一律讓位
   const settingsOpen=!!document.getElementById('settingsModal');
