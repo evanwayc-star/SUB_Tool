@@ -19,6 +19,7 @@ let toastT;
 function showToast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),3500); }
 let _osdT;
 function showOsd(text){ const el=$('speedOsd'); if(!el)return; el.textContent=text; el.classList.add('show'); clearTimeout(_osdT); _osdT=setTimeout(()=>el.classList.remove('show'),1000); }
+let _modalKeepVideo=false; // 目前對話框是否「不遮影片」（靠右停＋透明遮罩＋不隱藏 mpv）
 function openModal(title,html,buttons,opts={}){
   $('modalTitle').textContent=title; $('modalBody').innerHTML=html;
   const foot=$('modalFoot'); foot.innerHTML='';
@@ -26,20 +27,28 @@ function openModal(title,html,buttons,opts={}){
     const btn=document.createElement('button'); btn.textContent=b.label; if(b.primary)btn.className='primary';
     btn.onclick=b.act; foot.appendChild(btn);
   });
-  const modalEl=$('modalBg').querySelector('.modal');
+  const bg=$('modalBg');
+  const modalEl=bg.querySelector('.modal');
   if(modalEl) modalEl.style.width=opts.width||'';
+  // keepVideo：編輯字幕文字時要看得到後面的畫面 → 對話框靠右停、遮罩透明、且【不】隱藏 mpv。
+  //  （mpv 是 OS 層置頂視窗，靠右停才不會蓋到／被它蓋到；WebCodecs 走 HTML canvas 則本來就疊得上。）
+  _modalKeepVideo = !!opts.keepVideo;
+  bg.classList.toggle('dock-right', _modalKeepVideo || opts.dock==='right');
+  bg.classList.toggle('clear-bg', _modalKeepVideo);
   // X2：記住觸發元素，顯示後把焦點移進對話框（第一個可聚焦元素，通常是輸入框或「取消」）
   // 用 _lastFocusedOutsideModal（focusin 追蹤）而非 document.activeElement，因為觸發點擊
   // 可能在 openModal 執行前就把焦點移走，導致還原目標錯誤。
   _modalPrevFocus = _lastFocusedOutsideModal || document.activeElement;
-  $('modalBg').classList.add('show');
+  bg.classList.add('show');
   setTimeout(()=>{ _focusables()[0]?.focus(); }, 0);
-  // mpv 覆蓋視窗會蓋住置中的對話框，開啟對話框時先隱藏
-  if(Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(false).catch(()=>{});
+  // mpv 覆蓋視窗會蓋住置中的對話框，開啟對話框時先隱藏（keepVideo 例外：保留畫面）
+  if(!_modalKeepVideo && Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(false).catch(()=>{});
 }
 function closeModal(){
   const prev=_modalPrevFocus; _modalPrevFocus=null;
-  $('modalBg').classList.remove('show');
+  const bg=$('modalBg');
+  bg.classList.remove('show','dock-right','clear-bg');
+  _modalKeepVideo=false;
   // X2：把焦點還給開啟前的元素。延到下一個 tick，避免「隱藏對話框→焦點元素被瀏覽器
   // 同步 blur 到 body」覆蓋掉我們的還原。
   if(prev && prev.focus){ setTimeout(()=>{ try{ prev.focus(); }catch(e){} }, 0); }
@@ -57,7 +66,8 @@ function _focusables(){
   return Array.from(m.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
     .filter(el=>!el.disabled && el.offsetParent!==null);
 }
-$('modalBg').addEventListener('mousedown',e=>{if(e.target===$('modalBg'))closeModal();});
+// 點遮罩空白處＝關閉；但 keepVideo（透明遮罩、要看影片）時不關，避免點左邊影片就誤關（有確認/取消鈕）
+$('modalBg').addEventListener('mousedown',e=>{if(e.target===$('modalBg') && !_modalKeepVideo)closeModal();});
 $('modalBg').addEventListener('keydown',e=>{
   // X2：Tab 焦點陷阱 — 把焦點循環限制在對話框內，不外漏到被遮罩的背景
   if(e.key==='Tab'){

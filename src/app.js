@@ -980,7 +980,10 @@ async function openCueEditModal(c){
     `<div id="cueEditTa" contenteditable="true" style="width:100%;min-height:5em;border:1px solid var(--border);border-radius:4px;background:var(--bg);font-size:14px;font-family:inherit;padding:6px;box-sizing:border-box;color:var(--text);overflow-y:auto;outline:none"></div>`+
     covHtml+
     `</div>`,
-    [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:closeModal}]);
+    [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:closeModal}],
+    { keepVideo:true }); // 對話框靠右停、遮罩透明、不隱藏 mpv → 編輯時看得到後面的畫面
+  // seek 到這句的起點，讓後面顯示的正是這句對應的畫面（方便對著影像改字）
+  try{ Media.seek(c.start); }catch(e){}
   setTimeout(()=>{
     const ta=$('cueEditTa');
     if(ta){

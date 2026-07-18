@@ -440,6 +440,11 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .toast.show{opacity:1;transform:translateX(-50%) translateY(-6px)}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:900;display:none;align-items:center;justify-content:center}
 .modal-bg.show{display:flex}
+/* keepVideo 對話框（編輯字幕文字）：靠右停、遮罩透明 → 看得到後面的影片。
+   mpv 是 OS 層置頂視窗、只蓋 videoWrap（左側）；靠右停可避開它。 */
+.modal-bg.dock-right{justify-content:flex-end}
+.modal-bg.dock-right .modal{margin-right:2vw;max-width:min(46vw,560px)}
+.modal-bg.clear-bg{background:transparent}
 .modal{background:var(--panel);border:1px solid var(--border2);border-radius:10px;box-shadow:var(--shadow);
   width:min(520px,92vw);max-height:86vh;overflow:auto}
 .modal h3{padding:14px 18px;border-bottom:1px solid var(--border);font-size:15px}
