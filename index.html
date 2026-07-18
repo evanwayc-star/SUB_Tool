@@ -128,10 +128,10 @@
             <button class="ts-preset" id="tsEditCancel">取消</button>
           </div>
           <!-- 欄位順序（使用者指定）：
-               行1 大小｜粗體 斜體｜上下對齊 直書 左右對齊｜字色｜字型
+               行1 大小｜粗體 斜體｜上下對齊 左右對齊｜直書｜字色｜字型
                行2 座標｜角度｜字距 行距｜框線＋框色 陰影｜底色
-               直書夾在兩個對齊下拉之間是指定的位置（v4.34.2）；陰影未列入，跟著框線走
-               （同為「描邊」）。 -->
+               直書自成一格（前面有分隔線），排在對齊之後（v4.34.3）；陰影未列入指定順序，
+               跟著框線走（同為「描邊」）。 -->
           <div class="ts-line">
             <span class="ts-title" id="tsTitle">字幕樣式</span>
             <span class="ts-sep">│</span>
@@ -150,10 +150,11 @@
             <select id="tsValign" title="上下對齊">
               <option value="top">上</option><option value="middle">中</option><option value="bottom">下</option>
             </select>
-            <button class="ts-toggle" id="tsVertical" title="直書（逐字直排；多行＝多列，第一行在左）">直</button>
             <select id="tsAlign" title="左右對齊">
               <option value="left">左</option><option value="center">中</option><option value="right">右</option>
             </select>
+            <span class="ts-sep">│</span>
+            <button class="ts-toggle" id="tsVertical" title="直書（逐字直排；多行＝多列，第一行在左）">直</button>
             <span class="ts-sep">│</span>
             <span class="ts-label">字色</span>
             <input type="color" id="tsColor" value="#ffffff" title="文字顏色">
