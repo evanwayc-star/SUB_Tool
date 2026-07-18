@@ -20,7 +20,7 @@ import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
-import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
+import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
@@ -880,7 +880,7 @@ function renderTrackStyle(){
   panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===(st.color||'').toLowerCase()));
   // 常用樣式下拉重建
   const psel=$('tsPresetSel');
-  if(psel){ const cur=psel.value; psel.innerHTML='<option value="">— 套用 —</option>'+getPresets().map(p=>`<option>${escapeHTML(p.name)}</option>`).join(''); psel.value=cur||''; }
+  if(psel){ const cur=psel.value; psel.innerHTML='<option value="">— 套用 —</option>'+getAllPresets().map(p=>`<option>${escapeHTML(p.name)}</option>`).join(''); psel.value=cur||''; }
 }
 
 /* ===== 時間軸：雙擊字幕區塊內嵌編輯文字 ===== */
@@ -1121,6 +1121,7 @@ function initUI(){
     const t=styleTarget(); if(!t)return;
     const nm=await promptModal('存為常用樣式','取一個名字（同名會覆蓋）', t.trk.name+' 樣式');
     if(!nm)return;
+    if(isBuiltinPresetName(nm)){ showToast('這是內建樣式的保留名稱，請換一個'); return; } // 內建不可被覆蓋
     const list=[...getPresets()];
     const style=styleSnapshot(effStyle(t.cue, t.trk));
     const ex=list.findIndex(p=>p.name===nm);
@@ -1130,7 +1131,7 @@ function initUI(){
   $('tsPresetSel').addEventListener('change',e=>{
     const t=styleTarget(), v=e.target.value; e.target.value='';
     if(!v||!t)return;
-    const p=getPresets().find(x=>x.name===v); if(!p)return;
+    const p=getAllPresets().find(x=>x.name===v); if(!p)return;
     if(t.cue){ t.cue.style=Object.assign(t.cue.style||{}, p.style); } // 只套這一句
     else Object.assign(t.trk, p.style);
     styleChanged(); recordHistory('套用常用樣式：'+v);
@@ -1142,33 +1143,43 @@ function initUI(){
     `background:${st.bgBox?st.bgColor:'#222'};color:${st.color};`+
     `border:1px solid rgba(255,255,255,.2);${st.outline>0?`text-shadow:0 0 2px ${st.outlineColor},0 0 2px ${st.outlineColor};`:''}">字</span>`;
   function _renderPresetMgr(){
-    const list=getPresets();
+    // 清單＝內建（第一筆，不可改名／刪除）＋使用者自訂
+    const list=getAllPresets();
     const body=$('modalBody'); if(!body)return;
-    if(!list.length){ body.innerHTML=`<div style="color:var(--text-faint);font-size:13px;padding:20px 0;text-align:center">尚無常用樣式。<br>在樣式面板調好後，按「☆ 存為常用」即可建立。</div>`; return; }
     body.innerHTML=`<div style="max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:2px">`+
       list.map((p,i)=>{ const st=Object.assign({},STYLE_DEFAULTS,p.style||{});
+        // data-pre-ren/del 帶的是【使用者清單】的索引（扣掉前面的內建筆數），與 getPresets() 對得上
+        const ui=i-BUILTIN_PRESETS.length;
         return `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border)">`+
           _presetSwatch(st)+
-          `<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(p.name)}</span>`+
+          `<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(p.name)}`+
+          (p.builtin?`<span style="margin-left:6px;font-size:10px;padding:1px 5px;border-radius:8px;background:var(--panel3);color:var(--text-faint)">內建</span>`:'')+
+          `</span>`+
           `<button class="ts-preset" data-pre-apply="${i}" title="套用到目前選取的字幕（或整軌）">套用</button>`+
-          `<button class="ts-preset" data-pre-ren="${i}">改名</button>`+
-          `<button class="ts-preset" data-pre-del="${i}" style="color:var(--red,#e66)">刪除</button></div>`;
-      }).join('')+`</div>`;
+          (p.builtin
+            ? `<span style="font-size:11px;color:var(--text-faint);opacity:.6;padding:0 6px">不可修改</span>`
+            : `<button class="ts-preset" data-pre-ren="${ui}">改名</button>`+
+              `<button class="ts-preset" data-pre-del="${ui}" style="color:var(--red,#e66)">刪除</button>`)+
+          `</div>`;
+      }).join('')+
+      (getPresets().length?'':`<div style="color:var(--text-faint);font-size:12px;padding:10px 2px">尚未建立自訂樣式——在樣式面板調好後按「☆ 存為常用」即可新增。</div>`)+
+      `</div>`;
   }
   $('tsPresetMgr').addEventListener('click',()=>{
-    if(!getPresets().length){ showToast('尚無常用樣式；先用「☆ 存為常用」建立'); return; }
-    openModal('⚙ 常用樣式管理','',[{label:'關閉',primary:true,act:closeModal}]);
+    openModal('⚙ 常用樣式管理','',[{label:'關閉',primary:true,act:closeModal}]); // 內建那筆一定在，不再擋空清單
     _renderPresetMgr();
   });
   $('modalBody').addEventListener('click',async e=>{
     const applyB=e.target.closest('[data-pre-apply]');
     const renB=e.target.closest('[data-pre-ren]');
     const delB=e.target.closest('[data-pre-del]');
-    if(applyB){ const p=getPresets()[+applyB.dataset.preApply]; const t=styleTarget();
+    if(applyB){ const p=getAllPresets()[+applyB.dataset.preApply]; const t=styleTarget();
       if(p&&t){ if(t.cue) t.cue.style=Object.assign(t.cue.style||{},p.style); else Object.assign(t.trk,p.style);
         styleChanged(); recordHistory('套用常用樣式：'+p.name); showToast('已套用：'+p.name); } return; }
     if(renB){ const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;
-      const nn=await promptModal('改名','新名稱',p.name); if(nn){ p.name=nn; savePresets(l); renderTrackStyle(); _renderPresetMgr(); } return; }
+      const nn=await promptModal('改名','新名稱',p.name); if(!nn)return;
+      if(isBuiltinPresetName(nn)){ showToast('這是內建樣式的保留名稱，請換一個'); return; }
+      p.name=nn; savePresets(l); renderTrackStyle(); _renderPresetMgr(); return; }
     if(delB){ const l=[...getPresets()]; l.splice(+delB.dataset.preDel,1); savePresets(l); renderTrackStyle(); _renderPresetMgr(); showToast('已刪除'); }
   });
   /* 全軌統一：清掉本軌所有「逐句樣式覆蓋」，讓每句都回到軌道樣式。
@@ -1602,7 +1613,7 @@ async function initDesktop(){
     toASSFromState, _stageRect }; // 三路一致診斷：ASS 產出＋字幕層座標基準（畫面實際顯示區）
   window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview,
     demuxIndex: _wcDemuxIndex, SampleReader: _wcSampleReader }; // 階段0 PoC＋階段1 預覽＋v4.29 串流式 demux（驗證/診斷入口）
-  window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, savePresets, styleSnapshot, loadFonts, getFonts, anchorPct }; // v4.23 字幕樣式（驗證/診斷入口）
+  window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, anchorPct }; // v4.23 字幕樣式（驗證/診斷入口）
 }
 
 init();

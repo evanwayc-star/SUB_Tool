@@ -10,7 +10,7 @@ import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { effStyle, getPresets, STYLE_DEFAULTS, colorName, posToPx } from './substyle.js'; // colorName 只用在色點的 title
+import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx } from './substyle.js'; // colorName 只用在色點的 title
 
 /* 該句的「常用樣式名稱」：軌樣式完全吻合某個已存的常用樣式 → 顯示其名；有逐句覆蓋 → 「自訂」；
    皆非 → 留白。以軌為單位比對並快取（字幕上千條時避免逐句重算）；renderSubList 每次重繪前清空。 */
@@ -20,7 +20,7 @@ function _trackPresetName(tk){
   if(_presetNameCache.has(tk)) return _presetNameCache.get(tk);
   const st = effStyle(null, State.tracks[tk] || null);
   let name = '';
-  for(const p of getPresets()){
+  for(const p of getAllPresets()){
     const ps = p.style || {};
     if(Object.keys(STYLE_DEFAULTS).every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k])){ name = p.name; break; }
   }

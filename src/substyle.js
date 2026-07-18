@@ -226,8 +226,15 @@ export function verticalAssCols(st, text, vww, vwh){
 }
 
 /* ---- 常用樣式庫（跨專案；桌面存 config.json、網頁存 localStorage） ---- */
+/* 內建預設樣式：不可改名／刪除／編輯，永遠排在第一個，供隨時一鍵回到標準字幕外觀。
+   內容＝STYLE_DEFAULTS 本身（字級80／白字／黑框2／陰影0／中對齊＋下對齊／粗體／
+   座標(50%,90%)＝水平置中且貼齊 80% 安全框底線／角度0／無底色／字距行距皆 1）。
+   ── 刻意直接引用 STYLE_DEFAULTS 而非另抄一份：兩份會漂掉。 */
+export const BUILTIN_PRESETS = [
+  { name: '預設字幕樣式', builtin: true, style: { ...STYLE_DEFAULTS } },
+];
 const LS_KEY = 'subtool.subPresets';
-let _presets = null; // [{name, style:{...軌道級欄位子集}}]
+let _presets = null; // [{name, style:{...軌道級欄位子集}}]（僅使用者自訂；內建的不存檔）
 export async function loadPresets(){
   if(_presets) return _presets;
   try{
@@ -237,13 +244,17 @@ export async function loadPresets(){
   }catch(e){ _presets = []; }
   return _presets;
 }
-export function getPresets(){ return _presets || []; }
+export function getPresets(){ return _presets || []; }        // 僅使用者自訂（可改名／刪除／存檔）
+/* 給 UI 用的完整清單＝內建（永遠第一）＋使用者自訂。內建那筆帶 builtin:true，
+   呼叫端據此隱藏改名／刪除。 */
+export function getAllPresets(){ return [...BUILTIN_PRESETS, ...(_presets || [])]; }
+export function isBuiltinPresetName(name){ return BUILTIN_PRESETS.some(p => p.name === name); }
 export function savePresets(list){
-  _presets = list;
+  _presets = (list || []).filter(p => p && !isBuiltinPresetName(p.name)); // 內建的永不寫進使用者清單
   try{
     const DESK = window.subtool;
-    if(DESK && DESK.configSave) DESK.configSave({ subPresets: list });
-    else localStorage.setItem(LS_KEY, JSON.stringify(list));
+    if(DESK && DESK.configSave) DESK.configSave({ subPresets: _presets });
+    else localStorage.setItem(LS_KEY, JSON.stringify(_presets));
   }catch(e){}
 }
 /* ---- 字幕字型（v4.25.4）：桌面版掃 <專案根>/font/，以 FontFace 註冊供預覽；

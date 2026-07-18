@@ -119,7 +119,7 @@ function drawRuler(){
 
   // 主刻度 + 時間標籤（同樣用整數索引）
   ctx.beginPath();ctx.strokeStyle='#3a3a40';
-  ctx.fillStyle='#8a8a92';ctx.font='10px "Noto Sans Mono CJK TC",Consolas,monospace';ctx.textBaseline='middle';
+  ctx.fillStyle='#8a8a92';ctx.font='10px Consolas,"Courier New",monospace';ctx.textBaseline='middle';
   const firstMajorIdx=Math.ceil(t0/step);
   for(let mi=firstMajorIdx;;mi++){
     let t=mi*step;
