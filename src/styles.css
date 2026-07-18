@@ -197,6 +197,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .ts-preset{padding:1px 7px;font-size:11px;border-radius:3px;background:var(--panel3);color:var(--text-dim);cursor:pointer;border:1px solid transparent;line-height:18px}
 .ts-preset:hover{color:var(--text);background:var(--panel)}
 .ts-preset.active{background:var(--accent);color:#fff}
+/* 【必須有這條】：.ts-line 的 display:flex 是【作者規則】，會蓋過瀏覽器 UA 樣式表的
+   [hidden]{display:none} → 只寫 el.hidden=true 藏不掉，提示列會一直掛在面板上。 */
+.ts-line[hidden]{display:none}
 .ts-editbar{background:rgba(230,170,50,.10);border:1px solid rgba(230,170,50,.45);border-radius:4px;padding:2px 8px;margin-bottom:3px}
 .ts-editbar .ts-title{color:#e6aa32}
 .ts-editname{font-weight:600;color:var(--text);background:var(--panel3);border-radius:8px;padding:1px 8px}

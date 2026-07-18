@@ -127,8 +127,11 @@
             <button class="ts-preset" id="tsEditDone">完成</button>
             <button class="ts-preset" id="tsEditCancel">取消</button>
           </div>
-          <!-- 欄位順序對齊字幕列表的樣式摘要，兩邊讀起來一致：
-               行1 大小｜框線 陰影｜對齊｜粗體 斜體｜顏色    行2 字型｜座標｜角度｜直橫｜底色｜字距 行距 -->
+          <!-- 欄位順序（v4.34.1，使用者指定）：
+               行1 大小｜粗體 斜體｜上下對齊 左右對齊｜字色｜字型
+               行2 座標｜角度｜直書｜字距 行距｜框線＋框色 陰影｜底色
+               直書與陰影未在指定清單內，擺在語義最近的鄰居旁：直書跟著角度（同為「擺放」），
+               陰影跟著框線（同為「描邊」）。 -->
           <div class="ts-line">
             <span class="ts-title" id="tsTitle">字幕樣式</span>
             <span class="ts-sep">│</span>
@@ -139,14 +142,11 @@
             </div>
             <input type="number" id="tsSize" min="10" max="300" step="1" value="80"><span class="ts-unit">px</span>
             <span class="ts-sep">│</span>
-            <span class="ts-label">框線</span>
-            <input type="number" id="tsOutline" min="0" max="10" step="0.5" value="2" title="框線厚度 px">
-            <input type="color" id="tsOutlineColor" value="#000000" title="框線顏色">
-            <span class="ts-label">陰影</span>
-            <input type="number" id="tsShadow" min="0" max="10" step="0.5" value="0" title="陰影大小 px">
+            <button class="ts-toggle" id="tsBold" title="粗體"><b>B</b></button>
+            <button class="ts-toggle" id="tsItalic" title="斜體"><i>I</i></button>
             <span class="ts-sep">│</span>
             <span class="ts-label" title="多行／多句字幕彼此的對齊方式">對齊</span>
-            <!-- 上下對齊在左、左右對齊在右（與樣式摘要「行1：字級｜上下｜左右」同序） -->
+            <!-- 上下對齊在左、左右對齊在右 -->
             <select id="tsValign" title="上下對齊">
               <option value="top">上</option><option value="middle">中</option><option value="bottom">下</option>
             </select>
@@ -154,11 +154,8 @@
               <option value="left">左</option><option value="center">中</option><option value="right">右</option>
             </select>
             <span class="ts-sep">│</span>
-            <button class="ts-toggle" id="tsBold" title="粗體"><b>B</b></button>
-            <button class="ts-toggle" id="tsItalic" title="斜體"><i>I</i></button>
-            <span class="ts-sep">│</span>
-            <span class="ts-label">顏色</span>
-            <input type="color" id="tsColor" value="#ffffff">
+            <span class="ts-label">字色</span>
+            <input type="color" id="tsColor" value="#ffffff" title="文字顏色">
             <div class="ts-colors">
               <button class="ts-clr" data-color="#ffffff" title="白" aria-label="字幕顏色：白"
                 style="background:#ffffff"></button>
@@ -167,32 +164,36 @@
               <button class="ts-clr" data-color="#ffee00" title="黃" aria-label="字幕顏色：黃"
                 style="background:#ffee00"></button>
             </div>
-          </div>
-          <div class="ts-line">
-            <span class="ts-label">字型</span>
+            <span class="ts-sep">│</span>
             <select id="tsFont" title="字幕字型">
               <option>更紗黑體</option><option>台北黑體</option><option>思源黑體</option><option>思源宋體</option>
               <option>粉圓字體</option><option>標楷體</option>
               <option value="__custom">自訂…</option>
             </select>
-            <span class="ts-sep">│</span>
+          </div>
+          <div class="ts-line">
             <span class="ts-label">座標</span>
             <span class="ts-unit">X</span><input type="number" id="tsPosX" step="1" value="960" title="水平座標 X（像素，相對影片畫面）">
             <span class="ts-unit">Y</span><input type="number" id="tsPosY" step="1" value="972" title="垂直座標 Y（像素，相對影片畫面）">
             <span class="ts-sep">│</span>
             <span class="ts-label">角度</span>
             <input type="number" id="tsAngle" min="-180" max="180" step="1" value="0" title="旋轉角度（度，順時針為正；繞錨點）"><span class="ts-unit">°</span>
-            <span class="ts-sep">│</span>
             <button class="ts-toggle" id="tsVertical" title="直書（逐字直排；多行＝多列，第一行在左）">直</button>
-            <span class="ts-sep">│</span>
-            <button class="ts-toggle" id="tsBgBox" title="背景色塊">底</button>
-            <input type="color" id="tsBgColor" value="#000000" title="背景色">
-            <input type="number" id="tsBgAlpha" min="0" max="100" step="5" value="50" title="背景不透明度 %"><span class="ts-unit">%</span>
             <span class="ts-sep">│</span>
             <span class="ts-label">字距</span>
             <input type="number" id="tsSpacing" min="0" max="30" step="0.5" value="1" title="字元間距 px（直書＝字與字的間隔）">
             <span class="ts-label">行距</span>
             <input type="number" id="tsLineSp" min="1" max="3" step="0.1" value="1" title="行高倍數（直書＝列與列的間隔）">
+            <span class="ts-sep">│</span>
+            <span class="ts-label">框線</span>
+            <input type="number" id="tsOutline" min="0" max="10" step="0.5" value="2" title="框線厚度 px">
+            <input type="color" id="tsOutlineColor" value="#000000" title="框線顏色">
+            <span class="ts-label">陰影</span>
+            <input type="number" id="tsShadow" min="0" max="10" step="0.5" value="0" title="陰影大小 px">
+            <span class="ts-sep">│</span>
+            <button class="ts-toggle" id="tsBgBox" title="背景色塊">底</button>
+            <input type="color" id="tsBgColor" value="#000000" title="背景色">
+            <input type="number" id="tsBgAlpha" min="0" max="100" step="5" value="50" title="背景不透明度 %"><span class="ts-unit">%</span>
           </div>
           <div class="ts-line">
             <span class="ts-label">常用樣式</span>
