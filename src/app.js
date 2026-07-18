@@ -840,23 +840,44 @@ function renderListTrackSel(){
   sel.value=String(prev);
   renderTrackStyle();
 }
+/* 「編輯常用樣式」模式（v4.34.0）。
+   做法：暫借目前軌道當草稿——把該常用樣式套上去，使用者就能用原本那套面板控制項邊調邊
+   看即時預覽（三路照常運作，不必為編輯模式另做一份 UI）。按「完成」才寫回 preset。
+   entry: { name, before, trackIdx, targets:{tracks:[i], cues:[cue]} }
+   targets ＝【進入編輯前】就已符合舊樣式的軌與句，完成時一起改成新樣式（＝使用者說的
+   「改完所有套用這個名字的也跟著變」）。名稱比對本來就是「樣式完全相符」，見
+   subtitles.js _trackPresetName——所以這裡也只能用相符來判定，沒有存名稱的欄位。 */
+let _presetEdit = null;
 /* 樣式面板的編輯對象（v4.31）：【選取中的那一句】；沒選任何句子時才退回整軌。
    ── 使用者要的是「改樣式只影響這一句，要套到全部才按『全軌統一』」。 */
+/* 面板要改的對象。
+   cues＝【本軌所有被選取的句子】——多選時樣式要全部一起改（v4.34.0 前只改到 selectedId
+   那一句，使用者多選了三句卻只有第一句變）；cue＝其中第一句，只作為面板顯示的代表值。
+   完全沒選任何句子時 cues 為空陣列 ＝ 改的是整軌。 */
 function styleTarget(){
   const i=State.listTrack, trk=State.tracks[i];
   if(!trk) return null;
-  const cue=State.cues.find(c=>c.id===State.selectedId && (c.track||0)===i) || null;
-  return { i, trk, cue };
+  // 編輯常用樣式期間：不管有沒有選字幕，一律改軌道（＝那組樣式的草稿），否則改動會跑進
+  // 逐句覆蓋、存回 preset 時抓不到。
+  if(_presetEdit) return { i, trk, cues: [], cue: null };
+  const ids=State.selectedIds && State.selectedIds.length ? State.selectedIds
+          : (State.selectedId ? [State.selectedId] : []);
+  const cues=ids.length ? State.cues.filter(c=>(c.track||0)===i && ids.includes(c.id)) : [];
+  return { i, trk, cues, cue: cues[0] || null };
 }
 
 function renderTrackStyle(){
   const panel=$('trackStyle'); const t=styleTarget();
   if(!t){ panel.classList.add('disabled'); $('tsTitle').textContent='字幕樣式'; return; }
   panel.classList.remove('disabled');
-  const { trk, cue }=t;
+  const { trk, cue, cues }=t;
   const idx=cue ? State.cues.filter(c=>(c.track||0)===State.listTrack).indexOf(cue)+1 : 0;
-  $('tsTitle').textContent = cue ? `第 ${idx} 句樣式` : `「${trk.name}」整軌樣式`;
-  $('tsTitle').title = cue ? '改動只影響這一句；要套用到整軌請按「⇩ 全軌統一」' : '沒有選取字幕 → 改動套用到整條軌道';
+  const multi=cues.length>1;
+  $('tsTitle').textContent = multi ? `已選 ${cues.length} 句樣式`
+                           : cue ? `第 ${idx} 句樣式` : `「${trk.name}」整軌樣式`;
+  $('tsTitle').title = multi ? `改動會同時套用到選取的這 ${cues.length} 句（面板顯示的是第 ${idx} 句的值）`
+                     : cue ? '改動只影響這一句；要套用到整軌請按「⇩ 全軌統一」'
+                     : '沒有選取字幕 → 改動套用到整條軌道';
   panel.classList.toggle('per-cue', !!cue);
   const st=effStyle(cue, trk); // 生效值（缺欄位以預設後援）
   const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
@@ -1077,7 +1098,7 @@ function initUI(){
      ── 面板九個控件本來各自 `State.tracks[i][k]=v`，等於「改樣式一律套全軌」。 */
   const tsSet=(k,v)=>{
     const t=styleTarget(); if(!t)return;
-    if(t.cue){ t.cue.style=t.cue.style||{}; t.cue.style[k]=v; }
+    if(t.cues.length) for(const c of t.cues){ c.style=c.style||{}; c.style[k]=v; }
     else t.trk[k]=v;
     styleChanged();
   };
@@ -1132,7 +1153,7 @@ function initUI(){
     const t=styleTarget(), v=e.target.value; e.target.value='';
     if(!v||!t)return;
     const p=getAllPresets().find(x=>x.name===v); if(!p)return;
-    if(t.cue){ t.cue.style=Object.assign(t.cue.style||{}, p.style); } // 只套這一句
+    if(t.cues.length){ for(const c of t.cues) c.style=Object.assign(c.style||{}, p.style); } // 只套選取的那幾句
     else Object.assign(t.trk, p.style);
     styleChanged(); recordHistory('套用常用樣式：'+v);
   });
@@ -1158,7 +1179,8 @@ function initUI(){
           `<button class="ts-preset" data-pre-apply="${i}" title="套用到目前選取的字幕（或整軌）">套用</button>`+
           (p.builtin
             ? `<span style="font-size:11px;color:var(--text-faint);opacity:.6;padding:0 6px">不可修改</span>`
-            : `<button class="ts-preset" data-pre-ren="${ui}">改名</button>`+
+            : `<button class="ts-preset" data-pre-edit="${ui}" title="在樣式面板上修改這組樣式；完成後所有套用它的字幕一起變">編輯</button>`+
+              `<button class="ts-preset" data-pre-ren="${ui}">改名</button>`+
               `<button class="ts-preset" data-pre-del="${ui}" style="color:var(--red,#e66)">刪除</button>`)+
           `</div>`;
       }).join('')+
@@ -1169,12 +1191,52 @@ function initUI(){
     openModal('⚙ 常用樣式管理','',[{label:'關閉',primary:true,act:closeModal}]); // 內建那筆一定在，不再擋空清單
     _renderPresetMgr();
   });
+  /* 樣式是否等同某組 preset：與 subtitles.js _trackPresetName 同一套判準（全欄位相符），
+     否則管理視窗顯示「套用中：X」的那些句子，這裡會漏掉、改完不同步。 */
+  const _sameStyle=(st,ps)=>Object.keys(STYLE_DEFAULTS)
+    .every(k=>(ps[k]!=null?ps[k]:STYLE_DEFAULTS[k])===st[k]);
+  function _presetEditBegin(ui){
+    const p=getPresets()[ui]; if(!p)return;
+    const t=styleTarget(); if(!t){ showToast('沒有字幕軌可用來編輯'); return; }
+    const old=Object.assign({},STYLE_DEFAULTS,p.style||{});
+    // 先掃出「進入編輯前就符合舊樣式」的軌與句——套上草稿之後就分不出來了
+    const targets={ tracks:[], cues:[] };
+    State.tracks.forEach((tk,i)=>{ if(tk && _sameStyle(effStyle(null,tk),old)) targets.tracks.push(i); });
+    for(const c of State.cues) if(c.style && Object.keys(c.style).length &&
+      _sameStyle(effStyle(c,State.tracks[c.track||0]||null),old)) targets.cues.push(c);
+    _presetEdit={ name:p.name, ui, before:styleSnapshot(effStyle(null,t.trk)), trackIdx:t.i, targets, old };
+    Object.assign(t.trk, p.style);                    // 暫借目前軌當草稿（即時預覽）
+    closeModal();
+    $('tsEditBar').hidden=false; $('tsEditName').textContent=p.name;
+    styleChanged();
+  }
+  function _presetEditEnd(save){
+    const E=_presetEdit; if(!E)return;
+    const trk=State.tracks[E.trackIdx];
+    const draft = trk ? styleSnapshot(effStyle(null,trk)) : null;
+    _presetEdit=null; $('tsEditBar').hidden=true;      // 先清旗標，styleTarget 才回正常行為
+    if(!save || !draft){ if(trk) Object.assign(trk,E.before); styleChanged(); showToast('已取消編輯'); return; }
+    const list=[...getPresets()]; const p=list[E.ui];
+    if(p){ p.style=draft; savePresets(list); }
+    // 同步：進入前就符合舊樣式的，一起換成新樣式
+    let n=0;
+    for(const i of E.targets.tracks){ if(State.tracks[i]){ Object.assign(State.tracks[i],draft); n++; } }
+    for(const c of E.targets.cues){ c.style=Object.assign({},draft); n++; }
+    // 目前這軌只是借來當畫布：本來就不符合舊樣式的話，還原它，別被順手改掉
+    if(trk && !E.targets.tracks.includes(E.trackIdx)) Object.assign(trk,E.before);
+    styleChanged(); recordHistory('編輯常用樣式：'+E.name);
+    showToast(`已更新「${E.name}」` + (n?`，同步 ${n} 處`:'（目前沒有套用它的字幕）'));
+  }
+  $('tsEditDone')?.addEventListener('click',()=>_presetEditEnd(true));
+  $('tsEditCancel')?.addEventListener('click',()=>_presetEditEnd(false));
   $('modalBody').addEventListener('click',async e=>{
     const applyB=e.target.closest('[data-pre-apply]');
+    const editB=e.target.closest('[data-pre-edit]');
     const renB=e.target.closest('[data-pre-ren]');
     const delB=e.target.closest('[data-pre-del]');
+    if(editB){ _presetEditBegin(+editB.dataset.preEdit); return; }
     if(applyB){ const p=getAllPresets()[+applyB.dataset.preApply]; const t=styleTarget();
-      if(p&&t){ if(t.cue) t.cue.style=Object.assign(t.cue.style||{},p.style); else Object.assign(t.trk,p.style);
+      if(p&&t){ if(t.cues.length) for(const c of t.cues) c.style=Object.assign(c.style||{},p.style); else Object.assign(t.trk,p.style);
         styleChanged(); recordHistory('套用常用樣式：'+p.name); showToast('已套用：'+p.name); } return; }
     if(renB){ const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;
       const nn=await promptModal('改名','新名稱',p.name); if(!nn)return;

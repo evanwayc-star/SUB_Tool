@@ -117,6 +117,16 @@
         </div>
         <div class="sublist" id="sublist"></div>
         <div class="track-style" id="trackStyle">
+          <!-- 編輯常用樣式時才出現：期間面板一律改「整軌」（暫借目前軌道當畫布即時預覽），
+               按完成才寫回該常用樣式並同步所有套用它的軌／句。 -->
+          <div class="ts-line ts-editbar" id="tsEditBar" hidden>
+            <span class="ts-title">✎ 編輯常用樣式</span>
+            <span id="tsEditName" class="ts-editname"></span>
+            <span class="ts-editnote">面板改動會存回這組樣式，並同步所有套用它的字幕</span>
+            <span style="flex:1"></span>
+            <button class="ts-preset" id="tsEditDone">完成</button>
+            <button class="ts-preset" id="tsEditCancel">取消</button>
+          </div>
           <!-- 欄位順序對齊字幕列表的樣式摘要，兩邊讀起來一致：
                行1 大小｜框線 陰影｜對齊｜粗體 斜體｜顏色    行2 字型｜座標｜角度｜直橫｜底色｜字距 行距 -->
           <div class="ts-line">
@@ -136,11 +146,12 @@
             <input type="number" id="tsShadow" min="0" max="10" step="0.5" value="0" title="陰影大小 px">
             <span class="ts-sep">│</span>
             <span class="ts-label" title="多行／多句字幕彼此的對齊方式">對齊</span>
-            <select id="tsAlign" title="左右對齊">
-              <option value="left">左</option><option value="center">中</option><option value="right">右</option>
-            </select>
+            <!-- 上下對齊在左、左右對齊在右（與樣式摘要「行1：字級｜上下｜左右」同序） -->
             <select id="tsValign" title="上下對齊">
               <option value="top">上</option><option value="middle">中</option><option value="bottom">下</option>
+            </select>
+            <select id="tsAlign" title="左右對齊">
+              <option value="left">左</option><option value="center">中</option><option value="right">右</option>
             </select>
             <span class="ts-sep">│</span>
             <button class="ts-toggle" id="tsBold" title="粗體"><b>B</b></button>

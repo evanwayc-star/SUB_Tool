@@ -278,7 +278,9 @@ export async function loadFonts(){
     const DESK = window.subtool;
     if(!DESK || !DESK.fontsList) return _fonts;
     const r = await DESK.fontsList();
-    const list = (r && r.fonts) || [];
+    // 預設字型排第一（主行程給的是資料夾名字典序）；其餘維持原順序。
+    const list = ((r && r.fonts) || []).slice()
+      .sort((a, b) => (b.name === STYLE_DEFAULTS.font) - (a.name === STYLE_DEFAULTS.font));
     // 以 FontFace API 直接餵位元組註冊——CSS `@font-face{src:url('file://…')}` 會被
     // Chromium 擋下（"A network error occurred"），即使 webSecurity 關閉亦然。
     for(const f of list){
