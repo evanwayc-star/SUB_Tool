@@ -74,7 +74,27 @@ Main (main.js)
 | `mpv.quit()` | `mpv:quit` | R→M | 關閉 mpv |
 | `mpv.onEvent(cb)` | `mpv:event` | M→R | mpv 事件推播（`time-pos`, `duration`, `pause`, `eof` 等） |
 
+### 設定 / 字型 / 應用生命週期（v4.23 以後陸續加入）
+
+| `window.subtool` 方法 | IPC Channel | 方向 | 說明 |
+|---|---|---|---|
+| `isDesktop` | —（preload 內的常數 `true`） | — | 前端 `state.js` 用它判定桌面版（`DESK`）；網頁版沒有 `window.subtool`，取值為 undefined |
+| `fontsList()` | `fonts:list` | R→M | 掃 `font/` 下每個子資料夾，回傳 `{fonts:[{name, file, family}]}`。`name`＝資料夾名（UI 顯示）、`family`＝**字型檔內部家族名**（ASS 要用這個，見鐵律 §0.3）。此 handler 內會把字型路徑加進白名單，renderer 才取得到 `fs:fileURL` |
+| `configLoad()` | `config:load` | R→M | 讀 `%APPDATA%/sub-tool/config.json`（設定、常用樣式 `subPresets` 等） |
+| `configSave(data)` | `config:save` | R→M | **淺層合併**寫回 config.json（只傳要改的鍵即可） |
+| `keysLoad()` | `keys:load` | R→M | 讀自訂快捷鍵對應表 |
+| `keysSave(data)` | `keys:save` | R→M | 寫自訂快捷鍵對應表（快捷鍵設定視窗另有匯出／匯入 JSON 檔） |
+| `exportDirectory(files)` | `dialog:exportDirectory` | R→M | 選一個資料夾後批次寫入多個檔案（分軌匯出字幕用） |
+| `getStartupFile()` | `app:getStartupFile` | R→M | 取「雙擊 `.subtool` 啟動」時帶進來的檔案路徑（前端啟動後主動問一次） |
+| `onOpenFile(cb)` | `app:open-file` | M→R | 程式已在執行時又雙擊 `.subtool` → 推播路徑 |
+| `onAppRequestClose(cb)` | `app:request-close` | M→R | 使用者按視窗關閉鈕 → 主行程**先攔下來**問前端（前端跳「未儲存」確認） |
+| `closeApp()` | `app:close` | R→M | 前端確認完畢，真的關閉 |
+
 > **新增 IPC 通道時**：① `preload.js` 加 `ipcRenderer.invoke`；② `main.js` 加 `ipcMain.handle`；③ 更新此表。
+>
+> **路徑安全**：主行程對所有檔案操作走白名單（`allowDir()` / `allowFile()`）。新增任何會讀寫
+> 使用者路徑的通道時，記得把該路徑加進白名單，否則 renderer 拿不到 `fs:fileURL`——這正是
+> 字型管線當初漏掉的一步。
 
 ---
 
@@ -172,18 +192,30 @@ mpv 以**子視窗**方式嵌入：Main Process 啟動 `_mpvWin`（無框 Browse
 npm run dist    # vite build + electron-builder
 ```
 
-**輸出**：`release/` 下的 **win zip**（解壓即可執行）。
+**輸出**：`release/SUB Tool Setup <版本>.exe`（NSIS 安裝檔，約 287 MB——絕大部分是內建的
+ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專案檔即可開啟。
 
-**`package.json` electron-builder 設定**：
+**`package.json` electron-builder 設定**（實際值）：
 ```json
 {
-  "win": { "target": "zip" },
-  "files": ["dist/**/*", "electron/**/*"],
-  "asarUnpack": ["electron/mpv/**", "electron/ffmpeg/**"]
+  "win":  { "target": "nsis" },
+  "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true,
+            "createDesktopShortcut": true, "createStartMenuShortcut": true },
+  "fileAssociations": [{ "ext": "subtool", "role": "Editor" }],
+  "directories": { "output": "release" },
+  "files":         ["dist/**/*", "electron/**/*"],
+  "extraResources":[{ "from": "font", "to": "font", "filter": ["**/*"] }],
+  "asarUnpack":    ["electron/mpv/**", "electron/ffmpeg/**"]
 }
 ```
 
-> `asarUnpack` 確保 mpv.exe / ffmpeg.exe 不被 asar 打包，可被 `child_process.spawn` 直接呼叫。
+- `asarUnpack` 確保 mpv.exe / ffmpeg.exe 不被 asar 打包，可被 `child_process.spawn` 直接呼叫。
+- **`extraResources` 是字型能不能用的關鍵**：`files` 只收 `dist/` 與 `electron/`，`font/`
+  必須另外用 `extraResources` 送進 `resources/font`。v4.26 少了這一段 → **開發時字型正常、
+  裝起來的 exe 一個字型都沒有**（v4.27.0 修）。`fontsRoot()` 依 dev（專案根）→
+  `resources/font` → 安裝目錄 順序尋找。
+- 換 ffmpeg build 前先讀 §7 與變更紀錄：**BtbN 的 gpl-shared 版會截斷多串流 MXF 的音訊**，
+  目前固定用 gyan 的 full_build。任何抽換都必須拿真實的多音軌 MXF 驗過。
 
 ---
 
@@ -199,6 +231,11 @@ npm run dist    # vite build + electron-builder
 | GPU 編碼器不可用 | 確認驅動版本；`status()` 回傳 `venc: "libx264"` 表示已 fallback |
 | 快取未命中（每次都重新轉） | 來源檔前 1MB 或大小有變動；可手動刪除 `.subtool_Cache` 強制重建 |
 | `task-progress` 無回報 | `sender` 是否傳入 `runFF`；`safeSend` 是否因視窗已銷毀而跳過 |
+| **完全無法匯出影片**（filterchain 解析失敗） | `fontsdir=` 的 Windows 磁碟機冒號要跳脫**兩層**（`C\\:/`）。單反斜線會讓 ffmpeg 把 `:` 當選項分隔符。注意手動在 shell 跑也會撞到同一個錯，很容易誤判成「shell 吃掉跳脫字元」——用 `spawn`（無 shell 介入）重測才能確認 |
+| 匯出的字幕**字型不對**（變成微軟正黑體） | ASS 的 Fontname 必須是**字型檔內部家族名**（`fontsList()` 回的 `family`），不是資料夾名。libass 配不到會**靜默**退回，沒有錯誤訊息——查 libass 的 `fontselect:` 輸出，退回旗標 1 ＝ 沒配到 |
+| 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |
+| 使用者說某個按鈕「按了沒反應」 | 是不是用到了 `window.prompt()`？**Electron 停用了它**，回傳永遠是 null，靜默失敗。改用 `ui.js` 的 `promptModal()` |
+| HTML 疊層（字幕拖曳、安全框）在 MXF 模式下看不到 / 點不到 | mpv 是 **OS 層 always-on-top 子視窗**，蓋在所有 HTML 之上；需要 `mpv.show(false)` 讓位（`_syncMpvPanel()`） |
 
 ---
 
