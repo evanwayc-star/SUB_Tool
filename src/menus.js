@@ -2,7 +2,7 @@
 import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
 import { State, isSel } from './state.js';
-import { Media } from './media.js';
+import { Media, Wave } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade } from './timeline.js';
 import { Seq } from './sequence.js';
@@ -63,7 +63,7 @@ function showPlayerMenu(x,y){
     checked:(video.playbackRate||1)===r,act:()=>Media.setRate(r)}));
   showCtx(x,y,items);
 }
-$('videoWrap').addEventListener('contextmenu',e=>{ e.preventDefault(); showPlayerMenu(e.clientX,e.clientY); });
+$('videoWrap').addEventListener('contextmenu',e=>{ e.preventDefault(); });
 
 /* 字幕右鍵：移到軌道 / 上下新增 / 刪除 */
 function showCueMenu(x,y){
@@ -109,7 +109,7 @@ function showCueMenu(x,y){
           const ids=_list.slice(0,_i+1).map(c=>c.id);
           State.selectedIds=ids; State.selectedId=_c.id; State.activeEdge='start';
           refreshSelectionUI();
-          $('stSel').textContent='已選 '+ids.length+' 條';
+          $('stSel').textContent=ids.length?('已選 '+ids.length+' 條'):'';
         }}); addedSel=true;
       }
       if(_i>=0 && _i<_list.length-1){
@@ -117,7 +117,7 @@ function showCueMenu(x,y){
           const ids=_list.slice(_i).map(c=>c.id);
           State.selectedIds=ids; State.selectedId=_c.id; State.activeEdge='start';
           refreshSelectionUI();
-          $('stSel').textContent='已選 '+ids.length+' 條';
+          $('stSel').textContent=ids.length?('已選 '+ids.length+' 條'):'';
         }}); addedSel=true;
       }
       if(addedSel)items.push({sep:true});
@@ -180,53 +180,112 @@ tlScroll.addEventListener('contextmenu',e=>{
   if(clipEl){
     e.preventDefault();
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
-    if(State.videoTracks[c.vtrack||0]?.locked){ showCtx(e.clientX,e.clientY,[{label:'🔒 此視訊軌已鎖定'}]); return; }
-    selectClip(c.id); // 右鍵即選取（高亮，之後可直接 Del / 上下鍵切換）
-    const trimmed=c.in>0.01||c.out<c.dur-0.01;
-    const items=[{heading:true,label:'🎬 '+c.name}];
-    // 播放頭在此段內 → 可就地切割（等同 Ctrl+K）
-    const pt=Media.displayTime();
-    if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
-    items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
-    // 移到上／下一層視訊軌（多軌疊層：上層覆蓋下層）
-    const moveTrack=(dv)=>{
-      const tv=(c.vtrack||0)+dv;
-      if(State.videoTracks[tv]?.locked){ showToast('目標視訊軌已鎖定，無法移入'); return; }
-      Seq.moveToTrack(c, tv);
-      recordHistory('影片段移到 V'+((c.vtrack||0)+1));
-      Media.seek(Math.min(Media.displayTime(), State.duration||0));
-      drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
-    };
-    items.push({label:`⬆ 移到上層視訊軌（V${(c.vtrack||0)+2}）`,act:()=>moveTrack(1)});
-    if((c.vtrack||0)>0) items.push({label:`⬇ 移到下層視訊軌（V${(c.vtrack||0)}）`,act:()=>moveTrack(-1)});
-    items.push({label:`🎞 淡入淡出（轉場）${(c.fadeIn>0||c.fadeOut>0)?' ✓':''}…`,act:()=>showClipFade(c)});
-    items.push({label:`🔀 與前一段交叉溶接…`,act:()=>showCrossfade(c)});
-    // 相鄰段交換（同一視訊軌內、依時間軸順序；保留兩段之間的間距）
-    const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset);
-    const idx=sorted.indexOf(c);
-    const swap=(a,b)=>{ // a=前段 b=後段
-      const gap=b.offset-Seq.clipEnd(a), start=a.offset;
-      b.offset=start; a.offset=start+Seq.len(b)+gap;
-      Seq.sort(); Seq.recomputeDuration();
-      recordHistory('影片段交換');
-      Media.seek(Math.min(Media.displayTime(), State.duration||0));
-      drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
-    };
-    if(idx>0) items.push({label:'◀ 與前一段交換（同軌）',act:()=>swap(sorted[idx-1], c)});
-    if(idx<sorted.length-1) items.push({label:'▶ 與後一段交換（同軌）',act:()=>swap(c, sorted[idx+1])});
-    if(trimmed) items.push({label:'↺ 重設修剪（還原完整長度）',act:()=>{
-      const save={in:c.in,out:c.out};
-      c.in=0; c.out=c.dur;
-      const ov=State.clips.some(o=>o!==c && o.offset < Seq.clipEnd(c) - 1e-6 && Seq.clipEnd(o) > c.offset + 1e-6);
-      if(ov){ c.in=save.in; c.out=save.out; showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return; }
-      Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name); drawTimeline();
-    }});
-    if(State.clips.length>1){
-      items.push({sep:true});
-      items.push({label:'🗑 從序列移除',act:()=>{
-        if(Media.removeClip(c.id)){ recordHistory('移除影片段：'+c.name); drawTimeline(); }
+    const isLocked = State.videoTracks[c.vtrack||0]?.locked;
+    if(!isLocked) selectClip(c.id); // 右鍵即選取（高亮，之後可直接 Del / 上下鍵切換）
+
+    const items = isLocked ? [{label:'🔒 此視訊軌已鎖定'}] : [{heading:true,label:'🎬 '+c.name}];
+    
+    if(!isLocked){
+      const trimmed=c.in>0.01||c.out<c.dur-0.01;
+      // 播放頭在此段內 → 可就地切割（等同 Ctrl+K）
+      const pt=Media.displayTime();
+      if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
+      items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
+      // 移到上／下一層視訊軌（多軌疊層：上層覆蓋下層）
+      const moveTrack=(dv)=>{
+        const tv=(c.vtrack||0)+dv;
+        if(State.videoTracks[tv]?.locked){ showToast('目標視訊軌已鎖定，無法移入'); return; }
+        Seq.moveToTrack(c, tv);
+        recordHistory('影片段移到 V'+((c.vtrack||0)+1));
+        Media.seek(Math.min(Media.displayTime(), State.duration||0));
+        drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+      };
+      items.push({label:`⬆ 移到上層視訊軌（V${(c.vtrack||0)+2}）`,act:()=>moveTrack(1)});
+      if((c.vtrack||0)>0) items.push({label:`⬇ 移到下層視訊軌（V${(c.vtrack||0)}）`,act:()=>moveTrack(-1)});
+      items.push({label:`🎞 淡入淡出（轉場）${(c.fadeIn>0||c.fadeOut>0)?' ✓':''}…`,act:()=>showClipFade(c)});
+      items.push({label:`🔀 與前一段交叉溶接…`,act:()=>showCrossfade(c)});
+      // 相鄰段交換（同一視訊軌內、依時間軸順序；保留兩段之間的間距）
+      const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset);
+      const idx=sorted.indexOf(c);
+      const swap=(a,b)=>{ // a=前段 b=後段
+        const gap=b.offset-Seq.clipEnd(a), start=a.offset;
+        b.offset=start; a.offset=start+Seq.len(b)+gap;
+        Seq.sort(); Seq.recomputeDuration();
+        recordHistory('影片段交換');
+        Media.seek(Math.min(Media.displayTime(), State.duration||0));
+        drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+      };
+      if(idx>0) items.push({label:'◀ 與前一段交換（同軌）',act:()=>swap(sorted[idx-1], c)});
+      if(idx<sorted.length-1) items.push({label:'▶ 與後一段交換（同軌）',act:()=>swap(c, sorted[idx+1])});
+      if(trimmed) items.push({label:'↺ 重設修剪（還原完整長度）',act:()=>{
+        const save={in:c.in,out:c.out};
+        c.in=0; c.out=c.dur;
+        const ov=State.clips.some(o=>o!==c && o.offset < Seq.clipEnd(c) - 1e-6 && Seq.clipEnd(o) > c.offset + 1e-6);
+        if(ov){ c.in=save.in; c.out=save.out; showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return; }
+        Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name); drawTimeline();
       }});
+      if(State.clips.length>1){
+        items.push({sep:true});
+        items.push({label:'🗑 從序列移除',act:()=>{
+          if(Media.removeClip(c.id)){ recordHistory('移除影片段：'+c.name); drawTimeline(); }
+        }});
+      }
     }
+    
+    // 增加：切換波形顯示的音軌（支援主影片與後續加入的各個影片片段）
+    const activeSrcId = c.audioSrc || (c.primary?'video':'clip:'+c.id);
+    let channels = [];
+    if(activeSrcId === 'video' || activeSrcId === Media.activeSource) {
+      // 主影片：使用 Wave.sources 全域狀態
+      channels = Wave.sources.map((s,i) => ({
+        label: s.label,
+        active: Wave.srcIdx === i,
+        act: () => { Wave.selectSource(i); const sel=$('waveSrcSel'); if(sel) sel.value = String(i); }
+      }));
+    } else {
+      // 額外加入的影片段：從 Media.tracks 尋找其所屬聲道並動態載入
+      const trs = Media.tracks.filter(t => t.source === activeSrcId);
+      if(trs.length > 1 && window.subtool?.DESK) {
+        channels.push({
+          label: '主混音',
+          active: c._waveSel === -1 || c._waveSel == null,
+          act: async () => {
+            c._waveSel = -1;
+            if(c._mixPeaks) { c.peaks = c._mixPeaks; drawTimeline(); }
+          }
+        });
+        trs.forEach((tr, i) => {
+          if(tr.file) { // 桌面版才有分離的單軌 WAV 實體檔案可供讀取
+            channels.push({
+              label: tr.name.split('·').pop(),
+              active: c._waveSel === i,
+              act: async () => {
+                c._waveSel = i;
+                if(!c._mixPeaks) c._mixPeaks = c.peaks; // 備份主混音的波形
+                try {
+                  const url = await window.subtool.DESK.fileURL(tr.file);
+                  const buf = await fetch(url).then(r => r.arrayBuffer());
+                  c.peaks = Wave.calcFromWav(buf);
+                  drawTimeline();
+                } catch(e) { console.warn('wave ch load failed', e); }
+              }
+            });
+          }
+        });
+      }
+    }
+
+    if(channels.length > 1) {
+      items.push({sep:true});
+      items.push({heading:true,label:'🔊 選擇波形圖顯示音軌'});
+      for(const ch of channels) {
+        items.push({
+          label: (ch.active ? '✓ ' : '　') + ch.label,
+          act: ch.act
+        });
+      }
+    }
+    
     showCtx(e.clientX,e.clientY,items);
     return;
   }

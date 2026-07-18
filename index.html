@@ -128,6 +128,8 @@
             <span class="ts-title">✎ 編輯常用樣式</span>
             <span id="tsEditName" class="ts-editname"></span>
             <span class="ts-editnote">面板改動會存回這組樣式，並同步所有套用它的字幕</span>
+            <textarea id="tsEditPreviewText" style="font-size:12px; padding:4px 6px; border-radius:3px; border:1px solid var(--line,#3a4150); background:var(--bg-2); color:var(--text); margin-left:10px; width:220px; height:48px; resize:vertical; vertical-align:middle; line-height:1.2;" title="在播放器上預覽的測試文字">這是一段範例字幕
+（Sample Text）</textarea>
             <span style="flex:1"></span>
             <button class="ts-preset" id="tsEditDone">完成</button>
             <button class="ts-preset" id="tsEditCancel">取消</button>
@@ -246,7 +248,6 @@
           <button class="icon" data-act="zoom-fit" title="自適應縮放 (切換字幕範圍 / 影片全長, 快捷鍵 `)">自適應</button>
         </div>
         <div class="spacer"></div>
-
       </div>
       <div class="tl-body">
         <div class="tl-gutter" id="tlGutter">
@@ -255,8 +256,6 @@
               data-act="toggle-all-lock" title="全部 鎖定/解鎖">🔓</button></div>
           <div id="tlGutterVtracks"></div>
           <div id="tlGutterAtracks"></div>
-          <div class="tl-gutter-wave">🔊 波形<select id="waveGlobalSrcSel" style="margin-left:auto;margin-right:8px;"
-              title="切換音訊來源"></select><select id="waveSrcSel" style="display:none" title="波形來源聲道"></select></div>
           <div id="tlGutterTracks"></div>
         </div>
         <div class="splitter-v" id="tlGutterSplitter" title="拖曳調整軌道欄寬度"></div>

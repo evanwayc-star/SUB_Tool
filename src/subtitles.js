@@ -389,15 +389,19 @@ function renderCheckPanel(){
    ── 不走 renderSubList()：它會 innerHTML='' 重建整份，捲動位置跳回頂端；而樣式面板是
       邊拖數字邊看列表的，每個 input 事件跳一次根本沒法用。這裡只換 .sub-sty/.sub-styname
       兩個節點的內容，其餘 DOM（含捲動位置、選取狀態）原封不動。 */
+let _styleSumT = null;
 export function refreshStyleSummaries(){
-  const rows=sublist.querySelectorAll('.sub-row'); if(!rows.length)return;
-  _presetNameCache.clear(); // 軌樣式可能已不再吻合原本的常用樣式 → 重新比對名稱
-  const byId=new Map(State.cues.map(c=>[c.id,c]));
-  for(const row of rows){
-    const c=byId.get(row.dataset.id); if(!c)continue;
-    const sty=row.querySelector('.sub-sty'); if(sty)sty.innerHTML=styleSummaryHtml(c);
-    const nm=row.querySelector('.sub-styname'); if(nm)nm.innerHTML=styleNameHtml(c);
-  }
+  clearTimeout(_styleSumT);
+  _styleSumT = setTimeout(() => {
+    const rows=sublist.querySelectorAll('.sub-row'); if(!rows.length)return;
+    _presetNameCache.clear(); // 軌樣式可能已不再吻合原本的常用樣式 → 重新比對名稱
+    const byId=new Map(State.cues.map(c=>[c.id,c]));
+    for(const row of rows){
+      const c=byId.get(row.dataset.id); if(!c)continue;
+      const sty=row.querySelector('.sub-sty'); if(sty)sty.innerHTML=styleSummaryHtml(c);
+      const nm=row.querySelector('.sub-styname'); if(nm)nm.innerHTML=styleNameHtml(c);
+    }
+  }, 200);
 }
 
 function renderSubList(){

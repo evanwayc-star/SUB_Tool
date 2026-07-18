@@ -82,7 +82,7 @@ export function styleToCss(st, ratio){
     // 在 ASS 中 BorderStyle=3 時，Outline 轉為控制底色 padding，不再畫字體外框
     const pad = (0.12 * fs + (st.outline || 0) * r).toFixed(1);
     const padH = (0.35 * fs + (st.outline || 0) * r).toFixed(1);
-    css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;border-radius:.08em;`+
+    css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;margin:-${pad}px -${padH}px;border-radius:.08em;`+
            `box-decoration-break:clone;-webkit-box-decoration-break:clone;`;
     // Shadow 轉為底色色塊的陰影
     if(st.shadow > 0){
@@ -152,8 +152,9 @@ export function styleToAssStyleLine(name, st, vwh){
   const borderStyle = st.bgBox ? 3 : 1;
   const backCol = st.bgBox ? hexToAssColor(st.bgColor, st.bgAlpha) : '&H00000000';
   const shadowV = st.bgBox ? Math.max(1, st.shadow) : st.shadow; // BorderStyle=3 需 Outline/Shadow 撐出色塊範圍
+  const outlineCol = st.bgBox ? backCol : hexToAssColor(st.outlineColor);
   // Fontname 走 assFontName()：ASS 要的是字型檔內部家族名，不是 UI 的資料夾名
-  return `Style: ${name},${assFontName(st.font)},${st.fontSize},${hexToAssColor(st.color)},&H00FFFFFF,${hexToAssColor(st.outlineColor)},${backCol},`+
+  return `Style: ${name},${assFontName(st.font)},${st.fontSize},${hexToAssColor(st.color)},&H00FFFFFF,${outlineCol},${backCol},`+
     `${st.bold ? 1 : 0},${st.italic ? 1 : 0},0,0,100.0,100.0,${st.vertical ? 0 : st.letterSpacing},${(-(st.angle || 0)).toFixed(1)},`+
     `${borderStyle},${st.outline},${shadowV},${alignN},135,135,${mv},1`;
 }

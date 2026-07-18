@@ -119,7 +119,23 @@ function refreshMpvSubs(revealAfter=false, live=false){
         const sh=c.in - c.offset;
         cs=State.cues.map(x=>x.timed===false?x:{...x, start:x.start+sh, end:x.end+sh});
       }
-      let assStr = toASSFromState(cs);
+      let assStr;
+      if(_presetEdit) {
+        const previewText = document.getElementById('tsEditPreviewText')?.value || '這是一段範例字幕\n（Sample Text）';
+        const draftCue = { id: 'draft_preview', start: 0, end: State.duration || 36000, text: previewText, track: 0, timed: true, style: {} };
+        const tempTracks = [_presetEdit.draft];
+        const { x: RX, y: RY } = ASS_PLAY_RES;
+        assStr = SubFormats.toASS([draftCue], State.fps, tempTracks, RX, RY, RX, RX, RY);
+      } else if (live) {
+        const t = Media.displayTime();
+        const fastCs = cs.filter(c => c.timed === false || (c.end >= t - 5 && c.start <= t + 5));
+        assStr = toASSFromState(fastCs);
+        
+        clearTimeout(window._mpvSubFullT);
+        window._mpvSubFullT = setTimeout(() => refreshMpvSubs(false, false), 500);
+      } else {
+        assStr = toASSFromState(cs);
+      }
       if(State.safeFrame) {
         const sf = [];
         // 以 1920x1080 畫布為基準產生四邊矩形邊框
@@ -253,10 +269,10 @@ function renderVideoSub(){
   drawSafeFrame(); // 安全框跟著畫面每幀對齊
   // mpv 是 OS 層子視窗：保留透明的 DOM 命中層才可直接點字幕拖曳；真正的字幕仍由 libass 顯示。
   // 拖曳期間則暫時隱藏 libass，改用可見 DOM 預覽新位置（見 _subDragMove）。
-  const mpvHitLayer=!!(Media.mpvMode && !Media._wcTakeover && !_mpvSubtitleDrag);
+  const mpvHitLayer=!!(Media.mpvMode && !Media._wcTakeover && !_mpvSubtitleDrag && !_presetEdit);
   if(_videoSub){
     _videoSub.classList.toggle('mpv-hit-layer', mpvHitLayer);
-    if((!Media.mpvMode || Media._wcTakeover || mpvHitLayer || _mpvSubtitleDrag) && _videoSub.style.display==='none') _videoSub.style.display='';
+    if((!Media.mpvMode || Media._wcTakeover || mpvHitLayer || _mpvSubtitleDrag || _presetEdit) && _videoSub.style.display==='none') _videoSub.style.display='';
   }
   if(!mpvHitLayer) _sendMpvSubtitleGuide(null);
   const t=Media.displayTime();
@@ -293,7 +309,8 @@ function renderVideoSub(){
     for(const tk of tks){
       let cur = [], trk = {};
       if(_presetEdit){
-        cur = [{ id: 'draft_preview', text: '這是一段範例字幕\n（Sample Text）', style: {} }];
+        const previewText = document.getElementById('tsEditPreviewText')?.value || '這是一段範例字幕\n（Sample Text）';
+        cur = [{ id: 'draft_preview', text: previewText, style: {} }];
         trk = _presetEdit.draft;
       }else{
         cur = State.cues.filter(c => {
@@ -329,9 +346,8 @@ function renderVideoSub(){
       if(st.shadow<=0) css+='text-shadow:none;';             // 蓋掉 .line class 的預設六向描邊
       if(!st.bgBox) css+='background:transparent;';
       // padding 會把文字往內推 → 與 ASS 錯位（ASS 的 BorderStyle=3 是把色塊往【外】長，文字不動）。
-      // 置中對齊時左右抵銷看不出來，靠左/靠右就整塊偏移；且固定 px 不隨 ratio 縮放＝位置還會跟著視窗跑。
-      // 故：無色塊＝完全不留白；有色塊＝以等量負 margin 抵銷，色塊往外長、文字位置不動。
-      css+= st.bgBox ? 'padding:.15em .4em;margin:-.15em -.4em;' : 'padding:0;';
+      // 故 substyle.js 在產生 CSS 時已加入等量負 margin 抵銷，色塊往外長、文字位置不動。
+      if(!st.bgBox) css+='padding:0;';
       if(collide[i]) css+='color:#ff4444;';                   // 與前一句落在同一點＝會糊在一起
       const inner = escapeHTML(c.text||'').replace(/\n/g,'<br>'); // 直書由 writing-mode 自動分列（多行=多列）
       sig+=tk+'|'+c.id+'|'+contStyle+grab+'|'+collide[i]+'|'+c.text+'|'+JSON.stringify(st)+';';
@@ -361,7 +377,7 @@ function renderVideoSub(){
       座標，列表卻還顯示舊值（要等別的操作觸發整份重繪才會補上，看起來像「只有某些欄位會更新」）。 */
 function styleChanged(){
   if(_presetEdit){
-    renderVideoSub(); renderTrackStyle();
+    renderVideoSub(); refreshMpvSubs(false, true); renderTrackStyle();
     return;
   }
   renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); refreshStyleSummaries();
@@ -444,6 +460,45 @@ _videoSub?.addEventListener('pointerdown', e => {
 _videoSub?.addEventListener('pointermove', _subDragMove);
 _videoSub?.addEventListener('pointerup', _subDragEnd);
 _videoSub?.addEventListener('pointercancel', _subDragEnd);
+_videoSub?.addEventListener('contextmenu', e => {
+  const subEl = e.target.closest('.vsub-track');
+  if(!subEl) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const cid = subEl.dataset.cue;
+  
+  const items = [];
+  items.push({label:'↔ 水平置中', act:()=>{
+    let targetObj;
+    if(_presetEdit) targetObj = _presetEdit.draft;
+    else {
+      const c = State.cues.find(cu=>cu.id===cid);
+      if(c) targetObj = c.style = c.style || {};
+    }
+    if(targetObj) {
+      targetObj.posX = 50;
+      targetObj.align = 'center';
+      styleChanged();
+      recordHistory('字幕水平置中');
+    }
+  }});
+  items.push({label:'↕ 垂直置中', act:()=>{
+    let targetObj;
+    if(_presetEdit) targetObj = _presetEdit.draft;
+    else {
+      const c = State.cues.find(cu=>cu.id===cid);
+      if(c) targetObj = c.style = c.style || {};
+    }
+    if(targetObj) {
+      targetObj.posY = 50;
+      targetObj.valign = 'middle';
+      styleChanged();
+      recordHistory('字幕垂直置中');
+    }
+  }});
+  
+  showCtx(e.clientX, e.clientY, items);
+});
 _videoWrap?.addEventListener('pointermove', e => { if(!_subDrag) _setSubtitleHover(e.target.closest?.('.vsub-track.drag')||null); });
 _videoWrap?.addEventListener('pointerleave', () => { if(!_subDrag) _setSubtitleHover(null); });
 
@@ -809,8 +864,19 @@ async function doAction(act, force = false){
     case 'mixer-muteall': mixerMuteAll(); break;
     case 'cache-manage': openCacheDialog(); break;
     case 'export-notes': exportNotes(); break;
-    case 'toggle-all-vis': { const anyVis=State.tracks.some(t=>t.visible!==false); State.tracks.forEach(t=>t.visible=!anyVis); drawTimeline(); renderVideoSub(); refreshMpvSubs(); } break;
-    case 'toggle-all-lock': { const anyUnlocked=State.tracks.some(t=>!t.locked); State.tracks.forEach(t=>t.locked=anyUnlocked); drawTimeline(); } break;
+    case 'toggle-all-vis': {
+      const anyVis = State.tracks.some(t=>t.visible!==false) || State.videoTracks.some(t=>t.visible!==false);
+      State.tracks.forEach(t=>t.visible=!anyVis);
+      State.videoTracks.forEach(t=>t.visible=!anyVis);
+      drawTimeline(); renderVideoSub(); refreshMpvSubs();
+    } break;
+    case 'toggle-all-lock': {
+      const anyUnlocked = State.tracks.some(t=>!t.locked) || State.videoTracks.some(t=>!t.locked);
+      State.tracks.forEach(t=>t.locked=anyUnlocked);
+      State.videoTracks.forEach(t=>t.locked=anyUnlocked);
+      if(!anyUnlocked){ State.selectedIds=[]; State.selectedId=null; State.selectedClipId=null; const el=document.getElementById('stSel'); if(el) el.textContent=''; }
+      drawTimeline();
+    } break;
     case 'copy-track': doCopyTrack(); break;
     case 'check-panel': { const btn=$('checkPanelBtn'); const willShow=!$('checkPanel').classList.contains('show'); togglePanel('checkPanel'); if(btn)btn.classList.toggle('sub-active',willShow); if(willShow)renderCheckPanel(); } break;
     case 'close-check': { $('checkPanel').classList.remove('show'); const btn=$('checkPanelBtn'); if(btn)btn.classList.remove('sub-active'); _syncMpvPanel(); } break;
@@ -1306,6 +1372,8 @@ function initUI(){
   }
   $('tsEditDone')?.addEventListener('click',()=>_presetEditEnd(true));
   $('tsEditCancel')?.addEventListener('click',()=>_presetEditEnd(false));
+  $('tsEditPreviewText')?.addEventListener('input', () => { if(_presetEdit) { renderVideoSub(); refreshMpvSubs(false, true); } });
+  $('tsEditPreviewText')?.addEventListener('keydown', e => { e.stopPropagation(); });
   $('modalBody').addEventListener('click',async e=>{
     const applyB=e.target.closest('[data-pre-apply]');
     const editB=e.target.closest('[data-pre-edit]');
