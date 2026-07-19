@@ -64,9 +64,9 @@ button[data-act="imp-auto"]{background:rgba(60,200,100,.08);border-color:rgba(30
 button[data-act="imp-auto"]:hover{background:rgba(60,200,100,.16)}
 button[data-act="exp-dialog"]{background:rgba(60,140,255,.08);border-color:rgba(40,100,220,.35)}
 button[data-act="exp-dialog"]:hover{background:rgba(60,140,255,.16)}
-input,select{font-family:inherit;color:var(--text);background:var(--panel);border:1px solid var(--border2);
-  border-radius:4px;padding:4px 6px;font-size:12px}
-input:focus,select:focus{outline:none;border-color:var(--accent)}
+input,select,textarea{font-family:inherit;color:var(--text);background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:4px 6px;font-size:12px;user-select:text;-webkit-user-select:text}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .sep{width:1px;height:22px;background:var(--border2);margin:0 4px}
 .spacer{flex:1}
 .app{display:flex;flex-direction:column;height:100vh;width:100vw}

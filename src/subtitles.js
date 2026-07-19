@@ -20,8 +20,50 @@ let _customCodeCounter = 1;
 
 export function clearPresetNameCache(){ 
   _presetNameCache.clear(); 
-  _customCodeMap.clear();
-  _customCodeCounter = 1;
+  
+  // 掃描並找出目前真正有使用的自訂樣式 key
+  const activeKeys = new Set();
+  const keys = Object.keys(STYLE_DEFAULTS);
+  const presets = getAllPresets();
+  for (const c of State.cues) {
+    if (c.style && Object.keys(c.style).length > 0) {
+      const st = effStyle(c, State.tracks[c.track || 0] || null);
+      let name = '';
+      for (const p of presets) {
+        const ps = p.style || {};
+        if (keys.every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k])) { name = p.name; break; }
+      }
+      if (!name) {
+        let key = '';
+        for (const k of keys) key += st[k] + '|';
+        activeKeys.add(key);
+      }
+    }
+  }
+
+  // 刪除不再使用的舊 key (Garbage Collection)
+  for (const oldKey of _customCodeMap.keys()) {
+    if (!activeKeys.has(oldKey)) {
+      _customCodeMap.delete(oldKey);
+    }
+  }
+
+  // 找出目前已被佔用的號碼
+  const usedNumbers = new Set();
+  for (const code of _customCodeMap.values()) {
+    const m = code.match(/自訂-(\d+)/);
+    if (m) usedNumbers.add(parseInt(m[1], 10));
+  }
+
+  // 幫新的 key 分配最小的可用號碼
+  for (const key of activeKeys) {
+    if (!_customCodeMap.has(key)) {
+      let num = 1;
+      while (usedNumbers.has(num)) num++;
+      _customCodeMap.set(key, '自訂-' + String(num).padStart(2, '0'));
+      usedNumbers.add(num);
+    }
+  }
 }
 
 function _getCustomCodeForStyle(st){
@@ -425,7 +467,7 @@ export function refreshStyleSummaries(){
   clearTimeout(_styleSumT);
   _styleSumT = setTimeout(() => {
     const rows=sublist.querySelectorAll('.sub-row'); if(!rows.length)return;
-    _presetNameCache.clear(); // 軌樣式可能已不再吻合原本的常用樣式 → 重新比對名稱
+    clearPresetNameCache(); // 重新掃描並穩定自訂編號
     const byId=new Map(State.cues.map(c=>[c.id,c]));
     for(const row of rows){
       const c=byId.get(row.dataset.id); if(!c)continue;

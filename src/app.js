@@ -1060,12 +1060,9 @@ function renderTrackStyle(){
         orphans.push({ val: p.name, text: p.name });
         continue;
       }
-      const idx = p.name.indexOf('-');
-      if (idx > 0) {
-        const g = p.name.substring(0, idx).trim();
-        const n = p.name.substring(idx + 1).trim();
-        if (!groups[g]) groups[g] = [];
-        groups[g].push({ val: p.name, text: n });
+      if (p.group) {
+        if (!groups[p.group]) groups[p.group] = [];
+        groups[p.group].push({ val: p.name, text: p.name });
       } else {
         orphans.push({ val: p.name, text: p.name });
       }
@@ -1312,34 +1309,75 @@ function initUI(){
   // 存＝面板目前顯示的那組生效樣式（選取句 or 整軌）；套用＝同樣寫回面板當前的對象
   $('tsPresetSave').addEventListener('click',async()=>{
     const t=styleTarget(); if(!t)return;
+    const curSt = effStyle(t.cue, t.trk);
+    const isSameAsDefault = Object.keys(STYLE_DEFAULTS).every(k => 
+      (STYLE_DEFAULTS[k]) === (curSt[k] != null ? curSt[k] : STYLE_DEFAULTS[k])
+    );
+    if (isSameAsDefault) {
+      showToast('目前樣式與「預設」完全相同，無須儲存。');
+      return;
+    }
     
-    async function trySave(defName) {
-      const nm=await promptModal('存為常用樣式','取一個名字', defName);
-      if(!nm)return;
-      if(isBuiltinPresetName(nm)){ showToast('這是內建樣式的保留名稱，請換一個'); return trySave(defName); }
+    function promptSaveModal(defGroup, defName) {
+      return new Promise(resolve => {
+        let done = false;
+        const finish = (res) => { if(done)return; done = true; closeModal(); resolve(res); };
+        
+        const groups = [...new Set(getPresets().filter(p=>p.group).map(p=>p.group))];
+        const groupOpts = groups.map(g => `<option value="${escapeHTML(g)}">`).join('');
+        
+        openModal('存為常用樣式',
+          `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">資料夾 (選填)</div>`+
+          `<input type="text" id="__presetGroup" list="__presetGroupList" value="${escapeHTML(defGroup)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`+
+          `<datalist id="__presetGroupList">${groupOpts}</datalist>`+
+          `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">樣式名稱</div>`+
+          `<input type="text" id="__presetName" value="${escapeHTML(defName)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
+          [
+            { label: '儲存', primary: true, act: () => {
+              const grp = ($('__presetGroup')?.value || '').trim();
+              const nm = ($('__presetName')?.value || '').trim();
+              if(!nm) { showToast('名稱不可為空'); return; }
+              finish({ group: grp, name: nm });
+            }},
+            { label: '取消', act: () => finish(null) }
+          ]
+        );
+        setTimeout(() => { const el = $('__presetName'); if(el){ el.focus(); el.select(); } }, 30);
+      });
+    }
+
+    async function trySave(defGroup, defName) {
+      const res = await promptSaveModal(defGroup, defName);
+      if(!res) return;
+      const { group: grp, name: nm } = res;
+      if(isBuiltinPresetName(nm)){ showToast('這是內建樣式的保留名稱，請換一個'); return trySave(grp, defName); }
       
       const list=[...getPresets()];
-      const ex=list.findIndex(p=>p.name===nm);
+      const exIdx = list.findIndex(p => p.name === nm && (p.group||'') === grp);
       
-      const doSave = (finalName) => {
+      const doSave = (finalGroup, finalName) => {
         const style=styleSnapshot(effStyle(t.cue, t.trk));
-        const idx=list.findIndex(p=>p.name===finalName);
-        if(idx>=0) list[idx]={name:finalName,style}; else list.push({name:finalName,style});
+        const idx = list.findIndex(p => p.name === finalName && (p.group||'') === finalGroup);
+        if(idx>=0) {
+          list[idx] = Object.assign(list[idx], { name: finalName, group: finalGroup, style });
+        } else {
+          list.push({ name: finalName, group: finalGroup, style });
+        }
         savePresets(list); renderTrackStyle(); refreshStyleSummaries(); showToast('已儲存常用樣式：'+finalName);
       };
 
-      if(ex>=0) {
-        openModal('名稱已存在', `<div style="padding:6px 2px">「${escapeHTML(nm)}」已經存在，您要覆蓋現有的樣式，還是換別的名字？</div>`, [
-          { label: '覆蓋', primary: true, act: () => { closeModal(); doSave(nm); } },
-          { label: '換別的名字', act: () => { closeModal(); trySave(nm); } },
+      if(exIdx >= 0) {
+        openModal('名稱已存在', `<div style="padding:6px 2px">「${escapeHTML(nm)}」已經存在此資料夾中，您要覆蓋現有的樣式，還是換別的名字？</div>`, [
+          { label: '覆蓋', primary: true, act: () => { closeModal(); doSave(grp, nm); } },
+          { label: '換別的名字', act: () => { closeModal(); trySave(grp, nm); } },
           { label: '取消', act: closeModal }
         ]);
       } else {
-        doSave(nm);
+        doSave(grp, nm);
       }
     }
     
-    trySave(t.trk.name+' 樣式');
+    trySave('', t.trk.name+' 樣式');
   });
   $('tsPresetSel').addEventListener('change',e=>{
     const t=styleTarget(), v=e.target.value; e.target.value='';
@@ -1368,12 +1406,9 @@ function initUI(){
         orphans.push({ p, i, text: p.name });
         return;
       }
-      const idx = p.name.indexOf('-');
-      if (idx > 0) {
-        const g = p.name.substring(0, idx).trim();
-        const n = p.name.substring(idx + 1).trim();
-        if (!groups[g]) groups[g] = [];
-        groups[g].push({ p, i, text: n });
+      if (p.group) {
+        if (!groups[p.group]) groups[p.group] = [];
+        groups[p.group].push({ p, i, text: p.name });
       } else {
         orphans.push({ p, i, text: p.name });
       }
@@ -1383,7 +1418,7 @@ function initUI(){
       const { p, i, text } = item;
       const st=Object.assign({},STYLE_DEFAULTS,p.style||{});
       const ui=i-BUILTIN_PRESETS.length;
-      return `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border);${isGrouped ? 'padding-left:24px;' : ''}">`+
+      return `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border);">`+
         _presetSwatch(st)+
         `<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(text)}`+
         (p.builtin?`<span style="margin-left:6px;font-size:10px;padding:1px 5px;border-radius:8px;background:var(--panel3);color:var(--text-faint)">內建</span>`:'')+
@@ -1391,16 +1426,21 @@ function initUI(){
         `<button class="ts-preset" data-pre-apply="${i}" title="套用到目前選取的字幕（或整軌）">套用</button>`+
         (p.builtin
           ? `<span style="font-size:11px;color:var(--text-faint);opacity:.6;padding:0 6px">不可修改</span>`
-          : `<button class="ts-preset" data-pre-edit="${ui}" title="在樣式面板上修改這組樣式；完成後所有套用它的字幕一起變">編輯</button>`+
-            `<button class="ts-preset" data-pre-ren="${ui}">改名</button>`+
+          : `<button class="ts-preset" data-pre-edit="${ui}" title="在樣式面板上修改這組樣式；完成後所有套用它的字幕一起變">修改參數</button>`+
+            `<button class="ts-preset" data-pre-ren="${ui}" title="重新命名，或是將它移入/移出資料夾">改名 / 移動</button>`+
             `<button class="ts-preset" data-pre-del="${ui}" style="color:var(--red,#e66)">刪除</button>`)+
         `</div>`;
     };
 
     let itemsHtml = orphans.map(o => renderItem(o, false)).join('');
     for (const g in groups) {
-      itemsHtml += `<div style="padding:8px 4px 4px; font-size:12px; font-weight:bold; color:var(--text-dim); border-bottom:1px solid var(--border); background:rgba(0,0,0,.1);">📁 ${escapeHTML(g)}</div>`;
-      itemsHtml += groups[g].map(o => renderItem(o, true)).join('');
+      itemsHtml += `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border);cursor:pointer;" onclick="if(event.target.closest('button'))return; const c=this.nextElementSibling; const e=c.style.display==='none'; c.style.display=e?'block':'none';">`+
+        `<span style="font-size:14px;color:#ffca28;min-width:30px;text-align:center;">📁</span>`+
+        `<span style="flex:1;font-size:14px;font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(g)}</span>`+
+        `<button class="ts-preset" data-pre-ren-grp="${escapeHTML(g)}">改名</button>`+
+        `<button class="ts-preset" data-pre-del-grp="${escapeHTML(g)}" style="color:var(--red,#e66)">刪除</button>`+
+        `</div>`;
+      itemsHtml += `<div style="margin-left:15px; padding-left:10px; border-left:1px solid #444; display:block;">` + groups[g].map(o => renderItem(o, true)).join('') + `</div>`;
     }
 
     body.innerHTML=`<div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:10px;padding:0 4px">`+
@@ -1412,10 +1452,11 @@ function initUI(){
       (getPresets().length?'':`<div style="color:var(--text-faint);font-size:12px;padding:10px 2px">尚未建立自訂樣式——在樣式面板調好後按「☆ 存為常用」即可新增。</div>`)+
       `</div>`;
   }
-  $('tsPresetMgr').addEventListener('click',()=>{
+  const openPresetMgr = () => {
     openModal('⚙ 常用樣式管理','',[{label:'關閉',primary:true,act:closeModal}]); // 內建那筆一定在，不再擋空清單
     _renderPresetMgr();
-  });
+  };
+  $('tsPresetMgr').addEventListener('click', openPresetMgr);
   /* 樣式是否等同某組 preset：與 subtitles.js _trackPresetName 同一套判準（全欄位相符），
      否則管理視窗顯示「套用中：X」的那些句子，這裡會漏掉、改完不同步。 */
   const _sameStyle=(st,ps)=>Object.keys(STYLE_DEFAULTS)
@@ -1456,9 +1497,34 @@ function initUI(){
     const applyB=e.target.closest('[data-pre-apply]');
     const editB=e.target.closest('[data-pre-edit]');
     const renB=e.target.closest('[data-pre-ren]');
+    const renGrpB=e.target.closest('[data-pre-ren-grp]');
     const delB=e.target.closest('[data-pre-del]');
+    const delGrpB=e.target.closest('[data-pre-del-grp]');
     const expB=e.target.closest('#preExportBtn');
     const impB=e.target.closest('#preImportBtn');
+
+    if(renGrpB) {
+      const oldG = renGrpB.dataset.preRenGrp;
+      const newG = await promptModal('資料夾改名', '新名稱', oldG);
+      if(!newG || newG === oldG) { openPresetMgr(); return; }
+      const l = [...getPresets()];
+      let changed = false;
+      for (const p of l) {
+        if ((p.group||'') === oldG) { p.group = newG; changed = true; }
+      }
+      if(changed) { savePresets(l); renderTrackStyle(); refreshStyleSummaries(); }
+      openPresetMgr();
+      return;
+    }
+
+    if(delGrpB){ 
+      const grp = delGrpB.dataset.preDelGrp;
+      if (confirm(`確定要刪除「${grp}」資料夾以及裡面所有的樣式嗎？\n\n（注意：刪除後無法復原）`)) {
+        const l = getPresets().filter(p => p.group !== grp);
+        savePresets(l); renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); showToast('已刪除資料夾：' + grp);
+      }
+      return; 
+    }
 
     function _importPresets(j){
       if(!Array.isArray(j)){ showToast('檔案格式不符：非樣式陣列'); return; }
@@ -1484,13 +1550,8 @@ function initUI(){
       if(!presets.length){ showToast('沒有自訂樣式可匯出'); return; }
       if (IS_DESKTOP && DESK.exportDirectory) {
         const files = presets.map(p => {
-          let folder = '';
+          let folder = p.group ? `${p.group}/` : '';
           let name = p.name;
-          const idx = p.name.indexOf('-');
-          if (idx > 0) {
-            folder = p.name.substring(0, idx).trim() + '/';
-            name = p.name.substring(idx + 1).trim();
-          }
           const safeName = name.replace(/[<>:"/\\|?*]/g, '_');
           const str = JSON.stringify([p], null, 2);
           const bytes = new TextEncoder().encode(str);
@@ -1513,7 +1574,21 @@ function initUI(){
           if(!files || !files.length) return;
           const all = [];
           for (const f of files) {
-            try { const j = JSON.parse(new TextDecoder().decode(b64ToBytes(f.b64))); if (Array.isArray(j)) all.push(...j); else all.push(j); } catch(e){}
+            try { 
+              const str = new TextDecoder().decode(b64ToBytes(f.b64));
+              const j = JSON.parse(str); 
+              
+              // Extract OS folder from path if it exists
+              // f.name is a relative path like "My Folder/style.json"
+              const parts = (f.name || '').replace(/\\/g, '/').split('/');
+              const osFolder = parts.length > 1 ? parts[0] : null;
+
+              const items = Array.isArray(j) ? j : [j];
+              items.forEach(p => {
+                 if (osFolder) p.group = osFolder; // Map OS folder to UI folder
+                 all.push(p);
+              });
+            } catch(e){}
           }
           if (all.length) _importPresets(all);
         });
@@ -1535,10 +1610,42 @@ function initUI(){
     if(applyB){ const p=getAllPresets()[+applyB.dataset.preApply]; const t=styleTarget();
       if(p&&t){ if(t.cues.length) for(const c of t.cues) c.style=Object.assign(c.style||{},p.style); else Object.assign(t.trk,p.style);
         styleChanged(); recordHistory('套用常用樣式：'+p.name); showToast('已套用：'+p.name); } return; }
-    if(renB){ const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;
-      const nn=await promptModal('改名','新名稱',p.name); if(!nn)return;
-      if(isBuiltinPresetName(nn)){ showToast('這是內建樣式的保留名稱，請換一個'); return; }
-      p.name=nn; savePresets(l); renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); return; }
+    if(renB){ 
+      const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;
+      const groups = [...new Set(l.filter(x=>x.group).map(x=>x.group))];
+      const groupOpts = groups.map(g => `<option value="${escapeHTML(g)}">`).join('');
+      
+      openModal('編輯名稱與資料夾',
+        `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">資料夾 (選填，可直接修改)</div>`+
+        `<input type="text" id="__presetGroupRen" list="__presetGroupListRen" value="${escapeHTML(p.group||'')}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`+
+        `<datalist id="__presetGroupListRen">${groupOpts}</datalist>`+
+        `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">樣式名稱</div>`+
+        `<input type="text" id="__presetNameRen" value="${escapeHTML(p.name)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
+        [
+          { label: '儲存', primary: true, act: () => {
+            const nn = ($('__presetNameRen')?.value || '').trim();
+            const ng = ($('__presetGroupRen')?.value || '').trim();
+            if(!nn) { showToast('名稱不可為空'); return; }
+            if(isBuiltinPresetName(nn)){ showToast('這是內建樣式的保留名稱，請換一個'); return; }
+            
+            const ex = l.find(x => x !== p && x.name === nn && (x.group||'') === ng);
+            if (ex) {
+              showToast('該資料夾中已有同名的樣式，請換一個名稱');
+              return; 
+            }
+            
+            p.name=nn; 
+            if(ng) p.group=ng; else delete p.group;
+            
+            savePresets(l); renderTrackStyle(); refreshStyleSummaries(); 
+            openPresetMgr(); // 重新開啟管理視窗
+          }},
+          { label: '取消', act: openPresetMgr }
+        ]
+      );
+      setTimeout(() => { const el = $('__presetNameRen'); if(el){ el.focus(); el.select(); } }, 30);
+      return; 
+    }
     if(delB){ const l=[...getPresets()]; l.splice(+delB.dataset.preDel,1); savePresets(l); renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); showToast('已刪除'); }
   });
   /* 全軌統一：清掉本軌所有「逐句樣式覆蓋」，讓每句都回到軌道樣式。

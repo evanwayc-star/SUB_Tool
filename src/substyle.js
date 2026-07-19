@@ -252,6 +252,19 @@ export async function loadPresets(){
     if(DESK && DESK.configLoad){ const conf = await DESK.configLoad(); _presets = Array.isArray(conf.subPresets) ? conf.subPresets : []; }
     else _presets = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
   }catch(e){ _presets = []; }
+  
+  if (_presets) {
+    let migrated = false;
+    _presets.forEach(p => {
+      if (!p.group && p.name && p.name.indexOf('-') > 0) {
+        const idx = p.name.indexOf('-');
+        p.group = p.name.substring(0, idx).trim();
+        p.name = p.name.substring(idx + 1).trim();
+        migrated = true;
+      }
+    });
+    if (migrated) savePresets(_presets);
+  }
   return _presets;
 }
 export function getPresets(){ return _presets || []; }        // 僅使用者自訂（可改名／刪除／存檔）

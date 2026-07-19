@@ -79,6 +79,7 @@ $('modalBg').addEventListener('keydown',e=>{
     return;
   }
   if(e.key==='Enter' && e.target.tagName!=='TEXTAREA' && !e.target.isContentEditable){
+    if(e.isComposing) return;
     e.preventDefault(); e.stopPropagation();
     $('modalFoot')?.querySelector('button.primary')?.click();
   }
