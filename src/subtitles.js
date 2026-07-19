@@ -78,16 +78,16 @@ function styleSummaryHtml(c){
   const al={left:'左對齊',center:'中對齊',right:'右對齊'}[st.align||'center'];
   const p=posToPx(st);
   return `<span class="r1">`+
-      `<span class="g" title="字級">${lbl('字')}${n(st.fontSize,'字級')}</span>`+sep+
+      `<span class="g hl" title="字級">${lbl('字')}${n(st.fontSize,'字級')}</span>`+sep+
       tg('B',st.bold,'粗體')+' '+tg('I',st.italic,'斜體','it')+sep+
-      `<span title="多行／多句的垂直對齊">${va}</span>`+sep+
-      `<span title="多行／多句的水平對齊">${al}</span>`+sep+
+      `<span class="hl" title="多行／多句的垂直對齊">${va}</span>`+sep+
+      `<span class="hl" title="多行／多句的水平對齊">${al}</span>`+sep+
       (st.vertical ? `<span title="排版方向" class="tg on">直</span>`+sep : '')+
       cp('色',st.color,'文字顏色')+sep+
       `<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+
     `</span>`+
     `<span class="r2">`+
-      `<span class="g" title="座標（像素，文字塊${al==='中對齊'&&va==='中對齊'?'中心':'錨點'}）">座標(${p.x},${p.y})</span>`+sep+
+      `<span class="g hl" title="座標（像素，文字塊${al==='中對齊'&&va==='中對齊'?'中心':'錨點'}）">座標(${p.x},${p.y})</span>`+sep+
       `<span class="g" title="旋轉角度">${lbl('角度')}${n(st.angle,'角度')}</span>`+sep+
       `<span class="g" title="字距／行距">${lbl('距')}${n(st.letterSpacing,'字距')}<span class="sp2">/</span>${n(st.lineSpacing,'行距')}</span>`+sep+
       `<span class="g" title="框線粗細 ${st.outline}">${cp('框',st.outlineColor,'框線顏色')}${n(st.outline,'框線粗細')}</span>`+sep+

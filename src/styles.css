@@ -358,6 +358,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .sub-sty .n{font-style:normal;font-weight:500;color:var(--text-dim)}
 .sub-row .sub-sty .lbl{opacity:.45}  /* 欄位標籤（字／角度／距／%）：讓數值本身跳出來 */
 .sub-row .sub-sty .deg{margin-left:-3px}  /* 度數符號要黏著數字（抵掉 .g 的 flex gap）：0° 不是 0 ° */
+.sub-row .sub-sty .hl{color:#a9c7dd;background:rgba(169,199,221,0.12);padding:1px 5px;border-radius:3px;font-weight:500}
+.sub-row .sub-sty .hl .n{color:#a9c7dd;font-weight:600}
+.sub-row .sub-sty .hl .lbl{opacity:.65}
 .sub-row .sub-sty .fn{max-width:78px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}
 .sub-row .sub-sty .sw{width:10px;height:10px;border-radius:50%;border:1px solid rgba(255,255,255,.25);flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
 /* 色票膠囊：膠囊本身就填該顏色、標籤壓在上面（標籤＋色點合一）。
