@@ -121,7 +121,7 @@ function refreshMpvSubs(revealAfter=false, live=false){
       }
       let assStr;
       if(_presetEdit) {
-        const previewText = document.getElementById('tsEditPreviewText')?.value || '這是一段範例字幕\n（Sample Text）';
+        const previewText = document.getElementById('tsEditPreviewText')?.value || '田這是一段|範例字幕田\n田 ABC123|321CBA 田';
         const draftCue = { id: 'draft_preview', start: 0, end: State.duration || 36000, text: previewText, track: 0, timed: true, style: {} };
         const tempTracks = [_presetEdit.draft];
         const { x: RX, y: RY } = ASS_PLAY_RES;
@@ -309,7 +309,7 @@ function renderVideoSub(){
     for(const tk of tks){
       let cur = [], trk = {};
       if(_presetEdit){
-        const previewText = document.getElementById('tsEditPreviewText')?.value || '這是一段範例字幕\n（Sample Text）';
+        const previewText = document.getElementById('tsEditPreviewText')?.value || '田這是一段|範例字幕田\n田 ABC123|321CBA 田';
         cur = [{ id: 'draft_preview', text: previewText, style: {} }];
         trk = _presetEdit.draft;
       }else{
