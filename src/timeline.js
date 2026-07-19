@@ -485,22 +485,20 @@ function renderVtrackGutter(){
     const vis=videoTrackVisible(v);
     const g=document.createElement('div');
     g.className='vgtrack'+(vis?'':' hidden-tk'); g.style.height=vtrackH(v)+'px'; g.dataset.vtrack=v;
-    const hasComp = (meta.scale != null && meta.scale < 0.999) || (meta.opacity != null && meta.opacity < 0.999);
     const isLocked = !!meta.locked;
     // 此軌音源的混音控制（M/S/音量）——影音合一：一列＝影片區塊＋波形＋混音
     const src=_vtrackSrc(v);
     const muted=src&&Media.sourceMuted(src), solo=src&&Media.sourceSolo(src), vol=src?Math.round(Media.sourceVolume(src)*100):100;
     const mixHtml = src ? `<button class="awm${muted?' on':''}" title="靜音此軌音訊">M</button><button class="aws${solo?' on':''}" title="獨奏此軌音訊">S</button><input class="awvol" type="range" min="0" max="150" step="1" value="${vol}" title="音量 ${vol}%">` : '';
+    const lockBtn = `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌（禁止移動／修剪／切割／選取片段）'}">${isLocked?'🔒':'🔓'}</button>`;
     g.innerHTML=`<div class="vgrow1">`+
         `<span class="vlabel">V${v+1}</span>`+
         `<button class="eye" title="顯示/隱藏此軌（預覽）">${vis?'👁':'🚫'}</button>`+
         `<span class="gname" contenteditable="false" spellcheck="false" title="${escapeHTML(meta.name)}">${escapeHTML(meta.name)}</span>`+
-        `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌（禁止移動／修剪／切割／選取片段）'}">${isLocked?'🔒':'🔓'}</button>`+
-        `<button class="gpip${hasComp?' on':''}" title="合成設定（子母畫面／透明度，匯出時生效）">🎨</button>`+
         `<button class="gadd" title="在上方新增軌">＋</button>`+
         `<button class="gdel" title="刪除此軌">✕</button>`+
       `</div>`+
-      `<div class="vgrow2">${mixHtml || '<span class="vgnoaud">（此軌無音訊）</span>'}</div>`;
+      `<div class="vgrow2">${mixHtml || '<span class="vgnoaud">（此軌無音訊）</span>'}${lockBtn}</div>`;
     g.querySelector('.eye').onclick=(e)=>{ e.stopPropagation(); meta.visible=!vis; drawTimeline(); emit('render:videoSub'); };
     const nm=g.querySelector('.gname');
     nm.addEventListener('mousedown',e=>{
@@ -511,7 +509,6 @@ function renderVtrackGutter(){
     nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
     nm.onblur=()=>{ nm.contentEditable='false'; meta.name=nm.innerText.trim()||('視訊軌 '+(v+1)); };
     g.querySelector('.glock').onclick=(e)=>{ e.stopPropagation(); meta.locked=!meta.locked; if(meta.locked){ const sc=Seq.byId(State.selectedClipId); if(sc&&(sc.vtrack||0)===v) clearClipSelection(); } drawTimeline(); };
-    g.querySelector('.gpip').onclick=(e)=>{ e.stopPropagation(); showVtrackComposite(v); };
     g.querySelector('.gadd').onclick=(e)=>{ e.stopPropagation(); addVideoTrack(v+1); };
     g.querySelector('.gdel').onclick=(e)=>{ e.stopPropagation(); removeVideoTrack(v); };
     if(src){
@@ -558,35 +555,7 @@ function removeVideoTrack(v){
        {label:'確定刪除',primary:true,act:()=>{ closeModal(); doRemove(); }}]);
   } else doRemove();
 }
-/* 視訊軌合成設定（階段4）：透明度／大小（子母畫面）／位置——匯出時生效（預覽仍顯示最上層）。
-   大小 100%＝滿版覆蓋下層；小於 100% 即為 PiP 並依 3×3 位置定位；透明度讓下層透出。 */
-function showVtrackComposite(v){
-  const t=State.videoTracks[v]; if(!t) return;
-  const op=Math.round((t.opacity!=null?t.opacity:1)*100), sc=Math.round((t.scale!=null?t.scale:1)*100);
-  const px=(t.posX!=null?t.posX:0.5), py=(t.posY!=null?t.posY:0.5);
-  const cells=[[0,0,'↖'],[0.5,0,'↑'],[1,0,'↗'],[0,0.5,'←'],[0.5,0.5,'⊙'],[1,0.5,'→'],[0,1,'↙'],[0.5,1,'↓'],[1,1,'↘']];
-  const grid=cells.map(([x,y,ic])=>`<button class="pipPos${(Math.abs(x-px)<.01&&Math.abs(y-py)<.01)?' on':''}" data-x="${x}" data-y="${y}">${ic}</button>`).join('');
-  openModal(`合成設定 — ${escapeHTML(t.name||('視訊軌 V'+(v+1)))}`,
-    `<div style="font-size:13px;line-height:2.1">`+
-    `<div>透明度：<input type="range" id="pipOp" min="0" max="100" value="${op}" style="width:170px;vertical-align:middle"> <span id="pipOpV">${op}%</span></div>`+
-    `<div>大小（子母畫面）：<input type="range" id="pipSc" min="10" max="100" value="${sc}" style="width:170px;vertical-align:middle"> <span id="pipScV">${sc}%</span></div>`+
-    `<div style="margin-top:6px;display:flex;align-items:center;gap:8px">位置：<div id="pipGrid" style="display:inline-grid;grid-template-columns:repeat(3,32px);grid-auto-rows:28px;gap:3px">${grid}</div></div>`+
-    `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">大小 100%＝滿版（覆蓋下層）；小於 100% 即為子母畫面，位置生效。<b>預覽即時顯示合成結果</b>（與匯出一致）。</div>`+
-    `</div>`,
-    [{label:'重設',act:()=>{ delete t.scale; delete t.opacity; delete t.posX; delete t.posY; closeModal(); drawTimeline(); recordHistory('重設合成設定'); }},
-     {label:'套用',primary:true,act:()=>{
-        const g=document.querySelector('#pipGrid .pipPos.on');
-        t.opacity=(+$('pipOp').value)/100; t.scale=(+$('pipSc').value)/100;
-        if(g){ t.posX=+g.dataset.x; t.posY=+g.dataset.y; }
-        closeModal(); drawTimeline(); recordHistory('合成設定：'+(t.name||('V'+(v+1))));
-     }}]);
-  setTimeout(()=>{
-    const op=$('pipOp'), sc=$('pipSc');
-    if(op) op.oninput=()=>{ const e=$('pipOpV'); if(e)e.textContent=op.value+'%'; };
-    if(sc) sc.oninput=()=>{ const e=$('pipScV'); if(e)e.textContent=sc.value+'%'; };
-    document.querySelectorAll('#pipGrid .pipPos').forEach(b=>b.onclick=(ev)=>{ ev.preventDefault(); document.querySelectorAll('#pipGrid .pipPos').forEach(x=>x.classList.remove('on')); b.classList.add('on'); });
-  },0);
-}
+
 /* 影片段轉場（階段5）：淡入／淡出（秒）——匯出時影像 alpha 淡變＋音訊 afade 同步。
    淡到透明會露出下層／黑底；上層片段與下層重疊時的淡變即為軌間溶接（crossfade）。 */
 function showClipFade(c){

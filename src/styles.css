@@ -302,11 +302,8 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .vgtrack .awm,.vgtrack .aws{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border,#3a3f47);border-radius:3px;font-size:10px;width:18px;height:18px;line-height:1;padding:0;color:var(--text-dim);flex-shrink:0}
 .vgtrack .awm.on{background:var(--red,#e05353);border-color:var(--red,#e05353);color:#fff}
 .vgtrack .aws.on{background:#e0a53e;border-color:#e0a53e;color:#1b1b1d}
-.vgtrack .awvol{width:44px;flex-shrink:0;accent-color:#3fa9f5}
-.vgtrack .gpip{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s}
-.vgtrack:hover .gpip{opacity:.9}
-.vgtrack .gpip.on{opacity:1;filter:drop-shadow(0 0 3px var(--accent))}
-.vgtrack .glock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s,color .15s}
+.vgtrack .awvol{flex:1;min-width:80px;accent-color:#3fa9f5}
+.vgtrack .glock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s,color .15s;margin-left:auto}
 .vgtrack .glock:hover{opacity:1}
 .vgtrack .glock.locked{color:var(--accent);opacity:1}
 .pipPos{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border2,#3a3f47);color:var(--text-dim);border-radius:3px;font-size:13px;padding:0;line-height:1}
@@ -320,7 +317,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .awtrack .awm,.awtrack .aws{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border,#3a3f47);border-radius:3px;font-size:10px;width:18px;height:18px;line-height:1;padding:0;color:var(--text-dim);flex-shrink:0}
 .awtrack .awm.on{background:var(--red,#e05353);border-color:var(--red,#e05353);color:#fff}
 .awtrack .aws.on{background:#e0a53e;border-color:#e0a53e;color:#1b1b1d}
-.awtrack .awvol{width:52px;flex-shrink:0;accent-color:#3fa9f5}
+.awtrack .awvol{flex:1;min-width:80px;accent-color:#3fa9f5}
 .awtrack .expander{cursor:pointer;background:none;border:none;color:var(--text-faint);font-size:10px;width:14px;flex-shrink:0;padding:0}
 .awtrack.child{background:rgba(30,44,60,.16)}
 .awtrack.child .awname{padding-left:12px;color:#a9c7dd}
