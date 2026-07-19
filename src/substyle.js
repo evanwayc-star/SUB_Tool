@@ -241,7 +241,7 @@ export function verticalAssCols(st, text, vww, vwh){
    座標(50%,90%)＝水平置中且貼齊 80% 安全框底線／角度0／無底色／字距行距皆 1）。
    ── 刻意直接引用 STYLE_DEFAULTS 而非另抄一份：兩份會漂掉。 */
 export const BUILTIN_PRESETS = [
-  { name: '預設字幕樣式', builtin: true, style: { ...STYLE_DEFAULTS } },
+  { name: '預設', builtin: true, style: { ...STYLE_DEFAULTS } },
 ];
 const LS_KEY = 'subtool.subPresets';
 let _presets = null; // [{name, style:{...軌道級欄位子集}}]（僅使用者自訂；內建的不存檔）

@@ -39,15 +39,17 @@ function styleNameHtml(c){
   const n = _getPresetNameForStyle(st);
   
   if (n) {
+    const isCustom = n !== '預設';
+    const cls = isCustom ? 'nm custom' : 'nm';
     if (isOv) {
       // 雖然有覆蓋，但最終樣式吻合某個常用樣式
-      return `<span class="ov" title="此句有逐句樣式覆蓋，等同常用樣式：${escapeHTML(n)}">✱ ${escapeHTML(n)}</span>`;
+      return `<span class="${cls}" title="此句有逐句樣式覆蓋，等同常用樣式：${escapeHTML(n)}">✱ ${escapeHTML(n)}</span>`;
     } else {
-      return `<span class="nm" title="常用樣式：${escapeHTML(n)}">${escapeHTML(n)}</span>`;
+      return `<span class="${cls}" title="常用樣式：${escapeHTML(n)}">${escapeHTML(n)}</span>`;
     }
   } else {
     // 找不到符合的常用樣式
-    if (isOv) return `<span class="ov" title="此句有逐句樣式覆蓋">✱ 自訂</span>`;
+    if (isOv) return `<span class="ov custom" title="此句有逐句樣式覆蓋">✱ 自訂</span>`;
     return '';
   }
 }
