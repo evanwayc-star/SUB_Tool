@@ -15,7 +15,28 @@ import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx } from './s
 /* 該句的「常用樣式名稱」：軌樣式完全吻合某個已存的常用樣式 → 顯示其名；有逐句覆蓋 → 「自訂」；
    皆非 → 留白。以軌為單位比對並快取（字幕上千條時避免逐句重算）；renderSubList 每次重繪前清空。 */
 const _presetNameCache = new Map();
-export function clearPresetNameCache(){ _presetNameCache.clear(); }
+const _customCodeMap = new Map();
+let _customCodeCounter = 1;
+
+export function clearPresetNameCache(){ 
+  _presetNameCache.clear(); 
+  _customCodeMap.clear();
+  _customCodeCounter = 1;
+}
+
+function _getCustomCodeForStyle(st){
+  let key = '';
+  const keys = Object.keys(STYLE_DEFAULTS);
+  for(const k of keys) key += st[k] + '|';
+  
+  if(_customCodeMap.has(key)) return _customCodeMap.get(key);
+  
+  const code = '自訂-' + String(_customCodeCounter).padStart(2, '0');
+  _customCodeCounter++;
+  _customCodeMap.set(key, code);
+  return code;
+}
+
 function _getPresetNameForStyle(st){
   // 建立序列化字串作為快取 key (確保屬性順序一致)
   let key = '';
@@ -49,7 +70,10 @@ function styleNameHtml(c){
     }
   } else {
     // 找不到符合的常用樣式
-    if (isOv) return `<span class="ov custom" title="此句有逐句樣式覆蓋">✱ 自訂</span>`;
+    if (isOv) {
+      const code = _getCustomCodeForStyle(st);
+      return `<span class="ov custom" title="此句有逐句樣式覆蓋">✱ ${code}</span>`;
+    }
     return '';
   }
 }
@@ -77,6 +101,8 @@ function styleSummaryHtml(c){
   const va={top:'上對齊',middle:'中對齊',bottom:'下對齊'}[st.valign||'bottom'];
   const al={left:'左對齊',center:'中對齊',right:'右對齊'}[st.align||'center'];
   const p=posToPx(st);
+  const isPosChanged = st.posX !== 0.5 || st.posY !== 0.9;
+  const pCls = isPosChanged ? 'g hl warn' : 'g hl';
   return `<span class="r1">`+
       `<span class="g hl" title="字級">${lbl('字')}${n(st.fontSize,'字級')}</span>`+sep+
       tg('B',st.bold,'粗體')+' '+tg('I',st.italic,'斜體','it')+sep+
@@ -87,7 +113,7 @@ function styleSummaryHtml(c){
       `<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+
     `</span>`+
     `<span class="r2">`+
-      `<span class="g hl" title="座標（像素，文字塊${al==='中對齊'&&va==='中對齊'?'中心':'錨點'}）">座標(${p.x},${p.y})</span>`+sep+
+      `<span class="${pCls}" title="座標（像素，文字塊${al==='中對齊'&&va==='中對齊'?'中心':'錨點'}）">座標(${p.x},${p.y})</span>`+sep+
       `<span class="g" title="旋轉角度">${lbl('角度')}${n(st.angle,'角度')}</span>`+sep+
       `<span class="g" title="字距／行距">${lbl('距')}${n(st.letterSpacing,'字距')}<span class="sp2">/</span>${n(st.lineSpacing,'行距')}</span>`+sep+
       `<span class="g" title="框線粗細 ${st.outline}">${cp('框',st.outlineColor,'框線顏色')}${n(st.outline,'框線粗細')}</span>`+sep+
@@ -408,7 +434,7 @@ export function refreshStyleSummaries(){
 
 function renderSubList(){
   sublist.innerHTML='';
-  _presetNameCache.clear(); // 軌樣式／常用樣式庫可能已變 → 重新比對名稱
+  clearPresetNameCache(); // 軌樣式／常用樣式庫可能已變 → 重新比對名稱及自訂代號
   const list = State.cues.filter(c=>(c.track||0)===State.listTrack);
   if(list.length===0){
     sublist.innerHTML='<div class="empty">'+(State.cues.length?'此軌道沒有字幕':'尚無字幕<br><br>· 匯入字幕檔，或<br>· 選一條字幕後按 <b>I</b>/<b>O</b> 設定起訖<br>· 或點 <b>⬆＋ / ⬇＋</b> 新增')+'</div>';
