@@ -389,11 +389,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .sub-styname .nm.custom{
   background:rgba(65,160,210,.1);border:1px solid rgba(65,160,210,.28);color:#59b2d6;
 }
-.sub-row .sub-styname .ov{
-  display:inline-block;padding:1px 9px;border:1px solid transparent;
-  font-size:11px;font-weight:600;color:var(--accent);opacity:.9;
+.sub-row .sub-styname .nm.ov-custom{
+  background:transparent;border-color:transparent;color:#7ce38b;
 }
-.sub-row .sub-styname .ov.custom{color:#7ce38b;}
 .tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .glock{opacity:.8}
 .tl-gtrack .glock.locked{color:var(--accent);opacity:1}

@@ -72,7 +72,7 @@ function styleNameHtml(c){
     // 找不到符合的常用樣式
     if (isOv) {
       const code = _getCustomCodeForStyle(st);
-      return `<span class="ov custom" title="此句有逐句樣式覆蓋">✱ ${code}</span>`;
+      return `<span class="nm ov-custom" title="此句有逐句樣式覆蓋">✱ ${code}</span>`;
     }
     return '';
   }
@@ -92,6 +92,7 @@ function inkOn(hex){
    色名留在 title。B/I 與「底」亮＝開、暗＝關。有逐句覆蓋另由 styleNameHtml 標 ✱。 */
 function styleSummaryHtml(c){
   const st=effStyle(c, State.tracks[c.track||0]||null);
+  const tSt=effStyle({style:{}}, State.tracks[c.track||0]||null);
   const cp=(label,hex,t,on)=>`<b class="cp${on===false?' off':''}" style="background:${hex};color:${inkOn(hex)}"`+
     ` title="${t}：${colorName(hex)||hex}${on===false?'（未啟用）':''}">${label}</b>`;
   const tg=(label,on,t,cls)=>`<b class="tg${on?' on':''}${cls?' '+cls:''}" title="${t}：${on?'開':'關'}">${label}</b>`;
@@ -101,13 +102,15 @@ function styleSummaryHtml(c){
   const va={top:'上對齊',middle:'中對齊',bottom:'下對齊'}[st.valign||'bottom'];
   const al={left:'左對齊',center:'中對齊',right:'右對齊'}[st.align||'center'];
   const p=posToPx(st);
-  const isPosChanged = st.posX !== 0.5 || st.posY !== 0.9;
+  const isPosChanged = st.posX !== tSt.posX || st.posY !== tSt.posY;
   const pCls = isPosChanged ? 'g hl warn' : 'g hl';
+  const isAlignChanged = st.align !== tSt.align || st.valign !== tSt.valign;
+  const alCls = isAlignChanged ? 'hl warn' : 'hl';
   return `<span class="r1">`+
       `<span class="g hl" title="字級">${lbl('字')}${n(st.fontSize,'字級')}</span>`+sep+
       tg('B',st.bold,'粗體')+' '+tg('I',st.italic,'斜體','it')+sep+
-      `<span class="hl" title="多行／多句的垂直對齊">${va}</span>`+sep+
-      `<span class="hl" title="多行／多句的水平對齊">${al}</span>`+sep+
+      `<span class="${alCls}" title="多行／多句的垂直對齊">${va}</span>`+sep+
+      `<span class="${alCls}" title="多行／多句的水平對齊">${al}</span>`+sep+
       (st.vertical ? `<span title="排版方向" class="tg on">直</span>`+sep : '')+
       cp('色',st.color,'文字顏色')+sep+
       `<span class="fn" title="字型：${escapeHTML(st.font)}">${escapeHTML(st.font)}</span>`+
