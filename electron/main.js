@@ -599,6 +599,28 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   return { outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder), elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps };
 });
 
+ipcMain.handle('dialog:importDirectory', async () => {
+  const r = await dialog.showOpenDialog(mainWin, {
+    title: '選擇匯入資料夾',
+    properties: ['openDirectory']
+  });
+  if (r.canceled || r.filePaths.length === 0) return null;
+  const dir = r.filePaths[0];
+  allowDir(dir);
+  const files = [];
+  function scan(d) {
+    for (const f of fs.readdirSync(d)) {
+      const p = path.join(d, f);
+      if (fs.statSync(p).isDirectory()) scan(p);
+      else if (f.endsWith('.json')) {
+        files.push({ name: f, b64: fs.readFileSync(p).toString('base64') });
+      }
+    }
+  }
+  scan(dir);
+  return files;
+});
+
 ipcMain.handle('dialog:exportDirectory', async (e, files) => {
   const r = await dialog.showOpenDialog(mainWin, {
     title: '選擇匯出資料夾',
@@ -610,7 +632,9 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
   for (const f of files) {
     const data = f.content || f.b64;
     if (f.name && data) {
-      fs.writeFileSync(path.join(dir, f.name), Buffer.from(data, 'base64'));
+      const fullPath = path.join(dir, f.name);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, Buffer.from(data, 'base64'));
     }
   }
   return dir;

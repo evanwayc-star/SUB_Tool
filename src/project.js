@@ -8,6 +8,7 @@ import { History } from './history.js';
 import { renderNotes } from './notes.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
+import { getAllPresets, effStyle, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets } from './substyle.js';
 
 /* ===== 自動備份狀態 ===== */
 let _editGuardDone = false;  // 本 session 是否已顯示過「請先儲存」提示
@@ -21,6 +22,24 @@ function _defaultSaveName(){
 }
 
 function _buildProjectData(){
+  const usedPresets = [];
+  const allPresets = getAllPresets();
+  const keys = Object.keys(STYLE_DEFAULTS);
+  
+  const checkStyle = (st) => {
+    for (const p of allPresets) {
+      if (p.builtin) continue;
+      const ps = p.style || {};
+      const match = keys.every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k]);
+      if (match && !usedPresets.some(x => x.name === p.name)) {
+        usedPresets.push({ name: p.name, style: p.style });
+      }
+    }
+  };
+  
+  for (const t of State.tracks) checkStyle(effStyle(null, t));
+  for (const c of State.cues) checkStyle(effStyle(c, State.tracks[c.track || 0]));
+
   return {
     app:'SUB Tool', version:2,
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
@@ -41,7 +60,8 @@ function _buildProjectData(){
       ...(c.fadeIn?{fadeIn:c.fadeIn}:{}),...(c.fadeOut?{fadeOut:c.fadeOut}:{})})),
     notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
     cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false,
-      ...(c.style&&Object.keys(c.style).length?{style:c.style}:{})})) // v4.23 逐句樣式覆蓋（有才存）
+      ...(c.style&&Object.keys(c.style).length?{style:c.style}:{})})), // v4.23 逐句樣式覆蓋（有才存）
+    usedPresets
   };
 }
 function _buildBytes(){ return encodeUTF16LE(JSON.stringify(_buildProjectData(),null,1)); }
@@ -173,6 +193,32 @@ const Project = {
     else State.tracks=[];
     ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:0, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));
+    
+    if (Array.isArray(data.usedPresets) && data.usedPresets.length > 0) {
+      const list = [...getPresets()];
+      let changed = false;
+      for (const p of data.usedPresets) {
+        if (!p.name || !p.style || isBuiltinPresetName(p.name)) continue;
+        const ex = list.findIndex(x => x.name === p.name);
+        if (ex >= 0) {
+           const isDiff = Object.keys(STYLE_DEFAULTS).some(k => (list[ex].style[k]!=null?list[ex].style[k]:STYLE_DEFAULTS[k]) !== (p.style[k]!=null?p.style[k]:STYLE_DEFAULTS[k]));
+           if (isDiff) {
+              p.name = p.name + ' (專案)';
+              const ex2 = list.findIndex(x => x.name === p.name);
+              if (ex2 >= 0) list[ex2] = p; else list.push(p);
+              changed = true;
+           }
+        } else {
+           list.push(p);
+           changed = true;
+        }
+      }
+      if (changed) {
+        savePresets(list);
+        emit('render:trackStyle');
+      }
+    }
+
     // 影片序列：先暫存，待第一支影片載入完成（Media._registerPrimary）時還原幾何並補載其餘段
     // 視訊軌：新版存 videoTracks 陣列（名稱/顯示/鎖定）；舊版只有 videoTrackCount → 補足空軌
     if(Array.isArray(data.videoTracks) && data.videoTracks.length)

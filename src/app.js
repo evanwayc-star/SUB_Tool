@@ -1049,7 +1049,36 @@ function renderTrackStyle(){
   panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===(st.color||'').toLowerCase()));
   // 常用樣式下拉重建
   const psel=$('tsPresetSel');
-  if(psel){ const cur=psel.value; psel.innerHTML='<option value="">— 套用 —</option>'+getAllPresets().map(p=>`<option>${escapeHTML(p.name)}</option>`).join(''); psel.value=cur||''; }
+  if(psel){
+    const cur=psel.value; 
+    let html = '<option value="">— 套用 —</option>';
+    const list = getAllPresets();
+    const groups = {};
+    const orphans = [];
+    for (const p of list) {
+      if (p.builtin) {
+        orphans.push({ val: p.name, text: p.name });
+        continue;
+      }
+      const idx = p.name.indexOf('-');
+      if (idx > 0) {
+        const g = p.name.substring(0, idx).trim();
+        const n = p.name.substring(idx + 1).trim();
+        if (!groups[g]) groups[g] = [];
+        groups[g].push({ val: p.name, text: n });
+      } else {
+        orphans.push({ val: p.name, text: p.name });
+      }
+    }
+    for (const o of orphans) html += `<option value="${escapeHTML(o.val)}">${escapeHTML(o.text)}</option>`;
+    for (const g in groups) {
+      html += `<optgroup label="📁 ${escapeHTML(g)}">`;
+      for (const o of groups[g]) html += `<option value="${escapeHTML(o.val)}">${escapeHTML(o.text)}</option>`;
+      html += `</optgroup>`;
+    }
+    psel.innerHTML = html; 
+    psel.value=cur||''; 
+  }
 }
 
 /* ===== 時間軸：雙擊字幕區塊內嵌編輯文字 ===== */
@@ -1330,27 +1359,56 @@ function initUI(){
     // 清單＝內建（第一筆，不可改名／刪除）＋使用者自訂
     const list=getAllPresets();
     const body=$('modalBody'); if(!body)return;
+    
+    // 分組
+    const groups = {};
+    const orphans = [];
+    list.forEach((p, i) => {
+      if (p.builtin) {
+        orphans.push({ p, i, text: p.name });
+        return;
+      }
+      const idx = p.name.indexOf('-');
+      if (idx > 0) {
+        const g = p.name.substring(0, idx).trim();
+        const n = p.name.substring(idx + 1).trim();
+        if (!groups[g]) groups[g] = [];
+        groups[g].push({ p, i, text: n });
+      } else {
+        orphans.push({ p, i, text: p.name });
+      }
+    });
+
+    const renderItem = (item, isGrouped) => {
+      const { p, i, text } = item;
+      const st=Object.assign({},STYLE_DEFAULTS,p.style||{});
+      const ui=i-BUILTIN_PRESETS.length;
+      return `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border);${isGrouped ? 'padding-left:24px;' : ''}">`+
+        _presetSwatch(st)+
+        `<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(text)}`+
+        (p.builtin?`<span style="margin-left:6px;font-size:10px;padding:1px 5px;border-radius:8px;background:var(--panel3);color:var(--text-faint)">內建</span>`:'')+
+        `</span>`+
+        `<button class="ts-preset" data-pre-apply="${i}" title="套用到目前選取的字幕（或整軌）">套用</button>`+
+        (p.builtin
+          ? `<span style="font-size:11px;color:var(--text-faint);opacity:.6;padding:0 6px">不可修改</span>`
+          : `<button class="ts-preset" data-pre-edit="${ui}" title="在樣式面板上修改這組樣式；完成後所有套用它的字幕一起變">編輯</button>`+
+            `<button class="ts-preset" data-pre-ren="${ui}">改名</button>`+
+            `<button class="ts-preset" data-pre-del="${ui}" style="color:var(--red,#e66)">刪除</button>`)+
+        `</div>`;
+    };
+
+    let itemsHtml = orphans.map(o => renderItem(o, false)).join('');
+    for (const g in groups) {
+      itemsHtml += `<div style="padding:8px 4px 4px; font-size:12px; font-weight:bold; color:var(--text-dim); border-bottom:1px solid var(--border); background:rgba(0,0,0,.1);">📁 ${escapeHTML(g)}</div>`;
+      itemsHtml += groups[g].map(o => renderItem(o, true)).join('');
+    }
+
     body.innerHTML=`<div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:10px;padding:0 4px">`+
       `<button class="btn" id="preExportBtn" title="把自訂樣式存成 .json 檔">⭳ 匯出</button>`+
       `<button class="btn" id="preImportBtn" title="讀取 .json 檔並加入樣式庫">⭱ 匯入</button>`+
       `</div>`+
       `<div style="max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:2px">`+
-      list.map((p,i)=>{ const st=Object.assign({},STYLE_DEFAULTS,p.style||{});
-        // data-pre-ren/del 帶的是【使用者清單】的索引（扣掉前面的內建筆數），與 getPresets() 對得上
-        const ui=i-BUILTIN_PRESETS.length;
-        return `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border)">`+
-          _presetSwatch(st)+
-          `<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(p.name)}`+
-          (p.builtin?`<span style="margin-left:6px;font-size:10px;padding:1px 5px;border-radius:8px;background:var(--panel3);color:var(--text-faint)">內建</span>`:'')+
-          `</span>`+
-          `<button class="ts-preset" data-pre-apply="${i}" title="套用到目前選取的字幕（或整軌）">套用</button>`+
-          (p.builtin
-            ? `<span style="font-size:11px;color:var(--text-faint);opacity:.6;padding:0 6px">不可修改</span>`
-            : `<button class="ts-preset" data-pre-edit="${ui}" title="在樣式面板上修改這組樣式；完成後所有套用它的字幕一起變">編輯</button>`+
-              `<button class="ts-preset" data-pre-ren="${ui}">改名</button>`+
-              `<button class="ts-preset" data-pre-del="${ui}" style="color:var(--red,#e66)">刪除</button>`)+
-          `</div>`;
-      }).join('')+
+      itemsHtml +
       (getPresets().length?'':`<div style="color:var(--text-faint);font-size:12px;padding:10px 2px">尚未建立自訂樣式——在樣式面板調好後按「☆ 存為常用」即可新增。</div>`)+
       `</div>`;
   }
@@ -1424,29 +1482,50 @@ function initUI(){
     if(expB){
       const presets = getPresets(); // 只匯出自訂樣式
       if(!presets.length){ showToast('沒有自訂樣式可匯出'); return; }
-      const str = JSON.stringify(presets, null, 2);
-      const bytes = new TextEncoder().encode(str);
-      const name = `presets_${new Date().toISOString().replace(/\\D/g,'').slice(0,14)}.json`;
-      if(IS_DESKTOP && DESK.exportSub){
-        DESK.exportSub(name, bytesToB64(bytes), 'json').then(p=>{
-          if(p) showToast('已匯出樣式：' + p.split(/[\\\\/]/).pop());
+      if (IS_DESKTOP && DESK.exportDirectory) {
+        const files = presets.map(p => {
+          let folder = '';
+          let name = p.name;
+          const idx = p.name.indexOf('-');
+          if (idx > 0) {
+            folder = p.name.substring(0, idx).trim() + '/';
+            name = p.name.substring(idx + 1).trim();
+          }
+          const safeName = name.replace(/[<>:"/\\|?*]/g, '_');
+          const str = JSON.stringify([p], null, 2);
+          const bytes = new TextEncoder().encode(str);
+          return { name: folder + safeName + '.json', b64: bytesToB64(bytes) };
         });
-      }else{
+        DESK.exportDirectory(files).then(dir => {
+          if (dir) showToast('已匯出至：' + dir.split(/[\\/]/).pop());
+        });
+      } else {
+        const str = JSON.stringify(presets, null, 2);
+        const bytes = new TextEncoder().encode(str);
+        const name = `presets_${new Date().toISOString().replace(/\\D/g,'').slice(0,14)}.json`;
         downloadBytes(bytes, name, 'application/json'); showToast('已匯出樣式設定');
       }
       return;
     }
     if(impB){
-      if(IS_DESKTOP && DESK.importSub){
-        DESK.importSub('json').then(r=>{
-          if(!r||!r.path||!r.content)return;
-          try{ const j=JSON.parse(new TextDecoder().decode(b64ToBytes(r.content))); _importPresets(j); }catch(err){ showToast('讀取失敗：格式錯誤'); }
+      if(IS_DESKTOP && DESK.importDirectory){
+        DESK.importDirectory().then(files => {
+          if(!files || !files.length) return;
+          const all = [];
+          for (const f of files) {
+            try { const j = JSON.parse(new TextDecoder().decode(b64ToBytes(f.b64))); if (Array.isArray(j)) all.push(...j); else all.push(j); } catch(e){}
+          }
+          if (all.length) _importPresets(all);
         });
       }else{
-        const fi=document.createElement('input'); fi.type='file'; fi.accept='.json';
+        const fi=document.createElement('input'); fi.type='file'; fi.accept='.json'; fi.multiple=true;
         fi.onchange=async()=>{
-          if(!fi.files[0])return;
-          try{ const j=JSON.parse(await fi.files[0].text()); _importPresets(j); }catch(err){ showToast('讀取失敗：格式錯誤'); }
+          if(!fi.files.length)return;
+          const all = [];
+          for (const f of Array.from(fi.files)) {
+            try { const j = JSON.parse(await f.text()); if (Array.isArray(j)) all.push(...j); else all.push(j); } catch(e){}
+          }
+          if (all.length) _importPresets(all);
         };
         fi.click();
       }
