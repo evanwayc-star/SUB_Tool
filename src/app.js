@@ -1283,14 +1283,34 @@ function initUI(){
   // 存＝面板目前顯示的那組生效樣式（選取句 or 整軌）；套用＝同樣寫回面板當前的對象
   $('tsPresetSave').addEventListener('click',async()=>{
     const t=styleTarget(); if(!t)return;
-    const nm=await promptModal('存為常用樣式','取一個名字（同名會覆蓋）', t.trk.name+' 樣式');
-    if(!nm)return;
-    if(isBuiltinPresetName(nm)){ showToast('這是內建樣式的保留名稱，請換一個'); return; } // 內建不可被覆蓋
-    const list=[...getPresets()];
-    const style=styleSnapshot(effStyle(t.cue, t.trk));
-    const ex=list.findIndex(p=>p.name===nm);
-    if(ex>=0) list[ex]={name:nm,style}; else list.push({name:nm,style});
-    savePresets(list); renderTrackStyle(); refreshStyleSummaries(); showToast('已儲存常用樣式：'+nm);
+    
+    async function trySave(defName) {
+      const nm=await promptModal('存為常用樣式','取一個名字', defName);
+      if(!nm)return;
+      if(isBuiltinPresetName(nm)){ showToast('這是內建樣式的保留名稱，請換一個'); return trySave(defName); }
+      
+      const list=[...getPresets()];
+      const ex=list.findIndex(p=>p.name===nm);
+      
+      const doSave = (finalName) => {
+        const style=styleSnapshot(effStyle(t.cue, t.trk));
+        const idx=list.findIndex(p=>p.name===finalName);
+        if(idx>=0) list[idx]={name:finalName,style}; else list.push({name:finalName,style});
+        savePresets(list); renderTrackStyle(); refreshStyleSummaries(); showToast('已儲存常用樣式：'+finalName);
+      };
+
+      if(ex>=0) {
+        openModal('名稱已存在', `<div style="padding:6px 2px">「${escapeHTML(nm)}」已經存在，您要覆蓋現有的樣式，還是換別的名字？</div>`, [
+          { label: '覆蓋', primary: true, act: () => { closeModal(); doSave(nm); } },
+          { label: '換別的名字', act: () => { closeModal(); trySave(nm); } },
+          { label: '取消', act: closeModal }
+        ]);
+      } else {
+        doSave(nm);
+      }
+    }
+    
+    trySave(t.trk.name+' 樣式');
   });
   $('tsPresetSel').addEventListener('change',e=>{
     const t=styleTarget(), v=e.target.value; e.target.value='';
