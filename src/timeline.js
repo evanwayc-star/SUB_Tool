@@ -18,10 +18,11 @@ import { Seq } from './sequence.js';
 /* ===== 5. 時間軸 ====================================================== */
 const RULER_H=24, WAVE_H=64, ROW_H=64;  // default/min values; actual stored in State
 
-/* 影片序列：獨立視訊軌列容器（在波形上方），與字幕軌列同一套「列＋列頭」機制。
+/* 影片序列：獨立視訊軌列容器（在專案音訊軌上方），與字幕軌列同一套「列＋列頭」機制。
    容器 pointer-events:none、片段本身 auto——空白處仍可拖曳捲動/框選。 */
 const tlVtracks=document.getElementById('tlVtracks');
-const VROW_H=64;  // 視訊軌列預設高度（含區塊內波形）
+const tlAtracks=document.getElementById('tlAtracks');
+const VROW_H=44;  // 視訊軌列預設高度（影像與音訊分離後，不再內嵌波形）
 function waveH(){ return State.waveH||WAVE_H; }
 function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
 function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
@@ -34,15 +35,33 @@ function vtracksHeight(){ if(!Seq.active())return 0; let h=0; const N=vtrackCoun
 function vtrackTop(v){ const N=vtrackCount(); let top=0; for(let disp=0;disp<N;disp++){ const vv=N-1-disp; if(vv===v)return top; top+=vtrackH(vv); } return 0; }
 /* 補足 videoTracks 以涵蓋現有片段的最高軌（只增不減；每次全繪前呼叫，確保軌列與片段一致） */
 function syncVideoTracks(){ let m=0; for(const c of State.clips) m=Math.max(m,(c.vtrack||0)+1); ensureVideoTrackCount(m); }
-/* 音訊軌列（階段2）：把序列片段依音源分組，每音源一條波形列（取代舊的單一波形）。
-   無序列時高度為 0（維持純字幕版面）。audioRowLayout 回各列 {srcId,label,clips,y0,h}。 */
-const AROW_H=52, ACH_H=26;
-/* v4.15.0：音訊不再另成獨立列——每個影音軌列（視訊軌）的列頭直接含混音 M/S/音量，
-   波形也已畫在片段區塊內。故此處回空＝時間軸上不再有獨立音訊波形列。 */
-function audioRowLayout(){ return []; }
-/* 某視訊軌所屬的音源（取該軌上任一片段的 audioSrc）；供軌列列頭的混音控制用 */
-function _vtrackSrc(v){ const c=State.clips.find(x=>(x.vtrack||0)===v && x.path); return c ? (c.audioSrc||(c.primary?'video':'clip:'+c.id)) : null; }
-function atracksHeight(){ return audioRowLayout().reduce((s,r)=>s+r.h,0); }
+/* 音訊時間軸：一個匯入素材＝一條可視音訊軌；專案 A bus 只留在 mixer／配線資料。
+   這樣 8 聲道素材不會在 A1～A8 複製出八張一樣的波形。右鍵可決定這條素材
+   顯示 MIX 或任一來源聲道；大量素材仍以獨立捲動區避免擠掉字幕。 */
+const AROW_H=48, AUDIO_HEAD_H=22, AUDIO_MAX_VIEW_H=216, AUDIO_MIN_SUB_H=72;
+function sourceAudioRowH(row){
+  const h=Number(row?.height);
+  return Number.isFinite(h) ? clamp(h,32,160) : AROW_H;
+}
+function audioRowsHeight(){ return audioRowLayout().reduce((sum,row)=>sum+row.h,0); }
+function audioViewportH(){
+  const full=audioRowsHeight();
+  if(!full) return 0;
+  // tlLayer 的高度就是目前可見的時間軸 body；至少留字幕可操作的高度。
+  const layerH=tlLayer?.clientHeight||tlScroll?.clientHeight||0;
+  const room=layerH ? layerH-RULER_H-vtracksHeight()-AUDIO_HEAD_H-AUDIO_MIN_SUB_H : AUDIO_MAX_VIEW_H;
+  const cap=Math.max(36,Math.min(AUDIO_MAX_VIEW_H,room));
+  return Math.min(full,cap);
+}
+/* 每列為一個實際匯入的影音／音檔 source；同一檔切成多段仍共用同一列。 */
+function audioRowLayout(){
+  let y0=0;
+  return audioSourceLanes().map((lane,index)=>{
+    const h=sourceAudioRowH(lane);
+    const row={...lane,kind:'source',index,y0,h}; y0+=h; return row;
+  });
+}
+function atracksHeight(){ return audioRowLayout().length ? AUDIO_HEAD_H+audioViewportH() : 0; }
 function tracksTop(){return RULER_H+vtracksHeight()+atracksHeight();}
 function tracksScrollTop(){ return tlTracks?tlTracks.scrollTop:0; }
 
@@ -69,12 +88,18 @@ function layoutTimeline(){
   rulerCv.style.width=vw+'px'; rulerCv.style.height=RULER_H+'px';
   const vh=vtracksHeight();
   const ah=atracksHeight();
-  waveCv.width=vw*devicePixelRatio; waveCv.height=Math.max(1,ah)*devicePixelRatio;
-  waveCv.style.width=vw+'px'; waveCv.style.height=ah+'px'; waveCv.style.top=(RULER_H+vh)+'px'; waveCv.style.display=ah>0?'block':'none';
+  // waveCanvas 保留給舊 DOM/模組參照；專案音訊改用可獨立捲動的 DOM 軌列，以免 bus 很多時把字幕區擠走。
+  waveCv.width=1; waveCv.height=1;
+  waveCv.style.width='1px'; waveCv.style.height='1px'; waveCv.style.display='none';
   if(tlVtracks){ tlVtracks.style.top=RULER_H+'px'; tlVtracks.style.height=vh+'px'; tlVtracks.style.display=vh>0?'block':'none'; }
+  if(tlAtracks){
+    tlAtracks.style.top=(RULER_H+vh)+'px';
+    tlAtracks.style.height=ah+'px';
+    tlAtracks.style.display=ah>0?'block':'none';
+  }
   tlTracks.style.top=tracksTop()+'px';
   const gutWave=document.querySelector('.tl-gutter-wave'); if(gutWave) gutWave.style.display='none';
-  const gutA=$('tlGutterAtracks'); if(gutA) gutA.style.height=ah+'px';
+  const gutA=$('tlGutterAtracks'); if(gutA){ gutA.style.height=ah+'px'; gutA.style.display=ah>0?'block':'none'; }
 }
 // 次刻度等分數：依 step 與 fps 動態計算，確保每個次刻度落在格邊界
 function minorDiv(step){
@@ -173,51 +198,9 @@ function fmtTick(s, step){
   if(p.mm>0)return`${p.mm}:${pad(p.ss)}`;
   return`${p.ss}s`;
 }
-/* 波形：逐音訊軌列（每音源一條帶）繪製；每帶畫該音源各片段、各用自己的 peaks（依 offset/in 對映來源時間）。
-   取代舊的「單一波形＝基底軌」畫法——音訊現在也是多軌獨立成列。 */
+/* 專案 bus 的波形是 DOM 區塊內的小 canvas；保留此入口，讓既有的縮放、捲動與媒體載入重繪路徑繼續有效。 */
 function drawWave(){
-  const ctx=waveCv.getContext('2d');const dpr=devicePixelRatio;
-  const vw=viewportW(); const H=waveCv.height/dpr;
-  ctx.save();ctx.scale(dpr,dpr);
-  ctx.clearRect(0,0,vw,H);
-  ctx.fillStyle='#141416';ctx.fillRect(0,0,vw,H);
-  const rows=audioRowLayout(); if(!rows.length){ ctx.restore(); return; }
-  for(const r of rows){
-    if(r.kind==='channel'){
-      // 展開的聲道控制列：薄底 + 底線（波形保留在音源列，聲道列僅提供逐聲道 靜音/獨奏/音量）
-      ctx.fillStyle='#12181e'; ctx.fillRect(0,r.y0,vw,r.h);
-      ctx.strokeStyle='#222d36';ctx.globalAlpha=1;ctx.beginPath();ctx.moveTo(0,r.y0+r.h-0.5);ctx.lineTo(vw,r.y0+r.h-0.5);ctx.stroke();
-    } else _drawWaveBand(ctx, r, vw);
-  }
-  ctx.restore();
-}
-function _drawWaveBand(ctx, row, vw){
-  const y0=row.y0, h=row.h, mid=y0+h/2, amp=h*0.44;
-  // 影片長度底色（此帶）
-  if(State.duration>0){
-    const dx0=Math.max(0,timeToX(0)), dx1=Math.min(vw,timeToX(State.duration));
-    if(dx1>dx0){ ctx.fillStyle='#1a2530'; ctx.fillRect(dx0,y0,dx1-dx0,h); }
-  }
-  const res=Wave.resolution;
-  const muted=Media.sourceMuted(row.srcId);
-  ctx.strokeStyle=muted?'#4a5560':'#3fa9f5';ctx.globalAlpha=muted?0.55:0.9;ctx.beginPath();
-  for(let x=0;x<vw;x++){
-    const t=xToTime(x);
-    let cc=null; for(const c of row.clips){ if(t>=c.offset-1e-6 && t<Seq.clipEnd(c)-1e-6){ cc=c; break; } }
-    if(!cc) continue;
-    const pk=cc.peaks || ((cc.primary || cc.audioSrc==='video') ? Wave.peaks : null); if(!pk) continue;
-    const bT=Seq.toSource(t, cc);
-    const n=pk.length/2; const b=Math.floor(bT*res);
-    if(b<0||b>=n)continue;
-    let mn=pk[b*2],mx=pk[b*2+1];
-    const b2=Math.min(n-1,Math.floor((bT+(xToTime(x+1)-t))*res));
-    for(let k=b+1;k<=b2;k++){ if(pk[k*2]<mn)mn=pk[k*2]; if(pk[k*2+1]>mx)mx=pk[k*2+1]; }
-    ctx.moveTo(x+0.5,mid-mx*amp);ctx.lineTo(x+0.5,mid-mn*amp);
-  }
-  ctx.stroke();
-  ctx.globalAlpha=1;ctx.strokeStyle='#23232a';ctx.beginPath();ctx.moveTo(0,mid);ctx.lineTo(vw,mid);ctx.stroke();
-  // 帶底分隔線
-  ctx.strokeStyle='#2b3947';ctx.beginPath();ctx.moveTo(0,y0+h-0.5);ctx.lineTo(vw,y0+h-0.5);ctx.stroke();
+  renderAudioTrackRows();
 }
 function renderTrackRows(){
   tlTracks.innerHTML='';
@@ -423,25 +406,14 @@ function renderClipBlocks(){
     el.dataset.clipId=c.id; el.dataset.vtrack=v;
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
     const hasFade=(c.fadeIn>0||c.fadeOut>0);
-    el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}${hasFade?' ⌁':''}</div><div class="edge r"></div>`;
+    el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}${hasFade?' ⌁':''}</div><button class="clip-route" type="button" title="設定此影音檔的來源聲道如何對應到專案音訊軌">音訊配線</button><div class="edge r"></div>`;
     el.title=`${c.name}（${State.videoTracks[v]?.name||('視訊軌 V'+(v+1))}）\n位置 ${secToEncore(s,State.fps,State.dropFrame)} → ${secToEncore(e,State.fps,State.dropFrame)}`+
       `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
-      `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪｜右鍵＝選單`;
+      `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪｜「音訊配線」＝設定來源聲道到專案音訊軌`;
     row.appendChild(el);
-    // 區塊內波形：只畫【可視範圍】那段（高倍縮放時區塊會超寬，canvas 若設為整塊寬會超過瀏覽器上限而變白）。
-    // 把 canvas 寬度夾到視窗內、定位在可視起點；再依畫布 px 反推來源時間繪製。
-    const pk=c.peaks || ((c.primary||c.audioSrc==='video') ? Wave.peaks : null);
-    if(pk && pk.length){
-      const vx0=Math.max(0,x1), vx1=Math.min(vw,x2), cvw=Math.round(vx1-vx0);
-      if(cvw>=1){
-        const Hpx=Math.max(10, vtrackH(v)-4);
-        const cv=document.createElement('canvas'); cv.className='clip-wave';
-        cv.width=Math.max(1,Math.round(cvw*devicePixelRatio)); cv.height=Math.max(1,Math.round(Hpx*devicePixelRatio));
-        cv.style.left=(vx0-x1)+'px'; cv.style.width=cvw+'px';
-        _drawClipWave(cv, c, pk, cvw, Hpx, vx0);
-        el.insertBefore(cv, el.firstChild);
-      }
-    }
+    const routeBtn=el.querySelector('.clip-route');
+    routeBtn.addEventListener('mousedown',e=>{ e.preventDefault(); e.stopPropagation(); });
+    routeBtn.addEventListener('click',e=>{ e.preventDefault(); e.stopPropagation(); openAudioRoutingForClip(c); });
   }
 }
 /* 在片段區塊內畫該段音波：畫布覆蓋片段的【可視範圍】，x0abs＝畫布左緣的絕對時間軸 px；
@@ -461,6 +433,318 @@ function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs){
   }
   ctx.stroke(); ctx.restore();
 }
+
+/* ===== 專案音訊 bus（來源路由＋時間軸） ==================================
+   clip.audioSourceId 是可儲存的來源識別；audioSrc 是舊版即時播放識別，兩者並存時以前者為準。
+   sourceMaps[sourceId].channels 的每一筆可將一個來源聲道送到多個 bus。 */
+function clipAudioSourceId(c){
+  if(!c) return null;
+  return c.audioSourceId || c.audioSrc || (c.primary ? 'video' : ('clip:'+c.id));
+}
+/* audioSourceId 是專案檔中穩定的配線 ID，audioSrc 才是目前播放器內
+   Media.tracks 使用的 source ID。時間軸上的喇叭需要操作後者；遇到舊專案或
+   尚在載入中的來源時，依序嘗試所有合理的 runtime ID，避免按鈕變成裝飾。 */
+function runtimeAudioSourceId(source,fallbackSourceId=null){
+  const candidates=[
+    source?.audioSrc,
+    source?.source,
+    source?.primary ? 'video' : null,
+    source?.id && !String(source.id).startsWith('external:') ? ('clip:'+source.id) : null,
+    fallbackSourceId
+  ].filter((id,index,list)=>typeof id==='string'&&id&&list.indexOf(id)===index);
+  if(typeof Media?.sourceChannels==='function'){
+    for(const id of candidates){
+      try{ if(Media.sourceChannels(id).length) return id; }catch(_){}
+    }
+  }
+  return candidates[0]||null;
+}
+function timelineSourceMuted(source,external,fallbackSourceId=null){
+  if(external) return source?.enabled===false;
+  const runtimeId=runtimeAudioSourceId(source,fallbackSourceId);
+  try{ return !!(runtimeId&&typeof Media?.sourceMuted==='function'&&Media.sourceMuted(runtimeId)); }
+  catch(_){ return false; }
+}
+function muteButtonMarkup(muted,scope='素材'){
+  const action=muted?'開啟':'關閉';
+  const title=`${action}此${scope}聲音（目前${muted?'已關閉':'已開啟'}）`;
+  return `<button type="button" class="audio-clip-mute${muted?' on':''}" aria-pressed="${muted?'true':'false'}" aria-label="${title}" title="${title}">${muted?'🔇':'🔊'}</button>`;
+}
+function toggleTimelineSourceMute(source,{external=false,fallbackSourceId=null,select=false}={}){
+  if(external){
+    if(select) selectExternalAudioClip(source.id,{redraw:false});
+    return runExternalAudioAction('toggleExternalAudioEnabled',[source.id]);
+  }
+  const runtimeId=runtimeAudioSourceId(source,fallbackSourceId);
+  let channels=[];
+  try{ channels=runtimeId&&typeof Media?.sourceChannels==='function' ? Media.sourceChannels(runtimeId) : []; }catch(_){}
+  if(!runtimeId||!channels.length||typeof Media?.toggleSourceMute!=='function'){
+    showToast('此素材的音訊仍在準備中');
+    return false;
+  }
+  Media.toggleSourceMute(runtimeId);
+  drawTimeline();
+  return true;
+}
+function sourceMapForClip(c){
+  const maps=State.audioProject?.sourceMaps;
+  if(!maps || typeof maps!=='object') return null;
+  const sourceId=clipAudioSourceId(c);
+  const get=(key)=>maps instanceof Map ? maps.get(key) : maps[key];
+  return get(sourceId) || (c?.audioSrc && c.audioSrc!==sourceId ? get(c.audioSrc) : null) || null;
+}
+function sourceRoutingSummary(c){
+  const routes=sourceMapForClip(c)?.channels;
+  if(!Array.isArray(routes)||!routes.length) return '尚未配線';
+  const buses=State.audioProject?.buses||[];
+  const byId=new Map(buses.map((bus,index)=>[String(bus.id),bus?.name||`A${index+1}`]));
+  const ids=[];
+  for(const route of routes){
+    if(!route||route.enabled===false) continue;
+    for(const id of (Array.isArray(route.busIds)?route.busIds:[route.busIds])){
+      if(id!=null&&!ids.includes(String(id))) ids.push(String(id));
+    }
+  }
+  if(!ids.length) return '未送往專案音軌';
+  const labels=ids.map((id,index)=>byId.get(id)||`A${index+1}`);
+  return `→ ${labels.length<=4?labels.join('、'):`${labels.slice(0,4).join('、')} +${labels.length-4}`}`;
+}
+function openAudioRoutingForSource(source){
+  if(!source) return;
+  const isExternal=source.kind==='external-audio';
+  const detail={
+    ...(isExternal?{}:{clipId:source.id}),
+    audioSourceId:clipAudioSourceId(source),
+    audioSrc:source.audioSrc||null
+  };
+  const routing=typeof window!=='undefined' ? window.AudioRouting : null;
+  if(routing){
+    if(isExternal && typeof routing.openForSource==='function'){
+      routing.openForSource(detail.audioSourceId); return;
+    }
+    if(!isExternal && typeof routing.openForClip==='function'){
+      routing.openForClip(source.id); return;
+    }
+  }
+  if(typeof window!=='undefined' && typeof window.CustomEvent==='function'){
+    window.dispatchEvent(new CustomEvent('audio-routing:open',{detail}));
+  }
+}
+function openAudioRoutingForClip(c){ openAudioRoutingForSource(c); }
+function externalAudioTimelineEntries(){
+  const assets=typeof Media.getExternalAudioSources==='function' ? Media.getExternalAudioSources() : [];
+  // 靜音只影響預覽／輸出，不能把素材從剪輯時間軸藏掉；否則使用者無法再開回來。
+  return assets.filter(asset=>asset).map(asset=>{
+    const start=Math.max(0,Number(asset.offset)||0);
+    const inPoint=Math.max(0,Number(asset.in)||0);
+    const rawOut=Number(asset.out??asset.duration);
+    const outPoint=Number.isFinite(rawOut)?Math.max(inPoint,rawOut):inPoint;
+    return {source:asset,start,end:start+Math.max(0,outPoint-inPoint),external:true};
+  }).filter(entry=>entry.end>entry.start);
+}
+function audioTimelineEntries(){
+  return [
+    // 已解除影音連結的影片只保留畫面；它的聲音已成為可獨立編輯的 external audio block。
+    ...State.clips.filter(clip=>!clip.audioDetached).map(clip=>({source:clip,start:clip.offset,end:Seq.clipEnd(clip),external:false})),
+    ...externalAudioTimelineEntries()
+  ];
+}
+function audioSourceLanes(){
+  const lanes=new Map();
+  for(const entry of audioTimelineEntries()){
+    const source=entry.source;
+    const sourceId=clipAudioSourceId(source);
+    if(!sourceId) continue;
+    // 一個外部音檔被切開後，為了能讓兩段同時播放，runtime 會給每段獨立的
+    // audioSourceId／AudioElement；但在剪輯介面上它們仍應留在同一條「素材列」。
+    // timelineLaneId 只影響顯示分列，不影響來源聲道路由或輸出。
+    const laneId=entry.external && source.timelineLaneId ? String(source.timelineLaneId) : sourceId;
+    let lane=lanes.get(laneId);
+    if(!lane){
+      lane={
+        laneId,
+        sourceId,
+        source,
+        external:!!entry.external,
+        label:source.name||(entry.external?'外部音檔':'影音素材'),
+        firstStart:entry.start,
+        entries:[]
+      };
+      lanes.set(laneId,lane);
+    }
+    lane.entries.push(entry);
+    lane.firstStart=Math.min(lane.firstStart,entry.start);
+  }
+  return [...lanes.values()].sort((a,b)=>a.firstStart-b.firstStart||a.label.localeCompare(b.label));
+}
+function sourceWaveFallback(source,external){
+  if(source?.peaks) return source.peaks;
+  if(!external&&(source?.primary||source?.audioSrc==='video'||source?.audioSourceId==='video')) return Wave.peaks||null;
+  return null;
+}
+function sourceWaveDetail(source,external){
+  const fallback=sourceWaveFallback(source,external);
+  if(typeof Wave.getSourceWaveform==='function') return Wave.getSourceWaveform(source,fallback);
+  return {peaks:fallback,selection:'mix',fallback:false};
+}
+function sourceWaveLabel(source,selection){
+  if(typeof Wave.getSourceWaveOptions!=='function') return selection==='mix'?'MIX':'Ch';
+  const option=Wave.getSourceWaveOptions(source).find(item=>item.id===selection);
+  return option?.label||'MIX（所有聲道）';
+}
+/* 外部音檔是可獨立剪輯的素材。selectedAudioClipId 只保存 runtime 選取狀態，
+   不與影片 clip / 字幕選取混用，讓 Delete 與右鍵操作可明確知道目標。 */
+let _ignoreAudioClickUntil=0;
+function selectExternalAudioClip(assetId,{seek=false,redraw=true}={}){
+  if(!assetId) return;
+  State.selectedAudioClipId=assetId;
+  State.selectedClipId=null;
+  State.selectedId=null;
+  State.selectedIds=[];
+  refreshSelectionUI();
+  const asset=typeof Media.getExternalAudioSource==='function' ? Media.getExternalAudioSource(assetId) : null;
+  const label=asset?.name||'音訊素材';
+  const status=$('stSel'); if(status) status.textContent='已選音訊：'+label;
+  if(seek&&asset) Media.seek(Math.max(0,Number(asset.offset)||0));
+  if(redraw) drawTimeline();
+}
+function runExternalAudioAction(method,args=[],{clearSelection=false}={}){
+  const fn=Media?.[method];
+  if(typeof fn!=='function'){
+    showToast('音訊素材編輯功能尚未準備完成');
+    return false;
+  }
+  let result;
+  try{ result=fn.apply(Media,args); }
+  catch(err){ console.warn('external audio '+method+':',err); showToast('無法更新音訊素材'); return false; }
+  Promise.resolve(result).then(value=>{
+    if(value===false||value==null){ drawTimeline(); return; }
+    if(clearSelection) State.selectedAudioClipId=null;
+    drawTimeline();
+    emit('render:videoSub'); emit('mpv:refreshSubs');
+  }).catch(err=>{
+    console.warn('external audio '+method+':',err);
+    showToast('無法更新音訊素材');
+  });
+  return true;
+}
+function beginExternalAudioDrag(ev,asset,entry,block){
+  if(ev.button!==0 || ev.target.closest('button')) return;
+  const assetId=asset?.id||asset?.audioSourceId||asset?.audioSrc;
+  if(!assetId) return;
+  const mode=ev.target.classList.contains('edge')
+    ? (ev.target.classList.contains('l')?'audio-l':'audio-r') : 'audio-move';
+  selectExternalAudioClip(assetId,{redraw:false});
+  block.classList.add('selected');
+  const inPoint=Math.max(0,Number(asset.in)||0);
+  const rawOut=Number(asset.out??asset.duration);
+  const outPoint=Math.max(inPoint,Number.isFinite(rawOut)?rawOut:inPoint);
+  drag={
+    mode, audioAssetId:assetId, audioEl:block,
+    pointerId:block._audioPointerId,
+    startX:ev.clientX,startY:ev.clientY,startScroll:tlScroll.scrollLeft,moved:false,
+    os:entry.start,oin:inPoint,oout:outPoint,duration:Math.max(outPoint,Number(asset.duration)||0),
+    preview:{offset:entry.start,in:inPoint,out:outPoint},
+    snaps:snapTargets(new Set())
+  };
+  jklReset();
+  ev.preventDefault(); ev.stopPropagation();
+}
+function renderAudioTrackRows(){
+  if(!tlAtracks) return;
+  const rows=audioRowLayout();
+  const oldScroll=tlAtracks.scrollTop;
+  tlAtracks.innerHTML='';
+  if(!rows.length) return;
+
+  const head=document.createElement('div');
+  head.className='audio-section-head';
+  head.innerHTML=`<span>音訊</span><span class="audio-section-meta">素材音訊軌 ${rows.length}</span>`;
+  tlAtracks.appendChild(head);
+  const content=document.createElement('div');
+  content.className='audio-project-content';
+  content.style.height=audioRowsHeight()+'px';
+  tlAtracks.appendChild(content);
+
+  const vw=viewportW(), t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
+  for(const row of rows){
+    const {sourceId,h}=row;
+    const rowEl=document.createElement('div');
+    rowEl.className='audio-project-row';
+    rowEl.style.height=h+'px'; rowEl.dataset.audioSourceId=sourceId;
+    content.appendChild(rowEl);
+    for(const entry of row.entries){
+      const c=entry.source;
+      const {external}=entry;
+      const s=entry.start, e=entry.end;
+      if(e<t0||s>t1) continue;
+      const x1=timeToX(s), x2=timeToX(e);
+      const muted=timelineSourceMuted(c,external,sourceId);
+      const externalSelected=external&&State.selectedAudioClipId===c.id;
+      const block=document.createElement('div');
+      block.className='audio-clip-block'+(external?' external-audio-block':'')+(!external&&c.id===State.selectedClipId?' selected':'')+(external&&(externalSelected||Media.activeSource===c.audioSrc)?' selected':'')+(muted?' muted':'');
+      block.style.left=x1+'px'; block.style.width=Math.max(6,x2-x1)+'px';
+      block.dataset.clipId=c.id||'';
+      block.dataset.audioAssetId=external?(c.id||c.audioSourceId||c.audioSrc||''):'';
+      block.dataset.audioSourceId=clipAudioSourceId(c)||'';
+      block.dataset.audioSrc=c.audioSrc||'';
+      block.dataset.audioKind=external?'external':'clip';
+      block.dataset.audioStart=String(s);
+      block.dataset.audioEnd=String(e);
+      block.dataset.audioEnabled=String(!muted);
+      const wave=sourceWaveDetail(c,external);
+      const waveLabel=sourceWaveLabel(c,wave.selection);
+      const routeText=sourceRoutingSummary(c);
+      block.dataset.waveSelection=wave.selection||'mix';
+      block.title=`${c.name||(external?'外部音檔':'影音片段')}\n聲音：${muted?'已關閉':'已開啟'}（點喇叭按鈕切換）\n波形：${waveLabel}${wave.fallback?'（暫以 MIX 顯示）':''}\n${external?'拖曳＝移動｜拖左右邊緣＝修剪｜右鍵＝切割、刪除、靜音與波形':'右鍵：切換 MIX／來源聲道'}\n${routeText}\n按「配線」可修改此來源的聲道對應`;
+      block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span><span class="audio-clip-route">${escapeHTML(waveLabel)} · ${escapeHTML(routeText)}</span>${muteButtonMarkup(muted,external?'音檔':'影音素材')}<button type="button" class="audio-clip-config" title="設定此${external?'音檔':'影音檔'}的聲道對應">配線</button>${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}`;
+      const peak=wave.peaks;
+      if(peak && peak.length){
+        const vx0=Math.max(0,x1), vx1=Math.min(vw,x2), cvw=Math.round(vx1-vx0);
+        if(cvw>=1){
+          const Hpx=Math.max(10,h-6);
+          const cv=document.createElement('canvas'); cv.className='audio-clip-wave';
+          cv.width=Math.max(1,Math.round(cvw*devicePixelRatio)); cv.height=Math.max(1,Math.round(Hpx*devicePixelRatio));
+          cv.style.left=(vx0-x1)+'px'; cv.style.width=cvw+'px';
+          _drawClipWave(cv,c,peak,cvw,Hpx,vx0);
+          block.insertBefore(cv,block.firstChild);
+        }
+      }
+      // 音檔拖到區塊外（甚至快速移過其他 DOM）時仍保有事件目標，避免拖曳中途失效。
+      if(external){
+        block.addEventListener('pointerdown',ev=>{
+          if(ev.button!==0||ev.target.closest('button')) return;
+          try{ block.setPointerCapture(ev.pointerId); block._audioPointerId=ev.pointerId; }catch(_){}
+        });
+      }
+      block.addEventListener('mousedown',ev=>{
+        if(external){ beginExternalAudioDrag(ev,c,entry,block); return; }
+        ev.stopPropagation();
+      });
+      block.addEventListener('click',ev=>{
+        if(performance.now()<_ignoreAudioClickUntil) return;
+        if(ev.target.closest('.audio-clip-config,.audio-clip-mute')) return;
+        ev.preventDefault();
+        if(external) selectExternalAudioClip(c.id,{seek:true});
+        else selectClip(c.id);
+        if(!external) renderAudioTrackRows();
+      });
+      const mute=block.querySelector('.audio-clip-mute');
+      if(mute){
+        mute.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });
+        mute.addEventListener('click',ev=>{
+          ev.preventDefault(); ev.stopPropagation();
+          toggleTimelineSourceMute(c,{external,fallbackSourceId:sourceId,select:external});
+        });
+      }
+      const config=block.querySelector('.audio-clip-config');
+      config.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });
+      config.addEventListener('click',ev=>{ ev.preventDefault(); ev.stopPropagation(); openAudioRoutingForSource(c); });
+      rowEl.appendChild(block);
+    }
+  }
+  tlAtracks.scrollTop=oldScroll;
+}
 /* 由 tlVtracks 內的 y 座標推算滑鼠所在的 vtrack（由上而下逐列量測，支援各軌不同高度） */
 function clipTrackFromY(clientY){
   if(!tlVtracks) return 0;
@@ -472,8 +756,7 @@ function clipTrackFromY(clientY){
   return 0; // 落在最底層
 }
 
-/* 視訊軌列頭（左側 gutter；比照字幕軌）：眼睛(顯示切換)/名稱(雙擊改名)/＋(上方新增軌)/✕(刪除軌)/高度把手。
-   由上而下＝最高軌在上（與右側列一致）。無影片序列時不顯示（維持純字幕版面）。 */
+/* 視訊軌列頭：只處理影像軌的可見、鎖定與排序；音訊 M/S/音量已移到中間的專案 bus 區。 */
 function renderVtrackGutter(){
   const gut=$('tlGutterVtracks'); if(!gut) return;
   gut.innerHTML='';
@@ -486,10 +769,6 @@ function renderVtrackGutter(){
     const g=document.createElement('div');
     g.className='vgtrack'+(vis?'':' hidden-tk'); g.style.height=vtrackH(v)+'px'; g.dataset.vtrack=v;
     const isLocked = !!meta.locked;
-    // 此軌音源的混音控制（M/S/音量）——影音合一：一列＝影片區塊＋波形＋混音
-    const src=_vtrackSrc(v);
-    const muted=src&&Media.sourceMuted(src), solo=src&&Media.sourceSolo(src), vol=src?Math.round(Media.sourceVolume(src)*100):100;
-    const mixHtml = src ? `<button class="awm${muted?' on':''}" title="靜音此軌音訊">M</button><button class="aws${solo?' on':''}" title="獨奏此軌音訊">S</button><input class="awvol" type="range" min="0" max="150" step="1" value="${vol}" title="音量 ${vol}%">` : '';
     const lockBtn = `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌（禁止移動／修剪／切割／選取片段）'}">${isLocked?'🔒':'🔓'}</button>`;
     g.innerHTML=`<div class="vgrow1">`+
         `<span class="vlabel">V${v+1}</span>`+
@@ -497,8 +776,8 @@ function renderVtrackGutter(){
         `<span class="gname" contenteditable="false" spellcheck="false" title="${escapeHTML(meta.name)}">${escapeHTML(meta.name)}</span>`+
         `<button class="gadd" title="在上方新增軌">＋</button>`+
         `<button class="gdel" title="刪除此軌">✕</button>`+
-      `</div>`+
-      `<div class="vgrow2">${mixHtml || '<span class="vgnoaud">（此軌無音訊）</span>'}${lockBtn}</div>`;
+        lockBtn+
+      `</div>`;
     g.querySelector('.eye').onclick=(e)=>{ e.stopPropagation(); meta.visible=!vis; drawTimeline(); emit('render:videoSub'); };
     const nm=g.querySelector('.gname');
     nm.addEventListener('mousedown',e=>{
@@ -511,11 +790,6 @@ function renderVtrackGutter(){
     g.querySelector('.glock').onclick=(e)=>{ e.stopPropagation(); meta.locked=!meta.locked; if(meta.locked){ const sc=Seq.byId(State.selectedClipId); if(sc&&(sc.vtrack||0)===v) clearClipSelection(); } drawTimeline(); };
     g.querySelector('.gadd').onclick=(e)=>{ e.stopPropagation(); addVideoTrack(v+1); };
     g.querySelector('.gdel').onclick=(e)=>{ e.stopPropagation(); removeVideoTrack(v); };
-    if(src){
-      g.querySelector('.awm').onclick=(e)=>{ e.stopPropagation(); Media.toggleSourceMute(src); renderVtrackGutter(); drawTimeline(); };
-      g.querySelector('.aws').onclick=(e)=>{ e.stopPropagation(); Media.toggleSourceSolo(src); renderVtrackGutter(); drawTimeline(); };
-      const vv=g.querySelector('.awvol'); vv.oninput=()=>{ Media.setSourceVolume(src,(+vv.value)/100); vv.title='音量 '+vv.value+'%'; }; vv.addEventListener('mousedown',e=>e.stopPropagation());
-    }
     const resH=document.createElement('div');
     resH.className='tl-resize-handle';
     resH.addEventListener('mousedown',e=>{
@@ -535,11 +809,10 @@ function addVideoTrack(idx){
   for(const c of State.clips){ if((c.vtrack||0)>=idx) c.vtrack=(c.vtrack||0)+1; }
   Seq.sort(); drawTimeline(); recordHistory('新增視訊軌'); emit('render:videoSub');
 }
-/* 刪除指定視訊軌（連同其片段）；至少保留一軌，且不刪含主影片的軌 */
+/* 刪除指定視訊軌（連同其片段）；畫面列至少保留一軌，但主影片素材本身可被刪除。 */
 function removeVideoTrack(v){
   if(State.videoTracks.length<=1){ showToast('至少保留一條視訊軌'); return; }
   const clipsOn=State.clips.filter(c=>(c.vtrack||0)===v);
-  if(clipsOn.some(c=>c.primary)){ showToast('此視訊軌含主影片，無法刪除'); return; }
   const doRemove=()=>{
     for(const c of clipsOn) Media.removeClip(c.id);         // removeClip 會處理 Seq 與音軌清理
     for(const c of State.clips){ if((c.vtrack||0)>v) c.vtrack=(c.vtrack||0)-1; } // 上方軌下移一軌
@@ -621,6 +894,7 @@ function selectClip(id, opts={}){
   const c=Seq.byId(id); if(!c) return;
   if(!opts.force && State.videoTracks[c.vtrack||0]?.locked) return; // 鎖定軌：不可選取中間的影像片段
   State.selectedClipId=id;
+  State.selectedAudioClipId=null;
   State.selectedId=null; State.selectedIds=[]; // 與字幕選取互斥（避免 Del/上下鍵語意衝突）
   refreshSelectionUI(); // 清除字幕列高亮
   $('stSel').textContent='已選影片段：'+c.name;
@@ -685,45 +959,63 @@ function deleteSelectedClip(){
   }
 }
 
-/* 音訊軌列頭（每音源一列，可展開成各聲道）：
-   音源列＝🔊 名稱 ＋ 靜音 M／獨奏 S／音量（聚合套用到該音源的所有聲道）＋展開鈕（多聲道時）；
-   聲道列＝逐聲道 名稱 ＋ 靜音 M／獨奏 S／音量（直接操作該聲道 Media.tracks 項目）。 */
+/* 素材音訊列頭：每個檔案只出現一次；M/S/音量是 project bus 的 mixer 職責。
+   右側 block 的右鍵選單切換波形後，這裡同步顯示目前的 MIX / Ch 選擇。 */
 function renderAtrackGutter(){
   const gut=$('tlGutterAtracks'); if(!gut) return;
+  const rows=audioRowLayout();
+  const oldScroll=gut.scrollTop;
   gut.innerHTML='';
-  const refreshMixer=()=>{ renderAtrackGutter(); drawWave(); };
-  for(const r of audioRowLayout()){
-    const g=document.createElement('div'); g.style.height=r.h+'px';
-    if(r.kind==='channel'){
-      const tr=r.track; const vol=Math.round((tr.volume==null?1:tr.volume)*100);
-      g.className='awtrack child'; g.dataset.src=r.srcId;
-      g.innerHTML=`<span class="awname" title="${escapeHTML(r.label)}">${escapeHTML(r.label)}</span>`+
-        `<button class="awm${tr.muted?' on':''}" title="靜音此聲道">M</button>`+
-        `<button class="aws${tr.solo?' on':''}" title="獨奏此聲道">S</button>`+
-        `<input class="awvol" type="range" min="0" max="150" step="1" value="${vol}" title="音量 ${vol}%">`;
-      g.querySelector('.awm').onclick=(e)=>{ e.stopPropagation(); tr.muted=!tr.muted; Media.applyGains(); refreshMixer(); };
-      g.querySelector('.aws').onclick=(e)=>{ e.stopPropagation(); tr.solo=!tr.solo; Media.applyGains(); refreshMixer(); };
-      const vv=g.querySelector('.awvol');
-      vv.oninput=()=>{ tr.volume=(+vv.value)/100; vv.title='音量 '+vv.value+'%'; Media.applyGains(); };
-      vv.addEventListener('mousedown',e=>e.stopPropagation());
-      gut.appendChild(g); continue;
+  if(!rows.length) return;
+  const head=document.createElement('div');
+  head.className='audio-gutter-head';
+  head.innerHTML='<span>音訊</span><span>素材波形</span>';
+  gut.appendChild(head);
+  for(const row of rows){
+    const g=document.createElement('div');
+    const source=row.source;
+    const waveSelection=typeof Wave.getSourceWaveSelection==='function'
+      ? Wave.getSourceWaveSelection(source) : 'mix';
+    const waveLabel=sourceWaveLabel(source,waveSelection);
+    const muted=timelineSourceMuted(source,row.external,row.sourceId);
+    const selected=row.external&&State.selectedAudioClipId===source.id;
+    g.className='agtrack'+(row.external?' external-audio-gutter':'')+(muted?' muted':'')+(selected?' selected':'');
+    g.style.height=row.h+'px';
+    g.dataset.audioSourceId=row.sourceId;
+    g.dataset.audioAssetId=row.external?(source.id||source.audioSourceId||source.audioSrc||''):'';
+    g.title=`${row.label}\n聲音：${muted?'已關閉':'已開啟'}（點喇叭按鈕切換）\n波形：${waveLabel}\n在右側素材區塊按右鍵切換 MIX／來源聲道`;
+    g.innerHTML=`<span class="alabel">S${row.index+1}</span>`+
+      muteButtonMarkup(muted,row.external?'音檔':'影音素材')+
+      `<span class="aname" title="${escapeHTML(row.label)}">${escapeHTML(row.label)}</span>`+
+      `<span class="audio-clip-route">${escapeHTML(waveLabel)}</span>`;
+    if(row.external){
+      g.addEventListener('click',ev=>{
+        if(ev.target.closest('.audio-clip-mute')) return;
+        selectExternalAudioClip(source.id,{seek:true});
+      });
     }
-    const muted=Media.sourceMuted(r.srcId), solo=Media.sourceSolo(r.srcId), vol=Math.round(Media.sourceVolume(r.srcId)*100);
-    g.className='awtrack'; g.dataset.src=r.srcId;
-    g.innerHTML=(r.expandable?`<button class="expander" title="展開/收合各聲道">${r.expanded?'▼':'▶'}</button>`:`<span class="expander"></span>`)+
-      `<span class="awicon">🔊</span>`+
-      `<span class="awname" title="${escapeHTML(r.label)}">${escapeHTML(r.label)}</span>`+
-      `<button class="awm${muted?' on':''}" title="靜音此音訊軌">M</button>`+
-      `<button class="aws${solo?' on':''}" title="獨奏此音訊軌">S</button>`+
-      `<input class="awvol" type="range" min="0" max="150" step="1" value="${vol}" title="音量 ${vol}%">`;
-    if(r.expandable) g.querySelector('.expander').onclick=(e)=>{ e.stopPropagation(); State.audioExpanded[r.srcId]=!r.expanded; drawTimeline(); };
-    g.querySelector('.awm').onclick=(e)=>{ e.stopPropagation(); Media.toggleSourceMute(r.srcId); refreshMixer(); };
-    g.querySelector('.aws').onclick=(e)=>{ e.stopPropagation(); Media.toggleSourceSolo(r.srcId); refreshMixer(); };
-    const vv=g.querySelector('.awvol');
-    vv.oninput=()=>{ Media.setSourceVolume(r.srcId,(+vv.value)/100); vv.title='音量 '+vv.value+'%'; };
-    vv.addEventListener('mousedown',e=>e.stopPropagation());
+    const mute=g.querySelector('.audio-clip-mute');
+    mute?.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });
+    mute?.addEventListener('click',ev=>{
+      ev.preventDefault(); ev.stopPropagation();
+      toggleTimelineSourceMute(source,{external:row.external,fallbackSourceId:row.sourceId,select:row.external});
+    });
     gut.appendChild(g);
   }
+  gut.scrollTop=oldScroll;
+}
+/* 右側 bus 波形與左側控制列各自捲動，但必須保持同一列對齊。 */
+let _syncingAudioScroll=false;
+function syncAudioScroll(from,to){
+  if(_syncingAudioScroll || !from || !to) return;
+  _syncingAudioScroll=true; to.scrollTop=from.scrollTop; _syncingAudioScroll=false;
+}
+if(tlAtracks){
+  tlAtracks.addEventListener('scroll',()=>syncAudioScroll(tlAtracks,$('tlGutterAtracks')),{passive:true});
+}
+const _audioGutter=$('tlGutterAtracks');
+if(_audioGutter){
+  _audioGutter.addEventListener('scroll',()=>syncAudioScroll(_audioGutter,tlAtracks),{passive:true});
 }
 function renderCueBlocks(){
   renderClipBlocks(); // 波形列上的影片區塊與字幕區塊同步重繪（捲動/縮放/全繪路徑共用此入口）
@@ -1056,6 +1348,46 @@ const _handleDragUpdate = (e) => {
     drawWave(); // 波形跟著區塊走
     return;
   }
+  /* ---- 外部音訊素材拖曳 ----
+     拖曳中只更新 DOM 預覽，放開時才寫回 Media；這樣不會每一個 mousemove 都重建
+     AudioNode / cache，也避免波形在拖曳期間閃爍。 */
+  if(drag.mode==='audio-move'||drag.mode==='audio-l'||drag.mode==='audio-r'){
+    const minL=Math.min(0.2,Math.max(0.02,(drag.oout-drag.oin)/2));
+    const maxOut=Math.max(drag.oin+minL,drag.duration||drag.oout);
+    let offset=drag.os, inPoint=drag.oin, outPoint=drag.oout, target=null;
+    if(drag.mode==='audio-move'){
+      let next=Math.max(0,drag.os+dt);
+      const len=drag.oout-drag.oin;
+      const atStart=snapVal(next,drag.snaps,currentThr);
+      const atEnd=snapVal(next+len,drag.snaps,currentThr);
+      if(atStart!==next){ next=atStart; target=atStart; }
+      else if(atEnd!==next+len){ next=atEnd-len; target=atEnd; }
+      offset=snapFrame(Math.max(0,next));
+    }else if(drag.mode==='audio-l'){
+      const minLeft=Math.max(0,drag.os-drag.oin);
+      const maxLeft=drag.os+(drag.oout-drag.oin-minL);
+      let next=clamp(drag.os+dt,minLeft,maxLeft);
+      const snapped=snapVal(next,drag.snaps,currentThr);
+      if(snapped>=minLeft-1e-9&&snapped<=maxLeft+1e-9&&snapped!==next){ next=snapped; target=snapped; }
+      offset=snapFrame(next);
+      inPoint=clamp(drag.oin+(offset-drag.os),0,drag.oout-minL);
+    }else{
+      const minRight=drag.os+minL;
+      const maxRight=drag.os+(maxOut-drag.oin);
+      let right=clamp(drag.os+(drag.oout-drag.oin)+dt,minRight,maxRight);
+      const snapped=snapVal(right,drag.snaps,currentThr);
+      if(snapped>=minRight-1e-9&&snapped<=maxRight+1e-9&&snapped!==right){ right=snapped; target=snapped; }
+      right=snapFrame(right);
+      outPoint=clamp(drag.oin+(right-drag.os),drag.oin+minL,maxOut);
+    }
+    drag.preview={offset,in:inPoint,out:outPoint};
+    updateSnapGuide(target);
+    const x1=timeToX(offset), x2=timeToX(offset+Math.max(0,outPoint-inPoint));
+    drag.audioEl.style.left=x1+'px';
+    drag.audioEl.style.width=Math.max(6,x2-x1)+'px';
+    drag.audioEl.classList.add('dragging');
+    return;
+  }
   if(drag.mode==='move'){
     // 防重疊：限制 dt 使每條都不越過同軌鄰居
     if(!State.overwriteMode){
@@ -1222,6 +1554,20 @@ window.addEventListener('mouseup',e=>{
     Media.seek(Math.min(Media.displayTime(), State.duration||0));
     emit('render:videoSub'); emit('mpv:refreshSubs');
     drawTimeline();
+  }else if(drag.mode==='audio-move'||drag.mode==='audio-l'||drag.mode==='audio-r'){
+    const moved=drag.moved, mode=drag.mode, assetId=drag.audioAssetId, preview=drag.preview;
+    try{
+      if(drag.pointerId!=null&&drag.audioEl?.hasPointerCapture?.(drag.pointerId)) drag.audioEl.releasePointerCapture(drag.pointerId);
+    }catch(_){}
+    _ignoreAudioClickUntil=performance.now()+350;
+    if(!moved){ selectExternalAudioClip(assetId,{seek:true}); drag=null; return; }
+    if(mode==='audio-move'){
+      runExternalAudioAction('moveExternalAudio',[assetId,preview.offset]);
+    }else if(mode==='audio-l'){
+      runExternalAudioAction('trimExternalAudio',[assetId,'start',preview.offset]);
+    }else{
+      runExternalAudioAction('trimExternalAudio',[assetId,'end',preview.offset+Math.max(0,preview.out-preview.in)]);
+    }
   }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; if(moved) sweepContainedCues(drag.grp.map(x=>x.c)); sortCues(); emit('render:all'); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
   drag=null;
 });

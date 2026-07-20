@@ -29,7 +29,7 @@
       <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 儲存專案</button>
       <button class="icon" data-act="save-as-project" title="另存新檔">💾 另存新檔</button>
       <div class="sep"></div>
-      <button class="icon" data-act="open-media" title="匯入影音">🎬 開啟影音</button>
+      <button class="icon" data-act="open-media" title="匯入影片或音訊檔">🎬 開啟影音</button>
       <div class="sep"></div>
       <button class="icon" data-act="imp-auto" title="匯入字幕（自動辨識格式）">📄 匯入字幕</button>
       <div class="sep"></div>
@@ -49,7 +49,7 @@
       <div class="spacer"></div>
 
       <button class="icon" data-act="settings" title="自訂快捷鍵">⚙ 設定</button>
-      <button class="icon desktop-only" data-act="exp-video" title="匯出影片序列（ProRes 422 HQ / MP4，燒錄顯示中的字幕）" style="display:none">🎞 匯出影片</button>
+      <button class="icon desktop-only" data-act="exp-video" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV" style="display:none">🎞 匯出</button>
     </div>
 
     <!-- ===== 主體 ===== -->
@@ -94,7 +94,6 @@
           <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
           <button class="icon tp-btn" data-act="safe-frame" id="safeFrameBtn" title="安全框：90%／80% 安全區＋中心十字線（僅預覽參考，不燒入匯出）">⊹ 安全框</button>
           <button class="icon tp-btn" data-act="mixer" title="混音器：逐聲道電平 / 獨奏 / 靜音">🎚 混音器</button>
-          <button class="icon tp-btn" data-act="add-audio" title="載入外部音檔（右鍵影片切換音訊來源）">🔊＋</button>
         </div>
 
         <!-- 音軌清單已移入混音器浮動面板；保留隱藏佔位符供 JS 寫入 -->
@@ -229,7 +228,10 @@
         <button class="icon" data-act="notes" title="備註 (8)">📌 <span class="lbl">備註</span></button>
         <button class="icon" data-act="add-note" title="新增備註">＋</button>
         <div class="sep"></div>
-        <button class="icon" data-act="split-clip" title="在播放點切割影片段 (Ctrl+K)">✂ <span class="lbl">切割影片</span></button>
+        <button class="icon" data-act="split-clip" title="在播放點切割選取素材；未選取音檔時切割影片段 (Ctrl+K)">✂ <span class="lbl">切割片段</span></button>
+        <button class="icon" data-act="unlink-clip-audio" title="將選取影片的原音解除連結，成為可獨立剪輯的音訊素材">🔗✂ <span class="lbl">解除影音</span></button>
+        <div class="sep"></div>
+        <button class="icon" data-act="audio-project-settings" title="設定專案音訊軌與影片／WAV 的輸出聲道配置">🔊 <span class="lbl">輸出聲道</span></button>
         <div class="sep"></div>
         <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span
             class="lbl">上字幕</span></button>
@@ -264,6 +266,8 @@
           <div class="tl-layer" id="tlLayer">
             <canvas id="rulerCanvas"></canvas>
             <div class="tl-vtracks" id="tlVtracks"></div>
+            <!-- 素材音訊軌：位於影像與字幕之間；每個匯入檔一列，顯示 MIX 或選定來源聲道波形。 -->
+            <div class="tl-atracks" id="tlAtracks"></div>
             <canvas id="waveCanvas"></canvas>
             <div class="tl-tracks" id="tlTracks"></div>
             <div class="tl-rubber" id="tlRubber"></div>
@@ -311,9 +315,8 @@
   </div>
 
   <!-- hidden inputs -->
-  <input type="file" id="fileMedia" accept="video/*,audio/*,.mxf,.mov,.mp4,.mkv,.mp3,.wav,.m4a,.aac"
+  <input type="file" id="fileMedia" accept="video/*,audio/*,.mxf,.mov,.mp4,.mkv,.mp3,.wav,.m4a,.aac,.flac,.ogg" multiple
     style="display:none">
-  <input type="file" id="fileAudio" accept="audio/*,.wav,.mp3,.aac,.m4a,.flac,.ogg" style="display:none">
   <input type="file" id="fileProject" accept=".subtool,.json" style="display:none">
   <input type="file" id="fileSub" accept=".srt,.ass,.ssa,.txt" style="display:none">
 
@@ -378,8 +381,7 @@
     <div class="fp-head"><span>🎚 混音器</span><span class="spacer"></span><button class="fp-close"
         data-act="close-mixer">✕</button></div>
     <div class="fp-body">
-      <div class="mixer-toolbar"><select id="mixerSrcSel" class="mini" style="margin-right:8px;"
-          title="切換音訊來源"></select><button class="mini" data-act="mixer-reset" title="取消所有獨奏與靜音">重製</button><button
+      <div class="mixer-toolbar"><button class="mini" data-act="mixer-reset" title="取消所有專案音訊軌的獨奏與靜音">重製</button><button
           class="mini" data-act="mixer-muteall" title="將所有軌道靜音">全靜音</button><span class="spacer"
           style="flex:1"></span><button class="mini" data-act="cache-manage" title="管理轉檔快取（音軌／波形）">🗂 快取</button></div>
       <div class="mixer-strips" id="mixerStrips"></div>

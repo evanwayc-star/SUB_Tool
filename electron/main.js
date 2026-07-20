@@ -117,11 +117,30 @@ function cacheCandidates(src) {
 /* meta.json 內只存相對檔名（ch0.m4a 等）；讀取時依實際所在目錄解析成絕對路徑，確保跨電腦可用 */
 function resolveMeta(raw, dir) {
   const r = (f) => f ? path.join(dir, path.basename(f)) : f;
-  return { proxy: r(raw.proxy), wave: r(raw.wave), channels: (raw.channels || []).map(c => ({ label: c.label, file: r(c.file) })) };
+  return {
+    proxy: r(raw.proxy), wave: r(raw.wave),
+    channels: (raw.channels || []).map(c => ({
+      label: c.label, file: r(c.file),
+      // v4.36 前的快取沒有這兩個欄位；保留 null 以便呼叫端安全地要求重建，
+      // 不可猜成 stream 0，否則含多個 audio stream 的舊檔會被錯誤路由。
+      sourceStream: Number.isInteger(c.sourceStream) && c.sourceStream >= 0 ? c.sourceStream : null,
+      sourceChannel: Number.isInteger(c.sourceChannel) && c.sourceChannel >= 0 ? c.sourceChannel : null,
+    }))
+  };
 }
 function metaToStore(meta) {
   const b = (f) => f ? path.basename(f) : f;
-  return { proxy: b(meta.proxy), wave: b(meta.wave), channels: (meta.channels || []).map(c => ({ label: c.label, file: b(c.file) })) };
+  return {
+    proxy: b(meta.proxy), wave: b(meta.wave),
+    channels: (meta.channels || []).map(c => ({
+      label: c.label, file: b(c.file),
+      sourceStream: Number.isInteger(c.sourceStream) ? c.sourceStream : null,
+      sourceChannel: Number.isInteger(c.sourceChannel) ? c.sourceChannel : null,
+    }))
+  };
+}
+function hasRoutingMetadata(meta) {
+  return (meta.channels || []).every(c => Number.isInteger(c.sourceStream) && c.sourceStream >= 0 && Number.isInteger(c.sourceChannel) && c.sourceChannel >= 0);
 }
 /* 原子寫入 meta.json（先寫 .tmp 再 rename），避免中途被中斷留下半寫入的損毀清單 */
 function writeMeta(metaPath, meta) {
@@ -135,7 +154,7 @@ function readCache(src) {
   for (const dir of cacheCandidates(src)) {
     const metaPath = path.join(dir, 'meta.json');
     if (!fs.existsSync(metaPath)) continue;
-    try { const m = resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir); if (metaValid(m)) return { dir, meta: m }; } catch (e) {}
+    try { const m = resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir); if (metaValid(m)) return { dir, meta: m, routingMetadataComplete: hasRoutingMetadata(m) }; } catch (e) {}
   }
   return null;
 }
@@ -378,15 +397,16 @@ ipcMain.handle('fs:stat', (e, p) => { try { const s = fs.statSync(p); return { e
 
 ipcMain.handle('dialog:openMedia', async () => {
   const r = await dialog.showOpenDialog(mainWin, {
-    title: '匯入影音檔', properties: ['openFile'],
+    title: '匯入影片或音訊檔', properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '影音檔', extensions: ['mp4', 'mov', 'mkv', 'mxf', 'avi', 'm2ts', 'mts', 'ts', 'wmv', 'webm', 'mp3', 'wav', 'm4a', 'aac', 'flac'] },
+      { name: '影片或音訊', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'mxf', 'avi', 'm2ts', 'mts', 'ts', 'wmv', 'webm', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'aif', 'aiff'] },
       { name: '全部', extensions: ['*'] }
     ]
   });
   if (r.canceled) return null;
-  allowFileDir(r.filePaths[0]); // S1：把開啟媒體的目錄加入白名單
-  return r.filePaths[0];
+  r.filePaths.forEach(allowFileDir); // S1：所有選取媒體來源都加入白名單
+  // 保持單選時的舊字串回傳值，讓專案遺失主影片的既有重選流程可無修改地繼續使用。
+  return r.filePaths.length===1 ? r.filePaths[0] : r.filePaths;
 });
 ipcMain.handle('dialog:openAudio', async () => {
   const r = await dialog.showOpenDialog(mainWin, {
@@ -450,25 +470,201 @@ function hasAudioStream(p) {
   try { const r = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', p], { timeout: 8000 }); return !!(r.stdout && r.stdout.toString().trim()); }
   catch (e) { return true; } // 探測失敗時假設有音訊（較常見）
 }
-ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps }) => {
+
+/* ===== 專案音訊輸出（v4.36） =====
+   audioPlan 將「來源檔案」與「專案匯流排」分開：
+   - buses：每一條都是單聲道專案輸出，inputs 可在同一 bus 內混音；
+   - streams：影片容器內的音訊 stream，將 bus 依 Mono / Stereo / LtRt / 5.1 編組。
+   不把使用者提供的 id / 路徑塞進 filtergraph：id 只用於 Map 查找，filter label 一律由索引產生；
+   路徑則是獨立的 spawn argv。這同時避免 Windows 路徑跳脫問題與 filter injection。 */
+const _EXPORT_LAYOUTS = Object.freeze({
+  mono:       { channels: 1, channelLayout: 'mono',       channelNames: ['FC'],                             title: 'Mono' },
+  stereo:     { channels: 2, channelLayout: 'stereo',     channelNames: ['FL', 'FR'],                       title: 'Stereo' },
+  stereoLtRt: { channels: 2, channelLayout: 'stereo',     channelNames: ['FL', 'FR'],                       title: 'Stereo Lt/Rt' },
+  '5.1':      { channels: 6, channelLayout: '5.1(side)',  channelNames: ['FL', 'FR', 'FC', 'LFE', 'SL', 'SR'], title: '5.1 (L, R, C, LFE, Ls, Rs)' },
+});
+/* WAV 的多聲道檔本質上仍是一條 interleaved stream；保留 bus 順序並以 WAVEFORMATEXTENSIBLE
+   可辨識的 channel mask 寫出。18 軌是使用者明確需要的情境，這份清單涵蓋到 32 軌。 */
+const _WAV_CHANNEL_ORDER = Object.freeze([
+  'FL', 'FR', 'FC', 'LFE', 'BL', 'BR', 'FLC', 'FRC', 'BC', 'SL', 'SR', 'TC',
+  'TFL', 'TFC', 'TFR', 'TBL', 'TBC', 'TBR', 'WL', 'WR', 'SDL', 'SDR', 'LFE2',
+  'TSL', 'TSR', 'BFC', 'BFL', 'BFR', 'SSL', 'SSR', 'TTL', 'TTR',
+]);
+function _finiteNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+function _filterNumber(v, fallback = 0) { return _finiteNumber(v, fallback).toFixed(6); }
+/* stream.name 是可持久化的交付預設名稱（例如「M&E」、「5.1 主混音」）；它只作為
+   container metadata 傳給 ffmpeg argv，仍移除控制字元並限制長度，絕不進入 filtergraph。 */
+function _streamMetadataName(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\u0000-\u001F\u007F]/g, ' ').trim().slice(0, 255);
+}
+function _exportPlanError(message) { throw new Error('音訊輸出設定錯誤：' + message); }
+function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
+  if (raw == null) return null;
+  if (!raw || !Array.isArray(raw.buses) || (requireStreams && !Array.isArray(raw.streams)))
+    _exportPlanError(requireStreams ? '缺少 buses 或 streams。' : '缺少 buses。');
+  if (!raw.buses.length) _exportPlanError('至少需要一條專案音軌。');
+
+  const ids = new Set();
+  const buses = raw.buses.map((bus, bi) => {
+    const id = typeof bus?.id === 'string' ? bus.id : '';
+    if (!id) _exportPlanError(`第 ${bi + 1} 條專案音軌沒有 id。`);
+    if (ids.has(id)) _exportPlanError(`專案音軌 id 重複：${id}`);
+    ids.add(id);
+    const inputs = (Array.isArray(bus.inputs) ? bus.inputs : []).map((input, ii) => {
+      if (!input || typeof input.file !== 'string' || !input.file) _exportPlanError(`音軌 ${bi + 1} 的輸入 ${ii + 1} 缺少檔案。`);
+      const trimStart = Math.max(0, _finiteNumber(input.trimStart, 0));
+      const hasTrimEnd = input.trimEnd != null && input.trimEnd !== '';
+      const trimEnd = hasTrimEnd ? Math.max(0, _finiteNumber(input.trimEnd, 0)) : null;
+      if (trimEnd != null && trimEnd <= trimStart) _exportPlanError(`音軌 ${bi + 1} 的輸入 ${ii + 1} 範圍無效。`);
+      return {
+        file: input.file,
+        offset: Math.max(0, _finiteNumber(input.offset, 0)),
+        trimStart,
+        trimEnd,
+        volume: Math.max(0, Math.min(64, _finiteNumber(input.volume, 1))),
+        fadeIn: Math.max(0, _finiteNumber(input.fadeIn, 0)),
+        fadeOut: Math.max(0, _finiteNumber(input.fadeOut, 0)),
+      };
+    });
+    return { id, inputs };
+  });
+
+  const rawStreams = Array.isArray(raw.streams) ? raw.streams : [];
+  if (requireStreams && !rawStreams.length) _exportPlanError('至少需要一條輸出音訊 stream。');
+  const streamIds = new Set();
+  const assignedBusIds = new Set();
+  /* 純 WAV 交付只取 buses 的順序，不應因影片輸出編組尚在編輯（例如 5.1 還少一條 bus）
+     而失敗；影片匯出才驗證 streams 的 layout / bus 數。 */
+  const streams = (requireStreams ? rawStreams : []).map((stream, si) => {
+    const id = typeof stream?.id === 'string' && stream.id ? stream.id : `stream-${si + 1}`;
+    if (streamIds.has(id)) _exportPlanError(`輸出 stream id 重複：${id}`);
+    streamIds.add(id);
+    const layout = String(stream?.layout || '');
+    const spec = _EXPORT_LAYOUTS[layout];
+    if (!spec) _exportPlanError(`不支援的輸出格式：${layout || '（空白）'}。`);
+    const busIds = Array.isArray(stream?.busIds) ? stream.busIds : [];
+    if (busIds.length !== spec.channels) _exportPlanError(`${spec.title} 需要 ${spec.channels} 條專案音軌。`);
+    if (new Set(busIds).size !== busIds.length) _exportPlanError(`${spec.title} 不能重複使用同一條專案音軌。`);
+    for (const busId of busIds) {
+      if (!ids.has(busId)) _exportPlanError(`輸出 stream 引用了不存在的專案音軌：${String(busId)}`);
+      if (assignedBusIds.has(busId)) _exportPlanError(`專案音軌不能同時指派到多條輸出 stream：${String(busId)}`);
+      assignedBusIds.add(busId);
+    }
+    return { id, name: _streamMetadataName(stream?.name), layout, busIds, spec };
+  });
+  return { buses, streams };
+}
+function _planDuration(plan) {
+  let end = 0;
+  for (const bus of plan?.buses || []) for (const input of bus.inputs || []) {
+    if (input.trimEnd != null) end = Math.max(end, input.offset + Math.max(0, input.trimEnd - input.trimStart));
+  }
+  return end;
+}
+function _joinFilter(inputLabels, channelLayout, channelNames, outputLabel) {
+  const mapping = channelNames.map((name, i) => `${i}.0-${name}`).join('|');
+  return `${inputLabels.join('')}join=inputs=${inputLabels.length}:channel_layout=${channelLayout}:map=${mapping}${outputLabel}`;
+}
+/* 將 plan buses 編譯成 ffmpeg filtergraph。每個輸入都以自己的一份 -i 載入：同一來源可合法
+   路由到多條 bus 且各自有不同的 trim / fade，無需依賴脆弱的 asplit 標籤管理。 */
+function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration) {
+  const busLabels = new Map();
+  let ii = inputIndex;
+  plan.buses.forEach((bus, bi) => {
+    const parts = [];
+    bus.inputs.forEach((input, pi) => {
+      inputs.push('-i', input.file);
+      const label = `[apB${bi}I${pi}]`;
+      let chain = `[${ii++}:a]atrim=start=${_filterNumber(input.trimStart)}`;
+      if (input.trimEnd != null) chain += `:end=${_filterNumber(input.trimEnd)}`;
+      chain += ',asetpts=PTS-STARTPTS,aresample=48000,pan=mono|c0=c0,aformat=sample_fmts=fltp:channel_layouts=mono';
+      if (Math.abs(input.volume - 1) > 0.000001) chain += `,volume=${_filterNumber(input.volume, 1)}`;
+      const inputDuration = input.trimEnd == null ? null : input.trimEnd - input.trimStart;
+      const fadeIn = inputDuration == null ? input.fadeIn : Math.min(input.fadeIn, inputDuration);
+      const fadeOut = inputDuration == null ? 0 : Math.min(input.fadeOut, inputDuration);
+      if (fadeIn > 0) chain += `,afade=t=in:st=0:d=${_filterNumber(fadeIn)}`;
+      if (fadeOut > 0) chain += `,afade=t=out:st=${_filterNumber(Math.max(0, inputDuration - fadeOut))}:d=${_filterNumber(fadeOut)}`;
+      const offMs = Math.max(0, Math.round(input.offset * 1000));
+      chain += `,adelay=${offMs}:all=1,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${label}`;
+      fc.push(chain);
+      parts.push(label);
+    });
+    const busLabel = `[apB${bi}]`;
+    if (parts.length) {
+      fc.push(`${parts.join('')}amix=inputs=${parts.length}:normalize=0:dropout_transition=0,atrim=0:${_filterNumber(duration)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono${busLabel}`);
+    } else {
+      fc.push(`anullsrc=r=48000:cl=mono,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${busLabel}`);
+    }
+    busLabels.set(bus.id, busLabel);
+  });
+  const streamLabels = [];
+  plan.streams.forEach((stream, si) => {
+    const inputLabels = stream.busIds.map(id => busLabels.get(id));
+    let label;
+    if (stream.spec.channels === 1) label = inputLabels[0];
+    else {
+      label = `[apS${si}]`;
+      fc.push(_joinFilter(inputLabels, stream.spec.channelLayout, stream.spec.channelNames, label));
+    }
+    streamLabels.push({ label, stream });
+  });
+  return { inputIndex: ii, busLabels, streamLabels };
+}
+function _buildWavOutput(busLabels, plan, fc) {
+  const labels = plan.buses.map(bus => busLabels.get(bus.id));
+  if (labels.length === 1) return { label: labels[0], channels: 1 };
+  if (labels.length > _WAV_CHANNEL_ORDER.length)
+    _exportPlanError(`WAV 單檔目前最多可輸出 ${_WAV_CHANNEL_ORDER.length} 條獨立 mono 音軌。`);
+  const names = _WAV_CHANNEL_ORDER.slice(0, labels.length);
+  const label = '[wavOut]';
+  fc.push(_joinFilter(labels, names.join('+'), names, label));
+  return { label, channels: labels.length };
+}
+ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps, audioPlan: rawAudioPlan }) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
+  const isWav = format === 'wav';
+  const audioPlan = _normalizeAudioPlan(rawAudioPlan, { requireStreams: !isWav });
   const isPro = format === 'prores';
-  const ext = isPro ? 'mov' : 'mp4';
+  const ext = isWav ? 'wav' : (isPro ? 'mov' : 'mp4');
   let outPath = presetOut || null; // 有指定輸出路徑則跳過對話框（測試/批次用）
   if (!outPath) {
     const r = await dialog.showSaveDialog(mainWin, {
-      title: '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
-      filters: [{ name: isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)', extensions: [ext] }],
+      title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
+      filters: [{ name: isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)'), extensions: [ext] }],
     });
     if (r.canceled) return null;
     outPath = r.filePath;
   }
   allowFileDir(outPath);
   (clips || []).forEach(c => { if (c.path) allowFileDir(c.path); (c.audio || []).forEach(a => a.file && allowFileDir(a.file)); });
+  for (const bus of audioPlan?.buses || []) for (const input of bus.inputs || []) allowFileDir(input.file);
+
+  const planDuration = _planDuration(audioPlan);
+  const D = Math.max(0.05, _finiteNumber(duration, 0), planDuration);
+  ensureTmp();
+  /* WAV 是純音訊交付：所有 project buses 依 bus 順序合成一條 multichannel PCM stream；
+     exportLayout.streams 僅作用於影片容器的多 stream 輸出，故這裡刻意不採用它。 */
+  if (isWav) {
+    if (!audioPlan) _exportPlanError('WAV 匯出需要專案音軌路由資料。');
+    const inputs = [], fc = [];
+    const planned = _buildPlannedAudio(audioPlan, inputs, fc, 0, D);
+    const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);
+    /* 不要加 -ac：它會把 16/18 軌等自訂 WAVEFORMATEXTENSIBLE layout 強制改成通用
+       "N channels"，部分 ffmpeg/libswresample 版本會因此拒絕輸出。join 的輸出 layout
+       已精確帶有 bus 順序與 channel mask。 */
+    const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', wav.label,
+      '-ar', '48000', '-c:a', 'pcm_s24le', outPath];
+    const t0 = Date.now();
+    await runFF(args, { sender: e.sender, duration: D, jobId: 'export', label: `匯出 WAV PCM（${wav.channels} 軌）` });
+    return { outPath, encoder: 'pcm_s24le', gpu: false, elapsedMs: Date.now() - t0, videoKbps: null, audioChannels: wav.channels };
+  }
 
   const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
   const R = fps || 25;
-  ensureTmp();
   // ===== 多軌合成 filtergraph（v4.11.0）=====
   //  影像：每視訊軌各自 concat 成整條時間軸（片段放 offset、間隙【透明】），再由下而上 overlay 疊到黑底；
   //        上層片段覆蓋下層（比照預覽 top-occludes），透明間隙讓下層透出。
@@ -477,7 +673,6 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   const list = clips || [];
   if (!list.length) throw new Error('沒有可匯出的影片段');
   const inputs = [], fc = [];
-  const D = Math.max(0.05, +duration || 0);
   const EPS = 0.01;
   // 1) 每片段一個影像輸入（音訊回退共用同一輸入）；索引 === 片段序號 i
   list.forEach((c) => { inputs.push('-hwaccel', 'auto', '-i', c.path); });
@@ -521,39 +716,45 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     baseLabel = out;
   });
   const vc = baseLabel; // 疊層後的最終影像標籤
-  // 3) 音訊：每片段套混音器音量 → adelay 到 offset → 全部 amix
-  const aLabels = [];
-  list.forEach((c, i) => {
-    let al = null;
-    if (Array.isArray(c.audio)) {
-      if (!c.audio.length) return; // 全靜音 → 此片段不發聲
-      const mono = [];
-      c.audio.forEach((ch, j) => {
-        inputs.push('-i', ch.file); const aidx = ii++;
-        fc.push(`[${aidx}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,volume=${ch.volume}[am${i}_${j}]`);
-        mono.push(`[am${i}_${j}]`);
-      });
-      al = `[aa${i}]`;
-      fc.push(mono.length > 1
-        ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,pan=stereo|FL=c0|FR=c0${al}`
-        : `${mono[0]}pan=stereo|FL=c0|FR=c0${al}`);
-    } else if (hasAudioStream(c.path)) {
-      al = `[aa${i}]`;
-      fc.push(`[${i}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
-    } else return;
-    const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
-    // 轉場：音訊淡入/淡出（與影像同步）
-    const afi = Math.max(0, +c.fadeIn || 0), afo = Math.max(0, +c.fadeOut || 0), aclen = Math.max(0.001, c.out - c.in);
-    const afParts = [];
-    if (afi > 0) afParts.push(`afade=t=in:st=0:d=${Math.min(afi, aclen).toFixed(3)}`);
-    if (afo > 0) afParts.push(`afade=t=out:st=${Math.max(0, aclen - Math.min(afo, aclen)).toFixed(3)}:d=${Math.min(afo, aclen).toFixed(3)}`);
-    let asrc = al;
-    if (afParts.length) { const afl = `[af${i}]`; fc.push(`${al}${afParts.join(',')}${afl}`); asrc = afl; }
-    fc.push(`${asrc}adelay=${offMs}:all=1[ad${i}]`);
-    aLabels.push(`[ad${i}]`);
-  });
-  if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${D.toFixed(3)},aresample=48000[ac]`);
-  else fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS[ac]`);
+  // 3) 音訊：有 project audioPlan 時，依 bus / stream 路由輸出；沒有時完整保留舊版
+  // 「所有來源混成一條 stereo」的行為，讓既有專案與自動化呼叫不受影響。
+  let plannedAudio = null;
+  if (audioPlan) {
+    plannedAudio = _buildPlannedAudio(audioPlan, inputs, fc, ii, D);
+  } else {
+    const aLabels = [];
+    list.forEach((c, i) => {
+      let al = null;
+      if (Array.isArray(c.audio)) {
+        if (!c.audio.length) return; // 全靜音 → 此片段不發聲
+        const mono = [];
+        c.audio.forEach((ch, j) => {
+          inputs.push('-i', ch.file); const aidx = ii++;
+          fc.push(`[${aidx}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,volume=${ch.volume}[am${i}_${j}]`);
+          mono.push(`[am${i}_${j}]`);
+        });
+        al = `[aa${i}]`;
+        fc.push(mono.length > 1
+          ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,pan=stereo|FL=c0|FR=c0${al}`
+          : `${mono[0]}pan=stereo|FL=c0|FR=c0${al}`);
+      } else if (hasAudioStream(c.path)) {
+        al = `[aa${i}]`;
+        fc.push(`[${i}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+      } else return;
+      const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
+      // 轉場：音訊淡入/淡出（與影像同步）
+      const afi = Math.max(0, +c.fadeIn || 0), afo = Math.max(0, +c.fadeOut || 0), aclen = Math.max(0.001, c.out - c.in);
+      const afParts = [];
+      if (afi > 0) afParts.push(`afade=t=in:st=0:d=${Math.min(afi, aclen).toFixed(3)}`);
+      if (afo > 0) afParts.push(`afade=t=out:st=${Math.max(0, aclen - Math.min(afo, aclen)).toFixed(3)}:d=${Math.min(afo, aclen).toFixed(3)}`);
+      let asrc = al;
+      if (afParts.length) { const afl = `[af${i}]`; fc.push(`${al}${afParts.join(',')}${afl}`); asrc = afl; }
+      fc.push(`${asrc}adelay=${offMs}:all=1[ad${i}]`);
+      aLabels.push(`[ad${i}]`);
+    });
+    if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${D.toFixed(3)},aresample=48000[ac]`);
+    else fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS[ac]`);
+  }
 
   // 燒錄字幕（可見軌）：ass 濾鏡讀取暫存 .ass；以 cwd=TMP + basename 引用避開路徑跳脫
   let vfinal = vc, assName = null;
@@ -576,7 +777,15 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   // MP4：以使用者指定的目標位元率編碼（音訊固定 192k AAC）；ProRes 為固定品質，無位元率設定
   const kbps = Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
   const encode = isPro ? proresArgs() : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'];
-  const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', vfinal, '-map', '[ac]', '-r', String(R), ...encode, outPath];
+  const audioMaps = plannedAudio
+    ? plannedAudio.streamLabels.flatMap(({ label }) => ['-map', label])
+    : ['-map', '[ac]'];
+  /* Lt/Rt 與普通 stereo 的 codec channel layout 都是 FL/FR；以 stream metadata 明確標示，
+     方便剪輯軟體／檢視工具辨識交付意圖，不會把 Lt/Rt 誤標為離散 L/R。 */
+  const audioMetadata = plannedAudio
+    ? plannedAudio.streamLabels.flatMap(({ stream }, i) => ['-metadata:s:a:' + i, 'title=' + (stream.name || stream.spec.title)])
+    : [];
+  const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', vfinal, ...audioMaps, '-r', String(R), ...encode, ...audioMetadata, outPath];
 
   // 進度標籤即顯示本次實際送出的編碼器（GPU 或 CPU）與位元率，使用者在狀態列就看得到
   const planned = isPro ? 'prores_ks' : (VENC || 'libx264');
@@ -890,7 +1099,7 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
   // v4.23.x 修：v4.22 前的舊快取沒有 proxy——needsProxy 時視同未命中重轉（否則 WebCodecs
   // 預覽引擎永遠拿不到 proxy、無法接管 mpv 畫面 → 疊加/溶接預覽整組失效）
   const hit = readCache(src);
-  if (hit && (!needsProxy || (hit.meta && hit.meta.proxy && fs.existsSync(hit.meta.proxy)))) {
+  if (hit && (!audioArr.length || hit.routingMetadataComplete) && (!needsProxy || (hit.meta && hit.meta.proxy && fs.existsSync(hit.meta.proxy)))) {
     if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
     return Object.assign({ cached: true }, hit.meta);
   }
@@ -908,7 +1117,7 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
     const base = a.title || a.lang || ('音軌 ' + (i + 1));
     if (ch === 1) {
       fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
-      channels.push({ label: base, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`) });
+      channels.push({ label: base, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`), sourceStream: i, sourceChannel: 0 });
       chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
     } else {
       const pads = [];
@@ -916,7 +1125,7 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
       fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
       for (let k = 0; k < ch; k++) {
         fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
-        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`) });
+        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`), sourceStream: i, sourceChannel: k });
         chMaps.push(`[co${ci}]`); ci++;
       }
       const avg = (1 / ch).toFixed(4);
@@ -970,7 +1179,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   // 注意：串流播放需要影片 proxy；mpv 路徑寫的快取是「純音軌」(proxy=null)，
   // 對串流路徑而言不算命中，須往下重轉以產生 proxy（音軌/波形會一併重建）。
   const hit = readCache(src);
-  if (hit && hit.meta.proxy && fs.existsSync(hit.meta.proxy)) {
+  if (hit && (!audioArr.length || hit.routingMetadataComplete) && hit.meta.proxy && fs.existsSync(hit.meta.proxy)) {
     if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
     const jid = newJobId('c-'); // S5: 不可猜測
     _hJobs.set(jid, { filePath: hit.meta.proxy, done: true });
@@ -988,7 +1197,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
     const base = a.title || a.lang || ('音軌 ' + (i + 1));
     if (ch === 1) {
       fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
-      channels.push({ label: base, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`) });
+      channels.push({ label: base, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`), sourceStream: i, sourceChannel: 0 });
       chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
     } else {
       const pads = [];
@@ -996,7 +1205,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
       fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
       for (let k = 0; k < ch; k++) {
         fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
-        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`) });
+        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`), sourceStream: i, sourceChannel: k });
         chMaps.push(`[co${ci}]`); ci++;
       }
       const avg = (1 / ch).toFixed(4);

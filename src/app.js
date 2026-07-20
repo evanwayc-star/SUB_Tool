@@ -12,6 +12,7 @@ import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys } from './state.js';
 import { Media, Wave } from './media.js';
+import { AudioRouting } from './audio-routing.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
@@ -51,6 +52,8 @@ on('cue:openEdit', openCueEditModal);
 on('action', doAction);
 on('mpv:sync', _syncMpvPanel); // 自訂視窗（快捷鍵設定、右鍵選單）開閉時重算 mpv 讓位
 on('history:record', recordHistory); // 供 media.js 等低階模組記錄歷史（避免 media→history 循環相依）
+// 還原專案音訊設定後，Web Audio 的實際 gain 與混音器 UI 也要回到同一份快照。
+on('audio:projectRestored', ()=>{ Media.applyGains(); renderAudioTracks(); });
 // A1：fps 變更後的 DOM 同步（原本在 state.setFps 內，現下沉到此處，state.js 不再相依 DOM）
 on('fps:changed', ()=>{
   const sel=$('fpsSel'); if(sel) sel.value=State.dropFrame?String(State.fps)+'df':String(State.fps);
@@ -709,18 +712,65 @@ $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
 
 
 
+const AUDIO_MEDIA_EXTENSIONS=new Set(['aac','aif','aiff','alac','flac','m4a','mka','mp3','oga','ogg','opus','wav','wma']);
+
+function mediaFileKind(fileOrPath){
+  const name=typeof fileOrPath==='string'?fileOrPath:(fileOrPath?.name||'');
+  const type=typeof fileOrPath==='object'?(fileOrPath?.type||''):'';
+  if(/^audio\//i.test(type)) return 'audio';
+  if(/^video\//i.test(type)) return 'video';
+  const ext=(name.split('.').pop()||'').toLowerCase();
+  return AUDIO_MEDIA_EXTENSIONS.has(ext)?'audio':'video';
+}
+
+function pickMediaFiles(input){
+  return new Promise(resolve=>{
+    input.value='';
+    input.onchange=()=>resolve(Array.from(input.files||[]));
+    input.click();
+  });
+}
+
+async function importDesktopMediaFiles(value){
+  const paths=(Array.isArray(value)?value:(value?[value]:[])).filter(path=>typeof path==='string'&&path);
+  const videos=paths.filter(path=>mediaFileKind(path)==='video');
+  const audios=paths.filter(path=>mediaFileKind(path)==='audio');
+  if(videos.length>1){
+    // 多選影片的語意固定為「第一支建立／保留主序列，其餘加入序列」，避免連續跳出多個 modal。
+    if(!Media.seqOn()) await Media.loadDesktopMedia(videos.shift());
+    for(const path of videos) await Media.addClipDesktop(path);
+  }else if(videos.length===1){
+    const path=videos[0];
+    if(Media.seqOn()) Media.openIncoming({path});
+    else await Media.loadDesktopMedia(path);
+  }
+  for(const path of audios) await Media.addAudioFileDesktop(path);
+}
+
+async function importBrowserMediaFiles(files){
+  const list=Array.isArray(files)?files.filter(Boolean):[];
+  const videos=list.filter(file=>mediaFileKind(file)==='video');
+  const audios=list.filter(file=>mediaFileKind(file)==='audio');
+  if(videos.length>1){
+    if(!Media.seqOn()) await Media.loadVideoFile(videos.shift());
+    for(const file of videos) await Media.addClipWeb(file);
+  }else if(videos.length===1){
+    const file=videos[0];
+    if(Media.seqOn()) Media.openIncoming({file});
+    else await Media.loadVideoFile(file);
+  }
+  for(const file of audios) await Media.addAudioFile(file);
+}
+
 // A4：純關閉面板的 case 改用資料表，消除重複的 classList.remove('show')+_syncMpvPanel()
 const CLOSE_PANELS = { 'close-shift':'shiftPanel', 'close-history':'historyPanel', 'close-notes':'notesPanel', 'close-mixer':'mixerPanel' };
 async function doAction(act, force = false){
   if(CLOSE_PANELS[act]){ $(CLOSE_PANELS[act]).classList.remove('show'); _syncMpvPanel(); return; }
   switch(act){
     case 'open-media':
-      // 已有影片時 openIncoming 會詢問「加入序列」或「取代」
-      if(IS_DESKTOP){ const p=await DESK.openMedia(); if(p)Media.openIncoming({path:p}); }
-      else { const f=await pickFile($('fileMedia')); if(f)Media.openIncoming({file:f}); } break;
-    case 'add-audio':
-      if(IS_DESKTOP){ const ps=await DESK.openAudio(); for(const p of (ps||[]))await Media.addAudioFileDesktop(p); }
-      else { const f=await pickFile($('fileAudio')); if(f)Media.addAudioFile(f); } break;
+      if(IS_DESKTOP) await importDesktopMediaFiles(await DESK.openMedia());
+      else await importBrowserMediaFiles(await pickMediaFiles($('fileMedia')));
+      break;
     case 'open-project':
       if(IS_DESKTOP){ const r=await DESK.openProject(); if(r)Project.loadDesktop(r); }
       else { const f=await pickFile($('fileProject')); if(f)Project.load(f); } break;
@@ -736,11 +786,14 @@ async function doAction(act, force = false){
            State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
            State.listTrack=0;State.tracks=[];ensureTrackCount(0);
            if(State.subMode) doAction('sub-mode');
-           History.reset();resetProject();_firstLoad=true;
+           // 先重置可持久專案資料（含 audioProject），再建立空白專案的 undo 基線；
+           // 否則 Ctrl+Z 可能把上一個專案的聲道路由帶回新專案。
+           resetProject();_firstLoad=true;
            // 清除影音
            video.pause(); video.removeAttribute('src'); video.load();
            State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
            Media.reset();
+           History.reset();
            const nv=$('noVideo'); if(nv) nv.style.display='';
            onDurationKnown(); renderAudioTracks();
            renderListTrackSel();renderAll();renderNotes();drawTimeline();
@@ -750,7 +803,18 @@ async function doAction(act, force = false){
     case 'imp-auto': importSub(); break;
     case 'exp-dialog': showExportDialog(); break;
     case 'exp-video': showExportVideoDialog(); break;
-    case 'split-clip': Media.splitClipAt(Media.displayTime()); break; // 同 Ctrl+K：在播放點切割影片段
+    case 'audio-project-settings': AudioRouting.openOutputSettings(); break;
+    case 'split-clip':
+      if(State.selectedAudioClipId&&typeof Media.splitExternalAudio==='function') void Media.splitExternalAudio(State.selectedAudioClipId,Media.displayTime());
+      else Media.splitClipAt(Media.displayTime());
+      break; // 同 Ctrl+K：音訊已選取時切音訊，否則切影片段
+    case 'unlink-clip-audio': {
+      const id=State.selectedClipId||Media._activeClip?.()?.id;
+      if(!id){ showToast('請先選取要解除連結的影片段'); break; }
+      if(typeof Media.detachClipAudio!=='function'){ showToast('影音解除連結功能尚未就緒'); break; }
+      void Media.detachClipAudio(id);
+      break;
+    }
     case 'exp-srt': exportSub('srt'); break;
     case 'exp-ass': exportSub('ass'); break;
     case 'exp-encore': exportSub('encore'); break;
@@ -865,16 +929,22 @@ async function doAction(act, force = false){
     case 'cache-manage': openCacheDialog(); break;
     case 'export-notes': exportNotes(); break;
     case 'toggle-all-vis': {
-      const anyVis = State.tracks.some(t=>t.visible!==false) || State.videoTracks.some(t=>t.visible!==false);
+      const buses=State.audioProject?.buses||[];
+      const anyVis = State.tracks.some(t=>t.visible!==false) || State.videoTracks.some(t=>t.visible!==false) || buses.some(t=>t.visible!==false);
       State.tracks.forEach(t=>t.visible=!anyVis);
       State.videoTracks.forEach(t=>t.visible=!anyVis);
+      buses.forEach(t=>t.visible=!anyVis);
+      recordHistory(anyVis?'隱藏全部軌道':'顯示全部軌道');
       drawTimeline(); renderVideoSub(); refreshMpvSubs();
     } break;
     case 'toggle-all-lock': {
-      const anyUnlocked = State.tracks.some(t=>!t.locked) || State.videoTracks.some(t=>!t.locked);
+      const buses=State.audioProject?.buses||[];
+      const anyUnlocked = State.tracks.some(t=>!t.locked) || State.videoTracks.some(t=>!t.locked) || buses.some(t=>!t.locked);
       State.tracks.forEach(t=>t.locked=anyUnlocked);
       State.videoTracks.forEach(t=>t.locked=anyUnlocked);
-      if(!anyUnlocked){ State.selectedIds=[]; State.selectedId=null; State.selectedClipId=null; const el=document.getElementById('stSel'); if(el) el.textContent=''; }
+      buses.forEach(t=>t.locked=anyUnlocked);
+      recordHistory(anyUnlocked?'鎖定全部軌道':'解鎖全部軌道');
+      if(!anyUnlocked){ State.selectedIds=[]; State.selectedId=null; State.selectedClipId=null; State.selectedAudioClipId=null; const el=document.getElementById('stSel'); if(el) el.textContent=''; }
       drawTimeline();
     } break;
     case 'copy-track': doCopyTrack(); break;
@@ -1261,12 +1331,8 @@ async function openCueEditModal(c){
 function initUI(){
   // 軌道切換下拉
   $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; State.selectedIds=[]; State.selectedId=null; $('stSel').textContent=''; searchUpdate(); renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
-  // 混音器音源切換
-  const mixerSrcSel=$('mixerSrcSel');
-  if(mixerSrcSel) mixerSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
-  
   const waveGlobalSrcSel=$('waveGlobalSrcSel');
-  if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value); renderMixer(); e.target.blur(); });
+  if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value==='__all__'?null:e.target.value); renderMixer(); e.target.blur(); });
 
   /* 唯一的樣式寫入點（v4.31）：有選取字幕 → 寫該句的逐句覆蓋；沒選 → 寫整軌。
      ── 面板九個控件本來各自 `State.tracks[i][k]=v`，等於「改樣式一律套全軌」。 */

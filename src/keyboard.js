@@ -4,8 +4,9 @@ import { State, cueSuffix } from './state.js';
 import { clamp } from './util.js';
 import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
+import { Seq } from './sequence.js';
 import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
-import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, navigateClip, deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './timeline.js';
+import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './timeline.js';
 import { Project, ensureProjectSaved } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, updateNoteActive } from './notes.js';
@@ -166,24 +167,107 @@ function autoAdvanceSubMode(){
   setStatus('🎯 上字幕模式：已無下一句，取消選取 ✓','ok');
 }
 
+/* ===== 媒體片段邊界步進 =================================================
+   上／下箭頭用於播放頭在影像、外部音訊片段的頭尾間跳轉。字幕邊界仍保留給
+   預設的 E / D（或使用者自行重新綁定的快捷鍵），因此不會混淆兩種剪輯操作。 */
+const MEDIA_BOUNDARY_EPS = 1e-4;
+
+function finiteTimelineTime(value, fallback=0){
+  const n=Number(value);
+  return Number.isFinite(n) ? Math.max(0,n) : fallback;
+}
+
+function externalPlacementBoundaries(asset){
+  if(!asset || asset.timelineVisible===false) return [];
+  // 支援目前的一來源一片段格式，也預留給同一音源被切成多個 placement 的格式。
+  const placements=Array.isArray(asset.placements)&&asset.placements.length ? asset.placements : [asset];
+  const points=[];
+  for(const placement of placements){
+    if(!placement || placement.timelineVisible===false) continue;
+    const start=finiteTimelineTime(placement.offset ?? asset.offset);
+    const inPoint=finiteTimelineTime(placement.in ?? asset.in);
+    const duration=finiteTimelineTime(placement.duration ?? asset.duration);
+    const rawOut=Number(placement.out ?? asset.out);
+    const outPoint=Number.isFinite(rawOut) && rawOut>=inPoint ? rawOut : duration;
+    const end=start+Math.max(0,outPoint-inPoint);
+    points.push(start);
+    if(end>start+MEDIA_BOUNDARY_EPS) points.push(end);
+  }
+  return points;
+}
+
+function mediaBoundaryPoints(){
+  const points=[];
+  for(const clip of State.clips){
+    if(!clip || clip.timelineVisible===false) continue;
+    const start=finiteTimelineTime(clip.offset);
+    const end=Number(Seq.clipEnd(clip));
+    points.push(start);
+    if(Number.isFinite(end) && end>start+MEDIA_BOUNDARY_EPS) points.push(end);
+  }
+  for(const asset of Media.getExternalAudioSources()) points.push(...externalPlacementBoundaries(asset));
+
+  points.sort((a,b)=>a-b);
+  // 同一時間點可同時是數個影像／音訊片段邊界；按一次只需停一次。
+  return points.reduce((unique,point)=>{
+    if(!Number.isFinite(point)) return unique;
+    if(!unique.length || Math.abs(point-unique[unique.length-1])>MEDIA_BOUNDARY_EPS) unique.push(point);
+    return unique;
+  },[]);
+}
+
+function stepMediaBoundary(dir){
+  const points=mediaBoundaryPoints();
+  if(!points.length) return false;
+  const current=Media.displayTime();
+  const target=dir>0
+    ? points.find(point=>point>current+MEDIA_BOUNDARY_EPS)
+    : [...points].reverse().find(point=>point<current-MEDIA_BOUNDARY_EPS);
+  if(target==null) return false;
+  Media.seek(target);
+  updatePlayhead();
+  emit('playhead:ensure');
+  updateNoteActive(target);
+  emit('render:videoSub');
+  return true;
+}
+
 window.addEventListener('keydown',e=>{
   if($('modalBg').classList.contains('show')){ if(e.key==='Escape')closeModal(); return; }
   // 快捷鍵設定是獨立於 modalBg 的自訂對話框：開啟期間全域快捷鍵一律不作用（避免 Enter/Space 在背後觸發播放）
   if(document.getElementById('settingsModal'))return;
-  if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
+  if(e.isComposing || e.target.tagName==='INPUT'||e.target.tagName==='SELECT'||e.target.tagName==='TEXTAREA')return;
   if(document.activeElement?.isContentEditable){
     // 任何 contenteditable 編輯中（字幕列表 .txt、修改字幕視窗、軌道名稱、備註等）
     // 皆交由編輯器自身處理，全域快捷鍵不作用
     return;
   }
-  // 影片段已選取：上下鍵切換段、Del 刪除、Backspace 關閉前方空白、Esc 取消（左右鍵仍保留給逐格移動）
+  // 影片段已選取：Del 刪除、Backspace 關閉前方空白、Esc 取消。
+  // 上下鍵統一交給「媒體片段邊界」快捷鍵，讓已選取影片時也能跳到音訊片段邊界。
   if(State.selectedClipId!=null){
     const k=e.key;
-    if(k==='ArrowUp'){ e.preventDefault(); navigateClip(-1); return; }
-    if(k==='ArrowDown'){ e.preventDefault(); navigateClip(1); return; }
     if(k==='Backspace'){ e.preventDefault(); closeClipGapLeft(); return; } // 移到前一段結尾／序列開頭
     if(k==='Delete'){ e.preventDefault(); deleteSelectedClip(); return; }
     if(k==='Escape'){ e.preventDefault(); clearClipSelection(); return; }
+  }
+  // 外部音訊素材與影片段同樣可直接刪除；選取狀態由 timeline 的音訊 block 維護。
+  if(State.selectedAudioClipId!=null){
+    const k=e.key;
+    if(k==='Delete' || k==='Backspace'){
+      e.preventDefault();
+      const id=State.selectedAudioClipId;
+      if(Media.removeExternalAudio?.(id)){
+        State.selectedAudioClipId=null;
+        const status=$('stSel'); if(status) status.textContent='';
+        drawTimeline(); emit('render:videoSub');
+      }
+      return;
+    }
+    if(k==='Escape'){
+      e.preventDefault(); State.selectedAudioClipId=null;
+      const status=$('stSel'); if(status) status.textContent='';
+      drawTimeline(); return;
+    }
   }
   function matchAction(ev) {
     const key = ev.key.toLowerCase();
@@ -273,8 +357,19 @@ window.addEventListener('keydown',e=>{
     case 'seek_end': e.preventDefault(); seekEnd(); break;
     case 'prev_frame': e.preventDefault(); if(Media.playing) Media.pause(); nudge(-1/getExactFps(State.fps||30)); break;
     case 'next_frame': e.preventDefault(); if(Media.playing) Media.pause(); nudge(1/getExactFps(State.fps||30)); break;
-    case 'step_boundary_prev': e.preventDefault(); if(Media.playing) Media.pause(); stepBoundary(-1); break;
-    case 'step_boundary_next': e.preventDefault(); if(Media.playing) Media.pause(); stepBoundary(1); break;
+    case 'step_boundary_prev':
+      e.preventDefault();
+      if(Media.playing) Media.pause();
+      // 預設的 ↑ / ↓ 是媒體剪輯點；E / D 仍維持字幕邊界步進。
+      if(e.key==='ArrowUp' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) stepMediaBoundary(-1);
+      else stepBoundary(-1);
+      break;
+    case 'step_boundary_next':
+      e.preventDefault();
+      if(Media.playing) Media.pause();
+      if(e.key==='ArrowDown' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) stepMediaBoundary(1);
+      else stepBoundary(1);
+      break;
     case 'first_cue': e.preventDefault(); jumpToFirstLastCue(-1); break;
     case 'last_cue': e.preventDefault(); jumpToFirstLastCue(1); break;
     case 'prev_cue': e.preventDefault(); jumpToAdjacentCue(-1); break;
@@ -347,7 +442,11 @@ window.addEventListener('keydown',e=>{
       else { setStatus('目前時間點沒有字幕', ''); }
       break;
     case 'add_note': e.preventDefault(); addNote(); break;
-    case 'split_clip': e.preventDefault(); Media.splitClipAt(Media.displayTime()); break;
+    case 'split_clip':
+      e.preventDefault();
+      if(State.selectedAudioClipId&&typeof Media.splitExternalAudio==='function') void Media.splitExternalAudio(State.selectedAudioClipId,Media.displayTime());
+      else Media.splitClipAt(Media.displayTime());
+      break;
   }
 });
 window.addEventListener('keyup',e=>{
@@ -523,4 +622,4 @@ function stepBoundary(dir){
   }
 }
 
-export { setIn, setOut, nudge, stepBoundary, jklReset, resetPlaybackSpeed };
+export { setIn, setOut, nudge, stepBoundary, stepMediaBoundary, jklReset, resetPlaybackSpeed };

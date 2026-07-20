@@ -9,7 +9,6 @@ import { Seq } from './sequence.js';
 import { showToast } from './ui.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';
-import { renderAudioTracks, renderMixer } from './mixer.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -44,21 +43,10 @@ document.addEventListener('mousedown',e=>{ if(e.button===2)return; if(!ctx.conta
 window.addEventListener('blur',hideCtx);
 window.addEventListener('resize',hideCtx);
 
-/* 播放窗右鍵：音訊來源切換 + 播放速度 */
+/* 播放窗右鍵：播放速度。音訊素材波形改由時間軸素材區塊右鍵選擇，
+   不能再用這裡切換唯一音源，否則會破壞專案 A bus 的混音。 */
 function showPlayerMenu(x,y){
-  const srcs=Media.getSources();
-  const active=Media.activeSource;
-  const items=[{heading:true,label:'音訊來源'}];
-  if(srcs.length===0){
-    items.push({label:'（尚未載入音訊）'});
-  } else {
-    for(const s of srcs)
-      items.push({label:s.label,checked:active===s.id,
-        act:()=>{ Media.switchSource(s.id); renderMixer(); }});
-  }
-  items.push({sep:true});
-  items.push({label:'🔊 載入外部音檔…',act:()=>emit('action','add-audio')});
-  items.push({sep:true},{heading:true,label:'播放速度'});
+  const items=[{heading:true,label:'播放速度'}];
   [0.25,0.5,0.75,1,1.25,1.5,2].forEach(r=>items.push({label:r+'×',
     checked:(video.playbackRate||1)===r,act:()=>Media.setRate(r)}));
   showCtx(x,y,items);
@@ -173,8 +161,83 @@ function showCueMenu(x,y){
   items.push({label:'🗑 刪除字幕',act:()=>deleteSelected()});
   showCtx(x,y,items);
 }
+/* 外部音訊素材的幾何與播放狀態都由 Media 持有。選單只負責意圖／重繪，
+   以支援 split 的非同步載入流程，也不重複記錄 History。 */
+function selectExternalAudioForMenu(assetId,label){
+  if(!assetId) return;
+  State.selectedAudioClipId=assetId;
+  State.selectedClipId=null;
+  State.selectedId=null; State.selectedIds=[];
+  refreshSelectionUI();
+  const status=$('stSel'); if(status) status.textContent='已選音訊：'+(label||'音訊素材');
+}
+function runExternalAudioMenuAction(method,args=[],{clearSelection=false}={}){
+  const fn=Media?.[method];
+  if(typeof fn!=='function') { showToast('音訊素材編輯功能尚未準備完成'); return; }
+  let result;
+  try{ result=fn.apply(Media,args); }
+  catch(err){ console.warn('external audio '+method+':',err); showToast('無法更新音訊素材'); return; }
+  Promise.resolve(result).then(value=>{
+    if(value===false||value==null) return;
+    if(clearSelection) State.selectedAudioClipId=null;
+    drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+  }).catch(err=>{
+    console.warn('external audio '+method+':',err);
+    showToast('無法更新音訊素材');
+  });
+}
 /* 時間軸區塊右鍵 / 空白軌道區右鍵 */
 tlScroll.addEventListener('contextmenu',e=>{
+  /* 音訊素材區塊：一個檔案／來源一列。這裡只決定該素材要監看 MIX 還是哪個來源聲道；
+     專案輸出 bus 的配線與 M/S/音量都在各自的工具中，不能混為同一件事。 */
+  const audioEl=e.target.closest('.audio-clip-block');
+  if(audioEl){
+    e.preventDefault();
+    const isExternal=audioEl.dataset.audioKind==='external';
+    const assetId=audioEl.dataset.audioAssetId||audioEl.dataset.audioSourceId||audioEl.dataset.audioSrc||'';
+    const sourceId=audioEl.dataset.audioSourceId||audioEl.dataset.sourceId||'';
+    const sourceName=(audioEl.dataset.audioSourceName||audioEl.querySelector('.audio-clip-label')?.textContent||'音訊素材')
+      .trim().replace(/^[🔊🎵🔇]\s*/u,'');
+    if(isExternal) selectExternalAudioForMenu(assetId,sourceName);
+    const rawOptions=typeof Wave.getSourceWaveOptions==='function' ? Wave.getSourceWaveOptions(sourceId) : [];
+    const selected=typeof Wave.getSourceWaveSelection==='function' ? Wave.getSourceWaveSelection(sourceId) : 'mix';
+    const options=(Array.isArray(rawOptions)?rawOptions:[]).map((item,index)=>{
+      if(typeof item==='string') return {selection:item,label:item==='mix'?'MIX（所有聲道）':item};
+      const selection=item?.selection??item?.id??item?.value??(index===0?'mix':'');
+      return {selection:String(selection),label:item?.label||(selection==='mix'?'MIX（所有聲道）':String(selection)),ready:item?.ready!==false};
+    }).filter(item=>item.selection);
+    const items=[{heading:true,label:(isExternal?'🎵 ':'🔊 ')+sourceName}];
+    if(isExternal){
+      const start=Math.max(0,Number(audioEl.dataset.audioStart)||0);
+      const end=Math.max(start,Number(audioEl.dataset.audioEnd)||start);
+      const playhead=Media.displayTime();
+      const enabled=audioEl.dataset.audioEnabled!=='false';
+      if(playhead>start+0.0001&&playhead<end-0.0001){
+        items.push({label:'✂ 在播放點切割',act:()=>runExternalAudioMenuAction('splitExternalAudio',[assetId,playhead])});
+      }
+      items.push({label:'⏱ 播放頭移到音檔開頭',act:()=>{ Media.seek(start); emit('playhead:ensure'); }});
+      items.push({label:enabled?'🔇 關閉此音檔聲音':'🔊 開啟此音檔聲音',act:()=>runExternalAudioMenuAction('toggleExternalAudioEnabled',[assetId])});
+      items.push({label:'🗑 從時間軸移除音檔',act:()=>runExternalAudioMenuAction('removeExternalAudio',[assetId],{clearSelection:true})});
+      items.push({sep:true});
+    }
+    if(!options.length){
+      items.push({label:'波形正在準備中…'});
+    }else{
+      items.push({heading:true,label:'顯示此素材的波形'});
+      for(const option of options){
+        const label=option.ready?option.label:`${option.label}（準備中）`;
+        items.push({label,checked:String(selected||'mix')===option.selection,act:()=>{
+          const changed=Wave.setSourceWaveSelection?.(sourceId,option.selection);
+          Promise.resolve(changed).then(()=>drawTimeline()).catch(err=>{
+            console.warn('source wave selection:',err);
+            showToast('無法載入此聲道的波形');
+          });
+        }});
+      }
+    }
+    showCtx(e.clientX,e.clientY,items);
+    return;
+  }
   /* 影片序列區塊右鍵 */
   const clipEl=e.target.closest('.clip-block');
   if(clipEl){
@@ -190,6 +253,8 @@ tlScroll.addEventListener('contextmenu',e=>{
       // 播放頭在此段內 → 可就地切割（等同 Ctrl+K）
       const pt=Media.displayTime();
       if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
+      if(c.audioDetached) items.push({label:'🔇 此影片原音已解除連結'});
+      else items.push({label:'🔗✂ 解除影音連結',act:()=>{ void Media.detachClipAudio?.(c.id); }});
       items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
       // 移到上／下一層視訊軌（多軌疊層：上層覆蓋下層）
       const moveTrack=(dv)=>{
@@ -224,68 +289,11 @@ tlScroll.addEventListener('contextmenu',e=>{
         if(ov){ c.in=save.in; c.out=save.out; showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return; }
         Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name); drawTimeline();
       }});
-      if(State.clips.length>1){
-        items.push({sep:true});
-        items.push({label:'🗑 從序列移除',act:()=>{
-          if(Media.removeClip(c.id)){ recordHistory('移除影片段：'+c.name); drawTimeline(); }
-        }});
-      }
-    }
-    
-    // 增加：切換波形顯示的音軌（支援主影片與後續加入的各個影片片段）
-    const activeSrcId = c.audioSrc || (c.primary?'video':'clip:'+c.id);
-    let channels = [];
-    if(activeSrcId === 'video' || activeSrcId === Media.activeSource) {
-      // 主影片：使用 Wave.sources 全域狀態
-      channels = Wave.sources.map((s,i) => ({
-        label: s.label,
-        active: Wave.srcIdx === i,
-        act: () => { Wave.selectSource(i); const sel=$('waveSrcSel'); if(sel) sel.value = String(i); }
-      }));
-    } else {
-      // 額外加入的影片段：從 Media.tracks 尋找其所屬聲道並動態載入
-      const trs = Media.tracks.filter(t => t.source === activeSrcId);
-      if(trs.length > 1 && window.subtool?.DESK) {
-        channels.push({
-          label: '主混音',
-          active: c._waveSel === -1 || c._waveSel == null,
-          act: async () => {
-            c._waveSel = -1;
-            if(c._mixPeaks) { c.peaks = c._mixPeaks; drawTimeline(); }
-          }
-        });
-        trs.forEach((tr, i) => {
-          if(tr.file) { // 桌面版才有分離的單軌 WAV 實體檔案可供讀取
-            channels.push({
-              label: tr.name.split('·').pop(),
-              active: c._waveSel === i,
-              act: async () => {
-                c._waveSel = i;
-                if(!c._mixPeaks) c._mixPeaks = c.peaks; // 備份主混音的波形
-                try {
-                  const url = await window.subtool.DESK.fileURL(tr.file);
-                  const buf = await fetch(url).then(r => r.arrayBuffer());
-                  c.peaks = Wave.calcFromWav(buf);
-                  drawTimeline();
-                } catch(e) { console.warn('wave ch load failed', e); }
-              }
-            });
-          }
-        });
-      }
-    }
-
-    if(channels.length > 1) {
       items.push({sep:true});
-      items.push({heading:true,label:'🔊 選擇波形圖顯示音軌'});
-      for(const ch of channels) {
-        items.push({
-          label: (ch.active ? '✓ ' : '　') + ch.label,
-          act: ch.act
-        });
-      }
+      items.push({label:'🗑 從序列移除',act:()=>{
+        if(Media.removeClip(c.id)){ recordHistory('移除影片段：'+c.name); drawTimeline(); }
+      }});
     }
-    
     showCtx(e.clientX,e.clientY,items);
     return;
   }

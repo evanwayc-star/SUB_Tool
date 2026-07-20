@@ -253,12 +253,13 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .vtrack-row.hidden-tk{opacity:.28}
 .clip-block{position:absolute;top:2px;bottom:2px;pointer-events:auto;cursor:grab;box-sizing:border-box;
   background:rgba(46,89,132,.40);border:1px solid #3fa9f5;border-radius:4px;overflow:hidden;
-  display:flex;align-items:flex-start;padding:1px 8px;color:#bfe3ff;font-size:11px}
+  display:flex;align-items:center;gap:5px;padding:1px 7px;color:#bfe3ff;font-size:11px}
 .clip-block:hover{background:rgba(56,109,160,.48)}
 .clip-block.active{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
 .clip-block.selected{border-color:#fff;background:rgba(80,140,200,.62);box-shadow:0 0 0 2px var(--accent),0 1px 4px rgba(0,0,0,.5);z-index:6;color:#fff}
-.clip-block .clip-label{pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.7;position:relative;z-index:1;text-shadow:0 1px 2px rgba(0,0,0,.7)}
-.clip-wave{position:absolute;top:0;height:100%;pointer-events:none;z-index:0}
+.clip-block .clip-label{pointer-events:none;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.7;position:relative;z-index:1;text-shadow:0 1px 2px rgba(0,0,0,.7)}
+.clip-route{position:relative;z-index:3;flex:0 0 auto;cursor:pointer;padding:1px 5px;border:1px solid rgba(127,191,230,.55);border-radius:3px;background:rgba(8,20,32,.68);color:#cfeaff;font-size:10px;line-height:1.35;white-space:nowrap}
+.clip-route:hover{background:rgba(63,169,245,.26);border-color:#8fd0ff;color:#fff}
 .clip-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
 .clip-block .edge.l{left:0}.clip-block .edge.r{right:0}
 .clip-block .edge:hover{background:rgba(100,170,255,.45)}
@@ -268,6 +269,67 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .clip-block.locked:hover{background:rgba(46,89,132,.40)}
 .clip-block.locked::after{content:'🔒';position:absolute;top:0;right:3px;font-size:10px;line-height:1.4;opacity:.75;pointer-events:none;z-index:3;text-shadow:0 0 2px #000}
 .clip-block.locked .edge{cursor:default;pointer-events:none}
+/* 專案音訊：獨立在影像與字幕之間。外層固定可見高度、內層自行捲動，避免大量 bus 壓縮字幕區。 */
+#tlAtracks{position:absolute;left:0;right:0;z-index:3;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;
+  background:#12181c;border-top:1px solid #294050;border-bottom:1px solid #294050;scrollbar-gutter:stable}
+.audio-section-head{position:sticky;top:0;z-index:5;height:22px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:0 8px;
+  background:#18252e;border-bottom:1px solid #355166;color:#8ec8ec;font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
+.audio-section-meta{margin-left:auto;color:#7095ab;font-weight:500;letter-spacing:0}
+.audio-project-content{position:relative;min-height:1px}
+.audio-project-row{position:relative;box-sizing:border-box;overflow:hidden;border-bottom:1px solid #213640;
+  background:linear-gradient(90deg,rgba(35,70,78,.24),rgba(16,27,31,.12));}
+.audio-project-row:nth-child(2n){background:linear-gradient(90deg,rgba(30,62,71,.30),rgba(14,23,27,.16))}
+.audio-project-row.hidden-tk{opacity:.3}
+.audio-project-row.locked{background-image:repeating-linear-gradient(-45deg,rgba(111,142,154,.07) 0,rgba(111,142,154,.07) 3px,transparent 3px,transparent 10px)}
+.audio-clip-block{position:absolute;top:3px;bottom:3px;box-sizing:border-box;overflow:hidden;display:flex;align-items:center;gap:6px;padding:1px 6px;
+  border:1px solid #3ca99b;border-radius:3px;background:rgba(27,112,101,.42);color:#d0fff7;font-size:10px;cursor:pointer}
+.audio-clip-block:hover{background:rgba(35,137,123,.56);border-color:#69dcc9}
+.audio-clip-block.selected{border-color:#fff;box-shadow:0 0 0 1px var(--accent);background:rgba(52,145,130,.68)}
+.audio-clip-block.external-audio-block{border-color:#6384c7;background:rgba(54,76,143,.45);color:#e0e8ff}.audio-clip-block.external-audio-block:hover{border-color:#9db9ff;background:rgba(69,97,179,.58)}
+.audio-clip-block.external-audio-block{cursor:grab}
+.audio-clip-block.external-audio-block.dragging{cursor:grabbing;opacity:.9;box-shadow:0 0 0 1px #b8ccff,0 4px 12px rgba(0,0,0,.38);z-index:7}
+.audio-clip-block.muted{opacity:.62;border-style:dashed;color:#b7bfd0}
+.audio-clip-block.muted .audio-clip-wave{opacity:.4}
+.audio-clip-block.muted:hover{opacity:.84}
+.audio-clip-block.external-audio-block.muted{background:rgba(58,68,92,.42)}
+.audio-clip-block .edge{position:absolute;top:0;bottom:0;width:8px;z-index:4;cursor:ew-resize}
+.audio-clip-block .edge.l{left:0}.audio-clip-block .edge.r{right:0}
+.audio-clip-block .edge:hover{background:rgba(180,204,255,.38)}
+.audio-clip-label,.audio-clip-route{position:relative;z-index:2;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.75)}
+.audio-clip-label{flex:1;font-weight:600}
+.audio-clip-route{flex:0 1 auto;max-width:42%;color:#a8e9de}
+.audio-clip-wave{position:absolute;top:0;height:100%;pointer-events:none;z-index:0;opacity:.9}
+.audio-clip-mute{position:relative;z-index:5;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:24px;min-width:24px;height:22px;padding:0;border:1px solid rgba(170,194,255,.62);border-radius:3px;background:rgba(11,21,47,.76);color:#dae5ff;font-size:11px;line-height:1;cursor:pointer}
+.audio-clip-mute:hover{background:rgba(104,137,224,.34);border-color:#bed0ff;color:#fff}
+.audio-clip-mute.on{background:rgba(112,62,78,.72);border-color:#dd7e90;color:#fff}
+.audio-clip-mute:focus-visible{outline:2px solid #b8ccff;outline-offset:1px}
+.audio-clip-config{position:relative;z-index:3;flex:0 0 auto;padding:1px 5px;border:1px solid rgba(138,234,217,.55);border-radius:3px;
+  background:rgba(4,28,25,.7);color:#cafff5;font-size:10px;line-height:1.35;cursor:pointer;white-space:nowrap}
+.audio-clip-config:hover{background:rgba(67,204,178,.22);border-color:#9affea;color:#fff}
+/* 音訊配線／輸出設定：採用調音台 patchbay 的緊湊表格，而不是一般設定卡片。
+   左邊永遠是來源，右邊永遠是專案 A 軌或交付 stream，讓聲道順序能一眼校對。 */
+.audio-route-dialog,.audio-output-dialog{font-size:12px;color:var(--text);min-width:0}
+.audio-route-source{display:flex;align-items:baseline;gap:10px;padding:0 0 9px;border-bottom:1px solid var(--border)}
+.audio-route-source b{color:#cfeaff;font-size:14px}.audio-route-source span{color:var(--text-faint);font-size:11px}
+.audio-bus-count,.audio-route-actions,.audio-output-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:9px 0}
+.audio-bus-count label{display:flex;align-items:center;gap:6px;color:var(--text-dim)}
+.audio-bus-count input{width:58px;text-align:center}.audio-count-preset{min-width:32px;padding:3px 7px;font-family:"JetBrains Mono",monospace}
+.audio-route-actions{border-top:1px solid rgba(255,255,255,.03)}
+.audio-route-actions button:last-child{margin-left:auto;color:#8ec8ec;border-color:#355166;background:#18252e}
+.audio-route-range{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:0 0 8px;color:var(--text-dim);font-size:11px}.audio-route-range>span{color:#8ec8ec;font-weight:700}.audio-route-range label{display:flex;align-items:center;gap:4px}.audio-route-range input{width:48px;padding:3px;text-align:center;font:inherit}.audio-route-range button{padding:3px 7px;border-color:#355166;color:#b8e7df;background:#142426}
+.audio-route-help{color:var(--text-faint);font-size:11px;line-height:1.55;padding:0 0 8px}
+.audio-route-table-wrap,.audio-output-table-wrap{border:1px solid var(--border);background:#101416;max-height:360px;overflow:auto}
+.audio-route-table,.audio-output-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+.audio-route-table th,.audio-route-table td,.audio-output-table th,.audio-output-table td{padding:6px 8px;border-bottom:1px solid #252d31;text-align:left;vertical-align:middle}
+.audio-route-table th,.audio-output-table th{position:sticky;top:0;background:#18252e;color:#8ec8ec;font-size:10px;letter-spacing:.06em;font-weight:700;z-index:1}
+.audio-route-table tbody tr:nth-child(2n),.audio-output-table tbody tr:nth-child(2n){background:rgba(255,255,255,.018)}
+.audio-route-table select,.audio-output-table select{width:100%;min-width:130px;background:#11191d;border-color:#355166}
+.audio-route-state{color:#6dd2c1;font-size:11px;white-space:nowrap}.audio-route-empty{padding:18px;text-align:center;color:var(--text-faint)}
+.audio-output-table{border:0;background:#101416}.audio-output-table td:first-child{width:155px;color:#8ec8ec;font-family:"JetBrains Mono",monospace}
+.audio-output-table td:last-child{width:38px;text-align:center}.audio-output-remove{padding:1px 7px;min-width:25px;color:#e98b8b;border-color:rgba(224,85,85,.35)}
+.audio-output-actions{justify-content:flex-end}.audio-output-actions button{border-color:#355166;color:#b8e7df;background:#142426}
+.audio-output-stream{display:flex;align-items:center;gap:6px}.audio-output-index{display:inline-flex;align-items:center;justify-content:center;flex:0 0 20px;color:#8ec8ec}.audio-output-name{min-width:0;width:100%;font:inherit;font-size:11px;padding:3px 5px;background:#11191d;border:1px solid #355166;color:var(--text)}
+.audio-delivery-presets{display:flex;align-items:center;flex-wrap:wrap;gap:5px;padding:0 0 9px}.audio-delivery-presets>span{flex-basis:100%;color:var(--text-dim);font-size:11px}.audio-delivery-presets button{padding:3px 6px;border-color:#355166;background:#142426;color:#b8e7df;font-size:10px}.audio-delivery-presets #audioOutputAllMono{color:#dce8ee;border-color:#52656d;background:#1d272b}
 .tl-playhead{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--accent);z-index:10;pointer-events:none;will-change:left}
 .tl-playhead::before{content:"";position:absolute;top:0;left:-5px;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid var(--accent)}
 .tl-inpoint{position:absolute;top:0;bottom:0;width:2px;background:var(--green);z-index:9;pointer-events:none;opacity:.9}
@@ -284,11 +346,10 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-resize-handle{position:absolute;bottom:0;left:0;right:0;height:4px;cursor:ns-resize;z-index:10}
 .tl-resize-handle:hover,.tl-resize-handle:active{background:rgba(100,120,255,.35)}
 #tlGutterTracks{flex:1;overflow-y:auto;overflow-x:hidden}
-/* 視訊軌列頭（比照字幕軌 gutter，帶輕藍色調以區分）：眼睛/名稱/新增(＋)/刪除(✕)/高度把手 */
+/* 視訊軌列頭（比照字幕軌 gutter，帶輕藍色調以區分）：只留影像控制。 */
 #tlGutterVtracks{flex-shrink:0}
-.vgtrack{display:flex;flex-direction:column;justify-content:center;gap:2px;padding:2px 6px;border-bottom:1px solid #2b3947;position:relative;box-sizing:border-box;background:rgba(46,89,132,.12)}
-.vgtrack .vgrow1,.vgtrack .vgrow2{display:flex;align-items:center;gap:3px;min-width:0}
-.vgtrack .vgnoaud{font-size:10px;color:var(--text-faint)}
+.vgtrack{display:flex;align-items:center;padding:2px 6px;border-bottom:1px solid #2b3947;position:relative;box-sizing:border-box;background:rgba(46,89,132,.12)}
+.vgtrack .vgrow1{display:flex;align-items:center;gap:3px;min-width:0;width:100%}
 .vgtrack .vlabel{font-size:10px;color:#7fb0dd;flex-shrink:0;font-weight:600}
 .vgtrack .eye{cursor:pointer;font-size:13px;width:20px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
 .vgtrack.hidden-tk .gname{opacity:.45;text-decoration:line-through}
@@ -299,18 +360,37 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .vgtrack .gdel{cursor:pointer;background:none;border:none;font-size:13px;padding:0 2px;color:var(--text-faint);flex-shrink:0;opacity:0;transition:opacity .15s,color .15s}
 .vgtrack:hover .gdel{opacity:.8}
 .vgtrack .gdel:hover{color:var(--red)}
-.vgtrack .awm,.vgtrack .aws{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border,#3a3f47);border-radius:3px;font-size:10px;width:18px;height:18px;line-height:1;padding:0;color:var(--text-dim);flex-shrink:0}
-.vgtrack .awm.on{background:var(--red,#e05353);border-color:var(--red,#e05353);color:#fff}
-.vgtrack .aws.on{background:#e0a53e;border-color:#e0a53e;color:#1b1b1d}
-.vgtrack .awvol{flex:1;min-width:80px;accent-color:#3fa9f5}
 .vgtrack .glock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s,color .15s;margin-left:auto}
 .vgtrack .glock:hover{opacity:1}
 .vgtrack .glock.locked{color:var(--accent);opacity:1}
 .pipPos{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border2,#3a3f47);color:var(--text-dim);border-radius:3px;font-size:13px;padding:0;line-height:1}
 .pipPos:hover{border-color:var(--accent)}
 .pipPos.on{background:var(--accent);color:#fff;border-color:var(--accent)}
-/* 音訊軌列頭（每音源一列；🔊 名稱＋靜音 M／獨奏 S／音量）：比照混音器色調 */
-#tlGutterAtracks{flex-shrink:0}
+/* 專案音訊 bus 列頭：與右側的獨立捲動音訊區同高、同列。 */
+#tlGutterAtracks{flex-shrink:0;overflow-y:auto;overflow-x:hidden;background:#151f25;scrollbar-gutter:stable}
+.audio-gutter-head{position:sticky;top:0;z-index:5;height:22px;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;padding:0 7px;
+  background:#18252e;border-bottom:1px solid #355166;color:#8ec8ec;font-size:10px;font-weight:700;letter-spacing:.07em}
+.audio-gutter-head span:last-child{font-weight:500;color:#7095ab;letter-spacing:0}
+.agtrack{display:flex;align-items:center;gap:3px;padding:0 6px;border-bottom:1px solid #223a45;position:relative;box-sizing:border-box;background:rgba(25,58,68,.18)}
+.agtrack:nth-child(2n){background:rgba(20,48,58,.24)}
+.agtrack.hidden-tk{opacity:.42}
+.agtrack.external-audio-gutter{cursor:pointer}
+.agtrack.external-audio-gutter.selected{box-shadow:inset 3px 0 0 var(--accent);background:rgba(72,94,165,.35)}
+.agtrack.muted{opacity:.62}
+.agtrack.locked{background-image:repeating-linear-gradient(-45deg,rgba(111,142,154,.07) 0,rgba(111,142,154,.07) 3px,transparent 3px,transparent 10px)}
+.agtrack .alabel{width:18px;flex:0 0 auto;color:#6dd2c1;font-size:10px;font-weight:700;text-align:center}
+.agtrack .aeye{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
+.agtrack .aname{flex:1;min-width:26px;font-size:11px;color:#cef5ef;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 2px}
+.agtrack .aname:focus{outline:none;border-color:#4cb7aa;background:#102126}
+.agtrack .awm,.agtrack .aws{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border,#3a3f47);border-radius:3px;font-size:10px;width:18px;height:18px;line-height:1;padding:0;color:var(--text-dim);flex-shrink:0}
+.agtrack .awm.on{background:var(--red,#e05353);border-color:var(--red,#e05353);color:#fff}
+.agtrack .aws.on{background:#e0a53e;border-color:#e0a53e;color:#1b1b1d}
+.agtrack .awvol{width:44px;min-width:30px;accent-color:#50c9b5}
+.agtrack .alock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.62}
+.agtrack .alock:hover{opacity:1}.agtrack .alock.locked{color:var(--accent);opacity:1}
+.agtrack .audio-clip-mute{border-color:rgba(138,183,215,.62);background:rgba(11,29,39,.74);color:#bfe1f7}
+.agtrack .audio-clip-mute:hover{background:rgba(68,129,170,.42);border-color:#9bd8ff;color:#fff}
+.agtrack .audio-clip-mute.on{background:rgba(112,62,78,.82);border-color:#dd7e90;color:#fff}
 .awtrack{display:flex;align-items:center;gap:3px;padding:0 6px;border-bottom:1px solid #22303a;position:relative;box-sizing:border-box;background:rgba(30,44,60,.28)}
 .awtrack .awicon{font-size:12px;flex-shrink:0;opacity:.8}
 .awtrack .awname{flex:1;min-width:0;font-size:11px;color:#cfe6ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

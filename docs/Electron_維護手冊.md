@@ -1,5 +1,7 @@
 # SUB Tool — Electron 維護手冊
 
+> 對應版本：v4.37.0｜最後更新：2026-07-20
+
 > 本文件針對本專案實際架構撰寫；每次異動 IPC 通道、ffmpeg 流程、mpv 整合或打包設定時請同步更新。
 
 ---
@@ -195,6 +197,8 @@ npm run dist    # vite build + electron-builder
 **輸出**：`release/SUB Tool Setup <版本>.exe`（NSIS 安裝檔，約 287 MB——絕大部分是內建的
 ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專案檔即可開啟。
 
+**正式發布**：先執行 lint、test、build 與桌面媒體驗證；確認 `release/` 的 Setup 檔名包含正確版號後，將原始碼 tag 與同一支 Setup `.exe` 上傳至 GitHub Release。發布說明應連結 `docs/版本變更紀錄.md` 對應段落，不能只推送 commit 而漏掉安裝檔。
+
 **`package.json` electron-builder 設定**（實際值）：
 ```json
 {
@@ -236,6 +240,7 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 | 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |
 | 使用者說某個按鈕「按了沒反應」 | 是不是用到了 `window.prompt()`？**Electron 停用了它**，回傳永遠是 null，靜默失敗。改用 `ui.js` 的 `promptModal()` |
 | HTML 疊層（字幕拖曳、安全框）在 MXF 模式下看不到 / 點不到 | mpv 是 **OS 層 always-on-top 子視窗**，蓋在所有 HTML 之上；需要 `mpv.show(false)` 讓位（`_syncMpvPanel()`） |
+| 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |
 
 ---
 

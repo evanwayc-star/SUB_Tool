@@ -113,10 +113,17 @@ const Seq = {
     for(const c of State.clips){ if(c.id === excludeId) continue; arr.push(c.offset, this.clipEnd(c)); }
     return arr;
   },
-  /* 序列長度改變時同步 State.duration（影片總長 = 序列最右緣） */
+  /* 序列長度改變時同步 State.duration。
+     影片與外部音訊都是時間軸素材，任何一方較長都不能被另一方的編輯截短。
+     externalAudioEnd 由 Media 維護為純數值摘要，避免 sequence ↔ media 的循環 import。 */
   recomputeDuration(){
-    if(!this.active()) return;
-    const e = this.end();
+    const videoEnd=this.end();
+    const audioEnd=Math.max(0,Number(State.externalAudioEnd)||0);
+    // 字幕可先於媒體排版；保留既有「字幕最右端可延伸時間軸」的行為。
+    const cueEnd=(State.cues||[]).reduce((end,cue)=>{
+      return cue&&cue.timed!==false ? Math.max(end,Math.max(0,Number(cue.end)||0)) : end;
+    },0);
+    const e=Math.max(videoEnd,audioEnd,cueEnd);
     if(Math.abs((State.duration || 0) - e) > 1e-9){ State.duration = e; emit('duration:known'); }
   },
   /* 歷史快照：幾何 + 成員（切割/移除/加入才能正確 undo）。
@@ -124,7 +131,10 @@ const Seq = {
   snapshot(){
     return State.clips.map(c => ({ id: c.id, name: c.name, path: c.path || null,
       web: c.web ? { url: c.web.url } : null, dur: c.dur, fps: c.fps || 0,
-      primary: !!c.primary, audioSrc: c.audioSrc || null,
+      primary: !!c.primary,
+      // audioSrc 是播放器執行期用的來源鍵；audioSourceId 則是可存檔、
+      // 可在重新載入後套回每個媒體聲道配線的穩定識別。
+      audioSrc: c.audioSrc || null, audioSourceId: c.audioSourceId || null, audioDetached:!!c.audioDetached,
       in: c.in, out: c.out, offset: c.offset, vtrack: vt(c), fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0 }));
   },
   restore(list){
@@ -143,7 +153,7 @@ const Seq = {
     State.clips.length = 0;
     for(const s of list){
       const ex = old.get(s.id);
-      if(ex){ ex.in = s.in; ex.out = s.out; ex.offset = s.offset; ex.vtrack = s.vtrack || 0; ex.fadeIn = s.fadeIn || 0; ex.fadeOut = s.fadeOut || 0; State.clips.push(ex); }
+      if(ex){ ex.in = s.in; ex.out = s.out; ex.offset = s.offset; ex.vtrack = s.vtrack || 0; ex.fadeIn = s.fadeIn || 0; ex.fadeOut = s.fadeOut || 0; ex.audioDetached=!!s.audioDetached; State.clips.push(ex); }
       else{
         const k = s.path || (s.web && s.web.url);
         State.clips.push({ ...s, vtrack: s.vtrack || 0, web: s.web ? { url: s.web.url } : null, peaks: (k && peaksBySrc.get(k)) || null });

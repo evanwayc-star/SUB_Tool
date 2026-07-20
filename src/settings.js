@@ -31,8 +31,8 @@ const actionCategories = [
     actions: {
       'set_in': '設定字幕起點 (或新建)',
       'set_out': '設定字幕終點',
-      'step_boundary_prev': '跳轉至上一個字幕邊界',
-      'step_boundary_next': '跳轉至下一個字幕邊界',
+      'step_boundary_prev': '跳轉至上一個邊界（↑：影片／音訊；E：字幕）',
+      'step_boundary_next': '跳轉至下一個邊界（↓：影片／音訊；D：字幕）',
       'prev_cue': '跳至上一條字幕並選取',
       'next_cue': '跳至下一條字幕並選取',
       'first_cue': '跳至軌道第一條字幕',

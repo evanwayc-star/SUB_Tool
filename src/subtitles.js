@@ -555,7 +555,8 @@ function renderSubRow(id){
 
 function selectCue(id,opts){
   opts=opts||{};
-  State.selectedClipId=null; // 選字幕即取消影片段選取（兩者互斥；高亮於後續 renderClipBlocks 清除）
+  State.selectedClipId=null;
+  State.selectedAudioClipId=null; // 選字幕即取消影片／音訊素材選取，避免 Delete 目標混淆
   // 清理可能殘留的超長預設字幕
   let changed = false;
   State.cues.forEach(cue => {

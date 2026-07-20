@@ -289,15 +289,162 @@ function _clipAudioSpec(c) {
   return tks.filter(t => (anySolo ? t.solo : !t.muted) && (t.volume || 0) > 0)
             .map(t => ({ file: t.file, volume: +(t.volume != null ? t.volume : 1).toFixed(3) }));
 }
+/* 將專案層的 sourceMaps（來源聲道→bus）轉成 Electron 匯出端可直接編譯的 audioPlan。
+   這裡只讀 State 的可序列化路由與 Media 的暫存單聲道檔案；兩者刻意不互相寫入。
+   audioSourceId / sourceStream / sourceChannel 全部採 0-based，與 state.js 的持久化格式一致。 */
+function _externalAudioPlacements(externalSources) {
+  const sources=Array.isArray(externalSources)
+    ? externalSources : (typeof Media.getExternalAudioSources==='function' ? Media.getExternalAudioSources() : []);
+  return sources.filter(asset=>asset&&asset.enabled!==false).map(asset=>{
+    const trimStart=Math.max(0,Number(asset.in??asset.trimStart)||0);
+    const rawEnd=Number(asset.out??asset.trimEnd??asset.duration);
+    const trimEnd=Number.isFinite(rawEnd)?Math.max(trimStart,rawEnd):trimStart;
+    return {
+      source:asset,
+      offset:Math.max(0,Number(asset.offset)||0),
+      trimStart,
+      trimEnd,
+      fadeIn:Math.max(0,Number(asset.fadeIn)||0),
+      fadeOut:Math.max(0,Number(asset.fadeOut)||0),
+      gain:Math.max(0,Number(asset.gain==null?1:asset.gain)||0)
+    };
+  }).filter(placement=>placement.trimEnd>placement.trimStart);
+}
+/* 即使來源被靜音，它仍是時間軸上的素材；輸出影片的黑畫面／總長不能因 Mute 縮短。
+   音訊輸入本身仍由 _externalAudioPlacements 過濾 enabled=false。 */
+function _externalAudioTimelineEnd(externalSources){
+  const sources=Array.isArray(externalSources)
+    ? externalSources : (typeof Media.getExternalAudioSources==='function' ? Media.getExternalAudioSources() : []);
+  return sources.reduce((end,asset)=>{
+    if(!asset) return end;
+    const offset=Math.max(0,Number(asset.offset)||0);
+    const trimStart=Math.max(0,Number(asset.in??asset.trimStart)||0);
+    const rawEnd=Number(asset.out??asset.trimEnd??asset.duration);
+    const trimEnd=Number.isFinite(rawEnd)?Math.max(trimStart,rawEnd):trimStart;
+    return Math.max(end,offset+Math.max(0,trimEnd-trimStart));
+  },0);
+}
+
+/* runtime 已重建的音檔以 Media registry 為準；尚未能重開（例如檔案暫時離線）的
+   source 則保留 State 的可序列化 placement。如此匯出前會被標成 unresolved，
+   不會悄悄少掉一段音訊或把總長縮短。 */
+function _projectExternalAudioSources(){
+  let live=[];
+  try{ live=typeof Media.getExternalAudioSources==='function'?Media.getExternalAudioSources():[]; }catch(e){}
+  const byId=new Map();
+  for(const source of (Array.isArray(State.externalAudioState)?State.externalAudioState:[])){
+    const id=typeof source?.audioSourceId==='string'?source.audioSourceId:'';
+    if(id) byId.set(id,source);
+  }
+  for(const source of (Array.isArray(live)?live:[])){
+    const id=typeof source?.audioSourceId==='string'?source.audioSourceId:'';
+    if(id) byId.set(id,source); // runtime 有實體檔與最新編輯資料，優先採用
+  }
+  return [...byId.values()];
+}
+
+/* clips 與外部 audio asset 都先正規化為 placement，再共用同一條 bus/input 編譯流程。
+   外部 asset 沒有視訊，但它的 offset/in/out 是 timeline 域資料，故輸出能與預覽同位置對齊。 */
+function _buildProjectAudioPlan(clips, externalSources=null) {
+  const project = State.audioProject;
+  if (!project || !Array.isArray(project.buses) || !project.buses.length || !project.sourceMaps || !project.exportLayout)
+    return null; // 尚未進入專案音訊模式時，由主程序沿用舊版 stereo 匯出
+  const buses = project.buses.map(bus => ({ id: bus.id, inputs: [] }));
+  const busById = new Map(project.buses.map((bus, i) => [bus.id, { bus, plan: buses[i] }]));
+  const anySolo = project.buses.some(bus => bus.solo);
+  const busGain = new Map(project.buses.map(bus => {
+    const audible = anySolo ? !!bus.solo : !bus.muted;
+    return [bus.id, audible ? Math.max(0, Number(bus.volume == null ? 1 : bus.volume) || 0) : 0];
+  }));
+  const unresolvedSources=new Map();
+
+  const placements=[
+    ...(Array.isArray(clips)?clips:[]).filter(clip=>!clip.audioDetached).map(clip=>({
+      source:clip,
+      offset:Math.max(0,Number(clip.offset)||0),
+      trimStart:Math.max(0,Number(clip.in)||0),
+      trimEnd:Math.max(0,Number(clip.out)||0),
+      fadeIn:Math.max(0,Number(clip.fadeIn)||0),
+      fadeOut:Math.max(0,Number(clip.fadeOut)||0),
+      gain:1
+    })),
+    ..._externalAudioPlacements(externalSources)
+  ];
+
+  for (const placement of placements) {
+    const source=placement.source;
+    const sourceId = source.audioSourceId;
+    if (typeof sourceId !== 'string' || !sourceId) continue;
+    if (!(placement.trimEnd>placement.trimStart) || placement.gain<=0) continue;
+    const routes = project.sourceMaps[sourceId]?.channels;
+    if (!Array.isArray(routes) || !routes.length) continue;
+    // 同一來源在 Media.tracks 可能有非匯出用的 native track；只取具有快取實體檔、
+    // 並帶齊持久化聲道座標的 descriptor，避免把錯的第一個聲道拿去輸出。
+    const files = new Map();
+    const sourceTracks = Media.tracks.filter(track => track?.file && track.audioSourceId === sourceId && Number.isInteger(track.sourceStream) && Number.isInteger(track.sourceChannel));
+    // 保留既有混音器的逐聲道 M/S/音量行為。專案 bus 的 M/S/音量會在下方再疊加，
+    // 兩層控制與播放預覽一致；同一來源內有 Solo 時只輸出該來源被 Solo 的聲道。
+    const sourceHasSolo = sourceTracks.some(track => track.solo);
+    for (const track of sourceTracks) {
+      const key = track.sourceStream + ':' + track.sourceChannel;
+      if (!files.has(key)) files.set(key, track);
+    }
+    for (const route of routes) {
+      if (!route || route.enabled === false || !Array.isArray(route.busIds)) continue;
+      // 被靜音／未指派的 bus 本來就不會輸出，不需要因為它的快取尚未完成而阻擋匯出。
+      const activeBusIds=[...new Set(route.busIds)].filter(busId=>busGain.get(busId)>0&&busById.has(busId));
+      if(!activeBusIds.length) continue;
+      const sourceTrack = files.get(route.sourceStream + ':' + route.sourceChannel);
+      if (!sourceTrack) {
+        // 專案 audio mode 絕不能把「背景抽取尚未完成」靜默當成全靜音交付；
+        // 交由 UI 明確提示使用者等快取完成，避免錯誤匯出。
+        unresolvedSources.set(sourceId,source.name||'未命名音訊來源');
+        continue;
+      }
+      const trackAudible = sourceHasSolo ? !!sourceTrack.solo : !sourceTrack.muted;
+      const trackGain = Math.max(0, Number(sourceTrack.volume == null ? 1 : sourceTrack.volume) || 0);
+      if (!trackAudible || trackGain <= 0) continue;
+      const routeGain = Math.max(0, Number(route.gain == null ? 1 : route.gain) || 0);
+      for (const busId of activeBusIds) {
+        const target = busById.get(busId);
+        const volume = trackGain * routeGain * placement.gain * (busGain.get(busId) || 0);
+        if (!target || volume <= 0) continue;
+        target.plan.inputs.push({
+          file: sourceTrack.file,
+          offset: +placement.offset.toFixed(6),
+          trimStart: +placement.trimStart.toFixed(6),
+          trimEnd: +placement.trimEnd.toFixed(6),
+          volume: +volume.toFixed(6),
+          fadeIn: +placement.fadeIn.toFixed(6),
+          fadeOut: +placement.fadeOut.toFixed(6),
+        });
+      }
+    }
+  }
+  return {
+    buses,
+    unresolvedSources:[...unresolvedSources.entries()].map(([audioSourceId,name])=>({audioSourceId,name})),
+    streams: (Array.isArray(project.exportLayout.streams) ? project.exportLayout.streams : []).map(stream => ({
+      id: stream.id,
+      layout: stream.layout,
+      busIds: Array.isArray(stream.busIds) ? [...stream.busIds] : [],
+      ...(typeof stream.name==='string'&&stream.name.trim()?{name:stream.name.trim()}:{}),
+    })),
+  };
+}
 /* 匯出資料（v4.11.0 多軌合成）：送扁平片段清單（各含 vtrack 與音訊規格）＋視訊軌順序（由下而上）＋總長。
    主程序據此：每視訊軌各建整條時間軸（片段放 offset、間隙透明），由下而上 overlay 疊層；
    所有片段音訊各自 adelay 到 offset 後 amix（全軌混音）。單軌序列為此法之特例，結果與舊版一致。 */
 function _buildExportData() {
-  const clips = [...State.clips].filter(c => c.path);
-  if (!clips.length) return null;
-  const list = clips.map(c => ({
+  const sourceClips = [...State.clips].filter(c => c.path);
+  const audibleVideoClips=sourceClips.filter(c=>!c.audioDetached);
+  const externalSources=_projectExternalAudioSources();
+  const externalPlacements=_externalAudioPlacements(externalSources);
+  if (!sourceClips.length&&!externalPlacements.length) return null;
+  const audioPlan = _buildProjectAudioPlan(audibleVideoClips,externalSources);
+  const list = sourceClips.map(c => ({
     path: c.path, in: +c.in.toFixed(3), out: +c.out.toFixed(3),
-    offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0, audio: _clipAudioSpec(c),
+    offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0, audio: c.audioDetached?[]:_clipAudioSpec(c),
     fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
   }));
   const vtOrder = [...new Set(list.map(c => c.vtrack))].sort((a, b) => a - b); // 由下而上（vtrack 小＝底層先畫）
@@ -305,7 +452,15 @@ function _buildExportData() {
     const t = State.videoTracks[vt] || {};
     return { vt, scale: +(t.scale != null ? t.scale : 1), posX: +(t.posX != null ? t.posX : 0.5), posY: +(t.posY != null ? t.posY : 0.5), opacity: +(t.opacity != null ? t.opacity : 1) };
   });
-  return { clips: list, videoTracks, duration: +Seq.end().toFixed(3) };
+  const externalEnd=_externalAudioTimelineEnd(externalSources);
+  return {
+    clips:list,
+    videoTracks,
+    duration:+Math.max(Seq.end(),externalEnd).toFixed(3),
+    audioPlan,
+    audioOnly:list.length===0,
+    externalAudioCount:externalPlacements.length
+  };
 }
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
 /* MP4 交付碼率的合理建議值（Mbps）＝像素數 × fps × 0.12 bit ÷ 1e6（H.264 中高品質經驗值）。
@@ -337,36 +492,49 @@ function _mixerSummary() {
 }
 async function showExportVideoDialog() {
   if (!IS_DESKTOP || !DESK.exportVideo) { showToast('影片匯出僅在桌面版可用'); return; }
-  if (!Seq.active()) { showToast('尚未載入影片'); return; }
   const data = _buildExportData();
-  if (!data) { showToast('沒有可匯出的影片段（此序列的影片缺少來源路徑）'); return; }
+  if (!data) { showToast('沒有可匯出的影片或外部音訊'); return; }
+  if (data.audioOnly && !data.audioPlan) { showToast('純音訊 WAV 匯出需要專案音軌路由'); return; }
+  const unresolved=data.audioPlan?.unresolvedSources||[];
+  if(unresolved.length){
+    showToast(`音訊快取仍在準備：${unresolved.map(item=>item.name).join('、')}。完成後再匯出。`);
+    return;
+  }
   const clipCount = data.clips.length;
   const vtrackCount = data.videoTracks.length;
+  const audioOnly = !!data.audioOnly;
   const visSubTracks = State.tracks.filter((tk, i) => tk.visible !== false && State.cues.some(c => (c.track || 0) === i && c.timed !== false)).length;
-  const total = Seq.end();
+  const total = data.duration;
+  const hasProjectAudio = !!data.audioPlan;
   // 顯示實際會用到的編碼器（H.264 可走 GPU；ProRes 無 GPU 編碼器，一律 CPU）
   let venc = null; try { venc = (await DESK.status())?.venc; } catch (e) {}
   const gpu = venc && venc !== 'libx264';
   const mp4Note = gpu ? `GPU 加速（${_VENC_LABEL[venc] || venc}）` : 'CPU（libx264，未偵測到 GPU 編碼器）';
-  openModal('匯出影片',
+  openModal(audioOnly?'匯出音訊':'匯出影片',
     `<div style="font-size:13px;line-height:1.9">` +
-    `<div>序列：<b>${clipCount}</b> 段影片${vtrackCount > 1 ? `、<b>${vtrackCount}</b> 條視訊軌（由下而上疊合，上層覆蓋下層）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
-    `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
-    `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>` +
-    `<div style="margin-top:4px">音訊：<b>依混音器設定輸出</b>${_mixerSummary()}</div>` +
-    `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（靜音／獨奏／音量比照播放；未抽出逐聲道的來源則輸出原音）</div>` +
+    (audioOnly
+      ? `<div>外部音訊：<b>${data.externalAudioCount}</b> 個 placement，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>`
+      : `<div>序列：<b>${clipCount}</b> 段影片${vtrackCount > 1 ? `、<b>${vtrackCount}</b> 條視訊軌（由下而上疊合，上層覆蓋下層）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
+        `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
+        `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>`) +
+    `<div style="margin-top:4px">音訊：<b>${hasProjectAudio ? '依專案音軌與輸出編組' : '依混音器設定輸出'}</b>${hasProjectAudio ? `（${data.audioPlan.buses.length} 條專案音軌）` : _mixerSummary()}</div>` +
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">${hasProjectAudio ? (audioOnly?'（WAV 依 A1、A2…順序收進同一個多聲道檔。）':'（影片依 Mono／Stereo／LtRt／5.1 設定輸出多條 audio stream；WAV 則依專案音軌順序收進同一個多聲道檔。）') : '（靜音／獨奏／音量比照播放；未抽出逐聲道的來源則輸出原音）'}</div>` +
     `<div style="margin-top:12px">格式：</div>` +
-    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="prores" checked> ProRes 422 HQ（.mov，剪輯母帶）` +
+    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="prores"${audioOnly?' disabled':' checked'}> ProRes 422 HQ（.mov，剪輯母帶）` +
     `<span style="color:var(--text-faint);font-size:12px">— CPU 編碼（ffmpeg 無 GPU ProRes 編碼器）</span></label>` +
-    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="mp4"> MP4（H.264，交付/預覽）` +
+    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="mp4"${audioOnly?' disabled':''}> MP4（H.264，交付/預覽）` +
     `<span style="color:${gpu ? 'var(--green)' : 'var(--text-faint)'};font-size:12px">— ${mp4Note}</span></label>` +
+    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="wav"${hasProjectAudio ? '' : ' disabled'}${audioOnly?' checked':''}> WAV（多聲道 PCM，純音訊）` +
+    `<span style="color:var(--text-faint);font-size:12px">— ${hasProjectAudio ? '所有專案音軌依 A1、A2…順序放入同一個 WAV 檔' : '需先建立專案音軌路由'}</span></label>` +
     `<div id="expVbrRow" style="display:none;padding:6px 0 0 22px">影片位元率：` +
     `<input type="number" id="expVbr" min="0.1" max="200" step="0.5" value="${_lastVbrMbps || _suggestMbps()}" style="width:74px;margin:0 4px"> Mbps` +
     `<span style="color:var(--text-faint);font-size:12px;margin-left:8px">建議 <b>${_suggestMbps()}</b>（依 ${State.videoWidth || 1920}×${State.videoHeight || 1080}）· 音訊 192k AAC</span></div>` +
     `<div style="color:var(--text-faint);font-size:12px;margin-top:6px">ProRes 為固定品質，無位元率設定。來源解碼一律嘗試硬體加速（不支援時自動退回軟解）。</div>` +
     `</div>`,
     [{ label: '匯出', primary: true, act: () => {
-        const fmt = (document.querySelector('input[name="expVfmt"]:checked') || {}).value || 'prores';
+        const fmt = (document.querySelector('input[name="expVfmt"]:checked') || {}).value || (audioOnly?'wav':'prores');
+        if (audioOnly && fmt !== 'wav') { showToast('純音訊專案僅能匯出 WAV'); return; }
+        if (fmt === 'wav' && !data.audioPlan) { showToast('WAV 匯出需要專案音軌路由'); return; }
         let kbps = null;
         if (fmt === 'mp4') {
           const mbps = parseFloat(($('expVbr') || {}).value);
@@ -386,13 +554,15 @@ async function showExportVideoDialog() {
   }, 20);
 }
 async function _runExportVideo(data, format, videoKbps) {
+  const isWav = format === 'wav';
   const visCues = State.cues; // toASSFromState 內部依軌道可見性過濾，時碼為時間軸時間＝輸出時間
   const assText = toASSFromState(visCues);
   const hasVisSub = /\nDialogue:/.test(assText);
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_')[0];
-  const fmtLabel = format === 'prores' ? 'ProRes 422 HQ' : `MP4 ${(videoKbps / 1000).toFixed(1)}Mbps`;
-  setStatus(`匯出影片中（${fmtLabel}）…`, 'busy', 'lock');
-  showToast('開始匯出影片，時間依長度與格式而定…');
+  const fmtLabel = isWav ? 'WAV 多聲道 PCM' : (format === 'prores' ? 'ProRes 422 HQ' : `MP4 ${(videoKbps / 1000).toFixed(1)}Mbps`);
+  const kindLabel = isWav ? '音訊' : '影片';
+  setStatus(`匯出${kindLabel}中（${fmtLabel}）…`, 'busy', 'lock');
+  showToast(`開始匯出${kindLabel}，時間依長度與格式而定…`);
   try {
     const r = await DESK.exportVideo({
       clips: data.clips,
@@ -400,22 +570,23 @@ async function _runExportVideo(data, format, videoKbps) {
       width: State.videoWidth || 1920,
       height: State.videoHeight || 1080,
       fps: State.fps || 25,
-      assText: hasVisSub ? assText : null,
+      assText: !isWav && hasVisSub ? assText : null,
       format,
       videoKbps,
       duration: data.duration,
-      defaultName: `ST_${projName}_${format === 'prores' ? 'ProRes422HQ' : 'H264'}`,
+      audioPlan: data.audioPlan || undefined,
+      defaultName: `ST_${projName}_${isWav ? 'Audio' : (format === 'prores' ? 'ProRes422HQ' : 'H264')}`,
     });
     if (!r) { setStatus('已取消匯出', '', 'unlock'); return; }
     // r.encoder 為 ffmpeg 實際使用的編碼器（從其輸出解析），非事前猜測
-    const acc = r.gpu ? `GPU ${r.encoder}` : `CPU ${r.encoder}`;
+    const acc = isWav ? `${r.audioChannels || data.audioPlan?.buses.length || 1} 軌 ${r.encoder}` : (r.gpu ? `GPU ${r.encoder}` : `CPU ${r.encoder}`);
     const br = r.videoKbps ? `，${(r.videoKbps / 1000).toFixed(1)}Mbps` : '';
     const secs = (r.elapsedMs / 1000).toFixed(1);
-    setStatus(`已匯出影片（${acc}${br}，耗時 ${secs}s）：${r.outPath}`, 'ok', 'unlock');
-    showToast(`影片已匯出（${acc}${br}）：${baseName(r.outPath)}`);
+    setStatus(`已匯出${kindLabel}（${acc}${br}，耗時 ${secs}s）：${r.outPath}`, 'ok', 'unlock');
+    showToast(`${kindLabel}已匯出（${acc}${br}）：${baseName(r.outPath)}`);
   } catch (e) {
-    setStatus('影片匯出失敗：' + (e?.message || e), '', 'unlock');
-    showToast('影片匯出失敗：' + (e?.message || e));
+    setStatus(`${kindLabel}匯出失敗：` + (e?.message || e), '', 'unlock');
+    showToast(`${kindLabel}匯出失敗：` + (e?.message || e));
   }
 }
 
@@ -619,4 +790,5 @@ function applyDurAdjPct() {
   setStatus(`已調整 ${adjusted} 條字幕的持續時間（${pct}%${skipped ? `，跳過 ${skipped} 條已重疊` : ''}）`, 'ok');
 }
 
-export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport, showExportVideoDialog };
+export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport, showExportVideoDialog,
+  _buildProjectAudioPlan, _externalAudioPlacements, _externalAudioTimelineEnd, _buildExportData };

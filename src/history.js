@@ -1,5 +1,5 @@
 /* SUB Tool — 動作紀錄（復原 / 重做） */
-import { State, syncTrackCount, setFps } from './state.js';
+import { State, syncTrackCount, setFps, normalizeAudioProject } from './state.js';
 import { Seq } from './sequence.js';
 import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
@@ -11,8 +11,11 @@ import { setStatus } from './ui.js';
 /* ===== 動作紀錄（復原 / 重做） ===== */
 const History = {
   stack:[], hi:-1, max:120,
-  // clipGeo：只快照影片區塊的幾何（位置/修剪）；clip 成員增減與媒體資源不入 undo（資源無法還原）
-  snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,fps:State.fps,dropFrame:State.dropFrame,clipGeo:Seq.snapshot()}); },
+  // clipGeo：影片幾何；externalAudioState：外部音訊的可編輯純資料。
+  // AudioElement、波形與快取檔都不入 undo，Media 會依這份純資料重用或重建 runtime asset。
+  snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
+    audioProject:normalizeAudioProject(State.audioProject),externalAudioState:State.externalAudioState||[],
+    fps:State.fps,dropFrame:State.dropFrame,clipGeo:Seq.snapshot()}); },
   reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); },
   record(label){
     const newSnap = this.snap();
@@ -25,6 +28,10 @@ const History = {
         && old.notes.length === newSnap.notes.length
         && (old.clipGeo?.length || 0) === (newSnap.clipGeo?.length || 0)
         && (old.videoTracks?.length || 0) === (newSnap.videoTracks?.length || 0)
+        && (old.audioProject?.buses?.length || 0) === (newSnap.audioProject?.buses?.length || 0)
+        && Object.keys(old.audioProject?.sourceMaps || {}).length === Object.keys(newSnap.audioProject?.sourceMaps || {}).length
+        && (old.audioProject?.exportLayout?.streams?.length || 0) === (newSnap.audioProject?.exportLayout?.streams?.length || 0)
+        && (old.externalAudioState?.length || 0) === (newSnap.externalAudioState?.length || 0)
         && old.fps === newSnap.fps
         && old.dropFrame === newSnap.dropFrame;
       if(!structSame){ /* 結構有變動，直接記錄 */ }
@@ -40,6 +47,13 @@ const History = {
     const d=structuredClone(this.stack[i].snap);
     State.cues=d.cues; State.tracks=d.tracks; State.notes=d.notes||[]; syncTrackCount();
     State.videoTracks = (Array.isArray(d.videoTracks)&&d.videoTracks.length) ? d.videoTracks : [{name:'視訊軌 1',visible:true,locked:false}];
+    State.audioProject=normalizeAudioProject(d.audioProject);
+    // 專案音訊路由與 bus M/S/音量不只是畫面資料：還會決定 Web Audio 的實際 gain。
+    // 還原快照後通知協調層重新套用，避免 Ctrl+Z/Redo 看起來已變、聲音卻維持舊設定。
+    emit('audio:projectRestored', { audioProject: State.audioProject });
+    State.externalAudioState=Array.isArray(d.externalAudioState)?d.externalAudioState:[];
+    // Media 不反向由 History import；用事件讓它重用現存音源、或在桌面版依路徑重建。
+    emit('audio:externalRestored', { sources: State.externalAudioState });
     Seq.restore(d.clipGeo); // 影片區塊幾何（位置/修剪）；compact 會補足 videoTracks 涵蓋現有片段
     if(d.fps) setFps(d.dropFrame?String(d.fps)+'df':d.fps);
     if(!State.cues.some(c=>c.id===State.selectedId)){ State.selectedId=null; State.selectedIds=[]; }

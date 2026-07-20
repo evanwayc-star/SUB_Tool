@@ -5,6 +5,273 @@
    更新 UI 並依 'df' 後綴設定 dropFrame)、newId(遞增 cue id)、isSel/cueSuffix、DESK/IS_DESKTOP(Electron 偵測)。 */
 import { emit } from './events.js';
 
+/* ===== 專案音訊路由 ====================================================
+   音訊資料刻意與 Media（AudioContext、HTMLAudioElement、ffmpeg 暫存檔）分離：
+   - buses 是專案層的單聲道軌；
+   - sourceMaps 是每個匯入音源的來源聲道 -> bus 路由；
+   - exportLayout 是專案 bus -> 匯出音訊 stream 的編組。
+   sourceStream / sourceChannel 均採 0-based，畫面顯示時再 +1。
+   這些 helper 只操作可序列化的 State.audioProject，讓媒體載入、時間軸與匯出可共用同一份設定。 */
+let _audioBusSeq = 1;
+let _audioStreamSeq = 1;
+
+function _finiteNumber(v, fallback){ const n=Number(v); return Number.isFinite(n)?n:fallback; }
+function _nonNegativeInt(v, fallback){ return Math.max(0, Math.floor(_finiteNumber(v, fallback))); }
+function _cleanId(v){ return typeof v==='string' ? v.trim() : (v==null ? '' : String(v).trim()); }
+function _cleanName(v, fallback){ const s=typeof v==='string'?v.trim():''; return s||fallback; }
+
+function _reserveAudioBusId(id){
+  const m=/^ab(\d+)$/i.exec(id||'');
+  if(m) _audioBusSeq=Math.max(_audioBusSeq,Number(m[1])+1);
+}
+function _reserveAudioStreamId(id){
+  const m=/^out(\d+)$/i.exec(id||'');
+  if(m) _audioStreamSeq=Math.max(_audioStreamSeq,Number(m[1])+1);
+}
+function _nextAudioBusId(used){
+  let id='';
+  do { id='ab'+(_audioBusSeq++); } while(used.has(id));
+  used.add(id); return id;
+}
+function _nextAudioStreamId(used){
+  let id='';
+  do { id='out'+(_audioStreamSeq++); } while(used.has(id));
+  used.add(id); return id;
+}
+function _claimAudioBusId(rawId, used){
+  const id=_cleanId(rawId);
+  if(id&&!used.has(id)){ used.add(id); _reserveAudioBusId(id); return id; }
+  return _nextAudioBusId(used);
+}
+function _claimAudioStreamId(rawId, used){
+  const id=_cleanId(rawId);
+  if(id&&!used.has(id)){ used.add(id); _reserveAudioStreamId(id); return id; }
+  return _nextAudioStreamId(used);
+}
+
+function _normalBus(raw, index, used, forceName, forceId){
+  raw=(raw&&typeof raw==='object')?raw:{};
+  const id=_claimAudioBusId(forceId!=null?forceId:raw.id,used);
+  return {
+    id,
+    name:_cleanName(forceName!=null?forceName:raw.name,'音訊軌 '+(index+1)),
+    visible:raw.visible!==false,
+    locked:!!raw.locked,
+    muted:!!raw.muted,
+    solo:!!raw.solo,
+    volume:Math.max(0,_finiteNumber(raw.volume,1)),
+    height:Math.max(24,_finiteNumber(raw.height,42))
+  };
+}
+
+function _normalBusIds(value, validIds){
+  const list=Array.isArray(value)?value:(value==null?[]:[value]);
+  const seen=new Set(), out=[];
+  for(const v of list){
+    const id=_cleanId(v);
+    if(id&&validIds.has(id)&&!seen.has(id)){ seen.add(id); out.push(id); }
+  }
+  return out;
+}
+
+function _normalChannels(value){
+  if(typeof value==='number'){
+    const count=_nonNegativeInt(value,0);
+    return Array.from({length:count},(_,i)=>({sourceStream:0,sourceChannel:i}));
+  }
+  if(!Array.isArray(value)) return [];
+  const out=[];
+  value.forEach((raw,index)=>{
+    if(raw&&typeof raw==='object'){
+      out.push({
+        sourceStream:_nonNegativeInt(raw.sourceStream,0),
+        sourceChannel:_nonNegativeInt(raw.sourceChannel,index)
+      });
+    } else if(typeof raw==='number') {
+      out.push({sourceStream:0,sourceChannel:_nonNegativeInt(raw,index)});
+    }
+  });
+  const seen=new Set();
+  return out.filter(ch=>{
+    const key=ch.sourceStream+':'+ch.sourceChannel;
+    if(seen.has(key)) return false;
+    seen.add(key); return true;
+  }).sort((a,b)=>a.sourceStream-b.sourceStream||a.sourceChannel-b.sourceChannel);
+}
+
+function _normalSourceMaps(rawMaps, buses){
+  const validIds=new Set(buses.map(b=>b.id));
+  const out={};
+  if(!rawMaps||typeof rawMaps!=='object'||Array.isArray(rawMaps)) return out;
+  for(const [rawSourceId,rawMap] of Object.entries(rawMaps)){
+    const sourceId=_cleanId(rawSourceId);
+    if(!sourceId) continue;
+    const rawChannels=Array.isArray(rawMap)?rawMap:rawMap?.channels;
+    if(!Array.isArray(rawChannels)) { out[sourceId]={channels:[]}; continue; }
+    const byKey=new Map();
+    rawChannels.forEach((raw,index)=>{
+      raw=(raw&&typeof raw==='object')?raw:{};
+      const sourceStream=_nonNegativeInt(raw.sourceStream,0);
+      const sourceChannel=_nonNegativeInt(raw.sourceChannel,index);
+      const key=sourceStream+':'+sourceChannel;
+      const route={
+        sourceStream,
+        sourceChannel,
+        busIds:_normalBusIds(raw.busIds,validIds),
+        gain:Math.max(0,_finiteNumber(raw.gain,1)),
+        enabled:raw.enabled!==false
+      };
+      const prior=byKey.get(key);
+      if(prior){
+        // 同一來源聲道的複製路由以 busIds 表示；讀取重複列時合併，避免靜默遺失輸出。
+        for(const id of route.busIds) if(!prior.busIds.includes(id)) prior.busIds.push(id);
+      } else byKey.set(key,route);
+    });
+    out[sourceId]={channels:[...byKey.values()].sort((a,b)=>a.sourceStream-b.sourceStream||a.sourceChannel-b.sourceChannel)};
+  }
+  return out;
+}
+
+function _normalExportLayout(rawLayout, buses){
+  const validIds=new Set(buses.map(b=>b.id));
+  const rawStreams=Array.isArray(rawLayout?.streams)?rawLayout.streams:[];
+  const used=new Set(), streams=[];
+  rawStreams.forEach(raw=>{
+    raw=(raw&&typeof raw==='object')?raw:{};
+    const layout=_cleanName(raw.layout,'mono');
+    // Stream labels are optional metadata.  Keep only a trimmed string so
+    // project JSON remains safe and old unnamed layouts stay unchanged.
+    const name=_cleanName(raw.name,'');
+    const stream={
+      id:_claimAudioStreamId(raw.id,used),
+      layout,
+      busIds:_normalBusIds(raw.busIds,validIds)
+    };
+    if(name) stream.name=name;
+    streams.push(stream);
+  });
+  return {streams};
+}
+
+function _emptyAudioProject(){ return {mode:'auto',buses:[],sourceMaps:{},exportLayout:{streams:[]}}; }
+
+/* 回傳全新的、可序列化且已去除無效 bus 參照的音訊專案物件。
+   不帶參數時同時正規化 State.audioProject。 */
+function normalizeAudioProject(project){
+  const raw=(project&&typeof project==='object'&&!Array.isArray(project))?project:{};
+  const used=new Set();
+  const buses=(Array.isArray(raw.buses)?raw.buses:[]).map((bus,index)=>_normalBus(bus,index,used));
+  const normalized={
+    mode:raw.mode==='manual'?'manual':'auto',
+    buses,
+    sourceMaps:_normalSourceMaps(raw.sourceMaps,buses),
+    exportLayout:_normalExportLayout(raw.exportLayout,buses)
+  };
+  // 有 bus 卻沒有輸出設定時，使用「每條 bus 一個 mono stream」的安全預設。
+  if(!normalized.exportLayout.streams.length&&buses.length){
+    const streamIds=new Set();
+    normalized.exportLayout.streams=buses.map(bus=>({id:_nextAudioStreamId(streamIds),layout:'mono',busIds:[bus.id]}));
+  }
+  if(arguments.length===0){ State.audioProject=normalized; }
+  return normalized;
+}
+
+function newAudioBus(name, id){
+  const used=new Set((State.audioProject?.buses||[]).map(bus=>bus?.id).filter(Boolean));
+  return _normalBus({},used.size,used,name,id);
+}
+
+function resetAudioProject(){
+  _audioBusSeq=1; _audioStreamSeq=1;
+  State.audioProject=_emptyAudioProject();
+  return State.audioProject;
+}
+
+function _isDefaultMonoLayout(streams, buses){
+  if(streams.length!==buses.length) return false;
+  return buses.every((bus,index)=>{
+    const stream=streams[index];
+    return stream&&stream.layout==='mono'&&stream.busIds.length===1&&stream.busIds[0]===bus.id;
+  });
+}
+
+/* 補足專案單聲道 bus（只增不減）。若輸出仍是系統預設 mono 配置，新 bus 也會加入預設輸出；
+   已被使用者改成 5.1/stereo 等配置時，則不覆寫其編組。 */
+function ensureAudioBusCount(count, options={}){
+  const wanted=_nonNegativeInt(count,0);
+  State.audioProject=normalizeAudioProject(State.audioProject);
+  const project=State.audioProject;
+  const before=project.buses.slice();
+  const wasDefault=_isDefaultMonoLayout(project.exportLayout.streams,before);
+  let added=false;
+  while(project.buses.length<wanted){
+    const used=new Set(project.buses.map(bus=>bus.id));
+    project.buses.push(_normalBus({},project.buses.length,used));
+    added=true;
+  }
+  if(added&&options.exportDefaults!==false&&(wasDefault||options.appendExportDefaults===true))
+    ensureAudioExportDefaults({appendMissing:true});
+  return added;
+}
+
+/* 補足匯出預設：每個尚未被任何 stream 使用的 project bus 都會得到一條 mono stream。
+   UI 在使用者建立自訂編組後可傳 {appendMissing:false}，僅確保空設定有可用預設。 */
+function ensureAudioExportDefaults(options={}){
+  State.audioProject=normalizeAudioProject(State.audioProject);
+  const project=State.audioProject;
+  const streams=project.exportLayout.streams;
+  const appendMissing=options.appendMissing!==false;
+  if(!streams.length){
+    const used=new Set();
+    project.exportLayout.streams=project.buses.map(bus=>({id:_nextAudioStreamId(used),layout:'mono',busIds:[bus.id]}));
+    return project.exportLayout;
+  }
+  if(appendMissing){
+    const assigned=new Set(streams.flatMap(stream=>stream.busIds));
+    const used=new Set(streams.map(stream=>stream.id));
+    for(const bus of project.buses){
+      if(!assigned.has(bus.id)) streams.push({id:_nextAudioStreamId(used),layout:'mono',busIds:[bus.id]});
+    }
+  }
+  return project.exportLayout;
+}
+
+/* 為指定音源建立不覆寫既有設定的一對一路由。channels 可為聲道數字或
+   [{sourceStream,sourceChannel}]；兩個索引皆為 0-based。auto 模式會依聲道數自動補足 bus。 */
+function ensureAudioSourceMap(audioSourceId, channels, options={}){
+  const sourceId=_cleanId(audioSourceId);
+  if(!sourceId) return null;
+  const descriptors=_normalChannels(channels);
+  State.audioProject=normalizeAudioProject(State.audioProject);
+  if((State.audioProject.mode==='auto'||options.forceBusCount===true)&&options.ensureBuses!==false)
+    ensureAudioBusCount(descriptors.length,options);
+  const project=State.audioProject;
+  const existing=options.reset?[]:(project.sourceMaps[sourceId]?.channels||[]);
+  const byKey=new Map(existing.map(route=>[route.sourceStream+':'+route.sourceChannel,route]));
+  descriptors.forEach((channel,index)=>{
+    const key=channel.sourceStream+':'+channel.sourceChannel;
+    if(!byKey.has(key)){
+      const bus=project.buses[index];
+      byKey.set(key,{sourceStream:channel.sourceStream,sourceChannel:channel.sourceChannel,busIds:bus?[bus.id]:[],gain:1,enabled:true});
+    }
+  });
+  project.sourceMaps[sourceId]={channels:[...byKey.values()].sort((a,b)=>a.sourceStream-b.sourceStream||a.sourceChannel-b.sourceChannel)};
+  State.audioProject=normalizeAudioProject(project);
+  return State.audioProject.sourceMaps[sourceId];
+}
+
+/* 取得單一來源聲道的 route；不存在（或尚未匯入此音源）時回傳 null。 */
+function routeForChannel(audioSourceId, sourceStream=0, sourceChannel=0){
+  const sourceId=_cleanId(audioSourceId);
+  if(!sourceId) return null;
+  State.audioProject=normalizeAudioProject(State.audioProject);
+  const stream=_nonNegativeInt(sourceStream,0);
+  const channel=_nonNegativeInt(sourceChannel,0);
+  return State.audioProject.sourceMaps[sourceId]?.channels.find(route=>
+    route.sourceStream===stream&&route.sourceChannel===channel
+  )||null;
+}
+
 const State = {
   cues: [],            // {id,start,end,text,track}
   tracks: [],          // 字幕軌道
@@ -14,6 +281,13 @@ const State = {
   fps: 24,
   dropFrame: false,
   duration: 0,
+  // 外部音訊素材的最右緣（時間軸秒數）。它是 Media runtime registry 的可讀摘要，
+  // 讓 sequence.js 不必反向 import media.js，也不會在移動／刪除影片片段時把
+  // 時間軸長度縮回影片結尾。
+  externalAudioEnd: 0,
+  // 僅保存外部音訊的可編輯資料（不含 Audio / Web Audio / 波形等 runtime 物件）。
+  // Media 每次編輯時同步它，供 History 還原幾何與靜音狀態。
+  externalAudioState: [],
   autoSelect: false,   // 播放時是否自動選取對應字幕
   selectedId: null,    // 主選取（鍵盤/IO 對象）
   selectedIds: [],     // 多選集合
@@ -34,8 +308,10 @@ const State = {
   overwriteKeep: true,  // 可覆蓋模式下：true=保留被包含句, false=刪除被包含句
   clips: [],            // 影片序列（時間軸上的影片區塊，含 vtrack 視訊軌）：見 sequence.js
   selectedClipId: null, // 目前選取的影片段（點選後可用上下鍵切換、Del 刪除）
+  selectedAudioClipId: null, // 目前選取的外部音訊素材（與影片／字幕選取互斥）
   videoTracks: [{name:'視訊軌 1',visible:true,locked:false}], // 視訊軌（獨立成列，比照字幕軌 tracks[]；索引越大越上層＝越優先覆蓋）
   audioExpanded: {},    // 音訊軌（每音源一列）是否展開成各聲道控制列：{ srcId: true }
+  audioProject: _emptyAudioProject() // 專案音訊 bus / 來源路由 / 匯出 stream（不存 Media runtime）
 };
 /* 軌道工具 */
 function newTrack(name){ return {name:name||('軌道 '+(State.tracks.length+1)),visible:true,fontSize:80,posPct:90,align:'center',locked:false,color:'#ffffff'}; }
@@ -233,4 +509,7 @@ function cueSuffix(c){
   return ` - ${name} - 第${idx+1}句`;
 }
 
-export { State, newTrack, syncTrackCount, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys };
+export { State, newTrack, syncTrackCount, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks,
+  newAudioBus, normalizeAudioProject, resetAudioProject, ensureAudioBusCount, ensureAudioExportDefaults,
+  ensureAudioSourceMap, routeForChannel,
+  FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys };
