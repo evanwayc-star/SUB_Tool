@@ -1382,7 +1382,29 @@ function initUI(){
   tsToggle('tsVertical','vertical'); tsToggle('tsBgBox','bgBox');
   // 字型只從 font/ 掃出來的清單選（v4.34.4 拿掉「自訂…」——手打系統字型名匯出時常配不到，
   // 見鐵律 §0.3；要多一個字型就往 font/ 放一個資料夾）
-  $('tsFont').addEventListener('change',e=>tsSet('font', e.target.value));
+  $('tsFont').addEventListener('change', async e => {
+    if (e.target.value === '__custom') {
+      if (!window.subtool) {
+        ui.alert('網頁版無法直接匯入字型檔案。請使用桌面版。');
+        e.target.value = effStyle().font || STYLE_DEFAULTS.font;
+        return;
+      }
+      const imported = await window.subtool.importFont();
+      if (imported) {
+        await loadFonts(true); // Reload fonts list
+        // Update font select HTML
+        const sel = $('tsFont');
+        sel.innerHTML = getFonts().map(f=>`<option value="${escapeHTML(f.name)}">${escapeHTML(f.name)}</option>`).join('') + '<option value="__custom">其他...</option>';
+        sel.value = imported;
+        tsSet('font', imported);
+        renderTrackStyle();
+      } else {
+        e.target.value = effStyle().font || STYLE_DEFAULTS.font;
+      }
+      return;
+    }
+    tsSet('font', e.target.value);
+  });
   // 常用樣式庫：存 / 套用 / 管理（跨專案，存 config）
   // 存＝面板目前顯示的那組生效樣式（選取句 or 整軌）；套用＝同樣寫回面板當前的對象
   $('tsPresetSave').addEventListener('click',async()=>{
@@ -2067,7 +2089,7 @@ async function init(){
     const sel=$('tsFont'); if(!sel) return;
     if(fonts.length){
       const cur=sel.value;
-      sel.innerHTML=fonts.map(f=>`<option>${escapeHTML(f.name)}</option>`).join('');
+      sel.innerHTML=fonts.map(f=>`<option value="${escapeHTML(f.name)}">${escapeHTML(f.name)}</option>`).join('') + '<option value="__custom">其他...</option>';
       if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
     }
     renderVideoSub(); renderTrackStyle();

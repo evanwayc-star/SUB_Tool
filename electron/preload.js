@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('subtool', {
   exportSub:    (name, b64, ext) => ipcRenderer.invoke('dialog:exportSub', { name, b64, ext }),
   exportDirectory: (files) => ipcRenderer.invoke('dialog:exportDirectory', files),
   importDirectory: () => ipcRenderer.invoke('dialog:importDirectory'),
+  importFont:   () => ipcRenderer.invoke('dialog:importFont'),
   exportVideo:  (opts) => ipcRenderer.invoke('ffmpeg:exportVideo', opts),
   probe:        (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffprobe', p); },
   makeProxy:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:proxy', { path: p, duration }); },

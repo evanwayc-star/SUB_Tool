@@ -319,8 +319,8 @@ export function assFontName(name){
   const f = getFonts().find(x => x.name === name);
   return (f && f.family) || name;
 }
-export async function loadFonts(){
-  if(_fonts) return _fonts;
+export async function loadFonts(force = false){
+  if(_fonts && !force) return _fonts;
   _fonts = [];
   try{
     const DESK = window.subtool;

@@ -450,6 +450,22 @@ ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
   fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
   return r.filePath;
 });
+ipcMain.handle('dialog:importFont', async () => {
+  const r = await dialog.showOpenDialog(mainWin, { title: '匯入字型', properties: ['openFile'], filters: [{ name: '字型檔', extensions: ['ttf', 'otf', 'woff', 'woff2', 'ttc'] }, { name: '全部', extensions: ['*'] }] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  const src = r.filePaths[0];
+  const root = fontsRoot() || path.join(process.resourcesPath || path.join(__dirname, '..'), 'font');
+  try {
+    if (!fs.existsSync(root)) fs.mkdirSync(root, { recursive: true });
+    const name = path.basename(src);
+    const dest = path.join(root, name);
+    fs.copyFileSync(src, dest);
+    return name.replace(/\.(ttf|otf|ttc|woff2?)$/i, '');
+  } catch (e) {
+    console.error('[fonts] import error', e);
+    return null;
+  }
+});
 
 /* ---- 匯出影片序列（ProRes 422 HQ / MP4 H.264；燒錄可見軌字幕；各段原音混入其時段） ----
    items：依時間軸順序的陣列，clip={type:'clip',path,in,out} 或 gap={type:'gap',dur}。
