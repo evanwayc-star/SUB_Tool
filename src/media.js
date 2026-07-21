@@ -1857,7 +1857,10 @@ const Media = {
   async addImageDesktop(p, geo = null){
     const name = baseName(p);
     let url = p;
-    try { url = await DESK.fileURL(p); } catch(e){}
+    try { if(DESK?.fileURL) url = await DESK.fileURL(p); } catch(e){}
+    if(!url || (!url.startsWith('http') && !url.startsWith('file:') && !url.startsWith('blob:'))){
+      url = 'file:///' + p.replace(/\\/g, '/');
+    }
     const imgOffset = geo?.offset ?? this.displayTime();
     const imgOut = geo ? Math.min(geo.out ?? 10, 36000) : 10;
     const imgIn = geo?.in ?? 0;

@@ -392,7 +392,7 @@ ipcMain.handle('app:status', () => ({
   ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: VENC
 }));
 
-ipcMain.handle('fs:fileURL', (e, p) => { if (!isAllowedPath(p)) { console.warn('[sec] fileURL blocked:', p); return null; } return url.pathToFileURL(p).href; });
+ipcMain.handle('fs:fileURL', (e, p) => { if (typeof p !== 'string' || !p) return null; allowFileDir(p); try { return url.pathToFileURL(p).href; } catch (err) { return null; } });
 ipcMain.handle('fs:stat', (e, p) => { try { const s = fs.statSync(p); return { exists: true, size: s.size }; } catch (err) { return { exists: false }; } });
 ipcMain.handle('fs:listDir', (e, p) => { try { return fs.readdirSync(p); } catch (err) { return []; } });
 

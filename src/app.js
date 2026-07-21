@@ -418,8 +418,12 @@ function renderImageOverlays(){
 
     // 使用百分比定位（相對於 _stageRect()）
     const contStyle = `left:${posX*100}%; top:${posY*100}%; width:${scale*100}%; height:${scale*100}%; transform:translate(-50%,-50%); opacity:${alpha};`;
+    let imgSrc = c.web?.url || c.path || '';
+    if(imgSrc && !imgSrc.startsWith('http:') && !imgSrc.startsWith('https:') && !imgSrc.startsWith('file:') && !imgSrc.startsWith('blob:')){
+      imgSrc = 'file:///' + imgSrc.replace(/\\/g, '/');
+    }
     html += `<div class="img-wrap" data-id="${c.id}" style="${contStyle}">
-      <img src="${escapeHTML(c.web?.url || c.path)}" />
+      <img src="${escapeHTML(imgSrc)}" />
       <div class="resize-handle rh-nw" data-corner="nw"></div>
       <div class="resize-handle rh-ne" data-corner="ne"></div>
       <div class="resize-handle rh-sw" data-corner="sw"></div>
