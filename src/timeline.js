@@ -573,7 +573,7 @@ function externalAudioTimelineEntries(){
 function audioTimelineEntries(){
   return [
     // 已解除影音連結的影片只保留畫面；它的聲音已成為可獨立編輯的 external audio block。
-    ...State.clips.filter(clip=>!clip.audioDetached).map(clip=>({source:clip,start:clip.offset,end:Seq.clipEnd(clip),external:false})),
+    ...State.clips.filter(clip=>!clip.audioDetached && clip.type !== 'image').map(clip=>({source:clip,start:clip.offset,end:Seq.clipEnd(clip),external:false})),
     ...externalAudioTimelineEntries()
   ];
 }

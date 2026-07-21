@@ -24,7 +24,7 @@ const Seq = {
   /* 序列結尾（所有 clip 的最右緣；無 clip 回 0） */
   end(){ return State.clips.reduce((m, c) => Math.max(m, this.clipEnd(c)), 0); },
   byId(id){ return State.clips.find(c => c.id === id) || null; },
-  primary(){ return State.clips.find(c => c.primary) || State.clips[0] || null; },
+  primary(){ return State.clips.find(c => c.primary && c.type !== 'image') || State.clips.find(c => c.type !== 'image') || null; },
   /* 視訊軌數：至少 State.videoTracks.length，且涵蓋現有 clip 的最高軌 */
   trackCount(){ let m = 0; for(const c of State.clips) m = Math.max(m, vt(c) + 1); return Math.max(State.videoTracks.length || 1, m); },
   trackClips(v){ return State.clips.filter(c => vt(c) === v); },
@@ -34,8 +34,8 @@ const Seq = {
   clipAtOnTrack(t, v){ for(const c of State.clips){ if(vt(c) === v && this.isActiveAt(c, t)) return c; } return null; },
   /* t 所在、所有軌的作用中 clip（依 vtrack 由下而上排序，供匯出疊層與音訊混音） */
   clipsAt(t){ return State.clips.filter(c => this.isActiveAt(c, t)).sort((a, b) => vt(a) - vt(b)); },
-  /* ★ 最上層「可見」的作用中 clip（top-occludes）：播放預覽顯示它；隱藏的視訊軌不列入（跳到下一層） */
-  clipAt(t){ const a = this.clipsAt(t); for(let i = a.length - 1; i >= 0; i--){ if(videoTrackVisible(vt(a[i]))) return a[i]; } return null; },
+  /* ★ 最上層「可見」的作用中 clip（top-occludes）：播放預覽顯示它；隱藏的視訊軌不列入（跳到下一層）；圖片不列入 */
+  clipAt(t){ const a = this.clipsAt(t); for(let i = a.length - 1; i >= 0; i--){ if(a[i].type !== 'image' && videoTrackVisible(vt(a[i]))) return a[i]; } return null; },
   /* t 之後（不含）下一個開始的 clip（任一軌）；間隙播放時用來得知何時有內容切入 */
   nextAfter(t){
     let best = null;

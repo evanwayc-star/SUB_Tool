@@ -392,6 +392,8 @@ function renderImageOverlays(){
     const st = layer.style;
     st.left=rect.x+'px'; st.top=rect.y+'px';
     st.width=rect.w+'px'; st.height=rect.h+'px';
+    st.right='auto'; st.bottom='auto'; st.margin='0';
+    st.aspectRatio='auto'; st.maxWidth='none'; st.maxHeight='none';
   }
 
   const t = Media.displayTime();
@@ -427,6 +429,8 @@ function renderImageOverlays(){
   
   if(layer.innerHTML !== html) layer.innerHTML = html;
 }
+
+
 
 let _imgDrag = null;
 document.addEventListener('pointerdown', e => {

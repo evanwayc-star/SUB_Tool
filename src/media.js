@@ -1856,8 +1856,9 @@ const Media = {
     const name = baseName(p);
     let url = p;
     try { url = await DESK.fileURL(p); } catch(e){}
-    const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 5, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
-    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? 5, 5); c.offset = geo.offset ?? c.offset; if(geo.vtrack != null) c.vtrack = geo.vtrack; c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; }
+    const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
+    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? 5, 36000); c.offset = geo.offset ?? c.offset; if(geo.vtrack != null) c.vtrack = geo.vtrack; c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; }
+    else { c.out = 5; }
     // 預設將圖片放置於全新的最上層視訊軌
     if (!geo || geo.vtrack == null) {
       c.vtrack = State.videoTracks.length;
@@ -1872,7 +1873,8 @@ const Media = {
   /* 加入圖片到序列（網頁版） */
   async addImageWeb(f){
     const url = URL.createObjectURL(f); this.objectURLs.push(url);
-    const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 5, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
+    const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
+    c.out = 5;
     c.vtrack = State.videoTracks.length;
     ensureVideoTrackCount(c.vtrack + 1);
     Seq.sort(); Seq.recomputeDuration();
