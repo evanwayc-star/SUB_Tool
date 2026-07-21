@@ -222,8 +222,11 @@ export function assJoinVertical(chars, st){
       needsFsRestore = false;
     }
     if(ch === ' ' || ch === `{\\fs${fs}} `){
+      // 修正：半形空白在 ASS 直書（以 \N 切割逐列排版）時，若獨佔一行會佔用一整個全形字元的高度。
+      // 這裡將半形空白暫時替換為「一半字級的不可見空格 \h」，使其視覺高度縮減為一半，模擬正確的直書半形間距。
       const half = Math.round(fs * 0.5);
       ch = `{\\fs${half}}\\h`;
+      // 標記下一列必須還原回原本的字體大小，避免後續字元繼承到縮小一半的字級。
       needsFsRestore = true;
     }
     if(i > 0){

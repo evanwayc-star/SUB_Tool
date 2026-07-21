@@ -113,6 +113,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 /* 安全框：疊在影片與字幕之上的參考線（僅預覽，不燒入匯出）。預設隱藏 */
 .safe-frame{position:absolute;inset:0;pointer-events:none;z-index:2;display:none}
 .safe-frame.on{display:block}
+/* 100% 滿版安全框邊界：使用亮藍色 (#00A3FF) 來與 90% (白) 區分，確保在預覽畫面邊緣能清楚辨識 */
 .sf-100 { position:absolute; inset:0; border:2px solid #00A3FF; box-sizing:border-box; pointer-events:none; }
 .sf-90 { position:absolute; left:5%; top:5%; right:5%; bottom:5%; border:1px solid rgba(255,255,255,.55); pointer-events:none; }
 .sf-80 { position:absolute; left:10%; top:10%; right:10%; bottom:10%; border:2px dashed rgba(255,220,90,.7); }

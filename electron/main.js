@@ -482,6 +482,9 @@ const _EXPORT_LAYOUTS = Object.freeze({
   mono:       { channels: 1, channelLayout: 'mono',       channelNames: ['FC'],                             title: 'Mono' },
   stereo:     { channels: 2, channelLayout: 'stereo',     channelNames: ['FL', 'FR'],                       title: 'Stereo' },
   stereoLtRt: { channels: 2, channelLayout: 'stereo',     channelNames: ['FL', 'FR'],                       title: 'Stereo Lt/Rt' },
+  // 注意：5.1 聲道在 FFmpeg 必須使用標準的 '5.1' 配置 (搭配 BL, BR) 而非 '5.1(side)' (搭配 SL, SR)。
+  // 若使用 '5.1(side)'，AAC 編碼器會被迫啟用 PCE (Program Config Element) 標記非標準聲道位置，
+  // 導致極多主流播放器與剪輯軟體（如 Premiere Pro）無法解碼而變成靜音。
   '5.1':      { channels: 6, channelLayout: '5.1',        channelNames: ['FL', 'FR', 'FC', 'LFE', 'BL', 'BR'], title: '5.1 (L, R, C, LFE, Ls, Rs)' },
 });
 /* WAV 的多聲道檔本質上仍是一條 interleaved stream；保留 bus 順序並以 WAVEFORMATEXTENSIBLE
