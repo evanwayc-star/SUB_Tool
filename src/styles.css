@@ -274,9 +274,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* 專案音訊：獨立在影像與字幕之間。外層固定可見高度、內層自行捲動，避免大量 bus 壓縮字幕區。 */
 #tlAtracks{position:absolute;left:0;right:0;z-index:3;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;
   background:#12181c;border-top:1px solid #294050;border-bottom:1px solid #294050;scrollbar-gutter:stable}
-.audio-section-head{position:sticky;top:0;z-index:5;height:22px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:0 8px;
-  background:#18252e;border-bottom:1px solid #355166;color:#8ec8ec;font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
-.audio-section-meta{margin-left:auto;color:#7095ab;font-weight:500;letter-spacing:0}
+
 .audio-project-content{position:relative;min-height:1px}
 .audio-project-row{position:relative;box-sizing:border-box;overflow:hidden;border-bottom:1px solid #213640;
   background:linear-gradient(90deg,rgba(35,70,78,.24),rgba(16,27,31,.12));}
@@ -290,6 +288,10 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .audio-clip-block.external-audio-block{border-color:#6384c7;background:rgba(54,76,143,.45);color:#e0e8ff}.audio-clip-block.external-audio-block:hover{border-color:#9db9ff;background:rgba(69,97,179,.58)}
 .audio-clip-block.external-audio-block{cursor:grab}
 .audio-clip-block.external-audio-block.dragging{cursor:grabbing;opacity:.9;box-shadow:0 0 0 1px #b8ccff,0 4px 12px rgba(0,0,0,.38);z-index:7}
+.audio-clip-block.locked{cursor:default;border-style:dashed;border-color:rgba(105,180,165,.5)}
+.audio-clip-block.locked:hover{background:rgba(27,112,101,.5)}
+.audio-clip-block.locked:after{content:"🔒";position:absolute;top:0;right:3px;font-size:10px;line-height:1.4;opacity:.75;pointer-events:none;z-index:3;text-shadow:0 0 2px #000}
+.audio-clip-block.locked .edge{cursor:default;pointer-events:none}
 .audio-clip-block.muted{opacity:.62;border-style:dashed;color:#b7bfd0}
 .audio-clip-block.muted .audio-clip-wave{opacity:.4}
 .audio-clip-block.muted:hover{opacity:.84}
@@ -310,28 +312,32 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .audio-clip-config:hover{background:rgba(67,204,178,.22);border-color:#9affea;color:#fff}
 /* 音訊配線／輸出設定：採用調音台 patchbay 的緊湊表格，而不是一般設定卡片。
    左邊永遠是來源，右邊永遠是專案 A 軌或交付 stream，讓聲道順序能一眼校對。 */
-.audio-route-dialog,.audio-output-dialog{font-size:12px;color:var(--text);min-width:0}
+.audio-route-dialog,.audio-output-dialog{font-size:14px;color:var(--text);min-width:0}
 .audio-route-source{display:flex;align-items:baseline;gap:10px;padding:0 0 9px;border-bottom:1px solid var(--border)}
 .audio-route-source b{color:#cfeaff;font-size:14px}.audio-route-source span{color:var(--text-faint);font-size:11px}
 .audio-bus-count,.audio-route-actions,.audio-output-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:9px 0}
 .audio-bus-count label{display:flex;align-items:center;gap:6px;color:var(--text-dim)}
-.audio-bus-count input{width:58px;text-align:center}.audio-count-preset{min-width:32px;padding:3px 7px;font-family:"JetBrains Mono",monospace}
+.audio-bus-count input{width:64px;font-size:14px;text-align:center}.audio-count-preset{min-width:36px;font-size:13px;padding:4px 8px;font-family:"JetBrains Mono",monospace}
 .audio-route-actions{border-top:1px solid rgba(255,255,255,.03)}
 .audio-route-actions button:last-child{margin-left:auto;color:#8ec8ec;border-color:#355166;background:#18252e}
 .audio-route-range{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:0 0 8px;color:var(--text-dim);font-size:11px}.audio-route-range>span{color:#8ec8ec;font-weight:700}.audio-route-range label{display:flex;align-items:center;gap:4px}.audio-route-range input{width:48px;padding:3px;text-align:center;font:inherit}.audio-route-range button{padding:3px 7px;border-color:#355166;color:#b8e7df;background:#142426}
-.audio-route-help{color:var(--text-faint);font-size:11px;line-height:1.55;padding:0 0 8px}
-.audio-route-table-wrap,.audio-output-table-wrap{border:1px solid var(--border);background:#101416;max-height:360px;overflow:auto}
+.audio-route-help{color:var(--text-faint);font-size:13px;line-height:1.6;padding:0 0 10px}
+.audio-route-table-wrap,.audio-output-table-wrap{border:1px solid var(--border);background:#101416;max-height:480px;overflow:auto}
 .audio-route-table,.audio-output-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-.audio-route-table th,.audio-route-table td,.audio-output-table th,.audio-output-table td{padding:6px 8px;border-bottom:1px solid #252d31;text-align:left;vertical-align:middle}
-.audio-route-table th,.audio-output-table th{position:sticky;top:0;background:#18252e;color:#8ec8ec;font-size:10px;letter-spacing:.06em;font-weight:700;z-index:1}
+.audio-route-table th,.audio-route-table td,.audio-output-table th,.audio-output-table td{padding:8px 10px;border-bottom:1px solid #252d31;text-align:left;vertical-align:middle}
+.audio-route-table th,.audio-output-table th{position:sticky;top:0;background:#18252e;color:#8ec8ec;font-size:13px;letter-spacing:.04em;font-weight:700;z-index:1}
 .audio-route-table tbody tr:nth-child(2n),.audio-output-table tbody tr:nth-child(2n){background:rgba(255,255,255,.018)}
-.audio-route-table select,.audio-output-table select{width:100%;min-width:130px;background:#11191d;border-color:#355166}
+.audio-route-table select,.audio-output-table select{width:100%;min-width:140px;background:#11191d;border-color:#355166;font-size:14px;padding:6px 8px}
 .audio-route-state{color:#6dd2c1;font-size:11px;white-space:nowrap}.audio-route-empty{padding:18px;text-align:center;color:var(--text-faint)}
-.audio-output-table{border:0;background:#101416}.audio-output-table td:first-child{width:155px;color:#8ec8ec;font-family:"JetBrains Mono",monospace}
+.audio-output-table{border:0;background:#101416}.audio-output-table td:first-child{width:180px;color:#8ec8ec;font-family:"JetBrains Mono",monospace}
 .audio-output-table td:last-child{width:38px;text-align:center}.audio-output-remove{padding:1px 7px;min-width:25px;color:#e98b8b;border-color:rgba(224,85,85,.35)}
 .audio-output-actions{justify-content:flex-end}.audio-output-actions button{border-color:#355166;color:#b8e7df;background:#142426}
-.audio-output-stream{display:flex;align-items:center;gap:6px}.audio-output-index{display:inline-flex;align-items:center;justify-content:center;flex:0 0 20px;color:#8ec8ec}.audio-output-name{min-width:0;width:100%;font:inherit;font-size:11px;padding:3px 5px;background:#11191d;border:1px solid #355166;color:var(--text)}
-.audio-delivery-presets{display:flex;align-items:center;flex-wrap:wrap;gap:5px;padding:0 0 9px}.audio-delivery-presets>span{flex-basis:100%;color:var(--text-dim);font-size:11px}.audio-delivery-presets button{padding:3px 6px;border-color:#355166;background:#142426;color:#b8e7df;font-size:10px}.audio-delivery-presets #audioOutputAllMono{color:#dce8ee;border-color:#52656d;background:#1d272b}
+.audio-output-stream{display:flex;align-items:center;gap:6px}.audio-output-index{display:inline-flex;align-items:center;justify-content:center;flex:0 0 20px;color:#8ec8ec}.audio-output-name{min-width:0;width:100%;font:inherit;font-size:14px;padding:5px 7px;background:#11191d;border:1px solid #355166;color:var(--text)}
+.audio-delivery-presets{display:flex;align-items:center;flex-wrap:wrap;gap:14px 10px;padding:0 0 10px}.audio-delivery-presets>span{flex-basis:100%;color:var(--text-dim);font-size:13px}.audio-delivery-presets button{padding:6px 10px;border-color:#355166;background:#142426;color:#b8e7df;font-size:13px}.audio-delivery-presets #audioOutputAllMono{color:#dce8ee;border-color:#52656d;background:#1d272b}
+.audio-delivery-presets button.preset-me{color:#ffde6a;border-color:#7a6b29;background:#2a2512}
+.audio-delivery-presets button.preset-me:hover{color:#ffe589;border-color:#998634;background:#383218}
+.audio-delivery-presets button.preset-bi{color:#76a9fa;border-color:#2a508b;background:#132238}
+.audio-delivery-presets button.preset-bi:hover{color:#a4c8ff;border-color:#3a6bac;background:#1a3150}
 .tl-playhead{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--accent);z-index:10;pointer-events:none;will-change:left}
 .tl-playhead::before{content:"";position:absolute;top:0;left:-5px;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid var(--accent)}
 .tl-inpoint{position:absolute;top:0;bottom:0;width:2px;background:var(--green);z-index:9;pointer-events:none;opacity:.9}
@@ -370,9 +376,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .pipPos.on{background:var(--accent);color:#fff;border-color:var(--accent)}
 /* 專案音訊 bus 列頭：與右側的獨立捲動音訊區同高、同列。 */
 #tlGutterAtracks{flex-shrink:0;overflow-y:auto;overflow-x:hidden;background:#151f25;scrollbar-gutter:stable}
-.audio-gutter-head{position:sticky;top:0;z-index:5;height:22px;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;padding:0 7px;
-  background:#18252e;border-bottom:1px solid #355166;color:#8ec8ec;font-size:10px;font-weight:700;letter-spacing:.07em}
-.audio-gutter-head span:last-child{font-weight:500;color:#7095ab;letter-spacing:0}
+
 .agtrack{display:flex;align-items:center;gap:3px;padding:0 6px;border-bottom:1px solid #223a45;position:relative;box-sizing:border-box;background:rgba(25,58,68,.18)}
 .agtrack:nth-child(2n){background:rgba(20,48,58,.24)}
 .agtrack.hidden-tk{opacity:.42}

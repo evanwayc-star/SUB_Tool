@@ -17,41 +17,50 @@ const LAYOUTS={
 };
 const MAX_AUDIO_BUSES=1024;
 const DELIVERY_PRESETS=[
-  {id:'2-fullmix',label:'2 · 2.0 FullMix',count:2,streams:[
-    {layout:'stereo',name:'第一語言 2.0 FullMix'}
+  {id:'2-fm',label:'２軌道｜2.0-FM',count:2,streams:[
+    {layout:'stereo',name:'2.0-FM'}
   ]},
-  {id:'4-me',label:'4 · 2.0 + M&E',count:4,streams:[
-    {layout:'stereo',name:'第一語言 2.0 FullMix'},
-    {layout:'stereo',name:'配音 2.0 M&E'}
+  {id:'2-me',label:'２軌道(ME)｜2.0-ME',count:2,streams:[
+    {layout:'stereo',name:'2.0-ME'}
   ]},
-  {id:'4-bilingual',label:'4 · 雙語 2.0',count:4,streams:[
-    {layout:'stereo',name:'第一語言 2.0 FullMix'},
-    {layout:'stereo',name:'第二語言 2.0 FullMix'}
+  {id:'4-me',label:'４軌道(ME)｜2.0FM + 2.0-ME',count:4,streams:[
+    {layout:'stereo',name:'2.0FM'},
+    {layout:'stereo',name:'2.0-ME'}
   ]},
-  {id:'6-fullmix',label:'6 · 5.1 FullMix',count:6,streams:[
-    {layout:'5.1',name:'第一語言 5.1 FullMix'}
+  {id:'4-bi',label:'４軌道(雙語)｜2.0-FM + 2.0-FM',count:4,streams:[
+    {layout:'stereo',name:'2.0-FM'},
+    {layout:'stereo',name:'2.0-FM'}
   ]},
-  {id:'8-fullmix',label:'8 · 5.1 + 2.0',count:8,streams:[
-    {layout:'5.1',name:'第一語言 5.1 FullMix'},
-    {layout:'stereo',name:'第一語言 2.0 FullMix'}
+  {id:'6-fm',label:'６軌道｜5.1-FM',count:6,streams:[
+    {layout:'5.1',name:'5.1-FM'}
   ]},
-  {id:'10-me',label:'10 · 5.1 + 2.0 + M&E',count:10,streams:[
-    {layout:'5.1',name:'第一語言 5.1 FullMix'},
-    {layout:'stereo',name:'第一語言 2.0 FullMix'},
-    {layout:'stereo',name:'配音 2.0 M&E'}
+  {id:'6-bi-me',label:'６軌道(雙語_ME)｜2.0-FM + 2.0-FM + 2.0-ME',count:6,streams:[
+    {layout:'stereo',name:'2.0-FM'},
+    {layout:'stereo',name:'2.0-FM'},
+    {layout:'stereo',name:'2.0-ME'}
   ]},
-  {id:'16-bilingual',label:'16 · 雙語 5.1 + 2.0',count:16,streams:[
-    {layout:'5.1',name:'第一語言 5.1 FullMix'},
-    {layout:'stereo',name:'第一語言 2.0 FullMix'},
-    {layout:'5.1',name:'第二語言 5.1 FullMix'},
-    {layout:'stereo',name:'第二語言 2.0 FullMix'}
+  {id:'8-fm',label:'８軌道｜5.1-FM + 2.0-FM',count:8,streams:[
+    {layout:'5.1',name:'5.1-FM'},
+    {layout:'stereo',name:'2.0-FM'}
   ]},
-  {id:'18-me',label:'18 · 雙語 + M&E',count:18,streams:[
-    {layout:'5.1',name:'第一語言 5.1 FullMix'},
-    {layout:'stereo',name:'第一語言 2.0 FullMix'},
-    {layout:'5.1',name:'第二語言 5.1 FullMix'},
-    {layout:'stereo',name:'第二語言 2.0 FullMix'},
-    {layout:'stereo',name:'配音 2.0 M&E'}
+  {id:'8-fm-rev',label:'８軌道｜2.0-FM + 5.1-FM',count:8,streams:[
+    {layout:'stereo',name:'2.0-FM'},
+    {layout:'5.1',name:'5.1-FM'}
+  ]},
+  {id:'10-me',label:'１０軌道(ME)｜5.1-FM + 2.0-FM + 2.0-ME',count:10,streams:[
+    {layout:'5.1',name:'5.1-FM'},
+    {layout:'stereo',name:'2.0-FM'},
+    {layout:'stereo',name:'2.0-ME'}
+  ]},
+  {id:'12-bi',label:'１２軌道(雙語)｜5.1-FM + 5.1-FM',count:12,streams:[
+    {layout:'5.1',name:'5.1-FM'},
+    {layout:'5.1',name:'5.1-FM'}
+  ]},
+  {id:'16-bi',label:'１６軌道(雙語)｜5.1-FM + 2.0-FM + 5.1-FM + 2.0-FM',count:16,streams:[
+    {layout:'5.1',name:'5.1-FM'},
+    {layout:'stereo',name:'2.0-FM'},
+    {layout:'5.1',name:'5.1-FM'},
+    {layout:'stereo',name:'2.0-FM'}
   ]}
 ];
 
@@ -309,7 +318,16 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
   const initialBuses=originalBusState||structuredClone({mode:p.mode,buses:p.buses});
   const streams=p.exportLayout.streams;
   const rows=streams.map(outputRowHtml).join('')||'<tr><td colspan="4" class="audio-route-empty">尚無可輸出的專案音訊軌。</td></tr>';
-  const presetButtons=DELIVERY_PRESETS.map(preset=>`<button class="audio-delivery-preset" type="button" data-preset="${preset.id}" title="${escapeHTML(preset.streams.map(stream=>stream.name).join(' + '))}">${escapeHTML(preset.label)}</button>`).join('');
+  const presetButtons=DELIVERY_PRESETS.map(preset=>{
+    let cls = 'audio-delivery-preset';
+    if(preset.label.includes('ME')) cls += ' preset-me';
+    else if(preset.label.includes('雙語')) cls += ' preset-bi';
+    const btn = `<button class="${cls}" type="button" data-preset="${preset.id}" title="${escapeHTML(preset.streams.map(stream=>stream.name).join(' + '))}">${escapeHTML(preset.label)}</button>`;
+    if (preset.id === '8-fm') {
+      return `<div style="flex-basis:100%;height:0;"></div>` + btn;
+    }
+    return btn;
+  }).join('');
   openModal('Audio Channel Configuration',
     `<div class="audio-output-dialog">
       <div class="audio-route-help">影片輸出會依下列 Stream mux 音訊；WAV 則固定把所有專案音訊軌依 A 軌順序寫入同一個多聲道 WAV。</div>
@@ -324,7 +342,7 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
         <button class="audio-output-count-preset" type="button" data-count="16">16</button>
         <button class="audio-output-count-preset" type="button" data-count="18">18</button>
       </div>
-      <div class="audio-delivery-presets"><span>常用交付配置</span><button id="audioOutputAllMono" type="button">全部 Mono（依上方軌數）</button>${presetButtons}</div>
+      <div class="audio-delivery-presets"><span>常用交付配置</span><button id="audioOutputAllMono" type="button">全部Mono(依照專案總軌道數)</button>${presetButtons}</div>
       <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>Stream</th><th>Output Channels</th><th>Project Channels</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="audio-output-actions"><button id="audioOutputAdd" type="button">＋ 新增 Stream</button></div>
     </div>`,
@@ -360,7 +378,7 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
       });
       Media.applyGains(); renderAudioTracks(); drawTimeline();
       closeModal(); if(onBack) onBack();
-    }}],{width:'700px'});
+    }}],{width:'860px'});
   setTimeout(()=>{
     const rerender=()=>{
       // 版面重畫會重新建立「可連續分配」的選項；先保存畫面上的暫存選擇，

@@ -551,7 +551,8 @@ async function showExportVideoDialog() {
       : `<div>序列：<b>${clipCount}</b> 段影片${vtrackCount > 1 ? `、<b>${vtrackCount}</b> 條視訊軌（由下而上疊合，上層覆蓋下層）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
         `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
         `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>`) +
-    `<div style="margin-top:4px">音訊：<b>${hasProjectAudio ? '依專案音軌與輸出編組' : '依混音器設定輸出'}</b>${hasProjectAudio ? `（${data.audioPlan.buses.length} 條專案音軌）` : _mixerSummary()}</div>` +
+    `<div style="margin-top:4px;display:flex;align-items:center;gap:8px"><div>音訊：<b>${hasProjectAudio ? '依專案音軌與輸出編組' : '依混音器設定輸出'}</b>${hasProjectAudio ? `（${data.audioPlan.buses.length} 條專案音軌）` : _mixerSummary()}</div>` +
+    `<button type="button" id="expAudioSetBtn" style="padding:2px 8px;font-size:12px;background:var(--panel3);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer;">⚙ 聲道設定</button></div>` +
     `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">${hasProjectAudio ? (audioOnly?'（WAV 依 A1、A2…順序收進同一個多聲道檔。）':'（影片依 Mono／Stereo／LtRt／5.1 設定輸出多條 audio stream；WAV 則依專案音軌順序收進同一個多聲道檔。）') : '（靜音／獨奏／音量比照播放；未抽出逐聲道的來源則輸出原音）'}</div>` +
     `<div style="margin-top:12px">格式：</div>` +
     `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="prores"${audioOnly?' disabled':' checked'}> ProRes 422 HQ（.mov，剪輯母帶）` +
@@ -579,12 +580,20 @@ async function showExportVideoDialog() {
         closeModal(); _runExportVideo(data, fmt, kbps);
       } },
      { label: '取消', act: closeModal }]);
-  // 位元率欄位只在選 MP4 時出現
+  // 位元率欄位只在選 MP4 時出現，並綁定聲道設定按鈕
   setTimeout(() => {
     const row = $('expVbrRow');
     const sync = () => { const f = (document.querySelector('input[name="expVfmt"]:checked') || {}).value; if (row) row.style.display = (f === 'mp4') ? '' : 'none'; };
     document.querySelectorAll('input[name="expVfmt"]').forEach(el => el.addEventListener('change', sync));
     sync();
+    const setBtn = $('expAudioSetBtn');
+    if (setBtn) {
+      setBtn.onclick = () => {
+        closeModal();
+        const mainBtn = document.querySelector('[data-act="audio-project-settings"]');
+        if (mainBtn) mainBtn.click();
+      };
+    }
   }, 20);
 }
 async function _runExportVideo(data, format, videoKbps) {

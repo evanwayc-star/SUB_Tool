@@ -38,7 +38,7 @@ function syncVideoTracks(){ let m=0; for(const c of State.clips) m=Math.max(m,(c
 /* 音訊時間軸：一個匯入素材＝一條可視音訊軌；專案 A bus 只留在 mixer／配線資料。
    這樣 8 聲道素材不會在 A1～A8 複製出八張一樣的波形。右鍵可決定這條素材
    顯示 MIX 或任一來源聲道；大量素材仍以獨立捲動區避免擠掉字幕。 */
-const AROW_H=48, AUDIO_HEAD_H=22, AUDIO_MAX_VIEW_H=216, AUDIO_MIN_SUB_H=72;
+const AROW_H=48, AUDIO_HEAD_H=0, AUDIO_MAX_VIEW_H=216, AUDIO_MIN_SUB_H=72;
 function sourceAudioRowH(row){
   const h=Number(row?.height);
   return Number.isFinite(h) ? clamp(h,32,160) : ROW_H;
@@ -675,10 +675,7 @@ function renderAudioTrackRows(){
   tlAtracks.innerHTML='';
   if(!rows.length) return;
 
-  const head=document.createElement('div');
-  head.className='audio-section-head';
-  head.innerHTML=`<span>音訊</span><span class="audio-section-meta">素材音訊軌 ${rows.length}</span>`;
-  tlAtracks.appendChild(head);
+
   const content=document.createElement('div');
   content.className='audio-project-content';
   content.style.height=audioRowsHeight()+'px';
@@ -700,7 +697,8 @@ function renderAudioTrackRows(){
       const muted=timelineSourceMuted(c,external,sourceId);
       const externalSelected=external&&State.selectedAudioClipId===c.id;
       const block=document.createElement('div');
-      block.className='audio-clip-block'+(external?' external-audio-block':'')+(!external&&c.id===State.selectedClipId?' selected':'')+(external&&(externalSelected||Media.activeSource===c.audioSrc)?' selected':'')+(muted?' muted':'');
+      const isLocked=!!c.locked;
+      block.className='audio-clip-block'+(external?' external-audio-block':'')+(!external&&c.id===State.selectedClipId?' selected':'')+(external&&(externalSelected||Media.activeSource===c.audioSrc)?' selected':'')+(muted?' muted':'')+(isLocked?' locked':'');
       block.style.left=x1+'px'; block.style.width=Math.max(6,x2-x1)+'px';
       block.dataset.clipId=c.id||'';
       block.dataset.audioAssetId=external?(c.id||c.audioSourceId||c.audioSrc||''):'';
@@ -736,6 +734,7 @@ function renderAudioTrackRows(){
         });
       }
       block.addEventListener('mousedown',ev=>{
+        if(c.locked) return;
         if(external){ beginExternalAudioDrag(ev,c,entry,block); return; }
         ev.stopPropagation();
       });
@@ -973,10 +972,7 @@ function renderAtrackGutter(){
   const oldScroll=gut.scrollTop;
   gut.innerHTML='';
   if(!rows.length) return;
-  const head=document.createElement('div');
-  head.className='audio-gutter-head';
-  head.innerHTML='<span>音訊</span><span>素材波形</span>';
-  gut.appendChild(head);
+
   for(const row of rows){
     const g=document.createElement('div');
     const source=row.source;
@@ -985,7 +981,8 @@ function renderAtrackGutter(){
     const waveLabel=sourceWaveLabel(source,waveSelection);
     const muted=timelineSourceMuted(source,row.external,row.sourceId);
     const selected=row.external&&State.selectedAudioClipId===source.id;
-    g.className='agtrack'+(row.external?' external-audio-gutter':'')+(muted?' muted':'')+(selected?' selected':'');
+    const isLocked=!!source.locked;
+    g.className='agtrack'+(row.external?' external-audio-gutter':'')+(muted?' muted':'')+(selected?' selected':'')+(isLocked?' locked':'');
     g.style.height=row.h+'px';
     g.dataset.audioSourceId=row.sourceId;
     g.dataset.audioAssetId=row.external?(source.id||source.audioSourceId||source.audioSrc||''):'';
@@ -993,7 +990,8 @@ function renderAtrackGutter(){
     g.innerHTML=`<span class="alabel">S${row.index+1}</span>`+
       muteButtonMarkup(muted,row.external?'音檔':'影音素材')+
       `<span class="aname" title="${escapeHTML(row.label)}">${escapeHTML(row.label)}</span>`+
-      `<span class="audio-clip-route">${escapeHTML(waveLabel)}</span>`;
+      `<span class="audio-clip-route">${escapeHTML(waveLabel)}</span>`+
+      `<button class="alock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌'}">${isLocked?'🔒':'🔓'}</button>`;
     if(row.external){
       g.addEventListener('click',ev=>{
         if(ev.target.closest('.audio-clip-mute')) return;
@@ -1005,6 +1003,13 @@ function renderAtrackGutter(){
     mute?.addEventListener('click',ev=>{
       ev.preventDefault(); ev.stopPropagation();
       toggleTimelineSourceMute(source,{external:row.external,fallbackSourceId:row.sourceId,select:row.external});
+    });
+    const lockBtn=g.querySelector('.alock');
+    lockBtn?.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });
+    lockBtn?.addEventListener('click',ev=>{
+      ev.preventDefault(); ev.stopPropagation();
+      source.locked=!source.locked;
+      drawTimeline();
     });
     gut.appendChild(g);
   }
