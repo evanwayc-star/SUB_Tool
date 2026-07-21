@@ -370,6 +370,13 @@ function renderVideoSub(){
   if(sig===_videoSubSig) { renderImageOverlays(); return; }
   _videoSubSig=sig; _videoSub.innerHTML=html;
   renderImageOverlays();
+  
+  // 重繪會換掉原本的 DOM 節點；拖曳中直接接回新節點，讓原生提示框跟著位置走，
+  // 非拖曳時則清掉過期的 hover 引導，等下一次指標移動再計算。
+  if(_hoveredSubEl && !_hoveredSubEl.isConnected){
+    const dragEl=_subDrag?.cue ? _videoSub.querySelector(`.vsub-track.drag[data-cue="${_subDrag.cue.id}"]`) : null;
+    _setSubtitleHover(dragEl||null);
+  }
 }
 
 function renderImageOverlays(){
@@ -477,13 +484,6 @@ const _imgDragEnd = e => {
 document.addEventListener('pointerup', _imgDragEnd);
 document.addEventListener('pointercancel', _imgDragEnd);
 
-  // 重繪會換掉原本的 DOM 節點；拖曳中直接接回新節點，讓原生提示框跟著位置走，
-  // 非拖曳時則清掉過期的 hover 引導，等下一次指標移動再計算。
-  if(_hoveredSubEl && !_hoveredSubEl.isConnected){
-    const dragEl=_subDrag?.cue ? _videoSub.querySelector(`.vsub-track.drag[data-cue="${_subDrag.cue.id}"]`) : null;
-    _setSubtitleHover(dragEl||null);
-  }
-}
 
 /* 軌道樣式改動後的統一重繪：預覽畫面／mpv 字幕／樣式面板／字幕列表的樣式摘要。
    ── 一律走這裡（v4.29.5）：這四處本來各自散在九個呼叫點，漏掉列表摘要 → 面板改了框線、
