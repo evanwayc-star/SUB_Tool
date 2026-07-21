@@ -242,7 +242,7 @@ export const WCPreview = {
     const resized = (this.canvas.width !== bw || this.canvas.height !== bh);
 
     const t = Media.tlTime();
-    const acts = Media._gap ? [] : Seq.clipsAt(t).filter(c => State.videoTracks[c.vtrack||0]?.visible !== false);
+    const acts = Media._gap ? [] : Seq.clipsAt(t).filter(c => c.type !== 'image' && State.videoTracks[c.vtrack||0]?.visible !== false);
 
     // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
     // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
@@ -261,6 +261,7 @@ export const WCPreview = {
     // fetch/demux，那一刻只畫得出下層（要暫停等它載完才出現）＝「播放時不會切到最上層」。
     const PRELOAD_S = 3;
     for(const c of State.clips){
+      if(c.type === 'image') continue;
       if(acts.indexOf(c) >= 0) continue;
       if(c.offset > t + PRELOAD_S || Seq.clipEnd(c) <= t) continue;
       if(State.videoTracks[c.vtrack||0]?.visible === false) continue;
