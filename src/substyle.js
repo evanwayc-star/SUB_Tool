@@ -62,9 +62,8 @@ function originOf(st){ const a = anchorPct(st); return `${a.x}% ${a.y}%`; }
 
 /* ---- HTML 預覽（videoSub 每句 span 的 inline CSS；容器只管定位/對齊，由呼叫端處理） ---- */
 export function styleToCss(st, ratio){
-  // ASS 規範之 Fontsize 係以 72 pt / 96 dpi 換算 (72/96 = 0.75)，libass (mpv / 匯出燒入) 會自動套用 0.75。
-  // HTML DOM 預覽必須乘上 0.75，字級才能與 mpv / 匯出畫面 1:1 完美對齊。
-  const fs = Math.max(10, Math.round(st.fontSize * 0.75 * r));
+  const r = ratio || 1;
+  const fs = Math.max(12, Math.round(st.fontSize * r));
   let css = `font-size:${fs}px;color:${st.color};`+
     `font-family:'${st.font}','Noto Sans TC','Source Han Sans TC',sans-serif;`+
     `font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'};`+

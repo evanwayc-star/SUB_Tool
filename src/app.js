@@ -432,6 +432,12 @@ function renderImageOverlays(){
   });
   
   if(layer.innerHTML !== html) layer.innerHTML = html;
+
+  if(Media.mpvMode && !Media._wcTakeover && window.subtool?.mpv?.setImageGuide){
+    window.subtool.mpv.setImageGuide(html);
+  } else if(window.subtool?.mpv?.setImageGuide){
+    window.subtool.mpv.setImageGuide('');
+  }
 }
 
 

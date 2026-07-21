@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('subtool', {
     setBounds: (b)     => ipcRenderer.invoke('mpv:setBounds', b),
     show:      (v)     => ipcRenderer.invoke('mpv:show', v),
     setGuide:  (g)     => ipcRenderer.invoke('mpv:setGuide', g),
+    setImageGuide: (h) => ipcRenderer.invoke('mpv:setImageGuide', h),
     subSet:    (ass)   => ipcRenderer.invoke('mpv:subSet', ass),
     subVisible:(v)     => ipcRenderer.invoke('mpv:subVisible', v),
     quit:      ()      => ipcRenderer.invoke('mpv:quit'),

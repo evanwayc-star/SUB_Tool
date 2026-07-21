@@ -1326,14 +1326,18 @@ let _mpvGuideWin = null;  // 疊在 mpv 上方的透明輔助層（字幕拖曳�
 let _mpvRect = null;       // 最近一次面板矩形（內容座標 DIP）
 let _mpvVisible = true;
 let _mpvGuide = null;
+let _mpvImagesHtml = '';
 let _mpvSubFile = null;    // 餵給 mpv 的暫存 .ass 字幕檔
 let _mpvSubAdded = false;
 
 const MPV_GUIDE_HTML = `<!doctype html><html><head><style>
-html,body,svg{width:100%;height:100%;margin:0;overflow:hidden;background:transparent;pointer-events:none}
+html,body,svg{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:transparent;pointer-events:none}
+#imgContainer{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+.img-wrap{position:absolute;pointer-events:none}
+.img-wrap img{width:100%;height:100%;object-fit:contain;display:block}
 #guide{display:none} rect{fill:none;stroke:rgba(255,255,255,.88);stroke-width:1;stroke-dasharray:5 4}
 line{stroke:rgba(255,255,255,.65);stroke-width:1} circle{fill:#f0a020;stroke:#fff;stroke-width:2}
-</style></head><body><svg id="svg"><g id="guide"><rect id="box"/><line id="stem"/><circle id="dot" r="7"/></g></svg><script>
+</style></head><body><div id="imgContainer"></div><svg id="svg"><g id="guide"><rect id="box"/><line id="stem"/><circle id="dot" r="7"/></g></svg><script>
 let current=null; const svg=document.getElementById('svg'), guide=document.getElementById('guide');
 const draw=()=>{ const g=current; if(!g){guide.style.display='none';return;} const w=innerWidth,h=innerHeight;
   svg.setAttribute('viewBox','0 0 '+w+' '+h); document.getElementById('box').setAttribute('x',g.x); document.getElementById('box').setAttribute('y',g.y);
@@ -1342,6 +1346,7 @@ const draw=()=>{ const g=current; if(!g){guide.style.display='none';return;} con
   stem.setAttribute('x1',cx);stem.setAttribute('y1',cy+7);stem.setAttribute('x2',cx);stem.setAttribute('y2',g.y-2);
   dot.setAttribute('cx',cx);dot.setAttribute('cy',cy);guide.style.display='block'; };
 window.setGuide=(g)=>{current=g;draw();}; addEventListener('resize',draw);
+window.setImages=(h)=>{ document.getElementById('imgContainer').innerHTML=h||''; };
 </script></body></html>`;
 
 function applyMpvBounds(b) {
@@ -1369,11 +1374,11 @@ function applyMpvBounds(b) {
 function destroyMpvWin() {
   if (_mpvWin) { try { if (!_mpvWin.isDestroyed()) _mpvWin.destroy(); } catch (e) {} _mpvWin = null; }
   if (_mpvGuideWin) { try { if (!_mpvGuideWin.isDestroyed()) _mpvGuideWin.destroy(); } catch (e) {} _mpvGuideWin = null; }
-  _mpvRect = null; _mpvVisible = true; _mpvGuide = null; _mpvSubAdded = false; _mpvSubFile = null;
+  _mpvRect = null; _mpvVisible = true; _mpvGuide = null; _mpvImagesHtml = ''; _mpvSubAdded = false; _mpvSubFile = null;
 }
 
 function showMpvGuide() {
-  if (!_mpvVisible || !_mpvGuide || !_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
+  if (!_mpvVisible || (!_mpvGuide && !_mpvImagesHtml) || !_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
   try { _mpvGuideWin.showInactive(); _mpvGuideWin.moveTop(); } catch (e) {}
 }
 
@@ -1381,7 +1386,7 @@ function setMpvGuide(raw) {
   const vals = raw && [raw.x, raw.y, raw.w, raw.h];
   if (!vals || vals.some(v => !Number.isFinite(v)) || raw.w <= 0 || raw.h <= 0) {
     _mpvGuide = null;
-    if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e) {} }
+    if (!_mpvImagesHtml && _mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e) {} }
     return;
   }
   _mpvGuide = { x: +raw.x, y: +raw.y, w: +raw.w, h: +raw.h };
@@ -1389,6 +1394,16 @@ function setMpvGuide(raw) {
   try {
     _mpvGuideWin.webContents.executeJavaScript(`window.setGuide(${JSON.stringify(_mpvGuide)})`, true).catch(() => {});
     showMpvGuide();
+  } catch (e) {}
+}
+
+function setMpvImageGuide(html) {
+  _mpvImagesHtml = html || '';
+  if (!_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
+  try {
+    _mpvGuideWin.webContents.executeJavaScript(`window.setImages(${JSON.stringify(_mpvImagesHtml)})`, true).catch(() => {});
+    if (_mpvImagesHtml || _mpvGuide) showMpvGuide();
+    else if (!_mpvGuide) _mpvGuideWin.hide();
   } catch (e) {}
 }
 
@@ -1555,6 +1570,7 @@ ipcMain.handle('mpv:show', (e, v) => {
   }
 });
 ipcMain.handle('mpv:setGuide', (e, guide) => setMpvGuide(guide));
+ipcMain.handle('mpv:setImageGuide', (e, html) => setMpvImageGuide(html));
 // 餵字幕給 mpv（libass 渲染）：寫入暫存 .ass，首次 sub-add，之後 sub-reload
 ipcMain.handle('mpv:subSet', (e, assText) => {
   if (!_mpvClient) return;
