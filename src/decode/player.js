@@ -243,10 +243,11 @@ export const WCPreview = {
 
     const t = Media.tlTime();
     const acts = Media._gap ? [] : Seq.clipsAt(t).filter(c => c.type !== 'image' && State.videoTracks[c.vtrack||0]?.visible !== false);
+    const hasImageClip = !Media._gap && Seq.clipsAt(t).some(c => c.type === 'image' && State.videoTracks[c.vtrack||0]?.visible !== false);
 
     // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
-    // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
-    const needsComposite = acts.length > 1 || acts.some(c => {
+    // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／圖片疊層／子母畫面／淡變才接管。
+    const needsComposite = acts.length > 1 || hasImageClip || acts.some(c => {
       const vt=State.videoTracks[c.vtrack||0]||{};
       return (c.fadeIn||0)>0 || (c.fadeOut||0)>0 ||
         (vt.scale != null && Math.abs(vt.scale-1)>0.001) ||
