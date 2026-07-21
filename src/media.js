@@ -1851,6 +1851,36 @@ const Media = {
     }
     if(this._bgVersion === myVer) { renderAudioTracks(); setStatus(`影片已加入序列：${c.name}`, 'ok'); }
   },
+  /* 加入圖片到序列（桌面） */
+  async addImageDesktop(p, geo = null){
+    const name = baseName(p);
+    let url = p;
+    try { url = await DESK.fileURL(p); } catch(e){}
+    const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 5, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
+    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? 5, 5); c.offset = geo.offset ?? c.offset; if(geo.vtrack != null) c.vtrack = geo.vtrack; c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; }
+    // 預設將圖片放置於全新的最上層視訊軌
+    if (!geo || geo.vtrack == null) {
+      c.vtrack = State.videoTracks.length;
+      ensureVideoTrackCount(c.vtrack + 1);
+    }
+    Seq.sort(); Seq.recomputeDuration();
+    drawTimeline();
+    emit('history:record', '加入圖片：' + c.name);
+    setStatus(`已加入圖片：${c.name}`, 'ok');
+    return c;
+  },
+  /* 加入圖片到序列（網頁版） */
+  async addImageWeb(f){
+    const url = URL.createObjectURL(f); this.objectURLs.push(url);
+    const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 5, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
+    c.vtrack = State.videoTracks.length;
+    ensureVideoTrackCount(c.vtrack + 1);
+    Seq.sort(); Seq.recomputeDuration();
+    drawTimeline();
+    emit('history:record', '加入圖片：' + c.name);
+    setStatus(`已加入圖片：${c.name}`, 'ok');
+    return c;
+  },
   /* 加入影片到序列（網頁版）：objectURL + metadata 取長度；小檔另算波形 */
   async addClipWeb(f){
     setStatus('讀取影片資訊…', 'busy');

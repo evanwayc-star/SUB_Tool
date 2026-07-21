@@ -400,7 +400,7 @@ ipcMain.handle('dialog:openMedia', async () => {
   const r = await dialog.showOpenDialog(mainWin, {
     title: '匯入影片或音訊檔', properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '影片或音訊', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'mxf', 'avi', 'm2ts', 'mts', 'ts', 'wmv', 'webm', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'aif', 'aiff'] },
+      { name: '影音或圖片', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'mxf', 'avi', 'm2ts', 'mts', 'ts', 'wmv', 'webm', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'aif', 'aiff', 'jpg', 'jpeg', 'png'] },
       { name: '全部', extensions: ['*'] }
     ]
   });
@@ -706,10 +706,16 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   const uniqueVideoPaths = [...new Set(list.map(c => c.path))];
   const pathMinIn = new Map();
   uniqueVideoPaths.forEach(p => {
-    // 找出所有用到這個檔案的 clip，取最小的 c.in，並稍微往前抓 0.5 秒確保關鍵幀安全（最低 0）
-    const minIn = Math.max(0, Math.min(...list.filter(c => c.path === p).map(c => c.in)) - 0.5);
-    pathMinIn.set(p, minIn);
-    inputs.push(...hwdecArgs(), '-ss', minIn.toFixed(3), '-i', p);
+    const clipsForPath = list.filter(c => c.path === p);
+    const isImg = clipsForPath[0].type === 'image';
+    if (isImg) {
+      pathMinIn.set(p, 0);
+      inputs.push('-loop', '1', '-i', p);
+    } else {
+      const minIn = Math.max(0, Math.min(...clipsForPath.map(c => c.in)) - 0.5);
+      pathMinIn.set(p, minIn);
+      inputs.push(...hwdecArgs(), '-ss', minIn.toFixed(3), '-i', p);
+    }
   });
   const videoInputIndices = list.map(c => uniqueVideoPaths.indexOf(c.path));
   let ii = uniqueVideoPaths.length; // 之後的逐聲道音訊檔輸入從此接續編號
@@ -731,12 +737,25 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     for (const { c, i, vIdx } of trk) {
       if (c.offset > cursor + EPS) gap(c.offset - cursor);
       const L = `t${ti}s${si++}`;
-      // 縮放到此軌尺寸（等比、透明補邊，讓非填滿處露出下層），統一 fps/SAR、加 alpha
       const fi = Math.max(0, +c.fadeIn || 0), fo = Math.max(0, +c.fadeOut || 0), clen = Math.max(0.001, c.out - c.in);
       const minIn = pathMinIn.get(c.path);
       const adjIn = c.in - minIn;
       const adjOut = c.out - minIn;
-      let vchain = `[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
+      
+      let vchain = '';
+      if (c.type === 'image') {
+        const clipScale = c.scale ?? 1;
+        const cw = Math.max(2, Math.round(clipScale * SW));
+        const ch = Math.max(2, Math.round(clipScale * SH));
+        const pxClip = c.posX ?? 0.5;
+        const pyClip = c.posY ?? 0.5;
+        const padX = Math.round(pxClip * SW - cw / 2);
+        const padY = Math.round(pyClip * SH - ch / 2);
+        vchain = `[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:${padX}:${padY}:color=black@0.0,setsar=1`;
+      } else {
+        vchain = `[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
+      }
+      
       // 轉場：淡入/淡出（fade alpha＝淡到透明，讓下層/黑底露出→軌間溶接）
       if (fi > 0) vchain += `,fade=t=in:st=0:d=${Math.min(fi, clen).toFixed(3)}:alpha=1`;
       if (fo > 0) vchain += `,fade=t=out:st=${Math.max(0, clen - Math.min(fo, clen)).toFixed(3)}:d=${Math.min(fo, clen).toFixed(3)}:alpha=1`;

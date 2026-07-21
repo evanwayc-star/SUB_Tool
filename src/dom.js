@@ -8,4 +8,5 @@ const tlTracks= $('tlTracks');
 const rulerCv = $('rulerCanvas');
 const waveCv  = $('waveCanvas');
 const sublist=$('sublist');
-export { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist };
+const imageLayer=$('imageLayer');
+export { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist, imageLayer };

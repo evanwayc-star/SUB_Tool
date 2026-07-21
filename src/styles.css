@@ -106,6 +106,25 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
    會停在原生尺寸不放大，導致字幕／安全框（用 _stageRect）跟畫面對不上（v4.33 修）。 */
 #video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 .vsublayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;}
+/* 圖片合成預覽層：疊在預覽畫布之上，行為類似安全框與字幕層，對齊視訊比例區塊 */
+.imglayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;}
+.img-overlay{position:absolute;pointer-events:auto;cursor:grab;object-fit:contain;transform-origin:center center;}
+.imglayer.dragging, .imglayer.dragging .img-overlay{cursor:grabbing;}
+.img-overlay:hover, .img-overlay.hovering{outline:1px dashed rgba(255,255,255,.55);outline-offset:3px;}
+.img-overlay .resize-handle{display:none;}
+/* 當hover時顯示四角縮放把手，為了能縮放，需要外層包裝或用 clip data，在 app.js 中我們會使用 .img-wrap 來包裝 <img> */
+.img-wrap{position:absolute;pointer-events:auto;cursor:grab;transform-origin:center center;}
+.img-wrap img{width:100%;height:100%;object-fit:contain;pointer-events:none;}
+.imglayer.dragging, .imglayer.dragging .img-wrap{cursor:grabbing;}
+.img-wrap:hover, .img-wrap.hovering{outline:1px dashed rgba(255,255,255,.55);outline-offset:3px;}
+.img-wrap:hover .resize-handle, .img-wrap.hovering .resize-handle, .imglayer.dragging .img-wrap .resize-handle{
+  display:block;position:absolute;width:10px;height:10px;background:var(--accent);
+  border:1px solid #fff;border-radius:50%;cursor:pointer;
+}
+.img-wrap .rh-nw{top:-5px;left:-5px;cursor:nwse-resize;}
+.img-wrap .rh-ne{top:-5px;right:-5px;cursor:nesw-resize;}
+.img-wrap .rh-sw{bottom:-5px;left:-5px;cursor:nesw-resize;}
+.img-wrap .rh-se{bottom:-5px;right:-5px;cursor:nwse-resize;}
 /* WebCodecs 預覽畫布：不透明蓋住 video（video 仍出聲＋當時鐘）；previewFade/videoSub 依 DOM 順序疊其上 */
 .preview-canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none}
 /* 預覽淡出入黑提示（淡入/淡出/軌透明度）：疊在原生影片上（mpv 走獨立視窗，改用 brightness） */

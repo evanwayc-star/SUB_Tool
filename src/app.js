@@ -367,9 +367,116 @@ function renderVideoSub(){
     });
   }
   }catch(err){ console.error('[videoSub] 渲染錯誤（保留上次畫面）:', err); return; } // 防禦②：單次出錯不清空字幕、下次重試
-  if(sig===_videoSubSig) return;
-  _videoSubSig=sig;
-  _videoSub.innerHTML=html;
+  if(sig===_videoSubSig) { renderImageOverlays(); return; }
+  _videoSubSig=sig; _videoSub.innerHTML=html;
+  renderImageOverlays();
+}
+
+function renderImageOverlays(){
+  const rect = _stageRect();
+  const layer = document.getElementById('imageLayer');
+  if(!layer) return;
+  if(!rect){ layer.innerHTML=''; return; }
+  
+  const key = rect.x+'|'+rect.y+'|'+rect.w+'|'+rect.h;
+  if(layer.dataset.rect !== key){
+    layer.dataset.rect = key;
+    const st = layer.style;
+    st.left=rect.x+'px'; st.top=rect.y+'px';
+    st.width=rect.w+'px'; st.height=rect.h+'px';
+  }
+
+  const t = Media.displayTime();
+  // 只處理 type === 'image' 且 trackVisible 的
+  const imageClips = Seq.clipsAt(t).filter(c => c.type === 'image' && trackVisible(c.vtrack || 0));
+  
+  let html = '';
+  imageClips.forEach(c => {
+    // scale, posX, posY (預設 scale: 1, posX: 0.5, posY: 0.5)
+    const scale = c.scale ?? 1;
+    const posX = c.posX ?? 0.5;
+    const posY = c.posY ?? 0.5;
+    const opacity = (State.videoTracks[c.vtrack || 0]?.opacity ?? 1);
+    
+    // 計算淡入淡出
+    let alpha = opacity;
+    const fi = c.fadeIn || 0, fo = c.fadeOut || 0, clen = Math.max(0.001, c.out - c.in);
+    const currIn = t - c.offset;
+    if(fi > 0 && currIn < fi) alpha *= currIn / fi;
+    if(fo > 0 && currIn > clen - fo) alpha *= (clen - currIn) / fo;
+    alpha = Math.max(0, Math.min(1, alpha));
+
+    // 使用百分比定位（相對於 _stageRect()）
+    const contStyle = `left:${posX*100}%; top:${posY*100}%; width:${scale*100}%; height:${scale*100}%; transform:translate(-50%,-50%); opacity:${alpha};`;
+    html += `<div class="img-wrap" data-id="${c.id}" style="${contStyle}">
+      <img src="${escapeHTML(c.web?.url || c.path)}" />
+      <div class="resize-handle rh-nw" data-corner="nw"></div>
+      <div class="resize-handle rh-ne" data-corner="ne"></div>
+      <div class="resize-handle rh-sw" data-corner="sw"></div>
+      <div class="resize-handle rh-se" data-corner="se"></div>
+    </div>`;
+  });
+  
+  if(layer.innerHTML !== html) layer.innerHTML = html;
+}
+
+let _imgDrag = null;
+document.addEventListener('pointerdown', e => {
+  if(e.button !== 0) return;
+  const rh = e.target.closest?.('.resize-handle');
+  const wrap = e.target.closest?.('.img-wrap');
+  if(!wrap) return;
+  const cid = wrap.dataset.id;
+  const clip = Seq.byId(cid);
+  if(!clip) return;
+  
+  const rect = _stageRect();
+  if(!rect) return;
+
+  _imgDrag = { 
+    clip, rect, 
+    x0: e.clientX, y0: e.clientY,
+    origPosX: clip.posX ?? 0.5, origPosY: clip.posY ?? 0.5, origScale: clip.scale ?? 1,
+    corner: rh ? rh.dataset.corner : null
+  };
+  
+  const layer = document.getElementById('imageLayer');
+  layer?.classList.add('dragging');
+  try{ layer?.setPointerCapture(e.pointerId); }catch(err){}
+  e.preventDefault();
+});
+
+document.addEventListener('pointermove', e => {
+  const d = _imgDrag; if(!d) return;
+  const clip = d.clip;
+  
+  if(d.corner){
+    // Scale mode
+    const dx = e.clientX - d.x0;
+    const sign = (d.corner === 'nw' || d.corner === 'sw') ? -1 : 1;
+    const scaleDiff = (dx * sign) / d.rect.w * 2; 
+    clip.scale = Math.max(0.01, d.origScale + scaleDiff);
+  } else {
+    // Move mode
+    clip.posX = clamp(d.origPosX + (e.clientX - d.x0) / d.rect.w, 0, 1);
+    clip.posY = clamp(d.origPosY + (e.clientY - d.y0) / d.rect.h, 0, 1);
+  }
+  
+  renderImageOverlays();
+  e.preventDefault();
+});
+
+const _imgDragEnd = e => {
+  const d = _imgDrag; if(!d) return;
+  _imgDrag = null;
+  const layer = document.getElementById('imageLayer');
+  layer?.classList.remove('dragging');
+  try{ layer?.releasePointerCapture(e.pointerId); }catch(err){}
+  recordHistory('調整圖片大小與位置');
+};
+document.addEventListener('pointerup', _imgDragEnd);
+document.addEventListener('pointercancel', _imgDragEnd);
+
   // 重繪會換掉原本的 DOM 節點；拖曳中直接接回新節點，讓原生提示框跟著位置走，
   // 非拖曳時則清掉過期的 hover 引導，等下一次指標移動再計算。
   if(_hoveredSubEl && !_hoveredSubEl.isConnected){
@@ -723,6 +830,7 @@ function mediaFileKind(fileOrPath){
   if(/^audio\//i.test(type)) return 'audio';
   if(/^video\//i.test(type)) return 'video';
   const ext=(name.split('.').pop()||'').toLowerCase();
+  if(['jpg','jpeg','png'].includes(ext) || /^image\//i.test(type)) return 'image';
   return AUDIO_MEDIA_EXTENSIONS.has(ext)?'audio':'video';
 }
 
@@ -738,6 +846,7 @@ async function importDesktopMediaFiles(value){
   const paths=(Array.isArray(value)?value:(value?[value]:[])).filter(path=>typeof path==='string'&&path);
   const videos=paths.filter(path=>mediaFileKind(path)==='video');
   const audios=paths.filter(path=>mediaFileKind(path)==='audio');
+  const images=paths.filter(path=>mediaFileKind(path)==='image');
   if(videos.length>1){
     // 多選影片的語意固定為「第一支建立／保留主序列，其餘加入序列」，避免連續跳出多個 modal。
     if(!Media.seqOn()) await Media.loadDesktopMedia(videos.shift());
@@ -748,12 +857,14 @@ async function importDesktopMediaFiles(value){
     else await Media.loadDesktopMedia(path);
   }
   for(const path of audios) await Media.addAudioFileDesktop(path);
+  for(const path of images) await Media.addImageDesktop(path);
 }
 
 async function importBrowserMediaFiles(files){
   const list=Array.isArray(files)?files.filter(Boolean):[];
   const videos=list.filter(file=>mediaFileKind(file)==='video');
   const audios=list.filter(file=>mediaFileKind(file)==='audio');
+  const images=list.filter(file=>mediaFileKind(file)==='image');
   if(videos.length>1){
     if(!Media.seqOn()) await Media.loadVideoFile(videos.shift());
     for(const file of videos) await Media.addClipWeb(file);
@@ -763,6 +874,7 @@ async function importBrowserMediaFiles(files){
     else await Media.loadVideoFile(file);
   }
   for(const file of audios) await Media.addAudioFile(file);
+  for(const file of images) await Media.addImageWeb(file);
 }
 
 // A4：純關閉面板的 case 改用資料表，消除重複的 classList.remove('show')+_syncMpvPanel()

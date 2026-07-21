@@ -427,10 +427,13 @@ function renderClipBlocks(){
     el.dataset.clipId=c.id; el.dataset.vtrack=v;
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
     const hasFade=(c.fadeIn>0||c.fadeOut>0);
-    el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}${hasFade?' ⌁':''}</div><div class="edge r"></div>`;
+    const isImg = c.type === 'image';
+    const icon = isImg ? '🖼️' : '🎬';
+    const typeLabel = isImg ? '圖片' : '影片';
+    el.innerHTML=`<div class="edge l"></div><div class="clip-label">${icon} ${escapeHTML(c.name||'')}${trimmed?' ✂':''}${hasFade?' ⌁':''}</div><div class="edge r"></div>`;
     el.title=`${c.name}（${State.videoTracks[v]?.name||('視訊軌 V'+(v+1))}）\n位置 ${secToEncore(s,State.fps,State.dropFrame)} → ${secToEncore(e,State.fps,State.dropFrame)}`+
       `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
-      `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪`;
+      `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪\n${isImg ? '在預覽畫面可直接縮放與移動圖片位置' : ''}`;
     row.appendChild(el);
   }
 }
