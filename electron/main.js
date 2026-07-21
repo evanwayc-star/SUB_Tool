@@ -1533,6 +1533,7 @@ ipcMain.handle('mpv:loadfile', async (e, p) => {
   return { ok: false, duration: 0 };
 });
 ipcMain.handle('mpv:seek',  (e, t) => mpvSend(['seek', t, 'absolute']));
+ipcMain.handle('mpv:screenshot', (e, p) => mpvSend(['screenshot-to-file', p, 'subtitles']));
 ipcMain.handle('mpv:play',  ()     => mpvSend(['set_property', 'pause', false]));
 ipcMain.handle('mpv:pause', ()     => mpvSend(['set_property', 'pause', true]));
 ipcMain.handle('mpv:mute',  (e, v) => mpvSend(['set_property', 'mute', v]));

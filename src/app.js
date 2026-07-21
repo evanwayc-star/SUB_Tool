@@ -264,7 +264,7 @@ function toggleSafeFrame(){
   State.safeFrame = !State.safeFrame;
   $('safeFrameBtn')?.classList.toggle('active', State.safeFrame);
   drawSafeFrame(); saveConfig(); refreshMpvSubs();
-  showToast(State.safeFrame ? '安全框：開（90%／80%＋中心十字，僅預覽）' : '安全框：關');
+  showToast(State.safeFrame ? '安全框：開（100%／90%／80%＋中心十字）' : '安全框：關');
 }
 
 let _lastStageH = 0;
@@ -2159,7 +2159,117 @@ async function initDesktop(){
 }
 
 async function takeScreenshot(withTimecode = false) {
-  if (!Media.hasVideo()) { showToast('尚未載入影音'); return; }
+  if (!State.duration && !State.mediaPath) { showToast('尚未載入影音'); return; }
+
+  let tcSuffix = '';
+  let tcStr = '';
+  if (withTimecode) {
+    tcStr = secToEncore(Media.displayTime(), State.fps, State.dropFrame);
+    tcSuffix = '_' + tcStr.replace(/:/g, '-').replace(/;/g, '-');
+  }
+
+  // 決定目錄與檔名
+  let dir = getProjectDir();
+  if (!dir && State.mediaPath) {
+    const sep = State.mediaPath.replace(/\\/g, '/').lastIndexOf('/');
+    if (sep > 0) dir = State.mediaPath.substring(0, sep);
+  }
+  if (dir) dir = dir.replace(/[\\/]+$/, '');
+
+  let fullPath = '';
+  let name = '';
+  if (dir && IS_DESKTOP && DESK && DESK.listDir) {
+    let maxNum = 0;
+    try {
+      const files = await DESK.listDir(dir);
+      const re = /^Shot-(\d{3})/i;
+      for (const f of files) {
+        const m = re.exec(f);
+        if (m) { const n = parseInt(m[1], 10); if (n > maxNum) maxNum = n; }
+      }
+    } catch (e) { console.error('[screenshot] listDir error:', e); }
+    const nextNum = (maxNum + 1).toString().padStart(3, '0');
+    name = `Shot-${nextNum}${tcSuffix}.jpg`;
+    fullPath = dir + '/' + name;
+  } else {
+    // 瀏覽器 fallback 檔名
+    name = `Shot-${Math.floor(Media.displayTime())}${tcSuffix}.jpg`;
+  }
+
+  // 若為 MPV 模式
+  if (Media.mpvMode && IS_DESKTOP && DESK && DESK.mpv && DESK.mpv.screenshot && fullPath) {
+    if (!withTimecode) {
+      // 不需時間碼，直接請 mpv 存檔
+      try {
+        await DESK.mpv.screenshot(fullPath);
+        // mpv 非同步存檔，稍等一下讓它寫入
+        await new Promise(r => setTimeout(r, 300));
+        setStatus(`截圖已儲存：${name}`, 'ok');
+      } catch (e) {
+        console.error('[screenshot] mpv screenshot error:', e);
+        showToast('截圖失敗');
+      }
+      return;
+    } else {
+      // 需時間碼：請 mpv 存到暫存檔，讀入 JS 加工
+      const tempPath = dir + '/.subtool_temp_shot.jpg';
+      try {
+        await DESK.mpv.screenshot(tempPath);
+        await new Promise(r => setTimeout(r, 300)); // 等待寫入
+        
+        const b64 = await DESK.readB64(tempPath);
+        if (!b64) throw new Error('Cannot read temp screenshot');
+        
+        const img = new Image();
+        await new Promise((res, rej) => {
+          img.onload = res; img.onerror = rej;
+          img.src = 'data:image/jpeg;base64,' + b64;
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        
+        // 畫時間碼
+        const fontSize = Math.floor(canvas.height * 0.05);
+        ctx.font = 'bold ' + fontSize + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        const x = canvas.width / 2;
+        const y = canvas.height * 0.95;
+        const textWidth = ctx.measureText(tcStr).width;
+        
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.fillRect(x - textWidth / 2 - 10, y - fontSize - 5, textWidth + 20, fontSize + 10);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(tcStr, x, y);
+        
+        const outB64 = await new Promise(r => {
+          canvas.toBlob(b => {
+            const reader = new FileReader();
+            reader.onloadend = () => r(reader.result.split(',')[1]);
+            reader.readAsDataURL(b);
+          }, 'image/jpeg', 0.9);
+        });
+        
+        const result = await DESK.writeScreenshot(fullPath, outB64);
+        if (result) {
+           setStatus(`截圖已儲存：${name}`, 'ok');
+           // 清理暫存檔（嘗試刪除但忽略錯誤，因為沒有 expose unlink，此處留著會被覆蓋）
+        } else {
+           throw new Error('writeScreenshot failed');
+        }
+      } catch (e) {
+        console.error('[screenshot] MPV timecode shot error:', e);
+        showToast('截圖失敗');
+      }
+      return;
+    }
+  }
+
+  // ================= 瀏覽器或非 MPV 模式 (HTML5 Video) =================
   const canvas = document.createElement('canvas');
   canvas.width = State.videoWidth || 1920;
   canvas.height = State.videoHeight || 1080;
@@ -2173,12 +2283,7 @@ async function takeScreenshot(withTimecode = false) {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
   
-  // 時間碼浮水印
-  let tcSuffix = '';
   if (withTimecode) {
-    const tcStr = secToEncore(Media.displayTime(), State.fps, State.dropFrame);
-    tcSuffix = '_' + tcStr.replace(/:/g, '-').replace(/;/g, '-');
-    
     const fontSize = Math.floor(canvas.height * 0.05);
     ctx.font = 'bold ' + fontSize + 'px monospace';
     ctx.textAlign = 'center';
@@ -2189,54 +2294,24 @@ async function takeScreenshot(withTimecode = false) {
     const textWidth = ctx.measureText(tcStr).width;
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
     ctx.fillRect(x - textWidth / 2 - 10, y - fontSize - 5, textWidth + 20, fontSize + 10);
-    
     ctx.fillStyle = '#fff';
     ctx.fillText(tcStr, x, y);
   }
   
   canvas.toBlob(async (blob) => {
     try {
-      const b64 = await new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result.split(',')[1]);
-        reader.readAsDataURL(blob);
-      });
-      
-      if (IS_DESKTOP && DESK) {
-        let dir = getProjectDir();
-        if (!dir && State.mediaPath) {
-          const sep = State.mediaPath.replace(/\\/g, '/').lastIndexOf('/');
-          if (sep > 0) dir = State.mediaPath.substring(0, sep);
-        }
-        if (dir) {
-          // 去除尾端分隔符
-          dir = dir.replace(/[\\/]+$/, '');
-          // 掃描資料夾，找出所有 Shot-NNN 的最大編號
-          let maxNum = 0;
-          try {
-            const files = await DESK.listDir(dir);
-            const re = /^Shot-(\d{3})/i;
-            for (const f of files) {
-              const m = re.exec(f);
-              if (m) { const n = parseInt(m[1], 10); if (n > maxNum) maxNum = n; }
-            }
-          } catch (e) { console.error('[screenshot] listDir error:', e); }
-          const nextNum = (maxNum + 1).toString().padStart(3, '0');
-          const name = `Shot-${nextNum}${tcSuffix}.jpg`;
-          const fullPath = dir + '/' + name;
-          const result = await DESK.writeScreenshot(fullPath, b64);
-          if (result) {
-            setStatus(`截圖已儲存：${name}`, 'ok');
-          } else {
-            console.error('[screenshot] writeScreenshot failed, path:', fullPath);
-            showToast('截圖儲存失敗');
-          }
-          return;
-        }
+      if (fullPath && DESK) {
+        const b64 = await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result.split(',')[1]);
+          reader.readAsDataURL(blob);
+        });
+        const result = await DESK.writeScreenshot(fullPath, b64);
+        if (result) setStatus(`截圖已儲存：${name}`, 'ok');
+        else showToast('截圖儲存失敗');
+        return;
       }
       
-      // 瀏覽器版 fallback
-      const name = `Shot-${Math.floor(Media.displayTime())}${tcSuffix}.jpg`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
