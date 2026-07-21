@@ -482,7 +482,7 @@ const _EXPORT_LAYOUTS = Object.freeze({
   mono:       { channels: 1, channelLayout: 'mono',       channelNames: ['FC'],                             title: 'Mono' },
   stereo:     { channels: 2, channelLayout: 'stereo',     channelNames: ['FL', 'FR'],                       title: 'Stereo' },
   stereoLtRt: { channels: 2, channelLayout: 'stereo',     channelNames: ['FL', 'FR'],                       title: 'Stereo Lt/Rt' },
-  '5.1':      { channels: 6, channelLayout: '5.1(side)',  channelNames: ['FL', 'FR', 'FC', 'LFE', 'SL', 'SR'], title: '5.1 (L, R, C, LFE, Ls, Rs)' },
+  '5.1':      { channels: 6, channelLayout: '5.1',        channelNames: ['FL', 'FR', 'FC', 'LFE', 'BL', 'BR'], title: '5.1 (L, R, C, LFE, Ls, Rs)' },
 });
 /* WAV 的多聲道檔本質上仍是一條 interleaved stream；保留 bus 順序並以 WAVEFORMATEXTENSIBLE
    可辨識的 channel mask 寫出。18 軌是使用者明確需要的情境，這份清單涵蓋到 32 軌。 */

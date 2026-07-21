@@ -225,6 +225,7 @@
         <span style="font-weight:600">⏱ 時間軸</span>
         <span style="margin-left:8px; font-size:12px; opacity:0.8;">音軌數:</span>
         <input type="number" id="projectAudioTracksCount" min="1" max="32" value="2" title="設定專案目前有多少音軌" style="width:55px; margin-right:8px; text-align:center; background:var(--bg-3); color:var(--text); border:1px solid var(--line);">
+        <button class="icon" data-act="audio-project-settings" title="開啟 Audio Channel Configuration 視窗" style="margin-right:8px;">⚙ <span class="lbl">聲道設定</span></button>
         <button class="icon" data-act="add-track" title="新增字幕軌">＋ <span class="lbl">軌道</span></button>
         <div class="sep"></div>
         <button class="icon" data-act="history" title="動作紀錄 (7)">🕘 <span class="lbl">紀錄</span></button>
@@ -236,8 +237,6 @@
         <div class="sep"></div>
         <button class="icon" data-act="split-clip" title="在播放點切割選取素材；未選取音檔時切割影片段 (Ctrl+K)">✂ <span class="lbl">切割片段</span></button>
         <button class="icon" data-act="unlink-clip-audio" title="將選取影片的原音解除連結，成為可獨立剪輯的音訊素材">🔗✂ <span class="lbl">解除影音</span></button>
-        <div class="sep"></div>
-        <button class="icon" data-act="audio-project-settings" title="設定專案音訊軌與影片／WAV 的輸出聲道配置">🔊 <span class="lbl">輸出聲道</span></button>
         <div class="sep"></div>
         <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span
             class="lbl">上字幕</span></button>

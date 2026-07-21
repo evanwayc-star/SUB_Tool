@@ -142,6 +142,8 @@ function refreshMpvSubs(revealAfter=false, live=false){
       if(State.safeFrame) {
         const sf = [];
         // 以 1920x1080 畫布為基準產生四邊矩形邊框
+        // 100%
+        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFA300&\\3a&H00&\\bord2}m 2 2 l 1918 2 l 1918 1078 l 2 1078`);
         // 90%
         sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFFFFF&\\3a&H77&\\bord1}m 96 54 l 1824 54 l 1824 1026 l 96 1026`);
         // 80%

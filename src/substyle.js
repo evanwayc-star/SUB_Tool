@@ -212,8 +212,30 @@ export function assJoinLines(lines, st){
    （Style 的 Spacing 是「行內字距」，逐字換行後每字自成一行 → 對它無效，故走同一套墊高 hack） */
 export function assJoinVertical(chars, st){
   const gap = Math.round(st.letterSpacing || 0);
-  if(gap <= 0) return chars.join('\\N');
-  return chars.join(`\\N{\\fs${gap}}\\h\\N{\\fs${st.fontSize}}`);
+  const fs = st.fontSize;
+  let res = '';
+  let needsFsRestore = false;
+  for(let i=0; i<chars.length; i++){
+    let ch = chars[i];
+    if(needsFsRestore){
+      ch = `{\\fs${fs}}` + ch;
+      needsFsRestore = false;
+    }
+    if(ch === ' ' || ch === `{\\fs${fs}} `){
+      const half = Math.round(fs * 0.5);
+      ch = `{\\fs${half}}\\h`;
+      needsFsRestore = true;
+    }
+    if(i > 0){
+      if(gap > 0){
+        res += `\\N{\\fs${gap}}\\h\\N${needsFsRestore ? '' : '{\\fs'+fs+'}'}`;
+      } else {
+        res += `\\N`;
+      }
+    }
+    res += ch;
+  }
+  return res;
 }
 
 /* 直書 → ASS 多列：ASS 沒有 writing-mode，故【一列一個 Dialogue】自己排。
