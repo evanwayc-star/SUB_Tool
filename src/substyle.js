@@ -10,7 +10,7 @@ import { State } from './state.js';
 export const STYLE_DEFAULTS = {
   font: '更紗黑體', // 預設字型＝font/ 底下的資料夾名（v4.29.4 由台北黑體改為更紗黑體）
   bold: true, italic: false,
-  fontSize: 80, color: '#ffffff',
+  fontSize: 65, color: '#ffffff',
   letterSpacing: 1,     // px 字距（ASS Spacing / CSS letter-spacing）；直書時不適用（逐字換行）
   lineSpacing: 1.0,     // 行高倍數 1.0~3.0（CSS line-height；ASS 行間墊高 hack）；直書時＝字與字的間隔
   outline: 2,           // px 框線厚度（ASS Outline / CSS text-stroke）
@@ -22,7 +22,7 @@ export const STYLE_DEFAULTS = {
   // align/valign＝多行多句的對齊方式，同時也是文字塊對齊到座標的那一側（ASS \an 的語義）：
   //   align=center + valign=middle → 座標正好是文字塊的正中心。
   // 對應 ASS `\pos(x,y)`＋Alignment；HTML 為 left/top＋translate。舊專案的 posPct 自動當 posY。
-  posX: 50, posY: 90, align: 'center', valign: 'bottom',
+  posX: 50, posY: 91.20370370370371, align: 'center', valign: 'bottom',
   angle: 0, // 旋轉角度（度，順時針為正；繞文字塊中心）→ ASS Style Angle／\frz（逆時針故取負）、CSS rotate
 };
 

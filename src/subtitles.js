@@ -146,12 +146,13 @@ function styleSummaryHtml(c){
   const p=posToPx(st);
   const isPosChanged = st.posX !== tSt.posX || st.posY !== tSt.posY;
   const pCls = isPosChanged ? 'g hl warn' : 'g hl';
-  const isAlignChanged = st.align !== tSt.align || st.valign !== tSt.valign;
-  const alCls = isAlignChanged ? 'hl warn' : 'hl';
+  const fsCls = st.fontSize !== tSt.fontSize ? 'g hl warn' : 'g hl';
+  const vaCls = st.valign !== tSt.valign ? 'hl warn' : 'hl';
+  const alCls = st.align !== tSt.align ? 'hl warn' : 'hl';
   return `<span class="r1">`+
-      `<span class="g hl" title="字級">${lbl('字')}${n(st.fontSize,'字級')}</span>`+sep+
+      `<span class="${fsCls}" title="字級">${lbl('字')}${n(st.fontSize,'字級')}</span>`+sep+
       tg('B',st.bold,'粗體')+' '+tg('I',st.italic,'斜體','it')+sep+
-      `<span class="${alCls}" title="多行／多句的垂直對齊">${va}</span>`+sep+
+      `<span class="${vaCls}" title="多行／多句的垂直對齊">${va}</span>`+sep+
       `<span class="${alCls}" title="多行／多句的水平對齊">${al}</span>`+sep+
       (st.vertical ? `<span title="排版方向" class="tg on">直</span>`+sep : '')+
       cp('色',st.color,'文字顏色')+sep+

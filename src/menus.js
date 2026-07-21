@@ -9,13 +9,14 @@ import { Seq } from './sequence.js';
 import { showToast } from './ui.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';
+import { AudioRouting } from './audio-routing.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
 function hideCtx(){
   const was=ctx.classList.contains('show');
   ctx.classList.remove('show'); ctx.innerHTML='';
-  if(was) emit('mpv:sync'); // 選單若曾讓 mpv 讓位，關閉時恢復（僅在真的有開過才發，避免每次 mousedown 都打 IPC）
+  if(was) { window._ctxOpen=false; emit('mpv:sync'); emit('render:videoSub'); } // 選單若曾讓 mpv 讓位，關閉時恢復（僅在真的有開過才發，避免每次 mousedown 都打 IPC）
 }
 function showCtx(x,y,items){
   ctx.innerHTML='';
@@ -37,7 +38,9 @@ function showCtx(x,y,items){
   const w=ctx.offsetWidth,h=ctx.offsetHeight;
   ctx.style.left=Math.max(6,Math.min(x,window.innerWidth-w-6))+'px';
   ctx.style.top=Math.max(6,Math.min(y,window.innerHeight-h-6))+'px';
+  window._ctxOpen=true;
   emit('mpv:sync'); // 定位完成後重算：選單若與影片重疊，讓 mpv 讓位（否則 mpv 為 OS 子視窗會蓋住選單）
+  emit('render:videoSub');
 }
 document.addEventListener('mousedown',e=>{ if(e.button===2)return; if(!ctx.contains(e.target))hideCtx(); },true);
 window.addEventListener('blur',hideCtx);
@@ -220,6 +223,9 @@ tlScroll.addEventListener('contextmenu',e=>{
       items.push({label:'🗑 從時間軸移除音檔',act:()=>runExternalAudioMenuAction('removeExternalAudio',[assetId],{clearSelection:true})});
       items.push({sep:true});
     }
+    items.push({label:'🎧 軌道配置',act:()=>AudioRouting.openForSource(sourceId)});
+    items.push({sep:true});
+
     if(!options.length){
       items.push({label:'波形正在準備中…'});
     }else{
@@ -254,7 +260,10 @@ tlScroll.addEventListener('contextmenu',e=>{
       const pt=Media.displayTime();
       if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
       if(c.audioDetached) items.push({label:'🔇 此影片原音已解除連結'});
-      else items.push({label:'🔗✂ 解除影音連結',act:()=>{ void Media.detachClipAudio?.(c.id); }});
+      else {
+        items.push({label:'🔗✂ 解除影音連結',act:()=>{ void Media.detachClipAudio?.(c.id); }});
+        items.push({label:'🎧 音訊配線',act:()=>AudioRouting.openForClip(c.id)});
+      }
       items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
       // 移到上／下一層視訊軌（多軌疊層：上層覆蓋下層）
       const moveTrack=(dv)=>{

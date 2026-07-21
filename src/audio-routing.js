@@ -12,8 +12,7 @@ import { openModal, closeModal, showToast } from './ui.js';
 
 const LAYOUTS={
   mono:{label:'Mono',channels:1},
-  stereo:{label:'Stereo (L, R)',channels:2},
-  stereoLtRt:{label:'Stereo (Lt, Rt)',channels:2},
+  stereo:{label:'Stereo (Lt, Rt)',channels:2},
   '5.1':{label:'5.1 (L, R, C, LFE, Ls, Rs)',channels:6}
 };
 const MAX_AUDIO_BUSES=1024;
@@ -101,12 +100,28 @@ function setBusCount(rawCount){
   }
   const removed=p.buses.slice(count);
   const removedIds=new Set(removed.map(bus=>bus.id));
-  const usedByRoute=Object.values(p.sourceMaps).some(map=>(map?.channels||[]).some(route=>(route.busIds||[]).some(id=>removedIds.has(id))));
-  const usedByExport=(p.exportLayout?.streams||[]).some(stream=>(stream.busIds||[]).some(id=>removedIds.has(id)));
-  if(usedByRoute||usedByExport){
-    showToast('要減少專案音訊軌前，請先把被使用的 A 軌改派或清除。');
-    return false;
+  
+  // 自動清理被刪除的 bus 關聯，不再阻擋使用者減少軌道數
+  Object.values(p.sourceMaps).forEach(map => {
+    if(map && map.channels) {
+      map.channels.forEach(route => {
+        if(route.busIds) {
+          route.busIds = route.busIds.filter(id => !removedIds.has(id));
+        }
+      });
+    }
+  });
+
+  if(p.exportLayout && p.exportLayout.streams) {
+    p.exportLayout.streams.forEach(stream => {
+      if(stream.busIds) {
+        stream.busIds = stream.busIds.filter(id => !removedIds.has(id));
+      }
+    });
+    // 移除空 stream，但保留至少一個
+    p.exportLayout.streams = p.exportLayout.streams.filter((stream, index) => stream.busIds.length > 0 || index === 0);
   }
+
   p.mode='manual';
   p.buses=p.buses.slice(0,count);
   ensureAudioExportDefaults({appendMissing:false});
@@ -176,13 +191,6 @@ function openForRoutingSource(source, originalMap=null){
         <button class="audio-count-preset" type="button" data-count="18">18</button>
       </div>
       <div class="audio-route-actions"><button id="audioRouteAuto" type="button">自動順序對應</button><button id="audioRouteClear" type="button">清除這個來源的配線</button><button id="audioRouteOutput" type="button">輸出聲道設定…</button></div>
-      <div class="audio-route-range" aria-label="連續來源聲道對應">
-        <span>連續對應</span>
-        <label>來源起點 <input id="audioRouteSourceStart" type="number" min="1" value="1"></label>
-        <label>A 軌起點 <input id="audioRouteBusStart" type="number" min="1" value="1"></label>
-        <label>聲道數 <input id="audioRouteRangeCount" type="number" min="1" value="${Math.max(1,Math.min(routes.length,project().buses.length))}"></label>
-        <button id="audioRouteApplyRange" type="button">套用連續對應</button>
-      </div>
       <div class="audio-route-help">例如：來源 Stream 1 · Ch 1–6 可分別指定到 A3–A8。不同影片各自保存自己的分配。</div>
       ${routeTableHtml(source,routes)}
     </div>`,
@@ -199,26 +207,6 @@ function openForRoutingSource(source, originalMap=null){
     document.getElementById('audioRouteAuto')?.addEventListener('click',()=>{
       const available=project().buses.filter(bus=>!bus.locked);
       document.querySelectorAll('.audio-route-target').forEach((select,index)=>{ select.value=available[index]?.id||''; select.dataset.dirty='1'; });
-    });
-    document.getElementById('audioRouteApplyRange')?.addEventListener('click',()=>{
-      const sourceStart=Math.max(1,Math.floor(Number(document.getElementById('audioRouteSourceStart')?.value)||1));
-      const busStart=Math.max(1,Math.floor(Number(document.getElementById('audioRouteBusStart')?.value)||1));
-      const amount=Math.max(1,Math.floor(Number(document.getElementById('audioRouteRangeCount')?.value)||1));
-      const selects=[...document.querySelectorAll('.audio-route-target')];
-      const targetBuses=project().buses.slice(busStart-1,busStart-1+amount);
-      if(sourceStart-1+amount>selects.length || targetBuses.length!==amount){
-        showToast('連續對應的來源聲道或 A 軌範圍不足。');
-        return;
-      }
-      if(targetBuses.some(bus=>bus.locked)){
-        showToast('連續對應的 A 軌含有鎖定軌，請先解鎖或改選其他範圍。');
-        return;
-      }
-      for(let index=0;index<amount;index++){
-        const select=selects[sourceStart-1+index];
-        select.value=targetBuses[index].id;
-        select.dataset.dirty='1';
-      }
     });
     document.getElementById('audioRouteClear')?.addEventListener('click',()=>{
       document.querySelectorAll('.audio-route-target').forEach(select=>{ select.value=''; select.dataset.dirty='1'; });
@@ -427,7 +415,7 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
   },0);
 }
 
-const AudioRouting={openForClip,openForSource,openOutputSettings};
+const AudioRouting={openForClip,openForSource,openOutputSettings,setBusCount};
 if(typeof window!=='undefined'){
   window.AudioRouting=AudioRouting;
   window.addEventListener('audio-routing:open',event=>{

@@ -274,9 +274,9 @@ function routeForChannel(audioSourceId, sourceStream=0, sourceChannel=0){
 
 const State = {
   cues: [],            // {id,start,end,text,track}
-  tracks: [],          // 字幕軌道
+  tracks: [{name:'軌道 1',visible:true,fontSize:80,posPct:90,align:'center',valign:'bottom',locked:false,color:'#ffffff'}],          // 字幕軌道
   notes: [],           // 備註 {id,time,text,done}
-  trackCount: 0,       // = tracks.length（同步用）
+  trackCount: 1,       // = tracks.length（同步用）
   listTrack: 0,        // 字幕列表顯示的軌道
   fps: 24,
   dropFrame: false,
@@ -397,7 +397,7 @@ State.defaultKeymap = {
   'pause': [{key:'k'}],
   'forward': [{key:'l'}],
   'zoom_out': [{key:'1'}, {key:'-'}, {code:'NumpadSubtract'}],
-  'zoom_in': [{key:'2'}, {key:'='}, {code:'NumpadAdd'}],
+  'zoom_in': [{key:'2'}, {key:'='}, {key:'+'}, {code:'NumpadAdd'}],
   'zoom_fit': [{key:'`'}, {key:'\\'}, {code:'NumpadMultiply'}],
   // 主鍵盤與數字鍵盤分離：數字鍵盤一律以 code（NumpadX）綁定，主鍵盤數字以 key 綁定。
   // matchAction（keyboard.js）配合此約定：含 code 的綁定只比對 code；
@@ -411,6 +411,9 @@ State.defaultKeymap = {
   'toggle_sub_mode': [{key:'y'}],
   'set_in': [{key:'i'}, {key:'q'}],
   'set_out': [{key:'o'}, {key:'w'}],
+  'exp_in': [{key:'['}],
+  'exp_out': [{key:']'}],
+  'exp_clear': [],
   'nudge_left_1f': [{key:'arrowleft'}],
   'nudge_left_1s': [{key:'arrowleft', shift:true}],
   'nudge_left_5s': [{key:'arrowleft', ctrl:true, shift:true}],
@@ -448,6 +451,12 @@ State.defaultKeymap = {
   'select_current': [{key:'g'}],
   'add_note': [{key:'v'}, {key:'m'}],
   'split_clip': [{key:'k', ctrl:true}], // 在播放點切割影片段（影片序列）
+  'toggle_safe_frame': [{key:'g', ctrl:true}],
+  'toggle_mixer': [{key:'u'}],
+  'screenshot': [{key:'t'}],
+  'screenshot_tc': [{key:'t', ctrl:true}],
+  'copy_style': [{key:'c', ctrl:true, shift:true}],
+  'paste_style': [{key:'v', ctrl:true, shift:true}],
 };
 State.keymap = JSON.parse(JSON.stringify(State.defaultKeymap));
 

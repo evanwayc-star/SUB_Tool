@@ -394,6 +394,7 @@ ipcMain.handle('app:status', () => ({
 
 ipcMain.handle('fs:fileURL', (e, p) => { if (!isAllowedPath(p)) { console.warn('[sec] fileURL blocked:', p); return null; } return url.pathToFileURL(p).href; });
 ipcMain.handle('fs:stat', (e, p) => { try { const s = fs.statSync(p); return { exists: true, size: s.size }; } catch (err) { return { exists: false }; } });
+ipcMain.handle('fs:listDir', (e, p) => { try { return fs.readdirSync(p); } catch (err) { return []; } });
 
 ipcMain.handle('dialog:openMedia', async () => {
   const r = await dialog.showOpenDialog(mainWin, {
@@ -1163,6 +1164,10 @@ ipcMain.handle('fs:writeProject', (e, { path: p, b64 }) => {
   // S1：限副檔名 + 路徑白名單（autosave 落在媒體目錄旁，已於開檔時加入白名單）
   if (!/\.(subtool|json)$/i.test(p || '') || !isAllowedPath(p)) { console.warn('[sec] writeProject blocked:', p); return null; }
   try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, Buffer.from(b64, 'base64')); return p; } catch (err) { return null; }
+});
+ipcMain.handle('fs:writeScreenshot', (e, { path: p, b64 }) => {
+  if (!/\.(jpg|jpeg|png)$/i.test(p || '')) { console.warn('[sec] writeScreenshot blocked (bad ext):', p); return null; }
+  try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, Buffer.from(b64, 'base64')); return p; } catch (err) { console.error('[writeScreenshot] error:', err.message); return null; }
 });
 
 /* ---- 邊轉邊播 ingest（MXF 等非原生格式秒開）：fragmented MP4 + 本機 HTTP 伺服器 ----

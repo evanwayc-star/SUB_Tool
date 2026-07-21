@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('subtool', {
   getFilePath:  (file) => { try { return webUtils.getPathForFile(file) || null; } catch (e) { return null; } },
   fileURL:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:fileURL', p); },
   stat:         (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:stat', p); },
+  listDir:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:listDir', p); },
   fontsList:    () => ipcRenderer.invoke('fonts:list'), // v4.25.4 字幕字型：掃 <專案根>/font/
   openMedia:    () => ipcRenderer.invoke('dialog:openMedia'),
   openAudio:    () => ipcRenderer.invoke('dialog:openAudio'),
@@ -28,6 +29,7 @@ contextBridge.exposeInMainWorld('subtool', {
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
   readB64:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:readB64', p); },
   writeProject: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeProject', { path: p, b64 }); },
+  writeScreenshot: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeScreenshot', { path: p, b64 }); },
   cacheInfo:    () => ipcRenderer.invoke('cache:info'),
   cacheCleanOrphans: () => ipcRenderer.invoke('cache:cleanOrphans'),
   configLoad:   () => ipcRenderer.invoke('config:load'),

@@ -64,6 +64,8 @@ function renderAudioTracks(){
   list.innerHTML='';
   const buses=projectBuses();
   const hint=$('atHint');
+  const countInput=$('projectAudioTracksCount');
+  if(countInput && document.activeElement !== countInput) countInput.value = buses.length;
   if(!buses.length){
     if(hint) hint.textContent='尚未建立專案音訊軌';
     renderAudioSources();

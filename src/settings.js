@@ -62,6 +62,8 @@ const actionCategories = [
       'toggle_history': '打開/關閉紀錄視窗',
       'toggle_notes': '打開/關閉備註視窗',
       'toggle_check_panel': '打開/關閉字幕檢查視窗',
+      'toggle_mixer': '打開/關閉音量表',
+      'toggle_safe_frame': '打開/關閉安全框',
       'add_note': '新增備註',
       'select_all': '全選當前軌道字幕',
       'copy_cues': '複製選取字幕',
@@ -72,6 +74,14 @@ const actionCategories = [
     name: '影片序列',
     actions: {
       'split_clip': '在播放點切割影片段',
+    }
+  },
+  {
+    name: '輸出範圍',
+    actions: {
+      'exp_in': '設定輸出起點',
+      'exp_out': '設定輸出終點',
+      'exp_clear': '清除輸出範圍',
     }
   },
   {
@@ -87,6 +97,8 @@ const actionCategories = [
     actions: {
       'toggle_sub_mode': '切換上字幕模式',
       'search': '打開搜尋框',
+      'screenshot': '儲存畫面截圖 (Shot-001.jpg)',
+      'screenshot_tc': '儲存畫面截圖帶時間碼 (Ctrl+T)',
       'undo': '復原',
       'redo': '重做',
       'save_project': '儲存專案',
@@ -132,8 +144,15 @@ function renderSettingsTable(tbody) {
     'select_all', 'copy_cues', 'paste_cues',
     'delete_selected', 'cancel',
     'save_project', 'save_as',
-    'search', 'undo', 'redo'
+    'search', 'undo', 'redo',
+    'exp_clear'
   ];
+
+  /* exp_clear 是「同時按 [ 和 ]」的特殊組合，無法用標準 keymap 表示，
+     在設定表格中以固定文字顯示 */
+  const fixedDisplay = {
+    'exp_clear': '[ + ]'
+  };
 
   function checkDuplicate(newBind) {
     for (const [action, binds] of Object.entries(tempKeymap)) {
@@ -174,7 +193,7 @@ function renderSettingsTable(tbody) {
         input.type = 'text';
         input.className = 'key-input';
         input.id = `settings-input-${action}-${i}`;
-        input.value = formatKeyBind(binds[i]);
+        input.value = fixedDisplay[action] && i === 0 ? fixedDisplay[action] : formatKeyBind(binds[i]);
         
         const isFixed = fixedActions.includes(action);
         if (isFixed) {

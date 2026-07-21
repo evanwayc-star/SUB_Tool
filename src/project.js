@@ -22,6 +22,11 @@ function _defaultSaveName(){
   return (State.mediaName ? State.mediaName.replace(/\.[^.]+$/,'') : 'project')+'.subtool';
 }
 
+export function getProjectDir() {
+  if (!_savePath) return null;
+  return _savePath.replace(/[^\\/]+$/, '');
+}
+
 /* 專案檔只保留外部音檔可重建所需的純資料；Audio / WebAudio / wave cache 等 runtime
    物件一律不寫入。瀏覽器版不保留本機絕對路徑，與主影片的儲存規則一致。 */
 function _normalExternalAudioSources(rawSources){
@@ -315,7 +320,7 @@ const Project = {
       ...(t.outline!=null?{outline:t.outline}:{}),...(t.outlineColor!=null?{outlineColor:t.outlineColor}:{}),...(t.shadow!=null?{shadow:t.shadow}:{}),
       ...(t.vertical!=null?{vertical:t.vertical}:{}),...(t.bgBox!=null?{bgBox:t.bgBox}:{}),...(t.bgColor!=null?{bgColor:t.bgColor}:{}),...(t.bgAlpha!=null?{bgAlpha:t.bgAlpha}:{})}));
     else State.tracks=[];
-    ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:0, maxTk+1));
+    ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:1, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));
 
     // v3 專案音訊資料；v1/v2 沒有可可靠還原的來源聲道資訊，安全遷移為空的 auto 專案。

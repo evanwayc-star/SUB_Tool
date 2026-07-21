@@ -618,12 +618,13 @@ const Media = {
       const wavUrl=await DESK.fileURL(wavePath);
       const buf=await fetch(wavUrl).then(res=>res.arrayBuffer());
       if(this._bgVersion!==version || !this.externalAudioSources.includes(asset)) return;
-      const pk=Wave.calcFromWav(buf);
-      if(pk){
-        Wave.setSourceMixPeaks(asset,pk,{mixPath:wavePath,channels:asset.descriptors});
-      }else{
+      let pk=Wave.calcFromWav(buf);
+      if(!pk){
         const ab=await this.ctx.decodeAudioData(buf);
-        if(this._bgVersion===version && this.externalAudioSources.includes(asset)) Wave.setSourceBuffer(asset,ab);
+        pk=Wave.calcPeaks(ab,-1);
+      }
+      if(this._bgVersion===version && this.externalAudioSources.includes(asset)){
+        Wave.setSourceMixPeaks(asset,pk,{mixPath:wavePath,channels:asset.descriptors});
       }
     }catch(e){ console.warn('external wave cache:',e); }
   },
@@ -1239,8 +1240,12 @@ const Media = {
           const r=await fetch(wavUrl);
           const buf=await r.arrayBuffer();
           if(this._bgVersion===myVer){
-            const ab=await this.ctx.decodeAudioData(buf);
-            Wave.setSourceBuffer(primary,ab,{channels:chs}); drawTimeline();
+            let pk=Wave.calcFromWav(buf);
+            if(!pk){
+              const ab=await this.ctx.decodeAudioData(buf);
+              pk=Wave.calcPeaks(ab,-1);
+            }
+            Wave.setSourceMixPeaks(primary,pk,{mixPath:res.wave,channels:chs}); drawTimeline();
           }
         }catch(e){}
       }

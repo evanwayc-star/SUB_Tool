@@ -4,7 +4,7 @@ import { $, video } from './dom.js';
 import { decodeText, b64ToBytes, readFile, pickFile, encodeUTF16LE, bytesToB64, downloadBytes, baseName, escapeHTML } from './util.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
-import { ASS_PLAY_RES } from './substyle.js'; // ASS 虛擬畫布：與 HTML 預覽的縮放基準共用同一組
+import { ASS_PLAY_RES, getAllPresets } from './substyle.js'; // ASS 虛擬畫布：與 HTML 預覽的縮放基準共用同一組
 import { Media } from './media.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { snapAllCuesToFrames } from './subtitles.js';
@@ -78,17 +78,25 @@ async function importSub() {
 function _openImportModal(title, parsed, kind) {
   const trackOpts = State.tracks.map((tk, i) => `<option value="${i}">軌道 ${i + 1}：${escapeHTML(tk.name)}</option>`).join('');
   const suggestName = kind.toUpperCase() + ' 字幕';
+  const presets = getAllPresets();
+  const presetOpts = '<option value="">— 不套用自訂樣式 —</option>' + presets.map(p => `<option value="${escapeHTML(p.name)}">${escapeHTML(p.name)}</option>`).join('');
+  
   openModal(title,
     `<label style="display:block;padding:8px 0">目標軌道：<select id="importTkSel" style="margin-left:6px">${trackOpts}<option value="new" selected>＋ 新增軌道…</option></select></label>` +
     `<div id="importNewTkRow" style="padding-bottom:8px">軌道名稱：<input type="text" id="importNewTkName" style="margin-left:6px;width:160px" value="${escapeHTML(suggestName)}"></div>` +
+    `<label style="display:block;padding-bottom:8px">套用樣式：<select id="importPresetSel" style="margin-left:6px">${presetOpts}</select></label>` +
     `<label style="display:block;padding-bottom:8px"><input type="checkbox" id="importAppend"> 附加（保留現有字幕）</label>`,
     [{
       label: '匯入', primary: true, act: () => {
         const selVal = $('importTkSel').value;
+        const presetVal = $('importPresetSel').value;
+        const selectedPreset = presetVal ? getAllPresets().find(p => p.name === presetVal) : null;
         let targetTk;
         if (selVal === 'new') {
           const tkName = ($('importNewTkName').value.trim()) || ('軌道 ' + (State.tracks.length + 1));
-          State.tracks.push(newTrack(tkName)); syncTrackCount();
+          const trk = newTrack(tkName);
+          if (selectedPreset && selectedPreset.style) Object.assign(trk, selectedPreset.style);
+          State.tracks.push(trk); syncTrackCount();
           targetTk = State.tracks.length - 1;
         } else { targetTk = +selVal; }
         const append = selVal === 'new' || $('importAppend').checked;
@@ -96,7 +104,11 @@ function _openImportModal(title, parsed, kind) {
         const newCues = parsed.map(p => {
           const s = p.start || 0;
           const e = p.end || 0;
-          return { id: newId(), start: s, end: e, text: p.text || '', track: targetTk, timed: p.timed !== false && !(p.start === 0 && p.end === 0 && kind === 'txt') };
+          const cue = { id: newId(), start: s, end: e, text: p.text || '', track: targetTk, timed: p.timed !== false && !(p.start === 0 && p.end === 0 && kind === 'txt') };
+          if (selVal !== 'new' && selectedPreset && selectedPreset.style) {
+            cue.style = Object.assign({}, selectedPreset.style);
+          }
+          return cue;
         });
         if (kind === 'txt') newCues.forEach(c => c.timed = false);
         if (append) { State.cues.push(...newCues); }
@@ -436,9 +448,31 @@ function _buildProjectAudioPlan(clips, externalSources=null) {
    主程序據此：每視訊軌各建整條時間軸（片段放 offset、間隙透明），由下而上 overlay 疊層；
    所有片段音訊各自 adelay 到 offset 後 amix（全軌混音）。單軌序列為此法之特例，結果與舊版一致。 */
 function _buildExportData() {
-  const sourceClips = [...State.clips].filter(c => c.path);
+  const rawSourceClips = [...State.clips].filter(c => c.path);
+  const rawExternalSources=_projectExternalAudioSources();
+  
+  let expIn = State.exportIn != null ? State.exportIn : 0;
+  let rawDur = Math.max(Seq.end(), _externalAudioTimelineEnd(rawExternalSources));
+  let expOut = State.exportOut != null ? State.exportOut : rawDur;
+  if (expOut <= expIn) expOut = expIn + 0.1;
+
+  function _slice(c) {
+    const startProp = c.in != null ? c.in : (c.trimStart || 0);
+    const endProp = c.out != null ? c.out : (c.trimEnd != null ? c.trimEnd : c.duration);
+    const cDur = endProp - startProp;
+    const cEnd = (c.offset || 0) + cDur;
+    if (cEnd <= expIn || (c.offset || 0) >= expOut) return null;
+    let newIn = startProp, newOut = endProp, newOffset = (c.offset || 0) - expIn;
+    if (newOffset < 0) { newIn += (-newOffset); newOffset = 0; }
+    const newDur = newOut - newIn;
+    if (newOffset + newDur > (expOut - expIn)) newOut = newIn + ((expOut - expIn) - newOffset);
+    return { ...c, in: newIn, out: newOut, trimStart: newIn, trimEnd: newOut, offset: newOffset };
+  }
+
+  const sourceClips = rawSourceClips.map(_slice).filter(Boolean);
+  const externalSources = rawExternalSources.map(_slice).filter(Boolean);
+
   const audibleVideoClips=sourceClips.filter(c=>!c.audioDetached);
-  const externalSources=_projectExternalAudioSources();
   const externalPlacements=_externalAudioPlacements(externalSources);
   if (!sourceClips.length&&!externalPlacements.length) return null;
   const audioPlan = _buildProjectAudioPlan(audibleVideoClips,externalSources);
@@ -456,7 +490,7 @@ function _buildExportData() {
   return {
     clips:list,
     videoTracks,
-    duration:+Math.max(Seq.end(),externalEnd).toFixed(3),
+    duration:+(expOut - expIn).toFixed(3),
     audioPlan,
     audioOnly:list.length===0,
     externalAudioCount:externalPlacements.length

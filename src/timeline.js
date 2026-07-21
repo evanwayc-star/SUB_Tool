@@ -1,6 +1,6 @@
 /* SUB Tool — 時間軸：渲染（尺/波形/軌道/區塊）與互動（拖曳/框選/縮放） */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js';
-import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks } from './state.js';
+import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId } from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { encoreParts } from './time.js';
@@ -41,7 +41,7 @@ function syncVideoTracks(){ let m=0; for(const c of State.clips) m=Math.max(m,(c
 const AROW_H=48, AUDIO_HEAD_H=22, AUDIO_MAX_VIEW_H=216, AUDIO_MIN_SUB_H=72;
 function sourceAudioRowH(row){
   const h=Number(row?.height);
-  return Number.isFinite(h) ? clamp(h,32,160) : AROW_H;
+  return Number.isFinite(h) ? clamp(h,32,160) : ROW_H;
 }
 function audioRowsHeight(){ return audioRowLayout().reduce((sum,row)=>sum+row.h,0); }
 function audioViewportH(){
@@ -163,6 +163,27 @@ function drawRuler(){
       ctx.fillStyle='#f0a030';
       ctx.beginPath();ctx.moveTo(nx,RULER_H);ctx.lineTo(nx-8,RULER_H-14);ctx.lineTo(nx+8,RULER_H-14);ctx.closePath();ctx.fill();
       ctx.strokeStyle='#ffcc60';ctx.lineWidth=1;ctx.stroke();
+    }
+  }
+  // 輸出範圍標記
+  if(State.exportIn != null || State.exportOut != null){
+    const inX = State.exportIn != null ? timeToX(State.exportIn) : 0;
+    const outX = State.exportOut != null ? timeToX(State.exportOut) : vw;
+    ctx.fillStyle = 'rgba(60, 140, 255, 0.2)';
+    if (outX > inX) {
+      const sx = Math.max(0, inX), ex = Math.min(vw, outX);
+      if (ex > sx) ctx.fillRect(sx, 0, ex - sx, RULER_H);
+    }
+    ctx.strokeStyle = '#3c8cff'; ctx.lineWidth = 2;
+    if(State.exportIn != null && inX >= -10 && inX <= vw + 10){
+      ctx.beginPath(); ctx.moveTo(inX, 0); ctx.lineTo(inX, RULER_H); ctx.stroke();
+      ctx.fillStyle = '#3c8cff';
+      ctx.beginPath(); ctx.moveTo(inX, RULER_H); ctx.lineTo(inX+6, RULER_H-6); ctx.lineTo(inX, RULER_H-12); ctx.fill();
+    }
+    if(State.exportOut != null && outX >= -10 && outX <= vw + 10){
+      ctx.beginPath(); ctx.moveTo(outX, 0); ctx.lineTo(outX, RULER_H); ctx.stroke();
+      ctx.fillStyle = '#3c8cff';
+      ctx.beginPath(); ctx.moveTo(outX, RULER_H); ctx.lineTo(outX-6, RULER_H-6); ctx.lineTo(outX, RULER_H-12); ctx.fill();
     }
   }
   ctx.restore();
@@ -406,14 +427,11 @@ function renderClipBlocks(){
     el.dataset.clipId=c.id; el.dataset.vtrack=v;
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
     const hasFade=(c.fadeIn>0||c.fadeOut>0);
-    el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}${hasFade?' ⌁':''}</div><button class="clip-route" type="button" title="設定此影音檔的來源聲道如何對應到專案音訊軌">音訊配線</button><div class="edge r"></div>`;
+    el.innerHTML=`<div class="edge l"></div><div class="clip-label">🎬 ${escapeHTML(c.name||'')}${trimmed?' ✂':''}${hasFade?' ⌁':''}</div><div class="edge r"></div>`;
     el.title=`${c.name}（${State.videoTracks[v]?.name||('視訊軌 V'+(v+1))}）\n位置 ${secToEncore(s,State.fps,State.dropFrame)} → ${secToEncore(e,State.fps,State.dropFrame)}`+
       `\n修剪 in ${c.in.toFixed(2)}s / out ${c.out.toFixed(2)}s（來源長 ${c.dur.toFixed(2)}s）`+
-      `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪｜「音訊配線」＝設定來源聲道到專案音訊軌`;
+      `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪`;
     row.appendChild(el);
-    const routeBtn=el.querySelector('.clip-route');
-    routeBtn.addEventListener('mousedown',e=>{ e.preventDefault(); e.stopPropagation(); });
-    routeBtn.addEventListener('click',e=>{ e.preventDefault(); e.stopPropagation(); openAudioRoutingForClip(c); });
   }
 }
 /* 在片段區塊內畫該段音波：畫布覆蓋片段的【可視範圍】，x0abs＝畫布左緣的絕對時間軸 px；
@@ -421,7 +439,7 @@ function renderClipBlocks(){
 function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs){
   const ctx=cv.getContext('2d'); const dpr=devicePixelRatio;
   ctx.save(); ctx.scale(dpr,dpr);
-  const mid=Hpx/2, amp=Hpx*0.42, res=Wave.resolution, n=pk.length/2;
+  const mid=Hpx/2, amp=Hpx*1.2, res=Wave.resolution, n=pk.length/2;
   ctx.strokeStyle='rgba(190,230,255,.5)'; ctx.lineWidth=1; ctx.beginPath();
   for(let cx=0; cx<cvw; cx++){
     const bT=c.in+(xToTime(x0abs+cx)-c.offset);
@@ -696,8 +714,8 @@ function renderAudioTrackRows(){
       const waveLabel=sourceWaveLabel(c,wave.selection);
       const routeText=sourceRoutingSummary(c);
       block.dataset.waveSelection=wave.selection||'mix';
-      block.title=`${c.name||(external?'外部音檔':'影音片段')}\n聲音：${muted?'已關閉':'已開啟'}（點喇叭按鈕切換）\n波形：${waveLabel}${wave.fallback?'（暫以 MIX 顯示）':''}\n${external?'拖曳＝移動｜拖左右邊緣＝修剪｜右鍵＝切割、刪除、靜音與波形':'右鍵：切換 MIX／來源聲道'}\n${routeText}\n按「配線」可修改此來源的聲道對應`;
-      block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span><span class="audio-clip-route">${escapeHTML(waveLabel)} · ${escapeHTML(routeText)}</span>${muteButtonMarkup(muted,external?'音檔':'影音素材')}<button type="button" class="audio-clip-config" title="設定此${external?'音檔':'影音檔'}的聲道對應">配線</button>${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}`;
+      block.title=`${c.name||(external?'外部音檔':'影音片段')}\n聲音：${muted?'已關閉':'已開啟'}（右鍵選單切換）\n波形：${waveLabel}${wave.fallback?'（暫以 MIX 顯示）':''}\n${external?'拖曳＝移動｜拖左右邊緣＝修剪｜右鍵＝切割、刪除、靜音與波形':'右鍵：切換 MIX／來源聲道'}\n${routeText}`;
+      block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span>${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}`;
       const peak=wave.peaks;
       if(peak && peak.length){
         const vx0=Math.max(0,x1), vx1=Math.min(vw,x2), cvw=Math.round(vx1-vx0);
@@ -723,23 +741,11 @@ function renderAudioTrackRows(){
       });
       block.addEventListener('click',ev=>{
         if(performance.now()<_ignoreAudioClickUntil) return;
-        if(ev.target.closest('.audio-clip-config,.audio-clip-mute')) return;
         ev.preventDefault();
         if(external) selectExternalAudioClip(c.id,{seek:true});
         else selectClip(c.id);
         if(!external) renderAudioTrackRows();
       });
-      const mute=block.querySelector('.audio-clip-mute');
-      if(mute){
-        mute.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });
-        mute.addEventListener('click',ev=>{
-          ev.preventDefault(); ev.stopPropagation();
-          toggleTimelineSourceMute(c,{external,fallbackSourceId:sourceId,select:external});
-        });
-      }
-      const config=block.querySelector('.audio-clip-config');
-      config.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });
-      config.addEventListener('click',ev=>{ ev.preventDefault(); ev.stopPropagation(); openAudioRoutingForSource(c); });
       rowEl.appendChild(block);
     }
   }
@@ -1235,15 +1241,16 @@ tlScroll.addEventListener('mousedown',e=>{
       // 不同軌道：保持現有選取不變
       e.preventDefault(); return;
     }
-    if(e.ctrlKey||e.metaKey){ selectCue(c.id,{additive:true}); if(!isSel(c.id)){ e.preventDefault(); return; } } // 切換掉就不啟動拖曳
-    else if(!isSel(c.id)) selectCue(c.id);
     const mode = e.target.classList.contains('edge')? (e.target.classList.contains('l')?'l':'r') : 'move';
+    let isCtrl = (e.ctrlKey||e.metaKey);
+    if(isCtrl && mode!=='move'){ selectCue(c.id,{additive:true}); if(!isSel(c.id)){ e.preventDefault(); return; } }
+    else if(!isCtrl && !isSel(c.id)) selectCue(c.id);
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
       .map(cc=>{ const b=neighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
-      snaps:snapTargets(exSet)};
+      snaps:snapTargets(exSet), isCtrl};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
   }
@@ -1287,7 +1294,28 @@ const _handleDragUpdate = (e) => {
     updateSnapGuide(null); return;
   }
   if(drag.mode!=='scrub'){ // 含 cue 模式與 clip-move/clip-l/clip-r
-    if(Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)drag.moved=true;
+    if (!drag.moved && (Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)) {
+      drag.moved = true;
+      if (drag.isCtrl && drag.mode === 'move' && drag.grp) {
+        // Clone cues
+        const newIds = [];
+        drag.grp.forEach(it => {
+           const cloned = { ...it.c, id: newId(), style: it.c.style ? JSON.parse(JSON.stringify(it.c.style)) : undefined };
+           State.cues.push(cloned);
+           newIds.push(cloned.id);
+           it.c = cloned;
+        });
+        State.selectedIds = newIds;
+        State.selectedId = newIds[newIds.length - 1];
+        State.activeEdge = 'start';
+        // Re-render blocks so drag can update their DOM elements
+        drawTimeline();
+        drag.grp.forEach(it => {
+           it.el = tlTracks.querySelector(`.cue-block[data-id="${it.c.id}"]`);
+        });
+        refreshSelectionUI();
+      }
+    }
   }
   if(drag.mode==='rubber'){
     const currentX0 = drag.x0 - (tlScroll.scrollLeft - drag.startScroll);
@@ -1568,7 +1596,16 @@ window.addEventListener('mouseup',e=>{
     }else{
       runExternalAudioAction('trimExternalAudio',[assetId,'end',preview.offset+Math.max(0,preview.out-preview.in)]);
     }
-  }else if(drag.mode!=='scrub'){ const moved=drag.moved, m=drag.mode; if(moved) sweepContainedCues(drag.grp.map(x=>x.c)); sortCues(); emit('render:all'); if(moved)recordHistory(m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)); }
+  }else if(drag.mode!=='scrub'){
+    const moved=drag.moved, m=drag.mode;
+    if (!moved && drag.isCtrl && m==='move') {
+      selectCue(drag.c.id, {additive:true});
+    } else if (moved) {
+      sweepContainedCues(drag.grp.map(x=>x.c));
+      sortCues(); emit('render:all');
+      recordHistory(drag.isCtrl ? `複製字幕` : (m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)));
+    }
+  }
   drag=null;
 });
 

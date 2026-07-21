@@ -16,7 +16,7 @@ import { AudioRouting } from './audio-routing.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
-import { Project, ensureProjectSaved, resetProject, isProjectDirty } from './project.js';
+import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDir } from './project.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
@@ -272,7 +272,8 @@ function renderVideoSub(){
   drawSafeFrame(); // 安全框跟著畫面每幀對齊
   // mpv 是 OS 層子視窗：保留透明的 DOM 命中層才可直接點字幕拖曳；真正的字幕仍由 libass 顯示。
   // 拖曳期間則暫時隱藏 libass，改用可見 DOM 預覽新位置（見 _subDragMove）。
-  const mpvHitLayer=!!(Media.mpvMode && !Media._wcTakeover && !_mpvSubtitleDrag && !_presetEdit);
+  // 若 contextmenu 開啟（_ctxOpen），原生 mpv 會讓位，此時需解除 transparent 顯示 HTML 字幕預覽，避免文字不見。
+  const mpvHitLayer=!!(Media.mpvMode && !Media._wcTakeover && !_mpvSubtitleDrag && !_presetEdit && !window._ctxOpen);
   if(_videoSub){
     _videoSub.classList.toggle('mpv-hit-layer', mpvHitLayer);
     if((!Media.mpvMode || Media._wcTakeover || mpvHitLayer || _mpvSubtitleDrag || _presetEdit) && _videoSub.style.display==='none') _videoSub.style.display='';
@@ -905,6 +906,9 @@ async function doAction(act, force = false){
     case 'frame-fwd': nudge(1/State.fps); break;
     case 'set-in': setIn(); break;
     case 'set-out': setOut(); break;
+    case 'exp-in': State.exportIn=Media.displayTime(); drawTimeline(); setStatus(`輸出起點已設為 ${fmtClock(State.exportIn)}`,'ok'); break;
+    case 'exp-out': State.exportOut=Media.displayTime(); drawTimeline(); setStatus(`輸出終點已設為 ${fmtClock(State.exportOut)}`,'ok'); break;
+    case 'exp-clear': State.exportIn=null; State.exportOut=null; drawTimeline(); setStatus('輸出範圍已清除','ok'); break;
     case 'add-cue': addCueRelative(1); break;
     case 'add-cue-above': addCueRelative(-1); break;
     case 'add-cue-below': addCueRelative(1); break;
@@ -923,6 +927,10 @@ async function doAction(act, force = false){
     case 'add-note': addNote(); break;
     case 'clear-notes': clearAllNotes(); break;
     case 'safe-frame': toggleSafeFrame(); break;
+    case 'screenshot': takeScreenshot(); break;
+    case 'screenshot_tc': takeScreenshot(true); break;
+    case 'copy-style': copySelectedStyle(); break;
+    case 'paste-style': pasteStyleToSelected(); break;
     case 'mixer': togglePanel('mixerPanel'); renderMixer(); break;
     case 'mixer-reset': mixerReset(); break;
     case 'mixer-muteall': mixerMuteAll(); break;
@@ -1099,7 +1107,7 @@ function renderTrackStyle(){
   const st=effStyle(cue, trk); // 生效值（缺欄位以預設後援）
   const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
   setV('tsSize',st.fontSize); setV('tsColor',(st.color||'#ffffff').toLowerCase());
-  { const p=posToPx(st); setV('tsPosX',p.x); setV('tsPosY',p.y); } // 座標以像素呈現（內部為百分比）
+  setV('tsPosX',(st.posX!=null?st.posX:50).toFixed(1)); setV('tsPosY',(st.posY!=null?st.posY:91.2).toFixed(1)); // 座標改為百分比呈現
   setV('tsAngle',st.angle);
   setV('tsOutline',st.outline); setV('tsOutlineColor',st.outlineColor); setV('tsShadow',st.shadow);
   setV('tsSpacing',st.letterSpacing); setV('tsLineSp',st.lineSpacing);
@@ -1336,20 +1344,22 @@ function initUI(){
 
   /* 唯一的樣式寫入點（v4.31）：有選取字幕 → 寫該句的逐句覆蓋；沒選 → 寫整軌。
      ── 面板九個控件本來各自 `State.tracks[i][k]=v`，等於「改樣式一律套全軌」。 */
+  let _tsSetTimer = null;
   const tsSet=(k,v)=>{
     const t=styleTarget(); if(!t)return;
     if(t.cues.length) for(const c of t.cues){ c.style=c.style||{}; c.style[k]=v; }
     else t.trk[k]=v;
     styleChanged();
+    clearTimeout(_tsSetTimer);
+    _tsSetTimer = setTimeout(() => recordHistory('修改字幕樣式'), 500);
   };
   $('tsSize').addEventListener('input',e=>tsSet('fontSize', clamp(+e.target.value,10,300)));
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
-  // 座標＝像素（UI 以影片像素輸入；內部存百分比→換影片解析度時字幕不跑掉）
+  // 座標改為直接輸入百分比
   ['tsPosX','tsPosY'].forEach(id=>{
     const isX = id==='tsPosX', key = isX ? 'posX' : 'posY';
     $(id).addEventListener('input',e=>{
-      const span = isX ? (State.videoWidth||1920) : (State.videoHeight||1080);
-      tsSet(key, clamp((+e.target.value / span) * 100, 0, 100));
+      tsSet(key, clamp(+e.target.value, 0, 100));
     });
     $(id).addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   });
@@ -2147,5 +2157,162 @@ async function initDesktop(){
     demuxIndex: _wcDemuxIndex, SampleReader: _wcSampleReader }; // 階段0 PoC＋階段1 預覽＋v4.29 串流式 demux（驗證/診斷入口）
   window.SUB.SubStyle = { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, anchorPct }; // v4.23 字幕樣式（驗證/診斷入口）
 }
+
+async function takeScreenshot(withTimecode = false) {
+  if (!Media.hasVideo()) { showToast('尚未載入影音'); return; }
+  const canvas = document.createElement('canvas');
+  canvas.width = State.videoWidth || 1920;
+  canvas.height = State.videoHeight || 1080;
+  const ctx = canvas.getContext('2d');
+  
+  const vid = document.getElementById('video');
+  if (vid && vid.readyState >= 2) {
+    ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+  } else {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  
+  // 時間碼浮水印
+  let tcSuffix = '';
+  if (withTimecode) {
+    const tcStr = secToEncore(Media.displayTime(), State.fps, State.dropFrame);
+    tcSuffix = '_' + tcStr.replace(/:/g, '-').replace(/;/g, '-');
+    
+    const fontSize = Math.floor(canvas.height * 0.05);
+    ctx.font = 'bold ' + fontSize + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const x = canvas.width / 2;
+    const y = canvas.height * 0.95;
+    
+    const textWidth = ctx.measureText(tcStr).width;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.fillRect(x - textWidth / 2 - 10, y - fontSize - 5, textWidth + 20, fontSize + 10);
+    
+    ctx.fillStyle = '#fff';
+    ctx.fillText(tcStr, x, y);
+  }
+  
+  canvas.toBlob(async (blob) => {
+    try {
+      const b64 = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result.split(',')[1]);
+        reader.readAsDataURL(blob);
+      });
+      
+      if (IS_DESKTOP && DESK) {
+        let dir = getProjectDir();
+        if (!dir && State.mediaPath) {
+          const sep = State.mediaPath.replace(/\\/g, '/').lastIndexOf('/');
+          if (sep > 0) dir = State.mediaPath.substring(0, sep);
+        }
+        if (dir) {
+          // 去除尾端分隔符
+          dir = dir.replace(/[\\/]+$/, '');
+          // 掃描資料夾，找出所有 Shot-NNN 的最大編號
+          let maxNum = 0;
+          try {
+            const files = await DESK.listDir(dir);
+            const re = /^Shot-(\d{3})/i;
+            for (const f of files) {
+              const m = re.exec(f);
+              if (m) { const n = parseInt(m[1], 10); if (n > maxNum) maxNum = n; }
+            }
+          } catch (e) { console.error('[screenshot] listDir error:', e); }
+          const nextNum = (maxNum + 1).toString().padStart(3, '0');
+          const name = `Shot-${nextNum}${tcSuffix}.jpg`;
+          const fullPath = dir + '/' + name;
+          const result = await DESK.writeScreenshot(fullPath, b64);
+          if (result) {
+            setStatus(`截圖已儲存：${name}`, 'ok');
+          } else {
+            console.error('[screenshot] writeScreenshot failed, path:', fullPath);
+            showToast('截圖儲存失敗');
+          }
+          return;
+        }
+      }
+      
+      // 瀏覽器版 fallback
+      const name = `Shot-${Math.floor(Media.displayTime())}${tcSuffix}.jpg`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus(`截圖下載：${name}`, 'ok');
+    } catch (e) {
+      showToast('截圖失敗');
+    }
+  }, 'image/jpeg', 0.9);
+}
+
+let _clipboardStyle = null;
+function copySelectedStyle() {
+  if (!State.selectedId) { showToast('請先選取一條字幕'); return; }
+  const c = State.cues.find(x => x.id === State.selectedId);
+  if (!c) return;
+  const tk = State.tracks[c.track || 0];
+  _clipboardStyle = JSON.parse(JSON.stringify(effStyle(c, tk)));
+  setStatus('已拷貝字幕樣式', 'ok');
+}
+
+function pasteStyleToSelected() {
+  if (!_clipboardStyle) { showToast('尚未拷貝樣式'); return; }
+  const ids = State.selectedIds.length ? State.selectedIds : [State.selectedId].filter(Boolean);
+  if (!ids.length) { showToast('請先選取字幕'); return; }
+  
+  let changed = false;
+  for (const id of ids) {
+    const c = State.cues.find(x => x.id === id);
+    if (!c) continue;
+    const tk = State.tracks[c.track || 0];
+    const trackSt = effStyle(null, tk);
+    const newCueStyle = { ...c.style };
+    
+    for (const k of Object.keys(STYLE_DEFAULTS)) {
+      if (_clipboardStyle[k] !== trackSt[k]) {
+        newCueStyle[k] = _clipboardStyle[k];
+      } else {
+        delete newCueStyle[k];
+      }
+    }
+    
+    if (JSON.stringify(newCueStyle) !== JSON.stringify(c.style || {})) {
+      c.style = Object.keys(newCueStyle).length ? newCueStyle : undefined;
+      changed = true;
+    }
+  }
+  
+  if (changed) {
+    recordHistory('貼上字幕樣式');
+    renderAll();
+    setStatus('已貼上樣式', 'ok');
+  }
+}
+
+setTimeout(() => {
+  const audioTracksCountInput = document.getElementById('projectAudioTracksCount');
+  if (audioTracksCountInput) {
+    audioTracksCountInput.addEventListener('change', () => {
+      const val = parseInt(audioTracksCountInput.value, 10);
+      if (val >= 1 && val <= 32) {
+        if (typeof AudioRouting !== 'undefined' && AudioRouting.setBusCount) {
+          if (AudioRouting.setBusCount(val)) {
+            setStatus(`已將專案音軌數設定為 ${val}`, 'ok');
+            if (typeof emit === 'function') emit('render:all');
+            if (typeof renderMixer === 'function') renderMixer();
+            if (typeof renderAudioTracks === 'function') renderAudioTracks();
+          } else {
+            audioTracksCountInput.value = State.audioProject?.buses?.length || 2;
+          }
+        }
+      }
+    });
+  }
+}, 500);
 
 init();

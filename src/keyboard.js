@@ -232,7 +232,13 @@ function stepMediaBoundary(dir) {
   return true;
 }
 
+const _keysPressed = new Set();
+window.addEventListener('keyup', e => {
+  _keysPressed.delete(e.key.toLowerCase());
+});
+
 window.addEventListener('keydown', e => {
+  _keysPressed.add(e.key.toLowerCase());
   if ($('modalBg').classList.contains('show')) { if (e.key === 'Escape') closeModal(); return; }
   // 快捷鍵設定是獨立於 modalBg 的自訂對話框：開啟期間全域快捷鍵一律不作用（避免 Enter/Space 在背後觸發播放）
   if (document.getElementById('settingsModal')) return;
@@ -340,6 +346,7 @@ window.addEventListener('keydown', e => {
     case 'mark_clear': e.preventDefault(); emit('action', 'mark-clear'); break;
     case 'toggle_safe_frame': e.preventDefault(); emit('action', 'safe-frame'); break;
     case 'screenshot': e.preventDefault(); emit('action', 'screenshot'); break;
+    case 'screenshot_tc': e.preventDefault(); emit('action', 'screenshot_tc'); break;
     case 'toggle_mixer': e.preventDefault(); emit('action', 'mixer'); break;
     case 'set_in': e.preventDefault(); setIn(); break;
     case 'set_out': e.preventDefault(); setOut(); break;
@@ -454,6 +461,21 @@ window.addEventListener('keydown', e => {
     case 'toggle_auto_select': e.preventDefault(); emit('action', 'toggle-auto-select'); break;
     case 'toggle_overwrite': e.preventDefault(); emit('action', 'toggle-overwrite'); break;
     case 'toggle_overwrite_keep': e.preventDefault(); emit('action', 'toggle-ow-keep'); break;
+    case 'exp_in': 
+      e.preventDefault(); 
+      if (_keysPressed.has('[')) {
+        if (_keysPressed.has(']')) emit('action', 'exp-clear');
+        else emit('action', 'exp-in');
+      }
+      break;
+    case 'exp_out': 
+      e.preventDefault(); 
+      if (_keysPressed.has(']')) {
+        if (_keysPressed.has('[')) emit('action', 'exp-clear');
+        else emit('action', 'exp-out');
+      }
+      break;
+    case 'exp_clear': e.preventDefault(); emit('action', 'exp-clear'); break;
     case 'copy_cues': e.preventDefault(); copyCues(); break;
     case 'paste_cues': e.preventDefault(); pasteCues(); break;
     case 'select_current':
