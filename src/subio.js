@@ -590,7 +590,16 @@ async function showExportVideoDialog() {
 async function _runExportVideo(data, format, videoKbps) {
   const isWav = format === 'wav';
   const visCues = State.cues; // toASSFromState 內部依軌道可見性過濾，時碼為時間軸時間＝輸出時間
-  const assText = toASSFromState(visCues);
+  const expIn = State.exportIn != null ? State.exportIn : 0;
+  
+  // 修正：必須扣除 exportIn 的偏移量，否則部分匯出時字幕會出現在錯誤的時間點
+  const shiftedCues = expIn > 0 ? visCues.map(c => ({
+    ...c,
+    start: Math.max(0, (c.start || 0) - expIn),
+    end: Math.max(0, (c.end || 0) - expIn)
+  })) : visCues;
+
+  const assText = toASSFromState(shiftedCues);
   const hasVisSub = /\nDialogue:/.test(assText);
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_')[0];
   const fmtLabel = isWav ? 'WAV 多聲道 PCM' : (format === 'prores' ? 'ProRes 422 HQ' : `MP4 ${(videoKbps / 1000).toFixed(1)}Mbps`);

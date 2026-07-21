@@ -575,14 +575,21 @@ function _joinFilter(inputLabels, channelLayout, channelNames, outputLabel) {
 function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration) {
   const busLabels = new Map();
   let ii = inputIndex;
+  const audioInputMap = new Map();
   plan.buses.forEach((bus, bi) => {
     const parts = [];
     bus.inputs.forEach((input, pi) => {
-      inputs.push('-i', input.file);
+      let mappedIdx = audioInputMap.get(input.file);
+      if (mappedIdx === undefined) {
+        mappedIdx = ii++;
+        inputs.push('-i', input.file);
+        audioInputMap.set(input.file, mappedIdx);
+      }
       const label = `[apB${bi}I${pi}]`;
-      let chain = `[${ii++}:a]atrim=start=${_filterNumber(input.trimStart)}`;
+      let chain = `[${mappedIdx}:a]atrim=start=${_filterNumber(input.trimStart)}`;
       if (input.trimEnd != null) chain += `:end=${_filterNumber(input.trimEnd)}`;
-      chain += ',asetpts=PTS-STARTPTS,aresample=48000,pan=mono|c0=c0,aformat=sample_fmts=fltp:channel_layouts=mono';
+      // 移除 pan=mono|c0=c0 避免立體聲來源只取左聲道導致音量減半或無聲，改由 aformat 自動 downmix
+      chain += ',asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono';
       if (Math.abs(input.volume - 1) > 0.000001) chain += `,volume=${_filterNumber(input.volume, 1)}`;
       const inputDuration = input.trimEnd == null ? null : input.trimEnd - input.trimStart;
       const fadeIn = inputDuration == null ? input.fadeIn : Math.min(input.fadeIn, inputDuration);
@@ -675,9 +682,18 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   if (!list.length) throw new Error('沒有可匯出的影片段');
   const inputs = [], fc = [];
   const EPS = 0.01;
-  // 1) 每片段一個影像輸入（音訊回退共用同一輸入）；索引 === 片段序號 i
-  list.forEach((c) => { inputs.push('-hwaccel', 'auto', '-i', c.path); });
-  let ii = list.length; // 之後的逐聲道音訊檔輸入從此接續編號
+  // 1) 去重複輸入：同一個實體檔案只開啟一次，避免建立過多 hwaccel 實例耗盡 VRAM
+  // 並且計算每個實體檔案最早被用到的時間（minIn），用 -ss 加在 -i 前，避免 ffmpeg 從 0 開始慢速解碼 44GB 大檔！
+  const uniqueVideoPaths = [...new Set(list.map(c => c.path))];
+  const pathMinIn = new Map();
+  uniqueVideoPaths.forEach(p => {
+    // 找出所有用到這個檔案的 clip，取最小的 c.in，並稍微往前抓 0.5 秒確保關鍵幀安全（最低 0）
+    const minIn = Math.max(0, Math.min(...list.filter(c => c.path === p).map(c => c.in)) - 0.5);
+    pathMinIn.set(p, minIn);
+    inputs.push(...hwdecArgs(), '-ss', minIn.toFixed(3), '-i', p);
+  });
+  const videoInputIndices = list.map(c => uniqueVideoPaths.indexOf(c.path));
+  let ii = uniqueVideoPaths.length; // 之後的逐聲道音訊檔輸入從此接續編號
   // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
   fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${D.toFixed(3)},format=yuv420p,setsar=1[base]`);
   const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
@@ -689,16 +705,19 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     const px = Math.max(0, Math.min(1, T.posX == null ? 0.5 : +T.posX));
     const py = Math.max(0, Math.min(1, T.posY == null ? 0.5 : +T.posY));
     const SW = Math.max(2, Math.round(scale * W)), SH = Math.max(2, Math.round(scale * H)); // 此軌影格尺寸（PiP 時縮小）
-    const trk = list.map((c, i) => ({ c, i })).filter(x => (x.c.vtrack || 0) === vt).sort((a, b) => a.c.offset - b.c.offset);
+    const trk = list.map((c, i) => ({ c, i, vIdx: videoInputIndices[i] })).filter(x => (x.c.vtrack || 0) === vt).sort((a, b) => a.c.offset - b.c.offset);
     if (!trk.length) return;
     const segs = []; let cursor = 0, si = 0;
     const gap = (gd) => { const L = `t${ti}s${si++}`; fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${(+gd).toFixed(3)},format=yuva420p,setsar=1[${L}]`); segs.push(`[${L}]`); };
-    for (const { c, i } of trk) {
+    for (const { c, i, vIdx } of trk) {
       if (c.offset > cursor + EPS) gap(c.offset - cursor);
       const L = `t${ti}s${si++}`;
       // 縮放到此軌尺寸（等比、透明補邊，讓非填滿處露出下層），統一 fps/SAR、加 alpha
       const fi = Math.max(0, +c.fadeIn || 0), fo = Math.max(0, +c.fadeOut || 0), clen = Math.max(0.001, c.out - c.in);
-      let vchain = `[${i}:v]trim=start=${c.in}:end=${c.out},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
+      const minIn = pathMinIn.get(c.path);
+      const adjIn = c.in - minIn;
+      const adjOut = c.out - minIn;
+      let vchain = `[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
       // 轉場：淡入/淡出（fade alpha＝淡到透明，讓下層/黑底露出→軌間溶接）
       if (fi > 0) vchain += `,fade=t=in:st=0:d=${Math.min(fi, clen).toFixed(3)}:alpha=1`;
       if (fo > 0) vchain += `,fade=t=out:st=${Math.max(0, clen - Math.min(fo, clen)).toFixed(3)}:d=${Math.min(fo, clen).toFixed(3)}:alpha=1`;
@@ -720,6 +739,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   // 3) 音訊：有 project audioPlan 時，依 bus / stream 路由輸出；沒有時完整保留舊版
   // 「所有來源混成一條 stereo」的行為，讓既有專案與自動化呼叫不受影響。
   let plannedAudio = null;
+  const audioInputMap = new Map();
   if (audioPlan) {
     plannedAudio = _buildPlannedAudio(audioPlan, inputs, fc, ii, D);
   } else {
@@ -730,17 +750,18 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
         if (!c.audio.length) return; // 全靜音 → 此片段不發聲
         const mono = [];
         c.audio.forEach((ch, j) => {
-          inputs.push('-i', ch.file); const aidx = ii++;
-          fc.push(`[${aidx}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,volume=${ch.volume}[am${i}_${j}]`);
+          let mappedIdx = audioInputMap.get(ch.file);
+          if (mappedIdx === undefined) { mappedIdx = ii++; inputs.push('-i', ch.file); audioInputMap.set(ch.file, mappedIdx); }
+          fc.push(`[${mappedIdx}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,volume=${ch.volume}[am${i}_${j}]`);
           mono.push(`[am${i}_${j}]`);
         });
         al = `[aa${i}]`;
         fc.push(mono.length > 1
-          ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,pan=stereo|FL=c0|FR=c0${al}`
-          : `${mono[0]}pan=stereo|FL=c0|FR=c0${al}`);
+          ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`
+          : `${mono[0]}aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else if (hasAudioStream(c.path)) {
         al = `[aa${i}]`;
-        fc.push(`[${i}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+        fc.push(`[${videoInputIndices[i]}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else return;
       const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
       // 轉場：音訊淡入/淡出（與影像同步）
@@ -766,9 +787,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     // 不必先安裝到系統。
     // ── 磁碟機冒號要跳【兩層】(v4.31.2 修)：filtergraph 先拆選項、選項值再拆一次，
     //    所以字面上得是 `C\\:/...`。只寫一個反斜線（舊版）→ ffmpeg 把 `:` 當成選項分隔符、
-    //    整條 filterchain 解析失敗 → 匯出直接掛掉（實測 spawn 無 shell 介入亦然，
-    //    不是 shell 吃掉跳脫字元）。此路徑僅在 font/ 存在時才加，因此 v4.27.0 把字型
-    //    打進安裝包之後，安裝版的匯出才開始壞。
+    //    整條 filterchain 解析失敗 → 匯出直接掛掉。此路徑僅在 font/ 存在時才加。
     const fdir = fontsRoot();
     const fdirArg = fdir ? ':fontsdir=' + fdir.replace(/\\/g, '/').replace(/:/g, '\\\\:') : '';
     fc.push(`${vc}ass=${assName}${fdirArg}[vout]`);

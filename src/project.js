@@ -160,6 +160,8 @@ function _buildProjectData(){
       ...(t.outline!=null?{outline:t.outline}:{}),...(t.outlineColor!=null?{outlineColor:t.outlineColor}:{}),...(t.shadow!=null?{shadow:t.shadow}:{}),
       ...(t.vertical!=null?{vertical:t.vertical}:{}),...(t.bgBox!=null?{bgBox:t.bgBox}:{}),...(t.bgColor!=null?{bgColor:t.bgColor}:{}),...(t.bgAlpha!=null?{bgAlpha:t.bgAlpha}:{})})),
     pxPerSec:State.pxPerSec,
+    ...(State.exportIn!=null?{exportIn:State.exportIn}:{}),
+    ...(State.exportOut!=null?{exportOut:State.exportOut}:{}),
     // 影片序列（v4.5.0；v4.10.0 起含多視訊軌）：各段的來源路徑與幾何；網頁版無路徑（開啟時需手動重加）
     videoTracks:State.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked,
       ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})})),
@@ -375,6 +377,8 @@ const Project = {
     if(!State._pendingClips) delete State._pendingClips;
     State.duration=data.duration||State.duration;
     State.pxPerSec=data.pxPerSec||80;
+    State.exportIn=data.exportIn!=null?data.exportIn:null;
+    State.exportOut=data.exportOut!=null?data.exportOut:null;
     State.listTrack=0;
     State.selectedId=null; State.selectedIds=[]; // 開啟專案後預設不選取任何字幕
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); History.reset();

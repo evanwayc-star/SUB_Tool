@@ -2102,10 +2102,26 @@ async function initDesktop(){
       `原生 MP4/MOV/MP3/WAV 播放與字幕編輯不受影響。`);
     setStatus('就緒（桌面模式）— 可直接讀 MXF 與多音軌','ok');
   }catch(e){ setStatus('就緒（桌面模式）','ok'); }
+  const _taskStarts = {};
   DESK.onProgress(d=>{
-    if(!d.done && d.pct<100) setStatus((d.label||'處理中')+'… '+d.pct+'%','busy','lock');
+    if (d.pct === 0 || !_taskStarts[d.jobId]) _taskStarts[d.jobId] = Date.now();
+    if(!d.done && d.pct<100) {
+      const elMs = Date.now() - _taskStarts[d.jobId];
+      let tStr = '';
+      if (d.pct > 0 && elMs > 1000) {
+        const total = elMs / (d.pct / 100);
+        const remS = Math.floor((total - elMs) / 1000);
+        const elS = Math.floor(elMs / 1000);
+        const fmt = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
+        tStr = ` [已用 ${fmt(elS)} / 剩餘 ${fmt(remS)}]`;
+      }
+      setStatus((d.label||'處理中')+'… '+d.pct+'%'+tStr,'busy','lock');
+      if ($('stMedia')) $('stMedia').style.display = 'none'; // 隱藏媒體名稱以騰出空間，避免擠壓進度文字
+    }
     if(d.done) {
-      setStatus('轉檔完成', 'ok', 'unlock');
+      delete _taskStarts[d.jobId];
+      setStatus((d.label||'轉檔')+'完成', 'ok', 'unlock');
+      if ($('stMedia')) $('stMedia').style.display = ''; // 恢復顯示
       window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:d}));
     }
   });
