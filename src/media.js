@@ -1464,7 +1464,7 @@ const Media = {
      「間隙」（時間軸上沒有影片的區段）：畫面黑、播放頭以虛擬時鐘（_gapT/_gapStart）續走。 */
   activeClipId:null,
   _gap:false, _gapT:0, _gapStart:null, _seqSwitching:false,
-  seqOn(){ return State.clips.length > 0; },
+  seqOn(){ return State.clips.some(c => c.type !== 'image'); },
   audioOnlyTimeline(){ return !this.seqOn() && this.externalTimelineEnd()>0; },
   _activeClip(){ return Seq.byId(this.activeClipId); },
   /* 時間軸權威時間（播放中） */
@@ -1666,8 +1666,10 @@ const Media = {
     // 不會改變 video clip 集合，因此必須獨立偵測。
     this._syncExternalElementActivity(t);
     // 恆等模式（單一未修剪 clip 從 0 開始）：完全交給原生 ended / mpv keep-open，行為與舊版一致
-    const c0 = State.clips[0];
-    if(State.clips.length === 1 && !this._gap && c0.offset === 0 && c0.in === 0
+    // 圖片不計入：它們是純視覺疊層，不影響影片播放引擎
+    const _videoClips = State.clips.filter(c => c.type !== 'image');
+    const c0 = _videoClips[0];
+    if(_videoClips.length === 1 && c0 && !this._gap && c0.offset === 0 && c0.in === 0
        && Math.abs(c0.out - c0.dur) < 0.05 && this.activeClipId === c0.id) return;
     if(this._gap){
       const hit = Seq.clipAt(t);
@@ -1679,7 +1681,7 @@ const Media = {
     if(!c){ const hit = Seq.clipAt(t); if(hit) this._ensureClip(hit, Seq.toSource(t, hit), true); else this._enterGap(t); return; }
     // 疊合試聽：作用中片段集合變化 → 重設可聽音源並同步各自 element/buffer（讓滑入/滑出重疊的片段跟著出/停聲）。
     // okey 相同時不動，避免逐幀 churn；不改變影像的 active clip。
-    const okey = Seq.clipsAt(t).map(x=>x.id).join('|');
+    const okey = Seq.clipsAt(t).filter(x=>x.type !== 'image').map(x=>x.id).join('|');
     if(okey !== this._lastOverlapKey){
       this._lastOverlapKey = okey;
       this._applyClipAudio(c, t);
@@ -1857,8 +1859,8 @@ const Media = {
     let url = p;
     try { url = await DESK.fileURL(p); } catch(e){}
     const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
-    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? 5, 36000); c.offset = geo.offset ?? c.offset; if(geo.vtrack != null) c.vtrack = geo.vtrack; c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; }
-    else { c.out = 5; }
+    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? 10, 36000); c.offset = geo.offset ?? c.offset; if(geo.vtrack != null) c.vtrack = geo.vtrack; c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; }
+    else { c.out = 10; c.offset = this.displayTime(); }
     // 預設將圖片放置於全新的最上層視訊軌
     if (!geo || geo.vtrack == null) {
       c.vtrack = State.videoTracks.length;
@@ -1874,7 +1876,7 @@ const Media = {
   async addImageWeb(f){
     const url = URL.createObjectURL(f); this.objectURLs.push(url);
     const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
-    c.out = 5;
+    c.out = 10; c.offset = this.displayTime();
     c.vtrack = State.videoTracks.length;
     ensureVideoTrackCount(c.vtrack + 1);
     Seq.sort(); Seq.recomputeDuration();

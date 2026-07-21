@@ -39,7 +39,7 @@ const Seq = {
   /* t 之後（不含）下一個開始的 clip（任一軌）；間隙播放時用來得知何時有內容切入 */
   nextAfter(t){
     let best = null;
-    for(const c of State.clips){ if(c.offset > t + EPS && (!best || c.offset < best.offset)) best = c; }
+    for(const c of State.clips){ if(c.type !== 'image' && c.offset > t + EPS && (!best || c.offset < best.offset)) best = c; }
     return best;
   },
   /* ---- 時間映射 ---- */
