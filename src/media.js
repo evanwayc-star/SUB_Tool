@@ -1594,6 +1594,7 @@ const Media = {
   /* 把播放器對到指定 clip 的來源時間（必要時換檔）。resume=切換後是否續播 */
   async _ensureClip(c, localT, resume){
     if(this._seqSwitching) return;
+    if(c.type === 'image') return; // 圖片是純視覺疊層，不經過播放引擎
     if(resume === undefined) resume = this.playing;
     if(this.activeClipId === c.id && !this._gap){ this._playerSeekSource(localT); return; }
     this._seqSwitching = true;
@@ -1603,7 +1604,7 @@ const Media = {
       this.stopBufferSources(); // buffer 音軌隸屬 primary：換段先停，resume 時依 _srcHidden 決定是否重啟
       const _tl = Seq.toTimeline(localT, c);
       this._applyClipAudio(c, _tl);
-      this._lastOverlapKey = Seq.clipsAt(_tl).map(x=>x.id).join('|'); // 與 seqTick 疊合偵測同步，避免切段後多餘重同步
+      this._lastOverlapKey = Seq.clipsAt(_tl).filter(x=>x.type !== 'image').map(x=>x.id).join('|');
       if(this.mpvMode){
         if(c.path && DESK?.mpv?.loadfile){
           this.stopElementSources();
@@ -1853,14 +1854,15 @@ const Media = {
     }
     if(this._bgVersion === myVer) { renderAudioTracks(); setStatus(`影片已加入序列：${c.name}`, 'ok'); }
   },
-  /* 加入圖片到序列（桌面） */
   async addImageDesktop(p, geo = null){
     const name = baseName(p);
     let url = p;
     try { url = await DESK.fileURL(p); } catch(e){}
-    const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
-    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? 10, 36000); c.offset = geo.offset ?? c.offset; if(geo.vtrack != null) c.vtrack = geo.vtrack; c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; }
-    else { c.out = 10; c.offset = this.displayTime(); }
+    const imgOffset = geo?.offset ?? this.displayTime();
+    const imgOut = geo ? Math.min(geo.out ?? 10, 36000) : 10;
+    const imgIn = geo?.in ?? 0;
+    const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5, offset: imgOffset, out: imgOut, in: imgIn });
+    if(geo){ if(geo.vtrack != null) c.vtrack = geo.vtrack; c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; }
     // 預設將圖片放置於全新的最上層視訊軌
     if (!geo || geo.vtrack == null) {
       c.vtrack = State.videoTracks.length;
@@ -1872,11 +1874,10 @@ const Media = {
     setStatus(`已加入圖片：${c.name}`, 'ok');
     return c;
   },
-  /* 加入圖片到序列（網頁版） */
   async addImageWeb(f){
     const url = URL.createObjectURL(f); this.objectURLs.push(url);
-    const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5 });
-    c.out = 10; c.offset = this.displayTime();
+    const imgOffset = this.displayTime();
+    const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5, offset: imgOffset, out: 10 });
     c.vtrack = State.videoTracks.length;
     ensureVideoTrackCount(c.vtrack + 1);
     Seq.sort(); Seq.recomputeDuration();
