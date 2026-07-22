@@ -1,4 +1,28 @@
-/* SUB Tool — 字幕匯入 / 匯出 / 拖放 / FPS 轉換 / 時間碼位移 / 持續時間調整 */
+/* ==============================================================================
+   SUB Tool — 字幕與影片 I/O 匯出模組 (I/O Layer)
+   ==============================================================================
+   
+   【架構與職責總覽】
+   本檔案 (subio.js) 負責處理所有與外部檔案格式交握的邏輯。
+   包含：字幕匯入 (解析)、字幕匯出 (生成字串)、以及影片/音訊匯出 (組裝 FFmpeg 參數)。
+   
+   1. 字幕格式與編碼安全 (Subtitles I/O)
+      匯出時，處理了各種目標格式 (如 SRT, VTT, ASS, Encore TXT) 的特定要求
+      (如時間碼精度、BOM 標記、UTF-16LE 轉碼)。所有解析後的資料都會被標準化
+      為內部 `Cue` 結構。
+      
+   2. 影片匯出指令與 Filtergraph 組裝 (Video Export)
+      負責在 `_runExportVideo` 中將目前時間軸的視訊軌、音軌、以及動態產生的
+      ASS 字幕 (透過 `toASSFromState`) 編譯成 FFmpeg 可執行的 `filter_complex` 
+      與輸入輸出參數。這也是本專案最容易因為參數順序或字元跳脫 (Escaping) 
+      錯誤而導致匯出失敗的核心所在。
+
+   【維護鐵律】
+   - 修改 ASS 樣式或渲染尺寸時，請去 `substyle.js`。本檔的 `toASSFromState`
+     只負責「套用樣式並生成檔案字串」，絕對不可在此處 Hardcode 字型設定。
+   - 新增 FFmpeg 的 `-filter_complex` 濾鏡時，特別注意在 Windows 環境下
+     對於 `\`, `:`, `'` 等特殊字元的雙層跳脫 (Double Escaping) 問題。
+============================================================================== */
 import { State, setFps, newTrack, syncTrackCount, newId, IS_DESKTOP, DESK } from './state.js';
 import { $, video } from './dom.js';
 import { decodeText, b64ToBytes, readFile, pickFile, encodeUTF16LE, bytesToB64, downloadBytes, baseName, escapeHTML } from './util.js';

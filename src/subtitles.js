@@ -1,4 +1,31 @@
-/* SUB Tool — 字幕列表：渲染、選取（多選）、新增/刪除、軌道切換/樣式 */
+/* ==============================================================================
+   SUB Tool — 字幕列表渲染與資料邏輯模組 (Subtitles Data Layer)
+   ==============================================================================
+   
+   【架構與職責總覽】
+   本檔案 (subtitles.js) 負責操作與管理字幕資料 (Cues) 本身的生命週期。
+   包含：字幕的增刪改查 (CRUD)、多選與框選邏輯、以及字元檢核。
+   
+   1. 字幕列表的高效渲染 (DOM Virtualization)
+      右側字幕列表 (Sublist) 負責將 `State.cues` 映射為 DOM。
+      因為列表可能包含數以千計的 DOM 節點，模組內針對 `renderSubList`
+      進行了最佳化，並將 `presetNameCache` 獨立出來，避免每次重繪時
+      發生大量冗餘的樣式比對與計算。
+      
+   2. 多選與焦點 (Selection & Focus)
+      所有與字幕「選擇 (Selection)」有關的 Action (如 `selectCue`, `sweepContainedCues`) 
+      都集中於此。修改選取狀態後，會透過呼叫 `updateTlSel` 去同步
+      `timeline.js` 的視覺反饋。
+      
+   3. 特殊字元與檢核 (Character Check)
+      與 `subtitleTextCheck.js` 協作，於使用者輸入時即時檢查是否包含
+      半形逗號 (SRT 大忌) 或是不可見字元，並於畫面上以警告標記。
+
+   【維護鐵律】
+   - 所有會改變 `State.cues` 的操作，【必須】在此執行。完成狀態修改後，
+     一律發送 `emit('event')` 讓 app.js 去呼叫對應的繪製層重繪，
+     嚴禁在此檔案內越權去修改 Canvas 裡的 pixels 或 layout 屬性。
+============================================================================== */
 import { $, sublist, video } from './dom.js';
 import { State, isSel, newId, trackVisible, cueSuffix, ensureTrackCount } from './state.js';
 import { escapeHTML, tcKeyAllowed } from './util.js';
