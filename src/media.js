@@ -1,4 +1,34 @@
-/* SUB Tool — 媒體引擎（影片 + Web Audio 多音軌 + ffmpeg）與波形 */
+/* ==============================================================================
+   SUB Tool — 媒體播放引擎與音訊路由模組 (Media Engine)
+   ==============================================================================
+   
+   【架構與職責總覽】
+   本檔案 (media.js) 是本專案最核心、最龐大的模組，主要負責以下三大領域：
+   
+   1. 雙重播放引擎 (Dual-Engine Playback)
+      為了兼顧 Web 的輕量以及專業級編碼 (如 MXF, 10-bit ProRes) 的支援，
+      本模組會動態決定使用底層 Chromium 的 HTMLMediaElement 或是透過 IPC
+      喚起 `mpv` 作為原生子視窗進行渲染。兩者皆統一抽象為 Media API，對上層
+      (如時間軸、字幕操作) 隱藏底層差異。
+      
+   2. 時間同步機制 (Time Synchronization)
+      因為音訊、影片、以及 mpv IPC 都有各自的時間來源，
+      本模組使用 `requestAnimationFrame` 與定期 Tick，將這三者的時間軸
+      強制對齊。所有的 `currentTime` 必須經由 `sequence.js` 轉換為
+      「來源時間 (Source Time)」後，才能餵給底層播放器，以實現影片裁切
+      (In/Out) 與偏移 (Offset) 的視覺連貫。
+      
+   3. 多軌音訊與匯流排 (Web Audio API Routing & Bus)
+      為了讓使用者能在一條時間軸上排列多支影片並對其音軌進行混音，
+      本檔案建立了一套 AudioContext 的連線圖 (Audio Graph)。
+      將不同的音訊來源 (AudioSourceNode) 映射至各匯流排 (AudioBusNode)，
+      並最終輸出。同時，這也為波形 (Waveform) 的繪製提供了 PCM 資料來源。
+
+   【維護鐵律】
+   - 所有牽涉播放頭時間的操作，請務必先釐清目前變數是「專案全局時間軸」還是
+     「該片段的影片來源時間」。這兩者的轉換請統一呼叫 sequence 模組的方法，
+     千萬不要在此檔案內手刻算式。
+============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap } from './state.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
