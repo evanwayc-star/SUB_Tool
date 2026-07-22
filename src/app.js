@@ -1985,8 +1985,12 @@ function initUI(){
       if(!presets.length){ showToast('沒有自訂樣式可匯出'); return; }
       if (IS_DESKTOP && DESK.exportDirectory) {
         const files = presets.map(p => {
-          let folder = p.group ? `${p.group}/` : '';
-          let name = p.name;
+          // 資料夾名稱也必須淨化：group 直接來自匯入的 .json 內容（見下方匯入分支，
+          // items 原封不動 push 進來），未洗過的 "../.." 會讓主程序的 path.join
+          // 正規化後跳出使用者選定的資料夾，把檔案寫到磁碟上任意位置。
+          const safeGroup = (p.group || '').replace(/[<>:"/\\|?*]/g, '_').replace(/^\.+$/, '_');
+          const folder = safeGroup ? `${safeGroup}/` : '';
+          const name = p.name;
           const safeName = name.replace(/[<>:"/\\|?*]/g, '_');
           const str = JSON.stringify([p], null, 2);
           const bytes = new TextEncoder().encode(str);

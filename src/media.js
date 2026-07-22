@@ -3038,7 +3038,10 @@ const Wave = {
     const matching = this.sources.map((s,i) => ({s, i}))
         .filter(x => (x.s.sourceId || 'video') === activeSrcId);
     const show = matching.length > 1;
-    sel.innerHTML = matching.map(x => `<option value="${x.i}">${x.s.label}</option>`).join('');
+    // label 來自專案檔或媒體檔的 metadata（見 sources 的建立處：track.name / ch.label），
+    // 屬於外來字串——直接塞進 innerHTML 等於讓別人給的專案／影片可以在本程式內執行程式碼，
+    // 而主程序有多個吃路徑的 IPC，代價不只是畫面亂掉。
+    sel.innerHTML = matching.map(x => `<option value="${x.i}">${escapeHTML(String(x.s.label ?? ''))}</option>`).join('');
     if(!matching.find(x => x.i === this.srcIdx) && matching.length > 0){
       this.selectSource(matching[0].i);
     }

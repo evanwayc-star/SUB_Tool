@@ -1072,12 +1072,15 @@ ipcMain.handle('dialog:importDirectory', async () => {
   const dir = r.filePaths[0];
   allowDir(dir);
   const files = [];
+  /* name 必須是【相對於所選資料夾】的路徑：呼叫端（app.js 匯入樣式）就是靠 name 的第一段
+     還原「樣式資料夾」。之前這裡只回檔名，遞迴進子目錄後資料夾資訊就沒了 → 匯出時建好的
+     資料夾結構再匯入回來全部被攤平、group 全部遺失。分隔符一律正規化成 "/"。 */
   function scan(d) {
     for (const f of fs.readdirSync(d)) {
       const p = path.join(d, f);
       if (fs.statSync(p).isDirectory()) scan(p);
       else if (f.endsWith('.json')) {
-        files.push({ name: f, b64: fs.readFileSync(p).toString('base64') });
+        files.push({ name: path.relative(dir, p).split(path.sep).join('/'), b64: fs.readFileSync(p).toString('base64') });
       }
     }
   }
@@ -1093,14 +1096,24 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
   if (r.canceled || r.filePaths.length === 0) return null;
   const dir = r.filePaths[0];
   allowDir(dir);
-  for (const f of files) {
-    const data = f.content || f.b64;
-    if (f.name && data) {
-      const fullPath = path.join(dir, f.name);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(fullPath, Buffer.from(data, 'base64'));
+  /* 檔名可能源自使用者匯入的資料（例如樣式包 .json 裡的 group 欄位），renderer 端已淨化，
+     這裡再擋一次：path.join 會把 "../" 正規化掉，光靠呼叫端把關等於沒有把關。
+     一律要求最終路徑落在使用者剛剛選定的資料夾底下，否則跳過並記錄。 */
+  const root = path.resolve(dir);
+  let written = 0, blocked = 0;
+  for (const f of files || []) {
+    const data = f && (f.content || f.b64);
+    if (!f || typeof f.name !== 'string' || !f.name || !data) continue;
+    const fullPath = path.resolve(root, f.name);
+    if (fullPath !== root && !fullPath.startsWith(root + path.sep)) {
+      blocked++; console.warn('[sec] exportDirectory blocked (escapes target dir):', f.name);
+      continue;
     }
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, Buffer.from(data, 'base64'));
+    written++;
   }
+  if (blocked) console.warn(`[sec] exportDirectory: ${blocked} 個檔案因路徑越界被略過（已寫入 ${written} 個）`);
   return dir;
 });
 
@@ -1281,8 +1294,17 @@ ipcMain.handle('fonts:list', () => {
   return { root, fonts: out };
 });
 
+/* 只清自己產生的暫存／快取檔。呼叫端傳的一律是 ffmpeg 寫進 CACHE/TMP 的中繼檔
+   （見 media.js 的 cleanupAudio(wavPath)），所以限制在這兩個根目錄底下不影響任何既有流程；
+   少了這道檢查，這支 handler 就是一個「刪除磁碟上任意檔案」的原語，而 unlinkSync 不進資源回收筒。 */
 ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
-  try { fs.unlinkSync(p); tempFiles.delete(p); } catch (e2) {}
+  const roots = [CACHE, TMP].filter(Boolean).map(r => { try { return path.resolve(r); } catch (e2) { return null; } }).filter(Boolean);
+  let rp; try { rp = path.resolve(p); } catch (e2) { return; }
+  if (!roots.some(root => rp.startsWith(root + path.sep))) {
+    console.warn('[sec] ffmpeg:cleanup blocked (outside cache):', p);
+    return;
+  }
+  try { fs.unlinkSync(rp); tempFiles.delete(p); } catch (e2) {}
 });
 
 /* ---- 單次讀取多輸出：整個來源檔只讀一遍，同時產生 proxy + 每聲道音訊 + 混音波形 ----
@@ -1861,6 +1883,7 @@ function mpvConnectPipe(pipeName) {
 
 ipcMain.handle('mpv:detect', () => { const exe = detectMpv(); console.error('[mpv] detect ->', exe || '(not found)'); return { available: !!exe, exe }; });
 ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
+  if (typeof src !== 'string' || !src) throw new Error('mpv：來源路徑無效');
   if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
   destroyMpvWin();
@@ -1934,7 +1957,9 @@ ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
     mpvArgs.push(`--lavfi-complex=${aids.join('')}amix=inputs=${audio.length}:normalize=0[ao]`);
   }
 
-  mpvArgs.push(src);
+  /* "--" 終止選項解析：少了它，一個以 "-" 開頭的來源字串會被 mpv 當成【選項】吃掉
+     （--script=、--include=、--o= 之類足以造成程式碼執行），而不是當成檔名。 */
+  mpvArgs.push('--', src);
 
   _mpvProc = spawn(exe, mpvArgs, { detached: false, stdio: ['ignore', 'ignore', logStream ? 'pipe' : 'ignore'] });
   if (logStream && _mpvProc.stderr) _mpvProc.stderr.pipe(logStream);
@@ -2040,7 +2065,11 @@ ipcMain.handle('mpv:loadfile', async (e, p) => {
   return { ok: false, duration: 0 };
 });
 ipcMain.handle('mpv:seek',  (e, t) => mpvSend(['seek', t, 'absolute']));
-ipcMain.handle('mpv:screenshot', (e, p) => mpvSend(['screenshot-to-file', p, 'subtitles']));
+// 與 fs:writeScreenshot 同一道副檔名檢查：少了它，這支等於一個不限副檔名的任意路徑寫檔原語。
+ipcMain.handle('mpv:screenshot', (e, p) => {
+  if (!/\.(jpg|jpeg|png)$/i.test(p || '')) { console.warn('[sec] mpv:screenshot blocked (bad ext):', p); return null; }
+  return mpvSend(['screenshot-to-file', p, 'subtitles']);
+});
 ipcMain.handle('mpv:play',  ()     => mpvSend(['set_property', 'pause', false]));
 ipcMain.handle('mpv:pause', ()     => mpvSend(['set_property', 'pause', true]));
 ipcMain.handle('mpv:mute',  (e, v) => mpvSend(['set_property', 'mute', v]));
