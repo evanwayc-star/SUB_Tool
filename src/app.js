@@ -434,6 +434,11 @@ function renderImageOverlays(){
   if(layer.innerHTML !== html) layer.innerHTML = html;
 
   if(Media.mpvMode && !Media._wcTakeover && window.subtool?.mpv?.setImageGuide){
+    // [效能與字體最佳化] 
+    // 當處於 MPV 原生播放模式時，為了避免強行切換 WebCodecs 造成 CPU 解碼卡頓，
+    // 以及避免從 MPV libass 字幕渲染切換至 HTML DOM 造成字幕視覺大小突變，
+    // 我們將圖片疊加層 (包含 rect 座標) 傳送至 Electron 的透明置頂輔助視窗 (`_mpvGuideWin`)。
+    // 這樣即可在維持 MPV GPU 硬體加速與原生字幕渲染的同時，將圖片完美顯示在畫面上方。
     window.subtool.mpv.setImageGuide({ html, rect });
   } else if(window.subtool?.mpv?.setImageGuide){
     window.subtool.mpv.setImageGuide(null);

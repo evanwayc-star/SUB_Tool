@@ -246,6 +246,7 @@ export const WCPreview = {
 
     // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
     // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
+    // (註：單純的圖片疊層已改交由 _mpvGuideWin 在原生 MPV 上方疊加顯示，不再強制 WebCodecs 接管，確保流暢度與字體大小不變)
     const needsComposite = acts.length > 1 || acts.some(c => {
       const vt=State.videoTracks[c.vtrack||0]||{};
       return (c.fadeIn||0)>0 || (c.fadeOut||0)>0 ||
