@@ -63,11 +63,19 @@ const HAN_CHARACTER_RE = /^\p{Script=Han}$/u;
 const ALLOWED_NON_HAN_CHARACTER_RE =
   /^(?:[A-Za-z\uFF21-\uFF3A\uFF41-\uFF5A]|\p{Number}|\p{Punctuation}|\p{Symbol}|\p{White_Space}|\p{Emoji_Component})$/u;
 
+const _charCheckCache = new Map();
+const MAX_CHAR_CHECK_CACHE = 5000;
+
 /* 回傳字幕文字中的可疑字元（依出現順序去重）。
    simplified：常見簡體字（明確為簡轉繁時需修改的簡體字）。
    sharedSimplified：繁簡共用字（僅供參考，不誤報為問題字元）。
    unsupported：非繁中／英文／數字／符號的其他字元，例如日文假名、韓文、俄文與零寬空白。 */
 function inspectSubtitleCharacters(text){
+  const str = String(text ?? '');
+  if(_charCheckCache.has(str)){
+    return _charCheckCache.get(str);
+  }
+
   const simplified = [];
   const sharedSimplified = [];
   const unsupported = [];
@@ -75,7 +83,7 @@ function inspectSubtitleCharacters(text){
   const seenSharedSimplified = new Set();
   const seenUnsupported = new Set();
 
-  for(const character of String(text ?? '')){
+  for(const character of str){
     if(UNAMBIGUOUS_SIMPLIFIED_SET.has(character)){
       if(!seenSimplified.has(character)){
         seenSimplified.add(character);
@@ -96,7 +104,13 @@ function inspectSubtitleCharacters(text){
       unsupported.push(character);
     }
   }
-  return { simplified, sharedSimplified, unsupported };
+
+  const res = { simplified, sharedSimplified, unsupported };
+  if(_charCheckCache.size >= MAX_CHAR_CHECK_CACHE){
+    _charCheckCache.clear();
+  }
+  _charCheckCache.set(str, res);
+  return res;
 }
 
 export { inspectSubtitleCharacters };

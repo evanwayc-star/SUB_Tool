@@ -385,58 +385,65 @@ function renderCheckPanel(){
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
   // 時間碼重疊
   const overlapSet=_detectOverlaps(list);
-  const overlapNums=list.map((c,i)=>overlapSet.has(c.id)?i+1:null).filter(n=>n!==null);
-  // 多行（排除空白字幕，避免純換行符被誤計）
-  const multiNums=list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n/g)||[]).length>=2?i+1:null;}).filter(n=>n!==null);
-  const twoNums  =list.map((c,i)=>{const t=c.text||'';return t.trim()&&(t.match(/\n/g)||[]).length===1?i+1:null;}).filter(n=>n!==null);
-  // 空白字幕
-  const blankNums=list.map((c,i)=>!(c.text||'').trim()?i+1:null).filter(n=>n!==null);
-  
-  // 連續相同
+  const lenEl=$('cpLenInput');
+  _checkLenLimit = lenEl ? (parseInt(lenEl.value)||0) : 0;
+  const containsRaw=($('cpContainsInput')||{}).value||'';
+  _checkContains=containsRaw.split('||').map(s=>s.trim()===''?s:s.replace(/^[ ]+|[ ]+$/g,'')).filter(s=>s.length>0);
+
+  const overlapNums=[], multiNums=[], twoNums=[], blankNums=[];
+  const bNums=[], iNums=[], uNums=[], fontNums=[], posNums=[];
+  const trimNums=[], overLenNums=[], containsNums=[], nonTraditionalIssues=[];
+  const noTimeNums=[];
   const consecutiveIdenticalSet = new Set();
-  for(let i=1; i<list.length; i++){
-    const t1 = (list[i-1].text||'').trim();
-    const t2 = (list[i].text||'').trim();
-    if(t1 && t1 === t2){
-      consecutiveIdenticalSet.add(i);
-      consecutiveIdenticalSet.add(i+1);
+
+  for(let i=0; i<list.length; i++){
+    const c=list[i];
+    const num=i+1;
+    const t=c.text||'';
+    const trimmed=t.trim();
+    const lower=t.toLowerCase();
+
+    if(c.timed===false) noTimeNums.push(num);
+    if(overlapSet.has(c.id)) overlapNums.push(num);
+
+    if(!trimmed){
+      blankNums.push(num);
+    } else {
+      const lineCnt=(t.match(/\n/g)||[]).length;
+      if(lineCnt>=2) multiNums.push(num);
+      else if(lineCnt===1) twoNums.push(num);
+    }
+
+    if(i>0){
+      const prevTrimmed=(list[i-1].text||'').trim();
+      if(prevTrimmed && prevTrimmed===trimmed){
+        consecutiveIdenticalSet.add(i);
+        consecutiveIdenticalSet.add(num);
+      }
+    }
+
+    if(/<\/?b>/i.test(t)) bNums.push(num);
+    if(/<\/?i>/i.test(t)) iNums.push(num);
+    if(/<\/?u>/i.test(t)) uNums.push(num);
+    if(/<\/?font/i.test(t)) fontNums.push(num);
+    if(/\{\\an\d\}/i.test(t)) posNums.push(num);
+
+    if(/^[ 　]+|[ 　]+$/m.test(t)) trimNums.push(num);
+
+    if(_checkLenLimit && trimmed && t.split(/\n/).some(ln=>ln.length>_checkLenLimit)){
+      overLenNums.push(num);
+    }
+
+    if(_checkContains.length && _checkContains.some(kw=>lower.includes(kw.toLowerCase()))){
+      containsNums.push(num);
+    }
+
+    const issue=inspectSubtitleCharacters(t);
+    if(issue.simplified.length||issue.unsupported.length){
+      nonTraditionalIssues.push({ num, ...issue });
     }
   }
   const consecutiveIdenticalNums = Array.from(consecutiveIdenticalSet).sort((a,b)=>a-b);
-  
-  // SRT標籤
-  const bNums=list.map((c,i)=>/<\/?b>/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
-  const iNums=list.map((c,i)=>/<\/?i>/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
-  const uNums=list.map((c,i)=>/<\/?u>/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
-  const fontNums=list.map((c,i)=>/<\/?font/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
-  const posNums=list.map((c,i)=>/\{\\an\d\}/i.test(c.text||'')?i+1:null).filter(n=>n!==null);
-  
-  // 頭尾空白
-  const trimNums=list.map((c,i)=>{
-    const t=c.text||'';
-    if(t.match(/^[ 　]+|[ 　]+$/m)) return i+1;
-    return null;
-  }).filter(n=>n!==null);
-  // 超過字數
-  const lenEl=$('cpLenInput');
-  _checkLenLimit = lenEl ? (parseInt(lenEl.value)||0) : 0;
-  const overLenNums = _checkLenLimit
-    ? list.map((c,i)=>{ const t=c.text||''; return t.trim()&&t.split(/\n/).some(ln=>ln.length>_checkLenLimit)?i+1:null; }).filter(n=>n!==null)
-    : [];
-  // 包含文字（|| 為 OR）
-  const containsRaw=($('cpContainsInput')||{}).value||'';
-  // 純空白詞（用來搜尋空格）保留原樣；有文字的詞才去掉裝飾性 ASCII 空格
-  _checkContains=containsRaw.split('||').map(s=>s.trim()===''?s:s.replace(/^[ ]+|[ ]+$/g,'')).filter(s=>s.length>0);
-  const containsNums=_checkContains.length
-    ? list.map((c,i)=>{ const t=(c.text||'').toLowerCase(); return _checkContains.some(kw=>t.includes(kw.toLowerCase()))?i+1:null; }).filter(n=>n!==null)
-    : [];
-  // 疑似簡體或其他非繁中／英文／數字／符號字元
-  const nonTraditionalIssues=list.map((c,i)=>{
-    const issue=inspectSubtitleCharacters(c.text||'');
-    return issue.simplified.length||issue.unsupported.length ? { num:i+1, ...issue } : null;
-  }).filter(Boolean);
-  // 無時間碼
-  const noTimeNums=list.map((c,i)=>c.timed===false?i+1:null).filter(n=>n!==null);
   
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
   const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{
