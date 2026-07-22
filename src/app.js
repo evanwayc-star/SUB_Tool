@@ -639,6 +639,7 @@ function _moveImageDrag(x, y){
     clip.posY = clamp(d.origPosY + (y - d.y0) / d.rect.h, 0, 1);
   }
   renderImageOverlays();
+  renderVideoSub();
 }
 
 function _finishImageDrag(pointerId=null, source=null){
@@ -660,9 +661,10 @@ function _finishImageDrag(pointerId=null, source=null){
 const _imageLayer = document.getElementById('imageLayer');
 function _startDomImageDrag(e, pointerId=null){
   if(e.button !== 0) return;
-  const wrap = e.target.closest?.('.img-wrap');
+  const wrap = e.target.closest?.('.img-wrap') || document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.img-wrap');
   if(!wrap || !_imageLayer?.contains(wrap)) return false;
-  const corner = e.target.closest?.('.resize-handle')?.dataset.corner || null;
+  const handle = e.target.closest?.('.resize-handle') || document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.resize-handle');
+  const corner = handle?.dataset?.corner || null;
   if(_startImageDrag({ id:wrap.dataset.id, corner, x:e.clientX, y:e.clientY, pointerId, captureTarget:_imageLayer })){
     e.preventDefault();
     e.stopPropagation();

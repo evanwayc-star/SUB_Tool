@@ -3,7 +3,10 @@
    指標座標與操作類型。 */
 const { contextBridge, ipcRenderer } = require('electron');
 
-const POINTER_TYPES = new Set(['start', 'move', 'end', 'cancel']);
+// 【v4.6.3 新增 'enter' 與 'leave'】
+// 利用 Chromium 在 { forward: true } 模式下，對 pointer-events: auto 元素依然會觸發
+// DOM mouseenter/mouseleave 的特性，來取代過去主程序每 25ms 不穩定的 screen 座標比對。
+const POINTER_TYPES = new Set(['start', 'move', 'end', 'cancel', 'enter', 'leave']);
 const CORNERS = new Set(['nw', 'ne', 'sw', 'se']);
 
 function finite(value) {

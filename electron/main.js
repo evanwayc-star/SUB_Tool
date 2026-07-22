@@ -1567,12 +1567,12 @@ svg{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:transpa
 .img-wrap{position:absolute;pointer-events:auto;cursor:grab;touch-action:none;user-select:none}
 .img-wrap img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
 .img-wrap:hover,.img-wrap.hovering,.img-wrap.selected{outline:1px dashed rgba(255,255,255,.72);outline-offset:3px}
-.resize-handle{display:none;position:absolute;width:10px;height:10px;background:#f0a020;border:1px solid #fff;border-radius:50%;z-index:2}
+.resize-handle{display:none;position:absolute;width:12px;height:12px;background:#f0a020;border:1px solid #fff;border-radius:50%;z-index:10;pointer-events:auto !important;cursor:pointer !important}
 .img-wrap:hover .resize-handle,.img-wrap.hovering .resize-handle,.img-wrap.selected .resize-handle{display:block}
 /* 與 src/styles.css 同步：把手內縮貼四角內側（外凸會被視窗邊界裁掉），::after 補透明命中區 */
-.resize-handle::after{content:'';position:absolute;inset:-7px}
-.rh-nw{top:0;left:0;cursor:nwse-resize}.rh-ne{top:0;right:0;cursor:nesw-resize}
-.rh-sw{bottom:0;left:0;cursor:nesw-resize}.rh-se{bottom:0;right:0;cursor:nwse-resize}
+.resize-handle::after{content:'';position:absolute;inset:-8px;pointer-events:auto !important;cursor:pointer !important}
+.rh-nw{top:0;left:0;cursor:nwse-resize !important}.rh-ne{top:0;right:0;cursor:nesw-resize !important}
+.rh-sw{bottom:0;left:0;cursor:nesw-resize !important}.rh-se{bottom:0;right:0;cursor:nwse-resize !important}
 #guide{display:none} rect{fill:none;stroke:rgba(255,255,255,.88);stroke-width:1;stroke-dasharray:5 4}
 line{stroke:rgba(255,255,255,.65);stroke-width:1} circle{fill:#f0a020;stroke:#fff;stroke-width:2}
 </style></head><body><div id="imgContainer"></div><svg id="svg"><g id="guide"><rect id="box"/><line id="stem"/><circle id="dot" r="7"/></g></svg><div id="timecodeWatermark" aria-hidden="true"></div><script>
@@ -1591,18 +1591,55 @@ const wrapAt=(x,y)=>{const t=document.elementFromPoint(x,y);return t&&t.closest?
 const setHover=wrap=>{for(const el of imgContainer.querySelectorAll('.img-wrap.hovering'))if(el!==wrap)el.classList.remove('hovering');if(wrap)wrap.classList.add('hovering');};
 const point=e=>{const r=stageRect||{x:0,y:0};return{x:e.clientX-(+r.x||0),y:e.clientY-(+r.y||0)};};
 const send=(type,extra={})=>{const b=bridge();if(b)b.pointer({type,...extra});};
+document.addEventListener('mouseover', e => { if(e.target.closest&&e.target.closest('.img-wrap')) send('enter'); });
+document.addEventListener('mouseout', e => { if(e.target.closest&&e.target.closest('.img-wrap')&&(!e.relatedTarget||!e.relatedTarget.closest('.img-wrap'))) send('leave'); });
 document.addEventListener('pointermove',e=>{if(dragging){const p=point(e);send('move',{x:p.x,y:p.y});e.preventDefault();return;}setHover(wrapAt(e.clientX,e.clientY));});
-document.addEventListener('pointerdown',e=>{if(e.button!==0)return;const wrap=wrapAt(e.clientX,e.clientY);if(!wrap)return;const p=point(e),corner=(e.target.closest&&e.target.closest('.resize-handle')||{}).dataset?.corner||null;dragging={id:wrap.dataset.id,corner};try{wrap.setPointerCapture(e.pointerId);}catch(_){}send('start',{id:dragging.id,corner,x:p.x,y:p.y});e.preventDefault();});
+document.addEventListener('pointerdown',e=>{if(e.button!==0)return;const wrap=wrapAt(e.clientX,e.clientY);if(!wrap)return;const p=point(e);const handle=(e.target.closest&&e.target.closest('.resize-handle'))||(document.elementFromPoint(e.clientX,e.clientY)?.closest?.('.resize-handle'))||null;const corner=handle?.dataset?.corner||null;dragging={id:wrap.dataset.id,corner};try{wrap.setPointerCapture(e.pointerId);}catch(_){}send('start',{id:dragging.id,corner,x:p.x,y:p.y});e.preventDefault();});
 const finish=(e,type)=>{if(!dragging)return;const p=point(e);send(type,{id:dragging.id,x:p.x,y:p.y});dragging=null;setHover(wrapAt(e.clientX,e.clientY));};
 document.addEventListener('pointerup',e=>finish(e,'end'));document.addEventListener('pointercancel',e=>finish(e,'cancel'));
-window.setImages=(h, r)=>{
-  stageRect=r&&Number.isFinite(r.x)&&Number.isFinite(r.y)&&Number.isFinite(r.w)&&Number.isFinite(r.h)?r:null;
-  if(stageRect){ imgContainer.style.left=stageRect.x+'px'; imgContainer.style.top=stageRect.y+'px'; imgContainer.style.width=stageRect.w+'px'; imgContainer.style.height=stageRect.h+'px'; }
-  const tpl=document.createElement('template');tpl.innerHTML=h||'';
-  const incoming=[...tpl.content.querySelectorAll('.img-wrap')],existing=new Map([...imgContainer.querySelectorAll('.img-wrap')].map(el=>[el.dataset.id,el]));
-  for(const next of incoming){const id=next.dataset.id,old=existing.get(id);if(old){const hovering=old.classList.contains('hovering');old.className=next.className+(hovering?' hovering':'');old.setAttribute('style',next.getAttribute('style')||'');const ni=next.querySelector('img'),oi=old.querySelector('img');if(ni&&oi&&oi.getAttribute('src')!==ni.getAttribute('src'))oi.setAttribute('src',ni.getAttribute('src'));existing.delete(id);}else imgContainer.appendChild(next);}
-  for(const old of existing.values())old.remove();
-  if(!h){dragging=null;}
+window.setImages = (h, r) => {
+  stageRect = r && Number.isFinite(r.x) && Number.isFinite(r.y) && Number.isFinite(r.w) && Number.isFinite(r.h) ? r : null;
+  if(stageRect){
+    imgContainer.style.left = stageRect.x + 'px';
+    imgContainer.style.top = stageRect.y + 'px';
+    imgContainer.style.width = stageRect.w + 'px';
+    imgContainer.style.height = stageRect.h + 'px';
+  }
+  const tpl = document.createElement('template');
+  tpl.innerHTML = h || '';
+  const incoming = [...tpl.content.querySelectorAll('.img-wrap')];
+  const existing = new Map([...imgContainer.querySelectorAll('.img-wrap')].map(el => [el.dataset.id, el]));
+  
+  for(const next of incoming) {
+    const id = next.dataset.id;
+    const old = existing.get(id);
+    if(old) {
+      // 保留正在 Hover 的狀態，避免重繪閃爍
+      const hovering = old.classList.contains('hovering');
+      old.className = next.className + (hovering ? ' hovering' : '');
+      old.setAttribute('style', next.getAttribute('style') || '');
+      
+      // 【v4.6.3 重要改動 - 縮放把手同步重繪】
+      // 若只更新外層 (.img-wrap) 的 style，內部 4 個拖曳角 (.resize-handle) 的 style
+      // 會殘留在舊座標，導致圖片縮放時，黃色控制點沒有隨之移動。
+      // 這裡強制遍歷並同步所有 resize-handle 的行內樣式，確保把手能精準附著在圖片的最新邊界上。
+      const oh = old.querySelectorAll('.resize-handle');
+      const nh = next.querySelectorAll('.resize-handle');
+      for (let i = 0; i < oh.length; i++) {
+        if (nh[i]) oh[i].setAttribute('style', nh[i].getAttribute('style') || '');
+      }
+      
+      const ni = next.querySelector('img'), oi = old.querySelector('img');
+      if (ni && oi && oi.getAttribute('src') !== ni.getAttribute('src')) {
+        oi.setAttribute('src', ni.getAttribute('src'));
+      }
+      existing.delete(id);
+    } else {
+      imgContainer.appendChild(next);
+    }
+  }
+  for(const old of existing.values()) old.remove();
+  if(!h) { dragging = null; }
 };
 </script></body></html>`;
 
@@ -1654,28 +1691,8 @@ function stopMpvGuidePointerWatch() {
   _mpvGuidePointerTimer = null;
 }
 
-function pointerHitsMpvImage() {
-  if (!_mpvGuideWin || _mpvGuideWin.isDestroyed() || !_mpvImageHitRegions.length) return false;
-  try {
-    const point = screen.getCursorScreenPoint();
-    const bounds = _mpvGuideWin.getBounds();
-    const x = point.x - bounds.x, y = point.y - bounds.y;
-    return _mpvImageHitRegions.some(region =>
-      x >= region.x && x <= region.x + region.w && y >= region.y && y <= region.y + region.h
-    );
-  } catch (e) { return false; }
-}
-
-function syncMpvGuidePointerInput() {
-  const usable = _mpvVisible && _mpvImagesHtml && _mpvGuideWin && !_mpvGuideWin.isDestroyed();
-  setMpvGuideInteractive(!!usable && (_mpvGuideDragging || pointerHitsMpvImage()));
-}
-
-function startMpvGuidePointerWatch() {
-  if (_mpvGuidePointerTimer || !_mpvImagesHtml) return;
-  syncMpvGuidePointerInput();
-  _mpvGuidePointerTimer = setInterval(syncMpvGuidePointerInput, 25);
-}
+// 已經廢棄 25ms 輪詢，改由 Guide 視窗的原生 DOM pointerenter / pointerleave 事件觸發。
+// (在 mpv-guide:imagePointer IPC 的 'enter' / 'leave' 處理)
 
 function setMpvGuideInteractive(active) {
   active = !!active;
@@ -1683,8 +1700,7 @@ function setMpvGuideInteractive(active) {
   if (!_mpvGuideWin || _mpvGuideWin.isDestroyed()) { _mpvGuideAppliedInteractive = null; return; }
   if (_mpvGuideAppliedInteractive === active) return;
   try {
-    if (active) _mpvGuideWin.setIgnoreMouseEvents(false);
-    else _mpvGuideWin.setIgnoreMouseEvents(true);
+    _mpvGuideWin.setIgnoreMouseEvents(!active, { forward: true });
     _mpvGuideAppliedInteractive = active;
   } catch (e) {}
 }
@@ -1756,7 +1772,6 @@ function setMpvTimecodeWatermark(raw) {
 }
 
 function destroyMpvWin() {
-  stopMpvGuidePointerWatch();
   if (_mpvWin) { try { if (!_mpvWin.isDestroyed()) _mpvWin.destroy(); } catch (e) {} _mpvWin = null; }
   if (_mpvGuideWin) { try { if (!_mpvGuideWin.isDestroyed()) _mpvGuideWin.destroy(); } catch (e) {} _mpvGuideWin = null; }
   _mpvRect = null; _mpvVisible = true; _mpvGuide = null; _mpvImagesHtml = ''; _mpvImageHitRegions = []; _mpvGuideDragging = false; _mpvGuideInteractive = false; _mpvGuideAppliedInteractive = null; _mpvSubAdded = false; _mpvSubFile = null;
@@ -1796,15 +1811,12 @@ function setMpvImageGuide(data) {
     _mpvGuideWin.webContents.executeJavaScript(`window.setImages(${JSON.stringify(_mpvImagesHtml)}, ${JSON.stringify(rect)})`, true).catch(() => {});
     if (mpvGuideHasVisibleContent()) {
       showMpvGuide();
-      if (_mpvImagesHtml) startMpvGuidePointerWatch();
-      else {
+      if (!_mpvImagesHtml) {
         _mpvGuideDragging = false;
-        stopMpvGuidePointerWatch();
         setMpvGuideInteractive(false);
       }
     } else {
       _mpvGuideDragging = false;
-      stopMpvGuidePointerWatch();
       setMpvGuideInteractive(false);
       _mpvGuideWin.hide();
     }
@@ -1982,13 +1994,11 @@ ipcMain.handle('mpv:show', (e, v) => {
     try { _mpvWin.show(); _mpvWin.moveTop(); } catch (e2) {}
     if (_mpvRect) applyMpvBounds(_mpvRect);
     showMpvGuide();
-    if (_mpvImagesHtml) startMpvGuidePointerWatch();
-    else setMpvGuideInteractive(false);
+    if (!_mpvImagesHtml) setMpvGuideInteractive(false);
   } else {
     try { _mpvWin.hide(); } catch (e2) {}
     if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e2) {} }
     _mpvGuideDragging = false;
-    stopMpvGuidePointerWatch();
     setMpvGuideInteractive(false);
   }
 });
@@ -2005,11 +2015,32 @@ ipcMain.handle('mpv:clearTimecodeWatermark', (e) => {
 });
 // 圖片 guide 是內部透明視窗；僅接受該視窗傳來的有限座標／事件，再轉送到主 renderer。
 // 不把任意 IPC 或 DOM 字串回送，避免 guide 即使載入使用者圖片也取得主程序權限。
+//
+// 【v4.6.3 重要改動 - DOM 事件取代 25ms 主程序輪詢】
+// 在 Windows 高 DPI 多螢幕環境下，screen.getCursorScreenPoint() 與 getBounds()
+// 經常發生非預期的座標偏移，導致 25ms 的座標 hit test 極不穩定，進而使滑鼠點擊
+// 在 setIgnoreMouseEvents(true) 的狀態下被直接穿透給底層主視窗，無法拖曳圖片。
+//
+// 解決方案：
+// 依賴 Chromium 原生的事件轉發 (forward: true)。當透明視窗處於 ignoresMouseEvents(true)
+// 且帶有 forward: true 時，底層 Chromium 依舊會對 pointer-events: auto 的元素發送
+// mouseenter / mouseleave 事件。我們在 MPV_GUIDE_HTML 內利用這些原生事件向主進程
+// 送出 'enter' 與 'leave'，精確地切換互動狀態，徹底根除死結。
 ipcMain.on('mpv-guide:imagePointer', (e, raw) => {
   if (!_mpvGuideWin || _mpvGuideWin.isDestroyed() || e.sender !== _mpvGuideWin.webContents) return;
   if (!raw || typeof raw !== 'object') return;
   const type = String(raw.type || '');
-  if (!['start', 'move', 'end', 'cancel'].includes(type)) return;
+  if (!['start', 'move', 'end', 'cancel', 'enter', 'leave'].includes(type)) return;
+  
+  if (type === 'enter') {
+    if (!_mpvGuideDragging) setMpvGuideInteractive(true);
+    return;
+  }
+  if (type === 'leave') {
+    if (!_mpvGuideDragging) setMpvGuideInteractive(false);
+    return;
+  }
+
   const x = Number(raw.x), y = Number(raw.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   const payload = {
@@ -2024,9 +2055,8 @@ ipcMain.on('mpv-guide:imagePointer', (e, raw) => {
     setMpvGuideInteractive(true);
   } else if (type === 'end' || type === 'cancel') {
     _mpvGuideDragging = false;
-    // pointerup 之後依游標是否仍在圖片上切回穿透／命中模式；延後一輪讓 Chromium 的
-    // capture 釋放完整結束，避免最後一個 pointerup 被 ignoreMouseEvents 吃掉。
-    setTimeout(syncMpvGuidePointerInput, 0);
+    // pointerup 之後延遲恢復成原本的穿透模式，讓 Chromium capture 能完整釋放
+    setTimeout(() => { if (!_mpvGuideDragging) setMpvGuideInteractive(false); }, 0);
   }
   safeWinSend(mainWin, 'mpv:imagePointer', payload);
 });

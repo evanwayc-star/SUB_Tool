@@ -107,7 +107,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 #video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 .vsublayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:4;}
 /* 圖片合成預覽層：疊在預覽畫布之上，行為類似安全框與字幕層，對齊視訊比例區塊 */
-.imglayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:3;}
+.imglayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:10;}
 /* .img-wrap ＝圖片【實際被畫出來的矩形】（尺寸由 app.js 依 imagegeom.js 算好後以 px 指定）。
    v4.7 前這個框是「scale×畫框」，方形／直式素材的把手會離圖片上百 px；務必保持
    wrap ≡ 圖片，虛線框與四角把手才會貼合素材。 */
@@ -117,17 +117,17 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .img-wrap:hover, .img-wrap.hovering, .img-wrap.selected{outline:1px dashed rgba(255,255,255,.72);outline-offset:3px;}
 .img-wrap .resize-handle{display:none;}
 .img-wrap:hover .resize-handle, .img-wrap.hovering .resize-handle, .img-wrap.selected .resize-handle, .imglayer.dragging .img-wrap.selected .resize-handle{
-  display:block;position:absolute;width:10px;height:10px;background:var(--accent);pointer-events:auto;
-  border:1px solid #fff;border-radius:50%;cursor:pointer;z-index:2;
+  display:block;position:absolute;width:12px;height:12px;background:var(--accent);pointer-events:auto !important;
+  border:1px solid #fff;border-radius:50%;cursor:pointer !important;z-index:20;
 }
 /* 把手【內縮】貼在圖片四角內側：外凸 -5px 會被 .video-wrap{overflow:hidden} 與下方
    transport 播放列裁掉（實測下緣兩顆完全點不到）。::after 再往外補一圈透明命中區，
    讓實際可抓範圍約 24px，但看得見的圓點仍是 10px。 */
-.img-wrap .resize-handle::after{content:'';position:absolute;inset:-7px;}
-.img-wrap .rh-nw{top:0;left:0;cursor:nwse-resize;}
-.img-wrap .rh-ne{top:0;right:0;cursor:nesw-resize;}
-.img-wrap .rh-sw{bottom:0;left:0;cursor:nesw-resize;}
-.img-wrap .rh-se{bottom:0;right:0;cursor:nwse-resize;}
+.img-wrap .resize-handle::after{content:'';position:absolute;inset:-8px;pointer-events:auto !important;cursor:pointer !important;}
+.img-wrap .rh-nw{top:0;left:0;cursor:nwse-resize !important;}
+.img-wrap .rh-ne{top:0;right:0;cursor:nesw-resize !important;}
+.img-wrap .rh-sw{bottom:0;left:0;cursor:nesw-resize !important;}
+.img-wrap .rh-se{bottom:0;right:0;cursor:nwse-resize !important;}
 /* WebCodecs 預覽畫布：不透明蓋住 video（video 仍出聲＋當時鐘）；previewFade/videoSub 依 DOM 順序疊其上 */
 .preview-canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none}
 /* 預覽淡出入黑提示（淡入/淡出/軌透明度）：疊在原生影片上（mpv 走獨立視窗，改用 brightness） */
