@@ -1,9 +1,30 @@
-/* SUB Tool — 協調層 / 進入點（非 hub）
-   職責：載入並組裝各模組、訂閱事件匯流排(events.js)、處理影片事件、指令分派(doAction)、
-   面板與選單接線、初始化(init/initDesktop)。
-   架構重點：其他模組「不再 import app.js」——它們以 emit(...) 發送事件，由本檔以 on(...) 訂閱
-   後呼叫對應的渲染/指令函式（renderAll、renderVideoSub、onDurationKnown、doAction… 見下方註冊區）。
-   渲染協調函式(renderAll/renderVideoSub/ensurePlayheadVisible…)仍定義於此並供本檔內部直接呼叫。 */
+/* ==============================================================================
+   SUB Tool — 應用程式協調層與 UI 進入點 (App Layer / Entry Point)
+   ==============================================================================
+   
+   【架構與職責總覽】
+   本檔案 (app.js) 是本專案最頂層的「巨型協調者」。
+   為了避免循環依賴 (Circular Dependency) 導致模組掛點，所有子模組 (如 media,
+   subtitles, timeline) 均「不可直接 import app.js」。
+   
+   1. 單向事件綁定與派發
+      各子模組透過 `events.js` 以 `emit(...)` 發送狀態變更；
+      本檔透過 `on(...)` 訂閱並負責串接對應的渲染函式或邏輯。
+      
+   2. DOM 與全域事件管理
+      負責初始化使用者介面 (如設定快捷鍵、綁定滑鼠與觸控事件、管理視窗對話框)。
+      包含了所有複雜的「拖曳狀態 (Pointer Dragging)」管理，特別是字幕框與圖片的
+      DOM 幾何轉換 (將游標座標映射回 16:9 / 2.35:1 的影片絕對比例座標)。
+      
+   3. 跨進程介面介接 (Electron Bridge)
+      當運行於桌面版 (DESK = true) 時，本檔會監聽來自 `main.js` 的 IPC 推播
+      (如: mpv:event, mpv:imagePointer)，將 mpv 子視窗原生事件映射回前端 DOM 的行為。
+
+   【維護鐵律】
+   - 切勿在此檔案中直接修改底層的 State (應交由 state.js 或 subtitles.js 提供之 Action)。
+   - 新增功能時，若是與特定的繪圖有關 (如 Canvas)，請寫在 timeline.js；
+     若是與資料解析有關，請寫在 subio.js。保持 app.js 單純負責「接線」的職責。
+============================================================================== */
 "use strict";
 import _logoUrl from './logo.png';
 import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML } from './util.js';

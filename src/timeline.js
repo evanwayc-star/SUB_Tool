@@ -1,4 +1,30 @@
-/* SUB Tool — 時間軸：渲染（尺/波形/軌道/區塊）與互動（拖曳/框選/縮放） */
+/* ==============================================================================
+   SUB Tool — 時間軸渲染與互動模組 (Timeline Engine)
+   ==============================================================================
+   
+   【架構與職責總覽】
+   本檔案 (timeline.js) 專注於將「時間」視覺化，以及處理時間軸上所有的 DOM/Canvas 互動。
+   包含尺規 (Ruler)、音訊波形 (Waveform)、軌道容器 (Tracks)、與片段區塊 (Cues)。
+   
+   1. 高 DPI Canvas 渲染
+      波形與尺規是透過 HTML5 Canvas 繪製。為了在不同螢幕縮放 (devicePixelRatio)
+      下保持清晰度，本模組實作了物理像素與邏輯 CSS 像素的解耦，所有的 Canvas
+      繪製在 `drawRuler` 與 `drawWave` 中都已包含 Scale 縮放修正。
+      
+   2. 座標系統轉換
+      時間與像素的互轉是本模組核心 (`timeToX`, `xToTime`)。
+      牽扯到 Zoom Level 的變化時，為了維持播放頭 (Playhead) 的視覺穩定，
+      `layoutTimeline` 與 `setZoom` 內部處理了複雜的 Scroll Left 數學補償。
+      
+   3. 高效能局部重繪 (DOM 虛擬化概念)
+      因為軌道上可能有數千個字幕片段，如果每次 `requestAnimationFrame` 都重繪整個 DOM
+      將會嚴重卡頓。本模組實作了選擇性的狀態更新，例如透過 `updatePlayhead` 只平移
+      指標，而不會觸發重新排版。
+
+   【維護鐵律】
+   - 繪製函式中 (特別是 requestAnimationFrame 的迴圈)，【絕對禁止】頻繁呼叫
+     引起 Reflow 的屬性 (如 offsetWidth, clientHeight)。請改讀取緩存的 `viewportW` 變數。
+============================================================================== */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js';
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId } from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
