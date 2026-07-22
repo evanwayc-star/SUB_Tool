@@ -1510,13 +1510,16 @@ ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
     hasShadow: false, skipTaskbar: true, thickFrame: false,
     resizable: false, movable: false, minimizable: false, maximizable: false,
     fullscreenable: false, focusable: false,
-    webPreferences: { offscreen: false, backgroundThrottling: false },
+    webPreferences: { offscreen: false, backgroundThrottling: false, webSecurity: false },
   });
   // 提示層絕不可接收或轉送滑鼠事件：forward:true 會讓最上層 Chromium 視窗吃掉
   // pointer move，導致底下的字幕拖曳層必須靠隱藏影片才恢復。單純忽略才會一路穿透。
   try { _mpvGuideWin.setIgnoreMouseEvents(true); } catch (e2) {}
   try { _mpvGuideWin.setMenu(null); } catch (e2) {}
-  await _mpvGuideWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(MPV_GUIDE_HTML));
+  ensureTmp();
+  const guideHtmlPath = path.join(TMP, 'mpv-guide.html');
+  fs.writeFileSync(guideHtmlPath, MPV_GUIDE_HTML, 'utf8');
+  await _mpvGuideWin.loadURL(url.pathToFileURL(guideHtmlPath).href);
   _mpvVisible = true;
   applyMpvBounds(bounds);
 
