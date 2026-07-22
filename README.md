@@ -51,6 +51,39 @@ npm run build     # 打包成 dist/index.html
 ```bash
 npm install          # 第一次安裝
 npm run electron     # build + 啟動 Electron
+- JKL 穿梭輪（最高 5×）、`←/→` 逐格定位、可自訂快捷鍵（支援匯出／匯入）
+- 匯入 / 匯出：SRT、ASS/SSA、Adobe Encore 時碼、純文字、XLSX
+- FPS 自動偵測（23.976 / 24 / 25 / 29.97 DF/NDF / 30）
+- 多音軌混音器（以**專案輸出軌**為主；獨奏 / 靜音 / 逐聲道電平表）
+- 桌面版：MXF / MKV / AVI 等非原生格式（系統 ffmpeg）、mpv 秒開、媒體快取
+
+## 版本比較
+
+| 版本 | 啟動方式 | 媒體能力 |
+|------|----------|----------|
+| 網頁版 | `啟動工具.bat` 或開啟 `dist/index.html` | MP4 / MOV(H.264) / MP3 / WAV |
+| **桌面版（推薦）** | `啟動桌面版.bat` 或雙擊 `.subtool` 專案檔 | 上述 + MXF / MKV / AVI / 多音軌 / 雙擊開啟專案 |
+
+## 快速開始
+
+### 前置需求
+
+- [Node.js](https://nodejs.org) 18+
+- [ffmpeg](https://ffmpeg.org)（桌面版 MXF / 多音軌需要；放入 PATH 或 `C:\Program Files\FFMPEG\bin\`）
+
+### 網頁版
+
+```bash
+npm install       # 第一次安裝
+npm run build     # 打包成 dist/index.html
+# 開啟 dist/index.html（或雙擊 啟動工具.bat 自動執行上述步驟）
+```
+
+### 桌面版
+
+```bash
+npm install          # 第一次安裝
+npm run electron     # build + 啟動 Electron
 # 或雙擊 啟動桌面版.bat
 ```
 
@@ -66,7 +99,7 @@ npm run electron:dev    # 連 dev server + 開 DevTools
 ## 打包安裝檔（exe）
 
 ```bash
-npm run dist    # electron-builder → release/SUB Tool Setup 4.6.2.exe
+npm run dist    # electron-builder → release/SUB Tool Setup 4.6.3.exe
 ```
 
 ## 文件索引
@@ -78,7 +111,6 @@ npm run dist    # electron-builder → release/SUB Tool Setup 4.6.2.exe
 1. **[技術架構說明.md §0「鐵律」](docs/技術架構說明.md)** ← **先讀這個**。
    那一節列的是「違反後會**靜默**壞掉」的不變量（畫面看起來正常、匯出卻是錯的），
    每一條都附了真實踩雷紀錄。本專案絕大多數 bug 都出在那八條上。
-2. [開發說明.md](docs/開發說明.md) — 指令、發版流程、**CDP 真機驗證方式**、模組結構、常見陷阱
 3. [技術架構說明.md](docs/技術架構說明.md) 其餘章節 — 模組、資料流、字幕樣式系統、
    WebCodecs 引擎、串流式 demux
 4. [版本變更紀錄.md](docs/版本變更紀錄.md) — **本專案最有價值的資產**。每一版都寫了
