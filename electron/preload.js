@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("electron/preload.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作或狀態覆寫。
+============================================================================== */
 /* SUB Tool — preload：以 contextBridge 安全暴露桌面能力給前端 (window.subtool) */
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
@@ -73,3 +79,4 @@ contextBridge.exposeInMainWorld('subtool', {
     onEvent:   (cb)    => { ipcRenderer.removeAllListeners('mpv:event'); ipcRenderer.on('mpv:event', (_, d) => cb(d)); },
   },
 });
+

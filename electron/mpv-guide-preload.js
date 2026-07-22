@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("electron/mpv-guide-preload.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作或狀態覆寫。
+============================================================================== */
 /* 專供 mpv 圖片 guide 使用的最小 preload。
    guide 是另一個透明 BrowserWindow，不能直接存取主視窗資料；只允許回傳已白名單化的
    指標座標與操作類型。 */
@@ -25,3 +31,4 @@ contextBridge.exposeInMainWorld('mpvImageGuide', {
     ipcRenderer.send('mpv-guide:imagePointer', payload);
   },
 });
+
