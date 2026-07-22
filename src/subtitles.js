@@ -439,15 +439,11 @@ function renderCheckPanel(){
   const noTimeNums=list.map((c,i)=>c.timed===false?i+1:null).filter(n=>n!==null);
   
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
-  const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,sharedSimplified=[],unsupported})=>{
+  const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{
     const detail=[];
-    const sharedSet=new Set(sharedSimplified);
-    const definiteSimplified=simplified.filter(ch=>!sharedSet.has(ch));
-    const sharedOnly=simplified.length>0&&simplified.length===sharedSimplified.length&&!unsupported.length;
-    if(definiteSimplified.length) detail.push('明確簡體：'+definiteSimplified.join('、'));
-    if(sharedSimplified.length) detail.push((sharedOnly?'需人工確認：僅含繁簡共用字（台灣繁中可能合法）：':'繁簡共用字：')+sharedSimplified.join('、'));
-    if(unsupported.length) detail.push('其他：'+unsupported.map(ch=>/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/u.test(ch)?`U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}`:ch).join('、'));
-    return `<span class="cp-num${sharedOnly?' cp-shared-only':''}" data-idx="${num}" title="${escapeHTML(detail.join('；'))}">${num}</span>`;
+    if(simplified.length) detail.push('常見簡體：'+simplified.join('、'));
+    if(unsupported.length) detail.push('非允許字元：'+unsupported.map(ch=>/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/u.test(ch)?`U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}`:ch).join('、'));
+    return `<span class="cp-num" data-idx="${num}" title="${escapeHTML(detail.join('；'))}">${num}</span>`;
   }).join(', '):'無';
   const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rnt=$('cpNonTraditional'),rt=$('cpTrim'),rn=$('cpNoTime'),rci=$('cpConsecutiveIdentical');
   const sb=$('cpSrtB'),si=$('cpSrtI'),su=$('cpSrtU'),sf=$('cpSrtFont'),sp=$('cpSrtPos');

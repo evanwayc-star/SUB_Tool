@@ -47,9 +47,8 @@ const UNAMBIGUOUS_SIMPLIFIED_CHARACTERS = (
   + '𬨂𬨎𬩽𬪩𬬩𬬭𬬮𬬱𬬸𬬹𬬻𬬿𬭁𬭊𬭎𬭚𬭛𬭤𬭩𬭬𬭭𬭯𬭳𬭶𬭸𬭼𬮱𬮿𬯀𬯎𬱖𬱟𬳵𬳶𬳽𬳿𬴂𬴃𬴊𬶋𬶍𬶏𬶐𬶟𬶠𬶨𬶭𬶮𬷕𬸘𬸚𬸣𬸦𬸪𬸯𬹼𬺈𬺓𰬸𰰨𰶎𰻝𰾄𰾭𱊜'
 );
 
-/* 專案的嚴格繁中檢查：同一份 STCharacters 中「繁簡共用、轉換結果可能保留原字」
-   的全部來源字也一律列為疑似簡體。這會包含后、干、台、里，以及了、出、回等
-   在繁中也可能合法的寫法；依使用者規則，它們都必須交由人工複核，而不能略過。 */
+/* 繁簡共用字（如「后、干、台、里」、「了、出、回」等）：
+   在繁體中文中均可能為合法常見字，單一字元無法可靠判斷其語系，因此不會誤報為簡體或問題字元。 */
 const SHARED_SIMPLIFIED_VARIANT_CHARACTERS = (
   '㐹万丑丰了于云亘仆仇价仿伙余佛佣俊修借僵克党具冢冬准凌几凶出划刮制千升卜占卷厂厘只台叶吁吃合吊同' +
   '后向吣呆周咨咸咽哄唇喂噪回困坐坯堤夫夸奸姜娘它家尸局岩岳巨布帘席干幸广庵弦彩征御志念恤愈愿戚扇才' +
@@ -65,9 +64,9 @@ const ALLOWED_NON_HAN_CHARACTER_RE =
   /^(?:[A-Za-z\uFF21-\uFF3A\uFF41-\uFF5A]|\p{Number}|\p{Punctuation}|\p{Symbol}|\p{White_Space}|\p{Emoji_Component})$/u;
 
 /* 回傳字幕文字中的可疑字元（依出現順序去重）。
-   simplified：所有疑似簡體字（含本專案嚴格規則下的繁簡共用字）。
-   sharedSimplified：simplified 的子集；僅由繁簡共用字組成的句子可降為黃色人工確認。
-   unsupported：非繁中／英文／數字／符號的其他字元，例如日文假名、韓文與零寬空白。 */
+   simplified：常見簡體字（明確為簡轉繁時需修改的簡體字）。
+   sharedSimplified：繁簡共用字（僅供參考，不誤報為問題字元）。
+   unsupported：非繁中／英文／數字／符號的其他字元，例如日文假名、韓文、俄文與零寬空白。 */
 function inspectSubtitleCharacters(text){
   const simplified = [];
   const sharedSimplified = [];
@@ -85,10 +84,6 @@ function inspectSubtitleCharacters(text){
       continue;
     }
     if(SHARED_SIMPLIFIED_VARIANT_SET.has(character)){
-      if(!seenSimplified.has(character)){
-        seenSimplified.add(character);
-        simplified.push(character);
-      }
       if(!seenSharedSimplified.has(character)){
         seenSharedSimplified.add(character);
         sharedSimplified.push(character);
