@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/history.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — 動作紀錄（復原 / 重做） */
 import { State, syncTrackCount, setFps, normalizeAudioProject } from './state.js';
 import { Seq } from './sequence.js';
@@ -87,3 +93,4 @@ function renderHistory(){
 }
 
 export { History, recordHistory, renderHistory };
+

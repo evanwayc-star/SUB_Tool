@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/time.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — 時間 / 時碼換算（秒 ↔ 各字幕格式時碼）
    匯出：
      秒→時碼  fmtClock(UI 顯示) / secToSRT / secToASS / secToEncore
@@ -132,3 +138,4 @@ function snapTimeToFrame(t, fps, df=false) {
 }
 
 export { fmtClock, secToSRT, secToASS, secToEncore, encoreParts, srtToSec, assToSec, encoreToSec, snapTimeToFrame };
+

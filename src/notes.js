@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/notes.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — 備註面板（時間點標記）
    每條 note = {id,time,text,done}，存於 State.notes 並隨專案存檔。
    功能：新增(記下目前播放點)、內嵌編輯時間/文字、多選(Ctrl/Shift)、右鍵批次編輯/標記/刪除、
@@ -321,3 +327,4 @@ function exportNotes(){
 }
 
 export { addNote, renderNotes, exportNotes, doExportNotesGeneral, doExportNotesEdius, getNotesGeneralFileData, getNotesEdiusFileData, setNoteActive, updateNoteActive, clearAllNotes };
+

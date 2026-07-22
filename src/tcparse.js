@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/tcparse.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — 時間碼輸入解析（葉模組：字串 → 秒，支援絕對/緊湊/Drop-frame） */
 import { State } from './state.js';
 import { pad } from './util.js';
@@ -107,3 +113,4 @@ function setupTimecodeInput(inp) {
 }
 
 export { parseTimecodeInput, setupTimecodeInput };
+

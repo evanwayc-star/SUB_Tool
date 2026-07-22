@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/imagegeom.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — 圖片疊層幾何（v4.7）
 
    【唯一公式】圖片在畫面上的實際矩形，由這裡算出來，三處共用同一組數字：
@@ -47,3 +53,4 @@ export function imageBoxOnStage({ stageW, stageH, track, natW, natH, scale, posX
   const b = imageBox({ stageW: f.w, stageH: f.h, natW, natH, scale, posX, posY });
   return { x: f.x + b.x, y: f.y + b.y, w: b.w, h: b.h };
 }
+

@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/ui.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — UI 基本元件：狀態列 / Toast / OSD / 對話框（葉節點，僅依賴 dom + media 執行期狀態） */
 import { $ } from './dom.js';
 import { Media } from './media.js';
@@ -106,3 +112,4 @@ function promptModal(title, label, defVal = '', { placeholder = '', okLabel = '�
 }
 
 export { setStatus, showToast, showOsd, openModal, closeModal, promptModal };
+

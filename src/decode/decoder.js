@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/decode/decoder.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* 單軌 VideoDecoder 封裝：隨機存取（frameAt）＝從目標時間前最近的 keyframe 解到該時間的 VideoFrame。
    ── 階段0 PoC：frameAt 每次從 keyframe 重解（正確但非最省）；順序播放另走 decodeSeq 量 fps。
    B-frame：依 dts 餵、output 依 cts 回，故收集 flush 後全部 output 再挑最接近目標者。 */
@@ -80,3 +86,4 @@ export class TrackDecoder {
 
   close(){ try{ this.dec && this.dec.close(); }catch(e){} this.dec = null; }
 }
+

@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/menus.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — 右鍵選單（播放窗音軌/速度、字幕移軌） */
 import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
@@ -356,3 +362,4 @@ tlScroll.addEventListener('contextmenu',e=>{
 /* 動作分派 */
 
 export { hideCtx, showCtx, showPlayerMenu, showCueMenu };
+

@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/mixer.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — 專案音訊軌混音器（A1…An bus；來源聲道只在配線中處理） */
 import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
@@ -226,3 +232,4 @@ function updateMeters(){
 function clearMeterStrips(){ _meterStrips=[]; }
 
 export { renderAudioTracks, renderAudioSources, renderMixer, mixerReset, mixerMuteAll, updateMeters, clearMeterStrips };
+

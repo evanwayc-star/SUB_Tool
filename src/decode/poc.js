@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/decode/poc.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* 階段0 PoC 驗證入口（掛在 window.SUB.WC.pocTest）：
    取來源檔 → demux → VideoDecoder 解碼 → 畫到 canvas，並量測 demux/seek 時間與順序解碼 fps。
    目的：證明 WebCodecs 在此環境可用（H.264 硬解）、seek 準、效能足，供階段1 起採用。 */
@@ -59,3 +65,4 @@ export async function pocTest(url, opts){
 // 供 PoC 分步診斷（window.SUB.WC）
 export { demuxFile, TrackDecoder };
 export { demuxIndex, SampleReader } from './demux.js'; // v4.29 串流式：索引＋按需取位元組
+

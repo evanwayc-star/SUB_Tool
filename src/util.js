@@ -1,3 +1,9 @@
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/util.js")
+   ==============================================================================
+   【維護鐵律】本檔案已納入全專案終極防禦網。
+   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
+============================================================================== */
 /* SUB Tool — 基礎工具：數值 / 編碼 / 檔案（純邏輯，無跨模組相依） */
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const pad=(n,w=2)=>String(Math.floor(n)).padStart(w,'0');
@@ -67,3 +73,4 @@ function tcKeyAllowed(e){
 }
 
 export { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML, tcKeyAllowed };
+
