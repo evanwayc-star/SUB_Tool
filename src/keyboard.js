@@ -384,11 +384,12 @@ window.addEventListener('keydown', e => {
       if (Media.playing) Media.pause();
       // 預設的 ↑ / ↓ 是媒體剪輯點；E / D 仍維持字幕邊界步進。
       // 若目前有選取字幕，則視為在字幕軌道操作，改為依序步進字幕邊界 (與 E 相同)
-      if (e.key === 'ArrowUp' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        if (State.selectedClipId != null || State.activeTrackKind === 'video') {
-          if (!stepMediaBoundary(-1)) stepBoundary(-1);
+      if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const dir = e.key === 'ArrowUp' ? -1 : 1;
+        if (State.activeTrackKind === 'video' || State.selectedClipId != null || State.activeTrackKind === 'audio' || State.selectedAudioClipId != null) {
+          if (!stepMediaBoundary(dir)) stepBoundary(dir);
         } else {
-          stepBoundary(-1);
+          stepBoundary(dir);
         }
       } else {
         stepBoundary(-1);
@@ -397,11 +398,12 @@ window.addEventListener('keydown', e => {
     case 'step_boundary_next':
       e.preventDefault();
       if (Media.playing) Media.pause();
-      if (e.key === 'ArrowDown' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        if (State.selectedClipId != null || State.activeTrackKind === 'video') {
-          if (!stepMediaBoundary(1)) stepBoundary(1);
+      if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const dir = e.key === 'ArrowUp' ? -1 : 1;
+        if (State.activeTrackKind === 'video' || State.selectedClipId != null || State.activeTrackKind === 'audio' || State.selectedAudioClipId != null) {
+          if (!stepMediaBoundary(dir)) stepBoundary(dir);
         } else {
-          stepBoundary(1);
+          stepBoundary(dir);
         }
       } else {
         stepBoundary(1);

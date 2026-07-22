@@ -241,17 +241,21 @@ function renderTrackRows(){
         `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖':'鎖定'}此軌">${isLocked?'🔒':'🔓'}</button>`+
         `<button class="gdel" title="刪除此軌">✕</button>`;
       g.querySelector('.eye').onclick=(e)=>{e.stopPropagation();State.tracks[tk].visible=!vis;drawTimeline();emit('render:videoSub');emit('mpv:refreshSubs');};
-      const nm=g.querySelector('.gname');
-      nm.addEventListener('click',e=>{
-        if(nm.contentEditable==='true') return;
+      g.addEventListener('click', e => {
+        if (e.target.closest('.eye,.glock,.gdel,.drag-handle') || nm.contentEditable === 'true') return;
         e.stopPropagation();
-        State.listTrack=tk;
-        if(!e.shiftKey){ State.selectedIds=[]; State.selectedId=null; $('stSel').textContent=''; }
-        const sel=$('listTrackSel'); if(sel)sel.value=String(tk);
+        State.activeTrackKind = 'sub';
+        State.listTrack = tk;
+        State.selectedIds = []; State.selectedId = null; State.selectedClipId = null; State.selectedAudioClipId = null;
+        refreshSelectionUI();
+        renderClipBlocks();
+        const sel = $('listTrackSel'); if (sel) sel.value = String(tk);
         emit('render:trackStyle');
         emit('render:all');
         refreshTrackGutterActive();
+        const stSel = $('stSel'); if (stSel) stSel.textContent = '已切換至字幕軌：' + (State.tracks[tk]?.name || ('軌道 ' + (tk + 1)));
       });
+      const nm = g.querySelector('.gname');
       nm.addEventListener('mousedown',e=>{
         if(e.detail>=2){
           e.preventDefault(); nm.contentEditable='true'; nm.focus();
@@ -793,6 +797,17 @@ function renderVtrackGutter(){
         `<button class="gdel" title="刪除此軌">✕</button>`+
         lockBtn+
       `</div>`;
+    g.addEventListener('click', e => {
+      if (e.target.closest('.eye,.glock,.gdel,.gadd') || g.querySelector('.gname')?.contentEditable === 'true') return;
+      State.activeTrackKind = 'video';
+      State.activeVtrack = v;
+      State.selectedId = null; State.selectedIds = []; State.selectedClipId = null; State.selectedAudioClipId = null;
+      refreshSelectionUI();
+      renderClipBlocks();
+      renderAudioTrackRows();
+      refreshTrackGutterActive();
+      const stSel = $('stSel'); if (stSel) stSel.textContent = '已切換至視訊軌：' + (meta.name || ('視訊軌 ' + (v + 1)));
+    });
     g.querySelector('.eye').onclick=(e)=>{ e.stopPropagation(); meta.visible=!vis; drawTimeline(); emit('render:videoSub'); };
     const nm=g.querySelector('.gname');
     nm.addEventListener('mousedown',e=>{
@@ -1045,12 +1060,15 @@ function renderAtrackGutter(){
       `<span class="aname" title="${escapeHTML(row.label)}">${escapeHTML(row.label)}</span>`+
       `<span class="audio-clip-route">${escapeHTML(waveLabel)}</span>`+
       `<button class="alock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌'}">${isLocked?'🔒':'🔓'}</button>`;
-    if(row.external){
-      g.addEventListener('click',ev=>{
-        if(ev.target.closest('.audio-clip-mute')) return;
-        selectExternalAudioClip(source.id,{seek:true});
-      });
-    }
+    g.addEventListener('click', ev => {
+      if (ev.target.closest('.audio-clip-mute,.alock')) return;
+      State.activeTrackKind = 'audio';
+      State.selectedId = null; State.selectedIds = []; State.selectedClipId = null; State.selectedAudioClipId = null;
+      refreshSelectionUI();
+      renderClipBlocks();
+      renderAudioTrackRows();
+      const stSel = $('stSel'); if (stSel) stSel.textContent = '已切換至音訊軌：' + row.label;
+    });
     const mute=g.querySelector('.audio-clip-mute');
     mute?.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });
     mute?.addEventListener('click',ev=>{
