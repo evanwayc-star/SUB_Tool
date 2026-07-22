@@ -2126,6 +2126,22 @@ function initUI(){
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());
+  // 全域數值輸入框滾輪微調 (Wheel Scrubber) 手感支援
+  document.addEventListener('wheel', (e) => {
+    const el = e.target;
+    if (el && el.tagName === 'INPUT' && (el.type === 'number' || el.classList.contains('num-scrubber'))) {
+      e.preventDefault();
+      const step = e.shiftKey ? 10 : 1;
+      const dir = e.deltaY < 0 ? 1 : -1;
+      const min = el.min !== '' ? parseFloat(el.min) : -Infinity;
+      const max = el.max !== '' ? parseFloat(el.max) : Infinity;
+      const cur = parseFloat(el.value) || 0;
+      const next = Math.max(min, Math.min(max, cur + dir * step));
+      el.value = next;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }, { passive: false });
   // 字幕檢查：包含文字輸入
   $('cpContainsInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpContainsInput').addEventListener('keydown',e=>e.stopPropagation());

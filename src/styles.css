@@ -602,6 +602,8 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .statusbar .dot.ok{background:var(--green)}
 .statusbar .dot.err{background:var(--red)}
 .statusbar .dot.busy{background:var(--accent);animation:pulse 1s infinite}
+#stMsg{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#stMedia{opacity:0.85;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @keyframes pulse{50%{opacity:.3}}
 
 /* toast / modal */
@@ -653,6 +655,15 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* 字幕時間點點擊提示 */
 .sub-row .tin,.sub-row .tout{cursor:pointer;border-radius:2px}
 .sub-row .tin:hover,.sub-row .tout:hover{background:var(--panel3);color:var(--text)}
+
+.sub-row{
+  display:flex;align-items:center;padding:2px 8px;gap:8px;border-bottom:1px solid var(--border);
+  font-size:12px;user-select:text;line-height:1.4;border-left:3px solid transparent;
+  transition:background 0.15s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  content-visibility:auto;contain-intrinsic-size:1px 32px;
+}
+.sub-row:hover{background:var(--panel3)}
+.sub-row.sel{background:var(--panel2);border-left-color:var(--accent)}
 
 /* 1. Green: 空白 */
 .sub-row.blank{background:rgba(50,180,80,.13)}
@@ -820,4 +831,25 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 @keyframes flashDup { 0%, 100% { background-color: var(--panel3); } 50% { background-color: rgba(239, 68, 68, 0.8); color: white; } }
 .key-input.flash-duplicate { animation: flashDup 0.6s ease-in-out 2; border-color: #ef4444 !important; }
 .settings-footer { padding:15px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px; background:var(--panel); border-radius: 0 0 10px 10px; }
+
+/* ===== UI/UX 高級質感與無障礙增強 ===== */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 0;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
+
+.input-error {
+  animation: shake 0.25s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+  border-color: var(--red) !important;
+}
 

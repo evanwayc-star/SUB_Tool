@@ -1,3 +1,43 @@
+/**
+ * @typedef {Object} Cue
+ * @property {string} id - 字幕唯一識別碼
+ * @property {number} start - 起始時間 (秒)
+ * @property {number} end - 結束時間 (秒)
+ * @property {string} text - 字幕內文
+ * @property {number} [track=0] - 所屬字幕軌索引 (0-based)
+ * @property {boolean} [timed=true] - 是否具有有效時間碼
+ * @property {Object} [style] - 逐句覆蓋樣式
+ */
+
+/**
+ * @typedef {Object} Track
+ * @property {string} name - 字幕軌名稱
+ * @property {boolean} [visible=true] - 是否顯示
+ * @property {boolean} [locked=false] - 是否鎖定
+ * @property {number} [height] - 軌道顯示高度
+ */
+
+/**
+ * @typedef {Object} VideoTrack
+ * @property {string} name - 視訊軌名稱
+ * @property {boolean} [visible=true] - 是否顯示
+ * @property {boolean} [locked=false] - 是否鎖定
+ * @property {number} [height] - 軌道高度
+ */
+
+/**
+ * @typedef {Object} AppState
+ * @property {Cue[]} cues - 全專案字幕列表
+ * @property {Track[]} tracks - 字幕軌道定義
+ * @property {VideoTrack[]} videoTracks - 視訊軌道定義
+ * @property {Array} notes - 專案備忘錄
+ * @property {string|null} selectedId - 單選的字幕 ID
+ * @property {string[]} selectedIds - 多選的字幕 ID 集合
+ * @property {number} listTrack - 當前控制台檢視的軌道
+ * @property {number} fps - 專案影格率
+ * @property {boolean} dropFrame - 是否使用 Drop Frame 時間碼
+ */
+
 /* SUB Tool — 全域狀態 + 軌道/影格率 模型
    State：唯一的可變狀態來源（cues 字幕、tracks 軌道、notes 備忘、選取集、fps/dropFrame、
    時間軸視窗 viewStart/pxPerSec、媒體資訊…）。各模組直接讀寫 State，再 emit 觸發重繪。
@@ -306,12 +346,20 @@ const State = {
   videoHeight: 0,
   muted:false, lastVol:1,
   mediaPath:null,
+  subMode: false,      // 上字幕模式（O 後自動前進到下一句）
+  mediaName: null,
+  mediaSize: 0,
+  videoWidth: 0,
+  videoHeight: 0,
+  muted:false, lastVol:1,
+  mediaPath:null,
   clipboard:[],  // copied cues for paste
   overwriteMode: false, // 允許重疊（不可覆蓋/可覆蓋）
   overwriteKeep: true,  // 可覆蓋模式下：true=保留被包含句, false=刪除被包含句
   // 播放器監看用疊層。這是使用者偏好，不屬於專案／匯出資料，故只由 config 保存。
   timecodeWatermark: false,
-  clips: [],            // 影片序列（時間軸上的影片區塊，含 vtrack 視訊軌）：見 sequence.js
+  activeTrackKind: 'sub', // 目前焦點軌道類型：'sub' | 'video' | 'audio'
+  clips: [],            // 影片序列（時間軸上的影片區塊，含 vtrack 視訊轨）：見 sequence.js
   selectedClipId: null, // 目前選取的影片段（點選後可用上下鍵切換、Del 刪除）
   selectedAudioClipId: null, // 目前選取的外部音訊素材（與影片／字幕選取互斥）
   videoTracks: [{name:'視訊軌 1',visible:true,locked:false}], // 視訊軌（獨立成列，比照字幕軌 tracks[]；索引越大越上層＝越優先覆蓋）

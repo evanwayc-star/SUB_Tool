@@ -601,6 +601,7 @@ function selectCue(id,opts){
     const a=ids.indexOf(State.selectedId), b=ids.indexOf(id);
     if(a>=0&&b>=0){ const lo=Math.min(a,b),hi=Math.max(a,b); State.selectedIds=ids.slice(lo,hi+1); }
   }else{ State.selectedIds=[id]; State.selectedId=id; }
+  State.activeTrackKind='sub';
   State.activeEdge='start';
   const c=State.cues.find(x=>x.id===id);
   if(c && !opts.additive && !opts.range){

@@ -951,6 +951,7 @@ function selectClip(id, opts={}){
   const c=Seq.byId(id); if(!c) return;
   if(!opts.force && State.videoTracks[c.vtrack||0]?.locked) return; // 鎖定軌：不可選取中間的影像片段
   State.selectedClipId=id;
+  State.activeTrackKind='video';
   State.selectedAudioClipId=null;
   State.selectedId=null; State.selectedIds=[]; // 與字幕選取互斥（避免 Del/上下鍵語意衝突）
   refreshSelectionUI(); // 清除字幕列高亮

@@ -37,7 +37,17 @@ const History = {
         && old.exportIn === newSnap.exportIn
         && old.exportOut === newSnap.exportOut;
       if(!structSame){ /* 結構有變動，直接記錄 */ }
-      else if(JSON.stringify(newSnap) === JSON.stringify(old)) return;
+      else {
+        const len = newSnap.cues.length;
+        if(len > 300) {
+          const firstOld = old.cues[0], firstNew = newSnap.cues[0];
+          const lastOld = old.cues[len - 1], lastNew = newSnap.cues[len - 1];
+          if(firstOld?.start !== firstNew?.start || firstOld?.end !== firstNew?.end || firstOld?.text !== firstNew?.text ||
+             lastOld?.start !== lastNew?.start || lastOld?.end !== lastNew?.end || lastOld?.text !== lastNew?.text){
+            // 抽樣不同，必然有變動，直接記錄
+          } else if(JSON.stringify(newSnap) === JSON.stringify(old)) return;
+        } else if(JSON.stringify(newSnap) === JSON.stringify(old)) return;
+      }
     }
     if(this.hi<this.stack.length-1)this.stack=this.stack.slice(0,this.hi+1);
     this.stack.push({label,snap:newSnap});
