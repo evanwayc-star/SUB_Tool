@@ -29,6 +29,7 @@ import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters 
 import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
+import { imageBoxOnStage } from './imagegeom.js'; // v4.7 圖片疊層幾何：預覽／mpv 命中區／匯出 共用同一組公式
 import { on, emit } from './events.js';
 
 if (typeof __APP_VERSION__ !== 'undefined') {
@@ -437,6 +438,41 @@ function renderVideoSub(){
 let _imgDrag = null;
 let _mpvImageGuideSig = '';
 
+/* 圖片原始尺寸（contain 之後才知道互動框要多大）。匯入時已寫進 clip.natW/natH，
+   舊專案／還原路徑可能沒有 → 這裡以 src 為鍵背景量一次再補寫回 clip 並重繪。 */
+const _imgNatCache = new Map();
+function _imageNat(c, src){
+  if(c.natW > 0 && c.natH > 0) return { w:c.natW, h:c.natH };
+  const hit = _imgNatCache.get(src);
+  if(hit){ if(hit.w > 0){ c.natW = hit.w; c.natH = hit.h; } return hit; }
+  _imgNatCache.set(src, { w:0, h:0 }); // 佔位：避免每一格都重新發一次請求
+  const probe = new Image();
+  probe.onload = () => {
+    const w = probe.naturalWidth || 0, h = probe.naturalHeight || 0;
+    _imgNatCache.set(src, { w, h });
+    if(w > 0){ const live = Seq.byId(c.id); if(live){ live.natW = w; live.natH = h; } }
+    renderImageOverlays();
+  };
+  probe.onerror = () => {};
+  probe.src = src;
+  return { w:0, h:0 };
+}
+
+/* clip 的圖片來源 URL（純檔案路徑才補 file:///；已是 http/file/blob/data 一律照用） */
+function _imageSrc(c){
+  let src = c.web?.url || c.path || '';
+  if(src && !/^(https?|file|blob|data):/i.test(src)) src = 'file:///' + src.replace(/\\/g, '/');
+  return src;
+}
+/* 圖片在畫框內的實際矩形；拖曳與渲染共用，避免兩邊各算一次而漂移 */
+function _imageBoxOf(c, rect){
+  const nat = _imageNat(c, _imageSrc(c));
+  return imageBoxOnStage({
+    stageW: rect.w, stageH: rect.h, track: State.videoTracks[c.vtrack || 0] || {},
+    natW: nat.w, natH: nat.h, scale: c.scale ?? 1, posX: c.posX ?? 0.5, posY: c.posY ?? 0.5,
+  });
+}
+
 function renderImageOverlays(){
   const rect = _stageRect();
   const layer = document.getElementById('imageLayer');
@@ -471,12 +507,9 @@ function renderImageOverlays(){
   // 其餘區域仍會穿透到字幕／播放器既有控制。
   const mpvHitRegions = [];
   imageClips.forEach(c => {
-    // scale, posX, posY (預設 scale: 1, posX: 0.5, posY: 0.5)
-    const scale = c.scale ?? 1;
-    const posX = c.posX ?? 0.5;
-    const posY = c.posY ?? 0.5;
+    // 幾何（scale／posX／posY／所在視訊軌的 PiP）一律走 _imageBoxOf → imagegeom.js
     const opacity = (State.videoTracks[c.vtrack || 0]?.opacity ?? 1);
-    
+
     // 計算淡入淡出
     let alpha = opacity;
     const fi = c.fadeIn || 0, fo = c.fadeOut || 0, clen = Math.max(0.001, c.out - c.in);
@@ -485,28 +518,38 @@ function renderImageOverlays(){
     if(fo > 0 && currIn > clen - fo) alpha *= (clen - currIn) / fo;
     alpha = Math.max(0, Math.min(1, alpha));
 
-    // 使用百分比定位（相對於 _stageRect()）
-    const contStyle = `left:${posX*100}%; top:${posY*100}%; width:${scale*100}%; height:${scale*100}%; transform:translate(-50%,-50%); opacity:${alpha};`;
-    const hitPad = 14; // 虛線 outline＋外伸的 10px 控制點都在命中範圍內
-    const imageW = scale * rect.w, imageH = scale * rect.h;
+    const imgSrc = _imageSrc(c);
+
+    /* 互動框＝圖片【實際被畫出來的那塊】（見 imagegeom.js）。
+       舊版直接把「scale×畫框」當成 .img-wrap，非 16:9 的素材會讓虛線框與四角把手
+       離圖片本體上百 px，下緣兩顆還會掉到播放列底下＝拉不到、也移不準。 */
+    const box = _imageBoxOf(c, rect);
+    const contStyle = `left:${box.x.toFixed(2)}px; top:${box.y.toFixed(2)}px; width:${box.w.toFixed(2)}px; height:${box.h.toFixed(2)}px; opacity:${alpha};`;
+    const hitPad = 16; // 虛線 outline＋四角控制點的加大命中區都算在內
     mpvHitRegions.push({
-      x: rect.x + posX * rect.w - imageW / 2 - hitPad,
-      y: rect.y + posY * rect.h - imageH / 2 - hitPad,
-      w: imageW + hitPad * 2,
-      h: imageH + hitPad * 2,
+      x: rect.x + box.x - hitPad,
+      y: rect.y + box.y - hitPad,
+      w: box.w + hitPad * 2,
+      h: box.h + hitPad * 2,
     });
-    let imgSrc = c.web?.url || c.path || '';
-    if(imgSrc && !imgSrc.startsWith('http:') && !imgSrc.startsWith('https:') && !imgSrc.startsWith('file:') && !imgSrc.startsWith('blob:')){
-      imgSrc = 'file:///' + imgSrc.replace(/\\/g, '/');
-    }
+    /* 把手吸附回【畫面內】：圖片被放大到超出畫框時，四角會跑到看不見的地方，
+       使用者就再也縮不回來（只剩右鍵數值面板可救）。這裡把把手夾在
+       「圖片 ∩ 畫框」的可見矩形四角，圖片完全在框內時與貼齊四角等價。 */
+    const HS = 10; // 把手邊長，需與 styles.css / MPV_GUIDE_HTML 一致
+    const visL = Math.min(Math.max(0, -box.x), Math.max(0, box.w - HS));
+    const visT = Math.min(Math.max(0, -box.y), Math.max(0, box.h - HS));
+    const visR = Math.max(Math.min(box.w, rect.w - box.x), visL + HS);
+    const visB = Math.max(Math.min(box.h, rect.h - box.y), visT + HS);
+    const hPos = (cx, cy) =>
+      `left:${(cx === 'w' ? visL : visR - HS).toFixed(1)}px;top:${(cy === 'n' ? visT : visB - HS).toFixed(1)}px;right:auto;bottom:auto;`;
     // 被選取的圖片留下操作框，讓使用者能一眼辨識目前可拖曳／縮放的素材。
     const selected = c.id === State.selectedClipId || _imgDrag?.clip?.id === c.id;
     html += `<div class="img-wrap${selected ? ' selected' : ''}" data-id="${c.id}" style="${contStyle}">
       <img draggable="false" src="${escapeHTML(imgSrc)}" />
-      <div class="resize-handle rh-nw" data-corner="nw"></div>
-      <div class="resize-handle rh-ne" data-corner="ne"></div>
-      <div class="resize-handle rh-sw" data-corner="sw"></div>
-      <div class="resize-handle rh-se" data-corner="se"></div>
+      <div class="resize-handle rh-nw" data-corner="nw" style="${hPos('w','n')}"></div>
+      <div class="resize-handle rh-ne" data-corner="ne" style="${hPos('e','n')}"></div>
+      <div class="resize-handle rh-sw" data-corner="sw" style="${hPos('w','s')}"></div>
+      <div class="resize-handle rh-se" data-corner="se" style="${hPos('e','s')}"></div>
     </div>`;
   });
   
@@ -562,6 +605,9 @@ function _startImageDrag({ id, corner=null, x, y, pointerId=null, captureTarget=
   _imgDrag = {
     clip, rect, x0:x, y0:y, pointerId, captureTarget, source,
     origPosX: clip.posX ?? 0.5, origPosY: clip.posY ?? 0.5, origScale: clip.scale ?? 1,
+    // 縮放以「圖片目前的實際顯示尺寸」為基準；用畫框寬當分母的話，
+    // 高度受限的素材（方形／直式）拖起來會與視覺位移嚴重不同步。
+    origBox: _imageBoxOf(clip, rect),
     corner
   };
   // 先建立拖曳狀態，避免選取 UI 重繪時把剛開始的 pointer 流程打斷。
@@ -578,12 +624,16 @@ function _moveImageDrag(x, y){
   const clip = d.clip;
   if(d.corner){
     // 維持圖片比例；四個角都可縮放，橫向或直向拖曳任一方向都會有一致的變化。
+    // 位移換算成「相對圖片自身尺寸的比例」→ 把角往外拉半個圖寬＝放大 1.5 倍，
+    // 不論素材是方形、直式還是橫式，手感都一致（中心固定，故 ×2）。
     const sx = (d.corner === 'nw' || d.corner === 'sw') ? -1 : 1;
     const sy = (d.corner === 'nw' || d.corner === 'ne') ? -1 : 1;
-    const dx = (x - d.x0) * sx / d.rect.w * 2;
-    const dy = (y - d.y0) * sy / d.rect.h * 2;
+    const bw = d.origBox?.w > 1 ? d.origBox.w : d.rect.w;
+    const bh = d.origBox?.h > 1 ? d.origBox.h : d.rect.h;
+    const dx = (x - d.x0) * sx * 2 / bw;
+    const dy = (y - d.y0) * sy * 2 / bh;
     const delta = Math.abs(dx) >= Math.abs(dy) ? dx : dy;
-    clip.scale = clamp(d.origScale + delta, 0.05, 4);
+    clip.scale = clamp(d.origScale * (1 + delta), 0.02, 8);
   } else {
     clip.posX = clamp(d.origPosX + (x - d.x0) / d.rect.w, 0, 1);
     clip.posY = clamp(d.origPosY + (y - d.y0) / d.rect.h, 0, 1);

@@ -844,6 +844,48 @@ function removeVideoTrack(v){
   } else doRemove();
 }
 
+/* 圖片大小與位置（v4.7）：預覽拖曳之外的數值備援。
+   ── 之前唯一入口是在預覽畫面拖四角把手，一旦把手抓不到（框畫錯、被播放列蓋住…）
+      就完全無法調整。數值輸入不依賴任何命中測試，永遠可用，也方便精確對位。
+   ── 單位刻意用「％」：scale 是相對輸出畫框的比例，位置是畫面上的百分比座標，
+      與匯出 filtergraph（electron/main.js 圖片分支）同一組語意。 */
+function showImageGeom(c){
+  if(!c || c.type!=='image') return;
+  if(State.videoTracks[c.vtrack||0]?.locked){ showToast('此視訊軌已鎖定'); return; }
+  const S=Math.round((c.scale??1)*100), X=Math.round((c.posX??0.5)*100), Y=Math.round((c.posY??0.5)*100);
+  const row=(id,label,val,min,max,unit)=>
+    `<div>${label}：<input type="range" id="ig${id}R" min="${min}" max="${max}" step="1" value="${val}" style="width:180px;vertical-align:middle">`+
+    ` <input type="number" id="ig${id}" min="${min}" max="${max}" step="1" value="${val}" style="width:64px">${unit}</div>`;
+  openModal(`圖片大小與位置 — ${escapeHTML(c.name||'')}`,
+    `<div style="font-size:13px;line-height:2.2">`+
+    row('S','大小',S,2,800,'%')+row('X','水平位置',X,0,100,'%')+row('Y','垂直位置',Y,0,100,'%')+
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">`+
+    `大小＝圖片框佔畫面的比例（圖片依原始比例縮入該框）；位置＝圖片<b>中心</b>在畫面上的座標。`+
+    `${c.natW>0?`原始尺寸 ${c.natW}×${c.natH}。`:''}預覽與匯出使用同一組數值。</div>`+
+    `</div>`,
+    [{label:'重設',act:()=>{ c.scale=1; c.posX=0.5; c.posY=0.5; closeModal(); drawTimeline(); emit('render:videoSub'); recordHistory('重設圖片大小與位置'); }},
+     {label:'套用',primary:true,act:()=>{
+        const v=(id,d)=>{ const n=+($(('ig'+id))?.value); return Number.isFinite(n)?n:d; };
+        c.scale=Math.max(0.02,Math.min(8, v('S',S)/100));
+        c.posX =Math.max(0,Math.min(1, v('X',X)/100));
+        c.posY =Math.max(0,Math.min(1, v('Y',Y)/100));
+        closeModal(); drawTimeline(); emit('render:videoSub'); recordHistory('圖片大小與位置：'+(c.name||''));
+     }}]);
+  // 滑桿與數字框雙向同步，並即時預覽（不入 undo，套用時才記一筆）
+  setTimeout(()=>{
+    for(const id of ['S','X','Y']){
+      const r=$('ig'+id+'R'), n=$('ig'+id); if(!r||!n) continue;
+      const live=()=>{ const val=+n.value;
+        if(id==='S') c.scale=Math.max(0.02,Math.min(8,val/100));
+        else if(id==='X') c.posX=Math.max(0,Math.min(1,val/100));
+        else c.posY=Math.max(0,Math.min(1,val/100));
+        emit('render:videoSub'); };
+      r.oninput=()=>{ n.value=r.value; live(); };
+      n.oninput=()=>{ r.value=n.value; live(); };
+    }
+  },0);
+}
+
 /* 影片段轉場（階段5）：淡入／淡出（秒）——匯出時影像 alpha 淡變＋音訊 afade 同步。
    淡到透明會露出下層／黑底；上層片段與下層重疊時的淡變即為軌間溶接（crossfade）。 */
 function showClipFade(c){
@@ -1671,4 +1713,4 @@ export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
   addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, redrawTimeline, setZoom, zoomFit, zoomFitVideo,
   refreshTrackGutterActive, snapTargets, snapVal, neighborBounds,
-  selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade };
+  selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom };

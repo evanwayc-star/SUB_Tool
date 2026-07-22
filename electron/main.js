@@ -895,14 +895,24 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
       
       let vchain = '';
       if (c.type === 'image') {
-        const clipScale = c.scale ?? 1;
+        /* 圖片幾何必須與預覽同一組公式（src/imagegeom.js）：
+             方框＝scale×軌影格 → 圖片 contain 縮進方框 → 圖片【中心】對到 (posX,posY)。
+           ── 不能用 pad 定位（v4.6 以前的做法，實測有兩個硬傷）：
+              a) pad 的位移得用「縮放後的實際尺寸」算，但 force_original_aspect_ratio=decrease
+                 之後實際尺寸小於方框 → 非同比例素材會被貼到方框左上角。實測 1920×1080 專案
+                 放 500×500 的圖、scale=1/posX=0.5，匯出落在 x=0~1076（正解是 420~1500）。
+              b) scale>1 時 pad 位移為負 → ffmpeg 直接 "Padded dimensions cannot be smaller
+                 than input dimensions" / -22，整支匯出失敗（不只圖片壞掉）。
+           overlay 的 w/h 是縮放後的真實尺寸，可用負座標（超出畫面自動裁切），兩個問題一起解。 */
+        const clipScale = Math.max(0.01, +c.scale || 1);
         const cw = Math.max(2, Math.round(clipScale * SW));
         const ch = Math.max(2, Math.round(clipScale * SH));
-        const pxClip = c.posX ?? 0.5;
-        const pyClip = c.posY ?? 0.5;
-        const padX = Math.round(pxClip * SW - cw / 2);
-        const padY = Math.round(pyClip * SH - ch / 2);
-        vchain = `[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:${padX}:${padY}:color=black@0.0,setsar=1`;
+        const pxClip = Math.max(0, Math.min(1, c.posX == null ? 0.5 : +c.posX));
+        const pyClip = Math.max(0, Math.min(1, c.posY == null ? 0.5 : +c.posY));
+        const BG = `t${ti}ib${si}`, IM = `t${ti}im${si}`;
+        fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${clen.toFixed(3)},format=yuva420p,setsar=1[${BG}]`);
+        fc.push(`[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
+        vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
       } else {
         vchain = `[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
       }
@@ -1537,8 +1547,10 @@ svg{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:transpa
 .img-wrap:hover,.img-wrap.hovering,.img-wrap.selected{outline:1px dashed rgba(255,255,255,.72);outline-offset:3px}
 .resize-handle{display:none;position:absolute;width:10px;height:10px;background:#f0a020;border:1px solid #fff;border-radius:50%;z-index:2}
 .img-wrap:hover .resize-handle,.img-wrap.hovering .resize-handle,.img-wrap.selected .resize-handle{display:block}
-.rh-nw{top:-5px;left:-5px;cursor:nwse-resize}.rh-ne{top:-5px;right:-5px;cursor:nesw-resize}
-.rh-sw{bottom:-5px;left:-5px;cursor:nesw-resize}.rh-se{bottom:-5px;right:-5px;cursor:nwse-resize}
+/* 與 src/styles.css 同步：把手內縮貼四角內側（外凸會被視窗邊界裁掉），::after 補透明命中區 */
+.resize-handle::after{content:'';position:absolute;inset:-7px}
+.rh-nw{top:0;left:0;cursor:nwse-resize}.rh-ne{top:0;right:0;cursor:nesw-resize}
+.rh-sw{bottom:0;left:0;cursor:nesw-resize}.rh-se{bottom:0;right:0;cursor:nwse-resize}
 #guide{display:none} rect{fill:none;stroke:rgba(255,255,255,.88);stroke-width:1;stroke-dasharray:5 4}
 line{stroke:rgba(255,255,255,.65);stroke-width:1} circle{fill:#f0a020;stroke:#fff;stroke-width:2}
 </style></head><body><div id="imgContainer"></div><svg id="svg"><g id="guide"><rect id="box"/><line id="stem"/><circle id="dot" r="7"/></g></svg><div id="timecodeWatermark" aria-hidden="true"></div><script>

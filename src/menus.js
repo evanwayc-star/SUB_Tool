@@ -4,7 +4,7 @@ import { escapeHTML } from './util.js';
 import { State, isSel } from './state.js';
 import { Media, Wave } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
-import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade } from './timeline.js';
+import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade, showImageGeom } from './timeline.js';
 import { Seq } from './sequence.js';
 import { showToast, promptModal } from './ui.js';
 import { recordHistory } from './history.js';
@@ -274,14 +274,18 @@ tlScroll.addEventListener('contextmenu',e=>{
     const isLocked = State.videoTracks[c.vtrack||0]?.locked;
     if(!isLocked) selectClip(c.id); // 右鍵即選取（高亮，之後可直接 Del / 上下鍵切換）
 
-    const items = isLocked ? [{label:'🔒 此視訊軌已鎖定'}] : [{heading:true,label:'🎬 '+c.name}];
-    
+    const isImg = c.type==='image';
+    const items = isLocked ? [{label:'🔒 此視訊軌已鎖定'}] : [{heading:true,label:(isImg?'🖼 ':'🎬 ')+c.name}];
+
     if(!isLocked){
       const trimmed=c.in>0.01||c.out<c.dur-0.01;
       // 播放頭在此段內 → 可就地切割（等同 Ctrl+K）
       const pt=Media.displayTime();
       if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
-      if(c.audioDetached) items.push({label:'🔇 此影片原音已解除連結'});
+      // 圖片沒有原音，音訊相關項目不適用；改提供大小/位置的數值輸入
+      // （預覽拖曳把手是另一條路，兩者都寫同一組 scale/posX/posY）
+      if(isImg) items.push({label:'📐 圖片大小與位置…',act:()=>showImageGeom(c)});
+      else if(c.audioDetached) items.push({label:'🔇 此影片原音已解除連結'});
       else {
         items.push({label:'🔗✂ 解除影音連結',act:()=>{ void Media.detachClipAudio?.(c.id); }});
         items.push({label:'🎧 音訊配線',act:()=>AudioRouting.openForClip(c.id)});

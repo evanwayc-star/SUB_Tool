@@ -59,6 +59,39 @@ function detectFpsWeb(){
   try{ video.requestVideoFrameCallback(cb); }catch(e){}
 }
 
+/* 圖片原始像素尺寸（v4.7）。互動框要貼合 contain 之後的圖片本體，沒有這組數字
+   就只能退回「整個畫框」＝把手離素材老遠、下緣還會被播放列蓋住。
+   還原專案時 geo 已帶著存檔值，直接沿用不必再解一次。 */
+function probeImageSize(url, geo = null){
+  const gw = Number(geo?.natW), gh = Number(geo?.natH);
+  if(gw > 0 && gh > 0) return Promise.resolve({ w:gw, h:gh });
+  return new Promise(res => {
+    let done = false;
+    const finish = (w, h) => { if(done) return; done = true; res({ w: w || 0, h: h || 0 }); };
+    const im = new Image();
+    im.onload = () => finish(im.naturalWidth, im.naturalHeight);
+    im.onerror = () => finish(0, 0);      // 讀不到不擋匯入：app.js 之後還會再補量一次
+    setTimeout(() => finish(im.naturalWidth, im.naturalHeight), 4000);
+    im.src = url;
+  });
+}
+
+/* 圖片預設落在哪一條視訊軌（v4.7）。
+   舊行為是「每匯入一張就 State.videoTracks.length ＝永遠開新軌」，而視訊軌只增不減，
+   匯入十張圖就多十條軌。改成：由上往下找一條「只放圖片、且此時段沒有東西」的軌重用，
+   真的都被占用才開新軌。
+   ── 不可與影片段共軌：匯出是每軌各自 concat 成一條時間軸，同軌重疊會讓 cursor 倒退。 */
+function pickImageTrack(c){
+  const start = c.offset, end = c.offset + Math.max(0.001, (c.out ?? 0) - (c.in ?? 0));
+  for(let v = State.videoTracks.length - 1; v >= 0; v--){
+    const on = State.clips.filter(x => x !== c && (x.vtrack || 0) === v);
+    if(on.some(x => x.type !== 'image')) continue;                       // 有影片段 → 跳過
+    const busy = on.some(x => x.offset < end - 1e-4 && Seq.clipEnd(x) > start + 1e-4);
+    if(!busy) return v;
+  }
+  return State.videoTracks.length;
+}
+
 /* ===== 3. 媒體引擎 ==================================================== */
 const Media = {
   ctx:null,            // AudioContext
@@ -1896,6 +1929,8 @@ const Media = {
     }
     if(this._bgVersion === myVer) { renderAudioTracks(); setStatus(`影片已加入序列：${c.name}`, 'ok'); }
   },
+  /* v4.7：圖片原始像素尺寸。互動框（.img-wrap）要貼合「contain 之後的圖片」而非整個畫框，
+     沒有 natW/natH 就只能退回舊的滿框行為，把手會離素材很遠。舊專案讀不到時 app.js 會補量。 */
   async addImageDesktop(p, geo = null){
     const name = baseName(p);
     let url = p;
@@ -1908,16 +1943,17 @@ const Media = {
     const imgIn = geo?.in ?? 0;
     const geoNumber=(value,fallback)=>Number.isFinite(Number(value))?Number(value):fallback;
     const geoRatio=(value,fallback)=>Math.max(0,Math.min(1,geoNumber(value,fallback)));
+    const nat = await probeImageSize(url, geo);
     const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 36000, fps: State.fps || 25,
       scale:Math.max(0.01,geoNumber(geo?.scale,1)), posX:geoRatio(geo?.posX,0.5), posY:geoRatio(geo?.posY,0.5),
+      natW:nat.w, natH:nat.h,
       offset: imgOffset, out: imgOut, in: imgIn });
     if(geo){
       if(geo.vtrack != null){ c.vtrack = geo.vtrack; ensureVideoTrackCount(c.vtrack + 1); }
       c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0;
     }
-    // 預設將圖片放置於全新的最上層視訊軌
     if (!geo || geo.vtrack == null) {
-      c.vtrack = State.videoTracks.length;
+      c.vtrack = pickImageTrack(c);
       ensureVideoTrackCount(c.vtrack + 1);
     }
     Seq.sort(); Seq.recomputeDuration();
@@ -1956,8 +1992,9 @@ const Media = {
   async addImageWeb(f){
     const url = URL.createObjectURL(f); this.objectURLs.push(url);
     const imgOffset = this.displayTime();
-    const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5, offset: imgOffset, out: 10 });
-    c.vtrack = State.videoTracks.length;
+    const nat = await probeImageSize(url);
+    const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5, natW:nat.w, natH:nat.h, offset: imgOffset, out: 10 });
+    c.vtrack = pickImageTrack(c);
     ensureVideoTrackCount(c.vtrack + 1);
     Seq.sort(); Seq.recomputeDuration();
     drawTimeline();

@@ -134,7 +134,7 @@ const Seq = {
       primary: !!c.primary,
       // 圖片的幾何屬於 clip（不是整條視訊軌）。歷史快照必須記下它，
       // 否則調整大小／位置後的 Undo/Redo 會保留錯誤尺寸。
-      ...(c.type==='image'?{type:'image',scale:c.scale??1,posX:c.posX??0.5,posY:c.posY??0.5}:{}),
+      ...(c.type==='image'?{type:'image',scale:c.scale??1,posX:c.posX??0.5,posY:c.posY??0.5,natW:c.natW||0,natH:c.natH||0}:{}),
       // audioSrc 是播放器執行期用的來源鍵；audioSourceId 則是可存檔、
       // 可在重新載入後套回每個媒體聲道配線的穩定識別。
       audioSrc: c.audioSrc || null, audioSourceId: c.audioSourceId || null, audioDetached:!!c.audioDetached,
@@ -160,6 +160,7 @@ const Seq = {
         ex.in = s.in; ex.out = s.out; ex.offset = s.offset; ex.vtrack = s.vtrack || 0; ex.fadeIn = s.fadeIn || 0; ex.fadeOut = s.fadeOut || 0; ex.audioDetached=!!s.audioDetached;
         if(s.type==='image'){
           ex.type='image'; ex.scale=s.scale??1; ex.posX=s.posX??0.5; ex.posY=s.posY??0.5;
+          if(s.natW>0&&s.natH>0){ ex.natW=s.natW; ex.natH=s.natH; }
         }
         State.clips.push(ex);
       }

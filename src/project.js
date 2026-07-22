@@ -179,7 +179,9 @@ function _buildProjectData(){
     clips:_savedClips().map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,
       // 圖片需保留型別與自己的幾何。少了 type 會在重開專案時被誤當成影片
       // 丟給 ffprobe；少了 scale/posX/posY 則會回到預設滿版中央。
-      ...(c.type==='image'?{type:'image',scale:c.scale!=null?c.scale:1,posX:c.posX!=null?c.posX:0.5,posY:c.posY!=null?c.posY:0.5}:{}),
+      // natW/natH＝圖片原始像素尺寸；少了它重開專案要等背景重量一次才對得準互動框。
+      ...(c.type==='image'?{type:'image',scale:c.scale!=null?c.scale:1,posX:c.posX!=null?c.posX:0.5,posY:c.posY!=null?c.posY:0.5,
+        ...(c.natW>0&&c.natH>0?{natW:c.natW,natH:c.natH}:{})}:{}),
       ...(c.audioSourceId!=null?{audioSourceId:String(c.audioSourceId)}:(c.audioSrc!=null?{audioSourceId:String(c.audioSrc)}:{})),
       ...(c.audioDetached?{audioDetached:true}:{}),
       ...(c.fadeIn?{fadeIn:c.fadeIn}:{}),...(c.fadeOut?{fadeOut:c.fadeOut}:{})})),
