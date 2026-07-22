@@ -434,9 +434,9 @@ function renderImageOverlays(){
   if(layer.innerHTML !== html) layer.innerHTML = html;
 
   if(Media.mpvMode && !Media._wcTakeover && window.subtool?.mpv?.setImageGuide){
-    window.subtool.mpv.setImageGuide(html);
+    window.subtool.mpv.setImageGuide({ html, rect });
   } else if(window.subtool?.mpv?.setImageGuide){
-    window.subtool.mpv.setImageGuide('');
+    window.subtool.mpv.setImageGuide(null);
   }
 }
 

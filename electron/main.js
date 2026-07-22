@@ -1346,7 +1346,11 @@ const draw=()=>{ const g=current; if(!g){guide.style.display='none';return;} con
   stem.setAttribute('x1',cx);stem.setAttribute('y1',cy+7);stem.setAttribute('x2',cx);stem.setAttribute('y2',g.y-2);
   dot.setAttribute('cx',cx);dot.setAttribute('cy',cy);guide.style.display='block'; };
 window.setGuide=(g)=>{current=g;draw();}; addEventListener('resize',draw);
-window.setImages=(h)=>{ document.getElementById('imgContainer').innerHTML=h||''; };
+window.setImages=(h, r)=>{
+  const el = document.getElementById('imgContainer');
+  if(r){ el.style.left=r.x+'px'; el.style.top=r.y+'px'; el.style.width=r.w+'px'; el.style.height=r.h+'px'; }
+  el.innerHTML=h||'';
+};
 </script></body></html>`;
 
 function applyMpvBounds(b) {
@@ -1397,11 +1401,12 @@ function setMpvGuide(raw) {
   } catch (e) {}
 }
 
-function setMpvImageGuide(html) {
-  _mpvImagesHtml = html || '';
+function setMpvImageGuide(data) {
+  _mpvImagesHtml = (data && data.html) || (typeof data === 'string' ? data : '');
+  const rect = data && data.rect;
   if (!_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
   try {
-    _mpvGuideWin.webContents.executeJavaScript(`window.setImages(${JSON.stringify(_mpvImagesHtml)})`, true).catch(() => {});
+    _mpvGuideWin.webContents.executeJavaScript(`window.setImages(${JSON.stringify(_mpvImagesHtml)}, ${JSON.stringify(rect)})`, true).catch(() => {});
     if (_mpvImagesHtml || _mpvGuide) showMpvGuide();
     else if (!_mpvGuide) _mpvGuideWin.hide();
   } catch (e) {}
