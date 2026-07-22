@@ -382,6 +382,7 @@ const State = {
   // 播放器監看用疊層。這是使用者偏好，不屬於專案／匯出資料，故只由 config 保存。
   timecodeWatermark: false,
   activeTrackKind: 'sub', // 目前焦點軌道類型：'sub' | 'video' | 'audio'
+  activeSubTrack: 0,      // 目前選取的字幕軌道（用於上下鍵導航）
   clips: [],            // 影片序列（時間軸上的影片區塊，含 vtrack 視訊轨）：見 sequence.js
   selectedClipId: null, // 目前選取的影片段（點選後可用上下鍵切換、Del 刪除）
   selectedAudioClipId: null, // 目前選取的外部音訊素材（與影片／字幕選取互斥）
@@ -389,8 +390,6 @@ const State = {
   audioExpanded: {},    // 音訊軌（每音源一列）是否展開成各聲道控制列：{ srcId: true }
   audioProject: _emptyAudioProject() // 專案音訊 bus / 來源路由 / 匯出 stream（不存 Media runtime）
 };
-/* 軌道工具 */
-function newTrack(name){ return {name:name||('軌道 '+(State.tracks.length+1)),visible:true,fontSize:80,posPct:90,align:'center',locked:false,color:'#ffffff'}; }
 function syncTrackCount(){ State.trackCount=State.tracks.length; }
 /* 視訊軌工具（比照字幕軌）：newVideoTrack 建一條、ensureVideoTrackCount 補足數量（只增不減）、
    videoTrackVisible 顯示查詢、resetVideoTracks 回到單軌初始。索引 0＝最底/基底，越大越上層。 */

@@ -407,7 +407,9 @@ window.addEventListener('keydown', e => {
       // 若目前有選取字幕，則視為在字幕軌道操作，改為依序步進字幕邊界 (與 E 相同)
       if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         const dir = e.key === 'ArrowUp' ? -1 : 1;
-        if (State.activeTrackKind === 'video' || State.selectedClipId != null || State.activeTrackKind === 'audio' || State.selectedAudioClipId != null) {
+        if (State.activeTrackKind === 'sub') {
+          jumpToAdjacentCue(dir);
+        } else if (State.activeTrackKind === 'video' || State.selectedClipId != null || State.activeTrackKind === 'audio' || State.selectedAudioClipId != null) {
           if (!stepMediaBoundary(dir)) stepBoundary(dir);
         } else {
           stepBoundary(dir);
@@ -421,7 +423,9 @@ window.addEventListener('keydown', e => {
       if (Media.playing) Media.pause();
       if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         const dir = e.key === 'ArrowUp' ? -1 : 1;
-        if (State.activeTrackKind === 'video' || State.selectedClipId != null || State.activeTrackKind === 'audio' || State.selectedAudioClipId != null) {
+        if (State.activeTrackKind === 'sub') {
+          jumpToAdjacentCue(dir);
+        } else if (State.activeTrackKind === 'video' || State.selectedClipId != null || State.activeTrackKind === 'audio' || State.selectedAudioClipId != null) {
           if (!stepMediaBoundary(dir)) stepBoundary(dir);
         } else {
           stepBoundary(dir);
@@ -575,7 +579,7 @@ function jumpToFirstLastCue(dir) {
 /* Ctrl+上/下：跳到同軌上一句/下一句的起點並選取 */
 function jumpToAdjacentCue(dir) {
   const sel = State.cues.find(c => c.id === State.selectedId);
-  const track = sel ? (sel.track || 0) : State.listTrack;
+  const track = sel ? (sel.track || 0) : (State.activeSubTrack !== undefined ? State.activeSubTrack : State.listTrack);
   const list = State.cues.filter(c => (c.track || 0) === track);
   if (!list.length) return;
   let idx;

@@ -1668,6 +1668,10 @@ window.addEventListener('mouseup',e=>{
       refreshSelectionUI(); $('stSel').textContent='已選 '+State.selectedIds.length+' 條';
     }else{
       // 點時間軸空白：跳轉（Shift 時保留選取）
+      const sc=tracksScrollTop();
+      const tkIdx=yToTrack(Math.max(0,drag.y0-tracksTop()+sc));
+      if(tkIdx>=0){ State.activeTrackKind='sub'; State.activeSubTrack=tkIdx; }
+      
       Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub');
       if(!e.shiftKey){
         State.selectedIds=[]; State.selectedId=null; State.activeEdge='start';
