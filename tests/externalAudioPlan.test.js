@@ -27,6 +27,10 @@ describe('external audio project export plan',()=>{
   beforeEach(()=>{
     resetAudioProject();
     State.clips=[];
+    State.cues=[];
+    State.exportIn=null;
+    State.exportOut=null;
+    State.externalAudioEnd=0;
     ensureAudioBusCount(2);
     ensureAudioSourceMap('asset-external',[
       {sourceStream:0,sourceChannel:0},
@@ -95,6 +99,38 @@ describe('external audio project export plan',()=>{
     expect(data.clips).toHaveLength(1);
     expect(data.clips[0].audio).toEqual([]);
     expect(data.audioPlan.buses.flatMap(bus=>bus.inputs)).toHaveLength(2);
+  });
+
+  it('passes static-image identity and per-clip geometry to the ffmpeg export plan',()=>{
+    mediaMock.externalAudioSources=[];
+    State.clips=[{
+      id:'clip-image',type:'image',name:'Card',path:'C:/source/card.png',dur:36000,
+      in:0,out:8,offset:3,vtrack:2,scale:0.42,posX:0.2,posY:0.8
+    }];
+
+    const data=_buildExportData();
+
+    expect(data.duration).toBe(11);
+    expect(data.clips).toEqual([expect.objectContaining({
+      path:'C:/source/card.png',type:'image',in:0,out:8,offset:3,vtrack:2,
+      scale:0.42,posX:0.2,posY:0.8
+    })]);
+  });
+
+  it('keeps the original export In point for delivery metadata after slicing the timeline',()=>{
+    mediaMock.externalAudioSources=[];
+    State.clips=[{
+      id:'clip-image',type:'image',path:'C:/source/card.png',dur:36000,
+      in:0,out:20,offset:0,vtrack:0
+    }];
+    State.exportIn=4;
+    State.exportOut=12;
+
+    const data=_buildExportData();
+
+    expect(data.timelineStart).toBe(4);
+    expect(data.duration).toBe(8);
+    expect(data.clips[0]).toMatchObject({in:4,out:12,offset:0});
   });
 
   it('reports unresolved routed sources instead of silently exporting silence',()=>{

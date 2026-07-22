@@ -642,8 +642,42 @@ const Media = {
     return this.ctx;
   },
 
+  /* 使用者可先放置圖片、之後才匯入第一支影片。這時圖片已是有效的時間軸
+     內容，不能被「建立主影片」的 reset 當成舊影片序列清掉。 */
+  _captureImageOnlyTimeline(){
+    const clips=(State.clips||[]).filter(clip=>clip?.type==='image');
+    if(!clips.length || clips.length!==(State.clips||[]).length) return null;
+    const urls=new Set(clips.map(clip=>clip.web?.url).filter(url=>this.objectURLs.includes(url)));
+    return {
+      clips:clips.map(clip=>({...clip,web:clip.web?{...clip.web}:null})),
+      videoTracks:(State.videoTracks||[]).map(track=>({...track})),
+      objectURLs:urls
+    };
+  },
+  _resetForFirstVideo(){
+    const preserved=this._captureImageOnlyTimeline();
+    this.reset({keepObjectURLs:preserved?.objectURLs});
+    this._preservedImageTimeline=preserved;
+    return !!preserved;
+  },
+  _restorePreservedImageTimeline(){
+    const preserved=this._preservedImageTimeline;
+    delete this._preservedImageTimeline;
+    if(!preserved?.clips?.length) return false;
+    if(Array.isArray(preserved.videoTracks)&&preserved.videoTracks.length)
+      State.videoTracks=preserved.videoTracks.map(track=>({...track}));
+    for(const image of preserved.clips){
+      const vtrack=Math.max(0,Math.round(Number(image.vtrack)||0));
+      ensureVideoTrackCount(vtrack+1);
+      State.clips.push({...image,type:'image',primary:false,vtrack,web:image.web?{...image.web}:null});
+    }
+    Seq.sort(); Seq.recomputeDuration();
+    emit('render:videoSub');
+    return true;
+  },
+
   async loadVideoFile(file){
-    this.reset();
+    this._resetForFirstVideo();
     State.mediaName=file.name; State.mediaSize=file.size;
     const url=URL.createObjectURL(file); this.objectURLs.push(url);
     video.src=url;
@@ -767,7 +801,7 @@ const Media = {
 
   /* --- 桌面 (Electron) 媒體：系統 ffmpeg，單次讀取多輸出，逐聲道音軌 + 電平表 --- */
   async loadDesktopMedia(p){
-    this.reset();
+    this._resetForFirstVideo();
     State.mediaPath=p; State.mediaName=baseName(p);
     const st=await DESK.stat(p); State.mediaSize=st.size||0;
     setStatus('讀取媒體資訊…','busy');
@@ -1721,6 +1755,7 @@ const Media = {
     const audioSourceId=meta.audioSourceId||pendingPrimary?.audioSourceId||makeAudioSourceId();
     const c = Seq.add({ ...meta, primary: true, audioSrc: 'video', audioSourceId, audioDetached:!!pendingPrimary?.audioDetached, offset: 0 });
     this.activeClipId = c.id;
+    this._restorePreservedImageTimeline();
     // 開啟專案時還原其餘 clip（桌面：同一路徑且同 audioSourceId 的切割片段共用資源、只 ingest 一次）
     const pend = State._pendingClips; delete State._pendingClips;
     if(DESK && Array.isArray(pend)){
@@ -1737,6 +1772,13 @@ const Media = {
         const made = new Map(); if(c.path) made.set(resourceKey(pri||c), c);
         for(const pc of pend){
           if(pc === pri || !pc.path) continue;
+          // 圖片是靜態視覺疊層，不可走 addClipDesktop（它會以 ffprobe 當成
+          // 影片，因而在重開專案時遺失）。每一個圖片 placement 都要獨立
+          // 重建，才能保留自己的裁切時間、大小與位置。
+          if(pc.type==='image'){
+            await this.addImageDesktop(pc.path,{...pc,_restore:true}).catch(()=>null);
+            continue;
+          }
           const key=resourceKey(pc);
           const base = made.get(key);
           if(base){ // 同一 asset 的切割片段：直接建 clip 共用資源
@@ -1864,8 +1906,15 @@ const Media = {
     const imgOffset = geo?.offset ?? this.displayTime();
     const imgOut = geo ? Math.min(geo.out ?? 10, 36000) : 10;
     const imgIn = geo?.in ?? 0;
-    const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5, offset: imgOffset, out: imgOut, in: imgIn });
-    if(geo){ if(geo.vtrack != null) c.vtrack = geo.vtrack; c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; }
+    const geoNumber=(value,fallback)=>Number.isFinite(Number(value))?Number(value):fallback;
+    const geoRatio=(value,fallback)=>Math.max(0,Math.min(1,geoNumber(value,fallback)));
+    const c = Seq.add({ type: 'image', name, path: p, web: { url }, dur: 36000, fps: State.fps || 25,
+      scale:Math.max(0.01,geoNumber(geo?.scale,1)), posX:geoRatio(geo?.posX,0.5), posY:geoRatio(geo?.posY,0.5),
+      offset: imgOffset, out: imgOut, in: imgIn });
+    if(geo){
+      if(geo.vtrack != null){ c.vtrack = geo.vtrack; ensureVideoTrackCount(c.vtrack + 1); }
+      c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0;
+    }
     // 預設將圖片放置於全新的最上層視訊軌
     if (!geo || geo.vtrack == null) {
       c.vtrack = State.videoTracks.length;
@@ -1873,9 +1922,36 @@ const Media = {
     }
     Seq.sort(); Seq.recomputeDuration();
     drawTimeline();
-    emit('history:record', '加入圖片：' + c.name);
+    // 圖片疊層由 app.js 的 render:videoSub 事件建立；僅重繪時間軸不會
+    // 立即產生可拖曳的 .img-wrap，導致剛匯入時看得到素材卻不能直接調整。
+    emit('render:videoSub');
+    if(!geo?._restore) emit('history:record', '加入圖片：' + c.name);
     setStatus(`已加入圖片：${c.name}`, 'ok');
     return c;
+  },
+  /* 無主影片的桌面專案仍可能只含圖片。Project.apply 會先把所有 clip
+     暫存到 State._pendingClips；此處直接重建其中圖片，保留讀不到的項目
+     以便下次重新連結，不讓一次開檔就遺失。 */
+  async restorePendingImageClips(){
+    const pending=Array.isArray(State._pendingClips)?State._pendingClips:[];
+    if(!pending.length) return {restored:0,pending:0};
+    const remaining=[];
+    let restored=0;
+    for(const raw of pending){
+      if(raw?.type!=='image' || !raw.path){ remaining.push(raw); continue; }
+      let exists=true;
+      if(typeof DESK?.stat==='function'){
+        try{ exists=!!(await DESK.stat(raw.path))?.exists; }catch(e){ exists=false; }
+      }
+      if(!exists){ remaining.push(raw); continue; }
+      const image=await this.addImageDesktop(raw.path,{...raw,_restore:true}).catch(()=>null);
+      if(image) restored++; else remaining.push(raw);
+    }
+    if(remaining.length) State._pendingClips=remaining;
+    else delete State._pendingClips;
+    Seq.sort(); Seq.recomputeDuration();
+    if(restored) { drawTimeline(); emit('render:videoSub'); }
+    return {restored,pending:remaining.length};
   },
   async addImageWeb(f){
     const url = URL.createObjectURL(f); this.objectURLs.push(url);
@@ -1885,6 +1961,7 @@ const Media = {
     ensureVideoTrackCount(c.vtrack + 1);
     Seq.sort(); Seq.recomputeDuration();
     drawTimeline();
+    emit('render:videoSub');
     emit('history:record', '加入圖片：' + c.name);
     setStatus(`已加入圖片：${c.name}`, 'ok');
     return c;
@@ -2551,7 +2628,7 @@ const Media = {
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el)tr.el.playbackRate=r; }
     if(this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }
   },
-  reset(){
+  reset(options={}){
     if(this.mpvMode && DESK?.mpv){
       this._stopMpvBoundsFeeder();
       DESK.mpv.quit().catch(()=>{});
@@ -2580,10 +2657,13 @@ const Media = {
     this.tracks=[]; this.usingWebAudio=false;
     clearMeterStrips(); // Fix #10：清除 mixer 的舊音軌參照，避免 rafLoop 讀取廢棄 analyser
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
-    this.objectURLs.forEach(u=>{try{URL.revokeObjectURL(u);}catch(e){}}); this.objectURLs=[];
+    const keepObjectURLs=options.keepObjectURLs instanceof Set?options.keepObjectURLs:new Set();
+    this.objectURLs.forEach(u=>{ if(!keepObjectURLs.has(u)) try{URL.revokeObjectURL(u);}catch(e){} });
+    this.objectURLs=this.objectURLs.filter(u=>keepObjectURLs.has(u));
     this.playing=false; this._vTime=0; this._vStart=null;
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）
     Seq.clear(); this.activeClipId=null; this._mpvPath=null; State.selectedClipId=null; State.selectedAudioClipId=null; resetVideoTracks();
+    if(!options.keepObjectURLs) delete this._preservedImageTimeline;
     this._gap=false; this._gapT=0; this._gapStart=null; this._seqSwitching=false;
     video.style.visibility='';
     const pb=$('playBtn'); if(pb) pb.textContent='▶';

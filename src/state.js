@@ -295,6 +295,9 @@ const State = {
   activeId: null,      // 目前播放位置對應的字幕
   pxPerSec: 80,
   viewStart: 0,        // 時間軸左緣對應秒數
+  // 輸出範圍（播放器的 [In]／[Out]）；必須是可復原的專案狀態。
+  exportIn: null,
+  exportOut: null,
   inPoint: null,       // I 標記但尚未 O 的暫存起點
   subMode: false,      // 上字幕模式（O 後自動前進到下一句）
   mediaName: null,
@@ -306,6 +309,8 @@ const State = {
   clipboard:[],  // copied cues for paste
   overwriteMode: false, // 允許重疊（不可覆蓋/可覆蓋）
   overwriteKeep: true,  // 可覆蓋模式下：true=保留被包含句, false=刪除被包含句
+  // 播放器監看用疊層。這是使用者偏好，不屬於專案／匯出資料，故只由 config 保存。
+  timecodeWatermark: false,
   clips: [],            // 影片序列（時間軸上的影片區塊，含 vtrack 視訊軌）：見 sequence.js
   selectedClipId: null, // 目前選取的影片段（點選後可用上下鍵切換、Del 刪除）
   selectedAudioClipId: null, // 目前選取的外部音訊素材（與影片／字幕選取互斥）
@@ -358,6 +363,7 @@ async function loadConfig() {
       if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
       if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
       if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
+      if (typeof conf.timecodeWatermark === 'boolean') State.timecodeWatermark = conf.timecodeWatermark;
     } catch (e) { console.error('Failed to load config', e); }
   } else {
     try {
@@ -368,6 +374,7 @@ async function loadConfig() {
         if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
         if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
         if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
+        if (typeof conf.timecodeWatermark === 'boolean') State.timecodeWatermark = conf.timecodeWatermark;
       }
     } catch (e) {}
   }
@@ -378,7 +385,8 @@ function saveConfig() {
     autoSelect: State.autoSelect,
     overwriteMode: State.overwriteMode,
     overwriteKeep: State.overwriteKeep,
-    safeFrame: State.safeFrame
+    safeFrame: State.safeFrame,
+    timecodeWatermark: State.timecodeWatermark
   };
   if (DESK && DESK.configSave) {
     DESK.configSave(data).catch(e => console.error('Failed to save config', e));

@@ -67,6 +67,11 @@
             <div class="sf-cx"></div>
             <div class="sf-cy"></div>
           </div>
+          <!-- 監看用時間碼：只疊在播放器，絕不送進影片匯出濾鏡。 -->
+          <div class="timecode-watermark" id="timecodeWatermark" aria-hidden="true">
+            <span class="timecode-watermark-label">TC</span>
+            <span class="timecode-watermark-value" id="timecodeWatermarkValue">00:00:00:00</span>
+          </div>
           <div class="imglayer" id="imageLayer"></div>
           <div class="vsublayer" id="videoSub"></div>
           <div class="no-video" id="noVideo">
@@ -88,8 +93,7 @@
             <button class="icon" data-act="fwd1" title="前進 1 秒">1⏭</button>
             <button class="icon" data-act="fwd5" title="前進 5 秒">5⏭</button>
           </div>
-          <div id="speedIndicator"
-            style="color:var(--text-faint); font-weight:600; font-size:13px; margin:0 4px; width:42px; text-align:center;">
+          <div id="speedIndicator" class="speed-indicator" title="右鍵變更播放速度" aria-label="目前播放速度；右鍵變更">
             1x</div>
           <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span> / <span
               id="tcDur">00:00:00:00</span></div>
@@ -97,7 +101,9 @@
           <button class="icon tp-btn" data-act="exp-in" title="設定輸出起點 (快捷鍵 [)" style="font-size:11px; padding:2px 6px; min-width:unset;">[ In</button>
           <button class="icon tp-btn" data-act="exp-out" title="設定輸出終點 (快捷鍵 ])" style="font-size:11px; padding:2px 6px; min-width:unset;">Out ]</button>
           <button class="icon tp-btn" data-act="exp-clear" title="清除輸出範圍" style="font-size:11px; padding:2px 6px; min-width:unset;">✕</button>
+          <div class="transport-sep" aria-hidden="true"></div>
           <button class="icon tp-btn" data-act="safe-frame" id="safeFrameBtn" title="安全框：100%／90%／80% 安全區＋中心十字線（僅預覽參考，不燒入匯出）" style="font-size:11px; padding:2px 6px; min-width:unset;">⊹</button>
+          <button class="icon tp-btn" data-act="timecode-watermark" id="timecodeWatermarkBtn" title="顯示／隱藏時間碼浮水印（僅播放器監看，不燒入匯出）" aria-pressed="false" style="font-size:10px; padding:2px 5px; min-width:unset;">TC</button>
           <button class="icon tp-btn" data-act="mixer" title="顯示／隱藏音量表與匯出軌道對應設定" style="font-size:11px; padding:2px 6px; min-width:unset;">🎚</button>
         </div>
 
@@ -224,9 +230,13 @@
     <div class="timeline" id="timelinePanel">
       <div class="tl-toolbar">
         <span style="font-weight:600">⏱ 時間軸</span>
-        <span style="margin-left:8px; font-size:12px; opacity:0.8;">音軌數:</span>
-        <input type="number" id="projectAudioTracksCount" min="1" max="32" value="2" title="設定專案目前有多少音軌" style="width:55px; margin-right:8px; text-align:center; background:var(--bg-3); color:var(--text); border:1px solid var(--line);">
-        <button class="icon" data-act="audio-project-settings" title="開啟 Audio Channel Configuration 視窗" style="margin-right:8px;">⚙ <span class="lbl">聲道設定</span></button>
+        <div class="project-audio-count" title="專案總輸出音軌數；可直接輸入 1–32 軌">
+          <span class="project-audio-count-label">音軌數</span>
+          <input type="number" id="projectAudioTracksCount" min="1" max="32" value="2" aria-label="專案總輸出音軌數">
+          <span class="project-audio-count-unit" aria-hidden="true">軌</span>
+        </div>
+        <button class="icon" data-act="audio-project-settings" title="開啟 Audio Channel Configuration 視窗">⚙ <span class="lbl">聲道設定</span></button>
+        <div class="sep"></div>
         <button class="icon" data-act="add-track" title="新增字幕軌">＋ <span class="lbl">軌道</span></button>
         <div class="sep"></div>
         <button class="icon" data-act="history" title="動作紀錄 (7)">🕘 <span class="lbl">紀錄</span></button>
@@ -237,6 +247,7 @@
         <button class="icon" data-act="add-note" title="新增備註">＋</button>
         <div class="sep"></div>
         <button class="icon" data-act="split-clip" title="在播放點切割選取素材；未選取音檔時切割影片段 (Ctrl+K)">✂ <span class="lbl">切割片段</span></button>
+        <div class="sep"></div>
         <button class="icon" data-act="unlink-clip-audio" title="將選取影片的原音解除連結，成為可獨立剪輯的音訊素材">🔗✂ <span class="lbl">解除影音</span></button>
         <div class="sep"></div>
         <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span
@@ -357,6 +368,8 @@
       <div class="cp-row cp-issue cp-contains-row" id="cpContains"><span class="cp-label">包含文字</span><input
           id="cpContainsInput" type="text" value="  ||　　|| 　||　 "
           title="以 || 分隔多個關鍵字（OR 搜尋，不分大小寫）&#10;預設：連續兩個半形空白、兩個全形空白、半形+全形、全形+半形"><span class="cp-nums"></span></div>
+      <div class="cp-row cp-issue" id="cpNonTraditional"><span class="cp-label"
+          title="檢查疑似簡體字與其他非繁體中文、英文、數字、符號的字元。僅含繁簡共用字的句子以黃色編號提示人工確認；含明確簡體或其他字元則為紅色。">含非繁中／英文／數字／符號</span>：<span class="cp-nums"></span></div>
       <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
       <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span>：<span class="cp-nums"></span></div>
       <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span>：<span class="cp-nums"></span></div>

@@ -81,6 +81,16 @@ function _savedExternalAudioSources(){
   // 尚未能重新開啟（例如暫時找不到檔案）的來源也要繼續留在專案檔，避免下一次儲存遺失。
   return _normalExternalAudioSources([...(Array.isArray(live)?live:[]), ...(State._pendingExternalAudioSources||[])]);
 }
+/* 開啟專案到主影片尚未重建的短暫期間，clip 會暫放在 _pendingClips。
+   儲存／dirty 判斷都必須把它們算進去，否則純圖片專案會在重開後尚未還原
+   畫面前就被當成空專案覆寫。 */
+function _savedClips(){
+  const live=Array.isArray(State.clips)?State.clips:[];
+  const pending=Array.isArray(State._pendingClips)?State._pendingClips:[];
+  if(!pending.length) return live;
+  const liveIds=new Set(live.map(clip=>clip?.id).filter(Boolean));
+  return [...live,...pending.filter(clip=>!clip?.id||!liveIds.has(clip.id))];
+}
 
 async function _restorePendingExternalAudioSources(){
   const pending=_normalExternalAudioSources(State._pendingExternalAudioSources);
@@ -166,7 +176,10 @@ function _buildProjectData(){
     videoTracks:State.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked,
       ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})})),
     videoTrackCount:State.videoTracks.length||1, // 向下相容：舊版讀取用
-    clips:State.clips.map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,
+    clips:_savedClips().map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,
+      // 圖片需保留型別與自己的幾何。少了 type 會在重開專案時被誤當成影片
+      // 丟給 ffprobe；少了 scale/posX/posY 則會回到預設滿版中央。
+      ...(c.type==='image'?{type:'image',scale:c.scale!=null?c.scale:1,posX:c.posX!=null?c.posX:0.5,posY:c.posY!=null?c.posY:0.5}:{}),
       ...(c.audioSourceId!=null?{audioSourceId:String(c.audioSourceId)}:(c.audioSrc!=null?{audioSourceId:String(c.audioSrc)}:{})),
       ...(c.audioDetached?{audioDetached:true}:{}),
       ...(c.fadeIn?{fadeIn:c.fadeIn}:{}),...(c.fadeOut?{fadeOut:c.fadeOut}:{})})),
@@ -258,6 +271,9 @@ function resetProject(){
   _lastSavedDataStr=null;
   if(_autoSaveTimer){ clearInterval(_autoSaveTimer); _autoSaveTimer=null; }
   resetAudioProject();
+  State.exportIn=null;
+  State.exportOut=null;
+  delete State._pendingClips;
   delete State._pendingExternalAudioSources;
 }
 
@@ -268,7 +284,9 @@ function _hasAudioProjectData(){
 
 function isProjectDirty() {
   // v3 的 bus / routing / export layout 是可獨立於字幕存在的專案內容，不能被舊的「無字幕＝未修改」捷徑忽略。
-  if (State.cues.length === 0 && State.notes.length === 0 && !_hasAudioProjectData()) return false;
+  // 圖片／影片 clip 也是專案內容；尤其圖片大小或位置被調整後，不能因為沒有字幕
+  // 就讓關閉視窗流程誤判為未修改。
+  if (State.cues.length === 0 && State.notes.length === 0 && !_hasAudioProjectData() && _savedClips().length===0) return false;
   if (!_lastSavedDataStr) return true;
   return JSON.stringify(_buildProjectData()) !== _lastSavedDataStr;
 }
@@ -433,6 +451,9 @@ const Project = {
     }else{
       // 純音訊專案沒有主影片可觸發 reset，因此先清舊媒體，再重建外部音檔。
       try{ Media.reset(); }catch(e){}
+      // 純圖片專案同樣沒有主影片可觸發 _registerPrimary；直接從 pending
+      // 資料重建圖片，否則重開後只剩空時間軸。
+      try{ await Media.restorePendingImageClips?.(); }catch(e){ console.warn('restore pending image clips:',e); }
       await _restorePendingExternalAudioSources();
     }
   }

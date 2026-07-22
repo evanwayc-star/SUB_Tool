@@ -1,6 +1,6 @@
 # SUB Tool — Electron 維護手冊
 
-> 對應版本：v4.37.0｜最後更新：2026-07-20
+> 對應版本：v4.6.1｜最後更新：2026-07-22
 
 > 本文件針對本專案實際架構撰寫；每次異動 IPC 通道、ffmpeg 流程、mpv 整合或打包設定時請同步更新。
 
@@ -51,7 +51,7 @@ Main (main.js)
 | `saveProject(name, b64)` | `dialog:saveProject` | R→M | 另存 `.subtool` 專案，回傳儲存路徑 |
 | `importSub(kind)` | `dialog:importSub` | R→M | 開啟字幕檔，回傳 `{b64, name}` |
 | `exportSub(name, b64, ext)` | `dialog:exportSub` | R→M | 儲存字幕檔，回傳儲存路徑 |
-| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 匯出影片序列：`{items[],width,height,fps,assText,format:'prores'\|'mp4',duration,defaultName,outPath?}`。單一 filtergraph 串接各段＋燒字幕（ass 濾鏡，cwd=TMP 避開路徑跳脫）＋ ProRes422HQ/H.264 編碼；`outPath` 未給則彈存檔對話框。回傳輸出路徑或 null |
+| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 匯出影片序列：`{clips[],videoTracks[],width,height,fps,assText,format:'prores'\|'mp4'\|'wav',duration,audioPlan,timecodeWatermark?}`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼；影片輸出為 ProRes422HQ/H.264，WAV 則為多聲道 PCM。 |
 | `probe(path)` | `ffprobe` | R→M | ffprobe 探測，回傳 `{duration, fps, video, audio[]}` |
 | `makeProxy(path, dur)` | `ffmpeg:proxy` | R→M | 轉製 720p proxy（非即時，阻塞） |
 | `extractAudio(path, idx, dur, codec)` | `ffmpeg:extractAudio` | R→M | 抽取單一聲道 |
@@ -71,6 +71,10 @@ Main (main.js)
 | `mpv.mute(v)` | `mpv:mute` | R→M | 靜音切換 |
 | `mpv.rate(r)` | `mpv:rate` | R→M | 播放速率 |
 | `mpv.setBounds(b)` | `mpv:setBounds` | R→M | 更新 mpv 覆蓋視窗位置與大小 |
+| `mpv.setGuide(g)` | `mpv:setGuide` | R→M | 更新一般安全框／字幕操作 guide |
+| `mpv.setImageGuide(data)` | `mpv:setImageGuide` | R→M | 將圖片疊層 HTML、播放器矩形與命中區交給透明 guide 視窗；只有圖片及其控制點能取得 pointer 輸入 |
+| `mpv.onImagePointer(cb)` | `mpv:imagePointer` | M→R | guide 回送白名單化的 `start/move/end/cancel` 拖曳座標；renderer 依同一套幾何規則修改圖片位置與大小 |
+| `mpv.setTimecodeWatermark(data)` / `clearTimecodeWatermark()` | `mpv:setTimecodeWatermark` / `mpv:clearTimecodeWatermark` | R→M | 在原生 mpv 畫面上顯示／清除僅監看的時間碼，資料為 `{text,rect}`；不經 ASS、不會燒進輸出 |
 | `mpv.show(v)` | `mpv:show` | R→M | 顯示 / 隱藏 mpv 視窗。mpv 為 OS 層子視窗、HTML z-index 蓋不過：前端 `_syncMpvPanel()`（app.js）在對話框（含快捷鍵設定）、重疊影片的浮動面板／搜尋視窗／右鍵選單開啟時自動呼叫此方法讓位，關閉後恢復（`mpv:sync` 事件） |
 | `mpv.subSet(ass)` | `mpv:subSet` | R→M | 餵入 ASS 字幕（防抖 100ms） |
 | `mpv.quit()` | `mpv:quit` | R→M | 關閉 mpv |
@@ -179,6 +183,8 @@ mpv 以**子視窗**方式嵌入：Main Process 啟動 `_mpvWin`（無框 Browse
 - `mpv:event` 推播：`time-pos`、`duration`、`pause`、`eof-reached`（前端用於同步播放頭）
 - `mpv:subSet`：接收 base64 ASS 字串，寫入暫存 `.ass` 後用 `sub-reload` 指令更新
 - `mpv:setBounds`：更新 `_mpvWin` 位置；主視窗移動/縮放時自動呼叫
+- `mpv:setImageGuide`：透明 guide 視窗顯示圖片、虛線框與控制點。主程序依游標是否落在圖片命中區切換 `setIgnoreMouseEvents`，拖曳期間保留 pointer capture；圖片外的滑鼠事件會穿透回主 renderer，不能以全視窗 `forward:true` 取代。
+- `mpv:setTimecodeWatermark`：原生 mpv 模式由 guide 顯示監看 TC；一般 HTML 預覽仍由 renderer DOM 顯示。兩者都從 `Media.displayTime()` 取得同一個時碼來源。
 
 ### 注意事項
 
@@ -197,7 +203,7 @@ npm run dist    # vite build + electron-builder
 **輸出**：`release/SUB Tool Setup <版本>.exe`（NSIS 安裝檔，約 287 MB——絕大部分是內建的
 ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專案檔即可開啟。
 
-**正式發布**：先執行 lint、test、build 與桌面媒體驗證；確認 `release/` 的 Setup 檔名包含正確版號後，將原始碼 tag 與同一支 Setup `.exe` 上傳至 GitHub Release。發布說明應連結 `docs/版本變更紀錄.md` 對應段落，不能只推送 commit 而漏掉安裝檔。
+**正式發布**：先執行 lint、test、build 與桌面媒體驗證；確認 `release/` 的 Setup 檔名包含正確版號後，將原始碼推送到 `main`，再以同一個 commit 建立 GitHub tag／Release 並上傳同一支 Setup `.exe`。發布說明應連結 `docs/版本變更紀錄.md` 對應段落，不能只推送 commit 而漏掉安裝檔。
 
 **`package.json` electron-builder 設定**（實際值）：
 ```json
@@ -240,6 +246,9 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 | 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |
 | 使用者說某個按鈕「按了沒反應」 | 是不是用到了 `window.prompt()`？**Electron 停用了它**，回傳永遠是 null，靜默失敗。改用 `ui.js` 的 `promptModal()` |
 | HTML 疊層（字幕拖曳、安全框）在 MXF 模式下看不到 / 點不到 | mpv 是 **OS 層 always-on-top 子視窗**，蓋在所有 HTML 之上；需要 `mpv.show(false)` 讓位（`_syncMpvPanel()`） |
+| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | 檢查 `mpv-guide-preload.js`、`mpv:setImageGuide`、`mpv:imagePointer` 三段是否都存在；guide 必須只在圖片命中區接收輸入，拖曳結束後重新穿透。 |
+| 圖片匯出只顯示第一格或後段變黑 | 檢查 renderer 是否保留 `clip.type === 'image'`；主程序必須對該輸入加 `-loop 1 -framerate <project fps>`，並把每個 clip 的 `scale/posX/posY` 傳進 filtergraph。 |
+| TC 監看在 mpv 模式不顯示 | 先確認播放器 TC 開關為開，再檢查透明 guide 是否建立；這是監看 overlay，與匯出視窗的「壓入時間碼浮水印」為兩個獨立開關。 |
 | 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |
 
 ---

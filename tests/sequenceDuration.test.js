@@ -21,4 +21,21 @@ describe('sequence duration with external audio',()=>{
     Seq.recomputeDuration();
     expect(State.duration).toBe(18);
   });
+
+  it('restores image size and position from a sequence history snapshot',()=>{
+    State.clips=[{
+      id:'image-a',type:'image',path:'C:/source/card.png',dur:36000,
+      in:0,out:6,offset:2,vtrack:1,scale:0.35,posX:0.25,posY:0.75
+    }];
+    const snapshot=Seq.snapshot();
+
+    State.clips[0].scale=1;
+    State.clips[0].posX=0.5;
+    State.clips[0].posY=0.5;
+    Seq.restore(snapshot);
+
+    expect(State.clips[0]).toMatchObject({
+      type:'image',scale:0.35,posX:0.25,posY:0.75
+    });
+  });
 });

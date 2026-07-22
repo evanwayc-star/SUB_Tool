@@ -15,7 +15,7 @@ const History = {
   // AudioElement、波形與快取檔都不入 undo，Media 會依這份純資料重用或重建 runtime asset。
   snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
     audioProject:normalizeAudioProject(State.audioProject),externalAudioState:State.externalAudioState||[],
-    fps:State.fps,dropFrame:State.dropFrame,clipGeo:Seq.snapshot()}); },
+    fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clipGeo:Seq.snapshot()}); },
   reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); },
   record(label){
     const newSnap = this.snap();
@@ -33,7 +33,9 @@ const History = {
         && (old.audioProject?.exportLayout?.streams?.length || 0) === (newSnap.audioProject?.exportLayout?.streams?.length || 0)
         && (old.externalAudioState?.length || 0) === (newSnap.externalAudioState?.length || 0)
         && old.fps === newSnap.fps
-        && old.dropFrame === newSnap.dropFrame;
+        && old.dropFrame === newSnap.dropFrame
+        && old.exportIn === newSnap.exportIn
+        && old.exportOut === newSnap.exportOut;
       if(!structSame){ /* 結構有變動，直接記錄 */ }
       else if(JSON.stringify(newSnap) === JSON.stringify(old)) return;
     }
@@ -56,6 +58,8 @@ const History = {
     emit('audio:externalRestored', { sources: State.externalAudioState });
     Seq.restore(d.clipGeo); // 影片區塊幾何（位置/修剪）；compact 會補足 videoTracks 涵蓋現有片段
     if(d.fps) setFps(d.dropFrame?String(d.fps)+'df':d.fps);
+    State.exportIn=d.exportIn??null;
+    State.exportOut=d.exportOut??null;
     if(!State.cues.some(c=>c.id===State.selectedId)){ State.selectedId=null; State.selectedIds=[]; }
     else State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
     this.hi=i; emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); renderHistory();

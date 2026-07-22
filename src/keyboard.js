@@ -25,8 +25,9 @@ function updateSpeedIndicator() {
   const el = document.getElementById('speedIndicator');
   if (!el) return;
   if (_jklSpeed === 0 || _jklSpeed === 1) {
-    el.textContent = '1x';
-    el.style.color = 'var(--text-faint)';
+    const rate = Math.round((video.playbackRate || 1) * 100) / 100;
+    el.textContent = rate + 'x';
+    el.style.color = Math.abs(rate - 1) < 0.001 ? 'var(--text-faint)' : 'var(--accent)';
   } else if (_jklSpeed < 0) {
     el.textContent = _jklSpeed + 'x';
     el.style.color = '#ff4444';
@@ -39,6 +40,14 @@ function resetPlaybackSpeed() {
   jklClear();
   _jklSpeed = 0;
   Media.setRate(1);
+  updateSpeedIndicator();
+}
+/* 播放速度的右鍵選單使用這個入口，先結束 JKL 倒帶／穿梭計時器，
+   再套用使用者指定的正向速度，避免兩套控制彼此覆寫。 */
+function setManualPlaybackSpeed(rate) {
+  jklClear();
+  _jklSpeed = 0;
+  Media.setRate(rate);
   updateSpeedIndicator();
 }
 function jklApply() {
@@ -667,4 +676,4 @@ function stepBoundary(dir) {
   }
 }
 
-export { setIn, setOut, nudge, stepBoundary, stepMediaBoundary, jklReset, resetPlaybackSpeed };
+export { setIn, setOut, nudge, stepBoundary, stepMediaBoundary, jklReset, resetPlaybackSpeed, setManualPlaybackSpeed };

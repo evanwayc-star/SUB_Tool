@@ -1,7 +1,7 @@
 /* SUB Tool — Electron 主程序
    提供：原生檔案對話框、系統 ffmpeg/ffprobe（MXF 轉檔、多音軌抽取、波形）、
          專案/字幕直接讀寫磁碟。前端沿用同一份 index.html。 */
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -239,7 +239,7 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
 function createWindow() {
   mainWin = new BrowserWindow({
     width: 1480, height: 920, minWidth: 1024, minHeight: 640,
-    backgroundColor: '#1b1b1d', autoHideMenuBar: true,
+    backgroundColor: '#1b1b1d',
     title: `SUB TOOL v${app.getVersion()}`,
     icon: path.join(__dirname, 'logo.png'),
     webPreferences: {
@@ -248,6 +248,12 @@ function createWindow() {
       webSecurity: false // 本機信任程式：允許 file:// 影音直接讀取
     }
   });
+  // 移除 Electron 預設的 File / Edit / View 系統選單列。autoHideMenuBar
+  // 只會暫時隱藏它，按 Alt 仍會再次出現；這裡直接解除視窗選單並關閉
+  // Alt 的選單列顯示行為，避免干擾程式既有的快捷鍵操作。
+  mainWin.setMenu(null);
+  mainWin.setAutoHideMenuBar(false);
+  mainWin.setMenuBarVisibility(false);
   mainWin.maximize();
   // 讓嵌入式 mpv 覆蓋視窗跟著主視窗移動 / 縮放 / 最小化
   const reapplyMpv = () => { if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible && _mpvRect) applyMpvBounds(_mpvRect); };
@@ -651,10 +657,62 @@ function _buildWavOutput(busLabels, plan, fc) {
   fc.push(_joinFilter(labels, names.join('+'), names, label));
   return { label, channels: labels.length };
 }
-ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps, audioPlan: rawAudioPlan }) => {
+
+/* 匯出時間碼只接受 renderer 以 secToEncore() 產生的 SMPTE 字串。不要把任意 drawtext
+   表達式交給 filtergraph，避免輸出設定成為 filter injection 的入口。 */
+const _EXPORT_TIMECODE_RE = /^(\d{1,6}):([0-5]\d):([0-5]\d)([:;])(\d{2,3})$/;
+function _exportTimecodeRate(fps) {
+  const n = _finiteNumber(fps, 25);
+  // drawtext 的 timecode rate 是名義 timebase：23.976→24、29.97→30、59.94→60。
+  // 這裡若傳 30000/1001，FFmpeg 內部仍會取整數；明確傳 nominal rate 才能可靠套用 DF 規則。
+  if (Math.abs(n - 23.976) < 0.01) return { rate: '24', timebase: 24 };
+  if (Math.abs(n - 29.97) < 0.01) return { rate: '30', timebase: 30 };
+  if (Math.abs(n - 59.94) < 0.01) return { rate: '60', timebase: 60 };
+  const whole = Math.max(1, Math.min(240, Math.round(n)));
+  return { rate: String(whole), timebase: whole };
+}
+function _normaliseExportTimecodeWatermark(raw, fps) {
+  if (raw == null || raw === false) return null;
+  if (!raw || typeof raw !== 'object' || typeof raw.start !== 'string')
+    throw new Error('時間碼浮水印設定無效。');
+  const start = raw.start.trim();
+  const match = _EXPORT_TIMECODE_RE.exec(start);
+  const spec = _exportTimecodeRate(fps);
+  if (!match || Number(match[5]) >= spec.timebase)
+    throw new Error('時間碼浮水印的起始時間碼無效。');
+  const dropFrame = match[4] === ';';
+  if (dropFrame && !['30', '60'].includes(spec.rate))
+    throw new Error('Drop-frame 時碼只支援 29.97 或 59.94 FPS。');
+  // FFmpeg 的 AVTimecode 以 '.' 也表示 drop-frame，輸出仍會使用 SMPTE 的 ';'；
+  // 這避免 filtergraph 把未跳脫的分號誤判成下一條 filter 的分隔符。
+  return { start: dropFrame ? start.replace(';', '.') : start, rate: spec.rate };
+}
+/* 交付用 TC 必須固定使用專案隨附的更紗黑體等寬版本。
+   不能再掃到 font/ 裡第一個字型：目錄順序會讓匯出回退至比例數字，
+   導致例如 1 與 8 的寬度不同，時間碼在每格更新時左右跳動。 */
+function _findExportTimecodeFont() {
+  const root = fontsRoot();
+  const font = root && path.join(root, '更紗黑體', 'sarasa-mono-tc-nerd-regular.ttf');
+  try { return font && fs.existsSync(font) ? font : null; } catch (e) { return null; }
+}
+function _drawtextValue(value) {
+  // filtergraph 仍會拆 : / ;，所以即使值有引號也必須逐一跳脫。
+  return String(value).replace(/\\/g, '/').replace(/([:\\;'\[\]])/g, '\\$1');
+}
+function _buildExportTimecodeFilter(inputLabel, timecode, width, height, outputLabel) {
+  const font = _findExportTimecodeFont();
+  if (!font) throw new Error('找不到更紗黑體，無法壓入時間碼浮水印。');
+  const fontSize = Math.max(18, Math.round(Math.min(width, height) * 0.032));
+  const margin = Math.max(12, Math.round(Math.min(width, height) * 0.02));
+  const padding = Math.max(5, Math.round(fontSize * 0.32));
+  return `${inputLabel}drawtext=fontfile='${_drawtextValue(font)}':timecode='${_drawtextValue(timecode.start)}':r=${timecode.rate}:tc24hmax=0:x=${margin}:y=${margin}:fontcolor=0xFFF2C5:fontsize=${fontSize}:box=1:boxcolor=0x080A0CE6:boxborderw=${padding}:borderw=1:bordercolor=0xF59E0B:fix_bounds=1${outputLabel}`;
+}
+
+ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark }) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
   const isWav = format === 'wav';
   const audioPlan = _normalizeAudioPlan(rawAudioPlan, { requireStreams: !isWav });
+  const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
   const isPro = format === 'prores';
   const ext = isWav ? 'wav' : (isPro ? 'mov' : 'mp4');
   let outPath = presetOut || null; // 有指定輸出路徑則跳過對話框（測試/批次用）
@@ -710,7 +768,11 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     const isImg = clipsForPath[0].type === 'image';
     if (isImg) {
       pathMinIn.set(p, 0);
-      inputs.push('-loop', '1', '-i', p);
+      // 靜態圖片必須以 image2 的 loop input 供應整段所需影格；若少了
+      // -loop 1，filtergraph 只拿到第一格，後續時間軸就會變成黑畫面。
+      // 指定輸入影格率也避免由 image2 預設 25fps 再轉成專案 FPS 時出現
+      // 不必要的重複／丟格。
+      inputs.push('-loop', '1', '-framerate', String(R), '-i', p);
     } else {
       const minIn = Math.max(0, Math.min(...clipsForPath.map(c => c.in)) - 0.5);
       pathMinIn.set(p, minIn);
@@ -830,6 +892,12 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     const fdirArg = fdir ? ':fontsdir=' + fdir.replace(/\\/g, '/').replace(/:/g, '\\\\:') : '';
     fc.push(`${vc}ass=${assName}${fdirArg}[vout]`);
     vfinal = '[vout]';
+  }
+  // 時間碼是交付用 burn-in，必須接在 ASS 後面，才能保證始終位於字幕與所有影像之上。
+  if (timecodeWatermark) {
+    const tcOut = '[vtimecode]';
+    fc.push(_buildExportTimecodeFilter(vfinal, timecodeWatermark, W, H, tcOut));
+    vfinal = tcOut;
   }
 
   // MP4：以使用者指定的目標位元率編碼（音訊固定 192k AAC）；ProRes 為固定品質，無位元率設定
@@ -1327,18 +1395,36 @@ let _mpvRect = null;       // 最近一次面板矩形（內容座標 DIP）
 let _mpvVisible = true;
 let _mpvGuide = null;
 let _mpvImagesHtml = '';
+// MPV 的畫面不在主 renderer 裡，因此播放器上的時間碼需透過透明 guide 顯示。
+// 只保存已驗證的 SMPTE 時碼；主 renderer 明確清除前，換檔／重建 MPV 視窗仍可延續顯示。
+let _mpvTimecodeWatermark = '';
+let _mpvTimecodeWatermarkRect = null;
+let _mpvGuideInteractive = false;
+let _mpvGuideAppliedInteractive = null;
+let _mpvImageHitRegions = [];
+let _mpvGuideDragging = false;
+let _mpvGuidePointerTimer = null;
 let _mpvSubFile = null;    // 餵給 mpv 的暫存 .ass 字幕檔
 let _mpvSubAdded = false;
 
 const MPV_GUIDE_HTML = `<!doctype html><html><head><style>
-html,body,svg{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:transparent;pointer-events:none}
-#imgContainer{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
-.img-wrap{position:absolute;pointer-events:none}
-.img-wrap img{width:100%;height:100%;object-fit:contain;display:block}
+html,body{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:transparent}
+svg{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:transparent;pointer-events:none}
+#imgContainer{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:auto}
+#timecodeWatermark{display:none;position:absolute;top:14px;left:16px;z-index:10;pointer-events:none;user-select:none;white-space:nowrap;padding:6px 9px 5px;border:1px solid rgba(239,178,53,.78);border-left:3px solid #f0a020;border-radius:2px;background:rgba(8,11,14,.72);box-shadow:0 1px 5px rgba(0,0,0,.55);color:#ffe19a;font:600 16px/1 Consolas,"Cascadia Mono","JetBrains Mono",monospace;letter-spacing:.045em;font-variant-numeric:tabular-nums;text-shadow:0 1px 2px #000}
+#timecodeWatermark.visible{display:block}
+.img-wrap{position:absolute;pointer-events:auto;cursor:grab;touch-action:none;user-select:none}
+.img-wrap img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
+.img-wrap:hover,.img-wrap.hovering,.img-wrap.selected{outline:1px dashed rgba(255,255,255,.72);outline-offset:3px}
+.resize-handle{display:none;position:absolute;width:10px;height:10px;background:#f0a020;border:1px solid #fff;border-radius:50%;z-index:2}
+.img-wrap:hover .resize-handle,.img-wrap.hovering .resize-handle,.img-wrap.selected .resize-handle{display:block}
+.rh-nw{top:-5px;left:-5px;cursor:nwse-resize}.rh-ne{top:-5px;right:-5px;cursor:nesw-resize}
+.rh-sw{bottom:-5px;left:-5px;cursor:nesw-resize}.rh-se{bottom:-5px;right:-5px;cursor:nwse-resize}
 #guide{display:none} rect{fill:none;stroke:rgba(255,255,255,.88);stroke-width:1;stroke-dasharray:5 4}
 line{stroke:rgba(255,255,255,.65);stroke-width:1} circle{fill:#f0a020;stroke:#fff;stroke-width:2}
-</style></head><body><div id="imgContainer"></div><svg id="svg"><g id="guide"><rect id="box"/><line id="stem"/><circle id="dot" r="7"/></g></svg><script>
-let current=null; const svg=document.getElementById('svg'), guide=document.getElementById('guide');
+</style></head><body><div id="imgContainer"></div><svg id="svg"><g id="guide"><rect id="box"/><line id="stem"/><circle id="dot" r="7"/></g></svg><div id="timecodeWatermark" aria-hidden="true"></div><script>
+let current=null,stageRect=null,dragging=null;
+const svg=document.getElementById('svg'),guide=document.getElementById('guide'),imgContainer=document.getElementById('imgContainer'),timecodeWatermark=document.getElementById('timecodeWatermark');
 const draw=()=>{ const g=current; if(!g){guide.style.display='none';return;} const w=innerWidth,h=innerHeight;
   svg.setAttribute('viewBox','0 0 '+w+' '+h); document.getElementById('box').setAttribute('x',g.x); document.getElementById('box').setAttribute('y',g.y);
   document.getElementById('box').setAttribute('width',g.w); document.getElementById('box').setAttribute('height',g.h);
@@ -1346,10 +1432,24 @@ const draw=()=>{ const g=current; if(!g){guide.style.display='none';return;} con
   stem.setAttribute('x1',cx);stem.setAttribute('y1',cy+7);stem.setAttribute('x2',cx);stem.setAttribute('y2',g.y-2);
   dot.setAttribute('cx',cx);dot.setAttribute('cy',cy);guide.style.display='block'; };
 window.setGuide=(g)=>{current=g;draw();}; addEventListener('resize',draw);
+window.setTimecodeWatermark=(text,rect)=>{const value=typeof text==='string'?text:'';const x=Number(rect&&rect.x),y=Number(rect&&rect.y);timecodeWatermark.style.left=(Number.isFinite(x)?Math.round(x)+16:16)+'px';timecodeWatermark.style.top=(Number.isFinite(y)?Math.round(y)+14:14)+'px';timecodeWatermark.textContent=value;timecodeWatermark.classList.toggle('visible',!!value);};
+const bridge=()=>window.mpvImageGuide||null;
+const wrapAt=(x,y)=>{const t=document.elementFromPoint(x,y);return t&&t.closest?t.closest('.img-wrap'):null;};
+const setHover=wrap=>{for(const el of imgContainer.querySelectorAll('.img-wrap.hovering'))if(el!==wrap)el.classList.remove('hovering');if(wrap)wrap.classList.add('hovering');};
+const point=e=>{const r=stageRect||{x:0,y:0};return{x:e.clientX-(+r.x||0),y:e.clientY-(+r.y||0)};};
+const send=(type,extra={})=>{const b=bridge();if(b)b.pointer({type,...extra});};
+document.addEventListener('pointermove',e=>{if(dragging){const p=point(e);send('move',{x:p.x,y:p.y});e.preventDefault();return;}setHover(wrapAt(e.clientX,e.clientY));});
+document.addEventListener('pointerdown',e=>{if(e.button!==0)return;const wrap=wrapAt(e.clientX,e.clientY);if(!wrap)return;const p=point(e),corner=(e.target.closest&&e.target.closest('.resize-handle')||{}).dataset?.corner||null;dragging={id:wrap.dataset.id,corner};try{wrap.setPointerCapture(e.pointerId);}catch(_){}send('start',{id:dragging.id,corner,x:p.x,y:p.y});e.preventDefault();});
+const finish=(e,type)=>{if(!dragging)return;const p=point(e);send(type,{id:dragging.id,x:p.x,y:p.y});dragging=null;setHover(wrapAt(e.clientX,e.clientY));};
+document.addEventListener('pointerup',e=>finish(e,'end'));document.addEventListener('pointercancel',e=>finish(e,'cancel'));
 window.setImages=(h, r)=>{
-  const el = document.getElementById('imgContainer');
-  if(r){ el.style.left=r.x+'px'; el.style.top=r.y+'px'; el.style.width=r.w+'px'; el.style.height=r.h+'px'; }
-  el.innerHTML=h||'';
+  stageRect=r&&Number.isFinite(r.x)&&Number.isFinite(r.y)&&Number.isFinite(r.w)&&Number.isFinite(r.h)?r:null;
+  if(stageRect){ imgContainer.style.left=stageRect.x+'px'; imgContainer.style.top=stageRect.y+'px'; imgContainer.style.width=stageRect.w+'px'; imgContainer.style.height=stageRect.h+'px'; }
+  const tpl=document.createElement('template');tpl.innerHTML=h||'';
+  const incoming=[...tpl.content.querySelectorAll('.img-wrap')],existing=new Map([...imgContainer.querySelectorAll('.img-wrap')].map(el=>[el.dataset.id,el]));
+  for(const next of incoming){const id=next.dataset.id,old=existing.get(id);if(old){const hovering=old.classList.contains('hovering');old.className=next.className+(hovering?' hovering':'');old.setAttribute('style',next.getAttribute('style')||'');const ni=next.querySelector('img'),oi=old.querySelector('img');if(ni&&oi&&oi.getAttribute('src')!==ni.getAttribute('src'))oi.setAttribute('src',ni.getAttribute('src'));existing.delete(id);}else imgContainer.appendChild(next);}
+  for(const old of existing.values())old.remove();
+  if(!h){dragging=null;}
 };
 </script></body></html>`;
 
@@ -1375,14 +1475,142 @@ function applyMpvBounds(b) {
   } catch (e) {}
 }
 
+function normaliseMpvImageHitRegions(raw) {
+  if (!Array.isArray(raw)) return [];
+  const clampCoord = value => Math.max(-10000, Math.min(10000, Number(value)));
+  return raw.slice(0, 100).map(region => {
+    if (!region || typeof region !== 'object') return null;
+    const x = Number(region.x), y = Number(region.y);
+    const w = Number(region.w), h = Number(region.h);
+    if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null;
+    return { x: clampCoord(x), y: clampCoord(y), w: Math.max(1, Math.min(20000, w)), h: Math.max(1, Math.min(20000, h)) };
+  }).filter(Boolean);
+}
+
+/*
+ * BrowserWindow 的 ignoreMouseEvents({ forward:true }) 只保證把「move」送給該
+ * Chromium 視窗，不能可靠地把 pointerdown / pointerup 交給透明 guide。因此先前
+ * guide 雖顯示虛線與控制點，卻永遠收不到開始拖曳的事件。
+ *
+ * 改為由主程序讀取游標位置，僅在圖片（含角落控制點）的命中區切換 guide 的輸入。
+ * 圖片外一律真正穿透到主 renderer，字幕等既有操作不會被透明視窗攔住；拖曳開始後
+ * 則維持 guide 接收輸入，讓 pointer capture 可以收到放開事件。
+ */
+function stopMpvGuidePointerWatch() {
+  if (_mpvGuidePointerTimer) clearInterval(_mpvGuidePointerTimer);
+  _mpvGuidePointerTimer = null;
+}
+
+function pointerHitsMpvImage() {
+  if (!_mpvGuideWin || _mpvGuideWin.isDestroyed() || !_mpvImageHitRegions.length) return false;
+  try {
+    const point = screen.getCursorScreenPoint();
+    const bounds = _mpvGuideWin.getBounds();
+    const x = point.x - bounds.x, y = point.y - bounds.y;
+    return _mpvImageHitRegions.some(region =>
+      x >= region.x && x <= region.x + region.w && y >= region.y && y <= region.y + region.h
+    );
+  } catch (e) { return false; }
+}
+
+function syncMpvGuidePointerInput() {
+  const usable = _mpvVisible && _mpvImagesHtml && _mpvGuideWin && !_mpvGuideWin.isDestroyed();
+  setMpvGuideInteractive(!!usable && (_mpvGuideDragging || pointerHitsMpvImage()));
+}
+
+function startMpvGuidePointerWatch() {
+  if (_mpvGuidePointerTimer || !_mpvImagesHtml) return;
+  syncMpvGuidePointerInput();
+  _mpvGuidePointerTimer = setInterval(syncMpvGuidePointerInput, 25);
+}
+
+function setMpvGuideInteractive(active) {
+  active = !!active;
+  _mpvGuideInteractive = active;
+  if (!_mpvGuideWin || _mpvGuideWin.isDestroyed()) { _mpvGuideAppliedInteractive = null; return; }
+  if (_mpvGuideAppliedInteractive === active) return;
+  try {
+    if (active) _mpvGuideWin.setIgnoreMouseEvents(false);
+    else _mpvGuideWin.setIgnoreMouseEvents(true);
+    _mpvGuideAppliedInteractive = active;
+  } catch (e) {}
+}
+
+const MPV_TIMECODE_RE = /^\d{1,6}:[0-5]\d:[0-5]\d[:;]\d{2,3}$/;
+
+/*
+ * 時間碼浮水印由主 renderer 每次播放頭更新時送入。guide 是另一個 BrowserWindow，
+ * 因此不接受任意 HTML／樣式字串，只允許固定的 SMPTE HH:MM:SS:FF（或 DF 的 ;）格式。
+ * null、undefined、空白字串都是「清除」；其他不符合格式的資料直接拒絕、不改動目前顯示。
+ */
+function normaliseMpvTimecodeRect(raw) {
+  if (raw == null) return { ok: true, rect: null };
+  if (!raw || typeof raw !== 'object') return { ok: false, rect: null };
+  const x = Number(raw.x), y = Number(raw.y), w = Number(raw.w), h = Number(raw.h);
+  if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return { ok: false, rect: null };
+  return {
+    ok: true,
+    rect: {
+      x: Math.round(Math.max(-10000, Math.min(10000, x))),
+      y: Math.round(Math.max(-10000, Math.min(10000, y))),
+      w: Math.round(Math.max(1, Math.min(20000, w))),
+      h: Math.round(Math.max(1, Math.min(20000, h))),
+    },
+  };
+}
+
+function normaliseMpvTimecodeWatermark(raw) {
+  if (raw == null || raw === '') return { ok: true, text: '', rect: null };
+  // 支援純字串，讓舊版／簡單呼叫端仍可使用；標準 API 則傳 { text, rect }。
+  const data = typeof raw === 'string' ? { text: raw } : raw;
+  if (!data || typeof data !== 'object' || typeof data.text !== 'string') return { ok: false, text: '', rect: null };
+  const text = data.text.trim();
+  if (!text) return { ok: true, text: '', rect: null };
+  const rect = normaliseMpvTimecodeRect(data.rect);
+  if (!MPV_TIMECODE_RE.test(text) || !rect.ok) return { ok: false, text: '', rect: null };
+  return { ok: true, text, rect: rect.rect };
+}
+
+function mpvGuideHasVisibleContent() {
+  return !!(_mpvGuide || _mpvImagesHtml || _mpvTimecodeWatermark);
+}
+
+function sameMpvTimecodeRect(a, b) {
+  return a === b || !!(a && b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h);
+}
+
+function applyMpvTimecodeWatermark() {
+  if (!_mpvGuideWin || _mpvGuideWin.isDestroyed()) return false;
+  try {
+    _mpvGuideWin.webContents.executeJavaScript(`window.setTimecodeWatermark(${JSON.stringify(_mpvTimecodeWatermark)}, ${JSON.stringify(_mpvTimecodeWatermarkRect)})`, true).catch(() => {});
+    return true;
+  } catch (e) { return false; }
+}
+
+function setMpvTimecodeWatermark(raw) {
+  const next = normaliseMpvTimecodeWatermark(raw);
+  if (!next.ok) return false;
+  const changed = _mpvTimecodeWatermark !== next.text || !sameMpvTimecodeRect(_mpvTimecodeWatermarkRect, next.rect);
+  _mpvTimecodeWatermark = next.text;
+  _mpvTimecodeWatermarkRect = next.rect;
+  if (!_mpvGuideWin || _mpvGuideWin.isDestroyed()) return true;
+  try {
+    if (changed) applyMpvTimecodeWatermark();
+    if (_mpvTimecodeWatermark) showMpvGuide();
+    else if (!mpvGuideHasVisibleContent()) _mpvGuideWin.hide();
+  } catch (e) {}
+  return true;
+}
+
 function destroyMpvWin() {
+  stopMpvGuidePointerWatch();
   if (_mpvWin) { try { if (!_mpvWin.isDestroyed()) _mpvWin.destroy(); } catch (e) {} _mpvWin = null; }
   if (_mpvGuideWin) { try { if (!_mpvGuideWin.isDestroyed()) _mpvGuideWin.destroy(); } catch (e) {} _mpvGuideWin = null; }
-  _mpvRect = null; _mpvVisible = true; _mpvGuide = null; _mpvImagesHtml = ''; _mpvSubAdded = false; _mpvSubFile = null;
+  _mpvRect = null; _mpvVisible = true; _mpvGuide = null; _mpvImagesHtml = ''; _mpvImageHitRegions = []; _mpvGuideDragging = false; _mpvGuideInteractive = false; _mpvGuideAppliedInteractive = null; _mpvSubAdded = false; _mpvSubFile = null;
 }
 
 function showMpvGuide() {
-  if (!_mpvVisible || (!_mpvGuide && !_mpvImagesHtml) || !_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
+  if (!_mpvVisible || !mpvGuideHasVisibleContent() || !_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
   try { _mpvGuideWin.showInactive(); _mpvGuideWin.moveTop(); } catch (e) {}
 }
 
@@ -1390,7 +1618,12 @@ function setMpvGuide(raw) {
   const vals = raw && [raw.x, raw.y, raw.w, raw.h];
   if (!vals || vals.some(v => !Number.isFinite(v)) || raw.w <= 0 || raw.h <= 0) {
     _mpvGuide = null;
-    if (!_mpvImagesHtml && _mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e) {} }
+    if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) {
+      // 時間碼浮水印會讓 guide 視窗持續顯示；不能只在視窗隱藏時才清除 SVG，
+      // 否則上一句字幕的虛線框與旋轉點會殘留在仍可見的透明 guide 上。
+      try { _mpvGuideWin.webContents.executeJavaScript('window.setGuide(null)', true).catch(() => {}); } catch (e) {}
+      if (!mpvGuideHasVisibleContent()) { try { _mpvGuideWin.hide(); } catch (e) {} }
+    }
     return;
   }
   _mpvGuide = { x: +raw.x, y: +raw.y, w: +raw.w, h: +raw.h };
@@ -1403,12 +1636,25 @@ function setMpvGuide(raw) {
 
 function setMpvImageGuide(data) {
   _mpvImagesHtml = (data && data.html) || (typeof data === 'string' ? data : '');
+  _mpvImageHitRegions = normaliseMpvImageHitRegions(data && data.hitRegions);
   const rect = data && data.rect;
   if (!_mpvGuideWin || _mpvGuideWin.isDestroyed()) return;
   try {
     _mpvGuideWin.webContents.executeJavaScript(`window.setImages(${JSON.stringify(_mpvImagesHtml)}, ${JSON.stringify(rect)})`, true).catch(() => {});
-    if (_mpvImagesHtml || _mpvGuide) showMpvGuide();
-    else if (!_mpvGuide) _mpvGuideWin.hide();
+    if (mpvGuideHasVisibleContent()) {
+      showMpvGuide();
+      if (_mpvImagesHtml) startMpvGuidePointerWatch();
+      else {
+        _mpvGuideDragging = false;
+        stopMpvGuidePointerWatch();
+        setMpvGuideInteractive(false);
+      }
+    } else {
+      _mpvGuideDragging = false;
+      stopMpvGuidePointerWatch();
+      setMpvGuideInteractive(false);
+      _mpvGuideWin.hide();
+    }
   } catch (e) {}
 }
 
@@ -1510,11 +1756,14 @@ ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
     hasShadow: false, skipTaskbar: true, thickFrame: false,
     resizable: false, movable: false, minimizable: false, maximizable: false,
     fullscreenable: false, focusable: false,
-    webPreferences: { offscreen: false, backgroundThrottling: false, webSecurity: false },
+    webPreferences: {
+      offscreen: false, backgroundThrottling: false, webSecurity: false,
+      preload: path.join(__dirname, 'mpv-guide-preload.js'),
+    },
   });
-  // 提示層絕不可接收或轉送滑鼠事件：forward:true 會讓最上層 Chromium 視窗吃掉
-  // pointer move，導致底下的字幕拖曳層必須靠隱藏影片才恢復。單純忽略才會一路穿透。
-  try { _mpvGuideWin.setIgnoreMouseEvents(true); } catch (e2) {}
+  // 非圖片範圍一律穿透；主程序依圖片命中區切換成互動模式，避免 forward:true 導致
+  // Chromium 只收到 move 而遺失 pointerdown／pointerup。
+  setMpvGuideInteractive(false);
   try { _mpvGuideWin.setMenu(null); } catch (e2) {}
   ensureTmp();
   const guideHtmlPath = path.join(TMP, 'mpv-guide.html');
@@ -1522,6 +1771,11 @@ ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
   await _mpvGuideWin.loadURL(url.pathToFileURL(guideHtmlPath).href);
   _mpvVisible = true;
   applyMpvBounds(bounds);
+  // MPV 視窗可能因換媒體重建；將 renderer 已開啟的監看時間碼重新送進新 guide。
+  if (_mpvTimecodeWatermark) {
+    applyMpvTimecodeWatermark();
+    showMpvGuide();
+  }
 
   // 取得宿主視窗的原生 HWND（Win64 為 8-byte 指標）
   const hb = _mpvWin.getNativeWindowHandle();
@@ -1572,13 +1826,54 @@ ipcMain.handle('mpv:show', (e, v) => {
     try { _mpvWin.show(); _mpvWin.moveTop(); } catch (e2) {}
     if (_mpvRect) applyMpvBounds(_mpvRect);
     showMpvGuide();
+    if (_mpvImagesHtml) startMpvGuidePointerWatch();
+    else setMpvGuideInteractive(false);
   } else {
     try { _mpvWin.hide(); } catch (e2) {}
     if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e2) {} }
+    _mpvGuideDragging = false;
+    stopMpvGuidePointerWatch();
+    setMpvGuideInteractive(false);
   }
 });
 ipcMain.handle('mpv:setGuide', (e, guide) => setMpvGuide(guide));
 ipcMain.handle('mpv:setImageGuide', (e, html) => setMpvImageGuide(html));
+// 僅主 renderer 可以更新監看浮水印；guide 自己沒有這個 API，避免外部內容藉由透明層覆蓋 UI。
+ipcMain.handle('mpv:setTimecodeWatermark', (e, payload) => {
+  if (!mainWin || mainWin.isDestroyed() || e.sender !== mainWin.webContents) return false;
+  return setMpvTimecodeWatermark(payload);
+});
+ipcMain.handle('mpv:clearTimecodeWatermark', (e) => {
+  if (!mainWin || mainWin.isDestroyed() || e.sender !== mainWin.webContents) return false;
+  return setMpvTimecodeWatermark(null);
+});
+// 圖片 guide 是內部透明視窗；僅接受該視窗傳來的有限座標／事件，再轉送到主 renderer。
+// 不把任意 IPC 或 DOM 字串回送，避免 guide 即使載入使用者圖片也取得主程序權限。
+ipcMain.on('mpv-guide:imagePointer', (e, raw) => {
+  if (!_mpvGuideWin || _mpvGuideWin.isDestroyed() || e.sender !== _mpvGuideWin.webContents) return;
+  if (!raw || typeof raw !== 'object') return;
+  const type = String(raw.type || '');
+  if (!['start', 'move', 'end', 'cancel'].includes(type)) return;
+  const x = Number(raw.x), y = Number(raw.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const payload = {
+    type,
+    x: Math.max(-10000, Math.min(10000, x)),
+    y: Math.max(-10000, Math.min(10000, y)),
+  };
+  if (typeof raw.id === 'string' && raw.id.length <= 160) payload.id = raw.id;
+  if (['nw', 'ne', 'sw', 'se'].includes(raw.corner)) payload.corner = raw.corner;
+  if (type === 'start') {
+    _mpvGuideDragging = true;
+    setMpvGuideInteractive(true);
+  } else if (type === 'end' || type === 'cancel') {
+    _mpvGuideDragging = false;
+    // pointerup 之後依游標是否仍在圖片上切回穿透／命中模式；延後一輪讓 Chromium 的
+    // capture 釋放完整結束，避免最後一個 pointerup 被 ignoreMouseEvents 吃掉。
+    setTimeout(syncMpvGuidePointerInput, 0);
+  }
+  safeWinSend(mainWin, 'mpv:imagePointer', payload);
+});
 // 餵字幕給 mpv（libass 渲染）：寫入暫存 .ass，首次 sub-add，之後 sub-reload
 ipcMain.handle('mpv:subSet', (e, assText) => {
   if (!_mpvClient) return;

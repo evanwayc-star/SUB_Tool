@@ -2,6 +2,7 @@
 import { $, sublist, video } from './dom.js';
 import { State, isSel, newId, trackVisible, cueSuffix, ensureTrackCount } from './state.js';
 import { escapeHTML, tcKeyAllowed } from './util.js';
+import { inspectSubtitleCharacters } from './subtitleTextCheck.js';
 import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
@@ -429,11 +430,26 @@ function renderCheckPanel(){
   const containsNums=_checkContains.length
     ? list.map((c,i)=>{ const t=(c.text||'').toLowerCase(); return _checkContains.some(kw=>t.includes(kw.toLowerCase()))?i+1:null; }).filter(n=>n!==null)
     : [];
+  // 疑似簡體或其他非繁中／英文／數字／符號字元
+  const nonTraditionalIssues=list.map((c,i)=>{
+    const issue=inspectSubtitleCharacters(c.text||'');
+    return issue.simplified.length||issue.unsupported.length ? { num:i+1, ...issue } : null;
+  }).filter(Boolean);
   // 無時間碼
   const noTimeNums=list.map((c,i)=>c.timed===false?i+1:null).filter(n=>n!==null);
   
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
-  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rt=$('cpTrim'),rn=$('cpNoTime'),rci=$('cpConsecutiveIdentical');
+  const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,sharedSimplified=[],unsupported})=>{
+    const detail=[];
+    const sharedSet=new Set(sharedSimplified);
+    const definiteSimplified=simplified.filter(ch=>!sharedSet.has(ch));
+    const sharedOnly=simplified.length>0&&simplified.length===sharedSimplified.length&&!unsupported.length;
+    if(definiteSimplified.length) detail.push('明確簡體：'+definiteSimplified.join('、'));
+    if(sharedSimplified.length) detail.push((sharedOnly?'需人工確認：僅含繁簡共用字（台灣繁中可能合法）：':'繁簡共用字：')+sharedSimplified.join('、'));
+    if(unsupported.length) detail.push('其他：'+unsupported.map(ch=>/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/u.test(ch)?`U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}`:ch).join('、'));
+    return `<span class="cp-num${sharedOnly?' cp-shared-only':''}" data-idx="${num}" title="${escapeHTML(detail.join('；'))}">${num}</span>`;
+  }).join(', '):'無';
+  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rnt=$('cpNonTraditional'),rt=$('cpTrim'),rn=$('cpNoTime'),rci=$('cpConsecutiveIdentical');
   const sb=$('cpSrtB'),si=$('cpSrtI'),su=$('cpSrtU'),sf=$('cpSrtFont'),sp=$('cpSrtPos');
   if(rn)rn.querySelector('.cp-nums').innerHTML=mkNums(noTimeNums);
   if(ro)ro.querySelector('.cp-nums').innerHTML=mkNums(overlapNums);
@@ -449,6 +465,7 @@ function renderCheckPanel(){
   if(sp)sp.querySelector('.cp-nums').innerHTML=mkNums(posNums);
   if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'—';
   if(rc)rc.querySelector('.cp-nums').innerHTML=_checkContains.length?mkNums(containsNums):'—';
+  if(rnt)rnt.querySelector('.cp-nums').innerHTML=mkCharacterIssueNums(nonTraditionalIssues);
   panel.querySelectorAll('.cp-num').forEach(el=>{
     el.onclick=()=>{
       const idx=parseInt(el.dataset.idx)-1; const c=list[idx]; if(!c)return;

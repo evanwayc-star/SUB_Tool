@@ -1257,7 +1257,9 @@ tlScroll.addEventListener('mousedown',e=>{
       e.preventDefault(); return;
     }
     const mode = e.target.classList.contains('edge')? (e.target.classList.contains('l')?'l':'r') : 'move';
-    let isCtrl = (e.ctrlKey||e.metaKey);
+    const isCtrl = e.ctrlKey||e.metaKey;
+    // Ctrl/Cmd 已有複製行為；Alt 拖曳字幕區塊也複製，但不影響邊緣修剪。
+    const isCopyDrag = mode==='move' && (e.altKey||isCtrl);
     if(isCtrl && mode!=='move'){ selectCue(c.id,{additive:true}); if(!isSel(c.id)){ e.preventDefault(); return; } }
     else if(!isCtrl && !isSel(c.id)) selectCue(c.id);
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
@@ -1265,7 +1267,7 @@ tlScroll.addEventListener('mousedown',e=>{
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
       .map(cc=>{ const b=neighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
-      snaps:snapTargets(exSet), isCtrl};
+      snaps:snapTargets(exSet), isCtrl,isCopyDrag};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
   }
@@ -1311,7 +1313,7 @@ const _handleDragUpdate = (e) => {
   if(drag.mode!=='scrub'){ // 含 cue 模式與 clip-move/clip-l/clip-r
     if (!drag.moved && (Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)) {
       drag.moved = true;
-      if (drag.isCtrl && drag.mode === 'move' && drag.grp) {
+      if (drag.isCopyDrag && drag.mode === 'move' && drag.grp) {
         // Clone cues
         const newIds = [];
         drag.grp.forEach(it => {
@@ -1618,7 +1620,7 @@ window.addEventListener('mouseup',e=>{
     } else if (moved) {
       sweepContainedCues(drag.grp.map(x=>x.c));
       sortCues(); emit('render:all');
-      recordHistory(drag.isCtrl ? `複製字幕` : (m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)));
+      recordHistory(drag.isCopyDrag ? `複製字幕` : (m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}條)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)));
     }
   }
   drag=null;

@@ -476,11 +476,25 @@ function _buildExportData() {
   const externalPlacements=_externalAudioPlacements(externalSources);
   if (!sourceClips.length&&!externalPlacements.length) return null;
   const audioPlan = _buildProjectAudioPlan(audibleVideoClips,externalSources);
-  const list = sourceClips.map(c => ({
-    path: c.path, in: +c.in.toFixed(3), out: +c.out.toFixed(3),
-    offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0, audio: c.audioDetached?[]:_clipAudioSpec(c),
-    fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
-  }));
+  const finite=(value,fallback)=>Number.isFinite(Number(value))?Number(value):fallback;
+  const ratio=(value,fallback)=>Math.max(0,Math.min(1,finite(value,fallback)));
+  const list = sourceClips.map(c => {
+    /* 圖片不是一格影片：主程序必須收到 type=image，才能為該輸入加上
+       `-loop 1`。若在這裡遺失型別，ffmpeg 只會讀 PNG/JPG 的第一格，
+       看起來就像整支輸出停在開頭。圖片的個別縮放／位置也要一併交給
+       匯出 filtergraph，才會和預覽一致。 */
+    const image=c.type==='image';
+    return {
+      path: c.path, type:image?'image':'video',
+      in: +c.in.toFixed(3), out: +c.out.toFixed(3),
+      offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0, audio: c.audioDetached?[]:_clipAudioSpec(c),
+      fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
+      ...(image?{
+        scale:Math.max(0.01,finite(c.scale,1)),
+        posX:ratio(c.posX,0.5), posY:ratio(c.posY,0.5)
+      }:{}),
+    };
+  });
   const vtOrder = [...new Set(list.map(c => c.vtrack))].sort((a, b) => a - b); // 由下而上（vtrack 小＝底層先畫）
   const videoTracks = vtOrder.map(vt => {
     const t = State.videoTracks[vt] || {};
@@ -490,6 +504,9 @@ function _buildExportData() {
   return {
     clips:list,
     videoTracks,
+    // 匯出會把片段 offset 歸零；保留原始時間軸起點供 burn-in 時碼等交付資訊使用。
+    // 不四捨五入：23.976／29.97 的單格不足 0.04 秒，保留完整值才不會讓第一格差一格。
+    timelineStart:expIn,
     duration:+(expOut - expIn).toFixed(3),
     audioPlan,
     audioOnly:list.length===0,
@@ -540,6 +557,8 @@ async function showExportVideoDialog() {
   const visSubTracks = State.tracks.filter((tk, i) => tk.visible !== false && State.cues.some(c => (c.track || 0) === i && c.timed !== false)).length;
   const total = data.duration;
   const hasProjectAudio = !!data.audioPlan;
+  // 部分輸出仍保留專案時間軸的原始時碼，才會與播放器／工作單上的播放點一致。
+  const exportTcStart=secToEncore(data.timelineStart ?? 0, State.fps, State.dropFrame);
   // 顯示實際會用到的編碼器（H.264 可走 GPU；ProRes 無 GPU 編碼器，一律 CPU）
   let venc = null; try { venc = (await DESK.status())?.venc; } catch (e) {}
   const gpu = venc && venc !== 'libx264';
@@ -550,7 +569,10 @@ async function showExportVideoDialog() {
       ? `<div>外部音訊：<b>${data.externalAudioCount}</b> 個 placement，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>`
       : `<div>序列：<b>${clipCount}</b> 段影片${vtrackCount > 1 ? `、<b>${vtrackCount}</b> 條視訊軌（由下而上疊合，上層覆蓋下層）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
         `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
-        `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>`) +
+        `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>` +
+        `<label class="export-timecode-option" id="expTcOption"><input type="checkbox" id="expBurnTimecode">` +
+        `<span class="export-timecode-badge">TC</span><span class="export-timecode-title">壓入時間碼浮水印</span>` +
+        `<span class="export-timecode-note">左上角・由輸出起點 <b>${exportTcStart}</b> 開始・會燒入輸出檔</span></label>`) +
     `<div style="margin-top:4px;display:flex;align-items:center;gap:8px"><div>音訊：<b>${hasProjectAudio ? '依專案音軌與輸出編組' : '依混音器設定輸出'}</b>${hasProjectAudio ? `（${data.audioPlan.buses.length} 條專案音軌）` : _mixerSummary()}</div>` +
     `<button type="button" id="expAudioSetBtn" style="padding:2px 8px;font-size:12px;background:var(--panel3);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer;">⚙ 聲道設定</button></div>` +
     `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">${hasProjectAudio ? (audioOnly?'（WAV 依 A1、A2…順序收進同一個多聲道檔。）':'（影片依 Mono／Stereo／LtRt／5.1 設定輸出多條 audio stream；WAV 則依專案音軌順序收進同一個多聲道檔。）') : '（靜音／獨奏／音量比照播放；未抽出逐聲道的來源則輸出原音）'}</div>` +
@@ -570,6 +592,7 @@ async function showExportVideoDialog() {
         const fmt = (document.querySelector('input[name="expVfmt"]:checked') || {}).value || (audioOnly?'wav':'prores');
         if (audioOnly && fmt !== 'wav') { showToast('純音訊專案僅能匯出 WAV'); return; }
         if (fmt === 'wav' && !data.audioPlan) { showToast('WAV 匯出需要專案音軌路由'); return; }
+        const burnTimecode = !audioOnly && fmt !== 'wav' && !!$('expBurnTimecode')?.checked;
         let kbps = null;
         if (fmt === 'mp4') {
           const mbps = parseFloat(($('expVbr') || {}).value);
@@ -577,13 +600,20 @@ async function showExportVideoDialog() {
           _lastVbrMbps = Math.min(200, Math.max(0.1, mbps));
           kbps = Math.round(_lastVbrMbps * 1000);
         }
-        closeModal(); _runExportVideo(data, fmt, kbps);
+        closeModal(); _runExportVideo(data, fmt, kbps, burnTimecode);
       } },
      { label: '取消', act: closeModal }]);
   // 位元率欄位只在選 MP4 時出現，並綁定聲道設定按鈕
   setTimeout(() => {
     const row = $('expVbrRow');
-    const sync = () => { const f = (document.querySelector('input[name="expVfmt"]:checked') || {}).value; if (row) row.style.display = (f === 'mp4') ? '' : 'none'; };
+    const tcOption=$('expTcOption'), tcCheck=$('expBurnTimecode');
+    const sync = () => {
+      const f = (document.querySelector('input[name="expVfmt"]:checked') || {}).value;
+      if (row) row.style.display = (f === 'mp4') ? '' : 'none';
+      const isVideo = f !== 'wav';
+      if(tcOption) tcOption.classList.toggle('disabled', !isVideo);
+      if(tcCheck) { tcCheck.disabled=!isVideo; if(!isVideo) tcCheck.checked=false; }
+    };
     document.querySelectorAll('input[name="expVfmt"]').forEach(el => el.addEventListener('change', sync));
     sync();
     const setBtn = $('expAudioSetBtn');
@@ -596,10 +626,10 @@ async function showExportVideoDialog() {
     }
   }, 20);
 }
-async function _runExportVideo(data, format, videoKbps) {
+async function _runExportVideo(data, format, videoKbps, burnTimecode=false) {
   const isWav = format === 'wav';
   const visCues = State.cues; // toASSFromState 內部依軌道可見性過濾，時碼為時間軸時間＝輸出時間
-  const expIn = State.exportIn != null ? State.exportIn : 0;
+  const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
   
   // 修正：必須扣除 exportIn 的偏移量，否則部分匯出時字幕會出現在錯誤的時間點
   const shiftedCues = expIn > 0 ? visCues.map(c => ({
@@ -611,7 +641,8 @@ async function _runExportVideo(data, format, videoKbps) {
   const assText = toASSFromState(shiftedCues);
   const hasVisSub = /\nDialogue:/.test(assText);
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_')[0];
-  const fmtLabel = isWav ? 'WAV 多聲道 PCM' : (format === 'prores' ? 'ProRes 422 HQ' : `MP4 ${(videoKbps / 1000).toFixed(1)}Mbps`);
+  const tcSuffix=!isWav&&burnTimecode?'・含時間碼浮水印':'';
+  const fmtLabel = (isWav ? 'WAV 多聲道 PCM' : (format === 'prores' ? 'ProRes 422 HQ' : `MP4 ${(videoKbps / 1000).toFixed(1)}Mbps`)) + tcSuffix;
   const kindLabel = isWav ? '音訊' : '影片';
   setStatus(`匯出${kindLabel}中（${fmtLabel}）…`, 'busy', 'lock');
   showToast(`開始匯出${kindLabel}，時間依長度與格式而定…`);
@@ -623,6 +654,10 @@ async function _runExportVideo(data, format, videoKbps) {
       height: State.videoHeight || 1080,
       fps: State.fps || 25,
       assText: !isWav && hasVisSub ? assText : null,
+      // 使用專案時間軸的起點，而不是輸出檔的 00:00:00:00；部分輸出時可與播放器一致。
+      timecodeWatermark: !isWav && burnTimecode ? {
+        start: secToEncore(expIn, State.fps, State.dropFrame)
+      } : null,
       format,
       videoKbps,
       duration: data.duration,

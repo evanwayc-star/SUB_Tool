@@ -6,10 +6,11 @@ import { Media, Wave } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade } from './timeline.js';
 import { Seq } from './sequence.js';
-import { showToast } from './ui.js';
+import { showToast, promptModal } from './ui.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';
 import { AudioRouting } from './audio-routing.js';
+import { setManualPlaybackSpeed } from './keyboard.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -48,13 +49,34 @@ window.addEventListener('resize',hideCtx);
 
 /* 播放窗右鍵：播放速度。音訊素材波形改由時間軸素材區塊右鍵選擇，
    不能再用這裡切換唯一音源，否則會破壞專案 A bus 的混音。 */
+function formatPlaybackRate(rate){ return (Math.round(rate * 100) / 100).toString() + 'x'; }
+function setPlayerSpeed(rate){
+  const value=Math.round(Number(rate)*100)/100;
+  if(!Number.isFinite(value)||value<0.1||value>4){ showToast('播放速度需介於 0.1x 和 4x 之間'); return false; }
+  setManualPlaybackSpeed(value);
+  showToast('播放速度：'+formatPlaybackRate(value));
+  return true;
+}
+async function setCustomPlayerSpeed(){
+  const raw=await promptModal(
+    '自訂播放速度',
+    '輸入播放速度（0.1x–4x）',
+    String(video.playbackRate||1),
+    { placeholder:'例如 0.75、1.25 或 2x', okLabel:'套用' }
+  );
+  if(raw==null) return;
+  const value=Number(String(raw).replace(/[x×\s]/gi,''));
+  setPlayerSpeed(value);
+}
 function showPlayerMenu(x,y){
   const items=[{heading:true,label:'播放速度'}];
   [0.25,0.5,0.75,1,1.25,1.5,2].forEach(r=>items.push({label:r+'×',
-    checked:(video.playbackRate||1)===r,act:()=>Media.setRate(r)}));
+    checked:Math.abs((video.playbackRate||1)-r)<0.001,act:()=>setPlayerSpeed(r)}));
+  items.push({sep:true},{label:'自訂速度…',act:setCustomPlayerSpeed});
   showCtx(x,y,items);
 }
 $('videoWrap').addEventListener('contextmenu',e=>{ e.preventDefault(); });
+$('speedIndicator')?.addEventListener('contextmenu',e=>{ e.preventDefault(); e.stopPropagation(); showPlayerMenu(e.clientX,e.clientY); });
 
 /* 字幕右鍵：移到軌道 / 上下新增 / 刪除 */
 function showCueMenu(x,y){

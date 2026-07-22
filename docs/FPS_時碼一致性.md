@@ -1,6 +1,6 @@
 # FPS / 時碼一致性說明（給維護者）
 
-> 對應版本：v4.37.0｜主題：影格率（FPS）與時碼（timecode）在各處顯示為何要一致、如何保證一致。
+> 對應版本：v4.6.1｜主題：影格率（FPS）與時碼（timecode）在各處顯示為何要一致、如何保證一致。
 
 這份文件解釋本工具裡所有跟「影格 / 時碼」有關的設計原則與踩過的坑。
 **改動任何牽涉時碼顯示、播放點、seek、逐格的程式碼前，請先讀完本文。**
@@ -43,7 +43,7 @@ FPS-SYNC
 
 ## 2. 核心不變量（Invariants）★ 最重要
 
-維護時請把這 7 條當鐵律。違反任何一條都會造成「差一格 / 對不上刻度」。
+維護時請把這 8 條當鐵律。違反任何一條都會造成「差一格 / 對不上刻度」。
 
 ### (I1) FPS 一律「實測」，**絕不依檔名判斷**
 
@@ -93,6 +93,12 @@ FPS-SYNC
 - 已解除的音訊素材有自己的 `offset / in / out`，但鍵盤 `↑ / ↓`、切割與匯出都必須以**時間軸時間**計算邊界；不可使用該 AudioElement 的 `currentTime` 當時間軸位置。
 - 同一素材的來源時間只用於播放／解碼；`timelineTime = offset + (sourceTime - in)` 仍是唯一跨影片、外部音檔與字幕的共同座標。這讓音訊可移到影片外、純音訊專案仍有正確播放點與時碼。
 
+### (I8) 監看 TC 與燒入 TC 分工，但兩者都要以專案時碼為準
+
+- 播放器 `TC` 是監看 overlay，`app.js renderTimecodeWatermark()` 必須傳入 `Media.displayTime()`，一般預覽由 DOM 顯示、mpv 預覽由透明 guide 顯示；絕不能各自讀 `video.currentTime`／mpv 原始事件。
+- 匯出勾選「壓入時間碼浮水印」時，`subio.js` 要把輸出範圍的 `exportIn` 換成 `secToEncore(exportIn, fps, dropFrame)` 交給主程序。這表示輸出第一格顯示專案的 In 時碼，並非強制從 `00:00:00:00` 起算。
+- 監看 TC 是 config 偏好，不隨專案存檔也不會自動燒入；燒入 TC 只屬於那一次影片輸出，WAV 不適用。
+
 ---
 
 ## 3. 各關鍵點對照表（搜尋 `FPS-SYNC`）
@@ -110,6 +116,8 @@ FPS-SYNC
 | `timeline.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |
 | `app.js` | `timeupdate` handler | 三讀數同源 `displayTime()` | I4 |
 | `app.js` | `pause` event | 暫停時刷新時碼/seekBar 同源 | I4 |
+| `app.js` | `renderTimecodeWatermark()` | DOM／mpv guide 監看 TC 讀 `displayTime()` | I4, I8 |
+| `subio.js` | `_runExportVideo()` | 以輸出 In 換成交付用 TC 起點 | I2, I8 |
 
 ---
 

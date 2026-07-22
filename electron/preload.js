@@ -58,6 +58,15 @@ contextBridge.exposeInMainWorld('subtool', {
     show:      (v)     => ipcRenderer.invoke('mpv:show', v),
     setGuide:  (g)     => ipcRenderer.invoke('mpv:setGuide', g),
     setImageGuide: (h) => ipcRenderer.invoke('mpv:setImageGuide', h),
+    // 監看用時間碼：標準型態為 { text:'HH:MM:SS:FF', rect:{x,y,w,h} }；null／空字串清除。
+    // 由主程序再次白名單驗證，preload 僅作受限 IPC 入口。
+    setTimecodeWatermark: (data) => ipcRenderer.invoke('mpv:setTimecodeWatermark', data),
+    clearTimecodeWatermark: () => ipcRenderer.invoke('mpv:clearTimecodeWatermark'),
+    onImagePointer: (cb) => {
+      if (typeof cb !== 'function') return;
+      ipcRenderer.removeAllListeners('mpv:imagePointer');
+      ipcRenderer.on('mpv:imagePointer', (_, data) => cb(data));
+    },
     subSet:    (ass)   => ipcRenderer.invoke('mpv:subSet', ass),
     subVisible:(v)     => ipcRenderer.invoke('mpv:subVisible', v),
     quit:      ()      => ipcRenderer.invoke('mpv:quit'),

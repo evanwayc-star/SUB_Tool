@@ -105,21 +105,21 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
    ＝_stageRect()＝字幕層＝安全框，四者對齊。舊寫法只有 max-width/height：小於視窗的影片
    會停在原生尺寸不放大，導致字幕／安全框（用 _stageRect）跟畫面對不上（v4.33 修）。 */
 #video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
-.vsublayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;}
+.vsublayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:4;}
 /* 圖片合成預覽層：疊在預覽畫布之上，行為類似安全框與字幕層，對齊視訊比例區塊 */
-.imglayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;}
+.imglayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:3;}
 .img-overlay{position:absolute;pointer-events:auto;cursor:grab;object-fit:contain;transform-origin:center center;}
 .imglayer.dragging, .imglayer.dragging .img-overlay{cursor:grabbing;}
 .img-overlay:hover, .img-overlay.hovering{outline:1px dashed rgba(255,255,255,.55);outline-offset:3px;}
 .img-overlay .resize-handle{display:none;}
 /* 當hover時顯示四角縮放把手，為了能縮放，需要外層包裝或用 clip data，在 app.js 中我們會使用 .img-wrap 來包裝 <img> */
-.img-wrap{position:absolute;pointer-events:auto;cursor:grab;transform-origin:center center;}
+.img-wrap{position:absolute;pointer-events:auto;cursor:grab;transform-origin:center center;touch-action:none;user-select:none;z-index:1;}
 .img-wrap img{width:100%;height:100%;object-fit:contain;pointer-events:none;}
 .imglayer.dragging, .imglayer.dragging .img-wrap{cursor:grabbing;}
-.img-wrap:hover, .img-wrap.hovering{outline:1px dashed rgba(255,255,255,.55);outline-offset:3px;}
-.img-wrap:hover .resize-handle, .img-wrap.hovering .resize-handle, .imglayer.dragging .img-wrap .resize-handle{
-  display:block;position:absolute;width:10px;height:10px;background:var(--accent);
-  border:1px solid #fff;border-radius:50%;cursor:pointer;
+.img-wrap:hover, .img-wrap.hovering, .img-wrap.selected{outline:1px dashed rgba(255,255,255,.72);outline-offset:3px;}
+.img-wrap:hover .resize-handle, .img-wrap.hovering .resize-handle, .img-wrap.selected .resize-handle, .imglayer.dragging .img-wrap.selected .resize-handle{
+  display:block;position:absolute;width:10px;height:10px;background:var(--accent);pointer-events:auto;
+  border:1px solid #fff;border-radius:50%;cursor:pointer;z-index:2;
 }
 .img-wrap .rh-nw{top:-5px;left:-5px;cursor:nwse-resize;}
 .img-wrap .rh-ne{top:-5px;right:-5px;cursor:nesw-resize;}
@@ -139,6 +139,27 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .sf-cx { position:absolute; left:50%; top:0; bottom:0; width:1px; background:rgba(255,255,255,.35); transform:translateX(-50%); }
 .sf-cy { position:absolute; top:50%; left:0; right:0; height:1px; background:rgba(255,255,255,.35); transform:translateY(-50%); }
 #safeFrameBtn.active{background:var(--accent);border-color:var(--accent);color:#0d0d0d}
+/* 播放器監看時間碼：採現場監看器常見的半透明黑底＋琥珀時間碼；僅預覽，從不送至匯出。 */
+.timecode-watermark{position:absolute;z-index:8;display:none;align-items:center;gap:7px;pointer-events:none;
+  min-height:29px;padding:4px 9px 4px 6px;box-sizing:border-box;border:1px solid rgba(255,197,74,.58);border-left:3px solid #f59e0b;border-radius:2px;
+  color:#fff0bf;background:linear-gradient(90deg,rgba(8,10,12,.9),rgba(17,14,8,.73));box-shadow:0 2px 7px rgba(0,0,0,.56),inset 0 1px rgba(255,255,255,.08);
+  font-family:"Cascadia Mono","JetBrains Mono",Consolas,monospace;font-variant-numeric:tabular-nums;letter-spacing:.045em;white-space:nowrap;
+  text-shadow:0 1px 1px rgba(0,0,0,.9)}
+.timecode-watermark.on{display:inline-flex}
+.timecode-watermark-label{padding-right:6px;border-right:1px solid rgba(255,215,128,.38);color:#fbbf24;font-size:10px;font-weight:800;letter-spacing:.13em}
+.timecode-watermark-value{font-size:16px;font-weight:800;line-height:1;color:#fff2c5}
+#timecodeWatermarkBtn{font-family:"Cascadia Mono","JetBrains Mono",Consolas,monospace;font-weight:800;letter-spacing:.02em}
+#timecodeWatermarkBtn.active{color:#1a1305;background:#fbbf24;border-color:#fbbf24;box-shadow:inset 0 1px rgba(255,255,255,.35)}
+/* 匯出時的 TC 選項：沿用監看器的琥珀提示，但明確標示這一項會寫進輸出檔。 */
+.export-timecode-option{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;margin-top:9px;padding:6px 8px;
+  border:1px solid rgba(245,158,11,.38);border-left:3px solid #f59e0b;border-radius:4px;background:rgba(77,49,8,.24);cursor:pointer}
+.export-timecode-option input{margin:0;accent-color:#f59e0b}
+.export-timecode-badge{padding:1px 4px;border:1px solid rgba(251,191,36,.68);border-radius:2px;color:#fbbf24;background:#191306;
+  font:800 10px/1 "Cascadia Mono","JetBrains Mono",Consolas,monospace;letter-spacing:.08em}
+.export-timecode-title{color:#fff0bf;font-size:13px;font-weight:750}
+.export-timecode-note{flex:1 0 100%;padding-left:21px;color:var(--text-faint);font:11px/1.45 "Cascadia Mono","JetBrains Mono",Consolas,monospace}
+.export-timecode-note b{color:#fcd34d;font-weight:800}
+.export-timecode-option.disabled{opacity:.42;cursor:not-allowed}
 /* 字幕塊可直接抓著拖（.vsublayer 是 pointer-events:none，這裡開回來；旋轉後的 .line
    由 CSS transform 自動連命中區一起轉，抓視覺位置就抓得到）。鎖定軌不給抓＝無 .drag */
 .vsub-track{position:absolute;left:0;right:0;padding:0 6%}
@@ -176,7 +197,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .transport{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--panel);border-top:1px solid var(--border)}
 .tc{font-variant-numeric:tabular-nums;font-family:"更紗黑體","JetBrains Mono","更紗黑體","Segoe UI Variable","Consolas",monospace;font-size:17px;color:var(--text)}
 .tc .cur{color:var(--accent)}
-.transport .btns{display:flex;gap:4px}
+.transport .btns{display:flex;gap:3px}
+.transport .btns .icon{min-width:29px;height:26px;padding:1px 3px;justify-content:center;gap:1px;font-size:10px;line-height:1}
+.transport .btns #playBtn{min-width:30px;font-size:11px}
+.speed-indicator{width:38px;margin:0 2px;color:var(--text-faint);font:600 13px/1 "Cascadia Mono","JetBrains Mono",Consolas,monospace;
+  text-align:center;white-space:nowrap;cursor:context-menu;user-select:none}
+.speed-indicator:hover{color:#fcd34d}
+.transport-sep{width:1px;height:23px;flex:0 0 1px;margin:0 -2px 0 0;background:var(--border2);box-shadow:1px 0 rgba(255,255,255,.025)}
 .transport input[type=range]{flex:1;min-width:60px;accent-color:var(--accent)}
 .tp-btn{flex-shrink:0;padding:2px 6px;font-size:12px}
 /* 速度 OSD */
@@ -252,6 +279,16 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* ---------- 時間軸 ---------- */
 .timeline{height:280px;display:flex;flex-direction:column;background:var(--panel);min-height:160px}
 .tl-toolbar{display:flex;align-items:center;flex-wrap:nowrap;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--panel2);overflow:hidden}
+.project-audio-count{display:inline-flex;align-items:center;gap:5px;min-height:28px;margin-left:4px;padding:2px 7px 2px 9px;
+  border:1px solid rgba(204,171,104,.48);border-left:3px solid #c9a760;border-radius:4px;
+  background:linear-gradient(90deg,rgba(94,70,28,.29),rgba(51,43,25,.23));box-shadow:inset 0 1px rgba(246,225,179,.06),0 0 0 1px rgba(0,0,0,.24)}
+.project-audio-count-label{color:#e5ca8d;font-size:12px;font-weight:800;letter-spacing:.08em;white-space:nowrap;text-shadow:0 1px 0 rgba(0,0,0,.65)}
+.project-audio-count input{width:43px;min-width:43px;height:23px;padding:1px 2px;text-align:center;color:#fff1cd;background:#211d14;
+  border-color:#907744;border-radius:3px;font-family:"Cascadia Mono","JetBrains Mono",Consolas,monospace;font-size:15px;font-weight:800;line-height:1;
+  font-variant-numeric:tabular-nums;box-shadow:inset 0 0 0 1px rgba(218,181,101,.1)}
+.project-audio-count input:hover{border-color:#c3a15e;background:#292317}
+.project-audio-count input:focus{border-color:#d7b877;box-shadow:0 0 0 2px rgba(201,167,96,.18),inset 0 0 0 1px rgba(239,214,158,.16)}
+.project-audio-count-unit{color:#e8d09a;font-size:11px;font-weight:700;white-space:nowrap}
 .tl-toolbar .zoom{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px}
 .tl-toolbar .hint{color:var(--text-faint);font-size:11px}
 @media(max-width:1100px){.tl-toolbar .lbl,.tl-toolbar .hint{display:none}}
@@ -701,6 +738,8 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .check-panel .cp-row{display:flex;align-items:baseline;gap:6px;margin:4px 0;line-height:1.7;color:var(--text-dim)}
 .check-panel .cp-issue .cp-label{color:var(--red)}
 .check-panel .cp-issue .cp-nums .cp-num{color:var(--red)}
+#cpNonTraditional .cp-num.cp-shared-only{color:#e4bd60}
+#cpNonTraditional .cp-num.cp-shared-only:hover{color:#f3d486}
 .check-panel .cp-label{min-width:7em;text-align:right;flex-shrink:0;white-space:nowrap}
 .check-panel .cp-nums{flex:1;word-break:break-all}
 .check-panel .cp-num{cursor:pointer;text-decoration:underline;text-underline-offset:2px;padding:1px 3px;border-radius:3px}
