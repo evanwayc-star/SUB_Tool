@@ -19,6 +19,7 @@ vi.mock('../src/timeline.js',()=>({drawTimeline:vi.fn(),layoutTimeline:vi.fn()})
 vi.mock('../src/project.js',()=>({Project:{}}));
 vi.mock('../src/tcparse.js',()=>({parseTimecodeInput:vi.fn()}));
 vi.mock('../src/notes.js',()=>({getNotesGeneralFileData:vi.fn(),getNotesEdiusFileData:vi.fn()}));
+vi.mock('../src/audio-routing.js',()=>({AudioRouting:{openOutputSettings:vi.fn()}}));
 
 import { State, ensureAudioBusCount, ensureAudioSourceMap, resetAudioProject } from '../src/state.js';
 import { _buildExportData, _buildProjectAudioPlan } from '../src/subio.js';
@@ -31,6 +32,7 @@ describe('external audio project export plan',()=>{
     State.exportIn=null;
     State.exportOut=null;
     State.externalAudioEnd=0;
+    State.externalAudioState=[];
     ensureAudioBusCount(2);
     ensureAudioSourceMap('asset-external',[
       {sourceStream:0,sourceChannel:0},
@@ -48,18 +50,20 @@ describe('external audio project export plan',()=>{
     ];
     mediaMock.externalAudioSources=[{
       id:'external:asset-external',kind:'external-audio',name:'Music',audioSourceId:'asset-external',
-      audioSrc:'ext-asset-external',offset:10,in:3,out:8,duration:12,gain:0.5,fadeIn:1,fadeOut:2,enabled:true
+      audioSrc:'ext-asset-external',path:'C:/master/music.wav',offset:10,in:3,out:8,duration:12,gain:0.5,fadeIn:1,fadeOut:2,enabled:true
     }];
   });
 
-  it('places an external routed source on the timeline and preserves stream labels',()=>{
+  it('places an external routed source on the timeline directly from its master and preserves stream labels',()=>{
     const plan=_buildProjectAudioPlan([],mediaMock.getExternalAudioSources());
 
     expect(plan.buses[0].inputs).toEqual([{
-      file:'C:/cache/ext-ch1.m4a',offset:10,trimStart:3,trimEnd:8,volume:0.5,fadeIn:1,fadeOut:2
+      file:'C:/master/music.wav',sourceStream:0,sourceChannel:0,
+      offset:10,trimStart:3,trimEnd:8,volume:0.5,fadeIn:1,fadeOut:2
     }]);
     expect(plan.buses[1].inputs).toEqual([{
-      file:'C:/cache/ext-ch2.m4a',offset:10,trimStart:3,trimEnd:8,volume:0.5,fadeIn:1,fadeOut:2
+      file:'C:/master/music.wav',sourceStream:0,sourceChannel:1,
+      offset:10,trimStart:3,trimEnd:8,volume:0.5,fadeIn:1,fadeOut:2
     }]);
     expect(plan.streams).toEqual([{
       id:'program',name:'外部主輸出',layout:'stereo',busIds:State.audioProject.buses.map(bus=>bus.id)
@@ -134,11 +138,31 @@ describe('external audio project export plan',()=>{
   });
 
   it('reports unresolved routed sources instead of silently exporting silence',()=>{
-    mediaMock.tracks=[];
+    mediaMock.externalAudioSources[0]={...mediaMock.externalAudioSources[0],path:null};
     const plan=_buildProjectAudioPlan([],mediaMock.getExternalAudioSources());
 
     expect(plan.unresolvedSources).toEqual([
       {audioSourceId:'asset-external',name:'Music'}
     ]);
+  });
+
+  it('uses the video master in the legacy mixer fallback, never its AAC preview cache',()=>{
+    resetAudioProject();
+    mediaMock.externalAudioSources=[];
+    State.clips=[{
+      id:'clip-master',path:'C:/master/program.mxf',in:2,out:8,offset:4,vtrack:0,
+      audioSrc:'clip:clip-master',audioSourceId:'asset-video'
+    }];
+    mediaMock.tracks=[{
+      file:'C:/cache/program-ch3.m4a',source:'clip:clip-master',audioSourceId:'asset-video',
+      sourceStream:1,sourceChannel:2,kind:'element',muted:false,solo:false,volume:0.75
+    }];
+
+    const data=_buildExportData();
+
+    expect(data.audioPlan).toBeNull();
+    expect(data.clips[0].audio).toEqual([{
+      file:'C:/master/program.mxf',sourceStream:1,sourceChannel:2,volume:0.75
+    }]);
   });
 });

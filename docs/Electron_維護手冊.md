@@ -1,6 +1,6 @@
 # SUB Tool — Electron 維護手冊
 
-> 對應版本：v4.6.1｜最後更新：2026-07-22
+> 對應版本：v4.6.2｜最後更新：2026-07-22
 
 > 本文件針對本專案實際架構撰寫；每次異動 IPC 通道、ffmpeg 流程、mpv 整合或打包設定時請同步更新。
 
@@ -51,7 +51,7 @@ Main (main.js)
 | `saveProject(name, b64)` | `dialog:saveProject` | R→M | 另存 `.subtool` 專案，回傳儲存路徑 |
 | `importSub(kind)` | `dialog:importSub` | R→M | 開啟字幕檔，回傳 `{b64, name}` |
 | `exportSub(name, b64, ext)` | `dialog:exportSub` | R→M | 儲存字幕檔，回傳儲存路徑 |
-| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 匯出影片序列：`{clips[],videoTracks[],width,height,fps,assText,format:'prores'\|'mp4'\|'wav',duration,audioPlan,timecodeWatermark?}`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼；影片輸出為 ProRes422HQ/H.264，WAV 則為多聲道 PCM。 |
+| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 匯出影片序列：`{clips[],videoTracks[],width,height,fps,assText,format:'prores'\|'mp4'\|'wav',duration,audioPlan,timecodeWatermark?}`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼；影像／音訊都必須是母素材，handler 會拒絕 `proxy.mp4`／`chN.m4a` 快取。影片輸出為 ProRes422HQ/H.264，WAV 則為多聲道 PCM；MP4 完成後回傳 ffprobe 實測 audio bitrate。 |
 | `probe(path)` | `ffprobe` | R→M | ffprobe 探測，回傳 `{duration, fps, video, audio[]}` |
 | `makeProxy(path, dur)` | `ffmpeg:proxy` | R→M | 轉製 720p proxy（非即時，阻塞） |
 | `extractAudio(path, idx, dur, codec)` | `ffmpeg:extractAudio` | R→M | 抽取單一聲道 |
@@ -158,8 +158,10 @@ webPreferences: {
 ### 轉檔輸出規格
 
 - **Proxy 影片**：720p、yuv420p、CRF 26（NVENC: cq 26、QSV: global_quality 26）
-- **聲道音訊**：AAC 192kbps `.m4a`
+- **聲道音訊**：AAC 128kbps `.m4a`
 - **波形用音訊**：8kHz mono 16-bit PCM WAV
+
+> 上列三者皆為**預覽／波形快取**，絕不可作為匯出輸入。影片匯出重讀母素材；MP4 對經混音／編組後的交付 stream 重新編 AAC（Mono 192k／Stereo 320k／5.1 640k），ProRes 與 WAV 使用 24-bit PCM。若母素材也已作為影片 input，音訊 filtergraph 必須重用該 input，而非另開同檔造成雙重磁碟讀取。
 
 ### 媒體快取
 
@@ -250,6 +252,7 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 | 圖片匯出只顯示第一格或後段變黑 | 檢查 renderer 是否保留 `clip.type === 'image'`；主程序必須對該輸入加 `-loop 1 -framerate <project fps>`，並把每個 clip 的 `scale/posX/posY` 傳進 filtergraph。 |
 | TC 監看在 mpv 模式不顯示 | 先確認播放器 TC 開關為開，再檢查透明 guide 是否建立；這是監看 overlay，與匯出視窗的「壓入時間碼浮水印」為兩個獨立開關。 |
 | 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |
+| 匯出 MP4 的音訊 bitrate 看似偏低 | 先看匯出完成狀態的「音訊 AAC 實測」。確認使用新版安裝檔；該值是輸出 AAC，而不是母素材原始 bitrate。若需要無損音訊，改用 ProRes（24-bit PCM）或 WAV。 |
 
 ---
 

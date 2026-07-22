@@ -146,6 +146,27 @@ function hasRoutingMetadata(meta) {
 function writeMeta(metaPath, meta) {
   try { const tmp = metaPath + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(metaToStore(meta))); fs.renameSync(tmp, metaPath); } catch (e) {}
 }
+/* 匯出端也要自行守住「母素材」界線，不能只相信 renderer。生成的 preview 檔固定是
+   cache 目錄內的 proxy.mp4 / chN.m4a；同名的使用者原始檔不在 cache 目錄則仍可正常匯入。 */
+function isPreviewCacheMedia(file) {
+  if (typeof file !== 'string' || !file) return false;
+  let resolved;
+  try { resolved = path.resolve(file); } catch (e) { return false; }
+  const base = path.basename(resolved).toLowerCase();
+  if (base !== 'proxy.mp4' && !/^ch\d+\.m4a$/i.test(base)) return false;
+  const lower = resolved.toLowerCase();
+  const isCacheRoot = [CACHE, TMP].filter(Boolean).some(root => {
+    try {
+      const cacheRoot = path.resolve(root).toLowerCase();
+      return lower === cacheRoot || lower.startsWith(cacheRoot + path.sep);
+    } catch (e) { return false; }
+  });
+  return isCacheRoot || lower.split(path.sep).includes('.subtool_cache');
+}
+function assertMasterExportMedia(file, kind) {
+  if (isPreviewCacheMedia(file))
+    throw new Error(`${kind} 匯出不能使用 Proxy 或播放快取。請重新連結母素材後再匯出。`);
+}
 function metaValid(m) {
   return (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
 }
@@ -477,7 +498,9 @@ ipcMain.handle('dialog:importFont', async () => {
    items：依時間軸順序的陣列，clip={type:'clip',path,in,out} 或 gap={type:'gap',dur}。
    單一 filtergraph：各段 trim→fps→scale/pad 到 WxH，間隙用 color/anullsrc 生成，concat 串接，
    最後以 ass 濾鏡燒字幕（用 cwd 讓字幕檔以 basename 引用，避開 Windows 路徑跳脫地獄）。 */
-function proresArgs() { return ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le', '-c:a', 'pcm_s16le']; }
+// ProRes 母帶的音訊也必須保留交付品質。24-bit PCM 不經 AAC cache／有損重編，
+// 並與多聲道 WAV 匯出的 pcm_s24le 保持一致。
+function proresArgs() { return ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le', '-c:a', 'pcm_s24le']; }
 /* 匯出用的 H.264 參數：以「目標位元率」編碼（vencArgs() 是畫質模式 CQ/CRF，供轉檔 proxy 用，不可混用）。
    各編碼器的速率控制旗標不同；maxrate=目標、bufsize=2×目標 → 近似封頂 VBR，位元率穩定可預測。 */
 function vencArgsBitrate(kbps) {
@@ -492,6 +515,22 @@ function vencArgsBitrate(kbps) {
 function hasAudioStream(p) {
   try { const r = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', p], { timeout: 8000 }); return !!(r.stdout && r.stdout.toString().trim()); }
   catch (e) { return true; } // 探測失敗時假設有音訊（較常見）
+}
+/* 交付檔完成後再用 ffprobe 讀一次，renderer 顯示的是檔案實際寫入的 bitrate，
+   不只是在 UI 上宣告的目標值。故使用者可直接確認 MP4 並非沿用 preview AAC cache。 */
+function outputAudioBitrates(p) {
+  if (!FFPROBE || !p) return [];
+  try {
+    const r = spawnSync(FFPROBE, [
+      '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=bit_rate,channels', '-of', 'json', p
+    ], { encoding: 'utf8', timeout: 8000 });
+    if (r.status !== 0 || !r.stdout) return [];
+    const streams = JSON.parse(r.stdout).streams || [];
+    return streams.map(stream => ({
+      channels: Math.max(0, Math.floor(_finiteNumber(stream.channels, 0))),
+      kbps: Math.max(0, Math.round(_finiteNumber(stream.bit_rate, 0) / 1000))
+    }));
+  } catch (e) { return []; }
 }
 
 /* ===== 專案音訊輸出（v4.36） =====
@@ -546,8 +585,16 @@ function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
       const hasTrimEnd = input.trimEnd != null && input.trimEnd !== '';
       const trimEnd = hasTrimEnd ? Math.max(0, _finiteNumber(input.trimEnd, 0)) : null;
       if (trimEnd != null && trimEnd <= trimStart) _exportPlanError(`音軌 ${bi + 1} 的輸入 ${ii + 1} 範圍無效。`);
+      const sourceStream = Number.isInteger(input.sourceStream) && input.sourceStream >= 0 ? input.sourceStream : null;
+      const sourceChannel = Number.isInteger(input.sourceChannel) && input.sourceChannel >= 0 ? input.sourceChannel : null;
+      if ((sourceStream == null) !== (sourceChannel == null))
+        _exportPlanError(`音軌 ${bi + 1} 的輸入 ${ii + 1} 母素材聲道座標不完整。`);
       return {
         file: input.file,
+        // 有值時從母素材的第 N 個 audio stream / 第 M 個 channel 取單聲道；
+        // null 只保留給舊版「未分離聲道」的母素材輸入，絕不表示可用 preview cache。
+        sourceStream,
+        sourceChannel,
         offset: Math.max(0, _finiteNumber(input.offset, 0)),
         trimStart,
         trimEnd,
@@ -595,25 +642,43 @@ function _joinFilter(inputLabels, channelLayout, channelNames, outputLabel) {
   const mapping = channelNames.map((name, i) => `${i}.0-${name}`).join('|');
   return `${inputLabels.join('')}join=inputs=${inputLabels.length}:channel_layout=${channelLayout}:map=${mapping}${outputLabel}`;
 }
-/* 將 plan buses 編譯成 ffmpeg filtergraph。每個輸入都以自己的一份 -i 載入：同一來源可合法
-   路由到多條 bus 且各自有不同的 trim / fade，無需依賴脆弱的 asplit 標籤管理。 */
-function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration) {
+/* 將 plan buses 編譯成 ffmpeg filtergraph。每個母素材只開啟一次 -i，再以 a:N / pan 選取
+   來源 Stream/Channel；因此輸出不會碰到預覽用 proxy 或單聲道 AAC cache。
+   若同一母素材已作為影片輸入開啟，reusableMasterInputs 會直接重用那個 input，避免影片＋音訊
+   各自重讀一次大型 MXF/MOV，維持母素材品質的同時縮短匯出時間。 */
+function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMasterInputs = null) {
   const busLabels = new Map();
   let ii = inputIndex;
   const audioInputMap = new Map();
   plan.buses.forEach((bus, bi) => {
     const parts = [];
     bus.inputs.forEach((input, pi) => {
-      let mappedIdx = audioInputMap.get(input.file);
-      if (mappedIdx === undefined) {
-        mappedIdx = ii++;
-        inputs.push('-i', input.file);
-        audioInputMap.set(input.file, mappedIdx);
+      const reusable = reusableMasterInputs?.get(input.file);
+      // 影片 input 已以 -ss=seekStart 打開；只有所需 audio 範圍在其後才可重用。
+      // 否則另開同一母素材的 audio input，保證不會少掉時間軸較前面的外部音訊。
+      const canReuse = reusable && input.trimStart >= reusable.seekStart - 0.000001;
+      let mappedIdx, seekStart = 0;
+      if (canReuse) {
+        mappedIdx = reusable.index;
+        seekStart = reusable.seekStart;
+      } else {
+        mappedIdx = audioInputMap.get(input.file);
+        if (mappedIdx === undefined) {
+          mappedIdx = ii++;
+          inputs.push('-i', input.file);
+          audioInputMap.set(input.file, mappedIdx);
+        }
       }
       const label = `[apB${bi}I${pi}]`;
-      let chain = `[${mappedIdx}:a]atrim=start=${_filterNumber(input.trimStart)}`;
-      if (input.trimEnd != null) chain += `:end=${_filterNumber(input.trimEnd)}`;
-      // 移除 pan=mono|c0=c0 避免立體聲來源只取左聲道導致音量減半或無聲，改由 aformat 自動 downmix
+      const streamSelector = input.sourceStream == null ? '' : `:${input.sourceStream}`;
+      let chain = `[${mappedIdx}:a${streamSelector}]`;
+      // 有來源聲道座標時不可再讓 aformat 自動 downmix，否則路由到 A3/A4 的離散聲道
+      // 可能被混入其他 channel。pan 先精準取出單聲道，再做 trim / gain / fade。
+      if (input.sourceChannel != null) chain += `pan=mono|c0=c${input.sourceChannel},`;
+      const trimStart = Math.max(0, input.trimStart - seekStart);
+      const trimEnd = input.trimEnd == null ? null : Math.max(trimStart, input.trimEnd - seekStart);
+      chain += `atrim=start=${_filterNumber(trimStart)}`;
+      if (trimEnd != null) chain += `:end=${_filterNumber(trimEnd)}`;
       chain += ',asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono';
       if (Math.abs(input.volume - 1) > 0.000001) chain += `,volume=${_filterNumber(input.volume, 1)}`;
       const inputDuration = input.trimEnd == null ? null : input.trimEnd - input.trimStart;
@@ -656,6 +721,12 @@ function _buildWavOutput(busLabels, plan, fc) {
   const label = '[wavOut]';
   fc.push(_joinFilter(labels, names.join('+'), names, label));
   return { label, channels: labels.length };
+}
+// MP4 仍需 AAC，但不能用所有聲道共用的 192k：5.1 或多條 stereo 會明顯不足。
+// 這是輸出編碼位元率；輸入始終由母素材直接解碼（見 _buildPlannedAudio）。
+function aacBitrateForChannels(channels) {
+  const n = Math.max(1, Math.floor(_finiteNumber(channels, 1)));
+  return n >= 6 ? '640k' : (n >= 2 ? '320k' : '192k');
 }
 
 /* 匯出時間碼只接受 renderer 以 secToEncore() 產生的 SMPTE 字串。不要把任意 drawtext
@@ -715,6 +786,13 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
   const isPro = format === 'prores';
   const ext = isWav ? 'wav' : (isPro ? 'mov' : 'mp4');
+  // 在跳出存檔對話框前先驗證，避免使用者已選好輸出位置才得知目前專案指到 preview cache。
+  (clips || []).forEach(c => {
+    if (c.path) assertMasterExportMedia(c.path, '影像');
+    (c.audio || []).forEach(a => a.file && assertMasterExportMedia(a.file, '音訊'));
+  });
+  for (const bus of audioPlan?.buses || []) for (const input of bus.inputs || [])
+    assertMasterExportMedia(input.file, '音訊');
   let outPath = presetOut || null; // 有指定輸出路徑則跳過對話框（測試/批次用）
   if (!outPath) {
     const r = await dialog.showSaveDialog(mainWin, {
@@ -725,8 +803,16 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     outPath = r.filePath;
   }
   allowFileDir(outPath);
-  (clips || []).forEach(c => { if (c.path) allowFileDir(c.path); (c.audio || []).forEach(a => a.file && allowFileDir(a.file)); });
-  for (const bus of audioPlan?.buses || []) for (const input of bus.inputs || []) allowFileDir(input.file);
+  (clips || []).forEach(c => {
+    if (c.path) allowFileDir(c.path);
+    (c.audio || []).forEach(a => {
+      if (!a.file) return;
+      allowFileDir(a.file);
+    });
+  });
+  for (const bus of audioPlan?.buses || []) for (const input of bus.inputs || []) {
+    allowFileDir(input.file);
+  }
 
   const planDuration = _planDuration(audioPlan);
   const D = Math.max(0.05, _finiteNumber(duration, 0), planDuration);
@@ -763,7 +849,8 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   // 並且計算每個實體檔案最早被用到的時間（minIn），用 -ss 加在 -i 前，避免 ffmpeg 從 0 開始慢速解碼 44GB 大檔！
   const uniqueVideoPaths = [...new Set(list.map(c => c.path))];
   const pathMinIn = new Map();
-  uniqueVideoPaths.forEach(p => {
+  const reusableMasterInputs = new Map();
+  uniqueVideoPaths.forEach((p, inputIndex) => {
     const clipsForPath = list.filter(c => c.path === p);
     const isImg = clipsForPath[0].type === 'image';
     if (isImg) {
@@ -776,6 +863,8 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     } else {
       const minIn = Math.max(0, Math.min(...clipsForPath.map(c => c.in)) - 0.5);
       pathMinIn.set(p, minIn);
+      // 這個 input 本身就是母素材；音訊 routing 可重用它，不必再多開一次同一個 MXF/MOV。
+      reusableMasterInputs.set(p, { index: inputIndex, seekStart: minIn });
       inputs.push(...hwdecArgs(), '-ss', minIn.toFixed(3), '-i', p);
     }
   });
@@ -841,7 +930,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   let plannedAudio = null;
   const audioInputMap = new Map();
   if (audioPlan) {
-    plannedAudio = _buildPlannedAudio(audioPlan, inputs, fc, ii, D);
+    plannedAudio = _buildPlannedAudio(audioPlan, inputs, fc, ii, D, reusableMasterInputs);
   } else {
     const aLabels = [];
     list.forEach((c, i) => {
@@ -850,9 +939,24 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
         if (!c.audio.length) return; // 全靜音 → 此片段不發聲
         const mono = [];
         c.audio.forEach((ch, j) => {
-          let mappedIdx = audioInputMap.get(ch.file);
-          if (mappedIdx === undefined) { mappedIdx = ii++; inputs.push('-i', ch.file); audioInputMap.set(ch.file, mappedIdx); }
-          fc.push(`[${mappedIdx}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,volume=${ch.volume}[am${i}_${j}]`);
+          const reusable = reusableMasterInputs.get(ch.file);
+          const canReuse = reusable && c.in >= reusable.seekStart - 0.000001;
+          let mappedIdx, seekStart = 0;
+          if (canReuse) {
+            mappedIdx = reusable.index;
+            seekStart = reusable.seekStart;
+          } else {
+            mappedIdx = audioInputMap.get(ch.file);
+            if (mappedIdx === undefined) { mappedIdx = ii++; inputs.push('-i', ch.file); audioInputMap.set(ch.file, mappedIdx); }
+          }
+          // 相容舊專案的逐聲道混音路徑：當 renderer 提供來源 stream/channel 時，
+          // ch.file 已是母素材；必須先精準擷取該離散 channel，不能讓 ffmpeg 自行 downmix。
+          const streamSelector = Number.isInteger(ch.sourceStream) && ch.sourceStream >= 0 ? `:${ch.sourceStream}` : '';
+          let chain = `[${mappedIdx}:a${streamSelector}]`;
+          if (Number.isInteger(ch.sourceChannel) && ch.sourceChannel >= 0)
+            chain += `pan=mono|c0=c${ch.sourceChannel},`;
+          chain += `atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
+          fc.push(chain);
           mono.push(`[am${i}_${j}]`);
         });
         al = `[aa${i}]`;
@@ -861,7 +965,8 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
           : `${mono[0]}aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else if (hasAudioStream(c.path)) {
         al = `[aa${i}]`;
-        fc.push(`[${videoInputIndices[i]}:a]atrim=start=${c.in}:end=${c.out},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+        const seekStart = reusableMasterInputs.get(c.path)?.seekStart || 0;
+        fc.push(`[${videoInputIndices[i]}:a]atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else return;
       const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
       // 轉場：音訊淡入/淡出（與影像同步）
@@ -900,12 +1005,21 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     vfinal = tcOut;
   }
 
-  // MP4：以使用者指定的目標位元率編碼（音訊固定 192k AAC）；ProRes 為固定品質，無位元率設定
+  // MP4：影像使用使用者指定的目標位元率；每條 AAC stream 依聲道數給足交付 bitrate。
+  // ProRes 則固定輸出 24-bit PCM，避免母素材音訊再經有損 AAC 編碼。
   const kbps = Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
-  const encode = isPro ? proresArgs() : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'];
   const audioMaps = plannedAudio
     ? plannedAudio.streamLabels.flatMap(({ label }) => ['-map', label])
     : ['-map', '[ac]'];
+  const audioBitrates = isPro
+    ? []
+    : (plannedAudio
+      ? plannedAudio.streamLabels.map(({ stream }) => aacBitrateForChannels(stream.spec.channels))
+      : [aacBitrateForChannels(2)]);
+  const encode = isPro
+    ? proresArgs()
+    : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+      ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart'];
   /* Lt/Rt 與普通 stereo 的 codec channel layout 都是 FL/FR；以 stream metadata 明確標示，
      方便剪輯軟體／檢視工具辨識交付意圖，不會把 Lt/Rt 誤標為離散 L/R。 */
   const audioMetadata = plannedAudio
@@ -931,7 +1045,12 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     if (assName) { try { fs.unlinkSync(path.join(TMP, assName)); } catch (e2) {} }
   }
   // 回傳 ffmpeg 實際使用的編碼器與耗時，供 renderer 顯示「這次真的用了 GPU 沒有」
-  return { outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder), elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps };
+  return {
+    outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder),
+    elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps,
+    audioBitrates: isPro ? null : audioBitrates,
+    audioActualBitrates: isPro ? null : outputAudioBitrates(outPath)
+  };
 });
 
 ipcMain.handle('dialog:importDirectory', async () => {
