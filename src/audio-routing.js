@@ -1,6 +1,26 @@
-/* SUB Tool — 專案音訊配線 UI
-   將「媒體來源聲道 → 專案單聲道 bus」及「專案 bus → 匯出 stream」分成兩個清楚的操作面。
-   此檔只處理可序列化的 State.audioProject；實際播放與 ffmpeg 匯出各自讀同一份資料。 */
+/* ==============================================================================
+   SUB Tool — 音軌路由與聲道配線模組 (Audio Routing Layer)
+   ==============================================================================
+   
+   【架構與職責總覽】
+   本檔案 (audio-routing.js) 負責實作高階影音交付的「多聲道配線盤」。
+   將「媒體來源聲道 → 專案單聲道 Bus」及「專案 Bus → 最終匯出 Stream (Mono/Stereo/5.1)」
+   分成兩個清楚的抽象層，解決了多機位、多音軌輸入時的複雜混音需求。
+   
+   1. 純資料與 UI 綁定
+      此檔案只處理可序列化的 `State.audioProject` 以及對應的 UI 面板設定。
+      實際的 Web Audio API 播放邏輯實作在 `media.js`；
+      實際的 FFmpeg 聲道 mapping 匯出實作在 `subio.js`。
+      
+   2. Delivery Presets (交付預設集)
+      預設了業界標準的交片格式 (如 2.0-FM, 5.1-ME 等)，透過 `DELIVERY_PRESETS` 
+      將 `MAX_AUDIO_BUSES` 個輸入 Bus 強制映射到對應的輸出 Stream。
+
+   【維護鐵律】
+   - 當修改 `State.audioProject` 內部的陣列長度 (如增加 Bus 或切換 Layout) 時，
+     必須同步觸發 `emit('audioRoutingChanged')`，讓 `media.js` 得以即時重建
+     AudioContext 的連線圖 (Graph)，否則播放時會產生斷音或串音。
+============================================================================== */
 import { State, ensureAudioBusCount, ensureAudioExportDefaults, normalizeAudioProject } from './state.js';
 import { Seq } from './sequence.js';
 import { Media } from './media.js';

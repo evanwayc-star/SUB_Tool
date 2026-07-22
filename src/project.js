@@ -1,4 +1,25 @@
-/* SUB Tool — 專案存讀 (.subtool) */
+/* ==============================================================================
+   SUB Tool — 專案檔案讀寫與狀態快照模組 (Project I/O Layer)
+   ==============================================================================
+   
+   【架構與職責總覽】
+   本檔案 (project.js) 負責將記憶體中的 `State` 序列化並寫入硬碟的 `.subtool` 專案檔，
+   同時也負責專案載入時的逆向還原與資料結構升級。
+   
+   1. 序列化與 Base64 封裝
+      `.subtool` 是一個純 JSON 檔案。但為了讓專案能夠單檔流傳，
+      若使用者載入了圖片或小型字型檔，本模組會將這類小型二進位檔案轉為
+      Base64 字串並直接包裹進 JSON 中存檔。大型影音檔則僅儲存絕對路徑。
+      
+   2. 自動備份機制 (Auto Save)
+      為防止當機，本模組實作了定時自動備份。會定期比較 `_lastSavedDataStr` 
+      是否被修改，若有變更則將專案寫入備份目錄中，並加入時間戳記防撞。
+
+   【維護鐵律】
+   - 當您在 `state.js` 新增了任何專案層級的欄位時，請務必回來這裡確認
+     `makeProjectData` (存檔) 與 `loadProjectData` (讀檔) 是否有涵蓋到該欄位。
+     尤其是讀檔時，必須做好舊版專案檔缺乏該欄位的防呆保護 (Fallback)。
+============================================================================== */
 import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount, ensureVideoTrackCount, resetVideoTracks,
   normalizeAudioProject, resetAudioProject } from './state.js';
 import { $ } from './dom.js';
