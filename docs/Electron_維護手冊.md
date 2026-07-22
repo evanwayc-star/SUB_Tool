@@ -185,7 +185,10 @@ mpv 以**子視窗**方式嵌入：Main Process 啟動 `_mpvWin`（無框 Browse
 - `mpv:event` 推播：`time-pos`、`duration`、`pause`、`eof-reached`（前端用於同步播放頭）
 - `mpv:subSet`：接收 base64 ASS 字串，寫入暫存 `.ass` 後用 `sub-reload` 指令更新
 - `mpv:setBounds`：更新 `_mpvWin` 位置；主視窗移動/縮放時自動呼叫
-- `mpv:setImageGuide`：透明 guide 視窗顯示圖片、虛線框與控制點。主程序依游標是否落在圖片命中區切換 `setIgnoreMouseEvents`，拖曳期間保留 pointer capture；圖片外的滑鼠事件會穿透回主 renderer，不能以全視窗 `forward:true` 取代。
+- `mpv:setImageGuide`：將圖片的 HTML 疊層（包含虛線框與控制點）交給透明 guide 視窗。
+  - **【v4.6.3 嚴謹架構說明】事件穿透與互動機制**：
+    早期版本依賴主程序使用 `screen.getCursorScreenPoint()` 每 25ms 輪詢游標位置，以決定是否命中圖片（決定開關 `setIgnoreMouseEvents`）。然而在 Windows 複雜的高 DPI 或多螢幕環境下，原生 API 回傳的座標經常與 Chromium 內部的 DIP (Device-Independent Pixel) 產生偏移，導致「游標明明在圖片上，卻判定未命中」，進而將事件穿透給底層主視窗，造成無法拖曳。
+    **現行架構 (v4.6.3+)** 已徹底廢除輪詢。我們依賴 Chromium 原生的事件轉發能力：當設定 `setIgnoreMouseEvents(true, { forward: true })` 時，透明視窗底層的 Chromium 依舊會對具備 `pointer-events: auto` 的元素（如圖片本體、黃色控制角）派發原生的 `mouseenter` 與 `mouseleave`。Guide 內的 DOM 監聽到此事件後，經由 IPC (`mpv-guide:imagePointer`) 送出 `enter` / `leave`，由主程序 100% 精確地切換互動狀態，徹底解決了事件穿透的死結。
 - `mpv:setTimecodeWatermark`：原生 mpv 模式由 guide 顯示監看 TC；一般 HTML 預覽仍由 renderer DOM 顯示。兩者都從 `Media.displayTime()` 取得同一個時碼來源。
 
 ### 注意事項
@@ -248,7 +251,7 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 | 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |
 | 使用者說某個按鈕「按了沒反應」 | 是不是用到了 `window.prompt()`？**Electron 停用了它**，回傳永遠是 null，靜默失敗。改用 `ui.js` 的 `promptModal()` |
 | HTML 疊層（字幕拖曳、安全框）在 MXF 模式下看不到 / 點不到 | mpv 是 **OS 層 always-on-top 子視窗**，蓋在所有 HTML 之上；需要 `mpv.show(false)` 讓位（`_syncMpvPanel()`） |
-| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | 檢查 `mpv-guide-preload.js`、`mpv:setImageGuide`、`mpv:imagePointer` 三段是否都存在；guide 必須只在圖片命中區接收輸入，拖曳結束後重新穿透。 |
+| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | 這是因為透明視窗事件穿透（Click-Through）狀態卡死。自 v4.6.3 起已棄用輪詢，改由 Chromium 原生 `pointer-events` 與事件轉發處理。若問題復現，請檢查：1. `main.js` 中的 `setIgnoreMouseEvents(!active, { forward: true })` 參數是否被誤改；2. `preload.js` 是否漏掉了 `enter` 與 `leave` 白名單；3. `app.js` 與 `main.js` 之間是否有其他攔截。 |
 | 圖片匯出只顯示第一格或後段變黑 | 檢查 renderer 是否保留 `clip.type === 'image'`；主程序必須對該輸入加 `-loop 1 -framerate <project fps>`，並把每個 clip 的 `scale/posX/posY` 傳進 filtergraph。 |
 | TC 監看在 mpv 模式不顯示 | 先確認播放器 TC 開關為開，再檢查透明 guide 是否建立；這是監看 overlay，與匯出視窗的「壓入時間碼浮水印」為兩個獨立開關。 |
 | 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |
