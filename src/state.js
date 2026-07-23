@@ -390,6 +390,8 @@ const State = {
   audioExpanded: {},    // 音訊軌（每音源一列）是否展開成各聲道控制列：{ srcId: true }
   audioProject: _emptyAudioProject() // 專案音訊 bus / 來源路由 / 匯出 stream（不存 Media runtime）
 };
+/* 軌道工具 */
+function newTrack(name){ return {name:name||('軌道 '+(State.tracks.length+1)),visible:true,fontSize:80,posPct:90,align:'center',locked:false,color:'#ffffff'}; }
 function syncTrackCount(){ State.trackCount=State.tracks.length; }
 /* 視訊軌工具（比照字幕軌）：newVideoTrack 建一條、ensureVideoTrackCount 補足數量（只增不減）、
    videoTrackVisible 顯示查詢、resetVideoTracks 回到單軌初始。索引 0＝最底/基底，越大越上層。 */

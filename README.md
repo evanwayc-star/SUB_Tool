@@ -2,7 +2,7 @@
 
 上字幕編輯器，同一份 `dist/index.html` 同時支援**網頁版**與 **Electron 桌面版**。
 
-> 目前正式版本：**v4.6.3**（2026-07-23）
+> 目前正式版本：**v5.0.0**（2026-07-23）
 > （本專案已完成 100% 全檔案架構註釋與維護鐵律保護網）
 
 ## 功能摘要
@@ -99,7 +99,7 @@ npm run electron:dev    # 連 dev server + 開 DevTools
 ## 打包安裝檔（exe）
 
 ```bash
-npm run dist    # electron-builder → release/SUB Tool Setup 4.6.3.exe
+npm run dist    # electron-builder → release/SUB Tool Setup 5.0.0.exe
 ```
 
 ## 文件索引
