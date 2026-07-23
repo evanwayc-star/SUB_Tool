@@ -487,9 +487,8 @@ ipcMain.handle('dialog:importFont', async () => {
   const r = await dialog.showOpenDialog(mainWin, { title: '匯入字型', properties: ['openFile'], filters: [{ name: '字型檔', extensions: ['ttf', 'otf', 'woff', 'woff2', 'ttc'] }, { name: '全部', extensions: ['*'] }] });
   if (r.canceled || !r.filePaths[0]) return null;
   const src = r.filePaths[0];
-  const root = fontsRoot() || path.join(process.resourcesPath || path.join(__dirname, '..'), 'font');
+  const root = userFontsDir();
   try {
-    if (!fs.existsSync(root)) fs.mkdirSync(root, { recursive: true });
     const name = path.basename(src);
     const dest = path.join(root, name);
     fs.copyFileSync(src, dest);
@@ -1178,14 +1177,32 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
    每個子資料夾名＝字型名（如「台北黑體」），內含 .ttf/.otf/.ttc/.woff2 任一即採用；
    根目錄下的字型檔也收（檔名去副檔名當字型名）。renderer 用它注入 @font-face（預覽），
    匯出（libass）則以 fontsdir 指向同一資料夾 → 預覽與燒錄同一份字型。 */
-function fontsRoot() {
+function userFontsDir() {
+  const d = path.join(app.getPath('userData'), 'font');
+  try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {}
+  return d;
+}
+
+function fontsRoots() {
   const cands = [
-    path.join(__dirname, '..', 'font'),                                   // dev：專案根/font
-    path.join(process.resourcesPath || '', 'font'),                       // 打包：resources/font
-    path.join(path.dirname(app.getPath('exe')), 'font'),                  // 打包：安裝目錄/font
+    userFontsDir(),
+    path.join(__dirname, '..', 'font'),
+    path.join(process.resourcesPath || '', 'font'),
+    path.join(path.dirname(app.getPath('exe')), 'font'),
   ];
-  for (const d of cands) { try { if (fs.existsSync(d) && fs.statSync(d).isDirectory()) return d; } catch (e) {} }
-  return null;
+  const list = [];
+  for (const d of cands) {
+    try {
+      if (d && fs.existsSync(d) && fs.statSync(d).isDirectory()) {
+        if (!list.includes(d)) list.push(d);
+      }
+    } catch (e) {}
+  }
+  return list;
+}
+
+function fontsRoot() {
+  return userFontsDir();
 }
 const FONT_EXT = /\.(ttf|otf|ttc|woff2?)$/i;
 
@@ -1276,28 +1293,46 @@ function pickRegularFace(dir, files) {
 }
 
 ipcMain.handle('fonts:list', () => {
-  const root = fontsRoot();
-  if (!root) return { root: null, fonts: [] };
-  allowDir(root); // 納入路徑白名單，renderer 才能取 fileURL 讀字型位元組（FontFace 註冊）
+  const roots = fontsRoots();
+  const targetRoot = userFontsDir();
+  // 將其他目錄的字型自動同步/補充到 userFontsDir，確保 single-fontsdir 時也能全數讀取
+  for (const root of roots) {
+    if (root === targetRoot) continue;
+    try {
+      for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
+        const srcPath = path.join(root, ent.name);
+        const destPath = path.join(targetRoot, ent.name);
+        if (!fs.existsSync(destPath)) {
+          if (ent.isDirectory()) fs.cpSync(srcPath, destPath, { recursive: true });
+          else fs.copyFileSync(srcPath, destPath);
+        }
+      }
+    } catch (e) {}
+  }
+
   const out = [];
-  // name＝資料夾名（UI／CSS FontFace 用）；family＝檔案內部家族名（ASS Fontname 用，見 fontFamilyOf）
   const pushFile = (name, file) => {
     if (out.some(f => f.name === name)) return;
     out.push({ name, file, family: fontFamilyOf(file) || name });
   };
-  try {
-    for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
-      const full = path.join(root, ent.name);
-      if (ent.isDirectory()) {
-        let hit = null;
-        try { hit = pickRegularFace(full, fs.readdirSync(full)); } catch (e) {}
-        if (hit) { allowDir(full); pushFile(ent.name, path.join(full, hit)); } // 資料夾名＝字型名
-      } else if (FONT_EXT.test(ent.name)) {
-        pushFile(ent.name.replace(FONT_EXT, ''), full);
+
+  const finalRoots = fontsRoots();
+  for (const root of finalRoots) {
+    allowDir(root);
+    try {
+      for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
+        const full = path.join(root, ent.name);
+        if (ent.isDirectory()) {
+          let hit = null;
+          try { hit = pickRegularFace(full, fs.readdirSync(full)); } catch (e) {}
+          if (hit) { allowDir(full); pushFile(ent.name, path.join(full, hit)); }
+        } else if (FONT_EXT.test(ent.name)) {
+          pushFile(ent.name.replace(FONT_EXT, ''), full);
+        }
       }
-    }
-  } catch (e) { console.error('[fonts] list', e); }
-  return { root, fonts: out };
+    } catch (e) { console.error('[fonts] list', e); }
+  }
+  return { root: targetRoot, fonts: out };
 });
 
 /* 只清自己產生的暫存／快取檔。呼叫端傳的一律是 ffmpeg 寫進 CACHE/TMP 的中繼檔
