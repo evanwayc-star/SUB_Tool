@@ -333,7 +333,7 @@ export const WCPreview = {
       // 不是「第一層的解析度」——否則換到不同比例/解析度的片時整個畫面區跟著變，
       // 字幕大小也跟著跳（症狀＝「字幕在各個影片上大小不同」）。各層再 contain 進這張畫布（比例不同就留黑邊，與匯出一致）。
       if(!base){
-        const pw = State.videoWidth || L.sw, ph = State.videoHeight || L.sh;
+        const pw = State.videoWidth || 1920, ph = State.videoHeight || 1080;
         const s0 = Math.min(bw/pw, bh/ph);
         const w0 = Math.round(pw*s0), h0 = Math.round(ph*s0);
         base = { x:(bw-w0)>>1, y:(bh-h0)>>1, w:w0, h:h0 };

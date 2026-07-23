@@ -337,9 +337,9 @@ function routeForChannel(audioSourceId, sourceStream=0, sourceChannel=0){
 
 const State = {
   cues: [],            // {id,start,end,text,track}
-  tracks: [{name:'軌道 1',visible:true,fontSize:80,posPct:90,align:'center',valign:'bottom',locked:false,color:'#ffffff'}],          // 字幕軌道
+  tracks: [],          // 字幕軌道
   notes: [],           // 備註 {id,time,text,done}
-  trackCount: 1,       // = tracks.length（同步用）
+  trackCount: 0,       // = tracks.length（同步用）
   listTrack: 0,        // 字幕列表顯示的軌道
   fps: 24,
   dropFrame: false,

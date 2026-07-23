@@ -124,7 +124,14 @@ async function setIn() {
   if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
   let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
   let c = State.cues.find(x => x.id === State.selectedId);
-  if (!c) { c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', 0); selectCue(c.id); recordHistory('新增字幕(I)'); setStatus('已新增字幕，起點 ' + fmtClock(t), 'ok'); return; }
+  if (!c) {
+    const tk = State.tracks.length === 0 ? 0 : Math.min(State.tracks.length - 1, Math.max(0, State.listTrack));
+    c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', tk);
+    selectCue(c.id);
+    recordHistory('新增字幕(I)');
+    setStatus('已新增字幕，起點 ' + fmtClock(t), 'ok');
+    return;
+  }
   const wasUntimed = c.timed === false;
   c.start = t;
   if (State.subMode) {
@@ -200,7 +207,7 @@ function autoAdvanceSubMode() {
 /* ===== 媒體片段邊界步進 =================================================
    上／下箭頭用於播放頭在影像、外部音訊片段的頭尾間跳轉。字幕邊界仍保留給
    預設的 E / D（或使用者自行重新綁定的快捷鍵），因此不會混淆兩種剪輯操作。 */
-const MEDIA_BOUNDARY_EPS = 1e-4;
+const MEDIA_BOUNDARY_EPS = 0.05;
 
 function finiteTimelineTime(value, fallback = 0) {
   const n = Number(value);
@@ -228,14 +235,44 @@ function externalPlacementBoundaries(asset) {
 
 function mediaBoundaryPoints() {
   const points = [];
-  for (const clip of State.clips) {
-    if (!clip || clip.timelineVisible === false) continue;
-    const start = finiteTimelineTime(clip.offset);
-    const end = Number(Seq.clipEnd(clip));
-    points.push(start);
-    if (Number.isFinite(end) && end > start + MEDIA_BOUNDARY_EPS) points.push(end);
+  
+  const onlyVideo = State.activeTrackKind === 'video';
+  const vtrackIdx = onlyVideo ? (State.selectedClipId ? (Seq.byId(State.selectedClipId)?.vtrack || 0) : State.activeVtrack) : null;
+
+  const onlyAudio = State.activeTrackKind === 'audio';
+  const selectedAudioId = onlyAudio ? (State.selectedAudioClipId || State.activeAudioTrackId) : null;
+
+  const onlySub = State.activeTrackKind === 'sub';
+  const subTrackIdx = onlySub ? State.listTrack : null;
+
+  if (onlySub) {
+    for (const cue of State.cues) {
+      if ((cue.track || 0) !== subTrackIdx) continue;
+      if (cue.timed === false) continue;
+      points.push(cue.start);
+      points.push(cue.end);
+    }
+  } else {
+    for (const clip of State.clips) {
+      if (!clip || clip.timelineVisible === false) continue;
+      if (onlyVideo && vtrackIdx != null && (clip.vtrack || 0) !== vtrackIdx) continue;
+      if (onlyAudio) {
+        if (clip.type === 'image' || clip.audioDetached) continue;
+        const srcId = clip.audioSourceId || clip.audioSrc || (clip.primary ? 'video' : ('clip:'+clip.id));
+        if (selectedAudioId != null && srcId !== selectedAudioId) continue;
+      }
+      const start = finiteTimelineTime(clip.offset);
+      const end = Number(Seq.clipEnd(clip));
+      points.push(start);
+      if (Number.isFinite(end) && end > start + MEDIA_BOUNDARY_EPS) points.push(end);
+    }
+    
+    for (const asset of Media.getExternalAudioSources()) {
+      if (onlyVideo) continue; // If a video track is selected, ignore audio clips
+      if (onlyAudio && selectedAudioId != null && asset.id !== selectedAudioId && asset.audioSourceId !== selectedAudioId && asset.audioSrc !== selectedAudioId) continue;
+      points.push(...externalPlacementBoundaries(asset));
+    }
   }
-  for (const asset of Media.getExternalAudioSources()) points.push(...externalPlacementBoundaries(asset));
 
   points.sort((a, b) => a - b);
   // 同一時間點可同時是數個影像／音訊片段邊界；按一次只需停一次。
@@ -403,17 +440,10 @@ window.addEventListener('keydown', e => {
     case 'step_boundary_prev':
       e.preventDefault();
       if (Media.playing) Media.pause();
-      // 預設的 ↑ / ↓ 是媒體剪輯點；E / D 仍維持字幕邊界步進。
-      // 若目前有選取字幕，則視為在字幕軌道操作，改為依序步進字幕邊界 (與 E 相同)
+      // 預設的 ↑ / ↓ 是媒體剪輯點；E / D 仍維持舊的字幕邊界步進（含選取）。
+      // 依據使用者需求，任何軌道（視訊、音訊、字幕）的 ↑ / ↓ 都純粹在該軌切換播放點（不選取）。
       if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        const dir = e.key === 'ArrowUp' ? -1 : 1;
-        if (State.activeTrackKind === 'sub') {
-          jumpToAdjacentCue(dir);
-        } else if (State.activeTrackKind === 'video' || State.selectedClipId != null || State.activeTrackKind === 'audio' || State.selectedAudioClipId != null) {
-          if (!stepMediaBoundary(dir)) stepBoundary(dir);
-        } else {
-          stepBoundary(dir);
-        }
+        stepMediaBoundary(-1);
       } else {
         stepBoundary(-1);
       }
@@ -422,14 +452,7 @@ window.addEventListener('keydown', e => {
       e.preventDefault();
       if (Media.playing) Media.pause();
       if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        const dir = e.key === 'ArrowUp' ? -1 : 1;
-        if (State.activeTrackKind === 'sub') {
-          jumpToAdjacentCue(dir);
-        } else if (State.activeTrackKind === 'video' || State.selectedClipId != null || State.activeTrackKind === 'audio' || State.selectedAudioClipId != null) {
-          if (!stepMediaBoundary(dir)) stepBoundary(dir);
-        } else {
-          stepBoundary(dir);
-        }
+        stepMediaBoundary(1);
       } else {
         stepBoundary(1);
       }

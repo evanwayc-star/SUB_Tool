@@ -596,7 +596,7 @@ const Media = {
         audioSourceId:restoredSource?.audioSourceId,
         timelineLaneId:restoredSource?.timelineLaneId,
         duration,
-        offset:restoredSource?.offset,
+        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || State.audioSources.length > 0)) ? this.displayTime() : 0),
         in:restoredSource?.in,
         out:restoredSource?.out,
         gain:restoredSource?.gain,
@@ -830,7 +830,7 @@ const Media = {
         name:restoredSource?.name||file.name,
         timelineLaneId:restoredSource?.timelineLaneId,
         duration:el.duration||0,
-        offset:restoredSource?.offset,
+        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || State.audioSources.length > 0)) ? this.displayTime() : 0),
         in:restoredSource?.in,
         out:restoredSource?.out,
         gain:restoredSource?.gain,
@@ -1091,7 +1091,7 @@ const Media = {
         audioSourceId:restoredSource?.audioSourceId,
         timelineLaneId:restoredSource?.timelineLaneId,
         duration:el.duration||info?.duration||0,
-        offset:restoredSource?.offset,
+        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || State.audioSources.length > 0)) ? this.displayTime() : 0),
         in:restoredSource?.in,
         out:restoredSource?.out,
         gain:restoredSource?.gain,
@@ -1178,7 +1178,7 @@ const Media = {
     // 影片區清空為黑底，mpv 覆蓋視窗會貼合在此
     $('noVideo').style.display='none';
     video.style.display='none';
-    $('videoSub').style.display='none'; // 字幕改由 mpv/libass 渲染
+    $('videoSub').style.display=''; // 字幕由 HTML DOM (#videoSub) 統一渲染
     let res;
     try{ res=await DESK.mpv.launch({src:p, bounds:this._mpvRect(), audio}); }
     catch(e){ showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); $('videoSub').style.display=''; video.style.display=''; return; }
@@ -1893,10 +1893,17 @@ const Media = {
     // 一律附 web url（v4.22）：mpv 模式下 WebCodecs 預覽引擎也能直接解「加入的原生檔」做即時合成
     //（非原生加入檔 demux 會失敗 → WCPreview 視同不可解、讓回 mpv 顯示，無害）
     try{ meta.web = { url: await DESK.fileURL(p) }; }catch(e){}
-    const c = Seq.add({ ...meta, audioSourceId: geo?.audioSourceId || makeAudioSourceId(), audioDetached:!!geo?.audioDetached });
+    let overrides = {};
+    if (!geo && State.clips.length > 0) {
+      overrides.vtrack = State.videoTracks.length;
+      ensureVideoTrackCount(overrides.vtrack + 1);
+      overrides.offset = this.displayTime();
+    }
+    const c = Seq.add({ ...meta, ...overrides, audioSourceId: geo?.audioSourceId || makeAudioSourceId(), audioDetached:!!geo?.audioDetached });
     c.audioSrc = 'clip:' + c.id; // 此來源的音軌識別（切割片段將共用）
     this.registerAudioRouting(c,probeAudioChannelDescriptors(info?.audio));
     if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; c.audioDetached=!!geo.audioDetached; Seq.sort(); Seq.recomputeDuration(); }
+    else { Seq.sort(); Seq.recomputeDuration(); }
     drawTimeline();
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}（背景抽取音訊與波形…）`, 'busy');
@@ -1983,7 +1990,13 @@ const Media = {
       c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0;
     }
     if (!geo || geo.vtrack == null) {
-      c.vtrack = pickImageTrack(c);
+      if (!geo && State.clips.length > 1) { // Wait, c is already added to State.clips by Seq.add!
+        c.vtrack = State.videoTracks.length;
+      } else if (State.clips.length === 1) { // Only this newly added clip exists
+        c.vtrack = 0;
+      } else {
+        c.vtrack = pickImageTrack(c); // fallback
+      }
       ensureVideoTrackCount(c.vtrack + 1);
     }
     Seq.sort(); Seq.recomputeDuration();
@@ -2024,7 +2037,13 @@ const Media = {
     const imgOffset = this.displayTime();
     const nat = await probeImageSize(url);
     const c = Seq.add({ type: 'image', name: f.name, web: { url }, dur: 36000, fps: State.fps || 25, scale: 1, posX: 0.5, posY: 0.5, natW:nat.w, natH:nat.h, offset: imgOffset, out: 10 });
-    c.vtrack = pickImageTrack(c);
+    if (State.clips.length > 1) { // c is already added by Seq.add!
+      c.vtrack = State.videoTracks.length;
+    } else if (State.clips.length === 1) {
+      c.vtrack = 0;
+    } else {
+      c.vtrack = pickImageTrack(c);
+    }
     ensureVideoTrackCount(c.vtrack + 1);
     Seq.sort(); Seq.recomputeDuration();
     drawTimeline();
@@ -2044,7 +2063,13 @@ const Media = {
       test.src = url; setTimeout(() => r(test.duration || 0), 8000);
     });
     if(!dur){ showToast('無法讀取此影片，未加入'); setStatus('', ''); URL.revokeObjectURL(url); return; }
-    const c = Seq.add({ name: f.name, web: { url }, dur, audioSourceId: makeAudioSourceId() });
+    let overrides = {};
+    if (State.clips.length > 0) {
+      overrides.vtrack = State.videoTracks.length;
+      ensureVideoTrackCount(overrides.vtrack + 1);
+      overrides.offset = this.displayTime();
+    }
+    const c = Seq.add({ name: f.name, web: { url }, dur, audioSourceId: makeAudioSourceId(), ...overrides });
     c.audioSrc = 'clip:' + c.id;
     drawTimeline();
     emit('history:record', '加入影片：' + c.name);

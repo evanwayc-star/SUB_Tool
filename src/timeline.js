@@ -324,12 +324,29 @@ function renderTrackRows(){
   renderCueBlocks();
 }
 function refreshTrackGutterActive(){
-  const gut=$('tlGutterTracks'); if(!gut) return;
-  gut.querySelectorAll('.tl-gtrack').forEach(g=>{
-    g.classList.toggle('tl-active', +g.dataset.track===State.listTrack);
-  });
+  const gut=$('tlGutterTracks');
+  if(gut) {
+    gut.querySelectorAll('.tl-gtrack').forEach(g=>{
+      g.classList.toggle('tl-active', State.activeTrackKind === 'sub' && +g.dataset.track===State.listTrack);
+    });
+  }
+  
+  const vgut=$('tlGutterVtracks');
+  if(vgut) {
+    vgut.querySelectorAll('.vgtrack').forEach(g=>{
+      g.classList.toggle('tl-active', State.activeTrackKind === 'video' && +g.dataset.vtrack===State.activeVtrack);
+    });
+  }
+  
+  const agut=$('tlGutterAudio');
+  if(agut) {
+    agut.querySelectorAll('.agtrack').forEach(g=>{
+      g.classList.toggle('tl-active', State.activeTrackKind === 'audio' && g.dataset.audioSourceId===String(State.activeAudioTrackId));
+    });
+  }
+  
   tlTracks.querySelectorAll('.tl-track').forEach(r=>{
-    r.classList.toggle('tl-active', +r.dataset.track===State.listTrack);
+    r.classList.toggle('tl-active', State.activeTrackKind === 'sub' && +r.dataset.track===State.listTrack);
   });
 }
 
@@ -659,8 +676,11 @@ function selectExternalAudioClip(assetId,{seek=false,redraw=true}={}){
   State.selectedClipId=null;
   State.selectedId=null;
   State.selectedIds=[];
+  State.activeTrackKind='audio';
   refreshSelectionUI();
   const asset=typeof Media.getExternalAudioSource==='function' ? Media.getExternalAudioSource(assetId) : null;
+  if(asset) State.activeAudioTrackId = asset.audioSourceId || asset.audioSrc || asset.id;
+  refreshTrackGutterActive();
   const label=asset?.name||'音訊素材';
   const status=$('stSel'); if(status) status.textContent='已選音訊：'+label;
   if(seek&&asset) Media.seek(Math.max(0,Number(asset.offset)||0));
@@ -993,10 +1013,12 @@ function selectClip(id, opts={}){
   if(!opts.force && State.videoTracks[c.vtrack||0]?.locked) return; // 鎖定軌：不可選取中間的影像片段
   State.selectedClipId=id;
   State.activeTrackKind='video';
+  State.activeVtrack = c.vtrack || 0;
   State.selectedAudioClipId=null;
   State.selectedId=null; State.selectedIds=[]; // 與字幕選取互斥（避免 Del/上下鍵語意衝突）
   refreshSelectionUI(); // 清除字幕列高亮
   $('stSel').textContent='已選影片段：'+c.name;
+  refreshTrackGutterActive();
   if(opts.seek){ Media.seek(c.offset); emit('playhead:ensure'); emit('render:videoSub'); }
   renderClipBlocks();
 }
@@ -1089,10 +1111,12 @@ function renderAtrackGutter(){
     g.addEventListener('click', ev => {
       if (ev.target.closest('.audio-clip-mute,.alock')) return;
       State.activeTrackKind = 'audio';
+      State.activeAudioTrackId = row.sourceId;
       State.selectedId = null; State.selectedIds = []; State.selectedClipId = null; State.selectedAudioClipId = null;
       refreshSelectionUI();
       renderClipBlocks();
       renderAudioTrackRows();
+      refreshTrackGutterActive();
       const stSel = $('stSel'); if (stSel) stSel.textContent = '已切換至音訊軌：' + row.label;
     });
     const mute=g.querySelector('.audio-clip-mute');
@@ -1665,12 +1689,13 @@ window.addEventListener('mouseup',e=>{
       if(drag.additive){ for(const id of hit)if(!State.selectedIds.includes(id))State.selectedIds.push(id); }
       else State.selectedIds=hit;
       State.selectedId=State.selectedIds[State.selectedIds.length-1]||null; State.activeEdge='start';
+      State.activeTrackKind='sub';
       refreshSelectionUI(); $('stSel').textContent='已選 '+State.selectedIds.length+' 條';
     }else{
       // 點時間軸空白：跳轉（Shift 時保留選取）
       const sc=tracksScrollTop();
       const tkIdx=yToTrack(Math.max(0,drag.y0-tracksTop()+sc));
-      if(tkIdx>=0){ State.activeTrackKind='sub'; State.activeSubTrack=tkIdx; }
+      if(tkIdx>=0){ State.activeTrackKind='sub'; State.listTrack=tkIdx; }
       
       Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub');
       if(!e.shiftKey){
@@ -1679,6 +1704,7 @@ window.addEventListener('mouseup',e=>{
         refreshSelectionUI(); $('stSel').textContent='';
       }
     }
+    refreshTrackGutterActive();
     if(drag.moved) clearClipSelection(); // 框選字幕時取消影片段選取
   }else if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
     const moved=drag.moved, m=drag.mode, c=drag.clip;

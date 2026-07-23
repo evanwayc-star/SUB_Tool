@@ -252,14 +252,7 @@ function _stageRect(){
   if(!_videoWrap) return null;
   const W = _videoWrap.clientWidth, H = _videoWrap.clientHeight;
   if(!W || !H) return null;
-  let vw = State.videoWidth || 0, vh = State.videoHeight || 0;
-  if(!vw || !vh){
-    const ss = WCPreview.stageSize && WCPreview.stageSize();
-    if(ss){ vw = ss.w; vh = ss.h; }
-    else if(video.videoWidth){ vw = video.videoWidth; vh = video.videoHeight; }
-  }
-  // 未載入影片（純編輯字幕）時，預設給 1920x1080 比例，讓安全框與拖曳功能仍能正常運作
-  if(!vw || !vh){ vw = 1920; vh = 1080; }
+  const vw = 1920, vh = 1080;
   const s = Math.min(W/vw, H/vh);
   const dw = Math.max(1, Math.round(vw*s)), dh = Math.max(1, Math.round(vh*s));
   return { x: Math.round((W-dw)/2), y: Math.round((H-dh)/2), w: dw, h: dh };
@@ -349,8 +342,13 @@ let _lastStageH = 0;
 function renderVideoSub(){
   drawSafeFrame(); // 安全框跟著畫面每幀對齊
   renderTimecodeWatermark(); // 同步播放器監看時間碼（不參與輸出）
-  // mpv 是 OS 層子視窗：保留透明的 DOM 命中層才可直接點字幕拖曳；真正的字幕仍由 libass 顯示。
-  // 拖曳期間則暫時隱藏 libass，改用可見 DOM 預覽新位置（見 _subDragMove）。
+  // 【雙引擎渲染架構說明 (v5.2.0)】
+  // 1. 單軌影片 (MPV): mpv.exe 是一個 OS 層級實體視窗 (HWND)，會像一塊黑布一樣完全蓋住底下的 Chrome DOM。
+  //    因此，單軌時「必須」依賴 MPV 內建的 C++ libass 引擎，直接將字幕畫在影片上。此時 HTML DOM 僅保留透明命中層供拖曳。
+  // 2. 多軌影片 (WebCodecs): MPV 無法進行複雜即時混圖，因此會被隱藏。此時改用 HTML canvas (WCPreview) 渲染畫面，
+  //    字幕也就「必須」改由 HTML DOM (#videoSub) 繪製，因為 libass 已經跟著 MPV 被隱藏了。
+  // 3. 尺寸對齊: 透過 substyle.js 的 ASS_PLAY_RES 鎖定 1920x1080 與 0.75 (72/96) 字體係數，
+  //    確保 HTML DOM 與 libass 的字體在像素級別達到數學上的 100% 一致。
   // 若 contextmenu 開啟（_ctxOpen），原生 mpv 會讓位，此時需解除 transparent 顯示 HTML 字幕預覽，避免文字不見。
   const mpvHitLayer=!!(Media.mpvMode && !Media._wcTakeover && !_mpvSubtitleDrag && !_presetEdit && !window._ctxOpen);
   if(_videoSub){

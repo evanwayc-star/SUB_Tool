@@ -181,6 +181,7 @@ function _buildProjectData(){
 
   return {
     app:'SUB Tool', version:3,
+    playhead: Math.max(0, Media.displayTime() || 0),
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
     tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||80,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',valign:t.valign||'bottom',locked:!!t.locked,color:t.color||'#ffffff',
@@ -422,6 +423,11 @@ const Project = {
     State.exportOut=data.exportOut!=null?data.exportOut:null;
     State.listTrack=0;
     State.selectedId=null; State.selectedIds=[]; // 開啟專案後預設不選取任何字幕
+    if(data.playhead != null && typeof data.playhead === 'number'){
+      const pt = Math.max(0, data.playhead);
+      State._pendingPlayhead = pt;
+      setTimeout(() => { try { Media.seek(pt); } catch(e) {} }, 150);
+    }
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); History.reset();
     _lastSavedDataStr = JSON.stringify(_buildProjectData());
     setStatus('專案已載入','ok');

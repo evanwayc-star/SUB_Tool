@@ -2085,6 +2085,7 @@ ipcMain.handle('mpv:subVisible', (e, v) => mpvSend(['set_property', 'sub-visibil
 ipcMain.handle('mpv:loadfile', async (e, p) => {
   if (!isAllowedPath(p)) { console.warn('[sec] mpv loadfile blocked:', p); return null; }
   if (!_mpvClient) { console.error('[mpv] loadfile: no client'); return null; }
+  _mpvSubAdded = false; // 換檔會清空所有軌道（含先前 sub-add 的字幕），重置狀態以確保下次更新時重新 sub-add
   await mpvSend(['set_property', 'pause', true]);
   // 關鍵：啟動時可能帶 --lavfi-complex=[aid1][aid2]...amix（主影片多音軌混音）。
   // 換到音軌數不同的檔案時，該全域濾鏡引用不存在的音軌 → 濾鏡圖失敗、整段無法播放。

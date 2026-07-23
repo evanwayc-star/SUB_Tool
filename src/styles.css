@@ -540,8 +540,13 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s}
 .tl-gtrack:hover .glock{opacity:.8}
 .tl-gtrack .glock.locked{color:var(--accent);opacity:1}
-.tl-gtrack.tl-active{background:rgba(255,255,255,0.12)}
-.tl-track.tl-active{background:rgba(255,255,255,0.12)}
+.tl-gtrack.tl-active, .vgtrack.tl-active, .agtrack.tl-active {
+  background: rgba(255, 255, 255, 0.12) !important;
+  box-shadow: inset 3px 0 0 var(--accent) !important;
+}
+.tl-track.tl-active {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
 .tl-track.hidden-tk{opacity:.2}
 .tl-rubber{position:absolute;border:1px solid var(--accent);background:rgba(240,160,32,.15);z-index:8;pointer-events:none;display:none}
 
@@ -802,12 +807,12 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .ow-toggle-btn:hover, .ow-keep-btn:hover, .auto-select-btn:hover { filter:brightness(1.2); }
 
 /* 加寬字幕列表捲軸並使顏色更顯眼、上下更長 */
-#sublist::-webkit-scrollbar { width: 32px; }
+#sublist::-webkit-scrollbar { width: 16px; }
 #sublist::-webkit-scrollbar-track { background: var(--panel2); }
 #sublist::-webkit-scrollbar-thumb { 
   background-color: rgba(255, 255, 255, 0.45); 
-  border-left: 8px solid transparent; 
-  border-right: 8px solid transparent; 
+  border-left: 4px solid transparent; 
+  border-right: 4px solid transparent; 
   background-clip: padding-box;
   border-radius: 6px; 
   min-height: 40px;

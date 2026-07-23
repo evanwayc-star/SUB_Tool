@@ -64,9 +64,9 @@ export function effStyle(cue, track){
   return st;
 }
 
-/* ASS 的虛擬畫布（PlayResX/Y）。字級／框線／陰影都是相對 【PlayResY（高）】換算的
-   （ScaledBorderAndShadow: yes），座標則相對兩軸。HTML 預覽必須用同一組數字換算，
-   否則預覽與 mpv／匯出對不上。ASS 匯出端（subio.toASSFromState）吃的也是這個常數。 */
+
+/* ASS 虛擬畫布：專案固定基準解析度 (1920x1080)。所有 UI 上的字級、邊界百分比都相對於這個固定尺寸。
+   - 確保不論影片片段是 2.35:1 寬銀幕還是 16:9，字幕在預覽與匯出時大小 100% 絕對固定。 */
 export const ASS_PLAY_RES = { x: 1920, y: 1080 };
 
 /* 文字塊的錨點（align/valign 決定塊的哪一側貼齊座標）。
@@ -81,7 +81,9 @@ function originOf(st){ const a = anchorPct(st); return `${a.x}% ${a.y}%`; }
 /* ---- HTML 預覽（videoSub 每句 span 的 inline CSS；容器只管定位/對齊，由呼叫端處理） ---- */
 export function styleToCss(st, ratio){
   const r = ratio || 1;
-  const fs = Math.max(12, Math.round(st.fontSize * r));
+  // libass / VSFilter 將 ASS Fontsize 視為 pt (96dpi 下 1pt = 1.333px)，
+  // HTML CSS font-size 為 px。DOM 預覽乘以 0.75 (72/96) 即可讓 HTML DOM 預覽與 mpv / libass 渲染尺寸 100% 絕對同構。
+  const fs = Math.max(12, Math.round(st.fontSize * 0.75 * r));
   let css = `font-size:${fs}px;color:${st.color};`+
     `font-family:'${st.font}','Noto Sans TC','Source Han Sans TC',sans-serif;`+
     `font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'};`+
@@ -335,7 +337,9 @@ export function getFonts(){ return _fonts || []; }
    不在自備清單者（使用者自填的系統字型名）原樣傳回。 */
 export function assFontName(name){
   const f = getFonts().find(x => x.name === name);
-  return (f && f.family) || name;
+  let fam = (f && f.family) || name;
+  if (fam === 'Sarasa Mono TC Nerd') fam = 'Sarasa Mono TC';
+  return fam;
 }
 export async function loadFonts(force = false){
   if(_fonts && !force) return _fonts;
