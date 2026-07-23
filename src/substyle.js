@@ -354,14 +354,14 @@ export async function loadFonts(force = false){
     // 以 FontFace API 直接餵位元組註冊——CSS `@font-face{src:url('file://…')}` 會被
     // Chromium 擋下（"A network error occurred"），即使 webSecurity 關閉亦然。
     for(const f of list){
+      _fonts.push(f);
       try{
         const url = await DESK.fileURL(f.file);
         const buf = await (await fetch(url)).arrayBuffer();
         const face = new FontFace(f.name, buf);
         await face.load();
         document.fonts.add(face);
-        _fonts.push(f);
-      }catch(e){ console.warn('[fonts] 載入失敗：' + f.name, String(e && e.message || e)); }
+      }catch(e){ console.warn('[fonts] 預覽載入失敗（仍可匯出）：' + f.name, String(e && e.message || e)); }
     }
   }catch(e){ console.warn('[fonts] load', e); }
   return _fonts;
