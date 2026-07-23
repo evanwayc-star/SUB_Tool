@@ -1750,7 +1750,7 @@ function initUI(){
         await loadFonts(true); // Reload fonts list
         // Update font select HTML
         const sel = $('tsFont');
-        sel.innerHTML = getFonts().map(f=>`<option value="${escapeHTML(f.name)}">${escapeHTML(f.name)}</option>`).join('') + '<option value="__custom">其他...</option>';
+        sel.innerHTML = getFonts().map(f=>`<option value="${escapeHTML(f.name)}">${escapeHTML(f.name)}</option>`).join('') + '<option value="__custom">匯入自訂字型...</option>';
         sel.value = imported;
         tsSet('font', imported);
         renderTrackStyle();
@@ -2465,11 +2465,16 @@ async function init(){
   // v4.25.4 字幕字型：掃 <專案根>/font/ → 注入 @font-face → 填字型下拉（預覽與匯出同一份字型）
   loadFonts().then(fonts=>{
     const sel=$('tsFont'); if(!sel) return;
+    const cur=sel.value;
+    let html = '';
     if(fonts.length){
-      const cur=sel.value;
-      sel.innerHTML=fonts.map(f=>`<option value="${escapeHTML(f.name)}">${escapeHTML(f.name)}</option>`).join('') + '<option value="__custom">其他...</option>';
-      if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
+      html = fonts.map(f=>`<option value="${escapeHTML(f.name)}">${escapeHTML(f.name)}</option>`).join('');
+    } else {
+      // 若 font/ 資料夾為空，保留預設選項
+      html = '<option>更紗黑體</option><option>台北黑體</option><option>思源黑體</option><option>思源宋體</option><option>粉圓字體</option><option>標楷體</option>';
     }
+    sel.innerHTML = html + '<option value="__custom">匯入自訂字型...</option>';
+    if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
     renderVideoSub(); renderTrackStyle();
   }).catch(()=>{});
   History.reset();
