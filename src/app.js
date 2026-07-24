@@ -249,11 +249,25 @@ function _setSubtitleHover(el){
 /* 影片畫面在 videoWrap 內的實際顯示區（contain）。字幕層對齊它 ——
    否則字幕框固定 16:9，遇到不同比例的片（2.39:1 電影 vs 16:9）畫面高度不同，
    字幕卻照同一個框換算 →「字幕大小在各個影片上不一樣」。回 null＝取不到來源尺寸。 */
+/* 畫面【實際被畫出來的那塊】——字幕層、安全框、圖片層、拖曳換算全部以它為基準。
+   #video 是 object-fit:contain，所以顯示區是「來源比例貼合 videoWrap 後」的內縮矩形。
+
+   基準必須是【來源的真實尺寸】，不能寫死 16:9：
+   匯出畫布用的是 State.videoWidth/Height（見 subio.js），mpv 也照真實畫面。
+   這裡若假設 16:9，2.35:1 的素材會讓預覽的字級相對畫面高放大約 32%，
+   而 posY=91% 在預覽落在黑邊上、匯出卻在畫面內——三路一致（§0.1）當場破功。
+
+   State.videoWidth/Height 兩條開檔路徑都會設：原生走 media.js:752（video.videoWidth）、
+   mpv／ffmpeg 走 media.js:874（ffprobe 的 info.video）。取不到才退回 16:9，
+   那是「還沒載入任何影片」的空專案情境。 */
+const STAGE_FALLBACK_W = 1920, STAGE_FALLBACK_H = 1080;
 function _stageRect(){
   if(!_videoWrap) return null;
   const W = _videoWrap.clientWidth, H = _videoWrap.clientHeight;
   if(!W || !H) return null;
-  const vw = 1920, vh = 1080;
+  const srcW = +State.videoWidth || 0, srcH = +State.videoHeight || 0;
+  const vw = srcW > 0 ? srcW : STAGE_FALLBACK_W;
+  const vh = srcH > 0 ? srcH : STAGE_FALLBACK_H;
   const s = Math.min(W/vw, H/vh);
   const dw = Math.max(1, Math.round(vw*s)), dh = Math.max(1, Math.round(vh*s));
   return { x: Math.round((W-dw)/2), y: Math.round((H-dh)/2), w: dw, h: dh };
