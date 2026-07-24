@@ -16,13 +16,8 @@ function busLabel(bus,index){ return `A${index+1}`; }
 function busName(bus,index){ return bus?.name||busLabel(bus,index); }
 function busVolume(bus){ return Math.max(0,Math.min(1.5,Number(bus?.volume==null?1:bus.volume)||0)); }
 
-/* 與 timeline 的 bus 控制共用同一個通知介面：Media 負責重新套 gain，
-   timeline 則依 DOM event 更新列與波形。拖曳音量時只即時更新 gain，放開後才完整重繪。 */
-/* bus 的 M／S／音量變動後通知下游。
-   ── live=true（拖曳推桿中）：只套增益，不重繪——每次 input 都重畫整條時間軸太貴。
-   ── 否則發 `audio:busChanged`，由 media.js 訂閱後套增益並重繪音軌列與時間軸。
-   以前這裡同時發 events.js 事件與 window CustomEvent('audio-project:bus-change')，
-   但前者沒有任何訂閱者、實際生效的是後者。同一件事兩條路徑遲早漂掉，已收斂成一條。 */
+/* bus 的 M／S／音量變動後通知下游。live=true（拖曳推桿中）只套增益、不發事件——
+   每次 input 都重畫整條時間軸太貴。事件的訂閱端與來由見 docs/開發與驗證.md 的事件表。 */
 function notifyBusChange(bus,field,value,{live=false}={}){
   if(live){ Media.applyGains(); return; }
   emit('audio:busChanged',{busId:bus?.id,bus,field,value});

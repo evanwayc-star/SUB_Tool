@@ -1,10 +1,14 @@
 參考資料/
 test-media/
 
-# .claude/ 本身【不擋】——launch.json 等設定要共用給多個 AI 工具（見 AGENTS.md §0）。
+# .claude/ 本身【不擋】——launch.json 等設定要共用給多個 AI 工具（見 AGENTS.md §6）。
 # 只擋本機專屬的那一份：settings.local.json 存的是這台機器的權限白名單，
 # 裡面含使用者家目錄與樣本檔的絕對路徑，且每次授權都會變動。
 .claude/settings.local.json
+
+# 第三方 agent skill 的安裝結果，性質同 node_modules/——由工具裝到本機，不是本專案的原始碼。
+# 曾有 112 個檔案被 git add -A 掃進版控（見 v5.0.0 稽核第 6 批）。
+.agents/skills/
 
 # 建置產物（npm run build / npm run dist 產生，不進版控）
 # dist/ 曾在 898d092 被移除追蹤，但當時漏了補這一行，
