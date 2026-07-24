@@ -682,7 +682,7 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
       if (input.sourceChannel != null) chain += `pan=mono|c0=c${input.sourceChannel},`;
       const trimStart = Math.max(0, input.trimStart - seekStart);
       const trimEnd = input.trimEnd == null ? null : Math.max(trimStart, input.trimEnd - seekStart);
-      chain += `atrim=start=${_filterNumber(trimStart)}`;
+      chain += `asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(trimStart)}`;
       if (trimEnd != null) chain += `:end=${_filterNumber(trimEnd)}`;
       chain += ',asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono';
       if (Math.abs(input.volume - 1) > 0.000001) chain += `,volume=${_filterNumber(input.volume, 1)}`;
@@ -916,10 +916,10 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
         const pyClip = Math.max(0, Math.min(1, c.posY == null ? 0.5 : +c.posY));
         const BG = `t${ti}ib${si}`, IM = `t${ti}im${si}`;
         fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${clen.toFixed(3)},format=yuva420p,setsar=1[${BG}]`);
-        fc.push(`[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
+        fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
         vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
       } else {
-        vchain = `[${vIdx}:v]trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
+        vchain = `[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
       }
       
       // 轉場：淡入/淡出（fade alpha＝淡到透明，讓下層/黑底露出→軌間溶接）
@@ -970,7 +970,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
           let chain = `[${mappedIdx}:a${streamSelector}]`;
           if (Number.isInteger(ch.sourceChannel) && ch.sourceChannel >= 0)
             chain += `pan=mono|c0=c${ch.sourceChannel},`;
-          chain += `atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
+          chain += `asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
           fc.push(chain);
           mono.push(`[am${i}_${j}]`);
         });
@@ -981,7 +981,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
       } else if (hasAudioStream(c.path)) {
         al = `[aa${i}]`;
         const seekStart = reusableMasterInputs.get(c.path)?.seekStart || 0;
-        fc.push(`[${videoInputIndices[i]}:a]atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+        fc.push(`[${videoInputIndices[i]}:a]asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else return;
       const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
       // 轉場：音訊淡入/淡出（與影像同步）

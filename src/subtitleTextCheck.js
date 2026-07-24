@@ -6,6 +6,10 @@
 ============================================================================== */
 /* SUB Tool — 字幕文字字元檢查（純邏輯，供字幕檢查面板與測試共用） */
 
+/* 台灣常用字白名單，避免異體字或共用字造成誤判（依據使用者回報之指南） */
+const WHITELIST_CHARACTERS = '台裡著面才只它嘆夠峰群妳';
+const WHITELIST_SET = new Set(WHITELIST_CHARACTERS);
+
 /* 此集合由 OpenCC 的 STCharacters 字典萃取，只保留「簡轉繁時一定會改字」
    的來源字。
    Source: https://github.com/BYVoid/OpenCC/blob/master/data/dictionary/STCharacters.txt
@@ -90,6 +94,8 @@ function inspectSubtitleCharacters(text){
   const seenUnsupported = new Set();
 
   for(const character of str){
+    if(WHITELIST_SET.has(character)) continue;
+
     if(UNAMBIGUOUS_SIMPLIFIED_SET.has(character)){
       if(!seenSimplified.has(character)){
         seenSimplified.add(character);

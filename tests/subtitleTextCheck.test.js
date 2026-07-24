@@ -21,10 +21,10 @@ describe('字幕字元檢查', () => {
     expect(result.unsupported).toEqual(expect.arrayContaining(['こ', '안', 'П', '\u200B']));
   });
 
-  it('繁簡共用字（如「后、干、台、里」）不會誤報為簡體或問題字元', () => {
-    expect(inspectSubtitleCharacters('后后干干台台里里')).toEqual({
+  it('繁簡共用字（如「后、干、里」）不會誤報為簡體或問題字元', () => {
+    expect(inspectSubtitleCharacters('后后干干里里')).toEqual({
       simplified: [],
-      sharedSimplified: ['后', '干', '台', '里'],
+      sharedSimplified: ['后', '干', '里'],
       unsupported: [],
     });
   });
@@ -35,17 +35,25 @@ describe('字幕字元檢查', () => {
   });
 
   it('共用字與常見簡體字混用時，僅回傳常見簡體字與非允許字元', () => {
-    expect(inspectSubtitleCharacters('简后干台里简あ')).toEqual({
+    expect(inspectSubtitleCharacters('简后干里简あ')).toEqual({
       simplified: ['简'],
-      sharedSimplified: ['后', '干', '台', '里'],
+      sharedSimplified: ['后', '干', '里'],
       unsupported: ['あ'],
     });
   });
 
   it('繁簡共用字與常見簡體混用時，simplified 僅包含常見簡體字', () => {
-    expect(inspectSubtitleCharacters('台简')).toEqual({
+    expect(inspectSubtitleCharacters('干简')).toEqual({
       simplified: ['简'],
-      sharedSimplified: ['台'],
+      sharedSimplified: ['干'],
+      unsupported: [],
+    });
+  });
+
+  it('白名單字元（如「台、裡、著、面、才、只、它、嘆、夠、峰、群、妳」）直接放行，不視為簡體或共用字', () => {
+    expect(inspectSubtitleCharacters('台裡著面才只它嘆夠峰群妳')).toEqual({
+      simplified: [],
+      sharedSimplified: [],
       unsupported: [],
     });
   });
