@@ -17,9 +17,13 @@
       將 `MAX_AUDIO_BUSES` 個輸入 Bus 強制映射到對應的輸出 Stream。
 
    【維護鐵律】
-   - 當修改 `State.audioProject` 內部的陣列長度 (如增加 Bus 或切換 Layout) 時，
-     必須同步觸發 `emit('audioRoutingChanged')`，讓 `media.js` 得以即時重建
-     AudioContext 的連線圖 (Graph)，否則播放時會產生斷音或串音。
+   - 改完 `State.audioProject`（增減 Bus、切換 Layout、改來源→bus 對應）後，必須讓
+     `media.js` 重建 Web Audio 連線圖，否則播放會斷音或串音。本檔採**直接呼叫**：
+     `Media.registerAudioRouting(...)` 重建某素材的聲道對應、`Media.applyGains()`
+     套用 M/S/音量，再視情況 `renderAudioTracks()` / `drawTimeline()` 重繪。
+     ── 不要改用事件：曾有註解要求 `emit('audioRoutingChanged')`，但那個事件
+        **從未被 emit、也從未有訂閱者**，照做等於什麼都沒發生（`events.js` 的 emit
+        在無 handler 時是靜默 no-op，不會報錯，所以錯得很安靜）。
 ============================================================================== */
 import { State, ensureAudioBusCount, ensureAudioExportDefaults, normalizeAudioProject } from './state.js';
 import { Seq } from './sequence.js';
