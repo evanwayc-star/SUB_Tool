@@ -1,0 +1,145 @@
+/* 選取狀態的兩條不變量。
+
+   ① 三種選取互斥：字幕（selectedId/selectedIds）、視訊片段（selectedClipId）、
+      音訊片段（selectedAudioClipId）不可同時有值。漏清一個，Delete 或 Ctrl+K
+      就會作用在使用者以為沒選中的東西上——畫面不會報錯，資料卻被改掉。
+   ② activeTrackKind 必須與被選中的 id 同類，否則 ↑／↓ 會跳到別種軌。
+
+   這兩條以前散在約 97 個裸賦值裡由各處自行維持，沒有任何一處負責它們。
+   已收斂到 setSelection()／clearSelection()。 */
+import { beforeEach, describe, expect, it } from 'vitest';
+import { State, setSelection, clearSelection } from '../src/state.js';
+
+/* 每種選取都放進值，任何遺漏的清空都會在斷言裡現形。 */
+const dirty = () => {
+  State.selectedId = 'cue9';
+  State.selectedIds = ['cue8', 'cue9'];
+  State.selectedClipId = 'clip9';
+  State.selectedAudioClipId = 'aclip9';
+  State.activeTrackKind = 'video';
+};
+
+const snapshot = () => ({
+  selectedId: State.selectedId,
+  selectedIds: State.selectedIds,
+  selectedClipId: State.selectedClipId,
+  selectedAudioClipId: State.selectedAudioClipId,
+  activeTrackKind: State.activeTrackKind,
+});
+
+beforeEach(() => { dirty(); });
+
+describe('三種選取互斥', () => {
+  it('選字幕會清掉視訊與音訊片段選取', () => {
+    setSelection({ kind: 'sub', ids: ['a', 'b'] });
+    expect(snapshot()).toMatchObject({
+      selectedIds: ['a', 'b'], selectedId: 'b',
+      selectedClipId: null, selectedAudioClipId: null,
+      activeTrackKind: 'sub',
+    });
+  });
+
+  it('選視訊片段會清掉字幕與音訊選取', () => {
+    setSelection({ kind: 'video', ids: 'clip1' });
+    expect(snapshot()).toMatchObject({
+      selectedClipId: 'clip1',
+      selectedId: null, selectedIds: [], selectedAudioClipId: null,
+      activeTrackKind: 'video',
+    });
+  });
+
+  it('選音訊片段會清掉字幕與視訊選取', () => {
+    setSelection({ kind: 'audio', ids: 'aclip1' });
+    expect(snapshot()).toMatchObject({
+      selectedAudioClipId: 'aclip1',
+      selectedId: null, selectedIds: [], selectedClipId: null,
+      activeTrackKind: 'audio',
+    });
+  });
+
+  it('任何時刻最多只有一種選取有值', () => {
+    for (const kind of ['sub', 'video', 'audio']) {
+      dirty();
+      setSelection({ kind, ids: ['x'] });
+      const s = snapshot();
+      const filled = [
+        s.selectedIds.length > 0 || s.selectedId != null,
+        s.selectedClipId != null,
+        s.selectedAudioClipId != null,
+      ].filter(Boolean).length;
+      expect(filled, `kind=${kind} 時有 ${filled} 種選取同時有值`).toBe(1);
+    }
+  });
+});
+
+describe('activeTrackKind 與選取同步', () => {
+  it.each(['sub', 'video', 'audio'])('選 %s 時 activeTrackKind 跟著切', kind => {
+    setSelection({ kind, ids: ['x'] });
+    expect(State.activeTrackKind).toBe(kind);
+  });
+
+  /* 點時間軸空白處＝取消選取，但那一軌仍是目前焦點軌（見 開發與驗證.md §4.13）。
+     若這裡把 activeTrackKind 也清掉，鍵盤導航會失去焦點軌。 */
+  it('clearSelection 保留 activeTrackKind', () => {
+    State.activeTrackKind = 'audio';
+    clearSelection();
+    expect(State.activeTrackKind).toBe('audio');
+    expect(snapshot()).toMatchObject({
+      selectedId: null, selectedIds: [], selectedClipId: null, selectedAudioClipId: null,
+    });
+  });
+});
+
+describe('primary（主選取）的規則', () => {
+  it('未指定時取最後一個——與既有的「最後點到的成為主選取」一致', () => {
+    setSelection({ kind: 'sub', ids: ['a', 'b', 'c'] });
+    expect(State.selectedId).toBe('c');
+  });
+
+  it('可明確指定 primary', () => {
+    setSelection({ kind: 'sub', ids: ['a', 'b', 'c'], primary: 'a' });
+    expect(State.selectedId).toBe('a');
+    expect(State.selectedIds).toEqual(['a', 'b', 'c']);
+  });
+
+  it('空集合時 primary 為 null', () => {
+    setSelection({ kind: 'sub', ids: [] });
+    expect(State.selectedId).toBeNull();
+    expect(State.selectedIds).toEqual([]);
+  });
+});
+
+describe('輸入防禦（呼叫端傳什麼都不該讓狀態變成半殘）', () => {
+  it('單一 id 可不包成陣列', () => {
+    setSelection({ kind: 'video', ids: 'clip1' });
+    expect(State.selectedClipId).toBe('clip1');
+  });
+
+  it('null / undefined 的 id 會被濾掉，不會變成選取值', () => {
+    setSelection({ kind: 'sub', ids: ['a', null, undefined, 'b'] });
+    expect(State.selectedIds).toEqual(['a', 'b']);
+  });
+
+  it('完全不給參數＝清空，且不丟例外', () => {
+    expect(() => setSelection()).not.toThrow();
+    expect(snapshot()).toMatchObject({
+      selectedId: null, selectedIds: [], selectedClipId: null, selectedAudioClipId: null,
+    });
+  });
+
+  it('未知的 kind 視為清空，且不會亂設 activeTrackKind', () => {
+    State.activeTrackKind = 'sub';
+    setSelection({ kind: 'nonsense', ids: ['x'] });
+    expect(State.activeTrackKind).toBe('sub');
+    expect(snapshot()).toMatchObject({
+      selectedId: null, selectedIds: [], selectedClipId: null, selectedAudioClipId: null,
+    });
+  });
+
+  it('selectedIds 永遠是陣列（呼叫端會直接 .includes / .length）', () => {
+    for (const ids of [null, undefined, 'x', ['a']]) {
+      setSelection({ kind: 'sub', ids });
+      expect(Array.isArray(State.selectedIds)).toBe(true);
+    }
+  });
+});

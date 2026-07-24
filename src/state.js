@@ -582,6 +582,41 @@ function saveKeys() {
 
 function isSel(id){ return State.selectedIds.includes(id); }
 
+/* 選取狀態的單一入口。這裡守兩條【真的不變量】，以前它們散在約 97 個裸賦值裡
+   由各處自行維持：
+
+     ① 三種選取互斥 —— 字幕（selectedId/selectedIds）、視訊片段（selectedClipId）、
+        音訊片段（selectedAudioClipId）不可同時有值。漏清一個，
+        Delete 或 Ctrl+K 就會作用在使用者以為沒選中的東西上。
+     ② activeTrackKind 必須與被選中的 id 同類，否則鍵盤導航（↑／↓）會跳到別種軌。
+
+   典型呼叫：
+     setSelection({ kind:'sub',   ids:[a,b], primary:b })  多選字幕
+     setSelection({ kind:'video', ids:clipId })            選一個視訊片段
+     setSelection({ kind:'audio', ids:[] })                切到音訊軌並清空選取
+
+   注意：這裡【只管狀態】，不重繪。呼叫端仍要自己叫 refreshSelectionUI() 等，
+   維持與既有程式碼相同的節奏（一次操作可能改多項狀態後才重繪一次）。 */
+const SELECTION_KINDS = new Set(['sub', 'video', 'audio']);
+
+function setSelection({ kind = null, ids = [], primary } = {}){
+  /* 只認得這三種。未知的 kind 一律視為清空，且【不可】寫進 activeTrackKind——
+     它被宣告為 'sub' | 'video' | 'audio'，塞進別的值會讓鍵盤導航的分支全部落空，
+     而且不會有任何錯誤訊息。 */
+  const k = SELECTION_KINDS.has(kind) ? kind : null;
+  const list = Array.isArray(ids) ? ids.filter(v => v != null) : (ids == null ? [] : [ids]);
+  State.selectedIds        = k === 'sub'   ? list : [];
+  State.selectedId         = k === 'sub'   ? (primary !== undefined ? primary : (list.length ? list[list.length - 1] : null)) : null;
+  State.selectedClipId     = k === 'video' ? (list.length ? list[0] : null) : null;
+  State.selectedAudioClipId= k === 'audio' ? (list.length ? list[0] : null) : null;
+  if(k) State.activeTrackKind = k;
+  return State;
+}
+
+/* 清空三種選取但【保留】activeTrackKind——點時間軸空白處的語意是
+   「取消選取，但這一軌仍是目前焦點軌」（見 docs/開發與驗證.md §4.13）。 */
+function clearSelection(){ return setSelection({ kind: null }); }
+
 function cueSuffix(c){
   if(!c) return '';
   const tk=c.track||0;
@@ -594,4 +629,4 @@ function cueSuffix(c){
 export { State, newTrack, syncTrackCount, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks,
   newAudioBus, normalizeAudioProject, resetAudioProject, ensureAudioBusCount, ensureAudioExportDefaults,
   ensureAudioSourceMap, routeForChannel,
-  FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys };
+  FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, setSelection, clearSelection, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys };

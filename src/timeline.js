@@ -26,7 +26,7 @@
      引起 Reflow 的屬性 (如 offsetWidth, clientHeight)。請改讀取緩存的 `viewportW` 變數。
 ============================================================================== */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js';
-import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId } from './state.js';
+import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId, setSelection} from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { encoreParts } from './time.js';
@@ -270,9 +270,8 @@ function renderTrackRows(){
       g.addEventListener('click', e => {
         if (e.target.closest('.eye,.glock,.gdel,.drag-handle') || nm.contentEditable === 'true') return;
         e.stopPropagation();
-        State.activeTrackKind = 'sub';
         State.listTrack = tk;
-        State.selectedIds = []; State.selectedId = null; State.selectedClipId = null; State.selectedAudioClipId = null;
+        setSelection({ kind: 'sub', ids: [] });   // 切到字幕軌並清空三種選取（互斥由 setSelection 保證）
         refreshSelectionUI();
         renderClipBlocks();
         const sel = $('listTrackSel'); if (sel) sel.value = String(tk);
@@ -845,9 +844,8 @@ function renderVtrackGutter(){
       `</div>`;
     g.addEventListener('click', e => {
       if (e.target.closest('.eye,.glock,.gdel,.gadd') || g.querySelector('.gname')?.contentEditable === 'true') return;
-      State.activeTrackKind = 'video';
       State.activeVtrack = v;
-      State.selectedId = null; State.selectedIds = []; State.selectedClipId = null; State.selectedAudioClipId = null;
+      setSelection({ kind: 'video', ids: [] });
       refreshSelectionUI();
       renderClipBlocks();
       renderAudioTrackRows();
@@ -1110,9 +1108,8 @@ function renderAtrackGutter(){
       `<button class="alock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌'}">${isLocked?'🔒':'🔓'}</button>`;
     g.addEventListener('click', ev => {
       if (ev.target.closest('.audio-clip-mute,.alock')) return;
-      State.activeTrackKind = 'audio';
       State.activeAudioTrackId = row.sourceId;
-      State.selectedId = null; State.selectedIds = []; State.selectedClipId = null; State.selectedAudioClipId = null;
+      setSelection({ kind: 'audio', ids: [] });
       refreshSelectionUI();
       renderClipBlocks();
       renderAudioTrackRows();

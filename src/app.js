@@ -31,7 +31,7 @@ import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFil
 import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assToSec, encoreToSec, snapTimeToFrame } from './time.js';
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv, sublist } from './dom.js';
-import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys } from './state.js';
+import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection} from './state.js';
 import { Media, Wave } from './media.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
@@ -1325,7 +1325,7 @@ async function doAction(act, force = false){
       State.videoTracks.forEach(t=>t.locked=anyUnlocked);
       buses.forEach(t=>t.locked=anyUnlocked);
       recordHistory(anyUnlocked?'鎖定全部軌道':'解鎖全部軌道');
-      if(!anyUnlocked){ State.selectedIds=[]; State.selectedId=null; State.selectedClipId=null; State.selectedAudioClipId=null; const el=document.getElementById('stSel'); if(el) el.textContent=''; }
+      if(!anyUnlocked){ clearSelection(); const el=document.getElementById('stSel'); if(el) el.textContent=''; }
       drawTimeline();
     } break;
     case 'copy-track': doCopyTrack(); break;
