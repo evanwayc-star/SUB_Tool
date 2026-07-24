@@ -168,20 +168,11 @@ function renderMixer(){
   });
 }
 
+/* 電平表的來源聲道一律問 Media，不要自己過濾 Media.tracks。
+   這裡以前重寫了一份判定，漏掉外部素材的 placement gain，於是外部音檔被停用時
+   表還在跳但沒有聲音。判定的家在 media.js（見 Media.routedTracksForBus）。 */
 function _busRouteTracks(bus){
-  const busId=String(bus?.id||'');
-  if(!busId)return [];
-  const anyTrackSolo=Media.tracks.some(track=>track.solo&&!track._srcHidden);
-  const anyBusSolo=projectBuses().some(item=>item.solo);
-  if(bus.muted||(anyBusSolo&&!bus.solo)) return [];
-  return Media.tracks.filter(track=>{
-    if(track._srcHidden||!track.analyser||!track.audioSourceId) return false;
-    if(anyTrackSolo?!track.solo:track.muted) return false;
-    const route=State.audioProject?.sourceMaps?.[track.audioSourceId]?.channels?.find(item=>
-      item.sourceStream===track.sourceStream&&item.sourceChannel===track.sourceChannel
-    );
-    return !!(route&&route.enabled!==false&&Array.isArray(route.busIds)&&route.busIds.some(id=>String(id)===busId));
-  });
+  return Media.routedTracksForBus(bus?.id);
 }
 function _trackLevel(track){
   try{

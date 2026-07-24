@@ -2642,6 +2642,41 @@ const Media = {
   toggleProjectBusMute(id){ const bus=this.projectBusById(id); if(!bus)return; bus.muted=!bus.muted; this.applyGains(); renderAudioTracks(); drawTimeline(); },
   toggleProjectBusSolo(id){ const bus=this.projectBusById(id); if(!bus)return; bus.solo=!bus.solo; this.applyGains(); renderAudioTracks(); drawTimeline(); },
   setProjectBusVolume(id,value){ const bus=this.projectBusById(id); if(!bus)return; bus.volume=Math.max(0,Number(value)||0); this.applyGains(); },
+  /* 「這條聲道現在聽得到嗎」的唯一判定。applyGains 與混音器電平表都必須走它。
+
+     以前混音器自己在 mixer.js 重寫了一份（_busRouteTracks），漏掉 projectRouteState
+     裡的外部素材 placement gain——外部音檔被停用（enabled===false）時實際增益是 0，
+     但電平表照樣把它算進來，於是【表在跳、卻沒有聲音】。
+     兩份判定回答同一個問題卻各寫一次，遲早分歧；已收斂到這裡。 */
+  trackAudible(track){
+    if(!track || track._srcHidden) return false;
+    const anySolo=this.tracks.some(t=>t.solo&&!t._srcHidden);
+    return (anySolo ? !!track.solo : !track.muted) && this.projectRouteState(track).audible;
+  },
+
+  /* 餵給某條 project bus 的聲道。給混音器電平表用——它需要的是「哪些聲道有訊號進來」，
+     而不是 applyGains 的增益值，但兩者的「聽不聽得到」必須是同一套規則。
+     tracks 是裸陣列、沒有介面，外部若自行過濾就得自己解讀 _srcHidden／sourceStream／
+     audioSourceId 的組合語意——那正是上面那個漂移的來源。 */
+  routedTracksForBus(busId){
+    const id=String(busId||'');
+    if(!id) return [];
+    const project=State.audioProject;
+    const buses=project?.buses||[];
+    const bus=buses.find(item=>String(item.id)===id);
+    if(!bus||bus.muted) return [];
+    if(buses.some(item=>item.solo)&&!bus.solo) return [];
+    return this.tracks.filter(track=>{
+      if(!track.analyser||!track.audioSourceId) return false;
+      if(!this.trackAudible(track)) return false;
+      const route=project?.sourceMaps?.[track.audioSourceId]?.channels?.find(item=>
+        item.sourceStream===track.sourceStream&&item.sourceChannel===track.sourceChannel
+      );
+      return !!(route&&route.enabled!==false&&Array.isArray(route.busIds)
+        &&route.busIds.some(rawId=>String(rawId)===id));
+    });
+  },
+
   applyGains(){
     const anySolo=this.tracks.some(t=>t.solo&&!t._srcHidden);
     const routeState=track=>this.projectRouteState(track);
