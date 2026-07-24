@@ -24,7 +24,7 @@ description: 當使用者說「更新與打包」時，自動執行版本號更�
 
 ## 4. 提交與發佈至 GitHub (Commit & Push)
 - 執行 `git add .`。
-- 執行 `git commit -m "Release v[新版本號]: [主要變更簡述]"`。
+- 執行 `git commit -m "發佈 v[新版本號]: [用繁體中文簡述主要變更]"`（**注意：Commit Message 請一律使用繁體中文撰寫**）。
 - 執行 `git push` 將更新推送到遠端儲存庫。
 - (選擇性) 如果有需要，可以建立 Git Tag 並推送：`git tag v[新版本號]`、`git push origin v[新版本號]`。
 
