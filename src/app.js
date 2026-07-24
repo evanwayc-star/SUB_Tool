@@ -65,11 +65,12 @@ on('render:all', renderAll);
 on('render:videoSub', renderVideoSub);
 on('render:listTrackSel', renderListTrackSel);
 on('render:trackStyle', renderTrackStyle); // 換選取字幕 → 樣式面板換對象（v4.31）
-on('render:trackStyle', renderTrackStyle);
 on('playhead:ensure', ensurePlayheadVisible);
 on('duration:known', onDurationKnown);
 on('mpv:refreshSubs', refreshMpvSubs);
-on('panel:toggle', togglePanel);
+/* 這裡曾有 on('panel:toggle', togglePanel)，但全專案零個 emit——收了沒人發的死訂閱。
+   面板開關實際是 doAction() 直接呼叫 togglePanel()（見 'history'／'notes'／'mixer' 等 case）。
+   日後若真需要跨模組開面板，請【同時】加上發送端，不要只留一半（見 docs/開發與驗證.md 的事件表）。 */
 on('note:openInPanel', openNoteInPanel);
 on('cue:openEdit', openCueEditModal);
 on('action', doAction);
