@@ -251,7 +251,37 @@ function _buildExportTimecodeFilter(inputLabel, timecode, width, height, outputL
   return `${inputLabel}drawtext=fontfile='${_drawtextValue(font)}':timecode='${_drawtextValue(timecode.start)}':r=${timecode.rate}:tc24hmax=0:x=${margin}:y=${margin}:fontcolor=0xFFF2C5:fontsize=${fontSize}:box=1:boxcolor=0x080A0CE6:boxborderw=${padding}:borderw=1:bordercolor=0xF59E0B:fix_bounds=1${outputLabel}`;
 }
 
+/* 圖片在【軌影格】上的矩形。這是 src/imagegeom.js imageBox() 的主程序版本，
+   兩者必須逐位元等價——tests/imageGeomContract.test.js 以矩陣比對鎖住這件事。
+
+   為什麼不是「renderer 算好最終矩形傳過來」（架構審查原本的提案）：
+   圖片是先疊進軌影格、軌影格再帶著自己的透明度與疊層順序疊到畫布。
+   直接送畫布座標會繞過那一層，PiP 圖片軌的透明度與遮蔽就會壞掉。
+   共用公式、各自套用在自己的那一層，才是這裡正確的接縫。
+
+   為什麼不讓 ffmpeg 用 force_original_aspect_ratio=decrease 自己算：
+   那樣兩邊就是兩套實作，沒有任何機制保證它們一致。JS 算完給精確的 scale=w:h，
+   contain 的邏輯就只剩一份。 */
+function imageBoxForExport({ frameW, frameH, natW, natH, scale = 1, posX = 0.5, posY = 0.5 } = {}) {
+  const clamp01 = (v, d) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : d;
+  };
+  const SW = Math.max(0, _finiteNumber(frameW, 0)), SH = Math.max(0, _finiteNumber(frameH, 0));
+  const s = Math.max(0.01, _finiteNumber(scale, 1));
+  const boxW = SW * s, boxH = SH * s;
+  const nw = Math.max(0, _finiteNumber(natW, 0)), nh = Math.max(0, _finiteNumber(natH, 0));
+  let w = boxW, h = boxH;
+  if (nw > 0 && nh > 0 && boxW > 0 && boxH > 0) {
+    const k = Math.min(boxW / nw, boxH / nh); // contain
+    w = nw * k; h = nh * k;
+  }
+  const cx = SW * clamp01(posX, 0.5), cy = SH * clamp01(posY, 0.5);
+  return { x: cx - w / 2, y: cy - h / 2, w, h };
+}
+
 module.exports = {
+  imageBoxForExport,
   _EXPORT_LAYOUTS,
   _finiteNumber,
   _filterNumber,

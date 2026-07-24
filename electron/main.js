@@ -541,6 +541,7 @@ function outputAudioBitrates(p) {
 /* 匯出的純決策邏輯已抽到 ./export-plan.js（零 require、可在 vitest 直接測）。
    留在這裡的是需要副作用的部分：找字型要讀檔。 */
 const {
+  imageBoxForExport,
   _finiteNumber,
   _filterNumber,
   _exportPlanError,
@@ -694,8 +695,21 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
         const pyClip = Math.max(0, Math.min(1, c.posY == null ? 0.5 : +c.posY));
         const BG = `t${ti}ib${si}`, IM = `t${ti}im${si}`;
         fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${clen.toFixed(3)},format=yuva420p,setsar=1[${BG}]`);
-        fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
-        vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+        /* 有原生尺寸時用【與預覽同一條公式】算出精確矩形（imageBoxForExport ≡ imagegeom.imageBox），
+           contain 的邏輯就只有一份。舊專案沒帶 natW/natH 時退回讓 ffmpeg 自己算，
+           結果相同，只是少了「兩邊同一份實作」的保證。 */
+        const box = (+c.natW > 0 && +c.natH > 0)
+          ? imageBoxForExport({ frameW: SW, frameH: SH, natW: +c.natW, natH: +c.natH,
+                                scale: clipScale, posX: pxClip, posY: pyClip })
+          : null;
+        if (box) {
+          const bw = Math.max(2, Math.round(box.w)), bh = Math.max(2, Math.round(box.h));
+          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${bw}:${bh},format=yuva420p,setsar=1[${IM}]`);
+          vchain = `[${BG}][${IM}]overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}:format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+        } else {
+          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
+          vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+        }
       } else {
         vchain = `[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
       }
