@@ -11,6 +11,7 @@
 | 角色 | 檔案 | 職責 |
 |------|------|------|
 | **Main Process** | `electron/main.js` | 視窗管理、系統 ffmpeg/ffprobe、mpv 嵌入、本機檔案 I/O、快取管理 |
+| **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
 | **Renderer Process** | `dist/index.html`（Vite 打包） | UI 介面、字幕編輯、時間軸（完整前端邏輯） |
 | **Preload Script** | `electron/preload.js` | `contextBridge` → `window.subtool`，安全橋接 Node 能力給前端 |
 
@@ -256,7 +257,7 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 | 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |
 | 使用者說某個按鈕「按了沒反應」 | 是不是用到了 `window.prompt()`？**Electron 停用了它**，回傳永遠是 null，靜默失敗。改用 `ui.js` 的 `promptModal()` |
 | HTML 疊層（字幕拖曳、安全框）在 MXF 模式下看不到 / 點不到 | mpv 是 **OS 層 always-on-top 子視窗**，蓋在所有 HTML 之上；需要 `mpv.show(false)` 讓位（`_syncMpvPanel()`） |
-| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | 這是因為透明視窗事件穿透（Click-Through）狀態卡死。自 v5.0.0 起已棄用輪詢，改由 Chromium 原生 `pointer-events` 與事件轉發處理。若問題復現，請檢查：1. `main.js` 中的 `setIgnoreMouseEvents(!active, { forward: true })` 參數是否被誤改；2. `preload.js` 是否漏掉了 `enter` 與 `leave` 白名單；3. `app.js` 與 `main.js` 之間是否有其他攔截。 |
+| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | guide 視窗**刻意永久穿透**，互動一律由主視窗的 `#imageLayer` DOM 處理（見 `技術架構說明.md` §0.9）。請檢查：1. `main.js` 的 `setIgnoreMouseEvents(true, { forward: true })` 是否被改成有條件切換；2. `#imageLayer` 是否仍為**無條件建立**（不可只在非 mpv 模式建立）。**不要**把 `enter`／`leave` 加回 `mpv-guide-preload.js` 的白名單——那條路徑從未執行過（送出端沒帶座標，在 x/y 檢查就被丟掉），已於 v5.2.3 移除；接回去反而會讓 guide 在 hover 時奪取指標，底層視訊軌拖曳與右鍵選單全部失效。 |
 | 圖片匯出只顯示第一格或後段變黑 | 檢查 renderer 是否保留 `clip.type === 'image'`；主程序必須對該輸入加 `-loop 1 -framerate <project fps>`，並把每個 clip 的 `scale/posX/posY` 傳進 filtergraph。 |
 | TC 監看在 mpv 模式不顯示 | 先確認播放器 TC 開關為開，再檢查透明 guide 是否建立；這是監看 overlay，與匯出視窗的「壓入時間碼浮水印」為兩個獨立開關。 |
 | 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |
