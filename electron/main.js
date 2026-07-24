@@ -1632,8 +1632,8 @@ const wrapAt=(x,y)=>{const t=document.elementFromPoint(x,y);return t&&t.closest?
 const setHover=wrap=>{for(const el of imgContainer.querySelectorAll('.img-wrap.hovering'))if(el!==wrap)el.classList.remove('hovering');if(wrap)wrap.classList.add('hovering');};
 const point=e=>{const r=stageRect||{x:0,y:0};return{x:e.clientX-(+r.x||0),y:e.clientY-(+r.y||0)};};
 const send=(type,extra={})=>{const b=bridge();if(b)b.pointer({type,...extra});};
-document.addEventListener('mouseover', e => { if(e.target.closest&&e.target.closest('.img-wrap')) send('enter'); });
-document.addEventListener('mouseout', e => { if(e.target.closest&&e.target.closest('.img-wrap')&&(!e.relatedTarget||!e.relatedTarget.closest('.img-wrap'))) send('leave'); });
+// 這裡曾送出 'enter'／'leave' 給主程序切換指標抓取，但兩者都沒帶座標，
+// 在 mpv-guide-preload.js 的 x/y 檢查就被丟掉，從未生效。已移除，見 §0.9。
 document.addEventListener('pointermove',e=>{if(dragging){const p=point(e);send('move',{x:p.x,y:p.y});e.preventDefault();return;}setHover(wrapAt(e.clientX,e.clientY));});
 document.addEventListener('pointerdown',e=>{if(e.button!==0)return;const wrap=wrapAt(e.clientX,e.clientY);if(!wrap)return;const p=point(e);const handle=(e.target.closest&&e.target.closest('.resize-handle'))||(document.elementFromPoint(e.clientX,e.clientY)?.closest?.('.resize-handle'))||null;const corner=handle?.dataset?.corner||null;dragging={id:wrap.dataset.id,corner};try{wrap.setPointerCapture(e.pointerId);}catch(_){}send('start',{id:dragging.id,corner,x:p.x,y:p.y});e.preventDefault();});
 const finish=(e,type)=>{if(!dragging)return;const p=point(e);send(type,{id:dragging.id,x:p.x,y:p.y});dragging=null;setHover(wrapAt(e.clientX,e.clientY));};
@@ -2062,25 +2062,19 @@ ipcMain.handle('mpv:clearTimecodeWatermark', (e) => {
 // 經常發生非預期的座標偏移，導致 25ms 的座標 hit test 極不穩定，進而使滑鼠點擊
 // 在 setIgnoreMouseEvents(true) 的狀態下被直接穿透給底層主視窗，無法拖曳圖片。
 //
-// 解決方案：
-// 依賴 Chromium 原生的事件轉發 (forward: true)。當透明視窗處於 ignoresMouseEvents(true)
-// 且帶有 forward: true 時，底層 Chromium 依舊會對 pointer-events: auto 的元素發送
-// mouseenter / mouseleave 事件。我們在 MPV_GUIDE_HTML 內利用這些原生事件向主進程
-// 送出 'enter' 與 'leave'，精確地切換互動狀態，徹底根除死結。
+// 解決方案：guide 視窗【永久保持穿透】（setIgnoreMouseEvents(true, { forward: true })），
+// 互動一律由主視窗的 DOM 疊層處理——那一層是無條件建立的，兩個原生視窗都不攔截點擊，
+// 所以指標本來就會落到主視窗上。
+//
+// 這裡曾有 'enter'／'leave' 兩個分支，用來在 hover 時切換 setMpvGuideInteractive()。
+// 它們【從未執行過】：送出端沒帶座標，訊息在 preload 的 x/y 檢查就被丟掉。
+// 移除的是死碼，不是行為。【不要】把它們加回來——一旦 guide 在 hover 時奪取指標抓取權，
+// 底層視訊軌拖曳與右鍵選單就會失效，即 v4.6.3 當初要解決的那個死結。
 ipcMain.on('mpv-guide:imagePointer', (e, raw) => {
   if (!_mpvGuideWin || _mpvGuideWin.isDestroyed() || e.sender !== _mpvGuideWin.webContents) return;
   if (!raw || typeof raw !== 'object') return;
   const type = String(raw.type || '');
-  if (!['start', 'move', 'end', 'cancel', 'enter', 'leave'].includes(type)) return;
-  
-  if (type === 'enter') {
-    if (!_mpvGuideDragging) setMpvGuideInteractive(true);
-    return;
-  }
-  if (type === 'leave') {
-    if (!_mpvGuideDragging) setMpvGuideInteractive(false);
-    return;
-  }
+  if (!['start', 'move', 'end', 'cancel'].includes(type)) return;
 
   const x = Number(raw.x), y = Number(raw.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
