@@ -70,9 +70,16 @@ describe('trackFrame / imageBoxOnStage：視訊軌 PiP 也要跟匯出一致', (
   });
 });
 
-/* 匯出端在主程序（CommonJS，無法直接 import），以原始碼守住它沒有回頭用 pad：
-   pad 不接受負位移，且位移得用縮放後的真實尺寸算——這正是 v4.6 的兩個 bug。 */
-describe('electron/main.js 圖片分支：必須用 overlay 定位', () => {
+/* 匯出端在主程序（CommonJS），這裡只守【無法用其他方式驗證】的不變量。
+
+   幾何本身不在這裡驗——它已經由 tests/imageGeomContract.test.js 以矩陣窮舉
+   直接比對兩份實作（imagegeom.imageBox ≡ export-plan.imageBoxForExport），
+   那是真的執行程式碼，比在這裡比對原始碼字面可靠得多。
+
+   這個區塊原本用 regex 鎖死 overlay 的字面寫法。批次5 把圖片幾何改成共用公式後，
+   那些斷言全部變成「鎖住舊寫法、擋住正確的改動」——正是架構審查點名的
+   「接縫不存在時，測試只能鎖字面」。已改為只保留下面兩條真正的不變量。 */
+describe('electron/main.js 圖片分支：以原始碼守住的兩條不變量', () => {
   const src = fs.readFileSync(path.join(ROOT, 'electron', 'main.js'), 'utf8');
   const branch = src.slice(src.indexOf("if (c.type === 'image') {"), src.indexOf("} else {", src.indexOf("if (c.type === 'image') {")));
 
@@ -80,19 +87,20 @@ describe('electron/main.js 圖片分支：必須用 overlay 定位', () => {
     expect(branch.length).toBeGreaterThan(200);
   });
 
-  it('以 overlay 對齊圖片中心到 posX/posY（與 imageBox 同義）', () => {
-    expect(branch).toMatch(/overlay=x=\(W\*\$\{pxClip\.toFixed\(4\)\}\)-\(w\/2\):y=\(H\*\$\{pyClip\.toFixed\(4\)\}\)-\(h\/2\)/);
-  });
-
-  it('不再使用 pad 定位圖片（pad 會讓 scale>1 直接 -22 失敗）', () => {
+  /* pad 不接受負位移（scale>1 直接 -22，整支匯出失敗，不只圖片壞掉），
+     且它的位移必須用縮放【後】的真實尺寸算——這正是 v4.6 的兩個 bug。 */
+  it('不使用 pad 定位圖片', () => {
     expect(branch).not.toMatch(/pad=/);
   });
 
-  it('保留 contain 語意（scale + force_original_aspect_ratio=decrease）', () => {
-    expect(branch).toMatch(/force_original_aspect_ratio=decrease/);
+  it('走共用公式，並保留舊專案（無 natW/natH）的退路', () => {
+    expect(branch).toMatch(/imageBoxForExport\(/);
+    expect(branch).toMatch(/force_original_aspect_ratio=decrease/); // fallback 仍在
   });
 
-  it('靜態圖片輸入帶 -loop 1 與 -framerate（否則只會輸出第一格）', () => {
+  /* 這條沒有別的驗法：少了 -loop 1，ffmpeg 只讀 PNG 第一格，
+     整段圖片時間軸會變成黑畫面，而且不會有任何錯誤訊息。 */
+  it('靜態圖片輸入帶 -loop 1 與 -framerate', () => {
     expect(src).toMatch(/inputs\.push\('-loop', '1', '-framerate', String\(R\), '-i', p\)/);
   });
 });
