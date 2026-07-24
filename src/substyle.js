@@ -93,7 +93,11 @@ export function styleToCss(st, ratio){
   // letter-spacing＝字間(縱)、line-height＝列間(橫)語義自動對。
   // vertical-【lr】＝第一行在最左、往右排（非 CJK 書籍的右→左傳統）。
   // ASS 端 verticalAssCols() 依同一方向逐列定位——改這裡務必同時改那裡。
-  if(st.vertical) css += `writing-mode:vertical-lr;text-orientation:mixed;`;
+  // text-orientation 必須是 upright 而非 mixed：mixed 會把英數當成一段「橫向 run」整串
+  // 旋轉 90°，但 ASS 端（verticalChars → assJoinVertical）是【逐字】拆開、每字獨立直立一列。
+  // 用 mixed 的話，含 ABC123 的直書字幕預覽是橫躺的一串、匯出是六個直立字，連整列長度都不同
+  // ——正是 §0.1「三路一致」要防的那種靜默不一致（樣式編輯器的示範文字就含 ABC123）。
+  if(st.vertical) css += `writing-mode:vertical-lr;text-orientation:upright;`;
   // 旋轉支點＝【錨點】，不是文字塊中心：ASS 的 \frz 繞 \org 轉，而 \org 預設就是 \pos 那一點
   // （＝Alignment 指定的那一角）。用 center center 會與匯出／mpv 轉出不同結果——只有
   // align=center+valign=middle 時兩者才恰好重合，難怪預設值下看起來像是對的。
@@ -212,6 +216,23 @@ const VERT_PUNCT = {
   ',':'︐','.':'︒','!':'︕','?':'︖',':':'︓',';':'︔','(':'﹙',')':'﹚','~':'｜',
 };
 /* 回傳逐字陣列（已映射直排標點；\n→全形空格）。HTML 端每字 escape 後 join('<br>') */
+/* ASS 文字跳脫（v5.0.1）：把「使用者輸入的字面文字」與「我們自己送的控制碼」分開。
+   ── 實測（內建 ffmpeg／libass，1000×562 畫面數亮像素）：
+      `AAA{BBB}CCC` 只渲染出 AAACCC（2997，純文字 9 字是 4940）——大括號連同裡面的內容
+      被當成 override tag 整段吃掉；改成 `AAA\{BBB\}CCC` 後為 5579＝11 字完整渲染。
+      從 SRT 匯入殘留的 `{\an8}` 也是同一回事：整個標籤連同大括號被吞掉。
+      `\N` `\n` `\h` 則會被解讀成換行／硬空白（實測 `\N` 讓單行變兩行）。
+   ── 單獨的反斜線【不必】處理：實測 `C:\Users\test` 13 字完整渲染，因為 libass 只認
+      後面接 N/n/h 的序列。故這裡只在那三種情況插入零寬空格切斷，不動其他反斜線，
+      避免把正常路徑文字改得面目全非。
+   ── 只能套用在【使用者文字】上。cueAssTags／cueAssPos／assJoinLines／assJoinVertical
+      產生的是我們自己要送給 libass 的控制碼，一起跳脫會把它們全部破壞掉。 */
+export function assEscapeText(s){
+  return String(s ?? '')
+    .replace(/\\(?=[Nnh])/g, '\\​')  // 切斷 \N \n \h：插零寬空格，畫面上看不出來
+    .replace(/([{}])/g, '\\$1');          // 大括號 → \{ \}（實測有效）
+}
+
 export function verticalChars(text){
   const flat = String(text || '').replace(/\r/g, '').replace(/\n/g, '　');
   const out = [];
@@ -236,7 +257,9 @@ export function assJoinVertical(chars, st){
   let res = '';
   let needsFsRestore = false;
   for(let i=0; i<chars.length; i++){
-    let ch = chars[i];
+    // 先跳脫再串控制碼：順序反過來會把下面那些 {\fs} 一起跳脫掉。
+    // 空白字元不受跳脫影響，故第 242 行的 ' ' 比對仍然成立。
+    let ch = assEscapeText(chars[i]);
     if(needsFsRestore){
       ch = `{\\fs${fs}}` + ch;
       needsFsRestore = false;

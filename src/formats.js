@@ -7,7 +7,7 @@
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
-import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, STYLE_ONLY_KEYS } from './substyle.js';
+import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, STYLE_ONLY_KEYS } from './substyle.js';
 
 /* ===== 2. 字幕格式 解析 / 序列化 ====================================== */
 const SubFormats = {
@@ -113,7 +113,9 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       // （Style 是整軌共用的，改它會動到別句）。
       const anOv = (c.style && (c.style.align != null || c.style.valign != null) && !ownStyle.has(c.id))
         ? `{\\an${assAlignN(st)}}` : '';
-      const lines = String(c.text || '').replace(/\r/g, '').split('\n');
+      // 逐行跳脫後才交給 assJoinLines——它會插入 \N 與 {\fs} 行距墊高，
+      // 那些是我們自己要送的控制碼，不能跟使用者文字一起被跳脫。
+      const lines = String(c.text || '').replace(/\r/g, '').split('\n').map(assEscapeText);
       return head + anOv + cueAssPos(st, vww, vwh) + tags + assJoinLines(lines, st);
     }).join('\n');
     return head+styles+eventsHead+body+'\n';

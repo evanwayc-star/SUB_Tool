@@ -107,7 +107,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 #video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 .vsublayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:4;}
 /* 圖片合成預覽層：疊在預覽畫布之上，行為類似安全框與字幕層，對齊視訊比例區塊 */
-.imglayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:10;}
+/* z-index 必須【低於】.vsublayer(4)：字幕永遠在最上層，與匯出一致
+   （匯出的 ass= 是 filtergraph 最後一道濾鏡，字幕蓋在所有 overlay 之上）。
+   v5.0.0 一度調成 10 → 預覽變成圖片蓋字幕、與成品上下顛倒。仍高於 .safe-frame(2)。 */
+.imglayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:3;}
 /* .img-wrap ＝圖片【實際被畫出來的矩形】（尺寸由 app.js 依 imagegeom.js 算好後以 px 指定）。
    v4.7 前這個框是「scale×畫框」，方形／直式素材的把手會離圖片上百 px；務必保持
    wrap ≡ 圖片，虛線框與四角把手才會貼合素材。 */
