@@ -2767,11 +2767,14 @@ const Media = {
 on('audio:externalRestored',detail=>{
   try{ Media.restoreExternalAudioEditState(detail?.sources); }catch(error){ console.warn('restore external audio history:',error); }
 });
-if(typeof window!=='undefined'){
-  window.addEventListener('audio-project:bus-change',()=>{
-    try{ Media.applyGains(); renderAudioTracks(); drawTimeline(); }catch(e){}
-  });
-}
+/* 專案音訊 bus 的 M／S／音量變更 → 重新套用增益並重繪音軌列與時間軸。
+   ── 走 events.js 而非 window CustomEvent：mixer.js 以前兩者都發，但 `audio:busChanged`
+      從來沒有訂閱者（emit 無 handler 時是靜默 no-op，所以錯得很安靜），實際生效的是
+      繞道 window 的那一條。同一件事有兩條路徑遲早漂掉，且 window 事件在測試環境
+      （非 jsdom）不存在，因此收斂到與 audio:externalRestored 相同的作法。 */
+on('audio:busChanged',()=>{
+  try{ Media.applyGains(); renderAudioTracks(); drawTimeline(); }catch(e){}
+});
 /* 序列切換安全網：rafLoop 於背景分頁/最小化時完全暫停（rAF 凍結），但音訊元素照播——
    若無此網，跨段切換與間隙進出會凍結、音畫脫節。interval 在背景仍以 ~1s 節流執行，
    足以推進切換；前景時 rAF 主導、seqTick 冪等，多呼叫無害。 */
