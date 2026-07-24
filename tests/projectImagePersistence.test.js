@@ -5,6 +5,10 @@ const mediaMock=vi.hoisted(()=>(
   {
     getExternalAudioSources:vi.fn(()=>[]),
     reset:vi.fn(),
+    // _buildProjectData 會讀 displayTime() 存進 playhead（v5.2.0 起）。
+    // mock 少了它會讓所有存檔測試以 TypeError 失敗——不是產品缺陷，是 mock 沒跟上。
+    displayTime:vi.fn(()=>0),
+    seek:vi.fn(),
     restorePendingImageClips:vi.fn().mockResolvedValue({restored:1,pending:0})
   }
 ));
@@ -68,6 +72,31 @@ describe('project image persistence',()=>{
     expect(State._pendingClips).toEqual([expect.objectContaining({
       type:'image',path:'C:/source/card.png',scale:0.4,posX:0.2,posY:0.8
     })]);
+  });
+
+  it('saves the current playhead and restores it on load',async()=>{
+    // playhead 是 v5.2.0 加的：存檔寫入 Media.displayTime()、載入時 seek 回去。
+    // 這個欄位加進來時沒有補測試，導致 mock 缺 displayTime 讓整個檔案掛掉都沒被發現。
+    mediaMock.displayTime.mockReturnValue(3610.5);
+    await Project.saveAs();
+
+    const bytes=Buffer.from(saveProject.mock.calls[0][1],'base64');
+    const data=JSON.parse(bytes.subarray(2).toString('utf16le'));
+    expect(data.playhead).toBe(3610.5);
+
+    Project.apply(data);
+    expect(State._pendingPlayhead).toBe(3610.5);
+  });
+
+  it('clamps a negative saved playhead to zero',async()=>{
+    Project.apply({app:'SUB Tool',version:3,playhead:-12,cues:[],tracks:[]});
+    expect(State._pendingPlayhead).toBe(0);
+  });
+
+  it('ignores a non-numeric playhead instead of seeking to NaN',async()=>{
+    delete State._pendingPlayhead;
+    Project.apply({app:'SUB Tool',version:3,playhead:'01:00:00:00',cues:[],tracks:[]});
+    expect(State._pendingPlayhead).toBeUndefined();
   });
 
   it('treats image geometry as unsaved project work',async()=>{
