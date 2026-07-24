@@ -1,7 +1,5 @@
 # SUB Tool — Electron 維護手冊
 
-> 對應版本：v5.2.0｜最後更新：2026-07-23
-
 > 本文件針對本專案實際架構撰寫；每次異動 IPC 通道、ffmpeg 流程、mpv 整合或打包設定時請同步更新。
 
 ---
@@ -45,12 +43,16 @@ Main (main.js)
 | `getFilePath(file)` | —（preload 內直接呼叫 `webUtils.getPathForFile`，無 IPC） | R | 拖放的 `File` 物件 → 絕對路徑。Electron 32 起 `File.path` 已移除；只接受真正的 File 物件、失敗回 `null`。供拖放影音走桌面載入路徑（`loadDesktopMedia`） |
 | `readB64(path)` | `fs:readB64` | R→M | 讀檔回 base64 字串 |
 | `writeProject(path, b64)` | `fs:writeProject` | R→M | 直接寫入指定路徑（自動備份用） |
+| `writeScreenshot(path, b64)` | `fs:writeScreenshot` | R→M | 寫出畫面截圖；主程序限定 `.jpg/.jpeg/.png` 副檔名 |
+| `listDir(path)` | `fs:listDir` | R→M | 列出目錄內容（字型／素材掃描用） |
 | `openMedia()` | `dialog:openMedia` | R→M | 系統開檔對話框（影音），回傳路徑 |
 | `openAudio()` | `dialog:openAudio` | R→M | 系統開檔對話框（音訊），回傳路徑陣列 |
 | `openProject()` | `dialog:openProject` | R→M | 開啟 `.subtool` 專案，回傳 `{b64, path}` |
 | `saveProject(name, b64)` | `dialog:saveProject` | R→M | 另存 `.subtool` 專案，回傳儲存路徑 |
 | `importSub(kind)` | `dialog:importSub` | R→M | 開啟字幕檔，回傳 `{b64, name}` |
 | `exportSub(name, b64, ext)` | `dialog:exportSub` | R→M | 儲存字幕檔，回傳儲存路徑 |
+| `importDirectory()` | `dialog:importDirectory` | R→M | 選一個資料夾後批次讀入其中的 `.json`（常用樣式批次匯入用）；回傳的 `name` 是**相對於所選資料夾的路徑**，呼叫端據此還原樣式資料夾結構 |
+| `importFont()` | `dialog:importFont` | R→M | 匯入字型檔，複製進使用者資料夾（`userData`，避免安裝目錄的 Windows 寫入權限問題） |
 | `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 匯出影片序列：`{clips[],videoTracks[],width,height,fps,assText,format:'prores'\|'mp4'\|'wav',duration,audioPlan,timecodeWatermark?}`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼；影像／音訊都必須是母素材，handler 會拒絕 `proxy.mp4`／`chN.m4a` 快取。影片輸出為 ProRes422HQ/H.264，WAV 則為多聲道 PCM；MP4 完成後回傳 ffprobe 實測 audio bitrate。 |
 | `probe(path)` | `ffprobe` | R→M | ffprobe 探測，回傳 `{duration, fps, video, audio[]}` |
 | `makeProxy(path, dur)` | `ffmpeg:proxy` | R→M | 轉製 720p proxy（非即時，阻塞） |
@@ -70,6 +72,9 @@ Main (main.js)
 | `mpv.play()` / `mpv.pause()` | `mpv:play` / `mpv:pause` | R→M | 播放 / 暫停 |
 | `mpv.mute(v)` | `mpv:mute` | R→M | 靜音切換 |
 | `mpv.rate(r)` | `mpv:rate` | R→M | 播放速率 |
+| `mpv.brightness(v)` | `mpv:brightness` | R→M | 設定 mpv 畫面亮度（−100～0）。淡入淡出的預覽提示用：HTML 疊層蓋不過 mpv 的 OS 層視窗，故改以 brightness 呈現「淡到黑」 |
+| `mpv.screenshot(p)` | `mpv:screenshot` | R→M | 由 mpv 直接截圖到指定路徑（含字幕）；主程序限定圖片副檔名 |
+| `mpv.subVisible(v)` | `mpv:subVisible` | R→M | 切換 mpv 的 libass 字幕顯示（拖曳字幕時暫時隱藏，改由 HTML 層預覽新位置） |
 | `mpv.setBounds(b)` | `mpv:setBounds` | R→M | 更新 mpv 覆蓋視窗位置與大小 |
 | `mpv.setGuide(g)` | `mpv:setGuide` | R→M | 更新一般安全框／字幕操作 guide |
 | `mpv.setImageGuide(data)` | `mpv:setImageGuide` | R→M | 將圖片疊層 HTML、播放器矩形與命中區交給透明 guide 視窗；只有圖片及其控制點能取得 pointer 輸入 |
@@ -186,9 +191,9 @@ mpv 以**子視窗**方式嵌入：Main Process 啟動 `_mpvWin`（無框 Browse
 - `mpv:subSet`：接收 base64 ASS 字串，寫入暫存 `.ass` 後用 `sub-reload` 指令更新
 - `mpv:setBounds`：更新 `_mpvWin` 位置；主視窗移動/縮放時自動呼叫
 - `mpv:setImageGuide`：將圖片的 HTML 疊層（包含虛線框與控制點）交給透明 guide 視窗。
-  - **【v5.2.0 嚴謹架構說明】事件穿透與互動機制**：
+  - **【v5.0.0 嚴謹架構說明】事件穿透與互動機制**：
     早期版本依賴主程序使用 `screen.getCursorScreenPoint()` 每 25ms 輪詢游標位置，以決定是否命中圖片（決定開關 `setIgnoreMouseEvents`）。然而在 Windows 複雜的高 DPI 或多螢幕環境下，原生 API 回傳的座標經常與 Chromium 內部的 DIP (Device-Independent Pixel) 產生偏移，導致「游標明明在圖片上，卻判定未命中」，進而將事件穿透給底層主視窗，造成無法拖曳。
-    **現行架構 (v5.2.0+)** 已徹底廢除輪詢。我們依賴 Chromium 原生的事件轉發能力：當設定 `setIgnoreMouseEvents(true, { forward: true })` 時，透明視窗底層的 Chromium 依舊會對具備 `pointer-events: auto` 的元素（如圖片本體、黃色控制角）派發原生的 `mouseenter` 與 `mouseleave`。Guide 內的 DOM 監聽到此事件後，經由 IPC (`mpv-guide:imagePointer`) 送出 `enter` / `leave`，由主程序 100% 精確地切換互動狀態，徹底解決了事件穿透的死結。
+    **現行架構 (v5.0.0+)** 已徹底廢除輪詢。我們依賴 Chromium 原生的事件轉發能力：當設定 `setIgnoreMouseEvents(true, { forward: true })` 時，透明視窗底層的 Chromium 依舊會對具備 `pointer-events: auto` 的元素（如圖片本體、黃色控制角）派發原生的 `mouseenter` 與 `mouseleave`。Guide 內的 DOM 監聽到此事件後，經由 IPC (`mpv-guide:imagePointer`) 送出 `enter` / `leave`，由主程序 100% 精確地切換互動狀態，徹底解決了事件穿透的死結。
 - `mpv:setTimecodeWatermark`：原生 mpv 模式由 guide 顯示監看 TC；一般 HTML 預覽仍由 renderer DOM 顯示。兩者都從 `Media.displayTime()` 取得同一個時碼來源。
 
 ### 注意事項
@@ -227,7 +232,7 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 - `asarUnpack` 確保 mpv.exe / ffmpeg.exe 不被 asar 打包，可被 `child_process.spawn` 直接呼叫。
 - **`extraResources` 是字型能不能用的關鍵**：`files` 只收 `dist/` 與 `electron/`，`font/`
   必須另外用 `extraResources` 送進 `resources/font`。v4.26 少了這一段 → **開發時字型正常、
-  裝起來的 exe 一個字型都沒有**（v5.2.0 修）。`fontsRoot()` 依 dev（專案根）→
+  裝起來的 exe 一個字型都沒有**（v4.27.0 修）。`fontsRoot()` 依 dev（專案根）→
   `resources/font` → 安裝目錄 順序尋找。
 - 換 ffmpeg build 前先讀 §7 與變更紀錄：**BtbN 的 gpl-shared 版會截斷多串流 MXF 的音訊**，
   目前固定用 gyan 的 full_build。任何抽換都必須拿真實的多音軌 MXF 驗過。
@@ -251,7 +256,7 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 | 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |
 | 使用者說某個按鈕「按了沒反應」 | 是不是用到了 `window.prompt()`？**Electron 停用了它**，回傳永遠是 null，靜默失敗。改用 `ui.js` 的 `promptModal()` |
 | HTML 疊層（字幕拖曳、安全框）在 MXF 模式下看不到 / 點不到 | mpv 是 **OS 層 always-on-top 子視窗**，蓋在所有 HTML 之上；需要 `mpv.show(false)` 讓位（`_syncMpvPanel()`） |
-| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | 這是因為透明視窗事件穿透（Click-Through）狀態卡死。自 v5.2.0 起已棄用輪詢，改由 Chromium 原生 `pointer-events` 與事件轉發處理。若問題復現，請檢查：1. `main.js` 中的 `setIgnoreMouseEvents(!active, { forward: true })` 參數是否被誤改；2. `preload.js` 是否漏掉了 `enter` 與 `leave` 白名單；3. `app.js` 與 `main.js` 之間是否有其他攔截。 |
+| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | 這是因為透明視窗事件穿透（Click-Through）狀態卡死。自 v5.0.0 起已棄用輪詢，改由 Chromium 原生 `pointer-events` 與事件轉發處理。若問題復現，請檢查：1. `main.js` 中的 `setIgnoreMouseEvents(!active, { forward: true })` 參數是否被誤改；2. `preload.js` 是否漏掉了 `enter` 與 `leave` 白名單；3. `app.js` 與 `main.js` 之間是否有其他攔截。 |
 | 圖片匯出只顯示第一格或後段變黑 | 檢查 renderer 是否保留 `clip.type === 'image'`；主程序必須對該輸入加 `-loop 1 -framerate <project fps>`，並把每個 clip 的 `scale/posX/posY` 傳進 filtergraph。 |
 | TC 監看在 mpv 模式不顯示 | 先確認播放器 TC 開關為開，再檢查透明 guide 是否建立；這是監看 overlay，與匯出視窗的「壓入時間碼浮水印」為兩個獨立開關。 |
 | 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |
