@@ -609,14 +609,14 @@ async function showExportVideoDialog(initialDraft=null) {
   
   // draft initialization
   const draft = initialDraft || {
-    outDir: '',
     deliverables: [{
       format: audioOnly ? 'wav' : 'h264',
       kbps: 8000,
       targetH: 0,
       burnTimecode: false,
-      audioPlan: JSON.parse(JSON.stringify(AudioRouting.state.outputPlan || {})),
-      customName: ''
+      audioPlan: JSON.parse(JSON.stringify(State.audioProject?.exportLayout || {})),
+      customName: '',
+      outDir: ''
     }]
   };
   
@@ -624,20 +624,15 @@ async function showExportVideoDialog(initialDraft=null) {
   if (!initialDraft) {
     DESK.getStartupFile().then(p => {
       if (p) {
-        draft.outDir = p.replace(/\\[^\\]+$/, '');
-        const od = $('evOutDir');
-        if (od) { od.value = draft.outDir; checkConflicts(); }
+        draft.deliverables[0].outDir = p.replace(/\\[^\\]+$/, '');
+        updateRows();
+        checkConflicts();
       }
     });
   }
 
   let html = `
-    <div style="font-size:13px;line-height:1.6;width:680px;max-height:600px;display:flex;flex-direction:column;">
-      <div style="margin-bottom:12px;font-weight:bold;font-size:14px;">輸出目錄</div>
-      <div style="display:flex;gap:6px;margin-bottom:16px;">
-        <input type="text" id="evOutDir" style="flex:1;padding:4px;font-size:12px;background:var(--bg-2);color:var(--text);border:1px solid var(--border);" readonly>
-        <button id="evChooseDirBtn" style="padding:4px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">瀏覽...</button>
-      </div>
+    <div style="font-size:13px;line-height:1.6;width:760px;display:flex;flex-direction:column;">
 
       <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:8px;">
         <div style="font-weight:bold;font-size:14px;">交付清單</div>
@@ -664,14 +659,15 @@ async function showExportVideoDialog(initialDraft=null) {
 
     const ap = r.audioPlan;
     let audioDesc = '依專案音軌順序';
-    if (!isWav && ap && ap.groups) {
-      const gCounts = ap.groups.map(g => {
-        if (g.layout==='stereo') return '2.0';
-        if (g.layout==='5.1') return '5.1';
-        if (g.layout==='mono') return '1.0';
-        return g.layout;
+    const streams = ap?.streams || ap?.groups;
+    if (!isWav && Array.isArray(streams)) {
+      const gCounts = streams.map(g => {
+        if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '2.0';
+        if (g.layout === '5.1') return '5.1';
+        if (g.layout === 'mono') return '1.0';
+        return g.layout || '2.0';
       });
-      const tCount = ap.groups.reduce((acc,g) => acc + (g.layout==='5.1'?6:(g.layout==='stereo'?2:1)), 0);
+      const tCount = streams.reduce((acc, g) => acc + (g.layout === '5.1' ? 6 : (g.layout === 'mono' ? 1 : 2)), 0);
       audioDesc = gCounts.length ? `${gCounts.join(' + ')} (${tCount} 軌)` : '無';
     }
 
@@ -703,6 +699,8 @@ async function showExportVideoDialog(initialDraft=null) {
         </div>
         <div style="display:flex;gap:12px;align-items:center;">
           <input type="text" class="ev-name" data-idx="${i}" value="${r.customName}" style="flex:1;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" placeholder="檔名 (含副檔名)">
+          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" readonly style="flex:2;padding:3px;font-size:12px;background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);cursor:pointer;" title="點擊瀏覽選擇目錄" placeholder="選擇輸出目錄...">
+          <button class="ev-dir-btn" data-idx="${i}" style="padding:2px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">瀏覽...</button>
           <div style="display:flex;align-items:center;gap:6px;">
             <span style="font-size:11px;color:var(--text-faint);">音訊: ${audioDesc}</span>
             ${!isWav ? `<button class="ev-audio-btn" data-idx="${i}" style="padding:2px 6px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">⚙ 聲道</button>` : ''}
@@ -713,28 +711,32 @@ async function showExportVideoDialog(initialDraft=null) {
     `;
   }
 
-  function $ (sel) { return document.querySelectorAll(sel); }
+  function $$ (sel) { return document.querySelectorAll(sel); }
 
   function updateRows() {
     const c = $('evRowsContainer');
     if (!c) return;
     c.innerHTML = draft.deliverables.map((r, i) => renderRow(r, i)).join('');
     
-    $('.ev-format').forEach(el => el.onchange = e => {
+    $$('.ev-format').forEach(el => el.onchange = e => {
       const idx = +e.target.dataset.idx;
       draft.deliverables[idx].format = e.target.value;
-      draft.deliverables[idx].customName = ''; 
+      if (draft.deliverables[idx].customName) {
+        const isWav = e.target.value === 'wav';
+        const isPro = e.target.value === 'prores';
+        const ext = isWav ? '.wav' : (isPro ? '.mov' : '.mp4');
+        draft.deliverables[idx].customName = draft.deliverables[idx].customName.replace(/\.[a-zA-Z0-9]+$/, '') + ext;
+      }
       updateRows();
       checkConflicts();
     });
-    $('.ev-res').forEach(el => el.onchange = e => {
+    $$('.ev-res').forEach(el => el.onchange = e => {
       const idx = +e.target.dataset.idx;
       if (e.target.value === 'custom') {
         draft.deliverables[idx].targetH = 480;
       } else {
         draft.deliverables[idx].targetH = parseInt(e.target.value);
       }
-      draft.deliverables[idx].customName = '';
       if (draft.deliverables[idx].format === 'h264') {
         let w = State.videoWidth || 1920, h = draft.deliverables[idx].targetH || 1080;
         if (draft.deliverables[idx].targetH > 0) {
@@ -747,40 +749,65 @@ async function showExportVideoDialog(initialDraft=null) {
       updateRows();
       checkConflicts();
     });
-    $('.ev-custom-res').forEach(el => el.onchange = e => {
+    $$('.ev-custom-res').forEach(el => el.onchange = e => {
       const idx = +e.target.dataset.idx;
       draft.deliverables[idx].targetH = parseInt(e.target.value);
-      draft.deliverables[idx].customName = '';
       updateRows();
       checkConflicts();
     });
-    $('.ev-kbps').forEach(el => el.onchange = e => {
+    $$('.ev-kbps').forEach(el => el.onchange = e => {
       const idx = +e.target.dataset.idx;
       draft.deliverables[idx].kbps = parseInt(e.target.value);
     });
-    $('.ev-name').forEach(el => el.onchange = e => {
+    $$('.ev-name').forEach(el => el.onchange = e => {
       const idx = +e.target.dataset.idx;
-      draft.deliverables[idx].customName = e.target.value;
+      let val = e.target.value.trim();
+      if (val) {
+        const isWav = draft.deliverables[idx].format === 'wav';
+        const isPro = draft.deliverables[idx].format === 'prores';
+        const ext = isWav ? '.wav' : (isPro ? '.mov' : '.mp4');
+        if (!val.toLowerCase().endsWith(ext)) val += ext;
+      }
+      draft.deliverables[idx].customName = val;
+      updateRows();
       checkConflicts();
     });
-    $('.ev-tc').forEach(el => el.onchange = e => {
+    $$('.ev-tc').forEach(el => el.onchange = e => {
       const idx = +e.target.dataset.idx;
       draft.deliverables[idx].burnTimecode = e.target.checked;
     });
-    $('.ev-del').forEach(el => el.onclick = e => {
+    $$('.ev-outdir').forEach(el => el.onclick = async e => {
+      const idx = +e.target.dataset.idx;
+      const p = await DESK.exportDirectory([]);
+      if (p) {
+        draft.deliverables[idx].outDir = p;
+        updateRows();
+        checkConflicts();
+      }
+    });
+    $$('.ev-dir-btn').forEach(el => el.onclick = async e => {
+      const idx = +e.target.dataset.idx;
+      const p = await DESK.exportDirectory([]);
+      if (p) {
+        draft.deliverables[idx].outDir = p;
+        updateRows();
+        checkConflicts();
+      }
+    });
+    $$('.ev-del').forEach(el => el.onclick = e => {
       const idx = +e.target.dataset.idx;
       draft.deliverables.splice(idx, 1);
       updateRows();
       checkConflicts();
     });
-    $('.ev-audio-btn').forEach(el => el.onclick = e => {
+    $$('.ev-audio-btn').forEach(el => el.onclick = e => {
       const idx = +e.target.dataset.idx;
-      const oldPlan = JSON.parse(JSON.stringify(AudioRouting.state.outputPlan || {}));
-      AudioRouting.state.outputPlan = JSON.parse(JSON.stringify(draft.deliverables[idx].audioPlan));
+      const oldPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout || {}));
+      State.audioProject.exportLayout = JSON.parse(JSON.stringify(draft.deliverables[idx].audioPlan));
       closeModal();
       AudioRouting.openOutputSettings(() => {
-        draft.deliverables[idx].audioPlan = JSON.parse(JSON.stringify(AudioRouting.state.outputPlan));
-        AudioRouting.state.outputPlan = oldPlan;
+        draft.deliverables[idx].audioPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout));
+        State.audioProject.exportLayout = oldPlan;
         void showExportVideoDialog(draft);
       });
     });
@@ -788,24 +815,45 @@ async function showExportVideoDialog(initialDraft=null) {
 
   async function checkConflicts() {
     const msg = $('evConflictMsg');
-    if (!msg || !draft.outDir) return true;
+    if (!msg) return true;
     
-    const names = draft.deliverables.map(r => r.customName.toLowerCase());
-    const hasDupes = new Set(names).size !== names.length;
+    // Check missing directories
+    const missingDir = draft.deliverables.findIndex(r => !r.outDir);
+    if (missingDir !== -1) {
+      msg.textContent = `錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`;
+      msg.style.display = 'block';
+      return false;
+    }
+    
+    // Check missing customName
+    const missingName = draft.deliverables.findIndex(r => !r.customName);
+    if (missingName !== -1) {
+      msg.textContent = `錯誤：第 ${missingName + 1} 列缺少檔名！`;
+      msg.style.display = 'block';
+      return false;
+    }
+
+    const fullPaths = draft.deliverables.map(r => (r.outDir + '\\' + r.customName).toLowerCase());
+    const hasDupes = new Set(fullPaths).size !== fullPaths.length;
     if (hasDupes) {
-      msg.textContent = '警告：交付清單內有重複的檔名！';
+      msg.textContent = '警告：交付清單內有重複的輸出路徑！';
       msg.style.display = 'block';
       return false;
     }
     
     try {
-      const files = await DESK.listDir(draft.outDir);
-      const existing = files.map(f => f.name.toLowerCase());
-      const conflicts = names.filter(n => existing.includes(n));
+      const conflicts = [];
+      for (const r of draft.deliverables) {
+        const files = await DESK.listDir(r.outDir);
+        const existing = files.map(f => f.name.toLowerCase());
+        if (existing.includes(r.customName.toLowerCase())) {
+          conflicts.push(r.customName);
+        }
+      }
       if (conflicts.length > 0) {
-        msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})`;
+        msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})，匯出將會直接覆蓋。`;
         msg.style.display = 'block';
-        return false;
+        return true; // DO NOT block export for disk conflicts
       }
     } catch(e){}
     
@@ -816,73 +864,79 @@ async function showExportVideoDialog(initialDraft=null) {
   openModal('匯出交付清單', html, [
     { label: '取消', act: closeModal },
     { label: '全部送出', primary: true, act: async () => {
-      if (!draft.outDir) { showToast('請先選擇輸出目錄'); return; }
       if (draft.deliverables.length === 0) { showToast('清單不能為空'); return; }
       if (!(await checkConflicts())) return;
       
-      const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
-      const assText = !audioOnly && /\nDialogue:/.test(toASSFromState(State.cues)) 
-        ? toASSFromState(State.cues.map(c => ({...c, start: Math.max(0, (c.start || 0) - expIn), end: Math.max(0, (c.end || 0) - expIn)}))) 
-        : null;
-      
-      for (const [idx, r] of draft.deliverables.entries()) {
-        const isWav = r.format === 'wav';
-        const outPath = draft.outDir + '\\' + r.customName;
+      try {
+        const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
+        const assText = !audioOnly && /\nDialogue:/.test(toASSFromState(State.cues)) 
+          ? toASSFromState(State.cues.map(c => ({...c, start: Math.max(0, (c.start || 0) - expIn), end: Math.max(0, (c.end || 0) - expIn)}))) 
+          : null;
         
-        let w = State.videoWidth || 1920;
-        let h = State.videoHeight || 1080;
-        if (!isWav && r.targetH > 0) {
-          h = r.targetH;
-          const aspect = (State.videoWidth || 1920) / (State.videoHeight || 1080);
-          w = Math.round(h * aspect);
-          w -= (w % 2); 
+        for (const [idx, r] of draft.deliverables.entries()) {
+          const isWav = r.format === 'wav';
+          const cleanDir = (r.outDir || '').replace(/[/\\]+$/, '');
+          const outPath = cleanDir + '\\' + r.customName;
+          
+          let w = State.videoWidth || 1920;
+          let h = State.videoHeight || 1080;
+          if (!isWav && r.targetH > 0) {
+            h = r.targetH;
+            const aspect = (State.videoWidth || 1920) / (State.videoHeight || 1080);
+            w = Math.round(h * aspect);
+            w -= (w % 2); 
+          }
+
+          let finalAudioPlan = null;
+          if (data.audioPlan) {
+            finalAudioPlan = JSON.parse(JSON.stringify(data.audioPlan));
+            if (r.audioPlan && Array.isArray(r.audioPlan.streams)) {
+              finalAudioPlan.streams = r.audioPlan.streams;
+            }
+          }
+
+          const jobId = await DESK.exportVideo({
+            clips: data.clips,
+            videoTracks: data.videoTracks,
+            width: w,
+            height: h,
+            fps: State.fps || 25,
+            assText: assText,
+            format: r.format,
+            duration: data.duration,
+            videoKbps: r.kbps,
+            audioPlan: finalAudioPlan,
+            timecodeWatermark: !isWav && r.burnTimecode ? { start: secToEncore(expIn, State.fps, State.dropFrame) } : null,
+            defaultName: r.customName,
+            outPath: outPath
+          });
+          
+          if (jobId) showToast(`排入佇列: ${r.customName}`);
         }
-
-        const jobId = await DESK.exportVideo({
-          clips: data.clips,
-          videoTracks: data.videoTracks,
-          width: w,
-          height: h,
-          fps: State.fps || 25,
-          assText: assText,
-          format: r.format,
-          duration: data.duration,
-          videoKbps: r.kbps,
-          audioPlan: isWav ? null : r.audioPlan,
-          timecodeWatermark: !isWav && r.burnTimecode ? { start: secToEncore(expIn, State.fps, State.dropFrame) } : null,
-          defaultName: r.customName,
-          outPath: outPath
-        });
-        
-        if (jobId) showToast(`排入佇列: ${r.customName}`);
+        closeModal();
+      } catch (err) {
+        showToast('送出失敗: ' + (err.message || err));
+        console.error(err);
       }
-      closeModal();
     }}
-  ], { keepVideo: true });
-
-  const od = $('evOutDir');
-  if (od) od.value = draft.outDir;
-  
-  $('evChooseDirBtn').onclick = async () => {
-    const p = await DESK.exportDirectory([]);
-    if (p) {
-      draft.outDir = p;
-      od.value = p;
-      checkConflicts();
-    }
-  };
+  ], { width: '820px' });
 
   $('evAddRowBtn').onclick = () => {
+    let defaultOutDir = '';
+    if (draft.deliverables.length > 0) {
+      defaultOutDir = draft.deliverables[draft.deliverables.length - 1].outDir;
+    }
     if (draft.deliverables.length === 0) {
       draft.deliverables.push({
         format: audioOnly ? 'wav' : 'h264', kbps: 8000, targetH: 0, burnTimecode: false,
-        audioPlan: JSON.parse(JSON.stringify(AudioRouting.state.outputPlan || {})), customName: ''
+        audioPlan: JSON.parse(JSON.stringify(State.audioProject?.exportLayout || {})), customName: '', outDir: defaultOutDir
       });
     } else {
       const last = draft.deliverables[draft.deliverables.length - 1];
       draft.deliverables.push({
         ...JSON.parse(JSON.stringify(last)),
-        customName: ''
+        customName: '',
+        outDir: last.outDir
       });
     }
     updateRows();

@@ -16,7 +16,8 @@ class MediaPlayerAdapter {
   async show(v) { return this.mpv?.show(v).catch(()=>{}); }
   async setImageGuide(data) { return this.mpv?.setImageGuide(data).catch(()=>{}); }
   onImagePointer(cb) { this.mpv?.onImagePointer?.(cb); }
-  async screenshot(path) { return this.mpv?.screenshot(path); } 
+  async screenshot(path) { return this.mpv?.screenshot(path); }
+  async setTimecodeWatermark(payload) { return this.mpv?.setTimecodeWatermark(payload); }
   
   // Core Playback
   async detect() { return this.mpv?.detect(); }

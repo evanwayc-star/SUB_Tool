@@ -1007,7 +1007,7 @@ async function doAction(act, force = false){
       break;
     case 'imp-auto': importSub(); break;
     case 'exp-dialog': showExportDialog(); break;
-    case 'exp-video': showExportVideoDialog(); break;
+    case 'exp-video': showExportVideoDialog().catch(err=>{ console.error('匯出影片錯誤',err); showToast('匯出影片錯誤：'+err.message); }); break;
     case 'audio-project-settings': AudioRouting.openOutputSettings(); break;
     case 'split-clip':
       if(State.selectedAudioClipId&&typeof Media.splitExternalAudio==='function') void Media.splitExternalAudio(State.selectedAudioClipId,Media.displayTime());

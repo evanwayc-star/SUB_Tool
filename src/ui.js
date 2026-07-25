@@ -35,7 +35,10 @@ function openModal(title,html,buttons,opts={}){
   });
   const bg=$('modalBg');
   const modalEl=bg.querySelector('.modal');
-  if(modalEl) modalEl.style.width=opts.width||'';
+  if(modalEl) {
+    modalEl.style.width=opts.width||'';
+    modalEl.style.transform = '';
+  }
   // keepVideo：編輯字幕文字時要看得到後面的畫面 → 對話框靠右停、遮罩透明、且【不】隱藏 mpv。
   //  （mpv 是 OS 層置頂視窗，靠右停才不會蓋到／被它蓋到；WebCodecs 走 HTML canvas 則本來就疊得上。）
   _modalKeepVideo = !!opts.keepVideo;
@@ -110,6 +113,24 @@ function promptModal(title, label, defVal = '', { placeholder = '', okLabel = '�
     setTimeout(() => { const el = $('__promptInput'); if(el){ el.focus(); el.select(); } }, 30);
   });
 }
+
+// modal drag
+let _mDragging=false, _mStartX=0, _mStartY=0, _mStartTx=0, _mStartTy=0;
+$('modalTitle').addEventListener('pointerdown', e=>{
+  if(e.button!==0) return;
+  _mDragging=true; _mStartX=e.clientX; _mStartY=e.clientY;
+  const m = $('modalBg').querySelector('.modal');
+  const style = window.getComputedStyle(m);
+  const matrix = new DOMMatrixReadOnly(style.transform);
+  _mStartTx = matrix.m41; _mStartTy = matrix.m42;
+  $('modalTitle').setPointerCapture(e.pointerId);
+});
+$('modalTitle').addEventListener('pointermove', e=>{
+  if(!_mDragging) return;
+  const dx = e.clientX - _mStartX, dy = e.clientY - _mStartY;
+  $('modalBg').querySelector('.modal').style.transform = `translate(${_mStartTx+dx}px, ${_mStartTy+dy}px)`;
+});
+$('modalTitle').addEventListener('pointerup', e=>{ _mDragging=false; $('modalTitle').releasePointerCapture(e.pointerId); });
 
 export { setStatus, showToast, showOsd, openModal, closeModal, promptModal };
 

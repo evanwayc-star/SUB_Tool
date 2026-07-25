@@ -625,6 +625,151 @@ function _findExportTimecodeFont() {
   try { return font && fs.existsSync(font) ? font : null; } catch (e) { return null; }
 }
 
+/* ===== 背景匯出佇列與 QueueManager ===== */
+const EXPORT_QUEUE_DIR = path.join(os.tmpdir(), 'subtool_export_queue');
+let queueWin = null;
+let _queuePaused = false;
+let _queueConcurrency = 1;
+const _queueJobsMap = new Map();
+const _jobQueueList = [];
+let _activeQueueCount = 0;
+
+function ensureExportQueueDir() {
+  try { fs.mkdirSync(EXPORT_QUEUE_DIR, { recursive: true }); } catch (e) {}
+}
+
+function openQueueWindow() {
+  if (queueWin && !queueWin.isDestroyed()) {
+    queueWin.focus();
+    return;
+  }
+  queueWin = new BrowserWindow({
+    width: 720,
+    height: 520,
+    title: '匯出佇列監控',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'queue-preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  });
+  queueWin.loadFile(path.join(__dirname, 'queue.html'));
+  queueWin.on('closed', () => { queueWin = null; });
+}
+
+const QueueManager = {
+  ensureDir() {
+    ensureExportQueueDir();
+  },
+  addJob(job) {
+    this.ensureDir();
+    _queueJobsMap.set(job.id, job);
+    _jobQueueList.push(job);
+    this.broadcastUpdate();
+    this.processQueue();
+  },
+  broadcastUpdate() {
+    safeWinSend(mainWin, 'queue:update');
+    safeWinSend(mainWin, 'export-queue-updated', Array.from(_queueJobsMap.values()));
+    if (queueWin && !queueWin.isDestroyed()) {
+      safeWinSend(queueWin, 'queue:update');
+    }
+  },
+  async processQueue() {
+    if (_queuePaused) return;
+    while (_activeQueueCount < _queueConcurrency && _jobQueueList.length > 0) {
+      const job = _jobQueueList.shift();
+      if (!job || job.status === 'stopped' || job.status === 'done') continue;
+      _activeQueueCount++;
+      job.status = 'running';
+      this.broadcastUpdate();
+
+      (async () => {
+        try {
+          await _runJobLogic(job);
+        } catch (e) {
+          console.error(`[Queue] Job ${job.id} error:`, e);
+          job.status = 'failed';
+          job.errorMsg = e.message || String(e);
+        } finally {
+          _activeQueueCount--;
+          if (job.assRef) {
+            try { fs.unlinkSync(path.join(EXPORT_QUEUE_DIR, job.assRef)); } catch (e) {}
+          }
+          this.broadcastUpdate();
+          this.processQueue();
+        }
+      })();
+    }
+  }
+};
+
+ipcMain.handle('queue:getAll', () => ({
+  jobs: Array.from(_queueJobsMap.values()),
+  isPaused: _queuePaused,
+  concurrency: _queueConcurrency
+}));
+
+ipcMain.handle('queue:pause', (e, paused) => {
+  _queuePaused = !!paused;
+  QueueManager.broadcastUpdate();
+  if (!_queuePaused) QueueManager.processQueue();
+});
+
+ipcMain.handle('queue:resume', () => {
+  _queuePaused = false;
+  QueueManager.broadcastUpdate();
+  QueueManager.processQueue();
+});
+
+ipcMain.handle('queue:setConcurrency', (e, c) => {
+  _queueConcurrency = Math.max(1, Math.min(3, parseInt(c) || 1));
+  QueueManager.broadcastUpdate();
+  QueueManager.processQueue();
+});
+
+ipcMain.handle('queue:stopJob', (e, jobId) => {
+  const job = _queueJobsMap.get(jobId);
+  if (job) {
+    if (job.status === 'running') {
+      const active = activeJobs.get(jobId);
+      if (active && active.p) {
+        active.stopped = true;
+        try { active.p.kill(); } catch (err) {}
+      }
+    } else if (job.status === 'queued') {
+      const idx = _jobQueueList.findIndex(j => j.id === jobId);
+      if (idx !== -1) _jobQueueList.splice(idx, 1);
+    }
+    job.status = 'stopped';
+    QueueManager.broadcastUpdate();
+  }
+});
+
+ipcMain.handle('queue:retryJob', (e, jobId) => {
+  const job = _queueJobsMap.get(jobId);
+  if (job && (job.status === 'failed' || job.status === 'stopped' || job.status === 'missing-source')) {
+    job.status = 'queued';
+    job.pct = 0;
+    job.errorMsg = null;
+    _jobQueueList.push(job);
+    QueueManager.broadcastUpdate();
+    QueueManager.processQueue();
+  }
+});
+
+ipcMain.handle('queue:clearJob', (e, jobId) => {
+  _queueJobsMap.delete(jobId);
+  const idx = _jobQueueList.findIndex(j => j.id === jobId);
+  if (idx !== -1) _jobQueueList.splice(idx, 1);
+  QueueManager.broadcastUpdate();
+});
+
+ipcMain.handle('queue:openMonitor', () => {
+  openQueueWindow();
+});
+
 ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
   const { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark } = payload;
@@ -636,7 +781,6 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   
   (clips || []).forEach(c => {
     if (c.path) assertMasterExportMedia(c.path, '影像');
-    (c.audio || []).forEach(a => a.file && assertMasterExportMedia(a.file, '音訊'));
   });
   for (const bus of audioPlan?.buses || []) for (const input of bus.inputs || [])
     assertMasterExportMedia(input.file, '音訊');
@@ -970,7 +1114,7 @@ async function _runJobLogic(job) {
       const t0 = Date.now();
       try {
         const rr = await runFF(args, { sender, duration: D, jobId, label, cwd: TMP, onProcess: p => {
-          activeExportJob = { id: jobId, p, outPath, stopped: false };
+          activeJobs.set(jobId, { id: jobId, p, outPath, stopped: false });
         }});
     // ffmpeg 的串流對應行是「實際使用」的地面真相（非我們的猜測）：
     //   例 "mpeg2video (native) -> h264 (h264_nvenc)" → 取箭頭右側括號內的編碼器

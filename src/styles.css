@@ -627,7 +627,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .modal-bg.clear-bg{background:transparent}
 .modal{background:var(--panel);border:1px solid var(--border2);border-radius:10px;box-shadow:var(--shadow);
   width:min(520px,92vw);max-height:86vh;overflow:auto}
-.modal h3{padding:14px 18px;border-bottom:1px solid var(--border);font-size:15px}
+.modal h3{padding:14px 18px;border-bottom:1px solid var(--border);font-size:15px;cursor:move;user-select:none;}
 .modal .mbody{padding:16px 18px;line-height:1.7;font-size:13px;color:var(--text-dim)}
 .modal .mbody b{color:var(--text)}
 .modal .mbody kbd{background:var(--panel3);border:1px solid var(--border2);border-radius:4px;padding:1px 7px;font-size:11px;color:var(--text)}

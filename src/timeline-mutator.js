@@ -1,14 +1,16 @@
 import { clamp, escapeHTML } from './util.js';
 import { State, newTrack, syncTrackCount } from './state.js';
 import { Media } from './media.js';
-import { $, tlScroll } from './dom.js';
+import { $, tlScroll, tlLayer } from './dom.js';
 import { emit } from './events.js';
 import { recordHistory } from './history.js';
 import { openModal, closeModal } from './ui.js';
-import { drawTimeline, layoutTimeline, viewportW, tlTotal, yToTrack } from './timeline-renderer.js';
+import { drawTimeline, layoutTimeline, viewportW, tlTotal, yToTrack, tracksTop, tracksScrollTop } from './timeline-renderer.js';
 
-export function trackFromY(y) {
-  return yToTrack(y);
+export function trackFromY(clientY){
+  const rect=tlLayer.getBoundingClientRect();
+  const y=clientY-rect.top-tracksTop()+tracksScrollTop();
+  return yToTrack(Math.max(0,y));
 }
 
 export function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); emit('render:listTrackSel'); recordHistory('新增軌道'); }
@@ -90,12 +92,16 @@ export function snapTargets(excludeIds){
 export function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of targets){const d=Math.abs(x-t); if(d<bd){bd=d;best=x;}} return best; }
 
 export function neighborBounds(os,oe,track,excludeIds){
-  let maxStart=0, minEnd=999999;
+  let prevEnd=0,nextStart=Infinity;
+  const oMid = (os + oe) / 2;
   for(const c of State.cues){
-    if(excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id))) continue;
-    if((c.track||0)!==track || c.timed===false) continue;
-    if(c.end<=os && c.end>maxStart) maxStart=c.end;
-    if(c.start>=oe && c.start<minEnd) minEnd=c.start;
+    if(c.timed===false||(excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id)))||(c.track||0)!==track)continue;
+    const cMid = (c.start + c.end) / 2;
+    if(cMid < oMid){
+      if(c.end > prevEnd) prevEnd = c.end;
+    } else {
+      if(c.start < nextStart) nextStart = c.start;
+    }
   }
-  return {min:maxStart, max:minEnd};
+  return {prevEnd,nextStart};
 }
