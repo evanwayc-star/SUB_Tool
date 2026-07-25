@@ -302,7 +302,6 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-spacer{height:1px}
 .tl-layer{position:sticky;left:0;top:0;height:100%;will-change:transform}
 #rulerCanvas{position:absolute;left:0;top:0;display:block;background:var(--panel);border-bottom:1px solid var(--border)}
-#waveCanvas{position:absolute;left:0;display:block;background:var(--panel2)}
 .tl-tracks{position:absolute;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden}
 .tl-track{position:relative;left:0;border-bottom:1px solid #26262b}
 .cue-block{position:absolute;top:4px;bottom:4px;background:var(--cue);border:1px solid transparent;border-radius:4px;

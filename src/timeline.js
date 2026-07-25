@@ -25,7 +25,7 @@
    - 繪製函式中 (特別是 requestAnimationFrame 的迴圈)，【絕對禁止】頻繁呼叫
      引起 Reflow 的屬性 (如 offsetWidth, clientHeight)。請改讀取緩存的 `viewportW` 變數。
 ============================================================================== */
-import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, waveCv } from './dom.js';
+import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId, setSelection} from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
@@ -42,14 +42,13 @@ import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
 
 /* ===== 5. 時間軸 ====================================================== */
-const RULER_H=24, WAVE_H=64, ROW_H=64;  // default/min values; actual stored in State
+const RULER_H=24, ROW_H=64;  // default/min values; actual stored in State
 
 /* 影片序列：獨立視訊軌列容器（在專案音訊軌上方），與字幕軌列同一套「列＋列頭」機制。
    容器 pointer-events:none、片段本身 auto——空白處仍可拖曳捲動/框選。 */
 const tlVtracks=document.getElementById('tlVtracks');
 const tlAtracks=document.getElementById('tlAtracks');
 const VROW_H=44;  // 視訊軌列預設高度（影像與音訊分離後，不再內嵌波形）
-function waveH(){ return State.waveH||WAVE_H; }
 function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
 function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
 function yToTrack(y){ let c=0; for(let i=0;i<State.trackCount;i++){ c+=trackH(i); if(y<c)return i; } return State.trackCount-1; }
@@ -114,9 +113,6 @@ function layoutTimeline(){
   rulerCv.style.width=vw+'px'; rulerCv.style.height=RULER_H+'px';
   const vh=vtracksHeight();
   const ah=atracksHeight();
-  // waveCanvas 保留給舊 DOM/模組參照；專案音訊改用可獨立捲動的 DOM 軌列，以免 bus 很多時把字幕區擠走。
-  waveCv.width=1; waveCv.height=1;
-  waveCv.style.width='1px'; waveCv.style.height='1px'; waveCv.style.display='none';
   if(tlVtracks){ tlVtracks.style.top=RULER_H+'px'; tlVtracks.style.height=vh+'px'; tlVtracks.style.display=vh>0?'block':'none'; }
   if(tlAtracks){
     tlAtracks.style.top=(RULER_H+vh)+'px';
@@ -396,14 +392,7 @@ function _doResize(type,tk){
   // .cue-block uses top:4px;bottom:4px, .cue-overlap uses top:0;bottom:0 →
   // both auto-scale with row height via CSS — no renderCueBlocks() needed during drag.
   // Playhead is left-positioned, unaffected by height changes.
-  if(type==='wave'){
-    const wh=waveH();
-    const gutWave=document.querySelector('.tl-gutter-wave');
-    if(gutWave)gutWave.style.height=wh+'px';
-    waveCv.height=wh*devicePixelRatio; waveCv.style.height=wh+'px';
-    tlTracks.style.top=tracksTop()+'px';
-    drawWave();
-  }else if(type==='vtrack'){
+  if(type==='vtrack'){
     // 視訊軌高度改變會牽動波形與字幕軌位置 → 直接整體重繪
     drawTimeline();
   }else{
@@ -416,8 +405,7 @@ function _onRowResizeMove(e){
   if(!_rowResize)return;
   const {type,tk,startY,startH}=_rowResize;
   const dy=e.clientY-startY;
-  if(type==='wave')State.waveH=Math.max(24,startH+dy);
-  else if(type==='vtrack'){ if(State.videoTracks[tk])State.videoTracks[tk].height=Math.max(24,startH+dy); }
+  if(type==='vtrack'){ if(State.videoTracks[tk])State.videoTracks[tk].height=Math.max(24,startH+dy); }
   else if(State.tracks[tk])State.tracks[tk].height=Math.max(20,startH+dy);
   if(!_rowResize._raf){
     _rowResize._raf=requestAnimationFrame(()=>{ _rowResize&&(_rowResize._raf=null); _doResize(type,tk); });
@@ -428,21 +416,6 @@ function _onRowResizeUp(){
   _rowResize=null;
   drawTimeline();
 }
-// 波形列 resize handle（一次性）
-(()=>{
-  const gutWave=document.querySelector('.tl-gutter-wave'); if(!gutWave)return;
-  const h=document.createElement('div');
-  h.className='tl-resize-handle';
-  h.addEventListener('mousedown',e=>{
-    e.preventDefault();e.stopPropagation();
-    _rowResize={type:'wave',tk:-1,startY:e.clientY,startH:waveH()};
-    document.addEventListener('mousemove',_onRowResizeMove);
-    document.addEventListener('mouseup',_onRowResizeUp,{once:true});
-  });
-  h.addEventListener('dblclick',e=>{ e.preventDefault();e.stopPropagation(); State.waveH=WAVE_H; drawTimeline(); });
-  gutWave.appendChild(h);
-})();
-
 /* 影片序列：把各段畫進「對應視訊軌列」（各軌獨立成列，比照字幕軌）。
    先在 tlVtracks 內建立每軌的列 .vtrack-row（由上而下：最高軌在最上面），再把片段放入其列。
    片段位置＝offset、寬＝修剪後長度；拖曳移動、拖邊緣修剪、右鍵選單。 */
@@ -1781,7 +1754,7 @@ function neighborBounds(os,oe,track,excludeIds){
   return {prevEnd,nextStart};
 }
 
-export { RULER_H, WAVE_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
+export { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY,
   addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, redrawTimeline, setZoom, zoomFit, zoomFitVideo,
   refreshTrackGutterActive, snapTargets, snapVal, neighborBounds,
