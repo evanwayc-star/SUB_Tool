@@ -141,6 +141,29 @@ CSS 蓋掉 `[hidden]`）都是靠它才沒有重踩。
 - **不要新增與既有規則牴觸的規則檔**（`.cursorrules`、`GEMINI.md` 等）。
   規則只寫在這一份 `AGENTS.md`，其他工具的規則檔請做成指向它的捷徑。
 
+### 各工具實際會自動載入什麼
+
+三個工具開場自動讀的檔案**完全不一樣**。這張表是查證過的（官方文件 + Antigravity
+安裝檔內的路徑設定），不是推測：
+
+| 工具 | 專案內自動載入 | 全域 |
+|------|---------------|------|
+| **Claude Code** | `CLAUDE.md`、`.claude/rules/*.md` | `~/.claude/CLAUDE.md` |
+| **OpenAI Codex** | `AGENTS.md` | `~/.codex/AGENTS.md` |
+| **Antigravity** | `.agent/rules/*.md`；另可設 `chat.useAgentsMdFile` 讀 `AGENTS.md` | `~/.gemini/GEMINI.md` |
+
+**三者都不會自動讀 `README.md`。** 那是給人看的。
+
+> **重要**：Claude Code **不讀 `AGENTS.md`**（官方原文：*Claude Code reads `CLAUDE.md`,
+> not `AGENTS.md`*）。它是靠 `CLAUDE.md` 第一行的 `@AGENTS.md` **import 語法**才載入的。
+>
+> **真實事故**：`CLAUDE.md` 原本寫的是 Markdown 連結 ``[`AGENTS.md`](AGENTS.md)``，
+> 看起來像指過去了，實際上完全沒生效——import 解析還會刻意跳過反引號內的內容，
+> 雙重失效。這份 `AGENTS.md` 因此從未進入任何 Claude Code session 的 context。
+> 不要把那一行改回連結形式。
+
+**派工給任何 AI 時，直接說「動手前先讀 `AGENTS.md`」**——三個工具都能靠這句話找到正確入口。
+
 ---
 
 ## 7. 靜態安全網
