@@ -571,8 +571,8 @@ const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h
       前者的細節區明顯有色塊/馬賽克感。
    對照（0.12 係數）：720p@30≈4、1080p@30≈7、1080p@60≈15、4K@30≈30、4K@60≈60 Mbps。
    夾在 4~120 之間（下限 4 避免低解析度也被壓爛）。 */
-function _suggestMbps() {
-  const w = State.videoWidth || 1920, h = State.videoHeight || 1080, fps = State.fps || 30;
+function _suggestMbps(w = State.videoWidth || 1920, h = State.videoHeight || 1080) {
+  const fps = State.fps || 30;
   const mbps = (w * h * fps * 0.12) / 1e6;
   return Math.round(Math.max(4, Math.min(120, mbps)));
 }
@@ -597,151 +597,303 @@ async function showExportVideoDialog(initialDraft=null) {
   const data = _buildExportData();
   if (!data) { showToast('沒有可匯出的影片或外部音訊'); return; }
   if (data.audioOnly && !data.audioPlan) { showToast('純音訊 WAV 匯出需要專案音軌路由'); return; }
-  const unresolved=data.audioPlan?.unresolvedSources||[];
-  if(unresolved.length){
+  const unresolved = data.audioPlan?.unresolvedSources || [];
+  if (unresolved.length) {
     showToast(`找不到可供匯出的音訊母素材：${unresolved.map(item=>item.name).join('、')}。請重新連結來源檔。`);
     return;
   }
-  const clipCount = data.clips.length;
-  const vtrackCount = data.videoTracks.length;
+  
+  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_')[0];
   const audioOnly = !!data.audioOnly;
-  const visSubTracks = State.tracks.filter((tk, i) => tk.visible !== false && State.cues.some(c => (c.track || 0) === i && c.timed !== false)).length;
-  const total = data.duration;
   const hasProjectAudio = !!data.audioPlan;
-  const draft=initialDraft&&typeof initialDraft==='object'?initialDraft:{};
-  const initialFormat=audioOnly ? 'wav'
-    : (draft.format==='mp4' ? 'mp4' : (draft.format==='wav' && hasProjectAudio ? 'wav' : 'prores'));
-  // 部分輸出仍保留專案時間軸的原始時碼，才會與播放器／工作單上的播放點一致。
-  const exportTcStart=secToEncore(data.timelineStart ?? 0, State.fps, State.dropFrame);
-  // 顯示實際會用到的編碼器（H.264 可走 GPU；ProRes 無 GPU 編碼器，一律 CPU）
-  let venc = null; try { venc = (await DESK.status())?.venc; } catch (e) {}
-  const gpu = venc && venc !== 'libx264';
-  const mp4Note = gpu ? `GPU 加速（${_VENC_LABEL[venc] || venc}）` : 'CPU（libx264，未偵測到 GPU 編碼器）';
-  openModal(audioOnly?'匯出音訊':'匯出影片',
-    `<div style="font-size:13px;line-height:1.9">` +
-    (audioOnly
-      ? `<div>外部音訊：<b>${data.externalAudioCount}</b> 個 placement，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>`
-      : `<div>序列：<b>${clipCount}</b> 段影片${vtrackCount > 1 ? `、<b>${vtrackCount}</b> 條視訊軌（由下而上疊合，上層覆蓋下層）` : ''}，總長 <b>${secToEncore(total, State.fps, State.dropFrame)}</b></div>` +
-        `<div>字幕：${visSubTracks ? `將<b>燒錄</b> ${visSubTracks} 個顯示中的軌道` : '無顯示中的字幕（輸出乾淨影片）'}</div>` +
-        `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">（隱藏的字幕軌不會燒入；如不想燒字幕，先關閉軌道的 👁）</div>` +
-        `<label class="export-timecode-option" id="expTcOption"><input type="checkbox" id="expBurnTimecode"${draft.burnTimecode?' checked':''}>` +
-        `<span class="export-timecode-badge">TC</span><span class="export-timecode-title">壓入時間碼浮水印</span>` +
-        `<span class="export-timecode-note">左上角・由輸出起點 <b>${exportTcStart}</b> 開始・會燒入輸出檔</span></label>`) +
-    `<div style="margin-top:4px;display:flex;align-items:center;gap:8px"><div>音訊：<b>${hasProjectAudio ? '依專案音軌與輸出編組' : '依混音器設定輸出'}</b>${hasProjectAudio ? `（${data.audioPlan.buses.length} 條專案音軌）` : _mixerSummary()}</div>` +
-    `<button type="button" id="expAudioSetBtn" style="padding:2px 8px;font-size:12px;background:var(--panel3);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer;">⚙ 聲道設定</button></div>` +
-    `<div style="color:var(--text-faint);font-size:12px;margin-top:2px">${hasProjectAudio ? (audioOnly?'（WAV 依 A1、A2…順序收進同一個多聲道檔。）':'（影片依 Mono／Stereo／LtRt／5.1 設定輸出多條 audio stream；WAV 則依專案音軌順序收進同一個多聲道檔。）') : '（靜音／獨奏／音量比照播放；未抽出逐聲道的來源則輸出原音）'}</div>` +
-    `<div style="color:var(--green);font-size:12px;margin-top:2px">來源：影像與音訊均直接解碼母素材；Proxy 與播放用 AAC 快取不會參與匯出。</div>` +
-    `<div style="margin-top:12px">格式：</div>` +
-    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="prores"${audioOnly?' disabled':(initialFormat==='prores'?' checked':'')}> ProRes 422 HQ（.mov，剪輯母帶）` +
-    `<span style="color:var(--text-faint);font-size:12px">— 24-bit PCM 音訊、CPU 編碼（ffmpeg 無 GPU ProRes 編碼器）</span></label>` +
-    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="mp4"${audioOnly?' disabled':(initialFormat==='mp4'?' checked':'')}> MP4（H.264，交付/預覽）` +
-    `<span style="color:${gpu ? 'var(--green)' : 'var(--text-faint)'};font-size:12px">— ${mp4Note}</span></label>` +
-    `<label style="display:block;padding:2px 0"><input type="radio" name="expVfmt" value="wav"${hasProjectAudio ? '' : ' disabled'}${initialFormat==='wav'?' checked':''}> WAV（多聲道 PCM，純音訊）` +
-    `<span style="color:var(--text-faint);font-size:12px">— ${hasProjectAudio ? '所有專案音軌依 A1、A2…順序放入同一個 WAV 檔' : '需先建立專案音軌路由'}</span></label>` +
-    `<div id="expVbrRow" style="display:none;padding:6px 0 0 22px">影片位元率：` +
-    `<input type="number" id="expVbr" min="0.1" max="200" step="0.5" value="${draft.videoMbps || _lastVbrMbps || _suggestMbps()}" style="width:74px;margin:0 4px"> Mbps` +
-    `<span style="color:var(--text-faint);font-size:12px;margin-left:8px">建議 <b>${_suggestMbps()}</b>（依 ${State.videoWidth || 1920}×${State.videoHeight || 1080}）· 音訊 AAC：Mono 192k／Stereo 320k／5.1 640k</span></div>` +
-    `<div style="color:var(--text-faint);font-size:12px;margin-top:6px">ProRes 為固定品質，無位元率設定。來源解碼一律嘗試硬體加速（不支援時自動退回軟解）。</div>` +
-    `</div>`,
-    [{ label: '匯出', primary: true, act: () => {
-        const fmt = (document.querySelector('input[name="expVfmt"]:checked') || {}).value || (audioOnly?'wav':'prores');
-        if (audioOnly && fmt !== 'wav') { showToast('純音訊專案僅能匯出 WAV'); return; }
-        if (fmt === 'wav' && !data.audioPlan) { showToast('WAV 匯出需要專案音軌路由'); return; }
-        const burnTimecode = !audioOnly && fmt !== 'wav' && !!$('expBurnTimecode')?.checked;
-        let kbps = null;
-        if (fmt === 'mp4') {
-          const mbps = parseFloat(($('expVbr') || {}).value);
-          if (!(mbps > 0)) { showToast('請輸入有效的位元率（Mbps）'); return; }
-          _lastVbrMbps = Math.min(200, Math.max(0.1, mbps));
-          kbps = Math.round(_lastVbrMbps * 1000);
-        }
-        closeModal(); _runExportVideo(data, fmt, kbps, burnTimecode);
-      } },
-     { label: '取消', act: closeModal }]);
-  // 位元率欄位只在選 MP4 時出現，並綁定聲道設定按鈕
-  setTimeout(() => {
-    const row = $('expVbrRow');
-    const tcOption=$('expTcOption'), tcCheck=$('expBurnTimecode');
-    const sync = () => {
-      const f = (document.querySelector('input[name="expVfmt"]:checked') || {}).value;
-      if (row) row.style.display = (f === 'mp4') ? '' : 'none';
-      const isVideo = f !== 'wav';
-      if(tcOption) tcOption.classList.toggle('disabled', !isVideo);
-      if(tcCheck) { tcCheck.disabled=!isVideo; if(!isVideo) tcCheck.checked=false; }
-    };
-    document.querySelectorAll('input[name="expVfmt"]').forEach(el => el.addEventListener('change', sync));
-    sync();
-    const setBtn = $('expAudioSetBtn');
-    if (setBtn) {
-      setBtn.onclick = () => {
-        // 聲道設定和匯出設定共用同一個 modal；先保留目前匯出草稿，無論聲道設定是
-        // 儲存或取消都重開匯出視窗，不能讓「取消」看起來像把整個匯出流程取消。
-        const resumeDraft={
-          format:(document.querySelector('input[name="expVfmt"]:checked') || {}).value || initialFormat,
-          videoMbps:($('expVbr') || {}).value || '',
-          burnTimecode:!!$('expBurnTimecode')?.checked
-        };
-        closeModal();
-        AudioRouting.openOutputSettings(()=>{ void showExportVideoDialog(resumeDraft); });
-      };
+  
+  // draft initialization
+  const draft = initialDraft || {
+    outDir: '',
+    deliverables: [{
+      format: audioOnly ? 'wav' : 'h264',
+      kbps: 8000,
+      targetH: 0,
+      burnTimecode: false,
+      audioPlan: JSON.parse(JSON.stringify(AudioRouting.state.outputPlan || {})),
+      customName: ''
+    }]
+  };
+  
+  // if this is the first open, try to use project path as outDir
+  if (!initialDraft) {
+    DESK.getStartupFile().then(p => {
+      if (p) {
+        draft.outDir = p.replace(/\\[^\\]+$/, '');
+        const od = $('evOutDir');
+        if (od) { od.value = draft.outDir; checkConflicts(); }
+      }
+    });
+  }
+
+  let html = `
+    <div style="font-size:13px;line-height:1.6;width:680px;max-height:600px;display:flex;flex-direction:column;">
+      <div style="margin-bottom:12px;font-weight:bold;font-size:14px;">輸出目錄</div>
+      <div style="display:flex;gap:6px;margin-bottom:16px;">
+        <input type="text" id="evOutDir" style="flex:1;padding:4px;font-size:12px;background:var(--bg-2);color:var(--text);border:1px solid var(--border);" readonly>
+        <button id="evChooseDirBtn" style="padding:4px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">瀏覽...</button>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:8px;">
+        <div style="font-weight:bold;font-size:14px;">交付清單</div>
+        <button id="evAddRowBtn" style="padding:2px 8px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">＋新增一列</button>
+      </div>
+      
+      <div id="evRowsContainer" style="display:flex;flex-direction:column;gap:8px;overflow-y:auto;padding-right:4px;flex:1;"></div>
+      
+      <div id="evConflictMsg" style="color:var(--red);font-weight:bold;margin-top:12px;display:none;"></div>
+    </div>
+  `;
+
+  function renderRow(r, i) {
+    const isWav = r.format === 'wav';
+    
+    if (!r.customName) {
+      let ext = '.mp4';
+      if (r.format === 'prores') ext = '.mov';
+      if (r.format === 'wav') ext = '.wav';
+      let tag = r.format === 'h264' ? '_H264' : (r.format === 'prores' ? '_ProRes' : '_WAV');
+      if (!isWav && r.targetH > 0) tag += '_' + r.targetH + 'p';
+      r.customName = projName + tag + ext;
     }
+
+    const ap = r.audioPlan;
+    let audioDesc = '依專案音軌順序';
+    if (!isWav && ap && ap.groups) {
+      const gCounts = ap.groups.map(g => {
+        if (g.layout==='stereo') return '2.0';
+        if (g.layout==='5.1') return '5.1';
+        if (g.layout==='mono') return '1.0';
+        return g.layout;
+      });
+      const tCount = ap.groups.reduce((acc,g) => acc + (g.layout==='5.1'?6:(g.layout==='stereo'?2:1)), 0);
+      audioDesc = gCounts.length ? `${gCounts.join(' + ')} (${tCount} 軌)` : '無';
+    }
+
+    return `
+      <div style="border:1px solid var(--border);background:var(--panel2);padding:8px;border-radius:4px;display:flex;flex-direction:column;gap:6px;">
+        <div style="display:flex;gap:6px;align-items:center;">
+          <select class="ev-format" data-idx="${i}" style="width:100px;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);">
+            <option value="h264" ${r.format==='h264'?'selected':''} ${audioOnly?'disabled':''}>MP4 (H.264)</option>
+            <option value="prores" ${r.format==='prores'?'selected':''} ${audioOnly?'disabled':''}>MOV (ProRes)</option>
+            <option value="wav" ${r.format==='wav'?'selected':''} ${!hasProjectAudio?'disabled':''}>WAV (純音訊)</option>
+          </select>
+          ${!isWav ? `
+            <select class="ev-res" data-idx="${i}" style="width:110px;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);">
+              <option value="0" ${r.targetH===0?'selected':''}>來源解析度</option>
+              <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
+              <option value="1080" ${r.targetH===1080?'selected':''}>1080p</option>
+              <option value="720" ${r.targetH===720?'selected':''}>720p</option>
+              <option value="custom" ${(r.targetH>0 && ![1080,720,2160].includes(r.targetH))?'selected':''}>自訂...</option>
+            </select>
+            ${(r.targetH>0 && ![1080,720,2160].includes(r.targetH)) ? 
+              `<input type="number" class="ev-custom-res" data-idx="${i}" value="${r.targetH}" style="width:50px;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);">` 
+              : ''}
+            ${r.format==='h264' ? `
+              <input type="number" class="ev-kbps" data-idx="${i}" value="${r.kbps}" style="width:60px;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" title="目標視訊碼率 (kbps)"> kbps
+            ` : ''}
+          ` : ''}
+          <div style="flex:1"></div>
+          <button class="ev-del icon" data-idx="${i}" style="padding:2px;font-size:12px;cursor:pointer;color:var(--red);background:transparent;border:none;" title="刪除此列">✕</button>
+        </div>
+        <div style="display:flex;gap:12px;align-items:center;">
+          <input type="text" class="ev-name" data-idx="${i}" value="${r.customName}" style="flex:1;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" placeholder="檔名 (含副檔名)">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span style="font-size:11px;color:var(--text-faint);">音訊: ${audioDesc}</span>
+            ${!isWav ? `<button class="ev-audio-btn" data-idx="${i}" style="padding:2px 6px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">⚙ 聲道</button>` : ''}
+          </div>
+          ${!isWav ? `<label style="font-size:11px;display:flex;align-items:center;gap:4px;"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}>燒入TC</label>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function $ (sel) { return document.querySelectorAll(sel); }
+
+  function updateRows() {
+    const c = $('evRowsContainer');
+    if (!c) return;
+    c.innerHTML = draft.deliverables.map((r, i) => renderRow(r, i)).join('');
+    
+    $('.ev-format').forEach(el => el.onchange = e => {
+      const idx = +e.target.dataset.idx;
+      draft.deliverables[idx].format = e.target.value;
+      draft.deliverables[idx].customName = ''; 
+      updateRows();
+      checkConflicts();
+    });
+    $('.ev-res').forEach(el => el.onchange = e => {
+      const idx = +e.target.dataset.idx;
+      if (e.target.value === 'custom') {
+        draft.deliverables[idx].targetH = 480;
+      } else {
+        draft.deliverables[idx].targetH = parseInt(e.target.value);
+      }
+      draft.deliverables[idx].customName = '';
+      if (draft.deliverables[idx].format === 'h264') {
+        let w = State.videoWidth || 1920, h = draft.deliverables[idx].targetH || 1080;
+        if (draft.deliverables[idx].targetH > 0) {
+          const aspect = w / (State.videoHeight || 1080);
+          w = Math.round(h * aspect);
+          w -= (w % 2); 
+        }
+        draft.deliverables[idx].kbps = Math.round((w * h * 30 * 0.1) / 1000);
+      }
+      updateRows();
+      checkConflicts();
+    });
+    $('.ev-custom-res').forEach(el => el.onchange = e => {
+      const idx = +e.target.dataset.idx;
+      draft.deliverables[idx].targetH = parseInt(e.target.value);
+      draft.deliverables[idx].customName = '';
+      updateRows();
+      checkConflicts();
+    });
+    $('.ev-kbps').forEach(el => el.onchange = e => {
+      const idx = +e.target.dataset.idx;
+      draft.deliverables[idx].kbps = parseInt(e.target.value);
+    });
+    $('.ev-name').forEach(el => el.onchange = e => {
+      const idx = +e.target.dataset.idx;
+      draft.deliverables[idx].customName = e.target.value;
+      checkConflicts();
+    });
+    $('.ev-tc').forEach(el => el.onchange = e => {
+      const idx = +e.target.dataset.idx;
+      draft.deliverables[idx].burnTimecode = e.target.checked;
+    });
+    $('.ev-del').forEach(el => el.onclick = e => {
+      const idx = +e.target.dataset.idx;
+      draft.deliverables.splice(idx, 1);
+      updateRows();
+      checkConflicts();
+    });
+    $('.ev-audio-btn').forEach(el => el.onclick = e => {
+      const idx = +e.target.dataset.idx;
+      const oldPlan = JSON.parse(JSON.stringify(AudioRouting.state.outputPlan || {}));
+      AudioRouting.state.outputPlan = JSON.parse(JSON.stringify(draft.deliverables[idx].audioPlan));
+      closeModal();
+      AudioRouting.openOutputSettings(() => {
+        draft.deliverables[idx].audioPlan = JSON.parse(JSON.stringify(AudioRouting.state.outputPlan));
+        AudioRouting.state.outputPlan = oldPlan;
+        void showExportVideoDialog(draft);
+      });
+    });
+  }
+
+  async function checkConflicts() {
+    const msg = $('evConflictMsg');
+    if (!msg || !draft.outDir) return true;
+    
+    const names = draft.deliverables.map(r => r.customName.toLowerCase());
+    const hasDupes = new Set(names).size !== names.length;
+    if (hasDupes) {
+      msg.textContent = '警告：交付清單內有重複的檔名！';
+      msg.style.display = 'block';
+      return false;
+    }
+    
+    try {
+      const files = await DESK.listDir(draft.outDir);
+      const existing = files.map(f => f.name.toLowerCase());
+      const conflicts = names.filter(n => existing.includes(n));
+      if (conflicts.length > 0) {
+        msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})`;
+        msg.style.display = 'block';
+        return false;
+      }
+    } catch(e){}
+    
+    msg.style.display = 'none';
+    return true;
+  }
+
+  openModal('匯出交付清單', html, [
+    { label: '取消', act: closeModal },
+    { label: '全部送出', primary: true, act: async () => {
+      if (!draft.outDir) { showToast('請先選擇輸出目錄'); return; }
+      if (draft.deliverables.length === 0) { showToast('清單不能為空'); return; }
+      if (!(await checkConflicts())) return;
+      
+      const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
+      const assText = !audioOnly && /\nDialogue:/.test(toASSFromState(State.cues)) 
+        ? toASSFromState(State.cues.map(c => ({...c, start: Math.max(0, (c.start || 0) - expIn), end: Math.max(0, (c.end || 0) - expIn)}))) 
+        : null;
+      
+      for (const [idx, r] of draft.deliverables.entries()) {
+        const isWav = r.format === 'wav';
+        const outPath = draft.outDir + '\\' + r.customName;
+        
+        let w = State.videoWidth || 1920;
+        let h = State.videoHeight || 1080;
+        if (!isWav && r.targetH > 0) {
+          h = r.targetH;
+          const aspect = (State.videoWidth || 1920) / (State.videoHeight || 1080);
+          w = Math.round(h * aspect);
+          w -= (w % 2); 
+        }
+
+        const jobId = await DESK.exportVideo({
+          clips: data.clips,
+          videoTracks: data.videoTracks,
+          width: w,
+          height: h,
+          fps: State.fps || 25,
+          assText: assText,
+          format: r.format,
+          duration: data.duration,
+          videoKbps: r.kbps,
+          audioPlan: isWav ? null : r.audioPlan,
+          timecodeWatermark: !isWav && r.burnTimecode ? { start: secToEncore(expIn, State.fps, State.dropFrame) } : null,
+          defaultName: r.customName,
+          outPath: outPath
+        });
+        
+        if (jobId) showToast(`排入佇列: ${r.customName}`);
+      }
+      closeModal();
+    }}
+  ], { keepVideo: true });
+
+  const od = $('evOutDir');
+  if (od) od.value = draft.outDir;
+  
+  $('evChooseDirBtn').onclick = async () => {
+    const p = await DESK.exportDirectory([]);
+    if (p) {
+      draft.outDir = p;
+      od.value = p;
+      checkConflicts();
+    }
+  };
+
+  $('evAddRowBtn').onclick = () => {
+    if (draft.deliverables.length === 0) {
+      draft.deliverables.push({
+        format: audioOnly ? 'wav' : 'h264', kbps: 8000, targetH: 0, burnTimecode: false,
+        audioPlan: JSON.parse(JSON.stringify(AudioRouting.state.outputPlan || {})), customName: ''
+      });
+    } else {
+      const last = draft.deliverables[draft.deliverables.length - 1];
+      draft.deliverables.push({
+        ...JSON.parse(JSON.stringify(last)),
+        customName: ''
+      });
+    }
+    updateRows();
+    checkConflicts();
+  };
+
+  setTimeout(() => {
+    updateRows();
+    checkConflicts();
   }, 20);
 }
-async function _runExportVideo(data, format, videoKbps, burnTimecode=false) {
-  const isWav = format === 'wav';
-  const visCues = State.cues; // toASSFromState 內部依軌道可見性過濾，時碼為時間軸時間＝輸出時間
-  const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
-  
-  // 修正：必須扣除 exportIn 的偏移量，否則部分匯出時字幕會出現在錯誤的時間點
-  const shiftedCues = expIn > 0 ? visCues.map(c => ({
-    ...c,
-    start: Math.max(0, (c.start || 0) - expIn),
-    end: Math.max(0, (c.end || 0) - expIn)
-  })) : visCues;
-
-  const assText = toASSFromState(shiftedCues);
-  const hasVisSub = /\nDialogue:/.test(assText);
-  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_')[0];
-  const tcSuffix=!isWav&&burnTimecode?'・含時間碼浮水印':'';
-  const fmtLabel = (isWav ? 'WAV 多聲道 PCM' : (format === 'prores' ? 'ProRes 422 HQ' : `MP4 ${(videoKbps / 1000).toFixed(1)}Mbps`)) + tcSuffix;
-  const kindLabel = isWav ? '音訊' : '影片';
-  setStatus(`匯出${kindLabel}中（${fmtLabel}）…`, 'busy', 'lock');
-  showToast(`開始匯出${kindLabel}，時間依長度與格式而定…`);
-  try {
-    const r = await DESK.exportVideo({
-      clips: data.clips,
-      videoTracks: data.videoTracks,
-      width: State.videoWidth || 1920,
-      height: State.videoHeight || 1080,
-      fps: State.fps || 25,
-      assText: !isWav && hasVisSub ? assText : null,
-      // 使用專案時間軸的起點，而不是輸出檔的 00:00:00:00；部分輸出時可與播放器一致。
-      timecodeWatermark: !isWav && burnTimecode ? {
-        start: secToEncore(expIn, State.fps, State.dropFrame)
-      } : null,
-      format,
-      videoKbps,
-      duration: data.duration,
-      audioPlan: data.audioPlan || undefined,
-      defaultName: `ST_${projName}_${isWav ? 'Audio' : (format === 'prores' ? 'ProRes422HQ' : 'H264')}`,
-    });
-    if (!r) { setStatus('已取消匯出', '', 'unlock'); return; }
-    // r.encoder 為 ffmpeg 實際使用的編碼器（從其輸出解析），非事前猜測
-    const acc = isWav ? `${r.audioChannels || data.audioPlan?.buses.length || 1} 軌 ${r.encoder}` : (r.gpu ? `GPU ${r.encoder}` : `CPU ${r.encoder}`);
-    const br = r.videoKbps ? `，${(r.videoKbps / 1000).toFixed(1)}Mbps` : '';
-    const actualAbr = Array.isArray(r.audioActualBitrates) && r.audioActualBitrates.length
-      ? r.audioActualBitrates.map(stream => stream?.kbps > 0 ? `${stream.kbps}k` : '?').join('/') : '';
-    const targetAbr = Array.isArray(r.audioBitrates) && r.audioBitrates.length ? r.audioBitrates.join('/') : '';
-    const abr = actualAbr ? `，音訊 AAC 實測 ${actualAbr}` : (targetAbr ? `，音訊 AAC 目標 ${targetAbr}` : '');
-    const secs = (r.elapsedMs / 1000).toFixed(1);
-    setStatus(`已匯出${kindLabel}（${acc}${br}${abr}，耗時 ${secs}s）：${r.outPath}`, 'ok', 'unlock');
-    showToast(`${kindLabel}已匯出（${acc}${br}${abr}）：${baseName(r.outPath)}`);
-  } catch (e) {
-    setStatus(`${kindLabel}匯出失敗：` + (e?.message || e), '', 'unlock');
-    showToast(`${kindLabel}匯出失敗：` + (e?.message || e));
-  }
-}
-
 function doExportXLSX(trackDataList) {
   if (!trackDataList.length) { showToast('所選軌道沒有字幕'); return; }
   const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);

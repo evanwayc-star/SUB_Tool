@@ -23,6 +23,7 @@ const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
 let _currentIngestProc = null; // S1: 追蹤目前執行中的 ingest ffmpeg，換檔時強制 kill
+const activeJobs = new Map();
 
 /* S1：IPC 路徑白名單 — 僅允許存取「快取根」與「使用者本 session 透過對話框開過或
    經 ffmpeg/ffprobe 處理過的媒體所在目錄」。防止 renderer 被惡意字幕/專案檔注入後，
@@ -244,20 +245,69 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
     if (onProcess) onProcess(p);
     let err = '';       // 尾端（錯誤訊息用；會被截斷）
     const maps = [];    // 串流對應行（出現在輸出開頭，需單獨保留，否則被 err 截斷丟失）
+    const logPath = path.join(app.getPath('userData'), `export-${Date.now()}-${jobId || 'task'}.log`);
+    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+    logStream.write(`> ffmpeg ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}\n\n`);
+    
+    const startTime = Date.now();
+    const speeds = [];
+
     p.stderr.on('data', d => {
-      const s = d.toString(); err += s; if (err.length > 8000) err = err.slice(-8000);
+      const s = d.toString();
+      logStream.write(s);
+      err += s; if (err.length > 8000) err = err.slice(-8000);
+      
+      const sMatch = /speed=\s*([\d\.]+)x/.exec(s);
+      if (sMatch) {
+        speeds.push(parseFloat(sMatch[1]));
+        if (speeds.length > 5) speeds.shift();
+      }
+
       // 例：Stream #0:0 -> #0:0 (mpeg2video (native) -> h264 (h264_nvenc))
       for (const mm of s.matchAll(/Stream #\d+:\d+ -> #\d+:\d+ \(([^\n]*)\)/g)) if (maps.length < 8) maps.push(mm[1]);
       const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s);
       if (m && duration && sender) {
         const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
-        safeSend(sender, 'task-progress', { jobId, label, pct: Math.min(99, Math.round(t / duration * 100)) });
+        let etaS = null;
+        if (speeds.length > 0) {
+           const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+           if (avgSpeed > 0) etaS = (duration - t) / avgSpeed;
+        }
+        safeSend(sender, 'task-progress', { jobId, label, pct: Math.min(99, Math.round(t / duration * 100)), etaS, elapsedMs: Date.now() - startTime });
       }
     });
-    p.on('error', rej);
+    p.on('error', (e) => {
+      logStream.end();
+      rej(e);
+    });
     p.on('close', c => {
+      logStream.end();
       if (sender) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
-      c === 0 ? res({ tail: err, maps }) : rej(new Error('ffmpeg 結束碼 ' + c + '\n' + err.slice(-600)));
+      if (c === 0) {
+        fs.unlink(logPath, () => {});
+        res({ tail: err, maps });
+      } else {
+        const fullLog = fs.readFileSync(logPath, 'utf8');
+        let summary = '';
+        const mNoSuchFile = fullLog.match(/(.*): No such file or directory/);
+        if (mNoSuchFile) {
+          summary = `找不到來源檔：${mNoSuchFile[1]}`;
+        } else if (fullLog.includes('No space left on device')) {
+          summary = '磁碟空間不足';
+        } else if (fullLog.match(/Unknown encoder '([^']+)'/)) {
+          summary = `編碼器不可用：${fullLog.match(/Unknown encoder '([^']+)'/)[1]}`;
+        } else if (fullLog.includes('Permission denied')) {
+          const mPerm = fullLog.match(/(.*): Permission denied/);
+          summary = `輸出路徑無寫入權限` + (mPerm ? `：${mPerm[1]}` : '');
+        } else if (fullLog.includes('Filtergraph') && (fullLog.includes('parse error') || fullLog.includes('error parsing'))) {
+          summary = 'Filtergraph 解析失敗';
+        } else {
+          const lines = fullLog.split('\n');
+          if (lines.length <= 40) summary = lines.join('\n');
+          else summary = lines.slice(0, 20).join('\n') + '\n...\n' + lines.slice(-20).join('\n');
+        }
+        rej(new Error(`[LOG_PATH]${logPath}[/LOG_PATH]ffmpeg 結束碼 ${c}\n${summary}`));
+      }
     });
   });
 }
@@ -420,6 +470,18 @@ ipcMain.handle('app:getStartupFile', () => {
   return null;
 });
 
+ipcMain.handle('app:openPath', async (e, p) => {
+  const { shell } = require('electron');
+  return shell.openPath(p);
+});
+ipcMain.handle('ffmpeg:stopExport', () => {
+  if (activeExportJob && activeExportJob.p) {
+    activeExportJob.stopped = true;
+    activeExportJob.p.kill();
+    try { fs.unlinkSync(activeExportJob.outPath); } catch(e){}
+    activeJobs.delete(jobId);
+  }
+});
 ipcMain.handle('app:status', () => ({
   isDesktop: true, ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE,
   ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: VENC
@@ -563,21 +625,23 @@ function _findExportTimecodeFont() {
   try { return font && fs.existsSync(font) ? font : null; } catch (e) { return null; }
 }
 
-ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark }) => {
+ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
+  const { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark } = payload;
   const isWav = format === 'wav';
   const audioPlan = _normalizeAudioPlan(rawAudioPlan, { requireStreams: !isWav });
   const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
   const isPro = format === 'prores';
   const ext = isWav ? 'wav' : (isPro ? 'mov' : 'mp4');
-  // 在跳出存檔對話框前先驗證，避免使用者已選好輸出位置才得知目前專案指到 preview cache。
+  
   (clips || []).forEach(c => {
     if (c.path) assertMasterExportMedia(c.path, '影像');
     (c.audio || []).forEach(a => a.file && assertMasterExportMedia(a.file, '音訊'));
   });
   for (const bus of audioPlan?.buses || []) for (const input of bus.inputs || [])
     assertMasterExportMedia(input.file, '音訊');
-  let outPath = presetOut || null; // 有指定輸出路徑則跳過對話框（測試/批次用）
+    
+  let outPath = presetOut || null;
   if (!outPath) {
     const r = await dialog.showSaveDialog(mainWin, {
       title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
@@ -586,37 +650,100 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     if (r.canceled) return null;
     outPath = r.filePath;
   }
-  allowFileDir(outPath);
-  (clips || []).forEach(c => {
-    if (c.path) allowFileDir(c.path);
-    (c.audio || []).forEach(a => {
-      if (!a.file) return;
-      allowFileDir(a.file);
-    });
-  });
-  for (const bus of audioPlan?.buses || []) for (const input of bus.inputs || []) {
-    allowFileDir(input.file);
+
+  const jobId = 'export-' + Date.now();
+  // 分離 assText 存為獨立檔案
+  let assRef = null;
+  if (assText && assText.trim()) {
+    assRef = jobId + '.ass';
+    QueueManager.ensureDir();
+    fs.writeFileSync(path.join(EXPORT_QUEUE_DIR, assRef), assText, 'utf8');
+  }
+  
+  const savedPayload = { ...payload, assText: null, outPath };
+  const job = { id: jobId, status: 'queued', createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
+  QueueManager.addJob(job);
+  return jobId;
+});
+
+async function _runJobLogic(job) {
+  const { clips, videoTracks, width: W, height: H, fps: R, format, duration: D, outPath, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark } = job.payload;
+  const jobId = job.id;
+  // Get sender if available
+  let sender = null;
+  try {
+    const wc = require('electron').webContents.fromId(job.senderId);
+    if (wc && !wc.isDestroyed()) sender = wc;
+  } catch (err) {}
+  
+  const fallbackSender = mainWin && !mainWin.isDestroyed() ? mainWin.webContents : null;
+  const dispatch = (evt, data) => {
+    // Update local job state for queue window
+    if (evt === 'task-progress') {
+      if (data.done) job.status = 'done';
+      else if (data.error) {
+        job.status = 'failed';
+        job.errorMsg = data.errorMsg;
+        openQueueWindow(); // pop up on error
+      }
+      else if (data.stopped) job.status = 'stopped';
+      else {
+        job.pct = data.pct;
+        job.elapsedMs = data.elapsedMs;
+        job.etaS = data.etaS;
+      }
+      QueueManager.broadcastUpdate();
+    }
+    if (sender) safeSend(sender, evt, data);
+    else if (fallbackSender) safeSend(fallbackSender, evt, data);
+  };
+
+  const isWav = format === 'wav';
+  const audioPlan = _normalizeAudioPlan(rawAudioPlan, { requireStreams: !isWav });
+  const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, R);
+  const isPro = format === 'prores';
+  
+  // 載入分離的 assText
+  let assText = null;
+  if (job.assRef) {
+    try { assText = fs.readFileSync(path.join(EXPORT_QUEUE_DIR, job.assRef), 'utf8'); } catch(e){}
   }
 
-  const planDuration = _planDuration(audioPlan);
-  const D = Math.max(0.05, _finiteNumber(duration, 0), planDuration);
-  ensureTmp();
-  /* WAV 是純音訊交付：所有 project buses 依 bus 順序合成一條 multichannel PCM stream；
-     exportLayout.streams 僅作用於影片容器的多 stream 輸出，故這裡刻意不採用它。 */
-  if (isWav) {
-    if (!audioPlan) _exportPlanError('WAV 匯出需要專案音軌路由資料。');
-    const inputs = [], fc = [];
-    const planned = _buildPlannedAudio(audioPlan, inputs, fc, 0, D);
-    const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);
-    /* 不要加 -ac：它會把 16/18 軌等自訂 WAVEFORMATEXTENSIBLE layout 強制改成通用
-       "N channels"，部分 ffmpeg/libswresample 版本會因此拒絕輸出。join 的輸出 layout
-       已精確帶有 bus 順序與 channel mask。 */
-    const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', wav.label,
-      '-ar', '48000', '-c:a', 'pcm_s24le', outPath];
-    const t0 = Date.now();
-    await runFF(args, { sender: e.sender, duration: D, jobId: 'export', label: `匯出 WAV PCM（${wav.channels} 軌）` });
-    return { outPath, encoder: 'pcm_s24le', gpu: false, elapsedMs: Date.now() - t0, videoKbps: null, audioChannels: wav.channels };
-  }
+
+    try {
+      allowFileDir(outPath);
+      (clips || []).forEach(c => {
+        if (c.path) allowFileDir(c.path);
+        (c.audio || []).forEach(a => {
+          if (!a.file) return;
+          allowFileDir(a.file);
+        });
+      });
+      for (const bus of audioPlan?.buses || []) for (const input of bus.inputs || []) {
+        allowFileDir(input.file);
+      }
+
+      const planDuration = _planDuration(audioPlan);
+      const D = Math.max(0.05, _finiteNumber(duration, 0), planDuration);
+      ensureTmp();
+      
+      if (isWav) {
+        if (!audioPlan) _exportPlanError('WAV 匯出需要專案音軌路由資料。');
+        const inputs = [], fc = [];
+        const planned = _buildPlannedAudio(audioPlan, inputs, fc, 0, D);
+        const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);
+        const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', wav.label,
+          '-ar', '48000', '-c:a', 'pcm_s24le', outPath];
+        const t0 = Date.now();
+        const label = `匯出 WAV PCM（${wav.channels} 軌）`;
+        await runFF(args, { sender, duration: D, jobId, label, onProcess: p => {
+          activeJobs.set(jobId, { p, outPath, stopped: false });
+        }});
+        activeJobs.delete(jobId);
+        const r = { outPath, encoder: 'pcm_s24le', gpu: false, elapsedMs: Date.now() - t0, videoKbps: null, audioChannels: wav.channels };
+        dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
+        return;
+      }
 
   const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
   const R = fps || 25;
@@ -839,10 +966,12 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
   const isGpu = !isPro && planned !== 'libx264';
   const accel = isGpu ? 'GPU ' + planned.replace('h264_', '').toUpperCase() : 'CPU ' + planned;
   const label = `匯出 ${isPro ? 'ProRes 422 HQ' : 'MP4 ' + (kbps / 1000).toFixed(1) + 'Mbps'}（${accel}）`;
-  let usedEncoder = planned;
-  const t0 = Date.now();
-  try {
-    const rr = await runFF(args, { sender: e.sender, duration: duration || 0, jobId: 'export', label, cwd: TMP });
+      let usedEncoder = planned;
+      const t0 = Date.now();
+      try {
+        const rr = await runFF(args, { sender, duration: D, jobId, label, cwd: TMP, onProcess: p => {
+          activeExportJob = { id: jobId, p, outPath, stopped: false };
+        }});
     // ffmpeg 的串流對應行是「實際使用」的地面真相（非我們的猜測）：
     //   例 "mpeg2video (native) -> h264 (h264_nvenc)" → 取箭頭右側括號內的編碼器
     const vmap = (rr.maps || []).find(m => /->/.test(m) && /h264|prores|hevc/i.test(m));
@@ -852,13 +981,27 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, { clips, videoTracks, width, heig
     if (assName) { try { fs.unlinkSync(path.join(TMP, assName)); } catch (e2) {} }
   }
   // 回傳 ffmpeg 實際使用的編碼器與耗時，供 renderer 顯示「這次真的用了 GPU 沒有」
-  return {
-    outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder),
-    elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps,
-    audioBitrates: isPro ? null : audioBitrates,
-    audioActualBitrates: isPro ? null : outputAudioBitrates(outPath)
-  };
-});
+      activeJobs.delete(jobId);
+      const r = {
+        outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder),
+        elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps,
+        audioBitrates: isPro ? null : audioBitrates,
+        audioActualBitrates: isPro ? null : outputAudioBitrates(outPath)
+      };
+      dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
+    } catch (err) {
+      const wasStopped = activeJobs.has(jobId) && activeJobs.get(jobId).stopped;
+      activeJobs.delete(jobId);
+      if (wasStopped) {
+         try { fs.unlinkSync(outPath); } catch(e){}
+         dispatch( 'task-progress', { jobId, stopped: true });
+      } else {
+         dispatch( 'task-progress', { jobId, error: true, errorMsg: err.message });
+      }
+    }
+  
+}
+
 
 ipcMain.handle('dialog:importDirectory', async () => {
   const r = await dialog.showOpenDialog(mainWin, {

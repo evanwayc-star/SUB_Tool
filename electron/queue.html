@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>匯出佇列監控</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; background: #ececec; color: #333; }
+    h2 { margin-top: 0; font-size: 16px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .controls { display: flex; gap: 12px; align-items: center; font-size: 13px; }
+    button { padding: 4px 8px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 4px; }
+    button:hover { background: #f0f0f0; }
+    button[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .warning { color: #856404; background: #fff3cd; border: 1px solid #ffeeba; padding: 6px 10px; border-radius: 4px; font-size: 12px; margin-bottom: 12px; display: inline-block; }
+    
+    .job-list { display: flex; flex-direction: column; gap: 8px; }
+    .job { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .job-header { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 14px; font-weight: bold; }
+    .job-meta { font-size: 12px; color: #666; margin-bottom: 6px; word-break: break-all; }
+    .job-progress-row { display: flex; align-items: center; gap: 10px; }
+    .progress-bar-bg { flex: 1; height: 14px; background: #e9ecef; border-radius: 7px; overflow: hidden; }
+    .progress-bar-fill { height: 100%; background: #007bff; width: 0%; transition: width 0.3s; }
+    .job-status { font-size: 12px; font-weight: bold; min-width: 60px; text-align: right; }
+    
+    .job.status-queued .job-status { color: #6c757d; }
+    .job.status-running .job-status { color: #007bff; }
+    .job.status-running .progress-bar-fill { background: #007bff; }
+    .job.status-done .job-status { color: #28a745; }
+    .job.status-done .progress-bar-fill { background: #28a745; width: 100%; }
+    .job.status-failed .job-status { color: #dc3545; }
+    .job.status-failed .progress-bar-fill { background: #dc3545; width: 100%; }
+    .job.status-missing-source .job-status { color: #dc3545; }
+    
+    .job-actions { margin-top: 8px; display: flex; gap: 6px; }
+    .job-actions button { font-size: 11px; padding: 2px 6px; }
+    
+    .error-box { margin-top: 8px; font-size: 12px; color: #dc3545; background: #fff8f8; border: 1px solid #ffcaca; padding: 6px; border-radius: 4px; white-space: pre-wrap; display: none; }
+    .job.status-failed .error-box, .job.status-missing-source .error-box { display: block; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2>匯出佇列</h2>
+    <div class="controls">
+      <label title="並行通常不會更快，因為多次讀取同一個來源素材會讓磁碟效能下降。">
+        並行數：
+        <select id="concurrencySel">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+        </select>
+        <span style="color:#666;font-size:11px;">(並行通常不會更快)</span>
+      </label>
+      <button id="pauseToggleBtn">暫停佇列</button>
+    </div>
+  </div>
+  <div class="warning">ℹ️ 匯出中，預覽可能會發生卡頓。</div>
+  
+  <div class="job-list" id="jobList"></div>
+
+  <script>
+    const UI = {
+      list: document.getElementById('jobList'),
+      pauseBtn: document.getElementById('pauseToggleBtn'),
+      concurrencySel: document.getElementById('concurrencySel')
+    };
+
+    let _isPaused = false;
+    let _jobs = [];
+
+    // Format seconds
+    const fmt = s => {
+      if (s === null || s === undefined) return '估算中';
+      return \`\${Math.floor(s/60).toString().padStart(2,'0')}:\${(s%60).toString().padStart(2,'0')}\`;
+    };
+
+    function renderJobs() {
+      UI.list.innerHTML = '';
+      if (_jobs.length === 0) {
+        UI.list.innerHTML = '<div style="text-align:center;color:#999;padding:20px;font-size:13px;">目前沒有任何匯出工作。</div>';
+        return;
+      }
+      _jobs.forEach(job => {
+        const el = document.createElement('div');
+        el.className = 'job status-' + job.status;
+        
+        let statusText = job.status;
+        if (job.status === 'queued') statusText = '等待中';
+        if (job.status === 'running') statusText = '執行中 ' + (job.pct || 0).toFixed(1) + '%';
+        if (job.status === 'done') statusText = '完成';
+        if (job.status === 'failed') statusText = '失敗';
+        if (job.status === 'missing-source') statusText = '來源遺失';
+        
+        let tStr = '';
+        if (job.status === 'running') {
+          const elS = Math.floor((job.elapsedMs || 0) / 1000);
+          tStr = \`已用 \${fmt(elS)} / 剩餘 \${fmt(job.etaS ? Math.floor(job.etaS) : null)}\`;
+        } else if (job.status === 'done') {
+          const elS = Math.floor((job.elapsedMs || 0) / 1000);
+          tStr = \`耗時 \${fmt(elS)}\`;
+        }
+
+        const outName = job.payload.outPath.split(/[\\\\/]/).pop();
+        
+        let errorHtml = '';
+        if (job.errorMsg) {
+          let msg = job.errorMsg;
+          let logPath = null;
+          const m = msg.match(/\\[LOG_PATH\\](.*?)\\[\\/LOG_PATH\\]/);
+          if (m) {
+            logPath = m[1];
+            msg = msg.replace(/\\[LOG_PATH\\].*?\\[\\/LOG_PATH\\]/, '').trim();
+          }
+          errorHtml = \`<div class="error-box">\${msg}\` + 
+            (logPath ? \`<div style="margin-top:6px"><button onclick="window.queueAPI.openPath('\${logPath.replace(/\\\\/g, '\\\\\\\\')}')">開啟完整記錄</button></div>\` : '') +
+            \`</div>\`;
+        }
+
+        let actionHtml = '';
+        if (job.status === 'running' || job.status === 'queued') {
+          actionHtml += \`<button onclick="window.queueAPI.stopJob('\${job.id}')">停止</button>\`;
+        }
+        if (job.status === 'failed' || job.status === 'missing-source') {
+          actionHtml += \`<button onclick="window.queueAPI.retryJob('\${job.id}')">重試</button>\`;
+        }
+        if (job.status === 'done' || job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
+          actionHtml += \`<button onclick="window.queueAPI.clearJob('\${job.id}')">清除紀錄</button>\`;
+        }
+
+        el.innerHTML = \`
+          <div class="job-header"><span>\${outName}</span> <span class="job-status">\${statusText}</span></div>
+          <div class="job-meta">\${job.payload.defaultName} \${tStr ? '• ' + tStr : ''}</div>
+          \${(job.status === 'running' || job.status === 'done' || job.status === 'queued') ? \`
+            <div class="job-progress-row">
+              <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:\${job.pct || 0}%"></div></div>
+            </div>
+          \` : ''}
+          \${errorHtml}
+          <div class="job-actions">\${actionHtml}</div>
+        \`;
+        UI.list.appendChild(el);
+      });
+    }
+
+    async function loadData() {
+      const data = await window.queueAPI.getAll();
+      _jobs = data.jobs;
+      _isPaused = data.isPaused;
+      UI.pauseBtn.textContent = _isPaused ? '▶ 繼續佇列' : '⏸ 暫停佇列';
+      UI.concurrencySel.value = data.concurrency;
+      renderJobs();
+    }
+
+    UI.pauseBtn.onclick = async () => {
+      await window.queueAPI.setPause(!_isPaused);
+      loadData();
+    };
+
+    UI.concurrencySel.onchange = async () => {
+      await window.queueAPI.setConcurrency(parseInt(UI.concurrencySel.value));
+    };
+
+    window.queueAPI.onUpdate(() => {
+      loadData();
+    });
+
+    loadData();
+  </script>
+</body>
+</html>

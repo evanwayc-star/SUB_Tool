@@ -2524,8 +2524,88 @@ async function initDesktop(){
       `原生 MP4/MOV/MP3/WAV 播放與字幕編輯不受影響。`);
     setStatus('就緒（桌面模式）— 可直接讀 MXF 與多音軌','ok');
   }catch(e){ setStatus('就緒（桌面模式）','ok'); }
+  if ($('stStopBtn')) $('stStopBtn').onclick = () => { if (DESK.stopExport) DESK.stopExport(); };
+  if ($('stResumeBtn')) $('stResumeBtn').onclick = () => { if (DESK.queueResume) DESK.queueResume(); };
+  if ($('stMonitorBtn')) $('stMonitorBtn').onclick = () => { if (DESK.openQueueMonitor) DESK.openQueueMonitor(); };
+
+  let _queueStatus = { waitingCount: 0, missingCount: 0, isPaused: false };
+  if (DESK.onQueueStatus) {
+    DESK.onQueueStatus(s => {
+      _queueStatus = s;
+      _updateQueueStatusUI();
+    });
+  }
+
+  function _updateQueueStatusUI() {
+    if (_queueStatus.missingCount > 0) {
+      showToast(`佇列中有 ${_queueStatus.missingCount} 份工作來源遺失，已被中止`);
+      _queueStatus.missingCount = 0; // only show once per update
+    }
+    
+    // 如果沒有執行中的任務，但有等待中且暫停，就顯示在狀態列
+    if (_queueStatus.isPaused && _queueStatus.waitingCount > 0) {
+      setStatus(`佇列已暫停（還有 ${_queueStatus.waitingCount} 份等待中）`, '', 'unlock');
+      if ($('stResumeBtn')) $('stResumeBtn').style.display = 'inline-block';
+    } else {
+      if ($('stResumeBtn')) $('stResumeBtn').style.display = 'none';
+    }
+  }
+
   const _taskStarts = {};
   DESK.onProgress(d=>{
+    if (d.jobId && String(d.jobId).startsWith('export-')) {
+      if (d.error) {
+        if ($('stStopBtn')) $('stStopBtn').style.display = 'none';
+        let msg = d.errorMsg || '';
+        let logPath = null;
+        const m = msg.match(/\[LOG_PATH\](.*?)\[\/LOG_PATH\]/);
+        if (m) {
+          logPath = m[1];
+          msg = msg.replace(/\[LOG_PATH\].*?\[\/LOG_PATH\]/, '').trim();
+        }
+        setStatus(`匯出失敗`, '', 'unlock');
+        let modalBody = `<div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${msg.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`;
+        if (logPath) {
+          modalBody += `<div style="margin-top:16px"><button onclick="subtool.openPath('${logPath.replace(/\\/g, '\\\\')}')" style="padding:4px 8px;cursor:pointer">開啟完整記錄</button></div>`;
+        }
+        openModal(`匯出失敗`, modalBody, [{ label: '關閉', primary: true, act: closeModal }]);
+        setTimeout(_updateQueueStatusUI, 100);
+      } else if (d.stopped) {
+        if ($('stStopBtn')) $('stStopBtn').style.display = 'none';
+        setStatus('已停止匯出', '', 'unlock');
+        showToast('已停止匯出，半成品已刪除');
+        setTimeout(_updateQueueStatusUI, 100);
+      } else if (d.done) {
+        if ($('stStopBtn')) $('stStopBtn').style.display = 'none';
+        const r = d.result;
+        if (!r) return;
+        const isWav = r.encoder === 'pcm_s24le';
+        const kindLabel = isWav ? '音訊' : '影片';
+        const acc = isWav ? `${r.audioChannels} 軌 ${r.encoder}` : (r.gpu ? `GPU ${r.encoder}` : `CPU ${r.encoder}`);
+        const br = r.videoKbps ? `，${(r.videoKbps / 1000).toFixed(1)}Mbps` : '';
+        const actualAbr = Array.isArray(r.audioActualBitrates) && r.audioActualBitrates.length
+          ? r.audioActualBitrates.map(stream => stream?.kbps > 0 ? `${stream.kbps}k` : '?').join('/') : '';
+        const targetAbr = Array.isArray(r.audioBitrates) && r.audioBitrates.length ? r.audioBitrates.join('/') : '';
+        const abr = actualAbr ? `，音訊 AAC 實測 ${actualAbr}` : (targetAbr ? `，音訊 AAC 目標 ${targetAbr}` : '');
+        const secs = (r.elapsedMs / 1000).toFixed(1);
+        setStatus(`已匯出${kindLabel}（${acc}${br}${abr}，耗時 ${secs}s）`, 'ok', 'unlock');
+        showToast(`${kindLabel}已匯出（${acc}${br}${abr}）`);
+        setTimeout(_updateQueueStatusUI, 100);
+      } else {
+        if ($('stStopBtn')) $('stStopBtn').style.display = 'inline-block';
+        let tStr = '';
+        const elS = Math.floor((d.elapsedMs || 0) / 1000);
+        const fmt = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
+        if (d.etaS !== null && d.etaS !== undefined) {
+           tStr = ` [已用 ${fmt(elS)} / 剩餘 ${fmt(Math.floor(d.etaS))}]`;
+        } else {
+           tStr = ` [已用 ${fmt(elS)} / 估算中]`;
+        }
+        setStatus((d.label || '匯出中') + '… ' + d.pct + '%' + tStr, 'busy');
+      }
+      return;
+    }
+
     if (d.pct === 0 || !_taskStarts[d.jobId]) _taskStarts[d.jobId] = Date.now();
     if(!d.done && d.pct<100) {
       const elMs = Date.now() - _taskStarts[d.jobId];
