@@ -184,3 +184,34 @@ grep -rn "from './app.js'" src   # 應為空——不可再引入對 app.js 的�
 架構規則：**沒有任何模組可以 `import … from './app.js'`。**
 低階模組要觸發重繪／指令時用 `emit('事件名', …)`（`events.js`），
 由 `app.js` 以 `on(...)` 訂閱。
+
+---
+
+## 8. Agent skills 設定
+
+本 repo 已跑過 `/setup-matt-pocock-skills`。以下 skill 會讀取 `docs/agents/` 下的設定：
+`/to-tickets`、`/triage`、`/to-spec`、`/wayfinder`、`/implement`、
+`/improve-codebase-architecture`、`/diagnosing-bugs`、`/tdd`。
+
+### Issue tracker
+
+Issue 放在 **GitHub Issues**，用 `gh` CLI 操作；**外部 PR 不納入 triage**。
+Issue 內容用繁體中文撰寫（與 §5 提交訊息一致）。
+詳見 [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md)。
+
+### Triage 標籤
+
+五個角色使用**預設名稱**（`needs-triage` / `needs-info` / `ready-for-agent` /
+`ready-for-human` / `wontfix`）；`wontfix` 沿用 repo 既有標籤，未另建重複的。
+詳見 [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md)。
+
+### Domain docs
+
+**單一 context**：根目錄 `CONTEXT.md` + `docs/adr/`。兩者目前都尚未建立——
+這是刻意的，由 `/domain-modeling` 在真的解決了某個詞彙或決策時順勢建立，
+不要為了補齊而預先產生空殼。
+詳見 [`docs/agents/domain.md`](docs/agents/domain.md)。
+
+> **為什麼這一節在 `AGENTS.md` 而不是 `CLAUDE.md`**：skill 的預設規則是
+> 「`CLAUDE.md` 存在就寫進去」，但本專案的 `CLAUDE.md` 只是 `@AGENTS.md` 的轉接層，
+> Codex 與 Antigravity 都不讀它（見 §6）。這一節三個工具都需要看到。
