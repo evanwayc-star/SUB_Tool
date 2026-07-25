@@ -33,6 +33,7 @@ import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
 import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection} from './state.js';
 import { Media, Wave } from './media.js';
+import { getPlayerAdapter } from './media-player-adapter.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries } from './subtitles.js';
@@ -45,6 +46,7 @@ import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackD
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
+import { setupInteractionContext, bindImageDomEvents, bindSubtitleDomEvents, startImageDrag, moveImageDrag, finishImageDrag, getImgDrag, getSubDrag } from './pointer-interaction.js';
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
 import { showSettingsModal } from './settings.js';
@@ -130,7 +132,7 @@ let _lastMpvSubSend=0;
 let _revealMpvSubsAfterRefresh=false;
 let _firstLoad=true; // 第一次載入影片或字幕時自動 zoomFitVideo；新專案後重置
 function refreshMpvSubs(revealAfter=false, live=false){
-  if(!Media.mpvMode || !window.subtool?.mpv) return;
+  if(!Media.mpvMode || !getPlayerAdapter().isAvailable) return;
   if(revealAfter===true) _revealMpvSubsAfterRefresh=true;
   clearTimeout(_mpvSubT);
   // 一般變更維持防抖；直接拖曳則節流到約 12fps，讓 mpv/libass 仍可即時預覽位置，
@@ -178,11 +180,11 @@ function refreshMpvSubs(revealAfter=false, live=false){
         sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,540)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m 0 -1 l 1920 -1 l 1920 1 l 0 1`);
         assStr += '\n' + sf.join('\n') + '\n';
       }
-      await window.subtool.mpv.subSet(assStr);
+      await getPlayerAdapter().subSet(assStr);
       // 只在拖曳結束時才重新露出 mpv/libass 字幕，避免舊位置與 DOM 預覽重疊。
       if(_revealMpvSubsAfterRefresh){
         _revealMpvSubsAfterRefresh=false;
-        window.subtool.mpv.subVisible?.(true).catch(()=>{});
+        getPlayerAdapter().subVisible?.(true).catch(()=>{});
       }
     }catch(e){}
   },delay);
@@ -190,7 +192,7 @@ function refreshMpvSubs(revealAfter=false, live=false){
 /* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。
    只在浮動面板/搜尋視窗「實際重疊」影片區域時才隱藏 mpv，不重疊時影片繼續顯示。 */
 function _syncMpvPanel(){
-  if(!Media.mpvMode || !window.subtool?.mpv) return;
+  if(!Media.mpvMode || !getPlayerAdapter().isAvailable) return;
   // 對話框比照浮動面板：只有【真的蓋到影片區】才讓位。keepVideo 的對話框（編輯字幕文字）
   // 靠右停、不重疊 → mpv 續留，編輯時看得到畫面（v4.33.2；否則 openModal 的 keepVideo 會被這裡蓋掉）
   const _mb=$('modalBg');
@@ -224,7 +226,7 @@ function _syncMpvPanel(){
       }
     }
   }
-  window.subtool.mpv.show(!hides).catch(()=>{});
+  getPlayerAdapter().show(!hides).catch(()=>{});
 }
 const _videoSub = $('videoSub');
 const _videoWrap = $('videoWrap');
@@ -232,7 +234,7 @@ let _videoSubSig = '';
 let _mpvSubtitleDrag = false;
 let _hoveredSubEl = null;
 function _sendMpvSubtitleGuide(el){
-  const mpv=window.subtool?.mpv;
+  const mpv=getPlayerAdapter();
   if(!mpv?.setGuide) return;
   if(!el || !Media.mpvMode || Media._wcTakeover || _mpvSubtitleDrag){ mpv.setGuide(null).catch(()=>{}); return; }
   const wrap=_videoWrap?.getBoundingClientRect(), box=el.getBoundingClientRect();
@@ -307,7 +309,7 @@ const _timecodeWatermark = $('timecodeWatermark');
 let _mpvTimecodeWatermarkSig = '';
 
 function syncMpvTimecodeWatermark(text, rect){
-  const mpv=window.subtool?.mpv;
+  const mpv=getPlayerAdapter();
   if(!mpv?.setTimecodeWatermark) return;
   const nativeMpv=!!(Media.mpvMode && !Media._wcTakeover);
   const payload=(nativeMpv && text && rect?.w && rect?.h) ? {text,rect} : null;
@@ -464,12 +466,12 @@ function renderVideoSub(){
   // 重繪會換掉原本的 DOM 節點；拖曳中直接接回新節點，讓原生提示框跟著位置走，
   // 非拖曳時則清掉過期的 hover 引導，等下一次指標移動再計算。
   if(_hoveredSubEl && !_hoveredSubEl.isConnected){
-    const dragEl=_subDrag?.cue ? _videoSub.querySelector(`.vsub-track.drag[data-cue="${_subDrag.cue.id}"]`) : null;
+    const dragEl=getSubDrag()?.cue ? _videoSub.querySelector(`.vsub-track.drag[data-cue="${getSubDrag().cue.id}"]`) : null;
     _setSubtitleHover(dragEl||null);
   }
 }
 
-let _imgDrag = null;
+
 let _mpvImageGuideSig = '';
 
 /* 圖片原始尺寸（contain 之後才知道互動框要多大）。匯入時已寫進 clip.natW/natH，
@@ -514,9 +516,9 @@ function renderImageOverlays(){
   if(!rect){
     layer.innerHTML='';
     layer._imageHtml='';
-    if(_mpvImageGuideSig && window.subtool?.mpv?.setImageGuide){
+    if(_mpvImageGuideSig && getPlayerAdapter().setImageGuide){
       _mpvImageGuideSig='';
-      window.subtool.mpv.setImageGuide(null).catch(()=>{});
+      getPlayerAdapter().setImageGuide(null).catch(()=>{});
     }
     return;
   }
@@ -577,7 +579,7 @@ function renderImageOverlays(){
     const hPos = (cx, cy) =>
       `left:${(cx === 'w' ? visL : visR - HS).toFixed(1)}px;top:${(cy === 'n' ? visT : visB - HS).toFixed(1)}px;right:auto;bottom:auto;`;
     // 被選取的圖片留下操作框，讓使用者能一眼辨識目前可拖曳／縮放的素材。
-    const selected = c.id === State.selectedClipId || _imgDrag?.clip?.id === c.id;
+    const selected = c.id === State.selectedClipId || getImgDrag()?.clip?.id === c.id;
     html += `<div class="img-wrap${selected ? ' selected' : ''}" data-id="${c.id}" style="${contStyle}">
       <img draggable="false" src="${escapeHTML(imgSrc)}" />
       <div class="resize-handle rh-nw" data-corner="nw" style="${hPos('w','n')}"></div>
@@ -597,7 +599,7 @@ function renderImageOverlays(){
   const guideSig = Media.mpvMode && !Media._wcTakeover
     ? `${rect.x}|${rect.y}|${rect.w}|${rect.h}|${html}`
     : '';
-  if(Media.mpvMode && !Media._wcTakeover && window.subtool?.mpv?.setImageGuide){
+  if(Media.mpvMode && !Media._wcTakeover && getPlayerAdapter().setImageGuide){
     // [效能與字體最佳化] 
     // 當處於 MPV 原生播放模式時，為了避免強行切換 WebCodecs 造成 CPU 解碼卡頓，
     // 以及避免從 MPV libass 字幕渲染切換至 HTML DOM 造成字幕視覺大小突變，
@@ -606,12 +608,12 @@ function renderImageOverlays(){
     // 原生 guide 是另一個 BrowserWindow；只在內容變更時更新，避免播放中每格重寫 DOM。
     if(_mpvImageGuideSig !== guideSig){
       _mpvImageGuideSig = guideSig;
-      window.subtool.mpv.setImageGuide({ html, rect, hitRegions:mpvHitRegions }).catch(()=>{});
+      getPlayerAdapter().setImageGuide({ html, rect, hitRegions:mpvHitRegions }).catch(()=>{});
     }
-  } else if(window.subtool?.mpv?.setImageGuide){
+  } else if(getPlayerAdapter().setImageGuide){
     if(_mpvImageGuideSig){
       _mpvImageGuideSig = '';
-      window.subtool.mpv.setImageGuide(null).catch(()=>{});
+      getPlayerAdapter().setImageGuide(null).catch(()=>{});
     }
   }
 }
@@ -632,112 +634,13 @@ function _selectImageClip(clip, { redrawTimeline=true }={}){
   return true;
 }
 
-function _startImageDrag({ id, corner=null, x, y, pointerId=null, captureTarget=null, source='dom' }){
-  const clip = Seq.byId(id);
-  const rect = _stageRect();
-  if(!clip || clip.type !== 'image' || !rect?.w || !rect?.h || State.videoTracks[clip.vtrack || 0]?.locked) return false;
-  _imgDrag = {
-    clip, rect, x0:x, y0:y, pointerId, captureTarget, source,
-    origPosX: clip.posX ?? 0.5, origPosY: clip.posY ?? 0.5, origScale: clip.scale ?? 1,
-    // 縮放以「圖片目前的實際顯示尺寸」為基準；用畫框寬當分母的話，
-    // 高度受限的素材（方形／直式）拖起來會與視覺位移嚴重不同步。
-    origBox: _imageBoxOf(clip, rect),
-    corner
-  };
-  // 先建立拖曳狀態，避免選取 UI 重繪時把剛開始的 pointer 流程打斷。
-  _selectImageClip(clip, { redrawTimeline:false });
-  const layer = document.getElementById('imageLayer');
-  layer?.classList.add('dragging');
-  if(captureTarget && pointerId != null){ try{ captureTarget.setPointerCapture(pointerId); }catch(_){} }
-  renderImageOverlays();
-  return true;
-}
-
-function _moveImageDrag(x, y){
-  const d = _imgDrag; if(!d) return;
-  const clip = d.clip;
-  if(d.corner){
-    // 維持圖片比例；四個角都可縮放，橫向或直向拖曳任一方向都會有一致的變化。
-    // 位移換算成「相對圖片自身尺寸的比例」→ 把角往外拉半個圖寬＝放大 1.5 倍，
-    // 不論素材是方形、直式還是橫式，手感都一致（中心固定，故 ×2）。
-    const sx = (d.corner === 'nw' || d.corner === 'sw') ? -1 : 1;
-    const sy = (d.corner === 'nw' || d.corner === 'ne') ? -1 : 1;
-    const bw = d.origBox?.w > 1 ? d.origBox.w : d.rect.w;
-    const bh = d.origBox?.h > 1 ? d.origBox.h : d.rect.h;
-    const dx = (x - d.x0) * sx * 2 / bw;
-    const dy = (y - d.y0) * sy * 2 / bh;
-    const delta = Math.abs(dx) >= Math.abs(dy) ? dx : dy;
-    clip.scale = clamp(d.origScale * (1 + delta), 0.02, 8);
-  } else {
-    clip.posX = clamp(d.origPosX + (x - d.x0) / d.rect.w, 0, 1);
-    clip.posY = clamp(d.origPosY + (y - d.y0) / d.rect.h, 0, 1);
-  }
-  renderImageOverlays();
-  renderVideoSub();
-}
-
-function _finishImageDrag(pointerId=null, source=null){
-  const d = _imgDrag; if(!d || (source && d.source !== source)) return;
-  _imgDrag = null;
-  const layer = document.getElementById('imageLayer');
-  layer?.classList.remove('dragging');
-  if(d.captureTarget && d.pointerId != null && (pointerId == null || pointerId === d.pointerId)){
-    try{ d.captureTarget.releasePointerCapture(d.pointerId); }catch(_){}
-  }
-  renderImageOverlays();
-  drawTimeline();
-  recordHistory(d.corner ? '調整圖片大小' : '移動圖片位置');
-}
-
-// 一般瀏覽器／WebCodecs 預覽：直接由主 DOM 圖片層處理。
-// 綁在圖片層本身（而不是全文件事件代理），讓圖片確實在最上方時仍能取得起始事件；
-// move/up 則留在 document，配合 pointer capture 可跨出圖片範圍連續拖曳。
-const _imageLayer = document.getElementById('imageLayer');
-function _startDomImageDrag(e, pointerId=null){
-  if(e.button !== 0) return;
-  const wrap = e.target.closest?.('.img-wrap') || document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.img-wrap');
-  if(!wrap || !_imageLayer?.contains(wrap)) return false;
-  const handle = e.target.closest?.('.resize-handle') || document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.resize-handle');
-  const corner = handle?.dataset?.corner || null;
-  if(_startImageDrag({ id:wrap.dataset.id, corner, x:e.clientX, y:e.clientY, pointerId, captureTarget:_imageLayer })){
-    e.preventDefault();
-    e.stopPropagation();
-    return true;
-  }
-  return false;
-}
-_imageLayer?.addEventListener('pointerdown', e => _startDomImageDrag(e, e.pointerId));
-document.addEventListener('pointermove', e => {
-  if(!_imgDrag || _imgDrag.source !== 'dom') return;
-  _moveImageDrag(e.clientX, e.clientY);
-  e.preventDefault();
-});
-document.addEventListener('pointerup', e => _finishImageDrag(e.pointerId, 'dom'));
-document.addEventListener('pointercancel', e => _finishImageDrag(e.pointerId, 'dom'));
-
-// Windows 的原生覆蓋視窗在某些路徑只會把相容性的 mouse 事件送回 renderer，
-// 不會重新合成 PointerEvent。這組 fallback 也讓未支援 PointerEvent 的 Web 預覽可操作；
-// 有有效 pointerId 的正常 PointerEvent 拖曳則一律忽略相容 mouse 事件，避免移動兩次。
-_imageLayer?.addEventListener('mousedown', e => {
-  if(_imgDrag?.source === 'dom' && _imgDrag.pointerId != null) return;
-  _startDomImageDrag(e, null);
-});
-document.addEventListener('mousemove', e => {
-  if(!_imgDrag || _imgDrag.source !== 'dom' || _imgDrag.pointerId != null) return;
-  _moveImageDrag(e.clientX, e.clientY);
-  e.preventDefault();
-});
-document.addEventListener('mouseup', e => {
-  if(_imgDrag?.source === 'dom' && _imgDrag.pointerId == null) _finishImageDrag(null, 'dom');
-});
-
-// mpv 是原生子視窗，主 DOM 不能排在它上面；透明 guide 將同一組滑鼠事件轉送回來。
+// image dragging logic extracted to pointer-interaction.js
 // guide 傳來的是相對實際畫面區的像素座標，所以能完全複用以上幾何規則。
-window.subtool?.mpv?.onImagePointer?.(data => {
+getPlayerAdapter().onImagePointer?.(data => {
   if(!data || typeof data !== 'object') return;
-  if(data.type === 'start') _startImageDrag({ id:data.id, corner:data.corner || null, x:data.x, y:data.y, source:'mpv' });
-  else if(data.type === 'move' && _imgDrag?.source === 'mpv') _moveImageDrag(data.x, data.y);
-  else if((data.type === 'end' || data.type === 'cancel') && _imgDrag?.source === 'mpv') _finishImageDrag(null, 'mpv');
+  if(data.type === 'start') startImageDrag({ id:data.id, corner:data.corner || null, x:data.x, y:data.y, source:'mpv' });
+  else if(data.type === 'move' && getImgDrag()?.source === 'mpv') moveImageDrag(data.x, data.y);
+  else if((data.type === 'end' || data.type === 'cancel') && getImgDrag()?.source === 'mpv') finishImageDrag(null, 'mpv');
 });
 
 
@@ -757,78 +660,7 @@ function styleChanged(){
       其餘不受影響（列表標 ✱ 自訂）。整軌的標準位置仍用面板的 X／Y。
    ── 換算基準是畫面實際顯示區 _stageRect()（非 videoWrap）：不同比例的片拖起來才等效。
    ── 旋轉支點取【錨點】而非方塊中心，與 ASS 的 \frz 繞 \org(=\pos) 同構（見 substyle.originOf）。 */
-let _subDrag = null;
-function _subDragMove(e){
-  const d = _subDrag; if(!d) return;
-  const cue = d.cue; if(!cue) return;
-  const targetObj = _presetEdit ? _presetEdit.draft : (cue.style = cue.style || {});
-  if(d.rot){
-    let ang = d.angle + (Math.atan2(e.clientY-d.py, e.clientX-d.px)*180/Math.PI - d.a0);
-    if(e.shiftKey) ang = Math.round(ang/15)*15;
-    targetObj.angle = Math.round(((ang+180)%360+360)%360-180); // 收斂到 -180~180＝面板欄位範圍
-  }else{
-    targetObj.posX = clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100);
-    targetObj.posY = clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100);
-  }
-  if(_presetEdit) renderTrackStyle(); // 同步更新樣式面板
-  // 拖曳中只重繪預覽；mpv 與列表摘要留到放開才做
-  // （每次移動重送 ASS／重寫上千列摘要都太貴）
-  renderVideoSub();
-  // mpv 的原生影片蓋在 DOM 預覽之上；拖曳時節流重送 ASS，讓畫面上的真正字幕與安全框
-  // 持續可見並跟著移動，而不是等放開才跳到新位置。
-  if(Media.mpvMode && !Media._wcTakeover) refreshMpvSubs(false,true);
-  e.preventDefault();
-}
-function _subDragEnd(e){
-  const d = _subDrag; if(!d) return;
-  _subDrag = null;
-  const restoreMpvSubs=_mpvSubtitleDrag;
-  _mpvSubtitleDrag=false;
-  _videoSub.classList.remove('dragging');
-  try{ _videoSub.releasePointerCapture(e.pointerId); }catch(err){}
-  if(restoreMpvSubs){
-    _videoSub.classList.add('mpv-hit-layer');
-    refreshMpvSubs(true);
-  }else refreshMpvSubs();
-  // pointer capture 期間事件目標會是 videoSub，放開後重新綁定新 DOM 節點，讓原生提示框留在字幕上。
-  const nextEl=_videoSub?.querySelector(`.vsub-track.drag[data-cue="${d.cue.id}"]`);
-  _setSubtitleHover(nextEl||null);
-  refreshStyleSummaries(); drawTimeline(); // 座標／角度變了 → 摘要與 ✱ 標記要跟上
-  recordHistory((d.rot ? '旋轉字幕' : '移動字幕位置')+cueSuffix(d.cue)); // 一次拖曳＝一個還原點
-}
-_videoSub?.addEventListener('pointerdown', e => {
-  if(e.button !== 0) return;
-  const el = e.target.closest?.('.vsub-track.drag'); if(!el) return;
-  _setSubtitleHover(el);
-  let trk, cue;
-  if(_presetEdit && el.dataset.cue === 'draft_preview'){
-    trk = _presetEdit.draft;
-    cue = { style: {} }; // 臨時空物件
-  }else{
-    trk = State.tracks[+el.dataset.tk];
-    cue = State.cues.find(c => c.id === el.dataset.cue);
-  }
-  const rect = _stageRect();
-  if(!trk || !cue || trk.locked || !rect?.w || !rect?.h) return;
-  const st = _presetEdit ? _presetEdit.draft : effStyle(cue, trk);
-  const box = el.getBoundingClientRect();
-  const a = anchorPct(st);
-  // 旋轉支點＝錨點在畫面上的實際位置（與 CSS transform-origin／ASS \org 同一點），
-  // 不是方塊中心——支點取錯，把手轉起來文字會用另一個圓心跑掉。
-  const px = box.left + box.width*a.x/100, py = box.top + box.height*a.y/100;
-  _subDrag = { cue, rect, rot: e.altKey || !!e.target.closest('.rot'), x0: e.clientX, y0: e.clientY,
-    posX: st.posX, posY: st.posY, angle: st.angle||0, px, py,
-    a0: Math.atan2(e.clientY-py, e.clientX-px)*180/Math.PI };
-  // 不隱藏 mpv/libass：安全框也在同一層，隱藏會讓拖曳期間字幕與安全框一起消失。
-  // _subDragMove 會以節流方式即時同步新座標給 mpv。
-  // 捕獲掛在圖層上：.vsub-track 每次重繪都被換掉，捕在它身上會當場斷線
-  try{ _videoSub.setPointerCapture(e.pointerId); }catch(err){}
-  _videoSub.classList.add('dragging');
-  e.preventDefault();
-});
-_videoSub?.addEventListener('pointermove', _subDragMove);
-_videoSub?.addEventListener('pointerup', _subDragEnd);
-_videoSub?.addEventListener('pointercancel', _subDragEnd);
+// subtitle dragging logic extracted to pointer-interaction.js
 _videoSub?.addEventListener('contextmenu', e => {
   const subEl = e.target.closest('.vsub-track');
   if(!subEl) return;
@@ -868,8 +700,8 @@ _videoSub?.addEventListener('contextmenu', e => {
   
   showCtx(e.clientX, e.clientY, items);
 });
-_videoWrap?.addEventListener('pointermove', e => { if(!_subDrag) _setSubtitleHover(e.target.closest?.('.vsub-track.drag')||null); });
-_videoWrap?.addEventListener('pointerleave', () => { if(!_subDrag) _setSubtitleHover(null); });
+_videoWrap?.addEventListener('pointermove', e => { if(!getSubDrag()) _setSubtitleHover(e.target.closest?.('.vsub-track.drag')||null); });
+_videoWrap?.addEventListener('pointerleave', () => { if(!getSubDrag()) _setSubtitleHover(null); });
 
 /* ===== 快取管理對話框（桌面版） ===== */
 function _fmtBytes(n){ n=+n||0; if(n<1024)return n+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+' '+u[i]; }
@@ -2316,7 +2148,7 @@ function openNoteInPanel(n){
 }
 /* 開啟浮動面板時，若面板與影片重疊就自動推到影片右側，避免開啟時畫面變黑 */
 function _ensurePanelInRightArea(panel){
-  if(!Media.mpvMode||!window.subtool?.mpv) return;
+  if(!Media.mpvMode || !getPlayerAdapter().isAvailable) return;
   const vr=$('videoWrap')?.getBoundingClientRect();
   if(!vr) return;
   const pr=panel.getBoundingClientRect();
@@ -2715,11 +2547,11 @@ async function takeScreenshot(withTimecode = false) {
   }
 
   // 若為 MPV 模式
-  if (Media.mpvMode && IS_DESKTOP && DESK && DESK.mpv && DESK.mpv.screenshot && fullPath) {
+  if (Media.mpvMode && IS_DESKTOP && DESK && getPlayerAdapter() && getPlayerAdapter().screenshot && fullPath) {
     if (!withTimecode) {
       // 不需時間碼，直接請 mpv 存檔
       try {
-        await DESK.mpv.screenshot(fullPath);
+        await getPlayerAdapter().screenshot(fullPath);
         // mpv 非同步存檔，稍等一下讓它寫入
         await new Promise(r => setTimeout(r, 300));
         setStatus(`截圖已儲存：${name}`, 'ok');
@@ -2732,7 +2564,7 @@ async function takeScreenshot(withTimecode = false) {
       // 需時間碼：請 mpv 存到暫存檔，讀入 JS 加工
       const tempPath = dir + '/.subtool_temp_shot.jpg';
       try {
-        await DESK.mpv.screenshot(tempPath);
+        await getPlayerAdapter().screenshot(tempPath);
         await new Promise(r => setTimeout(r, 300)); // 等待寫入
         
         const b64 = await DESK.readB64(tempPath);
@@ -2909,3 +2741,32 @@ setTimeout(() => {
 }, 500);
 
 init();
+
+setupInteractionContext({
+  getStageRect: _stageRect,
+  selectImageClip: _selectImageClip,
+  renderImageOverlays,
+  renderVideoSub,
+  drawTimeline,
+  recordHistory,
+  imageBoxOf: _imageBoxOf,
+  getPresetEdit: () => _presetEdit,
+  refreshMpvSubs,
+  setSubtitleHover: _setSubtitleHover,
+  renderTrackStyle,
+  refreshStyleSummaries,
+  onSubDragEndCleanup: (pointerId, d) => {
+    const restoreMpvSubs = _mpvSubtitleDrag;
+    _mpvSubtitleDrag = false;
+    _videoSub.classList.remove('dragging');
+    try { _videoSub.releasePointerCapture(pointerId); } catch(err) {}
+    if(restoreMpvSubs){
+      _videoSub.classList.add('mpv-hit-layer');
+      refreshMpvSubs(true);
+    } else {
+      refreshMpvSubs();
+    }
+  }
+});
+bindImageDomEvents(document.getElementById('imageLayer'));
+bindSubtitleDomEvents(_videoSub, _videoWrap);

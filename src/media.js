@@ -31,6 +31,7 @@
 ============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap } from './state.js';
+import { getPlayerAdapter } from './media-player-adapter.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
@@ -882,8 +883,8 @@ const Media = {
     this.ensureCtx();
 
     // (mpv) 非原生格式或多音軌且偵測到 mpv：秒開，背景抽音軌
-    if((!canNative || audio.length>1) && DESK.mpv){
-      const mpvInfo=await DESK.mpv.detect();
+    if((!canNative || audio.length>1) && getPlayerAdapter().isAvailable){
+      const mpvInfo=await getPlayerAdapter().detect();
       if(mpvInfo.available){ await this._loadViaMpv(p,info); return; }
     }
 
@@ -1160,7 +1161,7 @@ const Media = {
   /* --- mpv 即時開啟路徑（偵測到 mpv.exe 時使用，無需等 proxy 轉檔） --- */
   _mpvRect(){ const vw=$('videoWrap'); const r=vw.getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height}; },
   _startMpvBoundsFeeder(){
-    const send=()=>{ if(!this.mpvMode||!DESK?.mpv)return; DESK.mpv.setBounds(this._mpvRect()).catch(()=>{}); };
+    const send=()=>{ if(!this.mpvMode||!getPlayerAdapter())return; getPlayerAdapter().setBounds(this._mpvRect()).catch(()=>{}); };
     this._mpvBoundsSend=send;
     try{ this._mpvRO=new ResizeObserver(send); this._mpvRO.observe($('videoWrap')); }catch(e){}
     window.addEventListener('resize',send);
@@ -1180,7 +1181,7 @@ const Media = {
     video.style.display='none';
     $('videoSub').style.display=''; // 字幕由 HTML DOM (#videoSub) 統一渲染
     let res;
-    try{ res=await DESK.mpv.launch({src:p, bounds:this._mpvRect(), audio}); }
+    try{ res=await getPlayerAdapter().launch({src:p, bounds:this._mpvRect(), audio}); }
     catch(e){ showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); $('videoSub').style.display=''; video.style.display=''; return; }
     this.mpvMode=true; this._mpvTime=0; this._mpvPath=p;
     // mpv 顯示時仍要建立透明的 DOM 字幕命中層，才能直接拖曳字幕。
@@ -1195,7 +1196,7 @@ const Media = {
     emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
 
     // 監聽 mpv 事件（時碼同步 / 播放狀態）。序列模式：e.data 為【來源時間】，顯示前換算為時間軸時間。
-    DESK.mpv.onEvent(e=>{
+    getPlayerAdapter().onEvent(e=>{
       if(e.event==='property-change'){
         if(e.name==='time-pos'&&e.data!=null){
           // 純音訊時間軸與影片間隙都刻意讓 mpv 停住；這時殘留的 time-pos
@@ -1327,7 +1328,7 @@ const Media = {
     this.pendingChannels=[];
     this.usingWebAudio=true; this.syncMuteState();
     // element tracks 接管後，mpv 靜音（避免雙重音訊）
-    if(chs.length>0) DESK.mpv.mute(true).catch(()=>{});
+    if(chs.length>0) getPlayerAdapter().mute(true).catch(()=>{});
     if(this.playing) this.startElementSources(this._mpvTime);
     renderAudioTracks();
 
@@ -1593,17 +1594,17 @@ const Media = {
     // 黑幕與 mpv brightness 都歸零否則雙重變暗（mpv 模式下 WC 接管時 mpv 視窗已隱藏）。
     if(this._wcComposited){
       if(ov && ov.style.opacity !== '0') ov.style.opacity = '0';
-      if(this._mpvBright){ this._mpvBright = 0; try{ DESK?.mpv?.brightness(0); }catch(e){} }
+      if(this._mpvBright){ this._mpvBright = 0; try{ getPlayerAdapter()?.brightness(0); }catch(e){} }
       return;
     }
     const d = this.previewFadeDarkness();
     if(this.mpvMode){
       const b = Math.round(-100 * d);
-      if(b !== this._mpvBright){ this._mpvBright = b; try{ DESK?.mpv?.brightness(b); }catch(e){} }
+      if(b !== this._mpvBright){ this._mpvBright = b; try{ getPlayerAdapter()?.brightness(b); }catch(e){} }
       if(ov && ov.style.opacity !== '0') ov.style.opacity = '0';
     }else{
       if(ov){ const sv = d.toFixed(3); if(ov.style.opacity !== sv) ov.style.opacity = sv; }
-      if(this._mpvBright){ this._mpvBright = 0; try{ DESK?.mpv?.brightness(0); }catch(e){} }
+      if(this._mpvBright){ this._mpvBright = 0; try{ getPlayerAdapter()?.brightness(0); }catch(e){} }
     }
   },
   /* 依 clip 切換「可聽見」的音軌集合：clip 綁定的（'video' 或 'clip:*'）只留當前 clip，
@@ -1680,7 +1681,7 @@ const Media = {
     this._gapStart = this.playing ? performance.now() : null;
     this.activeClipId = null;
     this.stopElementSources(); this.stopBufferSources();
-    if(this.mpvMode){ DESK?.mpv?.pause().catch(()=>{}); emit('mpv:sync'); } // _syncMpvPanel 依 Media._gap 隱藏 mpv
+    if(this.mpvMode){ getPlayerAdapter()?.pause().catch(()=>{}); emit('mpv:sync'); } // _syncMpvPanel 依 Media._gap 隱藏 mpv
     else if(video.hasAttribute('src')){ try{ video.pause(); }catch(e){} video.style.visibility='hidden'; }
   },
   _leaveGap(){
@@ -1703,10 +1704,10 @@ const Media = {
       this._applyClipAudio(c, _tl);
       this._lastOverlapKey = Seq.clipsAt(_tl).filter(x=>x.type !== 'image').map(x=>x.id).join('|');
       if(this.mpvMode){
-        if(c.path && DESK?.mpv?.loadfile){
+        if(c.path && getPlayerAdapter().isAvailable){
           this.stopElementSources();
           if(this._mpvPath !== c.path){ // 不同來源檔才需 loadfile（同檔切割片段只 seek，近乎無縫）
-            const r = await DESK.mpv.loadfile(c.path).catch(err=>{ console.error('mpv loadfile', err); return null; });
+            const r = await getPlayerAdapter().loadfile(c.path).catch(err=>{ console.error('mpv loadfile', err); return null; });
             if(!r || r.ok === false){ // 無聲失敗要浮上來（先前被吞掉，看起來像「無法播放」）
               setStatus(`mpv 無法載入「${c.name}」`, 'err');
               showToast(`mpv 無法載入影片段「${c.name}」（格式不支援或檔案無法讀取）`);
@@ -1715,15 +1716,15 @@ const Media = {
             this._mpvPath = c.path;
           }
           this._mpvTime = localT;
-          DESK.mpv.seek(localT).catch(()=>{});
+          getPlayerAdapter().seek(localT).catch(()=>{});
           // mpv 靜音隨「當前段是否已有元素音軌」同步：有→靜音（元素接管），無→出聲
           //（否則主媒體音軌就緒後 mute(true) 會讓沒有元素音軌的新段完全無聲）
           const _srcKey = c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id));
           const _hasEls = this.tracks.some(tr => (tr.source||'video') === _srcKey && tr.kind === 'element');
-          DESK.mpv.mute(_hasEls || c.audioDetached || State.muted).catch(()=>{});
+          getPlayerAdapter().mute(_hasEls || c.audioDetached || State.muted).catch(()=>{});
           emit('mpv:refreshSubs'); // 換 clip 後字幕需以新映射重擠（app.js 會做 offset 位移）
-          if(resume){ DESK.mpv.play().catch(()=>{}); this.startElementSources(localT, Seq.toTimeline(localT, c)); }
-          else DESK.mpv.pause().catch(()=>{});
+          if(resume){ getPlayerAdapter().play().catch(()=>{}); this.startElementSources(localT, Seq.toTimeline(localT, c)); }
+          else getPlayerAdapter().pause().catch(()=>{});
         }
       } else {
         const url = c.web && c.web.url;
@@ -1745,7 +1746,7 @@ const Media = {
     emit('render:videoSub');
   },
   _playerSeekSource(s){
-    if(this.mpvMode){ this._mpvTime = s; DESK?.mpv?.seek(s).catch(()=>{}); }
+    if(this.mpvMode){ this._mpvTime = s; getPlayerAdapter()?.seek(s).catch(()=>{}); }
     else if(video.hasAttribute('src')){ try{ video.currentTime = s; }catch(e){} }
   },
   /* 播放中的每幀檢查（rafLoop 呼叫）：段尾切換 / 間隙進出 / 序列結尾停止 */
@@ -1950,7 +1951,7 @@ const Media = {
       const ac = this._activeClip(); if(ac) this._applyClipAudio(ac);
       // 若正在播這個新段：元素音軌接管 → mpv 靜音並啟動元素
       if(this.mpvMode && ac && (ac.audioSrc || '') === ('clip:' + c.id)){
-        DESK.mpv.mute(true).catch(()=>{});
+        getPlayerAdapter().mute(true).catch(()=>{});
         if(this.playing) this._restartElements();
       }
     }
@@ -2231,7 +2232,7 @@ const Media = {
       this._gap=true; this._gapT=Math.min(playhead,State.duration||0);
       this._gapStart=wasPlaying?performance.now():null;
       this.stopBufferSources(); this.stopElementSources();
-      if(this.mpvMode){ DESK?.mpv?.pause?.().catch(()=>{}); emit('mpv:sync'); }
+      if(this.mpvMode){ getPlayerAdapter()?.pause?.().catch(()=>{}); emit('mpv:sync'); }
       else { try{ video.pause(); }catch(e){} video.style.visibility='hidden'; }
       for(const track of this.tracks){
         const source=track.source||'video';
@@ -2285,7 +2286,7 @@ const Media = {
       const t=Math.min(Math.max(0,this.displayTime()),Math.max(0,State.duration));
       this._vTime=t; this._vStart=performance.now();
       this.ensureCtx();
-      if(this.mpvMode) DESK?.mpv?.pause?.().catch(()=>{});
+      if(this.mpvMode) getPlayerAdapter()?.pause?.().catch(()=>{});
       else { try{ video.pause(); }catch(e){} video.style.visibility='hidden'; }
       this.playing=true; $('playBtn').textContent='⏸'; this._lastSeekTime=null;
       this.startElementSources(t,t);
@@ -2294,7 +2295,7 @@ const Media = {
     }
     if(this.mpvMode){
       this.ensureCtx();
-      DESK.mpv.play().catch(()=>{});
+      getPlayerAdapter().play().catch(()=>{});
       this.startElementSources(this._mpvTime, this.tlTime());
       this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); return;
     }
@@ -2324,16 +2325,16 @@ const Media = {
     if(this.audioOnlyTimeline()){
       if(this._vStart!==null){ this._vTime=this.vTime(); this._vStart=null; }
       this.stopBufferSources(); this.stopElementSources();
-      if(this.mpvMode) DESK?.mpv?.pause?.().catch(()=>{});
+      if(this.mpvMode) getPlayerAdapter()?.pause?.().catch(()=>{});
       else { try{ video.pause(); }catch(e){} }
       this.playing=false; $('playBtn').textContent='▶'; video.dispatchEvent(new Event('pause')); return;
     }
     const _c = this.seqOn() ? this._activeClip() : null;
     const _ps = _c ? Seq.toSource(this._lastSeekTime, _c) : this._lastSeekTime; // 播放器（來源）時間
     if(this.mpvMode){
-      DESK.mpv.pause().catch(()=>{});
+      getPlayerAdapter().pause().catch(()=>{});
       this._mpvTime = _ps;
-      DESK.mpv.seek(_ps).catch(()=>{});
+      getPlayerAdapter().seek(_ps).catch(()=>{});
       this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶'; return;
     }
@@ -2377,7 +2378,7 @@ const Media = {
       }
       if(this.mpvMode){
         this._mpvTime=local;
-        DESK.mpv.seek(local).catch(()=>{});
+        getPlayerAdapter().seek(local).catch(()=>{});
         this._syncSeqElements(t);
         window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
         return;
@@ -2391,7 +2392,7 @@ const Media = {
     }
     if(this.audioOnlyTimeline()){
       this._vTime=Math.max(0,t); if(this._vStart!==null)this._vStart=performance.now();
-      if(this.mpvMode) DESK?.mpv?.pause?.().catch(()=>{});
+      if(this.mpvMode) getPlayerAdapter()?.pause?.().catch(()=>{});
       else { try{ video.pause(); }catch(e){} video.style.visibility='hidden'; }
       $('tcCur').textContent=secToEncore(this._vTime,State.fps,State.dropFrame);
       $('seekBar').value=Math.round(this._vTime*1000);
@@ -2408,7 +2409,7 @@ const Media = {
     if(this.mpvMode){
       t=clamp(t,0,this._mpvDuration||0);
       this._mpvTime=t;
-      DESK.mpv.seek(t).catch(()=>{});
+      getPlayerAdapter().seek(t).catch(()=>{});
       for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
         const source=tr.source||'';
         const off=source.startsWith('ext-')?this.externalSourceTime(source,t):t;
@@ -2745,7 +2746,7 @@ const Media = {
     if(this.audioOnlyTimeline() && this._vStart!==null){ this._vTime=this.vTime(); this._vStart=performance.now(); }
     if(this.mpvMode){
       video.playbackRate=r; // 保持同步供 startElementSources 使用
-      DESK.mpv.rate(r).catch(()=>{});
+      getPlayerAdapter().rate(r).catch(()=>{});
       for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el)tr.el.playbackRate=r; }
       return;
     }
@@ -2756,9 +2757,9 @@ const Media = {
     if(this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }
   },
   reset(options={}){
-    if(this.mpvMode && DESK?.mpv){
+    if(this.mpvMode && getPlayerAdapter().isAvailable){
       this._stopMpvBoundsFeeder();
-      DESK.mpv.quit().catch(()=>{});
+      getPlayerAdapter().quit().catch(()=>{});
       this.mpvMode=false; this._mpvTime=0; this._mpvDuration=0;
       video.style.display='';
       const vs=$('videoSub'); if(vs) vs.style.display='';
