@@ -79,7 +79,7 @@ export function zoomFitVideo(){
 export function snapTargets(excludeIds){
   let t = [0, State.duration>0?State.duration:1];
   for(const c of State.cues){
-    if(excludeIds && excludeIds.includes(c.id)) continue;
+    if(excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id))) continue;
     if(c.timed===false) continue;
     t.push(c.start); t.push(c.end);
   }
@@ -92,7 +92,7 @@ export function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of target
 export function neighborBounds(os,oe,track,excludeIds){
   let maxStart=0, minEnd=999999;
   for(const c of State.cues){
-    if(excludeIds&&excludeIds.includes(c.id)) continue;
+    if(excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id))) continue;
     if((c.track||0)!==track || c.timed===false) continue;
     if(c.end<=os && c.end>maxStart) maxStart=c.end;
     if(c.start>=oe && c.start<minEnd) minEnd=c.start;
