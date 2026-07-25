@@ -143,16 +143,22 @@ CSS 蓋掉 `[hidden]`）都是靠它才沒有重踩。
 
 ### 各工具實際會自動載入什麼
 
-三個工具開場自動讀的檔案**完全不一樣**。這張表是查證過的（官方文件 + Antigravity
-安裝檔內的路徑設定），不是推測：
+三個工具開場自動讀的檔案**完全不一樣**，但都已經接到這一份 `AGENTS.md`：
 
-| 工具 | 專案內自動載入 | 全域 |
-|------|---------------|------|
-| **Claude Code** | `CLAUDE.md`、`.claude/rules/*.md` | `~/.claude/CLAUDE.md` |
-| **OpenAI Codex** | `AGENTS.md` | `~/.codex/AGENTS.md` |
-| **Antigravity** | `.agent/rules/*.md`；另可設 `chat.useAgentsMdFile` 讀 `AGENTS.md` | `~/.gemini/GEMINI.md` |
+| 工具 | 怎麼讀到 `AGENTS.md` | 全域規則 |
+|------|---------------------|---------|
+| **Claude Code** | `CLAUDE.md` 第一行的 `@AGENTS.md` **import** | `~/.claude/CLAUDE.md` |
+| **OpenAI Codex** | 原生就讀 `AGENTS.md` | `~/.codex/AGENTS.md` |
+| **Antigravity** | 設定 `chat.useAgentsMdFile: true`（已實測生效） | `~/.gemini/GEMINI.md` |
 
 **三者都不會自動讀 `README.md`。** 那是給人看的。
+
+Antigravity 那條是實測的：開啟設定後，它的 **Customizations → Rules** 面板會列出
+`Project · AGENTS.md`。要確認有沒有生效就去看那個面板。
+
+> 曾經一度為了保險同時建了 `.agent/rules/`（Antigravity 的原生規則目錄）。
+> 實測確認 Rules 面板只認 `AGENTS.md` 之後就刪掉了——留著等於同一件事有兩份說法，
+> 正是本節在防的事。**不要再加回來。**
 
 > **重要**：Claude Code **不讀 `AGENTS.md`**（官方原文：*Claude Code reads `CLAUDE.md`,
 > not `AGENTS.md`*）。它是靠 `CLAUDE.md` 第一行的 `@AGENTS.md` **import 語法**才載入的。
