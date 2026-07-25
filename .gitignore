@@ -30,3 +30,4 @@ electron/ffmpeg/
 electron/mpv/
 *.exe
 .config/
+tmp_profile/
