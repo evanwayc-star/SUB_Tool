@@ -67,6 +67,7 @@
    工具：newTrack/syncTrackCount/ensureTrackCount(軌道)、snapFps/setFps(影格率，setFps 會一併
    更新 UI 並依 'df' 後綴設定 dropFrame)、newId(遞增 cue id)、isSel/cueSuffix、DESK/IS_DESKTOP(Electron 偵測)。 */
 import { emit } from './events.js';
+import { makeSettingsStore } from './settings-store.js';
 
 /* ===== 專案音訊路由 ====================================================
    音訊資料刻意與 Media（AudioContext、HTMLAudioElement、ffmpeg 暫存檔）分離：
@@ -420,46 +421,33 @@ const _subtool = (typeof window !== 'undefined') ? window.subtool : null;
 const DESK = (_subtool && _subtool.isDesktop) ? _subtool : null;
 const IS_DESKTOP = !!DESK;
 
+/* 設定的落點（桌面 IPC vs localStorage）已收斂到 settings-store.js。
+   這裡只剩「哪些欄位、什麼型別」——而且【只寫一份】，不再桌面／網頁各一份。 */
+const _settings = makeSettingsStore(DESK);
+
+/* conf 物件 → State 的欄位映射。抽成純函式：以前這段在 loadConfig 裡寫了兩次
+   （DESK 一份、localStorage 一份），改欄位漏改一處就會兩邊行為不一致。 */
+function applyConfig(conf) {
+  if (!conf || typeof conf !== 'object') return;
+  if (typeof conf.autoSelect === 'boolean') State.autoSelect = conf.autoSelect;
+  if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
+  if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
+  if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
+  if (typeof conf.timecodeWatermark === 'boolean') State.timecodeWatermark = conf.timecodeWatermark;
+}
+
 async function loadConfig() {
-  if (DESK && DESK.configLoad) {
-    try {
-      const conf = await DESK.configLoad();
-      if (typeof conf.autoSelect === 'boolean') State.autoSelect = conf.autoSelect;
-      if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
-      if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
-      if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
-      if (typeof conf.timecodeWatermark === 'boolean') State.timecodeWatermark = conf.timecodeWatermark;
-    } catch (e) { console.error('Failed to load config', e); }
-  } else {
-    try {
-      const saved = localStorage.getItem('subtool_config');
-      if (saved) {
-        const conf = JSON.parse(saved);
-        if (typeof conf.autoSelect === 'boolean') State.autoSelect = conf.autoSelect;
-        if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
-        if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
-        if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
-        if (typeof conf.timecodeWatermark === 'boolean') State.timecodeWatermark = conf.timecodeWatermark;
-      }
-    } catch (e) {}
-  }
+  applyConfig(await _settings.load('config'));
 }
 
 function saveConfig() {
-  const data = {
+  return _settings.save('config', {
     autoSelect: State.autoSelect,
     overwriteMode: State.overwriteMode,
     overwriteKeep: State.overwriteKeep,
     safeFrame: State.safeFrame,
     timecodeWatermark: State.timecodeWatermark
-  };
-  if (DESK && DESK.configSave) {
-    DESK.configSave(data).catch(e => console.error('Failed to save config', e));
-  } else {
-    try {
-      localStorage.setItem('subtool_config', JSON.stringify(data));
-    } catch (e) {}
-  }
+  });
 }
 
 State.defaultKeymap = {
@@ -534,15 +522,7 @@ State.defaultKeymap = {
 State.keymap = JSON.parse(JSON.stringify(State.defaultKeymap));
 
 async function loadKeys() {
-  let loaded = null;
-  if (DESK && DESK.keysLoad) {
-    try { loaded = await DESK.keysLoad(); } catch(e) {}
-  } else {
-    try {
-      const saved = localStorage.getItem('subtool_keys');
-      if (saved) loaded = JSON.parse(saved);
-    } catch(e) {}
-  }
+  const loaded = await _settings.load('keys');
   if (loaded && Object.keys(loaded).length > 0) {
     State.keymap = Object.assign(JSON.parse(JSON.stringify(State.defaultKeymap)), loaded);
     _migrateKeymap(State.keymap);
@@ -571,13 +551,7 @@ function _migrateKeymap(km){
 }
 
 function saveKeys() {
-  if (DESK && DESK.keysSave) {
-    DESK.keysSave(State.keymap).catch(e => console.error('Failed to save keys', e));
-  } else {
-    try {
-      localStorage.setItem('subtool_keys', JSON.stringify(State.keymap));
-    } catch(e) {}
-  }
+  return _settings.save('keys', State.keymap);
 }
 
 function isSel(id){ return State.selectedIds.includes(id); }
