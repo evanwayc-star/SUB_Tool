@@ -1683,4 +1683,3 @@ export { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime
   refreshTrackGutterActive,
   selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom };
 
-export { trackFromY, addTrack, removeTrack, moveSelectedToTrack, setZoom, zoomFit, zoomFitVideo, snapTargets, snapVal, neighborBounds };
