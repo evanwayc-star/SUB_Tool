@@ -51,6 +51,23 @@ const Seq = {
   /* ---- 時間映射 ---- */
   toSource(t, c){ return t - c.offset + c.in; },
   toTimeline(s, c){ return s - c.in + c.offset; },
+  /* mpv/libass 吃來源時間，但字幕與播放頭都存時間軸時間。
+     live window 必須先在時間軸篩選，再做來源映射；反過來會把 offset clip 的字幕全濾掉。 */
+  timedRangesForSource(ranges,clip,{center=null,radius=null}={}){
+    const list=Array.isArray(ranges)?ranges:[];
+    const hasWindow=Number.isFinite(center)&&Number.isFinite(radius)&&radius>=0;
+    return list
+      .filter(range=>range?.timed===false||!hasWindow
+        ||(Number(range?.end)>=center-radius&&Number(range?.start)<=center+radius))
+      .map(range=>{
+        const copy={...range};
+        if(clip&&range?.timed!==false){
+          copy.start=this.toSource(Number(range.start)||0,clip);
+          copy.end=this.toSource(Number(range.end)||0,clip);
+        }
+        return copy;
+      });
+  },
 
   /* ---- 變更 ---- */
   add(meta){

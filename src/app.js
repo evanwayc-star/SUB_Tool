@@ -90,9 +90,10 @@ on('audio:projectRestored', ()=>{ Media.applyGains(); renderAudioTracks(); });
 // A1：fps 變更後的 DOM 同步（原本在 state.setFps 內，現下沉到此處，state.js 不再相依 DOM）
 on('fps:changed', ()=>{
   const sel=$('fpsSel'); if(sel) sel.value=State.dropFrame?String(State.fps)+'df':String(State.fps);
-  $('tcCur').textContent=secToEncore(video.currentTime||0,State.fps,State.dropFrame);
+  const t=Media.displayTime();
+  $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
   $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
-  renderTimecodeWatermark(Media.displayTime());
+  renderTimecodeWatermark(t);
   
   setTimeout(() => {
     if(snapAllCuesToFrames()){
@@ -150,12 +151,11 @@ function refreshMpvSubs(revealAfter=false, live=false){
       _lastMpvSubSend=performance.now();
       // 序列：mpv/libass 以【來源時間】渲染字幕，而 cue 時碼為【時間軸時間】——
       // 依當前 clip 的映射（來源 = 時間軸 - offset + in）整批平移後再餵給 mpv
-      let cs=State.cues;
       const c=Media.seqOn() ? Media._activeClip() : null;
-      if(c && (c.offset!==0 || c.in!==0)){
-        const sh=c.in - c.offset;
-        cs=State.cues.map(x=>x.timed===false?x:{...x, start:x.start+sh, end:x.end+sh});
-      }
+      // live 也必須先用時間軸位置篩選，最後才映射成 mpv 的來源時間。
+      const cs=Seq.timedRangesForSource(State.cues,c,live
+        ? {center:Media.displayTime(),radius:5}
+        : {});
       let assStr;
       if(_presetEdit) {
         const previewText = document.getElementById('tsEditPreviewText')?.value || '田這是一段|範例字幕田\n田 ABC123|321CBA 田';
@@ -164,9 +164,7 @@ function refreshMpvSubs(revealAfter=false, live=false){
         const { x: RX, y: RY } = ASS_PLAY_RES;
         assStr = SubFormats.toASS([draftCue], State.fps, tempTracks, RX, RY, RX, RX, RY);
       } else if (live) {
-        const t = Media.displayTime();
-        const fastCs = cs.filter(c => c.timed === false || (c.end >= t - 5 && c.start <= t + 5));
-        assStr = toASSFromState(fastCs);
+        assStr = toASSFromState(cs);
         
         clearTimeout(window._mpvSubFullT);
         window._mpvSubFullT = setTimeout(() => refreshMpvSubs(false, false), 500);
@@ -881,7 +879,7 @@ video.addEventListener('pause',()=>{
     }
   }
 });
-video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(video.currentTime);});
+video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(Media.displayTime());});
 window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});
 video.addEventListener('ended',()=>{ if(Media.seqContinueAtEnd()) return; Media.pause(); }); // 序列有後續→推進不暫停
 

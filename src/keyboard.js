@@ -87,7 +87,7 @@ function jklApply() {
     const capturedSpeed = _jklSpeed;
     _jklTimer = setInterval(() => {
       if (_jklSpeed !== capturedSpeed) { jklClear(); return; }
-      const t = Media.vTime();
+      const t = Media.displayTime();
       if (t <= 0) { jklClear(); _jklSpeed = 0; setStatus('已到開頭', ''); return; }
       const newT = Math.max(0, t - step);
       Media.seek(newT);
@@ -95,8 +95,9 @@ function jklApply() {
       emit('playhead:ensure');
       emit('render:videoSub');
       if (!video.src) {
-        $('tcCur').textContent = secToEncore(Media.vTime(), State.fps, State.dropFrame);
-        $('seekBar').value = Math.round(Media.vTime() * 1000);
+        const displayT=Media.displayTime();
+        $('tcCur').textContent = secToEncore(displayT, State.fps, State.dropFrame);
+        $('seekBar').value = Math.round(displayT * 1000);
       }
       Media.scrubAudio(newT, Math.max(step, 0.08));
     }, 1000 / fps);

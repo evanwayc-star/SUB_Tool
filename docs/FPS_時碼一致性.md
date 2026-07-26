@@ -113,9 +113,13 @@ FPS-SYNC
 | `media.js` | `pause()` 的 snap | 暫停點對齊影格 | I3 |
 | `media.js` | mpv `time-pos` handler | 暫停時同源同格 + 抖動容忍 | I4, I6 |
 | `keyboard.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
+| `keyboard.js` | JKL 倒播 timer | 以 `displayTime()` 計算下一個時間軸位置 | I4, I5 |
+| `notes.js` | `addNote()` | 備註時間取自 `displayTime()` | I4 |
 | `timeline.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |
 | `app.js` | `timeupdate` handler | 三讀數同源 `displayTime()` | I4 |
 | `app.js` | `pause` event | 暫停時刷新時碼/seekBar 同源 | I4 |
+| `app.js` | `fps:changed`／原生 `seeked` | 時碼、監看 TC、備註高亮同讀 `displayTime()` | I4 |
+| `sequence.js` | `timedRangesForSource()` | live ASS 先以時間軸篩選、最後才轉來源時間 | I4 |
 | `app.js` | `renderTimecodeWatermark()` | DOM／mpv guide 監看 TC 讀 `displayTime()` | I4, I8 |
 | `subio.js` | `_runExportVideo()` | 以輸出 In 換成交付用 TC 起點 | I2, I8 |
 

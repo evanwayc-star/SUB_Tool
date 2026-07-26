@@ -50,7 +50,7 @@ function updateNoteActive(t){
 
 /* ===== 備註 ===== */
 function addNote(){
-  const t=Media.vTime();
+  const t=Media.displayTime();
   const n={id:newId(),time:t,text:'',done:false};
   State.notes.push(n); State.notes.sort((a,b)=>a.time-b.time);
   _selectedNoteIds.clear(); _selectedNoteIds.add(n.id); _lastSelectedNoteId=n.id;
