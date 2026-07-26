@@ -177,6 +177,13 @@
       user-select: text;
     }
     .job.status-failed .error-box, .job.status-missing-source .error-box { display: block; }
+    
+    /* Drag & Drop */
+    .job[draggable="true"] { cursor: grab; }
+    .job[draggable="true"]:active { cursor: grabbing; }
+    .job.dragging { opacity: 0.4; }
+    .job.drop-above { border-top: 2px solid var(--accent); }
+    .job.drop-below { border-bottom: 2px solid var(--accent); }
 
     /* SVG Icons */
     .icon { width: 14px; height: 14px; fill: currentColor; }
@@ -236,9 +243,21 @@
         UI.list.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:40px;font-size:14px;border:1px dashed var(--border);border-radius:10px;">目前沒有任何匯出工作。</div>';
         return;
       }
-      _jobs.forEach(job => {
+      _jobs.forEach((job, index) => {
         const el = document.createElement('div');
         el.className = 'job status-' + job.status;
+        el.dataset.jobId = job.id;
+        el.dataset.status = job.status;
+        el.dataset.index = index;
+        
+        if (job.status === 'queued') {
+          el.draggable = true;
+          el.addEventListener('dragstart', handleDragStart);
+          el.addEventListener('dragover', handleDragOver);
+          el.addEventListener('dragleave', handleDragLeave);
+          el.addEventListener('drop', handleDrop);
+          el.addEventListener('dragend', handleDragEnd);
+        }
         
         let statusText = job.status;
         let icon = ICONS.queued;
@@ -316,6 +335,59 @@
         `;
         UI.list.appendChild(el);
       });
+    }
+
+    let dragSrcEl = null;
+    function handleDragStart(e) {
+      dragSrcEl = this;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', this.dataset.jobId);
+      this.classList.add('dragging');
+    }
+    function handleDragOver(e) {
+      if (e.preventDefault) e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (this !== dragSrcEl && this.dataset.status === 'queued') {
+        const rect = this.getBoundingClientRect();
+        const relY = e.clientY - rect.top;
+        if (relY < rect.height / 2) {
+          this.classList.add('drop-above');
+          this.classList.remove('drop-below');
+        } else {
+          this.classList.add('drop-below');
+          this.classList.remove('drop-above');
+        }
+      }
+      return false;
+    }
+    function handleDragLeave(e) {
+      this.classList.remove('drop-above', 'drop-below');
+    }
+    async function handleDrop(e) {
+      if (e.stopPropagation) e.stopPropagation();
+      this.classList.remove('drop-above', 'drop-below');
+      if (dragSrcEl !== this && this.dataset.status === 'queued') {
+        const srcId = dragSrcEl.dataset.jobId;
+        const targetId = this.dataset.jobId;
+        
+        const rect = this.getBoundingClientRect();
+        const relY = e.clientY - rect.top;
+        const insertAfter = relY >= rect.height / 2;
+        
+        const srcAbsoluteIdx = _jobs.findIndex(j => j.id === srcId);
+        let targetAbsoluteIdx = _jobs.findIndex(j => j.id === targetId);
+        
+        if (insertAfter) targetAbsoluteIdx++;
+        if (srcAbsoluteIdx < targetAbsoluteIdx) targetAbsoluteIdx--;
+        
+        await window.queueAPI.reorderJob(srcId, targetAbsoluteIdx);
+        loadData();
+      }
+      return false;
+    }
+    function handleDragEnd(e) {
+      this.classList.remove('dragging');
+      UI.list.querySelectorAll('.job').forEach(el => el.classList.remove('drop-above', 'drop-below'));
     }
 
     async function loadData() {

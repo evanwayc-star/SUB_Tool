@@ -774,6 +774,39 @@ ipcMain.handle('queue:clearJob', (e, jobId) => {
   QueueManager.broadcastUpdate();
 });
 
+ipcMain.handle('queue:clearCompleted', () => {
+  const toClear = [];
+  for (const [id, job] of _queueJobsMap.entries()) {
+    if (job.status === 'done') toClear.push(id);
+  }
+  toClear.forEach(id => {
+    _queueJobsMap.delete(id);
+    const idx = _jobQueueList.findIndex(j => j.id === id);
+    if (idx !== -1) _jobQueueList.splice(idx, 1);
+  });
+  QueueManager.broadcastUpdate();
+});
+
+ipcMain.handle('queue:reorderJob', (e, jobId, newIndex) => {
+  const jobs = Array.from(_queueJobsMap.values());
+  const oldIndex = jobs.findIndex(j => j.id === jobId);
+  if (oldIndex === -1) return;
+  
+  const [movedJob] = jobs.splice(oldIndex, 1);
+  jobs.splice(newIndex, 0, movedJob);
+  
+  _queueJobsMap.clear();
+  _jobQueueList.length = 0;
+  
+  for (const job of jobs) {
+    _queueJobsMap.set(job.id, job);
+    if (job.status === 'queued') {
+      _jobQueueList.push(job);
+    }
+  }
+  QueueManager.broadcastUpdate();
+});
+
 ipcMain.handle('queue:openMonitor', () => {
   openQueueWindow();
 });
