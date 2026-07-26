@@ -363,6 +363,13 @@ function _queueProjectLoad(work){
 const Project = {
   // save/saveAs 回傳 Promise<路徑|名稱|null>：null=失敗或使用者取消。
   // 呼叫端（如關閉前儲存流程）可 await 確認真正寫入完成後再繼續。
+  continueLoad(generation,work){
+    return _appendProjectLoad(generation,()=>work(()=>_isCurrentProjectLoad(generation)));
+  },
+  startNewProject(work){
+    const generation=++_projectLoadGeneration;
+    return _appendProjectLoad(generation,work);
+  },
   save(){
     const bytes=_buildBytes();
     if(IS_DESKTOP && _savePath){
@@ -496,7 +503,7 @@ const Project = {
         `<br><br>字幕內容已完整還原。`,
         [{label:'立即匯入影音',primary:true,act:()=>{
           closeModal();
-          if(_isCurrentProjectLoad(generation)) emit('action','open-media');
+          if(_isCurrentProjectLoad(generation)) emit('project:relinkBrowserMedia',generation);
         }},{label:'稍後',act:closeModal}]);
     }
     if(_isCurrentProjectLoad(generation)) _finishProjectLoad();

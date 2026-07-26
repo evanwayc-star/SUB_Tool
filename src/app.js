@@ -78,6 +78,13 @@ on('cue:openEdit', openCueEditModal);
 on('action', doAction);
 on('mpv:sync', _syncMpvPanel); // 自訂視窗（快捷鍵設定、右鍵選單）開閉時重算 mpv 讓位
 on('history:record', recordHistory); // 供 media.js 等低階模組記錄歷史（避免 media→history 循環相依）
+on('project:relinkBrowserMedia', generation=>{
+  void Project.continueLoad(generation,async isCurrent=>{
+    const files=await pickMediaFiles($('fileMedia'));
+    if(!isCurrent()) return;
+    await importBrowserMediaFiles(files);
+  }).catch(error=>console.warn('relink browser project media:',error));
+});
 // 還原專案音訊設定後，Web Audio 的實際 gain 與混音器 UI 也要回到同一份快照。
 on('audio:projectRestored', ()=>{ Media.applyGains(); renderAudioTracks(); });
 // A1：fps 變更後的 DOM 同步（原本在 state.setFps 內，現下沉到此處，state.js 不再相依 DOM）
@@ -988,21 +995,23 @@ async function doAction(act, force = false){
         [{label:'取消',act:closeModal},
          {label:'確定清空',primary:true,act:()=>{
            closeModal();
-           State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
-           State.listTrack=0;State.tracks=[];ensureTrackCount(0);
-           if(State.subMode) doAction('sub-mode');
-           // 先重置可持久專案資料（含 audioProject），再建立空白專案的 undo 基線；
-           // 否則 Ctrl+Z 可能把上一個專案的聲道路由帶回新專案。
-           resetProject();_firstLoad=true;
-           // 清除影音
-           video.pause(); video.removeAttribute('src'); video.load();
-           State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
-           Media.reset();
-           History.reset();
-           const nv=$('noVideo'); if(nv) nv.style.display='';
-           onDurationKnown(); renderAudioTracks();
-           renderListTrackSel();renderAll();renderNotes();drawTimeline();
-           setStatus('新專案','ok');
+           return Project.startNewProject(()=>{
+             State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
+             State.listTrack=0;State.tracks=[];ensureTrackCount(0);
+             if(State.subMode) doAction('sub-mode');
+             // 先重置可持久專案資料（含 audioProject），再建立空白專案的 undo 基線；
+             // 否則 Ctrl+Z 可能把上一個專案的聲道路由帶回新專案。
+             resetProject();_firstLoad=true;
+             // 清除影音
+             video.pause(); video.removeAttribute('src'); video.load();
+             State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
+             Media.reset();
+             History.reset();
+             const nv=$('noVideo'); if(nv) nv.style.display='';
+             onDurationKnown(); renderAudioTracks();
+             renderListTrackSel();renderAll();renderNotes();drawTimeline();
+             setStatus('新專案','ok');
+           });
          }}]);
       break;
     case 'imp-auto': importSub(); break;

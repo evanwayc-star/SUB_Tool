@@ -27,6 +27,7 @@ let History;
 let Project;
 let State;
 let desk;
+let on;
 
 function deferred() {
   let resolve;
@@ -43,6 +44,14 @@ function projectB64(data) {
     Buffer.from([0xFF, 0xFE]),
     Buffer.from(JSON.stringify(data), 'utf16le'),
   ]).toString('base64');
+}
+
+function projectFile(data) {
+  const bytes = Buffer.concat([
+    Buffer.from([0xFF, 0xFE]),
+    Buffer.from(JSON.stringify(data), 'utf16le'),
+  ]);
+  return new File([bytes], 'browser.subtool', { type: 'application/json' });
 }
 
 function projectData(label, mediaPath, playhead = null) {
@@ -94,6 +103,7 @@ describe('project load transactions', () => {
     ({ State } = await import('../src/state.js'));
     ({ History } = await import('../src/history.js'));
     ({ Project } = await import('../src/project.js'));
+    ({ on } = await import('../src/events.js'));
 
     History.stack = [];
     History.hi = -1;
@@ -205,5 +215,55 @@ describe('project load transactions', () => {
 
     expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov');
     expect(State.cues.map(cue => cue.text)).toEqual(['B']);
+  });
+
+  it('invalidates a browser relink picker when a newer project is requested while it is open', async () => {
+    const picker = deferred();
+    const continuationStarted = deferred();
+    let continuation;
+    let imported = false;
+    on('project:relinkBrowserMedia', generation => {
+      continuation = Project.continueLoad(generation, async isCurrent => {
+        continuationStarted.resolve();
+        await picker.promise;
+        if (!isCurrent()) return;
+        imported = true;
+      });
+    });
+    desk.stat.mockResolvedValue({ exists: true });
+    mediaMock.loadDesktopMedia.mockResolvedValue();
+
+    await Project.load(projectFile(projectData('A', 'C:/media/A.mov')));
+    const actions = uiMock.openModal.mock.calls.at(-1)?.[2];
+    actions[0].act();
+    await continuationStarted.promise;
+
+    const loadingB = Project.loadDesktop(request('B', 'C:/media/B.mov'));
+    picker.resolve();
+    await Promise.all([continuation, loadingB]);
+
+    expect(imported).toBe(false);
+    expect(State.cues.map(cue => cue.text)).toEqual(['B']);
+  });
+
+  it('invalidates an in-flight load before starting a new empty project transaction', async () => {
+    const statA = deferred();
+    desk.stat.mockReturnValue(statA.promise);
+    let cleared = false;
+
+    const loadingA = Project.loadDesktop(request('A', 'C:/media/A.mov'));
+    await vi.waitFor(() => expect(desk.stat).toHaveBeenCalledWith('C:/media/A.mov'));
+    const startingNew = Project.startNewProject(() => {
+      State.cues = [];
+      cleared = true;
+    });
+    expect(cleared).toBe(false);
+
+    statA.resolve({ exists: true });
+    await Promise.all([loadingA, startingNew]);
+
+    expect(mediaMock.loadDesktopMedia).not.toHaveBeenCalled();
+    expect(cleared).toBe(true);
+    expect(State.cues).toEqual([]);
   });
 });
