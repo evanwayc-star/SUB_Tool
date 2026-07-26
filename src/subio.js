@@ -867,7 +867,7 @@ async function showExportVideoDialog(initialDraft=null) {
       const conflicts = [];
       for (const r of draft.deliverables) {
         const files = await DESK.listDir(r.outDir);
-        const existing = files.map(f => f.name.toLowerCase());
+        const existing = files.map(f => (typeof f === 'string' ? f : f.name).toLowerCase());
         if (existing.includes(r.customName.toLowerCase())) {
           conflicts.push(r.customName);
         }

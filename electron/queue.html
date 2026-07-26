@@ -294,11 +294,10 @@
         }
 
         el.innerHTML = `
-          <div class="job-header">
-            <span class="job-title">${outName}</span> 
+          <div class="job-header" style="margin-bottom: 4px;">
+            <span class="job-title" style="font-size: 15px; font-weight: 500;">${outName}</span> 
             <span class="job-status">${icon} ${statusText}</span>
           </div>
-          <div class="job-meta">${job.payload.defaultName}</div>
           ${(job.status === 'running' || job.status === 'done' || job.status === 'queued') ? `
             <div class="job-progress-row" style="position: relative; margin-top: 8px;">
               <div class="progress-bar-bg" style="position: relative; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; height: 16px;">
