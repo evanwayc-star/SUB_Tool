@@ -653,7 +653,7 @@ function openQueueWindow() {
   }
   queueWin = new BrowserWindow({
     width: 720,
-    height: 520,
+    height: 700,
     title: '匯出佇列監控',
     autoHideMenuBar: true,
     webPreferences: {

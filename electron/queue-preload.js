@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('queueAPI', {
   stopJob: (id) => ipcRenderer.invoke('queue:stopJob', id),
   retryJob: (id) => ipcRenderer.invoke('queue:retryJob', id),
   clearJob: (id) => ipcRenderer.invoke('queue:clearJob', id),
+  clearCompleted: () => ipcRenderer.invoke('queue:clearCompleted'),
   openPath: (p) => ipcRenderer.invoke('app:openPath', p),
   showItemInFolder: (p) => ipcRenderer.invoke('app:showItemInFolder', p),
   onUpdate: (cb) => {

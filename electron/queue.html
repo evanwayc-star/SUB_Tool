@@ -105,7 +105,7 @@
       backdrop-filter: blur(12px);
       border: 1px solid var(--border); 
       border-radius: 10px; 
-      padding: 16px; 
+      padding: 10px 14px; 
       box-shadow: 0 4px 6px rgba(0,0,0,0.1); 
       transition: transform 0.2s ease, border-color 0.2s ease;
     }
@@ -116,21 +116,21 @@
     
     .job-header { 
       display: flex; justify-content: space-between; align-items: center;
-      margin-bottom: 6px; 
+      margin-bottom: 4px; 
     }
     .job-title {
-      font-size: 15px; 
+      font-size: 14px; 
       font-weight: 600; 
       color: #fff;
     }
     
-    .job-meta { font-size: 12px; color: var(--text-dim); margin-bottom: 12px; word-break: break-all; }
+    .job-meta { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; word-break: break-all; }
     
     .job-progress-row { 
-      display: flex; align-items: center; gap: 12px; margin-bottom: 12px;
+      display: flex; align-items: center; gap: 12px; margin-bottom: 8px;
     }
     .progress-bar-bg { 
-      flex: 1; height: 8px; background: rgba(0,0,0,0.5); 
+      flex: 1; height: 10px; background: rgba(0,0,0,0.5); 
       border-radius: 4px; overflow: hidden; 
       box-shadow: inset 0 1px 2px rgba(0,0,0,0.2);
     }
@@ -194,6 +194,7 @@
           <option value="3">3</option>
         </select>
       </label>
+      <button id="clearCompletedBtn">🧹 清除完成</button>
       <button id="pauseToggleBtn">⏸ 暫停佇列</button>
     </div>
   </div>
@@ -208,6 +209,7 @@
     const UI = {
       list: document.getElementById('jobList'),
       pauseBtn: document.getElementById('pauseToggleBtn'),
+      clearCompletedBtn: document.getElementById('clearCompletedBtn'),
       concurrencySel: document.getElementById('concurrencySel')
     };
 
@@ -295,14 +297,14 @@
 
         el.innerHTML = `
           <div class="job-header" style="margin-bottom: 4px;">
-            <span class="job-title" style="font-size: 15px; font-weight: 500;">${outName}</span> 
+            <span class="job-title" style="font-size: 14px; font-weight: 500;">${outName}</span> 
             <span class="job-status">${icon} ${statusText}</span>
           </div>
           ${(job.status === 'running' || job.status === 'done' || job.status === 'queued') ? `
-            <div class="job-progress-row" style="position: relative; margin-top: 8px;">
-              <div class="progress-bar-bg" style="position: relative; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; height: 16px;">
+            <div class="job-progress-row" style="position: relative; margin-top: 8px; margin-bottom: 8px;">
+              <div class="progress-bar-bg" style="position: relative; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; height: 12px;">
                 <div class="progress-bar-fill" style="width:${pctNum}%; background: ${job.status === 'done' ? '#4caf50' : '#f0a020'}; height: 100%; transition: width 0.3s ease;"></div>
-                <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.8); pointer-events: none;">
+                <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.8); pointer-events: none;">
                   ${pctNum.toFixed(1)}%
                 </div>
               </div>
@@ -335,6 +337,11 @@
 
     UI.pauseBtn.onclick = async () => {
       await window.queueAPI.setPause(!_isPaused);
+      loadData();
+    };
+
+    UI.clearCompletedBtn.onclick = async () => {
+      await window.queueAPI.clearCompleted();
       loadData();
     };
 
