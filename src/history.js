@@ -11,7 +11,7 @@ import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
 import { drawTimeline } from './timeline.js';
 import { renderNotes } from './notes.js';
-import { emit } from './events.js';
+import { emit, on } from './events.js';
 import { setStatus } from './ui.js';
 
 /* ===== 動作紀錄（復原 / 重做） ===== */
@@ -23,6 +23,27 @@ const History = {
     audioProject:normalizeAudioProject(State.audioProject),externalAudioState:State.externalAudioState||[],
     fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clipGeo:Seq.snapshot()}); },
   reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); },
+  /* 專案可先載入字幕、之後才重新連結媒體。媒體真正就緒時，把新出現的
+     專案 clip 補進先前「尚無媒體」的歷史步驟，保留期間的字幕 Undo，
+     同時避免任何一步復原後把剛重連的影片刪掉。 */
+  rebaseSequence(list){
+    if(!Array.isArray(list)||!list.length) return;
+    for(const entry of this.stack){
+      const existing=Array.isArray(entry?.snap?.clipGeo)?entry.snap.clipGeo:[];
+      // 已經有影片的歷史屬於另一個完整 runtime，不可在「取代媒體」時把新舊主片合併。
+      // rebase 只處理專案載入／第一支影片重連前尚無任何 video clip 的步驟。
+      if(existing.some(clip=>clip?.type!=='image')) continue;
+      const ids=new Set(existing.map(clip=>clip?.id).filter(Boolean));
+      const merged=[...existing];
+      for(const clip of list){
+        if(clip?.id&&ids.has(clip.id)) continue;
+        merged.push(structuredClone(clip));
+        if(clip?.id) ids.add(clip.id);
+      }
+      entry.snap.clipGeo=merged;
+    }
+    renderHistory();
+  },
   record(label){
     const newSnap = this.snap();
     if(this.hi >= 0) {
@@ -63,6 +84,8 @@ const History = {
   restore(i){
     if(i<0||i>=this.stack.length)return;
     const d=structuredClone(this.stack[i].snap);
+    // 必須在任何 State mutation 前保存位置；音訊或 duration 還原也可能改變 tlTime。
+    emit('media:sequenceWillRestore');
     State.cues=d.cues; State.tracks=d.tracks; State.notes=d.notes||[]; syncTrackCount();
     State.videoTracks = (Array.isArray(d.videoTracks)&&d.videoTracks.length) ? d.videoTracks : [{name:'視訊軌 1',visible:true,locked:false}];
     State.audioProject=normalizeAudioProject(d.audioProject);
@@ -76,6 +99,7 @@ const History = {
     if(d.fps) setFps(d.dropFrame?String(d.fps)+'df':d.fps);
     State.exportIn=d.exportIn??null;
     State.exportOut=d.exportOut??null;
+    emit('media:sequenceRestored');
     if(!State.cues.some(c=>c.id===State.selectedId)){ State.selectedId=null; State.selectedIds=[]; }
     else State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
     this.hi=i; emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); renderHistory();
@@ -91,6 +115,7 @@ function renderHistory(){
   ).join('');
   el.querySelectorAll('.hist-item').forEach(d=>d.onclick=()=>History.restore(+d.dataset.hi));
 }
+on('media:projectReady',detail=>History.rebaseSequence(detail?.clips));
 
 export { History, recordHistory, renderHistory };
 

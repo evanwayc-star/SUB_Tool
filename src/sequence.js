@@ -148,14 +148,6 @@ const Seq = {
   },
   restore(list){
     if(!Array.isArray(list)) return;
-    if(list.length === 0){
-      // 快照建立於影片載入前（如「初始」）：媒體載入不入 undo →
-      // 保留主媒體片段並還原為載入時的完整狀態，而非清空序列
-      const pri = State.clips.find(c => c.primary);
-      State.clips.length = 0;
-      if(pri){ pri.in = 0; pri.out = pri.dur; pri.offset = 0; State.clips.push(pri); }
-      this.sort(); this.recomputeDuration(); return;
-    }
     const old = new Map(State.clips.map(c => [c.id, c]));
     const peaksBySrc = new Map();
     for(const c of State.clips){ const k = c.path || (c.web && c.web.url); if(k && c.peaks && !peaksBySrc.has(k)) peaksBySrc.set(k, c.peaks); }

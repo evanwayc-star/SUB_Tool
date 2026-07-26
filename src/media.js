@@ -1816,16 +1816,25 @@ const Media = {
     // audioSourceId，否則重新載入後原本設定的聲道路由會找不到來源。
     const pending=Array.isArray(State._pendingClips)?State._pendingClips:[];
     const pendingPrimary=pending.find(x=>x?.primary)||pending.find(x=>x?.path&&x.path===meta.path)||null;
+    const projectRelink=!!State._pendingProjectMediaRelink;
+    delete State._pendingProjectMediaRelink;
     const audioSourceId=meta.audioSourceId||pendingPrimary?.audioSourceId||makeAudioSourceId();
     const c = Seq.add({ ...meta, primary: true, audioSrc: 'video', audioSourceId, audioDetached:!!pendingPrimary?.audioDetached, offset: 0 });
     this.activeClipId = c.id;
     this._restorePreservedImageTimeline();
     // 開啟專案時還原其餘 clip（桌面：同一路徑且同 audioSourceId 的切割片段共用資源、只 ingest 一次）
     const pend = State._pendingClips; delete State._pendingClips;
+    const restoredProjectClips=[];
+    if(projectRelink) restoredProjectClips.push(c);
+    let pendingRestore=Promise.resolve();
     if(DESK && Array.isArray(pend)){
       const pri = pend.find(x=>x.primary) || pend.find(x=>x.path===c.path);
-      if(pri){ c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0; c.vtrack = pri.vtrack || 0; c.fadeIn = pri.fadeIn || 0; c.fadeOut = pri.fadeOut || 0; c.audioDetached=!!pri.audioDetached; Seq.sort(); Seq.recomputeDuration(); }
-      (async()=>{
+      if(pri){
+        c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0; c.vtrack = pri.vtrack || 0; c.fadeIn = pri.fadeIn || 0; c.fadeOut = pri.fadeOut || 0; c.audioDetached=!!pri.audioDetached;
+        Seq.sort(); Seq.recomputeDuration();
+      }
+      if(pri&&!restoredProjectClips.includes(c)) restoredProjectClips.push(c);
+      pendingRestore=(async()=>{
         // 同一實體檔可被使用者匯入成兩個獨立媒體 asset；它們的路由必須保持分開。
         // 舊專案尚無 audioSourceId 時才退回 path-only 相容鍵。
         const resourceKey=item=>{
@@ -1840,7 +1849,8 @@ const Media = {
           // 影片，因而在重開專案時遺失）。每一個圖片 placement 都要獨立
           // 重建，才能保留自己的裁切時間、大小與位置。
           if(pc.type==='image'){
-            await this.addImageDesktop(pc.path,{...pc,_restore:true}).catch(()=>null);
+            const image=await this.addImageDesktop(pc.path,{...pc,_restore:true}).catch(()=>null);
+            if(image) restoredProjectClips.push(image);
             continue;
           }
           const key=resourceKey(pc);
@@ -1854,15 +1864,90 @@ const Media = {
               fadeIn: pc.fadeIn || 0, fadeOut: pc.fadeOut || 0,
               in: pc.in ?? 0, out: Math.min(pc.out ?? base.dur, base.dur), offset: pc.offset ?? undefined });
             if(pc.offset != null) piece.offset = pc.offset;
+            restoredProjectClips.push(piece);
           } else {
             const added = await this.addClipDesktop(pc.path, pc).catch(()=>null);
-            if(added) made.set(key, added);
+            if(added){ made.set(key, added); restoredProjectClips.push(added); }
           }
         }
         Seq.sort(); Seq.recomputeDuration(); drawTimeline();
       })();
     }
+    this._pendingProjectRestorePromise=pendingRestore;
+    void pendingRestore.catch(error=>console.warn('restore pending project clips:',error)).finally(()=>{
+      if(this._pendingProjectRestorePromise===pendingRestore) this._pendingProjectRestorePromise=null;
+      const restoredIds=new Set(restoredProjectClips.filter(clip=>State.clips.includes(clip)).map(clip=>clip.id));
+      emit('media:projectReady',{clips:Seq.snapshot().filter(clip=>restoredIds.has(clip.id))});
+    });
     return c;
+  },
+  async waitForPendingProjectRestore(){
+    const pending=this._pendingProjectRestorePromise;
+    if(pending) await pending;
+  },
+  _enterNoVideoTimeline(playhead,wasPlaying=this.playing){
+    const target=Math.min(Math.max(0,Number(playhead)||0),Math.max(0,State.duration||0));
+    this.activeClipId=null;
+    this._gap=true; this._gapT=target;
+    this._gapStart=wasPlaying?performance.now():null;
+    this.stopBufferSources(); this.stopElementSources();
+    if(this.mpvMode){ getPlayerAdapter()?.pause?.().catch(()=>{}); emit('mpv:sync'); }
+    else { try{ video.pause(); }catch(error){} video.style.visibility='hidden'; }
+    for(const track of this.tracks){
+      const source=track.source||'video';
+      if(source==='video'||source.startsWith('clip:')) track._srcHidden=true;
+    }
+    this.applyGains();
+    this._vTime=target;
+    if(this.audioOnlyTimeline()){
+      this._vStart=wasPlaying?performance.now():null;
+      this.seek(target);
+      if(wasPlaying) this.startElementSources(target,target);
+    }else{
+      this._vStart=null;
+      this.playing=false;
+      if(wasPlaying){
+        $('playBtn').textContent='▶';
+        video.dispatchEvent(new Event('pause'));
+      }
+    }
+    return target;
+  },
+  restoreSequenceEditState(timelineTime){
+    const wanted=new Map();
+    for(const clip of State.clips){
+      if(!clip||clip.type==='image') continue;
+      const sourceId=clip.audioSrc||(clip.primary?'video':('clip:'+clip.id));
+      if(sourceId.startsWith('clip:')&&!wanted.has(sourceId)) wanted.set(sourceId,clip);
+    }
+    this.tracks=this.tracks.filter(track=>{
+      const sourceId=track.source||'video';
+      if(!sourceId.startsWith('clip:')||wanted.has(sourceId)) return true;
+      try{ if(track.el){ track.el.pause(); track.el.src=''; } }catch(error){}
+      try{ track.gain?.disconnect?.(); }catch(error){}
+      this._clipRuntimeReadySources?.delete(sourceId);
+      return false;
+    });
+    if(this.activeClipId&&!Seq.byId(this.activeClipId)) this.activeClipId=null;
+
+    const pending=[];
+    for(const [sourceId,clip] of wanted){
+      const hasTrack=this.tracks.some(track=>(track.source||'video')===sourceId);
+      if(!hasTrack&&!this._clipRuntimeReadySources?.has(sourceId)) pending.push(this.ensureClipRuntime(clip));
+    }
+    renderAudioTracks();
+    if(this.seqOn()) this.seek(Math.max(0,Number(timelineTime)||0));
+    else this._enterNoVideoTimeline(timelineTime,this.playing);
+    const restorePromise=Promise.allSettled(pending);
+    this._historySequenceRestorePromise=restorePromise;
+    void restorePromise.finally(()=>{
+      if(this._historySequenceRestorePromise===restorePromise) this._historySequenceRestorePromise=null;
+    });
+    return restorePromise;
+  },
+  async waitForHistorySequenceRestore(){
+    const pending=this._historySequenceRestorePromise;
+    if(pending) await pending;
   },
   /* 已有影片時的新影片路由：詢問「加入序列」或「取代」 */
   openIncoming({ path = null, file = null }){
@@ -1908,11 +1993,36 @@ const Media = {
     drawTimeline();
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}（背景抽取音訊與波形…）`, 'busy');
-    this._clipIngest(c, info);
+    void this.ensureClipRuntime(c,info);
     return c;
+  },
+  ensureClipRuntime(c,knownInfo=null){
+    if(!c||c.type==='image'||!c.path||!DESK) return Promise.resolve();
+    const sourceId=c.audioSrc||(c.primary?'video':('clip:'+c.id));
+    if(sourceId==='video'||this.tracks.some(track=>(track.source||'video')===sourceId)) return Promise.resolve();
+    if(!this._clipRuntimePromises) this._clipRuntimePromises=new Map();
+    const existing=this._clipRuntimePromises.get(sourceId);
+    if(existing) return existing;
+    const pending=(async()=>{
+      const info=knownInfo||await DESK.probe(c.path);
+      const live=State.clips.find(clip=>(clip.audioSrc||(clip.primary?'video':('clip:'+clip.id)))===sourceId);
+      if(!live) return;
+      if(!live.web?.url){
+        try{ live.web={url:await DESK.fileURL(live.path)}; }catch(error){}
+      }
+      this.registerAudioRouting(live,probeAudioChannelDescriptors(info?.audio));
+      await this._clipIngest(live,info);
+      if(!this._clipRuntimeReadySources) this._clipRuntimeReadySources=new Set();
+      if(State.clips.includes(live)) this._clipRuntimeReadySources.add(sourceId);
+    })().catch(error=>console.warn('restore clip runtime:',error)).finally(()=>{
+      if(this._clipRuntimePromises?.get(sourceId)===pending) this._clipRuntimePromises.delete(sourceId);
+    });
+    this._clipRuntimePromises.set(sourceId,pending);
+    return pending;
   },
   /* 加入 clip 的背景音訊/波形（模式同 _bgAudioIngest；音軌以 source='clip:<id>' 標記） */
   async _clipIngest(c, info){
+    const sourceId=c.audioSrc||('clip:'+c.id);
     const myVer = this._bgVersion;
     this.ensureCtx();
     // queue:true —— 不可搶佔/殺掉進行中的 ingest（可能正是餵播放器的 streamIngest 背景轉檔
@@ -1922,10 +2032,13 @@ const Media = {
     // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
     let res; try{ res = await DESK.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
     catch(e){ if(this._bgVersion === myVer) setStatus('影片音訊抽取失敗：' + (e?.message||e), ''); return; }
-    if(!res || this._bgVersion !== myVer || !Seq.byId(c.id)) return;
+    if(!res || this._bgVersion !== myVer) return;
+    const live=State.clips.find(clip=>(clip.audioSrc||(clip.primary?'video':('clip:'+clip.id)))===sourceId);
+    if(!live) return;
+    c=live;
     if(res.proxy){
       try{ const u = await DESK.fileURL(res.proxy);
-        if(this._bgVersion === myVer && Seq.byId(c.id)){ c.proxyUrl = u; this.seek(this.displayTime()); }
+        if(this._bgVersion === myVer && State.clips.includes(c)){ c.proxyUrl = u; this.seek(this.displayTime()); }
       }catch(e){ console.warn('clip proxy url:', e); }
     }
     const chs = res.channels || [];
@@ -1938,19 +2051,19 @@ const Media = {
           setTimeout(() => r(el), 10000);
         }))
       ));
-      if(this._bgVersion !== myVer || !Seq.byId(c.id)){ els.forEach(el => { if(el) try{ el.src=''; }catch(e){} }); return; }
+      if(this._bgVersion !== myVer || !State.clips.includes(c)){ els.forEach(el => { if(el) try{ el.src=''; }catch(e){} }); return; }
       for(let i = 0; i < chs.length; i++){
         const el = els[i]; if(!el) continue;
         const node = this.ctx.createMediaElementSource(el);
         const g = this.ctx.createGain(); node.connect(g); g.connect(this.master);
         const tr = this.bindTrackRouting({ id: 'cl-' + c.id + '-' + i, name: c.name + '·' + (chs[i].label || ('軌 ' + (i + 1))),
-          kind: 'element', source: 'clip:' + c.id, el, gain: g, muted: false, solo: false, volume: 1, file: chs[i].file },c,descriptors[i],i);
+          kind: 'element', source: sourceId, el, gain: g, muted: false, solo: false, volume: 1, file: chs[i].file },c,descriptors[i],i);
         this.attachMeter(tr, node); this.tracks.push(tr);
       }
       // 依目前 active clip 重新套用可聽集合（新加入的預設隱藏，除非它正是 active）
       const ac = this._activeClip(); if(ac) this._applyClipAudio(ac);
       // 若正在播這個新段：元素音軌接管 → mpv 靜音並啟動元素
-      if(this.mpvMode && ac && (ac.audioSrc || '') === ('clip:' + c.id)){
+      if(this.mpvMode && ac && (ac.audioSrc || ('clip:'+ac.id)) === sourceId){
         getPlayerAdapter().mute(true).catch(()=>{});
         if(this.playing) this._restartElements();
       }
@@ -2228,29 +2341,7 @@ const Media = {
     this.recomputeTimelineDuration();
     if(!this.seqOn()){
       // 最後影片被刪除：保留黑畫面與外部音訊，不讓先前影片停留在最後一格。
-      this.activeClipId=null;
-      this._gap=true; this._gapT=Math.min(playhead,State.duration||0);
-      this._gapStart=wasPlaying?performance.now():null;
-      this.stopBufferSources(); this.stopElementSources();
-      if(this.mpvMode){ getPlayerAdapter()?.pause?.().catch(()=>{}); emit('mpv:sync'); }
-      else { try{ video.pause(); }catch(e){} video.style.visibility='hidden'; }
-      for(const track of this.tracks){
-        const source=track.source||'video';
-        if(source==='video'||source.startsWith('clip:')) track._srcHidden=true;
-      }
-      this.applyGains();
-      const target=Math.min(playhead,State.duration||0);
-      if(this.audioOnlyTimeline()){
-        this._vTime=target; this._vStart=wasPlaying?performance.now():null;
-        this.seek(target);
-        if(wasPlaying) this.startElementSources(target,target);
-      }else if(wasPlaying){
-        // 最後一段影片且沒有任何外部音訊時，刪除動作本身就結束了播放。
-        // 否則 playing 會停留在 true、播放鍵仍顯示暫停，卻沒有任何媒體可推進。
-        this._vTime=target; this._vStart=null;
-        this.playing=false; $('playBtn').textContent='▶';
-        video.dispatchEvent(new Event('pause'));
-      }
+      this._enterNoVideoTimeline(playhead,wasPlaying);
     }else this.seek(Math.min(playhead, State.duration || 0)); // 重新解析目前位置（可能已成間隙）
     renderAudioTracks();
     drawTimeline(); emit('render:videoSub');
@@ -2783,6 +2874,8 @@ const Media = {
       }
     }
     this.tracks=[]; this.usingWebAudio=false;
+    this._clipRuntimeReadySources?.clear();
+    this._clipRuntimePromises?.clear();
     clearMeterStrips(); // Fix #10：清除 mixer 的舊音軌參照，避免 rafLoop 讀取廢棄 analyser
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
     const keepObjectURLs=options.keepObjectURLs instanceof Set?options.keepObjectURLs:new Set();
@@ -2802,6 +2895,15 @@ const Media = {
 // timeline 的 bus 控制以事件通知，讓 timeline 不需反向依賴 Media；在載入順序不同時也安全。
 on('audio:externalRestored',detail=>{
   try{ Media.restoreExternalAudioEditState(detail?.sources); }catch(error){ console.warn('restore external audio history:',error); }
+});
+on('media:sequenceWillRestore',()=>{
+  try{ Media._historyRestoreTimelineTime=Media.displayTime(); }
+  catch(error){ Media._historyRestoreTimelineTime=0; }
+});
+on('media:sequenceRestored',()=>{
+  const time=Math.max(0,Number(Media._historyRestoreTimelineTime)||0);
+  Media._historyRestoreTimelineTime=null;
+  try{ void Media.restoreSequenceEditState(time); }catch(error){ console.warn('restore media history:',error); }
 });
 /* 專案音訊 bus 的 M／S／音量變更 → 重新套用增益並重繪音軌列與時間軸。
    走 events.js 而非 window CustomEvent，理由見 docs/開發與驗證.md 的事件表。 */

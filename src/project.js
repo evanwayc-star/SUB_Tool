@@ -28,7 +28,7 @@ import { Media } from './media.js';
 import { drawTimeline } from './timeline.js';
 import { History } from './history.js';
 import { renderNotes } from './notes.js';
-import { emit } from './events.js';
+import { emit, on } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { getAllPresets, effStyle, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets } from './substyle.js';
 
@@ -299,6 +299,7 @@ function resetProject(){
   State.exportOut=null;
   delete State._pendingClips;
   delete State._pendingExternalAudioSources;
+  delete State._pendingProjectMediaRelink;
 }
 
 function _hasAudioProjectData(){
@@ -313,6 +314,28 @@ function isProjectDirty() {
   if (State.cues.length === 0 && State.notes.length === 0 && !_hasAudioProjectData() && _savedClips().length===0) return false;
   if (!_lastSavedDataStr) return true;
   return JSON.stringify(_buildProjectData()) !== _lastSavedDataStr;
+}
+
+function _finishProjectLoad(){
+  // Undo 的「初始」必須以媒體與所有 pending clip 都完成還原後的序列為準。
+  // 若在 apply() 當下建立，第一個影片編輯再 Undo 會回到空序列。
+  History.reset();
+  _lastSavedDataStr = JSON.stringify(_buildProjectData());
+  setStatus('專案已載入','ok');
+}
+
+function _restorePendingPlayhead(){
+  const raw=State._pendingPlayhead;
+  if(!Number.isFinite(raw)) return false;
+  const target=Math.max(0,raw);
+  try{
+    Media.seek(target);
+    delete State._pendingPlayhead;
+    return true;
+  }catch(error){
+    console.warn('restore project playhead:',error);
+    return false;
+  }
 }
 
 /* ===== 8. 專案 .subtool ============================================== */
@@ -347,6 +370,8 @@ const Project = {
     State.mediaName=typeof savedMedia.name==='string'&&savedMedia.name?savedMedia.name:null;
     State.mediaSize=Math.max(0,Number(savedMedia.size)||0);
     State.mediaPath=IS_DESKTOP&&typeof savedMedia.path==='string'&&savedMedia.path?savedMedia.path:null;
+    if(State.mediaPath||State.mediaName) State._pendingProjectMediaRelink=true;
+    else delete State._pendingProjectMediaRelink;
     State.cues=(data.cues||[]).map(c=>{
       let tk = c.track||0;
       if (!isV1 && c.track !== undefined) tk = Math.max(0, c.track - 1);
@@ -426,11 +451,8 @@ const Project = {
     if(data.playhead != null && typeof data.playhead === 'number'){
       const pt = Math.max(0, data.playhead);
       State._pendingPlayhead = pt;
-      setTimeout(() => { try { Media.seek(pt); } catch(e) {} }, 150);
     }
-    emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); History.reset();
-    _lastSavedDataStr = JSON.stringify(_buildProjectData());
-    setStatus('專案已載入','ok');
+    emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes();
   },
   async load(file){
     const buf=await readFile(file);
@@ -448,6 +470,7 @@ const Project = {
         `<br><br>字幕內容已完整還原。`,
         [{label:'立即匯入影音',primary:true,act:()=>{closeModal(); emit('action','open-media');}},{label:'稍後',act:closeModal}]);
     }
+    _finishProjectLoad();
   },
   async loadDesktop(r){
     let data; try{ data=JSON.parse(decodeText(b64ToBytes(r.b64).buffer)); }catch(e){ showToast('無法解析專案檔'); return; }
@@ -463,7 +486,10 @@ const Project = {
       if(st.exists){
         // 等主影片完成初始化後才掛外部音檔，避免 Media.loadDesktopMedia 的 reset 清掉剛重建的音源。
         try{ await Media.loadDesktopMedia(mp); }catch(e){ console.warn('load project media:',e); }
+        // _registerPrimary 會背景還原其餘影片／圖片；Undo 基準必須等它們全部完成。
+        try{ await Media.waitForPendingProjectRestore?.(); }catch(e){ console.warn('restore project clips:',e); }
         await _restorePendingExternalAudioSources();
+        _restorePendingPlayhead();
       }
       else openModal('找不到原影片',
         `專案紀錄的影片路徑不存在：<br><br><b>${escapeHTML(mp)}</b><br><br>請手動重新匯入。字幕已還原。`,
@@ -474,8 +500,10 @@ const Project = {
           const p=Array.isArray(picked)?picked[0]:picked;
           if(p){
             try{ await Media.loadDesktopMedia(p); }catch(e){ console.warn('load replacement media:',e); }
+            try{ await Media.waitForPendingProjectRestore?.(); }catch(e){ console.warn('restore replacement clips:',e); }
           }
           await _restorePendingExternalAudioSources();
+          _restorePendingPlayhead();
         }},{label:'稍後',act:()=>{ closeModal(); void _restorePendingExternalAudioSources(); }}]);
     }else{
       // 純音訊專案沒有主影片可觸發 reset，因此先清舊媒體，再重建外部音檔。
@@ -484,8 +512,11 @@ const Project = {
       // 資料重建圖片，否則重開後只剩空時間軸。
       try{ await Media.restorePendingImageClips?.(); }catch(e){ console.warn('restore pending image clips:',e); }
       await _restorePendingExternalAudioSources();
+      _restorePendingPlayhead();
     }
+    _finishProjectLoad();
   }
 };
+on('media:projectReady',_restorePendingPlayhead);
 
 export { Project, ensureProjectSaved, isProjectGuardDone, resetProject, isProjectDirty };
