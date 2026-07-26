@@ -355,7 +355,7 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
   openModal('Audio Channel Configuration',
     `<div class="audio-output-dialog">
       <div class="audio-route-help">影片輸出會依下列 Stream mux 音訊；WAV 則固定把所有專案音訊軌依 A 軌順序寫入同一個多聲道 WAV。</div>
-      <div class="audio-bus-count"><label>專案音訊軌數
+      ${onBack ? '' : `<div class="audio-bus-count"><label>專案音訊軌數
         <input id="audioOutputBusCount" type="number" min="0" max="${MAX_AUDIO_BUSES}" value="${p.buses.length}">
       </label><button id="audioOutputBusApply" type="button">套用</button>
         <button class="audio-output-count-preset" type="button" data-count="2">2</button>
@@ -365,7 +365,7 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
         <button class="audio-output-count-preset" type="button" data-count="10">10</button>
         <button class="audio-output-count-preset" type="button" data-count="16">16</button>
         <button class="audio-output-count-preset" type="button" data-count="18">18</button>
-      </div>
+      </div>`}
       <div class="audio-delivery-presets"><span>常用交付配置</span><button id="audioOutputAllMono" type="button">全部Mono(依照專案總軌道數)</button>${presetButtons}</div>
       <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>Stream</th><th>Output Channels</th><th>Project Channels</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="audio-output-actions"><button id="audioOutputAdd" type="button">＋ 新增 Stream</button></div>

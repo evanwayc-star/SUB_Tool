@@ -188,7 +188,16 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
   });
   const streamLabels = [];
   plan.streams.forEach((stream, si) => {
-    const inputLabels = stream.busIds.map(id => busLabels.get(id));
+    const inputLabels = stream.busIds.map((id, ci) => {
+      let l = busLabels.get(id);
+      if (!l) {
+        // [v5.4.9 修復] 若該輸出 stream 參照到的專案音軌(bus)被使用者在設定對話框中調降刪除了，
+        // 為了避免 ffmpeg 生成 undefined 標籤導致 undefinedjoin= 崩潰，這裡以等長的無聲(anullsrc)軌道替補。
+        l = `[apS${si}M${ci}]`;
+        fc.push(`anullsrc=r=48000:cl=mono,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${l}`);
+      }
+      return l;
+    });
     let label;
     if (stream.spec.channels === 1) label = inputLabels[0];
     else {
