@@ -838,14 +838,26 @@ async function showExportVideoDialog(initialDraft=null) {
     $$('.ev-audio-btn').forEach(el => el.onclick = e => {
       const idx = +e.target.dataset.idx;
       const oldPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout || {}));
+      const oldBuses = JSON.parse(JSON.stringify(State.audioProject.buses || []));
+      
       State.audioProject.exportLayout = JSON.parse(JSON.stringify(draft.deliverables[idx].audioPlan));
+      if (draft.deliverables[idx].audioBuses) {
+        State.audioProject.buses = JSON.parse(JSON.stringify(draft.deliverables[idx].audioBuses));
+      }
+      
       closeModal();
       AudioRouting.openOutputSettings(() => {
         draft.deliverables[idx].audioPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout));
+        draft.deliverables[idx].audioBuses = JSON.parse(JSON.stringify(State.audioProject.buses));
+        
         if (!draft.deliverables[idx].nameModified) {
           draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
         }
+        
         State.audioProject.exportLayout = oldPlan;
+        State.audioProject.buses = oldBuses;
+        if (typeof window.renderAll === 'function') window.renderAll();
+        
         void showExportVideoDialog(draft);
       });
     });
@@ -933,6 +945,9 @@ async function showExportVideoDialog(initialDraft=null) {
           let finalAudioPlan = null;
           if (data.audioPlan) {
             finalAudioPlan = JSON.parse(JSON.stringify(data.audioPlan));
+            if (r.audioBuses && Array.isArray(r.audioBuses)) {
+              finalAudioPlan.buses = r.audioBuses;
+            }
             if (r.audioPlan && Array.isArray(r.audioPlan.streams)) {
               finalAudioPlan.streams = r.audioPlan.streams;
             }

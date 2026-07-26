@@ -55,7 +55,8 @@
       <div class="sep"></div>
 
       <button class="icon" data-act="settings" title="自訂快捷鍵">⚙ 設定</button>
-      <button class="icon desktop-only" data-act="exp-video" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV" style="display:none">🎞 匯出</button>
+      <button class="icon desktop-only" id="stMonitorBtn" title="監控匯出佇列" style="display:none">📋 監控序列</button>
+      <button class="icon desktop-only" data-act="exp-video" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV" style="display:none">🎞 匯出影片</button>
     </div>
 
     <!-- ===== 主體 ===== -->
@@ -306,7 +307,7 @@
 
     <!-- ===== 狀態列 ===== -->
     <div class="statusbar">
-      <span><span class="dot" id="stDot"></span><span id="stMsg" role="status" aria-live="polite">就緒</span><button id="stStopBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">停止</button><button id="stResumeBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">▶ 繼續佇列</button><button id="stMonitorBtn" style="margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">監控佇列</button></span>
+      <span><span class="dot" id="stDot"></span><span id="stMsg" role="status" aria-live="polite">就緒</span><button id="stStopBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">停止</button><button id="stResumeBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">▶ 繼續佇列</button></span>
       <div class="spacer"></div>
       <span id="stMedia"></span>
       <div class="sep"></div>
