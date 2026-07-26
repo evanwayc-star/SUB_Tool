@@ -609,6 +609,32 @@ async function showExportVideoDialog(initialDraft=null) {
     projName = rawParts[1];
   }
   
+  function genDefaultName(r) {
+    const isWav = r.format === 'wav';
+    let ext = '.mp4';
+    if (r.format === 'prores') ext = '.mov';
+    if (r.format === 'wav') ext = '.wav';
+    
+    const ap = r.audioPlan;
+    let audioDesc = '';
+    const streams = ap?.streams || ap?.groups;
+    if (Array.isArray(streams) && streams.length > 0) {
+      const gCounts = streams.map(g => {
+        if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '20FM';
+        if (g.layout === '5.1') return '51FM';
+        if (g.layout === 'mono') return '10FM';
+        return (g.layout || '20').replace('.', '') + 'FM';
+      });
+      audioDesc = '_' + gCounts.join('+');
+    }
+    
+    const fps = Math.round(State.fps || 25);
+    let tag = '';
+    if (!isWav && r.targetH > 0) tag += '_' + r.targetH + 'p';
+    
+    return `ST_${projName}_${fps}fps${audioDesc}${tag}${ext}`;
+  }
+  
   const audioOnly = !!data.audioOnly;
   const hasProjectAudio = !!data.audioPlan;
   
@@ -654,29 +680,7 @@ async function showExportVideoDialog(initialDraft=null) {
     const isWav = r.format === 'wav';
     
     if (!r.customName) {
-      let ext = '.mp4';
-      if (r.format === 'prores') ext = '.mov';
-      if (r.format === 'wav') ext = '.wav';
-      
-      const ap = r.audioPlan;
-      let audioDesc = '';
-      const streams = ap?.streams || ap?.groups;
-      if (Array.isArray(streams) && streams.length > 0) {
-        const gCounts = streams.map(g => {
-          if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '20FM';
-          if (g.layout === '5.1') return '51FM';
-          if (g.layout === 'mono') return '10FM';
-          return (g.layout || '20').replace('.', '') + 'FM';
-        });
-        audioDesc = '_' + gCounts.join('+');
-      }
-      
-      const fps = Math.round(State.fps || 25);
-      let tag = '';
-      if (!isWav && r.targetH > 0) tag += '_' + r.targetH + 'p';
-      if (r.format === 'prores') tag += '_ProRes';
-      
-      r.customName = `ST_${projName}_${fps}fps${audioDesc}${tag}${ext}`;
+      r.customName = genDefaultName(r);
     }
 
     const ap = r.audioPlan;
@@ -720,8 +724,8 @@ async function showExportVideoDialog(initialDraft=null) {
           <button class="ev-del icon" data-idx="${i}" style="padding:2px;font-size:12px;cursor:pointer;color:var(--red);background:transparent;border:none;" title="刪除此列">✕</button>
         </div>
         <div style="display:flex;gap:12px;align-items:center;">
-          <input type="text" class="ev-name" data-idx="${i}" value="${r.customName}" style="flex:1;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" placeholder="檔名 (含副檔名)">
-          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" readonly style="flex:2;padding:3px;font-size:12px;background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);cursor:pointer;" title="點擊瀏覽選擇目錄" placeholder="選擇輸出目錄...">
+          <input type="text" class="ev-name" data-idx="${i}" value="${r.customName}" style="flex:2;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" placeholder="檔名 (含副檔名)">
+          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" readonly style="flex:1;padding:3px;font-size:12px;background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);cursor:pointer;" title="點擊瀏覽選擇目錄" placeholder="選擇輸出目錄...">
           <button class="ev-dir-btn" data-idx="${i}" style="padding:2px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">瀏覽...</button>
           <div style="display:flex;align-items:center;gap:6px;">
             <span style="font-size:11px;color:var(--text-faint);">音訊: ${audioDesc}</span>
@@ -743,7 +747,9 @@ async function showExportVideoDialog(initialDraft=null) {
     $$('.ev-format').forEach(el => el.onchange = e => {
       const idx = +e.target.dataset.idx;
       draft.deliverables[idx].format = e.target.value;
-      if (draft.deliverables[idx].customName) {
+      if (!draft.deliverables[idx].nameModified) {
+        draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
+      } else if (draft.deliverables[idx].customName) {
         const isWav = e.target.value === 'wav';
         const isPro = e.target.value === 'prores';
         const ext = isWav ? '.wav' : (isPro ? '.mov' : '.mp4');
@@ -768,12 +774,18 @@ async function showExportVideoDialog(initialDraft=null) {
         }
         draft.deliverables[idx].kbps = Math.round((w * h * 30 * 0.1) / 1000);
       }
+      if (!draft.deliverables[idx].nameModified) {
+        draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
+      }
       updateRows();
       checkConflicts();
     });
     $$('.ev-custom-res').forEach(el => el.onchange = e => {
       const idx = +e.target.dataset.idx;
       draft.deliverables[idx].targetH = parseInt(e.target.value);
+      if (!draft.deliverables[idx].nameModified) {
+        draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
+      }
       updateRows();
       checkConflicts();
     });
@@ -791,6 +803,7 @@ async function showExportVideoDialog(initialDraft=null) {
         if (!val.toLowerCase().endsWith(ext)) val += ext;
       }
       draft.deliverables[idx].customName = val;
+      draft.deliverables[idx].nameModified = (val !== genDefaultName(draft.deliverables[idx]));
       updateRows();
       checkConflicts();
     });
@@ -829,6 +842,9 @@ async function showExportVideoDialog(initialDraft=null) {
       closeModal();
       AudioRouting.openOutputSettings(() => {
         draft.deliverables[idx].audioPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout));
+        if (!draft.deliverables[idx].nameModified) {
+          draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
+        }
         State.audioProject.exportLayout = oldPlan;
         void showExportVideoDialog(draft);
       });
@@ -860,6 +876,7 @@ async function showExportVideoDialog(initialDraft=null) {
     if (hasDupes) {
       msg.textContent = '警告：交付清單內有重複的輸出路徑！';
       msg.style.display = 'block';
+      alert('錯誤：交付清單內有重複的檔名！比較後面的序列會覆蓋掉前面的，請修改檔名再送出。');
       return false;
     }
     
