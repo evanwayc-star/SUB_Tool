@@ -16,8 +16,14 @@ const net = require('net');
 const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
+const QueueStore = require('./queue-store');
 
 let mainWin = null;
+let _allowMainWindowClose = false;
+let _isAppQuitting = false;
+let _mainHiddenForQueue = false;
+let _quitReady = false;
+let _quitSequenceStarted = false;
 let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null;
 const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
@@ -245,16 +251,51 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
     if (onProcess) onProcess(p);
     let err = '';       // 尾端（錯誤訊息用；會被截斷）
     const maps = [];    // 串流對應行（出現在輸出開頭，需單獨保留，否則被 err 截斷丟失）
-    const logPath = path.join(app.getPath('userData'), `export-${Date.now()}-${jobId || 'task'}.log`);
-    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-    logStream.write(`> ffmpeg ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}\n\n`);
+    const isQueueExport = typeof jobId === 'string' && jobId.startsWith('export-') && EXPORT_QUEUE_DIR;
+    if (isQueueExport) ensureExportQueueDir();
+    const logPath = isQueueExport
+      ? QueueStore.logPath(EXPORT_QUEUE_DIR, jobId)
+      : path.join(app.getPath('userData'), `export-${Date.now()}-${jobId || 'task'}.log`);
+    const logStream = fs.createWriteStream(logPath, { flags: isQueueExport ? 'w' : 'a' });
+    let logError = null;
+    logStream.on('error', error => {
+      logError = error;
+      console.error(`[Queue] 無法寫入 ffmpeg 記錄 ${logPath}：`, error);
+    });
+    const writeLog = data => {
+      if (logError) return;
+      try { logStream.write(data); } catch (error) { logError = error; }
+    };
+    let logFinishPromise = null;
+    const finishLog = () => {
+      if (logFinishPromise) return logFinishPromise;
+      logFinishPromise = new Promise(resolve => {
+        if (logError || logStream.writableFinished || logStream.destroyed) {
+          resolve();
+          return;
+        }
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(done, 1000);
+        logStream.once('finish', done);
+        logStream.once('error', done);
+        try { logStream.end(); } catch (error) { done(); }
+      });
+      return logFinishPromise;
+    };
+    writeLog(`> ffmpeg ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}\n\n`);
     
     const startTime = Date.now();
     const speeds = [];
 
     p.stderr.on('data', d => {
       const s = d.toString();
-      logStream.write(s);
+      writeLog(s);
       err += s; if (err.length > 8000) err = err.slice(-8000);
       
       const sMatch = /speed=\s*([\d\.]+)x/.exec(s);
@@ -279,17 +320,20 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
       }
     });
     p.on('error', (e) => {
-      logStream.end();
+      finishLog();
       rej(e);
     });
-    p.on('close', c => {
-      logStream.end();
+    p.on('close', async c => {
+      await finishLog();
       if (sender) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
       if (c === 0) {
         fs.unlink(logPath, () => {});
         res({ tail: err, maps });
       } else {
-        const fullLog = fs.readFileSync(logPath, 'utf8');
+        let fullLog = err;
+        try { fullLog = fs.readFileSync(logPath, 'utf8'); } catch (readError) {
+          if (logError) fullLog += `\n\n[無法寫入完整記錄：${logError.message || logError}]`;
+        }
         let summary = '';
         const mNoSuchFile = fullLog.match(/(.*): No such file or directory/);
         if (mNoSuchFile) {
@@ -316,7 +360,8 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
 
 /* ---- 視窗 ---- */
 function createWindow() {
-  mainWin = new BrowserWindow({
+  if (mainWin && !mainWin.isDestroyed()) return mainWin;
+  const win = new BrowserWindow({
     width: 1480, height: 920, minWidth: 1024, minHeight: 640,
     backgroundColor: '#1b1b1d',
     title: `SUB TOOL v${app.getVersion()}`,
@@ -327,45 +372,90 @@ function createWindow() {
       webSecurity: false // 本機信任程式：允許 file:// 影音直接讀取
     }
   });
+  mainWin = win;
   // 移除 Electron 預設的 File / Edit / View 系統選單列。autoHideMenuBar
   // 只會暫時隱藏它，按 Alt 仍會再次出現；這裡直接解除視窗選單並關閉
   // Alt 的選單列顯示行為，避免干擾程式既有的快捷鍵操作。
-  mainWin.setMenu(null);
-  mainWin.setAutoHideMenuBar(false);
-  mainWin.setMenuBarVisibility(false);
-  mainWin.maximize();
+  win.setMenu(null);
+  win.setAutoHideMenuBar(false);
+  win.setMenuBarVisibility(false);
+  win.maximize();
   // 讓嵌入式 mpv 覆蓋視窗跟著主視窗移動 / 縮放 / 最小化
   const reapplyMpv = () => { if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible && _mpvRect) applyMpvBounds(_mpvRect); };
-  mainWin.on('move', reapplyMpv);
-  mainWin.on('resize', reapplyMpv);
-  mainWin.on('restore', () => { if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible) { try { _mpvWin.show(); } catch (e) {} reapplyMpv(); } });
-  mainWin.on('minimize', () => { if (_mpvWin && !_mpvWin.isDestroyed()) { try { _mpvWin.hide(); } catch (e) {} } });
-  let isClosing = false;
-  mainWin.on('close', (e) => {
-    if (!isClosing && mainWin.webContents) {
+  win.on('move', reapplyMpv);
+  win.on('resize', reapplyMpv);
+  win.on('restore', () => { if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible) { try { _mpvWin.show(); } catch (e) {} reapplyMpv(); showMpvGuide(); } });
+  win.on('minimize', () => {
+    if (_mpvWin && !_mpvWin.isDestroyed()) { try { _mpvWin.hide(); } catch (e) {} }
+    if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e) {} }
+  });
+  win.on('close', (e) => {
+    if (!_allowMainWindowClose && !_isAppQuitting && !win.webContents.isDestroyed()) {
       e.preventDefault();
-      mainWin.webContents.send('app:request-close');
+      safeWinSend(win, 'app:request-close');
     }
   });
-  mainWin.on('closed', () => { destroyMpvWin(); });
-  ipcMain.handle('app:close', () => {
-    isClosing = true;
-    if (mainWin && !mainWin.isDestroyed()) mainWin.close();
+  win.on('closed', () => {
+    if (mainWin === win) {
+      mainWin = null;
+      _mainHiddenForQueue = false;
+    }
+    destroyMpvWin();
   });
   // S2：補齊 Electron 安全基線 — 拒絕開新視窗、限制導航只能停在本機應用頁（與 dev 的 localhost）
-  mainWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWin.webContents.on('will-navigate', (ev, u) => {
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (ev, u) => {
     if (!(u.startsWith('file:') || u.startsWith('http://localhost:8777'))) ev.preventDefault();
   });
+  win.webContents.once('did-finish-load', () => {
+    try { QueueManager.broadcastUpdate(); } catch (e) {}
+  });
   if (process.argv.includes('--dev')) {
-    mainWin.loadURL('http://localhost:8777'); // 需先執行 npm run dev
-    mainWin.webContents.openDevTools({ mode: 'detach' });
+    win.loadURL('http://localhost:8777'); // 需先執行 npm run dev
+    win.webContents.openDevTools({ mode: 'detach' });
   } else {
     const built = path.join(__dirname, '..', 'dist', 'index.html');
     const legacy = path.join(__dirname, '..', 'index.html');
-    mainWin.loadFile(fs.existsSync(built) ? built : legacy);
+    win.loadFile(fs.existsSync(built) ? built : legacy);
   }
+  return win;
 }
+
+function showMainWindow() {
+  if (_isAppQuitting) return false;
+  const win = mainWin && !mainWin.isDestroyed() ? mainWin : createWindow();
+  if (!win) return false;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  _mainHiddenForQueue = false;
+  if (_mpvWin && !_mpvWin.isDestroyed() && _mpvVisible) {
+    try { _mpvWin.show(); } catch (e) {}
+    if (_mpvRect) applyMpvBounds(_mpvRect);
+    showMpvGuide();
+  }
+  return true;
+}
+
+function hideMainWindow() {
+  if (!mainWin || mainWin.isDestroyed()) return false;
+  if (_mpvWin && !_mpvWin.isDestroyed()) { try { _mpvWin.hide(); } catch (e) {} }
+  if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) { try { _mpvGuideWin.hide(); } catch (e) {} }
+  mainWin.hide();
+  _mainHiddenForQueue = true;
+  return true;
+}
+
+ipcMain.handle('app:close', () => {
+  if (!mainWin || mainWin.isDestroyed()) return false;
+  // 監控視窗還在時保留 renderer 與未儲存專案，只隱藏主視窗；監控視窗可再叫回來。
+  if (queueWin && !queueWin.isDestroyed()) return hideMainWindow();
+  _allowMainWindowClose = true;
+  try { mainWin.close(); } finally { _allowMainWindowClose = false; }
+  return true;
+});
+
+ipcMain.handle('app:showMainWindow', () => showMainWindow());
 
 /* ---- 本機 HTTP 串流伺服器（MXF 等非原生格式邊轉邊播用） ---- */
 let _hSrv = null, _hPort = null;
@@ -419,7 +509,7 @@ app.on('open-file', (e, path) => {
   e.preventDefault();
   startupFile = path;
   allowFileDir(path);
-  if (mainWin) mainWin.webContents.send('app:open-file', path);
+  if (mainWin && !mainWin.isDestroyed()) safeWinSend(mainWin, 'app:open-file', path);
 });
 
 const gotTheLock = app.requestSingleInstanceLock();
@@ -427,14 +517,15 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', (event, commandLine, workingDirectory) => {
-    if (mainWin) {
-      if (mainWin.isMinimized()) mainWin.restore();
-      mainWin.focus();
-      const fileArg = commandLine.find(a => !a.startsWith('-') && (a.endsWith('.subtool') || a.endsWith('.json')));
-      if (fileArg) {
-        allowFileDir(fileArg);
-        mainWin.webContents.send('app:open-file', fileArg);
-      }
+    const hadLiveMainWindow = !!(mainWin && !mainWin.isDestroyed());
+    const fileArg = commandLine.find(a => !a.startsWith('-') && (a.endsWith('.subtool') || a.endsWith('.json')));
+    if (fileArg) {
+      startupFile = fileArg;
+      allowFileDir(fileArg);
+    }
+    if (!app.isReady()) return;
+    if (showMainWindow() && fileArg && hadLiveMainWindow) {
+      safeWinSend(mainWin, 'app:open-file', fileArg);
     }
   });
 
@@ -443,13 +534,29 @@ if (!gotTheLock) {
     FFPROBE = detect('ffprobe');
     VENC = detectVideoEncoder();
     CACHE = path.join(app.getPath('userData'), 'mediacache');
+    EXPORT_QUEUE_DIR = path.join(app.getPath('userData'), 'export-queue');
     try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
     try { cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
+    try { QueueManager.restoreJobs(); } catch (e) { console.error('[Queue] 無法恢復匯出佇列：', e); }
     createWindow();
-    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+    app.on('activate', () => { showMainWindow(); });
   });
 }
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('before-quit', (event) => {
+  if (_quitReady) return;
+  event.preventDefault();
+  if (_quitSequenceStarted) return;
+  _quitSequenceStarted = true;
+  _isAppQuitting = true;
+  Promise.resolve()
+    .then(() => QueueManager.prepareForShutdown())
+    .catch(e => { console.error('[Queue] 無法保存關閉前狀態：', e); })
+    .finally(() => {
+      _quitReady = true;
+      app.quit();
+    });
+});
 app.on('quit', () => {
   if (_mpvProc) { try { _mpvProc.kill(); } catch (e) {} _mpvProc = null; }
   for (const f of tempFiles) { try { fs.unlinkSync(f); } catch (e) {} }
@@ -480,13 +587,13 @@ ipcMain.handle('app:showItemInFolder', async (e, p) => {
   const { shell } = require('electron');
   shell.showItemInFolder(p);
 });
-ipcMain.handle('ffmpeg:stopExport', () => {
-  if (activeExportJob && activeExportJob.p) {
-    activeExportJob.stopped = true;
-    activeExportJob.p.kill();
-    try { fs.unlinkSync(activeExportJob.outPath); } catch(e){}
-    activeJobs.delete(jobId);
+ipcMain.handle('ffmpeg:stopExport', (event, requestedJobId) => {
+  if (typeof requestedJobId === 'string') {
+    return activeJobs.has(requestedJobId) ? stopQueueJob(requestedJobId) : false;
   }
+  const activeJobIds = Array.from(activeJobs.keys());
+  const latestJobId = activeJobIds[activeJobIds.length - 1];
+  return latestJobId ? stopQueueJob(latestJobId) : false;
 });
 ipcMain.handle('app:status', () => ({
   isDesktop: true, ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE,
@@ -632,7 +739,7 @@ function _findExportTimecodeFont() {
 }
 
 /* ===== 背景匯出佇列與 QueueManager ===== */
-const EXPORT_QUEUE_DIR = path.join(os.tmpdir(), 'subtool_export_queue');
+let EXPORT_QUEUE_DIR = null;
 let queueWin = null;
 let _queuePaused = false;
 let _queueConcurrency = 1;
@@ -641,7 +748,8 @@ const _jobQueueList = [];
 let _activeQueueCount = 0;
 
 function ensureExportQueueDir() {
-  try { fs.mkdirSync(EXPORT_QUEUE_DIR, { recursive: true }); } catch (e) {}
+  if (!EXPORT_QUEUE_DIR) throw new Error('匯出佇列目錄尚未初始化');
+  QueueStore.ensureDir(EXPORT_QUEUE_DIR);
 }
 
 function openQueueWindow() {
@@ -652,8 +760,10 @@ function openQueueWindow() {
     return;
   }
   queueWin = new BrowserWindow({
-    width: 720,
+    width: 1080,
     height: 700,
+    minWidth: 840,
+    minHeight: 520,
     title: '匯出佇列監控',
     autoHideMenuBar: true,
     webPreferences: {
@@ -663,15 +773,170 @@ function openQueueWindow() {
     }
   });
   queueWin.loadFile(path.join(__dirname, 'queue.html'));
-  queueWin.on('closed', () => { queueWin = null; });
+  queueWin.on('closed', () => {
+    queueWin = null;
+    // 主視窗已由使用者關閉（目前是隱藏）後，再關監控視窗就等同整個程式都關閉。
+    if (!_isAppQuitting && _mainHiddenForQueue && mainWin && !mainWin.isDestroyed()) app.quit();
+  });
+}
+
+function queueStatusSnapshot() {
+  const jobs = Array.from(_queueJobsMap.values());
+  return {
+    waitingCount: jobs.filter(job => job.status === 'queued').length,
+    missingCount: jobs.filter(job => job.status === 'missing-source').length,
+    isPaused: _queuePaused,
+  };
 }
 
 const QueueManager = {
+  shuttingDown: false,
+  shutdownPromise: null,
   ensureDir() {
     ensureExportQueueDir();
   },
-  addJob(job) {
+  persistJob(job) {
+    if (!job || !EXPORT_QUEUE_DIR) return;
+    const order = Array.from(_queueJobsMap.keys()).indexOf(job.id);
+    QueueStore.persistJob(EXPORT_QUEUE_DIR, job, order < 0 ? _queueJobsMap.size : order);
+  },
+  persistAll() {
+    if (!EXPORT_QUEUE_DIR) return;
+    let order = 0;
+    for (const job of _queueJobsMap.values()) {
+      QueueStore.persistJob(EXPORT_QUEUE_DIR, job, order++);
+    }
+  },
+  removeArtifacts(job, { removeAss = true } = {}) {
+    if (!job || !EXPORT_QUEUE_DIR) return;
+    try { QueueStore.removeJobFile(EXPORT_QUEUE_DIR, job.id); } catch (e) {
+      console.error(`[Queue] 無法刪除工作 ${job.id} 的快照：`, e);
+    }
+    if (removeAss && job.assRef) {
+      try { QueueStore.removeAssFile(EXPORT_QUEUE_DIR, job.assRef); } catch (e) {
+        console.error(`[Queue] 無法刪除工作 ${job.id} 的字幕暫存：`, e);
+      }
+    }
+    try { QueueStore.removeLogFile(EXPORT_QUEUE_DIR, job.id); } catch (e) {
+      console.error(`[Queue] 無法刪除工作 ${job.id} 的失敗記錄：`, e);
+    }
+  },
+  validateSources(job) {
+    const sourcePaths = QueueStore.mergeSourcePaths(job.payload, job.sourcePaths);
+    job.sourcePaths = sourcePaths;
+    const missing = sourcePaths.filter(sourcePath => {
+      try {
+        if (!fs.statSync(sourcePath).isFile()) return true;
+        assertMasterExportMedia(sourcePath, '匯出來源');
+        return false;
+      } catch (e) {
+        return true;
+      }
+    });
+    if (job.assRef) {
+      const assPath = QueueStore.safeAssPath(EXPORT_QUEUE_DIR, job.assRef);
+      try {
+        if (!assPath || !fs.statSync(assPath).isFile()) missing.push(assPath || job.assRef);
+      } catch (e) {
+        missing.push(assPath || job.assRef);
+      }
+    }
+    if (missing.length) {
+      job.status = 'missing-source';
+      job.errorMsg = `找不到來源檔：\n${missing.join('\n')}`;
+      try { this.persistJob(job); } catch (e) {
+        console.error(`[Queue] 無法保存工作 ${job.id} 的來源遺失狀態：`, e);
+      }
+      return false;
+    }
+    return true;
+  },
+  restoreJobs() {
     this.ensureDir();
+    const { jobs, warnings } = QueueStore.loadJobs(EXPORT_QUEUE_DIR);
+    _queueJobsMap.clear();
+    _jobQueueList.length = 0;
+    for (const job of jobs) {
+      delete job._persistOrder;
+      _queueJobsMap.set(job.id, job);
+      if (job.status === 'queued' && this.validateSources(job)) _jobQueueList.push(job);
+    }
+    _queuePaused = jobs.length > 0;
+    for (const warning of warnings) {
+      console.error(`[Queue] 略過無法恢復的工作 ${warning.filePath}：${warning.message}`);
+    }
+    try {
+      QueueStore.cleanupOrphanAssFiles(EXPORT_QUEUE_DIR, jobs.map(job => job.assRef).filter(Boolean));
+      this.persistAll(); // running 一律落回 queued，並保存最新 missing-source 檢查結果。
+    } catch (e) {
+      console.error('[Queue] 整理恢復後的工作失敗：', e);
+    }
+  },
+  prepareForShutdown() {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shuttingDown = true;
+    _queuePaused = true;
+    const closingProcesses = [];
+    const partialOutputs = [];
+    for (const job of _queueJobsMap.values()) {
+      if (job.status !== 'running' && job.status !== 'stopping') continue;
+      if (job.status === 'running') {
+        job.status = 'queued';
+        job.pct = 0;
+        job.elapsedMs = 0;
+        job.etaS = null;
+        job.errorMsg = null;
+      }
+      if (job.payload?.outPath) partialOutputs.push(job.payload.outPath);
+      const active = activeJobs.get(job.id);
+      if (active?.p) {
+        active.shutdown = true;
+        closingProcesses.push(new Promise(resolve => {
+          let settled = false;
+          const done = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(done, 3000);
+          active.p.once('close', done);
+          if (active.p.exitCode !== null) done();
+          else { try { active.p.kill(); } catch (e) { done(); } }
+        }));
+      }
+    }
+    try { this.persistAll(); } catch (e) {
+      // 即使磁碟暫時不可寫，也必須繼續等待 ffmpeg 關閉並清掉半成品。
+      console.error('[Queue] 關閉前無法更新工作快照：', e);
+    }
+    this.shutdownPromise = (async () => {
+      await Promise.all(closingProcesses);
+      for (const outPath of partialOutputs) {
+        let removed = false;
+        for (let attempt = 0; attempt < 10 && !removed; attempt++) {
+          try {
+            fs.unlinkSync(outPath);
+            removed = true;
+          } catch (e) {
+            if (e.code === 'ENOENT') {
+              removed = true;
+            } else if (attempt < 9) {
+              await new Promise(resolve => setTimeout(resolve, 100));
+            } else {
+              console.error(`[Queue] 無法刪除半成品 ${outPath}：`, e);
+            }
+          }
+        }
+      }
+    })();
+    return this.shutdownPromise;
+  },
+  addJob(job) {
+    if (this.shuttingDown) throw new Error('程式正在關閉，無法再加入匯出工作');
+    this.ensureDir();
+    job.sourcePaths = QueueStore.collectSourcePaths(job.payload);
+    QueueStore.persistJob(EXPORT_QUEUE_DIR, job, _queueJobsMap.size);
     _queueJobsMap.set(job.id, job);
     _jobQueueList.push(job);
     this.broadcastUpdate();
@@ -680,17 +945,26 @@ const QueueManager = {
   broadcastUpdate() {
     safeWinSend(mainWin, 'queue:update');
     safeWinSend(mainWin, 'export-queue-updated', Array.from(_queueJobsMap.values()));
+    safeWinSend(mainWin, 'queue-status', queueStatusSnapshot());
     if (queueWin && !queueWin.isDestroyed()) {
       safeWinSend(queueWin, 'queue:update');
     }
   },
   async processQueue() {
-    if (_queuePaused) return;
+    if (_queuePaused || this.shuttingDown) return;
     while (_activeQueueCount < _queueConcurrency && _jobQueueList.length > 0) {
       const job = _jobQueueList.shift();
-      if (!job || job.status === 'stopped' || job.status === 'done') continue;
+      if (!job || job.status !== 'queued') continue;
+      if (!this.validateSources(job)) {
+        this.broadcastUpdate();
+        continue;
+      }
       _activeQueueCount++;
       job.status = 'running';
+      try { this.persistJob(job); } catch (e) {
+        // 新增工作時已保存 queued 快照；running 只是 runtime 狀態，寫入失敗不可卡死 slot。
+        console.error(`[Queue] 無法保存工作 ${job.id} 的執行狀態：`, e);
+      }
       this.broadcastUpdate();
 
       (async () => {
@@ -698,15 +972,22 @@ const QueueManager = {
           await _runJobLogic(job);
         } catch (e) {
           console.error(`[Queue] Job ${job.id} error:`, e);
-          job.status = 'failed';
-          job.errorMsg = e.message || String(e);
+          if (!(this.shuttingDown && (job.status === 'queued' || job.status === 'stopping'))) {
+            job.status = e.code === 'MISSING_SOURCE' ? 'missing-source' : 'failed';
+            job.errorMsg = e.message || String(e);
+          }
         } finally {
           _activeQueueCount--;
-          if (job.assRef) {
-            try { fs.unlinkSync(path.join(EXPORT_QUEUE_DIR, job.assRef)); } catch (e) {}
+          try {
+            this.persistJob(job);
+            if (job.status === 'done') this.removeArtifacts(job);
+          } catch (e) {
+            console.error(`[Queue] 無法更新工作 ${job.id} 的持久化狀態：`, e);
           }
-          this.broadcastUpdate();
-          this.processQueue();
+          if (!this.shuttingDown) {
+            this.broadcastUpdate();
+            this.processQueue();
+          }
         }
       })();
     }
@@ -718,6 +999,7 @@ ipcMain.handle('queue:getAll', () => ({
   isPaused: _queuePaused,
   concurrency: _queueConcurrency
 }));
+ipcMain.handle('queue:getStatus', () => queueStatusSnapshot());
 
 ipcMain.handle('queue:pause', (e, paused) => {
   _queuePaused = !!paused;
@@ -726,9 +1008,11 @@ ipcMain.handle('queue:pause', (e, paused) => {
 });
 
 ipcMain.handle('queue:resume', () => {
+  if (QueueManager.shuttingDown) return false;
   _queuePaused = false;
   QueueManager.broadcastUpdate();
   QueueManager.processQueue();
+  return true;
 });
 
 ipcMain.handle('queue:setConcurrency', (e, c) => {
@@ -737,40 +1021,74 @@ ipcMain.handle('queue:setConcurrency', (e, c) => {
   QueueManager.processQueue();
 });
 
-ipcMain.handle('queue:stopJob', (e, jobId) => {
+function stopQueueJob(jobId) {
   const job = _queueJobsMap.get(jobId);
-  if (job) {
-    if (job.status === 'running') {
-      const active = activeJobs.get(jobId);
-      if (active && active.p) {
-        active.stopped = true;
-        try { active.p.kill(); } catch (err) {}
-      }
-    } else if (job.status === 'queued') {
-      const idx = _jobQueueList.findIndex(j => j.id === jobId);
-      if (idx !== -1) _jobQueueList.splice(idx, 1);
+  if (!job) return false;
+  if (job.status === 'running') {
+    const active = activeJobs.get(jobId);
+    if (active && active.p) {
+      active.stopped = true;
+      try { active.p.kill(); } catch (err) {}
+      try { if (active.outPath) fs.unlinkSync(active.outPath); } catch (err) {}
+      job.status = 'stopping';
+    } else {
+      return false;
     }
+  } else if (job.status === 'queued') {
+    const idx = _jobQueueList.findIndex(j => j.id === jobId);
+    if (idx !== -1) _jobQueueList.splice(idx, 1);
     job.status = 'stopped';
-    QueueManager.broadcastUpdate();
+  } else {
+    return false;
   }
+  try { QueueManager.persistJob(job); } catch (e) {
+    console.error(`[Queue] 無法保存工作 ${job.id} 的停止狀態：`, e);
+  }
+  QueueManager.broadcastUpdate();
+  return true;
+}
+
+ipcMain.handle('queue:stopJob', (e, jobId) => {
+  return stopQueueJob(jobId);
 });
 
 ipcMain.handle('queue:retryJob', (e, jobId) => {
+  if (QueueManager.shuttingDown) return false;
   const job = _queueJobsMap.get(jobId);
   if (job && (job.status === 'failed' || job.status === 'stopped' || job.status === 'missing-source')) {
+    const previousStatus = job.status;
+    const previousError = job.errorMsg;
+    if (!QueueManager.validateSources(job)) {
+      QueueManager.broadcastUpdate();
+      return;
+    }
     job.status = 'queued';
     job.pct = 0;
+    job.elapsedMs = 0;
+    job.etaS = null;
     job.errorMsg = null;
+    try {
+      QueueManager.persistJob(job);
+    } catch (e) {
+      job.status = previousStatus;
+      job.errorMsg = previousError || `無法保存重試工作：${e.message || e}`;
+      QueueManager.broadcastUpdate();
+      return false;
+    }
     _jobQueueList.push(job);
     QueueManager.broadcastUpdate();
     QueueManager.processQueue();
+    return true;
   }
+  return false;
 });
 
 ipcMain.handle('queue:clearJob', (e, jobId) => {
+  const job = _queueJobsMap.get(jobId);
   _queueJobsMap.delete(jobId);
   const idx = _jobQueueList.findIndex(j => j.id === jobId);
   if (idx !== -1) _jobQueueList.splice(idx, 1);
+  QueueManager.removeArtifacts(job);
   QueueManager.broadcastUpdate();
 });
 
@@ -780,9 +1098,11 @@ ipcMain.handle('queue:clearCompleted', () => {
     if (job.status === 'done') toClear.push(id);
   }
   toClear.forEach(id => {
+    const job = _queueJobsMap.get(id);
     _queueJobsMap.delete(id);
     const idx = _jobQueueList.findIndex(j => j.id === id);
     if (idx !== -1) _jobQueueList.splice(idx, 1);
+    QueueManager.removeArtifacts(job);
   });
   QueueManager.broadcastUpdate();
 });
@@ -804,6 +1124,7 @@ ipcMain.handle('queue:reorderJob', (e, jobId, newIndex) => {
       _jobQueueList.push(job);
     }
   }
+  QueueManager.persistAll();
   QueueManager.broadcastUpdate();
 });
 
@@ -836,18 +1157,25 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
     outPath = r.filePath;
   }
 
-  const jobId = 'export-' + Date.now();
+  const jobId = newJobId('export-');
   // 分離 assText 存為獨立檔案
   let assRef = null;
   if (assText && assText.trim()) {
     assRef = jobId + '.ass';
     QueueManager.ensureDir();
-    fs.writeFileSync(path.join(EXPORT_QUEUE_DIR, assRef), assText, 'utf8');
+    QueueStore.writeAssFile(EXPORT_QUEUE_DIR, assRef, assText);
   }
   
   const savedPayload = { ...payload, assText: null, outPath };
   const job = { id: jobId, status: 'queued', createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
-  QueueManager.addJob(job);
+  try {
+    QueueManager.addJob(job);
+  } catch (error) {
+    if (assRef) {
+      try { QueueStore.removeAssFile(EXPORT_QUEUE_DIR, assRef); } catch (cleanupError) {}
+    }
+    throw error;
+  }
   openQueueWindow();
   return jobId;
 });
@@ -897,7 +1225,16 @@ async function _runJobLogic(job) {
   // 載入分離的 assText
   let assText = null;
   if (job.assRef) {
-    try { assText = fs.readFileSync(path.join(EXPORT_QUEUE_DIR, job.assRef), 'utf8'); } catch(e){}
+    const assPath = QueueStore.safeAssPath(EXPORT_QUEUE_DIR, job.assRef);
+    try {
+      if (!assPath) throw new Error('字幕暫存路徑無效');
+      assText = fs.readFileSync(assPath, 'utf8');
+    } catch (cause) {
+      const error = new Error(`找不到字幕快照：${assPath || job.assRef}`);
+      error.code = 'MISSING_SOURCE';
+      error.cause = cause;
+      throw error;
+    }
   }
 
 
@@ -1114,7 +1451,7 @@ async function _runJobLogic(job) {
   // 燒錄字幕（可見軌）：ass 濾鏡讀取暫存 .ass；以 cwd=TMP + basename 引用避開路徑跳脫
   let vfinal = vc, assName = null;
   if (assText && assText.trim()) {
-    assName = 'export_' + Date.now() + '.ass';
+    assName = QueueStore.burnAssFileName(jobId);
     fs.writeFileSync(path.join(TMP, assName), assText, 'utf8');
     // v4.25.4：fontsdir 指向 <專案根>/font → 燒錄用的字型與預覽（FontFace 同一批檔）一致，
     // 不必先安裝到系統。
@@ -1187,9 +1524,14 @@ async function _runJobLogic(job) {
       };
       dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
     } catch (err) {
-      const wasStopped = activeJobs.has(jobId) && activeJobs.get(jobId).stopped;
+      const active = activeJobs.get(jobId);
+      const wasShutdown = !!active?.shutdown;
+      const wasStopped = !!active?.stopped;
       activeJobs.delete(jobId);
-      if (wasStopped) {
+      if (wasShutdown) {
+         try { fs.unlinkSync(outPath); } catch(e){}
+         // 關閉程式時 QueueManager 已把狀態退回 queued 並同步寫入磁碟。
+      } else if (wasStopped) {
          try { fs.unlinkSync(outPath); } catch(e){}
          dispatch( 'task-progress', { jobId, stopped: true });
       } else {

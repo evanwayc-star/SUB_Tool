@@ -97,10 +97,100 @@
       gap: 8px;
       backdrop-filter: blur(8px);
     }
+    .warning[hidden] { display: none; }
     
-    .job-list { display: flex; flex-direction: column; gap: 12px; }
+    .queue-board {
+      display: grid;
+      grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+      gap: 16px;
+      align-items: start;
+    }
+    .queue-column {
+      position: relative;
+      min-width: 0;
+      padding: 16px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.018);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+    .queue-column::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 3px;
+      background: var(--column-accent);
+      opacity: 0.85;
+    }
+    .queue-column.completed { --column-accent: var(--success); }
+    .queue-column.unfinished { --column-accent: #f0a020; }
+    .queue-column-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      min-height: 42px;
+      margin-bottom: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .queue-column-heading {
+      display: flex;
+      gap: 9px;
+      align-items: center;
+      min-width: 0;
+      margin: 0 0 4px;
+      font-size: 15px;
+      font-weight: 650;
+      color: #fff;
+    }
+    .queue-column-dot {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--column-accent);
+      box-shadow: 0 0 10px color-mix(in srgb, var(--column-accent) 55%, transparent);
+    }
+    .queue-column-summary {
+      margin: 0;
+      color: var(--text-dim);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .queue-column-count {
+      min-width: 26px;
+      padding: 3px 8px;
+      flex: 0 0 auto;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--column-accent);
+      background: color-mix(in srgb, var(--column-accent) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--column-accent) 28%, transparent);
+      border-radius: 999px;
+    }
+    .job-list {
+      display: flex;
+      min-height: 112px;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .queue-empty {
+      display: grid;
+      min-height: 108px;
+      place-items: center;
+      padding: 18px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 12px;
+      line-height: 1.55;
+      border: 1px dashed var(--border);
+      border-radius: 9px;
+    }
     
     .job { 
+      min-width: 0;
       background: var(--bg-panel);
       backdrop-filter: blur(12px);
       border: 1px solid var(--border); 
@@ -119,6 +209,10 @@
       margin-bottom: 4px; 
     }
     .job-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       font-size: 14px; 
       font-weight: 600; 
       color: #fff;
@@ -140,18 +234,52 @@
     }
     
     .job-status { 
+      flex: 0 0 auto;
       font-size: 13px; font-weight: 600; 
       display: flex; align-items: center; gap: 6px;
       padding: 4px 8px;
+      white-space: nowrap;
       border-radius: 4px;
       background: rgba(255,255,255,0.05);
     }
     
-    .job-actions { display: flex; gap: 8px; }
+    .job-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .job-timing {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+    .job-timing-item {
+      min-width: 0;
+      padding: 6px 7px;
+      background: rgba(255, 255, 255, 0.035);
+      border-radius: 5px;
+    }
+    .job-timing-item b {
+      display: block;
+      margin-top: 2px;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .job-timing.completed {
+      display: block;
+      text-align: right;
+    }
+    .job-timing.completed .job-timing-item {
+      display: inline-block;
+      min-width: 120px;
+      text-align: left;
+    }
     
     /* Status Colors & Animations */
     .job.status-queued .job-status { color: var(--text-dim); }
     .job.status-running .job-status { color: #66b0ff; background: rgba(0, 123, 255, 0.15); }
+    .job.status-stopping .job-status { color: var(--warn); background: var(--warn-bg); }
     .job.status-running .progress-bar-fill { 
       background: linear-gradient(90deg, #007bff, #00d2ff); 
       box-shadow: 0 0 10px var(--accent-glow);
@@ -160,6 +288,7 @@
     .job.status-done .progress-bar-fill { background: var(--success); box-shadow: 0 0 10px rgba(40,167,69,0.3); width: 100%; }
     .job.status-failed .job-status, .job.status-missing-source .job-status { color: var(--error); background: var(--error-bg); }
     .job.status-failed .progress-bar-fill, .job.status-missing-source .progress-bar-fill { background: var(--error); width: 100%; }
+    .job.status-stopped .job-status { color: var(--warn); background: var(--warn-bg); }
     
     /* Pulsing effect for running state */
     @keyframes pulse {
@@ -187,12 +316,31 @@
 
     /* SVG Icons */
     .icon { width: 14px; height: 14px; fill: currentColor; }
+
+    @media (max-width: 760px) {
+      body { padding: 18px; }
+      .header { align-items: flex-start; gap: 14px; }
+      .controls { justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+      .queue-board { grid-template-columns: 1fr; }
+      .queue-column.completed { order: 2; }
+      .queue-column.unfinished { order: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="header">
     <h2>匯出佇列監控</h2>
     <div class="controls">
+      <button id="showMainWindowBtn">🖥 開啟主視窗</button>
       <label title="並行通常不會更快，因為多次讀取同一個來源素材會讓磁碟效能下降。">
         並行數：
         <select id="concurrencySel">
@@ -205,16 +353,50 @@
       <button id="pauseToggleBtn">⏸ 暫停佇列</button>
     </div>
   </div>
-  <div class="warning">
+  <div class="warning" id="queueWarning" hidden>
     <svg class="icon" viewBox="0 0 24 24"><path d="M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z"/></svg>
     匯出中，背景轉碼可能會使預覽發生卡頓。
   </div>
   
-  <div class="job-list" id="jobList"></div>
+  <main class="queue-board" id="queueBoard">
+    <section class="queue-column completed" aria-labelledby="completedHeading">
+      <div class="queue-column-header">
+        <div>
+          <h3 class="queue-column-heading" id="completedHeading">
+            <span class="queue-column-dot" aria-hidden="true"></span>
+            已完成
+          </h3>
+          <p class="queue-column-summary">已成功輸出的工作</p>
+        </div>
+        <span class="queue-column-count" id="completedCount" aria-label="已完成工作數">0</span>
+      </div>
+      <div class="job-list" id="completedJobList"></div>
+    </section>
+
+    <section class="queue-column unfinished" aria-labelledby="unfinishedHeading">
+      <div class="queue-column-header">
+        <div>
+          <h3 class="queue-column-heading" id="unfinishedHeading">
+            <span class="queue-column-dot" aria-hidden="true"></span>
+            進行中與未完成
+          </h3>
+          <p class="queue-column-summary">執行中、等待中，或需要處理的工作</p>
+        </div>
+        <span class="queue-column-count" id="unfinishedCount" aria-label="未完成工作數">0</span>
+      </div>
+      <div class="job-list" id="unfinishedJobList"></div>
+    </section>
+  </main>
 
   <script>
     const UI = {
-      list: document.getElementById('jobList'),
+      board: document.getElementById('queueBoard'),
+      completedList: document.getElementById('completedJobList'),
+      unfinishedList: document.getElementById('unfinishedJobList'),
+      completedCount: document.getElementById('completedCount'),
+      unfinishedCount: document.getElementById('unfinishedCount'),
+      warning: document.getElementById('queueWarning'),
+      showMainWindowBtn: document.getElementById('showMainWindowBtn'),
       pauseBtn: document.getElementById('pauseToggleBtn'),
       clearCompletedBtn: document.getElementById('clearCompletedBtn'),
       concurrencySel: document.getElementById('concurrencySel')
@@ -228,6 +410,10 @@
       if (s === null || s === undefined || isNaN(s)) return '估算中';
       return `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
     };
+    const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[char]);
+    const finiteNumber = value => Number.isFinite(Number(value)) ? Number(value) : 0;
 
     const ICONS = {
       queued: '<svg class="icon" viewBox="0 0 24 24"><path d="M12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22C6.47,22 2,17.5 2,12A10,10 0 0,1 12,2M12.5,7V12.25L17,14.92L16.25,16.15L11,13V7H12.5Z"/></svg>',
@@ -237,13 +423,14 @@
       stopped: '<svg class="icon" viewBox="0 0 24 24"><path d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M9,9H15V15H9V9Z"/></svg>'
     };
 
-    function renderJobs() {
-      UI.list.innerHTML = '';
-      if (_jobs.length === 0) {
-        UI.list.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:40px;font-size:14px;border:1px dashed var(--border);border-radius:10px;">目前沒有任何匯出工作。</div>';
-        return;
-      }
-      _jobs.forEach((job, index) => {
+    function emptyState(message) {
+      const empty = document.createElement('div');
+      empty.className = 'queue-empty';
+      empty.textContent = message;
+      return empty;
+    }
+
+    function createJobCard(job, index) {
         const el = document.createElement('div');
         el.className = 'job status-' + job.status;
         el.dataset.jobId = job.id;
@@ -259,65 +446,75 @@
           el.addEventListener('dragend', handleDragEnd);
         }
         
+        const pctValue = finiteNumber(job.pct);
         let statusText = job.status;
         let icon = ICONS.queued;
         if (job.status === 'queued') { statusText = '等待中'; icon = ICONS.queued; }
-        if (job.status === 'running') { statusText = '執行中 ' + (job.pct || 0).toFixed(1) + '%'; icon = ICONS.running; }
+        if (job.status === 'running') { statusText = '執行中 ' + pctValue.toFixed(1) + '%'; icon = ICONS.running; }
+        if (job.status === 'stopping') { statusText = '停止中'; icon = ICONS.stopped; }
         if (job.status === 'done') { statusText = '完成'; icon = ICONS.done; }
         if (job.status === 'failed') { statusText = '失敗'; icon = ICONS.failed; }
         if (job.status === 'missing-source') { statusText = '來源遺失'; icon = ICONS.failed; }
         if (job.status === 'stopped') { statusText = '已停止'; icon = ICONS.stopped; }
         
         let tStr = '';
-        const pctNum = (job.status === 'done') ? 100 : (job.pct || 0);
+        const pctNum = (job.status === 'done') ? 100 : pctValue;
         if (job.status === 'running') {
-          const elS = Math.floor((job.elapsedMs || 0) / 1000);
-          const etaS = Math.floor(job.etaS || 0);
+          const elS = Math.floor(finiteNumber(job.elapsedMs) / 1000);
+          const etaS = Math.floor(finiteNumber(job.etaS));
           const totalS = elS + etaS;
-          tStr = `<span style="font-family: monospace; font-size: 13px; color: #bbb;">已花費: <span style="color:#fff">${fmt(elS)}</span> &nbsp;|&nbsp; 剩餘: <span style="color:#fff">${fmt(etaS)}</span> &nbsp;|&nbsp; 預計總時間: <span style="color:#fff">${fmt(totalS)}</span></span>`;
+          tStr = `<div class="job-timing">
+            <span class="job-timing-item">已花費<b>${fmt(elS)}</b></span>
+            <span class="job-timing-item">剩餘<b>${fmt(etaS)}</b></span>
+            <span class="job-timing-item">預計總時間<b>${fmt(totalS)}</b></span>
+          </div>`;
         } else if (job.status === 'done') {
-          const elS = Math.floor((job.elapsedMs || 0) / 1000);
-          tStr = `<span style="font-family: monospace; font-size: 13px; color: #bbb;">完成總花費時間: <span style="color:#4caf50">${fmt(elS)}</span></span>`;
+          const elS = Math.floor(finiteNumber(job.elapsedMs) / 1000);
+          tStr = `<div class="job-timing completed">
+            <span class="job-timing-item">完成總花費時間<b>${fmt(elS)}</b></span>
+          </div>`;
         }
 
-        const outName = job.payload.outPath.split(/[\\/]/).pop();
+        const outPath = String(job.payload?.outPath || '');
+        const outName = outPath.split(/[\\/]/).pop() || '未命名輸出';
         
         let errorHtml = '';
+        let errorMessage = '';
+        let logPath = null;
         if (job.errorMsg) {
-          let msg = job.errorMsg;
-          let logPath = null;
-          const m = msg.match(/\[LOG_PATH\](.*?)\[\/LOG_PATH\]/);
+          errorMessage = String(job.errorMsg);
+          const m = errorMessage.match(/\[LOG_PATH\](.*?)\[\/LOG_PATH\]/);
           if (m) {
             logPath = m[1];
-            msg = msg.replace(/\[LOG_PATH\].*?\[\/LOG_PATH\]/, '').trim();
+            errorMessage = errorMessage.replace(/\[LOG_PATH\].*?\[\/LOG_PATH\]/, '').trim();
           }
           errorHtml = `<div class="error-box">
             <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
-              <div style="flex:1">${msg}</div>
-              <button onclick="navigator.clipboard.writeText(\`${msg.replace(/`/g, '\\`')}\`); this.textContent='已複製！'; setTimeout(() => this.textContent='複製', 2000);" style="padding:2px 6px; font-size:11px; flex-shrink:0;">複製</button>
+              <div style="flex:1">${escapeHTML(errorMessage)}</div>
+              <button type="button" data-action="copy-error" style="padding:2px 6px; font-size:11px; flex-shrink:0;">複製</button>
             </div>` + 
-            (logPath ? `<div style="margin-top:10px"><button onclick="window.queueAPI.openPath('${logPath.replace(/\\/g, '\\\\')}')">開啟完整記錄</button></div>` : '') +
+            (logPath ? `<div style="margin-top:10px"><button type="button" data-action="open-log">開啟完整記錄</button></div>` : '') +
             `</div>`;
         }
 
         let actionHtml = '';
         if (job.status === 'running' || job.status === 'queued') {
-          actionHtml += `<button onclick="window.queueAPI.stopJob('${job.id}')">停止</button>`;
+          actionHtml += '<button type="button" data-action="stop">停止</button>';
         }
         if (job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
-          actionHtml += `<button class="primary" onclick="window.queueAPI.retryJob('${job.id}')">重試</button>`;
+          actionHtml += '<button type="button" class="primary" data-action="retry">重試</button>';
         }
         if (job.status === 'done' || job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
-          actionHtml += `<button onclick="window.queueAPI.clearJob('${job.id}')">清除紀錄</button>`;
+          actionHtml += '<button type="button" data-action="clear">清除紀錄</button>';
         }
         if (job.status === 'done') {
-          actionHtml += `<button class="primary" onclick="window.queueAPI.showItemInFolder('${job.payload.outPath.replace(/\\/g, '\\\\')}')">打開資料夾</button>`;
+          actionHtml += '<button type="button" class="primary" data-action="show-output">打開資料夾</button>';
         }
 
         el.innerHTML = `
           <div class="job-header" style="margin-bottom: 4px;">
-            <span class="job-title" style="font-size: 14px; font-weight: 500;">${outName}</span> 
-            <span class="job-status">${icon} ${statusText}</span>
+            <span class="job-title" title="${escapeHTML(outName)}">${escapeHTML(outName)}</span>
+            <span class="job-status">${icon} ${escapeHTML(statusText)}</span>
           </div>
           ${(job.status === 'running' || job.status === 'done' || job.status === 'queued') ? `
             <div class="job-progress-row" style="position: relative; margin-top: 8px; margin-bottom: 8px;">
@@ -328,13 +525,55 @@
                 </div>
               </div>
             </div>
-            ${tStr ? `<div style="margin-top: 8px; text-align: right;">${tStr}</div>` : ''}
+            ${tStr}
           ` : ''}
           ${errorHtml}
           <div class="job-actions">${actionHtml}</div>
         `;
-        UI.list.appendChild(el);
-      });
+        el.querySelector('[data-action="stop"]')?.addEventListener('click', () => window.queueAPI.stopJob(job.id));
+        el.querySelector('[data-action="retry"]')?.addEventListener('click', () => window.queueAPI.retryJob(job.id));
+        el.querySelector('[data-action="clear"]')?.addEventListener('click', () => window.queueAPI.clearJob(job.id));
+        el.querySelector('[data-action="show-output"]')?.addEventListener('click', () => window.queueAPI.showItemInFolder(outPath));
+        el.querySelector('[data-action="open-log"]')?.addEventListener('click', () => window.queueAPI.openPath(logPath));
+        el.querySelector('[data-action="copy-error"]')?.addEventListener('click', async event => {
+          await navigator.clipboard.writeText(errorMessage);
+          const button = event.currentTarget;
+          button.textContent = '已複製！';
+          setTimeout(() => { button.textContent = '複製'; }, 2000);
+        });
+        return el;
+    }
+
+    function renderJobs() {
+      const completed = _jobs.filter(job => job.status === 'done');
+      const unfinished = _jobs.filter(job => job.status !== 'done');
+
+      UI.completedList.replaceChildren();
+      UI.unfinishedList.replaceChildren();
+      UI.completedCount.textContent = String(completed.length);
+      UI.unfinishedCount.textContent = String(unfinished.length);
+      UI.clearCompletedBtn.disabled = completed.length === 0;
+      UI.warning.hidden = !_jobs.some(job => job.status === 'running' || job.status === 'stopping');
+
+      if (completed.length === 0) {
+        UI.completedList.appendChild(emptyState('完成的工作會整理在這裡。'));
+      } else {
+        completed.forEach(job => {
+          const index = _jobs.findIndex(item => item.id === job.id);
+          UI.completedList.appendChild(createJobCard(job, index));
+        });
+      }
+
+      if (unfinished.length === 0) {
+        UI.unfinishedList.appendChild(emptyState(_jobs.length === 0
+          ? '目前沒有匯出工作。'
+          : '所有工作都已完成。'));
+      } else {
+        unfinished.forEach(job => {
+          const index = _jobs.findIndex(item => item.id === job.id);
+          UI.unfinishedList.appendChild(createJobCard(job, index));
+        });
+      }
     }
 
     let dragSrcEl = null;
@@ -387,7 +626,7 @@
     }
     function handleDragEnd(e) {
       this.classList.remove('dragging');
-      UI.list.querySelectorAll('.job').forEach(el => el.classList.remove('drop-above', 'drop-below'));
+      UI.board.querySelectorAll('.job').forEach(el => el.classList.remove('drop-above', 'drop-below'));
     }
 
     async function loadData() {
@@ -410,6 +649,10 @@
     UI.pauseBtn.onclick = async () => {
       await window.queueAPI.setPause(!_isPaused);
       loadData();
+    };
+
+    UI.showMainWindowBtn.onclick = () => {
+      window.queueAPI.showMainWindow();
     };
 
     UI.clearCompletedBtn.onclick = async () => {

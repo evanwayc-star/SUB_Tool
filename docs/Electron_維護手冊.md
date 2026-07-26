@@ -54,7 +54,11 @@ Main (main.js)
 | `exportSub(name, b64, ext)` | `dialog:exportSub` | R→M | 儲存字幕檔，回傳儲存路徑 |
 | `importDirectory()` | `dialog:importDirectory` | R→M | 選一個資料夾後批次讀入其中的 `.json`（常用樣式批次匯入用）；回傳的 `name` 是**相對於所選資料夾的路徑**，呼叫端據此還原樣式資料夾結構 |
 | `importFont()` | `dialog:importFont` | R→M | 匯入字型檔，複製進使用者資料夾（`userData`，避免安裝目錄的 Windows 寫入權限問題） |
-| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 匯出影片序列：`{clips[],videoTracks[],width,height,fps,assText,format:'prores'\|'mp4'\|'wav',duration,audioPlan,timecodeWatermark?}`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼；影像／音訊都必須是母素材，handler 會拒絕 `proxy.mp4`／`chN.m4a` 快取。影片輸出為 ProRes422HQ/H.264，WAV 則為多聲道 PCM；MP4 完成後回傳 ffprobe 實測 audio bitrate。 |
+| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 將凍結後的影片序列加入持久化佇列並回傳工作 ID：`{clips[],videoTracks[],width,height,fps,assText,format:'prores'\|'mp4'\|'wav',duration,audioPlan,timecodeWatermark?}`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼；影像／音訊都必須是母素材，handler 會拒絕 `proxy.mp4`／`chN.m4a` 快取。影片輸出為 ProRes422HQ/H.264，WAV 則為多聲道 PCM；MP4 完成後回傳 ffprobe 實測 audio bitrate。 |
+| `stopExport(jobId)` | `ffmpeg:stopExport` | R→M | 停止主狀態列目前顯示的匯出工作；傳入 jobId 避免並行時停止到另一份工作 |
+| `openQueueMonitor()` | `queue:openMonitor` | R→M | 顯示／聚焦獨立的匯出佇列監控視窗 |
+| `queueResume()` | `queue:resume` | R→M | 解除佇列層級暫停並開始下一份等待工作 |
+| `onQueueStatus(cb)` | `queue:getStatus` + `queue-status` | R→M + M→R | 註冊後先主動取得、之後持續接收 `{waitingCount,missingCount,isPaused}`，確保重啟恢復的工作不會因監聽時序而漏掉提示 |
 | `probe(path)` | `ffprobe` | R→M | ffprobe 探測，回傳 `{duration, fps, video, audio[]}` |
 | `makeProxy(path, dur)` | `ffmpeg:proxy` | R→M | 轉製 720p proxy（非即時，阻塞） |
 | `extractAudio(path, idx, dur, codec)` | `ffmpeg:extractAudio` | R→M | 抽取單一聲道 |
@@ -100,7 +104,36 @@ Main (main.js)
 | `getStartupFile()` | `app:getStartupFile` | R→M | 取「雙擊 `.subtool` 啟動」時帶進來的檔案路徑（前端啟動後主動問一次） |
 | `onOpenFile(cb)` | `app:open-file` | M→R | 程式已在執行時又雙擊 `.subtool` → 推播路徑 |
 | `onAppRequestClose(cb)` | `app:request-close` | M→R | 使用者按視窗關閉鈕 → 主行程**先攔下來**問前端（前端跳「未儲存」確認） |
-| `closeApp()` | `app:close` | R→M | 前端確認完畢，真的關閉 |
+| `closeApp()` | `app:close` | R→M | 前端完成未儲存確認後關閉主視窗；監控視窗仍開啟時改為隱藏主視窗，以保留 renderer 與專案狀態 |
+
+### 匯出佇列監控視窗（`electron/queue-preload.js`）
+
+| `window.queueAPI` 方法 | IPC Channel | 方向 | 說明 |
+|---|---|---|---|
+| `getAll()` | `queue:getAll` | R→M | 取得全部工作、暫停狀態與並行數 |
+| `setPause(v)` | `queue:pause` | R→M | 設定佇列層級暫停；不會中斷已經執行中的工作 |
+| `setConcurrency(v)` | `queue:setConcurrency` | R→M | 設定同時執行數（1–3） |
+| `stopJob(id)` | `queue:stopJob` | R→M | 停止工作；執行中會 kill ffmpeg 並刪除半成品 |
+| `retryJob(id)` | `queue:retryJob` | R→M | 重新驗證來源後，以原本凍結快照重試 |
+| `clearJob(id)` | `queue:clearJob` | R→M | 清除工作紀錄及其 JSON／ASS 暫存與失敗 log |
+| `clearCompleted()` | `queue:clearCompleted` | R→M | 清除所有已完成工作 |
+| `reorderJob(id,index)` | `queue:reorderJob` | R→M | 調整等待工作順序並同步寫回持久化檔 |
+| `showMainWindow()` | `app:showMainWindow` | R→M | 顯示／重建主視窗；用於主視窗關閉後從監控視窗返回 |
+| `openPath(path)` | `app:openPath` | R→M | 以系統預設程式開啟失敗記錄 |
+| `showItemInFolder(path)` | `app:showItemInFolder` | R→M | 在檔案總管顯示完成的輸出檔 |
+| `onUpdate(cb)` | `queue:update` | M→R | 佇列內容或狀態變更通知 |
+
+佇列的持久化真相來源在 `<userData>/export-queue/`：每份可恢復工作各有一個
+`<id>.json`，有字幕時另存 `<id>.ass`，失敗記錄固定為 `<id>.log`。新增與排序都會原子寫入；程式重啟後，
+`running` 一律退回 `queued`，所有恢復工作保持暫停，直到使用者明確按「繼續佇列」。
+恢復及開始前都會驗證 `clips[].path`、片段音訊及 `audioPlan` 的來源；缺檔工作標為
+`missing-source`，不會靜默輸出缺字幕或缺素材的成品。`done`／`failed`／`stopped`
+只保留在本次執行的畫面，不跨重啟恢復。
+
+主視窗與監控視窗的關閉語意不同：監控視窗存在時關主視窗只會隱藏主視窗，
+可用 `app:showMainWindow` 原樣叫回；接著再關監控視窗才會真正退出程式。判斷使用
+明確的 `_mainHiddenForQueue` 旗標，不可用 `BrowserWindow.isVisible()` 代替，因為
+Windows 最小化時它也可能回傳 `false`。
 
 > **新增 IPC 通道時**：① `preload.js` 加 `ipcRenderer.invoke`；② `main.js` 加 `ipcMain.handle`；③ 更新此表。
 >

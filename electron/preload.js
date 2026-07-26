@@ -27,7 +27,7 @@ contextBridge.exposeInMainWorld('subtool', {
   importDirectory: () => ipcRenderer.invoke('dialog:importDirectory'),
   importFont:   () => ipcRenderer.invoke('dialog:importFont'),
   exportVideo:  (opts) => ipcRenderer.invoke('ffmpeg:exportVideo', opts),
-  stopExport:   () => ipcRenderer.invoke('ffmpeg:stopExport'),
+  stopExport:   (jobId) => ipcRenderer.invoke('ffmpeg:stopExport', jobId),
   openQueueMonitor: () => ipcRenderer.invoke('queue:openMonitor'),
   probe:        (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffprobe', p); },
   makeProxy:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:proxy', { path: p, duration }); },
@@ -52,7 +52,11 @@ contextBridge.exposeInMainWorld('subtool', {
   closeApp: () => ipcRenderer.invoke('app:close'),
   onOpenFile:    (cb) => ipcRenderer.on('app:open-file', (e, path) => cb(path)),
   queueResume:  () => ipcRenderer.invoke('queue:resume'),
-  onQueueStatus:(cb) => { ipcRenderer.removeAllListeners('queue-status'); ipcRenderer.on('queue-status', (e, d) => cb(d)); },
+  onQueueStatus:(cb) => {
+    ipcRenderer.removeAllListeners('queue-status');
+    ipcRenderer.on('queue-status', (e, d) => cb(d));
+    ipcRenderer.invoke('queue:getStatus').then(d => cb(d)).catch(() => {});
+  },
   onProgress:   (cb) => ipcRenderer.on('task-progress', (e, d) => cb(d)),
   mpv: {
     detect:    ()      => ipcRenderer.invoke('mpv:detect'),

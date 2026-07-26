@@ -2356,7 +2356,10 @@ async function initDesktop(){
       `原生 MP4/MOV/MP3/WAV 播放與字幕編輯不受影響。`);
     setStatus('就緒（桌面模式）— 可直接讀 MXF 與多音軌','ok');
   }catch(e){ setStatus('就緒（桌面模式）','ok'); }
-  if ($('stStopBtn')) $('stStopBtn').onclick = () => { if (DESK.stopExport) DESK.stopExport(); };
+  let _visibleExportJobId = null;
+  if ($('stStopBtn')) $('stStopBtn').onclick = () => {
+    if (DESK.stopExport) DESK.stopExport(_visibleExportJobId);
+  };
   if ($('stResumeBtn')) $('stResumeBtn').onclick = () => { if (DESK.queueResume) DESK.queueResume(); };
   if ($('stMonitorBtn')) $('stMonitorBtn').onclick = () => { if (DESK.openQueueMonitor) DESK.openQueueMonitor(); };
 
@@ -2386,6 +2389,8 @@ async function initDesktop(){
   const _taskStarts = {};
   DESK.onProgress(d=>{
     if (d.jobId && String(d.jobId).startsWith('export-')) {
+      if (!d.error && !d.stopped && !d.done) _visibleExportJobId = d.jobId;
+      else if (_visibleExportJobId === d.jobId) _visibleExportJobId = null;
       if (d.error) {
         if ($('stStopBtn')) $('stStopBtn').style.display = 'none';
         let msg = d.errorMsg || '';
@@ -2480,8 +2485,8 @@ async function initDesktop(){
       if (isProjectDirty()) {
         openModal('儲存變更', '關閉前是否要儲存專案？', [
           // 等儲存真正完成（拿到路徑）才關閉；使用者取消存檔對話框則回到編輯畫面，避免資料遺失
-          {label: '儲存', primary: true, act: async () => { const pth = await Project.save(); if (pth) DESK.closeApp(); else closeModal(); }},
-          {label: '不儲存', act: () => { DESK.closeApp(); }},
+          {label: '儲存', primary: true, act: async () => { const pth = await Project.save(); if (pth) { closeModal(); DESK.closeApp(); } else closeModal(); }},
+          {label: '不儲存', act: () => { closeModal(); DESK.closeApp(); }},
           {label: '取消', act: () => { closeModal(); }}
         ]);
       } else {
