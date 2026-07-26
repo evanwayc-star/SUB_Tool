@@ -44,10 +44,6 @@ import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
 import { t } from './i18n.js';
 
-function convertLineBreaks(parsed) {
-  for (const p of parsed) { if (p.text) p.text = p.text.replace(/\/\//g, '\n').replace(/\\\\/g, '\n'); }
-  return parsed;
-}
 /* 格式自動辨識 */
 function detectSubFormat(text, ext) {
   if (ext === 'srt') return 'srt';
@@ -96,8 +92,6 @@ async function importSub() {
     else parsed = SubFormats.parseTXT(text);
   } catch (e) { showToast('解析失敗：' + e.message); return; }
   if (parsed.length === 0) { showToast('未解析到字幕（檢查格式/編碼）'); return; }
-  convertLineBreaks(parsed);
-
   _openImportModal(`匯入字幕到哪個軌道？（已辨識為 ${kind.toUpperCase()}，${parsed.length} 條）`, parsed, kind);
 }
 function _openImportModal(title, parsed, kind) {
@@ -1054,7 +1048,6 @@ async function importDropped(f) {
   else if (kind === 'encore') parsed = SubFormats.parseEncore(text, State.fps, State.dropFrame);
   else parsed = SubFormats.parseTXT(text);
   if (!parsed.length) { showToast('未解析到字幕'); return; }
-  convertLineBreaks(parsed);
   _openImportModal(`拖入字幕（${kind.toUpperCase()}，${parsed.length} 條）`, parsed, kind);
 }
 

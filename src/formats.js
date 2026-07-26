@@ -9,6 +9,54 @@ import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
 import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, STYLE_ONLY_KEYS } from './substyle.js';
 
+/* 舊版用 `//` 或兩個反斜線表示人工換行。URI 內的雙斜線是資料本身，
+   包含 scheme 分隔與後續 path 中的 `//`，不可被誤切成多行。 */
+function decodeLegacyLineBreaks(value){
+  const text=String(value??'');
+  const decodeChunk=chunk=>chunk.replace(/\\\\|\/\//g,'\n');
+  const uri=/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"']*/g;
+  let out='',last=0,match;
+  while((match=uri.exec(text))){
+    out+=decodeChunk(text.slice(last,match.index));
+    out+=match[0];
+    last=match.index+match[0].length;
+  }
+  return out+decodeChunk(text.slice(last));
+}
+
+/* ASS Dialogue 文字不能用 `{...}` regex 處理：`\{`／`\}` 是使用者的字面括號，
+   assEscapeText 也會以零寬空格切斷字面 `\N`、`\n`、`\h`。逐字掃描才能同時
+   移除真正的 override tag、解控制碼，並把我們自己的跳脫還原。 */
+function decodeAssDialogueText(value){
+  const text=String(value??'');
+  let out='';
+  for(let i=0;i<text.length;){
+    const ch=text[i];
+    if(ch==='\\'){
+      const next=text[i+1];
+      if(next==='{'||next==='}'){ out+=next; i+=2; continue; }
+      if(next==='\u200b'&&/[Nnh]/.test(text[i+2]||'')){
+        out+='\\'+text[i+2]; i+=3; continue;
+      }
+      if(next==='N'||next==='n'){ out+='\n'; i+=2; continue; }
+      if(next==='h'){ out+=' '; i+=2; continue; }
+      out+='\\'; i++; continue;
+    }
+    if(ch==='{'){
+      let end=i+1;
+      while(end<text.length){
+        if(text[end]==='\\'){ end+=2; continue; }
+        if(text[end]==='}') break;
+        end++;
+      }
+      if(end<text.length){ i=end+1; continue; }
+    }
+    out+=ch;
+    i++;
+  }
+  return decodeLegacyLineBreaks(out);
+}
+
 /* ===== 2. 字幕格式 解析 / 序列化 ====================================== */
 const SubFormats = {
   /* ---- SRT ---- */
@@ -20,7 +68,7 @@ const SubFormats = {
       const tline=lines[i]; if(!tline||!tline.includes('-->'))continue;
       const [a,b]=tline.split('-->');
       const start=srtToSec(a), end=srtToSec(b);
-      const txt=lines.slice(i+1).join('\n').replace(/\\\\|\/\//g, '\n').trim();
+      const txt=decodeLegacyLineBreaks(lines.slice(i+1).join('\n')).trim();
       out.push({start,end,text:txt});
     }
     return out;
@@ -44,8 +92,7 @@ const SubFormats = {
         const nText=f.length; // 以欄位數切，text 取剩餘
         const parts=splitN(rest,nText-1);
         const rec={}; f.forEach((k,idx)=>rec[k]=parts[idx]!==undefined?parts[idx]:'');
-        let raw=rec.text||'';
-        const txt=raw.replace(/\{[^}]*\}/g,'').replace(/\\N/gi,'\n').replace(/\\h/g,' ').replace(/\\\\|\/\//g, '\n').trim();
+        const txt=decodeAssDialogueText(rec.text||'').trim();
         let track=0;
         const nm=(rec.name||'').match(/atg?(\d+)/i); if(nm)track=Math.max(0,+nm[1]-1);
         else if(/^\d+$/.test(rec.layer))track=clamp(+rec.layer,0,9);
@@ -139,7 +186,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       }
       out.push({
         start, end,
-        text: m[3].replace(/\s{2,}/g,'\n').replace(/\\\\|\/\//g, '\n').trim(),
+        text: decodeLegacyLineBreaks(m[3].replace(/\s{2,}/g,'\n')).trim(),
         timed: isUntimed ? false : undefined
       });
     }
@@ -155,7 +202,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
   parseTXT(text){
     let t = 0;
     return text.replace(/\r/g,'').split('\n').map(l=>l.trim()).filter(l=>l.length)
-      .map(l=>{ const c={start:t,end:t,text:l.replace(/\\\\|\/\//g, '\n'),timed:false}; t+=0.001; return c; });
+      .map(l=>{ const c={start:t,end:t,text:decodeLegacyLineBreaks(l),timed:false}; t+=0.001; return c; });
   },
   toTXT(cues){
     return cues.map(c=>(c.text||'').replace(/\n/g, '\\\\')).join('\n')+'\n';
@@ -168,5 +215,5 @@ function splitN(str,n){
   out.push(str.slice(i)); return out;
 }
 
-export { SubFormats, splitN };
+export { SubFormats, splitN, decodeLegacyLineBreaks, decodeAssDialogueText };
 
