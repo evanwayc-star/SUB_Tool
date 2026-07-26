@@ -603,7 +603,12 @@ async function showExportVideoDialog(initialDraft=null) {
     return;
   }
   
-  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_')[0];
+  const rawParts = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_');
+  let projName = rawParts[0];
+  if ((rawParts[0] === 'V' || rawParts[0] === 'ST') && rawParts.length > 1) {
+    projName = rawParts[1];
+  }
+  
   const audioOnly = !!data.audioOnly;
   const hasProjectAudio = !!data.audioPlan;
   
@@ -652,9 +657,26 @@ async function showExportVideoDialog(initialDraft=null) {
       let ext = '.mp4';
       if (r.format === 'prores') ext = '.mov';
       if (r.format === 'wav') ext = '.wav';
-      let tag = r.format === 'h264' ? '_H264' : (r.format === 'prores' ? '_ProRes' : '_WAV');
+      
+      const ap = r.audioPlan;
+      let audioDesc = '';
+      const streams = ap?.streams || ap?.groups;
+      if (Array.isArray(streams) && streams.length > 0) {
+        const gCounts = streams.map(g => {
+          if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '20FM';
+          if (g.layout === '5.1') return '51FM';
+          if (g.layout === 'mono') return '10FM';
+          return (g.layout || '20').replace('.', '') + 'FM';
+        });
+        audioDesc = '_' + gCounts.join('+');
+      }
+      
+      const fps = Math.round(State.fps || 25);
+      let tag = '';
       if (!isWav && r.targetH > 0) tag += '_' + r.targetH + 'p';
-      r.customName = projName + tag + ext;
+      if (r.format === 'prores') tag += '_ProRes';
+      
+      r.customName = `ST_${projName}_${fps}fps${audioDesc}${tag}${ext}`;
     }
 
     const ap = r.audioPlan;
@@ -914,6 +936,9 @@ async function showExportVideoDialog(initialDraft=null) {
           if (jobId) showToast(`排入佇列: ${r.customName}`);
         }
         closeModal();
+        if (IS_DESKTOP && typeof DESK.openQueueMonitor === 'function') {
+          setTimeout(() => DESK.openQueueMonitor(), 150);
+        }
       } catch (err) {
         showToast('送出失敗: ' + (err.message || err));
         console.error(err);
