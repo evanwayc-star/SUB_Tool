@@ -30,7 +30,7 @@ import { History } from './history.js';
 import { renderNotes } from './notes.js';
 import { emit, on } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
-import { getAllPresets, effStyle, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets } from './substyle.js';
+import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets } from './substyle.js';
 
 /* ===== 自動備份狀態 ===== */
 let _editGuardDone = false;  // 本 session 是否已顯示過「請先儲存」提示
@@ -184,13 +184,12 @@ function _buildProjectData(){
     playhead: Math.max(0, Media.displayTime() || 0),
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
-    tracks:State.tracks.map(t=>({name:t.name,visible:t.visible!==false,fontSize:t.fontSize||80,posPct:t.posPct!=null?t.posPct:100,align:t.align||'center',valign:t.valign||'bottom',locked:!!t.locked,color:t.color||'#ffffff',
-      ...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{}),
-      // v4.23 樣式擴充欄位：存在才寫（舊版讀到未知鍵會忽略，向後相容）
-      ...(t.font!=null?{font:t.font}:{}),...(t.bold!=null?{bold:t.bold}:{}),...(t.italic!=null?{italic:t.italic}:{}),
-      ...(t.letterSpacing!=null?{letterSpacing:t.letterSpacing}:{}),...(t.lineSpacing!=null?{lineSpacing:t.lineSpacing}:{}),
-      ...(t.outline!=null?{outline:t.outline}:{}),...(t.outlineColor!=null?{outlineColor:t.outlineColor}:{}),...(t.shadow!=null?{shadow:t.shadow}:{}),
-      ...(t.vertical!=null?{vertical:t.vertical}:{}),...(t.bgBox!=null?{bgBox:t.bgBox}:{}),...(t.bgColor!=null?{bgColor:t.bgColor}:{}),...(t.bgAlpha!=null?{bgAlpha:t.bgAlpha}:{})})),
+    // 存檔時固定展開「當下生效樣式」，避免日後 STYLE_DEFAULTS 調整後讓既有專案外觀漂移。
+    // posPct 僅供舊版 SUB Tool 讀取；新版以同值的 posY 為準。
+    tracks:State.tracks.map(t=>{
+      const st=trackStyleSnapshot(t);
+      return {name:t.name,visible:t.visible!==false,locked:!!t.locked,...st,posPct:st.posY};
+    }),
     pxPerSec:State.pxPerSec,
     ...(State.exportIn!=null?{exportIn:State.exportIn}:{}),
     ...(State.exportOut!=null?{exportOut:State.exportOut}:{}),
@@ -359,6 +358,26 @@ function _queueProjectLoad(work){
   return _appendProjectLoad(generation,()=>work(generation));
 }
 
+function _restoreSubtitleTrack(raw,index){
+  const saved=raw&&typeof raw==='object'?raw:{};
+  const track={
+    name:saved.name||('軌道 '+(index+1)),
+    visible:saved.visible!==false,
+    locked:!!saved.locked
+  };
+  // 只還原專案內實際存在的 canonical 欄位；缺值繼續交由 effStyle 的單一預設來源處理。
+  for(const key of Object.keys(STYLE_DEFAULTS)){
+    if(saved[key]!=null) track[key]=saved[key];
+  }
+  // 舊格式別名只在 canonical 欄位不存在時遷移，不能覆蓋使用者曾明確存下的 65／91.2037。
+  if(track.fontSize==null&&saved.fontScale!=null){
+    const scale=Number(saved.fontScale);
+    if(Number.isFinite(scale)) track.fontSize=Math.round(60*scale);
+  }
+  if(track.posY==null&&saved.posPct!=null) track.posY=saved.posPct;
+  return track;
+}
+
 /* ===== 8. 專案 .subtool ============================================== */
 const Project = {
   // save/saveAs 回傳 Promise<路徑|名稱|null>：null=失敗或使用者取消。
@@ -408,14 +427,7 @@ const Project = {
     });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
     const maxTk=State.cues.length > 0 ? State.cues.reduce((m,c)=>Math.max(m,c.track||0),0) : -1;
-    if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map((t,i)=>({name:t.name||('軌道 '+(i+1)),visible:t.visible!==false,fontSize:t.fontSize||(t.fontScale?Math.round(60*t.fontScale):60),
-      posPct:t.posPct!=null?t.posPct:90,align:t.align||'center',valign:t.valign||'bottom',locked:!!t.locked,color:t.color||'#ffffff',
-      ...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{}),
-      // v4.23 樣式擴充：舊專案缺欄位＝不寫（effStyle 以預設後援）
-      ...(t.font!=null?{font:t.font}:{}),...(t.bold!=null?{bold:t.bold}:{}),...(t.italic!=null?{italic:t.italic}:{}),
-      ...(t.letterSpacing!=null?{letterSpacing:t.letterSpacing}:{}),...(t.lineSpacing!=null?{lineSpacing:t.lineSpacing}:{}),
-      ...(t.outline!=null?{outline:t.outline}:{}),...(t.outlineColor!=null?{outlineColor:t.outlineColor}:{}),...(t.shadow!=null?{shadow:t.shadow}:{}),
-      ...(t.vertical!=null?{vertical:t.vertical}:{}),...(t.bgBox!=null?{bgBox:t.bgBox}:{}),...(t.bgColor!=null?{bgColor:t.bgColor}:{}),...(t.bgAlpha!=null?{bgAlpha:t.bgAlpha}:{})}));
+    if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map(_restoreSubtitleTrack);
     else State.tracks=[];
     ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:1, maxTk+1));
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));

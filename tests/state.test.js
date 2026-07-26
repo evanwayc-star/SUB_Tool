@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { State, applyFps, snapFps, FPS_SET } from '../src/state.js';
+import { State, applyFps, snapFps, FPS_SET, newTrack } from '../src/state.js';
+import { STYLE_DEFAULTS, effStyle } from '../src/substyle.js';
 
 // A1 後 state.js 不再相依 dom.js/time.js，可在 node 環境直接測試 applyFps（純函式）。
 
@@ -33,5 +34,25 @@ describe('applyFps', () => {
     expect(r.dropFrame).toBe(false);
     expect(State.dropFrame).toBe(false);
     expect(State.fps).toBe(24);
+  });
+});
+
+describe('subtitle style defaults', () => {
+  it('new tracks stay sparse and resolve through the canonical 80/90 defaults', () => {
+    State.tracks = [];
+    const track = newTrack();
+
+    expect(STYLE_DEFAULTS.fontSize).toBe(80);
+    expect(STYLE_DEFAULTS.posY).toBe(90);
+    expect(track).toEqual({
+      name: '軌道 1',
+      visible: true,
+      locked: false,
+    });
+    expect(effStyle(null, track)).toMatchObject({
+      fontSize: 80,
+      posX: 50,
+      posY: 90,
+    });
   });
 });

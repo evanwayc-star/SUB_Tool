@@ -44,7 +44,7 @@ import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
-import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
+import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { setupInteractionContext, bindImageDomEvents, bindSubtitleDomEvents, startImageDrag, moveImageDrag, finishImageDrag, getImgDrag, getSubDrag } from './pointer-interaction.js';
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal } from './ui.js';
@@ -1319,7 +1319,7 @@ function renderTrackStyle(){
   const st=effStyle(cue, trk); // 生效值（缺欄位以預設後援）
   const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
   setV('tsSize',st.fontSize); setV('tsColor',(st.color||'#ffffff').toLowerCase());
-  setV('tsPosX',(st.posX!=null?st.posX:50).toFixed(1)); setV('tsPosY',(st.posY!=null?st.posY:91.2).toFixed(1)); // 座標改為百分比呈現
+  setV('tsPosX',(st.posX!=null?st.posX:STYLE_DEFAULTS.posX).toFixed(1)); setV('tsPosY',(st.posY!=null?st.posY:STYLE_DEFAULTS.posY).toFixed(1)); // 座標改為百分比呈現
   setV('tsAngle',st.angle);
   setV('tsOutline',st.outline); setV('tsOutlineColor',st.outlineColor); setV('tsShadow',st.shadow);
   setV('tsSpacing',st.letterSpacing); setV('tsLineSp',st.lineSpacing);
@@ -2131,8 +2131,7 @@ function _execCopyTrack(srcIdx, withText){
   const names=State.tracks.map(t=>t.name);
   while(names.includes(name)) name=base+(n++);
   // 複製軌道屬性
-  const tk={name, visible:true, fontSize:srcTrack.fontSize||80, posPct:srcTrack.posPct!=null?srcTrack.posPct:90,
-             align:srcTrack.align||'center', locked:false, color:srcTrack.color||'#ffffff'};
+  const tk={name,visible:true,locked:false,...trackStyleSnapshot(srcTrack)};
   const newIdx=State.tracks.length;
   State.tracks.push(tk); syncTrackCount();
   // 複製字幕
