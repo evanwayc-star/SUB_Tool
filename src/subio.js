@@ -30,7 +30,7 @@ import { secToEncore, snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
 import { ASS_PLAY_RES, getAllPresets } from './substyle.js'; // ASS 虛擬畫布：與 HTML 預覽的縮放基準共用同一組
 import { Media } from './media.js';
-import { setStatus, showToast, openModal, closeModal } from './ui.js';
+import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
 import { snapAllCuesToFrames } from './subtitles.js';
 import { recordHistory } from './history.js';
 import { sortCues } from './subtitles.js';
@@ -853,7 +853,7 @@ async function showExportVideoDialog(initialDraft=null) {
       if (conflicts.length > 0) {
         msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})，匯出將會直接覆蓋。`;
         msg.style.display = 'block';
-        return true; // DO NOT block export for disk conflicts
+        return confirm(`硬碟上已存在同名檔案：\n${conflicts.join(', ')}\n\n確定要直接覆蓋並繼續匯出嗎？`);
       }
     } catch(e){}
     

@@ -1,46 +1,190 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-TW">
 <head>
   <meta charset="utf-8">
   <title>匯出佇列監控</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; background: #ececec; color: #333; }
-    h2 { margin-top: 0; font-size: 16px; }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-    .controls { display: flex; gap: 12px; align-items: center; font-size: 13px; }
-    button { padding: 4px 8px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 4px; }
-    button:hover { background: #f0f0f0; }
+    :root {
+      --bg: #121212;
+      --bg-panel: rgba(30, 30, 30, 0.7);
+      --bg-panel-solid: #1e1e1e;
+      --border: rgba(255, 255, 255, 0.1);
+      --border-hover: rgba(255, 255, 255, 0.2);
+      --text: #ececec;
+      --text-dim: #999;
+      --accent: #007bff;
+      --accent-glow: rgba(0, 123, 255, 0.3);
+      --success: #28a745;
+      --success-bg: rgba(40, 167, 69, 0.1);
+      --error: #dc3545;
+      --error-bg: rgba(220, 53, 69, 0.1);
+      --warn: #ffc107;
+      --warn-bg: rgba(255, 193, 7, 0.1);
+    }
+    
+    body { 
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+      margin: 0; 
+      padding: 24px; 
+      background: var(--bg); 
+      color: var(--text);
+      overflow-y: scroll;
+    }
+    
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+
+    h2 { margin-top: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.5px; }
+    
+    .header { 
+      display: flex; justify-content: space-between; align-items: center; 
+      margin-bottom: 24px; 
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    
+    .controls { display: flex; gap: 16px; align-items: center; font-size: 13px; }
+    
+    button { 
+      padding: 6px 12px; 
+      cursor: pointer; 
+      border: 1px solid var(--border); 
+      background: var(--bg-panel-solid); 
+      color: var(--text);
+      border-radius: 6px; 
+      font-size: 12px;
+      transition: all 0.2s ease;
+    }
+    button:hover { 
+      background: rgba(255, 255, 255, 0.1); 
+      border-color: var(--border-hover);
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+    button.primary:hover {
+      background: #0069d9;
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
     button[disabled] { opacity: 0.5; cursor: not-allowed; }
-    .warning { color: #856404; background: #fff3cd; border: 1px solid #ffeeba; padding: 6px 10px; border-radius: 4px; font-size: 12px; margin-bottom: 12px; display: inline-block; }
     
-    .job-list { display: flex; flex-direction: column; gap: 8px; }
-    .job { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-    .job-header { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 14px; font-weight: bold; }
-    .job-meta { font-size: 12px; color: #666; margin-bottom: 6px; word-break: break-all; }
-    .job-progress-row { display: flex; align-items: center; gap: 10px; }
-    .progress-bar-bg { flex: 1; height: 14px; background: #e9ecef; border-radius: 7px; overflow: hidden; }
-    .progress-bar-fill { height: 100%; background: #007bff; width: 0%; transition: width 0.3s; }
-    .job-status { font-size: 12px; font-weight: bold; min-width: 60px; text-align: right; }
+    select {
+      background: var(--bg-panel-solid);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 13px;
+      outline: none;
+    }
+    select:focus { border-color: var(--accent); }
+
+    .warning { 
+      color: var(--warn); 
+      background: var(--warn-bg); 
+      border: 1px solid rgba(255, 193, 7, 0.3); 
+      padding: 10px 14px; 
+      border-radius: 8px; 
+      font-size: 13px; 
+      margin-bottom: 20px; 
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      backdrop-filter: blur(8px);
+    }
     
-    .job.status-queued .job-status { color: #6c757d; }
-    .job.status-running .job-status { color: #007bff; }
-    .job.status-running .progress-bar-fill { background: #007bff; }
-    .job.status-done .job-status { color: #28a745; }
-    .job.status-done .progress-bar-fill { background: #28a745; width: 100%; }
-    .job.status-failed .job-status { color: #dc3545; }
-    .job.status-failed .progress-bar-fill { background: #dc3545; width: 100%; }
-    .job.status-missing-source .job-status { color: #dc3545; }
+    .job-list { display: flex; flex-direction: column; gap: 12px; }
     
-    .job-actions { margin-top: 8px; display: flex; gap: 6px; }
-    .job-actions button { font-size: 11px; padding: 2px 6px; }
+    .job { 
+      background: var(--bg-panel);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border); 
+      border-radius: 10px; 
+      padding: 16px; 
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1); 
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    .job:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-1px);
+    }
     
-    .error-box { margin-top: 8px; font-size: 12px; color: #dc3545; background: #fff8f8; border: 1px solid #ffcaca; padding: 6px; border-radius: 4px; white-space: pre-wrap; display: none; }
+    .job-header { 
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 6px; 
+    }
+    .job-title {
+      font-size: 15px; 
+      font-weight: 600; 
+      color: #fff;
+    }
+    
+    .job-meta { font-size: 12px; color: var(--text-dim); margin-bottom: 12px; word-break: break-all; }
+    
+    .job-progress-row { 
+      display: flex; align-items: center; gap: 12px; margin-bottom: 12px;
+    }
+    .progress-bar-bg { 
+      flex: 1; height: 8px; background: rgba(0,0,0,0.5); 
+      border-radius: 4px; overflow: hidden; 
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.2);
+    }
+    .progress-bar-fill { 
+      height: 100%; width: 0%; 
+      transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1); 
+    }
+    
+    .job-status { 
+      font-size: 13px; font-weight: 600; 
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.05);
+    }
+    
+    .job-actions { display: flex; gap: 8px; }
+    
+    /* Status Colors & Animations */
+    .job.status-queued .job-status { color: var(--text-dim); }
+    .job.status-running .job-status { color: #66b0ff; background: rgba(0, 123, 255, 0.15); }
+    .job.status-running .progress-bar-fill { 
+      background: linear-gradient(90deg, #007bff, #00d2ff); 
+      box-shadow: 0 0 10px var(--accent-glow);
+    }
+    .job.status-done .job-status { color: var(--success); background: var(--success-bg); }
+    .job.status-done .progress-bar-fill { background: var(--success); box-shadow: 0 0 10px rgba(40,167,69,0.3); width: 100%; }
+    .job.status-failed .job-status, .job.status-missing-source .job-status { color: var(--error); background: var(--error-bg); }
+    .job.status-failed .progress-bar-fill, .job.status-missing-source .progress-bar-fill { background: var(--error); width: 100%; }
+    
+    /* Pulsing effect for running state */
+    @keyframes pulse {
+      0% { opacity: 0.6; }
+      50% { opacity: 1; }
+      100% { opacity: 0.6; }
+    }
+    .status-running .status-icon { animation: pulse 1.5s infinite; }
+    
+    .error-box { 
+      margin-top: 12px; font-size: 12px; color: #ff8e99; 
+      background: rgba(220, 53, 69, 0.15); border: 1px solid rgba(220, 53, 69, 0.3); 
+      padding: 10px; border-radius: 6px; white-space: pre-wrap; display: none; 
+      font-family: monospace;
+      user-select: text;
+    }
     .job.status-failed .error-box, .job.status-missing-source .error-box { display: block; }
+
+    /* SVG Icons */
+    .icon { width: 14px; height: 14px; fill: currentColor; }
   </style>
 </head>
 <body>
   <div class="header">
-    <h2>匯出佇列</h2>
+    <h2>匯出佇列監控</h2>
     <div class="controls">
       <label title="並行通常不會更快，因為多次讀取同一個來源素材會讓磁碟效能下降。">
         並行數：
@@ -49,12 +193,14 @@
           <option value="2">2</option>
           <option value="3">3</option>
         </select>
-        <span style="color:#666;font-size:11px;">(並行通常不會更快)</span>
       </label>
-      <button id="pauseToggleBtn">暫停佇列</button>
+      <button id="pauseToggleBtn">⏸ 暫停佇列</button>
     </div>
   </div>
-  <div class="warning">ℹ️ 匯出中，預覽可能會發生卡頓。</div>
+  <div class="warning">
+    <svg class="icon" viewBox="0 0 24 24"><path d="M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z"/></svg>
+    匯出中，背景轉碼可能會使預覽發生卡頓。
+  </div>
   
   <div class="job-list" id="jobList"></div>
 
@@ -70,14 +216,22 @@
 
     // Format seconds
     const fmt = s => {
-      if (s === null || s === undefined) return '估算中';
-      return \`\${Math.floor(s/60).toString().padStart(2,'0')}:\${(s%60).toString().padStart(2,'0')}\`;
+      if (s === null || s === undefined || isNaN(s)) return '估算中';
+      return `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
+    };
+
+    const ICONS = {
+      queued: '<svg class="icon" viewBox="0 0 24 24"><path d="M12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22C6.47,22 2,17.5 2,12A10,10 0 0,1 12,2M12.5,7V12.25L17,14.92L16.25,16.15L11,13V7H12.5Z"/></svg>',
+      running: '<svg class="icon status-icon" viewBox="0 0 24 24"><path d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M12,10.5A1.5,1.5 0 0,0 10.5,12A1.5,1.5 0 0,0 12,13.5A1.5,1.5 0 0,0 13.5,12A1.5,1.5 0 0,0 12,10.5Z"/></svg>',
+      done: '<svg class="icon" viewBox="0 0 24 24"><path d="M12 2C6.5 2 2 6.5 2 12S6.5 22 12 22 22 17.5 22 12 17.5 2 12 2M10 17L5 12L6.41 10.59L10 14.17L17.59 6.58L19 8L10 17Z"/></svg>',
+      failed: '<svg class="icon" viewBox="0 0 24 24"><path d="M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z"/></svg>',
+      stopped: '<svg class="icon" viewBox="0 0 24 24"><path d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M9,9H15V15H9V9Z"/></svg>'
     };
 
     function renderJobs() {
       UI.list.innerHTML = '';
       if (_jobs.length === 0) {
-        UI.list.innerHTML = '<div style="text-align:center;color:#999;padding:20px;font-size:13px;">目前沒有任何匯出工作。</div>';
+        UI.list.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:40px;font-size:14px;border:1px dashed var(--border);border-radius:10px;">目前沒有任何匯出工作。</div>';
         return;
       }
       _jobs.forEach(job => {
@@ -85,59 +239,80 @@
         el.className = 'job status-' + job.status;
         
         let statusText = job.status;
-        if (job.status === 'queued') statusText = '等待中';
-        if (job.status === 'running') statusText = '執行中 ' + (job.pct || 0).toFixed(1) + '%';
-        if (job.status === 'done') statusText = '完成';
-        if (job.status === 'failed') statusText = '失敗';
-        if (job.status === 'missing-source') statusText = '來源遺失';
+        let icon = ICONS.queued;
+        if (job.status === 'queued') { statusText = '等待中'; icon = ICONS.queued; }
+        if (job.status === 'running') { statusText = '執行中 ' + (job.pct || 0).toFixed(1) + '%'; icon = ICONS.running; }
+        if (job.status === 'done') { statusText = '完成'; icon = ICONS.done; }
+        if (job.status === 'failed') { statusText = '失敗'; icon = ICONS.failed; }
+        if (job.status === 'missing-source') { statusText = '來源遺失'; icon = ICONS.failed; }
+        if (job.status === 'stopped') { statusText = '已停止'; icon = ICONS.stopped; }
         
         let tStr = '';
+        const pctNum = (job.status === 'done') ? 100 : (job.pct || 0);
         if (job.status === 'running') {
           const elS = Math.floor((job.elapsedMs || 0) / 1000);
-          tStr = \`已用 \${fmt(elS)} / 剩餘 \${fmt(job.etaS ? Math.floor(job.etaS) : null)}\`;
+          const etaS = Math.floor(job.etaS || 0);
+          const totalS = elS + etaS;
+          tStr = `<span style="font-family: monospace; font-size: 13px; color: #bbb;">已花費: <span style="color:#fff">${fmt(elS)}</span> &nbsp;|&nbsp; 剩餘: <span style="color:#fff">${fmt(etaS)}</span> &nbsp;|&nbsp; 預計總時間: <span style="color:#fff">${fmt(totalS)}</span></span>`;
         } else if (job.status === 'done') {
           const elS = Math.floor((job.elapsedMs || 0) / 1000);
-          tStr = \`耗時 \${fmt(elS)}\`;
+          tStr = `<span style="font-family: monospace; font-size: 13px; color: #bbb;">完成總花費時間: <span style="color:#4caf50">${fmt(elS)}</span></span>`;
         }
 
-        const outName = job.payload.outPath.split(/[\\\\/]/).pop();
+        const outName = job.payload.outPath.split(/[\\/]/).pop();
         
         let errorHtml = '';
         if (job.errorMsg) {
           let msg = job.errorMsg;
           let logPath = null;
-          const m = msg.match(/\\[LOG_PATH\\](.*?)\\[\\/LOG_PATH\\]/);
+          const m = msg.match(/\[LOG_PATH\](.*?)\[\/LOG_PATH\]/);
           if (m) {
             logPath = m[1];
-            msg = msg.replace(/\\[LOG_PATH\\].*?\\[\\/LOG_PATH\\]/, '').trim();
+            msg = msg.replace(/\[LOG_PATH\].*?\[\/LOG_PATH\]/, '').trim();
           }
-          errorHtml = \`<div class="error-box">\${msg}\` + 
-            (logPath ? \`<div style="margin-top:6px"><button onclick="window.queueAPI.openPath('\${logPath.replace(/\\\\/g, '\\\\\\\\')}')">開啟完整記錄</button></div>\` : '') +
-            \`</div>\`;
+          errorHtml = `<div class="error-box">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+              <div style="flex:1">${msg}</div>
+              <button onclick="navigator.clipboard.writeText(\`${msg.replace(/`/g, '\\`')}\`); this.textContent='已複製！'; setTimeout(() => this.textContent='複製', 2000);" style="padding:2px 6px; font-size:11px; flex-shrink:0;">複製</button>
+            </div>` + 
+            (logPath ? `<div style="margin-top:10px"><button onclick="window.queueAPI.openPath('${logPath.replace(/\\/g, '\\\\')}')">開啟完整記錄</button></div>` : '') +
+            `</div>`;
         }
 
         let actionHtml = '';
         if (job.status === 'running' || job.status === 'queued') {
-          actionHtml += \`<button onclick="window.queueAPI.stopJob('\${job.id}')">停止</button>\`;
+          actionHtml += `<button onclick="window.queueAPI.stopJob('${job.id}')">停止</button>`;
         }
-        if (job.status === 'failed' || job.status === 'missing-source') {
-          actionHtml += \`<button onclick="window.queueAPI.retryJob('\${job.id}')">重試</button>\`;
+        if (job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
+          actionHtml += `<button class="primary" onclick="window.queueAPI.retryJob('${job.id}')">重試</button>`;
         }
         if (job.status === 'done' || job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
-          actionHtml += \`<button onclick="window.queueAPI.clearJob('\${job.id}')">清除紀錄</button>\`;
+          actionHtml += `<button onclick="window.queueAPI.clearJob('${job.id}')">清除紀錄</button>`;
+        }
+        if (job.status === 'done') {
+          actionHtml += `<button class="primary" onclick="window.queueAPI.showItemInFolder('${job.payload.outPath.replace(/\\/g, '\\\\')}')">打開資料夾</button>`;
         }
 
-        el.innerHTML = \`
-          <div class="job-header"><span>\${outName}</span> <span class="job-status">\${statusText}</span></div>
-          <div class="job-meta">\${job.payload.defaultName} \${tStr ? '• ' + tStr : ''}</div>
-          \${(job.status === 'running' || job.status === 'done' || job.status === 'queued') ? \`
-            <div class="job-progress-row">
-              <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:\${job.pct || 0}%"></div></div>
+        el.innerHTML = `
+          <div class="job-header">
+            <span class="job-title">${outName}</span> 
+            <span class="job-status">${icon} ${statusText}</span>
+          </div>
+          <div class="job-meta">${job.payload.defaultName}</div>
+          ${(job.status === 'running' || job.status === 'done' || job.status === 'queued') ? `
+            <div class="job-progress-row" style="position: relative; margin-top: 8px;">
+              <div class="progress-bar-bg" style="position: relative; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; height: 16px;">
+                <div class="progress-bar-fill" style="width:${pctNum}%; background: ${job.status === 'done' ? '#4caf50' : '#f0a020'}; height: 100%; transition: width 0.3s ease;"></div>
+                <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.8); pointer-events: none;">
+                  ${pctNum.toFixed(1)}%
+                </div>
+              </div>
             </div>
-          \` : ''}
-          \${errorHtml}
-          <div class="job-actions">\${actionHtml}</div>
-        \`;
+            ${tStr ? `<div style="margin-top: 8px; text-align: right;">${tStr}</div>` : ''}
+          ` : ''}
+          ${errorHtml}
+          <div class="job-actions">${actionHtml}</div>
+        `;
         UI.list.appendChild(el);
       });
     }
@@ -146,7 +321,15 @@
       const data = await window.queueAPI.getAll();
       _jobs = data.jobs;
       _isPaused = data.isPaused;
-      UI.pauseBtn.textContent = _isPaused ? '▶ 繼續佇列' : '⏸ 暫停佇列';
+      
+      if (_isPaused) {
+        UI.pauseBtn.textContent = '▶ 繼續佇列';
+        UI.pauseBtn.classList.add('primary');
+      } else {
+        UI.pauseBtn.textContent = '⏸ 暫停佇列';
+        UI.pauseBtn.classList.remove('primary');
+      }
+      
       UI.concurrencySel.value = data.concurrency;
       renderJobs();
     }

@@ -48,7 +48,7 @@ function _exportPlanError(message) { throw new Error('音訊輸出設定錯誤�
 function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
   if (raw == null) return null;
   if (!raw || !Array.isArray(raw.buses) || (requireStreams && !Array.isArray(raw.streams)))
-    _exportPlanError(requireStreams ? '缺少 buses 或 streams。' : '缺少 buses。');
+    { console.error('AUDIO PLAN FAILED:', JSON.stringify(raw, null, 2)); _exportPlanError(requireStreams ? '缺少 buses 或 streams。' : '缺少 buses。'); }
   if (!raw.buses.length) _exportPlanError('至少需要一條專案音軌。');
 
   const ids = new Set();

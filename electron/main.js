@@ -266,14 +266,16 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
       // 例：Stream #0:0 -> #0:0 (mpeg2video (native) -> h264 (h264_nvenc))
       for (const mm of s.matchAll(/Stream #\d+:\d+ -> #\d+:\d+ \(([^\n]*)\)/g)) if (maps.length < 8) maps.push(mm[1]);
       const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s);
-      if (m && duration && sender) {
+      if (m && duration && (sender || onProgress)) {
         const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
         let etaS = null;
         if (speeds.length > 0) {
            const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
            if (avgSpeed > 0) etaS = (duration - t) / avgSpeed;
         }
-        safeSend(sender, 'task-progress', { jobId, label, pct: Math.min(99, Math.round(t / duration * 100)), etaS, elapsedMs: Date.now() - startTime });
+        const progData = { jobId, label, pct: Math.min(99, Math.round(t / duration * 100)), etaS, elapsedMs: Date.now() - startTime };
+        if (sender) safeSend(sender, 'task-progress', progData);
+        if (onProgress) onProgress(progData);
       }
     });
     p.on('error', (e) => {
@@ -474,6 +476,10 @@ ipcMain.handle('app:openPath', async (e, p) => {
   const { shell } = require('electron');
   return shell.openPath(p);
 });
+ipcMain.handle('app:showItemInFolder', async (e, p) => {
+  const { shell } = require('electron');
+  shell.showItemInFolder(p);
+});
 ipcMain.handle('ffmpeg:stopExport', () => {
   if (activeExportJob && activeExportJob.p) {
     activeExportJob.stopped = true;
@@ -640,6 +646,8 @@ function ensureExportQueueDir() {
 
 function openQueueWindow() {
   if (queueWin && !queueWin.isDestroyed()) {
+    if (queueWin.isMinimized()) queueWin.restore();
+    queueWin.show();
     queueWin.focus();
     return;
   }
@@ -807,11 +815,15 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   const savedPayload = { ...payload, assText: null, outPath };
   const job = { id: jobId, status: 'queued', createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
   QueueManager.addJob(job);
+  openQueueWindow();
   return jobId;
 });
 
 async function _runJobLogic(job) {
-  const { clips, videoTracks, width: W, height: H, fps: R, format, duration: D, outPath, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark } = job.payload;
+  // 解構 job.payload 變數
+  // [v5.4.4] 將 width, height, fps, duration 重新命名為 payloadWidth, payloadHeight, payloadFps, payloadDuration
+  // 避免與後續 ffmpeg 生成參數時使用的短變數 W, H, R, D 產生命名衝突 (ReferenceError)。
+  const { clips, videoTracks, width: payloadWidth, height: payloadHeight, fps: payloadFps, format, duration: payloadDuration, outPath, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark } = job.payload;
   const jobId = job.id;
   // Get sender if available
   let sender = null;
@@ -822,7 +834,9 @@ async function _runJobLogic(job) {
   
   const fallbackSender = mainWin && !mainWin.isDestroyed() ? mainWin.webContents : null;
   const dispatch = (evt, data) => {
-    // Update local job state for queue window
+    // [v5.4.4] Update local job state for queue window and broadcast updates
+    // 以往進度直接從 runFF 送到前端，導致佇列視窗無法同步。現在必須經由這裡透過 onProgress 攔截，
+    // 以確保 QueueManager 能收到進度，並觸發 QueueManager.broadcastUpdate()。
     if (evt === 'task-progress') {
       if (data.done) job.status = 'done';
       else if (data.error) {
@@ -844,7 +858,7 @@ async function _runJobLogic(job) {
 
   const isWav = format === 'wav';
   const audioPlan = _normalizeAudioPlan(rawAudioPlan, { requireStreams: !isWav });
-  const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, R);
+  const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, payloadFps);
   const isPro = format === 'prores';
   
   // 載入分離的 assText
@@ -868,7 +882,7 @@ async function _runJobLogic(job) {
       }
 
       const planDuration = _planDuration(audioPlan);
-      const D = Math.max(0.05, _finiteNumber(duration, 0), planDuration);
+      const D = Math.max(0.05, _finiteNumber(payloadDuration, 0), planDuration);
       ensureTmp();
       
       if (isWav) {
@@ -880,17 +894,20 @@ async function _runJobLogic(job) {
           '-ar', '48000', '-c:a', 'pcm_s24le', outPath];
         const t0 = Date.now();
         const label = `匯出 WAV PCM（${wav.channels} 軌）`;
-        await runFF(args, { sender, duration: D, jobId, label, onProcess: p => {
-          activeJobs.set(jobId, { p, outPath, stopped: false });
-        }});
+        await runFF(args, { duration: D, jobId, label, 
+          onProgress: data => dispatch('task-progress', data),
+          onProcess: p => {
+            activeJobs.set(jobId, { p, outPath, stopped: false });
+          }
+        });
         activeJobs.delete(jobId);
         const r = { outPath, encoder: 'pcm_s24le', gpu: false, elapsedMs: Date.now() - t0, videoKbps: null, audioChannels: wav.channels };
         dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
         return;
       }
 
-  const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
-  const R = fps || 25;
+  const W = Math.max(2, Math.round(payloadWidth || 1920)), H = Math.max(2, Math.round(payloadHeight || 1080));
+  const R = payloadFps || 25;
   // ===== 多軌合成 filtergraph（v4.11.0）=====
   //  影像：每視訊軌各自 concat 成整條時間軸（片段放 offset、間隙【透明】），再由下而上 overlay 疊到黑底；
   //        上層片段覆蓋下層（比照預覽 top-occludes），透明間隙讓下層透出。
@@ -1113,9 +1130,12 @@ async function _runJobLogic(job) {
       let usedEncoder = planned;
       const t0 = Date.now();
       try {
-        const rr = await runFF(args, { sender, duration: D, jobId, label, cwd: TMP, onProcess: p => {
-          activeJobs.set(jobId, { id: jobId, p, outPath, stopped: false });
-        }});
+        const rr = await runFF(args, { duration: D, jobId, label, cwd: TMP, 
+          onProgress: data => dispatch('task-progress', data),
+          onProcess: p => {
+            activeJobs.set(jobId, { id: jobId, p, outPath, stopped: false });
+          }
+        });
     // ffmpeg 的串流對應行是「實際使用」的地面真相（非我們的猜測）：
     //   例 "mpeg2video (native) -> h264 (h264_nvenc)" → 取箭頭右側括號內的編碼器
     const vmap = (rr.maps || []).find(m => /->/.test(m) && /h264|prores|hevc/i.test(m));
