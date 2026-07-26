@@ -128,7 +128,16 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
   const busLabels = new Map();
   let ii = inputIndex;
   const audioInputMap = new Map();
+  
+  const usedBusIds = new Set();
+  if (plan.streams && plan.streams.length > 0) {
+    plan.streams.forEach(s => s.busIds.forEach(id => usedBusIds.add(id)));
+  } else {
+    plan.buses.forEach(b => usedBusIds.add(b.id));
+  }
+
   plan.buses.forEach((bus, bi) => {
+    if (!usedBusIds.has(bus.id)) return;
     const parts = [];
     bus.inputs.forEach((input, pi) => {
       const reusable = reusableMasterInputs?.get(input.file);
