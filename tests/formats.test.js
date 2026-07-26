@@ -108,6 +108,19 @@ describe('legacy line-break compatibility', () => {
     );
   });
 
+  it('中文標點會結束 URI，後方舊式換行仍要解碼', () => {
+    expect(decodeLegacyLineBreaks(
+      '網址https://example.com，舊換行//下一行',
+    )).toBe(
+      '網址https://example.com，舊換行\n下一行',
+    );
+    expect(decodeLegacyLineBreaks(
+      '（https://example.com）//下一行',
+    )).toBe(
+      '（https://example.com）\n下一行',
+    );
+  });
+
   it('subio 不可在格式解析後再做第二次裸雙斜線轉換', () => {
     const source = readFileSync(new URL('../src/subio.js', import.meta.url), 'utf8');
     expect(source).not.toContain('convertLineBreaks');

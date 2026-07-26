@@ -14,7 +14,9 @@ import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, ass
 function decodeLegacyLineBreaks(value){
   const text=String(value??'');
   const decodeChunk=chunk=>chunk.replace(/\\\\|\/\//g,'\n');
-  const uri=/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"']*/g;
+  // CJK 字幕常把網址直接接在全形標點後繼續寫；這些標點是 token 邊界，
+  // 否則其後真正代表換行的 `//` 也會被整段誤保護。
+  const uri=/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"'，。！？；：、（）【】「」『』《》〈〉\(\)\[\]\{\}]*/g;
   let out='',last=0,match;
   while((match=uri.exec(text))){
     out+=decodeChunk(text.slice(last,match.index));
