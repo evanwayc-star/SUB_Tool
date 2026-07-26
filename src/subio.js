@@ -628,7 +628,7 @@ async function showExportVideoDialog(initialDraft=null) {
       audioDesc = '_' + gCounts.join('+');
     }
     
-    const fps = Math.round(State.fps || 25);
+    const fps = Math.floor(State.fps || 25);
     let tag = '';
     if (!isWav && r.targetH > 0) tag += '_' + r.targetH + 'p';
     
@@ -851,7 +851,7 @@ async function showExportVideoDialog(initialDraft=null) {
     });
   }
 
-  async function checkConflicts() {
+  async function checkConflicts(isSubmitting = false) {
     const msg = $('evConflictMsg');
     if (!msg) return true;
     
@@ -860,6 +860,7 @@ async function showExportVideoDialog(initialDraft=null) {
     if (missingDir !== -1) {
       msg.textContent = `錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`;
       msg.style.display = 'block';
+      if (isSubmitting) alert(`錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`);
       return false;
     }
     
@@ -868,6 +869,7 @@ async function showExportVideoDialog(initialDraft=null) {
     if (missingName !== -1) {
       msg.textContent = `錯誤：第 ${missingName + 1} 列缺少檔名！`;
       msg.style.display = 'block';
+      if (isSubmitting) alert(`錯誤：第 ${missingName + 1} 列缺少檔名！`);
       return false;
     }
 
@@ -876,13 +878,14 @@ async function showExportVideoDialog(initialDraft=null) {
     if (hasDupes) {
       msg.textContent = '警告：交付清單內有重複的輸出路徑！';
       msg.style.display = 'block';
-      alert('錯誤：交付清單內有重複的檔名！比較後面的序列會覆蓋掉前面的，請修改檔名再送出。');
+      if (isSubmitting) alert('錯誤：交付清單內有重複的檔名！比較後面的序列會覆蓋掉前面的，請修改檔名再送出。');
       return false;
     }
     
     try {
       const conflicts = [];
       for (const r of draft.deliverables) {
+        if (!r.outDir) continue;
         const files = await DESK.listDir(r.outDir);
         const existing = files.map(f => (typeof f === 'string' ? f : f.name).toLowerCase());
         if (existing.includes(r.customName.toLowerCase())) {
@@ -892,7 +895,8 @@ async function showExportVideoDialog(initialDraft=null) {
       if (conflicts.length > 0) {
         msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})，匯出將會直接覆蓋。`;
         msg.style.display = 'block';
-        return confirm(`硬碟上已存在同名檔案：\n${conflicts.join(', ')}\n\n確定要直接覆蓋並繼續匯出嗎？`);
+        if (isSubmitting) return confirm(`硬碟上已存在同名檔案：\n${conflicts.join(', ')}\n\n確定要直接覆蓋並繼續匯出嗎？`);
+        return true;
       }
     } catch(e){}
     
@@ -904,7 +908,7 @@ async function showExportVideoDialog(initialDraft=null) {
     { label: '取消', act: closeModal },
     { label: '全部送出', primary: true, act: async () => {
       if (draft.deliverables.length === 0) { showToast('清單不能為空'); return; }
-      if (!(await checkConflicts())) return;
+      if (!(await checkConflicts(true))) return;
       
       try {
         const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
