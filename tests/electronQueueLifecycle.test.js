@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,15 @@ const tempProfiles = new Set();
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function processIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function reservePort() {
@@ -317,6 +326,169 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     queueClient.close();
   }, 20000);
 
+  test('實際匯出由 watchdog 完成並釋放輸出鎖', async () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'subtool-watchdog-export-'));
+    tempProfiles.add(profile);
+    const imagePath = path.join(profile, 'one-pixel.png');
+    const outPath = path.join(profile, 'watchdog-output.mp4');
+    writeFileSync(
+      imagePath,
+      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+    );
+
+    const app = await launchApp(profile);
+    const mainTarget = await waitForTarget(
+      app.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得 watchdog 匯出主視窗',
+    );
+    const mainClient = await connectTarget(mainTarget);
+    const payload = {
+      outPath,
+      assText: '',
+      clips: [{
+        type: 'image',
+        path: imagePath,
+        in: 0,
+        out: 0.3,
+        offset: 0,
+        vtrack: 0,
+        natW: 1,
+        natH: 1,
+      }],
+      videoTracks: [{ vt: 0 }],
+      duration: 0.3,
+      width: 320,
+      height: 180,
+      fps: 25,
+      format: 'h264',
+      videoKbps: 500,
+      audioPlan: null,
+    };
+    await mainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
+    const queueClient = await openQueueMonitor(app, mainClient);
+    const finished = await waitUntil(
+      async () => {
+        const snapshot = await queueClient.evaluate('window.queueAPI.getAll()');
+        const job = snapshot.jobs[0];
+        return job && ['done', 'failed'].includes(job.status) ? job : null;
+      },
+      'watchdog 實際匯出完成',
+      20000,
+    );
+
+    expect(finished.status, finished.errorMsg).toBe('done');
+    expect(existsSync(outPath)).toBe(true);
+    expect(statSync(outPath).size).toBeGreaterThan(0);
+    const leaseDir = path.join(profile, 'export-queue', 'output-leases');
+    expect(existsSync(leaseDir) ? readdirSync(leaseDir).filter(name => name.endsWith('.lock')) : [])
+      .toEqual([]);
+
+    await mainClient.evaluate('window.subtool.closeApp(); true');
+    await waitUntil(
+      async () => await mainClient.evaluate('document.visibilityState') === 'hidden',
+      'watchdog 匯出後主視窗隱藏',
+    );
+    await queueClient.send('Page.close').catch(() => {});
+    await waitForExit(app);
+    mainClient.close();
+    queueClient.close();
+  }, 30000);
+
+  test('強制結束主程序後 watchdog 會停止 ffmpeg，重開只恢復等待工作', async () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'subtool-watchdog-crash-'));
+    tempProfiles.add(profile);
+    const imagePath = path.join(profile, 'crash-source.png');
+    const outPath = path.join(profile, 'crash-partial.mp4');
+    const leaseDir = path.join(profile, 'export-queue', 'output-leases');
+    writeFileSync(
+      imagePath,
+      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+    );
+
+    const firstApp = await launchApp(profile);
+    const firstMainTarget = await waitForTarget(
+      firstApp.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得 crash 測試主視窗',
+    );
+    const firstMainClient = await connectTarget(firstMainTarget);
+    const payload = {
+      outPath,
+      assText: '',
+      clips: [{
+        type: 'image',
+        path: imagePath,
+        in: 0,
+        out: 300,
+        offset: 0,
+        vtrack: 0,
+        natW: 1,
+        natH: 1,
+      }],
+      videoTracks: [{ vt: 0 }],
+      duration: 300,
+      width: 3840,
+      height: 2160,
+      fps: 25,
+      format: 'h264',
+      videoKbps: 500,
+      audioPlan: null,
+    };
+    await firstMainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
+    const owner = await waitUntil(
+      async () => {
+        if (!existsSync(leaseDir) || !existsSync(outPath)) return null;
+        const lock = readdirSync(leaseDir).find(name => name.endsWith('.lock'));
+        if (!lock) return null;
+        return JSON.parse(readFileSync(path.join(leaseDir, lock, 'owner.json'), 'utf8'));
+      },
+      'ffmpeg 已啟動並建立 output lease',
+      15000,
+    );
+    expect(owner.ffmpegPid).toBeGreaterThan(0);
+
+    firstApp.child.kill('SIGKILL');
+    await waitForExit(firstApp);
+    firstMainClient.close();
+    await waitUntil(
+      async () => !processIsRunning(owner.ffmpegPid),
+      '主程序消失後 ffmpeg 已停止',
+      10000,
+    );
+
+    const secondApp = await launchApp(profile);
+    const secondMainTarget = await waitForTarget(
+      secondApp.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得 crash 後重開主視窗',
+    );
+    const secondMainClient = await connectTarget(secondMainTarget);
+    const secondQueueClient = await openQueueMonitor(secondApp, secondMainClient);
+    const locksAfterRecovery = existsSync(leaseDir)
+      ? readdirSync(leaseDir).filter(name => name.endsWith('.lock'))
+      : [];
+    expect(existsSync(outPath)).toBe(false);
+    expect(locksAfterRecovery).toEqual([]);
+    const restored = await secondQueueClient.evaluate('window.queueAPI.getAll()');
+    expect(restored.isPaused).toBe(true);
+    expect(restored.jobs).toHaveLength(1);
+    expect(restored.jobs[0]).toMatchObject({
+      status: 'queued',
+      payload: { outPath },
+    });
+
+    await secondMainClient.evaluate('window.subtool.closeApp(); true');
+    await waitUntil(
+      async () => await secondMainClient.evaluate('document.visibilityState') === 'hidden',
+      'crash 重開後主視窗隱藏',
+    );
+    await secondQueueClient.send('Page.close').catch(() => {});
+    await waitForExit(secondApp);
+    secondMainClient.close();
+    secondQueueClient.close();
+  }, 45000);
+
   test('未開始的工作在重開程式後仍保留，並維持暫停', async () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-queue-restore-'));
     tempProfiles.add(profile);
@@ -345,6 +517,15 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       audioPlan: null,
     };
     await firstMainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
+    const duplicateError = await firstMainClient.evaluate(`(async () => {
+      try {
+        await window.subtool.exportVideo(${JSON.stringify(payload)});
+        return null;
+      } catch (error) {
+        return error && error.message ? error.message : String(error);
+      }
+    })()`);
+    expect(duplicateError).toContain('同一個輸出檔案');
     const beforeRestart = await firstQueueClient.evaluate('window.queueAPI.getAll()');
     expect(beforeRestart.jobs).toHaveLength(1);
     expect(beforeRestart.jobs[0].status).toBe('queued');

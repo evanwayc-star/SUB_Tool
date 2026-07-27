@@ -6,12 +6,15 @@
 
 ## 1. 系統架構總覽
 
-本專案採用 **Vite + Electron** 架構，三個核心角色：
+本專案採用 **Vite + Electron** 架構，核心角色與後端支援模組如下：
 
 | 角色 | 檔案 | 職責 |
 |------|------|------|
 | **Main Process** | `electron/main.js` | 視窗管理、系統 ffmpeg/ffprobe、mpv 嵌入、本機檔案 I/O、快取管理 |
 | **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
+| **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集 |
+| **匯出輸出鎖** | `electron/export-lease.js` | 依正規化輸出路徑建立原子 lease，避免不同工作同時以 `-y` 寫入同一檔案 |
+| **匯出監護程序** | `electron/export-watchdog.js` | 獨立持有交付匯出的 ffmpeg；主程序中斷後停止子程序、刪除半成品，並提供啟動復原用的 token pipe |
 | **Renderer Process** | `dist/index.html`（Vite 打包） | UI 介面、字幕編輯、時間軸（完整前端邏輯） |
 | **Preload Script** | `electron/preload.js` | `contextBridge` → `window.subtool`，安全橋接 Node 能力給前端 |
 
@@ -26,7 +29,8 @@ Main (main.js)
     │  ipcMain.handle(channel, ...)
     ├─→ 系統對話框（dialog）
     ├─→ 本機檔案系統（fs）
-    ├─→ ffmpeg / ffprobe（child_process.spawn）
+    ├─→ 交付匯出 watchdog ─→ ffmpeg
+    ├─→ ffprobe／預覽快取 ffmpeg（child_process.spawn）
     └─→ mpv 子行程（spawn）
 ```
 
@@ -113,7 +117,7 @@ Main (main.js)
 | `getAll()` | `queue:getAll` | R→M | 取得全部工作、暫停狀態與並行數 |
 | `setPause(v)` | `queue:pause` | R→M | 設定佇列層級暫停；不會中斷已經執行中的工作 |
 | `setConcurrency(v)` | `queue:setConcurrency` | R→M | 設定同時執行數（1–3） |
-| `stopJob(id)` | `queue:stopJob` | R→M | 停止工作；執行中會 kill ffmpeg 並刪除半成品 |
+| `stopJob(id)` | `queue:stopJob` | R→M | 停止工作；執行中會要求 watchdog 結束 ffmpeg，等程序關閉後再刪除半成品與釋放輸出鎖 |
 | `retryJob(id)` | `queue:retryJob` | R→M | 重新驗證來源後，以原本凍結快照重試 |
 | `clearJob(id)` | `queue:clearJob` | R→M | 清除工作紀錄及其 JSON／ASS 暫存與失敗 log |
 | `clearCompleted()` | `queue:clearCompleted` | R→M | 清除所有已完成工作 |
@@ -129,6 +133,19 @@ Main (main.js)
 恢復及開始前都會驗證 `clips[].path`、片段音訊及 `audioPlan` 的來源；缺檔工作標為
 `missing-source`，不會靜默輸出缺字幕或缺素材的成品。`done`／`failed`／`stopped`
 只保留在本次執行的畫面，不跨重啟恢復。
+
+交付匯出另在 `<userData>/export-queue/output-leases/<SHA-256>.lock/owner.json`
+記錄輸出路徑所有權。同一路徑在 `queued`／`running`／`stopping`／`missing-source`
+任一狀態已被保留時，新工作與重試都會回報 `OUTPUT_BUSY`，不會等前一份結束後再以
+`-y` 覆寫。每個執行中的工作由獨立 watchdog 持有 ffmpeg；正常停止會先等 ffmpeg
+真正關閉，才刪半成品並以 owner token 釋放 lease。若主程序被工作管理員強制終止，
+watchdog 會由 IPC disconnect 進入同一套清理；Windows 若連 watchdog 一起被終止，
+下次啟動會在還原工作 JSON **之前**復原殘留 lease。
+
+啟動復原只透過 owner 的 token pipe 確認仍存活的 watchdog；pipe 不存在時視為 stale，
+只刪半成品並以正確 token 釋放 lease，**絕不依持久化 PID 直接 taskkill**，避免 PID
+被 Windows 重用後誤殺其他程序。`owner.json` 損壞、token 不符或半成品刪除失敗時一律
+fail closed：保留 lease 並記錄警告，不能在身份或清理結果不明時放行同一路徑。
 
 主視窗與監控視窗的關閉語意不同：監控視窗存在時關主視窗只會隱藏主視窗，
 可用 `app:showMainWindow` 原樣叫回；接著再關監控視窗才會真正退出程式。判斷使用
@@ -202,6 +219,15 @@ webPreferences: {
 
 > 上列三者皆為**預覽／波形快取**，絕不可作為匯出輸入。影片匯出重讀母素材；MP4 對經混音／編組後的交付 stream 重新編 AAC（Mono 192k／Stereo 320k／5.1 640k），ProRes 與 WAV 使用 24-bit PCM。若母素材也已作為影片 input，音訊 filtergraph 必須重用該 input，而非另開同檔造成雙重磁碟讀取。
 
+### 交付匯出的崩潰隔離
+
+MP4／ProRes／WAV 的佇列工作不由 Electron main 直接持有 ffmpeg，而是由
+`export-watchdog.js` 啟動並監護；進度與 stderr 經 IPC 回傳 main。Proxy、ingest、
+波形等可重建的短期快取仍由 main 直接 spawn，以免把持久化工作語意套到快取流程。
+watchdog 必須在成功取得輸出 lease 後才可啟動 ffmpeg；結束碼非 0、使用者停止、
+main IPC 中斷時都必須先確認 ffmpeg 已關閉，再處理半成品。刪除失敗時保留 lease，
+讓後續工作無法靜默覆寫尚未清乾淨的路徑。
+
 ### 媒體快取
 
 快取鍵 = `SHA-1(basename + size + 前 1MB 內容)`（不含修改時間，跨電腦可用）
@@ -259,11 +285,17 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
   "directories": { "output": "release" },
   "files":         ["dist/**/*", "electron/**/*"],
   "extraResources":[{ "from": "font", "to": "font", "filter": ["**/*"] }],
-  "asarUnpack":    ["electron/mpv/**", "electron/ffmpeg/**"]
+  "asarUnpack":    [
+    "electron/mpv/**",
+    "electron/ffmpeg/**",
+    "electron/export-watchdog.js",
+    "electron/export-lease.js"
+  ]
 }
 ```
 
-- `asarUnpack` 確保 mpv.exe / ffmpeg.exe 不被 asar 打包，可被 `child_process.spawn` 直接呼叫。
+- `asarUnpack` 確保 mpv.exe／ffmpeg.exe 與獨立啟動的 export watchdog／lease 模組不被
+  asar 封裝，可由 `child_process.spawn` 直接執行並在安裝版正確 `require`。
 - **`extraResources` 是字型能不能用的關鍵**：`files` 只收 `dist/` 與 `electron/`，`font/`
   必須另外用 `extraResources` 送進 `resources/font`。v4.26 少了這一段 → **開發時字型正常、
   裝起來的 exe 一個字型都沒有**（v4.27.0 修）。`fontsRoot()` 依 dev（專案根）→
@@ -295,6 +327,8 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 | TC 監看在 mpv 模式不顯示 | 先確認播放器 TC 開關為開，再檢查透明 guide 是否建立；這是監看 overlay，與匯出視窗的「壓入時間碼浮水印」為兩個獨立開關。 |
 | 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |
 | 匯出 MP4 的音訊 bitrate 看似偏低 | 先看匯出完成狀態的「音訊 AAC 實測」。確認使用新版安裝檔；該值是輸出 AAC，而不是母素材原始 bitrate。若需要無損音訊，改用 ProRes（24-bit PCM）或 WAV。 |
+| 同一路徑無法再加入或重試匯出 | 先看監控視窗是否仍有 `queued`／`running`／`stopping`／`missing-source` 工作保留該路徑。若 `<userData>/export-queue/output-leases/` 仍有鎖，先完整重啟讓啟動復原處理；不要直接刪 `owner.json` 或依其中 PID 手動 taskkill。 |
+| 強制關閉後留下半成品或輸出鎖 | 重啟一次，確認啟動復原會在載入佇列前刪除 stale 半成品並釋放 lease。若仍保留，查看終端機的 `[Export watchdog]` 警告；通常代表 `owner.json` 損壞或檔案被其他程式占用，系統刻意 fail closed。 |
 
 ---
 

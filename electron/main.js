@@ -17,6 +17,8 @@ const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const QueueStore = require('./queue-store');
+const ExportLease = require('./export-lease');
+const ExportWatchdog = require('./export-watchdog');
 
 let mainWin = null;
 let _allowMainWindowClose = false;
@@ -243,16 +245,31 @@ function clearAllCache(currentSrc) {
 /* S2: 有 GPU 編碼器時啟用來源端硬體解碼（加速讀取 4K/MXF），對 -i 前插入 */
 function hwdecArgs() { return VENC && VENC !== 'libx264' ? ['-hwaccel', 'auto'] : []; }
 
-/* ---- 執行 ffmpeg，並回報進度 ---- */
-function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cwd } = {}) {
+function exportWatchdogScriptPath() {
+  const localPath = path.join(__dirname, 'export-watchdog.js');
+  if (!app.isPackaged) return localPath;
+  const unpackedPath = path.join(
+    process.resourcesPath,
+    'app.asar.unpacked',
+    'electron',
+    'export-watchdog.js',
+  );
+  return fs.existsSync(unpackedPath) ? unpackedPath : localPath;
+}
+
+/* ---- 執行 ffmpeg，並回報進度 ----
+   交付匯出改由獨立 watchdog 持有 ffmpeg；主程序被強制結束時 IPC disconnect 仍會觸發
+   子程序清理。Proxy／ingest 等短期工作維持原本直接 spawn，縮小變更面。 */
+function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cwd, outPath } = {}) {
   return new Promise((res, rej) => {
     if (!FFMPEG) return rej(new Error('找不到 ffmpeg'));
-    const p = spawn(FFMPEG, args, cwd ? { cwd } : {});
-    if (onProcess) onProcess(p);
     let err = '';       // 尾端（錯誤訊息用；會被截斷）
     const maps = [];    // 串流對應行（出現在輸出開頭，需單獨保留，否則被 err 截斷丟失）
     const isQueueExport = typeof jobId === 'string' && jobId.startsWith('export-') && EXPORT_QUEUE_DIR;
     if (isQueueExport) ensureExportQueueDir();
+    if (isQueueExport && (typeof outPath !== 'string' || !outPath)) {
+      return rej(new Error('匯出 watchdog 缺少輸出路徑'));
+    }
     const logPath = isQueueExport
       ? QueueStore.logPath(EXPORT_QUEUE_DIR, jobId)
       : path.join(app.getPath('userData'), `export-${Date.now()}-${jobId || 'task'}.log`);
@@ -289,16 +306,15 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
       return logFinishPromise;
     };
     writeLog(`> ffmpeg ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}\n\n`);
-    
+
     const startTime = Date.now();
     const speeds = [];
-
-    p.stderr.on('data', d => {
+    const consumeStderr = d => {
       const s = d.toString();
       writeLog(s);
       err += s; if (err.length > 8000) err = err.slice(-8000);
-      
-      const sMatch = /speed=\s*([\d\.]+)x/.exec(s);
+
+      const sMatch = /speed=\s*([\d.]+)x/.exec(s);
       if (sMatch) {
         speeds.push(parseFloat(sMatch[1]));
         if (speeds.length > 5) speeds.shift();
@@ -311,50 +327,99 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
         const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
         let etaS = null;
         if (speeds.length > 0) {
-           const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
-           if (avgSpeed > 0) etaS = (duration - t) / avgSpeed;
+          const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+          if (avgSpeed > 0) etaS = (duration - t) / avgSpeed;
         }
         const progData = { jobId, label, pct: Math.min(99, Math.round(t / duration * 100)), etaS, elapsedMs: Date.now() - startTime };
         if (sender) safeSend(sender, 'task-progress', progData);
         if (onProgress) onProgress(progData);
       }
-    });
-    p.on('error', (e) => {
-      finishLog();
-      rej(e);
-    });
-    p.on('close', async c => {
+    };
+
+    let watchdogFailure = null;
+    let settled = false;
+    const finishProcess = async (code, watchdogResult = null) => {
+      if (settled) return;
+      settled = true;
       await finishLog();
       if (sender) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
-      if (c === 0) {
+      if (code === 0 && (!watchdogResult || watchdogResult.ok)) {
         fs.unlink(logPath, () => {});
         res({ tail: err, maps });
-      } else {
-        let fullLog = err;
-        try { fullLog = fs.readFileSync(logPath, 'utf8'); } catch (readError) {
-          if (logError) fullLog += `\n\n[無法寫入完整記錄：${logError.message || logError}]`;
-        }
-        let summary = '';
-        const mNoSuchFile = fullLog.match(/(.*): No such file or directory/);
-        if (mNoSuchFile) {
-          summary = `找不到來源檔：${mNoSuchFile[1]}`;
-        } else if (fullLog.includes('No space left on device')) {
-          summary = '磁碟空間不足';
-        } else if (fullLog.match(/Unknown encoder '([^']+)'/)) {
-          summary = `編碼器不可用：${fullLog.match(/Unknown encoder '([^']+)'/)[1]}`;
-        } else if (fullLog.includes('Permission denied')) {
-          const mPerm = fullLog.match(/(.*): Permission denied/);
-          summary = `輸出路徑無寫入權限` + (mPerm ? `：${mPerm[1]}` : '');
-        } else if (fullLog.includes('Filtergraph') && (fullLog.includes('parse error') || fullLog.includes('error parsing'))) {
-          summary = 'Filtergraph 解析失敗';
-        } else {
-          const lines = fullLog.split('\n');
-          if (lines.length <= 40) summary = lines.join('\n');
-          else summary = lines.slice(0, 20).join('\n') + '\n...\n' + lines.slice(-20).join('\n');
-        }
-        rej(new Error(`[LOG_PATH]${logPath}[/LOG_PATH]ffmpeg 結束碼 ${c}\n${summary}`));
+        return;
       }
+
+      let fullLog = err;
+      try { fullLog = fs.readFileSync(logPath, 'utf8'); } catch (readError) {
+        if (logError) fullLog += `\n\n[無法寫入完整記錄：${logError.message || logError}]`;
+      }
+      let summary = '';
+      const mNoSuchFile = fullLog.match(/(.*): No such file or directory/);
+      if (watchdogFailure?.code === 'OUTPUT_BUSY') {
+        summary = `同一個輸出檔案正在由另一份工作使用：${outPath}`;
+      } else if (watchdogFailure?.message) {
+        summary = watchdogFailure.message;
+      } else if (watchdogResult?.cleanup?.retainedLease) {
+        summary = watchdogResult.cleanup.error?.message || '半成品尚未安全刪除，輸出鎖已保留';
+      } else if (mNoSuchFile) {
+        summary = `找不到來源檔：${mNoSuchFile[1]}`;
+      } else if (fullLog.includes('No space left on device')) {
+        summary = '磁碟空間不足';
+      } else if (fullLog.match(/Unknown encoder '([^']+)'/)) {
+        summary = `編碼器不可用：${fullLog.match(/Unknown encoder '([^']+)'/)[1]}`;
+      } else if (fullLog.includes('Permission denied')) {
+        const mPerm = fullLog.match(/(.*): Permission denied/);
+        summary = `輸出路徑無寫入權限` + (mPerm ? `：${mPerm[1]}` : '');
+      } else if (fullLog.includes('Filtergraph') && (fullLog.includes('parse error') || fullLog.includes('error parsing'))) {
+        summary = 'Filtergraph 解析失敗';
+      } else {
+        const lines = fullLog.split('\n');
+        if (lines.length <= 40) summary = lines.join('\n');
+        else summary = lines.slice(0, 20).join('\n') + '\n...\n' + lines.slice(-20).join('\n');
+      }
+      const failure = new Error(`[LOG_PATH]${logPath}[/LOG_PATH]ffmpeg 結束碼 ${code}\n${summary}`);
+      failure.code = watchdogFailure?.code || (watchdogResult?.cleanup?.retainedLease ? 'PARTIAL_CLEANUP_FAILED' : 'FFMPEG_EXIT');
+      failure.watchdogResult = watchdogResult;
+      rej(failure);
+    };
+
+    if (isQueueExport) {
+      const controller = ExportWatchdog.spawnExportWatchdog({
+        ffmpegPath: FFMPEG,
+        args,
+        cwd,
+        outPath,
+        jobId,
+        queueDir: EXPORT_QUEUE_DIR,
+      }, {
+        scriptPath: exportWatchdogScriptPath(),
+        onStderr: consumeStderr,
+        onMessage: message => {
+          if (message?.type === 'error' && !watchdogFailure) watchdogFailure = message;
+        },
+      });
+      controller.ready.catch(() => {});
+      if (onProcess) onProcess(controller);
+      controller.completion.then(result => {
+        const code = result.ok ? 0 : (Number.isInteger(result.code) ? result.code : 1);
+        return finishProcess(code, result);
+      }).catch(error => {
+        watchdogFailure ||= error;
+        return finishProcess(1, { ok: false, startupError: true });
+      });
+      return;
+    }
+
+    const p = spawn(FFMPEG, args, cwd ? { cwd } : {});
+    if (onProcess) onProcess(p);
+    p.stderr.on('data', consumeStderr);
+    p.on('error', async error => {
+      if (settled) return;
+      settled = true;
+      await finishLog();
+      rej(error);
     });
+    p.on('close', code => finishProcess(code));
   });
 }
 
@@ -529,7 +594,7 @@ if (!gotTheLock) {
     }
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     FFMPEG = detect('ffmpeg');
     FFPROBE = detect('ffprobe');
     VENC = detectVideoEncoder();
@@ -537,6 +602,15 @@ if (!gotTheLock) {
     EXPORT_QUEUE_DIR = path.join(app.getPath('userData'), 'export-queue');
     try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
     try { cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
+    try {
+      const recovery = await ExportWatchdog.recoverExportLeases(EXPORT_QUEUE_DIR);
+      for (const warning of recovery.warnings || []) {
+        console.error(`[Export watchdog] ${warning.message || JSON.stringify(warning)}`);
+      }
+    } catch (e) {
+      // 無法確認舊工作身份時 export lease 會保留並 fail closed；不可憑 owner 內的舊 PID 直接 taskkill。
+      console.error('[Export watchdog] 無法復原上次中斷的匯出：', e);
+    }
     try { QueueManager.restoreJobs(); } catch (e) { console.error('[Queue] 無法恢復匯出佇列：', e); }
     createWindow();
     app.on('activate', () => { showMainWindow(); });
@@ -746,10 +820,36 @@ let _queueConcurrency = 1;
 const _queueJobsMap = new Map();
 const _jobQueueList = [];
 let _activeQueueCount = 0;
+const OUTPUT_RESERVED_STATUSES = new Set(['queued', 'running', 'stopping', 'missing-source']);
 
 function ensureExportQueueDir() {
   if (!EXPORT_QUEUE_DIR) throw new Error('匯出佇列目錄尚未初始化');
   QueueStore.ensureDir(EXPORT_QUEUE_DIR);
+}
+
+function queueOutputKey(job) {
+  const outPath = job?.payload?.outPath;
+  if (typeof outPath !== 'string' || !outPath.trim()) {
+    const error = new Error('匯出工作缺少有效的輸出路徑');
+    error.code = 'INVALID_OUTPUT_PATH';
+    throw error;
+  }
+  return ExportLease.outputKey(outPath);
+}
+
+function assertQueueOutputAvailable(job, excludeId = job?.id) {
+  const key = queueOutputKey(job);
+  for (const existing of _queueJobsMap.values()) {
+    if (!existing || existing.id === excludeId || !OUTPUT_RESERVED_STATUSES.has(existing.status)) continue;
+    let existingKey;
+    try { existingKey = queueOutputKey(existing); } catch (error) { continue; }
+    if (existingKey !== key) continue;
+    const error = new Error(`同一個輸出檔案已在匯出佇列中：${job.payload.outPath}`);
+    error.code = 'OUTPUT_BUSY';
+    error.conflictingJobId = existing.id;
+    throw error;
+  }
+  return key;
 }
 
 function openQueueWindow() {
@@ -859,7 +959,18 @@ const QueueManager = {
     for (const job of jobs) {
       delete job._persistOrder;
       _queueJobsMap.set(job.id, job);
-      if (job.status === 'queued' && this.validateSources(job)) _jobQueueList.push(job);
+      const runnable = job.status === 'queued' && this.validateSources(job);
+      if (OUTPUT_RESERVED_STATUSES.has(job.status)) {
+        try {
+          // 舊版可能已把同一路徑的多份工作存進磁碟；依原佇列順序保留第一份，
+          // 其餘明確失敗，避免第一份完成釋放 lease 後第二份又以 -y 覆寫成品。
+          assertQueueOutputAvailable(job);
+        } catch (error) {
+          job.status = 'failed';
+          job.errorMsg = error.message || String(error);
+        }
+      }
+      if (runnable && job.status === 'queued') _jobQueueList.push(job);
     }
     _queuePaused = jobs.length > 0;
     for (const warning of warnings) {
@@ -877,7 +988,6 @@ const QueueManager = {
     this.shuttingDown = true;
     _queuePaused = true;
     const closingProcesses = [];
-    const partialOutputs = [];
     for (const job of _queueJobsMap.values()) {
       if (job.status !== 'running' && job.status !== 'stopping') continue;
       if (job.status === 'running') {
@@ -887,23 +997,31 @@ const QueueManager = {
         job.etaS = null;
         job.errorMsg = null;
       }
-      if (job.payload?.outPath) partialOutputs.push(job.payload.outPath);
       const active = activeJobs.get(job.id);
       if (active?.p) {
         active.shutdown = true;
-        closingProcesses.push(new Promise(resolve => {
-          let settled = false;
-          const done = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve();
-          };
-          const timer = setTimeout(done, 3000);
-          active.p.once('close', done);
-          if (active.p.exitCode !== null) done();
-          else { try { active.p.kill(); } catch (e) { done(); } }
-        }));
+        if (typeof active.stop === 'function') {
+          try { active.stop('shutdown'); } catch (e) {}
+          const completion = Promise.resolve(active.completion).catch(() => {});
+          closingProcesses.push(Promise.race([
+            completion,
+            new Promise(resolve => setTimeout(resolve, 5000)),
+          ]));
+        } else {
+          closingProcesses.push(new Promise(resolve => {
+            let settled = false;
+            const done = () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve();
+            };
+            const timer = setTimeout(done, 3000);
+            active.p.once('close', done);
+            if (active.p.exitCode !== null) done();
+            else { try { active.p.kill(); } catch (e) { done(); } }
+          }));
+        }
       }
     }
     try { this.persistAll(); } catch (e) {
@@ -912,29 +1030,13 @@ const QueueManager = {
     }
     this.shutdownPromise = (async () => {
       await Promise.all(closingProcesses);
-      for (const outPath of partialOutputs) {
-        let removed = false;
-        for (let attempt = 0; attempt < 10 && !removed; attempt++) {
-          try {
-            fs.unlinkSync(outPath);
-            removed = true;
-          } catch (e) {
-            if (e.code === 'ENOENT') {
-              removed = true;
-            } else if (attempt < 9) {
-              await new Promise(resolve => setTimeout(resolve, 100));
-            } else {
-              console.error(`[Queue] 無法刪除半成品 ${outPath}：`, e);
-            }
-          }
-        }
-      }
     })();
     return this.shutdownPromise;
   },
   addJob(job) {
     if (this.shuttingDown) throw new Error('程式正在關閉，無法再加入匯出工作');
     this.ensureDir();
+    assertQueueOutputAvailable(job);
     job.sourcePaths = QueueStore.collectSourcePaths(job.payload);
     QueueStore.persistJob(EXPORT_QUEUE_DIR, job, _queueJobsMap.size);
     _queueJobsMap.set(job.id, job);
@@ -1028,8 +1130,11 @@ function stopQueueJob(jobId) {
     const active = activeJobs.get(jobId);
     if (active && active.p) {
       active.stopped = true;
-      try { active.p.kill(); } catch (err) {}
-      try { if (active.outPath) fs.unlinkSync(active.outPath); } catch (err) {}
+      if (typeof active.stop === 'function') {
+        try { active.stop('user-stop'); } catch (err) {}
+      } else {
+        try { active.p.kill(); } catch (err) {}
+      }
       job.status = 'stopping';
     } else {
       return false;
@@ -1061,6 +1166,13 @@ ipcMain.handle('queue:retryJob', (e, jobId) => {
     if (!QueueManager.validateSources(job)) {
       QueueManager.broadcastUpdate();
       return;
+    }
+    try {
+      assertQueueOutputAvailable(job);
+    } catch (error) {
+      job.errorMsg = error.message || String(error);
+      QueueManager.broadcastUpdate();
+      return false;
     }
     job.status = 'queued';
     job.pct = 0;
@@ -1264,10 +1376,17 @@ async function _runJobLogic(job) {
           '-ar', '48000', '-c:a', 'pcm_s24le', outPath];
         const t0 = Date.now();
         const label = `匯出 WAV PCM（${wav.channels} 軌）`;
-        await runFF(args, { duration: D, jobId, label, 
+        await runFF(args, { duration: D, jobId, label, outPath,
           onProgress: data => dispatch('task-progress', data),
-          onProcess: p => {
-            activeJobs.set(jobId, { p, outPath, stopped: false });
+          onProcess: controller => {
+            activeJobs.set(jobId, {
+              controller,
+              p: controller.process,
+              stop: controller.stop,
+              completion: controller.completion,
+              outPath,
+              stopped: false,
+            });
           }
         });
         activeJobs.delete(jobId);
@@ -1500,10 +1619,18 @@ async function _runJobLogic(job) {
       let usedEncoder = planned;
       const t0 = Date.now();
       try {
-        const rr = await runFF(args, { duration: D, jobId, label, cwd: TMP, 
+        const rr = await runFF(args, { duration: D, jobId, label, cwd: TMP, outPath,
           onProgress: data => dispatch('task-progress', data),
-          onProcess: p => {
-            activeJobs.set(jobId, { id: jobId, p, outPath, stopped: false });
+          onProcess: controller => {
+            activeJobs.set(jobId, {
+              id: jobId,
+              controller,
+              p: controller.process,
+              stop: controller.stop,
+              completion: controller.completion,
+              outPath,
+              stopped: false,
+            });
           }
         });
     // ffmpeg 的串流對應行是「實際使用」的地面真相（非我們的猜測）：
@@ -1529,11 +1656,12 @@ async function _runJobLogic(job) {
       const wasStopped = !!active?.stopped;
       activeJobs.delete(jobId);
       if (wasShutdown) {
-         try { fs.unlinkSync(outPath); } catch(e){}
-         // 關閉程式時 QueueManager 已把狀態退回 queued 並同步寫入磁碟。
+         // 關閉程式時 QueueManager 已把狀態退回 queued；半成品與 lease 只由 watchdog
+         // 在確認 ffmpeg close 後處理，主程序不可搶先 unlink。
       } else if (wasStopped) {
-         try { fs.unlinkSync(outPath); } catch(e){}
-         dispatch( 'task-progress', { jobId, stopped: true });
+         if (err.code === 'PARTIAL_CLEANUP_FAILED' || err.watchdogResult?.cleanup?.retainedLease)
+           dispatch('task-progress', { jobId, error: true, errorMsg: err.message });
+         else dispatch('task-progress', { jobId, stopped: true });
       } else {
          dispatch( 'task-progress', { jobId, error: true, errorMsg: err.message });
       }
