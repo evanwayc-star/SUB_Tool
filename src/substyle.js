@@ -28,7 +28,7 @@ import { State } from './state.js';
 export const STYLE_DEFAULTS = {
   font: '更紗黑體', // 預設字型＝font/ 底下的資料夾名（v4.29.4 由台北黑體改為更紗黑體）
   bold: true, italic: false,
-  fontSize: 80, color: '#ffffff',
+  fontSize: 60, color: '#ffffff',
   letterSpacing: 1,     // px 字距（ASS Spacing / CSS letter-spacing）；直書時不適用（逐字換行）
   lineSpacing: 1.0,     // 行高倍數 1.0~3.0（CSS line-height；ASS 行間墊高 hack）；直書時＝字與字的間隔
   outline: 2,           // px 框線厚度（ASS Outline / CSS text-stroke）
@@ -305,7 +305,7 @@ export function verticalAssCols(st, text, vww, vwh){
 
 /* ---- 常用樣式庫（跨專案；桌面存 config.json、網頁存 localStorage） ---- */
 /* 內建預設樣式：不可改名／刪除／編輯，永遠排在第一個，供隨時一鍵回到標準字幕外觀。
-   內容＝STYLE_DEFAULTS 本身（字級80／白字／黑框2／陰影0／中對齊＋下對齊／粗體／
+   內容＝STYLE_DEFAULTS 本身（字級60／白字／黑框2／陰影0／中對齊＋下對齊／粗體／
    座標(50%,90%)＝水平置中且貼齊 80% 安全框底線／角度0／無底色／字距行距皆 1）。
    ── 刻意直接引用 STYLE_DEFAULTS 而非另抄一份：兩份會漂掉。 */
 export const BUILTIN_PRESETS = [

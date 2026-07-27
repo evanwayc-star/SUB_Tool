@@ -72,7 +72,7 @@ describe('subtitle style project persistence', () => {
 
     expect(track).toMatchObject({
       name: 'Sparse',
-      fontSize: 80,
+      fontSize: 60,
       posX: 50,
       posY: 90,
       posPct: 90,
@@ -88,7 +88,7 @@ describe('subtitle style project persistence', () => {
       locked: false,
     });
     expect(effStyle(null, State.tracks[0])).toMatchObject({
-      fontSize: 80,
+      fontSize: 60,
       posY: 90,
     });
   });
@@ -159,7 +159,7 @@ describe('subtitle style project persistence', () => {
 
     const html = new DOMParser().parseFromString(readFileSync('index.html', 'utf8'), 'text/html');
     expect([...html.querySelectorAll('[data-ts-size]')].map(button => button.dataset.tsSize))
-      .toEqual(['60', '80']);
+      .toEqual(['45', '60']);
     for (const id of [
       'tsSize', 'tsColor', 'tsPosX', 'tsPosY', 'tsAngle', 'tsSpacing', 'tsLineSp',
       'tsOutlineColor', 'tsOutline', 'tsShadow', 'tsBgColor', 'tsBgAlpha',
