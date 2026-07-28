@@ -1,6 +1,6 @@
 {
   "name": "sub-tool",
-  "version": "5.5.1",
+  "version": "5.5.2",
   "description": "SUB Tool 上字幕工具",
   "author": "Evan",
   "repository": "evanwayc-star/SUB_Tool",
@@ -12,6 +12,7 @@
     "electron": "vite build && electron .",
     "electron:dev": "electron . --dev",
     "dist": "vite build && electron-builder",
+    "release:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-install.ps1",
     "lint": "eslint src",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -55,6 +56,7 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,

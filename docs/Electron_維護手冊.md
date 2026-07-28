@@ -279,7 +279,7 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 ```json
 {
   "win":  { "target": "nsis" },
-  "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true,
+  "nsis": { "oneClick": false, "perMachine": true, "allowToChangeInstallationDirectory": true,
             "createDesktopShortcut": true, "createStartMenuShortcut": true },
   "fileAssociations": [{ "ext": "subtool", "role": "Editor" }],
   "directories": { "output": "release" },
@@ -298,8 +298,11 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
   asar 封裝，可由 `child_process.spawn` 直接執行並在安裝版正確 `require`。
 - **`extraResources` 是字型能不能用的關鍵**：`files` 只收 `dist/` 與 `electron/`，`font/`
   必須另外用 `extraResources` 送進 `resources/font`。v4.26 少了這一段 → **開發時字型正常、
-  裝起來的 exe 一個字型都沒有**（v4.27.0 修）。`fontsRoot()` 依 dev（專案根）→
-  `resources/font` → 安裝目錄 順序尋找。
+   裝起來的 exe 一個字型都沒有**（v4.27.0 修）。`fontsRoot()` 依 dev（專案根）→
+   `resources/font` → 安裝目錄 順序尋找。
+- `nsis.perMachine: true` 讓正式 Setup 以 UAC 安裝到 `C:\Program Files\SUB Tool` 為預設。
+  Setup 會建立真正的系統安裝與捷徑，不能拿 `/D=<workspace>` 當封裝 smoke；完整防呆流程見
+  [`開發與驗證.md` 的「安裝器 smoke 的安全邊界」](開發與驗證.md#安裝器-smoke-的安全邊界)。
 - 換 ffmpeg build 前先讀 §7 與變更紀錄：**BtbN 的 gpl-shared 版會截斷多串流 MXF 的音訊**，
   目前固定用 gyan 的 full_build。任何抽換都必須拿真實的多音軌 MXF 驗過。
 
