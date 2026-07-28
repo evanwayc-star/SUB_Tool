@@ -364,6 +364,20 @@ export function assFontName(name){
   if (fam === 'Sarasa Mono TC Nerd') fam = 'Sarasa Mono TC';
   return fam;
 }
+/* ASS Fontname（檔內 family）→ UI/FontFace 使用的資料夾名。自產舊 ASS 沒有 round-trip
+   metadata 時也必須走這條反向對照，否則 DOM 只註冊了「台北黑體」卻收到
+   `Taipei Sans TC Beta`，預覽會靜默退回系統字型。第二個參數讓純函式測試不必碰 module state。 */
+export function uiFontNameFromAss(name, fonts=getFonts()){
+  const source=String(name ?? '').trim();
+  if(!source || !Array.isArray(fonts)) return source;
+  const wanted=source.toLocaleLowerCase();
+  const found=fonts.find(font=>{
+    const family=String(font?.family || '');
+    const emitted=family === 'Sarasa Mono TC Nerd' ? 'Sarasa Mono TC' : family;
+    return [font?.name, family, emitted].some(value=>String(value || '').trim().toLocaleLowerCase()===wanted);
+  });
+  return found?.name || source;
+}
 export async function loadFonts(force = false){
   if(_fonts && !force) return _fonts;
   _fonts = [];

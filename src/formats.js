@@ -6,8 +6,8 @@
 ============================================================================== */
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
-import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec } from './time.js';
-import { effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, STYLE_ONLY_KEYS } from './substyle.js';
+import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, getExactFps } from './time.js';
+import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';
 
 /* 舊版用 `//` 或兩個反斜線表示人工換行。URI 內的雙斜線是資料本身，
    包含 scheme 分隔與後續 path 中的 `//`，不可被誤切成多行。 */
@@ -59,6 +59,423 @@ function decodeAssDialogueText(value){
   return decodeLegacyLineBreaks(out);
 }
 
+/* SUB Tool 自家 ASS 的無損補充資料。標準 ASS 僅能存百分秒與有限樣式欄位，
+   因此用 [Script Info] 裡的 `;` 註解附帶 UTF-8/Base64 JSON；任何一般 ASS 播放器
+   都會忽略它。必須顯式 includeMetadata，避免 mpv 即時預覽／燒錄用 ASS 反覆夾帶整份專案。 */
+const SUBTOOL_META_VERSION = 1;
+const SUBTOOL_META_CHUNK_SIZE = 768;
+const MAX_SUBTOOL_META_CHUNKS = 16384;
+const MAX_SUBTOOL_META_BYTES = 8 * 1024 * 1024;
+const MAX_SUBTOOL_META_TRACKS = 1000;
+const MAX_SUBTOOL_META_CUES = 100000;
+const MAX_SUBTOOL_META_TEXT = 100000;
+const MAX_SUBTOOL_META_SECONDS = 1000000000;
+const MAX_SUBTOOL_META_FRAME = 1000000000000;
+const TRACK_META_KEYS = new Set(['name', 'visible', 'locked', 'posPct', ...Object.keys(STYLE_DEFAULTS)]);
+const CUE_META_KEYS = new Set(['id', 'startFrame', 'endFrame', 'start', 'end', 'text', 'track', 'timed', 'style']);
+const META_STYLE_BOOL_KEYS = new Set(['bold', 'italic', 'vertical', 'bgBox']);
+const META_STYLE_COLOR_KEYS = new Set(['color', 'outlineColor', 'bgColor']);
+const META_STYLE_NUMBER_LIMITS = {
+  fontSize: [10, 300], letterSpacing: [0, 30], lineSpacing: [1, 3], outline: [0, 10], shadow: [0, 10],
+  bgAlpha: [0, 1], posX: [0, 100], posY: [0, 100], angle: [-180, 180],
+};
+
+function hasOwn(obj, key){ return Object.prototype.hasOwnProperty.call(obj, key); }
+function isPlainRecord(value){
+  if(!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto=Object.getPrototypeOf(value);
+  return proto===Object.prototype || proto===null;
+}
+function boundedNumber(value, min, max){
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : null;
+}
+function safeLabel(value){
+  return typeof value === 'string' && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
+}
+function safeFont(value){
+  const label=safeLabel(value);
+  // metadata 會以 Base64 JSON 存放，預覽 CSS 也把字型名置於單引號內；逗號與分號都
+  // 是安全的字面字元，不能讓自產 ASS 因 `Family, Variant` 靜默失去 metadata。引號／
+  // 反斜線才會突破 CSS 字串；標準 ASS Style 的逗號限制則由其序列化層另行處理。
+  return label != null && !/['"{}\\]/.test(label) ? label : null;
+}
+function safeCueText(value){
+  return typeof value === 'string' && value.length <= MAX_SUBTOOL_META_TEXT && !/[\u0000\u007f]/.test(value) ? value : null;
+}
+function normalizeStyleValue(key, value){
+  if(META_STYLE_BOOL_KEYS.has(key)) return typeof value === 'boolean' ? value : null;
+  if(META_STYLE_COLOR_KEYS.has(key)) return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : null;
+  if(key === 'font') return safeFont(value);
+  if(key === 'align') return ['left', 'center', 'right'].includes(value) ? value : null;
+  if(key === 'valign') return ['top', 'middle', 'bottom'].includes(value) ? value : null;
+  const limits=META_STYLE_NUMBER_LIMITS[key];
+  return limits ? boundedNumber(value, limits[0], limits[1]) : null;
+}
+function normalizeStyleRecord(value, strict=false){
+  if(!isPlainRecord(value)) return strict ? null : {};
+  const out={};
+  for(const [key, raw] of Object.entries(value)){
+    if(!CUE_STYLE_KEYS.includes(key)){
+      if(strict) return null;
+      continue;
+    }
+    const clean=normalizeStyleValue(key, raw);
+    if(clean == null){
+      if(strict) return null;
+      continue;
+    }
+    out[key]=clean;
+  }
+  return out;
+}
+function normalizeTrackRecord(value, strict=false){
+  if(!isPlainRecord(value)) return strict ? null : {};
+  const out={};
+  for(const [key, raw] of Object.entries(value)){
+    if(!TRACK_META_KEYS.has(key)){
+      if(strict) return null;
+      continue;
+    }
+    let clean=null;
+    if(key === 'name') clean=safeLabel(raw);
+    else if(key === 'visible' || key === 'locked') clean=typeof raw === 'boolean' ? raw : null;
+    else if(key === 'posPct') clean=boundedNumber(raw, 0, 100);
+    else clean=normalizeStyleValue(key, raw);
+    if(clean == null){
+      if(strict) return null;
+      continue;
+    }
+    out[key]=clean;
+  }
+  return out;
+}
+function metadataTrackIndex(value){
+  return Number.isSafeInteger(value) && value >= 0 && value < MAX_SUBTOOL_META_TRACKS ? value : null;
+}
+function metadataSeconds(value){
+  const sec=Number(value);
+  return Number.isFinite(sec) && sec >= 0 && sec <= MAX_SUBTOOL_META_SECONDS ? sec : 0;
+}
+function metadataFrame(value, exactFps){
+  const frame=Math.round(metadataSeconds(value) * exactFps);
+  return Math.max(0, Math.min(MAX_SUBTOOL_META_FRAME, frame));
+}
+function metadataCue(value, exactFps){
+  if(!isPlainRecord(value)) return null;
+  const cue=value;
+  const start=boundedNumber(Number(cue.start), 0, MAX_SUBTOOL_META_SECONDS);
+  const end=boundedNumber(Number(cue.end), 0, MAX_SUBTOOL_META_SECONDS);
+  const text=safeCueText(cue.text);
+  const track=cue.track == null ? 0 : metadataTrackIndex(cue.track);
+  if(start == null || end == null || end < start || text == null || track == null) return null;
+  const out={
+    startFrame: metadataFrame(start, exactFps), endFrame: metadataFrame(end, exactFps), start, end,
+    text, track, timed: cue.timed !== false,
+  };
+  if((typeof cue.id === 'string' && safeLabel(cue.id) != null) || (typeof cue.id === 'number' && Number.isSafeInteger(cue.id))) out.id=cue.id;
+  if(cue.style != null){
+    const style=normalizeStyleRecord(cue.style, true);
+    if(style == null) return null;
+    if(Object.keys(style).length) out.style=style;
+  }
+  return out;
+}
+function buildSubtoolMetadata(cues, fps, tracks, options){
+  const safeFps=boundedNumber(Number(fps), 1, 240);
+  const sourceCues=Array.isArray(cues) ? cues : [];
+  const sourceTracks=Array.isArray(tracks) ? tracks : [];
+  if(safeFps == null || sourceCues.length > MAX_SUBTOOL_META_CUES || sourceTracks.length > MAX_SUBTOOL_META_TRACKS) return null;
+  const exactFps=getExactFps(safeFps);
+  const safeCues=sourceCues.map(cue=>metadataCue(cue, exactFps));
+  if(safeCues.some(cue=>cue == null)) return null;
+  const trackCount=Math.max(sourceTracks.length, ...safeCues.map(cue=>cue.track + 1), 0);
+  if(trackCount > MAX_SUBTOOL_META_TRACKS) return null;
+  // 不認識的舊欄位可以略過；但已知、可表示的樣式欄位若不安全/無效，不能靜默
+  // 漏掉後還宣稱「無損」。這種情況寧可不寫 metadata，讓標準 ASS fallback 接手。
+  const safeTracks=Array.from({length:trackCount}, (_, index)=>{
+    const source=sourceTracks[index];
+    const normalized=normalizeTrackRecord(source);
+    if(isPlainRecord(source)){
+      for(const key of TRACK_META_KEYS){
+        if(source[key] != null && !hasOwn(normalized, key)) return null;
+      }
+    }
+    return normalized;
+  });
+  if(safeTracks.some(track=>track == null)) return null;
+  return {
+    version: SUBTOOL_META_VERSION, fps: safeFps, dropFrame: !!(options && options.dropFrame),
+    tracks: safeTracks, cues: safeCues,
+  };
+}
+function utf8ToBase64(value){
+  const bytes=new TextEncoder().encode(value);
+  let binary='';
+  for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i, i+0x8000));
+  return btoa(binary);
+}
+function base64ToUtf8(value){
+  const binary=atob(value);
+  if(binary.length > MAX_SUBTOOL_META_BYTES) throw new Error('metadata too large');
+  const bytes=new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
+  return new TextDecoder('utf-8', {fatal:true}).decode(bytes);
+}
+function encodeSubtoolMetadata(metadata){
+  try{
+    const data=utf8ToBase64(JSON.stringify(metadata));
+    if(data.length > Math.ceil(MAX_SUBTOOL_META_BYTES / 3) * 4) return '';
+    const count=Math.ceil(data.length / SUBTOOL_META_CHUNK_SIZE);
+    if(!count || count > MAX_SUBTOOL_META_CHUNKS) return '';
+    const lines=[];
+    for(let index=0;index<count;index++) lines.push(`; SUBTOOL-META:${SUBTOOL_META_VERSION}:${index+1}/${count}:${data.slice(index*SUBTOOL_META_CHUNK_SIZE, (index+1)*SUBTOOL_META_CHUNK_SIZE)}`);
+    return lines.join('\n')+'\n';
+  }catch(e){ return ''; }
+}
+function validateMetadataCue(value, trackCount){
+  if(!isPlainRecord(value) || Object.keys(value).some(key=>!CUE_META_KEYS.has(key))) return null;
+  const required=['startFrame', 'endFrame', 'start', 'end', 'text', 'track', 'timed'];
+  if(required.some(key=>!hasOwn(value, key))) return null;
+  const startFrame=Number.isSafeInteger(value.startFrame) && value.startFrame >= 0 && value.startFrame <= MAX_SUBTOOL_META_FRAME ? value.startFrame : null;
+  const endFrame=Number.isSafeInteger(value.endFrame) && value.endFrame >= startFrame && value.endFrame <= MAX_SUBTOOL_META_FRAME ? value.endFrame : null;
+  const start=boundedNumber(value.start, 0, MAX_SUBTOOL_META_SECONDS);
+  const end=boundedNumber(value.end, start == null ? 0 : start, MAX_SUBTOOL_META_SECONDS);
+  const text=safeCueText(value.text);
+  const track=Number.isSafeInteger(value.track) && value.track >= 0 && value.track < trackCount ? value.track : null;
+  if(startFrame == null || endFrame == null || start == null || end == null || text == null || track == null || typeof value.timed !== 'boolean') return null;
+  const out={startFrame, endFrame, start, end, text, track, timed:value.timed};
+  if(hasOwn(value, 'id')){
+    if(!((typeof value.id === 'string' && safeLabel(value.id) != null) || (typeof value.id === 'number' && Number.isSafeInteger(value.id)))) return null;
+    out.id=value.id;
+  }
+  if(hasOwn(value, 'style')){
+    const style=normalizeStyleRecord(value.style, true);
+    if(style == null) return null;
+    out.style=style;
+  }
+  return out;
+}
+function validateSubtoolMetadata(value){
+  const keys=new Set(['version', 'fps', 'dropFrame', 'tracks', 'cues']);
+  if(!isPlainRecord(value) || Object.keys(value).some(key=>!keys.has(key))) return null;
+  if(value.version !== SUBTOOL_META_VERSION || !hasOwn(value, 'fps') || !hasOwn(value, 'dropFrame') || !Array.isArray(value.tracks) || !Array.isArray(value.cues)) return null;
+  const fps=boundedNumber(value.fps, 1, 240);
+  if(fps == null || typeof value.dropFrame !== 'boolean' || value.tracks.length > MAX_SUBTOOL_META_TRACKS || value.cues.length > MAX_SUBTOOL_META_CUES) return null;
+  const tracks=[];
+  for(const track of value.tracks){
+    const clean=normalizeTrackRecord(track, true);
+    if(clean == null) return null;
+    tracks.push(clean);
+  }
+  const cues=[];
+  for(const cue of value.cues){
+    const clean=validateMetadataCue(cue, tracks.length);
+    if(clean == null) return null;
+    cues.push(clean);
+  }
+  return {version:SUBTOOL_META_VERSION, fps, dropFrame:value.dropFrame, tracks, cues};
+}
+function decodeSubtoolMetadata(lines){
+  const chunks=[];
+  let sawMetadata=false;
+  for(const line of lines){
+    if(!/^\s*;\s*SUBTOOL-META:/i.test(line)) continue;
+    sawMetadata=true;
+    const match=line.match(/^\s*;\s*SUBTOOL-META:(\d+):(\d+)\/(\d+):([A-Za-z0-9+/=]+)\s*$/i);
+    if(!match) return null;
+    const version=Number(match[1]), index=Number(match[2]), total=Number(match[3]);
+    if(version !== SUBTOOL_META_VERSION || !Number.isSafeInteger(index) || !Number.isSafeInteger(total) || index < 1 || index > total || total > MAX_SUBTOOL_META_CHUNKS) return null;
+    chunks.push({index, total, data:match[4]});
+  }
+  if(!sawMetadata) return null;
+  if(!chunks.length || chunks.some(chunk=>chunk.total !== chunks[0].total) || chunks.length !== chunks[0].total) return null;
+  const ordered=Array(chunks[0].total);
+  for(const chunk of chunks){ if(ordered[chunk.index-1] != null) return null; ordered[chunk.index-1]=chunk.data; }
+  if(ordered.some(chunk=>typeof chunk !== 'string')) return null;
+  const base64=ordered.join('');
+  if(base64.length > Math.ceil(MAX_SUBTOOL_META_BYTES / 3) * 4 || base64.length % 4) return null;
+  try{ return validateSubtoolMetadata(JSON.parse(base64ToUtf8(base64))); }catch(e){ return null; }
+}
+
+/* ---- 外部 ASS 樣式（best effort） ---------------------------------------
+   SUB Tool 的每一句只有一組完整樣式，無法表示 ASS 的字內局部變色、\t 動畫、\move
+   或 karaoke。因此只採用 Style 行與「文字前」靜態 override；這是一般剪輯軟體輸出的
+   常見形式，也避免把文字中途才開始的樣式錯套到整句前半。所有值都先限縮到本工具的
+   可表示範圍，尤其 font 會進 CSS 的單引號字串，不能直接信任外部檔案。 */
+const ASS_DEFAULT_STYLE_FIELDS=['name','fontname','fontsize','primarycolour','secondarycolour','outlinecolour','backcolour','bold','italic','underline','strikeout','scalex','scaley','spacing','angle','borderstyle','outline','shadow','alignment','marginl','marginr','marginv','encoding'];
+const ASS_DEFAULT_EVENT_FIELDS=['layer','start','end','style','name','marginl','marginr','marginv','effect','text'];
+
+function assFields(line){
+  return line.replace(/^Format:\s*/i,'').split(',').map(field=>field.trim().toLowerCase());
+}
+function assRecord(rest, fields){
+  const parts=splitN(rest, fields.length-1), out=Object.create(null);
+  fields.forEach((field,index)=>{ out[field]=parts[index]!==undefined ? parts[index].trim() : ''; });
+  return out;
+}
+function assFinite(value, min, max){
+  const raw=String(value??'').trim();
+  if(!raw) return null;
+  const number=Number(raw);
+  return Number.isFinite(number) && number>=min && number<=max ? number : null;
+}
+function assToggle(value){
+  const number=assFinite(value,-100000,100000);
+  return number == null ? null : number!==0;
+}
+function assScaled(value, scale, min, max){
+  const number=assFinite(value, -100000, 100000);
+  return number == null ? null : clamp(number*scale, min, max);
+}
+function assColour(value){
+  let raw=String(value??'').trim();
+  if(/^&H[0-9a-f]+&?$/i.test(raw)) raw=raw.replace(/^&H/i,'').replace(/&$/,'');
+  else if(/^-?\d+$/.test(raw)){
+    const decimal=Number(raw);
+    if(!Number.isSafeInteger(decimal)) return null;
+    raw=(decimal>>>0).toString(16).padStart(8,'0');
+  }else return null;
+  if(!/^[0-9a-f]{1,8}$/i.test(raw)) return null;
+  const bgr=raw.padStart(6,'0').slice(-6).toLowerCase();
+  const alpha=raw.length>6 ? parseInt(raw.slice(-8,-6),16) : 0;
+  return { color:`#${bgr.slice(4,6)}${bgr.slice(2,4)}${bgr.slice(0,2)}`, alpha:alpha/255 };
+}
+function assAlpha(value){
+  const raw=String(value??'').trim().replace(/^&H/i,'').replace(/&$/,'');
+  return /^[0-9a-f]{1,2}$/i.test(raw) ? parseInt(raw,16)/255 : null;
+}
+function assAlignment(value){
+  const n=Math.round(Number(value));
+  const horizontal={1:'left',2:'center',3:'right',4:'left',5:'center',6:'right',7:'left',8:'center',9:'right'}[n];
+  const vertical={1:'bottom',2:'bottom',3:'bottom',4:'middle',5:'middle',6:'middle',7:'top',8:'top',9:'top'}[n];
+  return horizontal && vertical ? {align:horizontal,valign:vertical} : null;
+}
+function assAngle(value){
+  const n=assFinite(value, -100000, 100000);
+  if(n == null) return null;
+  // ASS 的正角度與 CSS / SUB Tool 相反；超過一圈取等效角，仍維持 UI 可編輯範圍。
+  const reversed=-n;
+  return ((reversed+180)%360+360)%360-180;
+}
+function assPlayRes(info){
+  const x=assFinite(info.playresx, 1, 100000) || ASS_PLAY_RES.x;
+  const y=assFinite(info.playresy, 1, 100000) || ASS_PLAY_RES.y;
+  return {x,y,scaleY:ASS_PLAY_RES.y/y};
+}
+function assApplyMargins(style, record, res, preferRecord=false){
+  const margin=key=>{
+    const own=assFinite(record[key], 0, 100000);
+    // Event 的 0 是「沿用 Style」，Style 行本身的 0 則是合法的邊界位置。
+    return preferRecord ? (own != null && own > 0 ? own : null) : own;
+  };
+  const marginL=margin('marginl'), marginR=margin('marginr'), marginV=margin('marginv');
+  if(style.align==='left' && marginL != null) style.posX=clamp(marginL/res.x*100,0,100);
+  else if(style.align==='right' && marginR != null) style.posX=clamp(100-marginR/res.x*100,0,100);
+  if(style.valign==='top' && marginV != null) style.posY=clamp(marginV/res.y*100,0,100);
+  else if(style.valign==='bottom' && marginV != null) style.posY=clamp(100-marginV/res.y*100,0,100);
+}
+function assResetMarginAnchors(style){
+  // ASS Style 沒有自由座標；沒有 \pos 時，每次 Alignment 改變都必須從它的錨點重算，
+  // 不可沿用前一個 left/right/top/bottom 解析結果，否則 \an2 仍會留在舊左邊界。
+  style.posX=style.align==='left' ? 0 : style.align==='right' ? 100 : 50;
+  style.posY=style.valign==='top' ? 0 : style.valign==='bottom' ? 100 : 50;
+}
+function assStyleFromRecord(record, res){
+  const style={...STYLE_DEFAULTS};
+  const font=safeFont(uiFontNameFromAss(record.fontname)); if(font != null) style.font=font;
+  const fontSize=assScaled(record.fontsize,res.scaleY,10,300); if(fontSize != null) style.fontSize=fontSize;
+  const primary=assColour(record.primarycolour); if(primary) style.color=primary.color;
+  const outline=assColour(record.outlinecolour || record.tertiarycolour); if(outline) style.outlineColor=outline.color;
+  const back=assColour(record.backcolour); if(back){ style.bgColor=back.color; style.bgAlpha=clamp(1-back.alpha,0,1); }
+  const bold=assToggle(record.bold); if(bold != null) style.bold=bold;
+  const italic=assToggle(record.italic); if(italic != null) style.italic=italic;
+  const spacing=assScaled(record.spacing,res.scaleY,0,30); if(spacing != null) style.letterSpacing=spacing;
+  const outlineWidth=assScaled(record.outline,res.scaleY,0,10); if(outlineWidth != null) style.outline=outlineWidth;
+  const shadow=assScaled(record.shadow,res.scaleY,0,10); if(shadow != null) style.shadow=shadow;
+  const angle=assAngle(record.angle); if(angle != null) style.angle=angle;
+  const alignment=assAlignment(record.alignment); if(alignment) Object.assign(style,alignment);
+  const borderStyle=assFinite(record.borderstyle,1,3); if(borderStyle != null) style.bgBox=borderStyle===3;
+  assResetMarginAnchors(style);
+  assApplyMargins(style,record,res);
+  return style;
+}
+function assLeadingOverrideBlocks(value){
+  const text=String(value??''); let at=0; const blocks=[];
+  while(text[at]==='{'){
+    let end=at+1;
+    while(end<text.length){
+      if(text[end]==='\\'){ end+=2; continue; }
+      if(text[end]==='}') break;
+      end++;
+    }
+    if(end>=text.length) break;
+    blocks.push(text.slice(at+1,end)); at=end+1;
+  }
+  return blocks;
+}
+function assWithoutTransforms(value){
+  let out='', at=0;
+  while(at<value.length){
+    if(value[at]==='\\' && value[at+1]?.toLowerCase()==='t' && value[at+2]==='('){
+      let depth=1, end=at+3;
+      while(end<value.length && depth){ if(value[end]==='(') depth++; else if(value[end]===')') depth--; end++; }
+      if(!depth){ at=end; continue; }
+    }
+    out+=value[at++];
+  }
+  return out;
+}
+function assApplyLeadingOverrides(baseStyle, baseMargins, text, styles, styleMargins, res){
+  let style={...baseStyle}, margins=baseMargins, explicitPosition=false;
+  for(const block of assLeadingOverrideBlocks(text)){
+    const tags=assWithoutTransforms(block);
+    const matcher=/\\(fsp|fn|fs|3c|4c|4a|1c|c|bord|shad|frz|an|pos|r|b|i)(?:\(([^)]*)\)|([^\\{}]*))/gi;
+    let match;
+    while((match=matcher.exec(tags))){
+      const tag=match[1].toLowerCase(), raw=(match[2]!==undefined ? match[2] : match[3]).trim();
+      if(tag==='r'){
+        const resetKey=raw.toLowerCase(), reset=raw ? styles.get(resetKey) : baseStyle;
+        style={...(reset || baseStyle)};
+        margins=raw ? (styleMargins.get(resetKey)||baseMargins) : baseMargins;
+      }else if(tag==='fn'){
+        const font=safeFont(uiFontNameFromAss(raw)); if(font != null) style.font=font;
+      }else if(tag==='fs'){
+        const relative=/^[+-]/.test(raw), sourceSize=assFinite(raw,-100000,100000);
+        if(sourceSize != null){
+          const size=sourceSize*res.scaleY;
+          if(relative) style.fontSize=clamp(style.fontSize+size,10,300);
+          else if(size>0) style.fontSize=clamp(size,10,300);
+        }
+      }else if(tag==='fsp'){
+        const spacing=assScaled(raw,res.scaleY,0,30); if(spacing != null) style.letterSpacing=spacing;
+      }else if(tag==='bord'){
+        const outline=assScaled(raw,res.scaleY,0,10); if(outline != null) style.outline=outline;
+      }else if(tag==='shad'){
+        const shadow=assScaled(raw,res.scaleY,0,10); if(shadow != null) style.shadow=shadow;
+      }else if(tag==='b' || tag==='i'){
+        const enabled=assToggle(raw); if(enabled != null) style[tag==='b'?'bold':'italic']=enabled;
+      }else if(tag==='frz'){
+        const angle=assAngle(raw); if(angle != null) style.angle=angle;
+      }else if(tag==='an'){
+        const alignment=assAlignment(raw); if(alignment) Object.assign(style,alignment);
+      }else if(tag==='pos'){
+        const [x,y]=raw.split(',').map(part=>assFinite(part,-100000,100000));
+        if(x != null && y != null){ style.posX=clamp(x/res.x*100,0,100); style.posY=clamp(y/res.y*100,0,100); explicitPosition=true; }
+      }else if(tag==='c' || tag==='1c' || tag==='3c' || tag==='4c'){
+        const colour=assColour(raw);
+        if(colour){
+          if(tag==='3c') style.outlineColor=colour.color;
+          else if(tag==='4c') style.bgColor=colour.color;
+          else style.color=colour.color;
+        }
+      }else if(tag==='4a'){
+        const alpha=assAlpha(raw); if(alpha != null) style.bgAlpha=clamp(1-alpha,0,1);
+      }
+    }
+  }
+  return {style,margins,explicitPosition};
+}
+
 /* ===== 2. 字幕格式 解析 / 序列化 ====================================== */
 const SubFormats = {
   /* ---- SRT ---- */
@@ -82,32 +499,87 @@ const SubFormats = {
   /* ---- ASS ---- */
   parseASS(text){
     const out=[]; const lines=text.replace(/\r/g,'').split('\n');
-    let fmt=null;
+    const subtool=decodeSubtoolMetadata(lines);
+    const scriptInfo=Object.create(null), rawStyles=[], rawEvents=[];
+    let section='', styleFormat=null, eventFormat=null;
     for(const ln of lines){
       const t=ln.trim();
-      if(/^Format:/i.test(t) && /Start/i.test(t) && /Text/i.test(t)){
-        fmt=t.replace(/^Format:\s*/i,'').split(',').map(s=>s.trim().toLowerCase());
+      const sectionMatch=t.match(/^\[([^\]]+)]$/);
+      if(sectionMatch){ section=sectionMatch[1].trim().toLowerCase(); continue; }
+      if(section==='script info'){
+        const info=t.match(/^([^:;][^:]*):\s*(.*)$/);
+        if(info) scriptInfo[info[1].trim().toLowerCase()]=info[2].trim();
+      }
+      if(/^Format:/i.test(t)){
+        const fields=assFields(t);
+        if(section==='v4+ styles' || section==='v4 styles') styleFormat=fields;
+        else if(section==='events' || (fields.includes('start') && fields.includes('text'))) eventFormat=fields;
+        continue;
+      }
+      if(/^Style:/i.test(t) && (section==='v4+ styles' || section==='v4 styles')){
+        rawStyles.push(assRecord(t.replace(/^Style:\s*/i,''),styleFormat||ASS_DEFAULT_STYLE_FIELDS));
+        continue;
       }
       if(/^Dialogue:/i.test(t)){
         const rest=t.replace(/^Dialogue:\s*/i,'');
-        const f=fmt||['layer','start','end','style','name','marginl','marginr','marginv','effect','text'];
-        const nText=f.length; // 以欄位數切，text 取剩餘
-        const parts=splitN(rest,nText-1);
-        const rec={}; f.forEach((k,idx)=>rec[k]=parts[idx]!==undefined?parts[idx]:'');
-        const txt=decodeAssDialogueText(rec.text||'').trim();
-        let track=0;
-        const nm=(rec.name||'').match(/atg?(\d+)/i); if(nm)track=Math.max(0,+nm[1]-1);
-        else if(/^\d+$/.test(rec.layer))track=clamp(+rec.layer,0,9);
-        out.push({start:assToSec(rec.start),end:assToSec(rec.end),text:txt,track});
+        rawEvents.push(assRecord(rest,eventFormat||ASS_DEFAULT_EVENT_FIELDS));
       }
     }
+    const res=assPlayRes(scriptInfo), styles=new Map(), styleMargins=new Map();
+    for(const record of rawStyles){
+      const name=String(record.name||'').trim();
+      if(name && safeLabel(name) != null){
+        const key=name.toLowerCase();
+        styles.set(key,assStyleFromRecord(record,res));
+        styleMargins.set(key,record);
+      }
+    }
+    for(const rec of rawEvents){
+      const txt=decodeAssDialogueText(rec.text||'').trim();
+      let track=0;
+      const nm=(rec.name||'').match(/atg?(\d+)/i); if(nm)track=Math.max(0,+nm[1]-1);
+      else if(/^\d+$/.test(rec.layer))track=clamp(+rec.layer,0,9);
+      const styleName=String(rec.style||'').trim().toLowerCase();
+      const sourceStyle=styles.get(styleName);
+      const sourceMargins=styleMargins.get(styleName);
+      const hasOverrides=assLeadingOverrideBlocks(rec.text).length>0;
+      const cue={start:assToSec(rec.start),end:assToSec(rec.end),text:txt,track};
+      if(sourceStyle || hasOverrides){
+        const withMargins={...(sourceStyle||STYLE_DEFAULTS)};
+        if(sourceMargins) assApplyMargins(withMargins,sourceMargins,res);
+        assApplyMargins(withMargins,rec,res,true);
+        const applied=assApplyLeadingOverrides(withMargins,sourceMargins,rec.text,styles,styleMargins,res);
+        // \an 的位置語意由最終 alignment 決定；若沒有明確 \pos，必須在 override
+        // 後以「Dialogue 非零 margin 優先、否則 Style margin」重算一次。
+        if(!applied.explicitPosition){
+          assResetMarginAnchors(applied.style);
+          if(applied.margins) assApplyMargins(applied.style,applied.margins,res);
+          assApplyMargins(applied.style,rec,res,true);
+        }
+        cue.style=applied.style;
+      }
+      out.push(cue);
+    }
+    // Array 仍是既有公開介面；metadata 故意做成非列舉屬性，舊的 map/filter/序列化程式
+    // 不會把它當成一條字幕。呼叫端只有在存在且已通過完整驗證時才可採用它。
+    if(subtool) Object.defineProperty(out, 'subtool', {value:subtool, enumerable:false});
+    // v5.4.14 前的自產 ASS 以「先減半格」寫百分秒，29.97 回匯時會穩定落到前一格。
+    // 新版一律寫 timing marker；只有舊 header 且沒有 marker/metadata 的檔案才交給匯入
+    // 規劃層依使用者確認的 FPS 反推原格，不能誤修一般外部 ASS。
+    const legacyHeader=lines.some(line=>/^\s*;\s*Script generated by SUB Tool\s*$/i.test(line));
+    const timingMarker=lines.some(line=>/^\s*;\s*SUBTOOL-ASS-TIME:2\s*$/i.test(line));
+    if(!subtool && legacyHeader && !timingMarker) Object.defineProperty(out, 'subtoolLegacy', {value:true, enumerable:false});
     return out;
   },
-  toASS(cues,fps,tracks=[],vw=1920,vh=1080, ww=1920, vww=1000, vwh=562){
+  toASS(cues,fps,tracks=[],vw=1920,vh=1080, ww=1920, vww=1000, vwh=562, options={}){
+    const metadataPayload=options && options.includeMetadata === true
+      ? buildSubtoolMetadata(cues, fps, tracks, options) : null;
+    const metadata=metadataPayload ? encodeSubtoolMetadata(metadataPayload) : '';
     const head=
 `[Script Info]
 ; Script generated by SUB Tool
-ScriptType: v4.00+
+; SUBTOOL-ASS-TIME:2
+${metadata}ScriptType: v4.00+
 WrapStyle: 0
 Collisions: Normal
 PlayResX: ${vww}

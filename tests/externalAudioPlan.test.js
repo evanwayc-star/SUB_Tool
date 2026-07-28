@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createRequire } from 'node:module';
+
+const ExportPlan=createRequire(import.meta.url)('../electron/export-plan.js');
 
 const mediaMock=vi.hoisted(()=>({
   tracks:[],
@@ -12,7 +15,10 @@ vi.mock('../src/media.js',()=>({Media:mediaMock,Wave:{}}));
 vi.mock('../src/ui.js',()=>({
   setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()
 }));
-vi.mock('../src/substyle.js',()=>({ASS_PLAY_RES:{x:1920,y:1080}}));
+vi.mock('../src/substyle.js', async importOriginal => {
+  const actual = await importOriginal();
+  return { ...actual, ASS_PLAY_RES:{x:1920,y:1080} };
+});
 vi.mock('../src/subtitles.js',()=>({snapAllCuesToFrames:vi.fn(),sortCues:vi.fn()}));
 vi.mock('../src/history.js',()=>({recordHistory:vi.fn()}));
 vi.mock('../src/timeline.js',()=>({drawTimeline:vi.fn(),layoutTimeline:vi.fn()}));
@@ -22,7 +28,7 @@ vi.mock('../src/notes.js',()=>({getNotesGeneralFileData:vi.fn(),getNotesEdiusFil
 vi.mock('../src/audio-routing.js',()=>({AudioRouting:{openOutputSettings:vi.fn()}}));
 
 import { State, ensureAudioBusCount, ensureAudioSourceMap, resetAudioProject } from '../src/state.js';
-import { _buildExportData, _buildProjectAudioPlan } from '../src/subio.js';
+import { _buildExportData, _buildProjectAudioPlan, _composeDeliveryAudioPlan } from '../src/subio.js';
 
 describe('external audio project export plan',()=>{
   beforeEach(()=>{
@@ -164,5 +170,71 @@ describe('external audio project export plan',()=>{
     expect(data.clips[0].audio).toEqual([{
       file:'C:/master/program.mxf',sourceStream:1,sourceChannel:2,volume:0.75
     }]);
+  });
+
+  it('keeps compiled A7/A8 source inputs when restoring a Stereo delivery record',()=>{
+    const compiled={
+      buses:Array.from({length:8},(_,index)=>({
+        id:`a${index+1}`,
+        inputs:[{
+          file:'C:/master/program.mxf',sourceStream:0,sourceChannel:index,
+          offset:0,trimStart:0,trimEnd:10,volume:1,fadeIn:0,fadeOut:0
+        }]
+      })),
+      streams:[{id:'all-mono',layout:'mono',busIds:['a1']}]
+    };
+    const deliveryRecord={
+      audioBuses:compiled.buses.map(bus=>({id:bus.id,name:bus.id,muted:false,solo:false,volume:1})),
+      audioPlan:{streams:[{id:'program',layout:'stereo',busIds:['a7','a8']}]}
+    };
+
+    const finalPlan=_composeDeliveryAudioPlan(compiled,deliveryRecord);
+    const normalized=ExportPlan._normalizeAudioPlan(finalPlan);
+    const inputs=[];
+    const filtergraph=[];
+    ExportPlan._buildPlannedAudio(normalized,inputs,filtergraph,0,10);
+
+    expect(finalPlan.buses[6].inputs[0]).toMatchObject({sourceChannel:6});
+    expect(finalPlan.buses[7].inputs[0]).toMatchObject({sourceChannel:7});
+    expect(finalPlan.streams).toEqual([{id:'program',layout:'stereo',busIds:['a7','a8']}]);
+    expect(inputs).toEqual(['-i','C:/master/program.mxf']);
+    expect(filtergraph.join('\n')).toContain('pan=mono|c0=c6');
+    expect(filtergraph.join('\n')).toContain('pan=mono|c0=c7');
+    expect(filtergraph.join('\n')).toContain('[apB6][apB7]join=inputs=2:channel_layout=stereo:map=0.0-FL|1.0-FR');
+    expect(filtergraph.join('\n')).not.toContain('anullsrc');
+  });
+
+  it('uses an explicitly configured WAV bus subset in its selected order',()=>{
+    const compiled={
+      buses:Array.from({length:8},(_,index)=>({
+        id:`a${index+1}`,
+        inputs:[{
+          file:'C:/master/program.mxf',sourceStream:0,sourceChannel:index,
+          offset:0,trimStart:0,trimEnd:10,volume:1,fadeIn:0,fadeOut:0
+        }]
+      })),
+      streams:[{id:'all-mono',layout:'mono',busIds:['a1']}]
+    };
+    const deliveryRecord={
+      format:'wav',
+      audioBuses:compiled.buses.map(bus=>({id:bus.id,name:bus.id,muted:false,solo:false,volume:1})),
+      wavBusIds:['a7','a8'],
+      audioPlan:{streams:[{id:'program',layout:'stereo',busIds:['a7','a8']}]}
+    };
+
+    const finalPlan=_composeDeliveryAudioPlan(compiled,deliveryRecord);
+    const normalized=ExportPlan._normalizeAudioPlan(finalPlan,{requireStreams:false});
+    const inputs=[];
+    const filtergraph=[];
+    const planned=ExportPlan._buildPlannedAudio(normalized,inputs,filtergraph,0,10);
+    const wav=ExportPlan._buildWavOutput(planned.busLabels,normalized,filtergraph);
+
+    expect(finalPlan.buses.map(bus=>bus.id)).toEqual(['a7','a8']);
+    expect(wav.channels).toBe(2);
+    expect(inputs).toEqual(['-i','C:/master/program.mxf']);
+    expect(filtergraph.join('\n')).toContain('pan=mono|c0=c6');
+    expect(filtergraph.join('\n')).toContain('pan=mono|c0=c7');
+    expect(filtergraph.join('\n')).toContain('join=inputs=2:channel_layout=FL+FR');
+    expect(filtergraph.join('\n')).not.toContain('anullsrc');
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { secToEncore, encoreToSec, snapTimeToFrame } from '../src/time.js';
+import { assToSec, getExactFps, secToASS, secToEncore, encoreToSec, snapTimeToFrame } from '../src/time.js';
 
 // frame number n (at 30000/1001) -> 對應秒數，用來建構 DF 測試向量
 const dfSec = (n) => (n * 1001) / 30000;
@@ -37,6 +37,41 @@ describe('snapTimeToFrame 影格格網', () => {
   });
   it('無 fps 時原值返回', () => {
     expect(snapTimeToFrame(1.234, 0)).toBe(1.234);
+  });
+});
+
+describe('ASS 百分秒時間碼', () => {
+  it('29.97 fps 以百分秒表示每一格，不能系統性提前到前一格', () => {
+    const fps = 29.97;
+    const exactFps = getExactFps(fps);
+
+    expect(secToASS(1, fps)).toBe('0:00:01.00');
+    for (const frame of [0, 1, 2, 29, 30, 31, 1798, 1799, 1800]) {
+      const source = frame / exactFps;
+      const restored = assToSec(secToASS(source, fps));
+      expect(Math.round(restored * exactFps)).toBe(frame);
+    }
+  });
+
+  it('ASS 時間不可晚於原始影格，避免 mpv 在 cue 起始格晚顯示', () => {
+    const exactFps = getExactFps(29.97);
+    for (const frame of [0, 1, 2, 29, 30, 31, 1798, 1799, 1800]) {
+      const source = frame / exactFps;
+      expect(assToSec(secToASS(source, 29.97))).toBeLessThanOrEqual(source + 0.0000001);
+    }
+  });
+
+  it('支援的 FPS 在前兩小時每一格都能回到原本影格', () => {
+    for (const fps of [23.976, 24, 25, 29.97, 30]) {
+      const exactFps = getExactFps(fps);
+      const lastFrame = Math.floor(exactFps * 2 * 60 * 60);
+      for (let frame = 0; frame <= lastFrame; frame++) {
+        const restored = assToSec(secToASS(frame / exactFps, fps));
+        if (Math.round(restored * exactFps) !== frame) {
+          throw new Error(`fps=${fps}, frame=${frame} 無法由 ${secToASS(frame / exactFps, fps)} 還原`);
+        }
+      }
+    }
   });
 });
 

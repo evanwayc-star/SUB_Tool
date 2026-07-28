@@ -29,11 +29,17 @@ function secToSRT(s){
   if(s<0)s=0; const ms=Math.round(s*1000);
   return `${pad(ms/3600000)}:${pad((ms/60000)%60)}:${pad((ms/1000)%60)},${pad(ms%1000,3)}`;
 }
+/* FPS-SYNC：ASS 只有百分秒，序列化不可自行做「半格補償」。這個值回匯後仍要能
+   由 snapTimeToFrame() 回到同一個影格；精確的自產影格則另由 ASS metadata 保存。 */
 function secToASS(s, fps=25){
-  if(s<=0) return "0:00:00.00";
-  const halfFrame = 0.5 / Math.max(fps || 25, 1);
-  const shifted = Math.max(0, s - halfFrame); // 提早半格，絕對確保 mpv_time >= ASS_time
-  const cs = Math.floor(shifted * 100);
+  // ASS 只有百分秒精度。不可為了「提早顯示」先減半格再向下截斷：29.97 fps 的
+  // 第一格會因此寫成 0.01 秒，回匯並吸附影格後便落到前一格。以「不晚於原始時間」
+  // 的百分秒截斷表示：誤差小於 10ms，仍會吸附回同一影格，且 libass/mpv 不會在 cue
+  // 起始格晚顯示；自身匯出的精確影格另由 ASS metadata 保留。
+  void fps; // 保留既有呼叫簽名；ASS 的時間欄位本身不含 FPS。
+  const sec = Number(s);
+  if(!Number.isFinite(sec) || sec<=0) return "0:00:00.00";
+  const cs = Math.floor(sec * 100 + 0.0000001);
   return `${Math.floor(cs/360000)}:${pad((cs/6000)%60)}:${pad((cs/100)%60)}.${pad(cs%100,2)}`;
 }
 /* FPS-SYNC：秒 → Encore 時碼分量(時/分/秒/格)。所有「數影格」的時碼顯示都【必須】走這裡，

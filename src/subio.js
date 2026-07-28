@@ -28,10 +28,10 @@ import { $, video } from './dom.js';
 import { decodeText, b64ToBytes, readFile, pickFile, encodeUTF16LE, bytesToB64, downloadBytes, baseName, escapeHTML } from './util.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
-import { ASS_PLAY_RES, getAllPresets } from './substyle.js'; // ASS 虛擬畫布：與 HTML 預覽的縮放基準共用同一組
+import { ASS_PLAY_RES, getAllPresets, loadFonts } from './substyle.js'; // ASS 虛擬畫布：與 HTML 預覽的縮放基準共用同一組
+import { buildSubtitleImportPlan } from './subimport.js';
 import { Media } from './media.js';
 import { setStatus, showToast, showOsd, openModal, closeModal } from './ui.js';
-import { snapAllCuesToFrames } from './subtitles.js';
 import { recordHistory } from './history.js';
 import { sortCues } from './subtitles.js';
 import { drawTimeline, layoutTimeline } from './timeline.js';
@@ -54,20 +54,63 @@ function detectSubFormat(text, ext) {
   return 'txt';
 }
 /* 匯入 / 匯出字幕 */
-function _askFpsModal() {
+function _askFpsModal(defaultValue = '29.97', detectedSubtoolAss = false) {
   return new Promise(resolve => {
     const FPS_OPTS = [
       { v: '23.976', l: '23.98' }, { v: '24', l: '24' }, { v: '25', l: '25' },
       { v: '29.97df', l: '29.97 (Drop-frame)' }, { v: '29.97', l: '29.97 (Non-Drop-frame)' }, { v: '30', l: '30' },
     ];
-    const opts = FPS_OPTS.map(o => `<option value="${o.v}"${o.v === '29.97' ? ' selected' : ''}>${o.l}</option>`).join('');
+    const opts = FPS_OPTS.map(o => `<option value="${o.v}"${o.v === defaultValue ? ' selected' : ''}>${o.l}</option>`).join('');
     openModal('選擇影格率 (FPS)',
-      `<p style="margin:0 0 12px;font-size:13px;color:var(--text-faint)">尚未載入影片，請先設定字幕的影格率。</p>` +
+      `<p style="margin:0 0 12px;font-size:13px;color:var(--text-faint)">${detectedSubtoolAss ? '已從 SUB Tool ASS 偵測原始影格率；可在此確認或改為其他值。' : '尚未載入影片，請先設定字幕的影格率。'}</p>` +
       `<label>FPS：<select id="importFpsSel" style="margin-left:6px">${opts}</select></label>`,
       [{ label: '確定', primary: true, act: () => { const val = $('importFpsSel').value; closeModal(); resolve(val); } },
       { label: '取消', act: () => { closeModal(); resolve(null); } }]
     );
   });
+}
+function _parseSubtitleText(text, kind) {
+  if (kind === 'srt') return SubFormats.parseSRT(text);
+  if (kind === 'ass') return SubFormats.parseASS(text);
+  if (kind === 'encore') return SubFormats.parseEncore(text, State.fps, State.dropFrame);
+  return SubFormats.parseTXT(text);
+}
+function _subtoolFpsValue(parsed) {
+  const metadata = parsed?.subtool;
+  const fps = Number(metadata?.fps);
+  if (!Number.isFinite(fps)) return null;
+  if (Math.abs(fps - 23.976) < 0.01) return '23.976';
+  if (Math.abs(fps - 24) < 0.01) return '24';
+  if (Math.abs(fps - 25) < 0.01) return '25';
+  if (Math.abs(fps - 29.97) < 0.01) return metadata.dropFrame ? '29.97df' : '29.97';
+  if (Math.abs(fps - 30) < 0.01) return '30';
+  return null;
+}
+function _parsedSubtitleCount(parsed) {
+  return Array.isArray(parsed?.subtool?.cues) ? parsed.subtool.cues.length : (parsed?.length || 0);
+}
+async function _prepareSubtitleImport(text, kind) {
+  // ASS Style 的 Fontname 是檔內 family；先完成字型清單/FontFace 載入，解析時才能反查
+  // 回 UI 資料夾名，避免舊自產 ASS 或無 metadata fallback 靜默退回系統字型。
+  if (kind === 'ass') await loadFonts();
+  // Encore 的時碼本身含「格」，必須先有 FPS 才能解析；ASS/SRT/TXT 則可先解析，
+  // 讓自產 ASS 在空白專案時把原始 FPS 預選給使用者。
+  if (!State.mediaName && kind === 'encore') {
+    const fpsVal = await _askFpsModal();
+    if (fpsVal === null) return null;
+    setFps(fpsVal);
+  }
+  let parsed;
+  try { parsed = _parseSubtitleText(text, kind); }
+  catch (e) { showToast('解析失敗：' + e.message); return null; }
+  if (_parsedSubtitleCount(parsed) === 0) { showToast('未解析到字幕（檢查格式/編碼）'); return null; }
+  if (!State.mediaName && kind !== 'encore') {
+    const sourceFps = _subtoolFpsValue(parsed);
+    const fpsVal = await _askFpsModal(sourceFps || '29.97', !!sourceFps);
+    if (fpsVal === null) return null;
+    setFps(fpsVal);
+  }
+  return parsed;
 }
 async function importSub() {
   let text, fileName = '';
@@ -78,53 +121,55 @@ async function importSub() {
     const f = await pickFile($('fileSub')); if (!f) return;
     const buf = await readFile(f); text = decodeText(buf); fileName = f.name;
   }
-  if (!State.mediaName) {
-    const fpsVal = await _askFpsModal(); if (fpsVal === null) return;
-    setFps(fpsVal);
-  }
   const ext = (fileName.split('.').pop() || '').toLowerCase();
   const kind = detectSubFormat(text, ext);
-  let parsed = [];
-  try {
-    if (kind === 'srt') parsed = SubFormats.parseSRT(text);
-    else if (kind === 'ass') parsed = SubFormats.parseASS(text);
-    else if (kind === 'encore') parsed = SubFormats.parseEncore(text, State.fps, State.dropFrame);
-    else parsed = SubFormats.parseTXT(text);
-  } catch (e) { showToast('解析失敗：' + e.message); return; }
-  if (parsed.length === 0) { showToast('未解析到字幕（檢查格式/編碼）'); return; }
-  _openImportModal(`匯入字幕到哪個軌道？（已辨識為 ${kind.toUpperCase()}，${parsed.length} 條）`, parsed, kind);
+  const parsed = await _prepareSubtitleImport(text, kind); if (!parsed) return;
+  _openImportModal(`匯入字幕到哪個軌道？（已辨識為 ${kind.toUpperCase()}，${_parsedSubtitleCount(parsed)} 條）`, parsed, kind);
 }
 function _openImportModal(title, parsed, kind) {
   const trackOpts = State.tracks.map((tk, i) => `<option value="${i}">軌道 ${i + 1}：${escapeHTML(tk.name)}</option>`).join('');
-  const suggestName = kind.toUpperCase() + ' 字幕';
+  const assImportPreview = kind === 'ass' ? buildSubtitleImportPlan(parsed, { fps: State.fps, target: 'new' }) : null;
+  const hasRoundTripMetadata = assImportPreview?.usedMetadata === true;
+  const suggestName = hasRoundTripMetadata && assImportPreview.trackPatch?.name
+    ? assImportPreview.trackPatch.name : (kind.toUpperCase() + ' 字幕');
   const presets = getAllPresets();
   const presetOpts = '<option value="">— 不套用自訂樣式 —</option>' + presets.map(p => `<option value="${escapeHTML(p.name)}">${escapeHTML(p.name)}</option>`).join('');
+  const styleControl = hasRoundTripMetadata
+    ? `<p style="margin:0 0 8px;font-size:13px;color:var(--text-faint)">偵測到 SUB Tool ASS：會還原原始軌道與逐句樣式。${assImportPreview.usedFrameTiming ? '' : '目前專案 FPS 不同，將依原始秒數匯入。'}</p>`
+    : `${assImportPreview?.usedLegacyTiming ? '<p style="margin:0 0 8px;font-size:13px;color:var(--text-faint)">偵測到舊版 SUB Tool ASS：會依目前 FPS 修正舊版百分秒造成的一格偏移。</p>' : ''}<label style="display:block;padding-bottom:8px">套用樣式：<select id="importPresetSel" style="margin-left:6px">${presetOpts}</select></label>`;
   
   openModal(title,
     `<label style="display:block;padding:8px 0">目標軌道：<select id="importTkSel" style="margin-left:6px">${trackOpts}<option value="new" selected>＋ 新增軌道…</option></select></label>` +
     `<div id="importNewTkRow" style="padding-bottom:8px">軌道名稱：<input type="text" id="importNewTkName" style="margin-left:6px;width:160px" value="${escapeHTML(suggestName)}"></div>` +
-    `<label style="display:block;padding-bottom:8px">套用樣式：<select id="importPresetSel" style="margin-left:6px">${presetOpts}</select></label>` +
+    styleControl +
     `<label style="display:block;padding-bottom:8px"><input type="checkbox" id="importAppend"> 附加（保留現有字幕）</label>`,
     [{
       label: '匯入', primary: true, act: () => {
         const selVal = $('importTkSel').value;
-        const presetVal = $('importPresetSel').value;
+        const presetVal = hasRoundTripMetadata ? '' : $('importPresetSel').value;
         const selectedPreset = presetVal ? getAllPresets().find(p => p.name === presetVal) : null;
+        // ASS 一律走純規劃層：自產 metadata 可無損還原；外部 Style/override 與舊版
+        // SUB Tool 的時間修正也會以完整逐句樣式/時間帶進來，不可只在 metadata 時才走它。
+        const importPlan = kind === 'ass'
+          ? buildSubtitleImportPlan(parsed, { fps: State.fps, target: selVal === 'new' ? 'new' : 'existing' }) : null;
         let targetTk;
         if (selVal === 'new') {
-          const tkName = ($('importNewTkName').value.trim()) || ('軌道 ' + (State.tracks.length + 1));
+          const tkName = ($('importNewTkName').value.trim()) || importPlan?.trackPatch?.name || ('軌道 ' + (State.tracks.length + 1));
           const trk = newTrack(tkName);
-          if (selectedPreset && selectedPreset.style) Object.assign(trk, selectedPreset.style);
+          if (importPlan?.trackPatch) { Object.assign(trk, importPlan.trackPatch); trk.name = tkName; }
+          else if (selectedPreset && selectedPreset.style) Object.assign(trk, selectedPreset.style);
           State.tracks.push(trk); syncTrackCount();
           targetTk = State.tracks.length - 1;
         } else { targetTk = +selVal; }
         const append = selVal === 'new' || $('importAppend').checked;
         closeModal();
-        const newCues = parsed.map(p => {
-          const s = p.start || 0;
-          const e = p.end || 0;
+        const sourceCues = importPlan?.cues || parsed;
+        const newCues = sourceCues.map(p => {
+          const s = Number.isFinite(Number(p.start)) ? Number(p.start) : 0;
+          const e = Number.isFinite(Number(p.end)) ? Math.max(s, Number(p.end)) : s;
           const cue = { id: newId(), start: s, end: e, text: p.text || '', track: targetTk, timed: p.timed !== false && !(p.start === 0 && p.end === 0 && kind === 'txt') };
-          if (selVal !== 'new' && selectedPreset && selectedPreset.style) {
+          if (p.style && typeof p.style === 'object') cue.style = Object.assign({}, p.style);
+          else if (selVal !== 'new' && selectedPreset && selectedPreset.style) {
             cue.style = Object.assign({}, selectedPreset.style);
           }
           return cue;
@@ -133,7 +178,12 @@ function _openImportModal(title, parsed, kind) {
         if (append) { State.cues.push(...newCues); }
         else { State.cues = newCues; }
         
-        snapAllCuesToFrames();
+        // 只吸附本次匯入的 cue；附加到既有專案時不可順便改動其他字幕的影格位置。
+        newCues.forEach(c => {
+          if (c.timed === false) return;
+          c.start = snapTimeToFrame(c.start, State.fps, State.dropFrame);
+          c.end = Math.max(c.start, snapTimeToFrame(c.end, State.fps, State.dropFrame));
+        });
         
         State.listTrack = targetTk;
         if (!append) { State.selectedId = null; State.selectedIds = []; }
@@ -143,8 +193,12 @@ function _openImportModal(title, parsed, kind) {
           if (maxEnd > State.duration) { State.duration = maxEnd; emit('duration:known'); } else drawTimeline();
         }
         recordHistory('匯入字幕 ' + kind.toUpperCase());
-        setStatus(`已匯入 ${parsed.length} 條字幕到「${State.tracks[targetTk]?.name}」(${kind.toUpperCase()})`, 'ok');
-        showToast(`匯入 ${parsed.length} 條字幕`);
+        setStatus(`已匯入 ${newCues.length} 條字幕到「${State.tracks[targetTk]?.name}」(${kind.toUpperCase()})`, 'ok');
+        showToast(importPlan?.usedMetadata && !importPlan.usedFrameTiming
+          ? `匯入 ${newCues.length} 條字幕（來源 FPS 不同，已依秒數轉換）`
+          : importPlan?.usedLegacyTiming
+            ? `匯入 ${newCues.length} 條字幕（已修正舊版 ASS 的一格偏移）`
+            : `匯入 ${newCues.length} 條字幕`);
       }
     }, { label: '取消', act: closeModal }]);
   setTimeout(() => {
@@ -276,7 +330,9 @@ function getFileData(kind, cues, trackName) {
     fname = `ST_${projName}_SUB_${tkName}.srt`;
   }
   else if (kind === 'ass') { 
-    text = toASSFromState(cues); ext = 'ass'; 
+    // 只有可獨立儲存的 ASS 帶無損 metadata。mpv live ASS 與 ffmpeg 燒錄仍只吃標準 ASS，
+    // 避免每次刷新都夾帶整份專案資料。
+    text = toASSFromState(cues, { includeMetadata: true }); ext = 'ass';
     fname = `ST_${projName}_SUB_${tkName}.ass`;
   }
   else if (kind === 'encore') { 
@@ -303,9 +359,12 @@ function getXLSXFileData(trackDataList) {
 // 此處（匯出 .ass）兩份引數列重複、後援值漂移導致預覽與匯出的字幕排版對不上。
 // PlayRes 走 substyle 的 ASS_PLAY_RES 常數：HTML 預覽的縮放基準吃的是同一組數字，
 // 兩邊各寫一份遲早會漂（字級／框線／陰影全都相對 PlayResY 換算）。
-function toASSFromState(cues) {
+function toASSFromState(cues, options = {}) {
   const { x: RX, y: RY } = ASS_PLAY_RES;
-  return SubFormats.toASS(cues, State.fps, State.tracks, RX, RY, RX, RX, RY);
+  return SubFormats.toASS(cues, State.fps, State.tracks, RX, RY, RX, RX, RY, {
+    ...options,
+    dropFrame: State.dropFrame,
+  });
 }
 
 /* ===== 匯出影片（序列）：ProRes 422 HQ / MP4，燒錄可見軌字幕，音訊依混音器設定輸出 =====
@@ -558,6 +617,39 @@ function _buildExportData() {
     externalAudioCount:externalPlacements.length
   };
 }
+/* 交付列只儲存自己的 bus 編組與 stream 配置；真正可交付的母素材 inputs 來自每次
+   匯出時重新編譯的 audioPlan。若直接用儲存的 buses 取代它，所有 inputs 都會遺失，
+   export-plan 只能為選中的 bus 產生 anullsrc。 */
+function _composeDeliveryAudioPlan(compiledPlan, deliveryRecord) {
+  if (!compiledPlan) return null;
+  const finalPlan=JSON.parse(JSON.stringify(compiledPlan));
+  const savedBuses=deliveryRecord?.audioBuses;
+  if (Array.isArray(savedBuses)) {
+    const inputsById=new Map(finalPlan.buses.map(bus=>[String(bus.id),bus.inputs]));
+    finalPlan.buses=savedBuses.map(bus=>({
+      ...bus,
+      // 新增但尚無來源的 bus 仍明確是無聲；既有 bus 必須保留當次編譯的母素材座標。
+      inputs:inputsById.get(String(bus?.id))||[]
+    }));
+  }
+  if (Array.isArray(deliveryRecord?.audioPlan?.streams)) {
+    finalPlan.streams=JSON.parse(JSON.stringify(deliveryRecord.audioPlan.streams));
+  }
+  /* WAV 只有一條 interleaved stream；未特別設定時保留所有專案 A 軌的既有順序。
+     使用者在某一列 WAV 的「音軌」設定儲存後，則只取該列選中的 bus，並以該順序排成
+     WAV channels（例如 A7、A8 -> Stereo L/R）。不能只留下 streams，因為主程序的
+     WAV 路徑刻意忽略 mux streams，直接依 buses 產出。 */
+  if (deliveryRecord?.format === 'wav' && Array.isArray(deliveryRecord.wavBusIds)) {
+    const busesById=new Map(finalPlan.buses.map(bus=>[String(bus.id),bus]));
+    const seen=new Set();
+    finalPlan.buses=deliveryRecord.wavBusIds
+      .map(id=>String(id))
+      .filter(id=>id&&!seen.has(id)&&(seen.add(id),true))
+      .map(id=>busesById.get(id))
+      .filter(Boolean);
+  }
+  return finalPlan;
+}
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
 /* MP4 交付碼率的合理建議值（Mbps）＝像素數 × fps × 0.12 bit ÷ 1e6（H.264 中高品質經驗值）。
    ── v4.32：舊版固定預設 5Mbps、不看解析度 → 4K 用 5Mbps 會嚴重壓縮、畫面像被壓過
@@ -660,7 +752,11 @@ async function showExportVideoDialog(initialDraft=null) {
     <div style="font-size:13px;line-height:1.6;width:760px;display:flex;flex-direction:column;">
 
       <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:8px;">
-        <div style="font-weight:bold;font-size:14px;">交付清單</div>
+        <div>
+          <div style="font-weight:bold;font-size:14px;">交付清單</div>
+          <!-- FPS-SYNC：交付時長和播放器／時間軸一律共用 secToEncore()，不可自行拼時碼。 -->
+          <div id="evOutputDuration" data-seconds="${data.duration}" style="font-size:11px;color:var(--text-dim);margin-top:1px;">本次輸出時長：<b style="color:var(--text);font-variant-numeric:tabular-nums;">${secToEncore(data.duration, State.fps, State.dropFrame)}</b><span style="color:var(--text-faint);">（${data.duration.toFixed(3)} 秒）</span></div>
+        </div>
         <button id="evAddRowBtn" style="padding:2px 8px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">＋新增一列</button>
       </div>
       
@@ -680,7 +776,12 @@ async function showExportVideoDialog(initialDraft=null) {
     const ap = r.audioPlan;
     let audioDesc = '依專案音軌順序';
     const streams = ap?.streams || ap?.groups;
-    if (!isWav && Array.isArray(streams)) {
+    if (isWav && Array.isArray(r.wavBusIds)) {
+      const count=r.wavBusIds.length;
+      audioDesc=count===1 ? '已設定 Mono（1 軌）'
+        : count===2 ? '已設定 Stereo（2 軌）'
+        : `已設定 ${count} 軌（依選擇順序）`;
+    } else if (!isWav && Array.isArray(streams)) {
       const gCounts = streams.map(g => {
         if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '2.0';
         if (g.layout === '5.1') return '5.1';
@@ -723,7 +824,7 @@ async function showExportVideoDialog(initialDraft=null) {
           <button class="ev-dir-btn" data-idx="${i}" style="padding:2px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">瀏覽...</button>
           <div style="display:flex;align-items:center;gap:6px;">
             <span style="font-size:11px;color:var(--text-faint);">音訊: ${audioDesc}</span>
-            ${!isWav ? `<button class="ev-audio-btn" data-idx="${i}" style="padding:2px 6px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">⚙ 聲道</button>` : ''}
+            <button class="ev-audio-btn" data-idx="${i}" style="padding:2px 6px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;" title="設定此列輸出的音軌">⚙ 音軌</button>
           </div>
           ${!isWav ? `<label style="font-size:11px;display:flex;align-items:center;gap:4px;"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}>燒入TC</label>` : ''}
         </div>
@@ -840,9 +941,19 @@ async function showExportVideoDialog(initialDraft=null) {
       }
       
       closeModal();
-      AudioRouting.openOutputSettings(() => {
-        draft.deliverables[idx].audioPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout));
-        draft.deliverables[idx].audioBuses = JSON.parse(JSON.stringify(State.audioProject.buses));
+      const deliveryFormat=draft.deliverables[idx].format;
+      AudioRouting.openOutputSettings(({saved}={}) => {
+        if (saved) {
+          draft.deliverables[idx].audioPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout));
+          draft.deliverables[idx].audioBuses = JSON.parse(JSON.stringify(State.audioProject.buses));
+          if (deliveryFormat === 'wav') {
+            const seen=new Set();
+            draft.deliverables[idx].wavBusIds=(State.audioProject.exportLayout?.streams || [])
+              .flatMap(stream=>Array.isArray(stream?.busIds)?stream.busIds:[])
+              .map(id=>String(id))
+              .filter(id=>id&&!seen.has(id)&&(seen.add(id),true));
+          }
+        }
         
         if (!draft.deliverables[idx].nameModified) {
           draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
@@ -853,7 +964,7 @@ async function showExportVideoDialog(initialDraft=null) {
         if (typeof window.renderAll === 'function') window.renderAll();
         
         void showExportVideoDialog(draft);
-      });
+      }, null, null, { deliveryFormat });
     });
   }
 
@@ -936,16 +1047,7 @@ async function showExportVideoDialog(initialDraft=null) {
             w -= (w % 2); 
           }
 
-          let finalAudioPlan = null;
-          if (data.audioPlan) {
-            finalAudioPlan = JSON.parse(JSON.stringify(data.audioPlan));
-            if (r.audioBuses && Array.isArray(r.audioBuses)) {
-              finalAudioPlan.buses = r.audioBuses;
-            }
-            if (r.audioPlan && Array.isArray(r.audioPlan.streams)) {
-              finalAudioPlan.streams = r.audioPlan.streams;
-            }
-          }
+          const finalAudioPlan = _composeDeliveryAudioPlan(data.audioPlan,r);
 
           const jobId = await DESK.exportVideo({
             clips: data.clips,
@@ -1042,13 +1144,8 @@ async function importDropped(f) {
   const buf = await readFile(f); const text = decodeText(buf);
   const ext = (f.name.split('.').pop() || '').toLowerCase();
   const kind = detectSubFormat(text, ext);
-  let parsed;
-  if (kind === 'srt') parsed = SubFormats.parseSRT(text);
-  else if (kind === 'ass') parsed = SubFormats.parseASS(text);
-  else if (kind === 'encore') parsed = SubFormats.parseEncore(text, State.fps, State.dropFrame);
-  else parsed = SubFormats.parseTXT(text);
-  if (!parsed.length) { showToast('未解析到字幕'); return; }
-  _openImportModal(`拖入字幕（${kind.toUpperCase()}，${parsed.length} 條）`, parsed, kind);
+  const parsed = await _prepareSubtitleImport(text, kind); if (!parsed) return;
+  _openImportModal(`拖入字幕（${kind.toUpperCase()}，${_parsedSubtitleCount(parsed)} 條）`, parsed, kind);
 }
 
 /* ===== FPS 時間碼轉換 ===== */
@@ -1203,4 +1300,4 @@ function applyDurAdjPct() {
 }
 
 export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport, showExportVideoDialog,
-  _buildProjectAudioPlan, _externalAudioPlacements, _externalAudioTimelineEnd, _buildExportData };
+  _buildProjectAudioPlan, _externalAudioPlacements, _externalAudioTimelineEnd, _buildExportData, _composeDeliveryAudioPlan };

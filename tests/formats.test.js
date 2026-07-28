@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { SubFormats, splitN, decodeLegacyLineBreaks } from '../src/formats.js';
+import { uiFontNameFromAss } from '../src/substyle.js';
 
 describe('SRT round-trip', () => {
   it('cues -> toSRT -> parseSRT 還原 start/end/text', () => {
@@ -36,8 +37,9 @@ describe('ASS round-trip', () => {
     const ass = SubFormats.toASS(cues, 24, []);
     const parsed = SubFormats.parseASS(ass);
     expect(parsed).toHaveLength(2);
-    expect(parsed[0].start).toBeCloseTo(0.97, 2);
-    expect(parsed[0].end).toBeCloseTo(1.97, 2);
+    expect(parsed.subtool).toBeUndefined(); // 即時 mpv／燒錄用 ASS 預設不夾帶完整專案 metadata
+    expect(parsed[0].start).toBeCloseTo(1, 2);
+    expect(parsed[0].end).toBeCloseTo(2, 2);
     expect(parsed[0].text).toBe('Hi');
     expect(parsed[0].track).toBe(0);
     expect(parsed[1].text).toBe('A\nB');
@@ -61,6 +63,119 @@ describe('ASS round-trip', () => {
   it('只移除未跳脫 override tag，保留跳脫的大括號', () => {
     const line = 'Dialogue: 0,0:00:01.00,0:00:02.00,Default,atg1,0,0,0,,{\\b1}前\\{註\\}後{\\b0}';
     expect(SubFormats.parseASS(line)[0].text).toBe('前{註}後');
+  });
+
+  it('外部 ASS 會把 Style 與文字前 override 轉成依 PlayResY 縮放的完整逐句樣式', () => {
+    const text = `[Script Info]
+PlayResX: 1280
+PlayResY: 720
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Imported,Safe; Font,60,&H0000FFFF,&H00000000,&H00112233,&H800000FF,0,0,0,0,100,100,2,-12,3,4,2,8,100,100,72,1
+Style: Margins,Safe; Font,60,&H0000FFFF,&H00000000,&H00112233,&H800000FF,1,-1,0,0,100,100,2,-12,3,4,2,7,128,0,72,1
+Style: OverrideMargin,Safe; Font,60,&H0000FFFF,&H00000000,&H00112233,&H800000FF,0,0,0,0,100,100,2,0,1,2,0,2,100,100,100,1
+Style: Middle,Safe; Font,60,&H0000FFFF,&H00000000,&H00112233,&H800000FF,0,0,0,0,100,100,2,0,1,2,0,5,100,100,100,1
+Style: LeftToCenter,Safe; Font,60,&H0000FFFF,&H00000000,&H00112233,&H800000FF,0,0,0,0,100,100,2,0,1,2,0,7,100,100,100,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Imported,,0,0,0,,{\\fs90\\pos(640,360)\\c&HFF0000&\\3c&H0000FF00&\\bord2\\shad4\\fsp3\\frz-15\\an7\\b700\\i1}前\\{註\\}後
+Dialogue: 0,0:00:02.00,0:00:03.00,Margins,,0,0,0,,樣式邊界
+Dialogue: 0,0:00:03.00,0:00:04.00,OverrideMargin,,100,0,50,,{\\an7\\b700}覆寫對齊與邊界
+Dialogue: 0,0:00:04.00,0:00:05.00,Middle,,0,0,0,,中間對齊
+Dialogue: 0,0:00:05.00,0:00:06.00,LeftToCenter,,0,0,0,,{\\an2}左轉中下
+Dialogue: 0,0:00:06.00,0:00:07.00,Imported,,0,0,0,,前{\\b700}後
+Dialogue: 0,0:00:07.00,0:00:08.00,Imported,,0,0,0,,{\\t(0,100,\\fs100)}不套動畫`;
+
+    const parsed = SubFormats.parseASS(text);
+
+    expect(parsed[0]).toMatchObject({ start: 1, end: 2, text: '前{註}後', track: 0 });
+    expect(parsed[0].style).toMatchObject({
+      font: 'Safe; Font', fontSize: 135, color: '#0000ff', bold: true, italic: true,
+      letterSpacing: 4.5, outline: 3, outlineColor: '#00ff00', shadow: 6,
+      bgBox: true, bgColor: '#ff0000', bgAlpha: 1 - 128 / 255,
+      posX: 50, posY: 50, align: 'left', valign: 'top', angle: 15,
+    });
+    expect(parsed[1].style).toMatchObject({ posX: 10, posY: 10, align: 'left', valign: 'top' });
+    expect(parsed[2].style).toMatchObject({ bold: true, posX: 100 / 1280 * 100, posY: 50 / 720 * 100, align: 'left', valign: 'top' });
+    expect(parsed[3].style).toMatchObject({ posX: 50, posY: 50, align: 'center', valign: 'middle' });
+    expect(parsed[4].style).toMatchObject({ posX: 50, posY: 100 - 100 / 720 * 100, align: 'center', valign: 'bottom' });
+    expect(parsed[5].style).toMatchObject({ bold: false });
+    expect(parsed[6].style).toMatchObject({ fontSize: 90, bold: false });
+  });
+
+  it('ASS 內部 family 可反查回 DOM 註冊的 UI 字型名，未知系統字型保持原名', () => {
+    const fonts = [{ name: '台北黑體', family: 'Taipei Sans TC Beta' }];
+
+    expect(uiFontNameFromAss('Taipei Sans TC Beta', fonts)).toBe('台北黑體');
+    expect(uiFontNameFromAss('Arial', fonts)).toBe('Arial');
+  });
+
+  it('SUB Tool metadata 無損保留軌道與逐句樣式，以及 29.97 fps 的原始影格', () => {
+    const fps = 29.97;
+    const exactFps = 30000 / 1001;
+    const tracks = [
+      {
+        name: '主字幕', visible: true, locked: false,
+        font: '測試,字型;A', bold: true, italic: true, fontSize: 80, color: '#ffcc00',
+        letterSpacing: 2, lineSpacing: 1.4, outline: 3, outlineColor: '#112233', shadow: 2,
+        vertical: false, bgBox: true, bgColor: '#001122', bgAlpha: 0.6,
+        posX: 47, posY: 82, align: 'left', valign: 'middle', angle: 12,
+      },
+      {
+        name: '直書軌', visible: true, locked: true,
+        font: '另一字型', bold: false, italic: false, fontSize: 60, color: '#ffffff',
+        letterSpacing: 4, lineSpacing: 1.2, outline: 2, outlineColor: '#000000', shadow: 0,
+        vertical: true, bgBox: false, bgColor: '#000000', bgAlpha: 0.5,
+        posX: 62, posY: 75, align: 'right', valign: 'bottom', angle: -8,
+      },
+    ];
+    const cues = [
+      {
+        id: 'cue-main', start: 100 / exactFps, end: 136 / exactFps, text: '第一行\n第二行', track: 0,
+        style: { fontSize: 96, color: '#33ccff', posX: 41, posY: 77, angle: 15, bgBox: false },
+      },
+      {
+        id: 'cue-note', start: 0, end: 0, text: '未定時備註', track: 1, timed: false,
+        style: { vertical: true, letterSpacing: 6, lineSpacing: 1.8, align: 'center', valign: 'top' },
+      },
+    ];
+
+    const ass = SubFormats.toASS(
+      cues, fps, tracks, 1920, 1080, 1920, 1920, 1080,
+      { includeMetadata: true, dropFrame: true },
+    );
+    const parsed = SubFormats.parseASS(ass);
+
+    expect(ass).toMatch(/^; SUBTOOL-META:1:1\/\d+:/m);
+    expect(ass).toContain('Dialogue:');
+    expect(parsed.subtool).toMatchObject({
+      version: 1,
+      fps,
+      dropFrame: true,
+      tracks,
+      cues: [
+        {
+          id: 'cue-main', startFrame: 100, endFrame: 136, start: cues[0].start, end: cues[0].end,
+          text: cues[0].text, track: 0, timed: true, style: cues[0].style,
+        },
+        {
+          id: 'cue-note', startFrame: 0, endFrame: 0, start: 0, end: 0,
+          text: cues[1].text, track: 1, timed: false, style: cues[1].style,
+        },
+      ],
+    });
+  });
+
+  it('外部 ASS 或毀損 metadata 仍走標準 Dialogue 解析', () => {
+    const text = `[Script Info]
+; SUBTOOL-META:1:1/2:broken
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,外部字幕`;
+    const parsed = SubFormats.parseASS(text);
+
+    expect(parsed.subtool).toBeUndefined();
+    expect(parsed).toEqual([{ start: 1, end: 2, text: '外部字幕', track: 0 }]);
   });
 });
 

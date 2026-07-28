@@ -67,6 +67,8 @@ FPS-SYNC
 
 - 位於 `time.js`。`seek()`、`pause()`、時間軸拖曳（`timeline.js` 的 `snapFrame`）、逐格步進都用它對齊。
 - 確保播放點永遠落在整格、且與刻度同格。
+- ASS 的 Start/End 只有百分秒；`secToASS()` 必須直接向下表示原秒數，**不可**自行減半格後再截斷。
+  否則 29.97 的自產 ASS 回匯、再吸附格網時會穩定退到前一格。自產檔的精確影格由中繼資料保留。
 
 ### (I4) 「靜止讀數」必須同源於 `displayTime()`，**不可直接讀原始播放時間**
 
@@ -106,6 +108,7 @@ FPS-SYNC
 | 檔案 | 位置 | 作用 | 對應不變量 |
 |------|------|------|-----------|
 | `time.js` | `encoreParts()` | 唯一的「秒→時碼分量」換算 | I2 |
+| `time.js` | `secToASS()` | ASS 百分秒不預先位移；回匯可回同一影格 | I3 |
 | `time.js` | `snapTimeToFrame()` | 唯一的影格格網 | I3 |
 | `media.js` | `detectFpsWeb()` 區塊 | 實測 FPS（非檔名） | I1 |
 | `media.js` | `displayTime()` | 權威播放位置 | I4 |

@@ -860,10 +860,10 @@ function openQueueWindow() {
     return;
   }
   queueWin = new BrowserWindow({
-    width: 1080,
-    height: 700,
-    minWidth: 840,
-    minHeight: 520,
+    width: 1240,
+    height: 760,
+    minWidth: 960,
+    minHeight: 600,
     title: '匯出佇列監控',
     autoHideMenuBar: true,
     webPreferences: {
@@ -1179,6 +1179,7 @@ ipcMain.handle('queue:retryJob', (e, jobId) => {
     job.elapsedMs = 0;
     job.etaS = null;
     job.errorMsg = null;
+    delete job.completedAt;
     try {
       QueueManager.persistJob(job);
     } catch (e) {
@@ -1278,7 +1279,10 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
     QueueStore.writeAssFile(EXPORT_QUEUE_DIR, assRef, assText);
   }
   
-  const savedPayload = { ...payload, assText: null, outPath };
+  // 佇列顯示與 runFF 必須共用同一個實際交付時長：音訊 plan 的尾端若較長，
+  // ffmpeg 會以它延長成品，不能讓等待中的列仍顯示較短的前端宣告值。
+  const effectiveDuration = Math.max(0.05, _finiteNumber(duration, 0), _planDuration(audioPlan));
+  const savedPayload = { ...payload, assText: null, outPath, duration: effectiveDuration };
   const job = { id: jobId, status: 'queued', createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
   try {
     QueueManager.addJob(job);
@@ -1311,7 +1315,12 @@ async function _runJobLogic(job) {
     // 以往進度直接從 runFF 送到前端，導致佇列視窗無法同步。現在必須經由這裡透過 onProgress 攔截，
     // 以確保 QueueManager 能收到進度，並觸發 QueueManager.broadcastUpdate()。
     if (evt === 'task-progress') {
-      if (data.done) job.status = 'done';
+      if (data.done) {
+        job.status = 'done';
+        // 終端工作不跨重啟保存；這個時間只代表本次 ffmpeg 真正完成的當下，
+        // 不可由監控視窗開啟／重繪時的現在時間推算。
+        if (!Number.isFinite(job.completedAt) || job.completedAt <= 0) job.completedAt = Date.now();
+      }
       else if (data.error) {
         job.status = 'failed';
         job.errorMsg = data.errorMsg;

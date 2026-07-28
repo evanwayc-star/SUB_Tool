@@ -378,6 +378,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     );
 
     expect(finished.status, finished.errorMsg).toBe('done');
+    expect(finished.completedAt).toEqual(expect.any(Number));
     expect(existsSync(outPath)).toBe(true);
     expect(statSync(outPath).size).toBeGreaterThan(0);
     const leaseDir = path.join(profile, 'export-queue', 'output-leases');
@@ -493,6 +494,8 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-queue-restore-'));
     tempProfiles.add(profile);
     const outPath = path.join(profile, 'queued-output.mp4');
+    const audioPath = path.join(profile, 'queued-audio.wav');
+    writeFileSync(audioPath, Buffer.from('queued audio plan source'));
     const firstApp = await launchApp(profile);
     const firstMainTarget = await waitForTarget(
       firstApp.port,
@@ -514,7 +517,13 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       fps: 25,
       format: 'h264',
       videoKbps: 1000,
-      audioPlan: null,
+      audioPlan: {
+        buses: [
+          { id: 'a1', inputs: [{ file: audioPath, sourceStream: 0, sourceChannel: 0, offset: 0.5, trimStart: 1, trimEnd: 6 }] },
+          { id: 'a2', inputs: [{ file: audioPath, sourceStream: 0, sourceChannel: 1, offset: 0.5, trimStart: 1, trimEnd: 6 }] },
+        ],
+        streams: [{ id: 'stereo', layout: 'stereo', busIds: ['a1', 'a2'] }],
+      },
     };
     await firstMainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
     const duplicateError = await firstMainClient.evaluate(`(async () => {
@@ -529,6 +538,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const beforeRestart = await firstQueueClient.evaluate('window.queueAPI.getAll()');
     expect(beforeRestart.jobs).toHaveLength(1);
     expect(beforeRestart.jobs[0].status).toBe('queued');
+    expect(beforeRestart.jobs[0].payload.duration).toBe(5.5);
 
     await firstMainClient.evaluate('window.subtool.closeApp(); true');
     await waitUntil(
@@ -560,6 +570,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(afterRestart.jobs).toHaveLength(1);
     expect(afterRestart.jobs[0].status).toBe('queued');
     expect(afterRestart.jobs[0].payload.outPath).toBe(outPath);
+    expect(afterRestart.jobs[0].payload.duration).toBe(5.5);
 
     await secondMainClient.evaluate('window.subtool.closeApp(); true');
     await waitUntil(

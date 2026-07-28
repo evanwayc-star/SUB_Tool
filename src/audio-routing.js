@@ -330,7 +330,7 @@ function syncOutputDraftFromDialog(){
   });
   p.exportLayout={streams};
 }
-function openOutputSettings(onBack=null, originalLayout=null, originalBusState=null){
+function openOutputSettings(onBack=null, originalLayout=null, originalBusState=null, {deliveryFormat=null}={}){
   let p=project();
   // 只在完全沒有設定時建立 mono 預設。使用者已手動編組後，不能因重新開啟
   // 對話框就把未指定的 A 軌自動補回 mono stream。
@@ -340,6 +340,7 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
   // 聲道數與交付編組都可在此視窗內變更；取消必須把兩者一起還原，
   // 不能只回復 Stream 表格而留下剛才暫時建立的 A 軌。
   const initialBuses=originalBusState||structuredClone({mode:p.mode,buses:p.buses});
+  const wavDelivery=deliveryFormat==='wav';
   const streams=p.exportLayout.streams;
   const rows=streams.map(outputRowHtml).join('')||'<tr><td colspan="4" class="audio-route-empty">尚無可輸出的專案音訊軌。</td></tr>';
   const presetButtons=DELIVERY_PRESETS.map(preset=>{
@@ -352,10 +353,13 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
     }
     return btn;
   }).join('');
-  openModal('Audio Channel Configuration',
+  const outputHelp=wavDelivery
+    ? '這份 WAV 會把下列表格選取的專案音訊軌，依表格由上而下的順序寫入同一個多聲道 WAV；未在此列設定過的 WAV 仍會依全部 A 軌順序輸出。'
+    : '影片輸出會依下列 Stream mux 音訊；WAV 則固定把所有專案音訊軌依 A 軌順序寫入同一個多聲道 WAV。';
+  openModal(wavDelivery?'WAV 音軌設定':'Audio Channel Configuration',
     `<div class="audio-output-dialog">
-      <div class="audio-route-help">影片輸出會依下列 Stream mux 音訊；WAV 則固定把所有專案音訊軌依 A 軌順序寫入同一個多聲道 WAV。</div>
-      <div class="audio-bus-count"><label>專案音訊軌數
+      <div class="audio-route-help">${outputHelp}</div>
+      ${wavDelivery?'':`<div class="audio-bus-count"><label>專案音訊軌數
         <input id="audioOutputBusCount" type="number" min="0" max="${MAX_AUDIO_BUSES}" value="${p.buses.length}">
       </label><button id="audioOutputBusApply" type="button">套用</button>
         <button class="audio-output-count-preset" type="button" data-count="2">2</button>
@@ -365,10 +369,12 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
         <button class="audio-output-count-preset" type="button" data-count="10">10</button>
         <button class="audio-output-count-preset" type="button" data-count="16">16</button>
         <button class="audio-output-count-preset" type="button" data-count="18">18</button>
-      </div>
-      <div class="audio-delivery-presets"><span>常用交付配置</span><button id="audioOutputAllMono" type="button">全部Mono(依照專案總軌道數)</button>${presetButtons}</div>
-      <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>Stream</th><th>Output Channels</th><th>Project Channels</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="audio-output-actions"><button id="audioOutputAdd" type="button">＋ 新增 Stream</button></div>
+      </div>`}
+      ${wavDelivery
+        ? '<div class="audio-delivery-presets"><span>選取要依序寫入這份 WAV 的音軌群組；不會改動專案的 A 軌或來源配線。</span></div>'
+        : `<div class="audio-delivery-presets"><span>常用交付配置</span><button id="audioOutputAllMono" type="button">全部Mono(依照專案總軌道數)</button>${presetButtons}</div>`}
+      <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>${wavDelivery?'WAV 聲道群組':'Stream'}</th><th>${wavDelivery?'群組格式':'Output Channels'}</th><th>Project Channels</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="audio-output-actions"><button id="audioOutputAdd" type="button">＋ 新增 ${wavDelivery?'群組':'Stream'}</button></div>
     </div>`,
     [{label:'儲存輸出設定',primary:true,act:()=>{
       const busList=project().buses;
@@ -388,10 +394,10 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
         busIds.forEach(id=>seen.add(id));
         next.push({id:old.id,layout,busIds,...(name?{name}:{})});
       });
-      if(!valid){ showToast('每個 Stream 需要足夠且不重複的專案音訊軌。'); return; }
+      if(!valid){ showToast(wavDelivery?'每個 WAV 群組需要足夠且不重複的專案音訊軌。':'每個 Stream 需要足夠且不重複的專案音訊軌。'); return; }
       project().exportLayout.streams=next;
       closeModal(); updateViews('設定輸出音訊聲道');
-      if(onBack) onBack();
+      if(onBack) onBack({saved:true});
     }},{label:onBack?'返回配線':'取消',act:()=>{
       const current=project();
       State.audioProject=normalizeAudioProject({
@@ -401,14 +407,14 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
         exportLayout:initialLayout
       });
       Media.applyGains(); renderAudioTracks(); drawTimeline();
-      closeModal(); if(onBack) onBack();
+      closeModal(); if(onBack) onBack({saved:false});
     }}],{width:'860px'});
   setTimeout(()=>{
     const rerender=()=>{
       // 版面重畫會重新建立「可連續分配」的選項；先保存畫面上的暫存選擇，
       // 才不會在 Mono / Stereo / 5.1 切換時把使用者剛選的編組還原掉。
       syncOutputDraftFromDialog();
-      openOutputSettings(onBack,initialLayout,initialBuses);
+      openOutputSettings(onBack,initialLayout,initialBuses,{deliveryFormat});
     };
     const countInput=document.getElementById('audioOutputBusCount');
     document.getElementById('audioOutputBusApply')?.addEventListener('click',()=>{
@@ -423,13 +429,13 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
     document.getElementById('audioOutputAllMono')?.addEventListener('click',()=>{
       if(!applyAllMonoLayout()) return;
       updateViews('設定全部 Mono 輸出');
-      openOutputSettings(onBack,initialLayout,initialBuses);
+      openOutputSettings(onBack,initialLayout,initialBuses,{deliveryFormat});
     });
     document.querySelectorAll('.audio-delivery-preset').forEach(button=>button.addEventListener('click',()=>{
       const preset=DELIVERY_PRESETS.find(item=>item.id===button.dataset.preset);
       if(!preset||!applyDeliveryPreset(preset)) return;
       updateViews('套用常用輸出配置：'+preset.label);
-      openOutputSettings(onBack,initialLayout,initialBuses);
+      openOutputSettings(onBack,initialLayout,initialBuses,{deliveryFormat});
     }));
     document.querySelectorAll('.audio-output-layout,.audio-output-start').forEach(select=>select.addEventListener('change',()=>{
       // layout 改變時需要重建可選的連續 bus 範圍；只在 layout 欄變動才重畫。
@@ -452,7 +458,7 @@ function openOutputSettings(onBack=null, originalLayout=null, originalBusState=n
       const used=new Set(project().exportLayout.streams.map(stream=>stream.id));
       let n=1,id='out'+n; while(used.has(id)){ n++; id='out'+n; }
       project().exportLayout.streams.push({id,layout:'mono',busIds:[]});
-      openOutputSettings(onBack,initialLayout,initialBuses);
+      openOutputSettings(onBack,initialLayout,initialBuses,{deliveryFormat});
     });
   },0);
 }
