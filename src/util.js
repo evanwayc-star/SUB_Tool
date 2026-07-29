@@ -52,7 +52,12 @@ function downloadBytes(bytes,name,mime='application/octet-stream'){
   setTimeout(()=>URL.revokeObjectURL(url),2000);
 }
 function readFile(file){
-  return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsArrayBuffer(file);});
+  return new Promise((res,rej)=>{
+    const r=new FileReader();
+    r.onload=()=>res(r.result);
+    r.onerror=()=>rej(new Error(`無法讀取檔案 ${file.name} (大小: ${(file.size/1024/1024).toFixed(1)}MB)。可能是檔案過大超過瀏覽器記憶體限制，請改用桌面版。`));
+    r.readAsArrayBuffer(file);
+  });
 }
 function pickFile(inputEl){ return new Promise(res=>{
   inputEl.value=''; inputEl.onchange=()=>res(inputEl.files[0]||null); inputEl.click();

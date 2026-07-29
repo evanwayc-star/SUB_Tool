@@ -574,7 +574,7 @@ function _buildProjectAudioPlan(clips, externalSources=null) {
    主程序據此：每視訊軌各建整條時間軸（片段放 offset、間隙透明），由下而上 overlay 疊層；
    所有片段音訊各自 adelay 到 offset 後 amix（全軌混音）。單軌序列為此法之特例，結果與舊版一致。 */
 function _buildExportData() {
-  const rawSourceClips = [...State.clips].filter(c => c.path);
+  const rawSourceClips = [...State.clips].filter(c => c.path || c.name || c.web);
   const rawExternalSources=_projectExternalAudioSources();
   
   let expIn = State.exportIn != null ? State.exportIn : 0;
@@ -611,6 +611,7 @@ function _buildExportData() {
        匯出 filtergraph，才會和預覽一致。 */
     const image=c.type==='image';
     return {
+      name: c.name, web: c.web,
       path: c.path, type:image?'image':'video',
       in: +c.in.toFixed(3), out: +c.out.toFixed(3),
       offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0, audio: c.audioDetached?[]:_clipAudioSpec(c),
@@ -706,12 +707,12 @@ function _mixerSummary() {
   return `：目前 <b>${audible}</b>/${total} 條聲道會發聲`;
 }
 async function showExportVideoDialog(initialDraft=null) {
-  if (!IS_DESKTOP || !DESK.exportVideo) { showToast('影片匯出僅在桌面版可用'); return; }
+  if (IS_DESKTOP && !DESK.exportVideo) { showToast('桌面版匯出元件未就緒'); return; }
   const data = _buildExportData();
   if (!data) { showToast('沒有可匯出的影片或外部音訊'); return; }
   if (data.audioOnly && !data.audioPlan) { showToast('純音訊 WAV 匯出需要專案音軌路由'); return; }
   const unresolved = data.audioPlan?.unresolvedSources || [];
-  if (unresolved.length) {
+  if (IS_DESKTOP && unresolved.length) {
     showToast(`找不到可供匯出的音訊母素材：${unresolved.map(item=>item.name).join('、')}。請重新連結來源檔。`);
     return;
   }
@@ -765,14 +766,14 @@ async function showExportVideoDialog(initialDraft=null) {
   };
   
   // if this is the first open, try to use project path as outDir
-  if (!initialDraft) {
+  if (!initialDraft && IS_DESKTOP && DESK?.getStartupFile) {
     DESK.getStartupFile().then(p => {
       if (p) {
         draft.deliverables[0].outDir = p.replace(/\\[^\\]+$/, '');
         updateRows();
         checkConflicts();
       }
-    });
+    }).catch(err => { console.warn('Failed to get startup file', err); });
   }
 
   let html = `
@@ -847,8 +848,8 @@ async function showExportVideoDialog(initialDraft=null) {
         </div>
         <div style="display:flex;gap:12px;align-items:center;">
           <input type="text" class="ev-name" data-idx="${i}" value="${r.customName}" style="flex:2;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" placeholder="檔名 (含副檔名)">
-          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" readonly style="flex:1;padding:3px;font-size:12px;background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);cursor:pointer;" title="點擊瀏覽選擇目錄" placeholder="選擇輸出目錄...">
-          <button class="ev-dir-btn" data-idx="${i}" style="padding:2px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">瀏覽...</button>
+          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" readonly style="flex:1;padding:3px;font-size:12px;background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);cursor:pointer;${!IS_DESKTOP?'display:none;':''}" title="點擊瀏覽選擇目錄" placeholder="選擇輸出目錄...">
+          <button class="ev-dir-btn" data-idx="${i}" style="padding:2px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;${!IS_DESKTOP?'display:none;':''}">瀏覽...</button>
           <div style="display:flex;align-items:center;gap:6px;">
             <span style="font-size:11px;color:var(--text-faint);">音訊: ${audioDesc}</span>
             <button class="ev-audio-btn" data-idx="${i}" style="padding:2px 6px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;" title="設定此列輸出的音軌">⚙ 音軌</button>
@@ -1000,12 +1001,14 @@ async function showExportVideoDialog(initialDraft=null) {
     if (!msg) return true;
     
     // Check missing directories
-    const missingDir = draft.deliverables.findIndex(r => !r.outDir);
-    if (missingDir !== -1) {
-      msg.textContent = `錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`;
-      msg.style.display = 'block';
-      if (isSubmitting) alert(`錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`);
-      return false;
+    if (IS_DESKTOP) {
+      const missingDir = draft.deliverables.findIndex(r => !r.outDir);
+      if (missingDir !== -1) {
+        msg.textContent = `錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`;
+        msg.style.display = 'block';
+        if (isSubmitting) alert(`錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`);
+        return false;
+      }
     }
     
     // Check missing customName
@@ -1017,32 +1020,34 @@ async function showExportVideoDialog(initialDraft=null) {
       return false;
     }
 
-    const fullPaths = draft.deliverables.map(r => (r.outDir + '\\' + r.customName).toLowerCase());
-    const hasDupes = new Set(fullPaths).size !== fullPaths.length;
-    if (hasDupes) {
-      msg.textContent = '警告：交付清單內有重複的輸出路徑！';
-      msg.style.display = 'block';
-      if (isSubmitting) alert('錯誤：交付清單內有重複的檔名！比較後面的序列會覆蓋掉前面的，請修改檔名再送出。');
-      return false;
-    }
-    
-    try {
-      const conflicts = [];
-      for (const r of draft.deliverables) {
-        if (!r.outDir) continue;
-        const files = await DESK.listDir(r.outDir);
-        const existing = files.map(f => (typeof f === 'string' ? f : f.name).toLowerCase());
-        if (existing.includes(r.customName.toLowerCase())) {
-          conflicts.push(r.customName);
-        }
-      }
-      if (conflicts.length > 0) {
-        msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})，匯出將會直接覆蓋。`;
+    if (IS_DESKTOP) {
+      const fullPaths = draft.deliverables.map(r => (r.outDir + '\\' + r.customName).toLowerCase());
+      const hasDupes = new Set(fullPaths).size !== fullPaths.length;
+      if (hasDupes) {
+        msg.textContent = '警告：交付清單內有重複的輸出路徑！';
         msg.style.display = 'block';
-        if (isSubmitting) return confirm(`硬碟上已存在同名檔案：\n${conflicts.join(', ')}\n\n確定要直接覆蓋並繼續匯出嗎？`);
-        return true;
+        if (isSubmitting) alert('錯誤：交付清單內有重複的檔名！比較後面的序列會覆蓋掉前面的，請修改檔名再送出。');
+        return false;
       }
-    } catch(e){}
+      
+      try {
+        const conflicts = [];
+        for (const r of draft.deliverables) {
+          if (!r.outDir) continue;
+          const files = await DESK.listDir(r.outDir);
+          const existing = files.map(f => (typeof f === 'string' ? f : f.name).toLowerCase());
+          if (existing.includes(r.customName.toLowerCase())) {
+            conflicts.push(r.customName);
+          }
+        }
+        if (conflicts.length > 0) {
+          msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})，匯出將會直接覆蓋。`;
+          msg.style.display = 'block';
+          if (isSubmitting) return confirm(`硬碟上已存在同名檔案：\n${conflicts.join(', ')}\n\n確定要直接覆蓋並繼續匯出嗎？`);
+          return true;
+        }
+      } catch(e){}
+    }
     
     msg.style.display = 'none';
     return true;
@@ -1059,6 +1064,12 @@ async function showExportVideoDialog(initialDraft=null) {
         const assText = !audioOnly && /\nDialogue:/.test(toASSFromState(State.cues)) 
           ? toASSFromState(State.cues.map(c => ({...c, start: Math.max(0, (c.start || 0) - expIn), end: Math.max(0, (c.end || 0) - expIn)}))) 
           : null;
+        
+        if (!IS_DESKTOP) {
+          closeModal();
+          await _exportVideoWeb(data, draft.deliverables, expIn, assText);
+          return;
+        }
         
         for (const [idx, r] of draft.deliverables.entries()) {
           const isWav = r.format === 'wav';
@@ -1132,6 +1143,124 @@ async function showExportVideoDialog(initialDraft=null) {
     checkConflicts();
   }, 20);
 }
+
+async function _exportVideoWeb(data, deliverables, expIn, assText) {
+  // 【修正】在載入 FFmpeg (可能耗時較長導致使用者手勢 Token 失效) 前，先檢查是否因重新整理遺失 File 物件
+  if (!IS_DESKTOP) {
+    for (const c of data.clips) {
+      if (!c.path && !c.name && !c.web) continue;
+      const base = baseName(c.path || c.name || '');
+      const track = Media.tracks.find(t => (t.file && t.file.name === base) || (c.path && t.file?.path === c.path) || (c.path && t.file?.name === c.path) || (c.name && t.file?.name === c.name));
+      if (!track || !track.file) {
+        showToast(`請選擇遺失的媒體檔案：${base}`);
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'video/*,audio/*';
+        const file = await pickFile(input);
+        if (file) {
+          Media.tracks.push({ file: file }); // 存入 Media.tracks 供後續匯出使用
+        } else {
+          showToast(`已取消匯出：未提供 ${base}`);
+          return; // 使用者取消選擇，中斷匯出
+        }
+      }
+    }
+  }
+
+  try {
+    const ff = await Media.loadFFmpeg();
+    
+    // 如果有字幕，要求使用者提供一個本機字型檔，因為 WebAssembly 內沒有系統字型
+    let fontSelected = false;
+    if (assText) {
+      alert('【網頁版字幕燒錄】\\n為使 ffmpeg.wasm 順利燒錄字幕 (libass)，請選擇一個本機字型檔 (.ttf 或 .otf)。\\n這將用作所有字幕的預設字型。');
+      const inputEl = document.createElement('input');
+      inputEl.type = 'file';
+      inputEl.accept = '.ttf,.otf';
+      const fontFile = await pickFile(inputEl);
+      if (fontFile) {
+        const fontData = await readFile(fontFile);
+        try { ff.FS('mkdir', '/fonts'); } catch(e){}
+        ff.FS('writeFile', '/fonts/default_font.ttf', new Uint8Array(fontData));
+        // 強制替換 ASS 檔裡面的字型名稱為我們提供的預設字型，避免找不到
+        assText = assText.replace(/Fontname: [^,]+,/g, 'Fontname: DefaultFont,');
+        // 加入一條自訂字型的對應 (libass 可能需要 fonts.conf，但通常 fontsdir 下唯一字型會自動 fallback)
+        ff.FS('writeFile', 'sub.ass', new TextEncoder().encode(assText));
+        fontSelected = true;
+      } else {
+        showToast('未提供字型檔，本次匯出將不包含字幕');
+        assText = null;
+      }
+    }
+
+    for (const r of deliverables) {
+      if (r.format === 'wav') { showToast('網頁版暫不支援純音訊 WAV 匯出'); continue; }
+      if (r.format === 'prores') { showToast('網頁版暫不支援 ProRes 匯出'); continue; }
+      
+      const outName = r.customName || 'output.mp4';
+      setStatus(`開始匯出 ${outName}...`, 'busy');
+      
+      const memInputs = [];
+      const inputArgs = [];
+      
+      // 收集來源影片
+      for (const [idx, c] of data.clips.entries()) {
+        if (!c.path && !c.name && !c.web) continue;
+        const base = baseName(c.path || c.name || '');
+        const track = Media.tracks.find(t => (t.file && t.file.name === base) || (c.path && t.file?.path === c.path) || (c.path && t.file?.name === c.path) || (c.name && t.file?.name === c.name));
+        if (!track || !track.file) continue;
+        
+        const fileName = `in_${idx}_${base.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+        if (!memInputs.includes(fileName)) {
+          const fileData = await readFile(track.file);
+          ff.FS('writeFile', fileName, new Uint8Array(fileData));
+          memInputs.push(fileName);
+        }
+        
+        const start = Math.max(0, c.in);
+        const duration = c.out - c.in;
+        // 為了簡化，網頁版我們把每個 clip 當作獨立來源，後續用 filtergraph 串接或單純轉碼
+        inputArgs.push('-ss', start.toString(), '-t', duration.toString(), '-i', fileName);
+      }
+      
+      if (memInputs.length === 0) {
+        showToast(`無法匯出 ${outName}：找不到原始媒體檔案 (File/Blob)`);
+        continue;
+      }
+      
+      const outPath = `out_${Date.now()}.mp4`;
+      const kbps = r.kbps || 8000;
+      
+      let filtergraph = '';
+      if (assText && fontSelected) {
+        filtergraph = `ass=sub.ass:fontsdir=/fonts`;
+      }
+      
+      let args = [...inputArgs];
+      if (filtergraph) {
+        args.push('-vf', filtergraph);
+      }
+      args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-b:v', kbps + 'k', outPath);
+      
+      await ff.run(...args);
+      
+      const outData = ff.FS('readFile', outPath);
+      downloadBytes(outData.buffer, outName, 'video/mp4');
+      
+      // 清理 MEMFS
+      for (const f of memInputs) { try { ff.FS('unlink', f); } catch(e){} }
+      try { ff.FS('unlink', outPath); } catch(e){}
+      
+      setStatus(`已匯出 ${outName}`, 'ok');
+      showToast(`已匯出 ${outName}`);
+    }
+  } catch (err) {
+    setStatus('匯出失敗', '');
+    showToast('匯出失敗: ' + (err.message || err));
+    console.error(err);
+  }
+}
+
 function doExportXLSX(trackDataList) {
   if (!trackDataList.length) { showToast('所選軌道沒有字幕'); return; }
   const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);

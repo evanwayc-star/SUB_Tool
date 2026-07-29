@@ -31,13 +31,47 @@ function injectCSP() {
   };
 }
 
+function crossOriginIsolation() {
+  return {
+    name: 'cross-origin-isolation',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+        next();
+      });
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use((req, res, next) => {
+        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+        next();
+      });
+    }
+  };
+}
+
 // 開發：vite（HMR）；打包：輸出單一可雙擊的 dist/index.html（含內嵌 JS/CSS）
 export default defineConfig({
   base: './',
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
-  plugins: [injectCSP(), viteSingleFile()],
-  server: { port: 8777, host: true },
-  preview: { port: 8777, host: true },
+  plugins: [injectCSP(), viteSingleFile(), crossOriginIsolation()],
+  server: { 
+    port: 8777, 
+    host: true,
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp'
+    }
+  },
+  preview: { 
+    port: 8777, 
+    host: true,
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp'
+    }
+  },
   build: {
     outDir: 'dist',
     target: 'esnext',
@@ -46,3 +80,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 4000,
   },
 });
+
+
+
+

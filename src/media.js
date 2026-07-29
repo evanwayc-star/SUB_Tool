@@ -758,6 +758,7 @@ const Media = {
       this.registerAudioRouting(primary,[],2);
       const stereoTracks=this._connectStereo('video',primary);
       if(stereoTracks){
+        stereoTracks.forEach(t => t.file = file); // 保存 File 參考供匯出
         this.tracks.push(...stereoTracks);
         this.activeSource='video';
         this.usingWebAudio=false;
@@ -1452,7 +1453,7 @@ const Media = {
         const wav=ff.FS('readFile',`a${i}.wav`);
         const ab=await this.ctx.decodeAudioData(wav.buffer.slice(0));
         const g=this.ctx.createGain(); g.connect(this.master);
-        this.tracks.push(this.bindTrackRouting({id:'ex'+i,name:'音軌 '+(i+1),kind:'buffer',source:'video',buffer:ab,gain:g,muted:false,solo:false,volume:1},primary,{sourceStream:i,sourceChannel:0},i));
+        this.tracks.push(this.bindTrackRouting({id:'ex'+i,name:'音軌 '+(i+1),kind:'buffer',source:'video',buffer:ab,gain:g,muted:false,solo:false,volume:1,file:file},primary,{sourceStream:i,sourceChannel:0},i));
         try{ff.FS('unlink',`a${i}.wav`);}catch(e){}
       }
       try{ff.FS('unlink','in.media');ff.FS('unlink','prev.mp4');}catch(e){}
