@@ -14,6 +14,7 @@ class MediaPlayerAdapter {
   async subSet(assStr) { return this.mpv?.subSet(assStr).catch(()=>{}); }
   async subVisible(v) { return this.mpv?.subVisible?.(v).catch(()=>{}); }
   async show(v) { return this.mpv?.show(v).catch(()=>{}); }
+  async setGuide(data) { return this.mpv?.setGuide?.(data).catch(()=>{}); }
   async setImageGuide(data) { return this.mpv?.setImageGuide(data).catch(()=>{}); }
   onImagePointer(cb) { this.mpv?.onImagePointer?.(cb); }
   async screenshot(path) { return this.mpv?.screenshot(path); }

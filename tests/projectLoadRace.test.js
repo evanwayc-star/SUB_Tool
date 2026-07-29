@@ -25,9 +25,11 @@ vi.mock('../src/ui.js', () => uiMock);
 
 let History;
 let Project;
+let resetProject;
 let State;
 let desk;
 let on;
+let emit;
 
 function deferred() {
   let resolve;
@@ -102,8 +104,8 @@ describe('project load transactions', () => {
 
     ({ State } = await import('../src/state.js'));
     ({ History } = await import('../src/history.js'));
-    ({ Project } = await import('../src/project.js'));
-    ({ on } = await import('../src/events.js'));
+    ({ Project, resetProject } = await import('../src/project.js'));
+    ({ on, emit } = await import('../src/events.js'));
 
     History.stack = [];
     History.hi = -1;
@@ -195,6 +197,30 @@ describe('project load transactions', () => {
     expect(mediaMock.loadDesktopMedia).toHaveBeenCalledTimes(1);
     expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov');
     expect(State.cues.map(cue => cue.text)).toEqual(['B']);
+  });
+
+  it('does not restore a missing project playhead when a later project media becomes ready', async () => {
+    desk.stat.mockImplementation(path => Promise.resolve({
+      exists: path === 'C:/media/B.mov',
+    }));
+    mediaMock.loadDesktopMedia.mockImplementation(async () => {
+      emit('media:projectReady', { clips: [] });
+    });
+
+    await Project.loadDesktop(request('A', 'C:/media/missing-A.mov', 13));
+    await Project.loadDesktop(request('B', 'C:/media/B.mov'));
+
+    expect(mediaMock.seek).not.toHaveBeenCalled();
+  });
+
+  it('does not restore a saved playhead after starting a new project before media becomes ready', async () => {
+    desk.stat.mockResolvedValue({ exists: false });
+
+    await Project.loadDesktop(request('A', 'C:/media/missing-A.mov', 13));
+    await Project.startNewProject(() => resetProject());
+    emit('media:projectReady', { clips: [] });
+
+    expect(mediaMock.seek).not.toHaveBeenCalled();
   });
 
   it('keeps the transaction tail usable after an older load rejects', async () => {

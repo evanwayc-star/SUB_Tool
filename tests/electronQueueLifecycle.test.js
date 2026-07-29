@@ -582,4 +582,136 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     secondMainClient.close();
     secondQueueClient.close();
   }, 30000);
+
+  test('重試工作會依監控畫面與持久化順序優先執行，重開後也維持相同順序', async () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'subtool-queue-retry-order-'));
+    tempProfiles.add(profile);
+    const imagePath = path.join(profile, 'retry-order-source.png');
+    writeFileSync(
+      imagePath,
+      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+    );
+    const makePayload = label => ({
+      outPath: path.join(profile, `retry-order-${label}.mp4`),
+      assText: '',
+      clips: [{
+        type: 'image',
+        path: imagePath,
+        in: 0,
+        out: 300,
+        offset: 0,
+        vtrack: 0,
+        natW: 1,
+        natH: 1,
+      }],
+      videoTracks: [{ vt: 0 }],
+      duration: 300,
+      width: 3840,
+      height: 2160,
+      fps: 25,
+      format: 'h264',
+      videoKbps: 500,
+      audioPlan: null,
+    });
+
+    const firstApp = await launchApp(profile);
+    const firstMainTarget = await waitForTarget(
+      firstApp.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得重試排序測試主視窗',
+    );
+    const firstMainClient = await connectTarget(firstMainTarget);
+    const firstQueueClient = await openQueueMonitor(firstApp, firstMainClient);
+    await firstQueueClient.evaluate('window.queueAPI.setPause(true)');
+
+    const jobIds = [];
+    for (const label of ['a', 'b', 'c']) {
+      jobIds.push(await firstMainClient.evaluate(
+        `window.subtool.exportVideo(${JSON.stringify(makePayload(label))})`,
+      ));
+    }
+    await waitUntil(
+      async () => {
+        const snapshot = await firstQueueClient.evaluate('window.queueAPI.getAll()');
+        return snapshot.jobs.length === 3 && snapshot.jobs.every(job => job.status === 'queued');
+      },
+      '三份暫停中的等待工作',
+    );
+
+    expect(await firstQueueClient.evaluate(`window.queueAPI.stopJob(${JSON.stringify(jobIds[0])})`)).toBe(true);
+    expect(await firstQueueClient.evaluate(`window.queueAPI.retryJob(${JSON.stringify(jobIds[0])})`)).toBe(true);
+
+    const retried = await waitUntil(
+      async () => {
+        const snapshot = await firstQueueClient.evaluate('window.queueAPI.getAll()');
+        return snapshot.jobs.length === 3 && snapshot.jobs.every(job => job.status === 'queued')
+          ? snapshot
+          : null;
+      },
+      '停止後重試的工作回到等待佇列',
+    );
+    expect(retried.jobs.map(job => job.id)).toEqual(jobIds);
+    const persistedOrder = readdirSync(path.join(profile, 'export-queue'))
+      .filter(name => name.endsWith('.json'))
+      .map(name => JSON.parse(readFileSync(path.join(profile, 'export-queue', name), 'utf8')))
+      .sort((a, b) => a.order - b.order)
+      .map(job => job.id);
+    expect(persistedOrder).toEqual(jobIds);
+
+    await firstQueueClient.evaluate('window.queueAPI.setPause(false)');
+    const started = await waitUntil(
+      async () => {
+        const snapshot = await firstQueueClient.evaluate('window.queueAPI.getAll()');
+        return snapshot.jobs.find(job => job.status === 'running') || null;
+      },
+      '解除暫停後開始第一份等待工作',
+      15000,
+    );
+    expect(started.id).toBe(jobIds[0]);
+
+    await firstMainClient.evaluate('window.subtool.closeApp(); true');
+    await waitUntil(
+      async () => await firstMainClient.evaluate('document.visibilityState') === 'hidden',
+      '重試排序測試主視窗隱藏',
+    );
+    await firstQueueClient.send('Page.close').catch(() => {});
+    await waitForExit(firstApp);
+    firstMainClient.close();
+    firstQueueClient.close();
+
+    const secondApp = await launchApp(profile);
+    const secondMainTarget = await waitForTarget(
+      secondApp.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得重開後的重試排序主視窗',
+    );
+    const secondMainClient = await connectTarget(secondMainTarget);
+    const secondQueueClient = await openQueueMonitor(secondApp, secondMainClient);
+    const restored = await secondQueueClient.evaluate('window.queueAPI.getAll()');
+
+    expect(restored.isPaused).toBe(true);
+    expect(restored.jobs.map(job => job.id)).toEqual(jobIds);
+    expect(restored.jobs.every(job => job.status === 'queued')).toBe(true);
+
+    await secondQueueClient.evaluate('window.queueAPI.setPause(false)');
+    const restarted = await waitUntil(
+      async () => {
+        const snapshot = await secondQueueClient.evaluate('window.queueAPI.getAll()');
+        return snapshot.jobs.find(job => job.status === 'running') || null;
+      },
+      '重開後解除暫停時開始第一份等待工作',
+      15000,
+    );
+    expect(restarted.id).toBe(jobIds[0]);
+
+    await secondMainClient.evaluate('window.subtool.closeApp(); true');
+    await waitUntil(
+      async () => await secondMainClient.evaluate('document.visibilityState') === 'hidden',
+      '重開後的重試排序主視窗隱藏',
+    );
+    await secondQueueClient.send('Page.close').catch(() => {});
+    await waitForExit(secondApp);
+    secondMainClient.close();
+    secondQueueClient.close();
+  }, 60000);
 });

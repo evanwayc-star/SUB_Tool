@@ -299,6 +299,7 @@ function resetProject(){
   delete State._pendingClips;
   delete State._pendingExternalAudioSources;
   delete State._pendingProjectMediaRelink;
+  delete State._pendingPlayhead;
 }
 
 function _hasAudioProjectData(){
@@ -408,6 +409,8 @@ const Project = {
   },
   apply(data){
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
+    // 新專案若沒有儲存播放點，不能沿用前一個等待媒體就緒的播放點。
+    delete State._pendingPlayhead;
     // Fix #19：明確排除 undefined/null，避免 version:0 被誤判為 v1（0 是 falsy）
     const isV1 = data.version === undefined || data.version === null || data.version === 1;
     // Media.reset() 會釋放播放器資源，但不覆寫專案顯示名稱／路徑；讀取新專案時

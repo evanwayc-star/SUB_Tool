@@ -889,6 +889,17 @@ function queueStatusSnapshot() {
   };
 }
 
+// Map 的插入順序同時是監控畫面與持久化的工作順序。重試時必須依這個順序
+// 插回實際排程清單，否則畫面顯示第一份工作與下一份真正啟動的工作會不同。
+function queuedListIndexForMapOrder(jobId) {
+  let queuedIndex = 0;
+  for (const job of _queueJobsMap.values()) {
+    if (job.id === jobId) return queuedIndex;
+    if (job.status === 'queued') queuedIndex++;
+  }
+  return _jobQueueList.length;
+}
+
 const QueueManager = {
   shuttingDown: false,
   shutdownPromise: null,
@@ -1188,7 +1199,7 @@ ipcMain.handle('queue:retryJob', (e, jobId) => {
       QueueManager.broadcastUpdate();
       return false;
     }
-    _jobQueueList.push(job);
+    _jobQueueList.splice(queuedListIndexForMapOrder(job.id), 0, job);
     QueueManager.broadcastUpdate();
     QueueManager.processQueue();
     return true;
