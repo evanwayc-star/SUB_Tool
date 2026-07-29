@@ -68,7 +68,7 @@ function syncVideoTracks(){ let m=0; for(const c of State.clips) m=Math.max(m,(c
 const AROW_H=48, AUDIO_HEAD_H=0, AUDIO_MAX_VIEW_H=216, AUDIO_MIN_SUB_H=72;
 function sourceAudioRowH(row){
   const h=Number(row?.height);
-  return Number.isFinite(h) ? clamp(h,32,160) : ROW_H;
+  return Number.isFinite(h) ? clamp(h,32,160) : AROW_H;
 }
 function audioRowsHeight(){ return audioRowLayout().reduce((sum,row)=>sum+row.h,0); }
 function audioViewportH(){
@@ -394,8 +394,8 @@ function _doResize(type,tk){
   // .cue-block uses top:4px;bottom:4px, .cue-overlap uses top:0;bottom:0 →
   // both auto-scale with row height via CSS — no renderCueBlocks() needed during drag.
   // Playhead is left-positioned, unaffected by height changes.
-  if(type==='vtrack'){
-    // 視訊軌高度改變會牽動波形與字幕軌位置 → 直接整體重繪
+  if(type==='vtrack' || type==='atrack'){
+    // 視訊與音訊軌高度改變會牽動整體佈局與波形繪製 → 直接整體重繪
     drawTimeline();
   }else{
     const h=trackH(tk);
@@ -408,6 +408,7 @@ function _onRowResizeMove(e){
   const {type,tk,startY,startH}=_rowResize;
   const dy=e.clientY-startY;
   if(type==='vtrack'){ if(State.videoTracks[tk])State.videoTracks[tk].height=Math.max(24,startH+dy); }
+  else if(type==='atrack'){ if(_rowResize.source) _rowResize.source.height=Math.max(32,startH+dy); }
   else if(State.tracks[tk])State.tracks[tk].height=Math.max(20,startH+dy);
   if(!_rowResize._raf){
     _rowResize._raf=requestAnimationFrame(()=>{ _rowResize&&(_rowResize._raf=null); _doResize(type,tk); });
@@ -614,6 +615,7 @@ function audioSourceLanes(){
         laneId,
         sourceId,
         source,
+        height: source.height,
         external:!!entry.external,
         label:source.name||(entry.external?'外部音檔':'影音素材'),
         firstStart:entry.start,
@@ -844,6 +846,13 @@ function renderVtrackGutter(){
     resH.className='tl-resize-handle';
     resH.addEventListener('mousedown',e=>{
       e.preventDefault();e.stopPropagation();
+      const now=performance.now();
+      if(_lastHandleClick.tk==='v'+v && now-_lastHandleClick.t<400){
+        _lastHandleClick={tk:-1,t:0};
+        if(meta) delete meta.height;
+        drawTimeline(); return;
+      }
+      _lastHandleClick={tk:'v'+v,t:now};
       _rowResize={type:'vtrack',tk:v,startY:e.clientY,startH:vtrackH(v)};
       document.addEventListener('mousemove',_onRowResizeMove);
       document.addEventListener('mouseup',_onRowResizeUp,{once:true});
@@ -1139,6 +1148,25 @@ function renderAtrackGutter(){
       source.locked=!source.locked;
       drawTimeline();
     });
+
+    // 高度縮放把手
+    const resH=document.createElement('div');
+    resH.className='tl-resize-handle';
+    resH.addEventListener('mousedown',e=>{
+      e.preventDefault(); e.stopPropagation();
+      const now=performance.now();
+      if(_lastHandleClick.tk===row.sourceId && now-_lastHandleClick.t<400){
+        _lastHandleClick={tk:-1,t:0};
+        delete source.height;
+        drawTimeline(); return;
+      }
+      _lastHandleClick={tk:row.sourceId,t:now};
+      _rowResize={type:'atrack',source,startY:e.clientY,startH:row.h};
+      document.addEventListener('mousemove',_onRowResizeMove);
+      document.addEventListener('mouseup',_onRowResizeUp,{once:true});
+    });
+    g.appendChild(resH);
+
     gut.appendChild(g);
   }
   gut.scrollTop=oldScroll;

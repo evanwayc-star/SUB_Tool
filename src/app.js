@@ -1165,10 +1165,13 @@ async function doAction(act, force = false){
     } break;
     case 'toggle-all-lock': {
       const buses=State.audioProject?.buses||[];
-      const anyUnlocked = State.tracks.some(t=>!t.locked) || State.videoTracks.some(t=>!t.locked) || buses.some(t=>!t.locked);
+      const extAudio=typeof Media.getExternalAudioSources==='function'?Media.getExternalAudioSources():[];
+      const anyUnlocked = State.tracks.some(t=>!t.locked) || State.videoTracks.some(t=>!t.locked) || buses.some(t=>!t.locked) || State.clips.some(c=>!c.locked) || extAudio.some(a=>!a.locked);
       State.tracks.forEach(t=>t.locked=anyUnlocked);
       State.videoTracks.forEach(t=>t.locked=anyUnlocked);
       buses.forEach(t=>t.locked=anyUnlocked);
+      State.clips.forEach(c=>c.locked=anyUnlocked);
+      extAudio.forEach(a=>a.locked=anyUnlocked);
       recordHistory(anyUnlocked?'鎖定全部軌道':'解鎖全部軌道');
       if(!anyUnlocked){ clearSelection(); const el=document.getElementById('stSel'); if(el) el.textContent=''; }
       drawTimeline();
