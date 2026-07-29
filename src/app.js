@@ -1148,6 +1148,12 @@ async function doAction(act, force = false){
     case 'mixer-muteall': mixerMuteAll(); break;
     case 'cache-manage': openCacheDialog(); break;
     case 'export-notes': exportNotes(); break;
+    case 'toggle-vtracks':
+      State.vtracksCollapsed = !State.vtracksCollapsed;
+      const btn = document.getElementById('btnToggleVtracks');
+      if (btn) btn.style.opacity = State.vtracksCollapsed ? '0.4' : '1';
+      drawTimeline();
+      break;
     case 'toggle-all-vis': {
       const buses=State.audioProject?.buses||[];
       const anyVis = State.tracks.some(t=>t.visible!==false) || State.videoTracks.some(t=>t.visible!==false) || buses.some(t=>t.visible!==false);

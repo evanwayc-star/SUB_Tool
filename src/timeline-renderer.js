@@ -57,7 +57,7 @@ export function yToTrack(y){ let c=0; for(let i=0;i<State.trackCount;i++){ c+=tr
    顯示由上而下：disp0＝最高軌（vtrack 最大）；vtrackTop 回傳某軌在容器內的 y。 */
 function vtrackCount(){ return Math.max(1, State.videoTracks.length); }
 function vtrackH(v){ return State.videoTracks[v]?.height||VROW_H; }
-function vtracksHeight(){ if(!Seq.active())return 0; let h=0; const N=vtrackCount(); for(let v=0;v<N;v++)h+=vtrackH(v); return h; }
+function vtracksHeight(){ if(!Seq.active() || State.vtracksCollapsed)return 0; let h=0; const N=vtrackCount(); for(let v=0;v<N;v++)h+=vtrackH(v); return h; }
 function vtrackTop(v){ const N=vtrackCount(); let top=0; for(let disp=0;disp<N;disp++){ const vv=N-1-disp; if(vv===v)return top; top+=vtrackH(vv); } return 0; }
 /* 補足 videoTracks 以涵蓋現有片段的最高軌（只增不減；每次全繪前呼叫，確保軌列與片段一致） */
 function syncVideoTracks(){ let m=0; for(const c of State.clips) m=Math.max(m,(c.vtrack||0)+1); ensureVideoTrackCount(m); }
@@ -798,7 +798,8 @@ function clipTrackFromY(clientY){
 function renderVtrackGutter(){
   const gut=$('tlGutterVtracks'); if(!gut) return;
   gut.innerHTML='';
-  if(!Seq.active()) return;
+  if(!Seq.active() || State.vtracksCollapsed) { gut.style.display = 'none'; return; }
+  gut.style.display = 'block';
   const N=vtrackCount();
   for(let disp=0; disp<N; disp++){
     const v=N-1-disp;

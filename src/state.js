@@ -381,6 +381,7 @@ const State = {
   selectedClipId: null, // 目前選取的影片段（點選後可用上下鍵切換、Del 刪除）
   selectedAudioClipId: null, // 目前選取的外部音訊素材（與影片／字幕選取互斥）
   videoTracks: [{name:'視訊軌 1',visible:true,locked:false}], // 視訊軌（獨立成列，比照字幕軌 tracks[]；索引越大越上層＝越優先覆蓋）
+  vtracksCollapsed: false, // 是否收合視訊軌區塊
   audioExpanded: {},    // 音訊軌（每音源一列）是否展開成各聲道控制列：{ srcId: true }
   audioProject: _emptyAudioProject() // 專案音訊 bus / 來源路由 / 匯出 stream（不存 Media runtime）
 };

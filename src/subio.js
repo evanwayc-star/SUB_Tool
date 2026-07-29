@@ -217,8 +217,17 @@ function showExportDialog() {
   const cb = (attrs, label) => `<label style="display:flex;align-items:center;padding:6px 0;cursor:pointer;font-size:15px;color:#e2e2e2;"><input type="checkbox" ${attrs} style="transform:scale(1.2);margin-right:8px;"> ${label}</label>`;
 
   let html = sec('字幕格式',
-    [['encore', 'Adobe Encore (.txt)', true], ['srt', 'SRT (.srt)', false], ['ass', 'ASS (.ass)', false], ['txt', '純文字 (.txt)', false], ['xlsx', 'Excel (.xlsx)', false]]
-      .map(([v, l, d]) => cb(`data-fmt="${v}"${d ? ' checked' : ''}`, escapeHTML(l))).join(''));
+    [['encore', 'Adobe Encore (.txt)', true, false], ['srt', 'SRT (.srt)', false, true], ['ass', 'ASS (.ass)', false, true], ['txt', '純文字 (.txt)', false, false], ['xlsx', 'Excel (.xlsx)', false, false]]
+      .map(([v, l, d, supportMerge]) => {
+        let row = cb(`data-fmt="${v}"${d ? ' checked' : ''}`, escapeHTML(l));
+        if (supportMerge && State.cues.length && State.trackCount > 1) {
+          row = `<div style="display:flex;align-items:center;gap:16px;">
+            ${row}
+            ${cb(`id="merge_${v}"`, '合成單一檔案')}
+          </div>`;
+        }
+        return row;
+      }).join(''));
 
   if (State.cues.length && State.trackCount > 1)
     html += sec('軌道',
@@ -266,9 +275,27 @@ function showExportDialog() {
           const f = getXLSXFileData(list); if (f) filesToExport.push(f);
         } else {
           if (tks) {
-            for (const i of tks) {
-              const cues = State.cues.filter(c => (c.track || 0) === i);
-              if (cues.length) { const f = getFileData(fmt, cues, State.tracks[i]?.name); if (f) filesToExport.push(f); }
+            const shouldMerge = document.getElementById(`merge_${fmt}`)?.checked;
+            if (shouldMerge) {
+              const mergedCues = [];
+              const mergedNames = [];
+              for (const i of tks) {
+                const cues = State.cues.filter(c => (c.track || 0) === i);
+                if (cues.length) {
+                  mergedCues.push(...cues);
+                  mergedNames.push(State.tracks[i]?.name || ('軌道' + (i + 1)));
+                }
+              }
+              if (mergedCues.length) {
+                mergedCues.sort((a, b) => a.start - b.start);
+                const f = getFileData(fmt, mergedCues, mergedNames.join('+'));
+                if (f) filesToExport.push(f);
+              }
+            } else {
+              for (const i of tks) {
+                const cues = State.cues.filter(c => (c.track || 0) === i);
+                if (cues.length) { const f = getFileData(fmt, cues, State.tracks[i]?.name); if (f) filesToExport.push(f); }
+              }
             }
           } else {
             const f = getFileData(fmt, State.cues); if (f) filesToExport.push(f);

@@ -320,6 +320,7 @@
     .job-timing-item b { color: var(--text-dim); font-weight: 600; }
     .job-actions { display: flex; grid-area: actions; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
     .job-actions button { min-height: 28px; padding: 4px 8px; }
+    .job-main, .job-progress { pointer-events: none; } /* Prevent drag flickering */
     .job--compact .job-progress { display: none; }
     .job--compact .job-actions { grid-column: 3; }
 
@@ -488,6 +489,7 @@
 
     let _isPaused = false;
     let _jobs = [];
+    let _isDragging = false;
 
     // Format seconds
     const fmt = s => {
@@ -547,6 +549,7 @@
         if (job.status === 'queued') {
           el.draggable = true;
           el.addEventListener('dragstart', handleDragStart);
+          el.addEventListener('dragenter', handleDragEnter);
           el.addEventListener('dragover', handleDragOver);
           el.addEventListener('dragleave', handleDragLeave);
           el.addEventListener('drop', handleDrop);
@@ -666,6 +669,7 @@
     }
 
     function renderJobs() {
+      if (_isDragging) return;
       const completed = _jobs.filter(job => job.status === 'done');
       const unfinished = _jobs.filter(job => job.status !== 'done');
       const active = unfinished.filter(job => job.status === 'running' || job.status === 'stopping');
@@ -706,10 +710,14 @@
 
     let dragSrcEl = null;
     function handleDragStart(e) {
+      _isDragging = true;
       dragSrcEl = this;
       e.dataTransfer.effectAllowed = 'move';
       e.dataTransfer.setData('text/plain', this.dataset.jobId);
       this.classList.add('dragging');
+    }
+    function handleDragEnter(e) {
+      if (e.preventDefault) e.preventDefault();
     }
     function handleDragOver(e) {
       if (e.preventDefault) e.preventDefault();
@@ -733,6 +741,7 @@
     async function handleDrop(e) {
       if (e.stopPropagation) e.stopPropagation();
       this.classList.remove('drop-above', 'drop-below');
+      if (!dragSrcEl) return false;
       if (dragSrcEl !== this && this.dataset.status === 'queued') {
         const srcId = dragSrcEl.dataset.jobId;
         const targetId = this.dataset.jobId;
@@ -753,8 +762,10 @@
       return false;
     }
     function handleDragEnd(e) {
+      _isDragging = false;
       this.classList.remove('dragging');
       UI.board.querySelectorAll('.job').forEach(el => el.classList.remove('drop-above', 'drop-below'));
+      renderJobs(); // catch up with any missed updates
     }
 
     async function loadData() {
