@@ -41,6 +41,7 @@ import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
+import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 
 /* ===== 5. 時間軸 ====================================================== */
 const RULER_H=24, ROW_H=64;  // default/min values; actual stored in State
@@ -925,23 +926,43 @@ function showImageGeom(c){
 function showClipFade(c){
   if(!c) return;
   const len=Math.max(0.1, Seq.len(c));
-  const maxF=Math.max(0.1, Math.min(5, +len.toFixed(1)));
+  const maxF=Math.max(0.1, +len.toFixed(1));
   const fi=Math.min(+(c.fadeIn||0), maxF), fo=Math.min(+(c.fadeOut||0), maxF);
   openModal(`淡入淡出（轉場）— ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.2">`+
-    `<div>淡入：<input type="range" id="cfIn" min="0" max="${maxF}" step="0.1" value="${fi}" style="width:180px;vertical-align:middle"> <span id="cfInV">${fi.toFixed(1)}s</span></div>`+
-    `<div>淡出：<input type="range" id="cfOut" min="0" max="${maxF}" step="0.1" value="${fo}" style="width:180px;vertical-align:middle"> <span id="cfOutV">${fo.toFixed(1)}s</span></div>`+
+    `<div>淡入：<input type="range" id="cfIn" min="0" max="${maxF}" step="0.001" value="${fi}" style="width:180px;vertical-align:middle"> <input type="text" id="cfInV" value="${secToEncore(fi, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
+    `<div>淡出：<input type="range" id="cfOut" min="0" max="${maxF}" step="0.001" value="${fo}" style="width:180px;vertical-align:middle"> <input type="text" id="cfOutV" value="${secToEncore(fo, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">淡入從透明漸顯、淡出漸隱到透明（露出下層／黑底），音訊同步淡變。<b>匯出時生效</b>。若此片段在上層視訊軌且與下層重疊，淡變即為<b>軌間溶接</b>。</div>`+
     `</div>`,
     [{label:'清除',act:()=>{ c.fadeIn=0; c.fadeOut=0; closeModal(); drawTimeline(); recordHistory('清除轉場：'+(c.name||'')); }},
      {label:'套用',primary:true,act:()=>{
-        c.fadeIn=Math.max(0,Math.min(maxF,+$('cfIn').value)); c.fadeOut=Math.max(0,Math.min(maxF,+$('cfOut').value));
+        let vi = parseTimecodeInput($('cfInV').value);
+        if(vi===null) vi = parseFloat($('cfInV').value);
+        if(isNaN(vi)) vi = +$('cfIn').value;
+
+        let vo = parseTimecodeInput($('cfOutV').value);
+        if(vo===null) vo = parseFloat($('cfOutV').value);
+        if(isNaN(vo)) vo = +$('cfOut').value;
+
+        c.fadeIn=Math.max(0,Math.min(maxF,vi)); c.fadeOut=Math.max(0,Math.min(maxF,vo));
         closeModal(); drawTimeline(); recordHistory('轉場：'+(c.name||''));
      }}]);
   setTimeout(()=>{
-    const a=$('cfIn'), b=$('cfOut');
-    if(a) a.oninput=()=>{ const e=$('cfInV'); if(e)e.textContent=(+a.value).toFixed(1)+'s'; };
-    if(b) b.oninput=()=>{ const e=$('cfOutV'); if(e)e.textContent=(+b.value).toFixed(1)+'s'; };
+    const a=$('cfIn'), b=$('cfOut'), aV=$('cfInV'), bV=$('cfOutV');
+    if(aV) setupTimecodeInput(aV);
+    if(bV) setupTimecodeInput(bV);
+    if(a) a.oninput=()=>{ if(aV) aV.value=secToEncore(+a.value, State.fps, State.dropFrame); };
+    if(b) b.oninput=()=>{ if(bV) bV.value=secToEncore(+b.value, State.fps, State.dropFrame); };
+    if(aV) aV.onchange=()=>{
+        let v = parseTimecodeInput(aV.value);
+        if(v===null) v = parseFloat(aV.value);
+        if(!isNaN(v)) { a.value = Math.max(0, Math.min(maxF, v)); aV.value = secToEncore(+a.value, State.fps, State.dropFrame); }
+    };
+    if(bV) bV.onchange=()=>{
+        let v = parseTimecodeInput(bV.value);
+        if(v===null) v = parseFloat(bV.value);
+        if(!isNaN(v)) { b.value = Math.max(0, Math.min(maxF, v)); bV.value = secToEncore(+b.value, State.fps, State.dropFrame); }
+    };
   },0);
 }
 /* 交叉溶接（階段5.1）：把此片段移到上一層視訊軌、提前與「同軌前一段」尾端重疊 T 秒，
@@ -968,16 +989,30 @@ function showCrossfade(c){
   if(!c) return;
   const prev=_prevTrackClip(c);
   if(!prev){ showToast('前面沒有可溶接的片段（同一視訊軌）'); return; }
-  const maxT=Math.max(0.2, Math.min(3, Seq.len(c), Seq.len(prev)));
+  const maxT=Math.max(0.2, Math.min(Seq.len(c), Seq.len(prev)));
   const defT=Math.min(1, maxT);
   openModal(`交叉溶接 — ${escapeHTML(prev.name||'')} → ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.1">`+
-    `<div>溶接時間：<input type="range" id="xfT" min="0.2" max="${maxT.toFixed(1)}" step="0.1" value="${defT.toFixed(1)}" style="width:180px;vertical-align:middle"> <span id="xfTV">${defT.toFixed(1)}s</span></div>`+
+    `<div>溶接時間：<input type="range" id="xfT" min="0.001" max="${maxT.toFixed(3)}" step="0.001" value="${defT}" style="width:180px;vertical-align:middle"> <input type="text" id="xfTV" value="${secToEncore(defT, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">會把此片段移到<b>上一層視訊軌</b>並提前與前一段尾端重疊，兩段在重疊處淡出／淡入＝交叉溶接（匯出時合成）。</div>`+
     `</div>`,
     [{label:'取消',act:closeModal},
-     {label:'建立溶接',primary:true,act:()=>{ const T=+$('xfT').value; closeModal(); crossfadeWithPrev(c, T); }}]);
-  setTimeout(()=>{ const s=$('xfT'); if(s)s.oninput=()=>{ const e=$('xfTV'); if(e)e.textContent=(+s.value).toFixed(1)+'s'; }; },0);
+     {label:'建立溶接',primary:true,act:()=>{
+         let T = parseTimecodeInput($('xfTV').value);
+         if(T===null) T = parseFloat($('xfTV').value);
+         if(isNaN(T)) T = +$('xfT').value;
+         closeModal(); crossfadeWithPrev(c, T);
+     }}]);
+  setTimeout(()=>{
+    const s=$('xfT'), sV=$('xfTV');
+    if(sV) setupTimecodeInput(sV);
+    if(s) s.oninput=()=>{ if(sV) sV.value=secToEncore(+s.value, State.fps, State.dropFrame); };
+    if(sV) sV.onchange=()=>{
+        let v = parseTimecodeInput(sV.value);
+        if(v===null) v = parseFloat(sV.value);
+        if(!isNaN(v)) { s.value = Math.max(0.001, Math.min(maxT, v)); sV.value = secToEncore(+s.value, State.fps, State.dropFrame); }
+    };
+  },0);
 }
 
 /* ===== 影片段選取（點選高亮、上下鍵切換、Del 刪除；行為比照字幕列） ===== */
@@ -1384,16 +1419,22 @@ const _handleDragUpdate = (e) => {
       const nv=clipTrackFromY(e.clientY);
       if(nv!==(c.vtrack||0) && !State.videoTracks[nv]?.locked) c.vtrack=nv; // 不可放入鎖定軌
     } else if(drag.mode==='clip-l'){
-      // 修剪左緣：offset 與 in 同步位移 d；界線＝in≥0、留 minL、不越左鄰
+      // 修剪左緣：offset 與 in 同步位移 d；界線＝in≥0 (圖片除外)、留 minL、不越左鄰
       let d=dt;
-      d=Math.max(d, -drag.oin, drag.leftLim-drag.os);
-      d=Math.min(d, (drag.oout-minL)-drag.oin);
+      const leftBound = c.type === 'image' ? drag.leftLim - drag.os : Math.max(-drag.oin, drag.leftLim - drag.os);
+      d = Math.max(d, leftBound);
+      d = Math.min(d, (drag.oout-minL)-drag.oin);
       let nl=drag.os+d;
       const sn=snapVal(nl,drag.snaps,currentThr);
       if(sn!==nl){ const cd=sn-drag.os;
-        if(cd>=-drag.oin-1e-9 && cd<=(drag.oout-minL)-drag.oin+1e-9 && sn>=drag.leftLim-1e-9){ d=cd; nl=sn; tgt=sn; } }
+        if(cd>=leftBound-1e-9 && cd<=(drag.oout-minL)-drag.oin+1e-9 && sn>=drag.leftLim-1e-9){ d=cd; nl=sn; tgt=sn; } }
       nl=snapFrame(Math.max(0,nl)); d=nl-drag.os;
-      c.offset=nl; c.in=Math.max(0, drag.oin+d);
+      c.offset=nl; 
+      if (c.type === 'image') {
+        c.out = drag.oout - d;
+      } else {
+        c.in = Math.max(0, drag.oin+d);
+      }
     } else {
       // 修剪右緣：out∈[in+minL, dur]；時間軸右緣不越右鄰
       let edge=drag.os+(drag.oout+dt-drag.oin); // 時間軸右緣
