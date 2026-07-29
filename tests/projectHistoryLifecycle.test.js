@@ -161,7 +161,7 @@ describe('project history lifecycle', () => {
 
       expect(mediaMock.waitForPendingProjectRestore).toHaveBeenCalledTimes(1);
       expect(mediaMock.seek).toHaveBeenCalledWith(13);
-      expect(State._pendingPlayhead).toBeUndefined();
+      expect(State).not.toHaveProperty('_pendingPlayhead');
     } finally {
       vi.useRealTimers();
     }

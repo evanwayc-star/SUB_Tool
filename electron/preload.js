@@ -13,6 +13,13 @@ contextBridge.exposeInMainWorld('subtool', {
   // 拖放的 File 物件 → 絕對路徑（Electron 32 起 File.path 已移除，官方替代為 webUtils.getPathForFile）。
   // 只接受真正的 File 物件，無法被字串偽造；解析失敗回 null，呼叫端退回瀏覽器路徑。
   getFilePath:  (file) => { try { return webUtils.getPathForFile(file) || null; } catch (e) { return null; } },
+  // 由 preload 自真實 File 取路徑後才送主程序授權，renderer 無法傳入任意字串擴張能力範圍。
+  authorizeDroppedFile: (file) => {
+    try {
+      const p = webUtils.getPathForFile(file);
+      return p ? ipcRenderer.invoke('fs:authorizeDroppedFile', p) : Promise.resolve(null);
+    } catch (e) { return Promise.resolve(null); }
+  },
   fileURL:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:fileURL', p); },
   stat:         (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:stat', p); },
   listDir:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:listDir', p); },
@@ -37,6 +44,10 @@ contextBridge.exposeInMainWorld('subtool', {
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
   readB64:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:readB64', p); },
+  reserveScreenshotPath: (directory, suffix = '') => {
+    if(typeof directory!=='string') throw new TypeError('directory must be a string');
+    return ipcRenderer.invoke('fs:reserveScreenshotPath', { directory, suffix });
+  },
   writeProject: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeProject', { path: p, b64 }); },
   writeScreenshot: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeScreenshot', { path: p, b64 }); },
   openPath:     (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('app:openPath', p); },

@@ -1,10 +1,9 @@
-import { trackFromY, addTrack, removeTrack, moveSelectedToTrack, setZoom, zoomFit, zoomFitVideo, snapTargets, snapVal, neighborBounds } from './timeline-mutator.js';
 /* ==============================================================================
    SUB Tool — 時間軸渲染與互動模組 (Timeline Engine)
    ==============================================================================
    
    【架構與職責總覽】
-   本檔案 (timeline.js) 專注於將「時間」視覺化，以及處理時間軸上所有的 DOM/Canvas 互動。
+   本檔案是唯一的時間軸引擎：將「時間」視覺化，並處理所有時間軸 DOM/Canvas 互動與操作。
    包含尺規 (Ruler)、音訊波形 (Waveform)、軌道容器 (Tracks)、與片段區塊 (Cues)。
    
    1. 高 DPI Canvas 渲染
@@ -1744,12 +1743,109 @@ tlScroll.addEventListener('wheel',e=>{
 
 /* ===== 磁吸 / 防重疊 工具（時間軸拖曳專用） ===== */
 
+/* 這些操作和渲染共用同一份座標、縮放與重繪語意；保留在同一個時間軸引擎，
+   避免 renderer ↔ mutator 相互 import 而形成循環依賴。 */
+export function trackFromY(clientY){
+  const rect=tlLayer.getBoundingClientRect();
+  const y=clientY-rect.top-tracksTop()+tracksScrollTop();
+  return yToTrack(Math.max(0,y));
+}
 
+export function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); emit('render:listTrackSel'); recordHistory('新增軌道'); }
 
+export function removeTrack(i){
+  const n=State.cues.filter(c=>(c.track||0)===i).length;
+  const doRemove=()=>{
+    State.cues=State.cues.filter(c=>(c.track||0)!==i);
+    State.cues.forEach(c=>{ if((c.track||0)>i)c.track=(c.track||0)-1; });
+    State.tracks.splice(i,1); syncTrackCount();
+    if(State.listTrack===i)State.listTrack=-1; else if(State.listTrack>i)State.listTrack--;
+    State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
+    if(!State.cues.some(c=>c.id===State.selectedId)){State.selectedId=State.selectedIds[0]||null;State.activeEdge='start';}
+    emit('render:listTrackSel'); emit('render:all'); drawTimeline(); recordHistory('刪除軌道');
+  };
+  if(n>0){
+    openModal(`刪除軌道「${escapeHTML(State.tracks[i].name)}」`,
+      `<p>此軌道有 <b>${n}</b> 條字幕，刪除後一併移除。確定繼續？</p>`,
+      [{label:'取消',act:closeModal},
+       {label:'確定刪除',primary:true,act:()=>{ closeModal(); doRemove(); }}]);
+  } else { doRemove(); }
+}
+
+export function moveSelectedToTrack(target){
+  const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
+  if(!ids.length)return;
+  for(const id of ids){ const c=State.cues.find(x=>x.id===id); if(c)c.track=clamp(target,0,State.trackCount-1); }
+  emit('render:all'); drawTimeline(); recordHistory('移動至軌道');
+}
+
+export function setZoom(px,centerTime){
+  const c = centerTime!=null?centerTime:Media.displayTime();
+  State.pxPerSec=clamp(px,0.1,4000);
+  $('zoomBar').value=clamp(State.pxPerSec,0.1,4000);
+  layoutTimeline();
+  const target=c*State.pxPerSec - viewportW()/2;
+  tlScroll.scrollLeft=clamp(target,0,Math.max(0,tlTotal()*State.pxPerSec-viewportW()));
+  State.viewStart=tlScroll.scrollLeft/State.pxPerSec;
+  drawTimeline();
+}
+
+export function zoomFit(){
+  const vw=viewportW(); if(!vw) return;
+  const timed=State.cues.filter(c=>c.timed!==false&&c.end>c.start);
+  let t0,t1;
+  if(timed.length){
+    t0=Math.min(...timed.map(c=>c.start));
+    t1=Math.max(...timed.map(c=>c.end));
+  } else {
+    t0=0; t1=State.duration>0?State.duration:1;
+  }
+  const dur=t1-t0; if(dur<=0)return;
+  const MIN_PPS=Math.round(80*Math.pow(1.3,4));
+  const ideal=(vw-40)/dur;
+  const pps=clamp(Math.max(ideal,MIN_PPS),4,800);
+  const vt=Media.displayTime();
+  const center=clamp(vt,t0,t1);
+  setZoom(pps,center);
+}
+
+export function zoomFitVideo(){
+  const vw=viewportW(); if(!vw) return;
+  const dur=State.duration>0?State.duration:1;
+  const pps=(vw-40)/dur;
+  setZoom(pps, dur/2);
+}
+
+export function snapTargets(excludeIds){
+  let t = [0, State.duration>0?State.duration:1];
+  for(const c of State.cues){
+    if(excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id))) continue;
+    if(c.timed===false) continue;
+    t.push(c.start); t.push(c.end);
+  }
+  if(Media.mpvMode) t.push(Media.displayTime());
+  return t;
+}
+
+export function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of targets){const d=Math.abs(x-t); if(d<bd){bd=d;best=x;}} return best; }
+
+export function neighborBounds(os,oe,track,excludeIds){
+  let prevEnd=0,nextStart=Infinity;
+  const oMid = (os + oe) / 2;
+  for(const c of State.cues){
+    if(c.timed===false||(excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id)))||(c.track||0)!==track)continue;
+    const cMid = (c.start + c.end) / 2;
+    if(cMid < oMid){
+      if(c.end > prevEnd) prevEnd = c.end;
+    } else {
+      if(c.start < nextStart) nextStart = c.start;
+    }
+  }
+  return {prevEnd,nextStart};
+}
 
 export { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks,
   updatePlayhead, redrawTimeline,
   refreshTrackGutterActive,
   selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom };
-

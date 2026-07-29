@@ -68,13 +68,17 @@ describe('project image persistence',()=>{
       type:'image',path:'C:/source/card.png',scale:0.4,posX:0.2,posY:0.8
     })]);
 
+    State.clips=[]; // 真實載入流程會先由 Media.reset() 清掉舊 runtime clip。
     Project.apply(data);
-    expect(State._pendingClips).toEqual([expect.objectContaining({
+    expect(State).not.toHaveProperty('_pendingClips');
+    await Project.saveAs();
+    const reloaded=JSON.parse(Buffer.from(saveProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+    expect(reloaded.clips).toEqual([expect.objectContaining({
       type:'image',path:'C:/source/card.png',scale:0.4,posX:0.2,posY:0.8
     })]);
   });
 
-  it('saves the current playhead and restores it on load',async()=>{
+  it('saves the current playhead without leaking a pending field into State',async()=>{
     // playhead 是 v5.2.0 加的：存檔寫入 Media.displayTime()、載入時 seek 回去。
     // 這個欄位加進來時沒有補測試，導致 mock 缺 displayTime 讓整個檔案掛掉都沒被發現。
     mediaMock.displayTime.mockReturnValue(3610.5);
@@ -85,18 +89,7 @@ describe('project image persistence',()=>{
     expect(data.playhead).toBe(3610.5);
 
     Project.apply(data);
-    expect(State._pendingPlayhead).toBe(3610.5);
-  });
-
-  it('clamps a negative saved playhead to zero',async()=>{
-    Project.apply({app:'SUB Tool',version:3,playhead:-12,cues:[],tracks:[]});
-    expect(State._pendingPlayhead).toBe(0);
-  });
-
-  it('ignores a non-numeric playhead instead of seeking to NaN',async()=>{
-    delete State._pendingPlayhead;
-    Project.apply({app:'SUB Tool',version:3,playhead:'01:00:00:00',cues:[],tracks:[]});
-    expect(State._pendingPlayhead).toBeUndefined();
+    expect(State).not.toHaveProperty('_pendingPlayhead');
   });
 
   it('treats image geometry as unsaved project work',async()=>{
@@ -117,6 +110,8 @@ describe('project image persistence',()=>{
     await Project.loadDesktop({b64,path:'C:/projects/image-only.subtool'});
 
     expect(mediaMock.restorePendingImageClips).toHaveBeenCalledTimes(1);
-    expect(State._pendingClips).toEqual([expect.objectContaining({type:'image',path:'C:/source/card.png'})]);
+    const [plan]=mediaMock.restorePendingImageClips.mock.calls[0];
+    expect(plan.pendingClips()).toEqual([expect.objectContaining({type:'image',path:'C:/source/card.png'})]);
+    expect(State).not.toHaveProperty('_pendingClips');
   });
 });

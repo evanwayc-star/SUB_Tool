@@ -2,14 +2,18 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const QueueStore = require(path.join(ROOT, 'electron', 'queue-store.js'));
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const activeApps = new Set();
 const tempProfiles = new Set();
+let capabilitySeedCounter = 0;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -222,6 +226,66 @@ async function openQueueMonitor(app, mainClient) {
   return connectTarget(target);
 }
 
+/* exportVideo 的能力只能來自原生選取或 app 自己保存的 job snapshot。
+   這個 E2E helper 在 Electron 啟動前寫入與正式 QueueStore 相同格式的 queued snapshot，
+   確認 restoreJobs 已恢復其精確來源／輸出能力後，經由真實 queue monitor 清掉 seed。
+   清除工作檔不會撤銷已在本次主程序 session 恢復的 capability，因此後續 CDP 呼叫仍是
+   正式 IPC 路徑，而不是測試專用後門。 */
+function seedQueuedCapabilities(profileDir, entries) {
+  const queueDir = path.join(profileDir, 'export-queue');
+  const records = Array.isArray(entries) ? entries : [entries];
+  return records.map((entry, order) => {
+    const id = entry.id || `e2e-capability-seed-${++capabilitySeedCounter}`;
+    QueueStore.persistJob(queueDir, {
+      id,
+      createdAt: Date.now() + order,
+      status: 'queued',
+      payload: {
+        outPath: entry.outPath,
+        format: entry.format || 'h264',
+        clips: [],
+        audioPlan: null,
+      },
+      sourcePaths: entry.sourcePaths,
+    }, order);
+    return id;
+  });
+}
+
+async function restoreSeededCapabilities(app, mainClient, seedIds, { resume = true } = {}) {
+  const queueClient = await openQueueMonitor(app, mainClient);
+  await waitUntil(
+    async () => {
+      const snapshot = await queueClient.evaluate('window.queueAPI.getAll()');
+      return snapshot.isPaused && seedIds.every(id => snapshot.jobs.some(job => job.id === id));
+    },
+    'app-owned queue capability snapshot 已恢復',
+  );
+  for (const id of seedIds) {
+    await queueClient.evaluate(`window.queueAPI.clearJob(${JSON.stringify(id)})`);
+  }
+  await waitUntil(
+    async () => {
+      const snapshot = await queueClient.evaluate('window.queueAPI.getAll()');
+      return seedIds.every(id => !snapshot.jobs.some(job => job.id === id));
+    },
+    'queue monitor 已清除 capability seed',
+  );
+  if (resume) await queueClient.evaluate('window.queueAPI.setPause(false)');
+  return queueClient;
+}
+
+async function exportError(mainClient, payload) {
+  return mainClient.evaluate(`(async () => {
+    try {
+      await window.subtool.exportVideo(${JSON.stringify(payload)});
+      return null;
+    } catch (error) {
+      return error && error.message ? error.message : String(error);
+    }
+  })()`);
+}
+
 afterEach(async () => {
   for (const app of [...activeApps]) {
     if (app.child.exitCode === null) app.child.kill('SIGKILL');
@@ -326,6 +390,73 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     queueClient.close();
   }, 20000);
 
+  test('CDP 直接匯出不會將 renderer 路徑升格為來源或輸出能力', async () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'subtool-export-capability-reject-'));
+    tempProfiles.add(profile);
+    const authorizedSourcePath = path.join(profile, 'authorized-source.png');
+    const unauthorizedSourcePath = path.join(profile, 'unauthorized-source.png');
+    const seedOutPath = path.join(profile, 'seed-output.mp4');
+    const unauthorizedOutPath = path.join(profile, 'unauthorized-output.mp4');
+    const image = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    );
+    writeFileSync(authorizedSourcePath, image);
+    writeFileSync(unauthorizedSourcePath, image);
+    const [seedId] = seedQueuedCapabilities(profile, {
+      sourcePaths: [authorizedSourcePath],
+      outPath: seedOutPath,
+    });
+
+    const app = await launchApp(profile);
+    const mainTarget = await waitForTarget(
+      app.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得 capability 拒絕測試主視窗',
+    );
+    const mainClient = await connectTarget(mainTarget);
+    const queueClient = await restoreSeededCapabilities(app, mainClient, [seedId], { resume: false });
+    const makePayload = (sourcePath, outPath) => ({
+      outPath,
+      assText: '',
+      clips: [{
+        type: 'image',
+        path: sourcePath,
+        in: 0,
+        out: 0.3,
+        offset: 0,
+        vtrack: 0,
+        natW: 1,
+        natH: 1,
+      }],
+      videoTracks: [{ vt: 0 }],
+      duration: 0.3,
+      width: 320,
+      height: 180,
+      fps: 25,
+      format: 'h264',
+      videoKbps: 500,
+      audioPlan: null,
+    });
+
+    expect(await exportError(mainClient, makePayload(unauthorizedSourcePath, unauthorizedOutPath)))
+      .toContain('匯出來源未經授權');
+    expect(await exportError(mainClient, makePayload(authorizedSourcePath, unauthorizedOutPath)))
+      .toContain('匯出輸出位置未經授權');
+    expect((await queueClient.evaluate('window.queueAPI.getAll()')).jobs).toHaveLength(0);
+    expect(existsSync(unauthorizedOutPath)).toBe(false);
+
+    await mainClient.evaluate('window.subtool.closeApp(); true');
+    await waitUntil(
+      async () => await mainClient.evaluate('document.visibilityState') === 'hidden',
+      'capability 拒絕測試主視窗隱藏',
+    );
+    await queueClient.send('Page.close').catch(() => {});
+    await waitForExit(app);
+    mainClient.close();
+    queueClient.close();
+  }, 20000);
+
   test('實際匯出由 watchdog 完成並釋放輸出鎖', async () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-watchdog-export-'));
     tempProfiles.add(profile);
@@ -335,14 +466,6 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       imagePath,
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
     );
-
-    const app = await launchApp(profile);
-    const mainTarget = await waitForTarget(
-      app.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
-      '取得 watchdog 匯出主視窗',
-    );
-    const mainClient = await connectTarget(mainTarget);
     const payload = {
       outPath,
       assText: '',
@@ -365,8 +488,17 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       videoKbps: 500,
       audioPlan: null,
     };
+    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [imagePath], outPath });
+
+    const app = await launchApp(profile);
+    const mainTarget = await waitForTarget(
+      app.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得 watchdog 匯出主視窗',
+    );
+    const mainClient = await connectTarget(mainTarget);
+    const queueClient = await restoreSeededCapabilities(app, mainClient, [seedId]);
     await mainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
-    const queueClient = await openQueueMonitor(app, mainClient);
     const finished = await waitUntil(
       async () => {
         const snapshot = await queueClient.evaluate('window.queueAPI.getAll()');
@@ -406,14 +538,6 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       imagePath,
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
     );
-
-    const firstApp = await launchApp(profile);
-    const firstMainTarget = await waitForTarget(
-      firstApp.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
-      '取得 crash 測試主視窗',
-    );
-    const firstMainClient = await connectTarget(firstMainTarget);
     const payload = {
       outPath,
       assText: '',
@@ -436,6 +560,16 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       videoKbps: 500,
       audioPlan: null,
     };
+    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [imagePath], outPath });
+
+    const firstApp = await launchApp(profile);
+    const firstMainTarget = await waitForTarget(
+      firstApp.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得 crash 測試主視窗',
+    );
+    const firstMainClient = await connectTarget(firstMainTarget);
+    const firstQueueClient = await restoreSeededCapabilities(firstApp, firstMainClient, [seedId]);
     await firstMainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
     const owner = await waitUntil(
       async () => {
@@ -452,6 +586,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     firstApp.child.kill('SIGKILL');
     await waitForExit(firstApp);
     firstMainClient.close();
+    firstQueueClient.close();
     await waitUntil(
       async () => !processIsRunning(owner.ffmpegPid),
       '主程序消失後 ffmpeg 已停止',
@@ -496,16 +631,6 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const outPath = path.join(profile, 'queued-output.mp4');
     const audioPath = path.join(profile, 'queued-audio.wav');
     writeFileSync(audioPath, Buffer.from('queued audio plan source'));
-    const firstApp = await launchApp(profile);
-    const firstMainTarget = await waitForTarget(
-      firstApp.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
-      '取得第一次主視窗',
-    );
-    const firstMainClient = await connectTarget(firstMainTarget);
-    const firstQueueClient = await openQueueMonitor(firstApp, firstMainClient);
-    await firstQueueClient.evaluate('window.queueAPI.setPause(true)');
-
     const payload = {
       outPath,
       assText: '',
@@ -525,6 +650,17 @@ describeElectron('Electron 匯出佇列生命週期', () => {
         streams: [{ id: 'stereo', layout: 'stereo', busIds: ['a1', 'a2'] }],
       },
     };
+    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [audioPath], outPath });
+
+    const firstApp = await launchApp(profile);
+    const firstMainTarget = await waitForTarget(
+      firstApp.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL',
+      '取得第一次主視窗',
+    );
+    const firstMainClient = await connectTarget(firstMainTarget);
+    const firstQueueClient = await restoreSeededCapabilities(firstApp, firstMainClient, [seedId], { resume: false });
+    await firstQueueClient.evaluate('window.queueAPI.setPause(true)');
     await firstMainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
     const duplicateError = await firstMainClient.evaluate(`(async () => {
       try {
@@ -613,6 +749,11 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       videoKbps: 500,
       audioPlan: null,
     });
+    const retryPayloads = ['a', 'b', 'c'].map(makePayload);
+    const seedIds = seedQueuedCapabilities(profile, retryPayloads.map(payload => ({
+      sourcePaths: [imagePath],
+      outPath: payload.outPath,
+    })));
 
     const firstApp = await launchApp(profile);
     const firstMainTarget = await waitForTarget(
@@ -621,13 +762,13 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       '取得重試排序測試主視窗',
     );
     const firstMainClient = await connectTarget(firstMainTarget);
-    const firstQueueClient = await openQueueMonitor(firstApp, firstMainClient);
+    const firstQueueClient = await restoreSeededCapabilities(firstApp, firstMainClient, seedIds, { resume: false });
     await firstQueueClient.evaluate('window.queueAPI.setPause(true)');
 
     const jobIds = [];
-    for (const label of ['a', 'b', 'c']) {
+    for (const payload of retryPayloads) {
       jobIds.push(await firstMainClient.evaluate(
-        `window.subtool.exportVideo(${JSON.stringify(makePayload(label))})`,
+        `window.subtool.exportVideo(${JSON.stringify(payload)})`,
       ));
     }
     await waitUntil(

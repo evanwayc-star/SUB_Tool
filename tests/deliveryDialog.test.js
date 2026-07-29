@@ -7,6 +7,7 @@ const spies = vi.hoisted(() => ({
   }),
   closeModal: vi.fn(),
   openOutputSettings: vi.fn(),
+  openDeliveryOutputSettings: vi.fn(),
 }));
 
 const mediaMock = vi.hoisted(() => ({
@@ -31,7 +32,12 @@ vi.mock('../src/project.js', () => ({ Project: {} }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn() }));
 vi.mock('../src/xlsxExport.js', () => ({ buildXLSX: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ getNotesGeneralFileData: vi.fn(), getNotesEdiusFileData: vi.fn() }));
-vi.mock('../src/audio-routing.js', () => ({ AudioRouting: { openOutputSettings: spies.openOutputSettings } }));
+vi.mock('../src/audio-routing.js', () => ({
+  AudioRouting: {
+    openOutputSettings: spies.openOutputSettings,
+    openDeliveryOutputSettings: spies.openDeliveryOutputSettings,
+  },
+}));
 
 let State;
 let resetAudioProject;
@@ -54,6 +60,7 @@ beforeEach(() => {
   spies.openModal.mockClear();
   spies.closeModal.mockClear();
   spies.openOutputSettings.mockClear();
+  spies.openDeliveryOutputSettings.mockClear();
   resetAudioProject();
   ensureAudioBusCount(2);
   State.cues = [];
@@ -72,9 +79,19 @@ beforeEach(() => {
   State.exportOut = 32;
   State.externalAudioState = [];
   mediaMock.tracks = [];
+  window.subtool.getStartupFile.mockResolvedValue(null);
 });
 
 describe('匯出交付清單', () => {
+  it('不把 startup 專案所在資料夾誤當成已授權的交付輸出目錄', async () => {
+    window.subtool.getStartupFile.mockResolvedValue('C:\\Projects\\cut.subtool');
+
+    await showExportVideoDialog();
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    expect(document.querySelector('.ev-outdir')?.value).toBe('');
+  });
+
   it('WAV 列仍可設定音軌，並顯示實際輸出範圍的時長', async () => {
     await showExportVideoDialog();
     await new Promise(resolve => setTimeout(resolve, 25));
@@ -92,8 +109,15 @@ describe('匯出交付清單', () => {
     expect(audioButton).not.toBeNull();
     expect(audioButton.disabled).toBe(false);
     audioButton.click();
-    expect(spies.openOutputSettings).toHaveBeenCalledWith(
-      expect.any(Function), null, null, { deliveryFormat: 'wav' }
+    expect(spies.openDeliveryOutputSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buses: State.audioProject.buses,
+        streams: State.audioProject.exportLayout.streams,
+      }),
+      expect.any(Function), { deliveryFormat: 'wav' }
     );
+    // 交付列的設定視窗只拿深複製草稿，不暫時覆寫正在播放專案的 State。
+    expect(State.audioProject.buses).toHaveLength(2);
+    expect(State.audioProject.exportLayout.streams).toHaveLength(2);
   });
 });

@@ -78,11 +78,11 @@ on('cue:openEdit', openCueEditModal);
 on('action', doAction);
 on('mpv:sync', _syncMpvPanel); // 自訂視窗（快捷鍵設定、右鍵選單）開閉時重算 mpv 讓位
 on('history:record', recordHistory); // 供 media.js 等低階模組記錄歷史（避免 media→history 循環相依）
-on('project:relinkBrowserMedia', generation=>{
+on('project:relinkBrowserMedia', (generation, projectRestore)=>{
   void Project.continueLoad(generation,async isCurrent=>{
     const files=await pickMediaFiles($('fileMedia'));
     if(!isCurrent()) return;
-    await importBrowserMediaFiles(files);
+    await importBrowserMediaFiles(files,{generation,plan:projectRestore});
   }).catch(error=>console.warn('relink browser project media:',error));
 });
 // 還原專案音訊設定後，Web Audio 的實際 gain 與混音器 UI 也要回到同一份快照。
@@ -937,39 +937,47 @@ function pickMediaFiles(input){
   });
 }
 
-async function importDesktopMediaFiles(value){
+async function importDesktopMediaFiles(value, explicitRelink=null){
+  const relink=explicitRelink||Project.pendingMediaRelink?.()||null;
+  const projectRestore=relink?.plan||null;
   const paths=(Array.isArray(value)?value:(value?[value]:[])).filter(path=>typeof path==='string'&&path);
   const videos=paths.filter(path=>mediaFileKind(path)==='video');
   const audios=paths.filter(path=>mediaFileKind(path)==='audio');
   const images=paths.filter(path=>mediaFileKind(path)==='image');
+  let primaryLoaded=false;
   if(videos.length>1){
     // 多選影片的語意固定為「第一支建立／保留主序列，其餘加入序列」，避免連續跳出多個 modal。
-    if(!Media.seqOn()) await Media.loadDesktopMedia(videos.shift());
+    if(!Media.seqOn()) { await Media.loadDesktopMedia(videos.shift(),projectRestore); primaryLoaded=true; }
     for(const path of videos) await Media.addClipDesktop(path);
   }else if(videos.length===1){
     const path=videos[0];
     if(Media.seqOn()) Media.openIncoming({path});
-    else await Media.loadDesktopMedia(path);
+    else { await Media.loadDesktopMedia(path,projectRestore); primaryLoaded=true; }
   }
   for(const path of audios) await Media.addAudioFileDesktop(path);
   for(const path of images) await Media.addImageDesktop(path);
+  if(primaryLoaded&&relink) await Project.finishMediaRelink(relink.generation,projectRestore);
 }
 
-async function importBrowserMediaFiles(files){
+async function importBrowserMediaFiles(files, explicitRelink=null){
+  const relink=explicitRelink||Project.pendingMediaRelink?.()||null;
+  const projectRestore=relink?.plan||null;
   const list=Array.isArray(files)?files.filter(Boolean):[];
   const videos=list.filter(file=>mediaFileKind(file)==='video');
   const audios=list.filter(file=>mediaFileKind(file)==='audio');
   const images=list.filter(file=>mediaFileKind(file)==='image');
+  let primaryLoaded=false;
   if(videos.length>1){
-    if(!Media.seqOn()) await Media.loadVideoFile(videos.shift());
+    if(!Media.seqOn()) { await Media.loadVideoFile(videos.shift(),projectRestore); primaryLoaded=true; }
     for(const file of videos) await Media.addClipWeb(file);
   }else if(videos.length===1){
     const file=videos[0];
     if(Media.seqOn()) Media.openIncoming({file});
-    else await Media.loadVideoFile(file);
+    else { await Media.loadVideoFile(file,projectRestore); primaryLoaded=true; }
   }
   for(const file of audios) await Media.addAudioFile(file);
   for(const file of images) await Media.addImageWeb(file);
+  if(primaryLoaded&&relink) await Project.finishMediaRelink(relink.generation,projectRestore);
 }
 
 // A4：純關閉面板的 case 改用資料表，消除重複的 classList.remove('show')+_syncMpvPanel()
@@ -978,8 +986,20 @@ async function doAction(act, force = false){
   if(CLOSE_PANELS[act]){ $(CLOSE_PANELS[act]).classList.remove('show'); _syncMpvPanel(); return; }
   switch(act){
     case 'open-media':
-      if(IS_DESKTOP) await importDesktopMediaFiles(await DESK.openMedia());
-      else await importBrowserMediaFiles(await pickMediaFiles($('fileMedia')));
+      {
+        // 先在打開 picker 前凍結目前 restore transaction；否則使用者等檔案選擇器
+        // 開著時載入另一個專案，回來的舊檔案會錯套到新專案的 restore plan。
+        const relink=Project.pendingMediaRelink?.()||null;
+        if(relink){
+          await Project.continueLoad(relink.generation,async isCurrent=>{
+            const picked=IS_DESKTOP?await DESK.openMedia():await pickMediaFiles($('fileMedia'));
+            if(!isCurrent()) return;
+            if(IS_DESKTOP) await importDesktopMediaFiles(picked,relink);
+            else await importBrowserMediaFiles(picked,relink);
+          });
+        }else if(IS_DESKTOP) await importDesktopMediaFiles(await DESK.openMedia());
+        else await importBrowserMediaFiles(await pickMediaFiles($('fileMedia')));
+      }
       break;
     case 'open-project':
       if(IS_DESKTOP){ const r=await DESK.openProject(); if(r)Project.loadDesktop(r); }
@@ -2548,19 +2568,12 @@ async function takeScreenshot(withTimecode = false) {
 
   let fullPath = '';
   let name = '';
-  if (dir && IS_DESKTOP && DESK && DESK.listDir) {
-    let maxNum = 0;
+  if (dir && IS_DESKTOP && DESK?.reserveScreenshotPath) {
     try {
-      const files = await DESK.listDir(dir);
-      const re = /^Shot-(\d{3})/i;
-      for (const f of files) {
-        const m = re.exec(f);
-        if (m) { const n = parseInt(m[1], 10); if (n > maxNum) maxNum = n; }
-      }
-    } catch (e) { console.error('[screenshot] listDir error:', e); }
-    const nextNum = (maxNum + 1).toString().padStart(3, '0');
-    name = `Shot-${nextNum}${tcSuffix}.jpg`;
-    fullPath = dir + '/' + name;
+      const reserved = await DESK.reserveScreenshotPath(dir, tcSuffix);
+      fullPath = reserved?.path || '';
+      name = reserved?.name || '';
+    } catch (e) { console.error('[screenshot] reserve path error:', e); }
   } else {
     // 瀏覽器 fallback 檔名
     name = `Shot-${Math.floor(Media.displayTime())}${tcSuffix}.jpg`;

@@ -285,4 +285,24 @@ describe('history restores the media runtime', () => {
     expect(primaryTrack._srcHidden).toBe(true);
     seek.mockRestore();
   });
+
+  it('keeps an audio-only playhead on the transport virtual clock while the visual gap stays black', () => {
+    State.clips = [];
+    State.duration = 60;
+    Media.externalAudioSources = [{
+      id: 'external-a', duration: 60, in: 0, out: 60, offset: 0, enabled: true,
+    }];
+    Media._transport.reset();
+    Media._transport.enterGap(10, { running: false }); // visual black-screen state
+    Media._transport.seekVirtual(40, { running: false });
+    Media.playing = true;
+
+    expect(Media.audioOnlyTimeline()).toBe(true);
+    expect(Media._gap).toBe(true);
+    expect(Media.tlTime()).toBe(40);
+
+    Media.pause();
+    expect(Media.displayTime()).toBe(40);
+    expect(Media._vStart).toBeNull();
+  });
 });

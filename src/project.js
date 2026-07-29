@@ -28,9 +28,10 @@ import { Media } from './media.js';
 import { drawTimeline } from './timeline.js';
 import { History } from './history.js';
 import { renderNotes } from './notes.js';
-import { emit, on } from './events.js';
+import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets } from './substyle.js';
+import { ProjectLoadSession } from './project-load-session.js';
 
 /* ===== 自動備份狀態 ===== */
 let _editGuardDone = false;  // 本 session 是否已顯示過「請先儲存」提示
@@ -38,6 +39,7 @@ let _savePath      = null;   // 上次儲存的完整路徑（desktop only）
 let _saveBaseName  = null;   // 基礎名稱（不含副檔名），自動備份用
 let _autoSaveTimer = null;
 let _lastSavedDataStr = null; // 用於判斷專案是否被修改
+const _projectLoadSession = new ProjectLoadSession();
 
 function _defaultSaveName(){
   return (State.mediaName ? State.mediaName.replace(/\.[^.]+$/,'') : 'project')+'.subtool';
@@ -100,22 +102,23 @@ function _savedExternalAudioSources(){
   let live=[];
   try{ live=typeof Media.getExternalAudioSources==='function'?Media.getExternalAudioSources():[]; }catch(e){}
   // 尚未能重新開啟（例如暫時找不到檔案）的來源也要繼續留在專案檔，避免下一次儲存遺失。
-  return _normalExternalAudioSources([...(Array.isArray(live)?live:[]), ...(State._pendingExternalAudioSources||[])]);
+  const pending=_projectLoadSession.activePlan?.pendingExternalAudioSources?.()||[];
+  return _normalExternalAudioSources([...(Array.isArray(live)?live:[]), ...pending]);
 }
-/* 開啟專案到主影片尚未重建的短暫期間，clip 會暫放在 _pendingClips。
+/* 開啟專案到主影片尚未重建的短暫期間，clip 會保存在 ProjectLoadSession 的 restore plan。
    儲存／dirty 判斷都必須把它們算進去，否則純圖片專案會在重開後尚未還原
    畫面前就被當成空專案覆寫。 */
 function _savedClips(){
   const live=Array.isArray(State.clips)?State.clips:[];
-  const pending=Array.isArray(State._pendingClips)?State._pendingClips:[];
+  const pending=_projectLoadSession.activePlan?.pendingClips?.()||[];
   if(!pending.length) return live;
   const liveIds=new Set(live.map(clip=>clip?.id).filter(Boolean));
   return [...live,...pending.filter(clip=>!clip?.id||!liveIds.has(clip.id))];
 }
 
-async function _restorePendingExternalAudioSources(){
-  const pending=_normalExternalAudioSources(State._pendingExternalAudioSources);
-  if(!pending.length){ delete State._pendingExternalAudioSources; return {restored:0,pending:0}; }
+async function _restorePendingExternalAudioSources(plan=_projectLoadSession.activePlan){
+  const pending=_normalExternalAudioSources(plan?.pendingExternalAudioSources?.());
+  if(!pending.length){ plan?.replaceExternalAudioSources?.([]); return {restored:0,pending:0}; }
   if(!IS_DESKTOP||typeof Media.restoreExternalAudioSource!=='function') return {restored:0,pending:pending.length};
 
   const existing=new Set();
@@ -149,8 +152,7 @@ async function _restorePendingExternalAudioSources(){
       unresolved.push(source);
     }
   }
-  if(unresolved.length) State._pendingExternalAudioSources=unresolved;
-  else delete State._pendingExternalAudioSources;
+  plan?.replaceExternalAudioSources?.(unresolved);
   // 未找到檔案的來源仍要保留其可編輯 timeline metadata；否則一開專案就會被
   // 影片長度截短，下一次另行重新連結音檔時位置也會看起來消失。
   let live=[];
@@ -296,10 +298,7 @@ function resetProject(){
   resetAudioProject();
   State.exportIn=null;
   State.exportOut=null;
-  delete State._pendingClips;
-  delete State._pendingExternalAudioSources;
-  delete State._pendingProjectMediaRelink;
-  delete State._pendingPlayhead;
+  _projectLoadSession.clearPlan();
 }
 
 function _hasAudioProjectData(){
@@ -324,13 +323,13 @@ function _finishProjectLoad(){
   setStatus('專案已載入','ok');
 }
 
-function _restorePendingPlayhead(){
-  const raw=State._pendingPlayhead;
+function _restorePendingPlayhead(plan=_projectLoadSession.activePlan){
+  const raw=plan?.peekPlayhead?.();
   if(!Number.isFinite(raw)) return false;
   const target=Math.max(0,raw);
   try{
     Media.seek(target);
-    delete State._pendingPlayhead;
+    plan?.clearPlayhead?.();
     return true;
   }catch(error){
     console.warn('restore project playhead:',error);
@@ -338,24 +337,13 @@ function _restorePendingPlayhead(){
   }
 }
 
-/* 開啟專案會跨越 stat、媒體載入、背景 clip 還原等多個 await。使用者連按兩次時，
-   舊請求不可在新請求之後才回來覆寫 State；但兩次 Media.reset/load 也不能並行。
-   generation 提供 latest-wins，tail 則保證整段 runtime 交易依序收尾。 */
-let _projectLoadGeneration=0;
-let _projectLoadTail=Promise.resolve();
-function _isCurrentProjectLoad(generation){ return generation===_projectLoadGeneration; }
-function _appendProjectLoad(generation,work){
-  const result=_projectLoadTail.catch(()=>{}).then(()=>{
-    if(!_isCurrentProjectLoad(generation)) return;
-    return work();
-  });
-  // 尾鏈必須吞掉前一個呼叫的 rejection，否則下一次開啟專案永遠不會執行；
-  // 原呼叫仍拿到 result，可照常觀察錯誤。
-  _projectLoadTail=result.catch(()=>{});
-  return result;
-}
+/* ProjectLoadSession owns the latest-wins generation, serial runtime tail, and
+   temporary restore material. Project and Media exchange the plan explicitly
+   instead of smuggling it through State. */
+function _isCurrentProjectLoad(generation){ return _projectLoadSession.isCurrent(generation); }
+function _appendProjectLoad(generation,work){ return _projectLoadSession.append(generation,work); }
 function _queueProjectLoad(work){
-  const generation=++_projectLoadGeneration;
+  const generation=_projectLoadSession.begin();
   return _appendProjectLoad(generation,()=>work(generation));
 }
 
@@ -386,8 +374,30 @@ const Project = {
   continueLoad(generation,work){
     return _appendProjectLoad(generation,()=>work(()=>_isCurrentProjectLoad(generation)));
   },
+  /* 專案主媒體暫時找不到、使用者按稍後或取消檔案選擇器時，restore plan 必須保留到
+     下一次真正載入主影片。這是顯式 hand-off，不再把 pending material 塞回 State。 */
+  pendingMediaRelink(){
+    const plan=_projectLoadSession.activePlan;
+    if(!plan?.needsMediaRelink?.()) return null;
+    return { generation:_projectLoadSession.generation, plan };
+  },
+  /* 瀏覽器版重選媒體沒有桌面版的 loadDesktopMedia await 鏈。
+     由 app 在同一個 latest-wins transaction 內呼叫，等 Media 已完成其 pending
+     restore 後才還原播放點；不能再靠已移除的全域 media:projectReady 訂閱。 */
+  async finishMediaRelink(generation,plan){
+    if(!_isCurrentProjectLoad(generation)||_projectLoadSession.activePlan!==plan) return false;
+    try{ await Media.waitForPendingProjectRestore?.(); }catch(error){ console.warn('restore browser project clips:',error); }
+    if(!_isCurrentProjectLoad(generation)||_projectLoadSession.activePlan!==plan) return false;
+    await _restorePendingExternalAudioSources(plan);
+    if(!_isCurrentProjectLoad(generation)||_projectLoadSession.activePlan!==plan) return false;
+    _restorePendingPlayhead(plan);
+    _finishProjectLoad();
+    return true;
+  },
+  // 保留明確名稱給既有 browser 呼叫端；實際語意由同一個跨平台 completion 收斂。
+  finishBrowserMediaRelink(generation,plan){ return this.finishMediaRelink(generation,plan); },
   startNewProject(work){
-    const generation=++_projectLoadGeneration;
+    const generation=_projectLoadSession.begin();
     return _appendProjectLoad(generation,work);
   },
   save(){
@@ -407,10 +417,8 @@ const Project = {
     if(IS_DESKTOP){ return DESK.saveProject(name,bytesToB64(bytes)).then(pth=>{ if(pth) { _onSaved(pth); setStatus('已另存新檔', 'ok'); showToast('已另存新檔'); } return pth||null; }); }
     downloadBytes(bytes,name,'application/json'); _onSaved(null,name); return Promise.resolve(name);
   },
-  apply(data){
+  apply(data,generation=null){
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
-    // 新專案若沒有儲存播放點，不能沿用前一個等待媒體就緒的播放點。
-    delete State._pendingPlayhead;
     // Fix #19：明確排除 undefined/null，避免 version:0 被誤判為 v1（0 是 falsy）
     const isV1 = data.version === undefined || data.version === null || data.version === 1;
     // Media.reset() 會釋放播放器資源，但不覆寫專案顯示名稱／路徑；讀取新專案時
@@ -420,8 +428,7 @@ const Project = {
     State.mediaName=typeof savedMedia.name==='string'&&savedMedia.name?savedMedia.name:null;
     State.mediaSize=Math.max(0,Number(savedMedia.size)||0);
     State.mediaPath=IS_DESKTOP&&typeof savedMedia.path==='string'&&savedMedia.path?savedMedia.path:null;
-    if(State.mediaPath||State.mediaName) State._pendingProjectMediaRelink=true;
-    else delete State._pendingProjectMediaRelink;
+    const mediaRelink=!!(State.mediaPath||State.mediaName);
     State.cues=(data.cues||[]).map(c=>{
       let tk = c.track||0;
       if (!isV1 && c.track !== undefined) tk = Math.max(0, c.track - 1);
@@ -442,8 +449,6 @@ const Project = {
     // 外部音檔不屬於 video clip，先保留成 pending；桌面版在主影片完成載入後再依 path 還原。
     // 瀏覽器版刻意不自動重開本機檔案，讓使用者自行重新選取。
     const pendingExternal=_normalExternalAudioSources(data.externalAudioSources);
-    if(pendingExternal.length) State._pendingExternalAudioSources=pendingExternal;
-    else delete State._pendingExternalAudioSources;
     State.externalAudioState=pendingExternal;
     State.externalAudioEnd=_externalAudioEnd(pendingExternal);
     
@@ -478,23 +483,20 @@ const Project = {
       State.videoTracks = data.videoTracks.map((t,i)=>({name:t.name||('視訊軌 '+(i+1)),visible:t.visible!==false,locked:!!t.locked,
         ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})}));
     else { resetVideoTracks(); ensureVideoTrackCount(Math.max(1, data.videoTrackCount || 1)); }
-    State._pendingClips = (Array.isArray(data.clips) && data.clips.length) ? data.clips.map(raw=>{
+    const pendingClips = (Array.isArray(data.clips) && data.clips.length) ? data.clips.map(raw=>{
       const clip=(raw&&typeof raw==='object')?{...raw}:{};
       // audioSrc 是 v4.35 runtime 名稱；v3 專案檔改存 audioSourceId，讀舊資料時保留相同來源識別。
       if(clip.audioSourceId==null&&clip.audioSrc!=null) clip.audioSourceId=String(clip.audioSrc);
       return clip;
-    }) : null;
-    if(!State._pendingClips) delete State._pendingClips;
+    }) : [];
     State.duration=data.duration||State.duration;
     State.pxPerSec=data.pxPerSec||80;
     State.exportIn=data.exportIn!=null?data.exportIn:null;
     State.exportOut=data.exportOut!=null?data.exportOut:null;
     State.listTrack=0;
     State.selectedId=null; State.selectedIds=[]; // 開啟專案後預設不選取任何字幕
-    if(data.playhead != null && typeof data.playhead === 'number'){
-      const pt = Math.max(0, data.playhead);
-      State._pendingPlayhead = pt;
-    }
+    const playhead=data.playhead != null&&typeof data.playhead==='number' ? Math.max(0,data.playhead) : null;
+    _projectLoadSession.createRestorePlan(generation,{clips:pendingClips,externalAudioSources:pendingExternal,playhead,mediaRelink});
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes();
   },
   load(file){
@@ -507,10 +509,11 @@ const Project = {
     // 載入另一個專案必須先清掉舊的 runtime 媒體。尤其當新專案的主影片暫時
     // 找不到時，後續還原外部音檔不能和前一個專案殘留的 asset 混在一起。
     try{ Media.reset(); }catch(e){ console.warn('reset media before project load:',e); }
-    this.apply(data);
+    this.apply(data,generation);
     if(!_isCurrentProjectLoad(generation)) return;
     if(data.media&&data.media.name){
-      const extCount=Array.isArray(State._pendingExternalAudioSources)?State._pendingExternalAudioSources.length:0;
+      const plan=_projectLoadSession.activePlan;
+      const extCount=plan?.pendingExternalAudioSources?.().length||0;
       openModal('請重新選取影音檔',
         `此專案對應的影音檔為：<br><br><b>${escapeHTML(data.media.name)}</b><br><br>`+
         `基於瀏覽器安全限制，無法自動開啟原始檔路徑，請手動重新匯入同一支影片以還原預覽與波形。`+
@@ -518,7 +521,7 @@ const Project = {
         `<br><br>字幕內容已完整還原。`,
         [{label:'立即匯入影音',primary:true,act:()=>{
           closeModal();
-          if(_isCurrentProjectLoad(generation)) emit('project:relinkBrowserMedia',generation);
+          if(_isCurrentProjectLoad(generation)) emit('project:relinkBrowserMedia',generation,plan);
         }},{label:'稍後',act:closeModal}]);
     }
     if(_isCurrentProjectLoad(generation)) _finishProjectLoad();
@@ -538,19 +541,20 @@ const Project = {
     // 同上：即使原主影片不存在或使用者選擇「稍後」，也不能讓舊專案的
     // externalAudioSources 留在目前專案、造成播放或匯出重複音訊。
     try{ Media.reset(); }catch(e){ console.warn('reset media before desktop project load:',e); }
-    this.apply(data);
+    this.apply(data,generation);
+    const plan=_projectLoadSession.activePlan;
     // 載入既有專案時記錄儲存路徑，自動備份用
     if(r.path){ _savePath=r.path; _saveBaseName=r.path.replace(/\\/g,'/').split('/').pop().replace(/\.subtool$/i,''); if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave,3*60*1000); }
     if(mp){
       if(mediaStat?.exists){
         // 等主影片完成初始化後才掛外部音檔，避免 Media.loadDesktopMedia 的 reset 清掉剛重建的音源。
-        try{ await Media.loadDesktopMedia(mp); }catch(e){ console.warn('load project media:',e); }
+        try{ await Media.loadDesktopMedia(mp,plan); }catch(e){ console.warn('load project media:',e); }
         // _registerPrimary 會背景還原其餘影片／圖片；Undo 基準必須等它們全部完成。
         try{ await Media.waitForPendingProjectRestore?.(); }catch(e){ console.warn('restore project clips:',e); }
         if(!_isCurrentProjectLoad(generation)) return;
-        await _restorePendingExternalAudioSources();
+        await _restorePendingExternalAudioSources(plan);
         if(!_isCurrentProjectLoad(generation)) return;
-        _restorePendingPlayhead();
+        _restorePendingPlayhead(plan);
       }
       else openModal('找不到原影片',
         `專案紀錄的影片路徑不存在：<br><br><b>${escapeHTML(mp)}</b><br><br>請手動重新匯入。字幕已還原。`,
@@ -563,34 +567,33 @@ const Project = {
           // 開啟影音現在可多選；這個「找回原主影片」流程只需要第一個檔案。
           const p=Array.isArray(picked)?picked[0]:picked;
           if(p){
-            try{ await Media.loadDesktopMedia(p); }catch(e){ console.warn('load replacement media:',e); }
+            try{ await Media.loadDesktopMedia(p,plan); }catch(e){ console.warn('load replacement media:',e); }
             try{ await Media.waitForPendingProjectRestore?.(); }catch(e){ console.warn('restore replacement clips:',e); }
             if(!_isCurrentProjectLoad(generation)) return;
           }
-          await _restorePendingExternalAudioSources();
-          if(_isCurrentProjectLoad(generation)) _restorePendingPlayhead();
+          await _restorePendingExternalAudioSources(plan);
+          if(_isCurrentProjectLoad(generation)) _restorePendingPlayhead(plan);
           });
         }},{label:'稍後',act:()=>{
           if(!_isCurrentProjectLoad(generation)){ closeModal(); return Promise.resolve(); }
           return _appendProjectLoad(generation,async()=>{
             closeModal();
-            await _restorePendingExternalAudioSources();
+            await _restorePendingExternalAudioSources(plan);
           });
         }}]);
     }else{
       // 純音訊專案沒有主影片可觸發 reset，因此先清舊媒體，再重建外部音檔。
       try{ Media.reset(); }catch(e){}
-      // 純圖片專案同樣沒有主影片可觸發 _registerPrimary；直接從 pending
+      // 純圖片專案同樣沒有主影片可觸發 _registerPrimary；直接從 restore plan
       // 資料重建圖片，否則重開後只剩空時間軸。
-      try{ await Media.restorePendingImageClips?.(); }catch(e){ console.warn('restore pending image clips:',e); }
+      try{ await Media.restorePendingImageClips?.(plan); }catch(e){ console.warn('restore pending image clips:',e); }
       if(!_isCurrentProjectLoad(generation)) return;
-      await _restorePendingExternalAudioSources();
+      await _restorePendingExternalAudioSources(plan);
       if(!_isCurrentProjectLoad(generation)) return;
-      _restorePendingPlayhead();
+      _restorePendingPlayhead(plan);
     }
     if(_isCurrentProjectLoad(generation)) _finishProjectLoad();
   }
 };
-on('media:projectReady',_restorePendingPlayhead);
 
 export { Project, ensureProjectSaved, isProjectGuardDone, resetProject, isProjectDirty };

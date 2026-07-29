@@ -12,7 +12,9 @@
 |------|------|------|
 | **Main Process** | `electron/main.js` | 視窗管理、系統 ffmpeg/ffprobe、mpv 嵌入、本機檔案 I/O、快取管理 |
 | **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
+| **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
 | **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集 |
+| **匯出佇列狀態** | `electron/export-queue-state.js` | 唯一有序工作集合；scheduler、監控畫面、重試與持久化都讀同一份順序 |
 | **匯出輸出鎖** | `electron/export-lease.js` | 依正規化輸出路徑建立原子 lease，避免不同工作同時以 `-y` 寫入同一檔案 |
 | **匯出監護程序** | `electron/export-watchdog.js` | 獨立持有交付匯出的 ffmpeg；主程序中斷後停止子程序、刪除半成品，並提供啟動復原用的 token pipe |
 | **Renderer Process** | `dist/index.html`（Vite 打包） | UI 介面、字幕編輯、時間軸（完整前端邏輯） |
@@ -43,22 +45,24 @@ Main (main.js)
 | `window.subtool` 方法 | IPC Channel | 方向 | 說明 |
 |---|---|---|---|
 | `status()` | `app:status` | R→M | 回傳 `{ffmpeg, venc, mpv}` 狀態 |
-| `fileURL(path)` | `fs:fileURL` | R→M | 本地路徑 → 可播放 URL |
-| `stat(path)` | `fs:stat` | R→M | 回傳 `{exists, size}` |
+| `fileURL(path)` | `fs:fileURL` | R→M | 已授權唯讀檔案 → 可播放 URL；查詢不會取得新授權 |
+| `stat(path)` | `fs:stat` | R→M | 已授權唯讀檔案才回傳 `{exists, size}` |
 | `getFilePath(file)` | —（preload 內直接呼叫 `webUtils.getPathForFile`，無 IPC） | R | 拖放的 `File` 物件 → 絕對路徑。Electron 32 起 `File.path` 已移除；只接受真正的 File 物件、失敗回 `null`。供拖放影音走桌面載入路徑（`loadDesktopMedia`） |
-| `readB64(path)` | `fs:readB64` | R→M | 讀檔回 base64 字串 |
-| `writeProject(path, b64)` | `fs:writeProject` | R→M | 直接寫入指定路徑（自動備份用） |
-| `writeScreenshot(path, b64)` | `fs:writeScreenshot` | R→M | 寫出畫面截圖；主程序限定 `.jpg/.jpeg/.png` 副檔名 |
-| `listDir(path)` | `fs:listDir` | R→M | 列出目錄內容（字型／素材掃描用） |
-| `openMedia()` | `dialog:openMedia` | R→M | 系統開檔對話框（影音），回傳路徑 |
-| `openAudio()` | `dialog:openAudio` | R→M | 系統開檔對話框（音訊），回傳路徑陣列 |
-| `openProject()` | `dialog:openProject` | R→M | 開啟 `.subtool` 專案，回傳 `{b64, path}` |
-| `saveProject(name, b64)` | `dialog:saveProject` | R→M | 另存 `.subtool` 專案，回傳儲存路徑 |
+| `authorizeDroppedFile(file)` | `fs:authorizeDroppedFile` | R→M | preload 從真實拖放 `File` 取得精確路徑後，授予該單一影音檔唯讀能力 |
+| `readB64(path)` | `fs:readB64` | R→M | 只讀已授權檔案，回傳 base64 字串 |
+| `writeProject(path, b64)` | `fs:writeProject` | R→M | 只可寫回已選取專案本身或其 `.subtool_AutoSave/` |
+| `writeScreenshot(path, b64)` | `fs:writeScreenshot` | R→M | 只可寫入已授權截圖目錄的 `.jpg/.jpeg/.png` |
+| `reserveScreenshotPath(directory, suffix)` | `fs:reserveScreenshotPath` | R→M | 在已授權截圖目錄內保留下一個 `Shot-NNN*.jpg`；檔案清單不交給 renderer |
+| `listDir(path)` | `fs:listDir` | R→M | 只列出已選擇的交付目錄，供交付同名衝突提示 |
+| `openMedia()` | `dialog:openMedia` | R→M | 系統開檔對話框（影音），為每個回傳檔授予精確唯讀能力 |
+| `openAudio()` | `dialog:openAudio` | R→M | 系統開檔對話框（音訊），每個回傳檔都取得精確唯讀能力 |
+| `openProject()` | `dialog:openProject` | R→M | 開啟 `.subtool` 專案，回傳 `{b64, path}`；只解析明確 media 欄位並授予那些精確來源 |
+| `saveProject(name, b64)` | `dialog:saveProject` | R→M | 另存 `.subtool` 專案並授予該專案與 autosave 的限定寫入能力 |
 | `importSub(kind)` | `dialog:importSub` | R→M | 開啟字幕檔，回傳 `{b64, name}` |
 | `exportSub(name, b64, ext)` | `dialog:exportSub` | R→M | 儲存字幕檔，回傳儲存路徑 |
 | `importDirectory()` | `dialog:importDirectory` | R→M | 選一個資料夾後批次讀入其中的 `.json`（常用樣式批次匯入用）；回傳的 `name` 是**相對於所選資料夾的路徑**，呼叫端據此還原樣式資料夾結構 |
 | `importFont()` | `dialog:importFont` | R→M | 匯入字型檔，複製進使用者資料夾（`userData`，避免安裝目錄的 Windows 寫入權限問題） |
-| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 將凍結後的影片序列加入持久化佇列並回傳工作 ID：`{clips[],videoTracks[],width,height,fps,assText,format:'prores'\|'mp4'\|'wav',duration,audioPlan,timecodeWatermark?}`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼；影像／音訊都必須是母素材，handler 會拒絕 `proxy.mp4`／`chN.m4a` 快取。影片輸出為 ProRes422HQ/H.264，WAV 則為多聲道 PCM；MP4 完成後回傳 ffprobe 實測 audio bitrate。 |
+| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 將凍結後的影片序列加入持久化佇列並回傳工作 ID：`format` 只可為 `'h264'\|'prores'\|'wav'`，輸出副檔名必須分別是 `.mp4/.mov/.wav`。影像／音訊都必須是已授權母素材，輸出必須來自原生選取的交付位置；handler 會拒絕 `proxy.mp4`／`chN.m4a` 快取與任意 `presetOut`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼。 |
 | `stopExport(jobId)` | `ffmpeg:stopExport` | R→M | 停止主狀態列目前顯示的匯出工作；傳入 jobId 避免並行時停止到另一份工作 |
 | `openQueueMonitor()` | `queue:openMonitor` | R→M | 顯示／聚焦獨立的匯出佇列監控視窗 |
 | `queueResume()` | `queue:resume` | R→M | 解除佇列層級暫停並開始下一份等待工作 |
@@ -77,12 +81,12 @@ Main (main.js)
 | `mpv.detect()` | `mpv:detect` | R→M | 檢查 mpv 是否可用 |
 | `mpv.launch(opts)` | `mpv:launch` | R→M | 啟動 mpv 嵌入播放（`{src, bounds, audio}`） |
 | `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置（**來源時間**；影片序列的時間軸↔來源映射在前端 media.js 處理） |
-| `mpv.loadfile(p)` | `mpv:loadfile` | R→M | 影片序列跨段切換：同一 mpv 實例換檔（保留 --wid 嵌入與屬性），輪詢 duration 就緒後回傳 `{duration}`；路徑受 S1 白名單管制 |
+| `mpv.loadfile(p)` | `mpv:loadfile` | R→M | 影片序列跨段切換：同一 mpv 實例換檔（保留 --wid 嵌入與屬性），輪詢 duration 就緒後回傳 `{duration}`；只接受 FileAuthority 已授權來源 |
 | `mpv.play()` / `mpv.pause()` | `mpv:play` / `mpv:pause` | R→M | 播放 / 暫停 |
 | `mpv.mute(v)` | `mpv:mute` | R→M | 靜音切換 |
 | `mpv.rate(r)` | `mpv:rate` | R→M | 播放速率 |
 | `mpv.brightness(v)` | `mpv:brightness` | R→M | 設定 mpv 畫面亮度（−100～0）。淡入淡出的預覽提示用：HTML 疊層蓋不過 mpv 的 OS 層視窗，故改以 brightness 呈現「淡到黑」 |
-| `mpv.screenshot(p)` | `mpv:screenshot` | R→M | 由 mpv 直接截圖到指定路徑（含字幕）；主程序限定圖片副檔名 |
+| `mpv.screenshot(p)` | `mpv:screenshot` | R→M | 由 mpv 直接截圖到已授權截圖位置（含字幕）；限定圖片副檔名，固定暫存截圖只取得精確 read capability |
 | `mpv.subVisible(v)` | `mpv:subVisible` | R→M | 切換 mpv 的 libass 字幕顯示（拖曳字幕時暫時隱藏，改由 HTML 層預覽新位置） |
 | `mpv.setBounds(b)` | `mpv:setBounds` | R→M | 更新 mpv 覆蓋視窗位置與大小 |
 | `mpv.setGuide(g)` | `mpv:setGuide` | R→M | 更新一般安全框／字幕操作 guide |
@@ -99,12 +103,12 @@ Main (main.js)
 | `window.subtool` 方法 | IPC Channel | 方向 | 說明 |
 |---|---|---|---|
 | `isDesktop` | —（preload 內的常數 `true`） | — | 前端 `state.js` 用它判定桌面版（`DESK`）；網頁版沒有 `window.subtool`，取值為 undefined |
-| `fontsList()` | `fonts:list` | R→M | 掃 `font/` 下每個子資料夾，回傳 `{fonts:[{name, file, family}]}`。`name`＝資料夾名（UI 顯示）、`family`＝**字型檔內部家族名**（ASS 要用這個，見鐵律 §0.3）。此 handler 內會把字型路徑加進白名單，renderer 才取得到 `fs:fileURL` |
+| `fontsList()` | `fonts:list` | R→M | 掃 `font/` 下每個子資料夾，回傳 `{fonts:[{name, file, family}]}`。`name`＝資料夾名（UI 顯示）、`family`＝**字型檔內部家族名**（ASS 要用這個，見鐵律 §0.3）。此 handler 只授予已掃描字型根的唯讀能力，renderer 才取得到 `fs:fileURL` |
 | `configLoad()` | `config:load` | R→M | 讀 `%APPDATA%/sub-tool/config.json`（設定、常用樣式 `subPresets` 等） |
 | `configSave(data)` | `config:save` | R→M | **淺層合併**寫回 config.json（只傳要改的鍵即可） |
 | `keysLoad()` | `keys:load` | R→M | 讀自訂快捷鍵對應表 |
 | `keysSave(data)` | `keys:save` | R→M | 寫自訂快捷鍵對應表（快捷鍵設定視窗另有匯出／匯入 JSON 檔） |
-| `exportDirectory(files)` | `dialog:exportDirectory` | R→M | 選一個資料夾後批次寫入多個檔案（分軌匯出字幕用） |
+| `exportDirectory(files)` | `dialog:exportDirectory` | R→M | 選資料夾批次寫入字幕樣式包；只有 `files` 為空的「選擇交付目錄」流程會授予 ffmpeg delivery capability |
 | `getStartupFile()` | `app:getStartupFile` | R→M | 取「雙擊 `.subtool` 啟動」時帶進來的檔案路徑（前端啟動後主動問一次） |
 | `onOpenFile(cb)` | `app:open-file` | M→R | 程式已在執行時又雙擊 `.subtool` → 推播路徑 |
 | `onAppRequestClose(cb)` | `app:request-close` | M→R | 使用者按視窗關閉鈕 → 主行程**先攔下來**問前端（前端跳「未儲存」確認） |
@@ -123,15 +127,18 @@ Main (main.js)
 | `clearCompleted()` | `queue:clearCompleted` | R→M | 清除所有已完成工作 |
 | `reorderJob(id,index)` | `queue:reorderJob` | R→M | 調整等待工作順序並同步寫回持久化檔 |
 | `showMainWindow()` | `app:showMainWindow` | R→M | 顯示／重建主視窗；用於主視窗關閉後從監控視窗返回 |
-| `openPath(path)` | `app:openPath` | R→M | 以系統預設程式開啟失敗記錄 |
-| `showItemInFolder(path)` | `app:showItemInFolder` | R→M | 在檔案總管顯示完成的輸出檔 |
+| `openPath(path)` | `app:openPath` | R→M | 只可用系統預設程式開啟受控 `<userData>/export-queue/*.log` |
+| `showItemInFolder(path)` | `app:showItemInFolder` | R→M | 只可在檔案總管顯示已通過驗證的精確交付輸出檔 |
 | `onUpdate(cb)` | `queue:update` | M→R | 佇列內容或狀態變更通知 |
 
-佇列的持久化真相來源在 `<userData>/export-queue/`：每份可恢復工作各有一個
+佇列的持久化真相來源在 `<userData>/export-queue/`：`ExportQueueState` 是唯一的記憶體順序來源，
+每份可恢復工作各有一個
 `<id>.json`，有字幕時另存 `<id>.ass`，失敗記錄固定為 `<id>.log`。新增與排序都會原子寫入；程式重啟後，
 `running` 一律退回 `queued`，所有恢復工作保持暫停，直到使用者明確按「繼續佇列」。
 恢復及開始前都會驗證 `clips[].path`、片段音訊及 `audioPlan` 的來源；缺檔工作標為
-`missing-source`，不會靜默輸出缺字幕或缺素材的成品。`done`／`failed`／`stopped`
+`missing-source`，不會靜默輸出缺字幕或缺素材的成品。恢復 app 自己持久化的工作時，才重新授予
+snapshot 中每個精確來源與輸出檔的能力；renderer 後來附加的 payload 路徑仍會被拒絕。格式或副檔名
+不符的工作會失敗，不能以錯誤容器交付。`done`／`failed`／`stopped`
 只保留在本次執行的畫面，不跨重啟恢復。
 
 交付匯出另在 `<userData>/export-queue/output-leases/<SHA-256>.lock/owner.json`
@@ -154,9 +161,10 @@ Windows 最小化時它也可能回傳 `false`。
 
 > **新增 IPC 通道時**：① `preload.js` 加 `ipcRenderer.invoke`；② `main.js` 加 `ipcMain.handle`；③ 更新此表。
 >
-> **路徑安全**：主行程對所有檔案操作走白名單（`allowDir()` / `allowFile()`）。新增任何會讀寫
-> 使用者路徑的通道時，記得把該路徑加進白名單，否則 renderer 拿不到 `fs:fileURL`——這正是
-> 字型管線當初漏掉的一步。
+> **路徑安全**：主行程唯一權威是 `FileAuthority`，而不是「看過路徑就授權」的資料夾白名單。
+> 原生對話框、OS 開檔、preload 驗證的真實拖放 `File` 與 app 自己持久化的 queue snapshot 才能授予
+> capability。read、project/autosave write、delivery write、screenshot write、queue log shell-open 與
+> delivery reveal 各自分離；新增 IPC 時必須選對能力，不能用 `fs:fileURL`／`stat`／任意 payload 當升權入口。
 
 ---
 

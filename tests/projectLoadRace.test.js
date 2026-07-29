@@ -139,7 +139,7 @@ describe('project load transactions', () => {
     await Promise.all([loadingA, loadingB]);
 
     expect(mediaMock.loadDesktopMedia).toHaveBeenCalledTimes(1);
-    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov');
+    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov', expect.any(Object));
     expect(State.cues.map(cue => cue.text)).toEqual(['B']);
     expect(resetHistory).toHaveBeenCalledTimes(1);
   });
@@ -161,9 +161,9 @@ describe('project load transactions', () => {
     const resetHistory = vi.spyOn(History, 'reset');
 
     const loadingA = Project.loadDesktop(request('A', 'C:/media/A.mov', 11));
-    await vi.waitFor(() => expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/A.mov'));
+    await vi.waitFor(() => expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/A.mov', expect.any(Object)));
     const loadingB = Project.loadDesktop(request('B', 'C:/media/B.mov', 22));
-    expect(mediaMock.loadDesktopMedia).not.toHaveBeenCalledWith('C:/media/B.mov');
+    expect(mediaMock.loadDesktopMedia).not.toHaveBeenCalledWith('C:/media/B.mov', expect.any(Object));
 
     mediaA.resolve();
     await Promise.all([loadingA, loadingB]);
@@ -195,7 +195,7 @@ describe('project load transactions', () => {
 
     expect(desk.openMedia).not.toHaveBeenCalled();
     expect(mediaMock.loadDesktopMedia).toHaveBeenCalledTimes(1);
-    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov');
+    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov', expect.any(Object));
     expect(State.cues.map(cue => cue.text)).toEqual(['B']);
   });
 
@@ -239,7 +239,7 @@ describe('project load transactions', () => {
     await expect(loadingA).rejects.toThrow('磁碟暫時不可用');
     await loadingB;
 
-    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov');
+    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov', expect.any(Object));
     expect(State.cues.map(cue => cue.text)).toEqual(['B']);
   });
 
@@ -248,7 +248,9 @@ describe('project load transactions', () => {
     const continuationStarted = deferred();
     let continuation;
     let imported = false;
-    on('project:relinkBrowserMedia', generation => {
+    let restorePlan;
+    on('project:relinkBrowserMedia', (generation, plan) => {
+      restorePlan = plan;
       continuation = Project.continueLoad(generation, async isCurrent => {
         continuationStarted.resolve();
         await picker.promise;
@@ -257,12 +259,18 @@ describe('project load transactions', () => {
       });
     });
     desk.stat.mockResolvedValue({ exists: true });
-    mediaMock.loadDesktopMedia.mockResolvedValue();
+    // 真實 Media._registerPrimary() 會在成功建立主片段時消耗這個 restore plan 的
+    // relink flag；mock 也要維持同一個 completion 邊界，才能檢驗 A 不會殘留。
+    mediaMock.loadDesktopMedia.mockImplementation((_path, plan) => {
+      plan?.consumeMediaRelink?.();
+      return Promise.resolve();
+    });
 
     await Project.load(projectFile(projectData('A', 'C:/media/A.mov')));
     const actions = uiMock.openModal.mock.calls.at(-1)?.[2];
     actions[0].act();
     await continuationStarted.promise;
+    expect(restorePlan.pendingClips()).toEqual([expect.objectContaining({ id: 'clip-A' })]);
 
     const loadingB = Project.loadDesktop(request('B', 'C:/media/B.mov'));
     picker.resolve();
@@ -270,6 +278,43 @@ describe('project load transactions', () => {
 
     expect(imported).toBe(false);
     expect(State.cues.map(cue => cue.text)).toEqual(['B']);
+    expect(Project.pendingMediaRelink()).toBeNull();
+  });
+
+  it('完成瀏覽器媒體重新連結後才還原並消耗該專案的播放點', async () => {
+    let generation;
+    let restorePlan;
+    on('project:relinkBrowserMedia', (nextGeneration, plan) => {
+      generation = nextGeneration;
+      restorePlan = plan;
+    });
+
+    await Project.load(projectFile(projectData('A', 'C:/media/A.mov', 13)));
+    const actions = uiMock.openModal.mock.calls.at(-1)?.[2];
+    // 使用者先選「稍後」再從一般開啟媒體流程回來時，app 會從這個明確 hand-off
+    // 取得同一份 restore plan；不能把資料藏回 State 或重新建立一份。
+    const pending = Project.pendingMediaRelink();
+    expect(pending).toMatchObject({ generation: expect.any(Number), plan: expect.any(Object) });
+    expect(pending.plan.peekPlayhead()).toBe(13);
+    actions[0].act();
+    expect(restorePlan).toBe(pending.plan);
+    expect(generation).toBe(pending.generation);
+
+    expect(mediaMock.seek).not.toHaveBeenCalled();
+    await Project.finishBrowserMediaRelink(generation, restorePlan);
+
+    expect(mediaMock.waitForPendingProjectRestore).toHaveBeenCalledTimes(1);
+    expect(mediaMock.seek).toHaveBeenCalledWith(13);
+    expect(restorePlan.peekPlayhead()).toBeNull();
+  });
+
+  it('開新專案會撤銷尚未完成的瀏覽器重新連結 hand-off', async () => {
+    await Project.load(projectFile(projectData('A', 'C:/media/A.mov', 13)));
+    expect(Project.pendingMediaRelink()).toMatchObject({ plan: expect.any(Object) });
+
+    await Project.startNewProject(() => resetProject());
+
+    expect(Project.pendingMediaRelink()).toBeNull();
   });
 
   it('invalidates an in-flight load before starting a new empty project transaction', async () => {

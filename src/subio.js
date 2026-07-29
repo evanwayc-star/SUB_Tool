@@ -42,6 +42,7 @@ import { buildXLSX } from './xlsxExport.js';
 import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
 import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
+import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec } from './delivery-audio.js';
 import { t } from './i18n.js';
 
 /* 格式自動辨識 */
@@ -648,35 +649,9 @@ function _buildExportData() {
 /* 交付列只儲存自己的 bus 編組與 stream 配置；真正可交付的母素材 inputs 來自每次
    匯出時重新編譯的 audioPlan。若直接用儲存的 buses 取代它，所有 inputs 都會遺失，
    export-plan 只能為選中的 bus 產生 anullsrc。 */
+// 相容既有 I/O 接縫；真正的純交付編譯器位於 delivery-audio.js，不讀寫 State。
 function _composeDeliveryAudioPlan(compiledPlan, deliveryRecord) {
-  if (!compiledPlan) return null;
-  const finalPlan=JSON.parse(JSON.stringify(compiledPlan));
-  const savedBuses=deliveryRecord?.audioBuses;
-  if (Array.isArray(savedBuses)) {
-    const inputsById=new Map(finalPlan.buses.map(bus=>[String(bus.id),bus.inputs]));
-    finalPlan.buses=savedBuses.map(bus=>({
-      ...bus,
-      // 新增但尚無來源的 bus 仍明確是無聲；既有 bus 必須保留當次編譯的母素材座標。
-      inputs:inputsById.get(String(bus?.id))||[]
-    }));
-  }
-  if (Array.isArray(deliveryRecord?.audioPlan?.streams)) {
-    finalPlan.streams=JSON.parse(JSON.stringify(deliveryRecord.audioPlan.streams));
-  }
-  /* WAV 只有一條 interleaved stream；未特別設定時保留所有專案 A 軌的既有順序。
-     使用者在某一列 WAV 的「音軌」設定儲存後，則只取該列選中的 bus，並以該順序排成
-     WAV channels（例如 A7、A8 -> Stereo L/R）。不能只留下 streams，因為主程序的
-     WAV 路徑刻意忽略 mux streams，直接依 buses 產出。 */
-  if (deliveryRecord?.format === 'wav' && Array.isArray(deliveryRecord.wavBusIds)) {
-    const busesById=new Map(finalPlan.buses.map(bus=>[String(bus.id),bus]));
-    const seen=new Set();
-    finalPlan.buses=deliveryRecord.wavBusIds
-      .map(id=>String(id))
-      .filter(id=>id&&!seen.has(id)&&(seen.add(id),true))
-      .map(id=>busesById.get(id))
-      .filter(Boolean);
-  }
-  return finalPlan;
+  return composeDeliveryAudioPlan(compiledPlan, deliveryRecord);
 }
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
 /* MP4 交付碼率的合理建議值（Mbps）＝像素數 × fps × 0.12 bit ÷ 1e6（H.264 中高品質經驗值）。
@@ -765,17 +740,6 @@ async function showExportVideoDialog(initialDraft=null) {
     }]
   };
   
-  // if this is the first open, try to use project path as outDir
-  if (!initialDraft && IS_DESKTOP && DESK?.getStartupFile) {
-    DESK.getStartupFile().then(p => {
-      if (p) {
-        draft.deliverables[0].outDir = p.replace(/\\[^\\]+$/, '');
-        updateRows();
-        checkConflicts();
-      }
-    }).catch(err => { console.warn('Failed to get startup file', err); });
-  }
-
   let html = `
     <div style="font-size:13px;line-height:1.6;width:760px;display:flex;flex-direction:column;">
 
@@ -960,39 +924,21 @@ async function showExportVideoDialog(initialDraft=null) {
     });
     $$('.ev-audio-btn').forEach(el => el.onclick = e => {
       const idx = +e.target.dataset.idx;
-      const oldPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout || {}));
-      const oldBuses = JSON.parse(JSON.stringify(State.audioProject.buses || []));
-      
-      State.audioProject.exportLayout = JSON.parse(JSON.stringify(draft.deliverables[idx].audioPlan));
-      if (draft.deliverables[idx].audioBuses) {
-        State.audioProject.buses = JSON.parse(JSON.stringify(draft.deliverables[idx].audioBuses));
-      }
-      
+      // 交付列的編組是獨立草稿：不可為了重用設定視窗而暫時覆寫全域專案 buses，
+      // 否則縮減交付 A 軌時會連來源聲道配線一起受到影響。
+      const audioSpec=createDeliveryAudioSpec(State.audioProject,draft.deliverables[idx]);
       closeModal();
       const deliveryFormat=draft.deliverables[idx].format;
-      AudioRouting.openOutputSettings(({saved}={}) => {
-        if (saved) {
-          draft.deliverables[idx].audioPlan = JSON.parse(JSON.stringify(State.audioProject.exportLayout));
-          draft.deliverables[idx].audioBuses = JSON.parse(JSON.stringify(State.audioProject.buses));
-          if (deliveryFormat === 'wav') {
-            const seen=new Set();
-            draft.deliverables[idx].wavBusIds=(State.audioProject.exportLayout?.streams || [])
-              .flatMap(stream=>Array.isArray(stream?.busIds)?stream.busIds:[])
-              .map(id=>String(id))
-              .filter(id=>id&&!seen.has(id)&&(seen.add(id),true));
-          }
-        }
+      AudioRouting.openDeliveryOutputSettings(audioSpec,({saved,spec}={}) => {
+        if (saved && spec)
+          draft.deliverables[idx]=applyDeliveryAudioSpec(draft.deliverables[idx],spec);
         
         if (!draft.deliverables[idx].nameModified) {
           draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
         }
-        
-        State.audioProject.exportLayout = oldPlan;
-        State.audioProject.buses = oldBuses;
-        if (typeof window.renderAll === 'function') window.renderAll();
-        
+
         void showExportVideoDialog(draft);
-      }, null, null, { deliveryFormat });
+      }, { deliveryFormat });
     });
   }
 
@@ -1284,14 +1230,14 @@ document.addEventListener('drop', async e => {
   const ext = (f.name.split('.').pop() || '').toLowerCase();
   if (['subtool', 'json'].includes(ext)) Project.load(f);
   else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
-  else if (IS_DESKTOP && DESK.getFilePath) {
+  else if (IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)) {
     // 桌面版：拖放影音必須與「🎬 影音」按鈕走同一條桌面路徑（ffprobe 實測 FPS、
     // 系統 ffmpeg 轉檔/多音軌、mpv 秒開）——否則 MXF 等非原生格式會落到
     // ffmpeg.wasm 的 1.6GB 上限而「沒有觸發轉檔」。路徑經 preload 的
     // webUtils.getPathForFile 解析（Electron 32 起 File.path 已移除）；
-    // 解析失敗時退回瀏覽器路徑。後續 ffprobe 會把該目錄加入 S1 白名單（main.js）。
+    // preload 會先把真實 File 的精確路徑授權給主程序；解析失敗時退回瀏覽器路徑。
     // 已有影片時 openIncoming 會詢問「加入序列」或「取代」。
-    const p = DESK.getFilePath(f);
+    const p = DESK.authorizeDroppedFile ? await DESK.authorizeDroppedFile(f) : DESK.getFilePath(f);
     if (p) Media.openIncoming({ path: p }); else Media.openIncoming({ file: f });
   }
   else Media.openIncoming({ file: f });
