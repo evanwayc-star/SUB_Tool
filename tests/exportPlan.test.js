@@ -148,3 +148,170 @@ describe('WAV 交付的聲道組裝', () => {
     expect(typeof wav.label).toBe('string');
   });
 });
+
+/* ============================================================================
+   交付規格 → ffmpeg argv（buildDeliveryArgv）
+
+   這一段以前【一行測試都沒有】。它整段長在 _runJobLogic() 裡，和 fs.readFileSync、
+   spawn、佇列廣播糾纏，vitest 起不了 Electron；於是鐵律 §0.1（三路一致）與
+   §0.4（Windows 路徑跳脫兩層）最容易靜默壞掉的那一段，只能靠人工匯出後看成品。
+
+   音訊那半早就住在本檔並有測試，影像那半沒有——把它搬過來就是為了下面這些。
+============================================================================ */
+describe('交付 argv：影像合成', () => {
+  const clip = (over = {}) => ({
+    path: 'C:/source/master.mxf', type: 'video', vtrack: 0,
+    in: 10, out: 20, offset: 0, fadeIn: 0, fadeOut: 0, ...over,
+  });
+  const spec = (over = {}) => ({
+    format: 'mp4', width: 1920, height: 1080, fps: 25, duration: 10,
+    videoKbps: 8000, audioPlan: null, timecodeWatermark: null,
+    assFileName: null, outPath: 'C:/out/deliverable.mp4',
+    videoTracks: [{ vt: 0, scale: 1, posX: 0.5, posY: 0.5, opacity: 1 }],
+    clips: [clip()], ...over,
+  });
+  const env = (over = {}) => ({ hasAudioStream: () => false, ...over });
+  const fcOf = args => args[args.indexOf('-filter_complex') + 1];
+
+  it('沒有片段時明確失敗，不會產生一組會跑出空檔的 argv', () => {
+    expect(() => P.buildDeliveryArgv(spec({ clips: [] }), env())).toThrow('沒有可匯出的影片段');
+  });
+
+  /* 44GB MXF 的教訓：同一個實體檔案只開一次 input，並用 -ss 加在 -i 前，
+     否則 ffmpeg 會從 0 開始慢速解碼，而且每個 input 各建一個 hwaccel 實例耗盡 VRAM。 */
+  it('同一支母素材只開一次 input，且 -ss 在 -i 前面', () => {
+    const { args } = P.buildDeliveryArgv(spec({
+      clips: [clip({ in: 10, out: 20, offset: 0 }), clip({ in: 30, out: 40, offset: 10 })],
+    }), env());
+    expect(args.filter(a => a === 'C:/source/master.mxf')).toHaveLength(1);
+    const i = args.indexOf('-ss');
+    expect(args[i + 2]).toBe('-i');
+    expect(+args[i + 1]).toBeCloseTo(9.5); // 最早用到的 in 再退 0.5 秒
+  });
+
+  it('outPath 一定是最後一個 argv', () => {
+    const { args } = P.buildDeliveryArgv(spec(), env());
+    expect(args[0]).toBe('-y');
+    expect(args[args.length - 1]).toBe('C:/out/deliverable.mp4');
+    expect(args).toContain('-movflags');
+  });
+
+  it('ProRes 交付走 prores_ks，且不帶 AAC bitrate', () => {
+    const { args, plannedEncoder, kbps, audioBitrates } = P.buildDeliveryArgv(
+      spec({ format: 'prores', outPath: 'C:/out/master.mov' }),
+      env({ proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] }));
+    expect(plannedEncoder).toBe('prores_ks');
+    expect(args).toContain('prores_ks');
+    expect(args).not.toContain('-b:a:0');
+    expect(kbps).toBeNull();
+    expect(audioBitrates).toBeNull();
+  });
+
+  it('GPU 編碼器只影響標籤與參數，不改變 filtergraph', () => {
+    const cpu = P.buildDeliveryArgv(spec(), env({ vencArgsBitrate: () => ['-c:v', 'libx264'] }));
+    const gpu = P.buildDeliveryArgv(spec(), env({
+      encoderName: 'h264_nvenc',
+      vencArgsBitrate: () => ['-c:v', 'h264_nvenc'],
+      hwdecArgs: () => ['-hwaccel', 'auto'],
+    }));
+    expect(cpu.isGpu).toBe(false);
+    expect(gpu.isGpu).toBe(true);
+    expect(gpu.label).toContain('GPU NVENC');
+    expect(fcOf(gpu.args)).toBe(fcOf(cpu.args));
+    expect(gpu.args).toContain('-hwaccel');
+  });
+
+  /* 交付時長要取「宣告值」與「音訊 plan 尾端」的較大者：音訊較長時 ffmpeg 會
+     延長成品，佇列顯示與進度換算必須用同一個值，否則進度條會停在 100% 之前。 */
+  it('音訊 plan 比宣告時長更長時，交付時長跟著延長', () => {
+    const audioPlan = P._normalizeAudioPlan({
+      buses: [{ id: 'a1', inputs: [{ file: 'C:/source/master.mxf', sourceStream: 0, sourceChannel: 0, offset: 0, trimStart: 0, trimEnd: 30, volume: 1 }] }],
+      streams: [{ id: 's', layout: 'mono', busIds: ['a1'] }],
+    });
+    const { duration, args } = P.buildDeliveryArgv(spec({ duration: 10, audioPlan }), env());
+    expect(duration).toBe(30);
+    expect(fcOf(args)).toContain('d=30.000'); // 黑底也拉到同一個長度
+  });
+});
+
+describe('交付 argv：燒錄字幕與時間碼（鐵律 §0.4 路徑跳脫）', () => {
+  const base = {
+    format: 'mp4', width: 1920, height: 1080, fps: 25, duration: 5,
+    videoKbps: 8000, audioPlan: null, timecodeWatermark: null,
+    outPath: 'C:/out/deliverable.mp4',
+    videoTracks: [{ vt: 0 }],
+    clips: [{ path: 'C:/source/a.mov', type: 'video', vtrack: 0, in: 0, out: 5, offset: 0 }],
+  };
+  const fcOf = args => args[args.indexOf('-filter_complex') + 1];
+
+  /* v4.31.2 的真實事故：filtergraph 先拆選項、選項值再拆一次，所以磁碟機冒號
+     字面上必須是 `C\\:/...`。只寫一個反斜線 → ffmpeg 把 `:` 當選項分隔符、
+     整條 filterchain 解析失敗 → 匯出直接掛掉。 */
+  it('fontsdir 的磁碟機冒號跳【兩層】，反斜線一律轉成正斜線', () => {
+    const { args } = P.buildDeliveryArgv({ ...base, assFileName: 'job-1.ass' },
+      { hasAudioStream: () => false, fontsDir: 'C:\\Users\\Evan\\SUB_Tool\\font' });
+    const fc = fcOf(args);
+    expect(fc).toContain('ass=job-1.ass:fontsdir=C\\\\:/Users/Evan/SUB_Tool/font');
+    expect(fc).not.toContain('\\Users'); // 反斜線沒轉乾淨
+  });
+
+  it('沒有 font/ 目錄時不加 fontsdir，字幕仍然燒錄', () => {
+    const { args } = P.buildDeliveryArgv({ ...base, assFileName: 'job-1.ass' },
+      { hasAudioStream: () => false, fontsDir: null });
+    expect(fcOf(args)).toContain('ass=job-1.ass[vout]');
+  });
+
+  /* ASS 只帶檔名（cwd=TMP）而不是完整路徑——這是繞開路徑跳脫的整個理由，
+     一旦有人「順手改成絕對路徑」，Windows 上就會再踩一次 §0.4。 */
+  it('ass 濾鏡只引用檔名，不放絕對路徑', () => {
+    const { args } = P.buildDeliveryArgv({ ...base, assFileName: 'job-1.ass' },
+      { hasAudioStream: () => false });
+    expect(fcOf(args)).not.toMatch(/ass=[A-Za-z]:/);
+  });
+
+  /* 時間碼是交付用 burn-in，必須接在 ASS 後面，才會永遠在字幕與所有影像之上。 */
+  it('時間碼濾鏡接在字幕之後，且最終 map 指向時間碼的輸出', () => {
+    const { args } = P.buildDeliveryArgv({
+      ...base, assFileName: 'job-1.ass',
+      timecodeWatermark: P._normaliseExportTimecodeWatermark({ start: '10:00:00:00' }, 25),
+    }, { hasAudioStream: () => false, timecodeFontFile: 'C:/font/sarasa-mono.ttf' });
+    const fc = fcOf(args);
+    expect(fc.indexOf('ass=job-1.ass')).toBeLessThan(fc.indexOf('drawtext='));
+    expect(fc).toContain('[vout]drawtext=');
+    expect(args[args.indexOf('-map') + 1]).toBe('[vtimecode]');
+  });
+
+  it('沒有字幕也沒有時間碼時，直接 map 疊層結果', () => {
+    const { args } = P.buildDeliveryArgv({ ...base, assFileName: null }, { hasAudioStream: () => false });
+    expect(args[args.indexOf('-map') + 1]).toBe('[ov0]');
+  });
+});
+
+describe('交付 argv：WAV', () => {
+  const wavPlan = {
+    buses: [
+      { id: 'a1', inputs: [{ file: 'C:/source/master.mxf', sourceStream: 0, sourceChannel: 0, offset: 0, trimStart: 0, trimEnd: 8, volume: 1 }] },
+      { id: 'a2', inputs: [{ file: 'C:/source/master.mxf', sourceStream: 0, sourceChannel: 1, offset: 0, trimStart: 0, trimEnd: 8, volume: 1 }] },
+    ],
+    streams: [],
+  };
+
+  it('走 24-bit PCM 48k，聲道數＝專案音軌數，且不帶任何視訊參數', () => {
+    const { args, plannedEncoder, isGpu, audioChannels, label } = P.buildDeliveryArgv({
+      format: 'wav', duration: 8, outPath: 'C:/out/mix.wav',
+      audioPlan: P._normalizeAudioPlan(wavPlan, { requireStreams: false }),
+    }, {});
+    expect(plannedEncoder).toBe('pcm_s24le');
+    expect(isGpu).toBe(false);
+    expect(audioChannels).toBe(2);
+    expect(label).toContain('2 軌');
+    expect(args).toContain('-ar');
+    expect(args).not.toContain('-c:v');
+    expect(args[args.length - 1]).toBe('C:/out/mix.wav');
+  });
+
+  it('沒有專案音軌路由時明確擋下，不會輸出一個無聲的 WAV', () => {
+    expect(() => P.buildDeliveryArgv({ format: 'wav', duration: 8, outPath: 'C:/out/mix.wav', audioPlan: null }, {}))
+      .toThrow(/專案音軌路由/);
+  });
+});

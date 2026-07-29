@@ -48,7 +48,7 @@ Arctime 風格的多軌時間軸上字幕工具。**Vite + 原生 ES 模組（�
 同一份程式碼同時跑網頁版與 Electron 桌面版（以 `window.subtool` / `IS_DESKTOP` 分支）。
 
 ```
-src/            前端 ES 模組（28 支）＋ decode/ 底下 4 支 WebCodecs 相關
+src/            前端 ES 模組（39 支）＋ decode/ 底下 4 支 WebCodecs 相關
 electron/       主行程：ffmpeg / ffprobe / mpv / 檔案 I/O / 路徑白名單
 docs/           說明文件（見下方「文件職責」）
 tests/          vitest 單元測試（純函式與資料完整性）
@@ -175,7 +175,7 @@ Antigravity 那條是實測的：開啟設定後，它的 **Customizations → R
 ## 7. 靜態安全網
 
 ```bash
-npm run lint    # eslint：抓「用了沒 import 的名稱」
+npm run lint    # eslint（src 與 electron 兩邊）：抓「用了沒 import 的名稱」＋兩道封裝圍籬
 npm run build   # rollup：抓「import 了某模組未 export 的名稱」（eslint 抓不到）
 npm test        # vitest：純函式與資料完整性
 grep -rn "from './app.js'" src   # 應為空——不可再引入對 app.js 的相依
@@ -184,6 +184,18 @@ grep -rn "from './app.js'" src   # 應為空——不可再引入對 app.js 的�
 架構規則：**沒有任何模組可以 `import … from './app.js'`。**
 低階模組要觸發重繪／指令時用 `emit('事件名', …)`（`events.js`），
 由 `app.js` 以 `on(...)` 訂閱。
+
+### 兩道封裝圍籬（eslint `no-restricted-syntax`）
+
+違反這兩條的後果都是**靜默**的，所以用 lint 擋而不是靠自律：
+
+| 圍籬 | 內容 | 例外 |
+|------|------|------|
+| **選取狀態** | 不可直接寫 `State.selectedId` / `selectedIds` / `selectedClipId` / `selectedAudioClipId` / `activeTrackKind`，改用 `setSelection` / `deselect` / `pruneSelection` / `focusTrackKind` | `src/state.js` |
+| **Media 內部** | 不可讀寫 `Media._*`，改用公開入口（`activeClip()` / `inGap()` / `sourceLocalTime()` / `mpvPresenting()` / `webCodecsTakeover()`…） | `src/media.js` |
+
+> `no-restricted-syntax` 在 flat config 裡是**整組取代**而非累加。兩條圍籬因此寫在
+> 同一份清單再依檔案拆 block；分開寫成兩個 block 會讓後者**無聲地**關掉前者。
 
 ---
 

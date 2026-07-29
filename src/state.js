@@ -592,6 +592,41 @@ function setSelection({ kind = null, ids = [], primary } = {}){
    「取消選取，但這一軌仍是目前焦點軌」（見 docs/開發與驗證.md §4.13）。 */
 function clearSelection(){ return setSelection({ kind: null }); }
 
+/* 只放掉其中一種選取，其他兩種不動。
+   給了 id 就只在「目前選的正好是它」時才放掉——這是刪除素材、
+   取消單一片段時最常見的形狀，以前每個呼叫端各自寫一次 if 比對。
+   不動 activeTrackKind，理由同 clearSelection()。 */
+function deselect(kind, id){
+  if(!SELECTION_KINDS.has(kind)) return State;
+  if(kind === 'sub'){
+    if(id == null){ State.selectedIds = []; State.selectedId = null; return State; }
+    if(!State.selectedIds.includes(id) && State.selectedId !== id) return State;
+    State.selectedIds = State.selectedIds.filter(x => x !== id);
+    if(State.selectedId === id) State.selectedId = State.selectedIds[State.selectedIds.length - 1] ?? null;
+    return State;
+  }
+  const field = kind === 'video' ? 'selectedClipId' : 'selectedAudioClipId';
+  if(id == null || State[field] === id) State[field] = null;
+  return State;
+}
+
+/* 字幕集合變動後（undo/redo、刪除、匯入）把選取修剪回仍然存在的 id。
+   主選取消失時退回剩下的第一個，而不是連同其他選取一起丟掉——
+   以前 history.js 丟、subtitles.js 與 timeline-renderer.js 留，三處寫法不一致。 */
+function pruneSelection(){
+  const alive = new Set(State.cues.map(c => c.id));
+  const ids = State.selectedIds.filter(id => alive.has(id));
+  State.selectedIds = ids;
+  State.selectedId = alive.has(State.selectedId) ? State.selectedId : (ids[0] ?? null);
+  return State;
+}
+
+/* 只換焦點軌類別，不動任何選取——點軌道列頭的語意。 */
+function focusTrackKind(kind){
+  if(SELECTION_KINDS.has(kind)) State.activeTrackKind = kind;
+  return State;
+}
+
 function cueSuffix(c){
   if(!c) return '';
   const tk=c.track||0;
@@ -604,4 +639,6 @@ function cueSuffix(c){
 export { State, newTrack, syncTrackCount, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks,
   newAudioBus, normalizeAudioProject, resetAudioProject, ensureAudioBusCount, ensureAudioExportDefaults,
   ensureAudioSourceMap, routeForChannel,
-  FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel, setSelection, clearSelection, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys };
+  FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel,
+  setSelection, clearSelection, deselect, pruneSelection, focusTrackKind, cueSuffix,
+  loadConfig, saveConfig, loadKeys, saveKeys };

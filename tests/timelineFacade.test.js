@@ -138,4 +138,32 @@ describe('timeline public facade', () => {
     expect(engine.snapVal(4.9, [0, 5, 10], 0.2)).toBe(5);
     expect(engine.neighborBounds(4, 6, 0)).toEqual({ prevEnd: 3, nextStart: 7 });
   });
+
+  /* 接縫的寬度是一個決定，不是副作用。timeline.js 從 `export *` 改成逐一列名，
+     就是為了讓「在 timeline-renderer.js 加一個 export」不再等於「全專案多一個
+     可見名稱」。這條把清單釘住：要拓寬接縫，這個陣列也得一起改，diff 看得見。
+
+     不是為了湊測試數字——`export *` 時期這條測不出東西，因為清單就是實作本身。 */
+  it('對外名稱是一份明確清單，不會因為繪製模組多 export 就自動變寬', async () => {
+    const timeline = await import('../src/timeline.js');
+    expect(Object.keys(timeline).sort()).toEqual([
+      'ROW_H', 'RULER_H',
+      'addTrack', 'clearClipSelection', 'closeClipGapLeft',
+      'deleteSelectedClip', 'drawRuler', 'drawTimeline', 'drawWave',
+      'fmtTick', 'layoutTimeline', 'moveSelectedToTrack', 'neighborBounds',
+      'niceStep', 'refreshTrackGutterActive', 'removeTrack', 'renderCueBlocks',
+      'renderTrackRows', 'selectClip', 'setZoom', 'showClipFade',
+      'showCrossfade', 'showImageGeom', 'snapTargets', 'snapVal',
+      'timeToX', 'trackFromY', 'tracksScrollTop', 'tracksTop',
+      'updatePlayhead', 'viewportW', 'xToTime', 'zoomFit', 'zoomFitVideo',
+    ]);
+  });
+
+  /* 只在繪製模組內部用到的名稱不該出現在接縫上；死碼更不該。 */
+  it('內部度量與已移除的死碼都不在接縫上', async () => {
+    const timeline = await import('../src/timeline.js');
+    for (const name of ['yToTrack', 'tlTotal', 'redrawTimeline', 'navigateClip']) {
+      expect(timeline[name], `${name} 不應該還在 timeline.js 的對外清單裡`).toBeUndefined();
+    }
+  });
 });

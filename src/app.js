@@ -31,7 +31,8 @@ import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFil
 import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assToSec, encoreToSec, snapTimeToFrame } from './time.js';
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
-import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection} from './state.js';
+import { createCommands } from './commands.js';
+import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { getPlayerAdapter } from './media-player-adapter.js';
 import { AudioRouting } from './audio-routing.js';
@@ -151,7 +152,7 @@ function refreshMpvSubs(revealAfter=false, live=false){
       _lastMpvSubSend=performance.now();
       // 序列：mpv/libass 以【來源時間】渲染字幕，而 cue 時碼為【時間軸時間】——
       // 依當前 clip 的映射（來源 = 時間軸 - offset + in）整批平移後再餵給 mpv
-      const c=Media.seqOn() ? Media._activeClip() : null;
+      const c=Media.seqOn() ? Media.activeClip() : null;
       // live 也必須先用時間軸位置篩選，最後才映射成 mpv 的來源時間。
       const cs=Seq.timedRangesForSource(State.cues,c,live
         ? {center:Media.displayTime(),radius:5}
@@ -212,7 +213,7 @@ function _syncMpvPanel(){
   const settingsOpen=!!document.getElementById('settingsModal');
   // 序列間隙（時間軸上無影片的區段）：畫面應為黑 → mpv 讓位
   // WC 接管（proxy 就緒、WebCodecs 合成呈現中）：mpv 視窗一律讓位（僅供時鐘＋聲音兜底）
-  let hides=modalOpen||settingsOpen||!!Media._gap||!!Media._wcTakeover;
+  let hides=modalOpen||settingsOpen||Media.inGap()||Media.webCodecsTakeover();
   if(!hides){
     const vr=$('videoWrap')?.getBoundingClientRect();
     if(vr){
@@ -241,7 +242,7 @@ let _hoveredSubEl = null;
 function _sendMpvSubtitleGuide(el){
   const mpv=getPlayerAdapter();
   if(!mpv?.setGuide) return;
-  if(!el || !Media.mpvMode || Media._wcTakeover || _mpvSubtitleDrag){ mpv.setGuide(null).catch(()=>{}); return; }
+  if(!el || !Media.mpvPresenting() || _mpvSubtitleDrag){ mpv.setGuide(null).catch(()=>{}); return; }
   const wrap=_videoWrap?.getBoundingClientRect(), box=el.getBoundingClientRect();
   if(!wrap || !box.width || !box.height){ mpv.setGuide(null).catch(()=>{}); return; }
   mpv.setGuide({ x:box.left-wrap.left-3, y:box.top-wrap.top-3, w:box.width+6, h:box.height+6 }).catch(()=>{});
@@ -316,7 +317,7 @@ let _mpvTimecodeWatermarkSig = '';
 function syncMpvTimecodeWatermark(text, rect){
   const mpv=getPlayerAdapter();
   if(!mpv?.setTimecodeWatermark) return;
-  const nativeMpv=!!(Media.mpvMode && !Media._wcTakeover);
+  const nativeMpv=Media.mpvPresenting();
   const payload=(nativeMpv && text && rect?.w && rect?.h) ? {text,rect} : null;
   // 播放時這個函式會跟著 raf 呼叫；只有跨越下一格或畫面大小改變才送 IPC。
   const sig=payload ? `${payload.text}|${payload.rect.x}|${payload.rect.y}|${payload.rect.w}|${payload.rect.h}` : '';
@@ -334,7 +335,7 @@ function renderTimecodeWatermark(time=Media.displayTime()){
 
   // 與安全框／字幕同樣貼齊實際可見畫面，不會落在不同長寬比造成的黑邊上。
   const r=_stageRect();
-  const nativeMpv=!!(Media.mpvMode && !Media._wcTakeover);
+  const nativeMpv=Media.mpvPresenting();
   syncMpvTimecodeWatermark(on&&nativeMpv ? text : '', on&&nativeMpv ? r : null);
 
   if(!_timecodeWatermark) return;
@@ -372,10 +373,10 @@ function renderVideoSub(){
   // 3. 尺寸對齊: 透過 substyle.js 的 ASS_PLAY_RES 鎖定 1920x1080 與 0.75 (72/96) 字體係數，
   //    確保 HTML DOM 與 libass 的字體在像素級別達到數學上的 100% 一致。
   // 若 contextmenu 開啟（_ctxOpen），原生 mpv 會讓位，此時需解除 transparent 顯示 HTML 字幕預覽，避免文字不見。
-  const mpvHitLayer=!!(Media.mpvMode && !Media._wcTakeover && !_mpvSubtitleDrag && !_presetEdit && !window._ctxOpen);
+  const mpvHitLayer=!!(Media.mpvPresenting() && !_mpvSubtitleDrag && !_presetEdit && !window._ctxOpen);
   if(_videoSub){
     _videoSub.classList.toggle('mpv-hit-layer', mpvHitLayer);
-    if((!Media.mpvMode || Media._wcTakeover || mpvHitLayer || _mpvSubtitleDrag || _presetEdit) && _videoSub.style.display==='none') _videoSub.style.display='';
+    if((!Media.mpvPresenting() || mpvHitLayer || _mpvSubtitleDrag || _presetEdit) && _videoSub.style.display==='none') _videoSub.style.display='';
   }
   if(!mpvHitLayer) _sendMpvSubtitleGuide(null);
   const t=Media.displayTime();
@@ -601,10 +602,10 @@ function renderImageOverlays(){
     layer._imageHtml = html;
   }
 
-  const guideSig = Media.mpvMode && !Media._wcTakeover
+  const guideSig = Media.mpvPresenting()
     ? `${rect.x}|${rect.y}|${rect.w}|${rect.h}|${html}`
     : '';
-  if(Media.mpvMode && !Media._wcTakeover && getPlayerAdapter().setImageGuide){
+  if(Media.mpvPresenting() && getPlayerAdapter().setImageGuide){
     // [效能與字體最佳化] 
     // 當處於 MPV 原生播放模式時，為了避免強行切換 WebCodecs 造成 CPU 解碼卡頓，
     // 以及避免從 MPV libass 字幕渲染切換至 HTML DOM 造成字幕視覺大小突變，
@@ -627,10 +628,7 @@ function renderImageOverlays(){
 
 function _selectImageClip(clip, { redrawTimeline=true }={}){
   if(!clip || State.videoTracks[clip.vtrack || 0]?.locked) return false;
-  State.selectedClipId = clip.id;
-  State.selectedAudioClipId = null;
-  State.selectedId = null;
-  State.selectedIds = [];
+  setSelection({ kind:'video', ids:clip.id });
   refreshSelectionUI();
   const label = $('stSel'); if(label) label.textContent = '已選圖片：' + (clip.name || '未命名圖片');
   // pointerdown 中同步重建整個時間軸會延後 pointer capture；先讓預覽開始拖曳，
@@ -776,7 +774,7 @@ function rafLoop(){
     Media.seqTick(); // 影片序列：段尾切換 / 間隙進出 / 序列結尾停止
     const t=Media.displayTime();
     // 無媒體時更新時間顯示；序列間隙中影片暫停無 timeupdate，也由此更新
-    if(!video.src || Media._gap){
+    if(!video.src || Media.inGap()){
       $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
       $('seekBar').value=Math.round(t*1000);
     }
@@ -819,7 +817,7 @@ function rafLoop(){
     // active 備註
     if(State.notes.length&&$('notesPanel').classList.contains('show')) updateNoteActive(t);
     // buffer 音軌 drift 校正（序列間隙中不校正——影片已暫停，重啟音源會誤出聲）
-    if(Media.ctx && !Media._gap && Media.tracks.some(t=>t.kind==='buffer'&&!t._srcHidden)){
+    if(Media.ctx && !Media.inGap() && Media.tracks.some(t=>t.kind==='buffer'&&!t._srcHidden)){
       const expect=Media.startMediaTime+(Media.ctx.currentTime-Media.startCtxTime)*(video.playbackRate||1);
       if(Math.abs(expect-video.currentTime)>0.25){ Media.stopBufferSources(); Media.startBufferSources(video.currentTime); }
     }
@@ -829,7 +827,7 @@ function rafLoop(){
       const s=tr.source||'';
       let ref;
       if(s.startsWith('ext-')) ref=Media.tlTime();
-      else if(Media.seqOn()){ const lt=Media._srcLocalT(s||'video', Media.tlTime()); if(lt==null) continue; ref=lt; }
+      else if(Media.seqOn()){ const lt=Media.sourceLocalTime(s||'video', Media.tlTime()); if(lt==null) continue; ref=lt; }
       else ref=Media.vTime();
       if(Math.abs(tr.el.currentTime - ref) > 0.12){ try{tr.el.currentTime=ref;}catch(e){} }
     }}
@@ -870,8 +868,7 @@ video.addEventListener('pause',()=>{
       const nextCue = idx >= 0 && idx < tkCues.length - 1 ? tkCues[idx + 1] : null;
       const targetOut = nextCue ? nextCue.end : c.end;
       if (t > targetOut) {
-        State.selectedIds=[];
-        State.selectedId=null;
+        deselect('sub');
         refreshSelectionUI();
         const stSel = $('stSel');
         if(stSel) stSel.textContent='';
@@ -981,283 +978,31 @@ async function importBrowserMediaFiles(files, explicitRelink=null){
 }
 
 // A4：純關閉面板的 case 改用資料表，消除重複的 classList.remove('show')+_syncMpvPanel()
-const CLOSE_PANELS = { 'close-shift':'shiftPanel', 'close-history':'historyPanel', 'close-notes':'notesPanel', 'close-mixer':'mixerPanel' };
-async function doAction(act, force = false){
-  if(CLOSE_PANELS[act]){ $(CLOSE_PANELS[act]).classList.remove('show'); _syncMpvPanel(); return; }
-  switch(act){
-    case 'open-media':
-      {
-        // 先在打開 picker 前凍結目前 restore transaction；否則使用者等檔案選擇器
-        // 開著時載入另一個專案，回來的舊檔案會錯套到新專案的 restore plan。
-        const relink=Project.pendingMediaRelink?.()||null;
-        if(relink){
-          await Project.continueLoad(relink.generation,async isCurrent=>{
-            const picked=IS_DESKTOP?await DESK.openMedia():await pickMediaFiles($('fileMedia'));
-            if(!isCurrent()) return;
-            if(IS_DESKTOP) await importDesktopMediaFiles(picked,relink);
-            else await importBrowserMediaFiles(picked,relink);
-          });
-        }else if(IS_DESKTOP) await importDesktopMediaFiles(await DESK.openMedia());
-        else await importBrowserMediaFiles(await pickMediaFiles($('fileMedia')));
-      }
-      break;
-    case 'open-project':
-      if(IS_DESKTOP){ const r=await DESK.openProject(); if(r)Project.loadDesktop(r); }
-      else { const f=await pickFile($('fileProject')); if(f)Project.load(f); } break;
-    case 'save-project': Project.save(); break;
-    case 'save-as-project': Project.saveAs(); break;
-    case 'new':
-      // Fix #15 同款：破壞性動作改用 openModal，風格一致且 Electron 不會截取原生 confirm
-      openModal('開新專案',
-        '<p>確定清空目前專案？字幕、備註與已載入的影音都將清除（未存檔的話）。</p>',
-        [{label:'取消',act:closeModal},
-         {label:'確定清空',primary:true,act:()=>{
-           closeModal();
-           return Project.startNewProject(()=>{
-             State.cues=[];State.notes=[];State.selectedId=null;State.selectedIds=[];
-             State.listTrack=0;State.tracks=[];ensureTrackCount(0);
-             if(State.subMode) doAction('sub-mode');
-             // 先重置可持久專案資料（含 audioProject），再建立空白專案的 undo 基線；
-             // 否則 Ctrl+Z 可能把上一個專案的聲道路由帶回新專案。
-             resetProject();_firstLoad=true;
-             // 清除影音
-             video.pause(); video.removeAttribute('src'); video.load();
-             State.mediaName=''; State.mediaPath=''; State.mediaSize=0;
-             Media.reset();
-             History.reset();
-             const nv=$('noVideo'); if(nv) nv.style.display='';
-             onDurationKnown(); renderAudioTracks();
-             renderListTrackSel();renderAll();renderNotes();drawTimeline();
-             setStatus('新專案','ok');
-           });
-         }}]);
-      break;
-    case 'imp-auto': importSub(); break;
-    case 'exp-dialog': showExportDialog(); break;
-    case 'exp-video': showExportVideoDialog().catch(err=>{ console.error('匯出影片錯誤',err); showToast('匯出影片錯誤：'+err.message); }); break;
-    case 'audio-project-settings': AudioRouting.openOutputSettings(); break;
-    case 'split-clip':
-      if(State.selectedAudioClipId&&typeof Media.splitExternalAudio==='function') void Media.splitExternalAudio(State.selectedAudioClipId,Media.displayTime());
-      else Media.splitClipAt(Media.displayTime());
-      break; // 同 Ctrl+K：音訊已選取時切音訊，否則切影片段
-    case 'unlink-clip-audio': {
-      const id=State.selectedClipId||Media._activeClip?.()?.id;
-      if(!id){ showToast('請先選取要解除連結的影片段'); break; }
-      if(typeof Media.detachClipAudio!=='function'){ showToast('影音解除連結功能尚未就緒'); break; }
-      void Media.detachClipAudio(id);
-      break;
-    }
-    case 'exp-srt': exportSub('srt'); break;
-    case 'exp-ass': exportSub('ass'); break;
-    case 'exp-encore': exportSub('encore'); break;
-    case 'exp-txt': exportSub('txt'); break;
-    case 'fps-convert': showFpsConvertDialog(); break;
-    case 'shift-tc': togglePanel('shiftPanel'); break;
-    case 'shift-back': applyTcShift(-1); break;
-    case 'shift-fwd': applyTcShift(1); break;
-    case 'dur-adj-sub': applyDurAdjTc(-1); break;
-    case 'dur-adj-add': applyDurAdjTc(1); break;
-    case 'dur-adj-pct': applyDurAdjPct(); break;
-    case 'sub-mode':
-      State.subMode=!State.subMode;
-      { const smb=$('subModeBtn'); if(smb)smb.classList.toggle('sub-active',State.subMode); }
-      document.body.classList.toggle('sub-mode-on', State.subMode);
-      if(State.subMode){ 
-        State._prevAutoSelect = State.autoSelect;
-        State._prevOverwriteMode = State.overwriteMode;
-        State._prevOverwriteKeep = State.overwriteKeep;
-        if (State.autoSelect) doAction('toggle-auto-select', true);
-        if (State.overwriteMode) doAction('toggle-overwrite', true);
-        if (!State.overwriteKeep) doAction('toggle-ow-keep', true);
-        
-        // 擷取當時的完整字幕 ID 順序
-        State._subModeSequence = State.cues.map(c => c.id);
-        // 追蹤 subMode 期間被 I 鍵設定的字幕 ID（退出時作為安全網清理依據）
-        State._subModeTouchedIds = new Set();
+/* 指令表住在 commands.js —— 82 個 case 的 switch 攤成一張可列舉的表之後，
+   tests/commands.test.js 才有辦法回答「index.html 上這顆按鈕真的有實作嗎」。
+   這裡只留下 app.js 自己才有的畫面接線，逐一具名注入。 */
+const Commands = createCommands({
+  togglePanel,
+  syncMpvPanel: _syncMpvPanel,
+  pickMediaFiles,
+  importDesktopMediaFiles,
+  importBrowserMediaFiles,
+  resetFirstLoad: () => { _firstLoad = true; },
+  onDurationKnown,
+  renderAll,
+  renderListTrackSel,
+  renderVideoSub,
+  refreshMpvSubs,
+  takeScreenshot,
+  copySelectedStyle,
+  pasteStyleToSelected,
+  openCacheDialog,
+  toggleSafeFrame,
+  toggleTimecodeWatermark,
+  doCopyTrack,
+});
+function doAction(act, force = false){ return Commands.run(act, { force }); }
 
-        setStatus('🎯 上字幕模式 ON — I 設起點，O 設終點後自動前進','ok');
-      }
-      else { 
-        if (State._prevAutoSelect !== undefined && State.autoSelect !== State._prevAutoSelect) {
-           doAction('toggle-auto-select', true);
-        }
-        if (State._prevOverwriteMode !== undefined && State.overwriteMode !== State._prevOverwriteMode) {
-           doAction('toggle-overwrite', true);
-        }
-        if (State._prevOverwriteKeep !== undefined && State.overwriteKeep !== State._prevOverwriteKeep) {
-           doAction('toggle-ow-keep', true);
-        }
-        
-        // 清理殘留的未閉合超長字幕
-        let changed = false;
-        // 第一層：清理帶有 _tempEnd 標記的字幕
-        State.cues.forEach(cue => {
-          if (cue._tempEnd) {
-            cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
-            delete cue._tempEnd;
-            changed = true;
-          }
-        });
-        // 第二層安全網：檢查所有在 subMode 期間被 I 鍵觸碰過的字幕
-        // 即使 _tempEnd 已被意外清除，若 end 仍然異常長（>10 分鐘），也修正回來
-        if (State._subModeTouchedIds && State._subModeTouchedIds.size > 0) {
-          const maxReasonableDur = 600; // 10 分鐘，超過視為異常
-          State.cues.forEach(cue => {
-            if (State._subModeTouchedIds.has(cue.id)) {
-              const dur = cue.end - cue.start;
-              if (dur > maxReasonableDur) {
-                cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
-                changed = true;
-              }
-            }
-          });
-          delete State._subModeTouchedIds;
-        }
-        // 脫離上字幕模式後強制重新排序，並觸發重繪
-        sortCues();
-        if (changed) {
-          emit('render:videoSub'); emit('mpv:refreshSubs');
-        }
-        emit('render:all');
-
-        Media.pause(); setStatus('上字幕模式 OFF',''); 
-      }
-      break;
-    case 'playpause':
-      resetPlaybackSpeed(); // 重置 JKL 穿梭速度回 1x（清掉殘留的倍率）
-      Media.toggle();
-      setStatus(Media.playing?'▶ 正播':'⏸ 暫停', Media.playing?'ok':''); // 狀態列同步播放/暫停（非僅 JKL）
-      break;
-    case 'seek-start': Media.seek(0); break;
-    case 'back5': nudge(-5); break;
-    case 'back1': nudge(-1); break;
-    case 'fwd1': nudge(1); break;
-    case 'fwd5': nudge(5); break;
-    case 'frame-back': nudge(-1/State.fps); break;
-    case 'frame-fwd': nudge(1/State.fps); break;
-    case 'set-in': setIn(); break;
-    case 'set-out': setOut(); break;
-    case 'exp-in': State.exportIn=Media.displayTime(); drawTimeline(); recordHistory('設定輸出起點 [In]'); setStatus(`輸出起點已設為 ${fmtClock(State.exportIn)}`,'ok'); break;
-    case 'exp-out': State.exportOut=Media.displayTime(); drawTimeline(); recordHistory('設定輸出終點 [Out]'); setStatus(`輸出終點已設為 ${fmtClock(State.exportOut)}`,'ok'); break;
-    case 'exp-clear': State.exportIn=null; State.exportOut=null; drawTimeline(); recordHistory('清除輸出範圍'); setStatus('輸出範圍已清除','ok'); break;
-    case 'add-cue': addCueRelative(1); break;
-    case 'add-cue-above': addCueRelative(-1); break;
-    case 'add-cue-below': addCueRelative(1); break;
-    case 'del-cue': deleteSelected(); break;
-    case 'add-track': addTrack(); break;
-    case 'zoom-in': setZoom(State.pxPerSec*1.3); break;
-    case 'zoom-out': setZoom(State.pxPerSec*0.77); break;
-    case 'zoom-fit': 
-      if(window._lastZoomMode === 'fit') { zoomFitVideo(); window._lastZoomMode = 'video'; }
-      else { zoomFit(); window._lastZoomMode = 'fit'; }
-      break;
-    case 'undo': History.undo(); break;
-    case 'redo': History.redo(); break;
-    case 'history': togglePanel('historyPanel'); renderHistory(); break;
-    case 'notes': togglePanel('notesPanel'); renderNotes(); break;
-    case 'add-note': addNote(); break;
-    case 'clear-notes': clearAllNotes(); break;
-    case 'safe-frame': toggleSafeFrame(); break;
-    case 'timecode-watermark': toggleTimecodeWatermark(); break;
-    case 'screenshot': takeScreenshot(); break;
-    case 'screenshot_tc': takeScreenshot(true); break;
-    case 'copy-style': copySelectedStyle(); break;
-    case 'paste-style': pasteStyleToSelected(); break;
-    case 'mixer': togglePanel('mixerPanel'); renderMixer(); break;
-    case 'mixer-reset': mixerReset(); break;
-    case 'mixer-muteall': mixerMuteAll(); break;
-    case 'cache-manage': openCacheDialog(); break;
-    case 'export-notes': exportNotes(); break;
-    case 'toggle-vtracks':
-      State.vtracksCollapsed = !State.vtracksCollapsed;
-      const btn = document.getElementById('btnToggleVtracks');
-      if (btn) btn.style.opacity = State.vtracksCollapsed ? '0.4' : '1';
-      drawTimeline();
-      break;
-    case 'toggle-all-vis': {
-      const buses=State.audioProject?.buses||[];
-      const anyVis = State.tracks.some(t=>t.visible!==false) || State.videoTracks.some(t=>t.visible!==false) || buses.some(t=>t.visible!==false);
-      State.tracks.forEach(t=>t.visible=!anyVis);
-      State.videoTracks.forEach(t=>t.visible=!anyVis);
-      buses.forEach(t=>t.visible=!anyVis);
-      recordHistory(anyVis?'隱藏全部軌道':'顯示全部軌道');
-      drawTimeline(); renderVideoSub(); refreshMpvSubs();
-    } break;
-    case 'toggle-all-lock': {
-      const buses=State.audioProject?.buses||[];
-      const extAudio=typeof Media.getExternalAudioSources==='function'?Media.getExternalAudioSources():[];
-      const anyUnlocked = State.tracks.some(t=>!t.locked) || State.videoTracks.some(t=>!t.locked) || buses.some(t=>!t.locked) || State.clips.some(c=>!c.locked) || extAudio.some(a=>!a.locked);
-      State.tracks.forEach(t=>t.locked=anyUnlocked);
-      State.videoTracks.forEach(t=>t.locked=anyUnlocked);
-      buses.forEach(t=>t.locked=anyUnlocked);
-      State.clips.forEach(c=>c.locked=anyUnlocked);
-      extAudio.forEach(a=>a.locked=anyUnlocked);
-      recordHistory(anyUnlocked?'鎖定全部軌道':'解鎖全部軌道');
-      if(!anyUnlocked){ clearSelection(); const el=document.getElementById('stSel'); if(el) el.textContent=''; }
-      drawTimeline();
-    } break;
-    case 'copy-track': doCopyTrack(); break;
-    case 'check-panel': { const btn=$('checkPanelBtn'); const willShow=!$('checkPanel').classList.contains('show'); togglePanel('checkPanel'); if(btn)btn.classList.toggle('sub-active',willShow); if(willShow)renderCheckPanel(); } break;
-    case 'close-check': { $('checkPanel').classList.remove('show'); const btn=$('checkPanelBtn'); if(btn)btn.classList.remove('sub-active'); _syncMpvPanel(); } break;
-    case 'search-open': { const sd=$('searchDialog'); if(sd){ const show=sd.style.display==='none'||!sd.style.display; sd.style.display=show?'flex':'none'; if(show)setTimeout(()=>$('searchInput')?.focus(),20); _syncMpvPanel(); } } break;
-    case 'search-close': { const sd=$('searchDialog'); if(sd){ sd.style.display='none'; _syncMpvPanel(); } } break;
-    case 'search-next': searchNav(1); break;
-    case 'search-prev': searchNav(-1); break;
-    case 'search-clear': { $('searchInput').value=''; searchUpdate(); $('searchInput').focus(); } break;
-    case 'search-select-all': searchSelectAll(); break;
-    case 'replace-one': searchReplace(false); break;
-    case 'replace-all': searchReplace(true); break;
-    case 'trim-track': trimTrackSpaces(); break;
-    case 'remove-srt-tags': {
-      let changed = false;
-      State.cues.forEach(c => {
-        if (c.text) {
-          const nt = c.text.replace(/<[^>]+>|\{\\[^}]+\}/g, '');
-          if (nt !== c.text) { c.text = nt; changed = true; }
-        }
-      });
-      if (changed) { recordHistory('清除 SRT 標籤'); emit('render:all'); setStatus('已清除所有標籤', 'ok'); }
-      else { setStatus('未發現可清除的標籤', ''); }
-    } break;
-    case 'settings': showSettingsModal(); break;
-    case 'modal-close': closeModal(); break;
-    case 'toggle-auto-select':
-      if (State.subMode && !force) { setStatus('上字幕模式中強制關閉自動選取', 'err'); break; }
-      State.autoSelect = !State.autoSelect;
-      const asBtns = document.querySelectorAll('.auto-select-btn');
-      asBtns.forEach(btn => {
-        btn.textContent = State.autoSelect ? '自動選取' : '不自動選取';
-        btn.classList.toggle('on', State.autoSelect);
-      });
-      setStatus(`播放時自動選取：${State.autoSelect ? '開' : '關'}`, 'ok');
-      saveConfig();
-      break;
-    case 'toggle-overwrite':
-      if (State.subMode && !force) { setStatus('上字幕模式中強制鎖定不可覆蓋', 'err'); break; }
-      State.overwriteMode = !State.overwriteMode;
-      const owBtns = document.querySelectorAll('.ow-toggle-btn');
-      owBtns.forEach(btn => {
-      btn.textContent = State.overwriteMode ? '🔓 可覆蓋' : '🔒 不覆蓋';
-      btn.classList.toggle('primary', State.overwriteMode);
-    });
-    document.querySelectorAll('.ow-keep-btn').forEach(btn => {
-      btn.classList.toggle('inactive-mode', !State.overwriteMode);
-    });
-      setStatus(`覆蓋模式：${State.overwriteMode ? '解鎖 (可自由重疊)' : '鎖定 (不可覆蓋)'}`, 'ok');
-      saveConfig();
-      break;
-    case 'toggle-ow-keep':
-      if (State.subMode && !force) { setStatus('上字幕模式中強制鎖定保留', 'err'); break; }
-      State.overwriteKeep = !State.overwriteKeep;
-      document.querySelectorAll('.ow-keep-btn').forEach(btn => {
-        btn.textContent = State.overwriteKeep ? '⚪ 保留' : '❌ 刪除';
-        btn.classList.toggle('del', !State.overwriteKeep);
-      });
-      setStatus(`完全覆蓋時：${State.overwriteKeep ? '保留' : '刪除'} 被包含的字幕`, 'ok');
-      saveConfig();
-      break;
-  }
-}
 let _repTimer=null, _repInterval=null, _repFired=false;
 const REP_ACTS=['back5','back1','frame-back','frame-fwd','fwd1','fwd5'];
 document.addEventListener('mousedown',e=>{
@@ -1579,7 +1324,7 @@ async function openCueEditModal(c){
 /* ===== UI 接線（區塊切換 / 樣式 / 分隔線 / 捲動同步 / 雙擊） ===== */
 function initUI(){
   // 軌道切換下拉
-  $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; State.selectedIds=[]; State.selectedId=null; $('stSel').textContent=''; searchUpdate(); renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
+  $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; deselect('sub'); $('stSel').textContent=''; searchUpdate(); renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
   const waveGlobalSrcSel=$('waveGlobalSrcSel');
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value==='__all__'?null:e.target.value); renderMixer(); e.target.blur(); });
 

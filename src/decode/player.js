@@ -198,8 +198,8 @@ export const WCPreview = {
   _clipUrl(c, isTop){
     if(c.proxyUrl) return c.proxyUrl;
     if(Media.mpvMode){
-      if(c.path && c.path === Media._wcProxyPath) return Media._wcProxyUrl;
-      if((c.audioSrc || 'video') === 'video' || c.primary) return Media._wcProxyUrl;
+      if(c.path && c.path === Media.webCodecsProxyPath()) return Media.webCodecsProxyUrl();
+      if((c.audioSrc || 'video') === 'video' || c.primary) return Media.webCodecsProxyUrl();
       return (c.web && c.web.url) || null; // mpv 模式下加入的檔目前無 proxy/web → 該層不可解
     }
     return (c.web && c.web.url) || (isTop ? (video.currentSrc || video.src) : null) || null;
@@ -208,8 +208,8 @@ export const WCPreview = {
   /* mpv 畫面接管開關：WC 能呈現時隱藏 mpv 視窗、改用 HTML 字幕；讓回時還原 libass。 */
   _setTakeover(v){
     v = !!v;
-    if((Media._wcTakeover || false) === v) return;
-    Media._wcTakeover = v;
+    if(Media.webCodecsTakeover() === !!v) return;
+    Media.setWebCodecsTakeover(v);
     // mpv 回來顯示時仍保留透明 DOM 命中層，否則暫停畫面切回 mpv 後字幕又無法直接拖曳。
     const vs = $('videoSub');
     if(vs){
@@ -229,14 +229,14 @@ export const WCPreview = {
   tick(){
     if(!this._ensure()) return;
     const mpv = Media.mpvMode;
-    // mpv 模式下，即使沒有全域的 Media._wcProxyUrl，也必須放行，
+    // mpv 模式下，即使沒有全域的 proxy URL，也必須放行，
     // 以便後續能夠透過片段的 c.proxyUrl 進行解碼與接管
     const on = this.enabled && Media.seqOn();
     if(!on){
       this._hideCanvas();
       if(this.sources.size && !Media.seqOn()) this.disposeAll(); // 媒體已卸載 → 釋放 demux/解碼資源
       if(mpv) this._setTakeover(false);
-      Media._wcComposited = false; this.mode = 'off'; return;
+      Media.setWebCodecsComposited(false); this.mode = 'off'; return;
     }
 
     // 尺寸同步（wrap 客座尺寸 × dpr）
@@ -248,7 +248,7 @@ export const WCPreview = {
     const resized = (this.canvas.width !== bw || this.canvas.height !== bh);
 
     const t = Media.tlTime();
-    const acts = Media._gap ? [] : Seq.clipsAt(t).filter(c => c.type !== 'image' && State.videoTracks[c.vtrack||0]?.visible !== false);
+    const acts = Media.inGap() ? [] : Seq.clipsAt(t).filter(c => c.type !== 'image' && State.videoTracks[c.vtrack||0]?.visible !== false);
 
     // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
     // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
@@ -261,7 +261,7 @@ export const WCPreview = {
     });
     if(mpv && acts.length && !needsComposite){
       this._hideCanvas(); this._setTakeover(false);
-      Media._wcComposited=false; this.mode='mpv'; return;
+      Media.setWebCodecsComposited(false); this.mode='mpv'; return;
     }
 
     // 預熱（v4.25）：即將作用（t..t+PRELOAD_S）的片段先開始載入——否則播放進入疊層區時上層還在
@@ -302,12 +302,12 @@ export const WCPreview = {
     // <video>（原生）或 mpv 自己顯示畫面。canvas 是不透明的：留著畫黑會整個蓋住 →
     // 症狀＝「看得到字幕、看不到影像」。原生模式字幕層照常可見；mpv 模式才需讓回（字幕改由 libass）。
     // 上層解不動但下層可解時不走這裡：繼續合成可解的層並保持接管，字幕照常（v4.25.1）。
-    if(!layers.length && !Media._gap && acts.length > 0){
+    if(!layers.length && !Media.inGap() && acts.length > 0){
       if(mpv){
-        if(topBlocked === 'decoding' && Media._wcTakeover && !resized){ Media._wcComposited = true; return; } // 已接管：保留上一幀防閃
+        if(topBlocked === 'decoding' && Media.webCodecsTakeover() && !resized){ Media.setWebCodecsComposited(true); return; } // 已接管：保留上一幀防閃
         this._setTakeover(false);
       }
-      this._hideCanvas(); Media._wcComposited = false; this.mode = 'off'; return;
+      this._hideCanvas(); Media.setWebCodecsComposited(false); this.mode = 'off'; return;
     }
 
     // 【必須寫死 'block'，不可用 ''】：.preview-canvas 的 CSS 基礎規則就是 display:none，
@@ -318,9 +318,9 @@ export const WCPreview = {
     if(resized){ this.canvas.width = bw; this.canvas.height = bh; }
     const ctx = this.ctx;
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, bw, bh);
-    Media._wcComposited = false;
+    Media.setWebCodecsComposited(false);
 
-    if(Media._gap || !acts.length){ // 間隙／無作用層＝黑（mpv 下接管黑幕，gap 機制本就隱藏 mpv）
+    if(Media.inGap() || !acts.length){ // 間隙／無作用層＝黑（mpv 下接管黑幕，gap 機制本就隱藏 mpv）
       if(mpv) this._setTakeover(true);
       this.mode = 'black'; this.lastPresentedUs = null; return;
     }
@@ -349,11 +349,11 @@ export const WCPreview = {
       ctx.globalAlpha = 1;
     }
     if(painted && lastTs != null){
-      this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media._wcComposited = true;
+      this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media.setWebCodecsComposited(true);
       if(mpv) this._setTakeover(true);
     }
     else if(painted){ // 全部層皆全透明（淡出到底）＝黑畫面，屬正確結果
-      this.mode = 'black'; this.lastPresentedUs = null; Media._wcComposited = true;
+      this.mode = 'black'; this.lastPresentedUs = null; Media.setWebCodecsComposited(true);
       if(mpv) this._setTakeover(true);
     }else{ this.mode = 'black'; this.lastPresentedUs = null; }
   },

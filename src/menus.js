@@ -7,7 +7,7 @@
 /* SUB Tool — 右鍵選單（播放窗音軌/速度、字幕移軌） */
 import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
-import { State, isSel } from './state.js';
+import { State, isSel, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade, showImageGeom } from './timeline.js';
@@ -126,7 +126,7 @@ function showCueMenu(x,y){
       if(_i>0){
         items.push({label:'⬆ 將以上字幕選取',act:()=>{
           const ids=_list.slice(0,_i+1).map(c=>c.id);
-          State.selectedIds=ids; State.selectedId=_c.id; State.activeEdge='start';
+          setSelection({ kind:'sub', ids, primary:_c.id }); State.activeEdge='start';
           refreshSelectionUI();
           $('stSel').textContent=ids.length?('已選 '+ids.length+' 條'):'';
         }}); addedSel=true;
@@ -134,7 +134,7 @@ function showCueMenu(x,y){
       if(_i>=0 && _i<_list.length-1){
         items.push({label:'⬇ 將以下字幕選取',act:()=>{
           const ids=_list.slice(_i).map(c=>c.id);
-          State.selectedIds=ids; State.selectedId=_c.id; State.activeEdge='start';
+          setSelection({ kind:'sub', ids, primary:_c.id }); State.activeEdge='start';
           refreshSelectionUI();
           $('stSel').textContent=ids.length?('已選 '+ids.length+' 條'):'';
         }}); addedSel=true;
@@ -196,9 +196,7 @@ function showCueMenu(x,y){
    以支援 split 的非同步載入流程，也不重複記錄 History。 */
 function selectExternalAudioForMenu(assetId,label){
   if(!assetId) return;
-  State.selectedAudioClipId=assetId;
-  State.selectedClipId=null;
-  State.selectedId=null; State.selectedIds=[];
+  setSelection({ kind:'audio', ids:assetId });
   refreshSelectionUI();
   const status=$('stSel'); if(status) status.textContent='已選音訊：'+(label||'音訊素材');
 }
@@ -210,7 +208,7 @@ function runExternalAudioMenuAction(method,args=[],{clearSelection=false}={}){
   catch(err){ console.warn('external audio '+method+':',err); showToast('無法更新音訊素材'); return; }
   Promise.resolve(result).then(value=>{
     if(value===false||value==null) return;
-    if(clearSelection) State.selectedAudioClipId=null;
+    if(clearSelection) deselect('audio');
     drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
   }).catch(err=>{
     console.warn('external audio '+method+':',err);
@@ -355,7 +353,7 @@ tlScroll.addEventListener('contextmenu',e=>{
   }
   e.preventDefault();
   if(!isSel(block.dataset.id))selectCue(block.dataset.id);
-  else { State.selectedId=block.dataset.id; refreshSelectionUI(); }
+  else { setSelection({ kind:'sub', ids:State.selectedIds, primary:block.dataset.id }); refreshSelectionUI(); }
   showCueMenu(e.clientX,e.clientY);
 });
 

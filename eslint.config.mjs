@@ -24,6 +24,29 @@ const silentBugRules = {
   'no-unused-vars': 'off',      // 刻意關閉：本專案有大量刻意保留的匯出
 };
 
+/* 選取狀態的唯一入口。三種選取（字幕／視訊片段／音訊片段）互斥、
+   activeTrackKind 必須與被選中的 id 同類——這兩條不變量寫在 state.js 的
+   setSelection() 裡，違反時【不會報錯】，只會讓 Delete／Ctrl+K／↑↓
+   作用在使用者以為沒選中的東西上。 */
+const selectionFence = {
+  selector: "AssignmentExpression[left.object.name='State'][left.property.name=/^(selectedId|selectedIds|selectedClipId|selectedAudioClipId|activeTrackKind)$/]",
+  message: '選取狀態請改用 state.js 的 setSelection / deselect / pruneSelection / focusTrackKind，不要直接賦值（見 state.js setSelection 的不變量註解）。',
+};
+
+/* Media 的底線名稱是它的內部欄位。以前 app.js／pointer-interaction.js／
+   decode/player.js 直接讀寫 _wcTakeover、_gap、_activeClip、_srcLocalT，
+   等於把 Media 的內部結構變成全專案介面的一部分——改個欄位名就會靜默壞掉，
+   而 `mpvMode && !_wcTakeover` 這種組合更被各處手抄了七次。
+
+   已改走公開入口：activeClip() / inGap() / sourceLocalTime() /
+   mpvPresenting() / webCodecsTakeover() / setWebCodecsTakeover() … */
+const mediaPrivateFence = {
+  selector: "MemberExpression[object.name='Media'][property.name=/^_/]",
+  message: 'Media 的底線名稱是內部欄位，請改用它的公開入口（activeClip／inGap／sourceLocalTime／mpvPresenting／webCodecsTakeover…）。',
+};
+
+const encapsulationFences = [selectionFence, mediaPrivateFence];
+
 export default [
   {
     files: ['src/**/*.js'],
@@ -46,4 +69,22 @@ export default [
     },
     rules: silentBugRules,
   },
+  /* 選取狀態的唯一入口。三種選取（字幕／視訊片段／音訊片段）互斥、
+     activeTrackKind 必須與被選中的 id 同類——這兩條不變量寫在 state.js 的
+     setSelection() 裡，違反時【不會報錯】，只會讓 Delete／Ctrl+K／↑↓
+     作用在使用者以為沒選中的東西上。
+
+     這條規則就是那個接縫的圍籬：state.js 以外一律不准直接寫這五個欄位，
+     要改就走 setSelection / deselect / pruneSelection / focusTrackKind。 */
+  /* ── 模組內部狀態的圍籬 ──────────────────────────────────────────────
+     `no-restricted-syntax` 的設定在 flat config 裡是【整組取代】而非累加，
+     所以兩條圍籬不能各寫一個 block（後者會把前者關掉，而且不會有任何警告）。
+     這裡集中成一份清單，再依「自己人不受自己那條限制」拆成三個 block。 */
+  {
+    files: ['src/**/*.js'],
+    ignores: ['src/state.js', 'src/media.js'],
+    rules: { 'no-restricted-syntax': ['error', ...encapsulationFences] },
+  },
+  { files: ['src/state.js'], rules: { 'no-restricted-syntax': ['error', mediaPrivateFence] } },
+  { files: ['src/media.js'], rules: { 'no-restricted-syntax': ['error', selectionFence] } },
 ];

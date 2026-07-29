@@ -8,7 +8,7 @@
    這兩條以前散在約 97 個裸賦值裡由各處自行維持，沒有任何一處負責它們。
    已收斂到 setSelection()／clearSelection()。 */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { State, setSelection, clearSelection } from '../src/state.js';
+import { State, setSelection, clearSelection, deselect, pruneSelection, focusTrackKind } from '../src/state.js';
 
 /* 每種選取都放進值，任何遺漏的清空都會在斷言裡現形。 */
 const dirty = () => {
@@ -141,5 +141,99 @@ describe('輸入防禦（呼叫端傳什麼都不該讓狀態變成半殘）', (
       setSelection({ kind: 'sub', ids });
       expect(Array.isArray(State.selectedIds)).toBe(true);
     }
+  });
+});
+
+/* 以下三個是把「只放掉一種」「集合變動後修剪」「只換焦點軌」這三種呼叫端
+   以前各自手寫的形狀收進來的結果。它們過去分散在 media.js / menus.js /
+   keyboard.js / history.js / timeline-renderer.js，寫法彼此不一致。 */
+describe('deselect：只放掉一種選取', () => {
+  it.each([
+    ['video', 'selectedClipId'],
+    ['audio', 'selectedAudioClipId'],
+  ])('deselect(%s) 只清自己，其他兩種不動', (kind, field) => {
+    deselect(kind);
+    expect(State[field]).toBeNull();
+    expect(State.selectedId).toBe('cue9');           // 字幕選取原封不動
+    expect(State.selectedIds).toEqual(['cue8', 'cue9']);
+  });
+
+  it('給 id 時只在「目前選的正好是它」才放掉', () => {
+    deselect('audio', '別的素材');
+    expect(State.selectedAudioClipId).toBe('aclip9'); // 不是它，不動
+    deselect('audio', 'aclip9');
+    expect(State.selectedAudioClipId).toBeNull();
+  });
+
+  it('deselect(sub) 不給 id＝整組清掉', () => {
+    deselect('sub');
+    expect(State.selectedId).toBeNull();
+    expect(State.selectedIds).toEqual([]);
+  });
+
+  it('deselect(sub, id) 只從多選裡拿掉那一條，主選取退給剩下的最後一條', () => {
+    setSelection({ kind: 'sub', ids: ['a', 'b', 'c'] }); // primary = 'c'
+    deselect('sub', 'c');
+    expect(State.selectedIds).toEqual(['a', 'b']);
+    expect(State.selectedId).toBe('b');
+  });
+
+  it('不動 activeTrackKind（焦點軌留在原處，與 clearSelection 一致）', () => {
+    State.activeTrackKind = 'audio';
+    deselect('audio');
+    expect(State.activeTrackKind).toBe('audio');
+  });
+
+  it('未知的 kind 什麼都不做，且不丟例外', () => {
+    const before = snapshot();
+    expect(() => deselect('nonsense')).not.toThrow();
+    expect(snapshot()).toEqual(before);
+  });
+});
+
+describe('pruneSelection：字幕集合變動後修剪選取', () => {
+  beforeEach(() => { State.cues = [{ id: 'a' }, { id: 'b' }]; });
+
+  it('丟掉已不存在的 id', () => {
+    setSelection({ kind: 'sub', ids: ['a', 'ghost', 'b'] });
+    pruneSelection();
+    expect(State.selectedIds).toEqual(['a', 'b']);
+  });
+
+  /* 這裡以前有三種寫法：history.js 連同其他選取一起丟、另外兩處退給第一個。
+     統一成「退給第一個」——undo 之後不該連沒被刪的選取也一起消失。 */
+  it('主選取消失時退給剩下的第一個，而不是整組清空', () => {
+    setSelection({ kind: 'sub', ids: ['a', 'b'], primary: 'ghost' });
+    pruneSelection();
+    expect(State.selectedIds).toEqual(['a', 'b']);
+    expect(State.selectedId).toBe('a');
+  });
+
+  it('全部都不存在時才清空', () => {
+    setSelection({ kind: 'sub', ids: ['ghost1', 'ghost2'] });
+    pruneSelection();
+    expect(State.selectedIds).toEqual([]);
+    expect(State.selectedId).toBeNull();
+  });
+
+  it('主選取還在就不動它', () => {
+    setSelection({ kind: 'sub', ids: ['a', 'b'], primary: 'a' });
+    pruneSelection();
+    expect(State.selectedId).toBe('a');
+  });
+});
+
+describe('focusTrackKind：只換焦點軌', () => {
+  it('換 activeTrackKind 但不碰任何選取', () => {
+    focusTrackKind('sub');
+    expect(State.activeTrackKind).toBe('sub');
+    expect(State.selectedClipId).toBe('clip9');
+    expect(State.selectedAudioClipId).toBe('aclip9');
+  });
+
+  it('未知的 kind 不會寫進 activeTrackKind', () => {
+    State.activeTrackKind = 'video';
+    focusTrackKind('nonsense');
+    expect(State.activeTrackKind).toBe('video');
   });
 });

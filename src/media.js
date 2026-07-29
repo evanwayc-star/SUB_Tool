@@ -30,11 +30,12 @@
      千萬不要在此檔案內手刻算式。
 ============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
-import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap } from './state.js';
+import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
 import { getPlayerAdapter } from './media-player-adapter.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
+import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset } from './external-audio.js';
 import { emit, on } from './events.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Seq } from './sequence.js';
@@ -44,23 +45,11 @@ import { drawTimeline, updatePlayhead } from './timeline.js';
 
 /* 專案音訊路由使用的持久來源 ID。audioSrc 仍保留給既有播放同步（video / clip:<id>），
    但它會隨本次載入的 clip id 改變，因此不能拿來儲存聲道配線。 */
-let _audioSourceSeq = 1;
-function makeAudioSourceId(){
-  const uuid = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') ? crypto.randomUUID() : null;
-  return uuid ? `asset-${uuid}` : `asset-${Date.now().toString(36)}-${_audioSourceSeq++}`;
-}
+/* id 產生與聲道座標的正規化與外部音訊素材共用，實作在 external-audio.js。 */
 function audioSourceIdForClip(c){
   if(!c) return null;
   if(!c.audioSourceId) c.audioSourceId=makeAudioSourceId();
   return c.audioSourceId;
-}
-function sourceChannelDescriptors(channels, fallbackCount=0){
-  const list=Array.isArray(channels)?channels:[];
-  if(list.length) return list.map((ch,index)=>({
-    sourceStream:Math.max(0,Math.floor(Number(ch?.sourceStream ?? 0)||0)),
-    sourceChannel:Math.max(0,Math.floor(Number(ch?.sourceChannel ?? index)||0))
-  }));
-  return Array.from({length:Math.max(0,Math.floor(Number(fallbackCount)||0))},(_,index)=>({sourceStream:0,sourceChannel:index}));
 }
 function probeAudioChannelDescriptors(audio){
   const out=[];
@@ -142,7 +131,13 @@ const Media = {
   // 外部音檔不是影片 clip，但仍是可路由／可輸出的專案音源。
   // 每筆都提供 clip 相容的 id/name/audioSourceId/audioSrc/offset/in/out，供路由 UI
   // 或匯出端以同一套資料模型讀取；真正的播放群組仍用 audioSrc（ext-*）。
-  externalAudioSources:[],
+  //
+  // 素材本身（建立／查詢／移動／修剪／切點／序列化／時間換算）住在
+  // external-audio.js —— 那裡不碰 AudioElement 也不重繪，可以直接測。
+  // 這裡留下的是「素材變了之後 runtime 要做什麼」：拆 element、重算增益、重畫。
+  externalAudio:new ExternalAudioLibrary(),
+  get externalAudioSources(){ return this.externalAudio.assets; },
+  set externalAudioSources(list){ this.externalAudio.assets=Array.isArray(list)?list:[]; },
   // 播放中只在外部音訊跨越片段邊界時重新同步，避免每幀重設 Audio.currentTime。
   _externalActivityKey:null,
 
@@ -196,81 +191,23 @@ const Media = {
   /* 外部音檔的持久（本次專案工作階段）來源描述。audioSrc 是播放群組鍵，
      audioSourceId 則永遠不依檔名或 runtime track id 推導，避免同名檔彼此覆蓋路由。 */
   createExternalAudioSource(details={}){
-    const duration=Math.max(0,Number(details.duration)||0);
+    const asset=this.externalAudio.add(details);
     const fallbackCount=Math.max(0,Math.floor(Number(details.fallbackCount)||0));
-    const descriptors=sourceChannelDescriptors(details.descriptors,fallbackCount);
-    const requestedId=typeof details.audioSourceId==='string'?details.audioSourceId.trim():'';
-    const audioSourceId=requestedId&&!this.externalAudioSources.some(asset=>asset.audioSourceId===requestedId)
-      ? requestedId : makeAudioSourceId();
-    // 切開同一檔音訊時，每個片段仍要有獨立的 AudioElement 以便同時播放，
-    // 但時間軸 UI 應把它們留在同一條素材列。這個 ID 只管顯示分列，絕不參與 routing。
-    const requestedLaneId=typeof details.timelineLaneId==='string'?details.timelineLaneId.trim():'';
-    const timelineLaneId=requestedLaneId||audioSourceId;
-    const source='ext-'+audioSourceId;
-    const name=(typeof details.name==='string'&&details.name.trim())||'外部音訊';
-    const offset=Math.max(0,Number(details.offset)||0);
-    const inPoint=Math.max(0,Number(details.in??details.trimStart)||0);
-    const requestedOut=Number(details.out??details.trimEnd);
-    const out=Number.isFinite(requestedOut)&&requestedOut>=inPoint
-      ? (duration?Math.min(requestedOut,duration):requestedOut) : duration;
-    const asset={
-      id:'external:'+audioSourceId,
-      kind:'external-audio',
-      name,
-      path:typeof details.path==='string'&&details.path?details.path:null,
-      audioSourceId,
-      timelineLaneId,
-      audioSrc:source,
-      source,
-      offset,
-      in:inPoint,
-      out,
-      duration,
-      gain:Math.max(0,Number(details.gain==null?1:details.gain)||0),
-      fadeIn:Math.max(0,Number(details.fadeIn)||0),
-      fadeOut:Math.max(0,Number(details.fadeOut)||0),
-      enabled:details.enabled!==false,
-      // 影片容器（例如 MXF／部分 MOV）未必能被 Chromium 的 <audio> 解碼。
-      // 這個旗標會隨專案保存，讓它在重開後直接復用 ffmpeg 的逐聲道快取，
-      // 而不是再次嘗試載入原始影片容器後才失敗。
-      preferCache:details.preferCache===true,
-      descriptors,
-      // 瀏覽器版切割同一個 File 時需要保留來源；此欄位永不寫入專案檔。
-      _file:details.file||null
-    };
-    this.externalAudioSources.push(asset);
-    this.registerAudioRouting(asset,descriptors,fallbackCount);
+    this.registerAudioRouting(asset,asset.descriptors,fallbackCount);
     this.recomputeTimelineDuration();
     return asset;
   },
   /* 對 State / History 暴露的只會是純資料，絕不帶 File、AudioElement 或波形。 */
-  _serializableExternalAudioSource(asset){
-    if(!asset) return null;
-    const { _file, ...plain }=asset;
-    return {
-      ...plain,
-      descriptors:(asset.descriptors||[]).map(channel=>({...channel}))
-    };
-  },
+  _serializableExternalAudioSource(asset){ return serializeAsset(asset); },
   _syncExternalAudioState(){
-    State.externalAudioState=this.externalAudioSources
-      .map(asset=>this._serializableExternalAudioSource(asset))
-      .filter(Boolean);
-    State.externalAudioEnd=this.externalTimelineEnd();
+    State.externalAudioState=this.externalAudio.serialize().filter(Boolean);
+    State.externalAudioEnd=this.externalAudio.timelineEnd();
     return State.externalAudioEnd;
   },
   /* 給 audio-routing 的後續入口使用：回傳具 clip 相容欄位的 external source。 */
-  getExternalAudioSources(){
-    return this.externalAudioSources.map(asset=>this._serializableExternalAudioSource(asset));
-  },
+  getExternalAudioSources(){ return this.externalAudio.list(); },
   getRoutableAudioSources(){ return this.getExternalAudioSources(); },
-  getExternalAudioSource(key){
-    const value=String(key||'');
-    const asset=this.externalAudioSources.find(asset=>
-      asset.id===value||asset.audioSourceId===value||asset.audioSrc===value||asset.source===value
-    );
-    return asset?this._serializableExternalAudioSource(asset):null;
-  },
+  getExternalAudioSource(key){ return this.externalAudio.get(key); },
   /* project.js 可直接儲存 getExternalAudioSources() 的回傳資料，並在讀檔後呼叫此函式。
      目前僅桌面版可依原始 path 重建實際 audio element / cache。 */
   async restoreExternalAudioSource(serialized){
@@ -281,90 +218,30 @@ const Media = {
   /* History 只保存純資料；還原時優先重用仍在 runtime 的 asset，已被刪除的桌面檔案則非同步重建。
      這個入口刻意不紀錄新的 history，避免 Ctrl+Z/Redo 產生遞迴項目。 */
   restoreExternalAudioEditState(rawSources){
-    const wanted=(Array.isArray(rawSources)?rawSources:[]).filter(source=>
-      source&&typeof source==='object'&&typeof source.audioSourceId==='string'&&source.audioSourceId
-    ).map(source=>this._serializableExternalAudioSource(source));
-    const wantedIds=new Set(wanted.map(source=>source.audioSourceId));
-    for(const asset of [...this.externalAudioSources]){
-      if(!wantedIds.has(asset.audioSourceId)) this.removeExternalAudio(asset.id,{record:false});
-    }
-    const pending=[];
-    for(const source of wanted){
-      const asset=this._externalAudioAsset(source.audioSourceId);
-      if(asset){
-        asset.name=source.name||asset.name;
-        if(source.path) asset.path=source.path;
-        if(typeof source.timelineLaneId==='string'&&source.timelineLaneId.trim()) asset.timelineLaneId=source.timelineLaneId.trim();
-        asset.offset=source.offset;
-        asset.in=source.in;
-        asset.out=source.out;
-        asset.duration=Math.max(0,Number(source.duration)||asset.duration||0);
-        asset.gain=source.gain;
-        asset.fadeIn=source.fadeIn;
-        asset.fadeOut=source.fadeOut;
-        asset.enabled=source.enabled!==false;
-        asset.preferCache=source.preferCache===true;
-        if(Array.isArray(source.descriptors)&&source.descriptors.length) asset.descriptors=source.descriptors.map(channel=>({...channel}));
-        this._normalizeExternalAudioAsset(asset);
-      }else if(source.path&&DESK){
-        pending.push(source);
-      }
-    }
+    // 「誰留下、誰要移除、誰得重建」是資料判斷 → library；
+    // 移除要拆 AudioElement、重建要開檔 → 留在這裡。
+    const plan=this.externalAudio.planRestore(rawSources);
+    for(const asset of plan.removed) this.removeExternalAudio(asset.id,{record:false});
+    for(const { asset, source } of plan.kept) this.externalAudio.applyRestored(asset,source);
     // 尚未完成非同步重建前仍保留快照的總長，避免 undo 後時間軸立刻縮短。
-    State.externalAudioState=wanted;
-    State.externalAudioEnd=wanted.reduce((end,source)=>{
-      const range=this._externalAudioRange(source);
-      return Math.max(end,range.offset+range.length);
-    },0);
+    State.externalAudioState=plan.wanted;
+    State.externalAudioEnd=plan.timelineEnd;
     Seq.recomputeDuration();
     this.applyGains(); if(this.playing) this._restartElements(); renderAudioTracks(); drawTimeline();
-    for(const source of pending){
+    for(const source of plan.pending){
+      if(!DESK) continue; // 只有桌面版能依原始 path 重建
       void this.restoreExternalAudioSource({...source,_restore:true}).then(()=>{
         this.recomputeTimelineDuration(); this.applyGains(); renderAudioTracks(); drawTimeline();
       }).catch(error=>console.warn('restore history external audio:',error));
     }
   },
   updateExternalAudioSourceDuration(asset, rawDuration){
-    if(!asset||!this.externalAudioSources.includes(asset)) return;
-    const duration=Math.max(0,Number(rawDuration)||0);
-    if(!duration) return;
-    const previous=Math.max(0,Number(asset.duration)||0);
-    asset.duration=duration;
-    // 尚未被未來的時間軸編輯功能修剪時，out 跟著實際 metadata 長度更新。
-    if(!(asset.out>0)||Math.abs(Number(asset.out)-previous)<0.000001) asset.out=duration;
-    else asset.out=Math.min(Number(asset.out),duration);
-    this._normalizeExternalAudioAsset(asset);
+    if(!this.externalAudio.updateDuration(asset,rawDuration)) return;
     this.recomputeTimelineDuration();
   },
-  _externalAudioAsset(key){
-    const value=String(key||'');
-    return this.externalAudioSources.find(asset=>
-      asset.id===value||asset.audioSourceId===value||asset.audioSrc===value||asset.source===value
-    )||null;
-  },
-  /* 回傳已正規化的來源範圍；out=0 是合法的空範圍，不能以 || 回退為整段 duration。 */
-  _externalAudioRange(asset){
-    const duration=Math.max(0,Number(asset?.duration)||0);
-    const offset=Math.max(0,Number(asset?.offset)||0);
-    const rawIn=Number(asset?.in??asset?.trimStart);
-    const inPoint=Math.min(duration||Infinity,Math.max(0,Number.isFinite(rawIn)?rawIn:0));
-    const rawOut=Number(asset?.out??asset?.trimEnd);
-    let outPoint=Number.isFinite(rawOut)?Math.max(inPoint,rawOut):duration;
-    if(duration>0) outPoint=Math.min(outPoint,duration);
-    return {offset,in:inPoint,out:outPoint,length:Math.max(0,outPoint-inPoint),duration};
-  },
-  _normalizeExternalAudioAsset(asset){
-    if(!asset) return null;
-    const range=this._externalAudioRange(asset);
-    asset.offset=range.offset;
-    asset.in=range.in;
-    asset.out=range.out;
-    asset.gain=Math.max(0,Number(asset.gain==null?1:asset.gain)||0);
-    asset.fadeIn=Math.min(range.length,Math.max(0,Number(asset.fadeIn)||0));
-    asset.fadeOut=Math.min(range.length,Math.max(0,Number(asset.fadeOut)||0));
-    asset.enabled=asset.enabled!==false;
-    return asset;
-  },
+  _externalAudioAsset(key){ return this.externalAudio.find(key); },
+  _externalAudioRange(asset){ return this.externalAudio.range(asset); },
+  _normalizeExternalAudioAsset(asset){ return this.externalAudio.normalize(asset); },
   /* 外部音訊編輯完成後統一同步總長度、播放位置與 mixer／timeline。 */
   _commitExternalAudioEdit(asset,label=''){
     if(asset) this._normalizeExternalAudioAsset(asset);
@@ -382,62 +259,29 @@ const Media = {
     return State.duration;
   },
   moveExternalAudio(key, offset){
-    const asset=this._externalAudioAsset(key);
+    const asset=this.externalAudio.move(key,offset);
     if(!asset) return null;
-    asset.offset=Math.max(0,Number(offset)||0);
     return this._commitExternalAudioEdit(asset,'移動音訊：'+(asset.name||''));
   },
   /* edge 可用 start/left/in 或 end/right/out；timelineTime 一律是時間軸秒數。 */
   trimExternalAudio(key, edge, timelineTime){
-    const asset=this._externalAudioAsset(key);
+    const asset=this.externalAudio.trim(key,edge,timelineTime);
     if(!asset) return null;
-    const range=this._externalAudioRange(asset);
-    const MIN=Math.min(0.2,Math.max(0.02,range.length/2));
-    if(range.length<=MIN) return this._serializableExternalAudioSource(asset);
-    const t=Math.max(0,Number(timelineTime)||0);
-    const isStart=['start','left','in','head'].includes(String(edge||'').toLowerCase());
-    if(isStart){
-      const newOffset=clamp(t,0,range.offset+range.length-MIN);
-      asset.in=clamp(range.in+(newOffset-range.offset),0,range.out-MIN);
-      asset.offset=newOffset;
-    }else{
-      asset.out=clamp(range.in+(t-range.offset),range.in+MIN,range.duration||Infinity);
-    }
     return this._commitExternalAudioEdit(asset,'修剪音訊：'+(asset.name||''));
   },
   /* 在播放點切開一個外部音訊。
      每個切片都建立獨立 audioSourceId / AudioElement，才能同時被移動、靜音、輸出與播放；
      快取可由 Electron 的 ingest 命中，不共用同一個 element 而造成兩段互相 seek。 */
   async splitExternalAudio(key, timelineTime){
-    const asset=this._externalAudioAsset(key);
-    if(!asset) return null;
-    const range=this._externalAudioRange(asset);
-    const t=Math.max(0,Number(timelineTime)||0);
-    const MIN=Math.min(0.2,Math.max(0.02,range.length/2));
-    if(range.length<=MIN||t<=range.offset+MIN||t>=range.offset+range.length-MIN){
-      showToast('切點太靠近音訊段落邊界');
+    // 切點與左右兩段的規格是純計算 → library；把右段真的載進來要開檔 → 這裡。
+    const plan=this.externalAudio.planSplit(key,timelineTime);
+    if(!plan){
+      if(this.externalAudio.find(key)) showToast('切點太靠近音訊段落邊界');
       return null;
     }
-    const cut=range.in+(t-range.offset);
-    const previous={out:asset.out,fadeOut:asset.fadeOut};
-    const cloneDetails={
-      name:asset.name,
-      timelineLaneId:asset.timelineLaneId||asset.audioSourceId,
-      duration:asset.duration,
-      offset:t,
-      in:cut,
-      out:range.out,
-      gain:asset.gain,
-      fadeIn:0,
-      fadeOut:asset.fadeOut,
-      enabled:asset.enabled,
-      preferCache:asset.preferCache===true,
-      descriptors:(asset.descriptors||[]).map(channel=>({...channel})),
-      fallbackCount:(asset.descriptors||[]).length,
-      _internalSplit:true
-    };
-    asset.out=cut;
-    asset.fadeOut=0;
+    const { asset, previous, left, right: cloneDetails }=plan;
+    asset.out=left.out;
+    asset.fadeOut=left.fadeOut;
     this._commitExternalAudioEdit(asset);
     let right=null;
     try{
@@ -470,36 +314,22 @@ const Media = {
       try{track.el?.pause(); track.el&&(track.el.src='');}catch(e){}
       try{track.gain?.disconnect();}catch(e){}
     }
-    this.externalAudioSources=this.externalAudioSources.filter(item=>item!==asset);
+    this.externalAudio.remove(asset);
     Wave.forgetSourceWaveforms(asset);
     if(this.activeSource===source) this.activeSource=null;
-    if(State.selectedAudioClipId===asset.id) State.selectedAudioClipId=null;
+    deselect('audio', asset.id);
     this._commitExternalAudioEdit(null,record?'刪除音訊：'+(asset.name||''):'' );
     return true;
   },
   toggleExternalAudioEnabled(key, enabled){
-    const asset=this._externalAudioAsset(key);
+    const asset=this.externalAudio.setEnabled(key,enabled);
     if(!asset) return null;
-    asset.enabled=typeof enabled==='boolean'?enabled:asset.enabled===false;
     return this._commitExternalAudioEdit(asset,(asset.enabled?'開啟音訊：':'靜音音訊：')+(asset.name||''));
   },
   /* 將外部 asset 的 timeline placement 換算成來源秒數；null 表示此時間點不該播放。
      沒有 asset metadata 的舊 ext-* runtime track 保持原本「從 0 秒跟 timeline」行為。 */
-  externalSourceTime(source, timelineTime){
-    const asset=this.externalAudioSources.find(item=>item.audioSrc===source||item.source===source);
-    if(!asset) return Math.max(0,Number(timelineTime)||0);
-    if(asset.enabled===false) return null;
-    const range=this._externalAudioRange(asset);
-    const t=Math.max(0,Number(timelineTime)||0);
-    if(t<range.offset || !(range.length>0) || t>=range.offset+range.length) return null;
-    return range.in+(t-range.offset);
-  },
-  externalTimelineEnd(){
-    return this.externalAudioSources.reduce((end,asset)=>{
-      const range=this._externalAudioRange(asset);
-      return Math.max(end,range.offset+range.length);
-    },0);
-  },
+  externalSourceTime(source, timelineTime){ return this.externalAudio.sourceTime(source,timelineTime); },
+  externalTimelineEnd(){ return this.externalAudio.timelineEnd(); },
   /* 原生直讀的影片平常不需要 ffmpeg 音訊快取；但多聲道路由匯出必須有各聲道檔案。
      因此在背景補抽，不改變原生播放路徑，只把 cache file 掛回既有 L/R runtime track。 */
   async cacheNativeRoutingAudio(clip, path, duration, audio){
@@ -1572,6 +1402,27 @@ const Media = {
   seqOn(){ return State.clips.some(c => c.type !== 'image'); },
   audioOnlyTimeline(){ return !this.seqOn() && this.externalTimelineEnd()>0; },
   _activeClip(){ return Seq.byId(this.activeClipId); },
+
+  /* ===== 播放呈現狀態的對外查詢 ===============================================
+     以下五個是給 app.js／pointer-interaction.js／decode/player.js 用的公開入口。
+     它們背後的 _gap / _wcTakeover / _activeClip 以前是被【模組外直接讀】的底線
+     名稱——呼叫端因此得知道 Media 的內部欄位長什麼樣，改名就會靜默壞掉。
+
+     mpvPresenting() 特別值得存在：`mpvMode && !_wcTakeover` 這個組合原本在
+     app.js 與 pointer-interaction.js 手寫了七次，任何一處漏掉 `!_wcTakeover`，
+     WebCodecs 接管期間就會把 guide／命中層送去 mpv——畫面看起來正常，但點不到。 */
+  activeClip(){ return this._activeClip(); },
+  inGap(){ return !!this._gap; },
+  sourceLocalTime(srcId, t){ return this._srcLocalT(srcId, t); },
+  /* mpv 正在自己出圖（WebCodecs 尚未接管） */
+  mpvPresenting(){ return !!(this.mpvMode && !this._wcTakeover); },
+  webCodecsTakeover(){ return !!this._wcTakeover; },
+  /* 接管狀態的擁有者是 decode/player.js；它透過這兩個入口寫入，
+     而不是直接指派 Media 的底線欄位。 */
+  setWebCodecsTakeover(v){ this._wcTakeover = !!v; },
+  setWebCodecsComposited(v){ this._wcComposited = !!v; },
+  webCodecsProxyUrl(){ return this._wcProxyUrl; },
+  webCodecsProxyPath(){ return this._wcProxyPath; },
   /* 時間軸權威時間（播放中） */
   tlTime(){
     const virtual=this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'));
@@ -2898,7 +2749,7 @@ const Media = {
     this.objectURLs=this.objectURLs.filter(u=>keepObjectURLs.has(u));
     this.playing=false; this._transport.reset();
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）
-    Seq.clear(); this.activeClipId=null; this._mpvPath=null; State.selectedClipId=null; State.selectedAudioClipId=null; resetVideoTracks();
+    Seq.clear(); this.activeClipId=null; this._mpvPath=null; deselect('video'); deselect('audio'); resetVideoTracks();
     if(!options.keepObjectURLs) delete this._preservedImageTimeline;
     this._seqSwitching=false;
     video.style.visibility='';

@@ -140,7 +140,7 @@ export function bindSubtitleDomEvents(videoSub, videoWrap) {
     }
     if(presetEdit) ctx.renderTrackStyle(); 
     ctx.renderVideoSub();
-    if(Media.mpvMode && !Media._wcTakeover) ctx.refreshMpvSubs(false,true);
+    if(Media.mpvPresenting()) ctx.refreshMpvSubs(false,true);
     e.preventDefault();
   }
 

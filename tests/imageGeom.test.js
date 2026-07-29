@@ -6,7 +6,7 @@
         位移變負 → ffmpeg -22，整支匯出失敗。
    幾何公式一改就會同時破壞預覽與匯出，故一併鎖住。 */
 import { describe, it, expect } from 'vitest';
-import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { imageBox, trackFrame, imageBoxOnStage } from '../src/imagegeom.js';
@@ -70,37 +70,67 @@ describe('trackFrame / imageBoxOnStage：視訊軌 PiP 也要跟匯出一致', (
   });
 });
 
-/* 匯出端在主程序（CommonJS），這裡只守【無法用其他方式驗證】的不變量。
+/* 匯出端的圖片分支。
 
-   幾何本身不在這裡驗——它已經由 tests/imageGeomContract.test.js 以矩陣窮舉
-   直接比對兩份實作（imagegeom.imageBox ≡ export-plan.imageBoxForExport），
-   那是真的執行程式碼，比在這裡比對原始碼字面可靠得多。
+   【以前只能鎖原始碼字面】這一段本來是 `readFileSync('electron/main.js')` 再用
+   regex 找 `pad=` 與 `-loop 1`——因為那段程式長在 ipcMain.handle 裡，vitest 起不了
+   Electron，只能退而求其次去比對字串。那種測試會鎖住舊寫法、擋住正確的改動。
 
-   這個區塊原本用 regex 鎖死 overlay 的字面寫法。批次5 把圖片幾何改成共用公式後，
-   那些斷言全部變成「鎖住舊寫法、擋住正確的改動」——正是架構審查點名的
-   「接縫不存在時，測試只能鎖字面」。已改為只保留下面兩條真正的不變量。 */
-describe('electron/main.js 圖片分支：以原始碼守住的兩條不變量', () => {
-  const src = fs.readFileSync(path.join(ROOT, 'electron', 'main.js'), 'utf8');
-  const branch = src.slice(src.indexOf("if (c.type === 'image') {"), src.indexOf("} else {", src.indexOf("if (c.type === 'image') {")));
+   argv 組建搬進 export-plan.js（零 require）之後，這裡改成【真的產生 argv 再斷言】。 */
+describe('匯出圖片片段：直接檢查產生的 ffmpeg 參數', () => {
+  const require_ = createRequire(import.meta.url);
+  const { buildDeliveryArgv } = require_(path.join(ROOT, 'electron/export-plan.js'));
 
-  it('抓得到圖片分支', () => {
-    expect(branch.length).toBeGreaterThan(200);
+  const argvFor = clip => buildDeliveryArgv({
+    format: 'mp4', width: 1920, height: 1080, fps: 25, duration: 10,
+    videoKbps: 8000, audioPlan: null, timecodeWatermark: null,
+    assFileName: null, outPath: 'C:/out/deliverable.mp4',
+    videoTracks: [{ vt: 0, scale: 1, posX: 0.5, posY: 0.5, opacity: 1 }],
+    clips: [clip],
+  }, { hasAudioStream: () => false });
+
+  const image = {
+    type: 'image', path: 'C:/source/card.png', vtrack: 0,
+    in: 0, out: 8, offset: 0, fadeIn: 0, fadeOut: 0,
+    scale: 1, posX: 0.5, posY: 0.5, natW: 500, natH: 500,
+  };
+  const filtergraph = argv => argv[argv.indexOf('-filter_complex') + 1];
+
+  /* 這條沒有別的驗法：少了 -loop 1，ffmpeg 只讀 PNG 第一格，
+     整段圖片時間軸會變成黑畫面，而且不會有任何錯誤訊息。 */
+  it('靜態圖片輸入帶 -loop 1 與 -framerate（否則整段變黑畫面且不報錯）', () => {
+    const { args } = argvFor(image);
+    expect(args.join(' ')).toContain("-loop 1 -framerate 25 -i C:/source/card.png");
   });
 
   /* pad 不接受負位移（scale>1 直接 -22，整支匯出失敗，不只圖片壞掉），
      且它的位移必須用縮放【後】的真實尺寸算——這正是 v4.6 的兩個 bug。 */
   it('不使用 pad 定位圖片', () => {
-    expect(branch).not.toMatch(/pad=/);
+    const fc = filtergraph(argvFor(image).args);
+    const imageChains = fc.split(';').filter(chain => /overlay=x=\d|scale=\d+:\d+,/.test(chain));
+    expect(imageChains.join(';')).not.toMatch(/pad=/);
   });
 
-  it('走共用公式，並保留舊專案（無 natW/natH）的退路', () => {
-    expect(branch).toMatch(/imageBoxForExport\(/);
-    expect(branch).toMatch(/force_original_aspect_ratio=decrease/); // fallback 仍在
+  /* 三路一致：匯出的 overlay 座標必須等於預覽用的 imageBox()，不是「差不多」。
+     以前這裡只能斷言原始碼裡出現 `imageBoxForExport(`——那證明不了數字相同。 */
+  it('overlay 座標＝預覽 imageBox() 的同一組數字', () => {
+    const fc = filtergraph(argvFor(image).args);
+    const box = imageBox({ stageW: 1920, stageH: 1080, natW: 500, natH: 500, scale: 1, posX: 0.5, posY: 0.5 });
+
+    expect(fc).toContain(`scale=${Math.round(box.w)}:${Math.round(box.h)}`);
+    expect(fc).toContain(`overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}`);
   });
 
-  /* 這條沒有別的驗法：少了 -loop 1，ffmpeg 只讀 PNG 第一格，
-     整段圖片時間軸會變成黑畫面，而且不會有任何錯誤訊息。 */
-  it('靜態圖片輸入帶 -loop 1 與 -framerate', () => {
-    expect(src).toMatch(/inputs\.push\('-loop', '1', '-framerate', String\(R\), '-i', p\)/);
+  it('scale>1 的出血用負座標表達，不會變成 pad 的負位移', () => {
+    const fc = filtergraph(argvFor({ ...image, scale: 2, posX: 0.25 }).args);
+    const box = imageBox({ stageW: 1920, stageH: 1080, natW: 500, natH: 500, scale: 2, posX: 0.25, posY: 0.5 });
+
+    expect(box.x).toBeLessThan(0);
+    expect(fc).toContain(`overlay=x=${Math.round(box.x)}:`);
+  });
+
+  it('舊專案沒有 natW/natH 時退回 force_original_aspect_ratio=decrease，不破圖', () => {
+    const { natW, natH, ...legacy } = image;
+    expect(filtergraph(argvFor(legacy).args)).toContain('force_original_aspect_ratio=decrease');
   });
 });

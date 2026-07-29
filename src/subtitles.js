@@ -27,7 +27,8 @@
      嚴禁在此檔案內越權去修改 Canvas 裡的 pixels 或 layout 屬性。
 ============================================================================== */
 import { $, sublist, video } from './dom.js';
-import { State, isSel, newId, trackVisible, cueSuffix, ensureTrackCount } from './state.js';
+import { State, isSel, newId, trackVisible, cueSuffix, ensureTrackCount,
+  setSelection, deselect, pruneSelection } from './state.js';
 import { escapeHTML, tcKeyAllowed } from './util.js';
 import { inspectSubtitleCharacters } from './subtitleTextCheck.js';
 import { fmtClock, secToEncore, snapTimeToFrame } from './time.js';
@@ -301,11 +302,11 @@ function mergeAdjacentCues(id, dir){
   if (idx2 >= 0) State.cues.splice(idx2, 1);
   
   if (State.selectedId === cue2.id) {
-    State.selectedId = cue1.id;
-    State.selectedIds = [cue1.id];
+    setSelection({ kind:'sub', ids:[cue1.id] });
   } else if (State.selectedIds.includes(cue2.id)) {
-    State.selectedIds = State.selectedIds.filter(x => x !== cue2.id);
-    if (!State.selectedIds.includes(cue1.id)) State.selectedIds.push(cue1.id);
+    const kept = State.selectedIds.filter(x => x !== cue2.id);
+    if (!kept.includes(cue1.id)) kept.push(cue1.id);
+    setSelection({ kind:'sub', ids:kept, primary:State.selectedId });
   }
 
   sortCues();
@@ -603,8 +604,6 @@ function renderSubRow(id){
 
 function selectCue(id,opts){
   opts=opts||{};
-  State.selectedClipId=null;
-  State.selectedAudioClipId=null; // 選字幕即取消影片／音訊素材選取，避免 Delete 目標混淆
   // 清理可能殘留的超長預設字幕
   let changed = false;
   State.cues.forEach(cue => {
@@ -619,16 +618,20 @@ function selectCue(id,opts){
     emit('render:all');
   }
 
+  let picked, primary;
   if(opts.additive){
-    const i=State.selectedIds.indexOf(id);
-    if(i>=0)State.selectedIds.splice(i,1); else State.selectedIds.push(id);
-    State.selectedId=State.selectedIds[State.selectedIds.length-1]||null;
+    picked=[...State.selectedIds];
+    const i=picked.indexOf(id);
+    if(i>=0)picked.splice(i,1); else picked.push(id);
+    primary=picked[picked.length-1]??null;
   }else if(opts.range && State.selectedId){
     const ids=State.cues.map(c=>c.id);
     const a=ids.indexOf(State.selectedId), b=ids.indexOf(id);
-    if(a>=0&&b>=0){ const lo=Math.min(a,b),hi=Math.max(a,b); State.selectedIds=ids.slice(lo,hi+1); }
-  }else{ State.selectedIds=[id]; State.selectedId=id; }
-  State.activeTrackKind='sub';
+    picked = (a>=0&&b>=0) ? ids.slice(Math.min(a,b),Math.max(a,b)+1) : [...State.selectedIds];
+    primary=State.selectedId; // 範圍多選不換主選取
+  }else{ picked=[id]; primary=id; }
+  // 一次寫入：字幕選取成立即取消影片／音訊素材選取，避免 Delete 目標混淆
+  setSelection({ kind:'sub', ids:picked, primary });
   State.activeEdge='start';
   const c=State.cues.find(x=>x.id===id);
   if(c && !opts.additive && !opts.range){
@@ -702,8 +705,7 @@ export function sweepContainedCues(changedCues) {
     }
   }
   if (changed) {
-    State.selectedIds = State.selectedIds.filter(id => State.cues.find(cue => cue.id === id));
-    if (!State.cues.find(cue => cue.id === State.selectedId)) State.selectedId = State.selectedIds[0] || null;
+    pruneSelection();
     return true;
   }
   return false;
@@ -794,8 +796,8 @@ function _doDeleteCues(ids){
   const idxs=ids.map(id=>State.cues.findIndex(c=>c.id===id)).filter(i=>i>=0);
   const firstIdx=idxs.length?Math.min(...idxs):0;
   State.cues=State.cues.filter(c=>!ids.includes(c.id));
-  State.selectedId=State.cues[Math.min(firstIdx,State.cues.length-1)]?.id||null;
-  State.selectedIds=State.selectedId?[State.selectedId]:[]; State.activeEdge='start';
+  const next=State.cues[Math.min(firstIdx,State.cues.length-1)]?.id||null;
+  setSelection({ kind:'sub', ids:next?[next]:[] }); State.activeEdge='start';
   emit('render:all'); updateTlSel(); recordHistory('刪除字幕');
 }
 function deleteSelected(){
@@ -811,7 +813,7 @@ function deleteSelected(){
   }
   _doDeleteCues(ids);
 }
-function deleteCue(id){ if(id){State.selectedIds=[id];State.selectedId=id;} deleteSelected(); }
+function deleteCue(id){ if(id) setSelection({ kind:'sub', ids:[id] }); deleteSelected(); }
 
 function clearSelectedCuesTime() {
   const ids=State.selectedIds.length?State.selectedIds.slice():[State.selectedId].filter(Boolean);
@@ -914,8 +916,7 @@ function pasteCues(){
   });
   State.cues.push(...newCues);
   sortCues();
-  State.selectedIds=newCues.map(c=>c.id);
-  State.selectedId=newCues[0].id;
+  setSelection({ kind:'sub', ids:newCues.map(c=>c.id), primary:newCues[0].id });
   emit('render:all'); refreshSelectionUI(); recordHistory('貼上字幕');
   showToast(`已貼上 ${newCues.length} 條字幕`);
 }
@@ -971,8 +972,7 @@ function updateSearchCount(){
 }
 function searchSelectAll(){
   if(!_searchMatches.length) return;
-  State.selectedIds=_searchMatches.slice();
-  State.selectedId=_searchMatches[_searchMatches.length-1];
+  setSelection({ kind:'sub', ids:_searchMatches.slice() });
   State.activeEdge='start';
   refreshSelectionUI();
   const el=$('stSel'); if(el) el.textContent='已選 '+State.selectedIds.length+' 條';
@@ -1151,7 +1151,7 @@ sublist.addEventListener('contextmenu', e => {
 
   e.preventDefault();
   if (!isSel(c.id)) selectCue(c.id);
-  else { State.selectedId = c.id; refreshSelectionUI(); }
+  else { setSelection({ kind:'sub', ids:State.selectedIds, primary:c.id }); refreshSelectionUI(); }
   showCueMenu(e.clientX, e.clientY);
 });
 

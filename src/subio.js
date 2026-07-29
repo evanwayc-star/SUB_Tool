@@ -23,7 +23,7 @@
    - 新增 FFmpeg 的 `-filter_complex` 濾鏡時，特別注意在 Windows 環境下
      對於 `\`, `:`, `'` 等特殊字元的雙層跳脫 (Double Escaping) 問題。
 ============================================================================== */
-import { State, setFps, newTrack, syncTrackCount, newId, IS_DESKTOP, DESK } from './state.js';
+import { State, setFps, newTrack, syncTrackCount, newId, IS_DESKTOP, DESK, deselect } from './state.js';
 import { $, video } from './dom.js';
 import { decodeText, b64ToBytes, readFile, pickFile, encodeUTF16LE, bytesToB64, downloadBytes, baseName, escapeHTML } from './util.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
@@ -43,6 +43,7 @@ import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
 import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
 import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec } from './delivery-audio.js';
+import { buildExportSnapshot } from './delivery-job.js';
 import { t } from './i18n.js';
 
 /* 格式自動辨識 */
@@ -187,7 +188,7 @@ function _openImportModal(title, parsed, kind) {
         });
         
         State.listTrack = targetTk;
-        if (!append) { State.selectedId = null; State.selectedIds = []; }
+        if (!append) deselect('sub');
         sortCues(); emit('render:listTrackSel'); emit('render:all');
         {
           const maxEnd = State.cues.reduce((m, c) => c.timed !== false ? Math.max(m, c.end) : m, 0);
@@ -397,261 +398,18 @@ function toASSFromState(cues, options = {}) {
 
 /* ===== 匯出影片（序列）：ProRes 422 HQ / MP4，燒錄可見軌字幕，音訊依混音器設定輸出 =====
    桌面版專屬（需系統 ffmpeg）。輸出時間軸＝序列時間軸，故字幕（時間軸時碼）與輸出對齊。 */
-/* 依混音器狀態算出某影片段要輸出哪些聲道（比照 applyGains：有獨奏則只留獨奏，否則留未靜音；套用音量）。
-   預覽用的逐聲道 AAC 快取只拿來讀 M/S/音量與來源聲道座標；匯出一律改讀 c.path 的母素材。
-   回傳 []＝全靜音；沒有逐聲道資訊時回 undefined，主程序會直接讀同一支母素材的原始音訊。 */
-function _clipAudioSpec(c) {
-  const srcKey = c.audioSrc || (c.primary ? 'video' : 'clip:' + c.id);
-  const tks = Media.tracks.filter(t => (t.source || 'video') === srcKey && t.file && (t.kind === 'element' || t.kind === 'buffer'));
-  if (!tks.length) return undefined; // 無逐聲道檔 → 回退來源原音
-  const masterPath = typeof c?.path === 'string' && c.path ? c.path : null;
-  if (!masterPath) return []; // 不可改以播放用 cache 匯出。
-  const anySolo = tks.some(t => t.solo);
-  return tks.filter(t => (anySolo ? t.solo : !t.muted) && (t.volume || 0) > 0)
-            .map(t => {
-              const hasSourceCoordinates = Number.isInteger(t.sourceStream) && Number.isInteger(t.sourceChannel);
-              return {
-                // 即使舊專案尚未記錄 sourceStream/sourceChannel，也只讀母素材；
-                // 少了座標時 main process 會讀該母素材的預設 audio stream，絕不回退 m4a cache。
-                file: masterPath,
-                ...(hasSourceCoordinates ? { sourceStream:t.sourceStream, sourceChannel:t.sourceChannel } : {}),
-                volume: +(t.volume != null ? t.volume : 1).toFixed(3)
-              };
-            });
-}
-/* 將專案層的 sourceMaps（來源聲道→bus）轉成 Electron 匯出端可直接編譯的 audioPlan。
-   Media 的暫存單聲道檔案只提供目前混音器的 M/S/音量狀態與聲道準備情況；真正的 input.file
-   必須是每個素材的母檔 path，並帶 sourceStream/sourceChannel 讓主程序直接解碼該聲道。
-   audioSourceId / sourceStream / sourceChannel 全部採 0-based，與 state.js 的持久化格式一致。 */
-function _externalAudioPlacements(externalSources) {
-  const sources=Array.isArray(externalSources)
-    ? externalSources : (typeof Media.getExternalAudioSources==='function' ? Media.getExternalAudioSources() : []);
-  return sources.filter(asset=>asset&&asset.enabled!==false).map(asset=>{
-    const trimStart=Math.max(0,Number(asset.in??asset.trimStart)||0);
-    const rawEnd=Number(asset.out??asset.trimEnd??asset.duration);
-    const trimEnd=Number.isFinite(rawEnd)?Math.max(trimStart,rawEnd):trimStart;
-    return {
-      source:asset,
-      offset:Math.max(0,Number(asset.offset)||0),
-      trimStart,
-      trimEnd,
-      fadeIn:Math.max(0,Number(asset.fadeIn)||0),
-      fadeOut:Math.max(0,Number(asset.fadeOut)||0),
-      gain:Math.max(0,Number(asset.gain==null?1:asset.gain)||0)
-    };
-  }).filter(placement=>placement.trimEnd>placement.trimStart);
-}
-/* 即使來源被靜音，它仍是時間軸上的素材；輸出影片的黑畫面／總長不能因 Mute 縮短。
-   音訊輸入本身仍由 _externalAudioPlacements 過濾 enabled=false。 */
-function _externalAudioTimelineEnd(externalSources){
-  const sources=Array.isArray(externalSources)
-    ? externalSources : (typeof Media.getExternalAudioSources==='function' ? Media.getExternalAudioSources() : []);
-  return sources.reduce((end,asset)=>{
-    if(!asset) return end;
-    const offset=Math.max(0,Number(asset.offset)||0);
-    const trimStart=Math.max(0,Number(asset.in??asset.trimStart)||0);
-    const rawEnd=Number(asset.out??asset.trimEnd??asset.duration);
-    const trimEnd=Number.isFinite(rawEnd)?Math.max(trimStart,rawEnd):trimStart;
-    return Math.max(end,offset+Math.max(0,trimEnd-trimStart));
-  },0);
-}
-
-/* runtime 已重建的音檔以 Media registry 為準；尚未能重開（例如檔案暫時離線）的
-   source 則保留 State 的可序列化 placement。如此匯出前會被標成 unresolved，
-   不會悄悄少掉一段音訊或把總長縮短。 */
-function _projectExternalAudioSources(){
-  let live=[];
-  try{ live=typeof Media.getExternalAudioSources==='function'?Media.getExternalAudioSources():[]; }catch(e){}
-  const byId=new Map();
-  for(const source of (Array.isArray(State.externalAudioState)?State.externalAudioState:[])){
-    const id=typeof source?.audioSourceId==='string'?source.audioSourceId:'';
-    if(id) byId.set(id,source);
-  }
-  for(const source of (Array.isArray(live)?live:[])){
-    const id=typeof source?.audioSourceId==='string'?source.audioSourceId:'';
-    if(id) byId.set(id,source); // runtime 有實體檔與最新編輯資料，優先採用
-  }
-  return [...byId.values()];
-}
-
-/* clips 與外部 audio asset 都先正規化為 placement，再共用同一條 bus/input 編譯流程。
-   外部 asset 沒有視訊，但它的 offset/in/out 是 timeline 域資料，故輸出能與預覽同位置對齊。 */
-function _buildProjectAudioPlan(clips, externalSources=null) {
-  const project = State.audioProject;
-  if (!project || !Array.isArray(project.buses) || !project.buses.length || !project.sourceMaps || !project.exportLayout)
-    return null; // 尚未進入專案音訊模式時，由主程序沿用舊版 stereo 匯出
-  const buses = project.buses.map(bus => ({ id: bus.id, inputs: [] }));
-  const busById = new Map(project.buses.map((bus, i) => [bus.id, { bus, plan: buses[i] }]));
-  const anySolo = project.buses.some(bus => bus.solo);
-  const busGain = new Map(project.buses.map(bus => {
-    const audible = anySolo ? !!bus.solo : !bus.muted;
-    return [bus.id, audible ? Math.max(0, Number(bus.volume == null ? 1 : bus.volume) || 0) : 0];
-  }));
-  const unresolvedSources=new Map();
-
-  const placements=[
-    ...(Array.isArray(clips)?clips:[]).filter(clip=>!clip.audioDetached).map(clip=>({
-      source:clip,
-      offset:Math.max(0,Number(clip.offset)||0),
-      trimStart:Math.max(0,Number(clip.in)||0),
-      trimEnd:Math.max(0,Number(clip.out)||0),
-      fadeIn:Math.max(0,Number(clip.fadeIn)||0),
-      fadeOut:Math.max(0,Number(clip.fadeOut)||0),
-      gain:1
-    })),
-    ..._externalAudioPlacements(externalSources)
-  ];
-
-  for (const placement of placements) {
-    const source=placement.source;
-    const sourceId = source.audioSourceId;
-    if (typeof sourceId !== 'string' || !sourceId) continue;
-    if (!(placement.trimEnd>placement.trimStart) || placement.gain<=0) continue;
-    const masterPath=typeof source.path==='string'&&source.path ? source.path : '';
-    const routes = project.sourceMaps[sourceId]?.channels;
-    if (!Array.isArray(routes) || !routes.length) continue;
-    // 同一來源在 Media.tracks 可能有非匯出用的 native track；快取 track 只負責讀取
-    // 使用者在混音器做的 M/S/音量，不能再把它的低碼率 m4a 路徑交給匯出。
-    const tracksByDescriptor = new Map();
-    const sourceTracks = Media.tracks.filter(track => track?.file && track.audioSourceId === sourceId && Number.isInteger(track.sourceStream) && Number.isInteger(track.sourceChannel));
-    // 保留既有混音器的逐聲道 M/S/音量行為。專案 bus 的 M/S/音量會在下方再疊加，
-    // 兩層控制與播放預覽一致；同一來源內有 Solo 時只輸出該來源被 Solo 的聲道。
-    const sourceHasSolo = sourceTracks.some(track => track.solo);
-    for (const track of sourceTracks) {
-      const key = track.sourceStream + ':' + track.sourceChannel;
-      if (!tracksByDescriptor.has(key)) tracksByDescriptor.set(key, track);
-    }
-    for (const route of routes) {
-      if (!route || route.enabled === false || !Array.isArray(route.busIds)) continue;
-      // 被靜音／未指派的 bus 本來就不會輸出，不需要因為它的快取尚未完成而阻擋匯出。
-      const activeBusIds=[...new Set(route.busIds)].filter(busId=>busGain.get(busId)>0&&busById.has(busId));
-      if(!activeBusIds.length) continue;
-      const sourceStream=Number.isInteger(route.sourceStream)?route.sourceStream:null;
-      const sourceChannel=Number.isInteger(route.sourceChannel)?route.sourceChannel:null;
-      const sourceTrack = sourceStream!=null && sourceChannel!=null
-        ? tracksByDescriptor.get(sourceStream + ':' + sourceChannel) : null;
-      if (!masterPath || sourceStream==null || sourceChannel==null) {
-        // 沒有可重新讀取的母素材時不能偷偷退回 proxy／AAC cache；明確阻擋匯出。
-        unresolvedSources.set(sourceId,source.name||'未命名音訊來源');
-        continue;
-      }
-      // 快取尚未建立時，sourceMaps 已有完整聲道座標，仍可由母素材直接輸出；此時採預設
-      // 未靜音、音量 1。快取就緒後才將使用者已設定的個別 M/S/音量一併反映。
-      const trackAudible = sourceTrack ? (sourceHasSolo ? !!sourceTrack.solo : !sourceTrack.muted) : !sourceHasSolo;
-      const trackGain = sourceTrack ? Math.max(0, Number(sourceTrack.volume == null ? 1 : sourceTrack.volume) || 0) : 1;
-      if (!trackAudible || trackGain <= 0) continue;
-      const routeGain = Math.max(0, Number(route.gain == null ? 1 : route.gain) || 0);
-      for (const busId of activeBusIds) {
-        const target = busById.get(busId);
-        const volume = trackGain * routeGain * placement.gain * (busGain.get(busId) || 0);
-        if (!target || volume <= 0) continue;
-        target.plan.inputs.push({
-          // 這是母素材，絕不使用 sourceTrack.file（播放／波形的 AAC cache）。
-          file: masterPath,
-          sourceStream,
-          sourceChannel,
-          offset: +placement.offset.toFixed(6),
-          trimStart: +placement.trimStart.toFixed(6),
-          trimEnd: +placement.trimEnd.toFixed(6),
-          volume: +volume.toFixed(6),
-          fadeIn: +placement.fadeIn.toFixed(6),
-          fadeOut: +placement.fadeOut.toFixed(6),
-        });
-      }
-    }
-  }
-  return {
-    buses,
-    unresolvedSources:[...unresolvedSources.entries()].map(([audioSourceId,name])=>({audioSourceId,name})),
-    streams: (Array.isArray(project.exportLayout.streams) ? project.exportLayout.streams : []).map(stream => ({
-      id: stream.id,
-      layout: stream.layout,
-      busIds: Array.isArray(stream.busIds) ? [...stream.busIds] : [],
-      ...(typeof stream.name==='string'&&stream.name.trim()?{name:stream.name.trim()}:{}),
-    })),
-  };
-}
-/* 匯出資料（v4.11.0 多軌合成）：送扁平片段清單（各含 vtrack 與音訊規格）＋視訊軌順序（由下而上）＋總長。
-   主程序據此：每視訊軌各建整條時間軸（片段放 offset、間隙透明），由下而上 overlay 疊層；
-   所有片段音訊各自 adelay 到 offset 後 amix（全軌混音）。單軌序列為此法之特例，結果與舊版一致。 */
-function _buildExportData() {
-  const rawSourceClips = [...State.clips].filter(c => c.path || c.name || c.web);
-  const rawExternalSources=_projectExternalAudioSources();
-  
-  let expIn = State.exportIn != null ? State.exportIn : 0;
-  let rawDur = Math.max(Seq.end(), _externalAudioTimelineEnd(rawExternalSources));
-  let expOut = State.exportOut != null ? State.exportOut : rawDur;
-  if (expOut <= expIn) expOut = expIn + 0.1;
-
-  function _slice(c) {
-    const startProp = c.in != null ? c.in : (c.trimStart || 0);
-    const endProp = c.out != null ? c.out : (c.trimEnd != null ? c.trimEnd : c.duration);
-    const cDur = endProp - startProp;
-    const cEnd = (c.offset || 0) + cDur;
-    if (cEnd <= expIn || (c.offset || 0) >= expOut) return null;
-    let newIn = startProp, newOut = endProp, newOffset = (c.offset || 0) - expIn;
-    if (newOffset < 0) { newIn += (-newOffset); newOffset = 0; }
-    const newDur = newOut - newIn;
-    if (newOffset + newDur > (expOut - expIn)) newOut = newIn + ((expOut - expIn) - newOffset);
-    return { ...c, in: newIn, out: newOut, trimStart: newIn, trimEnd: newOut, offset: newOffset };
-  }
-
-  const sourceClips = rawSourceClips.map(_slice).filter(Boolean);
-  const externalSources = rawExternalSources.map(_slice).filter(Boolean);
-
-  const audibleVideoClips=sourceClips.filter(c=>!c.audioDetached);
-  const externalPlacements=_externalAudioPlacements(externalSources);
-  if (!sourceClips.length&&!externalPlacements.length) return null;
-  const audioPlan = _buildProjectAudioPlan(audibleVideoClips,externalSources);
-  const finite=(value,fallback)=>Number.isFinite(Number(value))?Number(value):fallback;
-  const ratio=(value,fallback)=>Math.max(0,Math.min(1,finite(value,fallback)));
-  const list = sourceClips.map(c => {
-    /* 圖片不是一格影片：主程序必須收到 type=image，才能為該輸入加上
-       `-loop 1`。若在這裡遺失型別，ffmpeg 只會讀 PNG/JPG 的第一格，
-       看起來就像整支輸出停在開頭。圖片的個別縮放／位置也要一併交給
-       匯出 filtergraph，才會和預覽一致。 */
-    const image=c.type==='image';
-    return {
-      name: c.name, web: c.web,
-      path: c.path, type:image?'image':'video',
-      in: +c.in.toFixed(3), out: +c.out.toFixed(3),
-      offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0, audio: c.audioDetached?[]:_clipAudioSpec(c),
-      fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
-      ...(image?{
-        scale:Math.max(0.01,finite(c.scale,1)),
-        posX:ratio(c.posX,0.5), posY:ratio(c.posY,0.5),
-        /* 原生尺寸讓主程序能用【與預覽同一條公式】算出精確的 contain 尺寸
-           （見 electron/export-plan.js imageBoxForExport ≡ src/imagegeom.js imageBox）。
-           舊專案可能沒有這兩個值，主程序會退回讓 ffmpeg 自己算 —— 結果相同，
-           只是少了「兩邊用同一份實作」的保證。 */
-        natW:Math.max(0,finite(c.natW,0)), natH:Math.max(0,finite(c.natH,0))
-      }:{}),
-    };
+/* 匯出快照的組建已搬到 delivery-job.js —— 那裡不 import State／Media／DOM，
+   所以可以不 mock 任何東西直接測（見該檔頭的說明與 tests/externalAudioPlan.test.js）。
+   這裡只負責把目前的 State／Media／Seq 交給它。 */
+function _exportSnapshot(){
+  let liveExternalSources=[];
+  try{ liveExternalSources = typeof Media.getExternalAudioSources==='function' ? Media.getExternalAudioSources() : []; }catch(e){}
+  return buildExportSnapshot({
+    state: State,
+    mediaTracks: Media.tracks || [],
+    liveExternalSources,
+    sequenceEnd: Seq.end(),
   });
-  const vtOrder = [...new Set(list.map(c => c.vtrack))].sort((a, b) => a - b); // 由下而上（vtrack 小＝底層先畫）
-  const videoTracks = vtOrder.map(vt => {
-    const t = State.videoTracks[vt] || {};
-    return { vt, scale: +(t.scale != null ? t.scale : 1), posX: +(t.posX != null ? t.posX : 0.5), posY: +(t.posY != null ? t.posY : 0.5), opacity: +(t.opacity != null ? t.opacity : 1) };
-  });
-  const externalEnd=_externalAudioTimelineEnd(externalSources);
-  return {
-    clips:list,
-    videoTracks,
-    // 匯出會把片段 offset 歸零；保留原始時間軸起點供 burn-in 時碼等交付資訊使用。
-    // 不四捨五入：23.976／29.97 的單格不足 0.04 秒，保留完整值才不會讓第一格差一格。
-    timelineStart:expIn,
-    duration:+(expOut - expIn).toFixed(3),
-    audioPlan,
-    audioOnly:list.length===0,
-    externalAudioCount:externalPlacements.length
-  };
-}
-/* 交付列只儲存自己的 bus 編組與 stream 配置；真正可交付的母素材 inputs 來自每次
-   匯出時重新編譯的 audioPlan。若直接用儲存的 buses 取代它，所有 inputs 都會遺失，
-   export-plan 只能為選中的 bus 產生 anullsrc。 */
-// 相容既有 I/O 接縫；真正的純交付編譯器位於 delivery-audio.js，不讀寫 State。
-function _composeDeliveryAudioPlan(compiledPlan, deliveryRecord) {
-  return composeDeliveryAudioPlan(compiledPlan, deliveryRecord);
 }
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
 /* MP4 交付碼率的合理建議值（Mbps）＝像素數 × fps × 0.12 bit ÷ 1e6（H.264 中高品質經驗值）。
@@ -683,7 +441,7 @@ function _mixerSummary() {
 }
 async function showExportVideoDialog(initialDraft=null) {
   if (IS_DESKTOP && !DESK.exportVideo) { showToast('桌面版匯出元件未就緒'); return; }
-  const data = _buildExportData();
+  const data = _exportSnapshot();
   if (!data) { showToast('沒有可匯出的影片或外部音訊'); return; }
   if (data.audioOnly && !data.audioPlan) { showToast('純音訊 WAV 匯出需要專案音軌路由'); return; }
   const unresolved = data.audioPlan?.unresolvedSources || [];
@@ -1031,7 +789,7 @@ async function showExportVideoDialog(initialDraft=null) {
             w -= (w % 2); 
           }
 
-          const finalAudioPlan = _composeDeliveryAudioPlan(data.audioPlan,r);
+          const finalAudioPlan = composeDeliveryAudioPlan(data.audioPlan,r);
 
           const jobId = await DESK.exportVideo({
             clips: data.clips,
@@ -1401,5 +1159,6 @@ function applyDurAdjPct() {
   setStatus(`已調整 ${adjusted} 條字幕的持續時間（${pct}%${skipped ? `，跳過 ${skipped} 條已重疊` : ''}）`, 'ok');
 }
 
-export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport, showExportVideoDialog,
-  _buildProjectAudioPlan, _externalAudioPlacements, _externalAudioTimelineEnd, _buildExportData, _composeDeliveryAudioPlan };
+/* 對外只有真正的字幕／匯出 I/O 動作。以前這裡還掛著五個底線名稱，
+   純粹是為了讓測試構得到匯出計畫的純函式——那些已經搬到 delivery-job.js。 */
+export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport, showExportVideoDialog };

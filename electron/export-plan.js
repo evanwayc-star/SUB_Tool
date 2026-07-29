@@ -298,8 +298,298 @@ function imageBoxForExport({ frameW, frameH, natW, natH, scale = 1, posX = 0.5, 
   return { x: cx - w / 2, y: cy - h / 2, w, h };
 }
 
+/* ==============================================================================
+   交付規格 → ffmpeg argv
+   ==============================================================================
+   一份交付規格 ＋ 一份專案快照 → 一組完整的 ffmpeg 參數。ADR-0001 決定「一份交付
+   一個 ffmpeg 程序」，所以這裡的單位就是「一組 argv」。
+
+   這整段以前住在 _runJobLogic() 裡，和 fs.readFileSync、spawn、佇列廣播、進度回報
+   糾纏在一起，因此鐵律 §0.1（三路一致）與 §0.4（Windows 路徑跳脫【兩層】）最容易
+   靜默壞掉的那一段【一行測試都沒有】——音訊那半早就搬進本檔並有測試，影像那半沒有。
+
+   副作用一律由 env 傳入，本函式只做決策：
+     hwdecArgs()             硬體解碼參數（依偵測到的編碼器）
+     vencArgsBitrate(kbps)   H.264 目標位元率參數
+     proresArgs()            ProRes 參數
+     encoderName             實際可用的視訊編碼器（VENC；null＝libx264）
+     hasAudioStream(path)    ffprobe 探測（僅舊版 stereo 回退路徑用得到）
+     fontsDir                字型根目錄（燒錄 ASS 的 fontsdir；null＝不加）
+     timecodeFontFile        交付 TC 專用等寬字型檔
+
+   回傳 { args, label, duration, plannedEncoder, isGpu, kbps, audioBitrates,
+          audioChannels }；呼叫端只負責 spawn 與回報。 */
+function buildDeliveryArgv(spec = {}, env = {}) {
+  const {
+    format, clips, videoTracks, width, height, fps, duration,
+    videoKbps, audioPlan, timecodeWatermark, assFileName, outPath,
+  } = spec;
+  const {
+    hwdecArgs = () => [],
+    vencArgsBitrate = () => [],
+    proresArgs = () => [],
+    encoderName = null,
+    hasAudioStream = () => true,
+    fontsDir = null,
+    timecodeFontFile = null,
+  } = env;
+
+  const isWav = format === 'wav';
+  const isPro = format === 'prores';
+  // 佇列顯示與 runFF 必須共用同一個實際交付時長：音訊 plan 的尾端若較長，
+  // ffmpeg 會以它延長成品。
+  const D = Math.max(0.05, _finiteNumber(duration, 0), _planDuration(audioPlan));
+
+  if (isWav) {
+    if (!audioPlan) _exportPlanError('WAV 匯出需要專案音軌路由資料。');
+    const inputs = [], fc = [];
+    const planned = _buildPlannedAudio(audioPlan, inputs, fc, 0, D);
+    const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);
+    return {
+      args: ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', wav.label,
+        '-ar', '48000', '-c:a', 'pcm_s24le', outPath],
+      label: `匯出 WAV PCM（${wav.channels} 軌）`,
+      duration: D,
+      plannedEncoder: 'pcm_s24le',
+      isGpu: false,
+      kbps: null,
+      audioBitrates: null,
+      audioChannels: wav.channels,
+    };
+  }
+
+  const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
+  const R = fps || 25;
+  // ===== 多軌合成 filtergraph（v4.11.0）=====
+  //  影像：每視訊軌各自 concat 成整條時間軸（片段放 offset、間隙【透明】），再由下而上 overlay 疊到黑底；
+  //        上層片段覆蓋下層（比照預覽 top-occludes），透明間隙讓下層透出。
+  //  音訊：所有片段各自套混音器音量後 adelay 到自身 offset，再全部 amix（全軌混音）。
+  //  單軌、無重疊的序列＝此法之特例，結果與舊版 concat 相同。
+  const list = clips || [];
+  if (!list.length) throw new Error('沒有可匯出的影片段');
+  const inputs = [], fc = [];
+  const EPS = 0.01;
+  // 1) 去重複輸入：同一個實體檔案只開啟一次，避免建立過多 hwaccel 實例耗盡 VRAM
+  // 並且計算每個實體檔案最早被用到的時間（minIn），用 -ss 加在 -i 前，避免 ffmpeg 從 0 開始慢速解碼 44GB 大檔！
+  const uniqueVideoPaths = [...new Set(list.map(c => c.path))];
+  const pathMinIn = new Map();
+  const reusableMasterInputs = new Map();
+  uniqueVideoPaths.forEach((p, inputIndex) => {
+    const clipsForPath = list.filter(c => c.path === p);
+    const isImg = clipsForPath[0].type === 'image';
+    if (isImg) {
+      pathMinIn.set(p, 0);
+      // 靜態圖片必須以 image2 的 loop input 供應整段所需影格；若少了
+      // -loop 1，filtergraph 只拿到第一格，後續時間軸就會變成黑畫面。
+      // 指定輸入影格率也避免由 image2 預設 25fps 再轉成專案 FPS 時出現
+      // 不必要的重複／丟格。
+      inputs.push('-loop', '1', '-framerate', String(R), '-i', p);
+    } else {
+      const minIn = Math.max(0, Math.min(...clipsForPath.map(c => c.in)) - 0.5);
+      pathMinIn.set(p, minIn);
+      // 這個 input 本身就是母素材；音訊 routing 可重用它，不必再多開一次同一個 MXF/MOV。
+      reusableMasterInputs.set(p, { index: inputIndex, seekStart: minIn });
+      inputs.push(...hwdecArgs(), '-ss', minIn.toFixed(3), '-i', p);
+    }
+  });
+  const videoInputIndices = list.map(c => uniqueVideoPaths.indexOf(c.path));
+  let ii = uniqueVideoPaths.length; // 之後的逐聲道音訊檔輸入從此接續編號
+  // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
+  fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${D.toFixed(3)},format=yuv420p,setsar=1[base]`);
+  const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
+  let baseLabel = '[base]';
+  vtracks.forEach((T, ti) => {
+    const vt = T.vt || 0;
+    const scale = Math.max(0.02, Math.min(1, +T.scale || 1));
+    const opacity = Math.max(0, Math.min(1, T.opacity == null ? 1 : +T.opacity));
+    const px = Math.max(0, Math.min(1, T.posX == null ? 0.5 : +T.posX));
+    const py = Math.max(0, Math.min(1, T.posY == null ? 0.5 : +T.posY));
+    const SW = Math.max(2, Math.round(scale * W)), SH = Math.max(2, Math.round(scale * H)); // 此軌影格尺寸（PiP 時縮小）
+    const trk = list.map((c, i) => ({ c, i, vIdx: videoInputIndices[i] })).filter(x => (x.c.vtrack || 0) === vt).sort((a, b) => a.c.offset - b.c.offset);
+    if (!trk.length) return;
+    const segs = []; let cursor = 0, si = 0;
+    const gap = (gd) => { const L = `t${ti}s${si++}`; fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${(+gd).toFixed(3)},format=yuva420p,setsar=1[${L}]`); segs.push(`[${L}]`); };
+    for (const { c, vIdx } of trk) {
+      if (c.offset > cursor + EPS) gap(c.offset - cursor);
+      const L = `t${ti}s${si++}`;
+      const fi = Math.max(0, +c.fadeIn || 0), fo = Math.max(0, +c.fadeOut || 0), clen = Math.max(0.001, c.out - c.in);
+      const minIn = pathMinIn.get(c.path);
+      const adjIn = c.in - minIn;
+      const adjOut = c.out - minIn;
+
+      let vchain = '';
+      if (c.type === 'image') {
+        /* 圖片幾何必須與預覽同一組公式（src/imagegeom.js）：
+             方框＝scale×軌影格 → 圖片 contain 縮進方框 → 圖片【中心】對到 (posX,posY)。
+           ── 不能用 pad 定位（v4.6 以前的做法，實測有兩個硬傷）：
+              a) pad 的位移得用「縮放後的實際尺寸」算，但 force_original_aspect_ratio=decrease
+                 之後實際尺寸小於方框 → 非同比例素材會被貼到方框左上角。實測 1920×1080 專案
+                 放 500×500 的圖、scale=1/posX=0.5，匯出落在 x=0~1076（正解是 420~1500）。
+              b) scale>1 時 pad 位移為負 → ffmpeg 直接 "Padded dimensions cannot be smaller
+                 than input dimensions" / -22，整支匯出失敗（不只圖片壞掉）。
+           overlay 的 w/h 是縮放後的真實尺寸，可用負座標（超出畫面自動裁切），兩個問題一起解。 */
+        const clipScale = Math.max(0.01, +c.scale || 1);
+        const cw = Math.max(2, Math.round(clipScale * SW));
+        const ch = Math.max(2, Math.round(clipScale * SH));
+        const pxClip = Math.max(0, Math.min(1, c.posX == null ? 0.5 : +c.posX));
+        const pyClip = Math.max(0, Math.min(1, c.posY == null ? 0.5 : +c.posY));
+        const BG = `t${ti}ib${si}`, IM = `t${ti}im${si}`;
+        fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${clen.toFixed(3)},format=yuva420p,setsar=1[${BG}]`);
+        /* 有原生尺寸時用【與預覽同一條公式】算出精確矩形（imageBoxForExport ≡ imagegeom.imageBox），
+           contain 的邏輯就只有一份。舊專案沒帶 natW/natH 時退回讓 ffmpeg 自己算，
+           結果相同，只是少了「兩邊同一份實作」的保證。 */
+        const box = (+c.natW > 0 && +c.natH > 0)
+          ? imageBoxForExport({ frameW: SW, frameH: SH, natW: +c.natW, natH: +c.natH,
+                                scale: clipScale, posX: pxClip, posY: pyClip })
+          : null;
+        if (box) {
+          const bw = Math.max(2, Math.round(box.w)), bh = Math.max(2, Math.round(box.h));
+          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${bw}:${bh},format=yuva420p,setsar=1[${IM}]`);
+          vchain = `[${BG}][${IM}]overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}:format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+        } else {
+          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
+          vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+        }
+      } else {
+        vchain = `[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
+      }
+
+      // 轉場：淡入/淡出（fade alpha＝淡到透明，讓下層/黑底露出→軌間溶接）
+      if (fi > 0) vchain += `,fade=t=in:st=0:d=${Math.min(fi, clen).toFixed(3)}:alpha=1`;
+      if (fo > 0) vchain += `,fade=t=out:st=${Math.max(0, clen - Math.min(fo, clen)).toFixed(3)}:d=${Math.min(fo, clen).toFixed(3)}:alpha=1`;
+      fc.push(`${vchain}[${L}]`);
+      segs.push(`[${L}]`);
+      cursor = c.offset + Math.max(0.001, c.out - c.in);
+    }
+    if (cursor < D - EPS) gap(D - cursor);
+    let trkLabel;
+    if (segs.length > 1) { trkLabel = `[trkV${ti}]`; fc.push(`${segs.join('')}concat=n=${segs.length}:v=1:a=0${trkLabel}`); }
+    else { trkLabel = segs[0]; }
+    if (opacity < 0.999) { const ol = `[trkO${ti}]`; fc.push(`${trkLabel}format=yuva420p,colorchannelmixer=aa=${opacity.toFixed(3)}${ol}`); trkLabel = ol; } // 透明度
+    const out = `[ov${ti}]`;
+    // 位置：px/py 0..1 → 以 overlay 表達式對映（scale=1 時 W-w=0＝滿版；PiP 時定位縮小影格）
+    fc.push(`${baseLabel}${trkLabel}overlay=x=(W-w)*${px.toFixed(4)}:y=(H-h)*${py.toFixed(4)}:eof_action=pass:format=auto${out}`);
+    baseLabel = out;
+  });
+  const vc = baseLabel; // 疊層後的最終影像標籤
+  // 3) 音訊：有 project audioPlan 時，依 bus / stream 路由輸出；沒有時完整保留舊版
+  // 「所有來源混成一條 stereo」的行為，讓既有專案與自動化呼叫不受影響。
+  let plannedAudio = null;
+  const audioInputMap = new Map();
+  if (audioPlan) {
+    plannedAudio = _buildPlannedAudio(audioPlan, inputs, fc, ii, D, reusableMasterInputs);
+  } else {
+    const aLabels = [];
+    list.forEach((c, i) => {
+      let al = null;
+      if (Array.isArray(c.audio)) {
+        if (!c.audio.length) return; // 全靜音 → 此片段不發聲
+        const mono = [];
+        c.audio.forEach((ch, j) => {
+          const reusable = reusableMasterInputs.get(ch.file);
+          const canReuse = reusable && c.in >= reusable.seekStart - 0.000001;
+          let mappedIdx, seekStart = 0;
+          if (canReuse) {
+            mappedIdx = reusable.index;
+            seekStart = reusable.seekStart;
+          } else {
+            mappedIdx = audioInputMap.get(ch.file);
+            if (mappedIdx === undefined) { mappedIdx = ii++; inputs.push('-i', ch.file); audioInputMap.set(ch.file, mappedIdx); }
+          }
+          // 相容舊專案的逐聲道混音路徑：當 renderer 提供來源 stream/channel 時，
+          // ch.file 已是母素材；必須先精準擷取該離散 channel，不能讓 ffmpeg 自行 downmix。
+          const streamSelector = Number.isInteger(ch.sourceStream) && ch.sourceStream >= 0 ? `:${ch.sourceStream}` : '';
+          let chain = `[${mappedIdx}:a${streamSelector}]`;
+          if (Number.isInteger(ch.sourceChannel) && ch.sourceChannel >= 0)
+            chain += `pan=mono|c0=c${ch.sourceChannel},`;
+          chain += `asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
+          fc.push(chain);
+          mono.push(`[am${i}_${j}]`);
+        });
+        al = `[aa${i}]`;
+        fc.push(mono.length > 1
+          ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`
+          : `${mono[0]}aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+      } else if (hasAudioStream(c.path)) {
+        al = `[aa${i}]`;
+        const seekStart = reusableMasterInputs.get(c.path)?.seekStart || 0;
+        fc.push(`[${videoInputIndices[i]}:a]asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+      } else return;
+      const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
+      // 轉場：音訊淡入/淡出（與影像同步）
+      const afi = Math.max(0, +c.fadeIn || 0), afo = Math.max(0, +c.fadeOut || 0), aclen = Math.max(0.001, c.out - c.in);
+      const afParts = [];
+      if (afi > 0) afParts.push(`afade=t=in:st=0:d=${Math.min(afi, aclen).toFixed(3)}`);
+      if (afo > 0) afParts.push(`afade=t=out:st=${Math.max(0, aclen - Math.min(afo, aclen)).toFixed(3)}:d=${Math.min(afo, aclen).toFixed(3)}`);
+      let asrc = al;
+      if (afParts.length) { const afl = `[af${i}]`; fc.push(`${al}${afParts.join(',')}${afl}`); asrc = afl; }
+      fc.push(`${asrc}adelay=${offMs}:all=1[ad${i}]`);
+      aLabels.push(`[ad${i}]`);
+    });
+    if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${D.toFixed(3)},aresample=48000[ac]`);
+    else fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS[ac]`);
+  }
+
+  // 燒錄字幕（可見軌）：ass 濾鏡讀取暫存 .ass；以 cwd=TMP + basename 引用避開路徑跳脫
+  let vfinal = vc;
+  if (assFileName) {
+    // v4.25.4：fontsdir 指向 <專案根>/font → 燒錄用的字型與預覽（FontFace 同一批檔）一致，
+    // 不必先安裝到系統。
+    // ── 磁碟機冒號要跳【兩層】(v4.31.2 修)：filtergraph 先拆選項、選項值再拆一次，
+    //    所以字面上得是 `C\\:/...`。只寫一個反斜線（舊版）→ ffmpeg 把 `:` 當成選項分隔符、
+    //    整條 filterchain 解析失敗 → 匯出直接掛掉。此路徑僅在 font/ 存在時才加。
+    const fdirArg = fontsDir ? ':fontsdir=' + fontsDir.replace(/\\/g, '/').replace(/:/g, '\\\\:') : '';
+    fc.push(`${vc}ass=${assFileName}${fdirArg}[vout]`);
+    vfinal = '[vout]';
+  }
+  // 時間碼是交付用 burn-in，必須接在 ASS 後面，才能保證始終位於字幕與所有影像之上。
+  if (timecodeWatermark) {
+    const tcOut = '[vtimecode]';
+    fc.push(_buildExportTimecodeFilter(vfinal, timecodeWatermark, W, H, tcOut, timecodeFontFile));
+    vfinal = tcOut;
+  }
+
+  // MP4：影像使用使用者指定的目標位元率；每條 AAC stream 依聲道數給足交付 bitrate。
+  // ProRes 則固定輸出 24-bit PCM，避免母素材音訊再經有損 AAC 編碼。
+  const kbps = Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
+  const audioMaps = plannedAudio
+    ? plannedAudio.streamLabels.flatMap(({ label }) => ['-map', label])
+    : ['-map', '[ac]'];
+  const audioBitrates = isPro
+    ? []
+    : (plannedAudio
+      ? plannedAudio.streamLabels.map(({ stream }) => aacBitrateForChannels(stream.spec.channels))
+      : [aacBitrateForChannels(2)]);
+  const encode = isPro
+    ? proresArgs()
+    : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+      ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart'];
+  /* Lt/Rt 與普通 stereo 的 codec channel layout 都是 FL/FR；以 stream metadata 明確標示，
+     方便剪輯軟體／檢視工具辨識交付意圖，不會把 Lt/Rt 誤標為離散 L/R。 */
+  const audioMetadata = plannedAudio
+    ? plannedAudio.streamLabels.flatMap(({ stream }, i) => ['-metadata:s:a:' + i, 'title=' + (stream.name || stream.spec.title)])
+    : [];
+  const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', vfinal, ...audioMaps, '-r', String(R), ...encode, ...audioMetadata, outPath];
+
+  // 進度標籤即顯示本次實際送出的編碼器（GPU 或 CPU）與位元率，使用者在狀態列就看得到
+  const plannedEncoder = isPro ? 'prores_ks' : (encoderName || 'libx264');
+  const isGpu = !isPro && plannedEncoder !== 'libx264';
+  const accel = isGpu ? 'GPU ' + plannedEncoder.replace('h264_', '').toUpperCase() : 'CPU ' + plannedEncoder;
+  return {
+    args,
+    label: `匯出 ${isPro ? 'ProRes 422 HQ' : 'MP4 ' + (kbps / 1000).toFixed(1) + 'Mbps'}（${accel}）`,
+    duration: D,
+    plannedEncoder,
+    isGpu,
+    kbps: isPro ? null : kbps,
+    audioBitrates: isPro ? null : audioBitrates,
+    audioChannels: null,
+  };
+}
+
 module.exports = {
   imageBoxForExport,
+  buildDeliveryArgv,
   _EXPORT_LAYOUTS,
   _finiteNumber,
   _filterNumber,

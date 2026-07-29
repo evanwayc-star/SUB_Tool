@@ -21,7 +21,7 @@
      實作複雜的業務邏輯，請將業務邏輯封裝在對應的模組，並透過 import 呼叫。
 ============================================================================== */
 import { $, video, sublist } from './dom.js';
-import { State, cueSuffix } from './state.js';
+import { State, cueSuffix, setSelection, deselect, focusTrackKind } from './state.js';
 import { clamp } from './util.js';
 import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
@@ -331,14 +331,14 @@ window.addEventListener('keydown', e => {
       e.preventDefault();
       const id = State.selectedAudioClipId;
       if (Media.removeExternalAudio?.(id)) {
-        State.selectedAudioClipId = null;
+        deselect('audio', id);
         const status = $('stSel'); if (status) status.textContent = '';
         drawTimeline(); emit('render:videoSub');
       }
       return;
     }
     if (k === 'Escape') {
-      e.preventDefault(); State.selectedAudioClipId = null;
+      e.preventDefault(); deselect('audio');
       const status = $('stSel'); if (status) status.textContent = '';
       drawTimeline(); return;
     }
@@ -409,9 +409,11 @@ window.addEventListener('keydown', e => {
       if (sd) { const show = sd.style.display === 'none' || !sd.style.display; sd.style.display = show ? 'flex' : 'none'; if (show) setTimeout(() => document.getElementById('searchInput')?.focus(), 20); }
       break;
     case 'toggle_sub_mode': e.preventDefault(); emit('action', 'sub-mode'); break;
-    case 'mark_in': e.preventDefault(); emit('action', 'mark-in'); break;
-    case 'mark_out': e.preventDefault(); emit('action', 'mark-out'); break;
-    case 'mark_clear': e.preventDefault(); emit('action', 'mark-clear'); break;
+    /* mark_in / mark_out / mark_clear 三個 case 已移除：它們送出的
+       'mark-in' / 'mark-out' / 'mark-clear' 從來沒有對應的指令，而且
+       State.defaultKeymap 裡也沒有任何鍵綁到這三個動作——兩端都是死的，
+       所以沒有人發現。真正在用的是 exp_in / exp_out / exp_clear。
+       （指令表資料化後由 tests/commands.test.js 擋住這種兩端不對稱。） */
     case 'toggle_safe_frame': e.preventDefault(); emit('action', 'safe-frame'); break;
     case 'screenshot': e.preventDefault(); emit('action', 'screenshot'); break;
     case 'screenshot_tc': e.preventDefault(); emit('action', 'screenshot_tc'); break;
@@ -480,8 +482,7 @@ window.addEventListener('keydown', e => {
       e.preventDefault();
       const tkCues = State.cues.filter(c => (c.track || 0) === State.listTrack);
       if (tkCues.length) {
-        State.selectedIds = tkCues.map(c => c.id);
-        State.selectedId = tkCues[0].id;
+        setSelection({ kind: 'sub', ids: tkCues.map(c => c.id), primary: tkCues[0].id });
         refreshSelectionUI();
         const stSel = document.getElementById('stSel');
         if (stSel) stSel.textContent = '已選 ' + State.selectedIds.length + ' 條';
@@ -503,7 +504,7 @@ window.addEventListener('keydown', e => {
       if (State.subMode) { e.preventDefault(); emit('action', 'sub-mode'); jklReset(); }
       if (State.selectedId || State.selectedIds.length) {
         e.preventDefault();
-        State.selectedId = null; State.selectedIds = [];
+        deselect('sub');
         refreshSelectionUI();
         const stSel = document.getElementById('stSel');
         if (stSel) stSel.textContent = '';
@@ -621,8 +622,7 @@ function jumpToAdjacentCue(dir) {
   const target = list[idx];
   if (!target) return;
   if (Media.playing) {
-    State.selectedId = null;
-    State.selectedIds = [];
+    deselect('sub');
     refreshSelectionUI();
     const stSel = document.getElementById('stSel');
     if (stSel) stSel.textContent = '';
@@ -656,7 +656,7 @@ function jumpToCueInMinusFrames(dir, frames) {
 }
 
 function stepBoundary(dir) {
-  State.activeTrackKind = 'sub';
+  focusTrackKind('sub');
   const t = Media.displayTime();
   const EPS = 0.05; // 50ms寬容度，避免播放器時間小數點誤差
 

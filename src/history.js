@@ -5,7 +5,7 @@
    所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
 ============================================================================== */
 /* SUB Tool — 動作紀錄（復原 / 重做） */
-import { State, syncTrackCount, setFps, normalizeAudioProject } from './state.js';
+import { State, syncTrackCount, setFps, normalizeAudioProject, pruneSelection } from './state.js';
 import { Seq } from './sequence.js';
 import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
@@ -100,8 +100,7 @@ const History = {
     State.exportIn=d.exportIn??null;
     State.exportOut=d.exportOut??null;
     emit('media:sequenceRestored');
-    if(!State.cues.some(c=>c.id===State.selectedId)){ State.selectedId=null; State.selectedIds=[]; }
-    else State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
+    pruneSelection(); // 還原後選取只留仍存在的字幕（三處各自寫過一次，現在同一條規則）
     this.hi=i; emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); renderHistory();
   },
   undo(){ if(this.hi>0){ this.restore(this.hi-1); setStatus('已復原','ok'); } else setStatus('沒有可復原的動作',''); },

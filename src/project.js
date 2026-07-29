@@ -21,7 +21,7 @@
      尤其是讀檔時，必須做好舊版專案檔缺乏該欄位的防呆保護 (Fallback)。
 ============================================================================== */
 import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount, ensureVideoTrackCount, resetVideoTracks,
-  normalizeAudioProject, resetAudioProject } from './state.js';
+  normalizeAudioProject, resetAudioProject, deselect } from './state.js';
 import { $ } from './dom.js';
 import { encodeUTF16LE, decodeText, bytesToB64, b64ToBytes, downloadBytes, readFile, escapeHTML } from './util.js';
 import { Media } from './media.js';
@@ -494,7 +494,7 @@ const Project = {
     State.exportIn=data.exportIn!=null?data.exportIn:null;
     State.exportOut=data.exportOut!=null?data.exportOut:null;
     State.listTrack=0;
-    State.selectedId=null; State.selectedIds=[]; // 開啟專案後預設不選取任何字幕
+    deselect('sub'); // 開啟專案後預設不選取任何字幕
     const playhead=data.playhead != null&&typeof data.playhead==='number' ? Math.max(0,data.playhead) : null;
     _projectLoadSession.createRestorePlan(generation,{clips:pendingClips,externalAudioSources:pendingExternal,playhead,mediaRelink});
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes();

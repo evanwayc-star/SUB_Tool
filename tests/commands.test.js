@@ -1,0 +1,106 @@
+/* 指令表的完整性（src/commands.js）。
+
+   【這是把 switch 攤成資料的唯一理由】
+   指令是三個來源共用的介面：index.html 的 data-act 按鈕、keyboard.js 的
+   emit('action', …)、以及右鍵選單。以前它的實作是 app.js 裡一個 82 個 case 的
+   switch，而 app.js 沒有任何 export——沒有任何方法回答「這顆按鈕真的有實作嗎」。
+   少一個 case 的後果是按下去什麼都不會發生，沒有錯誤、沒有 log。
+
+   實測：攤成表之後第一次跑這個檢查，就抓到 keyboard.js 送出的 'mark-in'、
+   'mark-out'、'mark-clear' 三個指令根本不存在（那三個 case 也沒有任何按鍵
+   綁得到，兩端都是死的，所以一直沒被發現）。
+
+   這裡刻意【讀原始碼】而不是 import commands.js：createCommands() 會把 media、
+   timeline、subio 等整條依賴鏈拉進來，需要 DOM 與一堆 mock；而要檢查的是
+   「有沒有這個 id」，不是它做了什麼。用原始碼比對就不必付那個代價。 */
+import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const read = rel => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+
+const commandsSrc = read('src/commands.js');
+/* 表格條目：縮排四格的 'id': —— 與 CLOSE_PANELS 那四個由迴圈補上的。 */
+const tableIds = [...commandsSrc.matchAll(/^ {4}'([a-z0-9_-]+)':/gm)].map(m => m[1]);
+const closeIds = [...commandsSrc.matchAll(/^ {2}'(close-[a-z]+)':/gm)].map(m => m[1]);
+const COMMANDS = new Set([...tableIds, ...closeIds]);
+
+const htmlActs = [...read('index.html').matchAll(/data-act="([^"]+)"/g)].map(m => m[1]);
+const keyboardActs = [...read('src/keyboard.js').matchAll(/emit\('action',\s*'([^']+)'/g)].map(m => m[1]);
+
+describe('指令表本身', () => {
+  it('抓得到整張表（解析沒有失效）', () => {
+    expect(COMMANDS.size).toBeGreaterThan(70);
+    expect(COMMANDS.has('playpause')).toBe(true);
+    expect(COMMANDS.has('close-mixer')).toBe(true); // 迴圈補上的那四個
+  });
+
+  it('沒有重複的 id（後者會靜默覆蓋前者）', () => {
+    const all = [...tableIds, ...closeIds];
+    const dupes = all.filter((id, i) => all.indexOf(id) !== i);
+    expect(dupes).toEqual([]);
+  });
+});
+
+describe('每個觸發點都有對應的指令', () => {
+  it('index.html 的每個 data-act 都在表上', () => {
+    const missing = [...new Set(htmlActs)].filter(act => !COMMANDS.has(act));
+    expect(missing, `這些按鈕按下去不會有任何反應：${missing.join('、')}`).toEqual([]);
+  });
+
+  it('keyboard.js 送出的每個 action 都在表上', () => {
+    const missing = [...new Set(keyboardActs)].filter(act => !COMMANDS.has(act));
+    expect(missing, `這些快捷鍵按下去不會有任何反應：${missing.join('、')}`).toEqual([]);
+  });
+});
+
+/* 反方向：表上有、但沒有任何地方會觸發的 id。
+   這些不是錯誤（它們是仍可用的入口），但清單不該悄悄變長——每多一個就是
+   一段沒有人會執行到的程式碼。要新增請連同觸發點一起加。 */
+describe('沒有觸發點的指令維持在已知清單內', () => {
+  const KNOWN_UNTRIGGERED = [
+    // 匯出字幕已統一走 exp-dialog 的格式勾選；這四個是留給選單的直接入口。
+    'exp-srt', 'exp-ass', 'exp-encore', 'exp-txt',
+    // 這兩個的實際使用者是快捷鍵，但快捷鍵直接呼叫函式而不經指令表。
+    'seek-start', 'add-cue',
+  ];
+
+  it('清單相符', () => {
+    const triggered = new Set([...htmlActs, ...keyboardActs]);
+    const untriggered = [...COMMANDS].filter(id => !triggered.has(id)).sort();
+    expect(untriggered).toEqual([...KNOWN_UNTRIGGERED].sort());
+  });
+});
+
+/* 指令表只准注入「app.js 才有的畫面接線」。ctx 每多一個成員，就代表 app.js
+   又多一件事沒有自己的模組——這條把它變成一個要按下同意的決定，而不是慣性。 */
+describe('ctx 是有名字的一小組，不是雜物袋', () => {
+  it('注入的成員維持在已知清單內', () => {
+    const used = [...new Set([...commandsSrc.matchAll(/\bctx\.([a-zA-Z]+)/g)].map(m => m[1]))].sort();
+    expect(used).toEqual([
+      'copySelectedStyle', 'doCopyTrack', 'importBrowserMediaFiles', 'importDesktopMediaFiles',
+      'onDurationKnown', 'openCacheDialog', 'pasteStyleToSelected', 'pickMediaFiles',
+      'refreshMpvSubs', 'renderAll', 'renderListTrackSel', 'renderVideoSub', 'resetFirstLoad',
+      'syncMpvPanel', 'takeScreenshot', 'toggleSafeFrame', 'toggleTimecodeWatermark', 'togglePanel',
+    ].sort());
+  });
+
+  it('app.js 真的把每一個都傳進去了', () => {
+    const appSrc = read('src/app.js');
+    const wiring = appSrc.slice(appSrc.indexOf('createCommands({'), appSrc.indexOf('function doAction'));
+    const used = [...new Set([...commandsSrc.matchAll(/\bctx\.([a-zA-Z]+)/g)].map(m => m[1]))];
+    const missing = used.filter(name => !new RegExp(`\\b${name}\\b`).test(wiring));
+    expect(missing, `commands.js 用了 ctx.${missing.join('／ctx.')} 但 app.js 沒傳`).toEqual([]);
+  });
+});
+
+/* app.js 不該再留著第二套指令分派。 */
+describe('app.js 只剩接線', () => {
+  it('doAction 是一行委派，不再是 switch', () => {
+    const appSrc = read('src/app.js');
+    expect(appSrc).toContain('function doAction(act, force = false){ return Commands.run(act, { force }); }');
+    expect(appSrc).not.toMatch(/switch\s*\(\s*act\s*\)/);
+  });
+});

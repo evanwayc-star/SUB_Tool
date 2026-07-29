@@ -26,7 +26,8 @@
      引起 Reflow 的屬性 (如 offsetWidth, clientHeight)。請改讀取緩存的 `viewportW` 變數。
 ============================================================================== */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
-import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId, setSelection} from './state.js';
+import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId,
+  setSelection, deselect, pruneSelection, focusTrackKind } from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
 import { Media, Wave } from './media.js';
 import { encoreParts } from './time.js';
@@ -52,7 +53,7 @@ const tlAtracks=document.getElementById('tlAtracks');
 const VROW_H=44;  // 視訊軌列預設高度（影像與音訊分離後，不再內嵌波形）
 function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
 function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
-export function yToTrack(y){ let c=0; for(let i=0;i<State.trackCount;i++){ c+=trackH(i); if(y<c)return i; } return State.trackCount-1; }
+function yToTrack(y){ let c=0; for(let i=0;i<State.trackCount;i++){ c+=trackH(i); if(y<c)return i; } return State.trackCount-1; }
 /* 視訊軌：數量、每軌高度、總高（無影片序列時為 0＝不佔空間，維持純字幕版面）。
    顯示由上而下：disp0＝最高軌（vtrack 最大）；vtrackTop 回傳某軌在容器內的 y。 */
 function vtrackCount(){ return Math.max(1, State.videoTracks.length); }
@@ -98,7 +99,7 @@ function snapFrame(t){
 function timeToX(t){ return (t - State.viewStart)*State.pxPerSec; }
 function xToTime(x){return State.viewStart + x/State.pxPerSec;}
 
-export function tlTotal(){
+function tlTotal(){
   const maxCueEnd=State.cues.reduce((m,c)=>c.end>m?c.end:m, 0);
   const base=Math.max(State.duration, maxCueEnd);
   const extra=Math.max(30, base*0.15);
@@ -647,11 +648,7 @@ function sourceWaveLabel(source,selection){
 let _ignoreAudioClickUntil=0;
 function selectExternalAudioClip(assetId,{seek=false,redraw=true}={}){
   if(!assetId) return;
-  State.selectedAudioClipId=assetId;
-  State.selectedClipId=null;
-  State.selectedId=null;
-  State.selectedIds=[];
-  State.activeTrackKind='audio';
+  setSelection({ kind:'audio', ids:assetId });
   refreshSelectionUI();
   const asset=typeof Media.getExternalAudioSource==='function' ? Media.getExternalAudioSource(assetId) : null;
   if(asset) State.activeAudioTrackId = asset.audioSourceId || asset.audioSrc || asset.id;
@@ -672,7 +669,7 @@ function runExternalAudioAction(method,args=[],{clearSelection=false}={}){
   catch(err){ console.warn('external audio '+method+':',err); showToast('無法更新音訊素材'); return false; }
   Promise.resolve(result).then(value=>{
     if(value===false||value==null){ drawTimeline(); return; }
-    if(clearSelection) State.selectedAudioClipId=null;
+    if(clearSelection) deselect('audio');
     drawTimeline();
     emit('render:videoSub'); emit('mpv:refreshSubs');
   }).catch(err=>{
@@ -1027,11 +1024,8 @@ function showCrossfade(c){
 function selectClip(id, opts={}){
   const c=Seq.byId(id); if(!c) return;
   if(!opts.force && State.videoTracks[c.vtrack||0]?.locked) return; // 鎖定軌：不可選取中間的影像片段
-  State.selectedClipId=id;
-  State.activeTrackKind='video';
+  setSelection({ kind:'video', ids:id }); // 互斥（避免 Del/上下鍵語意衝突）由 setSelection 保證
   State.activeVtrack = c.vtrack || 0;
-  State.selectedAudioClipId=null;
-  State.selectedId=null; State.selectedIds=[]; // 與字幕選取互斥（避免 Del/上下鍵語意衝突）
   refreshSelectionUI(); // 清除字幕列高亮
   $('stSel').textContent='已選影片段：'+c.name;
   refreshTrackGutterActive();
@@ -1040,31 +1034,13 @@ function selectClip(id, opts={}){
 }
 function clearClipSelection(){
   if(State.selectedClipId==null) return;
-  State.selectedClipId=null;
+  deselect('video');
   $('stSel').textContent='';
   renderClipBlocks();
 }
-/* 上/下鍵：切換到上一段/下一段（依時間軸順序），選取並把播放頭移到段首。
-   邊界延續（v4.23.x）：已在第一段再按上＝跳到影片頭（該段開頭）；已在最後一段再按下＝跳到影片尾（序列結尾）。 */
-function navigateClip(dir){
-  const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset).filter(c=>!State.videoTracks[c.vtrack||0]?.locked); // 跳過鎖定軌
-  if(!sorted.length) return;
-  let idx=sorted.findIndex(c=>c.id===State.selectedClipId);
-  if(idx<0){ // 尚無選取：從播放頭所在（或最接近）的段開始
-    const t=Media.displayTime();
-    idx=sorted.findIndex(c=>c.id===Media.activeClipId);
-    if(idx<0){ idx=0; for(let i=0;i<sorted.length;i++){ if(sorted[i].offset<=t+1e-4) idx=i; } }
-    selectClip(sorted[idx].id, {seek:true});
-    return;
-  }
-  const ni=idx+dir;
-  if(ni<0){ Media.seek(sorted[0].offset); emit('playhead:ensure'); emit('render:videoSub'); return; } // 第一段再上＝影片頭
-  if(ni>=sorted.length){ // 最後段再下＝影片尾（序列結尾；退一格避免落在結尾外）
-    const end=Math.max(0, Seq.end() - 1/(State.fps||25));
-    Media.seek(end); emit('playhead:ensure'); emit('render:videoSub'); return;
-  }
-  selectClip(sorted[ni].id, {seek:true});
-}
+/* 影片段的上/下鍵導航曾經住在這裡（navigateClip）。v4.37 起上下鍵統一交給
+   keyboard.js 的「媒體片段邊界」快捷鍵處理，讓已選取影片時也能跳到音訊片段邊界，
+   這個函式就再也沒有呼叫端了；接縫收窄時一併移除，避免看起來還有兩套導航。 */
 /* 關閉選取影片段「前方」的空白：把它往左移到緊貼前一段結尾；前面沒有素材則移到 00:00:00:00 */
 function closeClipGapLeft(){
   const id=State.selectedClipId; if(id==null) return;
@@ -1090,8 +1066,8 @@ function deleteSelectedClip(){
     recordHistory('刪除影片段：'+(c?c.name:''));
     const rest=[...State.clips].sort((a,b)=>a.offset-b.offset);
     const next=rest[Math.min(idx, rest.length-1)];
-    if(next){ State.selectedClipId=next.id; $('stSel').textContent='已選影片段：'+next.name; }
-    else State.selectedClipId=null;
+    if(next){ setSelection({ kind:'video', ids:next.id }); $('stSel').textContent='已選影片段：'+next.name; }
+    else deselect('video');
     drawTimeline();
   }
 }
@@ -1246,10 +1222,6 @@ function updatePlayhead(){
 function drawTimeline(){
   syncVideoTracks(); layoutTimeline(); drawRuler(); drawWave(); renderVtrackGutter(); renderAtrackGutter(); renderTrackRows(); updatePlayhead();
 }
-// Fix #9：不重建 renderTrackRows 的輕量版，供捲動/播放以外的重繪使用
-function redrawTimeline(){
-  drawRuler(); drawWave(); renderCueBlocks(); updatePlayhead();
-}
 /* 時間軸捲動 */
 tlScroll.addEventListener('scroll',()=>{
   State.viewStart=tlScroll.scrollLeft/State.pxPerSec;
@@ -1332,7 +1304,8 @@ tlScroll.addEventListener('mousedown',e=>{
         const ai=list.findIndex(z=>z.id===State.selectedId), bi=list.findIndex(z=>z.id===c.id);
         if(ai>=0&&bi>=0){
           const lo=Math.min(ai,bi), hi=Math.max(ai,bi);
-          State.selectedIds=list.slice(lo,hi+1).map(z=>z.id);
+          // primary 明確保留錨點（範圍多選不換主選取）
+          setSelection({ kind:'sub', ids:list.slice(lo,hi+1).map(z=>z.id), primary:State.selectedId });
           State.activeEdge='start';
           refreshSelectionUI(); $('stSel').textContent='已選 '+State.selectedIds.length+' 條';
           e.preventDefault(); return;
@@ -1407,8 +1380,7 @@ const _handleDragUpdate = (e) => {
            newIds.push(cloned.id);
            it.c = cloned;
         });
-        State.selectedIds = newIds;
-        State.selectedId = newIds[newIds.length - 1];
+        setSelection({ kind:'sub', ids:newIds });
         State.activeEdge = 'start';
         // Re-render blocks so drag can update their DOM elements
         drawTimeline();
@@ -1666,20 +1638,21 @@ window.addEventListener('mouseup',e=>{
       const rowA=yToTrack(Math.max(0,Math.min(drag.y0,y1)-tracksTop()+sc));
       const rowB=yToTrack(Math.max(0,Math.max(drag.y0,y1)-tracksTop()+sc));
       const hit=State.cues.filter(c=>c.timed!==false&&(c.track||0)>=rowA&&(c.track||0)<=rowB&&c.end>=ta&&c.start<=tb).map(c=>c.id);
-      if(drag.additive){ for(const id of hit)if(!State.selectedIds.includes(id))State.selectedIds.push(id); }
-      else State.selectedIds=hit;
-      State.selectedId=State.selectedIds[State.selectedIds.length-1]||null; State.activeEdge='start';
-      State.activeTrackKind='sub';
+      const picked = drag.additive
+        ? [...State.selectedIds, ...hit.filter(id=>!State.selectedIds.includes(id))]
+        : hit;
+      setSelection({ kind:'sub', ids:picked });
+      State.activeEdge='start';
       refreshSelectionUI(); $('stSel').textContent='已選 '+State.selectedIds.length+' 條';
     }else{
       // 點時間軸空白：跳轉（Shift 時保留選取）
       const sc=tracksScrollTop();
       const tkIdx=yToTrack(Math.max(0,drag.y0-tracksTop()+sc));
-      if(tkIdx>=0){ State.activeTrackKind='sub'; State.listTrack=tkIdx; }
+      if(tkIdx>=0){ focusTrackKind('sub'); State.listTrack=tkIdx; }
       
       Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub');
       if(!e.shiftKey){
-        State.selectedIds=[]; State.selectedId=null; State.activeEdge='start';
+        deselect('sub'); State.activeEdge='start';
         clearClipSelection();
         refreshSelectionUI(); $('stSel').textContent='';
       }
@@ -1760,8 +1733,8 @@ export function removeTrack(i){
     State.cues.forEach(c=>{ if((c.track||0)>i)c.track=(c.track||0)-1; });
     State.tracks.splice(i,1); syncTrackCount();
     if(State.listTrack===i)State.listTrack=-1; else if(State.listTrack>i)State.listTrack--;
-    State.selectedIds=State.selectedIds.filter(id=>State.cues.some(c=>c.id===id));
-    if(!State.cues.some(c=>c.id===State.selectedId)){State.selectedId=State.selectedIds[0]||null;State.activeEdge='start';}
+    if(!State.cues.some(c=>c.id===State.selectedId)) State.activeEdge='start';
+    pruneSelection();
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); recordHistory('刪除軌道');
   };
   if(n>0){
@@ -1846,6 +1819,6 @@ export function neighborBounds(os,oe,track,excludeIds){
 
 export { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
   layoutTimeline, drawTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks,
-  updatePlayhead, redrawTimeline,
+  updatePlayhead,
   refreshTrackGutterActive,
-  selectClip, clearClipSelection, navigateClip, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom };
+  selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom };
