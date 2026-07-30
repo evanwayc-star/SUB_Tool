@@ -152,8 +152,9 @@ describe('timeline public facade', () => {
       'deleteSelectedClip', 'drawRuler', 'drawTimeline', 'drawWave',
       'fmtTick', 'layoutTimeline', 'moveSelectedToTrack', 'neighborBounds',
       'niceStep', 'refreshTrackGutterActive', 'removeTrack', 'renderCueBlocks',
-      'renderTrackRows', 'selectClip', 'setZoom', 'showClipFade',
-      'showCrossfade', 'showImageGeom', 'snapTargets', 'snapVal',
+      'renderTrackRows', 'selectClip', 'setZoom',
+      'showClipDuration', 'showClipFade', 'showCrossfade', 'showImageGeom',
+      'snapTargets', 'snapVal',
       'timeToX', 'trackFromY', 'tracksScrollTop', 'tracksTop',
       'updatePlayhead', 'viewportW', 'xToTime', 'zoomFit', 'zoomFitVideo',
     ]);

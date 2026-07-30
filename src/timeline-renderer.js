@@ -890,8 +890,11 @@ function removeVideoTrack(v){
       就完全無法調整。數值輸入不依賴任何命中測試，永遠可用，也方便精確對位。
    ── 單位刻意用「％」：scale 是相對輸出畫框的比例，位置是畫面上的百分比座標，
       與匯出 filtergraph（electron/main.js 圖片分支）同一組語意。 */
+/* 大小與位置（圖片與影片共用）。v5.7.0 起影片也適用：
+   逐片段幾何在匯出（export-plan.js）、WebCodecs 合成器（decode/player.js）
+   三路都已支援，所以這個對話框對影片不再是空的。 */
 function showImageGeom(c){
-  if(!c || c.type!=='image') return;
+  if(!c) return;
   if(State.videoTracks[c.vtrack||0]?.locked){ showToast('此視訊軌已鎖定'); return; }
   const S=Math.round((c.scale??1)*100), X=Math.round((c.posX??0.5)*100), Y=Math.round((c.posY??0.5)*100);
   const row=(id,label,val,min,max,unit)=>
@@ -908,23 +911,23 @@ function showImageGeom(c){
     const set=(id,val)=>{ const r=$('ig'+id+'R'), n=$('ig'+id); if(r)r.value=val; if(n)n.value=val; };
     set('S',Math.round((c.scale??1)*100)); set('X',Math.round((c.posX??0.5)*100)); set('Y',Math.round((c.posY??0.5)*100));
   };
-  openModal(`圖片大小與位置 — ${escapeHTML(c.name||'')}`,
+  openModal(`${c.type==='image'?'圖片':'影片'}大小與位置 — ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.2">`+
     row('S','大小',S,2,800,'%')+row('X','水平位置',X,0,100,'%')+row('Y','垂直位置',Y,0,100,'%')+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">`+
-    `大小＝圖片框佔畫面的比例（圖片依原始比例縮入該框）；位置＝圖片<b>中心</b>在畫面上的座標。`+
+    `大小＝素材框佔軌影格的比例（素材依原始比例縮入該框）；位置＝素材<b>中心</b>在影格上的座標。`+
     `${c.natW>0?`原始尺寸 ${c.natW}×${c.natH}。`:''}預覽與匯出使用同一組數值。<br>`+
     `<b>符合視窗</b>＝維持目前位置，等比例放大到上下左右最先碰到的那個邊界為止。</div>`+
     `</div>`,
     [{label:'符合視窗',act:()=>{ fitClipToStage(c); syncInputs(); emit('render:videoSub'); }},
-     {label:'重設',act:()=>{ c.scale=1; c.posX=0.5; c.posY=0.5; commit('重設圖片大小與位置'); }},
+     {label:'重設',act:()=>{ c.scale=1; c.posX=0.5; c.posY=0.5; commit('重設大小與位置：'+(c.name||'')); }},
      {label:'取消',act:()=>{ closeModal(); }},
      {label:'套用',primary:true,act:()=>{
         const v=(id,d)=>{ const n=+($(('ig'+id))?.value); return Number.isFinite(n)?n:d; };
         c.scale=Math.max(0.02,Math.min(8, v('S',S)/100));
         c.posX =Math.max(0,Math.min(1, v('X',X)/100));
         c.posY =Math.max(0,Math.min(1, v('Y',Y)/100));
-        commit('圖片大小與位置：'+(c.name||''));
+        commit('大小與位置：'+(c.name||''));
      }}],
     { onDismiss:restore });
   // 滑桿與數字框雙向同步，並即時預覽（不入 undo，套用時才記一筆）
@@ -1002,6 +1005,55 @@ function showClipFade(c){
     };
   },0);
 }
+/* 修改片段的持續時間（右鍵選單）。
+
+   兩個上限，取較小者：
+     ① 來源長度：影片不能播超過素材本身（c.dur − c.in）。靜態圖片的 dur 是
+        10 小時，實務上等同無上限。
+     ② 同軌下一段的起點：同一視訊軌不可重疊（不同軌重疊＝疊層，是正常用法，
+        所以【只】看同軌，不能像「重設修剪」那樣掃全部 clips 而誤擋疊層）。
+
+   改的是 out（in 不動），因為使用者要的是「這段播多久」而不是「從哪裡開始播」。 */
+function showClipDuration(c){
+  if(!c) return;
+  if(State.videoTracks[c.vtrack||0]?.locked){ showToast('此視訊軌已鎖定'); return; }
+  const isImg = c.type === 'image';
+  const cur = Seq.len(c);
+  const maxBySource = Math.max(0.001, (+c.dur || 0) - (+c.in || 0));
+  const nextStart = Seq.trackClips(c.vtrack||0)
+    .filter(o => o !== c && o.offset > c.offset + 1e-6)
+    .reduce((m, o) => Math.min(m, o.offset), Infinity);
+  const maxByNeighbor = nextStart === Infinity ? Infinity : Math.max(0.001, nextStart - c.offset);
+  const maxLen = Math.min(maxBySource, maxByNeighbor);
+  const limitNote = maxByNeighbor < maxBySource
+    ? '（受同軌下一段起點限制）'
+    : (isImg ? '（圖片可自由延長）' : '（受來源素材長度限制）');
+
+  openModal(`修改持續時間 — ${escapeHTML(c.name||'')}`,
+    `<div style="font-size:13px;line-height:2.2">`+
+    `<div>持續時間：<input type="text" id="cdVal" value="${secToEncore(cur, State.fps, State.dropFrame)}" `+
+    `style="width:120px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:3px 4px;border-radius:3px;text-align:center;font-family:'Cascadia Mono','JetBrains Mono',Consolas,monospace"></div>`+
+    `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">`+
+    `最長 <b>${secToEncore(Math.min(maxLen, 359999.9), State.fps, State.dropFrame)}</b> ${limitNote}<br>`+
+    `可直接輸入時碼，或用上下方向鍵微調。起點不變，只調整這一段播多久。</div>`+
+    `</div>`,
+    [{label:'取消',act:()=>{ closeModal(); }},
+     {label:'套用',primary:true,act:()=>{
+        let v = parseTimecodeInput($('cdVal').value);
+        if(v===null) v = parseFloat($('cdVal').value);
+        if(!Number.isFinite(v) || v<=0){ showToast('請輸入有效的持續時間'); return; }
+        const clamped = Math.min(v, maxLen);
+        c.out = (+c.in || 0) + clamped;
+        Seq.recomputeDuration();
+        closeModal({committed:true});
+        Media.seek(Math.min(Media.displayTime(), State.duration||0)); // 幾何變了→重新解析映射
+        drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+        recordHistory('修改持續時間：'+(c.name||''));
+        if(clamped < v - 1e-6) showToast(`已設為可用的最長 ${secToEncore(clamped, State.fps, State.dropFrame)}${limitNote}`);
+     }}]);
+  setTimeout(()=>{ const el=$('cdVal'); if(el){ setupTimecodeInput(el); el.focus(); el.select(); } },0);
+}
+
 /* 交叉溶接（階段5.1）：把此片段移到上一層視訊軌、提前與「同軌前一段」尾端重疊 T 秒，
    前段淡出／此段淡入＝交叉溶接。完全複用「多軌 overlay＋淡變」的匯出（不改 filtergraph）。 */
 function _prevTrackClip(c){
@@ -1853,4 +1905,4 @@ export { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime
   layoutTimeline, drawTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks,
   updatePlayhead,
   refreshTrackGutterActive,
-  selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom };
+  selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom, showClipDuration };

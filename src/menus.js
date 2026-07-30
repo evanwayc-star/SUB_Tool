@@ -10,7 +10,7 @@ import { escapeHTML } from './util.js';
 import { State, isSel, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
-import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade, showImageGeom } from './timeline.js';
+import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade, showImageGeom, showClipDuration } from './timeline.js';
 import { Seq } from './sequence.js';
 import { showToast, promptModal } from './ui.js';
 import { recordHistory } from './history.js';
@@ -288,7 +288,9 @@ tlScroll.addEventListener('contextmenu',e=>{
       if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
       // 圖片沒有原音，音訊相關項目不適用；改提供大小/位置的數值輸入
       // （預覽拖曳把手是另一條路，兩者都寫同一組 scale/posX/posY）
-      if(isImg) items.push({label:'📐 圖片大小與位置…',act:()=>showImageGeom(c)});
+      items.push({label:`📐 ${isImg?'圖片':'影片'}大小與位置…`,act:()=>showImageGeom(c)});
+      items.push({label:'⏳ 修改持續時間…',act:()=>showClipDuration(c)});
+      if(isImg){ /* 圖片沒有原音，音訊相關項目不適用 */ }
       else if(c.audioDetached) items.push({label:'🔇 此影片原音已解除連結'});
       else {
         items.push({label:'🔗✂ 解除影音連結',act:()=>{ void Media.detachClipAudio?.(c.id); }});

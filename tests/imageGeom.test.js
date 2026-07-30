@@ -184,3 +184,80 @@ describe('匯出圖片片段：直接檢查產生的 ffmpeg 參數', () => {
     expect(filtergraph(argvFor(legacy).args)).toContain('force_original_aspect_ratio=decrease');
   });
 });
+
+/* 逐片段影片幾何（v5.7.0）。
+
+   在此之前影片段沒有自己的 scale／posX／posY：匯出是
+   `scale=SW:SH:force_original_aspect_ratio=decrease` + pad 置中，把素材釘死在軌影格
+   正中央；預覽端則是「素材直接 contain 進畫布再乘軌 scale」——少了「軌影格」那一層。
+
+   兩者在素材比例＝專案比例時剛好一致，所以一直沒被發現；素材比例不同且該軌是 PiP
+   或非置中時，實測差到 120px（4:3 素材、軌 scale=0.5、posX=1）。
+
+   現在影片與圖片走同一條路，且都以 imagegeom 的公式為準。下面這些數字全部
+   以真實 ffmpeg 匯出＋逐像素量測驗證過（見開發與驗證.md §4.16）。 */
+describe('影片段幾何：與圖片共用同一條公式', () => {
+  const require_ = createRequire(import.meta.url);
+  const { buildDeliveryArgv } = require_(path.join(ROOT, 'electron/export-plan.js'));
+  const W = 1920, H = 1080, NATW = 640, NATH = 480;   // 4:3 素材放進 16:9 專案
+
+  const fcFor = (clip, track) => {
+    const { args } = buildDeliveryArgv({
+      format: 'mp4', width: W, height: H, fps: 25, duration: 3, videoKbps: 6000,
+      audioPlan: null, timecodeWatermark: null, assFileName: null, outPath: 'C:/o.mp4',
+      videoTracks: [track],
+      clips: [{ path: 'C:/a.mov', type: 'video', vtrack: 0, in: 0, out: 3, offset: 0,
+                natW: NATW, natH: NATH, ...clip }],
+    }, { hasAudioStream: () => false });
+    return args[args.indexOf('-filter_complex') + 1];
+  };
+
+  /* 舊專案（沒設過逐片段幾何）的輸出不可以變。真機比對已確認新舊畫面矩形
+     都是 {x:240,y:0,w:1440,h:1080}；這裡鎖住產生那個結果的參數。 */
+  it('預設幾何＝素材 contain 進整個軌影格並置中', () => {
+    const fc = fcFor({}, { vt: 0, scale: 1, posX: 0.5, posY: 0.5, opacity: 1 });
+    const box = imageBoxOnStage({ stageW: W, stageH: H, track: { scale: 1, posX: 0.5, posY: 0.5 },
+      natW: NATW, natH: NATH, scale: 1, posX: 0.5, posY: 0.5 });
+    expect(box).toEqual({ x: 240, y: 0, w: 1440, h: 1080 });
+    expect(fc).toContain(`scale=${Math.round(box.w)}:${Math.round(box.h)}`);
+    expect(fc).toContain(`overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}`);
+  });
+
+  it('影片段可以有自己的縮放與位置（以前完全沒有這個能力）', () => {
+    const fc = fcFor({ scale: 0.4, posX: 0.85, posY: 0.15 }, { vt: 0 });
+    const box = imageBoxOnStage({ stageW: W, stageH: H, track: {},
+      natW: NATW, natH: NATH, scale: 0.4, posX: 0.85, posY: 0.15 });
+    expect(fc).toContain(`scale=${Math.round(box.w)}:${Math.round(box.h)}`);
+    expect(fc).toContain(`overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}`);
+  });
+
+  /* 軌影格與片段方框是兩層，順序不能顛倒：先用軌 scale/pos 框出影格
+     （available-space 定位），片段再在影格內以【中心】定位。 */
+  it('軌 PiP 與片段幾何疊加時，兩層順序正確', () => {
+    const track = { vt: 0, scale: 0.5, posX: 1, posY: 0 };
+    const fc = fcFor({ scale: 0.6, posX: 0.2, posY: 0.8 }, track);
+    const box = imageBoxOnStage({ stageW: W, stageH: H, track,
+      natW: NATW, natH: NATH, scale: 0.6, posX: 0.2, posY: 0.8 });
+    // 軌影格 960×540 位於 (960,0)；片段方框在影格內以中心定位
+    expect(fc).toContain(`scale=${Math.round(box.w)}:${Math.round(box.h)}`);
+  });
+
+  /* 影片不再走 pad：pad 的位移不接受負值，片段放大／偏移出界時會讓
+     整支匯出失敗（-22），這正是 v4.6 圖片踩過的坑。 */
+  it('影片段不使用 pad 定位', () => {
+    const fc = fcFor({ scale: 1.6, posX: 0.1 }, { vt: 0 });
+    expect(fc).not.toMatch(/pad=/);
+  });
+
+  it('舊專案沒有 natW/natH 時退回 ffmpeg 自算，仍套用片段位置', () => {
+    const { args } = buildDeliveryArgv({
+      format: 'mp4', width: W, height: H, fps: 25, duration: 3, videoKbps: 6000,
+      audioPlan: null, timecodeWatermark: null, assFileName: null, outPath: 'C:/o.mp4',
+      videoTracks: [{ vt: 0 }],
+      clips: [{ path: 'C:/a.mov', type: 'video', vtrack: 0, in: 0, out: 3, offset: 0, scale: 0.5, posX: 0.25 }],
+    }, { hasAudioStream: () => false });
+    const fc = args[args.indexOf('-filter_complex') + 1];
+    expect(fc).toContain('force_original_aspect_ratio=decrease');
+    expect(fc).toContain('overlay=x=(W*0.2500)-(w/2)');
+  });
+});

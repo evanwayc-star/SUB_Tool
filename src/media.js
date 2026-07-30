@@ -1836,7 +1836,11 @@ const Media = {
     const fps = info?.video?.fps || 0;
     if(fps && Math.abs(snapFps(fps) - State.fps) > 0.002)
       showToast(`注意：${baseName(p)} 為 ${fps}fps，與序列 ${State.fps}${State.dropFrame?'df':''}fps 不同——時碼以序列 FPS 為準`);
-    const meta = { name: baseName(p), path: p, dur, fps };
+    // natW/natH 與圖片共用同一組欄位名，讓 imagegeom 的公式對兩者一體適用。
+    // 舊專案沒有這兩個值時，匯出仍可由 ffmpeg 自行 contain（結果相同），
+    // 只是對話框的「符合視窗」少了精確依據。
+    const meta = { name: baseName(p), path: p, dur, fps,
+      natW: +info?.video?.width || 0, natH: +info?.video?.height || 0 };
     // 一律附 web url（v4.22）：mpv 模式下 WebCodecs 預覽引擎也能直接解「加入的原生檔」做即時合成
     //（非原生加入檔 demux 會失敗 → WCPreview 視同不可解、讓回 mpv 顯示，無害）
     try{ meta.web = { url: await DESK.fileURL(p) }; }catch(e){}

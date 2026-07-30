@@ -21,6 +21,7 @@ import { Media } from '../media.js';
 import { emit } from '../events.js';
 import { showToast } from '../ui.js';
 import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
+import { imageBoxOnStage, trackFrame } from '../imagegeom.js'; // 預覽／mpv 命中區／匯出 三路共用的唯一幾何公式
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
@@ -257,7 +258,13 @@ export const WCPreview = {
       const vt=State.videoTracks[c.vtrack||0]||{};
       return (c.fadeIn||0)>0 || (c.fadeOut||0)>0 ||
         (vt.scale != null && Math.abs(vt.scale-1)>0.001) ||
-        (vt.opacity != null && vt.opacity<0.999);
+        (vt.opacity != null && vt.opacity<0.999) ||
+        // 逐片段幾何（v5.7.0）：mpv 只會滿版播放，表達不了「這一段自己縮小／偏移」。
+        // 少了這一條，設了幾何的影片段在 mpv 模式下會【看起來沒生效】，
+        // 但匯出卻套用了——預覽與成品不一致，而且沒有任何錯誤訊息。
+        (c.scale != null && Math.abs(c.scale-1)>0.001) ||
+        (c.posX != null && Math.abs(c.posX-0.5)>0.001) ||
+        (c.posY != null && Math.abs(c.posY-0.5)>0.001);
     });
     if(mpv && acts.length && !needsComposite){
       this._hideCanvas(); this._setTakeover(false);
@@ -294,7 +301,7 @@ export const WCPreview = {
       const f = ss.request(su);
       const vt = State.videoTracks[c.vtrack||0] || {};
       const alpha = (vt.opacity != null ? vt.opacity : 1) * this._clipFadeAlpha(c, t);
-      if(f) layers.push({ src:f, sw:f.displayWidth||f.codedWidth, sh:f.displayHeight||f.codedHeight, vt, alpha, ts:f.timestamp, url });
+      if(f) layers.push({ src:f, sw:f.displayWidth||f.codedWidth, sh:f.displayHeight||f.codedHeight, vt, clip:c, alpha, ts:f.timestamp, url });
       else if(isTop) topBlocked = 'decoding'; // 頂層未就緒（原生與 mpv 同）
     }
 
@@ -339,14 +346,37 @@ export const WCPreview = {
         base = { x:(bw-w0)>>1, y:(bh-h0)>>1, w:w0, h:h0 };
         this._stageW = pw; this._stageH = ph; // 供字幕層對齊畫面區（見 app.js _stageRect）
       }
-      const vt = L.vt, sc = vt.scale != null ? vt.scale : 1;
-      const s1 = Math.min(base.w/L.sw, base.h/L.sh) * sc;
-      const dw = Math.max(1, Math.round(L.sw*s1)), dh = Math.max(1, Math.round(L.sh*s1));
-      const px = vt.posX != null ? vt.posX : 0.5, py = vt.posY != null ? vt.posY : 0.5;
+      /* 幾何一律走 imagegeom.imageBoxOnStage()：軌影格（available-space 定位）
+         → 片段方框＝scale×影格 → 素材 contain 進方框 → 方框【中心】對到 (posX,posY)。
+         這正是匯出 filtergraph 的模型，兩邊共用同一份實作才談得上三路一致。
+
+         v5.7.0 前這裡是「素材直接 contain 進 base 再乘軌 scale、以 available-space 定位」，
+         少了「軌影格」這一層——素材比例與專案畫布不同、且該軌是 PiP 或非置中時，
+         預覽與匯出會差好幾十到上百 px（實測 4:3 影片放進 16:9 專案、軌 scale=0.5、
+         posX=1 時差 120px）。 */
+      const cl = L.clip || {};
+      const box = imageBoxOnStage({
+        stageW: base.w, stageH: base.h, track: L.vt,
+        natW: L.sw, natH: L.sh,
+        scale: cl.scale, posX: cl.posX, posY: cl.posY,
+      });
+      const dw = Math.max(1, Math.round(box.w)), dh = Math.max(1, Math.round(box.h));
+      /* 裁進軌影格：匯出是把片段疊到一張【軌影格大小】的透明底上，再把那張底疊到畫布，
+         所以超出軌影格的部分會被切掉。預覽不裁的話，PiP 軌上做了偏移／放大的片段
+         會溢出影格外，跟成品對不上（實測 4:3 素材在 0.5 PiP 軌上偏移時差 24px 寬、
+         54px 高）。 */
+      const fr = trackFrame({ stageW: base.w, stageH: base.h,
+        scale: L.vt?.scale, posX: L.vt?.posX, posY: L.vt?.posY });
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(base.x + Math.round(fr.x), base.y + Math.round(fr.y),
+               Math.round(fr.w), Math.round(fr.h));
+      ctx.clip();
       ctx.globalAlpha = clamp(L.alpha, 0, 1);
-      try{ ctx.drawImage(L.src, base.x + Math.round((base.w - dw) * px), base.y + Math.round((base.h - dh) * py), dw, dh);
+      try{ ctx.drawImage(L.src, base.x + Math.round(box.x), base.y + Math.round(box.y), dw, dh);
            painted++; if(L.ts != null){ lastTs = L.ts; lastUrl = L.url; } }catch(e){}
       ctx.globalAlpha = 1;
+      ctx.restore();
     }
     if(painted && lastTs != null){
       this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media.setWebCodecsComposited(true);

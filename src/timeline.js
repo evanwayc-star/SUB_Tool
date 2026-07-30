@@ -31,5 +31,5 @@ export {
 
   /* 影片段操作 */
   selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft,
-  showClipFade, showCrossfade, showImageGeom,
+  showClipFade, showCrossfade, showImageGeom, showClipDuration,
 } from './timeline-renderer.js';

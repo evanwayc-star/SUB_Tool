@@ -418,9 +418,17 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       const adjOut = c.out - minIn;
 
       let vchain = '';
-      if (c.type === 'image') {
-        /* 圖片幾何必須與預覽同一組公式（src/imagegeom.js）：
-             方框＝scale×軌影格 → 圖片 contain 縮進方框 → 圖片【中心】對到 (posX,posY)。
+      {
+        /* 片段幾何必須與預覽同一組公式（src/imagegeom.js）：
+             方框＝scale×軌影格 → 素材 contain 縮進方框 → 素材【中心】對到 (posX,posY)。
+
+           v5.7.0 起【影片與圖片走同一條路】。在那之前影片是
+             scale=SW:SH:force_original_aspect_ratio=decrease + pad 置中
+           ——沒有逐片段幾何，而且 pad 把素材釘死在軌影格正中央。預設值
+           （scale=1、pos=0.5）下兩者結果相同，所以舊專案的輸出不變；
+           但那條路沒辦法表達「這一段自己要縮小／偏移」。
+
+           ── 不能用 pad 定位（v4.6 以前的做法，實測有兩個硬傷）：
            ── 不能用 pad 定位（v4.6 以前的做法，實測有兩個硬傷）：
               a) pad 的位移得用「縮放後的實際尺寸」算，但 force_original_aspect_ratio=decrease
                  之後實際尺寸小於方框 → 非同比例素材會被貼到方框左上角。實測 1920×1080 專案
@@ -450,8 +458,6 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
           vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
         }
-      } else {
-        vchain = `[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${SW}:${SH}:force_original_aspect_ratio=decrease,format=yuva420p,pad=${SW}:${SH}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,setsar=1`;
       }
 
       // 轉場：淡入/淡出（fade alpha＝淡到透明，讓下層/黑底露出→軌間溶接）
