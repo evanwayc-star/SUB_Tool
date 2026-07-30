@@ -14,7 +14,8 @@
 | **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
 | **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
 | **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集 |
-| **匯出佇列狀態** | `electron/export-queue-state.js` | 唯一有序工作集合；scheduler、監控畫面、重試與持久化都讀同一份順序 |
+| **完成紀錄** | `electron/queue-history.js` | 已完成交付的稽核紀錄（跨重啟保留、上限 200 筆）。**刻意不走 queue-store**：只存渲染完成卡片需要的欄位，**不含 `payload` 的 `clips`／`audioPlan`**，因此不可能被重新排程執行 |
+| **匯出佇列狀態** | `electron/export-queue-state.js` | 唯一有序工作集合；scheduler、監控畫面、重試與持久化都讀同一份順序。`liveWorkCount()`（running＋stopping）是「還在轉檔嗎」的唯一定義，兩個關閉決策都讀它 |
 | **匯出輸出鎖** | `electron/export-lease.js` | 依正規化輸出路徑建立原子 lease，避免不同工作同時以 `-y` 寫入同一檔案 |
 | **匯出監護程序** | `electron/export-watchdog.js` | 獨立持有交付匯出的 ffmpeg；主程序中斷後停止子程序、刪除半成品，並提供啟動復原用的 token pipe |
 | **Renderer Process** | `dist/index.html`（Vite 打包） | UI 介面、字幕編輯、時間軸（完整前端邏輯） |
@@ -112,7 +113,7 @@ Main (main.js)
 | `getStartupFile()` | `app:getStartupFile` | R→M | 取「雙擊 `.subtool` 啟動」時帶進來的檔案路徑（前端啟動後主動問一次） |
 | `onOpenFile(cb)` | `app:open-file` | M→R | 程式已在執行時又雙擊 `.subtool` → 推播路徑 |
 | `onAppRequestClose(cb)` | `app:request-close` | M→R | 使用者按視窗關閉鈕 → 主行程**先攔下來**問前端（前端跳「未儲存」確認） |
-| `closeApp()` | `app:close` | R→M | 前端完成未儲存確認後關閉主視窗；監控視窗仍開啟時改為隱藏主視窗，以保留 renderer 與專案狀態 |
+| `closeApp()` | `app:close` | R→M | 前端完成未儲存確認後關閉主視窗；監控視窗仍開啟時改為隱藏主視窗，以保留 renderer 與專案狀態。**還有工作在轉檔（`liveWorkCount() > 0`）時不結束程式**，改為叫出監控視窗並隱藏主視窗（見下方「視窗關閉與轉檔中的工作」） |
 
 ### 匯出佇列監控視窗（`electron/queue-preload.js`）
 
@@ -138,8 +139,43 @@ Main (main.js)
 恢復及開始前都會驗證 `clips[].path`、片段音訊及 `audioPlan` 的來源；缺檔工作標為
 `missing-source`，不會靜默輸出缺字幕或缺素材的成品。恢復 app 自己持久化的工作時，才重新授予
 snapshot 中每個精確來源與輸出檔的能力；renderer 後來附加的 payload 路徑仍會被拒絕。格式或副檔名
-不符的工作會失敗，不能以錯誤容器交付。`done`／`failed`／`stopped`
-只保留在本次執行的畫面，不跨重啟恢復。
+不符的工作會失敗，不能以錯誤容器交付。`done`／`failed`／`stopped` 是 **terminal**：
+`persistJob()` 寫完立刻刪檔、`loadJobs()` 讀到殘留的 terminal 記錄也會刪掉並跳過。
+**這是安全設計，不是疏漏**——它保證已完成的工作不會在重啟後被誤當 `queued` 重跑，
+以 `-y` 覆寫掉已經交付出去的成品（見 `tests/queueStore.test.js`）。
+
+### 完成紀錄（`history.json`）
+
+使用者需要「關掉軟體後仍看得到交付了什麼」，但上面那條 terminal 規則不能動。因此
+完成紀錄走**另一條路**：`<userData>/export-queue/history.json`，由
+`electron/queue-history.js` 維護。
+
+- 只存 `id`／`status:'done'`／`createdAt`／`completedAt`／`elapsedMs` 與
+  `payload` 的 `outPath`／`duration`／`format` —— 也就是 `queue.html` 的
+  `createJobCard()` 渲染完成卡片實際會用到的欄位，**其餘一律不存**。
+- 沒有 `clips`／`audioPlan`／`assRef`／`sourcePaths`，所以它**本質上不可執行**；
+  `restoreJobs()` 把它們以 `done` 身分放回 `ExportQueueState`，`nextQueued()`
+  永遠不會選到，`OUTPUT_RESERVED_STATUSES` 也不含 `done`（不會擋住同路徑重新匯出）。
+- 上限 200 筆，超出丟最舊的。JSON 損毀或版本不符時**回空陣列而不是拋錯**——
+  稽核資料不該擋住程式啟動。
+- `queue:clearJob`／`queue:clearCompleted` 必須**同時**清掉 `history.json`，
+  否則使用者清掉的紀錄下次啟動又會回來。
+
+### 視窗關閉與轉檔中的工作
+
+`prepareForShutdown()` 會停掉執行中的 ffmpeg 並清半成品，所以任何「會結束程式」的
+路徑在還有工作轉檔時都必須先擋下來：
+
+| 情境 | 行為 |
+|------|------|
+| 關閉主視窗，監控視窗開著 | 隱藏主視窗（保留 renderer 與專案狀態），既有行為 |
+| 關閉主視窗，`liveWorkCount() > 0` | **不結束程式**：`openQueueWindow()` ＋ `hideMainWindow()`，轉檔繼續 |
+| 關閉主視窗，沒有工作在轉檔 | 正常關閉流程 |
+| 關閉監控視窗，主視窗還開著 | 直接關（只是收起監控畫面，轉檔照跑），不打擾 |
+| 關閉監控視窗且這次關閉會結束程式（`queueWindowCloseEndsApp()`）、`liveWorkCount() > 0` | `preventDefault()` ＋ `dialog.showMessageBox` 確認；預設與 `Esc` 都落在「繼續轉檔」 |
+
+`queueWindowCloseEndsApp()` ＝ 主視窗已不存在，或主視窗是為了讓監控視窗獨自存在而被隱藏
+（`_mainHiddenForQueue`）——也就是 `closed` handler 會呼叫 `app.quit()` 的那兩種情況。
 
 交付匯出另在 `<userData>/export-queue/output-leases/<SHA-256>.lock/owner.json`
 記錄輸出路徑所有權。同一路徑在 `queued`／`running`／`stopping`／`missing-source`
