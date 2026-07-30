@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "electron": "vite build && electron .",
     "electron:dev": "electron . --dev",
+    "predist": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-native-binaries.ps1",
     "dist": "vite build && electron-builder",
     "release:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-install.ps1",
     "lint": "eslint src electron",

@@ -214,6 +214,19 @@ webPreferences: {
 4. `C:\Program Files\FFMPEG\bin\`
 5. `C:\ffmpeg\bin\`
 
+> **`electron/ffmpeg/` 與 `electron/mpv/`（§5）刻意不進版控**（`.gitignore`，合計約
+> 538 MB），每台要發版的機器都要手動放好；固定用 gyan 的 full_build（見下方
+> §7「常見問題排查」）。**這一步不會有任何警告就悄悄失敗**：`npm run dist` 對
+> `package.json` `build.asarUnpack` 沒 match 到任何檔案是靜默的，產物只是單純
+> 少了 ffmpeg 或 mpv，`detect()` 會退回上面第 2～5 順位——如果系統 PATH 裝的不是
+> gyan full_build，多音軌 MXF 的音訊會被截斷，而使用者與發版者都不會看到任何
+> 錯誤訊息（見 AGENTS.md §0.6「有產出不等於對」）。
+>
+> 因此 `npm run dist` 會先跑 `predist`（`scripts/verify-native-binaries.ps1`），
+> 核對這四個檔案存在且大小正常，缺一個就讓 `dist` 直接失敗並印出取得方式。
+> `tests/verifyNativeBinaries.test.js` 真的執行這支腳本驗證缺檔／殘檔情境會被
+> 擋下，不只是比對 script 字串。
+
 ### 硬體視訊編碼器偵測
 
 啟動時依序測試 `h264_nvenc` → `h264_qsv` → `h264_amf`，全失敗則用 `libx264`。結果存入 `VENC`。
