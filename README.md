@@ -1,114 +1,235 @@
 <p align="center">
-  <img src="src/logo.png" width="100" alt="SUB Tool logo">
+  <img src="src/logo.png" width="96" alt="SUB Tool logo">
 </p>
 
 <h1 align="center">SUB Tool</h1>
 
 <p align="center">
   <strong>把字幕、畫面、音訊與交付，放在同一條時間軸完成。</strong><br>
-  為上字幕、剪輯與交付流程打造的高效多軌時間軸工具，提供流暢的網頁版與全能的 Windows 桌面版。
+  Arctime 風格的多軌上字幕工具　·　網頁版隨開隨用，Windows 桌面版吃得下 44GB 的 MXF。
 </p>
 
 <p align="center">
-  <a href="https://github.com/evanwayc-star/SUB_Tool/releases/latest">下載 Windows 桌面版</a>
+  <a href="https://github.com/evanwayc-star/SUB_Tool/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/evanwayc-star/SUB_Tool?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&color=e8a33d"></a>
+  <img alt="平台" src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%C2%B7%20%E7%B6%B2%E9%A0%81-4c9fd8">
+  <img alt="架構" src="https://img.shields.io/badge/Vite%20%2B%20%E5%8E%9F%E7%94%9F%20ES%20%E6%A8%A1%E7%B5%84-%E7%84%A1%E6%A1%86%E6%9E%B6-6bbf59">
+  <img alt="播放與轉檔" src="https://img.shields.io/badge/mpv%20%C2%B7%20FFmpeg-%E5%85%A7%E5%BB%BA-8e6bd8">
+</p>
+
+<p align="center">
+  <a href="https://github.com/evanwayc-star/SUB_Tool/releases/latest"><b>⬇ 下載桌面版</b></a>
   &nbsp;·&nbsp;
-  <a href="docs/使用說明.md">閱讀使用說明</a>
+  <a href="docs/使用說明.md">📖 使用說明</a>
   &nbsp;·&nbsp;
-  <a href="docs/版本變更紀錄.md">查看版本變更</a>
+  <a href="docs/版本變更紀錄.md">🗒 版本變更</a>
+  &nbsp;·&nbsp;
+  <a href="AGENTS.md">🤖 給 AI 助理</a>
 </p>
 
 ---
 
-## 🚀 核心特色亮點 (Features)
+## 這是什麼
 
-SUB Tool 致力於將繁瑣的字幕與影音交付工作，整合成最直覺、最快速的工作流。
+一個把**上字幕**和**剪輯交付**放在同一條時間軸上的工具。你可以在這裡切片段、疊圖層、
+配聲道、逐句調字幕樣式，最後一次送出多種交付格式，轉檔在背景跑，你繼續編輯。
 
-### 1. 專業且細膩的字幕控制
-每一句字幕都能擁有獨立的生命力。您可以針對單一字幕調整字型、大小、對齊、外框、陰影、直書排版等設定。
-- **所見即所得**：在預覽畫面上直接點擊並拖曳字幕，即時調整位置。
-- **格式支援齊全**：完美支援 SRT、ASS/SSA、純文字、xlsx，甚至 Adobe Encore 時碼的匯入與匯出。
-- **智慧合併匯出**：最新版本支援勾選多條軌道，一鍵合併輸出成單一 SRT/ASS 檔案，大幅提升交付效率。
+![SUB Tool 主工作區：播放器、字幕列表、樣式面板與多軌時間軸](docs/images/readme-workspace.png?v=3)
 
-![SUB Tool 主工作區：播放器、字幕列表、樣式面板與多軌時間軸](docs/images/readme-workspace.png?v=2)
-> **強大的主工作區**：整合了即時播放器、高效率的字幕列表、詳細的樣式面板，以及靈活的多軌時間軸。
-
-### 2. 多軌時間軸：不只是字幕，更是完整的影音畫布
-無論是複雜的多聲道專案，還是需要疊加多層影像，SUB Tool 都能輕鬆應對。
-- **視訊與音訊獨立編輯**：支援無限增加視訊與字幕軌道。拖曳邊緣即可修剪，拖放即可變更軌道。
-- **全新視訊軌收合功能**：當軌道數量增加時，只需點擊左側 🎬 按鈕，即可一鍵收合視訊軌區塊，將寶貴的畫面空間保留給最重要的音訊與字幕編輯。
-- **動態效果與轉場**：支援透明疊層、子母畫面、圖片插入，更內建淡入淡出與軌間交叉溶接效果。
-
-### 3. 為專業交付而生的高階音訊處理
-- **多聲道路由 (Audio Routing)**：內建專業的音軌配線矩陣（Bus），輕鬆設定 Mono、Stereo 或是 5.1 聲道的輸出對應。
-- **原生畫質交付**：輸出時一律讀取母素材進行無損解碼與重新編碼，絕不使用降級的 Proxy 或快取。
-
-![SUB Tool 匯出佇列監控：工作狀態、輸出時長、預估時間與完成時間](docs/images/readme-export-queue.png?v=2)
-> **背景佇列監控**：所有匯出工作都在背景由 FFmpeg 處理。您可以隨時監控進度、預估剩餘時間、調整工作優先順序（支援拖曳排序），完全不中斷當前的編輯工作。
+<p align="center"><sub>
+主工作區。上方是即時預覽（字幕直接畫在畫面上，可拖曳定位），右側是字幕列表與逐句樣式面板，
+下方是多軌時間軸：<b>V2</b> 疊層圖片、<b>V1</b> 主影片、<b>S1</b> 音訊波形，再往下是兩條字幕軌
+（第二條帶 🔒 表示已鎖定）。
+</sub></p>
 
 ---
 
-## 💻 選擇適合您的版本
+## ✨ 主要能力
 
-| 功能與能力 | Windows 桌面版（推薦） | 網頁版 |
+### 🎬 多軌時間軸：不只是字幕，是完整的影音畫布
+
+| 能力 | 說明 |
+| :--- | :--- |
+| **無限視訊／字幕軌** | 拖曳邊緣修剪，拖放換軌；視訊軌可一鍵收合，把畫面留給字幕 |
+| **疊層與子母畫面** | 透明疊層、PiP、插入圖片，逐片段獨立控制大小與位置 |
+| **轉場** | 內建淡入淡出，相鄰片段可交叉溶接 |
+| **影音合一軌** | 區塊內直接顯示波形，列頭就是混音器 |
+
+### 📐 圖片與影片都能逐片段調整（v5.8.0）
+
+右鍵任何一個圖片或影片片段，就能改它的**大小、位置**與**播放長度**——
+不影響同軌其他片段，也不動它的起點。
+
+![影片大小與位置對話框：大小、水平位置、垂直位置，以及符合視窗／重設／取消／套用](docs/images/readme-clip-geometry.png?v=3)
+
+<p align="center"><sub>
+「符合視窗」會維持目前的中心位置，等比例放大到上下左右<b>最先碰到</b>的那個邊界為止。
+按「取消」（或 <kbd>Esc</kbd>、點視窗外）會還原成打開對話框前的樣子。
+</sub></p>
+
+### 📝 專業且細膩的字幕控制
+
+- **逐句樣式**：字型、字級、對齊、外框、陰影、直書、旋轉，可以只改選中的那一句。
+- **所見即所得**：在預覽畫面上直接拖曳字幕定位。
+- **格式齊全**：SRT、ASS/SSA、純文字、xlsx，以及 Adobe Encore 時碼，匯入匯出都支援。
+- **合併匯出**：勾選多條軌道，一次併成單一 SRT／ASS。
+- **軌道鎖定真的鎖得住**：鎖定後在上字幕模式按 <kbd>I</kbd>／<kbd>O</kbd> 會被擋下並提示，
+  不會靜悄悄地改到（這是 v5.8.0 修掉的一個坑）。
+
+### 🔊 為交付而生的音訊處理
+
+- **多聲道路由**：內建配線矩陣（Bus），Mono／Stereo／5.1 的輸出對應都在同一個面板決定。
+- **原生畫質交付**：輸出一律回頭讀母素材重新編碼，不會拿預覽用的 Proxy 或快取充數。
+- **音訊三層分離**：素材聲道、專案 bus、匯出聲道是三件獨立的事，不會互相污染。
+
+### 🚚 背景交付佇列
+
+一次列好多筆交付（不同格式、不同解析度、要不要燒時間碼），一次送出。
+
+![匯出交付清單：每列一種交付格式，檔名與輸出目錄同一列](docs/images/readme-delivery-list.png?v=3)
+
+<p align="center"><sub>
+交付清單。同一份時間軸可以同時輸出 MP4、ProRes 與純音訊 WAV，每一列各自決定解析度、
+碼率、聲道配置，以及要不要把時間碼燒進畫面。同目錄內出現重複檔名會當場擋下。
+</sub></p>
+
+送出後轉檔在背景排隊進行，可以隨時看進度與預估剩餘時間、拖曳調整等待中的順序、
+暫停整條佇列——**編輯不必停下來等**。
+
+![SUB Tool 匯出佇列監控：執行中的進度、等待中的工作與已完成紀錄](docs/images/readme-export-queue.png?v=3)
+
+> 關掉軟體時如果還有工作在轉，不會默默中斷，會先問你（v5.7.0）。
+> 已完成的紀錄跨重啟保留。
+
+---
+
+## 🧭 一份樣式，三個地方長得一樣
+
+這是整個專案最核心的一條規矩：**HTML 預覽、mpv 播放、燒錄匯出**這三條路，
+只准吃同一份樣式計算結果。任何一條自己算，畫面看起來會正常，匯出卻是錯的。
+
+```mermaid
+flowchart LR
+  S["substyle.js<br/>effStyle()<br/>唯一樣式來源"]
+  G["imagegeom.js<br/>imageBoxOnStage()<br/>唯一幾何公式"]
+
+  S --> A["HTML 預覽<br/>編輯時看到的"]
+  S --> B["mpv libass<br/>桌面版播放"]
+  S --> C["FFmpeg 燒錄<br/>最後交付的"]
+
+  G --> A
+  G --> C
+
+  A -. 必須一致 .-> B
+  B -. 必須一致 .-> C
+
+  style S fill:#e8a33d,stroke:#a5701c,color:#1a1a1a
+  style G fill:#6bbf59,stroke:#3f7a33,color:#1a1a1a
+```
+
+> v5.8.0 就是靠三路逐像素比對，才抓到一個長期存在的落差：素材比例與專案不同、
+> 且該軌是 PiP 時，預覽與匯出實測差 **120px**。細節見
+> [`docs/技術架構說明.md`](docs/技術架構說明.md) §0。
+
+---
+
+## 💻 選哪個版本
+
+| | 🖥 **Windows 桌面版**（推薦） | 🌐 **網頁版** |
 | :--- | :--- | :--- |
-| **適用情境** | 日常剪輯、高強度交付、讀寫 `.subtool` 專案檔 | 輕量快速預覽、跨平台從原始碼執行 |
-| **媒體支援** | MP4, MOV, MXF, MKV, AVI | MP4, MOV (H.264), MP3, WAV |
-| **音訊能力** | 完美支援多音軌素材、多聲道輸出 | 基本音訊播放 |
-| **播放核心** | 整合原生 `mpv` 播放器，秒開大檔不卡頓 | 依賴瀏覽器 HTML5 播放能力 |
+| **適合** | 日常剪輯、高強度交付、`.subtool` 專案檔 | 快速預覽、跨平台、從原始碼跑 |
+| **影片格式** | MP4 · MOV · **MXF** · MKV · AVI | MP4 · MOV (H.264) |
+| **音訊** | 多音軌素材、多聲道輸出 | 基本播放 |
+| **播放核心** | 內建 `mpv`，44GB 大檔秒開 | 瀏覽器 HTML5 |
+| **轉檔** | 內建 `FFmpeg`，背景佇列 | 瀏覽器端，能力有限 |
 
 ---
 
-## ⚡ 快速開始 (Quick Start)
+## ⚡ 快速開始
 
-### 使用 Windows 桌面版 (一般使用者)
-1. 前往 [Releases 頁面](https://github.com/evanwayc-star/SUB_Tool/releases/latest) 下載最新版的 `SUB Tool Setup.exe` 並安裝。
-2. 開啟應用程式，拖曳您的影片與字幕檔進入畫面即可開始編輯！
-3. 若您有已儲存的 `.subtool` 專案，雙擊檔案即可秒速還原所有軌道與設定。
-4. 第一次使用？建議從 [`docs/使用說明.md`](docs/使用說明.md) 開始閱讀。
+### 一般使用者（Windows）
+
+1. 到 [**Releases**](https://github.com/evanwayc-star/SUB_Tool/releases/latest) 下載
+   `SUB Tool Setup X.Y.Z.exe` 並安裝。
+2. 開啟後把影片與字幕檔**直接拖進畫面**。
+3. 已存過的 `.subtool` 專案檔**雙擊就能還原**所有軌道與設定。
+4. 第一次用，建議先翻一下 [`docs/使用說明.md`](docs/使用說明.md)。
 
 <details>
-<summary><b>從原始碼執行 (開發者)</b></summary>
+<summary><b>👩‍💻 從原始碼執行（開發者）</b></summary>
 
-本專案採用 **Vite + 原生 ES 模組（無框架）** 架構，確保最純粹的高效能體驗。
-您需要先安裝 [Node.js](https://nodejs.org) (建議 18+)。
+<br>
 
-1. **安裝依賴套件：**
+需要 [Node.js](https://nodejs.org) 18+。本專案是 **Vite + 原生 ES 模組（無框架）**，
+以 `vite-plugin-singlefile` 打包成單一 `dist/index.html`。
+
+安裝依賴：
+
 ```bash
 npm install
 ```
 
-2. **啟動開發用桌面版：**
+啟動開發用桌面版：
+
 ```bash
 npm run electron
 ```
 
-3. **打包編譯：**
-```bash
-# 僅編譯網頁版前端
-npm run build
+只編譯網頁版前端：
 
-# 編譯前端並打包出可執行的 .exe 安裝檔
+```bash
+npm run build
+```
+
+編譯並打包出 `.exe` 安裝檔：
+
+```bash
 npm run dist
 ```
 
-完整的架構規範、驗證與發版流程，請參閱開發者專用的 [`docs/開發與驗證.md`](docs/開發與驗證.md)。
+三道靜態安全網（發版前必須全綠）：
+
+```bash
+npm run lint && npm test && npm run build
+```
+
+完整的環境需求、驗證方法與發版流程見 [`docs/開發與驗證.md`](docs/開發與驗證.md)。
+
 </details>
 
 ---
 
-## 📚 文件入口指南
+## 🗂 專案結構
 
-| 您的需求是？ | 請參閱對應文件 |
+```
+src/            前端 ES 模組（39 支）＋ decode/ 底下 4 支 WebCodecs 相關
+electron/       主行程：ffmpeg / ffprobe / mpv / 檔案 I/O / 路徑白名單
+docs/           說明文件（見下方索引）
+tests/          vitest 單元測試（純函式與資料完整性）
+font/<資料夾名>/ 自備字型，資料夾名＝UI 顯示名
+```
+
+架構規則：**沒有任何模組可以 `import … from './app.js'`。**
+低階模組要觸發重繪或指令時發事件（`emit()`），由 `app.js` 訂閱。
+
+---
+
+## 📚 文件索引
+
+| 你想做什麼 | 看這份 |
 | :--- | :--- |
-| **我想學習操作與快捷鍵** | [`docs/使用說明.md`](docs/使用說明.md) |
-| **我是開發者，想發佈新版本** | [`docs/開發與驗證.md`](docs/開發與驗證.md) |
-| **我想了解 Electron 與 IPC 架構** | [`docs/Electron_維護手冊.md`](docs/Electron_維護手冊.md) |
-| **我要參與貢獻，想了解核心鐵律** | [`docs/技術架構說明.md`](docs/技術架構說明.md) |
-| **我想了解 FPS 與時間碼的處理邏輯**| [`docs/FPS_時碼一致性.md`](docs/FPS_時碼一致性.md) |
-| **我想看每次改版修復了什麼坑** | [`docs/版本變更紀錄.md`](docs/版本變更紀錄.md) |
-| **我想知道某個詞在這個專案指什麼** | [`CONTEXT.md`](CONTEXT.md)（領域詞彙表） |
-| **我想知道某個設計為什麼是這樣決定的** | [`docs/adr/`](docs/adr/)（架構決策紀錄） |
-| **我想看還在設計中的功能規格** | [`docs/specs/`](docs/specs/) |
+| 學操作與快捷鍵 | [`docs/使用說明.md`](docs/使用說明.md) |
+| 建置、驗證、發版 | [`docs/開發與驗證.md`](docs/開發與驗證.md) |
+| 了解核心鐵律與模組架構 | [`docs/技術架構說明.md`](docs/技術架構說明.md) |
+| 了解 Electron 與 IPC | [`docs/Electron_維護手冊.md`](docs/Electron_維護手冊.md) |
+| 了解 FPS 與時間碼邏輯 | [`docs/FPS_時碼一致性.md`](docs/FPS_時碼一致性.md) |
+| 查每一版修了哪些坑 | [`docs/版本變更紀錄.md`](docs/版本變更紀錄.md) |
+| 查某個詞在這裡指什麼 | [`CONTEXT.md`](CONTEXT.md)（領域詞彙表） |
+| 查某個設計為什麼這樣決定 | [`docs/adr/`](docs/adr/)（架構決策紀錄） |
+| 看還在設計中的規格 | [`docs/specs/`](docs/specs/) |
 
-> 🤖 **給 AI 助理與新加入維護者的重要提醒：**
-> 準備修改任何程式碼之前，請**務必**先閱讀本專案最高指導原則：[`AGENTS.md`](AGENTS.md)。
+---
+
+> 🤖 **給 AI 助理與新加入的維護者**
+>
+> 動手改任何程式碼之前，請**務必**先讀 [`AGENTS.md`](AGENTS.md)——
+> 那是本專案的最高指導原則，每一條規則後面都對應一次真實踩過的坑。
