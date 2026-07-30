@@ -51,7 +51,7 @@ import { setupInteractionContext, bindImageDomEvents, bindSubtitleDomEvents, sta
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
 import { showSettingsModal } from './settings.js';
-import { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
+import { importSub, showExportDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { imageBoxOnStage } from './imagegeom.js'; // v4.7 圖片疊層幾何：預覽／mpv 命中區／匯出 共用同一組公式
 import { on, emit } from './events.js';

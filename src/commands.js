@@ -29,7 +29,7 @@ import { Media } from './media.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { AudioRouting } from './audio-routing.js';
 import { showSettingsModal } from './settings.js';
-import { importSub, showExportDialog, showExportVideoDialog, exportSub,
+import { importSub, showExportDialog, showExportVideoDialog,
   showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
 import { addCueRelative, deleteSelected, sortCues, renderCheckPanel,
   searchNav, searchUpdate, searchSelectAll, searchReplace, trimTrackSpaces } from './subtitles.js';
@@ -108,10 +108,6 @@ function createCommands(ctx){
     'exp-video': () => showExportVideoDialog().catch(err => {
       console.error('匯出影片錯誤', err); showToast('匯出影片錯誤：' + err.message);
     }),
-    'exp-srt': () => exportSub('srt'),
-    'exp-ass': () => exportSub('ass'),
-    'exp-encore': () => exportSub('encore'),
-    'exp-txt': () => exportSub('txt'),
     'export-notes': () => exportNotes(),
     'audio-project-settings': () => AudioRouting.openOutputSettings(),
 
@@ -202,7 +198,6 @@ function createCommands(ctx){
       Media.toggle();
       setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : ''); // 狀態列同步播放/暫停（非僅 JKL）
     },
-    'seek-start': () => Media.seek(0),
     'back5': () => nudge(-5),
     'back1': () => nudge(-1),
     'fwd1': () => nudge(1),
@@ -218,7 +213,6 @@ function createCommands(ctx){
     'exp-clear': () => { State.exportIn = null; State.exportOut = null; drawTimeline(); recordHistory('清除輸出範圍'); setStatus('輸出範圍已清除', 'ok'); },
 
     /* ── 字幕編輯 ───────────────────────────────────────────────────── */
-    'add-cue': () => addCueRelative(1),
     'add-cue-above': () => addCueRelative(-1),
     'add-cue-below': () => addCueRelative(1),
     'del-cue': () => deleteSelected(),

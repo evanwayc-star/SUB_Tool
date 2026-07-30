@@ -56,21 +56,15 @@ describe('每個觸發點都有對應的指令', () => {
   });
 });
 
-/* 反方向：表上有、但沒有任何地方會觸發的 id。
-   這些不是錯誤（它們是仍可用的入口），但清單不該悄悄變長——每多一個就是
-   一段沒有人會執行到的程式碼。要新增請連同觸發點一起加。 */
-describe('沒有觸發點的指令維持在已知清單內', () => {
-  const KNOWN_UNTRIGGERED = [
-    // 匯出字幕已統一走 exp-dialog 的格式勾選；這四個是留給選單的直接入口。
-    'exp-srt', 'exp-ass', 'exp-encore', 'exp-txt',
-    // 這兩個的實際使用者是快捷鍵，但快捷鍵直接呼叫函式而不經指令表。
-    'seek-start', 'add-cue',
-  ];
-
-  it('清單相符', () => {
+/* 反方向：表上有、但沒有任何地方會觸發的 id ＝ 永遠不會被執行到的程式碼。
+   一度有六個（exp-srt／exp-ass／exp-encore／exp-txt 被 exp-dialog 的格式勾選取代，
+   seek-start／add-cue 的實際使用者是直接呼叫函式的快捷鍵），已全部移除。
+   這條不留允許清單——要新增指令，就連同觸發點一起加。 */
+describe('沒有任何指令是孤兒', () => {
+  it('每個指令都至少有一個觸發點（index.html 或快捷鍵）', () => {
     const triggered = new Set([...htmlActs, ...keyboardActs]);
-    const untriggered = [...COMMANDS].filter(id => !triggered.has(id)).sort();
-    expect(untriggered).toEqual([...KNOWN_UNTRIGGERED].sort());
+    const orphans = [...COMMANDS].filter(id => !triggered.has(id)).sort();
+    expect(orphans, `這些指令沒有任何地方會觸發：${orphans.join('、')}`).toEqual([]);
   });
 });
 

@@ -311,24 +311,6 @@ function showExportDialog() {
   }, { label: '取消', act: closeModal }]);
 
 }
-function exportSub(kind) {
-  if (State.cues.length === 0) { showToast('沒有字幕可匯出'); return; }
-  const filesToExport = [];
-  if (kind === 'xlsx') {
-    const list = State.tracks.map((tk, i) => ({ name: tk.name, cues: State.cues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length);
-    const f = getXLSXFileData(list); if (f) filesToExport.push(f);
-  } else {
-    if (State.trackCount > 1) {
-      for (let i = 0; i < State.tracks.length; i++) {
-        const cues = State.cues.filter(c => (c.track || 0) === i);
-        if (cues.length) { const f = getFileData(kind, cues, State.tracks[i]?.name); if (f) filesToExport.push(f); }
-      }
-    } else {
-      const f = getFileData(kind, State.cues); if (f) filesToExport.push(f);
-    }
-  }
-  executeBatchExport(filesToExport);
-}
 function executeBatchExport(files) {
   if (!files.length) return;
   if (!IS_DESKTOP) {
@@ -1161,4 +1143,4 @@ function applyDurAdjPct() {
 
 /* 對外只有真正的字幕／匯出 I/O 動作。以前這裡還掛著五個底線名稱，
    純粹是為了讓測試構得到匯出計畫的純函式——那些已經搬到 delivery-job.js。 */
-export { importSub, showExportDialog, exportSub, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport, showExportVideoDialog };
+export { importSub, showExportDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, executeBatchExport, showExportVideoDialog };

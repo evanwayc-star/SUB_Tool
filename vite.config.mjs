@@ -78,6 +78,32 @@ export default defineConfig({
     cssCodeSplit: false,
     assetsInlineLimit: 100000000,
     chunkSizeWarningLimit: 4000,
+    rollupOptions: {
+      /* AGENTS.md §7 說「npm run build 抓『import 了某模組未 export 的名稱』」——
+         但 rollup 對這件事預設【只警告不失敗】，build 照樣 exit 0，於是那道防線
+         其實是空的。
+
+         真實事故：移除 subio.js 的 exportSub 之後，app.js 仍留著它的 import。
+         lint 過（no-undef 認得 import 進來的名稱）、build 也過（只印了一行 warning
+         就被 tail 吃掉），三關全綠但那是一個在原生 ESM 下會直接 SyntaxError 的錯誤。
+
+         這裡把它升級成硬失敗。清單只收「一定是錯」的那幾種，不做風格檢查。 */
+      onwarn(warning, defaultHandler) {
+        /* 只收「一定是錯」的兩種，不做風格檢查。
+           CIRCULAR_DEPENDENCY 刻意【不】列入：目前已知有一組 ui.js ↔ media.js
+           的既有循環（ui.js 只為了讀 Media.mpvMode 決定開 modal 時要不要讓開 mpv），
+           把它升級成致命會讓 build 卡在一個與本次改動無關的舊問題上。
+           要解的話是把它改成事件（emit('mpv:sync')），那是另一件事。 */
+        const FATAL = new Set([
+          'MISSING_EXPORT',        // import 了對方沒有 export 的名稱
+          'UNRESOLVED_IMPORT',     // import 的模組根本不存在
+        ]);
+        if (FATAL.has(warning.code)) {
+          throw new Error(`[build 阻擋] ${warning.code}：${warning.message}`);
+        }
+        defaultHandler(warning);
+      },
+    },
   },
 });
 
