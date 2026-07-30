@@ -39,7 +39,7 @@ import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
-import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDir } from './project.js';
+import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDir, confirmDiscardUnsaved } from './project.js';
 import { Seq } from './sequence.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory } from './history.js';
@@ -2245,20 +2245,26 @@ async function initDesktop(){
     }
   });
   
-  const handleStartupFile = async (file) => {
+  /* fromLaunch=true 是「這個程式就是為了開這個檔而啟動的」（雙擊 .subtool 冷啟動），
+     那時還沒有任何專案內容，不必問。fromLaunch=false 是程式已經開著時又收到一個
+     檔案（Explorer 再雙擊另一個 .subtool → second-instance → app:open-file），
+     這時目前的專案可能有未存檔的變更，必須先問過——原本這條路徑直接覆蓋掉，
+     使用者連一句提示都看不到。 */
+  const handleStartupFile = async (file, { fromLaunch = false } = {}) => {
     if (!file) return;
+    if (!fromLaunch && !await confirmDiscardUnsaved()) return;
     try {
       const b64 = await DESK.readB64(file);
       if (b64) Project.loadDesktop({ path: file, b64 });
       else setStatus('無法讀取專案檔內容');
     } catch(e) { console.error(e); }
   };
-  
+
   if (DESK.getStartupFile) {
-    DESK.getStartupFile().then(handleStartupFile);
+    DESK.getStartupFile().then(file => handleStartupFile(file, { fromLaunch: true }));
   }
   if (DESK.onOpenFile) {
-    DESK.onOpenFile(handleStartupFile);
+    DESK.onOpenFile(file => handleStartupFile(file));
   }
   if (DESK.onAppRequestClose) {
     DESK.onAppRequestClose(() => {

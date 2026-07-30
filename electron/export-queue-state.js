@@ -94,10 +94,19 @@ class ExportQueueState {
     return job;
   }
 
+  /* 「還在轉檔」的定義只有這一份。關閉主視窗要不要改開監控視窗、關閉監控視窗要不要
+     先確認，兩個決定都讀這裡——否則兩處各寫一次 status 比對，改狀態名稱時會有一處
+     漏掉，而漏掉的後果是【安靜地把使用者的轉檔砍掉】。
+     stopping 也算：ffmpeg 還沒真正結束，這時關掉一樣會中斷它。 */
+  liveWorkCount() {
+    return this._jobs.filter(job => job.status === 'running' || job.status === 'stopping').length;
+  }
+
   statusSnapshot(isPaused = false) {
     return {
       waitingCount: this._jobs.filter(job => job.status === 'queued').length,
       missingCount: this._jobs.filter(job => job.status === 'missing-source').length,
+      liveCount: this.liveWorkCount(),
       isPaused: !!isPaused,
     };
   }

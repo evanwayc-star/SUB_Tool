@@ -546,19 +546,23 @@ async function showExportVideoDialog(initialDraft=null) {
             ${r.format==='h264' ? `
               <input type="number" class="ev-kbps" data-idx="${i}" value="${r.kbps}" style="width:60px;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" title="目標視訊碼率 (kbps)"> kbps
             ` : ''}
+            <label style="font-size:11px;display:flex;align-items:center;gap:4px;margin-left:8px;white-space:nowrap;" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}>燒入TC</label>
           ` : ''}
           <div style="flex:1"></div>
           <button class="ev-del icon" data-idx="${i}" style="padding:2px;font-size:12px;cursor:pointer;color:var(--red);background:transparent;border:none;" title="刪除此列">✕</button>
         </div>
+        <!-- 檔名與輸出目錄自成一列：交付檔名常常很長（含專案代號、fps、聲道編組），
+             和音軌／TC 擠在同一列時尾端會被截掉，看不到全貌。 -->
         <div style="display:flex;gap:12px;align-items:center;">
-          <input type="text" class="ev-name" data-idx="${i}" value="${r.customName}" style="flex:2;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" placeholder="檔名 (含副檔名)">
-          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" readonly style="flex:1;padding:3px;font-size:12px;background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);cursor:pointer;${!IS_DESKTOP?'display:none;':''}" title="點擊瀏覽選擇目錄" placeholder="選擇輸出目錄...">
-          <button class="ev-dir-btn" data-idx="${i}" style="padding:2px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;${!IS_DESKTOP?'display:none;':''}">瀏覽...</button>
+          <input type="text" class="ev-name" data-idx="${i}" value="${r.customName}" style="flex:3;min-width:0;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" placeholder="檔名 (含副檔名)" title="${escapeHTML(r.customName || '')}">
+          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" readonly style="flex:2;min-width:0;padding:3px;font-size:12px;background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);cursor:pointer;${!IS_DESKTOP?'display:none;':''}" title="${escapeHTML(r.outDir || '點擊瀏覽選擇目錄')}" placeholder="選擇輸出目錄...">
+          <button class="ev-dir-btn" data-idx="${i}" style="flex:none;padding:2px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;${!IS_DESKTOP?'display:none;':''}">瀏覽...</button>
+        </div>
+        <div style="display:flex;gap:12px;align-items:center;">
           <div style="display:flex;align-items:center;gap:6px;">
             <span style="font-size:11px;color:var(--text-faint);">音訊: ${audioDesc}</span>
             <button class="ev-audio-btn" data-idx="${i}" style="padding:2px 6px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;" title="設定此列輸出的音軌">⚙ 音軌</button>
           </div>
-          ${!isWav ? `<label style="font-size:11px;display:flex;align-items:center;gap:4px;"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}>燒入TC</label>` : ''}
         </div>
       </div>
     `;
@@ -710,9 +714,11 @@ async function showExportVideoDialog(initialDraft=null) {
       const fullPaths = draft.deliverables.map(r => (r.outDir + '\\' + r.customName).toLowerCase());
       const hasDupes = new Set(fullPaths).size !== fullPaths.length;
       if (hasDupes) {
-        msg.textContent = '警告：交付清單內有重複的輸出路徑！';
+        /* 比對的是「目錄 + 檔名」而不是單純檔名——同名但不同目錄是合法的。
+           訊息要講清楚是「同一目錄內」重複，否則使用者會以為不同資料夾也不准同名。 */
+        msg.textContent = '錯誤：交付清單在同一目錄內，有重複的檔名！';
         msg.style.display = 'block';
-        if (isSubmitting) alert('錯誤：交付清單內有重複的檔名！比較後面的序列會覆蓋掉前面的，請修改檔名再送出。');
+        if (isSubmitting) alert('錯誤：交付清單在同一目錄內，有重複的檔名！比較後面的序列會覆蓋掉前面的，請修改檔名再送出。');
         return false;
       }
       

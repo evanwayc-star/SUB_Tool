@@ -288,6 +288,32 @@ function ensureProjectSaved(){
 /* 同步版本：用於不適合 await 的地方（timeline 拖曳） */
 function isProjectGuardDone(){ return _editGuardDone; }
 
+/* 會丟棄目前專案的動作（開啟另一個專案）之前的確認。
+   回傳 true＝可以繼續，false＝使用者取消。
+
+   為什麼要有這個：關閉視窗時會問「要不要存」（app.js 的 onAppRequestClose），
+   但「開啟另一個專案」原本【完全沒有問】——三條開啟路徑（選單開啟、Explorer 雙擊
+   .subtool、瀏覽器版選檔）都直接 Project.load*()，未存檔的內容就這樣沒了，
+   而且沒有任何提示。這裡把那個提示補上，並讓三條路徑共用同一份。 */
+function confirmDiscardUnsaved(title = '開啟另一個專案'){
+  if(!isProjectDirty()) return Promise.resolve(true);
+  return new Promise(resolve=>{
+    openModal(title,
+      '<p>目前的專案有未儲存的變更，開啟另一個專案會失去這些變更。<br>要先儲存嗎？</p>',
+      [
+        // 等儲存真正完成（拿到路徑）才繼續；使用者取消存檔對話框則留在原專案，
+        // 與關閉視窗時的處理一致，避免「以為存好了其實沒有」。
+        {label:'儲存後開啟',primary:true,act:async()=>{
+          const pth=await Project.save();
+          if(pth){ closeModal(); resolve(true); }
+          else closeModal(), resolve(false);
+        }},
+        {label:'不儲存直接開啟',act:()=>{ closeModal(); resolve(true); }},
+        {label:'取消',act:()=>{ closeModal(); resolve(false); }},
+      ]);
+  });
+}
+
 /* 開新專案時重置所有儲存狀態 */
 function resetProject(){
   _editGuardDone=false;
@@ -596,4 +622,4 @@ const Project = {
   }
 };
 
-export { Project, ensureProjectSaved, isProjectGuardDone, resetProject, isProjectDirty };
+export { Project, ensureProjectSaved, isProjectGuardDone, resetProject, isProjectDirty, confirmDiscardUnsaved };

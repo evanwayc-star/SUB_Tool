@@ -17,6 +17,7 @@ const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const QueueStore = require('./queue-store');
+const QueueHistory = require('./queue-history');
 const { ExportQueueState } = require('./export-queue-state');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
@@ -24,6 +25,7 @@ const { FileAuthority, collectProjectMediaPathsFromBuffer } = require('./file-au
 
 let mainWin = null;
 let _allowMainWindowClose = false;
+let _allowQueueWindowClose = false;
 let _isAppQuitting = false;
 let _mainHiddenForQueue = false;
 let _quitReady = false;
@@ -552,6 +554,14 @@ ipcMain.handle('app:close', () => {
   if (!mainWin || mainWin.isDestroyed()) return false;
   // 監控視窗還在時保留 renderer 與未儲存專案，只隱藏主視窗；監控視窗可再叫回來。
   if (queueWin && !queueWin.isDestroyed()) return hideMainWindow();
+  /* 還有工作正在轉檔時不結束程式：關閉主視窗會一路走到 app.quit() →
+     before-quit → prepareForShutdown()，把執行中的 ffmpeg 全部停掉並清掉半成品。
+     使用者按的是「關閉編輯視窗」，不是「放棄這幾個小時的轉檔」。
+     改成把監控視窗叫出來、主視窗收起來，轉檔繼續跑，程式也還活著。 */
+  if (_queueState.liveWorkCount() > 0) {
+    openQueueWindow();
+    return hideMainWindow();
+  }
   _allowMainWindowClose = true;
   try { mainWin.close(); } finally { _allowMainWindowClose = false; }
   return true;
@@ -1017,11 +1027,45 @@ function openQueueWindow() {
     }
   });
   queueWin.loadFile(path.join(__dirname, 'queue.html'));
+  /* 關掉監控視窗如果會順帶結束整個程式，而且還有工作在轉檔，就先問過使用者。
+     這裡不能只看「有沒有在轉檔」——主視窗還開著時，關監控視窗只是收起監控畫面，
+     轉檔照跑，這種情況跳確認視窗只會擾民。 */
+  queueWin.on('close', (e) => {
+    if (_isAppQuitting || _allowQueueWindowClose) return;
+    if (!queueWindowCloseEndsApp()) return;
+    const liveCount = _queueState.liveWorkCount();
+    if (liveCount === 0) return;
+    e.preventDefault();
+    const win = queueWin;
+    dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: ['繼續轉檔', '中斷並關閉'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: '仍有匯出工作進行中',
+      message: `還有 ${liveCount} 個匯出工作正在轉檔`,
+      detail: '這是最後一個視窗，關閉它會結束程式並中斷轉檔，已寫出的半成品會被清除。\n確定要關閉嗎？',
+    }).then(({ response }) => {
+      if (response !== 1) return; // 預設與 Esc 都落在「繼續轉檔」
+      _allowQueueWindowClose = true;
+      try { if (win && !win.isDestroyed()) win.close(); } finally { _allowQueueWindowClose = false; }
+    }).catch(error => {
+      console.error('[Queue] 關閉確認對話框失敗：', error);
+    });
+  });
   queueWin.on('closed', () => {
     queueWin = null;
     // 主視窗已由使用者關閉（目前是隱藏）後，再關監控視窗就等同整個程式都關閉。
     if (!_isAppQuitting && _mainHiddenForQueue && mainWin && !mainWin.isDestroyed()) app.quit();
   });
+}
+
+/* 關閉監控視窗會不會順帶結束程式：主視窗不在了（window-all-closed → quit），
+   或主視窗只是為了讓監控視窗獨自存在而被隱藏（closed handler 會 app.quit()）。 */
+function queueWindowCloseEndsApp() {
+  if (!mainWin || mainWin.isDestroyed()) return true;
+  return _mainHiddenForQueue;
 }
 
 function queueStatusSnapshot() {
@@ -1044,7 +1088,18 @@ const QueueManager = {
     if (!EXPORT_QUEUE_DIR) return;
     let order = 0;
     for (const job of _queueState.jobs()) {
+      // 已完成的工作由 queue-history 保存；交給 persistJob 只會寫完再刪（tombstone），
+      // 白做一次磁碟 I/O。
+      if (job.status === 'done') continue;
       QueueStore.persistJob(EXPORT_QUEUE_DIR, job, order++);
+    }
+  },
+  /* 完成紀錄與佇列快照是兩套儲存，清除時必須一起清，否則使用者清掉的紀錄
+     會在下次啟動時原封不動地回來。 */
+  forgetHistory(jobId) {
+    if (!EXPORT_QUEUE_DIR) return;
+    try { QueueHistory.remove(EXPORT_QUEUE_DIR, jobId); } catch (e) {
+      console.error(`[Queue] 無法從完成紀錄移除 ${jobId}：`, e);
     }
   },
   removeArtifacts(job, { removeAss = true } = {}) {
@@ -1132,7 +1187,20 @@ const QueueManager = {
         }
       }
     }
+    /* 只有「還能執行的工作」才需要開機暫停等使用者確認；完成紀錄不該讓佇列開機即暫停。
+       這一行在完成紀錄載回來之前算，順序不可對調。 */
     _queuePaused = jobs.length > 0;
+    /* 完成紀錄以 done 身分放回同一個 collection，讓監控畫面重啟後看起來和關閉前一樣。
+       它們沒有 payload.clips / audioPlan，nextQueued() 也永遠不會選到 done，
+       因此不可能被重跑——queue-store 的 terminal tombstone 安全性質不受影響。 */
+    try {
+      for (const entry of QueueHistory.load(EXPORT_QUEUE_DIR)) {
+        if (_queueState.get(entry.id)) continue;
+        _queueState.add({ ...entry, senderId: null, pct: 100, etaS: null, errorMsg: null });
+      }
+    } catch (e) {
+      console.error('[Queue] 無法載入完成紀錄：', e);
+    }
     for (const warning of warnings) {
       console.error(`[Queue] 略過無法恢復的工作 ${warning.filePath}：${warning.message}`);
     }
@@ -1245,7 +1313,13 @@ const QueueManager = {
           _activeQueueCount--;
           try {
             this.persistJob(job);
-            if (job.status === 'done') this.removeArtifacts(job);
+            if (job.status === 'done') {
+              // 半成品與字幕暫存照樣清掉；只把「這份交付完成過」這件事留成紀錄。
+              this.removeArtifacts(job);
+              try { QueueHistory.append(EXPORT_QUEUE_DIR, job); } catch (historyError) {
+                console.error(`[Queue] 無法寫入完成紀錄 ${job.id}：`, historyError);
+              }
+            }
           } catch (e) {
             console.error(`[Queue] 無法更新工作 ${job.id} 的持久化狀態：`, e);
           }
@@ -1356,6 +1430,7 @@ ipcMain.handle('queue:retryJob', (e, jobId) => {
 ipcMain.handle('queue:clearJob', (e, jobId) => {
   const job = _queueState.remove(jobId);
   QueueManager.removeArtifacts(job);
+  QueueManager.forgetHistory(jobId); // 否則清掉的紀錄下次啟動又會回來
   QueueManager.broadcastUpdate();
 });
 
@@ -1365,6 +1440,9 @@ ipcMain.handle('queue:clearCompleted', () => {
     const job = _queueState.remove(id);
     QueueManager.removeArtifacts(job);
   });
+  try { QueueHistory.clear(EXPORT_QUEUE_DIR); } catch (error) {
+    console.error('[Queue] 無法清除完成紀錄：', error);
+  }
   QueueManager.broadcastUpdate();
 });
 

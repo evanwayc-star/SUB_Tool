@@ -120,4 +120,31 @@ describe('匯出交付清單', () => {
     expect(State.audioProject.buses).toHaveLength(2);
     expect(State.audioProject.exportLayout.streams).toHaveLength(2);
   });
+
+  /* 交付檔名常常很長（專案代號＋fps＋聲道編組），和其他控制項擠在同一列時尾端會被
+     截掉。三列的分工：格式／解析度／碼率／燒入TC ｜ 檔名＋輸出目錄 ｜ 音軌。
+     這條鎖住那個分列，避免日後有人為了省高度又併回去。 */
+  it('檔名與輸出目錄獨佔一列，燒入TC 在格式列，音軌自成一列', async () => {
+    await showExportVideoDialog();
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    const nameRow = document.querySelector('.ev-name').parentElement;
+    expect(nameRow.querySelector('.ev-outdir'), '輸出目錄應與檔名同列').not.toBeNull();
+    expect(nameRow.querySelector('.ev-dir-btn'), '瀏覽鈕應與檔名同列').not.toBeNull();
+    expect(nameRow.querySelector('.ev-audio-btn'), '音軌不該和檔名同列').toBeNull();
+    expect(nameRow.querySelector('.ev-tc'), '燒入TC 不該和檔名同列').toBeNull();
+
+    // 燒入TC 與格式／解析度／碼率同列
+    const formatRow = document.querySelector('.ev-format').parentElement;
+    expect(formatRow.querySelector('.ev-tc'), '燒入TC 應在格式列').not.toBeNull();
+    expect(formatRow.querySelector('.ev-del'), '刪除鈕仍在格式列最右').not.toBeNull();
+
+    const audioRow = document.querySelector('.ev-audio-btn').parentElement.parentElement;
+    expect(audioRow.querySelector('.ev-tc'), '燒入TC 已移走，不該還在音軌列').toBeNull();
+    expect(audioRow.querySelector('.ev-name'), '檔名不該和音軌同列').toBeNull();
+
+    // 檔名欄位要拿到比目錄更大的份額，長檔名才看得到全貌
+    expect(document.querySelector('.ev-name').style.flexGrow).toBe('3');
+    expect(document.querySelector('.ev-outdir').style.flexGrow).toBe('2');
+  });
 });

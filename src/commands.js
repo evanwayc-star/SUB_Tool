@@ -24,7 +24,7 @@ import { pickFile } from './util.js';
 import { fmtClock } from './time.js';
 import { emit } from './events.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
-import { Project, resetProject } from './project.js';
+import { Project, resetProject, confirmDiscardUnsaved } from './project.js';
 import { Media } from './media.js';
 import { History, recordHistory, renderHistory } from './history.js';
 import { AudioRouting } from './audio-routing.js';
@@ -67,7 +67,9 @@ function createCommands(ctx){
       } else if (IS_DESKTOP) await ctx.importDesktopMediaFiles(await DESK.openMedia());
       else await ctx.importBrowserMediaFiles(await ctx.pickMediaFiles($('fileMedia')));
     },
+    // 先問過再開檔案選擇器：讓使用者挑完檔案才說「你有未存檔的變更」很惱人。
     'open-project': async () => {
+      if (!await confirmDiscardUnsaved()) return;
       if (IS_DESKTOP) { const r = await DESK.openProject(); if (r) Project.loadDesktop(r); }
       else { const f = await pickFile($('fileProject')); if (f) Project.load(f); }
     },

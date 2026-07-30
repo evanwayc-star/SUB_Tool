@@ -33,6 +33,7 @@ describe('匯出佇列的唯一順序狀態', () => {
     expect(state.statusSnapshot(true)).toEqual({
       waitingCount: 2,
       missingCount: 1,
+      liveCount: 1, // restored-running
       isPaused: true,
     });
   });
@@ -74,5 +75,48 @@ describe('匯出佇列的唯一順序狀態', () => {
     expect(state.remove('queued-a')?.id).toBe('queued-a');
     expect(state.jobs().map(item => item.id)).toEqual(['queued-c', 'running-now', 'queued-b']);
     expect(state.nextQueued()?.id).toBe('queued-b');
+  });
+});
+
+/* 「還在轉檔嗎」只有這一份定義。關閉主視窗要不要改開監控視窗（不要砍掉轉檔）、
+   關閉監控視窗要不要先確認（會中斷轉檔），兩個決定都讀 liveWorkCount()。
+   任何一處自己重寫 status 比對，就會在改狀態名稱時漏掉一處——而漏掉的後果是
+   安靜地把使用者跑到一半的轉檔砍掉。 */
+describe('liveWorkCount：正在轉檔的工作數', () => {
+  it('running 與 stopping 都算——stopping 的 ffmpeg 還沒真的結束', () => {
+    const state = new ExportQueueState([
+      job('a', 'running'),
+      job('b', 'stopping'),
+    ]);
+    expect(state.liveWorkCount()).toBe(2);
+  });
+
+  it('等待中與各種終端狀態都不算', () => {
+    const state = new ExportQueueState([
+      job('waiting', 'queued'),
+      job('finished', 'done'),
+      job('broken', 'failed'),
+      job('halted', 'stopped'),
+      job('lost', 'missing-source'),
+    ]);
+    expect(state.liveWorkCount()).toBe(0);
+  });
+
+  it('空佇列是 0', () => {
+    expect(new ExportQueueState().liveWorkCount()).toBe(0);
+  });
+
+  it('狀態摘要一併帶出 liveCount，監控畫面與關閉決策讀同一個數字', () => {
+    const state = new ExportQueueState([
+      job('a', 'running'),
+      job('b', 'queued'),
+      job('c', 'missing-source'),
+    ]);
+    expect(state.statusSnapshot(true)).toEqual({
+      waitingCount: 1,
+      missingCount: 1,
+      liveCount: 1,
+      isPaused: true,
+    });
   });
 });
