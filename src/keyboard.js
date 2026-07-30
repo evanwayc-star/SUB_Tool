@@ -26,7 +26,7 @@ import { clamp } from './util.js';
 import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
-import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues } from './subtitles.js';
+import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues, trackLocked, cueTrackLocked } from './subtitles.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './timeline.js';
 import { Project, ensureProjectSaved } from './project.js';
 import { History, recordHistory, renderHistory } from './history.js';
@@ -127,12 +127,14 @@ async function setIn() {
   let c = State.cues.find(x => x.id === State.selectedId);
   if (!c) {
     const tk = State.tracks.length === 0 ? 0 : Math.min(State.tracks.length - 1, Math.max(0, State.listTrack));
+    if (trackLocked(tk, '在此軌新增字幕')) return;
     c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', tk);
     selectCue(c.id);
     recordHistory('新增字幕(I)');
     setStatus('已新增字幕，起點 ' + fmtClock(t), 'ok');
     return;
   }
+  if (cueTrackLocked(c, '調整字幕起點')) return;
   const wasUntimed = c.timed === false;
   c.start = t;
   if (State.subMode) {
@@ -162,6 +164,7 @@ async function setOut() {
   let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
   const c = State.cues.find(x => x.id === State.selectedId);
   if (!c) { setStatus('請先選擇字幕（或按 I 新建）', 'err'); return; }
+  if (cueTrackLocked(c, '調整字幕終點')) return;
 
   const wasUntimed = c.timed === false;
   if (wasUntimed) {

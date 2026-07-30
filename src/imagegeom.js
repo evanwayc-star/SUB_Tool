@@ -47,6 +47,32 @@ export function trackFrame({ stageW, stageH, scale = 1, posX = 0.5, posY = 0.5 }
   return { x: (SW - w) * clamp01(posX, 0.5), y: (SH - h) * clamp01(posY, 0.5), w, h };
 }
 
+/* 「符合視窗」要用的倍率：維持目前中心位置，等比例放大／縮小到上下左右
+   【最先碰到】的那個邊界為止。
+
+   素材實際矩形的寬高與 scale 成正比（框跟著 scale 縮放、contain 也是線性），
+   所以量一次 scale=1 的矩形就能解出倍率：
+     可用寬 = 2×min(cx, W−cx)      可用高 = 2×min(cy, H−cy)
+     倍率   = min(可用寬 / w₁, 可用高 / h₁)
+   取較小者，就是第一個被超過的邊界。
+
+   位置貼齊邊緣（posX≈0 或 1）時可用空間為零、倍率會趨近 0，那個結果沒有意義；
+   此時回報 recentred=true 並以置中重算（等同傳統的「填滿視窗」），
+   由呼叫端決定要不要一起把位置改成置中。 */
+export function fitScale({ stageW, stageH, natW, natH, posX = 0.5, posY = 0.5, min = 0.02, max = 8 } = {}) {
+  const W = Math.max(0, num(stageW, 0)), H = Math.max(0, num(stageH, 0));
+  const at = (px, py) => {
+    const b = imageBox({ stageW: W, stageH: H, natW, natH, scale: 1, posX: px, posY: py });
+    if (!(b.w > 0) || !(b.h > 0)) return 1;
+    const cx = W * clamp01(px, 0.5), cy = H * clamp01(py, 0.5);
+    return Math.min((2 * Math.min(cx, W - cx)) / b.w, (2 * Math.min(cy, H - cy)) / b.h);
+  };
+  let s = at(clamp01(posX, 0.5), clamp01(posY, 0.5));
+  let recentred = false;
+  if (!(s > 0.05)) { s = at(0.5, 0.5); recentred = true; }
+  return { scale: Math.max(min, Math.min(max, s)), recentred };
+}
+
 /* 圖片在整個畫框上的最終矩形（先套軌影格、再套圖片自身幾何）。 */
 export function imageBoxOnStage({ stageW, stageH, track, natW, natH, scale, posX, posY } = {}) {
   const f = trackFrame({ stageW, stageH, scale: track?.scale, posX: track?.posX, posY: track?.posY });

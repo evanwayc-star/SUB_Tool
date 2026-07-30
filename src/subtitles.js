@@ -800,9 +800,24 @@ function _doDeleteCues(ids){
   setSelection({ kind:'sub', ids:next?[next]:[] }); State.activeEdge='start';
   emit('render:all'); updateTlSel(); recordHistory('刪除字幕');
 }
+/* 鎖定軌的字幕不可改。
+   原本只有右鍵選單（menus.js）與時間軸拖曳（timeline-renderer.js）會檢查 locked，
+   I／O 鍵——也就是上字幕模式的核心——完全沒有守衛，於是鎖定的軌道照樣能被改時間、
+   照樣能新增字幕，而且沒有任何提示（使用者以為鎖了，其實沒鎖）。
+   所有會改動字幕的入口都要先過這裡，並且【一定要出提示】——沉默地不作用比擋不住更難查。 */
+function trackLocked(tk, action = '修改'){
+  const t = State.tracks[tk || 0];
+  if(!t?.locked) return false;
+  showToast(`🔒「${t.name || ('軌道 ' + ((tk || 0) + 1))}」已鎖定，無法${action}`);
+  return true;
+}
+function cueTrackLocked(c, action = '修改'){ return trackLocked(c?.track || 0, action); }
+
 function deleteSelected(){
   const ids=State.selectedIds.length?State.selectedIds.slice():[State.selectedId].filter(Boolean);
   if(!ids.length)return;
+  const onLocked=State.cues.find(c=>ids.includes(c.id)&&State.tracks[c.track||0]?.locked);
+  if(onLocked&&cueTrackLocked(onLocked,'刪除字幕')) return;
   // 比照備註多選刪除（notes.js）：>1 條先 openModal 確認，避免 Ctrl+A 後誤觸 Del 清空整軌
   if(ids.length>1){
     openModal(`刪除 ${ids.length} 條字幕`,
@@ -1243,4 +1258,4 @@ export { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSing
   addCue, addCueRelative, deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, searchSelectAll, openInlineTimeEdit,
-  copyCues, pasteCues };
+  copyCues, pasteCues, trackLocked, cueTrackLocked };

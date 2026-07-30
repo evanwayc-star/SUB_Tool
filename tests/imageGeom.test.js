@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { imageBox, trackFrame, imageBoxOnStage } from '../src/imagegeom.js';
+import { imageBox, trackFrame, imageBoxOnStage, fitScale } from '../src/imagegeom.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -47,6 +47,56 @@ describe('imageBox：contain 之後的實際矩形', () => {
   it('natW/natH 未知時退回方框＝舊行為，不破圖', () => {
     expect(imageBox({ stageW: 1920, stageH: 1080, scale: 0.5 }))
       .toEqual({ x: 480, y: 270, w: 960, h: 540 });
+  });
+});
+
+/* 「符合視窗」＝維持目前中心位置，等比例縮放到最先碰到的邊界為止。
+   位置會影響答案：中心偏右時右側可用空間變小，倍率就得跟著變小。
+   這幾個數字都在網頁版真機驗證過（0.711 = 768/1080）。 */
+describe('fitScale：符合視窗的倍率', () => {
+  const square = { stageW: 1920, stageH: 1080, natW: 500, natH: 500 };
+
+  it('方形素材置中於 16:9 → 高度先碰到，倍率為 1（框滿畫面）', () => {
+    expect(fitScale({ ...square })).toEqual({ scale: 1, recentred: false });
+  });
+
+  it('中心偏右時倍率變小（右側可用空間先用完）', () => {
+    // 中心 x=1536，右側只剩 384 → 可用寬 768；素材在 scale=1 時是 1080 寬
+    const { scale, recentred } = fitScale({ ...square, posX: 0.8 });
+    expect(scale).toBeCloseTo(768 / 1080, 3);
+    expect(recentred).toBe(false);
+  });
+
+  it('偏左與偏右對稱', () => {
+    expect(fitScale({ ...square, posX: 0.2 }).scale)
+      .toBeCloseTo(fitScale({ ...square, posX: 0.8 }).scale, 6);
+  });
+
+  /* 貼齊邊緣時可用空間為 0，倍率會趨近 0——那個結果沒有意義，
+     所以改為置中重算並回報 recentred，讓呼叫端把位置一起改回置中。 */
+  it('貼齊邊緣時改為置中重算，並回報 recentred', () => {
+    expect(fitScale({ ...square, posX: 0 })).toEqual({ scale: 1, recentred: true });
+    expect(fitScale({ ...square, posY: 1 })).toEqual({ scale: 1, recentred: true });
+  });
+
+  it('直式素材以寬度為限', () => {
+    // 600x1200 放進 1920x1080：contain 後是 540x1080，可用寬 1920 → 1920/540
+    const { scale } = fitScale({ stageW: 1920, stageH: 1080, natW: 600, natH: 1200 });
+    expect(scale).toBeCloseTo(Math.min(1920 / 540, 1080 / 1080), 3);
+  });
+
+  it('沒有原始尺寸時退回「框＝畫面」，置中倍率為 1', () => {
+    expect(fitScale({ stageW: 1920, stageH: 1080 }).scale).toBeCloseTo(1, 6);
+  });
+
+  it('倍率夾在 min/max 之間，不會回傳 0 或爆量', () => {
+    const r = fitScale({ stageW: 1920, stageH: 1080, natW: 1, natH: 100000 });
+    expect(r.scale).toBeGreaterThanOrEqual(0.02);
+    expect(r.scale).toBeLessThanOrEqual(8);
+  });
+
+  it('畫面尺寸為 0 時不丟例外', () => {
+    expect(() => fitScale({ stageW: 0, stageH: 0, natW: 10, natH: 10 })).not.toThrow();
   });
 });
 

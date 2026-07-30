@@ -26,6 +26,7 @@
      引起 Reflow 的屬性 (如 offsetWidth, clientHeight)。請改讀取緩存的 `viewportW` 變數。
 ============================================================================== */
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
+import { fitScale } from './imagegeom.js'; // 「符合視窗」與匯出共用同一條 contain 公式
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId,
   setSelection, deselect, pruneSelection, focusTrackKind } from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
@@ -896,21 +897,36 @@ function showImageGeom(c){
   const row=(id,label,val,min,max,unit)=>
     `<div>${label}：<input type="range" id="ig${id}R" min="${min}" max="${max}" step="1" value="${val}" style="width:180px;vertical-align:middle">`+
     ` <input type="number" id="ig${id}" min="${min}" max="${max}" step="1" value="${val}" style="width:64px">${unit}</div>`;
+  /* 即時預覽是直接改 c 的欄位（預覽三路都讀 c），所以【必須】先留一份原值：
+     取消／Esc／點遮罩關閉時要還原回去。v5.7.0 前沒有還原也沒有取消鈕——調完滑桿
+     按 Esc，看起來是取消了，值其實已經被寫進去了。 */
+  const snap={ scale:c.scale??1, posX:c.posX??0.5, posY:c.posY??0.5 };
+  const restore=()=>{ c.scale=snap.scale; c.posX=snap.posX; c.posY=snap.posY;
+    drawTimeline(); emit('render:videoSub'); };
+  const commit=label=>{ closeModal({committed:true}); drawTimeline(); emit('render:videoSub'); recordHistory(label); };
+  const syncInputs=()=>{
+    const set=(id,val)=>{ const r=$('ig'+id+'R'), n=$('ig'+id); if(r)r.value=val; if(n)n.value=val; };
+    set('S',Math.round((c.scale??1)*100)); set('X',Math.round((c.posX??0.5)*100)); set('Y',Math.round((c.posY??0.5)*100));
+  };
   openModal(`圖片大小與位置 — ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.2">`+
     row('S','大小',S,2,800,'%')+row('X','水平位置',X,0,100,'%')+row('Y','垂直位置',Y,0,100,'%')+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">`+
     `大小＝圖片框佔畫面的比例（圖片依原始比例縮入該框）；位置＝圖片<b>中心</b>在畫面上的座標。`+
-    `${c.natW>0?`原始尺寸 ${c.natW}×${c.natH}。`:''}預覽與匯出使用同一組數值。</div>`+
+    `${c.natW>0?`原始尺寸 ${c.natW}×${c.natH}。`:''}預覽與匯出使用同一組數值。<br>`+
+    `<b>符合視窗</b>＝維持目前位置，等比例放大到上下左右最先碰到的那個邊界為止。</div>`+
     `</div>`,
-    [{label:'重設',act:()=>{ c.scale=1; c.posX=0.5; c.posY=0.5; closeModal(); drawTimeline(); emit('render:videoSub'); recordHistory('重設圖片大小與位置'); }},
+    [{label:'符合視窗',act:()=>{ fitClipToStage(c); syncInputs(); emit('render:videoSub'); }},
+     {label:'重設',act:()=>{ c.scale=1; c.posX=0.5; c.posY=0.5; commit('重設圖片大小與位置'); }},
+     {label:'取消',act:()=>{ closeModal(); }},
      {label:'套用',primary:true,act:()=>{
         const v=(id,d)=>{ const n=+($(('ig'+id))?.value); return Number.isFinite(n)?n:d; };
         c.scale=Math.max(0.02,Math.min(8, v('S',S)/100));
         c.posX =Math.max(0,Math.min(1, v('X',X)/100));
         c.posY =Math.max(0,Math.min(1, v('Y',Y)/100));
-        closeModal(); drawTimeline(); emit('render:videoSub'); recordHistory('圖片大小與位置：'+(c.name||''));
-     }}]);
+        commit('圖片大小與位置：'+(c.name||''));
+     }}],
+    { onDismiss:restore });
   // 滑桿與數字框雙向同步，並即時預覽（不入 undo，套用時才記一筆）
   setTimeout(()=>{
     for(const id of ['S','X','Y']){
@@ -925,6 +941,22 @@ function showImageGeom(c){
     }
   },0);
 }
+
+/* 「符合視窗」：幾何計算在 imagegeom.js fitScale()（三路共用的唯一公式所在），
+   這裡只負責套用結果與回報。 */
+function fitClipToStage(c){
+  const { scale, recentred } = fitScale({
+    stageW: State.videoWidth || 1920, stageH: State.videoHeight || 1080,
+    natW: c.natW, natH: c.natH, posX: c.posX ?? 0.5, posY: c.posY ?? 0.5,
+  });
+  if (recentred) { c.posX = 0.5; c.posY = 0.5; }
+  c.scale = scale;
+  showToast(recentred
+    ? `已置中並符合視窗（大小 ${Math.round(scale * 100)}%）`
+    : `已符合視窗（大小 ${Math.round(scale * 100)}%）`);
+  return scale;
+}
+
 
 /* 影片段轉場（階段5）：淡入／淡出（秒）——匯出時影像 alpha 淡變＋音訊 afade 同步。
    淡到透明會露出下層／黑底；上層片段與下層重疊時的淡變即為軌間溶接（crossfade）。 */

@@ -26,7 +26,12 @@ function showToast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add(
 let _osdT;
 function showOsd(text){ const el=$('speedOsd'); if(!el)return; el.textContent=text; el.classList.add('show'); clearTimeout(_osdT); _osdT=setTimeout(()=>el.classList.remove('show'),1000); }
 let _modalKeepVideo=false; // 目前對話框是否「不遮影片」（靠右停＋透明遮罩＋不隱藏 mpv）
+/* opts.onDismiss：對話框在【沒有被確認】的情況下關閉時呼叫（取消鈕、Esc、點遮罩）。
+   會即時預覽的對話框需要它才能把值還原——否則使用者調完滑桿按 Esc，
+   看起來是取消了，值卻已經被寫進去（v5.7.0 前的「圖片大小與位置」正是如此）。
+   確認的那顆按鈕要呼叫 closeModal({committed:true}) 才不會觸發還原。 */
 function openModal(title,html,buttons,opts={}){
+  _modalDismiss = typeof opts.onDismiss==='function' ? opts.onDismiss : null;
   $('modalTitle').textContent=title; $('modalBody').innerHTML=html;
   const foot=$('modalFoot'); foot.innerHTML='';
   (buttons||[{label:'關閉',primary:true,act:closeModal}]).forEach(b=>{
@@ -53,7 +58,12 @@ function openModal(title,html,buttons,opts={}){
   // mpv 覆蓋視窗會蓋住置中的對話框，開啟對話框時先隱藏（keepVideo 例外：保留畫面）
   if(!_modalKeepVideo && Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(false).catch(()=>{});
 }
-function closeModal(){
+/* arg 可能是 MouseEvent（`act: closeModal` 這種直接當 handler 用的呼叫點），
+   那時 committed 會是 undefined＝視為取消，正是取消鈕該有的語意。 */
+function closeModal(arg){
+  const committed = !!(arg && arg.committed === true);
+  const dismiss = _modalDismiss; _modalDismiss=null;
+  if(!committed && dismiss){ try{ dismiss(); }catch(e){ console.warn('modal onDismiss:',e); } }
   const prev=_modalPrevFocus; _modalPrevFocus=null;
   const bg=$('modalBg');
   bg.classList.remove('show','dock-right','clear-bg');
@@ -65,6 +75,8 @@ function closeModal(){
 }
 // X2：對話框內可聚焦元素（用於初始聚焦與 Tab 焦點陷阱）
 let _modalPrevFocus=null;
+// 未確認就關閉時要跑的還原邏輯（見 openModal 的 opts.onDismiss）
+let _modalDismiss=null;
 // 追蹤對話框外最後聚焦的元素，作為關閉後的焦點還原目標
 let _lastFocusedOutsideModal=null;
 document.addEventListener('focusin', e=>{
