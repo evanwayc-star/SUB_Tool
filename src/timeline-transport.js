@@ -50,8 +50,18 @@ class TimelineTransport {
   get pausedTime(){ return this._pausedTime; }
   set pausedTime(value){ this._pausedTime = value == null ? null : nonNegative(value); }
 
+  /* 沒有 clip 時是恆等映射——與上面的 timelineTime() 對稱。
+     少了這個守衛，`Seq.toSource(t, null)` 會讀 `null.offset` 而丟 TypeError。
+
+     真實事故（v5.9.0 引入、v5.11.0 修）：`Media.pause()` 在 2275 行拿
+     `this._activeClip()` 的結果直接進來，而**空專案（還沒載入任何媒體）時它是 null**。
+     於是新專案按一次空白鍵開始跑虛擬時鐘、再按一次要暫停時整個 pause() 在那一行中斷，
+     後面的 `video.pause()`、`this.playing=false`、按鈕改回 ▶ 全部沒執行——
+     **播放頭停不下來，而畫面上沒有任何錯誤訊息**。
+     這個轉換原本內聯在 pause() 裡且帶著 clip 判斷，抽進 transport 時守衛掉了。 */
   sourceTime(timelineTime, clip){
-    return nonNegative(this._toSource(nonNegative(timelineTime), clip));
+    const t = nonNegative(timelineTime);
+    return nonNegative(clip ? this._toSource(t, clip) : t);
   }
 
   _clockTime(anchor, startedAt, playbackRate){

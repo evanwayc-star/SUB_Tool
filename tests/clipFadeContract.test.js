@@ -15,7 +15,7 @@
    壞掉的樣子：預覽裡圖片已經淡完，匯出的影片卻還亮著（或反過來）。
    不會報錯，只有把兩邊的畫面並排比對才看得出來。 */
 import { describe, expect, it } from 'vitest';
-import { clipLength, fadeAlphaAt, fadeWindow } from '../src/clip-fade.js';
+import { clipLength, fadeAlphaAt, fadeAlphaAtTimeline, fadeWindow } from '../src/clip-fade.js';
 import { buildDeliveryArgv } from '../electron/export-plan.js';
 
 const clip = (o = {}) => ({
@@ -120,9 +120,56 @@ describe('片段淡入淡出跨行程契約：預覽規格 ↔ 匯出 filtergrap
     expect(fadeAlphaAt(c, 2)).toBeCloseTo(0.5, 6);
   });
 
+  /* 範圍外要回 0，而且**沒有設淡入淡出的片段也一樣**。
+     有淡變時斜坡本身算出來就是負數、被夾成 0，看起來像有守住——
+     真正需要那道範圍檢查的是沒有淡變的片段：少了它會回 1，
+     已經結束的疊層就繼續亮在畫面上。 */
   it('片段範圍外一律 0（不可讓已結束的疊層繼續亮著）', () => {
-    const c = clip({ out: 10, fadeIn: 1, fadeOut: 1 });
-    expect(fadeAlphaAt(c, -0.5)).toBe(0);
-    expect(fadeAlphaAt(c, 10.5)).toBe(0);
+    const withFade = clip({ out: 10, fadeIn: 1, fadeOut: 1 });
+    expect(fadeAlphaAt(withFade, -0.5)).toBe(0);
+    expect(fadeAlphaAt(withFade, 10.5)).toBe(0);
+
+    const noFade = clip({ out: 10 });
+    expect(fadeAlphaAt(noFade, -0.5)).toBe(0);
+    expect(fadeAlphaAt(noFade, 10.5)).toBe(0);
+    expect(fadeAlphaAt(noFade, 5)).toBe(1);      // 範圍內仍是滿版
+
+    const onlyIn = clip({ out: 10, fadeIn: 2 });
+    expect(fadeAlphaAt(onlyIn, 10.5)).toBe(0);   // 淡出側沒有斜坡可以擋
+  });
+});
+
+/* 預覽的三個呼叫端（app.js 圖片疊層、decode/player.js 合成、media.js 淡出入黑）
+   拿到的都是時間軸時間。轉換原本各自寫在呼叫端、而且寫法不一致（見 clip-fade.js
+   fadeAlphaAtTimeline 的檔頭）——鐵律 §0.5：時間域轉換不該散在呼叫端。 */
+describe('時間軸時間入口', () => {
+  it('等同於自己先減掉 offset', () => {
+    const c = clip({ out: 10, offset: 30, fadeIn: 2, fadeOut: 2 });
+    for (const local of [0, 0.5, 1, 2, 5, 8, 9.5, 10]) {
+      expect(fadeAlphaAtTimeline(c, 30 + local), String(local))
+        .toBeCloseTo(fadeAlphaAt(c, local), 12);
+    }
+  });
+
+  it('片段還沒到或已經過去都是 0', () => {
+    const c = clip({ out: 10, offset: 30, fadeIn: 1, fadeOut: 1 });
+    expect(fadeAlphaAtTimeline(c, 29.5)).toBe(0);
+    expect(fadeAlphaAtTimeline(c, 40.5)).toBe(0);
+    expect(fadeAlphaAtTimeline(c, 35)).toBe(1);
+  });
+
+  /* 舊寫法中 app.js 用的是 `t - c.offset`（沒有 || 0）。片段少了 offset 欄位時
+     那會算出 NaN → fadeAlphaAt 的 `+localTime || 0` 把它吃成 0 → 若有淡入，
+     整段變全透明。另外兩處寫 `c.offset || 0` 則正常。這條守住那個縫。 */
+  it('片段沒有 offset 欄位時視為 0，不會整段變透明', () => {
+    const c = clip({ out: 10, fadeIn: 2 });
+    delete c.offset;
+    expect(fadeAlphaAtTimeline(c, 5)).toBe(1);
+    expect(fadeAlphaAtTimeline(c, 1)).toBeCloseTo(0.5, 6);
+  });
+
+  it('沒有片段時回 0（不炸）', () => {
+    expect(fadeAlphaAtTimeline(null, 5)).toBe(0);
+    expect(fadeAlphaAtTimeline(undefined, 5)).toBe(0);
   });
 });

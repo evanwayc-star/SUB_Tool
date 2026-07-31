@@ -13,6 +13,7 @@
 | **Main Process** | `electron/main.js` | 視窗管理、系統 ffmpeg/ffprobe、mpv 嵌入、本機檔案 I/O、快取管理 |
 | **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
 | **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
+| **匯出工作狀態機** | `electron/export-job-status.js` | **七種狀態與四個分類的唯一定義**（見下方「匯出工作的狀態機」）。零 `require`，純資料＋述詞 |
 | **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集 |
 | **完成紀錄** | `electron/queue-history.js` | 已完成交付的稽核紀錄（跨重啟保留、上限 200 筆）。**刻意不走 queue-store**：只存渲染完成卡片需要的欄位，**不含 `payload` 的 `clips`／`audioPlan`**，因此不可能被重新排程執行 |
 | **匯出佇列狀態** | `electron/export-queue-state.js` | 唯一有序工作集合；scheduler、監控畫面、重試與持久化都讀同一份順序。`liveWorkCount()`（running＋stopping）是「還在轉檔嗎」的唯一定義，兩個關閉決策都讀它 |
@@ -143,6 +144,29 @@ snapshot 中每個精確來源與輸出檔的能力；renderer 後來附加的 p
 `persistJob()` 寫完立刻刪檔、`loadJobs()` 讀到殘留的 terminal 記錄也會刪掉並跳過。
 **這是安全設計，不是疏漏**——它保證已完成的工作不會在重啟後被誤當 `queued` 重跑，
 以 `-y` 覆寫掉已經交付出去的成品（見 `tests/queueStore.test.js`）。
+
+### 匯出工作的狀態機（`electron/export-job-status.js`；v5.11.0 起）
+
+工作有七種狀態，以及四個「這個狀態算什麼」的分類。**它們只有這一份定義**：
+
+| 分類 | 成員 | 誰在讀 | 漏掉的後果 |
+|------|------|--------|-----------|
+| `terminal` | done／failed／stopped／stopping | `queue-store` 的墓碑機制 | 已完成的工作重啟後被當 `queued` 重跑，以 `-y` 覆寫已交付的成品 |
+| `restorable` | queued／running／missing-source | `queue-store.loadJobs()` | 重啟後工作整批消失 |
+| `liveWork` | running／stopping | 兩個關閉決策、並行度 | 關閉程式時把轉檔中的工作連同 ffmpeg 一起殺掉 |
+| `retryable` | failed／stopped／missing-source | 重試 | 把還在跑的工作推回佇列 |
+| `reservesOutput` | queued／running／stopping／missing-source | 輸出 lease | 兩份工作同時以 `-y` 寫同一個檔案 |
+
+兩條不變量寫在測試裡（`tests/exportJobStatus.test.js`），新增狀態卻不分類就會紅：
+
+- `terminal` 與 `restorable` **互斥且窮盡**——磁碟上的每一筆記錄，重開程式時不是被恢復、
+  就是被當墓碑刪掉，沒有第三種。
+- `liveWork` 與 `terminal` **刻意重疊於 `stopping`**：ffmpeg 還活著（關閉程式要先問），
+  但萬一程式在這個狀態下死掉，那筆工作不該被恢復。**這不是筆誤。**
+
+> v5.11.0 之前，狀態是散在 `electron/` 的 46 處字面字串，而上面五份分類分別住在
+> `queue-store.js`、`main.js`、`export-queue-state.js` 三支檔案裡。新增一種狀態時，
+> 沒有任何機制告訴你「還有三個地方要表態」，而漏掉其中一個**不會報錯**。
 
 ### 完成紀錄（`history.json`）
 

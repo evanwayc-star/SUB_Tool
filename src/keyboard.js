@@ -33,6 +33,7 @@ import { History, recordHistory, renderHistory } from './history.js';
 import { addNote, renderNotes, updateNoteActive } from './notes.js';
 import { emit } from './events.js';
 import { setStatus, closeModal, showOsd } from './ui.js';
+import { matchAction } from './keybinding.js';
 
 /* ===== JKL 穿梭輪 ======================================================= */
 /* _jklSpeed: 0=暫停, 1=正常播放, 2=2x播放, -1=1x倒帶, -2=2x倒帶 */
@@ -346,33 +347,9 @@ window.addEventListener('keydown', e => {
       drawTimeline(); return;
     }
   }
-  function matchAction(ev) {
-    const key = ev.key.toLowerCase();
-    const code = ev.code;
-    const ctrl = ev.ctrlKey || ev.metaKey;
-    const shift = ev.shiftKey;
-    const alt = ev.altKey;
-    // 數字鍵盤（NumLock 開）的字元鍵 key 值與主鍵盤相同（Numpad2 → '2'），
-    // 若允許命中 key 綁定，會先撞上主鍵盤數字的動作（如 zoom_in 的 '2'）。
-    // 故：數字鍵盤字元鍵只能以 code 綁定；key.length>1 的（NumpadEnter→'enter'、
-    // NumLock 關時 Numpad2→'arrowdown'）不受限，照常走 key 綁定。
-    const numpadChar = code && code.startsWith('Numpad') && key.length === 1;
-
-    for (const [action, binds] of Object.entries(State.keymap)) {
-      if (!binds) continue;
-      for (const bind of binds) {
-        if (!!bind.ctrl !== ctrl) continue;
-        if (!!bind.shift !== shift) continue;
-        if (!!bind.alt !== alt) continue;
-        if (bind.code) { if (bind.code === code) return action; continue; } // 含 code 的綁定只比對 code
-        if (numpadChar) continue;
-        if (bind.key && bind.key === key) return action;
-      }
-    }
-    return null;
-  }
-
-  const action = matchAction(e);
+  /* 比對規則（含數字鍵盤那套約定）住在 src/keybinding.js——設定視窗的錄製與
+     重複檢查用的是同一份。兩邊各寫一套時 NumpadEnter 會被 {key:'enter'} 蓋掉。 */
+  const action = matchAction(State.keymap, e);
   if (!action) return;
 
   switch (action) {

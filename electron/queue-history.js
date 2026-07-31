@@ -19,6 +19,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { JOB_STATUS } = require('./export-job-status.js');
 
 const HISTORY_VERSION = 1;
 const HISTORY_FILE = 'history.json';
@@ -44,7 +45,7 @@ function toEntry(job) {
   if (typeof outPath !== 'string' || !outPath.trim()) return null;
   return {
     id: job.id,
-    status: 'done',
+    status: JOB_STATUS.DONE,
     createdAt: finiteOr(job.createdAt, 0),
     completedAt: finiteOr(job.completedAt, Date.now()),
     elapsedMs: finiteOr(job.elapsedMs, 0),

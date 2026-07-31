@@ -13,6 +13,7 @@
    ② demuxFile(arrayBuffer)：整檔抽出（PoC／小檔／moov 不在檔頭的退路）。
    兩者都回 { config, index/chunks, info }；player.js 以 SampleReader 統一取位元組。 */
 import { createFile, DataStream, MP4BoxBuffer, Endianness } from 'mp4box';
+import { evictWindows, planWindow, sliceBounds, touchWindow, windowByteRange } from './sample-index.js';
 
 /* 從 trak 的 stsd entry 抽 avcC/hvcC 當 VideoDecoderConfig.description（去掉 8-byte box header）。
    av1/vp9 或 in-band（avc3）通常不需 description → 回 undefined。 */
@@ -164,53 +165,39 @@ export async function demuxIndex(url){
 }
 
 /* 位元組視窗讀取器：一次抓「一段連續樣本」進記憶體，播過就丟。
-   視窗同時受樣本數與位元組數上限拘束——長 GOP／高位元率的原生檔，48 顆樣本可能是好幾十 MB。 */
-const WIN_SAMPLES = 48;            // ≈2s @24fps（proxy 短 GOP 每 0.5s 一個關鍵幀）
-const WIN_BYTES   = 4 * 1024 * 1024;
-const WIN_KEEP    = 4;             // 常駐視窗數（≈16MB 上限）
-
+   視窗怎麼切、位移怎麼算、誰先被丟——全部在 sample-index.js（純函式，有測試）。
+   這裡只剩「發 Range 請求」與「把位元組掛回視窗」這些真正需要 IO 的部分。 */
 export class SampleReader {
   constructor(url, index, maxEnd){
     this.url = url; this.index = index; this.maxEnd = maxEnd;
     this.wins = new Map();  // startIdx → {from,to,bytes:Uint8Array|null,base,promise}
     this.order = [];        // LRU（最舊在前）
   }
-  /* 視窗起點對齊到固定格線 → 各層游標不同也能共用同一批視窗 */
-  _winStart(i){ return Math.floor(i / WIN_SAMPLES) * WIN_SAMPLES; }
-  _winEnd(from){
-    let to = Math.min(from + WIN_SAMPLES, this.index.length);
-    const base = this.index[from].offset;
-    for(let i = from + 1; i < to; i++){
-      if(this.index[i].offset + this.index[i].size - base > WIN_BYTES){ to = i; break; }
-    }
-    return Math.max(to, from + 1); // 單顆樣本自己就超過 WIN_BYTES 時仍須抓得動
-  }
   /* 位元組已就位 → Uint8Array；否則 null（呼叫端應先 ensure()、本幀先跳過） */
   data(i){
-    const w = this.wins.get(this._winStart(i));
-    if(!w || !w.bytes || i < w.from || i >= w.to) return null;
-    const s = this.index[i], off = s.offset - w.base;
-    return w.bytes.subarray(off, off + s.size);
+    if(i < 0 || i >= this.index.length) return null;
+    const w = this.wins.get(planWindow(this.index, i).from);
+    if(!w || !w.bytes) return null;
+    const b = sliceBounds(this.index, i, w);
+    return b ? w.bytes.subarray(b.off, b.end) : null;
   }
   /* 觸發抓取（非同步、不等待）。同一視窗重覆呼叫只會抓一次。 */
   ensure(i){
     if(i < 0 || i >= this.index.length) return;
-    const from = this._winStart(i);
+    const { from, to } = planWindow(this.index, i);
     let w = this.wins.get(from);
-    if(w){ this._touch(from); return; }
-    const to = this._winEnd(from);
-    const base = this.index[from].offset;
-    const end = Math.min(this.index[to - 1].offset + this.index[to - 1].size, this.maxEnd);
+    if(w){ this.order = touchWindow(this.order, from); return; }
+    const { base, end } = windowByteRange(this.index, from, to, this.maxEnd);
     w = { from, to, base, bytes: null };
     this.wins.set(from, w); this.order.push(from);
     w.promise = fetchRange(this.url, base, end, false)
       .then(ab => { if(this.wins.get(from) === w) w.bytes = new Uint8Array(ab); })
       .catch(e => { this.wins.delete(from); const k = this.order.indexOf(from); if(k >= 0) this.order.splice(k, 1);
         console.warn('[WC] 取位元組失敗:', e && (e.message || e)); });
-    this._evict();
+    const { keep, drop } = evictWindows(this.order);
+    for(const k of drop) this.wins.delete(k);
+    this.order = keep;
   }
-  _touch(from){ const k = this.order.indexOf(from); if(k >= 0){ this.order.splice(k, 1); this.order.push(from); } }
-  _evict(){ while(this.order.length > WIN_KEEP) this.wins.delete(this.order.shift()); }
   dispose(){ this.wins.clear(); this.order = []; }
 }
 

@@ -9,6 +9,7 @@ import { State, saveKeys, DESK, IS_DESKTOP } from './state.js';
 import { setStatus, showToast } from './ui.js';
 import { emit } from './events.js';
 import { downloadBytes, pickFile, readFile, decodeText, bytesToB64 } from './util.js';
+import { bindFromEvent, findConflict, formatBind, mergeImportedKeymap, stripEmptyBinds } from './keybinding.js';
 
 const actionCategories = [
   {
@@ -120,27 +121,6 @@ const actionCategories = [
   }
 ];
 
-function formatKeyBind(bind) {
-  if (!bind) return '';
-  const parts = [];
-  if (bind.ctrl) parts.push('Ctrl');
-  if (bind.shift) parts.push('Shift');
-  if (bind.alt) parts.push('Alt');
-  if (bind.code && bind.code.startsWith('Numpad')) {
-    const nmap = { 'NumpadAdd':'Num +', 'NumpadSubtract':'Num -', 'NumpadMultiply':'Num *', 'NumpadDivide':'Num /', 'NumpadEnter':'Num Enter', 'NumpadDecimal':'Num .' };
-    parts.push(nmap[bind.code] || bind.code.replace('Numpad', 'Num '));
-  } else if (bind.key) {
-    if (bind.key === ' ') parts.push('Space');
-    else if (bind.key === 'escape') parts.push('Esc');
-    else if (bind.key === 'arrowup') parts.push('↑');
-    else if (bind.key === 'arrowdown') parts.push('↓');
-    else if (bind.key === 'arrowleft') parts.push('←');
-    else if (bind.key === 'arrowright') parts.push('→');
-    else parts.push(bind.key.charAt(0).toUpperCase() + bind.key.slice(1));
-  }
-  return parts.join(' + ');
-}
-
 let tempKeymap = null;
 
 function renderSettingsTable(tbody) {
@@ -167,22 +147,10 @@ function renderSettingsTable(tbody) {
     'exp_clear': '[ + ]'
   };
 
+  /* 重複判準與比對規則同住 keybinding.js——兩者不一致的後果見該檔檔頭。 */
   function checkDuplicate(newBind) {
-    for (const [action, binds] of Object.entries(tempKeymap)) {
-      if (!binds) continue;
-      for (let i = 0; i < binds.length; i++) {
-        const b = binds[i];
-        if (!b) continue;
-        if (!!b.ctrl === !!newBind.ctrl &&
-            !!b.shift === !!newBind.shift &&
-            !!b.alt === !!newBind.alt &&
-            b.key === newBind.key &&
-            b.code === newBind.code) {
-          return { label: allLabels[action] || action, action, index: i };
-        }
-      }
-    }
-    return null;
+    const hit = findConflict(tempKeymap, newBind);
+    return hit ? { ...hit, label: allLabels[hit.action] || hit.action } : null;
   }
 
   for (const category of actionCategories) {
@@ -206,7 +174,7 @@ function renderSettingsTable(tbody) {
         input.type = 'text';
         input.className = 'key-input';
         input.id = `settings-input-${action}-${i}`;
-        input.value = fixedDisplay[action] && i === 0 ? fixedDisplay[action] : formatKeyBind(binds[i]);
+        input.value = fixedDisplay[action] && i === 0 ? fixedDisplay[action] : formatBind(binds[i]);
         
         const isFixed = fixedActions.includes(action);
         if (isFixed) {
@@ -241,19 +209,9 @@ function renderSettingsTable(tbody) {
             return;
           }
 
-          // Ignore standalone modifiers
-          if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
-
-          const bind = {
-            key: e.key.toLowerCase(),
-          };
-          if (e.code && e.code.startsWith('Numpad')) {
-            bind.code = e.code;
-            delete bind.key; // Prefer code for numpad
-          }
-          if (e.ctrlKey || e.metaKey) bind.ctrl = true;
-          if (e.shiftKey) bind.shift = true;
-          if (e.altKey) bind.alt = true;
+          // 單獨的修飾鍵不算一個綁定（判斷同樣在 keybinding.js）
+          const bind = bindFromEvent(e);
+          if (!bind) return;
 
           // Check for duplicate
           const dupInfo = checkDuplicate(bind);
@@ -275,7 +233,7 @@ function renderSettingsTable(tbody) {
 
           binds[i] = bind;
           tempKeymap[action] = binds;
-          input.value = formatKeyBind(bind);
+          input.value = formatBind(bind);
           updateStyle();
           input.blur();
         });
@@ -352,15 +310,8 @@ export function showSettingsModal() {
     const f = await pickFile(document.getElementById('settingsImportFile')); if (!f) return;
     try {
       const obj = JSON.parse(decodeText(await readFile(f)));
-      const km = obj && obj.keymap ? obj.keymap : obj; // 相容：直接是 keymap 物件也收
-      if (!km || typeof km !== 'object' || Array.isArray(km)) throw new Error('格式不符（不是快捷鍵設定檔）');
-      // 只採用「本版本認得的動作」，值須為綁定陣列；其餘一律以預設補齊
-      const merged = JSON.parse(JSON.stringify(State.defaultKeymap));
-      let applied = 0;
-      for (const act of Object.keys(merged)) {
-        if (Array.isArray(km[act])) { merged[act] = km[act].filter(b => b && typeof b === 'object'); applied++; }
-      }
-      if (!applied) throw new Error('檔案裡沒有可用的快捷鍵綁定');
+      // 只採用「本版本認得的動作」，其餘一律以預設補齊（規則見 keybinding.js）
+      const { keymap: merged, applied } = mergeImportedKeymap(State.defaultKeymap, obj);
       tempKeymap = merged;
       renderSettingsTable(tbody);
       showToast(`已匯入 ${applied} 項快捷鍵；按「儲存」才會生效`);
@@ -397,11 +348,7 @@ export function showSettingsModal() {
   document.getElementById('settingsCancelBtn').onclick = cancel;
 
   document.getElementById('settingsSaveBtn').onclick = () => {
-    // Clean up empty bindings
-    for (const k in tempKeymap) {
-      tempKeymap[k] = tempKeymap[k].filter(b => b !== null);
-    }
-    State.keymap = tempKeymap;
+    State.keymap = stripEmptyBinds(tempKeymap);
     saveKeys();
     document.removeEventListener('keydown', onEsc, true);
     modal.remove();

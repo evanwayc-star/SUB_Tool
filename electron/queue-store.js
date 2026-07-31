@@ -2,9 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const { isRestorable, isTerminal } = require('./export-job-status');
+
 const STORE_VERSION = 1;
-const RESTORABLE_STATUSES = new Set(['queued', 'running', 'missing-source']);
-const TERMINAL_STATUSES = new Set(['done', 'failed', 'stopped', 'stopping']);
+/* 分類的唯一來源在 export-job-status.js；這裡保留同名薄包裝，讓既有呼叫端與
+   模組匯出面不變（tests/queueStore.test.js 會 import 這兩個名字）。 */
+const RESTORABLE_STATUSES = { has: isRestorable };
+const TERMINAL_STATUSES = { has: isTerminal };
 
 function uniquePaths(values) {
   const seen = new Set();

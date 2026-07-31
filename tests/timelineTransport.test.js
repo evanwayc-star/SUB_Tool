@@ -18,6 +18,35 @@ function createTransport(clock){
 }
 
 describe('TimelineTransport', () => {
+  /* 迴歸（v5.9.0 引入、v5.11.0 修）：空專案（還沒載入任何媒體）時
+     `Media.pause()` 傳進來的 clip 是 null，而 sourceTime() 少了 timelineTime()
+     那道守衛 → `Seq.toSource(t, null)` 讀 null.offset 丟 TypeError，
+     pause() 在那一行中斷，後面的 video.pause()／playing=false／按鈕改回 ▶ 全部沒跑。
+     使用者看到的是「按空白鍵停不下來」，而且畫面上沒有任何錯誤。 */
+  it('沒有 clip 時兩個方向都是恆等映射，不可丟例外', () => {
+    const transport = createTransport(createClock());
+    for (const clip of [null, undefined]) {
+      expect(() => transport.sourceTime(12.5, clip)).not.toThrow();
+      expect(transport.sourceTime(12.5, clip)).toBe(12.5);
+      expect(transport.timelineTime({ sourceTime: 12.5, clip })).toBe(12.5);
+    }
+    // 沒有 clip 也照樣夾成非負
+    expect(transport.sourceTime(-3, null)).toBe(0);
+  });
+
+  it('空專案：開始虛擬時鐘後暫停不會丟例外，並回到時間軸時間', () => {
+    const clock = createClock();
+    const transport = createTransport(clock);
+    transport.startVirtual(0);
+    clock.advance(2000);
+    let paused;
+    expect(() => {
+      paused = transport.pause({ sourceTime: 0, clip: null, virtual: true, useGap: false });
+    }).not.toThrow();
+    expect(paused).toBeCloseTo(2, 6);
+    expect(transport.displayTime({ playing: false, virtual: true, clip: null })).toBeCloseTo(2, 6);
+  });
+
   it('keeps source-driver time and public timeline time in separate domains', () => {
     const clock = createClock();
     const transport = createTransport(clock);

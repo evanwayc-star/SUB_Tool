@@ -54,7 +54,7 @@ import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { imageBoxOnStage } from './imagegeom.js'; // v4.7 圖片疊層幾何：預覽／mpv 命中區／匯出 共用同一組公式
-import { fadeAlphaAt } from './clip-fade.js';     // v5.9 淡入淡出：預覽與匯出共用同一份規格
+import { fadeAlphaAtTimeline } from './clip-fade.js'; // v5.9 淡入淡出：預覽與匯出共用同一份規格
 import { timecodeSuffix, screenshotDir, fallbackScreenshotName } from './screenshot-target.js';
 import { presetExportRelativePath } from './export-name-safety.js';
 import { on, emit } from './events.js';
@@ -555,8 +555,8 @@ function renderImageOverlays(){
     // 幾何（scale／posX／posY／所在視訊軌的 PiP）一律走 _imageBoxOf → imagegeom.js
     const opacity = (State.videoTracks[c.vtrack || 0]?.opacity ?? 1);
 
-    // 淡入淡出的長度與斜坡只有 clip-fade.js 一份規格；匯出側套用同一組數字。
-    const alpha = Math.max(0, Math.min(1, opacity * fadeAlphaAt(c, t - c.offset)));
+    // 淡入淡出的長度、斜坡與時間域轉換只有 clip-fade.js 一份規格；匯出側套用同一組數字。
+    const alpha = Math.max(0, Math.min(1, opacity * fadeAlphaAtTimeline(c, t)));
 
     const imgSrc = _imageSrc(c);
 

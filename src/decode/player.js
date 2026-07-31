@@ -19,10 +19,11 @@ import { State } from '../state.js';
 import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
 import { emit } from '../events.js';
-import { fadeAlphaAt } from '../clip-fade.js';  // 淡入淡出：預覽與匯出共用同一份規格
+import { fadeAlphaAtTimeline } from '../clip-fade.js';  // 淡入淡出：預覽與匯出共用同一份規格
 import { needsComposite, stageBox } from '../compositor-plan.js';
 import { showToast } from '../ui.js';
 import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
+import { keyIndexBefore } from './sample-index.js';
 import { imageBoxOnStage, trackFrame } from '../imagegeom.js'; // 預覽／mpv 命中區／匯出 三路共用的唯一幾何公式
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
@@ -100,18 +101,8 @@ class SourceStream {
     }
   }
 
-  /* 目標時間所屬 GOP 的關鍵幀 chunk 索引。keyIdx 上二分搜尋——每幀每層都要問，
-     長片（2 小時＝17 萬顆樣本）逐顆線性掃會直接吃掉整個 frame budget。 */
-  _keyBefore(tUs){
-    const ki = this.keyIdx, cs = this.chunks;
-    let lo = 0, hi = ki.length - 1, k = ki[0];
-    while(lo <= hi){
-      const m = (lo + hi) >> 1;
-      if(cs[ki[m]].timestamp <= tUs){ k = ki[m]; lo = m + 1; }
-      else hi = m - 1;
-    }
-    return k;
-  }
+  /* 目標時間所屬 GOP 的關鍵幀 chunk 索引（二分搜尋，規則在 sample-index.js）。 */
+  _keyBefore(tUs){ return keyIndexBefore(this.chunks, this.keyIdx, tUs); }
 
   _reseek(tUs){
     try{ this.dec.reset(); }catch(e){}
@@ -378,9 +369,10 @@ export const WCPreview = {
     }else{ this.mode = 'black'; this.lastPresentedUs = null; }
   },
 
-  /* 片段淡入/淡出在 t 的可見度。公式只有 clip-fade.js 一份（v5.9.1 起）——
-     這裡與 media.js previewFadeDarkness 原本各自內聯了一份完全相同的算式。 */
-  _clipFadeAlpha(c, t){ return fadeAlphaAt(c, t - (c.offset || 0)); },
+  /* 片段淡入/淡出在**時間軸時間** t 的可見度。公式與時間域轉換都只有
+     clip-fade.js 一份——這裡、app.js 的圖片疊層、media.js 的 previewFadeDarkness
+     原本各自內聯了同一組算式（且對缺 offset 的片段結果不一致）。 */
+  _clipFadeAlpha(c, t){ return fadeAlphaAtTimeline(c, t); },
 
   setEnabled(v){
     this.enabled = !!v;

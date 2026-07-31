@@ -37,7 +37,7 @@ import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset } from './external-audio.js';
 import { emit, on } from './events.js';
-import { fadeAlphaAt } from './clip-fade.js';   // 淡入淡出：預覽與匯出共用同一份規格
+import { fadeAlphaAtTimeline } from './clip-fade.js';   // 淡入淡出：預覽與匯出共用同一份規格
 import { sourceChannelLabels } from './channel-layout.js'; // 來源聲道展開順序：與主程序 ingest 同一份約定
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Seq } from './sequence.js';
@@ -1421,8 +1421,8 @@ const Media = {
     if(!this.seqOn() || this._gap) return 0;
     const c = this._activeClip(); if(!c) return 0;
     const t = this.tlTime();
-    // 淡入淡出公式只有 clip-fade.js 一份（v5.9.1 起）；這裡原本內聯了一份相同的算式。
-    let vis = fadeAlphaAt(c, t - (c.offset || 0));
+    // 淡入淡出公式與時間域轉換只有 clip-fade.js 一份；這裡原本內聯了一份相同的算式。
+    let vis = fadeAlphaAtTimeline(c, t);
     const vt = State.videoTracks[c.vtrack || 0];
     if(vt && vt.opacity != null && vt.opacity < 1) vis *= Math.max(0, vt.opacity);
     return clamp(1 - vis, 0, 1);

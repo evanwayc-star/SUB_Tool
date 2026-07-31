@@ -1,3 +1,4 @@
+const { isRetryable, isLiveWork } = require('./export-job-status');
 'use strict';
 
 /* 匯出佇列唯一的順序來源。這裡不保存第二份「可執行清單」：監控畫面、持久化 order
@@ -52,7 +53,7 @@ class ExportQueueState {
      重試工作在監控畫面、持久化 order 與 nextQueued() 都維持原本的位置。 */
   retry(jobId) {
     const job = this.get(jobId);
-    if (!job || !['failed', 'stopped', 'missing-source'].includes(job.status)) return null;
+    if (!job || !isRetryable(job.status)) return null;
     job.status = 'queued';
     job.pct = 0;
     job.elapsedMs = 0;
@@ -99,7 +100,7 @@ class ExportQueueState {
      漏掉，而漏掉的後果是【安靜地把使用者的轉檔砍掉】。
      stopping 也算：ffmpeg 還沒真正結束，這時關掉一樣會中斷它。 */
   liveWorkCount() {
-    return this._jobs.filter(job => job.status === 'running' || job.status === 'stopping').length;
+    return this._jobs.filter(job => isLiveWork(job.status)).length;
   }
 
   statusSnapshot(isPaused = false) {

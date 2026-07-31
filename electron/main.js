@@ -25,6 +25,7 @@ const { FileAuthority, collectProjectMediaPathsFromBuffer } = require('./file-au
 const { isPathContained } = require('./export-name-safety');
 const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
 const { channelFileName } = require('./channel-layout');
+const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
 
 let mainWin = null;
 let _allowMainWindowClose = false;
@@ -894,7 +895,8 @@ let _queuePaused = false;
 let _queueConcurrency = 1;
 const _queueState = new ExportQueueState();
 let _activeQueueCount = 0;
-const OUTPUT_RESERVED_STATUSES = new Set(['queued', 'running', 'stopping', 'missing-source']);
+/* 分類的唯一來源在 export-job-status.js */
+const OUTPUT_RESERVED_STATUSES = { has: reservesOutput };
 
 function ensureExportQueueDir() {
   if (!EXPORT_QUEUE_DIR) throw new Error('匯出佇列目錄尚未初始化');
@@ -1191,7 +1193,7 @@ const QueueManager = {
     _queuePaused = true;
     const closingProcesses = [];
     for (const job of _queueState.jobs()) {
-      if (job.status !== 'running' && job.status !== 'stopping') continue;
+      if (!isLiveWork(job.status)) continue;
       if (job.status === 'running') {
         job.status = 'queued';
         job.pct = 0;
@@ -1369,7 +1371,7 @@ ipcMain.handle('queue:stopJob', (e, jobId) => {
 ipcMain.handle('queue:retryJob', (e, jobId) => {
   if (QueueManager.shuttingDown) return false;
   const job = _queueState.get(jobId);
-  if (job && (job.status === 'failed' || job.status === 'stopped' || job.status === 'missing-source')) {
+  if (job && isRetryable(job.status)) {
     const previousStatus = job.status;
     const previousError = job.errorMsg;
     if (!QueueManager.validateSources(job)) {
