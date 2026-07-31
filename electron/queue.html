@@ -135,15 +135,23 @@
       font-size: 12px;
       white-space: nowrap;
     }
+    /* color-scheme: dark 是關鍵：展開後的 <option> 清單是作業系統畫的，
+       不吃這裡的 CSS。少了它，深色介面上會彈出白底選單、選項幾乎看不見。
+       background 也不能留 transparent——收合狀態下同樣會被系統畫成淺色。 */
     select {
       min-height: 24px;
       padding: 2px 17px 2px 5px;
       border: 0;
       border-radius: 4px;
       outline: none;
-      background: transparent;
+      background: var(--surface-raised);
       color: var(--text);
       font: inherit;
+      color-scheme: dark;
+    }
+    select option {
+      background: var(--surface-raised);
+      color: var(--text);
     }
 
     .warning {

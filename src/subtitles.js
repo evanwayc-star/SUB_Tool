@@ -39,7 +39,7 @@ import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx } from './substyle.js'; // colorName 只用在色點的 title
+import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx, styleMatchesPreset } from './substyle.js'; // colorName 只用在色點的 title
 
 /* 該句的「常用樣式名稱」：軌樣式完全吻合某個已存的常用樣式 → 顯示其名；有逐句覆蓋 → 「自訂」；
    皆非 → 留白。以軌為單位比對並快取（字幕上千條時避免逐句重算）；renderSubList 每次重繪前清空。 */
@@ -59,8 +59,7 @@ export function clearPresetNameCache(){
       const st = effStyle(c, State.tracks[c.track || 0] || null);
       let name = '';
       for (const p of presets) {
-        const ps = p.style || {};
-        if (keys.every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k])) { name = p.name; break; }
+        if (styleMatchesPreset(st, p)) { name = p.name; break; }
       }
       if (!name) {
         let key = '';
@@ -118,8 +117,7 @@ function _getPresetNameForStyle(st){
   
   let name = '';
   for(const p of getAllPresets()){
-    const ps = p.style || {};
-    if(keys.every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k])){ name = p.name; break; }
+    if(styleMatchesPreset(st, p)){ name = p.name; break; }
   }
   _presetNameCache.set(key, name);
   return name;
@@ -473,13 +471,13 @@ function renderCheckPanel(){
   }
   const consecutiveIdenticalNums = Array.from(consecutiveIdenticalSet).sort((a,b)=>a-b);
   
-  const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'無';
+  const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'N/A';
   const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{
     const detail=[];
     if(simplified.length) detail.push('常見簡體：'+simplified.join('、'));
     if(unsupported.length) detail.push('非允許字元：'+unsupported.map(ch=>/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/u.test(ch)?`U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}`:ch).join('、'));
     return `<span class="cp-num" data-idx="${num}" title="${escapeHTML(detail.join('；'))}">${num}</span>`;
-  }).join(', '):'無';
+  }).join(', '):'N/A';
   const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rnt=$('cpNonTraditional'),rt=$('cpTrim'),rn=$('cpNoTime'),rci=$('cpConsecutiveIdentical');
   const sb=$('cpSrtB'),si=$('cpSrtI'),su=$('cpSrtU'),sf=$('cpSrtFont'),sp=$('cpSrtPos');
   if(rn)rn.querySelector('.cp-nums').innerHTML=mkNums(noTimeNums);
@@ -587,7 +585,6 @@ function _subRowHTML(c,i,overlaps){
     `</div>`+
     `<div class="sub-sty">${styleSummaryHtml(c)}</div>`+
     `<div class="sub-styname">${styleNameHtml(c)}</div>`+
-    (State.trackCount>1?`<div class="tk">軌${(c.track||0)+1}</div>`:``)+
   `</div>`;
 }
 

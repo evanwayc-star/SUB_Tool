@@ -111,6 +111,12 @@ function createCommands(ctx){
       console.error('匯出影片錯誤', err); showToast('匯出影片錯誤：' + err.message);
     }),
     'export-notes': () => exportNotes(),
+    /* 監控序列：原本只有狀態列按鈕的 onclick 直接呼叫 DESK，沒有進指令表，
+       所以沒辦法綁快捷鍵、也不在 tests/commands.test.js 的對稱檢查裡。 */
+    'queue-monitor': () => {
+      if (!IS_DESKTOP || typeof DESK.openQueueMonitor !== 'function') { showToast('匯出佇列只在桌面版提供'); return; }
+      DESK.openQueueMonitor();
+    },
     'audio-project-settings': () => AudioRouting.openOutputSettings(),
 
     /* ── 影片段 ─────────────────────────────────────────────────────── */

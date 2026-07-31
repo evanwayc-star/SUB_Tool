@@ -23,6 +23,7 @@
   --cyan-d:#b45309;
   --green:#39FF14;       /* Neon Green for In-Point */
   --red:#EF4444;
+  --pink-soft:#e8a0b4;   /* 淺淡粉：提示性質、非錯誤的檢查項目（與紅色警示區隔） */
   --cue:#2A75D3;         /* Professional Flat Blue */
   --cue-sel:#F59E0B;     /* Amber */
   --cue-untimed:#3a3a3a;
@@ -64,8 +65,12 @@ button[data-act="imp-auto"]{background:rgba(60,200,100,.08);border-color:rgba(30
 button[data-act="imp-auto"]:hover{background:rgba(60,200,100,.16)}
 button[data-act="exp-dialog"]{background:rgba(60,140,255,.08);border-color:rgba(40,100,220,.35)}
 button[data-act="exp-dialog"]:hover{background:rgba(60,140,255,.16)}
+/* color-scheme: dark 是必要的：<select> 展開後的 <option> 清單由作業系統繪製，
+   不吃這裡的 CSS。少了它，深色介面上會彈出白底選單、選項幾乎看不見
+   （日期／數字微調鈕與捲軸同理）。 */
 input,select,textarea{font-family:inherit;color:var(--text);background:var(--panel);border:1px solid var(--border2);
-  border-radius:4px;padding:4px 6px;font-size:12px;user-select:text;-webkit-user-select:text}
+  border-radius:4px;padding:4px 6px;font-size:12px;user-select:text;-webkit-user-select:text;color-scheme:dark}
+select option{background:var(--panel);color:var(--text)}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .sep{width:1px;height:22px;background:var(--border2);margin:0 4px}
 .spacer{flex:1}
@@ -597,7 +602,12 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .note-item input[type=checkbox]{margin-top:2px;accent-color:var(--green);cursor:pointer}
 .note-item .nt-time{font-family:"更紗黑體","Segoe UI Variable","Consolas",monospace;color:var(--cyan);cursor:pointer;white-space:nowrap}
 .note-item .nt-time:hover{text-decoration:underline}
-.note-item .nt-text{flex:1;color:var(--text);cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 3px;word-break:break-word}
+/* min-height 是必要的，不是美觀問題：空白備註的 span 沒有行框，實測只有 4px 高
+   （有文字時 19px）。使用者新增備註後若沒有立刻打字，那條備註的文字框就縮成
+   一條 4px 的細線，之後再也雙擊不到——等於那則備註永遠改不了文字。 */
+.note-item .nt-text{flex:1;color:var(--text);cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 3px;word-break:break-word;min-height:1.35em}
+.note-item .nt-text:empty::before{content:'（雙擊輸入備註）';color:var(--text-faint);pointer-events:none}
+.note-item .nt-text:empty:focus::before{content:''}
 .note-item .nt-text:focus{outline:none;border-color:var(--accent);background:var(--panel)}
 .note-item.done .nt-text{text-decoration:line-through;color:var(--text-faint)}
 .note-item .nt-del{background:none;border:none;color:var(--text-faint);cursor:pointer;opacity:0}
@@ -757,20 +767,30 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-gtrack.tl-dragging{opacity:.4}
 .tl-gtrack.tl-drag-target{box-shadow:inset 0 2px 0 var(--accent)}
 /* 字幕檢查面板 */
-.check-float-panel{width:360px}
+/* 檢查項目多、數字列表又常常換行，60vh 一開就要捲；拉高到 82vh、加寬到 420px。 */
+.check-float-panel{width:420px;max-height:82vh}
 .check-panel{padding:8px 14px;font-size:13px;font-family:"更紗黑體","Segoe UI Variable","Consolas",monospace}
 .check-panel .cp-row{display:flex;align-items:baseline;gap:6px;margin:4px 0;line-height:1.7;color:var(--text-dim)}
 .check-panel .cp-issue .cp-label{color:var(--red)}
 .check-panel .cp-issue .cp-nums .cp-num{color:var(--red)}
 #cpNonTraditional .cp-num.cp-shared-only{color:#e4bd60}
 #cpNonTraditional .cp-num.cp-shared-only:hover{color:#f3d486}
-.check-panel .cp-label{min-width:7em;text-align:right;flex-shrink:0;white-space:nowrap}
+/* 標籤欄是固定寬度、靠右對齊，冒號由 ::after 產生貼在內容尾端
+   ——這樣所有列的冒號都落在同一個 x，不論標籤多長、有沒有按鈕或輸入框。
+   舊版把冒號寫成 HTML 字面、且 Trim 按鈕夾在標籤與冒號之間，
+   於是每一列的冒號各自跑到不同位置。 */
+.check-panel .cp-label{width:8em;min-width:8em;text-align:right;flex-shrink:0;white-space:nowrap}
+.check-panel .cp-label::after{content:'：'}
+/* 列內的動作按鈕（例：Trim）：緊接在冒號右邊。
+   不可以放進 .cp-label 裡——夾在標籤文字與冒號之間會把該列的冒號往右推，整排就對不齊了。 */
+.check-panel .cp-act{flex-shrink:0;padding:1px 8px;font-size:11px}
 .check-panel .cp-nums{flex:1;word-break:break-all}
 .check-panel .cp-num{cursor:pointer;text-decoration:underline;text-underline-offset:2px;padding:1px 3px;border-radius:3px}
 .check-panel .cp-num:hover{color:var(--accent)}
 .check-panel .cp-sep{color:var(--border2);margin:6px 0;letter-spacing:1px}
 #cpBlank .cp-label,#cpBlank .cp-num{color:var(--green)}
-#cpTwo .cp-label,#cpTwo .cp-num{color:var(--cyan)}
+/* 用亮一點的藍：--cue（#2A75D3）在深色底上偏暗不好讀，這裡要的是可讀的資訊色 */
+#cpTwo .cp-label,#cpTwo .cp-num{color:#5b9fff}
 #cpConsecutiveIdentical .cp-label,#cpConsecutiveIdentical .cp-num{color:var(--accent)}
 #cpBlank .cp-num:hover,#cpTwo .cp-num:hover,#cpConsecutiveIdentical .cp-num:hover{color:var(--accent)}
 #cpOverLen input[type="number"]{width:36px;margin:0 3px;padding:1px 3px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:11px;text-align:center;-moz-appearance:textfield}
@@ -779,7 +799,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* 包含文字篩選行 */
 .cp-contains-row{flex-wrap:wrap;row-gap:2px}
 .cp-contains-row input{flex:1;min-width:100px;padding:2px 6px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:12px;font-family:inherit}
-.cp-contains-row .cp-nums{flex-basis:100%;padding-left:calc(7em + 12px)}
+.cp-contains-row .cp-nums{flex-basis:100%;padding-left:calc(8em + 12px)}
+/* 非繁中字元屬於提示性質、不是錯誤，用淺淡粉色與其他紅色警示區隔 */
+#cpNonTraditional .cp-label,#cpNonTraditional .cp-nums .cp-num{color:var(--pink-soft)}
 #cpContains .cp-label,#cpContains .cp-num{color:#caa72e}
 #cpContains .cp-num:hover{color:var(--accent)}
 .sub-row.contains-match{background:#2a2510}

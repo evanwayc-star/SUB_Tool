@@ -77,6 +77,13 @@ const actionCategories = [
     }
   },
   {
+    name: '匯出',
+    actions: {
+      'export_video': '開啟匯出交付清單',
+      'open_queue_monitor': '打開匯出佇列監控（桌面版）',
+    }
+  },
+  {
     name: '影片序列',
     actions: {
       'split_clip': '在播放點切割影片段',
@@ -360,10 +367,34 @@ export function showSettingsModal() {
     } catch (e) { setStatus('匯入失敗：' + (e?.message || e), 'err'); showToast('匯入失敗：' + (e?.message || e)); }
   };
 
-  document.getElementById('settingsCancelBtn').onclick = () => {
+  /* 取消＝丟棄 tempKeymap 直接關掉（尚未寫進 State.keymap）。
+     Esc 與「取消」走同一條路，不可各寫一份。 */
+  const cancel = () => {
+    document.removeEventListener('keydown', onEsc, true);
     modal.remove();
     emit('mpv:sync');
   };
+
+  /* 這個對話框是自己 createElement 出來的，不走 ui.js 的 openModal，
+     所以 keyboard.js 那條「modalBg 開著時 Esc → closeModal」完全管不到它，
+     必須自己接。用捕獲階段是為了搶在全域快捷鍵之前。
+
+     但快捷鍵輸入框自己也用 Esc（＝取消這一次錄製、把焦點移開），
+     而它是在冒泡階段處理的——捕獲階段若無條件關閉整個對話框，
+     使用者在錄製到一半按 Esc 就會連設定視窗一起關掉，剛改的內容全丟。
+     所以焦點在綁定輸入框裡時要讓開，交給輸入框自己處理。 */
+  const onEsc = (e) => {
+    if (e.key !== 'Escape') return;
+    if (!document.getElementById('settingsModal')) { document.removeEventListener('keydown', onEsc, true); return; }
+    const t = e.target;
+    if (t && t.tagName === 'INPUT' && t.closest('#settingsModal')) return; // 錄製中：讓輸入框自己 blur
+    e.preventDefault();
+    e.stopPropagation();
+    cancel();
+  };
+  document.addEventListener('keydown', onEsc, true);
+
+  document.getElementById('settingsCancelBtn').onclick = cancel;
 
   document.getElementById('settingsSaveBtn').onclick = () => {
     // Clean up empty bindings
@@ -372,6 +403,7 @@ export function showSettingsModal() {
     }
     State.keymap = tempKeymap;
     saveKeys();
+    document.removeEventListener('keydown', onEsc, true);
     modal.remove();
     emit('mpv:sync');
     setStatus('快捷鍵設定已儲存', 'ok');

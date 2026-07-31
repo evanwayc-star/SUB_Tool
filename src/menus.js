@@ -17,6 +17,7 @@ import { recordHistory } from './history.js';
 import { emit } from './events.js';
 import { AudioRouting } from './audio-routing.js';
 import { setManualPlaybackSpeed } from './keyboard.js';
+import { splitMenuLabel } from './menu-label.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -32,10 +33,7 @@ function showCtx(x,y,items){
     if(it.sep){ d=document.createElement('div'); d.className='msep'; }
     else if(it.heading){ d=document.createElement('div'); d.className='lbl'; d.textContent=it.label; }
     else { d=document.createElement('div'); d.className='ci'; d.setAttribute('role','menuitem');
-      let icon = '';
-      let text = it.label;
-      const match = text.match(/^([⬆⬇⇄⇅→⏱🗑✂↓↑])\s*(.*)$/u);
-      if (match) { icon = match[1]; text = match[2]; }
+      const { icon, text } = splitMenuLabel(it.label);
       d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`+(it.checked?'<span class="chk">✓</span>':'');
       d.onclick=()=>{ hideCtx(); it.act&&it.act(); }; }
     ctx.appendChild(d);

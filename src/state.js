@@ -300,6 +300,38 @@ function ensureAudioExportDefaults(options={}){
   return project.exportLayout;
 }
 
+/* 減少專案音軌數之後，把指向已消失 bus 的參照全部清乾淨。
+
+   §0.8：素材聲道／專案音軌／輸出 stream 是三件事。刪掉一條專案音軌時，
+   **兩個地方**會留下指向它的 id——來源聲道的 `sourceMaps[].channels[].busIds`
+   與輸出編組的 `exportLayout.streams[].busIds`。漏掉任一個都不會報錯：
+   配線面板看起來正常，匯出時那條 stream 卻對應到一個不存在的 bus，
+   結果是靜音或聲道數不對，而且要把成品放進播放器才聽得出來。
+
+   輸出 stream 清空後要移除，但**至少保留一條**——一條都不留的話，
+   匯出會產生沒有音訊軌的檔案。
+
+   純函式（只動傳進來的 project 物件，不碰 State）：這條規則以前住在
+   audio-routing.js 的 setBusCount 裡，和對話框 DOM 綁在一起，沒有測試。 */
+function pruneRemovedAudioBuses(project, removedIds){
+  if(!project) return project;
+  const gone = removedIds instanceof Set ? removedIds : new Set(removedIds || []);
+  if(!gone.size) return project;
+  const drop = ids => (Array.isArray(ids) ? ids.filter(id => !gone.has(id)) : ids);
+
+  Object.values(project.sourceMaps || {}).forEach(map => {
+    if(map && Array.isArray(map.channels))
+      map.channels.forEach(route => { if(route.busIds) route.busIds = drop(route.busIds); });
+  });
+
+  const streams = project.exportLayout && project.exportLayout.streams;
+  if(Array.isArray(streams)){
+    streams.forEach(stream => { if(stream.busIds) stream.busIds = drop(stream.busIds); });
+    project.exportLayout.streams = streams.filter((stream, index) => (stream.busIds || []).length > 0 || index === 0);
+  }
+  return project;
+}
+
 /* 為指定音源建立不覆寫既有設定的一對一路由。channels 可為聲道數字或
    [{sourceStream,sourceChannel}]；兩個索引皆為 0-based。auto 模式會依聲道數自動補足 bus。 */
 function ensureAudioSourceMap(audioSourceId, channels, options={}){
@@ -517,6 +549,8 @@ State.defaultKeymap = {
   'toggle_mixer': [{key:'u'}],
   'screenshot': [{key:'t'}],
   'screenshot_tc': [{key:'t', ctrl:true}],
+  'export_video': [{key:'/'}],          // 匯出影片（交付清單）
+  'open_queue_monitor': [{key:'.'}],     // 監控匯出佇列（桌面版）
   'copy_style': [{key:'c', ctrl:true, shift:true}],
   'paste_style': [{key:'v', ctrl:true, shift:true}],
 };
@@ -638,7 +672,7 @@ function cueSuffix(c){
 
 export { State, newTrack, syncTrackCount, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks,
   newAudioBus, normalizeAudioProject, resetAudioProject, ensureAudioBusCount, ensureAudioExportDefaults,
-  ensureAudioSourceMap, routeForChannel,
+  ensureAudioSourceMap, routeForChannel, pruneRemovedAudioBuses,
   FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel,
   setSelection, clearSelection, deselect, pruneSelection, focusTrackKind, cueSuffix,
   loadConfig, saveConfig, loadKeys, saveKeys };

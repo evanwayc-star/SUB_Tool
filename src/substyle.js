@@ -65,6 +65,38 @@ export function effStyle(cue, track){
 }
 
 
+/* 生效樣式 st 是否等同某一組常用樣式（全欄位相符；preset 沒寫到的欄位視為預設值）。
+
+   **這是唯一的判準。** v5.9.1 之前同一個謂詞在專案裡有三份實作
+   （subtitles.js 兩處內聯、app.js 的 _sameStyle），靠註解維持同步——
+   而那兩則註解指名的 `_trackPresetName` 早就改名了、註解沒跟上。
+   新增樣式欄位時只會有人想到改一處，另外兩處就靜默地開始給出不同答案。 */
+export function styleMatchesPreset(st, preset){
+  const ps = (preset && preset.style) || preset || {};
+  return Object.keys(STYLE_DEFAULTS).every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k]);
+}
+
+/* 把「寫了但其實沒有改變任何結果」的逐句覆蓋清掉，並在清空後移除 cue.style 本身。
+   回傳是否真的動過。
+
+   為什麼需要：套用常用樣式到某一句時，程式會把該樣式的**每一個欄位**都寫進
+   cue.style（見 app.js 的 data-pre-apply 分支）。如果那句所在的軌本來就是同一組
+   樣式，這些覆蓋一個都沒有改變外觀，但字幕列表仍會標上 ✱（＝此句有逐句覆蓋），
+   使用者「把樣式改回預設」之後反而多一個記號，看起來像沒改乾淨。
+
+   只刪與軌道生效值相同的欄位——真正有差異的覆蓋一律保留（那是使用者要的釘選，
+   軌道樣式日後改變時不該跟著跑）。 */
+export function pruneRedundantCueStyle(cue, track){
+  if(!cue || !cue.style) return false;
+  const base = effStyle(null, track);          // 沒有逐句覆蓋時這一句會長什麼樣
+  let changed = false;
+  for(const k of Object.keys(cue.style)){
+    if(cue.style[k] != null && cue.style[k] === base[k]){ delete cue.style[k]; changed = true; }
+  }
+  if(Object.keys(cue.style).length === 0){ delete cue.style; changed = true; }
+  return changed;
+}
+
 /* ASS 虛擬畫布：專案固定基準解析度 (1920x1080)。所有 UI 上的字級、邊界百分比都相對於這個固定尺寸。
    - 確保不論影片片段是 2.35:1 寬銀幕還是 16:9，字幕在預覽與匯出時大小 100% 絕對固定。 */
 export const ASS_PLAY_RES = { x: 1920, y: 1080 };

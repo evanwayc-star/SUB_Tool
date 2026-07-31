@@ -55,7 +55,7 @@
       <div class="sep"></div>
 
       <button class="icon" data-act="settings" title="自訂快捷鍵">⚙ 設定</button>
-      <button class="icon desktop-only" id="stMonitorBtn" title="監控匯出佇列" style="display:none">📋 監控序列</button>
+      <button class="icon desktop-only" id="stMonitorBtn" data-act="queue-monitor" title="監控匯出佇列（.）" style="display:none">📋 監控序列</button>
       <button class="icon" data-act="exp-video" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV">🎞 匯出影片</button>
     </div>
 
@@ -206,9 +206,9 @@
             <input type="number" id="tsAngle" min="-180" max="180" step="1" title="旋轉角度（度，順時針為正；繞錨點）">
             <span class="ts-sep">│</span>
             <span class="ts-label">字距</span>
-            <input type="number" id="tsSpacing" min="0" max="30" step="0.5" title="字元間距 px（直書＝字與字的間隔）">
+            <input type="number" id="tsSpacing" min="0" max="100" step="0.5" title="字元間距 px（直書＝字與字的間隔）">
             <span class="ts-label">行距</span>
-            <input type="number" id="tsLineSp" min="1" max="3" step="0.1" title="行高倍數（直書＝列與列的間隔）">
+            <input type="number" id="tsLineSp" min="1" max="100" step="0.1" title="行高倍數（直書＝列與列的間隔）">
             <span class="ts-sep">│</span>
             <span class="ts-label">框線</span>
             <input type="color" id="tsOutlineColor" title="框線顏色">
@@ -357,31 +357,31 @@
     <div class="fp-head"><span>✓ 字幕檢查</span><span class="spacer"></span><button class="fp-close"
         data-act="close-check">✕</button></div>
     <div class="fp-body check-panel">
-      <div class="cp-row cp-issue" id="cpNoTime"><span class="cp-label">[無時間碼]</span>：<span class="cp-nums"></span>
+      <div class="cp-row cp-issue" id="cpNoTime"><span class="cp-label">[無時間碼]</span><span class="cp-nums"></span>
       </div>
-      <div class="cp-row cp-issue" id="cpOverlap"><span class="cp-label">時間碼重疊</span>：<span class="cp-nums"></span>
+      <div class="cp-row cp-issue" id="cpOverlap"><span class="cp-label">時間碼重疊</span><span class="cp-nums"></span>
       </div>
-      <div class="cp-row cp-issue" id="cpMulti"><span class="cp-label">字幕３行以上</span>：<span class="cp-nums"></span></div>
-      <div class="cp-row cp-issue" id="cpTrim"><span class="cp-label">頭尾為空白</span><button class="mini"
-          data-act="trim-track" title="自動刪除該軌道所有頭尾空白">Trim</button>：<span class="cp-nums"></span></div>
+      <div class="cp-row cp-issue" id="cpMulti"><span class="cp-label">字幕３行以上</span><span class="cp-nums"></span></div>
+      <div class="cp-row cp-issue" id="cpTrim"><span class="cp-label">頭尾為空白</span><button class="mini cp-act"
+          data-act="trim-track" title="自動刪除該軌道所有頭尾空白">Trim</button><span class="cp-nums"></span></div>
       <div class="cp-row cp-issue" id="cpOverLen"><span class="cp-label">超過<input id="cpLenInput" type="number" min="1"
-            max="9999" placeholder="—" title="輸入字數上限，超過的部分會以紅色粗體顯示">字</span>：<span class="cp-nums"></span></div>
+            max="9999" placeholder="—" title="輸入字數上限，超過的部分會以紅色粗體顯示">字</span><span class="cp-nums"></span></div>
       <div class="cp-row cp-issue cp-contains-row" id="cpContains"><span class="cp-label">包含文字</span><input
           id="cpContainsInput" type="text" value="  ||　　|| 　||　 "
           title="以 || 分隔多個關鍵字（OR 搜尋，不分大小寫）&#10;預設：連續兩個半形空白、兩個全形空白、半形+全形、全形+半形"><span class="cp-nums"></span></div>
       <div class="cp-row cp-issue" id="cpNonTraditional"><span class="cp-label"
-          title="檢查常見簡體字，以及日文假名、韓文、俄文、零寬空白等非允許字元。繁簡共用字（如「后、干、台、里」）不會誤報。">含非繁中／英文／數字／符號</span>：<span class="cp-nums"></span></div>
+          title="檢查常見簡體字，以及日文假名、韓文、俄文、零寬空白等非允許字元。繁簡共用字（如「后、干、台、里」）不會誤報。">含非繁中等字元</span><span class="cp-nums"></span></div>
       <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
-      <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span>：<span class="cp-nums"></span></div>
-      <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span>：<span class="cp-nums"></span></div>
-      <div class="cp-row" id="cpConsecutiveIdentical"><span class="cp-label">　連續相同</span>：<span class="cp-nums"></span></div>
+      <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span><span class="cp-nums"></span></div>
+      <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span><span class="cp-nums"></span></div>
+      <div class="cp-row" id="cpConsecutiveIdentical"><span class="cp-label">　連續相同</span><span class="cp-nums"></span></div>
       <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
       <div class="cp-row" style="justify-content:center;margin:8px 0;"><button class="mini" data-act="remove-srt-tags" title="清除所有字幕的 &lt;&gt; 與 {} 標籤">🗑 清除所有 SRT 標籤</button></div>
-      <div class="cp-row" id="cpSrtB"><span class="cp-label">　粗體 &lt;b&gt;</span>：<span class="cp-nums"></span></div>
-      <div class="cp-row" id="cpSrtI"><span class="cp-label">　斜體 &lt;i&gt;</span>：<span class="cp-nums"></span></div>
-      <div class="cp-row" id="cpSrtU"><span class="cp-label">　底線 &lt;u&gt;</span>：<span class="cp-nums"></span></div>
-      <div class="cp-row" id="cpSrtFont"><span class="cp-label">　顏色 &lt;font&gt;</span>：<span class="cp-nums"></span></div>
-      <div class="cp-row" id="cpSrtPos"><span class="cp-label">　定位 {\an}</span>：<span class="cp-nums"></span></div>
+      <div class="cp-row" id="cpSrtB"><span class="cp-label">　粗體 &lt;b&gt;</span><span class="cp-nums"></span></div>
+      <div class="cp-row" id="cpSrtI"><span class="cp-label">　斜體 &lt;i&gt;</span><span class="cp-nums"></span></div>
+      <div class="cp-row" id="cpSrtU"><span class="cp-label">　底線 &lt;u&gt;</span><span class="cp-nums"></span></div>
+      <div class="cp-row" id="cpSrtFont"><span class="cp-label">　顏色 &lt;font&gt;</span><span class="cp-nums"></span></div>
+      <div class="cp-row" id="cpSrtPos"><span class="cp-label">　定位 {\an}</span><span class="cp-nums"></span></div>
     </div>
   </div>
 

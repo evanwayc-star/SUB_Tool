@@ -421,6 +421,8 @@ window.addEventListener('keydown', e => {
     case 'screenshot': e.preventDefault(); emit('action', 'screenshot'); break;
     case 'screenshot_tc': e.preventDefault(); emit('action', 'screenshot_tc'); break;
     case 'toggle_mixer': e.preventDefault(); emit('action', 'mixer'); break;
+    case 'export_video': e.preventDefault(); emit('action', 'exp-video'); break;
+    case 'open_queue_monitor': e.preventDefault(); emit('action', 'queue-monitor'); break;
     case 'set_in': e.preventDefault(); setIn(); break;
     case 'set_out': e.preventDefault(); setOut(); break;
     case 'nudge_left_1f':

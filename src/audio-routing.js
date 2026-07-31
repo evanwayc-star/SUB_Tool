@@ -25,7 +25,7 @@
         **從未被 emit、也從未有訂閱者**，照做等於什麼都沒發生（`events.js` 的 emit
         在無 handler 時是靜默 no-op，不會報錯，所以錯得很安靜）。
 ============================================================================== */
-import { State, ensureAudioBusCount, ensureAudioExportDefaults, normalizeAudioProject } from './state.js';
+import { State, ensureAudioBusCount, ensureAudioExportDefaults, normalizeAudioProject, pruneRemovedAudioBuses } from './state.js';
 import { Seq } from './sequence.js';
 import { Media } from './media.js';
 import { drawTimeline } from './timeline.js';
@@ -132,29 +132,9 @@ function setBusCount(rawCount){
     ensureAudioExportDefaults({appendMissing:true});
     return true;
   }
-  const removed=p.buses.slice(count);
-  const removedIds=new Set(removed.map(bus=>bus.id));
-  
-  // 自動清理被刪除的 bus 關聯，不再阻擋使用者減少軌道數
-  Object.values(p.sourceMaps).forEach(map => {
-    if(map && map.channels) {
-      map.channels.forEach(route => {
-        if(route.busIds) {
-          route.busIds = route.busIds.filter(id => !removedIds.has(id));
-        }
-      });
-    }
-  });
-
-  if(p.exportLayout && p.exportLayout.streams) {
-    p.exportLayout.streams.forEach(stream => {
-      if(stream.busIds) {
-        stream.busIds = stream.busIds.filter(id => !removedIds.has(id));
-      }
-    });
-    // 移除空 stream，但保留至少一個
-    p.exportLayout.streams = p.exportLayout.streams.filter((stream, index) => stream.busIds.length > 0 || index === 0);
-  }
+  const removedIds=new Set(p.buses.slice(count).map(bus=>bus.id));
+  // 清掉指向已消失 bus 的參照（來源配線與輸出編組兩處）。規則在 state.js，可獨立測試。
+  pruneRemovedAudioBuses(p, removedIds);
 
   p.mode='manual';
   p.buses=p.buses.slice(0,count);

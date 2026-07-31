@@ -19,6 +19,8 @@ import { State } from '../state.js';
 import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
 import { emit } from '../events.js';
+import { fadeAlphaAt } from '../clip-fade.js';  // 淡入淡出：預覽與匯出共用同一份規格
+import { needsComposite, stageBox } from '../compositor-plan.js';
 import { showToast } from '../ui.js';
 import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
 import { imageBoxOnStage, trackFrame } from '../imagegeom.js'; // 預覽／mpv 命中區／匯出 三路共用的唯一幾何公式
@@ -254,19 +256,9 @@ export const WCPreview = {
     // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
     // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
     // (註：單純的圖片疊層已改交由 _mpvGuideWin 在原生 MPV 上方疊加顯示，不再強制 WebCodecs 接管，確保流暢度與字體大小不變)
-    const needsComposite = acts.length > 1 || acts.some(c => {
-      const vt=State.videoTracks[c.vtrack||0]||{};
-      return (c.fadeIn||0)>0 || (c.fadeOut||0)>0 ||
-        (vt.scale != null && Math.abs(vt.scale-1)>0.001) ||
-        (vt.opacity != null && vt.opacity<0.999) ||
-        // 逐片段幾何（v5.7.0）：mpv 只會滿版播放，表達不了「這一段自己縮小／偏移」。
-        // 少了這一條，設了幾何的影片段在 mpv 模式下會【看起來沒生效】，
-        // 但匯出卻套用了——預覽與成品不一致，而且沒有任何錯誤訊息。
-        (c.scale != null && Math.abs(c.scale-1)>0.001) ||
-        (c.posX != null && Math.abs(c.posX-0.5)>0.001) ||
-        (c.posY != null && Math.abs(c.posY-0.5)>0.001);
-    });
-    if(mpv && acts.length && !needsComposite){
+    // 判斷在 compositor-plan.js（純函式、可測）；這裡只依結果決定要不要讓回 mpv。
+    const mustComposite = needsComposite(acts, State.videoTracks);
+    if(mpv && acts.length && !mustComposite){
       this._hideCanvas(); this._setTakeover(false);
       Media.setWebCodecsComposited(false); this.mode='mpv'; return;
     }
@@ -341,9 +333,7 @@ export const WCPreview = {
       // 字幕大小也跟著跳（症狀＝「字幕在各個影片上大小不同」）。各層再 contain 進這張畫布（比例不同就留黑邊，與匯出一致）。
       if(!base){
         const pw = State.videoWidth || 1920, ph = State.videoHeight || 1080;
-        const s0 = Math.min(bw/pw, bh/ph);
-        const w0 = Math.round(pw*s0), h0 = Math.round(ph*s0);
-        base = { x:(bw-w0)>>1, y:(bh-h0)>>1, w:w0, h:h0 };
+        base = stageBox({ canvasW: bw, canvasH: bh, projectW: pw, projectH: ph });
         this._stageW = pw; this._stageH = ph; // 供字幕層對齊畫面區（見 app.js _stageRect）
       }
       /* 幾何一律走 imagegeom.imageBoxOnStage()：軌影格（available-space 定位）
@@ -388,14 +378,9 @@ export const WCPreview = {
     }else{ this.mode = 'black'; this.lastPresentedUs = null; }
   },
 
-  /* 片段淡入/淡出在 t 的可見度（與 media.js previewFadeDarkness / 匯出 fade=alpha=1 同公式） */
-  _clipFadeAlpha(c, t){
-    let vis = 1;
-    const fi = +c.fadeIn||0, fo = +c.fadeOut||0, s = c.offset, e = Seq.clipEnd(c);
-    if(fi > 0 && t < s + fi) vis = Math.min(vis, Math.max(0, (t - s) / fi));
-    if(fo > 0 && t > e - fo) vis = Math.min(vis, Math.max(0, (e - t) / fo));
-    return vis;
-  },
+  /* 片段淡入/淡出在 t 的可見度。公式只有 clip-fade.js 一份（v5.9.1 起）——
+     這裡與 media.js previewFadeDarkness 原本各自內聯了一份完全相同的算式。 */
+  _clipFadeAlpha(c, t){ return fadeAlphaAt(c, t - (c.offset || 0)); },
 
   setEnabled(v){
     this.enabled = !!v;

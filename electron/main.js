@@ -22,6 +22,9 @@ const { ExportQueueState } = require('./export-queue-state');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
 const { FileAuthority, collectProjectMediaPathsFromBuffer } = require('./file-authority');
+const { isPathContained } = require('./export-name-safety');
+const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
+const { channelFileName } = require('./channel-layout');
 
 let mainWin = null;
 let _allowMainWindowClose = false;
@@ -52,29 +55,9 @@ function grantTrustedProjectFile(projectFile, contents) {
   for (const mediaPath of collectProjectMediaPathsFromBuffer(projectBuffer)) fileAuthority.grantTrustedFile(mediaPath);
 }
 
-function requireReadablePath(operation, file) {
-  if (fileAuthority.canRead(file)) return;
-  console.warn(`[sec] ${operation} blocked (unauthorized path):`, file);
-  const error = new Error('未授權存取此檔案');
-  error.code = 'UNAUTHORIZED_PATH';
-  throw error;
-}
-
-function requirePermittedShellOpenPath(file) {
-  if (fileAuthority.canOpenQueueLog(file)) return;
-  console.warn('[sec] app:openPath blocked (unauthorized log):', file);
-  const error = new Error('未授權開啟此檔案');
-  error.code = 'UNAUTHORIZED_PATH';
-  throw error;
-}
-
-function requirePermittedDeliveryRevealPath(file) {
-  if (fileAuthority.canRevealDeliveryOutput(file)) return;
-  console.warn('[sec] app:showItemInFolder blocked (unauthorized delivery):', file);
-  const error = new Error('未授權顯示此交付檔案');
-  error.code = 'UNAUTHORIZED_OUTPUT_PATH';
-  throw error;
-}
+/* 三個守衛與 expectedExportExtension 的實作在 ipc-guards.js（可獨立測試，
+   不需要整個 Electron 主行程）；這裡只建立跟 fileAuthority 綁定的實例。 */
+const { requireReadablePath, requirePermittedShellOpenPath, requirePermittedDeliveryRevealPath } = createIpcGuards(fileAuthority);
 /* S5：不可猜測的串流 job id（取代 Date.now() / 可推導的 cacheKey） */
 function newJobId(prefix) { return prefix + crypto.randomBytes(12).toString('hex'); }
 
@@ -928,15 +911,6 @@ function queueOutputKey(job) {
   return ExportLease.outputKey(outPath);
 }
 
-function expectedExportExtension(format) {
-  if (format === 'wav') return 'wav';
-  if (format === 'prores') return 'mov';
-  if (format === 'h264') return 'mp4';
-  const error = new Error(`不支援的匯出格式：${format || '(empty)'}`);
-  error.code = 'INVALID_EXPORT_FORMAT';
-  throw error;
-}
-
 function assertQueueOutputFormat(job) {
   const outPath = job?.payload?.outPath;
   const expected = expectedExportExtension(job?.payload?.format);
@@ -1713,14 +1687,15 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
   if (isDeliveryDirectory) fileAuthority.grantDeliveryDirectory(dir);
   /* 檔名可能源自使用者匯入的資料（例如樣式包 .json 裡的 group 欄位），renderer 端已淨化，
      這裡再擋一次：path.join 會把 "../" 正規化掉，光靠呼叫端把關等於沒有把關。
-     一律要求最終路徑落在使用者剛剛選定的資料夾底下，否則跳過並記錄。 */
+     一律要求最終路徑落在使用者剛剛選定的資料夾底下，否則跳過並記錄。
+     圍堵判斷在 export-name-safety.js（跨行程契約的另一側）。 */
   const root = path.resolve(dir);
   let written = 0, blocked = 0;
   for (const f of files || []) {
     const data = f && (f.content || f.b64);
     if (!f || typeof f.name !== 'string' || !f.name || !data) continue;
     const fullPath = path.resolve(root, f.name);
-    if (fullPath !== root && !fullPath.startsWith(root + path.sep)) {
+    if (!isPathContained(root, f.name)) {
       blocked++; console.warn('[sec] exportDirectory blocked (escapes target dir):', f.name);
       continue;
     }
@@ -2047,7 +2022,7 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
     const base = a.title || a.lang || ('音軌 ' + (i + 1));
     if (ch === 1) {
       fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
-      channels.push({ label: base, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`), sourceStream: i, sourceChannel: 0 });
+      channels.push({ label: base, file: path.join(dir, channelFileName(ci)), sourceStream: i, sourceChannel: 0 });
       chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
     } else {
       const pads = [];
@@ -2055,7 +2030,7 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
       fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
       for (let k = 0; k < ch; k++) {
         fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
-        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`), sourceStream: i, sourceChannel: k });
+        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, channelFileName(ci)), sourceStream: i, sourceChannel: k });
         chMaps.push(`[co${ci}]`); ci++;
       }
       const avg = (1 / ch).toFixed(4);
@@ -2134,7 +2109,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
     const base = a.title || a.lang || ('音軌 ' + (i + 1));
     if (ch === 1) {
       fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
-      channels.push({ label: base, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`), sourceStream: i, sourceChannel: 0 });
+      channels.push({ label: base, file: path.join(dir, channelFileName(ci)), sourceStream: i, sourceChannel: 0 });
       chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
     } else {
       const pads = [];
@@ -2142,7 +2117,7 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
       fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
       for (let k = 0; k < ch; k++) {
         fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
-        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, `ch_${String(ci + 1).padStart(2, '0')}.m4a`), sourceStream: i, sourceChannel: k });
+        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, channelFileName(ci)), sourceStream: i, sourceChannel: k });
         chMaps.push(`[co${ci}]`); ci++;
       }
       const avg = (1 / ch).toFixed(4);
