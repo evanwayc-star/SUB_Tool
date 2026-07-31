@@ -1055,8 +1055,8 @@ function renderListTrackSel(){
    看即時預覽（三路照常運作，不必為編輯模式另做一份 UI）。按「完成」才寫回 preset。
    entry: { name, before, trackIdx, targets:{tracks:[i], cues:[cue]} }
    targets ＝【進入編輯前】就已符合舊樣式的軌與句，完成時一起改成新樣式（＝使用者說的
-   「改完所有套用這個名字的也跟著變」）。名稱比對本來就是「樣式完全相符」，見
-   subtitles.js _trackPresetName——所以這裡也只能用相符來判定，沒有存名稱的欄位。 */
+   「改完所有套用這個名字的也跟著變」）。名稱比對本來就是「樣式完全相符」，判準見
+   substyle.js styleMatchesPreset()——所以這裡也只能用相符來判定，沒有存名稱的欄位。 */
 let _presetEdit = null;
 /* 樣式面板的編輯對象（v4.31）：【選取中的那一句】；沒選任何句子時才退回整軌。
    ── 使用者要的是「改樣式只影響這一句，要套到全部才按『全軌統一』」。 */
