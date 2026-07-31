@@ -583,7 +583,7 @@ function openAudioRoutingForSource(source){
 }
 function openAudioRoutingForClip(c){ openAudioRoutingForSource(c); }
 function externalAudioTimelineEntries(){
-  const assets=typeof Media.getExternalAudioSources==='function' ? Media.getExternalAudioSources() : [];
+  const assets=Media.externalAudio?.list?.() || [];
   // 靜音只影響預覽／輸出，不能把素材從剪輯時間軸藏掉；否則使用者無法再開回來。
   return assets.filter(asset=>asset).map(asset=>{
     const start=Math.max(0,Number(asset.offset)||0);
@@ -651,7 +651,7 @@ function selectExternalAudioClip(assetId,{seek=false,redraw=true}={}){
   if(!assetId) return;
   setSelection({ kind:'audio', ids:assetId });
   refreshSelectionUI();
-  const asset=typeof Media.getExternalAudioSource==='function' ? Media.getExternalAudioSource(assetId) : null;
+  const asset=Media.externalAudio?.get?.(assetId) || null;
   if(asset) State.activeAudioTrackId = asset.audioSourceId || asset.audioSrc || asset.id;
   refreshTrackGutterActive();
   const label=asset?.name||'音訊素材';
@@ -1020,10 +1020,7 @@ function showClipDuration(c){
   const isImg = c.type === 'image';
   const cur = Seq.len(c);
   const maxBySource = Math.max(0.001, (+c.dur || 0) - (+c.in || 0));
-  const nextStart = Seq.trackClips(c.vtrack||0)
-    .filter(o => o !== c && o.offset > c.offset + 1e-6)
-    .reduce((m, o) => Math.min(m, o.offset), Infinity);
-  const maxByNeighbor = nextStart === Infinity ? Infinity : Math.max(0.001, nextStart - c.offset);
+  const maxByNeighbor = Seq.maxLengthOnTrack(c);   // 同軌鄰居的事實只有 sequence.js 一份
   const maxLen = Math.min(maxBySource, maxByNeighbor);
   const limitNote = maxByNeighbor < maxBySource
     ? '（受同軌下一段起點限制）'
@@ -1407,7 +1404,7 @@ tlScroll.addEventListener('mousedown',e=>{
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
-      .map(cc=>{ const b=neighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
+      .map(cc=>{ const b=cueNeighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
       snaps:snapTargets(exSet), isCtrl,isCopyDrag};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
@@ -1886,7 +1883,7 @@ export function snapTargets(excludeIds){
 
 export function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of targets){const d=Math.abs(x-t); if(d<bd){bd=d;best=x;}} return best; }
 
-export function neighborBounds(os,oe,track,excludeIds){
+export function cueNeighborBounds(os,oe,track,excludeIds){
   let prevEnd=0,nextStart=Infinity;
   const oMid = (os + oe) / 2;
   for(const c of State.cues){

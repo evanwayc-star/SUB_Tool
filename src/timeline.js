@@ -27,7 +27,7 @@ export {
   trackFromY, addTrack, removeTrack, moveSelectedToTrack,
 
   /* 磁吸 */
-  snapTargets, snapVal, neighborBounds,
+  snapTargets, snapVal, cueNeighborBounds,
 
   /* 影片段操作 */
   selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft,

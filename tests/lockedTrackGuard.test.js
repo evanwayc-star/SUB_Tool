@@ -21,7 +21,7 @@ const ui = vi.hoisted(() => ({
 vi.mock('../src/ui.js', () => ui);
 vi.mock('../src/media.js', () => ({ Media: {
   displayTime: () => 5,
-  getExternalAudioSources: () => [],
+  externalAudio: { list: () => [], get: () => null },
   seek: vi.fn(), scrubAudio: vi.fn(), pause: vi.fn(), setRate: vi.fn(),
 }, Wave: {} }));
 vi.mock('../src/timeline.js', () => ({

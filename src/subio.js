@@ -44,6 +44,7 @@ import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
 import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec } from './delivery-audio.js';
 import { buildExportSnapshot } from './delivery-job.js';
+import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { t } from './i18n.js';
 
 /* 格式自動辨識 */
@@ -385,7 +386,7 @@ function toASSFromState(cues, options = {}) {
    這裡只負責把目前的 State／Media／Seq 交給它。 */
 function _exportSnapshot(){
   let liveExternalSources=[];
-  try{ liveExternalSources = typeof Media.getExternalAudioSources==='function' ? Media.getExternalAudioSources() : []; }catch(e){}
+  try{ liveExternalSources = Media.externalAudio?.list?.() || []; }catch(e){}
   return buildExportSnapshot({
     state: State,
     mediaTracks: Media.tracks || [],
@@ -432,54 +433,22 @@ async function showExportVideoDialog(initialDraft=null) {
     return;
   }
   
-  const rawParts = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'sequence').split('_');
-  let projName = rawParts[0];
-  if ((rawParts[0] === 'V' || rawParts[0] === 'ST') && rawParts.length > 1) {
-    projName = rawParts[1];
-  }
-  
-  function genDefaultName(r) {
-    const isWav = r.format === 'wav';
-    let ext = '.mp4';
-    if (r.format === 'prores') ext = '.mov';
-    if (r.format === 'wav') ext = '.wav';
-    
-    const ap = r.audioPlan;
-    let audioDesc = '';
-    const streams = ap?.streams || ap?.groups;
-    if (Array.isArray(streams) && streams.length > 0) {
-      const gCounts = streams.map(g => {
-        if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '20FM';
-        if (g.layout === '5.1') return '51FM';
-        if (g.layout === 'mono') return '10FM';
-        return (g.layout || '20').replace('.', '') + 'FM';
-      });
-      audioDesc = '_' + gCounts.join('+');
-    }
-    
-    const fps = Math.floor(State.fps || 25);
-    let tag = '';
-    if (!isWav && r.targetH > 0) tag += '_' + r.targetH + 'p';
-    
-    return `ST_${projName}_${fps}fps${audioDesc}${tag}${ext}`;
-  }
-  
   const audioOnly = !!data.audioOnly;
   const hasProjectAudio = !!data.audioPlan;
-  
-  // draft initialization
-  const draft = initialDraft || {
-    deliverables: [{
-      format: audioOnly ? 'wav' : 'h264',
-      kbps: 8000,
-      targetH: 0,
-      burnTimecode: false,
-      audioPlan: JSON.parse(JSON.stringify(State.audioProject?.exportLayout || {})),
-      customName: '',
-      outDir: ''
-    }]
-  };
-  
+
+  /* 清單與它的全部規則住在 delivery-list.js（純模組）。這支對話框只負責
+     把清單畫成 DOM、把 DOM 事件轉成清單操作，以及做磁碟 I/O 的那一段檢查。 */
+  const list = createDeliveryList({
+    projectTag: projectTagFrom(State.mediaName),
+    fps: State.fps || 25,
+    canvasW: State.videoWidth || 1920,
+    canvasH: State.videoHeight || 1080,
+    audioOnly,
+    defaultAudioLayout: State.audioProject?.exportLayout || {},
+    desktop: IS_DESKTOP,
+    initial: initialDraft?.deliverables || null,
+  });
+
   let html = `
     <div style="font-size:13px;line-height:1.6;width:760px;display:flex;flex-direction:column;">
 
@@ -500,10 +469,6 @@ async function showExportVideoDialog(initialDraft=null) {
 
   function renderRow(r, i) {
     const isWav = r.format === 'wav';
-    
-    if (!r.customName) {
-      r.customName = genDefaultName(r);
-    }
 
     const ap = r.audioPlan;
     let audioDesc = '依專案音軌順序';
@@ -573,164 +538,65 @@ async function showExportVideoDialog(initialDraft=null) {
   function updateRows() {
     const c = $('evRowsContainer');
     if (!c) return;
-    c.innerHTML = draft.deliverables.map((r, i) => renderRow(r, i)).join('');
+    c.innerHTML = list.rows().map((r, i) => renderRow(r, i)).join('');
     
-    $$('.ev-format').forEach(el => el.onchange = e => {
-      const idx = +e.target.dataset.idx;
-      draft.deliverables[idx].format = e.target.value;
-      if (!draft.deliverables[idx].nameModified) {
-        draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
-      } else if (draft.deliverables[idx].customName) {
-        const isWav = e.target.value === 'wav';
-        const isPro = e.target.value === 'prores';
-        const ext = isWav ? '.wav' : (isPro ? '.mov' : '.mp4');
-        draft.deliverables[idx].customName = draft.deliverables[idx].customName.replace(/\.[a-zA-Z0-9]+$/, '') + ext;
-      }
-      updateRows();
-      checkConflicts();
-    });
+    const idxOf = e => +e.target.dataset.idx;
+    const after = () => { updateRows(); checkConflicts(); };
+
+    $$('.ev-format').forEach(el => el.onchange = e => { list.setFormat(idxOf(e), e.target.value); after(); });
     $$('.ev-res').forEach(el => el.onchange = e => {
-      const idx = +e.target.dataset.idx;
-      if (e.target.value === 'custom') {
-        draft.deliverables[idx].targetH = 480;
-      } else {
-        draft.deliverables[idx].targetH = parseInt(e.target.value);
-      }
-      if (draft.deliverables[idx].format === 'h264') {
-        let w = State.videoWidth || 1920, h = draft.deliverables[idx].targetH || 1080;
-        if (draft.deliverables[idx].targetH > 0) {
-          const aspect = w / (State.videoHeight || 1080);
-          w = Math.round(h * aspect);
-          w -= (w % 2); 
-        }
-        draft.deliverables[idx].kbps = Math.round((w * h * 30 * 0.1) / 1000);
-      }
-      if (!draft.deliverables[idx].nameModified) {
-        draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
-      }
-      updateRows();
-      checkConflicts();
+      list.setTargetHeight(idxOf(e), e.target.value === 'custom' ? 480 : parseInt(e.target.value, 10));
+      after();
     });
-    $$('.ev-custom-res').forEach(el => el.onchange = e => {
-      const idx = +e.target.dataset.idx;
-      draft.deliverables[idx].targetH = parseInt(e.target.value);
-      if (!draft.deliverables[idx].nameModified) {
-        draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
-      }
-      updateRows();
-      checkConflicts();
-    });
-    $$('.ev-kbps').forEach(el => el.onchange = e => {
-      const idx = +e.target.dataset.idx;
-      draft.deliverables[idx].kbps = parseInt(e.target.value);
-    });
-    $$('.ev-name').forEach(el => el.onchange = e => {
-      const idx = +e.target.dataset.idx;
-      let val = e.target.value.trim();
-      if (val) {
-        const isWav = draft.deliverables[idx].format === 'wav';
-        const isPro = draft.deliverables[idx].format === 'prores';
-        const ext = isWav ? '.wav' : (isPro ? '.mov' : '.mp4');
-        if (!val.toLowerCase().endsWith(ext)) val += ext;
-      }
-      draft.deliverables[idx].customName = val;
-      draft.deliverables[idx].nameModified = (val !== genDefaultName(draft.deliverables[idx]));
-      updateRows();
-      checkConflicts();
-    });
-    $$('.ev-tc').forEach(el => el.onchange = e => {
-      const idx = +e.target.dataset.idx;
-      draft.deliverables[idx].burnTimecode = e.target.checked;
-    });
-    $$('.ev-outdir').forEach(el => el.onclick = async e => {
-      const idx = +e.target.dataset.idx;
+    $$('.ev-custom-res').forEach(el => el.onchange = e => { list.setTargetHeight(idxOf(e), parseInt(e.target.value, 10)); after(); });
+    $$('.ev-kbps').forEach(el => el.onchange = e => list.setKbps(idxOf(e), e.target.value));
+    $$('.ev-name').forEach(el => el.onchange = e => { list.setName(idxOf(e), e.target.value); after(); });
+    $$('.ev-tc').forEach(el => el.onchange = e => list.setBurnTimecode(idxOf(e), e.target.checked));
+
+    const pickDir = async e => {
+      const idx = idxOf(e);
       const p = await DESK.exportDirectory([]);
-      if (p) {
-        draft.deliverables[idx].outDir = p;
-        updateRows();
-        checkConflicts();
-      }
-    });
-    $$('.ev-dir-btn').forEach(el => el.onclick = async e => {
-      const idx = +e.target.dataset.idx;
-      const p = await DESK.exportDirectory([]);
-      if (p) {
-        draft.deliverables[idx].outDir = p;
-        updateRows();
-        checkConflicts();
-      }
-    });
-    $$('.ev-del').forEach(el => el.onclick = e => {
-      const idx = +e.target.dataset.idx;
-      draft.deliverables.splice(idx, 1);
-      updateRows();
-      checkConflicts();
-    });
+      if (p) { list.setOutDir(idx, p); after(); }
+    };
+    $$('.ev-outdir').forEach(el => el.onclick = pickDir);
+    $$('.ev-dir-btn').forEach(el => el.onclick = pickDir);
+    $$('.ev-del').forEach(el => el.onclick = e => { list.removeAt(idxOf(e)); after(); });
+
     $$('.ev-audio-btn').forEach(el => el.onclick = e => {
-      const idx = +e.target.dataset.idx;
+      const idx = idxOf(e);
       // 交付列的編組是獨立草稿：不可為了重用設定視窗而暫時覆寫全域專案 buses，
       // 否則縮減交付 A 軌時會連來源聲道配線一起受到影響。
-      const audioSpec=createDeliveryAudioSpec(State.audioProject,draft.deliverables[idx]);
+      const audioSpec = createDeliveryAudioSpec(State.audioProject, list.get(idx));
       closeModal();
-      const deliveryFormat=draft.deliverables[idx].format;
-      AudioRouting.openDeliveryOutputSettings(audioSpec,({saved,spec}={}) => {
-        if (saved && spec)
-          draft.deliverables[idx]=applyDeliveryAudioSpec(draft.deliverables[idx],spec);
-        
-        if (!draft.deliverables[idx].nameModified) {
-          draft.deliverables[idx].customName = genDefaultName(draft.deliverables[idx]);
-        }
-
-        void showExportVideoDialog(draft);
+      const deliveryFormat = list.get(idx).format;
+      AudioRouting.openDeliveryOutputSettings(audioSpec, ({ saved, spec } = {}) => {
+        if (saved && spec) list.applyRow(idx, applyDeliveryAudioSpec(list.get(idx), spec));
+        void showExportVideoDialog({ deliverables: list.rows() });
       }, { deliveryFormat });
     });
   }
 
+  /* 純規則由清單自己回答；這裡只剩「畫出訊息」與「問磁碟」兩件 I/O 的事。 */
   async function checkConflicts(isSubmitting = false) {
     const msg = $('evConflictMsg');
     if (!msg) return true;
-    
-    // Check missing directories
-    if (IS_DESKTOP) {
-      const missingDir = draft.deliverables.findIndex(r => !r.outDir);
-      if (missingDir !== -1) {
-        msg.textContent = `錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`;
-        msg.style.display = 'block';
-        if (isSubmitting) alert(`錯誤：第 ${missingDir + 1} 列缺少輸出目錄！`);
-        return false;
-      }
-    }
-    
-    // Check missing customName
-    const missingName = draft.deliverables.findIndex(r => !r.customName);
-    if (missingName !== -1) {
-      msg.textContent = `錯誤：第 ${missingName + 1} 列缺少檔名！`;
+
+    const blocking = list.problems().filter(p => p.kind === 'blocking')[0];
+    if (blocking) {
+      msg.textContent = blocking.message;
       msg.style.display = 'block';
-      if (isSubmitting) alert(`錯誤：第 ${missingName + 1} 列缺少檔名！`);
+      if (isSubmitting) alert(blocking.submitMessage || blocking.message);
       return false;
     }
 
     if (IS_DESKTOP) {
-      const fullPaths = draft.deliverables.map(r => (r.outDir + '\\' + r.customName).toLowerCase());
-      const hasDupes = new Set(fullPaths).size !== fullPaths.length;
-      if (hasDupes) {
-        /* 比對的是「目錄 + 檔名」而不是單純檔名——同名但不同目錄是合法的。
-           訊息要講清楚是「同一目錄內」重複，否則使用者會以為不同資料夾也不准同名。 */
-        msg.textContent = '錯誤：交付清單在同一目錄內，有重複的檔名！';
-        msg.style.display = 'block';
-        if (isSubmitting) alert('錯誤：交付清單在同一目錄內，有重複的檔名！比較後面的序列會覆蓋掉前面的，請修改檔名再送出。');
-        return false;
-      }
-      
       try {
         const conflicts = [];
-        for (const r of draft.deliverables) {
-          if (!r.outDir) continue;
-          const files = await DESK.listDir(r.outDir);
+        for (const { dir, name } of list.outPaths()) {
+          if (!dir) continue;
+          const files = await DESK.listDir(dir);
           const existing = files.map(f => (typeof f === 'string' ? f : f.name).toLowerCase());
-          if (existing.includes(r.customName.toLowerCase())) {
-            conflicts.push(r.customName);
-          }
+          if (existing.includes(name.toLowerCase())) conflicts.push(name);
         }
         if (conflicts.length > 0) {
           msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})，匯出將會直接覆蓋。`;
@@ -740,7 +606,7 @@ async function showExportVideoDialog(initialDraft=null) {
         }
       } catch(e){}
     }
-    
+
     msg.style.display = 'none';
     return true;
   }
@@ -748,54 +614,34 @@ async function showExportVideoDialog(initialDraft=null) {
   openModal('匯出交付清單', html, [
     { label: '取消', act: closeModal },
     { label: '全部送出', primary: true, act: async () => {
-      if (draft.deliverables.length === 0) { showToast('清單不能為空'); return; }
+      if (list.count() === 0) { showToast('清單不能為空'); return; }
       if (!(await checkConflicts(true))) return;
-      
+
       try {
         const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
-        const assText = !audioOnly && /\nDialogue:/.test(toASSFromState(State.cues)) 
-          ? toASSFromState(State.cues.map(c => ({...c, start: Math.max(0, (c.start || 0) - expIn), end: Math.max(0, (c.end || 0) - expIn)}))) 
+        const assText = !audioOnly && /\nDialogue:/.test(toASSFromState(State.cues))
+          ? toASSFromState(State.cues.map(c => ({...c, start: Math.max(0, (c.start || 0) - expIn), end: Math.max(0, (c.end || 0) - expIn)})))
           : null;
-        
+
         if (!IS_DESKTOP) {
           closeModal();
-          await _exportVideoWeb(data, draft.deliverables, expIn, assText);
+          await _exportVideoWeb(data, list.rows(), expIn, assText);
           return;
         }
-        
-        for (const [idx, r] of draft.deliverables.entries()) {
-          const isWav = r.format === 'wav';
-          const cleanDir = (r.outDir || '').replace(/[/\\]+$/, '');
-          const outPath = cleanDir + '\\' + r.customName;
-          
-          let w = State.videoWidth || 1920;
-          let h = State.videoHeight || 1080;
-          if (!isWav && r.targetH > 0) {
-            h = r.targetH;
-            const aspect = (State.videoWidth || 1920) / (State.videoHeight || 1080);
-            w = Math.round(h * aspect);
-            w -= (w % 2); 
-          }
 
-          const finalAudioPlan = composeDeliveryAudioPlan(data.audioPlan,r);
-
-          const jobId = await DESK.exportVideo({
-            clips: data.clips,
-            videoTracks: data.videoTracks,
-            width: w,
-            height: h,
-            fps: State.fps || 25,
-            assText: assText,
-            format: r.format,
-            duration: data.duration,
-            videoKbps: r.kbps,
-            audioPlan: finalAudioPlan,
-            timecodeWatermark: !isWav && r.burnTimecode ? { start: secToEncore(expIn, State.fps, State.dropFrame) } : null,
-            defaultName: r.customName,
-            outPath: outPath
-          });
-          
-          if (jobId) showToast(`排入佇列: ${r.customName}`);
+        // 交付規格 → 匯出工作的轉換只有 toJobs() 一份；這裡只負責送出與回報。
+        const jobs = list.toJobs({
+          clips: data.clips,
+          videoTracks: data.videoTracks,
+          duration: data.duration,
+          assText,
+          timelineStartTimecode: secToEncore(expIn, State.fps, State.dropFrame),
+          composeAudioPlan: composeDeliveryAudioPlan,
+          compiledAudioPlan: data.audioPlan,
+        });
+        for (const job of jobs) {
+          const jobId = await DESK.exportVideo(job);
+          if (jobId) showToast(`排入佇列: ${job.defaultName}`);
         }
         closeModal();
         if (IS_DESKTOP && typeof DESK.openQueueMonitor === 'function') {
@@ -808,27 +654,7 @@ async function showExportVideoDialog(initialDraft=null) {
     }}
   ], { width: '820px' });
 
-  $('evAddRowBtn').onclick = () => {
-    let defaultOutDir = '';
-    if (draft.deliverables.length > 0) {
-      defaultOutDir = draft.deliverables[draft.deliverables.length - 1].outDir;
-    }
-    if (draft.deliverables.length === 0) {
-      draft.deliverables.push({
-        format: audioOnly ? 'wav' : 'h264', kbps: 8000, targetH: 0, burnTimecode: false,
-        audioPlan: JSON.parse(JSON.stringify(State.audioProject?.exportLayout || {})), customName: '', outDir: defaultOutDir
-      });
-    } else {
-      const last = draft.deliverables[draft.deliverables.length - 1];
-      draft.deliverables.push({
-        ...JSON.parse(JSON.stringify(last)),
-        customName: '',
-        outDir: last.outDir
-      });
-    }
-    updateRows();
-    checkConflicts();
-  };
+  $('evAddRowBtn').onclick = () => { list.add(); updateRows(); checkConflicts(); };
 
   setTimeout(() => {
     updateRows();

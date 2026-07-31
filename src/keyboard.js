@@ -271,7 +271,7 @@ function mediaBoundaryPoints() {
       if (Number.isFinite(end) && end > start + MEDIA_BOUNDARY_EPS) points.push(end);
     }
     
-    for (const asset of Media.getExternalAudioSources()) {
+    for (const asset of (Media.externalAudio?.list?.() || [])) {
       if (onlyVideo) continue; // If a video track is selected, ignore audio clips
       if (onlyAudio && selectedAudioId != null && asset.id !== selectedAudioId && asset.audioSourceId !== selectedAudioId && asset.audioSrc !== selectedAudioId) continue;
       points.push(...externalPlacementBoundaries(asset));

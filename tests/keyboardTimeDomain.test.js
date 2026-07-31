@@ -9,7 +9,7 @@ const mediaMock = vi.hoisted(() => ({
   pause: vi.fn(),
   play: vi.fn(),
   setRate: vi.fn(),
-  getExternalAudioSources: vi.fn(() => []),
+  externalAudio: { list: vi.fn(() => []), get: vi.fn(() => null) },
   playing: false,
 }));
 

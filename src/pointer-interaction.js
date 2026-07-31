@@ -4,10 +4,17 @@ import { Seq } from './sequence.js';
 import { Media } from './media.js';
 import { anchorPct, effStyle } from './substyle.js';
 
-let _imgDrag = null;
-let _subDrag = null;
+/* 預覽窗的拖曳（圖片疊層與字幕）。
 
-let ctx = {
+   【為什麼是工廠而不是一組散裝 export】
+   舊介面是 8 個模組層 export ＋ setupInteractionContext(callbacks)，
+   拖曳狀態是模組層變數。問題有二：
+     - **隱含的初始化順序**：沒先呼叫 setup 就用，callbacks 全是空函式，
+       拖曳「看起來沒反應」而且不會報錯；
+     - 模組層狀態 → 測試無法建立兩個互不干擾的實例。
+   改成 createPreviewDrag(deps) 之後，依賴走建構參數（少一個就是 undefined，
+   會當場炸掉而不是靜默失效），拖曳狀態成為實例欄位。 */
+const DEFAULT_DEPS = {
   getStageRect: () => null,
   selectImageClip: (clip, opts) => {},
   renderImageOverlays: () => {},
@@ -23,11 +30,12 @@ let ctx = {
   onSubDragEndCleanup: (pointerId, d) => {}
 };
 
-export function setupInteractionContext(callbacks) {
-  Object.assign(ctx, callbacks);
-}
+export function createPreviewDrag(deps = {}) {
+  const ctx = { ...DEFAULT_DEPS, ...deps };
+  let _imgDrag = null;
+  let _subDrag = null;
 
-export function startImageDrag({ id, corner=null, x, y, pointerId=null, captureTarget=null, source='dom' }) {
+  function startImageDrag({ id, corner=null, x, y, pointerId=null, captureTarget=null, source='dom' }) {
   const clip = Seq.byId(id);
   const rect = ctx.getStageRect();
   if(!clip || clip.type !== 'image' || !rect?.w || !rect?.h || State.videoTracks[clip.vtrack || 0]?.locked) return false;
@@ -45,7 +53,7 @@ export function startImageDrag({ id, corner=null, x, y, pointerId=null, captureT
   return true;
 }
 
-export function moveImageDrag(x, y) {
+  function moveImageDrag(x, y) {
   const d = _imgDrag; if(!d) return;
   const clip = d.clip;
   if(d.corner){
@@ -65,7 +73,7 @@ export function moveImageDrag(x, y) {
   ctx.renderVideoSub();
 }
 
-export function finishImageDrag(pointerId=null, source=null) {
+  function finishImageDrag(pointerId=null, source=null) {
   const d = _imgDrag; if(!d || (source && d.source !== source)) return;
   _imgDrag = null;
   const layer = document.getElementById('imageLayer');
@@ -78,7 +86,7 @@ export function finishImageDrag(pointerId=null, source=null) {
   ctx.recordHistory(d.corner ? '調整圖片大小' : '移動圖片位置');
 }
 
-export function bindImageDomEvents(imageLayer) {
+  function bindImageDomEvents(imageLayer) {
   function startDomImageDrag(e, pointerId=null) {
     if(e.button !== 0) return false;
     const wrap = e.target.closest?.('.img-wrap') || document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.img-wrap');
@@ -116,15 +124,15 @@ export function bindImageDomEvents(imageLayer) {
   });
 }
 
-export function getImgDrag() {
+  function getImgDrag() {
   return _imgDrag;
 }
 
-export function getSubDrag() {
+  function getSubDrag() {
   return _subDrag;
 }
 
-export function bindSubtitleDomEvents(videoSub, videoWrap) {
+  function bindSubtitleDomEvents(videoSub, videoWrap) {
   function subDragMove(e){
     const d = _subDrag; if(!d) return;
     const cue = d.cue; if(!cue) return;
@@ -190,4 +198,20 @@ export function bindSubtitleDomEvents(videoSub, videoWrap) {
 
   videoWrap?.addEventListener('pointermove', e => { if(!_subDrag) ctx.setSubtitleHover(e.target.closest?.('.vsub-track.drag')||null); });
   videoWrap?.addEventListener('pointerleave', () => { if(!_subDrag) ctx.setSubtitleHover(null); });
+}
+
+  /* 對外介面：一個物件、四個動作。
+     bind() 一次接好兩層的 DOM 事件；startImageDrag／moveImageDrag／finishImageDrag
+     供 mpv 疊層那條路徑使用（它的指標事件來自主程序，不是 DOM）。 */
+  return {
+    bind({ imageLayer, videoSub, videoWrap } = {}) {
+      bindImageDomEvents(imageLayer);
+      bindSubtitleDomEvents(videoSub, videoWrap);
+    },
+    startImageDrag,
+    moveImageDrag,
+    finishImageDrag,
+    imageDrag: () => _imgDrag,
+    subtitleDrag: () => _subDrag,
+  };
 }

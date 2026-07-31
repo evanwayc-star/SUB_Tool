@@ -36,7 +36,7 @@ import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackC
 import { Media, Wave } from './media.js';
 import { getPlayerAdapter } from './media-player-adapter.js';
 import { AudioRouting } from './audio-routing.js';
-import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, neighborBounds } from './timeline.js';
+import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, cueNeighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
 import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDir, confirmDiscardUnsaved } from './project.js';
@@ -47,13 +47,15 @@ import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackD
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
-import { setupInteractionContext, bindImageDomEvents, bindSubtitleDomEvents, startImageDrag, moveImageDrag, finishImageDrag, getImgDrag, getSubDrag } from './pointer-interaction.js';
+import { createPreviewDrag } from './pointer-interaction.js';
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
 import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { imageBoxOnStage } from './imagegeom.js'; // v4.7 圖片疊層幾何：預覽／mpv 命中區／匯出 共用同一組公式
+import { fadeAlphaAt } from './clip-fade.js';     // v5.9 淡入淡出：預覽與匯出共用同一份規格
+import { timecodeSuffix, screenshotDir, fallbackScreenshotName } from './screenshot-target.js';
 import { on, emit } from './events.js';
 
 if (typeof __APP_VERSION__ !== 'undefined') {
@@ -472,7 +474,7 @@ function renderVideoSub(){
   // 重繪會換掉原本的 DOM 節點；拖曳中直接接回新節點，讓原生提示框跟著位置走，
   // 非拖曳時則清掉過期的 hover 引導，等下一次指標移動再計算。
   if(_hoveredSubEl && !_hoveredSubEl.isConnected){
-    const dragEl=getSubDrag()?.cue ? _videoSub.querySelector(`.vsub-track.drag[data-cue="${getSubDrag().cue.id}"]`) : null;
+    const dragEl=previewDrag.subtitleDrag()?.cue ? _videoSub.querySelector(`.vsub-track.drag[data-cue="${previewDrag.subtitleDrag().cue.id}"]`) : null;
     _setSubtitleHover(dragEl||null);
   }
 }
@@ -552,13 +554,8 @@ function renderImageOverlays(){
     // 幾何（scale／posX／posY／所在視訊軌的 PiP）一律走 _imageBoxOf → imagegeom.js
     const opacity = (State.videoTracks[c.vtrack || 0]?.opacity ?? 1);
 
-    // 計算淡入淡出
-    let alpha = opacity;
-    const fi = c.fadeIn || 0, fo = c.fadeOut || 0, clen = Math.max(0.001, c.out - c.in);
-    const currIn = t - c.offset;
-    if(fi > 0 && currIn < fi) alpha *= currIn / fi;
-    if(fo > 0 && currIn > clen - fo) alpha *= (clen - currIn) / fo;
-    alpha = Math.max(0, Math.min(1, alpha));
+    // 淡入淡出的長度與斜坡只有 clip-fade.js 一份規格；匯出側套用同一組數字。
+    const alpha = Math.max(0, Math.min(1, opacity * fadeAlphaAt(c, t - c.offset)));
 
     const imgSrc = _imageSrc(c);
 
@@ -585,7 +582,7 @@ function renderImageOverlays(){
     const hPos = (cx, cy) =>
       `left:${(cx === 'w' ? visL : visR - HS).toFixed(1)}px;top:${(cy === 'n' ? visT : visB - HS).toFixed(1)}px;right:auto;bottom:auto;`;
     // 被選取的圖片留下操作框，讓使用者能一眼辨識目前可拖曳／縮放的素材。
-    const selected = c.id === State.selectedClipId || getImgDrag()?.clip?.id === c.id;
+    const selected = c.id === State.selectedClipId || previewDrag.imageDrag()?.clip?.id === c.id;
     html += `<div class="img-wrap${selected ? ' selected' : ''}" data-id="${c.id}" style="${contStyle}">
       <img draggable="false" src="${escapeHTML(imgSrc)}" />
       <div class="resize-handle rh-nw" data-corner="nw" style="${hPos('w','n')}"></div>
@@ -641,9 +638,9 @@ function _selectImageClip(clip, { redrawTimeline=true }={}){
 // guide 傳來的是相對實際畫面區的像素座標，所以能完全複用以上幾何規則。
 getPlayerAdapter().onImagePointer?.(data => {
   if(!data || typeof data !== 'object') return;
-  if(data.type === 'start') startImageDrag({ id:data.id, corner:data.corner || null, x:data.x, y:data.y, source:'mpv' });
-  else if(data.type === 'move' && getImgDrag()?.source === 'mpv') moveImageDrag(data.x, data.y);
-  else if((data.type === 'end' || data.type === 'cancel') && getImgDrag()?.source === 'mpv') finishImageDrag(null, 'mpv');
+  if(data.type === 'start') previewDrag.startImageDrag({ id:data.id, corner:data.corner || null, x:data.x, y:data.y, source:'mpv' });
+  else if(data.type === 'move' && previewDrag.imageDrag()?.source === 'mpv') previewDrag.moveImageDrag(data.x, data.y);
+  else if((data.type === 'end' || data.type === 'cancel') && previewDrag.imageDrag()?.source === 'mpv') previewDrag.finishImageDrag(null, 'mpv');
 });
 
 
@@ -703,8 +700,8 @@ _videoSub?.addEventListener('contextmenu', e => {
   
   showCtx(e.clientX, e.clientY, items);
 });
-_videoWrap?.addEventListener('pointermove', e => { if(!getSubDrag()) _setSubtitleHover(e.target.closest?.('.vsub-track.drag')||null); });
-_videoWrap?.addEventListener('pointerleave', () => { if(!getSubDrag()) _setSubtitleHover(null); });
+_videoWrap?.addEventListener('pointermove', e => { if(!previewDrag.subtitleDrag()) _setSubtitleHover(e.target.closest?.('.vsub-track.drag')||null); });
+_videoWrap?.addEventListener('pointerleave', () => { if(!previewDrag.subtitleDrag()) _setSubtitleHover(null); });
 
 /* ===== 快取管理對話框（桌面版） ===== */
 function _fmtBytes(n){ n=+n||0; if(n<1024)return n+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+' '+u[i]; }
@@ -2292,7 +2289,7 @@ async function initDesktop(){
     renderCueBlocks, trackFromY, secToEncore, secToSRT, secToASS, newId, ensureTrackCount,
     syncTrackCount, sortCues, onDurationKnown, setZoom, zoomFit, zoomFitVideo, showCueMenu, showPlayerMenu,
     History, recordHistory, renderHistory, addNote, renderNotes, togglePanel,
-    parseTimecodeInput, snapVal, snapTargets, neighborBounds, setFps, snapFps, FPS_SET,
+    parseTimecodeInput, snapVal, snapTargets, cueNeighborBounds, setFps, snapFps, FPS_SET,
     toASSFromState, _stageRect }; // 三路一致診斷：ASS 產出＋字幕層座標基準（畫面實際顯示區）
   window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview,
     demuxIndex: _wcDemuxIndex, SampleReader: _wcSampleReader }; // 階段0 PoC＋階段1 預覽＋v4.29 串流式 demux（驗證/診斷入口）
@@ -2302,20 +2299,10 @@ async function initDesktop(){
 async function takeScreenshot(withTimecode = false) {
   if (!State.duration && !State.mediaPath) { showToast('尚未載入影音'); return; }
 
-  let tcSuffix = '';
-  let tcStr = '';
-  if (withTimecode) {
-    tcStr = secToEncore(Media.displayTime(), State.fps, State.dropFrame);
-    tcSuffix = '_' + tcStr.replace(/:/g, '-').replace(/;/g, '-');
-  }
-
-  // 決定目錄與檔名
-  let dir = getProjectDir();
-  if (!dir && State.mediaPath) {
-    const sep = State.mediaPath.replace(/\\/g, '/').lastIndexOf('/');
-    if (sep > 0) dir = State.mediaPath.substring(0, sep);
-  }
-  if (dir) dir = dir.replace(/[\\/]+$/, '');
+  // 存哪、叫什麼名字的規則在 screenshot-target.js（純函式，可測）；這裡只負責編排。
+  const tcStr = withTimecode ? secToEncore(Media.displayTime(), State.fps, State.dropFrame) : '';
+  const tcSuffix = withTimecode ? timecodeSuffix(tcStr) : '';
+  const dir = screenshotDir({ projectDir: getProjectDir(), mediaPath: State.mediaPath });
 
   let fullPath = '';
   let name = '';
@@ -2326,8 +2313,7 @@ async function takeScreenshot(withTimecode = false) {
       name = reserved?.name || '';
     } catch (e) { console.error('[screenshot] reserve path error:', e); }
   } else {
-    // 瀏覽器 fallback 檔名
-    name = `Shot-${Math.floor(Media.displayTime())}${tcSuffix}.jpg`;
+    name = fallbackScreenshotName(Media.displayTime(), tcSuffix);
   }
 
   // 若為 MPV 模式
@@ -2526,7 +2512,7 @@ setTimeout(() => {
 
 init();
 
-setupInteractionContext({
+const previewDrag = createPreviewDrag({
   getStageRect: _stageRect,
   selectImageClip: _selectImageClip,
   renderImageOverlays,
@@ -2552,5 +2538,4 @@ setupInteractionContext({
     }
   }
 });
-bindImageDomEvents(document.getElementById('imageLayer'));
-bindSubtitleDomEvents(_videoSub, _videoWrap);
+previewDrag.bind({ imageLayer: document.getElementById('imageLayer'), videoSub: _videoSub, videoWrap: _videoWrap });

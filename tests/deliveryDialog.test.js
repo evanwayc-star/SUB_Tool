@@ -12,7 +12,7 @@ const spies = vi.hoisted(() => ({
 
 const mediaMock = vi.hoisted(() => ({
   tracks: [],
-  getExternalAudioSources: () => [],
+  externalAudio: { list: () => [], get: () => null },
 }));
 
 vi.mock('../src/media.js', () => ({ Media: mediaMock, Wave: {} }));

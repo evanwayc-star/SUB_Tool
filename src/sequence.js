@@ -95,18 +95,36 @@ const Seq = {
     if(c.in >= c.out) c.in = Math.max(0, c.out - 0.2);
     this.recomputeDuration();
   },
-  /* 拖曳邊界：回傳 clip 於「時間軸」上可移動的 offset 範圍（只受【同軌】鄰居限制；拖曳開始時計算一次） */
-  neighborBounds(c, v){
+  /* 【同軌鄰居的位置】——這是唯一的鄰居事實，其他上限一律由它導出。
+     只看同軌是刻意的：同一視訊軌不可重疊，不同軌重疊＝疊層，是正常用法。
+
+     回傳鄰居本身的座標（prevEnd＝左鄰右緣、nextStart＝右鄰左緣），
+     **不預先扣掉自身長度**——扣掉之後就只回答得了「可以移到哪」，
+     回答不了「可以多長」。v5.8.0 的「修改持續時間」就是因為前一版的介面
+     把移動語義烤進回傳值，只好在 timeline-renderer 裡再手寫第三份同軌掃描。 */
+  neighborsOnTrack(c, v){
     v = (v === undefined) ? vt(c) : v;
-    const L = this.len(c);
-    let lo = 0, hi = Infinity;
+    let prevEnd = 0, nextStart = Infinity;
     for(const o of State.clips){
       if(o === c || vt(o) !== v) continue;
       const oEnd = this.clipEnd(o);
-      if(oEnd <= c.offset + EPS) lo = Math.max(lo, oEnd);                    // 左鄰的右緣
-      if(o.offset >= this.clipEnd(c) - EPS) hi = Math.min(hi, o.offset - L); // 右鄰的左緣 − 自身長度
+      if(oEnd <= c.offset + EPS) prevEnd = Math.max(prevEnd, oEnd);          // 左鄰的右緣
+      if(o.offset >= this.clipEnd(c) - EPS) nextStart = Math.min(nextStart, o.offset);
     }
-    return { lo, hi: Math.max(lo, hi) };
+    return { prevEnd, nextStart };
+  },
+  /* 拖曳邊界：clip 於「時間軸」上可移動的 offset 範圍。由鄰居事實導出（右鄰左緣 − 自身長度）。 */
+  neighborBounds(c, v){
+    const { prevEnd, nextStart } = this.neighborsOnTrack(c, v);
+    const hi = (nextStart === Infinity) ? Infinity : nextStart - this.len(c);
+    return { lo: prevEnd, hi: Math.max(prevEnd, hi) };
+  },
+  /* 改長度的上限：同時受【來源長度】與【同軌下一段的起點】限制。
+     來源長度對圖片不適用（圖片可自由延長），由呼叫端決定要不要納入。 */
+  maxLengthOnTrack(c, v){
+    const { nextStart } = this.neighborsOnTrack(c, v);
+    if(nextStart === Infinity) return Infinity;
+    return Math.max(0.001, nextStart - c.offset);
   },
   /* 自由拖放後的重疊解算（插入語義）：只在【被拖 clip 所在軌】內處理。
      同軌依 offset 排序（同位時被拖段優先），由左至右掃描——真的重疊才把後面段推到前段結尾。

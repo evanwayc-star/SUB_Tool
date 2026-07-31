@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mediaMock=vi.hoisted(()=>(
   {
-    getExternalAudioSources:vi.fn(()=>[]),
+    externalAudio: { list: vi.fn(() => []), get: vi.fn(() => null) },
     reset:vi.fn(),
     // _buildProjectData 會讀 displayTime() 存進 playhead（v5.2.0 起）。
     // mock 少了它會讓所有存檔測試以 TypeError 失敗——不是產品缺陷，是 mock 沒跟上。
@@ -31,7 +31,7 @@ describe('project image persistence',()=>{
   beforeEach(async()=>{
     vi.resetModules();
     saveProject=vi.fn().mockResolvedValue('C:/projects/image-test.subtool');
-    mediaMock.getExternalAudioSources.mockReturnValue([]);
+    mediaMock.externalAudio.list.mockReturnValue([]);
     mediaMock.reset.mockClear();
     mediaMock.restorePendingImageClips.mockClear();
     mediaMock.restorePendingImageClips.mockResolvedValue({restored:1,pending:0});

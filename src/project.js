@@ -100,7 +100,7 @@ function _externalAudioEnd(sources){
 
 function _savedExternalAudioSources(){
   let live=[];
-  try{ live=typeof Media.getExternalAudioSources==='function'?Media.getExternalAudioSources():[]; }catch(e){}
+  try{ live=Media.externalAudio?.list?.() || []; }catch(e){}
   // 尚未能重新開啟（例如暫時找不到檔案）的來源也要繼續留在專案檔，避免下一次儲存遺失。
   const pending=_projectLoadSession.activePlan?.pendingExternalAudioSources?.()||[];
   return _normalExternalAudioSources([...(Array.isArray(live)?live:[]), ...pending]);
@@ -123,7 +123,7 @@ async function _restorePendingExternalAudioSources(plan=_projectLoadSession.acti
 
   const existing=new Set();
   try{
-    for(const source of (typeof Media.getExternalAudioSources==='function'?Media.getExternalAudioSources():[])){
+    for(const source of (Media.externalAudio?.list?.() || [])){
       if(source?.audioSourceId) existing.add(String(source.audioSourceId));
     }
   }catch(e){}
@@ -156,7 +156,7 @@ async function _restorePendingExternalAudioSources(plan=_projectLoadSession.acti
   // 未找到檔案的來源仍要保留其可編輯 timeline metadata；否則一開專案就會被
   // 影片長度截短，下一次另行重新連結音檔時位置也會看起來消失。
   let live=[];
-  try{ live=typeof Media.getExternalAudioSources==='function'?Media.getExternalAudioSources():[]; }catch(e){}
+  try{ live=Media.externalAudio?.list?.() || []; }catch(e){}
   State.externalAudioState=[...(Array.isArray(live)?live:[]),...unresolved];
   State.externalAudioEnd=_externalAudioEnd(State.externalAudioState);
   return {restored,pending:unresolved.length};

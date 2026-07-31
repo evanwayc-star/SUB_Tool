@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mediaMock = vi.hoisted(() => ({
   displayTime: vi.fn(() => 0),
-  getExternalAudioSources: vi.fn(() => []),
+  externalAudio: { list: vi.fn(() => []), get: vi.fn(() => null) },
   loadDesktopMedia: vi.fn(),
   reset: vi.fn(),
   restorePendingImageClips: vi.fn().mockResolvedValue({ restored: 0, pending: 0 }),

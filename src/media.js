@@ -205,9 +205,6 @@ const Media = {
     return State.externalAudioEnd;
   },
   /* 給 audio-routing 的後續入口使用：回傳具 clip 相容欄位的 external source。 */
-  getExternalAudioSources(){ return this.externalAudio.list(); },
-  getRoutableAudioSources(){ return this.getExternalAudioSources(); },
-  getExternalAudioSource(key){ return this.externalAudio.get(key); },
   /* project.js 可直接儲存 getExternalAudioSources() 的回傳資料，並在讀檔後呼叫此函式。
      目前僅桌面版可依原始 path 重建實際 audio element / cache。 */
   async restoreExternalAudioSource(serialized){
@@ -239,12 +236,9 @@ const Media = {
     if(!this.externalAudio.updateDuration(asset,rawDuration)) return;
     this.recomputeTimelineDuration();
   },
-  _externalAudioAsset(key){ return this.externalAudio.find(key); },
-  _externalAudioRange(asset){ return this.externalAudio.range(asset); },
-  _normalizeExternalAudioAsset(asset){ return this.externalAudio.normalize(asset); },
   /* 外部音訊編輯完成後統一同步總長度、播放位置與 mixer／timeline。 */
   _commitExternalAudioEdit(asset,label=''){
-    if(asset) this._normalizeExternalAudioAsset(asset);
+    if(asset) this.externalAudio.normalize(asset);
     this.recomputeTimelineDuration();
     this.applyGains();
     if(this.playing) this._restartElements();
@@ -305,7 +299,7 @@ const Media = {
     return right;
   },
   removeExternalAudio(key,{record=true}={}){
-    const asset=this._externalAudioAsset(key);
+    const asset=this.externalAudio.find(key);
     if(!asset) return false;
     const source=asset.audioSrc;
     const oldTracks=this.tracks.filter(track=>track.source===source);
@@ -328,8 +322,6 @@ const Media = {
   },
   /* 將外部 asset 的 timeline placement 換算成來源秒數；null 表示此時間點不該播放。
      沒有 asset metadata 的舊 ext-* runtime track 保持原本「從 0 秒跟 timeline」行為。 */
-  externalSourceTime(source, timelineTime){ return this.externalAudio.sourceTime(source,timelineTime); },
-  externalTimelineEnd(){ return this.externalAudio.timelineEnd(); },
   /* 原生直讀的影片平常不需要 ffmpeg 音訊快取；但多聲道路由匯出必須有各聲道檔案。
      因此在背景補抽，不改變原生播放路徑，只把 cache file 掛回既有 L/R runtime track。 */
   async cacheNativeRoutingAudio(clip, path, duration, audio){
@@ -1400,7 +1392,7 @@ const Media = {
   set _gapStart(value){ this._transport.gapStartedAt = value; },
   _seqSwitching:false,
   seqOn(){ return State.clips.some(c => c.type !== 'image'); },
-  audioOnlyTimeline(){ return !this.seqOn() && this.externalTimelineEnd()>0; },
+  audioOnlyTimeline(){ return !this.seqOn() && this.externalAudio.timelineEnd()>0; },
   _activeClip(){ return Seq.byId(this.activeClipId); },
 
   /* ===== 播放呈現狀態的對外查詢 ===============================================
@@ -2180,7 +2172,7 @@ const Media = {
     drawTimeline(); renderAudioTracks();
     emit('history:record','解除影音連結：'+(clip.name||''));
     setStatus('已解除影音連結，可分別剪輯影片與音訊','ok');
-    return made.map(asset=>this.getExternalAudioSource(asset.id));
+    return made.map(asset=>this.externalAudio.get(asset.id));
   },
   /* 自序列移除 clip；可刪除最後一段影片，保留已解除連結／外部音訊做純音訊時間軸。 */
   removeClip(id){
@@ -2317,7 +2309,7 @@ const Media = {
       for(const tr of this.tracks){
         const source=tr.source||'';
         if(tr.kind!=='element'||!tr.el||!source.startsWith('ext-')) continue;
-        const off=this.externalSourceTime(source,t);
+        const off=this.externalAudio.sourceTime(source,t);
         try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
       }
       const hit = Seq.clipAt(t);
@@ -2357,7 +2349,7 @@ const Media = {
         if(tr.kind!=='element'||!tr.el) continue;
         const source=tr.source||'';
         if(!source.startsWith('ext-')){ try{tr.el.pause();}catch(e){} continue; }
-        const off=this.externalSourceTime(source,t);
+        const off=this.externalAudio.sourceTime(source,t);
         try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
       }
       window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
@@ -2369,7 +2361,7 @@ const Media = {
       getPlayerAdapter().seek(t).catch(()=>{});
       for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
         const source=tr.source||'';
-        const off=source.startsWith('ext-')?this.externalSourceTime(source,t):t;
+        const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
         try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
       } }
       $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
@@ -2383,7 +2375,7 @@ const Media = {
       $('seekBar').value=Math.round(t*1000);
       for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
         const source=tr.source||'';
-        const off=source.startsWith('ext-')?this.externalSourceTime(source,t):t;
+        const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
         try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
       } }
       if(this.playing&&this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
@@ -2392,7 +2384,7 @@ const Media = {
     video.currentTime=t;
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
       const source=tr.source||'';
-      const off=source.startsWith('ext-')?this.externalSourceTime(source,t):t;
+      const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
       try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
     } }
     if(this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
@@ -2405,7 +2397,7 @@ const Media = {
       if(tr.kind!=='element'||!tr.el) continue;
       const source=tr.source||'';
       if(!source.startsWith('ext-')) continue;
-      active.push(`${source}:${!tr._srcHidden&&this.externalSourceTime(source,t)!=null?'1':'0'}`);
+      active.push(`${source}:${!tr._srcHidden&&this.externalAudio.sourceTime(source,t)!=null?'1':'0'}`);
     }
     const key=active.join('|');
     if(key===this._externalActivityKey) return;
@@ -2414,7 +2406,7 @@ const Media = {
       if(tr.kind!=='element'||!tr.el) continue;
       const source=tr.source||'';
       if(!source.startsWith('ext-')) continue;
-      const off=!tr._srcHidden?this.externalSourceTime(source,t):null;
+      const off=!tr._srcHidden?this.externalAudio.sourceTime(source,t):null;
       try{
         if(off==null){ tr.el.pause(); continue; }
         tr.el.currentTime=clamp(off,0,tr.el.duration||off);
@@ -2432,7 +2424,7 @@ const Media = {
       const s = tr.source || 'video';
       let off;
       if(s.startsWith('ext-')){
-        off=this.externalSourceTime(s,tlT);                                 // 外部音檔：timeline placement → 來源時間
+        off=this.externalAudio.sourceTime(s,tlT);                                 // 外部音檔：timeline placement → 來源時間
         if(off==null){ try{tr.el.pause();}catch(e){} continue; }
       }
       else if(this.seqOn()){ const lt = this._srcLocalT(s, tlT); if(lt == null){ try{ tr.el.pause(); }catch(e){} continue; } off = lt; } // 各音源對到自己片段來源時間；無作用片段則停
@@ -2558,7 +2550,7 @@ const Media = {
          const audible = anySolo ? tr.solo : !tr.muted;
          if(audible){
            const source=tr.source||'';
-           const off=source.startsWith('ext-')?this.externalSourceTime(source,t):localT;
+           const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):localT;
            if(off!=null) scrubEl(tr.el,off);
          }
       }

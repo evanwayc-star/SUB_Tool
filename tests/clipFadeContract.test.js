@@ -1,0 +1,128 @@
+/* 片段淡入淡出的【跨行程契約】。
+
+   同一組數字必須存在於兩個地方，因為它們跑在不同的行程與模組系統：
+     src/clip-fade.js         fadeWindow()  → renderer（ES module，Vite 打包）
+     electron/export-plan.js  fade/afade    → 主程序（CommonJS）
+
+   為什麼不合併成一份：主程序不能 import renderer 的 ES module，而且匯出側
+   要的不是「某一刻的 alpha」，是要餵給 ffmpeg 的 `st=` 與 `d=` 參數。
+   正確的接縫是「共用同一份規格、各自表達成自己那一路的東西」。
+
+   既然無法合併，就必須有機制阻止它們漂掉——就是這支測試。
+   對照 tests/imageGeomContract.test.js（幾何側）與
+   tests/subtitleStyleContract.test.js（樣式側），這是第三道同型的守衛。
+
+   壞掉的樣子：預覽裡圖片已經淡完，匯出的影片卻還亮著（或反過來）。
+   不會報錯，只有把兩邊的畫面並排比對才看得出來。 */
+import { describe, expect, it } from 'vitest';
+import { clipLength, fadeAlphaAt, fadeWindow } from '../src/clip-fade.js';
+import { buildDeliveryArgv } from '../electron/export-plan.js';
+
+const clip = (o = {}) => ({
+  name: 'a.mov', path: 'C:/a.mov', type: 'video',
+  in: o.in ?? 0, out: o.out ?? 10, offset: o.offset ?? 0, vtrack: 0,
+  audio: [], fadeIn: o.fadeIn ?? 0, fadeOut: o.fadeOut ?? 0,
+});
+
+/* 從 argv 撈出影像／音訊 fade 的 st 與 d。 */
+function fadeParamsFrom(argv) {
+  const fc = argv.join(' ');
+  const grab = re => [...fc.matchAll(re)].map(m => m.groups);
+  return {
+    vIn: grab(/fade=t=in:st=(?<st>[\d.]+):d=(?<d>[\d.]+):alpha=1/g),
+    vOut: grab(/fade=t=out:st=(?<st>[\d.]+):d=(?<d>[\d.]+):alpha=1/g),
+    aIn: grab(/afade=t=in:st=(?<st>[\d.]+):d=(?<d>[\d.]+)/g),
+    aOut: grab(/afade=t=out:st=(?<st>[\d.]+):d=(?<d>[\d.]+)/g),
+  };
+}
+
+function argvFor(c) {
+  const { args } = buildDeliveryArgv({
+    clips: [c],
+    videoTracks: [{ vt: 0, scale: 1, posX: 0.5, posY: 0.5, opacity: 1 }],
+    width: 1920, height: 1080, fps: 25,
+    duration: clipLength(c),
+    format: 'h264', videoKbps: 8000,
+    outPath: 'C:\\out\\a.mp4',
+  }, { ffmpeg: 'ffmpeg' });
+  return args;
+}
+
+const MATRIX = [
+  { label: '只有淡入', c: { out: 10, fadeIn: 2 } },
+  { label: '只有淡出', c: { out: 10, fadeOut: 3 } },
+  { label: '淡入淡出都有', c: { out: 12, fadeIn: 1.5, fadeOut: 2.5 } },
+  { label: '修剪過的片段（in 不為 0）', c: { in: 4, out: 14, fadeIn: 2, fadeOut: 2 } },
+  { label: '淡入長度超過片段長度', c: { out: 3, fadeIn: 9 } },
+  { label: '淡出長度超過片段長度', c: { out: 3, fadeOut: 9 } },
+  { label: '極短片段', c: { in: 0, out: 0.05, fadeIn: 0.02, fadeOut: 0.02 } },
+];
+
+describe('片段淡入淡出跨行程契約：預覽規格 ↔ 匯出 filtergraph', () => {
+  for (const { label, c: over } of MATRIX) {
+    describe(label, () => {
+      const c = clip(over);
+      const win = fadeWindow(c);
+      const argv = argvFor(c);
+      const got = fadeParamsFrom(argv);
+
+      it('片段長度兩邊一致', () => {
+        // 匯出側以 clen = max(0.001, out - in) 當基準；沒有淡出時看淡入的 d 上限
+        expect(win.length).toBeCloseTo(Math.max(0.001, c.out - c.in), 6);
+      });
+
+      it('淡入：st 一律為 0，d 等於夾過長度後的淡入秒數', () => {
+        if (win.fadeIn <= 0) { expect(got.vIn).toHaveLength(0); return; }
+        expect(got.vIn.length).toBeGreaterThan(0);
+        expect(Number(got.vIn[0].st)).toBe(0);
+        expect(Number(got.vIn[0].d)).toBeCloseTo(win.fadeIn, 3);
+      });
+
+      it('淡出：st 等於 length − fadeOut，d 等於夾過長度後的淡出秒數', () => {
+        if (win.fadeOut <= 0) { expect(got.vOut).toHaveLength(0); return; }
+        expect(got.vOut.length).toBeGreaterThan(0);
+        expect(Number(got.vOut[0].st)).toBeCloseTo(win.fadeOutStart, 3);
+        expect(Number(got.vOut[0].d)).toBeCloseTo(win.fadeOut, 3);
+      });
+
+      /* 預覽的斜坡必須落在匯出宣告的同一個視窗內：
+         淡入結束那一刻要滿版、淡出開始那一刻也要滿版。 */
+      it('預覽的 alpha 斜坡與匯出宣告的視窗對得上', () => {
+        expect(fadeAlphaAt(c, 0)).toBe(win.fadeIn > 0 ? 0 : 1);
+        expect(fadeAlphaAt(c, win.fadeIn)).toBeCloseTo(win.fadeOut > 0 && win.fadeIn >= win.fadeOutStart
+          ? fadeAlphaAt(c, win.fadeIn) : 1, 6);
+        expect(fadeAlphaAt(c, win.length)).toBe(win.fadeOut > 0 ? 0 : 1);
+      });
+    });
+  }
+
+  it('沒有淡入淡出時，filtergraph 不含任何 fade（不可硬塞 d=0）', () => {
+    const got = fadeParamsFrom(argvFor(clip({ out: 10 })));
+    expect(got.vIn).toHaveLength(0);
+    expect(got.vOut).toHaveLength(0);
+  });
+
+  it('長度為 0 的片段兩邊都夾到 0.001，不會除以零也不會出現 d=0', () => {
+    const c = clip({ in: 5, out: 5, fadeIn: 1 });
+    expect(clipLength(c)).toBe(0.001);
+    expect(Number.isFinite(fadeAlphaAt(c, 0))).toBe(true);
+    expect(fadeWindow(c).fadeIn).toBe(0.001);
+  });
+
+  it('負數的淡入淡出視為 0', () => {
+    const w = fadeWindow(clip({ out: 10, fadeIn: -3, fadeOut: -1 }));
+    expect(w.fadeIn).toBe(0);
+    expect(w.fadeOut).toBe(0);
+  });
+
+  it('斜坡是線性的：淡入一半時剛好 0.5', () => {
+    const c = clip({ out: 10, fadeIn: 4 });
+    expect(fadeAlphaAt(c, 2)).toBeCloseTo(0.5, 6);
+  });
+
+  it('片段範圍外一律 0（不可讓已結束的疊層繼續亮著）', () => {
+    const c = clip({ out: 10, fadeIn: 1, fadeOut: 1 });
+    expect(fadeAlphaAt(c, -0.5)).toBe(0);
+    expect(fadeAlphaAt(c, 10.5)).toBe(0);
+  });
+});

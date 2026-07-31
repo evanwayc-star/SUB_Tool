@@ -57,7 +57,7 @@ vi.mock('../src/util.js', () => ({
 vi.mock('../src/media.js', () => ({
   Media: {
     displayTime: () => 0,
-    getExternalAudioSources: () => [],
+    externalAudio: { list: () => [], get: () => null },
     mpvMode: false,
   },
   Wave: {},
@@ -126,7 +126,7 @@ describe('timeline public facade', () => {
 
     const operations = [
       'trackFromY', 'addTrack', 'removeTrack', 'moveSelectedToTrack',
-      'setZoom', 'zoomFit', 'zoomFitVideo', 'snapTargets', 'snapVal', 'neighborBounds',
+      'setZoom', 'zoomFit', 'zoomFitVideo', 'snapTargets', 'snapVal', 'cueNeighborBounds',
     ];
     for (const name of operations) {
       expect(engine[name]).toBeTypeOf('function');
@@ -136,7 +136,7 @@ describe('timeline public facade', () => {
     expect(engine.trackFromY(35)).toBe(0);
     expect(engine.trackFromY(120)).toBe(1);
     expect(engine.snapVal(4.9, [0, 5, 10], 0.2)).toBe(5);
-    expect(engine.neighborBounds(4, 6, 0)).toEqual({ prevEnd: 3, nextStart: 7 });
+    expect(engine.cueNeighborBounds(4, 6, 0)).toEqual({ prevEnd: 3, nextStart: 7 });
   });
 
   /* 接縫的寬度是一個決定，不是副作用。timeline.js 從 `export *` 改成逐一列名，
@@ -148,9 +148,9 @@ describe('timeline public facade', () => {
     const timeline = await import('../src/timeline.js');
     expect(Object.keys(timeline).sort()).toEqual([
       'ROW_H', 'RULER_H',
-      'addTrack', 'clearClipSelection', 'closeClipGapLeft',
+      'addTrack', 'clearClipSelection', 'closeClipGapLeft', 'cueNeighborBounds',
       'deleteSelectedClip', 'drawRuler', 'drawTimeline', 'drawWave',
-      'fmtTick', 'layoutTimeline', 'moveSelectedToTrack', 'neighborBounds',
+      'fmtTick', 'layoutTimeline', 'moveSelectedToTrack',
       'niceStep', 'refreshTrackGutterActive', 'removeTrack', 'renderCueBlocks',
       'renderTrackRows', 'selectClip', 'setZoom',
       'showClipDuration', 'showClipFade', 'showCrossfade', 'showImageGeom',

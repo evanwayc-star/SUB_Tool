@@ -259,7 +259,7 @@ function createCommands(ctx){
     },
     'toggle-all-lock': () => {
       const buses = State.audioProject?.buses || [];
-      const extAudio = typeof Media.getExternalAudioSources === 'function' ? Media.getExternalAudioSources() : [];
+      const extAudio = Media.externalAudio?.list?.() || [];
       const anyUnlocked = State.tracks.some(t => !t.locked) || State.videoTracks.some(t => !t.locked) || buses.some(t => !t.locked) || State.clips.some(c => !c.locked) || extAudio.some(a => !a.locked);
       State.tracks.forEach(t => t.locked = anyUnlocked);
       State.videoTracks.forEach(t => t.locked = anyUnlocked);
