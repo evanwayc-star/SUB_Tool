@@ -130,6 +130,7 @@ const Media = {
   mpvMode:false, _mpvTime:0, _mpvDuration:0, _bgVersion:0,
   activeSource:null, // null=全部混音；'video'=影片原音；'ext-xxx'=外部檔案
   pendingChannels:[], // 背景抽取音軌時的「準備中」聲道（讓混音器立即顯示推桿，逐一就緒）
+  audioPanelNotice:null, // 網頁版能力限制的持續提示；renderAudioTracks 不得用 bus 數覆蓋
   // 外部音檔不是影片 clip，但仍是可路由／可輸出的專案音源。
   // 每筆都提供 clip 相容的 id/name/audioSourceId/audioSrc/offset/in/out，供路由 UI
   // 或匯出端以同一套資料模型讀取；真正的播放群組仍用 audioSrc（ext-*）。
@@ -558,10 +559,14 @@ const Media = {
 
   async loadVideoFile(file, projectRestore=null){
     this._resetForFirstVideo();
+    this.audioPanelNotice=null;
+    renderAudioTracks();
     State.mediaName=file.name; State.mediaSize=file.size;
     const url=URL.createObjectURL(file); this.objectURLs.push(url);
     video.src=url;
     const native = await canPlayNatively(file, video);
+    this.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:native});
+    renderAudioTracks();
     $('noVideo').style.display='none';
     if(native){
       await new Promise((res)=>{ video.onloadedmetadata=res; if(video.readyState>=1)res(); });
@@ -603,6 +608,9 @@ const Media = {
   },
 
   async probeAndMaybeExtract(file){
+    // 大檔限制必須先於 audioTracks 早退判斷；即使瀏覽器列得出多個 stream，
+    // HTMLMediaElement 仍只提供 Stereo 播放路徑，不能宣稱已載入全部來源聲道。
+    this.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:true});
     // 嘗試以原生 audioTracks 偵測；多數瀏覽器不支援，故主要靠 ffmpeg
     try{
       const at=video.audioTracks;
@@ -626,7 +634,7 @@ const Media = {
         }
       }).catch(()=>{});
     }else{
-      $('atHint').textContent='檔案過大，略過多軌偵測（建議用 Electron 版）';
+      showToast(WEB_LARGE_NATIVE_AUDIO_NOTICE);
     }
     renderAudioTracks();
   },
@@ -1230,6 +1238,8 @@ const Media = {
   },
   async transcodeAndExtract(file,projectRestore=null){
     if(file.size>FFMPEG_MAX_BYTES){
+      this.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:false});
+      renderAudioTracks();
       setStatus('','');
       openModal('檔案過大',
         `<b>${file.name}</b> 約 ${(file.size/1e9).toFixed(2)} GB。<br><br>`+
@@ -2711,6 +2721,7 @@ const Media = {
     this._bgVersion++; this.activeSource=null; // 讓進行中的 _bgAudioIngest 知道要放棄；清除音源選擇
     this._wcProxyUrl=null; this._wcProxyPath=null; this._wcTakeover=false; // WC 接管狀態隨媒體卸載歸零
     this.pendingChannels=[];
+    this.audioPanelNotice=null;
     // 只清 runtime asset registry；State.audioProject 的 sourceMaps 由 project reset/load 負責，
     // 以便讀取專案時可在之後用 restoreExternalAudioSource 沿用相同 audioSourceId 重建。
     this.externalAudioSources=[];
@@ -2771,6 +2782,15 @@ setInterval(()=>{ try{ Media.seqTick(); }catch(e){} }, 500);
 
 const FFMPEG_MAX_BYTES = 1.6e9; // 超過此大小不送 ffmpeg.wasm
 const WAVE_DECODE_MAX = 5e8;    // 超過此大小不整檔解碼波形，改即時擷取
+const WEB_LARGE_NATIVE_AUDIO_NOTICE =
+  '網頁版無法完整讀取此大型檔案的多音軌，目前僅提供 Stereo 預覽；請使用 macOS 或 Windows 桌面版載入全部 Mono 聲道。';
+const WEB_LARGE_UNSUPPORTED_MEDIA_NOTICE =
+  '網頁版無法載入此大型非原生格式的影音與多音軌；請使用 macOS 或 Windows 桌面版載入全部 Mono 聲道。';
+
+function webAudioCapabilityNotice(file,{nativePreview=false}={}){
+  if(Number(file?.size)<=FFMPEG_MAX_BYTES) return null;
+  return nativePreview ? WEB_LARGE_NATIVE_AUDIO_NOTICE : WEB_LARGE_UNSUPPORTED_MEDIA_NOTICE;
+}
 
 function loadScript(src){return new Promise((res,rej)=>{
   if([...document.scripts].some(s=>s.src===src))return res();
@@ -3111,7 +3131,7 @@ const Wave = {
     this.peaks=new Float32Array(len*2); this.live=true;
     this.clearSources();
     drawTimeline();
-    $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
+    if(!Media.audioPanelNotice) $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
   },
   captureLive(){ // 由 rafLoop 於播放時呼叫
     if(!this.live||!this.peaks||!Media.analyser)return;

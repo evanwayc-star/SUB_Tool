@@ -68,13 +68,21 @@ function renderAudioTracks(){
   const hint=$('atHint');
   const countInput=$('projectAudioTracksCount');
   if(countInput && document.activeElement !== countInput) countInput.value = buses.length;
+  if(hint && Media.audioPanelNotice){
+    hint.textContent=Media.audioPanelNotice;
+    hint.classList.add('audio-capability-notice');
+    hint.hidden=false;
+  }else if(hint){
+    hint.classList.remove('audio-capability-notice');
+    hint.hidden=true;
+  }
   if(!buses.length){
-    if(hint) hint.textContent='尚未建立專案音訊軌';
+    if(hint && !Media.audioPanelNotice) hint.textContent='尚未建立專案音訊軌';
     renderAudioSources();
     if($('mixerPanel')?.classList.contains('show')) renderMixer();
     return;
   }
-  if(hint) hint.textContent=`${buses.length} 條專案音訊軌`;
+  if(hint && !Media.audioPanelNotice) hint.textContent=`${buses.length} 條專案音訊軌`;
   buses.forEach((bus,index)=>{
     const label=busLabel(bus,index), name=busName(bus,index), volume=Math.round(busVolume(bus)*100);
     const row=document.createElement('div'); row.className='atrack project-bus';

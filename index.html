@@ -114,8 +114,8 @@
           <button class="icon tp-btn" data-act="mixer" title="顯示／隱藏音量表與匯出軌道對應設定" style="font-size:11px; padding:2px 6px; min-width:unset;">🎚</button>
         </div>
 
-        <!-- 音軌清單已移入音量表浮動面板；保留隱藏佔位符供 JS 寫入 -->
-        <span id="atHint" hidden></span>
+        <!-- 音軌清單已移入音量表浮動面板；提示平時隱藏，大型網頁媒體限制會持續顯示 -->
+        <span id="atHint" role="status" aria-live="polite" hidden></span>
         <div id="atList" hidden></div>
       </div>
 

@@ -12,10 +12,9 @@
    CONTEXT.md：**來源聲道**＝母素材內可獨立讀取的一個聲道，以從 1 開始的號碼識別。
 
    【這支測得到什麼、測不到什麼】
-   測得到：兩側 flattenSourceChannels 的輸出逐項相同，以及扁平序號 → 檔名的對應。
-   測不到：main.js `_runIngest` 裡真正產生 channels[] 的那段迴圈——它與 filtergraph
-   組建交纏、且是 async + spawn ffmpeg，vitest 起不了。那段已改為呼叫共用的
-   channelFileName()，但「迴圈的走訪順序」本身仍只能靠這裡的規格與程式碼審查把關。 */
+   測得到：兩側 flattenSourceChannels 的輸出逐項相同、扁平序號 → 檔名，以及 main.js
+   實際使用的 buildAudioIngestPlan() 所產生之 channels[]／filtergraph 規劃。
+   測不到：原生 ffmpeg binary 真正解碼特定母檔後的聲音內容；那一層仍需 §4 大檔真機驗收。 */
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import { flattenSourceChannels, sourceChannelLabels } from '../src/channel-layout.js';
@@ -71,6 +70,51 @@ describe('來源聲道展開：renderer ↔ 主程序', () => {
   it('null／undefined 安全', () => {
     expect(flattenSourceChannels(null)).toEqual([]);
     expect(flattenSourceChannels(undefined)).toEqual(main.flattenSourceChannels(undefined));
+  });
+});
+
+describe('桌面版原生 ingest 規劃', () => {
+  for (const { label, audio } of MATRIX) {
+    it(`${label}：ingest 規劃與 renderer 的來源聲道座標、順序完全相同`, () => {
+      const plan = main.buildAudioIngestPlan(audio);
+      expect(plan.channels.map(({ sourceStream, sourceChannel }, index) => ({
+        sourceStream, sourceChannel, index,
+      }))).toEqual(flattenSourceChannels(audio));
+      expect(plan.channels.map(channel => channel.file))
+        .toEqual(plan.channels.map((_, index) => main.channelFileName(index)));
+    });
+  }
+
+  it('5.1 FM + 2.0 FM 會產生依序排列的 8 個獨立 Mono 來源聲道', () => {
+    const plan = main.buildAudioIngestPlan([
+      { channels: 6, title: '5.1 FM' },
+      { channels: 2, title: '2.0 FM' },
+    ]);
+
+    expect(plan.channels).toEqual([
+      { label: '5.1 FM · 聲道1', file: 'ch_01.m4a', sourceStream: 0, sourceChannel: 0 },
+      { label: '5.1 FM · 聲道2', file: 'ch_02.m4a', sourceStream: 0, sourceChannel: 1 },
+      { label: '5.1 FM · 聲道3', file: 'ch_03.m4a', sourceStream: 0, sourceChannel: 2 },
+      { label: '5.1 FM · 聲道4', file: 'ch_04.m4a', sourceStream: 0, sourceChannel: 3 },
+      { label: '5.1 FM · 聲道5', file: 'ch_05.m4a', sourceStream: 0, sourceChannel: 4 },
+      { label: '5.1 FM · 聲道6', file: 'ch_06.m4a', sourceStream: 0, sourceChannel: 5 },
+      { label: '2.0 FM · 聲道1', file: 'ch_07.m4a', sourceStream: 1, sourceChannel: 0 },
+      { label: '2.0 FM · 聲道2', file: 'ch_08.m4a', sourceStream: 1, sourceChannel: 1 },
+    ]);
+    expect(plan.channelMaps).toEqual([
+      '[co0]', '[co1]', '[co2]', '[co3]', '[co4]', '[co5]', '[co6]', '[co7]',
+    ]);
+    expect(plan.filters.filter(part => part.includes('pan=mono') && /\[co\d+\]$/.test(part)))
+      .toEqual([
+        '[sp0_0]pan=mono|c0=c0[co0]',
+        '[sp0_1]pan=mono|c0=c1[co1]',
+        '[sp0_2]pan=mono|c0=c2[co2]',
+        '[sp0_3]pan=mono|c0=c3[co3]',
+        '[sp0_4]pan=mono|c0=c4[co4]',
+        '[sp0_5]pan=mono|c0=c5[co5]',
+        '[sp1_0]pan=mono|c0=c0[co6]',
+        '[sp1_1]pan=mono|c0=c1[co7]',
+      ]);
   });
 });
 

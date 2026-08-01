@@ -24,7 +24,7 @@ const ExportWatchdog = require('./export-watchdog');
 const { FileAuthority, collectProjectMediaPathsFromBuffer } = require('./file-authority');
 const { isPathContained } = require('./export-name-safety');
 const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
-const { channelFileName } = require('./channel-layout');
+const { buildAudioIngestPlan } = require('./channel-layout');
 const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
 const {
   deliveryVideoEncoderArgs,
@@ -2007,37 +2007,11 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
   const metaPath = path.join(dir, 'meta.json');
   fs.mkdirSync(dir, { recursive: true });
 
-  const fc = [];            // filter_complex 片段
-  const channels = [];      // {label, file}
-  const chMaps = [];        // 對應 channels 的 -map 值
-  const waveContribs = [];  // 各聲源對波形的貢獻（單聲道）
-  let ci = 0;
-  audioArr.forEach((a, i) => {
-    const ch = Math.max(1, a.channels || 1);
-    const base = a.title || a.lang || ('音軌 ' + (i + 1));
-    if (ch === 1) {
-      fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
-      channels.push({ label: base, file: path.join(dir, channelFileName(ci)), sourceStream: i, sourceChannel: 0 });
-      chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
-    } else {
-      const pads = [];
-      for (let k = 0; k < ch; k++) pads.push(`sp${i}_${k}`);
-      fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
-      for (let k = 0; k < ch; k++) {
-        fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
-        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, channelFileName(ci)), sourceStream: i, sourceChannel: k });
-        chMaps.push(`[co${ci}]`); ci++;
-      }
-      const avg = (1 / ch).toFixed(4);
-      const sum = Array.from({ length: ch }, (_, k) => `${avg}*c${k}`).join('+');
-      fc.push(`[wv${i}]pan=mono|c0=${sum}[wm${i}]`);
-      waveContribs.push(`[wm${i}]`);
-    }
-  });
-
-  let waveLabel = null;
-  if (waveContribs.length === 1) waveLabel = waveContribs[0];
-  else if (waveContribs.length > 1) { fc.push(`${waveContribs.join('')}amix=inputs=${waveContribs.length}:normalize=0[wavemix]`); waveLabel = '[wavemix]'; }
+  const audioPlan = buildAudioIngestPlan(audioArr);
+  const fc = audioPlan.filters;
+  const channels = audioPlan.channels.map(channel => ({ ...channel, file: path.join(dir, channel.file) }));
+  const chMaps = audioPlan.channelMaps;
+  const waveLabel = audioPlan.waveLabel;
 
   const args = ['-y', ...hwdecArgs(), '-i', src]; // S2: hwaccel 加速來源解碼
   if (fc.length) args.push('-filter_complex', fc.join(';'));
@@ -2096,34 +2070,12 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   const metaPath = path.join(dir, 'meta.json');
   fs.mkdirSync(dir, { recursive: true });
 
-  // 與 ffmpeg:ingest 相同的音訊 filter_complex 建構
-  const fc = [], channels = [], chMaps = [], waveContribs = [];
-  let ci = 0;
-  audioArr.forEach((a, i) => {
-    const ch = Math.max(1, a.channels || 1);
-    const base = a.title || a.lang || ('音軌 ' + (i + 1));
-    if (ch === 1) {
-      fc.push(`[0:a:${i}]asplit=2[co${ci}][wv${i}]`);
-      channels.push({ label: base, file: path.join(dir, channelFileName(ci)), sourceStream: i, sourceChannel: 0 });
-      chMaps.push(`[co${ci}]`); waveContribs.push(`[wv${i}]`); ci++;
-    } else {
-      const pads = [];
-      for (let k = 0; k < ch; k++) pads.push(`sp${i}_${k}`);
-      fc.push(`[0:a:${i}]asplit=${ch + 1}${pads.map(p => `[${p}]`).join('')}[wv${i}]`);
-      for (let k = 0; k < ch; k++) {
-        fc.push(`[${pads[k]}]pan=mono|c0=c${k}[co${ci}]`);
-        channels.push({ label: `${base} · 聲道${k + 1}`, file: path.join(dir, channelFileName(ci)), sourceStream: i, sourceChannel: k });
-        chMaps.push(`[co${ci}]`); ci++;
-      }
-      const avg = (1 / ch).toFixed(4);
-      fc.push(`[wv${i}]pan=mono|c0=${Array.from({ length: ch }, (_, k) => `${avg}*c${k}`).join('+')}[wm${i}]`);
-      waveContribs.push(`[wm${i}]`);
-    }
-  });
-
-  let waveLabel = null;
-  if (waveContribs.length === 1) waveLabel = waveContribs[0];
-  else if (waveContribs.length > 1) { fc.push(`${waveContribs.join('')}amix=inputs=${waveContribs.length}:normalize=0[wavemix]`); waveLabel = '[wavemix]'; }
+  // 與 ffmpeg:ingest 共用同一份跨平台逐聲道規劃，避免兩條路徑或兩個 OS 漂移。
+  const audioPlan = buildAudioIngestPlan(audioArr);
+  const fc = audioPlan.filters;
+  const channels = audioPlan.channels.map(channel => ({ ...channel, file: path.join(dir, channel.file) }));
+  const chMaps = audioPlan.channelMaps;
+  const waveLabel = audioPlan.waveLabel;
 
   const proxy = path.join(dir, 'proxy.mp4');
   const wave = waveLabel ? path.join(dir, 'wave.wav') : null;
