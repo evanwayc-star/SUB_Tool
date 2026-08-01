@@ -1261,7 +1261,7 @@ async function openCueEditModal(c){
       // Enter 系列一律擋住冒泡：確認/切分會同步關閉 modal，若讓事件繼續傳到 window 的
       // 快捷鍵處理器，modal 已不在、同一下 Enter 會再觸發 toggle_play_pause 造成雙重動作
       if(e.key==='Enter') e.stopPropagation();
-      if(e.key==='Enter'&&e.ctrlKey){
+      if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){
         e.preventDefault();
         const sel=window.getSelection();
         if(!sel.rangeCount)return;
@@ -2127,14 +2127,14 @@ async function initDesktop(){
   const brand=document.querySelector('.brand');
   if(brand && !brand.querySelector('small')){ const sm=document.createElement('small'); sm.style.cssText='opacity:.55;font-size:11px;margin-left:6px;vertical-align:middle'; sm.textContent='桌面版'; brand.appendChild(sm); }
   document.querySelectorAll('.desktop-only').forEach(el=>{ el.style.display=''; }); // 顯示桌面專屬功能（匯出影片等）
-  const nv=$('noVideo'); if(nv) nv.innerHTML='<b>尚未載入影音</b>點 <kbd>🎬 影音</kbd> 匯入<br>桌面版支援 MP4 / MOV / <b>MXF</b> / MKV / 多音軌（系統 ffmpeg）<br>多音軌可同時混音播放，每軌獨立音量／獨奏';
+  const nv=$('noVideo'); if(nv) nv.innerHTML='<b>尚未載入影音</b>點 <kbd>🎬 影音</kbd> 匯入<br>桌面版支援 MP4 / MOV / <b>MXF</b> / MKV / 多音軌（ffmpeg）<br>多音軌可同時混音播放，每軌獨立音量／獨奏';
   try{
     const s=await DESK.status();
     const eng=$('stEngine');
     if(eng){
       const hasGpu = !!(s.venc && s.venc !== 'libx264');
       eng.innerHTML = '引擎：' + (s.ffmpeg
-        ? '系統 ffmpeg ✓' + (hasGpu
+        ? 'ffmpeg ✓' + (hasGpu
             ? ` · <b style="color:var(--green)">GPU ${String(s.venc).replace('h264_','').toUpperCase()}</b>`
             : ' · <span style="color:var(--text-faint)">CPU 編碼</span>')
         : '⚠ 未偵測到 ffmpeg');
@@ -2144,12 +2144,18 @@ async function initDesktop(){
             : '未偵測到 GPU 編碼器，H.264 將以 CPU（libx264）編碼。')
         : '未偵測到 ffmpeg';
     }
-    if(!s.ffmpeg) openModal('未偵測到 ffmpeg',
-      `桌面版的 MXF 轉檔與多音軌抽取需要系統安裝 <b>ffmpeg</b>。<br><br>`+
-      `偵測位置：PATH、<code>C:\\Program Files\\FFMPEG\\bin\\</code> 等。<br>`+
-      `可至 <b>ffmpeg.org</b> 下載後加入 PATH，或設環境變數 <code>FFMPEG_PATH</code>。<br><br>`+
-      `原生 MP4/MOV/MP3/WAV 播放與字幕編輯不受影響。`);
-    setStatus('就緒（桌面模式）— 可直接讀 MXF 與多音軌','ok');
+    if(!s.ffmpeg){
+      const isMac=s.platform==='darwin';
+      openModal('未偵測到 ffmpeg', isMac
+        ? `目前的 Apple Silicon App 套件缺少或無法啟動內建 <b>ffmpeg</b>。<br><br>`+
+          `請重新安裝 arm64 版 SUB Tool；開發測試版請回到專案執行 <code>npm ci</code> 與 <code>npm run dist:mac:test</code>。<br>`+
+          `也可透過 Homebrew 安裝 ffmpeg，或設定環境變數 <code>FFMPEG_PATH</code> 後重新開啟程式。<br><br>`+
+          `MXF、proxy、多音軌抽取與影片匯出在修復前無法使用。`
+        : `目前的桌面版缺少或無法啟動內建 <b>ffmpeg</b>。<br><br>`+
+          `請重新安裝 SUB Tool；也可把 ffmpeg 加入 PATH，或設定環境變數 <code>FFMPEG_PATH</code>。<br><br>`+
+          `MXF、proxy、多音軌抽取與影片匯出在修復前無法使用。`);
+    }
+    setStatus(s.ffmpeg ? '就緒（桌面模式）— 可直接讀 MXF 與多音軌' : '桌面模式 — ffmpeg 無法使用',s.ffmpeg?'ok':'err');
   }catch(e){ setStatus('就緒（桌面模式）','ok'); }
   let _visibleExportJobId = null;
   if ($('stStopBtn')) $('stStopBtn').onclick = () => {

@@ -680,7 +680,7 @@ const Media = {
     }catch(e){ setStatus('音訊載入失敗：'+e.message,''); showToast('音訊載入失敗：'+e.message); }
   },
 
-  /* --- 桌面 (Electron) 媒體：系統 ffmpeg，單次讀取多輸出，逐聲道音軌 + 電平表 --- */
+  /* --- 桌面 (Electron) 媒體：平台原生 ffmpeg，單次讀取多輸出，逐聲道音軌 + 電平表 --- */
   async loadDesktopMedia(p, projectRestore=null){
     this._resetForFirstVideo();
     State.mediaPath=p; State.mediaName=baseName(p);

@@ -380,7 +380,7 @@ function toASSFromState(cues, options = {}) {
 }
 
 /* ===== 匯出影片（序列）：ProRes 422 HQ / MP4，燒錄可見軌字幕，音訊依混音器設定輸出 =====
-   桌面版專屬（需系統 ffmpeg）。輸出時間軸＝序列時間軸，故字幕（時間軸時碼）與輸出對齊。 */
+   桌面版專屬（需平台原生 ffmpeg）。輸出時間軸＝序列時間軸，故字幕（時間軸時碼）與輸出對齊。 */
 /* 匯出快照的組建已搬到 delivery-job.js —— 那裡不 import State／Media／DOM，
    所以可以不 mock 任何東西直接測（見該檔頭的說明與 tests/externalAudioPlan.test.js）。
    這裡只負責把目前的 State／Media／Seq 交給它。 */
@@ -804,7 +804,7 @@ document.addEventListener('drop', async e => {
   else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
   else if (IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)) {
     // 桌面版：拖放影音必須與「🎬 影音」按鈕走同一條桌面路徑（ffprobe 實測 FPS、
-    // 系統 ffmpeg 轉檔/多音軌、mpv 秒開）——否則 MXF 等非原生格式會落到
+    // 平台原生 ffmpeg 轉檔/多音軌、Windows mpv 秒開）——否則 MXF 等非原生格式會落到
     // ffmpeg.wasm 的 1.6GB 上限而「沒有觸發轉檔」。路徑經 preload 的
     // webUtils.getPathForFile 解析（Electron 32 起 File.path 已移除）；
     // preload 會先把真實 File 的精確路徑授權給主程序；解析失敗時退回瀏覽器路徑。

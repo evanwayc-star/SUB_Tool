@@ -1245,7 +1245,7 @@ sublist.addEventListener('keydown', e => {
   const c = State.cues.find(x => x.id === row.dataset.id);
   if (!c) return;
 
-  if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); splitCueAtCursor(c, txt); }
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); splitCueAtCursor(c, txt); }
   else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); txt.blur(); }
   else if (e.key === 'Escape') { e.preventDefault(); txt.innerText = txt.dataset.orig || ''; txt.blur(); }
   e.stopPropagation();

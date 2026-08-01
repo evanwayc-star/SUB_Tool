@@ -124,6 +124,11 @@ git add -A && git commit && git push origin main
 # ⑦ 建立 GitHub Release，附上同一支 .exe
 ```
 
+上面是 Windows 正式發版流程。Apple Silicon 的本機 unsigned 驗證使用
+`npm run dist:mac:test`；它**不是正式發布**，不可直接上傳 Release。Mac 對外發布還必須完成
+Developer ID 簽署、hardened runtime、Apple notarization 與實體 Mac 驗收；完整分流與清單見
+[`docs/開發與驗證.md`](docs/開發與驗證.md#apple-silicon-本機測試版)。
+
 **變更紀錄請寫「為什麼」與「怎麼驗的」，不要只寫「修了 X」。**
 這份檔案是本專案最有價值的交接資產——很多坑（字型家族名、filtergraph 跳脫、
 CSS 蓋掉 `[hidden]`）都是靠它才沒有重踩。

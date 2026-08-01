@@ -10,7 +10,7 @@
 
 | 角色 | 檔案 | 職責 |
 |------|------|------|
-| **Main Process** | `electron/main.js` | 視窗管理、系統 ffmpeg/ffprobe、mpv 嵌入、本機檔案 I/O、快取管理 |
+| **Main Process** | `electron/main.js` | 視窗管理、平台原生 ffmpeg/ffprobe、Windows mpv 嵌入、本機檔案 I/O、快取管理 |
 | **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
 | **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
 | **匯出工作狀態機** | `electron/export-job-status.js` | **七種狀態與四個分類的唯一定義**（見下方「匯出工作的狀態機」）。零 `require`，純資料＋述詞 |
@@ -46,7 +46,7 @@ Main (main.js)
 
 | `window.subtool` 方法 | IPC Channel | 方向 | 說明 |
 |---|---|---|---|
-| `status()` | `app:status` | R→M | 回傳 `{ffmpeg, venc, mpv}` 狀態 |
+| `status()` | `app:status` | R→M | 回傳 `{isDesktop, ffmpeg, ffprobe, ffmpegPath, ffprobePath, venc, platform, arch, ffmpegDetection, ffprobeDetection}`；兩份 detection 含逐候選探測結果 |
 | `fileURL(path)` | `fs:fileURL` | R→M | 已授權唯讀檔案 → 可播放 URL；查詢不會取得新授權 |
 | `stat(path)` | `fs:stat` | R→M | 已授權唯讀檔案才回傳 `{exists, size}` |
 | `getFilePath(file)` | —（preload 內直接呼叫 `webUtils.getPathForFile`，無 IPC） | R | 拖放的 `File` 物件 → 絕對路徑。Electron 32 起 `File.path` 已移除；只接受真正的 File 物件、失敗回 `null`。供拖放影音走桌面載入路徑（`loadDesktopMedia`） |
@@ -80,8 +80,8 @@ Main (main.js)
 | `cacheCleanOrphans()` | `cache:cleanOrphans` | R→M | 刪除無效快取資料夾 |
 | `cacheClearAll(src)` | `cache:clearAll` | R→M | 清除全部快取 |
 | `onProgress(cb)` | `task-progress` | M→R | ffmpeg 進度推播 `{jobId, label, pct, done}` |
-| `mpv.detect()` | `mpv:detect` | R→M | 檢查 mpv 是否可用 |
-| `mpv.launch(opts)` | `mpv:launch` | R→M | 啟動 mpv 嵌入播放（`{src, bounds, audio}`） |
+| `mpv.detect()` | `mpv:detect` | R→M | 回傳 `{available, supported, exe}`；Apple Silicon 第一版固定 `supported:false` |
+| `mpv.launch(opts)` | `mpv:launch` | R→M | Windows 啟動 mpv 嵌入播放（`{src, bounds, audio}`）；其他平台 fail closed |
 | `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置（**來源時間**；影片序列的時間軸↔來源映射在前端 media.js 處理） |
 | `mpv.loadfile(p)` | `mpv:loadfile` | R→M | 影片序列跨段切換：同一 mpv 實例換檔（保留 --wid 嵌入與屬性），輪詢 duration 就緒後回傳 `{duration}`；只接受 FileAuthority 已授權來源 |
 | `mpv.play()` / `mpv.pause()` | `mpv:play` / `mpv:pause` | R→M | 播放 / 暫停 |
@@ -92,8 +92,8 @@ Main (main.js)
 | `mpv.subVisible(v)` | `mpv:subVisible` | R→M | 切換 mpv 的 libass 字幕顯示（拖曳字幕時暫時隱藏，改由 HTML 層預覽新位置） |
 | `mpv.setBounds(b)` | `mpv:setBounds` | R→M | 更新 mpv 覆蓋視窗位置與大小 |
 | `mpv.setGuide(g)` | `mpv:setGuide` | R→M | 更新一般安全框／字幕操作 guide |
-| `mpv.setImageGuide(data)` | `mpv:setImageGuide` | R→M | 將圖片疊層 HTML、播放器矩形與命中區交給透明 guide 視窗；只有圖片及其控制點能取得 pointer 輸入 |
-| `mpv.onImagePointer(cb)` | `mpv:imagePointer` | M→R | guide 回送白名單化的 `start/move/end/cancel` 拖曳座標；renderer 依同一套幾何規則修改圖片位置與大小 |
+| `mpv.setImageGuide(data)` | `mpv:setImageGuide` | R→M | 將圖片疊層 HTML 與播放器矩形交給透明 guide 顯示；guide 永久穿透，實際互動由主 renderer 的 `#imageLayer` 處理 |
+| `mpv.onImagePointer(cb)` | `mpv:imagePointer` | M→R | 保留的白名單 `start/move/end/cancel` 座標通道；現行互動不可依賴 guide hover 或 `enter/leave` 切換 |
 | `mpv.setTimecodeWatermark(data)` / `clearTimecodeWatermark()` | `mpv:setTimecodeWatermark` / `mpv:clearTimecodeWatermark` | R→M | 在原生 mpv 畫面上顯示／清除僅監看的時間碼，資料為 `{text,rect}`；不經 ASS、不會燒進輸出 |
 | `mpv.show(v)` | `mpv:show` | R→M | 顯示 / 隱藏 mpv 視窗。mpv 為 OS 層子視窗、HTML z-index 蓋不過：前端 `_syncMpvPanel()`（app.js）在對話框（含快捷鍵設定）、重疊影片的浮動面板／搜尋視窗／右鍵選單開啟時自動呼叫此方法讓位，關閉後恢復（`mpv:sync` 事件） |
 | `mpv.subSet(ass)` | `mpv:subSet` | R→M | 餵入 ASS 字幕（防抖 100ms） |
@@ -233,8 +233,9 @@ Windows 最小化時它也可能回傳 `false`。
 ### 前置需求
 
 - Node.js 18+（`npm install` 安裝 Vite / Electron 相依）
-- ffmpeg / ffprobe（MXF / 多音軌功能）：放入 PATH 或 `C:\Program Files\FFMPEG\bin\`
-- mpv（秒開功能，選用）：系統安裝後放入 PATH
+- ffmpeg / ffprobe（MXF / 多音軌功能）：Windows 發版機使用 `electron/ffmpeg/*.exe`；
+  Apple Silicon 由 `npm run native:prepare:mac` 準備 `electron/ffmpeg/darwin-arm64/`
+- mpv（Windows 秒開功能）：放在 `electron/mpv/`；macOS 第一版不啟用 Windows 專用嵌入
 
 ### 開發流程
 
@@ -266,35 +267,40 @@ webPreferences: {
 
 ## 4. ffmpeg / ffprobe 整合
 
-### 路徑偵測順序（`detect()` 函式）
+### 路徑偵測順序（`native-tooling.js`）
 
-1. 內建（`electron/ffmpeg/ffmpeg.exe` 及 asar.unpacked 路徑）
-2. 環境變數 `FFMPEG_PATH` / `FFPROBE_PATH`
-3. 系統 PATH 中的 `ffmpeg` / `ffprobe`
-4. `C:\Program Files\FFMPEG\bin\`
-5. `C:\ffmpeg\bin\`
+| 順位 | Windows | Apple Silicon macOS |
+|------|---------|---------------------|
+| 1 | `electron/ffmpeg/<tool>.exe` | `electron/ffmpeg/darwin-arm64/<tool>` |
+| 2 | `resources/app.asar.unpacked/electron/ffmpeg/<tool>.exe` | `resources/app.asar.unpacked/electron/ffmpeg/darwin-arm64/<tool>` |
+| 3 | `FFMPEG_PATH`／`FFPROBE_PATH` | 同左 |
+| 4 | PATH 中的 `ffmpeg`／`ffprobe` | 同左 |
+| 5 | `C:\Program Files\FFMPEG\bin\`、`C:\ffmpeg\bin\` | `/opt/homebrew/bin`、`/usr/local/bin`、`/opt/local/bin`、`~/.local/bin` |
 
-> **`electron/ffmpeg/` 與 `electron/mpv/`（§5）刻意不進版控**（`.gitignore`，合計約
-> 538 MB），每台要發版的機器都要手動放好；固定用 gyan 的 full_build（見下方
-> §7「常見問題排查」）。**這一步不會有任何警告就悄悄失敗**：`npm run dist` 對
-> `package.json` `build.asarUnpack` 沒 match 到任何檔案是靜默的，產物只是單純
-> 少了 ffmpeg 或 mpv，`detect()` 會退回上面第 2～5 順位——如果系統 PATH 裝的不是
-> gyan full_build，多音軌 MXF 的音訊會被截斷，而使用者與發版者都不會看到任何
-> 錯誤訊息（見 AGENTS.md §0.6「有產出不等於對」）。
->
-> 因此 `npm run dist` 會先跑 `predist`（`scripts/verify-native-binaries.ps1`），
-> 核對這四個檔案存在且大小正常，缺一個就讓 `dist` 直接失敗並印出取得方式。
-> `tests/verifyNativeBinaries.test.js` 真的執行這支腳本驗證缺檔／殘檔情境會被
-> 擋下，不只是比對 script 字串。
+每個候選都真的執行 `-version`；`app:status` 回傳最後採用路徑及每次探測的 status／signal／
+error code，不能再只靠「檔案存在」推定可執行。
+
+`electron/ffmpeg/` 與 `electron/mpv/` 刻意不進版控。Windows 發版機仍需手動放好 gyan
+full_build 與 mpv（約 538 MB；見 §7）。Apple Silicon 則由固定版本的 `ffmpeg-static` 與
+`@derhuerst/ffprobe-static` 在 **darwin/arm64 本機**下載正確架構，複製相鄰的 LICENSE／
+README，並實際探測 `ass`、`libx264`、`prores_ks`、`pcm_s24le`、`mxf` 後才允許打包。
+
+`scripts/verify-native-binaries.js` 是 Windows/macOS 共用的唯一封裝需求檢查器：Windows 要求
+ffmpeg.exe、ffprobe.exe、mpv.exe、d3dcompiler_43.dll；darwin-arm64 只要求 ffmpeg/ffprobe，
+並額外檢查 Unix executable bit。Windows `predist` 明確帶入 `win32/x64`，`dist:mac:test`
+明確帶入 `darwin/arm64`；
+`tests/verifyNativeBinaries.test.js` 真的餵缺檔與殘檔情境，不只比對 script 字串。
 
 ### 硬體視訊編碼器偵測
 
-啟動時依序測試 `h264_nvenc` → `h264_qsv` → `h264_amf`，全失敗則用 `libx264`。結果存入 `VENC`。
+Windows 啟動時依序測試 `h264_nvenc` → `h264_qsv` → `h264_amf`；macOS 測試
+`h264_videotoolbox`。全部失敗才用 `libx264`。結果存入 `VENC`。
 可在 DevTools console 執行 `await window.subtool.status()` 查看 `venc` 欄位。
 
 ### 轉檔輸出規格
 
-- **Proxy 影片**：720p、yuv420p、CRF 26（NVENC: cq 26、QSV: global_quality 26）
+- **Proxy 影片**：720p、yuv420p；libx264 CRF 26、NVENC cq 26、QSV global_quality 26、
+  VideoToolbox 4 Mbps realtime
 - **聲道音訊**：AAC 128kbps `.m4a`
 - **波形用音訊**：8kHz mono 16-bit PCM WAV
 
@@ -315,56 +321,89 @@ main IPC 中斷時都必須先確認 ffmpeg 已關閉，再處理半成品。刪
 
 候選目錄（依序讀取第一個有效的、寫入第一個可寫的）：
 1. 影片所在目錄旁的 `.subtool_Cache/<key>/`
-2. `%APPDATA%\sub-tool\mediacache\<key>/`（`CACHE` = `app.getPath('userData')`）
+2. `<userData>/mediacache/<key>/`（`CACHE` = `app.getPath('userData')`；Windows 通常在
+   `%APPDATA%\sub-tool`，macOS 通常在 `~/Library/Application Support/sub-tool`）
 
-暫存路徑：`%TEMP%\subtool_cache\`（程式退出時清除）。
+暫存路徑：`path.join(os.tmpdir(), 'subtool_cache')`（程式退出時清除）。
 
 ---
 
-## 5. mpv 嵌入整合
+## 5. mpv 嵌入整合（Windows-only）
 
-mpv 以**子視窗**方式嵌入：Main Process 啟動 `_mpvWin`（無框 BrowserWindow）並蓋在播放區域上方。
+Windows 的 mpv 以**子視窗**方式嵌入：Main Process 啟動 `_mpvWin`（無框 BrowserWindow）
+並用 `--wid=<HWND>` 蓋在播放區域上方。這條實作依賴 Windows HWND、D3D compiler 與
+`\\.\pipe\...` named pipe，不能只換一支 macOS mpv binary 就宣稱跨平台。
+
+Apple Silicon 第一版由 `mpvEmbeddingSupported('darwin')` 明確回傳 false：`mpv:detect` 回報
+`supported:false, available:false`，`mpv:launch` 也會 fail closed。renderer 會走現有的
+ffmpeg 單次 ingest → proxy／逐聲道快取 → HTML/WebCodecs 預覽；這條路徑較慢，但不會執行
+未驗證的 Windows 視窗控制碼。未來若要做 macOS mpv，必須另行設計原生視窗嵌入與 IPC，
+不能移除這個平台閘門當成完成。
 
 ### 主要行為
 
-- `mpv:launch`：啟動 mpv IPC socket（`\\.\pipe\mpvsocket_<pid>`），建立連線後送播放指令
+- `mpv:launch`：Windows 啟動 mpv IPC socket（`\\.\pipe\mpvsocket_<pid>`），建立連線後送播放指令
 - `mpv:event` 推播：`time-pos`、`duration`、`pause`、`eof-reached`（前端用於同步播放頭）
 - `mpv:subSet`：接收 base64 ASS 字串，寫入暫存 `.ass` 後用 `sub-reload` 指令更新
 - `mpv:setBounds`：更新 `_mpvWin` 位置；主視窗移動/縮放時自動呼叫
-- `mpv:setImageGuide`：將圖片的 HTML 疊層（包含虛線框與控制點）交給透明 guide 視窗。
-  - **【v5.0.0 嚴謹架構說明】事件穿透與互動機制**：
-    早期版本依賴主程序使用 `screen.getCursorScreenPoint()` 每 25ms 輪詢游標位置，以決定是否命中圖片（決定開關 `setIgnoreMouseEvents`）。然而在 Windows 複雜的高 DPI 或多螢幕環境下，原生 API 回傳的座標經常與 Chromium 內部的 DIP (Device-Independent Pixel) 產生偏移，導致「游標明明在圖片上，卻判定未命中」，進而將事件穿透給底層主視窗，造成無法拖曳。
-    **現行架構 (v5.0.0+)** 已徹底廢除輪詢。我們依賴 Chromium 原生的事件轉發能力：當設定 `setIgnoreMouseEvents(true, { forward: true })` 時，透明視窗底層的 Chromium 依舊會對具備 `pointer-events: auto` 的元素（如圖片本體、黃色控制角）派發原生的 `mouseenter` 與 `mouseleave`。Guide 內的 DOM 監聽到此事件後，經由 IPC (`mpv-guide:imagePointer`) 送出 `enter` / `leave`，由主程序 100% 精確地切換互動狀態，徹底解決了事件穿透的死結。
+- `mpv:setImageGuide`：將圖片的 HTML 疊層（包含虛線框與控制點）交給透明 guide 視窗，僅供
+  OS 層 mpv 上方顯示。guide 永久使用 `setIgnoreMouseEvents(true, { forward:true })`；實際拖曳／縮放
+  一律由主 renderer 無條件建立的 `#imageLayer` DOM 處理。早期 25ms 游標輪詢與
+  `enter`／`leave` IPC 都已移除；不要恢復，否則 guide 會攔截底層時間軸與右鍵選單。
 - `mpv:setTimecodeWatermark`：原生 mpv 模式由 guide 顯示監看 TC；一般 HTML 預覽仍由 renderer DOM 顯示。兩者都從 `Media.displayTime()` 取得同一個時碼來源。
 
 ### 注意事項
 
 - `_mpvWin` 與 `mainWin` 是不同的 BrowserWindow；`mainWin.minimize()` 時需手動 `_mpvWin.hide()`
 - `safeSend(wc, ch, data)`：視窗關閉後 IPC 回呼可能仍在執行，必須先確認 `!wc.isDestroyed()`
-- mpv 版本需支援 `--input-ipc-server`；偵測失敗時 fallback 到 ffmpeg 單次轉檔
+- Windows mpv 版本需支援 `--input-ipc-server`；偵測失敗時 fallback 到 ffmpeg 單次轉檔
 
 ---
 
 ## 6. 打包與發布
 
 ```bash
-npm run dist    # vite build + electron-builder
+npm run dist          # 明確鎖定 Windows x64：NSIS Setup
+npm run dist:mac:test # Apple Silicon：unsigned 本機測試 DMG + ZIP
 ```
 
-**輸出**：`release/SUB Tool Setup <版本>.exe`（NSIS 安裝檔，約 287 MB——絕大部分是內建的
-ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專案檔即可開啟。
+Windows 輸出 `release/SUB Tool Setup <版本>.exe`（NSIS）；Apple Silicon 輸出
+`release/SUB Tool-<版本>-mac-arm64.dmg` 與 `.zip`，unpacked App 位於
+`release/mac-arm64/SUB Tool.app`。兩個平台都關聯 `.subtool`。
 
-**正式發布**：先執行 lint、test、build 與桌面媒體驗證；確認 `release/` 的 Setup 檔名包含正確版號後，將原始碼推送到 `main`，再以同一個 commit 建立 GitHub tag／Release 並上傳同一支 Setup `.exe`。發布說明應連結 `docs/版本變更紀錄.md` 對應段落，不能只推送 commit 而漏掉安裝檔。
+`dist:mac:test` 明確設為 unsigned 並關閉 hardened runtime，只供擁有原始碼的人在自己的 Mac
+驗證功能；不可上傳成正式 Release。第一階段不提供正式 Mac 發布指令；之後必須在同一個已驗收
+commit 上另行加入 Developer ID、hardened runtime 與 Apple notarization 的 fail-closed 流程，
+並驗證 DMG 安裝位置、Finder 檔案關聯、啟動版本及 Gatekeeper。
+共通正式發布流程與人工驗收清單見 [`開發與驗證.md`](開發與驗證.md)。
 
 **`package.json` electron-builder 設定**（實際值）：
 ```json
 {
-  "win":  { "target": "nsis" },
+  "win":  {
+    "target": "nsis",
+    "files": [
+      "dist/**/*",
+      { "from": "electron", "to": "electron", "filter": ["**/*", "!ffmpeg/**", "!mpv/**"] },
+      { "from": "electron/ffmpeg", "to": "electron/ffmpeg", "filter": ["ffmpeg.exe", "ffprobe.exe"] },
+      { "from": "electron/mpv", "to": "electron/mpv", "filter": ["mpv.exe", "d3dcompiler_43.dll"] }
+    ]
+  },
+  "mac":  {
+    "target": [
+      { "target": "dmg", "arch": ["arm64"] },
+      { "target": "zip", "arch": ["arm64"] }
+    ],
+    "files": [
+      "dist/**/*",
+      { "from": "electron", "to": "electron", "filter": ["**/*", "!ffmpeg/**", "!mpv/**"] },
+      { "from": "electron/ffmpeg/darwin-arm64", "to": "electron/ffmpeg/darwin-arm64", "filter": ["**/*"] }
+    ]
+  },
   "nsis": { "oneClick": false, "perMachine": true, "allowToChangeInstallationDirectory": true,
             "createDesktopShortcut": true, "createStartMenuShortcut": true },
   "fileAssociations": [{ "ext": "subtool", "role": "Editor" }],
   "directories": { "output": "release" },
-  "files":         ["dist/**/*", "electron/**/*"],
   "extraResources":[{ "from": "font", "to": "font", "filter": ["**/*"] }],
   "asarUnpack":    [
     "electron/mpv/**",
@@ -375,17 +414,22 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 }
 ```
 
-- `asarUnpack` 確保 mpv.exe／ffmpeg.exe 與獨立啟動的 export watchdog／lease 模組不被
+- `asarUnpack` 確保各平台 ffmpeg、Windows mpv 與獨立啟動的 export watchdog／lease 模組不被
   asar 封裝，可由 `child_process.spawn` 直接執行並在安裝版正確 `require`。
-- **`extraResources` 是字型能不能用的關鍵**：`files` 只收 `dist/` 與 `electron/`，`font/`
+- Mac 的 platform-specific `files` 先排除整個 `electron/mpv` 與 `electron/ffmpeg`，再只加入
+  `darwin-arm64` 子目錄；因此從 Windows 搬來的忽略檔不會污染 DMG。
+- Windows 也先排除兩個原生工具目錄，再只加入四個 x64 必要檔；因此 Mac 建置留下的
+  `darwin-arm64` 子目錄不會污染 NSIS Setup。
+- **`extraResources` 是字型能不能用的關鍵**：平台 `files` 只收 `dist/` 與 `electron/`，`font/`
   必須另外用 `extraResources` 送進 `resources/font`。v4.26 少了這一段 → **開發時字型正常、
    裝起來的 exe 一個字型都沒有**（v4.27.0 修）。`fontsRoot()` 依 dev（專案根）→
    `resources/font` → 安裝目錄 順序尋找。
 - `nsis.perMachine: true` 讓正式 Setup 以 UAC 安裝到 `C:\Program Files\SUB Tool` 為預設。
   Setup 會建立真正的系統安裝與捷徑，不能拿 `/D=<workspace>` 當封裝 smoke；完整防呆流程見
   [`開發與驗證.md` 的「安裝器 smoke 的安全邊界」](開發與驗證.md#安裝器-smoke-的安全邊界)。
-- 換 ffmpeg build 前先讀 §7 與變更紀錄：**BtbN 的 gpl-shared 版會截斷多串流 MXF 的音訊**，
-  目前固定用 gyan 的 full_build。任何抽換都必須拿真實的多音軌 MXF 驗過。
+- Windows 換 ffmpeg build 前先讀 §7 與變更紀錄：**BtbN 的 gpl-shared 版會截斷多串流
+  MXF 的音訊**，目前固定用 gyan full_build。Mac static build 雖有能力探針，仍必須拿同一支
+  真實多音軌 MXF 驗證，不能用 `-demuxers` 列得到 `mxf` 當成內容正確。
 
 ---
 
@@ -395,10 +439,12 @@ ffmpeg／mpv 與字型）。安裝後會關聯 `.subtool` 副檔名，雙擊專�
 |------|----------|
 | 主視窗無法啟動 | 確認 `npm install` 完成；檢查 `electron/main.js` Node 相依 |
 | 前端無法呼叫 `window.subtool` | `preload.js` 是否正確載入；`contextBridge.exposeInMainWorld` 是否成功 |
-| ffmpeg 功能無效 | `await window.subtool.status()` → 查看 `ffmpeg` 欄位；確認 ffmpeg 在 PATH |
+| ffmpeg 功能無效 | `await window.subtool.status()` → 看 `ffmpegPath` 與 `ffmpegDetection.attempts`；安裝版應先命中 `app.asar.unpacked`，不是只確認 PATH |
 | 影片黑畫面（4:2:2）| ffmpeg 未加 `-vf format=yuv420p`；proxy 輸出格式不相容 |
-| mpv 無法啟動 | 確認系統已安裝 mpv 且在 PATH；socket 路徑 `\\.\pipe\mpvsocket_<pid>` 是否有衝突 |
-| GPU 編碼器不可用 | 確認驅動版本；`status()` 回傳 `venc: "libx264"` 表示已 fallback |
+| mpv 無法啟動 | 只適用 Windows：確認內建 mpv 與 `d3dcompiler_43.dll`；socket `\\.\pipe\mpvsocket_<pid>` 是否衝突。macOS 的 `supported:false` 是第一版預期行為 |
+| GPU 編碼器不可用 | Windows 確認顯示卡驅動；Mac 確認 static ffmpeg 列出且能實跑 `h264_videotoolbox`；`status()` 回傳 `libx264` 表示已 fallback |
+| Mac App 被 Gatekeeper 擋下 | `dist:mac:test` 是 unsigned，只能對自己剛建出的可信產物依 Apple「隱私權與安全性 → 仍要打開」放行；公開版本必須 Developer ID 簽署與 notarize |
+| Mac DMG 異常巨大或含 `.exe` | 檢查 `build.mac.files` 是否仍先排除 `electron/ffmpeg/**`、`electron/mpv/**` 再只加入 `darwin-arm64`；解開 App 實看內容，不能只看 build 成功 |
 | 快取未命中（每次都重新轉） | 來源檔前 1MB 或大小有變動；可手動刪除 `.subtool_Cache` 強制重建 |
 | `task-progress` 無回報 | `sender` 是否傳入 `runFF`；`safeSend` 是否因視窗已銷毀而跳過 |
 | **完全無法匯出影片**（filterchain 解析失敗） | `fontsdir=` 的 Windows 磁碟機冒號要跳脫**兩層**（`C\\:/`）。單反斜線會讓 ffmpeg 把 `:` 當選項分隔符。注意手動在 shell 跑也會撞到同一個錯，很容易誤判成「shell 吃掉跳脫字元」——用 `spawn`（無 shell 介入）重測才能確認 |

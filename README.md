@@ -6,12 +6,12 @@
 
 <p align="center">
   <strong>把字幕、畫面、音訊與交付，放在同一條時間軸完成。</strong><br>
-  Arctime 風格的多軌上字幕工具　·　網頁版隨開隨用，Windows 桌面版吃得下 44GB 的 MXF。
+  Arctime 風格的多軌上字幕工具　·　網頁版隨開隨用，Windows 桌面版吃得下 44GB 的 MXF，Apple Silicon 測試版可自行建置。
 </p>
 
 <p align="center">
   <a href="https://github.com/evanwayc-star/SUB_Tool/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/evanwayc-star/SUB_Tool?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&color=e8a33d"></a>
-  <img alt="平台" src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%C2%B7%20%E7%B6%B2%E9%A0%81-4c9fd8">
+  <img alt="平台" src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%C2%B7%20macOS%20arm64%20%E6%B8%AC%E8%A9%A6%20%C2%B7%20%E7%B6%B2%E9%A0%81-4c9fd8">
   <img alt="架構" src="https://img.shields.io/badge/Vite%20%2B%20%E5%8E%9F%E7%94%9F%20ES%20%E6%A8%A1%E7%B5%84-%E7%84%A1%E6%A1%86%E6%9E%B6-6bbf59">
   <img alt="播放與轉檔" src="https://img.shields.io/badge/mpv%20%C2%B7%20FFmpeg-%E5%85%A7%E5%BB%BA-8e6bd8">
 </p>
@@ -134,13 +134,13 @@ flowchart LR
 
 ## 💻 選哪個版本
 
-| | 🖥 **Windows 桌面版**（推薦） | 🌐 **網頁版** |
-| :--- | :--- | :--- |
-| **適合** | 日常剪輯、高強度交付、`.subtool` 專案檔 | 快速預覽、跨平台、從原始碼跑 |
-| **影片格式** | MP4 · MOV · **MXF** · MKV · AVI | MP4 · MOV (H.264) |
-| **音訊** | 多音軌素材、多聲道輸出 | 基本播放 |
-| **播放核心** | 內建 `mpv`，44GB 大檔秒開 | 瀏覽器 HTML5 |
-| **轉檔** | 內建 `FFmpeg`，背景佇列 | 瀏覽器端，能力有限 |
+| | 🖥 **Windows 桌面版**（推薦） | 🍎 **Apple Silicon 測試版** | 🌐 **網頁版** |
+| :--- | :--- | :--- | :--- |
+| **適合** | 日常剪輯、高強度交付、`.subtool` 專案檔 | M 系列 Mac 本機驗收；目前需從原始碼建置 | 快速預覽、跨平台、從原始碼跑 |
+| **影片格式** | MP4 · MOV · **MXF** · MKV · AVI | 目標為 MP4 · MOV · **MXF** · MKV · AVI（待實機驗收） | MP4 · MOV (H.264) |
+| **音訊** | 多音軌素材、多聲道輸出 | 多音軌素材、多聲道輸出（待實機驗收） | 基本播放 |
+| **播放核心** | 內建 `mpv`，44GB 大檔秒開 | ffmpeg ingest + HTML/WebCodecs；第一版不啟用 mpv | 瀏覽器 HTML5 |
+| **轉檔** | 內建 `FFmpeg`，背景佇列 | 內建 arm64 FFmpeg；VideoToolbox／CPU fallback 待實機驗收 | 瀏覽器端，能力有限 |
 
 ---
 
@@ -180,11 +180,21 @@ npm run electron
 npm run build
 ```
 
-編譯並打包出 `.exe` 安裝檔：
+Windows 編譯並打包出 `.exe` 安裝檔：
 
 ```bash
 npm run dist
 ```
+
+Apple Silicon Mac 編譯 unsigned 本機測試版（DMG + ZIP）：
+
+```bash
+npm ci
+npm run dist:mac:test
+```
+
+這不是已簽署的公開發行版。完整的 Gatekeeper 放行方式、原生架構核對與 44GB MXF／交付
+驗收清單見 [`docs/開發與驗證.md`](docs/開發與驗證.md#apple-silicon-本機測試版)。
 
 三道靜態安全網（發版前必須全綠）：
 

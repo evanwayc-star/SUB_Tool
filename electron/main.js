@@ -5,7 +5,7 @@
    所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作或狀態覆寫。
 ============================================================================== */
 /* SUB Tool — Electron 主程序
-   提供：原生檔案對話框、系統 ffmpeg/ffprobe（MXF 轉檔、多音軌抽取、波形）、
+   提供：原生檔案對話框、平台原生 ffmpeg/ffprobe（MXF 轉檔、多音軌抽取、波形）、
          專案/字幕直接讀寫磁碟。前端沿用同一份 index.html。 */
 const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
@@ -26,6 +26,13 @@ const { isPathContained } = require('./export-name-safety');
 const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
 const { channelFileName } = require('./channel-layout');
 const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
+const {
+  deliveryVideoEncoderArgs,
+  detectNativeTool,
+  mpvEmbeddingSupported,
+  previewVideoEncoderArgs,
+  videoEncoderCandidates,
+} = require('./native-tooling');
 
 let mainWin = null;
 let _allowMainWindowClose = false;
@@ -35,6 +42,7 @@ let _mainHiddenForQueue = false;
 let _quitReady = false;
 let _quitSequenceStarted = false;
 let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null;
+let FFMPEG_DETECTION = null, FFPROBE_DETECTION = null;
 const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
@@ -62,22 +70,6 @@ const { requireReadablePath, requirePermittedShellOpenPath, requirePermittedDeli
 /* S5：不可猜測的串流 job id（取代 Date.now() / 可推導的 cacheKey） */
 function newJobId(prefix) { return prefix + crypto.randomBytes(12).toString('hex'); }
 
-/* ---- 偵測 ffmpeg / ffprobe（優先使用內建版本，fallback 系統安裝） ---- */
-function detect(bin, extra) {
-  const bundled = [
-    path.join(__dirname, 'ffmpeg', `${bin}.exe`),
-    path.join(process.resourcesPath || '', 'app.asar.unpacked', 'electron', 'ffmpeg', `${bin}.exe`),
-  ];
-  const cands = [...bundled, process.env[bin.toUpperCase() + '_PATH'], bin,
-    `C:\\Program Files\\FFMPEG\\bin\\${bin}.exe`,
-    `C:\\Program Files\\ffmpeg\\bin\\${bin}.exe`,
-    `C:\\ffmpeg\\bin\\${bin}.exe`].concat(extra || []);
-  for (const c of cands) {
-    if (!c) continue;
-    try { const r = spawnSync(c, ['-version'], { timeout: 5000 }); if (r.status === 0) return c; } catch (e) {}
-  }
-  return null;
-}
 function ensureTmp() { try { fs.mkdirSync(TMP, { recursive: true }); } catch (e) {} }
 function tmpPath(ext) { ensureTmp(); const p = path.join(TMP, `t${Date.now()}_${tmpSeq++}.${ext}`); tempFiles.add(p); return p; }
 /* WebContents 可能在視窗關閉後仍被呼叫（例如 mpv pipe close 回呼），必須先確認未銷毀 */
@@ -88,7 +80,7 @@ function safeWinSend(win, ch, data) {
   try { if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) win.webContents.send(ch, data); } catch (e) {}
 }
 
-/* ---- 偵測可用的硬體視訊編碼器（NVENC/QSV/AMF），否則退回 libx264 ---- */
+/* ---- 偵測平台可用的硬體視訊編碼器（VideoToolbox／NVENC／QSV／AMF），否則退回 libx264 ---- */
 function detectVideoEncoder() {
   if (!FFMPEG) return 'libx264';
   const test = (name) => {
@@ -99,17 +91,12 @@ function detectVideoEncoder() {
       return r.status === 0;
     } catch (e) { return false; }
   };
-  for (const enc of ['h264_nvenc', 'h264_qsv', 'h264_amf']) { if (test(enc)) return enc; }
+  for (const enc of videoEncoderCandidates(process.platform)) { if (test(enc)) return enc; }
   return 'libx264';
 }
 /* 依選定編碼器回傳「轉檔預覽影片」用的視訊參數（品質導向、yuv420p 由呼叫端的 -vf 負責） */
 function vencArgs() {
-  switch (VENC) {
-    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '26', '-forced-idr', '1'];
-    case 'h264_qsv':   return ['-c:v', 'h264_qsv', '-global_quality', '26'];
-    case 'h264_amf':   return ['-c:v', 'h264_amf', '-rc', 'cqp', '-qp_i', '26', '-qp_p', '26'];
-    default:           return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26'];
-  }
+  return previewVideoEncoderArgs(VENC);
 }
 
 /* proxy 專用短 GOP（每 0.5s 一個 keyframe）：WebCodecs 預覽 seek 需從最近 keyframe 重解，
@@ -626,8 +613,18 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(async () => {
-    FFMPEG = detect('ffmpeg');
-    FFPROBE = detect('ffprobe');
+    FFMPEG_DETECTION = detectNativeTool('ffmpeg', {
+      moduleDir: __dirname,
+      resourcesPath: process.resourcesPath,
+      homeDir: os.homedir(),
+    });
+    FFPROBE_DETECTION = detectNativeTool('ffprobe', {
+      moduleDir: __dirname,
+      resourcesPath: process.resourcesPath,
+      homeDir: os.homedir(),
+    });
+    FFMPEG = FFMPEG_DETECTION.path;
+    FFPROBE = FFPROBE_DETECTION.path;
     VENC = detectVideoEncoder();
     CACHE = path.join(app.getPath('userData'), 'mediacache');
     fileAuthority.grantInternalDirectory(CACHE);
@@ -707,7 +704,9 @@ ipcMain.handle('ffmpeg:stopExport', (event, requestedJobId) => {
 });
 ipcMain.handle('app:status', () => ({
   isDesktop: true, ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE,
-  ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: VENC
+  ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: VENC,
+  platform: process.platform, arch: process.arch,
+  ffmpegDetection: FFMPEG_DETECTION, ffprobeDetection: FFPROBE_DETECTION,
 }));
 
 ipcMain.handle('fs:fileURL', (e, p) => {
@@ -833,13 +832,7 @@ function proresArgs() { return ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor
 /* 匯出用的 H.264 參數：以「目標位元率」編碼（vencArgs() 是畫質模式 CQ/CRF，供轉檔 proxy 用，不可混用）。
    各編碼器的速率控制旗標不同；maxrate=目標、bufsize=2×目標 → 近似封頂 VBR，位元率穩定可預測。 */
 function vencArgsBitrate(kbps) {
-  const b = kbps + 'k', buf = (kbps * 2) + 'k';
-  switch (VENC) {
-    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-b:v', b, '-maxrate', b, '-bufsize', buf];
-    case 'h264_qsv':   return ['-c:v', 'h264_qsv', '-b:v', b, '-maxrate', b, '-bufsize', buf];
-    case 'h264_amf':   return ['-c:v', 'h264_amf', '-rc', 'vbr_peak', '-b:v', b, '-maxrate', b, '-bufsize', buf];
-    default:           return ['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', b, '-maxrate', b, '-bufsize', buf];
-  }
+  return deliveryVideoEncoderArgs(VENC, kbps);
 }
 function hasAudioStream(p) {
   try { const r = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', p], { timeout: 8000 }); return !!(r.stdout && r.stdout.toString().trim()); }
@@ -2457,6 +2450,7 @@ function setMpvImageGuide(data) {
 }
 
 function detectMpv() {
+  if (!mpvEmbeddingSupported(process.platform)) return null;
   if (_mpvExe) return _mpvExe;
   const cands = [
     // 內建（隨程式打包）— 優先，讓秒開成為預設行為
@@ -2526,10 +2520,16 @@ function mpvConnectPipe(pipeName) {
   });
 }
 
-ipcMain.handle('mpv:detect', () => { const exe = detectMpv(); console.error('[mpv] detect ->', exe || '(not found)'); return { available: !!exe, exe }; });
+ipcMain.handle('mpv:detect', () => {
+  const supported = mpvEmbeddingSupported(process.platform);
+  const exe = supported ? detectMpv() : null;
+  console.error('[mpv] detect ->', exe || (supported ? '(not found)' : `(disabled on ${process.platform})`));
+  return { available: !!exe, supported, exe };
+});
 ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
   if (typeof src !== 'string' || !src) throw new Error('mpv：來源路徑無效');
   requireReadablePath('mpv:launch', src);
+  if (!mpvEmbeddingSupported(process.platform)) throw new Error('目前 macOS 版不啟用 Windows 專用的 mpv 嵌入');
   if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
   destroyMpvWin();
@@ -2741,4 +2741,3 @@ ipcMain.handle('mpv:quit',  () => {
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
   destroyMpvWin();
 });
-
