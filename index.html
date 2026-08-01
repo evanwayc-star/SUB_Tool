@@ -22,18 +22,18 @@
         <small id="appVersion"></small>
       </div>
 
-      <button class="icon" data-act="new" title="清空新建">🗑 開新專案</button>
+      <button class="icon" data-act="new" title="清空新建">🗑 <span class="lbl">開新專案</span></button>
       <div class="sep"></div>
-      <button class="icon open-proj-btn" data-act="open-project" title="開啟專案 (.subtool)">📂 開啟專案</button>
+      <button class="icon open-proj-btn" data-act="open-project" title="開啟專案 (.subtool)">📂 <span class="lbl">開啟專案</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 儲存專案</button>
-      <button class="icon" data-act="save-as-project" title="另存新檔">💾 另存新檔</button>
+      <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 <span class="lbl">儲存專案</span></button>
+      <button class="icon" data-act="save-as-project" title="另存新檔">💾 <span class="lbl">另存新檔</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="open-media" title="匯入影片或音訊檔">🎬 開啟影音</button>
+      <button class="icon" data-act="open-media" title="匯入影片或音訊檔">🎬 <span class="lbl">開啟影音</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="imp-auto" title="匯入字幕（自動辨識格式）">📄 匯入字幕</button>
+      <button class="icon" data-act="imp-auto" title="匯入字幕（自動辨識格式）">📄 <span class="lbl">匯入字幕</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="exp-dialog" title="匯出字幕">💬 匯出字幕</button>
+      <button class="icon" data-act="exp-dialog" title="匯出字幕">💬 <span class="lbl">匯出字幕</span></button>
       <div class="sep"></div>
       <div class="fps-box" title="影格率 (Adobe Encore 時碼換算用)">
         FPS <select id="fpsSel">
@@ -54,9 +54,9 @@
       <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)">⚪ 保留</button>
       <div class="sep"></div>
 
-      <button class="icon" data-act="settings" title="自訂快捷鍵">⚙ 設定</button>
-      <button class="icon desktop-only" id="stMonitorBtn" data-act="queue-monitor" title="監控匯出佇列（.）" style="display:none">📋 監控序列</button>
-      <button class="icon" data-act="exp-video" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV">🎞 匯出影片</button>
+      <button class="icon" data-act="settings" title="自訂快捷鍵">⚙ <span class="lbl">設定</span></button>
+      <button class="icon desktop-only" id="stMonitorBtn" data-act="queue-monitor" title="監控匯出佇列（.）" style="display:none">📋 <span class="lbl">監控序列</span></button>
+      <button class="icon" data-act="exp-video" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV">🎞 <span class="lbl">匯出影片</span></button>
     </div>
 
     <!-- ===== 主體 ===== -->
@@ -92,26 +92,26 @@
 
         <div class="transport">
           <div class="btns">
-            <button class="icon" data-act="back5" title="後退 5 秒">⏮5</button>
             <button class="icon" data-act="back1" title="後退 1 秒">⏮1</button>
             <button class="icon" data-act="frame-back" title="後退 1 格 (←)">◀ǀ</button>
             <button class="icon primary" id="playBtn" data-act="playpause" title="播放/暫停 (空白鍵)">▶</button>
             <button class="icon" data-act="frame-fwd" title="前進 1 格 (→)">ǀ▶</button>
             <button class="icon" data-act="fwd1" title="前進 1 秒">1⏭</button>
-            <button class="icon" data-act="fwd5" title="前進 5 秒">5⏭</button>
           </div>
           <div id="speedIndicator" class="speed-indicator" title="右鍵變更播放速度" aria-label="目前播放速度；右鍵變更">
             1x</div>
           <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span> / <span
               id="tcDur">00:00:00:00</span></div>
-          <input type="range" id="seekBar" min="0" max="1000" value="0" step="1" style="flex:1; min-width:100px; margin:0 8px;">
-          <button class="icon tp-btn" data-act="exp-in" title="設定輸出起點 (快捷鍵 [)" style="font-size:11px; padding:2px 6px; min-width:unset;">[ In</button>
-          <button class="icon tp-btn" data-act="exp-out" title="設定輸出終點 (快捷鍵 ])" style="font-size:11px; padding:2px 6px; min-width:unset;">Out ]</button>
-          <button class="icon tp-btn" data-act="exp-clear" title="清除輸出範圍" style="font-size:11px; padding:2px 6px; min-width:unset;">✕</button>
-          <div class="transport-sep" aria-hidden="true"></div>
-          <button class="icon tp-btn" data-act="safe-frame" id="safeFrameBtn" title="安全框：100%／90%／80% 安全區＋中心十字線（僅預覽參考，不燒入匯出）" style="font-size:11px; padding:2px 6px; min-width:unset;">⊹</button>
-          <button class="icon tp-btn" data-act="timecode-watermark" id="timecodeWatermarkBtn" title="顯示／隱藏時間碼浮水印（僅播放器監看，不燒入匯出）" aria-pressed="false" style="font-size:10px; padding:2px 5px; min-width:unset;">TC</button>
-          <button class="icon tp-btn" data-act="mixer" title="顯示／隱藏音量表與匯出軌道對應設定" style="font-size:11px; padding:2px 6px; min-width:unset;">🎚</button>
+          <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
+          <div class="transport-tools">
+            <button class="icon tp-btn" data-act="exp-in" title="設定輸出起點 (快捷鍵 [)" style="font-size:11px; padding:2px 6px; min-width:unset;">[ In</button>
+            <button class="icon tp-btn" data-act="exp-out" title="設定輸出終點 (快捷鍵 ])" style="font-size:11px; padding:2px 6px; min-width:unset;">Out ]</button>
+            <button class="icon tp-btn" data-act="exp-clear" title="清除輸出範圍" style="font-size:11px; padding:2px 6px; min-width:unset;">✕</button>
+            <div class="transport-sep" aria-hidden="true"></div>
+            <button class="icon tp-btn" data-act="safe-frame" id="safeFrameBtn" title="安全框：100%／90%／80% 安全區＋中心十字線（僅預覽參考，不燒入匯出）" style="font-size:11px; padding:2px 6px; min-width:unset;">⊹</button>
+            <button class="icon tp-btn" data-act="timecode-watermark" id="timecodeWatermarkBtn" title="顯示／隱藏時間碼浮水印（僅播放器監看，不燒入匯出）" aria-pressed="false" style="font-size:10px; padding:2px 5px; min-width:unset;">TC</button>
+            <button class="icon tp-btn" data-act="mixer" title="顯示／隱藏音量表與匯出軌道對應設定" style="font-size:11px; padding:2px 6px; min-width:unset;">🎚</button>
+          </div>
         </div>
 
         <!-- 音軌清單已移入音量表浮動面板；提示平時隱藏，大型網頁媒體限制會持續顯示 -->
@@ -158,75 +158,92 @@
                跟著框線走（同為「描邊」）。 -->
           <div class="ts-line">
             <span class="ts-title" id="tsTitle">字幕樣式</span>
-            <span class="ts-sep">│</span>
-            <span class="ts-label">大小</span>
-            <div class="ts-btngrp">
-              <button class="ts-preset" data-ts-size="45">45</button>
-              <button class="ts-preset" data-ts-size="60">60</button>
+            <div class="ts-group">
+              <span class="ts-label">大小</span>
+              <div class="ts-btngrp">
+                <button class="ts-preset" data-ts-size="45">45</button>
+                <button class="ts-preset" data-ts-size="60">60</button>
+              </div>
+              <!-- 樣式欄位不在 HTML 重抄預設值；renderTrackStyle() 一律以 effStyle() 初始化。 -->
+              <input type="number" id="tsSize" min="10" max="300" step="1"><span class="ts-unit">px</span>
             </div>
-            <!-- 樣式欄位不在 HTML 重抄預設值；renderTrackStyle() 一律以 effStyle() 初始化。 -->
-            <input type="number" id="tsSize" min="10" max="300" step="1"><span class="ts-unit">px</span>
-            <span class="ts-sep">│</span>
-            <button class="ts-toggle" id="tsBold" title="粗體"><b>B</b></button>
-            <button class="ts-toggle" id="tsItalic" title="斜體"><i>I</i></button>
-            <span class="ts-sep">│</span>
-            <span class="ts-label" title="多行／多句字幕彼此的對齊方式">對齊</span>
-            <!-- 上下對齊在左、左右對齊在右 -->
-            <select id="tsValign" title="上下對齊">
-              <option value="top">上</option><option value="middle">中</option><option value="bottom">下</option>
-            </select>
-            <select id="tsAlign" title="左右對齊">
-              <option value="left">左</option><option value="center">中</option><option value="right">右</option>
-            </select>
-            <span class="ts-sep">│</span>
-            <button class="ts-toggle" id="tsVertical" title="直書（逐字直排；多行＝多列，第一行在左）">直</button>
-            <span class="ts-sep">│</span>
-            <span class="ts-label">字色</span>
-            <input type="color" id="tsColor" title="文字顏色">
-            <div class="ts-colors">
-              <button class="ts-clr" data-color="#ffffff" title="白" aria-label="字幕顏色：白"
-                style="background:#ffffff"></button>
-              <button class="ts-clr" data-color="#ff3333" title="紅" aria-label="字幕顏色：紅"
-                style="background:#ff3333"></button>
-              <button class="ts-clr" data-color="#ffee00" title="黃" aria-label="字幕顏色：黃"
-                style="background:#ffee00"></button>
+            <div class="ts-group">
+              <button class="ts-toggle" id="tsBold" title="粗體"><b>B</b></button>
+              <button class="ts-toggle" id="tsItalic" title="斜體"><i>I</i></button>
             </div>
-            <span class="ts-sep">│</span>
-            <select id="tsFont" title="字幕字型">
-              <option>更紗黑體</option><option>台北黑體</option><option>思源黑體</option><option>思源宋體</option>
-              <option>粉圓字體</option><option>標楷體</option><option value="__custom">匯入自訂字型...</option>
-            </select>
+            <div class="ts-group">
+              <span class="ts-label" title="多行／多句字幕彼此的對齊方式">對齊</span>
+              <!-- 上下對齊在左、左右對齊在右 -->
+              <select id="tsValign" title="上下對齊">
+                <option value="top">上</option><option value="middle">中</option><option value="bottom">下</option>
+              </select>
+              <select id="tsAlign" title="左右對齊">
+                <option value="left">左</option><option value="center">中</option><option value="right">右</option>
+              </select>
+            </div>
+            <div class="ts-group">
+              <button class="ts-toggle" id="tsVertical" title="直書（逐字直排；多行＝多列，第一行在左）">直</button>
+            </div>
+            <div class="ts-group">
+              <span class="ts-label">字色</span>
+              <input type="color" id="tsColor" title="文字顏色">
+              <div class="ts-colors">
+                <button class="ts-clr" data-color="#ffffff" title="白" aria-label="字幕顏色：白"
+                  style="background:#ffffff"></button>
+                <button class="ts-clr" data-color="#ff3333" title="紅" aria-label="字幕顏色：紅"
+                  style="background:#ff3333"></button>
+                <button class="ts-clr" data-color="#ffee00" title="黃" aria-label="字幕顏色：黃"
+                  style="background:#ffee00"></button>
+              </div>
+            </div>
+            <div class="ts-group">
+              <select id="tsFont" title="字幕字型">
+                <option>更紗黑體</option><option>台北黑體</option><option>思源黑體</option><option>思源宋體</option>
+                <option>粉圓字體</option><option>標楷體</option><option value="__custom">匯入自訂字型...</option>
+              </select>
+            </div>
           </div>
           <div class="ts-line">
-            <span class="ts-label">座標</span>
-            <span class="ts-unit">X</span><input type="number" id="tsPosX" step="0.1" title="水平座標 X（百分比）"><span class="ts-unit">%</span>
-            <span class="ts-unit">Y</span><input type="number" id="tsPosY" step="0.1" title="垂直座標 Y（百分比）"><span class="ts-unit">%</span>
-            <span class="ts-sep">│</span>
-            <span class="ts-label">角度</span>
-            <input type="number" id="tsAngle" min="-180" max="180" step="1" title="旋轉角度（度，順時針為正；繞錨點）">
-            <span class="ts-sep">│</span>
-            <span class="ts-label">字距</span>
-            <input type="number" id="tsSpacing" min="0" max="100" step="0.5" title="字元間距 px（直書＝字與字的間隔）">
-            <span class="ts-label">行距</span>
-            <input type="number" id="tsLineSp" min="1" max="100" step="0.1" title="行高倍數（直書＝列與列的間隔）">
-            <span class="ts-sep">│</span>
-            <span class="ts-label">框線</span>
-            <input type="color" id="tsOutlineColor" title="框線顏色">
-            <input type="number" id="tsOutline" min="0" max="10" step="0.5" title="框線厚度 px">
-            <span class="ts-label">陰影</span>
-            <input type="number" id="tsShadow" min="0" max="10" step="0.5" title="陰影大小 px">
-            <span class="ts-sep">│</span>
-            <button class="ts-toggle" id="tsBgBox" title="背景色塊">底</button>
-            <input type="color" id="tsBgColor" title="背景色">
-            <input type="number" id="tsBgAlpha" min="0" max="100" step="5" title="背景不透明度 %"><span class="ts-unit">%</span>
+            <div class="ts-group">
+              <span class="ts-label">座標</span>
+              <span class="ts-unit">X</span><input type="number" id="tsPosX" step="0.1" title="水平座標 X（百分比）"><span class="ts-unit">%</span>
+              <span class="ts-unit">Y</span><input type="number" id="tsPosY" step="0.1" title="垂直座標 Y（百分比）"><span class="ts-unit">%</span>
+            </div>
+            <div class="ts-group">
+              <span class="ts-label">角度</span>
+              <input type="number" id="tsAngle" min="-180" max="180" step="1" title="旋轉角度（度，順時針為正；繞錨點）">
+            </div>
+            <div class="ts-group">
+              <span class="ts-label">字距</span>
+              <input type="number" id="tsSpacing" min="0" max="100" step="0.5" title="字元間距 px（直書＝字與字的間隔）">
+              <span class="ts-label">行距</span>
+              <input type="number" id="tsLineSp" min="1" max="100" step="0.1" title="行高倍數（直書＝列與列的間隔）">
+            </div>
+            <div class="ts-group">
+              <span class="ts-label">框線</span>
+              <input type="color" id="tsOutlineColor" title="框線顏色">
+              <input type="number" id="tsOutline" min="0" max="10" step="0.5" title="框線厚度 px">
+              <span class="ts-label">陰影</span>
+              <input type="number" id="tsShadow" min="0" max="10" step="0.5" title="陰影大小 px">
+            </div>
+            <div class="ts-group">
+              <button class="ts-toggle" id="tsBgBox" title="背景色塊">底</button>
+              <input type="color" id="tsBgColor" title="背景色">
+              <input type="number" id="tsBgAlpha" min="0" max="100" step="5" title="背景不透明度 %"><span class="ts-unit">%</span>
+            </div>
           </div>
           <div class="ts-line">
-            <span class="ts-label">常用樣式</span>
-            <select id="tsPresetSel" title="套用常用樣式"><option value="">— 套用 —</option></select>
-            <button class="ts-preset" id="tsPresetSave" title="把目前這組樣式存成常用樣式（跨專案保存）">☆ 存為常用</button>
-            <button class="ts-preset" id="tsPresetMgr" title="管理常用樣式（改名／刪除）">⚙ 管理</button>
-            <span class="ts-sep">│</span>
-            <button class="ts-preset" id="tsUnify" title="把目前這句的樣式套用到整條軌道的每一句">⇩ 全軌統一</button>
+            <div class="ts-group">
+              <span class="ts-label">常用樣式</span>
+              <select id="tsPresetSel" title="套用常用樣式"><option value="">— 套用 —</option></select>
+            </div>
+            <div class="ts-group">
+              <button class="ts-preset" id="tsPresetSave" title="把目前這組樣式存成常用樣式（跨專案保存）">☆ 存為常用</button>
+              <button class="ts-preset" id="tsPresetMgr" title="管理常用樣式（改名／刪除）">⚙ 管理</button>
+            </div>
+            <div class="ts-group">
+              <button class="ts-preset" id="tsUnify" title="把目前這句的樣式套用到整條軌道的每一句">⇩ 全軌統一</button>
+            </div>
           </div>
         </div>
       </div>
@@ -237,7 +254,7 @@
     <!-- ===== 時間軸 ===== -->
     <div class="timeline" id="timelinePanel">
       <div class="tl-toolbar">
-        <span style="font-weight:600">⏱ 時間軸</span>
+        <span class="tl-toolbar-title" style="font-weight:600">⏱ <span class="lbl">時間軸</span></span>
         <div class="project-audio-count" title="專案總輸出音軌數；可直接輸入 1–32 軌">
           <span class="project-audio-count-label">音軌數</span>
           <input type="number" id="projectAudioTracksCount" min="1" max="32" value="2" aria-label="專案總輸出音軌數">
@@ -269,10 +286,10 @@
         <span id="tlSel">未選取</span>
         <div class="sep"></div>
         <div class="zoom">
-          縮放 <button class="icon" data-act="zoom-out">－</button>
+          <span class="lbl">縮放</span> <button class="icon" data-act="zoom-out">－</button>
           <input type="range" id="zoomBar" min="0.1" max="400" value="80" step="0.1" style="width:120px">
           <button class="icon" data-act="zoom-in">＋</button>
-          <button class="icon" data-act="zoom-fit" title="自適應縮放 (切換字幕範圍 / 影片全長, 快捷鍵 `)">自適應</button>
+          <button class="icon" data-act="zoom-fit" title="自適應縮放 (切換字幕範圍 / 影片全長, 快捷鍵 `)"><span class="lbl">自適應</span><span class="compact-icon" aria-hidden="true">↔</span></button>
         </div>
         <div class="spacer"></div>
       </div>

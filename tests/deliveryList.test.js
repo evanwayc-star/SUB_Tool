@@ -229,6 +229,24 @@ describe('轉成匯出工作', () => {
     expect(job.defaultName).toBe('ST_拼桌_29fps.mp4');
   });
 
+  it('macOS 輸出目錄使用 POSIX 斜線，不可混入 Windows 反斜線', () => {
+    const l = base();
+    l.setOutDir(0, '/Users/evan/Movies/SUBTool_Output/');
+    const [job] = l.toJobs(snapshot);
+    expect(job.outPath).toBe('/Users/evan/Movies/SUBTool_Output/ST_拼桌_29fps.mp4');
+    expect(job.outPath).not.toContain('\\');
+  });
+
+  it('POSIX 根目錄與 Windows 磁碟根目錄都只保留一個分隔符', () => {
+    const posix = base();
+    posix.setOutDir(0, '/');
+    expect(posix.toJobs(snapshot)[0].outPath).toBe('/ST_拼桌_29fps.mp4');
+
+    const windows = base();
+    windows.setOutDir(0, 'D:\\');
+    expect(windows.toJobs(snapshot)[0].outPath).toBe('D:\\ST_拼桌_29fps.mp4');
+  });
+
   it('交付解析度走同一條公式', () => {
     const l = base();
     l.setOutDir(0, 'D:\\交付');

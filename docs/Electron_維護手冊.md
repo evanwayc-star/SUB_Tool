@@ -445,6 +445,7 @@ commit 上另行加入 Developer ID、hardened runtime 與 Apple notarization �
 | GPU 編碼器不可用 | Windows 確認顯示卡驅動；Mac 確認 static ffmpeg 列出且能實跑 `h264_videotoolbox`；`status()` 回傳 `libx264` 表示已 fallback |
 | Mac App 被 Gatekeeper 擋下 | `dist:mac:test` 是 unsigned，只能對自己剛建出的可信產物依 Apple「隱私權與安全性 → 仍要打開」放行；公開版本必須 Developer ID 簽署與 notarize |
 | Mac DMG 異常巨大或含 `.exe` | 檢查 `build.mac.files` 是否仍先排除 `electron/ffmpeg/**`、`electron/mpv/**` 再只加入 `darwin-arm64`；解開 App 實看內容，不能只看 build 成功 |
+| Mac 選完輸出目錄卻被 fileAuthority 拒絕 | 檢查 renderer 送出的 `outPath` 是否把 POSIX 目錄組成 `Output\\file.mp4`。`delivery-list.js` 必須依原生選擇器回傳格式保留 `/` 或 `\\`，不能固定使用 Windows 分隔符；POSIX 根目錄與 Windows 磁碟根目錄都有單元測試 |
 | 快取未命中（每次都重新轉） | 來源檔前 1MB 或大小有變動；可手動刪除 `.subtool_Cache` 強制重建 |
 | `task-progress` 無回報 | `sender` 是否傳入 `runFF`；`safeSend` 是否因視窗已銷毀而跳過 |
 | **完全無法匯出影片**（filterchain 解析失敗） | `fontsdir=` 的 Windows 磁碟機冒號要跳脫**兩層**（`C\\:/`）。單反斜線會讓 ffmpeg 把 `:` 當選項分隔符。注意手動在 shell 跑也會撞到同一個錯，很容易誤判成「shell 吃掉跳脫字元」——用 `spawn`（無 shell 介入）重測才能確認 |

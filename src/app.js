@@ -57,6 +57,7 @@ import { imageBoxOnStage } from './imagegeom.js'; // v4.7 圖片疊層幾何：�
 import { fadeAlphaAtTimeline } from './clip-fade.js'; // v5.9 淡入淡出：預覽與匯出共用同一份規格
 import { timecodeSuffix, screenshotDir, fallbackScreenshotName } from './screenshot-target.js';
 import { presetExportRelativePath } from './export-name-safety.js';
+import { renderSeekBar } from './seekbar.js';
 import { on, emit } from './events.js';
 
 if (typeof __APP_VERSION__ !== 'undefined') {
@@ -734,6 +735,7 @@ async function openCacheDialog(){
 function onDurationKnown(){
   $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
   $('seekBar').max=Math.max(1,Math.round(State.duration*1000));
+  renderSeekBar($('seekBar'), Media.displayTime());
   $('stMedia').textContent=State.mediaName?(State.mediaName+(State.mediaSize?(' · '+(State.mediaSize/1e6).toFixed(1)+'MB'):'')):'';
   const vw=viewportW();
   if(vw && State.duration>0){
@@ -762,7 +764,7 @@ video.addEventListener('timeupdate',()=>{
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：tcCur/seekBar/播放點都以 displayTime() 為唯一來源
   let t = Media.displayTime();
   $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame); // 時:分:秒:格
-  $('seekBar').value=Math.round(t*1000);
+  renderSeekBar($('seekBar'), t);
   renderTimecodeWatermark(t);
   if(!Media.playing) updatePlayhead();
 });
@@ -774,7 +776,7 @@ function rafLoop(){
     // 無媒體時更新時間顯示；序列間隙中影片暫停無 timeupdate，也由此更新
     if(!video.src || Media.inGap()){
       $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-      $('seekBar').value=Math.round(t*1000);
+      renderSeekBar($('seekBar'), t);
     }
     ensurePlayheadVisible(); // scroll viewport first so State.viewStart is current
     updatePlayhead(); renderVideoSub();
@@ -854,7 +856,7 @@ video.addEventListener('pause',()=>{
   $('playBtn').textContent='▶';
   const t=Media.displayTime();
   $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-  $('seekBar').value=Math.round(t*1000);
+  renderSeekBar($('seekBar'), t);
   renderTimecodeWatermark(t);
   updatePlayhead();
   
@@ -888,7 +890,7 @@ video.addEventListener('ended',()=>{ if(Media.seqContinueAtEnd()) return; Media.
 });
 
 /* seek bar */
-$('seekBar').addEventListener('input',e=>{ const t=(+e.target.value)/1000; Media.seek(t); updateNoteActive(t); });
+$('seekBar').addEventListener('input',e=>{ renderSeekBar(e.target); const t=(+e.target.value)/1000; Media.seek(t); updateNoteActive(t); });
 // rateSel removed from UI — speed controlled via JKL keys
 $('fpsSel').addEventListener('change',e=>{
   const prev=State.fps,prevDf=State.dropFrame;
@@ -1002,7 +1004,7 @@ const Commands = createCommands({
 function doAction(act, force = false){ return Commands.run(act, { force }); }
 
 let _repTimer=null, _repInterval=null, _repFired=false;
-const REP_ACTS=['back5','back1','frame-back','frame-fwd','fwd1','fwd5'];
+const REP_ACTS=['back1','frame-back','frame-fwd','fwd1'];
 document.addEventListener('mousedown',e=>{
   if(e.button!==0)return;
   const b=e.target.closest('[data-act]');

@@ -48,7 +48,7 @@ Arctime 風格的多軌時間軸上字幕工具。**Vite + 原生 ES 模組（�
 同一份程式碼同時跑網頁版與 Electron 桌面版（以 `window.subtool` / `IS_DESKTOP` 分支）。
 
 ```
-src/            前端 ES 模組（39 支）＋ decode/ 底下 4 支 WebCodecs 相關
+src/            前端 ES 模組（48 支）＋ decode/ 底下 5 支 WebCodecs 相關
 electron/       主行程：ffmpeg / ffprobe / mpv / 檔案 I/O / 路徑白名單
 docs/           說明文件（見下方「文件職責」）
 tests/          vitest 單元測試（純函式與資料完整性）

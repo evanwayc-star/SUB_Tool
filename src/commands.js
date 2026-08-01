@@ -206,10 +206,8 @@ function createCommands(ctx){
       Media.toggle();
       setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : ''); // 狀態列同步播放/暫停（非僅 JKL）
     },
-    'back5': () => nudge(-5),
     'back1': () => nudge(-1),
     'fwd1': () => nudge(1),
-    'fwd5': () => nudge(5),
     'frame-back': () => nudge(-1 / State.fps),
     'frame-fwd': () => nudge(1 / State.fps),
     'set-in': () => setIn(),

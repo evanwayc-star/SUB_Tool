@@ -77,15 +77,21 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .app{display:flex;flex-direction:column;height:100vh;width:100vw}
 
 /* ---------- 頂部選單列 ---------- */
-.menubar{display:flex;align-items:center;gap:6px;background:rgba(18,18,18,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);
-  padding:6px 10px;flex-wrap:wrap;min-height:46px}
-.menubar button.icon{color:rgb(180,180,180)}
+.menubar{display:flex;align-items:center;gap:3px;background:rgba(18,18,18,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);
+  padding:6px;flex-wrap:nowrap;min-height:46px;overflow:hidden}
+.menubar>*{flex-shrink:0}
+.menubar>.spacer{flex:1 1 auto;min-width:0}
+.menubar>.sep{margin:0 1px}
+.menubar button.icon{color:rgb(180,180,180);padding-left:6px;padding-right:6px;white-space:nowrap}
+.menubar .auto-select-btn,.menubar .ow-toggle-btn,.menubar .ow-keep-btn{
+  min-width:0;padding-left:7px;padding-right:7px;margin-left:0;font-size:12px;letter-spacing:.2px;white-space:nowrap}
 .brand{display:flex;align-items:center;margin-right:6px;white-space:nowrap}
 .brand img{height:28px;width:auto;display:block}
 .brand small{color:#ffffff;font-weight:400;font-size:14px;margin-left:6px}
 .menubar .grp{display:flex;align-items:center;gap:4px}
 .fps-box{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px}
 .fps-box input{width:56px;text-align:center}
+@media(max-width:1250px){.menubar button.icon .lbl{display:none}}
 
 /* dropdown menu */
 .menu{position:relative}
@@ -100,7 +106,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 
 /* ---------- 主體 ---------- */
 .main{flex:1;display:flex;min-height:0;border-bottom:1px solid var(--border)}
-.left{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg)}
+.left{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg);container-type:inline-size}
 .right{width:570px;min-width:260px;max-width:60%;display:flex;flex-direction:column;background:var(--panel);
   border-left:1px solid var(--border)}
 
@@ -204,9 +210,12 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .no-video b{display:block;color:var(--text-dim);font-size:15px;margin-bottom:8px}
 .no-video kbd{background:var(--panel3);border:1px solid var(--border2);border-radius:4px;padding:1px 6px;font-size:11px}
 
-/* transport */
-.transport{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--panel);border-top:1px solid var(--border)}
-.tc{font-variant-numeric:tabular-nums;font-family:"更紗黑體","JetBrains Mono","更紗黑體","Segoe UI Variable","Consolas",monospace;font-size:17px;color:var(--text)}
+/* transport
+   Mac 的分割畫面在預設視窗下，播放器欄實測只有 668–783px。時碼若可 shrink／換行，
+   目前時間與總長度就會被拆成上下兩列；窄欄時把交付／監看工具整組移到下一列，
+   極窄欄再把 TC＋seek 獨立成一列，保留完整時碼與按鈕命中範圍。 */
+.transport{display:flex;align-items:center;gap:6px;padding:8px;background:var(--panel);border-top:1px solid var(--border)}
+.tc{font-variant-numeric:tabular-nums;font-family:"更紗黑體","JetBrains Mono","更紗黑體","Segoe UI Variable","Consolas",monospace;font-size:17px;line-height:1;color:var(--text);white-space:nowrap;flex:0 0 auto}
 .tc .cur{color:var(--accent)}
 .transport .btns{display:flex;gap:3px}
 .transport .btns .icon{min-width:29px;height:26px;padding:1px 3px;justify-content:center;gap:1px;font-size:10px;line-height:1}
@@ -214,9 +223,28 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .speed-indicator{width:38px;margin:0 2px;color:var(--text-faint);font:600 13px/1 "Cascadia Mono","JetBrains Mono",Consolas,monospace;
   text-align:center;white-space:nowrap;cursor:context-menu;user-select:none}
 .speed-indicator:hover{color:#fcd34d}
+.transport-tools{display:flex;align-items:center;gap:6px;flex:0 0 auto}
 .transport-sep{width:1px;height:23px;flex:0 0 1px;margin:0 -2px 0 0;background:var(--border2);box-shadow:1px 0 rgba(255,255,255,.025)}
-.transport input[type=range]{flex:1;min-width:60px;accent-color:var(--accent)}
+.transport input[type=range]{
+  --seek-progress:0%;-webkit-appearance:none;appearance:none;flex:1;min-width:60px;height:18px;margin:0;padding:0;border:0;
+  background:linear-gradient(to right,var(--accent) 0 var(--seek-progress),var(--text-faint) var(--seek-progress) 100%) center/calc(100% - 14px) 4px no-repeat;
+  cursor:pointer}
+.transport input[type=range]::-webkit-slider-runnable-track{height:4px;background:transparent;border:0}
+.transport input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;margin-top:-5px;
+  border:1px solid var(--accent-d);border-radius:50%;background:var(--accent);box-shadow:0 1px 2px rgba(0,0,0,.55)}
 .tp-btn{flex-shrink:0;padding:2px 6px;font-size:12px}
+@container (max-width:779px){
+  .transport{display:grid;grid-template-columns:auto auto auto minmax(60px,1fr)}
+  .transport-tools{grid-column:1/-1;justify-self:end}
+}
+@container (max-width:600px){
+  .transport{grid-template-columns:auto minmax(60px,1fr)}
+  .transport .btns{grid-column:1}
+  .speed-indicator{grid-column:2}
+  .tc{grid-column:1}
+  .transport #seekBar{grid-column:2}
+  .transport-tools{grid-column:1/-1}
+}
 #atHint.audio-capability-notice{display:block;flex:0 0 auto;padding:7px 12px;border-top:1px solid rgba(245,158,11,.38);
   background:rgba(245,158,11,.12);color:#f7c76b;font-size:12px;line-height:1.45}
 #atHint.audio-capability-notice[hidden]{display:none}
@@ -260,7 +288,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sublist .empty{padding:40px 20px;text-align:center;color:var(--text-faint);font-size:12px;line-height:1.7}
 .rhead{flex-wrap:wrap}
 .track-style{flex-shrink:0;border-top:1px solid var(--border);background:var(--panel2);padding:4px 10px}
-.ts-line{display:flex;align-items:center;gap:5px;white-space:nowrap;overflow-x:auto;font-size:12px;color:var(--text-dim);min-height:28px}
+.ts-line{display:flex;align-items:center;flex-wrap:wrap;column-gap:5px;row-gap:3px;white-space:nowrap;overflow-x:hidden;font-size:12px;color:var(--text-dim);min-height:28px}
+.ts-group{display:inline-flex;align-items:center;gap:5px;flex:0 0 auto;min-height:24px;white-space:nowrap}
+.ts-group:not(:first-child){border-left:1px solid var(--border);padding-left:6px}
 .ts-title{font-weight:600;color:var(--text);font-size:12px;flex-shrink:0}
 .ts-sep{color:var(--border);padding:0 1px;user-select:none;flex-shrink:0}
 .ts-label{color:var(--text-faint);font-size:11px;flex-shrink:0}
@@ -292,7 +322,11 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 
 /* ---------- 時間軸 ---------- */
 .timeline{height:280px;display:flex;flex-direction:column;background:var(--panel);min-height:160px}
-.tl-toolbar{display:flex;align-items:center;flex-wrap:nowrap;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--panel2);overflow:hidden}
+.tl-toolbar{display:flex;align-items:center;flex-wrap:nowrap;gap:4px;padding:6px;border-bottom:1px solid var(--border);background:var(--panel2);overflow:hidden;white-space:nowrap}
+.tl-toolbar>*{flex-shrink:0;white-space:nowrap}
+.tl-toolbar>.spacer{flex:1 1 auto;min-width:0}
+.tl-toolbar>.sep{margin:0 1px}
+.tl-toolbar button.icon{padding-left:6px;padding-right:6px;white-space:nowrap}
 /* 專案音軌數：琥珀色是刻意的強調（它決定所有交付的聲道數），但飽和度壓低過一次——
    原本數字是 #fff1cd（近乎白色的奶油色）配 800 字重，在深色介面上等於一直發光刺眼。
    現在整組往下壓約三成亮度，維持「這是重點」的層級，但不再搶視線。 */
@@ -307,8 +341,15 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .project-audio-count input:focus{border-color:#ac9059;box-shadow:0 0 0 2px rgba(201,167,96,.13),inset 0 0 0 1px rgba(239,214,158,.10)}
 .project-audio-count-unit{color:#b09d74;font-size:11px;font-weight:700;white-space:nowrap}
 .tl-toolbar .zoom{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px}
+.tl-toolbar #tlSel{min-width:90px;padding-left:6px;padding-right:6px}
+.tl-toolbar #zoomBar{width:105px!important}
+.tl-toolbar .compact-icon{display:none}
 .tl-toolbar .hint{color:var(--text-faint);font-size:11px}
-@media(max-width:1100px){.tl-toolbar .lbl,.tl-toolbar .hint{display:none}}
+@media(max-width:1100px){
+  .tl-toolbar .lbl,.tl-toolbar .hint{display:none}
+  .tl-toolbar .compact-icon{display:inline}
+  .tl-toolbar #zoomBar{width:80px!important}
+}
 .tl-scroll{flex:1;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--bg)}
 .tl-spacer{height:1px}
 .tl-layer{position:sticky;left:0;top:0;height:100%;will-change:transform}

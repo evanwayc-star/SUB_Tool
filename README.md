@@ -137,10 +137,10 @@ flowchart LR
 | | 🖥 **Windows 桌面版**（推薦） | 🍎 **Apple Silicon 測試版** | 🌐 **網頁版** |
 | :--- | :--- | :--- | :--- |
 | **適合** | 日常剪輯、高強度交付、`.subtool` 專案檔 | M 系列 Mac 本機驗收；目前需從原始碼建置 | 快速預覽、跨平台、從原始碼跑 |
-| **影片格式** | MP4 · MOV · **MXF** · MKV · AVI | 目標為 MP4 · MOV · **MXF** · MKV · AVI（待實機驗收） | MP4 · MOV (H.264) |
-| **音訊** | 多音軌素材、多聲道輸出 | 多音軌素材、多聲道輸出（待實機驗收） | 基本播放 |
+| **影片格式** | MP4 · MOV · **MXF** · MKV · AVI | MP4 多聲道已實機驗證；MOV／MXF／MKV／AVI 仍依 §4.16 驗收 | MP4 · MOV (H.264) |
+| **音訊** | 多音軌素材、多聲道輸出 | `5.1 FM + 2.0 FM` 已實機驗證為 8 個獨立 Mono | 基本播放 |
 | **播放核心** | 內建 `mpv`，44GB 大檔秒開 | ffmpeg ingest + HTML/WebCodecs；第一版不啟用 mpv | 瀏覽器 HTML5 |
-| **轉檔** | 內建 `FFmpeg`，背景佇列 | 內建 arm64 FFmpeg；VideoToolbox／CPU fallback 待實機驗收 | 瀏覽器端，能力有限 |
+| **轉檔** | 內建 `FFmpeg`，背景佇列 | 內建 arm64 FFmpeg；VideoToolbox 已實機驗證，CPU fallback 保留 | 瀏覽器端，能力有限 |
 
 ---
 
@@ -193,8 +193,9 @@ npm ci
 npm run dist:mac:test
 ```
 
-這不是已簽署的公開發行版。完整的 Gatekeeper 放行方式、原生架構核對與 44GB MXF／交付
-驗收清單見 [`docs/開發與驗證.md`](docs/開發與驗證.md#apple-silicon-本機測試版)。
+這不是已簽署的公開發行版。Apple Silicon 的 6.42GB `5.1 FM + 2.0 FM`／8 Mono／MP4 交付
+已完成實機驗證；完整的 Gatekeeper 放行方式、原生架構核對與仍待執行的 44GB MXF／交付
+清單見 [`docs/開發與驗證.md`](docs/開發與驗證.md#apple-silicon-本機測試版)。
 
 三道靜態安全網（發版前必須全綠）：
 
@@ -211,7 +212,7 @@ npm run lint && npm test && npm run build
 ## 🗂 專案結構
 
 ```
-src/            前端 ES 模組（39 支）＋ decode/ 底下 4 支 WebCodecs 相關
+src/            前端 ES 模組（48 支）＋ decode/ 底下 5 支 WebCodecs 相關
 electron/       主行程：ffmpeg / ffprobe / mpv / 檔案 I/O / 路徑白名單
 docs/           說明文件（見下方索引）
 tests/          vitest 單元測試（純函式與資料完整性）

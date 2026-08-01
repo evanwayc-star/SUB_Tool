@@ -78,7 +78,14 @@ export function suggestKbps({ w, h }) {
 }
 
 function joinPath(dir, name) {
-  return String(dir || '').replace(/[/\\]+$/, '') + '\\' + name;
+  const raw = String(dir || '');
+  if (!raw) return name;
+  // renderer 不能 import node:path；依原生選擇器回傳的目錄格式保留平台分隔符。
+  // Windows dialog 回傳反斜線，macOS/Linux 回傳斜線。固定補 `\\` 會把
+  // `/Users/.../output` 組成未獲 fileAuthority 授權的 `output\\file.mp4`。
+  const separator = raw.includes('\\') ? '\\' : '/';
+  const base = raw.replace(/[/\\]+$/, '');
+  return (base || separator) + (base ? separator : '') + name;
 }
 
 function newRow({ audioOnly, defaultAudioLayout, outDir = '' }) {
