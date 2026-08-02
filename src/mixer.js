@@ -176,11 +176,12 @@ function renderMixer(){
   });
 }
 
-/* 電平表的來源聲道一律問 Media，不要自己過濾 Media.tracks。
+/* 電平表的 bus 輸入一律問 Media，不要自己過濾 Media.tracks 或重算 gain。
    這裡以前重寫了一份判定，漏掉外部素材的 placement gain，於是外部音檔被停用時
-   表還在跳但沒有聲音。判定的家在 media.js（見 Media.routedTracksForBus）。 */
-function _busRouteTracks(bus){
-  return Media.routedTracksForBus(bus?.id);
+   表還在跳但沒有聲音。判定與完整增益的家在 project-audio.js
+   （由 Media.routedTrackStatesForBus 暴露）。 */
+function _busRouteStates(interpretation,bus){
+  return interpretation.routedTrackStatesForBus(bus?.id);
 }
 function _trackLevel(track){
   try{
@@ -209,10 +210,10 @@ function mixerMuteAll(){
 function updateMeters(){
   const panel=$('mixerPanel'); if(!panel||!panel.classList.contains('show')||!_meterStrips.length)return;
   const now=performance.now();
+  const interpretation=Media.projectAudioInterpretation();
   for(const strip of _meterStrips){
-    const busGain=busVolume(strip.bus);
     let level=0;
-    for(const track of _busRouteTracks(strip.bus)) level=Math.max(level,_trackLevel(track)*(track.volume==null?1:track.volume)*busGain);
+    for(const input of _busRouteStates(interpretation,strip.bus)) level=Math.max(level,_trackLevel(input.track)*input.gain);
     strip.level=Math.max(level,(strip.level||0)*0.82);
     const db=strip.level>1e-4?20*Math.log10(strip.level):-60;
     const height=Math.max(0,Math.min(100,(db+60)/60*100));

@@ -110,6 +110,21 @@ describe('Media.routedTracksForBus', () => {
   });
 });
 
+describe('Media.routedTrackStatesForBus', () => {
+  it('回傳該 bus 真正收到的完整增益，不漏 route、placement 或 bus gain', () => {
+    Media.tracks = [track({ volume: 0.5 })];
+    Media.externalAudioSources = [{ audioSourceId: 'src1', enabled: true, gain: 0.5 }];
+    State.audioProject.sourceMaps.src1.channels[0].gain = 0.25;
+    State.audioProject.buses[0].volume = 0.8;
+
+    const states = Media.routedTrackStatesForBus('a1');
+
+    expect(states).toHaveLength(1);
+    expect(states[0].track).toBe(Media.tracks[0]);
+    expect(states[0].gain).toBeCloseTo(0.05);
+  });
+});
+
 /* 這一組就是這次要修的 bug：外部素材的 placement gain 以前只有 applyGains 看得到。 */
 describe('外部音訊素材的 placement gain（以前電平表看不到）', () => {
   beforeEach(() => {
@@ -140,18 +155,33 @@ describe('trackAudible 與 applyGains 是同一套規則', () => {
     expect(Media.trackAudible(null)).toBe(false);
     expect(Media.trackAudible(undefined)).toBe(false);
   });
+
+  it('暫時隱藏的來源即使有 Solo，也不會讓目前監聽來源整組靜音', () => {
+    Media.tracks = [
+      track({ sourceChannel: 0 }),
+      track({ sourceChannel: 1, solo: true, _srcHidden: true }),
+    ];
+    State.audioProject.sourceMaps.src1.channels.push(
+      { sourceStream: 0, sourceChannel: 1, enabled: true, gain: 1, busIds: ['a1'] });
+
+    expect(Media.trackAudible(Media.tracks[0])).toBe(true);
+    expect(Media.trackAudible(Media.tracks[1])).toBe(false);
+  });
 });
 
-describe('mixer.js 不再自己過濾 Media.tracks', () => {
+describe('mixer.js 不再自己解讀 Media.tracks 的路由與增益', () => {
   /* 這是這次收斂的契約：判定的家在 media.js。
      若有人又在 mixer.js 重寫一份 solo/mute/busIds 判定，這裡就會紅。 */
-  it('_busRouteTracks 只是轉呼叫 Media.routedTracksForBus', () => {
+  it('_busRouteStates 只使用 ProjectAudioInterpretation 編好的 bus 輸入', () => {
     const src = fs.readFileSync(path.join(ROOT, 'src/mixer.js'), 'utf8');
-    const body = src.slice(src.indexOf('function _busRouteTracks'));
+    const body = src.slice(src.indexOf('function _busRouteStates'));
     const fn = body.slice(0, body.indexOf('\n}') + 2);
 
-    expect(fn).toMatch(/Media\.routedTracksForBus\(/);
+    expect(fn).toMatch(/interpretation\.routedTrackStatesForBus\(/);
     expect(fn).not.toMatch(/Media\.tracks\.filter/);
     expect(fn).not.toMatch(/sourceMaps/);
+    expect(src.match(/Media\.projectAudioInterpretation\(\)/g)).toHaveLength(1);
+    expect(src).toMatch(/_trackLevel\(input\.track\)\s*\*\s*input\.gain/);
+    expect(src).not.toMatch(/_trackLevel\(track\).*track\.volume.*busGain/);
   });
 });

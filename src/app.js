@@ -72,6 +72,8 @@ on('render:all', renderAll);
 on('render:videoSub', renderVideoSub);
 on('render:listTrackSel', renderListTrackSel);
 on('render:trackStyle', renderTrackStyle); // 換選取字幕 → 樣式面板換對象（v4.31）
+on('timeline:invalidate', drawTimeline); // 軌道 metadata 交易只發事件，不反向 import renderer
+on('selection:clipCleared', ()=>{ const el=$('stSel'); if(el) el.textContent=''; });
 on('playhead:ensure', ensurePlayheadVisible);
 on('duration:known', onDurationKnown);
 on('mpv:refreshSubs', refreshMpvSubs);

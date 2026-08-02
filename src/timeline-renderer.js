@@ -40,6 +40,7 @@ import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps } from './time.j
 import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
+import { beginTimelineTrackEdit, updateTimelineTrack } from './timeline-edit-transaction.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
@@ -265,7 +266,10 @@ function renderTrackRows(){
         `<span class="gname" contenteditable="false" spellcheck="false">${escapeHTML(State.tracks[tk].name)}</span>`+
         `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖':'鎖定'}此軌">${isLocked?'🔒':'🔓'}</button>`+
         `<button class="gdel" title="刪除此軌">✕</button>`;
-      g.querySelector('.eye').onclick=(e)=>{e.stopPropagation();State.tracks[tk].visible=!vis;drawTimeline();emit('render:videoSub');emit('mpv:refreshSubs');};
+      g.querySelector('.eye').onclick=(e)=>{
+        e.stopPropagation();
+        updateTimelineTrack({kind:'subtitle',index:tk,field:'visible',value:!vis});
+      };
       g.addEventListener('click', e => {
         if (e.target.closest('.eye,.glock,.gdel,.drag-handle') || nm.contentEditable === 'true') return;
         e.stopPropagation();
@@ -287,8 +291,14 @@ function renderTrackRows(){
         }
       });
       nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=State.tracks[tk].name;nm.blur();} };
-      nm.onblur=()=>{ nm.contentEditable='false'; State.tracks[tk].name=nm.innerText.trim()||('軌道 '+(tk+1)); emit('render:listTrackSel'); };
-      g.querySelector('.glock').onclick=(e)=>{e.stopPropagation();State.tracks[tk].locked=!State.tracks[tk].locked;renderTrackRows();};
+      nm.onblur=()=>{
+        nm.contentEditable='false';
+        updateTimelineTrack({kind:'subtitle',index:tk,field:'name',value:nm.innerText});
+      };
+      g.querySelector('.glock').onclick=(e)=>{
+        e.stopPropagation();
+        updateTimelineTrack({kind:'subtitle',index:tk,field:'locked',value:!State.tracks[tk].locked});
+      };
       g.querySelector('.gdel').onclick=(e)=>{e.stopPropagation();removeTrack(tk);};
       // 高度縮放把手
       const resH=document.createElement('div');
@@ -298,11 +308,12 @@ function renderTrackRows(){
         const now=performance.now();
         if(_lastHandleClick.tk===tk && now-_lastHandleClick.t<400){
           _lastHandleClick={tk:-1,t:0};
-          if(State.tracks[tk])delete State.tracks[tk].height;
-          drawTimeline(); return;
+          updateTimelineTrack({kind:'subtitle',index:tk,field:'height',value:undefined});
+          return;
         }
         _lastHandleClick={tk,t:now};
-        _rowResize={type:'track',tk,startY:e.clientY,startH:trackH(tk)};
+        _rowResize={type:'track',tk,startY:e.clientY,startH:trackH(tk),
+          edit:beginTimelineTrackEdit({kind:'subtitle',index:tk,field:'height'})};
         document.addEventListener('mousemove',_onRowResizeMove);
         document.addEventListener('mouseup',_onRowResizeUp,{once:true});
       });
@@ -408,17 +419,20 @@ function _onRowResizeMove(e){
   if(!_rowResize)return;
   const {type,tk,startY,startH}=_rowResize;
   const dy=e.clientY-startY;
-  if(type==='vtrack'){ if(State.videoTracks[tk])State.videoTracks[tk].height=Math.max(24,startH+dy); }
+  if(type==='vtrack') _rowResize.edit?.preview(Math.max(24,startH+dy));
   else if(type==='atrack'){ if(_rowResize.source) _rowResize.source.height=Math.max(32,startH+dy); }
-  else if(State.tracks[tk])State.tracks[tk].height=Math.max(20,startH+dy);
+  else _rowResize.edit?.preview(Math.max(20,startH+dy));
   if(!_rowResize._raf){
     _rowResize._raf=requestAnimationFrame(()=>{ _rowResize&&(_rowResize._raf=null); _doResize(type,tk); });
   }
 }
 function _onRowResizeUp(){
   document.removeEventListener('mousemove',_onRowResizeMove);
+  const resize=_rowResize;
+  if(resize?._raf){ cancelAnimationFrame(resize._raf); resize._raf=null; }
   _rowResize=null;
-  drawTimeline();
+  if(resize?.edit) resize.edit.commit();
+  else drawTimeline();
 }
 /* 影片序列：把各段畫進「對應視訊軌列」（各軌獨立成列，比照字幕軌）。
    先在 tlVtracks 內建立每軌的列 .vtrack-row（由上而下：最高軌在最上面），再把片段放入其列。
@@ -827,7 +841,10 @@ function renderVtrackGutter(){
       refreshTrackGutterActive();
       const stSel = $('stSel'); if (stSel) stSel.textContent = '已切換至視訊軌：' + (meta.name || ('視訊軌 ' + (v + 1)));
     });
-    g.querySelector('.eye').onclick=(e)=>{ e.stopPropagation(); meta.visible=!vis; drawTimeline(); emit('render:videoSub'); };
+    g.querySelector('.eye').onclick=(e)=>{
+      e.stopPropagation();
+      updateTimelineTrack({kind:'video',index:v,field:'visible',value:!vis});
+    };
     const nm=g.querySelector('.gname');
     nm.addEventListener('mousedown',e=>{
       if(e.detail>=2){ e.preventDefault(); nm.contentEditable='true'; nm.focus();
@@ -835,8 +852,14 @@ function renderVtrackGutter(){
       }
     });
     nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
-    nm.onblur=()=>{ nm.contentEditable='false'; meta.name=nm.innerText.trim()||('視訊軌 '+(v+1)); };
-    g.querySelector('.glock').onclick=(e)=>{ e.stopPropagation(); meta.locked=!meta.locked; if(meta.locked){ const sc=Seq.byId(State.selectedClipId); if(sc&&(sc.vtrack||0)===v) clearClipSelection(); } drawTimeline(); };
+    nm.onblur=()=>{
+      nm.contentEditable='false';
+      updateTimelineTrack({kind:'video',index:v,field:'name',value:nm.innerText});
+    };
+    g.querySelector('.glock').onclick=(e)=>{
+      e.stopPropagation();
+      updateTimelineTrack({kind:'video',index:v,field:'locked',value:!meta.locked});
+    };
     g.querySelector('.gadd').onclick=(e)=>{ e.stopPropagation(); addVideoTrack(v+1); };
     g.querySelector('.gdel').onclick=(e)=>{ e.stopPropagation(); removeVideoTrack(v); };
     const resH=document.createElement('div');
@@ -846,11 +869,12 @@ function renderVtrackGutter(){
       const now=performance.now();
       if(_lastHandleClick.tk==='v'+v && now-_lastHandleClick.t<400){
         _lastHandleClick={tk:-1,t:0};
-        if(meta) delete meta.height;
-        drawTimeline(); return;
+        updateTimelineTrack({kind:'video',index:v,field:'height',value:undefined});
+        return;
       }
       _lastHandleClick={tk:'v'+v,t:now};
-      _rowResize={type:'vtrack',tk:v,startY:e.clientY,startH:vtrackH(v)};
+      _rowResize={type:'vtrack',tk:v,startY:e.clientY,startH:vtrackH(v),
+        edit:beginTimelineTrackEdit({kind:'video',index:v,field:'height'})};
       document.addEventListener('mousemove',_onRowResizeMove);
       document.addEventListener('mouseup',_onRowResizeUp,{once:true});
     });

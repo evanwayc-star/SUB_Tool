@@ -212,7 +212,7 @@ npm run lint && npm test && npm run build
 ## 🗂 專案結構
 
 ```
-src/            前端 ES 模組（48 支）＋ decode/ 底下 5 支 WebCodecs 相關
+src/            前端 ES 模組（51 支）＋ decode/ 底下 5 支 WebCodecs 相關
 electron/       主行程：ffmpeg / ffprobe / mpv / 檔案 I/O / 路徑白名單
 docs/           說明文件（見下方索引）
 tests/          vitest 單元測試（純函式與資料完整性）

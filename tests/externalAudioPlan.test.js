@@ -17,6 +17,7 @@ import { createRequire } from 'node:module';
 import { State, ensureAudioBusCount, ensureAudioSourceMap, resetAudioProject } from '../src/state.js';
 import { Seq } from '../src/sequence.js';
 import { buildExportSnapshot, buildProjectAudioPlan } from '../src/delivery-job.js';
+import { createProjectAudioInterpretation } from '../src/project-audio.js';
 import { composeDeliveryAudioPlan } from '../src/delivery-audio.js';
 
 const ExportPlan = createRequire(import.meta.url)('../electron/export-plan.js');
@@ -181,6 +182,41 @@ describe('external audio project export plan', () => {
     }]);
   });
 
+  it('applies source-channel Solo globally in preview and delivery, not once per mother source', () => {
+    resetAudioProject();
+    ensureAudioBusCount(2);
+    const [a1, a2] = State.audioProject.buses.map(bus => bus.id);
+    ensureAudioSourceMap('source-a', [{ sourceStream: 0, sourceChannel: 0 }]);
+    ensureAudioSourceMap('source-b', [{ sourceStream: 0, sourceChannel: 0 }]);
+    State.audioProject.sourceMaps['source-a'].channels[0].busIds = [a1];
+    State.audioProject.sourceMaps['source-b'].channels[0].busIds = [a2];
+    State.audioProject.exportLayout = { streams: [
+      { id: 'a', layout: 'mono', busIds: [a1] },
+      { id: 'b', layout: 'mono', busIds: [a2] },
+    ] };
+    mediaTracks = [
+      // 原生 Stereo 會先建立控制軌，逐聲道 cache 稍後才完成；Solo/Mute 不得依賴 file。
+      { audioSourceId: 'source-a', sourceStream: 0, sourceChannel: 0, muted: false, solo: true, volume: 1 },
+      { audioSourceId: 'source-b', sourceStream: 0, sourceChannel: 0, muted: false, solo: false, volume: 1 },
+    ];
+    const clips = [
+      { name: 'A', path: 'C:/master/a.mov', audioSourceId: 'source-a', in: 0, out: 5, offset: 0 },
+      { name: 'B', path: 'C:/master/b.mov', audioSourceId: 'source-b', in: 0, out: 5, offset: 0 },
+    ];
+
+    const plan = audioPlan(clips, []);
+    const preview = createProjectAudioInterpretation({
+      audioProject: State.audioProject,
+      mediaTracks,
+      externalSources: [],
+    });
+
+    expect(preview.trackState(mediaTracks[0]).audible).toBe(true);
+    expect(preview.trackState(mediaTracks[1]).audible).toBe(false);
+    expect(plan.buses.find(bus => bus.id === a1).inputs).toHaveLength(1);
+    expect(plan.buses.find(bus => bus.id === a2).inputs).toEqual([]);
+  });
+
   /* 專案的 externalAudioState（可序列化）與 Media 目前實際持有的素材是兩份資料。
      runtime 有實體檔與最新編輯，優先採用；只存在於專案檔的那些仍要留著，
      否則檔案暫時離線時會靜默少掉一段音訊、總長也跟著縮短。 */
@@ -265,19 +301,25 @@ describe('交付編組（composeDeliveryAudioPlan）接上 export-plan 的 filte
   });
 });
 
-/* 這個模組能不能被無 mock 測試，取決於它有沒有偷偷 import 副作用來源。
-   比照 tests/exportPlan.test.js 對 electron/export-plan.js 的同款守衛。 */
+/* 這兩個模組能不能被無 mock 測試，取決於它們有沒有偷偷 import 副作用來源。
+   delivery-job 只准依賴純資料的 project-audio；後者本身必須是依賴葉節點。 */
 describe('模組本身保持純淨', () => {
-  it('delivery-job.js 不 import State／Media／Seq，也不碰 DOM', () => {
+  it('delivery-job.js 只依賴純音訊解讀器，兩者都不碰 State／Media／Seq／DOM', () => {
     const fs = createRequire(import.meta.url)('node:fs');
     const path = createRequire(import.meta.url)('node:path');
     const url = createRequire(import.meta.url)('node:url');
     const root = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
     const src = fs.readFileSync(path.join(root, 'src/delivery-job.js'), 'utf8');
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    const interpretation = fs.readFileSync(path.join(root, 'src/project-audio.js'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
-    expect(code).not.toMatch(/\bimport\b/);      // 完全沒有相依
-    expect(code).not.toMatch(/\bdocument\b/);
-    expect(code).not.toMatch(/\bwindow\b/);
+    expect([...code.matchAll(/from\s+['"]([^'"]+)['"]/g)].map(match => match[1]))
+      .toEqual(['./project-audio.js']);
+    for (const pureCode of [code, interpretation]) {
+      expect(pureCode).not.toMatch(/from\s+['"].*(state|media|sequence|dom)/i);
+      expect(pureCode).not.toMatch(/\bdocument\b/);
+      expect(pureCode).not.toMatch(/\bwindow\b/);
+    }
   });
 });
