@@ -35,60 +35,8 @@ import { escapeHTML } from './util.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './delivery-audio.js';
+import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, monoStreamsForBuses, deliveryStreamsForPreset, AudioRoutingModel } from './audio-routing-model.js';
 
-const LAYOUTS={
-  mono:{label:'Mono',channels:1},
-  stereo:{label:'Stereo (Lt, Rt)',channels:2},
-  '5.1':{label:'5.1 (L, R, C, LFE, Ls, Rs)',channels:6}
-};
-const MAX_AUDIO_BUSES=MAX_DELIVERY_AUDIO_BUSES;
-const DELIVERY_PRESETS=[
-  {id:'2-fm',label:'２軌道｜2.0-FM',count:2,streams:[
-    {layout:'stereo',name:'2.0-FM'}
-  ]},
-  {id:'2-me',label:'２軌道(ME)｜2.0-ME',count:2,streams:[
-    {layout:'stereo',name:'2.0-ME'}
-  ]},
-  {id:'4-me',label:'４軌道(ME)｜2.0FM + 2.0-ME',count:4,streams:[
-    {layout:'stereo',name:'2.0FM'},
-    {layout:'stereo',name:'2.0-ME'}
-  ]},
-  {id:'4-bi',label:'４軌道(雙語)｜2.0-FM + 2.0-FM',count:4,streams:[
-    {layout:'stereo',name:'2.0-FM'},
-    {layout:'stereo',name:'2.0-FM'}
-  ]},
-  {id:'6-fm',label:'６軌道｜5.1-FM',count:6,streams:[
-    {layout:'5.1',name:'5.1-FM'}
-  ]},
-  {id:'6-bi-me',label:'６軌道(雙語_ME)｜2.0-FM + 2.0-FM + 2.0-ME',count:6,streams:[
-    {layout:'stereo',name:'2.0-FM'},
-    {layout:'stereo',name:'2.0-FM'},
-    {layout:'stereo',name:'2.0-ME'}
-  ]},
-  {id:'8-fm',label:'８軌道｜5.1-FM + 2.0-FM',count:8,streams:[
-    {layout:'5.1',name:'5.1-FM'},
-    {layout:'stereo',name:'2.0-FM'}
-  ]},
-  {id:'8-fm-rev',label:'８軌道｜2.0-FM + 5.1-FM',count:8,streams:[
-    {layout:'stereo',name:'2.0-FM'},
-    {layout:'5.1',name:'5.1-FM'}
-  ]},
-  {id:'10-me',label:'１０軌道(ME)｜5.1-FM + 2.0-FM + 2.0-ME',count:10,streams:[
-    {layout:'5.1',name:'5.1-FM'},
-    {layout:'stereo',name:'2.0-FM'},
-    {layout:'stereo',name:'2.0-ME'}
-  ]},
-  {id:'12-bi',label:'１２軌道(雙語)｜5.1-FM + 5.1-FM',count:12,streams:[
-    {layout:'5.1',name:'5.1-FM'},
-    {layout:'5.1',name:'5.1-FM'}
-  ]},
-  {id:'16-bi',label:'１６軌道(雙語)｜5.1-FM + 2.0-FM + 5.1-FM + 2.0-FM',count:16,streams:[
-    {layout:'5.1',name:'5.1-FM'},
-    {layout:'stereo',name:'2.0-FM'},
-    {layout:'5.1',name:'5.1-FM'},
-    {layout:'stereo',name:'2.0-FM'}
-  ]}
-];
 
 function project(){
   State.audioProject=normalizeAudioProject(State.audioProject);
@@ -241,46 +189,6 @@ function openForSource(sourceKey, originalMap=null){
   if(clip){ openForRoutingSource(clip,originalMap); return; }
   showToast('找不到這個音訊來源');
 }
-function layoutWidth(layout){ return LAYOUTS[layout]?.channels||1; }
-function monoStreamsForBuses(buses){
-  return buses.map((bus,index)=>({id:`mono-${index+1}`,layout:'mono',name:`A${index+1} Mono`,busIds:[bus.id]}));
-}
-function deliveryStreamsForPreset(preset,buses){
-  let cursor=0;
-  return preset.streams.map((spec,index)=>{
-    const width=layoutWidth(spec.layout);
-    const busIds=buses.slice(cursor,cursor+width).map(bus=>bus.id);
-    cursor+=width;
-    return {id:`delivery-${preset.id}-${index+1}`,layout:spec.layout,name:spec.name,busIds};
-  });
-}
-function applyDeliveryPreset(preset){
-  let p=project();
-  const oldLayout=structuredClone(p.exportLayout);
-  if(p.buses.length>preset.count){
-    // 先替換輸出編組，讓縮減檢查只阻擋仍被來源路由使用的 A 軌。
-    p.exportLayout={streams:deliveryStreamsForPreset(preset,p.buses.slice(0,preset.count))};
-    if(!setBusCount(preset.count)){
-      p.exportLayout=oldLayout;
-      return false;
-    }
-  }else if(p.buses.length<preset.count){
-    setBusCount(preset.count);
-  }else{
-    p.mode='manual';
-  }
-  // ensureAudioBusCount / ensureAudioExportDefaults 會正規化並換掉 State.audioProject 物件，
-  // 因此聲道數改變後必須重新取得目前專案，不能把編組寫進已失效的舊參照。
-  p=project();
-  p.exportLayout={streams:deliveryStreamsForPreset(preset,p.buses)};
-  return true;
-}
-function applyAllMonoLayout(){
-  const p=project();
-  if(!p.buses.length){ showToast('請先設定至少一條專案音訊軌。'); return false; }
-  p.exportLayout={streams:monoStreamsForBuses(p.buses)};
-  return true;
-}
 function outputRowHtml(stream,index,buses=project().buses){
   const layout=LAYOUTS[stream.layout]?stream.layout:'mono';
   const width=layoutWidth(layout);
@@ -315,27 +223,25 @@ function outputStreamsFromDialog(buses, existingStreams){
    State.audioProject 的既有操作包成 editor，下面的對話框不必知道資料是否為全域專案。 */
 function projectOutputEditor(originalLayout=null,originalBusState=null){
   let initial=null;
+  ensureAudioExportDefaults({appendMissing:false});
+  const p = project();
+  initial={
+    layout:originalLayout||structuredClone(p.exportLayout),
+    buses:originalBusState||structuredClone({mode:p.mode,buses:p.buses})
+  };
+  
+  const model = AudioRoutingModel.createProjectAdapter(State.audioProject);
+  
   return {
     prepare(){
-      ensureAudioExportDefaults({appendMissing:false});
-      const p=project();
-      if(!initial) initial={
-        layout:originalLayout||structuredClone(p.exportLayout),
-        buses:originalBusState||structuredClone({mode:p.mode,buses:p.buses})
-      };
-      return p;
+      return model.current();
     },
-    current(){ return project(); },
-    setStreams(streams){ project().exportLayout={streams}; },
-    setBusCount,
-    allMono:applyAllMonoLayout,
-    preset:applyDeliveryPreset,
-    addStream(){
-      const p=project();
-      const used=new Set(p.exportLayout.streams.map(stream=>stream.id));
-      let n=1,id='out'+n; while(used.has(id)){ n++; id='out'+n; }
-      p.exportLayout.streams.push({id,layout:'mono',busIds:[]});
-    },
+    current(){ return model.current(); },
+    setStreams(streams){ model.setStreams(streams); State.audioProject = model.current(); },
+    setBusCount(c){ const r = model.setBusCount(c); State.audioProject = model.current(); return r; },
+    allMono(){ const r = model.applyAllMonoLayout(); State.audioProject = model.current(); return r; },
+    preset(p){ const r = model.applyDeliveryPreset(p); State.audioProject = model.current(); return r; },
+    addStream(){ model.addStream(); State.audioProject = model.current(); },
     update:label=>updateViews(label),
     cancel(){
       if(!initial) return;
@@ -354,53 +260,29 @@ function projectOutputEditor(originalLayout=null,originalBusState=null){
 /* 每一列交付有自己的 buses / streams。這個 editor 完全不讀也不寫 State，因此改交付
    A 軌數量、取消對話框或同時排多列，不會意外重配正在播放專案的來源聲道。 */
 function deliveryOutputEditor(spec){
-  let draft=structuredClone(spec||{buses:[],streams:[]});
-  const initial=structuredClone(draft);
-  const view=()=>({mode:'manual',buses:Array.isArray(draft.buses)?draft.buses:[],exportLayout:{streams:Array.isArray(draft.streams)?draft.streams:[]}});
+  let initial=structuredClone(spec||{buses:[],streams:[]});
+  let model = AudioRoutingModel.createDeliveryAdapter(initial);
+  
   return {
-    prepare(){ draft=ensureDeliveryAudioExportDefaults(draft,{appendMissing:false}); return view(); },
-    current:view,
-    setStreams(streams){ draft={...draft,streams:structuredClone(streams)}; },
-    setBusCount(rawCount){
-      const beforeCount=(draft.buses||[]).length;
-      const before=JSON.stringify(draft.buses||[]);
-      draft=resizeDeliveryAudioBuses(draft,rawCount);
-      if((draft.buses||[]).length>beforeCount)
-        draft=ensureDeliveryAudioExportDefaults(draft,{appendMissing:true});
-      return JSON.stringify(draft.buses||[])!==before;
+    prepare(){ return model.current(); },
+    current(){ return model.current(); },
+    setStreams(streams){ model.setStreams(streams); },
+    setBusCount(c){ return model.setBusCount(c); },
+    allMono(){ 
+      const res = model.applyAllMonoLayout(); 
+      if(!res) showToast('請先設定至少一條專案音訊軌。'); 
+      return res; 
     },
-    allMono(){
-      const p=view();
-      if(!p.buses.length){ showToast('請先設定至少一條專案音訊軌。'); return false; }
-      draft={...draft,streams:monoStreamsForBuses(p.buses)};
-      return true;
+    preset(p){ 
+      const res = model.applyDeliveryPreset(p); 
+      if(res.error) { showToast(res.error); return false; }
+      return true; 
     },
-    preset(preset){
-      // 不足時是「拒絕這一次預設」而不是縮短使用者原本的 draft；否則使用者
-      // 看到 toast 後按儲存，會意外把交付列的 A 軌選擇寫成較少的數量。
-      const candidate=resizeDeliveryAudioBuses(draft,preset.count);
-      if((candidate.buses||[]).length<preset.count){
-        showToast(`此專案只有 ${(candidate.availableBuses||candidate.buses||[]).length} 條可用音訊軌，無法套用 ${preset.label}。`);
-        return false;
-      }
-      draft={...candidate,streams:deliveryStreamsForPreset(preset,candidate.buses)};
-      return true;
-    },
-    addStream(){
-      const used=new Set((draft.streams||[]).map(stream=>String(stream.id)));
-      let n=1,id='delivery-out-'+n; while(used.has(id)){ n++; id='delivery-out-'+n; }
-      draft={...draft,streams:[...(draft.streams||[]),{id,layout:'mono',busIds:[]}]};
-    },
-    syncWavBusIds(){
-      const seen=new Set();
-      draft={...draft,wavBusIds:(draft.streams||[])
-        .flatMap(stream=>Array.isArray(stream?.busIds)?stream.busIds:[])
-        .map(id=>String(id))
-        .filter(id=>id&&!seen.has(id)&&(seen.add(id),true))};
-    },
+    addStream(){ model.addStream(); },
+    syncWavBusIds(){ model.syncWavBusIds(); },
     update(){},
-    cancel(){ draft=structuredClone(initial); },
-    result(){ return structuredClone(draft); }
+    cancel(){ model = AudioRoutingModel.createDeliveryAdapter(initial); },
+    result(){ return model.result(); }
   };
 }
 

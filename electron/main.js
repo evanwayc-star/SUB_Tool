@@ -33,6 +33,7 @@ const {
   previewVideoEncoderArgs,
   videoEncoderCandidates,
 } = require('./native-tooling');
+const { FFmpegOutputParser, FFmpegErrorAnalyzer } = require('./ffmpeg-parser');
 
 let mainWin = null;
 let _allowMainWindowClose = false;
@@ -318,31 +319,18 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
     writeLog(`> ffmpeg ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}\n\n`);
 
     const startTime = Date.now();
-    const speeds = [];
+    const parser = new FFmpegOutputParser(duration);
+    
     const consumeStderr = d => {
       const s = d.toString();
       writeLog(s);
       err += s; if (err.length > 8000) err = err.slice(-8000);
 
-      const sMatch = /speed=\s*([\d.]+)x/.exec(s);
-      if (sMatch) {
-        speeds.push(parseFloat(sMatch[1]));
-        if (speeds.length > 5) speeds.shift();
-      }
-
-      // 例：Stream #0:0 -> #0:0 (mpeg2video (native) -> h264 (h264_nvenc))
-      for (const mm of s.matchAll(/Stream #\d+:\d+ -> #\d+:\d+ \(([^\n]*)\)/g)) if (maps.length < 8) maps.push(mm[1]);
-      const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s);
-      if (m && duration && (sender || onProgress)) {
-        const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
-        let etaS = null;
-        if (speeds.length > 0) {
-          const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
-          if (avgSpeed > 0) etaS = (duration - t) / avgSpeed;
-        }
-        const progData = { jobId, label, pct: Math.min(99, Math.round(t / duration * 100)), etaS, elapsedMs: Date.now() - startTime };
-        if (sender) safeSend(sender, 'task-progress', progData);
-        if (onProgress) onProgress(progData);
+      const progData = parser.parseChunk(s);
+      if (progData && (sender || onProgress)) {
+        const payload = { jobId, label, pct: progData.pct, etaS: progData.etaS, elapsedMs: Date.now() - startTime };
+        if (sender) safeSend(sender, 'task-progress', payload);
+        if (onProgress) onProgress(payload);
       }
     };
 
@@ -355,7 +343,7 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
       if (sender) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
       if (code === 0 && (!watchdogResult || watchdogResult.ok)) {
         fs.unlink(logPath, () => {});
-        res({ tail: err, maps });
+        res({ tail: err, maps: parser.maps });
         return;
       }
 
@@ -363,32 +351,11 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
       try { fullLog = fs.readFileSync(logPath, 'utf8'); } catch (readError) {
         if (logError) fullLog += `\n\n[無法寫入完整記錄：${logError.message || logError}]`;
       }
-      let summary = '';
-      const mNoSuchFile = fullLog.match(/(.*): No such file or directory/);
-      if (watchdogFailure?.code === 'OUTPUT_BUSY') {
-        summary = `同一個輸出檔案正在由另一份工作使用：${outPath}`;
-      } else if (watchdogFailure?.message) {
-        summary = watchdogFailure.message;
-      } else if (watchdogResult?.cleanup?.retainedLease) {
-        summary = watchdogResult.cleanup.error?.message || '半成品尚未安全刪除，輸出鎖已保留';
-      } else if (mNoSuchFile) {
-        summary = `找不到來源檔：${mNoSuchFile[1]}`;
-      } else if (fullLog.includes('No space left on device')) {
-        summary = '磁碟空間不足';
-      } else if (fullLog.match(/Unknown encoder '([^']+)'/)) {
-        summary = `編碼器不可用：${fullLog.match(/Unknown encoder '([^']+)'/)[1]}`;
-      } else if (fullLog.includes('Permission denied')) {
-        const mPerm = fullLog.match(/(.*): Permission denied/);
-        summary = `輸出路徑無寫入權限` + (mPerm ? `：${mPerm[1]}` : '');
-      } else if (fullLog.includes('Filtergraph') && (fullLog.includes('parse error') || fullLog.includes('error parsing'))) {
-        summary = 'Filtergraph 解析失敗';
-      } else {
-        const lines = fullLog.split('\n');
-        if (lines.length <= 40) summary = lines.join('\n');
-        else summary = lines.slice(0, 20).join('\n') + '\n...\n' + lines.slice(-20).join('\n');
-      }
+      
+      const { summary, errorCode } = FFmpegErrorAnalyzer.analyze(fullLog, code, watchdogFailure, watchdogResult, outPath);
+      
       const failure = new Error(`[LOG_PATH]${logPath}[/LOG_PATH]ffmpeg 結束碼 ${code}\n${summary}`);
-      failure.code = watchdogFailure?.code || (watchdogResult?.cleanup?.retainedLease ? 'PARTIAL_CLEANUP_FAILED' : 'FFMPEG_EXIT');
+      failure.code = errorCode;
       failure.watchdogResult = watchdogResult;
       rej(failure);
     };
