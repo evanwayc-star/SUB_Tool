@@ -245,6 +245,17 @@ tlScroll.addEventListener('contextmenu',e=>{
       items.push({label:'⏱ 播放頭移到音檔開頭',act:()=>{ Media.seek(start); emit('playhead:ensure'); }});
       items.push({label:enabled?'🔇 關閉此音檔聲音':'🔊 開啟此音檔聲音',act:()=>runExternalAudioMenuAction('toggleExternalAudioEnabled',[assetId])});
       items.push({label:'🗑 從時間軸移除音檔',act:()=>runExternalAudioMenuAction('removeExternalAudio',[assetId],{clearSelection:true})});
+      if (IS_DESKTOP) {
+        const extSrc = State.externalAudioSources.find(s => s.id === assetId);
+        if (extSrc && extSrc.path) {
+          items.push({label:'📂 用 檔案管理器 打開',act:()=>{
+            window.subtool?.showSourceInFolder?.(extSrc.path).catch(err => {
+              console.warn(err);
+              showToast('無法顯示檔案位置');
+            });
+          }});
+        }
+      }
       items.push({sep:true});
     }
     items.push({label:'🎧 軌道配置',act:()=>AudioRouting.openForSource(sourceId)});
@@ -284,6 +295,17 @@ tlScroll.addEventListener('contextmenu',e=>{
       // 播放頭在此段內 → 可就地切割（等同 Ctrl+K）
       const pt=Media.displayTime();
       if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
+      
+      const filePath = c.path || (c.primary ? State.media?.path : null);
+      if (IS_DESKTOP && filePath) {
+        items.push({label:'📂 用 檔案管理器 打開',act:()=>{
+          window.subtool?.showSourceInFolder?.(filePath).catch(err => {
+            console.warn(err);
+            showToast('無法顯示檔案位置');
+          });
+        }});
+      }
+
       // 圖片沒有原音，音訊相關項目不適用；改提供大小/位置的數值輸入
       // （預覽拖曳把手是另一條路，兩者都寫同一組 scale/posX/posY）
       items.push({label:`📐 ${isImg?'圖片':'影片'}大小與位置…`,act:()=>showImageGeom(c)});

@@ -66,7 +66,7 @@ function grantTrustedProjectFile(projectFile, contents) {
 
 /* 三個守衛與 expectedExportExtension 的實作在 ipc-guards.js（可獨立測試，
    不需要整個 Electron 主行程）；這裡只建立跟 fileAuthority 綁定的實例。 */
-const { requireReadablePath, requirePermittedShellOpenPath, requirePermittedDeliveryRevealPath } = createIpcGuards(fileAuthority);
+const { requireReadablePath, requirePermittedShellOpenPath, requirePermittedDeliveryRevealPath, requirePermittedSourceRevealPath } = createIpcGuards(fileAuthority);
 /* S5：不可猜測的串流 job id（取代 Date.now() / 可推導的 cacheKey） */
 function newJobId(prefix) { return prefix + crypto.randomBytes(12).toString('hex'); }
 
@@ -691,6 +691,12 @@ ipcMain.handle('app:openPath', async (e, p) => {
 ipcMain.handle('app:showItemInFolder', async (e, p) => {
   const { shell } = require('electron');
   requirePermittedDeliveryRevealPath(p);
+  shell.showItemInFolder(p);
+  return true;
+});
+ipcMain.handle('app:showSourceInFolder', async (e, p) => {
+  const { shell } = require('electron');
+  requirePermittedSourceRevealPath(p);
   shell.showItemInFolder(p);
   return true;
 });

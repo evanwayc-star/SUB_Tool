@@ -38,7 +38,15 @@ function createIpcGuards(fileAuthority) {
     throw error;
   }
 
-  return { requireReadablePath, requirePermittedShellOpenPath, requirePermittedDeliveryRevealPath };
+  function requirePermittedSourceRevealPath(file) {
+    if (fileAuthority.canRead(file)) return;
+    console.warn('[sec] app:showSourceInFolder blocked (unauthorized source):', file);
+    const error = new Error('未授權顯示此來源檔案');
+    error.code = 'UNAUTHORIZED_SOURCE_PATH';
+    throw error;
+  }
+
+  return { requireReadablePath, requirePermittedShellOpenPath, requirePermittedDeliveryRevealPath, requirePermittedSourceRevealPath };
 }
 
 /* 與 fileAuthority 無關的純格式驗證，放在同一支模組是因為它守的是同一類東西
