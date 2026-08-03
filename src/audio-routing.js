@@ -19,7 +19,7 @@
    【維護鐵律】
    - 改完 `State.audioProject`（增減 Bus、切換 Layout、改來源→bus 對應）後，必須讓
      `media.js` 重建 Web Audio 連線圖，否則播放會斷音或串音。本檔採**直接呼叫**：
-     `Media.registerAudioRouting(...)` 重建某素材的聲道對應、`Media.applyGains()`
+     `AudioPipeline.registerSource(...)` 重建某素材的聲道對應、`Media.applyGains()`
      套用 M/S/音量，再視情況 `renderAudioTracks()` / `drawTimeline()` 重繪。
      ── 不要改用事件：曾有註解要求 `emit('audioRoutingChanged')`，但那個事件
         **從未被 emit、也從未有訂閱者**，照做等於什麼都沒發生（`events.js` 的 emit
@@ -28,6 +28,7 @@
 import { State, ensureAudioBusCount, ensureAudioExportDefaults, normalizeAudioProject, pruneRemovedAudioBuses } from './state.js';
 import { Seq } from './sequence.js';
 import { Media } from './media.js';
+import { AudioPipeline } from './audio-pipeline.js';
 import { drawTimeline } from './timeline.js';
 import { renderAudioTracks } from './mixer.js';
 import { escapeHTML } from './util.js';
@@ -111,13 +112,13 @@ function routesForSource(source){
   if(Array.isArray(existing)&&existing.length) return existing;
   const runtime=Media.tracks.filter(track=>track.audioSourceId===sourceId);
   if(runtime.length){
-    Media.registerAudioRouting(source,runtime.map(track=>({sourceStream:track.sourceStream,sourceChannel:track.sourceChannel})),runtime.length);
+    AudioPipeline.registerSource(source,runtime.map(track=>({sourceStream:track.sourceStream,sourceChannel:track.sourceChannel})),runtime.length);
     return project().sourceMaps[sourceId]?.channels||[];
   }
   // 外部音檔尚在背景快取時也已有 ffprobe descriptor，不能等到播放節點就緒才讓使用者配線。
   const descriptors=Array.isArray(source?.descriptors) ? source.descriptors : [];
   if(descriptors.length){
-    Media.registerAudioRouting(source,descriptors,descriptors.length);
+    AudioPipeline.registerSource(source,descriptors,descriptors.length);
     return project().sourceMaps[sourceId]?.channels||[];
   }
   return [];

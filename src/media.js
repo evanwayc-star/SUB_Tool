@@ -30,6 +30,7 @@
      千萬不要在此檔案內手刻算式。
 ============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
+import { AudioPipeline } from './audio-pipeline.js';
 import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
 import { getPlayerAdapter } from './media-player-adapter.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
@@ -154,28 +155,11 @@ const Media = {
 
   /* 將 ffprobe / ingest 的實體聲道資料登錄到可儲存的 project audio model。
      `sourceStream` / `sourceChannel` 一律採 0-based；UI 才加 1 顯示。 */
-  registerAudioRouting(clip, channels, fallbackCount=0){
-    const sourceId=audioSourceIdForClip(clip);
-    if(!sourceId) return [];
-    const descriptors=sourceChannelDescriptors(channels,fallbackCount);
-    ensureAudioSourceMap(sourceId,descriptors);
-    // 波形顯示與輸出 routing 共用同一組實體來源聲道描述。這裡只登錄 metadata，
-    // 真正的 peaks 會在背景 wave/cache 就緒時補上；因此時間軸可先顯示 MIX，
-    // 右鍵選單也能立即列出可選的 Ch 1、Ch 2…。
-    Wave.registerSourceWaveforms(clip,{channels:Array.isArray(channels)&&channels.length?channels:descriptors});
-    return descriptors;
-  },
-  sourceDescriptorFor(clip, channel, index=0){
-    const sourceId=audioSourceIdForClip(clip);
-    return {
-      audioSourceId:sourceId,
-      sourceStream:Math.max(0,Math.floor(Number(channel?.sourceStream ?? 0)||0)),
-      sourceChannel:Math.max(0,Math.floor(Number(channel?.sourceChannel ?? index)||0))
-    };
-  },
+  /* registerAudioRouting moved to AudioPipeline */
+  /* sourceDescriptorFor moved to AudioPipeline */
   bindTrackRouting(track, clip, channel, index=0){
     if(!track) return track;
-    Object.assign(track,this.sourceDescriptorFor(clip,channel,index));
+    Object.assign(track,AudioPipeline.sourceDescriptorFor(clip,channel,index));
     return track;
   },
   /* 同一媒體來源被切開／解除影音連結時，保留使用者已設定的來源聲道→專案 bus 配線。 */
@@ -190,7 +174,7 @@ const Media = {
   createExternalAudioSource(details={}){
     const asset=this.externalAudio.add(details);
     const fallbackCount=Math.max(0,Math.floor(Number(details.fallbackCount)||0));
-    this.registerAudioRouting(asset,asset.descriptors,fallbackCount);
+    AudioPipeline.registerSource(asset,asset.descriptors,fallbackCount);
     this.recomputeTimelineDuration();
     return asset;
   },
@@ -329,11 +313,11 @@ const Media = {
       const res=await DESK.ingest({path,duration,needsProxy:false,audio,queue:true});
       if(this._bgVersion!==myVer || !Seq.byId(clip.id)) return;
       const chs=res?.channels||[];
-      const descriptors=this.registerAudioRouting(clip,chs,chs.length);
+      const descriptors=AudioPipeline.registerSource(clip,chs,chs.length);
       const tracks=this.tracks.filter(track=>(track.source||'video')==='video'&&track.audioSourceId===clip.audioSourceId);
       for(let i=0;i<Math.min(tracks.length,chs.length);i++){
         tracks[i].file=chs[i].file;
-        Object.assign(tracks[i],this.sourceDescriptorFor(clip,descriptors[i],i));
+        Object.assign(tracks[i],AudioPipeline.sourceDescriptorFor(clip,descriptors[i],i));
       }
       drawTimeline();
     }catch(e){ console.warn('native audio cache:',e); }
@@ -347,7 +331,7 @@ const Media = {
       const res=await DESK.ingest({path,duration,needsProxy:false,audio,queue:true});
       if(this._bgVersion!==myVer || !this.externalAudioSources.includes(asset)) return null;
       const channels=res?.channels||[];
-      const descriptors=this.registerAudioRouting(asset,channels,channels.length||(asset.descriptors||[]).length);
+      const descriptors=AudioPipeline.registerSource(asset,channels,channels.length||(asset.descriptors||[]).length);
       asset.descriptors=descriptors;
       if(channels.length) await this._replaceExternalTracksWithCached(asset,channels,descriptors,myVer);
       if(res?.wave) await this._setExternalWaveFromPath(asset,res.wave,myVer);
@@ -575,7 +559,7 @@ const Media = {
       detectFpsWeb(); // 播放時自動偵測 FPS
       const primary=this._registerPrimary({ name:file.name, web:{url}, dur:State.duration||0 },projectRestore); // 登錄為序列第一段
       // 用 Web Audio 接管原生音訊，L / R 分頻顯示於混音器
-      this.registerAudioRouting(primary,[],2);
+      AudioPipeline.registerSource(primary,[],2);
       const stereoTracks=this._connectStereo('video',primary);
       if(stereoTracks){
         stereoTracks.forEach(t => t.file = file); // 保存 File 參考供匯出
@@ -732,7 +716,7 @@ const Media = {
       if(!owns()) return;
       State.duration=video.duration||dur||0;
       const primary=this._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
-      this.registerAudioRouting(primary,probeAudioChannelDescriptors(audio),audio.length?0:0);
+      AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio),audio.length?0:0);
       const stereoTracks=this._connectStereo('video',primary);
       if(stereoTracks) this.tracks.push(...stereoTracks);
       this.activeSource='video';
@@ -778,7 +762,7 @@ const Media = {
       State.duration=video.duration||dur||0;
       video.muted=true;
       const primary=this._registerPrimary({ name:State.mediaName, path:p, web:{url:res.streamUrl}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
-      this.registerAudioRouting(primary,probeAudioChannelDescriptors(audio));
+      AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
       this.activeSource='video';
       // 混音器立即顯示「準備中」推桿
       this.pendingChannels=this._expandChannels(audio).map(label=>({label,ready:false}));
@@ -800,7 +784,7 @@ const Media = {
               createAudio:()=>new Audio(),
             });
             if(!els) return;
-            const descriptors=self.registerAudioRouting(primary,chs,chs.length);
+            const descriptors=AudioPipeline.registerSource(primary,chs,chs.length);
             for(let i=0;i<chs.length;i++){
               const el=els[i]; if(!el) continue;
               const node=self.ctx.createMediaElementSource(el);
@@ -863,7 +847,7 @@ const Media = {
     State.duration=video.duration||dur||0;
     video.muted=true;
     const primary=this._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
-    this.registerAudioRouting(primary,probeAudioChannelDescriptors(audio));
+    AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
 
     const chs=res.channels||[];
     let els=[];
@@ -876,7 +860,7 @@ const Media = {
       });
       if(!els) return;
     }
-    const descriptors=this.registerAudioRouting(primary,chs,chs.length);
+    const descriptors=AudioPipeline.registerSource(primary,chs,chs.length);
     if(chs.length){
       for(let i=0;i<chs.length;i++){
         const el=els[i]; if(!el) continue;
@@ -1065,7 +1049,7 @@ const Media = {
     State.duration=this._mpvDuration;
     if(info?.video?.fps) setFps(info.video.fps);
     const primary=this._registerPrimary({ name:State.mediaName, path:p, dur:this._mpvDuration||0, fps:info?.video?.fps||0 },projectRestore);
-    this.registerAudioRouting(primary,probeAudioChannelDescriptors(audio));
+    AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
 
     this._startMpvBoundsFeeder();
     emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
@@ -1173,7 +1157,7 @@ const Media = {
     if(!current()) return;
     const chs=res.channels||[];
     const primary=Seq.primary();
-    const descriptors=this.registerAudioRouting(primary,chs,chs.length);
+    const descriptors=AudioPipeline.registerSource(primary,chs,chs.length);
     if(chs.length){
       // 並行載入所有聲道，大幅縮短多聲道（8ch MXF 等）的等待時間
       const els=await this._intakeSession.materializeAudioElements(chs,{
@@ -1318,7 +1302,7 @@ const Media = {
       $('noVideo').style.display='none';
       State.duration=video.duration||0;
       const primary=this._registerPrimary({ name:file.name, web:{url}, dur:State.duration||0 },projectRestore);
-      this.registerAudioRouting(primary,Array.from({length:aCount},(_,sourceStream)=>({sourceStream,sourceChannel:0})));
+      AudioPipeline.registerSource(primary,Array.from({length:aCount},(_,sourceStream)=>({sourceStream,sourceChannel:0})));
       // 抽音軌
       for(let i=0;i<aCount;i++){
         setStatus(`抽取音軌 ${i+1}/${aCount}…`,'busy');
@@ -1898,7 +1882,7 @@ const Media = {
     }
     const c = Seq.add({ ...meta, ...overrides, audioSourceId: geo?.audioSourceId || makeAudioSourceId(), audioDetached:!!geo?.audioDetached });
     c.audioSrc = 'clip:' + c.id; // 此來源的音軌識別（切割片段將共用）
-    this.registerAudioRouting(c,probeAudioChannelDescriptors(info?.audio));
+    AudioPipeline.registerSource(c,probeAudioChannelDescriptors(info?.audio));
     if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; c.audioDetached=!!geo.audioDetached; Seq.sort(); Seq.recomputeDuration(); }
     else { Seq.sort(); Seq.recomputeDuration(); }
     drawTimeline();
@@ -1921,7 +1905,7 @@ const Media = {
       if(!live.web?.url){
         try{ live.web={url:await DESK.fileURL(live.path)}; }catch(error){}
       }
-      this.registerAudioRouting(live,probeAudioChannelDescriptors(info?.audio));
+      AudioPipeline.registerSource(live,probeAudioChannelDescriptors(info?.audio));
       await this._clipIngest(live,info);
       if(!this._clipRuntimeReadySources) this._clipRuntimeReadySources=new Set();
       if(State.clips.includes(live)) this._clipRuntimeReadySources.add(sourceId);
@@ -1953,7 +1937,7 @@ const Media = {
       }catch(e){ console.warn('clip proxy url:', e); }
     }
     const chs = res.channels || [];
-    const descriptors=this.registerAudioRouting(c,chs,chs.length);
+    const descriptors=AudioPipeline.registerSource(c,chs,chs.length);
     if(chs.length){
       const els=await this._intakeSession.materializeAudioElements(chs,{
         owns:()=>this._bgVersion===myVer&&State.clips.includes(c),
@@ -2110,7 +2094,7 @@ const Media = {
         const el = new Audio(); el.src = url; el.preload = 'auto';
         const node = this.ctx.createMediaElementSource(el);
         const chN = Math.max(1, node.channelCount || 2);
-        this.registerAudioRouting(c,[],chN);
+        AudioPipeline.registerSource(c,[],chN);
         const trs = this._splitToChannelTracks(node, 'clip:' + c.id, el, chN,c);
         trs.forEach(tr => { tr.name = c.name + '·' + tr.name; tr.source = 'clip:' + c.id; });
         this.tracks.push(...trs);
