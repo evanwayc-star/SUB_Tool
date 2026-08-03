@@ -38,16 +38,22 @@ export function projectTagFrom(mediaName) {
   return raw[0];
 }
 
-/* 聲道編組寫進檔名的縮寫：Stereo→20FM、5.1→51FM、Mono→10FM。
-   多條輸出 stream 以 + 相連（例：`_51FM+20FM`）。 */
+/* 聲道編組寫進檔名的邏輯：
+   若全為 Mono，顯示 NCH-Mono（例：`_8CH-Mono`）。
+   否則優先使用設定的使用者自訂名稱（如 `2.0-ME`）；若無名稱則依 layout 給預設：Stereo→2.0-FM、5.1→5.1-FM。
+   多條輸出 stream 以 + 相連（例：`_5.1-FM+2.0-FM`）。 */
 function audioTagFrom(audioPlan) {
   const streams = audioPlan?.streams || audioPlan?.groups;
   if (!Array.isArray(streams) || streams.length === 0) return '';
+  if (streams.every(g => g.layout === 'mono')) {
+    return `_${streams.length}CH-Mono`;
+  }
   const parts = streams.map(g => {
-    if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '20FM';
-    if (g.layout === '5.1') return '51FM';
-    if (g.layout === 'mono') return '10FM';
-    return String(g.layout || '20').replace('.', '') + 'FM';
+    if (g.name && g.name.trim()) return g.name.trim();
+    if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '2.0-FM';
+    if (g.layout === '5.1') return '5.1-FM';
+    if (g.layout === 'mono') return '1.0-FM';
+    return String(g.layout || '2.0') + '-FM';
   });
   return '_' + parts.join('+');
 }

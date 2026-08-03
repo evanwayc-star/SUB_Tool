@@ -49,19 +49,25 @@ describe('預設檔名', () => {
   it('聲道編組寫進檔名，多條 stream 以 + 相連', () => {
     const audioPlan = { streams: [{ layout: '5.1' }, { layout: 'stereo' }] };
     expect(defaultDeliveryName({ projectTag: '拼桌', fps: 29.97, format: 'h264', targetH: 0, audioPlan }))
-      .toBe('ST_拼桌_29fps_51FM+20FM.mp4');
+      .toBe('ST_拼桌_29fps_5.1-FM+2.0-FM.mp4');
   });
-  it('mono 與 LtRt 各自有縮寫', () => {
-    const mk = layout => defaultDeliveryName({
-      projectTag: 'X', fps: 25, format: 'h264', targetH: 0, audioPlan: { streams: [{ layout }] },
+  it('有設定 stream 名稱時，優先使用名稱（如 ME、雙語）', () => {
+    const audioPlan = { streams: [{ layout: 'stereo', name: '2.0-FM' }, { layout: 'stereo', name: '2.0-ME' }] };
+    expect(defaultDeliveryName({ projectTag: '拼桌', fps: 25, format: 'h264', targetH: 0, audioPlan }))
+      .toBe('ST_拼桌_25fps_2.0-FM+2.0-ME.mp4');
+  });
+  it('全部皆為 mono 時，統一改用 NCH-Mono', () => {
+    const mk = count => defaultDeliveryName({
+      projectTag: 'X', fps: 25, format: 'h264', targetH: 0,
+      audioPlan: { streams: Array.from({ length: count }).map(() => ({ layout: 'mono' })) },
     });
-    expect(mk('mono')).toContain('_10FM');
-    expect(mk('stereoLtRt')).toContain('_20FM');
+    expect(mk(1)).toContain('_1CH-Mono');
+    expect(mk(8)).toContain('_8CH-Mono');
   });
   it('舊欄位名 groups 也吃得到', () => {
     const audioPlan = { groups: [{ layout: 'mono' }] };
     expect(defaultDeliveryName({ projectTag: 'X', fps: 25, format: 'h264', targetH: 0, audioPlan }))
-      .toContain('_10FM');
+      .toContain('_1CH-Mono');
   });
 });
 
