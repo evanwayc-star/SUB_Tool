@@ -368,7 +368,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-tracks{position:absolute;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden}
 .tl-track{position:relative;left:0;border-bottom:1px solid #26262b}
 .cue-block{position:absolute;top:4px;bottom:4px;background:var(--cue);border:1px solid transparent;border-radius:4px;
-  overflow:hidden;cursor:grab;display:flex;align-items:center;padding:0 6px;font-size:16px;font-weight:400;color:#fff;
+  overflow:hidden;cursor:grab;display:flex;align-items:center;padding:0;font-size:16px;font-weight:400;color:#fff;
   box-shadow:0 1px 3px rgba(0,0,0,.4);box-sizing:border-box}
 .cue-block.sel{background:var(--cue-sel);border-color:var(--text);color:#1b1b1d;z-index:5}
 .cue-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
@@ -379,11 +379,11 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .vtrack-row.hidden-tk{opacity:.28}
 .clip-block{position:absolute;top:2px;bottom:2px;pointer-events:auto;cursor:grab;box-sizing:border-box;
   background:rgba(46,89,132,.40);border:1px solid #3fa9f5;border-radius:4px;overflow:hidden;
-  display:flex;align-items:center;gap:5px;padding:1px 7px;color:#bfe3ff;font-size:11px}
+  display:flex;align-items:center;gap:0;padding:0;color:#bfe3ff;font-size:11px}
 .clip-block:hover{background:rgba(56,109,160,.48)}
 .clip-block.active{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
 .clip-block.selected{border-color:#fff;background:rgba(80,140,200,.62);box-shadow:0 0 0 2px var(--accent),0 1px 4px rgba(0,0,0,.5);z-index:6;color:#fff}
-.clip-block .clip-label{pointer-events:none;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.7;position:relative;z-index:1;text-shadow:0 1px 2px rgba(0,0,0,.7)}
+.clip-block .clip-label{padding:1px 7px;pointer-events:none;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.7;position:relative;z-index:1;text-shadow:0 1px 2px rgba(0,0,0,.7)}
 .clip-route{position:relative;z-index:3;flex:0 0 auto;cursor:pointer;padding:1px 5px;border:1px solid rgba(127,191,230,.55);border-radius:3px;background:rgba(8,20,32,.68);color:#cfeaff;font-size:10px;line-height:1.35;white-space:nowrap}
 .clip-route:hover{background:rgba(63,169,245,.26);border-color:#8fd0ff;color:#fff}
 .clip-block .edge{position:absolute;top:0;bottom:0;width:7px;cursor:ew-resize;z-index:2}
@@ -405,7 +405,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .audio-project-row:nth-child(2n){background:linear-gradient(90deg,rgba(30,62,71,.30),rgba(14,23,27,.16))}
 .audio-project-row.hidden-tk{opacity:.3}
 .audio-project-row.locked{background-color:rgba(111,142,154,.07);opacity:0.8}
-.audio-clip-block{position:absolute;top:3px;bottom:3px;box-sizing:border-box;overflow:hidden;display:flex;align-items:center;gap:6px;padding:1px 6px;
+.audio-clip-block{position:absolute;top:3px;bottom:3px;box-sizing:border-box;overflow:hidden;display:flex;align-items:center;gap:0;padding:0;
   border:1px solid #3ca99b;border-radius:3px;background:rgba(27,112,101,.42);color:#d0fff7;font-size:10px;cursor:pointer}
 .audio-clip-block:hover{background:rgba(35,137,123,.56);border-color:#69dcc9}
 .audio-clip-block.selected{border-color:#fff;box-shadow:0 0 0 1px var(--accent);background:rgba(52,145,130,.68)}
@@ -424,7 +424,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .audio-clip-block .edge.l{left:0}.audio-clip-block .edge.r{right:0}
 .audio-clip-block .edge:hover{background:rgba(180,204,255,.38)}
 .audio-clip-label,.audio-clip-route{position:relative;z-index:2;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.75)}
-.audio-clip-label{flex:1;font-weight:600}
+.audio-clip-label{padding:1px 6px;flex:1;font-weight:600}
 .audio-clip-route{flex:0 1 auto;max-width:42%;color:#a8e9de}
 .audio-clip-wave{position:absolute;top:0;height:100%;pointer-events:none;z-index:0;opacity:.9}
 .audio-clip-mute{position:relative;z-index:5;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:24px;min-width:24px;height:22px;padding:0;border:1px solid rgba(170,194,255,.62);border-radius:3px;background:rgba(11,21,47,.76);color:#dae5ff;font-size:11px;line-height:1;cursor:pointer}
