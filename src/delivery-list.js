@@ -40,8 +40,8 @@ export function projectTagFrom(mediaName) {
 
 /* 聲道編組寫進檔名的邏輯：
    若全為 Mono，顯示 NCH-Mono（例：`_8CH-Mono`）。
-   否則優先使用設定的使用者自訂名稱（如 `2.0-ME`）；若無名稱則依 layout 給預設：Stereo→2.0-FM、5.1→5.1-FM。
-   多條輸出 stream 以 + 相連（例：`_5.1-FM+2.0-FM`）。 */
+   否則優先使用設定的使用者自訂名稱（並移除點、減號與空白，如 `2.0-ME` → `20ME`）；若無名稱則依 layout 給預設：Stereo→20FM、5.1→51FM。
+   多條輸出 stream 以 + 相連（例：`_51FM+20ME`）。 */
 function audioTagFrom(audioPlan) {
   const streams = audioPlan?.streams || audioPlan?.groups;
   if (!Array.isArray(streams) || streams.length === 0) return '';
@@ -49,11 +49,13 @@ function audioTagFrom(audioPlan) {
     return `_${streams.length}CH-Mono`;
   }
   const parts = streams.map(g => {
-    if (g.name && g.name.trim()) return g.name.trim();
-    if (g.layout === 'stereo' || g.layout === 'stereoLtRt') return '2.0-FM';
-    if (g.layout === '5.1') return '5.1-FM';
-    if (g.layout === 'mono') return '1.0-FM';
-    return String(g.layout || '2.0') + '-FM';
+    let raw = '';
+    if (g.name && g.name.trim()) raw = g.name.trim();
+    else if (g.layout === 'stereo' || g.layout === 'stereoLtRt') raw = '20FM';
+    else if (g.layout === '5.1') raw = '51FM';
+    else if (g.layout === 'mono') raw = '10FM';
+    else raw = String(g.layout || '20') + 'FM';
+    return raw.replace(/[.\-\s]/g, '');
   });
   return '_' + parts.join('+');
 }

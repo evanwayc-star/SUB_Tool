@@ -49,12 +49,12 @@ describe('預設檔名', () => {
   it('聲道編組寫進檔名，多條 stream 以 + 相連', () => {
     const audioPlan = { streams: [{ layout: '5.1' }, { layout: 'stereo' }] };
     expect(defaultDeliveryName({ projectTag: '拼桌', fps: 29.97, format: 'h264', targetH: 0, audioPlan }))
-      .toBe('ST_拼桌_29fps_5.1-FM+2.0-FM.mp4');
+      .toBe('ST_拼桌_29fps_51FM+20FM.mp4');
   });
-  it('有設定 stream 名稱時，優先使用名稱（如 ME、雙語）', () => {
+  it('有設定 stream 名稱時，優先使用名稱並移除點與減號（如 ME、雙語）', () => {
     const audioPlan = { streams: [{ layout: 'stereo', name: '2.0-FM' }, { layout: 'stereo', name: '2.0-ME' }] };
     expect(defaultDeliveryName({ projectTag: '拼桌', fps: 25, format: 'h264', targetH: 0, audioPlan }))
-      .toBe('ST_拼桌_25fps_2.0-FM+2.0-ME.mp4');
+      .toBe('ST_拼桌_25fps_20FM+20ME.mp4');
   });
   it('全部皆為 mono 時，統一改用 NCH-Mono', () => {
     const mk = count => defaultDeliveryName({
