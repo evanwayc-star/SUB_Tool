@@ -30,6 +30,6 @@ export {
   snapTargets, snapVal, cueNeighborBounds,
 
   /* 影片段操作 */
-  selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft,
-  showClipFade, showCrossfade, showImageGeom, showClipDuration,
+
 } from './timeline-renderer.js';
+export { selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom, showClipDuration } from './clip-model.js';
