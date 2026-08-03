@@ -49,9 +49,9 @@ describe('圖示拆分', () => {
     expect(splitMenuLabel('⏱播放頭移到此段開頭')).toEqual({ icon: '⏱', text: '播放頭移到此段開頭' });
   });
 
-  it('連續兩個圖示視為同一個圖示欄（例：🔗✂ 解除影音連結）', () => {
-    const r = splitMenuLabel('🔗✂ 解除影音連結');
-    expect(r.text).toBe('解除影音連結');
+  it('連續兩個圖示視為同一個圖示欄（例：🔗✂ 影音分離）', () => {
+    const r = splitMenuLabel('🔗✂ 影音分離');
+    expect(r.text).toBe('影音分離');
     expect(r.icon).toBe('🔗✂');
   });
 

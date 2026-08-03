@@ -362,14 +362,14 @@ window.addEventListener('keydown', e => {
     case 'rewind':
       e.preventDefault();
       if (_jklSpeed >= 0) _jklSpeed = -1;
-      else _jklSpeed = Math.max(-5, _jklSpeed - 0.5);
+      else _jklSpeed = Math.max(-16, _jklSpeed - 0.5);
       jklApply(); break;
     case 'pause':
       e.preventDefault(); _jklSpeed = 0; jklApply(); break;
     case 'forward':
       e.preventDefault();
       if (_jklSpeed <= 0) _jklSpeed = 1;
-      else _jklSpeed = Math.min(5, _jklSpeed + 0.5);
+      else _jklSpeed = Math.min(16, _jklSpeed + 0.5);
       jklApply(); break;
     case 'zoom_out': e.preventDefault(); setZoom(State.pxPerSec * 0.77); break;
     case 'zoom_in': e.preventDefault(); setZoom(State.pxPerSec * 1.3); break;

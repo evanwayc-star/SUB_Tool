@@ -56,7 +56,7 @@ window.addEventListener('resize',hideCtx);
 function formatPlaybackRate(rate){ return (Math.round(rate * 100) / 100).toString() + 'x'; }
 function setPlayerSpeed(rate){
   const value=Math.round(Number(rate)*100)/100;
-  if(!Number.isFinite(value)||value<0.1||value>4){ showToast('播放速度需介於 0.1x 和 4x 之間'); return false; }
+  if(!Number.isFinite(value)||value<0.1||value>16){ showToast('播放速度需介於 0.1 和 16 之間'); return false; }
   setManualPlaybackSpeed(value);
   showToast('播放速度：'+formatPlaybackRate(value));
   return true;
@@ -64,9 +64,9 @@ function setPlayerSpeed(rate){
 async function setCustomPlayerSpeed(){
   const raw=await promptModal(
     '自訂播放速度',
-    '輸入播放速度（0.1x–4x）',
+    '輸入播放速度（0.1–16）',
     String(video.playbackRate||1),
-    { placeholder:'例如 0.75、1.25 或 2x', okLabel:'套用' }
+    { placeholder:'例如 0.75、1.25 或 2', okLabel:'套用' }
   );
   if(raw==null) return;
   const value=Number(String(raw).replace(/[x×\s]/gi,''));
@@ -291,7 +291,7 @@ tlScroll.addEventListener('contextmenu',e=>{
       if(isImg){ /* 圖片沒有原音，音訊相關項目不適用 */ }
       else if(c.audioDetached) items.push({label:'🔇 此影片原音已解除連結'});
       else {
-        items.push({label:'🔗✂ 解除影音連結',act:()=>{ void Media.detachClipAudio?.(c.id); }});
+        items.push({label:'🔗✂ 影音分離',act:()=>{ void Media.detachClipAudio?.(c.id); }});
         items.push({label:'🎧 音訊配線',act:()=>AudioRouting.openForClip(c.id)});
       }
       items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});

@@ -1546,7 +1546,7 @@ const Media = {
       el.addEventListener('canplay', ()=>{
         const at = this.tracks.find(x=>x._altPrimary);
         if(this.playing && at && !at._srcHidden){ const lt=this._srcLocalT('video', this.tlTime());
-          if(lt!=null){ try{ el.currentTime=clamp(lt,0,el.duration||lt); el.playbackRate=video.playbackRate||1; el.play(); }catch(e){} } }
+          if(lt!=null){ try{ el.currentTime=clamp(lt,0,el.duration||lt); el.playbackRate=video.playbackRate||1; if('preservesPitch' in el) el.preservesPitch = (el.playbackRate >= 0.25 && el.playbackRate <= 4); el.play(); }catch(e){} } }
       }, {once:true});
       const node = this.ctx.createMediaElementSource(el);
       const g = this.ctx.createGain(); node.connect(g); g.connect(this.master);
@@ -2463,6 +2463,7 @@ const Media = {
         if(off==null){ tr.el.pause(); continue; }
         tr.el.currentTime=clamp(off,0,tr.el.duration||off);
         tr.el.playbackRate=video.playbackRate||1;
+        if('preservesPitch' in tr.el) tr.el.preservesPitch = (tr.el.playbackRate >= 0.25 && tr.el.playbackRate <= 4);
         const result=tr.el.play(); if(result?.catch) result.catch(()=>{});
       }catch(e){}
     }
@@ -2481,7 +2482,7 @@ const Media = {
       }
       else if(this.seqOn()){ const lt = this._srcLocalT(s, tlT); if(lt == null){ try{ tr.el.pause(); }catch(e){} continue; } off = lt; } // 各音源對到自己片段來源時間；無作用片段則停
       else off = localT;
-      try{ tr.el.currentTime=clamp(off,0,tr.el.duration||off); tr.el.playbackRate=video.playbackRate||1; tr.el.play(); }catch(e){} }
+      try{ tr.el.currentTime=clamp(off,0,tr.el.duration||off); tr.el.playbackRate=video.playbackRate||1; if('preservesPitch' in tr.el) tr.el.preservesPitch = (tr.el.playbackRate >= 0.25 && tr.el.playbackRate <= 4); tr.el.play(); }catch(e){} }
   },
   // 音源切換／clip 切換後，若正在播放需重啟可聽元素（先前隱藏者已被跳過、未在播）
   _restartElements(){
@@ -2559,6 +2560,7 @@ const Media = {
 
        const doPlay = () => {
            el._scrubEl.playbackRate = el.playbackRate || 1;
+           if('preservesPitch' in el._scrubEl) el._scrubEl.preservesPitch = (el._scrubEl.playbackRate >= 0.25 && el._scrubEl.playbackRate <= 4);
            el._scrubEl.currentTime = clamp(tt, 0, el.duration || tt);
            el._scrubEl.volume = State.muted ? 0 : 1;
            const p = el._scrubEl.play();
@@ -2713,18 +2715,19 @@ const Media = {
     if(this.audioOnlyTimeline() && this._transport.virtualStartedAt!==null){
       this._transport.reanchorVirtual({playbackRate:video.playbackRate||1});
     }
+    const pp = (r >= 0.25 && r <= 4);
     if(this.mpvMode){
-      video.playbackRate=r; // 保持同步供 startElementSources 使用
+      video.playbackRate=r; if('preservesPitch' in video) video.preservesPitch=pp; // 保持同步供 startElementSources 使用
       getPlayerAdapter().rate(r).catch(()=>{});
-      for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el)tr.el.playbackRate=r; }
+      for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ tr.el.playbackRate=r; if('preservesPitch' in tr.el) tr.el.preservesPitch=pp; } }
       return;
     }
     // 虛擬模式中更改速度前，先把已累積時間存回 transport，重設計時起點，防止位置跳躍。
     if(!this.audioOnlyTimeline()&&!video.hasAttribute('src')&&this._transport.virtualStartedAt!==null){
       this._transport.reanchorVirtual({playbackRate:video.playbackRate||1});
     }
-    video.playbackRate=r;
-    for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el)tr.el.playbackRate=r; }
+    video.playbackRate=r; if('preservesPitch' in video) video.preservesPitch=pp;
+    for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ tr.el.playbackRate=r; if('preservesPitch' in tr.el) tr.el.preservesPitch=pp; } }
     if(this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }
   },
   reset(options={}){
