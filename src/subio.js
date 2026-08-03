@@ -437,7 +437,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
 
       try {
         const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
-        const assText = !audioOnly && /\\nDialogue:/.test(toASSFromState(State.cues))
+        const assText = !audioOnly && /\nDialogue:/.test(toASSFromState(State.cues))
           ? toASSFromState(State.cues.map(c => ({...c, start: Math.max(0, (c.start || 0) - expIn), end: Math.max(0, (c.end || 0) - expIn)})))
           : null;
 
