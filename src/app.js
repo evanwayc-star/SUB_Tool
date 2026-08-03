@@ -1,3 +1,4 @@
+import { initMediaView } from './media-view.js';
 /* ==============================================================================
    SUB Tool — 應用程式協調層與 UI 進入點 (App Layer / Entry Point)
    ==============================================================================
@@ -2180,7 +2181,8 @@ async function init(){
   updateConfigUI();
   State.fps=+$('fpsSel').value||24;
   const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;
-  initUI(); initExtras(); applyAriaLabels();
+  initUI();
+  initMediaView(); initExtras(); applyAriaLabels();
   renderAll(); layoutTimeline(); drawTimeline(); rafLoop();
   loadPresets().then(()=>renderTrackStyle()).catch(()=>{}); // v4.23 常用樣式庫（config 持久化）
   // v4.25.4 字幕字型：掃 <專案根>/font/ → 注入 @font-face → 填字型下拉（預覽與匯出同一份字型）

@@ -45,8 +45,6 @@ import { sourceChannelLabels } from './channel-layout.js'; // 來源聲道展開
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Seq } from './sequence.js';
 import { TimelineTransport } from './timeline-transport.js';
-import { renderAudioTracks, clearMeterStrips } from './mixer.js';
-import { drawTimeline, updatePlayhead } from './timeline.js';
 
 /* 專案音訊路由使用的持久來源 ID。audioSrc 仍保留給既有播放同步（video / clip:<id>），
    但它會隨本次載入的 clip id 改變，因此不能拿來儲存聲道配線。 */
@@ -205,11 +203,11 @@ const Media = {
     State.externalAudioState=plan.wanted;
     State.externalAudioEnd=plan.timelineEnd;
     Seq.recomputeDuration();
-    this.applyGains(); if(this.playing) this._restartElements(); renderAudioTracks(); drawTimeline();
+    this.applyGains(); if(this.playing) this._restartElements(); emit('media:audioTracks'); emit('media:timeline');
     for(const source of plan.pending){
       if(!DESK) continue; // 只有桌面版能依原始 path 重建
       void this.restoreExternalAudioSource({...source,_restore:true}).then(()=>{
-        this.recomputeTimelineDuration(); this.applyGains(); renderAudioTracks(); drawTimeline();
+        this.recomputeTimelineDuration(); this.applyGains(); emit('media:audioTracks'); emit('media:timeline');
       }).catch(error=>console.warn('restore history external audio:',error));
     }
   },
@@ -223,7 +221,7 @@ const Media = {
     this.recomputeTimelineDuration();
     this.applyGains();
     if(this.playing) this._restartElements();
-    renderAudioTracks(); drawTimeline();
+    emit('media:audioTracks'); emit('media:timeline');
     if(label) emit('history:record',label);
     return asset?this._serializableExternalAudioSource(asset):null;
   },
@@ -319,7 +317,7 @@ const Media = {
         tracks[i].file=chs[i].file;
         Object.assign(tracks[i],AudioPipeline.sourceDescriptorFor(clip,descriptors[i],i));
       }
-      drawTimeline();
+      emit('media:timeline');
     }catch(e){ console.warn('native audio cache:',e); }
   },
   /* 外部音檔初次以原檔快速播放；背景 ingest 完成後改用每條單聲道快取。
@@ -336,7 +334,7 @@ const Media = {
       if(channels.length) await this._replaceExternalTracksWithCached(asset,channels,descriptors,myVer);
       if(res?.wave) await this._setExternalWaveFromPath(asset,res.wave,myVer);
       if(this._bgVersion===myVer && this.externalAudioSources.includes(asset)){
-        this.applyGains(); renderAudioTracks(); drawTimeline();
+        this.applyGains(); emit('media:audioTracks'); emit('media:timeline');
         setStatus('音軌與波形已加入','ok');
       }
       return res;
@@ -423,7 +421,7 @@ const Media = {
       this.syncMuteState();
       this.recomputeTimelineDuration();
       if(cache.wave) void this._setExternalWaveFromPath(asset,cache.wave,version);
-      renderAudioTracks(); drawTimeline();
+      emit('media:audioTracks'); emit('media:timeline');
       if(this.playing) this._restartElements();
       if(!(restoredSource?._restore)&&!(restoredSource?._internalSplit)) emit('history:record','加入音訊：'+asset.name);
       return asset;
@@ -543,13 +541,13 @@ const Media = {
   async loadVideoFile(file, projectRestore=null){
     this._resetForFirstVideo();
     this.audioPanelNotice=null;
-    renderAudioTracks();
+    emit('media:audioTracks');
     State.mediaName=file.name; State.mediaSize=file.size;
     const url=URL.createObjectURL(file); this.objectURLs.push(url);
     video.src=url;
     const native = await canPlayNatively(file, video);
     this.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:native});
-    renderAudioTracks();
+    emit('media:audioTracks');
     $('noVideo').style.display='none';
     if(native){
       await new Promise((res)=>{ video.onloadedmetadata=res; if(video.readyState>=1)res(); });
@@ -604,7 +602,7 @@ const Media = {
             index:i,enabled:i===0});
           at[i].enabled=(i===0);
         }
-        renderAudioTracks(); return;
+        emit('media:audioTracks'); return;
       }
     }catch(e){}
     // 用 ffmpeg 探測（不阻塞主流程，量力而為）
@@ -619,7 +617,7 @@ const Media = {
     }else{
       showToast(WEB_LARGE_NATIVE_AUDIO_NOTICE);
     }
-    renderAudioTracks();
+    emit('media:audioTracks');
   },
 
   async addAudioFile(file, restoredSource=null){
@@ -664,7 +662,7 @@ const Media = {
       if(file.size<=WAVE_DECODE_MAX) void Wave.fromFile(file,asset).catch(()=>{});
       if(!Wave.peaks) Wave.initLive();
       setStatus('音軌已加入','ok');
-      renderAudioTracks();
+      emit('media:audioTracks');
       if(this.playing) this.startElementSources(this.vTime());
       if(!(restoredSource?._restore)&&!(restoredSource?._internalSplit)) emit('history:record','加入音訊：'+asset.name);
       return asset;
@@ -720,7 +718,7 @@ const Media = {
       const stereoTracks=this._connectStereo('video',primary);
       if(stereoTracks) this.tracks.push(...stereoTracks);
       this.activeSource='video';
-      this.usingWebAudio=false; this.syncMuteState(); renderAudioTracks();
+      this.usingWebAudio=false; this.syncMuteState(); emit('media:audioTracks');
       // 原生播放繼續直讀；聲道 cache 在背景準備，供專案路由匯出使用。
       this.cacheNativeRoutingAudio(primary,p,State.duration||dur,audio);
       if(audio.length>0){
@@ -738,7 +736,7 @@ const Media = {
           if(!owns()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
           try { DESK.cleanupAudio(wavPath); } catch(e) {}
           if(ab.duration>State.duration)State.duration=ab.duration; 
-          Wave.setSourceBuffer(primary,ab); drawTimeline();
+          Wave.setSourceBuffer(primary,ab); emit('media:timeline');
         }
         catch(e){ if(owns()){ console.warn('wave',e); Wave.initLive(); } }
       }
@@ -766,7 +764,7 @@ const Media = {
       this.activeSource='video';
       // 混音器立即顯示「準備中」推桿
       this.pendingChannels=this._expandChannels(audio).map(label=>({label,ready:false}));
-      this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
+      this.usingWebAudio=true; this.syncMuteState(); emit('media:audioTracks');
       Wave.initLive(); emit('duration:known');
 
       // 載入音軌+波形的共用函式（快取立即執行，非快取等轉檔完成後執行）
@@ -792,12 +790,12 @@ const Media = {
               const tr=self.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:false,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
               self.attachMeter(tr,node); self.tracks.push(tr);
               if(self.pendingChannels[i]) self.pendingChannels[i].ready=true;
-              self.syncMuteState(); renderAudioTracks();
+              self.syncMuteState(); emit('media:audioTracks');
             }
           }
-        }finally{ if(owns()){ self.pendingChannels=[]; renderAudioTracks(); } }
+        }finally{ if(owns()){ self.pendingChannels=[]; emit('media:audioTracks'); } }
         if(!owns()) return;
-        self.syncMuteState(); renderAudioTracks();
+        self.syncMuteState(); emit('media:audioTracks');
         if(r.wave){
           try{
             const u=await DESK.fileURL(r.wave);
@@ -806,7 +804,7 @@ const Media = {
             const buf=await fb.arrayBuffer();
             if(owns()){
               const pk=Wave.calcFromWav(buf);
-              if(pk){ Wave.setSourceMixPeaks(primary,pk,{mixPath:r.wave,channels:chs}); drawTimeline(); }
+              if(pk){ Wave.setSourceMixPeaks(primary,pk,{mixPath:r.wave,channels:chs}); emit('media:timeline'); }
               else Wave.initLive();
             }
           }catch(e2){ console.warn('wave',e2); if(owns()) Wave.initLive(); }
@@ -871,7 +869,7 @@ const Media = {
       }
     }
     this.activeSource='video';
-    this.usingWebAudio=true; this.syncMuteState(); renderAudioTracks();
+    this.usingWebAudio=true; this.syncMuteState(); emit('media:audioTracks');
 
     if(res.wave){
       // FIX: 改用 fileURL+fetch+computeFromWav，與 streamIngest 路徑一致（避免 readB64 塞爆 IPC + decodeAudioData 耗盡記憶體）
@@ -883,7 +881,7 @@ const Media = {
         const pk=Wave.calcFromWav(buf);
         if(pk) Wave.setSourceMixPeaks(primary,pk,{mixPath:res.wave,channels:chs});
         else Wave.initLive();
-        drawTimeline();
+        emit('media:timeline');
       }
       catch(e){ if(owns()){ console.warn('wave',e); Wave.initLive(); } }
     } else Wave.initLive();
@@ -945,14 +943,14 @@ const Media = {
       if(restoredSource?._restore){
         // 專案重開時外部音檔仍是時間軸參考音，不搶走正在載入的主影片音源選擇。
         newTracks.forEach(track=>{ track._srcHidden=false; });
-        this.applyGains(); renderAudioTracks();
+        this.applyGains(); emit('media:audioTracks');
       }else{
         // 和還原專案的行為一致：新加入的外部素材不能把其他外部／影片來源隱藏掉。
         newTracks.forEach(track=>{ track._srcHidden=false; });
       }
       this.usingWebAudio=true; this.syncMuteState();
       this.recomputeTimelineDuration();
-      renderAudioTracks();
+      emit('media:audioTracks');
       if(this.playing) this.startElementSources(this.vTime());
       if(!(restoredSource?._restore)&&!(restoredSource?._internalSplit)) emit('history:record','加入音訊：'+asset.name);
       if(Array.isArray(info?.audio)&&info.audio.length){
@@ -1076,7 +1074,7 @@ const Media = {
           });
           $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
           $('seekBar').value=Math.round(t*1000);
-          updatePlayhead();
+          emit('media:playhead');
           if(Math.abs(e.data-prev)>0.5) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:driverTimeline}));
         }
         if(e.name==='pause'){
@@ -1120,7 +1118,7 @@ const Media = {
 
     // 混音器立即顯示「準備中」推桿（聲道數在 ffprobe 階段就已知）
     this.pendingChannels = this._expandChannels(audio).map(label=>({label,ready:false}));
-    renderAudioTracks();
+    emit('media:audioTracks');
     setStatus('媒體已載入（mpv 秒開，嵌入播放）','ok');
     emit('duration:known');
     Wave.initLive();
@@ -1142,7 +1140,7 @@ const Media = {
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
     try{ res=await DESK.ingest({path:p,duration:dur,needsProxy:true,audio,queue:true}); }
-    catch(e){ if(!current()) return; console.warn('bg audio ingest:',e); this.pendingChannels=[]; renderAudioTracks(); setStatus('音軌抽取失敗：'+e.message,''); return; }
+    catch(e){ if(!current()) return; console.warn('bg audio ingest:',e); this.pendingChannels=[]; emit('media:audioTracks'); setStatus('音軌抽取失敗：'+e.message,''); return; }
     if(!current()) return; // 使用者已換另一個檔，丟棄結果
     if(res.proxy){
       try{
@@ -1174,7 +1172,7 @@ const Media = {
         this.attachMeter(tr,node); this.tracks.push(tr);
         if(this.pendingChannels[i]) this.pendingChannels[i].ready=true;
         this.usingWebAudio=true; this.syncMuteState();
-        renderAudioTracks();
+        emit('media:audioTracks');
       }
     }
     if(!current()) return;
@@ -1183,7 +1181,7 @@ const Media = {
     // element tracks 接管後，mpv 靜音（避免雙重音訊）
     if(chs.length>0) getPlayerAdapter().mute(true).catch(()=>{});
     if(this.playing) this.startElementSources(this._mpvTime);
-    renderAudioTracks();
+    emit('media:audioTracks');
 
     if(res.wave){
       try{
@@ -1200,7 +1198,7 @@ const Media = {
           pk=Wave.calcPeaks(ab,-1);
         }
         if(!current()) return;
-        Wave.setSourceMixPeaks(primary,pk,{mixPath:res.wave,channels:chs}); drawTimeline();
+        Wave.setSourceMixPeaks(primary,pk,{mixPath:res.wave,channels:chs}); emit('media:timeline');
       }catch(e){ if(!current()) return; }
     }
     if(current()) setStatus('音軌與波形已就緒','ok');
@@ -1262,7 +1260,7 @@ const Media = {
         this.tracks.push({id:'ex'+i,name:'抽取音軌 '+(i+1),kind:'buffer',buffer:ab,gain:g,muted:false,solo:false,volume:1});
       }
       this.usingWebAudio=true; this.syncMuteState();
-      setStatus('多音軌抽取完成','ok'); renderAudioTracks();
+      setStatus('多音軌抽取完成','ok'); emit('media:audioTracks');
       if(this.playing){ this.stopBufferSources(); this.startBufferSources(video.currentTime); }
     }catch(e){ setStatus('音軌抽取失敗','');console.error(e);
     }finally{
@@ -1276,7 +1274,7 @@ const Media = {
   async transcodeAndExtract(file,projectRestore=null){
     if(file.size>FFMPEG_MAX_BYTES){
       this.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:false});
-      renderAudioTracks();
+      emit('media:audioTracks');
       setStatus('','');
       openModal('檔案過大',
         `<b>${file.name}</b> 約 ${(file.size/1e9).toFixed(2)} GB。<br><br>`+
@@ -1315,7 +1313,7 @@ const Media = {
       }
       try{ff.FS('unlink','in.media');ff.FS('unlink','prev.mp4');}catch(e){}
       this.usingWebAudio=true; this.syncMuteState();
-      setStatus('轉檔完成','ok'); renderAudioTracks();
+      setStatus('轉檔完成','ok'); emit('media:audioTracks');
       Wave.fromTracks();
       emit('duration:known');
     }catch(e){ setStatus('轉檔失敗','');console.error(e);showToast('ffmpeg 轉檔失敗'); }
@@ -1561,7 +1559,7 @@ const Media = {
       if(s === 'video' || s.startsWith('clip:')) tr._srcHidden = !audible.has(s);
     }
     if(!this.mpvMode) video.muted=this.hasMix()?true:(State.muted||!!c.audioDetached);
-    this.applyGains(); renderAudioTracks();
+    this.applyGains(); emit('media:audioTracks');
   },
   _enterGap(t){
     this._transport.enterGap(t,{running:this.playing});
@@ -1759,7 +1757,7 @@ const Media = {
             if(added){ made.set(key, added); restoredProjectClips.push(added); }
           }
         }
-        Seq.sort(); Seq.recomputeDuration(); drawTimeline();
+        Seq.sort(); Seq.recomputeDuration(); emit('media:timeline');
       })();
     }else if(projectRestore&&Array.isArray(pend)){
       // Browser 不能憑路徑重開其他 File；保留未選回的 segment metadata，避免
@@ -1826,7 +1824,7 @@ const Media = {
       const hasTrack=this.tracks.some(track=>(track.source||'video')===sourceId);
       if(!hasTrack&&!this._clipRuntimeReadySources?.has(sourceId)) pending.push(this.ensureClipRuntime(clip));
     }
-    renderAudioTracks();
+    emit('media:audioTracks');
     if(this.seqOn()) this.seek(Math.max(0,Number(timelineTime)||0));
     else this._enterNoVideoTimeline(timelineTime,this.playing);
     const restorePromise=Promise.allSettled(pending);
@@ -1885,7 +1883,7 @@ const Media = {
     AudioPipeline.registerSource(c,probeAudioChannelDescriptors(info?.audio));
     if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; c.audioDetached=!!geo.audioDetached; Seq.sort(); Seq.recomputeDuration(); }
     else { Seq.sort(); Seq.recomputeDuration(); }
-    drawTimeline();
+    emit('media:timeline');
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}（背景抽取音訊與波形…）`, 'busy');
     void this.ensureClipRuntime(c,info);
@@ -1967,11 +1965,11 @@ const Media = {
         if(this._bgVersion === myVer && Seq.byId(c.id)){
           c.peaks = Wave.calcFromWav(buf);
           if(c.peaks) Wave.setSourceMixPeaks(c,c.peaks,{mixPath:res.wave,channels:chs});
-          drawTimeline();
+          emit('media:timeline');
         }
       }catch(e){ console.warn('clip wave', e); }
     }
-    if(this._bgVersion === myVer) { renderAudioTracks(); setStatus(`影片已加入序列：${c.name}`, 'ok'); }
+    if(this._bgVersion === myVer) { emit('media:audioTracks'); setStatus(`影片已加入序列：${c.name}`, 'ok'); }
   },
   /* v4.7：圖片原始像素尺寸。互動框（.img-wrap）要貼合「contain 之後的圖片」而非整個畫框，
      沒有 natW/natH 就只能退回舊的滿框行為，把手會離素材很遠。舊專案讀不到時 app.js 會補量。 */
@@ -2010,7 +2008,7 @@ const Media = {
       ensureVideoTrackCount(c.vtrack + 1);
     }
     Seq.sort(); Seq.recomputeDuration();
-    drawTimeline();
+    emit('media:timeline');
     // 圖片疊層由 app.js 的 render:videoSub 事件建立；僅重繪時間軸不會
     // 立即產生可拖曳的 .img-wrap，導致剛匯入時看得到素材卻不能直接調整。
     emit('render:videoSub');
@@ -2038,7 +2036,7 @@ const Media = {
     }
     projectRestore?.replaceClips?.(remaining);
     Seq.sort(); Seq.recomputeDuration();
-    if(restored) { drawTimeline(); emit('render:videoSub'); }
+    if(restored) { emit('media:timeline'); emit('render:videoSub'); }
     return {restored,pending:remaining.length};
   },
   async addImageWeb(f){
@@ -2055,7 +2053,7 @@ const Media = {
     }
     ensureVideoTrackCount(c.vtrack + 1);
     Seq.sort(); Seq.recomputeDuration();
-    drawTimeline();
+    emit('media:timeline');
     emit('render:videoSub');
     emit('history:record', '加入圖片：' + c.name);
     setStatus(`已加入圖片：${c.name}`, 'ok');
@@ -2080,7 +2078,7 @@ const Media = {
     }
     const c = Seq.add({ name: f.name, web: { url }, dur, audioSourceId: makeAudioSourceId(), ...overrides });
     c.audioSrc = 'clip:' + c.id;
-    drawTimeline();
+    emit('media:timeline');
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}`, 'ok');
     // 音訊（整檔混音一軌，經聲道分離）＋波形：僅小檔（記憶體考量）
@@ -2099,7 +2097,7 @@ const Media = {
         trs.forEach(tr => { tr.name = c.name + '·' + tr.name; tr.source = 'clip:' + c.id; });
         this.tracks.push(...trs);
         const ac = this._activeClip(); if(ac) this._applyClipAudio(ac);
-        renderAudioTracks(); drawTimeline();
+        emit('media:audioTracks'); emit('media:timeline');
       }catch(e){ console.warn('addClipWeb audio', e); }
     } else showToast('檔案較大：此段不產生波形（可另載入音訊檔）');
     return c;
@@ -2124,7 +2122,7 @@ const Media = {
     });
     c.out = cut;
     Seq.sort(); Seq.recomputeDuration();
-    drawTimeline();
+    emit('media:timeline');
     emit('history:record', '切割影片：' + c.name);
     setStatus(`已於 ${secToEncore(t, State.fps, State.dropFrame)} 切割「${c.name}」`, 'ok');
     return true;
@@ -2205,7 +2203,7 @@ const Media = {
       this.applyGains();
     }
     this.recomputeTimelineDuration();
-    drawTimeline(); renderAudioTracks();
+    emit('media:timeline'); emit('media:audioTracks');
     emit('history:record','解除影音連結：'+(clip.name||''));
     setStatus('已解除影音連結，可分別剪輯影片與音訊','ok');
     return made.map(asset=>this.externalAudio.get(asset.id));
@@ -2238,8 +2236,8 @@ const Media = {
       // 最後影片被刪除：保留黑畫面與外部音訊，不讓先前影片停留在最後一格。
       this._enterNoVideoTimeline(playhead,wasPlaying);
     }else this.seek(Math.min(playhead, State.duration || 0)); // 重新解析目前位置（可能已成間隙）
-    renderAudioTracks();
-    drawTimeline(); emit('render:videoSub');
+    emit('media:audioTracks');
+    emit('media:timeline'); emit('render:videoSub');
     return true;
   },
 
@@ -2614,8 +2612,8 @@ const Media = {
     return this.projectAudioInterpretation().projectRouteState(track);
   },
   projectBusById(id){ return (State.audioProject?.buses||[]).find(bus=>String(bus.id)===String(id))||null; },
-  toggleProjectBusMute(id){ const bus=this.projectBusById(id); if(!bus)return; bus.muted=!bus.muted; this.applyGains(); renderAudioTracks(); drawTimeline(); },
-  toggleProjectBusSolo(id){ const bus=this.projectBusById(id); if(!bus)return; bus.solo=!bus.solo; this.applyGains(); renderAudioTracks(); drawTimeline(); },
+  toggleProjectBusMute(id){ const bus=this.projectBusById(id); if(!bus)return; bus.muted=!bus.muted; this.applyGains(); emit('media:audioTracks'); emit('media:timeline'); },
+  toggleProjectBusSolo(id){ const bus=this.projectBusById(id); if(!bus)return; bus.solo=!bus.solo; this.applyGains(); emit('media:audioTracks'); emit('media:timeline'); },
   setProjectBusVolume(id,value){ const bus=this.projectBusById(id); if(!bus)return; bus.volume=Math.max(0,Number(value)||0); this.applyGains(); },
   /* 「這條聲道現在聽得到嗎」的唯一判定。applyGains 與混音器電平表都必須走它。
 
@@ -2677,9 +2675,9 @@ const Media = {
   /* 某音源的混音器聲道（Media.tracks 內 source 相符者）；音源層級的 靜音/獨奏/音量＝對其所有聲道聚合套用 */
   sourceChannels(srcId){ return this.tracks.filter(t=>(t.source||'video')===srcId && (t.kind==='buffer'||t.kind==='native'||t.kind==='element'||t.kind==='nativeTrack')); },
   sourceMuted(srcId){ const ch=this.sourceChannels(srcId); return ch.length>0 && ch.every(t=>t.muted); },
-  toggleSourceMute(srcId){ const ch=this.sourceChannels(srcId); const m=!(ch.length>0&&ch.every(t=>t.muted)); for(const t of ch)t.muted=m; this.applyGains(); renderAudioTracks(); },
+  toggleSourceMute(srcId){ const ch=this.sourceChannels(srcId); const m=!(ch.length>0&&ch.every(t=>t.muted)); for(const t of ch)t.muted=m; this.applyGains(); emit('media:audioTracks'); },
   sourceSolo(srcId){ const ch=this.sourceChannels(srcId); return ch.length>0 && ch.some(t=>t.solo); },
-  toggleSourceSolo(srcId){ const ch=this.sourceChannels(srcId); const s=!(ch.length>0&&ch.some(t=>t.solo)); for(const t of ch)t.solo=s; this.applyGains(); renderAudioTracks(); },
+  toggleSourceSolo(srcId){ const ch=this.sourceChannels(srcId); const s=!(ch.length>0&&ch.some(t=>t.solo)); for(const t of ch)t.solo=s; this.applyGains(); emit('media:audioTracks'); },
   sourceVolume(srcId){ const ch=this.sourceChannels(srcId); return ch.length? ch.reduce((m,t)=>Math.max(m,t.volume==null?1:t.volume),0) : 1; },
   setSourceVolume(srcId,v){ for(const t of this.sourceChannels(srcId))t.volume=v; this.applyGains(); },
   switchSource(id){
@@ -2687,13 +2685,13 @@ const Media = {
     for(const tr of this.tracks) tr._srcHidden=(id!==null && (tr.source||'video')!==id);
     this.applyGains();
     this._restartElements(); // 播放中切換音源：新的可聽元素需重新啟動（隱藏者未在播）
-    renderAudioTracks();
+    emit('media:audioTracks');
     // 自動切換波形
     let targetIdx = -1;
     if(id === 'video' || id === null) targetIdx = Wave.sources.findIndex(s => (s.sourceId || 'video') === 'video');
     else targetIdx = Wave.sources.findIndex(s => s.sourceId === id);
     if(targetIdx >= 0) { Wave.selectSource(targetIdx); }
-    Wave._renderSrcSel();
+    emit('media:srcSel');
   },
   setRate(r){
     if(this.audioOnlyTimeline() && this._transport.virtualStartedAt!==null){
@@ -2747,7 +2745,7 @@ const Media = {
     this.tracks=[]; this.usingWebAudio=false;
     this._clipRuntimeReadySources?.clear();
     this._clipRuntimePromises?.clear();
-    clearMeterStrips(); // Fix #10：清除 mixer 的舊音軌參照，避免 rafLoop 讀取廢棄 analyser
+    emit('media:clearMeters'); // Fix #10：清除 mixer 的舊音軌參照，避免 rafLoop 讀取廢棄 analyser
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
     const keepObjectURLs=options.keepObjectURLs instanceof Set?options.keepObjectURLs:new Set();
     this.objectURLs.forEach(u=>{ if(!keepObjectURLs.has(u)) try{URL.revokeObjectURL(u);}catch(e){} });
@@ -2779,7 +2777,7 @@ on('media:sequenceRestored',()=>{
 /* 專案音訊 bus 的 M／S／音量變更 → 重新套用增益並重繪音軌列與時間軸。
    走 events.js 而非 window CustomEvent，理由見 docs/開發與驗證.md 的事件表。 */
 on('audio:busChanged',()=>{
-  try{ Media.applyGains(); renderAudioTracks(); drawTimeline(); }
+  try{ Media.applyGains(); emit('media:audioTracks'); emit('media:timeline'); }
   catch(error){ console.warn('bus changed:',error); }
 });
 /* 序列切換安全網：rafLoop 於背景分頁/最小化時完全暫停（rAF 凍結），但音訊元素照播——
@@ -3012,7 +3010,7 @@ const Wave = {
         }
         entry.peaks=peaks;
         if(key==='mix'&&peaks) this.setSourceMixPeaks(source,peaks,{mixPath:entry.path});
-        drawTimeline();
+        emit('media:timeline');
         return peaks;
       }catch(error){
         console.warn('source waveform load',error);
@@ -3040,7 +3038,7 @@ const Wave = {
     state.selection=next==='mix'||state.channels.has(next)?next:'mix';
     // 立即重繪 MIX／已快取聲道；尚未解碼的單聲道會在背景載入後再重繪。
     this.getSourceWaveform(source);
-    drawTimeline();
+    emit('media:timeline');
     return state.selection;
   },
   forgetSourceWaveforms(source){
@@ -3061,7 +3059,7 @@ const Wave = {
     });
     this.registerSourceWaveforms(sourceId,{mixPath:wavePath,mixPeaks:this.peaks,channels});
     this.srcIdx=0;
-    this._renderSrcSel();
+    emit('media:srcSel');
   },
   setFromBuffer(ab, sourceId = 'video') {
     this.sources = this.sources.filter(s => s.sourceId !== sourceId);
@@ -3078,7 +3076,7 @@ const Wave = {
     this.live = false;
     this.peaks = mixPeaks;
     this.srcIdx = this.sources.findIndex(s => s.sourceId === sourceId);
-    this._renderSrcSel();
+    emit('media:srcSel');
   },
   async selectSource(idx){
     if(idx<0||idx>=this.sources.length) return;
@@ -3088,7 +3086,7 @@ const Wave = {
       this.setSourceWaveSelection(src.sourceKey||src.sourceId,src.kind==='channel'
         ? this._channelKey(src.sourceStream||0,src.sourceChannel||0) : 'mix');
     }
-    if(src.peaks){ this.peaks=src.peaks; drawTimeline(); return; }
+    if(src.peaks){ this.peaks=src.peaks; emit('media:timeline'); return; }
     if(!DESK||!Media.ctx) return;
     const myIdx=idx; // Fix #11：快照索引作取消令牌，防止非同步競爭覆蓋結果
     try{
@@ -3100,35 +3098,18 @@ const Wave = {
       if(this.srcIdx !== myIdx) return; // 解碼期間再次確認
       this.live=false; this.compute(ab);
       src.peaks=this.peaks;
-      drawTimeline();
+      emit('media:timeline');
     }catch(e){ console.warn('wave selectSource',e); }
   },
   clearSources(){
-    this.sources=[]; this.srcIdx=-1; this.sourceWaveforms.clear(); this._renderSrcSel();
+    this.sources=[]; this.srcIdx=-1; this.sourceWaveforms.clear(); emit('media:srcSel');
   },
-  _renderSrcSel(){
-    const sel=$('waveSrcSel'); if(!sel) return;
-    const activeSrcId = Media.activeSource || 'video';
-    const matching = this.sources.map((s,i) => ({s, i}))
-        .filter(x => (x.s.sourceId || 'video') === activeSrcId);
-    const show = matching.length > 1;
-    // label 來自專案檔或媒體檔的 metadata（見 sources 的建立處：track.name / ch.label），
-    // 屬於外來字串——直接塞進 innerHTML 等於讓別人給的專案／影片可以在本程式內執行程式碼，
-    // 而主程序有多個吃路徑的 IPC，代價不只是畫面亂掉。
-    sel.innerHTML = matching.map(x => `<option value="${x.i}">${escapeHTML(String(x.s.label ?? ''))}</option>`).join('');
-    if(!matching.find(x => x.i === this.srcIdx) && matching.length > 0){
-      this.selectSource(matching[0].i);
-    }
-    sel.value = String(Math.max(0, this.srcIdx));
-    sel.style.display = show ? '' : 'none';
-  },
-
   async fromFile(file,source='video'){
     Media.ensureCtx();
     const buf=await readFile(file);
     const ab=await Media.ctx.decodeAudioData(buf.slice(0));
     if(ab.duration>State.duration){State.duration=ab.duration;emit('duration:known');}
-    this.setSourceBuffer(source,ab); drawTimeline();
+    this.setSourceBuffer(source,ab); emit('media:timeline');
     setStatus('波形已產生','ok');
   },
   async fromVideoElement(){ /* fallback：無法解碼時略過 */ },
@@ -3137,7 +3118,7 @@ const Wave = {
     const len=Math.ceil(Math.max(State.duration,1)*this.resolution);
     this.peaks=new Float32Array(len*2); this.live=true;
     this.clearSources();
-    drawTimeline();
+    emit('media:timeline');
     if(!Media.audioPanelNotice) $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
   },
   captureLive(){ // 由 rafLoop 於播放時呼叫
@@ -3157,7 +3138,7 @@ const Wave = {
   },
   fromTracks(){
     const b=Media.tracks.find(t=>t.kind==='buffer'); 
-    if(b){ Wave.setFromBuffer(b.buffer, 'video'); drawTimeline(); }
+    if(b){ Wave.setFromBuffer(b.buffer, 'video'); emit('media:timeline'); }
   },
   /* 純計算版（不改 this.peaks）：影片序列的每段 clip 各自持有 peaks 時使用 */
   calcPeaks(ab, chIdx = -1){
