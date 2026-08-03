@@ -7,7 +7,7 @@
 /* SUB Tool — 右鍵選單（播放窗音軌/速度、字幕移軌） */
 import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
-import { State, isSel, setSelection, deselect } from './state.js';
+import { State, isSel, setSelection, deselect, IS_DESKTOP } from './state.js';
 import { Media, Wave } from './media.js';
 import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade, showImageGeom, showClipDuration } from './timeline.js';
