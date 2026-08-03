@@ -457,11 +457,11 @@ function renderVideoSub(){
       if(!st.bgBox) css+='background:transparent;';
       // padding 會把文字往內推 → 與 ASS 錯位（ASS 的 BorderStyle=3 是把色塊往【外】長，文字不動）。
       // 故 substyle.js 在產生 CSS 時已加入等量負 margin 抵銷，色塊往外長、文字位置不動。
-      if(!st.bgBox) css+='padding:0;';
       if(collide[i]) css+='color:#ff4444;';                   // 與前一句落在同一點＝會糊在一起
       const inner = escapeHTML(c.text||'').replace(/\n/g,'<br>'); // 直書由 writing-mode 自動分列（多行=多列）
+      const vertClass = st.vertical ? ' vertical' : ''; // 直書容器同步套 writing-mode，修正 Chromium 高度少算 Bug
       sig+=tk+'|'+c.id+'|'+contStyle+grab+'|'+collide[i]+'|'+c.text+'|'+JSON.stringify(st)+';';
-      html+=`<div class="vsub-track${grab}" data-tk="${tk}" data-cue="${c.id}"`+
+      html+=`<div class="vsub-track${grab}${vertClass}" data-tk="${tk}" data-cue="${c.id}"`+
         (grab?' title="拖曳＝移動這一句／頂端把手＝旋轉"':'')+` style="${contStyle}">`+
         `<span class="line" style="${css}">${inner}</span>`+
         // 旋轉把手：滑鼠移到該句才浮出（見 styles.css）。放在容器內、隨容器定位，
@@ -474,7 +474,82 @@ function renderVideoSub(){
   if(sig===_videoSubSig) { renderImageOverlays(); return; }
   _videoSubSig=sig; _videoSub.innerHTML=html;
   renderImageOverlays();
-  
+
+  // 終極修復 Chromium 直書截斷 Bug 與墨水溢出裁切 Bug：
+  // 1. 直書截斷：Chromium 在計算正交排版時，會錯誤地把高度截斷在外層容器 (vsublayer) 的高度。
+  // 2. 墨水溢出：純文字的 ascender/descender 經常超出標準行高，導致虛線切字。
+  // 完美解法：【維度轉換法】
+  // 對於任何中英文與符號，只要字體沒變，它在「橫排」時的寬度，精準等於它在「直排」時的高度！
+  // 我們將直排字幕強制解除直排屬性，讓它在一個無限大的容器內以橫排顯示，
+  // 這樣 Chromium 完全不會觸發直排截斷 Bug。我們量測其橫排的 offsetWidth / offsetHeight，
+  // 並將寬高反轉 (W=H, H=W)，完美精準算出直書時所需的排版空間，徹底打破截斷限制！
+  requestAnimationFrame(() => {
+    const tracks = Array.from(_videoSub.querySelectorAll('.vsub-track'));
+    if(tracks.length === 0) return;
+
+    const measureWrapper = document.createElement('div');
+    measureWrapper.style.position = 'fixed';
+    measureWrapper.style.top = '0';
+    measureWrapper.style.left = '0';
+    measureWrapper.style.width = '99999px';
+    measureWrapper.style.height = '99999px';
+    measureWrapper.style.visibility = 'hidden';
+    measureWrapper.style.pointerEvents = 'none';
+    document.body.appendChild(measureWrapper);
+
+    const data = [];
+
+    // Pass 1: Clone 並轉換為橫排來測量真實物理尺寸
+    tracks.forEach(track => {
+      const line = track.querySelector('.line');
+      if(!line) return;
+      
+      const trackClone = track.cloneNode(true);
+      // 解除所有旋轉與定位
+      trackClone.style.transform = 'none';
+      const lineClone = trackClone.querySelector('.line');
+      if(lineClone) lineClone.style.transform = 'none';
+      
+      // 【關鍵】：如果是直排字幕，強制拔除直排屬性，讓它變成橫排！
+      const isVertical = track.classList.contains('vertical');
+      if(isVertical) {
+        trackClone.classList.remove('vertical');
+        trackClone.style.writingMode = 'horizontal-tb'; // 確保絕對是橫排
+        if(lineClone) {
+          lineClone.style.writingMode = 'horizontal-tb';
+          lineClone.style.textOrientation = 'mixed';
+        }
+      }
+      
+      measureWrapper.appendChild(trackClone);
+      
+      const style = window.getComputedStyle(lineClone);
+      const marginX = (parseFloat(style.marginLeft) || 0) + (parseFloat(style.marginRight) || 0);
+      const marginY = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+      
+      // 讀取橫排時的真實排版尺寸 (已加回 margin，等於純淨的 margin-box)
+      const measuredW = lineClone.offsetWidth + marginX;
+      const measuredH = lineClone.offsetHeight + marginY;
+      
+      if(measuredW > 0 && measuredH > 0){
+        data.push({
+          track: track,
+          // 【維度對調】：直排時，高度 = 橫排寬度；寬度 = 橫排高度
+          w: isVertical ? measuredH : measuredW,
+          h: isVertical ? measuredW : measuredH
+        });
+      }
+    });
+
+    document.body.removeChild(measureWrapper);
+
+    // Pass 2: 將反轉後的真實尺寸寫回，徹底打破 Chromium 截斷限制
+    data.forEach(item => {
+      item.track.style.width = item.w + 'px';
+      item.track.style.height = item.h + 'px';
+    });
+  });
+
   // 重繪會換掉原本的 DOM 節點；拖曳中直接接回新節點，讓原生提示框跟著位置走，
   // 非拖曳時則清掉過期的 hover 引導，等下一次指標移動再計算。
   if(_hoveredSubEl && !_hoveredSubEl.isConnected){

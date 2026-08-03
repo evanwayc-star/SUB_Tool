@@ -146,6 +146,12 @@ export function styleToCss(st, ratio){
       css += `box-shadow:${d}px ${d}px 0px rgba(0,0,0,.85);`;
     }
   } else {
+    // 為了讓 CSS outline (畫在 border-box) 能包覆字體的 stroke 和 shadow 視覺溢出，
+    // 同樣加上 padding 與等量負 margin。這樣 layout 不變，但 border-box 變大。
+    // 額外加 12px 緩衝，確保能完全包覆字體本身的 ascender/descender 墨水溢出，避免虛線切到字。
+    const over = (((st.outline || 0) * 2 * r) + ((st.shadow || 0) * r) + 12).toFixed(1);
+    css += `padding:${over}px;margin:-${over}px;`;
+
     if(st.outline > 0){
       // ASS outline 向外擴 N px；CSS stroke 置中描邊 → 寬度 2N 視覺對應，paint-order 讓筆畫墊在填色後
       css += `-webkit-text-stroke:${(st.outline * 2 * r).toFixed(1)}px ${st.outlineColor};paint-order:stroke fill;`;

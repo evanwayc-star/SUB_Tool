@@ -16,9 +16,9 @@ const actionCategories = [
     name: '播放控制',
     actions: {
       'toggle_play_pause': '播放或暫停',
-      'rewind': '倒帶 (-1x 到 -5x，每階 0.5x)',
+      'rewind': '倒帶',
       'pause': '暫停',
-      'forward': '正播 (1x 到 5x，每階 0.5x)',
+      'forward': '正播',
       'prev_cue_5f': '退回至上一字幕起點前5格',
       'next_cue_5f': '退回至下一字幕起點前5格',
       'nudge_left_1f': '播放點往左平移1格',
@@ -38,8 +38,8 @@ const actionCategories = [
     actions: {
       'set_in': '設定字幕起點 (或新建)',
       'set_out': '設定字幕終點',
-      'step_boundary_prev': '跳轉至上一個邊界（↑：影片／音訊；E：字幕）',
-      'step_boundary_next': '跳轉至下一個邊界（↓：影片／音訊；D：字幕）',
+      'step_boundary_prev': '跳轉至上一個邊界',
+      'step_boundary_next': '跳轉至下一個邊界',
       'prev_cue': '跳至上一條字幕並選取',
       'next_cue': '跳至下一條字幕並選取',
       'first_cue': '跳至軌道第一條字幕',
@@ -111,8 +111,8 @@ const actionCategories = [
     actions: {
       'toggle_sub_mode': '切換上字幕模式',
       'search': '打開搜尋框',
-      'screenshot': '儲存畫面截圖 (Shot-001.jpg)',
-      'screenshot_tc': '儲存畫面截圖帶時間碼 (Ctrl+T)',
+      'screenshot': '儲存畫面截圖',
+      'screenshot_tc': '儲存畫面截圖帶時間碼',
       'undo': '復原',
       'redo': '重做',
       'save_project': '儲存專案',
