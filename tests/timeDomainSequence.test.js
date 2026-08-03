@@ -38,11 +38,12 @@ describe('timeline/source time boundaries', () => {
   });
 
   it('keeps public UI wiring on displayTime instead of player source time', () => {
+    const videoRenderer = readFileSync(new URL('../src/video-renderer.js', import.meta.url), 'utf8');
     const app = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
     const keyboard = readFileSync(new URL('../src/keyboard.js', import.meta.url), 'utf8');
     const notes = readFileSync(new URL('../src/notes.js', import.meta.url), 'utf8');
 
-    expect(app).toContain('Seq.timedRangesForSource(State.cues');
+    expect(videoRenderer).toContain('Seq.timedRangesForSource(State.cues');
     expect(app).toContain('updateNoteActive(Media.displayTime())');
     expect(app).not.toContain('updateNoteActive(video.currentTime)');
     expect(keyboard).not.toContain('const t = Media.vTime();');

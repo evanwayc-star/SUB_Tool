@@ -42,7 +42,11 @@ function project(){
   State.audioProject=normalizeAudioProject(State.audioProject);
   return State.audioProject;
 }
-function clipSourceId(clip){ return clip?.audioSourceId||clip?.audioSrc||null; }
+function clipSourceId(clip){
+  if(!clip) return null;
+  if(clip.id?.startsWith('ext-')) return clip.id;
+  return clip.audioSourceId || clip.audioSrc || (clip.primary ? 'video' : ('clip:'+clip.id));
+}
 function busName(bus,index){ return bus?.name||`A${index+1}`; }
 function busById(id){ return project().buses.find(bus=>String(bus.id)===String(id))||null; }
 function routeKey(route){ return `${route.sourceStream}:${route.sourceChannel}`; }

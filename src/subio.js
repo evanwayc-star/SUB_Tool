@@ -224,7 +224,31 @@ function _mixerSummary() {
   return `：目前 <b>${audible}</b>/${total} 條聲道會發聲`;
 }
 
-async function showExportVideoDialog(initialDraft=null) {
+import { validateSubtitlesBeforeExport } from './subtitle-validator.js';
+
+async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
+  if (!skipValidation) {
+    const cpLenInput = $('cpLenInput');
+    const wordLimit = cpLenInput && cpLenInput.value ? parseInt(cpLenInput.value, 10) : null;
+    const validationErrors = validateSubtitlesBeforeExport(wordLimit);
+    if (validationErrors.length > 0) {
+      const html = `<div style="font-size:14px;color:var(--text);margin-bottom:12px;">字幕檢查發現以下潛在問題：</div>
+                    <ul style="max-height:200px;overflow-y:auto;background:var(--panel2);padding:10px 10px 10px 25px;border-radius:4px;color:var(--red);margin-bottom:15px;font-size:13px;line-height:1.6;">
+                      ${validationErrors.map(e => `<li>${e}</li>`).join('')}
+                    </ul>
+                    <div style="font-size:13px;color:var(--text-dim);">確定要忽略警告並繼續匯出嗎？</div>`;
+      
+      openModal('⚠️ 匯出警告：字幕潛在問題', html, [
+        { label: '取消', act: closeModal },
+        { label: '繼續匯出', primary: true, act: () => {
+          closeModal();
+          showExportVideoDialog(initialDraft, true);
+        }}
+      ], { width: '700px' });
+      return;
+    }
+  }
+
   if (IS_DESKTOP && !DESK.exportVideo) { showToast('桌面版匯出元件未就緒'); return; }
   const data = _exportSnapshot();
   if (!data) { showToast('沒有可匯出的影片或外部音訊'); return; }

@@ -142,6 +142,7 @@ const Media = {
   // 這裡留下的是「素材變了之後 runtime 要做什麼」：拆 element、重算增益、重畫。
   externalAudio:new ExternalAudioLibrary(),
   get externalAudioSources(){ return this.externalAudio.assets; },
+  getExternalAudioSource(id){ return this.externalAudio.find(id); },
   set externalAudioSources(list){ this.externalAudio.assets=Array.isArray(list)?list:[]; },
   // 播放中只在外部音訊跨越片段邊界時重新同步，避免每幀重設 Audio.currentTime。
   _externalActivityKey:null,
