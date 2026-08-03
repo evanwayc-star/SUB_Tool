@@ -721,6 +721,40 @@ ipcMain.handle('fs:listDir', (e, p) => {
   if (!fileAuthority.canListDirectory(p)) { console.warn('[sec] listDir blocked:', p); return []; }
   try { return fs.readdirSync(p); } catch (err) { return []; }
 });
+
+async function findFileRecursively(dir, targetName, maxDepth = 3) {
+  if (maxDepth < 0) return null;
+  try {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === targetName) {
+        return path.join(dir, entry.name);
+      }
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const found = await findFileRecursively(path.join(dir, entry.name), targetName, maxDepth - 1);
+        if (found) return found;
+      }
+    }
+  } catch(e) {}
+  return null;
+}
+
+ipcMain.handle('fs:findRelinkTarget', async (e, { projectPath, oldMediaPath }) => {
+  if (!projectPath || !oldMediaPath) return null;
+  if (!fileAuthority.canRead(projectPath)) return null;
+  
+  const targetName = path.basename(oldMediaPath);
+  const startDir = path.dirname(projectPath);
+  
+  const newPath = await findFileRecursively(startDir, targetName, 3);
+  if (newPath) {
+    fileAuthority.grantTrustedFile(newPath, { read: true, write: false });
+    return newPath;
+  }
+  return null;
+});
 // preload 只會從真實的拖放／選檔 File 物件取得 p；不可提供接收任意字串的授權 IPC。
 ipcMain.handle('fs:authorizeDroppedFile', (e, p) => {
   if (typeof p !== 'string' || !p) return null;

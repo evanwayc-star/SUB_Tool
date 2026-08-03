@@ -394,6 +394,38 @@ function _restoreSubtitleTrack(raw,index){
 }
 
 /* ===== 8. 專案 .subtool ============================================== */
+
+async function _autoRelinkMissingMedia(data, projectPath) {
+  if (!IS_DESKTOP || typeof DESK.findRelinkTarget !== 'function') return;
+  
+  async function checkAndRelink(obj, pathKey) {
+    if (!obj || !obj[pathKey]) return;
+    const p = obj[pathKey];
+    try {
+      const stat = await DESK.stat(p);
+      if (!stat.exists) {
+        const newPath = await DESK.findRelinkTarget(projectPath, p);
+        if (newPath) obj[pathKey] = newPath;
+      }
+    } catch(e) {}
+  }
+  
+  if (data.media) await checkAndRelink(data.media, 'path');
+  
+  if (Array.isArray(data.clips)) {
+    for (const clip of data.clips) {
+      await checkAndRelink(clip, 'path');
+      await checkAndRelink(clip, 'audioSrc');
+    }
+  }
+  
+  if (Array.isArray(data.externalAudioSources)) {
+    for (const src of data.externalAudioSources) {
+      await checkAndRelink(src, 'path');
+    }
+  }
+}
+
 const Project = {
   // save/saveAs 回傳 Promise<路徑|名稱|null>：null=失敗或使用者取消。
   // 呼叫端（如關閉前儲存流程）可 await 確認真正寫入完成後再繼續。
@@ -557,6 +589,7 @@ const Project = {
   },
   async _loadDesktop(r,generation){
     let data; try{ data=JSON.parse(decodeText(b64ToBytes(r.b64).buffer)); }catch(e){ showToast('無法解析專案檔'); return; }
+    await _autoRelinkMissingMedia(data, r.path);
     const mp=data.media&&data.media.path;
     // stat 是唯讀，可在碰 State 之前先完成；若期間有更新請求，舊專案完全不進入 runtime。
     let mediaStat=null;

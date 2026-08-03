@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('subtool', {
   fileURL:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:fileURL', p); },
   stat:         (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:stat', p); },
   listDir:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:listDir', p); },
+  findRelinkTarget: (projectPath, oldMediaPath) => ipcRenderer.invoke("fs:findRelinkTarget", { projectPath, oldMediaPath }),
   fontsList:    () => ipcRenderer.invoke('fonts:list'), // v4.25.4 字幕字型：掃 <專案根>/font/
   openMedia:    () => ipcRenderer.invoke('dialog:openMedia'),
   openAudio:    () => ipcRenderer.invoke('dialog:openAudio'),
