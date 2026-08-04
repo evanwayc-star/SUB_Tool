@@ -1,7 +1,15 @@
 /* 來源聲道展開順序的【跨行程契約】。
 
-     src/channel-layout.js       flattenSourceChannels()  → renderer（ES module）
-     electron/channel-layout.js  flattenSourceChannels()  → 主程序（CommonJS）
+   ⚠ v6.1.2 起兩側不再各有一份實作。規則收進 `shared/channel-layout.cjs`，
+     renderer 與主程序都從那裡取用：
+
+     src/channel-layout.js       → 轉出 shared 的 flattenSourceChannels()
+     electron/channel-layout.js  → require 同一份
+
+     因此本檔的比對「兩邊輸出相同」現在是恆真的——它守的東西變了：
+     從「兩份手抄副本有沒有漂掉」變成「兩側的取用路徑有沒有接對」
+     （例如某一側改回自己寫一份、或 re-export 漏掉名稱）。
+     真正的規則正確性由下方對 flattenSourceChannels 本身的斷言負責。
 
    主程序 ingest 時依這個順序把每條聲道抽成 ch_01.m4a、ch_02.m4a…，
    renderer 再依位置把檔案對回 (sourceStream, sourceChannel)。

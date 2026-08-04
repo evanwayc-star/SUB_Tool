@@ -1,36 +1,16 @@
 /* ==============================================================================
-   SUB Tool — 來源聲道的展開順序（主程序側）
+   SUB Tool — 單次 ffmpeg ingest 的音訊規劃（主程序側）
    ==============================================================================
 
    ingest 時把 ffprobe 的 `audio[]` 攤平成一維聲道清單，並依這個順序把每條聲道
-   抽成 `ch_01.m4a`、`ch_02.m4a`…。renderer（`src/channel-layout.js`）依同一個順序
-   把檔案對回 (sourceStream, sourceChannel)。
+   抽成 `ch_01.m4a`、`ch_02.m4a`…。renderer 依同一個順序把檔案對回
+   (sourceStream, sourceChannel)。
 
-   **順序是跨行程約定。** 任一邊改了，聲道就會整組對錯位——畫面完全正常、
-   波形也畫得出來，只有把成品放進播放器才聽得出來是別條聲道。
-   由 `tests/channelLayoutContract.test.js` 矩陣窮舉比對兩邊。
+   **展開順序是跨行程約定**，規則住在 `shared/channel-layout.cjs`——
+   v6.1.2 之前這裡有一份與 renderer 逐行相同的手抄副本，現在只有那一份。
+   本檔只留主程序專用的部分：filtergraph 規劃。
 ============================================================================== */
-
-/** ffprobe audio[] → 一維來源聲道清單（與 renderer 端同序）。 */
-function sourceChannelCount(stream) {
-  return Math.max(1, (stream && stream.channels) || 1);
-}
-
-function flattenSourceChannels(audio) {
-  const out = [];
-  (audio || []).forEach((a, streamIndex) => {
-    const ch = sourceChannelCount(a);
-    for (let k = 0; k < ch; k++) {
-      out.push({ sourceStream: streamIndex, sourceChannel: k, index: out.length });
-    }
-  });
-  return out;
-}
-
-/** 扁平序號 → ingest 抽出的單聲道檔名（1-based，補零兩位）。 */
-function channelFileName(index) {
-  return `ch_${String(index + 1).padStart(2, '0')}.m4a`;
-}
+const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
 
 /**
  * ffprobe audio[] → 單次 ffmpeg ingest 的跨平台音訊規劃。

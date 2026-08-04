@@ -1,16 +1,17 @@
 /* 圖片幾何的【跨行程契約】。
 
-   同一條公式必須存在於兩個地方，因為它們跑在不同的行程與模組系統：
-     src/imagegeom.js       imageBox()          → renderer（ES module，Vite 打包）
-     electron/export-plan.js imageBoxForExport() → 主程序（CommonJS）
+   ⚠ v6.1.2 起【公式本身】只有一份：`shared/image-geometry.cjs`。
+     以前這裡說「同一條公式必須存在於兩個地方，因為它們跑在不同的行程與模組系統」
+     ——那個前提是錯的。跨模組系統的障礙用一支 CommonJS 純模組就解決了
+     （renderer 由 Vite bundle、主程序 require，見 shared/README.md），
+     `electron/export-plan.js imageBoxForExport()` 現在只是換參數名的轉呼叫。
 
-   為什麼不合併成一份：圖片是先疊進【軌影格】、軌影格再帶著自己的透明度與疊層
-   順序疊到畫布。renderer 直接送畫布座標會繞過那一層，PiP 圖片軌就會壞掉。
-   所以正確的接縫是「共用公式、各自套用在自己的那一層」。
+   真正無法合併的是【套用的層次】：圖片先疊進「軌影格」，軌影格再帶著自己的
+   透明度與疊層順序疊到畫布。renderer 直接送畫布座標會繞過那一層，PiP 圖片軌
+   就會壞掉。所以接縫是「共用公式、各自套用在自己的那一層」——
+   共用的部分現在真的共用了，各自套用的部分仍由本檔的矩陣窮舉守著。
 
-   既然無法合併，就必須有機制阻止它們漂掉——就是這支測試。
-   它以矩陣窮舉比對兩份實作，任何一邊被改動而另一邊沒跟上就會紅。
-   對應 docs/技術架構說明.md §0.1（三路一致）。 */
+   對應 docs/技術架構說明.md §0.1（三路一致）與 §0.9。 */
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';

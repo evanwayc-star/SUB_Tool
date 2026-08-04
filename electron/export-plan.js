@@ -8,8 +8,12 @@
    的地方（見 docs/技術架構說明.md §0.6）。它原本整段長在 ipcMain.handle 裡，
    與 dialog、ffprobe spawn 糾纏，vitest 起不了 Electron，於是一行測試都沒有。
 
-   本檔【不可】require 任何東西——保持零依賴就是它可測的保證。
+   本檔【只可】require `shared/` 底下的零相依純模組（那些是與 renderer 共用的
+   領域規則，見 shared/README.md）。**不可** require electron／fs／child_process
+   ——一旦碰了，vitest 就再也起不動它，測試會整批消失而沒有人發現。
    需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由呼叫端傳入。
+   這條由 tests/exportPlan.test.js 守著，而且純淨是【遞移】的：被 require 的
+   shared/ 模組自己也不可以 require 任何東西。
 ============================================================================== */
 /* ===== 專案音訊輸出（v4.36） =====
    audioPlan 將「來源檔案」與「專案匯流排」分開：
@@ -17,6 +21,12 @@
    - streams：影片容器內的音訊 stream，將 bus 依 Mono / Stereo / LtRt / 5.1 編組。
    不把使用者提供的 id / 路徑塞進 filtergraph：id 只用於 Map 查找，filter label 一律由索引產生；
    路徑則是獨立的 spawn argv。這同時避免 Windows 路徑跳脫問題與 filter injection。 */
+/* 與 renderer 共用的領域規則（零相依純模組，見 shared/README.md）。
+   片段幾何是鐵律 §0.9、淡入淡出視窗是 clipFadeContract 守的那條——
+   兩者以前在這裡各有一份手抄副本。 */
+const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
+const { clipLength } = require('../shared/clip-fade.cjs');
+
 const _EXPORT_LAYOUTS = Object.freeze({
   mono:       { channels: 1, channelLayout: 'mono',       channelNames: ['FC'],                             title: 'Mono' },
   stereo:     { channels: 2, channelLayout: 'stereo',     channelNames: ['FL', 'FR'],                       title: 'Stereo' },
@@ -280,22 +290,14 @@ function _buildExportTimecodeFilter(inputLabel, timecode, width, height, outputL
    為什麼不讓 ffmpeg 用 force_original_aspect_ratio=decrease 自己算：
    那樣兩邊就是兩套實作，沒有任何機制保證它們一致。JS 算完給精確的 scale=w:h，
    contain 的邏輯就只剩一份。 */
+/* 片段疊層幾何與預覽共用同一份實作（`shared/image-geometry.cjs`，見鐵律 §0.9）。
+   v6.1.2 之前這裡是 `imageBoxForExport()`——與 src/imagegeom.js 的 imageBox()
+   逐行相同的手抄副本，靠 imageGeomContract.test.js 比對兩份輸出。
+   壞掉的樣子：預覽與匯出差幾十到上百 px，兩邊各自看起來都正常。
+
+   參數名保留 frameW/frameH 的語意（匯出端傳的是【軌影格】尺寸，不是專案畫布）。 */
 function imageBoxForExport({ frameW, frameH, natW, natH, scale = 1, posX = 0.5, posY = 0.5 } = {}) {
-  const clamp01 = (v, d) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : d;
-  };
-  const SW = Math.max(0, _finiteNumber(frameW, 0)), SH = Math.max(0, _finiteNumber(frameH, 0));
-  const s = Math.max(0.01, _finiteNumber(scale, 1));
-  const boxW = SW * s, boxH = SH * s;
-  const nw = Math.max(0, _finiteNumber(natW, 0)), nh = Math.max(0, _finiteNumber(natH, 0));
-  let w = boxW, h = boxH;
-  if (nw > 0 && nh > 0 && boxW > 0 && boxH > 0) {
-    const k = Math.min(boxW / nw, boxH / nh); // contain
-    w = nw * k; h = nh * k;
-  }
-  const cx = SW * clamp01(posX, 0.5), cy = SH * clamp01(posY, 0.5);
-  return { x: cx - w / 2, y: cy - h / 2, w, h };
+  return sharedImageBox({ stageW: frameW, stageH: frameH, natW, natH, scale, posX, posY });
 }
 
 /* ==============================================================================
@@ -433,7 +435,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     for (const { c, vIdx } of trk) {
       if (c.offset > cursor + EPS) gap(c.offset - cursor);
       const L = `t${ti}s${si++}`;
-      const fi = Math.max(0, +c.fadeIn || 0), fo = Math.max(0, +c.fadeOut || 0), clen = Math.max(0.001, c.out - c.in);
+      const fi = Math.max(0, +c.fadeIn || 0), fo = Math.max(0, +c.fadeOut || 0), clen = clipLength(c);
       const minIn = pathMinIn.get(c.path);
       const adjIn = c.in - minIn;
       const adjOut = c.out - minIn;
@@ -486,7 +488,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       if (fo > 0) vchain += `,fade=t=out:st=${Math.max(0, clen - Math.min(fo, clen)).toFixed(3)}:d=${Math.min(fo, clen).toFixed(3)}:alpha=1`;
       fc.push(`${vchain}[${L}]`);
       segs.push(`[${L}]`);
-      cursor = c.offset + Math.max(0.001, c.out - c.in);
+      cursor = c.offset + clipLength(c);
     }
     if (cursor < D - EPS) gap(D - cursor);
     let trkLabel;
@@ -545,7 +547,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       } else return;
       const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
       // 轉場：音訊淡入/淡出（與影像同步）
-      const afi = Math.max(0, +c.fadeIn || 0), afo = Math.max(0, +c.fadeOut || 0), aclen = Math.max(0.001, c.out - c.in);
+      const afi = Math.max(0, +c.fadeIn || 0), afo = Math.max(0, +c.fadeOut || 0), aclen = clipLength(c);
       const afParts = [];
       if (afi > 0) afParts.push(`afade=t=in:st=0:d=${Math.min(afi, aclen).toFixed(3)}`);
       if (afo > 0) afParts.push(`afade=t=out:st=${Math.max(0, aclen - Math.min(afo, aclen)).toFixed(3)}:d=${Math.min(afo, aclen).toFixed(3)}`);

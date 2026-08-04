@@ -86,6 +86,23 @@ export default [
     },
     rules: silentBugRules,
   },
+  /* shared/：兩個行程共用的零相依純模組（見 shared/README.md）。
+     CommonJS，但【不可】用 node globals——它會被 Vite 打包進 renderer，
+     碰到 require/process/Buffer 會在瀏覽器端爆掉。這裡刻意不給 node globals，
+     no-undef 就會擋下來。
+
+     為什麼要特別列一個 block：舊設定的 `eslint src electron` 少寫了 shared，
+     於是這個資料夾會【完全不被檢查】——與 electron/ 曾經 2,268 行零規則
+     是同一個錯（見上一個 block 的註解）。npm run lint 也已補上 shared。 */
+  {
+    files: ['shared/**/*.cjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'commonjs',
+      globals: { module: 'writable', exports: 'writable' },
+    },
+    rules: silentBugRules,
+  },
   /* 選取狀態的唯一入口。三種選取（字幕／視訊片段／音訊片段）互斥、
      activeTrackKind 必須與被選中的 id 同類——這兩條不變量寫在 state.js 的
      setSelection() 裡，違反時【不會報錯】，只會讓 Delete／Ctrl+K／↑↓

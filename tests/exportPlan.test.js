@@ -15,13 +15,37 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const P = require(path.join(ROOT, 'electron/export-plan.js'));
 
 describe('模組本身保持純淨', () => {
+  const fs = require('node:fs');
+  const stripComments = src =>
+    src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const requiresIn = src =>
+    [...stripComments(src).matchAll(/\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g)].map(m => m[1]);
+
   /* 這條是這個接縫的立身之本：一旦有人在裡面 require('electron') 或 require('fs')，
-     它就再也不能在 vitest 裡跑，測試會整批消失而沒有人發現。 */
-  it('原始碼裡沒有任何 require（副作用一律由呼叫端傳入）', () => {
-    const fs = require('node:fs');
+     它就再也不能在 vitest 裡跑，測試會整批消失而沒有人發現。
+
+     v6.1.2 之前這裡斷言的是「一個 require 都不可以有」。那是用來代替真正想守的
+     東西——【沒有副作用、起得了 vitest】——的一個近似。為了讓片段幾何與淡入淡出
+     的規則能與 renderer 共用同一份實作（shared/*.cjs），這裡改成守真正的那件事：
+     只准 require `shared/` 底下的零相依純模組，而且那些模組自己也不可以 require
+     任何東西（純淨必須是遞移的，否則 shared/ 會變成偷渡 fs 的後門）。 */
+  it('只 require shared/ 底下的純模組，不碰 electron/fs/spawn', () => {
     const src = fs.readFileSync(path.join(ROOT, 'electron/export-plan.js'), 'utf8');
-    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-    expect(code).not.toMatch(/\brequire\s*\(/);
+    for (const spec of requiresIn(src)) {
+      expect(spec, `export-plan.js 不可 require「${spec}」`).toMatch(/^\.\.\/shared\/[\w-]+\.cjs$/);
+    }
+  });
+
+  it('被 require 的 shared/ 模組自己也零相依（純淨是遞移的）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'electron/export-plan.js'), 'utf8');
+    const specs = requiresIn(src);
+    expect(specs.length, 'shared/ 模組沒被 require＝這條測試變成空轉').toBeGreaterThan(0);
+    for (const spec of specs) {
+      const full = path.join(ROOT, 'electron', spec);
+      expect(fs.existsSync(full), `${spec} 不存在——打包時 require 會在啟動就失敗`).toBe(true);
+      expect(requiresIn(fs.readFileSync(full, 'utf8')),
+        `${spec} 自己 require 了東西，純淨不再遞移`).toEqual([]);
+    }
   });
 });
 

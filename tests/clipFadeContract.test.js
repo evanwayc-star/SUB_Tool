@@ -1,14 +1,14 @@
 /* 片段淡入淡出的【跨行程契約】。
 
-   同一組數字必須存在於兩個地方，因為它們跑在不同的行程與模組系統：
-     src/clip-fade.js         fadeWindow()  → renderer（ES module，Vite 打包）
-     electron/export-plan.js  fade/afade    → 主程序（CommonJS）
+   ⚠ v6.1.2 起【視窗規則】只有一份：`shared/clip-fade.cjs`（clipLength／fadeWindow）。
+     以前這裡說「主程序不能 import renderer 的 ES module」——那個障礙用一支
+     CommonJS 純模組就解決了（見 shared/README.md）。`electron/export-plan.js`
+     原本把長度下限 `Math.max(0.001, out-in)` 內聯了三處，現在都改吃 clipLength()。
 
-   為什麼不合併成一份：主程序不能 import renderer 的 ES module，而且匯出側
-   要的不是「某一刻的 alpha」，是要餵給 ffmpeg 的 `st=` 與 `d=` 參數。
-   正確的接縫是「共用同一份規格、各自表達成自己那一路的東西」。
-
-   既然無法合併，就必須有機制阻止它們漂掉——就是這支測試。
+   真正無法合併的是【表達】：匯出側要的不是「某一刻的 alpha」，
+   而是要餵給 ffmpeg 的 `st=` 與 `d=` 參數。
+   接縫是「共用同一份規格、各自表達成自己那一路的東西」——
+   共用的部分現在真的共用了，各自表達的部分仍由本檔守著。
    對照 tests/imageGeomContract.test.js（幾何側）與
    tests/subtitleStyleContract.test.js（樣式側），這是第三道同型的守衛。
 

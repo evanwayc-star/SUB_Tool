@@ -20,32 +20,15 @@
 
    natW/natH 取不到時（舊專案、圖檔還沒載入）退回方框尺寸＝舊行為，不會破圖。 */
 
+/* imageBox 與 trackFrame 的規則住在 `shared/image-geometry.cjs`——匯出端（主程序、
+   CommonJS）吃的是同一份。v6.1.2 之前 electron/export-plan.js 有一份逐行相同的
+   `imageBoxForExport()`，靠 imageGeomContract.test.js 比對兩份輸出。 */
+import { imageBox, trackFrame } from '../shared/image-geometry.cjs';
+
+export { imageBox, trackFrame };
+
 const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const clamp01 = (v, d) => Math.max(0, Math.min(1, num(v, d)));
-
-/* 回傳 { x, y, w, h }：相對「畫框左上角」的像素矩形（畫框＝stageW×stageH）。 */
-export function imageBox({ stageW, stageH, natW, natH, scale = 1, posX = 0.5, posY = 0.5 } = {}) {
-  const SW = Math.max(0, num(stageW, 0)), SH = Math.max(0, num(stageH, 0));
-  const s = Math.max(0.01, num(scale, 1));
-  const boxW = SW * s, boxH = SH * s;
-  const nw = Math.max(0, num(natW, 0)), nh = Math.max(0, num(natH, 0));
-  let w = boxW, h = boxH;
-  if (nw > 0 && nh > 0 && boxW > 0 && boxH > 0) {
-    const k = Math.min(boxW / nw, boxH / nh); // contain
-    w = nw * k; h = nh * k;
-  }
-  const cx = SW * clamp01(posX, 0.5), cy = SH * clamp01(posY, 0.5);
-  return { x: cx - w / 2, y: cy - h / 2, w, h };
-}
-
-/* 視訊軌本身的 PiP 影格（軌 scale/posX/posY）。匯出是「圖片放進軌影格 → 軌影格再疊到畫布」，
-   預覽必須套同一層，否則對圖片軌做子母畫面時預覽與匯出會對不上。 */
-export function trackFrame({ stageW, stageH, scale = 1, posX = 0.5, posY = 0.5 } = {}) {
-  const SW = Math.max(0, num(stageW, 0)), SH = Math.max(0, num(stageH, 0));
-  const s = Math.max(0.02, Math.min(1, num(scale, 1)));
-  const w = SW * s, h = SH * s;
-  return { x: (SW - w) * clamp01(posX, 0.5), y: (SH - h) * clamp01(posY, 0.5), w, h };
-}
 
 /* 「符合視窗」要用的倍率：維持目前中心位置，等比例放大／縮小到上下左右
    【最先碰到】的那個邊界為止。

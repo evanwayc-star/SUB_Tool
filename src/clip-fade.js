@@ -19,21 +19,12 @@
    這與 imagegeom.js ↔ export-plan.js 的作法相同（見 imageGeomContract）。
 ============================================================================== */
 
-/* 片段在時間軸上的長度。下限 0.001 是刻意的：長度為 0 的片段會讓
-   淡入比例變成除以零，ffmpeg 那邊則會產生 d=0 的 fade（等同沒有淡入，
-   但不會報錯）。兩邊都夾同一個下限才不會一邊有淡、一邊沒有。 */
-export function clipLength(clip) {
-  return Math.max(0.001, (+clip.out || 0) - (+clip.in || 0));
-}
+/* clipLength 與 fadeWindow 的規則住在 `shared/clip-fade.cjs`——匯出端（主程序、
+   CommonJS）吃的是同一份。v6.1.2 之前 electron/export-plan.js 把長度下限內聯了
+   三處、淡入淡出的夾擠又各寫一次。 */
+import { clipLength, fadeWindow } from '../shared/clip-fade.cjs';
 
-/* 生效的淡入／淡出秒數：負數視為 0，且不得超過片段長度
-   （淡入 3 秒放在 1 秒長的片段上，實際只能淡 1 秒）。 */
-export function fadeWindow(clip) {
-  const length = clipLength(clip);
-  const fadeIn = Math.min(Math.max(0, +clip.fadeIn || 0), length);
-  const fadeOut = Math.min(Math.max(0, +clip.fadeOut || 0), length);
-  return { length, fadeIn, fadeOut, fadeOutStart: Math.max(0, length - fadeOut) };
-}
+export { clipLength, fadeWindow };
 
 /**
  * 片段在「片段內本地時間」的不透明度倍率（0–1）。

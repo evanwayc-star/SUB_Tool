@@ -50,10 +50,18 @@ Arctime 風格的多軌時間軸上字幕工具。**Vite + 原生 ES 模組（�
 ```
 src/            前端 ES 模組（51 支）＋ decode/ 底下 5 支 WebCodecs 相關
 electron/       主行程：ffmpeg / ffprobe / mpv / 檔案 I/O / 路徑白名單
+shared/         【兩個行程共用的領域規則】零相依純 CommonJS（見 shared/README.md）
 docs/           說明文件（見下方「文件職責」）
 tests/          vitest 單元測試（純函式與資料完整性）
 font/<資料夾名>/ 自備字型，資料夾名＝UI 顯示名
 ```
+
+> `shared/` 存在的理由：renderer 是 ESM、主程序是 CJS，兩邊無法互相 import，
+> 於是「來源聲道展開順序」「片段疊層幾何」「淡入淡出視窗」長期各自維護一份手抄實作，
+> 靠契約測試比對兩份輸出是否相同。那些測試證明的是「兩份副本目前一致」，不是規則正確。
+> 一支零相依的 `.cjs` 兩邊都吃得下（Vite 會 bundle、主程序 require），規則因此只需要一份。
+> **加東西進去前先讀 `shared/README.md`**——那裡列了哪些看起來像一組、實際上
+> 【不可以】合併的東西（例如檔名淨化 vs 路徑圍堵是兩層防線，不是兩份副本）。
 
 ---
 
@@ -189,11 +197,16 @@ Antigravity 那條是實測的：開啟設定後，它的 **Customizations → R
 ## 7. 靜態安全網
 
 ```bash
-npm run lint    # eslint（src 與 electron 兩邊）：抓「用了沒 import 的名稱」＋兩道封裝圍籬
+npm run lint    # eslint（src / electron / shared 三邊）：抓「用了沒 import 的名稱」＋兩道封裝圍籬
 npm run build   # rollup：抓「import 了某模組未 export 的名稱」（eslint 抓不到）
 npm test        # vitest：純函式與資料完整性
 grep -rn "from './app.js'" src   # 應為空——不可再引入對 app.js 的相依
 ```
+
+> **新增頂層資料夾時，記得同時加進 `npm run lint` 的參數。**
+> `electron/` 曾經因為 eslint 設定的 `files` 只寫了 `src/**`，
+> 導致 2,268 行**完全沒有被檢查**；`shared/` 建立時差點重演同一件事
+> （設定裡的 block 有寫，但 `npm run lint` 的參數漏了就等於沒開）。
 
 架構規則：**沒有任何模組可以 `import … from './app.js'`。**
 低階模組要觸發重繪／指令時用 `emit('事件名', …)`（`events.js`），
