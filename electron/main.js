@@ -748,8 +748,25 @@ ipcMain.handle('fs:reserveScreenshotPath', (e, { directory, suffix } = {}) => {
   return fileAuthority.canWriteScreenshot(target) ? { path: target, name } : null;
 });
 
+
+// Windows COM threading + mpv wid freezing workaround
+async function safeShowOpenDialog(options) {
+  const mpvWasVisible = typeof _mpvWin !== 'undefined' && _mpvWin && !_mpvWin.isDestroyed() && _mpvVisible;
+  if (mpvWasVisible) { try { _mpvWin.hide(); } catch(e){} }
+  const r = await dialog.showOpenDialog(options);
+  if (mpvWasVisible) { try { _mpvWin.show(); } catch(e){} }
+  return r;
+}
+async function safeShowSaveDialog(options) {
+  const mpvWasVisible = typeof _mpvWin !== 'undefined' && _mpvWin && !_mpvWin.isDestroyed() && _mpvVisible;
+  if (mpvWasVisible) { try { _mpvWin.hide(); } catch(e){} }
+  const r = await dialog.showSaveDialog(options);
+  if (mpvWasVisible) { try { _mpvWin.show(); } catch(e){} }
+  return r;
+}
+
 ipcMain.handle('dialog:openMedia', async () => {
-  const r = await dialog.showOpenDialog({
+  const r = await safeShowOpenDialog({
     title: '匯入影片或音訊檔', properties: ['openFile', 'multiSelections'],
     filters: [
       { name: '影音或圖片', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'mxf', 'avi', 'm2ts', 'mts', 'ts', 'wmv', 'webm', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'aif', 'aiff', 'jpg', 'jpeg', 'png'] },
@@ -765,7 +782,7 @@ ipcMain.handle('dialog:openMedia', async () => {
   return r.filePaths.length===1 ? r.filePaths[0] : r.filePaths;
 });
 ipcMain.handle('dialog:openAudio', async () => {
-  const r = await dialog.showOpenDialog({
+  const r = await safeShowOpenDialog({
     title: '加入音軌檔', properties: ['openFile', 'multiSelections'],
     filters: [{ name: '音訊', extensions: ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg'] }]
   });
@@ -778,7 +795,7 @@ ipcMain.handle('dialog:openAudio', async () => {
 });
 
 ipcMain.handle('dialog:openProject', async () => {
-  const r = await dialog.showOpenDialog({
+  const r = await safeShowOpenDialog({
     title: '開啟專案', properties: ['openFile'],
     filters: [{ name: 'SUB Tool 專案', extensions: ['subtool', 'json'] }]
   });
@@ -788,7 +805,7 @@ ipcMain.handle('dialog:openProject', async () => {
   return { path: r.filePaths[0], b64: buf.toString('base64') };
 });
 ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
-  const r = await dialog.showSaveDialog({ title: '儲存專案', defaultPath: name, filters: [{ name: 'SUB Tool 專案', extensions: ['subtool'] }] });
+  const r = await safeShowSaveDialog({ title: '儲存專案', defaultPath: name, filters: [{ name: 'SUB Tool 專案', extensions: ['subtool'] }] });
   if (r.canceled) return null;
   fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
   grantTrustedProjectFile(r.filePath, Buffer.from(b64, 'base64'));
@@ -797,19 +814,19 @@ ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
 
 ipcMain.handle('dialog:importSub', async (e, kind) => {
   const filt = { srt: ['srt'], ass: ['ass', 'ssa'], encore: ['txt'], txt: ['txt'] }[kind] || ['*'];
-  const r = await dialog.showOpenDialog({ title: '匯入字幕', properties: ['openFile'], filters: [{ name: kind.toUpperCase(), extensions: filt }, { name: '全部', extensions: ['*'] }] });
+  const r = await safeShowOpenDialog({ title: '匯入字幕', properties: ['openFile'], filters: [{ name: kind.toUpperCase(), extensions: filt }, { name: '全部', extensions: ['*'] }] });
   if (r.canceled) return null;
   const buf = fs.readFileSync(r.filePaths[0]);
   return { path: r.filePaths[0], b64: buf.toString('base64') };
 });
 ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
-  const r = await dialog.showSaveDialog({ title: '匯出字幕', defaultPath: name, filters: [{ name: (ext || 'txt').toUpperCase(), extensions: [ext || 'txt'] }] });
+  const r = await safeShowSaveDialog({ title: '匯出字幕', defaultPath: name, filters: [{ name: (ext || 'txt').toUpperCase(), extensions: [ext || 'txt'] }] });
   if (r.canceled) return null;
   fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
   return r.filePath;
 });
 ipcMain.handle('dialog:importFont', async () => {
-  const r = await dialog.showOpenDialog({ title: '匯入字型', properties: ['openFile'], filters: [{ name: '字型檔', extensions: ['ttf', 'otf', 'woff', 'woff2', 'ttc'] }, { name: '全部', extensions: ['*'] }] });
+  const r = await safeShowOpenDialog({ title: '匯入字型', properties: ['openFile'], filters: [{ name: '字型檔', extensions: ['ttf', 'otf', 'woff', 'woff2', 'ttc'] }, { name: '全部', extensions: ['*'] }] });
   if (r.canceled || !r.filePaths[0]) return null;
   const src = r.filePaths[0];
   const root = userFontsDir();
@@ -1438,7 +1455,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   
   let outPath = presetOut || null;
   if (!outPath) {
-    const r = await dialog.showSaveDialog({
+    const r = await safeShowSaveDialog({
       title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
       filters: [{ name: isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)'), extensions: [ext] }],
     });
@@ -1646,7 +1663,7 @@ async function _runJobLogic(job) {
 
 
 ipcMain.handle('dialog:importDirectory', async () => {
-  const r = await dialog.showOpenDialog({
+  const r = await safeShowOpenDialog({
     title: '選擇匯入資料夾',
     properties: ['openDirectory']
   });
@@ -1671,7 +1688,7 @@ ipcMain.handle('dialog:importDirectory', async () => {
 });
 
 ipcMain.handle('dialog:exportDirectory', async (e, files) => {
-  const r = await dialog.showOpenDialog({
+  const r = await safeShowOpenDialog({
     title: '選擇匯出資料夾',
     properties: ['openDirectory', 'createDirectory']
   });
