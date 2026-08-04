@@ -34,6 +34,7 @@ const {
   videoEncoderCandidates,
 } = require('./native-tooling');
 const { FFmpegOutputParser, FFmpegErrorAnalyzer } = require('./ffmpeg-parser');
+const { buildIngestArgs } = require('./ffmpeg-pipeline-builder');
 
 let mainWin = null;
 let _allowMainWindowClose = false;
@@ -96,13 +97,7 @@ function detectVideoEncoder() {
   return 'libx264';
 }
 /* 依選定編碼器回傳「轉檔預覽影片」用的視訊參數（品質導向、yuv420p 由呼叫端的 -vf 負責） */
-function vencArgs() {
-  return previewVideoEncoderArgs(VENC);
-}
 
-/* proxy 專用短 GOP（每 0.5s 一個 keyframe）：WebCodecs 預覽 seek 需從最近 keyframe 重解，
-   短 GOP 讓任意 seek 幾乎即時；檔案略大可接受（僅 720p proxy，不影響匯出）。 */
-function proxyGopArgs() { return ['-force_key_frames', 'expr:gte(t,n_forced*0.5)']; }
 
 /* ---- 媒體快取鍵：檔名 + 大小 + 前 1MB 內容雜湊（不含修改時間，跨電腦可共用快取） ---- */
 function cacheKeyFor(src) {
@@ -1735,9 +1730,8 @@ ipcMain.handle('ffprobe', (e, p) => {
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {
   requireReadablePath('ffmpeg:proxy', src);
   const out = tmpPath('mp4');
-  // 關鍵：必須 format=yuv420p，否則 4:2:2 / 10-bit 來源轉出的 proxy 仍是 Chromium 無法解碼的格式
-  await runFF(['-y', '-i', src, '-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), ...proxyGopArgs(), '-movflags', '+faststart', out],
-    { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片' });
+  const args = buildIngestArgs({ src, needsProxy: true, proxyPath: out, encoder: VENC, isStream: false });
+  await runFF(args, { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片' });
   return out;
 });
 
@@ -2020,13 +2014,20 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
   const chMaps = audioPlan.channelMaps;
   const waveLabel = audioPlan.waveLabel;
 
-  const args = ['-y', ...hwdecArgs(), '-i', src]; // S2: hwaccel 加速來源解碼
-  if (fc.length) args.push('-filter_complex', fc.join(';'));
-  let proxy = null;
-  if (needsProxy) { proxy = path.join(dir, 'proxy.mp4'); args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p', ...vencArgs(), ...proxyGopArgs(), '-movflags', '+faststart', proxy); }
-  channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '128k', c.file); });
-  let wave = null;
-  if (waveLabel) { wave = path.join(dir, 'wave.wav'); args.push('-map', waveLabel, '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', wave); }
+  let proxy = needsProxy ? path.join(dir, 'proxy.mp4') : null;
+  let wave = waveLabel ? path.join(dir, 'wave.wav') : null;
+  const args = buildIngestArgs({
+    src,
+    needsProxy,
+    proxyPath: proxy,
+    fc,
+    channels,
+    chMaps,
+    waveLabel,
+    wavePath: wave,
+    encoder: VENC,
+    isStream: false
+  });
 
   // 稍微延遲讓 mpv 優先取得檔案讀取權，避免 ffmpeg 瞬間佔滿磁碟 I/O 導致 mpv 播放無聲
   await new Promise(r => setTimeout(r, 1000));
@@ -2087,13 +2088,18 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   const proxy = path.join(dir, 'proxy.mp4');
   const wave = waveLabel ? path.join(dir, 'wave.wav') : null;
 
-  const args = ['-y', ...hwdecArgs(), '-i', src]; // S2: hwaccel 加速來源解碼
-  if (fc.length) args.push('-filter_complex', fc.join(';'));
-  // 關鍵：fragmented MP4 讓 browser 在 ffmpeg 還未結束時就能開始播放
-  args.push('-map', '0:v:0', '-an', '-vf', 'scale=-2:720,format=yuv420p',
-    ...vencArgs(), '-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxy);
-  channels.forEach((c, k) => { args.push('-map', chMaps[k], '-c:a', 'aac', '-b:a', '128k', c.file); });
-  if (waveLabel) args.push('-map', waveLabel, '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', wave);
+  const args = buildIngestArgs({
+    src,
+    needsProxy: true,
+    proxyPath: proxy,
+    fc,
+    channels,
+    chMaps,
+    waveLabel,
+    wavePath: wave,
+    encoder: VENC,
+    isStream: true
+  });
 
   const jid = newJobId('l-'); // S5: 不可猜測
   const job = { filePath: proxy, done: false, error: null };

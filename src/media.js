@@ -1447,7 +1447,6 @@ const Media = {
   async loadDesktopMedia(p, projectRestore=null) { return loadDesktopMedia(this, p, projectRestore); },
   async loadVideoFile(file, projectRestore=null) { return loadVideoFile(this, file, projectRestore); },
   async _loadViaMpv(p, info, projectRestore=null, intakeToken=null) { return _loadViaMpv(this, p, info, projectRestore, intakeToken); },
-  async _loadAudioOnly(p, info, projectRestore=null, intakeToken=null) { return _loadAudioOnly(this, p, info, projectRestore, intakeToken); },
   _expandChannels(audio) { return _expandChannels(this, audio); },
 
   /* 加入影片到序列（桌面）：probe 取長度/FPS → 建 clip → 背景 ingest 音軌+波形（沿用每檔快取） */

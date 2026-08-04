@@ -369,6 +369,21 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   if (!list.length) throw new Error('沒有可匯出的影片段');
   const inputs = [], fc = [];
   const EPS = 0.01;
+  const isPassthrough = !isWav && !isPro && !assFileName && !timecodeWatermark &&
+    list.length === 1 && list[0].type === 'video' &&
+    !list[0].crop && !list[0].transform &&
+    !list[0].fadeIn && !list[0].fadeOut &&
+    (list[0].opacity == null || list[0].opacity === 1) &&
+    (list[0].scale == null || list[0].scale === 1) &&
+    (list[0].posX == null || list[0].posX === 0.5) &&
+    (list[0].posY == null || list[0].posY === 0.5) &&
+    list[0].natW === W && list[0].natH === H &&
+    (list[0].offset || 0) <= EPS &&
+    (list[0].speed == null || list[0].speed === 1) &&
+    (list[0].out - list[0].in) >= D - EPS &&
+    (list[0].in || 0) <= EPS &&
+    (!videoTracks || videoTracks.every(t => (t.scale == null || t.scale === 1) && (t.opacity == null || t.opacity === 1) && (t.posX == null || t.posX === 0.5) && (t.posY == null || t.posY === 0.5)));
+
   // 1) 去重複輸入：同一個實體檔案只開啟一次，避免建立過多 hwaccel 實例耗盡 VRAM
   // 並且計算每個實體檔案最早被用到的時間（minIn），用 -ss 加在 -i 前，避免 ffmpeg 從 0 開始慢速解碼 44GB 大檔！
   const uniqueVideoPaths = [...new Set(list.map(c => c.path))];
@@ -389,15 +404,21 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       pathMinIn.set(p, minIn);
       // 這個 input 本身就是母素材；音訊 routing 可重用它，不必再多開一次同一個 MXF/MOV。
       reusableMasterInputs.set(p, { index: inputIndex, seekStart: minIn });
-      inputs.push(...hwdecArgs(), '-ss', minIn.toFixed(3), '-i', p);
+      const hw = isPassthrough ? [] : hwdecArgs(); // passthrough 不需硬解
+      inputs.push(...hw, '-ss', minIn.toFixed(3), '-i', p);
     }
   });
   const videoInputIndices = list.map(c => uniqueVideoPaths.indexOf(c.path));
   let ii = uniqueVideoPaths.length; // 之後的逐聲道音訊檔輸入從此接續編號
-  // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
-  fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${D.toFixed(3)},format=yuv420p,setsar=1[base]`);
-  const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
-  let baseLabel = '[base]';
+
+  let vc = null; // 疊層後的最終影像標籤
+  if (isPassthrough) {
+    vc = '0:v:0';
+  } else {
+    // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
+    fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${D.toFixed(3)},format=yuv420p,setsar=1[base]`);
+    const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
+    let baseLabel = '[base]';
   vtracks.forEach((T, ti) => {
     const vt = T.vt || 0;
     const scale = Math.max(0.02, Math.min(1, +T.scale || 1));
@@ -477,7 +498,8 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     fc.push(`${baseLabel}${trkLabel}overlay=x=(W-w)*${px.toFixed(4)}:y=(H-h)*${py.toFixed(4)}:eof_action=pass:format=auto${out}`);
     baseLabel = out;
   });
-  const vc = baseLabel; // 疊層後的最終影像標籤
+  vc = baseLabel;
+  }
   // 3) 音訊：有 project audioPlan 時，依 bus / stream 路由輸出；沒有時完整保留舊版
   // 「所有來源混成一條 stereo」的行為，讓既有專案與自動化呼叫不受影響。
   let plannedAudio = null;
@@ -568,19 +590,26 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       : [aacBitrateForChannels(2)]);
   const encode = isPro
     ? proresArgs()
-    : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac',
-      ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart'];
+    : isPassthrough
+      ? ['-c:v', 'copy', '-c:a', 'aac', ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart']
+      : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+        ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart'];
   /* Lt/Rt 與普通 stereo 的 codec channel layout 都是 FL/FR；以 stream metadata 明確標示，
      方便剪輯軟體／檢視工具辨識交付意圖，不會把 Lt/Rt 誤標為離散 L/R。 */
   const audioMetadata = plannedAudio
     ? plannedAudio.streamLabels.flatMap(({ stream }, i) => ['-metadata:s:a:' + i, 'title=' + (stream.name || stream.spec.title)])
     : [];
-  const args = ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', vfinal, ...audioMaps, '-r', String(R), ...encode, ...audioMetadata, outPath];
+  
+  const args = ['-y', ...inputs];
+  if (fc.length > 0) args.push('-filter_complex', fc.join(';'));
+  args.push('-map', vfinal, ...audioMaps);
+  if (!isPassthrough) args.push('-r', String(R));
+  args.push(...encode, ...audioMetadata, outPath);
 
   // 進度標籤即顯示本次實際送出的編碼器（GPU 或 CPU）與位元率，使用者在狀態列就看得到
-  const plannedEncoder = isPro ? 'prores_ks' : (encoderName || 'libx264');
-  const isGpu = !isPro && plannedEncoder !== 'libx264';
-  const accel = isGpu ? 'GPU ' + plannedEncoder.replace('h264_', '').toUpperCase() : 'CPU ' + plannedEncoder;
+  const plannedEncoder = isPro ? 'prores_ks' : (isPassthrough ? 'copy' : (encoderName || 'libx264'));
+  const isGpu = !isPro && plannedEncoder !== 'libx264' && plannedEncoder !== 'copy';
+  const accel = isGpu ? 'GPU ' + plannedEncoder.replace('h264_', '').toUpperCase() : (isPassthrough ? 'Direct Stream Copy' : 'CPU ' + plannedEncoder);
   return {
     args,
     label: `匯出 ${isPro ? 'ProRes 422 HQ' : 'MP4 ' + (kbps / 1000).toFixed(1) + 'Mbps'}（${accel}）`,
