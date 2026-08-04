@@ -2074,18 +2074,18 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
 }
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
-ipcMain.handle('fs:readB64', (e, p) => {
+ipcMain.handle('fs:readB64', async (e, p) => {
   if (!fileAuthority.canRead(p)) { console.warn('[sec] readB64 blocked:', p); return null; }
-  try { return fs.readFileSync(p).toString('base64'); } catch (err) { return null; }
+  try { return (await fs.promises.readFile(p)).toString('base64'); } catch (err) { return null; }
 });
-ipcMain.handle('fs:writeProject', (e, { path: p, b64 }) => {
+ipcMain.handle('fs:writeProject', async (e, { path: p, b64 }) => {
   // autosave 落在使用者已選取的專案／媒體資料夾旁；不可讓 renderer 自行擴張寫入根。
   if (!fileAuthority.canWriteProject(p)) { console.warn('[sec] writeProject blocked:', p); return null; }
-  try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, Buffer.from(b64, 'base64')); return p; } catch (err) { return null; }
+  try { await fs.promises.mkdir(path.dirname(p), { recursive: true }); await fs.promises.writeFile(p, Buffer.from(b64, 'base64')); return p; } catch (err) { return null; }
 });
-ipcMain.handle('fs:writeScreenshot', (e, { path: p, b64 }) => {
+ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
   if (!fileAuthority.canWriteScreenshot(p)) { console.warn('[sec] writeScreenshot blocked:', p); return null; }
-  try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, Buffer.from(b64, 'base64')); return p; } catch (err) { console.error('[writeScreenshot] error:', err.message); return null; }
+  try { await fs.promises.mkdir(path.dirname(p), { recursive: true }); await fs.promises.writeFile(p, Buffer.from(b64, 'base64')); return p; } catch (err) { console.error('[writeScreenshot] error:', err.message); return null; }
 });
 
 /* ---- 邊轉邊播 ingest（MXF 等非原生格式秒開）：fragmented MP4 + 本機 HTTP 伺服器 ----
