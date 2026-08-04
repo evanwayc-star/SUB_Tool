@@ -4,8 +4,9 @@ const { previewVideoEncoderArgs } = require('./native-tooling');
 
 /**
  * 組合 Ingest 與 StreamIngest 的 FFmpeg 參數。
- * 根據編碼器 (VENC) 決定是否啟用硬體縮放 (scale_cuda, vpp_qsv)
- * 來打通 VRAM，極大化 Proxy 產生速度。
+ * 根據編碼器 (VENC) 決定啟用硬體加速，並組裝所有 `-map` 與 `-filter_complex`。
+ * 注意：不強制指定 scale_cuda 或 hwaccel_output_format，以確保當遇到
+ * nvdec 不支援的專業格式（如 4:2:2 10-bit MXF）時，能優雅退回軟體解碼，不致崩潰。
  */
 function buildIngestArgs({
   src,
@@ -23,9 +24,9 @@ function buildIngestArgs({
   const isQsv = encoder === 'h264_qsv';
 
   let hwdec = [];
-  if (isCuda) hwdec = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'];
-  else if (isQsv) hwdec = ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'];
-  else if (encoder && encoder !== 'libx264') hwdec = ['-hwaccel', 'auto'];
+  if (encoder && encoder !== 'libx264') {
+    hwdec = ['-hwaccel', 'auto'];
+  }
 
   const args = ['-y', ...hwdec, '-i', src];
 
@@ -33,8 +34,6 @@ function buildIngestArgs({
 
   if (needsProxy && proxyPath) {
     let vf = 'scale=-2:720,format=yuv420p';
-    if (isCuda) vf = 'scale_cuda=-2:720';
-    else if (isQsv) vf = 'vpp_qsv=w=-2:h=720';
 
     const vencArgs = previewVideoEncoderArgs(encoder);
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
