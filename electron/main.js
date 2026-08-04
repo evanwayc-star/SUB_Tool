@@ -709,6 +709,10 @@ async function findFileRecursively(dir, targetName, maxDepth = 3) {
   return null;
 }
 
+ipcMain.handle('fs:authorizeProject', (e, { path: p, b64 }) => {
+  grantTrustedProjectFile(p, Buffer.from(b64, 'base64'));
+  return true;
+});
 ipcMain.handle('fs:findRelinkTarget', async (e, { projectPath, oldMediaPath }) => {
   if (!projectPath || !oldMediaPath) return null;
   if (!fileAuthority.canRead(projectPath)) return null;
@@ -749,19 +753,32 @@ ipcMain.handle('fs:reserveScreenshotPath', (e, { directory, suffix } = {}) => {
 });
 
 
+let _dialogActive = false;
 // Windows COM threading + mpv wid freezing workaround
 async function safeShowOpenDialog(options) {
   const mpvWasVisible = typeof _mpvWin !== 'undefined' && _mpvWin && !_mpvWin.isDestroyed() && _mpvVisible;
+  _dialogActive = true;
   if (mpvWasVisible) { try { _mpvWin.hide(); } catch(e){} }
   const r = await dialog.showOpenDialog(options);
-  if (mpvWasVisible) { try { _mpvWin.show(); } catch(e){} }
+  _dialogActive = false;
+  if (mpvWasVisible || _mpvVisible) {
+    if (typeof _mpvWin !== 'undefined' && _mpvWin && !_mpvWin.isDestroyed()) {
+      try { _mpvWin.show(); _mpvWin.moveTop(); } catch(e){}
+    }
+  }
   return r;
 }
 async function safeShowSaveDialog(options) {
   const mpvWasVisible = typeof _mpvWin !== 'undefined' && _mpvWin && !_mpvWin.isDestroyed() && _mpvVisible;
+  _dialogActive = true;
   if (mpvWasVisible) { try { _mpvWin.hide(); } catch(e){} }
   const r = await dialog.showSaveDialog(options);
-  if (mpvWasVisible) { try { _mpvWin.show(); } catch(e){} }
+  _dialogActive = false;
+  if (mpvWasVisible || _mpvVisible) {
+    if (typeof _mpvWin !== 'undefined' && _mpvWin && !_mpvWin.isDestroyed()) {
+      try { _mpvWin.show(); _mpvWin.moveTop(); } catch(e){}
+    }
+  }
   return r;
 }
 

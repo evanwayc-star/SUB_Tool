@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('subtool', {
   openMedia:    () => ipcRenderer.invoke('dialog:openMedia'),
   openAudio:    () => ipcRenderer.invoke('dialog:openAudio'),
   openProject:  () => ipcRenderer.invoke('dialog:openProject'),
+  authorizeProject: (path, b64) => ipcRenderer.invoke('fs:authorizeProject', { path, b64 }),
   saveProject:  (name, b64) => ipcRenderer.invoke('dialog:saveProject', { name, b64 }),
   importSub:    (kind) => ipcRenderer.invoke('dialog:importSub', kind),
   exportSub:    (name, b64, ext) => ipcRenderer.invoke('dialog:exportSub', { name, b64, ext }),

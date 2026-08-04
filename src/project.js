@@ -590,6 +590,7 @@ const Project = {
   },
   async _loadDesktop(r,generation){
     let data; try{ data=JSON.parse(decodeText(b64ToBytes(r.b64).buffer)); }catch(e){ showToast('無法解析專案檔'); return; }
+    if(IS_DESKTOP && r.path && DESK.authorizeProject) await DESK.authorizeProject(r.path, r.b64);
     await _autoRelinkMissingMedia(data, r.path);
     const mp=data.media&&data.media.path;
     // stat 是唯讀，可在碰 State 之前先完成；若期間有更新請求，舊專案完全不進入 runtime。
