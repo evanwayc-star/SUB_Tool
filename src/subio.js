@@ -11,6 +11,7 @@ import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
 import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec } from './delivery-audio.js';
 import { buildExportSnapshot } from './delivery-job.js';
+import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { buildExportJobs, buildWebExportParams } from './export-job-builder.js';
 import { escapeHTML } from './util.js';
@@ -213,13 +214,16 @@ let _lastVbrMbps = null;
 function _mixerSummary() {
   const srcs = new Set(State.clips.map(c => c.audioSrc || (c.primary ? 'video' : 'clip:' + c.id)));
   let audible = 0, total = 0, hasFileSrc = false;
+  /* 專案級 Solo：與 delivery-job.js 的 clipAudioSpec 及 project-audio.js 的
+     audioPlan 用同一份判準，否則對話框顯示的「幾條會發聲」會與實際輸出不符。
+     原本在迴圈裡按每支母素材各算一次 Solo。 */
+  const anySolo = anySourceSolo(Media.tracks);
   for (const s of srcs) {
     const tks = Media.tracks.filter(t => (t.source || 'video') === s && t.file);
     if (!tks.length) continue;
     hasFileSrc = true;
-    const anySolo = tks.some(t => t.solo);
     total += tks.length;
-    audible += tks.filter(t => (anySolo ? t.solo : !t.muted) && (t.volume || 0) > 0).length;
+    audible += tks.filter(t => sourceTrackAudible(t, anySolo) && (t.volume || 0) > 0).length;
   }
   if (!hasFileSrc) return '';
   return `：目前 <b>${audible}</b>/${total} 條聲道會發聲`;

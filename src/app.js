@@ -41,7 +41,7 @@ import { Media, Wave } from './media.js';
 import { getPlayerAdapter } from './media-player-adapter.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, cueNeighborBounds } from './timeline.js';
-import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries } from './subtitles.js';
+import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries, updateSearchCount } from './subtitles.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
 import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDir, confirmDiscardUnsaved } from './project.js';
 import { Seq } from './sequence.js';
@@ -76,6 +76,18 @@ on('render:all', renderAll);
 on('render:videoSub', renderVideoSub);
 on('render:listTrackSel', renderListTrackSel);
 on('render:trackStyle', renderTrackStyle); // 換選取字幕 → 樣式面板換對象（v4.31）
+/* ── 以下四條原本【只有發送端、沒有訂閱者】────────────────────────────
+   events.js 的 emit 在沒有 handler 時是靜默 no-op，eslint 看不到字串、
+   rollup 沒有模組邊，所以半條邊不會有任何徵兆。實際後果：
+     render:searchCount → #searchCount 永遠不更新（搜尋結果計數是死的）
+     render:subList     → 搜尋後字幕列不重繪，.search-match 高亮出不來
+     render:selection   → 刪除／貼上後選取列的 UI 不同步
+     render:checkPanel  → Trim 後字元檢查面板不刷新
+   由 tests/eventBusContract.test.js 擋住往後再出現半條邊。 */
+on('render:subList', renderSubList);
+on('render:searchCount', updateSearchCount);
+on('render:selection', refreshSelectionUI);
+on('render:checkPanel', renderCheckPanel);
 on('timeline:invalidate', drawTimeline); // 軌道 metadata 交易只發事件，不反向 import renderer
 on('selection:clipCleared', ()=>{ const el=$('stSel'); if(el) el.textContent=''; });
 on('playhead:ensure', ensurePlayheadVisible);
@@ -145,7 +157,10 @@ on('fps:changed', ()=>{
 
 /* ===== 9. UI 接線 / 渲染 / 初始化 ==================================== */
 function renderAll(){ renderSubList(); renderCueBlocks(); renderVideoSub(); updateTlSel(); refreshMpvSubs(); }
-on('render:trackStyle', renderTrackStyle);
+/* render:trackStyle 的訂閱在上面（第 78 行附近），這裡曾經【又註冊一次】。
+   events.js 的 on() 是 push、不去重，所以每次 emit 都會把整個樣式面板
+   （含 preset 的 <optgroup> DOM）重建兩遍——選取一變更就發生，完全無徵兆。
+   訂閱只留一處；重複訂閱由 tests/eventBusContract.test.js 擋住。 */
 on('render:styleSummaries', () => { if(typeof refreshStyleSummaries === 'function') refreshStyleSummaries(); });
 /* mpv 嵌入模式：字幕改由 mpv/libass 渲染（DOM 疊層被覆蓋）。cue 變動時重建 .ass 餵給 mpv（防抖） */
 function styleChanged(){
@@ -1227,8 +1242,12 @@ function initPresetLibrary(){
     styleChanged(); recordHistory('編輯常用樣式：'+E.name);
     showToast(`已更新「${E.name}」` + (n?`，同步 ${n} 處`:'（目前沒有套用它的字幕）'));
   }
-  $('tsEditDone')?.addEventListener('click',()=>State.presetEditEnd(true));
-  $('tsEditCancel')?.addEventListener('click',()=>State.presetEditEnd(false));
+  /* 直接呼叫上面那兩個函式。原本寫的是 State.presetEditEnd(...)，但 State 上
+     【從來沒有】這兩個成員（全 repo 只有讀、沒有任何一處賦值），於是「完成」
+     「取消」「修改參數」三顆按鈕一按就丟 TypeError。State 是無型別的物件袋、
+     no-undef 也不檢查成員存取，app.js 又沒有測試，三道防線同時看不到。 */
+  $('tsEditDone')?.addEventListener('click',()=>_presetEditEnd(true));
+  $('tsEditCancel')?.addEventListener('click',()=>_presetEditEnd(false));
   $('tsEditPreviewText')?.addEventListener('input', () => { if(State.presetEdit) { renderVideoSub(); refreshMpvSubs(false, true); } });
   $('tsEditPreviewText')?.addEventListener('keydown', e => { e.stopPropagation(); });
   $('modalBody').addEventListener('click',async e=>{
@@ -1345,7 +1364,7 @@ function initPresetLibrary(){
       }
       return;
     }
-    if(editB){ State.presetEditBegin(+editB.dataset.preEdit); return; }
+    if(editB){ _presetEditBegin(+editB.dataset.preEdit); return; }
     if(applyB){ const p=getAllPresets()[+applyB.dataset.preApply]; const t=styleTarget();
       if(p&&t){
         if(t.cues.length){

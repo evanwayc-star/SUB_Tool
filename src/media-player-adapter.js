@@ -85,56 +85,34 @@ export class MpvAdapter extends BaseMediaPlayerAdapter {
 let activeAdapter = null;
 
 export function getPlayerAdapter() {
-  if (!activeAdapter) activeAdapter = new WebCodecsAdapter(new MpvAdapter(window.subtool));
+  if (!activeAdapter) activeAdapter = new MpvAdapter(window.subtool);
   return activeAdapter;
 }
 
 export function resetPlayerAdapter(desk) {
-  activeAdapter = new WebCodecsAdapter(new MpvAdapter(desk));
+  activeAdapter = new MpvAdapter(desk);
 }
 
 export function setPlayerAdapter(adapter) {
   activeAdapter = adapter;
 }
 
-export class WebCodecsAdapter extends BaseMediaPlayerAdapter {
-  constructor(baseAdapter) {
-    super();
-    this.base = baseAdapter;
-    this.compositing = false;
-  }
-  get type() { return this.base.type; }
-  get isAvailable() { return this.base.isAvailable; }
-  get isCompositing() { return this.compositing; }
-  
-  setCompositing(v) {
-    this.compositing = !!v;
-    const vs = document.getElementById('videoSub');
-    if (vs) {
-      vs.style.display = '';
-      vs.classList.toggle('mpv-hit-layer', !v);
-    }
-    window.dispatchEvent(new CustomEvent('mpv:sync'));
-  }
-  
-  async play() { return this.base.play(); }
-  async pause() { return this.base.pause(); }
-  async seek(t) { return this.base.seek(t); }
-  async rate(r) { return this.base.rate(r); }
-  async subSet(assStr) { return this.base.subSet(assStr); }
-  async subVisible(v) { return this.base.subVisible(v); }
-  async show(v) { return this.base.show(v); }
-  async setGuide(data) { return this.base.setGuide(data); }
-  async setImageGuide(data) { return this.base.setImageGuide(data); }
-  onImagePointer(cb) { this.base.onImagePointer(cb); }
-  async screenshot(path) { return this.base.screenshot(path); }
-  async setTimecodeWatermark(payload) { return this.base.setTimecodeWatermark(payload); }
-  async detect() { return this.base.detect(); }
-  async setBounds(bounds) { return this.base.setBounds(bounds); }
-  async launch(opts) { return this.base.launch(opts); }
-  onEvent(cb) { this.base.onEvent(cb); }
-  async mute(m) { return this.base.mute(m); }
-  brightness(b) { return this.base.brightness(b); }
-  async loadfile(path) { return this.base.loadfile(path); }
-  async quit() { return this.base.quit(); }
-}
+/* ── 這裡曾有 WebCodecsAdapter ─────────────────────────────────────────────
+   一個把 base adapter 全部轉呼叫的 decorator：39 個方法逐一 `return this.base.X(…)`，
+   唯一自己做事的是 setCompositing()，而它做的三件事在唯一的呼叫端
+   （decode/player.js `_setTakeover`）緊接著又原樣做了一次。
+
+   更關鍵的是它在生產環境【從未存在】：
+     - 9 個 setPlayerAdapter() 呼叫點全部裝 `new Html5Adapter(video)` 或
+       `new MpvAdapter(window.subtool)`，把 wrapper 整個換掉；
+     - 唯一會產生它的 resetPlayerAdapter() 只有測試在呼叫。
+   於是任何媒體載入之後 getPlayerAdapter().setCompositing 都是 undefined，
+   呼叫時丟 TypeError，被 app.js 的 `try{ WCPreview.tick(); }catch(e){}` 吞掉；
+   下游讀 isCompositing 拿到 undefined，mpvPresenting() 因此永遠回 true。
+   它的 `window.dispatchEvent(new CustomEvent('mpv:sync'))` 也是死的——
+   'mpv:sync' 的唯一訂閱者在 events.js 的匯流排上，不是 window。
+
+   合成旗標已搬回它該在的地方（Media._wcTakeover，公開入口
+   webCodecsTakeover() / setWebCodecsTakeover()，正是 eslint 圍籬點名的那組）。
+   ── 若日後真的需要一個 decorator，先確認它會被【裝上】：
+      兩個 adapter 才是真接縫，零個不是。 */

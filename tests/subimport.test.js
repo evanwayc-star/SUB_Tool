@@ -20,7 +20,7 @@ const sourceCue = {
 
 function selfExportedAss() {
   return SubFormats.toASS(
-    [sourceCue], fps, [sourceTrack], 1920, 1080, 1920, 1920, 1080,
+    [sourceCue], fps, [sourceTrack], 1920, 1080,
     { includeMetadata: true, dropFrame: false },
   );
 }

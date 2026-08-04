@@ -25,6 +25,8 @@ import {
   buildProjectAudioPlan,
   externalAudioPlacements,
   trimRange,
+  anySourceSolo,
+  sourceTrackAudible,
 } from './project-audio.js';
 
 /* ── 內部工具 ───────────────────────────────────────────────────────────── */
@@ -43,8 +45,14 @@ function clipAudioSpec(clip, mediaTracks){
   if (!tks.length) return undefined; // 無逐聲道檔 → 回退來源原音
   const masterPath = typeof clip?.path === 'string' && clip.path ? clip.path : null;
   if (!masterPath) return []; // 不可改以播放用 cache 匯出。
-  const anySolo = tks.some(t => t.solo);
-  return tks.filter(t => (anySolo ? t.solo : !t.muted) && (t.volume || 0) > 0)
+  /* Solo 是【專案級】狀態，所以要看整份 mediaTracks，不是只看這支母素材的 tks。
+     原本寫 `tks.some(t => t.solo)`——每支母素材各算一次 Solo，於是 A 素材有 Solo 時
+     B 素材因為自己沒有 Solo 而整組照常發聲。project-audio.js 的 audioPlan 用的是
+     專案級 Solo，兩者會進入同一份匯出快照（clip.audio 是 audioPlan 不存在時的
+     後備路徑，見 electron/export-plan.js:507），於是同一份快照帶著兩條互相矛盾的規則。
+     交付語意不理會 _srcHidden——那只是監聽畫面的暫時來源篩選。 */
+  const anySolo = anySourceSolo(mediaTracks);
+  return tks.filter(t => sourceTrackAudible(t, anySolo) && (t.volume || 0) > 0)
             .map(t => {
               const hasSourceCoordinates = Number.isInteger(t.sourceStream) && Number.isInteger(t.sourceChannel);
               return {

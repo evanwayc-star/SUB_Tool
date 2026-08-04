@@ -41,7 +41,7 @@ export function getXLSXFileData(trackDataList) {
 
 export function toASSFromState(cues, options = {}) {
   const { x: RX, y: RY } = ASS_PLAY_RES;
-  return SubFormats.toASS(cues, State.fps, State.tracks, RX, RY, RX, RX, RY, {
+  return SubFormats.toASS(cues, State.fps, State.tracks, RX, RY, {
     ...options,
     dropFrame: State.dropFrame,
   });
@@ -116,7 +116,16 @@ export async function _exportVideoWeb(data, deliverables, expIn, assText) {
         const fontData = await readFile(fontFile);
         try { ff.FS('mkdir', '/fonts'); } catch(e){}
         ff.FS('writeFile', '/fonts/default_font.ttf', new Uint8Array(fontData));
-        assText = assText.replace(/Fontname: [^,]+,/g, 'Fontname: DefaultFont,');
+        /* 這裡原本有一行
+             assText = assText.replace(/Fontname: [^,]+,/g, 'Fontname: DefaultFont,');
+           它【永遠匹配不到】：產生的 ASS 裡不存在 `Fontname: `（冒號＋空格）這個字串。
+           Style 行是 `Style: <名稱>,<家族名>,…`，而 `Fontname` 只出現在
+           `Format: Name, Fontname, Fontsize, …` 標頭，前面是逗號＋空格。
+
+           也不該「修好」它：把家族名改寫成 `DefaultFont` 正是鐵律 §0.3 記過的錯——
+           libass 只認字型檔【內部】的家族名，填一個不存在的名字會讓它靜默退回系統字型。
+           實際能運作的原因是 /fonts 裡只有這一支字型，libass 配不到指定家族時
+           就會退回它。維持這個行為，但不要再假裝有在改寫。 */
         ff.FS('writeFile', 'sub.ass', new TextEncoder().encode(assText));
         fontSelected = true;
       } else {

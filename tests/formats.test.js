@@ -141,7 +141,7 @@ Dialogue: 0,0:00:07.00,0:00:08.00,Imported,,0,0,0,,{\\t(0,100,\\fs100)}不套動
     ];
 
     const ass = SubFormats.toASS(
-      cues, fps, tracks, 1920, 1080, 1920, 1920, 1080,
+      cues, fps, tracks, 1920, 1080,
       { includeMetadata: true, dropFrame: true },
     );
     const parsed = SubFormats.parseASS(ass);

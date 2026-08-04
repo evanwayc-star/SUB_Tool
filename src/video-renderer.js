@@ -46,7 +46,7 @@ export function refreshMpvSubs(revealAfter=false, live=false){
         const draftCue = { id: 'draft_preview', start: 0, end: State.duration || 36000, text: previewText, track: 0, timed: true, style: {} };
         const tempTracks = [State.presetEdit.draft];
         const { x: RX, y: RY } = ASS_PLAY_RES;
-        assStr = SubFormats.toASS([draftCue], State.fps, tempTracks, RX, RY, RX, RX, RY);
+        assStr = SubFormats.toASS([draftCue], State.fps, tempTracks, RX, RY);
       } else if (live) {
         assStr = toASSFromState(cs);
         
@@ -96,7 +96,7 @@ export function _syncMpvPanel(){
   const settingsOpen=!!document.getElementById('settingsModal');
   // 序列間隙（時間軸上無影片的區段）：畫面應為黑 → mpv 讓位
   // WC 接管（proxy 就緒、WebCodecs 合成呈現中）：mpv 視窗一律讓位（僅供時鐘＋聲音兜底）
-  let hides=modalOpen||settingsOpen||Media.inGap()||getPlayerAdapter().isCompositing;
+  let hides=modalOpen||settingsOpen||Media.inGap()||Media.webCodecsTakeover();
   if(!hides){
     const vr=$('videoWrap')?.getBoundingClientRect();
     if(vr){

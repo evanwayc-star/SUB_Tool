@@ -193,9 +193,16 @@ export function hexToAssColor(hex, alpha01){
 }
 
 /* 生效樣式 → ASS Alignment（\an 的 1-9 numpad）＝ 垂直基數(下1/中4/上7) ＋ 水平(左0/中1/右2)。
-   Style 行與逐句 \an 共用，避免兩處各算一次而漂掉。 */
+   直書一律上錨——ASS 沒有 writing-mode，直書是由 verticalAssCols() 逐列自己 \pos 定位的，
+   Style 行的 Alignment 只作為無 \pos 時的後援。
+
+   【這個註解以前說謊】原本寫著「Style 行與逐句 \an 共用，避免兩處各算一次而漂掉」，
+   但 styleToAssStyleLine() 根本沒有呼叫這支，而是內聯了一份自己的副本——
+   兩處確實各算一次，只是剛好沒有漂掉：逐句 \an 那條路（formats.js）在直書時
+   會提前 return 走 verticalAssCols()，所以 st.vertical 的差異從來沒被觸發到。
+   現在真的共用了，`st.vertical ? 'top'` 這一項也一併收進來，兩邊的值與過去完全相同。 */
 export function assAlignN(st){
-  const vbase = { top: 7, middle: 4, bottom: 1 }[st.valign || 'bottom'];
+  const vbase = { top: 7, middle: 4, bottom: 1 }[st.vertical ? 'top' : (st.valign || 'bottom')];
   const acol = { left: 0, center: 1, right: 2 }[st.align];
   return vbase + (acol != null ? acol : 1);
 }
@@ -204,10 +211,8 @@ export function assAlignN(st){
 export function styleToAssStyleLine(name, st, vwh){
   // Alignment 1-9（numpad）＝ 垂直基數(下1/中4/上7) ＋ 水平(左0/中1/右2)；直書一律上錨。
   // 實際落點由每句的 \pos(x,y) 決定（見 cueAssPos），故 MarginV 僅作為無 \pos 時的後援。
-  const va = st.vertical ? 'top' : (st.valign || 'bottom');
-  const vbase = { top: 7, middle: 4, bottom: 1 }[va];
-  const acol = { left: 0, center: 1, right: 2 }[st.align];
-  const alignN = vbase + (acol != null ? acol : 1);
+  const va = st.vertical ? 'top' : (st.valign || 'bottom'); // MarginV 後援用；錨點見下一行
+  const alignN = assAlignN(st);
   const mv = va === 'middle' ? 0
            : va === 'top' ? Math.round(vwh * (st.posY / 100))            // 距頂
            : Math.round(vwh * ((100 - st.posY) / 100));                  // 距底

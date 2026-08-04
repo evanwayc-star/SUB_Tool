@@ -1,6 +1,7 @@
 import { State } from './state.js';
 import { clamp } from './util.js';
 import { Seq } from './sequence.js';
+import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 
 class AudioEngineCore {
   constructor() {
@@ -26,6 +27,20 @@ class AudioEngineCore {
 
   get context() {
     return this.ctx;
+  }
+
+  /* 讀 master analyser 的時域取樣。回傳內部緩衝區（呼叫端只讀不存）；
+     還沒有 AudioContext 時回傳 null。
+
+     【為什麼是這裡】ctx / analyser / _anBuf 原本住在 media.js，v5.11.8 的
+     「深度解耦」把它們搬進本模組，但 Wave.captureLive() 的讀取端留在原地，
+     繼續讀早已不存在的 Media.analyser / Media._anBuf——於是它的守衛
+     `if(!Media.analyser) return;` 永遠成立，長檔的即時波形產生靜默失效。
+     搬狀態就要一起搬讀取端；讀取端沒有入口可用時，就會像那次一樣留在原地爛掉。 */
+  readTimeDomain() {
+    if (!this.analyser || !this._anBuf) return null;
+    this.analyser.getFloatTimeDomainData(this._anBuf);
+    return this._anBuf;
   }
 
   createGain() {
@@ -141,11 +156,16 @@ class AudioEngineCore {
       localT = transportSourceTimeFn(t, c);
     }
 
+    /* 預覽語意：被來源篩選藏起來的聲道不算進 Solo（respectHidden:true）。
+       這一行以前寫 `tracks.some(x => x.solo)`——沒有排除 _srcHidden，
+       與同一個函式下方第二處判斷【不一致】。規則現在只有 project-audio.js 一份。 */
+    const anySolo = anySourceSolo(tracks, { respectHidden: true });
+
     if (this.ctx) {
       for (const tr of tracks) {
         if (tr._srcHidden) continue;
         if (tr.kind === 'buffer') {
-          const audible = tracks.some(x => x.solo) ? tr.solo : !tr.muted;
+          const audible = sourceTrackAudible(tr, anySolo);
           if (audible) {
             if (tr._scrubNode) { try { tr._scrubNode.stop(); } catch (e) {} }
             try {
@@ -200,11 +220,10 @@ class AudioEngineCore {
       }
     };
 
-    const anySolo = tracks.some(tr => tr.solo && !tr._srcHidden);
-    const activeMix = anySolo
-      ? tracks.some(tr => (tr.kind === 'buffer' || tr.kind === 'element') && !tr._srcHidden && tr.solo)
-      : tracks.some(tr => (tr.kind === 'buffer' || tr.kind === 'element') && !tr._srcHidden && !tr.muted);
-      
+    const activeMix = tracks.some(tr =>
+      (tr.kind === 'buffer' || tr.kind === 'element') && !tr._srcHidden && sourceTrackAudible(tr, anySolo));
+
+
     if (!activeMix && (activeSource === 'video' || activeSource === null)) {
       // Return true to indicate main video should be scrubbed
       return { scrubMainVideo: true, localT };
@@ -213,7 +232,7 @@ class AudioEngineCore {
     for (const tr of tracks) {
       if (tr._srcHidden) continue;
       if (tr.kind === 'element' && tr.el) {
-        const audible = anySolo ? tr.solo : !tr.muted;
+        const audible = sourceTrackAudible(tr, anySolo);
         if (audible) {
           const source = tr.source || '';
           const off = source.startsWith('ext-') ? extSourceTimeFn(source, t) : localT;

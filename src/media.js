@@ -131,6 +131,14 @@ const Media = {
   ffmpeg:null, ffmpegLoading:null,
   objectURLs:[],
   mpvMode:false, _mpvTime:0, _mpvDuration:0, _bgVersion:0,
+  /* mpv 畫面接管旗標：true＝WebCodecs 已接管、mpv 視窗讓位。
+     這個旗標曾被搬到 WebCodecsAdapter.compositing，但那個 wrapper 在生產環境
+     【從來沒有被裝上】——9 個 setPlayerAdapter() 呼叫點全部裝裸 adapter，
+     唯一會產生 wrapper 的 resetPlayerAdapter() 只有測試在呼叫。
+     結果 setCompositing() 是 undefined、呼叫時丟 TypeError 被 try/catch 吞掉，
+     而 mpvPresenting() 讀 `!undefined` → mpv 模式下【永遠回 true】。
+     旗標的家在這裡，公開入口是 webCodecsTakeover() / setWebCodecsTakeover()。 */
+  _wcTakeover:false,
   _intakeSession:new MediaIntakeSession(),
   activeSource:null, // null=全部混音；'video'=影片原音；'ext-xxx'=外部檔案
   pendingChannels:[], // 背景抽取音軌時的「準備中」聲道（讓混音器立即顯示推桿，逐一就緒）
@@ -1043,8 +1051,11 @@ const Media = {
   inGap(){ return !!this._gap; },
   sourceLocalTime(srcId, t){ return this._srcLocalT(srcId, t); },
   /* mpv 正在自己出圖（WebCodecs 尚未接管） */
-  mpvPresenting(){ return !!(this.mpvMode && !getPlayerAdapter().isCompositing); },
-  // setWebCodecsTakeover 已被重構至 WebCodecsAdapter.setCompositing
+  mpvPresenting(){ return !!(this.mpvMode && !this._wcTakeover); },
+  /* WebCodecs 是否已接管畫面（mpv 視窗讓位）。與 _wcComposited 不同：
+     這個是「有沒有叫 mpv 讓位」，_wcComposited 是「WC 這一輪有沒有真的畫出東西」。 */
+  webCodecsTakeover(){ return !!this._wcTakeover; },
+  setWebCodecsTakeover(v){ this._wcTakeover = !!v; },
   setWebCodecsComposited(v){ this._wcComposited = !!v; },
   webCodecsProxyUrl(){ return this._wcProxyUrl; },
   webCodecsProxyPath(){ return this._wcProxyPath; },
@@ -2643,11 +2654,11 @@ export const Wave = {
     if(!Media.audioPanelNotice) $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
   },
   captureLive(){ // 由 rafLoop 於播放時呼叫
-    if(!this.live||!this.peaks||!Media.analyser)return;
+    if(!this.live||!this.peaks)return;
     // 序列：Wave.peaks 屬主媒體來源（來源時間索引）；非主媒體片段播放中或間隙時不得寫入（會污染波形）。
     // 主媒體切割出的片段（audioSrc==='video'）寫入是正確的——同一來源、同一索引域。
     if(Media.seqOn()){ const c=Media._activeClip(); if(Media._gap || !c || (c.audioSrc||(c.primary?'video':''))!=='video') return; }
-    const buf=Media._anBuf; Media.analyser.getFloatTimeDomainData(buf);
+    const buf=AudioEngine.readTimeDomain(); if(!buf) return;
     let mn=0,mx=0; for(let i=0;i<buf.length;i++){const v=buf[i]; if(v<mn)mn=v; if(v>mx)mx=v;}
     const t=video.currentTime||0; const b=Math.floor(t*this.resolution);
     const n=this.peaks.length/2;

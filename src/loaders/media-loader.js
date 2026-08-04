@@ -110,7 +110,14 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       Wave.initLive(); emit('duration:known');
 
       // 載入音軌+波形的共用函式（快取立即執行，非快取等轉檔完成後執行）
-      const self=this;
+      /* `ctx` 就是 Media；不要寫成 `const self=this`。loadDesktopMedia 是被當
+         【普通函式】呼叫的（media.js：`return loadDesktopMedia(this, p, …)`），
+         ESM 一律嚴格模式，所以函式內的 `this` 是 undefined——底下每一個
+         `self.*` 都會丟 TypeError，而呼叫端是
+         `void loadTracksAndWave(res).catch(e => console.warn(…))`，錯誤被吞掉。
+         這條路只在 mpv 偵測失敗時才走到（見上方 mpv 分支會先 return），
+         所以沒有人回報，也沒有測試碰得到。 */
+      const self=ctx;
       const loadTracksAndWave=async(r)=>{
         if(!owns()) return;
         const chs=r.channels||[];

@@ -1251,8 +1251,12 @@ const QueueManager = {
     this.processQueue();
   },
   broadcastUpdate() {
+    /* 這裡原本還送一個 'export-queue-updated' 通道，帶著 _queueState.jobs()
+       ——也就是整份 job 清單，含每個 job 的 payload.clips 與 audioPlan。
+       全 repo **沒有任何監聽者**（preload.js／queue-preload.js／queue.html／src/
+       都沒有），而 broadcastUpdate() 是由 dispatch() 在每一行 ffmpeg 進度時呼叫的，
+       等於每秒數次把整份凍結快照結構化複製過行程邊界給沒有人。已移除。 */
     safeWinSend(mainWin, 'queue:update');
-    safeWinSend(mainWin, 'export-queue-updated', _queueState.jobs());
     safeWinSend(mainWin, 'queue-status', queueStatusSnapshot());
     if (queueWin && !queueWin.isDestroyed()) {
       safeWinSend(queueWin, 'queue:update');

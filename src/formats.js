@@ -571,7 +571,13 @@ const SubFormats = {
     if(!subtool && legacyHeader && !timingMarker) Object.defineProperty(out, 'subtoolLegacy', {value:true, enumerable:false});
     return out;
   },
-  toASS(cues,fps,tracks=[],vw=1920,vh=1080, ww=1920, vww=1000, vwh=562, options={}){
+  /* vww / vwh ＝ 字幕畫布（PlayResX / PlayResY），見 CONTEXT.md「字幕畫布」。
+     ── 這裡曾經還有三個參數 `vw=1920, vh=1080, ww=1920` 卡在 tracks 與 vww 之間，
+        而它們在整個函式體內【一次都沒有被引用】。呼叫端因此得把三個沒有作用的數字
+        填在正確的位置上，填錯不會有任何徵兆（預設值 1000/562 是看起來合理的數字，
+        不是明顯錯誤的值）。實際呼叫長這樣：`toASS(cues, fps, tracks, RX, RY, RX, RX, RY)`
+        ——五個位置只有最後兩個有意義。已移除。 */
+  toASS(cues,fps,tracks=[], vww=1000, vwh=562, options={}){
     const metadataPayload=options && options.includeMetadata === true
       ? buildSubtoolMetadata(cues, fps, tracks, options) : null;
     const metadata=metadataPayload ? encodeSubtoolMetadata(metadataPayload) : '';

@@ -155,7 +155,11 @@ export function sweepContainedCues(changedCues) {
 
 export function addCue(start, end, text, track, selectCueCb){
   const added = ensureTrackCount((track||0)+1);
-  if(added){ emit('render:timeline'); emit('render:listTrackSel'); } // using general timeline event here
+  /* 'render:timeline' 沒有任何訂閱者（註解說「using general timeline event」，
+     但通用的那個叫 'timeline:invalidate'，app.js 有訂閱→drawTimeline）。
+     新增軌道後不重繪時間軸，新軌的軌列不會出現。改用既有名稱，
+     不再替 drawTimeline 增加第三個別名。 */
+  if(added){ emit('timeline:invalidate'); emit('render:listTrackSel'); }
   const c={id:newId(),start:start||0,end:end!=null?end:(start||0),text:text||'',track:track||0,timed:(start!=null&&end!=null)};
   State.cues.push(c); sortCues(); emit('render:all'); 
   if (selectCueCb) selectCueCb(c.id); 

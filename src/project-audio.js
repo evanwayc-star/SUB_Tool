@@ -16,6 +16,36 @@ const gainValue = (value, fallback = 1) => {
 };
 const descriptorKey = (sourceStream, sourceChannel) => `${sourceStream}:${sourceChannel}`;
 
+/* ── 可聽性判準：全專案唯一一份 ────────────────────────────────────────────
+   `anySolo ? solo : !muted` 這條規則曾經被寫了五次、散在四個模組，而且彼此不一致：
+     project-audio.js（本檔，宣稱唯一）· audio-engine.js ×3 · delivery-job.js · subio.js
+   光是 audio-engine.js 內部就有兩種理論——一處的 anySolo 排除 _srcHidden、另一處沒有。
+   更嚴重的是 delivery-job.js 按【每個母素材各算一次】Solo，與本檔的【專案級】
+   Solo 不同，而兩者會進入同一份匯出快照（audioPlan 與 clip.audio），
+   由主行程決定用哪一條——正是下面那段註解記過的漂移。
+
+   規則只留在這裡；要問「這條聲道聽不聽得到」就呼叫它。 */
+
+/**
+ * 一組母素材聲道裡有沒有任何一條被 Solo。
+ * @param {Array} tracks 母素材聲道
+ * @param {boolean} respectHidden true＝忽略被來源篩選藏起來的聲道（預覽語意）；
+ *                                false＝連被藏起來的也算（交付語意，Solo 是持久狀態）
+ */
+export function anySourceSolo(tracks, { respectHidden = false } = {}){
+  return (Array.isArray(tracks) ? tracks : [])
+    .some(track => !!track?.solo && !(respectHidden && track?._srcHidden));
+}
+
+/**
+ * 單一母素材聲道的可聽性。anySolo 必須是【整組】的 Solo 狀態，
+ * 不可以只看該聲道所屬的那支母素材（那正是造成漂移的寫法）。
+ */
+export function sourceTrackAudible(track, anySolo){
+  if (!track) return false;
+  return anySolo ? !!track.solo : !track.muted;
+}
+
 function trimRange(asset){
   const trimStart = nonNeg(asset?.in ?? asset?.trimStart);
   const rawEnd = Number(asset?.out ?? asset?.trimEnd ?? asset?.duration);
@@ -66,8 +96,8 @@ class ProjectAudioInterpretation {
 
     /* Solo 是整個專案的聲道狀態，不是「每支母素材各算一次」。_srcHidden 只是
        監聽畫面的暫時來源篩選：預覽須忽略被篩掉來源的 Solo，交付則保留持久語意。 */
-    this.anySourceSolo = this.mediaTracks.some(track => !!track?.solo);
-    this.anyVisibleSourceSolo = this.mediaTracks.some(track => !!track?.solo && !track?._srcHidden);
+    this.anySourceSolo = anySourceSolo(this.mediaTracks);
+    this.anyVisibleSourceSolo = anySourceSolo(this.mediaTracks, { respectHidden: true });
     this.externalBySourceId = new Map(this.externalSources
       .filter(asset => typeof asset?.audioSourceId === 'string')
       .map(asset => [asset.audioSourceId, asset]));
@@ -78,7 +108,7 @@ class ProjectAudioInterpretation {
   sourceTrackState(track, { respectHidden = true } = {}){
     if (!track || (respectHidden && track._srcHidden)) return { audible: false, gain: 0 };
     const anySolo = respectHidden ? this.anyVisibleSourceSolo : this.anySourceSolo;
-    const audible = anySolo ? !!track.solo : !track.muted;
+    const audible = sourceTrackAudible(track, anySolo);
     const gain = audible ? gainValue(track.volume) : 0;
     return { audible: audible && gain > 0, gain };
   }
