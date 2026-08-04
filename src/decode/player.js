@@ -18,6 +18,7 @@ import { clamp } from '../util.js';
 import { State } from '../state.js';
 import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
+import { getPlayerAdapter } from '../media-player-adapter.js';
 import { emit } from '../events.js';
 import { fadeAlphaAtTimeline } from '../clip-fade.js';  // 淡入淡出：預覽與匯出共用同一份規格
 import { needsComposite, stageBox } from '../compositor-plan.js';
@@ -202,8 +203,8 @@ export const WCPreview = {
   /* mpv 畫面接管開關：WC 能呈現時隱藏 mpv 視窗、改用 HTML 字幕；讓回時還原 libass。 */
   _setTakeover(v){
     v = !!v;
-    if(Media.webCodecsTakeover() === !!v) return;
-    Media.setWebCodecsTakeover(v);
+    if(getPlayerAdapter().isCompositing === !!v) return;
+    getPlayerAdapter().setCompositing(v);
     // mpv 回來顯示時仍保留透明 DOM 命中層，否則暫停畫面切回 mpv 後字幕又無法直接拖曳。
     const vs = $('videoSub');
     if(vs){
@@ -294,7 +295,7 @@ export const WCPreview = {
     // 上層解不動但下層可解時不走這裡：繼續合成可解的層並保持接管，字幕照常（v4.25.1）。
     if(!layers.length && !Media.inGap() && acts.length > 0){
       if(mpv){
-        if(topBlocked === 'decoding' && Media.webCodecsTakeover() && !resized){ Media.setWebCodecsComposited(true); return; } // 已接管：保留上一幀防閃
+        if(topBlocked === 'decoding' && getPlayerAdapter().isCompositing && !resized){ Media.setWebCodecsComposited(true); return; } // 已接管：保留上一幀防閃
         this._setTakeover(false);
       }
       this._hideCanvas(); Media.setWebCodecsComposited(false); this.mode = 'off'; return;

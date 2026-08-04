@@ -85,14 +85,56 @@ export class MpvAdapter extends BaseMediaPlayerAdapter {
 let activeAdapter = null;
 
 export function getPlayerAdapter() {
-  if (!activeAdapter) activeAdapter = new MpvAdapter(window.subtool);
+  if (!activeAdapter) activeAdapter = new WebCodecsAdapter(new MpvAdapter(window.subtool));
   return activeAdapter;
 }
 
 export function resetPlayerAdapter(desk) {
-  activeAdapter = new MpvAdapter(desk);
+  activeAdapter = new WebCodecsAdapter(new MpvAdapter(desk));
 }
 
 export function setPlayerAdapter(adapter) {
   activeAdapter = adapter;
+}
+
+export class WebCodecsAdapter extends BaseMediaPlayerAdapter {
+  constructor(baseAdapter) {
+    super();
+    this.base = baseAdapter;
+    this.compositing = false;
+  }
+  get type() { return this.base.type; }
+  get isAvailable() { return this.base.isAvailable; }
+  get isCompositing() { return this.compositing; }
+  
+  setCompositing(v) {
+    this.compositing = !!v;
+    const vs = document.getElementById('videoSub');
+    if (vs) {
+      vs.style.display = '';
+      vs.classList.toggle('mpv-hit-layer', !v);
+    }
+    window.dispatchEvent(new CustomEvent('mpv:sync'));
+  }
+  
+  async play() { return this.base.play(); }
+  async pause() { return this.base.pause(); }
+  async seek(t) { return this.base.seek(t); }
+  async rate(r) { return this.base.rate(r); }
+  async subSet(assStr) { return this.base.subSet(assStr); }
+  async subVisible(v) { return this.base.subVisible(v); }
+  async show(v) { return this.base.show(v); }
+  async setGuide(data) { return this.base.setGuide(data); }
+  async setImageGuide(data) { return this.base.setImageGuide(data); }
+  onImagePointer(cb) { this.base.onImagePointer(cb); }
+  async screenshot(path) { return this.base.screenshot(path); }
+  async setTimecodeWatermark(payload) { return this.base.setTimecodeWatermark(payload); }
+  async detect() { return this.base.detect(); }
+  async setBounds(bounds) { return this.base.setBounds(bounds); }
+  async launch(opts) { return this.base.launch(opts); }
+  onEvent(cb) { this.base.onEvent(cb); }
+  async mute(m) { return this.base.mute(m); }
+  brightness(b) { return this.base.brightness(b); }
+  async loadfile(path) { return this.base.loadfile(path); }
+  async quit() { return this.base.quit(); }
 }

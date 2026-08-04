@@ -1,6 +1,7 @@
 import { $, video, tlScroll, tlLayer } from './dom.js';
 import { State, isSel, setSelection, deselect, IS_DESKTOP, saveConfig, trackVisible, videoTrackVisible } from './state.js';
 import { Media } from './media.js';
+
 import { Seq } from './sequence.js';
 import { emit, on } from './events.js';
 import { getExactFps, secToEncore } from './time.js';
@@ -95,7 +96,7 @@ export function _syncMpvPanel(){
   const settingsOpen=!!document.getElementById('settingsModal');
   // 序列間隙（時間軸上無影片的區段）：畫面應為黑 → mpv 讓位
   // WC 接管（proxy 就緒、WebCodecs 合成呈現中）：mpv 視窗一律讓位（僅供時鐘＋聲音兜底）
-  let hides=modalOpen||settingsOpen||Media.inGap()||Media.webCodecsTakeover();
+  let hides=modalOpen||settingsOpen||Media.inGap()||getPlayerAdapter().isCompositing;
   if(!hides){
     const vr=$('videoWrap')?.getBoundingClientRect();
     if(vr){
