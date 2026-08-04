@@ -655,9 +655,20 @@ function pruneSelection(){
   return State;
 }
 
-/* 只換焦點軌類別，不動任何選取——點軌道列頭的語意。 */
-function focusTrackKind(kind){
-  if(SELECTION_KINDS.has(kind)) State.activeTrackKind = kind;
+/* 每種焦點軌類別各有一個「是哪一軌」的夥伴欄位。這三個欄位與 activeTrackKind
+   是【同一條複合不變量】——refreshTrackGutterActive() 就是證據，它把兩者成對比對：
+     activeTrackKind==='sub'   && dataset.track        === listTrack
+     activeTrackKind==='video' && dataset.vtrack       === activeVtrack
+     activeTrackKind==='audio' && dataset.audioSourceId=== activeAudioTrackId
+   但圍籬只守了 activeTrackKind，三個夥伴欄位在圍籬外，其中 listTrack 有 13 處寫入。 */
+const FOCUS_INDEX_FIELD = { sub: 'listTrack', video: 'activeVtrack', audio: 'activeAudioTrackId' };
+
+/* 只換焦點軌類別，不動任何選取——點軌道列頭的語意。
+   給了 index 就連夥伴欄位一起寫，讓「焦點在哪一種軌的哪一軌」是一次寫入。 */
+function focusTrackKind(kind, index){
+  if(!SELECTION_KINDS.has(kind)) return State;
+  State.activeTrackKind = kind;
+  if(index !== undefined) State[FOCUS_INDEX_FIELD[kind]] = index;
   return State;
 }
 

@@ -1,7 +1,7 @@
 /* clip-model.js — 影片段域邏輯（選取、刪除、轉場、幾何）
    從 timeline-renderer.js 抽出，使渲染引擎不再包含域操作。
    渲染需求透過 emit() 事件觸發，由 timeline-renderer.js 訂閱。 */
-import { State, setSelection, deselect, ensureVideoTrackCount } from './state.js';
+import { State, setSelection, deselect, focusTrackKind, ensureVideoTrackCount } from './state.js';
 import { $ } from './dom.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
@@ -62,7 +62,7 @@ function selectClip(id, opts={}){
   const c=Seq.byId(id); if(!c) return;
   if(!opts.force && State.videoTracks[c.vtrack||0]?.locked) return; // 鎖定軌：不可選取中間的影像片段
   setSelection({ kind:'video', ids:id }); // 互斥（避免 Del/上下鍵語意衝突）由 setSelection 保證
-  State.activeVtrack = c.vtrack || 0;
+  focusTrackKind('video', c.vtrack || 0);  // 焦點類別＋哪一軌是同一條不變量
   refreshSelectionUI(); // 清除字幕列高亮
   $('stSel').textContent='已選影片段：'+c.name;
   refreshTrackGutterActive();

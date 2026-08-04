@@ -277,8 +277,8 @@ function renderTrackRows(){
       g.addEventListener('click', e => {
         if (e.target.closest('.eye,.glock,.gdel,.drag-handle') || nm.contentEditable === 'true') return;
         e.stopPropagation();
-        State.listTrack = tk;
         setSelection({ kind: 'sub', ids: [] });   // 切到字幕軌並清空三種選取（互斥由 setSelection 保證）
+        focusTrackKind('sub', tk);                // 焦點類別＋哪一軌一次寫入（同一條不變量）
         refreshSelectionUI();
         renderClipBlocks();
         const sel = $('listTrackSel'); if (sel) sel.value = String(tk);
@@ -671,7 +671,7 @@ function selectExternalAudioClip(assetId,{seek=false,redraw=true}={}){
   setSelection({ kind:'audio', ids:assetId });
   refreshSelectionUI();
   const asset=Media.externalAudio?.get?.(assetId) || null;
-  if(asset) State.activeAudioTrackId = asset.audioSourceId || asset.audioSrc || asset.id;
+  if(asset) focusTrackKind('audio', asset.audioSourceId || asset.audioSrc || asset.id);
   refreshTrackGutterActive();
   const label=asset?.name||'音訊素材';
   const status=$('stSel'); if(status) status.textContent='已選音訊：'+label;
@@ -838,8 +838,8 @@ function renderVtrackGutter(){
       `</div>`;
     g.addEventListener('click', e => {
       if (e.target.closest('.eye,.glock,.gdel,.gadd') || g.querySelector('.gname')?.contentEditable === 'true') return;
-      State.activeVtrack = v;
       setSelection({ kind: 'video', ids: [] });
+      focusTrackKind('video', v);
       refreshSelectionUI();
       renderClipBlocks();
       renderAudioTrackRows();
@@ -952,8 +952,8 @@ function renderAtrackGutter(){
       `<button class="alock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌'}">${isLocked?'🔒':'🔓'}</button>`;
     g.addEventListener('click', ev => {
       if (ev.target.closest('.audio-clip-mute,.alock')) return;
-      State.activeAudioTrackId = row.sourceId;
       setSelection({ kind: 'audio', ids: [] });
+      focusTrackKind('audio', row.sourceId);
       refreshSelectionUI();
       renderClipBlocks();
       renderAudioTrackRows();
@@ -1503,7 +1503,7 @@ window.addEventListener('mouseup',e=>{
       // 點時間軸空白：跳轉（Shift 時保留選取）
       const sc=tracksScrollTop();
       const tkIdx=yToTrack(Math.max(0,drag.y0-tracksTop()+sc));
-      if(tkIdx>=0){ focusTrackKind('sub'); State.listTrack=tkIdx; }
+      if(tkIdx>=0){ focusTrackKind('sub', tkIdx); } // 類別與「哪一軌」是同一條不變量，一次寫入
       
       Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub');
       if(!e.shiftKey){

@@ -40,10 +40,27 @@ const selectionFence = {
 
    已改走公開入口：activeClip() / inGap() / sourceLocalTime() /
    mpvPresenting() / webCodecsTakeover() / setWebCodecsTakeover() … */
+/* ── 這道圍籬守的是【識別字】，不是接縫 ──────────────────────────────
+   選擇器比對的是「物件叫什麼名字」。所以任何模組只要把 Media 換個名字持有，
+   就自動免疫：`src/loaders/media-loader.js` 收下的參數叫 `ctx`，
+   於是它存取 Media 的 17 個私有欄位、共 40 處，lint 從頭到尾看不到。
+
+   兩件事要分開看：
+   1) media-loader.js 觸及那些欄位【本身是可以的】——它是 Media 實作的一部分
+      （media.js 把它再包成方法：`loadDesktopMedia(p){ return loadDesktopMedia(this,p) }`），
+      屬於 Media 的【內部接縫】而非外部接縫。問題在於這件事從來沒有被寫下來，
+      而是靠圍籬的一個漏洞默許的。現在明確列進 MEDIA_INTERNAL_FILES。
+   2) 其他檔案若也用別名持有 Media，同樣會靜默穿過。因此把已知別名納入比對。
+      **新增別名時要回來加**——沒有純靜態的方法能認出「這個參數其實就是 Media」，
+      這是本規則的維護成本，寫在這裡以免下一個人以為它是萬全的。 */
 const mediaPrivateFence = {
-  selector: "MemberExpression[object.name='Media'][property.name=/^_/]",
-  message: 'Media 的底線名稱是內部欄位，請改用它的公開入口（activeClip／inGap／sourceLocalTime／mpvPresenting／webCodecsTakeover…）。',
+  selector: "MemberExpression[object.name=/^(Media|ctx)$/][property.name=/^_/]",
+  message: 'Media 的底線名稱是內部欄位，請改用它的公開入口（activeClip／inGap／sourceLocalTime／mpvPresenting／webCodecsTakeover…）。若你的模組確實屬於 Media 的實作，請列進 eslint.config.mjs 的 MEDIA_INTERNAL_FILES，並在該檔案標明。',
 };
+
+/* Media 實作的一部分——可以碰 Media 的私有欄位。
+   清單刻意短：每多一個，就代表 Media 的實作又散到一個檔案。 */
+const MEDIA_INTERNAL_FILES = ['src/media.js', 'src/loaders/media-loader.js'];
 
 const encapsulationFences = [selectionFence, mediaPrivateFence];
 
@@ -82,9 +99,10 @@ export default [
      這裡集中成一份清單，再依「自己人不受自己那條限制」拆成三個 block。 */
   {
     files: ['src/**/*.js'],
-    ignores: ['src/state.js', 'src/media.js'],
+    ignores: ['src/state.js', ...MEDIA_INTERNAL_FILES],
     rules: { 'no-restricted-syntax': ['error', ...encapsulationFences] },
   },
   { files: ['src/state.js'], rules: { 'no-restricted-syntax': ['error', mediaPrivateFence] } },
-  { files: ['src/media.js'], rules: { 'no-restricted-syntax': ['error', selectionFence] } },
+  /* Media 實作的檔案不受 mediaPrivateFence 限制，但仍受 selectionFence 限制。 */
+  { files: MEDIA_INTERNAL_FILES, rules: { 'no-restricted-syntax': ['error', selectionFence] } },
 ];

@@ -237,3 +237,53 @@ describe('focusTrackKind：只換焦點軌', () => {
     expect(State.activeTrackKind).toBe('video');
   });
 });
+
+/* 焦點軌的「哪一種」與「哪一軌」是同一條複合不變量。
+
+   refreshTrackGutterActive()（timeline-renderer.js）是證據：它把兩者成對比對
+     activeTrackKind==='sub'   && dataset.track         === listTrack
+     activeTrackKind==='video' && dataset.vtrack        === activeVtrack
+     activeTrackKind==='audio' && dataset.audioSourceId === activeAudioTrackId
+   但 eslint 圍籬只守了 activeTrackKind，三個夥伴欄位在圍籬外（listTrack 有 13 處寫入）。
+   於是曾出現「先寫夥伴欄位、再呼叫 setSelection」與「先 focusTrackKind、再裸寫夥伴欄位」
+   兩種順序並存的寫法。focusTrackKind(kind, index) 讓它變成一次寫入。 */
+describe('focusTrackKind：類別與夥伴欄位一次寫入', () => {
+  beforeEach(() => {
+    State.listTrack = 0;
+    State.activeVtrack = 0;
+    State.activeAudioTrackId = null;
+    State.activeTrackKind = 'sub';
+  });
+
+  it('sub 的夥伴欄位是 listTrack', () => {
+    focusTrackKind('sub', 3);
+    expect(State.activeTrackKind).toBe('sub');
+    expect(State.listTrack).toBe(3);
+  });
+
+  it('video 的夥伴欄位是 activeVtrack', () => {
+    focusTrackKind('video', 2);
+    expect(State.activeTrackKind).toBe('video');
+    expect(State.activeVtrack).toBe(2);
+  });
+
+  it('audio 的夥伴欄位是 activeAudioTrackId（字串 id，不是索引）', () => {
+    focusTrackKind('audio', 'ext-7');
+    expect(State.activeTrackKind).toBe('audio');
+    expect(State.activeAudioTrackId).toBe('ext-7');
+  });
+
+  it('不給 index 就只換類別，夥伴欄位不動（點軌道列頭以外的語意）', () => {
+    State.listTrack = 5;
+    focusTrackKind('sub');
+    expect(State.activeTrackKind).toBe('sub');
+    expect(State.listTrack).toBe(5);
+  });
+
+  it('未知的 kind 連夥伴欄位都不可以寫', () => {
+    State.listTrack = 5;
+    focusTrackKind('nonsense', 9);
+    expect(State.activeTrackKind).toBe('sub');
+    expect(State.listTrack).toBe(5);
+  });
+});

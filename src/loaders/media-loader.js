@@ -1,3 +1,27 @@
+/* ==============================================================================
+   SUB Tool — 母素材載入路徑（"src/loaders/media-loader.js"）
+   ==============================================================================
+   【這支是 Media 實作的一部分，不是獨立模組。】
+
+   它收下的 `ctx` 就是 Media 本身（media.js 把每個進入點再包成方法：
+   `loadDesktopMedia(p){ return loadDesktopMedia(this, p, …) }`），並直接讀寫
+   Media 的 17 個私有欄位、共 40 處。那在這裡是**允許的**——它屬於 Media 的
+   【內部接縫】，與 media.js 同一個實作範圍。
+
+   但這件事以前從來沒有被寫下來，而是靠 eslint 圍籬的一個漏洞默許的：
+   `mediaPrivateFence` 比對的是「物件叫不叫 Media」，而這裡叫 `ctx`，
+   於是 40 處存取從頭到尾沒有被檢查過。現在明確列進
+   `eslint.config.mjs` 的 MEDIA_INTERNAL_FILES，並記在這裡。
+
+   ── 三條載入路徑（順序即優先序，前面命中就 return）──
+     (mpv) 非原生格式或多音軌且 mpv 可用 → _loadViaMpv，秒開、背景抽音軌
+     (A)   純原生 + 單一 mono/stereo     → 直讀 <video>，完全不碰 ffmpeg
+     (B)   其餘                          → streamIngest 邊轉邊播（mpv 不可用時的退路）
+
+   **加新東西前先問：這是 Media 的實作，還是可以獨立測的規則？**
+   後者請放到自己的模組（例如 channel-layout.js／media-intake-session.js），
+   不要繼續加大這支對 Media 內部的相依。
+============================================================================== */
 import { $, video } from '../dom.js';
 import { State, DESK, setFps } from '../state.js';
 import { setStatus, showToast } from '../ui.js';
