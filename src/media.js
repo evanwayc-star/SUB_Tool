@@ -32,7 +32,7 @@
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { AudioPipeline } from './audio-pipeline.js';
 import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
-import { getPlayerAdapter } from './media-player-adapter.js';
+import { getPlayerAdapter, setPlayerAdapter, Html5Adapter, MpvAdapter } from './media-player-adapter.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
@@ -546,7 +546,7 @@ const Media = {
     emit('media:audioTracks');
     State.mediaName=file.name; State.mediaSize=file.size;
     const url=URL.createObjectURL(file); this.objectURLs.push(url);
-    video.src=url;
+    video.src=url; setPlayerAdapter(new Html5Adapter(video));
     const native = await canPlayNatively(file, video);
     this.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:native});
     emit('media:audioTracks');
@@ -711,7 +711,7 @@ const Media = {
     if(canNative && audio.length<=1 && audioChannelCount<=2){
       const mediaUrl=await DESK.fileURL(p);
       if(!owns()) return;
-      video.src=mediaUrl;
+      video.src=mediaUrl; setPlayerAdapter(new Html5Adapter(video));
       await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,10000);});
       if(!owns()) return;
       State.duration=video.duration||dur||0;
@@ -756,7 +756,7 @@ const Media = {
       if(!owns()) return;
       if(res.cached) setStatus('使用既有快取，秒開…','ok');
 
-      video.src=res.streamUrl;
+      video.src=res.streamUrl; setPlayerAdapter(new Html5Adapter(video));
       await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,15000);});
       if(!owns()) return;
       State.duration=video.duration||dur||0;
@@ -841,7 +841,7 @@ const Media = {
 
     const mediaUrl=await DESK.fileURL(res.proxy||p);
     if(!owns()) return;
-    video.src=mediaUrl;
+    video.src=mediaUrl; setPlayerAdapter(new Html5Adapter(video));
     await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,10000);});
     if(!owns()) return;
     State.duration=video.duration||dur||0;
@@ -1043,6 +1043,7 @@ const Media = {
     video.style.display='none';
     $('videoSub').style.display=''; // 字幕由 HTML DOM (#videoSub) 統一渲染
     this.mpvMode=true; this._mpvTime=0; this._mpvPath=p;
+    setPlayerAdapter(new MpvAdapter(window.subtool));
     // mpv 顯示時仍要建立透明的 DOM 字幕命中層，才能直接拖曳字幕。
     emit('render:videoSub');
     this._mpvDuration=res.duration||dur||0;
@@ -1297,7 +1298,7 @@ const Media = {
       await ff.run('-i','in.media','-c:v','libx264','-preset','ultrafast','-crf','26','-an','-movflags','+faststart','prev.mp4');
       const mp4=ff.FS('readFile','prev.mp4');
       const url=URL.createObjectURL(new Blob([mp4.buffer],{type:'video/mp4'})); this.objectURLs.push(url);
-      video.src=url; video.muted=true;
+      video.src=url; video.muted=true; setPlayerAdapter(new Html5Adapter(video));
       await new Promise(res=>{video.onloadedmetadata=res;});
       $('noVideo').style.display='none';
       State.duration=video.duration||0;
@@ -1616,7 +1617,7 @@ const Media = {
         const url = c.web && c.web.url;
         if(url && video.src !== url){
           this.stopElementSources();
-          video.src = url;
+          video.src = url; setPlayerAdapter(new Html5Adapter(video));
           await new Promise(res=>{ video.onloadedmetadata = ()=>{ video.onloadedmetadata=null; res(); }; if(video.readyState>=1)res(); setTimeout(res, 8000); });
           if(video.duration) Seq.updateSourceDur(c, video.duration);
         }
@@ -2273,31 +2274,25 @@ const Media = {
       const t=Math.min(Math.max(0,this.displayTime()),Math.max(0,State.duration));
       this._transport.startVirtual(t,{playbackRate:video.playbackRate||1});
       this.ensureCtx();
-      if(this.mpvMode) getPlayerAdapter()?.pause?.().catch(()=>{});
-      else { try{ video.pause(); }catch(e){} video.style.visibility='hidden'; }
+      getPlayerAdapter().pause().catch(()=>{});
+      if(!this.mpvMode) video.style.visibility='hidden';
       this.playing=true; $('playBtn').textContent='⏸'; this._lastSeekTime=null;
       this.startElementSources(t,t);
       video.dispatchEvent(new Event('play'));
       return;
     }
-    if(this.mpvMode){
-      this.ensureCtx();
-      getPlayerAdapter().play().catch(()=>{});
-      this.startElementSources(this._mpvTime, this.tlTime());
-      this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); return;
-    }
-    if(!video.hasAttribute('src')){
+    this.ensureCtx();
+    if(!this.mpvMode && !video.hasAttribute('src')){
       this._transport.resumeVirtual({playbackRate:video.playbackRate||1});
-      this.ensureCtx();
       if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(this._vTime);
       this.startElementSources(this._vTime);
-      this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); return;
+    } else {
+      getPlayerAdapter().play().catch(()=>{});
+      const current = this.mpvMode ? this._mpvTime : video.currentTime;
+      if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(current);
+      this.startElementSources(current, this.tlTime());
     }
-    this.ensureCtx();
-    if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(video.currentTime);
-    this.startElementSources(video.currentTime, this.tlTime());
-    video.play();
-    this.playing=true; $('playBtn').textContent='⏸';
+    this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play'));
     this._lastSeekTime=null;
   },
   pause(){
@@ -2314,24 +2309,20 @@ const Media = {
     }
     if(this.audioOnlyTimeline()){
       this.stopBufferSources(); this.stopElementSources();
-      if(this.mpvMode) getPlayerAdapter()?.pause?.().catch(()=>{});
-      else { try{ video.pause(); }catch(e){} }
+      getPlayerAdapter().pause().catch(()=>{});
       this.playing=false; $('playBtn').textContent='▶'; video.dispatchEvent(new Event('pause')); return;
     }
     const _ps=this._transport.sourceTime(paused,_c); // 播放器（來源）時間
-    if(this.mpvMode){
-      getPlayerAdapter().pause().catch(()=>{});
-      this._mpvTime = _ps;
-      getPlayerAdapter().seek(_ps).catch(()=>{});
-      this.stopElementSources();
-      this.playing=false; $('playBtn').textContent='▶'; return;
-    }
-    if(!video.hasAttribute('src')){
+    getPlayerAdapter().pause().catch(()=>{});
+    if(this.mpvMode) this._mpvTime = _ps;
+
+    if(!this.mpvMode && !video.hasAttribute('src')){
       this.stopBufferSources(); this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶'; return;
     }
-    video.pause(); this.stopBufferSources(); this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶';
-    try { video.currentTime = _ps; } catch(e) {}
+    
+    getPlayerAdapter().seek(_ps).catch(()=>{});
+    this.stopBufferSources(); this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶';
   },
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t){
@@ -2362,17 +2353,12 @@ const Media = {
         window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
         return;
       }
-      if(this.mpvMode){
-        this._mpvTime=local;
+      if(this.mpvMode || video.hasAttribute('src')){
+        if(this.mpvMode) this._mpvTime=local;
         getPlayerAdapter().seek(local).catch(()=>{});
         this._syncSeqElements(t);
-        window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
-        return;
-      }
-      if(video.hasAttribute('src')){
-        video.currentTime=local;
-        this._syncSeqElements(t);
-        if(this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(local); }
+        if(!this.mpvMode && this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(local); }
+        if(this.mpvMode) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
         return;
       }
     }
@@ -2392,39 +2378,37 @@ const Media = {
       window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
       return;
     }
-    if(this.mpvMode){
-      t=clamp(t,0,this._mpvDuration||0);
-      this._mpvTime=t;
+    if(this.mpvMode || video.hasAttribute('src')){
+      if (this.mpvMode) {
+        t = clamp(t, 0, this._mpvDuration || 0);
+        this._mpvTime = t;
+      }
       getPlayerAdapter().seek(t).catch(()=>{});
       for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
         const source=tr.source||'';
         const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
         try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
       } }
-      $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-      $('seekBar').value=Math.round(t*1000);
-      window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
+      
+      if(this.mpvMode) {
+        $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
+        $('seekBar').value=Math.round(t*1000);
+        window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
+      } else {
+        if(this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
+      }
       return;
     }
-    if(!video.hasAttribute('src')){
-      this._transport.seekVirtual(t,{running:this._transport.virtualStartedAt!==null});
-      $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-      $('seekBar').value=Math.round(t*1000);
-      for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
-        const source=tr.source||'';
-        const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
-        try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
-      } }
-      if(this.playing&&this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
-      return;
-    }
-    video.currentTime=t;
+    
+    this._transport.seekVirtual(t,{running:this._transport.virtualStartedAt!==null});
+    $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
+    $('seekBar').value=Math.round(t*1000);
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
       const source=tr.source||'';
       const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
       try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
     } }
-    if(this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
+    if(this.playing&&this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
   },
   /* 外部音訊不隸屬影片 clip；在它自己的開始／結束邊界才一次性 seek/play 或 pause。
      這可處理「影片已結束但音檔稍後才開始」與修剪後的音檔尾端，且不會每幀造成播放抖動。 */
@@ -2713,23 +2697,14 @@ const Media = {
     emit('media:srcSel');
   },
   setRate(r){
-    if(this.audioOnlyTimeline() && this._transport.virtualStartedAt!==null){
+    if(this._transport.virtualStartedAt!==null && (this.audioOnlyTimeline() || !video.hasAttribute('src'))){
       this._transport.reanchorVirtual({playbackRate:video.playbackRate||1});
     }
     const pp = (r >= 0.25 && r <= 4);
-    if(this.mpvMode){
-      video.playbackRate=r; if('preservesPitch' in video) video.preservesPitch=pp; // 保持同步供 startElementSources 使用
-      getPlayerAdapter().rate(r).catch(()=>{});
-      for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ tr.el.playbackRate=r; if('preservesPitch' in tr.el) tr.el.preservesPitch=pp; } }
-      return;
-    }
-    // 虛擬模式中更改速度前，先把已累積時間存回 transport，重設計時起點，防止位置跳躍。
-    if(!this.audioOnlyTimeline()&&!video.hasAttribute('src')&&this._transport.virtualStartedAt!==null){
-      this._transport.reanchorVirtual({playbackRate:video.playbackRate||1});
-    }
     video.playbackRate=r; if('preservesPitch' in video) video.preservesPitch=pp;
+    getPlayerAdapter().rate(r).catch(()=>{});
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ tr.el.playbackRate=r; if('preservesPitch' in tr.el) tr.el.preservesPitch=pp; } }
-    if(this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }
+    if(!this.mpvMode && this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }
   },
   reset(options={}){
     this._intakeSession.invalidate();
@@ -2739,6 +2714,7 @@ const Media = {
       // 已載入 mpv 的 quit 與下一支素材的 launch 共用同一條 system-effect lane。
       this._intakeSession.queueExclusive(()=>adapter.quit()).catch(()=>{});
       this.mpvMode=false; this._mpvTime=0; this._mpvDuration=0;
+      setPlayerAdapter(new Html5Adapter(video));
       video.style.display='';
       const vs=$('videoSub'); if(vs) vs.style.display='';
     }
