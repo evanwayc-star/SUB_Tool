@@ -339,16 +339,16 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* 專案音軌數：琥珀色是刻意的強調（它決定所有交付的聲道數），但飽和度壓低過一次——
    原本數字是 #fff1cd（近乎白色的奶油色）配 800 字重，在深色介面上等於一直發光刺眼。
    現在整組往下壓約三成亮度，維持「這是重點」的層級，但不再搶視線。 */
-.project-audio-count{display:inline-flex;align-items:center;gap:5px;min-height:28px;margin-left:4px;padding:2px 7px 2px 9px;
-  border:1px solid rgba(178,148,90,.34);border-left:3px solid #9a8250;border-radius:4px;
-  background:linear-gradient(90deg,rgba(94,70,28,.20),rgba(51,43,25,.16));box-shadow:inset 0 1px rgba(246,225,179,.04),0 0 0 1px rgba(0,0,0,.24)}
-.project-audio-count-label{color:#bda87b;font-size:12px;font-weight:700;letter-spacing:.08em;white-space:nowrap;text-shadow:0 1px 0 rgba(0,0,0,.65)}
-.project-audio-count input{width:43px;min-width:43px;height:23px;padding:1px 2px;text-align:center;color:#dcc59a;background:#211d14;
-  border-color:#7a6539;border-radius:3px;font-family:"Cascadia Mono","JetBrains Mono",Consolas,monospace;font-size:15px;font-weight:700;line-height:1;
-  font-variant-numeric:tabular-nums;box-shadow:inset 0 0 0 1px rgba(218,181,101,.07)}
-.project-audio-count input:hover{border-color:#9c8250;background:#292317}
-.project-audio-count input:focus{border-color:#ac9059;box-shadow:0 0 0 2px rgba(201,167,96,.13),inset 0 0 0 1px rgba(239,214,158,.10)}
-.project-audio-count-unit{color:#b09d74;font-size:11px;font-weight:700;white-space:nowrap}
+.project-audio-count{display:inline-flex;align-items:center;gap:5px;min-height:28px;margin-left:4px;padding:2px 7px;
+  border:1px solid var(--border);border-radius:4px;
+  background:var(--panel2);}
+.project-audio-count-label{color:var(--text-dim);font-size:12px;font-weight:700;letter-spacing:.08em;white-space:nowrap;}
+.project-audio-count input{width:43px;min-width:43px;height:23px;padding:1px 2px;text-align:center;color:var(--text);background:var(--panel);
+  border:1px solid var(--border2);border-radius:3px;font-family:"Cascadia Mono","JetBrains Mono",Consolas,monospace;font-size:15px;font-weight:700;line-height:1;
+  font-variant-numeric:tabular-nums;}
+.project-audio-count input:hover{border-color:var(--text-dim);background:var(--panel3)}
+.project-audio-count input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(76,183,170,.15)}
+.project-audio-count-unit{color:var(--text-dim);font-size:11px;font-weight:700;white-space:nowrap}
 .tl-toolbar .zoom{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px}
 .tl-toolbar #tlSel{min-width:90px;padding-left:6px;padding-right:6px}
 .tl-toolbar #zoomBar{width:105px!important; -webkit-appearance:none;appearance:none;height:18px;margin:0;padding:0;border:0;background:var(--text-faint) center/calc(100% - 14px) 4px no-repeat;cursor:pointer}
@@ -477,13 +477,13 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-gutter-wave select{margin-left:auto;font-size:12px;padding:1px 4px;height:22px;max-width:100px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:3px;cursor:pointer}
 .tl-resize-handle{position:absolute;bottom:0;left:0;right:0;height:4px;cursor:ns-resize;z-index:10}
 .tl-resize-handle:hover,.tl-resize-handle:active{background:rgba(100,120,255,.35)}
-#tlGutterTracks{flex:1;overflow-y:auto;overflow-x:hidden}
+#tlGutterTracks{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}
 /* 視訊軌列頭（比照字幕軌 gutter，帶輕藍色調以區分）：只留影像控制。 */
-#tlGutterVtracks{flex-shrink:0}
+#tlGutterVtracks{flex-shrink:0;overflow-y:hidden;scrollbar-gutter:stable}
 .vgtrack{display:flex;align-items:center;padding:2px 6px;border-bottom:1px solid #2b3947;position:relative;box-sizing:border-box;background:rgba(46,89,132,.12)}
 .vgtrack .vgrow1{display:flex;align-items:center;gap:3px;min-width:0;width:100%}
-.vgtrack .vlabel{font-size:10px;color:#7fb0dd;flex-shrink:0;font-weight:600}
-.vgtrack .eye{cursor:pointer;font-size:13px;width:20px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
+.vgtrack .vlabel{font-size:10px;color:#7fb0dd;flex-shrink:0;font-weight:600;width:20px;text-align:center}
+.vgtrack .eye{cursor:pointer;font-size:13px;width:24px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
 .vgtrack.hidden-tk .gname{opacity:.45;text-decoration:line-through}
 .vgtrack .gname{flex:1;font-size:11px;color:#bfe3ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 3px}
 .vgtrack .gname:focus{outline:none;border-color:var(--accent);background:var(--panel)}
@@ -492,7 +492,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .vgtrack .gdel{cursor:pointer;background:none;border:none;font-size:13px;padding:0 2px;color:var(--text-faint);flex-shrink:0;opacity:0;transition:opacity .15s,color .15s}
 .vgtrack:hover .gdel{opacity:.8}
 .vgtrack .gdel:hover{color:var(--red)}
-.vgtrack .glock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s,color .15s;margin-left:auto}
+.vgtrack .glock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.55;transition:opacity .15s,color .15s;margin-left:auto;width:20px;text-align:center}
 .vgtrack .glock:hover{opacity:1}
 .vgtrack .glock.locked{color:var(--accent);opacity:1}
 .pipPos{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border2,#3a3f47);color:var(--text-dim);border-radius:3px;font-size:13px;padding:0;line-height:1}
@@ -508,7 +508,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .agtrack.external-audio-gutter.selected{box-shadow:inset 3px 0 0 var(--accent);background:rgba(72,94,165,.35)}
 .agtrack.muted{opacity:.62}
 .agtrack.locked{background-color:rgba(111,142,154,.07);opacity:0.8}
-.agtrack .alabel{width:18px;flex:0 0 auto;color:#6dd2c1;font-size:10px;font-weight:700;text-align:center}
+.agtrack .alabel{width:20px;flex:0 0 auto;color:#6dd2c1;font-size:10px;font-weight:700;text-align:center}
 .agtrack .aeye{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
 .agtrack .aname{flex:1;min-width:26px;font-size:11px;color:#cef5ef;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 2px}
 .agtrack .aname:focus{outline:none;border-color:#4cb7aa;background:#102126}
@@ -516,7 +516,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .agtrack .awm.on{background:var(--red,#e05353);border-color:var(--red,#e05353);color:#fff}
 .agtrack .aws.on{background:#e0a53e;border-color:#e0a53e;color:#1b1b1d}
 .agtrack .awvol{width:44px;min-width:30px;accent-color:#50c9b5}
-.agtrack .alock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.62}
+.agtrack .alock{cursor:pointer;background:none;border:none;font-size:12px;padding:0 1px;color:var(--text-faint);flex-shrink:0;opacity:.62;width:20px;text-align:center;margin-left:auto}
 .agtrack .alock:hover{opacity:1}.agtrack .alock.locked{color:var(--accent);opacity:1}
 .agtrack .audio-clip-mute{border-color:rgba(138,183,215,.62);background:rgba(11,29,39,.74);color:#bfe1f7}
 .agtrack .audio-clip-mute:hover{background:rgba(68,129,170,.42);border-color:#9bd8ff;color:#fff}
@@ -532,7 +532,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .awtrack.child{background:rgba(30,44,60,.16)}
 .awtrack.child .awname{padding-left:12px;color:#a9c7dd}
 .tl-gtrack{display:flex;align-items:center;gap:4px;padding:0 6px;border-bottom:1px solid #26262b;position:relative}
-.tl-gtrack .eye{cursor:pointer;font-size:14px;width:22px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
+.tl-gtrack .eye{cursor:pointer;font-size:14px;width:24px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
 .tl-gtrack.hidden-tk .gname{opacity:.45;text-decoration:line-through}
 .tl-gtrack .gname{flex:1;font-size:11px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 3px}
 .tl-gtrack .gname:focus{outline:none;border-color:var(--accent);background:var(--panel)}
@@ -602,7 +602,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .sub-styname .nm.ov-custom{
   background:transparent;border-color:transparent;color:#7ce38b;
 }
-.tl-gtrack .glock{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s}
+.tl-gtrack .glock{cursor:pointer;font-size:12px;width:20px;text-align:center;background:none;border:none;padding:0;color:var(--text-faint);opacity:0;flex-shrink:0;transition:opacity .15s,color .15s;margin-left:auto}
 .tl-gtrack:hover .glock{opacity:.8}
 .tl-gtrack .glock.locked{color:var(--accent);opacity:1}
 .tl-gtrack.tl-active, .vgtrack.tl-active, .agtrack.tl-active {
@@ -711,7 +711,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .progress>div{height:100%;background:var(--accent);width:0%;transition:width .2s}
 
 /* 浮動搜尋視窗 */
-.search-dialog{position:fixed;top:100px;right:24px;z-index:300;background:var(--panel2);border:1px solid var(--border2);border-radius:6px;padding:10px;width:340px;box-shadow:0 4px 24px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:6px}
+.search-dialog{position:fixed;top:100px;right:24px;z-index:300;background:var(--panel2);border:1px solid var(--border2);border-radius:6px;padding:10px;width:420px;box-shadow:0 4px 24px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:6px}
 .sd-head{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:600;color:var(--text-dim);cursor:move;padding-bottom:6px;border-bottom:1px solid var(--border);user-select:none}
 .sd-close{background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;padding:0 2px;line-height:1}
 .sd-close:hover{color:var(--text)}
@@ -819,7 +819,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .shift-tab.active{background:var(--accent);color:#1b1b1d;border-color:var(--accent-d)}
 .shift-page{display:flex;flex-direction:column;gap:6px}
 /* 軌道拖曳重排 */
-.tl-gtrack .drag-handle{cursor:grab;color:var(--text-faint);font-size:14px;padding:0 2px;user-select:none;opacity:0;flex-shrink:0}
+.tl-gtrack .drag-handle{cursor:grab;color:var(--text-faint);font-size:14px;padding:0 2px;user-select:none;opacity:0;flex-shrink:0;width:20px;text-align:center}
 .tl-gtrack:hover .drag-handle{opacity:.6}
 .tl-gtrack.tl-dragging{opacity:.4}
 .tl-gtrack.tl-drag-target{box-shadow:inset 0 2px 0 var(--accent)}

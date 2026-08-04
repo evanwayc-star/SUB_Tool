@@ -177,7 +177,26 @@ export function createDeliveryList({
     },
 
     setKbps(i, kbps) { const r = at(i); if (r) r.kbps = parseInt(kbps, 10) || 0; },
-    setBurnTimecode(i, on) { const r = at(i); if (r) { r.burnTimecode = !!on; refreshName(r); } },
+    setBurnTimecode(i, on) { 
+      const r = at(i); 
+      if (r) { 
+        r.burnTimecode = !!on; 
+        if (!r.nameModified) {
+          refreshName(r); 
+        } else {
+          const ext = extensionFor(r.format);
+          let base = r.customName;
+          if (base.toLowerCase().endsWith(ext)) {
+            base = base.slice(0, -ext.length);
+          }
+          if (on && !base.endsWith('_TC')) {
+            r.customName = base + '_TC' + ext;
+          } else if (!on && base.endsWith('_TC')) {
+            r.customName = base.slice(0, -3) + ext;
+          }
+        }
+      } 
+    },
     setOutDir(i, dir) { const r = at(i); if (r) r.outDir = dir || ''; },
 
     setName(i, value) {

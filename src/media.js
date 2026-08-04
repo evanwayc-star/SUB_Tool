@@ -789,7 +789,7 @@ const Media = {
               const el=els[i]; if(!el) continue;
               const node=self.ctx.createMediaElementSource(el);
               const g=self.ctx.createGain(); node.connect(g); g.connect(self.master);
-              const tr=self.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:false,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
+              const tr=self.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:!!primary?.muted,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
               self.attachMeter(tr,node); self.tracks.push(tr);
               if(self.pendingChannels[i]) self.pendingChannels[i].ready=true;
               self.syncMuteState(); emit('media:audioTracks');
@@ -866,7 +866,7 @@ const Media = {
         const el=els[i]; if(!el) continue;
         const node=this.ctx.createMediaElementSource(el);
         const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-        const tr=this.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:false,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
+        const tr=this.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:!!primary?.muted,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
         this.attachMeter(tr,node); this.tracks.push(tr);
       }
     }
@@ -1170,7 +1170,7 @@ const Media = {
         const el=els[i]; if(!el) continue;
         const node=this.ctx.createMediaElementSource(el);
         const g=this.ctx.createGain(); node.connect(g); g.connect(this.master);
-        const tr=this.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:false,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
+        const tr=this.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:!!primary?.muted,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
         this.attachMeter(tr,node); this.tracks.push(tr);
         if(this.pendingChannels[i]) this.pendingChannels[i].ready=true;
         this.usingWebAudio=true; this.syncMuteState();
@@ -1310,7 +1310,7 @@ const Media = {
         const wav=ff.FS('readFile',`a${i}.wav`);
         const ab=await this.ctx.decodeAudioData(wav.buffer.slice(0));
         const g=this.ctx.createGain(); g.connect(this.master);
-        this.tracks.push(this.bindTrackRouting({id:'ex'+i,name:'音軌 '+(i+1),kind:'buffer',source:'video',buffer:ab,gain:g,muted:false,solo:false,volume:1,file:file},primary,{sourceStream:i,sourceChannel:0},i));
+        this.tracks.push(this.bindTrackRouting({id:'ex'+i,name:'音軌 '+(i+1),kind:'buffer',source:'video',buffer:ab,gain:g,muted:!!primary?.muted,solo:false,volume:1,file:file},primary,{sourceStream:i,sourceChannel:0},i));
         try{ff.FS('unlink',`a${i}.wav`);}catch(e){}
       }
       try{ff.FS('unlink','in.media');ff.FS('unlink','prev.mp4');}catch(e){}
@@ -1349,7 +1349,7 @@ const Media = {
     const anL=mkAn(), anR=mkAn();
     splitter.connect(anL,0); splitter.connect(anR,1);
     const mk=(id,nm,g,an,index)=>this.bindTrackRouting(
-      {id,name:nm,kind:'native',source:sourceName,gain:g,muted:false,solo:false,volume:1,
+      {id,name:nm,kind:'native',source:sourceName,gain:g,muted:!!clip?.muted,solo:false,volume:1,
         analyser:an,_mbuf:new Float32Array(an.fftSize),level:0,peak:0,peakT:0},
       clip,null,index
     );
@@ -1367,7 +1367,7 @@ const Media = {
       splitter.connect(an,i); splitter.connect(g,i); g.connect(this.master);
       return this.bindTrackRouting(
         {id:'ext'+(_extTrackIdCounter++),name:lbl,kind:'element',source:sourceName,
-          el,gain:g,muted:false,solo:false,volume:1,
+          el,gain:g,muted:!!clip?.muted,solo:false,volume:1,
           analyser:an,_mbuf:new Float32Array(an.fftSize),level:0,peak:0,peakT:0},
         clip,Array.isArray(descriptors)?descriptors[i]:null,i
       );
@@ -1534,7 +1534,7 @@ const Media = {
       }, {once:true});
       const node = this.ctx.createMediaElementSource(el);
       const g = this.ctx.createGain(); node.connect(g); g.connect(this.master);
-      tr = { id:'altpri', name:'主影片音訊', kind:'element', el, gain:g, muted:false, solo:false, volume:1, source:'video', _altPrimary:true, _srcHidden:true };
+      tr = { id:'altpri', name:'主影片音訊', kind:'element', el, gain:g, muted:!!pri?.muted, solo:false, volume:1, source:'video', _altPrimary:true, _srcHidden:true };
       this.tracks.push(tr);
       return tr;
     }catch(e){ console.warn('altPrimary', e); return null; }
@@ -1718,6 +1718,7 @@ const Media = {
       // 所有本機 File，但至少不會在使用者重新選回主檔時遺失 trim/offset/track。
       c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0;
       c.vtrack = pri.vtrack || 0; c.fadeIn = pri.fadeIn || 0; c.fadeOut = pri.fadeOut || 0;
+      if (pri.muted != null) c.muted = pri.muted;
       c.audioDetached=!!pri.audioDetached;
       Seq.sort(); Seq.recomputeDuration();
     }

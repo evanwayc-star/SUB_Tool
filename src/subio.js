@@ -280,7 +280,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:8px;">
         <div>
           <div style="font-weight:bold;font-size:14px;">交付清單</div>
-          <div id="evOutputDuration" data-seconds="${data.duration}" style="font-size:11px;color:var(--text-dim);margin-top:1px;">本次輸出時長：<b style="color:var(--text);font-variant-numeric:tabular-nums;">${secToEncore(data.duration, State.fps, State.dropFrame)}</b><span style="color:var(--text-faint);">（${data.duration.toFixed(3)} 秒）</span></div>
+          <div id="evOutputDuration" data-seconds="${data.duration}" style="font-size:11px;color:var(--text-dim);margin-top:1px;">本次輸出時長：<b style="color:var(--text);font-variant-numeric:tabular-nums;">${secToEncore(data.duration, State.fps, State.dropFrame)}</b>${(State.exportIn != null || State.exportOut != null) ? ' <span style="color:var(--text-dim);">(自訂範圍)</span>' : ''}</div>
         </div>
         <button id="evAddRowBtn" style="padding:2px 8px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">＋新增一列</button>
       </div>
@@ -345,12 +345,12 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         </div>
         <div style="display:flex;gap:12px;align-items:center;">
           <input type="text" class="ev-name" data-idx="${i}" value="${r.customName}" style="flex:3;min-width:0;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" placeholder="檔名 (含副檔名)" title="${escapeHTML(r.customName || '')}">
-          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" readonly style="flex:2;min-width:0;padding:3px;font-size:12px;background:var(--bg-2);color:var(--text-dim);border:1px solid var(--border);cursor:pointer;${!IS_DESKTOP?'display:none;':''}" title="${escapeHTML(r.outDir || '點擊瀏覽選擇目錄')}" placeholder="選擇輸出目錄...">
+          <input type="text" class="ev-outdir" data-idx="${i}" value="${r.outDir || ''}" style="flex:2;min-width:0;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);${!IS_DESKTOP?'display:none;':''}" title="${escapeHTML(r.outDir || '')}" placeholder="選擇輸出目錄...">
           <button class="ev-dir-btn" data-idx="${i}" style="flex:none;padding:2px 8px;font-size:12px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;${!IS_DESKTOP?'display:none;':''}">瀏覽...</button>
         </div>
         <div style="display:flex;gap:12px;align-items:center;">
           <div style="display:flex;align-items:center;gap:6px;">
-            <span style="font-size:11px;color:var(--text-faint);">音訊: ${audioDesc}</span>
+            <span style="font-size:11px;color:var(--text-dim);">音訊: ${audioDesc}</span>
             <button class="ev-audio-btn" data-idx="${i}" style="padding:2px 6px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;" title="設定此列輸出的音軌">⚙ 音軌</button>
           </div>
         </div>
@@ -376,14 +376,14 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     $$('.ev-custom-res').forEach(el => el.onchange = e => { list.setTargetHeight(idxOf(e), parseInt(e.target.value, 10)); after(); });
     $$('.ev-kbps').forEach(el => el.onchange = e => list.setKbps(idxOf(e), e.target.value));
     $$('.ev-name').forEach(el => el.onchange = e => { list.setName(idxOf(e), e.target.value); after(); });
-    $$('.ev-tc').forEach(el => el.onchange = e => list.setBurnTimecode(idxOf(e), e.target.checked));
+    $$('.ev-outdir').forEach(el => el.onchange = e => { list.setOutDir(idxOf(e), e.target.value); after(); });
+    $$('.ev-tc').forEach(el => el.onchange = e => { list.setBurnTimecode(idxOf(e), e.target.checked); after(); });
 
     const pickDir = async e => {
       const idx = idxOf(e);
       const p = await DESK.exportDirectory([]);
       if (p) { list.setOutDir(idx, p); after(); }
     };
-    $$('.ev-outdir').forEach(el => el.onclick = pickDir);
     $$('.ev-dir-btn').forEach(el => el.onclick = pickDir);
     $$('.ev-del').forEach(el => el.onclick = e => { list.removeAt(idxOf(e)); after(); });
 

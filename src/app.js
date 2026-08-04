@@ -583,8 +583,10 @@ function renderTrackStyle(){
   const { trk, cue, cues }=t;
   const idx=cue ? State.cues.filter(c=>(c.track||0)===State.listTrack).indexOf(cue)+1 : 0;
   const multi=cues.length>1;
-  $('tsTitle').textContent = multi ? `已選 ${cues.length} 句樣式`
-                           : cue ? `第 ${idx} 句樣式` : `「${trk.name}」整軌樣式`;
+  const editingPreset = State.presetEdit;
+  const labelStr = editingPreset ? `✎ 編輯常用樣式：${editingPreset.name}`
+                           : cue ? `第 ${idx} 句樣式` : `「${trk.name}」樣式`;
+  $('tsTitle').textContent = labelStr;
   $('tsTitle').title = multi ? `改動會同時套用到選取的這 ${cues.length} 句（面板顯示的是第 ${idx} 句的值）`
                      : cue ? '改動只影響這一句；要套用到整軌請按「⇩ 全軌統一」'
                      : '沒有選取字幕 → 改動套用到整條軌道';
@@ -823,7 +825,7 @@ async function openCueEditModal(c){
 /* ===== UI 接線（區塊切換 / 樣式 / 分隔線 / 捲動同步 / 雙擊） ===== */
 function initUI(){
   // 軌道切換下拉
-  $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; deselect('sub'); $('stSel').textContent=''; searchUpdate(); renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
+  $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; deselect('sub'); $('stSel').textContent=''; searchUpdate(); renderSubList(); renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
   const waveGlobalSrcSel=$('waveGlobalSrcSel');
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value==='__all__'?null:e.target.value); renderMixer(); e.target.blur(); });
 

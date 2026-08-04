@@ -330,9 +330,9 @@ function renderSubList(){
   const list = State.cues.filter(c=>(c.track||0)===State.listTrack);
   if(list.length===0){
     sublist.innerHTML='<div class="empty">'+(State.cues.length?'此軌道沒有字幕':'尚無字幕<br><br>· 匯入字幕檔，或<br>· 選一條字幕後按 <b>I</b>/<b>O</b> 設定起訖<br>· 或點 <b>⬆＋ / ⬇＋</b> 新增')+'</div>';
-    $('subCount').textContent=list.length+' 條'; return;
+    $('subCount').textContent=list.length+' 句'; return;
   }
-  $('subCount').textContent=list.length+' 條';
+  $('subCount').textContent=list.length+' 句';
   const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
   const overlaps=detectOverlaps(timed, 0.001);
   let html='';
@@ -453,7 +453,7 @@ function selectCue(id,opts){
     }
   }
   const pc=State.cues.find(x=>x.id===State.selectedId);
-  $('stSel').textContent=State.selectedIds.length?('已選 '+State.selectedIds.length+' 條'+(pc?(' · #'+(State.cues.indexOf(pc)+1)):'')):'';
+  $('stSel').textContent=State.selectedIds.length?('已選 '+State.selectedIds.length+' 句'+(pc?(' · #'+(State.cues.indexOf(pc)+1)):'')):'';
   updatePlayhead();
 }
 
