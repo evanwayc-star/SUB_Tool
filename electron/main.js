@@ -26,6 +26,7 @@ const { isPathContained } = require('./export-name-safety');
 const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
 const { buildAudioIngestPlan } = require('./channel-layout');
 const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
+const { createExportAdmission } = require('./export-admission');
 const {
   deliveryVideoEncoderArgs,
   detectNativeTool,
@@ -171,9 +172,10 @@ function isPreviewCacheMedia(file) {
   });
   return isCacheRoot || lower.split(path.sep).includes('.subtool_cache');
 }
+/* 鐵律 §0.8 的守門員。規則本身在 export-admission.js（可測），這裡只是轉呼叫，
+   保留原名讓既有呼叫端不動。_admission 在下方建立；本函式的呼叫點都在那之後。 */
 function assertMasterExportMedia(file, kind) {
-  if (isPreviewCacheMedia(file))
-    throw new Error(`${kind} 匯出不能使用 Proxy 或播放快取。請重新連結母素材後再匯出。`);
+  return _admission.assertMasterMedia(file, kind);
 }
 function metaValid(m) {
   return (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
@@ -905,69 +907,30 @@ function ensureExportQueueDir() {
   QueueStore.ensureDir(EXPORT_QUEUE_DIR);
 }
 
-function queueOutputKey(job) {
-  const outPath = job?.payload?.outPath;
-  if (typeof outPath !== 'string' || !outPath.trim()) {
-    const error = new Error('匯出工作缺少有效的輸出路徑');
-    error.code = 'INVALID_OUTPUT_PATH';
-    throw error;
-  }
-  return ExportLease.outputKey(outPath);
-}
+/* 准入政策（能不能進佇列、需要哪些檔案能力）住在 export-admission.js——
+   那四條規則原本散在這裡，與 BrowserWindow／dialog／spawn 糾纏，因此一行測試都沒有，
+   而其中一條正是鐵律 §0.8 的守門員（不可拿 proxy.mp4／chNN.m4a 匯出）。
+   外部能力全部由這裡注入，本檔只留「接線」。 */
+const _admission = createExportAdmission({
+  expectedExtensionFor: expectedExportExtension,
+  outputKeyFor: outPath => ExportLease.outputKey(outPath),
+  mergeSourcePaths: (payload, sourcePaths) => QueueStore.mergeSourcePaths(payload, sourcePaths),
+  currentJobs: () => _queueState.jobs(),
+  reservesOutput: status => OUTPUT_RESERVED_STATUSES.has(status),
+  canReadSource: file => fileAuthority.canRead(file),
+  canWriteDelivery: file => fileAuthority.canWriteDelivery(file),
+  isPreviewCacheMedia,
+});
 
-function assertQueueOutputFormat(job) {
-  const outPath = job?.payload?.outPath;
-  const expected = expectedExportExtension(job?.payload?.format);
-  const actual = typeof outPath === 'string' ? path.extname(outPath).slice(1).toLowerCase() : '';
-  if (actual === expected) return expected;
-  const error = new Error(`匯出格式 ${job?.payload?.format || '(empty)'} 必須使用 .${expected} 副檔名`);
-  error.code = 'INVALID_OUTPUT_EXTENSION';
-  throw error;
-}
-
-function assertQueueOutputAvailable(job, excludeId = job?.id) {
-  const key = queueOutputKey(job);
-  for (const existing of _queueState.jobs()) {
-    if (!existing || existing.id === excludeId || !OUTPUT_RESERVED_STATUSES.has(existing.status)) continue;
-    let existingKey;
-    try { existingKey = queueOutputKey(existing); } catch (error) { continue; }
-    if (existingKey !== key) continue;
-    const error = new Error(`同一個輸出檔案已在匯出佇列中：${job.payload.outPath}`);
-    error.code = 'OUTPUT_BUSY';
-    error.conflictingJobId = existing.id;
-    throw error;
-  }
-  return key;
-}
-
+/* 以下維持原本的名字，呼叫端不動——它們現在只是轉呼叫。 */
+const queueOutputKey = job => _admission.outputKey(job);
+const assertQueueOutputFormat = job => _admission.assertOutputFormat(job);
+const assertQueueOutputAvailable = (job, excludeId) => _admission.assertOutputAvailable(job, excludeId);
 /* 匯出 payload 是 renderer 的資料快照，不能因為進了佇列就自動升格成檔案能力。
    sourcePaths 在 enqueue 時凍結，重啟時則只從 app 自己持久化的 job snapshot 重新授予
    精確檔案能力；任何後來摻入 payload 的路徑都仍會被這裡拒絕。 */
-function queueSourcePaths(job) {
-  return QueueStore.mergeSourcePaths(job?.payload, job?.sourcePaths);
-}
-
-function exportAuthorizationError(message, code = 'UNAUTHORIZED_PATH') {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function assertQueueJobCapabilities(job) {
-  assertQueueOutputFormat(job);
-  const sourcePaths = queueSourcePaths(job);
-  for (const sourcePath of sourcePaths) {
-    if (!fileAuthority.canRead(sourcePath)) {
-      throw exportAuthorizationError(`匯出來源未經授權：${sourcePath}`);
-    }
-    assertMasterExportMedia(sourcePath, '匯出來源');
-  }
-  const outPath = job?.payload?.outPath;
-  if (!fileAuthority.canWriteDelivery(outPath)) {
-    throw exportAuthorizationError(`匯出輸出位置未經授權：${outPath}`, 'UNAUTHORIZED_OUTPUT_PATH');
-  }
-  return sourcePaths;
-}
+const queueSourcePaths = job => _admission.sourcePathsOf(job);
+const assertQueueJobCapabilities = job => _admission.assertJobAdmissible(job);
 
 function grantPersistedQueueJobCapabilities(job) {
   const sourcePaths = queueSourcePaths(job);
@@ -1116,7 +1079,7 @@ const QueueManager = {
       }
     }
     if (missing.length) {
-      job.status = 'missing-source';
+      job.status = JOB_STATUS.MISSING_SOURCE;
       job.errorMsg = `找不到或未授權的來源檔：\n${missing.join('\n')}`;
       try { this.persistJob(job); } catch (e) {
         console.error(`[Queue] 無法保存工作 ${job.id} 的來源遺失狀態：`, e);
@@ -1126,7 +1089,7 @@ const QueueManager = {
     try {
       assertQueueOutputFormat(job);
     } catch (error) {
-      job.status = 'failed';
+      job.status = JOB_STATUS.FAILED;
       job.errorMsg = error.message || String(error);
       try { this.persistJob(job); } catch (persistError) {
         console.error(`[Queue] 無法保存工作 ${job.id} 的輸出格式失敗狀態：`, persistError);
@@ -1134,7 +1097,7 @@ const QueueManager = {
       return false;
     }
     if (!fileAuthority.canWriteDelivery(job?.payload?.outPath)) {
-      job.status = 'failed';
+      job.status = JOB_STATUS.FAILED;
       job.errorMsg = `匯出輸出位置未經授權：${job?.payload?.outPath || ''}`;
       try { this.persistJob(job); } catch (e) {
         console.error(`[Queue] 無法保存工作 ${job.id} 的輸出授權失敗狀態：`, e);
@@ -1160,7 +1123,7 @@ const QueueManager = {
           // 其餘明確失敗，避免第一份完成釋放 lease 後第二份又以 -y 覆寫成品。
           assertQueueOutputAvailable(job);
         } catch (error) {
-          job.status = 'failed';
+          job.status = JOB_STATUS.FAILED;
           job.errorMsg = error.message || String(error);
         }
       }
@@ -1197,7 +1160,7 @@ const QueueManager = {
     for (const job of _queueState.jobs()) {
       if (!isLiveWork(job.status)) continue;
       if (job.status === 'running') {
-        job.status = 'queued';
+        job.status = JOB_STATUS.QUEUED;
         job.pct = 0;
         job.elapsedMs = 0;
         job.etaS = null;
@@ -1479,7 +1442,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   // ffmpeg 會以它延長成品，不能讓等待中的列仍顯示較短的前端宣告值。
   const effectiveDuration = Math.max(0.05, _finiteNumber(duration, 0), _planDuration(audioPlan));
   const savedPayload = { ...payload, audioPlan, assText: null, outPath, duration: effectiveDuration };
-  const job = { id: jobId, status: 'queued', createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
+  const job = { id: jobId, status: JOB_STATUS.QUEUED, createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
   try {
     QueueManager.addJob(job);
   } catch (error) {
@@ -1512,17 +1475,17 @@ async function _runJobLogic(job) {
     // 以確保 QueueManager 能收到進度，並觸發 QueueManager.broadcastUpdate()。
     if (evt === 'task-progress') {
       if (data.done) {
-        job.status = 'done';
+        job.status = JOB_STATUS.DONE;
         // 終端工作不跨重啟保存；這個時間只代表本次 ffmpeg 真正完成的當下，
         // 不可由監控視窗開啟／重繪時的現在時間推算。
         if (!Number.isFinite(job.completedAt) || job.completedAt <= 0) job.completedAt = Date.now();
       }
       else if (data.error) {
-        job.status = 'failed';
+        job.status = JOB_STATUS.FAILED;
         job.errorMsg = data.errorMsg;
         openQueueWindow(); // pop up on error
       }
-      else if (data.stopped) job.status = 'stopped';
+      else if (data.stopped) job.status = JOB_STATUS.STOPPED;
       else {
         job.pct = data.pct;
         job.elapsedMs = data.elapsedMs;
