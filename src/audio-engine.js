@@ -68,11 +68,15 @@ class AudioEngineCore {
     return this.ctx.createChannelMerger(num);
   }
 
-  startBufferSources(tracks, offset, playbackRate, seqOn, tlTime, srcLocalTFn) {
+  /* 具名參數，不用位置參數。這三個 transport 方法原本收 6～11 個位置參數
+     （scrubAudio 是 11 個，其中 3 個是回呼），而它們全部來自 Media 自己的狀態——
+     位置一旦寫錯，型別又都對得上（數字／布林／函式），就會靜默跑出錯的行為。
+     `at` 一律是【時間軸時間】以外的語意請看各參數註解（鐵律 §0.5）。 */
+  startBufferSources(tracks, { offset, playbackRate = 1, seqOn = false, tlTime = 0, sourceTimeFor } = {}) {
     if (!this.ctx) return null;
     let off = offset;
-    if (seqOn) {
-      const lt = srcLocalTFn('video', tlTime);
+    if (seqOn && sourceTimeFor) {
+      const lt = sourceTimeFor('video', tlTime);
       if (lt != null) off = lt;
     }
     const startCtxTime = this.ctx.currentTime;
@@ -102,7 +106,8 @@ class AudioEngineCore {
     }
   }
 
-  startElementSources(tracks, localT, tlT, seqOn, srcLocalTFn, extSourceTimeFn, playbackRate) {
+  /* localT＝目前 clip 的來源時間；tlT＝時間軸時間（ext-* 參考音用）。兩者不可互換，見 §0.5。 */
+  startElementSources(tracks, { localT, tlT, seqOn = false, sourceTimeFor, externalSourceTimeFor, playbackRate = 1 } = {}) {
     for (const tr of tracks) {
       if (tr.kind !== 'element' || !tr.el) continue;
       if (tr._srcHidden) {
@@ -112,13 +117,13 @@ class AudioEngineCore {
       const s = tr.source || 'video';
       let off;
       if (s.startsWith('ext-')) {
-        off = extSourceTimeFn(s, tlT);
+        off = externalSourceTimeFor?.(s, tlT);
         if (off == null) {
           try { tr.el.pause(); } catch (e) {}
           continue;
         }
       } else if (seqOn) {
-        const lt = srcLocalTFn(s, tlT);
+        const lt = sourceTimeFor?.(s, tlT);
         if (lt == null) {
           try { tr.el.pause(); } catch (e) {}
           continue;
@@ -147,13 +152,20 @@ class AudioEngineCore {
     }
   }
 
-  scrubAudio(tracks, t, duration, seqOn, activeClipId, transportSourceTimeFn, playing, muted, extSourceTimeFn, activeSource, playbackRate) {
+  /* at＝【時間軸時間】（鐵律 §0.5）。序列模式下才由 clipSourceTimeFor 轉成來源時間。
+     回傳 { scrubMainVideo, localT }：scrubMainVideo=true 代表沒有任何可聽的
+     Web Audio 軌，呼叫端要改為 scrub 主 <video>。 */
+  scrubAudio(tracks, {
+    at, duration, seqOn = false, activeClipId, clipSourceTimeFor,
+    playing = false, muted = false, externalSourceTimeFor, activeSource, playbackRate = 1,
+  } = {}) {
     if (playing || muted) return;
+    const t = at;
     let localT = t;
     if (seqOn) {
       const c = Seq.clipAt(t);
       if (!c || c.id !== activeClipId) return;
-      localT = transportSourceTimeFn(t, c);
+      localT = clipSourceTimeFor(t, c);
     }
 
     /* 預覽語意：被來源篩選藏起來的聲道不算進 Solo（respectHidden:true）。
@@ -235,7 +247,7 @@ class AudioEngineCore {
         const audible = sourceTrackAudible(tr, anySolo);
         if (audible) {
           const source = tr.source || '';
-          const off = source.startsWith('ext-') ? extSourceTimeFn(source, t) : localT;
+          const off = source.startsWith('ext-') ? externalSourceTimeFor?.(source, t) : localT;
           if (off != null) scrubEl(tr.el, off);
         }
       }

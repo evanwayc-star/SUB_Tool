@@ -2049,15 +2049,14 @@ const Media = {
   // 序列模式：被 _srcHidden 的（其他 clip / 已切換音源）不播，避免多段音訊同時出聲。
   startElementSources(localT, tlT){
     if(tlT === undefined) tlT = this.seqOn() ? this.tlTime() : localT;
-    AudioEngine.startElementSources(
-      this.tracks,
+    AudioEngine.startElementSources(this.tracks, {
       localT,
       tlT,
-      this.seqOn(),
-      (s, t) => this._srcLocalT(s, t),
-      (s, t) => this.externalAudio.sourceTime(s, t),
-      video.playbackRate || 1
-    );
+      seqOn: this.seqOn(),
+      sourceTimeFor: (s, t) => this._srcLocalT(s, t),
+      externalSourceTimeFor: (s, t) => this.externalAudio.sourceTime(s, t),
+      playbackRate: video.playbackRate || 1,
+    });
   },
   // 音源切換／clip 切換後，若正在播放需重啟可聽元素（先前隱藏者已被跳過、未在播）
   _restartElements(){
@@ -2070,14 +2069,13 @@ const Media = {
     AudioEngine.stopElementSources(this.tracks);
   },
   startBufferSources(offset){
-    const res = AudioEngine.startBufferSources(
-      this.tracks,
+    const res = AudioEngine.startBufferSources(this.tracks, {
       offset,
-      video.playbackRate || 1,
-      this.seqOn(),
-      this.tlTime(),
-      (s, t) => this._srcLocalT(s, t)
-    );
+      playbackRate: video.playbackRate || 1,
+      seqOn: this.seqOn(),
+      tlTime: this.tlTime(),
+      sourceTimeFor: (s, t) => this._srcLocalT(s, t),
+    });
     if (res) {
       this.startCtxTime = res.startCtxTime;
       this.startMediaTime = res.startMediaTime;
@@ -2087,19 +2085,18 @@ const Media = {
     AudioEngine.stopBufferSources(this.tracks);
   },
   scrubAudio(t, duration = 0.15) {
-    const res = AudioEngine.scrubAudio(
-      this.tracks,
-      t,
+    const res = AudioEngine.scrubAudio(this.tracks, {
+      at: t,                                   // 時間軸時間（§0.5）
       duration,
-      this.seqOn(),
-      this.activeClipId,
-      (tt, c) => this._transport.sourceTime(tt, c),
-      this.playing,
-      State.muted,
-      (s, tt) => this.externalAudio.sourceTime(s, tt),
-      this.activeSource,
-      video.playbackRate || 1
-    );
+      seqOn: this.seqOn(),
+      activeClipId: this.activeClipId,
+      clipSourceTimeFor: (tt, c) => this._transport.sourceTime(tt, c),
+      playing: this.playing,
+      muted: State.muted,
+      externalSourceTimeFor: (s, tt) => this.externalAudio.sourceTime(s, tt),
+      activeSource: this.activeSource,
+      playbackRate: video.playbackRate || 1,
+    });
     if (res && res.scrubMainVideo) {
       if(!video.src) return;
       if(!video._scrubEl) {
