@@ -36,10 +36,12 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx.ensureCtx();
 
     // (mpv) 非原生格式或多音軌且偵測到 mpv：秒開，背景抽音軌
-    if((!canNative || audio.length>1) && getPlayerAdapter().isAvailable){
-      const mpvInfo=await getPlayerAdapter().detect();
+        // (mpv) 非原生格式或多音軌且偵測到 mpv：秒開，背景抽音軌
+    const dummyMpv = typeof window !== 'undefined' && window.subtool ? new MpvAdapter(window.subtool) : null;
+    if((!canNative || audio.length>1) && dummyMpv && dummyMpv.isAvailable){
+      const mpvInfo=await dummyMpv.detect();
       if(!owns()) return;
-      if(mpvInfo.available){ await ctx._loadViaMpv(p,info,projectRestore,intake); return; }
+      if(mpvInfo && mpvInfo.available){ await ctx._loadViaMpv(p,info,projectRestore,intake); return; }
     }
 
     // (A) 純原生 + 單一 mono/stereo 音訊：完全不需 ffmpeg，直讀最快。
@@ -234,7 +236,7 @@ export function _expandChannels(ctx, audio){ return sourceChannelLabels(audio); 
 
 export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken=null){
     const owns=()=>!intakeToken||ctx._intakeSession.owns(intakeToken);
-    const adapter=getPlayerAdapter();
+    const adapter = typeof window !== 'undefined' && window.subtool ? new MpvAdapter(window.subtool) : getPlayerAdapter();
     const dur=info?.duration||0;
     const audio=info?.audio||[];
     setStatus('啟動 mpv（秒開）…','busy');
