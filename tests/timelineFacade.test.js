@@ -122,21 +122,28 @@ describe('timeline public facade', () => {
     });
 
     const engine = await import('../src/timeline-renderer.js');
+    const interaction = await import('../src/timeline-interaction.js');
     const timeline = await import('../src/timeline.js');
 
-    const operations = [
+    const engineOps = [
       'trackFromY', 'addTrack', 'removeTrack', 'moveSelectedToTrack',
-      'setZoom', 'zoomFit', 'zoomFitVideo', 'snapTargets', 'snapVal', 'cueNeighborBounds',
+      'setZoom', 'zoomFit', 'zoomFitVideo',
     ];
-    for (const name of operations) {
+    for (const name of engineOps) {
       expect(engine[name]).toBeTypeOf('function');
       expect(timeline[name]).toBe(engine[name]);
     }
 
+    const interactionOps = ['snapTargets', 'snapVal', 'cueNeighborBounds'];
+    for (const name of interactionOps) {
+      expect(interaction[name]).toBeTypeOf('function');
+      expect(timeline[name]).toBe(interaction[name]);
+    }
+
     expect(engine.trackFromY(35)).toBe(0);
     expect(engine.trackFromY(120)).toBe(1);
-    expect(engine.snapVal(4.9, [0, 5, 10], 0.2)).toBe(5);
-    expect(engine.cueNeighborBounds(4, 6, 0)).toEqual({ prevEnd: 3, nextStart: 7 });
+    expect(interaction.snapVal(4.9, [0, 5, 10], 0.2)).toBe(5);
+    expect(interaction.cueNeighborBounds(4, 6, 0)).toEqual({ prevEnd: 3, nextStart: 7 });
   });
 
   /* 接縫的寬度是一個決定，不是副作用。timeline.js 從 `export *` 改成逐一列名，

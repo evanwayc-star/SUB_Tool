@@ -13,7 +13,7 @@
 ============================================================================== */
 export {
   /* 版面度量與座標換算 */
-  RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
+  RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW,
 
   /* 繪製 */
   layoutTimeline, drawTimeline, drawRuler, drawWave,
@@ -24,13 +24,12 @@ export {
   setZoom, zoomFit, zoomFitVideo,
 
   /* 軌道操作 */
-  trackFromY, addTrack, removeTrack, moveSelectedToTrack,
-
-  /* 磁吸 */
-  snapTargets, snapVal, cueNeighborBounds,
-
-  /* 影片段操作 */
+  trackFromY, addTrack, removeTrack, moveSelectedToTrack
 
 } from './timeline-renderer.js';
+export {
+  timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds
+} from './timeline-interaction.js';
+
 export { selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft } from './clip-model.js';
 export { showClipFade, showCrossfade, showImageGeom, showClipDuration } from './clip-view.js';

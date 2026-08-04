@@ -43,6 +43,7 @@ import { recordHistory } from './history.js';
 import { beginTimelineTrackEdit, updateTimelineTrack } from './timeline-edit-transaction.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
+import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 
 import { on as _onEvent } from './events.js';
@@ -102,8 +103,7 @@ function viewportW(){return tlScroll.clientWidth;}
 function snapFrame(t){
   return snapTimeToFrame(t, State.fps, State.dropFrame);
 }
-function timeToX(t){ return (t - State.viewStart)*State.pxPerSec; }
-function xToTime(x){return State.viewStart + x/State.pxPerSec;}
+
 
 function tlTotal(){
   const maxCueEnd=State.cues.reduce((m,c)=>c.end>m?c.end:m, 0);
@@ -1644,35 +1644,9 @@ export function zoomFitVideo(){
   setZoom(pps, dur/2);
 }
 
-export function snapTargets(excludeIds){
-  let t = [0, State.duration>0?State.duration:1];
-  for(const c of State.cues){
-    if(excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id))) continue;
-    if(c.timed===false) continue;
-    t.push(c.start); t.push(c.end);
-  }
-  if(Media.mpvMode) t.push(Media.displayTime());
-  return t;
-}
 
-export function snapVal(t,targets,thr){ let best=t,bd=thr; for(const x of targets){const d=Math.abs(x-t); if(d<bd){bd=d;best=x;}} return best; }
 
-export function cueNeighborBounds(os,oe,track,excludeIds){
-  let prevEnd=0,nextStart=Infinity;
-  const oMid = (os + oe) / 2;
-  for(const c of State.cues){
-    if(c.timed===false||(excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id)))||(c.track||0)!==track)continue;
-    const cMid = (c.start + c.end) / 2;
-    if(cMid < oMid){
-      if(c.end > prevEnd) prevEnd = c.end;
-    } else {
-      if(c.start < nextStart) nextStart = c.start;
-    }
-  }
-  return {prevEnd,nextStart};
-}
-
-export { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime,
+export { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, 
   layoutTimeline, drawTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks,
   updatePlayhead,
   refreshTrackGutterActive,
