@@ -207,6 +207,7 @@ function _buildProjectData(){
         ...(c.natW>0&&c.natH>0?{natW:c.natW,natH:c.natH}:{})}:{}),
       ...(c.audioSourceId!=null?{audioSourceId:String(c.audioSourceId)}:(c.audioSrc!=null?{audioSourceId:String(c.audioSrc)}:{})),
       ...(c.audioDetached?{audioDetached:true}:{}),
+      ...(c.muted?{muted:true}:{}),
       ...(c.fadeIn?{fadeIn:c.fadeIn}:{}),...(c.fadeOut?{fadeOut:c.fadeOut}:{})})),
     // v3：只存純資料的 project bus / source routing / export stream；Media 的 runtime 資源絕不寫入專案檔。
     audioProject:normalizeAudioProject(State.audioProject),

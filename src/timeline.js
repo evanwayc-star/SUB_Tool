@@ -32,4 +32,5 @@ export {
   /* 影片段操作 */
 
 } from './timeline-renderer.js';
-export { selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft, showClipFade, showCrossfade, showImageGeom, showClipDuration } from './clip-model.js';
+export { selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft } from './clip-model.js';
+export { showClipFade, showCrossfade, showImageGeom, showClipDuration } from './clip-view.js';

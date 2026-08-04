@@ -159,6 +159,7 @@ const Media = {
   bindTrackRouting(track, clip, channel, index=0){
     if(!track) return track;
     Object.assign(track,AudioPipeline.sourceDescriptorFor(clip,channel,index));
+    if(clip && clip.muted) track.muted = true;
     return track;
   },
   /* 同一媒體來源被切開／解除影音連結時，保留使用者已設定的來源聲道→專案 bus 配線。 */
@@ -2676,7 +2677,23 @@ const Media = {
   /* 某音源的混音器聲道（Media.tracks 內 source 相符者）；音源層級的 靜音/獨奏/音量＝對其所有聲道聚合套用 */
   sourceChannels(srcId){ return this.tracks.filter(t=>(t.source||'video')===srcId && (t.kind==='buffer'||t.kind==='native'||t.kind==='element'||t.kind==='nativeTrack')); },
   sourceMuted(srcId){ const ch=this.sourceChannels(srcId); return ch.length>0 && ch.every(t=>t.muted); },
-  toggleSourceMute(srcId){ const ch=this.sourceChannels(srcId); const m=!(ch.length>0&&ch.every(t=>t.muted)); for(const t of ch)t.muted=m; this.applyGains(); emit('media:audioTracks'); },
+  toggleSourceMute(srcId){ 
+    const ch=this.sourceChannels(srcId); 
+    const m=!(ch.length>0&&ch.every(t=>t.muted)); 
+    for(const t of ch)t.muted=m; 
+    
+    // Persist clip mute state to State so it saves
+    let clip = null;
+    if (srcId === 'video' || srcId === 'altpri') {
+       clip = State.clips?.find(c=>c.primary);
+    } else if (srcId.startsWith('clip:')) {
+       clip = State.clips?.find(c=>c.id===srcId.substring(5));
+    }
+    if (clip) clip.muted = m;
+
+    this.applyGains(); 
+    emit('media:audioTracks'); 
+  },
   sourceSolo(srcId){ const ch=this.sourceChannels(srcId); return ch.length>0 && ch.some(t=>t.solo); },
   toggleSourceSolo(srcId){ const ch=this.sourceChannels(srcId); const s=!(ch.length>0&&ch.some(t=>t.solo)); for(const t of ch)t.solo=s; this.applyGains(); emit('media:audioTracks'); },
   sourceVolume(srcId){ const ch=this.sourceChannels(srcId); return ch.length? ch.reduce((m,t)=>Math.max(m,t.volume==null?1:t.volume),0) : 1; },

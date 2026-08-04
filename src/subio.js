@@ -12,6 +12,7 @@ import { AudioRouting } from './audio-routing.js';
 import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec } from './delivery-audio.js';
 import { buildExportSnapshot } from './delivery-job.js';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
+import { buildExportJobs, buildWebExportParams } from './export-job-builder.js';
 import { escapeHTML } from './util.js';
 import { Media } from './media.js';
 
@@ -290,6 +291,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     </div>
   `;
 
+  const activeSubs = State.tracks.map((t, idx) => t.visible !== false ? (t.name || `軌道 ${idx+1}`) : null).filter(Boolean);
+
   function renderRow(r, i) {
     const isWav = r.format === 'wav';
 
@@ -335,6 +338,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
               <input type="number" class="ev-kbps" data-idx="${i}" value="${r.kbps}" style="width:60px;padding:3px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);" title="目標視訊碼率 (kbps)"> kbps
             ` : ''}
             <label style="font-size:11px;display:flex;align-items:center;gap:4px;margin-left:8px;white-space:nowrap;" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}>燒入TC</label>
+            <span style="font-size:11px;color:var(--text-faint);margin-left:8px;white-space:nowrap;">${activeSubs.length ? '字幕: '+activeSubs.join(', ') : '無字幕'}</span>
           ` : ''}
           <div style="flex:1"></div>
           <button class="ev-del icon" data-idx="${i}" style="padding:2px;font-size:12px;cursor:pointer;color:var(--red);background:transparent;border:none;" title="刪除此列">✕</button>
@@ -436,26 +440,14 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       if (!(await checkConflicts(true))) return;
 
       try {
-        const expIn = data.timelineStart != null ? data.timelineStart : (State.exportIn != null ? State.exportIn : 0);
-        const assText = !audioOnly && /\nDialogue:/.test(toASSFromState(State.cues))
-          ? toASSFromState(State.cues.map(c => ({...c, start: Math.max(0, (c.start || 0) - expIn), end: Math.max(0, (c.end || 0) - expIn)})))
-          : null;
-
         if (!IS_DESKTOP) {
           closeModal();
+          const { expIn, assText } = buildWebExportParams(data, State);
           await _exportVideoWeb(data, list.rows(), expIn, assText);
           return;
         }
 
-        const jobs = list.toJobs({
-          clips: data.clips,
-          videoTracks: data.videoTracks,
-          duration: data.duration,
-          assText,
-          timelineStartTimecode: secToEncore(expIn, State.fps, State.dropFrame),
-          composeAudioPlan: composeDeliveryAudioPlan,
-          compiledAudioPlan: data.audioPlan,
-        });
+        const jobs = buildExportJobs(data, list, State);
         for (const job of jobs) {
           const jobId = await DESK.exportVideo(job);
           if (jobId) showToast(`排入佇列: ${job.defaultName}`);

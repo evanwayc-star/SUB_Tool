@@ -61,11 +61,12 @@ function audioTagFrom(audioPlan) {
 }
 
 /** 一列交付的預設檔名。純函式：同樣的輸入永遠得到同樣的名字。 */
-export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPlan }) {
+export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPlan, burnTimecode }) {
   const ext = extensionFor(format);
   const isWav = format === 'wav';
   const tag = (!isWav && targetH > 0) ? '_' + targetH + 'p' : '';
-  return `ST_${projectTag}_${Math.floor(fps || 25)}fps${audioTagFrom(audioPlan)}${tag}${ext}`;
+  const tcTag = burnTimecode ? '_TC' : '';
+  return `ST_${projectTag}_${Math.floor(fps || 25)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
 }
 
 /* 交付解析度：等比縮放到指定高度，寬度取偶數（H.264 的 yuv420p 要求寬高皆偶數；
@@ -130,7 +131,7 @@ export function createDeliveryList({
     : [newRow({ audioOnly, defaultAudioLayout })];
 
   const nameFor = r => defaultDeliveryName({
-    projectTag, fps, format: r.format, targetH: r.targetH, audioPlan: r.audioPlan,
+    projectTag, fps, format: r.format, targetH: r.targetH, audioPlan: r.audioPlan, burnTimecode: r.burnTimecode
   });
 
   /* 使用者沒有自己改過名字的列，要跟著格式／解析度／編組變動重新產生。
@@ -176,7 +177,7 @@ export function createDeliveryList({
     },
 
     setKbps(i, kbps) { const r = at(i); if (r) r.kbps = parseInt(kbps, 10) || 0; },
-    setBurnTimecode(i, on) { const r = at(i); if (r) r.burnTimecode = !!on; },
+    setBurnTimecode(i, on) { const r = at(i); if (r) { r.burnTimecode = !!on; refreshName(r); } },
     setOutDir(i, dir) { const r = at(i); if (r) r.outDir = dir || ''; },
 
     setName(i, value) {

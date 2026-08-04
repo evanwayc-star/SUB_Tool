@@ -12,11 +12,12 @@ import { showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
 import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx, styleMatchesPreset } from './substyle.js';
 import { showCueMenu } from './menus.js';
+import { deleteSelectedWithPrompt } from './subtitle-view.js';
 
 // Domain imports
 import { 
   snapAllCuesToFrames, swapAdjacentCues, mergeAdjacentCues, detectOverlaps, sweepContainedCues,
-  addCue as _addCue, addCueRelative as _addCueRelative, deleteSelected, deleteCue, clearSelectedCuesTime, 
+  addCue as _addCue, addCueRelative as _addCueRelative, deleteSelectedCues, deleteCue, clearSelectedCuesTime, 
   shiftTextsDown, shiftTextsUp, sortCues, copyCues, pasteCues as _pasteCues, trimTrackSpaces,
   trackLocked, cueTrackLocked 
 } from './subtitle-model.js';
@@ -770,7 +771,7 @@ function pasteCues() {
 
 export { 
   renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel,
-  addCue, addCueRelative, deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
+  addCue, addCueRelative, deleteSelectedWithPrompt as deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, updateSearchCount, searchSelectAll, openInlineTimeEdit, refreshStyleSummaries,
   copyCues, pasteCues, trackLocked, cueTrackLocked, snapAllCuesToFrames, sweepContainedCues

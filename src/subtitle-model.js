@@ -200,24 +200,15 @@ export function cueTrackLocked(c, action = '修改'){
   return trackLocked(c?.track || 0, action); 
 }
 
-export function deleteSelected(){
-  const ids=State.selectedIds.length?State.selectedIds.slice():[State.selectedId].filter(Boolean);
-  if(!ids.length)return;
-  const onLocked=State.cues.find(c=>ids.includes(c.id)&&State.tracks[c.track||0]?.locked);
-  if(onLocked&&cueTrackLocked(onLocked,'刪除字幕')) return;
-  if(ids.length>1){
-    openModal(`刪除 ${ids.length} 條字幕`,
-      `<p>確定要刪除選取的 <b>${ids.length}</b> 條字幕嗎？</p>`,
-      [{label:'取消',act:closeModal},
-       {label:'確定刪除',primary:true,act:()=>{ closeModal(); _doDeleteCues(ids); }}]);
-    return;
-  }
+export function deleteSelectedCues(ids){
+  if(!ids || !ids.length) return;
   _doDeleteCues(ids);
 }
 
 export function deleteCue(id){ 
   if(id) setSelection({ kind:'sub', ids:[id] }); 
-  deleteSelected(); 
+  const ids = State.selectedIds.length ? State.selectedIds.slice() : [State.selectedId].filter(Boolean);
+  deleteSelectedCues(ids);
 }
 
 export function clearSelectedCuesTime() {
