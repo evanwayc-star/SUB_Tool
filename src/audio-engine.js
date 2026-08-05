@@ -3,8 +3,19 @@ import { clamp } from './util.js';
 import { Seq } from './sequence.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 
+/* AudioContext 的建立是這個模組唯一的外部相依，也是它長期【零測試】的原因：
+   模組層直接 `new AudioContext()`，vitest 的 node 環境起不動它，jsdom 也沒有
+   Web Audio。於是這 250 多行——播放起停、序列時間域換算、scrub、可聽性篩選
+   ——一行測試都碰不到。
+
+   把「怎麼生出一個 AudioContext」變成注入點就夠了：生產環境維持原本的行為
+   （不傳就用 window.AudioContext），測試傳一個假的進來。這是模組的【內部接縫】，
+   不是公開介面的一部分——呼叫端仍然只用匯出的 AudioEngine 單例。 */
+const defaultCreateContext = () => new (window.AudioContext || window.webkitAudioContext)();
+
 class AudioEngineCore {
-  constructor() {
+  constructor({ createContext = defaultCreateContext } = {}) {
+    this._createContext = createContext;
     this.ctx = null;
     this.master = null;
     this.analyser = null;
@@ -13,7 +24,7 @@ class AudioEngineCore {
 
   ensureCtx() {
     if (!this.ctx) {
-      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.ctx = this._createContext();
       this.master = this.ctx.createGain();
       this.master.connect(this.ctx.destination);
       this.analyser = this.ctx.createAnalyser();
@@ -256,4 +267,12 @@ class AudioEngineCore {
   }
 }
 
+/* 生產環境用的單例——呼叫端一律用這個。 */
 export const AudioEngine = new AudioEngineCore();
+
+/* 測試用的建構入口（內部接縫，見檔頭 defaultCreateContext 的註解）。
+   生產程式碼【不應該】呼叫它：多個 AudioEngine 等於多個 AudioContext，
+   而瀏覽器對同時存在的 AudioContext 數量有上限。 */
+export function createAudioEngineForTest(deps) {
+  return new AudioEngineCore(deps);
+}
