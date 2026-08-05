@@ -128,6 +128,7 @@ Main (main.js)
 | `clearJob(id)` | `queue:clearJob` | R→M | 清除工作紀錄及其 JSON／ASS 暫存與失敗 log |
 | `clearCompleted()` | `queue:clearCompleted` | R→M | 清除所有已完成工作 |
 | `reorderJob(id,index)` | `queue:reorderJob` | R→M | 調整等待工作順序並同步寫回持久化檔 |
+| `changeFormat(id,format)` | `queue:changeFormat` | R→M | 改【等待中】工作的交付格式。**renderer 只送 format，輸出路徑一律由主程序從既有 outPath 推導**（同資料夾、同主檔名、只換副檔名），所以沒有路徑注入空間；未知格式由 `expectedExportExtension` fail-closed 擋掉，並重跑一次准入檢查（格式／同路徑互斥／檔案能力） |
 | `showMainWindow()` | `app:showMainWindow` | R→M | 顯示／重建主視窗；用於主視窗關閉後從監控視窗返回 |
 | `openPath(path)` | `app:openPath` | R→M | 只可用系統預設程式開啟受控 `<userData>/export-queue/*.log` |
 | `showItemInFolder(path)` | `app:showItemInFolder` | R→M | 只可在檔案總管顯示已通過驗證的精確交付輸出檔 |

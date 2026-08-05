@@ -1411,6 +1411,42 @@ ipcMain.handle('queue:reorderJob', (e, jobId, newIndex) => {
   QueueManager.broadcastUpdate();
 });
 
+/* 改變【還沒開始轉檔】的工作的交付格式。
+
+   安全性：renderer 只送 format 字串，**輸出路徑一律由這裡從既有的 outPath 推導**
+   （同資料夾、同主檔名、只換副檔名）。renderer 給不了路徑，所以沒有注入空間；
+   未知格式由 expectedExportExtension 直接擋掉（fail-closed）。
+
+   為什麼改 payload 就夠：_runJobLogic 是在【執行時】才從 job.payload 重新推導
+   format / isWav / isPro / audioPlan / timecodeWatermark 的，不是在入列時凍結的。
+   （TC 浮水印在轉成 WAV 時會自動變成 null，因為那條路徑本來就寫 `isWav ? null : …`。） */
+ipcMain.handle('queue:changeFormat', (e, jobId, format) => {
+  const job = _queueState.get(jobId);
+  if (!job) throw new Error('找不到這份匯出工作');
+  if (job.status !== JOB_STATUS.QUEUED) throw new Error('只有等待中的工作可以更改格式');
+
+  const ext = expectedExportExtension(format); // 未知格式在這裡就丟 INVALID_EXPORT_FORMAT
+  const oldPath = String(job.payload?.outPath || '');
+  if (!oldPath) throw new Error('這份工作沒有輸出路徑');
+  const newPath = oldPath.replace(/\.[^.\\/]*$/, '') + '.' + ext;
+
+  if (newPath !== oldPath) {
+    /* 先用候選物件跑一次准入檢查，通過才真的改到 job 上——
+       失敗時 job 必須維持原狀，不可以留下改到一半的狀態。 */
+    const candidate = { ...job, payload: { ...job.payload, format, outPath: newPath } };
+    _admission.assertOutputFormat(candidate);
+    _admission.assertOutputAvailable(candidate, jobId); // 排除自己；擋同路徑撞車
+    /* 同資料夾、同主檔名，只換副檔名——舊路徑既然已獲授權，這個新路徑就在
+       同一個已授權的範圍內。仍明確授予，避免只授了精確檔名時漏掉。 */
+    fileAuthority.grantDeliveryFile(newPath);
+  }
+
+  job.payload = { ...job.payload, format, outPath: newPath };
+  QueueManager.persistJob(job);
+  QueueManager.broadcastUpdate();
+  return { format, outPath: newPath };
+});
+
 ipcMain.handle('queue:openMonitor', () => {
   openQueueWindow();
 });

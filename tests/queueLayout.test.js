@@ -15,6 +15,7 @@ async function openQueueWindow(jobs) {
     clearJob: vi.fn().mockResolvedValue(),
     clearCompleted: vi.fn().mockResolvedValue(),
     reorderJob: vi.fn().mockResolvedValue(),
+    changeFormat: vi.fn().mockResolvedValue({ format: 'h264', outPath: 'C:\\out\\a.mp4' }),
     showMainWindow: vi.fn().mockResolvedValue(),
     openPath: vi.fn().mockResolvedValue(),
     showItemInFolder: vi.fn().mockResolvedValue(),
@@ -115,8 +116,73 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(durationText('running-1')).toBe('時長 01:01:12.5');
     expect(durationText('queued-1')).toBe('時長 00:00:00.033');
     expect(durationText('legacy-1')).toBe('時長 —');
+    /* 沒有 fps 就退回 HH:MM:SS.mmm——不要假裝有影格精度。
+       精確秒數保留在 title 裡，換成影格顯示之後資訊也不會消失。 */
     expect(document.querySelector('[data-job-id="done-1"] .job-duration')?.title)
-      .toBe('輸出時長：00:00:20.02');
+      .toBe('輸出時長 00:00:20.02 · 精確 20.020 秒');
+  });
+
+  /* 時長改用剪輯慣用的 HH:MM:SS:FF（v6.1.4）。
+     這是【時長】不是時間碼位置，所以不做 drop-frame 補償——DF 是為了讓 29.97 的
+     時間碼位置貼回牆上時鐘，對長度沒有意義。29.97 以 30 為進位基數。 */
+  it('有 fps 時，時長以 HH:MM:SS:FF 顯示', async () => {
+    const jobs = [
+      { id: 'j25', status: 'queued', payload: { outPath: 'C:\\out\\a.mp4', duration: 20.04, fps: 25 } },
+      { id: 'j2997', status: 'queued', payload: { outPath: 'C:\\out\\b.mp4', duration: 3600, fps: 29.97 } },
+      { id: 'jexact', status: 'queued', payload: { outPath: 'C:\\out\\c.mp4', duration: 2, fps: 24 } }
+    ];
+    const { document } = await openQueueWindow(jobs);
+    const durationText = id => document.querySelector(`[data-job-id="${id}"] .job-duration`)?.textContent;
+
+    expect(durationText('j25')).toBe('時長 00:00:20:01');   // 20.04s × 25 = 501 影格 → 20 秒又 1 格
+    expect(durationText('jexact')).toBe('時長 00:00:02:00'); // 整秒不可以跑出 FF=24
+    // 29.97：3600 秒 × 29.97 = 107892 影格；以 30 為基數 → 3596 秒又 12 格
+    expect(durationText('j2997')).toBe('時長 00:59:56:12');
+    expect(document.querySelector('[data-job-id="j25"] .job-duration')?.title)
+      .toContain('（25 fps）');
+  });
+
+  it('顯示交付規格與加入佇列的時間', async () => {
+    const jobs = [
+      { id: 'mp4', status: 'queued', createdAt: new Date(2026, 7, 5, 23, 52, 23).getTime(),
+        payload: { outPath: 'C:\\out\\a.mp4', format: 'h264', width: 1920, height: 1080, videoKbps: 8000 } },
+      // ProRes 固定 profile、WAV 沒有視訊：不可以顯示會誤導的 kbps
+      { id: 'pro', status: 'queued', payload: { outPath: 'C:\\out\\b.mov', format: 'prores', width: 1920, height: 1080, videoKbps: 8000 } },
+      { id: 'wav', status: 'queued', payload: { outPath: 'C:\\out\\c.wav', format: 'wav', width: 1920, height: 1080, videoKbps: 8000 } }
+    ];
+    const { document } = await openQueueWindow(jobs);
+    const spec = id => document.querySelector(`[data-job-id="${id}"] .job-spec`)?.textContent;
+
+    expect(spec('mp4')).toBe('MP4 / 1920 x 1080 px / 8000 kbps');
+    expect(spec('pro')).toBe('ProRes / 1920 x 1080 px');
+    expect(spec('wav')).toBe('WAV');
+
+    expect(document.querySelector('[data-job-id="mp4"] .job-enqueued')?.textContent)
+      .toBe('加入 2026/08/05-11:52:23pm');
+    // 舊工作沒有 createdAt 時不可以印出 Invalid Date
+    expect(document.querySelector('[data-job-id="pro"] .job-enqueued')).toBe(null);
+  });
+
+  it('等待中的列才有拖曳握把與格式下拉；執行中沒有', async () => {
+    const jobs = [
+      { id: 'q1', status: 'queued', payload: { outPath: 'C:\\out\\a.mp4', format: 'h264' } },
+      { id: 'r1', status: 'running', payload: { outPath: 'C:\\out\\b.mp4', format: 'h264' } }
+    ];
+    const { document } = await openQueueWindow(jobs);
+    const row = id => document.querySelector(`[data-job-id="${id}"]`);
+
+    // 握把每一列都在（不能拖的用透明佔位，各列文字才對齊）
+    expect(row('q1').querySelector('.job-grip')).not.toBe(null);
+    expect(row('r1').querySelector('.job-grip')).not.toBe(null);
+    expect(row('q1').draggable).toBe(true);
+    expect(row('r1').draggable).toBe(false);
+
+    // 格式只有等待中能改：執行中的 ffmpeg argv 已經定案
+    const sel = row('q1').querySelector('select[data-action="format"]');
+    expect(sel).not.toBe(null);
+    expect(sel.value).toBe('h264');
+    expect([...sel.options].map(o => o.value)).toEqual(['h264', 'prores', 'wav']);
+    expect(row('r1').querySelector('select[data-action="format"]')).toBe(null);
   });
 
   it('緊湊列仍保留操作按鈕，工作文字不會被當成 HTML', async () => {
