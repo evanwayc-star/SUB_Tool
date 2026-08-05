@@ -14,14 +14,19 @@
    規則與 DOM 綁死＝沒有接縫。這支模組就是那個接縫。
 
    【鐵律】
-   - **零 import、零 DOM、零 I/O。** 需要的東西一律由呼叫端傳進來
-     （專案名、fps、專案畫布尺寸…）。這是它能被直接測試的唯一原因，
-     不要為了方便而 import State 或 Media。
+   - **零 DOM、零 I/O；import 只准 `shared/` 底下的零相依純模組。**
+     需要的東西一律由呼叫端傳進來（專案名、fps、專案畫布尺寸…）。
+     這是它能被直接測試的唯一原因，不要為了方便而 import State 或 Media。
+     ── v6.1.5 之前這裡寫的是「零 import」。那是用來代替真正想守的東西
+        （沒有副作用、不必起 DOM 就能測）的一個近似；交付解析度的規則要與
+        主行程共用時就得放寬。放寬到 `shared/`【不會】動搖那個目的，
+        因為那些模組本身也不准 require 任何東西（見 shared/README.md）。
    - 磁碟上的同名檔案檢查**不在這裡**——那是 I/O，留在對話框。
      這裡只做純規則的驗證（缺目錄／缺檔名／同一目錄內重複檔名）。
    - 交付解析度的寬度必須是偶數（H.264 要求），推導公式只有 deliveryResolution()
      一份，送出與 UI 都吃它。
 ============================================================================== */
+import { deliveryResolution, suggestKbps } from '../shared/delivery-resolution.cjs';
 
 const EXT_BY_FORMAT = { wav: '.wav', prores: '.mov', h264: '.mp4' };
 
@@ -69,22 +74,15 @@ export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPla
   return `ST_${projectTag}_${Math.floor(fps || 25)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
 }
 
-/* 交付解析度：等比縮放到指定高度，寬度取偶數（H.264 的 yuv420p 要求寬高皆偶數；
-   奇數寬會讓 ffmpeg 直接失敗）。targetH=0＝沿用專案畫布。 */
-export function deliveryResolution({ canvasW, canvasH, targetH, isWav }) {
-  const W = canvasW || 1920, H = canvasH || 1080;
-  if (isWav || !(targetH > 0)) return { w: W, h: H };
-  const h = targetH;
-  let w = Math.round(h * (W / H));
-  w -= (w % 2);
-  return { w, h };
-}
+/* 交付解析度與建議碼率的規則住在 `shared/delivery-resolution.cjs`——
+   匯出佇列監控（另一個 BrowserWindow）與主行程也要用它來改已入列工作的解析度，
+   而那兩邊都拿不到 renderer 的 ES 模組。
 
-/* 依解析度給的建議碼率（kbps）。沿用切換解析度時的既有係數，
-   讓「換成 720p」不會還留著 4K 的碼率。 */
-export function suggestKbps({ w, h }) {
-  return Math.round((w * h * 30 * 0.1) / 1000);
-}
+   ── import ＋ export 兩件事都要做 ──
+   `export { x } from '…'` 只是轉出，【不會】建立本地綁定；而本檔內部
+   （setTargetHeight／toJobs）也在呼叫這兩個函式。只寫 export 會讓那些呼叫變成
+   未定義——所幸 eslint 的 no-undef 擋得下來，這正是那條規則存在的理由。 */
+export { deliveryResolution, suggestKbps };
 
 function joinPath(dir, name) {
   const raw = String(dir || '');
@@ -259,13 +257,21 @@ export function createDeliveryList({
      * 這裡是「交付規格 → 匯出工作」的唯一轉換點：解析度、時間碼浮水印、
      * 輸出路徑都在這裡決定，呼叫端只負責把 snapshot 與 assText 遞進來。
      */
-    toJobs({ clips, videoTracks, duration, assText, timelineStartTimecode, composeAudioPlan, compiledAudioPlan }) {
+    toJobs({ clips, videoTracks, duration, assText, subtitleTracks, timelineStartTimecode, composeAudioPlan, compiledAudioPlan }) {
       return rows.map(r => {
         const isWav = r.format === 'wav';
         const { w, h } = deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav });
         return {
           clips, videoTracks,
           width: w, height: h,
+          /* 匯出佇列監控要能改已入列工作的解析度，那需要【專案畫布】的比例——
+             width/height 是【已經算好的交付解析度】，不是畫布。反覆換解析度時
+             用交付尺寸回推會累積捨入誤差（寬度取偶數），所以把畫布原值帶著走。
+             targetH 則是為了讓下拉能顯示目前選的是哪一項（0＝來源解析度）。 */
+          canvasW, canvasH, targetH: r.targetH,
+          /* 會被燒進這份交付的字幕軌名稱。與 ASS 產生端同一條篩選規則
+             （formats.js 依 tracks[tk].visible === false 排除），所以顯示不會說謊。 */
+          subtitleTracks: Array.isArray(subtitleTracks) ? subtitleTracks.slice() : [],
           fps: fps || 25,
           assText,
           format: r.format,
@@ -273,6 +279,10 @@ export function createDeliveryList({
           videoKbps: r.kbps,
           audioPlan: composeAudioPlan ? composeAudioPlan(compiledAudioPlan, r) : compiledAudioPlan,
           timecodeWatermark: (!isWav && r.burnTimecode) ? { start: timelineStartTimecode } : null,
+          /* 即使這一列沒有勾燒入 TC 也要存起來：匯出佇列監控可以事後把 TC 打開，
+             那時必須用【送出當下的時間軸起點】重建 watermark。少了它就只能猜
+             00:00:00:00——設過 In 點的專案會燒出錯的時間碼，而且畫面一切正常。 */
+          timelineStartTimecode,
           defaultName: r.customName,
           outPath: joinPath(r.outDir, r.customName),
         };

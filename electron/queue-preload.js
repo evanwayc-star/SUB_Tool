@@ -9,8 +9,9 @@ contextBridge.exposeInMainWorld('queueAPI', {
   clearJob: (id) => ipcRenderer.invoke('queue:clearJob', id),
   clearCompleted: () => ipcRenderer.invoke('queue:clearCompleted'),
   reorderJob: (id, newIndex) => ipcRenderer.invoke('queue:reorderJob', id, newIndex),
-  /* 只送 format；輸出路徑由主行程從既有的 outPath 推導（同資料夾、只換副檔名）。 */
-  changeFormat: (id, format) => ipcRenderer.invoke('queue:changeFormat', id, format),
+  /* 只送 {format, targetH, kbps}；輸出路徑與實際尺寸一律由主行程推導
+     （路徑同資料夾、只換副檔名；解析度依專案畫布比例重算）。 */
+  updateDelivery: (id, patch) => ipcRenderer.invoke('queue:updateDelivery', id, patch),
   showMainWindow: () => ipcRenderer.invoke('app:showMainWindow'),
   openPath: (p) => ipcRenderer.invoke('app:openPath', p),
   showItemInFolder: (p) => ipcRenderer.invoke('app:showItemInFolder', p),

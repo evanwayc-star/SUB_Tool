@@ -15,7 +15,7 @@ async function openQueueWindow(jobs) {
     clearJob: vi.fn().mockResolvedValue(),
     clearCompleted: vi.fn().mockResolvedValue(),
     reorderJob: vi.fn().mockResolvedValue(),
-    changeFormat: vi.fn().mockResolvedValue({ format: 'h264', outPath: 'C:\\out\\a.mp4' }),
+    updateDelivery: vi.fn().mockResolvedValue({ format: 'h264', outPath: 'C:\\out\\a.mp4', width: 1920, height: 1080 }),
     showMainWindow: vi.fn().mockResolvedValue(),
     openPath: vi.fn().mockResolvedValue(),
     showItemInFolder: vi.fn().mockResolvedValue(),
@@ -151,14 +151,15 @@ describe('匯出佇列監控緊湊工作區', () => {
       { id: 'wav', status: 'queued', payload: { outPath: 'C:\\out\\c.wav', format: 'wav', width: 1920, height: 1080, videoKbps: 8000 } }
     ];
     const { document } = await openQueueWindow(jobs);
-    const spec = id => document.querySelector(`[data-job-id="${id}"] .job-spec`)?.textContent;
+    const spec = id => document.querySelector(`[data-job-id="${id}"] .job-chip--spec`)?.textContent;
 
     expect(spec('mp4')).toBe('MP4 / 1920 x 1080 px / 8000 kbps');
     expect(spec('pro')).toBe('ProRes / 1920 x 1080 px');
     expect(spec('wav')).toBe('WAV');
 
+    // 「加入」二字拿掉了：它靠位置（推到最右）與 title 表達，不再佔用寬度
     expect(document.querySelector('[data-job-id="mp4"] .job-enqueued')?.textContent)
-      .toBe('加入 2026/08/05-11:52:23pm');
+      .toBe('2026/08/05-11:52:23pm');
     // 舊工作沒有 createdAt 時不可以印出 Invalid Date
     expect(document.querySelector('[data-job-id="pro"] .job-enqueued')).toBe(null);
   });
@@ -177,12 +178,111 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(row('q1').draggable).toBe(true);
     expect(row('r1').draggable).toBe(false);
 
-    // 格式只有等待中能改：執行中的 ffmpeg argv 已經定案
-    const sel = row('q1').querySelector('select[data-action="format"]');
-    expect(sel).not.toBe(null);
-    expect(sel.value).toBe('h264');
-    expect([...sel.options].map(o => o.value)).toEqual(['h264', 'prores', 'wav']);
-    expect(row('r1').querySelector('select[data-action="format"]')).toBe(null);
+    // 交付設定只有等待中能改：執行中的 ffmpeg argv 已經定案
+    expect(row('q1').querySelector('[data-action="edit"]')).not.toBe(null);
+    expect(row('r1').querySelector('[data-action="edit"]')).toBe(null);
+
+    // 還沒轉檔的用「刪除」，轉檔中的才用「停止」
+    expect(row('q1').querySelector('[data-action="delete"]')).not.toBe(null);
+    expect(row('q1').querySelector('[data-action="stop"]')).toBe(null);
+    expect(row('r1').querySelector('[data-action="stop"]')).not.toBe(null);
+    expect(row('r1').querySelector('[data-action="delete"]')).toBe(null);
+  });
+
+  it('顯示會被燒進交付的字幕軌', async () => {
+    const jobs = [
+      { id: 'subs', status: 'queued', payload: { outPath: 'C:\\out\\a.mp4', format: 'h264', subtitleTracks: ['取詞', '對白'] } },
+      { id: 'none', status: 'queued', payload: { outPath: 'C:\\out\\b.mp4', format: 'h264', subtitleTracks: [] } },
+      // WAV 沒有畫面，不談字幕
+      { id: 'wav', status: 'queued', payload: { outPath: 'C:\\out\\c.wav', format: 'wav', subtitleTracks: ['取詞'] } },
+      // 舊工作沒有這個欄位 → 整段不顯示，不可以謊報「無字幕」
+      { id: 'legacy', status: 'queued', payload: { outPath: 'C:\\out\\d.mp4', format: 'h264' } }
+    ];
+    const { document } = await openQueueWindow(jobs);
+    const subs = id => document.querySelector(`[data-job-id="${id}"] .job-subs`)?.textContent ?? null;
+
+    expect(subs('subs')).toBe('字幕 取詞、對白');
+    expect(subs('none')).toBe('無字幕');
+    expect(subs('wav')).toBe(null);
+    expect(subs('legacy')).toBe(null);
+  });
+
+  it('顯示是否燒入 TC', async () => {
+    const jobs = [
+      { id: 'tc', status: 'queued', payload: { outPath: 'C:\\out\\a_TC.mp4', format: 'h264', timecodeWatermark: { start: '01:00:00:00' } } },
+      { id: 'notc', status: 'queued', payload: { outPath: 'C:\\out\\b.mp4', format: 'h264', timecodeWatermark: null } }
+    ];
+    const { document } = await openQueueWindow(jobs);
+    const tc = id => document.querySelector(`[data-job-id="${id}"] .job-chip--tc`);
+    expect(tc('tc')?.textContent).toBe('燒入 TC');
+    expect(tc('notc')).toBe(null);
+  });
+
+  it('交付編輯器：TC 開關會送出，WAV 不送', async () => {
+    const jobs = [{
+      id: 'q1', status: 'queued',
+      payload: { outPath: 'C:\\out\\a.mp4', format: 'h264', targetH: 0, videoKbps: 8000,
+                 timecodeWatermark: null, timelineStartTimecode: '01:00:00:00' }
+    }];
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    const row = document.querySelector('[data-job-id="q1"]');
+    row.querySelector('[data-action="edit"]').click();
+    const box = row.querySelector('.job-editor');
+
+    expect(box.querySelector('[data-f="tc"]').checked).toBe(false);
+    box.querySelector('[data-f="tc"]').checked = true;
+    box.querySelector('[data-f="save"]').click();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1',
+      expect.objectContaining({ format: 'h264', burnTimecode: true }));
+  });
+
+  it('交付編輯器：只送 format/targetH/kbps，尺寸與路徑由主程序推導', async () => {
+    const jobs = [{
+      id: 'q1', status: 'queued',
+      payload: { outPath: 'C:\\out\\a.mp4', format: 'h264', width: 1920, height: 1080,
+                 canvasW: 1920, canvasH: 1080, targetH: 0, videoKbps: 8000 }
+    }];
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    const row = document.querySelector('[data-job-id="q1"]');
+
+    row.querySelector('[data-action="edit"]').click();
+    const box = row.querySelector('.job-editor');
+    expect(box, '按下更改格式應該開出編輯面板').not.toBe(null);
+    // 編輯期間必須關掉拖曳，否則在輸入框上按住會被當成拖曳整張卡片
+    expect(row.draggable).toBe(false);
+
+    box.querySelector('[data-f="res"]').value = '720';
+    box.querySelector('[data-f="kbps"]').value = '3000';
+    box.querySelector('[data-f="save"]').click();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1',
+      { format: 'h264', targetH: 720, kbps: 3000, burnTimecode: false });
+  });
+
+  it('交付編輯器：WAV 隱藏解析度與碼率，且不送 kbps', async () => {
+    const jobs = [{
+      id: 'q1', status: 'queued',
+      payload: { outPath: 'C:\\out\\a.mp4', format: 'h264', width: 1920, height: 1080, targetH: 0, videoKbps: 8000 }
+    }];
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    const row = document.querySelector('[data-job-id="q1"]');
+    row.querySelector('[data-action="edit"]').click();
+    const box = row.querySelector('.job-editor');
+
+    const fmt = box.querySelector('[data-f="format"]');
+    fmt.value = 'wav';
+    fmt.dispatchEvent(new document.defaultView.Event('change'));
+
+    expect(box.querySelector('[data-only="video"]').hidden).toBe(true);
+    expect(box.querySelector('[data-only="h264"]').hidden).toBe(true);
+
+    box.querySelector('[data-f="save"]').click();
+    await new Promise(r => setTimeout(r, 0));
+    // WAV 沒有視訊碼率，不可以送 kbps
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1', { format: 'wav', targetH: 0 });
   });
 
   it('緊湊列仍保留操作按鈕，工作文字不會被當成 HTML', async () => {
@@ -200,11 +300,15 @@ describe('匯出佇列監控緊湊工作區', () => {
 
     const { document, queueAPI } = await openQueueWindow(jobs);
     document.querySelector('[data-job-id="done-1"] [data-action="show-output"]').click();
-    document.querySelector('[data-job-id="queued-1"] [data-action="stop"]').click();
+    /* 等待中的工作用【刪除】而不是【停止】——它根本還沒跑過，
+       標成「已停止」沒有意義。刪除會問一次，因為那會連交付設定一起丟掉。 */
+    document.defaultView.confirm = () => true;
+    document.querySelector('[data-job-id="queued-1"] [data-action="delete"]').click();
     document.querySelector('[data-job-id="failed-1"] [data-action="retry"]').click();
 
     expect(queueAPI.showItemInFolder).toHaveBeenCalledWith(outPath);
-    expect(queueAPI.stopJob).toHaveBeenCalledWith('queued-1');
+    expect(queueAPI.clearJob).toHaveBeenCalledWith('queued-1');
+    expect(queueAPI.stopJob).not.toHaveBeenCalled();
     expect(queueAPI.retryJob).toHaveBeenCalledWith('failed-1');
     expect(document.getElementById('injected-output')).toBeNull();
     expect(document.getElementById('injected-error')).toBeNull();

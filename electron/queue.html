@@ -323,30 +323,79 @@
       white-space: nowrap;
     }
     .job-duration b { color: var(--text-dim); font-family: "Cascadia Mono", Consolas, monospace; font-weight: 650; }
-    /* 交付規格 + 加入時間。放在檔名下面一行，執行中與等待中都看得到。 */
+    /* 交付規格／字幕／TC／加入時間。
+
+       全部擠成一行純文字會很難掃——改成分組的小標籤，各自有邊框當視覺分隔，
+       加入時間則推到最右邊拉開距離（它是這一行裡最不重要的資訊）。 */
     .job-specline {
       display: flex;
-      gap: 10px;
+      gap: 6px;
       align-items: center;
-      margin: 3px 0 0;
+      margin: 5px 0 0;
       min-width: 0;
       color: var(--text-muted);
       font-size: 11px;
       line-height: 1.35;
     }
-    .job-spec {
+    .job-chip {
       flex: 0 1 auto;
       overflow: hidden;
+      padding: 2px 7px;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 4px;
+      background: rgba(255,255,255,.02);
       text-overflow: ellipsis;
       white-space: nowrap;
-      font-family: "Cascadia Mono", Consolas, monospace;
-      color: var(--text-dim);
     }
+    .job-chip--spec {
+      flex-shrink: 0;
+      color: var(--text-dim);
+      font-family: "Cascadia Mono", Consolas, monospace;
+    }
+    .job-subs { opacity: .9; }
+    .job-chip--tc {
+      flex-shrink: 0;
+      color: #f6c354;
+      border-color: rgba(246,195,84,.28);
+      background: rgba(246,195,84,.08);
+      font-weight: 600;
+    }
+    /* 推到最右：與左邊那組標籤之間留出明顯空白 */
     .job-enqueued {
       flex: 0 0 auto;
+      margin-left: auto;
+      padding-left: 10px;
       font-family: "Cascadia Mono", Consolas, monospace;
-      opacity: .72;
+      opacity: .55;
     }
+    /* 交付設定編輯器：橫跨 main→actions（不壓到握把那一欄） */
+    .job-editor {
+      display: flex;
+      grid-column: 2 / -1;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      align-items: center;
+      margin-top: 8px;
+      padding: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: var(--surface);
+      font-size: 12px;
+    }
+    .job-editor label { display: inline-flex; gap: 5px; align-items: center; color: var(--text-muted); }
+    .job-editor label[hidden] { display: none; }
+    .job-editor select, .job-editor input {
+      padding: 3px 6px;
+      color: var(--text-dim);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      background: var(--bg);
+      font-family: inherit;
+      font-size: 12px;
+    }
+    .job-editor-actions { display: inline-flex; gap: 6px; margin-left: auto; }
+    .job-editor-error { flex: 1 0 100%; color: var(--error); font-size: 11px; }
+    .job-editor-error[hidden] { display: none; }
     .job-progress { grid-area: progress; min-width: 0; }
     .progress-bar-bg {
       position: relative;
@@ -620,6 +669,22 @@
     /* 交付規格摘要：MP4 / 1920 x 1080 px / 8000 kbps
        ProRes 與 WAV 不吃 videoKbps（前者固定 profile、後者無視訊），不要顯示誤導的數字。 */
     const FORMAT_LABEL = { h264: 'MP4', prores: 'ProRes', wav: 'WAV' };
+
+    /* 是否燒入時間碼。payload.timecodeWatermark 非 null 就是要燒——
+       那個值在 delivery-list.js toJobs 產生時就已經套過「WAV 不燒」的規則
+       （`(!isWav && r.burnTimecode) ? {…} : null`），所以這裡不必再判斷格式。 */
+    const burnsTimecode = payload => !!payload?.timecodeWatermark;
+
+    /* 會被燒進這份交付的字幕軌。payload.subtitleTracks 由 renderer 在入列時寫入，
+       與產生 ASS 的是同一份 State.tracks（見 src/subtitle-model.js
+       burnedSubtitleTrackNames），所以這裡顯示的不會與實際燒進去的分岔。
+       WAV 沒有畫面，不談字幕；舊工作沒有這個欄位時回 null（整段不顯示）。 */
+    const fmtSubtitles = payload => {
+      if (String(payload?.format || '') === 'wav') return null;
+      const list = payload?.subtitleTracks;
+      if (!Array.isArray(list)) return null;       // 舊工作：沒這個欄位，不要謊報「無字幕」
+      return list.length ? '字幕 ' + list.join('、') : '無字幕';
+    };
     const fmtDeliverySpec = payload => {
       const format = String(payload?.format || '');
       const parts = [FORMAT_LABEL[format] || format.toUpperCase() || '—'];
@@ -720,6 +785,7 @@
           : '輸出時長：尚未取得';
         const enqueuedAt = fmtEnqueuedAt(job.createdAt);
         const deliverySpec = fmtDeliverySpec(job.payload);
+        const subtitleLabel = fmtSubtitles(job.payload);
         
         let errorHtml = '';
         let errorMessage = '';
@@ -742,17 +808,19 @@
         }
 
         let actionHtml = '';
-        /* 只有【等待中】能改格式：執行中的 ffmpeg argv 已經定案，
+        /* 只有【等待中】能改交付設定：執行中的 ffmpeg argv 已經定案，
            已完成／失敗的改了也沒有意義（要改就重新送一份）。 */
         if (job.status === 'queued') {
-          const current = String(job.payload?.format || '');
-          const options = [['h264', 'MP4'], ['prores', 'ProRes'], ['wav', 'WAV']]
-            .map(([v, label]) => `<option value="${v}"${v === current ? ' selected' : ''}>${label}</option>`)
-            .join('');
-          actionHtml += `<select data-action="format" title="更改輸出格式（副檔名會一起改）" aria-label="輸出格式">${options}</select>`;
+          actionHtml += '<button type="button" data-action="edit">更改格式</button>';
         }
-        if (job.status === 'running' || job.status === 'queued') {
+        /* 還沒開始轉檔的工作用【刪除】而不是【停止】——「停止」會把它留在清單裡
+           標成「已停止」，但它根本還沒跑過，那個狀態沒有意義。刪除才是使用者要的。
+           執行中的才是真的要「停止」（去砍 ffmpeg 程序）。 */
+        if (job.status === 'running') {
           actionHtml += '<button type="button" data-action="stop">停止</button>';
+        }
+        if (job.status === 'queued') {
+          actionHtml += '<button type="button" data-action="delete">刪除</button>';
         }
         if (job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
           actionHtml += '<button type="button" class="primary" data-action="retry">重試</button>';
@@ -779,8 +847,10 @@
               <span class="job-duration" title="${escapeHTML(outputDurationTitle)}" aria-label="${escapeHTML(outputDurationTitle)}">時長 <b>${escapeHTML(outputDurationLabel)}</b></span>
             </div>
             <p class="job-specline">
-              <span class="job-spec">${escapeHTML(deliverySpec)}</span>
-              ${enqueuedAt ? `<span class="job-enqueued" title="加入佇列時間">加入 ${escapeHTML(enqueuedAt)}</span>` : ''}
+              <span class="job-chip job-chip--spec">${escapeHTML(deliverySpec)}</span>
+              ${subtitleLabel ? `<span class="job-chip job-subs" title="會燒進這份交付的字幕軌">${escapeHTML(subtitleLabel)}</span>` : ''}
+              ${burnsTimecode(job.payload) ? '<span class="job-chip job-chip--tc" title="會在畫面上燒入時間碼">燒入 TC</span>' : ''}
+              ${enqueuedAt ? `<span class="job-enqueued" title="加入佇列時間">${escapeHTML(enqueuedAt)}</span>` : ''}
             </p>
             ${job.status === 'queued' ? '' : `<p class="job-meta">${escapeHTML(metaText)}</p>`}
           </div>
@@ -795,29 +865,14 @@
           <div class="job-actions">${actionHtml}</div>
           ${errorHtml}
         `;
-        const formatSel = el.querySelector('[data-action="format"]');
-        if (formatSel) {
-          /* select 在 .job-actions 裡，那一區有 pointer-events；但整張卡片是
-             draggable，按住 select 拖動會被當成拖曳卡片 → 下拉打不開。
-             draggable 只在互動這個控制項時暫時關掉。 */
-          formatSel.addEventListener('mousedown', () => { el.draggable = false; });
-          formatSel.addEventListener('blur', () => { if (job.status === 'queued') el.draggable = true; });
-          formatSel.addEventListener('change', async event => {
-            const sel = event.currentTarget;
-            const next = sel.value;
-            sel.disabled = true;
-            try {
-              await window.queueAPI.changeFormat(job.id, next);
-              await loadData();
-            } catch (err) {
-              sel.value = String(job.payload?.format || '');
-              window.alert('更改格式失敗：' + (err && err.message ? err.message : err));
-            } finally {
-              sel.disabled = false;
-              el.draggable = job.status === 'queued';
-            }
-          });
-        }
+        el.querySelector('[data-action="edit"]')?.addEventListener('click', () => openDeliveryEditor(el, job));
+        el.querySelector('[data-action="delete"]')?.addEventListener('click', () => {
+          /* 刪除等待中的工作會連設定一起丟掉（輸出路徑、格式、音訊編組），
+             要重新走一次交付對話框才能補回來——值得問一句。
+             清除【已完成】的紀錄則不問，那只是收拾畫面。 */
+          if (!window.confirm(`要刪除「${outName}」嗎？\n它還沒有開始轉檔，刪除後要重新從交付清單送出。`)) return;
+          window.queueAPI.clearJob(job.id);
+        });
         el.querySelector('[data-action="stop"]')?.addEventListener('click', () => window.queueAPI.stopJob(job.id));
         el.querySelector('[data-action="retry"]')?.addEventListener('click', () => window.queueAPI.retryJob(job.id));
         el.querySelector('[data-action="clear"]')?.addEventListener('click', () => window.queueAPI.clearJob(job.id));
@@ -832,8 +887,102 @@
         return el;
     }
 
+    /* 交付設定編輯器：格式／解析度／碼率統合在一起。
+
+       只送 {format, targetH, kbps}——**輸出路徑與實際尺寸一律由主行程推導**
+       （路徑同資料夾只換副檔名，解析度依專案畫布比例重算），所以這個視窗
+       給不了任意路徑，也不會與交付對話框算出不同的尺寸。
+
+       解析度選項要與交付對話框一致（src/subio.js 的 .ev-res）。 */
+    const RES_OPTIONS = [[0, '來源解析度'], [2160, '4K (2160p)'], [1080, '1080p'], [720, '720p']];
+
+    function openDeliveryEditor(cardEl, job) {
+      cardEl.querySelector('.job-editor')?.remove();
+      const p = job.payload || {};
+      const curFormat = String(p.format || 'h264');
+      const curTargetH = Number(p.targetH) || 0;
+      const curKbps = Number(p.videoKbps) || 0;
+      const known = RES_OPTIONS.some(([v]) => v === curTargetH);
+
+      const box = document.createElement('div');
+      box.className = 'job-editor';
+      box.innerHTML = `
+        <label>格式
+          <select data-f="format">
+            ${[['h264', 'MP4 (H.264)'], ['prores', 'ProRes'], ['wav', 'WAV (純音訊)']]
+              .map(([v, t]) => `<option value="${v}"${v === curFormat ? ' selected' : ''}>${t}</option>`).join('')}
+          </select>
+        </label>
+        <label data-only="video">解析度
+          <select data-f="res">
+            ${RES_OPTIONS.map(([v, t]) => `<option value="${v}"${v === curTargetH ? ' selected' : ''}>${t}</option>`).join('')}
+            <option value="custom"${known ? '' : ' selected'}>自訂…</option>
+          </select>
+        </label>
+        <label data-only="video" data-custom${known ? ' hidden' : ''}>高度
+          <input type="number" data-f="customH" min="16" step="2" value="${known ? '' : curTargetH}" style="width:72px">
+        </label>
+        <label data-only="h264">碼率
+          <input type="number" data-f="kbps" min="1" step="100" value="${curKbps}" style="width:80px"> kbps
+        </label>
+        <label data-only="video"><input type="checkbox" data-f="tc"${burnsTimecode(p) ? ' checked' : ''}> 燒入 TC</label>
+        <span class="job-editor-actions">
+          <button type="button" data-f="cancel">取消</button>
+          <button type="button" class="primary" data-f="save">套用</button>
+        </span>
+        <span class="job-editor-error" hidden></span>`;
+
+      const q = sel => box.querySelector(sel);
+      const errEl = q('.job-editor-error');
+      const syncVisibility = () => {
+        const f = q('[data-f="format"]').value;
+        box.querySelectorAll('[data-only="video"]').forEach(n => { n.hidden = (f === 'wav'); });
+        box.querySelectorAll('[data-only="h264"]').forEach(n => { n.hidden = (f !== 'h264'); });
+        const isCustom = q('[data-f="res"]').value === 'custom';
+        box.querySelector('[data-custom]').hidden = (f === 'wav') || !isCustom;
+      };
+      q('[data-f="format"]').addEventListener('change', syncVisibility);
+      q('[data-f="res"]').addEventListener('change', syncVisibility);
+      syncVisibility();
+
+      const close = () => { box.remove(); cardEl.draggable = job.status === 'queued'; };
+      q('[data-f="cancel"]').addEventListener('click', close);
+      q('[data-f="save"]').addEventListener('click', async () => {
+        const format = q('[data-f="format"]').value;
+        const resVal = q('[data-f="res"]').value;
+        const targetH = resVal === 'custom' ? Number(q('[data-f="customH"]').value) || 0 : Number(resVal);
+        const patch = { format, targetH };
+        if (format === 'h264') patch.kbps = Number(q('[data-f="kbps"]').value) || 0;
+        /* WAV 沒有畫面可燒，不送這個欄位（主行程也會再擋一次）。 */
+        if (format !== 'wav') patch.burnTimecode = q('[data-f="tc"]').checked;
+        q('[data-f="save"]').disabled = true;
+        errEl.hidden = true;
+        try {
+          await window.queueAPI.updateDelivery(job.id, patch);
+          close();
+          await loadData();
+        } catch (err) {
+          /* 失敗時【不關閉】編輯器，讓使用者看得到原因並改掉——
+             主行程那邊 job 維持原狀，所以畫面與實際狀態仍然一致。 */
+          errEl.textContent = String(err && err.message ? err.message : err).replace(/^Error:\s*/, '');
+          errEl.hidden = false;
+          q('[data-f="save"]').disabled = false;
+        }
+      });
+
+      /* 編輯期間關掉拖曳，否則在輸入框上按住會被當成拖曳整張卡片。 */
+      cardEl.draggable = false;
+      cardEl.appendChild(box);
+      q('[data-f="format"]').focus();
+    }
+
     function renderJobs() {
       if (_isDragging) return;
+      /* 編輯交付設定時不要重建清單。renderJobs() 由 queue:update 廣播觸發，
+         而執行中的工作【每一行 ffmpeg 進度】都會廣播一次——不擋的話使用者
+         正在打字的面板會被沖掉，游標也跟著跳掉。
+         與 _isDragging 同一個理由，只是那個是拖曳、這個是編輯。 */
+      if (UI.board.querySelector('.job-editor')) return;
       const completed = _jobs.filter(job => job.status === 'done');
       const unfinished = _jobs.filter(job => job.status !== 'done');
       const active = unfinished.filter(job => job.status === 'running' || job.status === 'stopping');

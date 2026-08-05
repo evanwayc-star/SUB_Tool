@@ -1,6 +1,7 @@
 import { toASSFromState } from './ffmpeg-export.js';
 import { secToEncore } from './time.js';
 import { composeDeliveryAudioPlan } from './delivery-audio.js';
+import { burnedSubtitleTrackNames } from './subtitle-model.js';
 
 /**
  * Builds raw ExportJobs from a project snapshot and a DeliveryList.
@@ -26,6 +27,9 @@ export function buildExportJobs(snapshot, list, stateInfo) {
     videoTracks: snapshot.videoTracks,
     duration: snapshot.duration,
     assText,
+    /* 帶進 payload 供匯出佇列監控顯示。與 assText 出自同一份 State.tracks，
+       所以「說會燒哪幾軌」與「實際燒進 ASS 的」不會分岔。 */
+    subtitleTracks: burnedSubtitleTrackNames(stateInfo.tracks),
     timelineStartTimecode: secToEncore(expIn, fps, dropFrame),
     composeAudioPlan: composeDeliveryAudioPlan,
     compiledAudioPlan: snapshot.audioPlan,

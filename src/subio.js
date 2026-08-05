@@ -3,7 +3,7 @@ import { $ } from './dom.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { sortCues } from './subtitle-model.js';
+import { sortCues, burnedSubtitleTrackNames } from './subtitle-model.js';
 import { drawTimeline, layoutTimeline } from './timeline.js';
 import { emit } from './events.js';
 import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
@@ -295,7 +295,9 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     </div>
   `;
 
-  const activeSubs = State.tracks.map((t, idx) => t.visible !== false ? (t.name || `軌道 ${idx+1}`) : null).filter(Boolean);
+  /* 判準只有 subtitle-model.js 一份——對話框、job payload 與佇列監控三個消費端
+     必須顯示同一份清單，否則「說會燒哪幾軌」與「實際燒了哪幾軌」會不一致。 */
+  const activeSubs = burnedSubtitleTrackNames(State.tracks);
 
   function renderRow(r, i) {
     const isWav = r.format === 'wav';
