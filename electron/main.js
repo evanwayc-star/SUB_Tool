@@ -10,6 +10,12 @@
 const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
+/* 非同步 fs。原生檔案對話框（dialog.showOpenDialog）的訊息迴圈就跑在主行程的
+   UI 執行緒上，所以這條執行緒上的每一次同步 I/O 都會讓對話框跟著頓——包含
+   「在對話框裡切換資料夾」。素材放在 SMB 網路磁碟時一次 statSync 可能要數十毫秒，
+   而快取【優先寫在影片旁邊】（見 cacheCandidates），所以那些 stat 也打在網路上。
+   會週期性執行的路徑一律改用這個。 */
+const fsp = require('fs/promises');
 const os = require('os');
 const url = require('url');
 const net = require('net');
@@ -531,9 +537,13 @@ async function ensureHttpServer() {
       const m = /bytes=(\d+)-(\d*)/.exec(rf);
       if (!m) { res.writeHead(400); res.end(); return; }
       const start = +m[1], reqEnd = m[2] ? +m[2] : undefined;
-      const tryRange = (n) => {
-        let sz = 0; try { sz = fs.statSync(job.filePath).size; } catch (e) {}
-        if (sz <= start && !job.done && n < 120) { setTimeout(() => tryRange(n + 1), 500); return; }
+      /* 非同步：邊轉邊播時 <video> 會對還沒寫完的 proxy 發 range 請求，這裡每 500ms
+         重試一次、最多 120 次（＝每個請求最長輪詢 60 秒），而且同時可能有多個請求在輪詢。
+         同步 stat 打在 SMB 上的 proxy，會讓主行程的 UI 執行緒被反覆鎖住，
+         原生檔案對話框（訊息迴圈在同一條執行緒）因此卡頓。 */
+      const tryRange = async (n) => {
+        let sz = 0; try { sz = (await fsp.stat(job.filePath)).size; } catch (e) {}
+        if (sz <= start && !job.done && n < 120) { setTimeout(() => { void tryRange(n + 1); }, 500); return; }
         if (sz <= start) { res.writeHead(416); res.end(); return; }
         const end = reqEnd !== undefined ? Math.min(reqEnd, sz - 1) : sz - 1;
         const len = end - start + 1;
@@ -544,7 +554,11 @@ async function ensureHttpServer() {
         });
         fs.createReadStream(job.filePath, { start, end }).pipe(res);
       };
-      tryRange(0);
+      /* 非同步之後回傳的是 Promise；沒接住的 rejection 在 Electron 會炸掉整個主行程。 */
+      void tryRange(0).catch(err => {
+        console.error('[HTTP] range 供應失敗：', err);
+        try { if (!res.headersSent) { res.writeHead(500); res.end(); } } catch (e) {}
+      });
     });
     _hSrv.listen(0, '127.0.0.1', () => { _hPort = _hSrv.address().port; resolve(_hPort); });
     _hSrv.on('error', reject);
@@ -2087,7 +2101,11 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   // S3: 縮小閾值至 128KB（empty_moov 寫完即可播，不需等到 512KB）
   const t0 = Date.now();
   while (Date.now() - t0 < 60000) {
-    try { if (fs.statSync(proxy).size >= 131072) break; } catch (e2) {}
+    /* 非同步：這個迴圈最長跑 60 秒、每 300ms 一次。proxy 依 cacheCandidates 的優先序
+       多半落在【影片旁邊】的 .subtool_Cache，素材在 SMB 上時這個 stat 也在 SMB 上。
+       用同步版本等於每 300ms 就把主行程的 UI 執行緒鎖住數十毫秒——原生檔案對話框的
+       訊息迴圈就在那條執行緒上，於是「開啟檔案總管」與「在裡面切換資料夾」都會頓。 */
+    try { if ((await fsp.stat(proxy)).size >= 131072) break; } catch (e2) {}
     if (job.error) throw new Error('轉檔失敗：' + job.error);
     await new Promise(r => setTimeout(r, 300));
   }
