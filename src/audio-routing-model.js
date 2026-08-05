@@ -1,4 +1,6 @@
-import { normalizeAudioProject, ensureAudioBusCount, ensureAudioExportDefaults, pruneRemovedAudioBuses } from './state.js';
+/* ensureAudioBusCount / ensureAudioExportDefaults 曾在這裡被 import 卻從未使用
+   （本專案刻意關閉 no-unused-vars，所以沒有任何東西會提醒）。已移除。 */
+import { normalizeAudioProject, pruneRemovedAudioBuses } from './state.js';
 import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './delivery-audio.js';
 
 export const LAYOUTS = {
@@ -83,14 +85,24 @@ export class AudioRoutingModel {
         
         if (count > p.buses.length) {
           p.mode = 'manual';
-          // Since we are working on a pure draft, we'll manually expand buses here
-          // to avoid mutating global State via ensureAudioBusCount if possible.
-          // For now, we simulate what ensureAudioBusCount does:
-          while (p.buses.length < count) {
-            const nextId = p.buses.length + 1;
-            p.buses.push({ id: `bus-${nextId}`, locked: false });
-          }
-          if (!p.exportLayout?.streams?.length) {
+          /* 【不要自己捏 bus】
+             這裡原本寫 `p.buses.push({ id: \`bus-${n}\`, locked: false })`，註解還說
+             「we simulate what ensureAudioBusCount does」——但那份模擬與真正的擁有者
+             （state.js 的 _normalBus）產出的形狀不同：真的那份是
+             { id:'abN', name, visible, locked, muted, solo, volume, height }。
+             更陰的是 state.js 的 _cleanId 會【保留】任何非空字串當 id，
+             所以 'bus-3' 寫回 State 之後不會被修正，會被當成合法 id 接受，
+             而 name/volume/height 一律缺席——直到某條路徑碰巧呼叫了
+             normalizeAudioProject()，那條 bus 才會突然改名成「音訊軌 3」、音量重設。
+
+             改成推空物件、交給正規化器補齊：id 與所有欄位只有一個產生處。 */
+          const hadLayout = !!p.exportLayout?.streams?.length;
+          while (p.buses.length < count) p.buses.push({});
+          p = normalizeAudioProject(p);
+          /* normalizeAudioProject 在 exportLayout 為空時會自己補「每條 bus 一個 mono
+             stream」。本編輯器的預設不同（一條 stereo 吃前兩條 bus），所以只在
+             【原本就沒有】輸出設定時才覆寫回自己的預設，維持既有行為。 */
+          if (!hadLayout) {
             p.exportLayout = { streams: [{ id: 'out1', layout: 'stereo', busIds: p.buses.slice(0, 2).map(b => b.id) }] };
           }
           return true;

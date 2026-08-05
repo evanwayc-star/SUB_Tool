@@ -241,6 +241,11 @@ function projectOutputEditor(originalLayout=null,originalBusState=null){
       return model.current();
     },
     current(){ return model.current(); },
+    /* 草稿寫回 State 時只有【新增 bus】那條路徑需要正規化——bus 的 id 與欄位由
+       state.js 的 _normalBus 產生，模型自己捏過一份形狀不同的（v6.1.2 修）。
+       其餘幾條刻意【不】呼叫 normalizeAudioProject：它在 exportLayout 為空時會
+       自己補上「每條 bus 一個 mono stream」，使用者若把輸出清空就會被自動填回去，
+       等於改掉他的編輯結果。模型的 setBusCount 已經在內部正規化過。 */
     setStreams(streams){ model.setStreams(streams); State.audioProject = model.current(); },
     setBusCount(c){ const r = model.setBusCount(c); State.audioProject = model.current(); return r; },
     allMono(){ const r = model.applyAllMonoLayout(); State.audioProject = model.current(); return r; },
