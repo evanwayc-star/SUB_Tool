@@ -724,7 +724,29 @@ const Media = {
   /* --- mpv 即時開啟路徑（偵測到 mpv.exe 時使用，無需等 proxy 轉檔） --- */
   _mpvRect(){ const vw=$('videoWrap'); const r=vw.getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height}; },
   _startMpvBoundsFeeder(){
-    const send=()=>{ if(!this.mpvMode||!getPlayerAdapter())return; getPlayerAdapter().setBounds(this._mpvRect()).catch(()=>{}); };
+    /* 矩形沒變就不要送。
+
+       下面那個 2000ms 的計時器是面板拖移的安全網，但它【無條件】送出同一個矩形，
+       於是只要 mpv 在跑，主行程就每 2 秒把 mpv 與 guide 兩個 transparent 子視窗
+       各重設一次位置。那在 Windows 上是 layered window 的 SetWindowPos，會強制
+       DWM 重新合成；而原生檔案對話框的訊息迴圈就在主行程的 UI 執行緒上，
+       於是「開啟檔案總管」與「在對話框裡切換資料夾」每 2 秒被打斷一次。
+
+       主行程側另有一道相同的守衛（applyMpvBounds 比對絕對座標），因為視窗移動時
+       矩形不變但絕對位置會變——那一層才是正確性的保證，這裡只是省掉沒必要的 IPC。 */
+    /* 先停掉舊的。原本沒有這一行：重開素材時 media-loader 會再呼叫一次本函式，
+       舊的 setInterval 與 ResizeObserver 沒被清掉就會累積，每個各自送自己的 bounds。
+       現在 last 是每個 feeder 各自的閉包，殘留的舊 feeder 會拿自己的舊 last 判斷，
+       更容易送出多餘的 IPC——所以這一行同時是效能與正確性的保險。 */
+    this._stopMpvBoundsFeeder();
+    let last=null;
+    const send=()=>{
+      if(!this.mpvMode||!getPlayerAdapter())return;
+      const r=this._mpvRect();
+      if(last && last.x===r.x && last.y===r.y && last.w===r.w && last.h===r.h) return;
+      last=r;
+      getPlayerAdapter().setBounds(r).catch(()=>{});
+    };
     this._mpvBoundsSend=send;
     try{ this._mpvRO=new ResizeObserver(send); this._mpvRO.observe($('videoWrap')); }catch(e){}
     window.addEventListener('resize',send);

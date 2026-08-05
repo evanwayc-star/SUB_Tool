@@ -2226,24 +2226,45 @@ window.setImages = (h, r) => {
 };
 </script></body></html>`;
 
+/* 上一次真的套用出去的【絕對】座標。用來擋掉沒有變化的重設。 */
+let _mpvAppliedBounds = null;
+
 function applyMpvBounds(b) {
   if (!_mpvWin || _mpvWin.isDestroyed() || !b || !mainWin) return;
   _mpvRect = b;
   try {
     const cb = mainWin.getContentBounds(); // DIP，內容區左上角為原點
-    _mpvWin.setBounds({
+    const next = {
       x: Math.round(cb.x + b.x),
       y: Math.round(cb.y + b.y),
       width: Math.max(1, Math.round(b.w)),
       height: Math.max(1, Math.round(b.h)),
-    });
+    };
+
+    /* 沒變就不要動視窗。
+
+       mpv 與 guide 都是 `transparent: true` 的子視窗——在 Windows 上那是 layered
+       window，setBounds() 會走 SetWindowPos 並強制 DWM 重新合成整塊區域，成本不低。
+       而 renderer 有一個【每 2 秒】的安全網計時器（media.js _startMpvBoundsFeeder）
+       會無條件送同一個矩形過來，所以只要 mpv 在跑，這裡本來就是每 2 秒把兩個 layered
+       視窗各重設一次位置——即使畫面根本沒動。
+
+       那會卡到原生檔案對話框：dialog.showOpenDialog 的訊息迴圈就在主行程的 UI
+       執行緒上，於是「開啟檔案總管」與「在裡面切換資料夾」每 2 秒被打斷一次。
+
+       ── 比對的必須是【絕對座標】，不是傳進來的 b ──
+       主視窗移動時 reapplyMpv() 會用【同一個 b】重呼叫（b 是內容區相對座標，
+       視窗移動並不會改變它），此時 cb.x/cb.y 變了、next 也就變了，仍會正確套用。
+       若改成比對 b，視窗一移動 mpv 就會留在原地。 */
+    const same = _mpvAppliedBounds
+      && _mpvAppliedBounds.x === next.x && _mpvAppliedBounds.y === next.y
+      && _mpvAppliedBounds.width === next.width && _mpvAppliedBounds.height === next.height;
+    if (same) return;
+    _mpvAppliedBounds = next;
+
+    _mpvWin.setBounds(next);
     if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) {
-      _mpvGuideWin.setBounds({
-        x: Math.round(cb.x + b.x),
-        y: Math.round(cb.y + b.y),
-        width: Math.max(1, Math.round(b.w)),
-        height: Math.max(1, Math.round(b.h)),
-      });
+      _mpvGuideWin.setBounds(next);
     }
   } catch (e) {}
 }
@@ -2357,7 +2378,9 @@ function setMpvTimecodeWatermark(raw) {
 function destroyMpvWin() {
   if (_mpvWin) { try { if (!_mpvWin.isDestroyed()) _mpvWin.destroy(); } catch (e) {} _mpvWin = null; }
   if (_mpvGuideWin) { try { if (!_mpvGuideWin.isDestroyed()) _mpvGuideWin.destroy(); } catch (e) {} _mpvGuideWin = null; }
-  _mpvRect = null; _mpvVisible = true; _mpvGuide = null; _mpvImagesHtml = ''; _mpvImageHitRegions = []; _mpvGuideDragging = false; _mpvGuideInteractive = false; _mpvGuideAppliedInteractive = null; _mpvSubAdded = false; _mpvSubFile = null;
+  /* _mpvAppliedBounds 必須一起清掉：它是「上次真的送出去的絕對座標」的快取，
+     mpv 重啟後視窗是全新的，留著舊值會讓第一次定位被誤判成「沒變」而跳過。 */
+  _mpvRect = null; _mpvAppliedBounds = null; _mpvVisible = true; _mpvGuide = null; _mpvImagesHtml = ''; _mpvImageHitRegions = []; _mpvGuideDragging = false; _mpvGuideInteractive = false; _mpvGuideAppliedInteractive = null; _mpvSubAdded = false; _mpvSubFile = null;
 }
 
 function showMpvGuide() {
