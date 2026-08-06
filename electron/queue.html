@@ -329,7 +329,11 @@
        加入時間則推到最右邊拉開距離（它是這一行裡最不重要的資訊）。 */
     .job-specline {
       display: flex;
-      gap: 6px;
+      /* 換行而不是壓縮。標籤的內容長度差很多（字幕軌可能有好幾條），
+         擠在同一行會把後面的壓成省略號、甚至疊到隔壁標籤上。
+         寧可多佔一行也要看得完整。 */
+      flex-wrap: wrap;
+      gap: 5px 6px;
       align-items: center;
       margin: 5px 0 0;
       min-width: 0;
@@ -338,7 +342,10 @@
       line-height: 1.35;
     }
     .job-chip {
-      flex: 0 1 auto;
+      /* 不縮：寬度由內容決定，放不下就換行（見上）。
+         這是修掉「字幕標籤被壓成一個省略號、還被燒入TC疊住」的關鍵。 */
+      flex: 0 0 auto;
+      max-width: 100%;
       overflow: hidden;
       padding: 2px 7px;
       border: 1px solid rgba(255,255,255,.09);
@@ -348,11 +355,12 @@
       white-space: nowrap;
     }
     .job-chip--spec {
-      flex-shrink: 0;
       color: var(--text-dim);
       font-family: "Cascadia Mono", Consolas, monospace;
     }
-    .job-subs { opacity: .9; }
+    /* 字幕軌可能很多條——單獨給它一個上限並允許截斷，
+       其餘標籤不受影響（它們長度固定）。完整內容在 title 裡。 */
+    .job-subs { flex: 0 1 auto; min-width: 5.5em; opacity: .9; }
     .job-chip--tc {
       flex-shrink: 0;
       color: #f6c354;
@@ -438,6 +446,11 @@
     /* 欄位是 grip main progress actions；加了握把之後 actions 是第 4 欄，
        原本寫 3（舊版沒有握把時 actions 就是第 3 欄）會把按鈕塞進進度條那一欄。 */
     .job--compact .job-actions { grid-column: 4; }
+    /* 等待中的列沒有進度條，但那一欄仍佔著 minmax(260px, 1.2fr) 的寬度——
+       `display:none` 只是不畫內容，欄位還在。結果 job-main 被壓在
+       minmax(210px, 1fr) 裡，規格那一行的標籤被擠到只剩省略號，
+       而右邊有一大塊空白。讓 main 直接跨過那一欄。 */
+    .job--compact .job-main { grid-column: 2 / 4; }
 
     .job.status-running { border-color: rgba(58, 157, 245, .42); }
     .job.status-running .job-status { color: #79beff; background: var(--accent-bg); }
@@ -505,8 +518,13 @@
       .header { grid-template-columns: 1fr; }
       .controls { justify-content: flex-start; }
       .queue-workspace { flex: 0 1 auto; min-height: 0; }
-      .job { grid-template-areas: "main actions" "progress progress" "error error"; grid-template-columns: minmax(0, 1fr) auto; }
-      .job--compact .job-actions { grid-column: 2; }
+      /* 握把在窄版面也要有自己的欄位——加握把時漏了這兩個 media query，
+         沒有 grip 區域時它會被自動配置到別人的格子上。 */
+      .job { grid-template-areas: "grip main actions" "grip progress progress" "grip error error"; grid-template-columns: auto minmax(0, 1fr) auto; }
+      .job--compact .job-actions { grid-column: 3; }
+      /* 寬版面讓 main 跨過空的進度條欄（grid-column: 2 / 4）；這裡只有三欄，
+         第 3 欄是 actions，沿用那條規則會讓檔名疊到按鈕上。改回自動配置。 */
+      .job--compact .job-main { grid-column: auto; }
     }
 
     @media (max-width: 620px) {
@@ -514,9 +532,10 @@
       .title-line { gap: 8px; }
       .queue-stats { width: 100%; }
       .drag-hint { display: none; }
-      .job { grid-template-areas: "main" "progress" "actions" "error"; grid-template-columns: minmax(0, 1fr); }
-      .job-actions { grid-column: 1; justify-content: flex-start; }
-      .job--compact .job-actions { grid-column: 1; }
+      .job { grid-template-areas: "grip main" "grip progress" "grip actions" "grip error"; grid-template-columns: auto minmax(0, 1fr); }
+      .job-actions { grid-column: 2; justify-content: flex-start; }
+      .job--compact .job-actions { grid-column: 2; }
+      .job--compact .job-main { grid-column: auto; } /* 同上：這裡只有兩欄 */
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -848,7 +867,7 @@
             </div>
             <p class="job-specline">
               <span class="job-chip job-chip--spec">${escapeHTML(deliverySpec)}</span>
-              ${subtitleLabel ? `<span class="job-chip job-subs" title="會燒進這份交付的字幕軌">${escapeHTML(subtitleLabel)}</span>` : ''}
+              ${subtitleLabel ? `<span class="job-chip job-subs" title="${escapeHTML('會燒進這份交付的字幕軌：' + subtitleLabel)}">${escapeHTML(subtitleLabel)}</span>` : ''}
               ${burnsTimecode(job.payload) ? '<span class="job-chip job-chip--tc" title="會在畫面上燒入時間碼">燒入 TC</span>' : ''}
               ${enqueuedAt ? `<span class="job-enqueued" title="加入佇列時間">${escapeHTML(enqueuedAt)}</span>` : ''}
             </p>
