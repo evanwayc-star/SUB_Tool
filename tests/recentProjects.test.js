@@ -107,3 +107,64 @@ describe('removeRecent', () => {
     expect(R.removeRecent(list, abs('zzz.subtool'))).toEqual(list);
   });
 });
+
+/* ── 「檔案還在不在」的探測（createMissingProbe）──────────────────────────────
+   這支的呼叫端在主行程的 UI 執行緒上，而原生檔案對話框的訊息迴圈也在那條執行緒。
+   最近開啟的清單裡常有 SMB 路徑（實際使用者的三筆是 \Storage\DCP\...），
+   NAS 休眠時一次 stat 可能要數十秒——v6.1.7~6.1.9 這裡是【同步】的 fs.statSync，
+   等於一台睡著的 NAS 就能把整個 app 連同對話框凍住。v6.1.9 之後改成非同步＋限時。
+
+   兩個判斷很容易寫反，而且寫反了都是安靜的：
+   1. 逾時【不是】不見。把它當成不見，會讓一台只是慢的 NAS 上的專案全部被標灰。
+   2. 只有檔案系統明確說沒有（ENOENT／ENOTDIR）才算不見；權限不足、網路錯誤都不算。 */
+describe('檔案還在不在的探測', () => {
+  const file = { isFile: () => true };
+  const dir = { isFile: () => false };
+  const err = code => Object.assign(new Error(code), { code });
+
+  it('檔案在 → 不算不見', async () => {
+    const probe = R.createMissingProbe({ stat: async () => file });
+    expect(await probe('X')).toBe(false);
+  });
+
+  it('ENOENT → 確定不見', async () => {
+    const probe = R.createMissingProbe({ stat: async () => { throw err('ENOENT'); } });
+    expect(await probe('X')).toBe(true);
+  });
+
+  it('路徑存在但不是檔案（變成資料夾）→ 算不見', async () => {
+    const probe = R.createMissingProbe({ stat: async () => dir });
+    expect(await probe('X')).toBe(true);
+  });
+
+  it('逾時 → 不算不見（NAS 只是慢，不可以把專案標灰）', async () => {
+    /* 永遠不 resolve，模擬一台睡著的 NAS。 */
+    const probe = R.createMissingProbe({ stat: () => new Promise(() => {}), timeoutMs: 10 });
+    expect(await probe('\\Storage\DCP\睡著了.subtool')).toBe(false);
+  });
+
+  it('逾時會【真的】在限時內回來，不會跟著 NAS 一起卡住', async () => {
+    const probe = R.createMissingProbe({ stat: () => new Promise(() => {}), timeoutMs: 30 });
+    const t0 = Date.now();
+    await probe('X');
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('權限不足（EACCES）→ 不算不見，只是這次問不到', async () => {
+    const probe = R.createMissingProbe({ stat: async () => { throw err('EACCES'); } });
+    expect(await probe('X')).toBe(false);
+  });
+
+  it('網路錯誤（ENETUNREACH）→ 不算不見', async () => {
+    const probe = R.createMissingProbe({ stat: async () => { throw err('ENETUNREACH'); } });
+    expect(await probe('X')).toBe(false);
+  });
+
+  it('慢但有回應的 stat 仍會被正確判讀', async () => {
+    const probe = R.createMissingProbe({
+      stat: () => new Promise(r => setTimeout(() => r(file), 5)),
+      timeoutMs: 200,
+    });
+    expect(await probe('X')).toBe(false);
+  });
+});

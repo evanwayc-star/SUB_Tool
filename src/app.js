@@ -53,7 +53,7 @@ import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct, styleMatchesPreset, pruneRedundantCueStyle } from './substyle.js'; // v4.23 字幕樣式系統
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { createPreviewDrag } from './pointer-interaction.js';
-import { setStatus, showToast, showOsd, openModal, closeModal, promptModal } from './ui.js';
+import { setStatus, showToast, showOsd, openModal, closeModal, promptModal, closeMenus, openMenu } from './ui.js';
 import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
 import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
@@ -542,20 +542,18 @@ document.addEventListener('click',e=>{
     doAction(b.dataset.act);
   }
   // 關閉下拉選單
-  document.querySelectorAll('.menu.open').forEach(m=>{ if(!m.contains(e.target))m.classList.remove('open'); });
+  closeMenus(e.target);
 });
 document.querySelectorAll('.menu>button').forEach(btn=>{
   btn.addEventListener('click',e=>{
     e.stopPropagation();
-    const m=btn.parentElement; const wasOpen=m.classList.contains('open');
-    document.querySelectorAll('.menu.open').forEach(x=>x.classList.remove('open'));
-    if(!wasOpen)m.classList.add('open');
+    const m=btn.parentElement;
+    if(m.classList.contains('open')) closeMenus();
+    else openMenu(m);
   });
 });
 // 選單項目點擊後關閉
-document.querySelectorAll('.menu .items button').forEach(b=>b.addEventListener('click',()=>{
-  b.closest('.menu').classList.remove('open');
-}));
+document.querySelectorAll('.menu .items button').forEach(b=>b.addEventListener('click',()=>closeMenus()));
 
 
 /* ===== 字幕列表：軌道切換下拉 + 樣式面板 ===== */

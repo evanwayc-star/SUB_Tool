@@ -17,7 +17,7 @@
 ============================================================================== */
 import { $ } from './dom.js';
 import { IS_DESKTOP, DESK } from './state.js';
-import { showToast } from './ui.js';
+import { showToast, closeMenus, syncMenuOverlay } from './ui.js';
 import { Project, confirmDiscardUnsaved } from './project.js';
 
 /* 8月6日 · 11:05 am —— 與匯出佇列監控的「加入時間」同一種寫法。 */
@@ -57,6 +57,7 @@ export async function renderRecentMenu() {
     empty.className = 'lbl';
     empty.textContent = '還沒有開啟過專案';
     box.appendChild(empty);
+    syncMenuOverlay();
     return;
   }
 
@@ -75,7 +76,7 @@ export async function renderRecentMenu() {
     when.textContent = fmtWhen(item.at);
     b.append(name, when);
     b.addEventListener('click', () => {
-      $('recentMenu')?.classList.remove('open');
+      closeMenus();
       void openByIndex(item.index);
     });
     box.appendChild(b);
@@ -87,11 +88,15 @@ export async function renderRecentMenu() {
   clear.type = 'button';
   clear.textContent = '清除清單';
   clear.addEventListener('click', async () => {
-    $('recentMenu')?.classList.remove('open');
+    closeMenus();
     try { await DESK.clearRecentProjects(); } catch (e) {}
     await renderRecentMenu();
   });
   box.append(sep, clear);
+  /* 內容是非同步填進來的，選單高度到這一刻才確定。沒有這一行的話，讓位判斷用的是
+     還沒長高的空盒子矩形——那個矩形通常還構不到影片區，於是 mpv 不讓位，選單照樣
+     被蓋住。這是本次事故最容易漏掉的一半。 */
+  syncMenuOverlay();
 }
 
 export function initRecentProjects() {

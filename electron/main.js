@@ -841,15 +841,25 @@ function rememberRecentProject(filePath) {
   saveRecentProjects(RecentProjects.addRecent(loadRecentProjects(), filePath, { now: Date.now() }));
 }
 
+/* 規則與逾時政策在 recent-projects.js（那裡有完整說明並附測試）；
+   這裡只負責把真正的 fs 接上去。用 fsp 而不是 fs：清單裡常有 SMB 路徑，
+   同步 stat 會連同原生檔案對話框一起凍住主行程的 UI 執行緒。 */
+const recentProjectMissing = RecentProjects.createMissingProbe({ stat: fsp.stat });
+
 /* 清單本身不含能力授予——只是給選單顯示用。
    `missing` 讓選單可以把已經不在的檔案標灰，而不是讓使用者點了才失敗。 */
-ipcMain.handle('project:recentList', () => loadRecentProjects().map((item, index) => ({
-  index,
-  name: item.name || path.basename(item.path),
-  path: item.path,
-  at: item.at || 0,
-  missing: !(() => { try { return fs.statSync(item.path).isFile(); } catch (e) { return false; } })(),
-})));
+ipcMain.handle('project:recentList', async () => {
+  const list = loadRecentProjects();
+  /* 一起探測，不要一筆一筆等——10 筆各 400ms 逾時串起來就是 4 秒。 */
+  const missing = await Promise.all(list.map(item => recentProjectMissing(item.path)));
+  return list.map((item, index) => ({
+    index,
+    name: item.name || path.basename(item.path),
+    path: item.path,
+    at: item.at || 0,
+    missing: missing[index],
+  }));
+});
 
 /* renderer 只送【索引】，路徑由主程序自己的清單決定——沒有路徑注入空間。
    讀取前才授予那一個檔案的能力（fileAuthority 是每次工作階段的）。 */

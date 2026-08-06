@@ -7,7 +7,7 @@
 
 ---
 
-## 0. 最高優先：不要做這三件事
+## 0. 最高優先：不要做這四件事
 
 ### 0.1 絕對不要對版號做全域字串取代
 
@@ -38,6 +38,33 @@
 
 驗證必須看**內容**，不是看有沒有報錯。詳見
 [`docs/技術架構說明.md`](docs/技術架構說明.md) §0.6，那裡有兩個「驗證方法本身出錯」的真實案例。
+
+### 0.4 絕對不要在專案根目錄跑 `asar extract-file`
+
+`asar extract-file` 是**依 basename 把檔案寫到 cwd**。所以在專案根目錄下
+
+```bash
+npx asar extract-file release/win-unpacked/resources/app.asar dist/index.html
+```
+
+會把 796 KB 的**建置產物**寫成 `./index.html`，直接蓋掉 32 KB 的 **Vite 原始碼入口**。
+要驗 asar 內容，**先 `cd` 到一個暫存目錄再解**。
+
+> **真實事故（發生過兩次）**：
+> - v6.1.7（`dbc047b`）——蓋掉之後還跟了一行 `rm -f index.html`，檔案直接消失，
+>   commit 裡留下 `delete mode 100644 index.html`。於 `074572d` 從 git 還原。
+> - v6.1.9（`9544570`）——**同一個指令、同一個錯誤，再犯一次**。這次沒有刪檔，
+>   但被 `git add -A` 掃進了版本庫。於 v6.1.10 還原。
+>
+> 兩次都是**靜默**的：`npm run lint`、`npm test`、`npm run build` **全綠**——
+> vite 會把「建置產物」當成一份合法的 HTML 入口再 bundle 一次，照樣 exit 0 並吐出
+> 一個看起來正常的 `dist`。真正會炸的時機在很久以後：某次有人改了 `index.html` 的
+> 版面卻發現改了沒效果，或整份工具列的原始標記已經找不回來了。
+
+現在有一道機械式的絆索：[`tests/sourceEntryHtml.test.js`](tests/sourceEntryHtml.test.js)
+會檢查根目錄的 `index.html` 仍是原始碼入口（有 `<script type="module" src="/src/main.js">`、
+沒有建置期才注入的 CSP meta、大小在原始碼的量級）。**這支測試紅了，先想「是不是又被
+產物蓋掉了」，而不是「測試過時了」。**
 
 ---
 

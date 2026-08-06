@@ -26,7 +26,18 @@
    然後模擬真人點一下——測的是「使用者按下去會不會看到清單」，不是任一支函式的回傳值。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../src/ui.js', () => ({ showToast: vi.fn() }));
+const ui = vi.hoisted(() => ({
+  showToast: vi.fn(),
+  /* 真的把 .open 拿掉——選單關閉的行為要跟正式碼一致，測試才測得到「點了會關」。 */
+  closeMenus: vi.fn(() => {
+    document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open'));
+  }),
+  openMenu: vi.fn(m => m?.classList.add('open')),
+  /* 內容填完後要重算 mpv 讓位（見 src/ui.js 的註解）。這支被呼叫到幾次、
+     在什麼時機呼叫，是本檔案要盯的東西之一。 */
+  syncMenuOverlay: vi.fn(),
+}));
+vi.mock('../src/ui.js', () => ui);
 vi.mock('../src/project.js', () => ({
   Project: { loadDesktop: vi.fn() },
   confirmDiscardUnsaved: vi.fn().mockResolvedValue(true),
@@ -133,6 +144,32 @@ describe('最近開啟選單', () => {
     await vi.waitFor(() => expect(openRecentProject).toHaveBeenCalledWith(1));
     /* renderer 不可以有能力指定路徑——那等於一條「叫主程序讀任意檔案」的路。 */
     expect(openRecentProject.mock.calls.flat().some(a => typeof a === 'string')).toBe(false);
+  });
+
+  /* mpv 是 OS 層子視窗，HTML 蓋不過它。選單內容是【非同步】填進來的，高度到那一刻
+     才確定，所以填完必須再要求重算一次讓位；只在「打開的瞬間」算，量到的是還沒長高
+     的空盒子，判斷會是「不重疊」，mpv 不讓位，選單照樣被蓋住。 */
+  it('內容填完後會要求重算 mpv 讓位', async () => {
+    initRecentProjects();
+    await vi.waitFor(() => expect(projectRows()).toHaveLength(2));
+    expect(ui.syncMenuOverlay).toHaveBeenCalled();
+  });
+
+  it('清單空的時候也要重算（那一格同樣有高度）', async () => {
+    recentProjects.mockResolvedValue([]);
+    initRecentProjects();
+    await vi.waitFor(() => expect(ui.syncMenuOverlay).toHaveBeenCalled());
+  });
+
+  it('點某一列會關掉選單（走 closeMenus，不自己動 classList）', async () => {
+    initRecentProjects();
+    await vi.waitFor(() => expect(projectRows()).toHaveLength(2));
+    click('recentBtn');
+    await vi.waitFor(() =>
+      expect(document.getElementById('recentMenu').classList.contains('open')).toBe(true));
+    projectRows()[0].click();
+    expect(ui.closeMenus).toHaveBeenCalled();
+    expect(document.getElementById('recentMenu').classList.contains('open')).toBe(false);
   });
 
   it('清單是空的時候給一句話，不是留一個空盒子', async () => {

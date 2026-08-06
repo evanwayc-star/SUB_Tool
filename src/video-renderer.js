@@ -113,6 +113,22 @@ export function _syncMpvPanel(){
         const cm=$('ctxmenu');
         if(cm&&cm.classList.contains('show')&&ov(cm.getBoundingClientRect()))hides=true;
       }
+      if(!hides){
+        /* 工具列的下拉選單（.menu.open .items）。這一條是 v6.1.9 補的。
+
+           真實事故：「最近開啟」展開後有最多 10 筆、每筆兩行，高度遠超過工具列，
+           直接伸進影片區。選單有正確 render（CDP 量到 computed style 可見、每一列
+           的 getBoundingClientRect 都有寬高）卻【完全看不到】——因為 mpv 是 OS 層
+           子視窗，HTML 的 z-index 蓋不過它。
+
+           §0.7 說可見性只能看 computed style，那是對的；但它只證明「HTML 這一層
+           把它畫出來了」，證明不了「使用者的眼睛看得到」。上面那幾種疊層（浮動面板、
+           搜尋視窗、右鍵選單）早就接進這裡了，只有工具列選單從一開始就漏掉——
+           先前沒有人發現，是因為在這之前工具列選單都很矮，撐不到影片區。 */
+        for(const it of document.querySelectorAll('.menu.open .items')){
+          if(ov(it.getBoundingClientRect())){hides=true;break;}
+        }
+      }
     }
   }
   getPlayerAdapter().show(!hides).catch(()=>{});

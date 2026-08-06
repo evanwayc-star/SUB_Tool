@@ -7,6 +7,7 @@
 /* SUB Tool — UI 基本元件：狀態列 / Toast / OSD / 對話框（葉節點，僅依賴 dom + media 執行期狀態） */
 import { $ } from './dom.js';
 import { Media } from './media.js';
+import { emit } from './events.js';
 
 /* 狀態列 / toast / modal */
 // X6：狀態點除顏色外提供文字等價（aria-label），供報讀器與非顏色辨識
@@ -144,5 +145,40 @@ $('modalTitle').addEventListener('pointermove', e=>{
 });
 $('modalTitle').addEventListener('pointerup', e=>{ _mDragging=false; $('modalTitle').releasePointerCapture(e.pointerId); });
 
-export { setStatus, showToast, showOsd, openModal, closeModal, promptModal };
+/* ── 工具列的下拉選單（.menu / .menu.open .items）────────────────────────────
+   【開合一律走這兩支，不要自己動 classList】
+
+   除了加減 class，它們還要 `emit('mpv:sync')`。mpv 是 OS 層子視窗，HTML 的
+   z-index 蓋不過它；展開的選單若伸進影片區就會整個被蓋在下面。訂閱者
+   `_syncMpvPanel()`（video-renderer.js）會量 `.menu.open .items` 與 videoWrap
+   的矩形，真的重疊才讓 mpv 讓位——不重疊時影片繼續顯示，不會為了一個選單閃黑。
+
+   真實事故（v6.1.9）：「最近開啟」展開後最多 10 筆、每筆兩行，高度遠超過工具列，
+   直接伸進影片區，於是選單「打得開但完全看不到」。同一個讓位機制浮動面板、
+   搜尋視窗、右鍵選單早就接上了，只有工具列選單漏掉——先前沒被發現，是因為在
+   這之前工具列選單都很矮，撐不到影片區。
+
+   放在 ui.js 而不是 app.js：`src/recent-projects.js` 也要關選單，而 §7 的架構規則
+   是「沒有任何模組可以 import app.js」。 */
+function closeMenus(keepFor){
+  let changed=false;
+  document.querySelectorAll('.menu.open').forEach(m=>{
+    if(keepFor && m.contains(keepFor)) return;
+    m.classList.remove('open'); changed=true;
+  });
+  if(changed) emit('mpv:sync');
+  return changed;
+}
+function openMenu(m){
+  if(!m) return;
+  closeMenus();
+  m.classList.add('open');
+  emit('mpv:sync');
+}
+/* 選單內容是非同步填進去的（最近開啟要等主程序回清單），高度會在打開【之後】才長出來。
+   填完要再算一次，否則讓位判斷用的是還沒長高的矩形。 */
+function syncMenuOverlay(){ emit('mpv:sync'); }
+
+export { setStatus, showToast, showOsd, openModal, closeModal, promptModal,
+  closeMenus, openMenu, syncMenuOverlay };
 
