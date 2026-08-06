@@ -64,6 +64,13 @@ const JOBS = [
     payload: { outPath: 'C:\\out\\失敗的工作.mp4', format: 'h264',
       width: 1920, height: 1080, fps: 25, videoKbps: 8000, duration: 152.0,
       subtitleTracks: ['對白'], timecodeWatermark: null } },
+  /* 完成的工作是從 queue-history 讀回來的，欄位由 toEntry() 決定。
+     它先前只存 outPath/duration/format，於是完成那幾列少了解析度、碼率、
+     字幕與 TC——同一個畫面上兩種樣子。這一筆就是照 toEntry 的形狀寫的。 */
+  { id: 'd1', status: 'done', createdAt: at(20, 30, 0), completedAt: at(20, 45, 12), elapsedMs: 912000,
+    payload: { outPath: 'C:\\out\\已完成_51FM+20FM_TC.mp4', format: 'h264',
+      width: 1920, height: 1080, fps: 29.97, videoKbps: 8000, duration: 152.0,
+      subtitleTracks: ['字卡', '對白'], timecodeWatermark: { start: null } } },
 ];
 
 const stub = `<script>

@@ -359,8 +359,13 @@
       font-family: "Cascadia Mono", Consolas, monospace;
     }
     /* 字幕軌可能很多條——單獨給它一個上限並允許截斷，
-       其餘標籤不受影響（它們長度固定）。完整內容在 title 裡。 */
-    .job-subs { flex: 0 1 auto; min-width: 5.5em; opacity: .9; }
+       其餘標籤不受影響（它們長度固定）。完整內容在 title 裡。
+       顏色與規格標籤同級：這是「這份交付會燒什麼」的關鍵資訊，不該比周圍更淡。 */
+    .job-subs {
+      flex: 0 1 auto;
+      min-width: 5.5em;
+      color: var(--text-dim);
+    }
     .job-chip--tc {
       flex-shrink: 0;
       color: #f6c354;
@@ -368,13 +373,14 @@
       background: rgba(246,195,84,.08);
       font-weight: 600;
     }
-    /* 推到最右：與左邊那組標籤之間留出明顯空白 */
+    /* 推到最右：與左邊那組標籤之間留出明顯空白。
+       比標籤淡一階（它是次要資訊），但不到看不清楚的程度。 */
     .job-enqueued {
       flex: 0 0 auto;
       margin-left: auto;
       padding-left: 10px;
-      font-family: "Cascadia Mono", Consolas, monospace;
-      opacity: .55;
+      color: var(--text-muted);
+      opacity: .9;
     }
     /* 交付設定編輯器：橫跨 main→actions（不壓到握把那一欄） */
     .job-editor {
@@ -636,7 +642,9 @@
       const date = new Date(timestamp);
       if (Number.isNaN(date.getTime())) return '';
       const hour = date.getHours();
-      const period = hour >= 12 ? 'PM' : 'AM';
+      /* 小寫，與 fmtEnqueuedAt 一致——同一張卡片上「加入時間」與「完成於」
+         用不同大小寫看起來像兩套系統。 */
+      const period = hour >= 12 ? 'pm' : 'am';
       const hour12 = hour % 12 || 12;
       return `${date.getMonth() + 1}月${date.getDate()}日 · ${String(hour12).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')} ${period}`;
     };
@@ -672,7 +680,8 @@
       return fraction ? `${base}.${String(fraction).padStart(3, '0').replace(/0+$/, '')}` : base;
     };
 
-    /* 加入佇列的時間：2026/08/05-11:52:23pm */
+    /* 加入佇列的時間：加入時間：8月6日 · 11:05:50 am
+       不顯示年份——佇列裡的工作都是近期的，年份只是噪音（完整值在 title 裡）。 */
     const fmtEnqueuedAt = value => {
       const ms = Number(value);
       if (!Number.isFinite(ms) || ms <= 0) return '';
@@ -681,8 +690,8 @@
       const h24 = d.getHours();
       const suffix = h24 < 12 ? 'am' : 'pm';
       const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-      return `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}`
-        + `-${pad2(h12)}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}${suffix}`;
+      return `加入時間：${d.getMonth() + 1}月${d.getDate()}日`
+        + ` · ${pad2(h12)}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${suffix}`;
     };
 
     /* 交付規格摘要：MP4 / 1920 x 1080 px / 8000 kbps
@@ -702,7 +711,7 @@
       if (String(payload?.format || '') === 'wav') return null;
       const list = payload?.subtitleTracks;
       if (!Array.isArray(list)) return null;       // 舊工作：沒這個欄位，不要謊報「無字幕」
-      return list.length ? '字幕 ' + list.join('、') : '無字幕';
+      return list.length ? '字幕：' + list.join('、') : '無字幕';
     };
     const fmtDeliverySpec = payload => {
       const format = String(payload?.format || '');
@@ -771,7 +780,9 @@
           const elS = Math.floor(finiteNumber(job.elapsedMs) / 1000);
           const etaS = Math.floor(finiteNumber(job.etaS));
           const totalS = elS + etaS;
-          metaText = '正在轉碼；進度會隨 ffmpeg 更新';
+          /* 這裡原本寫「正在轉碼；進度會隨 ffmpeg 更新」——與狀態列的
+             「執行中 26.0%」和下面的已／剩／預計完全重複，只是多佔一行。 */
+          metaText = '';
           timingHtml = `<div class="job-timing">
             <span class="job-timing-item">已 <b>${fmt(elS)}</b></span>
             <span class="job-timing-item">剩 <b>${fmt(etaS)}</b></span>
@@ -871,7 +882,7 @@
               ${burnsTimecode(job.payload) ? '<span class="job-chip job-chip--tc" title="會在畫面上燒入時間碼">燒入 TC</span>' : ''}
               ${enqueuedAt ? `<span class="job-enqueued" title="加入佇列時間">${escapeHTML(enqueuedAt)}</span>` : ''}
             </p>
-            ${job.status === 'queued' ? '' : `<p class="job-meta">${escapeHTML(metaText)}</p>`}
+            ${(job.status === 'queued' || !metaText) ? '' : `<p class="job-meta">${escapeHTML(metaText)}</p>`}
           </div>
           ${isRunning ? `
             <div class="job-progress">

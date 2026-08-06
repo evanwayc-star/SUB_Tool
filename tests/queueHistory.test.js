@@ -50,7 +50,14 @@ describe('寫入與讀回', () => {
       createdAt: 1000,
       completedAt: 2000,
       elapsedMs: 1500,
-      payload: { outPath: 'C:/out/a.mp4', duration: 12.5, format: 'h264' },
+      /* 顯示用欄位在來源沒有時一律落到「不知道」而不是假值：
+         數值 0（fmtDeliverySpec 會因此略過不顯示）、字幕 undefined
+         （不可以變成 [] ——那會讓畫面顯示「無字幕」，等於謊報）。 */
+      payload: {
+        outPath: 'C:/out/a.mp4', duration: 12.5, format: 'h264',
+        width: 0, height: 0, fps: 0, videoKbps: 0,
+        subtitleTracks: undefined, timecodeWatermark: null,
+      },
     }]);
   });
 
@@ -92,7 +99,14 @@ describe('紀錄不可執行（queue-store terminal tombstone 的安全性質不
       },
     }));
     const [entry] = QueueHistory.load(dir);
-    expect(Object.keys(entry.payload).sort()).toEqual(['duration', 'format', 'outPath']);
+    /* 白名單，不是黑名單：列出【允許】的欄位，任何新加進 toEntry 的東西都會讓
+       這條紅——那正是我們要的，因為 payload 裡混著 clips／audioPlan 這種
+       可執行內容，多帶一個欄位就可能把它們洩進紀錄。
+       v6.1.7 新增的五個是純顯示用的值（解析度／fps／碼率／字幕名稱／有沒有燒 TC）。 */
+    expect(Object.keys(entry.payload).sort()).toEqual([
+      'duration', 'format', 'fps', 'height', 'outPath',
+      'subtitleTracks', 'timecodeWatermark', 'videoKbps', 'width',
+    ]);
     expect(entry.assRef).toBeUndefined();
     expect(entry.sourcePaths).toBeUndefined();
     expect(entry.senderId).toBeUndefined();
@@ -204,5 +218,53 @@ describe('寫入是原子的', () => {
     const parsed = JSON.parse(readFileSync(QueueHistory.historyPath(dir), 'utf8'));
     expect(parsed.version).toBe(QueueHistory.HISTORY_VERSION);
     expect(parsed.entries).toHaveLength(1);
+  });
+});
+
+/* 完成紀錄要能在監控畫面上顯示得【和未完成的一模一樣】。
+
+   壞掉的樣子（v6.1.7 之前）：toEntry() 只存 outPath / duration / format，
+   於是完成的那幾列少了解析度、碼率、字幕與 TC，時長也因為沒有 fps 而退回
+   HH:MM:SS.mmm——同一個畫面上兩種樣子，而且不會有任何錯誤。 */
+describe('完成紀錄帶著顯示所需的欄位', () => {
+  const { toEntry } = QueueHistory;
+
+  const finished = {
+    id: 'j1', status: 'done', createdAt: 1, completedAt: 2, elapsedMs: 3,
+    payload: {
+      outPath: 'D:/out/a.mp4', format: 'h264', duration: 152,
+      width: 1920, height: 1080, fps: 29.97, videoKbps: 8000,
+      subtitleTracks: ['字卡', '對白'],
+      timecodeWatermark: { start: '01:00:00:00' },
+      // 這兩個【不該】被帶進紀錄：它們是可執行的內容
+      clips: [{ path: 'D:/m.mxf' }], audioPlan: { buses: [] },
+    },
+  };
+
+  it('解析度／fps／碼率／字幕／TC 都留下來', () => {
+    const e = toEntry(finished);
+    expect(e.payload.width).toBe(1920);
+    expect(e.payload.height).toBe(1080);
+    expect(e.payload.fps).toBe(29.97);
+    expect(e.payload.videoKbps).toBe(8000);
+    expect(e.payload.subtitleTracks).toEqual(['字卡', '對白']);
+    expect(e.payload.timecodeWatermark).toBeTruthy();
+  });
+
+  it('仍然不含 clips／audioPlan——完成紀錄必須是不可執行的', () => {
+    const e = toEntry(finished);
+    expect(e.payload.clips).toBeUndefined();
+    expect(e.payload.audioPlan).toBeUndefined();
+  });
+
+  it('沒燒 TC 時記成 null，不可以留下會被誤判為「有燒」的物件', () => {
+    const e = toEntry({ ...finished, payload: { ...finished.payload, timecodeWatermark: null } });
+    expect(e.payload.timecodeWatermark).toBe(null);
+  });
+
+  it('沒有字幕欄位的舊工作維持 undefined（畫面才不會謊報「無字幕」）', () => {
+    const p = { ...finished.payload };
+    delete p.subtitleTracks;
+    expect(toEntry({ ...finished, payload: p }).payload.subtitleTracks).toBeUndefined();
   });
 });

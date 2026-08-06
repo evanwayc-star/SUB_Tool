@@ -78,7 +78,7 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(document.getElementById('completedHistory').hidden).toBe(false);
     expect(document.getElementById('completedHistory').open).toBe(false);
     expect(document.querySelector('[data-job-id="done-1"] .job-meta')?.textContent || '')
-      .toContain('完成於 7月28日 · 03:53 PM');
+      .toContain('完成於 7月28日 · 03:53 pm');
     expect(document.querySelector('[data-job-id="queued-1"]').classList.contains('job--compact')).toBe(true);
     expect(Boolean(document.querySelector('[data-job-id="queued-1"] .job-meta'))).toBe(false);
     expect(document.getElementById('queueWarning').hidden).toBe(false);
@@ -157,9 +157,10 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(spec('pro')).toBe('ProRes / 1920 x 1080 px');
     expect(spec('wav')).toBe('WAV');
 
-    // 「加入」二字拿掉了：它靠位置（推到最右）與 title 表達，不再佔用寬度
+    /* 不顯示年份——佇列裡的工作都是近期的，年份只是噪音。
+       am/pm 一律小寫，與「完成於」一致（同一張卡片上不該有兩套大小寫）。 */
     expect(document.querySelector('[data-job-id="mp4"] .job-enqueued')?.textContent)
-      .toBe('2026/08/05-11:52:23pm');
+      .toBe('加入時間：8月5日 · 11:52:23 pm');
     // 舊工作沒有 createdAt 時不可以印出 Invalid Date
     expect(document.querySelector('[data-job-id="pro"] .job-enqueued')).toBe(null);
   });
@@ -201,7 +202,7 @@ describe('匯出佇列監控緊湊工作區', () => {
     const { document } = await openQueueWindow(jobs);
     const subs = id => document.querySelector(`[data-job-id="${id}"] .job-subs`)?.textContent ?? null;
 
-    expect(subs('subs')).toBe('字幕 取詞、對白');
+    expect(subs('subs')).toBe('字幕：取詞、對白');
     expect(subs('none')).toBe('無字幕');
     expect(subs('wav')).toBe(null);
     expect(subs('legacy')).toBe(null);

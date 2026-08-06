@@ -49,10 +49,23 @@ function toEntry(job) {
     createdAt: finiteOr(job.createdAt, 0),
     completedAt: finiteOr(job.completedAt, Date.now()),
     elapsedMs: finiteOr(job.elapsedMs, 0),
+    /* 完成紀錄要能在監控畫面上顯示得【和未完成的一模一樣】。
+       先前只存 outPath / duration / format，於是完成的那幾列少了解析度、碼率、
+       字幕與 TC，時長也因為沒有 fps 而退回 HH:MM:SS.mmm——同一個畫面上兩種樣子。
+       這些欄位都很小，帶著走比事後猜便宜。 */
     payload: {
       outPath,
       duration: finiteOr(job.payload?.duration, 0),
       format: typeof job.payload?.format === 'string' ? job.payload.format : null,
+      width: finiteOr(job.payload?.width, 0),
+      height: finiteOr(job.payload?.height, 0),
+      fps: finiteOr(job.payload?.fps, 0),
+      videoKbps: finiteOr(job.payload?.videoKbps, 0),
+      subtitleTracks: Array.isArray(job.payload?.subtitleTracks)
+        ? job.payload.subtitleTracks.filter(n => typeof n === 'string')
+        : undefined,
+      /* 只留「有沒有燒」這件事——起始時間碼對完成紀錄沒有意義。 */
+      timecodeWatermark: job.payload?.timecodeWatermark ? { start: null } : null,
     },
   };
 }
