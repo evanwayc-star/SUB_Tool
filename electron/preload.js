@@ -29,6 +29,11 @@ contextBridge.exposeInMainWorld('subtool', {
   openMedia:    () => ipcRenderer.invoke('dialog:openMedia'),
   openAudio:    () => ipcRenderer.invoke('dialog:openAudio'),
   openProject:  () => ipcRenderer.invoke('dialog:openProject'),
+  /* 最近開啟：清單由主程序持有並持久化。開啟時只送【索引】——
+     renderer 給不了路徑，所以沒有「叫主程序讀任意檔案」的路。 */
+  recentProjects:   () => ipcRenderer.invoke('project:recentList'),
+  openRecentProject: (index) => ipcRenderer.invoke('project:openRecent', index),
+  clearRecentProjects: () => ipcRenderer.invoke('project:clearRecent'),
   authorizeProject: (path, b64) => ipcRenderer.invoke('fs:authorizeProject', { path, b64 }),
   saveProject:  (name, b64) => ipcRenderer.invoke('dialog:saveProject', { name, b64 }),
   importSub:    (kind) => ipcRenderer.invoke('dialog:importSub', kind),

@@ -25,6 +25,9 @@
       <button class="icon" data-act="new" title="清空新建">🗑 <span class="lbl">開新專案</span></button>
       <div class="sep"></div>
       <button class="icon open-proj-btn" data-act="open-project" title="開啟專案 (.subtool)">📂 <span class="lbl">開啟專案</span></button>
+      <!-- 最近開啟：清單由主程序持有，這裡只顯示與送索引（見 electron/main.js project:recentList）。
+           .menu 的開合由 app.js 既有的通用邏輯處理，不必另外接線。 -->
+      <div class="menu" id="recentMenu"><button class="icon" id="recentBtn" title="最近開啟的專案">🕘 <span class="lbl">最近開啟</span></button><div class="items" id="recentItems"></div></div>
       <div class="sep"></div>
       <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 <span class="lbl">儲存專案</span></button>
       <button class="icon" data-act="save-as-project" title="另存新檔">💾 <span class="lbl">另存新檔</span></button>
@@ -125,8 +128,10 @@
       <div class="right" id="rightPanel">
         <div class="rhead">
           <span class="title">字幕列表</span>
-          <select id="listTrackSel" title="切換顯示的字幕軌道" style="margin-left:8px;max-width:120px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);padding:1px 4px;border-radius:3px;"></select>
-          <span class="count" id="subCount" style="margin-left:8px; color:#e4bd60; font-weight:bold;">0 句</span>
+          <!-- 軌道選單用黃色：它是「目前在看哪一軌」，是這一列裡要先讀到的資訊。
+               總句數改白色——它是那一軌的附屬數字，不該比軌道名更搶眼。 -->
+          <select id="listTrackSel" title="切換顯示的字幕軌道" style="margin-left:8px;max-width:120px;background:var(--panel2);color:#e4bd60;font-weight:600;border:1px solid var(--border2);padding:1px 4px;border-radius:3px;"></select>
+          <span class="count" id="subCount" style="margin-left:8px; color:var(--text); font-weight:bold;">0 句</span>
           <button class="icon" data-act="add-cue-above" title="於選取字幕上方新增空白" style="margin-left:auto;">⬆＋</button>
           <button class="icon" data-act="add-cue-below" title="於選取字幕下方新增空白">⬇＋</button>
           <button class="icon" data-act="del-cue" title="刪除選取 (Del)">✕</button>

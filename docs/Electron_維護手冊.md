@@ -58,7 +58,10 @@ Main (main.js)
 | `listDir(path)` | `fs:listDir` | R→M | 只列出已選擇的交付目錄，供交付同名衝突提示 |
 | `openMedia()` | `dialog:openMedia` | R→M | 系統開檔對話框（影音），為每個回傳檔授予精確唯讀能力 |
 | `openAudio()` | `dialog:openAudio` | R→M | 系統開檔對話框（音訊），每個回傳檔都取得精確唯讀能力 |
-| `openProject()` | `dialog:openProject` | R→M | 開啟 `.subtool` 專案，回傳 `{b64, path}`；只解析明確 media 欄位並授予那些精確來源 |
+| `openProject()` | `dialog:openProject` | R→M | 開啟 `.subtool` 專案，回傳 `{b64, path}`；只解析明確 media 欄位並授予那些精確來源。開啟成功後記進「最近開啟」 |
+| `recentProjects()` | `project:recentList` | R→M | 最近開啟的專案（最多 10 筆）。**只回顯示用的字串與索引，不授予任何能力**；`missing` 讓選單能把已不存在的檔案標灰 |
+| `openRecentProject(i)` | `project:openRecent` | R→M | 依**索引**開啟——清單由主程序持有，renderer 給不了路徑，所以沒有「叫主程序讀任意檔案」的路。`fileAuthority` 的授權是每次工作階段的，這裡才重新授予那一個檔案。檔案不存在時從清單移除並丟錯 |
+| `clearRecentProjects()` | `project:clearRecent` | R→M | 清空最近開啟清單 |
 | `saveProject(name, b64)` | `dialog:saveProject` | R→M | 另存 `.subtool` 專案並授予該專案與 autosave 的限定寫入能力 |
 | `importSub(kind)` | `dialog:importSub` | R→M | 開啟字幕檔，回傳 `{b64, name}` |
 | `exportSub(name, b64, ext)` | `dialog:exportSub` | R→M | 儲存字幕檔，回傳儲存路徑 |

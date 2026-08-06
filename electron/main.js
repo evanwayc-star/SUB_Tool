@@ -34,6 +34,7 @@ const { buildAudioIngestPlan } = require('./channel-layout');
 const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
 const { createExportAdmission } = require('./export-admission');
 const { createExportQueue } = require('./export-queue');
+const RecentProjects = require('./recent-projects');
 /* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
 const { deliveryResolution, suggestKbps } = require('../shared/delivery-resolution.cjs');
@@ -804,6 +805,64 @@ ipcMain.handle('dialog:openAudio', async () => {
   return r.filePaths;
 });
 
+/* ── 最近開啟的專案 ────────────────────────────────────────────────────────
+   清單由【主程序】持有並持久化，renderer 只拿得到「顯示用的字串」與索引。
+
+   為什麼不讓 renderer 存路徑再送回來開：那等於給了它一條
+   「叫主程序讀任意檔案」的路。fileAuthority 的授權是【每次工作階段】的，
+   重開程式後舊路徑本來就不再被授權——正確的作法是主程序自己記得使用者
+   確實開過哪些檔，並且只在從這份清單開啟時才重新授予那一個檔案。 */
+function loadRecentProjects() {
+  try {
+    const p = getConfigPath();
+    if (!fs.existsSync(p)) return [];
+    return RecentProjects.sanitize(JSON.parse(fs.readFileSync(p, 'utf8'))?.recentProjects);
+  } catch (e) { return []; }
+}
+
+function saveRecentProjects(list) {
+  try {
+    const p = getConfigPath();
+    const current = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
+    fs.writeFileSync(p, JSON.stringify({ ...current, recentProjects: list }, null, 2), 'utf8');
+  } catch (e) { console.error('[recent] save err', e); }
+}
+
+function rememberRecentProject(filePath) {
+  saveRecentProjects(RecentProjects.addRecent(loadRecentProjects(), filePath, { now: Date.now() }));
+}
+
+/* 清單本身不含能力授予——只是給選單顯示用。
+   `missing` 讓選單可以把已經不在的檔案標灰，而不是讓使用者點了才失敗。 */
+ipcMain.handle('project:recentList', () => loadRecentProjects().map((item, index) => ({
+  index,
+  name: item.name || path.basename(item.path),
+  path: item.path,
+  at: item.at || 0,
+  missing: !(() => { try { return fs.statSync(item.path).isFile(); } catch (e) { return false; } })(),
+})));
+
+/* renderer 只送【索引】，路徑由主程序自己的清單決定——沒有路徑注入空間。
+   讀取前才授予那一個檔案的能力（fileAuthority 是每次工作階段的）。 */
+ipcMain.handle('project:openRecent', (e, index) => {
+  const list = loadRecentProjects();
+  const item = list[Math.trunc(Number(index))];
+  if (!item) throw new Error('找不到這筆最近開啟的專案');
+  let buf;
+  try {
+    buf = fs.readFileSync(item.path);
+  } catch (error) {
+    /* 檔案不見了就從清單移除，免得它一直留在選單裡讓人一再踩空。 */
+    saveRecentProjects(RecentProjects.removeRecent(list, item.path));
+    throw new Error(`找不到專案檔：${item.path}`);
+  }
+  grantTrustedProjectFile(item.path, buf);
+  rememberRecentProject(item.path); // 移到最前面
+  return { path: item.path, b64: buf.toString('base64') };
+});
+
+ipcMain.handle('project:clearRecent', () => { saveRecentProjects([]); return true; });
+
 ipcMain.handle('dialog:openProject', async () => {
   const r = await dialog.showOpenDialog(mainWin, {
     title: '開啟專案', properties: ['openFile'],
@@ -812,6 +871,7 @@ ipcMain.handle('dialog:openProject', async () => {
   if (r.canceled) return null;
   const buf = fs.readFileSync(r.filePaths[0]);
   grantTrustedProjectFile(r.filePaths[0], buf);
+  rememberRecentProject(r.filePaths[0]);
   return { path: r.filePaths[0], b64: buf.toString('base64') };
 });
 ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
@@ -819,6 +879,8 @@ ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
   if (r.canceled) return null;
   fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
   grantTrustedProjectFile(r.filePath, Buffer.from(b64, 'base64'));
+  /* 另存新檔也算「開過」——使用者接下來就在編輯它，下次會想從最近開啟找到它。 */
+  rememberRecentProject(r.filePath);
   return r.filePath;
 });
 

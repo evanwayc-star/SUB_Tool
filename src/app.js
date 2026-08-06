@@ -42,6 +42,7 @@ import { getPlayerAdapter } from './media-player-adapter.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, cueNeighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries, updateSearchCount } from './subtitles.js';
+import { initRecentProjects } from './recent-projects.js';
 import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
 import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDir, confirmDiscardUnsaved } from './project.js';
 import { Seq } from './sequence.js';
@@ -1624,7 +1625,7 @@ async function init(){
   State.fps=+$('fpsSel').value||24;
   const brandLogo=$('brandLogo'); if(brandLogo) brandLogo.src=_logoUrl;
   initUI();
-  initMediaView(); initExtras(); applyAriaLabels();
+  initMediaView(); initExtras(); initRecentProjects(); applyAriaLabels();
   renderAll(); layoutTimeline(); drawTimeline(); rafLoop();
   loadPresets().then(()=>renderTrackStyle()).catch(()=>{}); // v4.23 常用樣式庫（config 持久化）
   // v4.25.4 字幕字型：掃 <專案根>/font/ → 注入 @font-face → 填字型下拉（預覽與匯出同一份字型）
