@@ -158,8 +158,8 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
             const descriptors=AudioPipeline.registerSource(primary,chs,chs.length);
             for(let i=0;i<chs.length;i++){
               const el=els[i]; if(!el) continue;
-              const node=AudioEngine.context.createMediaElementSource(el);
-              const g=AudioEngine.createGain(); node.connect(g); g.connect(AudioEngine.master);
+              const node=AudioEngine.createMediaElementSource(el);
+              const g=AudioEngine.createGain(); node.connect(g); AudioEngine.connectToMaster(g);
               const tr=self.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:!!primary?.muted,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
               self.attachMeter(tr,node); self.tracks.push(tr);
               if(self.pendingChannels[i]) self.pendingChannels[i].ready=true;
@@ -236,7 +236,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       for(let i=0;i<chs.length;i++){
         const el=els[i]; if(!el) continue;
         const node=AudioEngine.createMediaElementSource(el);
-        const g=AudioEngine.createGain(); node.connect(g); g.connect(AudioEngine.master);
+        const g=AudioEngine.createGain(); node.connect(g); AudioEngine.connectToMaster(g);
         const tr=ctx.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:!!primary?.muted,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
         ctx.attachMeter(tr,node); ctx.tracks.push(tr);
       }

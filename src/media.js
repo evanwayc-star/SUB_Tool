@@ -465,7 +465,7 @@ const Media = {
     for(let i=0;i<channels.length;i++){
       const el=els[i]; if(!el) continue;
       const node=AudioEngine.createMediaElementSource(el);
-      const gain=AudioEngine.createGain(); node.connect(gain); gain.connect(AudioEngine.master);
+      const gain=AudioEngine.createGain(); node.connect(gain); AudioEngine.connectToMaster(gain);
       const descriptor=descriptors[i]||{sourceStream:0,sourceChannel:i};
       const prior=oldByDescriptor.get(descriptor.sourceStream+':'+descriptor.sourceChannel)||fallback;
       const track=this.bindTrackRouting({
@@ -501,7 +501,34 @@ const Media = {
     }catch(e){ console.warn('external wave cache:',e); }
   },
 
+  /* 把播放狀態接給 AudioEngine（只做一次）。
+
+     transport 需要的東西全部來自這裡，而且整個播放期間都是同一組來源。
+     以前是每次呼叫都推一次參數——scrubAudio 收 11 個、startElementSources 收 7 個，
+     其中好幾個是回呼。位置或名字寫錯時型別又都對得上，會靜默跑出錯的行為。
+     注入一次之後，呼叫端只傳「這一刻要做什麼」。
+
+     每一項都是 getter：Media 的狀態一直在變，存值會拿到 bind 當下的快照。 */
+  _bindAudioEngine(){
+    if(this._audioEngineBound) return;
+    this._audioEngineBound = true;
+    AudioEngine.bind({
+      tracks: () => this.tracks,
+      seqOn: () => this.seqOn(),
+      playing: () => this.playing,
+      muted: () => State.muted,
+      activeSource: () => this.activeSource,
+      activeClipId: () => this.activeClipId,
+      playbackRate: () => video.playbackRate || 1,
+      timelineTime: () => this.tlTime(),
+      sourceTimeFor: (s, t) => this._srcLocalT(s, t),
+      externalSourceTimeFor: (s, t) => this.externalAudio.sourceTime(s, t),
+      clipSourceTimeFor: (t, c) => this._transport.sourceTime(t, c),
+    });
+  },
+
   ensureCtx(){
+    this._bindAudioEngine();
     return AudioEngine.ensureCtx();
   },
 
@@ -795,7 +822,7 @@ const Media = {
       for(let i=0;i<chs.length;i++){
         const el=els[i]; if(!el) continue;
         const node=AudioEngine.createMediaElementSource(el);
-        const g=AudioEngine.createGain(); node.connect(g); g.connect(AudioEngine.master);
+        const g=AudioEngine.createGain(); node.connect(g); AudioEngine.connectToMaster(g);
         const tr=this.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:!!primary?.muted,solo:false,volume:1,file:chs[i].file},primary,descriptors[i],i);
         this.attachMeter(tr,node); this.tracks.push(tr);
         if(this.pendingChannels[i]) this.pendingChannels[i].ready=true;
@@ -884,7 +911,7 @@ const Media = {
         await ff.run('-i','in.media','-map',`0:a:${i}`,'-ac','2','-ar','48000',`a${i}.wav`);
         const wav=ff.FS('readFile',`a${i}.wav`);
         const ab=await AudioEngine.decodeAudioData(wav.buffer.slice(0));
-        const g=AudioEngine.createGain(); g.connect(AudioEngine.master);
+        const g=AudioEngine.createGain(); AudioEngine.connectToMaster(g);
         this.tracks.push({id:'ex'+i,name:'抽取音軌 '+(i+1),kind:'buffer',buffer:ab,gain:g,muted:false,solo:false,volume:1});
       }
       this.usingWebAudio=true; this.syncMuteState();
@@ -935,7 +962,7 @@ const Media = {
         await ff.run('-i','in.media','-map',`0:a:${i}`,'-ac','2','-ar','48000',`a${i}.wav`);
         const wav=ff.FS('readFile',`a${i}.wav`);
         const ab=await AudioEngine.decodeAudioData(wav.buffer.slice(0));
-        const g=AudioEngine.createGain(); g.connect(AudioEngine.master);
+        const g=AudioEngine.createGain(); AudioEngine.connectToMaster(g);
         this.tracks.push(this.bindTrackRouting({id:'ex'+i,name:'音軌 '+(i+1),kind:'buffer',source:'video',buffer:ab,gain:g,muted:!!primary?.muted,solo:false,volume:1,file:file},primary,{sourceStream:i,sourceChannel:0},i));
         try{ff.FS('unlink',`a${i}.wav`);}catch(e){}
       }
@@ -954,7 +981,7 @@ const Media = {
       try{ this.videoSrcNode=AudioEngine.createMediaElementSource(video); }
       catch(e){ console.warn('MediaElementSource',e); return null; }
     } else { try{ this.videoSrcNode.disconnect(); }catch(e){} }
-    const g=AudioEngine.createGain(); this.videoSrcNode.connect(g); g.connect(AudioEngine.master);
+    const g=AudioEngine.createGain(); this.videoSrcNode.connect(g); AudioEngine.connectToMaster(g);
     return g;
   },
   /* 立體聲分頻：L / R 各自一條 native 音軌，可獨立靜音/獨奏/電平表 */
@@ -970,8 +997,8 @@ const Media = {
     this.videoSrcNode.connect(splitter);
     splitter.connect(gL,0); splitter.connect(gR,1);
     gL.connect(merger,0,0); gR.connect(merger,0,1);
-    merger.connect(AudioEngine.master);
-    const mkAn=()=>{ const a=AudioEngine.context.createAnalyser(); a.fftSize=1024; a.smoothingTimeConstant=0.3; return a; };
+    AudioEngine.connectToMaster(merger);
+    const mkAn=()=>AudioEngine.createAnalyser();
     const anL=mkAn(), anR=mkAn();
     splitter.connect(anL,0); splitter.connect(anR,1);
     const mk=(id,nm,g,an,index)=>this.bindTrackRouting(
@@ -989,8 +1016,8 @@ const Media = {
     node.connect(splitter);
     return labels.map((lbl,i)=>{
       const g=AudioEngine.createGain();
-      const an=AudioEngine.context.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=0.3;
-      splitter.connect(an,i); splitter.connect(g,i); g.connect(AudioEngine.master);
+      const an=AudioEngine.createAnalyser();
+      splitter.connect(an,i); splitter.connect(g,i); AudioEngine.connectToMaster(g);
       return this.bindTrackRouting(
         {id:'ext'+(_extTrackIdCounter++),name:lbl,kind:'element',source:sourceName,
           el,gain:g,muted:!!clip?.muted,solo:false,volume:1,
@@ -1002,9 +1029,9 @@ const Media = {
   /* 為音軌掛上電平表 analyser：取「源頭」訊號（與 mute/solo 無關），播放時即有資料，
      讓使用者就算某聲道沒開也能從表頭看出它有沒有內容 */
   attachMeter(tr, sourceNode){
-    if(!AudioEngine.context||!sourceNode)return;
+    if(!AudioEngine.isReady||!sourceNode)return;
     try{
-      const an=AudioEngine.context.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=0.3;
+      const an=AudioEngine.createAnalyser();
       sourceNode.connect(an);
       tr.analyser=an; tr._mbuf=new Float32Array(an.fftSize); tr.level=0; tr.peak=0; tr.peakT=0;
     }catch(e){}
@@ -1145,7 +1172,7 @@ const Media = {
      建一個 <audio> 載入主影片檔、接進混音圖。重疊時 native 會被其他片段 element 的 activeMix 抑制而消失，
      改用此獨立播放器播主影片聲音（見 _applyClipAudio 的 _srcHidden 判定；MXF 等已有獨立音軌者不建）。 */
   _ensureAltPrimaryEl(){
-    if(!AudioEngine.context) return null;
+    if(!AudioEngine.isReady) return null;
     let tr = this.tracks.find(t => t._altPrimary);
     if(tr) return tr;
     if(this.tracks.some(t => (t.source||'video')==='video' && (t.kind==='element'||t.kind==='buffer'))) return null; // 已有獨立音軌
@@ -1159,7 +1186,7 @@ const Media = {
           if(lt!=null){ try{ el.currentTime=clamp(lt,0,el.duration||lt); el.playbackRate=video.playbackRate||1; if('preservesPitch' in el) el.preservesPitch = (el.playbackRate >= 0.25 && el.playbackRate <= 4); el.play(); }catch(e){} } }
       }, {once:true});
       const node = AudioEngine.createMediaElementSource(el);
-      const g = AudioEngine.createGain(); node.connect(g); g.connect(AudioEngine.master);
+      const g = AudioEngine.createGain(); node.connect(g); AudioEngine.connectToMaster(g);
       tr = { id:'altpri', name:'主影片音訊', kind:'element', el, gain:g, muted:!!pri?.muted, solo:false, volume:1, source:'video', _altPrimary:true, _srcHidden:true };
       this.tracks.push(tr);
       return tr;
@@ -1580,7 +1607,7 @@ const Media = {
       for(let i = 0; i < chs.length; i++){
         const el = els[i]; if(!el) continue;
         const node = AudioEngine.createMediaElementSource(el);
-        const g = AudioEngine.createGain(); node.connect(g); g.connect(AudioEngine.master);
+        const g = AudioEngine.createGain(); node.connect(g); AudioEngine.connectToMaster(g);
         const tr = this.bindTrackRouting({ id: 'cl-' + c.id + '-' + i, name: c.name + '·' + (chs[i].label || ('軌 ' + (i + 1))),
           kind: 'element', source: sourceId, el, gain: g, muted: false, solo: false, volume: 1, file: chs[i].file },c,descriptors[i],i);
         this.attachMeter(tr, node); this.tracks.push(tr);
@@ -2070,15 +2097,7 @@ const Media = {
   // localT=當前 clip 的來源時間；tlT=時間軸時間（ext-* 參考音用；未給則同 localT）。
   // 序列模式：被 _srcHidden 的（其他 clip / 已切換音源）不播，避免多段音訊同時出聲。
   startElementSources(localT, tlT){
-    if(tlT === undefined) tlT = this.seqOn() ? this.tlTime() : localT;
-    AudioEngine.startElementSources(this.tracks, {
-      localT,
-      tlT,
-      seqOn: this.seqOn(),
-      sourceTimeFor: (s, t) => this._srcLocalT(s, t),
-      externalSourceTimeFor: (s, t) => this.externalAudio.sourceTime(s, t),
-      playbackRate: video.playbackRate || 1,
-    });
+    AudioEngine.startElements(localT, tlT);
   },
   // 音源切換／clip 切換後，若正在播放需重啟可聽元素（先前隱藏者已被跳過、未在播）
   _restartElements(){
@@ -2088,37 +2107,20 @@ const Media = {
     this.startElementSources(c ? Seq.toSource(tl, c) : this.vTime(), tl);
   },
   stopElementSources(){
-    AudioEngine.stopElementSources(this.tracks);
+    AudioEngine.stopElements();
   },
   startBufferSources(offset){
-    const res = AudioEngine.startBufferSources(this.tracks, {
-      offset,
-      playbackRate: video.playbackRate || 1,
-      seqOn: this.seqOn(),
-      tlTime: this.tlTime(),
-      sourceTimeFor: (s, t) => this._srcLocalT(s, t),
-    });
+    const res = AudioEngine.startBuffers(offset);
     if (res) {
       this.startCtxTime = res.startCtxTime;
       this.startMediaTime = res.startMediaTime;
     }
   },
   stopBufferSources(){
-    AudioEngine.stopBufferSources(this.tracks);
+    AudioEngine.stopBuffers();
   },
   scrubAudio(t, duration = 0.15) {
-    const res = AudioEngine.scrubAudio(this.tracks, {
-      at: t,                                   // 時間軸時間（§0.5）
-      duration,
-      seqOn: this.seqOn(),
-      activeClipId: this.activeClipId,
-      clipSourceTimeFor: (tt, c) => this._transport.sourceTime(tt, c),
-      playing: this.playing,
-      muted: State.muted,
-      externalSourceTimeFor: (s, tt) => this.externalAudio.sourceTime(s, tt),
-      activeSource: this.activeSource,
-      playbackRate: video.playbackRate || 1,
-    });
+    const res = AudioEngine.scrub(t, duration); // t＝時間軸時間（§0.5）
     if (res && res.scrubMainVideo) {
       if(!video.src) return;
       if(!video._scrubEl) {
@@ -2208,7 +2210,7 @@ const Media = {
       // 只有當有「真正可聽見」的 mix 音軌時才壓制 native
       if(tr.kind==='native'&&activeMix&&!(interpretation.anyVisibleSourceSolo&&tr.solo)) tr.gain.gain.value=0;
     }
-    if(AudioEngine.master) AudioEngine.master.gain.value = State.muted?0:1;
+    AudioEngine.setMasterGain(State.muted?0:1);
   },
   getSources(){
     const seen=new Set(); const srcs=[];
@@ -2638,14 +2640,14 @@ export const Wave = {
         ? this._channelKey(src.sourceStream||0,src.sourceChannel||0) : 'mix');
     }
     if(src.peaks){ this.peaks=src.peaks; emit('media:timeline'); return; }
-    if(!DESK||!AudioEngine.context) return;
+    if(!DESK||!AudioEngine.isReady) return;
     const myIdx=idx; // Fix #11：快照索引作取消令牌，防止非同步競爭覆蓋結果
     try{
       const wavUrl = await DESK.fileURL(src.path);
       const res = await fetch(wavUrl);
       const buf = await res.arrayBuffer();
       if(this.srcIdx !== myIdx) return; // 已切換至其他音源，丟棄結果
-      const ab=await AudioEngine.context.decodeAudioData(buf);
+      const ab=await AudioEngine.decodeAudioData(buf);
       if(this.srcIdx !== myIdx) return; // 解碼期間再次確認
       this.live=false; this.compute(ab);
       src.peaks=this.peaks;
@@ -2658,7 +2660,7 @@ export const Wave = {
   async fromFile(file,source='video'){
     Media.ensureCtx();
     const buf=await readFile(file);
-    const ab=await AudioEngine.context.decodeAudioData(buf.slice(0));
+    const ab=await AudioEngine.decodeAudioData(buf.slice(0));
     if(ab.duration>State.duration){State.duration=ab.duration;emit('duration:known');}
     this.setSourceBuffer(source,ab); emit('media:timeline');
     setStatus('波形已產生','ok');

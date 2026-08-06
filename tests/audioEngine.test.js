@@ -5,12 +5,18 @@
    vitest 的 node 環境起不動、jsdom 也沒有 Web Audio，於是播放起停、序列時間域
    換算、scrub 與可聽性篩選全部碰不到。改成注入 createContext 之後就測得到了。
 
+   v6.1.7 起 transport 的狀態由 bind() 注入一次，呼叫端只傳「這一刻要做什麼」
+   （startBuffers(offset) / startElements(localT, tlT) / scrub(at, duration)）。
+   以前是每次呼叫都推 6～11 個參數，其中好幾個是回呼——寫錯位置或名字時
+   型別又都對得上，會靜默跑出錯的行為。**這份測試自己變短就是介面變好的證據。**
+
    這裡守的重點：
      - 可聽性只有 project-audio.js 一份判準（Solo 是【專案級】，且預覽語意要
        排除被來源篩選藏起來的聲道）。此檔曾有兩處寫法不一致。
-     - 時間域（鐵律 §0.5）：序列模式下 offset 必須經過 sourceTimeFor／
-       externalSourceTimeFor 換算，不可以直接拿時間軸時間去設 currentTime。
-     - 具名參數：以前是 6～11 個位置參數，寫錯順序型別還都對得上。
+     - 時間域（鐵律 §0.5）：序列模式下 offset 必須經換算，不可以直接拿時間軸
+       時間去設 currentTime。
+     - 封裝不可有洞：createAnalyser / connectToMaster / isReady / setMasterGain
+       都要存在，否則呼叫端會自己去戳 .context / .master（先前有 21 處）。
 
    測不到的：真正的聲音。那需要真機驗收（AGENTS.md §4）。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,15 +31,11 @@ function fakeContext() {
     destination: { id: 'destination' },
     resume: vi.fn(),
     createGain: () => ({ connect: vi.fn(), gain: { value: 1 } }),
-    createAnalyser: () => ({ fftSize: 2048, getFloatTimeDomainData: vi.fn() }),
+    createAnalyser: () => ({ fftSize: 2048, smoothingTimeConstant: 0, getFloatTimeDomainData: vi.fn() }),
     createBufferSource() {
       const node = {
-        buffer: null,
-        playbackRate: { value: 1 },
-        connect: vi.fn(),
-        start: vi.fn(),
-        stop: vi.fn(),
-        disconnect: vi.fn(),
+        buffer: null, playbackRate: { value: 1 },
+        connect: vi.fn(), start: vi.fn(), stop: vi.fn(), disconnect: vi.fn(),
       };
       created.push(node);
       return node;
@@ -42,25 +44,34 @@ function fakeContext() {
   };
 }
 
-function engineWithCtx() {
+/* 建一個接好狀態的引擎。env 的每一項都是 getter（Media 的狀態一直在變）。 */
+function engineWith(env = {}, { ready = true } = {}) {
   const ctx = fakeContext();
   const engine = createAudioEngineForTest({ createContext: () => ctx });
-  engine.ensureCtx();
+  if (ready) engine.ensureCtx();
+  engine.bind({
+    tracks: () => env.tracks || [],
+    seqOn: () => !!env.seqOn,
+    playing: () => !!env.playing,
+    muted: () => !!env.muted,
+    activeSource: () => env.activeSource ?? null,
+    activeClipId: () => env.activeClipId ?? null,
+    playbackRate: () => env.playbackRate ?? 1,
+    timelineTime: () => env.timelineTime ?? 0,
+    sourceTimeFor: env.sourceTimeFor || (() => null),
+    externalSourceTimeFor: env.externalSourceTimeFor || (() => null),
+    clipSourceTimeFor: env.clipSourceTimeFor || (() => 0),
+  });
   return { engine, ctx };
 }
 
 const bufferTrack = (over = {}) => ({
-  kind: 'buffer',
-  buffer: { duration: 100 },
-  gain: { connect: vi.fn() },
-  muted: false, solo: false,
-  ...over,
+  kind: 'buffer', buffer: { duration: 100 }, gain: { connect: vi.fn() },
+  muted: false, solo: false, ...over,
 });
 
 const elementTrack = (over = {}) => ({
-  kind: 'element',
-  source: 'video',
-  muted: false, solo: false,
+  kind: 'element', source: 'video', muted: false, solo: false,
   el: { currentTime: 0, duration: 100, playbackRate: 1, play: vi.fn(), pause: vi.fn() },
   ...over,
 });
@@ -86,6 +97,43 @@ describe('ensureCtx', () => {
   });
 });
 
+/* 封裝有洞時呼叫端會自己去戳內部欄位——v6.1.6 之前全專案有 21 處
+   `AudioEngine.context.X` / `AudioEngine.master`，起因就是 wrapper
+   少了 createAnalyser。這一組確保那些入口都在。 */
+describe('封裝不可有洞', () => {
+  it('createAnalyser 存在，並套用預設的 fftSize / smoothing', () => {
+    const { engine } = engineWith();
+    const an = engine.createAnalyser();
+    expect(an.fftSize).toBe(1024);
+    expect(an.smoothingTimeConstant).toBe(0.3);
+    expect(engine.createAnalyser({ fftSize: 512 }).fftSize).toBe(512);
+  });
+
+  it('connectToMaster 取代 node.connect(AudioEngine.master)', () => {
+    const { engine } = engineWith();
+    const node = { connect: vi.fn() };
+    expect(engine.connectToMaster(node)).toBe(node);
+    expect(node.connect).toHaveBeenCalledWith(engine.master);
+  });
+
+  it('isReady 取代 if(!AudioEngine.context)', () => {
+    const notReady = createAudioEngineForTest({ createContext: () => fakeContext() });
+    expect(notReady.isReady).toBe(false);
+    notReady.ensureCtx();
+    expect(notReady.isReady).toBe(true);
+  });
+
+  it('setMasterGain 取代直接寫 master.gain.value，且夾在 0 以上', () => {
+    const { engine } = engineWith();
+    engine.setMasterGain(0);
+    expect(engine.master.gain.value).toBe(0);
+    engine.setMasterGain(-5);
+    expect(engine.master.gain.value).toBe(0);
+    engine.setMasterGain(1);
+    expect(engine.master.gain.value).toBe(1);
+  });
+});
+
 describe('readTimeDomain', () => {
   it('還沒有 AudioContext 時回 null，不可以丟例外', () => {
     const engine = createAudioEngineForTest({ createContext: () => fakeContext() });
@@ -95,141 +143,169 @@ describe('readTimeDomain', () => {
   /* Wave.captureLive() 曾因為讀取端留在 media.js 而永遠拿不到資料
      （守衛 `if(!Media.analyser) return` 永遠成立）。這裡鎖住入口存在且可用。 */
   it('有 context 時回傳緩衝區並向 analyser 取樣', () => {
-    const { engine } = engineWithCtx();
+    const { engine } = engineWith();
     const buf = engine.readTimeDomain();
     expect(buf).toBeInstanceOf(Float32Array);
     expect(engine.analyser.getFloatTimeDomainData).toHaveBeenCalledWith(buf);
   });
 });
 
-describe('startBufferSources：序列模式的時間域換算（§0.5）', () => {
+describe('未 bind 時 transport 是安全的 no-op', () => {
+  it('沒接上 Media 也不可以丟例外', () => {
+    const engine = createAudioEngineForTest({ createContext: () => fakeContext() });
+    engine.ensureCtx();
+    expect(() => engine.startBuffers(0)).not.toThrow();
+    expect(() => engine.startElements(0, 0)).not.toThrow();
+    expect(() => engine.stopBuffers()).not.toThrow();
+    expect(() => engine.stopElements()).not.toThrow();
+    expect(() => engine.scrub(1)).not.toThrow();
+  });
+});
+
+describe('startBuffers：序列模式的時間域換算（§0.5）', () => {
   it('非序列模式直接用 offset', () => {
-    const { engine, ctx } = engineWithCtx();
     const tr = bufferTrack();
-    const res = engine.startBufferSources([tr], { offset: 42 });
+    const { engine, ctx } = engineWith({ tracks: [tr] });
+    const res = engine.startBuffers(42);
     expect(res.startMediaTime).toBe(42);
     expect(res.startCtxTime).toBe(ctx.currentTime);
     expect(ctx._created[0].start).toHaveBeenCalledWith(0, 42);
   });
 
-  it('序列模式改用 sourceTimeFor(tlTime) 的來源時間', () => {
-    const { engine, ctx } = engineWithCtx();
+  it('序列模式改用 sourceTimeFor(timelineTime) 的來源時間', () => {
     const sourceTimeFor = vi.fn(() => 7);
-    const res = engine.startBufferSources([bufferTrack()], {
-      offset: 42, seqOn: true, tlTime: 99, sourceTimeFor,
+    const { engine, ctx } = engineWith({
+      tracks: [bufferTrack()], seqOn: true, timelineTime: 99, sourceTimeFor,
     });
+    const res = engine.startBuffers(42);
     expect(sourceTimeFor).toHaveBeenCalledWith('video', 99);
     expect(res.startMediaTime).toBe(7);
     expect(ctx._created[0].start).toHaveBeenCalledWith(0, 7);
   });
 
   it('sourceTimeFor 回 null（播放頭不在此來源上）時保留原 offset', () => {
-    const { engine } = engineWithCtx();
-    const res = engine.startBufferSources([bufferTrack()], {
-      offset: 42, seqOn: true, tlTime: 99, sourceTimeFor: () => null,
+    const { engine } = engineWith({
+      tracks: [bufferTrack()], seqOn: true, timelineTime: 99, sourceTimeFor: () => null,
     });
-    expect(res.startMediaTime).toBe(42);
+    expect(engine.startBuffers(42).startMediaTime).toBe(42);
   });
 
   it('offset 會被夾在 [0, buffer.duration]', () => {
-    const { engine, ctx } = engineWithCtx();
-    engine.startBufferSources([bufferTrack({ buffer: { duration: 5 } })], { offset: 999 });
+    const { engine, ctx } = engineWith({ tracks: [bufferTrack({ buffer: { duration: 5 } })] });
+    engine.startBuffers(999);
     expect(ctx._created[0].start).toHaveBeenCalledWith(0, 5);
   });
 
   it('_srcHidden 的聲道不發聲', () => {
-    const { engine, ctx } = engineWithCtx();
-    engine.startBufferSources([bufferTrack({ _srcHidden: true })], { offset: 0 });
+    const { engine, ctx } = engineWith({ tracks: [bufferTrack({ _srcHidden: true })] });
+    engine.startBuffers(0);
     expect(ctx._created.length).toBe(0);
   });
 
   it('沒有 AudioContext 時回 null，不可以丟例外', () => {
-    const engine = createAudioEngineForTest({ createContext: () => fakeContext() });
-    expect(engine.startBufferSources([bufferTrack()], { offset: 0 })).toBe(null);
+    const { engine } = engineWith({ tracks: [bufferTrack()] }, { ready: false });
+    expect(engine.startBuffers(0)).toBe(null);
   });
 });
 
-describe('stopBufferSources', () => {
+describe('stopBuffers', () => {
   it('停止並斷開，且把 srcNode 清乾淨（不清會重複 stop 丟例外）', () => {
-    const { engine, ctx } = engineWithCtx();
     const tr = bufferTrack();
-    engine.startBufferSources([tr], { offset: 0 });
+    const { engine, ctx } = engineWith({ tracks: [tr] });
+    engine.startBuffers(0);
     const node = ctx._created[0];
-    engine.stopBufferSources([tr]);
+    engine.stopBuffers();
     expect(node.stop).toHaveBeenCalled();
     expect(node.disconnect).toHaveBeenCalled();
     expect(tr.srcNode).toBe(null);
   });
 });
 
-describe('startElementSources：來源類型決定用哪個時間域（§0.5）', () => {
+describe('startElements：來源類型決定用哪個時間域（§0.5）', () => {
   it('非序列模式用 localT（來源時間）', () => {
-    const { engine } = engineWithCtx();
     const tr = elementTrack();
-    engine.startElementSources([tr], { localT: 12, tlT: 99 });
+    const { engine } = engineWith({ tracks: [tr] });
+    engine.startElements(12, 99);
     expect(tr.el.currentTime).toBe(12);
     expect(tr.el.play).toHaveBeenCalled();
   });
 
   it('ext-* 來源用 externalSourceTimeFor(tlT)——它吃的是時間軸時間', () => {
-    const { engine } = engineWithCtx();
     const tr = elementTrack({ source: 'ext-3' });
     const externalSourceTimeFor = vi.fn(() => 5);
-    engine.startElementSources([tr], { localT: 12, tlT: 99, externalSourceTimeFor });
+    const { engine } = engineWith({ tracks: [tr], externalSourceTimeFor });
+    engine.startElements(12, 99);
     expect(externalSourceTimeFor).toHaveBeenCalledWith('ext-3', 99);
     expect(tr.el.currentTime).toBe(5);
   });
 
   it('ext-* 落在素材範圍外（回 null）時暫停，不可以亂放', () => {
-    const { engine } = engineWithCtx();
     const tr = elementTrack({ source: 'ext-3' });
-    engine.startElementSources([tr], { localT: 12, tlT: 99, externalSourceTimeFor: () => null });
+    const { engine } = engineWith({ tracks: [tr], externalSourceTimeFor: () => null });
+    engine.startElements(12, 99);
     expect(tr.el.pause).toHaveBeenCalled();
     expect(tr.el.play).not.toHaveBeenCalled();
   });
 
   it('序列模式用 sourceTimeFor；回 null 時暫停', () => {
-    const { engine } = engineWithCtx();
     const play = elementTrack();
-    engine.startElementSources([play], { localT: 12, tlT: 99, seqOn: true, sourceTimeFor: () => 3 });
+    const e1 = engineWith({ tracks: [play], seqOn: true, sourceTimeFor: () => 3 });
+    e1.engine.startElements(12, 99);
     expect(play.el.currentTime).toBe(3);
 
     const skip = elementTrack();
-    engine.startElementSources([skip], { localT: 12, tlT: 99, seqOn: true, sourceTimeFor: () => null });
+    const e2 = engineWith({ tracks: [skip], seqOn: true, sourceTimeFor: () => null });
+    e2.engine.startElements(12, 99);
     expect(skip.el.pause).toHaveBeenCalled();
     expect(skip.el.play).not.toHaveBeenCalled();
   });
 
+  /* tlT 不給時要由 env.timelineTime() 補（序列模式）或退回 localT。
+     這正是「時間域轉換收在邊界」的形狀（§0.5）。 */
+  it('不給 tlT 時：序列模式取 timelineTime，非序列退回 localT', () => {
+    const seqTr = elementTrack({ source: 'ext-1' });
+    const extFor = vi.fn(() => 4);
+    const e1 = engineWith({ tracks: [seqTr], seqOn: true, timelineTime: 77, externalSourceTimeFor: extFor });
+    e1.engine.startElements(12);
+    expect(extFor).toHaveBeenCalledWith('ext-1', 77);
+
+    const flatTr = elementTrack({ source: 'ext-1' });
+    const extFor2 = vi.fn(() => 4);
+    const e2 = engineWith({ tracks: [flatTr], seqOn: false, externalSourceTimeFor: extFor2 });
+    e2.engine.startElements(12);
+    expect(extFor2).toHaveBeenCalledWith('ext-1', 12);
+  });
+
   it('_srcHidden 的聲道直接暫停', () => {
-    const { engine } = engineWithCtx();
     const tr = elementTrack({ _srcHidden: true });
-    engine.startElementSources([tr], { localT: 12, tlT: 12 });
+    const { engine } = engineWith({ tracks: [tr] });
+    engine.startElements(12, 12);
     expect(tr.el.pause).toHaveBeenCalled();
     expect(tr.el.play).not.toHaveBeenCalled();
   });
 
   it('preservesPitch 只在 0.25–4 倍速間開啟（超出範圍瀏覽器會爆音）', () => {
-    const { engine } = engineWithCtx();
     const inRange = elementTrack();
     inRange.el.preservesPitch = false;
-    engine.startElementSources([inRange], { localT: 0, tlT: 0, playbackRate: 2 });
+    engineWith({ tracks: [inRange], playbackRate: 2 }).engine.startElements(0, 0);
     expect(inRange.el.preservesPitch).toBe(true);
 
     const outOfRange = elementTrack();
     outOfRange.el.preservesPitch = true;
-    engine.startElementSources([outOfRange], { localT: 0, tlT: 0, playbackRate: 8 });
+    engineWith({ tracks: [outOfRange], playbackRate: 8 }).engine.startElements(0, 0);
     expect(outOfRange.el.preservesPitch).toBe(false);
   });
 });
 
-describe('scrubAudio：可聽性只有一份判準', () => {
-  let engine, ctx;
-  beforeEach(() => { ({ engine, ctx } = engineWithCtx()); });
-
+describe('scrub：可聽性只有一份判準', () => {
   it('播放中或靜音時什麼都不做', () => {
-    expect(engine.scrubAudio([bufferTrack()], { at: 1, playing: true })).toBeUndefined();
-    expect(engine.scrubAudio([bufferTrack()], { at: 1, muted: true })).toBeUndefined();
-    expect(ctx._created.length).toBe(0);
+    const a = engineWith({ tracks: [bufferTrack()], playing: true });
+    expect(a.engine.scrub(1)).toBeUndefined();
+    expect(a.ctx._created.length).toBe(0);
+
+    const b = engineWith({ tracks: [bufferTrack()], muted: true });
+    expect(b.engine.scrub(1)).toBeUndefined();
+    expect(b.ctx._created.length).toBe(0);
   });
 
   /* 這一條是重點：此檔曾有兩處 anySolo，一處排除 _srcHidden、一處沒有。
@@ -237,29 +313,34 @@ describe('scrubAudio：可聽性只有一份判準', () => {
   it('預覽語意：被 _srcHidden 藏起來的聲道不把 Solo 帶進判斷', () => {
     const hidden = bufferTrack({ solo: true, _srcHidden: true });
     const visible = bufferTrack({ muted: false });
-    engine.scrubAudio([hidden, visible], { at: 1, duration: 0.15 });
+    const { engine, ctx } = engineWith({ tracks: [hidden, visible] });
+    engine.scrub(1, 0.15);
     expect(ctx._created.length, '可見且未靜音的聲道應該要出聲').toBe(1);
   });
 
   it('有可見的 Solo 時，未 Solo 的聲道不出聲', () => {
-    const soloed = bufferTrack({ solo: true });
-    const other = bufferTrack({ solo: false });
-    engine.scrubAudio([soloed, other], { at: 1, duration: 0.15 });
+    const { engine, ctx } = engineWith({
+      tracks: [bufferTrack({ solo: true }), bufferTrack({ solo: false })],
+    });
+    engine.scrub(1, 0.15);
     expect(ctx._created.length).toBe(1);
   });
 
   it('沒有 Solo 時，靜音的不出聲、未靜音的出聲', () => {
-    engine.scrubAudio([bufferTrack({ muted: true }), bufferTrack({ muted: false })], { at: 1, duration: 0.15 });
+    const { engine, ctx } = engineWith({
+      tracks: [bufferTrack({ muted: true }), bufferTrack({ muted: false })],
+    });
+    engine.scrub(1, 0.15);
     expect(ctx._created.length).toBe(1);
   });
 
   it('全部不可聽且 activeSource 是主影片時，回報要改 scrub 主 <video>', () => {
-    const res = engine.scrubAudio([bufferTrack({ muted: true })], { at: 1, duration: 0.15, activeSource: 'video' });
-    expect(res).toEqual({ scrubMainVideo: true, localT: 1 });
+    const { engine } = engineWith({ tracks: [bufferTrack({ muted: true })], activeSource: 'video' });
+    expect(engine.scrub(1, 0.15)).toEqual({ scrubMainVideo: true, localT: 1 });
   });
 
   it('有可聽的軌時不要求主影片接手', () => {
-    const res = engine.scrubAudio([bufferTrack()], { at: 1, duration: 0.15, activeSource: 'video' });
-    expect(res.scrubMainVideo).toBe(false);
+    const { engine } = engineWith({ tracks: [bufferTrack()], activeSource: 'video' });
+    expect(engine.scrub(1, 0.15).scrubMainVideo).toBe(false);
   });
 });

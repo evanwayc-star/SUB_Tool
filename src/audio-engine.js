@@ -13,13 +13,50 @@ import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
    不是公開介面的一部分——呼叫端仍然只用匯出的 AudioEngine 單例。 */
 const defaultCreateContext = () => new (window.AudioContext || window.webkitAudioContext)();
 
+/* 未 bind 時的預設環境：沒有音軌、非序列、沒有時間域轉換。
+   讓 transport 方法在還沒接上 Media 時是安全的 no-op，而不是丟例外。 */
+const UNBOUND = Object.freeze({
+  tracks: () => [],
+  seqOn: () => false,
+  playing: () => false,
+  muted: () => false,
+  activeSource: () => null,
+  activeClipId: () => null,
+  playbackRate: () => 1,
+  timelineTime: () => 0,
+  sourceTimeFor: () => null,
+  externalSourceTimeFor: () => null,
+  clipSourceTimeFor: () => 0,
+});
+
 class AudioEngineCore {
   constructor({ createContext = defaultCreateContext } = {}) {
     this._createContext = createContext;
+    this._env = UNBOUND;
     this.ctx = null;
     this.master = null;
     this.analyser = null;
     this._anBuf = null;
+  }
+
+  /* 接上播放狀態的來源。
+
+     【為什麼是 bind 而不是每次傳參數】
+     transport 方法需要的東西——音軌清單、是不是序列模式、播放速率、
+     時間域轉換函式——【全部】來自 Media，而且在整個播放期間都是同一組。
+     以前是每次呼叫都推一次：scrubAudio 收 11 個參數（其中 3 個是回呼）、
+     startElementSources 收 7 個。位置或名字寫錯時型別又都對得上
+     （數字／布林／函式），會靜默跑出錯的行為。
+
+     改成注入一次之後，呼叫端只需要傳「這一刻要做什麼」：
+       startBuffers(offset) / startElements(localT, tlT) / scrub(at, duration)
+     介面從 11 個參數縮到 2 個，而模組能做的事沒有變少——這就是深度。
+
+     env 的每一項都是 getter（不是值），因為 Media 的狀態一直在變；
+     存值會拿到 bind 當下的快照。 */
+  bind(env) {
+    this._env = { ...UNBOUND, ...(env || {}) };
+    return this;
   }
 
   ensureCtx() {
@@ -79,15 +116,47 @@ class AudioEngineCore {
     return this.ctx.createChannelMerger(num);
   }
 
-  /* 具名參數，不用位置參數。這三個 transport 方法原本收 6～11 個位置參數
-     （scrubAudio 是 11 個，其中 3 個是回呼），而它們全部來自 Media 自己的狀態——
-     位置一旦寫錯，型別又都對得上（數字／布林／函式），就會靜默跑出錯的行為。
-     `at` 一律是【時間軸時間】以外的語意請看各參數註解（鐵律 §0.5）。 */
-  startBufferSources(tracks, { offset, playbackRate = 1, seqOn = false, tlTime = 0, sourceTimeFor } = {}) {
+  /* 電平表用的 analyser。wrapper 先前【沒有】這一支，於是呼叫端只好走
+     `AudioEngine.context.createAnalyser()` 繞過去——封裝一旦不完整，
+     呼叫端就會自己開洞，而那個洞會擴散（媒體來源與解碼也被順手繞過）。 */
+  createAnalyser({ fftSize = 1024, smoothingTimeConstant = 0.3 } = {}) {
+    this.ensureCtx();
+    const an = this.ctx.createAnalyser();
+    an.fftSize = fftSize;
+    an.smoothingTimeConstant = smoothingTimeConstant;
+    return an;
+  }
+
+  /* 接到主輸出。取代散在各處的 `node.connect(AudioEngine.master)`（13 處）——
+     那要求呼叫端知道「主輸出叫 master 而且是個 GainNode」，等於把內部結構
+     變成介面的一部分。 */
+  connectToMaster(node) {
+    this.ensureCtx();
+    try { node.connect(this.master); } catch (e) {}
+    return node;
+  }
+
+  /* 音訊圖建好了沒。取代散在各處的 `if(!AudioEngine.context) return`——
+     呼叫端要問的是「能不能用」，不是「有沒有那個叫 context 的欄位」。 */
+  get isReady() { return !!this.ctx; }
+
+  /* 主輸出音量（靜音是 0）。取代 `AudioEngine.master.gain.value = …`。 */
+  setMasterGain(value) {
+    if (!this.master) return;
+    this.master.gain.value = Math.max(0, Number(value) || 0);
+  }
+
+  /* ── transport：呼叫端只傳「這一刻要做什麼」 ────────────────────────────
+     其餘（音軌、序列模式、播放速率、時間域轉換）由 bind() 注入的 env 提供。
+     時間域見鐵律 §0.5：localT 是來源時間、tlT／at 是時間軸時間，不可互換。 */
+  startBuffers(offset) {
     if (!this.ctx) return null;
+    const env = this._env;
+    const tracks = env.tracks();
+    const playbackRate = env.playbackRate();
     let off = offset;
-    if (seqOn && sourceTimeFor) {
-      const lt = sourceTimeFor('video', tlTime);
+    if (env.seqOn()) {
+      const lt = env.sourceTimeFor('video', env.timelineTime());
       if (lt != null) off = lt;
     }
     const startCtxTime = this.ctx.currentTime;
@@ -107,8 +176,8 @@ class AudioEngineCore {
     return { startCtxTime, startMediaTime: off };
   }
 
-  stopBufferSources(tracks) {
-    for (const tr of tracks) {
+  stopBuffers() {
+    for (const tr of this._env.tracks()) {
       if (tr.srcNode) {
         try { tr.srcNode.stop(); } catch (e) {}
         try { tr.srcNode.disconnect(); } catch (e) {}
@@ -118,8 +187,12 @@ class AudioEngineCore {
   }
 
   /* localT＝目前 clip 的來源時間；tlT＝時間軸時間（ext-* 參考音用）。兩者不可互換，見 §0.5。 */
-  startElementSources(tracks, { localT, tlT, seqOn = false, sourceTimeFor, externalSourceTimeFor, playbackRate = 1 } = {}) {
-    for (const tr of tracks) {
+  startElements(localT, tlT) {
+    const env = this._env;
+    const seqOn = env.seqOn();
+    const playbackRate = env.playbackRate();
+    if (tlT === undefined) tlT = seqOn ? env.timelineTime() : localT;
+    for (const tr of env.tracks()) {
       if (tr.kind !== 'element' || !tr.el) continue;
       if (tr._srcHidden) {
         try { tr.el.pause(); } catch (e) {}
@@ -128,13 +201,13 @@ class AudioEngineCore {
       const s = tr.source || 'video';
       let off;
       if (s.startsWith('ext-')) {
-        off = externalSourceTimeFor?.(s, tlT);
+        off = env.externalSourceTimeFor(s, tlT);
         if (off == null) {
           try { tr.el.pause(); } catch (e) {}
           continue;
         }
       } else if (seqOn) {
-        const lt = sourceTimeFor?.(s, tlT);
+        const lt = env.sourceTimeFor(s, tlT);
         if (lt == null) {
           try { tr.el.pause(); } catch (e) {}
           continue;
@@ -155,28 +228,29 @@ class AudioEngineCore {
     }
   }
 
-  stopElementSources(tracks) {
-    for (const tr of tracks) {
+  stopElements() {
+    for (const tr of this._env.tracks()) {
       if (tr.kind === 'element' && tr.el) {
         try { tr.el.pause(); } catch (e) {}
       }
     }
   }
 
-  /* at＝【時間軸時間】（鐵律 §0.5）。序列模式下才由 clipSourceTimeFor 轉成來源時間。
+  /* at＝【時間軸時間】（鐵律 §0.5）。序列模式下才轉成來源時間。
      回傳 { scrubMainVideo, localT }：scrubMainVideo=true 代表沒有任何可聽的
      Web Audio 軌，呼叫端要改為 scrub 主 <video>。 */
-  scrubAudio(tracks, {
-    at, duration, seqOn = false, activeClipId, clipSourceTimeFor,
-    playing = false, muted = false, externalSourceTimeFor, activeSource, playbackRate = 1,
-  } = {}) {
-    if (playing || muted) return;
+  scrub(at, duration = 0.15) {
+    const env = this._env;
+    if (env.playing() || env.muted()) return;
+    const tracks = env.tracks();
+    const playbackRate = env.playbackRate();
+    const activeSource = env.activeSource();
     const t = at;
     let localT = t;
-    if (seqOn) {
+    if (env.seqOn()) {
       const c = Seq.clipAt(t);
-      if (!c || c.id !== activeClipId) return;
-      localT = clipSourceTimeFor(t, c);
+      if (!c || c.id !== env.activeClipId()) return;
+      localT = env.clipSourceTimeFor(t, c);
     }
 
     /* 預覽語意：被來源篩選藏起來的聲道不算進 Solo（respectHidden:true）。
@@ -217,7 +291,7 @@ class AudioEngineCore {
           el._scrubEl.preservesPitch = (el._scrubEl.playbackRate >= 0.25 && el._scrubEl.playbackRate <= 4);
         }
         el._scrubEl.currentTime = clamp(tt, 0, el.duration || tt);
-        el._scrubEl.volume = muted ? 0 : 1;
+        el._scrubEl.volume = env.muted() ? 0 : 1;
         const p = el._scrubEl.play();
         if (p !== undefined) {
           p.then(() => {
@@ -258,7 +332,7 @@ class AudioEngineCore {
         const audible = sourceTrackAudible(tr, anySolo);
         if (audible) {
           const source = tr.source || '';
-          const off = source.startsWith('ext-') ? externalSourceTimeFor?.(source, t) : localT;
+          const off = source.startsWith('ext-') ? env.externalSourceTimeFor(source, t) : localT;
           if (off != null) scrubEl(tr.el, off);
         }
       }
