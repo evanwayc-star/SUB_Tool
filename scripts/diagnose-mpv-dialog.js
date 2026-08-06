@@ -1,161 +1,160 @@
 /* ==============================================================================
-   診斷：「選單被 mpv 蓋住」與「開啟影音要等很久對話框才出現」
+   診斷：工具列下拉選單看不到，以及檔案對話框卡頓
    ==============================================================================
    用法（PowerShell）：
      1) 用偵錯連接埠啟動已安裝的 app：
           & "C:\Program Files\SUB Tool\SUB Tool.exe" --remote-debugging-port=9223
-     2) 在 app 裡把專案／影片開起來，讓畫面上真的看得到 mpv 的播放畫面
-     3) node scripts/diagnose-mpv-dialog.js [連接埠]
+     2) 在 app 裡把專案／影片開起來，讓畫面上真的看得到播放畫面
+     3) node scripts/diagnose-mpv-dialog.js
 
-   ── 為什麼需要這支，而不是在頁面裡攔 IPC ──
-   `contextBridge.exposeInMainWorld` 暴露的物件是【凍住的】（writable:false），
-   非嚴格模式下賦值會**無聲失敗**。所以在頁面裡寫
-       window.subtool.mpv.show = spy
-   根本裝不上去，量到的「沒有被呼叫」是自己的沉默，不是證據。
-   （這個坑真的踩過，見 docs/版本變更紀錄.md v6.1.11。）
+   ── 這支腳本存在的理由：三個不能用的觀察點 ──
+   同一個「選單看不到」的問題查了三輪才找對地方，因為最直覺的三種驗證全是無效的：
 
-   ── 觀察點 ──
-   mpv 疊層自己是一個 BrowserWindow（data:text/html 的 target），
-   被 hide() 之後它的 `document.visibilityState` 會變成 'hidden'。
-   那是唯一能從外部確認「mpv 到底有沒有讓位」的地方。
+   1. **在頁面裡攔 IPC**：`contextBridge.exposeInMainWorld` 暴露的物件是【凍住的】
+      （writable:false），非嚴格模式下 `window.subtool.mpv.show = spy` 會**無聲失敗**。
+      量到的「沒有被呼叫」是自己的沉默，不是證據。
+   2. **讀 mpv 疊層視窗的 `document.visibilityState`**：`_mpvWin` 是用
+      `backgroundThrottling:false` 建的，Electron 在那個設定下【即使視窗被 hide()，
+      頁面仍回報 visible】。這條路整整誤導了一輪。
+   3. **`getBoundingClientRect()` / computed style**：兩者都【看不到裁切】。被祖先
+      `overflow:hidden` 裁掉的元素照樣回報完整高度、`display:block`、`opacity:1`。
+      鐵律 §0.7 在這裡會給出錯誤答案。
+
+   有效的觀察點只有兩個，這支腳本用的就是它們：
+   - **主行程的 inspector**（`process._debugProcess` 開啟）→ `BrowserWindow.isVisible()`
+     才是視窗可見性的唯一真相。
+   - **`document.elementFromPoint()`** → 它回答「這個座標上使用者實際點得到誰」，
+     會如實反映裁切。
 ============================================================================== */
 const http = require('http');
 const WebSocket = require('ws');
+const { execSync } = require('child_process');
 
-const PORT = Number(process.argv[2] || 9223);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-const getJSON = url => new Promise((resolve, reject) => {
-  http.get(url, res => {
+const getJSON = url => new Promise((res, rej) => {
+  http.get(url, r => {
     let b = '';
-    res.on('data', d => { b += d; });
-    res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
-  }).on('error', reject);
+    r.on('data', d => { b += d; });
+    r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } });
+  }).on('error', rej);
 });
 
 function connect(target) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
     let id = 0;
-    const pending = new Map();
+    const pend = new Map();
     ws.on('open', () => resolve({
       eval: expr => new Promise((res, rej) => {
-        const msgId = ++id;
-        pending.set(msgId, { res, rej });
+        const i = ++id;
+        pend.set(i, { res, rej });
         ws.send(JSON.stringify({
-          id: msgId, method: 'Runtime.evaluate',
-          params: { expression: expr, awaitPromise: true, returnByValue: true },
+          id: i, method: 'Runtime.evaluate',
+          params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true },
         }));
       }),
       close: () => { try { ws.close(); } catch (e) {} },
     }));
     ws.on('message', raw => {
       const m = JSON.parse(raw);
-      if (!m.id || !pending.has(m.id)) return;
-      const { res, rej } = pending.get(m.id);
-      pending.delete(m.id);
+      if (!m.id || !pend.has(m.id)) return;
+      const { res, rej } = pend.get(m.id);
+      pend.delete(m.id);
       if (m.error) rej(new Error(m.error.message));
-      else if (m.result?.exceptionDetails) rej(new Error(m.result.exceptionDetails.text));
+      else if (m.result?.exceptionDetails) rej(new Error(JSON.stringify(m.result.exceptionDetails).slice(0, 300)));
       else res(m.result?.result?.value);
     });
     ws.on('error', reject);
   });
 }
 
-/* 在主視窗裡重算一次 _syncMpvPanel 的判斷，並把每一項中間值報出來——
-   這樣「它算出要讓位了嗎」與「訊息有沒有生效」可以分開看。 */
-const SNAPSHOT = `JSON.stringify((() => {
-  const $ = id => document.getElementById(id);
-  const M = window.SUB && window.SUB.Media;
-  const vr = $('videoWrap') && $('videoWrap').getBoundingClientRect();
+/** 在 renderer 裡執行一段 JS（透過主行程的 webContents，不需要另外連 renderer）。 */
+const inPage = js => `(async () => {
+  const B = require('electron').BrowserWindow;
+  const w = B.getAllWindows().find(x => !x.getParentWindow());
+  return await w.webContents.executeJavaScript(${JSON.stringify(js)}, true);
+})()`;
+
+/** 視窗可見性的唯一真相。 */
+const WINDOWS = `JSON.stringify(require('electron').BrowserWindow.getAllWindows().map(w => ({
+  id: w.id, 可見: w.isVisible(), 是子視窗: !!w.getParentWindow(),
+  url: (w.webContents && w.webContents.getURL() || '').slice(0, 42),
+})))`;
+
+/** 選單使用者「實際看得到多少」——elementFromPoint 會如實反映裁切。 */
+const VISIBLE_PART = `(() => {
   const box = document.querySelector('.menu.open .items');
-  const ir = box && box.getBoundingClientRect();
-  const ov = (a, b) => !!(a && b) && !(a.right<=b.left||a.left>=b.right||a.bottom<=b.top||a.top>=b.bottom);
-  const r = x => x ? {top:Math.round(x.top),bottom:Math.round(x.bottom),left:Math.round(x.left),right:Math.round(x.right)} : null;
-  return {
-    mpvMode: !!(M && M.mpvMode),
-    有mpv這條IPC: !!(window.subtool && window.subtool.mpv),
-    inGap: !!(M && M.inGap && M.inGap()),
-    webCodecsTakeover: !!(M && M.webCodecsTakeover && M.webCodecsTakeover()),
-    選單展開: !!document.querySelector('.menu.open'),
-    選單矩形: r(ir),
-    影片區矩形: r(vr),
-    重疊: ov(ir, vr),
-    '_syncMpvPanel 應算出 hides': !!(M && (M.inGap && M.inGap() || M.webCodecsTakeover && M.webCodecsTakeover()) || ov(ir, vr)),
-  };
-})())`;
+  if (!box) return JSON.stringify({ 選單沒展開: true });
+  const r = box.getBoundingClientRect();
+  const probes = [r.top + 3, (r.top + r.bottom) / 2, r.bottom - 5].map(y => {
+    const el = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(y));
+    return { y: Math.round(y), 命中: el ? (el.id || el.className || el.tagName) : null,
+             在選單內: !!(el && box.contains(el)) };
+  });
+  const bar = document.querySelector('.menubar');
+  const bcs = bar && getComputedStyle(bar);
+  return JSON.stringify({
+    選單矩形: { top: Math.round(r.top), bottom: Math.round(r.bottom), 高: Math.round(r.height) },
+    使用者實際看得到: probes.filter(p => p.在選單內).length + '/3 個取樣點',
+    探針: probes,
+    menubar: bcs ? { overflow: bcs.overflow, backdropFilter: bcs.backdropFilter,
+                     底緣: Math.round(bar.getBoundingClientRect().bottom) } : null,
+  }, null, 1);
+})()`;
+
+function findMainPid() {
+  /* 只找沒有 --type= 的那個，就是 Electron 的主行程。 */
+  const out = execSync(
+    'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'SUB Tool.exe\'\\" | ' +
+    'Where-Object { $_.CommandLine -notmatch \'--type=\' } | Select-Object -First 1 -ExpandProperty ProcessId"',
+    { encoding: 'utf8' }).trim();
+  return Number(out);
+}
 
 (async () => {
-  let targets;
-  try {
-    targets = (await getJSON(`http://127.0.0.1:${PORT}/json/list`)).filter(t => t.type === 'page');
-  } catch (e) {
-    console.error(`連不上 127.0.0.1:${PORT} —— app 有用 --remote-debugging-port=${PORT} 啟動嗎？`);
-    console.error('（一律用 127.0.0.1：Windows 的 localhost 會先解析成 IPv6，而偵錯埠只綁 IPv4。）');
-    process.exit(1);
-  }
+  const pid = Number(process.argv[2]) || findMainPid();
+  if (!Number.isFinite(pid)) { console.error('找不到 SUB Tool 的主行程，app 有開著嗎？'); process.exit(1); }
+  console.log(`主行程 PID = ${pid}`);
+  try { process._debugProcess(pid); } catch (e) { console.error('開啟 inspector 失敗：', e.message); }
+  await sleep(1200);
 
-  const mainT = targets.find(t => /index\.html/.test(t.url || ''));
-  const mpvT = targets.find(t => /^data:text\/html/.test(t.url || ''));
-  if (!mainT) { console.error('找不到主視窗。目前的目標：'); targets.forEach(t => console.error('  ' + t.url)); process.exit(1); }
+  let t;
+  try { t = (await getJSON('http://127.0.0.1:9229/json/list'))[0]; }
+  catch (e) { console.error('連不上主行程的 inspector（9229）：' + e.message); process.exit(1); }
+  const main = await connect(t);
 
-  const main = await connect(mainT);
-  const mpv = mpvT ? await connect(mpvT) : null;
-
-  if (!mpv) {
-    console.log('※ 找不到 mpv 疊層視窗的 CDP target。');
-    console.log('  代表 mpv 目前【沒有】在跑——請先把影片開起來、確認畫面上看得到播放畫面，再跑一次。');
-  }
-
-  const mpvState = async () => {
-    if (!mpv) return '（沒有 mpv target）';
-    try { return await mpv.eval('document.visibilityState'); } catch (e) { return '讀取失敗：' + e.message; }
-  };
-
-  const report = async label => {
-    const snap = JSON.parse(await main.eval(SNAPSHOT));
+  const dump = async label => {
     console.log(`\n【${label}】`);
-    for (const [k, v] of Object.entries(snap)) console.log(`  ${k}: ${JSON.stringify(v)}`);
-    console.log(`  ★ mpv 視窗 visibilityState = ${await mpvState()}`);
+    for (const w of JSON.parse(await main.eval(WINDOWS))) {
+      console.log(`  視窗 id=${String(w.id).padStart(2)}  可見=${String(w.可見).padEnd(5)}` +
+        `  ${w.是子視窗 ? '子' : '主'}  ${w.url}`);
+    }
   };
 
-  console.log('=== 1. 選單遮蔽 ===');
-  await report('打開選單前');
-  await main.eval(`(document.getElementById('recentBtn')||{click(){}}).click(); true`);
-  await sleep(900);
-  await report('打開選單後');
-  await main.eval(`(document.getElementById('recentBtn')||{click(){}}).click(); true`);
+  console.log('\n================ 1. 下拉選單看不看得到 ================');
+  await dump('打開選單前');
+  await main.eval(inPage(`document.getElementById('recentBtn').click(); true`));
+  await sleep(1000);
+  await dump('打開選單後');
+  console.log('  ' + (await main.eval(inPage(VISIBLE_PART))).split('\n').join('\n  '));
+  await main.eval(inPage(`document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open')); true`));
   await sleep(400);
-  await report('關閉選單後');
+  await dump('關閉選單後');
 
-  console.log('\n=== 2. 開啟影音的等待 ===');
-  const wait = await main.eval(`(async () => {
-    const P = window.SUB && window.SUB.Project;
-    const relink = P && P.pendingMediaRelink ? (P.pendingMediaRelink() || null) : null;
-    const out = { 有pending_relink: !!relink };
-    if (relink) {
-      const t0 = performance.now();
-      await P.continueLoad(relink.generation, async () => {});
-      out.空工作排進專案載入佇列等了_ms = Math.round(performance.now() - t0);
-    }
-    if (window.subtool && window.subtool.mainLoopLag) {
-      out.主行程事件迴圈延遲 = await window.subtool.mainLoopLag(false);
-    }
-    return JSON.stringify(out);
-  })()`);
-  const w = JSON.parse(wait);
-  for (const [k, v] of Object.entries(w)) console.log(`  ${k}: ${JSON.stringify(v)}`);
+  console.log('\n================ 2. 主行程有沒有被擋住 ================');
+  const lag = await main.eval(inPage(`window.subtool && window.subtool.mainLoopLag
+    ? window.subtool.mainLoopLag(false).then(x => JSON.stringify(x)) : '"（此版本沒有 mainLoopLag）"'`));
+  console.log('  事件迴圈延遲（ms）:', lag);
 
-  console.log('\n=== 怎麼讀 ===');
-  console.log('  1. 「應算出 hides」= true 但 mpv visibilityState 仍是 visible');
-  console.log('     → 判斷是對的，但讓位的訊息沒有生效（往 mpv:show 那條查）');
-  console.log('  2. 「應算出 hides」= false');
-  console.log('     → 判斷本身就錯（看選單矩形與影片區矩形為什麼沒重疊）');
-  console.log('  3. mpvMode = false 但畫面上看得到 mpv');
-  console.log('     → _syncMpvPanel 第一行就 return 了，這是守衛的問題');
-  console.log('  4. 主行程事件迴圈延遲的 max 很大 → 卡頓是我們擋住主行程');
-  console.log('     max 很小 → 卡頓不在主行程（renderer 或 Windows 對話框）');
+  console.log('\n================ 怎麼讀 ================');
+  console.log('  A. 「使用者實際看得到」不是 3/3，但 mpv 子視窗【可見=false】');
+  console.log('     → mpv 已經讓位了，蓋住選單的是【HTML 這一層的裁切】。');
+  console.log('       看 menubar 的 overflow 與 backdropFilter：那兩個各自都會裁子孫，');
+  console.log('       而且拿掉任一個都不夠（見 tests/menubarClipping.test.js）。');
+  console.log('  B. mpv 子視窗【可見=true】而選單與影片區重疊');
+  console.log('     → 讓位沒有生效，往 _syncMpvPanel → mpv:show 那條查。');
+  console.log('  C. 事件迴圈延遲 max 很大 → 卡頓是主行程被擋住；很小 → 不在主行程。');
 
-  main.close(); if (mpv) mpv.close();
+  main.close();
   process.exit(0);
 })().catch(e => { console.error('失敗:', e.message); process.exit(1); });

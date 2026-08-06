@@ -78,8 +78,41 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .app{display:flex;flex-direction:column;height:100vh;width:100vw}
 
 /* ---------- 頂部選單列 ---------- */
-.menubar{display:flex;align-items:center;gap:3px;background:rgba(18,18,18,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);
-  padding:6px;flex-wrap:nowrap;min-height:46px;overflow:hidden}
+/* 【下拉選單會被這一條規則裁掉，改動前先讀完】
+   ------------------------------------------------------------------------
+   工具列裡的下拉選單（.menu .items）是 position:absolute，住在 .menubar 內，
+   所以會被 .menubar 的裁切影響。這裡原本是
+
+       background:rgba(18,18,18,0.85); backdrop-filter:blur(12px); overflow:hidden
+
+   而【那兩個屬性各自都會把子孫裁在 .menubar 的 46px 邊框盒內】：
+     - overflow:hidden —— 一般認知中的裁切
+     - backdrop-filter —— 它會建立 containing block 並把子孫裁到自己的邊框盒；
+       這一個很容易漏掉，因為名字聽起來只跟視覺效果有關
+
+   真實事故（v6.1.7 加入「最近開啟」後一直到 v6.1.11）：選單展開後高 397px，
+   使用者【只看得到最上面約 5px】（選單 top=41、menubar 底緣=46）。
+   `z-index:200` 完全無效——祖先的裁切跟 z-index 無關。
+   工具列在這之前沒有任何下拉選單，所以這條規則躺了很久都沒被踩到。
+
+   當時誤判成「被 mpv 的 OS 層視窗蓋住」，連查三輪。實測（elementFromPoint）：
+     overflow:hidden + backdrop-filter          → 1/3 取樣點看得到
+     只改 overflow:visible                       → 1/3（backdrop-filter 還在裁）
+     只拿掉 backdrop-filter                      → 1/3（overflow 還在裁）
+     兩個都處理                                   → 3/3
+   ★ 拿掉任一個都沒用，必須兩個一起。
+
+   現在的作法：
+     - 水平方向仍要裁（視窗變窄時工具列不可以撐爆版面），用 overflow-x:clip。
+       【不可以用 hidden】：hidden 會強制另一軸變成 auto，等於還是裁；
+       clip 不會，所以 overflow-y:visible 才留得住。
+     - 磨砂質感移到 ::before。它沒有子孫，裁誰都無所謂。
+   ------------------------------------------------------------------------ */
+.menubar{display:flex;align-items:center;gap:3px;border-bottom:1px solid var(--border);
+  padding:6px;flex-wrap:nowrap;min-height:46px;position:relative;
+  overflow-x:clip;overflow-y:visible}
+.menubar::before{content:'';position:absolute;inset:0;z-index:-1;
+  background:rgba(18,18,18,0.85);backdrop-filter:blur(12px)}
 .menubar>*{flex-shrink:0}
 .menubar>.spacer{flex:1 1 auto;min-width:0}
 .menubar>.sep{margin:0 1px}

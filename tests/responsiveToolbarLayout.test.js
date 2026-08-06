@@ -21,7 +21,12 @@ describe('Mac 工具列 responsive 版面', () => {
   it('頂部工具列維持單列，窄視窗只隱藏按鈕文字', () => {
     const menu = declarations('.menubar');
     expect(menu).toContain('flex-wrap:nowrap');
-    expect(menu).toContain('overflow:hidden');
+    /* 水平方向仍然要裁——這一條守的是「窄視窗時工具列不可以撐爆版面」。
+       但【不可以是 overflow:hidden】：hidden 會連帶把垂直軸變成 auto，
+       把工具列裡的下拉選單一起裁掉（v6.1.12 的真實事故，見
+       tests/menubarClipping.test.js）。clip 不會，所以垂直軸留得住 visible。 */
+    expect(menu).toContain('overflow-x:clip');
+    expect(menu).not.toContain('overflow:hidden');
     expect(css).toContain('@media(max-width:1250px){.menubar button.icon .lbl{display:none}}');
     expect(html).toMatch(/id="stMonitorBtn"[\s\S]*class="lbl">監控序列/);
     expect(html).toMatch(/data-act="exp-video"[\s\S]*class="lbl">匯出影片/);
