@@ -102,10 +102,21 @@ export function initRecentProjects() {
     menu.hidden = true;
     return;
   }
-  /* 每次打開才抓：別的視窗或另存新檔都可能改動清單，開機時抓一次會過期。
-     .menu 的開合由 app.js 的通用邏輯處理（見該處），這裡只補「打開時重畫」。 */
-  $('recentBtn')?.addEventListener('click', () => {
-    if (menu.classList.contains('open')) return; // 這一次點擊是要關閉
-    void renderRecentMenu();
-  });
+  /* 每次點都重畫：別的視窗或另存新檔都可能改動清單，開機時抓一次會過期。
+
+     【不要改成「只在即將打開時才畫」】——那需要知道這一次點擊是開還是關，而
+     `.open` 這個 class 是由 `app.js` 頂層的通用選單處理器（`.menu>button`）加上去的。
+     那個處理器在【模組載入時】就註冊了，比 initRecentProjects()（由 initAll 呼叫）
+     還早，兩個監聽器又都掛在同一顆 recentBtn 上，所以依註冊順序：通用處理器先把
+     class 翻好，才輪到這裡。
+
+     真實事故（v6.1.8）：這裡原本寫 `if (menu.classList.contains('open')) return;`，
+     用意是「這一次是要關閉就不用畫」。實際跑起來第一次點擊時 class 早就被加上了，
+     於是每次「要打開」都被誤判成「要關閉」而直接 return——選單打得開，但**永遠是空的**。
+     反而是第二次點擊（關閉）才會畫，所以第三次點才看得到東西。
+
+     多畫一次的成本只是一次 IPC，不值得為它賭監聽器的註冊順序。 */
+  $('recentBtn')?.addEventListener('click', () => { void renderRecentMenu(); });
+  /* 先畫一次，第一次打開就有內容，而不是先閃一格空白再填。 */
+  void renderRecentMenu();
 }

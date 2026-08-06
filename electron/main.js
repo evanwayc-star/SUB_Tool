@@ -575,7 +575,12 @@ app.on('open-file', (e, path) => {
   e.preventDefault();
   startupFile = path;
   grantTrustedProjectFile(path);
-  if (mainWin && !mainWin.isDestroyed()) safeWinSend(mainWin, 'app:open-file', path);
+  if (mainWin && !mainWin.isDestroyed()) {
+    /* 主視窗還活著＝app 早就 ready，寫設定檔是安全的。還沒 ready 的情況不寫，
+       交給下面的 app:getStartupFile（renderer 起來後才會呼叫）補記。 */
+    rememberRecentProject(path);
+    safeWinSend(mainWin, 'app:open-file', path);
+  }
 });
 
 const gotTheLock = app.requestSingleInstanceLock();
@@ -590,6 +595,7 @@ if (!gotTheLock) {
       grantTrustedProjectFile(fileArg);
     }
     if (!app.isReady()) return;
+    if (fileArg) rememberRecentProject(fileArg);
     if (showMainWindow() && fileArg && hadLiveMainWindow) {
       safeWinSend(mainWin, 'app:open-file', fileArg);
     }
@@ -661,6 +667,9 @@ ipcMain.handle('app:getStartupFile', () => {
   }
   if (fileToOpen) {
     grantTrustedProjectFile(fileToOpen);
+    /* 從 Explorer 雙擊 .subtool 開起來的專案也算「開過」。少了這一行，
+       只有走「開啟專案」對話框的才會進最近開啟清單——而雙擊才是最常用的那條路。 */
+    rememberRecentProject(fileToOpen);
     return fileToOpen;
   }
   return null;
