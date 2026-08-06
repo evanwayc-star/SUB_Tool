@@ -321,3 +321,63 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(queueAPI.showMainWindow).toHaveBeenCalledTimes(1);
   });
 });
+
+/* `.` ＝ 主視窗與佇列監控之間的切換鍵。
+
+   主視窗按 . 會把監控視窗叫到前面（src/state.js 的 open_queue_monitor）；
+   這裡測的是【回程】——在監控視窗按 . 把主視窗叫回前面。
+   v6.1.8 之前只有去程沒有回程，所以在監控視窗按 . 完全沒反應。
+
+   兩邊要綁同一個鍵才有「切換」的手感；改動時請一起改。 */
+describe('鍵盤：. 切回主視窗', () => {
+  const press = (document, key, target, init = {}) => {
+    const ev = new document.defaultView.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
+    (target || document.body).dispatchEvent(ev);
+    return ev;
+  };
+
+  it('按 . 會把主視窗叫到前面', async () => {
+    const { document, queueAPI } = await openQueueWindow([]);
+    press(document, '.');
+    expect(queueAPI.showMainWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it('別的鍵不會', async () => {
+    const { document, queueAPI } = await openQueueWindow([]);
+    press(document, 'a');
+    press(document, 'Enter');
+    press(document, ',');
+    expect(queueAPI.showMainWindow).not.toHaveBeenCalled();
+  });
+
+  /* 這個視窗有「更改格式」的編輯面板，解析度與碼率是 number input。
+     `.` 是可列印字元——在那裡按到不可以被吃掉，更不可以把主視窗搶到前面。 */
+  it('在輸入框裡打 . 不可以觸發', async () => {
+    const jobs = [{ id: 'q1', status: 'queued', payload: { outPath: 'C:\out\a.mp4', format: 'h264', targetH: 0, videoKbps: 8000 } }];
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    document.querySelector('[data-job-id="q1"] [data-action="edit"]').click();
+    const input = document.querySelector('.job-editor [data-f="kbps"]');
+    expect(input).not.toBe(null);
+
+    const ev = press(document, '.', input);
+    expect(queueAPI.showMainWindow).not.toHaveBeenCalled();
+    expect(ev.defaultPrevented, '不可以吃掉使用者要打的小數點').toBe(false);
+  });
+
+  it('在下拉選單上按 . 也不可以觸發', async () => {
+    const jobs = [{ id: 'q1', status: 'queued', payload: { outPath: 'C:\out\a.mp4', format: 'h264', targetH: 0 } }];
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    document.querySelector('[data-job-id="q1"] [data-action="edit"]').click();
+    press(document, '.', document.querySelector('.job-editor [data-f="format"]'));
+    expect(queueAPI.showMainWindow).not.toHaveBeenCalled();
+  });
+
+  /* Ctrl+. 之類的組合鍵留給瀏覽器／系統，不要攔。 */
+  it('帶修飾鍵時不攔截', async () => {
+    const { document, queueAPI } = await openQueueWindow([]);
+    press(document, '.', null, { ctrlKey: true });
+    press(document, '.', null, { altKey: true });
+    press(document, '.', null, { metaKey: true });
+    expect(queueAPI.showMainWindow).not.toHaveBeenCalled();
+  });
+});

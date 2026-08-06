@@ -550,10 +550,12 @@ State.defaultKeymap = {
   'screenshot': [{key:'t'}],
   'screenshot_tc': [{key:'t', ctrl:true}],
   'export_video': [{key:'/'}],          // 匯出影片（交付清單）
-  /* 監控匯出佇列（桌面版）。加 Ctrl 是刻意的：裸的 `.` 是可列印字元，
-     使用者反映按到就跳視窗。改成 Ctrl+. 之後既保留捷徑、又不會被誤觸。
-     （已存過自訂鍵位的人不受影響——loadKeys 會蓋掉預設值。） */
-  'open_queue_monitor': [{key:'.', ctrl:true}],
+  /* 監控匯出佇列（桌面版）。`.` 是兩個視窗之間的【切換鍵】：
+     主視窗按 . → 佇列監控到前面；佇列監控按 . → 主視窗到前面（見 electron/queue.html）。
+     兩邊要綁同一個鍵才有「切換」的手感，改動時請一起改。
+     ── 它是可列印字元，但 keyboard.js 在 INPUT／TEXTAREA／contentEditable
+        都會先 return，所以打字時不會誤觸。 */
+  'open_queue_monitor': [{key:'.'}],
   'copy_style': [{key:'c', ctrl:true, shift:true}],
   'paste_style': [{key:'v', ctrl:true, shift:true}],
 };
