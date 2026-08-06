@@ -550,7 +550,10 @@ State.defaultKeymap = {
   'screenshot': [{key:'t'}],
   'screenshot_tc': [{key:'t', ctrl:true}],
   'export_video': [{key:'/'}],          // 匯出影片（交付清單）
-  'open_queue_monitor': [{key:'.'}],     // 監控匯出佇列（桌面版）
+  /* 監控匯出佇列（桌面版）。加 Ctrl 是刻意的：裸的 `.` 是可列印字元，
+     使用者反映按到就跳視窗。改成 Ctrl+. 之後既保留捷徑、又不會被誤觸。
+     （已存過自訂鍵位的人不受影響——loadKeys 會蓋掉預設值。） */
+  'open_queue_monitor': [{key:'.', ctrl:true}],
   'copy_style': [{key:'c', ctrl:true, shift:true}],
   'paste_style': [{key:'v', ctrl:true, shift:true}],
 };

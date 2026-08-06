@@ -1043,6 +1043,10 @@ function openQueueWindow() {
       contextIsolation: true
     }
   });
+  /* 主視窗有 setMenu(null)，這裡先前沒有——於是佇列視窗留著 Electron 的
+     預設應用選單（autoHideMenuBar 只是把它藏起來，加速鍵仍然是活的）。
+     兩個視窗對鍵盤的行為不一致本身就是意外的來源，補齊。 */
+  queueWin.setMenu(null);
   queueWin.loadFile(path.join(__dirname, 'queue.html'));
   /* 關掉監控視窗如果會順帶結束整個程式，而且還有工作在轉檔，就先問過使用者。
      這裡不能只看「有沒有在轉檔」——主視窗還開著時，關監控視窗只是收起監控畫面，
