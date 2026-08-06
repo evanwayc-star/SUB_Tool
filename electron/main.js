@@ -16,6 +16,20 @@ const fs = require('fs');
    而快取【優先寫在影片旁邊】（見 cacheCandidates），所以那些 stat 也打在網路上。
    會週期性執行的路徑一律改用這個。 */
 const fsp = require('fs/promises');
+/* 主行程事件迴圈的延遲量測。
+
+   「開啟檔案對話框會卡頓」這個回報前後查了三輪（v6.1.3 修過兩個真的成因，
+   v6.1.10 又修掉一個會凍住整個程式的同步 stat），每一輪都得靠推論——因為
+   當下沒有任何數字能回答最關鍵的那個問題：**是我們擋住了主行程，還是 Windows
+   的對話框自己慢？** 兩者症狀一模一樣，修法完全不同。
+
+   monitorEventLoopDelay 是 libuv 層的直方圖，沒有 JS 回呼、成本可忽略。
+   有了它，下次再遇到就是「讀數字」而不是「再猜一輪」。
+   讀取入口：IPC `app:mainLoopLag`（見下方），或桌面版 DevTools 裡
+   `await window.subtool.mainLoopLag()`。 */
+const { monitorEventLoopDelay } = require('perf_hooks');
+const _loopLag = monitorEventLoopDelay({ resolution: 20 });
+_loopLag.enable();
 const os = require('os');
 const url = require('url');
 const net = require('net');
@@ -785,7 +799,30 @@ ipcMain.handle('fs:reserveScreenshotPath', (e, { directory, suffix } = {}) => {
 
 
 
+/* 主行程被擋住了多久。單位 ms。
+   `reset: true`（預設）會清空直方圖，所以「開對話框前讀一次、關掉後再讀一次」
+   量到的就是那一段期間主行程實際被擋住的情形。 */
+ipcMain.handle('app:mainLoopLag', (e, reset = true) => {
+  const ms = n => Math.round(n / 1e4) / 100;   // 奈秒 → ms，保留兩位
+  const out = { mean: ms(_loopLag.mean), max: ms(_loopLag.max),
+                p99: ms(_loopLag.percentile(99)), 樣本: _loopLag.count };
+  if (reset) _loopLag.reset();
+  return out;
+});
+
+/* 開對話框前先把直方圖清掉，讓「對話框開著的這段時間」自成一段。
+   若使用者回報「按下去等很久才跳出來」，讀到的 max 就能分辨：
+   max 很小 → 主行程沒被擋住，慢的是 Windows 的對話框本身（例如還原到
+   \\Storage 這種 SMB 位置，shell 要先連上去列目錄才畫得出視窗）；
+   max 很大 → 是我們擋住了主行程，往同步 I/O 那邊查。 */
+function markDialogOpen(tag) {
+  const max = Math.round(_loopLag.max / 1e4) / 100;
+  if (max > 250) console.warn(`[lag] 開 ${tag} 對話框前，主行程曾被擋住 ${max}ms`);
+  _loopLag.reset();
+}
+
 ipcMain.handle('dialog:openMedia', async () => {
+  markDialogOpen('openMedia');
   const r = await dialog.showOpenDialog(mainWin, {
     title: '匯入影片或音訊檔', properties: ['openFile', 'multiSelections'],
     filters: [
@@ -883,6 +920,7 @@ ipcMain.handle('project:openRecent', (e, index) => {
 ipcMain.handle('project:clearRecent', () => { saveRecentProjects([]); return true; });
 
 ipcMain.handle('dialog:openProject', async () => {
+  markDialogOpen('openProject');
   const r = await dialog.showOpenDialog(mainWin, {
     title: '開啟專案', properties: ['openFile'],
     filters: [{ name: 'SUB Tool 專案', extensions: ['subtool', 'json'] }]

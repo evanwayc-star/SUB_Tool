@@ -57,7 +57,7 @@ function openModal(title,html,buttons,opts={}){
   bg.classList.add('show');
   setTimeout(()=>{ _focusables()[0]?.focus(); }, 0);
   // mpv 覆蓋視窗會蓋住置中的對話框，開啟對話框時先隱藏（keepVideo 例外：保留畫面）
-  if(!_modalKeepVideo && Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(false).catch(()=>{});
+  if(!_modalKeepVideo && Media.mpvMode) setMpvWindowVisible(false);
 }
 /* arg 可能是 MouseEvent（`act: closeModal` 這種直接當 handler 用的呼叫點），
    那時 committed 會是 undefined＝視為取消，正是取消鈕該有的語意。 */
@@ -72,7 +72,7 @@ function closeModal(arg){
   // X2：把焦點還給開啟前的元素。延到下一個 tick，避免「隱藏對話框→焦點元素被瀏覽器
   // 同步 blur 到 body」覆蓋掉我們的還原。
   if(prev && prev.focus){ setTimeout(()=>{ try{ prev.focus(); }catch(e){} }, 0); }
-  if(Media.mpvMode && window.subtool?.mpv) window.subtool.mpv.show(true).catch(()=>{});
+  if(Media.mpvMode) setMpvWindowVisible(true);
 }
 // X2：對話框內可聚焦元素（用於初始聚焦與 Tab 焦點陷阱）
 let _modalPrevFocus=null;
@@ -145,6 +145,26 @@ $('modalTitle').addEventListener('pointermove', e=>{
 });
 $('modalTitle').addEventListener('pointerup', e=>{ _mDragging=false; $('modalTitle').releasePointerCapture(e.pointerId); });
 
+/* ── mpv 的 OS 層視窗要不要顯示 ─────────────────────────────────────────────
+   【一律走這支，不要走 getPlayerAdapter().show()】
+
+   mpv 視窗是【主程序擁有的 OS 層子視窗】。「它在不在」跟「renderer 現在用哪個
+   adapter 在播」是兩件事，而這兩件事會脫鉤：
+
+     src/media.js 的 _ensureClip 在序列切到原生格式的片段時會
+     `setPlayerAdapter(new Html5Adapter(video))`，卻【沒有】把 Media.mpvMode 設回
+     false（全專案只有 Media.reset() 會設 false）。於是 mpvMode 仍是 true、
+     mpv 視窗仍然開著，但 getPlayerAdapter() 已經是 Html5Adapter——
+     它的 show() 是基底類別的 no-op，訊息根本沒送出去，視窗當然不會讓位。
+
+   真實事故（v6.1.10）：工具列選單接上了讓位機制、單元測試全綠、CDP 也證實
+   _syncMpvPanel 確實走到了新分支並算出「重疊」，使用者實測卻還是
+   「被播放視窗遮住」。差別就在 openModal 從一開始就是【直接送 IPC】
+   （所以對話框從來沒出過這個問題），而 _syncMpvPanel 走的是 adapter。 */
+function setMpvWindowVisible(v){
+  window.subtool?.mpv?.show(!!v)?.catch?.(()=>{});
+}
+
 /* ── 工具列的下拉選單（.menu / .menu.open .items）────────────────────────────
    【開合一律走這兩支，不要自己動 classList】
 
@@ -180,5 +200,5 @@ function openMenu(m){
 function syncMenuOverlay(){ emit('mpv:sync'); }
 
 export { setStatus, showToast, showOsd, openModal, closeModal, promptModal,
-  closeMenus, openMenu, syncMenuOverlay };
+  closeMenus, openMenu, syncMenuOverlay, setMpvWindowVisible };
 

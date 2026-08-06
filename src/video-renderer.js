@@ -15,7 +15,7 @@ import { imageBoxOnStage } from './imagegeom.js';
 import { fadeAlphaAtTimeline } from './clip-fade.js';
 import { SubFormats } from './formats.js';
 import { recordHistory } from './history.js';
-import { showToast } from './ui.js';
+import { showToast, setMpvWindowVisible } from './ui.js';
 import { refreshSelectionUI } from './subtitles.js';
 
 let _mpvSubT=null;
@@ -81,7 +81,9 @@ export function refreshMpvSubs(revealAfter=false, live=false){
 /* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。
    只在浮動面板/搜尋視窗「實際重疊」影片區域時才隱藏 mpv，不重疊時影片繼續顯示。 */
 export function _syncMpvPanel(){
-  if(!Media.mpvMode || !getPlayerAdapter().isAvailable) return;
+  /* 守衛看的是【mpv 視窗這條 IPC 通不通】，不是「現在裝的是哪個 adapter」——
+     兩者會脫鉤，詳見 ui.js setMpvWindowVisible 的註解。 */
+  if(!Media.mpvMode || !window.subtool?.mpv) return;
   // 對話框比照浮動面板：只有【真的蓋到影片區】才讓位。keepVideo 的對話框（編輯字幕文字）
   // 靠右停、不重疊 → mpv 續留，編輯時看得到畫面（v4.33.2；否則 openModal 的 keepVideo 會被這裡蓋掉）
   const _mb=$('modalBg');
@@ -131,7 +133,7 @@ export function _syncMpvPanel(){
       }
     }
   }
-  getPlayerAdapter().show(!hides).catch(()=>{});
+  setMpvWindowVisible(!hides);
 }
 const _videoSub = $('videoSub');
 const _videoWrap = $('videoWrap');

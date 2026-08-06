@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld('subtool', {
   openMedia:    () => ipcRenderer.invoke('dialog:openMedia'),
   openAudio:    () => ipcRenderer.invoke('dialog:openAudio'),
   openProject:  () => ipcRenderer.invoke('dialog:openProject'),
+  /* 主行程被擋住了多久（ms）。用來分辨「檔案對話框慢」是我們擋住主行程，
+     還是 Windows 的對話框自己慢——兩者症狀一樣、修法完全不同。 */
+  mainLoopLag:  (reset = true) => ipcRenderer.invoke('app:mainLoopLag', reset),
   /* 最近開啟：清單由主程序持有並持久化。開啟時只送【索引】——
      renderer 給不了路徑，所以沒有「叫主程序讀任意檔案」的路。 */
   recentProjects:   () => ipcRenderer.invoke('project:recentList'),
