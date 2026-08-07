@@ -76,9 +76,12 @@ const inPage = js => `(async () => {
   return await w.webContents.executeJavaScript(${JSON.stringify(js)}, true);
 })()`;
 
+/* 兩種啟動方式的行程名不一樣，兩個都要認：
+   安裝版是 SUB Tool.exe，啟動桌面版.bat 跑的是 electron.exe。 */
 function findMainPid() {
-  const ps = "Get-CimInstance Win32_Process -Filter \"Name='SUB Tool.exe'\" | "
-    + "Where-Object { $_.CommandLine -notmatch '--type=' } | "
+  const ps = 'Get-CimInstance Win32_Process | '
+    + "Where-Object { ($_.Name -eq 'SUB Tool.exe' -or $_.Name -eq 'electron.exe') "
+    + "-and $_.CommandLine -notmatch '--type=' } | "
     + 'Select-Object -First 1 -ExpandProperty ProcessId';
   try {
     return Number(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim());

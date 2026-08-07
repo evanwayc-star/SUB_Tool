@@ -72,9 +72,16 @@ function connect(target) {
   });
 }
 
+/* 找 Electron 的【主】行程（沒有 --type= 的那個）。
+
+   兩種啟動方式的行程名不一樣，兩個都要認：
+     - 安裝版：SUB Tool.exe
+     - 啟動桌面版.bat：node_modules\electron\dist\electron.exe
+   只寫前者的話，用 .bat 測試時腳本會一直「等不到 app」。 */
 function findMainPid() {
-  const ps = "Get-CimInstance Win32_Process -Filter \"Name='SUB Tool.exe'\" | "
-    + "Where-Object { $_.CommandLine -notmatch '--type=' } | "
+  const ps = 'Get-CimInstance Win32_Process | '
+    + "Where-Object { ($_.Name -eq 'SUB Tool.exe' -or $_.Name -eq 'electron.exe') "
+    + "-and $_.CommandLine -notmatch '--type=' } | "
     + 'Select-Object -First 1 -ExpandProperty ProcessId';
   try {
     return Number(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim());

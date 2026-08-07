@@ -117,8 +117,9 @@ const VISIBLE_PART = `(() => {
    引號，交給 shell 拼字串在不同殼層（PowerShell vs Git Bash）會被吃掉不同的地方，
    結果是 PID 變成 0 而錯誤訊息完全看不出原因。 */
 function findMainPid() {
-  const ps = "Get-CimInstance Win32_Process -Filter \"Name='SUB Tool.exe'\" | "
-    + "Where-Object { $_.CommandLine -notmatch '--type=' } | "
+  const ps = 'Get-CimInstance Win32_Process | '
+    + "Where-Object { ($_.Name -eq 'SUB Tool.exe' -or $_.Name -eq 'electron.exe') "
+    + "-and $_.CommandLine -notmatch '--type=' } | "
     + 'Select-Object -First 1 -ExpandProperty ProcessId';
   try {
     return Number(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim());
