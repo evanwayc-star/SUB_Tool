@@ -838,13 +838,41 @@ function markDialogOpen(tag) {
    只在超過 3 秒時才印，正常使用完全安靜。 */
 async function timedDialog(tag, run) {
   const t0 = Date.now();
+  _loopLag.reset();
+
+  /* ── 開原生對話框前先把 mpv 的子視窗收起來 ──────────────────────────────
+     mpv 是【另一個行程】，透過 --wid 畫進我們建立的 HWND。Windows 在建立模態
+     對話框時會對擁有者視窗與它的子視窗發訊息，而【跨行程的 SendMessage 會卡住
+     等對方的訊息迴圈回應】——此刻 mpv 正在解碼一支 114 GB 的影片。
+
+     實測支持這個方向：同一次啟動裡，「開啟專案」的對話框（mpv 還沒啟動）不到
+     3 秒；緊接著 mpv launch 之後，「開啟影音」的對話框花了 42,610ms。
+     而我們這一側從按下滑鼠到呼叫 showOpenDialog 總共 <5ms，SMB 也正常
+     （列目錄 21ms、跨 114GB 任何位置讀 1MB 都在 41ms 內）。
+
+     收起來也符合既有行為：HTML 對話框（ui.js openModal）本來就會讓 mpv 讓位，
+     原生對話框是 OS 層的模態，更該讓。 */
+  const hideMpv = _mpvVisible && _mpvWin && !_mpvWin.isDestroyed();
+  if (hideMpv) {
+    try { _mpvWin.hide(); } catch (e) {}
+    try { if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) _mpvGuideWin.hide(); } catch (e) {}
+  }
+
   try {
     return await run();
   } finally {
+    /* _mpvVisible 沒有被改過——這裡只是暫時藏起來，所以照它原本的意思還原。 */
+    if (hideMpv && _mpvVisible && _mpvWin && !_mpvWin.isDestroyed()) {
+      try { _mpvWin.show(); } catch (e) {}
+      if (_mpvRect) applyMpvBounds(_mpvRect);
+      showMpvGuide();
+    }
     const ms = Date.now() - t0;
+    const blocked = Math.round(_loopLag.max / 1e4) / 100;
     if (ms > 3000) {
-      console.warn(`[dialog] ${tag}：呼叫 showOpenDialog 到關閉共 ${ms}ms。`
-        + '（我們這一側到呼叫為止 <5ms，所以這段扣掉你的操作時間就是 Windows 畫視窗的時間）');
+      console.warn(`[dialog] ${tag}：呼叫 showOpenDialog 到關閉共 ${ms}ms，`
+        + `其中主行程事件迴圈被擋住最久 ${blocked}ms。`
+        + `（mpv 子視窗在開對話框前${hideMpv ? '有' : '沒有'}被收起來）`);
     }
   }
 }
