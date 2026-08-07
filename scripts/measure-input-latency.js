@@ -104,39 +104,67 @@ const ARM = `(() => {
   return true;
 })()`;
 
-(async () => {
-  let pid = Number(process.argv[2]) || findMainPid();
-  if (!pid) {
-    console.log('等待 app 啟動…');
-    const until = Date.now() + 60 * 60 * 1000;
-    while (!pid && Date.now() < until) { await sleep(2000); pid = findMainPid(); }
+async function waitForPid(prev) {
+  const until = Date.now() + 60 * 60 * 1000;
+  let announced = false;
+  while (Date.now() < until) {
+    const pid = findMainPid();
+    if (pid && pid !== prev) return pid;
+    if (!announced) { console.log(prev ? '\napp 已關閉，等待重新啟動…' : '等待 app 啟動…'); announced = true; }
+    await sleep(2000);
   }
-  if (!pid) { console.error('等不到 app。'); process.exit(1); }
-  console.log(`主行程 PID = ${pid}`);
-  try { process._debugProcess(pid); } catch (e) {}
-  await sleep(1200);
+  return 0;
+}
 
-  const main = await connect((await getJSON('http://127.0.0.1:9229/json/list'))[0]);
-  await main.eval(inPage(ARM));
-
-  console.log('\n量測已就緒（不使用計時器，所以不受背景節流影響）。');
-  console.log('★ 載入影音，然後按「開啟影音」。每一次輸入都會即時印出來。');
-  console.log('   延遲 = 事件實際發生 → renderer 的 handler 跑起來\n');
-  console.log('  時間      事件           延遲       可見性     目標');
-  console.log('  --------  -------------  ---------  ---------  ----');
-
-  let seen = 0;
+/* 【外層重掛迴圈】
+   使用者在測試過程中會關掉、重開 app（每次重開 PID 都不同）。原本掛一次就結束，
+   app 一重開監看器就跟著死，而且輸出是空的——看起來像「什麼都沒量到」，
+   實際上是目標不見了。現在偵測到讀取失敗就重新等待、重新掛上。 */
+(async () => {
+  let pid = Number(process.argv[2]) || 0;
+  let printedHeader = false;
   for (;;) {
-    let list = [];
-    try { list = JSON.parse(await main.eval(inPage('JSON.stringify(window.__inp || [])'))); }
-    catch (e) { console.error('（讀取失敗，app 可能關了）', e.message); break; }
-    for (let i = seen; i < list.length; i++) {
-      const r = list[i];
-      const mark = r.延遲ms > 1000 ? '   ← 這一段就是使用者等的時間' : '';
-      console.log(`  ${new Date(r.at).toTimeString().slice(0, 8)}  ${r.kind.padEnd(13)}` +
-        `  ${String(r.延遲ms).padStart(6)} ms  ${r.vis.padEnd(9)}  ${r.act}${mark}`);
+    if (!pid) pid = await waitForPid(0);
+    if (!pid) { console.error('等不到 app。'); process.exit(1); }
+    console.log(`\n主行程 PID = ${pid}`);
+    try { process._debugProcess(pid); } catch (e) {}
+    await sleep(1200);
+
+    let main;
+    try {
+      main = await connect((await getJSON('http://127.0.0.1:9229/json/list'))[0]);
+      await main.eval(inPage(ARM));
+    } catch (e) {
+      console.error('掛上失敗，重試：', e.message);
+      pid = 0; await sleep(2000); continue;
     }
-    seen = list.length;
-    await sleep(1000);
+
+    if (!printedHeader) {
+      console.log('\n量測已就緒（不使用計時器，所以不受背景節流影響）。');
+      console.log('★ 載入影音，然後按「開啟影音」。每一次輸入都會即時印出來。');
+      console.log('   延遲 = 事件實際發生 → renderer 的 handler 跑起來\n');
+      console.log('  時間      事件           延遲       可見性     目標');
+      console.log('  --------  -------------  ---------  ---------  ----');
+      printedHeader = true;
+    } else {
+      console.log('（已重新掛上，繼續量測）');
+    }
+
+    let seen = 0, alive = true;
+    while (alive) {
+      let list = [];
+      try { list = JSON.parse(await main.eval(inPage('JSON.stringify(window.__inp || [])'))); }
+      catch (e) { alive = false; break; }
+      for (let i = seen; i < list.length; i++) {
+        const r = list[i];
+        const mark = r.延遲ms > 1000 ? '   ← 這一段就是使用者等的時間' : '';
+        console.log(`  ${new Date(r.at).toTimeString().slice(0, 8)}  ${r.kind.padEnd(13)}` +
+          `  ${String(r.延遲ms).padStart(6)} ms  ${r.vis.padEnd(9)}  ${r.act}${mark}`);
+      }
+      seen = list.length;
+      await sleep(1000);
+    }
+    try { main.close(); } catch (e) {}
+    pid = 0;
   }
 })().catch(e => { console.error('失敗:', e.message); process.exit(1); });
