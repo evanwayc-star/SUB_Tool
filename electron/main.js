@@ -836,6 +836,48 @@ function markDialogOpen(tag) {
    使用者一看到視窗就按取消時，這個數字近似於視窗出現所花的時間。
 
    只在超過 3 秒時才印，正常使用完全安靜。 */
+/* 上一次在各種對話框裡實際挑到檔案的資料夾。
+
+   ── 為什麼要自己記，而不是交給 Windows ──
+   沒有給 defaultPath 時，Windows 會從自己的 MRU（ComDlg32\OpenSavePidlMRU）
+   還原上次的位置，而那是【PIDL 解析】——會走 shell namespace，對網路位置要做
+   名稱解析。這台機器的 DNS 只有公用伺服器（168.95.1.1／8.8.8.8／1.1.1.1），
+   解析不到 \\Storage、\\Avjet-Server 這種內網主機名，只能退回 LLMNR／NetBIOS
+   廣播——實測 Avjet-Server 冷解析要 7.3 秒、Storage 2.7 秒，而 MRU 裡有幾十筆
+   指向這兩台。
+
+   直接給一個【字串路徑】當 defaultPath 就不必走那條路。
+   行為對使用者是一樣的（還是回到上次的資料夾），但由我們自己記。
+
+   實測背景：開啟影音的對話框花了 42.6／43.3 秒，而同一次啟動裡「開啟專案」
+   （本機路徑）不到 3 秒；期間主行程事件迴圈只被擋住 32ms，我們這一側到呼叫
+   showOpenDialog 為止 <5ms——也就是那 43 秒完全在原生對話框裡面。 */
+let _lastDirs = null;
+function lastDir(kind) {
+  if (!_lastDirs) {
+    try {
+      const p = getConfigPath();
+      _lastDirs = (fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')).lastDirs : null) || {};
+    } catch (e) { _lastDirs = {}; }
+  }
+  const d = _lastDirs[kind];
+  /* 存在才用：資料夾被刪掉或磁碟沒接時給了不存在的 defaultPath，
+     對話框的行為會變得難以預期。 */
+  try { return d && fs.statSync(d).isDirectory() ? d : undefined; } catch (e) { return undefined; }
+}
+function rememberDir(kind, filePath) {
+  if (typeof filePath !== 'string' || !filePath) return;
+  try {
+    const dir = path.dirname(filePath);
+    if (!_lastDirs) lastDir(kind);
+    if (_lastDirs[kind] === dir) return;
+    _lastDirs[kind] = dir;
+    const p = getConfigPath();
+    const current = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
+    fs.writeFileSync(p, JSON.stringify({ ...current, lastDirs: _lastDirs }, null, 2), 'utf8');
+  } catch (e) {}
+}
+
 async function timedDialog(tag, run) {
   const t0 = Date.now();
   _loopLag.reset();
@@ -881,12 +923,14 @@ ipcMain.handle('dialog:openMedia', async () => {
   markDialogOpen('openMedia');
   const r = await timedDialog('開啟影音', () => dialog.showOpenDialog(mainWin, {
     title: '匯入影片或音訊檔', properties: ['openFile', 'multiSelections'],
+    defaultPath: lastDir('media'),   // 見 lastDir 的註解：繞開 shell 的 MRU／PIDL 解析
     filters: [
       { name: '影音或圖片', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'mxf', 'avi', 'm2ts', 'mts', 'ts', 'wmv', 'webm', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'aif', 'aiff', 'jpg', 'jpeg', 'png'] },
       { name: '全部', extensions: ['*'] }
     ]
   }));
   if (r.canceled) return null;
+  rememberDir('media', r.filePaths[0]);
   r.filePaths.forEach(p => {
     fileAuthority.grantTrustedFile(p, { read: true, write: false });
     fileAuthority.grantScreenshotDirectory(path.dirname(p));
@@ -979,9 +1023,11 @@ ipcMain.handle('dialog:openProject', async () => {
   markDialogOpen('openProject');
   const r = await timedDialog('開啟專案', () => dialog.showOpenDialog(mainWin, {
     title: '開啟專案', properties: ['openFile'],
+    defaultPath: lastDir('project'),
     filters: [{ name: 'SUB Tool 專案', extensions: ['subtool', 'json'] }]
   }));
   if (r.canceled) return null;
+  rememberDir('project', r.filePaths[0]);
   const buf = fs.readFileSync(r.filePaths[0]);
   grantTrustedProjectFile(r.filePaths[0], buf);
   rememberRecentProject(r.filePaths[0]);
@@ -2526,6 +2572,10 @@ ipcMain.handle('mpv:detect', () => {
 ipcMain.handle('mpv:launch', async (e, { src, bounds, audio }) => {
   if (typeof src !== 'string' || !src) throw new Error('mpv：來源路徑無效');
   requireReadablePath('mpv:launch', src);
+  /* 從專案載入的影片也算「上次去過的資料夾」——否則開專案之後第一次按開啟影音，
+     lastDirs 還是空的，defaultPath 給不出來，又會退回 shell 的 MRU 解析
+     （見 lastDir 的註解）。而「開專案 → 按開啟影音」正是使用者實際會走的路。 */
+  rememberDir('media', src);
   if (!mpvEmbeddingSupported(process.platform)) throw new Error('目前 macOS 版不啟用 Windows 專用的 mpv 嵌入');
   if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
