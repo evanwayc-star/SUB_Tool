@@ -441,6 +441,7 @@ commit 上另行加入 Developer ID、hardened runtime 與 Apple notarization �
 
 | 症狀 | 檢查項目 |
 |------|----------|
+| 點擊原生對話框（開啟影音/專案等）時整個程式卡死 40 秒才跳出視窗 | 全球已知 Electron 結合 Win11 的 OS 級 Bug。主因是預設路徑為網路磁碟時，若 Win11 的「公用網路」或「網路探索」因尋找幽靈設備而 Timeout，會鎖死對話框的 COM 執行緒並凍結整個 App 畫面。**唯一解法**：進入 Windows「進階共用設定」，將目前網卡的**「網路探索」關閉**。原生軟體因使用多執行緒能避開此問題，但 Electron 受限架構無法倖免。 |
 | 主視窗無法啟動 | 確認 `npm install` 完成；檢查 `electron/main.js` Node 相依 |
 | 前端無法呼叫 `window.subtool` | `preload.js` 是否正確載入；`contextBridge.exposeInMainWorld` 是否成功 |
 | ffmpeg 功能無效 | `await window.subtool.status()` → 看 `ffmpegPath` 與 `ffmpegDetection.attempts`；安裝版應先命中 `app.asar.unpacked`，不是只確認 PATH |

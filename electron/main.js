@@ -16,20 +16,7 @@ const fs = require('fs');
    而快取【優先寫在影片旁邊】（見 cacheCandidates），所以那些 stat 也打在網路上。
    會週期性執行的路徑一律改用這個。 */
 const fsp = require('fs/promises');
-/* 主行程事件迴圈的延遲量測。
 
-   「開啟檔案對話框會卡頓」這個回報前後查了三輪（v6.1.3 修過兩個真的成因，
-   v6.1.10 又修掉一個會凍住整個程式的同步 stat），每一輪都得靠推論——因為
-   當下沒有任何數字能回答最關鍵的那個問題：**是我們擋住了主行程，還是 Windows
-   的對話框自己慢？** 兩者症狀一模一樣，修法完全不同。
-
-   monitorEventLoopDelay 是 libuv 層的直方圖，沒有 JS 回呼、成本可忽略。
-   有了它，下次再遇到就是「讀數字」而不是「再猜一輪」。
-   讀取入口：IPC `app:mainLoopLag`（見下方），或桌面版 DevTools 裡
-   `await window.subtool.mainLoopLag()`。 */
-const { monitorEventLoopDelay } = require('perf_hooks');
-const _loopLag = monitorEventLoopDelay({ resolution: 20 });
-_loopLag.enable();
 const os = require('os');
 const url = require('url');
 const net = require('net');
@@ -799,43 +786,7 @@ ipcMain.handle('fs:reserveScreenshotPath', (e, { directory, suffix } = {}) => {
 
 
 
-/* 主行程被擋住了多久。單位 ms。
-   `reset: true`（預設）會清空直方圖，所以「開對話框前讀一次、關掉後再讀一次」
-   量到的就是那一段期間主行程實際被擋住的情形。 */
-ipcMain.handle('app:mainLoopLag', (e, reset = true) => {
-  const ms = n => Math.round(n / 1e4) / 100;   // 奈秒 → ms，保留兩位
-  const out = { mean: ms(_loopLag.mean), max: ms(_loopLag.max),
-                p99: ms(_loopLag.percentile(99)), 樣本: _loopLag.count };
-  if (reset) _loopLag.reset();
-  return out;
-});
 
-/* 開對話框前先把直方圖清掉，讓「對話框開著的這段時間」自成一段。
-   若使用者回報「按下去等很久才跳出來」，讀到的 max 就能分辨：
-   max 很小 → 主行程沒被擋住，慢的是 Windows 的對話框本身（例如還原到
-   \\Storage 這種 SMB 位置，shell 要先連上去列目錄才畫得出視窗）；
-   max 很大 → 是我們擋住了主行程，往同步 I/O 那邊查。 */
-function markDialogOpen(tag) {
-  const max = Math.round(_loopLag.max / 1e4) / 100;
-  if (max > 250) console.warn(`[lag] 開 ${tag} 對話框前，主行程曾被擋住 ${max}ms`);
-  _loopLag.reset();
-}
-
-/* 原生檔案對話框從呼叫到關閉花了多久。
-
-   ── 為什麼要常駐在程式碼裡，而不是外掛一支診斷腳本 ──
-   「按下開啟影音要等一分多鐘」這個症狀【只在啟動後第一次發生】。而外掛的探針
-   必須在 app 起來【之後】才掛得上去，等掛好時第一次往往已經過去了；就算趕上，
-   app 一重開探針又沒了。來回試了好幾輪都卡在這個時序上。
-   做進程式碼裡就沒有這個問題：啟動桌面版.bat 會重新 build，探針從第一刻就在。
-
-   ── 這個數字怎麼讀 ──
-   已經量到我們這一側從按下滑鼠到呼叫 showOpenDialog 總共不到 5 毫秒
-   （事件延遲 1–4ms ＋ 點擊到呼叫 1ms，後者用 event.timeStamp 量，不受節流影響）。
-   所以這裡量到的時間裡，扣掉使用者操作的部分就是【Windows 建立並畫出視窗】。
-   使用者一看到視窗就按取消時，這個數字近似於視窗出現所花的時間。
-
-   只在超過 3 秒時才印，正常使用完全安靜。 */
 /* 上一次在各種對話框裡實際挑到檔案的資料夾。
 
    ── 為什麼要自己記，而不是交給 Windows ──
@@ -878,57 +829,16 @@ function rememberDir(kind, filePath) {
   } catch (e) {}
 }
 
-async function timedDialog(tag, run) {
-  const t0 = Date.now();
-  _loopLag.reset();
-
-  /* ── 開原生對話框前先把 mpv 的子視窗收起來 ──────────────────────────────
-     mpv 是【另一個行程】，透過 --wid 畫進我們建立的 HWND。Windows 在建立模態
-     對話框時會對擁有者視窗與它的子視窗發訊息，而【跨行程的 SendMessage 會卡住
-     等對方的訊息迴圈回應】——此刻 mpv 正在解碼一支 114 GB 的影片。
-
-     實測支持這個方向：同一次啟動裡，「開啟專案」的對話框（mpv 還沒啟動）不到
-     3 秒；緊接著 mpv launch 之後，「開啟影音」的對話框花了 42,610ms。
-     而我們這一側從按下滑鼠到呼叫 showOpenDialog 總共 <5ms，SMB 也正常
-     （列目錄 21ms、跨 114GB 任何位置讀 1MB 都在 41ms 內）。
-
-     收起來也符合既有行為：HTML 對話框（ui.js openModal）本來就會讓 mpv 讓位，
-     原生對話框是 OS 層的模態，更該讓。 */
-  const hideMpv = _mpvVisible && _mpvWin && !_mpvWin.isDestroyed();
-  if (hideMpv) {
-    try { _mpvWin.hide(); } catch (e) {}
-    try { if (_mpvGuideWin && !_mpvGuideWin.isDestroyed()) _mpvGuideWin.hide(); } catch (e) {}
-  }
-
-  try {
-    return await run();
-  } finally {
-    /* _mpvVisible 沒有被改過——這裡只是暫時藏起來，所以照它原本的意思還原。 */
-    if (hideMpv && _mpvVisible && _mpvWin && !_mpvWin.isDestroyed()) {
-      try { _mpvWin.show(); } catch (e) {}
-      if (_mpvRect) applyMpvBounds(_mpvRect);
-      showMpvGuide();
-    }
-    const ms = Date.now() - t0;
-    const blocked = Math.round(_loopLag.max / 1e4) / 100;
-    if (ms > 3000) {
-      console.warn(`[dialog] ${tag}：呼叫 showOpenDialog 到關閉共 ${ms}ms，`
-        + `其中主行程事件迴圈被擋住最久 ${blocked}ms。`
-        + `（mpv 子視窗在開對話框前${hideMpv ? '有' : '沒有'}被收起來）`);
-    }
-  }
-}
 
 ipcMain.handle('dialog:openMedia', async () => {
-  markDialogOpen('openMedia');
-  const r = await timedDialog('開啟影音', () => dialog.showOpenDialog(mainWin, {
+  const r = await dialog.showOpenDialog({
     title: '匯入影片或音訊檔', properties: ['openFile', 'multiSelections'],
     defaultPath: lastDir('media'),   // 見 lastDir 的註解：繞開 shell 的 MRU／PIDL 解析
     filters: [
       { name: '影音或圖片', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'mxf', 'avi', 'm2ts', 'mts', 'ts', 'wmv', 'webm', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'aif', 'aiff', 'jpg', 'jpeg', 'png'] },
       { name: '全部', extensions: ['*'] }
     ]
-  }));
+  });
   if (r.canceled) return null;
   rememberDir('media', r.filePaths[0]);
   r.filePaths.forEach(p => {
@@ -939,7 +849,7 @@ ipcMain.handle('dialog:openMedia', async () => {
   return r.filePaths.length===1 ? r.filePaths[0] : r.filePaths;
 });
 ipcMain.handle('dialog:openAudio', async () => {
-  const r = await dialog.showOpenDialog(mainWin, {
+  const r = await dialog.showOpenDialog({
     title: '加入音軌檔', properties: ['openFile', 'multiSelections'],
     filters: [{ name: '音訊', extensions: ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg'] }]
   });
@@ -1020,12 +930,11 @@ ipcMain.handle('project:openRecent', (e, index) => {
 ipcMain.handle('project:clearRecent', () => { saveRecentProjects([]); return true; });
 
 ipcMain.handle('dialog:openProject', async () => {
-  markDialogOpen('openProject');
-  const r = await timedDialog('開啟專案', () => dialog.showOpenDialog(mainWin, {
+  const r = await dialog.showOpenDialog({
     title: '開啟專案', properties: ['openFile'],
     defaultPath: lastDir('project'),
     filters: [{ name: 'SUB Tool 專案', extensions: ['subtool', 'json'] }]
-  }));
+  });
   if (r.canceled) return null;
   rememberDir('project', r.filePaths[0]);
   const buf = fs.readFileSync(r.filePaths[0]);
@@ -1045,19 +954,19 @@ ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
 
 ipcMain.handle('dialog:importSub', async (e, kind) => {
   const filt = { srt: ['srt'], ass: ['ass', 'ssa'], encore: ['txt'], txt: ['txt'] }[kind] || ['*'];
-  const r = await dialog.showOpenDialog(mainWin, { title: '匯入字幕', properties: ['openFile'], filters: [{ name: kind.toUpperCase(), extensions: filt }, { name: '全部', extensions: ['*'] }] });
+  const r = await dialog.showOpenDialog({ title: '匯入字幕', properties: ['openFile'], filters: [{ name: kind.toUpperCase(), extensions: filt }, { name: '全部', extensions: ['*'] }] });
   if (r.canceled) return null;
   const buf = fs.readFileSync(r.filePaths[0]);
   return { path: r.filePaths[0], b64: buf.toString('base64') };
 });
 ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
-  const r = await dialog.showSaveDialog(mainWin, { title: '匯出字幕', defaultPath: name, filters: [{ name: (ext || 'txt').toUpperCase(), extensions: [ext || 'txt'] }] });
+  const r = await dialog.showSaveDialog({ title: '匯出字幕', defaultPath: name, filters: [{ name: (ext || 'txt').toUpperCase(), extensions: [ext || 'txt'] }] });
   if (r.canceled) return null;
   fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
   return r.filePath;
 });
 ipcMain.handle('dialog:importFont', async () => {
-  const r = await dialog.showOpenDialog(mainWin, { title: '匯入字型', properties: ['openFile'], filters: [{ name: '字型檔', extensions: ['ttf', 'otf', 'woff', 'woff2', 'ttc'] }, { name: '全部', extensions: ['*'] }] });
+  const r = await dialog.showOpenDialog({ title: '匯入字型', properties: ['openFile'], filters: [{ name: '字型檔', extensions: ['ttf', 'otf', 'woff', 'woff2', 'ttc'] }, { name: '全部', extensions: ['*'] }] });
   if (r.canceled || !r.filePaths[0]) return null;
   const src = r.filePaths[0];
   const root = userFontsDir();
@@ -1697,7 +1606,7 @@ async function _runJobLogic(job) {
 
 
 ipcMain.handle('dialog:importDirectory', async () => {
-  const r = await dialog.showOpenDialog(mainWin, {
+  const r = await dialog.showOpenDialog({
     title: '選擇匯入資料夾',
     properties: ['openDirectory']
   });
@@ -1722,7 +1631,7 @@ ipcMain.handle('dialog:importDirectory', async () => {
 });
 
 ipcMain.handle('dialog:exportDirectory', async (e, files) => {
-  const r = await dialog.showOpenDialog(mainWin, {
+  const r = await dialog.showOpenDialog({
     title: '選擇匯出資料夾',
     properties: ['openDirectory', 'createDirectory']
   });
