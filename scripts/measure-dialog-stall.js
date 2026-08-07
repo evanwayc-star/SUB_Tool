@@ -174,24 +174,38 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
   console.log('★ 現在請在 SUB Tool 裡按「開啟影音」，等對話框真的出現後按【取消】。');
   console.log('（最多等 5 分鐘，抓到就會自動印結果）\n');
 
-  const deadline = Date.now() + 5 * 60 * 1000;
-  let dlg = [];
+  /* 只認【開啟影音】那一輪。
+
+     先前這裡寫成「看到任何一次 resolved 就收工」，結果抓到的是使用者在載入影音
+     【之前】按的『開啟專案』——那一輪只花 2 ms，完全正常，白跑一趟。
+     現在要等到：出現一次 act 含 media 的點擊，而且它之後有一次 showOpenDialog。 */
+  const deadline = Date.now() + 10 * 60 * 1000;
+  let dlg = [], clk = [];
   while (Date.now() < deadline) {
     dlg = JSON.parse(await main.eval(`JSON.stringify(globalThis.__dlgLog || [])`));
-    if (dlg.some(x => x.phase === 'resolved')) break;
+    clk = JSON.parse(await main.eval(inPage(`JSON.stringify(window.__clickLog || [])`)));
+    const media = clk.filter(c => /media/.test(c.act)).pop();
+    if (media && dlg.some(x => x.phase === 'enter' && x.t >= media.t)) {
+      /* 抓到了。再等一下把 resolved（使用者按取消／選檔）也收進來。 */
+      await sleep(1500);
+      dlg = JSON.parse(await main.eval(`JSON.stringify(globalThis.__dlgLog || [])`));
+      break;
+    }
     process.stdout.write('.');
     await sleep(2000);
   }
   console.log('\n');
 
-  const clk = JSON.parse(await main.eval(inPage(`JSON.stringify(window.__clickLog || [])`)));
+  clk = JSON.parse(await main.eval(inPage(`JSON.stringify(window.__clickLog || [])`)));
   const lagMain = JSON.parse(await main.eval(`JSON.stringify(globalThis.__lag_main || [])`));
   const lagRend = JSON.parse(await main.eval(inPage(`JSON.stringify(window.__lag_rend || [])`)));
   const hhmmssms = t2 => new Date(t2).toTimeString().slice(0, 8) + '.' + String(t2 % 1000).padStart(3, '0');
 
+  /* 配對【那一次】開啟影音的點擊與它之後的 showOpenDialog——不是第一次的。
+     同一次執行裡通常還有先前開啟專案那一輪，取錯就會算成 2 ms 而誤判成正常。 */
   const c0 = clk.filter(c => /media/.test(c.act)).pop();
-  const d0 = dlg.find(x => x.phase === 'enter');
-  const d1 = dlg.find(x => x.phase === 'resolved');
+  const d0 = c0 ? dlg.find(x => x.phase === 'enter' && x.t >= c0.t) : null;
+  const d1 = d0 ? dlg.find(x => x.phase === 'resolved' && x.t >= d0.t) : null;
 
   console.log('renderer 收到的點擊：');
   clk.forEach(c => console.log(`  ${hhmmssms(c.t)}  act=${c.act}`));
