@@ -240,6 +240,7 @@ function createCommands(ctx){
     /* ── 軌道與時間軸 ───────────────────────────────────────────────── */
     'add-track': () => addTrack(),
     'copy-track': () => ctx.doCopyTrack(),
+    'compare-track': () => ctx.doCompareTrack(),
     'zoom-in': () => setZoom(State.pxPerSec * 1.3),
     'zoom-out': () => setZoom(State.pxPerSec * 0.77),
     'zoom-fit': () => {

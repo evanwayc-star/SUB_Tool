@@ -106,7 +106,17 @@ const History = {
   undo(){ if(this.hi>0){ this.restore(this.hi-1); setStatus('已復原','ok'); } else setStatus('沒有可復原的動作',''); },
   redo(){ if(this.hi<this.stack.length-1){ this.restore(this.hi+1); setStatus('已重做','ok'); } else setStatus('沒有可重做的動作',''); },
 };
-function recordHistory(label){ History.record(label); }
+function recordHistory(label){ 
+  History.record(label); 
+  if (window.subtool && window.subtool.syncCompareWindow) {
+    window.subtool.syncCompareWindow({
+      tracks: State.tracks,
+      cues: State.cues,
+      fps: State.fps,
+      dropFrame: State.dropFrame
+    });
+  }
+}
 function renderHistory(){
   const el=$('historyList'); if(!el)return;
   el.innerHTML=History.stack.map((h,i)=>

@@ -515,6 +515,7 @@ const Commands = createCommands({
   toggleSafeFrame,
   toggleTimecodeWatermark,
   doCopyTrack,
+  doCompareTrack,
 });
 function doAction(act, force = false){ return Commands.run(act, { force }); }
 
@@ -1453,6 +1454,20 @@ function _execCopyTrack(srcIdx, withText){
   recordHistory('複製字幕軌道');
   showToast(`已複製到「${name}」（${srcCues.length} 條）`);
 }
+function doCompareTrack() {
+  if (State.tracks.length < 1) { showToast('沒有足夠的字幕軌道可供比對'); return; }
+  if (window.subtool && window.subtool.openCompareWindow) {
+    const data = {
+      tracks: State.tracks,
+      cues: State.cues,
+      fps: State.fps,
+      dropFrame: State.dropFrame
+    };
+    window.subtool.openCompareWindow(data);
+  } else {
+    showToast('此功能僅限桌面版使用');
+  }
+}
 
 function openNoteInPanel(n){
   $('notesPanel').classList.add('show');
@@ -1807,6 +1822,27 @@ async function initDesktop(){
   }
   if (DESK.onOpenFile) {
     DESK.onOpenFile(file => handleStartupFile(file));
+  }
+  if (DESK.onSeekMain) {
+    DESK.onSeekMain((payload) => {
+      if (typeof payload === 'number') {
+        Media.seek(payload);
+      } else if (payload && typeof payload === 'object') {
+        if (payload.trackIdx !== undefined && State.listTrack !== payload.trackIdx) {
+          State.listTrack = payload.trackIdx;
+          renderListTrackSel();
+          renderTrackStyle();
+          refreshTrackGutterActive();
+          renderSubList();
+        }
+        if (payload.cueId !== undefined) {
+          selectCueSingle(payload.cueId, false);
+        }
+        if (payload.time !== undefined) {
+          Media.seek(payload.time);
+        }
+      }
+    });
   }
   if (DESK.onAppRequestClose) {
     DESK.onAppRequestClose(() => {

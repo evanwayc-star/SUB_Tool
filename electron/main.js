@@ -1043,6 +1043,7 @@ function _findExportTimecodeFont() {
 /* ===== 背景匯出佇列與 QueueManager ===== */
 let EXPORT_QUEUE_DIR = null;
 let queueWin = null;
+let compareWin = null;
 const _queueState = new ExportQueueState();
 /* 分類的唯一來源在 export-job-status.js */
 const OUTPUT_RESERVED_STATUSES = { has: reservesOutput };
@@ -2696,4 +2697,49 @@ ipcMain.handle('mpv:quit',  () => {
   if (_mpvProc) { try { _mpvProc.kill(); } catch (ee) {} _mpvProc = null; }
   if (_mpvClient) { try { _mpvClient.destroy(); } catch (ee) {} _mpvClient = null; }
   destroyMpvWin();
+});
+
+/* ===== 字幕比對視窗 ===== */
+function openCompareWindow(data) {
+  if (compareWin && !compareWin.isDestroyed()) {
+    if (compareWin.isMinimized()) compareWin.restore();
+    compareWin.show();
+    compareWin.focus();
+    compareWin.webContents.send('compare:update-data', data);
+    return;
+  }
+  compareWin = new BrowserWindow({
+    width: 1200,
+    height: 700,
+    minWidth: 800,
+    minHeight: 500,
+    title: '字幕比對',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'compare-preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  });
+  compareWin.setMenu(null);
+  compareWin.loadFile(path.join(__dirname, 'compare.html'));
+  compareWin.webContents.once('did-finish-load', () => {
+    compareWin.webContents.send('compare:update-data', data);
+  });
+  compareWin.on('closed', () => {
+    compareWin = null;
+  });
+}
+
+ipcMain.on('open-compare-window', (event, data) => {
+  openCompareWindow(data);
+});
+
+ipcMain.on('compare:seek-main', (event, time) => {
+  safeWinSend(mainWin, 'seek-main', time);
+});
+ipcMain.on('sync-compare-window', (event, data) => {
+  if (compareWin && !compareWin.isDestroyed()) {
+    compareWin.webContents.send('compare:update-data', data);
+  }
 });

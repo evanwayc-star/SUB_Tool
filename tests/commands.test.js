@@ -74,7 +74,7 @@ describe('ctx 是有名字的一小組，不是雜物袋', () => {
   it('注入的成員維持在已知清單內', () => {
     const used = [...new Set([...commandsSrc.matchAll(/\bctx\.([a-zA-Z]+)/g)].map(m => m[1]))].sort();
     expect(used).toEqual([
-      'copySelectedStyle', 'doCopyTrack', 'importBrowserMediaFiles', 'importDesktopMediaFiles',
+      'copySelectedStyle', 'doCompareTrack', 'doCopyTrack', 'importBrowserMediaFiles', 'importDesktopMediaFiles',
       'onDurationKnown', 'openCacheDialog', 'pasteStyleToSelected', 'pickMediaFiles',
       'refreshMpvSubs', 'renderAll', 'renderListTrackSel', 'renderVideoSub', 'resetFirstLoad',
       'syncMpvPanel', 'takeScreenshot', 'toggleSafeFrame', 'toggleTimecodeWatermark', 'togglePanel',
