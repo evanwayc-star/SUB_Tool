@@ -100,10 +100,24 @@ const LAG_PROBE = tag => `(() => {
   return true;
 })()`;
 
+/* 等 app 出現。這樣可以【先】把量測跑起來，使用者再開 app——
+   否則要求「先開 app 再跑腳本」很容易忘，而且錯過載入那一段就白跑一次。 */
+async function waitForApp(maxMs = 10 * 60 * 1000) {
+  const until = Date.now() + maxMs;
+  let announced = false;
+  while (Date.now() < until) {
+    const pid = Number(process.argv[2]) || findMainPid();
+    if (Number.isFinite(pid) && pid) return pid;
+    if (!announced) { console.log('等待 SUB Tool 啟動…（請開啟 app 並載入影音）'); announced = true; }
+    await sleep(2000);
+  }
+  return NaN;
+}
+
 (async () => {
-  const pid = Number(process.argv[2]) || findMainPid();
+  const pid = await waitForApp();
   if (!Number.isFinite(pid) || !pid) {
-    console.error('找不到 SUB Tool 的主行程——app 有開著嗎？');
+    console.error('等不到 SUB Tool 的主行程。');
     process.exit(1);
   }
   console.log(`主行程 PID = ${pid}`);
