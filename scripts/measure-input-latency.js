@@ -80,6 +80,31 @@ const inPage = js => `(async () => {
   return await w.webContents.executeJavaScript(${JSON.stringify(js)}, true);
 })()`;
 
+/* 主行程側：攔 dialog.showOpenDialog，記錄呼叫與回傳的時間。
+
+   已經量到我們這一側從按下到交棒不到 5 毫秒（輸入延遲 1–4ms ＋ 點擊到呼叫
+   showOpenDialog 1ms），所以那一分鐘只可能在【showOpenDialog 裡面】。
+   resolved - enter 含「Windows 畫出視窗」與「使用者操作」兩段——
+   請使用者一看到視窗就按取消，這個差值就近似於視窗出現所花的時間。
+
+   這個 monkeypatch 掛在主行程上，只要 app 不重開就一直有效。 */
+const ARM_DIALOG = `(() => {
+  const d = require('electron').dialog;
+  if (!globalThis.__dlgArmed) {
+    const orig = d.showOpenDialog.bind(d);
+    d.showOpenDialog = (...a) => {
+      globalThis.__dlgLog.push({ phase: 'enter', t: Date.now() });
+      return orig(...a).then(r => {
+        globalThis.__dlgLog.push({ phase: 'resolved', t: Date.now(), canceled: r.canceled });
+        return r;
+      });
+    };
+    globalThis.__dlgArmed = true;
+  }
+  globalThis.__dlgLog = globalThis.__dlgLog || [];
+  return true;
+})()`;
+
 /* 三種事件都攔：pointerdown（最早）、mousedown、click。
    若 pointerdown 就已經遲到，代表事件在【送進頁面之前】就被延誤了；
    若 pointerdown 準時而 click 遲到，代表延誤發生在頁面內部。 */
@@ -134,6 +159,7 @@ async function waitForPid(prev) {
     try {
       main = await connect((await getJSON('http://127.0.0.1:9229/json/list'))[0]);
       await main.eval(inPage(ARM));
+      await main.eval(ARM_DIALOG);
     } catch (e) {
       console.error('掛上失敗，重試：', e.message);
       pid = 0; await sleep(2000); continue;
