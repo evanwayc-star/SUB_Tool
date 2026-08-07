@@ -64,6 +64,11 @@ const MEDIA_INTERNAL_FILES = ['src/media.js', 'src/loaders/media-loader.js'];
 
 const encapsulationFences = [selectionFence, mediaPrivateFence];
 
+/* scripts/ 裡【不是】Node 工具、而是送進頁面執行的載荷（貼進 DevTools，
+   或由 cdp-run.js 送過去）。它們要 browser globals，不是 node globals。
+   兩種東西住在同一個資料夾、檔名看不出差別，所以只能列白名單。 */
+const IN_PAGE_SCRIPTS = ['scripts/verify-v612-changes.js'];
+
 export default [
   {
     files: ['src/**/*.js'],
@@ -83,6 +88,42 @@ export default [
       ecmaVersion: 2023,
       sourceType: 'commonjs',
       globals: { ...globals.node },
+    },
+    rules: silentBugRules,
+  },
+  /* scripts/：發版與驗證用的 Node 工具（CDP 執行器、原生二進位檢查、診斷腳本…）。
+
+     【第三次踩同一個坑】——`electron/` 曾經 2,268 行零規則，`shared/` 建立時差點重演，
+     而 `scripts/` 一直到 v6.1.12 都【完全沒有被檢查】：`npm run lint` 的參數沒有它，
+     而且就算補上參數也還是空跑的，因為這份設定裡沒有能對上 scripts/ 的 files 區塊。
+     eslint flat config 對「沒有任何 block 命中」的檔案是套零規則，**不會警告**。
+
+     實際代價：診斷腳本一次編輯把兩個變數宣告吃掉了，`node --check` 過（語法沒錯），
+     lint 也過（根本沒在看），要等到真的執行才會 ReferenceError。
+
+     **新增頂層資料夾時，npm run lint 的參數與這裡的 files 區塊要【同時】補。**
+     補完請用突變確認：塞一個沒定義的名稱進去，lint 必須紅。 */
+  {
+    files: ['scripts/**/*.js'],
+    ignores: IN_PAGE_SCRIPTS,
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'commonjs',
+      globals: { ...globals.node },
+    },
+    rules: silentBugRules,
+  },
+  /* scripts/ 裡混了【兩種完全不同的東西】，而檔名看不出差別：
+       - Node 工具（cdp-run.js、verify-native-binaries.js…）→ node globals
+       - 送進頁面執行的載荷（貼進 DevTools，或由 cdp-run.js 送過去）→ browser globals
+     所以用白名單分開。新增「在頁面裡跑」的腳本時要回來加一行；
+     忘了加的後果是 lint 對它吐一串 window/document 的假錯誤。 */
+  {
+    files: IN_PAGE_SCRIPTS,
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'script',
+      globals: { ...globals.browser },
     },
     rules: silentBugRules,
   },

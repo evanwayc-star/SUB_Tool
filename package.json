@@ -16,7 +16,7 @@
     "native:prepare:mac": "node scripts/prepare-macos-native-binaries.js",
     "dist:mac:test": "npm run native:prepare:mac && node scripts/verify-native-binaries.js --platform darwin --arch arm64 && npm run build && electron-builder --mac --arm64 -c.mac.identity=null -c.mac.hardenedRuntime=false",
     "release:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-install.ps1",
-    "lint": "eslint src electron shared",
+    "lint": "eslint src electron shared scripts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

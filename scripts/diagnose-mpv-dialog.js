@@ -28,7 +28,7 @@
 ============================================================================== */
 const http = require('http');
 const WebSocket = require('ws');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const getJSON = url => new Promise((res, rej) => {
@@ -44,17 +44,27 @@ function connect(target) {
     const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
     let id = 0;
     const pend = new Map();
-    ws.on('open', () => resolve({
-      eval: expr => new Promise((res, rej) => {
-        const i = ++id;
-        pend.set(i, { res, rej });
-        ws.send(JSON.stringify({
-          id: i, method: 'Runtime.evaluate',
-          params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true },
-        }));
-      }),
-      close: () => { try { ws.close(); } catch (e) {} },
-    }));
+    /* 沒有這道逾時的話，連不上就是【無聲地卡住】——先前使用者跑到一半沒有任何輸出，
+       就是卡在這裡。寧可明確失敗也不要讓人盯著空白終端機。 */
+    const bail = setTimeout(() => {
+      try { ws.close(); } catch (e) {}
+      reject(new Error('連上 inspector 逾時（10 秒）。'
+        + '常見原因：已經有另一個偵錯工具佔著這個 session（DevTools、VS Code、或上一次沒關乾淨的執行）。'));
+    }, 10000);
+    ws.on('open', () => {
+      clearTimeout(bail);
+      resolve({
+        eval: expr => new Promise((res, rej) => {
+          const i = ++id;
+          pend.set(i, { res, rej });
+          ws.send(JSON.stringify({
+            id: i, method: 'Runtime.evaluate',
+            params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true },
+          }));
+        }),
+        close: () => { try { ws.close(); } catch (e) {} },
+      });
+    });
     ws.on('message', raw => {
       const m = JSON.parse(raw);
       if (!m.id || !pend.has(m.id)) return;
@@ -102,13 +112,17 @@ const VISIBLE_PART = `(() => {
   }, null, 1);
 })()`;
 
+/* 只找沒有 --type= 的那個，就是 Electron 的主行程。
+   用 execFileSync 傳【參數陣列】而不是拼一整條命令列：這段 PowerShell 裡有巢狀
+   引號，交給 shell 拼字串在不同殼層（PowerShell vs Git Bash）會被吃掉不同的地方，
+   結果是 PID 變成 0 而錯誤訊息完全看不出原因。 */
 function findMainPid() {
-  /* 只找沒有 --type= 的那個，就是 Electron 的主行程。 */
-  const out = execSync(
-    'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'SUB Tool.exe\'\\" | ' +
-    'Where-Object { $_.CommandLine -notmatch \'--type=\' } | Select-Object -First 1 -ExpandProperty ProcessId"',
-    { encoding: 'utf8' }).trim();
-  return Number(out);
+  const ps = "Get-CimInstance Win32_Process -Filter \"Name='SUB Tool.exe'\" | "
+    + "Where-Object { $_.CommandLine -notmatch '--type=' } | "
+    + 'Select-Object -First 1 -ExpandProperty ProcessId';
+  try {
+    return Number(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim());
+  } catch (e) { return NaN; }
 }
 
 (async () => {
