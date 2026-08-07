@@ -821,15 +821,43 @@ function markDialogOpen(tag) {
   _loopLag.reset();
 }
 
+/* 原生檔案對話框從呼叫到關閉花了多久。
+
+   ── 為什麼要常駐在程式碼裡，而不是外掛一支診斷腳本 ──
+   「按下開啟影音要等一分多鐘」這個症狀【只在啟動後第一次發生】。而外掛的探針
+   必須在 app 起來【之後】才掛得上去，等掛好時第一次往往已經過去了；就算趕上，
+   app 一重開探針又沒了。來回試了好幾輪都卡在這個時序上。
+   做進程式碼裡就沒有這個問題：啟動桌面版.bat 會重新 build，探針從第一刻就在。
+
+   ── 這個數字怎麼讀 ──
+   已經量到我們這一側從按下滑鼠到呼叫 showOpenDialog 總共不到 5 毫秒
+   （事件延遲 1–4ms ＋ 點擊到呼叫 1ms，後者用 event.timeStamp 量，不受節流影響）。
+   所以這裡量到的時間裡，扣掉使用者操作的部分就是【Windows 建立並畫出視窗】。
+   使用者一看到視窗就按取消時，這個數字近似於視窗出現所花的時間。
+
+   只在超過 3 秒時才印，正常使用完全安靜。 */
+async function timedDialog(tag, run) {
+  const t0 = Date.now();
+  try {
+    return await run();
+  } finally {
+    const ms = Date.now() - t0;
+    if (ms > 3000) {
+      console.warn(`[dialog] ${tag}：呼叫 showOpenDialog 到關閉共 ${ms}ms。`
+        + '（我們這一側到呼叫為止 <5ms，所以這段扣掉你的操作時間就是 Windows 畫視窗的時間）');
+    }
+  }
+}
+
 ipcMain.handle('dialog:openMedia', async () => {
   markDialogOpen('openMedia');
-  const r = await dialog.showOpenDialog(mainWin, {
+  const r = await timedDialog('開啟影音', () => dialog.showOpenDialog(mainWin, {
     title: '匯入影片或音訊檔', properties: ['openFile', 'multiSelections'],
     filters: [
       { name: '影音或圖片', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'mxf', 'avi', 'm2ts', 'mts', 'ts', 'wmv', 'webm', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'aif', 'aiff', 'jpg', 'jpeg', 'png'] },
       { name: '全部', extensions: ['*'] }
     ]
-  });
+  }));
   if (r.canceled) return null;
   r.filePaths.forEach(p => {
     fileAuthority.grantTrustedFile(p, { read: true, write: false });
@@ -921,10 +949,10 @@ ipcMain.handle('project:clearRecent', () => { saveRecentProjects([]); return tru
 
 ipcMain.handle('dialog:openProject', async () => {
   markDialogOpen('openProject');
-  const r = await dialog.showOpenDialog(mainWin, {
+  const r = await timedDialog('開啟專案', () => dialog.showOpenDialog(mainWin, {
     title: '開啟專案', properties: ['openFile'],
     filters: [{ name: 'SUB Tool 專案', extensions: ['subtool', 'json'] }]
-  });
+  }));
   if (r.canceled) return null;
   const buf = fs.readFileSync(r.filePaths[0]);
   grantTrustedProjectFile(r.filePaths[0], buf);
