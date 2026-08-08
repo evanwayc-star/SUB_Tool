@@ -1,5 +1,6 @@
-const { isRetryable, isLiveWork } = require('./export-job-status');
 'use strict';
+
+const { JOB_STATUS, canTransition, isRetryable, isLiveWork } = require('./export-job-status');
 
 /* 匯出佇列唯一的順序來源。這裡不保存第二份「可執行清單」：監控畫面、持久化 order
    與 scheduler 都從同一個有序 collection 讀取，避免重試或拖曳後兩種順序分歧。 */
@@ -46,7 +47,7 @@ class ExportQueueState {
   }
 
   nextQueued() {
-    return this._jobs.find(job => job.status === 'queued') || null;
+    return this._jobs.find(job => job.status === JOB_STATUS.QUEUED) || null;
   }
 
   /* 重試只改同一個 collection 內的工作狀態，不重新插入另一份排程陣列；因此
@@ -54,11 +55,13 @@ class ExportQueueState {
   retry(jobId) {
     const job = this.get(jobId);
     if (!job || !isRetryable(job.status)) return null;
-    job.status = 'queued';
-    job.pct = 0;
-    job.elapsedMs = 0;
-    job.etaS = null;
-    job.errorMsg = null;
+    const queued = this.setStatus(jobId, JOB_STATUS.QUEUED, {
+      pct: 0,
+      elapsedMs: 0,
+      etaS: null,
+      errorMsg: null,
+    });
+    if (!queued) return null;
     delete job.completedAt;
     return job;
   }
@@ -66,6 +69,7 @@ class ExportQueueState {
   setStatus(jobId, status, fields = null) {
     const job = this.get(jobId);
     if (!job || typeof status !== 'string' || !status) return null;
+    if (job.status !== status && !canTransition(job.status, status)) return null;
     job.status = status;
     if (fields && typeof fields === 'object') Object.assign(job, fields);
     return job;
@@ -74,8 +78,8 @@ class ExportQueueState {
   stop(jobId) {
     const job = this.get(jobId);
     if (!job) return null;
-    if (job.status === 'queued') return this.setStatus(jobId, 'stopped');
-    if (job.status === 'running') return this.setStatus(jobId, 'stopping');
+    if (job.status === JOB_STATUS.QUEUED) return this.setStatus(jobId, JOB_STATUS.STOPPED);
+    if (job.status === JOB_STATUS.RUNNING) return this.setStatus(jobId, JOB_STATUS.STOPPING);
     return null;
   }
 

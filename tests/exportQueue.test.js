@@ -35,7 +35,13 @@ function fakeState() {
     add: j => { jobs.push(j); },
     get: id => jobs.find(j => j.id === id),
     remove: id => { const i = jobs.findIndex(j => j.id === id); return i < 0 ? null : jobs.splice(i, 1)[0]; },
-    setStatus: (id, s) => { const j = jobs.find(x => x.id === id); if (j) j.status = s; return j; },
+    setStatus: (id, s, fields) => {
+      const j = jobs.find(x => x.id === id);
+      if (!j) return null;
+      j.status = s;
+      if (fields && typeof fields === 'object') Object.assign(j, fields);
+      return j;
+    },
     nextQueued: () => jobs.find(j => j.status === 'queued') || null,
     statusSnapshot: p => ({ paused: p, total: jobs.length }),
     liveWorkCount: () => jobs.filter(j => LIVE.has(j.status)).length,

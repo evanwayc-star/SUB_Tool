@@ -17,6 +17,13 @@ function job(id, status = 'queued', extra = {}) {
 }
 
 describe('匯出佇列的唯一順序狀態', () => {
+  it('拒絕非法狀態轉移，尤其完成工作不可回到 running', () => {
+    const state = new ExportQueueState([job('completed', 'done')]);
+
+    expect(state.setStatus('completed', 'running')).toBeNull();
+    expect(state.get('completed').status).toBe('done');
+  });
+
   it('恢復後用同一個有序 collection 同時提供監控順序、下一份工作與狀態摘要', () => {
     const state = new ExportQueueState();
     state.load([

@@ -62,7 +62,6 @@ const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
 let _currentIngestProc = null; // S1: 追蹤目前執行中的 ingest ffmpeg，換檔時強制 kill
-const activeJobs = new Map();
 
 /* S1：唯一的 IPC 檔案能力權威。
    renderer 路徑不會因 fs:fileURL／stat 等查詢被靜默升格；只接受原生對話框、OS 開檔、
@@ -459,7 +458,7 @@ function createWindow() {
     if (!(u.startsWith('file:') || u.startsWith('http://localhost:8777'))) ev.preventDefault();
   });
   win.webContents.once('did-finish-load', () => {
-    try { QueueManager.notifyChanged(); } catch (e) {}
+    try { QueueManager.refreshViews(); } catch (e) {}
   });
   if (process.argv.includes('--dev')) {
     win.loadURL('http://localhost:8777'); // 需先執行 npm run dev
@@ -505,7 +504,7 @@ ipcMain.handle('app:close', () => {
      before-quit → prepareForShutdown()，把執行中的 ffmpeg 全部停掉並清掉半成品。
      使用者按的是「關閉編輯視窗」，不是「放棄這幾個小時的轉檔」。
      改成把監控視窗叫出來、主視窗收起來，轉檔繼續跑，程式也還活著。 */
-  if (_queueState.liveWorkCount() > 0) {
+  if (QueueManager.liveWorkCount() > 0) {
     openQueueWindow();
     return hideMainWindow();
   }
@@ -695,11 +694,11 @@ ipcMain.handle('app:showSourceInFolder', async (e, p) => {
 });
 ipcMain.handle('ffmpeg:stopExport', (event, requestedJobId) => {
   if (typeof requestedJobId === 'string') {
-    return activeJobs.has(requestedJobId) ? stopQueueJob(requestedJobId) : false;
+    return QueueManager.activeJob(requestedJobId) ? QueueManager.stopJob(requestedJobId) : false;
   }
-  const activeJobIds = Array.from(activeJobs.keys());
+  const activeJobIds = QueueManager.activeJobIds();
   const latestJobId = activeJobIds[activeJobIds.length - 1];
-  return latestJobId ? stopQueueJob(latestJobId) : false;
+  return latestJobId ? QueueManager.stopJob(latestJobId) : false;
 });
 ipcMain.handle('app:status', () => ({
   isDesktop: true, ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE,
@@ -1044,7 +1043,7 @@ function _findExportTimecodeFont() {
 let EXPORT_QUEUE_DIR = null;
 let queueWin = null;
 let compareWin = null;
-const _queueState = new ExportQueueState();
+let QueueManager = null;
 /* 分類的唯一來源在 export-job-status.js */
 const OUTPUT_RESERVED_STATUSES = { has: reservesOutput };
 
@@ -1061,7 +1060,7 @@ const _admission = createExportAdmission({
   expectedExtensionFor: expectedExportExtension,
   outputKeyFor: outPath => ExportLease.outputKey(outPath),
   mergeSourcePaths: (payload, sourcePaths) => QueueStore.mergeSourcePaths(payload, sourcePaths),
-  currentJobs: () => _queueState.jobs(),
+  currentJobs: () => QueueManager ? QueueManager.jobs() : [],
   reservesOutput: status => OUTPUT_RESERVED_STATUSES.has(status),
   canReadSource: file => fileAuthority.canRead(file),
   canWriteDelivery: file => fileAuthority.canWriteDelivery(file),
@@ -1071,7 +1070,6 @@ const _admission = createExportAdmission({
 /* 以下維持原本的名字，呼叫端不動——它們現在只是轉呼叫。 */
 const queueOutputKey = job => _admission.outputKey(job);
 const assertQueueOutputFormat = job => _admission.assertOutputFormat(job);
-const assertQueueOutputAvailable = (job, excludeId) => _admission.assertOutputAvailable(job, excludeId);
 /* 匯出 payload 是 renderer 的資料快照，不能因為進了佇列就自動升格成檔案能力。
    sourcePaths 在 enqueue 時凍結，重啟時則只從 app 自己持久化的 job snapshot 重新授予
    精確檔案能力；任何後來摻入 payload 的路徑都仍會被這裡拒絕。 */
@@ -1123,7 +1121,7 @@ function openQueueWindow() {
   queueWin.on('close', (e) => {
     if (_isAppQuitting || _allowQueueWindowClose) return;
     if (!queueWindowCloseEndsApp()) return;
-    const liveCount = _queueState.liveWorkCount();
+    const liveCount = QueueManager.liveWorkCount();
     if (liveCount === 0) return;
     e.preventDefault();
     const win = queueWin;
@@ -1172,13 +1170,14 @@ function queueStatusSnapshot() {
    現在佇列【自己擁有】那些狀態，這裡只留接線：
    視窗生命週期與 _runJobLogic（spawn／log／進度回報）仍是 main.js 的職責，
    由 onChanged / runJob 注入。 */
-const QueueManager = createExportQueue({
+QueueManager = createExportQueue({
   dir: () => EXPORT_QUEUE_DIR,
-  state: _queueState,
+  createState: () => new ExportQueueState(),
   store: QueueStore,
   history: QueueHistory,
   JOB_STATUS,
   isLiveWork,
+  isRetryable,
   reservesOutput,
   admission: _admission,
   grantPersistedCapabilities: grantPersistedQueueJobCapabilities,
@@ -1186,13 +1185,13 @@ const QueueManager = createExportQueue({
   canWriteDelivery: file => fileAuthority.canWriteDelivery(file),
   isFile: p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } },
   runJob: job => _runJobLogic(job),
+  prepareDeliveryUpdate: prepareQueueDeliveryUpdate,
   onChanged: () => {
     safeWinSend(mainWin, 'queue:update');
     safeWinSend(mainWin, 'queue-status', queueStatusSnapshot());
     if (queueWin && !queueWin.isDestroyed()) safeWinSend(queueWin, 'queue:update');
   },
   onJobFailed: () => openQueueWindow(), // 失敗時把監控視窗叫出來
-  activeJobs,
 });
 
 ipcMain.handle('queue:getAll', () => ({
@@ -1216,96 +1215,24 @@ ipcMain.handle('queue:setConcurrency', (e, c) => {
   QueueManager.setConcurrency(c);
 });
 
-function stopQueueJob(jobId) {
-  const job = _queueState.get(jobId);
-  if (!job) return false;
-  if (job.status === 'running') {
-    const active = activeJobs.get(jobId);
-    if (active && active.p) {
-      active.stopped = true;
-      if (typeof active.stop === 'function') {
-        try { active.stop('user-stop'); } catch (err) {}
-      } else {
-        try { active.p.kill(); } catch (err) {}
-      }
-      _queueState.setStatus(jobId, 'stopping');
-    } else {
-      return false;
-    }
-  } else if (job.status === 'queued') {
-    _queueState.stop(jobId);
-  } else {
-    return false;
-  }
-  try { QueueManager.persistJob(job); } catch (e) {
-    console.error(`[Queue] 無法保存工作 ${job.id} 的停止狀態：`, e);
-  }
-  QueueManager.notifyChanged();
-  return true;
-}
-
 ipcMain.handle('queue:stopJob', (e, jobId) => {
-  return stopQueueJob(jobId);
+  return QueueManager.stopJob(jobId);
 });
 
 ipcMain.handle('queue:retryJob', (e, jobId) => {
-  if (QueueManager.shuttingDown) return false;
-  const job = _queueState.get(jobId);
-  if (job && isRetryable(job.status)) {
-    const previousStatus = job.status;
-    const previousError = job.errorMsg;
-    if (!QueueManager.validateSources(job)) {
-      QueueManager.notifyChanged();
-      return;
-    }
-    try {
-      assertQueueOutputAvailable(job);
-    } catch (error) {
-      job.errorMsg = error.message || String(error);
-      QueueManager.notifyChanged();
-      return false;
-    }
-    const retried = _queueState.retry(jobId);
-    if (!retried) return false;
-    try {
-      QueueManager.persistJob(job);
-    } catch (e) {
-      _queueState.setStatus(jobId, previousStatus, {
-        errorMsg: previousError || `無法保存重試工作：${e.message || e}`,
-      });
-      QueueManager.notifyChanged();
-      return false;
-    }
-    QueueManager.notifyChanged();
-    QueueManager.processQueue();
-    return true;
-  }
-  return false;
+  return QueueManager.retryJob(jobId);
 });
 
 ipcMain.handle('queue:clearJob', (e, jobId) => {
-  const job = _queueState.remove(jobId);
-  QueueManager.removeArtifacts(job);
-  QueueManager.forgetHistory(jobId); // 否則清掉的紀錄下次啟動又會回來
-  QueueManager.notifyChanged();
+  return QueueManager.clearJob(jobId);
 });
 
 ipcMain.handle('queue:clearCompleted', () => {
-  const toClear = _queueState.jobs().filter(job => job.status === 'done').map(job => job.id);
-  toClear.forEach(id => {
-    const job = _queueState.remove(id);
-    QueueManager.removeArtifacts(job);
-  });
-  try { QueueHistory.clear(EXPORT_QUEUE_DIR); } catch (error) {
-    console.error('[Queue] 無法清除完成紀錄：', error);
-  }
-  QueueManager.notifyChanged();
+  return QueueManager.clearCompleted();
 });
 
 ipcMain.handle('queue:reorderJob', (e, jobId, newIndex) => {
-  if (!_queueState.reorder(jobId, newIndex)) return;
-  QueueManager.persistAll();
-  QueueManager.notifyChanged();
+  return QueueManager.reorderJob(jobId, newIndex);
 });
 
 /* 改變【還沒開始轉檔】的工作的交付格式。
@@ -1318,7 +1245,10 @@ ipcMain.handle('queue:reorderJob', (e, jobId, newIndex) => {
    format / isWav / isPro / audioPlan / timecodeWatermark 的，不是在入列時凍結的。
    （TC 浮水印在轉成 WAV 時會自動變成 null，因為那條路徑本來就寫 `isWav ? null : …`。） */
 ipcMain.handle('queue:updateDelivery', (e, jobId, patch) => {
-  const job = _queueState.get(jobId);
+  return QueueManager.updateDelivery(jobId, patch);
+});
+
+function prepareQueueDeliveryUpdate(job, patch) {
   if (!job) throw new Error('找不到這份匯出工作');
   if (job.status !== JOB_STATUS.QUEUED) throw new Error('只有等待中的工作可以修改交付設定');
 
@@ -1371,18 +1301,15 @@ ipcMain.handle('queue:updateDelivery', (e, jobId, patch) => {
   const nextPayload = { ...p, format, outPath: newPath, width: w, height: h, targetH, videoKbps, canvasW, canvasH, timecodeWatermark };
   const candidate = { ...job, payload: nextPayload };
   _admission.assertOutputFormat(candidate);
-  _admission.assertOutputAvailable(candidate, jobId); // 排除自己；擋同路徑撞車
-  if (newPath !== oldPath) {
-    /* 同資料夾、同主檔名，只換副檔名——舊路徑既然已獲授權，新路徑就在同一個
-       已授權的範圍內。仍明確授予，避免只授了精確檔名時漏掉。 */
-    fileAuthority.grantDeliveryFile(newPath);
-  }
-
-  job.payload = nextPayload;
-  QueueManager.persistJob(job);
-  QueueManager.notifyChanged();
-  return { format, outPath: newPath, width: w, height: h, targetH, videoKbps, burnTimecode: !!timecodeWatermark };
-});
+  _admission.assertOutputAvailable(candidate, job.id); // 排除自己；擋同路徑撞車
+  return {
+    payload: nextPayload,
+    result: { format, outPath: newPath, width: w, height: h, targetH, videoKbps, burnTimecode: !!timecodeWatermark },
+    /* 同資料夾、同主檔名，只換副檔名。能力只在 job 快照成功落盤後才擴張，
+       失敗時不留下 renderer 看不到的半份授權。 */
+    onCommitted: newPath !== oldPath ? () => fileAuthority.grantDeliveryFile(newPath) : undefined,
+  };
+}
 
 ipcMain.handle('queue:openMonitor', () => {
   openQueueWindow();
@@ -1457,28 +1384,10 @@ async function _runJobLogic(job) {
   
   const fallbackSender = mainWin && !mainWin.isDestroyed() ? mainWin.webContents : null;
   const dispatch = (evt, data) => {
-    // [v5.4.4] Update local job state for queue window and broadcast updates
-    // 以往進度直接從 runFF 送到前端，導致佇列視窗無法同步。現在必須經由這裡透過 onProgress 攔截，
-    // 以確保 QueueManager 能收到進度，並觸發 QueueManager.notifyChanged()。
+    // 進度與 terminal transition 都由 QueueManager 擁有；runJob adapter 只轉送。
+    // 這避免 main.js 和 queue 各自改 job.status，造成合法狀態機被繞過。
     if (evt === 'task-progress') {
-      if (data.done) {
-        job.status = JOB_STATUS.DONE;
-        // 終端工作不跨重啟保存；這個時間只代表本次 ffmpeg 真正完成的當下，
-        // 不可由監控視窗開啟／重繪時的現在時間推算。
-        if (!Number.isFinite(job.completedAt) || job.completedAt <= 0) job.completedAt = Date.now();
-      }
-      else if (data.error) {
-        job.status = JOB_STATUS.FAILED;
-        job.errorMsg = data.errorMsg;
-        openQueueWindow(); // pop up on error
-      }
-      else if (data.stopped) job.status = JOB_STATUS.STOPPED;
-      else {
-        job.pct = data.pct;
-        job.elapsedMs = data.elapsedMs;
-        job.etaS = data.etaS;
-      }
-      QueueManager.notifyChanged();
+      QueueManager.reportProgress(jobId, data);
     }
     if (sender) safeSend(sender, evt, data);
     else if (fallbackSender) safeSend(fallbackSender, evt, data);
@@ -1536,7 +1445,7 @@ async function _runJobLogic(job) {
         await runFF(args, { duration: D, jobId, label, outPath,
           onProgress: data => dispatch('task-progress', data),
           onProcess: controller => {
-            activeJobs.set(jobId, {
+            QueueManager.registerActiveJob(jobId, {
               controller,
               p: controller.process,
               stop: controller.stop,
@@ -1546,7 +1455,7 @@ async function _runJobLogic(job) {
             });
           }
         });
-        activeJobs.delete(jobId);
+        QueueManager.clearActiveJob(jobId);
         const r = { outPath, encoder: plan.plannedEncoder, gpu: false, elapsedMs: Date.now() - t0, videoKbps: null, audioChannels: plan.audioChannels };
         dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
         return;
@@ -1558,7 +1467,7 @@ async function _runJobLogic(job) {
         const rr = await runFF(args, { duration: D, jobId, label, cwd: TMP, outPath,
           onProgress: data => dispatch('task-progress', data),
           onProcess: controller => {
-            activeJobs.set(jobId, {
+            QueueManager.registerActiveJob(jobId, {
               id: jobId,
               controller,
               p: controller.process,
@@ -1578,7 +1487,7 @@ async function _runJobLogic(job) {
     if (assName) { try { fs.unlinkSync(path.join(TMP, assName)); } catch (e2) {} }
   }
   // 回傳 ffmpeg 實際使用的編碼器與耗時，供 renderer 顯示「這次真的用了 GPU 沒有」
-      activeJobs.delete(jobId);
+      QueueManager.clearActiveJob(jobId);
       const r = {
         outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder),
         elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps,
@@ -1587,10 +1496,10 @@ async function _runJobLogic(job) {
       };
       dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
     } catch (err) {
-      const active = activeJobs.get(jobId);
+      const active = QueueManager.activeJob(jobId);
       const wasShutdown = !!active?.shutdown;
       const wasStopped = !!active?.stopped;
-      activeJobs.delete(jobId);
+      QueueManager.clearActiveJob(jobId);
       if (wasShutdown) {
          // 關閉程式時 QueueManager 已把狀態退回 queued；半成品與 lease 只由 watchdog
          // 在確認 ffmpeg close 後處理，主程序不可搶先 unlink。

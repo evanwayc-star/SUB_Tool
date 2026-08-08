@@ -29,12 +29,14 @@
 /**
  * @param {object} deps 全部由呼叫端注入
  * @param {()=>string|null} deps.dir            佇列資料夾（app ready 後才知道）
- * @param {object} deps.state                   ExportQueueState 實例
+ * @param {object} [deps.state]                 ExportQueueState 實例（測試可注入）
+ * @param {()=>object} [deps.createState]       正式執行時建立狀態的工廠
  * @param {object} deps.store                   QueueStore
  * @param {object} deps.history                 QueueHistory
  * @param {object} deps.JOB_STATUS
  * @param {(s:string)=>boolean} deps.isLiveWork
  * @param {(s:string)=>boolean} deps.reservesOutput
+ * @param {(s:string)=>boolean} [deps.isRetryable]
  * @param {object} deps.admission               export-admission 實例
  * @param {(job:object)=>void} deps.grantPersistedCapabilities  恢復時重新授予檔案能力
  * @param {(p:string)=>boolean} deps.canReadSource
@@ -43,14 +45,18 @@
  * @param {(job:object)=>Promise} deps.runJob   實際跑 ffmpeg
  * @param {()=>void} deps.onChanged             狀態變動 → 廣播給視窗
  * @param {(job:object)=>void} [deps.onJobFailed]
- * @param {Map} deps.activeJobs                 執行中的 ffmpeg 程序表（關機時要收）
+ * @param {Map} [deps.activeJobs]               測試可注入的執行中程序表
+ * @param {(job:object, patch:object)=>{payload:object,result:object,onCommitted?:()=>void}} [deps.prepareDeliveryUpdate]
  */
 function createExportQueue(deps) {
   const {
-    dir, state, store, history, JOB_STATUS, isLiveWork, reservesOutput,
+    dir, store, history, JOB_STATUS, isLiveWork, reservesOutput,
     admission, grantPersistedCapabilities, canReadSource, canWriteDelivery,
-    isFile, runJob, onChanged, onJobFailed, activeJobs,
+    isFile, runJob, onChanged, onJobFailed, isRetryable, prepareDeliveryUpdate,
   } = deps;
+  const state = deps.state || deps.createState?.();
+  if (!state) throw new TypeError('匯出佇列需要 ExportQueueState');
+  const activeJobs = deps.activeJobs || new Map();
 
   const log = (msg, err) => console.error(`[Queue] ${msg}`, err ?? '');
 
@@ -58,6 +64,32 @@ function createExportQueue(deps) {
   let paused = false;
   let concurrency = 1;
   let activeCount = 0;
+
+  /* 所有會改 job 的 IPC 操作都先走這裡：先保留完整快照、再持久化，只有成功後
+     才廣播和排程。這避免「畫面顯示 queued、磁碟仍是 failed」這種半套交易。 */
+  const cloneJob = job => {
+    if (typeof structuredClone === 'function') return structuredClone(job);
+    return JSON.parse(JSON.stringify(job));
+  };
+  const restoreJob = (job, snapshot) => {
+    for (const key of Object.keys(job)) delete job[key];
+    Object.assign(job, snapshot);
+  };
+  const mutatePersistedJob = (jobId, mutate) => {
+    const job = state.get(jobId);
+    if (!job) return { ok: false, job: null, error: null };
+    const snapshot = cloneJob(job);
+    let changed;
+    try { changed = mutate(job); } catch (error) { return { ok: false, job, error }; }
+    if (!changed) return { ok: false, job, error: null };
+    try {
+      queue.persistJob(job);
+      return { ok: true, job, error: null };
+    } catch (error) {
+      restoreJob(job, snapshot);
+      return { ok: false, job, error };
+    }
+  };
 
   const queue = {
     shuttingDown: false,
@@ -71,10 +103,17 @@ function createExportQueue(deps) {
     statusSnapshot() { return state.statusSnapshot(paused); },
     liveWorkCount() { return state.liveWorkCount(); },
 
-    /* 狀態變動時通知外界（主行程用它廣播給主視窗與監控視窗）。
-       佇列內部自己會在該通知的時候呼叫；這個方法是給【外部改了 job 之後】用的，
-       例如 IPC 直接改交付設定、停止某個工作。 */
-    notifyChanged() { onChanged(); },
+    /* 這些只讀／程序表入口讓 runJob adapter 不必碰 main.js 的第二份 Map。 */
+    activeJob(jobId) { return activeJobs.get(jobId) || null; },
+    activeJobIds() { return Array.from(activeJobs.keys()); },
+    registerActiveJob(jobId, active) {
+      if (!state.get(jobId) || !active) return false;
+      activeJobs.set(jobId, active);
+      return true;
+    },
+    clearActiveJob(jobId) { return activeJobs.delete(jobId); },
+    /* 視窗剛完成載入時重送既有快照；這不是狀態變動，不能被 IPC mutation 濫用。 */
+    refreshViews() { onChanged(); },
 
     /* 准入檢查的轉呼叫。主行程在【入列以外】的地方也要跑它
        （送出前的授權檢查、_runJobLogic 開跑前再確認一次）。 */
@@ -136,17 +175,10 @@ function createExportQueue(deps) {
       try { store.removeLogFile(d, job.id); } catch (e) { log(`無法刪除工作 ${job.id} 的失敗記錄：`, e); }
     },
 
-    remove(jobId) { return state.remove(jobId); },
-    reorder(jobId, index) { return state.reorder(jobId, index); },
-    setStatus(jobId, s) { return state.setStatus(jobId, s); },
-    retry(jobId) { return state.retry(jobId); },
-    stop(jobId) { return state.stop(jobId); },
-
     /* ── 執行前的來源檢查 ───────────────────────────────────────────── */
-    validateSources(job) {
+    inspectSources(job) {
       const d = dir();
       const sourcePaths = admission.sourcePathsOf(job);
-      job.sourcePaths = sourcePaths;
       const missing = sourcePaths.filter(sourcePath => {
         try {
           if (!canReadSource(sourcePath)) return true;
@@ -161,23 +193,170 @@ function createExportQueue(deps) {
           if (!assPath || !isFile(assPath)) missing.push(assPath || job.assRef);
         } catch (e) { missing.push(assPath || job.assRef); }
       }
-      const fail = (status, message) => {
-        job.status = status;
-        job.errorMsg = message;
-        try { this.persistJob(job); } catch (e) { log(`無法保存工作 ${job.id} 的失敗狀態：`, e); }
-        return false;
-      };
       if (missing.length) {
-        return fail(JOB_STATUS.MISSING_SOURCE, `找不到或未授權的來源檔：\n${missing.join('\n')}`);
+        return {
+          ok: false, sourcePaths, status: JOB_STATUS.MISSING_SOURCE,
+          errorMsg: `找不到或未授權的來源檔：\n${missing.join('\n')}`,
+        };
       }
       try {
         admission.assertOutputFormat(job);
       } catch (error) {
-        return fail(JOB_STATUS.FAILED, error.message || String(error));
+        return { ok: false, sourcePaths, status: JOB_STATUS.FAILED, errorMsg: error.message || String(error) };
       }
       if (!canWriteDelivery(job?.payload?.outPath)) {
-        return fail(JOB_STATUS.FAILED, `匯出輸出位置未經授權：${job?.payload?.outPath || ''}`);
+        return {
+          ok: false, sourcePaths, status: JOB_STATUS.FAILED,
+          errorMsg: `匯出輸出位置未經授權：${job?.payload?.outPath || ''}`,
+        };
       }
+      return { ok: true, sourcePaths, status: null, errorMsg: null };
+    },
+
+    /* 僅供 scheduler／restore 使用。retry 只檢查而不改終態，避免失敗重試把原本
+       的 failed/missing-source 改成另一個錯誤，使用者就看不到真正原因。 */
+    validateSources(job) {
+      const inspected = this.inspectSources(job);
+      if (inspected.ok) {
+        job.sourcePaths = inspected.sourcePaths;
+        return true;
+      }
+      const committed = mutatePersistedJob(job.id, current => {
+        current.sourcePaths = inspected.sourcePaths;
+        return state.setStatus(current.id, inspected.status, { errorMsg: inspected.errorMsg });
+      });
+      if (!committed.ok && committed.error) log(`無法保存工作 ${job.id} 的來源檢查結果：`, committed.error);
+      return false;
+    },
+
+    /* ── 對外的工作交易 ───────────────────────────────────────────── */
+    retryJob(jobId) {
+      if (this.shuttingDown) return false;
+      const job = state.get(jobId);
+      if (!job || typeof isRetryable !== 'function' || !isRetryable(job.status)) return false;
+      const inspected = this.inspectSources(job);
+      if (!inspected.ok) return false;
+      try { admission.assertOutputAvailable(job); } catch (error) { return false; }
+      const committed = mutatePersistedJob(jobId, current => {
+        current.sourcePaths = inspected.sourcePaths;
+        return state.retry(current.id);
+      });
+      if (!committed.ok) {
+        if (committed.error) log(`無法保存重試工作 ${jobId}：`, committed.error);
+        return false;
+      }
+      onChanged();
+      this.processQueue();
+      return true;
+    },
+
+    stopJob(jobId) {
+      const job = state.get(jobId);
+      if (!job) return false;
+      if (job.status === JOB_STATUS.QUEUED) {
+        const committed = mutatePersistedJob(jobId, current => state.stop(current.id));
+        if (!committed.ok) {
+          if (committed.error) log(`無法保存工作 ${jobId} 的停止狀態：`, committed.error);
+          return false;
+        }
+        onChanged();
+        this.processQueue();
+        return true;
+      }
+      if (job.status !== JOB_STATUS.RUNNING) return false;
+      const active = activeJobs.get(jobId);
+      if (!active?.p) return false;
+      const committed = mutatePersistedJob(jobId, current => state.stop(current.id));
+      if (!committed.ok) {
+        if (committed.error) log(`無法保存工作 ${jobId} 的停止狀態：`, committed.error);
+        return false;
+      }
+      active.stopped = true;
+      try {
+        if (typeof active.stop === 'function') active.stop('user-stop');
+        else active.p.kill();
+      } catch (error) {
+        log(`無法停止工作 ${jobId} 的 ffmpeg：`, error);
+      }
+      onChanged();
+      return true;
+    },
+
+    reorderJob(jobId, index) {
+      const previous = state.jobs();
+      if (!state.reorder(jobId, index)) return false;
+      try { this.persistAll(); } catch (error) {
+        state.load(previous);
+        /* QueueStore 的每個 job snapshot 都是單檔原子寫入；若中途某一檔失敗，
+           立即把已寫入的前段補回原本順序。補償也失敗時不廣播，磁碟恢復時仍以
+           最後成功快照為準，不會讓畫面先宣稱重排完成。 */
+        try { this.persistAll(); } catch (rollbackError) {
+          log(`無法回復工作 ${jobId} 的原本順序：`, rollbackError);
+        }
+        log(`無法保存工作 ${jobId} 的新順序：`, error);
+        return false;
+      }
+      onChanged();
+      return true;
+    },
+
+    clearJob(jobId) {
+      const job = state.get(jobId);
+      if (!job || isLiveWork(job.status)) return false;
+      this.removeArtifacts(job);
+      this.forgetHistory(jobId);
+      state.remove(jobId);
+      onChanged();
+      return true;
+    },
+
+    clearCompleted() {
+      const completed = state.jobs().filter(job => job.status === JOB_STATUS.DONE);
+      for (const job of completed) {
+        this.removeArtifacts(job);
+        state.remove(job.id);
+      }
+      try { history.clear?.(dir()); } catch (error) { log('無法清除完成紀錄：', error); }
+      if (completed.length) onChanged();
+      return completed.length;
+    },
+
+    updateDelivery(jobId, patch) {
+      const job = state.get(jobId);
+      if (!job) throw new Error('找不到這份匯出工作');
+      if (job.status !== JOB_STATUS.QUEUED) throw new Error('只有等待中的工作可以修改交付設定');
+      if (typeof prepareDeliveryUpdate !== 'function') throw new Error('匯出佇列未設定交付更新規則');
+      const prepared = prepareDeliveryUpdate(job, patch);
+      if (!prepared || !prepared.payload || !prepared.result) throw new Error('交付更新規則回傳無效結果');
+      const committed = mutatePersistedJob(jobId, current => {
+        current.payload = prepared.payload;
+        return true;
+      });
+      if (!committed.ok) {
+        throw committed.error || new Error('無法保存交付設定');
+      }
+      try { prepared.onCommitted?.(); } catch (error) { log(`無法授予工作 ${jobId} 的交付能力：`, error); }
+      onChanged();
+      return prepared.result;
+    },
+
+    reportProgress(jobId, data = {}) {
+      const job = state.get(jobId);
+      if (!job) return false;
+      if (data.done) {
+        if (!state.setStatus(jobId, JOB_STATUS.DONE)) return false;
+        if (!Number.isFinite(job.completedAt) || job.completedAt <= 0) job.completedAt = Date.now();
+      } else if (data.error) {
+        if (!state.setStatus(jobId, JOB_STATUS.FAILED, { errorMsg: data.errorMsg })) return false;
+        if (onJobFailed) { try { onJobFailed(job); } catch (error) {} }
+      } else if (data.stopped) {
+        if (!state.setStatus(jobId, JOB_STATUS.STOPPED)) return false;
+      } else {
+        job.pct = data.pct;
+        job.elapsedMs = data.elapsedMs;
+        job.etaS = data.etaS;
+      }
+      onChanged();
       return true;
     },
 
@@ -197,8 +376,7 @@ function createExportQueue(deps) {
           try {
             admission.assertOutputAvailable(job);
           } catch (error) {
-            job.status = JOB_STATUS.FAILED;
-            job.errorMsg = error.message || String(error);
+            state.setStatus(job.id, JOB_STATUS.FAILED, { errorMsg: error.message || String(error) });
           }
         }
       }
@@ -232,11 +410,12 @@ function createExportQueue(deps) {
       for (const job of state.jobs()) {
         if (!isLiveWork(job.status)) continue;
         if (job.status === JOB_STATUS.RUNNING) {
-          job.status = JOB_STATUS.QUEUED;
-          job.pct = 0;
-          job.elapsedMs = 0;
-          job.etaS = null;
-          job.errorMsg = null;
+          state.setStatus(job.id, JOB_STATUS.QUEUED, {
+            pct: 0,
+            elapsedMs: 0,
+            etaS: null,
+            errorMsg: null,
+          });
         }
         const active = activeJobs.get(job.id);
         if (!active?.p) continue;
@@ -279,8 +458,11 @@ function createExportQueue(deps) {
       job.sourcePaths = store.collectSourcePaths(job.payload);
       admission.assertJobAdmissible(job);
       admission.assertOutputAvailable(job);
-      store.persistJob(d, job, state.jobs().length);
       state.add(job);
+      try { store.persistJob(d, job, state.jobs().length - 1); } catch (error) {
+        state.remove(job.id);
+        throw error;
+      }
       onChanged();
       this.processQueue();
     },
@@ -291,15 +473,21 @@ function createExportQueue(deps) {
         const job = state.nextQueued();
         if (!job) break;
         if (!this.validateSources(job)) {
-          onChanged();
-          continue;
+          /* 來源檢查成功寫成 terminal error 後才廣播；持久化失敗則保持 queued
+             並停止本輪，避免同一份工作在 while 裡無限重試。 */
+          if (state.get(job.id)?.status !== JOB_STATUS.QUEUED) {
+            onChanged();
+            continue;
+          }
+          return;
+        }
+        const started = mutatePersistedJob(job.id, current =>
+          state.setStatus(current.id, JOB_STATUS.RUNNING));
+        if (!started.ok) {
+          if (started.error) log(`無法保存工作 ${job.id} 的執行狀態：`, started.error);
+          return;
         }
         activeCount++;
-        state.setStatus(job.id, JOB_STATUS.RUNNING);
-        try { this.persistJob(job); } catch (e) {
-          // 新增工作時已保存 queued 快照；running 只是 runtime 狀態，寫入失敗不可卡死 slot。
-          log(`無法保存工作 ${job.id} 的執行狀態：`, e);
-        }
         onChanged();
 
         (async () => {
@@ -308,9 +496,10 @@ function createExportQueue(deps) {
           } catch (e) {
             log(`Job ${job.id} error:`, e);
             if (!(this.shuttingDown && (job.status === JOB_STATUS.QUEUED || job.status === JOB_STATUS.STOPPING))) {
-              job.status = e.code === 'MISSING_SOURCE' ? JOB_STATUS.MISSING_SOURCE : JOB_STATUS.FAILED;
-              job.errorMsg = e.message || String(e);
-              if (onJobFailed) { try { onJobFailed(job); } catch (e2) {} }
+              const status = e.code === 'MISSING_SOURCE' ? JOB_STATUS.MISSING_SOURCE : JOB_STATUS.FAILED;
+              if (state.setStatus(job.id, status, { errorMsg: e.message || String(e) })) {
+                if (onJobFailed) { try { onJobFailed(job); } catch (e2) {} }
+              }
             }
           } finally {
             activeCount--;
