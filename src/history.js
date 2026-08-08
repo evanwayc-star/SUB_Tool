@@ -13,6 +13,16 @@ import { drawTimeline } from './timeline.js';
 import { renderNotes } from './notes.js';
 import { emit, on } from './events.js';
 import { setStatus } from './ui.js';
+import { syncSubtitleCompareSession } from './subtitle-compare-session.js';
+
+function syncCompareSnapshot(){
+  return syncSubtitleCompareSession({
+    tracks: State.tracks,
+    cues: State.cues,
+    fps: State.fps,
+    dropFrame: State.dropFrame,
+  });
+}
 
 /* ===== 動作紀錄（復原 / 重做） ===== */
 const History = {
@@ -22,7 +32,7 @@ const History = {
   snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
     audioProject:normalizeAudioProject(State.audioProject),externalAudioState:State.externalAudioState||[],
     fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clipGeo:Seq.snapshot()}); },
-  reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); },
+  reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); syncCompareSnapshot(); },
   /* 專案可先載入字幕、之後才重新連結媒體。媒體真正就緒時，把新出現的
      專案 clip 補進先前「尚無媒體」的歷史步驟，保留期間的字幕 Undo，
      同時避免任何一步復原後把剛重連的影片刪掉。 */
@@ -102,28 +112,14 @@ const History = {
     emit('media:sequenceRestored');
     pruneSelection(); // 還原後選取只留仍存在的字幕（三處各自寫過一次，現在同一條規則）
     this.hi=i; emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); renderHistory();
-    if (window.subtool && window.subtool.syncCompareWindow) {
-      window.subtool.syncCompareWindow({
-        tracks: State.tracks,
-        cues: State.cues,
-        fps: State.fps,
-        dropFrame: State.dropFrame
-      });
-    }
+    syncCompareSnapshot();
   },
   undo(){ if(this.hi>0){ this.restore(this.hi-1); setStatus('已復原','ok'); } else setStatus('沒有可復原的動作',''); },
   redo(){ if(this.hi<this.stack.length-1){ this.restore(this.hi+1); setStatus('已重做','ok'); } else setStatus('沒有可重做的動作',''); },
 };
 function recordHistory(label){ 
   History.record(label); 
-  if (window.subtool && window.subtool.syncCompareWindow) {
-    window.subtool.syncCompareWindow({
-      tracks: State.tracks,
-      cues: State.cues,
-      fps: State.fps,
-      dropFrame: State.dropFrame
-    });
-  }
+  syncCompareSnapshot();
 }
 function renderHistory(){
   const el=$('historyList'); if(!el)return;
@@ -135,4 +131,3 @@ function renderHistory(){
 on('media:projectReady',detail=>History.rebaseSequence(detail?.clips));
 
 export { History, recordHistory, renderHistory };
-

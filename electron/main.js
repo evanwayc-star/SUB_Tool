@@ -2699,13 +2699,14 @@ ipcMain.handle('mpv:quit',  () => {
   destroyMpvWin();
 });
 
-/* ===== 字幕比對視窗 ===== */
-function openCompareWindow(data) {
+/* ===== 字幕比對視窗 =====
+   比對規則與 revision 住在 renderer 的 SubtitleCompareSession；本檔只做受限 IPC adapter。 */
+function openCompareWindow(payload) {
   if (compareWin && !compareWin.isDestroyed()) {
     if (compareWin.isMinimized()) compareWin.restore();
     compareWin.show();
     compareWin.focus();
-    compareWin.webContents.send('compare:update-data', data);
+    compareWin.webContents.send('compare:update-data', payload);
     return;
   }
   compareWin = new BrowserWindow({
@@ -2724,25 +2725,35 @@ function openCompareWindow(data) {
   compareWin.setMenu(null);
   compareWin.loadFile(path.join(__dirname, 'compare.html'));
   compareWin.webContents.once('did-finish-load', () => {
-    compareWin.webContents.send('compare:update-data', data);
+    compareWin.webContents.send('compare:update-data', payload);
   });
   compareWin.on('closed', () => {
     compareWin = null;
+    safeWinSend(mainWin, 'compare:closed');
   });
 }
 
-ipcMain.on('open-compare-window', (event, data) => {
-  openCompareWindow(data);
+function isMainCompareSender(event) {
+  return !!(mainWin && !mainWin.isDestroyed() && event?.sender === mainWin.webContents);
+}
+
+function isCompareWindowSender(event) {
+  return !!(compareWin && !compareWin.isDestroyed() && event?.sender === compareWin.webContents);
+}
+
+ipcMain.on('open-compare-window', (event, payload) => {
+  if (!isMainCompareSender(event)) return;
+  openCompareWindow(payload);
 });
 
-ipcMain.on('compare:seek-main', (event, time) => {
-  safeWinSend(mainWin, 'seek-main', time);
+ipcMain.on('compare:command', (event, command) => {
+  if (!isCompareWindowSender(event) || !command || typeof command !== 'object') return;
+  safeWinSend(mainWin, 'compare:command', command);
 });
-ipcMain.on('compare:match-style', (event, cueId, sourceCueId) => {
-  safeWinSend(mainWin, 'compare:apply-style', cueId, sourceCueId);
-});
-ipcMain.on('sync-compare-window', (event, data) => {
+
+ipcMain.on('sync-compare-window', (event, payload) => {
+  if (!isMainCompareSender(event)) return;
   if (compareWin && !compareWin.isDestroyed()) {
-    compareWin.webContents.send('compare:update-data', data);
+    compareWin.webContents.send('compare:update-data', payload);
   }
 });

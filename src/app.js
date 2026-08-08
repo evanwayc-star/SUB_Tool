@@ -51,6 +51,8 @@ import { History, recordHistory, renderHistory } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct, styleMatchesPreset, pruneRedundantCueStyle } from './substyle.js'; // v4.23 字幕樣式系統
+import { GEOMETRY_STYLE_KEYS, applyCueStyleAssignment, planCueStyleAssignment, planTrackStyleAssignment } from './style-assignment.js';
+import { closeSubtitleCompareSession, configureSubtitleCompareSession, handleSubtitleCompareCommand, openSubtitleCompareSession } from './subtitle-compare-session.js';
 import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
 import { createPreviewDrag } from './pointer-interaction.js';
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal, closeMenus, openMenu } from './ui.js';
@@ -170,6 +172,30 @@ function styleChanged(){
     return;
   }
   renderVideoSub(); refreshMpvSubs(); renderTrackStyle(); refreshStyleSummaries();
+}
+
+function currentSubtitleCompareSnapshot(){
+  return {
+    tracks: State.tracks,
+    cues: State.cues,
+    fps: State.fps,
+    dropFrame: State.dropFrame,
+  };
+}
+
+function applyCueStylePatch(cue, desiredStyle, preserveKeys = []){
+  const targetTrack = State.tracks[cue?.track || 0] || null;
+  const plan = planCueStyleAssignment({ cue, targetTrack, desiredStyle, preserveKeys });
+  applyCueStyleAssignment(cue, plan);
+  return plan.changed;
+}
+
+function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []){
+  const plan = planTrackStyleAssignment({ track, cues, desiredStyle, preserveKeys });
+  if(!plan.changed) return false;
+  Object.assign(track, plan.trackPatch);
+  for(const cuePatch of plan.cuePatches) applyCueStyleAssignment(cuePatch.cue, cuePatch);
+  return true;
 }
 
 /* 在預覽窗裡直接擺放【單一句】字幕（v4.30）：拖字幕＝移動、拖頂端把手＝旋轉（Shift 吸附 15°，Alt 直接旋轉）。
@@ -849,8 +875,11 @@ function initUI(){
   let _tsSetTimer = null;
   const tsSet=(k,v)=>{
     const t=styleTarget(); if(!t)return;
-    if(t.cues.length) for(const c of t.cues){ c.style=c.style||{}; c.style[k]=v; }
-    else t.trk[k]=v;
+    const changed = t.cues.length
+      ? t.cues.reduce((anyChanged, cue) => applyCueStylePatch(cue, { [k]: v }) || anyChanged, false)
+      : t.trk[k] !== v;
+    if(!t.cues.length && changed) t.trk[k]=v;
+    if(!changed) return;
     styleChanged();
     clearTimeout(_tsSetTimer);
     _tsSetTimer = setTimeout(() => recordHistory('修改字幕樣式'), 500);
@@ -983,8 +1012,11 @@ function initUI(){
     const t=styleTarget(), v=e.target.value; e.target.value='';
     if(!v||!t)return;
     const p=getAllPresets().find(x=>x.name===v); if(!p)return;
-    if(t.cues.length){ for(const c of t.cues) c.style=Object.assign(c.style||{}, p.style); } // 只套選取的那幾句
-    else Object.assign(t.trk, p.style);
+    const changed = t.cues.length
+      ? t.cues.reduce((anyChanged, cue) => applyCueStylePatch(cue, p.style) || anyChanged, false)
+      : Object.keys(p.style || {}).some(key => t.trk[key] !== p.style[key]);
+    if(!t.cues.length && changed) Object.assign(t.trk, p.style);
+    if(!changed) return;
     styleChanged(); recordHistory('套用常用樣式：'+v);
   });
   /* 常用樣式庫（管理視窗、編輯模式、匯入匯出）：見 initPresetLibrary()。
@@ -1006,12 +1038,12 @@ function initUI(){
       `把<b style="color:var(--accent)">${來源}的樣式</b>套用到「${escapeHTML(trk.name)}」的<b>全部 ${others.length+ (cue?1:0)} 句</b>。<br>`+
       (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會一併被覆蓋。<br>` : '')+
       `<span style="color:var(--text-faint)">位置與角度也會一起套用（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
-      [{label:'取消',act:closeModal},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
-        closeModal();
-        // 生效樣式寫進軌道當共同基準，再清掉全軌的逐句覆蓋（含這一句）→ 每句都長一樣
-        for(const k of Object.keys(STYLE_DEFAULTS)) trk[k]=st[k];
-        for(const c of State.cues) if((c.track||0)===i) delete c.style;
-        styleChanged(); drawTimeline(); // 摘要就地更新（捲動位置留在原處）；時間軸重畫掉 ✱ 標記
+       [{label:'取消',act:closeModal},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
+         closeModal();
+         const trackCues = State.cues.filter(c => (c.track||0)===i);
+         // 生效樣式寫進軌道共同基準，逐句 override 由同一份 plan 最小化。
+         applyTrackStylePlan(trk, trackCues, st);
+         styleChanged(); drawTimeline(); // 摘要就地更新（捲動位置留在原處）；時間軸重畫掉 ✱ 標記
         recordHistory('全軌套用（'+來源+' → 全軌）');
         showToast('已把'+來源+'的樣式套用到整條軌道');
       }}]);
@@ -1031,30 +1063,12 @@ function initUI(){
       `（將排除座標與角度的變更）<br>`+
       (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會部分覆蓋。<br>` : '')+
       `<span style="color:var(--text-faint)">位置與角度會保持各句原本的設定（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
-      [{label:'取消',act:closeModal},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
-        closeModal();
-        const excludedKeys = ['posX', 'posY', 'align', 'valign', 'angle'];
-        
-        // 針對同軌每句，合併新樣式（st）與該句原有的座標（origCst）
-        const trackCues = State.cues.filter(c => (c.track||0)===i);
-        for(const c of trackCues) {
-          const origCst = effStyle(c, trk);
-          const desired = { ...st };
-          for(const k of excludedKeys) desired[k] = origCst[k];
-          c.style = desired;
-        }
-        
-        // 軌道基準樣式：更新排除鍵以外的所有屬性
-        for(const k of Object.keys(STYLE_DEFAULTS)) {
-          if (!excludedKeys.includes(k)) trk[k] = st[k];
-        }
-        
-        // 修剪多餘覆蓋，讓能用軌道屬性表達的都清掉
-        for(const c of trackCues) {
-          pruneRedundantCueStyle(c, trk);
-        }
-        
-        styleChanged(); drawTimeline(); 
+       [{label:'取消',act:closeModal},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
+         closeModal();
+         const trackCues = State.cues.filter(c => (c.track||0)===i);
+         applyTrackStylePlan(trk, trackCues, st, GEOMETRY_STYLE_KEYS);
+
+         styleChanged(); drawTimeline();
         recordHistory('全軌套用-排除座標（'+來源+' → 全軌）');
         showToast('已套用樣式（保留原座標與角度）');
       }}]);
@@ -1412,12 +1426,7 @@ function initPresetLibrary(){
       if(p&&t){
         if(t.cues.length){
           for(const c of t.cues){
-            c.style=Object.assign(c.style||{},p.style);
-            /* 套用會把該樣式的每一個欄位都寫成逐句覆蓋。若這句所在的軌本來就是
-               同一組樣式，那些覆蓋一個都沒改變外觀，卻會讓列表標上 ✱（有逐句覆蓋）
-               ——使用者「改回預設」反而多一個記號。與軌道相同的欄位在這裡清掉，
-               真正有差異的覆蓋一律保留。 */
-            pruneRedundantCueStyle(c, State.tracks[c.track||0]||null);
+            applyCueStylePatch(c, p.style);
           }
         } else Object.assign(t.trk,p.style);
         styleChanged(); recordHistory('套用常用樣式：'+p.name); showToast('已套用：'+p.name); } return; }
@@ -1499,14 +1508,8 @@ function _execCopyTrack(srcIdx, withText){
 }
 function doCompareTrack() {
   if (State.tracks.length < 1) { showToast('沒有足夠的字幕軌道可供比對'); return; }
-  if (window.subtool && window.subtool.openCompareWindow) {
-    const data = {
-      tracks: State.tracks,
-      cues: State.cues,
-      fps: State.fps,
-      dropFrame: State.dropFrame
-    };
-    window.subtool.openCompareWindow(data);
+  if (DESK?.openCompareWindow) {
+    openSubtitleCompareSession(currentSubtitleCompareSnapshot());
   } else {
     showToast('此功能僅限桌面版使用');
   }
@@ -1866,90 +1869,44 @@ async function initDesktop(){
   if (DESK.onOpenFile) {
     DESK.onOpenFile(file => handleStartupFile(file));
   }
-  if (DESK.onSeekMain) {
-    DESK.onSeekMain((payload) => {
-      if (typeof payload === 'number') {
-        Media.seek(payload);
-      } else if (payload && typeof payload === 'object') {
-        if (payload.trackIdx !== undefined && State.listTrack !== payload.trackIdx) {
-          State.listTrack = payload.trackIdx;
-          renderListTrackSel();
-          renderTrackStyle();
-          refreshTrackGutterActive();
-          renderSubList();
-        }
-        if (payload.cueId !== undefined) {
-          selectCueSingle(payload.cueId, false);
-        }
-        if (payload.time !== undefined) {
-          Media.seek(payload.time);
-        }
+  configureSubtitleCompareSession({
+    port: {
+      open: payload => DESK.openCompareWindow(payload),
+      sync: payload => DESK.syncCompareWindow(payload),
+    },
+    onSeek: ({ cueId }) => {
+      const cue = State.cues.find(item => item.id === cueId);
+      if (!cue) return false;
+      const trackIndex = cue.track || 0;
+      if (State.listTrack !== trackIndex) {
+        State.listTrack = trackIndex;
+        renderListTrackSel();
+        renderTrackStyle();
+        refreshTrackGutterActive();
+        renderSubList();
       }
+      selectCueSingle(cueId, false);
+      Media.seek(cue.start);
+      return true;
+    },
+    onMatchStyle: ({ targetCueId, sourceCueId }) => {
+      const targetCue = State.cues.find(item => item.id === targetCueId);
+      const sourceCue = State.cues.find(item => item.id === sourceCueId);
+      if (!targetCue || !sourceCue) return false;
+      const sourceStyle = effStyle(sourceCue, State.tracks[sourceCue.track || 0] || null);
+      if (!applyCueStylePatch(targetCue, sourceStyle)) return true;
+      recordHistory('匹配樣式');
+      renderAll();
+      return true;
+    },
+  });
+  if (DESK.onCompareCommand) {
+    DESK.onCompareCommand(command => {
+      const result = handleSubtitleCompareCommand(command);
+      if (!result.accepted) console.warn('[compare] command rejected:', result.reason);
     });
   }
-  if (DESK.onCompareApplyStyle) {
-    DESK.onCompareApplyStyle((cueId, fallbackDataObj) => {
-      const cue = State.cues.find(c => c.id === cueId);
-      
-      let sourceCue = null;
-      let fallbackData = fallbackDataObj;
-      
-      if (typeof fallbackDataObj === 'string') {
-        if (fallbackDataObj.startsWith('c')) {
-          // Old legacy: passed the ID string directly
-          sourceCue = State.cues.find(c => c.id === fallbackDataObj);
-          fallbackData = null;
-        } else {
-          try { fallbackData = JSON.parse(fallbackDataObj); } catch (e) {}
-        }
-      }
-
-      if (fallbackData && !sourceCue) {
-        if (fallbackData.id) {
-          sourceCue = State.cues.find(c => c.id === fallbackData.id);
-        }
-        if (!sourceCue && typeof fallbackData.track === 'number' && typeof fallbackData.start === 'number') {
-          sourceCue = State.cues.find(c => (c.track || 0) === fallbackData.track && Math.abs(c.start - fallbackData.start) <= 0.5);
-        }
-      }
-
-      if (cue && sourceCue) {
-        const sourceTk = State.tracks[sourceCue.track || 0];
-        const targetTk = State.tracks[cue.track || 0];
-        const sourceComputed = effStyle(sourceCue, sourceTk);
-        const targetTrackSt = effStyle(null, targetTk);
-        
-        const newCueStyle = { ...cue.style };
-        
-        for (const k of Object.keys(STYLE_DEFAULTS)) {
-          if (sourceComputed[k] !== targetTrackSt[k]) {
-            newCueStyle[k] = sourceComputed[k];
-          } else {
-            delete newCueStyle[k];
-          }
-        }
-        
-        if (Object.keys(newCueStyle).length) {
-          cue.style = newCueStyle;
-        } else {
-          delete cue.style;
-        }
-        
-        recordHistory('匹配樣式');
-        renderAll(); // This will re-render main UI
-        if (DESK.syncCompareWindow) {
-          DESK.syncCompareWindow({
-            tracks: State.tracks,
-            cues: State.cues,
-            fps: State.fps,
-            dropFrame: State.dropFrame
-          });
-        }
-      } else {
-        showToast(`失敗! Target:${cueId}, FD:${JSON.stringify(fallbackDataObj)}`);
-      }
-    });
-  }
+  if (DESK.onCompareClosed) DESK.onCompareClosed(() => closeSubtitleCompareSession());
   if (DESK.onAppRequestClose) {
     DESK.onAppRequestClose(() => {
       if (isProjectDirty()) {
@@ -2151,22 +2108,7 @@ function pasteStyleToSelected() {
   for (const id of ids) {
     const c = State.cues.find(x => x.id === id);
     if (!c) continue;
-    const tk = State.tracks[c.track || 0];
-    const trackSt = effStyle(null, tk);
-    const newCueStyle = { ...c.style };
-    
-    for (const k of Object.keys(STYLE_DEFAULTS)) {
-      if (_clipboardStyle[k] !== trackSt[k]) {
-        newCueStyle[k] = _clipboardStyle[k];
-      } else {
-        delete newCueStyle[k];
-      }
-    }
-    
-    if (JSON.stringify(newCueStyle) !== JSON.stringify(c.style || {})) {
-      c.style = Object.keys(newCueStyle).length ? newCueStyle : undefined;
-      changed = true;
-    }
+    changed = applyCueStylePatch(c, _clipboardStyle) || changed;
   }
   
   if (changed) {
