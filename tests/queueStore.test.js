@@ -12,9 +12,15 @@ const {
   jobPath,
   logPath,
   loadJobs,
+  loadPendingDeletes,
+  loadTerminalOutcomes,
   mergeSourcePaths,
   persistJob,
   removeLogFile,
+  resolvePendingDeletes,
+  resolveTerminalOutcomes,
+  stagePendingDeletes,
+  stageTerminalOutcome,
   writeAssFile,
 } = require('../electron/queue-store');
 
@@ -63,6 +69,18 @@ describe('匯出佇列持久化', () => {
     expect(result.jobs.every(job => job.status === 'queued')).toBe(true);
     expect(result.jobs[1].payload.outPath).toBe(first.payload.outPath);
     expect(result.jobs[1].pct).toBe(0);
+  });
+
+  test('retry attempt 與終態 outcome 都會跨重啟保留 generation', () => {
+    const dir = makeTempDir();
+    const queued = makeJob({ id: 'attempted', attempt: 3 });
+    const failed = makeJob({ id: 'attempted', status: 'failed', attempt: 3 });
+
+    persistJob(dir, queued);
+    stageTerminalOutcome(dir, failed);
+
+    expect(loadJobs(dir).jobs).toEqual([expect.objectContaining({ id: 'attempted', attempt: 3 })]);
+    expect(loadTerminalOutcomes(dir)).toEqual([expect.objectContaining({ id: 'attempted', attempt: 3 })]);
   });
 
   test('從影片、片段音訊與 audioPlan 蒐集去重後的來源路徑', () => {
@@ -141,7 +159,7 @@ describe('匯出佇列持久化', () => {
     expect(existsSync(filePath)).toBe(false);
   });
 
-  test('done、failed 與 stopped 不持久化', () => {
+  test('done、failed 與 stopped 不會成為可恢復的 job JSON snapshot', () => {
     const dir = makeTempDir();
     const queued = makeJob();
     persistJob(dir, queued);
@@ -186,5 +204,36 @@ describe('匯出佇列持久化', () => {
     expect(result.warnings).toHaveLength(2);
     expect(cleanupOrphanAssFiles(dir, ['kept.ass'])).toEqual(['orphan.ass']);
     expect(existsSync(path.join(dir, 'future.ass'))).toBe(true);
+  });
+});
+
+describe('跨檔交易 journal', () => {
+  test('終態 outcome journal 保留可恢復的完成資訊，並可原子結清', () => {
+    const dir = makeTempDir();
+    const finished = makeJob({ status: 'done', completedAt: 4567, elapsedMs: 3000 });
+
+    stageTerminalOutcome(dir, finished);
+    expect(loadTerminalOutcomes(dir)).toEqual([expect.objectContaining({
+      id: finished.id,
+      status: 'done',
+      completedAt: 4567,
+      payload: finished.payload,
+    })]);
+
+    resolveTerminalOutcomes(dir, [finished.id]);
+    expect(loadTerminalOutcomes(dir)).toEqual([]);
+  });
+
+  test('pending-delete journal 不會被 loadJobs 當成工作，且清理可重試', () => {
+    const dir = makeTempDir();
+    const queued = makeJob({ id: 'queued' });
+    persistJob(dir, queued);
+
+    stagePendingDeletes(dir, [{ id: queued.id, assRef: 'queued.ass' }]);
+    expect(loadJobs(dir).jobs.map(job => job.id)).toEqual(['queued']);
+    expect(loadPendingDeletes(dir)).toEqual([{ id: 'queued', assRef: 'queued.ass' }]);
+
+    resolvePendingDeletes(dir, [queued.id]);
+    expect(loadPendingDeletes(dir)).toEqual([]);
   });
 });

@@ -51,6 +51,23 @@ describe('字幕比對 session', () => {
       .toEqual({ accepted: false, reason: 'stale-revision' });
   });
 
+  it('可在延後寫入 history 前立即推送變更，讓舊 command fail closed', () => {
+    const sent = [];
+    const session = createSubtitleCompareSession({
+      port: { open: payload => sent.push(payload), sync: payload => sent.push(payload) },
+    });
+
+    session.open(snapshot());
+    const oldRevision = session.revision();
+    const changed = snapshot();
+    changed.cues[0].style = { fontSize: 90 };
+    session.sync(changed);
+
+    expect(session.handleCommand({ type: 'match-style', revision: oldRevision, targetCueId: 'left', sourceCueId: 'right' }))
+      .toEqual({ accepted: false, reason: 'stale-revision' });
+    expect(sent).toHaveLength(2);
+  });
+
   it('只接受 snapshot 內存在的 stable cue ID，並交給 application callback', () => {
     const matched = [];
     const session = createSubtitleCompareSession({

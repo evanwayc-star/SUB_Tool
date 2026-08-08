@@ -65,6 +65,12 @@ function make(over = {}) {
       safeAssPath: (d, ref) => `${d}/${ref}`,
       loadJobs: () => ({ jobs: over.storedJobs || [], warnings: [] }),
       cleanupOrphanAssFiles: vi.fn(),
+      stageTerminalOutcome: vi.fn(),
+      loadTerminalOutcomes: () => [],
+      resolveTerminalOutcomes: vi.fn(),
+      stagePendingDeletes: vi.fn(),
+      loadPendingDeletes: () => [],
+      resolvePendingDeletes: vi.fn(),
     },
     history: {
       append: (d, job) => appended.push(job.id),
@@ -214,9 +220,12 @@ describe('失敗處理', () => {
 
 describe('完成後的收尾', () => {
   it('done 時清掉半成品並寫入完成紀錄', async () => {
-    const { queue, state, appended } = make({
-      runJob: async j => { j.status = 'done'; },
+    let queue;
+    const built = make({
+      runJob: async j => { queue.reportProgress(j.id, { done: true }); },
     });
+    ({ queue } = built);
+    const { state, appended } = built;
     state.load([job('a')]);
     queue.processQueue();
     await new Promise(r => setTimeout(r, 10));
@@ -252,6 +261,18 @@ describe('關機收尾', () => {
     expect(j.status).toBe('queued');
     expect(j.pct).toBe(0);
     expect(j.errorMsg).toBe(null);
+  });
+
+  it('已送出使用者停止的 runner 關機時不會被改成 shutdown 中斷', async () => {
+    const stop = vi.fn();
+    const active = { p: {}, stopped: true, completion: Promise.resolve(), stop };
+    const { queue, state } = make({ activeJobs: new Map([['a', active]]) });
+    state.load([job('a', { status: 'stopping' })]);
+
+    await queue.prepareForShutdown();
+
+    expect(active.shutdown).not.toBe(true);
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it('關機後不可再加入工作', async () => {

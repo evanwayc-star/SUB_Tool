@@ -25,6 +25,7 @@ const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const QueueStore = require('./queue-store');
 const QueueHistory = require('./queue-history');
+const { relayQueueRunnerEvent, runnerFailureProgress } = require('./queue-runner-adapter');
 const { ExportQueueState } = require('./export-queue-state');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
@@ -637,10 +638,25 @@ app.on('before-quit', (event) => {
   _isAppQuitting = true;
   Promise.resolve()
     .then(() => QueueManager.prepareForShutdown())
-    .catch(e => { console.error('[Queue] 無法保存關閉前狀態：', e); })
-    .finally(() => {
+    .then(() => {
       _quitReady = true;
       app.quit();
+    })
+    .catch(e => {
+      /* outcome journal 尚未 durable 時不能「照樣退出」：那會遺失唯一知道 ffmpeg
+         已結束的 intent，重啟後把舊 running snapshot 當 queued 重新以 -y 執行。 */
+      console.error('[Queue] 無法安全保存關閉前狀態，已取消退出：', e);
+      _quitSequenceStarted = false;
+      _isAppQuitting = false;
+      const options = {
+        type: 'error',
+        title: '尚未能安全關閉',
+        message: '匯出終態或中斷工作的恢復快照尚未保存，已取消關閉。',
+        detail: '請確認儲存空間或防毒軟體鎖定狀態後，再次嘗試關閉。',
+      };
+      const owner = mainWin && !mainWin.isDestroyed() ? mainWin : null;
+      const show = owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options);
+      Promise.resolve(show).catch(() => {});
     });
 });
 app.on('quit', () => {
@@ -1379,11 +1395,13 @@ async function _runJobLogic(job) {
   const dispatch = (evt, data) => {
     // 進度與 terminal transition 都由 QueueManager 擁有；runJob adapter 只轉送。
     // 這避免 main.js 和 queue 各自改 job.status，造成合法狀態機被繞過。
-    if (evt === 'task-progress') {
-      QueueManager.reportProgress(jobId, data);
-    }
-    if (sender) safeSend(sender, evt, data);
-    else if (fallbackSender) safeSend(fallbackSender, evt, data);
+    relayQueueRunnerEvent({
+      reportProgress: (id, progress) => QueueManager.reportProgress(id, progress),
+      send: (event, payload) => {
+        if (sender) safeSend(sender, event, payload);
+        else if (fallbackSender) safeSend(fallbackSender, event, payload);
+      },
+    }, jobId, evt, data);
   };
 
   const isWav = format === 'wav';
@@ -1493,16 +1511,10 @@ async function _runJobLogic(job) {
       const wasShutdown = !!active?.shutdown;
       const wasStopped = !!active?.stopped;
       QueueManager.clearActiveJob(jobId);
-      if (wasShutdown) {
-         // 關閉程式時 QueueManager 已把狀態退回 queued；半成品與 lease 只由 watchdog
-         // 在確認 ffmpeg close 後處理，主程序不可搶先 unlink。
-      } else if (wasStopped) {
-         if (err.code === 'PARTIAL_CLEANUP_FAILED' || err.watchdogResult?.cleanup?.retainedLease)
-           dispatch('task-progress', { jobId, error: true, errorMsg: err.message });
-         else dispatch('task-progress', { jobId, stopped: true });
-      } else {
-         dispatch( 'task-progress', { jobId, error: true, errorMsg: err.message });
-      }
+      /* 手動停止優先於隨後的 app shutdown；否則 stopping 會被關機當作 queued 恢復，
+         使用者明確取消的工作在重啟後反而重新執行。 */
+      const progress = runnerFailureProgress({ stopped: wasStopped, shutdown: wasShutdown, error: err });
+      if (progress) dispatch('task-progress', { jobId, ...progress });
     }
   
 }

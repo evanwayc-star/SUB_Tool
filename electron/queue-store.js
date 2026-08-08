@@ -5,6 +5,12 @@ const crypto = require('crypto');
 const { isRestorable, isTerminal } = require('./export-job-status');
 
 const STORE_VERSION = 1;
+/* 跨多檔刪除／終態切換不能靠「依序 unlink」假裝交易：Windows 在 JSON 已刪、ASS
+   被防毒鎖住時若當場 crash，重啟便不知道使用者其實已按過清除、或 ffmpeg 已經完成。
+   這兩份 journal 是可原子寫入的意圖紀錄；QueueManager 以它們作恢復時的唯一裁決。 */
+const JOURNAL_VERSION = 1;
+const TERMINAL_OUTCOME_JOURNAL = '.queue-terminal-outcomes';
+const PENDING_DELETE_JOURNAL = '.queue-pending-deletes';
 /* 分類的唯一來源在 export-job-status.js；這裡保留同名薄包裝，讓既有呼叫端與
    模組匯出面不變（tests/queueStore.test.js 會 import 這兩個名字）。 */
 const RESTORABLE_STATUSES = { has: isRestorable };
@@ -66,10 +72,19 @@ function burnAssFileName(id) {
 }
 
 function safeAssPath(queueDir, assRef) {
-  if (typeof assRef !== 'string' || !assRef || path.basename(assRef) !== assRef || !assRef.endsWith('.ass')) {
+  if (!isSafeAssRef(assRef)) {
     return null;
   }
   return path.join(queueDir, assRef);
+}
+
+function isSafeAssRef(assRef) {
+  return typeof assRef === 'string' && !!assRef && path.basename(assRef) === assRef && assRef.endsWith('.ass');
+}
+
+function normaliseAttempt(value) {
+  const attempt = Number(value);
+  return Number.isSafeInteger(attempt) && attempt >= 0 ? attempt : 0;
 }
 
 function ensureDir(queueDir) {
@@ -85,6 +100,130 @@ function writeAtomic(filePath, content) {
     try { fs.unlinkSync(tempPath); } catch (cleanupError) {}
     throw error;
   }
+}
+
+function terminalOutcomeJournalPath(queueDir) {
+  return path.join(queueDir, TERMINAL_OUTCOME_JOURNAL);
+}
+
+function pendingDeleteJournalPath(queueDir) {
+  return path.join(queueDir, PENDING_DELETE_JOURNAL);
+}
+
+function pendingDeleteEntry(job) {
+  safeId(job?.id);
+  return { id: job.id, assRef: isSafeAssRef(job.assRef) ? job.assRef : null };
+}
+
+function terminalOutcomeEntry(job) {
+  safeId(job?.id);
+  if (!isTerminal(job?.status)) throw new TypeError(`終態工作 ${job?.id || '(unknown)'} 的 status 無效`);
+  if (!job.payload || typeof job.payload !== 'object') {
+    throw new TypeError(`終態工作 ${job.id} 缺少 payload`);
+  }
+  return {
+    id: job.id,
+    status: job.status,
+    attempt: normaliseAttempt(job.attempt),
+    createdAt: Number(job.createdAt) || 0,
+    completedAt: Number(job.completedAt) || 0,
+    elapsedMs: Number(job.elapsedMs) || 0,
+    errorMsg: typeof job.errorMsg === 'string' ? job.errorMsg : null,
+    payload: job.payload,
+    assRef: isSafeAssRef(job.assRef) ? job.assRef : null,
+    sourcePaths: mergeSourcePaths(job.payload, job.sourcePaths),
+  };
+}
+
+function loadJournal(queueDir, filePathFor, field, normalise) {
+  if (!queueDir) return [];
+  let raw;
+  try {
+    raw = fs.readFileSync(filePathFor(queueDir), 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (error) {
+    throw new Error(`${field} journal 格式損毀`);
+  }
+  if (!parsed || parsed.version !== JOURNAL_VERSION || !Array.isArray(parsed[field])) {
+    throw new Error(`${field} journal 版本或格式無效`);
+  }
+  const seen = new Set();
+  const entries = [];
+  for (const candidate of parsed[field]) {
+    const entry = normalise(candidate);
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function saveJournal(queueDir, filePathFor, field, entries, normalise) {
+  if (!queueDir) throw new Error('匯出佇列目錄尚未初始化');
+  const seen = new Set();
+  const normalised = [];
+  for (const candidate of entries || []) {
+    const entry = normalise(candidate);
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    normalised.push(entry);
+  }
+  ensureDir(queueDir);
+  writeAtomic(filePathFor(queueDir), `${JSON.stringify({ version: JOURNAL_VERSION, [field]: normalised }, null, 2)}\n`);
+  return normalised;
+}
+
+function loadTerminalOutcomes(queueDir) {
+  return loadJournal(queueDir, terminalOutcomeJournalPath, 'outcomes', terminalOutcomeEntry);
+}
+
+function stageTerminalOutcome(queueDir, job) {
+  const next = terminalOutcomeEntry(job);
+  const entries = loadTerminalOutcomes(queueDir).filter(entry => entry.id !== next.id);
+  entries.push(next);
+  return saveJournal(queueDir, terminalOutcomeJournalPath, 'outcomes', entries, terminalOutcomeEntry);
+}
+
+function resolveTerminalOutcomes(queueDir, ids) {
+  const resolved = new Set(Array.isArray(ids) ? ids : []);
+  return saveJournal(
+    queueDir,
+    terminalOutcomeJournalPath,
+    'outcomes',
+    loadTerminalOutcomes(queueDir).filter(entry => !resolved.has(entry.id)),
+    terminalOutcomeEntry,
+  );
+}
+
+function loadPendingDeletes(queueDir) {
+  return loadJournal(queueDir, pendingDeleteJournalPath, 'deletes', pendingDeleteEntry);
+}
+
+function stagePendingDeletes(queueDir, jobs) {
+  const entries = loadPendingDeletes(queueDir);
+  const byId = new Map(entries.map(entry => [entry.id, entry]));
+  for (const job of jobs || []) {
+    const entry = pendingDeleteEntry(job);
+    const previous = byId.get(entry.id);
+    const assRef = previous?.assRef || entry.assRef || null;
+    byId.set(entry.id, { id: entry.id, assRef });
+  }
+  return saveJournal(queueDir, pendingDeleteJournalPath, 'deletes', Array.from(byId.values()), pendingDeleteEntry);
+}
+
+function resolvePendingDeletes(queueDir, ids) {
+  const resolved = new Set(Array.isArray(ids) ? ids : []);
+  return saveJournal(
+    queueDir,
+    pendingDeleteJournalPath,
+    'deletes',
+    loadPendingDeletes(queueDir).filter(entry => !resolved.has(entry.id)),
+    pendingDeleteEntry,
+  );
 }
 
 function removeJobFile(queueDir, id) {
@@ -126,6 +265,7 @@ function persistedRecord(job, order) {
     createdAt: Number(job.createdAt) || Date.now(),
     order: Number.isFinite(Number(order)) ? Number(order) : 0,
     status: job.status,
+    attempt: normaliseAttempt(job.attempt),
     payload: job.payload,
     assRef: job.assRef || null,
     sourcePaths,
@@ -142,9 +282,8 @@ function persistJob(queueDir, job, order = 0) {
   try {
     writeAtomic(jobPath(queueDir, job.id), `${JSON.stringify(record, null, 2)}\n`);
   } catch (error) {
-    if (TERMINAL_STATUSES.has(job.status)) {
-      try { removeJobFile(queueDir, job.id); } catch (cleanupError) {}
-    }
+    /* 終態 intent 已由 QueueManager 的 journal 保護；這裡絕不能因新檔寫失敗
+       刪掉舊 running snapshot，否則 RAM rollback 後重啟會直接遺失這份工作。 */
     throw error;
   }
   job.sourcePaths = record.sourcePaths;
@@ -157,10 +296,13 @@ function persistJob(queueDir, job, order = 0) {
   return true;
 }
 
-function loadJobs(queueDir) {
+function loadJobs(queueDir, { protectedAssRefs = [] } = {}) {
   const jobs = [];
   const warnings = [];
   if (!fs.existsSync(queueDir)) return { jobs, warnings };
+  /* outcome journal 是 failed/stopped 的可重試 snapshot；若有殘留 stopping JSON，
+     讀它時只能刪 tombstone，不能連同 journal 正在引用的 ASS 一起當孤兒刪掉。 */
+  const protectedAss = new Set((protectedAssRefs || []).filter(isSafeAssRef));
 
   const files = fs.readdirSync(queueDir)
     .filter(name => name.endsWith('.json'))
@@ -182,7 +324,7 @@ function loadJobs(queueDir) {
       ids.add(record.id);
       if (TERMINAL_STATUSES.has(record.status)) {
         try { removeJobFile(queueDir, record.id); } catch (error) {}
-        if (record.assRef) {
+        if (record.assRef && !protectedAss.has(record.assRef)) {
           try { removeAssFile(queueDir, record.assRef); } catch (error) {}
         }
         continue;
@@ -204,6 +346,7 @@ function loadJobs(queueDir) {
         id: record.id,
         createdAt: Number(record.createdAt) || 0,
         status,
+        attempt: normaliseAttempt(record.attempt),
         payload: record.payload,
         assRef: record.assRef || null,
         sourcePaths,
@@ -243,6 +386,9 @@ function cleanupOrphanAssFiles(queueDir, referencedAssFiles) {
 }
 
 module.exports = {
+  JOURNAL_VERSION,
+  TERMINAL_OUTCOME_JOURNAL,
+  PENDING_DELETE_JOURNAL,
   STORE_VERSION,
   RESTORABLE_STATUSES,
   TERMINAL_STATUSES,
@@ -252,12 +398,20 @@ module.exports = {
   ensureDir,
   jobPath,
   logPath,
+  loadPendingDeletes,
+  loadTerminalOutcomes,
   loadJobs,
   mergeSourcePaths,
   persistJob,
   removeAssFile,
   removeJobFile,
   removeLogFile,
+  resolvePendingDeletes,
+  resolveTerminalOutcomes,
   safeAssPath,
+  stagePendingDeletes,
+  stageTerminalOutcome,
+  pendingDeleteJournalPath,
+  terminalOutcomeJournalPath,
   writeAssFile,
 };

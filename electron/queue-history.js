@@ -5,7 +5,8 @@
    為什麼不直接讓 done 工作走既有的 queue-store 持久化：
 
    queue-store.js 把 done / failed / stopped / stopping 視為 **terminal**，
-   persistJob() 寫完就立刻刪檔、loadJobs() 讀到 terminal 記錄也會刪掉並跳過。
+   persistJob() 寫完就立刻刪檔、loadJobs() 讀到 terminal 記錄也會刪掉並跳過；
+   可重試的 failed / stopped 例外由 ExportQueue 的 outcome journal 保存完整 frozen snapshot。
    那個 tombstone 機制是刻意的安全設計——它保證「已完成的工作不會在重啟後被誤當
    queued 重跑」，否則會以 -y 覆寫掉已經交付出去的成品（見 queue-store.js:147-152
    與 tests/queueStore.test.js「殘留的 terminal tombstone 不會被恢復或重跑」）。

@@ -24,6 +24,16 @@ describe('字幕樣式 assignment plan', () => {
     expect(plan.style).toBeUndefined();
   });
 
+  it('目標軌道改成新基準時，會清掉 cue 既有的冗餘 canonical override', () => {
+    const plan = planCueStyleAssignment({
+      cue: { id: 'cue-1', style: { fontSize: 90, legacyTag: 'keep' } },
+      targetTrack: { fontSize: 90 },
+      desiredStyle: { fontSize: 90 },
+    });
+
+    expect(plan.style).toEqual({ legacyTag: 'keep' });
+  });
+
   it('可保留既有幾何欄位，同時套用其他生效樣式', () => {
     const plan = planCueStyleAssignment({
       cue: { id: 'cue-1', style: { posX: 20 } },

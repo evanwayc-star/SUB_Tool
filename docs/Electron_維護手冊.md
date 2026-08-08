@@ -14,7 +14,7 @@
 | **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
 | **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
 | **匯出工作狀態機** | `electron/export-job-status.js` | **七種狀態與四個分類的唯一定義**（見下方「匯出工作的狀態機」）。零 `require`，純資料＋述詞 |
-| **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集 |
+| **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集；終態 outcome／待刪除 journal |
 | **完成紀錄** | `electron/queue-history.js` | 已完成交付的稽核紀錄（跨重啟保留、上限 200 筆）。**刻意不走 queue-store**：只存渲染完成卡片需要的欄位，**不含 `payload` 的 `clips`／`audioPlan`**，因此不可能被重新排程執行 |
 | **匯出佇列狀態** | `electron/export-queue-state.js` | 唯一有序工作集合；scheduler、監控畫面、重試與持久化都讀同一份順序。`liveWorkCount()`（running＋stopping）是「還在轉檔嗎」的唯一定義，兩個關閉決策都讀它 |
 | **匯出輸出鎖** | `electron/export-lease.js` | 依正規化輸出路徑建立原子 lease，避免不同工作同時以 `-y` 寫入同一檔案 |
@@ -139,14 +139,30 @@ Main (main.js)
 佇列的持久化真相來源在 `<userData>/export-queue/`：`ExportQueueState` 是唯一的記憶體順序來源，
 每份可恢復工作各有一個
 `<id>.json`，有字幕時另存 `<id>.ass`，失敗記錄固定為 `<id>.log`。新增與排序都會原子寫入；程式重啟後，
-`running` 一律退回 `queued`，所有恢復工作保持暫停，直到使用者明確按「繼續佇列」。
+沒有已知終態意圖的 `running` 會退回 `queued`，所有恢復工作保持暫停，直到使用者明確按「繼續佇列」。
 恢復及開始前都會驗證 `clips[].path`、片段音訊及 `audioPlan` 的來源；缺檔工作標為
 `missing-source`，不會靜默輸出缺字幕或缺素材的成品。恢復 app 自己持久化的工作時，才重新授予
 snapshot 中每個精確來源與輸出檔的能力；renderer 後來附加的 payload 路徑仍會被拒絕。格式或副檔名
 不符的工作會失敗，不能以錯誤容器交付。`done`／`failed`／`stopped` 是 **terminal**：
-`persistJob()` 寫完立刻刪檔、`loadJobs()` 讀到殘留的 terminal 記錄也會刪掉並跳過。
+它們不保留成可恢復的工作 JSON；舊 terminal JSON 即使殘留，`loadJobs()` 也會刪掉並跳過。
 **這是安全設計，不是疏漏**——它保證已完成的工作不會在重啟後被誤當 `queued` 重跑，
 以 `-y` 覆寫掉已經交付出去的成品（見 `tests/queueStore.test.js`）。
+
+終態會先寫入 `.queue-terminal-outcomes`，清除意圖會先寫入 `.queue-pending-deletes`；兩份
+journal 都必須成功寫入才會通知 renderer。啟動時會在任何工作進入 State 前，以 journal 與
+工作 JSON 一起復原／對帳：若 journal 損毀或無法讀取，佇列保持 fail-closed，避免把已完成或已清除的工作重新排程。
+成功交付的 log 與 ASS snapshot 可隨終態清理；`failed`／`stopped` 則把完整 frozen snapshot 留在
+outcome journal，重啟後還原成不可排程、但可重試／清除／開啟 log 的列。這些列的 ASS 與完整
+ffmpeg log 會保留到使用者明確清除；重試使用遞增 attempt，較新的 queued snapshot 在重啟時會勝過舊 outcome。
+關機時 runner 已知的 `done`／`failed`／`stopped` 若仍無法寫入 outcome journal，會保持 `stopping` 並**取消退出**；
+不可把它降回 `queued`，否則舊 snapshot 在下次啟動會重跑並覆寫可能已交付的輸出。反過來，已中斷的
+`stopping` 轉回 `queued` 後若 fallback snapshot 無法原子寫入，也會取消退出；否則 terminal tombstone
+可能讓該工作在重啟後整筆消失。
+這裡等待的是 queue runner 完整收尾，不只是 watchdog child 的 `completion`：後者之後仍可能在寫 log 並
+發出 `done`／`failed`，因此 runner 結束前不可把 `stopping` 轉成 `queued`。等待有上限；逾時會取消退出並
+維持 `stopping`，等 runner 真正收尾後才原子寫回 `queued`，絕不把未結清工作交給重啟猜測。
+使用者先按「停止」再關閉程式時，`stopped` 終態優先於 shutdown：關機只等待既有停止收尾，不能覆寫為
+可恢復的 `queued`。
 
 ### 匯出工作的狀態機（`electron/export-job-status.js`；v5.11.0 起）
 
@@ -185,8 +201,8 @@ snapshot 中每個精確來源與輸出檔的能力；renderer 後來附加的 p
   永遠不會選到，`OUTPUT_RESERVED_STATUSES` 也不含 `done`（不會擋住同路徑重新匯出）。
 - 上限 200 筆，超出丟最舊的。JSON 損毀或版本不符時**回空陣列而不是拋錯**——
   稽核資料不該擋住程式啟動。
-- `queue:clearJob`／`queue:clearCompleted` 必須**同時**清掉 `history.json`，
-  否則使用者清掉的紀錄下次啟動又會回來。
+- `queue:clearJob`／`queue:clearCompleted` 先寫待刪除 journal，再清掉 `history.json` 與工作暫存；
+  即使 Windows 暫時鎖住其中一個檔案，重啟復原也會完成清除，工作不會重新出現。
 
 ### 視窗關閉與轉檔中的工作
 

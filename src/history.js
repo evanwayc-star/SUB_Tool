@@ -15,7 +15,7 @@ import { emit, on } from './events.js';
 import { setStatus } from './ui.js';
 import { syncSubtitleCompareSession } from './subtitle-compare-session.js';
 
-function syncCompareSnapshot(){
+export function syncCompareSnapshot(){
   return syncSubtitleCompareSession({
     tracks: State.tracks,
     cues: State.cues,
@@ -117,9 +117,9 @@ const History = {
   undo(){ if(this.hi>0){ this.restore(this.hi-1); setStatus('已復原','ok'); } else setStatus('沒有可復原的動作',''); },
   redo(){ if(this.hi<this.stack.length-1){ this.restore(this.hi+1); setStatus('已重做','ok'); } else setStatus('沒有可重做的動作',''); },
 };
-function recordHistory(label){ 
+function recordHistory(label, { sync = true } = {}){
   History.record(label); 
-  syncCompareSnapshot();
+  if(sync) syncCompareSnapshot();
 }
 function renderHistory(){
   const el=$('historyList'); if(!el)return;

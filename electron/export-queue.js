@@ -52,7 +52,7 @@ function createExportQueue(deps) {
   const {
     dir, store, history, JOB_STATUS, isLiveWork, reservesOutput,
     admission, grantPersistedCapabilities, canReadSource, canWriteDelivery,
-    isFile, runJob, onChanged, onJobFailed, isRetryable, prepareDeliveryUpdate,
+    isFile, runJob, onChanged, onJobFailed, isRetryable, prepareDeliveryUpdate, shutdownRunnerTimeoutMs,
   } = deps;
   const state = deps.state || deps.createState?.();
   if (!state) throw new TypeError('匯出佇列需要 ExportQueueState');
@@ -64,6 +64,20 @@ function createExportQueue(deps) {
   let paused = false;
   let concurrency = 1;
   let activeCount = 0;
+  /* journal 已提交的終態等候 runner finally 清理；journal 寫失敗的終態則留在
+     記憶體待重試。在後者成功前 scheduler 必須整體停住，不能讓下一份工作越過它。 */
+  const persistedTerminalJobs = new Set();
+  const pendingTerminalMutations = new Map();
+  const pendingTerminalRunnerExited = new Set();
+  /* watchdog 的 completion 只代表 child 已結束；_runJobLogic 還可能在寫 log、發 terminal
+     progress，必須另外保有 queue runner promise，關機時才不會搶在終態前降回 queued。 */
+  const activeQueueRunners = new Map();
+  /* 關機開始時已存在的 runner 必須自行收尾，或由它的 finally 以 durable snapshot
+     轉回 queued；在此集合清空前，scheduler 不能開新工作。 */
+  const shutdownPendingRunners = new Set();
+  const runnerShutdownTimeoutMs = Number.isFinite(Number(shutdownRunnerTimeoutMs))
+    ? Math.max(1, Number(shutdownRunnerTimeoutMs))
+    : 5000;
 
   /* 所有會改 job 的 IPC 操作都先走這裡：先保留完整快照、再持久化，只有成功後
      才廣播和排程。這避免「畫面顯示 queued、磁碟仍是 failed」這種半套交易。 */
@@ -89,6 +103,66 @@ function createExportQueue(deps) {
       restoreJob(job, snapshot);
       return { ok: false, job, error };
     }
+  };
+  const journalledTerminal = status => [JOB_STATUS.DONE, JOB_STATUS.FAILED, JOB_STATUS.STOPPED].includes(status);
+  const retainsRetryRecord = status => [JOB_STATUS.FAILED, JOB_STATUS.STOPPED].includes(status);
+  const attemptOf = job => {
+    const attempt = Number(job?.attempt);
+    return Number.isSafeInteger(attempt) && attempt >= 0 ? attempt : 0;
+  };
+  const hasPendingJournalledTerminal = () =>
+    Array.from(pendingTerminalMutations.values()).some(pending => journalledTerminal(pending.status));
+  const unsafeShutdownError = () => new Error(
+    '終態 outcome journal 尚未保存；為避免重複執行或覆寫已交付輸出，已取消安全關閉。',
+  );
+  const unsafeShutdownSnapshotError = () => new Error(
+    '無法保存關機中的 queued snapshot；為避免遺失可恢復工作，已取消安全關閉。',
+  );
+  const unsafeShutdownRunnerError = () => new Error(
+    'queue runner 尚未在關機期限內收尾；為避免遺失終態，已取消安全關閉。',
+  );
+  const rememberPendingTerminal = (jobId, status, fields, error) => {
+    if (error) pendingTerminalMutations.set(jobId, { status, fields: fields ? cloneJob(fields) : null });
+  };
+  const persistTerminalStatus = (jobId, status, fields = null) => {
+    /* missing-source 是可恢復的診斷狀態，不是 runner 終態墓碑；維持既有 job snapshot
+       路徑，讓使用者重啟後仍能修來源再重試。 */
+    if (!journalledTerminal(status)) {
+      const committed = mutatePersistedJob(jobId, current => state.setStatus(current.id, status, fields));
+      if (committed.ok) pendingTerminalMutations.delete(jobId);
+      else rememberPendingTerminal(jobId, status, fields, committed.error);
+      return committed;
+    }
+
+    const job = state.get(jobId);
+    if (!job) return { ok: false, job: null, error: null };
+    const snapshot = cloneJob(job);
+    try {
+      if (!state.setStatus(jobId, status, fields)) return { ok: false, job, error: null };
+      if (status === JOB_STATUS.DONE && (!Number.isFinite(job.completedAt) || job.completedAt <= 0)) {
+        job.completedAt = Date.now();
+      }
+      /* 終態的 durable commit 是 journal，不是可能在 Windows 被鎖住的舊 job JSON。
+         因此 journal 寫成功後，就算 cleanup 暫時失敗也可在重啟時阻止 running 重跑。 */
+      store.stageTerminalOutcome(dir(), job);
+    } catch (error) {
+      restoreJob(job, snapshot);
+      rememberPendingTerminal(jobId, status, fields, error);
+      return { ok: false, job, error };
+    }
+    pendingTerminalMutations.delete(jobId);
+    persistedTerminalJobs.add(jobId);
+    return { ok: true, job, error: null };
+  };
+  const requeueInterruptedShutdownJob = jobId => {
+    const committed = mutatePersistedJob(jobId, current => state.setStatus(current.id, JOB_STATUS.QUEUED, {
+      pct: 0,
+      elapsedMs: 0,
+      etaS: null,
+      errorMsg: null,
+    }));
+    if (committed.ok) shutdownPendingRunners.delete(jobId);
+    return committed;
   };
 
   const queue = {
@@ -151,9 +225,9 @@ function createExportQueue(deps) {
       if (!d) return;
       let order = 0;
       for (const job of state.jobs()) {
-        /* 已完成的工作由 history 保存；交給 persistJob 只會寫完再刪（tombstone），
-           白費一次磁碟往返。 */
-        if (job.status === JOB_STATUS.DONE) continue;
+        /* 已完成工作由 history 保存；failed/stopped 則由 outcome journal 保存完整快照。
+           兩者交給 persistJob 都只會寫完再刪 terminal tombstone，白費磁碟往返。 */
+        if (job.status === JOB_STATUS.DONE || retainsRetryRecord(job.status)) continue;
         store.persistJob(d, job, order++);
       }
     },
@@ -161,18 +235,143 @@ function createExportQueue(deps) {
     /* 完成紀錄若不一起刪，清掉的工作下次啟動又會回來。 */
     forgetHistory(jobId) {
       const d = dir();
-      if (!d) return;
-      try { history.remove(d, jobId); } catch (e) { log(`無法從完成紀錄移除 ${jobId}：`, e); }
+      if (!d) return false;
+      try {
+        history.remove(d, jobId);
+        return true;
+      } catch (e) {
+        log(`無法從完成紀錄移除 ${jobId}：`, e);
+        return false;
+      }
     },
 
-    removeArtifacts(job, { removeAss = true } = {}) {
+    removeArtifacts(job, { removeAss = true, removeLog = true } = {}) {
       const d = dir();
-      if (!job || !d) return;
-      try { store.removeJobFile(d, job.id); } catch (e) { log(`無法刪除工作 ${job.id} 的快照：`, e); }
-      if (removeAss && job.assRef) {
-        try { store.removeAssFile(d, job.assRef); } catch (e) { log(`無法刪除工作 ${job.id} 的字幕暫存：`, e); }
+      if (!job || !d) return false;
+      try { store.removeJobFile(d, job.id); } catch (e) {
+        log(`無法刪除工作 ${job.id} 的快照：`, e);
+        return false;
       }
-      try { store.removeLogFile(d, job.id); } catch (e) { log(`無法刪除工作 ${job.id} 的失敗記錄：`, e); }
+      if (removeAss && job.assRef) {
+        try { store.removeAssFile(d, job.assRef); } catch (e) {
+          log(`無法刪除工作 ${job.id} 的字幕暫存：`, e);
+          return false;
+        }
+      }
+      if (removeLog) {
+        try { store.removeLogFile(d, job.id); } catch (e) {
+          log(`無法刪除工作 ${job.id} 的失敗記錄：`, e);
+          return false;
+        }
+      }
+      return true;
+    },
+
+    /* 終態 journal 的收尾：done 先寫不可執行的完成紀錄，再清工作檔；任一步失敗
+       都保留 journal，下一次啟動會重試，而且永遠不會把舊 running snapshot 拿去排程。 */
+    finalizeTerminalOutcome(job) {
+      const d = dir();
+      if (!job || !d) return false;
+      if (job.status === JOB_STATUS.DONE) {
+        try { history.append(d, job); } catch (error) {
+          log(`無法寫入完成紀錄 ${job.id}：`, error);
+          return false;
+        }
+      }
+      /* D3/D8：failed/stopped 的 outcome 本身就是跨重啟的可重試記錄；保留 frozen
+         ASS／完整 log／journal，只有成功交付可以連同 outcome 一起刪掉。 */
+      const delivered = job.status === JOB_STATUS.DONE;
+      if (!this.removeArtifacts(job, { removeAss: delivered, removeLog: delivered })) return false;
+      if (retainsRetryRecord(job.status)) return true;
+      try {
+        store.resolveTerminalOutcomes(d, [job.id]);
+        return true;
+      } catch (error) {
+        log(`無法結清工作 ${job.id} 的終態 journal：`, error);
+        return false;
+      }
+    },
+
+    recoverTerminalOutcomes(loadedJobs = [], journalOutcomes = null) {
+      const d = dir();
+      const outcomes = Array.isArray(journalOutcomes) ? journalOutcomes : store.loadTerminalOutcomes(d);
+      const newestPersistedJob = new Map();
+      for (const job of loadedJobs) {
+        const previous = newestPersistedJob.get(job.id);
+        if (!previous || attemptOf(job) > attemptOf(previous)) newestPersistedJob.set(job.id, job);
+      }
+      const activeOutcomes = [];
+      for (const outcome of outcomes) {
+        const newer = newestPersistedJob.get(outcome.id);
+        /* 重試的新 snapshot 先成功原子寫入、後面才清舊 outcome；若剛好在兩步中斷，
+           generation 較大的 queued attempt 必須贏，否則舊 tombstone 會吃掉新工作。 */
+        if (newer && attemptOf(newer) > attemptOf(outcome)) {
+          try { store.resolveTerminalOutcomes(d, [outcome.id]); } catch (error) {
+            log(`無法結清舊 attempt ${outcome.id} 的終態 journal：`, error);
+          }
+          continue;
+        }
+        this.finalizeTerminalOutcome(outcome);
+        activeOutcomes.push(outcome);
+      }
+      return activeOutcomes;
+    },
+
+    recoverPendingDeletes() {
+      const d = dir();
+      const deletes = store.loadPendingDeletes(d);
+      /* 使用者明確清除優先於尚未收尾的 done outcome：先取消 outcome journal，避免
+         下一次重啟又把完成紀錄補回來。刪除 intent 本身已落盤，取消失敗就保留它重試。 */
+      const terminalOutcomes = new Map(store.loadTerminalOutcomes(d).map(outcome => [outcome.id, outcome]));
+      const ids = new Set(deletes.map(entry => entry.id));
+      const resolved = [];
+      for (const entry of deletes) {
+        const outcome = terminalOutcomes.get(entry.id);
+        /* history 還原的 done card 不含 assRef；若它和未收尾 outcome 同時存在，
+           要先把原本的 ASS 參照升級寫回 delete journal，才能在 Windows 鎖檔後重啟續刪。 */
+        let cleanupEntry = entry;
+        if (!cleanupEntry.assRef && outcome?.assRef) {
+          cleanupEntry = { ...entry, assRef: outcome.assRef };
+          try {
+            store.stagePendingDeletes(d, [cleanupEntry]);
+          } catch (error) {
+            log(`無法補強工作 ${entry.id} 的待刪除 journal：`, error);
+            continue;
+          }
+        }
+        if (outcome) {
+          try {
+            store.resolveTerminalOutcomes(d, [entry.id]);
+            terminalOutcomes.delete(entry.id);
+          } catch (error) {
+            log(`無法取消工作 ${entry.id} 的終態 journal：`, error);
+            continue;
+          }
+        }
+        if (this.removeArtifacts(cleanupEntry) && this.forgetHistory(entry.id)) resolved.push(entry.id);
+      }
+      if (resolved.length) {
+        try { store.resolvePendingDeletes(d, resolved); } catch (error) {
+          /* 即使 journal 自身暫時無法清空，已完成的刪除仍可安全重做；不可把 State 加回去。 */
+          log('無法結清待刪除 journal：', error);
+        }
+      }
+      return ids;
+    },
+
+    stageDeletion(jobs) {
+      const d = dir();
+      if (!d || !Array.isArray(jobs) || !jobs.length) return false;
+      try { store.stagePendingDeletes(d, jobs); } catch (error) {
+        log('無法保存待刪除 journal：', error);
+        return false;
+      }
+      for (const job of jobs) state.remove(job.id);
+      try { this.recoverPendingDeletes(); } catch (error) {
+        /* 清理可延後；stagePendingDeletes 已是對使用者可見的 durable commit。 */
+        log('無法立即清理待刪除工作：', error);
+      }
+      return true;
     },
 
     /* ── 執行前的來源檢查 ───────────────────────────────────────────── */
@@ -221,6 +420,26 @@ function createExportQueue(deps) {
         job.sourcePaths = inspected.sourcePaths;
         return true;
       }
+      /* 不能執行的交付格式／輸出能力是可重試的 failed，而不是普通 job JSON 的墓碑。
+         它和 runner 回報的 failed 一樣必須先寫 outcome，否則 queue-store 會清掉 terminal
+         JSON，重啟後這筆失敗列便消失。missing-source 仍走一般 snapshot，讓使用者補回來源。 */
+      if (inspected.status === JOB_STATUS.FAILED) {
+        const committed = persistTerminalStatus(job.id, JOB_STATUS.FAILED, {
+          sourcePaths: inspected.sourcePaths,
+          errorMsg: inspected.errorMsg,
+        });
+        if (!committed.ok) {
+          if (committed.error) log(`無法保存工作 ${job.id} 的來源檢查失敗：`, committed.error);
+          return false;
+        }
+        /* 這條路沒有 runner finally；journal 已是 durable commit，接著只盡力清舊 JSON。
+           即使 Windows 暫時鎖住，retryJob 仍會以 journal fence 重試收尾。 */
+        if (!this.finalizeTerminalOutcome(committed.job)) {
+          log(`無法收尾工作 ${job.id} 的來源檢查失敗 outcome`);
+        }
+        persistedTerminalJobs.delete(job.id);
+        return false;
+      }
       const committed = mutatePersistedJob(job.id, current => {
         current.sourcePaths = inspected.sourcePaths;
         return state.setStatus(current.id, inspected.status, { errorMsg: inspected.errorMsg });
@@ -234,16 +453,38 @@ function createExportQueue(deps) {
       if (this.shuttingDown) return false;
       const job = state.get(jobId);
       if (!job || typeof isRetryable !== 'function' || !isRetryable(job.status)) return false;
+      /* outcome journal 還在時，舊 attempt 的 tombstone 仍會在重啟時壓過同 id 的
+         queued snapshot。先清好舊 artifacts，再以遞增 attempt 原子寫入新 snapshot；
+         journal 清理失敗也不會造成 ABA，因為啟動時 generation 較新的工作必須勝出。 */
+      if (persistedTerminalJobs.has(jobId)) return false;
+      let outcome;
+      try {
+        outcome = store.loadTerminalOutcomes(dir()).find(entry => entry.id === jobId) || null;
+      } catch (error) {
+        log(`無法讀取重試工作 ${jobId} 的終態 journal：`, error);
+        return false;
+      }
+      if (outcome) {
+        if (outcome.status !== job.status || !this.finalizeTerminalOutcome(outcome)) return false;
+      }
+      const nextAttempt = Math.max(attemptOf(job), attemptOf(outcome)) + 1;
       const inspected = this.inspectSources(job);
       if (!inspected.ok) return false;
       try { admission.assertOutputAvailable(job); } catch (error) { return false; }
       const committed = mutatePersistedJob(jobId, current => {
         current.sourcePaths = inspected.sourcePaths;
+        current.attempt = nextAttempt;
         return state.retry(current.id);
       });
       if (!committed.ok) {
         if (committed.error) log(`無法保存重試工作 ${jobId}：`, committed.error);
         return false;
+      }
+      if (outcome) {
+        try { store.resolveTerminalOutcomes(dir(), [jobId]); } catch (error) {
+          /* 新 attempt 已落盤；保留舊 journal 也安全，restore 會由較大的 attempt 收斂它。 */
+          log(`無法結清重試工作 ${jobId} 的舊終態 journal：`, error);
+        }
       }
       onChanged();
       this.processQueue();
@@ -254,11 +495,15 @@ function createExportQueue(deps) {
       const job = state.get(jobId);
       if (!job) return false;
       if (job.status === JOB_STATUS.QUEUED) {
-        const committed = mutatePersistedJob(jobId, current => state.stop(current.id));
+        /* queued→stopped 沒有 runner finally 可替它補 journal；同樣要走終態交易，
+           才能跨重啟留下可重試的 frozen snapshot。 */
+        const committed = persistTerminalStatus(jobId, JOB_STATUS.STOPPED);
         if (!committed.ok) {
           if (committed.error) log(`無法保存工作 ${jobId} 的停止狀態：`, committed.error);
           return false;
         }
+        this.finalizeTerminalOutcome(committed.job);
+        persistedTerminalJobs.delete(jobId);
         onChanged();
         this.processQueue();
         return true;
@@ -303,21 +548,15 @@ function createExportQueue(deps) {
     clearJob(jobId) {
       const job = state.get(jobId);
       if (!job || isLiveWork(job.status)) return false;
-      this.removeArtifacts(job);
-      this.forgetHistory(jobId);
-      state.remove(jobId);
+      if (!this.stageDeletion([job])) return false;
       onChanged();
       return true;
     },
 
     clearCompleted() {
       const completed = state.jobs().filter(job => job.status === JOB_STATUS.DONE);
-      for (const job of completed) {
-        this.removeArtifacts(job);
-        state.remove(job.id);
-      }
-      try { history.clear?.(dir()); } catch (error) { log('無法清除完成紀錄：', error); }
-      if (completed.length) onChanged();
+      if (!completed.length || !this.stageDeletion(completed)) return 0;
+      onChanged();
       return completed.length;
     },
 
@@ -343,14 +582,22 @@ function createExportQueue(deps) {
     reportProgress(jobId, data = {}) {
       const job = state.get(jobId);
       if (!job) return false;
-      if (data.done) {
-        if (!state.setStatus(jobId, JOB_STATUS.DONE)) return false;
-        if (!Number.isFinite(job.completedAt) || job.completedAt <= 0) job.completedAt = Date.now();
-      } else if (data.error) {
-        if (!state.setStatus(jobId, JOB_STATUS.FAILED, { errorMsg: data.errorMsg })) return false;
-        if (onJobFailed) { try { onJobFailed(job); } catch (error) {} }
-      } else if (data.stopped) {
-        if (!state.setStatus(jobId, JOB_STATUS.STOPPED)) return false;
+      const terminal = data.done ? JOB_STATUS.DONE
+        : data.error ? JOB_STATUS.FAILED
+          : data.stopped ? JOB_STATUS.STOPPED
+            : null;
+
+      /* 進度是短生命的 UI 資料；終態卻會決定重啟恢復、輸出 lease 與下一份工作，
+      因此必須和所有其他 mutation 一樣先落盤。runJob 的 finally 仍負責完成紀錄
+         與 artifacts 清理，但監控視窗絕不能先看見尚未保存的 done／failed／stopped。 */
+      if (terminal) {
+        const fields = terminal === JOB_STATUS.FAILED ? { errorMsg: data.errorMsg } : null;
+        const committed = persistTerminalStatus(jobId, terminal, fields);
+        if (!committed.ok) {
+          if (committed.error) log(`無法保存工作 ${jobId} 的終態：`, committed.error);
+          return false;
+        }
+        if (terminal === JOB_STATUS.FAILED && onJobFailed) { try { onJobFailed(job); } catch (error) {} }
       } else {
         job.pct = data.pct;
         job.elapsedMs = data.elapsedMs;
@@ -360,12 +607,80 @@ function createExportQueue(deps) {
       return true;
     },
 
+    retryPendingTerminalMutations({ terminalOnly = false } = {}) {
+      const pendingEntries = Array.from(pendingTerminalMutations.entries())
+        .filter(([, pending]) => !terminalOnly || journalledTerminal(pending.status));
+      if (!pendingEntries.length) return true;
+      for (const [jobId, pending] of pendingEntries) {
+        const runnerExited = pendingTerminalRunnerExited.delete(jobId);
+        const committed = persistTerminalStatus(jobId, pending.status, pending.fields);
+        if (!committed.ok) {
+          if (runnerExited) pendingTerminalRunnerExited.add(jobId);
+          if (committed.error) log(`無法重試保存工作 ${jobId} 的終態：`, committed.error);
+          return false;
+        }
+        if (pending.status === JOB_STATUS.FAILED && onJobFailed) { try { onJobFailed(committed.job); } catch (error) {} }
+        if (journalledTerminal(pending.status) && runnerExited) {
+          /* 原 runner 的 finally 已提前退出；現在由這裡做收尾。無論 cleanup 是否暫時
+             失敗，都釋放 lifecycle marker，讓 retryJob 以 journal fence 再次嘗試。 */
+          this.finalizeTerminalOutcome(committed.job);
+          persistedTerminalJobs.delete(jobId);
+          shutdownPendingRunners.delete(jobId);
+        }
+      }
+      onChanged();
+      return true;
+    },
+
+    /* timeout 後 runner 已經結束、但第一次 queued fallback 寫入失敗時，不能只等下一次
+       關機才再試。這個小恢復步驟在 scheduler 入口先跑；未結束的 runner 仍保留 fence。 */
+    retryShutdownSnapshots() {
+      for (const jobId of Array.from(shutdownPendingRunners)) {
+        const job = state.get(jobId);
+        if (!job || job.status !== JOB_STATUS.STOPPING) {
+          shutdownPendingRunners.delete(jobId);
+          continue;
+        }
+        if (activeQueueRunners.has(jobId)) continue;
+        const committed = requeueInterruptedShutdownJob(jobId);
+        if (!committed.ok) {
+          if (committed.error) log(`無法重試保存工作 ${jobId} 的 queued snapshot：`, committed.error);
+          return false;
+        }
+      }
+      return true;
+    },
+
     /* ── 重啟後恢復 ─────────────────────────────────────────────────── */
     restoreJobs() {
       const d = this.ensureDir();
-      const { jobs, warnings } = store.loadJobs(d);
+      let jobs;
+      let warnings;
+      let journalOutcomes;
+      let terminalOutcomes;
+      let pendingDeleteIds;
+      try {
+        pendingDeleteIds = this.recoverPendingDeletes();
+        /* 先驗 journal 再讀 terminal JSON：若 stopping tombstone 與 stopped outcome 共用
+           ASS，queue-store 必須知道這份 ASS 正受 journal 保護，不能提早清掉。 */
+        journalOutcomes = store.loadTerminalOutcomes(d);
+        ({ jobs, warnings } = store.loadJobs(d, {
+          protectedAssRefs: journalOutcomes.map(outcome => outcome.assRef).filter(Boolean),
+        }));
+        terminalOutcomes = this.recoverTerminalOutcomes(jobs, journalOutcomes);
+      } catch (error) {
+        /* journal 損毀時不知道哪些工作已被清除或已完成；不猜、更不能讓它們重跑。 */
+        state.load([]);
+        paused = true;
+        log('無法恢復匯出交易 journal，已安全停止排程：', error);
+        return;
+      }
+      const terminalOutcomeIds = new Set(terminalOutcomes.map(outcome => outcome.id));
+      const suppressedIds = new Set([...terminalOutcomeIds, ...pendingDeleteIds]);
       state.load([]);
+      let restorableCount = 0;
       for (const job of jobs) {
+        if (suppressedIds.has(job.id)) continue;
         delete job._persistOrder;
         grantPersistedCapabilities(job);
         /* 依持久化順序逐一加入，才能在碰到舊版重複輸出路徑時保留第一份、
@@ -376,18 +691,42 @@ function createExportQueue(deps) {
           try {
             admission.assertOutputAvailable(job);
           } catch (error) {
-            state.setStatus(job.id, JOB_STATUS.FAILED, { errorMsg: error.message || String(error) });
+            /* 還原時才發現的 output collision 也是可重試 failed；不能直接改 State，
+               否則 persistAll 會略過 terminal JSON，下一次重啟這筆列就不見。 */
+            const committed = persistTerminalStatus(job.id, JOB_STATUS.FAILED, {
+              errorMsg: error.message || String(error),
+            });
+            if (!committed.ok) {
+              if (committed.error) log(`無法保存恢復工作 ${job.id} 的輸出衝突：`, committed.error);
+            } else {
+              if (!this.finalizeTerminalOutcome(committed.job)) {
+                log(`無法收尾恢復工作 ${job.id} 的輸出衝突 outcome`);
+              }
+              persistedTerminalJobs.delete(job.id);
+            }
           }
         }
+        /* 來源缺失仍要讓使用者看見開機暫停；但剛轉成 failed 的 outcome 已不可排程，
+           不該讓它單獨把佇列鎖在「等待繼續」的假狀態。 */
+        if (job.status === JOB_STATUS.QUEUED || job.status === JOB_STATUS.MISSING_SOURCE) restorableCount += 1;
+      }
+      /* failed/stopped 不是可排程 snapshot，卻是 D3/D8 的可操作失敗紀錄：journal 裡
+         保留完整 payload/ASS 參照，重啟後也必須回到同一個 State collection，才能重試、
+         清除與開啟完整 log。 */
+      for (const outcome of terminalOutcomes) {
+        if (pendingDeleteIds.has(outcome.id) || !retainsRetryRecord(outcome.status) || state.get(outcome.id)) continue;
+        grantPersistedCapabilities(outcome);
+        state.add({ ...outcome, senderId: null, pct: 0, etaS: null });
       }
       /* 只有「還能執行的工作」才需要開機暫停等使用者確認；完成紀錄不該讓佇列開機即暫停。
          這一行在完成紀錄載回來之前算，順序不可對調。 */
-      paused = jobs.length > 0;
+      paused = restorableCount > 0 || pendingTerminalMutations.size > 0;
       /* 完成紀錄以 done 身分放回同一個 collection，讓監控畫面重啟後看起來和關閉前一樣。
          它們沒有 payload.clips / audioPlan，nextQueued() 也永遠不會選到 done，
          因此不可能被重跑——queue-store 的 terminal tombstone 安全性質不受影響。 */
       try {
         for (const entry of history.load(d)) {
+          if (pendingDeleteIds.has(entry.id)) continue;
           if (state.get(entry.id)) continue;
           state.add({ ...entry, senderId: null, pct: 100, etaS: null, errorMsg: null });
         }
@@ -396,7 +735,7 @@ function createExportQueue(deps) {
         log(`略過無法恢復的工作 ${warning.filePath}：${warning.message}`);
       }
       try {
-        store.cleanupOrphanAssFiles(d, jobs.map(job => job.assRef).filter(Boolean));
+        store.cleanupOrphanAssFiles(d, state.jobs().map(job => job.assRef).filter(Boolean));
         this.persistAll(); // running 一律落回 queued，並保存最新 missing-source 檢查結果。
       } catch (e) { log('整理恢復後的工作失敗：', e); }
     },
@@ -404,24 +743,37 @@ function createExportQueue(deps) {
     /* ── 關機收尾 ───────────────────────────────────────────────────── */
     prepareForShutdown() {
       if (this.shutdownPromise) return this.shutdownPromise;
+      /* runner 已經報告 done／failed／stopped 卻暫時寫不進 journal 時，RAM 內的
+         pending intent 是唯一知道「輸出可能已交付」的證據。關機若把它降成 queued，
+         下次啟動會以 -y 重跑並覆寫成品；先重試，仍失敗就拒絕退出。 */
+      if (hasPendingJournalledTerminal() && !this.retryPendingTerminalMutations({ terminalOnly: true })) {
+        paused = true;
+        onChanged();
+        return Promise.reject(unsafeShutdownError());
+      }
       this.shuttingDown = true;
       paused = true;
       const closingProcesses = [];
+      const closingRunners = [];
       for (const job of state.jobs()) {
         if (!isLiveWork(job.status)) continue;
+        shutdownPendingRunners.add(job.id);
+        /* shutdown 的中斷期保持 stopping：晚到的 done／failed 仍可合法寫入 outcome，
+           而 queue runner catch 也知道這不是使用者要求的 failed。確認程序結束且沒有
+           pending terminal 後，才在下方把它落回 queued。 */
         if (job.status === JOB_STATUS.RUNNING) {
-          state.setStatus(job.id, JOB_STATUS.QUEUED, {
-            pct: 0,
-            elapsedMs: 0,
-            etaS: null,
-            errorMsg: null,
-          });
+          state.setStatus(job.id, JOB_STATUS.STOPPING);
         }
+        const runner = activeQueueRunners.get(job.id);
+        if (runner) closingRunners.push(Promise.resolve(runner).catch(() => {}));
         const active = activeJobs.get(job.id);
         if (!active?.p) continue;
-        active.shutdown = true;
+        const alreadyStopped = !!active.stopped;
+        if (!alreadyStopped) active.shutdown = true;
         if (typeof active.stop === 'function') {
-          try { active.stop('shutdown'); } catch (e) {}
+          if (!alreadyStopped) {
+            try { active.stop('shutdown'); } catch (e) {}
+          }
           const completion = Promise.resolve(active.completion).catch(() => {});
           closingProcesses.push(Promise.race([
             completion,
@@ -439,15 +791,55 @@ function createExportQueue(deps) {
             const timer = setTimeout(done, 3000);
             active.p.once('close', done);
             if (active.p.exitCode !== null) done();
-            else { try { active.p.kill(); } catch (e) { done(); } }
+            else if (!alreadyStopped) { try { active.p.kill(); } catch (e) { done(); } }
           }));
         }
       }
-      try { this.persistAll(); } catch (e) {
-        // 即使磁碟暫時不可寫，也必須繼續等待 ffmpeg 關閉並清掉半成品。
-        log('關閉前無法更新工作快照：', e);
-      }
-      this.shutdownPromise = (async () => { await Promise.all(closingProcesses); })();
+      const shutdown = (async () => {
+        await Promise.all(closingProcesses);
+        /* watchdog controller 關閉後，_runJobLogic 仍可能 await finishLog() 才 dispatch done。
+           必須等 queue runner 的 finally 也結束，否則 STOPPING→QUEUED 會讓晚到 done
+           變成非法轉移、遺失唯一的 terminal intent。 */
+        if (closingRunners.length) {
+          let runnerTimer;
+          const runnersSettled = await Promise.race([
+            Promise.all(closingRunners).then(() => true, () => false),
+            new Promise(resolve => { runnerTimer = setTimeout(() => resolve(false), runnerShutdownTimeoutMs); }),
+          ]);
+          clearTimeout(runnerTimer);
+          if (!runnersSettled) throw unsafeShutdownRunnerError();
+        }
+        if (hasPendingJournalledTerminal() && !this.retryPendingTerminalMutations({ terminalOnly: true })) {
+          throw unsafeShutdownError();
+        }
+        for (const job of state.jobs()) {
+          if (!shutdownPendingRunners.has(job.id)) continue;
+          if (job.status !== JOB_STATUS.STOPPING) {
+            shutdownPendingRunners.delete(job.id);
+            continue;
+          }
+          const committed = requeueInterruptedShutdownJob(job.id);
+          if (!committed.ok) {
+            if (committed.error) log(`關閉前無法保存工作 ${job.id} 的 queued snapshot：`, committed.error);
+            throw unsafeShutdownSnapshotError();
+          }
+        }
+        try { this.persistAll(); } catch (e) {
+          /* 已確認沒有未保存的終態，仍不能把沒有 snapshot 的 stopping tombstone 留給重啟。
+             只有 queued fallback durable 後才可退出；否則這筆被中斷工作會整筆消失。 */
+          log('關閉前無法更新工作快照：', e);
+          throw unsafeShutdownSnapshotError();
+        }
+      })();
+      this.shutdownPromise = shutdown;
+      shutdown.catch(() => {
+        if (this.shutdownPromise !== shutdown) return;
+        /* 保持 pause，讓使用者恢復磁碟後可再次嘗試；不能留下 shuttingDown 鎖死 UI。 */
+        this.shutdownPromise = null;
+        this.shuttingDown = false;
+        paused = true;
+        onChanged();
+      });
       return this.shutdownPromise;
     },
 
@@ -469,6 +861,11 @@ function createExportQueue(deps) {
 
     async processQueue() {
       if (paused || this.shuttingDown) return;
+      if (!this.retryPendingTerminalMutations()) return;
+      if (!this.retryShutdownSnapshots()) return;
+      /* timeout 後仍要先允許既有 terminal journal recovery 清掉 fence；但在仍有
+         未收尾 runner 時，不能開始任何新工作。 */
+      if (shutdownPendingRunners.size) return;
       while (activeCount < concurrency) {
         const job = state.nextQueued();
         if (!job) break;
@@ -490,35 +887,76 @@ function createExportQueue(deps) {
         activeCount++;
         onChanged();
 
-        (async () => {
+        const runner = (async () => {
           try {
             await runJob(job);
           } catch (e) {
             log(`Job ${job.id} error:`, e);
-            if (!(this.shuttingDown && (job.status === JOB_STATUS.QUEUED || job.status === JOB_STATUS.STOPPING))) {
+            const alreadyTerminal = [JOB_STATUS.DONE, JOB_STATUS.FAILED, JOB_STATUS.STOPPED, JOB_STATUS.MISSING_SOURCE]
+              .includes(job.status);
+            if (!alreadyTerminal && !(this.shuttingDown && (job.status === JOB_STATUS.QUEUED || job.status === JOB_STATUS.STOPPING))) {
               const status = e.code === 'MISSING_SOURCE' ? JOB_STATUS.MISSING_SOURCE : JOB_STATUS.FAILED;
-              if (state.setStatus(job.id, status, { errorMsg: e.message || String(e) })) {
+              const committed = persistTerminalStatus(job.id, status, { errorMsg: e.message || String(e) });
+              if (!committed.ok) {
+                if (committed.error) log(`無法保存工作 ${job.id} 的終態：`, committed.error);
+              } else if (status === JOB_STATUS.FAILED) {
                 if (onJobFailed) { try { onJobFailed(job); } catch (e2) {} }
               }
             }
           } finally {
             activeCount--;
+            /* reportProgress(done) 後 runner 仍可能在收尾；使用者此時已明確清除，
+               pending-delete journal 優先，不能讓晚到 finally 再寫回 history。 */
+            if (!state.get(job.id)) {
+              persistedTerminalJobs.delete(job.id);
+              pendingTerminalMutations.delete(job.id);
+              pendingTerminalRunnerExited.delete(job.id);
+              shutdownPendingRunners.delete(job.id);
+              if (!this.shuttingDown) this.processQueue();
+              return;
+            }
+            /* 終態的 rollback 代表磁碟仍是 running；此時廣播或排下一份都會讓 UI／
+               排程宣稱不存在的交易已完成。保留該筆工作，待磁碟可寫或重啟後再恢復。 */
+            if (pendingTerminalMutations.has(job.id)) {
+              pendingTerminalRunnerExited.add(job.id);
+              return;
+            }
             try {
-              this.persistJob(job);
-              if (job.status === JOB_STATUS.DONE) {
-                // 半成品與字幕暫存照樣清掉；只把「這份交付完成過」這件事留成紀錄。
-                this.removeArtifacts(job);
-                try { history.append(dir(), job); } catch (historyError) {
-                  log(`無法寫入完成紀錄 ${job.id}：`, historyError);
-                }
+              /* reportProgress／catch 的終態已先記入 journal；finally 只做可重試清理。
+                 舊 adapter 若直接 mutation，仍保守保留原本的 job snapshot 行為。 */
+              if (persistedTerminalJobs.delete(job.id)) {
+                this.finalizeTerminalOutcome(job);
+                shutdownPendingRunners.delete(job.id);
               }
-            } catch (e) { log(`無法更新工作 ${job.id} 的持久化狀態：`, e); }
+              /* prepareForShutdown 會在所有 runner 收尾後才把 stopping 落回 queued。
+                 此刻若交給 queue-store 寫 stopping，terminal tombstone 規則可能先刪掉
+                 唯一的 running snapshot；強制中止時便會讓工作無從恢復。 */
+              else if (shutdownPendingRunners.has(job.id) && job.status === JOB_STATUS.STOPPING) {
+                /* runner 一旦真正結束，就已沒有晚到 terminal 的窗口；無論關機 promise
+                   是否剛 timeout，都由它自己原子寫回 queued，不能持久化 stopping tombstone。 */
+                const committed = requeueInterruptedShutdownJob(job.id);
+                if (!committed.ok) {
+                  paused = true;
+                  if (committed.error) log(`無法保存工作 ${job.id} 的延後 queued snapshot：`, committed.error);
+                }
+              } else this.persistJob(job);
+            } catch (e) {
+              log(`無法更新工作 ${job.id} 的持久化狀態：`, e);
+              return;
+            }
             if (!this.shuttingDown) {
               onChanged();
               this.processQueue();
             }
           }
         })();
+        activeQueueRunners.set(job.id, runner);
+        /* 即使 runner 在第一個 await 前同步失敗，then 也會在本輪結束後清掉 map；
+           prepareForShutdown 同時持有自己的 snapshot，因此不會漏等已開始的收尾。 */
+        runner.then(
+          () => { if (activeQueueRunners.get(job.id) === runner) activeQueueRunners.delete(job.id); },
+          () => { if (activeQueueRunners.get(job.id) === runner) activeQueueRunners.delete(job.id); },
+        );
       }
     },
   };

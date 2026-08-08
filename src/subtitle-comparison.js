@@ -6,7 +6,7 @@
    必須在這個純資料 module 保持同一個 locality。這裡不碰 DOM、IPC 或 State。
 */
 import { STYLE_DEFAULTS, effStyle } from './substyle.js';
-import { getExactFps, secToEncore } from './time.js';
+import { getExactFps, secToEncore, snapTimeToFrame } from './time.js';
 
 export const SUBTITLE_COMPARE_TOLERANCE_SECONDS = 1;
 
@@ -29,8 +29,9 @@ function normaliseChecks(checks = {}) {
   };
 }
 
-export function subtitleFrameIndex(time, fps) {
-  return Math.round(asFiniteTime(time) * getExactFps(fps));
+export function subtitleFrameIndex(time, fps, dropFrame = false) {
+  const snapped = snapTimeToFrame(asFiniteTime(time), fps, dropFrame);
+  return Math.round(snapped * getExactFps(fps));
 }
 
 function cueView(cue, trackIndex, fps, dropFrame) {
@@ -94,8 +95,8 @@ function comparisonRow(pair, { leftTrack, rightTrack, tracks, fps, dropFrame, ch
   const right = cueView(pair.right, rightTrack, fps, dropFrame);
   const missing = !left || !right;
   const time = !missing && (
-    subtitleFrameIndex(left.start, fps) !== subtitleFrameIndex(right.start, fps)
-    || subtitleFrameIndex(left.end, fps) !== subtitleFrameIndex(right.end, fps)
+    subtitleFrameIndex(left.start, fps, dropFrame) !== subtitleFrameIndex(right.start, fps, dropFrame)
+    || subtitleFrameIndex(left.end, fps, dropFrame) !== subtitleFrameIndex(right.end, fps, dropFrame)
   );
   const text = !missing && left.text !== right.text;
   const style = !missing

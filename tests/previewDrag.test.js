@@ -230,17 +230,6 @@ describe('圖片疊層：結束拖曳', () => {
     expect(d.imageDrag()).toBe(null);
   });
 
-  /* mpv 疊層那條路的指標事件來自主程序，與 DOM 那條可能同時在跑。
-     source 不符時不可把別人的拖曳收掉。 */
-  it('來源不符時不結束別人的拖曳', () => {
-    const d = makeDrag();
-    d.startImageDrag({ id: 'i1', x: 0, y: 0, source: 'mpv' });
-    d.finishImageDrag(null, 'dom');
-    expect(d.imageDrag()).not.toBe(null);
-    d.finishImageDrag(null, 'mpv');
-    expect(d.imageDrag()).toBe(null);
-  });
-
   it('兩個實例互不干擾（工廠化的重點）', () => {
     const a = makeDrag(), b = makeDrag();
     a.startImageDrag({ id: 'i1', x: 0, y: 0 });

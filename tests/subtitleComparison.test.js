@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { buildSubtitleComparisonPlan } from '../src/subtitle-comparison.js';
+import { buildSubtitleComparisonPlan, subtitleFrameIndex } from '../src/subtitle-comparison.js';
+import { getExactFps, snapTimeToFrame } from '../src/time.js';
 
 describe('字幕比對 plan', () => {
+  it('影格比對使用 time.js 的唯一吸附格網', () => {
+    const fps = 29.97;
+    const time = 10.016;
+
+    expect(subtitleFrameIndex(time, fps)).toBe(
+      Math.round(snapTimeToFrame(time, fps) * getExactFps(fps)),
+    );
+  });
+
   it('使用 canonical 29.97 NDF 時碼，而不是牆鐘秒數自行格式化', () => {
     const plan = buildSubtitleComparisonPlan({
       tracks: [{ name: 'A' }, { name: 'B' }],

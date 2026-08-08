@@ -47,7 +47,7 @@ import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboa
 import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDir, confirmDiscardUnsaved } from './project.js';
 import { Seq } from './sequence.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
-import { History, recordHistory, renderHistory } from './history.js';
+import { History, recordHistory, renderHistory, syncCompareSnapshot } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct, styleMatchesPreset, pruneRedundantCueStyle } from './substyle.js'; // v4.23 字幕樣式系統
@@ -881,8 +881,11 @@ function initUI(){
     if(!t.cues.length && changed) t.trk[k]=v;
     if(!changed) return;
     styleChanged();
+    // 樣式 history 會合併 500ms 內的輸入，但 compare 的 snapshot 不能等到那時；
+    // 否則舊視窗的 stable-ID command 會在這段空窗套到已改過的 project 上。
+    syncCompareSnapshot();
     clearTimeout(_tsSetTimer);
-    _tsSetTimer = setTimeout(() => recordHistory('修改字幕樣式'), 500);
+    _tsSetTimer = setTimeout(() => recordHistory('修改字幕樣式', { sync: false }), 500);
   };
   $('tsSize').addEventListener('input',e=>tsSet('fontSize', clamp(+e.target.value,10,300)));
   $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
@@ -1295,7 +1298,7 @@ function initPresetLibrary(){
     // 同步：進入前就符合舊樣式的，一起換成新樣式
     let n=0;
     for(const i of E.targets.tracks){ if(State.tracks[i]){ Object.assign(State.tracks[i],draft); n++; } }
-    for(const c of E.targets.cues){ c.style=Object.assign({},draft); n++; }
+    for(const c of E.targets.cues){ applyCueStylePatch(c, draft); n++; }
     styleChanged(); recordHistory('編輯常用樣式：'+E.name);
     showToast(`已更新「${E.name}」` + (n?`，同步 ${n} 處`:'（目前沒有套用它的字幕）'));
   }

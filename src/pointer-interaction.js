@@ -35,12 +35,12 @@ export function createPreviewDrag(deps = {}) {
   let _imgDrag = null;
   let _subDrag = null;
 
-  function startImageDrag({ id, corner=null, x, y, pointerId=null, captureTarget=null, source='dom' }) {
+  function startImageDrag({ id, corner=null, x, y, pointerId=null, captureTarget=null }) {
   const clip = Seq.byId(id);
   const rect = ctx.getStageRect();
   if(!clip || clip.type !== 'image' || !rect?.w || !rect?.h || State.videoTracks[clip.vtrack || 0]?.locked) return false;
   _imgDrag = {
-    clip, rect, x0:x, y0:y, pointerId, captureTarget, source,
+    clip, rect, x0:x, y0:y, pointerId, captureTarget,
     origPosX: clip.posX ?? 0.5, origPosY: clip.posY ?? 0.5, origScale: clip.scale ?? 1,
     origBox: ctx.imageBoxOf(clip, rect),
     corner
@@ -73,8 +73,8 @@ export function createPreviewDrag(deps = {}) {
   ctx.renderVideoSub();
 }
 
-  function finishImageDrag(pointerId=null, source=null) {
-  const d = _imgDrag; if(!d || (source && d.source !== source)) return;
+  function finishImageDrag(pointerId=null) {
+  const d = _imgDrag; if(!d) return;
   _imgDrag = null;
   const layer = document.getElementById('imageLayer');
   layer?.classList.remove('dragging');
@@ -103,24 +103,24 @@ export function createPreviewDrag(deps = {}) {
 
   imageLayer?.addEventListener('pointerdown', e => startDomImageDrag(e, e.pointerId));
   document.addEventListener('pointermove', e => {
-    if(!_imgDrag || _imgDrag.source !== 'dom') return;
+    if(!_imgDrag) return;
     moveImageDrag(e.clientX, e.clientY);
     e.preventDefault();
   });
-  document.addEventListener('pointerup', e => finishImageDrag(e.pointerId, 'dom'));
-  document.addEventListener('pointercancel', e => finishImageDrag(e.pointerId, 'dom'));
+  document.addEventListener('pointerup', e => finishImageDrag(e.pointerId));
+  document.addEventListener('pointercancel', e => finishImageDrag(e.pointerId));
 
   imageLayer?.addEventListener('mousedown', e => {
-    if(_imgDrag?.source === 'dom' && _imgDrag.pointerId != null) return;
+    if(_imgDrag?.pointerId != null) return;
     startDomImageDrag(e, null);
   });
   document.addEventListener('mousemove', e => {
-    if(!_imgDrag || _imgDrag.source !== 'dom' || _imgDrag.pointerId != null) return;
+    if(!_imgDrag || _imgDrag.pointerId != null) return;
     moveImageDrag(e.clientX, e.clientY);
     e.preventDefault();
   });
   document.addEventListener('mouseup', e => {
-    if(_imgDrag?.source === 'dom' && _imgDrag.pointerId == null) finishImageDrag(null, 'dom');
+    if(_imgDrag?.pointerId == null) finishImageDrag(null);
   });
 }
 
@@ -209,8 +209,7 @@ export function createPreviewDrag(deps = {}) {
 }
 
   /* 對外介面：一個物件、四個動作。
-     bind() 一次接好兩層的 DOM 事件；startImageDrag／moveImageDrag／finishImageDrag
-     供 mpv 疊層那條路徑使用（它的指標事件來自主程序，不是 DOM）。 */
+     bind() 一次接好兩層 DOM 事件；圖片互動唯一走 renderer DOM layer。 */
   return {
     bind({ imageLayer, videoSub, videoWrap } = {}) {
       bindImageDomEvents(imageLayer);
