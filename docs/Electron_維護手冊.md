@@ -95,8 +95,7 @@ Main (main.js)
 | `mpv.subVisible(v)` | `mpv:subVisible` | R→M | 切換 mpv 的 libass 字幕顯示（拖曳字幕時暫時隱藏，改由 HTML 層預覽新位置） |
 | `mpv.setBounds(b)` | `mpv:setBounds` | R→M | 更新 mpv 覆蓋視窗位置與大小 |
 | `mpv.setGuide(g)` | `mpv:setGuide` | R→M | 更新一般安全框／字幕操作 guide |
-| `mpv.setImageGuide(data)` | `mpv:setImageGuide` | R→M | 將圖片疊層 HTML 與播放器矩形交給透明 guide 顯示；guide 永久穿透，實際互動由主 renderer 的 `#imageLayer` 處理 |
-| `mpv.onImagePointer(cb)` | `mpv:imagePointer` | M→R | 保留的白名單 `start/move/end/cancel` 座標通道；現行互動不可依賴 guide hover 或 `enter/leave` 切換 |
+| `mpv.setImageGuide(data)` | `mpv:setImageGuide` | R→M | 將圖片疊層 HTML 與播放器矩形交給透明 guide 顯示；只負責視覺，互動契約見 [`技術架構說明.md` §0.9](技術架構說明.md#09-靜態圖片也是時間軸片段不是播放器的一格畫面) |
 | `mpv.setTimecodeWatermark(data)` / `clearTimecodeWatermark()` | `mpv:setTimecodeWatermark` / `mpv:clearTimecodeWatermark` | R→M | 在原生 mpv 畫面上顯示／清除僅監看的時間碼，資料為 `{text,rect}`；不經 ASS、不會燒進輸出 |
 | `mpv.show(v)` | `mpv:show` | R→M | 顯示 / 隱藏 mpv 視窗。mpv 為 OS 層子視窗、HTML z-index 蓋不過：前端 `_syncMpvPanel()`（app.js）在對話框（含快捷鍵設定）、重疊影片的浮動面板／搜尋視窗／右鍵選單開啟時自動呼叫此方法讓位，關閉後恢復（`mpv:sync` 事件） |
 | `mpv.subSet(ass)` | `mpv:subSet` | R→M | 餵入 ASS 字幕（防抖 100ms） |
@@ -334,7 +333,7 @@ main IPC 中斷時都必須先確認 ffmpeg 已關閉，再處理半成品。刪
 
 ## 5. mpv 嵌入整合（Windows-only）
 
-Windows 的 mpv 以**子視窗**方式嵌入：Main Process 啟動 `_mpvWin`（無框 BrowserWindow）
+Windows 的 mpv 以**子視窗**方式嵌入：`mpv-host.js` 啟動無框 BrowserWindow 宿主
 並用 `--wid=<HWND>` 蓋在播放區域上方。這條實作依賴 Windows HWND、D3D compiler 與
 `\\.\pipe\...` named pipe，不能只換一支 macOS mpv binary 就宣稱跨平台。
 
@@ -346,19 +345,16 @@ ffmpeg 單次 ingest → proxy／逐聲道快取 → HTML/WebCodecs 預覽；這
 
 ### 主要行為
 
-- `mpv:launch`：Windows 啟動 mpv IPC socket（`\\.\pipe\mpvsocket_<pid>`），建立連線後送播放指令
+- `mpv:launch`：Windows 啟動 mpv IPC socket（`\\.\pipe\subtool-mpv-<token>`），建立連線後送播放指令；child process、pipe、宿主與 guide 視窗均由 `mpv-host.js` 收斂管理
 - `mpv:event` 推播：`time-pos`、`duration`、`pause`、`eof-reached`（前端用於同步播放頭）
 - `mpv:subSet`：接收 base64 ASS 字串，寫入暫存 `.ass` 後用 `sub-reload` 指令更新
-- `mpv:setBounds`：更新 `_mpvWin` 位置；主視窗移動/縮放時自動呼叫
-- `mpv:setImageGuide`：將圖片的 HTML 疊層（包含虛線框與控制點）交給透明 guide 視窗，僅供
-  OS 層 mpv 上方顯示。guide 永久使用 `setIgnoreMouseEvents(true, { forward:true })`；實際拖曳／縮放
-  一律由主 renderer 無條件建立的 `#imageLayer` DOM 處理。早期 25ms 游標輪詢與
-  `enter`／`leave` IPC 都已移除；不要恢復，否則 guide 會攔截底層時間軸與右鍵選單。
+- `mpv:setBounds`：更新 mpv host 視窗位置；主視窗移動/縮放時自動呼叫
+- `mpv:setImageGuide`：僅把圖片視覺疊層交給透明 guide；永久穿透與單一 DOM 互動責任的完整約束見 [`技術架構說明.md` §0.9](技術架構說明.md#09-靜態圖片也是時間軸片段不是播放器的一格畫面)
 - `mpv:setTimecodeWatermark`：原生 mpv 模式由 guide 顯示監看 TC；一般 HTML 預覽仍由 renderer DOM 顯示。兩者都從 `Media.displayTime()` 取得同一個時碼來源。
 
 ### 注意事項
 
-- `_mpvWin` 與 `mainWin` 是不同的 BrowserWindow；`mainWin.minimize()` 時需手動 `_mpvWin.hide()`
+- mpv host 與 `mainWin` 是不同的 BrowserWindow；`mainWin.minimize()` 時由 `mpvHost.hideForParent()` 一起隱藏宿主與 guide
 - `safeSend(wc, ch, data)`：視窗關閉後 IPC 回呼可能仍在執行，必須先確認 `!wc.isDestroyed()`
 - Windows mpv 版本需支援 `--input-ipc-server`；偵測失敗時 fallback 到 ffmpeg 單次轉檔
 
@@ -446,7 +442,7 @@ commit 上另行加入 Developer ID、hardened runtime 與 Apple notarization �
 | 前端無法呼叫 `window.subtool` | `preload.js` 是否正確載入；`contextBridge.exposeInMainWorld` 是否成功 |
 | ffmpeg 功能無效 | `await window.subtool.status()` → 看 `ffmpegPath` 與 `ffmpegDetection.attempts`；安裝版應先命中 `app.asar.unpacked`，不是只確認 PATH |
 | 影片黑畫面（4:2:2）| ffmpeg 未加 `-vf format=yuv420p`；proxy 輸出格式不相容 |
-| mpv 無法啟動 | 只適用 Windows：確認內建 mpv 與 `d3dcompiler_43.dll`；socket `\\.\pipe\mpvsocket_<pid>` 是否衝突。macOS 的 `supported:false` 是第一版預期行為 |
+| mpv 無法啟動 | 只適用 Windows：確認內建 mpv 與 `d3dcompiler_43.dll`；查看 `%TEMP%\subtool_cache\mpv-last.log` 與 `subtool-mpv-<token>` named pipe 是否建立。macOS 的 `supported:false` 是第一版預期行為 |
 | GPU 編碼器不可用 | Windows 確認顯示卡驅動；Mac 確認 static ffmpeg 列出且能實跑 `h264_videotoolbox`；`status()` 回傳 `libx264` 表示已 fallback |
 | Mac App 被 Gatekeeper 擋下 | `dist:mac:test` 是 unsigned，只能對自己剛建出的可信產物依 Apple「隱私權與安全性 → 仍要打開」放行；公開版本必須 Developer ID 簽署與 notarize |
 | Mac DMG 異常巨大或含 `.exe` | 檢查 `build.mac.files` 是否仍先排除 `electron/ffmpeg/**`、`electron/mpv/**` 再只加入 `darwin-arm64`；解開 App 實看內容，不能只看 build 成功 |
@@ -458,7 +454,7 @@ commit 上另行加入 Developer ID、hardened runtime 與 Apple notarization �
 | 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |
 | 使用者說某個按鈕「按了沒反應」 | 是不是用到了 `window.prompt()`？**Electron 停用了它**，回傳永遠是 null，靜默失敗。改用 `ui.js` 的 `promptModal()` |
 | HTML 疊層（字幕拖曳、安全框）在 MXF 模式下看不到 / 點不到 | mpv 是 **OS 層 always-on-top 子視窗**，蓋在所有 HTML 之上；需要 `mpv.show(false)` 讓位（`_syncMpvPanel()`） |
-| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | guide 視窗**刻意永久穿透**，互動一律由主視窗的 `#imageLayer` DOM 處理（見 `技術架構說明.md` §0.9）。請檢查：1. `main.js` 的 `setIgnoreMouseEvents(true, { forward: true })` 是否被改成有條件切換；2. `#imageLayer` 是否仍為**無條件建立**（不可只在非 mpv 模式建立）。**不要**把 `enter`／`leave` 加回 `mpv-guide-preload.js` 的白名單——那條路徑從未執行過（送出端沒帶座標，在 x/y 檢查就被丟掉），已於 v5.2.3 移除；接回去反而會讓 guide 在 hover 時奪取指標，底層視訊軌拖曳與右鍵選單全部失效。 |
+| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | guide 視窗**刻意永久穿透**，互動一律由主視窗的 `#imageLayer` DOM 處理（見 [`技術架構說明.md` §0.9](技術架構說明.md#09-靜態圖片也是時間軸片段不是播放器的一格畫面)）。確認 `mpv-host.js` 仍固定 `setIgnoreMouseEvents(true, { forward: true })`，以及 `#imageLayer` 仍為**無條件建立**；不可再建 guide pointer IPC。 |
 | 圖片匯出只顯示第一格或後段變黑 | 檢查 renderer 是否保留 `clip.type === 'image'`；主程序必須對該輸入加 `-loop 1 -framerate <project fps>`，並把每個 clip 的 `scale/posX/posY` 傳進 filtergraph。 |
 | TC 監看在 mpv 模式不顯示 | 先確認播放器 TC 開關為開，再檢查透明 guide 是否建立；這是監看 overlay，與匯出視窗的「壓入時間碼浮水印」為兩個獨立開關。 |
 | 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |

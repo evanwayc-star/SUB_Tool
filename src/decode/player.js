@@ -25,7 +25,7 @@ import { needsComposite, stageBox } from '../compositor-plan.js';
 import { showToast } from '../ui.js';
 import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
 import { keyIndexBefore } from './sample-index.js';
-import { imageBoxOnStage, trackFrame } from '../imagegeom.js'; // 預覽／mpv 命中區／匯出 三路共用的唯一幾何公式
+import { imageBoxOnStage, trackFrame } from '../imagegeom.js'; // 預覽／mpv guide／匯出 三路共用的唯一幾何公式
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
@@ -247,7 +247,7 @@ export const WCPreview = {
 
     // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
     // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
-    // (註：單純的圖片疊層已改交由 _mpvGuideWin 在原生 MPV 上方疊加顯示，不再強制 WebCodecs 接管，確保流暢度與字體大小不變)
+    // (註：單純的圖片疊層已改交由 mpv-host 的透明 guide 在原生 MPV 上方顯示，不再強制 WebCodecs 接管，確保流暢度與字體大小不變)
     // 判斷在 compositor-plan.js（純函式、可測）；這裡只依結果決定要不要讓回 mpv。
     const mustComposite = needsComposite(acts, State.videoTracks);
     if(mpv && acts.length && !mustComposite){

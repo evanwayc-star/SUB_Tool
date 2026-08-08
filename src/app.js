@@ -19,7 +19,7 @@ import { initMediaView } from './media-view.js';
       
    3. 跨進程介面介接 (Electron Bridge)
       當運行於桌面版 (DESK = true) 時，本檔會監聽來自 `main.js` 的 IPC 推播
-      (如: mpv:event, mpv:imagePointer)，將 mpv 子視窗原生事件映射回前端 DOM 的行為。
+      （如: mpv:event），將播放器事件映射回前端 DOM 的行為。
 
    【維護鐵律】
    - 切勿在此檔案中直接修改底層的 State (應交由 state.js 或 subtitles.js 提供之 Action)。
@@ -60,7 +60,7 @@ import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters 
 import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
-import { imageBoxOnStage } from './imagegeom.js'; // v4.7 圖片疊層幾何：預覽／mpv 命中區／匯出 共用同一組公式
+import { imageBoxOnStage } from './imagegeom.js'; // v4.7 圖片疊層幾何：預覽／mpv guide／匯出 共用同一組公式
 import { fadeAlphaAtTimeline } from './clip-fade.js'; // v5.9 淡入淡出：預覽與匯出共用同一份規格
 import { timecodeSuffix, screenshotDir, fallbackScreenshotName } from './screenshot-target.js';
 import { presetExportRelativePath } from './export-name-safety.js';

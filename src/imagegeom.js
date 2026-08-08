@@ -8,7 +8,7 @@
 
    【唯一公式】圖片在畫面上的實際矩形，由這裡算出來，三處共用同一組數字：
      1) 預覽 DOM 疊層（app.js renderImageOverlays → .img-wrap 的 left/top/width/height）
-     2) mpv 透明 guide 視窗的滑鼠命中區（app.js → main.js pointerHitsMpvImage）
+     2) mpv 透明 guide 視窗的視覺疊層（只畫框與控制點；互動仍由主 DOM 處理）
      3) 匯出 filtergraph（electron/main.js 圖片分支，見該處註解與 tests/imageGeom.test.js）
 
    語意：

@@ -18,6 +18,20 @@ function nativeToolCandidates(tool, options = {}) {
   const envPath = env[`${tool.toUpperCase()}_PATH`];
 
   if (platform === 'win32') {
+    if (tool === 'mpv') {
+      return unique([
+        pathApi.join(moduleDir, 'mpv', 'mpv.exe'),
+        pathApi.join(resourcesPath, 'app.asar.unpacked', 'electron', 'mpv', 'mpv.exe'),
+        pathApi.join(resourcesPath, 'mpv', 'mpv.exe'),
+        pathApi.join(resourcesPath, 'app', 'electron', 'mpv', 'mpv.exe'),
+        envPath,
+        'mpv',
+        'C:\\Program Files\\mpv\\mpv.exe',
+        pathApi.join(env.LOCALAPPDATA || '', 'Programs', 'mpv', 'mpv.exe'),
+        homeDir && pathApi.join(homeDir, 'scoop', 'shims', 'mpv.exe'),
+        homeDir && pathApi.join(homeDir, 'scoop', 'apps', 'mpv', 'current', 'mpv.exe'),
+      ]);
+    }
     const executable = `${tool}.exe`;
     return unique([
       pathApi.join(moduleDir, 'ffmpeg', executable),
@@ -45,12 +59,13 @@ function nativeToolCandidates(tool, options = {}) {
 
 function detectNativeTool(tool, options = {}) {
   const spawnSync = options.spawnSync || nodeSpawnSync;
+  const versionArgs = options.versionArgs || (tool === 'mpv' ? ['--version'] : ['-version']);
   const attempts = [];
 
   for (const candidate of nativeToolCandidates(tool, options)) {
     let result;
     try {
-      result = spawnSync(candidate, ['-version'], { timeout: 5000, stdio: 'pipe' });
+      result = spawnSync(candidate, versionArgs, { timeout: 5000, stdio: 'pipe' });
     } catch (error) {
       result = { status: null, signal: null, error };
     }

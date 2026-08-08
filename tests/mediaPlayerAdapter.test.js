@@ -45,7 +45,6 @@ describe('BaseMediaPlayerAdapter（no-op 基底）', () => {
     // sync 方法也不拋
     expect(() => base.brightness(50)).not.toThrow();
     expect(() => base.onEvent(() => {})).not.toThrow();
-    expect(() => base.onImagePointer(() => {})).not.toThrow();
   });
 });
 

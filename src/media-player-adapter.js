@@ -12,7 +12,6 @@ export class BaseMediaPlayerAdapter {
   async show(v) { return Promise.resolve(); }
   async setGuide(data) { return Promise.resolve(); }
   async setImageGuide(data) { return Promise.resolve(); }
-  onImagePointer(cb) {}
   async screenshot(path) { return Promise.resolve(); }
   async setTimecodeWatermark(payload) { return Promise.resolve(); }
   async detect() { return Promise.resolve(); }
@@ -65,7 +64,6 @@ export class MpvAdapter extends BaseMediaPlayerAdapter {
   async show(v) { return this.mpv?.show(v).catch(()=>{}); }
   async setGuide(data) { return this.mpv?.setGuide?.(data).catch(()=>{}); }
   async setImageGuide(data) { return this.mpv?.setImageGuide(data).catch(()=>{}); }
-  onImagePointer(cb) { this.mpv?.onImagePointer?.(cb); }
   async screenshot(path) { return this.mpv?.screenshot(path); }
   async setTimecodeWatermark(payload) { return this.mpv?.setTimecodeWatermark(payload); }
   async detect() { return this.mpv?.detect(); }

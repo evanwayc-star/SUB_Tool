@@ -520,10 +520,8 @@ export function renderImageOverlays(){
   const imageClips = Seq.clipsAt(t).filter(c => c.type === 'image' && videoTrackVisible(c.vtrack || 0));
   
   let html = '';
-  // MPV 的原生畫面在主 DOM 上方，圖片控制層則是另一個透明 BrowserWindow。
-  // 把可點選區一併交給主程序，讓它只在圖片（包含四角控制點）下方接收滑鼠事件；
-  // 其餘區域仍會穿透到字幕／播放器既有控制。
-  const mpvHitRegions = [];
+  // MPV 的原生畫面在主 DOM 上方，圖片外觀交給透明 guide 顯示；互動始終由
+  // 這個主 renderer 的 #imageLayer 收到，不能另建第二條 native pointer 路徑。
   imageClips.forEach(c => {
     // 幾何（scale／posX／posY／所在視訊軌的 PiP）一律走 _imageBoxOf → imagegeom.js
     const opacity = (State.videoTracks[c.vtrack || 0]?.opacity ?? 1);
@@ -538,13 +536,6 @@ export function renderImageOverlays(){
        離圖片本體上百 px，下緣兩顆還會掉到播放列底下＝拉不到、也移不準。 */
     const box = _imageBoxOf(c, rect);
     const contStyle = `left:${box.x.toFixed(2)}px; top:${box.y.toFixed(2)}px; width:${box.w.toFixed(2)}px; height:${box.h.toFixed(2)}px; opacity:${alpha};`;
-    const hitPad = 16; // 虛線 outline＋四角控制點的加大命中區都算在內
-    mpvHitRegions.push({
-      x: rect.x + box.x - hitPad,
-      y: rect.y + box.y - hitPad,
-      w: box.w + hitPad * 2,
-      h: box.h + hitPad * 2,
-    });
     /* 把手吸附回【畫面內】：圖片被放大到超出畫框時，四角會跑到看不見的地方，
        使用者就再也縮不回來（只剩右鍵數值面板可救）。這裡把把手夾在
        「圖片 ∩ 畫框」的可見矩形四角，圖片完全在框內時與貼齊四角等價。 */
@@ -580,12 +571,12 @@ export function renderImageOverlays(){
     // [效能與字體最佳化] 
     // 當處於 MPV 原生播放模式時，為了避免強行切換 WebCodecs 造成 CPU 解碼卡頓，
     // 以及避免從 MPV libass 字幕渲染切換至 HTML DOM 造成字幕視覺大小突變，
-    // 我們將圖片疊加層 (包含 rect 座標) 傳送至 Electron 的透明置頂輔助視窗 (`_mpvGuideWin`)。
+    // 我們將圖片疊加層 (包含 rect 座標) 傳送至 Electron mpv-host 所有的透明置頂 guide 視窗。
     // 這樣即可在維持 MPV GPU 硬體加速與原生字幕渲染的同時，將圖片完美顯示在畫面上方。
     // 原生 guide 是另一個 BrowserWindow；只在內容變更時更新，避免播放中每格重寫 DOM。
     if(_mpvImageGuideSig !== guideSig){
       _mpvImageGuideSig = guideSig;
-      getPlayerAdapter().setImageGuide({ html, rect, hitRegions:mpvHitRegions }).catch(()=>{});
+      getPlayerAdapter().setImageGuide({ html, rect }).catch(()=>{});
     }
   } else if(getPlayerAdapter().setImageGuide){
     if(_mpvImageGuideSig){
@@ -607,16 +598,6 @@ export function _selectImageClip(clip, { redrawTimeline=true }={}){
   if(redrawTimeline) drawTimeline();
   return true;
 }
-
-// image dragging logic extracted to pointer-interaction.js
-// guide 傳來的是相對實際畫面區的像素座標，所以能完全複用以上幾何規則。
-getPlayerAdapter().onImagePointer?.(data => {
-  if(!data || typeof data !== 'object') return;
-  if(data.type === 'start') previewDrag.startImageDrag({ id:data.id, corner:data.corner || null, x:data.x, y:data.y, source:'mpv' });
-  else if(data.type === 'move' && previewDrag.imageDrag()?.source === 'mpv') previewDrag.moveImageDrag(data.x, data.y);
-  else if((data.type === 'end' || data.type === 'cancel') && previewDrag.imageDrag()?.source === 'mpv') previewDrag.finishImageDrag(null, 'mpv');
-});
-
 
 /* 軌道樣式改動後的統一重繪：預覽畫面／mpv 字幕／樣式面板／字幕列表的樣式摘要。
    ── 一律走這裡（v4.29.5）：這四處本來各自散在九個呼叫點，漏掉列表摘要 → 面板改了框線、

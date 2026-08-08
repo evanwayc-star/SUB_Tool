@@ -120,4 +120,27 @@ describe('原生工具候選路徑', () => {
     expect(mpvEmbeddingSupported('win32')).toBe(true);
     expect(mpvEmbeddingSupported('darwin')).toBe(false);
   });
+
+  it('Windows mpv 探測使用實際 bundle 目錄與 --version，而不是 ffmpeg/mpv.exe', () => {
+    const calls = [];
+    const result = detectNativeTool('mpv', {
+      platform: 'win32',
+      moduleDir: 'C:\\app\\electron',
+      resourcesPath: 'C:\\app\\resources',
+      env: { MPV_PATH: 'D:\\tools\\mpv.exe' },
+      spawnSync(candidate, args) {
+        calls.push({ candidate, args });
+        return candidate.endsWith('mpv.exe') ? { status: 0, signal: null } : { status: null, signal: null };
+      },
+    });
+
+    expect(nativeToolCandidates('mpv', {
+      platform: 'win32', moduleDir: 'C:\\app\\electron', resourcesPath: 'C:\\app\\resources', env: {},
+    })).toEqual(expect.arrayContaining([
+      'C:\\app\\electron\\mpv\\mpv.exe',
+      'C:\\app\\resources\\app.asar.unpacked\\electron\\mpv\\mpv.exe',
+    ]));
+    expect(calls[0]).toEqual({ candidate: 'C:\\app\\electron\\mpv\\mpv.exe', args: ['--version'] });
+    expect(result.path).toBe('C:\\app\\electron\\mpv\\mpv.exe');
+  });
 });
