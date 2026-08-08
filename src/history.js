@@ -102,6 +102,14 @@ const History = {
     emit('media:sequenceRestored');
     pruneSelection(); // 還原後選取只留仍存在的字幕（三處各自寫過一次，現在同一條規則）
     this.hi=i; emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); renderHistory();
+    if (window.subtool && window.subtool.syncCompareWindow) {
+      window.subtool.syncCompareWindow({
+        tracks: State.tracks,
+        cues: State.cues,
+        fps: State.fps,
+        dropFrame: State.dropFrame
+      });
+    }
   },
   undo(){ if(this.hi>0){ this.restore(this.hi-1); setStatus('已復原','ok'); } else setStatus('沒有可復原的動作',''); },
   redo(){ if(this.hi<this.stack.length-1){ this.restore(this.hi+1); setStatus('已重做','ok'); } else setStatus('沒有可重做的動作',''); },

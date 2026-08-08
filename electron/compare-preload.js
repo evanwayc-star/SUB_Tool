@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('subtool', {
-  onUpdateData: (cb) => ipcRenderer.on('compare:update-data', (e, data) => cb(data)),
-  seekMain: (time) => ipcRenderer.send('compare:seek-main', time)
+  onUpdateData: (callback) => ipcRenderer.on('compare:update-data', (e, data) => callback(data)),
+  seekMain: (payload) => ipcRenderer.send('compare:seek-main', payload),
+  matchStyle: (cueId, sourceCueId) => ipcRenderer.send('compare:match-style', cueId, sourceCueId)
 });

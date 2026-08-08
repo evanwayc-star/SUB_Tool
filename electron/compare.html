@@ -65,9 +65,41 @@
     }
     
     .legend {
-      display: flex; gap: 16px; font-size: 12px; color: var(--text-dim); font-weight: 500;
+      display: flex; gap: 12px; font-size: 12px; color: var(--text-dim); font-weight: 500;
     }
-    .legend span { display: flex; align-items: center; gap: 6px; }
+    
+    .pill-toggle {
+      display: flex; align-items: center; gap: 6px; 
+      background: rgba(255, 255, 255, 0.05); 
+      border: 1px solid rgba(255, 255, 255, 0.1); 
+      border-radius: 20px; padding: 4px 14px; 
+      color: var(--text-dim); font-size: 13px; cursor: pointer;
+      transition: all 0.2s ease; outline: none;
+    }
+    .pill-toggle:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .pill-toggle.active#toggleTime {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: rgba(56, 189, 248, 0.3);
+      color: #38bdf8;
+    }
+    .pill-toggle.active#toggleText {
+      background: rgba(74, 222, 128, 0.15);
+      border-color: rgba(74, 222, 128, 0.3);
+      color: #4ade80;
+    }
+    .pill-toggle.active#toggleStyle {
+      background: rgba(192, 132, 252, 0.15);
+      border-color: rgba(192, 132, 252, 0.3);
+      color: #c084fc;
+    }
+    .pill-toggle .icon {
+      opacity: 0.5; filter: grayscale(100%); transition: all 0.2s ease;
+    }
+    .pill-toggle.active .icon {
+      opacity: 1; filter: none;
+    }
     
     .scroll-container {
       flex: 1; overflow-y: auto; overflow-x: hidden;
@@ -114,6 +146,22 @@
       display: inline-block; padding: 2px 6px; background: rgba(0, 0, 0, 0.3);
       color: var(--text-dim); border-radius: 4px; font-size: 11px;
       margin-right: 6px; font-weight: 600; border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    
+    .context-menu {
+      position: fixed; background: rgba(30, 41, 59, 0.95);
+      border: 1px solid var(--border); border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      padding: 4px; display: none; z-index: 1000;
+      backdrop-filter: blur(10px);
+    }
+    .context-menu.show { display: block; }
+    .menu-item {
+      padding: 8px 12px; font-size: 13px; color: var(--text);
+      border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px;
+    }
+    .menu-item:hover {
+      background: var(--surface-raised); color: #fff;
     }
 
     .icon {
@@ -187,9 +235,9 @@
     </div>
     <div class="legend-group">
       <div class="legend">
-        <span><div class="icon active-time"><svg viewBox="0 0 24 24"><use href="#ico-time"></use></svg></div>時間</span>
-        <span><div class="icon active-text"><svg viewBox="0 0 24 24"><use href="#ico-text"></use></svg></div>內容</span>
-        <span><div class="icon active-style"><svg viewBox="0 0 24 24"><use href="#ico-style"></use></svg></div>樣式</span>
+        <button id="toggleTime" class="pill-toggle active"><div class="icon active-time"><svg viewBox="0 0 24 24"><use href="#ico-time"></use></svg></div>時間</button>
+        <button id="toggleText" class="pill-toggle active"><div class="icon active-text"><svg viewBox="0 0 24 24"><use href="#ico-text"></use></svg></div>內容</button>
+        <button id="toggleStyle" class="pill-toggle active"><div class="icon active-style"><svg viewBox="0 0 24 24"><use href="#ico-style"></use></svg></div>樣式</button>
       </div>
       <label class="checkbox-wrap">
         <input type="checkbox" id="hideIdentical"> 隱藏無差異字幕
@@ -208,8 +256,15 @@
     </div>
   </div>
 
+  <div id="ctxMenu" class="context-menu">
+    <div class="menu-item" id="miMatchStyle">🎨 匹配另一側樣式</div>
+  </div>
+
   <script>
     let _data = null;
+    let checkTime = true;
+    let checkText = true;
+    let checkStyle = true;
 
     function formatTc(s) {
       if (s == null) return '';
@@ -321,25 +376,16 @@
         let msgTime = '', msgText = '', msgStyle = '';
         
         if (r.a && r.b) {
-          if (Math.abs(r.a.start - r.b.start) > frameSec * 0.5 || Math.abs(r.a.end - r.b.end) > frameSec * 0.5) {
-            diffTime = true;
-            msgTime = `開始差 ${((r.a.start - r.b.start)*fps).toFixed(1)} 幀, 結束差 ${((r.a.end - r.b.end)*fps).toFixed(1)} 幀`;
+          if (checkTime && Math.abs(r.a.start - r.b.start) > 0.001) { diffTime = true; msgTime = '時間不同'; }
+          if (checkText && r.a.text !== r.b.text) { diffText = true; msgText = '內容不同'; }
+          if (checkStyle) {
+            const sRes = compareStyles(r.a.style, r.b.style);
+            if (sRes.diff) { diffStyle = true; msgStyle = sRes.msg; }
           }
-          if (r.a.text !== r.b.text) {
-            diffText = true;
-            msgText = '文字內容不同';
-          }
-          const styleDiff = compareStyles(r.a.style, r.b.style);
-          if (styleDiff.diff) {
-            diffStyle = true;
-            msgStyle = styleDiff.msg;
-          }
-        } else {
-           diffTime = true; diffText = true; diffStyle = true;
-           msgTime = '缺漏'; msgText = '缺漏'; msgStyle = '缺漏';
         }
-
-        const hasDiff = diffTime || diffText || diffStyle;
+        
+        const isMissing = !r.a || !r.b;
+        const hasDiff = isMissing || diffTime || diffText || diffStyle;
         if (hideIdentical && !hasDiff) return;
 
         const tcA1 = r.a ? formatTc(r.a.start) : '';
@@ -354,23 +400,30 @@
         const txtB = r.b ? (r.b.text||'').replace(/</g, '&lt;') : '';
         const hTxt = highlightDiff(txtA, txtB);
 
-        const renderCell = (c, trackIdx, hlStart, hlEnd, hlTxt, cueNum) => {
+        const renderCell = (c, trackIdx, hlStart, hlEnd, hlTxt, cueNum, otherCue) => {
           if (!c) return `<div class="cell missing"></div>`;
           const payload = JSON.stringify({ time: c.start, cueId: c.id, trackIdx: trackIdx }).replace(/"/g, '&quot;');
           const badgeHtml = cueNum !== null ? `<span class="badge">#${cueNum}</span>` : '';
-          return `<div class="cell ${hasDiff ? 'has-diff' : ''}" onclick="window.subtool.seekMain(${payload})">
+          
+          let ctxMenuHtml = '';
+          if (otherCue && diffStyle) {
+            const fallbackData = encodeURIComponent(JSON.stringify({ id: otherCue.id, track: otherCue.track || 0, start: otherCue.start }));
+            ctxMenuHtml = `oncontextmenu="handleContextMenu(event, '${c.id}', '${fallbackData}')"`;
+          }
+
+          return `<div class="cell ${hasDiff ? 'has-diff' : ''}" onclick="window.subtool.seekMain(${payload})" ${ctxMenuHtml}>
             <div class="tc">${badgeHtml}${hlStart} → ${hlEnd}</div>
             <div class="txt">${hlTxt}</div>
           </div>`;
         };
 
-        html += renderCell(r.a, idxA, hStart.s1, hEnd.s1, hTxt.s1, r.idxA);
+        html += renderCell(r.a, idxA, hStart.s1, hEnd.s1, hTxt.s1, r.idxA, r.b);
         html += `<div class="icons">
           <div class="icon ${diffTime ? 'active-time' : ''}" title="${msgTime}"><svg viewBox="0 0 24 24"><use href="#ico-time"></use></svg></div>
           <div class="icon ${diffText ? 'active-text' : ''}" title="${msgText}"><svg viewBox="0 0 24 24"><use href="#ico-text"></use></svg></div>
           <div class="icon ${diffStyle ? 'active-style' : ''}" title="${msgStyle}"><svg viewBox="0 0 24 24"><use href="#ico-style"></use></svg></div>
         </div>`;
-        html += renderCell(r.b, idxB, hStart.s2, hEnd.s2, hTxt.s2, r.idxB);
+        html += renderCell(r.b, idxB, hStart.s2, hEnd.s2, hTxt.s2, r.idxB, r.a);
       });
       
       container.innerHTML = html || '<div id="emptyState"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 10 0 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>無差異字幕</div>';
@@ -403,6 +456,54 @@
     document.getElementById('selA').addEventListener('change', renderRows);
     document.getElementById('selB').addEventListener('change', renderRows);
     document.getElementById('hideIdentical').addEventListener('change', renderRows);
+
+    document.getElementById('toggleTime').addEventListener('click', (e) => {
+      checkTime = !checkTime;
+      e.currentTarget.classList.toggle('active', checkTime);
+      renderRows();
+    });
+    document.getElementById('toggleText').addEventListener('click', (e) => {
+      checkText = !checkText;
+      e.currentTarget.classList.toggle('active', checkText);
+      renderRows();
+    });
+    document.getElementById('toggleStyle').addEventListener('click', (e) => {
+      checkStyle = !checkStyle;
+      e.currentTarget.classList.toggle('active', checkStyle);
+      renderRows();
+    });
+
+    // Context Menu Logic
+    let ctxTarget = null;
+    function handleContextMenu(e, cueId, fallbackDataStr) {
+      e.preventDefault();
+      let fallbackData = {};
+      try { fallbackData = JSON.parse(decodeURIComponent(fallbackDataStr)); } catch(e) {}
+      ctxTarget = { cueId, fallbackData };
+      const menu = document.getElementById('ctxMenu');
+      menu.style.left = e.clientX + 'px';
+      menu.style.top = e.clientY + 'px';
+      menu.classList.add('show');
+    }
+    
+    document.addEventListener('click', () => {
+      const menu = document.getElementById('ctxMenu');
+      if (menu) menu.classList.remove('show');
+    });
+
+    document.getElementById('miMatchStyle').addEventListener('click', (e) => {
+      // DEBUG
+      if (ctxTarget) {
+        console.log('Sending matchStyle:', ctxTarget.cueId, ctxTarget.fallbackData);
+      }
+      if (ctxTarget && window.subtool && window.subtool.matchStyle) {
+        window.subtool.matchStyle(ctxTarget.cueId, ctxTarget.fallbackData);
+      } else {
+        alert('Missing matchStyle API or target!');
+      }
+      const menu = document.getElementById('ctxMenu');
+      if (menu) menu.classList.remove('show');
+    });
   </script>
 </body>
 </html>

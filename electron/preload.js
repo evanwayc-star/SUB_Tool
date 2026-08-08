@@ -73,6 +73,7 @@ contextBridge.exposeInMainWorld('subtool', {
   openCompareWindow: (data) => ipcRenderer.send('open-compare-window', data),
   syncCompareWindow: (data) => ipcRenderer.send('sync-compare-window', data),
   onSeekMain: (cb) => ipcRenderer.on('seek-main', (e, t) => cb(t)),
+  onCompareApplyStyle: (cb) => ipcRenderer.on('compare:apply-style', (e, cueId, sourceCueId) => cb(cueId, sourceCueId)),
   onAppRequestClose: (cb) => ipcRenderer.on('app:request-close', () => cb()),
   closeApp: () => ipcRenderer.invoke('app:close'),
   onOpenFile:    (cb) => ipcRenderer.on('app:open-file', (e, path) => cb(path)),

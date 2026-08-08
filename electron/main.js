@@ -88,11 +88,11 @@ function newJobId(prefix) { return prefix + crypto.randomBytes(12).toString('hex
 function ensureTmp() { try { fs.mkdirSync(TMP, { recursive: true }); } catch (e) {} }
 function tmpPath(ext) { ensureTmp(); const p = path.join(TMP, `t${Date.now()}_${tmpSeq++}.${ext}`); tempFiles.add(p); return p; }
 /* WebContents 可能在視窗關閉後仍被呼叫（例如 mpv pipe close 回呼），必須先確認未銷毀 */
-function safeSend(wc, ch, data) {
-  try { if (wc && !wc.isDestroyed()) wc.send(ch, data); } catch (e) {}
+function safeSend(wc, ch, ...args) {
+  try { if (wc && !wc.isDestroyed()) wc.send(ch, ...args); } catch (e) {}
 }
-function safeWinSend(win, ch, data) {
-  try { if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) win.webContents.send(ch, data); } catch (e) {}
+function safeWinSend(win, ch, ...args) {
+  try { if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) win.webContents.send(ch, ...args); } catch (e) {}
 }
 
 /* ---- 偵測平台可用的硬體視訊編碼器（VideoToolbox／NVENC／QSV／AMF），否則退回 libx264 ---- */
@@ -2737,6 +2737,9 @@ ipcMain.on('open-compare-window', (event, data) => {
 
 ipcMain.on('compare:seek-main', (event, time) => {
   safeWinSend(mainWin, 'seek-main', time);
+});
+ipcMain.on('compare:match-style', (event, cueId, sourceCueId) => {
+  safeWinSend(mainWin, 'compare:apply-style', cueId, sourceCueId);
 });
 ipcMain.on('sync-compare-window', (event, data) => {
   if (compareWin && !compareWin.isDestroyed()) {

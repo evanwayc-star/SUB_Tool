@@ -1844,6 +1844,69 @@ async function initDesktop(){
       }
     });
   }
+  if (DESK.onCompareApplyStyle) {
+    DESK.onCompareApplyStyle((cueId, fallbackDataObj) => {
+      const cue = State.cues.find(c => c.id === cueId);
+      
+      let sourceCue = null;
+      let fallbackData = fallbackDataObj;
+      
+      if (typeof fallbackDataObj === 'string') {
+        if (fallbackDataObj.startsWith('c')) {
+          // Old legacy: passed the ID string directly
+          sourceCue = State.cues.find(c => c.id === fallbackDataObj);
+          fallbackData = null;
+        } else {
+          try { fallbackData = JSON.parse(fallbackDataObj); } catch (e) {}
+        }
+      }
+
+      if (fallbackData && !sourceCue) {
+        if (fallbackData.id) {
+          sourceCue = State.cues.find(c => c.id === fallbackData.id);
+        }
+        if (!sourceCue && typeof fallbackData.track === 'number' && typeof fallbackData.start === 'number') {
+          sourceCue = State.cues.find(c => (c.track || 0) === fallbackData.track && Math.abs(c.start - fallbackData.start) <= 0.5);
+        }
+      }
+
+      if (cue && sourceCue) {
+        const sourceTk = State.tracks[sourceCue.track || 0];
+        const targetTk = State.tracks[cue.track || 0];
+        const sourceComputed = effStyle(sourceCue, sourceTk);
+        const targetTrackSt = effStyle(null, targetTk);
+        
+        const newCueStyle = { ...cue.style };
+        
+        for (const k of Object.keys(STYLE_DEFAULTS)) {
+          if (sourceComputed[k] !== targetTrackSt[k]) {
+            newCueStyle[k] = sourceComputed[k];
+          } else {
+            delete newCueStyle[k];
+          }
+        }
+        
+        if (Object.keys(newCueStyle).length) {
+          cue.style = newCueStyle;
+        } else {
+          delete cue.style;
+        }
+        
+        recordHistory('匹配樣式');
+        renderAll(); // This will re-render main UI
+        if (DESK.syncCompareWindow) {
+          DESK.syncCompareWindow({
+            tracks: State.tracks,
+            cues: State.cues,
+            fps: State.fps,
+            dropFrame: State.dropFrame
+          });
+        }
+      } else {
+        showToast(`失敗! Target:${cueId}, FD:${JSON.stringify(fallbackDataObj)}`);
+      }
+    });
+  }
   if (DESK.onAppRequestClose) {
     DESK.onAppRequestClose(() => {
       if (isProjectDirty()) {
