@@ -1002,18 +1002,61 @@ function initUI(){
     const idx=cue ? State.cues.filter(c=>(c.track||0)===i).indexOf(cue)+1 : 0;
     const 來源 = cue ? `第 ${idx} 句` : '目前';
     if(!others.length){ showToast('本軌只有這一句'); return; }
-    openModal('⇩ 全軌統一', `<div style="font-size:13px;line-height:1.7">`+
+    openModal('⇩ 全軌套用', `<div style="font-size:13px;line-height:1.7">`+
       `把<b style="color:var(--accent)">${來源}的樣式</b>套用到「${escapeHTML(trk.name)}」的<b>全部 ${others.length+ (cue?1:0)} 句</b>。<br>`+
       (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會一併被覆蓋。<br>` : '')+
-      `<span style="color:var(--text-faint)">位置與角度也會一起統一（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
+      `<span style="color:var(--text-faint)">位置與角度也會一起套用（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
       [{label:'取消',act:closeModal},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
         closeModal();
         // 生效樣式寫進軌道當共同基準，再清掉全軌的逐句覆蓋（含這一句）→ 每句都長一樣
         for(const k of Object.keys(STYLE_DEFAULTS)) trk[k]=st[k];
         for(const c of State.cues) if((c.track||0)===i) delete c.style;
         styleChanged(); drawTimeline(); // 摘要就地更新（捲動位置留在原處）；時間軸重畫掉 ✱ 標記
-        recordHistory('全軌統一樣式（'+來源+' → 全軌）');
+        recordHistory('全軌套用（'+來源+' → 全軌）');
         showToast('已把'+來源+'的樣式套用到整條軌道');
+      }}]);
+  });
+
+  $('tsUnifyExclude')?.addEventListener('click',()=>{
+    const t=styleTarget(); if(!t)return;
+    const { i, trk, cue }=t;
+    const others=State.cues.filter(c=>(c.track||0)===i && c!==cue);
+    const ovs=others.filter(c=>c.style && Object.keys(c.style).length).length;
+    const st=effStyle(cue, trk);
+    const idx=cue ? State.cues.filter(c=>(c.track||0)===i).indexOf(cue)+1 : 0;
+    const 來源 = cue ? `第 ${idx} 句` : '目前';
+    if(!others.length){ showToast('本軌只有這一句'); return; }
+    openModal('⇩ 全軌套用-排除座標', `<div style="font-size:13px;line-height:1.7">`+
+      `把<b style="color:var(--accent)">${來源}的樣式</b>套用到「${escapeHTML(trk.name)}」的<b>全部 ${others.length+ (cue?1:0)} 句</b>。<br>`+
+      `（將排除座標與角度的變更）<br>`+
+      (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會部分覆蓋。<br>` : '')+
+      `<span style="color:var(--text-faint)">位置與角度會保持各句原本的設定（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
+      [{label:'取消',act:closeModal},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
+        closeModal();
+        const excludedKeys = ['posX', 'posY', 'align', 'valign', 'angle'];
+        
+        // 針對同軌每句，合併新樣式（st）與該句原有的座標（origCst）
+        const trackCues = State.cues.filter(c => (c.track||0)===i);
+        for(const c of trackCues) {
+          const origCst = effStyle(c, trk);
+          const desired = { ...st };
+          for(const k of excludedKeys) desired[k] = origCst[k];
+          c.style = desired;
+        }
+        
+        // 軌道基準樣式：更新排除鍵以外的所有屬性
+        for(const k of Object.keys(STYLE_DEFAULTS)) {
+          if (!excludedKeys.includes(k)) trk[k] = st[k];
+        }
+        
+        // 修剪多餘覆蓋，讓能用軌道屬性表達的都清掉
+        for(const c of trackCues) {
+          pruneRedundantCueStyle(c, trk);
+        }
+        
+        styleChanged(); drawTimeline(); 
+        recordHistory('全軌套用-排除座標（'+來源+' → 全軌）');
+        showToast('已套用樣式（保留原座標與角度）');
       }}]);
   });
   // 大小快捷鈕 / 顏色色票 — 委派點擊；一律經 tsSet（選取句 or 整軌）

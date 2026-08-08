@@ -320,7 +320,7 @@ describe('字幕拖曳：旋轉', () => {
   it('Alt 開始＝旋轉；角度正規化在 −180…180 之間', () => {
     const { videoSub, el } = mountSubtitle();
     el.dispatchEvent(pointer('pointerdown', 100, 0, { altKey: true }));
-    for (let i = 0; i <= 24; i++) {
+    for (let i = 1; i <= 24; i++) {
       const a = i / 24 * Math.PI * 2;
       videoSub.dispatchEvent(pointer('pointermove', 100 * Math.cos(a), 100 * Math.sin(a)));
       const ang = State.cues[0].style.angle;

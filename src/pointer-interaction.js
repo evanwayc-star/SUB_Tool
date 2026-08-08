@@ -135,6 +135,9 @@ export function createPreviewDrag(deps = {}) {
   function bindSubtitleDomEvents(videoSub, videoWrap) {
   function subDragMove(e){
     const d = _subDrag; if(!d) return;
+    if (!d.moved && (Math.abs(e.clientX - d.x0) > 3 || Math.abs(e.clientY - d.y0) > 3)) d.moved = true;
+    if (!d.moved) return;
+
     const cue = d.cue; if(!cue) return;
     const presetEdit = ctx.getPresetEdit();
     const targetObj = presetEdit ? presetEdit.draft : (cue.style = cue.style || {});
@@ -159,9 +162,14 @@ export function createPreviewDrag(deps = {}) {
     
     const nextEl = videoSub?.querySelector(`.vsub-track.drag[data-cue="${d.cue.id}"]`);
     ctx.setSubtitleHover(nextEl||null);
-    ctx.refreshStyleSummaries(); 
-    ctx.drawTimeline(); 
-    ctx.recordHistory((d.rot ? '旋轉字幕' : '移動字幕位置')+cueSuffix(d.cue));
+    
+    if (!d.moved) {
+      if(ctx.selectCueSingle) ctx.selectCueSingle(d.cue.id);
+    } else {
+      ctx.refreshStyleSummaries(); 
+      ctx.drawTimeline(); 
+      ctx.recordHistory((d.rot ? '旋轉字幕' : '移動字幕位置')+cueSuffix(d.cue));
+    }
   }
 
   videoSub?.addEventListener('pointerdown', e => {
@@ -185,7 +193,7 @@ export function createPreviewDrag(deps = {}) {
     const px = box.left + box.width*a.x/100, py = box.top + box.height*a.y/100;
     _subDrag = { cue, rect, rot: e.altKey || !!e.target.closest('.rot'), x0: e.clientX, y0: e.clientY,
       posX: st.posX, posY: st.posY, angle: st.angle||0, px, py,
-      a0: Math.atan2(e.clientY-py, e.clientX-px)*180/Math.PI };
+      a0: Math.atan2(e.clientY-py, e.clientX-px)*180/Math.PI, moved: false };
       
     try{ videoSub.setPointerCapture(e.pointerId); }catch(err){}
     videoSub.classList.add('dragging');

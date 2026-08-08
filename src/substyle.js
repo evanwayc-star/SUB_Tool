@@ -35,7 +35,7 @@ export const STYLE_DEFAULTS = {
   outlineColor: '#000000',
   shadow: 0,            // px 陰影（ASS Shadow / CSS text-shadow 右下偏移）
   vertical: false,      // 直書（單列逐字換行；原文換行以全形空格取代）
-  bgBox: false, bgColor: '#000000', bgAlpha: 0.5, // 背景色塊（ASS BorderStyle=3；限軌級）
+  bgBox: false, bgColor: '#000000', bgAlpha: 0.3, // 背景色塊（ASS BorderStyle=3；限軌級）
   // 位置＝畫面座標（內部存百分比＝解析度無關、專案可攜；UI／摘要以像素顯示）。
   // align/valign＝多行多句的對齊方式，同時也是文字塊對齊到座標的那一側（ASS \an 的語義）：
   //   align=center + valign=middle → 座標正好是文字塊的正中心。

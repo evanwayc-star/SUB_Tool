@@ -16,7 +16,7 @@ import { fadeAlphaAtTimeline } from './clip-fade.js';
 import { SubFormats } from './formats.js';
 import { recordHistory } from './history.js';
 import { showToast, setMpvWindowVisible } from './ui.js';
-import { refreshSelectionUI } from './subtitles.js';
+import { refreshSelectionUI, selectCueSingle } from './subtitles.js';
 
 let _mpvSubT=null;
 let _lastMpvSubSend=0;
@@ -631,6 +631,7 @@ export const previewDrag = createPreviewDrag({
   imageBoxOf: _imageBoxOf,
   getPresetEdit: () => State.presetEdit,
   refreshMpvSubs,
+  selectCueSingle,
   setSubtitleHover: _setSubtitleHover,
   renderTrackStyle: () => emit('render:trackStyle'),
   refreshStyleSummaries: () => emit('render:styleSummaries'),
