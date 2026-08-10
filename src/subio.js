@@ -19,6 +19,7 @@ import { runFrozenExportSubmission } from './export-submission-transaction.js';
 import { videoExportCapability } from './export-capability.js';
 import { escapeHTML } from './util.js';
 import { Media } from './media.js';
+import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 
 // Domain imports
 import { importSub, importDropped } from './sub-parse.js';
@@ -208,6 +209,7 @@ function _captureExportDraft(){
   return freezeExportSubmission(snapshot, {
     cues: State.cues,
     tracks: State.tracks,
+    backgroundLayouts: measureSubtitleBackgroundLayouts(State.cues, State.tracks),
     fps: State.fps,
     dropFrame: State.dropFrame,
     mediaName: State.mediaName,

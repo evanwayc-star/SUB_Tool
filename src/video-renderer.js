@@ -13,7 +13,8 @@ import { createPreviewDrag } from './pointer-interaction.js';
 import { drawTimeline } from './timeline.js';
 import { imageBoxOnStage } from './imagegeom.js';
 import { fadeAlphaAtTimeline } from './clip-fade.js';
-import { SubFormats } from './formats.js';
+import { renderASS } from './ass-render.js';
+import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { recordHistory } from './history.js';
 import { showToast, setMpvWindowVisible } from './ui.js';
 import { refreshSelectionUI, selectCueSingle } from './subtitles.js';
@@ -45,8 +46,12 @@ export function refreshMpvSubs(revealAfter=false, live=false){
         const previewText = document.getElementById('tsEditPreviewText')?.value || '田這是一段|範例字幕田\n田 ABC123|321CBA 田';
         const draftCue = { id: 'draft_preview', start: 0, end: State.duration || 36000, text: previewText, track: 0, timed: true, style: {} };
         const tempTracks = [State.presetEdit.draft];
-        const { x: RX, y: RY } = ASS_PLAY_RES;
-        assStr = SubFormats.toASS([draftCue], State.fps, tempTracks, RX, RY);
+        const previewCues = [draftCue];
+        assStr = renderASS(previewCues, {
+          fps: State.fps,
+          tracks: tempTracks,
+          backgroundLayouts: measureSubtitleBackgroundLayouts(previewCues, tempTracks),
+        });
       } else if (live) {
         assStr = toASSFromState(cs);
         

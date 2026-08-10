@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { renderASS } from '../src/ass-render.js';
+import { planSubtitleBackgroundLayouts } from '../src/subtitle-background-layout.js';
 import { STYLE_DEFAULTS } from '../src/substyle.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -69,6 +70,47 @@ const describeWithBundledFfmpeg = process.platform === 'win32' && existsSync(FFM
   ? describe : describe.skip;
 
 describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
+  it('不同長度的兩行與軟體預覽相同，共用最寬行的矩形底色', () => {
+    const track = {
+      ...STYLE_DEFAULTS,
+      font: 'Arial',
+      fontSize: 80,
+      posX: 50,
+      posY: 50,
+      align: 'center',
+      valign: 'middle',
+      lineSpacing: 1,
+      outline: 2,
+      shadow: 0,
+      bgBox: true,
+      bgColor: '#000000',
+      bgAlpha: 0.5,
+    };
+    const cues = [
+      { id: 'uneven-lines', track: 0, start: 0, end: 1, text: 'MMMMMMMM\nMMMMMMMMMMMMMMMM' },
+    ];
+    const backgroundLayouts = planSubtitleBackgroundLayouts(cues, [track], {
+      measureLineWidth: line => line.length * 50,
+    });
+    const ass = renderASS(cues, { fps: 30, tracks: [track], backgroundLayouts })
+      .replace(/(Dialogue:[^\r\n]*?,Track0_Text,[^\r\n]*?\\pos\([^)]*\))/, '$1{\\1a&HFF&}');
+
+    const { rows, singleBackground, darkestWideBand } = measureBackground(ass);
+    expect(rows.length).toBeGreaterThan(20);
+    const firstY = rows[0].y;
+    const lastY = rows.at(-1).y;
+    const middleY = (firstY + lastY) / 2;
+    const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+    const upperWidth = median(rows.filter(row => row.y < middleY - 2).map(row => row.width));
+    const lowerWidth = median(rows.filter(row => row.y > middleY + 2).map(row => row.width));
+    expect(Math.abs(upperWidth - lowerWidth)).toBeLessThanOrEqual(4);
+    expect(upperWidth).toBeGreaterThanOrEqual(418);
+    expect(upperWidth).toBeLessThanOrEqual(428);
+    expect(singleBackground).toBeGreaterThanOrEqual(110);
+    expect(singleBackground).toBeLessThanOrEqual(145);
+    expect(darkestWideBand).toBeGreaterThanOrEqual(singleBackground - 20);
+  });
+
   it.each([
     { label: '一般外擴', outline: 2, shadow: 0 },
     { label: '使用者把外擴設為 0', outline: 0, shadow: 0 },

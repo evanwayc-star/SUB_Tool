@@ -64,6 +64,28 @@ describe('frozen export submission', () => {
     expect(job.defaultName).toMatch(/\.mp4$/);
   });
 
+  it('freezes the preview-matched subtitle background rectangle into the queued ASS', () => {
+    const source = {
+      cues: [{ id: 'boxed', start: 11, end: 12, text: '短行\n較長的第二行', track: 0 }],
+      tracks: [{ name: '對白', visible: true, bgBox: true, bgColor: '#000000', bgAlpha: 0.5 }],
+      backgroundLayouts: {
+        boxed: { width: 520, height: 150, offsetX: -260, offsetY: -150 },
+      },
+      fps: 25,
+    };
+    const submission = freezeExportSubmission(snapshot, source);
+    source.backgroundLayouts.boxed.width = 999;
+    const list = createDeliveryList({ projectTag: 'program', desktop: true });
+    list.setOutDir(0, 'D:/deliverables');
+
+    const [job] = buildExportJobs(submission, list);
+
+    expect(submission.backgroundLayouts.boxed.width).toBe(520);
+    expect(job.assText).toContain('Track0_Text');
+    expect(job.assText).toContain('\\p1');
+    expect(job.assText).toContain('l 520 150');
+  });
+
   it('captures project and delivery rows before asynchronous conflict I/O', async () => {
     let resolveConflict;
     const conflictGate = new Promise(resolve => { resolveConflict = resolve; });

@@ -2,6 +2,7 @@ import { State, IS_DESKTOP, DESK } from './state.js';
 import { encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes } from './util.js';
 import { SubFormats } from './formats.js';
 import { renderASS } from './ass-render.js';
+import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { setStatus, showToast } from './ui.js';
 import { buildXLSX } from './xlsxExport.js';
 
@@ -39,8 +40,11 @@ export function getXLSXFileData(trackDataList) {
 }
 
 export function toASSFromState(cues, options = {}) {
+  const backgroundLayouts = options.backgroundLayouts ??
+    measureSubtitleBackgroundLayouts(cues, State.tracks);
   return renderASS(cues, {
     ...options,
+    backgroundLayouts,
     fps: State.fps,
     tracks: State.tracks,
     dropFrame: State.dropFrame,

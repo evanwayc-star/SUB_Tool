@@ -8,6 +8,7 @@ import { burnedSubtitleTrackNames } from './subtitle-track-names.js';
    queue jobs derive their ASS, labels, and timecode from this immutable copy. */
 export function freezeExportSubmission(snapshot, {
   cues = [], tracks = [], fps = 25, dropFrame = false,
+  backgroundLayouts = {},
   mediaName = '', canvasW = 1920, canvasH = 1080,
   audioProject = null, defaultAudioLayout = {}, hasCustomRange = false,
 } = {}) {
@@ -16,6 +17,7 @@ export function freezeExportSubmission(snapshot, {
     ...snapshot,
     cues,
     tracks,
+    backgroundLayouts,
     fps,
     dropFrame,
     mediaName,
@@ -56,6 +58,7 @@ function subtitlePayloadForSubmission(submission) {
     fps: submission?.fps,
     tracks: submission?.tracks,
     dropFrame: submission?.dropFrame,
+    backgroundLayouts: submission?.backgroundLayouts,
   });
   return { assText: /\nDialogue:/.test(assText) ? assText : null, cues };
 }

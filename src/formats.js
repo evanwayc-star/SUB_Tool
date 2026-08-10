@@ -7,7 +7,34 @@
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, getExactFps } from './time.js';
-import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';
+import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, hexToAssColor, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';
+
+function finiteBackgroundLayout(layout){
+  if(!layout || typeof layout !== 'object') return null;
+  const width = Number(layout.width), height = Number(layout.height);
+  const offsetX = Number(layout.offsetX), offsetY = Number(layout.offsetY);
+  if(![width, height, offsetX, offsetY].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  return { width, height, offsetX, offsetY };
+}
+
+function assFillTags(hex, alpha){
+  const packed = hexToAssColor(hex, alpha).replace(/^&H/i, '').padStart(8, '0');
+  return `\\1c&H${packed.slice(2)}&\\1a&H${packed.slice(0, 2)}&`;
+}
+
+function backgroundDrawing(layout, st, vww, vwh, { shadow=false } = {}){
+  const x = Math.round((st.posX / 100) * vww);
+  const y = Math.round((st.posY / 100) * vwh);
+  const shift = shadow ? Math.max(0, Number(st.shadow) || 0) : 0;
+  const left = Math.round(x + layout.offsetX + shift);
+  const top = Math.round(y + layout.offsetY + shift);
+  const width = Math.max(1, Math.round(layout.width));
+  const height = Math.max(1, Math.round(layout.height));
+  const rotate = st.angle ? `\\org(${x},${y})\\frz${-(st.angle || 0)}` : '';
+  const fill = shadow ? assFillTags('#000000', 0.85) : assFillTags(st.bgColor, st.bgAlpha);
+  return `{\\an7\\pos(${left},${top})${rotate}\\p1\\bord0\\shad0${fill}}`+
+    `m 0 0 l ${width} 0 l ${width} ${height} l 0 ${height}`;
+}
 
 /* 舊版用 `//` 或兩個反斜線表示人工換行。URI 內的雙斜線是資料本身，
    包含 scheme 分隔與後續 path 中的 `//`，不可被誤切成多行。 */
@@ -578,6 +605,8 @@ const SubFormats = {
         不是明顯錯誤的值）。實際呼叫長這樣：`toASS(cues, fps, tracks, RX, RY, RX, RX, RY)`
         ——五個位置只有最後兩個有意義。已移除。 */
   toASS(cues,fps,tracks=[], vww=1000, vwh=562, options={}){
+    const backgroundLayouts = options?.backgroundLayouts && typeof options.backgroundLayouts === 'object'
+      ? options.backgroundLayouts : {};
     const metadataPayload=options && options.includeMetadata === true
       ? buildSubtoolMetadata(cues, fps, tracks, options) : null;
     const metadata=metadataPayload ? encodeSubtoolMetadata(metadataPayload) : '';
@@ -622,18 +651,41 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       ownStyle.set(c.id, nm);
       styles += styleToAssStyleLine(nm, effStyle(c, trkOf(c)), vwh) + '\n';
     }
-    const body=vis.map(c=>{
+    const foregroundStyles = new Map();
+    const foregroundStyleFor = (baseName, baseStyle) => {
+      if(foregroundStyles.has(baseName)) return foregroundStyles.get(baseName);
+      const name = `${baseName}_Text`;
+      foregroundStyles.set(baseName, name);
+      styles += styleToAssStyleLine(name, {
+        ...baseStyle,
+        bgBox: false,
+        outline: 0,
+        shadow: 0,
+      }, vwh) + '\n';
+      return name;
+    };
+    const eventHead = (c, styleName) =>
+      `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styleName},atg${(c.track||0)+1},0,0,0,,`;
+    const rendered=vis.map(c=>{
       const trk = trkOf(c);
       const st = effStyle(c, trk);
       const styName = ownStyle.get(c.id) || (trk ? `Track${c.track||0}` : 'Default');
-      const tags = cueAssTags(c.style, st);
-      const head = `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styName},atg${(c.track||0)+1},0,0,0,,`;
+      const layout = st.bgBox && !st.vertical
+        ? finiteBackgroundLayout(backgroundLayouts[String(c.id)]) : null;
+      const baseStyle = ownStyle.has(c.id) ? st : effStyle(null, trk);
+      const textStyleName = layout ? foregroundStyleFor(styName, baseStyle) : styName;
+      const textDiff = layout && c.style
+        ? Object.fromEntries(Object.entries(c.style).filter(([key]) =>
+          !['outline','outlineColor','shadow','bgBox','bgColor','bgAlpha'].includes(key)))
+        : c.style;
+      const tags = cueAssTags(textDiff, layout ? { ...st, bgBox:false } : st);
+      const head = eventHead(c, textStyleName);
       // 直書：ASS 無 writing-mode → 一列一個 Dialogue、逐列自己定位（見 verticalAssCols）。
       // 每列以 inline \an 覆蓋 Style 的 Alignment（Style 是整軌共用的，做不到逐列）。
       if(st.vertical){
-        return verticalAssCols(st, c.text || '', vww, vwh)
+        return { backgrounds:[], text:verticalAssCols(st, c.text || '', vww, vwh)
           .map(col => `${head}{\\an${col.an}\\pos(${col.x},${col.y})}${tags}${assJoinVertical(col.chars, st)}`)
-          .join('\n');
+          .join('\n') };
       }
       // \pos 精確落點（畫面百分比座標）＋逐句覆蓋 tags。
       // 錨點預設由 Style 的 Alignment 決定；該句自己覆蓋了對齊 → 補一個 inline \an
@@ -643,8 +695,22 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       // 逐行跳脫後才交給 assJoinLines——它會插入 \N 與 {\fs} 行距墊高，
       // 那些是我們自己要送的控制碼，不能跟使用者文字一起被跳脫。
       const lines = String(c.text || '').replace(/\r/g, '').split('\n').map(assEscapeText);
-      return head + anOv + cueAssPos(st, vww, vwh) + tags + assJoinLines(lines, st);
-    }).join('\n');
+      const text = head + anOv + cueAssPos(st, vww, vwh) + tags +
+        assJoinLines(lines, st, { suppressBackground:!!layout });
+      const backgrounds = [];
+      if(layout){
+        const backgroundHead = eventHead(c, 'Default');
+        if(Number(st.shadow) > 0) backgrounds.push(backgroundHead + backgroundDrawing(layout, st, vww, vwh, { shadow:true }));
+        backgrounds.push(backgroundHead + backgroundDrawing(layout, st, vww, vwh));
+      }
+      return { backgrounds, text };
+    });
+    // 同一 Layer 內後面的事件畫在上面：先集中所有底色，再畫文字，避免下一句的底色
+    // 蓋住前一句文字；不同 track 的 Layer 順序仍保持原有語義。
+    const body=[
+      ...rendered.flatMap(item => item.backgrounds),
+      ...rendered.map(item => item.text),
+    ].join('\n');
     return head+styles+eventsHead+body+'\n';
   },
   /* ---- Adobe Encore ---- */

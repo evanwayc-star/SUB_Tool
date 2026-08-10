@@ -133,6 +133,22 @@ export function effectiveSubtitleLineSpacing(st){
   return Math.max(lineSpacing, 1 + subtitleBackgroundGap(st) / fontSize);
 }
 
+/* HTML 預覽的背景盒尺寸也是 ASS 向量底色的唯一尺寸來源。把字級與 padding
+   算式集中在這裡，避免預覽與燒錄各自抄一份常數後再次漂移。 */
+export function subtitleBackgroundCssMetrics(st, ratio=1){
+  const r = ratio || 1;
+  const fontSize = Math.max(12, Math.round(st.fontSize * 0.75 * r));
+  const outline = finiteNonNegative(st?.outline);
+  const padY = Number((0.12 * fontSize + outline * r).toFixed(1));
+  const padX = Number((0.35 * fontSize + outline * r).toFixed(1));
+  return {
+    fontSize,
+    lineHeight: fontSize * effectiveSubtitleLineSpacing(st),
+    padX,
+    padY,
+  };
+}
+
 function effectiveVerticalLetterSpacing(st){
   const requested = finiteNonNegative(st?.letterSpacing);
   return st?.vertical ? Math.max(requested, subtitleBackgroundGap(st)) : requested;
@@ -150,7 +166,8 @@ export function styleToCss(st, ratio){
   const r = ratio || 1;
   // libass / VSFilter 將 ASS Fontsize 視為 pt (96dpi 下 1pt = 1.333px)，
   // HTML CSS font-size 為 px。DOM 預覽乘以 0.75 (72/96) 即可讓 HTML DOM 預覽與 mpv / libass 渲染尺寸 100% 絕對同構。
-  const fs = Math.max(12, Math.round(st.fontSize * 0.75 * r));
+  const bgMetrics = subtitleBackgroundCssMetrics(st, r);
+  const fs = bgMetrics.fontSize;
   let css = `font-size:${fs}px;color:${st.color};`+
     `font-family:'${st.font}','Noto Sans TC','Source Han Sans TC',sans-serif;`+
     `font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'};`+
@@ -172,8 +189,8 @@ export function styleToCss(st, ratio){
   if(st.angle) css += `transform:rotate(${st.angle}deg);transform-origin:${originOf(st)};`;
   if(st.bgBox){
     // 在 ASS 中 BorderStyle=3 時，Outline 轉為控制底色 padding，不再畫字體外框
-    const pad = (0.12 * fs + (st.outline || 0) * r).toFixed(1);
-    const padH = (0.35 * fs + (st.outline || 0) * r).toFixed(1);
+    const pad = bgMetrics.padY.toFixed(1);
+    const padH = bgMetrics.padX.toFixed(1);
     css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;margin:-${pad}px -${padH}px;border-radius:.08em;`+
            `box-decoration-break:clone;-webkit-box-decoration-break:clone;`;
     // Shadow 轉為底色色塊的陰影
@@ -322,11 +339,11 @@ export function verticalChars(text){
 
 /* 行距 hack：ASS 無行距欄位——行間插入一個「高度=gapPx 的 \h 空白行」，之後恢復字級 fsPx。
    一般字幕 lineSpacing<=1 時原樣不動；BorderStyle=3 仍套背景盒安全下限。 */
-export function assJoinLines(lines, st){
+export function assJoinLines(lines, st, { suppressBackground=false } = {}){
   const fs = st.fontSize;
   const gap = Math.round((effectiveSubtitleLineSpacing(st) - 1) * fs);
   if(gap <= 0) return lines.join('\\N');
-  if(!st.bgBox) return lines.join(`\\N{\\fs${gap}}\\h\\N{\\fs${fs}}`);
+  if(!st.bgBox || suppressBackground) return lines.join(`\\N{\\fs${gap}}\\h\\N{\\fs${fs}}`);
   // spacer 自己不可帶 BorderStyle=3 的邊界，否則兩行之間會多出一小塊底色；
   // 下一行前再恢復有效的 outline/shadow，避免關閉狀態一路洩漏到後文。
   return lines.join(`\\N{\\fs${gap}\\bord0\\shad0}\\h\\N`+
