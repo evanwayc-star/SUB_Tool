@@ -34,7 +34,7 @@ describe('ProjectLoadSession', () => {
     expect(order).toEqual(['first:start', 'first:finish', 'second']);
   });
 
-  it('keeps restore material in an explicit plan until its adapter consumes it', () => {
+  it('keeps restore material in an explicit plan until its adapter commits replacement', () => {
     const session = new ProjectLoadSession();
     const generation = session.begin();
     const plan = session.createRestorePlan(generation, {
@@ -45,8 +45,8 @@ describe('ProjectLoadSession', () => {
     });
 
     expect(session.activePlan).toBe(plan);
-    expect(plan.takeClips()).toEqual([{ id: 'image', type: 'image' }]);
-    expect(plan.pendingClips()).toEqual([]);
+    expect(plan.owns()).toBe(true);
+    expect(plan.pendingClips()).toEqual([{ id: 'image', type: 'image' }]);
     plan.replaceClips([{ id: 'missing', type: 'image' }]);
     expect(plan.pendingClips()).toEqual([{ id: 'missing', type: 'image' }]);
     expect(plan.pendingExternalAudioSources()).toEqual([
@@ -59,5 +59,7 @@ describe('ProjectLoadSession', () => {
     expect(plan.peekPlayhead()).toBeNull();
     const invalidPlan = session.createRestorePlan(generation, { playhead: '01:00:00:00' });
     expect(invalidPlan.peekPlayhead()).toBeNull();
+    expect(plan.owns()).toBe(false);
+    expect(invalidPlan.owns()).toBe(true);
   });
 });

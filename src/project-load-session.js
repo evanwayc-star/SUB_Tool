@@ -11,20 +11,19 @@ class ProjectRestorePlan {
   #externalAudioSources;
   #playhead;
   #mediaRelink;
+  #owns;
 
-  constructor({ clips = [], externalAudioSources = [], playhead = null, mediaRelink = false } = {}) {
+  constructor({ clips = [], externalAudioSources = [], playhead = null, mediaRelink = false } = {}, { owns = () => true } = {}) {
     this.#clips = Array.isArray(clips) ? clips : [];
     this.#externalAudioSources = Array.isArray(externalAudioSources) ? externalAudioSources : [];
     this.#playhead = Number.isFinite(playhead) ? Math.max(0, playhead) : null;
     this.#mediaRelink = mediaRelink === true;
+    this.#owns = typeof owns === 'function' ? owns : () => true;
   }
 
+  owns() { return this.#owns(); }
+
   pendingClips() { return this.#clips; }
-  takeClips() {
-    const clips = this.#clips;
-    this.#clips = [];
-    return clips;
-  }
   replaceClips(clips) { this.#clips = Array.isArray(clips) ? clips : []; }
 
   pendingExternalAudioSources() { return this.#externalAudioSources; }
@@ -73,7 +72,10 @@ class ProjectLoadSession {
 
   createRestorePlan(generation, material) {
     if (generation != null && !this.isCurrent(generation)) return null;
-    const plan = new ProjectRestorePlan(material);
+    let plan = null;
+    plan = new ProjectRestorePlan(material, {
+      owns: () => this.isCurrent(generation) && this.#activePlan === plan,
+    });
     this.#activePlan = plan;
     return plan;
   }

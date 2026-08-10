@@ -13,6 +13,12 @@
 | **Main Process** | `electron/main.js` | 視窗管理、平台原生 ffmpeg/ffprobe、Windows mpv 嵌入、本機檔案 I/O、快取管理 |
 | **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
 | **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
+| **拖放檔案准入** | `electron/dropped-file-admission.js` | 一般影音拖放只授權精確來源；`.subtool/.json` 必須走原子可信專案 intake，不得先取得 read／截圖目錄能力 |
+| **可信專案匯入** | `electron/trusted-project-intake.js` | 只接受由 main process 讀取或選檔取得的 `.subtool` bytes，再從其中衍生專案與媒體 read capability；renderer 不可用自帶 path/b64 擴權 |
+| **專案寫入准入** | `electron/project-write-admission.js` | Save As／原檔覆寫共用的 write transaction；renderer bytes 內每個 media path 必須已有 read capability，write 成功後才清除舊 relink declaration |
+| **專案檔案 Gateway** | `electron/project-file-gateway.js` | 將讀取→解析→授權→最近清單與准入→寫入→清舊 declaration 封成可執行交易，IPC handler 不得自行拆開步驟 |
+| **Renderer 設定政策** | `electron/config-policy.js` | allowlist renderer 可保存的設定鍵；`recentProjects` 等 main-owned 欄位不可由 renderer 注入 |
+| **媒體 ingest 協調器** | `electron/media-ingest-coordinator.js` | 串流 ingest 的 response/completion 與 queued cache work 的單一序列 lane；取代工作會取消舊流程與其晚到 process |
 | **匯出工作狀態機** | `electron/export-job-status.js` | **七種狀態與四個分類的唯一定義**（見下方「匯出工作的狀態機」）。零 `require`，純資料＋述詞 |
 | **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集；終態 outcome／待刪除 journal |
 | **完成紀錄** | `electron/queue-history.js` | 已完成交付的稽核紀錄（跨重啟保留、上限 200 筆）。**刻意不走 queue-store**：只存渲染完成卡片需要的欄位，**不含 `payload` 的 `clips`／`audioPlan`**，因此不可能被重新排程執行 |
@@ -50,9 +56,11 @@ Main (main.js)
 | `fileURL(path)` | `fs:fileURL` | R→M | 已授權唯讀檔案 → 可播放 URL；查詢不會取得新授權 |
 | `stat(path)` | `fs:stat` | R→M | 已授權唯讀檔案才回傳 `{exists, size}` |
 | `getFilePath(file)` | —（preload 內直接呼叫 `webUtils.getPathForFile`，無 IPC） | R | 拖放的 `File` 物件 → 絕對路徑。Electron 32 起 `File.path` 已移除；只接受真正的 File 物件、失敗回 `null`。供拖放影音走桌面載入路徑（`loadDesktopMedia`） |
-| `authorizeDroppedFile(file)` | `fs:authorizeDroppedFile` | R→M | preload 從真實拖放 `File` 取得精確路徑後，授予該單一影音檔唯讀能力 |
+| `authorizeDroppedFile(file)` | `fs:authorizeDroppedFile` | R→M | preload 從真實拖放 `File` 取得精確路徑後，授予該單一影音檔唯讀能力；專案副檔名 fail closed |
+| `openDroppedProject(file)` | `project:openDroppedFile` | R→M | preload 從真實拖放 `File` 取得專案路徑；main 先 read／parse 成功，再以可信 bytes 原子授予專案與其精確媒體能力 |
 | `readB64(path)` | `fs:readB64` | R→M | 只讀已授權檔案，回傳 base64 字串 |
-| `writeProject(path, b64)` | `fs:writeProject` | R→M | 只可寫回已選取專案本身或其 `.subtool_AutoSave/` |
+| `writeProject(path, b64)` | `fs:writeProject` | R→M | 只可寫回已選取專案本身或其 `.subtool_AutoSave/`；bytes 宣告的所有媒體須已授權，成功覆寫才清除舊 relink declaration |
+| `findRelinkTarget(projectPath, oldMediaPath)` | `fs:findRelinkTarget` | R→M | 只接受 main 從該份可信專案 bytes 記錄過的精確 oldMediaPath，再於專案樹中搜尋同名替代檔 |
 | `writeScreenshot(path, b64)` | `fs:writeScreenshot` | R→M | 只可寫入已授權截圖目錄的 `.jpg/.jpeg/.png` |
 | `reserveScreenshotPath(directory, suffix)` | `fs:reserveScreenshotPath` | R→M | 在已授權截圖目錄內保留下一個 `Shot-NNN*.jpg`；檔案清單不交給 renderer |
 | `listDir(path)` | `fs:listDir` | R→M | 只列出已選擇的交付目錄，供交付同名衝突提示 |
@@ -108,8 +116,8 @@ Main (main.js)
 |---|---|---|---|
 | `isDesktop` | —（preload 內的常數 `true`） | — | 前端 `state.js` 用它判定桌面版（`DESK`）；網頁版沒有 `window.subtool`，取值為 undefined |
 | `fontsList()` | `fonts:list` | R→M | 掃 `font/` 下每個子資料夾，回傳 `{fonts:[{name, file, family}]}`。`name`＝資料夾名（UI 顯示）、`family`＝**字型檔內部家族名**（ASS 要用這個，見鐵律 §0.3）。此 handler 只授予已掃描字型根的唯讀能力，renderer 才取得到 `fs:fileURL` |
-| `configLoad()` | `config:load` | R→M | 讀 `%APPDATA%/sub-tool/config.json`（設定、常用樣式 `subPresets` 等） |
-| `configSave(data)` | `config:save` | R→M | **淺層合併**寫回 config.json（只傳要改的鍵即可） |
+| `configLoad()` | `config:load` | R→M | 讀 Electron `userData/config/settings.json`（設定、常用樣式 `subPresets` 等） |
+| `configSave(data)` | `config:save` | R→M | 只合併 `config-policy.js` allowlist 內的 renderer-owned 設定鍵；`recentProjects` 等 main-owned 欄位會被剝除 |
 | `keysLoad()` | `keys:load` | R→M | 讀自訂快捷鍵對應表 |
 | `keysSave(data)` | `keys:save` | R→M | 寫自訂快捷鍵對應表（快捷鍵設定視窗另有匯出／匯入 JSON 檔） |
 | `exportDirectory(files)` | `dialog:exportDirectory` | R→M | 選資料夾批次寫入字幕樣式包；只有 `files` 為空的「選擇交付目錄」流程會授予 ffmpeg delivery capability |

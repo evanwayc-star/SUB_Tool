@@ -3,7 +3,8 @@ import { $ } from './dom.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { sortCues, burnedSubtitleTrackNames } from './subtitle-model.js';
+import { sortCues } from './subtitle-model.js';
+import { burnedSubtitleTrackNames } from './subtitle-track-names.js';
 import { drawTimeline, layoutTimeline } from './timeline.js';
 import { emit } from './events.js';
 import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
@@ -13,14 +14,16 @@ import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSp
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
-import { buildExportJobs, buildWebExportParams } from './export-job-builder.js';
+import { buildExportJobs, freezeExportSubmission, subtitleCuesForSubmission } from './export-job-builder.js';
+import { runFrozenExportSubmission } from './export-submission-transaction.js';
+import { videoExportCapability } from './export-capability.js';
 import { escapeHTML } from './util.js';
 import { Media } from './media.js';
 
 // Domain imports
 import { importSub, importDropped } from './sub-parse.js';
 import { applyTcShift, applyDurAdjTc, applyDurAdjPct } from './timeline-edit-batch.js';
-import { getFileData, getXLSXFileData, toASSFromState, executeBatchExport, doExportXLSX, _exportVideoWeb } from './ffmpeg-export.js';
+import { getFileData, getXLSXFileData, toASSFromState, executeBatchExport, doExportXLSX } from './ffmpeg-export.js';
 
 function showFpsConvertDialog() {
   const tkIdx = State.listTrack;
@@ -190,14 +193,29 @@ function showExportDialog() {
 
 }
 
-function _exportSnapshot(){
+/* This is a display draft while the modal is open.  It becomes an actual
+   submission only when the user presses \"全部送出\" below; that handler calls it
+   again before any async conflict I/O starts. */
+function _captureExportDraft(){
   let liveExternalSources=[];
   try{ liveExternalSources = Media.externalAudio?.list?.() || []; }catch(e){}
-  return buildExportSnapshot({
+  const snapshot = buildExportSnapshot({
     state: State,
     mediaTracks: Media.tracks || [],
     liveExternalSources,
     sequenceEnd: Seq.end(),
+  });
+  return freezeExportSubmission(snapshot, {
+    cues: State.cues,
+    tracks: State.tracks,
+    fps: State.fps,
+    dropFrame: State.dropFrame,
+    mediaName: State.mediaName,
+    canvasW: State.videoWidth || 1920,
+    canvasH: State.videoHeight || 1080,
+    audioProject: State.audioProject,
+    defaultAudioLayout: State.audioProject?.exportLayout || {},
+    hasCustomRange: State.exportIn != null || State.exportOut != null,
   });
 }
 
@@ -232,6 +250,8 @@ function _mixerSummary() {
 import { validateSubtitlesBeforeExport } from './subtitle-validator.js';
 
 async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
+  const capability = videoExportCapability(IS_DESKTOP);
+  if (!capability.supported) { showToast(capability.message); return; }
   if (!skipValidation) {
     const cpLenInput = $('cpLenInput');
     const wordLimit = cpLenInput && cpLenInput.value ? parseInt(cpLenInput.value, 10) : null;
@@ -254,8 +274,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     }
   }
 
-  if (IS_DESKTOP && !DESK.exportVideo) { showToast('桌面版匯出元件未就緒'); return; }
-  const data = _exportSnapshot();
+  if (!DESK.exportVideo) { showToast('桌面版匯出元件未就緒'); return; }
+  const data = initialDraft?.draft || _captureExportDraft();
   if (!data) { showToast('沒有可匯出的影片或外部音訊'); return; }
   if (data.audioOnly && !data.audioPlan) { showToast('純音訊 WAV 匯出需要專案音軌路由'); return; }
   const unresolved = data.audioPlan?.unresolvedSources || [];
@@ -268,12 +288,12 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
   const hasProjectAudio = !!data.audioPlan;
 
   const list = createDeliveryList({
-    projectTag: projectTagFrom(State.mediaName),
-    fps: State.fps || 25,
-    canvasW: State.videoWidth || 1920,
-    canvasH: State.videoHeight || 1080,
+    projectTag: projectTagFrom(data.mediaName),
+    fps: data.fps || 25,
+    canvasW: data.canvasW || 1920,
+    canvasH: data.canvasH || 1080,
     audioOnly,
-    defaultAudioLayout: State.audioProject?.exportLayout || {},
+    defaultAudioLayout: data.defaultAudioLayout || {},
     desktop: IS_DESKTOP,
     initial: initialDraft?.deliverables || null,
   });
@@ -284,7 +304,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:8px;">
         <div>
           <div style="font-weight:bold;font-size:14px;">交付清單</div>
-          <div id="evOutputDuration" data-seconds="${data.duration}" style="font-size:11px;color:var(--text-dim);margin-top:1px;">本次輸出時長：<b style="color:var(--text);font-variant-numeric:tabular-nums;">${secToEncore(data.duration, State.fps, State.dropFrame)}</b>${(State.exportIn != null || State.exportOut != null) ? ' <span style="color:var(--text-dim);">(自訂範圍)</span>' : ''}</div>
+          <div id="evOutputDuration" data-seconds="${data.duration}" style="font-size:11px;color:var(--text-dim);margin-top:1px;">本次輸出時長：<b style="color:var(--text);font-variant-numeric:tabular-nums;">${secToEncore(data.duration, data.fps, data.dropFrame)}</b>${data.hasCustomRange ? ' <span style="color:var(--text-dim);">(自訂範圍)</span>' : ''}</div>
         </div>
         <button id="evAddRowBtn" style="padding:2px 8px;font-size:11px;cursor:pointer;background:var(--panel3);border:1px solid var(--border);color:var(--text);border-radius:4px;">＋新增一列</button>
       </div>
@@ -295,9 +315,9 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     </div>
   `;
 
-  /* 判準只有 subtitle-model.js 一份——對話框、job payload 與佇列監控三個消費端
+  /* 軌道名稱判準只有 subtitle-track-names.js 一份——對話框、job payload 與佇列監控三個消費端
      必須顯示同一份清單，否則「說會燒哪幾軌」與「實際燒了哪幾軌」會不一致。 */
-  const activeSubs = burnedSubtitleTrackNames(State.tracks);
+  const activeSubs = burnedSubtitleTrackNames(data.tracks, subtitleCuesForSubmission(data));
 
   function renderRow(r, i) {
     const isWav = r.format === 'wav';
@@ -395,21 +415,21 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
 
     $$('.ev-audio-btn').forEach(el => el.onclick = e => {
       const idx = idxOf(e);
-      const audioSpec = createDeliveryAudioSpec(State.audioProject, list.get(idx));
+      const audioSpec = createDeliveryAudioSpec(data.audioProject, list.get(idx));
       closeModal();
       const deliveryFormat = list.get(idx).format;
       AudioRouting.openDeliveryOutputSettings(audioSpec, ({ saved, spec } = {}) => {
         if (saved && spec) list.applyRow(idx, applyDeliveryAudioSpec(list.get(idx), spec));
-        void showExportVideoDialog({ deliverables: list.rows() });
+        void showExportVideoDialog({ deliverables: list.rows(), draft: data });
       }, { deliveryFormat });
     });
   }
 
-  async function checkConflicts(isSubmitting = false) {
+  async function checkConflicts(isSubmitting = false, candidate = list) {
     const msg = $('evConflictMsg');
     if (!msg) return true;
 
-    const blocking = list.problems().filter(p => p.kind === 'blocking')[0];
+    const blocking = candidate.problems().filter(p => p.kind === 'blocking')[0];
     if (blocking) {
       msg.textContent = blocking.message;
       msg.style.display = 'block';
@@ -420,7 +440,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     if (IS_DESKTOP) {
       try {
         const conflicts = [];
-        for (const { dir, name } of list.outPaths()) {
+        for (const { dir, name } of candidate.outPaths()) {
           if (!dir) continue;
           const files = await DESK.listDir(dir);
           const existing = files.map(f => (typeof f === 'string' ? f : f.name).toLowerCase());
@@ -439,28 +459,59 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     return true;
   }
 
+  function freezeCurrentDeliveryList(submission) {
+    return createDeliveryList({
+      projectTag: projectTagFrom(submission.mediaName),
+      fps: submission.fps || 25,
+      canvasW: submission.canvasW || 1920,
+      canvasH: submission.canvasH || 1080,
+      audioOnly: !!submission.audioOnly,
+      defaultAudioLayout: submission.defaultAudioLayout || {},
+      desktop: IS_DESKTOP,
+      // `rows()` is intentionally live while the dialog is editable.  Clone
+      // once at click time so async conflict checks cannot let later UI edits
+      // alter the jobs that this submission builds.
+      initial: structuredClone(list.rows()),
+    });
+  }
+
   openModal('匯出交付清單', html, [
     { label: '取消', act: closeModal },
     { label: '全部送出', primary: true, act: async () => {
-      if (list.count() === 0) { showToast('清單不能為空'); return; }
-      if (!(await checkConflicts(true))) return;
-
       try {
-        if (!IS_DESKTOP) {
-          closeModal();
-          const { expIn, assText } = buildWebExportParams(data, State);
-          await _exportVideoWeb(data, list.rows(), expIn, assText);
-          return;
-        }
-
-        const jobs = buildExportJobs(data, list, State);
-        for (const job of jobs) {
-          const jobId = await DESK.exportVideo(job);
-          if (jobId) showToast(`排入佇列: ${job.defaultName}`);
-        }
-        closeModal();
-        if (IS_DESKTOP && typeof DESK.openQueueMonitor === 'function') {
-          setTimeout(() => DESK.openQueueMonitor(), 150);
+        const result = await runFrozenExportSubmission({
+          // D3: capture project data and editable delivery rows synchronously,
+          // before checkConflicts performs directory I/O.
+          capture: () => {
+            const submission = _captureExportDraft();
+            return submission ? { submission, submittedList: freezeCurrentDeliveryList(submission) } : null;
+          },
+          validate: ({ submission, submittedList }) => {
+            if (submission.audioOnly && !submission.audioPlan) return '純音訊 WAV 匯出需要專案音軌路由';
+            const unresolved = submission.audioPlan?.unresolvedSources || [];
+            if (unresolved.length) {
+              return `找不到可供匯出的音訊母素材：${unresolved.map(item=>item.name).join('、')}。請重新連結來源檔。`;
+            }
+            if (!!submission.audioOnly !== audioOnly) return '匯出素材在交付清單開啟後已變更，請重新開啟清單確認交付格式。';
+            if (submittedList.count() === 0) return '清單不能為空';
+            return null;
+          },
+          checkConflicts: ({ submittedList }) => checkConflicts(true, submittedList),
+          dispatch: async ({ submission, submittedList }) => {
+            const jobs = buildExportJobs(submission, submittedList);
+            for (const job of jobs) {
+              const jobId = await DESK.exportVideo(job);
+              if (jobId) showToast(`排入佇列: ${job.defaultName}`);
+            }
+            closeModal();
+            if (typeof DESK.openQueueMonitor === 'function') {
+              setTimeout(() => DESK.openQueueMonitor(), 150);
+            }
+            return jobs.length;
+          },
+        });
+        if (result.status === 'invalid') {
+          showToast(result.reason);
         }
       } catch (err) {
         showToast('送出失敗: ' + (err.message || err));
@@ -492,7 +543,12 @@ document.addEventListener('drop', async e => {
   e.preventDefault(); $('videoWrap').classList.remove('dragover');
   const f = e.dataTransfer.files[0]; if (!f) return;
   const ext = (f.name.split('.').pop() || '').toLowerCase();
-  if (['subtool', 'json'].includes(ext)) Project.load(f);
+  if (['subtool', 'json'].includes(ext)) {
+    if(IS_DESKTOP&&typeof DESK.openDroppedProject==='function'){
+      const project=await DESK.openDroppedProject(f);
+      if(project) await Project.loadDesktop(project);
+    }else await Project.load(f);
+  }
   else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
   else if (IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)) {
     const p = DESK.authorizeDroppedFile ? await DESK.authorizeDroppedFile(f) : DESK.getFilePath(f);

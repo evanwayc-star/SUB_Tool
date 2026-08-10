@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { MediaIntakeSession } from '../src/media-intake-session.js';
+import { MediaIntakeSession, waitForOwnedMediaMetadata } from '../src/media-intake-session.js';
 
 const deferred = () => {
   let resolve;
@@ -76,5 +76,23 @@ describe('MediaIntakeSession resource ownership', () => {
     cleanupGate.resolve();
     await Promise.all([cleanup, second]);
     expect(events).toEqual(['cleanup:start', 'cleanup:end', 'B:start']);
+  });
+
+  it('cancels a shared video metadata wait without replacing another handler', async () => {
+    const element = new EventTarget();
+    Object.defineProperty(element, 'readyState', { configurable: true, value: 0 });
+    const existingHandler = vi.fn();
+    element.onloadedmetadata = existingHandler;
+    let current = true;
+
+    const result = waitForOwnedMediaMetadata(element, {
+      owns: () => current,
+      timeoutMs: 500,
+      pollMs: 5,
+    });
+    current = false;
+
+    await expect(result).resolves.toBe('cancelled');
+    expect(element.onloadedmetadata).toBe(existingHandler);
   });
 });

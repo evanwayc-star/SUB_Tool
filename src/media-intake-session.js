@@ -32,6 +32,48 @@ function waitForMetadata(element, timeoutMs){
   });
 }
 
+/* The shared <video> element can be reassigned by a newer intake while an old
+   transcode waits for metadata.  Property handlers (`onloadedmetadata = ...`)
+   let A and B overwrite one another; an unbounded wait also blocks the single
+   ffmpeg.wasm lane forever.  Return an explicit outcome and poll ownership so
+   cancellation settles even when the replacement source emits no event. */
+function waitForOwnedMediaMetadata(element, {
+  owns = () => true,
+  timeoutMs = 10000,
+  pollMs = 25,
+} = {}) {
+  const stillOwns = typeof owns === 'function' ? owns : () => true;
+  return new Promise(resolve => {
+    let settled = false;
+    let timer = null;
+    let poll = null;
+    const remove = () => {
+      if (timer) clearTimeout(timer);
+      if (poll) clearInterval(poll);
+      element?.removeEventListener?.('loadedmetadata', onMetadata);
+      element?.removeEventListener?.('error', onError);
+    };
+    const finish = outcome => {
+      if (settled) return;
+      settled = true;
+      remove();
+      resolve(outcome);
+    };
+    const check = () => {
+      if (!stillOwns()) finish('cancelled');
+      else if (Number(element?.readyState) >= 1) finish('ready');
+    };
+    const onMetadata = () => finish(stillOwns() ? 'ready' : 'cancelled');
+    const onError = () => finish(stillOwns() ? 'error' : 'cancelled');
+
+    element?.addEventListener?.('loadedmetadata', onMetadata, { once: true });
+    element?.addEventListener?.('error', onError, { once: true });
+    timer = setTimeout(() => finish(stillOwns() ? 'timeout' : 'cancelled'), Math.max(1, timeoutMs));
+    poll = setInterval(check, Math.max(1, pollMs));
+    check();
+  });
+}
+
 class MediaIntakeSession {
   constructor(){
     this.generation = 0;
@@ -104,4 +146,4 @@ class MediaIntakeSession {
   }
 }
 
-export { MediaIntakeSession };
+export { MediaIntakeSession, waitForOwnedMediaMetadata };

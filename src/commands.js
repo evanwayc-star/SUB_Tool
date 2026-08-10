@@ -23,6 +23,7 @@ import { State, ensureTrackCount, saveConfig, clearSelection, IS_DESKTOP, DESK }
 import { pickFile } from './util.js';
 import { fmtClock } from './time.js';
 import { emit } from './events.js';
+import { runVideoExportCommand } from './export-capability.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Project, resetProject, confirmDiscardUnsaved } from './project.js';
 import { Media } from './media.js';
@@ -107,8 +108,13 @@ function createCommands(ctx){
     /* ── 字幕匯入匯出 ───────────────────────────────────────────────── */
     'imp-auto': () => importSub(),
     'exp-dialog': () => showExportDialog(),
-    'exp-video': () => showExportVideoDialog().catch(err => {
-      console.error('匯出影片錯誤', err); showToast('匯出影片錯誤：' + err.message);
+    'exp-video': () => runVideoExportCommand({
+      isDesktop: IS_DESKTOP,
+      openExport: () => showExportVideoDialog(),
+      notify: showToast,
+      reportError: err => {
+        console.error('匯出影片錯誤', err); showToast('匯出影片錯誤：' + err.message);
+      },
     }),
     'export-notes': () => exportNotes(),
     /* 監控序列：原本只有狀態列按鈕的 onclick 直接呼叫 DESK，沒有進指令表，

@@ -2,6 +2,7 @@
    （本專案刻意關閉 no-unused-vars，所以沒有任何東西會提醒）。已移除。 */
 import { normalizeAudioProject, pruneRemovedAudioBuses } from './state.js';
 import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './delivery-audio.js';
+import { repairAudioExportStreams } from './audio-stream-layout.js';
 
 export const LAYOUTS = {
   mono: { label: 'Mono', channels: 1 },
@@ -69,6 +70,50 @@ export function deliveryStreamsForPreset(preset, buses) {
   });
 }
 
+/* 專案音訊 bus 的增減只有這一份 transition。來源配線對話框與輸出設定對話框
+   都必須經過它，否則「同樣改成 6 軌」會在不同入口留下不同 exportLayout。 */
+export function resizeProjectAudioBuses(projectDraft, rawCount) {
+  const original = structuredClone(projectDraft || {});
+  let project = normalizeAudioProject(original);
+  const normalizedChanged = JSON.stringify(project) !== JSON.stringify(original);
+  project.buses = Array.isArray(project.buses) ? project.buses : [];
+  const count = Math.max(0, Math.min(MAX_AUDIO_BUSES, Math.floor(Number(rawCount) || 0)));
+  if (count === project.buses.length) return { changed: normalizedChanged, project };
+
+  if (count > project.buses.length) {
+    project.mode = 'manual';
+    /* 【不要自己捏 bus】
+       state.js 是 id、名稱、音量與高度的唯一擁有者；推空物件再正規化，才能避免
+       某個 UI 路徑產生不完整 bus、另一個 UI 路徑產生完整 bus。 */
+    const hadLayout = !!project.exportLayout?.streams?.length;
+    while (project.buses.length < count) project.buses.push({});
+    project = normalizeAudioProject(project);
+    /* 專案原本完全沒有輸出設定時，1 bus 建立 mono、2 bus 以上維持本編輯器
+       既有的 stereo 預設；已有編組則必須原樣保留，不能因「增加 bus」偷換 layout。 */
+    if (!hadLayout) {
+      project.exportLayout = {
+        streams: [{
+          id: 'out1',
+          // A 1-bus project is a valid mono delivery, not malformed stereo.
+          layout: count === 1 ? 'mono' : 'stereo',
+          busIds: project.buses.slice(0, count === 1 ? 1 : 2).map(bus => bus.id),
+        }],
+      };
+    }
+    return { changed: true, project };
+  }
+
+  const removedIds = new Set(project.buses.slice(count).map(bus => bus.id));
+  pruneRemovedAudioBuses(project, removedIds);
+  project.mode = 'manual';
+  project.buses = project.buses.slice(0, count);
+  project.exportLayout = {
+    ...(project.exportLayout || {}),
+    streams: repairAudioExportStreams(project.exportLayout?.streams),
+  };
+  return { changed: true, project };
+}
+
 /**
  * Pure model for AudioRouting state transitions
  */
@@ -80,39 +125,9 @@ export class AudioRoutingModel {
       current() { return p; },
       
       setBusCount(rawCount) {
-        const count = Math.max(0, Math.min(MAX_AUDIO_BUSES, Math.floor(Number(rawCount) || 0)));
-        if (count === p.buses.length) return false;
-        
-        if (count > p.buses.length) {
-          p.mode = 'manual';
-          /* 【不要自己捏 bus】
-             這裡原本寫 `p.buses.push({ id: \`bus-${n}\`, locked: false })`，註解還說
-             「we simulate what ensureAudioBusCount does」——但那份模擬與真正的擁有者
-             （state.js 的 _normalBus）產出的形狀不同：真的那份是
-             { id:'abN', name, visible, locked, muted, solo, volume, height }。
-             更陰的是 state.js 的 _cleanId 會【保留】任何非空字串當 id，
-             所以 'bus-3' 寫回 State 之後不會被修正，會被當成合法 id 接受，
-             而 name/volume/height 一律缺席——直到某條路徑碰巧呼叫了
-             normalizeAudioProject()，那條 bus 才會突然改名成「音訊軌 3」、音量重設。
-
-             改成推空物件、交給正規化器補齊：id 與所有欄位只有一個產生處。 */
-          const hadLayout = !!p.exportLayout?.streams?.length;
-          while (p.buses.length < count) p.buses.push({});
-          p = normalizeAudioProject(p);
-          /* normalizeAudioProject 在 exportLayout 為空時會自己補「每條 bus 一個 mono
-             stream」。本編輯器的預設不同（一條 stereo 吃前兩條 bus），所以只在
-             【原本就沒有】輸出設定時才覆寫回自己的預設，維持既有行為。 */
-          if (!hadLayout) {
-            p.exportLayout = { streams: [{ id: 'out1', layout: 'stereo', busIds: p.buses.slice(0, 2).map(b => b.id) }] };
-          }
-          return true;
-        }
-        
-        const removedIds = new Set(p.buses.slice(count).map(bus => bus.id));
-        pruneRemovedAudioBuses(p, removedIds);
-        p.mode = 'manual';
-        p.buses = p.buses.slice(0, count);
-        return true;
+        const transition = resizeProjectAudioBuses(p, rawCount);
+        p = transition.project;
+        return transition.changed;
       },
       
       setStreams(streams) {

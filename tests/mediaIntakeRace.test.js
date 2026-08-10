@@ -41,6 +41,8 @@ const deskMock = vi.hoisted(() => ({
   })),
   ingest: vi.fn(),
   fileURL: vi.fn(async path => `file:///${String(path).replaceAll('\\', '/')}`),
+  waveAudio: vi.fn(),
+  cleanupAudio: vi.fn(),
 }));
 
 vi.mock('../src/dom.js', () => domMock);
@@ -59,6 +61,7 @@ const deferred = () => {
 };
 
 let Media;
+let Wave;
 let State;
 let resetAudioProject;
 let resetPlayerAdapter;
@@ -74,9 +77,12 @@ describe('desktop mother-source intake ownership', () => {
       constructor(){ this.state = 'running'; this.destination = {}; this.currentTime = 0; }
       createGain(){ return { connect: vi.fn(), disconnect: vi.fn(), gain: { value: 1 } }; }
       createAnalyser(){ return { connect: vi.fn(), fftSize: 0 }; }
+      createMediaElementSource(){ return { channelCount: 2, connect: vi.fn(), disconnect: vi.fn() }; }
+      createChannelSplitter(){ return { connect: vi.fn(), disconnect: vi.fn() }; }
+      createChannelMerger(){ return { connect: vi.fn(), disconnect: vi.fn() }; }
       resume(){}
     };
-    ({ Media } = await import('../src/media.js'));
+    ({ Media, Wave } = await import('../src/media.js'));
     ({ State, resetAudioProject } = await import('../src/state.js'));
     ({ resetPlayerAdapter } = await import('../src/media-player-adapter.js'));
   });
@@ -87,6 +93,8 @@ describe('desktop mother-source intake ownership', () => {
     deskMock.probe.mockClear();
     deskMock.fileURL.mockClear();
     deskMock.ingest.mockReset();
+    deskMock.waveAudio.mockReset();
+    deskMock.cleanupAudio.mockReset();
     deskMock.ingest.mockImplementation(({ path }) => {
       const work = deferred();
       pending.set(path, work);
@@ -133,7 +141,10 @@ describe('desktop mother-source intake ownership', () => {
       ? proxyURL.promise
       : Promise.resolve(`file:///${String(path).replaceAll('\\', '/')}`));
 
-    const stale = Media._bgAudioIngest('C:/media/A.mp4', [{ channels: 1 }], 12);
+    const primaryA = Media._registerPrimary({
+      name: 'A.mp4', path: 'C:/media/A.mp4', dur: 12, audioSourceId: 'source-a',
+    });
+    const stale = Media._bgAudioIngest('C:/media/A.mp4', [{ channels: 1 }], 12, primaryA);
     await vi.waitFor(() => expect(deskMock.fileURL).toHaveBeenCalledWith('C:/cache/A-proxy.mp4'));
 
     Media.reset();
@@ -147,6 +158,27 @@ describe('desktop mother-source intake ownership', () => {
 
     expect(State.audioProject.sourceMaps['source-b']).toBeUndefined();
     expect(Media.tracks).toEqual([]);
+  });
+
+  it('does not commit desktop native waveform data after the last source placement is deleted', async () => {
+    const wavePath = deferred();
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'h264', fps: 25, width: 1920, height: 1080 },
+      audio: [{ channels: 2, channelLayout: 'stereo' }],
+    });
+    deskMock.ingest.mockResolvedValueOnce({ channels: [] });
+    deskMock.waveAudio.mockReturnValueOnce(wavePath.promise);
+
+    const loading = Media.loadDesktopMedia('C:/media/A.mp4');
+    await vi.waitFor(() => expect(deskMock.waveAudio).toHaveBeenCalledTimes(1));
+    const primary = State.clips[0];
+    expect(Media.removeClip(primary.id)).toBe(true);
+    wavePath.resolve('C:/cache/A-wave.wav');
+    await loading;
+
+    expect(Wave._sourceState(primary, false)).toBeNull();
+    expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/A-wave.wav');
   });
 
   it('serializes overlapping mpv launches and cleans the stale native runtime before B starts', async () => {

@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { AudioRoutingModel, DELIVERY_PRESETS } from '../src/audio-routing-model.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { AudioRoutingModel, DELIVERY_PRESETS, resizeProjectAudioBuses } from '../src/audio-routing-model.js';
 import { normalizeAudioProject } from '../src/state.js';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const { _normalizeAudioPlan } = require('../electron/export-plan.js');
 
 /* 餵給模型的 bus 必須是 state.js 真的會產生的形狀。
 
@@ -117,13 +125,108 @@ describe('新增的 bus 與 state.js 的擁有者同形', () => {
     expect(layout.streams[0].busIds.length).toBe(2);
   });
 
-  it('已有輸出設定時不可被正規化器的 mono 預設蓋掉', () => {
+  it('只有一條 bus 時建立可交付的 mono stream，而不是壞掉的單聲道 stereo', () => {
+    const transition = resizeProjectAudioBuses({ ...realProject(0), exportLayout: { streams: [] } }, 1);
+    const layout = transition.project.exportLayout;
+    expect(layout.streams).toEqual([{ id: 'out1', layout: 'mono', busIds: [transition.project.buses[0].id] }]);
+    expect(() => _normalizeAudioPlan({
+      buses: transition.project.buses.map(bus => ({ id: bus.id, inputs: [] })),
+      streams: layout.streams,
+    })).not.toThrow();
+  });
+
+  it('Stereo 從兩條 bus 縮成一條時同步降為可交付的 Mono', () => {
+    const project = realProject(2);
+    project.exportLayout = {
+      streams: [{ id: 'out1', layout: 'stereo', name: '2.0-FM', busIds: project.buses.map(bus => bus.id) }],
+    };
+    const transition = resizeProjectAudioBuses(project, 1);
+    const streams = transition.project.exportLayout.streams;
+
+    expect(streams).toEqual([{ id: 'out1', layout: 'mono', busIds: [transition.project.buses[0].id] }]);
+    expect(() => _normalizeAudioPlan({
+      buses: transition.project.buses.map(bus => ({ id: bus.id, inputs: [] })),
+      streams,
+    })).not.toThrow();
+  });
+
+  it('載入舊專案時修復單 bus Stereo，即使 bus 數沒有再變動', () => {
+    const base = realProject(1);
+    const bus = base.buses[0];
+    const legacy = {
+      ...base,
+      exportLayout: { streams: [{ id: 'out1', layout: 'stereo', name: '舊 2.0', busIds: [bus.id] }] },
+    };
+    const normalized = normalizeAudioProject(legacy);
+    expect(normalized.exportLayout.streams).toEqual([{ id: 'out1', layout: 'mono', busIds: [bus.id] }]);
+    expect(() => _normalizeAudioPlan({
+      buses: normalized.buses.map(item => ({ id: item.id, inputs: [] })),
+      streams: normalized.exportLayout.streams,
+    })).not.toThrow();
+
+    const transition = resizeProjectAudioBuses(legacy, 1);
+    expect(transition.changed).toBe(true);
+    expect(transition.project.exportLayout.streams[0]).toMatchObject({ layout: 'mono', busIds: [bus.id] });
+  });
+
+  it('5.1 縮成非標準聲道數時拆成有效 Mono streams，不遺失存活 bus', () => {
+    const project = realProject(6);
+    project.exportLayout = {
+      streams: [{ id: 'surround', layout: '5.1', name: '5.1-FM', busIds: project.buses.map(bus => bus.id) }],
+    };
+    const transition = resizeProjectAudioBuses(project, 5);
+    const streams = transition.project.exportLayout.streams;
+
+    expect(streams).toHaveLength(5);
+    expect(streams.every(stream => stream.layout === 'mono' && stream.busIds.length === 1)).toBe(true);
+    expect(streams.flatMap(stream => stream.busIds)).toEqual(transition.project.buses.map(bus => bus.id));
+    expect(() => _normalizeAudioPlan({
+      buses: transition.project.buses.map(bus => ({ id: bus.id, inputs: [] })),
+      streams,
+    })).not.toThrow();
+  });
+
+  it('已有兩條 bus 的不完整 5.1 會安全修復為 Stereo，不會被 mono 預設蓋掉', () => {
     const base = realProject(2);
     base.exportLayout = { streams: [{ id: 'out1', layout: '5.1', busIds: base.buses.map(b => b.id) }] };
     const adapter = AudioRoutingModel.createProjectAdapter(base);
     adapter.setBusCount(6);
     const layout = adapter.current().exportLayout;
     expect(layout.streams.length).toBe(1);
-    expect(layout.streams[0].layout).toBe('5.1');
+    expect(layout.streams[0].layout).toBe('stereo');
+    expect(layout.streams[0].busIds).toEqual(base.buses.map(bus => bus.id));
+  });
+});
+
+describe('專案 bus 數量只有一個 transition', () => {
+  it('來源配線與輸出設定共用 resize 規則，會保留既有輸出編組', () => {
+    const project = realProject(2);
+    project.exportLayout = {
+      streams: [{ id: 'program', layout: 'stereo', busIds: project.buses.map(bus => bus.id) }],
+    };
+
+    const direct = resizeProjectAudioBuses(project, 6);
+    const editor = AudioRoutingModel.createProjectAdapter(project);
+    expect(editor.setBusCount(6)).toBe(true);
+
+    expect(direct.changed).toBe(true);
+    expect(direct.project.buses).toHaveLength(6);
+    expect(editor.current().buses).toHaveLength(6);
+    expect(direct.project.buses.map(bus => bus.id)).toEqual(expect.arrayContaining(project.buses.map(bus => bus.id)));
+    expect(editor.current().buses.map(bus => bus.id)).toEqual(expect.arrayContaining(project.buses.map(bus => bus.id)));
+    expect(direct.project.exportLayout.streams).toEqual([
+      { id: 'program', layout: 'stereo', busIds: project.buses.map(bus => bus.id) },
+    ]);
+    expect(editor.current().exportLayout.streams).toEqual(direct.project.exportLayout.streams);
+  });
+
+  it('來源配線面板委派給共享 transition，而不是再手寫一套增減規則', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'src', 'audio-routing.js'), 'utf8');
+    const body = source.slice(source.indexOf('function setBusCount'));
+    const fn = body.slice(0, body.indexOf('\nfunction routeTableHtml'));
+
+    expect(fn).toMatch(/resizeProjectAudioBuses\(project\(\),rawCount\)/);
+    expect(fn).not.toMatch(/ensureAudioBusCount\(/);
+    expect(fn).not.toMatch(/pruneRemovedAudioBuses\(/);
   });
 });

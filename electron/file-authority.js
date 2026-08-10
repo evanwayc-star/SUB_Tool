@@ -19,13 +19,13 @@ function collectProjectMediaPaths(project) {
     paths.push(value);
   };
   add(project?.media?.path);
-  for (const clip of project?.clips || []) add(clip?.path);
-  for (const source of project?.externalAudioSources || []) add(source?.path);
+  for (const clip of Array.isArray(project?.clips) ? project.clips : []) add(clip?.path);
+  for (const source of Array.isArray(project?.externalAudioSources) ? project.externalAudioSources : []) add(source?.path);
   return paths;
 }
 
-function collectProjectMediaPathsFromBuffer(buffer) {
-  if (!Buffer.isBuffer(buffer)) return [];
+function parseProjectBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer)) return null;
   let text;
   if (buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xFE) text = buffer.subarray(2).toString('utf16le');
   else if (buffer.length >= 2 && buffer[0] === 0xFE && buffer[1] === 0xFF) {
@@ -46,7 +46,15 @@ function collectProjectMediaPathsFromBuffer(buffer) {
       text = body.toString('utf16le');
     } else text = buffer.toString('utf8');
   }
-  try { return collectProjectMediaPaths(JSON.parse(text)); } catch (error) { return []; }
+  try {
+    const project = JSON.parse(text);
+    return project && typeof project === 'object' && !Array.isArray(project) ? project : null;
+  } catch (error) { return null; }
+}
+
+function collectProjectMediaPathsFromBuffer(buffer) {
+  const project = parseProjectBuffer(buffer);
+  return project ? collectProjectMediaPaths(project) : [];
 }
 
 class FileAuthority {
@@ -243,4 +251,5 @@ module.exports = {
   QUEUE_LOG_FILE,
   collectProjectMediaPaths,
   collectProjectMediaPathsFromBuffer,
+  parseProjectBuffer,
 };

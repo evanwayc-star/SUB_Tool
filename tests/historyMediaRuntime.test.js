@@ -182,6 +182,39 @@ describe('history restores the media runtime', () => {
     }));
   });
 
+  it('lets pending source work follow a same-fingerprint clip clone across undo and redo', async () => {
+    const firstProbe = {};
+    firstProbe.promise = new Promise(resolve => { firstProbe.resolve = resolve; });
+    deskMock.probe
+      .mockReturnValueOnce(firstProbe.promise)
+      .mockResolvedValue({ duration: 5, video: { codec: 'h264', fps: 25 }, audio: [] });
+    const secondary = {
+      id: 'clip-b', name: 'insert.mov', path: 'C:/source/insert.mov',
+      web: { url: 'file:///C:/source/insert.mov' }, dur: 5, in: 0, out: 5,
+      offset: 14, vtrack: 0, primary: false, audioSrc: 'clip:clip-b', audioSourceId: 'source-b',
+    };
+    State.clips.push(secondary);
+    History.record('加入影片');
+    History.undo();
+
+    History.redo();
+    await vi.waitFor(() => expect(deskMock.probe).toHaveBeenCalledTimes(1));
+    const firstRedoClip = State.clips.find(clip => clip.id === 'clip-b');
+    History.undo();
+    History.redo();
+    const secondRedoClip = State.clips.find(clip => clip.id === 'clip-b');
+    expect(secondRedoClip).not.toBe(firstRedoClip);
+    expect(deskMock.probe).toHaveBeenCalledTimes(1);
+
+    firstProbe.resolve({ duration: 5, video: { codec: 'h264', fps: 25 }, audio: [] });
+    await Media.waitForHistorySequenceRestore();
+
+    expect(deskMock.ingest).toHaveBeenCalledTimes(1);
+    expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'C:/source/insert.mov', queue: true,
+    }));
+  });
+
   it('rebases pre-media history so delayed project relinking survives undo', () => {
     State.clips = [];
     History.reset();

@@ -41,6 +41,7 @@ import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { beginTimelineTrackEdit, updateTimelineTrack } from './timeline-edit-transaction.js';
+import { beginTimelineGesture } from './timeline-gesture-transaction.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
 import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction.js';
@@ -715,7 +716,8 @@ function beginExternalAudioDrag(ev,asset,entry,block){
     startX:ev.clientX,startY:ev.clientY,startScroll:tlScroll.scrollLeft,moved:false,
     os:entry.start,oin:inPoint,oout:outPoint,duration:Math.max(outPoint,Number(asset.duration)||0),
     preview:{offset:entry.start,in:inPoint,out:outPoint},
-    snaps:snapTargets(new Set())
+    snaps:snapTargets(new Set()),
+    transaction:beginTimelineGesture(),
   };
   jklReset();
   ev.preventDefault(); ev.stopPropagation();
@@ -1118,7 +1120,8 @@ tlScroll.addEventListener('mousedown',e=>{
     drag={mode, clip:c, clipEl:liveEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft, moved:false,
       os:c.offset, oin:c.in, oout:c.out,
       leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+(c.out-c.in)), // 右鄰左緣（時間軸）
-      nb, snaps:[...snapTargets(new Set()), ...Seq.snapEdges(c.id)]};
+      nb, snaps:[...snapTargets(new Set()), ...Seq.snapEdges(c.id)],
+      transaction:beginTimelineGesture({targets:[{target:c,fields:['offset','in','out','vtrack']}]}),};
     e.preventDefault(); return;
   }
   const overlap=e.target.closest('.cue-overlap');
@@ -1179,8 +1182,15 @@ tlScroll.addEventListener('mousedown',e=>{
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
       .map(cc=>{ const b=cueNeighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
+    const selectionBefore={ids:[...State.selectedIds],primary:State.selectedId,activeEdge:State.activeEdge};
+    const transaction=beginTimelineGesture({targets:grp.map(item=>({target:item.c,fields:['start','end','track']}))});
+    // renderSubRow is part of the drag preview.  Cancellation must refresh the
+    // same rows after model rollback, otherwise their TC/duration stays stale.
+    const previewRowIds=grp.map(item=>item.c.id);
+    transaction.addCancelEffect(()=>previewRowIds.forEach(renderSubRow));
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
-      snaps:snapTargets(exSet), isCtrl,isCopyDrag};
+      snaps:snapTargets(exSet), isCtrl,isCopyDrag,selectionBefore,
+      transaction};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
   }
@@ -1212,6 +1222,46 @@ tlScroll.addEventListener('mousedown',e=>{
 });
 let _autoScrollId = null;
 
+function stopTimelineAutoScroll(){
+  if(_autoScrollId) { cancelAnimationFrame(_autoScrollId); _autoScrollId = null; }
+}
+
+/* blur / pointercancel has no mouseup.  Preview edits must never escape that
+   lifecycle: restore the captured fields, remove copy-drag clones, and redraw
+   without recording history. */
+function cancelTimelineDrag(){
+  if(!drag) return;
+  const pending=drag;
+  updateSnapGuide(null);
+  stopTimelineAutoScroll();
+  if(pending.mode==='rubber') $('tlRubber').style.display='none';
+  if(pending.mode==='audio-move'||pending.mode==='audio-l'||pending.mode==='audio-r'){
+    try{
+      if(pending.pointerId!=null&&pending.audioEl?.hasPointerCapture?.(pending.pointerId)) pending.audioEl.releasePointerCapture(pending.pointerId);
+    }catch(_){}
+  }
+  const restored=pending.transaction?.cancel?.()||false;
+  // Cue mousedown hides overlap badges before the 3px movement threshold.  A
+  // cancel before movement has nothing to restore (`restored === false`) but
+  // still needs a full redraw to put those preview-only DOM changes back.
+  if(pending.transaction){
+    if(restored&&(pending.mode==='clip-move'||pending.mode==='clip-l'||pending.mode==='clip-r')){
+      Seq.sort(); Seq.recomputeDuration();
+      Media.seek(Math.min(Media.displayTime(),State.duration||0));
+    }
+    drawTimeline();
+    emit('render:videoSub'); emit('mpv:refreshSubs');
+    // copy drag temporarily selected the cloned cues.  The rollback restored
+    // State selection; mirror it back to the subtitle list/status immediately
+    // instead of leaving the removed clone highlighted until a later render.
+    if(pending.isCopyDrag){
+      refreshSelectionUI();
+      $('stSel').textContent=State.selectedIds.length ? '已選 '+State.selectedIds.length+' 句' : '';
+    }
+  }
+  drag=null;
+}
+
 const _handleDragUpdate = (e) => {
   if(!drag)return;
   const rect=tlLayer.getBoundingClientRect();
@@ -1226,14 +1276,23 @@ const _handleDragUpdate = (e) => {
   if(drag.mode!=='scrub'){ // 含 cue 模式與 clip-move/clip-l/clip-r
     if (!drag.moved && (Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)) {
       drag.moved = true;
+      drag.transaction?.markMoved();
       if (drag.isCopyDrag && drag.mode === 'move' && drag.grp) {
         // Clone cues
         const newIds = [];
+        const copied = new Set();
         drag.grp.forEach(it => {
            const cloned = { ...it.c, id: newId(), style: it.c.style ? JSON.parse(JSON.stringify(it.c.style)) : undefined };
            State.cues.push(cloned);
+           copied.add(cloned);
            newIds.push(cloned.id);
            it.c = cloned;
+        });
+        const before=drag.selectionBefore;
+        drag.transaction?.addRollback(()=>{
+          State.cues=State.cues.filter(cue=>!copied.has(cue));
+          setSelection({kind:'sub',ids:before.ids,primary:before.primary});
+          State.activeEdge=before.activeEdge;
         });
         setSelection({ kind:'sub', ids:newIds });
         State.activeEdge = 'start';
@@ -1481,7 +1540,7 @@ window.addEventListener('mousemove',e=>{
 window.addEventListener('mouseup',e=>{
   if(!drag)return;
   updateSnapGuide(null);
-  if(_autoScrollId) { cancelAnimationFrame(_autoScrollId); _autoScrollId = null; }
+  stopTimelineAutoScroll();
   if(drag.mode==='rubber'){
     $('tlRubber').style.display='none';
     const rect=tlLayer.getBoundingClientRect();
@@ -1516,7 +1575,7 @@ window.addEventListener('mouseup',e=>{
     if(drag.moved) clearClipSelection(); // 框選字幕時取消影片段選取
   }else if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
     const moved=drag.moved, m=drag.mode, c=drag.clip;
-    if(!moved){ selectClip(c.id); drag=null; return; } // 未拖動＝點選該影片段（高亮，供上下鍵/Del）
+    if(!moved){ selectClip(c.id); drag.transaction?.commit?.(); drag=null; return; } // 未拖動＝點選該影片段（高亮，供上下鍵/Del）
     if(m==='clip-move'){ Seq.resolveOverlaps(c); Seq.compact(); } // 自由拖放：同軌連鎖右推；收斂空的頂部視訊軌
     Seq.sort(); Seq.recomputeDuration();
     recordHistory(m==='clip-move'?('移動影片：'+c.name):('修剪影片：'+c.name));
@@ -1530,7 +1589,7 @@ window.addEventListener('mouseup',e=>{
       if(drag.pointerId!=null&&drag.audioEl?.hasPointerCapture?.(drag.pointerId)) drag.audioEl.releasePointerCapture(drag.pointerId);
     }catch(_){}
     _ignoreAudioClickUntil=performance.now()+350;
-    if(!moved){ selectExternalAudioClip(assetId,{seek:true}); drag=null; return; }
+    if(!moved){ selectExternalAudioClip(assetId,{seek:true}); drag.transaction?.commit?.(); drag=null; return; }
     if(mode==='audio-move'){
       runExternalAudioAction('moveExternalAudio',[assetId,preview.offset]);
     }else if(mode==='audio-l'){
@@ -1548,8 +1607,12 @@ window.addEventListener('mouseup',e=>{
       recordHistory(drag.isCopyDrag ? `複製字幕` : (m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}句)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)));
     }
   }
+  drag.transaction?.commit?.();
   drag=null;
 });
+
+window.addEventListener('blur',cancelTimelineDrag);
+window.addEventListener('pointercancel',cancelTimelineDrag,true);
 
 /* 滾輪縮放（Ctrl）/ 平移 / 逐格 */
 tlScroll.addEventListener('wheel',e=>{

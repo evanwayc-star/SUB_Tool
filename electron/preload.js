@@ -6,6 +6,7 @@
 ============================================================================== */
 /* SUB Tool — preload：以 contextBridge 安全暴露桌面能力給前端 (window.subtool) */
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+const isProjectFilePath = filePath => typeof filePath === 'string' && /\.(subtool|json)$/i.test(filePath);
 
 contextBridge.exposeInMainWorld('subtool', {
   isDesktop: true,
@@ -17,8 +18,16 @@ contextBridge.exposeInMainWorld('subtool', {
   authorizeDroppedFile: (file) => {
     try {
       const p = webUtils.getPathForFile(file);
-      return p ? ipcRenderer.invoke('fs:authorizeDroppedFile', p) : Promise.resolve(null);
+      return p && !isProjectFilePath(p) ? ipcRenderer.invoke('fs:authorizeDroppedFile', p) : Promise.resolve(null);
     } catch (e) { return Promise.resolve(null); }
+  },
+  openDroppedProject: (file) => {
+    try {
+      const projectPath = webUtils.getPathForFile(file);
+      return projectPath && isProjectFilePath(projectPath)
+        ? ipcRenderer.invoke('project:openDroppedFile', projectPath)
+        : Promise.resolve(null);
+    } catch (error) { return Promise.resolve(null); }
   },
   fileURL:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:fileURL', p); },
   stat:         (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:stat', p); },
@@ -37,7 +46,6 @@ contextBridge.exposeInMainWorld('subtool', {
   recentProjects:   () => ipcRenderer.invoke('project:recentList'),
   openRecentProject: (index) => ipcRenderer.invoke('project:openRecent', index),
   clearRecentProjects: () => ipcRenderer.invoke('project:clearRecent'),
-  authorizeProject: (path, b64) => ipcRenderer.invoke('fs:authorizeProject', { path, b64 }),
   saveProject:  (name, b64) => ipcRenderer.invoke('dialog:saveProject', { name, b64 }),
   importSub:    (kind) => ipcRenderer.invoke('dialog:importSub', kind),
   exportSub:    (name, b64, ext) => ipcRenderer.invoke('dialog:exportSub', { name, b64, ext }),

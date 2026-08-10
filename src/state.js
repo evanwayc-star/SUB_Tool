@@ -68,6 +68,7 @@
    更新 UI 並依 'df' 後綴設定 dropFrame)、newId(遞增 cue id)、isSel/cueSuffix、DESK/IS_DESKTOP(Electron 偵測)。 */
 import { emit } from './events.js';
 import { makeSettingsStore } from './settings-store.js';
+import { repairAudioExportStreams } from './audio-stream-layout.js';
 
 /* ===== 專案音訊路由 ====================================================
    音訊資料刻意與 Media（AudioContext、HTMLAudioElement、ffmpeg 暫存檔）分離：
@@ -231,6 +232,7 @@ function normalizeAudioProject(project){
     sourceMaps:_normalSourceMaps(raw.sourceMaps,buses),
     exportLayout:_normalExportLayout(raw.exportLayout,buses)
   };
+  normalized.exportLayout.streams=repairAudioExportStreams(normalized.exportLayout.streams);
   // 有 bus 卻沒有輸出設定時，使用「每條 bus 一個 mono stream」的安全預設。
   if(!normalized.exportLayout.streams.length&&buses.length){
     const streamIds=new Set();

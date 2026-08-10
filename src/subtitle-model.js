@@ -1,5 +1,6 @@
 import { State, newId, setSelection, pruneSelection, ensureTrackCount, cueSuffix } from './state.js';
 import { emit } from './events.js';
+import { burnedSubtitleTrackNames } from './subtitle-track-names.js';
 import { Media } from './media.js';
 import { snapTimeToFrame } from './time.js';
 import { recordHistory } from './history.js';
@@ -336,19 +337,6 @@ export function trimTrackSpaces() {
   }
 }
 
-/* 會被燒進交付的字幕軌名稱。
-
-   【為什麼要有這一支】
-   這個判準原本在 subio.js 的匯出對話框裡內聯了一份（顯示「字幕: 取詞, 對白」），
-   而真正決定哪些字幕進得了 ASS 的是 formats.js —— 它以
-   `tracks[tk].visible === false` 排除整軌。兩處各寫一次，改其中一邊就會讓
-   對話框顯示的內容與實際燒進去的不一致，而且不會有任何錯誤。
-
-   v6.1.5 起匯出佇列監控也要顯示同一份清單，變成三個消費端——規則必須只有一份。
-
-   ⚠ 改這裡時要同步確認 formats.js 的軌道篩選仍然一致，否則顯示會說謊。 */
-export function burnedSubtitleTrackNames(tracks) {
-  return (Array.isArray(tracks) ? tracks : [])
-    .map((t, idx) => (t && t.visible !== false) ? (t.name || `軌道 ${idx + 1}`) : null)
-    .filter(Boolean);
-}
+/* 相容既有 import；規則已移到 subtitle-track-names.js，交付對話框、ASS 與 queue payload
+   都從同一份實際輸出 cues 推導。 */
+export { burnedSubtitleTrackNames };

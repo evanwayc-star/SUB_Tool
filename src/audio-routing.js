@@ -25,7 +25,7 @@
         **從未被 emit、也從未有訂閱者**，照做等於什麼都沒發生（`events.js` 的 emit
         在無 handler 時是靜默 no-op，不會報錯，所以錯得很安靜）。
 ============================================================================== */
-import { State, ensureAudioBusCount, ensureAudioExportDefaults, normalizeAudioProject, pruneRemovedAudioBuses } from './state.js';
+import { State, ensureAudioExportDefaults, normalizeAudioProject } from './state.js';
 import { Seq } from './sequence.js';
 import { Media } from './media.js';
 import { AudioPipeline } from './audio-pipeline.js';
@@ -35,7 +35,7 @@ import { escapeHTML } from './util.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './delivery-audio.js';
-import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, monoStreamsForBuses, deliveryStreamsForPreset, AudioRoutingModel } from './audio-routing-model.js';
+import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, monoStreamsForBuses, deliveryStreamsForPreset, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-model.js';
 
 
 function project(){
@@ -76,22 +76,9 @@ function routesForSource(source){
   return [];
 }
 function setBusCount(rawCount){
-  const count=Math.max(0,Math.min(MAX_AUDIO_BUSES,Math.floor(Number(rawCount)||0)));
-  const p=project();
-  if(count===p.buses.length) return false;
-  if(count>p.buses.length){
-    p.mode='manual';
-    ensureAudioBusCount(count,{appendExportDefaults:true});
-    ensureAudioExportDefaults({appendMissing:true});
-    return true;
-  }
-  const removedIds=new Set(p.buses.slice(count).map(bus=>bus.id));
-  // 清掉指向已消失 bus 的參照（來源配線與輸出編組兩處）。規則在 state.js，可獨立測試。
-  pruneRemovedAudioBuses(p, removedIds);
-
-  p.mode='manual';
-  p.buses=p.buses.slice(0,count);
-  ensureAudioExportDefaults({appendMissing:false});
+  const transition=resizeProjectAudioBuses(project(),rawCount);
+  if(!transition.changed) return false;
+  State.audioProject=transition.project;
   return true;
 }
 function routeTableHtml(clip,routes){

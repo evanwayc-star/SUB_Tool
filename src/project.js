@@ -117,6 +117,7 @@ function _savedClips(){
 }
 
 async function _restorePendingExternalAudioSources(plan=_projectLoadSession.activePlan){
+  const ownsPlan=()=>_projectLoadSession.activePlan===plan&&(!plan?.owns||plan.owns());
   const pending=_normalExternalAudioSources(plan?.pendingExternalAudioSources?.());
   if(!pending.length){ plan?.replaceExternalAudioSources?.([]); return {restored:0,pending:0}; }
   if(!IS_DESKTOP||typeof Media.restoreExternalAudioSource!=='function') return {restored:0,pending:pending.length};
@@ -131,12 +132,14 @@ async function _restorePendingExternalAudioSources(plan=_projectLoadSession.acti
   const unresolved=[];
   let restored=0;
   for(const source of pending){
+    if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
     if(existing.has(source.audioSourceId)){ restored++; continue; }
     if(!source.path){ unresolved.push(source); continue; }
     let exists=true;
     if(typeof DESK?.stat==='function'){
       try{ exists=!!(await DESK.stat(source.path))?.exists; }catch(e){ exists=false; }
     }
+    if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
     if(!exists){
       console.warn('external audio source is unavailable:',source.path);
       unresolved.push(source);
@@ -144,19 +147,31 @@ async function _restorePendingExternalAudioSources(plan=_projectLoadSession.acti
     }
     try{
       // _restore 避免每支外部音檔重新載入時搶走主影片的目前音源選取。
-      const asset=await Media.restoreExternalAudioSource({...source,_restore:true});
+      const asset=await Media.restoreExternalAudioSource({...source,_restore:true},null,ownsPlan);
+      if(!ownsPlan()){
+        // Production restore returns the exact runtime object it inserted.  A
+        // test adapter may ignore the upstream lease, so only remove by id
+        // when object identity proves the stale asset is still registered.
+        if(asset&&Array.isArray(Media.externalAudioSources)&&Media.externalAudioSources.includes(asset)){
+          Media.removeExternalAudio?.(asset.id,{record:false});
+        }
+        return {restored:0,pending:pending.length,cancelled:true};
+      }
       if(asset){ existing.add(source.audioSourceId); restored++; }
       else unresolved.push(source);
     }catch(e){
+      if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
       console.warn('restore external audio source:',source.path,e);
       unresolved.push(source);
     }
   }
+  if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
   plan?.replaceExternalAudioSources?.(unresolved);
   // 未找到檔案的來源仍要保留其可編輯 timeline metadata；否則一開專案就會被
   // 影片長度截短，下一次另行重新連結音檔時位置也會看起來消失。
   let live=[];
   try{ live=Media.externalAudio?.list?.() || []; }catch(e){}
+  if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
   State.externalAudioState=[...(Array.isArray(live)?live:[]),...unresolved];
   State.externalAudioEnd=_externalAudioEnd(State.externalAudioState);
   return {restored,pending:unresolved.length};
@@ -590,8 +605,8 @@ const Project = {
   },
   async _loadDesktop(r,generation){
     let data; try{ data=JSON.parse(decodeText(b64ToBytes(r.b64).buffer)); }catch(e){ showToast('無法解析專案檔'); return; }
-    if(IS_DESKTOP && r.path && DESK.authorizeProject) await DESK.authorizeProject(r.path, r.b64);
     await _autoRelinkMissingMedia(data, r.path);
+    if(!_isCurrentProjectLoad(generation)) return;
     const mp=data.media&&data.media.path;
     // stat 是唯讀，可在碰 State 之前先完成；若期間有更新請求，舊專案完全不進入 runtime。
     let mediaStat=null;

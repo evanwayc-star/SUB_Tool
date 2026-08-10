@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mediaMock = vi.hoisted(() => ({
   displayTime: vi.fn(() => 0),
   externalAudio: { list: vi.fn(() => []), get: vi.fn(() => null) },
+  externalAudioSources: [],
   loadDesktopMedia: vi.fn(),
+  removeExternalAudio: vi.fn(),
   reset: vi.fn(),
+  restoreExternalAudioSource: vi.fn(),
   restorePendingImageClips: vi.fn().mockResolvedValue({ restored: 0, pending: 0 }),
   seek: vi.fn(),
   waitForPendingProjectRestore: vi.fn().mockResolvedValue(),
@@ -114,6 +117,9 @@ describe('project load transactions', () => {
     State.notes = [];
     mediaMock.reset.mockClear();
     mediaMock.loadDesktopMedia.mockReset();
+    mediaMock.removeExternalAudio.mockReset();
+    mediaMock.restoreExternalAudioSource.mockReset();
+    mediaMock.externalAudioSources.length = 0;
     mediaMock.waitForPendingProjectRestore.mockReset();
     mediaMock.waitForPendingProjectRestore.mockResolvedValue();
     mediaMock.seek.mockClear();
@@ -142,6 +148,71 @@ describe('project load transactions', () => {
     expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov', expect.any(Object));
     expect(State.cues.map(cue => cue.text)).toEqual(['B']);
     expect(resetHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops an old media-less project after its auto-relink await loses ownership', async () => {
+    const relinkA = deferred();
+    desk.findRelinkTarget = vi.fn((projectPath, oldPath) => {
+      if (oldPath === 'C:/audio/A.wav') return relinkA.promise;
+      return Promise.resolve(null);
+    });
+    desk.stat.mockImplementation(path => Promise.resolve({
+      exists: path === 'C:/media/B.mov',
+    }));
+    mediaMock.loadDesktopMedia.mockResolvedValue();
+    const dataA = {
+      app: 'SUB Tool', version: 3, media: { name: '', path: null }, duration: 8, fps: 25,
+      tracks: [], cues: [{ start: 1, end: 2, text: 'A', track: 0 }], notes: [], clips: [],
+      externalAudioSources: [{ audioSourceId: 'audio-A', name: 'A', path: 'C:/audio/A.wav' }],
+    };
+
+    const loadingA = Project.loadDesktop({
+      path: 'C:/projects/A.subtool',
+      b64: projectB64(dataA),
+    });
+    await vi.waitFor(() => expect(desk.findRelinkTarget).toHaveBeenCalledWith(
+      'C:/projects/A.subtool', 'C:/audio/A.wav',
+    ));
+    const loadingB = Project.loadDesktop(request('B', 'C:/media/B.mov'));
+    relinkA.resolve(null);
+    await Promise.all([loadingA, loadingB]);
+
+    expect(State.cues.map(cue => cue.text)).toEqual(['B']);
+    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledTimes(1);
+    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov', expect.any(Object));
+    expect(mediaMock.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not commit external-audio metadata after a rejected restore loses the project plan', async () => {
+    const restoreA = deferred();
+    desk.stat.mockResolvedValue({ exists: true });
+    mediaMock.restoreExternalAudioSource.mockReturnValueOnce(restoreA.promise);
+    mediaMock.loadDesktopMedia.mockResolvedValue();
+    const dataA = {
+      app: 'SUB Tool', version: 3, media: { name: '', path: null }, duration: 8, fps: 25,
+      tracks: [], cues: [{ start: 1, end: 2, text: 'A', track: 0 }], notes: [], clips: [],
+      externalAudioSources: [{
+        audioSourceId: 'audio-A', name: 'A', path: 'C:/audio/A.wav', duration: 8, out: 8,
+      }],
+    };
+
+    const loadingA = Project.loadDesktop({
+      path: 'C:/projects/A.subtool',
+      b64: projectB64(dataA),
+    });
+    await vi.waitFor(() => expect(mediaMock.restoreExternalAudioSource).toHaveBeenCalledTimes(1));
+    const loadingB = Project.loadDesktop(request('B', 'C:/media/B.mov'));
+    restoreA.reject(new Error('A source disappeared'));
+    await Promise.all([loadingA, loadingB]);
+
+    expect(State.cues.map(cue => cue.text)).toEqual(['B']);
+    expect(State.externalAudioState).toEqual([]);
+    expect(State.externalAudioEnd).toBe(0);
+    expect(mediaMock.restoreExternalAudioSource).toHaveBeenCalledWith(
+      expect.objectContaining({ audioSourceId: 'audio-A', _restore: true }),
+      null,
+      expect.any(Function),
+    );
   });
 
   it('serializes a newer project behind an in-flight media load and only finalizes the winner', async () => {

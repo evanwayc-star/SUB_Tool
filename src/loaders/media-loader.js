@@ -34,6 +34,7 @@ import { Wave, WAVE_DECODE_MAX, probeAudioChannelDescriptors, detectFpsWeb, prob
 import { sourceChannelLabels } from '../channel-layout.js';
 import { secToEncore } from '../time.js';
 import { Seq } from '../sequence.js';
+import { waitForOwnedMediaMetadata } from '../media-intake-session.js';
 export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx._resetForFirstVideo();
     const intake=ctx._intakeSession.begin(p);
@@ -76,10 +77,12 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       const mediaUrl=await DESK.fileURL(p);
       if(!owns()) return;
       video.src=mediaUrl; setPlayerAdapter(new Html5Adapter(video));
-      await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,10000);});
-      if(!owns()) return;
+      const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
+      if(!owns()||metadata==='cancelled') return;
+      if(metadata!=='ready'){ showToast('無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
       State.duration=video.duration||dur||0;
       const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
+      const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
       AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio),audio.length?0:0);
       const stereoTracks=ctx._connectStereo('video',primary);
       if(stereoTracks) ctx.tracks.push(...stereoTracks);
@@ -92,21 +95,21 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         let wavPath=null;
         try{
           wavPath=await DESK.waveAudio(p,dur);
-          if(!owns()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
+          if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
           const wavUrl=await DESK.fileURL(wavPath);
-          if(!owns()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
+          if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
           const res=await fetch(wavUrl);
           const buf=await res.arrayBuffer();
-          if(!owns()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
+          if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
           const ab=await AudioEngine.decodeAudioData(buf); 
-          if(!owns()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
+          if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
           try { DESK.cleanupAudio(wavPath); } catch(e) {}
           if(ab.duration>State.duration)State.duration=ab.duration; 
           Wave.setSourceBuffer(primary,ab); emit('media:timeline');
         }
-        catch(e){ if(owns()){ console.warn('wave',e); Wave.initLive(); } }
+        catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); } }
       }
-      if(!owns()) return;
+      if(!ownsPrimary()) return;
       setStatus('媒體已載入（桌面模式，原生直讀）','ok'); emit('duration:known'); return;
     }
 
@@ -121,11 +124,13 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       if(res.cached) setStatus('使用既有快取，秒開…','ok');
 
       video.src=res.streamUrl; setPlayerAdapter(new Html5Adapter(video));
-      await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,15000);});
-      if(!owns()) return;
+      const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:15000});
+      if(!owns()||metadata==='cancelled') return;
+      if(metadata!=='ready'){ showToast('轉檔串流無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
       State.duration=video.duration||dur||0;
       video.muted=true;
       const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:res.streamUrl}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
+      const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
       AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
       ctx.activeSource='video';
       // 混音器立即顯示「準備中」推桿
@@ -143,14 +148,14 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
          所以沒有人回報，也沒有測試碰得到。 */
       const self=ctx;
       const loadTracksAndWave=async(r)=>{
-        if(!owns()) return;
+        if(!ownsPrimary()) return;
         const chs=r.channels||[];
         let els=[];
         try{
           if(chs.length){
             setStatus(`載入 ${chs.length} 條聲道…`,'busy');
             els=await self._intakeSession.materializeAudioElements(chs,{
-              token:intake,
+              owns:ownsPrimary,
               resolveFileURL:file=>DESK.fileURL(file),
               createAudio:()=>new Audio(),
             });
@@ -166,35 +171,35 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
               self.syncMuteState(); emit('media:audioTracks');
             }
           }
-        }finally{ if(owns()){ self.pendingChannels=[]; emit('media:audioTracks'); } }
-        if(!owns()) return;
+        }finally{ if(ownsPrimary()){ self.pendingChannels=[]; emit('media:audioTracks'); } }
+        if(!ownsPrimary()) return;
         self.syncMuteState(); emit('media:audioTracks');
         if(r.wave){
           try{
             const u=await DESK.fileURL(r.wave);
-            if(!owns()) return;
+            if(!ownsPrimary()) return;
             const fb=await fetch(u);
             const buf=await fb.arrayBuffer();
-            if(owns()){
+            if(ownsPrimary()){
               const pk=Wave.calcFromWav(buf);
               if(pk){ Wave.setSourceMixPeaks(primary,pk,{mixPath:r.wave,channels:chs}); emit('media:timeline'); }
               else Wave.initLive();
             }
-          }catch(e2){ console.warn('wave',e2); if(owns()) Wave.initLive(); }
+          }catch(e2){ console.warn('wave',e2); if(ownsPrimary()) Wave.initLive(); }
         }
-        if(owns()) setStatus('媒體已載入','ok');
+        if(ownsPrimary()) setStatus('媒體已載入','ok');
       };
 
       if(res.cached){
-        void loadTracksAndWave(res).catch(error=>{ if(owns()) console.warn('stream ingest tracks:',error); });
+        void loadTracksAndWave(res).catch(error=>{ if(ownsPrimary()) console.warn('stream ingest tracks:',error); });
       } else {
         setStatus('視訊播放就緒，音軌轉檔中（背景）…','busy');
         // 只在「本次轉檔工作」完成時才載入；用 ingestJobId 過濾其他工作的完成事件，並在換檔時移除
         const handler=(ev)=>{
-          if(!owns()){ window.removeEventListener('desk:ingest-done',handler); self._ingestDoneHandler=null; return; }
+          if(!ownsPrimary()){ window.removeEventListener('desk:ingest-done',handler); self._ingestDoneHandler=null; return; }
           if(res.ingestJobId && ev?.detail?.jobId && ev.detail.jobId!==res.ingestJobId) return; // 非本次轉檔，忽略
           window.removeEventListener('desk:ingest-done',handler); self._ingestDoneHandler=null;
-          void loadTracksAndWave(res).catch(error=>{ if(owns()) console.warn('stream ingest tracks:',error); });
+          void loadTracksAndWave(res).catch(error=>{ if(ownsPrimary()) console.warn('stream ingest tracks:',error); });
         };
         ctx._ingestDoneHandler=handler;
         window.addEventListener('desk:ingest-done', handler);
@@ -213,11 +218,13 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     const mediaUrl=await DESK.fileURL(res.proxy||p);
     if(!owns()) return;
     video.src=mediaUrl; setPlayerAdapter(new Html5Adapter(video));
-    await new Promise(r=>{video.onloadedmetadata=r; if(video.readyState>=1)r(); setTimeout(r,10000);});
-    if(!owns()) return;
+    const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
+    if(!owns()||metadata==='cancelled') return;
+    if(metadata!=='ready'){ showToast('轉檔結果無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
     State.duration=video.duration||dur||0;
     video.muted=true;
     const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
+    const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
     AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
 
     const chs=res.channels||[];
@@ -225,11 +232,11 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     if(chs.length){
       setStatus(`載入 ${chs.length} 條聲道…`,'busy');
       els=await ctx._intakeSession.materializeAudioElements(chs,{
-        token:intake,
+        owns:ownsPrimary,
         resolveFileURL:file=>DESK.fileURL(file),
         createAudio:()=>new Audio(),
       });
-      if(!els) return;
+      if(!els||!ownsPrimary()) return;
     }
     const descriptors=AudioPipeline.registerSource(primary,chs,chs.length);
     if(chs.length){
@@ -248,18 +255,18 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       // FIX: 改用 fileURL+fetch+computeFromWav，與 streamIngest 路徑一致（避免 readB64 塞爆 IPC + decodeAudioData 耗盡記憶體）
       try{
         const waveUrl=await DESK.fileURL(res.wave);
-        if(!owns()) return;
+        if(!ownsPrimary()) return;
         const buf=await fetch(waveUrl).then(r=>r.arrayBuffer());
-        if(!owns()) return;
+        if(!ownsPrimary()) return;
         const pk=Wave.calcFromWav(buf);
         if(pk) Wave.setSourceMixPeaks(primary,pk,{mixPath:res.wave,channels:chs});
         else Wave.initLive();
         emit('media:timeline');
       }
-      catch(e){ if(owns()){ console.warn('wave',e); Wave.initLive(); } }
-    } else Wave.initLive();
+      catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); } }
+    } else if(ownsPrimary()) Wave.initLive();
 
-    if(!owns()) return;
+    if(!ownsPrimary()) return;
     setStatus('媒體已載入（桌面模式）','ok'); emit('duration:known');
   }
 
@@ -389,28 +396,34 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     // 背景抽取音軌（不阻塞播放；完成後 element tracks 接管音訊，mpv 靜音）
     if(audio.length>0){
       ctx.ensureCtx();
-      ctx._bgAudioIngest(p,audio,dur);
+      ctx._bgAudioIngest(p,audio,dur,primary);
     }
   }
 
 export async function loadVideoFile(ctx, file, projectRestore=null){
     ctx._resetForFirstVideo();
+    const intake=ctx._intakeSession.begin(file);
+    const owns=()=>ctx._intakeSession.owns(intake);
     ctx.audioPanelNotice=null;
     emit('media:audioTracks');
     State.mediaName=file.name; State.mediaSize=file.size;
     const url=URL.createObjectURL(file); ctx.objectURLs.push(url);
     video.src=url; setPlayerAdapter(new Html5Adapter(video));
     const native = await canPlayNatively(file, video);
+    if(!owns()) return;
     ctx.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:native});
     emit('media:audioTracks');
     $('noVideo').style.display='none';
     if(native){
-      await new Promise((res)=>{ video.onloadedmetadata=res; if(video.readyState>=1)res(); });
+      const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
+      if(!owns()||metadata==='cancelled') return;
+      if(metadata!=='ready'){ showToast('無法讀取此影片，未載入'); setStatus('讀取失敗',''); return; }
       State.duration=video.duration||0;
       State.videoWidth=video.videoWidth||0;
       State.videoHeight=video.videoHeight||0;
-      detectFpsWeb(); // 播放時自動偵測 FPS
       const primary=ctx._registerPrimary({ name:file.name, web:{url}, dur:State.duration||0 },projectRestore); // 登錄為序列第一段
+      const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
+      detectFpsWeb(ownsPrimary); // 播放時自動偵測 FPS；刪除／換掉來源後晚到 callback 必須失效
       // 用 Web Audio 接管原生音訊，L / R 分頻顯示於混音器
       AudioPipeline.registerSource(primary,[],2);
       const stereoTracks=ctx._connectStereo('video',primary);
@@ -422,10 +435,11 @@ export async function loadVideoFile(ctx, file, projectRestore=null){
         setStatus('已載入原生影音','ok');
       }
       // 探測是否有多音軌
-      await ctx.probeAndMaybeExtract(file);
+      await ctx.probeAndMaybeExtract(file,{owns:ownsPrimary});
+      if(!ownsPrimary()) return;
       // 產生波形：小檔整檔解碼；大檔（如長片）改用播放時即時擷取，避免記憶體爆掉
       if(file.size <= WAVE_DECODE_MAX){
-        Wave.fromFile(file,primary).catch(()=>Wave.initLive());
+        Wave.fromFile(file,primary,{owns:ownsPrimary}).catch(()=>{ if(ownsPrimary()) Wave.initLive(); });
       }else{
         Wave.initLive();
         // Fix #18：區分 500MB-1.6GB（可播放但波形受限）與更大檔案的提示
@@ -438,9 +452,9 @@ export async function loadVideoFile(ctx, file, projectRestore=null){
     }else{
       // 非原生格式：ffmpeg 轉檔給預覽 + 抽音軌
       setStatus('格式非瀏覽器原生，啟動 ffmpeg…','busy');
-      await ctx.transcodeAndExtract(file,projectRestore);
+      await ctx.transcodeAndExtract(file,projectRestore,{owns});
     }
-    emit('duration:known');
+    if(owns()) emit('duration:known');
   }
 
 export const FFMPEG_MAX_BYTES = 1.6e9; // 超過此大小不送 ffmpeg.wasm

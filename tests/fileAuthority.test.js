@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { FileAuthority, collectProjectMediaPaths, collectProjectMediaPathsFromBuffer } = require('../electron/file-authority.js');
+const { FileAuthority, collectProjectMediaPaths, collectProjectMediaPathsFromBuffer, parseProjectBuffer } = require('../electron/file-authority.js');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const makeAuthority = () => new FileAuthority({
@@ -133,6 +133,14 @@ describe('FileAuthority', () => {
     ]);
   });
 
+  it('容忍專案中非陣列的 clip/audio 欄位，不把舊專案形狀錯誤變成主程序例外', () => {
+    expect(collectProjectMediaPaths({
+      media: { path: 'D:\\Media\\master.mxf' },
+      clips: {},
+      externalAudioSources: 'legacy',
+    })).toEqual(['D:\\Media\\master.mxf']);
+  });
+
   it('支援 SUB Tool UTF-16LE 與舊式 UTF-8 專案，讓可信開檔保留媒體重載流程', () => {
     const project = { media: { path: 'D:\\Media\\master.mxf' } };
     const utf16 = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(JSON.stringify(project), 'utf16le')]);
@@ -143,6 +151,8 @@ describe('FileAuthority', () => {
     expect(collectProjectMediaPathsFromBuffer(utf16WithoutBom)).toEqual(['D:\\Media\\master.mxf']);
     expect(collectProjectMediaPathsFromBuffer(utf8)).toEqual(['D:\\Media\\master.mxf']);
     expect(collectProjectMediaPathsFromBuffer(Buffer.from('{broken json'))).toEqual([]);
+    expect(parseProjectBuffer(utf16)).toEqual(project);
+    expect(parseProjectBuffer(Buffer.from('{broken json'))).toBeNull();
   });
 
   it('主程序的 file URL 與兩種截圖寫入都委派給同一個權威，而不是查詢時擴權', () => {

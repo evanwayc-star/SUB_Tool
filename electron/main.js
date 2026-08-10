@@ -29,7 +29,11 @@ const { relayQueueRunnerEvent, runnerFailureProgress } = require('./queue-runner
 const { ExportQueueState } = require('./export-queue-state');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
-const { FileAuthority, collectProjectMediaPathsFromBuffer } = require('./file-authority');
+const { FileAuthority } = require('./file-authority');
+const { createTrustedProjectIntake } = require('./trusted-project-intake');
+const { inspectProjectWrite } = require('./project-write-admission');
+const { createProjectFileGateway } = require('./project-file-gateway');
+const { mergeRendererConfig } = require('./config-policy');
 const { isPathContained } = require('./export-name-safety');
 const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
 const { buildAudioIngestPlan } = require('./channel-layout');
@@ -37,6 +41,8 @@ const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./expor
 const { createExportAdmission } = require('./export-admission');
 const { createExportQueue } = require('./export-queue');
 const { createMpvHost } = require('./mpv-host');
+const { createMediaIngestCoordinator } = require('./media-ingest-coordinator');
+const { authorizeDroppedMediaPath } = require('./dropped-file-admission');
 const RecentProjects = require('./recent-projects');
 /* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
@@ -63,22 +69,46 @@ let FFMPEG_DETECTION = null, FFPROBE_DETECTION = null;
 const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
-let _currentIngestProc = null; // S1: 追蹤目前執行中的 ingest ffmpeg，換檔時強制 kill
+/* proxy、聲道與波形都共用 per-source cache；streamIngest 回傳「可播放」後仍持有
+   writer lease，直到 ffmpeg 完整結束才讓下一個 queued ingest 寫入。 */
+const mediaIngestCoordinator = createMediaIngestCoordinator();
 
 /* S1：唯一的 IPC 檔案能力權威。
    renderer 路徑不會因 fs:fileURL／stat 等查詢被靜默升格；只接受原生對話框、OS 開檔、
    preload 驗證過的拖放 File 與內部快取。專案內已宣告的媒體則只給「那一個檔案」的唯讀能力。 */
 const fileAuthority = new FileAuthority({ internalDirectories: [TMP] });
+const trustedProjectIntake = createTrustedProjectIntake({
+  readFile: projectFile => fs.readFileSync(projectFile),
+  grantProjectFile: projectFile => fileAuthority.grantProjectFile(projectFile),
+  grantMediaFile: mediaPath => fileAuthority.grantTrustedFile(mediaPath, { read: true, write: false }),
+});
 
 function grantTrustedProjectFile(projectFile, contents) {
-  if (typeof projectFile !== 'string' || !projectFile) return;
-  fileAuthority.grantProjectFile(projectFile);
-  let projectBuffer = contents;
-  if (!Buffer.isBuffer(projectBuffer)) {
-    try { projectBuffer = fs.readFileSync(projectFile); } catch (error) { projectBuffer = null; }
-  }
-  for (const mediaPath of collectProjectMediaPathsFromBuffer(projectBuffer)) fileAuthority.grantTrustedFile(mediaPath);
+  return trustedProjectIntake.grant(projectFile, contents);
 }
+
+function admittedRendererProjectBuffer(b64) {
+  if (typeof b64 !== 'string') return null;
+  let buffer;
+  try { buffer = Buffer.from(b64, 'base64'); } catch (error) { return null; }
+  const admission = inspectProjectWrite(buffer, { canRead: mediaPath => fileAuthority.canRead(mediaPath) });
+  if (!admission.allowed) {
+    console.warn('[sec] project write blocked:', admission.reason,
+      admission.unauthorizedPaths.length ? `(${admission.unauthorizedPaths.length} unauthorized media path(s))` : '');
+    return null;
+  }
+  return buffer;
+}
+
+const projectFileGateway = createProjectFileGateway({
+  readFile: projectFile => fs.promises.readFile(projectFile),
+  writeFile: (projectFile, contents) => fs.promises.writeFile(projectFile, contents),
+  ensureDirectory: projectFile => fs.promises.mkdir(path.dirname(projectFile), { recursive: true }),
+  grantTrustedProject: grantTrustedProjectFile,
+  clearTrustedDeclarations: projectFile => trustedProjectIntake.grantProjectOnly(projectFile),
+  // Function declarations are hoisted; the settings path itself is resolved only on use.
+  rememberRecent: projectFile => rememberRecentProject(projectFile),
+});
 
 /* 三個守衛與 expectedExportExtension 的實作在 ipc-guards.js（可獨立測試，
    不需要整個 Electron 主行程）；這裡只建立跟 fileAuthority 綁定的實例。 */
@@ -281,7 +311,7 @@ function exportWatchdogScriptPath() {
 /* ---- 執行 ffmpeg，並回報進度 ----
    交付匯出改由獨立 watchdog 持有 ffmpeg；主程序被強制結束時 IPC disconnect 仍會觸發
    子程序清理。Proxy／ingest 等短期工作維持原本直接 spawn，縮小變更面。 */
-function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cwd, outPath } = {}) {
+function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cwd, outPath, shouldSend } = {}) {
   return new Promise((res, rej) => {
     if (!FFMPEG) return rej(new Error('找不到 ffmpeg'));
     let err = '';       // 尾端（錯誤訊息用；會被截斷）
@@ -330,6 +360,7 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
 
     const startTime = Date.now();
     const parser = new FFmpegOutputParser(duration);
+    const maySend = () => typeof shouldSend !== 'function' || shouldSend();
     
     const consumeStderr = d => {
       const s = d.toString();
@@ -339,7 +370,7 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
       const progData = parser.parseChunk(s);
       if (progData && (sender || onProgress)) {
         const payload = { jobId, label, pct: progData.pct, etaS: progData.etaS, elapsedMs: Date.now() - startTime };
-        if (sender) safeSend(sender, 'task-progress', payload);
+        if (sender && maySend()) safeSend(sender, 'task-progress', payload);
         if (onProgress) onProgress(payload);
       }
     };
@@ -350,7 +381,7 @@ function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cw
       if (settled) return;
       settled = true;
       await finishLog();
-      if (sender) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
+      if (sender && maySend()) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
       if (code === 0 && (!watchdogResult || watchdogResult.ok)) {
         fs.unlink(logPath, () => {});
         res({ tail: err, maps: parser.maps });
@@ -748,13 +779,13 @@ async function findFileRecursively(dir, targetName, maxDepth = 3) {
   return null;
 }
 
-ipcMain.handle('fs:authorizeProject', (e, { path: p, b64 }) => {
-  grantTrustedProjectFile(p, Buffer.from(b64, 'base64'));
-  return true;
-});
 ipcMain.handle('fs:findRelinkTarget', async (e, { projectPath, oldMediaPath }) => {
   if (!projectPath || !oldMediaPath) return null;
   if (!fileAuthority.canRead(projectPath)) return null;
+  /* The basename must come from this exact project's main-read bytes.  A
+     renderer-supplied arbitrary name is never authority to search/grant a
+     sibling file. */
+  if (!trustedProjectIntake.canRelink(projectPath, oldMediaPath)) return null;
   
   const targetName = path.basename(oldMediaPath);
   const startDir = path.dirname(projectPath);
@@ -768,10 +799,10 @@ ipcMain.handle('fs:findRelinkTarget', async (e, { projectPath, oldMediaPath }) =
 });
 // preload 只會從真實的拖放／選檔 File 物件取得 p；不可提供接收任意字串的授權 IPC。
 ipcMain.handle('fs:authorizeDroppedFile', (e, p) => {
-  if (typeof p !== 'string' || !p) return null;
-  fileAuthority.grantTrustedFile(p, { read: true, write: false });
-  fileAuthority.grantScreenshotDirectory(path.dirname(p));
-  return p;
+  return authorizeDroppedMediaPath(p, {
+    grantRead: file => fileAuthority.grantTrustedFile(file, { read: true, write: false }),
+    grantScreenshotDirectory: directory => fileAuthority.grantScreenshotDirectory(directory),
+  });
 });
 ipcMain.handle('fs:reserveScreenshotPath', (e, { directory, suffix } = {}) => {
   if (!fileAuthority.canUseScreenshotDirectory(directory)) {
@@ -918,21 +949,18 @@ ipcMain.handle('project:recentList', async () => {
 
 /* renderer 只送【索引】，路徑由主程序自己的清單決定——沒有路徑注入空間。
    讀取前才授予那一個檔案的能力（fileAuthority 是每次工作階段的）。 */
-ipcMain.handle('project:openRecent', (e, index) => {
+ipcMain.handle('project:openRecent', async (e, index) => {
   const list = loadRecentProjects();
   const item = list[Math.trunc(Number(index))];
   if (!item) throw new Error('找不到這筆最近開啟的專案');
-  let buf;
-  try {
-    buf = fs.readFileSync(item.path);
-  } catch (error) {
+  if (!fs.existsSync(item.path)) {
     /* 檔案不見了就從清單移除，免得它一直留在選單裡讓人一再踩空。 */
     saveRecentProjects(RecentProjects.removeRecent(list, item.path));
     throw new Error(`找不到專案檔：${item.path}`);
   }
-  grantTrustedProjectFile(item.path, buf);
-  rememberRecentProject(item.path); // 移到最前面
-  return { path: item.path, b64: buf.toString('base64') };
+  const opened = await projectFileGateway.openTrusted(item.path);
+  if (!opened) throw new Error(`無法解析專案檔：${item.path}`);
+  return opened;
 });
 
 ipcMain.handle('project:clearRecent', () => { saveRecentProjects([]); return true; });
@@ -945,19 +973,18 @@ ipcMain.handle('dialog:openProject', async () => {
   });
   if (r.canceled) return null;
   rememberDir('project', r.filePaths[0]);
-  const buf = fs.readFileSync(r.filePaths[0]);
-  grantTrustedProjectFile(r.filePaths[0], buf);
-  rememberRecentProject(r.filePaths[0]);
-  return { path: r.filePaths[0], b64: buf.toString('base64') };
+  return projectFileGateway.openTrusted(r.filePaths[0]);
 });
 ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
+  const projectBuffer = admittedRendererProjectBuffer(b64);
+  if (!projectBuffer) return null;
   const r = await dialog.showSaveDialog(mainWin, { title: '儲存專案', defaultPath: name, filters: [{ name: 'SUB Tool 專案', extensions: ['subtool'] }] });
   if (r.canceled) return null;
-  fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
-  grantTrustedProjectFile(r.filePath, Buffer.from(b64, 'base64'));
-  /* 另存新檔也算「開過」——使用者接下來就在編輯它，下次會想從最近開啟找到它。 */
-  rememberRecentProject(r.filePath);
-  return r.filePath;
+  /* 儲存時的 JSON 來自 renderer；只授權使用者剛在原生對話框選定的專案檔，
+     不可據此替其中任意宣告的 media path 升權。重新從原生開啟該專案時，才會走
+     trustedProjectIntake.grant() 解析已取得的檔案內容。 */
+  try { return await projectFileGateway.writeRendererProject(r.filePath, projectBuffer, { remember: true }); }
+  catch (error) { return null; }
 });
 
 ipcMain.handle('dialog:importSub', async (e, kind) => {
@@ -1201,6 +1228,13 @@ QueueManager = createExportQueue({
     if (queueWin && !queueWin.isDestroyed()) safeWinSend(queueWin, 'queue:update');
   },
   onJobFailed: () => openQueueWindow(), // 失敗時把監控視窗叫出來
+});
+
+ipcMain.handle('project:openDroppedFile', (e, projectFile) => {
+  /* Only preload can derive this path from an actual dropped File.  Do not
+     pre-authorize it through fs:authorizeDroppedFile: a malformed project must
+     leave no read/screenshot capability behind. */
+  return projectFileGateway.openTrusted(projectFile);
 });
 
 ipcMain.handle('queue:getAll', () => ({
@@ -1827,7 +1861,7 @@ ipcMain.handle('config:save', (e, data) => {
   try {
     const p = getConfigPath();
     const current = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
-    const merged = { ...current, ...data };
+    const merged = mergeRendererConfig(current, data);
     fs.writeFileSync(p, JSON.stringify(merged, null, 2), 'utf8');
     return true;
   } catch(e) { console.error('[config] save err', e); return false; }
@@ -1857,19 +1891,12 @@ ipcMain.handle('keys:save', (e, data) => {
 
 ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio, queue }) => {
   requireReadablePath('ffmpeg:ingest', src);
-  // queue=false（取代式載入）：強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源。
-  // queue=true（影片序列「加入」）：不可殺前一個——那可能是正在餵播放器的 streamIngest
-  // 背景轉檔或主媒體的音軌抽取（殺掉會讓播放直接中斷）；改為排隊、待其完成後執行。
-  if (!queue && _currentIngestProc) { try { _currentIngestProc.kill(); } catch (e2) {} _currentIngestProc = null; }
-  if (queue) {
-    const p = _ingestQueueTail.then(() => _runIngest(e, { src, duration, needsProxy, audio }));
-    _ingestQueueTail = p.catch(() => null); // 佇列不因單一失敗而中斷；失敗仍 reject 給 renderer
-    return p;
-  }
-  return _runIngest(e, { src, duration, needsProxy, audio });
+  const run = lease => _runIngest(e, { src, duration, needsProxy, audio }, lease);
+  /* queue=false 是新的主素材，會淘汰舊主素材及尚未開始的背景工作；queue=true
+     則排在連 streamIngest 的完整 completion 後面，絕不與它同時寫 cache。 */
+  return queue ? mediaIngestCoordinator.enqueue(run) : mediaIngestCoordinator.replace(run);
 });
-let _ingestQueueTail = Promise.resolve(); // 序列加入的 ingest 串行排隊（不與播放中的轉檔搶 I/O）
-async function _runIngest(e, { src, duration, needsProxy, audio }) {
+async function _runIngest(e, { src, duration, needsProxy, audio }, lease) {
   const audioArr = Array.isArray(audio) ? audio : [];
   // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
   // v4.23.x 修：v4.22 前的舊快取沒有 proxy——needsProxy 時視同未命中重轉（否則 WebCodecs
@@ -1906,9 +1933,19 @@ async function _runIngest(e, { src, duration, needsProxy, audio }) {
 
   // 稍微延遲讓 mpv 優先取得檔案讀取權，避免 ffmpeg 瞬間佔滿磁碟 I/O 導致 mpv 播放無聲
   await new Promise(r => setTimeout(r, 1000));
+  if (lease?.isCancelled?.()) throw new Error('媒體轉檔已被較新的載入取代');
 
-  await runFF(args, { sender: e.sender, duration, jobId: 'ingest', label: '讀取並轉檔（單次讀取）', onProcess: p => { _currentIngestProc = p; } }); // S1: 記錄 proc
-  _currentIngestProc = null;
+  await runFF(args, {
+    sender: e.sender,
+    duration,
+    jobId: 'ingest',
+    label: '讀取並轉檔（單次讀取）',
+    onProcess: p => lease?.setProcess?.(p),
+    shouldSend: () => !lease?.isCancelled?.(),
+  });
+  // kill 與 child exit 可能在同一個 event-loop turn 完成；即使 runFF 剛好 resolve，
+  // 被較新載入撤銷的 lease 也不可把舊 cache 宣告為可用。
+  if (lease?.isCancelled?.()) throw new Error('媒體轉檔已被較新的載入取代');
   const meta = { proxy, channels, wave };
   writeMeta(metaPath, meta);
   return Object.assign({ cached: false }, meta);
@@ -1922,7 +1959,10 @@ ipcMain.handle('fs:readB64', async (e, p) => {
 ipcMain.handle('fs:writeProject', async (e, { path: p, b64 }) => {
   // autosave 落在使用者已選取的專案／媒體資料夾旁；不可讓 renderer 自行擴張寫入根。
   if (!fileAuthority.canWriteProject(p)) { console.warn('[sec] writeProject blocked:', p); return null; }
-  try { await fs.promises.mkdir(path.dirname(p), { recursive: true }); await fs.promises.writeFile(p, Buffer.from(b64, 'base64')); return p; } catch (err) { return null; }
+  const projectBuffer = admittedRendererProjectBuffer(b64);
+  if (!projectBuffer) return null;
+  try { return await projectFileGateway.writeRendererProject(p, projectBuffer, { ensureParent: true }); }
+  catch (err) { return null; }
 });
 ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
   if (!fileAuthority.canWriteScreenshot(p)) { console.warn('[sec] writeScreenshot blocked:', p); return null; }
@@ -1934,17 +1974,20 @@ ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
    快取命中時行為與 ffmpeg:ingest 相同（秒開）。 */
 ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) => {
   requireReadablePath('ffmpeg:streamIngest', src);
-  // S1: 強制終止上一個未完成的 ingest，確保新檔案獲得完整系統資源
-  if (_currentIngestProc) { try { _currentIngestProc.kill(); } catch (e2) {} _currentIngestProc = null; }
+  return mediaIngestCoordinator.replace(lease => _runStreamIngest(e, { src, duration, audio }, lease));
+});
+
+async function _runStreamIngest(e, { src, duration, audio }, lease) {
   const audioArr = Array.isArray(audio) ? audio : [];
   const port = await ensureHttpServer();
+  if (lease?.isCancelled?.()) return { response: null, completion: null };
 
   // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
   // 注意：串流播放需要影片 proxy；mpv 路徑寫的快取是「純音軌」(proxy=null)，
   // 對串流路徑而言不算命中，須往下重轉以產生 proxy（音軌/波形會一併重建）。
   const hit = readCache(src);
   if (hit && (!audioArr.length || hit.routingMetadataComplete) && hit.meta.proxy && fs.existsSync(hit.meta.proxy)) {
-    if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
+    if (e.sender && !lease?.isCancelled?.()) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
     const jid = newJobId('c-'); // S5: 不可猜測
     _hJobs.set(jid, { filePath: hit.meta.proxy, done: true });
     return Object.assign({ cached: true, streamUrl: `http://127.0.0.1:${port}/${jid}` }, hit.meta);
@@ -1979,26 +2022,52 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) 
   const jid = newJobId('l-'); // S5: 不可猜測
   const job = { filePath: proxy, done: false, error: null };
   _hJobs.set(jid, job);
+  if (lease?.isCancelled?.()) {
+    job.done = true;
+    job.error = '媒體轉檔已被較新的載入取代';
+    return { response: null, completion: null };
+  }
 
   // 背景跑 ffmpeg（不 await）。用唯一 jobId 讓前端能辨識「是本次轉檔完成」而非其他工作。
-  runFF(args, { sender: e.sender, duration, jobId: jid, label: '背景轉檔中', onProcess: p => { _currentIngestProc = p; } }) // S1: 記錄 proc
-    .then(() => { _currentIngestProc = null; job.done = true; writeMeta(metaPath, { proxy, channels, wave }); })
-    .catch(err => { _currentIngestProc = null; job.done = true; job.error = err.message; });
+  const completion = runFF(args, {
+    sender: e.sender,
+    duration,
+    jobId: jid,
+    label: '背景轉檔中',
+    onProcess: p => lease?.setProcess?.(p),
+    shouldSend: () => !lease?.isCancelled?.(),
+  })
+    .then(() => {
+      job.done = true;
+      // response 已先交給播放器不代表舊載入仍有權完成 cache commit；replace()
+      // 撤銷後留下的 partial output 必須由下一次 ingest 重建，而非寫入 meta.json。
+      if (!lease?.isCancelled?.()) writeMeta(metaPath, { proxy, channels, wave });
+    })
+    .catch(err => { job.done = true; job.error = err.message; });
 
   // S3: 縮小閾值至 128KB（empty_moov 寫完即可播，不需等到 512KB）
   const t0 = Date.now();
   while (Date.now() - t0 < 60000) {
+    // replace() may have killed this ffmpeg while the first playable bytes are
+    // still pending.  Return the completion handle (not a stale response) so
+    // the coordinator keeps the writer lane until the old process exits.
+    if (lease?.isCancelled?.()) return { response: null, completion };
     /* 非同步：這個迴圈最長跑 60 秒、每 300ms 一次。proxy 依 cacheCandidates 的優先序
        多半落在【影片旁邊】的 .subtool_Cache，素材在 SMB 上時這個 stat 也在 SMB 上。
        用同步版本等於每 300ms 就把主行程的 UI 執行緒鎖住數十毫秒——原生檔案對話框的
        訊息迴圈就在那條執行緒上，於是「開啟檔案總管」與「在裡面切換資料夾」都會頓。 */
     try { if ((await fsp.stat(proxy)).size >= 131072) break; } catch (e2) {}
+    if (lease?.isCancelled?.()) return { response: null, completion };
     if (job.error) throw new Error('轉檔失敗：' + job.error);
     await new Promise(r => setTimeout(r, 300));
+    if (lease?.isCancelled?.()) return { response: null, completion };
   }
 
-  return { cached: false, streamUrl: `http://127.0.0.1:${port}/${jid}`, proxy, channels, wave, ingestJobId: jid };
-});
+  return {
+    response: { cached: false, streamUrl: `http://127.0.0.1:${port}/${jid}`, proxy, channels, wave, ingestJobId: jid },
+    completion,
+  };
+}
 
 /* ============ mpv 媒體播放器整合（秒開非原生格式，無需等待 ffmpeg proxy 轉檔） ============
    原生 child process、named pipe 與兩個透明宿主視窗均由 mpv-host 擁有；本檔只保留
