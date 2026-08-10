@@ -618,9 +618,9 @@ const Media = {
       objectURLs:urls
     };
   },
-  _resetForFirstVideo(){
+  _resetForFirstVideo(options={}){
     const preserved=this._captureImageOnlyTimeline();
-    this.reset({keepObjectURLs:preserved?.objectURLs});
+    this.reset({keepObjectURLs:preserved?.objectURLs, ...options});
     this._preservedImageTimeline=preserved;
     return !!preserved;
   },
@@ -2709,7 +2709,8 @@ const Media = {
     this.objectURLs=this.objectURLs.filter(u=>keepObjectURLs.has(u));
     this.playing=false; this._transport.reset();
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）
-    Seq.clear(); this.activeClipId=null; this._mpvPath=null; deselect('video'); deselect('audio'); resetVideoTracks();
+    Seq.clear(); this.activeClipId=null; this._mpvPath=null; deselect('video'); deselect('audio'); 
+    if(!options.keepVideoTracks) resetVideoTracks();
     if(!options.keepObjectURLs) delete this._preservedImageTimeline;
     this._seqSwitchToken=null;
     this._seqSwitching=false;

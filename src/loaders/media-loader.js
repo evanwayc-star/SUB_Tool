@@ -36,7 +36,7 @@ import { secToEncore } from '../time.js';
 import { Seq } from '../sequence.js';
 import { waitForOwnedMediaMetadata } from '../media-intake-session.js';
 export async function loadDesktopMedia(ctx, p, projectRestore=null){
-    ctx._resetForFirstVideo();
+    ctx._resetForFirstVideo(projectRestore ? { keepVideoTracks: true } : {});
     const intake=ctx._intakeSession.begin(p);
     const owns=()=>ctx._intakeSession.owns(intake);
     State.mediaPath=p; State.mediaName=baseName(p);
@@ -401,7 +401,7 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
   }
 
 export async function loadVideoFile(ctx, file, projectRestore=null){
-    ctx._resetForFirstVideo();
+    ctx._resetForFirstVideo(projectRestore ? { keepVideoTracks: true } : {});
     const intake=ctx._intakeSession.begin(file);
     const owns=()=>ctx._intakeSession.owns(intake);
     ctx.audioPanelNotice=null;

@@ -214,7 +214,7 @@ function _buildProjectData(){
     videoTracks:State.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked,
       ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})})),
     videoTrackCount:State.videoTracks.length||1, // 向下相容：舊版讀取用
-    clips:_savedClips().map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,
+    clips:_savedClips().map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,locked:!!c.locked,
       // 圖片需保留型別與自己的幾何。少了 type 會在重開專案時被誤當成影片
       // 丟給 ffprobe；少了 scale/posX/posY 則會回到預設滿版中央。
       // natW/natH＝圖片原始像素尺寸；少了它重開專案要等背景重量一次才對得準互動框。
