@@ -213,7 +213,7 @@ function sheetXml(headerLabel, cues, fps, dropFrame) {
       // 資料列：Arial 無底色，左右框（s="2"）
       `<row r="${r}">`
       + `<c r="A${r}" t="inlineStr" s="2"><is><t>${xmlEsc(`${inTc} ${outTc}`)}</t></is></c>`
-      + `<c r="B${r}" t="inlineStr" s="2"><is><t xml:space="preserve">${xmlEsc((c.text || '').replace(/\r?\n/g, '\\\\'))}</t></is></c>`
+      + `<c r="B${r}" t="inlineStr" s="2"><is><t xml:space="preserve">${xmlEsc((c.text || '').replace(/\r?\n/g, '\\N'))}</t></is></c>`
       + `</row>`
     );
   }

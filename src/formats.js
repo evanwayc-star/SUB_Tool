@@ -40,12 +40,13 @@ function backgroundText(layout, st, lines, vww, vwh){
   const y = Math.round((st.posY / 100) * vwh);
   const metrics = subtitleBackgroundCssMetrics(st, 1);
   const radius = metrics.fontSize * 0.25;
-  const boxW = layout.width + metrics.padX * 2;
+  const fudge = (layout.width * 0.015) + (metrics.fontSize * 0.2);
+  const boxW = layout.width + metrics.padX * 2 + fudge;
   const boxH = layout.height;
   const shape = assRoundedRectAt(0, 0, boxW, boxH, radius);
 
   const anchorX = st.align === 'left' ? 0 : st.align === 'right' ? 100 : 50;
-  const left = x - (layout.width * anchorX / 100) - metrics.padX;
+  const left = x - (layout.width * anchorX / 100) - metrics.padX - (fudge * anchorX / 100);
   const top = y + layout.offsetY;
   const colorASS = hexToAssColor(st.bgColor);
   const alphaASS = Math.round((1 - (st.bgAlpha ?? 0.3)) * 255).toString(16).padStart(2, '0').toUpperCase();
