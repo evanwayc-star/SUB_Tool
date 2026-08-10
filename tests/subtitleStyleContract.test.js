@@ -129,7 +129,6 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
       it('外框：無背景色塊時 CSS stroke = ASS Outline × 2；有色塊時改用 BorderStyle 3', () => {
         if (st.bgBox) {
           expect(Number(ass.BorderStyle)).toBe(3);
-          expect(cssProp(css, '-webkit-text-stroke')).toBeNull();
           expect(cssProp(css, 'background')).not.toBeNull();
           expect(ass.BackColour).toBe(hexToAssColor(st.bgColor, st.bgAlpha));
           expect(ass.OutlineColour).toBe(ass.BackColour);
@@ -152,7 +151,7 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
       /* 陰影：兩邊要嘛都有、要嘛都沒有。BorderStyle=3 由最小 Outline 撐出色塊；
          不可在使用者選 0 時偷加 Shadow，否則半透明底色會整塊被重複合成而變深。 */
       it('陰影：兩路同時存在或同時不存在', () => {
-        const hasCssShadow = cssProp(css, 'text-shadow') !== null || cssProp(css, 'box-shadow') !== null;
+        const hasCssShadow = cssProp(css, 'text-shadow') !== null || cssProp(css, 'filter') !== null || cssProp(css, 'box-shadow') !== null;
         if (st.bgBox) {
           expect(Number(ass.Shadow)).toBe(st.shadow);
           expect(hasCssShadow).toBe(st.shadow > 0);

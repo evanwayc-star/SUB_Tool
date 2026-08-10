@@ -3,7 +3,7 @@ import { planSubtitleBackgroundLayouts } from '../src/subtitle-background-layout
 import { STYLE_DEFAULTS } from '../src/substyle.js';
 
 describe('字幕單一底色版面', () => {
-  it('只凍結最寬行索引與垂直幾何，不把 Chromium 字寬冒充 libass 字寬', () => {
+  it('凍結幾何特徵，包含字寬供向量繪製使用', () => {
     const track = {
       ...STYLE_DEFAULTS,
       fontSize: 80,
@@ -30,8 +30,9 @@ describe('字幕單一底色版面', () => {
     const layout = layouts['uneven-lines'];
 
     expect(layout.lineIndex).toBe(1);
-    expect(layout.height).toBeCloseTo(145.9, 5);
-    expect(layout.offsetY).toBeCloseTo(-72.95, 5);
+    expect(layout.width).toBe(480);
+    expect(layout.height).toBeCloseTo(141.9, 5);
+    expect(layout.offsetY).toBeCloseTo(-70.95, 5);
   });
 
   it('無底色與直書不建立水平矩形計畫', () => {

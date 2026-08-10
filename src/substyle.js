@@ -138,9 +138,8 @@ export function effectiveSubtitleLineSpacing(st){
 export function subtitleBackgroundCssMetrics(st, ratio=1){
   const r = ratio || 1;
   const fontSize = Math.max(12, Math.round(st.fontSize * 0.75 * r));
-  const outline = finiteNonNegative(st?.outline);
-  const padY = Number((0.12 * fontSize + outline * r).toFixed(1));
-  const padX = Number((0.35 * fontSize + outline * r).toFixed(1));
+  const padY = Number((0.12 * fontSize).toFixed(1));
+  const padX = Number((0.35 * fontSize).toFixed(1));
   return {
     fontSize,
     lineHeight: fontSize * effectiveSubtitleLineSpacing(st),
@@ -164,8 +163,6 @@ function assShadow(st){ return finiteNonNegative(st?.shadow); }
 /* ---- HTML 預覽（videoSub 每句 span 的 inline CSS；容器只管定位/對齊，由呼叫端處理） ---- */
 export function styleToCss(st, ratio){
   const r = ratio || 1;
-  // libass / VSFilter 將 ASS Fontsize 視為 pt (96dpi 下 1pt = 1.333px)，
-  // HTML CSS font-size 為 px。DOM 預覽乘以 0.75 (72/96) 即可讓 HTML DOM 預覽與 mpv / libass 渲染尺寸 100% 絕對同構。
   const bgMetrics = subtitleBackgroundCssMetrics(st, r);
   const fs = bgMetrics.fontSize;
   let css = `font-size:${fs}px;color:${st.color};`+
@@ -174,45 +171,27 @@ export function styleToCss(st, ratio){
     `line-height:${effectiveSubtitleLineSpacing(st)};`;
   const letterSpacing = effectiveVerticalLetterSpacing(st);
   if(letterSpacing) css += `letter-spacing:${(letterSpacing * r).toFixed(1)}px;`;
-  // 直書：瀏覽器原生直排——多行(<br)自動分列、CJK 標點自動轉直排字形；
-  // letter-spacing＝字間(縱)、line-height＝列間(橫)語義自動對。
-  // vertical-【lr】＝第一行在最左、往右排（非 CJK 書籍的右→左傳統）。
-  // ASS 端 verticalAssCols() 依同一方向逐列定位——改這裡務必同時改那裡。
-  // text-orientation 必須是 upright 而非 mixed：mixed 會把英數當成一段「橫向 run」整串
-  // 旋轉 90°，但 ASS 端（verticalChars → assJoinVertical）是【逐字】拆開、每字獨立直立一列。
-  // 用 mixed 的話，含 ABC123 的直書字幕預覽是橫躺的一串、匯出是六個直立字，連整列長度都不同
-  // ——正是 §0.1「三路一致」要防的那種靜默不一致（樣式編輯器的示範文字就含 ABC123）。
   if(st.vertical) css += `writing-mode:vertical-lr;text-orientation:upright;`;
-  // 旋轉支點＝【錨點】，不是文字塊中心：ASS 的 \frz 繞 \org 轉，而 \org 預設就是 \pos 那一點
-  // （＝Alignment 指定的那一角）。用 center center 會與匯出／mpv 轉出不同結果——只有
-  // align=center+valign=middle 時兩者才恰好重合，難怪預設值下看起來像是對的。
   if(st.angle) css += `transform:rotate(${st.angle}deg);transform-origin:${originOf(st)};`;
   if(st.bgBox){
-    // 在 ASS 中 BorderStyle=3 時，Outline 轉為控制底色 padding，不再畫字體外框
     const pad = bgMetrics.padY.toFixed(1);
     const padH = bgMetrics.padX.toFixed(1);
-    css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;margin:-${pad}px -${padH}px;border-radius:.08em;`+
+    css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;margin:-${pad}px -${padH}px;border-radius:.25em;`+
            `box-decoration-break:clone;-webkit-box-decoration-break:clone;`;
-    // Shadow 轉為底色色塊的陰影
     if(st.shadow > 0){
       const d = (st.shadow * r).toFixed(1);
       css += `box-shadow:${d}px ${d}px 0px rgba(0,0,0,.85);`;
     }
   } else {
-    // 為了讓 CSS outline (畫在 border-box) 能包覆字體的 stroke 和 shadow 視覺溢出，
-    // 同樣加上 padding 與等量負 margin。這樣 layout 不變，但 border-box 變大。
-    // 額外加 12px 緩衝，確保能完全包覆字體本身的 ascender/descender 墨水溢出，避免虛線切到字。
     const over = (((st.outline || 0) * 2 * r) + ((st.shadow || 0) * r) + 12).toFixed(1);
     css += `padding:${over}px;margin:-${over}px;`;
-
-    if(st.outline > 0){
-      // ASS outline 向外擴 N px；CSS stroke 置中描邊 → 寬度 2N 視覺對應，paint-order 讓筆畫墊在填色後
-      css += `-webkit-text-stroke:${(st.outline * 2 * r).toFixed(1)}px ${st.outlineColor};paint-order:stroke fill;`;
-    }
-    if(st.shadow > 0){
-      const d = (st.shadow * r).toFixed(1);
-      css += `text-shadow:${d}px ${d}px ${(st.shadow * r * 0.6).toFixed(1)}px rgba(0,0,0,.85);`;
-    }
+  }
+  if(st.outline > 0){
+    css += `-webkit-text-stroke:${(st.outline * 2 * r).toFixed(1)}px ${st.outlineColor};paint-order:stroke fill;`;
+  }
+  if(st.shadow > 0 && !st.bgBox){
+    const d = (st.shadow * r).toFixed(1);
+    css += `text-shadow:${d}px ${d}px ${(st.shadow * r * 0.6).toFixed(1)}px rgba(0,0,0,.85);`;
   }
   return css;
 }

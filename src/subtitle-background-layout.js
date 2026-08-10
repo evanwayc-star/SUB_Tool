@@ -38,6 +38,7 @@ export function planSubtitleBackgroundLayouts(cues, tracks, { measureLineWidth }
     const anchor = anchorPct(st);
     layouts[key] = {
       lineIndex,
+      width: widths[lineIndex],
       height: contentHeight + metrics.padY * 2,
       offsetY: -(contentHeight * anchor.y / 100) - metrics.padY,
     };

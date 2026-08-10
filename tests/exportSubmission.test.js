@@ -69,7 +69,7 @@ describe('frozen export submission', () => {
       cues: [{ id: 'boxed', start: 11, end: 12, text: '短行\n較長的第二行', track: 0 }],
       tracks: [{ name: '對白', visible: true, bgBox: true, bgColor: '#000000', bgAlpha: 0.5 }],
       backgroundLayouts: {
-        boxed: { lineIndex: 1, height: 150, offsetY: -150 },
+        'boxed': { lineIndex: 1, height: 140, offsetY: -70, width: 300 }
       },
       fps: 25,
     };
@@ -82,7 +82,7 @@ describe('frozen export submission', () => {
 
     expect(submission.backgroundLayouts.boxed.lineIndex).toBe(1);
     expect(job.assText).toContain('Track0_Text');
-    expect(job.assText).toContain('\\fscy');
+    expect(job.assText).toContain('\\p1');
     expect(job.assText).toContain('較長的第二行');
   });
 
