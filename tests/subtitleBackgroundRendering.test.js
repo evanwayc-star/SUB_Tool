@@ -205,7 +205,7 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
       measureLineWidth: line => line.length * 50,
     });
     const ass = renderASS(cues, { fps: 30, tracks: [track], backgroundLayouts })
-      .replace(/(Dialogue:[^\r\n]*?,Track0_Text,[^\r\n]*?\\pos\([^)]*\))/, '$1{\\1a&HFF&}');
+      .replace(/(Dialogue:[^\r\n]*?,Track0_Text,[^\r\n]*?\\pos\([^)]*\))/g, '$1{\\1a&HFF&}');
 
     const { rows, singleBackground, darkestWideBand } = measureBackground(ass);
     expect(rows.length).toBeGreaterThan(20);
@@ -247,7 +247,7 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
       { id: 'two-lines', track: 0, start: 0, end: 1, text: 'MMMMMMMMMMMM\nMMMMMMMMMMMMMMMM' },
     ], { fps: 30, tracks: [track] })
       // 只隱藏主色文字，保留正式輸出的 BorderStyle=3 背景幾何，讓像素判讀不受字形影響。
-      .replace(/(Dialogue:.*?\\pos\([^)]*\))/, '$1{\\1a&HFF&}');
+      .replace(/(Dialogue:.*?\\pos\([^)]*\))/g, '$1{\\1a&HFF&}');
 
     const { singleBackground, darkestWideBand, rows } = measureBackground(ass);
     expect(rows.length).toBeGreaterThan(20);

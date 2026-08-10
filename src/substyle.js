@@ -138,8 +138,8 @@ export function effectiveSubtitleLineSpacing(st){
 export function subtitleBackgroundCssMetrics(st, ratio=1){
   const r = ratio || 1;
   const fontSize = Math.max(12, Math.round(st.fontSize * 0.75 * r));
-  const padY = Number((0.12 * fontSize).toFixed(1));
-  const padX = Number((0.35 * fontSize).toFixed(1));
+  const padY = Number((0.20 * fontSize).toFixed(1));
+  const padX = Number((0.50 * fontSize).toFixed(1));
   return {
     fontSize,
     lineHeight: fontSize * effectiveSubtitleLineSpacing(st),

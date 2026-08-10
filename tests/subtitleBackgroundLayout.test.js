@@ -31,8 +31,8 @@ describe('字幕單一底色版面', () => {
 
     expect(layout.lineIndex).toBe(1);
     expect(layout.width).toBe(480);
-    expect(layout.height).toBeCloseTo(141.9, 5);
-    expect(layout.offsetY).toBeCloseTo(-70.95, 5);
+    expect(layout.height).toBeCloseTo(151.5, 5);
+    expect(layout.offsetY).toBeCloseTo(-75.75, 5);
   });
 
   it('無底色與直書不建立水平矩形計畫', () => {

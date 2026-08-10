@@ -79,7 +79,7 @@ function _normalExternalAudioSources(rawSources){
       audioSourceId, timelineLaneId,
       offset:nonNegative(raw.offset), in:inPoint, out, duration,
       gain:nonNegative(raw.gain,1), fadeIn:nonNegative(raw.fadeIn), fadeOut:nonNegative(raw.fadeOut),
-      enabled:raw.enabled!==false,
+      enabled:raw.enabled!==false, locked:!!raw.locked,
       // 已解除自影片容器的音訊必須在重開專案時仍直接走 ffmpeg cache；否則 MXF／
       // 部分 MOV 會再次被 Chromium <audio> 拒絕，讓「解除影音」看似消失。
       ...(raw.preferCache===true?{preferCache:true}:{}),

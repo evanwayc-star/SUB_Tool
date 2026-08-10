@@ -19,47 +19,40 @@ function finiteBackgroundLayout(layout){
   return { lineIndex, height, offsetY, width };
 }
 
-function assRoundedRect(W, H, R) {
+function assRoundedRectAt(X, Y, W, H, R) {
   R = Math.max(0, Math.min(R, W / 2, H / 2));
-  if (R <= 0) return `m 0 0 l ${W.toFixed(1)} 0 l ${W.toFixed(1)} ${H.toFixed(1)} l 0 ${H.toFixed(1)}`;
+  if (R <= 0) return `m ${X.toFixed(1)} ${Y.toFixed(1)} l ${(X+W).toFixed(1)} ${Y.toFixed(1)} l ${(X+W).toFixed(1)} ${(Y+H).toFixed(1)} l ${X.toFixed(1)} ${(Y+H).toFixed(1)}`;
   const k = 0.5522847 * R;
-  return `m ${R.toFixed(1)} 0 ` +
-    `l ${(W - R).toFixed(1)} 0 ` +
-    `b ${(W - R + k).toFixed(1)} 0 ${W.toFixed(1)} ${(R - k).toFixed(1)} ${W.toFixed(1)} ${R.toFixed(1)} ` +
-    `l ${W.toFixed(1)} ${(H - R).toFixed(1)} ` +
-    `b ${W.toFixed(1)} ${(H - R + k).toFixed(1)} ${(W - R + k).toFixed(1)} ${H.toFixed(1)} ${(W - R).toFixed(1)} ${H.toFixed(1)} ` +
-    `l ${R.toFixed(1)} ${H.toFixed(1)} ` +
-    `b ${(R - k).toFixed(1)} ${H.toFixed(1)} 0 ${(H - R + k).toFixed(1)} 0 ${(H - R).toFixed(1)} ` +
-    `l 0 ${R.toFixed(1)} ` +
-    `b 0 ${(R - k).toFixed(1)} ${(R - k).toFixed(1)} 0 ${R.toFixed(1)} 0`;
+  return `m ${(X+R).toFixed(1)} ${Y.toFixed(1)} ` +
+    `l ${(X+W - R).toFixed(1)} ${Y.toFixed(1)} ` +
+    `b ${(X+W - R + k).toFixed(1)} ${Y.toFixed(1)} ${(X+W).toFixed(1)} ${(Y+R - k).toFixed(1)} ${(X+W).toFixed(1)} ${(Y+R).toFixed(1)} ` +
+    `l ${(X+W).toFixed(1)} ${(Y+H - R).toFixed(1)} ` +
+    `b ${(X+W).toFixed(1)} ${(Y+H - R + k).toFixed(1)} ${(X+W - R + k).toFixed(1)} ${(Y+H).toFixed(1)} ${(X+W - R).toFixed(1)} ${(Y+H).toFixed(1)} ` +
+    `l ${(X+R).toFixed(1)} ${(Y+H).toFixed(1)} ` +
+    `b ${(X+R - k).toFixed(1)} ${(Y+H).toFixed(1)} ${X.toFixed(1)} ${(Y+H - R + k).toFixed(1)} ${X.toFixed(1)} ${(Y+H - R).toFixed(1)} ` +
+    `l ${X.toFixed(1)} ${(Y+R).toFixed(1)} ` +
+    `b ${X.toFixed(1)} ${(Y+R - k).toFixed(1)} ${(X+R - k).toFixed(1)} ${Y.toFixed(1)} ${(X+R).toFixed(1)} ${Y.toFixed(1)}`;
 }
+function assRoundedRect(W, H, R) { return assRoundedRectAt(0, 0, W, H, R); }
 
-function backgroundText(layout, st, rawLines, vww, vwh){
-  if (!layout || typeof layout.width !== 'number') return '';
+function backgroundText(layout, st, lines, vww, vwh){
   const x = Math.round((st.posX / 100) * vww);
   const y = Math.round((st.posY / 100) * vwh);
   const metrics = subtitleBackgroundCssMetrics(st, 1);
-  
+  const radius = metrics.fontSize * 0.25;
   const boxW = layout.width + metrics.padX * 2;
   const boxH = layout.height;
-  const top = y + layout.offsetY;
-  
+  const shape = assRoundedRectAt(0, 0, boxW, boxH, radius);
+
   const anchorX = st.align === 'left' ? 0 : st.align === 'right' ? 100 : 50;
   const left = x - (layout.width * anchorX / 100) - metrics.padX;
-  
-  const radius = metrics.fontSize * 0.25;
-  const shape = assRoundedRect(boxW, boxH, radius);
-  
-  const rotate = st.angle ? `\\org(${x},${y})\\frz${-(st.angle || 0)}` : '';
-  const alphaASS = Math.round((1 - (st.bgAlpha ?? 0.3)) * 255).toString(16).padStart(2, '0').toUpperCase();
+  const top = y + layout.offsetY;
   const colorASS = hexToAssColor(st.bgColor);
+  const alphaASS = Math.round((1 - (st.bgAlpha ?? 0.3)) * 255).toString(16).padStart(2, '0').toUpperCase();
+  const rotate = st.angle ? `\\org(${x},${y})\\frz${-(st.angle || 0)}` : '';
   const shadowTag = st.shadow ? `\\shad${st.shadow}\\4c&H000000&\\4a&H26&` : `\\shad0`;
-  
   return `{\\an7\\pos(${left.toFixed(1)},${top.toFixed(1)})${rotate}\\c${colorASS}&\\1a&H${alphaASS}&\\bord0${shadowTag}\\p1}${shape}`;
 }
-
-/* 舊版用 `//` 或兩個反斜線表示人工換行。URI 內的雙斜線是資料本身，
-   包含 scheme 分隔與後續 path 中的 `//`，不可被誤切成多行。 */
 function decodeLegacyLineBreaks(value){
   const text=String(value??'');
   const decodeChunk=chunk=>chunk.replace(/\\\\|\/\//g,'\n');
@@ -716,13 +709,25 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       // 逐行跳脫後才交給 assJoinLines——它會插入 \N 與 {\fs} 行距墊高，
       // 那些是我們自己要送的控制碼，不能跟使用者文字一起被跳脫。
       const lines = String(c.text || '').replace(/\r/g, '').split('\n').map(assEscapeText);
-      const text = head + anOv + cueAssPos(st, vww, vwh) + tags +
-        assJoinLines(lines, st, { suppressBackground:!!layout });
       const backgrounds = [];
+      let text = '';
       if(layout){
         const background = backgroundText(layout, st,
           String(c.text || '').replace(/\r/g, '').split('\n'), vww, vwh);
         if(background) backgrounds.push(eventHead(c, 'Default') + background);
+        
+        const x = Math.round((st.posX / 100) * vww);
+        const y = Math.round((st.posY / 100) * vwh);
+        const top = y + layout.offsetY;
+        const metrics = subtitleBackgroundCssMetrics(st, 1);
+        const hAlign = { left:4, center:5, right:6 }[st.align||'center'];
+        text = lines.map((line, i) => {
+          const cy = Math.round(top + metrics.padY + i * metrics.lineHeight + metrics.lineHeight / 2);
+          return `${head}{\\an${hAlign}\\pos(${x},${cy})}${tags}${line}`;
+        }).join('\n');
+      } else {
+        text = head + anOv + cueAssPos(st, vww, vwh) + tags +
+          assJoinLines(lines, st);
       }
       return { backgrounds, text };
     });
