@@ -39,7 +39,7 @@ function backgroundText(layout, st, rawLines, vww, vwh){
   // ascent/descent 安全邊；水平不做比例猜測，直接由 libass 以最寬行排出。
   const scaleY = Math.max(1, 100 * Math.sqrt(layout.height / fontSize));
   const rotate = st.angle ? `\\org(${x},${y})\\frz${-(st.angle || 0)}` : '';
-  return `{\\an${backgroundTopAlignment(st)}\\pos(${x},${top})${rotate}`+
+  return `{\\q2\\an${backgroundTopAlignment(st)}\\pos(${x},${top})${rotate}`+
     `\\1a&HFF&\\fscy${scaleY.toFixed(2)}\\xbord${metrics.padX.toFixed(1)}`+
     `\\ybord${metrics.padY.toFixed(1)}}${assEscapeText(line)}`;
 }
