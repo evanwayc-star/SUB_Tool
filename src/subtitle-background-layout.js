@@ -14,8 +14,9 @@ function cueKey(cue){
   return cue?.id == null ? null : String(cue.id);
 }
 
-/* 純版面規則：measureLineWidth 是唯一 adapter。瀏覽器用真實 DOM 字型量測；
-   測試可注入固定寬度，ASS renderer 只消費凍結後的 plain-data rectangle。 */
+/* 純版面規則：measureLineWidth 是唯一 adapter。瀏覽器只判斷最寬行；
+   ASS renderer 以同一行交給 libass 自己決定實際寬度，避免跨引擎字寬漂移。
+   交付只消費凍結後的行索引與垂直幾何，不反查 DOM／State。 */
 export function planSubtitleBackgroundLayouts(cues, tracks, { measureLineWidth } = {}){
   if(typeof measureLineWidth !== 'function') return {};
   const layouts = {};
@@ -30,14 +31,14 @@ export function planSubtitleBackgroundLayouts(cues, tracks, { measureLineWidth }
       const width = Number(measureLineWidth(line, st));
       return Number.isFinite(width) ? Math.max(0, width) : 0;
     });
-    const contentWidth = Math.max(0, ...widths);
+    const lineIndex = widths.reduce((widest, width, index) =>
+      width > widths[widest] ? index : widest, 0);
     const metrics = subtitleBackgroundCssMetrics(st, 1);
     const contentHeight = Math.max(metrics.lineHeight, metrics.lineHeight * lines.length);
     const anchor = anchorPct(st);
     layouts[key] = {
-      width: contentWidth + metrics.padX * 2,
+      lineIndex,
       height: contentHeight + metrics.padY * 2,
-      offsetX: -(contentWidth * anchor.x / 100) - metrics.padX,
       offsetY: -(contentHeight * anchor.y / 100) - metrics.padY,
     };
   }

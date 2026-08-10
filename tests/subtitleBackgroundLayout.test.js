@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { planSubtitleBackgroundLayouts } from '../src/subtitle-background-layout.js';
 import { STYLE_DEFAULTS } from '../src/substyle.js';
 
-describe('字幕矩形底色版面', () => {
-  it('以最寬行形成單一矩形，並以文字內容盒而非 padding 對齊座標', () => {
+describe('字幕單一底色版面', () => {
+  it('只凍結最寬行索引與垂直幾何，不把 Chromium 字寬冒充 libass 字寬', () => {
     const track = {
       ...STYLE_DEFAULTS,
       fontSize: 80,
@@ -29,9 +29,8 @@ describe('字幕矩形底色版面', () => {
     });
     const layout = layouts['uneven-lines'];
 
-    expect(layout.width).toBeCloseTo(526, 5);
+    expect(layout.lineIndex).toBe(1);
     expect(layout.height).toBeCloseTo(145.9, 5);
-    expect(layout.offsetX).toBeCloseTo(-263, 5);
     expect(layout.offsetY).toBeCloseTo(-72.95, 5);
   });
 

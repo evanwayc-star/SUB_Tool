@@ -7,33 +7,41 @@
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, getExactFps } from './time.js';
-import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, hexToAssColor, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';
+import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';
 
 function finiteBackgroundLayout(layout){
   if(!layout || typeof layout !== 'object') return null;
-  const width = Number(layout.width), height = Number(layout.height);
-  const offsetX = Number(layout.offsetX), offsetY = Number(layout.offsetY);
-  if(![width, height, offsetX, offsetY].every(Number.isFinite) || width <= 0 || height <= 0) return null;
-  return { width, height, offsetX, offsetY };
+  const lineIndex = Number(layout.lineIndex), height = Number(layout.height);
+  const offsetY = Number(layout.offsetY);
+  if(!Number.isSafeInteger(lineIndex) || lineIndex < 0 ||
+     ![height, offsetY].every(Number.isFinite) || height <= 0) return null;
+  return { lineIndex, height, offsetY };
 }
 
-function assFillTags(hex, alpha){
-  const packed = hexToAssColor(hex, alpha).replace(/^&H/i, '').padStart(8, '0');
-  return `\\1c&H${packed.slice(2)}&\\1a&H${packed.slice(0, 2)}&`;
+function backgroundTopAlignment(st){
+  return { left:7, center:8, right:9 }[st?.align] || 8;
 }
 
-function backgroundDrawing(layout, st, vww, vwh, { shadow=false } = {}){
+/* Chromium 只選出「哪一行最寬」與整塊的垂直幾何；實際寬度必須交給
+   同一個 libass/font provider 排版，不能把瀏覽器的字寬數字當成 ASS 字寬。
+   BorderStyle=3 的垂直縮放在 libass 會同時作用於字級與字形座標，實測高度
+   近似 fontSize * scale^2；依 frozen DOM 高度反解 scale，可用單一原生盒涵蓋多行。 */
+function backgroundText(layout, st, rawLines, vww, vwh){
+  const line = rawLines[Math.min(layout.lineIndex, rawLines.length - 1)] || '';
+  if(!line) return '';
   const x = Math.round((st.posX / 100) * vww);
   const y = Math.round((st.posY / 100) * vwh);
-  const shift = shadow ? Math.max(0, Number(st.shadow) || 0) : 0;
-  const left = Math.round(x + layout.offsetX + shift);
-  const top = Math.round(y + layout.offsetY + shift);
-  const width = Math.max(1, Math.round(layout.width));
-  const height = Math.max(1, Math.round(layout.height));
+  const metrics = subtitleBackgroundCssMetrics(st, 1);
+  const topNudge = st.valign === 'bottom' ? metrics.padY : 0;
+  const top = Math.round(y + layout.offsetY - topNudge);
+  const fontSize = Math.max(1, Number(st.fontSize) || STYLE_DEFAULTS.fontSize);
+  // 將原生底色字形的垂直尺度拉到 frozen DOM 整塊高度，再以 ybord 留出
+  // ascent/descent 安全邊；水平不做比例猜測，直接由 libass 以最寬行排出。
+  const scaleY = Math.max(1, 100 * Math.sqrt(layout.height / fontSize));
   const rotate = st.angle ? `\\org(${x},${y})\\frz${-(st.angle || 0)}` : '';
-  const fill = shadow ? assFillTags('#000000', 0.85) : assFillTags(st.bgColor, st.bgAlpha);
-  return `{\\an7\\pos(${left},${top})${rotate}\\p1\\bord0\\shad0${fill}}`+
-    `m 0 0 l ${width} 0 l ${width} ${height} l 0 ${height}`;
+  return `{\\an${backgroundTopAlignment(st)}\\pos(${x},${top})${rotate}`+
+    `\\1a&HFF&\\fscy${scaleY.toFixed(2)}\\xbord${metrics.padX.toFixed(1)}`+
+    `\\ybord${metrics.padY.toFixed(1)}}${assEscapeText(line)}`;
 }
 
 /* 舊版用 `//` 或兩個反斜線表示人工換行。URI 內的雙斜線是資料本身，
@@ -699,9 +707,9 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
         assJoinLines(lines, st, { suppressBackground:!!layout });
       const backgrounds = [];
       if(layout){
-        const backgroundHead = eventHead(c, 'Default');
-        if(Number(st.shadow) > 0) backgrounds.push(backgroundHead + backgroundDrawing(layout, st, vww, vwh, { shadow:true }));
-        backgrounds.push(backgroundHead + backgroundDrawing(layout, st, vww, vwh));
+        const background = backgroundText(layout, st,
+          String(c.text || '').replace(/\r/g, '').split('\n'), vww, vwh);
+        if(background) backgrounds.push(eventHead(c, styName) + cueAssTags(c.style, st) + background);
       }
       return { backgrounds, text };
     });
