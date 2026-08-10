@@ -40,7 +40,7 @@ function backgroundText(layout, st, lines, vww, vwh){
   const y = Math.round((st.posY / 100) * vwh);
   const metrics = subtitleBackgroundCssMetrics(st, 1);
   const radius = metrics.fontSize * 0.25;
-  const fudge = (layout.width * 0.015) + (metrics.fontSize * 0.2);
+  const fudge = (layout.width * 0.05) + (metrics.fontSize * 0.5);
   const boxW = layout.width + metrics.padX * 2 + fudge;
   const boxH = layout.height;
   const shape = assRoundedRectAt(0, 0, boxW, boxH, radius);
