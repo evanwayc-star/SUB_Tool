@@ -110,6 +110,41 @@ export function anchorPct(st){
 }
 function originOf(st){ const a = anchorPct(st); return `${a.x}% ${a.y}%`; }
 
+function finiteNonNegative(value, fallback=0){
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, number) : fallback;
+}
+
+/* BorderStyle=3 以 Outline 向文字盒四周擴張；上下相鄰兩行若仍用一般行進距離，
+   兩個半透明盒會在交界重疊並合成一條更深的橫帶。背景盒至少保留 1 ASS 單位的
+   Outline（outline=shadow=0 時 libass 完全不畫盒），再為兩側 Outline 與向下 Shadow
+   預留完整距離，並加 1 單位隔開 libass 的反鋸齒邊緣。回傳整數是因為 ASS 的
+   spacer font size 最終也只能可靠落在整數像素。 */
+export function subtitleBackgroundGap(st){
+  if(!st?.bgBox) return 0;
+  const outline = Math.max(1, finiteNonNegative(st.outline));
+  const shadow = finiteNonNegative(st.shadow);
+  return Math.ceil(outline * 2 + shadow + 1);
+}
+
+export function effectiveSubtitleLineSpacing(st){
+  const lineSpacing = Math.max(1, finiteNonNegative(st?.lineSpacing, 1));
+  const fontSize = Math.max(1, finiteNonNegative(st?.fontSize, STYLE_DEFAULTS.fontSize));
+  return Math.max(lineSpacing, 1 + subtitleBackgroundGap(st) / fontSize);
+}
+
+function effectiveVerticalLetterSpacing(st){
+  const requested = finiteNonNegative(st?.letterSpacing);
+  return st?.vertical ? Math.max(requested, subtitleBackgroundGap(st)) : requested;
+}
+
+function assBackgroundOutline(st){
+  const outline = finiteNonNegative(st?.outline);
+  return st?.bgBox ? Math.max(1, outline) : outline;
+}
+
+function assShadow(st){ return finiteNonNegative(st?.shadow); }
+
 /* ---- HTML 預覽（videoSub 每句 span 的 inline CSS；容器只管定位/對齊，由呼叫端處理） ---- */
 export function styleToCss(st, ratio){
   const r = ratio || 1;
@@ -119,8 +154,9 @@ export function styleToCss(st, ratio){
   let css = `font-size:${fs}px;color:${st.color};`+
     `font-family:'${st.font}','Noto Sans TC','Source Han Sans TC',sans-serif;`+
     `font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'};`+
-    `line-height:${st.lineSpacing};`;
-  if(st.letterSpacing) css += `letter-spacing:${(st.letterSpacing * r).toFixed(1)}px;`;
+    `line-height:${effectiveSubtitleLineSpacing(st)};`;
+  const letterSpacing = effectiveVerticalLetterSpacing(st);
+  if(letterSpacing) css += `letter-spacing:${(letterSpacing * r).toFixed(1)}px;`;
   // 直書：瀏覽器原生直排——多行(<br)自動分列、CJK 標點自動轉直排字形；
   // letter-spacing＝字間(縱)、line-height＝列間(橫)語義自動對。
   // vertical-【lr】＝第一行在最左、往右排（非 CJK 書籍的右→左傳統）。
@@ -218,12 +254,13 @@ export function styleToAssStyleLine(name, st, vwh){
            : Math.round(vwh * ((100 - st.posY) / 100));                  // 距底
   const borderStyle = st.bgBox ? 3 : 1;
   const backCol = st.bgBox ? hexToAssColor(st.bgColor, st.bgAlpha) : '&H00000000';
-  const shadowV = st.bgBox ? Math.max(1, st.shadow) : st.shadow; // BorderStyle=3 需 Outline/Shadow 撐出色塊範圍
+  const outlineV = assBackgroundOutline(st);
+  const shadowV = assShadow(st);
   const outlineCol = st.bgBox ? backCol : hexToAssColor(st.outlineColor);
   // Fontname 走 assFontName()：ASS 要的是字型檔內部家族名，不是 UI 的資料夾名
   return `Style: ${name},${assFontName(st.font)},${st.fontSize},${hexToAssColor(st.color)},&H00FFFFFF,${outlineCol},${backCol},`+
     `${st.bold ? 1 : 0},${st.italic ? 1 : 0},0,0,100.0,100.0,${st.vertical ? 0 : st.letterSpacing},${(-(st.angle || 0)).toFixed(1)},`+
-    `${borderStyle},${st.outline},${shadowV},${alignN},135,135,${mv},1`;
+    `${borderStyle},${outlineV},${shadowV},${alignN},135,135,${mv},1`;
 }
 
 /* 畫面座標 → ASS `{\pos(x,y)}`（相對 PlayResX/Y）。錨點由 Style 的 Alignment 決定，
@@ -235,7 +272,7 @@ export function cueAssPos(st, vww, vwh){
 }
 
 /* 逐句覆蓋（diff＝cue.style）→ ASS inline override tags（貼在 Dialogue 文字最前）。無覆蓋回空字串 */
-export function cueAssTags(diff){
+export function cueAssTags(diff, st=null){
   if(!diff) return '';
   let t = '';
   if(diff.font != null) t += `\\fn${assFontName(diff.font)}`; // 同 Style：ASS 認的是內部家族名
@@ -244,7 +281,7 @@ export function cueAssTags(diff){
   if(diff.bold != null) t += `\\b${diff.bold ? 1 : 0}`;
   if(diff.italic != null) t += `\\i${diff.italic ? 1 : 0}`;
   if(diff.letterSpacing != null) t += `\\fsp${diff.letterSpacing}`;
-  if(diff.outline != null) t += `\\bord${diff.outline}`;
+  if(diff.outline != null) t += `\\bord${st?.bgBox ? Math.max(1, finiteNonNegative(diff.outline)) : diff.outline}`;
   if(diff.outlineColor != null) t += `\\3c${hexToAssColor(diff.outlineColor)}&`;
   if(diff.shadow != null) t += `\\shad${diff.shadow}`;
   if(diff.angle != null) t += `\\frz${-diff.angle}`; // ASS \frz 逆時針為正 → 取負
@@ -284,18 +321,22 @@ export function verticalChars(text){
 }
 
 /* 行距 hack：ASS 無行距欄位——行間插入一個「高度=gapPx 的 \h 空白行」，之後恢復字級 fsPx。
-   lineSpacing<=1 時原樣不動。 */
+   一般字幕 lineSpacing<=1 時原樣不動；BorderStyle=3 仍套背景盒安全下限。 */
 export function assJoinLines(lines, st){
   const fs = st.fontSize;
-  const gap = Math.round((Math.max(1, st.lineSpacing) - 1) * fs);
+  const gap = Math.round((effectiveSubtitleLineSpacing(st) - 1) * fs);
   if(gap <= 0) return lines.join('\\N');
-  return lines.join(`\\N{\\fs${gap}}\\h\\N{\\fs${fs}}`);
+  if(!st.bgBox) return lines.join(`\\N{\\fs${gap}}\\h\\N{\\fs${fs}}`);
+  // spacer 自己不可帶 BorderStyle=3 的邊界，否則兩行之間會多出一小塊底色；
+  // 下一行前再恢復有效的 outline/shadow，避免關閉狀態一路洩漏到後文。
+  return lines.join(`\\N{\\fs${gap}\\bord0\\shad0}\\h\\N`+
+    `{\\fs${fs}\\bord${assBackgroundOutline(st)}\\shad${assShadow(st)}}`);
 }
 
 /* 直書單列：逐字換行；字與字之間插入「高度＝字距」的空白行。
    （Style 的 Spacing 是「行內字距」，逐字換行後每字自成一行 → 對它無效，故走同一套墊高 hack） */
 export function assJoinVertical(chars, st){
-  const gap = Math.round(st.letterSpacing || 0);
+  const gap = Math.round(effectiveVerticalLetterSpacing(st));
   const fs = st.fontSize;
   let res = '';
   let needsFsRestore = false;
@@ -317,7 +358,13 @@ export function assJoinVertical(chars, st){
     }
     if(i > 0){
       if(gap > 0){
-        res += `\\N{\\fs${gap}}\\h\\N${needsFsRestore ? '' : '{\\fs'+fs+'}'}`;
+        if(st.bgBox){
+          const restoreFs = needsFsRestore ? '' : `\\fs${fs}`;
+          res += `\\N{\\fs${gap}\\bord0\\shad0}\\h\\N`+
+            `{${restoreFs}\\bord${assBackgroundOutline(st)}\\shad${assShadow(st)}}`;
+        } else {
+          res += `\\N{\\fs${gap}}\\h\\N${needsFsRestore ? '' : '{\\fs'+fs+'}'}`;
+        }
       } else {
         res += `\\N`;
       }
@@ -333,12 +380,13 @@ export function assJoinVertical(chars, st){
    ── y 不自己算：交給 libass。valign→\an（上8/中5/下2）讓每列各自貼齊同一條基準線，
       正好等於「多列之間上／中／下對齊」的語義。各列長度不同、且 ASS 行高並非剛好等於
       字級，硬估文字高度必歪——這樣就完全不必估。
-   ── x 自己算：列距＝fontSize×lineSpacing，恰為 CSS `line-height:<number>` 在直書時的
-      水平步進 → 與預覽同一個數。整塊寬 W＝列數×列距，再依 align 決定哪一側對齊 posX
+   ── x 自己算：列距＝fontSize×有效 lineSpacing（使用者值＋背景盒安全下限），恰為 CSS
+      `line-height:<number>` 在直書時的水平步進 → 與預覽同一個數。整塊寬 W＝列數×列距，
+      再依 align 決定哪一側對齊 posX
       （對應 HTML 容器的 translate 補償）。 */
 export function verticalAssCols(st, text, vww, vwh){
   const cols = String(text || '').replace(/\r/g, '').split('\n').map(l => verticalChars(l));
-  const colW = st.fontSize * Math.max(1, st.lineSpacing);
+  const colW = st.fontSize * effectiveSubtitleLineSpacing(st);
   const W = cols.length * colW;
   const X = (st.posX / 100) * vww, Y = Math.round((st.posY / 100) * vwh);
   const left = st.align === 'left' ? X : st.align === 'right' ? X - W : X - W / 2;

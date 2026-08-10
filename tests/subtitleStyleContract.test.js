@@ -19,6 +19,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   STYLE_DEFAULTS, styleToCss, styleToAssStyleLine, hexToAssColor, ASS_PLAY_RES,
+  assJoinLines, assJoinVertical, cueAssTags, effectiveSubtitleLineSpacing,
+  subtitleBackgroundGap, verticalAssCols,
 } from '../src/substyle.js';
 
 const style = (over = {}) => ({ ...STYLE_DEFAULTS, ...over });
@@ -147,12 +149,12 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
         }
       });
 
-      /* 陰影：兩邊要嘛都有、要嘛都沒有。BorderStyle=3 時 ASS 需要 Shadow≥1
-         才撐得出色塊，這是刻意的例外，一併釘住。 */
+      /* 陰影：兩邊要嘛都有、要嘛都沒有。BorderStyle=3 由最小 Outline 撐出色塊；
+         不可在使用者選 0 時偷加 Shadow，否則半透明底色會整塊被重複合成而變深。 */
       it('陰影：兩路同時存在或同時不存在', () => {
         const hasCssShadow = cssProp(css, 'text-shadow') !== null || cssProp(css, 'box-shadow') !== null;
         if (st.bgBox) {
-          expect(Number(ass.Shadow)).toBe(Math.max(1, st.shadow));
+          expect(Number(ass.Shadow)).toBe(st.shadow);
           expect(hasCssShadow).toBe(st.shadow > 0);
         } else {
           expect(Number(ass.Shadow)).toBe(st.shadow);
@@ -160,8 +162,10 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
         }
       });
 
-      it('行距：CSS line-height 直接帶生效樣式的倍數', () => {
-        expect(cssProp(css, 'line-height')).toBe(String(st.lineSpacing));
+      it('行距：CSS 保留使用者值，背景盒另套不重疊的安全下限', () => {
+        const boxGap = subtitleBackgroundGap(st);
+        const expected = Math.max(st.lineSpacing, 1 + boxGap / st.fontSize);
+        expect(Number(cssProp(css, 'line-height'))).toBeCloseTo(expected, 6);
       });
 
       /* Alignment 是 numpad：垂直基數（下1/中4/上7）＋ 水平（左0/中1/右2）。
@@ -190,5 +194,43 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
   it('ASS Style 行的欄位數固定為 23（欄位錯位會讓 libass 整行忽略）', () => {
     const line = styleToAssStyleLine('Default', style(), ASS_PLAY_RES.y).replace(/^Style:\s*/, '');
     expect(line.split(',')).toHaveLength(23);
+  });
+
+  describe('背景盒幾何安全距離', () => {
+    it('由上下兩側 outline 與向下 shadow 推導，並替零外擴保留最小可見邊界', () => {
+      expect(subtitleBackgroundGap(style())).toBe(0);
+      expect(subtitleBackgroundGap(style({ bgBox: true, outline: 2, shadow: 0 }))).toBe(5);
+      expect(subtitleBackgroundGap(style({ bgBox: true, outline: 0, shadow: 0 }))).toBe(3);
+      expect(subtitleBackgroundGap(style({ bgBox: true, outline: 2.5, shadow: 0.5 }))).toBe(7);
+    });
+
+    it('使用者要求更大的行距時不會被安全下限縮回去', () => {
+      const st = style({ bgBox: true, fontSize: 80, outline: 2, lineSpacing: 1.5 });
+      expect(effectiveSubtitleLineSpacing(st)).toBe(1.5);
+    });
+
+    it('水平 ASS spacer 關閉自己的底色，下一行前恢復有效邊界', () => {
+      const st = style({ bgBox: true, fontSize: 80, outline: 2, shadow: 0, lineSpacing: 1 });
+      expect(assJoinLines(['上行', '下行'], st))
+        .toBe('上行\\N{\\fs5\\bord0\\shad0}\\h\\N{\\fs80\\bord2\\shad0}下行');
+    });
+
+    it('直書的字距與欄距使用同一安全下限', () => {
+      const st = style({
+        bgBox: true, vertical: true, fontSize: 80, outline: 2, shadow: 0,
+        lineSpacing: 1, letterSpacing: 0, align: 'left', posX: 0,
+      });
+      expect(assJoinVertical(['甲', '乙'], st))
+        .toBe('甲\\N{\\fs5\\bord0\\shad0}\\h\\N{\\fs80\\bord2\\shad0}乙');
+      const columns = verticalAssCols(st, '甲\n乙', 1920, 1080);
+      expect(columns[1].x - columns[0].x).toBe(85);
+    });
+
+    it('outline=0 仍產生置中的最小背景盒，且逐句 override 不會把它關掉', () => {
+      const st = style({ bgBox: true, outline: 0, shadow: 0 });
+      expect(Number(assFields(st).Outline)).toBe(1);
+      expect(Number(assFields(st).Shadow)).toBe(0);
+      expect(cueAssTags({ outline: 0 }, st)).toBe('{\\bord1}');
+    });
   });
 });

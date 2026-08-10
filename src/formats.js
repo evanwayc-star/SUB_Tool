@@ -626,7 +626,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
       const trk = trkOf(c);
       const st = effStyle(c, trk);
       const styName = ownStyle.get(c.id) || (trk ? `Track${c.track||0}` : 'Default');
-      const tags = cueAssTags(c.style);
+      const tags = cueAssTags(c.style, st);
       const head = `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styName},atg${(c.track||0)+1},0,0,0,,`;
       // 直書：ASS 無 writing-mode → 一列一個 Dialogue、逐列自己定位（見 verticalAssCols）。
       // 每列以 inline \an 覆蓋 Style 的 Alignment（Style 是整軌共用的，做不到逐列）。
