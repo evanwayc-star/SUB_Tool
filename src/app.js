@@ -1109,7 +1109,7 @@ function initUI(){
   $('cpContainsInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpContainsInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋浮動視窗
-  $('searchInput').addEventListener('input',()=>searchUpdate());
+  $('searchInput').addEventListener('input',()=>searchUpdate($('searchInput').value));
   $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing) return; if(e.key==='Enter'){ searchNav(1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
   $('replaceInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋視窗可拖曳

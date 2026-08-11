@@ -180,8 +180,11 @@ function openInlineTimeEdit(el, curSec, onCommit){
     if(done) return; done = true;
     if(commit){
       const raw = inp.value.trim();
-      if(raw === origText || raw === '--:--:--:--' || raw === ''){
+      if(raw === origText){
         inp.remove(); el.textContent = origText; return;
+      }
+      if(raw === '--:--:--:--' || raw === ''){
+        inp.remove(); onCommit(null); return;
       }
       let t = null;
       if(raw.startsWith('+') || raw.startsWith('-')){
@@ -632,6 +635,11 @@ sublist.addEventListener('dblclick', async e => {
     await ensureProjectSaved();
     if (tin) {
       openInlineTimeEdit(tin, c.start || 0, t => {
+        if(t === null) {
+          c.timed = false;
+          commitCueTimeEdit(c, 'both'); recordHistory('清除時間碼' + cueSuffix(c));
+          return;
+        }
         c.start = Math.max(0, t);
         if (c.timed === false) {
           c.end = c.start + 1.0;
@@ -643,6 +651,11 @@ sublist.addEventListener('dblclick', async e => {
       });
     } else {
       openInlineTimeEdit(tout, c.end || 0, t => {
+        if(t === null) {
+          c.timed = false;
+          commitCueTimeEdit(c, 'both'); recordHistory('清除時間碼' + cueSuffix(c));
+          return;
+        }
         c.end = Math.max((c.start || 0) + 0.001, t);
         let edge = 'end';
         if (c.timed === false) {

@@ -1590,7 +1590,7 @@ const Media = {
     const pendingPrimary=pending.find(x=>x?.primary)||pending.find(x=>x?.path&&x.path===meta.path)||pending.find(x=>x?.name&&x.name===meta.name)||null;
     const projectRelink=projectRestore?.consumeMediaRelink?.()===true;
     const audioSourceId=meta.audioSourceId||pendingPrimary?.audioSourceId||makeAudioSourceId();
-    const c = Seq.add({ ...meta, primary: true, audioSrc: 'video', audioSourceId, audioDetached:!!pendingPrimary?.audioDetached, offset: 0 });
+    const c = Seq.add({ ...meta, primary: true, audioSrc: 'video', audioSourceId, audioDetached:!!pendingPrimary?.audioDetached, locked:!!pendingPrimary?.locked, offset: 0 });
     const restoreSequenceVersion=this._sequenceEditVersion;
     const restoreBaseOwns=()=>
       (!projectRestore?.owns||projectRestore.owns())&&
@@ -1622,7 +1622,7 @@ const Media = {
       c.in = pri.in ?? 0; c.out = Math.min(pri.out ?? c.dur, c.dur); c.offset = pri.offset ?? 0;
       c.vtrack = pri.vtrack || 0; c.fadeIn = pri.fadeIn || 0; c.fadeOut = pri.fadeOut || 0;
       if (pri.muted != null) c.muted = pri.muted;
-      c.audioDetached=!!pri.audioDetached;
+      c.audioDetached=!!pri.audioDetached; c.locked=!!pri.locked;
       Seq.sort(); Seq.recomputeDuration();
     }
     if(DESK && Array.isArray(pend)){
@@ -1661,7 +1661,7 @@ const Media = {
               dur: base.dur, fps: base.fps || 0, peaks: base.peaks, vtrack: pc.vtrack || 0,
               audioSrc: base.audioSrc || ('clip:' + base.id),
               audioSourceId: base.audioSourceId || pc.audioSourceId || makeAudioSourceId(),
-              audioDetached:!!pc.audioDetached,
+              audioDetached:!!pc.audioDetached, locked:!!pc.locked,
               fadeIn: pc.fadeIn || 0, fadeOut: pc.fadeOut || 0,
               in: pc.in ?? 0, out: Math.min(pc.out ?? base.dur, base.dur), offset: pc.offset ?? undefined });
             if(pc.offset != null) piece.offset = pc.offset;
@@ -1823,10 +1823,10 @@ const Media = {
       ensureVideoTrackCount(overrides.vtrack + 1);
       overrides.offset = this.displayTime();
     }
-    const c = Seq.add({ ...meta, ...overrides, audioSourceId: geo?.audioSourceId || makeAudioSourceId(), audioDetached:!!geo?.audioDetached });
+    const c = Seq.add({ ...meta, ...overrides, audioSourceId: geo?.audioSourceId || makeAudioSourceId(), audioDetached:!!geo?.audioDetached, locked:!!geo?.locked });
     c.audioSrc = 'clip:' + c.id; // 此來源的音軌識別（切割片段將共用）
     AudioPipeline.registerSource(c,probeAudioChannelDescriptors(info?.audio));
-    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; c.audioDetached=!!geo.audioDetached; Seq.sort(); Seq.recomputeDuration(); }
+    if(geo){ c.in = geo.in ?? 0; c.out = Math.min(geo.out ?? dur, dur); c.offset = geo.offset ?? c.offset; if(geo.vtrack){ c.vtrack = geo.vtrack; ensureVideoTrackCount(geo.vtrack+1); } c.fadeIn = geo.fadeIn || 0; c.fadeOut = geo.fadeOut || 0; c.audioDetached=!!geo.audioDetached; c.locked=!!geo.locked; Seq.sort(); Seq.recomputeDuration(); }
     else { Seq.sort(); Seq.recomputeDuration(); }
     emit('media:timeline');
     emit('history:record', '加入影片：' + c.name);

@@ -207,8 +207,9 @@ function sheetXml(headerLabel, cues, fps, dropFrame) {
   for (let i = 0; i < cues.length; i++) {
     const r = i + 2;
     const c = cues[i];
-    const inTc  = secToEncore(c.start, fps, dropFrame);
-    const outTc = secToEncore(c.end,   fps, dropFrame);
+    const isUntimed = c.timed === false || !Number.isFinite(c.start) || !Number.isFinite(c.end);
+    const inTc  = isUntimed ? '--:--:--:--' : secToEncore(c.start, fps, dropFrame);
+    const outTc = isUntimed ? '--:--:--:--' : secToEncore(c.end,   fps, dropFrame);
     rows.push(
       // 資料列：Arial 無底色，左右框（s="2"）
       `<row r="${r}">`
