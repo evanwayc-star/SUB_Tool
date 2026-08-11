@@ -162,7 +162,7 @@ class TimelineTransport {
   }
 
   /* mpv / native driver 在暫停時可能沉降到相鄰格；小幅抖動不得覆寫 seek 目標。 */
-  observeSourceTime(sourceTime, { clip = null, playing = false, fps, dropFrame = false, settleFrames = 1.5 } = {}){
+  observeSourceTime(sourceTime, { clip = null, playing = false, fps, dropFrame = false, settleFrames = 4.0 } = {}){
     let timeline = this.timelineTime({ sourceTime, clip });
     if(!playing){
       const frame = 1 / (finite(fps, 25) || 25);

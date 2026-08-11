@@ -138,17 +138,17 @@ describe('TimelineTransport', () => {
     })).toBe(107);
   });
 
-  it('only treats sub-1.5-frame paused drift as mpv settling', () => {
+  it('only treats sub-4-frame paused drift as mpv settling', () => {
     const clock = createClock();
     const transport = createTransport(clock);
     const clip = { in: 10, offset: 100 };
     const target = transport.seek(105, { duration: 200, fps: 25, dropFrame: false });
 
-    expect(transport.observeSourceTime(15.04, {
+    expect(transport.observeSourceTime(15.15, {
       clip, playing: false, fps: 25, dropFrame: false,
     })).toBe(target);
-    expect(transport.observeSourceTime(15.08, {
+    expect(transport.observeSourceTime(15.20, {
       clip, playing: false, fps: 25, dropFrame: false,
-    })).toBe(105.08);
+    })).toBe(105.20);
   });
 });
