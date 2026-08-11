@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { authorizeDroppedMediaPath } = require('../electron/dropped-file-admission.js');
@@ -19,7 +20,7 @@ describe('dropped desktop project intake', () => {
     expect(grantScreenshotDirectory).not.toHaveBeenCalled();
 
     expect(authorizeDroppedMediaPath('D:\\Media\\program.mov', {
-      grantRead, grantScreenshotDirectory,
+      grantRead, grantScreenshotDirectory, pathModule: path.win32
     })).toBe('D:\\Media\\program.mov');
     expect(grantRead).toHaveBeenCalledWith('D:\\Media\\program.mov');
     expect(grantScreenshotDirectory).toHaveBeenCalledWith('D:\\Media');

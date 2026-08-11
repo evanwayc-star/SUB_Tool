@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
 const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'compare-window-scroll.cjs');
 
 function delay(ms) {
