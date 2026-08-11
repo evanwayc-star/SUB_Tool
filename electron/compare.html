@@ -8,127 +8,184 @@
     :root {
       --bg: #09090b; /* Zinc 950 */
       --surface: #18181b; /* Zinc 900 */
-      --surface-hover: #27272a; /* Zinc 800 */
+      --surface-hover: rgba(255, 255, 255, 0.03);
       --border: rgba(255, 255, 255, 0.08);
-      --text: #e4e4e7; /* Zinc 200 */
-      --text-dim: #71717a; /* Zinc 500 */
+      --border-light: rgba(255, 255, 255, 0.04);
+      --text: #f4f4f5; /* Zinc 100 */
+      --text-dim: #a1a1aa; /* Zinc 400 */
+      --text-muted: #52525b; /* Zinc 600 */
       --accent: #ffffff; /* Pure white accent */
-      --diff-highlight: #38bdf8; /* Sharp electric blue for all differences */
-      --missing-bg: #000000;
+      --diff-highlight-bg: rgba(56, 189, 248, 0.15);
+      --diff-highlight-text: #38bdf8; /* Sharp electric blue */
+      --missing-bg: rgba(0, 0, 0, 0.4);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0; height: 100vh; min-height: 100vh; overflow: hidden;
       background: var(--bg); color: var(--text);
-      font-family: Inter, "Segoe UI", system-ui, sans-serif;
+      font-family: "Geist", "Satoshi", "Inter", system-ui, sans-serif;
       display: flex; flex-direction: column;
       -webkit-font-smoothing: antialiased;
     }
     
-    /* Header - No glass, just crisp borders */
+    /* Liquid Glass Header */
     .header {
-      display: flex; align-items: center; gap: 24px; padding: 12px 24px;
-      background: var(--bg);
+      display: flex; align-items: center; gap: 24px; padding: 16px 24px;
+      background: rgba(9, 9, 11, 0.65);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
       border-bottom: 1px solid var(--border);
+      box-shadow: inset 0 -1px 0 rgba(255,255,255,0.03), 0 4px 30px rgba(0,0,0,0.3);
       position: relative; z-index: 10;
     }
-    .track-select-group { flex: 0 1 240px; display: grid; gap: 4px; min-width: 0; }
-    label { color: var(--text-dim); font-size: 10px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
+    .track-select-group { flex: 0 1 240px; display: grid; gap: 6px; min-width: 0; }
+    label { color: var(--text-dim); font-size: 11px; font-weight: 500; letter-spacing: .05em; text-transform: uppercase; }
     
     /* Selectors */
     select {
-      appearance: none; width: 100%; border: 1px solid var(--border); border-radius: 4px;
-      background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2371717a'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M8 9l4-4 4 4m0 6l-4 4-4-4'/%3E%3C/svg%3E") no-repeat right 8px center/14px;
-      color: var(--text); padding: 6px 32px 6px 12px; font: inherit; cursor: pointer;
-      font-size: 13px; transition: border-color 0.1s;
+      appearance: none; width: 100%; border: 1px solid var(--border); border-radius: 8px;
+      background: rgba(24, 24, 27, 0.5) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23a1a1aa'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M8 9l4-4 4 4m0 6l-4 4-4-4'/%3E%3C/svg%3E") no-repeat right 12px center/14px;
+      color: var(--text); padding: 8px 36px 8px 14px; font: inherit; cursor: pointer;
+      font-size: 13px; font-weight: 500;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
     }
-    select:hover { border-color: rgba(255,255,255,0.2); }
-    select:focus { outline: none; border-color: var(--text-dim); }
+    select:hover { border-color: rgba(255,255,255,0.2); background-color: rgba(24, 24, 27, 0.8); }
+    select:focus { outline: none; border-color: var(--diff-highlight-text); box-shadow: 0 0 0 1px var(--diff-highlight-text); }
 
-    /* Segmented Controls - Minimalist */
-    .controls { display: flex; flex: 1; flex-direction: column; gap: 8px; align-items: center; justify-content: center; }
+    /* Controls (Pills) */
+    .controls { display: flex; flex: 1; flex-direction: column; gap: 12px; align-items: center; justify-content: center; }
     .toggles { 
-      display: flex; background: var(--surface); border-radius: 6px; padding: 2px; 
-      border: 1px solid rgba(255,255,255,0.03);
+      display: flex; background: rgba(255,255,255,0.03); border-radius: 9999px; padding: 4px; 
+      border: 1px solid var(--border-light);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.2);
     }
     .pill-toggle {
-      border: none; background: transparent; border-radius: 4px;
+      border: none; background: transparent; border-radius: 9999px;
       color: var(--text-dim); cursor: pointer; font: inherit; font-size: 12px; font-weight: 500;
-      padding: 4px 14px; transition: all 0.1s;
+      padding: 6px 16px; transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
       display: flex; align-items: center; gap: 6px;
     }
     .pill-toggle:hover { color: var(--text); }
-    .pill-toggle.active { color: var(--bg); background: var(--text); font-weight: 600; }
-    .pill-toggle svg { width: 13px; height: 13px; opacity: 0.8; }
+    .pill-toggle.active { color: var(--bg); background: var(--text); font-weight: 600; box-shadow: 0 2px 10px rgba(255,255,255,0.2); }
+    .pill-toggle svg { width: 14px; height: 14px; opacity: 0.8; }
     .pill-toggle.active svg { opacity: 1; color: var(--bg); }
     
     .checkbox-wrap { 
       display: flex; align-items: center; gap: 6px; color: var(--text-dim); 
-      font-size: 11px; font-weight: 500; cursor: pointer; transition: color 0.1s;
+      font-size: 12px; font-weight: 500; cursor: pointer; transition: color 0.2s;
     }
     .checkbox-wrap:hover { color: var(--text); }
-    .checkbox-wrap input { accent-color: var(--text); cursor: pointer; margin: 0; }
+    .checkbox-wrap input { accent-color: var(--diff-highlight-text); cursor: pointer; margin: 0; width: 14px; height: 14px; }
     
     /* Layout */
     .scroll-container {
       flex: 1; overflow-y: auto; overflow-x: hidden; display: grid; 
-      /* No borders between columns, just negative space */
-      grid-template-columns: minmax(0,1fr) 40px minmax(0,1fr);
+      grid-template-columns: minmax(0,1fr) 50px minmax(0,1fr);
       align-content: start; background: var(--bg);
+      padding-bottom: 40px;
     }
+    
+    /* Rows & Micro-physics */
+    .row { display: contents; }
+    
     .cell {
-      position: relative; min-height: 72px; padding: 16px 24px; cursor: pointer;
-      background: transparent; border-bottom: 1px solid var(--border);
-      transition: background 0.1s;
+      position: relative; min-height: 80px; padding: 20px 32px; cursor: pointer;
+      background: transparent; border-bottom: 1px solid var(--border-light);
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .cell:hover { background: var(--surface); }
+    /* Hover micro-physics: slight lift and shadow */
+    .row:hover .cell { 
+      background: var(--surface-hover); 
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px -4px rgba(0,0,0,0.5);
+      border-bottom-color: transparent;
+      z-index: 2;
+    }
     .cell.missing { background: var(--missing-bg); cursor: default; }
     
     /* Content */
     .tc { 
-      margin-bottom: 6px; color: var(--text-dim); 
+      margin-bottom: 8px; color: var(--text-muted); 
       font-family: ui-monospace, SFMono-Regular, Consolas, monospace; 
       font-size: 11px; display: flex; align-items: center; flex-wrap: wrap; 
+      letter-spacing: 0.02em;
     }
-    .badge { margin-right: 8px; color: var(--text-dim); font-size: 11px; font-weight: 400; opacity: 0.6; }
+    .badge { 
+      margin-right: 12px; color: var(--bg); background: var(--text-muted);
+      padding: 1px 6px; border-radius: 4px;
+      font-size: 10px; font-weight: 700; opacity: 0.8; 
+    }
     
-    .txt { color: var(--text); font-size: 14px; font-weight: 400; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .txt { color: var(--text); font-size: 15px; font-weight: 400; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
     
-    /* Diff Highlighting - Minimal Underline */
+    /* Diff Highlighting - Soft Glow Badge */
     .diff-fragment { 
-      color: var(--diff-highlight); 
-      border-bottom: 1px solid rgba(56,189,248,0.5); 
-      padding-bottom: 1px;
+      color: var(--diff-highlight-text);
+      background: var(--diff-highlight-bg);
+      padding: 2px 4px;
+      border-radius: 4px;
+      box-shadow: inset 0 0 0 1px rgba(56,189,248,0.2);
     }
     
     /* Center Status Column */
-    .icons {
-      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
-      border-bottom: 1px solid var(--border);
+    .icons-col {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+      border-bottom: 1px solid var(--border-light);
+      position: relative;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     }
+    .row:hover .icons-col {
+      background: var(--surface-hover);
+      transform: translateY(-1px);
+      border-bottom-color: transparent;
+      z-index: 2;
+    }
+    
     .icon { 
-      width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; 
-      color: var(--surface-hover); transition: all 0.1s; 
+      width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; 
+      color: var(--text-muted); transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.03);
     }
     .icon svg { width: 12px; height: 12px; stroke-width: 2.5; }
-    .icon.active { color: var(--diff-highlight); }
     
-    #emptyState { grid-column: 1 / -1; display: grid; place-items: center; min-height: 220px; padding: 40px; color: var(--text-dim); text-align: center; font-size: 13px; }
-    
-    /* Context Menu */
-    .context-menu {
-      display: none; position: fixed; z-index: 100; padding: 4px; border: 1px solid var(--border); border-radius: 6px;
-      background: var(--surface); box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    /* Glowing active state */
+    .icon.active { 
+      color: var(--diff-highlight-text); 
+      background: var(--diff-highlight-bg);
+      border-color: rgba(56, 189, 248, 0.3);
+      filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.4));
     }
-    .context-menu.show { display: block; }
-    .menu-item { padding: 6px 12px; border-radius: 4px; color: var(--text); cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 8px; }
-    .menu-item:hover { background: var(--surface-hover); color: #fff; }
+    
+    #emptyState { grid-column: 1 / -1; display: grid; place-items: center; min-height: 240px; padding: 40px; color: var(--text-dim); text-align: center; font-size: 14px; }
+    
+    /* Liquid Glass Context Menu */
+    .context-menu {
+      display: none; position: fixed; z-index: 100; padding: 6px; 
+      border: 1px solid var(--border); border-radius: 12px;
+      background: rgba(24, 24, 27, 0.85); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05);
+      min-width: 160px;
+    }
+    .context-menu.show { 
+      display: block; 
+      animation: menuPop 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes menuPop {
+      0% { opacity: 0; transform: scale(0.95) translateY(4px); }
+      100% { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    
+    .menu-item { padding: 8px 14px; border-radius: 6px; color: var(--text); cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 10px; transition: all 0.15s; }
+    .menu-item:hover { background: rgba(255,255,255,0.1); color: #fff; }
     .menu-item svg { width: 14px; height: 14px; opacity: 0.8; }
     
     @media (max-width: 740px) {
-      .header { gap: 12px; padding: 12px; flex-wrap: wrap; }
+      .header { gap: 16px; padding: 16px; flex-wrap: wrap; }
       .track-select-group { flex: 1 1 100%; }
       .controls { flex-direction: row; justify-content: space-between; width: 100%; }
+      .cell { padding: 16px; }
     }
   </style>
 </head>
@@ -167,7 +224,7 @@
 
   <div id="ctxMenu" class="context-menu">
     <div class="menu-item" id="miMatchStyle">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
       匹配另一側樣式
     </div>
   </div>
@@ -249,13 +306,17 @@
           : '';
         const leftSource = row.active.style && row.right ? row.right.id : null;
         const rightSource = row.active.style && row.left ? row.left.id : null;
+        
+        // Wrap everything in a .row for hover effects
+        html += '<div class="row">';
         html += cellHtml(row.left, row.leftIndex, hasDiff, start.left, end.left, text.left, leftSource);
-        html += '<div class="icons">'
+        html += '<div class="icons-col">'
           + '<div class="icon ' + (row.active.time ? 'active' : '') + '" title="' + (row.active.time ? '時間不同' : '') + '">' + iconTime + '</div>'
           + '<div class="icon ' + (row.active.text ? 'active' : '') + '" title="' + (row.active.text ? '內容不同' : '') + '">' + iconText + '</div>'
           + '<div class="icon ' + (row.active.style ? 'active' : '') + '" title="' + escapeHtml(row.active.style ? styleTitle : '') + '">' + iconStyle + '</div>'
           + '</div>';
         html += cellHtml(row.right, row.rightIndex, hasDiff, start.right, end.right, text.right, rightSource);
+        html += '</div>';
       }
       container.innerHTML = html || '<div id="emptyState">無差異字幕</div>';
     }
