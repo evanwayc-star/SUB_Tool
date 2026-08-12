@@ -35,16 +35,28 @@ describe('字幕單一底色版面', () => {
     expect(layout.offsetY).toBeCloseTo(-75.75, 5);
   });
 
-  it('無底色與直書不建立水平矩形計畫', () => {
+  it('無底色不建立矩形計畫', () => {
     const plain = { ...STYLE_DEFAULTS, bgBox: false };
-    const vertical = { ...STYLE_DEFAULTS, bgBox: true, vertical: true };
     const cues = [
       { id: 'plain', track: 0, text: 'A' },
-      { id: 'vertical', track: 1, text: '甲\n乙' },
     ];
 
-    expect(planSubtitleBackgroundLayouts(cues, [plain, vertical], {
+    expect(planSubtitleBackgroundLayouts(cues, [plain], {
       measureLineWidth: () => 100,
     })).toEqual({});
+  });
+  
+  it('直書建立垂直矩形計畫', () => {
+    const vertical = { ...STYLE_DEFAULTS, bgBox: true, vertical: true };
+    const cues = [
+      { id: 'vertical', track: 0, text: '甲\n乙' },
+    ];
+
+    const layouts = planSubtitleBackgroundLayouts(cues, [vertical], {
+      measureLineWidth: () => ({ width: 40, height: 100 }),
+    });
+    
+    expect(layouts['vertical']).toBeDefined();
+    expect(layouts['vertical'].height).toBeCloseTo(118, 0); // 100 + padY*2
   });
 });

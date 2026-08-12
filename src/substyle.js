@@ -177,7 +177,7 @@ export function styleToCss(st, ratio){
     const pad = bgMetrics.padY.toFixed(1);
     const padH = bgMetrics.padX.toFixed(1);
     css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;margin:-${pad}px -${padH}px;border-radius:.25em;`+
-           `box-decoration-break:clone;-webkit-box-decoration-break:clone;`;
+           `display:inline-block;text-align:inherit;`;
     if(st.shadow > 0){
       const d = (st.shadow * r).toFixed(1);
       css += `box-shadow:${d}px ${d}px 0px rgba(0,0,0,.85);`;
