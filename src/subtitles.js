@@ -13,6 +13,7 @@ import { recordHistory } from './history.js';
 import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx, styleMatchesPreset } from './substyle.js';
 import { showCueMenu } from './menus.js';
 import { deleteSelectedWithPrompt } from './subtitle-view.js';
+import { analyzeSubtitles } from './subtitle-analyzer.js';
 
 // Domain imports
 import { 
@@ -217,66 +218,13 @@ function updateTlSel(){
 function renderCheckPanel(){
   const panel=$('checkPanel'); if(!panel||!panel.classList.contains('show'))return;
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
-  const overlapSet=detectOverlaps(list);
   const lenEl=$('cpLenInput');
   _checkLenLimit = lenEl ? (parseInt(lenEl.value)||0) : 0;
   const containsRaw=($('cpContainsInput')||{}).value||'';
   _checkContains=containsRaw.split('||').map(s=>s.trim()===''?s:s.replace(/^[ ]+|[ ]+$/g,'')).filter(s=>s.length>0);
 
-  const overlapNums=[], multiNums=[], twoNums=[], blankNums=[];
-  const bNums=[], iNums=[], uNums=[], fontNums=[], posNums=[];
-  const trimNums=[], overLenNums=[], containsNums=[], nonTraditionalIssues=[];
-  const noTimeNums=[];
-  const consecutiveIdenticalSet = new Set();
-
-  for(let i=0; i<list.length; i++){
-    const c=list[i];
-    const num=i+1;
-    const t=c.text||'';
-    const trimmed=t.trim();
-    const lower=t.toLowerCase();
-
-    if(c.timed===false) noTimeNums.push(num);
-    if(overlapSet.has(c.id)) overlapNums.push(num);
-
-    if(!trimmed){
-      blankNums.push(num);
-    } else {
-      const lineCnt=(t.match(/\n/g)||[]).length;
-      if(lineCnt>=2) multiNums.push(num);
-      else if(lineCnt===1) twoNums.push(num);
-    }
-
-    if(i>0){
-      const prevTrimmed=(list[i-1].text||'').trim();
-      if(prevTrimmed && prevTrimmed===trimmed){
-        consecutiveIdenticalSet.add(i);
-        consecutiveIdenticalSet.add(num);
-      }
-    }
-
-    if(/<\/?b>/i.test(t)) bNums.push(num);
-    if(/<\/?i>/i.test(t)) iNums.push(num);
-    if(/<\/?u>/i.test(t)) uNums.push(num);
-    if(/<\/?font/i.test(t)) fontNums.push(num);
-    if(/\{\\an\d\}/i.test(t)) posNums.push(num);
-
-    if(/^[ 　]+|[ 　]+$/m.test(t)) trimNums.push(num);
-
-    if(_checkLenLimit && trimmed && t.split(/\n/).some(ln=>ln.length>_checkLenLimit)){
-      overLenNums.push(num);
-    }
-
-    if(_checkContains.length && _checkContains.some(kw=>lower.includes(kw.toLowerCase()))){
-      containsNums.push(num);
-    }
-
-    const issue=inspectSubtitleCharacters(t);
-    if(issue.simplified.length||issue.unsupported.length){
-      nonTraditionalIssues.push({ num, ...issue });
-    }
-  }
-  const consecutiveIdenticalNums = Array.from(consecutiveIdenticalSet).sort((a,b)=>a-b);
+  const report = analyzeSubtitles(list, { checkLenLimit: _checkLenLimit, checkContains: _checkContains });
+  const { overlapNums, multiNums, twoNums, blankNums, bNums, iNums, uNums, fontNums, posNums, trimNums, overLenNums, containsNums, nonTraditionalIssues, noTimeNums, consecutiveIdenticalNums } = report;
   
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'N/A';
   const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{

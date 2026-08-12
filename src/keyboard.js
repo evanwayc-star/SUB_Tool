@@ -34,6 +34,7 @@ import { addNote, renderNotes, updateNoteActive } from './notes.js';
 import { emit } from './events.js';
 import { setStatus, closeModal, showOsd } from './ui.js';
 import { matchAction } from './keybinding.js';
+import { getNoteJump, getFirstLastCue, getAdjacentCue, getCueInMinusFrames, getBoundaryStep } from './timeline-navigation.js';
 
 /* ===== JKL 穿梭輪 ======================================================= */
 /* _jklSpeed: 0=暫停, 1=正常播放, 2=2x播放, -1=1x倒帶, -2=2x倒帶 */
@@ -564,20 +565,15 @@ function seekEnd() { const t = State.duration || 0; Media.seek(t); updatePlayhea
 
 /* Ctrl+左/右：跳到上一個/下一個備註時間點 */
 function jumpToNote(dir) {
-  if (!State.notes.length) return;
-  const t = Media.displayTime(), EPS = 1e-4;
-  let target = null;
-  if (dir > 0) { for (const n of State.notes) { if (n.time > t + EPS && (target === null || n.time < target.time)) target = n; } }
-  else { for (const n of State.notes) { if (n.time < t - EPS && (target === null || n.time > target.time)) target = n; } }
-  if (!target) return;
-  Media.seek(target.time); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(target.time);
+  const targetTime = getNoteJump({ notes: State.notes, currentTime: Media.displayTime(), dir });
+  if (targetTime === null) return;
+  Media.seek(targetTime); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(targetTime);
 }
 
 /* Shift+Home/End：跳到同軌第一句 / 最後一句並選取 */
 function jumpToFirstLastCue(dir) {
-  const list = State.cues.filter(c => (c.track || 0) === State.listTrack && c.timed !== false);
-  if (!list.length) return;
-  const target = dir < 0 ? list[0] : list[list.length - 1];
+  const target = getFirstLastCue({ cues: State.cues, listTrack: State.listTrack, dir });
+  if (!target) return;
   selectCueSingle(target.id, false);
   Media.seek(target.start);
   updatePlayhead(); emit('playhead:ensure');
@@ -585,23 +581,15 @@ function jumpToFirstLastCue(dir) {
 
 /* Ctrl+上/下：跳到同軌上一句/下一句的起點並選取 */
 function jumpToAdjacentCue(dir) {
-  const sel = State.cues.find(c => c.id === State.selectedId);
-  const track = sel ? (sel.track || 0) : (State.activeSubTrack !== undefined ? State.activeSubTrack : State.listTrack);
-  const list = State.cues.filter(c => (c.track || 0) === track);
-  if (!list.length) return;
-  let idx;
-  if (sel) {
-    idx = list.findIndex(c => c.id === sel.id) + dir;
-  } else {
-    const t = Media.displayTime();
-    if (dir < 0) {
-      idx = list.filter(c => c.start < t - 1e-4).length - 1;
-      if (Media.playing) idx -= 1;
-    }
-    else idx = list.findIndex(c => c.start > t + 1e-4);
-  }
-  idx = Math.max(0, Math.min(list.length - 1, idx));
-  const target = list[idx];
+  const target = getAdjacentCue({ 
+    cues: State.cues, 
+    selectedId: State.selectedId, 
+    listTrack: State.listTrack, 
+    activeSubTrack: State.activeSubTrack, 
+    currentTime: Media.displayTime(), 
+    isPlaying: Media.playing, 
+    dir 
+  });
   if (!target) return;
   if (Media.playing) {
     deselect('sub');
@@ -616,101 +604,36 @@ function jumpToAdjacentCue(dir) {
 }
 
 function jumpToCueInMinusFrames(dir, frames) {
-  const sel = State.cues.find(c => c.id === State.selectedId);
-  const track = sel ? (sel.track || 0) : State.listTrack;
-  const list = State.cues.filter(c => (c.track || 0) === track);
-  if (!list.length) return;
-  let idx;
-  if (sel) {
-    idx = list.findIndex(c => c.id === sel.id) + dir;
-  } else {
-    const t = Media.displayTime();
-    if (dir < 0) idx = list.filter(c => c.start < t - 1e-4).length - 1;
-    else idx = list.findIndex(c => c.start > t + 1e-4);
-  }
-  idx = Math.max(0, Math.min(list.length - 1, idx));
-  const target = list[idx];
-  if (!target) return;
-  selectCueSingle(target.id, false);
-  const targetTime = Math.max(0, target.start - (frames / State.fps));
-  Media.seek(targetTime);
+  const result = getCueInMinusFrames({
+    cues: State.cues,
+    selectedId: State.selectedId,
+    listTrack: State.listTrack,
+    currentTime: Media.displayTime(),
+    fps: State.fps,
+    dir,
+    frames
+  });
+  if (!result) return;
+  selectCueSingle(result.targetCue.id, false);
+  Media.seek(result.targetTime);
   updatePlayhead(); emit('playhead:ensure');
 }
 
 function stepBoundary(dir) {
   focusTrackKind('sub');
-  const t = Media.displayTime();
-  const EPS = 0.05; // 50ms寬容度，避免播放器時間小數點誤差
+  const result = getBoundaryStep({
+    cues: State.cues,
+    selectedId: State.selectedId,
+    listTrack: State.listTrack,
+    currentTime: Media.displayTime(),
+    dir,
+    eps: 0.05
+  });
 
-  const selTrack = State.listTrack;
-  const timed = State.cues.filter(c => c.timed !== false && (c.track || 0) === selTrack);
-  if (!timed.length) return;
-
-  const selIdx = timed.findIndex(c => c.id === State.selectedId);
-  let c = selIdx >= 0 ? timed[selIdx] : null;
-  let cIdx = selIdx;
-
-  // 如果播放點已經不在被選取的字幕範圍內（包含邊界寬容度），代表被手動拖走了，這時放棄當前選取，改依時間 t 尋找
-  if (c && (t < c.start - EPS || t > c.end + EPS)) {
-    c = null;
-    cIdx = -1;
-  }
-
-  let targetId = null;
-  let targetEdge = 'start';
-  let targetTime = 0;
-
-  if (dir > 0) {
-    if (!c) {
-      const bnd = [];
-      for (const cue of timed) { bnd.push({ id: cue.id, edge: 'start', t: cue.start }); bnd.push({ id: cue.id, edge: 'end', t: cue.end }); }
-      bnd.sort((a, b) => a.t - b.t);
-      const nextBnd = bnd.find(b => b.t > t + EPS);
-      if (nextBnd) { targetId = nextBnd.id; targetEdge = nextBnd.edge; targetTime = nextBnd.t; }
-    } else {
-      if (t < c.start - EPS) {
-        targetId = c.id; targetEdge = 'start'; targetTime = c.start;
-      } else if (t < c.end - EPS) {
-        targetId = c.id; targetEdge = 'end'; targetTime = c.end;
-      } else {
-        if (cIdx < timed.length - 1) {
-          const next = timed[cIdx + 1];
-          targetId = next.id; targetEdge = 'start'; targetTime = next.start;
-        } else {
-          return;
-        }
-      }
-    }
-  } else {
-    if (!c) {
-      const bnd = [];
-      for (const cue of timed) { bnd.push({ id: cue.id, edge: 'start', t: cue.start }); bnd.push({ id: cue.id, edge: 'end', t: cue.end }); }
-      bnd.sort((a, b) => a.t - b.t);
-      let prevBnd = null;
-      for (let i = bnd.length - 1; i >= 0; i--) {
-        if (bnd[i].t < t - EPS) { prevBnd = bnd[i]; break; }
-      }
-      if (prevBnd) { targetId = prevBnd.id; targetEdge = prevBnd.edge; targetTime = prevBnd.t; }
-    } else {
-      if (t > c.end + EPS) {
-        targetId = c.id; targetEdge = 'end'; targetTime = c.end;
-      } else if (t > c.start + EPS) {
-        targetId = c.id; targetEdge = 'start'; targetTime = c.start;
-      } else {
-        if (cIdx > 0) {
-          const prev = timed[cIdx - 1];
-          targetId = prev.id; targetEdge = 'end'; targetTime = prev.end;
-        } else {
-          return;
-        }
-      }
-    }
-  }
-
-  if (targetId) {
-    selectCueSingle(targetId);
-    State.activeEdge = targetEdge;
-    Media.seek(targetTime);
+  if (result) {
+    selectCueSingle(result.targetId);
+    State.activeEdge = result.targetEdge;
+    Media.seek(result.targetTime);
     emit('playhead:ensure');
     updatePlayhead();
   }

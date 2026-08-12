@@ -152,7 +152,7 @@ describe('subtitle style project persistence', () => {
     expect(copied).not.toHaveProperty('posPct');
 
     // 接線檢查只負責鎖住 app 使用上面已實際執行過的 helper；行為正確性不靠比字串判定。
-    const source = readFileSync('src/app.js', 'utf8');
+    const source = readFileSync('src/actions/track-actions.js', 'utf8');
     expect(source).not.toContain('srcTrack.fontSize||80');
     expect(source).not.toContain('st.posY:91.2');
     expect(source).toContain('trackStyleSnapshot(srcTrack)');

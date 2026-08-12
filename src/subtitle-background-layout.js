@@ -17,7 +17,7 @@ function cueKey(cue){
 /* 純版面規則：measureLineWidth 是唯一 adapter。瀏覽器只判斷最寬行；
    ASS renderer 以同一行交給 libass 自己決定實際寬度，避免跨引擎字寬漂移。
    交付只消費凍結後的行索引與垂直幾何，不反查 DOM／State。 */
-export function planSubtitleBackgroundLayouts(cues, tracks, { measureLineWidth } = {}){
+export function planSubtitleBackgroundLayouts(cues, tracks, { measureLineWidth, vww = 1920, vwh = 1080 } = {}){
   if(typeof measureLineWidth !== 'function') return {};
   const layouts = {};
   for(const cue of Array.isArray(cues) ? cues : []){
@@ -36,12 +36,37 @@ export function planSubtitleBackgroundLayouts(cues, tracks, { measureLineWidth }
     const metrics = subtitleBackgroundCssMetrics(st, 1);
     const contentHeight = Math.max(metrics.lineHeight, metrics.lineHeight * lines.length);
     const anchor = anchorPct(st);
+    
+    const x = Math.round((st.posX / 100) * vww);
+    const y = Math.round((st.posY / 100) * vwh);
+    const radius = metrics.fontSize * 0.25;
+    const fudge = (widths[lineIndex] * 0.05) + (metrics.fontSize * 0.5);
+    const boxW = widths[lineIndex] + metrics.padX * 2 + fudge;
+    const boxH = contentHeight + metrics.padY * 2;
+    const offsetY = -(contentHeight * anchor.y / 100) - metrics.padY;
+    
+    const anchorX = st.align === 'left' ? 0 : st.align === 'right' ? 100 : 50;
+    const absoluteX = x - (widths[lineIndex] * anchorX / 100) - metrics.padX - (fudge * anchorX / 100);
+    const absoluteY = y + offsetY;
+    
+    const hAlign = { left: 4, center: 5, right: 6 }[st.align || 'center'];
+    const textLines = lines.map((line, i) => {
+      const cy = Math.round(absoluteY + metrics.padY + i * metrics.lineHeight + metrics.lineHeight / 2);
+      return { x, cy, hAlign, line };
+    });
+
     layouts[key] = {
       lineIndex,
       width: widths[lineIndex],
       widths,
-      height: contentHeight + metrics.padY * 2,
-      offsetY: -(contentHeight * anchor.y / 100) - metrics.padY,
+      height: boxH,
+      offsetY,
+      absoluteX,
+      absoluteY,
+      boxW,
+      boxH,
+      radius,
+      textLines,
     };
   }
   return layouts;
@@ -95,9 +120,11 @@ function measurerFor(documentRef){
   return entry;
 }
 
-export function measureSubtitleBackgroundLayouts(cues, tracks, documentRef=globalThis.document){
+export function measureSubtitleBackgroundLayouts(cues, tracks, { documentRef=globalThis.document, vww = 1920, vwh = 1080 } = {}){
   if(!documentRef?.body || typeof documentRef.createElement !== 'function') return {};
   return planSubtitleBackgroundLayouts(cues, tracks, {
     measureLineWidth: measurerFor(documentRef),
+    vww,
+    vwh
   });
 }

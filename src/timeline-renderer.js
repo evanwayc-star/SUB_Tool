@@ -25,6 +25,9 @@
    - 繪製函式中 (特別是 requestAnimationFrame 的迴圈)，【絕對禁止】頻繁呼叫
      引起 Reflow 的屬性 (如 offsetWidth, clientHeight)。請改讀取緩存的 `viewportW` 變數。
 ============================================================================== */
+import { paintClipBlocks } from './painters/clip-painter.js';
+import { paintSubtitleBlocks } from './painters/subtitle-painter.js';
+import { paintClipWave } from './painters/waveform-painter.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
 import { fitScale } from './imagegeom.js'; // 「符合視窗」與匯出共用同一條 contain 公式
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId,
@@ -46,58 +49,46 @@ import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
 import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
+import { planCueStyleAssignment } from './style-assignment.js';
+import { effStyle } from './substyle.js';
 
 import { on as _onEvent } from './events.js';
 import { selectClip, clearClipSelection } from './clip-model.js';
 _onEvent('clip:blocksChanged', ()=>renderClipBlocks());
 
 /* ===== 5. 時間軸 ====================================================== */
-const RULER_H=24, ROW_H=64;  // default/min values; actual stored in State
+import * as L from './timeline-layout.js';
+const { RULER_H, ROW_H } = L;
 
 /* 影片序列：獨立視訊軌列容器（在專案音訊軌上方），與字幕軌列同一套「列＋列頭」機制。
    容器 pointer-events:none、片段本身 auto——空白處仍可拖曳捲動/框選。 */
 const tlVtracks=document.getElementById('tlVtracks');
 const tlAtracks=document.getElementById('tlAtracks');
-const VROW_H=44;  // 視訊軌列預設高度（影像與音訊分離後，不再內嵌波形）
-function trackH(tk){ return State.tracks[tk]?.height||ROW_H; }
-function _tracksHeight(){ let h=0; for(let i=0;i<State.trackCount;i++)h+=trackH(i); return h; }
-function yToTrack(y){ let c=0; for(let i=0;i<State.trackCount;i++){ c+=trackH(i); if(y<c)return i; } return State.trackCount-1; }
+function trackH(tk){ return L.trackH(State.tracks, tk); }
+function _tracksHeight(){ return L.tracksHeight(State.tracks, State.trackCount); }
+function yToTrack(y){ return L.yToTrack(State.tracks, State.trackCount, y); }
 /* 視訊軌：數量、每軌高度、總高（無影片序列時為 0＝不佔空間，維持純字幕版面）。
    顯示由上而下：disp0＝最高軌（vtrack 最大）；vtrackTop 回傳某軌在容器內的 y。 */
-function vtrackCount(){ return Math.max(1, State.videoTracks.length); }
-function vtrackH(v){ return State.videoTracks[v]?.height||VROW_H; }
-function vtracksHeight(){ if(!Seq.active() || State.vtracksCollapsed)return 0; let h=0; const N=vtrackCount(); for(let v=0;v<N;v++)h+=vtrackH(v); return h; }
-function vtrackTop(v){ const N=vtrackCount(); let top=0; for(let disp=0;disp<N;disp++){ const vv=N-1-disp; if(vv===v)return top; top+=vtrackH(vv); } return 0; }
+function vtrackCount(){ return L.vtrackCount(State.videoTracks); }
+function vtrackH(v){ return L.vtrackH(State.videoTracks, v); }
+function vtracksHeight(){ return L.vtracksHeight(State.videoTracks, Seq.active(), State.vtracksCollapsed); }
+function vtrackTop(v){ return L.vtrackTop(State.videoTracks, v); }
 /* 補足 videoTracks 以涵蓋現有片段的最高軌（只增不減；每次全繪前呼叫，確保軌列與片段一致） */
 function syncVideoTracks(){ let m=0; for(const c of State.clips) m=Math.max(m,(c.vtrack||0)+1); ensureVideoTrackCount(m); }
 /* 音訊時間軸：一個匯入素材＝一條可視音訊軌；專案 A bus 只留在 mixer／配線資料。
    這樣 8 聲道素材不會在 A1～A8 複製出八張一樣的波形。右鍵可決定這條素材
    顯示 MIX 或任一來源聲道；大量素材仍以獨立捲動區避免擠掉字幕。 */
-const AROW_H=48, AUDIO_HEAD_H=0, AUDIO_MAX_VIEW_H=216, AUDIO_MIN_SUB_H=72;
-function sourceAudioRowH(row){
-  const h=Number(row?.height);
-  return Number.isFinite(h) ? clamp(h,32,160) : AROW_H;
-}
-function audioRowsHeight(){ return audioRowLayout().reduce((sum,row)=>sum+row.h,0); }
-function audioViewportH(){
-  const full=audioRowsHeight();
-  if(!full) return 0;
-  // tlLayer 的高度就是目前可見的時間軸 body；至少留字幕可操作的高度。
-  const layerH=tlLayer?.clientHeight||tlScroll?.clientHeight||0;
-  const room=layerH ? layerH-RULER_H-vtracksHeight()-AUDIO_HEAD_H-AUDIO_MIN_SUB_H : AUDIO_MAX_VIEW_H;
-  const cap=Math.max(36,Math.min(AUDIO_MAX_VIEW_H,room));
-  return Math.min(full,cap);
-}
+function audioRowsHeight(){ return L.audioRowsHeight(audioRowLayout()); }
 /* 每列為一個實際匯入的影音／音檔 source；同一檔切成多段仍共用同一列。 */
 function audioRowLayout(){
   let y0=0;
   return audioSourceLanes().map((lane,index)=>{
-    const h=sourceAudioRowH(lane);
+    const h=L.sourceAudioRowH(lane);
     const row={...lane,kind:'source',index,y0,h}; y0+=h; return row;
   });
 }
-function atracksHeight(){ return audioRowLayout().length ? AUDIO_HEAD_H+audioViewportH() : 0; }
-function tracksTop(){return RULER_H+vtracksHeight()+atracksHeight();}
+function atracksHeight(){ return L.atracksHeight(audioRowLayout(), tlLayer?.clientHeight||tlScroll?.clientHeight||0, vtracksHeight()); }
+function tracksTop(){return L.tracksTop(vtracksHeight(), atracksHeight());}
 function tracksScrollTop(){ return tlTracks?tlTracks.scrollTop:0; }
 
 function viewportW(){return tlScroll.clientWidth;}
@@ -444,66 +435,71 @@ function _onRowResizeUp(){
    片段位置＝offset、寬＝修剪後長度；拖曳移動、拖邊緣修剪、右鍵選單。 */
 function renderClipBlocks(){
   if(!tlVtracks) return;
-  tlVtracks.innerHTML='';
-  if(!Seq.active()) return;
-  const N=vtrackCount();
-  // 每軌一列（top→bottom：disp0＝最高軌 vtrack=N-1）
-  const rowByV=[];
+  if(!Seq.active()){
+    paintClipBlocks(tlVtracks, { rows: [], clips: [] });
+    return;
+  }
+  const N = vtrackCount();
+  const displayList = { rows: [], clips: [] };
+  
   for(let disp=0; disp<N; disp++){
-    const v=N-1-disp;
-    const row=document.createElement('div');
-    row.className='vtrack-row'+(videoTrackVisible(v)?'':' hidden-tk');
-    row.style.top=vtrackTop(v)+'px'; row.style.height=vtrackH(v)+'px'; row.dataset.vtrack=v;
-    tlVtracks.appendChild(row); rowByV[v]=row;
+    const v = N - 1 - disp;
+    displayList.rows.push({
+      vtrack: v,
+      top: vtrackTop(v),
+      height: vtrackH(v),
+      visible: videoTrackVisible(v)
+    });
   }
-  // 片段進列
-  const vw=viewportW(); const t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
+
+  const vw = viewportW();
+  const t0 = State.viewStart;
+  const t1 = State.viewStart + vw / State.pxPerSec;
+
   for(const c of State.clips){
-    const s=c.offset, e=Seq.clipEnd(c);
-    if(e<t0||s>t1) continue;
-    const v=c.vtrack||0; const row=rowByV[v]||rowByV[0]; if(!row) continue;
-    const el=document.createElement('div');
-    el.className='clip-block'+(c.id===Media.activeClipId?' active':'')+(c.id===State.selectedClipId?' selected':'')+(State.videoTracks[v]?.locked?' locked':'');
-    const x1=timeToX(s), x2=timeToX(e);
-    el.style.left=x1+'px'; el.style.width=Math.max(6,x2-x1)+'px';
-    el.dataset.clipId=c.id; el.dataset.vtrack=v;
-    const trimmed=c.in>0.01||c.out<c.dur-0.01;
-    const hasFade=(c.fadeIn>0||c.fadeOut>0);
-    try {
-      const isImg = c.type === 'image';
-      const icon = isImg ? '🖼️' : '🎬';
-      const typeLabel = isImg ? '圖片' : '影片';
-      el.innerHTML=`<div class="edge l"></div><div class="clip-label">${icon} ${escapeHTML(c.name||'')}${trimmed?' ✂':''}${hasFade?' ⌁':''}</div><div class="edge r"></div>`;
-      el.title=`${c.name}（${State.videoTracks[v]?.name||('視訊軌 V'+(v+1))}）\n位置 ${secToEncore(s,State.fps,State.dropFrame)} → ${secToEncore(e,State.fps,State.dropFrame)}`+
-        `\n修剪 in ${Number(c.in).toFixed(2)}s / out ${Number(c.out).toFixed(2)}s（來源長 ${Number(c.dur).toFixed(2)}s）`+
-        `\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪\n${isImg ? '在預覽畫面可直接縮放與移動圖片位置' : ''}`;
-      row.appendChild(el);
-    } catch(err) {
-      console.error('renderClipBlocks error on clip', c, err);
-      // Fallback text
-      el.innerHTML=`<div class="edge l"></div><div class="clip-label">⚠️ ERROR</div><div class="edge r"></div>`;
-      row.appendChild(el);
-    }
+    const s = c.offset, e = Seq.clipEnd(c);
+    if(e < t0 || s > t1) continue;
+    const v = c.vtrack || 0;
+    
+    displayList.clips.push({
+      id: c.id,
+      vtrack: v,
+      active: c.id === Media.activeClipId,
+      selected: c.id === State.selectedClipId,
+      locked: !!State.videoTracks[v]?.locked,
+      x: timeToX(s),
+      w: timeToX(e) - timeToX(s),
+      trimmed: c.in > 0.01 || c.out < c.dur - 0.01,
+      hasFade: c.fadeIn > 0 || c.fadeOut > 0,
+      isImg: c.type === 'image',
+      name: c.name,
+      escapedName: escapeHTML(c.name || ''),
+      trackName: State.videoTracks[v]?.name || ('視訊軌 V' + (v+1)),
+      timeRangeStr: secToEncore(s, State.fps, State.dropFrame) + ' → ' + secToEncore(e, State.fps, State.dropFrame),
+      inStr: Number(c.in).toFixed(2),
+      outStr: Number(c.out).toFixed(2),
+      durStr: Number(c.dur).toFixed(2)
+    });
   }
+  paintClipBlocks(tlVtracks, displayList);
 }
 /* 在片段區塊內畫該段音波：畫布覆蓋片段的【可視範圍】，x0abs＝畫布左緣的絕對時間軸 px；
    逐畫布像素以 xToTime 反推來源時間 → 取 peaks（縮放時畫布寬≤視窗，不會超過 canvas 上限）。 */
 function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs){
-  const ctx=cv.getContext('2d'); const dpr=devicePixelRatio;
-  ctx.save(); ctx.scale(dpr,dpr);
-  const mid=Hpx/2, amp=Hpx*1.2, res=Wave.resolution, n=pk.length/2;
-  ctx.strokeStyle='rgba(190,230,255,.5)'; ctx.lineWidth=1; ctx.beginPath();
-  for(let cx=0; cx<cvw; cx++){
-    const bT=c.in+(xToTime(x0abs+cx)-c.offset);
-    const b=Math.floor(bT*res); if(b<0||b>=n) continue;
-    let mn=pk[b*2], mx=pk[b*2+1];
-    const b2=Math.min(n-1, Math.floor((c.in+(xToTime(x0abs+cx+1)-c.offset))*res));
-    for(let k=b+1;k<=b2;k++){ if(pk[k*2]<mn)mn=pk[k*2]; if(pk[k*2+1]>mx)mx=pk[k*2+1]; }
-    ctx.moveTo(cx+0.5, mid-mx*amp); ctx.lineTo(cx+0.5, mid-mn*amp);
+  const res = Wave.resolution, n = pk.length / 2;
+  const timeToXMap = new Float64Array(cvw + 1);
+  for (let cx = 0; cx <= cvw; cx++) {
+    timeToXMap[cx] = c.in + (xToTime(x0abs + cx) - c.offset);
   }
-  ctx.stroke(); ctx.restore();
+  
+  const displayList = {
+    Hpx, cvw, res, n, pk, 
+    startIn: c.in, startOffset: c.offset, x0abs,
+    dpr: devicePixelRatio,
+    timeToXMap
+  };
+  paintClipWave(cv.getContext('2d'), displayList);
 }
-
 /* ===== 專案音訊 bus（來源路由＋時間軸） ==================================
    clip.audioSourceId 是可儲存的來源識別；audioSrc 是舊版即時播放識別，兩者並存時以前者為準。
    sourceMaps[sourceId].channels 的每一筆可將一個來源聲道送到多個 bus。 */
@@ -1017,50 +1013,57 @@ if(_audioGutter){
   _audioGutter.addEventListener('scroll',()=>syncAudioScroll(_audioGutter,tlAtracks),{passive:true});
 }
 function renderCueBlocks(){
-  renderClipBlocks(); // 波形列上的影片區塊與字幕區塊同步重繪（捲動/縮放/全繪路徑共用此入口）
-  tlTracks.querySelectorAll('.cue-block,.cue-overlap').forEach(e=>e.remove());
-  const rows=[...tlTracks.querySelectorAll('.tl-track')];
-  const vw=viewportW(); const t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
-  // P2：單趟 O(N) 依「邏輯軌道」分桶（取代每軌各跑一次 State.cues.filter 的 O(tracks×N)），
-  // 同一趟順便建立可見區塊。重疊掃描改用分桶結果。
-  const byTrack=new Map();
+  renderClipBlocks();
+  const rows = [...tlTracks.querySelectorAll('.tl-track')];
+  const vw = viewportW();
+  const t0 = State.viewStart, t1 = State.viewStart + vw / State.pxPerSec;
+  
+  const displayList = { cues: [], overlaps: [] };
+  const byTrack = new Map();
+  
   for(const c of State.cues){
-    if(c.timed===false)continue;
-    const tk=c.track||0;
-    let arr=byTrack.get(tk); if(!arr){ arr=[]; byTrack.set(tk,arr); } arr.push(c);
-    if(c.end<t0||c.start>t1)continue; // 視窗裁切後才建 DOM
-    const row=rows[Math.min(tk,rows.length-1)]; if(!row)continue;
-    const el=document.createElement('div');
-    el.className='cue-block'+(isSel(c.id)?' sel':'')+(isSel(c.id)&&State.selectedIds.length>1?' multi':'')+(c.id===State.selectedId?' primary':'');
-    const x1 = timeToX(c.start);
-    const x2 = timeToX(c.end);
-    el.style.left = x1 + 'px';
-    el.style.width = Math.max(2, x2 - x1) + 'px';
-    el.dataset.id=c.id;
-    el.innerHTML='<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;padding:0 6px;">'+(c.style?'<span title="此句有樣式覆蓋" style="color:var(--accent)">✱ </span>':'')+escapeHTML(c.text||'').replace(/\n/g,'<br>')+'</div><div class="edge r"></div>';
-    row.appendChild(el);
+    if(c.timed === false) continue;
+    const tk = c.track || 0;
+    let arr = byTrack.get(tk);
+    if(!arr){ arr = []; byTrack.set(tk, arr); }
+    arr.push(c);
+    
+    if(c.end < t0 || c.start > t1) continue;
+    
+    displayList.cues.push({
+      id: c.id,
+      track: tk,
+      selected: isSel(c.id),
+      selectedMulti: isSel(c.id) && State.selectedIds.length > 1,
+      primary: c.id === State.selectedId,
+      x: timeToX(c.start),
+      w: timeToX(c.end) - timeToX(c.start),
+      hasStyle: !!c.style,
+      htmlText: escapeHTML(c.text || '').replace(/\n/g, '<br>')
+    });
   }
-  // 重疊區域：粉紅底色（用分桶結果，雙層 break；保留每桶排序以防 State.cues 暫時未排序）
-  for(const [tk,tc] of byTrack){
-    const row=rows[Math.min(tk,rows.length-1)]; if(!row)continue;
-    tc.sort((a,b)=>a.start-b.start);
-    for(let i=0;i<tc.length-1;i++){
-      for(let j=i+1;j<tc.length;j++){
-        if(tc[j].start>=tc[i].end - 0.001)break;
-        const os=tc[j].start, oe=Math.min(tc[i].end,tc[j].end);
-        if(oe<=t0||os>=t1)continue;
-        const vs=Math.max(os,t0), ve=Math.min(oe,t1);
-        const ov=document.createElement('div'); ov.className='cue-overlap';
-        const x1 = timeToX(vs);
-        const x2 = timeToX(ve);
-        ov.style.left = x1 + 'px';
-        ov.style.width = Math.max(2, x2 - x1) + 'px';
-        ov.dataset.id1 = tc[i].id;
-        ov.dataset.id2 = tc[j].id;
-        row.appendChild(ov);
+  
+  for(const [tk, tc] of byTrack){
+    tc.sort((a,b) => a.start - b.start);
+    for(let i=0; i<tc.length-1; i++){
+      for(let j=i+1; j<tc.length; j++){
+        if(tc[j].start >= tc[i].end - 0.001) break;
+        const os = tc[j].start, oe = Math.min(tc[i].end, tc[j].end);
+        if(oe <= t0 || os >= t1) continue;
+        const vs = Math.max(os, t0), ve = Math.min(oe, t1);
+        
+        displayList.overlaps.push({
+          track: tk,
+          x: timeToX(vs),
+          w: timeToX(ve) - timeToX(vs),
+          id1: tc[i].id,
+          id2: tc[j].id
+        });
       }
     }
   }
+  
+  paintSubtitleBlocks(rows, displayList);
 }
 /* y 座標 -> 軌道索引（含垂直捲動位移） */
 
@@ -1181,9 +1184,9 @@ tlScroll.addEventListener('mousedown',e=>{
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
-      .map(cc=>{ const b=cueNeighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart}; }); // P3：快取區塊 element 參照
+      .map(cc=>{ const b=cueNeighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart,origStyle:cc.style ? {...cc.style} : undefined}; }); // P3：快取區塊 element 參照
     const selectionBefore={ids:[...State.selectedIds],primary:State.selectedId,activeEdge:State.activeEdge};
-    const transaction=beginTimelineGesture({targets:grp.map(item=>({target:item.c,fields:['start','end','track']}))});
+    const transaction=beginTimelineGesture({targets:grp.map(item=>({target:item.c,fields:['start','end','track','style']}))});
     // renderSubRow is part of the drag preview.  Cancellation must refresh the
     // same rows after model rollback, otherwise their TC/duration stays stale.
     const previewRowIds=grp.map(item=>item.c.id);
@@ -1448,7 +1451,21 @@ const _handleDragUpdate = (e) => {
         it.c.start = snapFrame(it.os+dt);
         it.c.end = snapFrame(it.c.start+len);
       }
-      it.c.track=it.ot+dTk;
+      const newTrackIdx = it.ot + dTk;
+      if (it.c.track !== newTrackIdx) {
+        it.c.track = newTrackIdx;
+        if (newTrackIdx !== it.ot) {
+          const oldEffStyle = effStyle({ style: it.origStyle }, State.tracks[it.ot]);
+          const plan = planCueStyleAssignment({ 
+            cue: { style: it.origStyle }, 
+            targetTrack: State.tracks[newTrackIdx], 
+            desiredStyle: oldEffStyle 
+          });
+          it.c.style = plan.style;
+        } else {
+          it.c.style = it.origStyle;
+        }
+      }
     }
   }else if(drag.mode==='l'){
     const it=drag.grp[0];

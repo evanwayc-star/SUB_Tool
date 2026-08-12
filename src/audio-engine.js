@@ -2,6 +2,7 @@ import { State } from './state.js';
 import { clamp } from './util.js';
 import { Seq } from './sequence.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
+import { scheduleScrub } from './scrub-scheduler.js';
 
 /* AudioContext 的建立是這個模組唯一的外部相依，也是它長期【零測試】的原因：
    模組層直接 `new AudioContext()`，vitest 的 node 環境起不動它，jsdom 也沒有
@@ -278,48 +279,8 @@ class AudioEngineCore {
       }
     }
 
-    const scrubEl = (el, tt) => {
-      if (!el.src) return;
-      if (!el._scrubEl) {
-        el._scrubEl = document.createElement('video');
-        el._scrubEl.preload = 'auto';
-      }
-
-      const doPlay = () => {
-        el._scrubEl.playbackRate = el.playbackRate || 1;
-        if ('preservesPitch' in el._scrubEl) {
-          el._scrubEl.preservesPitch = (el._scrubEl.playbackRate >= 0.25 && el._scrubEl.playbackRate <= 4);
-        }
-        el._scrubEl.currentTime = clamp(tt, 0, el.duration || tt);
-        el._scrubEl.volume = env.muted() ? 0 : 1;
-        const p = el._scrubEl.play();
-        if (p !== undefined) {
-          p.then(() => {
-            clearTimeout(el._scrubTimer);
-            el._scrubTimer = setTimeout(() => { el._scrubEl.pause(); }, 150);
-          }).catch(() => {});
-        }
-      };
-
-      if (el._scrubEl.src !== el.src) {
-        el._scrubEl.src = el.src;
-        el._scrubEl.onloadedmetadata = () => {
-          el._scrubEl.onloadedmetadata = null;
-          doPlay();
-        };
-      } else if (el._scrubEl.readyState >= 1) {
-        doPlay();
-      } else {
-        el._scrubEl.onloadedmetadata = () => {
-          el._scrubEl.onloadedmetadata = null;
-          doPlay();
-        };
-      }
-    };
-
     const activeMix = tracks.some(tr =>
       (tr.kind === 'buffer' || tr.kind === 'element') && !tr._srcHidden && sourceTrackAudible(tr, anySolo));
-
 
     if (!activeMix && (activeSource === 'video' || activeSource === null)) {
       // Return true to indicate main video should be scrubbed
@@ -333,7 +294,11 @@ class AudioEngineCore {
         if (audible) {
           const source = tr.source || '';
           const off = source.startsWith('ext-') ? env.externalSourceTimeFor(source, t) : localT;
-          if (off != null) scrubEl(tr.el, off);
+          if (off != null) {
+            const rate = env.playbackRate();
+            const preservesPitch = rate >= 0.25 && rate <= 4;
+            scheduleScrub(tr.el, off, { rate, preservesPitch, isMuted: env.muted(), durationMs: duration * 1000 });
+          }
         }
       }
     }

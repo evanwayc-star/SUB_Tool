@@ -69,7 +69,7 @@ describe('frozen export submission', () => {
       cues: [{ id: 'boxed', start: 11, end: 12, text: '短行\n較長的第二行', track: 0 }],
       tracks: [{ name: '對白', visible: true, bgBox: true, bgColor: '#000000', bgAlpha: 0.5 }],
       backgroundLayouts: {
-        'boxed': { lineIndex: 1, height: 140, offsetY: -70, width: 300 }
+        'boxed': { lineIndex: 1, height: 140, offsetY: -70, width: 300, boxW: 300, boxH: 140, absoluteX: 960, absoluteY: 972, radius: 15, textLines: [{ x: 960, cy: 972, hAlign: 5 }, { x: 960, cy: 1002, hAlign: 5 }] }
       },
       fps: 25,
     };

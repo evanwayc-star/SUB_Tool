@@ -1,6 +1,9 @@
 /* ==============================================================================
    SUB Tool — Module Architecture Protection ("src/formats.js")
    ==============================================================================
+/* ==============================================================================
+   SUB Tool — Module Architecture Protection ("src/formats.js")
+   ==============================================================================
    【維護鐵律】本檔案已納入全專案終極防禦網。
    所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
 ============================================================================== */
@@ -11,49 +14,129 @@ import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, ass
 
 function finiteBackgroundLayout(layout){
   if(!layout || typeof layout !== 'object') return null;
-  const lineIndex = Number(layout.lineIndex), height = Number(layout.height);
-  const offsetY = Number(layout.offsetY);
-  const width = Number(layout.width);
-  if(!Number.isSafeInteger(lineIndex) || lineIndex < 0 ||
-     ![height, offsetY, width].every(Number.isFinite) || height <= 0 || width <= 0) return null;
-  return { lineIndex, height, offsetY, width };
+  if(!Number.isFinite(layout.absoluteX) || !Number.isFinite(layout.absoluteY) || !Number.isFinite(layout.boxW) || !Number.isFinite(layout.boxH)) return null;
+  return layout;
 }
 
-function assRoundedRectAt(X, Y, W, H, R) {
-  R = Math.max(0, Math.min(R, W / 2, H / 2));
-  if (R <= 0) return `m ${X.toFixed(1)} ${Y.toFixed(1)} l ${(X+W).toFixed(1)} ${Y.toFixed(1)} l ${(X+W).toFixed(1)} ${(Y+H).toFixed(1)} l ${X.toFixed(1)} ${(Y+H).toFixed(1)}`;
-  const k = 0.5522847 * R;
-  return `m ${(X+R).toFixed(1)} ${Y.toFixed(1)} ` +
-    `l ${(X+W - R).toFixed(1)} ${Y.toFixed(1)} ` +
-    `b ${(X+W - R + k).toFixed(1)} ${Y.toFixed(1)} ${(X+W).toFixed(1)} ${(Y+R - k).toFixed(1)} ${(X+W).toFixed(1)} ${(Y+R).toFixed(1)} ` +
-    `l ${(X+W).toFixed(1)} ${(Y+H - R).toFixed(1)} ` +
-    `b ${(X+W).toFixed(1)} ${(Y+H - R + k).toFixed(1)} ${(X+W - R + k).toFixed(1)} ${(Y+H).toFixed(1)} ${(X+W - R).toFixed(1)} ${(Y+H).toFixed(1)} ` +
-    `l ${(X+R).toFixed(1)} ${(Y+H).toFixed(1)} ` +
-    `b ${(X+R - k).toFixed(1)} ${(Y+H).toFixed(1)} ${X.toFixed(1)} ${(Y+H - R + k).toFixed(1)} ${X.toFixed(1)} ${(Y+H - R).toFixed(1)} ` +
-    `l ${X.toFixed(1)} ${(Y+R).toFixed(1)} ` +
-    `b ${X.toFixed(1)} ${(Y+R - k).toFixed(1)} ${(X+R - k).toFixed(1)} ${Y.toFixed(1)} ${(X+R).toFixed(1)} ${Y.toFixed(1)}`;
-}
-function assRoundedRect(W, H, R) { return assRoundedRectAt(0, 0, W, H, R); }
+class AssDocumentBuilder {
+  constructor(fps, vww = 1000, vwh = 562) {
+    this.fps = fps;
+    this.vww = vww;
+    this.vwh = vwh;
+    this.styles = new Map();
+    this.events = [];
+  }
 
-function backgroundText(layout, st, lines, vww, vwh){
-  const x = Math.round((st.posX / 100) * vww);
-  const y = Math.round((st.posY / 100) * vwh);
-  const metrics = subtitleBackgroundCssMetrics(st, 1);
-  const radius = metrics.fontSize * 0.25;
-  const fudge = (layout.width * 0.05) + (metrics.fontSize * 0.5);
-  const boxW = layout.width + metrics.padX * 2 + fudge;
-  const boxH = layout.height;
-  const shape = assRoundedRectAt(0, 0, boxW, boxH, radius);
+  addStyle(name, st) {
+    if (!this.styles.has(name)) {
+      this.styles.set(name, styleToAssStyleLine(name, st, this.vwh));
+    }
+    return name;
+  }
 
-  const anchorX = st.align === 'left' ? 0 : st.align === 'right' ? 100 : 50;
-  const left = x - (layout.width * anchorX / 100) - metrics.padX - (fudge * anchorX / 100);
-  const top = y + layout.offsetY;
-  const colorASS = hexToAssColor(st.bgColor);
-  const alphaASS = Math.round((1 - (st.bgAlpha ?? 0.3)) * 255).toString(16).padStart(2, '0').toUpperCase();
-  const rotate = st.angle ? `\\org(${x},${y})\\frz${-(st.angle || 0)}` : '';
-  const shadowTag = st.shadow ? `\\shad${st.shadow}\\4c&H000000&\\4a&H26&` : `\\shad0`;
-  return `{\\an7\\pos(${left.toFixed(1)},${top.toFixed(1)})${rotate}\\c${colorASS}&\\1a&H${alphaASS}&\\bord0${shadowTag}\\p1}${shape}`;
+  _assRoundedRectAt(X, Y, W, H, R) {
+    R = Math.max(0, Math.min(R, W / 2, H / 2));
+    if (R <= 0) return `m ${X.toFixed(1)} ${Y.toFixed(1)} l ${(X+W).toFixed(1)} ${Y.toFixed(1)} l ${(X+W).toFixed(1)} ${(Y+H).toFixed(1)} l ${X.toFixed(1)} ${(Y+H).toFixed(1)}`;
+    const k = 0.5522847 * R;
+    return `m ${(X+R).toFixed(1)} ${Y.toFixed(1)} ` +
+      `l ${(X+W - R).toFixed(1)} ${Y.toFixed(1)} ` +
+      `b ${(X+W - R + k).toFixed(1)} ${Y.toFixed(1)} ${(X+W).toFixed(1)} ${(Y+R - k).toFixed(1)} ${(X+W).toFixed(1)} ${(Y+R).toFixed(1)} ` +
+      `l ${(X+W).toFixed(1)} ${(Y+H - R).toFixed(1)} ` +
+      `b ${(X+W).toFixed(1)} ${(Y+H - R + k).toFixed(1)} ${(X+W - R + k).toFixed(1)} ${(Y+H).toFixed(1)} ${(X+W - R).toFixed(1)} ${(Y+H).toFixed(1)} ` +
+      `l ${(X+R).toFixed(1)} ${(Y+H).toFixed(1)} ` +
+      `b ${(X+R - k).toFixed(1)} ${(Y+H).toFixed(1)} ${X.toFixed(1)} ${(Y+H - R + k).toFixed(1)} ${X.toFixed(1)} ${(Y+H - R).toFixed(1)} ` +
+      `l ${X.toFixed(1)} ${(Y+R).toFixed(1)} ` +
+      `b ${X.toFixed(1)} ${(Y+R - k).toFixed(1)} ${(X+R - k).toFixed(1)} ${Y.toFixed(1)} ${(X+R).toFixed(1)} ${Y.toFixed(1)}`;
+  }
+
+  _backgroundText(layout, st, head) {
+    const shape = this._assRoundedRectAt(0, 0, layout.boxW, layout.boxH, layout.radius);
+    const colorASS = hexToAssColor(st.bgColor);
+    const alphaASS = Math.round((1 - (st.bgAlpha ?? 0.3)) * 255).toString(16).padStart(2, '0').toUpperCase();
+    const x = Math.round((st.posX / 100) * this.vww);
+    const y = Math.round((st.posY / 100) * this.vwh);
+    const rotate = st.angle ? `\\org(${x},${y})\\frz${-(st.angle || 0)}` : '';
+    const shadowTag = st.shadow ? `\\shad${st.shadow}\\4c&H000000&\\4a&H26&` : `\\shad0`;
+    const bgTags = `{\\an7\\pos(${layout.absoluteX.toFixed(1)},${layout.absoluteY.toFixed(1)})${rotate}\\c${colorASS}&\\1a&H${alphaASS}&\\bord0${shadowTag}\\p1}${shape}`;
+    return head + bgTags;
+  }
+
+  addCue(cue, track, layout) {
+    const st = effStyle(cue, track);
+    const hasOwnStyle = cue.style && STYLE_ONLY_KEYS.some(k => cue.style[k] != null);
+    
+    const styName = hasOwnStyle 
+      ? this.addStyle(`Cue_${String(cue.id).replace(/[^A-Za-z0-9_]/g,'')}`, st)
+      : (track ? `Track${cue.track||0}` : 'Default');
+
+    const baseStyle = hasOwnStyle ? st : effStyle(null, track);
+    let textStyleName = styName;
+
+    if (layout) {
+      textStyleName = this.addStyle(`${styName}_Text`, { ...baseStyle, bgBox: false, shadow: 0 });
+    }
+
+    const textDiff = layout && cue.style
+      ? Object.fromEntries(Object.entries(cue.style).filter(([key]) =>
+        !['outline','outlineColor','shadow','bgBox','bgColor','bgAlpha'].includes(key)))
+      : cue.style;
+      
+    const tags = cueAssTags(textDiff, layout ? { ...st, bgBox:false } : st);
+    const head = `Dialogue: ${cue.track||0},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},${textStyleName},atg${(cue.track||0)+1},0,0,0,,`;
+
+    if (st.vertical) {
+      const text = verticalAssCols(st, cue.text || '', this.vww, this.vwh)
+        .map(col => `${head}{\\an${col.an}\\pos(${col.x},${col.y})}${tags}${assJoinVertical(col.chars, st)}`)
+        .join('\n');
+      this.events.push({ type: 'text', text });
+      return;
+    }
+
+    const anOv = (cue.style && (cue.style.align != null || cue.style.valign != null) && !hasOwnStyle)
+      ? `{\\an${assAlignN(st)}}` : '';
+    
+    const lines = String(cue.text || '').replace(/\r/g, '').split('\n').map(assEscapeText);
+
+    if (layout) {
+      this.events.push({ type: 'background', text: this._backgroundText(layout, st, `Dialogue: ${cue.track||0},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},Default,atg${(cue.track||0)+1},0,0,0,,`) });
+      const text = layout.textLines.map((l, i) => {
+        return `${head}{\\an${l.hAlign}\\pos(${l.x},${l.cy})}${tags}${lines[i]}`;
+      }).join('\n');
+      this.events.push({ type: 'text', text });
+    } else {
+      const text = head + anOv + cueAssPos(st, this.vww, this.vwh) + tags + assJoinLines(lines, st);
+      this.events.push({ type: 'text', text });
+    }
+  }
+
+  build(metadata) {
+    let stylesBlock = '';
+    for (const line of this.styles.values()) stylesBlock += line + '\n';
+
+    const backgrounds = this.events.filter(e => e.type === 'background').map(e => e.text);
+    const texts = this.events.filter(e => e.type === 'text').map(e => e.text);
+    const body = [...backgrounds, ...texts].join('\n');
+
+    return `[Script Info]
+; Script generated by SUB Tool
+; SUBTOOL-ASS-TIME:2
+${metadata}ScriptType: v4.00+
+WrapStyle: 0
+Collisions: Normal
+PlayResX: ${this.vww}
+PlayResY: ${this.vwh}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+${stylesBlock}
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+${body}
+`;
+  }
 }
+
 function decodeLegacyLineBreaks(value){
   const text=String(value??'');
   const decodeChunk=chunk=>chunk.replace(/\\\\|\/\//g,'\n');
@@ -614,131 +697,41 @@ const SubFormats = {
     if(!subtool && legacyHeader && !timingMarker) Object.defineProperty(out, 'subtoolLegacy', {value:true, enumerable:false});
     return out;
   },
-  /* vww / vwh ＝ 字幕畫布（PlayResX / PlayResY），見 CONTEXT.md「字幕畫布」。
-     ── 這裡曾經還有三個參數 `vw=1920, vh=1080, ww=1920` 卡在 tracks 與 vww 之間，
-        而它們在整個函式體內【一次都沒有被引用】。呼叫端因此得把三個沒有作用的數字
-        填在正確的位置上，填錯不會有任何徵兆（預設值 1000/562 是看起來合理的數字，
-        不是明顯錯誤的值）。實際呼叫長這樣：`toASS(cues, fps, tracks, RX, RY, RX, RX, RY)`
-        ——五個位置只有最後兩個有意義。已移除。 */
   toASS(cues,fps,tracks=[], vww=1000, vwh=562, options={}){
     const backgroundLayouts = options?.backgroundLayouts && typeof options.backgroundLayouts === 'object'
       ? options.backgroundLayouts : {};
     const metadataPayload=options && options.includeMetadata === true
       ? buildSubtoolMetadata(cues, fps, tracks, options) : null;
     const metadata=metadataPayload ? encodeSubtoolMetadata(metadataPayload) : '';
-    const head=
-`[Script Info]
-; Script generated by SUB Tool
-; SUBTOOL-ASS-TIME:2
-${metadata}ScriptType: v4.00+
-WrapStyle: 0
-Collisions: Normal
-PlayResX: ${vww}
-PlayResY: ${vwh}
-ScaledBorderAndShadow: yes
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-`;
-    // 樣式行/文字轉換一律走 substyle.js（v4.23）：軌道樣式全欄位（字型/粗斜/字距/框線/陰影/直書/背景塊）＋
-    // 逐句覆蓋（inline override）＋直書逐字＋行距墊高——與 HTML 預覽同構（同吃 effStyle）。
-    let styles = '';
+    const builder = new AssDocumentBuilder(fps, vww, vwh);
+
     if (!tracks || !tracks.length) {
-      styles += styleToAssStyleLine('Default', effStyle(null, null), vwh) + '\n';
+      builder.addStyle('Default', effStyle(null, null));
     } else {
-      tracks.forEach((tk, i) => { styles += styleToAssStyleLine(`Track${i}`, effStyle(null, tk), vwh) + '\n'; });
-      styles += styleToAssStyleLine('Default', effStyle(null, null), vwh) + '\n';
+      tracks.forEach((tk, i) => { builder.addStyle(`Track${i}`, effStyle(null, tk)); });
+      builder.addStyle('Default', effStyle(null, null));
     }
 
-    const eventsHead = `\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
-    const vis=cues.filter(c=>{
-      if(c.timed===false) return false;
+    const vis = cues.filter(c => {
+      if(c.timed === false) return false;
       const tk = c.track || 0;
       if(tracks && tracks[tk] && tracks[tk].visible === false) return false;
       return true;
     });
-    // 背景色塊只有 Style 行表達得出來（BorderStyle/BackColour 無 inline tag）→ 有覆蓋到它的句子
-    // 各自帶一條專屬 Style。其餘欄位一律走 inline tag，不必為每句生 Style。
+
     const trkOf = c => (tracks && tracks.length > (c.track||0)) ? tracks[c.track||0] : null;
-    const ownStyle = new Map(); // cue.id → Style 名
-    for(const c of vis){
-      if(!c.style || !STYLE_ONLY_KEYS.some(k => c.style[k] != null)) continue;
-      const nm = `Cue_${String(c.id).replace(/[^A-Za-z0-9_]/g,'')}`;
-      ownStyle.set(c.id, nm);
-      styles += styleToAssStyleLine(nm, effStyle(c, trkOf(c)), vwh) + '\n';
-    }
-    const foregroundStyles = new Map();
-    const foregroundStyleFor = (baseName, baseStyle) => {
-      if(foregroundStyles.has(baseName)) return foregroundStyles.get(baseName);
-      const name = `${baseName}_Text`;
-      foregroundStyles.set(baseName, name);
-      styles += styleToAssStyleLine(name, {
-        ...baseStyle,
-        bgBox: false,
-        shadow: 0,
-      }, vwh) + '\n';
-      return name;
-    };
-    const eventHead = (c, styleName) =>
-      `Dialogue: ${c.track||0},${secToASS(c.start, fps)},${secToASS(c.end, fps)},${styleName},atg${(c.track||0)+1},0,0,0,,`;
-    const rendered=vis.map(c=>{
+
+    for (const c of vis) {
       const trk = trkOf(c);
       const st = effStyle(c, trk);
-      const styName = ownStyle.get(c.id) || (trk ? `Track${c.track||0}` : 'Default');
       const layout = st.bgBox && !st.vertical
         ? finiteBackgroundLayout(backgroundLayouts[String(c.id)]) : null;
-      const baseStyle = ownStyle.has(c.id) ? st : effStyle(null, trk);
-      const textStyleName = layout ? foregroundStyleFor(styName, baseStyle) : styName;
-      const textDiff = layout && c.style
-        ? Object.fromEntries(Object.entries(c.style).filter(([key]) =>
-          !['outline','outlineColor','shadow','bgBox','bgColor','bgAlpha'].includes(key)))
-        : c.style;
-      const tags = cueAssTags(textDiff, layout ? { ...st, bgBox:false } : st);
-      const head = eventHead(c, textStyleName);
-      // 直書：ASS 無 writing-mode → 一列一個 Dialogue、逐列自己定位（見 verticalAssCols）。
-      // 每列以 inline \an 覆蓋 Style 的 Alignment（Style 是整軌共用的，做不到逐列）。
-      if(st.vertical){
-        return { backgrounds:[], text:verticalAssCols(st, c.text || '', vww, vwh)
-          .map(col => `${head}{\\an${col.an}\\pos(${col.x},${col.y})}${tags}${assJoinVertical(col.chars, st)}`)
-          .join('\n') };
-      }
-      // \pos 精確落點（畫面百分比座標）＋逐句覆蓋 tags。
-      // 錨點預設由 Style 的 Alignment 決定；該句自己覆蓋了對齊 → 補一個 inline \an
-      // （Style 是整軌共用的，改它會動到別句）。
-      const anOv = (c.style && (c.style.align != null || c.style.valign != null) && !ownStyle.has(c.id))
-        ? `{\\an${assAlignN(st)}}` : '';
-      // 逐行跳脫後才交給 assJoinLines——它會插入 \N 與 {\fs} 行距墊高，
-      // 那些是我們自己要送的控制碼，不能跟使用者文字一起被跳脫。
-      const lines = String(c.text || '').replace(/\r/g, '').split('\n').map(assEscapeText);
-      const backgrounds = [];
-      let text = '';
-      if(layout){
-        const background = backgroundText(layout, st,
-          String(c.text || '').replace(/\r/g, '').split('\n'), vww, vwh);
-        if(background) backgrounds.push(eventHead(c, 'Default') + background);
-        
-        const x = Math.round((st.posX / 100) * vww);
-        const y = Math.round((st.posY / 100) * vwh);
-        const top = y + layout.offsetY;
-        const metrics = subtitleBackgroundCssMetrics(st, 1);
-        const hAlign = { left:4, center:5, right:6 }[st.align||'center'];
-        text = lines.map((line, i) => {
-          const cy = Math.round(top + metrics.padY + i * metrics.lineHeight + metrics.lineHeight / 2);
-          return `${head}{\\an${hAlign}\\pos(${x},${cy})}${tags}${line}`;
-        }).join('\n');
-      } else {
-        text = head + anOv + cueAssPos(st, vww, vwh) + tags +
-          assJoinLines(lines, st);
-      }
-      return { backgrounds, text };
-    });
-    // 同一 Layer 內後面的事件畫在上面：先集中所有底色，再畫文字，避免下一句的底色
-    // 蓋住前一句文字；不同 track 的 Layer 順序仍保持原有語義。
-    const body=[
-      ...rendered.flatMap(item => item.backgrounds),
-      ...rendered.map(item => item.text),
-    ].join('\n');
-    return head+styles+eventsHead+body+'\n';
+      
+      builder.addCue(c, trk, layout);
+    }
+
+    return builder.build(metadata);
   },
   /* ---- Adobe Encore ---- */
   parseEncore(text,fps,df=false){

@@ -68,25 +68,11 @@ describe('沒有任何指令是孤兒', () => {
   });
 });
 
-/* 指令表只准注入「app.js 才有的畫面接線」。ctx 每多一個成員，就代表 app.js
-   又多一件事沒有自己的模組——這條把它變成一個要按下同意的決定，而不是慣性。 */
-describe('ctx 是有名字的一小組，不是雜物袋', () => {
-  it('注入的成員維持在已知清單內', () => {
-    const used = [...new Set([...commandsSrc.matchAll(/\bctx\.([a-zA-Z]+)/g)].map(m => m[1]))].sort();
-    expect(used).toEqual([
-      'copySelectedStyle', 'doCompareTrack', 'doCopyTrack', 'importBrowserMediaFiles', 'importDesktopMediaFiles',
-      'onDurationKnown', 'openCacheDialog', 'pasteStyleToSelected', 'pickMediaFiles',
-      'refreshMpvSubs', 'renderAll', 'renderListTrackSel', 'renderVideoSub', 'resetFirstLoad',
-      'syncMpvPanel', 'takeScreenshot', 'toggleSafeFrame', 'toggleTimecodeWatermark', 'togglePanel',
-    ].sort());
-  });
-
-  it('app.js 真的把每一個都傳進去了', () => {
-    const appSrc = read('src/app.js');
-    const wiring = appSrc.slice(appSrc.indexOf('createCommands({'), appSrc.indexOf('function doAction'));
-    const used = [...new Set([...commandsSrc.matchAll(/\bctx\.([a-zA-Z]+)/g)].map(m => m[1]))];
-    const missing = used.filter(name => !new RegExp(`\\b${name}\\b`).test(wiring));
-    expect(missing, `commands.js 用了 ctx.${missing.join('／ctx.')} 但 app.js 沒傳`).toEqual([]);
+/* 指令表現在已經完全自給自足，不再需要 app.js 注入任何接線！ */
+describe('完美單向資料流', () => {
+  it('commands.js 不再依賴 ctx，完全獨立運作', () => {
+    const used = [...commandsSrc.matchAll(/\bctx\.([a-zA-Z]+)/g)];
+    expect(used, '發現殘留的 ctx 依賴').toEqual([]);
   });
 });
 
