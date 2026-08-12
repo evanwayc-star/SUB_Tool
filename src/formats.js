@@ -30,8 +30,8 @@ function finiteBackgroundLayout(layout){
   return { lineIndex, height, offsetY, textLines };
 }
 
-function backgroundTopAlignment(st){
-  return { left:7, center:8, right:9 }[st?.align] || 8;
+function backgroundMiddleAlignment(st){
+  return { left:4, center:5, right:6 }[st?.align] || 5;
 }
 
 const BACKGROUND_SHAPING_KEYS = new Set(['font','fontSize','bold','italic','letterSpacing']);
@@ -68,18 +68,24 @@ class AssDocumentBuilder {
     const x = Math.round((st.posX / 100) * this.vww);
     const y = Math.round((st.posY / 100) * this.vwh);
     const metrics = subtitleBackgroundCssMetrics(st, 1);
-    const top = Math.round(y + layout.offsetY);
-    const fontSize = Math.max(1, Number(st.fontSize) || STYLE_DEFAULTS.fontSize);
-    const scaleY = Math.max(1, 100 * Math.sqrt(layout.height / fontSize));
+    const top = y + layout.offsetY;
+    // 不以字型的 top metrics 定位：VSFilter/PotPlayer 與 libass 對 ascender 的
+    // 解讀並不完全相同，top-aligned 的放大底框會因此向上偏。改用已凍結的
+    // 整段字幕中心定位，讓上下外擴不依賴特定 ASS renderer 的字型頂界。
+    const centerY = Math.round(top + layout.height / 2);
+    // 背景的高度只用 y-border 擴張，不再縮放字形。不同 ASS renderer 對
+    // fscy 後的字型 ascender/descender 取值不同；ybord 則直接表達「從
+    // 單行文字盒往外擴到整段高度」，比較接近 CSS 的整塊 padding 語義。
+    const yBorder = Math.max(metrics.padY, (layout.height - metrics.fontSize) / 2);
     const angle = Number(st.angle) || 0;
     const rotate = `${angle ? `\\org(${x},${y})` : ''}\\frz${-angle}`;
     const shadow = Number.isFinite(Number(st.shadow)) ? Math.max(0, Number(st.shadow)) : 0;
     const shadowTags = shadow > 0
       ? `\\shad${shadow}\\4c&H000000&\\4a&H26&`
       : '\\shad0';
-    const tags = `{\\q2\\an${backgroundTopAlignment(st)}\\pos(${x},${top})${rotate}`+
-      `\\1a&HFF&\\fscy${scaleY.toFixed(2)}\\xbord${metrics.padX.toFixed(1)}`+
-      `\\ybord${metrics.padY.toFixed(1)}${shadowTags}}`;
+    const tags = `{\\q2\\an${backgroundMiddleAlignment(st)}\\pos(${x},${centerY})${rotate}`+
+      `\\1a&HFF&\\fscy100.00\\xbord${metrics.padX.toFixed(1)}`+
+      `\\ybord${yBorder.toFixed(1)}${shadowTags}}`;
     return head + cueAssTags(backgroundShapingDiff(cueStyle), st) + tags + assEscapeText(line);
   }
 

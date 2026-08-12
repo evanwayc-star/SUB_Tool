@@ -1,6 +1,7 @@
 import { clamp } from './util.js';
 
-export const RULER_H = 24;
+// 時間尺同時是主要 seek / scrub 命中區；36px 讓頻繁點按更容易，又不過度壓縮軌道空間。
+export const RULER_H = 36;
 export const ROW_H = 64;
 export const VROW_H = 44;
 export const AROW_H = 48;

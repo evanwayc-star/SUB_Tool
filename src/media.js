@@ -274,12 +274,12 @@ const Media = {
     State.externalAudioState=plan.wanted;
     State.externalAudioEnd=plan.timelineEnd;
     Seq.recomputeDuration();
-    this.applyGains(); if(this.playing) this._restartElements(); emit('media:audioTracks'); emit('media:timeline');
+    this.syncMuteState(); if(this.playing) this._restartElements(); emit('media:audioTracks'); emit('media:timeline');
     for(const source of plan.pending){
       if(!DESK) continue; // 只有桌面版能依原始 path 重建
       void this.restoreExternalAudioSource({...source,_restore:true},assetOperation).then(()=>{
         if(!owns()) return;
-        this.recomputeTimelineDuration(); this.applyGains(); emit('media:audioTracks'); emit('media:timeline');
+        this.recomputeTimelineDuration(); this.syncMuteState(); emit('media:audioTracks'); emit('media:timeline');
       }).catch(error=>console.warn('restore history external audio:',error));
     }
   },
@@ -291,7 +291,7 @@ const Media = {
   _commitExternalAudioEdit(asset,label=''){
     if(asset) this.externalAudio.normalize(asset);
     this.recomputeTimelineDuration();
-    this.applyGains();
+    this.syncMuteState();
     if(this.playing) this._restartElements();
     emit('media:audioTracks'); emit('media:timeline');
     if(label) emit('history:record',label);
@@ -1402,8 +1402,7 @@ const Media = {
       const s = tr.source || 'video';
       if(s === 'video' || s.startsWith('clip:')) tr._srcHidden = !audible.has(s);
     }
-    if(!this.mpvMode) video.muted=this.hasMix()?true:(State.muted||!!c.audioDetached);
-    this.applyGains(); emit('media:audioTracks');
+    this.syncMuteState(); emit('media:audioTracks');
   },
   _enterGap(t){
     this._transport.enterGap(t,{running:this.playing});
@@ -2195,7 +2194,7 @@ const Media = {
       // video 的 MediaElementSource 不能安全地重新建立；保留節點但讓它不再進入 mixer。
       for(const track of this.tracks){ if((track.source||'video')==='video') track._srcHidden=true; }
     }
-    if(!stillUsed){
+    if(!stillUsed && src==='video'){
       const hadPendingSourceWork=this.pendingChannels.length>0||!!this._ingestDoneHandler;
       this.pendingChannels=[];
       if(this._ingestDoneHandler){
@@ -2380,6 +2379,9 @@ const Media = {
       try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
     } }
     if(this.playing&&this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
+    // 純字幕專案沒有 video/mpv 的 seeked 事件可接手；仍須通知播放器預覽、播放頭與備註
+    // 已換到新的時間點。否則從比對視窗或 seek bar 跳句時，時碼會改但字幕畫面停在上一格。
+    window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
   },
   /* 外部音訊不隸屬影片 clip；在它自己的開始／結束邊界才一次性 seek/play 或 pause。
      這可處理「影片已結束但音檔稍後才開始」與修剪後的音檔尾端，且不會每幀造成播放抖動。 */
@@ -2411,6 +2413,13 @@ const Media = {
     const mix=this.hasMix();
     const active=this._activeClip();
     video.muted = mix ? true : (State.muted || !!active?.audioDetached);
+    if(this.mpvMode){
+      const source=active ? (active.audioSrc || (active.primary ? 'video' : ('clip:' + active.id))) : null;
+      const sourceHasElements=!!source&&this.tracks.some(track=>
+        (track.kind==='buffer'||track.kind==='element')&&
+        (track.source||'video')===source&&!track._srcHidden);
+      getPlayerAdapter().mute(State.muted||!!active?.audioDetached||sourceHasElements).catch(()=>{});
+    }
     this.applyGains();
   },
   /* 專案 bus 的 M/S/音量套在每個來源聲道路由之後。

@@ -1,5 +1,6 @@
 import { startAppTicker } from './app-ticker.js';
 import { StylePanelController } from './ui/style-panel-controller.js';
+import { bindNumberInputWheel } from './number-input-wheel.js';
 import { initMediaView } from './media-view.js';
 /* ==============================================================================
    SUB Tool — 應用程式協調層與 UI 進入點 (App Layer / Entry Point)
@@ -68,6 +69,7 @@ import { timecodeSuffix, screenshotDir, fallbackScreenshotName } from './screens
 import { presetExportRelativePath } from './export-name-safety.js';
 import { renderSeekBar } from './seekbar.js';
 import { on, emit } from './events.js';
+import { setTimelineToolbarCollapsed, toggleTimelineToolbar } from './timeline-toolbar.js';
 
 if (typeof __APP_VERSION__ !== 'undefined') {
   const el = document.getElementById('appVersion');
@@ -566,22 +568,8 @@ function initUI(){
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());
-  // 全域數值輸入框滾輪微調 (Wheel Scrubber) 手感支援
-  document.addEventListener('wheel', (e) => {
-    const el = e.target;
-    if (el && el.tagName === 'INPUT' && (el.type === 'number' || el.classList.contains('num-scrubber'))) {
-      e.preventDefault();
-      const step = e.shiftKey ? 10 : 1;
-      const dir = e.deltaY < 0 ? 1 : -1;
-      const min = el.min !== '' ? parseFloat(el.min) : -Infinity;
-      const max = el.max !== '' ? parseFloat(el.max) : Infinity;
-      const cur = parseFloat(el.value) || 0;
-      const next = Math.max(min, Math.min(max, cur + dir * step));
-      el.value = next;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  }, { passive: false });
+  // 全域數值輸入框滾輪微調：每個欄位遵守自己的 step（行距＝0.1、字距＝0.5）。
+  bindNumberInputWheel(document);
   // 字幕檢查：包含文字輸入
   $('cpContainsInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
   $('cpContainsInput').addEventListener('keydown',e=>e.stopPropagation());
@@ -635,7 +623,8 @@ function initUI(){
     localStorage.setItem(_LAYOUT_KEY,JSON.stringify({
       rw:$('rightPanel').style.width||'',
       th:$('timelinePanel').style.height||'',
-      gw:gt?gt.style.width||'':''
+      gw:gt?gt.style.width||'':'',
+      tc:!!$('tlToolbarOptions')?.hidden
     }));
   };
   const loadLayout=()=>{
@@ -644,6 +633,7 @@ function initUI(){
       if(d.rw) $('rightPanel').style.width=d.rw;
       if(d.th) $('timelinePanel').style.height=d.th;
       const gt=$('tlGutter'); if(d.gw&&gt) gt.style.width=d.gw;
+      setTimelineToolbarCollapsed({ button:$('tlToolbarToggle'), options:$('tlToolbarOptions') }, d.tc===true);
     }catch(_){}
   };
   const dragSplit=(handle,onMove)=>{ handle.addEventListener('mousedown',e=>{ e.preventDefault();
@@ -661,6 +651,10 @@ function initUI(){
         document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up); });
     }
   }
+  $('tlToolbarToggle')?.addEventListener('click',()=>{
+    toggleTimelineToolbar({ button:$('tlToolbarToggle'), options:$('tlToolbarOptions') });
+    saveLayout();
+  });
   loadLayout();
   renderListTrackSel();
   // 點擊時間軸時解除輸入框焦點
@@ -1620,4 +1614,3 @@ setTimeout(() => {
 }, 500);
 
 init();
-

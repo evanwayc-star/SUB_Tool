@@ -141,6 +141,23 @@ describe('history restores the media runtime', () => {
     seek.mockRestore();
   });
 
+  it('notifies preview consumers when seeking a subtitle-only timeline without media', () => {
+    State.clips = [];
+    State.duration = 30;
+    State.externalAudioEnd = 0;
+    Media.activeClipId = null;
+    Media.tracks = [];
+
+    const seeked = vi.fn();
+    window.addEventListener('mpv:seeked', seeked, { once: true });
+
+    Media.seek(12);
+
+    expect(Media.displayTime()).toBe(12);
+    expect(seeked).toHaveBeenCalledTimes(1);
+    expect(seeked.mock.calls[0][0].detail).toBe(12);
+  });
+
   it('prunes removed clip audio and rebuilds it when redo revives the clip', async () => {
     const secondary = {
       id: 'clip-b',

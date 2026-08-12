@@ -41,6 +41,12 @@ describe('Mac 工具列 responsive 版面', () => {
     expect(html).toMatch(/data-act="zoom-fit"[\s\S]*class="compact-icon"/);
   });
 
+  it('時間軸標題後保留收合把手，音軌數與後續工具位於同一個可隱藏群組', () => {
+    expect(html).toMatch(/tl-toolbar-title[\s\S]*id="tlToolbarToggle"[\s\S]*id="tlToolbarOptions"[\s\S]*project-audio-count[\s\S]*data-act="zoom-fit"/);
+    expect(declarations('.tl-toolbar-options')).toContain('display:flex');
+    expect(declarations('.tl-toolbar-options[hidden]')).toContain('display:none');
+  });
+
   it('字幕樣式只讓控制群整組換行，不產生第二條橫向捲軸', () => {
     const line = declarations('.ts-line');
     expect(line).toContain('flex-wrap:wrap');

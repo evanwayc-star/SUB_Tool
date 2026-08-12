@@ -109,6 +109,7 @@ function layoutTimeline(){
   $('tlSpacer').style.width=(total*State.pxPerSec)+'px';
   const vw=viewportW();
   tlLayer.style.width=vw+'px';
+  $('timelinePanel')?.style.setProperty('--timeline-ruler-height',RULER_H+'px');
   rulerCv.width=vw*devicePixelRatio; rulerCv.height=RULER_H*devicePixelRatio;
   rulerCv.style.width=vw+'px'; rulerCv.style.height=RULER_H+'px';
   const vh=vtracksHeight();
@@ -142,7 +143,8 @@ function drawRuler(){
   ctx.save();ctx.scale(dpr,dpr);
   const vw=viewportW();
   ctx.clearRect(0,0,vw,RULER_H);
-  ctx.fillStyle='#1d1d20';ctx.fillRect(0,0,vw,RULER_H);
+  // 中性深灰保留明確的「可點擊跳轉帶」，近白文字與兩級刻度兼顧辨識與長時間舒適度。
+  ctx.fillStyle='rgb(65,65,65)';ctx.fillRect(0,0,vw,RULER_H);
   const targetPx=80;
   const step=niceStep(targetPx/State.pxPerSec);
   const t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
@@ -151,7 +153,7 @@ function drawRuler(){
   // 次刻度（用整數索引避免浮點累積誤差）
   const div=minorDiv(step);
   if(div>1){
-    ctx.beginPath();ctx.strokeStyle='#2a2a30';
+    ctx.beginPath();ctx.strokeStyle='#9299a3';
     const firstMinorIdx=Math.ceil(t0*div/step);
     for(let mi=firstMinorIdx;;mi++){
       let t=(mi*step)/div;
@@ -165,8 +167,8 @@ function drawRuler(){
   }
 
   // 主刻度 + 時間標籤（同樣用整數索引）
-  ctx.beginPath();ctx.strokeStyle='#3a3a40';
-  ctx.fillStyle='#8a8a92';ctx.font='10px Consolas,"Courier New",monospace';ctx.textBaseline='middle';
+  ctx.beginPath();ctx.strokeStyle='#d8dde5';
+  ctx.fillStyle='#f2f4f7';ctx.font='600 11px Consolas,"Courier New",monospace';ctx.textBaseline='middle';
   const firstMajorIdx=Math.ceil(t0/step);
   for(let mi=firstMajorIdx;;mi++){
     let t=mi*step;
@@ -814,6 +816,8 @@ function clipTrackFromY(clientY){
 /* 視訊軌列頭：只處理影像軌的可見、鎖定與排序；音訊 M/S/音量已移到中間的專案 bus 區。 */
 function renderVtrackGutter(){
   const gut=$('tlGutterVtracks'); if(!gut) return;
+  const toggle=$('btnToggleVtracks');
+  if(toggle) toggle.style.opacity=State.vtracksCollapsed?'0.4':'1';
   gut.innerHTML='';
   if(!Seq.active() || State.vtracksCollapsed) { gut.style.display = 'none'; return; }
   gut.style.display = 'block';

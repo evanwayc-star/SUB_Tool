@@ -262,43 +262,48 @@
     <div class="timeline" id="timelinePanel">
       <div class="tl-toolbar">
         <span class="tl-toolbar-title" style="font-weight:600">⏱ <span class="lbl">時間軸</span></span>
-        <div class="project-audio-count" title="專案總輸出音軌數；可直接輸入 1–32 軌">
-          <span class="project-audio-count-label">音軌數</span>
-          <input type="number" id="projectAudioTracksCount" min="1" max="32" value="2" aria-label="專案總輸出音軌數">
-          <span class="project-audio-count-unit" aria-hidden="true">軌</span>
+        <button type="button" class="icon tl-toolbar-toggle" id="tlToolbarToggle"
+          aria-controls="tlToolbarOptions" aria-expanded="true" aria-label="收合時間軸工具"
+          title="收合音軌數與時間軸工具"><span data-role="timeline-toolbar-icon" aria-hidden="true">◀</span></button>
+        <div class="tl-toolbar-options" id="tlToolbarOptions">
+          <div class="project-audio-count" title="專案總輸出音軌數；可直接輸入 1–32 軌">
+            <span class="project-audio-count-label">音軌數</span>
+            <input type="number" id="projectAudioTracksCount" min="1" max="32" value="2" aria-label="專案總輸出音軌數">
+            <span class="project-audio-count-unit" aria-hidden="true">軌</span>
+          </div>
+          <button class="icon" data-act="audio-project-settings" title="開啟 Audio Channel Configuration 視窗">⚙ <span class="lbl">聲道設定</span></button>
+          <div class="sep"></div>
+          <button class="icon" data-act="add-track" title="新增字幕軌">＋ <span class="lbl">字幕軌</span></button>
+          <div class="sep"></div>
+          <button class="icon" data-act="history" title="動作紀錄 (7)">🕘 <span class="lbl">紀錄</span></button>
+          <button class="icon" data-act="undo" title="復原 (Ctrl+Z)">↶</button>
+          <button class="icon" data-act="redo" title="重做 (Ctrl+Shift+Z)">↷</button>
+          <div class="sep"></div>
+          <button class="icon" data-act="notes" title="備註 (8)">📌 <span class="lbl">備註</span></button>
+          <button class="icon" data-act="add-note" title="新增備註">＋</button>
+          <div class="sep"></div>
+          <button class="icon" data-act="split-clip" title="在播放點切割選取素材；未選取音檔時切割影片段 (Ctrl+K)">✂ <span class="lbl">切割</span></button>
+          <div class="sep"></div>
+          <button class="icon" data-act="unlink-clip-audio" title="將選取影片的原音解除連結，成為可獨立剪輯的音訊素材">🔗✂ <span class="lbl">影音分離</span></button>
+          <div class="sep"></div>
+          <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span
+              class="lbl">上字幕</span></button>
+          <div class="sep"></div>
+          <button class="icon" data-act="set-in" title="設定起點 (Q)"
+            style="width: 44px; justify-content: center;">In</button>
+          <button class="icon" data-act="set-out" title="設定終點 (W)"
+            style="width: 44px; justify-content: center;">Out</button>
+          <div class="sep"></div>
+          <span id="tlSel">未選取</span>
+          <div class="sep"></div>
+          <div class="zoom">
+            <span class="lbl">縮放</span> <button class="icon" data-act="zoom-out">－</button>
+            <input type="range" id="zoomBar" min="0.1" max="400" value="80" step="0.1" style="width:120px">
+            <button class="icon" data-act="zoom-in">＋</button>
+            <button class="icon" data-act="zoom-fit" title="自適應縮放 (切換字幕範圍 / 影片全長, 快捷鍵 `)"><span class="lbl">自適應</span><span class="compact-icon" aria-hidden="true">↔</span></button>
+          </div>
+          <div class="spacer"></div>
         </div>
-        <button class="icon" data-act="audio-project-settings" title="開啟 Audio Channel Configuration 視窗">⚙ <span class="lbl">聲道設定</span></button>
-        <div class="sep"></div>
-        <button class="icon" data-act="add-track" title="新增字幕軌">＋ <span class="lbl">字幕軌</span></button>
-        <div class="sep"></div>
-        <button class="icon" data-act="history" title="動作紀錄 (7)">🕘 <span class="lbl">紀錄</span></button>
-        <button class="icon" data-act="undo" title="復原 (Ctrl+Z)">↶</button>
-        <button class="icon" data-act="redo" title="重做 (Ctrl+Shift+Z)">↷</button>
-        <div class="sep"></div>
-        <button class="icon" data-act="notes" title="備註 (8)">📌 <span class="lbl">備註</span></button>
-        <button class="icon" data-act="add-note" title="新增備註">＋</button>
-        <div class="sep"></div>
-        <button class="icon" data-act="split-clip" title="在播放點切割選取素材；未選取音檔時切割影片段 (Ctrl+K)">✂ <span class="lbl">切割</span></button>
-        <div class="sep"></div>
-        <button class="icon" data-act="unlink-clip-audio" title="將選取影片的原音解除連結，成為可獨立剪輯的音訊素材">🔗✂ <span class="lbl">影音分離</span></button>
-        <div class="sep"></div>
-        <button class="icon" id="subModeBtn" data-act="sub-mode" title="上字幕模式：啟動後播放，I/O 設定字幕起訖，O 後自動前進下一句">🎯 <span
-            class="lbl">上字幕</span></button>
-        <div class="sep"></div>
-        <button class="icon" data-act="set-in" title="設定起點 (Q)"
-          style="width: 44px; justify-content: center;">In</button>
-        <button class="icon" data-act="set-out" title="設定終點 (W)"
-          style="width: 44px; justify-content: center;">Out</button>
-        <div class="sep"></div>
-        <span id="tlSel">未選取</span>
-        <div class="sep"></div>
-        <div class="zoom">
-          <span class="lbl">縮放</span> <button class="icon" data-act="zoom-out">－</button>
-          <input type="range" id="zoomBar" min="0.1" max="400" value="80" step="0.1" style="width:120px">
-          <button class="icon" data-act="zoom-in">＋</button>
-          <button class="icon" data-act="zoom-fit" title="自適應縮放 (切換字幕範圍 / 影片全長, 快捷鍵 `)"><span class="lbl">自適應</span><span class="compact-icon" aria-hidden="true">↔</span></button>
-        </div>
-        <div class="spacer"></div>
       </div>
       <div class="tl-body">
         <div class="tl-gutter" id="tlGutter">

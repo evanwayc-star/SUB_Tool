@@ -56,7 +56,7 @@ vi.mock('../src/ui.js', () => ({
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
 vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
 
-let Media, Wave, State, resetAudioProject;
+let Media, Wave, State, resetAudioProject, resetPlayerAdapter;
 
 describe('reset-scoped media ownership', () => {
   beforeAll(async () => {
@@ -75,6 +75,7 @@ describe('reset-scoped media ownership', () => {
     };
     ({ Media, Wave } = await import('../src/media.js'));
     ({ State, resetAudioProject } = await import('../src/state.js'));
+    ({ resetPlayerAdapter } = await import('../src/media-player-adapter.js'));
   });
 
   beforeEach(() => {
@@ -93,6 +94,8 @@ describe('reset-scoped media ownership', () => {
     domMock.video.readyState = 0;
     domMock.video.duration = 5;
     domMock.video.resetEvents();
+    delete desktopMock.mpv;
+    resetPlayerAdapter(desktopMock);
   });
 
   it('drops a late external-audio metadata result after project reset', async () => {
@@ -184,6 +187,67 @@ describe('reset-scoped media ownership', () => {
       if (oldRevoke) Object.defineProperty(URL, 'revokeObjectURL', oldRevoke);
       else delete URL.revokeObjectURL;
     }
+  });
+
+  it('restores native video audio after the last external mix source is deleted', () => {
+    const asset = Media.createExternalAudioSource({
+      name: 'reference.wav', path: 'C:/audio/reference.wav', duration: 8,
+      in: 0, out: 8, offset: 0, fallbackCount: 1,
+    });
+    const element = { pause: vi.fn(), src: 'file:///reference.wav' };
+    const gain = { disconnect: vi.fn(), gain: { value: 1 } };
+    Media.tracks = [{
+      id: 'external-track', kind: 'element', source: asset.audioSrc,
+      el: element, gain, muted: false, solo: false, volume: 1,
+      audioSourceId: asset.audioSourceId,
+    }];
+    domMock.video.src = 'file:///picture.mp4';
+    domMock.video.muted = true;
+
+    expect(Media.removeExternalAudio(asset.id, { record: false })).toBe(true);
+
+    expect(Media.tracks).toEqual([]);
+    expect(domMock.video.muted).toBe(false);
+  });
+
+  it('mutes mpv immediately when the active clip audio is detached', async () => {
+    const mute = vi.fn().mockResolvedValue(undefined);
+    desktopMock.mpv = { mute };
+    resetPlayerAdapter(desktopMock);
+    Media.mpvMode = true;
+    const clip = {
+      id: 'detached-video', name: 'picture.mov', path: 'C:/media/picture.mov',
+      dur: 8, in: 0, out: 8, offset: 0, vtrack: 0, primary: true,
+      audioSrc: 'video', audioSourceId: 'source-picture', audioDetached: true,
+    };
+    State.clips = [clip];
+    Media.activeClipId = clip.id;
+    Media._applyClipAudio(clip, 0);
+    await Promise.resolve();
+
+    expect(mute).toHaveBeenCalledWith(true);
+  });
+
+  it('does not cancel primary audio preparation when an unrelated image is deleted', () => {
+    const primary = {
+      id: 'primary-video', name: 'picture.mov', path: 'C:/media/picture.mov',
+      dur: 8, in: 0, out: 8, offset: 0, vtrack: 0, primary: true,
+      audioSrc: 'video', audioSourceId: 'source-picture',
+    };
+    const image = {
+      id: 'overlay-image', name: 'card.png', path: 'C:/media/card.png',
+      type: 'image', dur: 4, in: 0, out: 4, offset: 1, vtrack: 1,
+    };
+    const pending = [{ id: 'pending-primary-channel' }];
+    const ingestDone = vi.fn();
+    State.clips = [primary, image];
+    Media.pendingChannels = pending;
+    Media._ingestDoneHandler = ingestDone;
+
+    expect(Media.removeClip(image.id)).toBe(true);
+
+    expect(Media.pendingChannels).toBe(pending);
+    expect(Media._ingestDoneHandler).toBe(ingestDone);
   });
 
   it('cancels an older history audio restore when redo replaces its snapshot', async () => {

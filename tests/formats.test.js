@@ -144,6 +144,12 @@ Dialogue: 0,0:00:07.00,0:00:08.00,Imported,,0,0,0,,{\\t(0,100,\\fs100)}不套動
 
     expect(background).toContain('\\fs72');
     expect(background).toContain('\\b1');
+    // 多行底框必須以整段字幕中心定位；若用 top alignment，PotPlayer 與
+    // libass 對字型 ascender 的解讀不同，最下面一行會掉出底色。
+    expect(background).toContain('\\an4\\pos(192,144)');
+    expect(background).not.toContain('\\an7');
+    expect(background).toContain('\\fscy100.00');
+    expect(background).toContain('\\ybord18.0');
     expect(background).toContain('\\shad8');
     expect(background).toContain('\\4c&H000000&');
     expect(background).toContain('\\4a&H26&');

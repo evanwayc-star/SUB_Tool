@@ -77,6 +77,7 @@ FPS-SYNC
   - 播放中才回傳 `vTime()`（原始時間，為了平滑移動）。
 - 播放器時碼 `tcCur`、時間軸播放點 `updatePlayhead()`、`seekBar` 這三個**靜止讀數必須全部用 `displayTime()`**。
 - **不可**直接用 `video.currentTime` 或 mpv 的 `e.data`：seek 後瀏覽器 / mpv 會把實際位置「沉降」到相鄰格，原始時間經 `secToEncore` 進位就會比播放點多一格（見 Bug C）。
+- 純字幕專案沒有 HTML video／mpv 的原生 `seeked` 可接手；`Media.seek()` 完成虛擬時間跳轉後仍須發出統一的 `mpv:seeked` 通知，讓字幕預覽、播放點與備註立即讀回同一個 `displayTime()`。
 
 ### (I5) 逐格步進以 `displayTime()` 為基準
 
@@ -112,7 +113,7 @@ FPS-SYNC
 | `time.js` | `snapTimeToFrame()` | 唯一的影格格網 | I3 |
 | `media.js` | `detectFpsWeb()` 區塊 | 實測 FPS（非檔名） | I1 |
 | `media.js` | `displayTime()` | 權威播放位置 | I4 |
-| `media.js` | `seek()` 的 snap | seek 對齊影格 | I3 |
+| `media.js` | `seek()` 的 snap／純字幕通知 | seek 對齊影格；無播放器時仍通知預覽讀回 `displayTime()` | I3, I4 |
 | `media.js` | `pause()` 的 snap | 暫停點對齊影格 | I3 |
 | `media.js` | mpv `time-pos` handler | 暫停時同源同格 + 抖動容忍 | I4, I6 |
 | `keyboard.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
@@ -162,6 +163,12 @@ FPS-SYNC
   - 全面導入 **SMPTE NTSC 精確分數**（如 `30000/1001` 代替 `29.97`）。
   - `renderVideoSub` 完全捨棄浮點比較，直接將時間與字幕轉為精確的**整數影格座標 (Frame Index)** 後再比較（`currentFrame >= startFrame`）。
   - 將所有 `snapFrame` 邏輯統一由 `time.js` 的 `snapTimeToFrame` 處理，並將磁吸範圍縮小為 8px（且允許按住 `Alt` 暫時取消磁吸）。
+
+### Bug E — 純字幕專案點選比對字幕後，時碼改了但預覽畫面沒有更新
+
+- **現象**：沒有匯入影音時，從字幕比對視窗點選一句字幕，播放點會跳到正確時間，但播放器字幕仍停在上一句。
+- **原因**：虛擬時間軸 seek 沒有 HTML video／mpv 的原生事件可觸發後續重繪。
+- **修法**：`Media.seek()` 的無媒體分支在更新虛擬時間後主動送出統一 `mpv:seeked` 通知；所有預覽消費者仍從 `displayTime()` 讀取權威位置（I4）。
 
 ---
 

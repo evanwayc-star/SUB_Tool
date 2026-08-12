@@ -214,6 +214,7 @@ function _buildProjectData(){
     videoTracks:State.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked,
       ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})})),
     videoTrackCount:State.videoTracks.length||1, // 向下相容：舊版讀取用
+    vtracksCollapsed:!!State.vtracksCollapsed,
     clips:_savedClips().map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,locked:!!c.locked,
       // 圖片需保留型別與自己的幾何。少了 type 會在重開專案時被誤當成影片
       // 丟給 ffprobe；少了 scale/posX/posY 則會回到預設滿版中央。
@@ -338,6 +339,7 @@ function resetProject(){
   _lastSavedDataStr=null;
   if(_autoSaveTimer){ clearInterval(_autoSaveTimer); _autoSaveTimer=null; }
   resetAudioProject();
+  State.vtracksCollapsed=false;
   State.exportIn=null;
   State.exportOut=null;
   _projectLoadSession.clearPlan();
@@ -557,6 +559,8 @@ const Project = {
       State.videoTracks = data.videoTracks.map((t,i)=>({name:t.name||('視訊軌 '+(i+1)),visible:t.visible!==false,locked:!!t.locked,
         ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})}));
     else { resetVideoTracks(); ensureVideoTrackCount(Math.max(1, data.videoTrackCount || 1)); }
+    // 視訊軌收合屬於專案工作區狀態；舊專案沒有此欄位時維持原本的展開預設。
+    State.vtracksCollapsed=data.vtracksCollapsed===true;
     const pendingClips = (Array.isArray(data.clips) && data.clips.length) ? data.clips.map(raw=>{
       const clip=(raw&&typeof raw==='object')?{...raw}:{};
       // audioSrc 是 v4.35 runtime 名稱；v3 專案檔改存 audioSourceId，讀舊資料時保留相同來源識別。

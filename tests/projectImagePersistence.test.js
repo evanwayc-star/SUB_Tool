@@ -78,6 +78,30 @@ describe('project image persistence',()=>{
     })]);
   });
 
+  it('saves and reloads the video-track collapsed setting, with old projects defaulting to expanded',async()=>{
+    State.vtracksCollapsed=true;
+    await Project.saveAs();
+
+    const bytes=Buffer.from(saveProject.mock.calls.at(-1)[1],'base64');
+    const data=JSON.parse(bytes.subarray(2).toString('utf16le'));
+    expect(data.vtracksCollapsed).toBe(true);
+    expect(isProjectDirty()).toBe(false);
+
+    State.vtracksCollapsed=false;
+    expect(isProjectDirty()).toBe(true);
+    Project.apply(data);
+    expect(State.vtracksCollapsed).toBe(true);
+
+    delete data.vtracksCollapsed;
+    State.vtracksCollapsed=true;
+    Project.apply(data);
+    expect(State.vtracksCollapsed).toBe(false);
+
+    State.vtracksCollapsed=true;
+    resetProject();
+    expect(State.vtracksCollapsed).toBe(false);
+  });
+
   it('saves the current playhead without leaking a pending field into State',async()=>{
     // playhead 是 v5.2.0 加的：存檔寫入 Media.displayTime()、載入時 seek 回去。
     // 這個欄位加進來時沒有補測試，導致 mock 缺 displayTime 讓整個檔案掛掉都沒被發現。

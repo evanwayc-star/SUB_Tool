@@ -369,6 +369,14 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-toolbar>.spacer{flex:1 1 auto;min-width:0}
 .tl-toolbar>.sep{margin:0 1px}
 .tl-toolbar button.icon{padding-left:6px;padding-right:6px;white-space:nowrap}
+.tl-toolbar-toggle{width:27px;min-width:27px;height:28px;padding:0!important;justify-content:center;color:var(--text-dim)}
+.tl-toolbar-toggle:hover{color:var(--text);border-color:var(--text-dim)}
+.tl-toolbar-toggle[aria-expanded="false"]{color:var(--accent);border-color:var(--accent-d);background:rgba(76,183,170,.08)}
+.tl-toolbar-options{display:flex;align-items:center;gap:4px;flex:1 1 auto!important;min-width:0;overflow:hidden}
+.tl-toolbar-options[hidden]{display:none}
+.tl-toolbar-options>*{flex-shrink:0;white-space:nowrap}
+.tl-toolbar-options>.spacer{flex:1 1 auto;min-width:0}
+.tl-toolbar-options>.sep{margin:0 1px}
 /* 專案音軌數：琥珀色是刻意的強調（它決定所有交付的聲道數），但飽和度壓低過一次——
    原本數字是 #fff1cd（近乎白色的奶油色）配 800 字重，在深色介面上等於一直發光刺眼。
    現在整組往下壓約三成亮度，維持「這是重點」的層級，但不再搶視線。 */
@@ -397,7 +405,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-scroll{flex:1;overflow-x:auto;overflow-y:hidden;position:relative;background:var(--bg)}
 .tl-spacer{height:1px}
 .tl-layer{position:sticky;left:0;top:0;height:100%;will-change:transform}
-#rulerCanvas{position:absolute;left:0;top:0;display:block;background:var(--panel);border-bottom:1px solid var(--border)}
+#rulerCanvas{position:absolute;left:0;top:0;display:block;background:rgb(65,65,65);border-bottom:1px solid #24272b;cursor:pointer}
 .tl-tracks{position:absolute;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden}
 .tl-track{position:relative;left:0;border-bottom:1px solid #26262b}
 .cue-block{position:absolute;top:4px;bottom:4px;background:var(--cue);border:1px solid transparent;border-radius:4px;
@@ -505,7 +513,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* 時間軸：左側軌道欄 (眼睛開關) */
 .tl-body{flex:1;display:flex;min-height:0}
 .tl-gutter{width:158px;flex-shrink:0;background:var(--panel2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
-.tl-gutter-head{height:24px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 8px;font-size:10px;color:var(--text-faint)}
+.tl-gutter-head{height:var(--timeline-ruler-height,36px);flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 8px;font-size:10px;color:var(--text-faint)}
 .tl-gutter-wave{height:48px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 8px;gap:5px;font-size:12px;color:var(--text-faint);position:relative}
 .tl-gutter-wave select{margin-left:auto;font-size:12px;padding:1px 4px;height:22px;max-width:100px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:3px;cursor:pointer}
 .tl-resize-handle{position:absolute;bottom:0;left:0;right:0;height:4px;cursor:ns-resize;z-index:10}
