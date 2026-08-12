@@ -10,12 +10,37 @@
 /* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, getExactFps } from './time.js';
-import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss, hexToAssColor } from './substyle.js';
+import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';
 
 function finiteBackgroundLayout(layout){
   if(!layout || typeof layout !== 'object') return null;
-  if(!Number.isFinite(layout.absoluteX) || !Number.isFinite(layout.absoluteY) || !Number.isFinite(layout.boxW) || !Number.isFinite(layout.boxH)) return null;
-  return layout;
+  const lineIndex = Number(layout.lineIndex);
+  const height = Number(layout.height);
+  const offsetY = Number(layout.offsetY);
+  const textLines = Array.isArray(layout.textLines) ? layout.textLines.map(line => ({
+    x: Number(line?.x),
+    cy: Number(line?.cy),
+    hAlign: Number(line?.hAlign),
+  })) : null;
+  if(!Number.isSafeInteger(lineIndex) || lineIndex < 0 ||
+     !Number.isFinite(height) || height <= 0 ||
+     !Number.isFinite(offsetY) || !textLines?.length ||
+     textLines.some(line => !Number.isFinite(line.x) || !Number.isFinite(line.cy) ||
+       ![4, 5, 6].includes(line.hAlign))) return null;
+  return { lineIndex, height, offsetY, textLines };
+}
+
+function backgroundTopAlignment(st){
+  return { left:7, center:8, right:9 }[st?.align] || 8;
+}
+
+const BACKGROUND_SHAPING_KEYS = new Set(['font','fontSize','bold','italic','letterSpacing']);
+
+function backgroundShapingDiff(diff){
+  if(!diff) return null;
+  const filtered = Object.fromEntries(Object.entries(diff)
+    .filter(([key]) => BACKGROUND_SHAPING_KEYS.has(key)));
+  return Object.keys(filtered).length ? filtered : null;
 }
 
 class AssDocumentBuilder {
@@ -34,31 +59,28 @@ class AssDocumentBuilder {
     return name;
   }
 
-  _assRoundedRectAt(X, Y, W, H, R) {
-    R = Math.max(0, Math.min(R, W / 2, H / 2));
-    if (R <= 0) return `m ${X.toFixed(1)} ${Y.toFixed(1)} l ${(X+W).toFixed(1)} ${Y.toFixed(1)} l ${(X+W).toFixed(1)} ${(Y+H).toFixed(1)} l ${X.toFixed(1)} ${(Y+H).toFixed(1)}`;
-    const k = 0.5522847 * R;
-    return `m ${(X+R).toFixed(1)} ${Y.toFixed(1)} ` +
-      `l ${(X+W - R).toFixed(1)} ${Y.toFixed(1)} ` +
-      `b ${(X+W - R + k).toFixed(1)} ${Y.toFixed(1)} ${(X+W).toFixed(1)} ${(Y+R - k).toFixed(1)} ${(X+W).toFixed(1)} ${(Y+R).toFixed(1)} ` +
-      `l ${(X+W).toFixed(1)} ${(Y+H - R).toFixed(1)} ` +
-      `b ${(X+W).toFixed(1)} ${(Y+H - R + k).toFixed(1)} ${(X+W - R + k).toFixed(1)} ${(Y+H).toFixed(1)} ${(X+W - R).toFixed(1)} ${(Y+H).toFixed(1)} ` +
-      `l ${(X+R).toFixed(1)} ${(Y+H).toFixed(1)} ` +
-      `b ${(X+R - k).toFixed(1)} ${(Y+H).toFixed(1)} ${X.toFixed(1)} ${(Y+H - R + k).toFixed(1)} ${X.toFixed(1)} ${(Y+H - R).toFixed(1)} ` +
-      `l ${X.toFixed(1)} ${(Y+R).toFixed(1)} ` +
-      `b ${X.toFixed(1)} ${(Y+R - k).toFixed(1)} ${(X+R - k).toFixed(1)} ${Y.toFixed(1)} ${(X+R).toFixed(1)} ${Y.toFixed(1)}`;
-  }
-
-  _backgroundText(layout, st, head) {
-    const shape = this._assRoundedRectAt(0, 0, layout.boxW, layout.boxH, layout.radius);
-    const colorASS = hexToAssColor(st.bgColor);
-    const alphaASS = Math.round((1 - (st.bgAlpha ?? 0.3)) * 255).toString(16).padStart(2, '0').toUpperCase();
+  /* Chromium 只凍結「哪一行最寬」與整塊的垂直幾何；背景寬度由 libass
+     以正式輸出字型重新排出。文字與底框因此共用同一套 shaping/font metrics，
+     左／中／右錨點都不需要猜跨引擎的寬度補償值。 */
+  _backgroundText(layout, st, head, rawLines, cueStyle) {
+    const line = String(rawLines[Math.min(layout.lineIndex, rawLines.length - 1)] || '').trim();
+    if(!line) return '';
     const x = Math.round((st.posX / 100) * this.vww);
     const y = Math.round((st.posY / 100) * this.vwh);
-    const rotate = st.angle ? `\\org(${x},${y})\\frz${-(st.angle || 0)}` : '';
-    const shadowTag = st.shadow ? `\\shad${st.shadow}\\4c&H000000&\\4a&H26&` : `\\shad0`;
-    const bgTags = `{\\an7\\pos(${layout.absoluteX.toFixed(1)},${layout.absoluteY.toFixed(1)})${rotate}\\c${colorASS}&\\1a&H${alphaASS}&\\bord0${shadowTag}\\p1}${shape}`;
-    return head + bgTags;
+    const metrics = subtitleBackgroundCssMetrics(st, 1);
+    const top = Math.round(y + layout.offsetY);
+    const fontSize = Math.max(1, Number(st.fontSize) || STYLE_DEFAULTS.fontSize);
+    const scaleY = Math.max(1, 100 * Math.sqrt(layout.height / fontSize));
+    const angle = Number(st.angle) || 0;
+    const rotate = `${angle ? `\\org(${x},${y})` : ''}\\frz${-angle}`;
+    const shadow = Number.isFinite(Number(st.shadow)) ? Math.max(0, Number(st.shadow)) : 0;
+    const shadowTags = shadow > 0
+      ? `\\shad${shadow}\\4c&H000000&\\4a&H26&`
+      : '\\shad0';
+    const tags = `{\\q2\\an${backgroundTopAlignment(st)}\\pos(${x},${top})${rotate}`+
+      `\\1a&HFF&\\fscy${scaleY.toFixed(2)}\\xbord${metrics.padX.toFixed(1)}`+
+      `\\ybord${metrics.padY.toFixed(1)}${shadowTags}}`;
+    return head + cueAssTags(backgroundShapingDiff(cueStyle), st) + tags + assEscapeText(line);
   }
 
   addCue(cue, track, layout) {
@@ -78,7 +100,7 @@ class AssDocumentBuilder {
 
     const textDiff = layout && cue.style
       ? Object.fromEntries(Object.entries(cue.style).filter(([key]) =>
-        !['outline','outlineColor','shadow','bgBox','bgColor','bgAlpha'].includes(key)))
+        !['shadow','bgBox','bgColor','bgAlpha'].includes(key)))
       : cue.style;
       
     const tags = cueAssTags(textDiff, layout ? { ...st, bgBox:false } : st);
@@ -98,9 +120,15 @@ class AssDocumentBuilder {
     const lines = String(cue.text || '').replace(/\r/g, '').split('\n').map(assEscapeText);
 
     if (layout) {
-      this.events.push({ type: 'background', text: this._backgroundText(layout, st, `Dialogue: ${100-(cue.track||0)},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},Default,atg${(cue.track||0)+1},0,0,0,,`) });
+      const backgroundHead = `Dialogue: ${100-(cue.track||0)},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},${styName},atg${(cue.track||0)+1},0,0,0,,`;
+      const background = this._backgroundText(layout, st, backgroundHead,
+        String(cue.text || '').replace(/\r/g, '').split('\n'), cue.style);
+      if(background) this.events.push({ type: 'background', text: background });
+      const x = Math.round((st.posX / 100) * this.vww);
+      const y = Math.round((st.posY / 100) * this.vwh);
+      const blockOrigin = st.angle ? `\\org(${x},${y})` : '';
       const text = layout.textLines.map((l, i) => {
-        return `${head}{\\an${l.hAlign}\\pos(${l.x},${l.cy})}${tags}${lines[i]}`;
+        return `${head}{\\an${l.hAlign}\\pos(${l.x},${l.cy})${blockOrigin}}${tags}${lines[i]}`;
       }).join('\n');
       this.events.push({ type: 'text', text });
     } else {

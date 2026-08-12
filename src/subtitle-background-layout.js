@@ -44,59 +44,52 @@ export function planSubtitleBackgroundLayouts(cues, tracks, { measureLineWidth, 
     const y = Math.round((st.posY / 100) * vwh);
     const radius = metrics.fontSize * 0.25;
     
-    let lineIndex, boxW, boxH, absoluteX, absoluteY, textLines, offsetY;
-    
+    let layout;
+
     if (st.vertical) {
       const contentWidth = Math.max(metrics.lineHeight, metrics.lineHeight * lines.length);
-      lineIndex = heights.reduce((tallest, height, index) =>
+      const lineIndex = heights.reduce((tallest, height, index) =>
         height > heights[tallest] ? index : tallest, 0);
-      
-      boxW = contentWidth + metrics.padX * 2;
-      boxH = heights[lineIndex] + metrics.padY * 2;
-      
+
+      const boxW = contentWidth + metrics.padX * 2;
+      const boxH = heights[lineIndex] + metrics.padY * 2;
+
       const left = st.align === 'left' ? x : st.align === 'right' ? x - contentWidth : x - contentWidth / 2;
-      absoluteX = left - metrics.padX;
-      
+      const absoluteX = left - metrics.padX;
+
       const anchorY = anchor.y; // top 0, middle 50, bottom 100
-      absoluteY = y - (heights[lineIndex] * anchorY / 100) - metrics.padY;
-      offsetY = absoluteY - y;
-      
-      textLines = [];
+      const absoluteY = y - (heights[lineIndex] * anchorY / 100) - metrics.padY;
+      layout = {
+        lineIndex,
+        height: boxH,
+        offsetY: absoluteY - y,
+        absoluteX,
+        absoluteY,
+        boxW,
+        boxH,
+        radius,
+        textLines: [],
+      };
     } else {
-      lineIndex = widths.reduce((widest, width, index) =>
+      const lineIndex = widths.reduce((widest, width, index) =>
         width > widths[widest] ? index : widest, 0);
-        
+
       const contentHeight = Math.max(metrics.lineHeight, metrics.lineHeight * lines.length);
-      
-      boxW = widths[lineIndex] + metrics.padX * 2;
-      boxH = contentHeight + metrics.padY * 2;
-      
-      const anchorX = anchor.x; // left 0, center 50, right 100
-      absoluteX = x - (widths[lineIndex] * anchorX / 100) - metrics.padX;
-      
-      offsetY = -(contentHeight * anchor.y / 100) - metrics.padY;
-      absoluteY = y + offsetY;
-      
+      const boxH = contentHeight + metrics.padY * 2;
+      const offsetY = -(contentHeight * anchor.y / 100) - metrics.padY;
+      const absoluteY = y + offsetY;
+
       const hAlign = { left: 4, center: 5, right: 6 }[st.align || 'center'];
-      textLines = lines.map((line, i) => {
+      const textLines = lines.map((line, i) => {
         const cy = Math.round(absoluteY + metrics.padY + i * metrics.lineHeight + metrics.lineHeight / 2);
         return { x, cy, hAlign, line };
       });
+      // 水平字幕不可把 Chromium 的數值寬度凍結給 libass；兩套 shaping
+      // 引擎的細微差距會在左／右錨點全部落到單側，正是底色跑版的來源。
+      layout = { lineIndex, height: boxH, offsetY, textLines };
     }
 
-    layouts[key] = {
-      lineIndex,
-      width: widths[lineIndex],
-      widths,
-      height: boxH,
-      offsetY,
-      absoluteX,
-      absoluteY,
-      boxW,
-      boxH,
-      radius,
-      textLines,
-    };
+    layouts[key] = layout;
   }
   return layouts;
 }

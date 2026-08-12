@@ -133,8 +133,8 @@ export function effectiveSubtitleLineSpacing(st){
   return Math.max(lineSpacing, 1 + subtitleBackgroundGap(st) / fontSize);
 }
 
-/* HTML 預覽的背景盒尺寸也是 ASS 向量底色的唯一尺寸來源。把字級與 padding
-   算式集中在這裡，避免預覽與燒錄各自抄一份常數後再次漂移。 */
+/* HTML 預覽與 ASS 原生底色共用字級、行高與外擴。Chromium 只凍結最寬行索引
+   與垂直幾何；實際水平寬度仍由 libass 以正式輸出字型決定。 */
 export function subtitleBackgroundCssMetrics(st, ratio=1){
   const r = ratio || 1;
   const fontSize = Math.max(12, Math.round(st.fontSize * 0.75 * r));
@@ -176,7 +176,7 @@ export function styleToCss(st, ratio){
   if(st.bgBox){
     const pad = bgMetrics.padY.toFixed(1);
     const padH = bgMetrics.padX.toFixed(1);
-    css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;margin:-${pad}px -${padH}px;border-radius:.25em;`+
+    css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;margin:-${pad}px -${padH}px;border-radius:0;`+
            `display:inline-block;text-align:inherit;`;
     if(st.shadow > 0){
       const d = (st.shadow * r).toFixed(1);

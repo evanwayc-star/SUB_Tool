@@ -130,6 +130,8 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
         if (st.bgBox) {
           expect(Number(ass.BorderStyle)).toBe(3);
           expect(cssProp(css, 'background')).not.toBeNull();
+          // libass 的原生 BorderStyle=3 是方角；HTML 也必須同形，避免預覽與輸出漂移。
+          expect(cssProp(css, 'border-radius')).toBe('0');
           expect(ass.BackColour).toBe(hexToAssColor(st.bgColor, st.bgAlpha));
           expect(ass.OutlineColour).toBe(ass.BackColour);
         } else {

@@ -110,6 +110,50 @@ Dialogue: 0,0:00:07.00,0:00:08.00,Imported,,0,0,0,,{\\t(0,100,\\fs100)}不套動
     expect(uiFontNameFromAss('Arial', fonts)).toBe('Arial');
   });
 
+  it('原生底框只套文字 shaping 覆寫，不讓文字框色污染背景色', () => {
+    const track = {
+      font: 'Arial', fontSize: 60, bgBox: true, bgColor: '#112233', bgAlpha: 0.6,
+      outline: 2, outlineColor: '#000000', shadow: 0,
+      align: 'left', valign: 'top', posX: 10, posY: 10,
+    };
+    const cue = {
+      id: 'boxed', track: 0, start: 0, end: 1, text: 'Background',
+      style: {
+        fontSize: 72,
+        bold: true,
+        color: '#ffee00',
+        outline: 6,
+        outlineColor: '#ff00ff',
+        shadow: 8,
+      },
+    };
+    const ass = SubFormats.toASS([cue], 30, [track], 1920, 1080, {
+      backgroundLayouts: {
+        boxed: {
+          lineIndex: 0,
+          height: 90,
+          offsetY: -9,
+          textLines: [{ x: 192, cy: 45, hAlign: 4 }],
+        },
+      },
+    });
+    const background = ass.split(/\r?\n/).find(line =>
+      line.startsWith('Dialogue:') && !line.includes('_Text,'));
+    const foreground = ass.split(/\r?\n/).find(line =>
+      line.startsWith('Dialogue:') && line.includes('_Text,'));
+
+    expect(background).toContain('\\fs72');
+    expect(background).toContain('\\b1');
+    expect(background).toContain('\\shad8');
+    expect(background).toContain('\\4c&H000000&');
+    expect(background).toContain('\\4a&H26&');
+    expect(background).not.toContain('\\c&H00EEFF&');
+    expect(background).not.toContain('\\3c');
+    expect(background).not.toContain('\\bord6');
+    expect(foreground).toContain('\\bord6');
+    expect(foreground).toContain('\\3c&H00FF00FF&');
+  });
+
   it('SUB Tool metadata 無損保留軌道與逐句樣式，以及 29.97 fps 的原始影格', () => {
     const fps = 29.97;
     const exactFps = 30000 / 1001;

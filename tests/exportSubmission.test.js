@@ -64,12 +64,17 @@ describe('frozen export submission', () => {
     expect(job.defaultName).toMatch(/\.mp4$/);
   });
 
-  it('freezes the preview-matched subtitle background rectangle into the queued ASS', () => {
+  it('freezes the preview-matched subtitle background geometry into the queued ASS', () => {
     const source = {
       cues: [{ id: 'boxed', start: 11, end: 12, text: '短行\n較長的第二行', track: 0 }],
       tracks: [{ name: '對白', visible: true, bgBox: true, bgColor: '#000000', bgAlpha: 0.5 }],
       backgroundLayouts: {
-        'boxed': { lineIndex: 1, height: 140, offsetY: -70, width: 300, boxW: 300, boxH: 140, absoluteX: 960, absoluteY: 972, radius: 15, textLines: [{ x: 960, cy: 972, hAlign: 5 }, { x: 960, cy: 1002, hAlign: 5 }] }
+        'boxed': {
+          lineIndex: 1,
+          height: 140,
+          offsetY: -70,
+          textLines: [{ x: 960, cy: 972, hAlign: 5 }, { x: 960, cy: 1002, hAlign: 5 }],
+        },
       },
       fps: 25,
     };
@@ -82,7 +87,7 @@ describe('frozen export submission', () => {
 
     expect(submission.backgroundLayouts.boxed.lineIndex).toBe(1);
     expect(job.assText).toContain('Track0_Text');
-    expect(job.assText).toContain('\\p1');
+    expect(job.assText).toContain('\\q2');
     expect(job.assText).toContain('較長的第二行');
   });
 

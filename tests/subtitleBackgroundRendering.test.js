@@ -69,28 +69,75 @@ function measureChromiumLines(lines, track) {
   }
 }
 
-function measureTextAndBackground(rgb) {
-  const background = { left: WIDTH, right: -1, top: HEIGHT, bottom: -1 };
-  const text = { left: WIDTH, right: -1, top: HEIGHT, bottom: -1 };
+function measureRenderedBounds(rgb) {
+  const bounds = { left: WIDTH, right: -1, top: HEIGHT, bottom: -1 };
+  const source = [rgb[0], rgb[1], rgb[2]];
   for (let y = 0; y < HEIGHT; y += 1) {
     for (let x = 0; x < WIDTH; x += 1) {
       const i = (y * WIDTH + x) * 3;
-      const r = rgb[i], g = rgb[i + 1], b = rgb[i + 2];
-      if (r >= 95 && r <= 170 && Math.max(r, g, b) - Math.min(r, g, b) <= 8) {
-        background.left = Math.min(background.left, x);
-        background.right = Math.max(background.right, x);
-        background.top = Math.min(background.top, y);
-        background.bottom = Math.max(background.bottom, y);
-      }
-      if (r >= 220 && g >= 220 && b >= 220) {
-        text.left = Math.min(text.left, x);
-        text.right = Math.max(text.right, x);
-        text.top = Math.min(text.top, y);
-        text.bottom = Math.max(text.bottom, y);
-      }
+      const changed = Math.max(
+        Math.abs(rgb[i] - source[0]),
+        Math.abs(rgb[i + 1] - source[1]),
+        Math.abs(rgb[i + 2] - source[2]),
+      ) >= 12;
+      if (!changed) continue;
+      bounds.left = Math.min(bounds.left, x);
+      bounds.right = Math.max(bounds.right, x);
+      bounds.top = Math.min(bounds.top, y);
+      bounds.bottom = Math.max(bounds.bottom, y);
     }
   }
-  return { background, text };
+  return bounds;
+}
+
+function renderedMask(rgb, threshold) {
+  const mask = new Uint8Array(WIDTH * HEIGHT);
+  const source = [rgb[0], rgb[1], rgb[2]];
+  for (let y = 0; y < HEIGHT; y += 1) {
+    for (let x = 0; x < WIDTH; x += 1) {
+      const i = (y * WIDTH + x) * 3;
+      if (Math.max(
+        Math.abs(rgb[i] - source[0]),
+        Math.abs(rgb[i + 1] - source[1]),
+        Math.abs(rgb[i + 2] - source[2]),
+      ) >= threshold) mask[y * WIDTH + x] = 1;
+    }
+  }
+  return mask;
+}
+
+function expectTextMaskInsideBackground(backgroundRgb, textRgb, label) {
+  const background = renderedMask(backgroundRgb, 4);
+  const text = renderedMask(textRgb, 12);
+  let textPixels = 0;
+  const misses = [];
+  for (let y = 0; y < HEIGHT; y += 1) {
+    for (let x = 0; x < WIDTH; x += 1) {
+      if (!text[y * WIDTH + x]) continue;
+      textPixels += 1;
+      let covered = false;
+      for (let dy = -1; dy <= 1 && !covered; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const px = x + dx, py = y + dy;
+          if (px >= 0 && px < WIDTH && py >= 0 && py < HEIGHT && background[py * WIDTH + px]) {
+            covered = true;
+            break;
+          }
+        }
+      }
+      if (!covered && misses.length < 12) misses.push([x, y]);
+    }
+  }
+  expect(textPixels, label).toBeGreaterThan(0);
+  expect(misses, `${label} 未被底色遮罩包住的文字像素`).toEqual([]);
+}
+
+function dialogueLayer(ass, kind) {
+  return ass.split(/\r?\n/).filter(line => {
+    if (!line.startsWith('Dialogue:')) return true;
+    const background = !line.includes('_Text,');
+    return kind === 'background' ? background : !background;
+  }).join('\n');
 }
 
 function rowBackgroundLevels(rgb) {
@@ -130,7 +177,86 @@ const describeWithBundledFfmpeg = process.platform === 'win32' && existsSync(FFM
   ? describe : describe.skip;
 
 describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
-  it('Chromium 量出的單一底色必須包住 libass 的每一行文字', () => {
+  it('多行中英混排在九種錨點都先取整段文字邊界再向外擴張', () => {
+    const lines = [
+      '《Synners》',
+      '(1992年亞瑟·克拉克獎)',
+      '',
+      '《The Girl-Thing Who Went Out for Sushi》',
+      '(2013年雨果獎)',
+    ];
+    const baseTrack = {
+      ...STYLE_DEFAULTS,
+      font: 'Sarasa Mono TC',
+      fontSize: 60,
+      outline: 2,
+      shadow: 0,
+      bgBox: true,
+      bgColor: '#808080',
+      bgAlpha: 1,
+    };
+    const measured = measureChromiumLines(lines, baseTrack);
+    expect(measured.fontLoaded).toBe(true);
+
+    const placements = ['left', 'center', 'right'].flatMap(align =>
+      ['top', 'middle', 'bottom'].map(valign => ({
+        align,
+        valign,
+        posX: { left: 5, center: 50, right: 95 }[align],
+        posY: { top: 10, middle: 50, bottom: 90 }[valign],
+      })));
+
+    const observations = [];
+
+    for (const placement of placements) {
+      const track = { ...baseTrack, ...placement };
+      const cues = [{ id: 'awards', track: 0, start: 0, end: 1, text: lines.join('\n') }];
+      let measuredLine = 0;
+      const backgroundLayouts = planSubtitleBackgroundLayouts(cues, [track], {
+        measureLineWidth: () => measured.widths[measuredLine++],
+      });
+      const ass = renderASS(cues, { fps: 30, tracks: [track], backgroundLayouts });
+      // 文字反鋸齒會產生灰階；同一張畫面量測會誤把它算成底色。
+      // 分別燒錄底色與文字，才是兩個真實的 ink bounding box。
+      const backgroundPixels = renderSubtitleFrame(dialogueLayer(ass, 'background'), {
+        sourceColor: '0x00FF00', fontPath: SARASA_FONT,
+      });
+      const textPixels = renderSubtitleFrame(dialogueLayer(ass, 'text'), {
+        sourceColor: '0x00FF00', fontPath: SARASA_FONT,
+      });
+      const background = measureRenderedBounds(backgroundPixels);
+      const text = measureRenderedBounds(textPixels);
+      const containment = {
+        leftInset: text.left - background.left,
+        rightInset: background.right - text.right,
+        topInset: text.top - background.top,
+        bottomInset: background.bottom - text.bottom,
+      };
+      observations.push({ placement, background, text, containment });
+
+      expect(background.right, JSON.stringify(placement)).toBeGreaterThan(background.left);
+      expect(text.right, JSON.stringify(placement)).toBeGreaterThan(text.left);
+      expect(Math.min(...Object.values(containment)), JSON.stringify({ placement, background, text, containment }))
+        .toBeGreaterThanOrEqual(3);
+      expect(Math.abs(containment.topInset - containment.bottomInset), JSON.stringify({ placement, containment }))
+        .toBeLessThanOrEqual(2);
+      expect(background.right - background.left, JSON.stringify({ placement, background, text }))
+        .toBeLessThan((text.right - text.left) + 90);
+      expect(background.bottom - background.top, JSON.stringify({ placement, background, text }))
+        .toBeLessThan((text.bottom - text.top) + 90);
+    }
+
+    const baselineWidth = observations[0].background.right - observations[0].background.left;
+    const baselineHeight = observations[0].background.bottom - observations[0].background.top;
+    for (const observation of observations) {
+      const width = observation.background.right - observation.background.left;
+      const height = observation.background.bottom - observation.background.top;
+      expect(Math.abs(width - baselineWidth), JSON.stringify(observation)).toBeLessThanOrEqual(2);
+      expect(Math.abs(height - baselineHeight), JSON.stringify(observation)).toBeLessThanOrEqual(2);
+    }
+  }, 30000);
+
+  it('長句與旋轉時，libass 單一底色仍包住每一行文字', () => {
     const lines = [
       '作為非歐盟公民，出入境系統（EES）將以數位方式查驗您的身分，',
       '並記錄您進出歐盟的相關紀錄。',
@@ -155,7 +281,7 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
       { align: 'left', valign: 'top', posX: 10, posY: 20, angle: 0 },
       { align: 'center', valign: 'middle', posX: 50, posY: 50, angle: 0 },
       { align: 'center', valign: 'bottom', posX: 50, posY: 80, angle: 0 },
-      { align: 'right', valign: 'bottom', posX: 90, posY: 80, angle: 8 },
+      { align: 'right', valign: 'bottom', posX: 90, posY: 80, angle: 20 },
     ]) {
       const track = { ...baseTrack, ...placement };
       const cues = [{ id: 'ees', track: 0, start: 0, end: 1, text: lines.join('\n') }];
@@ -164,8 +290,15 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
         measureLineWidth: () => measured.widths[measuredLine++],
       });
       const ass = renderASS(cues, { fps: 30, tracks: [track], backgroundLayouts });
-      const pixels = renderSubtitleFrame(ass, { sourceColor: '0x00FF00', fontPath: SARASA_FONT });
-      const { background, text } = measureTextAndBackground(pixels);
+      const backgroundPixels = renderSubtitleFrame(dialogueLayer(ass, 'background'), {
+        sourceColor: '0x00FF00', fontPath: SARASA_FONT,
+      });
+      const textPixels = renderSubtitleFrame(dialogueLayer(ass, 'text'), {
+        sourceColor: '0x00FF00', fontPath: SARASA_FONT,
+      });
+      const background = measureRenderedBounds(backgroundPixels);
+      const text = measureRenderedBounds(textPixels);
+      expectTextMaskInsideBackground(backgroundPixels, textPixels, JSON.stringify(placement));
 
       expect(background.right, JSON.stringify(placement)).toBeGreaterThan(background.left);
       expect(text.right, JSON.stringify(placement)).toBeGreaterThan(text.left);
@@ -176,7 +309,7 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
         bottomInset: background.bottom - text.bottom,
       };
       expect(Math.min(...Object.values(containment)), JSON.stringify({ placement, background, text, containment }))
-        .toBeGreaterThanOrEqual(-5); // 容許圓角造成的輕微溢出
+        .toBeGreaterThanOrEqual(0);
       expect(background.right - background.left).toBeLessThan((text.right - text.left) + 90);
       expect(background.bottom - background.top).toBeLessThan((text.bottom - text.top) + 90);
     }
@@ -207,7 +340,7 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
     const ass = renderASS(cues, { fps: 30, tracks: [track], backgroundLayouts })
       .replace(/(Dialogue:[^\r\n]*?,Track0_Text,[^\r\n]*?\\pos\([^)]*\))/g, '$1{\\1a&HFF&}');
 
-    const { rows, singleBackground, darkestWideBand } = measureBackground(ass);
+    const { rows, singleBackground } = measureBackground(ass);
     expect(rows.length).toBeGreaterThan(20);
     const firstY = rows[0].y;
     const lastY = rows.at(-1).y;
@@ -215,12 +348,11 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
     const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
     const upperWidth = median(rows.filter(row => row.y < middleY - 2).map(row => row.width));
     const lowerWidth = median(rows.filter(row => row.y > middleY + 2).map(row => row.width));
-    expect(Math.abs(upperWidth - lowerWidth)).toBeLessThanOrEqual(40); // 圓角會讓上下緣較窄
+    expect(Math.abs(upperWidth - lowerWidth)).toBeLessThanOrEqual(4);
     expect(upperWidth).toBeGreaterThanOrEqual(300);
     expect(singleBackground).toBeGreaterThanOrEqual(110);
     expect(singleBackground).toBeLessThanOrEqual(145);
-    // 圓角反鋸齒會產生非預期的單一像素 alpha 極值，不再強制檢查 darkestWideBand。
-    // 因為向量繪製（單一 \\p1）在物理上已不可能產生兩塊 Box 重疊加深的 bug。
+    // 背景是單一 native Dialogue，不會由逐行 Box 疊出較深色橫帶。
   });
 
   it.each([
