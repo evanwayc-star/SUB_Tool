@@ -18,6 +18,7 @@ import { emit } from './events.js';
 import { AudioRouting } from './audio-routing.js';
 import { setManualPlaybackSpeed } from './keyboard.js';
 import { splitMenuLabel } from './menu-label.js';
+import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './actions/style-actions.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -88,6 +89,9 @@ function showCueMenu(x,y){
   const items=[{heading:true,label:`已選 ${n} 條字幕`}];
   items.push({label:`複製 ${n} 條字幕`,act:()=>copyCues()});
   if(State.clipboard?.length) items.push({label:`貼上 ${State.clipboard.length} 條字幕`,act:()=>pasteCues()});
+  items.push({sep:true});
+  items.push({label:`拷貝樣式`,act:()=>copySelectedStyle()});
+  if(hasClipboardStyle()) items.push({label:`貼上樣式`,act:()=>pasteStyleToSelected()});
   items.push({sep:true});
 
   // 單選空白字幕時，顯示文字位移選項

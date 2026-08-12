@@ -28,6 +28,7 @@ function applyCueStyleAssignment(cue, plan) {
 }
 
 let _clipboardStyle = null;
+export function hasClipboardStyle() { return !!_clipboardStyle; }
 
 export function copySelectedStyle() {
   if (!State.selectedId) { showToast('請先選取一條字幕'); return; }
