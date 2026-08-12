@@ -82,7 +82,7 @@ class AssDocumentBuilder {
       : cue.style;
       
     const tags = cueAssTags(textDiff, layout ? { ...st, bgBox:false } : st);
-    const head = `Dialogue: ${cue.track||0},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},${textStyleName},atg${(cue.track||0)+1},0,0,0,,`;
+    const head = `Dialogue: ${100-(cue.track||0)},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},${textStyleName},atg${(cue.track||0)+1},0,0,0,,`;
 
     if (st.vertical) {
       const text = verticalAssCols(st, cue.text || '', this.vww, this.vwh)
@@ -98,7 +98,7 @@ class AssDocumentBuilder {
     const lines = String(cue.text || '').replace(/\r/g, '').split('\n').map(assEscapeText);
 
     if (layout) {
-      this.events.push({ type: 'background', text: this._backgroundText(layout, st, `Dialogue: ${cue.track||0},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},Default,atg${(cue.track||0)+1},0,0,0,,`) });
+      this.events.push({ type: 'background', text: this._backgroundText(layout, st, `Dialogue: ${100-(cue.track||0)},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},Default,atg${(cue.track||0)+1},0,0,0,,`) });
       const text = layout.textLines.map((l, i) => {
         return `${head}{\\an${l.hAlign}\\pos(${l.x},${l.cy})}${tags}${lines[i]}`;
       }).join('\n');

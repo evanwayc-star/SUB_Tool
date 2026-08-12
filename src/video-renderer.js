@@ -351,7 +351,7 @@ export function renderVideoSub(){
       // text-align 作用在「行內軸」：橫書＝水平（吃 align），直書＝垂直（要吃 valign）。
       // 直書餵 align 會變成拿左右對齊去排上下 → 與 ASS 的逐列 \an(上8/中5/下2) 對不起來。
       const ta = st.vertical ? ({ top:'start', middle:'center', bottom:'end' })[st.valign||'bottom'] : st.align;
-      const contStyle = `left:${st.posX}%;right:auto;top:${st.posY}%;transform:translate(${-a.x}%,${-a.y}%);text-align:${ta};padding:0;`;
+      const contStyle = `left:${st.posX}%;right:auto;top:${st.posY}%;transform:translate(${-a.x}%,${-a.y}%);text-align:${ta};padding:0;z-index:${100-tk};`;
       let css=styleToCss(st, ratio);
       if(st.shadow<=0) css+='text-shadow:none;';             // 蓋掉 .line class 的預設六向描邊
       if(!st.bgBox) css+='background:transparent;';
