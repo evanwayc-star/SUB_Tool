@@ -21,9 +21,13 @@ vi.mock('../src/ui.js', () => ({
   openModal: spies.openModal, closeModal: spies.closeModal,
 }));
 vi.mock('../src/formats.js', () => ({ SubFormats: {} }));
-vi.mock('../src/substyle.js', () => ({
-  ASS_PLAY_RES: { x: 1920, y: 1080 }, getAllPresets: () => [], loadFonts: vi.fn(),
-}));
+vi.mock('../src/substyle.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    ASS_PLAY_RES: { x: 1920, y: 1080 }, getAllPresets: () => [], loadFonts: vi.fn(),
+  };
+});
 vi.mock('../src/subimport.js', () => ({ buildSubtitleImportPlan: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));

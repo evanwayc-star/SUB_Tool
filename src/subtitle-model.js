@@ -5,6 +5,8 @@ import { Media } from './media.js';
 import { snapTimeToFrame } from './time.js';
 import { recordHistory } from './history.js';
 import { showToast, openModal, closeModal } from './ui.js';
+import { planCueStyleAssignment } from './style-assignment.js';
+import { effStyle } from './substyle.js';
 
 export function snapAllCuesToFrames() {
   if (!State.fps) return false;
@@ -304,9 +306,23 @@ export function pasteCues(selectCueCb){
   const minStart=timedClip.length ? Math.min(...timedClip.map(c=>c.start)) : 0;
   const delta=Media.displayTime()-minStart;
   const newCues=State.clipboard.map(c=>{
-    if(c.timed===false) return {...c, id:newId(), track:State.listTrack};
+    const oldTrack = c.track || 0;
+    const newTrack = State.listTrack;
+    let newStyle = c.style ? {...c.style} : undefined;
+    
+    if (oldTrack !== newTrack) {
+      const oldEffStyle = effStyle({ style: newStyle }, State.tracks[oldTrack]);
+      const plan = planCueStyleAssignment({
+        cue: { style: newStyle },
+        targetTrack: State.tracks[newTrack],
+        desiredStyle: oldEffStyle
+      });
+      newStyle = plan.style;
+    }
+    
+    if(c.timed===false) return {...c, id:newId(), track:newTrack, style: newStyle};
     const s=Math.max(0, c.start+delta);
-    return {...c, id:newId(), track:State.listTrack, start:s, end:Math.max(s+0.001, c.end+delta)};
+    return {...c, id:newId(), track:newTrack, start:s, end:Math.max(s+0.001, c.end+delta), style: newStyle};
   });
   State.cues.push(...newCues);
   sortCues();
