@@ -90,8 +90,8 @@ function showCueMenu(x,y){
   items.push({label:`複製 ${n} 條字幕`,act:()=>copyCues()});
   if(State.clipboard?.length) items.push({label:`貼上 ${State.clipboard.length} 條字幕`,act:()=>pasteCues()});
   items.push({sep:true});
-  items.push({label:`拷貝樣式`,act:()=>copySelectedStyle()});
-  if(hasClipboardStyle()) items.push({label:`貼上樣式`,act:()=>pasteStyleToSelected()});
+  items.push({label:`<svg viewBox="0 0 512 512" width="13" height="13" fill="currentColor" style="vertical-align:-2px"><path d="M204.3 5C104.9 24.4 24.8 104.3 5.2 203.4c-37 187 131.7 326.4 258.8 306.7 41.2-6.4 61.4-54.6 42.5-91.7-23.1-45.4 9.9-98.4 60.5-98.4h79.7c75.8 0 137.2-61.4 137.2-137.2 0-97-75.1-177.3-172-181.7-68.5-3.1-135.5-2.6-207.6 3.9zM104 224c-22.1 0-40-17.9-40-40s17.9-40 40-40 40 17.9 40 40-17.9 40-40 40zm104-72c-22.1 0-40-17.9-40-40s17.9-40 40-40 40 17.9 40 40-17.9 40-40 40zm128 0c-22.1 0-40-17.9-40-40s17.9-40 40-40 40 17.9 40 40-17.9 40-40 40zm88 96c-22.1 0-40-17.9-40-40s17.9-40 40-40 40 17.9 40 40-17.9 40-40 40z"/></svg> 拷貝樣式`,act:()=>copySelectedStyle()});
+  if(hasClipboardStyle()) items.push({label:`<svg viewBox="0 0 384 512" width="13" height="13" fill="currentColor" style="vertical-align:-2px"><path d="M336 64h-80c0-35.3-28.7-64-64-64s-64 28.7-64 64H48C21.5 64 0 85.5 0 112v352c0 26.5 21.5 48 48 48h288c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48zM192 40c13.3 0 24 10.7 24 24s-10.7 24-24 24-24-10.7-24-24 10.7-24 24-24zm144 418c0 3.3-2.7 6-6 6H54c-3.3 0-6-2.7-6-6V118c0-3.3 2.7-6 6-6h42v36c0 6.6 5.4 12 12 12h168c6.6 0 12-5.4 12-12v-36h42c3.3 0 6 2.7 6 6v340z"/></svg> 貼上樣式`,act:()=>pasteStyleToSelected()});
   items.push({sep:true});
 
   // 單選空白字幕時，顯示文字位移選項

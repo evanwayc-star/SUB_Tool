@@ -12,6 +12,8 @@
    並拉進 `media.js` 的模組層副作用，為了測一個純函式而啟整個世界不划算。 */
 export function splitMenuLabel(label) {
   const raw = String(label == null ? '' : label);
+  const svgMatch = raw.match(/^(<svg[^>]*>.*?<\/svg>)\s*(.*)$/i);
+  if (svgMatch) return { icon: svgMatch[1], text: svgMatch[2] };
   const m = raw.match(/^([\p{Extended_Pictographic}\p{So}\p{Sm}️]+)\s*(.*)$/u);
   return m ? { icon: m[1], text: m[2] } : { icon: '', text: raw };
 }

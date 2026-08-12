@@ -27,7 +27,7 @@ export function planSubtitleBackgroundLayouts(cues, tracks, { measureLineWidth, 
     if(!st.bgBox) continue;
     const lines = String(cue.text || '').replace(/\r/g, '').split('\n');
     const measured = lines.map(line => {
-      const res = measureLineWidth(line, st);
+      const res = measureLineWidth(line.trim(), st);
       if (typeof res === 'number') return { width: Number.isFinite(res) ? Math.max(0, res) : 0, height: 0 };
       return { 
         width: Number.isFinite(res?.width) ? Math.max(0, res.width) : 0,
