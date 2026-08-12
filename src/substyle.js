@@ -166,7 +166,7 @@ export function styleToCss(st, ratio){
   const bgMetrics = subtitleBackgroundCssMetrics(st, r);
   const fs = bgMetrics.fontSize;
   let css = `font-size:${fs}px;color:${st.color};`+
-    `font-family:'${st.font}','Noto Sans TC','Source Han Sans TC',sans-serif;`+
+    `font-family:'${st.font}','Arial','Noto Sans TC','Source Han Sans TC',sans-serif;`+
     `font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'};`+
     `line-height:${effectiveSubtitleLineSpacing(st)};`;
   const letterSpacing = effectiveVerticalLetterSpacing(st);
