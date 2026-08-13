@@ -356,7 +356,20 @@ function isProjectDirty() {
   // 就讓關閉視窗流程誤判為未修改。
   if (State.cues.length === 0 && State.notes.length === 0 && !_hasAudioProjectData() && _savedClips().length===0) return false;
   if (!_lastSavedDataStr) return true;
-  return JSON.stringify(_buildProjectData()) !== _lastSavedDataStr;
+  
+  const currentStr = JSON.stringify(_buildProjectData());
+  if (currentStr === _lastSavedDataStr) return false;
+  
+  // 忽略 playhead 的差異（播放點改變不應視為專案已修改而阻擋關閉）
+  try {
+    const current = JSON.parse(currentStr);
+    const last = JSON.parse(_lastSavedDataStr);
+    current.playhead = 0;
+    last.playhead = 0;
+    return JSON.stringify(current) !== JSON.stringify(last);
+  } catch (e) {
+    return true;
+  }
 }
 
 function _finishProjectLoad(){

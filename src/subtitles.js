@@ -281,16 +281,66 @@ function refreshStyleSummaries(){
 function renderSubList(){
   sublist.innerHTML='';
   clearPresetNameCache();
-  const list = State.cues.filter(c=>(c.track||0)===State.listTrack);
-  if(list.length===0){
-    sublist.innerHTML='<div class="empty">'+(State.cues.length?'此軌道沒有字幕':'尚無字幕<br><br>· 匯入字幕檔，或<br>· 選一條字幕後按 <b>I</b>/<b>O</b> 設定起訖<br>· 或點 <b>⬆＋ / ⬇＋</b> 新增')+'</div>';
-    $('subCount').textContent=list.length+' 句'; return;
+  
+  const filterEl = $('subStyleFilter');
+  const allList = State.cues.filter(c=>(c.track||0)===State.listTrack);
+  
+  if (filterEl) {
+    const usedStyles = new Set();
+    for (const c of allList) {
+      const isOv = c.style && Object.keys(c.style).length > 0;
+      const st = effStyle(c, State.tracks[c.track || 0] || null);
+      const n = _getPresetNameForStyle(st);
+      if (n) {
+        usedStyles.add(isOv ? `✱ ${n}` : n);
+      } else if (isOv) {
+        usedStyles.add(`✱ 自訂`);
+      }
+    }
+    
+    const curVal = filterEl.value;
+    let html = `<option value="">所有樣式</option><option value="__non_default">非預設樣式</option>`;
+    const sorted = Array.from(usedStyles).sort();
+    for (const s of sorted) {
+      html += `<option value="${escapeHTML(s)}">${escapeHTML(s)}</option>`;
+    }
+    filterEl.innerHTML = html;
+    filterEl.style.display = 'inline-block';
+    
+    if (curVal === '__non_default' || usedStyles.has(curVal)) {
+      filterEl.value = curVal;
+    } else {
+      filterEl.value = '';
+    }
   }
-  $('subCount').textContent=list.length+' 句';
+
+  const activeFilter = filterEl ? filterEl.value : '';
+  let list = allList;
+  if (activeFilter) {
+    list = allList.filter(c => {
+      const isOv = c.style && Object.keys(c.style).length > 0;
+      const st = effStyle(c, State.tracks[c.track || 0] || null);
+      const n = _getPresetNameForStyle(st);
+      
+      if (activeFilter === '__non_default') {
+        return n !== '預設' || isOv;
+      }
+      
+      const label = n ? (isOv ? `✱ ${n}` : n) : `✱ 自訂`;
+      return label === activeFilter;
+    });
+  }
+
+  if(list.length===0){
+    sublist.innerHTML='<div class="empty">'+(State.cues.length?'此軌道沒有符合篩選條件的字幕':'尚無字幕<br><br>· 匯入字幕檔，或<br>· 選一條字幕後按 <b>I</b>/<b>O</b> 設定起訖<br>· 或點 <b>⬆＋ / ⬇＋</b> 新增')+'</div>';
+    $('subCount').textContent=list.length+' 句' + (allList.length !== list.length ? ` / ${allList.length} 句` : '');
+    return;
+  }
+  $('subCount').textContent=list.length+' 句' + (allList.length !== list.length ? ` / ${allList.length} 句` : '');
   const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
   const overlaps=detectOverlaps(timed, 0.001);
   let html='';
-  for(let i=0;i<list.length;i++) html+=_subRowHTML(list[i],i,overlaps);
+  for(let i=0;i<list.length;i++) html+=_subRowHTML(list[i],allList.indexOf(list[i]),overlaps);
   sublist.innerHTML=html;
   renderCheckPanel();
 }

@@ -17,7 +17,9 @@ export function paintSubtitleBlocks(trackRows, displayList) {
     el.style.width = Math.max(2, c.w) + 'px';
     el.dataset.id = c.id;
     const styleMarker = c.hasStyle ? '<span title="此句有樣式覆蓋" style="color:var(--accent)">✱ </span>' : '';
-    el.innerHTML = '<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;padding:0 6px;">' + styleMarker + c.htmlText + '</div><div class="edge r"></div>';
+    const displayIndex = c.isLast ? `${c.cueIndex} ＃` : c.cueIndex;
+    const idxHtml = c.cueIndex ? `<div style="padding:0 8px 0 12px;font-size:12px;font-weight:600;color:rgba(255,255,255,0.7);pointer-events:none;display:flex;align-items:center;">${displayIndex}</div>` : '';
+    el.innerHTML = '<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;padding:0 6px;">' + styleMarker + c.htmlText + '</div>' + idxHtml + '<div class="edge r"></div>';
     row.appendChild(el);
   }
 

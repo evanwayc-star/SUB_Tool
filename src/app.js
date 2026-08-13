@@ -557,6 +557,10 @@ let _covCleared=false; // 本次開窗有沒有按過「清除全部覆蓋」（
 function initUI(){
   // 軌道切換下拉
   $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; deselect('sub'); $('stSel').textContent=''; searchUpdate(); renderSubList(); StylePanelController.renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
+  const sf = $('subStyleFilter');
+  if (sf) {
+    sf.addEventListener('change', () => { deselect('sub'); $('stSel').textContent=''; renderSubList(); });
+  }
   const waveGlobalSrcSel=$('waveGlobalSrcSel');
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value==='__all__'?null:e.target.value); renderMixer(); e.target.blur(); });
 

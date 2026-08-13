@@ -1024,10 +1024,21 @@ function renderCueBlocks(){
   
   const displayList = { cues: [], overlaps: [] };
   const byTrack = new Map();
+  const trackIndices = new Map();
+  const trackTotals = new Map();
   
   for(const c of State.cues){
-    if(c.timed === false) continue;
     const tk = c.track || 0;
+    trackTotals.set(tk, (trackTotals.get(tk) || 0) + 1);
+  }
+  
+  for(const c of State.cues){
+    const tk = c.track || 0;
+    let idx = trackIndices.get(tk) || 0;
+    trackIndices.set(tk, idx + 1);
+    const cueIndex = idx + 1;
+
+    if(c.timed === false) continue;
     let arr = byTrack.get(tk);
     if(!arr){ arr = []; byTrack.set(tk, arr); }
     arr.push(c);
@@ -1043,7 +1054,9 @@ function renderCueBlocks(){
       x: timeToX(c.start),
       w: timeToX(c.end) - timeToX(c.start),
       hasStyle: !!c.style,
-      htmlText: escapeHTML(c.text || '').replace(/\n/g, '<br>')
+      htmlText: escapeHTML(c.text || '').replace(/\n/g, '<br>'),
+      cueIndex: cueIndex,
+      isLast: cueIndex === trackTotals.get(tk)
     });
   }
   
