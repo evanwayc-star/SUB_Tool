@@ -6,8 +6,8 @@
    是再驗證一次最終路徑真的落在使用者選定的資料夾內——`path.join`／`path.resolve`
    會把 `"../"` 正規化掉，只靠呼叫端把關等於沒有把關。
 
-   兩邊各自維護一份規則（不同行程、不同模組系統，無法合併成一份實作），
-   由 `tests/exportNameSafetyContract.test.js` 矩陣窮舉比對，任一邊漂掉就紅。
+   兩邊是不同職責：renderer 淨化名稱，這裡圍堵解析後路徑；
+   `tests/exportPathSafety.test.js` 驗證兩層組合與路徑 containment。
 ============================================================================== */
 const path = require('path');
 

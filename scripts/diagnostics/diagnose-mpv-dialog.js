@@ -5,7 +5,7 @@
      1) 用偵錯連接埠啟動已安裝的 app：
           & "C:\Program Files\SUB Tool\SUB Tool.exe" --remote-debugging-port=9223
      2) 在 app 裡把專案／影片開起來，讓畫面上真的看得到播放畫面
-     3) node scripts/diagnose-mpv-dialog.js
+     3) node scripts/diagnostics/diagnose-mpv-dialog.js
 
    ── 這支腳本存在的理由：三個不能用的觀察點 ──
    同一個「選單看不到」的問題查了三輪才找對地方，因為最直覺的三種驗證全是無效的：

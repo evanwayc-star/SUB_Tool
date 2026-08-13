@@ -110,7 +110,7 @@
 ```mermaid
 flowchart LR
   S["substyle.js<br/>effStyle()<br/>唯一樣式來源"]
-  G["imagegeom.js<br/>imageBoxOnStage()<br/>唯一幾何公式"]
+  G["image-geometry.js<br/>imageBoxOnStage()<br/>唯一幾何公式"]
 
   S --> A["HTML 預覽<br/>編輯時看到的"]
   S --> B["mpv libass<br/>桌面版播放"]
@@ -212,15 +212,18 @@ npm run lint && npm test && npm run build
 ## 🗂 專案結構
 
 ```
-src/            前端 ES 模組（51 支）＋ decode/ 底下 5 支 WebCodecs 相關
-electron/       主行程：ffmpeg / ffprobe / mpv / 檔案 I/O / 路徑白名單
-docs/           說明文件（見下方索引）
-tests/          vitest 單元測試（純函式與資料完整性）
-font/<資料夾名>/ 自備字型，資料夾名＝UI 顯示名
+src/            renderer ES 模組與 WebCodecs 實作
+electron/       Electron 主行程、preload、mpv／ffmpeg adapters
+shared/         renderer／主行程共用的零相依 CommonJS 領域規則
+scripts/        acceptance／diagnostics／release 工具
+tests/          vitest 行為、契約與結構測試
+docs/           使用、開發、架構與 ADR 文件
+font/<資料夾名>/ 自備字型；資料夾名就是 UI 顯示名
 ```
 
 架構規則：**沒有任何模組可以 `import … from './app.js'`。**
-低階模組要觸發重繪或指令時發事件（`emit()`），由 `app.js` 訂閱。
+低階模組要觸發重繪或指令時發事件（`emit()`），由 `app.js` 或專責的上層 bridge／view 訂閱。
+檔案放置與命名規則見 [`docs/開發與驗證.md` §6](docs/開發與驗證.md#6-目錄結構與命名)。
 
 ---
 
@@ -236,7 +239,6 @@ font/<資料夾名>/ 自備字型，資料夾名＝UI 顯示名
 | 查每一版修了哪些坑 | [`docs/版本變更紀錄.md`](docs/版本變更紀錄.md) |
 | 查某個詞在這裡指什麼 | [`CONTEXT.md`](CONTEXT.md)（領域詞彙表） |
 | 查某個設計為什麼這樣決定 | [`docs/adr/`](docs/adr/)（架構決策紀錄） |
-| 看還在設計中的規格 | [`docs/specs/`](docs/specs/) |
 
 ---
 

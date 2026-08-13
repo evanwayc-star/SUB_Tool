@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inspectSubtitleCharacters } from '../src/subtitleTextCheck.js';
+import { inspectSubtitleCharacters } from '../src/subtitle-text-check.js';
 
 describe('字幕字元檢查', () => {
   it('允許繁中、英文、數字、標點與 emoji', () => {

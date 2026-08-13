@@ -82,6 +82,23 @@ function make({ duration = 123.5 } = {}) {
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it('連續精準定位直接改 time-pos，避免 seek 指令延後最新逐格目標', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    sockets[0].write.mockClear();
+
+    host.seek(10);
+    host.seek(10 + 1 / 25);
+    host.seek(10 + 2 / 25);
+
+    const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands).toEqual([
+      ['set_property', 'time-pos', 10],
+      ['set_property', 'time-pos', 10.04],
+      ['set_property', 'time-pos', 10.08],
+    ]);
+  });
+
   it('launch owns both native windows, embeds mpv, connects the pipe, and cleans all resources on quit', async () => {
     const { host, children, sockets } = make();
 

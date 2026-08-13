@@ -3,12 +3,12 @@
    ==============================================================================
    用法：
      1) 先跑這支（app 可以還沒開，它會等）：
-          node scripts/profile-renderer-stall.js
+          node scripts/diagnostics/profile-renderer-stall.js
      2) 開啟 SUB Tool → 載入影音
      3) 偵測到 renderer 開始被擋住就自動開始計時，卡住結束後印出最耗時的函式
 
    ── 為什麼是 renderer ──
-   實測（scripts/measure-dialog-stall.js）：
+   實測（scripts/diagnostics/measure-dialog-stall.js）：
 
      點擊「開啟影音」→ 主行程進入 dialog.showOpenDialog：1 ms
      主行程被擋住：（沒有）

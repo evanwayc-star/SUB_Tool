@@ -1,4 +1,4 @@
-/* npm run dist 之前的內建執行檔核對（scripts/verify-native-binaries.js）。
+/* npm run dist 之前的內建執行檔核對（scripts/release/verify-native-binaries.js）。
 
    electron/ffmpeg/ 與 electron/mpv/ 合計約 538 MB，刻意不進版控（.gitignore）。
    package.json 的 asarUnpack 明列這四個路徑要被打進安裝檔，但 electron-builder
@@ -19,7 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const NODE_SCRIPT = path.join(ROOT, 'scripts', 'verify-native-binaries.js');
+const NODE_SCRIPT = path.join(ROOT, 'scripts', 'release', 'verify-native-binaries.js');
 const require = createRequire(import.meta.url);
 const { bundledNativeRequirements } = require('../electron/native-tooling.js');
 
@@ -96,7 +96,7 @@ describe('package.json：predist 有接上這支腳本', () => {
   const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
   it('npm run dist 之前使用跨平台 Node 腳本，不依賴 PowerShell', () => {
-    expect(pkg.scripts.predist).toContain('node scripts/verify-native-binaries.js');
+    expect(pkg.scripts.predist).toContain('node scripts/release/verify-native-binaries.js');
     expect(pkg.scripts.predist).not.toContain('powershell');
   });
 

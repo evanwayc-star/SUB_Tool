@@ -9,10 +9,9 @@ import { updateNoteActive } from './notes.js';
 import { updateMeters } from './mixer.js';
 import { selectCueSingle } from './subtitles.js';
 
-let rafOn = false, rafFrame = 0, _rafLastIdx = 0;
+let rafFrame = 0, _rafLastIdx = 0;
 let _rafId = null;
 
-// Extracted from app.js line 266-321
 export function rafLoop(renderVideoSubCallback) {
   if (Media.playing) {
     Media.seqTick();
@@ -21,7 +20,7 @@ export function rafLoop(renderVideoSubCallback) {
       $('tcCur').textContent = secToEncore(t, State.fps, State.dropFrame);
       renderSeekBar($('seekBar'), t);
     }
-    // app.js has ensurePlayheadVisible() here. We'll pass it as callback.
+    // app.js 提供頂層捲動協調；ticker 不反向 import 協調層。
     if (window._ensurePlayheadVisible) window._ensurePlayheadVisible();
     updatePlayhead();
     renderVideoSubCallback();

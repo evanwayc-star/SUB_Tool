@@ -2,7 +2,7 @@
    匯出佇列監控的版面預覽產生器
    ==============================================================================
    用法：
-     node scripts/preview-queue-window.js [輸出路徑]
+     node scripts/acceptance/preview-queue-window.js [輸出路徑]
      預設輸出 dist/__queue-preview.html（dist/ 已被 gitignore，不會污染版控）
 
    把 `electron/queue.html` 注入一份假的 `queueAPI` 並塞進涵蓋各種極端情況的
@@ -32,7 +32,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 const OUT = process.argv[2] || path.join(ROOT, 'dist', '__queue-preview.html');
 
 const at = (h, m, s) => new Date(2026, 7, 5, h, m, s).getTime();

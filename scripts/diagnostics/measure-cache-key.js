@@ -1,7 +1,7 @@
 /* ==============================================================================
    量測：載入影音時，快取相關的【同步】I/O 各要花多久
    ==============================================================================
-   用法：node scripts/measure-cache-key.js "<影片完整路徑>"
+   用法：node scripts/diagnostics/measure-cache-key.js "<影片完整路徑>"
 
    ── 為什麼盯這裡 ──
    這些全部跑在【主行程的 UI 執行緒】上，而原生檔案對話框的訊息迴圈也在那條執行緒。
@@ -20,7 +20,7 @@ const crypto = require('crypto');
 
 const SRC = process.argv[2];
 if (!SRC) {
-  console.error('用法：node scripts/measure-cache-key.js "<影片完整路徑>"');
+  console.error('用法：node scripts/diagnostics/measure-cache-key.js "<影片完整路徑>"');
   process.exit(2);
 }
 

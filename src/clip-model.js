@@ -12,12 +12,12 @@ import { secToEncore } from './time.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { escapeHTML } from './util.js';
 import { recordHistory } from './history.js';
-import { fitScale } from './imagegeom.js';
+import { fitScale } from './image-geometry.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 
 
 
-/* 「符合視窗」：幾何計算在 imagegeom.js fitScale()（三路共用的唯一公式所在），
+/* 「符合視窗」：幾何計算在 image-geometry.js fitScale()（三路共用的唯一公式所在），
    這裡只負責套用結果與回報。 */
 function fitClipToStage(c){
   const { scale, recentred } = fitScale({

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { prepareMacNativeBinaries } = require('../scripts/prepare-macos-native-binaries.js');
+const { prepareMacNativeBinaries } = require('../scripts/release/prepare-macos-native-binaries.js');
 
 describe('Apple Silicon 原生執行檔準備', () => {
   it('複製 ffmpeg/ffprobe 並以實際能力探針擋下功能殘缺的 build', () => {

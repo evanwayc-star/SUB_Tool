@@ -279,7 +279,7 @@ function _buildExportTimecodeFilter(inputLabel, timecode, width, height, outputL
   return `${inputLabel}drawtext=fontfile='${_drawtextValue(font)}':timecode='${_drawtextValue(timecode.start)}':r=${timecode.rate}:tc24hmax=0:x=${margin}:y=${margin}:fontcolor=0xFFF2C5:fontsize=${fontSize}:box=1:boxcolor=0x080A0CE6:boxborderw=${padding}:borderw=1:bordercolor=0xF59E0B:fix_bounds=1${outputLabel}`;
 }
 
-/* 圖片在【軌影格】上的矩形。這是 src/imagegeom.js imageBox() 的主程序版本，
+/* 圖片在【軌影格】上的矩形。這是 src/image-geometry.js imageBox() 的主程序版本，
    兩者必須逐位元等價——tests/imageGeomContract.test.js 以矩陣比對鎖住這件事。
 
    為什麼不是「renderer 算好最終矩形傳過來」（架構審查原本的提案）：
@@ -291,7 +291,7 @@ function _buildExportTimecodeFilter(inputLabel, timecode, width, height, outputL
    那樣兩邊就是兩套實作，沒有任何機制保證它們一致。JS 算完給精確的 scale=w:h，
    contain 的邏輯就只剩一份。 */
 /* 片段疊層幾何與預覽共用同一份實作（`shared/image-geometry.cjs`，見鐵律 §0.9）。
-   v6.1.2 之前這裡是 `imageBoxForExport()`——與 src/imagegeom.js 的 imageBox()
+   v6.1.2 之前這裡是 `imageBoxForExport()`——與 src/image-geometry.js 的 imageBox()
    逐行相同的手抄副本，靠 imageGeomContract.test.js 比對兩份輸出。
    壞掉的樣子：預覽與匯出差幾十到上百 px，兩邊各自看起來都正常。
 
@@ -442,7 +442,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
 
       let vchain = '';
       {
-        /* 片段幾何必須與預覽同一組公式（src/imagegeom.js）：
+        /* 片段幾何必須與預覽同一組公式（src/image-geometry.js）：
              方框＝scale×軌影格 → 素材 contain 縮進方框 → 素材【中心】對到 (posX,posY)。
 
            v5.7.0 起【影片與圖片走同一條路】。在那之前影片是
@@ -451,7 +451,6 @@ function buildDeliveryArgv(spec = {}, env = {}) {
            （scale=1、pos=0.5）下兩者結果相同，所以舊專案的輸出不變；
            但那條路沒辦法表達「這一段自己要縮小／偏移」。
 
-           ── 不能用 pad 定位（v4.6 以前的做法，實測有兩個硬傷）：
            ── 不能用 pad 定位（v4.6 以前的做法，實測有兩個硬傷）：
               a) pad 的位移得用「縮放後的實際尺寸」算，但 force_original_aspect_ratio=decrease
                  之後實際尺寸小於方框 → 非同比例素材會被貼到方框左上角。實測 1920×1080 專案
@@ -466,7 +465,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
         const pyClip = Math.max(0, Math.min(1, c.posY == null ? 0.5 : +c.posY));
         const BG = `t${ti}ib${si}`, IM = `t${ti}im${si}`;
         fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${clen.toFixed(3)},format=yuva420p,setsar=1[${BG}]`);
-        /* 有原生尺寸時用【與預覽同一條公式】算出精確矩形（imageBoxForExport ≡ imagegeom.imageBox），
+        /* 有原生尺寸時用【與預覽同一條公式】算出精確矩形（imageBoxForExport ≡ image-geometry.imageBox），
            contain 的邏輯就只有一份。舊專案沒帶 natW/natH 時退回讓 ffmpeg 自己算，
            結果相同，只是少了「兩邊同一份實作」的保證。 */
         const box = (+c.natW > 0 && +c.natH > 0)

@@ -162,7 +162,7 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
         scale: Math.max(0.01, finite(c.scale, 1)),
         posX: ratio(c.posX, 0.5), posY: ratio(c.posY, 0.5),
         /* 原生尺寸讓主程序能用【與預覽同一條公式】算出精確的 contain 尺寸
-           （見 electron/export-plan.js imageBoxForExport ≡ src/imagegeom.js imageBox）。
+           （兩側 consumer 都取用 shared/image-geometry.cjs 的唯一公式）。
            舊專案可能沒有這兩個值，主程序會退回讓 ffmpeg 自己算 —— 結果相同，
            只是少了「兩邊用同一份實作」的保證。 */
         natW: Math.max(0, finite(c.natW, 0)), natH: Math.max(0, finite(c.natH, 0)),

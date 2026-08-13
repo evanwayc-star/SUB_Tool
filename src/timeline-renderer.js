@@ -29,7 +29,7 @@ import { paintClipBlocks } from './painters/clip-painter.js';
 import { paintSubtitleBlocks } from './painters/subtitle-painter.js';
 import { paintClipWave } from './painters/waveform-painter.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
-import { fitScale } from './imagegeom.js'; // 「符合視窗」與匯出共用同一條 contain 公式
+import { fitScale } from './image-geometry.js'; // 「符合視窗」與匯出共用同一條 contain 公式
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId,
   setSelection, deselect, pruneSelection, focusTrackKind } from './state.js';
 import { clamp, pad, escapeHTML } from './util.js';
@@ -1154,11 +1154,18 @@ tlScroll.addEventListener('mousedown',e=>{
   if(block){
     const c=State.cues.find(z=>z.id===block.dataset.id); if(!c)return;
     if(e.detail>=2 && !e.shiftKey){ selectCue(c.id); emit('cue:openEdit', c); e.preventDefault(); return; }
-    // 第一次拖曳前的儲存守衛（同步，不 await，避免拖曳殘留問題）
-    if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; }
+    const mode = e.target.classList.contains('edge')? (e.target.classList.contains('l')?'l':'r') : 'move';
+    const isCtrl = e.ctrlKey||e.metaKey;
+    const isPlainClick = !isCtrl && !e.shiftKey && !e.altKey;
+    // 第一次拖曳前的儲存守衛（同步，不 await，避免拖曳殘留問題）。選取本身
+    // 不會修改專案，所以要先反映；否則第一次點擊只會開提示，看起來像沒點中。
+    if(!isProjectGuardDone()){
+      if(isPlainClick) selectCue(c.id);
+      ensureProjectSaved(); e.preventDefault(); return;
+    }
     if(State.tracks[c.track||0]?.locked){
       // 鎖定軌道：僅允許選取，不允許拖曳移動
-      if(!isSel(c.id)) selectCue(c.id); e.preventDefault(); return;
+      if(isPlainClick || !isSel(c.id)) selectCue(c.id); e.preventDefault(); return;
     }
     if(e.shiftKey && State.selectedId){
       // 同軌道範圍多選
@@ -1179,12 +1186,13 @@ tlScroll.addEventListener('mousedown',e=>{
       // 不同軌道：保持現有選取不變
       e.preventDefault(); return;
     }
-    const mode = e.target.classList.contains('edge')? (e.target.classList.contains('l')?'l':'r') : 'move';
-    const isCtrl = e.ctrlKey||e.metaKey;
     // Ctrl/Cmd 已有複製行為；Alt 拖曳字幕區塊也複製，但不影響邊緣修剪。
     const isCopyDrag = mode==='move' && (e.altKey||isCtrl);
     if(isCtrl && mode!=='move'){ selectCue(c.id,{additive:true}); if(!isSel(c.id)){ e.preventDefault(); return; } }
     else if(!isCtrl && !isSel(c.id)) selectCue(c.id);
+    // 已在多選中的字幕要等到 mouseup 才收斂：若滑鼠超過 3px 門檻，原選取
+    // 必須完整保留，才能拖動整組；只有真正的普通單擊才切軌並變成單選。
+    const collapseMultiOnPlainClick = mode==='move' && isPlainClick && isSel(c.id) && State.selectedIds.length>1;
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
@@ -1196,7 +1204,7 @@ tlScroll.addEventListener('mousedown',e=>{
     const previewRowIds=grp.map(item=>item.c.id);
     transaction.addCancelEffect(()=>previewRowIds.forEach(renderSubRow));
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
-      snaps:snapTargets(exSet), isCtrl,isCopyDrag,selectionBefore,
+      snaps:snapTargets(exSet), isCtrl,isCopyDrag,collapseMultiOnPlainClick,selectionBefore,
       transaction};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
@@ -1620,7 +1628,9 @@ window.addEventListener('mouseup',e=>{
     }
   }else if(drag.mode!=='scrub'){
     const moved=drag.moved, m=drag.mode;
-    if (!moved && drag.isCtrl && m==='move') {
+    if (!moved && drag.collapseMultiOnPlainClick) {
+      selectCue(drag.c.id);
+    } else if (!moved && drag.isCtrl && m==='move') {
       selectCue(drag.c.id, {additive:true});
     } else if (moved) {
       sweepContainedCues(drag.grp.map(x=>x.c));

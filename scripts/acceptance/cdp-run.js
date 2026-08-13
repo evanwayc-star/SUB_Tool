@@ -4,7 +4,7 @@
    用法：
      1) 先用偵錯連接埠啟動已安裝的 app（PowerShell）：
           & "C:\Program Files\SUB Tool\SUB Tool.exe" --remote-debugging-port=9223
-     2) node scripts/cdp-run.js <要執行的 js 檔> [連接埠]
+     2) node scripts/acceptance/cdp-run.js <要執行的 js 檔> [連接埠]
 
    為什麼不用 DevTools 前端：同一個目標只能接一個 DevTools 客戶端，而 Chrome 內建的
    DevTools 版本也可能與 Electron 對不上，症狀就是「WebSocket disconnected」。
@@ -22,7 +22,7 @@ const WebSocket = require('ws');
 const file = process.argv[2];
 const port = Number(process.argv[3] || 9223);
 if (!file) {
-  console.error('用法：node scripts/cdp-run.js <js 檔> [連接埠]');
+  console.error('用法：node scripts/acceptance/cdp-run.js <js 檔> [連接埠]');
   process.exit(2);
 }
 const source = fs.readFileSync(path.resolve(file), 'utf8');

@@ -1,7 +1,7 @@
 /* ==============================================================================
-   讀出頁面裡的輸入延遲探針（由 scripts/measure-input-latency.js 裝上）
+   讀出頁面裡的輸入延遲探針（由 scripts/diagnostics/measure-input-latency.js 裝上）
    ==============================================================================
-   用法：node scripts/read-input-probe.js
+   用法：node scripts/diagnostics/read-input-probe.js
 
    ── 為什麼要拆成「裝」與「讀」兩支 ──
    常駐的監看行程一再被中止，而它一死輸出就停在表頭，看起來像「什麼都沒量到」
@@ -79,7 +79,7 @@ const inPage = js => `(async () => {
   const main = await connect((await getJSON('http://127.0.0.1:9229/json/list'))[0]);
   const armed = await main.eval(inPage('!!window.__inpArmed'));
   if (!armed) {
-    console.error('頁面裡沒有探針。請先跑 scripts/measure-input-latency.js 裝上，');
+    console.error('頁面裡沒有探針。請先跑 scripts/diagnostics/measure-input-latency.js 裝上，');
     console.error('而且【不要在裝好之後重開 app】——重開會把它清掉。');
     process.exit(1);
   }

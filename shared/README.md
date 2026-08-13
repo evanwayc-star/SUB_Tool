@@ -6,13 +6,13 @@
 
 renderer 是 ES module（Vite 打包成單一 `dist/index.html`），主程序是 CommonJS
 （`package.json` 沒有 `"type": "module"`，`electron/main.js` 用 `require`）。
-兩邊無法互相 import，於是幾條領域規則長期**各自維護一份手抄實作**，靠契約測試
-矩陣窮舉比對兩份輸出是否相同：
+兩邊過去無法直接共用 ESM，於是幾條領域規則長期**各自維護一份手抄實作**，靠契約測試
+矩陣窮舉比對兩份輸出是否相同。現在規則已收斂到 `shared/`，下表保留歷史來源：
 
 | 規則 | 以前的兩份 |
 |------|-----------|
 | 來源聲道展開順序 | `src/channel-layout.js` ↔ `electron/channel-layout.js` |
-| 片段疊層幾何 | `src/imagegeom.js imageBox()` ↔ `electron/export-plan.js imageBoxForExport()` |
+| 片段疊層幾何 | renderer `imageBox()` ↔ 主程序 `imageBoxForExport()` 的手抄公式 |
 | 片段長度與淡入淡出視窗 | `src/clip-fade.js` ↔ `electron/export-plan.js`（內聯三處） |
 
 那些契約測試證明的是「兩份副本目前一致」，不是「規則本身正確」。

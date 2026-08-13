@@ -4,7 +4,7 @@ import { SubFormats } from './formats.js';
 import { renderASS } from './ass-render.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { setStatus, showToast } from './ui.js';
-import { buildXLSX } from './xlsxExport.js';
+import { buildXLSX } from './xlsx-export.js';
 
 export function getFileData(kind, cues, trackName) {
   if (!cues.length) return null;

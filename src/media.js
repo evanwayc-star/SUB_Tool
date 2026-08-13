@@ -1736,7 +1736,7 @@ const Media = {
     const fps = info?.video?.fps || 0;
     if(fps && Math.abs(snapFps(fps) - State.fps) > 0.002)
       showToast(`注意：${baseName(p)} 為 ${fps}fps，與序列 ${State.fps}${State.dropFrame?'df':''}fps 不同——時碼以序列 FPS 為準`);
-    // natW/natH 與圖片共用同一組欄位名，讓 imagegeom 的公式對兩者一體適用。
+    // natW/natH 與圖片共用同一組欄位名，讓 image-geometry 的公式對兩者一體適用。
     // 舊專案沒有這兩個值時，匯出仍可由 ffmpeg 自行 contain（結果相同），
     // 只是對話框的「符合視窗」少了精確依據。
     const meta = { name: baseName(p), path: p, dur, fps,

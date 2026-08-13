@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { imageBox } from '../src/imagegeom.js';
+import { imageBox } from '../src/image-geometry.js';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,7 +33,7 @@ const NATIVES = [
 const SCALES = [0.01, 0.25, 0.5, 1, 1.5, 3];
 const POSITIONS = [0, 0.25, 0.5, 0.75, 1];
 
-describe('imagegeom.imageBox ≡ export-plan.imageBoxForExport', () => {
+describe('image-geometry.imageBox ≡ export-plan.imageBoxForExport', () => {
   it('矩陣窮舉下兩份實作完全一致', () => {
     let checked = 0;
     const mismatches = [];
@@ -79,7 +79,7 @@ describe('imagegeom.imageBox ≡ export-plan.imageBoxForExport', () => {
     const b = imageBoxForExport({ frameW: over.frameW ?? 1920, frameH: over.frameH ?? 1080, ...args });
 
     for (const k of ['x', 'y', 'w', 'h']) {
-      expect(Number.isFinite(a[k]), `imagegeom.${k} 不是有限數：${a[k]}`).toBe(true);
+      expect(Number.isFinite(a[k]), `image-geometry.${k} 不是有限數：${a[k]}`).toBe(true);
       expect(b[k]).toBeCloseTo(a[k], 9);
     }
   });

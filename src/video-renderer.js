@@ -11,7 +11,7 @@ import { getPlayerAdapter } from './media-player-adapter.js';
 import { toASSFromState } from './subio.js';
 import { createPreviewDrag } from './pointer-interaction.js';
 import { drawTimeline } from './timeline.js';
-import { imageBoxOnStage } from './imagegeom.js';
+import { imageBoxOnStage } from './image-geometry.js';
 import { fadeAlphaAtTimeline } from './clip-fade.js';
 import { renderASS } from './ass-render.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
@@ -528,7 +528,7 @@ export function renderImageOverlays(){
   // MPV 的原生畫面在主 DOM 上方，圖片外觀交給透明 guide 顯示；互動始終由
   // 這個主 renderer 的 #imageLayer 收到，不能另建第二條 native pointer 路徑。
   imageClips.forEach(c => {
-    // 幾何（scale／posX／posY／所在視訊軌的 PiP）一律走 _imageBoxOf → imagegeom.js
+    // 幾何（scale／posX／posY／所在視訊軌的 PiP）一律走 _imageBoxOf → image-geometry.js
     const opacity = (State.videoTracks[c.vtrack || 0]?.opacity ?? 1);
 
     // 淡入淡出的長度、斜坡與時間域轉換只有 clip-fade.js 一份規格；匯出側套用同一組數字。
@@ -536,7 +536,7 @@ export function renderImageOverlays(){
 
     const imgSrc = _imageSrc(c);
 
-    /* 互動框＝圖片【實際被畫出來的那塊】（見 imagegeom.js）。
+    /* 互動框＝圖片【實際被畫出來的那塊】（見 image-geometry.js）。
        舊版直接把「scale×畫框」當成 .img-wrap，非 16:9 的素材會讓虛線框與四角把手
        離圖片本體上百 px，下緣兩顆還會掉到播放列底下＝拉不到、也移不準。 */
     const box = _imageBoxOf(c, rect);

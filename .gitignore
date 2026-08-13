@@ -13,8 +13,8 @@ test-media/
 # 建置產物（npm run build / npm run dist 產生，不進版控）
 # dist/ 曾在 898d092 被移除追蹤，但當時漏了補這一行，
 # 導致它每次 build 後又冒出來、隨時可能被 git add -A 掃回來。
-dist/
-release/
+/dist/
+/release/
 *.mxf
 *.mov
 *.mp4

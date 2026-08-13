@@ -61,7 +61,6 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx.ensureCtx();
 
     // (mpv) 非原生格式或多音軌且偵測到 mpv：秒開，背景抽音軌
-        // (mpv) 非原生格式或多音軌且偵測到 mpv：秒開，背景抽音軌
     const dummyMpv = typeof window !== 'undefined' && window.subtool ? new MpvAdapter(window.subtool) : null;
     if((!canNative || audio.length>1) && dummyMpv && dummyMpv.isAvailable){
       const mpvInfo=await dummyMpv.detect();

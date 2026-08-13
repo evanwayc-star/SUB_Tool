@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
-  $RepositoryRoot = Join-Path $PSScriptRoot '..'
+  $RepositoryRoot = Join-Path $PSScriptRoot '..\..'
 }
 
 function Normalize-PathForComparison([string]$Path) {

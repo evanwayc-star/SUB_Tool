@@ -5,18 +5,12 @@
    片段的長度與淡入淡出視窗。**預覽與匯出必須用同一組數字**，否則畫面在
    預覽裡淡完了、匯出卻還沒淡完（或反過來），而且完全不會報錯。
 
-   【為什麼獨立成一支】
-   同一組計算原本散在三個地方：
+   【歷史原因】同一組計算原本散在三個地方：
      src/app.js              renderImageOverlays() 的 alpha 疊乘
      electron/export-plan.js 影像 `fade=t=in/out:...:alpha=1`
      electron/export-plan.js 音訊 `afade=t=in/out:...`
-   三份都寫著 `Math.max(0.001, c.out - c.in)`，改一份不會讓另外兩份紅。
-
-   【跨行程的接縫】
-   electron/ 是主程序（CommonJS），不能 import 這裡。所以這支模組不是
-   「唯一實作」，而是「唯一的規格」——匯出側各自套用在自己的 filtergraph 上，
-   由 tests/clipFadeContract.test.js 以矩陣窮舉比對兩邊，任一邊漂掉就紅。
-   這與 imagegeom.js ↔ export-plan.js 的作法相同（見 imageGeomContract）。
+   現在規則已收斂到 `shared/clip-fade.cjs`，renderer 與主程序都直接取用同一份實作；
+   `tests/clipFadeContract.test.js` 守住兩側的 consumer／filtergraph 表達。
 ============================================================================== */
 
 /* clipLength 與 fadeWindow 的規則住在 `shared/clip-fade.cjs`——匯出端（主程序、

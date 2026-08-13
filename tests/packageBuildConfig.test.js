@@ -71,7 +71,7 @@ describe('Apple Silicon 安裝檔設定', () => {
 
   it('測試版建置會先準備靜態 arm64 工具，再明確要求 unsigned Mac target', () => {
     expect(packageJson.scripts['native:prepare:mac']).toBe(
-      'node scripts/prepare-macos-native-binaries.js',
+      'node scripts/release/prepare-macos-native-binaries.js',
     );
     expect(packageJson.scripts['dist:mac:test']).toContain('npm run native:prepare:mac');
     expect(packageJson.scripts['dist:mac:test']).toContain('electron-builder --mac --arm64');

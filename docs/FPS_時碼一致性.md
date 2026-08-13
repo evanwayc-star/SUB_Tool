@@ -11,8 +11,8 @@
 FPS-SYNC
 ```
 
-> 想一次找到全部關鍵點：用編輯器全域搜尋 `FPS-SYNC`（目前約 12 處，分布於 5 個檔案：
-> `time.js / media.js / timeline.js / keyboard.js / app.js`）。
+> 想一次找到全部標記：用編輯器全域搜尋 `FPS-SYNC`（目前 12 處，分布於 6 個檔案：
+> `time.js / media.js / loaders/media-loader.js / timeline-renderer.js / keyboard.js / app.js`）。
 
 ---
 
@@ -60,12 +60,12 @@ FPS-SYNC
 
 ### (I2) 「秒 → 時:分:秒:格」只有一個換算來源：`encoreParts()`
 
-- 位於 `time.js`。`secToEncore()`（播放器 `tcCur`、字幕列表、匯出）與 `timeline.js` 的 `fmtTick()`（時間軸刻度）**都呼叫它**。
+- 位於 `time.js`。`secToEncore()`（播放器 `tcCur`、字幕列表、匯出）與 `timeline-renderer.js` 的 `fmtTick()`（時間軸刻度）**都呼叫它**。
 - **不要**在任何地方自己用 `Math.floor(s/3600)…` 拼時碼。曾經 `fmtTick` 這樣做，導致時間軸刻度顯示「真實秒數」而播放器顯示「數影格時碼」，在 1:33 處兩者差約 5 秒（見第 4 節 Bug A）。
 
 ### (I3) 影格格網只有一個：`snapTimeToFrame()`
 
-- 位於 `time.js`。`seek()`、`pause()`、時間軸拖曳（`timeline.js` 的 `snapFrame`）、逐格步進都用它對齊。
+- 位於 `time.js`。`seek()`、`pause()`、時間軸拖曳（`timeline-renderer.js` 的 `snapFrame`）、逐格步進都用它對齊。
 - 確保播放點永遠落在整格、且與刻度同格。
 - ASS 的 Start/End 只有百分秒；`secToASS()` 必須直接向下表示原秒數，**不可**自行減半格後再截斷。
   否則 29.97 的自產 ASS 回匯、再吸附格網時會穩定退到前一格。自產檔的精確影格由中繼資料保留。
@@ -83,6 +83,7 @@ FPS-SYNC
 
 - `nudge()`（`keyboard.js`）用 `Media.displayTime() + d`，**不是** `vTime() + d`。
 - 因為 `vTime()` 帶有瀏覽器沉降的浮點 ε，`+1格` 後再 `round` 會被放大成跳兩格 / 退不動（29.97 尤甚，見 Bug B）。
+- Windows mpv host 對外仍只接受**來源時間**，但 IPC 實作要設定 `time-pos`，不可改回連續送 `seek absolute`。mpv 的 `seek` command 會刻意排入舊畫面的顯示等待，快速送出 ±1／±2 格時可能讓最新目標額外等約 0.3 秒；`time-pos` setter 仍是精準 absolute 定位，且可立即接手最新目標。
 
 ### (I6) 不可用「原始播放時間」覆蓋權威值 `_lastSeekTime`
 
@@ -98,13 +99,16 @@ FPS-SYNC
 
 ### (I8) 監看 TC 與燒入 TC 分工，但兩者都要以專案時碼為準
 
-- 播放器 `TC` 是監看 overlay，`app.js renderTimecodeWatermark()` 必須傳入 `Media.displayTime()`，一般預覽由 DOM 顯示、mpv 預覽由透明 guide 顯示；絕不能各自讀 `video.currentTime`／mpv 原始事件。
-- 匯出勾選「壓入時間碼浮水印」時，`subio.js` 要把輸出範圍的 `exportIn` 換成 `secToEncore(exportIn, fps, dropFrame)` 交給主程序。這表示輸出第一格顯示專案的 In 時碼，並非強制從 `00:00:00:00` 起算。
+- 播放器 `TC` 是監看 overlay，`video-renderer.js renderTimecodeWatermark()` 必須使用 `Media.displayTime()`，一般預覽由 DOM 顯示、mpv 預覽由透明 guide 顯示；絕不能各自讀 `video.currentTime`／mpv 原始事件。
+- 匯出勾選「壓入時間碼浮水印」時，`export-job-builder.js buildExportJobs()` 從已凍結 submission 的 `timelineStart` 產生 `timelineStartTimecode`。這表示輸出第一格顯示專案的 In 時碼，並非強制從 `00:00:00:00` 起算。
 - 監看 TC 是 config 偏好，不隨專案存檔也不會自動燒入；燒入 TC 只屬於那一次影片輸出，WAV 不適用。
 
 ---
 
-## 3. 各關鍵點對照表（搜尋 `FPS-SYNC`）
+## 3. 各關鍵點對照表
+
+`FPS-SYNC` 標記放在最容易破壞不變量的計算與狀態邊界；下表也列出直接消費這些結果的入口，
+因此不保證每一列本身都有該字串。
 
 | 檔案 | 位置 | 作用 | 對應不變量 |
 |------|------|------|-----------|
@@ -116,16 +120,17 @@ FPS-SYNC
 | `media.js` | `seek()` 的 snap／純字幕通知 | seek 對齊影格；無播放器時仍通知預覽讀回 `displayTime()` | I3, I4 |
 | `media.js` | `pause()` 的 snap | 暫停點對齊影格 | I3 |
 | `media.js` | mpv `time-pos` handler | 暫停時同源同格 + 抖動容忍 | I4, I6 |
+| `loaders/media-loader.js` | 原生 `seeked` 對齊 | 暫停載入完成後仍回到權威影格 | I3, I4 |
 | `keyboard.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
 | `keyboard.js` | JKL 倒播 timer | 以 `displayTime()` 計算下一個時間軸位置 | I4, I5 |
 | `notes.js` | `addNote()` | 備註時間取自 `displayTime()` | I4 |
-| `timeline.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |
+| `timeline-renderer.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |
 | `app.js` | `timeupdate` handler | 三讀數同源 `displayTime()` | I4 |
 | `app.js` | `pause` event | 暫停時刷新時碼/seekBar 同源 | I4 |
 | `app.js` | `fps:changed`／原生 `seeked` | 時碼、監看 TC、備註高亮同讀 `displayTime()` | I4 |
 | `sequence.js` | `timedRangesForSource()` | live ASS 先以時間軸篩選、最後才轉來源時間 | I4 |
-| `app.js` | `renderTimecodeWatermark()` | DOM／mpv guide 監看 TC 讀 `displayTime()` | I4, I8 |
-| `subio.js` | `_runExportVideo()` | 以輸出 In 換成交付用 TC 起點 | I2, I8 |
+| `video-renderer.js` | `renderTimecodeWatermark()` | DOM／mpv guide 監看 TC 讀 `displayTime()` | I4, I8 |
+| `export-job-builder.js` | `buildExportJobs()` | 從凍結的輸出 In 產生交付用 TC 起點 | I2, I8 |
 
 ---
 
@@ -158,7 +163,7 @@ FPS-SYNC
 - **現象**：明明字幕列表與時間軸上標示為 `02:03:54:13`，但播放器時間在 `02:03:54:12` 時就已經渲染出字幕。且拖曳時間軸設定 In 點時，會產生 1 格偏移。
 - **原因**：
   - 過去判斷字幕是否顯示採用小數浮點運算 `(t + halfFrame) >= c.start`，在浮點精度下會引發邊界誤判，造成提早顯示。
-  - `timeline.js` 的磁吸範圍過大（20px），且之前使用了未經 NTSC 分數修正的 `Math.round(t*29.97)`。
+  - 舊時間軸實作的磁吸範圍過大（20px），且之前使用了未經 NTSC 分數修正的 `Math.round(t*29.97)`。
 - **修法**：
   - 全面導入 **SMPTE NTSC 精確分數**（如 `30000/1001` 代替 `29.97`）。
   - `renderVideoSub` 完全捨棄浮點比較，直接將時間與字幕轉為精確的**整數影格座標 (Frame Index)** 後再比較（`currentFrame >= startFrame`）。

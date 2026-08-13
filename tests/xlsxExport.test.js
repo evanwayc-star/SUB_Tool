@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildXLSX } from '../src/xlsxExport.js';
+import { buildXLSX } from '../src/xlsx-export.js';
 
 // 讀小端 uint16 / uint32
 const u16 = (b, o) => b[o] | (b[o + 1] << 8);

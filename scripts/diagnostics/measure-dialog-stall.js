@@ -3,7 +3,7 @@
    ==============================================================================
    用法：
      1) 開啟 SUB Tool，把影音載入好（重點：載入後才會發生）
-     2) node scripts/measure-dialog-stall.js
+     2) node scripts/diagnostics/measure-dialog-stall.js
      3) 腳本會說「請按開啟影音」——去按，等對話框真的出現後按取消
      4) 回到終端機看結果
 

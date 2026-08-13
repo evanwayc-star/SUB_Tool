@@ -1,7 +1,7 @@
 /* ==============================================================================
    量測：Windows 檔案對話框要讀那個大檔的中繼資料時，會慢多久
    ==============================================================================
-   用法：node scripts/measure-shell-metadata-read.js "<影片完整路徑>"
+   用法：node scripts/diagnostics/measure-shell-metadata-read.js "<影片完整路徑>"
         （在 mpv 正在播那個檔的時候跑，才量得到真實情況）
 
    ── 為什麼查到這裡 ──
@@ -30,7 +30,7 @@ const fs = require('fs');
 
 const SRC = process.argv[2];
 if (!SRC) {
-  console.error('用法：node scripts/measure-shell-metadata-read.js "<影片完整路徑>"');
+  console.error('用法：node scripts/diagnostics/measure-shell-metadata-read.js "<影片完整路徑>"');
   process.exit(2);
 }
 

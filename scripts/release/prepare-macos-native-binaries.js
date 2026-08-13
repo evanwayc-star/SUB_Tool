@@ -48,7 +48,7 @@ function prepareMacNativeBinaries(options = {}) {
     throw new Error(`Mac 原生執行檔只能在 darwin/arm64 準備，目前是 ${platform}/${arch}`);
   }
 
-  const repositoryRoot = path.resolve(options.repositoryRoot || path.join(__dirname, '..'));
+  const repositoryRoot = path.resolve(options.repositoryRoot || path.join(__dirname, '..', '..'));
   const ffmpegSource = options.ffmpegSource || require('ffmpeg-static');
   const ffprobeSource = options.ffprobeSource || require('@derhuerst/ffprobe-static');
   const spawnSync = options.spawnSync || nodeSpawnSync;

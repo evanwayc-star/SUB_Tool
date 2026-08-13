@@ -93,7 +93,7 @@ Main (main.js)
 | `onProgress(cb)` | `task-progress` | M→R | ffmpeg 進度推播 `{jobId, label, pct, done}` |
 | `mpv.detect()` | `mpv:detect` | R→M | 回傳 `{available, supported, exe}`；Apple Silicon 第一版固定 `supported:false` |
 | `mpv.launch(opts)` | `mpv:launch` | R→M | Windows 啟動 mpv 嵌入播放（`{src, bounds, audio}`）；其他平台 fail closed |
-| `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置（**來源時間**；影片序列的時間軸↔來源映射在前端 media.js 處理） |
+| `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置（**來源時間**；影片序列的時間軸↔來源映射在前端 media.js 處理）。host 以設定 `time-pos` 執行精準 absolute 定位，避免 mpv `seek` command 的 queued display delay 阻塞連續逐格的最新目標 |
 | `mpv.loadfile(p)` | `mpv:loadfile` | R→M | 影片序列跨段切換：同一 mpv 實例換檔（保留 --wid 嵌入與屬性），輪詢 duration 就緒後回傳 `{duration}`；只接受 FileAuthority 已授權來源 |
 | `mpv.play()` / `mpv.pause()` | `mpv:play` / `mpv:pause` | R→M | 播放 / 暫停 |
 | `mpv.mute(v)` | `mpv:mute` | R→M | 靜音切換 |
@@ -312,7 +312,7 @@ full_build 與 mpv（約 538 MB；見 §7）。Apple Silicon 則由固定版本�
 `@derhuerst/ffprobe-static` 在 **darwin/arm64 本機**下載正確架構，複製相鄰的 LICENSE／
 README，並實際探測 `ass`、`libx264`、`prores_ks`、`pcm_s24le`、`mxf` 後才允許打包。
 
-`scripts/verify-native-binaries.js` 是 Windows/macOS 共用的唯一封裝需求檢查器：Windows 要求
+`scripts/release/verify-native-binaries.js` 是 Windows/macOS 共用的唯一封裝需求檢查器：Windows 要求
 ffmpeg.exe、ffprobe.exe、mpv.exe、d3dcompiler_43.dll；darwin-arm64 只要求 ffmpeg/ffprobe，
 並額外檢查 Unix executable bit。Windows `predist` 明確帶入 `win32/x64`，`dist:mac:test`
 明確帶入 `darwin/arm64`；

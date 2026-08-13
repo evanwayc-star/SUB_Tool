@@ -156,7 +156,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
    （匯出的 ass= 是 filtergraph 最後一道濾鏡，字幕蓋在所有 overlay 之上）。
    v5.0.0 一度調成 10 → 預覽變成圖片蓋字幕、與成品上下顛倒。仍高於 .safe-frame(2)。 */
 .imglayer{position:absolute;inset:0;pointer-events:none;aspect-ratio:16/9;max-width:100%;max-height:100%;margin:auto;z-index:3;}
-/* .img-wrap ＝圖片【實際被畫出來的矩形】（尺寸由 app.js 依 imagegeom.js 算好後以 px 指定）。
+/* .img-wrap ＝圖片【實際被畫出來的矩形】（尺寸由 app.js 依 image-geometry.js 算好後以 px 指定）。
    v4.7 前這個框是「scale×畫框」，方形／直式素材的把手會離圖片上百 px；務必保持
    wrap ≡ 圖片，虛線框與四角把手才會貼合素材。 */
 .img-wrap{position:absolute;pointer-events:auto;cursor:grab;transform-origin:center center;touch-action:none;user-select:none;z-index:1;}
@@ -312,9 +312,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .sublist{flex:1;overflow:auto;position:relative}
 .sub-row{display:flex;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer;align-items:flex-start;transition:background 0.15s ease}
 .sub-row:hover{background:var(--panel2)}
-.sub-row.active{box-shadow:inset 3px 0 0 var(--cue);background:rgba(42,117,211,0.12)}
-.sub-row.sel{background:rgba(245,158,11,0.12);border-left:3px solid var(--cue-sel);padding-left:7px}
-.sub-row.sel.active{box-shadow:inset 3px 0 0 var(--cue);}
+.sub-row.active{box-shadow:inset 5px 0 0 var(--cue);background:rgba(42,117,211,0.12)}
+.sub-row.sel{background:rgba(245,158,11,0.12);border-left-color:var(--cue-sel)}
+.sub-row.sel.active{box-shadow:inset 5px 0 0 var(--cue);}
 body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .idx{width:26px;color:var(--text-faint);font-size:11px;text-align:right;padding-top:2px;flex-shrink:0;font-variant-numeric:tabular-nums}
 .sub-row .body{flex:1;min-width:0}
@@ -776,35 +776,35 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 
 .sub-row{
   display:flex;align-items:center;padding:2px 8px;gap:8px;border-bottom:1px solid var(--border);
-  font-size:12px;user-select:text;line-height:1.4;border-left:3px solid transparent;
-  transition:background 0.15s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  font-size:12px;user-select:text;line-height:1.4;border-left:5px solid transparent;
+  transition:background 0.15s cubic-bezier(0.4, 0, 0.2, 1);
   content-visibility:auto;contain-intrinsic-size:1px 32px;
 }
 .sub-row:hover{background:var(--panel3)}
-.sub-row.sel{background:var(--panel2);border-left-color:var(--accent)}
+.sub-row.sel{background:var(--panel2);border-left-color:var(--cue-sel)}
 
 /* 1. Green: 空白 */
 .sub-row.blank{background:rgba(50,180,80,.13)}
 .sub-row.blank:hover{background:rgba(50,180,80,.20)}
-.sub-row.blank.sel{background:rgba(50,180,80,.22);border-left-color:rgba(50,180,80,.8)}
+.sub-row.blank.sel{background:rgba(50,180,80,.22)}
 
 /* 2. Blue: 兩行 */
 .sub-row.two-line{background:rgba(40,130,240,.13)}
 .sub-row.two-line:hover{background:rgba(40,130,240,.20)}
-.sub-row.two-line.sel{background:rgba(40,130,240,.22);border-left-color:rgba(40,130,240,.8)}
+.sub-row.two-line.sel{background:rgba(40,130,240,.22)}
 
 /* 3. Brown: 缺少 In/Out */
 .sub-row.no-time{background:rgba(180,120,50,.25)}
 .sub-row.no-time:hover{background:rgba(180,120,50,.35)}
-.sub-row.no-time.sel{background:rgba(180,120,50,.45);border-left-color:rgba(180,120,50,.8)}
+.sub-row.no-time.sel{background:rgba(180,120,50,.45)}
 /* 4. Red: 超過三行 / 重疊 */
 .sub-row.multi-line{background:rgba(240,100,120,.15)}
 .sub-row.multi-line:hover{background:rgba(240,100,120,.22)}
-.sub-row.multi-line.sel{background:rgba(240,100,120,.28);border-left-color:rgba(240,80,100,.8)}
+.sub-row.multi-line.sel{background:rgba(240,100,120,.28)}
 .sub-row.multi-line .txt{color:#d44}
 .sub-row.overlap{background:rgba(230,80,80,.15) !important}
 .sub-row.overlap:hover{background:rgba(230,80,80,.22) !important}
-.sub-row.overlap.sel{background:rgba(230,80,80,.28) !important; border-left-color:rgba(230,80,80,.8) !important}
+.sub-row.overlap.sel{background:rgba(230,80,80,.28) !important;border-left-color:var(--cue-sel) !important}
 /* 時間軸重疊覆蓋 */
 .cue-overlap{position:absolute;top:0;bottom:0;pointer-events:auto;cursor:pointer;z-index:6;
   background:rgba(210,40,40,.22) repeating-linear-gradient(-45deg,rgba(220,40,40,.75) 0,rgba(220,40,40,.75) 3px,transparent 3px,transparent 10px)}

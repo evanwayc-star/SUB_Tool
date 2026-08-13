@@ -1,7 +1,7 @@
 import { $, sublist } from './dom.js';
 import { State, isSel, newId, trackVisible, cueSuffix, setSelection, deselect, pruneSelection } from './state.js';
 import { escapeHTML, tcKeyAllowed } from './util.js';
-import { inspectSubtitleCharacters } from './subtitleTextCheck.js';
+import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';

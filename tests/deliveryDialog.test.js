@@ -34,7 +34,7 @@ vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));
 vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));
 vi.mock('../src/project.js', () => ({ Project: {} }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn() }));
-vi.mock('../src/xlsxExport.js', () => ({ buildXLSX: vi.fn() }));
+vi.mock('../src/xlsx-export.js', () => ({ buildXLSX: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ getNotesGeneralFileData: vi.fn(), getNotesEdiusFileData: vi.fn() }));
 vi.mock('../src/audio-routing.js', () => ({
   AudioRouting: {

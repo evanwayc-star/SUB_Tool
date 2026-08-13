@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { imageBox, trackFrame, imageBoxOnStage, fitScale } from '../src/imagegeom.js';
+import { imageBox, trackFrame, imageBoxOnStage, fitScale } from '../src/image-geometry.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -194,7 +194,7 @@ describe('匯出圖片片段：直接檢查產生的 ffmpeg 參數', () => {
    兩者在素材比例＝專案比例時剛好一致，所以一直沒被發現；素材比例不同且該軌是 PiP
    或非置中時，實測差到 120px（4:3 素材、軌 scale=0.5、posX=1）。
 
-   現在影片與圖片走同一條路，且都以 imagegeom 的公式為準。下面這些數字全部
+   現在影片與圖片走同一條路，且都以 image-geometry 的公式為準。下面這些數字全部
    以真實 ffmpeg 匯出＋逐像素量測驗證過（見開發與驗證.md §4.16）。 */
 describe('影片段幾何：與圖片共用同一條公式', () => {
   const require_ = createRequire(import.meta.url);

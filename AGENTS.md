@@ -75,13 +75,17 @@ Arctime 風格的多軌時間軸上字幕工具。**Vite + 原生 ES 模組（�
 同一份程式碼同時跑網頁版與 Electron 桌面版（以 `window.subtool` / `IS_DESKTOP` 分支）。
 
 ```
-src/            前端 ES 模組（51 支）＋ decode/ 底下 5 支 WebCodecs 相關
-electron/       主行程：ffmpeg / ffprobe / mpv / 檔案 I/O / 路徑白名單
+src/            renderer ES 模組與 WebCodecs 實作
+electron/       Electron 主行程、preload、mpv／ffmpeg adapters
 shared/         【兩個行程共用的領域規則】零相依純 CommonJS（見 shared/README.md）
+scripts/        acceptance／diagnostics／release 工具
+tests/          vitest 行為、契約與結構測試
 docs/           說明文件（見下方「文件職責」）
-tests/          vitest 單元測試（純函式與資料完整性）
-font/<資料夾名>/ 自備字型，資料夾名＝UI 顯示名
+font/<資料夾名>/ 自備字型；資料夾名＝UI 顯示名
 ```
+
+新增、搬移或重新命名檔案時，先讀 [`docs/開發與驗證.md`](docs/開發與驗證.md#6-目錄結構與命名)
+§6；它是放置與命名規則的唯一來源。
 
 > `shared/` 存在的理由：renderer 是 ESM、主程序是 CJS，兩邊無法互相 import，
 > 於是「來源聲道展開順序」「片段疊層幾何」「淡入淡出視窗」長期各自維護一份手抄實作，
@@ -131,17 +135,16 @@ font/<資料夾名>/ 自備字型，資料夾名＝UI 顯示名
 | `docs/技術架構說明.md` | **鐵律**、模組架構、資料流、字幕樣式、WebCodecs、demux | 維護者 |
 | `docs/Electron_維護手冊.md` | IPC 通道表、ffmpeg／mpv 整合、打包、排查表 | 維護者 |
 | `docs/FPS_時碼一致性.md` | FPS／時碼的 8 條不變量與踩雷案例 | 維護者 |
-| `docs/版本變更紀錄.md` | 版本歷史（**只新增最上面一筆**） | 所有人 |
+| `docs/版本變更紀錄.md` | 版本歷史（只在導言分隔線下、現有最新版本前新增一節） | 所有人 |
 | [`CONTEXT.md`](CONTEXT.md) | **領域詞彙表**：這個詞指的是什麼（只放定義，不放實作） | 所有人 |
 | [`docs/adr/`](docs/adr/) | **架構決策紀錄**：為什麼這樣決定、代價是什麼、什麼情況才該推翻 | 維護者 |
-| [`docs/specs/`](docs/specs/) | 尚在設計中的功能規格與未決清單 | 維護者 |
 
 **規則**：同一件事只在一處寫完整，其他地方用連結指過去。
 
-> **這張表是 `docs/` 的唯一索引，新增文件時必須回來加一列。**
-> `CONTEXT.md`、`docs/adr/`、`docs/specs/` 三類是 `/setup-matt-pocock-skills` 那批
+> **這張表是文件職責的唯一規範；新增文件時必須回來加一列。** README 另提供面向人的導覽。
+> `CONTEXT.md`、`docs/adr/` 兩類是 `/setup-matt-pocock-skills` 那批
 > skill 帶進來的新類別，建立後有一段時間沒有被接進這張表也沒有進 README 的索引——
-> 結果是四份有內容的文件（兩份 ADR、一份 444 行的設計中規格）**沒有任何入口能抵達**，
+> 結果是多份有內容的文件曾經**沒有任何入口能抵達**，
 > 只有 grep 找得到。文件沒有入口，等同於不存在。
 
 ---
@@ -152,7 +155,7 @@ font/<資料夾名>/ 自備字型，資料夾名＝UI 顯示名
 npm run lint && npm test && npm run build   # ① 三關全綠才繼續
 #                                            ② 桌面版真機驗證
 # ③ 只改 package.json 與 package-lock.json 的版號（見 §0.1）
-# ④ docs/版本變更紀錄.md 最上面新增一筆
+# ④ docs/版本變更紀錄.md 在導言分隔線下、現有最新版本前新增一節
 npm run dist                                 # ⑤ → release/SUB Tool Setup X.Y.Z.exe
 # ⑥ 實際安裝並確認 app 內顯示的版號
 git add -A && git commit && git push origin main
@@ -237,7 +240,7 @@ grep -rn "from './app.js'" src   # 應為空——不可再引入對 app.js 的�
 
 架構規則：**沒有任何模組可以 `import … from './app.js'`。**
 低階模組要觸發重繪／指令時用 `emit('事件名', …)`（`events.js`），
-由 `app.js` 以 `on(...)` 訂閱。
+由 `app.js` 或專責的上層 bridge／view 以 `on(...)` 訂閱。
 
 ### 兩道封裝圍籬（eslint `no-restricted-syntax`）
 

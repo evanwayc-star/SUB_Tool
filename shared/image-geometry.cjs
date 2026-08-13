@@ -12,7 +12,7 @@
      2) mpv 透明 guide 視窗的滑鼠命中區
      3) 匯出 filtergraph（electron/export-plan.js）
 
-   v6.1.2 之前第 3 路是 `imageBoxForExport()`——與 `src/imagegeom.js imageBox()`
+   v6.1.2 之前第 3 路是 `imageBoxForExport()`——與 `src/image-geometry.js imageBox()`
    逐行相同的手抄副本，靠 `tests/imageGeomContract.test.js` 比對兩份輸出。
    壞掉的樣子：預覽與匯出差幾十到上百 px（v5.8.0 實測 4:3 素材、軌 scale=0.5
    時差 120px），而兩邊各自看起來都很正常。

@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { bundledNativeRequirements } = require('../electron/native-tooling');
+const { bundledNativeRequirements } = require('../../electron/native-tooling');
 
 const MIN_BYTES = {
   ffmpeg: 10 * 1024 * 1024,
@@ -19,7 +19,7 @@ function readOption(argv, name, fallback) {
 }
 
 function verifyNativeBinaries(options = {}) {
-  const repositoryRoot = path.resolve(options.repositoryRoot || path.join(__dirname, '..'));
+  const repositoryRoot = path.resolve(options.repositoryRoot || path.join(__dirname, '..', '..'));
   const platform = options.platform || process.platform;
   const arch = options.arch || process.arch;
   const failures = [];
@@ -65,7 +65,7 @@ function remediationFor(platform, arch) {
 
 function main(argv) {
   const result = verifyNativeBinaries({
-    repositoryRoot: readOption(argv, 'repository-root', path.join(__dirname, '..')),
+    repositoryRoot: readOption(argv, 'repository-root', path.join(__dirname, '..', '..')),
     platform: readOption(argv, 'platform', process.platform),
     arch: readOption(argv, 'arch', process.arch),
   });

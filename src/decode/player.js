@@ -25,7 +25,7 @@ import { needsComposite, stageBox } from '../compositor-plan.js';
 import { showToast } from '../ui.js';
 import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
 import { keyIndexBefore } from './sample-index.js';
-import { imageBoxOnStage, trackFrame } from '../imagegeom.js'; // 預覽／mpv guide／匯出 三路共用的唯一幾何公式
+import { imageBoxOnStage, trackFrame } from '../image-geometry.js'; // 預覽／mpv guide／匯出 三路共用的唯一幾何公式
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
@@ -328,7 +328,7 @@ export const WCPreview = {
         base = stageBox({ canvasW: bw, canvasH: bh, projectW: pw, projectH: ph });
         this._stageW = pw; this._stageH = ph; // 供字幕層對齊畫面區（見 app.js _stageRect）
       }
-      /* 幾何一律走 imagegeom.imageBoxOnStage()：軌影格（available-space 定位）
+      /* 幾何一律走 image-geometry.imageBoxOnStage()：軌影格（available-space 定位）
          → 片段方框＝scale×影格 → 素材 contain 進方框 → 方框【中心】對到 (posX,posY)。
          這正是匯出 filtergraph 的模型，兩邊共用同一份實作才談得上三路一致。
 

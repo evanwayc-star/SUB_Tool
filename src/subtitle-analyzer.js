@@ -1,5 +1,5 @@
 import { detectOverlaps } from './subtitle-model.js';
-import { inspectSubtitleCharacters } from './subtitleTextCheck.js';
+import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 
 /**
  * @param {Array} cues - The list of cues to analyze.

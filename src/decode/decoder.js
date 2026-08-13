@@ -5,7 +5,7 @@
    所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
 ============================================================================== */
 /* 單軌 VideoDecoder 封裝：隨機存取（frameAt）＝從目標時間前最近的 keyframe 解到該時間的 VideoFrame。
-   ── 階段0 PoC：frameAt 每次從 keyframe 重解（正確但非最省）；順序播放另走 decodeSeq 量 fps。
+   診斷用 `frameAt` 每次從 keyframe 重解（正確但非最省）；順序播放另走 decodeSeq 量 fps。
    B-frame：依 dts 餵、output 依 cts 回，故收集 flush 後全部 output 再挑最接近目標者。 */
 export class TrackDecoder {
   constructor(){ this.dec=null; this.config=null; this.chunks=[]; this._collect=null; }
@@ -15,7 +15,7 @@ export class TrackDecoder {
     this.config = config; this.chunks = chunks;
     const cfg = Object.assign({ optimizeForLatency: true }, config); // 儘早吐 frame、不多囤
     // 預設軟解：720p proxy 軟解已 >3000fps（解一幀 ~0.3ms）遠超即時，且**硬解在部分環境對連續解碼不穩**
-    // （PoC 實測：硬解可解單幀、但連續解到約第 18 幀就吞 chunk 不吐 frame）。需硬解（高解析度/多軌）時
+    // （診斷實測：硬解可解單幀、但連續解到約第 18 幀就吞 chunk 不吐 frame）。需硬解（高解析度/多軌）時
     // 傳 opts.hardwareAcceleration:'no-preference'；「持續輸出探針 + fallback」留待階段4 效能優化再做。
     cfg.hardwareAcceleration = opts.hardwareAcceleration || 'prefer-software';
     this.cfg = cfg;

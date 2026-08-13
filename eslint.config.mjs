@@ -64,10 +64,8 @@ const MEDIA_INTERNAL_FILES = ['src/media.js', 'src/loaders/media-loader.js', 'sr
 
 const encapsulationFences = [selectionFence, mediaPrivateFence];
 
-/* scripts/ 裡【不是】Node 工具、而是送進頁面執行的載荷（貼進 DevTools，
-   或由 cdp-run.js 送過去）。它們要 browser globals，不是 node globals。
-   兩種東西住在同一個資料夾、檔名看不出差別，所以只能列白名單。 */
-const IN_PAGE_SCRIPTS = ['scripts/verify-v612-changes.js'];
+/* 送進頁面執行的驗收載荷集中在 in-page/；它們要 browser globals，不是 node globals。 */
+const IN_PAGE_SCRIPTS = ['scripts/acceptance/in-page/**/*.js'];
 
 export default [
   {
@@ -91,7 +89,7 @@ export default [
     },
     rules: silentBugRules,
   },
-  /* scripts/：發版與驗證用的 Node 工具（CDP 執行器、原生二進位檢查、診斷腳本…）。
+  /* scripts/：驗收、診斷與發版用的 Node 工具。
 
      【第三次踩同一個坑】——`electron/` 曾經 2,268 行零規則，`shared/` 建立時差點重演，
      而 `scripts/` 一直到 v6.1.12 都【完全沒有被檢查】：`npm run lint` 的參數沒有它，
@@ -113,11 +111,7 @@ export default [
     },
     rules: silentBugRules,
   },
-  /* scripts/ 裡混了【兩種完全不同的東西】，而檔名看不出差別：
-       - Node 工具（cdp-run.js、verify-native-binaries.js…）→ node globals
-       - 送進頁面執行的載荷（貼進 DevTools，或由 cdp-run.js 送過去）→ browser globals
-     所以用白名單分開。新增「在頁面裡跑」的腳本時要回來加一行；
-     忘了加的後果是 lint 對它吐一串 window/document 的假錯誤。 */
+  /* acceptance/in-page/ 是送進頁面執行的載荷；以資料夾作為 seam，避免逐檔白名單漂移。 */
   {
     files: IN_PAGE_SCRIPTS,
     languageOptions: {

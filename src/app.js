@@ -7,7 +7,7 @@ import { initMediaView } from './media-view.js';
    ==============================================================================
    
    【架構與職責總覽】
-   本檔案 (app.js) 是本專案最頂層的「巨型協調者」。
+   本檔案 (app.js) 是本專案最頂層的協調與 UI 接線層。
    為了避免循環依賴 (Circular Dependency) 導致模組掛點，所有子模組 (如 media,
    subtitles, timeline) 均「不可直接 import app.js」。
    
@@ -16,9 +16,8 @@ import { initMediaView } from './media-view.js';
       本檔透過 `on(...)` 訂閱並負責串接對應的渲染函式或邏輯。
       
    2. DOM 與全域事件管理
-      負責初始化使用者介面 (如設定快捷鍵、綁定滑鼠與觸控事件、管理視窗對話框)。
-      包含了所有複雜的「拖曳狀態 (Pointer Dragging)」管理，特別是字幕框與圖片的
-      DOM 幾何轉換 (將游標座標映射回 16:9 / 2.35:1 的影片絕對比例座標)。
+      負責初始化使用者介面、快捷鍵、頂層對話框與 Electron 事件接線。
+      時間軸手勢、播放器指標互動與樣式面板各自位於專責模組。
       
    3. 跨進程介面介接 (Electron Bridge)
       當運行於桌面版 (DESK = true) 時，本檔會監聽來自 `main.js` 的 IPC 推播
@@ -26,8 +25,8 @@ import { initMediaView } from './media-view.js';
 
    【維護鐵律】
    - 切勿在此檔案中直接修改底層的 State (應交由 state.js 或 subtitles.js 提供之 Action)。
-   - 新增功能時，若是與特定的繪圖有關 (如 Canvas)，請寫在 timeline.js；
-     若是與資料解析有關，請寫在 subio.js。保持 app.js 單純負責「接線」的職責。
+   - 新增功能時，繪圖進 `painters/` 或對應 renderer，資料規則進純領域模組；
+     `subio.js` 只保留字幕 I/O 與匯出對話框協調。保持 app.js 單純負責「接線」。
 ============================================================================== */
 "use strict";
 import { refreshMpvSubs, renderVideoSub, _syncMpvPanel, renderImageOverlays, _selectImageClip, _imageBoxOf, _stageRect, drawSafeFrame, renderTimecodeWatermark, toggleSafeFrame, toggleTimecodeWatermark, _setSubtitleHover, previewDrag, _firstLoad, setFirstLoad } from './video-renderer.js';
@@ -51,7 +50,7 @@ import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDi
 import { Seq } from './sequence.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory, syncCompareSnapshot } from './history.js';
-import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/poc.js'; // 階段0 PoC：WebCodecs 解碼驗證（掛 window.SUB.WC）
+import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/diagnostics.js'; // WebCodecs 診斷入口（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct, styleMatchesPreset, pruneRedundantCueStyle } from './substyle.js'; // v4.23 字幕樣式系統
 import { GEOMETRY_STYLE_KEYS, applyCueStyleAssignment, planCueStyleAssignment, planTrackStyleAssignment } from './style-assignment.js';
@@ -63,7 +62,7 @@ import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters 
 import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
-import { imageBoxOnStage } from './imagegeom.js'; // v4.7 圖片疊層幾何：預覽／mpv guide／匯出 共用同一組公式
+import { imageBoxOnStage } from './image-geometry.js'; // v4.7 圖片疊層幾何：預覽／mpv guide／匯出 共用同一組公式
 import { fadeAlphaAtTimeline } from './clip-fade.js'; // v5.9 淡入淡出：預覽與匯出共用同一份規格
 import { timecodeSuffix, screenshotDir, fallbackScreenshotName } from './screenshot-target.js';
 import { presetExportRelativePath } from './export-name-safety.js';
@@ -102,7 +101,7 @@ on('duration:known', onDurationKnown);
 on('mpv:refreshSubs', refreshMpvSubs);
 /* 這裡曾有 on('panel:toggle', togglePanel)，但全專案零個 emit——收了沒人發的死訂閱。
    面板開關實際是 doAction() 直接呼叫 togglePanel()（見 'history'／'notes'／'mixer' 等 case）。
-   日後若真需要跨模組開面板，請【同時】加上發送端，不要只留一半（見 docs/開發與驗證.md 的事件表）。 */
+   日後若真需要跨模組開面板，請【同時】加上發送端，不要只留一半（見 docs/技術架構說明.md 的 events.js 章節）。 */
 on('note:openInPanel', openNoteInPanel);
 on('cue:openEdit', StylePanelController.openCueEditModal);
 on('action', doAction);

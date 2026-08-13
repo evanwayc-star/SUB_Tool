@@ -2,7 +2,7 @@
    持續量測：載入影音之後，列 SMB 目錄要花多久
    ==============================================================================
    用法：
-     node scripts/watch-smb-latency.js ["\\\\Storage\\DCP\\...\\Original"]
+     node scripts/diagnostics/watch-smb-latency.js ["\\\\Storage\\DCP\\...\\Original"]
      （不給路徑就用預設的那個 DCP 資料夾）
 
    ── 為什麼要這支 ──
