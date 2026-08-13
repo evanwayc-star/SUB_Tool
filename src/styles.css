@@ -890,7 +890,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* 用亮一點的藍：--cue（#2A75D3）在深色底上偏暗不好讀，這裡要的是可讀的資訊色 */
 #cpTwo .cp-label,#cpTwo .cp-num{color:#5b9fff}
 #cpConsecutiveIdentical .cp-label,#cpConsecutiveIdentical .cp-num{color:var(--accent)}
+#cpConsecutiveIdentical .cp-num.cp-joined-identical{color:#1f7a3f}
 #cpBlank .cp-num:hover,#cpTwo .cp-num:hover,#cpConsecutiveIdentical .cp-num:hover{color:var(--accent)}
+#cpConsecutiveIdentical .cp-num.cp-joined-identical:hover{color:#2f9b55}
 #cpOverLen input[type="number"]{width:36px;margin:0 3px;padding:1px 3px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:11px;text-align:center;-moz-appearance:textfield}
 #cpOverLen input[type="number"]::-webkit-inner-spin-button{display:none}
 .sub-row .txt .over-len{color:var(--red);font-weight:bold;text-decoration:underline wavy var(--red)}

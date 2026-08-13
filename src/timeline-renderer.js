@@ -1188,11 +1188,12 @@ tlScroll.addEventListener('mousedown',e=>{
     }
     // Ctrl/Cmd 已有複製行為；Alt 拖曳字幕區塊也複製，但不影響邊緣修剪。
     const isCopyDrag = mode==='move' && (e.altKey||isCtrl);
+    // 已選中的字幕要等 mouseup 才判定是點擊或拖曳：多選時點擊會收斂成
+    // 單選；已是單選時也要重新揭示列表列，避免使用者捲走後再點時間軸卻
+    // 看不到該句。拖曳、修剪與修飾鍵操作都不走這條。
+    const selectOnPlainClickRelease = mode==='move' && isPlainClick && isSel(c.id);
     if(isCtrl && mode!=='move'){ selectCue(c.id,{additive:true}); if(!isSel(c.id)){ e.preventDefault(); return; } }
     else if(!isCtrl && !isSel(c.id)) selectCue(c.id);
-    // 已在多選中的字幕要等到 mouseup 才收斂：若滑鼠超過 3px 門檻，原選取
-    // 必須完整保留，才能拖動整組；只有真正的普通單擊才切軌並變成單選。
-    const collapseMultiOnPlainClick = mode==='move' && isPlainClick && isSel(c.id) && State.selectedIds.length>1;
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
@@ -1204,7 +1205,7 @@ tlScroll.addEventListener('mousedown',e=>{
     const previewRowIds=grp.map(item=>item.c.id);
     transaction.addCancelEffect(()=>previewRowIds.forEach(renderSubRow));
     drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
-      snaps:snapTargets(exSet), isCtrl,isCopyDrag,collapseMultiOnPlainClick,selectionBefore,
+      snaps:snapTargets(exSet), isCtrl,isCopyDrag,selectOnPlainClickRelease,selectionBefore,
       transaction};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
@@ -1628,7 +1629,7 @@ window.addEventListener('mouseup',e=>{
     }
   }else if(drag.mode!=='scrub'){
     const moved=drag.moved, m=drag.mode;
-    if (!moved && drag.collapseMultiOnPlainClick) {
+    if (!moved && drag.selectOnPlainClickRelease) {
       selectCue(drag.c.id);
     } else if (!moved && drag.isCtrl && m==='move') {
       selectCue(drag.c.id, {additive:true});

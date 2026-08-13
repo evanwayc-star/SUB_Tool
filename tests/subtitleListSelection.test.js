@@ -216,6 +216,41 @@ it('普通點跨軌多選中的字幕，會在 mouseup 切換列表並收斂成�
   });
 });
 
+it('普通點已選字幕，仍會把該列捲入字幕列表可視範圍', () => {
+  subtitles.selectCue('b');
+  Element.prototype.scrollIntoView.mockClear();
+  requestAnimationFrame.mockClear();
+
+  clickBlock(blockB);
+
+  const selectedRow = document.querySelector('.sub-row[data-id="b"]');
+  expect({
+    selectedId: state.State.selectedId,
+    yellow: selectedRow.classList.contains('sel'),
+    primary: selectedRow.classList.contains('primary'),
+  }).toEqual({ selectedId: 'b', yellow: true, primary: true });
+  expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
+  expect(Element.prototype.scrollIntoView.mock.instances).toContain(selectedRow);
+  expect(requestAnimationFrame).toHaveBeenCalledOnce();
+
+  const revealAfterLayout = requestAnimationFrame.mock.calls[0][0];
+  Element.prototype.scrollIntoView.mockClear();
+  revealAfterLayout();
+  expect(Element.prototype.scrollIntoView.mock.instances).toContain(selectedRow);
+});
+
+it('後續 preventScroll 會取消同一句字幕尚未執行的延後揭示', () => {
+  subtitles.selectCue('b');
+  expect(requestAnimationFrame).toHaveBeenCalledOnce();
+  const staleReveal = requestAnimationFrame.mock.calls[0][0];
+
+  subtitles.selectCue('b', { preventScroll: true });
+  Element.prototype.scrollIntoView.mockClear();
+  staleReveal();
+
+  expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+});
+
 it('普通拖曳跨軌多選中的字幕，會保留群組並讓全部字幕一起移動', () => {
   makeCrossTrackSelection();
 

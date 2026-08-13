@@ -29,6 +29,7 @@ import { searchSelectAll, txtHTML, isSearchHit, getSearchCountText, searchUpdate
 const _presetNameCache = new Map();
 const _customCodeMap = new Map();
 let _customCodeCounter = 1;
+let _selectionRevealSeq = 0;
 
 function clearPresetNameCache(){ 
   _presetNameCache.clear(); 
@@ -223,10 +224,12 @@ function renderCheckPanel(){
   const containsRaw=($('cpContainsInput')||{}).value||'';
   _checkContains=containsRaw.split('||').map(s=>s.trim()===''?s:s.replace(/^[ ]+|[ ]+$/g,'')).filter(s=>s.length>0);
 
-  const report = analyzeSubtitles(list, { checkLenLimit: _checkLenLimit, checkContains: _checkContains });
-  const { overlapNums, multiNums, twoNums, blankNums, bNums, iNums, uNums, fontNums, posNums, trimNums, overLenNums, containsNums, nonTraditionalIssues, noTimeNums, consecutiveIdenticalNums } = report;
+  const report = analyzeSubtitles(list, { checkLenLimit: _checkLenLimit, checkContains: _checkContains, fps: State.fps });
+  const { overlapNums, multiNums, twoNums, blankNums, bNums, iNums, uNums, fontNums, posNums, trimNums, overLenNums, containsNums, nonTraditionalIssues, noTimeNums, consecutiveIdenticalNums, consecutiveIdenticalJoinedNums=[] } = report;
   
   const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'N/A';
+  const joinedIdenticalSet=new Set(consecutiveIdenticalJoinedNums);
+  const mkConsecutiveIdenticalNums=nums=>nums.length?nums.map(n=>`<span class="cp-num${joinedIdenticalSet.has(n)?' cp-joined-identical':''}" data-idx="${n}">${n}</span>`).join(', '):'N/A';
   const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{
     const detail=[];
     if(simplified.length) detail.push('常見簡體：'+simplified.join('、'));
@@ -241,7 +244,7 @@ function renderCheckPanel(){
   if(rt)rt.querySelector('.cp-nums').innerHTML=mkNums(trimNums);
   if(r2)r2.querySelector('.cp-nums').innerHTML=mkNums(twoNums);
   if(rb)rb.querySelector('.cp-nums').innerHTML=mkNums(blankNums);
-  if(rci)rci.querySelector('.cp-nums').innerHTML=mkNums(consecutiveIdenticalNums);
+  if(rci)rci.querySelector('.cp-nums').innerHTML=mkConsecutiveIdenticalNums(consecutiveIdenticalNums);
   if(sb)sb.querySelector('.cp-nums').innerHTML=mkNums(bNums);
   if(si)si.querySelector('.cp-nums').innerHTML=mkNums(iNums);
   if(su)su.querySelector('.cp-nums').innerHTML=mkNums(uNums);
@@ -448,22 +451,34 @@ function commitCueTimeEdit(c, edge){
 }
 
 function refreshSelectionUI(opts={}){
+  const revealSeq=++_selectionRevealSeq;
   sublist.querySelectorAll('.sub-row').forEach(r=>{
     r.classList.toggle('sel',isSel(r.dataset.id));
     r.classList.toggle('primary',r.dataset.id===State.selectedId);
   });
   const row=State.selectedId&&sublist.querySelector(`.sub-row[data-id="${State.selectedId}"]`);
   if(row && !opts.preventScroll){
-    if(State.subMode){
-      const allRows = Array.from(sublist.querySelectorAll('.sub-row'));
-      const idx = allRows.indexOf(row);
-      if (idx !== -1) {
-        const targetRow = allRows[Math.max(0, idx - 4)];
-        sublist.scrollTop = targetRow.offsetTop;
+    const selectedId=State.selectedId;
+    const reveal=()=>{
+      if(_selectionRevealSeq!==revealSeq||State.selectedId!==selectedId)return;
+      const currentRow=sublist.querySelector(`.sub-row[data-id="${selectedId}"]`);
+      if(!currentRow)return;
+      if(State.subMode){
+        const allRows = Array.from(sublist.querySelectorAll('.sub-row'));
+        const idx = allRows.indexOf(currentRow);
+        if (idx !== -1) {
+          const targetRow = allRows[Math.max(0, idx - 4)];
+          sublist.scrollTop = targetRow.offsetTop;
+        }
+      } else {
+        currentRow.scrollIntoView({block:'nearest'});
       }
-    } else {
-      row.scrollIntoView({block:'nearest'});
-    }
+    };
+    reveal();
+    // 列表使用 content-visibility:auto；剛跨軌重建時，離屏列的第一輪
+    // scrollIntoView 可能只依 contain-intrinsic-size 估算。下一幀實際列高完成後
+    // 再揭示一次，否則大型列表會先短暫捲到目標，隨即讓該列掉出 viewport。
+    requestAnimationFrame(reveal);
   }
   renderCueBlocks();
   updateTlSel();

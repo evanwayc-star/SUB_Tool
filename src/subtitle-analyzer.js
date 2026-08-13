@@ -1,5 +1,6 @@
 import { detectOverlaps } from './subtitle-model.js';
 import { inspectSubtitleCharacters } from './subtitle-text-check.js';
+import { getExactFps } from './time.js';
 
 /**
  * @param {Array} cues - The list of cues to analyze.
@@ -11,16 +12,18 @@ import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 export function analyzeSubtitles(cues, options = {}) {
   const checkLenLimit = options.checkLenLimit || 0;
   const checkContains = options.checkContains || [];
+  const exactFps = getExactFps(Number(options.fps) || 25);
   
   const overlapSet = detectOverlaps(cues);
   const result = {
     overlapNums: [], multiNums: [], twoNums: [], blankNums: [],
     bNums: [], iNums: [], uNums: [], fontNums: [], posNums: [],
     trimNums: [], overLenNums: [], containsNums: [], nonTraditionalIssues: [],
-    noTimeNums: [], consecutiveIdenticalNums: []
+    noTimeNums: [], consecutiveIdenticalNums: [], consecutiveIdenticalJoinedNums: []
   };
 
   const consecutiveIdenticalSet = new Set();
+  const consecutiveIdenticalJoinedSet = new Set();
   
   for(let i=0; i<cues.length; i++){
     const c=cues[i];
@@ -45,6 +48,12 @@ export function analyzeSubtitles(cues, options = {}) {
       if(prevTrimmed && prevTrimmed===trimmed){
         consecutiveIdenticalSet.add(i);
         consecutiveIdenticalSet.add(num);
+        const prev=cues[i-1];
+        if(prev.timed!==false && c.timed!==false && Number.isFinite(prev.end) && Number.isFinite(c.start)
+          && Math.round(prev.end*exactFps)===Math.round(c.start*exactFps)){
+          consecutiveIdenticalJoinedSet.add(i);
+          consecutiveIdenticalJoinedSet.add(num);
+        }
       }
     }
 
@@ -71,5 +80,6 @@ export function analyzeSubtitles(cues, options = {}) {
   }
   
   result.consecutiveIdenticalNums = Array.from(consecutiveIdenticalSet).sort((a,b)=>a-b);
+  result.consecutiveIdenticalJoinedNums = Array.from(consecutiveIdenticalJoinedSet).sort((a,b)=>a-b);
   return result;
 }
