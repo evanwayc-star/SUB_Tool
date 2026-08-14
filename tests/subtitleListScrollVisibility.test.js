@@ -65,6 +65,7 @@ async function runVisibilityFixture() {
       FIXTURE,
       `--app-entry=${pathToFileURL(entryPath).href}`,
       `--user-data-dir=${profileDir}`,
+      '--no-sandbox',
     ], {
       cwd: ROOT,
       windowsHide: true,

@@ -83,7 +83,7 @@ class CdpClient {
 
 async function runScrollFixture() {
   const port = await reservePort();
-  const child = spawn(ELECTRON, [FIXTURE, `--remote-debugging-port=${port}`], {
+  const child = spawn(ELECTRON, [FIXTURE, `--remote-debugging-port=${port}`, '--no-sandbox'], {
       cwd: ROOT,
       windowsHide: true,
       env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' },

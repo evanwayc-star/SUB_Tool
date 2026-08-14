@@ -54,7 +54,7 @@ function measureChromiumLines(lines, track) {
       fontPath: SARASA_FONT,
       fontSpec: `${track.bold ? '700 ' : '400 '}${metrics.fontSize}px "${track.font}"`,
     }), 'utf8');
-    const result = spawnSync(ELECTRON, [MEASURE_FIXTURE, configPath], {
+    const result = spawnSync(ELECTRON, [MEASURE_FIXTURE, configPath, '--no-sandbox'], {
       cwd: ROOT,
       encoding: 'utf8',
       timeout: 15000,

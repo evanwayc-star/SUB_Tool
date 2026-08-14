@@ -130,7 +130,7 @@ async function launchApp(profileDir) {
   mkdirSync(isolatedTemp, { recursive: true });
   const child = spawn(
     ELECTRON,
-    ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${profileDir}`],
+    ['.', `--remote-debugging-port=${port}`, `--user-data-dir=${profileDir}`, '--no-sandbox'],
     {
       cwd: ROOT,
       windowsHide: true,
@@ -151,7 +151,7 @@ async function launchSecondInstance(profileDir) {
   const stderr = [];
   const isolatedTemp = path.join(profileDir, `system-temp-second-${Date.now()}`);
   mkdirSync(isolatedTemp, { recursive: true });
-  const child = spawn(ELECTRON, ['.', `--user-data-dir=${profileDir}`], {
+  const child = spawn(ELECTRON, ['.', `--user-data-dir=${profileDir}`, '--no-sandbox'], {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['ignore', 'ignore', 'pipe'],
