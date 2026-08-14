@@ -267,8 +267,20 @@ let _styleSumT = null;
 function refreshStyleSummaries(){
   clearTimeout(_styleSumT);
   _styleSumT = setTimeout(() => {
-    const rows=sublist.querySelectorAll('.sub-row'); if(!rows.length)return;
     clearPresetNameCache();
+
+    const filterEl = $('subStyleFilter');
+    if (filterEl) {
+      const allList = State.cues.filter(c=>(c.track||0)===State.listTrack);
+      const oldVal = filterEl.value;
+      const newVal = updateStyleFilterOptions(allList);
+      if (oldVal !== newVal) {
+        renderSubList();
+        return;
+      }
+    }
+
+    const rows=sublist.querySelectorAll('.sub-row'); if(!rows.length)return;
     const byId=new Map(State.cues.map(c=>[c.id,c]));
     for(const row of rows){
       const c=byId.get(row.dataset.id); if(!c)continue;
@@ -276,6 +288,39 @@ function refreshStyleSummaries(){
       const nm=row.querySelector('.sub-styname'); if(nm)nm.innerHTML=styleNameHtml(c);
     }
   }, 200);
+}
+
+function updateStyleFilterOptions(allList) {
+  const filterEl = $('subStyleFilter');
+  if (!filterEl) return '';
+  
+  const usedStyles = new Set();
+  for (const c of allList) {
+    const isOv = c.style && Object.keys(c.style).length > 0;
+    const st = effStyle(c, State.tracks[c.track || 0] || null);
+    const n = _getPresetNameForStyle(st);
+    if (n) {
+      usedStyles.add(isOv ? `✱ ${n}` : n);
+    } else if (isOv) {
+      usedStyles.add(`✱ 自訂`);
+    }
+  }
+  
+  const curVal = filterEl.value;
+  let html = `<option value="">所有樣式</option><option value="__non_default">非預設樣式</option>`;
+  const sorted = Array.from(usedStyles).sort();
+  for (const s of sorted) {
+    html += `<option value="${escapeHTML(s)}">${escapeHTML(s)}</option>`;
+  }
+  filterEl.innerHTML = html;
+  filterEl.style.display = 'inline-block';
+  
+  if (curVal === '__non_default' || usedStyles.has(curVal)) {
+    filterEl.value = curVal;
+  } else {
+    filterEl.value = '';
+  }
+  return filterEl.value;
 }
 
 function renderSubList(){
@@ -286,32 +331,7 @@ function renderSubList(){
   const allList = State.cues.filter(c=>(c.track||0)===State.listTrack);
   
   if (filterEl) {
-    const usedStyles = new Set();
-    for (const c of allList) {
-      const isOv = c.style && Object.keys(c.style).length > 0;
-      const st = effStyle(c, State.tracks[c.track || 0] || null);
-      const n = _getPresetNameForStyle(st);
-      if (n) {
-        usedStyles.add(isOv ? `✱ ${n}` : n);
-      } else if (isOv) {
-        usedStyles.add(`✱ 自訂`);
-      }
-    }
-    
-    const curVal = filterEl.value;
-    let html = `<option value="">所有樣式</option><option value="__non_default">非預設樣式</option>`;
-    const sorted = Array.from(usedStyles).sort();
-    for (const s of sorted) {
-      html += `<option value="${escapeHTML(s)}">${escapeHTML(s)}</option>`;
-    }
-    filterEl.innerHTML = html;
-    filterEl.style.display = 'inline-block';
-    
-    if (curVal === '__non_default' || usedStyles.has(curVal)) {
-      filterEl.value = curVal;
-    } else {
-      filterEl.value = '';
-    }
+    updateStyleFilterOptions(allList);
   }
 
   const activeFilter = filterEl ? filterEl.value : '';

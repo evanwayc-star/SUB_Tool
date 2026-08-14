@@ -30,7 +30,7 @@ import { History } from './history.js';
 import { renderNotes } from './notes.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
-import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets } from './substyle.js';
+import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets, loadFonts } from './substyle.js';
 import { ProjectLoadSession } from './project-load-session.js';
 
 /* ===== 自動備份狀態 ===== */
@@ -489,6 +489,56 @@ const Project = {
     const generation=_projectLoadSession.begin();
     return _appendProjectLoad(generation,work);
   },
+  async _checkMissingFonts(data) {
+    const requiredFonts = new Set();
+    if (Array.isArray(data.tracks) && data.tracks.length > 0) {
+      for (const t of data.tracks) {
+        if (t.font) requiredFonts.add(t.font);
+        else requiredFonts.add(STYLE_DEFAULTS.font);
+      }
+    } else {
+      requiredFonts.add(STYLE_DEFAULTS.font);
+    }
+    if (Array.isArray(data.cues)) {
+      for (const c of data.cues) {
+        if (c.style && c.style.font) requiredFonts.add(c.style.font);
+      }
+    }
+    const missing = [];
+    for (const font of requiredFonts) {
+      if (!this._isFontAvailable(font)) {
+        missing.push(font);
+      }
+    }
+    return missing;
+  },
+  _isFontAvailable(fontName) {
+    if (!fontName) return true;
+    try {
+      if (typeof document !== 'undefined' && document.fonts && document.fonts.check(`12px "${fontName}"`)) return true;
+    } catch(e) {}
+    if (typeof document === 'undefined') return true;
+    
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return true;
+    
+    const text = "abcdefghijklmnopqrstuvwxyz0123456789";
+    
+    context.font = "72px monospace";
+    const baselineMono = context.measureText(text).width;
+    context.font = `72px "${fontName}", monospace`;
+    const newMono = context.measureText(text).width;
+    if (newMono !== baselineMono) return true;
+    
+    context.font = "72px sans-serif";
+    const baselineSans = context.measureText(text).width;
+    context.font = `72px "${fontName}", sans-serif`;
+    const newSans = context.measureText(text).width;
+    if (newSans !== baselineSans) return true;
+    
+    return false;
+  },
   save(){
     const bytes=_buildBytes();
     if(IS_DESKTOP && _savePath){
@@ -597,6 +647,36 @@ const Project = {
     const buf=await readFile(file);
     if(!_isCurrentProjectLoad(generation)) return;
     let data; try{ data=JSON.parse(decodeText(buf)); }catch(e){ showToast('無法解析專案檔'); return; }
+    
+    let missing = await this._checkMissingFonts(data);
+    while (missing.length > 0) {
+      const proceed = await new Promise(resolve => {
+        const buttons = [];
+        if (IS_DESKTOP && DESK && DESK.importFont) {
+          buttons.push({label:'匯入字體檔案', act: async ()=>{
+            const imported = await DESK.importFont();
+            if (imported) {
+              await loadFonts(true);
+              closeModal();
+              resolve('recheck');
+            }
+          }});
+        }
+        buttons.push({label:'先退出', primary:true, act:()=>{ closeModal(); resolve('cancel'); }});
+        buttons.push({label:'強制繼續開啟', act:()=>{ closeModal(); resolve('continue'); }});
+        
+        openModal('缺少字體',
+          `此專案使用了您電腦上尚未安裝的字體：<br><br><b>${missing.map(escapeHTML).join(', ')}</b><br><br>繼續開啟可能會導致字形樣式被破壞。您要先退出以匯入該字體檔案，還是強制繼續開啟？`,
+          buttons
+        );
+      });
+      if (proceed === 'cancel') return;
+      if (proceed === 'continue') break;
+      if (proceed === 'recheck') {
+        missing = await this._checkMissingFonts(data);
+      }
+    }
+
     // 載入另一個專案必須先清掉舊的 runtime 媒體。尤其當新專案的主影片暫時
     // 找不到時，後續還原外部音檔不能和前一個專案殘留的 asset 混在一起。
     try{ Media.reset(); }catch(e){ console.warn('reset media before project load:',e); }
@@ -622,6 +702,36 @@ const Project = {
   },
   async _loadDesktop(r,generation){
     let data; try{ data=JSON.parse(decodeText(b64ToBytes(r.b64).buffer)); }catch(e){ showToast('無法解析專案檔'); return; }
+    
+    let missing = await this._checkMissingFonts(data);
+    while (missing.length > 0) {
+      const proceed = await new Promise(resolve => {
+        const buttons = [];
+        if (IS_DESKTOP && DESK && DESK.importFont) {
+          buttons.push({label:'匯入字體檔案', act: async ()=>{
+            const imported = await DESK.importFont();
+            if (imported) {
+              await loadFonts(true);
+              closeModal();
+              resolve('recheck');
+            }
+          }});
+        }
+        buttons.push({label:'先退出', primary:true, act:()=>{ closeModal(); resolve('cancel'); }});
+        buttons.push({label:'強制繼續開啟', act:()=>{ closeModal(); resolve('continue'); }});
+        
+        openModal('缺少字體',
+          `此專案使用了您電腦上尚未安裝的字體：<br><br><b>${missing.map(escapeHTML).join(', ')}</b><br><br>繼續開啟可能會導致字形樣式被破壞。您要先退出以匯入該字體檔案，還是強制繼續開啟？`,
+          buttons
+        );
+      });
+      if (proceed === 'cancel') return;
+      if (proceed === 'continue') break;
+      if (proceed === 'recheck') {
+        missing = await this._checkMissingFonts(data);
+      }
+    }
+
     await _autoRelinkMissingMedia(data, r.path);
     if(!_isCurrentProjectLoad(generation)) return;
     const mp=data.media&&data.media.path;
