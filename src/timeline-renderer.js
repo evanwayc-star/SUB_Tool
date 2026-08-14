@@ -32,7 +32,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
 import { fitScale } from './image-geometry.js'; // 「符合視窗」與匯出共用同一條 contain 公式
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId,
   setSelection, deselect, pruneSelection, focusTrackKind } from './state.js';
-import { clamp, pad, escapeHTML } from './util.js';
+import { clamp, pad, escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { Media, Wave } from './media.js';
 import { encoreParts } from './time.js';
 import { selectCue, refreshSelectionUI, renderSubRow, sortCues, sweepContainedCues } from './subtitles.js';
@@ -1054,7 +1054,7 @@ function renderCueBlocks(){
       x: timeToX(c.start),
       w: timeToX(c.end) - timeToX(c.start),
       hasStyle: !!c.style,
-      htmlText: escapeHTML(c.text || '').replace(/\n/g, '<br>'),
+      htmlText: escapeHTMLWithSpaces(c.text || '').replace(/\n/g, '<br>'),
       cueIndex: cueIndex,
       isLast: cueIndex === trackTotals.get(tk)
     });

@@ -67,6 +67,11 @@ function b64ToBytes(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);
 function bytesToB64(bytes){let bin='';const ch=0x8000;for(let i=0;i<bytes.length;i+=ch)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+ch));return btoa(bin);}
 const baseName = p => (p||'').split(/[\\/]/).pop();
 function escapeHTML(s){return s.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function escapeHTMLWithSpaces(s){
+  return escapeHTML(s || '')
+    .replace(/ /g, '<span style="color:#00bfff;font-weight:bold;-webkit-text-stroke:0.5px #00bfff;user-select:none;font-family:monospace;pointer-events:none;">\u2423</span>')
+    .replace(/　/g, '<span style="color:#00bfff;font-weight:bold;user-select:none;font-family:monospace;pointer-events:none;">\u25A1</span>');
+}
 
 /* 時間碼輸入框按鍵過濾：只允許數字與 : ; + -，以及編輯/導覽鍵與 Ctrl/Cmd 組合（複製貼上/全選）。
    其餘按鍵（字母 i/o 等）一律不接受 → 不打入字元、也不觸發任何動作。回傳 true=允許。 */
@@ -77,5 +82,5 @@ function tcKeyAllowed(e){
   return !(e.key.length===1 && !/[0-9:;+\-]/.test(e.key));
 }
 
-export { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML, tcKeyAllowed };
+export { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML, escapeHTMLWithSpaces, tcKeyAllowed };
 

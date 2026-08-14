@@ -1,7 +1,7 @@
 import { State, setSelection } from './state.js';
 import { emit } from './events.js';
 import { recordHistory } from './history.js';
-import { escapeHTML } from './util.js';
+import { escapeHTML, escapeHTMLWithSpaces } from './util.js';
 
 let _searchTerms = [];
 let _searchMatches = [];
@@ -11,14 +11,14 @@ export function escRe(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
 
 export function txtHTML(text){
   const raw = text||'';
-  if(!_searchTerms.length) return escapeHTML(raw);
+  if(!_searchTerms.length) return escapeHTMLWithSpaces(raw);
   const ranges=[];
   for(const term of _searchTerms){
     if(!term) continue;
     const re = new RegExp(escRe(term),'gi');
     let m; while((m=re.exec(raw))){ if(!m[0].length){ re.lastIndex++; continue; } ranges.push([m.index, m.index+m[0].length]); }
   }
-  if(!ranges.length) return escapeHTML(raw);
+  if(!ranges.length) return escapeHTMLWithSpaces(raw);
   ranges.sort((a,b)=>a[0]-b[0]);
   const merged=[ranges[0].slice()];
   for(let i=1;i<ranges.length;i++){
@@ -28,10 +28,10 @@ export function txtHTML(text){
   }
   let out='', pos=0;
   for(const [s,e] of merged){
-    out+=escapeHTML(raw.slice(pos,s))+`<span class="search-match">${escapeHTML(raw.slice(s,e))}</span>`;
+    out+=escapeHTMLWithSpaces(raw.slice(pos,s))+`<span class="search-match">${escapeHTMLWithSpaces(raw.slice(s,e))}</span>`;
     pos=e;
   }
-  return out+escapeHTML(raw.slice(pos));
+  return out+escapeHTMLWithSpaces(raw.slice(pos));
 }
 
 export function isSearchHit(id) {

@@ -1,6 +1,6 @@
 import { $, sublist } from './dom.js';
 import { State, isSel, newId, trackVisible, cueSuffix, setSelection, deselect, pruneSelection } from './state.js';
-import { escapeHTML, tcKeyAllowed } from './util.js';
+import { escapeHTML, tcKeyAllowed, escapeHTMLWithSpaces } from './util.js';
 import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
@@ -382,8 +382,8 @@ function _rowClass(c){
 }
 
 function _lineLenHTML(line){
-  if(!_checkLenLimit||line.length<=_checkLenLimit) return escapeHTML(line);
-  return escapeHTML(line.slice(0,_checkLenLimit))+`<span class="over-len">${escapeHTML(line.slice(_checkLenLimit))}</span>`;
+  if(!_checkLenLimit||line.length<=_checkLenLimit) return escapeHTMLWithSpaces(line);
+  return escapeHTMLWithSpaces(line.slice(0,_checkLenLimit))+`<span class="over-len">${escapeHTMLWithSpaces(line.slice(_checkLenLimit))}</span>`;
 }
 
 function _txtInner(text){
