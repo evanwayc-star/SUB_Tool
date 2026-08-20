@@ -83,7 +83,7 @@ function audioRowsHeight(){ return L.audioRowsHeight(audioRowLayout()); }
 function audioRowLayout(){
   let y0=0;
   return audioSourceLanes().map((lane,index)=>{
-    const h=L.sourceAudioRowH(lane);
+    const h=L.sourceAudioRowH(lane.source);
     const row={...lane,kind:'source',index,y0,h}; y0+=h; return row;
   });
 }
@@ -620,6 +620,7 @@ function audioTimelineEntries(){
 }
 function audioSourceLanes(){
   const lanes=new Map();
+  let orderCounter=0;
   for(const entry of audioTimelineEntries()){
     const source=entry.source;
     const sourceId=clipAudioSourceId(source);
@@ -637,15 +638,14 @@ function audioSourceLanes(){
         height: source.height,
         external:!!entry.external,
         label:source.name||(entry.external?'外部音檔':'影音素材'),
-        firstStart:entry.start,
+        order: orderCounter++,
         entries:[]
       };
       lanes.set(laneId,lane);
     }
     lane.entries.push(entry);
-    lane.firstStart=Math.min(lane.firstStart,entry.start);
   }
-  return [...lanes.values()].sort((a,b)=>a.firstStart-b.firstStart||a.label.localeCompare(b.label));
+  return [...lanes.values()].sort((a,b)=>a.order-b.order);
 }
 function sourceWaveFallback(source,external){
   if(source?.peaks) return source.peaks;
@@ -793,7 +793,7 @@ function renderAudioTrackRows(){
       block.addEventListener('click',ev=>{
         if(performance.now()<_ignoreAudioClickUntil) return;
         ev.preventDefault();
-        if(external) selectExternalAudioClip(c.id,{seek:true});
+        if(external) selectExternalAudioClip(c.id);
         else selectClip(c.id);
         if(!external) renderAudioTrackRows();
       });
@@ -1632,7 +1632,7 @@ window.addEventListener('mouseup',e=>{
       if(drag.pointerId!=null&&drag.audioEl?.hasPointerCapture?.(drag.pointerId)) drag.audioEl.releasePointerCapture(drag.pointerId);
     }catch(_){}
     _ignoreAudioClickUntil=performance.now()+350;
-    if(!moved){ selectExternalAudioClip(assetId,{seek:true}); drag.transaction?.commit?.(); drag=null; return; }
+    if(!moved){ selectExternalAudioClip(assetId); drag.transaction?.commit?.(); drag=null; return; }
     if(mode==='audio-move'){
       runExternalAudioAction('moveExternalAudio',[assetId,preview.offset]);
     }else if(mode==='audio-l'){
