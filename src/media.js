@@ -130,7 +130,8 @@ function pickImageTrack(c){
 /* ===== 3. 媒體引擎 ==================================================== */
 const Media = {
   _syncEngine: null,
-  initSyncEngine() { if(!this._syncEngine) { this._syncEngine = new PlaybackSyncEngine(this); this._syncEngine.start(); } },
+  initSyncEngine() { if(!this._syncEngine) { this._syncEngine = new PlaybackSyncEngine(this); this._syncEngine.start(); } return this._syncEngine; },
+  invalidateExternalActivity() { this._syncEngine?.invalidateExternalActivity?.(); },
   seqTick() { this.initSyncEngine(); return this._syncEngine.seqTick(); },
   seqContinueAtEnd() { this.initSyncEngine(); return this._syncEngine.seqContinueAtEnd(); },
   _syncSeqElements(t) { this.initSyncEngine(); return this._syncEngine._syncSeqElements(t); },
@@ -290,7 +291,21 @@ const Media = {
     if(asset) this.externalAudio.normalize(asset);
     this.recomputeTimelineDuration();
     this.syncMuteState();
+    this.invalidateExternalActivity();
     if(this.playing) this._restartElements();
+    else {
+      const t = this.tlTime();
+      for(const tr of this.tracks){
+        const source = tr.source||'';
+        if(tr.kind==='element' && tr.el && source.startsWith('ext-')){
+          const off = this.externalAudio.sourceTime(source, t);
+          try {
+            if(off == null) tr.el.pause();
+            else tr.el.currentTime = clamp(off, 0, tr.el.duration || off);
+          } catch(e) {}
+        }
+      }
+    }
     emit('media:audioTracks'); emit('media:timeline');
     if(label) emit('history:record',label);
     return asset?this._serializableExternalAudioSource(asset):null;

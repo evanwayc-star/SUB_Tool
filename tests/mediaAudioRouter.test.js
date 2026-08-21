@@ -69,4 +69,53 @@ describe('MediaAudioRouter buffer drift clock', () => {
 
     expect(context.created, 'the stopped HTML video clock must not trigger repeated buffer restarts').toHaveLength(1);
   });
+
+  it('calibrates external element tracks against externalAudio.sourceTime instead of global timeline time', () => {
+    const el = {
+      paused: false,
+      currentTime: 5.0,
+      pause: vi.fn(),
+    };
+    const track = {
+      kind: 'element',
+      source: 'ext-1',
+      el,
+      _srcHidden: false,
+    };
+    let tlTime = 1385; // 23:05 on timeline
+    const media = {
+      tracks: [track],
+      playing: true,
+      activeSource: 'video',
+      activeClipId: null,
+      seqOn: () => true,
+      inGap: () => false,
+      tlTime: () => tlTime,
+      vTime: () => tlTime,
+      sourceLocalTime: () => tlTime,
+      externalAudio: {
+        sourceTime: (src, t) => {
+          if (src === 'ext-1' && t >= 1380 && t <= 1440) return t - 1380;
+          return null;
+        },
+      },
+    };
+    const video = { playbackRate: 1 };
+    const router = new MediaAudioRouter(media, video, { muted: false });
+
+    // When currentTime is 5.0 and expected source time is 5.0 (1385 - 1380), no drift adjustment should occur
+    router.syncDrift();
+    expect(el.currentTime).toBe(5.0);
+    expect(el.pause).not.toHaveBeenCalled();
+
+    // When element drifts to 5.5, it should calibrate back to 5.0, NOT 1385
+    el.currentTime = 5.5;
+    router.syncDrift();
+    expect(el.currentTime).toBe(5.0);
+
+    // When timeline time moves outside the clip (e.g. 100s, where sourceTime returns null), element should pause
+    tlTime = 100;
+    router.syncDrift();
+    expect(el.pause).toHaveBeenCalled();
+  });
 });

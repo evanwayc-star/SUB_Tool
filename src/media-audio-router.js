@@ -82,12 +82,19 @@ export class MediaAudioRouter {
       // 每次 drift tick 都會把正常前進的 buffer 誤判成漂移並重啟。
       AudioEngine.syncBuffers(this.media.vTime(), { inGap: this.media.inGap() });
     }
-    // element 音軌 drift 校正（多軌同步）：ext-* 參考音對「時間軸時間」；clip 綁定音軌對【各自音源】的來源時間
+    // element 音軌 drift 校正（多軌同步）：ext-* 參考音對其來源時間（含 offset/in）；clip 綁定音軌對【各自音源】的來源時間
     for(const tr of this.media.tracks){ 
       if(tr.kind==='element' && tr.el && !tr.el.paused){
         const s = tr.source||'';
         let ref;
-        if(s.startsWith('ext-')) ref = this.media.tlTime();
+        if(s.startsWith('ext-')){
+          const st = this.media.externalAudio?.sourceTime?.(s, this.media.tlTime());
+          if(st == null){
+            try{ tr.el.pause(); }catch(e){}
+            continue;
+          }
+          ref = st;
+        }
         else if(this.media.seqOn()){ 
           const lt = this.media.sourceLocalTime(s||'video', this.media.tlTime()); 
           if(lt==null) continue; 
