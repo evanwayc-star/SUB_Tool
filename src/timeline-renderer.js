@@ -43,7 +43,7 @@ import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps } from './time.j
 import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
-import { beginTimelineTrackEdit, updateTimelineTrack } from './timeline-edit-transaction.js';
+import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
 import { beginTimelineGesture } from './timeline-gesture-transaction.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
@@ -418,7 +418,7 @@ function _onRowResizeMove(e){
   const {type,tk,startY,startH}=_rowResize;
   const dy=e.clientY-startY;
   if(type==='vtrack') _rowResize.edit?.preview(Math.max(24,startH+dy));
-  else if(type==='atrack'){ if(_rowResize.source) _rowResize.source.height=Math.max(32,startH+dy); }
+  else if(type==='atrack') _rowResize.edit?.preview(Math.max(32,startH+dy));
   else _rowResize.edit?.preview(Math.max(20,startH+dy));
   if(!_rowResize._raf){
     _rowResize._raf=requestAnimationFrame(()=>{ _rowResize&&(_rowResize._raf=null); _doResize(type,tk); });
@@ -987,13 +987,46 @@ function renderAtrackGutter(){
     resH.addEventListener('mousedown',e=>{
       e.preventDefault(); e.stopPropagation();
       const now=performance.now();
+      const applyAudioHeight = (val) => {
+        if (row.external) {
+          Media.setExternalAudioHeight(row.sourceId, val === ABSENT ? undefined : val);
+        } else {
+          for (const c of State.clips) {
+            if (clipAudioSourceId(c) === row.sourceId) {
+              if (val === ABSENT) delete c.height;
+              else c.height = val;
+            }
+          }
+        }
+      };
       if(_lastHandleClick.tk===row.sourceId && now-_lastHandleClick.t<400){
         _lastHandleClick={tk:-1,t:0};
-        delete source.height;
+        updateTimelineTrack({
+          kind:'audio',
+          id:row.sourceId,
+          field:'height',
+          value:undefined,
+          onApply:applyAudioHeight
+        });
         drawTimeline(); return;
       }
       _lastHandleClick={tk:row.sourceId,t:now};
-      _rowResize={type:'atrack',source,startY:e.clientY,startH:row.h};
+      const audioTarget = row.external
+        ? (Media.externalAudio?.find?.(row.sourceId) || source)
+        : source;
+      _rowResize={
+        type:'atrack',
+        tk:row.sourceId,
+        startY:e.clientY,
+        startH:row.h,
+        edit:beginTimelineTrackEdit({
+          kind:'audio',
+          id:row.sourceId,
+          field:'height',
+          target:audioTarget,
+          onApply:applyAudioHeight
+        })
+      };
       document.addEventListener('mousemove',_onRowResizeMove);
       document.addEventListener('mouseup',_onRowResizeUp,{once:true});
     });

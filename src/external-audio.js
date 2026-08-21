@@ -76,7 +76,7 @@ class ExternalAudioLibrary {
   find(key){
     const value = String(key || '');
     return this.assets.find(asset =>
-      asset.id === value || asset.audioSourceId === value || asset.audioSrc === value || asset.source === value
+      asset.id === value || asset.audioSourceId === value || asset.audioSrc === value || asset.source === value || asset.timelineLaneId === value
     ) || null;
   }
   has(asset){ return this.assets.includes(asset); }
@@ -126,6 +126,7 @@ class ExternalAudioLibrary {
       fadeIn: nonNeg(details.fadeIn),
       fadeOut: nonNeg(details.fadeOut),
       enabled: details.enabled !== false,
+      ...(Number.isFinite(Number(details.height)) ? { height: clamp(Number(details.height), 32, 160) } : {}),
       // 影片容器（例如 MXF／部分 MOV）未必能被 Chromium 的 <audio> 解碼。
       // 這個旗標會隨專案保存，讓它在重開後直接復用 ffmpeg 的逐聲道快取，
       // 而不是再次嘗試載入原始影片容器後才失敗。
@@ -161,6 +162,10 @@ class ExternalAudioLibrary {
     asset.fadeIn = Math.min(range.length, nonNeg(asset.fadeIn));
     asset.fadeOut = Math.min(range.length, nonNeg(asset.fadeOut));
     asset.enabled = asset.enabled !== false;
+    if (asset.height != null) {
+      if (Number.isFinite(Number(asset.height))) asset.height = clamp(Number(asset.height), 32, 160);
+      else delete asset.height;
+    }
     return asset;
   }
 
@@ -198,6 +203,22 @@ class ExternalAudioLibrary {
     return asset;
   }
 
+  setHeight(targetOrKey, height){
+    const target = (typeof targetOrKey === 'object' && targetOrKey !== null)
+      ? (this.has(targetOrKey) ? targetOrKey : this.find(targetOrKey.id || targetOrKey.audioSourceId || targetOrKey.timelineLaneId || targetOrKey.audioSrc || targetOrKey.source))
+      : this.find(targetOrKey);
+    if (!target) return null;
+    const laneId = target.timelineLaneId || target.audioSourceId;
+    const val = (height == null || !Number.isFinite(Number(height))) ? undefined : clamp(Number(height), 32, 160);
+    for (const asset of this.assets) {
+      if (asset.timelineLaneId === laneId || asset.audioSourceId === target.audioSourceId || asset.id === target.id) {
+        if (val === undefined) delete asset.height;
+        else asset.height = val;
+      }
+    }
+    return target;
+  }
+
   updateDuration(asset, rawDuration){
     if (!asset || !this.has(asset)) return null;
     const duration = nonNeg(rawDuration);
@@ -233,6 +254,7 @@ class ExternalAudioLibrary {
       right: {
         name: asset.name,
         timelineLaneId: asset.timelineLaneId || asset.audioSourceId,
+        height: asset.height,
         duration: asset.duration,
         offset: t,
         in: cut,
@@ -310,6 +332,11 @@ class ExternalAudioLibrary {
     asset.name = source.name || asset.name;
     if (source.path) asset.path = source.path;
     if (typeof source.timelineLaneId === 'string' && source.timelineLaneId.trim()) asset.timelineLaneId = source.timelineLaneId.trim();
+    if (source.height != null && Number.isFinite(Number(source.height))) {
+      asset.height = clamp(Number(source.height), 32, 160);
+    } else {
+      delete asset.height;
+    }
     asset.offset = source.offset;
     asset.in = source.in;
     asset.out = source.out;

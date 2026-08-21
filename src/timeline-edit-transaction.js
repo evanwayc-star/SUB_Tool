@@ -14,27 +14,51 @@ import { State, deselect } from './state.js';
 import { emit } from './events.js';
 
 const ALLOWED_FIELDS = new Set(['visible', 'name', 'locked', 'height']);
-const KIND_LABEL = { subtitle: '字幕軌', video: '視訊軌' };
+const KIND_LABEL = { subtitle: '字幕軌', video: '視訊軌', audio: '音訊軌' };
 const ABSENT = Symbol('absent');
 
-function trackAt(kind, index){
-  if (!Number.isInteger(index) || index < 0) return null;
-  if (kind === 'subtitle') return State.tracks?.[index] || null;
-  if (kind === 'video') return State.videoTracks?.[index] || null;
+function trackAt(kind, index, id){
+  if (kind === 'subtitle') {
+    if (!Number.isInteger(index) || index < 0) return null;
+    return State.tracks?.[index] || null;
+  }
+  if (kind === 'video') {
+    if (!Number.isInteger(index) || index < 0) return null;
+    return State.videoTracks?.[index] || null;
+  }
+  if (kind === 'audio') {
+    const key = id ?? index;
+    if (key == null || key === '') return null;
+    const strKey = String(key);
+    if (Array.isArray(State.externalAudioState)) {
+      const found = State.externalAudioState.find(a =>
+        a && (a.id === strKey || a.audioSourceId === strKey || a.audioSrc === strKey || a.source === strKey || a.timelineLaneId === strKey)
+      );
+      if (found) return found;
+    }
+    if (Array.isArray(State.clips)) {
+      const foundClip = State.clips.find(c =>
+        c && (c.id === strKey || c.audioSourceId === strKey || c.audioSrc === strKey || String(c.audioSourceId || c.id || c.audioSrc || '') === strKey)
+      );
+      if (foundClip) return foundClip;
+    }
+  }
   return null;
 }
 
 function normalizedValue(kind, index, field, value){
   if (field === 'visible' || field === 'locked') return !!value;
   if (field === 'name') {
-    const fallback = kind === 'video' ? `視訊軌 ${index + 1}` : `軌道 ${index + 1}`;
+    const fallback = kind === 'video' ? `視訊軌 ${index + 1}` : (kind === 'audio' ? `音訊軌 ${index + 1}` : `軌道 ${index + 1}`);
     return String(value ?? '').trim() || fallback;
   }
   if (field === 'height') {
     if (value == null) return ABSENT;
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return ABSENT;
-    return Math.max(kind === 'video' ? 24 : 20, numeric);
+    const minH = kind === 'video' ? 24 : (kind === 'audio' ? 32 : 20);
+    const maxH = kind === 'audio' ? 160 : Infinity;
+    return Math.min(maxH, Math.max(minH, numeric));
   }
   return value;
 }
@@ -69,22 +93,23 @@ function notify(kind, index, field, phase, selectionChanged = false){
   if (selectionChanged) emit('render:all');
 }
 
-function beginTimelineTrackEdit({ kind, index, field, label = null } = {}){
+function beginTimelineTrackEdit({ kind, index, id, field, label = null, target: providedTarget = null, onApply = null } = {}){
   if (!KIND_LABEL[kind] || !ALLOWED_FIELDS.has(field)) return null;
-  const target = trackAt(kind, index);
+  const target = providedTarget || trackAt(kind, index, id);
   if (!target) return null;
   const before = readValue(target, field);
   let latest = before;
   let active = true;
 
-  const live = () => active && trackAt(kind, index) === target;
+  const live = () => active && (providedTarget ? true : trackAt(kind, index, id) === target);
   const apply = (value, phase) => {
     if (!live()) return false;
     const next = normalizedValue(kind, index, field, value);
     if (Object.is(latest, next)) return false;
     writeValue(target, field, next);
     latest = next;
-    if (phase) notify(kind, index, field, phase);
+    if (typeof onApply === 'function') onApply(next, target);
+    if (phase) notify(kind, index ?? id, field, phase);
     return true;
   };
   // 拖曳預覽由 renderer 在 requestAnimationFrame 內局部更新；完整重繪只在 commit。
@@ -109,7 +134,7 @@ function beginTimelineTrackEdit({ kind, index, field, label = null } = {}){
     }
     active = false;
     if (clearedClipId) emit('selection:clipCleared', { id: clearedClipId, reason: 'track-locked' });
-    notify(kind, index, field, 'commit', selectionChanged);
+    notify(kind, index ?? id, field, 'commit', selectionChanged);
     emit('history:record', label || defaultLabel({ kind, field, before, after: latest, target }));
     return true;
   };
@@ -119,7 +144,8 @@ function beginTimelineTrackEdit({ kind, index, field, label = null } = {}){
     const changed = !Object.is(before, latest);
     if (changed) {
       writeValue(target, field, before);
-      notify(kind, index, field, 'cancel');
+      if (typeof onApply === 'function') onApply(before, target);
+      notify(kind, index ?? id, field, 'cancel');
     }
     active = false;
     return changed;
@@ -134,4 +160,4 @@ function updateTimelineTrack(options){
   return edit.commit(options?.value);
 }
 
-export { beginTimelineTrackEdit, updateTimelineTrack };
+export { beginTimelineTrackEdit, updateTimelineTrack, ABSENT };

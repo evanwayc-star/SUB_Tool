@@ -91,6 +91,25 @@ describe('timeline track edit transaction', () => {
     expect(mpvRefreshes).toEqual([]);
   });
 
+  it('previews and commits audio track height with undo/redo support', () => {
+    State.externalAudioState = [{ id: 'ext-asset-1', audioSourceId: 'asset-1', name: '配樂' }];
+    const onApply = vi.fn();
+    const edit = beginTimelineTrackEdit({ kind: 'audio', id: 'ext-asset-1', field: 'height', onApply });
+
+    edit.preview(88);
+    expect(State.externalAudioState[0].height).toBe(88);
+    expect(onApply).toHaveBeenCalledWith(88, State.externalAudioState[0]);
+    expect(History.stack).toHaveLength(1);
+
+    expect(edit.commit()).toBe(true);
+    expect(History.stack).toHaveLength(2);
+    expect(History.stack.at(-1).label).toBe('調整音訊軌高度：配樂');
+
+    // Resetting height back to default
+    updateTimelineTrack({ kind: 'audio', id: 'ext-asset-1', field: 'height', value: undefined, onApply });
+    expect(State.externalAudioState[0].height).toBeUndefined();
+  });
+
   it('cancels a queued resize preview frame before the commit redraw', () => {
     const src = fs.readFileSync(path.join(ROOT, 'src/timeline-renderer.js'), 'utf8');
     const body = src.slice(src.indexOf('function _onRowResizeUp'));

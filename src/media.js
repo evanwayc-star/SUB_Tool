@@ -331,6 +331,12 @@ const Media = {
     if(!asset) return null;
     return this._commitExternalAudioEdit(asset,'修剪音訊：'+(asset.name||''));
   },
+  setExternalAudioHeight(key, height){
+    const asset=this.externalAudio.setHeight(key, height);
+    if(!asset) return null;
+    this._syncExternalAudioState();
+    return asset;
+  },
   /* 在播放點切開一個外部音訊。
      每個切片都建立獨立 audioSourceId / AudioElement，才能同時被移動、靜音、輸出與播放；
      快取可由 Electron 的 ingest 命中，不共用同一個 element 而造成兩段互相 seek。 */

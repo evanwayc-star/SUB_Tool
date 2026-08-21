@@ -236,6 +236,49 @@ describe('History 還原：算出留下／移除／重建三份名單', () => {
   });
 });
 
+describe('高度調整（setHeight）', () => {
+  it('可設定素材高度並限制在 32~160 範圍內', () => {
+    const a = add();
+    lib.setHeight(a.id, 80);
+    expect(a.height).toBe(80);
+
+    lib.setHeight(a.id, 10);
+    expect(a.height).toBe(32);
+
+    lib.setHeight(a.id, 300);
+    expect(a.height).toBe(160);
+
+    lib.setHeight(a.id, null);
+    expect(a.height).toBeUndefined();
+  });
+
+  it('同一個 timelineLaneId 的所有切片片段高度同步更新', () => {
+    const a = add({ timelineLaneId: 'lane-1' });
+    const b = add({ timelineLaneId: 'lane-1' });
+    const c = add({ timelineLaneId: 'lane-2' });
+
+    lib.setHeight(a.id, 96);
+    expect(a.height).toBe(96);
+    expect(b.height).toBe(96);
+    expect(c.height).toBeUndefined();
+  });
+
+  it('切割時右段繼承原段高度', () => {
+    const a = add({ height: 75, duration: 10, in: 0, out: 10, offset: 0 });
+    const plan = lib.planSplit(a.id, 4);
+    expect(plan.right.height).toBe(75);
+  });
+
+  it('還原快照時恢復高度設定', () => {
+    const a = add({ height: 90 });
+    lib.applyRestored(a, { ...a, height: 60 });
+    expect(a.height).toBe(60);
+
+    lib.applyRestored(a, { ...a, height: null });
+    expect(a.height).toBeUndefined();
+  });
+});
+
 describe('sourceChannelDescriptors', () => {
   it('有明細時逐一正規化，缺 sourceChannel 用索引補', () => {
     expect(sourceChannelDescriptors([{ sourceStream: 1 }, { sourceStream: 1, sourceChannel: 3 }]))
