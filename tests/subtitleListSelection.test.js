@@ -44,7 +44,9 @@ vi.mock('../src/subtitle-model.js', () => ({
   detectOverlaps: () => new Set(), sweepContainedCues: vi.fn(), addCue: vi.fn(), addCueRelative: vi.fn(),
   deleteSelectedCues: vi.fn(), deleteCue: vi.fn(), clearSelectedCuesTime: vi.fn(), shiftTextsDown: vi.fn(),
   shiftTextsUp: vi.fn(), sortCues: vi.fn(), copyCues: vi.fn(), pasteCues: vi.fn(), trimTrackSpaces: vi.fn(),
-  trackLocked: () => false, cueTrackLocked: () => false, splitCue: vi.fn(),
+  trackLocked: (tk) => !!state?.State?.tracks?.[tk]?.locked,
+  cueTrackLocked: (c) => !!state?.State?.tracks?.[c?.track || 0]?.locked,
+  splitCue: vi.fn(),
 }));
 vi.mock('../src/subtitle-search.js', () => ({
   searchSelectAll: vi.fn(), txtHTML: value => String(value ?? ''), isSearchHit: () => false,
@@ -90,7 +92,7 @@ function mount() {
     <video id="video"></video><div id="imageLayer"></div>
     <select id="listTrackSel"></select><span id="subCount"></span><span id="stSel"></span>
     <div id="sublist"></div><div id="checkPanel"></div>
-    <div id="tlScroll"><div id="tlLayer"><canvas id="rulerCanvas"></canvas>
+    <div id="tlScroll"><div id="tlSpacer"></div><div id="tlLayer"><canvas id="rulerCanvas"></canvas>
       <div id="tlVtracks"></div><div id="tlAtracks"></div>
       <div id="tlTracks">
         <div class="tl-track" data-track="0"><div class="cue-block" data-id="a"><i>A</i></div></div>
@@ -277,12 +279,33 @@ it('普通拖曳跨軌多選中的字幕，會保留群組並讓全部字幕一�
 it('選取字幕時狀態列格式為「已選取 N 句．[軌道名稱] - #編號」', () => {
   subtitles.selectCue('a');
   const stSel = document.getElementById('stSel');
-  expect(stSel.textContent).toBe('已選取 1 句．T0 - #1');
+  expect(stSel.textContent).toBe('已選取 1 句．[T0] - #1');
+  expect(stSel.innerHTML).toContain('<span class="sel-track-name">[T0]</span>');
 
   subtitles.selectCue('b');
-  expect(stSel.textContent).toBe('已選取 1 句．T1 - #1');
+  expect(stSel.textContent).toBe('已選取 1 句．[T1] - #1');
+  expect(stSel.innerHTML).toContain('<span class="sel-track-name">[T1]</span>');
 
   makeCrossTrackSelection();
-  expect(stSel.textContent).toBe('已選取 2 句．T1 - #1');
+  expect(stSel.textContent).toBe('已選取 2 句．[T1] - #1');
+});
+
+it('拖曳字幕時不可移入已鎖定的軌道', () => {
+  state.State.tracks[1].locked = true;
+  const blockA = document.querySelector('.cue-block[data-id="a"]');
+  // 嘗試將 track 0 的 a 拖曳至 track 1（dy = 50px）
+  dragBlock(blockA, { dx: 0, dy: 50 });
+  const cueA = state.State.cues.find(c => c.id === 'a');
+  expect(cueA.track).toBe(0); // 仍維持在 track 0，未被移入 track 1
+});
+
+it('moveSelectedToTrack 嘗試移動字幕至鎖定軌道時被擋下', async () => {
+  const { moveSelectedToTrack } = await import('../src/timeline-renderer.js');
+  state.State.tracks[1].locked = true;
+  state.State.selectedId = 'a';
+  state.State.selectedIds = ['a'];
+  moveSelectedToTrack(1);
+  const cueA = state.State.cues.find(c => c.id === 'a');
+  expect(cueA.track).toBe(0);
 });
 

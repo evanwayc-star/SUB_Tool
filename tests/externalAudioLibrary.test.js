@@ -279,6 +279,37 @@ describe('高度調整（setHeight）', () => {
   });
 });
 
+describe('音訊軌鎖定（setLocked 與 locked 狀態維護）', () => {
+  it('建立時若傳入 locked: true 則正確初始化為 locked', () => {
+    const a = add({ locked: true });
+    expect(a.locked).toBe(true);
+  });
+
+  it('setLocked 可切換同 laneId 所有切片的鎖定狀態', () => {
+    const a1 = add({ audioSourceId: 'a1', timelineLaneId: 'lane-1', locked: false });
+    const a2 = add({ audioSourceId: 'a2', timelineLaneId: 'lane-1', locked: false });
+    lib.setLocked(a1.id, true);
+    expect(a1.locked).toBe(true);
+    expect(a2.locked).toBe(true);
+
+    lib.setLocked(a2.id, false);
+    expect(a1.locked).toBe(false);
+    expect(a2.locked).toBe(false);
+  });
+
+  it('planSplit 切割時右段會繼承左段的 locked 狀態', () => {
+    const a = add({ duration: 10, offset: 0, in: 0, out: 10, locked: true });
+    const plan = lib.planSplit(a.id, 5);
+    expect(plan.right.locked).toBe(true);
+  });
+
+  it('applyRestored 會還原快照中的 locked 狀態', () => {
+    const a = add({ audioSourceId: 'a', locked: false });
+    lib.applyRestored(a, { audioSourceId: 'a', locked: true });
+    expect(a.locked).toBe(true);
+  });
+});
+
 describe('sourceChannelDescriptors', () => {
   it('有明細時逐一正規化，缺 sourceChannel 用索引補', () => {
     expect(sourceChannelDescriptors([{ sourceStream: 1 }, { sourceStream: 1, sourceChannel: 3 }]))

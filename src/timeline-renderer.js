@@ -35,7 +35,7 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVid
 import { clamp, pad, escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { Media, Wave } from './media.js';
 import { encoreParts } from './time.js';
-import { selectCue, refreshSelectionUI, renderSubRow, sortCues, sweepContainedCues } from './subtitles.js';
+import { selectCue, refreshSelectionUI, renderSubRow, sortCues, sweepContainedCues, trackLocked, cueTrackLocked } from './subtitles.js';
 import { snapTimeToFrame } from './time.js';
 import { emit } from './events.js';
 import { ensureProjectSaved, isProjectGuardDone } from './project.js';
@@ -974,10 +974,16 @@ function renderAtrackGutter(){
       ev.preventDefault(); ev.stopPropagation();
       const newState=!source.locked;
       if(row.external){
-        for(const entry of row.entries) entry.source.locked=newState;
+        Media.setExternalAudioLocked(row.sourceId, newState);
       } else {
+        for(const c of State.clips){
+          if(clipAudioSourceId(c)===row.sourceId){
+            c.locked=newState;
+          }
+        }
         source.locked=newState;
       }
+      recordHistory((newState?'鎖定':'解鎖')+'音訊軌：'+row.label);
       drawTimeline();
     });
 
@@ -1241,6 +1247,11 @@ tlScroll.addEventListener('mousedown',e=>{
     if(isCtrl && mode!=='move'){ selectCue(c.id,{additive:true}); if(!isSel(c.id)){ e.preventDefault(); return; } }
     else if(!isCtrl && !isSel(c.id)) selectCue(c.id);
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
+    const grpCues = grpIds.map(id => State.cues.find(z => z.id === id)).filter(Boolean);
+    if(grpCues.some(cc => State.tracks[cc.track || 0]?.locked)){
+      // 群組中包含鎖定軌道：僅允許選取，不允許拖曳移動
+      e.preventDefault(); return;
+    }
     const exSet=new Set(grpIds);
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
       .map(cc=>{ const b=cueNeighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart,origStyle:cc.style ? {...cc.style} : undefined}; }); // P3：快取區塊 element 參照
@@ -1499,7 +1510,12 @@ const _handleDragUpdate = (e) => {
     }
     updateSnapGuide(targetSn);
     const minOt=Math.min(...drag.grp.map(g=>g.ot)), maxOt=Math.max(...drag.grp.map(g=>g.ot));
-    const dTk=clamp(trackFromY(e.clientY)-drag.ot, -minOt, State.trackCount-1-maxOt);
+    const rawDTk=clamp(trackFromY(e.clientY)-drag.ot, -minOt, State.trackCount-1-maxOt);
+    const canMoveToTrack = drag.grp.every(it => {
+      const targetTk = it.ot + rawDTk;
+      return targetTk >= 0 && targetTk < State.trackCount && !State.tracks[targetTk]?.locked;
+    });
+    const dTk = canMoveToTrack ? rawDTk : 0;
     for(const it of drag.grp){
       const len=it.oe-it.os;
       if (snapAnchor === 'end') {
@@ -1743,7 +1759,12 @@ export function removeTrack(i){
 export function moveSelectedToTrack(target){
   const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
   if(!ids.length)return;
-  for(const id of ids){ const c=State.cues.find(x=>x.id===id); if(c)c.track=clamp(target,0,State.trackCount-1); }
+  const targetTk=clamp(target,0,State.trackCount-1);
+  if(trackLocked(targetTk, '移動至此軌道')) return;
+  const cues=ids.map(id=>State.cues.find(x=>x.id===id)).filter(Boolean);
+  const fromLocked=cues.find(c=>State.tracks[c.track||0]?.locked);
+  if(fromLocked && cueTrackLocked(fromLocked, '移動字幕')) return;
+  for(const c of cues){ c.track=targetTk; }
   emit('render:all'); drawTimeline(); recordHistory('移動至軌道');
 }
 

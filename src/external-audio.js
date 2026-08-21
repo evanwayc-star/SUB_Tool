@@ -126,6 +126,7 @@ class ExternalAudioLibrary {
       fadeIn: nonNeg(details.fadeIn),
       fadeOut: nonNeg(details.fadeOut),
       enabled: details.enabled !== false,
+      locked: details.locked === true,
       ...(Number.isFinite(Number(details.height)) ? { height: clamp(Number(details.height), 32, 160) } : {}),
       // 影片容器（例如 MXF／部分 MOV）未必能被 Chromium 的 <audio> 解碼。
       // 這個旗標會隨專案保存，讓它在重開後直接復用 ffmpeg 的逐聲道快取，
@@ -162,6 +163,7 @@ class ExternalAudioLibrary {
     asset.fadeIn = Math.min(range.length, nonNeg(asset.fadeIn));
     asset.fadeOut = Math.min(range.length, nonNeg(asset.fadeOut));
     asset.enabled = asset.enabled !== false;
+    asset.locked = asset.locked === true;
     if (asset.height != null) {
       if (Number.isFinite(Number(asset.height))) asset.height = clamp(Number(asset.height), 32, 160);
       else delete asset.height;
@@ -219,6 +221,21 @@ class ExternalAudioLibrary {
     return target;
   }
 
+  setLocked(targetOrKey, locked){
+    const target = (typeof targetOrKey === 'object' && targetOrKey !== null)
+      ? (this.has(targetOrKey) ? targetOrKey : this.find(targetOrKey.id || targetOrKey.audioSourceId || targetOrKey.timelineLaneId || targetOrKey.audioSrc || targetOrKey.source))
+      : this.find(targetOrKey);
+    if (!target) return null;
+    const laneId = target.timelineLaneId || target.audioSourceId;
+    const val = typeof locked === 'boolean' ? locked : !target.locked;
+    for (const asset of this.assets) {
+      if (asset.timelineLaneId === laneId || asset.audioSourceId === target.audioSourceId || asset.id === target.id) {
+        asset.locked = val;
+      }
+    }
+    return target;
+  }
+
   updateDuration(asset, rawDuration){
     if (!asset || !this.has(asset)) return null;
     const duration = nonNeg(rawDuration);
@@ -263,6 +280,7 @@ class ExternalAudioLibrary {
         fadeIn: 0,
         fadeOut: asset.fadeOut,
         enabled: asset.enabled,
+        locked: asset.locked === true,
         preferCache: asset.preferCache === true,
         descriptors: (asset.descriptors || []).map(channel => ({ ...channel })),
         fallbackCount: (asset.descriptors || []).length,
@@ -345,6 +363,7 @@ class ExternalAudioLibrary {
     asset.fadeIn = source.fadeIn;
     asset.fadeOut = source.fadeOut;
     asset.enabled = source.enabled !== false;
+    asset.locked = source.locked === true;
     asset.preferCache = source.preferCache === true;
     if (Array.isArray(source.descriptors) && source.descriptors.length) asset.descriptors = source.descriptors.map(channel => ({ ...channel }));
     return this.normalize(asset);

@@ -453,6 +453,7 @@ export function copyCues(){
 
 export function pasteCues(){
   if(!State.clipboard?.length){ showToast('剪貼簿是空的'); return; }
+  if(trackLocked(State.listTrack, '貼上字幕')) return;
   const timedClip=State.clipboard.filter(c=>c.timed!==false);
   const minStart=timedClip.length ? Math.min(...timedClip.map(c=>c.start)) : 0;
   const delta=Media.displayTime()-minStart;

@@ -924,6 +924,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 #stSel.sel-none, #tlSel.sel-none { background:rgba(150,150,150,.15); color:var(--text-dim); }
 #stSel.sel-one, #tlSel.sel-one { background:rgba(245,158,11,.08); color:var(--cue-sel); }
 #stSel.sel-multi, #tlSel.sel-multi { background:rgba(240,100,140,.08); color:#ffcccc; }
+#stSel .sel-track-name, #tlSel .sel-track-name { color:#ffffff; font-weight:700; }
 .ow-toggle-btn { background:rgba(150,150,150,.08); color:var(--text-dim); }
 .ow-toggle-btn.primary { background:rgba(239,68,68,.08); color:#ff6666; }
 .ow-keep-btn { background:rgba(40,180,80,.08); color:#6f6; }

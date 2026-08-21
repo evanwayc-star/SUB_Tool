@@ -120,3 +120,14 @@ describe('deleteSelected：選取跨到鎖定軌時整批擋下', () => {
     expect(ui.showToast).toHaveBeenCalled();
   });
 });
+
+describe('pasteCues 鎖定防護', () => {
+  it('嘗試在鎖定軌道貼上字幕 → 擋下並提示', async () => {
+    const { pasteCues } = await import('../src/subtitle-model.js');
+    State.clipboard = [{ id: 'copy-1', text: 'hi', start: 0, end: 1, track: 0 }];
+    State.listTrack = 1; // 歌詞軌（鎖定）
+    pasteCues();
+    expect(State.cues.length).toBe(2);
+    expect(ui.showToast).toHaveBeenCalled();
+  });
+});

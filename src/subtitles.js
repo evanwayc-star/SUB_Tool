@@ -212,6 +212,20 @@ function openInlineTimeEdit(el, curSec, onCommit){
   inp.addEventListener('mousedown', e=>e.stopPropagation());
 }
 
+function formatSubSelectionHTML(){
+  if(!State.selectedIds || !State.selectedIds.length) return '';
+  const pc = State.cues.find(x => x.id === State.selectedId);
+  let extra = '';
+  if(pc){
+    const tk = pc.track || 0;
+    const tkName = State.tracks[tk]?.name || ('軌道 ' + (tk + 1));
+    const tkCues = State.cues.filter(c => (c.track || 0) === tk);
+    const cueIdx = tkCues.indexOf(pc) + 1;
+    extra = `．<span class="sel-track-name">[${escapeHTML(tkName)}]</span> - #${cueIdx}`;
+  }
+  return `已選取 ${State.selectedIds.length} 句${extra}`;
+}
+
 function formatSubSelectionText(){
   if(!State.selectedIds || !State.selectedIds.length) return '';
   const pc = State.cues.find(x => x.id === State.selectedId);
@@ -221,7 +235,7 @@ function formatSubSelectionText(){
     const tkName = State.tracks[tk]?.name || ('軌道 ' + (tk + 1));
     const tkCues = State.cues.filter(c => (c.track || 0) === tk);
     const cueIdx = tkCues.indexOf(pc) + 1;
-    extra = `．${tkName} - #${cueIdx}`;
+    extra = `．[${tkName}] - #${cueIdx}`;
   }
   return `已選取 ${State.selectedIds.length} 句${extra}`;
 }
@@ -230,7 +244,7 @@ function updateTlSel(){
   const el = $('stSel');
   if(!el) return;
   if(State.activeTrackKind === 'sub' || (State.selectedIds && State.selectedIds.length > 0)){
-    el.textContent = formatSubSelectionText();
+    el.innerHTML = formatSubSelectionHTML();
   }
 }
 
@@ -495,7 +509,7 @@ function selectCue(id,opts){
     }
   }
   const stSelEl = $('stSel');
-  if (stSelEl) stSelEl.textContent = formatSubSelectionText();
+  if (stSelEl) stSelEl.innerHTML = formatSubSelectionHTML();
   updatePlayhead();
 }
 
@@ -784,7 +798,7 @@ function pasteCues() {
 }
 
 export { 
-  renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel, formatSubSelectionText,
+  renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel, formatSubSelectionText, formatSubSelectionHTML,
   addCue, addCueRelative, deleteSelectedWithPrompt as deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, updateSearchCount, searchSelectAll, openInlineTimeEdit, refreshStyleSummaries,

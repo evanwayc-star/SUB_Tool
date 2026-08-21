@@ -318,6 +318,7 @@ const Media = {
   },
   moveExternalAudio(key, offset){
     const current=this.externalAudio.find(key);
+    if(current?.locked){ showToast('音訊軌已鎖定'); return null; }
     this._invalidateExternalAssetEdit(current);
     const asset=this.externalAudio.move(key,offset);
     if(!asset) return null;
@@ -326,6 +327,7 @@ const Media = {
   /* edge 可用 start/left/in 或 end/right/out；timelineTime 一律是時間軸秒數。 */
   trimExternalAudio(key, edge, timelineTime){
     const current=this.externalAudio.find(key);
+    if(current?.locked){ showToast('音訊軌已鎖定'); return null; }
     this._invalidateExternalAssetEdit(current);
     const asset=this.externalAudio.trim(key,edge,timelineTime);
     if(!asset) return null;
@@ -337,10 +339,18 @@ const Media = {
     this._syncExternalAudioState();
     return asset;
   },
+  setExternalAudioLocked(key, locked){
+    const asset=this.externalAudio.setLocked(key, locked);
+    if(!asset) return null;
+    this._syncExternalAudioState();
+    return asset;
+  },
   /* 在播放點切開一個外部音訊。
      每個切片都建立獨立 audioSourceId / AudioElement，才能同時被移動、靜音、輸出與播放；
      快取可由 Electron 的 ingest 命中，不共用同一個 element 而造成兩段互相 seek。 */
   async splitExternalAudio(key, timelineTime){
+    const current=this.externalAudio.find(key);
+    if(current?.locked){ showToast('音訊軌已鎖定'); return null; }
     // 切點與左右兩段的規格是純計算 → library；把右段真的載進來要開檔 → 這裡。
     const plan=this.externalAudio.planSplit(key,timelineTime);
     if(!plan){
@@ -381,6 +391,7 @@ const Media = {
   removeExternalAudio(key,{record=true}={}){
     const asset=this.externalAudio.find(key);
     if(!asset) return false;
+    if(record && asset.locked){ showToast('音訊軌已鎖定'); return false; }
     this._invalidateExternalAssetEdit(asset);
     const source=asset.audioSrc;
     const oldTracks=this.tracks.filter(track=>track.source===source);
@@ -516,6 +527,7 @@ const Media = {
         fadeIn:restoredSource?.fadeIn,
         fadeOut:restoredSource?.fadeOut,
         enabled:restoredSource?.enabled,
+        locked:restoredSource?.locked,
         // 一旦走過此保底路徑，之後切割／專案重開都不要再讀原始影片容器。
         preferCache:true,
         descriptors,
@@ -723,6 +735,7 @@ const Media = {
         fadeIn:restoredSource?.fadeIn,
         fadeOut:restoredSource?.fadeOut,
         enabled:restoredSource?.enabled,
+        locked:restoredSource?.locked,
         descriptors:restoredSource?.descriptors,
         fallbackCount:chCount,
         file
@@ -802,6 +815,7 @@ const Media = {
         fadeIn:restoredSource?.fadeIn,
         fadeOut:restoredSource?.fadeOut,
         enabled:restoredSource?.enabled,
+        locked:restoredSource?.locked,
         descriptors:probedDescriptors.length?probedDescriptors:restoredSource?.descriptors,
         fallbackCount:chCount
       });

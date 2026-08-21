@@ -467,7 +467,7 @@ function initUI(){
         stSel.className = 'sel-none';
         if(txt !== '未選取') stSel.textContent = '未選取';
       } else {
-        tlSel.textContent = txt;
+        tlSel.innerHTML = stSel.innerHTML;
         const isSingle = /已選(取)?\s*1\s*[句條]/.test(txt) ||
                          txt.startsWith('已選圖片') ||
                          txt.startsWith('已選音訊') ||
