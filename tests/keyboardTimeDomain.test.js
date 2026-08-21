@@ -107,4 +107,25 @@ describe('JKL reverse shuttle time domain', () => {
     expect(mediaMock.displayTime).toHaveBeenCalled();
     expect(mediaMock.vTime).not.toHaveBeenCalled();
   });
+
+  it('播放時按下左右鍵會先暫停並往左/右移動一格', async () => {
+    State.keymap = {
+      nudge_left_1f: [{ key: 'arrowleft' }],
+      nudge_right_1f: [{ key: 'arrowright' }],
+    };
+    mediaMock.playing = true;
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    expect(mediaMock.pause).toHaveBeenCalled();
+    expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 - 1 / State.fps, 8));
+
+    mediaMock.pause.mockClear();
+    mediaMock.seek.mockClear();
+    mediaMock.playing = true;
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    expect(mediaMock.pause).toHaveBeenCalled();
+    expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 + 1 / State.fps, 8));
+  });
 });

@@ -403,6 +403,7 @@ window.addEventListener('keydown', e => {
     case 'set_out': e.preventDefault(); setOut(); break;
     case 'nudge_left_1f':
       e.preventDefault();
+      if (Media.playing) { jklClear(); _jklSpeed = 0; Media.pause(); setStatus('⏸ 暫停', ''); }
       if (e.repeat) { if (_jklSpeed >= 0) { _jklSpeed = -1; jklApply(); } }
       else nudge(-1 / getExactFps(State.fps || 30));
       break;
@@ -410,6 +411,7 @@ window.addEventListener('keydown', e => {
     case 'nudge_left_5s': e.preventDefault(); nudge(-5); break;
     case 'nudge_right_1f':
       e.preventDefault();
+      if (Media.playing) { jklClear(); _jklSpeed = 0; Media.pause(); setStatus('⏸ 暫停', ''); }
       if (e.repeat) { if (_jklSpeed <= 0) { _jklSpeed = 1; jklApply(); } }
       else nudge(1 / getExactFps(State.fps || 30));
       break;
@@ -544,6 +546,12 @@ window.addEventListener('keyup', e => {
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { if (_jklSpeed !== 0) jklReset(); }
 });
 function nudge(d) {
+  if (Media.playing) {
+    jklClear();
+    _jklSpeed = 0;
+    Media.pause();
+    setStatus('⏸ 暫停', '');
+  }
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點（暫停時為已對齊幀格的 _lastSeekTime）
   // 為基準，避免讀 video.currentTime 的浮點 ε 經 seek 重新 round 後被放大，
   // 造成逐格時跳兩格／退不動（29.97fps 尤甚）
