@@ -280,9 +280,9 @@ it('選取字幕時狀態列格式為「已選取 N 句．[軌道名稱] - #編�
   expect(stSel.textContent).toBe('已選取 1 句．T0 - #1');
 
   subtitles.selectCue('b');
-  expect(stSel.textContent).toBe('已選取 1 句．T1 - #2');
+  expect(stSel.textContent).toBe('已選取 1 句．T1 - #1');
 
   makeCrossTrackSelection();
-  expect(stSel.textContent).toBe('已選取 2 句．T1 - #2');
+  expect(stSel.textContent).toBe('已選取 2 句．T1 - #1');
 });
 

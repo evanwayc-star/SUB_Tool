@@ -219,7 +219,9 @@ function formatSubSelectionText(){
   if(pc){
     const tk = pc.track || 0;
     const tkName = State.tracks[tk]?.name || ('軌道 ' + (tk + 1));
-    extra = `．${tkName} - #${State.cues.indexOf(pc) + 1}`;
+    const tkCues = State.cues.filter(c => (c.track || 0) === tk);
+    const cueIdx = tkCues.indexOf(pc) + 1;
+    extra = `．${tkName} - #${cueIdx}`;
   }
   return `已選取 ${State.selectedIds.length} 句${extra}`;
 }
