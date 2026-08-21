@@ -468,7 +468,12 @@ function initUI(){
         if(txt !== '未選取') stSel.textContent = '未選取';
       } else {
         tlSel.textContent = txt;
-        if(txt.includes('已選 1 條')) {
+        const isSingle = /已選(取)?\s*1\s*[句條]/.test(txt) ||
+                         txt.startsWith('已選圖片') ||
+                         txt.startsWith('已選音訊') ||
+                         txt.startsWith('已選影片段') ||
+                         txt.startsWith('已切換至');
+        if(isSingle) {
            tlSel.className = 'sel-one';
            stSel.className = 'sel-one';
         } else {

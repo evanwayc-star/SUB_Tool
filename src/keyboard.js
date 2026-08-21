@@ -465,8 +465,6 @@ window.addEventListener('keydown', e => {
       if (tkCues.length) {
         setSelection({ kind: 'sub', ids: tkCues.map(c => c.id), primary: tkCues[0].id });
         refreshSelectionUI();
-        const stSel = document.getElementById('stSel');
-        if (stSel) stSel.textContent = '已選 ' + State.selectedIds.length + ' 條';
       }
       break;
     case 'copy_style':

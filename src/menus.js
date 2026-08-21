@@ -130,7 +130,6 @@ function showCueMenu(x,y){
           const ids=_list.slice(0,_i+1).map(c=>c.id);
           setSelection({ kind:'sub', ids, primary:_c.id }); State.activeEdge='start';
           refreshSelectionUI();
-          $('stSel').textContent=ids.length?('已選 '+ids.length+' 條'):'';
         }}); addedSel=true;
       }
       if(_i>=0 && _i<_list.length-1){
@@ -138,7 +137,6 @@ function showCueMenu(x,y){
           const ids=_list.slice(_i).map(c=>c.id);
           setSelection({ kind:'sub', ids, primary:_c.id }); State.activeEdge='start';
           refreshSelectionUI();
-          $('stSel').textContent=ids.length?('已選 '+ids.length+' 條'):'';
         }}); addedSel=true;
       }
       if(addedSel)items.push({sep:true});

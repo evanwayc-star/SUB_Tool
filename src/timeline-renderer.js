@@ -1225,7 +1225,7 @@ tlScroll.addEventListener('mousedown',e=>{
           // primary 明確保留錨點（範圍多選不換主選取）
           setSelection({ kind:'sub', ids:list.slice(lo,hi+1).map(z=>z.id), primary:State.selectedId });
           State.activeEdge='start';
-          refreshSelectionUI(); $('stSel').textContent='已選 '+State.selectedIds.length+' 句';
+          refreshSelectionUI();
           e.preventDefault(); return;
         }
       }
@@ -1318,7 +1318,6 @@ function cancelTimelineDrag(){
     // instead of leaving the removed clone highlighted until a later render.
     if(pending.isCopyDrag){
       refreshSelectionUI();
-      $('stSel').textContent=State.selectedIds.length ? '已選 '+State.selectedIds.length+' 句' : '';
     }
   }
   drag=null;
@@ -1633,7 +1632,7 @@ window.addEventListener('mouseup',e=>{
         : hit;
       setSelection({ kind:'sub', ids:picked });
       State.activeEdge='start';
-      refreshSelectionUI(); $('stSel').textContent='已選 '+State.selectedIds.length+' 條';
+      refreshSelectionUI();
     }else{
       // 點時間軸空白：跳轉（Shift 時保留選取）
       const sc=tracksScrollTop();

@@ -212,8 +212,24 @@ function openInlineTimeEdit(el, curSec, onCommit){
   inp.addEventListener('mousedown', e=>e.stopPropagation());
 }
 
+function formatSubSelectionText(){
+  if(!State.selectedIds || !State.selectedIds.length) return '';
+  const pc = State.cues.find(x => x.id === State.selectedId);
+  let extra = '';
+  if(pc){
+    const tk = pc.track || 0;
+    const tkName = State.tracks[tk]?.name || ('軌道 ' + (tk + 1));
+    extra = `．${tkName} - #${State.cues.indexOf(pc) + 1}`;
+  }
+  return `已選取 ${State.selectedIds.length} 句${extra}`;
+}
+
 function updateTlSel(){
-  // Synchronized via MutationObserver in app.js
+  const el = $('stSel');
+  if(!el) return;
+  if(State.activeTrackKind === 'sub' || (State.selectedIds && State.selectedIds.length > 0)){
+    el.textContent = formatSubSelectionText();
+  }
 }
 
 function renderCheckPanel(){
@@ -476,8 +492,8 @@ function selectCue(id,opts){
       }
     }
   }
-  const pc=State.cues.find(x=>x.id===State.selectedId);
-  $('stSel').textContent=State.selectedIds.length?('已選 '+State.selectedIds.length+' 句'+(pc?(' · #'+(State.cues.indexOf(pc)+1)):'')):'';
+  const stSelEl = $('stSel');
+  if (stSelEl) stSelEl.textContent = formatSubSelectionText();
   updatePlayhead();
 }
 
@@ -766,7 +782,7 @@ function pasteCues() {
 }
 
 export { 
-  renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel,
+  renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel, formatSubSelectionText,
   addCue, addCueRelative, deleteSelectedWithPrompt as deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, updateSearchCount, searchSelectAll, openInlineTimeEdit, refreshStyleSummaries,

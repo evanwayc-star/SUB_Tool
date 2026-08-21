@@ -273,3 +273,16 @@ it('普通拖曳跨軌多選中的字幕，會保留群組並讓全部字幕一�
     ],
   });
 });
+
+it('選取字幕時狀態列格式為「已選取 N 句．[軌道名稱] - #編號」', () => {
+  subtitles.selectCue('a');
+  const stSel = document.getElementById('stSel');
+  expect(stSel.textContent).toBe('已選取 1 句．T0 - #1');
+
+  subtitles.selectCue('b');
+  expect(stSel.textContent).toBe('已選取 1 句．T1 - #2');
+
+  makeCrossTrackSelection();
+  expect(stSel.textContent).toBe('已選取 2 句．T1 - #2');
+});
+
