@@ -41,10 +41,13 @@ describe('Mac 工具列 responsive 版面', () => {
     expect(html).toMatch(/data-act="zoom-fit"[\s\S]*class="compact-icon"/);
   });
 
-  it('時間軸標題後保留收合把手，音軌數與後續工具位於同一個可隱藏群組', () => {
+  it('時間軸標題後保留收合把手，已選取狀態與縮放控制項獨立於收合群組外保持常駐', () => {
     expect(html).toMatch(/tl-toolbar-title[\s\S]*id="tlToolbarToggle"[\s\S]*id="tlToolbarOptions"[\s\S]*project-audio-count[\s\S]*data-act="zoom-fit"/);
+    expect(html).toMatch(/id="tlToolbarOptions"[\s\S]*project-audio-count[\s\S]*<\/div>\s*<div class="spacer"><\/div>\s*<span id="tlSel">[\s\S]*class="zoom"/);
     expect(declarations('.tl-toolbar-options')).toContain('display:flex');
     expect(declarations('.tl-toolbar-options[hidden]')).toContain('display:none');
+    expect(declarations('.tl-toolbar #tlSel')).toContain('flex-shrink:0');
+    expect(declarations('.tl-toolbar .zoom')).toContain('flex-shrink:0');
   });
 
   it('字幕樣式只讓控制群整組換行，不產生第二條橫向捲軸', () => {

@@ -372,7 +372,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .tl-toolbar-toggle{width:27px;min-width:27px;height:28px;padding:0!important;justify-content:center;color:var(--text-dim)}
 .tl-toolbar-toggle:hover{color:var(--text);border-color:var(--text-dim)}
 .tl-toolbar-toggle[aria-expanded="false"]{color:var(--accent);border-color:var(--accent-d);background:rgba(76,183,170,.08)}
-.tl-toolbar-options{display:flex;align-items:center;gap:4px;flex:1 1 auto!important;min-width:0;overflow:hidden}
+.tl-toolbar-options{display:flex;align-items:center;gap:4px;flex:0 1 auto;min-width:0;overflow:hidden}
 .tl-toolbar-options[hidden]{display:none}
 .tl-toolbar-options>*{flex-shrink:0;white-space:nowrap}
 .tl-toolbar-options>.spacer{flex:1 1 auto;min-width:0}
@@ -390,8 +390,8 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .project-audio-count input:hover{border-color:var(--text-dim);background:var(--panel3)}
 .project-audio-count input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(76,183,170,.15)}
 .project-audio-count-unit{color:var(--text-dim);font-size:11px;font-weight:700;white-space:nowrap}
-.tl-toolbar .zoom{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px}
-.tl-toolbar #tlSel{min-width:90px;padding-left:6px;padding-right:6px}
+.tl-toolbar .zoom{display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:11px;flex-shrink:0}
+.tl-toolbar #tlSel{min-width:90px;padding-left:6px;padding-right:6px;flex-shrink:0}
 .tl-toolbar #zoomBar{width:105px!important; -webkit-appearance:none;appearance:none;height:18px;margin:0;padding:0;border:0;background:var(--text-faint) center/calc(100% - 14px) 4px no-repeat;cursor:pointer}
 .tl-toolbar #zoomBar::-webkit-slider-runnable-track{height:4px;background:transparent;border:0}
 .tl-toolbar #zoomBar::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;margin-top:-5px;border:1px solid var(--accent-d);border-radius:50%;background:var(--accent);box-shadow:0 1px 2px rgba(0,0,0,.55)}

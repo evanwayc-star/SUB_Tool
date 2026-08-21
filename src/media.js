@@ -873,7 +873,7 @@ const Media = {
     // so generation alone cannot prevent a late cache result from recreating
     // that source in audioProject/Wave.
     const current=()=>this._bgVersion===myVer&&!!this._liveClipForSource(primary);
-    setStatus('背景抽取音軌中（不影響播放）…','busy');
+    setStatus('正在轉檔 Proxy 與分析音訊（背景處理，不影響播放）…','busy');
     let res;
     // needsProxy:true（v4.22 WebCodecs 階段5）：mpv 路徑同 pass 一併產 720p proxy——
     // proxy 就緒後 WebCodecs 預覽引擎接管畫面（即時多軌合成），mpv 退居時鐘＋兜底
@@ -946,7 +946,7 @@ const Media = {
         Wave.setSourceMixPeaks(sourceClip,pk,{mixPath:res.wave,channels:chs}); emit('media:timeline');
       }catch(e){ if(!current()) return; }
     }
-    if(current()) setStatus('音軌與波形已就緒','ok');
+    if(current()) setStatus('轉檔 Proxy 與音軌波形已就緒','ok');
   },
 
   /* --- ffmpeg.wasm --- */
@@ -1748,7 +1748,7 @@ const Media = {
     else { Seq.sort(); Seq.recomputeDuration(); }
     emit('media:timeline');
     emit('history:record', '加入影片：' + c.name);
-    setStatus(`已加入序列：${c.name}（背景抽取音訊與波形…）`, 'busy');
+    setStatus(`已加入序列：${c.name}（背景轉檔 Proxy 與抽取音訊…）`, 'busy');
     void this.ensureClipRuntime(c,info,assetOperation);
     return c;
   },

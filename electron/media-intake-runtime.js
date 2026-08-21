@@ -351,12 +351,15 @@ function createMediaIntakeRuntime(options = {}) {
 
   async function ingest({ src, duration, needsProxy, audio }, session = {}) {
     const audioSources = Array.isArray(audio) ? audio : [];
+    const ingestLabel = needsProxy && audioSources.length
+      ? '正在轉檔 Proxy 與分析音訊'
+      : (needsProxy ? '正在轉檔 Proxy' : '正在分析音訊');
     const hit = readCache(src);
     if (hit
       && (!audioSources.length || hit.routingMetadataComplete)
       && (!needsProxy || (hit.meta?.proxy && fs.existsSync(hit.meta.proxy)))) {
       options.sendProgress?.(session.progressTarget, {
-        jobId: 'ingest', label: '使用快取', pct: 100, done: true,
+        jobId: 'ingest', label: '使用既有快取', pct: 100, done: true,
       });
       return Object.assign({ cached: true }, hit.meta);
     }
@@ -387,7 +390,7 @@ function createMediaIntakeRuntime(options = {}) {
       sender: session.progressTarget,
       duration,
       jobId: 'ingest',
-      label: '讀取並轉檔（單次讀取）',
+      label: ingestLabel,
       onProcess: process => session.ownProcess?.(process),
       shouldSend: () => !cancelled(session),
     });
@@ -407,7 +410,7 @@ function createMediaIntakeRuntime(options = {}) {
       && hit.meta.proxy
       && fs.existsSync(hit.meta.proxy)) {
       options.sendProgress?.(session.progressTarget, {
-        jobId: 'ingest', label: '使用快取', pct: 100, done: true,
+        jobId: 'ingest', label: '使用既有快取', pct: 100, done: true,
       });
       const id = createStreamId('c-');
       streamJobs.set(id, { filePath: hit.meta.proxy, done: true, error: null });
@@ -451,7 +454,7 @@ function createMediaIntakeRuntime(options = {}) {
       sender: session.progressTarget,
       duration,
       jobId: id,
-      label: '背景轉檔中',
+      label: '正在背景轉檔 Proxy 與分析音訊',
       onProcess: process => session.ownProcess?.(process),
       shouldSend: () => !cancelled(session),
     }).then(() => {

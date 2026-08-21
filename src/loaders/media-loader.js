@@ -92,7 +92,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       // 原生播放繼續直讀；聲道 cache 在背景準備，供專案路由匯出使用。
       ctx.cacheNativeRoutingAudio(primary,p,State.duration||dur,audio);
       if(audio.length>0){
-        setStatus('產生波形…','busy');
+        setStatus('正在分析音訊與產生波形…','busy');
         let wavPath=null;
         try{
           wavPath=await DESK.waveAudio(p,dur);
@@ -111,13 +111,13 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); } }
       }
       if(!ownsPrimary()) return;
-      setStatus('媒體已載入（桌面模式，原生直讀）','ok'); emit('duration:known'); return;
+      setStatus('媒體已載入（原生直讀，免轉 Proxy）','ok'); emit('duration:known'); return;
     }
 
     // (B) 非原生（需 proxy）或原生多音軌
     // 非原生且有 streamIngest：邊轉邊播（幾秒內可開始播放）
     if(!canNative && DESK.streamIngest){
-      setStatus('讀取中（背景轉檔，即將可播放）…','busy');
+      setStatus('正在背景轉檔 Proxy 與分析音訊（即將可播放）…','busy');
       let res;
       try{ res=await DESK.streamIngest({ path:p, duration:dur, audio }); }
       catch(e){ if(!owns()) return; console.error(e); showToast('讀取失敗：'+e.message); setStatus('讀取失敗',''); return; }
@@ -201,7 +201,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       if(res.cached){
         void loadTracksAndWave(res).catch(error=>{ if(ownsPrimary()) console.warn('stream ingest tracks:',error); });
       } else {
-        setStatus('視訊播放就緒，音軌轉檔中（背景）…','busy');
+        setStatus('視訊播放就緒，正在背景轉檔 Proxy 與分析音訊…','busy');
         // 只在「本次轉檔工作」完成時才載入；用 ingestJobId 過濾其他工作的完成事件，並在換檔時移除
         const handler=(ev)=>{
           if(!ownsPrimary()){ window.removeEventListener('desk:ingest-done',handler); self._ingestDoneHandler=null; return; }
@@ -216,7 +216,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     }
 
     // (B2) 原生多音軌 或 無 streamIngest 時的原有路徑
-    setStatus(canNative?'抽取多音軌（單次讀取）…':'讀取並轉檔中（單次讀取，大檔需數分鐘）…','busy');
+    setStatus(canNative?'正在分析音訊與抽取多聲道…':'正在轉檔 Proxy 與分析音訊（大檔需數分鐘）…','busy');
     let res;
     try{ res=await DESK.ingest({ path:p, duration:dur, needsProxy:!canNative, audio }); }
     catch(e){ if(!owns()) return; console.error(e); showToast('讀取/轉檔失敗：'+e.message); setStatus('讀取/轉檔失敗',''); return; }
@@ -408,14 +408,16 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     // 混音器立即顯示「準備中」推桿（聲道數在 ffprobe 階段就已知）
     ctx.pendingChannels = ctx._expandChannels(audio).map(label=>({label,ready:false}));
     emit('media:audioTracks');
-    setStatus('媒體已載入（mpv 秒開，嵌入播放）','ok');
     emit('duration:known');
     Wave.initLive();
 
     // 背景抽取音軌（不阻塞播放；完成後 element tracks 接管音訊，mpv 靜音）
     if(audio.length>0){
+      setStatus('mpv 預覽就緒，正在轉檔 Proxy 與分析音訊…','busy');
       ctx.ensureCtx();
       ctx._bgAudioIngest(p,audio,dur,primary);
+    } else {
+      setStatus('媒體已載入（mpv 秒開，嵌入播放）','ok');
     }
   }
 
