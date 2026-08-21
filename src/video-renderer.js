@@ -481,10 +481,10 @@ function _imageNat(c, src){
   return { w:0, h:0 };
 }
 
-/* clip 的圖片來源 URL（純檔案路徑才補 file:///；已是 http/file/blob/data 一律照用） */
+/* clip 的圖片來源 URL（純檔案路徑才補 legacy file:///；opaque capability URL 一律照用） */
 function _imageSrc(c){
   let src = c.web?.url || c.path || '';
-  if(src && !/^(https?|file|blob|data):/i.test(src)) src = 'file:///' + src.replace(/\\/g, '/');
+  if(src && !/^(https?|file|blob|data|subtool-local):/i.test(src)) src = 'file:///' + src.replace(/\\/g, '/');
   return src;
 }
 /* 圖片在畫框內的實際矩形；拖曳與渲染共用，避免兩邊各算一次而漂移 */

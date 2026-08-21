@@ -38,6 +38,7 @@ class AudioEngineCore {
     this.master = null;
     this.analyser = null;
     this._anBuf = null;
+    this._bufferClock = null;
   }
 
   /* 接上播放狀態的來源。
@@ -174,7 +175,8 @@ class AudioEngineCore {
         src.start(0, clamp(off, 0, tr.buffer.duration));
       } catch (e) {}
     }
-    return { startCtxTime, startMediaTime: off };
+    this._bufferClock = { startCtxTime, startMediaTime: off };
+    return { ...this._bufferClock };
   }
 
   stopBuffers() {
@@ -185,6 +187,23 @@ class AudioEngineCore {
         tr.srcNode = null;
       }
     }
+    this._bufferClock = null;
+  }
+
+  /* buffer sources 沒有可讀的 currentTime；它們的播放時鐘必須由
+     擁有 AudioContext 的同一個模組維護。currentMediaTime 是播放器內的來源時間
+     （鐵律 §0.5）；間隙中影片時鐘停住，不可為了校正而誤啟動音訊。 */
+  syncBuffers(currentMediaTime, { inGap = false } = {}) {
+    if (!this.ctx || !this._bufferClock || inGap) return false;
+    const current = Number(currentMediaTime);
+    if (!Number.isFinite(current)) return false;
+    const rate = this._env.playbackRate() || 1;
+    const expected = this._bufferClock.startMediaTime
+      + (this.ctx.currentTime - this._bufferClock.startCtxTime) * rate;
+    if (Math.abs(expected - current) <= 0.25) return false;
+    this.stopBuffers();
+    this.startBuffers(current);
+    return true;
   }
 
   /* localT＝目前 clip 的來源時間；tlT＝時間軸時間（ext-* 參考音用）。兩者不可互換，見 §0.5。 */

@@ -44,7 +44,7 @@ vi.mock('../src/subtitle-model.js', () => ({
   detectOverlaps: () => new Set(), sweepContainedCues: vi.fn(), addCue: vi.fn(), addCueRelative: vi.fn(),
   deleteSelectedCues: vi.fn(), deleteCue: vi.fn(), clearSelectedCuesTime: vi.fn(), shiftTextsDown: vi.fn(),
   shiftTextsUp: vi.fn(), sortCues: vi.fn(), copyCues: vi.fn(), pasteCues: vi.fn(), trimTrackSpaces: vi.fn(),
-  trackLocked: () => false, cueTrackLocked: () => false,
+  trackLocked: () => false, cueTrackLocked: () => false, splitCue: vi.fn(),
 }));
 vi.mock('../src/subtitle-search.js', () => ({
   searchSelectAll: vi.fn(), txtHTML: value => String(value ?? ''), isSearchHit: () => false,

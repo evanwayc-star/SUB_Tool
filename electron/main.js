@@ -7,20 +7,16 @@
 /* SUB Tool — Electron 主程序
    提供：原生檔案對話框、平台原生 ffmpeg/ffprobe（MXF 轉檔、多音軌抽取、波形）、
          專案/字幕直接讀寫磁碟。前端沿用同一份 index.html。 */
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
-/* 非同步 fs。原生檔案對話框（dialog.showOpenDialog）的訊息迴圈就跑在主行程的
-   UI 執行緒上，所以這條執行緒上的每一次同步 I/O 都會讓對話框跟著頓——包含
-   「在對話框裡切換資料夾」。素材放在 SMB 網路磁碟時一次 statSync 可能要數十毫秒，
-   而快取【優先寫在影片旁邊】（見 cacheCandidates），所以那些 stat 也打在網路上。
-   會週期性執行的路徑一律改用這個。 */
+/* RecentProjects 的 missing probe 會觸及 SMB 路徑，不可用同步 stat 阻塞
+   Electron 主行程；快取與 fragmented-MP4 輪詢的非同步 I/O 在 media-intake-runtime。 */
 const fsp = require('fs/promises');
 
 const os = require('os');
 const url = require('url');
 const net = require('net');
-const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const QueueStore = require('./queue-store');
@@ -30,20 +26,20 @@ const { ExportQueueState } = require('./export-queue-state');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
 const { FileAuthority } = require('./file-authority');
-const { createTrustedProjectIntake } = require('./trusted-project-intake');
-const { inspectProjectWrite } = require('./project-write-admission');
-const { createProjectFileGateway } = require('./project-file-gateway');
+const { createLocalResourceServer, registerLocalResourceScheme } = require('./local-resource');
+const { createProjectWorkspace } = require('./project-workspace');
 const { mergeRendererConfig } = require('./config-policy');
 const { isPathContained } = require('./export-name-safety');
 const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
-const { buildAudioIngestPlan } = require('./channel-layout');
 const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
 const { createExportAdmission } = require('./export-admission');
 const { createExportQueue } = require('./export-queue');
 const { createMpvHost } = require('./mpv-host');
 const { createMediaIngestCoordinator } = require('./media-ingest-coordinator');
+const { createFFmpegExecution } = require('./ffmpeg-execution');
+const { createMediaIntakeRuntime } = require('./media-intake-runtime');
+const { createMediaProbe } = require('./media-probe');
 const { authorizeDroppedMediaPath } = require('./dropped-file-admission');
-const RecentProjects = require('./recent-projects');
 /* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
 const { deliveryResolution, suggestKbps } = require('../shared/delivery-resolution.cjs');
@@ -54,8 +50,10 @@ const {
   previewVideoEncoderArgs,
   videoEncoderCandidates,
 } = require('./native-tooling');
-const { FFmpegOutputParser, FFmpegErrorAnalyzer } = require('./ffmpeg-parser');
 const { buildIngestArgs } = require('./ffmpeg-pipeline-builder');
+
+// 自訂 scheme 的 privileges 必須在 app ready 前註冊；實際 handler 於 ready 後安裝。
+registerLocalResourceScheme(protocol);
 
 let mainWin = null;
 let _allowMainWindowClose = false;
@@ -66,6 +64,8 @@ let _quitReady = false;
 let _quitSequenceStarted = false;
 let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null;
 let FFMPEG_DETECTION = null, FFPROBE_DETECTION = null;
+let mediaProbe = null;
+let projectOpenReady = false;
 const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
@@ -77,43 +77,27 @@ const mediaIngestCoordinator = createMediaIngestCoordinator();
    renderer 路徑不會因 fs:fileURL／stat 等查詢被靜默升格；只接受原生對話框、OS 開檔、
    preload 驗證過的拖放 File 與內部快取。專案內已宣告的媒體則只給「那一個檔案」的唯讀能力。 */
 const fileAuthority = new FileAuthority({ internalDirectories: [TMP] });
-const trustedProjectIntake = createTrustedProjectIntake({
-  readFile: projectFile => fs.readFileSync(projectFile),
-  grantProjectFile: projectFile => fileAuthority.grantProjectFile(projectFile),
-  grantMediaFile: mediaPath => fileAuthority.grantTrustedFile(mediaPath, { read: true, write: false }),
+const localResourceServer = createLocalResourceServer({
+  fileAuthority,
+  protocolModule: protocol,
+  sessionModule: session,
 });
-
-function grantTrustedProjectFile(projectFile, contents) {
-  return trustedProjectIntake.grant(projectFile, contents);
-}
-
-function admittedRendererProjectBuffer(b64) {
-  if (typeof b64 !== 'string') return null;
-  let buffer;
-  try { buffer = Buffer.from(b64, 'base64'); } catch (error) { return null; }
-  const admission = inspectProjectWrite(buffer, { canRead: mediaPath => fileAuthority.canRead(mediaPath) });
-  if (!admission.allowed) {
-    console.warn('[sec] project write blocked:', admission.reason,
-      admission.unauthorizedPaths.length ? `(${admission.unauthorizedPaths.length} unauthorized media path(s))` : '');
-    return null;
-  }
-  return buffer;
-}
-
-const projectFileGateway = createProjectFileGateway({
+const projectWorkspace = createProjectWorkspace({
   readFile: projectFile => fs.promises.readFile(projectFile),
   writeFile: (projectFile, contents) => fs.promises.writeFile(projectFile, contents),
   ensureDirectory: projectFile => fs.promises.mkdir(path.dirname(projectFile), { recursive: true }),
-  grantTrustedProject: grantTrustedProjectFile,
-  clearTrustedDeclarations: projectFile => trustedProjectIntake.grantProjectOnly(projectFile),
-  // Function declarations are hoisted; the settings path itself is resolved only on use.
-  rememberRecent: projectFile => rememberRecentProject(projectFile),
+  grantProjectFile: projectFile => fileAuthority.grantProjectFile(projectFile),
+  grantMediaFile: mediaPath => fileAuthority.grantTrustedFile(mediaPath, { read: true, write: false }),
+  canReadMedia: mediaPath => fileAuthority.canRead(mediaPath),
+  readRecent: () => loadRecentProjects(),
+  writeRecent: list => saveRecentProjects(list),
+  stat: projectFile => fsp.stat(projectFile),
 });
 
 /* 三個守衛與 expectedExportExtension 的實作在 ipc-guards.js（可獨立測試，
    不需要整個 Electron 主行程）；這裡只建立跟 fileAuthority 綁定的實例。 */
 const { requireReadablePath, requirePermittedShellOpenPath, requirePermittedDeliveryRevealPath, requirePermittedSourceRevealPath } = createIpcGuards(fileAuthority);
-/* S5：不可猜測的串流 job id（取代 Date.now() / 可推導的 cacheKey） */
+/* S5：不可猜測的交付 job id；串流 id 由 media-intake-runtime 自行持有。 */
 function newJobId(prefix) { return prefix + crypto.randomBytes(12).toString('hex'); }
 
 function ensureTmp() { try { fs.mkdirSync(TMP, { recursive: true }); } catch (e) {} }
@@ -143,303 +127,14 @@ function detectVideoEncoder() {
 /* 依選定編碼器回傳「轉檔預覽影片」用的視訊參數（品質導向、yuv420p 由呼叫端的 -vf 負責） */
 
 
-/* ---- 媒體快取鍵：檔名 + 大小 + 前 1MB 內容雜湊（不含修改時間，跨電腦可共用快取） ---- */
-function cacheKeyFor(src) {
-  try {
-    const s = fs.statSync(src);
-    const readLen = Math.min(1024 * 1024, s.size);
-    const h = crypto.createHash('sha1').update(path.basename(src) + '|' + s.size + '|');
-    if (readLen > 0) {
-      const fd = fs.openSync(src, 'r');
-      try { const buf = Buffer.alloc(readLen); fs.readSync(fd, buf, 0, readLen, 0); h.update(buf); }
-      finally { fs.closeSync(fd); }
-    }
-    return h.digest('hex').slice(0, 16);
-  } catch (e) { return crypto.createHash('sha1').update(path.basename(String(src))).digest('hex').slice(0, 16); }
-}
-/* 候選快取目錄：優先放在影片旁的 .subtool_Cache/<金鑰>（可隨檔案被其他電腦讀取），
-   其次才用 userData/mediacache。讀取時依序找第一個有效的；寫入時找第一個可寫的。 */
-function cacheCandidates(src) {
-  const key = cacheKeyFor(src);
-  const list = [];
-  try { const vdir = path.dirname(src); if (vdir && vdir !== '.') list.push(path.join(vdir, '.subtool_Cache', key)); } catch (e) {}
-  list.push(path.join(CACHE || TMP, key));
-  return list;
-}
-/* meta.json 內只存相對檔名（ch0.m4a 等）；讀取時依實際所在目錄解析成絕對路徑，確保跨電腦可用 */
-function resolveMeta(raw, dir) {
-  const r = (f) => f ? path.join(dir, path.basename(f)) : f;
-  return {
-    proxy: r(raw.proxy), wave: r(raw.wave),
-    channels: (raw.channels || []).map(c => ({
-      label: c.label, file: r(c.file),
-      // v4.36 前的快取沒有這兩個欄位；保留 null 以便呼叫端安全地要求重建，
-      // 不可猜成 stream 0，否則含多個 audio stream 的舊檔會被錯誤路由。
-      sourceStream: Number.isInteger(c.sourceStream) && c.sourceStream >= 0 ? c.sourceStream : null,
-      sourceChannel: Number.isInteger(c.sourceChannel) && c.sourceChannel >= 0 ? c.sourceChannel : null,
-    }))
-  };
-}
-function metaToStore(meta) {
-  const b = (f) => f ? path.basename(f) : f;
-  return {
-    proxy: b(meta.proxy), wave: b(meta.wave),
-    channels: (meta.channels || []).map(c => ({
-      label: c.label, file: b(c.file),
-      sourceStream: Number.isInteger(c.sourceStream) ? c.sourceStream : null,
-      sourceChannel: Number.isInteger(c.sourceChannel) ? c.sourceChannel : null,
-    }))
-  };
-}
-function hasRoutingMetadata(meta) {
-  return (meta.channels || []).every(c => Number.isInteger(c.sourceStream) && c.sourceStream >= 0 && Number.isInteger(c.sourceChannel) && c.sourceChannel >= 0);
-}
-/* 原子寫入 meta.json（先寫 .tmp 再 rename），避免中途被中斷留下半寫入的損毀清單 */
-function writeMeta(metaPath, meta) {
-  try { const tmp = metaPath + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(metaToStore(meta))); fs.renameSync(tmp, metaPath); } catch (e) {}
-}
-/* 匯出端也要自行守住「母素材」界線，不能只相信 renderer。生成的 preview 檔固定是
-   cache 目錄內的 proxy.mp4 / chN.m4a；同名的使用者原始檔不在 cache 目錄則仍可正常匯入。 */
-function isPreviewCacheMedia(file) {
-  if (typeof file !== 'string' || !file) return false;
-  let resolved;
-  try { resolved = path.resolve(file); } catch (e) { return false; }
-  const base = path.basename(resolved).toLowerCase();
-  if (base !== 'proxy.mp4' && !/^ch\d+\.m4a$/i.test(base)) return false;
-  const lower = resolved.toLowerCase();
-  const isCacheRoot = [CACHE, TMP].filter(Boolean).some(root => {
-    try {
-      const cacheRoot = path.resolve(root).toLowerCase();
-      return lower === cacheRoot || lower.startsWith(cacheRoot + path.sep);
-    } catch (e) { return false; }
-  });
-  return isCacheRoot || lower.split(path.sep).includes('.subtool_cache');
-}
 /* 鐵律 §0.8 的守門員。規則本身在 export-admission.js（可測），這裡只是轉呼叫，
    保留原名讓既有呼叫端不動。_admission 在下方建立；本函式的呼叫點都在那之後。 */
 function assertMasterExportMedia(file, kind) {
   return _admission.assertMasterMedia(file, kind);
 }
-function metaValid(m) {
-  return (!m.proxy || fs.existsSync(m.proxy)) && (m.channels || []).every(c => fs.existsSync(c.file)) && (!m.wave || fs.existsSync(m.wave));
-}
-/* 讀取快取：回傳第一個檔案完整的 {dir, meta}，否則 null */
-function readCache(src) {
-  for (const dir of cacheCandidates(src)) {
-    const metaPath = path.join(dir, 'meta.json');
-    if (!fs.existsSync(metaPath)) continue;
-    try {
-      const m = resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir);
-      if (metaValid(m)) {
-        fileAuthority.grantManagedCacheDirectory(dir);
-        return { dir, meta: m, routingMetadataComplete: hasRoutingMetadata(m) };
-      }
-    } catch (e) {}
-  }
-  return null;
-}
-function isDirWritable(dir) {
-  try { fs.mkdirSync(dir, { recursive: true }); const t = path.join(dir, '.wtest_' + process.pid); fs.writeFileSync(t, 'x'); fs.unlinkSync(t); return true; }
-  catch (e) { return false; }
-}
-/* 取得可寫的快取目錄（優先影片旁的 .subtool_Cache）。 */
-function writeCacheDir(src) {
-  for (const dir of cacheCandidates(src)) {
-    if (isDirWritable(dir)) {
-      fileAuthority.grantManagedCacheDirectory(dir);
-      return dir;
-    }
-  }
-  const fallback = path.join(CACHE || TMP, cacheKeyFor(src));
-  fileAuthority.grantManagedCacheDirectory(fallback);
-  return fallback;
-}
-/* ---- 快取管理：統計 / 清孤兒 / 全清 ---- */
-function dirSize(dir) {
-  let total = 0;
-  try { for (const f of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, f.name); if (f.isDirectory()) total += dirSize(p); else { try { total += fs.statSync(p).size; } catch (e) {} } } } catch (e) {}
-  return total;
-}
-function cacheInfo() {
-  const root = CACHE || TMP; let folders = 0, bytes = 0;
-  try { for (const f of fs.readdirSync(root, { withFileTypes: true })) { if (f.isDirectory()) { folders++; bytes += dirSize(path.join(root, f.name)); } } } catch (e) {}
-  return { root, folders, bytes };
-}
-/* 移除無效（缺 meta.json 或所引用檔案已不存在）的快取資料夾 */
-function cleanOrphans() {
-  const root = CACHE || TMP; let removed = 0, bytes = 0;
-  try {
-    for (const f of fs.readdirSync(root, { withFileTypes: true })) {
-      if (!f.isDirectory()) continue;
-      const dir = path.join(root, f.name), metaPath = path.join(dir, 'meta.json');
-      // 只刪除「確定無效」的：沒有 meta.json，或 meta 能解析但引用的檔案已不存在。
-      // meta.json 存在但解析失敗（可能是中途中斷的半寫入）→ 保留，下次再判斷，避免誤刪整份有效快取。
-      let remove = false;
-      if (!fs.existsSync(metaPath)) remove = true;
-      else { try { if (!metaValid(resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir))) remove = true; } catch (e) { remove = false; } }
-      if (remove) { const sz = dirSize(dir); try { fs.rmSync(dir, { recursive: true, force: true }); removed++; bytes += sz; } catch (e) {} }
-    }
-  } catch (e) {}
-  return { removed, bytes };
-}
-function clearAllCache(currentSrc) {
-  const root = CACHE || TMP; let bytes = dirSize(root);
-  try { fs.rmSync(root, { recursive: true, force: true }); fs.mkdirSync(root, { recursive: true }); } catch (e) {}
-  // 影片旁快取只能依已取得 read capability 的母素材推導；renderer 傳入的任意
-  // currentSrc 不得變成刪除同層 .subtool_Cache 的能力。
-  if (currentSrc && fileAuthority.canRead(currentSrc)) {
-    try { const ndir = path.join(path.dirname(currentSrc), '.subtool_Cache', cacheKeyFor(currentSrc)); if (fs.existsSync(ndir)) { bytes += dirSize(ndir); fs.rmSync(ndir, { recursive: true, force: true }); } } catch (e) {}
-  } else if (currentSrc) console.warn('[sec] cache clear source blocked:', currentSrc);
-  return { bytes };
-}
 
 /* S2: 有 GPU 編碼器時啟用來源端硬體解碼（加速讀取 4K/MXF），對 -i 前插入 */
 function hwdecArgs() { return VENC && VENC !== 'libx264' ? ['-hwaccel', 'auto'] : []; }
-
-function exportWatchdogScriptPath() {
-  const localPath = path.join(__dirname, 'export-watchdog.js');
-  if (!app.isPackaged) return localPath;
-  const unpackedPath = path.join(
-    process.resourcesPath,
-    'app.asar.unpacked',
-    'electron',
-    'export-watchdog.js',
-  );
-  return fs.existsSync(unpackedPath) ? unpackedPath : localPath;
-}
-
-/* ---- 執行 ffmpeg，並回報進度 ----
-   交付匯出改由獨立 watchdog 持有 ffmpeg；主程序被強制結束時 IPC disconnect 仍會觸發
-   子程序清理。Proxy／ingest 等短期工作維持原本直接 spawn，縮小變更面。 */
-function runFF(args, { onProgress, duration, sender, jobId, label, onProcess, cwd, outPath, shouldSend } = {}) {
-  return new Promise((res, rej) => {
-    if (!FFMPEG) return rej(new Error('找不到 ffmpeg'));
-    let err = '';       // 尾端（錯誤訊息用；會被截斷）
-    const maps = [];    // 串流對應行（出現在輸出開頭，需單獨保留，否則被 err 截斷丟失）
-    const isQueueExport = typeof jobId === 'string' && jobId.startsWith('export-') && EXPORT_QUEUE_DIR;
-    if (isQueueExport) ensureExportQueueDir();
-    if (isQueueExport && (typeof outPath !== 'string' || !outPath)) {
-      return rej(new Error('匯出 watchdog 缺少輸出路徑'));
-    }
-    const logPath = isQueueExport
-      ? QueueStore.logPath(EXPORT_QUEUE_DIR, jobId)
-      : path.join(app.getPath('userData'), `export-${Date.now()}-${jobId || 'task'}.log`);
-    const logStream = fs.createWriteStream(logPath, { flags: isQueueExport ? 'w' : 'a' });
-    let logError = null;
-    logStream.on('error', error => {
-      logError = error;
-      console.error(`[Queue] 無法寫入 ffmpeg 記錄 ${logPath}：`, error);
-    });
-    const writeLog = data => {
-      if (logError) return;
-      try { logStream.write(data); } catch (error) { logError = error; }
-    };
-    let logFinishPromise = null;
-    const finishLog = () => {
-      if (logFinishPromise) return logFinishPromise;
-      logFinishPromise = new Promise(resolve => {
-        if (logError || logStream.writableFinished || logStream.destroyed) {
-          resolve();
-          return;
-        }
-        let settled = false;
-        const done = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve();
-        };
-        const timer = setTimeout(done, 1000);
-        logStream.once('finish', done);
-        logStream.once('error', done);
-        try { logStream.end(); } catch (error) { done(); }
-      });
-      return logFinishPromise;
-    };
-    writeLog(`> ffmpeg ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}\n\n`);
-
-    const startTime = Date.now();
-    const parser = new FFmpegOutputParser(duration);
-    const maySend = () => typeof shouldSend !== 'function' || shouldSend();
-    
-    const consumeStderr = d => {
-      const s = d.toString();
-      writeLog(s);
-      err += s; if (err.length > 8000) err = err.slice(-8000);
-
-      const progData = parser.parseChunk(s);
-      if (progData && (sender || onProgress)) {
-        const payload = { jobId, label, pct: progData.pct, etaS: progData.etaS, elapsedMs: Date.now() - startTime };
-        if (sender && maySend()) safeSend(sender, 'task-progress', payload);
-        if (onProgress) onProgress(payload);
-      }
-    };
-
-    let watchdogFailure = null;
-    let settled = false;
-    const finishProcess = async (code, watchdogResult = null) => {
-      if (settled) return;
-      settled = true;
-      await finishLog();
-      if (sender && maySend()) safeSend(sender, 'task-progress', { jobId, label, pct: 100, done: true });
-      if (code === 0 && (!watchdogResult || watchdogResult.ok)) {
-        fs.unlink(logPath, () => {});
-        res({ tail: err, maps: parser.maps });
-        return;
-      }
-
-      let fullLog = err;
-      try { fullLog = fs.readFileSync(logPath, 'utf8'); } catch (readError) {
-        if (logError) fullLog += `\n\n[無法寫入完整記錄：${logError.message || logError}]`;
-      }
-      
-      const { summary, errorCode } = FFmpegErrorAnalyzer.analyze(fullLog, code, watchdogFailure, watchdogResult, outPath);
-      
-      const failure = new Error(`[LOG_PATH]${logPath}[/LOG_PATH]ffmpeg 結束碼 ${code}\n${summary}`);
-      failure.code = errorCode;
-      failure.watchdogResult = watchdogResult;
-      rej(failure);
-    };
-
-    if (isQueueExport) {
-      const controller = ExportWatchdog.spawnExportWatchdog({
-        ffmpegPath: FFMPEG,
-        args,
-        cwd,
-        outPath,
-        jobId,
-        queueDir: EXPORT_QUEUE_DIR,
-      }, {
-        scriptPath: exportWatchdogScriptPath(),
-        onStderr: consumeStderr,
-        onMessage: message => {
-          if (message?.type === 'error' && !watchdogFailure) watchdogFailure = message;
-        },
-      });
-      controller.ready.catch(() => {});
-      if (onProcess) onProcess(controller);
-      controller.completion.then(result => {
-        const code = result.ok ? 0 : (Number.isInteger(result.code) ? result.code : 1);
-        return finishProcess(code, result);
-      }).catch(error => {
-        watchdogFailure ||= error;
-        return finishProcess(1, { ok: false, startupError: true });
-      });
-      return;
-    }
-
-    const p = spawn(FFMPEG, args, cwd ? { cwd } : {});
-    if (onProcess) onProcess(p);
-    p.stderr.on('data', consumeStderr);
-    p.on('error', async error => {
-      if (settled) return;
-      settled = true;
-      await finishLog();
-      rej(error);
-    });
-    p.on('close', code => finishProcess(code));
-  });
-}
 
 /* ---- 視窗 ---- */
 function createWindow() {
@@ -452,10 +147,11 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true, nodeIntegration: false,
-      webSecurity: false // 本機信任程式：允許 file:// 影音直接讀取
+      webSecurity: true
     }
   });
   mainWin = win;
+  win.webContents.on('did-start-loading', () => { projectOpenReady = false; });
   // 移除 Electron 預設的 File / Edit / View 系統選單列。autoHideMenuBar
   // 只會暫時隱藏它，按 Alt 仍會再次出現；這裡直接解除視窗選單並關閉
   // Alt 的選單列顯示行為，避免干擾程式既有的快捷鍵操作。
@@ -495,8 +191,9 @@ function createWindow() {
     win.webContents.openDevTools({ mode: 'detach' });
   } else {
     const built = path.join(__dirname, '..', 'dist', 'index.html');
-    const legacy = path.join(__dirname, '..', 'index.html');
-    win.loadFile(fs.existsSync(built) ? built : legacy);
+    void localResourceServer.loadApplicationDocument(win, built).catch(error => {
+      console.error('[app] 無法載入 application document：', error);
+    });
   }
   return win;
 }
@@ -540,93 +237,37 @@ ipcMain.handle('app:close', () => {
 
 ipcMain.handle('app:showMainWindow', () => showMainWindow());
 
-/* ---- 本機 HTTP 串流伺服器（MXF 等非原生格式邊轉邊播用） ---- */
-let _hSrv = null, _hPort = null;
-const _hJobs = new Map(); // id -> { filePath, done, error }
-
-async function ensureHttpServer() {
-  if (_hSrv) return _hPort;
-  return new Promise((resolve, reject) => {
-    _hSrv = http.createServer((req, res) => {
-      const id = decodeURIComponent(req.url.slice(1).split('?')[0]);
-      const job = _hJobs.get(id);
-      if (!job || !job.filePath) { res.writeHead(404); res.end(); return; }
-      const rf = req.headers.range;
-      if (!rf) {
-        res.writeHead(200, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' });
-        const rd = fs.createReadStream(job.filePath);
-        rd.pipe(res, { end: false });
-        rd.on('end', () => {
-          if (job.done) { res.end(); return; }
-          const poll = () => { if (job.done || job.error) { res.end(); } else { setTimeout(poll, 400); } };
-          poll();
-        });
-        req.on('close', () => rd.destroy());
-        return;
-      }
-      const m = /bytes=(\d+)-(\d*)/.exec(rf);
-      if (!m) { res.writeHead(400); res.end(); return; }
-      const start = +m[1], reqEnd = m[2] ? +m[2] : undefined;
-      /* 非同步：邊轉邊播時 <video> 會對還沒寫完的 proxy 發 range 請求，這裡每 500ms
-         重試一次、最多 120 次（＝每個請求最長輪詢 60 秒），而且同時可能有多個請求在輪詢。
-         同步 stat 打在 SMB 上的 proxy，會讓主行程的 UI 執行緒被反覆鎖住，
-         原生檔案對話框（訊息迴圈在同一條執行緒）因此卡頓。 */
-      const tryRange = async (n) => {
-        let sz = 0; try { sz = (await fsp.stat(job.filePath)).size; } catch (e) {}
-        if (sz <= start && !job.done && n < 120) { setTimeout(() => { void tryRange(n + 1); }, 500); return; }
-        if (sz <= start) { res.writeHead(416); res.end(); return; }
-        const end = reqEnd !== undefined ? Math.min(reqEnd, sz - 1) : sz - 1;
-        const len = end - start + 1;
-        res.writeHead(206, {
-          'Content-Type': 'video/mp4',
-          'Content-Range': `bytes ${start}-${end}/${job.done ? sz : '*'}`,
-          'Content-Length': len, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' // S5
-        });
-        fs.createReadStream(job.filePath, { start, end }).pipe(res);
-      };
-      /* 非同步之後回傳的是 Promise；沒接住的 rejection 在 Electron 會炸掉整個主行程。 */
-      void tryRange(0).catch(err => {
-        console.error('[HTTP] range 供應失敗：', err);
-        try { if (!res.headersSent) { res.writeHead(500); res.end(); } } catch (e) {}
-      });
-    });
-    _hSrv.listen(0, '127.0.0.1', () => { _hPort = _hSrv.address().port; resolve(_hPort); });
-    _hSrv.on('error', reject);
-  });
+async function deliverExternalProjectOpen(projectPath) {
+  if (!projectOpenReady || !mainWin || mainWin.isDestroyed()) {
+    projectWorkspace.stageStartup(projectPath);
+    return;
+  }
+  const opened = await projectWorkspace.openLatest(projectPath);
+  if (!opened) return;
+  if (!projectOpenReady || !mainWin || mainWin.isDestroyed()) {
+    projectWorkspace.stageStartup(projectPath);
+    return;
+  }
+  safeWinSend(mainWin, 'app:open-file', opened);
 }
 
-let startupFile = null;
-app.on('open-file', (e, path) => {
+app.on('open-file', (e, projectPath) => {
   e.preventDefault();
-  startupFile = path;
-  grantTrustedProjectFile(path);
-  if (mainWin && !mainWin.isDestroyed()) {
-    /* 主視窗還活著＝app 早就 ready，寫設定檔是安全的。還沒 ready 的情況不寫，
-       交給下面的 app:getStartupFile（renderer 起來後才會呼叫）補記。 */
-    rememberRecentProject(path);
-    safeWinSend(mainWin, 'app:open-file', path);
-  }
+  void deliverExternalProjectOpen(projectPath);
 });
 
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on('second-instance', (event, commandLine, workingDirectory) => {
-    const hadLiveMainWindow = !!(mainWin && !mainWin.isDestroyed());
+  app.on('second-instance', async (event, commandLine, workingDirectory) => {
     const fileArg = commandLine.find(a => !a.startsWith('-') && (a.endsWith('.subtool') || a.endsWith('.json')));
-    if (fileArg) {
-      startupFile = fileArg;
-      grantTrustedProjectFile(fileArg);
-    }
-    if (!app.isReady()) return;
-    if (fileArg) rememberRecentProject(fileArg);
-    if (showMainWindow() && fileArg && hadLiveMainWindow) {
-      safeWinSend(mainWin, 'app:open-file', fileArg);
-    }
+    if (fileArg) await deliverExternalProjectOpen(fileArg);
+    if (app.isReady()) showMainWindow();
   });
 
   app.whenReady().then(async () => {
+    localResourceServer.install();
     FFMPEG_DETECTION = detectNativeTool('ffmpeg', {
       moduleDir: __dirname,
       resourcesPath: process.resourcesPath,
@@ -639,13 +280,14 @@ if (!gotTheLock) {
     });
     FFMPEG = FFMPEG_DETECTION.path;
     FFPROBE = FFPROBE_DETECTION.path;
+    mediaProbe = createMediaProbe({ executable: FFPROBE });
     VENC = detectVideoEncoder();
     CACHE = path.join(app.getPath('userData'), 'mediacache');
     fileAuthority.grantInternalDirectory(CACHE);
     EXPORT_QUEUE_DIR = path.join(app.getPath('userData'), 'export-queue');
     fileAuthority.grantQueueLogDirectory(EXPORT_QUEUE_DIR);
     try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
-    try { cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
+    try { mediaIntakeRuntime.cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
     try {
       const recovery = await ExportWatchdog.recoverExportLeases(EXPORT_QUEUE_DIR);
       for (const warning of recovery.warnings || []) {
@@ -692,27 +334,19 @@ app.on('before-quit', (event) => {
 });
 app.on('quit', () => {
   mpvHost.dispose();
+  void mediaIntakeRuntime.close();
   for (const f of tempFiles) { try { fs.unlinkSync(f); } catch (e) {} }
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}
 });
 
 /* ============ IPC ============ */
-ipcMain.handle('app:getStartupFile', () => {
-  let fileToOpen = null;
-  if (startupFile) fileToOpen = startupFile;
-  else if (process.platform === 'win32' || process.platform === 'linux') {
-    const args = process.argv.slice(app.isPackaged ? 1 : 2);
-    const fileArg = args.find(a => !a.startsWith('-') && (a.endsWith('.subtool') || a.endsWith('.json')));
-    if (fileArg) fileToOpen = fileArg;
-  }
-  if (fileToOpen) {
-    grantTrustedProjectFile(fileToOpen);
-    /* 從 Explorer 雙擊 .subtool 開起來的專案也算「開過」。少了這一行，
-       只有走「開啟專案」對話框的才會進最近開啟清單——而雙擊才是最常用的那條路。 */
-    rememberRecentProject(fileToOpen);
-    return fileToOpen;
-  }
-  return null;
+ipcMain.handle('app:getStartupFile', async () => {
+  const args = (process.platform === 'win32' || process.platform === 'linux')
+    ? process.argv.slice(app.isPackaged ? 1 : 2)
+    : [];
+  const opened = await projectWorkspace.openStartup(args);
+  projectOpenReady = true;
+  return opened;
 });
 
 ipcMain.handle('app:openPath', async (e, p) => {
@@ -748,8 +382,9 @@ ipcMain.handle('app:status', () => ({
 }));
 
 ipcMain.handle('fs:fileURL', (e, p) => {
-  if (!fileAuthority.canExposeFileURL(p)) { console.warn('[sec] fileURL blocked:', p); return null; }
-  try { return url.pathToFileURL(p).href; } catch (err) { return null; }
+  const resourceURL = localResourceServer.urlFor(p);
+  if (!resourceURL) console.warn('[sec] fileURL blocked:', p);
+  return resourceURL;
 });
 ipcMain.handle('fs:stat', (e, p) => {
   if (!fileAuthority.canStat(p)) { console.warn('[sec] stat blocked:', p); return { exists: false }; }
@@ -785,7 +420,7 @@ ipcMain.handle('fs:findRelinkTarget', async (e, { projectPath, oldMediaPath }) =
   /* The basename must come from this exact project's main-read bytes.  A
      renderer-supplied arbitrary name is never authority to search/grant a
      sibling file. */
-  if (!trustedProjectIntake.canRelink(projectPath, oldMediaPath)) return null;
+  if (!projectWorkspace.canRelink(projectPath, oldMediaPath)) return null;
   
   const targetName = path.basename(oldMediaPath);
   const startDir = path.dirname(projectPath);
@@ -911,7 +546,7 @@ function loadRecentProjects() {
   try {
     const p = getConfigPath();
     if (!fs.existsSync(p)) return [];
-    return RecentProjects.sanitize(JSON.parse(fs.readFileSync(p, 'utf8'))?.recentProjects);
+    return JSON.parse(fs.readFileSync(p, 'utf8'))?.recentProjects || [];
   } catch (e) { return []; }
 }
 
@@ -923,47 +558,15 @@ function saveRecentProjects(list) {
   } catch (e) { console.error('[recent] save err', e); }
 }
 
-function rememberRecentProject(filePath) {
-  saveRecentProjects(RecentProjects.addRecent(loadRecentProjects(), filePath, { now: Date.now() }));
-}
-
-/* 規則與逾時政策在 recent-projects.js（那裡有完整說明並附測試）；
-   這裡只負責把真正的 fs 接上去。用 fsp 而不是 fs：清單裡常有 SMB 路徑，
-   同步 stat 會連同原生檔案對話框一起凍住主行程的 UI 執行緒。 */
-const recentProjectMissing = RecentProjects.createMissingProbe({ stat: fsp.stat });
-
 /* 清單本身不含能力授予——只是給選單顯示用。
    `missing` 讓選單可以把已經不在的檔案標灰，而不是讓使用者點了才失敗。 */
-ipcMain.handle('project:recentList', async () => {
-  const list = loadRecentProjects();
-  /* 一起探測，不要一筆一筆等——10 筆各 400ms 逾時串起來就是 4 秒。 */
-  const missing = await Promise.all(list.map(item => recentProjectMissing(item.path)));
-  return list.map((item, index) => ({
-    index,
-    name: item.name || path.basename(item.path),
-    path: item.path,
-    at: item.at || 0,
-    missing: missing[index],
-  }));
-});
+ipcMain.handle('project:recentList', () => projectWorkspace.listRecent());
 
 /* renderer 只送【索引】，路徑由主程序自己的清單決定——沒有路徑注入空間。
    讀取前才授予那一個檔案的能力（fileAuthority 是每次工作階段的）。 */
-ipcMain.handle('project:openRecent', async (e, index) => {
-  const list = loadRecentProjects();
-  const item = list[Math.trunc(Number(index))];
-  if (!item) throw new Error('找不到這筆最近開啟的專案');
-  if (!fs.existsSync(item.path)) {
-    /* 檔案不見了就從清單移除，免得它一直留在選單裡讓人一再踩空。 */
-    saveRecentProjects(RecentProjects.removeRecent(list, item.path));
-    throw new Error(`找不到專案檔：${item.path}`);
-  }
-  const opened = await projectFileGateway.openTrusted(item.path);
-  if (!opened) throw new Error(`無法解析專案檔：${item.path}`);
-  return opened;
-});
+ipcMain.handle('project:openRecent', (e, index) => projectWorkspace.openRecent(index));
 
-ipcMain.handle('project:clearRecent', () => { saveRecentProjects([]); return true; });
+ipcMain.handle('project:clearRecent', () => projectWorkspace.clearRecent());
 
 ipcMain.handle('dialog:openProject', async () => {
   const r = await dialog.showOpenDialog({
@@ -973,17 +576,16 @@ ipcMain.handle('dialog:openProject', async () => {
   });
   if (r.canceled) return null;
   rememberDir('project', r.filePaths[0]);
-  return projectFileGateway.openTrusted(r.filePaths[0]);
+  return projectWorkspace.open(r.filePaths[0]);
 });
 ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
-  const projectBuffer = admittedRendererProjectBuffer(b64);
-  if (!projectBuffer) return null;
+  if (!projectWorkspace.acceptsRendererProject(b64)) return null;
   const r = await dialog.showSaveDialog(mainWin, { title: '儲存專案', defaultPath: name, filters: [{ name: 'SUB Tool 專案', extensions: ['subtool'] }] });
   if (r.canceled) return null;
   /* 儲存時的 JSON 來自 renderer；只授權使用者剛在原生對話框選定的專案檔，
      不可據此替其中任意宣告的 media path 升權。重新從原生開啟該專案時，才會走
-     trustedProjectIntake.grant() 解析已取得的檔案內容。 */
-  try { return await projectFileGateway.writeRendererProject(r.filePath, projectBuffer, { remember: true }); }
+     projectWorkspace 解析已取得的檔案內容。 */
+  try { return await projectWorkspace.writeRendererProject(r.filePath, b64, { remember: true }); }
   catch (error) { return null; }
 });
 
@@ -1028,27 +630,6 @@ function proresArgs() { return ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor
 function vencArgsBitrate(kbps) {
   return deliveryVideoEncoderArgs(VENC, kbps);
 }
-function hasAudioStream(p) {
-  try { const r = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', p], { timeout: 8000 }); return !!(r.stdout && r.stdout.toString().trim()); }
-  catch (e) { return true; } // 探測失敗時假設有音訊（較常見）
-}
-/* 交付檔完成後再用 ffprobe 讀一次，renderer 顯示的是檔案實際寫入的 bitrate，
-   不只是在 UI 上宣告的目標值。故使用者可直接確認 MP4 並非沿用 preview AAC cache。 */
-function outputAudioBitrates(p) {
-  if (!FFPROBE || !p) return [];
-  try {
-    const r = spawnSync(FFPROBE, [
-      '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=bit_rate,channels', '-of', 'json', p
-    ], { encoding: 'utf8', timeout: 8000 });
-    if (r.status !== 0 || !r.stdout) return [];
-    const streams = JSON.parse(r.stdout).streams || [];
-    return streams.map(stream => ({
-      channels: Math.max(0, Math.floor(_finiteNumber(stream.channels, 0))),
-      kbps: Math.max(0, Math.round(_finiteNumber(stream.bit_rate, 0) / 1000))
-    }));
-  } catch (e) { return []; }
-}
-
 /* 匯出的純決策邏輯已抽到 ./export-plan.js（零 require、可在 vitest 直接測）。
    留在這裡的是需要副作用的部分：找字型要讀檔。 */
 const {
@@ -1088,6 +669,39 @@ function ensureExportQueueDir() {
   QueueStore.ensureDir(EXPORT_QUEUE_DIR);
 }
 
+/* 交付與可重建快取共用同一個 execution outcome；module 內部保留兩個真實 adapters：
+   交付由獨立 watchdog 持有，可重建的 proxy／ingest 則由 Electron main 直接持有。 */
+const ffmpegExecution = createFFmpegExecution({
+  getFFmpegPath: () => FFMPEG,
+  getUserDataDir: () => app.getPath('userData'),
+  getQueueDir: () => EXPORT_QUEUE_DIR,
+  ensureQueueDir: ensureExportQueueDir,
+  moduleDir: __dirname,
+  isPackaged: () => app.isPackaged,
+  getResourcesPath: () => process.resourcesPath,
+  send: safeSend,
+  onLogError: (logPath, error) => {
+    console.error(`[Queue] 無法寫入 ffmpeg 記錄 ${logPath}：`, error);
+  },
+});
+const runFF = (args, options) => ffmpegExecution.execute(args, options);
+
+/* cache identity / metadata / fragmented-MP4 HTTP registry / ingest commit 由同一個
+   runtime 持有；main 只保留 Electron IPC、FileAuthority 與原生工具的組裝點。 */
+const mediaIntakeRuntime = createMediaIntakeRuntime({
+  cacheRoot: () => CACHE,
+  tempRoot: TMP,
+  fileAuthority,
+  ffmpegExecution,
+  getEncoder: () => VENC,
+  sendProgress: (target, payload) => safeSend(target, 'task-progress', payload),
+  forgetTemporaryFile: file => tempFiles.delete(file),
+  log: (message, ...args) => {
+    if (String(message).startsWith('[HTTP]')) console.error(message, ...args);
+    else console.warn(message, ...args);
+  },
+});
+
 /* 准入政策（能不能進佇列、需要哪些檔案能力）住在 export-admission.js——
    那四條規則原本散在這裡，與 BrowserWindow／dialog／spawn 糾纏，因此一行測試都沒有，
    而其中一條正是鐵律 §0.8 的守門員（不可拿 proxy.mp4／chNN.m4a 匯出）。
@@ -1100,7 +714,7 @@ const _admission = createExportAdmission({
   reservesOutput: status => OUTPUT_RESERVED_STATUSES.has(status),
   canReadSource: file => fileAuthority.canRead(file),
   canWriteDelivery: file => fileAuthority.canWriteDelivery(file),
-  isPreviewCacheMedia,
+  isPreviewCacheMedia: file => mediaIntakeRuntime.isPreviewCacheMedia(file),
 });
 
 /* 以下維持原本的名字，呼叫端不動——它們現在只是轉呼叫。 */
@@ -1150,7 +764,9 @@ function openQueueWindow() {
      預設應用選單（autoHideMenuBar 只是把它藏起來，加速鍵仍然是活的）。
      兩個視窗對鍵盤的行為不一致本身就是意外的來源，補齊。 */
   queueWin.setMenu(null);
-  queueWin.loadFile(path.join(__dirname, 'queue.html'));
+  const queueDocument = path.join(__dirname, 'queue.html');
+  localResourceServer.allowInternalDocument(queueDocument);
+  queueWin.loadFile(queueDocument);
   /* 關掉監控視窗如果會順帶結束整個程式，而且還有工作在轉檔，就先問過使用者。
      這裡不能只看「有沒有在轉檔」——主視窗還開著時，關監控視窗只是收起監控畫面，
      轉檔照跑，這種情況跳確認視窗只會擾民。 */
@@ -1234,7 +850,7 @@ ipcMain.handle('project:openDroppedFile', (e, projectFile) => {
   /* Only preload can derive this path from an actual dropped File.  Do not
      pre-authorize it through fs:authorizeDroppedFile: a malformed project must
      leave no read/screenshot capability behind. */
-  return projectFileGateway.openTrusted(projectFile);
+  return projectWorkspace.open(projectFile);
 });
 
 ipcMain.handle('queue:getAll', () => ({
@@ -1471,6 +1087,12 @@ async function _runJobLogic(job) {
         assName = QueueStore.burnAssFileName(jobId);
         fs.writeFileSync(path.join(TMP, assName), assText, 'utf8');
       }
+      const audioPresence = new Map(await Promise.all(
+        [...new Set((clips || [])
+          .filter(clip => clip?.path && clip.type !== 'image')
+          .map(clip => clip.path))]
+          .map(async sourcePath => [sourcePath, await mediaProbe.hasAudio(sourcePath)]),
+      ));
       const plan = buildDeliveryArgv({
         format, clips, videoTracks,
         width: payloadWidth, height: payloadHeight, fps: payloadFps,
@@ -1479,7 +1101,7 @@ async function _runJobLogic(job) {
       }, {
         hwdecArgs, vencArgsBitrate, proresArgs,
         encoderName: VENC,
-        hasAudioStream,
+        hasAudioStream: sourcePath => audioPresence.get(sourcePath) ?? true,
         fontsDir: fontsRoot(),
         timecodeFontFile: _findExportTimecodeFont(),
       });
@@ -1537,7 +1159,7 @@ async function _runJobLogic(job) {
         outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder),
         elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps,
         audioBitrates: isPro ? null : audioBitrates,
-        audioActualBitrates: isPro ? null : outputAudioBitrates(outPath)
+        audioActualBitrates: isPro ? null : await mediaProbe.audioBitrates(outPath)
       };
       dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
     } catch (err) {
@@ -1614,26 +1236,14 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
 });
 
 /* ---- 快取管理 ---- */
-ipcMain.handle('cache:info', () => cacheInfo());
-ipcMain.handle('cache:cleanOrphans', () => cleanOrphans());
-ipcMain.handle('cache:clearAll', (e, currentSrc) => clearAllCache(currentSrc));
+ipcMain.handle('cache:info', () => mediaIntakeRuntime.cacheInfo());
+ipcMain.handle('cache:cleanOrphans', () => mediaIntakeRuntime.cleanOrphans());
+ipcMain.handle('cache:clearAll', (e, currentSrc) => mediaIntakeRuntime.clearAll(currentSrc));
 
 ipcMain.handle('ffprobe', (e, p) => {
-  if (!FFPROBE) throw new Error('找不到 ffprobe');
+  if (!mediaProbe) throw new Error('找不到 ffprobe');
   requireReadablePath('ffprobe', p);
-  const r = spawnSync(FFPROBE, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', p], { maxBuffer: 1 << 24 });
-  if (r.status !== 0) throw new Error('ffprobe 失敗');
-  const j = JSON.parse(r.stdout.toString());
-  const video = (j.streams || []).filter(s => s.codec_type === 'video' && !((s.disposition || {}).attached_pic));
-  const audio = (j.streams || []).filter(s => s.codec_type === 'audio');
-  const v = video[0];
-  let fps = null;
-  if (v && v.avg_frame_rate && v.avg_frame_rate !== '0/0') { const [a, b] = v.avg_frame_rate.split('/').map(Number); if (b) fps = a / b; }
-  return {
-    duration: parseFloat((j.format || {}).duration) || (v && parseFloat(v.duration)) || 0,
-    video: v ? { codec: v.codec_name, width: v.width, height: v.height, fps } : null,
-    audio: audio.map((a, i) => ({ index: i, streamIndex: a.index, codec: a.codec_name, channels: a.channels, lang: (a.tags && (a.tags.language || a.tags.LANGUAGE)) || '', title: (a.tags && (a.tags.title || a.tags.TITLE)) || '' }))
-  };
+  return mediaProbe.describe(p);
 });
 
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {
@@ -1832,17 +1442,12 @@ ipcMain.handle('fonts:list', () => {
    （見 media.js 的 cleanupAudio(wavPath)），所以限制在這兩個根目錄底下不影響任何既有流程；
    少了這道檢查，這支 handler 就是一個「刪除磁碟上任意檔案」的原語，而 unlinkSync 不進資源回收筒。 */
 ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
-  let target; try { target = path.resolve(p); } catch (e2) { return; }
-  if (!fileAuthority.canManageInternalFile(target)) {
-    console.warn('[sec] ffmpeg:cleanup blocked (outside cache):', p);
-    return;
-  }
-  try { fs.unlinkSync(target); tempFiles.delete(target); } catch (e2) {}
+  mediaIntakeRuntime.cleanupGeneratedFile(p);
 });
 
 /* ---- 單次讀取多輸出：整個來源檔只讀一遍，同時產生 proxy + 每聲道音訊 + 混音波形 ----
    每聲道以 asplit 分流（不直接 -map 同一條 stream，避免 filtergraph 與 -map 雙重消費而 deadlock）。
-   結果存入持久快取（依 cacheKeyFor），重開同檔直接命中、秒開。 */
+   結果由 media-intake-runtime 存入持久快取，重開同檔直接命中、秒開。 */
 function getConfigPath() {
   const configDir = app.isPackaged ? path.join(app.getPath('userData'), 'config') : path.join(app.getAppPath(), '.config');
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
@@ -1889,67 +1494,24 @@ ipcMain.handle('keys:save', (e, data) => {
   } catch(e) { console.error('[keys] save err', e); return false; }
 });
 
+function mediaIntakeSession(event, lease) {
+  return {
+    progressTarget: event.sender,
+    isCancelled: () => !!lease?.isCancelled?.(),
+    ownProcess: process => lease?.setProcess?.(process),
+  };
+}
+
 ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio, queue }) => {
   requireReadablePath('ffmpeg:ingest', src);
-  const run = lease => _runIngest(e, { src, duration, needsProxy, audio }, lease);
+  const run = lease => mediaIntakeRuntime.ingest(
+    { src, duration, needsProxy, audio },
+    mediaIntakeSession(e, lease),
+  );
   /* queue=false 是新的主素材，會淘汰舊主素材及尚未開始的背景工作；queue=true
      則排在連 streamIngest 的完整 completion 後面，絕不與它同時寫 cache。 */
   return queue ? mediaIngestCoordinator.enqueue(run) : mediaIngestCoordinator.replace(run);
 });
-async function _runIngest(e, { src, duration, needsProxy, audio }, lease) {
-  const audioArr = Array.isArray(audio) ? audio : [];
-  // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
-  // v4.23.x 修：v4.22 前的舊快取沒有 proxy——needsProxy 時視同未命中重轉（否則 WebCodecs
-  // 預覽引擎永遠拿不到 proxy、無法接管 mpv 畫面 → 疊加/溶接預覽整組失效）
-  const hit = readCache(src);
-  if (hit && (!audioArr.length || hit.routingMetadataComplete) && (!needsProxy || (hit.meta && hit.meta.proxy && fs.existsSync(hit.meta.proxy)))) {
-    if (e.sender) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
-    return Object.assign({ cached: true }, hit.meta);
-  }
-  const dir = writeCacheDir(src);
-  const metaPath = path.join(dir, 'meta.json');
-  fs.mkdirSync(dir, { recursive: true });
-
-  const audioPlan = buildAudioIngestPlan(audioArr);
-  const fc = audioPlan.filters;
-  const channels = audioPlan.channels.map(channel => ({ ...channel, file: path.join(dir, channel.file) }));
-  const chMaps = audioPlan.channelMaps;
-  const waveLabel = audioPlan.waveLabel;
-
-  let proxy = needsProxy ? path.join(dir, 'proxy.mp4') : null;
-  let wave = waveLabel ? path.join(dir, 'wave.wav') : null;
-  const args = buildIngestArgs({
-    src,
-    needsProxy,
-    proxyPath: proxy,
-    fc,
-    channels,
-    chMaps,
-    waveLabel,
-    wavePath: wave,
-    encoder: VENC,
-    isStream: false
-  });
-
-  // 稍微延遲讓 mpv 優先取得檔案讀取權，避免 ffmpeg 瞬間佔滿磁碟 I/O 導致 mpv 播放無聲
-  await new Promise(r => setTimeout(r, 1000));
-  if (lease?.isCancelled?.()) throw new Error('媒體轉檔已被較新的載入取代');
-
-  await runFF(args, {
-    sender: e.sender,
-    duration,
-    jobId: 'ingest',
-    label: '讀取並轉檔（單次讀取）',
-    onProcess: p => lease?.setProcess?.(p),
-    shouldSend: () => !lease?.isCancelled?.(),
-  });
-  // kill 與 child exit 可能在同一個 event-loop turn 完成；即使 runFF 剛好 resolve，
-  // 被較新載入撤銷的 lease 也不可把舊 cache 宣告為可用。
-  if (lease?.isCancelled?.()) throw new Error('媒體轉檔已被較新的載入取代');
-  const meta = { proxy, channels, wave };
-  writeMeta(metaPath, meta);
-  return Object.assign({ cached: false }, meta);
-}
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
 ipcMain.handle('fs:readB64', async (e, p) => {
@@ -1959,9 +1521,7 @@ ipcMain.handle('fs:readB64', async (e, p) => {
 ipcMain.handle('fs:writeProject', async (e, { path: p, b64 }) => {
   // autosave 落在使用者已選取的專案／媒體資料夾旁；不可讓 renderer 自行擴張寫入根。
   if (!fileAuthority.canWriteProject(p)) { console.warn('[sec] writeProject blocked:', p); return null; }
-  const projectBuffer = admittedRendererProjectBuffer(b64);
-  if (!projectBuffer) return null;
-  try { return await projectFileGateway.writeRendererProject(p, projectBuffer, { ensureParent: true }); }
+  try { return await projectWorkspace.writeRendererProject(p, b64, { ensureParent: true }); }
   catch (err) { return null; }
 });
 ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
@@ -1974,100 +1534,13 @@ ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
    快取命中時行為與 ffmpeg:ingest 相同（秒開）。 */
 ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) => {
   requireReadablePath('ffmpeg:streamIngest', src);
-  return mediaIngestCoordinator.replace(lease => _runStreamIngest(e, { src, duration, audio }, lease));
+  return mediaIngestCoordinator.replace(lease => mediaIntakeRuntime.stream(
+    { src, duration, audio },
+    mediaIntakeSession(e, lease),
+  ));
 });
-
-async function _runStreamIngest(e, { src, duration, audio }, lease) {
-  const audioArr = Array.isArray(audio) ? audio : [];
-  const port = await ensureHttpServer();
-  if (lease?.isCancelled?.()) return { response: null, completion: null };
-
-  // 快取命中（先找影片旁的 .subtool_Cache，再找 userData）
-  // 注意：串流播放需要影片 proxy；mpv 路徑寫的快取是「純音軌」(proxy=null)，
-  // 對串流路徑而言不算命中，須往下重轉以產生 proxy（音軌/波形會一併重建）。
-  const hit = readCache(src);
-  if (hit && (!audioArr.length || hit.routingMetadataComplete) && hit.meta.proxy && fs.existsSync(hit.meta.proxy)) {
-    if (e.sender && !lease?.isCancelled?.()) safeSend(e.sender, 'task-progress', { jobId: 'ingest', label: '使用快取', pct: 100, done: true });
-    const jid = newJobId('c-'); // S5: 不可猜測
-    _hJobs.set(jid, { filePath: hit.meta.proxy, done: true });
-    return Object.assign({ cached: true, streamUrl: `http://127.0.0.1:${port}/${jid}` }, hit.meta);
-  }
-  const dir = writeCacheDir(src);
-  const metaPath = path.join(dir, 'meta.json');
-  fs.mkdirSync(dir, { recursive: true });
-
-  // 與 ffmpeg:ingest 共用同一份跨平台逐聲道規劃，避免兩條路徑或兩個 OS 漂移。
-  const audioPlan = buildAudioIngestPlan(audioArr);
-  const fc = audioPlan.filters;
-  const channels = audioPlan.channels.map(channel => ({ ...channel, file: path.join(dir, channel.file) }));
-  const chMaps = audioPlan.channelMaps;
-  const waveLabel = audioPlan.waveLabel;
-
-  const proxy = path.join(dir, 'proxy.mp4');
-  const wave = waveLabel ? path.join(dir, 'wave.wav') : null;
-
-  const args = buildIngestArgs({
-    src,
-    needsProxy: true,
-    proxyPath: proxy,
-    fc,
-    channels,
-    chMaps,
-    waveLabel,
-    wavePath: wave,
-    encoder: VENC,
-    isStream: true
-  });
-
-  const jid = newJobId('l-'); // S5: 不可猜測
-  const job = { filePath: proxy, done: false, error: null };
-  _hJobs.set(jid, job);
-  if (lease?.isCancelled?.()) {
-    job.done = true;
-    job.error = '媒體轉檔已被較新的載入取代';
-    return { response: null, completion: null };
-  }
-
-  // 背景跑 ffmpeg（不 await）。用唯一 jobId 讓前端能辨識「是本次轉檔完成」而非其他工作。
-  const completion = runFF(args, {
-    sender: e.sender,
-    duration,
-    jobId: jid,
-    label: '背景轉檔中',
-    onProcess: p => lease?.setProcess?.(p),
-    shouldSend: () => !lease?.isCancelled?.(),
-  })
-    .then(() => {
-      job.done = true;
-      // response 已先交給播放器不代表舊載入仍有權完成 cache commit；replace()
-      // 撤銷後留下的 partial output 必須由下一次 ingest 重建，而非寫入 meta.json。
-      if (!lease?.isCancelled?.()) writeMeta(metaPath, { proxy, channels, wave });
-    })
-    .catch(err => { job.done = true; job.error = err.message; });
-
-  // S3: 縮小閾值至 128KB（empty_moov 寫完即可播，不需等到 512KB）
-  const t0 = Date.now();
-  while (Date.now() - t0 < 60000) {
-    // replace() may have killed this ffmpeg while the first playable bytes are
-    // still pending.  Return the completion handle (not a stale response) so
-    // the coordinator keeps the writer lane until the old process exits.
-    if (lease?.isCancelled?.()) return { response: null, completion };
-    /* 非同步：這個迴圈最長跑 60 秒、每 300ms 一次。proxy 依 cacheCandidates 的優先序
-       多半落在【影片旁邊】的 .subtool_Cache，素材在 SMB 上時這個 stat 也在 SMB 上。
-       用同步版本等於每 300ms 就把主行程的 UI 執行緒鎖住數十毫秒——原生檔案對話框的
-       訊息迴圈就在那條執行緒上，於是「開啟檔案總管」與「在裡面切換資料夾」都會頓。 */
-    try { if ((await fsp.stat(proxy)).size >= 131072) break; } catch (e2) {}
-    if (lease?.isCancelled?.()) return { response: null, completion };
-    if (job.error) throw new Error('轉檔失敗：' + job.error);
-    await new Promise(r => setTimeout(r, 300));
-    if (lease?.isCancelled?.()) return { response: null, completion };
-  }
-
-  return {
-    response: { cached: false, streamUrl: `http://127.0.0.1:${port}/${jid}`, proxy, channels, wave, ingestJobId: jid },
-    completion,
-  };
-}
+ipcMain.handle('ffmpeg:releaseStream', (e, streamLeaseId) =>
+  mediaIntakeRuntime.releaseStream(streamLeaseId));
 
 /* ============ mpv 媒體播放器整合（秒開非原生格式，無需等待 ffmpeg proxy 轉檔） ============
    原生 child process、named pipe 與兩個透明宿主視窗均由 mpv-host 擁有；本檔只保留
@@ -2154,6 +1627,7 @@ const mpvHost = createMpvHost({
   fs,
   path,
   url,
+  allowInternalDocument: file => localResourceServer.allowInternalDocument(file),
   getMainWindow: () => mainWin,
   supported: () => mpvEmbeddingSupported(process.platform),
   findExecutable: () => detectNativeTool('mpv', {
@@ -2242,7 +1716,9 @@ function openCompareWindow(payload) {
     }
   });
   compareWin.setMenu(null);
-  compareWin.loadFile(path.join(__dirname, 'compare.html'));
+  const compareDocument = path.join(__dirname, 'compare.html');
+  localResourceServer.allowInternalDocument(compareDocument);
+  compareWin.loadFile(compareDocument);
   compareWin.webContents.once('did-finish-load', () => {
     compareWin.webContents.send('compare:update-data', payload);
   });

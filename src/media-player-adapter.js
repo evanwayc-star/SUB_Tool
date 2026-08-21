@@ -1,116 +1,256 @@
 // media-player-adapter.js
-// Adapter pattern：將播放器操作抽象為統一介面。
-// MpvAdapter 封裝桌面版 mpv IPC，Html5Adapter 封裝 <video> 元素，
-// BaseMediaPlayerAdapter 是所有方法都是 no-op 的基底類別。
+// NativePreviewRuntime 是 renderer 的單一預覽 owner；HTML5／mpv transport adapters
+// 留在模組內部，OS 視窗、guide 與 bounds 不會因 active transport 改變而掉進 no-op。
 
-export class BaseMediaPlayerAdapter {
-  constructor() {}
-  get type() { return 'base'; }
-  get isAvailable() { return true; }
-  async subSet(assStr) { return Promise.resolve(); }
-  async subVisible(v) { return Promise.resolve(); }
-  async show(v) { return Promise.resolve(); }
-  async setGuide(data) { return Promise.resolve(); }
-  async setImageGuide(data) { return Promise.resolve(); }
-  async screenshot(path) { return Promise.resolve(); }
-  async setTimecodeWatermark(payload) { return Promise.resolve(); }
-  async detect() { return Promise.resolve(); }
-  async setBounds(bounds) { return Promise.resolve(); }
-  async launch(opts) { return Promise.resolve(); }
-  onEvent(cb) {}
-  async mute(m) { return Promise.resolve(); }
-  brightness(b) {}
-  async pause() { return Promise.resolve(); }
-  async play() { return Promise.resolve(); }
-  async loadfile(path) { return Promise.resolve(); }
-  async seek(t) { return Promise.resolve(); }
-  async rate(r) { return Promise.resolve(); }
-  async quit() { return Promise.resolve(); }
-}
-
-export class Html5Adapter extends BaseMediaPlayerAdapter {
-  constructor(videoEl) {
-    super();
-    this._video = videoEl;
-  }
+class Html5Transport {
+  constructor(video) { this.video = video; }
   get type() { return 'html5'; }
-  async play() { 
-    try { 
-      const result = this._video.play(); 
-      if (result?.catch) result.catch(()=>{});
-      return result;
-    } catch(e) {} 
+  async play() {
+    const result = this.video?.play?.();
+    if (result?.catch) result.catch(() => {});
+    return result;
   }
-  async pause() { try { this._video.pause(); } catch(e) {} }
-  async seek(t) { try { this._video.currentTime = t; } catch(e) {} }
-  async rate(r) { 
-    try { 
-      this._video.playbackRate = r; 
-      if('preservesPitch' in this._video) this._video.preservesPitch = (r >= 0.25 && r <= 4); 
-    } catch(e) {} 
+  async pause() { this.video?.pause?.(); }
+  async seek(time) { if (this.video) this.video.currentTime = time; }
+  async rate(value) {
+    if (!this.video) return;
+    this.video.playbackRate = value;
+    if ('preservesPitch' in this.video) this.video.preservesPitch = value >= 0.25 && value <= 4;
   }
+  async mute(value) { if (this.video) this.video.muted = !!value; }
 }
 
-export class MpvAdapter extends BaseMediaPlayerAdapter {
-  constructor(desk) {
-    super();
-    this.desk = desk;
-    this.mpv = desk?.mpv;
-  }
+class MpvTransport {
+  constructor(mpv) { this.mpv = mpv; }
   get type() { return 'mpv'; }
-  get isAvailable() { return !!this.mpv; }
-  async subSet(assStr) { return this.mpv?.subSet(assStr).catch(()=>{}); }
-  async subVisible(v) { return this.mpv?.subVisible?.(v).catch(()=>{}); }
-  async show(v) { return this.mpv?.show(v).catch(()=>{}); }
-  async setGuide(data) { return this.mpv?.setGuide?.(data).catch(()=>{}); }
-  async setImageGuide(data) { return this.mpv?.setImageGuide(data).catch(()=>{}); }
-  async screenshot(path) { return this.mpv?.screenshot(path); }
-  async setTimecodeWatermark(payload) { return this.mpv?.setTimecodeWatermark(payload); }
-  async detect() { return this.mpv?.detect(); }
-  async setBounds(bounds) { return this.mpv?.setBounds(bounds).catch(()=>{}); }
-  async launch(opts) { return this.mpv?.launch(opts); }
-  onEvent(cb) { this.mpv?.onEvent(cb); }
-  async mute(m) { return this.mpv?.mute(m).catch(()=>{}); }
-  brightness(b) { try{ this.mpv?.brightness(b); }catch(e){} }
-  async pause() { return this.mpv?.pause?.().catch(()=>{}); }
-  async play() { return this.mpv?.play?.().catch(()=>{}); }
-  async loadfile(path) { return this.mpv?.loadfile(path); }
-  async seek(t) { return this.mpv?.seek(t).catch(()=>{}); }
-  async rate(r) { return this.mpv?.rate(r).catch(()=>{}); }
-  async quit() { return this.mpv?.quit().catch(()=>{}); }
+  async play() { return this.mpv?.play?.(); }
+  async pause() { return this.mpv?.pause?.(); }
+  async seek(time) { return this.mpv?.seek?.(time); }
+  async rate(value) { return this.mpv?.rate?.(value); }
+  async mute(value) { return this.mpv?.mute?.(value); }
 }
 
-let activeAdapter = null;
+export function createNativePreviewRuntime({
+  video,
+  mpv,
+  windowTarget = typeof window !== 'undefined' ? window : null,
+  ResizeObserverCtor = typeof ResizeObserver !== 'undefined' ? ResizeObserver : null,
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+} = {}) {
+  let bridge = mpv || null;
+  let mode = 'html5';
+  let activeTransport = new Html5Transport(video);
+  let nativeVisible = true;
+  let subtitleGuideActive = false;
+  let imageGuideActive = false;
+  let boundsObserver = null;
+  let boundsListener = null;
+  let boundsTimer = null;
+  let lastBounds = null;
+  let generation = 0;
+
+  const sameBounds = (left, right) => !!(left && right
+    && left.x === right.x && left.y === right.y && left.w === right.w && left.h === right.h);
+
+  function stopBoundsFeeder() {
+    boundsObserver?.disconnect?.();
+    boundsObserver = null;
+    if (boundsListener) windowTarget?.removeEventListener?.('resize', boundsListener);
+    boundsListener = null;
+    if (boundsTimer != null) clearIntervalFn(boundsTimer);
+    boundsTimer = null;
+    lastBounds = null;
+  }
+
+  function startBoundsFeeder({ readBounds, boundsElement } = {}) {
+    stopBoundsFeeder();
+    if (typeof readBounds !== 'function' || !bridge?.setBounds) return;
+    const send = () => {
+      if (mode !== 'mpv') return;
+      const next = readBounds();
+      if (!next || sameBounds(lastBounds, next)) return;
+      lastBounds = { ...next };
+      Promise.resolve(bridge.setBounds(next)).catch(() => {});
+    };
+    boundsListener = send;
+    if (ResizeObserverCtor && boundsElement) {
+      try {
+        boundsObserver = new ResizeObserverCtor(send);
+        boundsObserver.observe(boundsElement);
+      } catch (error) { boundsObserver = null; }
+    }
+    windowTarget?.addEventListener?.('resize', send);
+    boundsTimer = setIntervalFn(send, 2000);
+    send();
+  }
+
+  async function clearGuides() {
+    subtitleGuideActive = false;
+    imageGuideActive = false;
+    await Promise.all([
+      Promise.resolve(bridge?.setGuide?.(null)).catch(() => {}),
+      Promise.resolve(bridge?.setImageGuide?.(null)).catch(() => {}),
+    ]);
+  }
+
+  function selectHtml5(nextVideo = video) {
+    generation += 1;
+    mode = 'html5';
+    activeTransport = new Html5Transport(nextVideo);
+    nativeVisible = false;
+    stopBoundsFeeder();
+    subtitleGuideActive = false;
+    imageGuideActive = false;
+  }
+
+  async function shutdownNative() {
+    await clearGuides();
+    return bridge?.quit ? bridge.quit() : false;
+  }
+
+  const runtime = {
+    get type() { return activeTransport.type; },
+    get isAvailable() { return mode === 'html5' || !!bridge; },
+    get mode() { return mode; },
+
+    async enterMpv({ src, bounds, audio, readBounds, boundsElement } = {}) {
+      const token = ++generation;
+      if (!bridge?.launch) throw new Error('mpv preview bridge is unavailable');
+      let result;
+      try {
+        result = await bridge.launch({ src, bounds, audio });
+      } catch (error) {
+        if (token === generation) {
+          selectHtml5(video);
+          await Promise.resolve(shutdownNative()).catch(() => {});
+        }
+        throw error;
+      }
+      if (token !== generation) {
+        await Promise.resolve(bridge.quit?.()).catch(() => {});
+        return null;
+      }
+      mode = 'mpv';
+      activeTransport = new MpvTransport(bridge);
+      nativeVisible = true;
+      startBoundsFeeder({ readBounds, boundsElement });
+      return result;
+    },
+
+    async enterHtml5(nextVideo = video) {
+      const nativeWasActive = mode === 'mpv';
+      selectHtml5(nextVideo);
+      if (nativeWasActive) await Promise.resolve(shutdownNative()).catch(() => {});
+    },
+
+    setMpvBridge(nextBridge) { bridge = nextBridge || null; },
+    selectHtml5,
+    shutdownNative,
+    startBoundsFeeder,
+    stopBoundsFeeder,
+    async setNativeVisible(visible) {
+      nativeVisible = !!visible;
+      return bridge?.show ? bridge.show(nativeVisible) : false;
+    },
+    async setSubtitleGuide(guide) {
+      subtitleGuideActive = !!guide;
+      return bridge?.setGuide ? bridge.setGuide(guide || null) : false;
+    },
+    async setImageGuide(guide) {
+      imageGuideActive = !!(guide && (guide.html || typeof guide === 'string'));
+      return bridge?.setImageGuide ? bridge.setImageGuide(guide || null) : false;
+    },
+    async clearGuides() { return clearGuides(); },
+    async play() { return activeTransport.play(); },
+    async pause() { return activeTransport.pause(); },
+    async seek(time) { return activeTransport.seek(time); },
+    async rate(value) { return activeTransport.rate(value); },
+    async mute(value) { return activeTransport.mute(value); },
+    brightness(value) {
+      if (!bridge?.brightness) return false;
+      try { return bridge.brightness(value); } catch (error) { return false; }
+    },
+    async loadfile(filePath) {
+      if (mode !== 'mpv' || !bridge?.loadfile) return false;
+      return bridge.loadfile(filePath);
+    },
+    async subSet(assText) {
+      if (mode !== 'mpv' || !bridge?.subSet) return false;
+      return bridge.subSet(assText);
+    },
+    async subVisible(visible) {
+      if (mode !== 'mpv' || !bridge?.subVisible) return false;
+      return bridge.subVisible(!!visible);
+    },
+    async screenshot(filePath) {
+      if (mode !== 'mpv' || !bridge?.screenshot) return false;
+      return bridge.screenshot(filePath);
+    },
+    async setTimecodeWatermark(payload) {
+      if (!bridge?.setTimecodeWatermark) return false;
+      return bridge.setTimecodeWatermark(payload || null);
+    },
+    async detect() { return bridge?.detect ? bridge.detect() : null; },
+    onEvent(callback) { return bridge?.onEvent?.(callback); },
+    async quit() {
+      generation += 1;
+      stopBoundsFeeder();
+      await clearGuides();
+      return bridge?.quit ? bridge.quit() : false;
+    },
+    async launch(options) {
+      return runtime.enterMpv(options);
+    },
+    async setBounds(bounds) {
+      if (!bridge?.setBounds) return false;
+      return bridge.setBounds(bounds);
+    },
+    async setGuide(guide) { return runtime.setSubtitleGuide(guide); },
+    async show(visible) { return runtime.setNativeVisible(visible); },
+    snapshot() {
+      return {
+        mode,
+        activeTransport: activeTransport.type,
+        nativeVisible,
+        subtitleGuideActive,
+        imageGuideActive,
+        boundsFeeding: !!(boundsObserver || boundsListener || boundsTimer != null),
+      };
+    },
+  };
+
+  return runtime;
+}
+
+let activeRuntime = null;
+
+function _defaultVideo() {
+  return typeof document !== 'undefined' ? document.getElementById('video') : null;
+}
 
 export function getPlayerAdapter() {
-  if (!activeAdapter) activeAdapter = new MpvAdapter(window.subtool);
-  return activeAdapter;
+  if (!activeRuntime) {
+    const desk = typeof window !== 'undefined' ? window.subtool : null;
+    activeRuntime = createNativePreviewRuntime({ video: _defaultVideo(), mpv: desk?.mpv });
+  }
+  return activeRuntime;
 }
 
-export function resetPlayerAdapter(desk) {
-  activeAdapter = new MpvAdapter(desk);
+export const getNativePreviewRuntime = getPlayerAdapter;
+
+export function resetPlayerAdapter(desk = null, video = _defaultVideo()) {
+  activeRuntime?.stopBoundsFeeder?.();
+  activeRuntime = createNativePreviewRuntime({ video, mpv: desk?.mpv });
+  return activeRuntime;
 }
 
-export function setPlayerAdapter(adapter) {
-  activeAdapter = adapter;
+export function activateHtml5Transport(video = _defaultVideo()) {
+  return getPlayerAdapter().enterHtml5(video);
 }
 
-/* ── 這裡曾有 WebCodecsAdapter ─────────────────────────────────────────────
-   一個把 base adapter 全部轉呼叫的 decorator：39 個方法逐一 `return this.base.X(…)`，
-   唯一自己做事的是 setCompositing()，而它做的三件事在唯一的呼叫端
-   （decode/player.js `_setTakeover`）緊接著又原樣做了一次。
-
-   更關鍵的是它在生產環境【從未存在】：
-     - 9 個 setPlayerAdapter() 呼叫點全部裝 `new Html5Adapter(video)` 或
-       `new MpvAdapter(window.subtool)`，把 wrapper 整個換掉；
-     - 唯一會產生它的 resetPlayerAdapter() 只有測試在呼叫。
-   於是任何媒體載入之後 getPlayerAdapter().setCompositing 都是 undefined，
-   呼叫時丟 TypeError，被 app.js 的 `try{ WCPreview.tick(); }catch(e){}` 吞掉；
-   下游讀 isCompositing 拿到 undefined，mpvPresenting() 因此永遠回 true。
-   它的 `window.dispatchEvent(new CustomEvent('mpv:sync'))` 也是死的——
-   'mpv:sync' 的唯一訂閱者在 events.js 的匯流排上，不是 window。
-
-   合成旗標已搬回它該在的地方（Media._wcTakeover，公開入口
-   webCodecsTakeover() / setWebCodecsTakeover()，正是 eslint 圍籬點名的那組）。
-   ── 若日後真的需要一個 decorator，先確認它會被【裝上】：
-      兩個 adapter 才是真接縫，零個不是。 */
+export function activateMpvTransport(desk) {
+  const runtime = getPlayerAdapter();
+  runtime.setMpvBridge(desk?.mpv);
+  return runtime;
+}

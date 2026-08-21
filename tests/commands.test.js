@@ -83,4 +83,26 @@ describe('app.js 只剩接線', () => {
     expect(appSrc).toContain('function doAction(act, force = false){ return Commands.run(act, { force }); }');
     expect(appSrc).not.toMatch(/switch\s*\(\s*act\s*\)/);
   });
+
+  it('建立 registry 時不再傳入已被忽略的舊 ctx', () => {
+    const appSrc = read('src/app.js');
+    expect(appSrc).toContain('const Commands = createCommands();');
+    expect(appSrc).not.toMatch(/createCommands\s*\(\s*\{/);
+  });
+
+  it('app.js 不再保留 actions 已擁有的平行實作', () => {
+    const appSrc = read('src/app.js');
+    const actionOwned = [
+      'currentSubtitleCompareSnapshot', 'applyCueStylePatch', 'applyTrackStylePlan',
+      '_fmtBytes', 'openCacheDialog',
+      'mediaFileKind', 'pickMediaFiles', 'importDesktopMediaFiles', 'importBrowserMediaFiles',
+      'doCopyTrack', '_execCopyTrack', 'doCompareTrack',
+      '_ensurePanelInRightArea', 'togglePanel',
+      'takeScreenshot', 'copySelectedStyle', 'pasteStyleToSelected',
+    ];
+    const duplicates = actionOwned.filter(name => new RegExp(
+      `(?:async\\s+)?function\\s+${name}\\s*\\(`,
+    ).test(appSrc));
+    expect(duplicates).toEqual([]);
+  });
 });

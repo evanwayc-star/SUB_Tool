@@ -29,7 +29,7 @@ import { initMediaView } from './media-view.js';
      `subio.js` 只保留字幕 I/O 與匯出對話框協調。保持 app.js 單純負責「接線」。
 ============================================================================== */
 "use strict";
-import { refreshMpvSubs, renderVideoSub, _syncMpvPanel, renderImageOverlays, _selectImageClip, _imageBoxOf, _stageRect, drawSafeFrame, renderTimecodeWatermark, toggleSafeFrame, toggleTimecodeWatermark, _setSubtitleHover, previewDrag, _firstLoad, setFirstLoad } from './video-renderer.js';
+import { refreshMpvSubs, renderVideoSub, _syncMpvPanel, renderImageOverlays, _selectImageClip, _imageBoxOf, _stageRect, drawSafeFrame, renderTimecodeWatermark, _setSubtitleHover, previewDrag, _firstLoad, setFirstLoad } from './video-renderer.js';
 const _videoSub = document.getElementById('videoSub');
 const _videoWrap = document.getElementById('videoWrap');
 import _logoUrl from './logo.png';
@@ -38,33 +38,31 @@ import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assTo
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
 import { createCommands } from './commands.js';
-import { State, newTrack, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
+import { togglePanel } from './actions/panel-actions.js';
+import { applyCueStylePatch } from './actions/style-actions.js';
+import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
-import { getPlayerAdapter } from './media-player-adapter.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, cueNeighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries, updateSearchCount } from './subtitles.js';
 import { initRecentProjects } from './recent-projects.js';
-import { setIn, setOut, nudge, stepBoundary, resetPlaybackSpeed } from './keyboard.js';
-import { Project, ensureProjectSaved, resetProject, isProjectDirty, getProjectDir, confirmDiscardUnsaved } from './project.js';
+import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
+import { Project, isProjectDirty, confirmDiscardUnsaved } from './project.js';
 import { Seq } from './sequence.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory, syncCompareSnapshot } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/diagnostics.js'; // WebCodecs 診斷入口（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
-import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, trackStyleSnapshot, loadFonts, getFonts, posToPx, anchorPct, styleMatchesPreset, pruneRedundantCueStyle } from './substyle.js'; // v4.23 字幕樣式系統
-import { GEOMETRY_STYLE_KEYS, applyCueStyleAssignment, planCueStyleAssignment, planTrackStyleAssignment } from './style-assignment.js';
-import { closeSubtitleCompareSession, configureSubtitleCompareSession, handleSubtitleCompareCommand, openSubtitleCompareSession } from './subtitle-compare-session.js';
-import { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes } from './notes.js';
+import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct, styleMatchesPreset, pruneRedundantCueStyle } from './substyle.js'; // v4.23 字幕樣式系統
+import { closeSubtitleCompareSession, configureSubtitleCompareSession, handleSubtitleCompareCommand } from './subtitle-compare-session.js';
+import { addNote, renderNotes, setNoteActive, updateNoteActive } from './notes.js';
 import { createPreviewDrag } from './pointer-interaction.js';
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal, closeMenus, openMenu } from './ui.js';
-import { renderAudioTracks, renderMixer, mixerReset, mixerMuteAll, updateMeters } from './mixer.js';
-import { showSettingsModal } from './settings.js';
-import { importSub, showExportDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct, toASSFromState, showExportVideoDialog } from './subio.js';
+import { renderAudioTracks, renderMixer, updateMeters } from './mixer.js';
+import { applyDurAdjPct, toASSFromState } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { imageBoxOnStage } from './image-geometry.js'; // v4.7 圖片疊層幾何：預覽／mpv guide／匯出 共用同一組公式
 import { fadeAlphaAtTimeline } from './clip-fade.js'; // v5.9 淡入淡出：預覽與匯出共用同一份規格
-import { timecodeSuffix, screenshotDir, fallbackScreenshotName } from './screenshot-target.js';
 import { presetExportRelativePath } from './export-name-safety.js';
 import { renderSeekBar } from './seekbar.js';
 import { on, emit } from './events.js';
@@ -108,11 +106,8 @@ on('action', doAction);
 on('mpv:sync', _syncMpvPanel); // 自訂視窗（快捷鍵設定、右鍵選單）開閉時重算 mpv 讓位
 on('history:record', recordHistory); // 供 media.js 等低階模組記錄歷史（避免 media→history 循環相依）
 on('project:relinkBrowserMedia', (generation, projectRestore)=>{
-  void Project.continueLoad(generation,async isCurrent=>{
-    const files=await pickMediaFiles($('fileMedia'));
-    if(!isCurrent()) return;
-    await importBrowserMediaFiles(files,{generation,plan:projectRestore});
-  }).catch(error=>console.warn('relink browser project media:',error));
+  void Commands.run('open-media', { relink: { generation, plan: projectRestore } })
+    .catch(error=>console.warn('relink browser project media:',error));
 });
 // 還原專案音訊設定後，Web Audio 的實際 gain 與混音器 UI 也要回到同一份快照。
 on('audio:projectRestored', ()=>{ Media.applyGains(); renderAudioTracks(); });
@@ -177,30 +172,6 @@ function styleChanged(){
   renderVideoSub(); refreshMpvSubs(); StylePanelController.renderTrackStyle(); refreshStyleSummaries();
 }
 
-function currentSubtitleCompareSnapshot(){
-  return {
-    tracks: State.tracks,
-    cues: State.cues,
-    fps: State.fps,
-    dropFrame: State.dropFrame,
-  };
-}
-
-function applyCueStylePatch(cue, desiredStyle, preserveKeys = []){
-  const targetTrack = State.tracks[cue?.track || 0] || null;
-  const plan = planCueStyleAssignment({ cue, targetTrack, desiredStyle, preserveKeys });
-  applyCueStyleAssignment(cue, plan);
-  return plan.changed;
-}
-
-function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []){
-  const plan = planTrackStyleAssignment({ track, cues, desiredStyle, preserveKeys });
-  if(!plan.changed) return false;
-  Object.assign(track, plan.trackPatch);
-  for(const cuePatch of plan.cuePatches) applyCueStyleAssignment(cuePatch.cue, cuePatch);
-  return true;
-}
-
 /* 在預覽窗裡直接擺放【單一句】字幕（v4.30）：拖字幕＝移動、拖頂端把手＝旋轉（Shift 吸附 15°，Alt 直接旋轉）。
    ── 寫的是【該句的逐句覆蓋】(cue.style.posX/posY/angle)，不動軌道樣式：拖哪一句就只有那句跑，
       其餘不受影響（列表標 ✱ 自訂）。整軌的標準位置仍用面板的 X／Y。
@@ -249,33 +220,6 @@ _videoSub?.addEventListener('contextmenu', e => {
 _videoWrap?.addEventListener('pointermove', e => { if(!previewDrag.subtitleDrag()) _setSubtitleHover(e.target.closest?.('.vsub-track.drag')||null); });
 _videoWrap?.addEventListener('pointerleave', () => { if(!previewDrag.subtitleDrag()) _setSubtitleHover(null); });
 
-/* ===== 快取管理對話框（桌面版） ===== */
-function _fmtBytes(n){ n=+n||0; if(n<1024)return n+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+' '+u[i]; }
-let _cacheDlgGen=0;
-async function openCacheDialog(){
-  const DESK=window.subtool;
-  if(!DESK||!DESK.cacheInfo){ showToast('快取管理僅在桌面版可用'); return; }
-  const myGen=++_cacheDlgGen;
-  openModal('🗂 轉檔快取','<div style="padding:6px 2px">讀取中…</div>',[{label:'關閉',primary:true,act:closeModal}]);
-  let info; try{ info=await DESK.cacheInfo(); }catch(e){ info={folders:0,bytes:0,root:''}; }
-  // 使用者在讀取期間已關閉（或又開了別的對話框）就不要把對話框彈回來
-  if(myGen!==_cacheDlgGen || !$('modalBg').classList.contains('show')) return;
-  const html=
-    `<div style="padding:4px 2px;line-height:1.9">`+
-    `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>`+
-    `<div style="font-size:11px;color:var(--muted);word-break:break-all;margin-top:2px">${escapeHTML(info.root||'')}</div>`+
-    `<div style="font-size:12px;color:var(--muted);margin-top:8px">說明：開啟影片時會把每個聲道與波形轉存到「影片同資料夾的 <code>.subtool_Cache</code>」內，其他電腦讀取同一個檔案時可直接沿用、不必重算。此處管理的是本機的中央快取。</div>`+
-    `</div>`;
-  const buttons=[
-    {label:'清理孤兒檔',act:async()=>{ const r=await DESK.cacheCleanOrphans(); showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}`); openCacheDialog(); }},
-    {label:'全部清除',act:()=>{
-      openModal('確認清除','<div style="padding:6px 2px">將刪除所有中央快取，以及目前開啟影片旁的 .subtool_Cache 資料夾。<br>下次開啟同檔需重新轉檔。確定？</div>',
-        [{label:'確定清除',primary:true,act:async()=>{ const r=await DESK.cacheClearAll(State.mediaPath||null); showToast(`已清除快取，釋放 ${_fmtBytes(r.bytes)}`); closeModal(); }},{label:'取消',act:openCacheDialog}]);
-    }},
-    {label:'關閉',primary:true,act:closeModal},
-  ];
-  openModal('🗂 轉檔快取',html,buttons);
-}
 function onDurationKnown(){
   $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
   $('seekBar').max=Math.max(1,Math.round(State.duration*1000));
@@ -392,94 +336,11 @@ $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
 
 
 
-const AUDIO_MEDIA_EXTENSIONS=new Set(['aac','aif','aiff','alac','flac','m4a','mka','mp3','oga','ogg','opus','wav','wma']);
-
-function mediaFileKind(fileOrPath){
-  const name=typeof fileOrPath==='string'?fileOrPath:(fileOrPath?.name||'');
-  const type=typeof fileOrPath==='object'?(fileOrPath?.type||''):'';
-  if(/^audio\//i.test(type)) return 'audio';
-  if(/^video\//i.test(type)) return 'video';
-  const ext=(name.split('.').pop()||'').toLowerCase();
-  if(['jpg','jpeg','png'].includes(ext) || /^image\//i.test(type)) return 'image';
-  return AUDIO_MEDIA_EXTENSIONS.has(ext)?'audio':'video';
-}
-
-function pickMediaFiles(input){
-  return new Promise(resolve=>{
-    input.value='';
-    input.onchange=()=>resolve(Array.from(input.files||[]));
-    input.click();
-  });
-}
-
-async function importDesktopMediaFiles(value, explicitRelink=null){
-  const relink=explicitRelink||Project.pendingMediaRelink?.()||null;
-  const projectRestore=relink?.plan||null;
-  const paths=(Array.isArray(value)?value:(value?[value]:[])).filter(path=>typeof path==='string'&&path);
-  const videos=paths.filter(path=>mediaFileKind(path)==='video');
-  const audios=paths.filter(path=>mediaFileKind(path)==='audio');
-  const images=paths.filter(path=>mediaFileKind(path)==='image');
-  let primaryLoaded=false;
-  if(videos.length>1){
-    // 多選影片的語意固定為「第一支建立／保留主序列，其餘加入序列」，避免連續跳出多個 modal。
-    if(!Media.seqOn()) { await Media.loadDesktopMedia(videos.shift(),projectRestore); primaryLoaded=true; }
-    for(const path of videos) await Media.addClipDesktop(path);
-  }else if(videos.length===1){
-    const path=videos[0];
-    if(Media.seqOn()) Media.openIncoming({path});
-    else { await Media.loadDesktopMedia(path,projectRestore); primaryLoaded=true; }
-  }
-  for(const path of audios) await Media.addAudioFileDesktop(path);
-  for(const path of images) await Media.addImageDesktop(path);
-  if(primaryLoaded&&relink) await Project.finishMediaRelink(relink.generation,projectRestore);
-}
-
-async function importBrowserMediaFiles(files, explicitRelink=null){
-  const relink=explicitRelink||Project.pendingMediaRelink?.()||null;
-  const projectRestore=relink?.plan||null;
-  const list=Array.isArray(files)?files.filter(Boolean):[];
-  const videos=list.filter(file=>mediaFileKind(file)==='video');
-  const audios=list.filter(file=>mediaFileKind(file)==='audio');
-  const images=list.filter(file=>mediaFileKind(file)==='image');
-  let primaryLoaded=false;
-  if(videos.length>1){
-    if(!Media.seqOn()) { await Media.loadVideoFile(videos.shift(),projectRestore); primaryLoaded=true; }
-    for(const file of videos) await Media.addClipWeb(file);
-  }else if(videos.length===1){
-    const file=videos[0];
-    if(Media.seqOn()) Media.openIncoming({file});
-    else { await Media.loadVideoFile(file,projectRestore); primaryLoaded=true; }
-  }
-  for(const file of audios) await Media.addAudioFile(file);
-  for(const file of images) await Media.addImageWeb(file);
-  if(primaryLoaded&&relink) await Project.finishMediaRelink(relink.generation,projectRestore);
-}
-
 // A4：純關閉面板的 case 改用資料表，消除重複的 classList.remove('show')+_syncMpvPanel()
 /* 指令表住在 commands.js —— 82 個 case 的 switch 攤成一張可列舉的表之後，
    tests/commands.test.js 才有辦法回答「index.html 上這顆按鈕真的有實作嗎」。
-   這裡只留下 app.js 自己才有的畫面接線，逐一具名注入。 */
-const Commands = createCommands({
-  togglePanel,
-  syncMpvPanel: _syncMpvPanel,
-  pickMediaFiles,
-  importDesktopMediaFiles,
-  importBrowserMediaFiles,
-  resetFirstLoad: () => { setFirstLoad(true); },
-  onDurationKnown,
-  renderAll,
-  renderListTrackSel,
-  renderVideoSub,
-  refreshMpvSubs,
-  takeScreenshot,
-  copySelectedStyle,
-  pasteStyleToSelected,
-  openCacheDialog,
-  toggleSafeFrame,
-  toggleTimecodeWatermark,
-  doCopyTrack,
-  doCompareTrack,
-});
+   指令的 production actions 由 commands.js 直接組裝；app.js 只保留事件入口。 */
+const Commands = createCommands();
 function doAction(act, force = false){ return Commands.run(act, { force }); }
 
 let _repTimer=null, _repInterval=null, _repFired=false;
@@ -947,51 +808,6 @@ function initPresetLibrary(){
   });
 }
 
-/* ===== 磁吸 / 防重疊 工具 ===== */
-/* ===== 複製軌道 ===== */
-function doCopyTrack(){
-  const srcIdx=State.listTrack;
-  const srcTrack=State.tracks[srcIdx];
-  if(!srcTrack){ showToast('請先選擇一個字幕軌道'); return; }
-  const srcCues=State.cues.filter(c=>(c.track||0)===srcIdx);
-  openModal('複製字幕軌道',
-    `<p>將 <b>${escapeHTML(srcTrack.name)}</b> 的 <b>${srcCues.length}</b> 條字幕複製到新軌道，請選擇複製方式：</p>`,
-    [
-      { label:'含文字內容', primary:true, act:()=>{ closeModal(); _execCopyTrack(srcIdx,true); } },
-      { label:'僅複製時間點（文字清空）', act:()=>{ closeModal(); _execCopyTrack(srcIdx,false); } },
-      { label:'取消', act:closeModal }
-    ]
-  );
-}
-function _execCopyTrack(srcIdx, withText){
-  const srcTrack=State.tracks[srcIdx]; if(!srcTrack)return;
-  // 產生唯一軌道名稱
-  const base=srcTrack.name+'_複製';
-  let name=base, n=1;
-  const names=State.tracks.map(t=>t.name);
-  while(names.includes(name)) name=base+(n++);
-  // 複製軌道屬性
-  const tk={name,visible:true,locked:false,...trackStyleSnapshot(srcTrack)};
-  const newIdx=State.tracks.length;
-  State.tracks.push(tk); syncTrackCount();
-  // 複製字幕
-  const srcCues=State.cues.filter(c=>(c.track||0)===srcIdx);
-  for(const c of srcCues)
-    State.cues.push({id:newId(), start:c.start, end:c.end, text:withText?(c.text||''):'', track:newIdx, timed:c.timed});
-  sortCues(); renderAll(); drawTimeline();
-  State.listTrack=newIdx; renderListTrackSel(); renderSubList();
-  recordHistory('複製字幕軌道');
-  showToast(`已複製到「${name}」（${srcCues.length} 條）`);
-}
-function doCompareTrack() {
-  if (State.tracks.length < 1) { showToast('沒有足夠的字幕軌道可供比對'); return; }
-  if (DESK?.openCompareWindow) {
-    openSubtitleCompareSession(currentSubtitleCompareSnapshot());
-  } else {
-    showToast('此功能僅限桌面版使用');
-  }
-}
-
 function openNoteInPanel(n){
   $('notesPanel').classList.add('show');
   setNoteActive(n.id);
@@ -1000,25 +816,6 @@ function openNoteInPanel(n){
     $('notesList')?.querySelector(`[data-id="${n.id}"]`)?.scrollIntoView({block:'nearest'});
   },30);
 }
-/* 開啟浮動面板時，若面板與影片重疊就自動推到影片右側，避免開啟時畫面變黑 */
-function _ensurePanelInRightArea(panel){
-  if(!Media.mpvMode || !getPlayerAdapter().isAvailable) return;
-  const vr=$('videoWrap')?.getBoundingClientRect();
-  if(!vr) return;
-  const pr=panel.getBoundingClientRect();
-  if(pr.left < vr.right + 4){
-    panel.style.right='auto'; panel.style.bottom='auto';
-    panel.style.left=(vr.right+8)+'px';
-    panel.style.top=Math.max(50, Math.min(pr.top, window.innerHeight-120))+'px';
-  }
-}
-
-function togglePanel(id){ const p=$(id); const willShow=!p.classList.contains('show');
-  document.querySelectorAll('.float-panel.show').forEach(x=>x.classList.remove('show'));
-  if(willShow){ p.classList.add('show'); setTimeout(()=>{ _ensurePanelInRightArea(p); _syncMpvPanel(); },0); }
-  else _syncMpvPanel();
-}
-
 /* ===== 播放時間數字：雙擊輸入 / 右鍵複製 ===== */
 function startTimeEdit(){
   const span=$('tcCur'); if(span.querySelector('input'))return;
@@ -1330,12 +1127,14 @@ async function initDesktop(){
      檔案（Explorer 再雙擊另一個 .subtool → second-instance → app:open-file），
      這時目前的專案可能有未存檔的變更，必須先問過——原本這條路徑直接覆蓋掉，
      使用者連一句提示都看不到。 */
-  const handleStartupFile = async (file, { fromLaunch = false } = {}) => {
-    if (!file) return;
+  const handleStartupFile = async (incoming, { fromLaunch = false } = {}) => {
+    if (!incoming) return;
     if (!fromLaunch && !await confirmDiscardUnsaved()) return;
     try {
-      const b64 = await DESK.readB64(file);
-      if (b64) Project.loadDesktop({ path: file, b64 });
+      const opened = typeof incoming === 'object' && typeof incoming.path === 'string'
+        ? incoming
+        : { path: incoming, b64: await DESK.readB64(incoming) };
+      if (opened.b64) Project.loadDesktop(opened);
       else setStatus('無法讀取專案檔內容');
     } catch(e) { console.error(e); }
   };
@@ -1415,184 +1214,6 @@ async function initDesktop(){
   window.SUB.WC = { pocTest: _wcPocTest, demuxFile: _wcDemux, TrackDecoder: _wcTrackDecoder, preview: WCPreview,
     demuxIndex: _wcDemuxIndex, SampleReader: _wcSampleReader }; // 階段0 PoC＋階段1 預覽＋v4.29 串流式 demux（驗證/診斷入口）
   window.SUB.SubStyle = { effStyle, styleToCss, styleMatchesPreset, pruneRedundantCueStyle, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, anchorPct }; // v4.23 字幕樣式（驗證/診斷入口）
-}
-
-async function takeScreenshot(withTimecode = false) {
-  if (!State.duration && !State.mediaPath) { showToast('尚未載入影音'); return; }
-
-  // 存哪、叫什麼名字的規則在 screenshot-target.js（純函式，可測）；這裡只負責編排。
-  const tcStr = withTimecode ? secToEncore(Media.displayTime(), State.fps, State.dropFrame) : '';
-  const tcSuffix = withTimecode ? timecodeSuffix(tcStr) : '';
-  const dir = screenshotDir({ projectDir: getProjectDir(), mediaPath: State.mediaPath });
-
-  let fullPath = '';
-  let name = '';
-  if (dir && IS_DESKTOP && DESK?.reserveScreenshotPath) {
-    try {
-      const reserved = await DESK.reserveScreenshotPath(dir, tcSuffix);
-      fullPath = reserved?.path || '';
-      name = reserved?.name || '';
-    } catch (e) { console.error('[screenshot] reserve path error:', e); }
-  } else {
-    name = fallbackScreenshotName(Media.displayTime(), tcSuffix);
-  }
-
-  // 若為 MPV 模式
-  if (Media.mpvMode && IS_DESKTOP && DESK && getPlayerAdapter() && getPlayerAdapter().screenshot && fullPath) {
-    if (!withTimecode) {
-      // 不需時間碼，直接請 mpv 存檔
-      try {
-        await getPlayerAdapter().screenshot(fullPath);
-        // mpv 非同步存檔，稍等一下讓它寫入
-        await new Promise(r => setTimeout(r, 300));
-        setStatus(`截圖已儲存：${name}`, 'ok');
-      } catch (e) {
-        console.error('[screenshot] mpv screenshot error:', e);
-        showToast('截圖失敗');
-      }
-      return;
-    } else {
-      // 需時間碼：請 mpv 存到暫存檔，讀入 JS 加工
-      const tempPath = dir + '/.subtool_temp_shot.jpg';
-      try {
-        await getPlayerAdapter().screenshot(tempPath);
-        await new Promise(r => setTimeout(r, 300)); // 等待寫入
-        
-        const b64 = await DESK.readB64(tempPath);
-        if (!b64) throw new Error('Cannot read temp screenshot');
-        
-        const img = new Image();
-        await new Promise((res, rej) => {
-          img.onload = res; img.onerror = rej;
-          img.src = 'data:image/jpeg;base64,' + b64;
-        });
-
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        
-        // 畫時間碼
-        const fontSize = Math.floor(canvas.height * 0.05);
-        ctx.font = 'bold ' + fontSize + 'px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'bottom';
-        const x = canvas.width / 2;
-        const y = canvas.height * 0.95;
-        const textWidth = ctx.measureText(tcStr).width;
-        
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-        ctx.fillRect(x - textWidth / 2 - 10, y - fontSize - 5, textWidth + 20, fontSize + 10);
-        ctx.fillStyle = '#fff';
-        ctx.fillText(tcStr, x, y);
-        
-        const outB64 = await new Promise(r => {
-          canvas.toBlob(b => {
-            const reader = new FileReader();
-            reader.onloadend = () => r(reader.result.split(',')[1]);
-            reader.readAsDataURL(b);
-          }, 'image/jpeg', 0.9);
-        });
-        
-        const result = await DESK.writeScreenshot(fullPath, outB64);
-        if (result) {
-           setStatus(`截圖已儲存：${name}`, 'ok');
-           // 清理暫存檔（嘗試刪除但忽略錯誤，因為沒有 expose unlink，此處留著會被覆蓋）
-        } else {
-           throw new Error('writeScreenshot failed');
-        }
-      } catch (e) {
-        console.error('[screenshot] MPV timecode shot error:', e);
-        showToast('截圖失敗');
-      }
-      return;
-    }
-  }
-
-  // ================= 瀏覽器或非 MPV 模式 (HTML5 Video) =================
-  const canvas = document.createElement('canvas');
-  canvas.width = State.videoWidth || 1920;
-  canvas.height = State.videoHeight || 1080;
-  const ctx = canvas.getContext('2d');
-  
-  const vid = document.getElementById('video');
-  if (vid && vid.readyState >= 2) {
-    ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
-  } else {
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }
-  
-  if (withTimecode) {
-    const fontSize = Math.floor(canvas.height * 0.05);
-    ctx.font = 'bold ' + fontSize + 'px monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    const x = canvas.width / 2;
-    const y = canvas.height * 0.95;
-    
-    const textWidth = ctx.measureText(tcStr).width;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.fillRect(x - textWidth / 2 - 10, y - fontSize - 5, textWidth + 20, fontSize + 10);
-    ctx.fillStyle = '#fff';
-    ctx.fillText(tcStr, x, y);
-  }
-  
-  canvas.toBlob(async (blob) => {
-    try {
-      if (fullPath && DESK) {
-        const b64 = await new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result.split(',')[1]);
-          reader.readAsDataURL(blob);
-        });
-        const result = await DESK.writeScreenshot(fullPath, b64);
-        if (result) setStatus(`截圖已儲存：${name}`, 'ok');
-        else showToast('截圖儲存失敗');
-        return;
-      }
-      
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = name;
-      a.click();
-      URL.revokeObjectURL(url);
-      setStatus(`截圖下載：${name}`, 'ok');
-    } catch (e) {
-      showToast('截圖失敗');
-    }
-  }, 'image/jpeg', 0.9);
-}
-
-let _clipboardStyle = null;
-function copySelectedStyle() {
-  if (!State.selectedId) { showToast('請先選取一條字幕'); return; }
-  const c = State.cues.find(x => x.id === State.selectedId);
-  if (!c) return;
-  const tk = State.tracks[c.track || 0];
-  _clipboardStyle = JSON.parse(JSON.stringify(effStyle(c, tk)));
-  setStatus('已拷貝字幕樣式', 'ok');
-}
-
-function pasteStyleToSelected() {
-  if (!_clipboardStyle) { showToast('尚未拷貝樣式'); return; }
-  const ids = State.selectedIds.length ? State.selectedIds : [State.selectedId].filter(Boolean);
-  if (!ids.length) { showToast('請先選取字幕'); return; }
-  
-  let changed = false;
-  for (const id of ids) {
-    const c = State.cues.find(x => x.id === id);
-    if (!c) continue;
-    changed = applyCueStylePatch(c, _clipboardStyle) || changed;
-  }
-  
-  if (changed) {
-    recordHistory('貼上字幕樣式');
-    renderAll();
-    setStatus('已貼上樣式', 'ok');
-  }
 }
 
 setTimeout(() => {

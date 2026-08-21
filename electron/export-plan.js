@@ -539,7 +539,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
         fc.push(mono.length > 1
           ? `${mono.join('')}amix=inputs=${mono.length}:normalize=0,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`
           : `${mono[0]}aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
-      } else if (hasAudioStream(c.path)) {
+      } else if (c.type !== 'image' && hasAudioStream(c.path)) {
         al = `[aa${i}]`;
         const seekStart = reusableMasterInputs.get(c.path)?.seekStart || 0;
         fc.push(`[${videoInputIndices[i]}:a]asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);

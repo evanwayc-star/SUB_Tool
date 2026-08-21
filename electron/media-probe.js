@@ -1,0 +1,187 @@
+'use strict';
+
+const { spawn: nodeSpawn } = require('child_process');
+
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function fpsOf(stream) {
+  const raw = stream?.avg_frame_rate;
+  if (typeof raw !== 'string' || raw === '0/0') return null;
+  const [numerator, denominator] = raw.split('/').map(Number);
+  return Number.isFinite(numerator) && Number.isFinite(denominator) && denominator
+    ? numerator / denominator
+    : null;
+}
+
+function descriptorOf(document = {}) {
+  const streams = Array.isArray(document.streams) ? document.streams : [];
+  const video = streams.find(stream => stream?.codec_type === 'video' && !stream?.disposition?.attached_pic) || null;
+  const audio = streams.filter(stream => stream?.codec_type === 'audio');
+  return {
+    duration: finiteNumber(document.format?.duration, finiteNumber(video?.duration, 0)),
+    video: video ? {
+      codec: video.codec_name,
+      width: video.width,
+      height: video.height,
+      fps: fpsOf(video),
+    } : null,
+    audio: audio.map((stream, index) => ({
+      index,
+      streamIndex: stream.index,
+      codec: stream.codec_name,
+      channels: stream.channels,
+      lang: stream.tags?.language || stream.tags?.LANGUAGE || '',
+      title: stream.tags?.title || stream.tags?.TITLE || '',
+    })),
+  };
+}
+
+function createMediaProbe({
+  executable,
+  spawnProcess = nodeSpawn,
+  timeoutMs = 15000,
+  terminationGraceMs = 1000,
+} = {}) {
+  let terminationBarrier = Promise.resolve();
+  const uncertainProcesses = new Set();
+
+  async function run(args, { signal } = {}) {
+    if (!executable) throw new Error('找不到 ffprobe');
+    await terminationBarrier;
+    if (uncertainProcesses.size) {
+      const error = new Error('前一個 ffprobe 尚未確認結束');
+      error.code = 'PROBE_TERMINATION_PENDING';
+      throw error;
+    }
+    if (signal?.aborted) {
+      const error = new Error('ffprobe 已取消');
+      error.code = 'PROBE_ABORTED';
+      throw error;
+    }
+    return new Promise((resolve, reject) => {
+      let child;
+      try {
+        child = spawnProcess(executable, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      const stdout = [];
+      const stderr = [];
+      let settled = false;
+      let timer = null;
+      let terminationTimer = null;
+      let onAbort = null;
+      let terminationError = null;
+      let releaseTermination = null;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (terminationTimer) clearTimeout(terminationTimer);
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+        releaseTermination?.();
+        callback(value);
+      };
+      const terminate = error => {
+        if (settled || terminationError) return;
+        terminationError = error;
+        if (timer) clearTimeout(timer);
+        timer = null;
+        uncertainProcesses.add(child);
+        const processClosed = new Promise(resolve => { releaseTermination = resolve; });
+        const previousBarrier = terminationBarrier;
+        terminationBarrier = Promise.all([previousBarrier, processClosed]).then(() => undefined);
+        terminationTimer = setTimeout(() => {
+          const timeoutError = new Error(`ffprobe 終止後超過 ${terminationGraceMs}ms 未關閉`);
+          timeoutError.code = 'PROBE_TERMINATION_TIMEOUT';
+          timeoutError.cause = terminationError;
+          finish(reject, timeoutError);
+        }, terminationGraceMs);
+        try { child.kill(); } catch (killError) {}
+      };
+      child.stdout?.on('data', chunk => stdout.push(Buffer.from(chunk)));
+      child.stderr?.on('data', chunk => stderr.push(Buffer.from(chunk)));
+      child.once('error', error => {
+        if (!terminationError) finish(reject, error);
+      });
+      child.once('close', status => {
+        uncertainProcesses.delete(child);
+        if (terminationError) {
+          finish(reject, terminationError);
+          return;
+        }
+        if (status !== 0) {
+          const error = new Error(Buffer.concat(stderr).toString('utf8').trim() || 'ffprobe 失敗');
+          error.code = 'PROBE_FAILED';
+          finish(reject, error);
+          return;
+        }
+        finish(resolve, Buffer.concat(stdout).toString('utf8'));
+      });
+      timer = setTimeout(() => {
+        const error = new Error(`ffprobe 超過 ${timeoutMs}ms 未完成`);
+        error.code = 'PROBE_TIMEOUT';
+        terminate(error);
+      }, timeoutMs);
+      if (signal) {
+        onAbort = () => {
+          const error = new Error('ffprobe 已取消');
+          error.code = 'PROBE_ABORTED';
+          terminate(error);
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  async function describe(filePath, options) {
+    const stdout = await run(['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath], options);
+    let document;
+    try {
+      document = JSON.parse(stdout);
+    } catch (cause) {
+      const error = new Error('ffprobe 回傳無法解析的 JSON');
+      error.code = 'PROBE_PARSE';
+      error.cause = cause;
+      throw error;
+    }
+    return descriptorOf(document);
+  }
+
+  async function hasAudio(filePath) {
+    try {
+      const stdout = await run([
+        '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', filePath,
+      ]);
+      return !!stdout.trim();
+    } catch (error) {
+      // Legacy projects do not carry a complete source-channel plan.  Dropping
+      // their audio is worse than letting ffmpeg report a concrete map error.
+      return true;
+    }
+  }
+
+  async function audioBitrates(filePath) {
+    try {
+      const stdout = await run([
+        '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=bit_rate,channels', '-of', 'json', filePath,
+      ]);
+      const streams = JSON.parse(stdout).streams;
+      if (!Array.isArray(streams)) return [];
+      return streams.map(stream => ({
+        channels: Math.max(0, Math.floor(finiteNumber(stream.channels, 0))),
+        kbps: Math.max(0, Math.round(finiteNumber(stream.bit_rate, 0) / 1000)),
+      }));
+    } catch (error) {
+      return [];
+    }
+  }
+
+  return Object.freeze({ describe, hasAudio, audioBitrates });
+}
+
+module.exports = { createMediaProbe, descriptorOf };

@@ -240,14 +240,18 @@ describe('repository structure', () => {
 
   it('版本變更紀錄保留單一標題、警語與目前版本入口', () => {
     const changelog = readFileSync(path.join(ROOT, 'docs/版本變更紀錄.md'), 'utf8');
+    const normalizedChangelog = changelog.replace(/\r\n/g, '\n');
     const packageJson = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-    const firstVersion = changelog.match(/^## \[v([^\]]+)\]/m)?.[1];
+    const versions = [...normalizedChangelog.matchAll(/^## \[v([^\]]+)\]/gm)]
+      .map((match) => match[1]);
+    const firstVersion = versions[0];
 
-    expect(changelog.startsWith('# CHANGELOG — SUB Tool\n')).toBe(true);
-    expect(changelog.match(/^# CHANGELOG — SUB Tool$/gm)).toHaveLength(1);
-    expect(changelog.match(/絕對不要對這個檔案做版號的全域字串取代/g)).toHaveLength(1);
-    expect(changelog).not.toContain('\f');
-    expect(changelog).not.toMatch(/\\n## \[v/);
+    expect(normalizedChangelog.startsWith('# CHANGELOG — SUB Tool\n')).toBe(true);
+    expect(normalizedChangelog.match(/^# CHANGELOG — SUB Tool$/gm)).toHaveLength(1);
+    expect(normalizedChangelog.match(/絕對不要對這個檔案做版號的全域字串取代/g)).toHaveLength(1);
+    expect(normalizedChangelog).not.toContain('\f');
+    expect(normalizedChangelog).not.toMatch(/\\n## \[v/);
+    expect(versions.filter(version => version === packageJson.version)).toHaveLength(1);
     expect(firstVersion).toBe(packageJson.version);
   });
 });

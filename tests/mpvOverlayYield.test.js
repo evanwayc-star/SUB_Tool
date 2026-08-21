@@ -22,20 +22,10 @@
    stub 出來的。這支測試因此測的是【重疊判斷與接線】，不是 CSS 排版；排版要靠真機
    驗證（docs/開發與驗證.md §3 的 CDP，或看得到畫面的截圖）。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetPlayerAdapter } from '../src/media-player-adapter.js';
 
-/* 【spy 掛在 IPC 邊界，不是 adapter 上】——這正是 v6.1.11 修的東西。
-   mpv 視窗是主程序擁有的 OS 層子視窗，要它讓位就得把訊息真的送出去；
-   走 getPlayerAdapter().show() 會在 adapter 是 Html5Adapter 時無聲地掉進 no-op。
-   所以這裡刻意讓 getPlayerAdapter() 回傳一個【show 是 no-op 的】adapter：
-   如果哪天有人把正式碼改回走 adapter，這些案例會立刻紅。 */
+/* spy 掛在 preload mpv bridge 系統邊界；正式碼則經單一 preview runtime 送達。 */
 const show = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
-const adapter = vi.hoisted(() => ({
-  isAvailable: true,
-  show: vi.fn().mockResolvedValue(undefined),   // 故意不是 show：走 adapter 就收不到
-  subSet: vi.fn(), setGuide: vi.fn(),
-}));
-
-vi.mock('../src/media-player-adapter.js', () => ({ getPlayerAdapter: () => adapter }));
 vi.mock('../src/media.js', () => ({ Media: {
   mpvMode: true,
   inGap: () => false,
@@ -76,11 +66,11 @@ function mountMenu({ open, rect }) {
 beforeEach(async () => {
   vi.resetModules();
   show.mockClear();
-  adapter.show.mockClear();
   Object.defineProperty(window, 'subtool', {
     configurable: true,
     value: { isDesktop: true, mpv: { show } },
   });
+  resetPlayerAdapter(window.subtool);
   document.body.innerHTML = `
     <div id="videoWrap"></div><div id="videoSub"></div>
     <div id="modalBg"><div class="modal"><div id="modalTitle"></div>
@@ -134,26 +124,11 @@ describe('工具列下拉選單與 mpv 讓位', () => {
   });
 });
 
-/* v6.1.10 修好了「有沒有算出要讓位」，但讓位的訊息【送錯地方】，使用者實測仍被遮住。
-   ================================================================================
-   當時走的是 getPlayerAdapter().show(!hides)。問題在於 mpv 視窗是主程序擁有的 OS
-   層子視窗，「它在不在」跟「renderer 現在用哪個 adapter 播」是兩件事，而這兩件事
-   會脫鉤：src/media.js 的 _ensureClip 在序列切到原生格式的片段時會
-   setPlayerAdapter(new Html5Adapter(video))，卻沒有把 Media.mpvMode 設回 false
-   （全專案只有 Media.reset() 會設）。於是：
-
-     Media.mpvMode === true   → 通過 _syncMpvPanel 的守衛
-     mpv 視窗仍然開著          → 使用者看得到它蓋住選單
-     getPlayerAdapter()        → Html5Adapter，show() 是基底類別的 no-op
-     → 訊息根本沒送出去，視窗當然不讓位
-
-   對話框（openModal）從來沒出過這個問題，因為它一直是直接送 IPC。 */
 describe('讓位的訊息要真的送到主程序', () => {
-  it('adapter 是 no-op 時仍然要讓位（不可以繞 getPlayerAdapter）', () => {
+  it('active transport 是 HTML5 時仍然能讓原生 OS 視窗讓位', () => {
     mountMenu({ open: true, rect: { left: 320, top: 40, right: 560, bottom: 420 } });
     _syncMpvPanel();
-    expect(show).toHaveBeenCalledWith(false);          // 送到 IPC 了
-    expect(adapter.show).not.toHaveBeenCalled();       // 而且沒有繞 adapter
+    expect(show).toHaveBeenCalledWith(false);
   });
 
   it('沒有 mpv 這條 IPC（網頁版）時不做任何事', async () => {

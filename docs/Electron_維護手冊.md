@@ -10,7 +10,7 @@
 
 | 角色 | 檔案 | 職責 |
 |------|------|------|
-| **Main Process** | `electron/main.js` | 視窗管理、平台原生 ffmpeg/ffprobe、Windows mpv 嵌入、本機檔案 I/O、快取管理 |
+| **Main Process** | `electron/main.js` | 視窗／IPC／平台能力的頂層組裝；不自行持有 ffmpeg execution 或媒體 intake 狀態 |
 | **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
 | **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
 | **拖放檔案准入** | `electron/dropped-file-admission.js` | 一般影音拖放只授權精確來源；`.subtool/.json` 必須走原子可信專案 intake，不得先取得 read／截圖目錄能力 |
@@ -19,6 +19,8 @@
 | **專案檔案 Gateway** | `electron/project-file-gateway.js` | 將讀取→解析→授權→最近清單與准入→寫入→清舊 declaration 封成可執行交易，IPC handler 不得自行拆開步驟 |
 | **Renderer 設定政策** | `electron/config-policy.js` | allowlist renderer 可保存的設定鍵；`recentProjects` 等 main-owned 欄位不可由 renderer 注入 |
 | **媒體 ingest 協調器** | `electron/media-ingest-coordinator.js` | 串流 ingest 的 response/completion 與 queued cache work 的單一序列 lane；取代工作會取消舊流程與其晚到 process |
+| **原生媒體 intake runtime** | `electron/media-intake-runtime.js` | 快取 identity／metadata／清理、fragmented-MP4 HTTP Range registry、batch／stream ingest commit 與 cancel 的單一 owner |
+| **FFmpeg execution** | `electron/ffmpeg-execution.js` | 統一 stderr parser、進度、queue log、錯誤分析與 outcome；交付走 watchdog，可重建快取走 direct child |
 | **匯出工作狀態機** | `electron/export-job-status.js` | **七種狀態與四個分類的唯一定義**（見下方「匯出工作的狀態機」）。零 `require`，純資料＋述詞 |
 | **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集；終態 outcome／待刪除 journal |
 | **完成紀錄** | `electron/queue-history.js` | 已完成交付的稽核紀錄（跨重啟保留、上限 200 筆）。**刻意不走 queue-store**：只存渲染完成卡片需要的欄位，**不含 `payload` 的 `clips`／`audioPlan`**，因此不可能被重新排程執行 |
@@ -338,11 +340,16 @@ Windows 啟動時依序測試 `h264_nvenc` → `h264_qsv` → `h264_amf`；macOS
 MP4／ProRes／WAV 的佇列工作不由 Electron main 直接持有 ffmpeg，而是由
 `export-watchdog.js` 啟動並監護；進度與 stderr 經 IPC 回傳 main。Proxy、ingest、
 波形等可重建的短期快取仍由 main 直接 spawn，以免把持久化工作語意套到快取流程。
+兩條 adapter 都由 `ffmpeg-execution.js` 統一收斂 parser、progress、log、error 與 outcome；
+呼叫端不可自行複製這份協定。
 watchdog 必須在成功取得輸出 lease 後才可啟動 ffmpeg；結束碼非 0、使用者停止、
 main IPC 中斷時都必須先確認 ffmpeg 已關閉，再處理半成品。刪除失敗時保留 lease，
 讓後續工作無法靜默覆寫尚未清乾淨的路徑。
 
 ### 媒體快取
+
+`media-intake-runtime.js` 是快取 identity、metadata、讀寫／清理與 HTTP 串流 job registry
+的唯一 owner；`main.js` 的 cache／ingest IPC 只做 FileAuthority 與 session 組裝。
 
 快取鍵 = `SHA-1(basename + size + 前 1MB 內容)`（不含修改時間，跨電腦可用）
 
@@ -472,7 +479,7 @@ commit 上另行加入 Developer ID、hardened runtime 與 Apple notarization �
 | Mac DMG 異常巨大或含 `.exe` | 檢查 `build.mac.files` 是否仍先排除 `electron/ffmpeg/**`、`electron/mpv/**` 再只加入 `darwin-arm64`；解開 App 實看內容，不能只看 build 成功 |
 | Mac 選完輸出目錄卻被 fileAuthority 拒絕 | 檢查 renderer 送出的 `outPath` 是否把 POSIX 目錄組成 `Output\\file.mp4`。`delivery-list.js` 必須依原生選擇器回傳格式保留 `/` 或 `\\`，不能固定使用 Windows 分隔符；POSIX 根目錄與 Windows 磁碟根目錄都有單元測試 |
 | 快取未命中（每次都重新轉） | 來源檔前 1MB 或大小有變動；可手動刪除 `.subtool_Cache` 強制重建 |
-| `task-progress` 無回報 | `sender` 是否傳入 `runFF`；`safeSend` 是否因視窗已銷毀而跳過 |
+| `task-progress` 無回報 | 呼叫端是否把 progress target 傳入 `ffmpeg-execution`／`media-intake-runtime` session；`safeSend` 是否因視窗已銷毀而跳過 |
 | **完全無法匯出影片**（filterchain 解析失敗） | `fontsdir=` 的 Windows 磁碟機冒號要跳脫**兩層**（`C\\:/`）。單反斜線會讓 ffmpeg 把 `:` 當選項分隔符。注意手動在 shell 跑也會撞到同一個錯，很容易誤判成「shell 吃掉跳脫字元」——用 `spawn`（無 shell 介入）重測才能確認 |
 | 匯出的字幕**字型不對**（變成微軟正黑體） | ASS 的 Fontname 必須是**字型檔內部家族名**（`fontsList()` 回的 `family`），不是資料夾名。libass 配不到會**靜默**退回，沒有錯誤訊息——查 libass 的 `fontselect:` 輸出，退回旗標 1 ＝ 沒配到 |
 | 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |

@@ -221,6 +221,33 @@ describe('stopBuffers', () => {
   });
 });
 
+describe('syncBuffers', () => {
+  it('以 AudioContext 時鐘偵測 drift，並從目前來源時間重啟 buffer', () => {
+    const tr = bufferTrack();
+    const { engine, ctx } = engineWith({ tracks: [tr], playbackRate: 1 });
+    engine.startBuffers(2);
+    const firstNode = ctx._created[0];
+    ctx.currentTime = 11;
+
+    expect(engine.syncBuffers(50)).toBe(true);
+    expect(firstNode.stop).toHaveBeenCalled();
+    expect(firstNode.disconnect).toHaveBeenCalled();
+    expect(ctx._created).toHaveLength(2);
+    expect(ctx._created[1].start).toHaveBeenCalledWith(0, 50);
+  });
+
+  it('序列 gap 內不會為了校正已停住的影片時鐘而重啟 buffer', () => {
+    const tr = bufferTrack();
+    const { engine, ctx } = engineWith({ tracks: [tr] });
+    engine.startBuffers(2);
+    ctx.currentTime = 20;
+
+    expect(engine.syncBuffers(50, { inGap: true })).toBe(false);
+    expect(ctx._created).toHaveLength(1);
+    expect(ctx._created[0].stop).not.toHaveBeenCalled();
+  });
+});
+
 describe('startElements：來源類型決定用哪個時間域（§0.5）', () => {
   it('非序列模式用 localT（來源時間）', () => {
     const tr = elementTrack();

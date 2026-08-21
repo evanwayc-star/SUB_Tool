@@ -18,7 +18,7 @@ const MPV_TIMECODE_RE = /^\d{1,6}:[0-5]\d:[0-5]\d[:;]\d{2,3}$/;
 
 function createMpvHost(deps) {
   const {
-    BrowserWindow, spawn, createConnection, fs, path, url,
+    BrowserWindow, spawn, createConnection, fs, path, url, allowInternalDocument,
     getMainWindow, supported, findExecutable, ensureTmp, tmpDir, tempFiles,
     guideHtml, fontsDir, onEvent, log = () => {},
     now = () => Date.now(), delay = ms => new Promise(resolve => setTimeout(resolve, ms)),
@@ -292,7 +292,7 @@ function createMpvHost(deps) {
       resizable: false, movable: false, minimizable: false, maximizable: false,
       fullscreenable: false, focusable: false,
       webPreferences: {
-        offscreen: false, backgroundThrottling: false, webSecurity: false,
+        offscreen: false, backgroundThrottling: false, webSecurity: true,
       },
     });
     /* guide 只有原生畫面上的視覺職責；所有 pointer 都穿透到主 renderer 的
@@ -305,6 +305,7 @@ function createMpvHost(deps) {
     ensureTmp?.();
     const guidePath = path.join(tmpDir, 'mpv-guide.html');
     fs.writeFileSync(guidePath, guideHtml, 'utf8');
+    allowInternalDocument?.(guidePath);
     await guideWin.loadURL(url.pathToFileURL(guidePath).href);
   }
 

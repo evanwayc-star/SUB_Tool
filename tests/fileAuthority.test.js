@@ -157,16 +157,21 @@ describe('FileAuthority', () => {
 
   it('主程序的 file URL 與兩種截圖寫入都委派給同一個權威，而不是查詢時擴權', () => {
     const main = fs.readFileSync(path.join(ROOT, 'electron', 'main.js'), 'utf8');
+    const localResource = fs.readFileSync(path.join(ROOT, 'electron', 'local-resource.js'), 'utf8');
+    const mediaIntakeRuntime = fs.readFileSync(path.join(ROOT, 'electron', 'media-intake-runtime.js'), 'utf8');
     const preload = fs.readFileSync(path.join(ROOT, 'electron', 'preload.js'), 'utf8');
     const media = fs.readFileSync(path.join(ROOT, 'src', 'media.js'), 'utf8');
     const subio = fs.readFileSync(path.join(ROOT, 'src', 'subio.js'), 'utf8');
 
-    expect(main).toMatch(/ipcMain\.handle\('fs:fileURL',[\s\S]{0,180}fileAuthority\.canExposeFileURL/);
+    expect(main).toMatch(/ipcMain\.handle\('fs:fileURL',[\s\S]{0,180}localResourceServer\.urlFor/);
     expect(main).not.toMatch(/ipcMain\.handle\('fs:fileURL',[\s\S]{0,180}allowFileDir/);
+    expect(localResource).toMatch(/urlFor\(file\)[\s\S]{0,180}fileAuthority\.canExposeFileURL/);
     expect(main).toMatch(/ipcMain\.handle\('fs:writeScreenshot',[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);
     expect(main).toMatch(/ipcMain\.handle\('mpv:screenshot',[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);
     expect(main).toMatch(/ipcMain\.handle\('mpv:launch',[\s\S]{0,180}requireReadablePath\('mpv:launch', src\)/);
-    expect(main).toMatch(/cache clear source blocked/);
+    expect(main).toMatch(/cache:clearAll[\s\S]{0,180}mediaIntakeRuntime\.clearAll/);
+    expect(mediaIntakeRuntime).toMatch(/currentSrc && fileAuthority\.canRead\(currentSrc\)/);
+    expect(mediaIntakeRuntime).toMatch(/cache clear source blocked/);
     expect(main).toMatch(/QueueManager\.assertJobCapabilities\(\{ payload: authorizationPayload \}\)/);
     expect(main).toMatch(/fileAuthority\.canWriteDelivery/);
     expect(main).toMatch(/app:openPath[\s\S]{0,180}requirePermittedShellOpenPath/);

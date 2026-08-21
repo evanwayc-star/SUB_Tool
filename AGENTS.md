@@ -154,13 +154,18 @@ font/<資料夾名>/ 自備字型；資料夾名＝UI 顯示名
 ```bash
 npm run lint && npm test && npm run build   # ① 三關全綠才繼續
 #                                            ② 桌面版真機驗證
-# ③ 只改 package.json 與 package-lock.json 的版號（見 §0.1）
-# ④ docs/版本變更紀錄.md 在導言分隔線下、現有最新版本前新增一節
+# ③ 將本版「為什麼／怎麼驗」寫入暫存 notes 檔，再執行下列 transaction：
+npm run release:prepare -- --version X.Y.Z --date YYYY-MM-DD --notes <notes檔路徑>
+#    → 只更新兩份 manifest 版號，並在 changelog 導言後插入單一版本區段
 npm run dist                                 # ⑤ → release/SUB Tool Setup X.Y.Z.exe
 # ⑥ 實際安裝並確認 app 內顯示的版號
 git add -A && git commit && git push origin main
 # ⑦ 建立 GitHub Release，附上同一支 .exe
 ```
+
+`release:prepare` 是版號與 changelog 的唯一 mutation 入口；它會從 Git 取得 production source
+evidence、拒絕當前版號重複／缺少驗證段落，任一檔案寫入失敗時回復整個 transaction。完整參數與
+發版驗收仍以 [`docs/開發與驗證.md`](docs/開發與驗證.md#2-建置與發版流程) 為單一細節來源。
 
 上面是 Windows 正式發版流程。Apple Silicon 的本機 unsigned 驗證使用
 `npm run dist:mac:test`；它**不是正式發布**，不可直接上傳 Release。Mac 對外發布還必須完成

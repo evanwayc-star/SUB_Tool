@@ -8,6 +8,7 @@
 import { $ } from './dom.js';
 import { Media } from './media.js';
 import { emit } from './events.js';
+import { getNativePreviewRuntime } from './media-player-adapter.js';
 
 /* 狀態列 / toast / modal */
 // X6：狀態點除顏色外提供文字等價（aria-label），供報讀器與非顏色辨識
@@ -145,24 +146,8 @@ $('modalTitle').addEventListener('pointermove', e=>{
 });
 $('modalTitle').addEventListener('pointerup', e=>{ _mDragging=false; $('modalTitle').releasePointerCapture(e.pointerId); });
 
-/* ── mpv 的 OS 層視窗要不要顯示 ─────────────────────────────────────────────
-   【一律走這支，不要走 getPlayerAdapter().show()】
-
-   mpv 視窗是【主程序擁有的 OS 層子視窗】。「它在不在」跟「renderer 現在用哪個
-   adapter 在播」是兩件事，而這兩件事會脫鉤：
-
-     src/media.js 的 _ensureClip 在序列切到原生格式的片段時會
-     `setPlayerAdapter(new Html5Adapter(video))`，卻【沒有】把 Media.mpvMode 設回
-     false（全專案只有 Media.reset() 會設 false）。於是 mpvMode 仍是 true、
-     mpv 視窗仍然開著，但 getPlayerAdapter() 已經是 Html5Adapter——
-     它的 show() 是基底類別的 no-op，訊息根本沒送出去，視窗當然不會讓位。
-
-   真實事故（v6.1.10）：工具列選單接上了讓位機制、單元測試全綠、CDP 也證實
-   _syncMpvPanel 確實走到了新分支並算出「重疊」，使用者實測卻還是
-   「被播放視窗遮住」。差別就在 openModal 從一開始就是【直接送 IPC】
-   （所以對話框從來沒出過這個問題），而 _syncMpvPanel 走的是 adapter。 */
 function setMpvWindowVisible(v){
-  window.subtool?.mpv?.show(!!v)?.catch?.(()=>{});
+  getNativePreviewRuntime().setNativeVisible(!!v).catch(()=>{});
 }
 
 /* ── 工具列的下拉選單（.menu / .menu.open .items）────────────────────────────

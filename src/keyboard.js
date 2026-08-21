@@ -129,10 +129,8 @@ async function setIn() {
   let c = State.cues.find(x => x.id === State.selectedId);
   if (!c) {
     const tk = State.tracks.length === 0 ? 0 : Math.min(State.tracks.length - 1, Math.max(0, State.listTrack));
-    if (trackLocked(tk, '在此軌新增字幕')) return;
-    c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', tk);
-    selectCue(c.id);
-    recordHistory('新增字幕(I)');
+    c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', tk, { historyLabel:'新增字幕(I)' });
+    if(!c) return;
     setStatus('已新增字幕，起點 ' + fmtClock(t), 'ok');
     return;
   }

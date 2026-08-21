@@ -156,35 +156,45 @@ export function sweepContainedCues(changedCues) {
   return false;
 }
 
-export function addCue(start, end, text, track, selectCueCb){
-  const added = ensureTrackCount((track||0)+1);
+export function addCue(start, end, text, track, { historyLabel = '新增字幕' } = {}){
+  const targetTrack = track || 0;
+  if (trackLocked(targetTrack, '在此軌新增字幕')) return null;
+  const added = ensureTrackCount(targetTrack + 1);
   /* 'render:timeline' 沒有任何訂閱者（註解說「using general timeline event」，
      但通用的那個叫 'timeline:invalidate'，app.js 有訂閱→drawTimeline）。
      新增軌道後不重繪時間軸，新軌的軌列不會出現。改用既有名稱，
      不再替 drawTimeline 增加第三個別名。 */
   if(added){ emit('timeline:invalidate'); emit('render:listTrackSel'); }
-  const c={id:newId(),start:start||0,end:end!=null?end:(start||0),text:text||'',track:track||0,timed:(start!=null&&end!=null)};
-  State.cues.push(c); sortCues(); emit('render:all'); 
-  if (selectCueCb) selectCueCb(c.id); 
+  const c={id:newId(),start:start||0,end:end!=null?end:(start||0),text:text||'',track:targetTrack,timed:(start!=null&&end!=null)};
+  State.cues.push(c);
+  sortCues();
+  setSelection({ kind:'sub', ids:[c.id] });
+  State.activeEdge='start';
+  emit('render:all');
+  emit('render:selection');
+  recordHistory(historyLabel);
   return c;
 }
 
-export function addCueRelative(dir, selectCueCb){
+export function addCueRelative(dir){
   const sel=State.cues.find(c=>c.id===State.selectedId);
+  const historyLabel=dir>0?'下方新增字幕':'上方新增字幕';
+  if(sel && cueTrackLocked(sel, '新增字幕')) return null;
   if(sel && sel.timed===false){
     const c={id:newId(),start:sel.start,end:sel.end,text:'',track:sel.track||0,timed:false};
     State.cues.splice(State.cues.indexOf(sel)+(dir>0?1:0),0,c);
-    emit('render:all'); 
-    if (selectCueCb) selectCueCb(c.id); 
-    recordHistory('新增空白字幕');
+    setSelection({ kind:'sub', ids:[c.id] });
+    State.activeEdge='start';
+    emit('render:all');
+    emit('render:selection');
+    recordHistory(historyLabel);
     return c;
   }
   const tk=sel?(sel.track||0):0;
   let start,end;
   if(sel){ if(dir>0){ start=sel.end; end=snapTimeToFrame(sel.end+2, State.fps, State.dropFrame); } else { end=sel.start; start=Math.max(0,snapTimeToFrame(sel.start-2, State.fps, State.dropFrame)); } }
   else { start=snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame); end=snapTimeToFrame(start+2, State.fps, State.dropFrame); }
-  const c=addCue(start,end,'',tk, selectCueCb); recordHistory(dir>0?'下方新增字幕':'上方新增字幕');
-  return c;
+  return addCue(start,end,'',tk,{ historyLabel });
 }
 
 export function _doDeleteCues(ids){
@@ -293,6 +303,147 @@ export function sortCues() {
   }
 }
 
+function finalizeCueTimeEdit(cue, edge) {
+  const track = cue.track || 0;
+  sweepContainedCues([cue]);
+
+  if (edge === 'start' || edge === 'both') {
+    const index = State.cues.indexOf(cue);
+    let nextIndex = index + 1;
+    let offset = 0.001;
+    while (index >= 0 && nextIndex < State.cues.length) {
+      const nextCue = State.cues[nextIndex];
+      if ((nextCue.track || 0) !== track) { nextIndex += 1; continue; }
+      if (nextCue.timed !== false) break;
+      nextCue.start = cue.start + offset;
+      nextCue.end = nextCue.start;
+      offset += 0.001;
+      nextIndex += 1;
+    }
+  }
+
+  sortCues();
+  setSelection({ kind: 'sub', ids: [cue.id] });
+  State.activeEdge = edge;
+  emit('render:all');
+  emit('render:selection');
+}
+
+/* 一般字幕編輯的單一 public seam。UI adapter 只提供「要改什麼」；
+   鎖軌、時間不變量、選取、History 與 invalidation 都在同一筆交易內完成。 */
+export function editCue({ cueId, operation, value, baseline }) {
+  const cue = State.cues.find(item => item.id === cueId);
+  if (!cue) return { ok: false, reason: 'cue-not-found' };
+
+  if (operation === 'text-preview' || operation === 'text') {
+    if (cueTrackLocked(cue, '編輯字幕')) return { ok: false, reason: 'track-locked' };
+    const nextText = String(value ?? '');
+    const changed = operation === 'text'
+      ? nextText !== String(baseline ?? cue.text ?? '')
+      : nextText !== String(cue.text ?? '');
+    cue.text = nextText;
+    if (!changed) return { ok: true, changed: false, cue };
+    if (operation === 'text-preview') {
+      emit('render:videoSub');
+      emit('mpv:refreshSubs');
+    } else {
+      emit('render:all');
+      recordHistory('編輯字幕文字' + cueSuffix(cue));
+    }
+    return { ok: true, changed: true, cue };
+  }
+
+  if (operation === 'text-style') {
+    if (cueTrackLocked(cue, '編輯字幕')) return { ok: false, reason: 'track-locked' };
+    const nextText = String(value?.text ?? '');
+    const nextStyle = value?.style && Object.keys(value.style).length
+      ? structuredClone(value.style)
+      : null;
+    const originalText = String(baseline?.text ?? cue.text ?? '');
+    const originalStyle = baseline?.style || null;
+    const textChanged = nextText !== originalText;
+    const styleChanged = JSON.stringify(nextStyle) !== JSON.stringify(originalStyle);
+    cue.text = nextText;
+    if (nextStyle) cue.style = nextStyle;
+    else delete cue.style;
+    if (!textChanged && !styleChanged) return { ok: true, changed: false, cue };
+    emit('render:all');
+    recordHistory('編輯字幕' + (styleChanged ? '（含樣式覆蓋）' : '文字') + cueSuffix(cue));
+    return { ok: true, changed: true, cue, styleChanged };
+  }
+
+  if (operation === 'start' || operation === 'end') {
+    const action = operation === 'start' ? '修改字幕起點' : '修改字幕終點';
+    if (cueTrackLocked(cue, action)) return { ok: false, reason: 'track-locked' };
+    const before = { start: cue.start, end: cue.end, timed: cue.timed !== false };
+    let edge = operation;
+    if (value === null) {
+      cue.timed = false;
+      edge = 'both';
+    } else if (operation === 'start') {
+      cue.start = Math.max(0, Number(value) || 0);
+      if (cue.timed === false) {
+        cue.end = cue.start + 1;
+        cue.timed = true;
+      } else {
+        cue.start = Math.min(cue.start, cue.end - 0.001);
+      }
+    } else {
+      cue.end = Math.max((cue.start || 0) + 0.001, Number(value) || 0);
+      if (cue.timed === false) {
+        cue.start = Math.max(0, cue.end - 1);
+        cue.timed = true;
+        edge = 'both';
+      }
+    }
+    const changed = cue.start !== before.start || cue.end !== before.end || (cue.timed !== false) !== before.timed;
+    if (!changed) return { ok: true, changed: false, cue };
+    finalizeCueTimeEdit(cue, edge);
+    const label = value === null ? '清除時間碼' : operation === 'start' ? '修改起點' : '修改終點';
+    recordHistory(label + cueSuffix(cue));
+    return { ok: true, changed: true, cue };
+  }
+
+  return { ok: false, reason: 'unsupported-operation' };
+}
+
+export function splitCue({ cueId, textBefore, textAfter, timelineTime }) {
+  const cue = State.cues.find(c => c.id === cueId);
+  if (!cue) return { ok: false, reason: 'cue-not-found' };
+  if (cueTrackLocked(cue, '拆分字幕')) return { ok: false, reason: 'track-locked' };
+  if (!String(textBefore ?? '').trim() || !String(textAfter ?? '').trim()) {
+    showToast('不能在句首或句尾切分，以免產生空白字幕');
+    return { ok: false, reason: 'blank-side' };
+  }
+
+  const isTimed = cue.timed !== false;
+  if (isTimed && (timelineTime < cue.start + 0.05 || timelineTime > cue.end - 0.05)) {
+    showToast('切分點距離起訖太近，或是超出了字幕範圍');
+    return { ok: false, reason: 'split-time-out-of-range' };
+  }
+  const originalEnd = cue.end;
+  cue.text = textBefore;
+  if (isTimed) cue.end = timelineTime;
+
+  const newCue = {
+    id: newId(),
+    start: isTimed ? timelineTime : 0,
+    end: isTimed ? originalEnd : 0,
+    text: textAfter,
+    track: cue.track || 0,
+    timed: isTimed,
+  };
+  const index = State.cues.indexOf(cue);
+  State.cues.splice(index + 1, 0, newCue);
+  sortCues();
+  setSelection({ kind: 'sub', ids: [newCue.id] });
+  State.activeEdge = 'start';
+  emit('render:all');
+  emit('render:selection');
+  recordHistory('拆分字幕');
+  return { ok: true, cue: newCue };
+}
+
 export function copyCues(){
   const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
   if(!ids.length){ showToast('沒有選取的字幕'); return; }
@@ -300,7 +451,7 @@ export function copyCues(){
   showToast(`已複製 ${State.clipboard.length} 條字幕`);
 }
 
-export function pasteCues(selectCueCb){
+export function pasteCues(){
   if(!State.clipboard?.length){ showToast('剪貼簿是空的'); return; }
   const timedClip=State.clipboard.filter(c=>c.timed!==false);
   const minStart=timedClip.length ? Math.min(...timedClip.map(c=>c.start)) : 0;

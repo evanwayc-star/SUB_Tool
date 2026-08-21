@@ -7,17 +7,18 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
 
 // S3：CSP 縱深防禦。只在「打包」時注入（dev 的 HMR 需要 eval/ws，故不套用），
 // 內嵌 script/style 需 'unsafe-inline'；ffmpeg.wasm（web 版）需 'wasm-unsafe-eval'
-// 與 jsdelivr/unpkg CDN（script/connect/worker）；桌面/串流媒體需 file:、blob:、127.0.0.1。
+// 與 jsdelivr/unpkg CDN（script/connect/worker）；桌面本機資源只走主程序核發的
+// subtool-local: capability URL，不再開放 renderer 直接讀 literal file:。
 const CSP = [
   "default-src 'self'",
   "base-uri 'self'",
   "object-src 'none'",
   "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: file:",
-  "font-src 'self' data:",
-  "media-src 'self' blob: data: file: http://127.0.0.1:* http://localhost:*",
-  "connect-src 'self' blob: data: https://cdn.jsdelivr.net https://unpkg.com http://127.0.0.1:* http://localhost:*",
+  "img-src 'self' data: blob: subtool-local:",
+  "font-src 'self' data: subtool-local:",
+  "media-src 'self' blob: data: subtool-local: http://127.0.0.1:* http://localhost:*",
+  "connect-src 'self' blob: data: subtool-local: https://cdn.jsdelivr.net https://unpkg.com http://127.0.0.1:* http://localhost:*",
   "worker-src 'self' blob:",
 ].join('; ');
 function injectCSP() {

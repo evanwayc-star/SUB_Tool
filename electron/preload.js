@@ -38,9 +38,6 @@ contextBridge.exposeInMainWorld('subtool', {
   openMedia:    () => ipcRenderer.invoke('dialog:openMedia'),
   openAudio:    () => ipcRenderer.invoke('dialog:openAudio'),
   openProject:  () => ipcRenderer.invoke('dialog:openProject'),
-  /* 主行程被擋住了多久（ms）。用來分辨「檔案對話框慢」是我們擋住主行程，
-     還是 Windows 的對話框自己慢——兩者症狀一樣、修法完全不同。 */
-  mainLoopLag:  (reset = true) => ipcRenderer.invoke('app:mainLoopLag', reset),
   /* 最近開啟：清單由主程序持有並持久化。開啟時只送【索引】——
      renderer 給不了路徑，所以沒有「叫主程序讀任意檔案」的路。 */
   recentProjects:   () => ipcRenderer.invoke('project:recentList'),
@@ -62,6 +59,7 @@ contextBridge.exposeInMainWorld('subtool', {
   cleanupAudio: (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:cleanup', { path: p }); },
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
+  releaseStream: (streamLeaseId) => ipcRenderer.invoke('ffmpeg:releaseStream', streamLeaseId),
   readB64:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:readB64', p); },
   reserveScreenshotPath: (directory, suffix = '') => {
     if(typeof directory!=='string') throw new TypeError('directory must be a string');

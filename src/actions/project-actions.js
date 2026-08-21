@@ -11,9 +11,10 @@ import { renderNotes } from '../notes.js';
 import { drawTimeline } from '../timeline.js';
 import { setStatus, openModal, closeModal } from '../ui.js';
 import { pickMediaFiles, importDesktopMediaFiles, importBrowserMediaFiles } from './media-ingest-actions.js';
+import { toggleSubMode } from './subtitle-actions.js';
 
-export async function openMedia() {
-  const relink = Project.pendingMediaRelink?.() || null;
+export async function openMedia({ relink: requestedRelink = null } = {}) {
+  const relink = requestedRelink || Project.pendingMediaRelink?.() || null;
   if (relink) {
     await Project.continueLoad(relink.generation, async isCurrent => {
       const picked = IS_DESKTOP ? await DESK.openMedia() : await pickMediaFiles($('fileMedia'));
@@ -44,7 +45,7 @@ export function startNewProject() {
          State.cues = []; State.notes = [];
          clearSelection();
          State.listTrack = 0; State.tracks = []; ensureTrackCount(0);
-         if (State.subMode) emit('action', 'sub-mode');
+         if (State.subMode) toggleSubMode();
          resetProject(); setFirstLoad(true);
          video.pause(); video.removeAttribute('src'); video.load();
          State.mediaName = ''; State.mediaPath = ''; State.mediaSize = 0;

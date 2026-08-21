@@ -1,5 +1,5 @@
 import { $, sublist } from '../dom.js';
-import { State, newId, cueSuffix } from '../state.js';
+import { State, cueSuffix } from '../state.js';
 import { effStyle, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot } from '../substyle.js';
 import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from '../style-assignment.js';
 import { applyCueStylePatch, applyTrackStylePlan } from '../actions/style-actions.js';
@@ -10,7 +10,7 @@ import { escapeHTML, clamp } from '../util.js';
 import { Media } from '../media.js';
 import { emit } from '../events.js';
 import { ensureProjectSaved } from '../project.js';
-import { sortCues, selectCue } from '../subtitles.js';
+import { editCue, splitCue } from '../subtitle-model.js';
 import { showCtx, hideCtx } from '../menus.js';
 
 let renderAll, renderVideoSub, refreshMpvSubs, drawTimeline, refreshStyleSummaries, initPresetLibrary, styleChanged;
@@ -106,7 +106,13 @@ async function startInlineEdit(block,c){
   ed.style.width=Math.max(90,r.width)+'px'; ed.style.minHeight=r.height+'px';
   $('tlLayer').appendChild(ed); ed.focus(); ed.select();
   let done=false; const orig=c.text||'';
-  const commit=(save)=>{ if(done)return; done=true; if(save)c.text=ed.value; ed.remove(); renderAll(); renderVideoSub(); if(save&&(c.text||'')!==orig)recordHistory('編輯字幕文字'+cueSuffix(c)); };
+  const commit=(save)=>{
+    if(done)return;
+    done=true;
+    const value=ed.value;
+    ed.remove();
+    if(save) editCue({ cueId:c.id, operation:'text', value, baseline:orig });
+  };
   ed.addEventListener('keydown',ev=>{ ev.stopPropagation();
     if(ev.key==='Enter'&&!ev.shiftKey){ ev.preventDefault(); commit(true); }
     else if(ev.key==='Escape'){ ev.preventDefault(); commit(false); } });
@@ -178,7 +184,7 @@ async function openCueEditModal(c){
     //    座標／角度是在預覽窗拖出來的，這裡沒有對應欄位，不保留的話「開一下視窗按確定」
     //    就會把拖好的位置與角度默默清掉（angle 自 v4.27 起即有此問題）。
     //    使用者若要清掉它們，走「清除全部覆蓋」（見下方 covClear，會連同這些一起清）。
-    const style={}; const origStyle=JSON.stringify(c.style||null);
+    const style={}; const origStyle=c.style?structuredClone(c.style):null;
     const managed=new Set(COV_FIELDS.map(f=>f[0]));
     if(c.style && !_covCleared) for(const k of CUE_STYLE_KEYS){ if(!managed.has(k) && c.style[k]!=null) style[k]=c.style[k]; }
     for(const [k,,type] of COV_FIELDS){
@@ -186,10 +192,13 @@ async function openCueEditModal(c){
       if(!on||!on.checked||!vi) continue;
       style[k]= type==='num' ? +vi.value : type==='bool' ? (vi.value==='1') : vi.value;
     }
-    if(Object.keys(style).length) c.style=style; else delete c.style;
-    const styleChanged=JSON.stringify(c.style||null)!==origStyle;
-    c.text=val; closeModal(); renderAll(); renderVideoSub(); if(styleChanged) refreshMpvSubs();
-    if(val!==orig||styleChanged) recordHistory('編輯字幕'+(styleChanged?'（含樣式覆蓋）':'文字')+cueSuffix(c));
+    const result=editCue({
+      cueId:c.id,
+      operation:'text-style',
+      value:{ text:val, style:Object.keys(style).length?style:null },
+      baseline:{ text:orig, style:origStyle },
+    });
+    if(result.ok) closeModal({committed:true});
   };
   openModal('修改字幕文字',
     `<div style="font-size:12px;color:var(--text-faint);margin-bottom:10px">${escapeHTML(trackName)} ｜ ${tc}</div>`+
@@ -236,19 +245,15 @@ async function openCueEditModal(c){
         }
         const textBefore=full.slice(0,markerPos);
         const textAfter=full.slice(markerPos);
-        if (!textBefore.trim() || !textAfter.trim()) { showToast('不能在句首或句尾切分，以免產生空白字幕'); return; }
-        const origEnd=c.end;
-        const isTimed=c.timed!==false;
-        if(isTimed){ const pt=Media.displayTime(); if(pt < c.start + 0.05 || pt > c.end - 0.05){ showToast('切分點距離起訖太近，或是超出了字幕範圍'); return; } }
-        let splitTime=0;
-        if(isTimed){ splitTime=Media.displayTime(); c.end=splitTime; }
-        c.text=textBefore;
-        const nc={id:newId(),start:isTimed?splitTime:0,end:isTimed?origEnd:0,
-          text:textAfter,track:c.track||0,timed:isTimed};
-        const cidx=State.cues.indexOf(c);
-        if(cidx>=0)State.cues.splice(cidx+1,0,nc); else State.cues.push(nc);
-        closeModal(); sortCues(); renderAll(); recordHistory('拆分字幕');
-        selectCue(nc.id,{seek:false});
+        const result=splitCue({
+          cueId:c.id,
+          textBefore,
+          textAfter,
+          timelineTime:Media.displayTime(),
+        });
+        if(!result.ok)return;
+        const nc=result.cue;
+        closeModal({committed:true});
         setTimeout(()=>{
           const nr=sublist.querySelector(`.sub-row[data-id="${nc.id}"]`);
           if(nr)nr.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));

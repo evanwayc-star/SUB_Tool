@@ -9,10 +9,6 @@ export class MediaAudioRouter {
     this.video = video;
     this.state = stateObj;
     this._audioEngineBound = false;
-    
-    // Internal timing state for drift correction
-    this.startCtxTime = 0;
-    this.startMediaTime = 0;
   }
 
   /* 把播放狀態接給 AudioEngine（只做一次）。 */
@@ -55,11 +51,7 @@ export class MediaAudioRouter {
   }
 
   startBufferSources(offset) {
-    const res = AudioEngine.startBuffers(offset);
-    if (res) {
-      this.startCtxTime = res.startCtxTime;
-      this.startMediaTime = res.startMediaTime;
-    }
+    AudioEngine.startBuffers(offset);
   }
 
   stopBufferSources() {
@@ -84,12 +76,11 @@ export class MediaAudioRouter {
   /* 從 app.js 提取過來的 drift 修正邏輯 */
   syncDrift() {
     // buffer 音軌 drift 校正（序列間隙中不校正——影片已暫停，重啟音源會誤出聲）
-    if(this.media.ctx && !this.media.inGap() && this.media.tracks.some(t=>t.kind==='buffer'&&!t._srcHidden)){
-      const expect = this.startMediaTime + (this.media.ctx.currentTime - this.startCtxTime) * (this.video.playbackRate||1);
-      if(Math.abs(expect - this.video.currentTime) > 0.25){ 
-        this.stopBufferSources(); 
-        this.startBufferSources(this.video.currentTime); 
-      }
+    if(this.media.tracks.some(t=>t.kind==='buffer'&&!t._srcHidden)){
+      // vTime() 是播放器公開的來源時鐘：HTML5 時讀 video.currentTime，mpv 時讀
+      // native time-pos。不可固定讀隱藏的 HTML video，否則 mpv 播放時它停在 0，
+      // 每次 drift tick 都會把正常前進的 buffer 誤判成漂移並重啟。
+      AudioEngine.syncBuffers(this.media.vTime(), { inGap: this.media.inGap() });
     }
     // element 音軌 drift 校正（多軌同步）：ext-* 參考音對「時間軸時間」；clip 綁定音軌對【各自音源】的來源時間
     for(const tr of this.media.tracks){ 

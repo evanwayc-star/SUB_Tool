@@ -35,7 +35,7 @@ import { MediaAudioRouter } from './media-audio-router.js';
 import { AudioPipeline } from './audio-pipeline.js';
 import { destroyScrubber } from './scrub-scheduler.js';
 import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
-import { getPlayerAdapter, setPlayerAdapter, Html5Adapter, MpvAdapter } from './media-player-adapter.js';
+import { activateHtml5Transport, getPlayerAdapter } from './media-player-adapter.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
@@ -134,15 +134,12 @@ const Media = {
   seqTick() { this.initSyncEngine(); return this._syncEngine.seqTick(); },
   seqContinueAtEnd() { this.initSyncEngine(); return this._syncEngine.seqContinueAtEnd(); },
   _syncSeqElements(t) { this.initSyncEngine(); return this._syncEngine._syncSeqElements(t); },
-  _syncExternalElementActivity(t) { this.initSyncEngine(); return this._syncEngine._syncExternalElementActivity(t); },
 
   // AudioContext 與引擎封裝在 AudioEngine 中，這裡不再維護 ctx 等細節。
   master:null,         // master gain
   videoSrcNode:null,   // MediaElementSource (原生單軌)
   tracks:[],           // {id,name,kind:'native'|'buffer',buffer?,gain,muted,solo,volume,srcNode?,offset}
   playing:false,
-  startCtxTime:0,      // ctx.currentTime 對應播放起點
-  startMediaTime:0,    // 對應 media 時間
   usingWebAudio:false, // 是否用 Web Audio 混音（多軌）
   ffmpeg:null, ffmpegLoading:null,
   // ffmpeg.wasm exposes one worker, logger, and virtual filesystem.  Every
@@ -150,16 +147,12 @@ const Media = {
   // can overwrite a current transcode's in.media or logger mid-run.
   _webFfmpegTail:Promise.resolve(),
   objectURLs:[],
-  mpvMode:false, _mpvTime:0, _mpvDuration:0, _bgVersion:0,
-  /* mpv 畫面接管旗標：true＝WebCodecs 已接管、mpv 視窗讓位。
-     這個旗標曾被搬到 WebCodecsAdapter.compositing，但那個 wrapper 在生產環境
-     【從來沒有被裝上】——9 個 setPlayerAdapter() 呼叫點全部裝裸 adapter，
-     唯一會產生 wrapper 的 resetPlayerAdapter() 只有測試在呼叫。
-     結果 setCompositing() 是 undefined、呼叫時丟 TypeError 被 try/catch 吞掉，
-     而 mpvPresenting() 讀 `!undefined` → mpv 模式下【永遠回 true】。
-     旗標的家在這裡，公開入口是 webCodecsTakeover() / setWebCodecsTakeover()。 */
+  get mpvMode(){ return getPlayerAdapter().mode === 'mpv'; },
+  _mpvTime:0, _mpvDuration:0, _bgVersion:0,
+  /* mpv 畫面接管旗標：true＝WebCodecs 已接管、mpv 視窗讓位。 */
   _wcTakeover:false,
   _intakeSession:new MediaIntakeSession(),
+  _activeStreamLeaseId:null,
   _assetEpoch:new ResetEpoch(),
   // Pending project restoration and History can touch the same sequence while
   // filesystem work is still in flight. This monotonic generation makes that
@@ -210,9 +203,14 @@ const Media = {
   get externalAudioSources(){ return this.externalAudio.assets; },
   getExternalAudioSource(id){ return this.externalAudio.find(id); },
   set externalAudioSources(list){ this.externalAudio.assets=Array.isArray(list)?list:[]; },
-  // 播放中只在外部音訊跨越片段邊界時重新同步，避免每幀重設 Audio.currentTime。
-  _externalActivityKey:null,
-
+  _setActiveStreamLease(streamLeaseId){
+    const next=typeof streamLeaseId==='string'&&streamLeaseId?streamLeaseId:null;
+    const previous=this._activeStreamLeaseId;
+    this._activeStreamLeaseId=next;
+    if(previous&&previous!==next&&DESK?.releaseStream){
+      Promise.resolve(DESK.releaseStream(previous)).catch(()=>{});
+    }
+  },
   /* 由 ffprobe 的 audio[] 推算出每個聲道的標籤。展開順序**必須**與 main.js ingest
      一致（它依同一順序抽出 ch_01.m4a、ch_02.m4a…），規則在 channel-layout.js，
      由 tests/channelLayoutContract.test.js 鎖住兩邊不漂掉。 */
@@ -847,41 +845,6 @@ const Media = {
 
   /* --- mpv 即時開啟路徑（偵測到 mpv.exe 時使用，無需等 proxy 轉檔） --- */
   _mpvRect(){ const vw=$('videoWrap'); const r=vw.getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height}; },
-  _startMpvBoundsFeeder(){
-    /* 矩形沒變就不要送。
-
-       下面那個 2000ms 的計時器是面板拖移的安全網，但它【無條件】送出同一個矩形，
-       於是只要 mpv 在跑，主行程就每 2 秒把 mpv 與 guide 兩個 transparent 子視窗
-       各重設一次位置。那在 Windows 上是 layered window 的 SetWindowPos，會強制
-       DWM 重新合成；而原生檔案對話框的訊息迴圈就在主行程的 UI 執行緒上，
-       於是「開啟檔案總管」與「在對話框裡切換資料夾」每 2 秒被打斷一次。
-
-       主行程側另有一道相同的守衛（mpvHost.setBounds 比對絕對座標），因為視窗移動時
-       矩形不變但絕對位置會變——那一層才是正確性的保證，這裡只是省掉沒必要的 IPC。 */
-    /* 先停掉舊的。原本沒有這一行：重開素材時 media-loader 會再呼叫一次本函式，
-       舊的 setInterval 與 ResizeObserver 沒被清掉就會累積，每個各自送自己的 bounds。
-       現在 last 是每個 feeder 各自的閉包，殘留的舊 feeder 會拿自己的舊 last 判斷，
-       更容易送出多餘的 IPC——所以這一行同時是效能與正確性的保險。 */
-    this._stopMpvBoundsFeeder();
-    let last=null;
-    const send=()=>{
-      if(!this.mpvMode||!getPlayerAdapter())return;
-      const r=this._mpvRect();
-      if(last && last.x===r.x && last.y===r.y && last.w===r.w && last.h===r.h) return;
-      last=r;
-      getPlayerAdapter().setBounds(r).catch(()=>{});
-    };
-    this._mpvBoundsSend=send;
-    try{ this._mpvRO=new ResizeObserver(send); this._mpvRO.observe($('videoWrap')); }catch(e){}
-    window.addEventListener('resize',send);
-    this._mpvBoundsTimer=setInterval(send,2000); // Fix #17：安全網（面板拖移），降至 2000ms 減少 IPC 呼叫
-  },
-  _stopMpvBoundsFeeder(){
-    if(this._mpvRO){ try{this._mpvRO.disconnect();}catch(e){} this._mpvRO=null; }
-    if(this._mpvBoundsSend){ window.removeEventListener('resize',this._mpvBoundsSend); this._mpvBoundsSend=null; }
-    if(this._mpvBoundsTimer){ clearInterval(this._mpvBoundsTimer); this._mpvBoundsTimer=null; }
-  },
-
   async _bgAudioIngest(p, audio, dur, primary=Seq.primary()){
     const myVer=this._bgVersion;
     // Background work belongs to the exact mother-source object that started
@@ -1123,7 +1086,7 @@ const Media = {
       if(!owns()) return false;
       const mp4=ff.FS('readFile','prev.mp4');
       const url=URL.createObjectURL(new Blob([mp4.buffer],{type:'video/mp4'})); this.objectURLs.push(url);
-      video.src=url; video.muted=true; setPlayerAdapter(new Html5Adapter(video));
+      video.src=url; video.muted=true; await activateHtml5Transport(video);
       const metadataOutcome=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(metadataOutcome==='cancelled'||!owns()) return false;
       if(metadataOutcome!=='ready') throw new Error(`轉檔預覽影片 metadata ${metadataOutcome}`);
@@ -1467,7 +1430,9 @@ const Media = {
         const url = c.web && c.web.url;
         if(url && video.src !== url){
           this.stopElementSources();
-          video.src = url; setPlayerAdapter(new Html5Adapter(video));
+          await activateHtml5Transport(video);
+          if(!owns()) return;
+          video.src = url;
           const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:8000});
           if(!owns()) return;
           if(metadata!=='ready'){
@@ -1889,7 +1854,7 @@ const Media = {
     let url = null;
     try { if(DESK?.fileURL) url = await DESK.fileURL(p); } catch(e){}
     if(!owns()) return null;
-    if(!url || (!url.startsWith('http') && !url.startsWith('file:') && !url.startsWith('blob:'))){
+    if(!url || (!url.startsWith('http') && !url.startsWith('file:') && !url.startsWith('blob:') && !url.startsWith('subtool-local:'))){
       // fileURL 被權威拒絕時不可自行組 file:/// 繞過它；這裡只會在未經可信入口的
       // 專案圖片路徑或 preload 失敗時觸發，交給既有的 pending-relink 流程保留素材資訊。
       console.warn('image file URL unavailable:', p);
@@ -2396,6 +2361,7 @@ const Media = {
   },
   stopElementSources(){
     this._audioRouter.stopElementSources();
+    this._syncEngine?.invalidateExternalActivity();
   },
   startBufferSources(offset){
     this._audioRouter.startBufferSources(offset);
@@ -2545,15 +2511,16 @@ const Media = {
   },
   reset(options={}){
     this._intakeSession.invalidate();
+    this._setActiveStreamLease(null);
     this._assetEpoch.invalidate();
     this._sequenceEditVersion+=1;
     if(this.mpvMode && getPlayerAdapter().isAvailable){
-      this._stopMpvBoundsFeeder();
-      const adapter=getPlayerAdapter();
+      const runtime=getPlayerAdapter();
+      runtime.stopBoundsFeeder();
       // 已載入 mpv 的 quit 與下一支素材的 launch 共用同一條 system-effect lane。
-      this._intakeSession.queueExclusive(()=>adapter.quit()).catch(()=>{});
-      this.mpvMode=false; this._mpvTime=0; this._mpvDuration=0;
-      setPlayerAdapter(new Html5Adapter(video));
+      runtime.selectHtml5(video);
+      this._intakeSession.queueExclusive(()=>runtime.shutdownNative()).catch(()=>{});
+      this._mpvTime=0; this._mpvDuration=0;
       video.style.display='';
       const vs=$('videoSub'); if(vs) vs.style.display='';
     }
@@ -2564,7 +2531,6 @@ const Media = {
     // 只清 runtime asset registry；State.audioProject 的 sourceMaps 由 project reset/load 負責，
     // 以便讀取專案時可在之後用 restoreExternalAudioSource 沿用相同 audioSourceId 重建。
     this.externalAudioSources=[];
-    this._externalActivityKey=null;
     State.externalAudioState=[];
     State.externalAudioEnd=0;
     if(this._ingestDoneHandler){ window.removeEventListener('desk:ingest-done',this._ingestDoneHandler); this._ingestDoneHandler=null; }

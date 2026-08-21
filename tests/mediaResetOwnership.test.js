@@ -212,9 +212,9 @@ describe('reset-scoped media ownership', () => {
 
   it('mutes mpv immediately when the active clip audio is detached', async () => {
     const mute = vi.fn().mockResolvedValue(undefined);
-    desktopMock.mpv = { mute };
-    resetPlayerAdapter(desktopMock);
-    Media.mpvMode = true;
+    desktopMock.mpv = { mute, launch: vi.fn().mockResolvedValue({ ok: true, duration: 8 }) };
+    const runtime = resetPlayerAdapter(desktopMock);
+    await runtime.enterMpv({ src: 'C:/media/picture.mov', bounds: { x: 0, y: 0, w: 640, h: 360 }, audio: [] });
     const clip = {
       id: 'detached-video', name: 'picture.mov', path: 'C:/media/picture.mov',
       dur: 8, in: 0, out: 8, offset: 0, vtrack: 0, primary: true,

@@ -413,7 +413,7 @@ function tlContextMenuHandler(e){
     const tk=trackFromY(e.clientY);
     if(State.tracks[tk]?.locked){ showCtx(e.clientX,e.clientY,[{label:'🔒 此軌道已鎖定'}]); return; }
     showCtx(e.clientX,e.clientY,[{label:`＋ 新增空白字幕（1 秒）`,act:()=>{
-      const c=addCue(t,t+1,'',tk); selectCue(c.id); recordHistory('右鍵新增字幕');
+      addCue(t,t+1,'',tk,{ historyLabel:'右鍵新增字幕' });
     }}]);
     return;
   }

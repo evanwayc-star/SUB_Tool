@@ -1,5 +1,5 @@
 import { $, sublist } from './dom.js';
-import { State, isSel, newId, trackVisible, cueSuffix, setSelection, deselect, pruneSelection } from './state.js';
+import { State, isSel, trackVisible, cueSuffix, setSelection, deselect, pruneSelection } from './state.js';
 import { escapeHTML, tcKeyAllowed, escapeHTMLWithSpaces } from './util.js';
 import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
@@ -20,7 +20,7 @@ import {
   snapAllCuesToFrames, swapAdjacentCues, mergeAdjacentCues, detectOverlaps, sweepContainedCues,
   addCue as _addCue, addCueRelative as _addCueRelative, deleteSelectedCues, deleteCue, clearSelectedCuesTime, 
   shiftTextsDown, shiftTextsUp, sortCues, copyCues, pasteCues as _pasteCues, trimTrackSpaces,
-  trackLocked, cueTrackLocked 
+  trackLocked, cueTrackLocked, editCue, splitCue
 } from './subtitle-model.js';
 
 // Search imports
@@ -186,7 +186,7 @@ function openInlineTimeEdit(el, curSec, onCommit){
         inp.remove(); el.textContent = origText; return;
       }
       if(raw === '--:--:--:--' || raw === ''){
-        inp.remove(); onCommit(null); return;
+        inp.remove(); el.textContent = origText; onCommit(null); return;
       }
       let t = null;
       if(raw.startsWith('+') || raw.startsWith('-')){
@@ -199,7 +199,7 @@ function openInlineTimeEdit(el, curSec, onCommit){
       } else {
         t = parseTimecodeInput(raw);
       }
-      if(t !== null){ onCommit(t); return; }
+      if(t !== null){ inp.remove(); el.textContent = origText; onCommit(t); return; }
     }
     inp.remove(); el.textContent = origText;
   };
@@ -579,37 +579,16 @@ function splitCueAtCursor(c, txtEl){
 
   const textBefore=full.slice(0,markerPos);
   const textAfter=full.slice(markerPos);
-  if (!textBefore.trim() || !textAfter.trim()) {
-    showToast('不能在句首或句尾切分，以免產生空白字幕');
-    return;
-  }
 
-  const origEnd=c.end;
-  const isTimed=c.timed!==false;
-  if(isTimed){
-    const pt=Media.displayTime();
-    if(pt < c.start + 0.05 || pt > c.end - 0.05){
-      showToast('切分點距離起訖太近，或是超出了字幕範圍');
-      return;
-    }
-  }
-  let splitTime=0;
-  if(isTimed) splitTime=Media.displayTime();
-
-  c.text=textBefore;
+  const result=splitCue({
+    cueId:c.id,
+    textBefore,
+    textAfter,
+    timelineTime:Media.displayTime(),
+  });
+  if(!result.ok)return;
+  const newCue=result.cue;
   txtEl.contentEditable='false';
-
-  if(isTimed) c.end=splitTime;
-
-  const newCue={id:newId(),start:isTimed?splitTime:0,end:isTimed?origEnd:0,
-    text:textAfter,track:c.track||0,timed:isTimed};
-
-  const idx=State.cues.indexOf(c);
-  if(idx>=0) State.cues.splice(idx+1,0,newCue);
-  else State.cues.push(newCue);
-
-  sortCues(); emit('render:all'); recordHistory('拆分字幕');
-  selectCue(newCue.id,{seek:false});
 
   requestAnimationFrame(()=>{
     const nr=sublist.querySelector(`.sub-row[data-id="${newCue.id}"]`);
@@ -668,35 +647,11 @@ sublist.addEventListener('dblclick', async e => {
     await ensureProjectSaved();
     if (tin) {
       openInlineTimeEdit(tin, c.start || 0, t => {
-        if(t === null) {
-          c.timed = false;
-          commitCueTimeEdit(c, 'both'); recordHistory('清除時間碼' + cueSuffix(c));
-          return;
-        }
-        c.start = Math.max(0, t);
-        if (c.timed === false) {
-          c.end = c.start + 1.0;
-          c.timed = true;
-        } else {
-          c.start = Math.min(c.start, c.end - 0.001);
-        }
-        commitCueTimeEdit(c, 'start'); recordHistory('修改起點' + cueSuffix(c));
+        editCue({ cueId: c.id, operation: 'start', value: t });
       });
     } else {
       openInlineTimeEdit(tout, c.end || 0, t => {
-        if(t === null) {
-          c.timed = false;
-          commitCueTimeEdit(c, 'both'); recordHistory('清除時間碼' + cueSuffix(c));
-          return;
-        }
-        c.end = Math.max((c.start || 0) + 0.001, t);
-        let edge = 'end';
-        if (c.timed === false) {
-          c.start = Math.max(0, c.end - 1.0);
-          c.timed = true;
-          edge = 'both';
-        }
-        commitCueTimeEdit(c, edge); recordHistory('修改終點' + cueSuffix(c));
+        editCue({ cueId: c.id, operation: 'end', value: t });
       });
     }
     return;
@@ -748,11 +703,11 @@ sublist.addEventListener('input', e => {
 
   let val = txt.innerText;
   if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
-  c.text = val;
+  const preview=editCue({ cueId:c.id, operation:'text-preview', value:val });
+  if(!preview.ok){ val=c.text||''; txt.innerText=val; }
   const rc2 = _rowClass(c);
   row.classList.remove('no-time', 'blank', 'two-line', 'multi-line'); 
   if (rc2) rc2.split(' ').filter(Boolean).forEach(cls => row.classList.add(cls));
-  emit('render:videoSub'); emit('mpv:refreshSubs');
   _debouncedHeavyEdit();
 });
 
@@ -765,15 +720,10 @@ sublist.addEventListener('focusout', e => {
   if (!c) return;
   let val = txt.innerText;
   if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
-  c.text = val;
   txt.contentEditable = 'false';
-  txt.innerHTML = _txtInner(c.text);
-  const rc2 = _rowClass(c);
-  row.classList.remove('no-time', 'blank', 'two-line', 'multi-line'); 
-  if (rc2) rc2.split(' ').filter(Boolean).forEach(cls => row.classList.add(cls));
   const orig = txt.dataset.orig || '';
-  if ((c.text || '') !== orig) recordHistory('編輯字幕文字' + cueSuffix(c));
-  renderCheckPanel();
+  const result=editCue({ cueId:c.id, operation:'text', value:val, baseline:orig });
+  if(!result.ok) txt.innerHTML=_txtInner(c.text);
 });
 
 sublist.addEventListener('keydown', e => {
@@ -805,14 +755,14 @@ function updateSearchCount() {
   const el=$('searchCount'); if(!el) return;
   el.textContent = getSearchCountText();
 }
-function addCue(start, end, text, track) {
-  return _addCue(start, end, text, track, selectCue);
+function addCue(start, end, text, track, options) {
+  return _addCue(start, end, text, track, options);
 }
 function addCueRelative(dir) {
-  return _addCueRelative(dir, selectCue);
+  return _addCueRelative(dir);
 }
 function pasteCues() {
-  _pasteCues(selectCue);
+  _pasteCues();
 }
 
 export { 

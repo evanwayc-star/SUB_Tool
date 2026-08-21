@@ -29,7 +29,7 @@ vi.mock('../src/subtitle-model.js', () => ({
   deleteSelectedCues: vi.fn(), deleteCue: vi.fn(), clearSelectedCuesTime: vi.fn(), shiftTextsDown: vi.fn(),
   shiftTextsUp: vi.fn(), sortCues: vi.fn(), copyCues: vi.fn(), pasteCues: vi.fn(), trimTrackSpaces: vi.fn(),
   swapAdjacentCues: vi.fn(), mergeAdjacentCues: vi.fn(), snapAllCuesToFrames: vi.fn(),
-  trackLocked: () => false, cueTrackLocked: () => false,
+  trackLocked: () => false, cueTrackLocked: () => false, splitCue: vi.fn(),
 }));
 vi.mock('../src/subtitle-search.js', () => ({
   searchSelectAll: vi.fn(), txtHTML: value => String(value ?? ''), isSearchHit: () => false,

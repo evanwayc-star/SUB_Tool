@@ -8,6 +8,7 @@ import { video } from './dom.js';
 export class PlaybackSyncEngine {
     constructor(mediaAdapter) {
         this.media = mediaAdapter;
+        this._externalActivityKey = null;
     }
 
     start() {
@@ -33,15 +34,21 @@ export class PlaybackSyncEngine {
     // 純音訊專案（或影片全數刪除後）以虛擬時鐘繼續走到所有音訊素材的最右端。
     if(this.media.audioOnlyTimeline()){
       const t=this.media.tlTime();
-      this.media._syncExternalElementActivity(t);
+      this._syncExternalElementActivity(t);
       if(t >= Math.max(0,State.duration)-0.02){ this.media.pause(); this.media.seek(State.duration); }
       return;
     }
     if(!this.media.seqOn()) return;
     const t = this.media.tlTime();
+    // fallback 狀態：播放中卻沒有 active clip，且播放頭也不在任何 clip 上。
+    // 必須先完成 gap transition（它會停掉 element sources），再依時間軸
+    // 重新啟動仍在範圍內的外部音訊；否則會在同一 tick 先 play 後 pause。
+    if(!this.media._gap && !this.media._activeClip() && !Seq.clipAt(t)){
+      this._enterGap(t);
+    }
     // 外部音檔可在影片播放中、影片間隙，或影片結束後才開始／結束；其邊界
     // 不會改變 video clip 集合，因此必須獨立偵測。
-    this.media._syncExternalElementActivity(t);
+    this._syncExternalElementActivity(t);
     // 恆等模式（單一未修剪 clip 從 0 開始）：完全交給原生 ended / mpv keep-open，行為與舊版一致
     // 圖片不計入：它們是純視覺疊層，不影響影片播放引擎
     const _videoClips = State.clips.filter(c => c.type !== 'image');
@@ -55,7 +62,7 @@ export class PlaybackSyncEngine {
       return;
     }
     const c = this.media._activeClip();
-    if(!c){ const hit = Seq.clipAt(t); if(hit) this.media._ensureClip(hit, this.media._transport.sourceTime(t,hit), true); else this.media._enterGap(t); return; }
+    if(!c){ const hit = Seq.clipAt(t); if(hit) this.media._ensureClip(hit, this.media._transport.sourceTime(t,hit), true); else this._enterGap(t); return; }
     // 疊合試聽：作用中片段集合變化 → 重設可聽音源並同步各自 element/buffer（讓滑入/滑出重疊的片段跟著出/停聲）。
     // okey 相同時不動，避免逐幀 churn；不改變影像的 active clip。
     const okey = Seq.clipsAt(t).filter(x=>x.type !== 'image').map(x=>x.id).join('|');
@@ -70,9 +77,9 @@ export class PlaybackSyncEngine {
     if(t >= end - 0.02){
       const nxt = Seq.clipAt(end + 0.001);
       if(nxt) this.media._ensureClip(nxt, this.media._transport.sourceTime(end,nxt), true);
-      else if(Seq.nextAfter(end)) this.media._enterGap(end);
+      else if(Seq.nextAfter(end)) this._enterGap(end);
       else if(State.duration > end + 0.001){
-        this.media._enterGap(end);
+        this._enterGap(end);
         this.media.startElementSources(end,end); // 黑畫面期間外部音訊仍依時間軸繼續播
       }else { this.media.pause(); this.media.seek(end); }
     }
@@ -85,9 +92,18 @@ export class PlaybackSyncEngine {
     const end = Seq.clipEnd(c);
     const nxt = Seq.clipAt(end + 0.001);
     if(nxt){ this.media._ensureClip(nxt, this.media._transport.sourceTime(end,nxt), true); return true; }
-    if(Seq.nextAfter(end)){ this.media._enterGap(end); return true; }
-    if(State.duration > end + 0.001){ this.media._enterGap(end); this.media.startElementSources(end,end); return true; }
+    if(Seq.nextAfter(end)){ this._enterGap(end); return true; }
+    if(State.duration > end + 0.001){ this._enterGap(end); this.media.startElementSources(end,end); return true; }
     return false;
+  }
+
+  invalidateExternalActivity(){
+    this._externalActivityKey = null;
+  }
+
+  _enterGap(t){
+    this.media._enterGap(t);
+    this.invalidateExternalActivity();
   }
 
     
@@ -100,8 +116,8 @@ export class PlaybackSyncEngine {
       active.push(`${source}:${!tr._srcHidden&&this.media.externalAudio.sourceTime(source,t)!=null?'1':'0'}`);
     }
     const key=active.join('|');
-    if(key===this.media._externalActivityKey) return;
-    this.media._externalActivityKey=key;
+    if(key===this._externalActivityKey) return;
+    this._externalActivityKey=key;
     for(const tr of this.media.tracks){
       if(tr.kind!=='element'||!tr.el) continue;
       const source=tr.source||'';

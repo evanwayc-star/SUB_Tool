@@ -122,11 +122,14 @@ describe('trusted project intake', () => {
     expect(main).not.toContain("'fs:authorizeProject'");
     expect(preload).not.toMatch(/authorizeProject\s*:/);
     expect(project).not.toMatch(/DESK\.authorizeProject/);
-    // Executable read/write ordering is covered by projectFileGateway.test;
+    // Executable read/write ordering is covered by projectWorkspace.test;
     // these remain supplemental checks that both IPC edges actually delegate.
-    expect(main).toMatch(/dialog:saveProject[\s\S]*?admittedRendererProjectBuffer\(b64\)[\s\S]*?projectFileGateway\.writeRendererProject\(r\.filePath/);
-    expect(main).toMatch(/fs:writeProject[\s\S]*?admittedRendererProjectBuffer\(b64\)[\s\S]*?projectFileGateway\.writeRendererProject\(p/);
-    expect(main).toMatch(/fs:findRelinkTarget[\s\S]*?trustedProjectIntake\.canRelink\(projectPath, oldMediaPath\)/);
+    expect(main).toMatch(/dialog:saveProject[\s\S]*?projectWorkspace\.acceptsRendererProject\(b64\)[\s\S]*?projectWorkspace\.writeRendererProject\(r\.filePath/);
+    expect(main).toMatch(/fs:writeProject[\s\S]*?projectWorkspace\.writeRendererProject\(p/);
+    expect(main).toMatch(/fs:findRelinkTarget[\s\S]*?projectWorkspace\.canRelink\(projectPath, oldMediaPath\)/);
+    expect(main).toMatch(/app\.on\('open-file'[\s\S]{0,300}deliverExternalProjectOpen\(projectPath\)/);
+    expect(main).toMatch(/app:getStartupFile[\s\S]{0,400}projectWorkspace\.openStartup\(args\)/);
+    expect(main).not.toMatch(/app\.on\('open-file'[\s\S]{0,500}grantTrustedProjectFile\(/);
     expect(preload).toMatch(/openDroppedProject[\s\S]*?project:openDroppedFile/);
     expect(preload).not.toMatch(/openDroppedProject[\s\S]{0,260}fs:authorizeDroppedFile/);
   });

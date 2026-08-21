@@ -29,7 +29,7 @@ import { AudioPipeline } from '../audio-pipeline.js';
 import { AudioEngine } from '../audio-engine.js';
 import { emit } from '../events.js';
 import { escapeHTML, baseName } from '../util.js';
-import { getPlayerAdapter, setPlayerAdapter, Html5Adapter, MpvAdapter } from '../media-player-adapter.js';
+import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from '../media-player-adapter.js';
 import { Wave, WAVE_DECODE_MAX, probeAudioChannelDescriptors, detectFpsWeb, probeImageSize } from '../media.js'; 
 import { sourceChannelLabels } from '../channel-layout.js';
 import { secToEncore } from '../time.js';
@@ -61,9 +61,11 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx.ensureCtx();
 
     // (mpv) 非原生格式或多音軌且偵測到 mpv：秒開，背景抽音軌
-    const dummyMpv = typeof window !== 'undefined' && window.subtool ? new MpvAdapter(window.subtool) : null;
-    if((!canNative || audio.length>1) && dummyMpv && dummyMpv.isAvailable){
-      const mpvInfo=await dummyMpv.detect();
+    const previewRuntime = typeof window !== 'undefined' && window.subtool
+      ? activateMpvTransport(window.subtool)
+      : getPlayerAdapter();
+    if((!canNative || audio.length>1) && previewRuntime.isAvailable){
+      const mpvInfo=await previewRuntime.detect();
       if(!owns()) return;
       if(mpvInfo && mpvInfo.available){ await ctx._loadViaMpv(p,info,projectRestore,intake); return; }
     }
@@ -75,7 +77,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     if(canNative && audio.length<=1 && audioChannelCount<=2){
       const mediaUrl=await DESK.fileURL(p);
       if(!owns()) return;
-      video.src=mediaUrl; setPlayerAdapter(new Html5Adapter(video));
+      video.src=mediaUrl; await activateHtml5Transport(video);
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(!owns()||metadata==='cancelled') return;
       if(metadata!=='ready'){ showToast('無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
@@ -119,13 +121,20 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       let res;
       try{ res=await DESK.streamIngest({ path:p, duration:dur, audio }); }
       catch(e){ if(!owns()) return; console.error(e); showToast('讀取失敗：'+e.message); setStatus('讀取失敗',''); return; }
-      if(!owns()) return;
+      if(!owns()){
+        if(res?.streamLeaseId&&DESK.releaseStream) Promise.resolve(DESK.releaseStream(res.streamLeaseId)).catch(()=>{});
+        return;
+      }
+      ctx._setActiveStreamLease(res.streamLeaseId);
       if(res.cached) setStatus('使用既有快取，秒開…','ok');
 
-      video.src=res.streamUrl; setPlayerAdapter(new Html5Adapter(video));
+      video.src=res.streamUrl; await activateHtml5Transport(video);
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:15000});
       if(!owns()||metadata==='cancelled') return;
-      if(metadata!=='ready'){ showToast('轉檔串流無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
+      if(metadata!=='ready'){
+        ctx._setActiveStreamLease(null);
+        showToast('轉檔串流無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return;
+      }
       State.duration=video.duration||dur||0;
       video.muted=true;
       const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:res.streamUrl}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
@@ -216,7 +225,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
 
     const mediaUrl=await DESK.fileURL(res.proxy||p);
     if(!owns()) return;
-    video.src=mediaUrl; setPlayerAdapter(new Html5Adapter(video));
+    video.src=mediaUrl; await activateHtml5Transport(video);
     const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
     if(!owns()||metadata==='cancelled') return;
     if(metadata!=='ready'){ showToast('轉檔結果無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
@@ -273,26 +282,34 @@ export function _expandChannels(ctx, audio){ return sourceChannelLabels(audio); 
 
 export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken=null){
     const owns=()=>!intakeToken||ctx._intakeSession.owns(intakeToken);
-    const adapter = typeof window !== 'undefined' && window.subtool ? new MpvAdapter(window.subtool) : getPlayerAdapter();
+    const adapter = typeof window !== 'undefined' && window.subtool
+      ? activateMpvTransport(window.subtool)
+      : getPlayerAdapter();
     const dur=info?.duration||0;
     const audio=info?.audio||[];
     setStatus('啟動 mpv（秒開）…','busy');
     let res;
     try{
-      const launch=()=>adapter.launch({src:p, bounds:ctx._mpvRect(), audio});
+      const launch=()=>adapter.enterMpv({
+        src:p,
+        bounds:ctx._mpvRect(),
+        audio,
+        boundsElement:$('videoWrap'),
+        readBounds:()=>ctx._mpvRect(),
+      });
       const launchAndOwn=async()=>{
         let launched;
         try{ launched=await launch(); }
         catch(error){
           // 主程序可能在建立 native window/process 後才於 pipe 連線失敗。
           // 錯誤路徑也必須在 exclusive lane 內清理，不能只清成功但失權的回傳。
-          await adapter.quit();
+          await adapter.enterHtml5(video);
           throw error;
         }
         if(!owns()){
           // launch 已跨進主程序並改寫共享 mpv 狀態；單純丟棄回傳值不夠，
           // 必須在下一個 queued launch 開始前把舊 native runtime 收掉。
-          await adapter.quit();
+          await adapter.enterHtml5(video);
           return null;
         }
         return launched;
@@ -301,15 +318,19 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
         ? await ctx._intakeSession.runExclusive(intakeToken,launchAndOwn)
         : await launchAndOwn();
     }
-    catch(e){ if(!owns()) return; showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗',''); $('videoSub').style.display=''; video.style.display=''; return; }
+    catch(e){
+      if(!owns()) return;
+      await adapter.enterHtml5(video);
+      showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗','');
+      $('videoSub').style.display=''; video.style.display=''; return;
+    }
     if(!res||!owns()) return;
     // 影片區清空為黑底，mpv 覆蓋視窗會貼合在此。必須等 ownership 確認後才改 UI，
     // 否則較舊的 launch 晚到會把新載入的 HTML video 藏起來。
     $('noVideo').style.display='none';
     video.style.display='none';
     $('videoSub').style.display=''; // 字幕由 HTML DOM (#videoSub) 統一渲染
-    ctx.mpvMode=true; ctx._mpvTime=0; ctx._mpvPath=p;
-    setPlayerAdapter(new MpvAdapter(window.subtool));
+    ctx._mpvTime=0; ctx._mpvPath=p;
     // mpv 顯示時仍要建立透明的 DOM 字幕命中層，才能直接拖曳字幕。
     emit('render:videoSub');
     ctx._mpvDuration=res.duration||dur||0;
@@ -318,7 +339,6 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     const primary=ctx._registerPrimary({ name:State.mediaName, path:p, dur:ctx._mpvDuration||0, fps:info?.video?.fps||0 },projectRestore);
     AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
 
-    ctx._startMpvBoundsFeeder();
     emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
 
     // 監聽 mpv 事件（時碼同步 / 播放狀態）。序列模式：e.data 為【來源時間】，顯示前換算為時間軸時間。
@@ -407,7 +427,7 @@ export async function loadVideoFile(ctx, file, projectRestore=null){
     emit('media:audioTracks');
     State.mediaName=file.name; State.mediaSize=file.size;
     const url=URL.createObjectURL(file); ctx.objectURLs.push(url);
-    video.src=url; setPlayerAdapter(new Html5Adapter(video));
+    video.src=url; await activateHtml5Transport(video);
     const native = await canPlayNatively(file, video);
     if(!owns()) return;
     ctx.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:native});

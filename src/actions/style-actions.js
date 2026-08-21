@@ -3,7 +3,7 @@ import { effStyle } from '../substyle.js';
 import { showToast, setStatus } from '../ui.js';
 import { recordHistory } from '../history.js';
 import { emit } from '../events.js';
-import { planCueStyleAssignment, planTrackStyleAssignment } from '../style-assignment.js';
+import { applyCueStyleAssignment, planCueStyleAssignment, planTrackStyleAssignment } from '../style-assignment.js';
 
 export function applyCueStylePatch(cue, desiredStyle, preserveKeys = []){
   const targetTrack = State.tracks[cue?.track || 0] || null;
@@ -17,13 +17,6 @@ export function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []
   if(!plan.changed) return false;
   Object.assign(track, plan.trackPatch);
   for(const cuePatch of plan.cuePatches) applyCueStyleAssignment(cuePatch.cue, cuePatch);
-  return true;
-}
-
-function applyCueStyleAssignment(cue, plan) {
-  if (!cue || !plan?.changed) return false;
-  if (plan.style) cue.style = { ...plan.style };
-  else delete cue.style;
   return true;
 }
 

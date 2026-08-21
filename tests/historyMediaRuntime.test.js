@@ -120,7 +120,6 @@ describe('history restores the media runtime', () => {
     Media._gap = false;
     Media._gapT = 0;
     Media._gapStart = null;
-    Media.mpvMode = false;
     domMock.video.style.visibility = '';
     domMock.video.pause.mockClear();
     domMock.video.dispatchEvent.mockClear();
