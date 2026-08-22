@@ -9,7 +9,8 @@ import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
 import { State, isSel, setSelection, deselect, IS_DESKTOP } from './state.js';
 import { Media, Wave } from './media.js';
-import { addCue, addCueRelative, deleteSelected, clearSelectedCuesTime, selectCue, refreshSelectionUI, shiftTextsDown, shiftTextsUp, enterSwapMode, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitles.js';
+import { selectCue, refreshSelectionUI, enterSwapMode, deleteSelected } from './subtitles.js';
+import { addCue, addCueRelative, clearSelectedCuesTime, shiftTextsDown, shiftTextsUp, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitle-model.js';
 import { moveSelectedToTrack, xToTime, trackFromY, tracksTop, drawTimeline, selectClip, showClipFade, showCrossfade, showImageGeom, showClipDuration } from './timeline.js';
 import { Seq } from './sequence.js';
 import { showToast, promptModal } from './ui.js';
@@ -18,7 +19,7 @@ import { emit } from './events.js';
 import { AudioRouting } from './audio-routing.js';
 import { setManualPlaybackSpeed } from './keyboard.js';
 import { splitMenuLabel } from './menu-label.js';
-import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './actions/style-actions.js';
+import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './style-commands.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');

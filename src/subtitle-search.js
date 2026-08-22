@@ -93,3 +93,34 @@ export function searchSelectAll(){
   State.activeEdge='start';
   emit('render:selection');
 }
+
+export function searchNext() {
+  searchNav(1);
+}
+
+export function searchPrev() {
+  searchNav(-1);
+}
+
+export function searchClear() {
+  const si = (typeof document !== 'undefined') ? document.getElementById('searchInput') : null;
+  if (si) si.value = '';
+  searchUpdate('');
+}
+
+export function doSearchSelectAll() {
+  searchSelectAll();
+}
+
+export function replaceOne() {
+  const ri = (typeof document !== 'undefined') ? document.getElementById('replaceInput') : null;
+  const repText = ri ? ri.value : '';
+  searchReplace(false, repText);
+}
+
+export function replaceAll() {
+  const ri = (typeof document !== 'undefined') ? document.getElementById('replaceInput') : null;
+  const repText = ri ? ri.value : '';
+  searchReplace(true, repText);
+}
+

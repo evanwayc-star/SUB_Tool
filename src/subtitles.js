@@ -1,3 +1,11 @@
+/* ==============================================================================
+   SUB Tool — 字幕列表視圖配接器 (Subtitle List View DOM Adapter)
+   ==============================================================================
+   【架構與職責】
+   負責字幕列表 (Sublist) 的 DOM 渲染、行內編輯、選取視窗滾動、文字檢查面板及交換模式 UI。
+   純領域邏輯（新增/刪除/排序/時間計算）請使用 `subtitle-model.js`。
+   搜尋邏輯請使用 `subtitle-search.js`。
+   ============================================================================== */
 import { $, sublist } from './dom.js';
 import { State, isSel, trackVisible, cueSuffix, setSelection, deselect, pruneSelection } from './state.js';
 import { escapeHTML, tcKeyAllowed, escapeHTMLWithSpaces } from './util.js';

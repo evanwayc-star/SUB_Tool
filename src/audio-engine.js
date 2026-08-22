@@ -259,7 +259,7 @@ class AudioEngineCore {
   /* at＝【時間軸時間】（鐵律 §0.5）。序列模式下才轉成來源時間。
      回傳 { scrubMainVideo, localT }：scrubMainVideo=true 代表沒有任何可聽的
      Web Audio 軌，呼叫端要改為 scrub 主 <video>。 */
-  scrub(at, duration = 0.15) {
+  scrub(at, duration = 0.08) {
     const env = this._env;
     if (env.playing() || env.muted()) return;
     const tracks = env.tracks();
@@ -279,9 +279,12 @@ class AudioEngineCore {
     const anySolo = anySourceSolo(tracks, { respectHidden: true });
 
     if (this.ctx) {
+      if (this.ctx.state === 'suspended') {
+        try { this.ctx.resume(); } catch (e) {}
+      }
       for (const tr of tracks) {
         if (tr._srcHidden) continue;
-        if (tr.kind === 'buffer') {
+        if (tr.kind === 'buffer' && tr.buffer) {
           const audible = sourceTrackAudible(tr, anySolo);
           if (audible) {
             if (tr._scrubNode) { try { tr._scrubNode.stop(); } catch (e) {} }
@@ -290,7 +293,8 @@ class AudioEngineCore {
               src.buffer = tr.buffer;
               src.playbackRate.value = playbackRate || 1;
               src.connect(tr.gain);
-              src.start(0, clamp(localT, 0, tr.buffer.duration), duration);
+              const maxDur = Math.max(0, (tr.buffer.duration || 0) - 0.01);
+              src.start(0, clamp(localT, 0, maxDur), duration);
               tr._scrubNode = src;
             } catch (e) {}
           }

@@ -1,61 +1,45 @@
 /* ==============================================================================
-   SUB Tool — 片段淡入淡出（Clip Fade）
+   SUB Tool — 片段淡入淡出計算（Renderer 配接層）
    ==============================================================================
-
-   片段的長度與淡入淡出視窗。**預覽與匯出必須用同一組數字**，否則畫面在
-   預覽裡淡完了、匯出卻還沒淡完（或反過來），而且完全不會報錯。
-
-   【歷史原因】同一組計算原本散在三個地方：
-     src/app.js              renderImageOverlays() 的 alpha 疊乘
-     electron/export-plan.js 影像 `fade=t=in/out:...:alpha=1`
-     electron/export-plan.js 音訊 `afade=t=in/out:...`
-   現在規則已收斂到 `shared/clip-fade.cjs`，renderer 與主程序都直接取用同一份實作；
-   `tests/clipFadeContract.test.js` 守住兩側的 consumer／filtergraph 表達。
-============================================================================== */
-
-/* clipLength 與 fadeWindow 的規則住在 `shared/clip-fade.cjs`——匯出端（主程序、
-   CommonJS）吃的是同一份。v6.1.2 之前 electron/export-plan.js 把長度下限內聯了
-   三處、淡入淡出的夾擠又各寫一次。 */
+   【架構與職責】
+   核心視窗計算規則統一維護於 `shared/clip-fade.cjs`（`clipLength`, `fadeWindow`）。
+   本模組提供渲染端在不同時間域下（片段本地時間 vs 時間軸全域時間）的不透明度計算。
+   ============================================================================== */
 import { clipLength, fadeWindow } from '../shared/clip-fade.cjs';
 
 export { clipLength, fadeWindow };
 
 /**
- * 片段在「片段內本地時間」的不透明度倍率（0–1）。
- *
- * 線性斜坡，與 ffmpeg `fade` 濾鏡的預設曲線一致。
- * 回傳的是**倍率**，呼叫端自行乘上軌道透明度等其他因素。
- *
- * 預覽端多半該用 {@link fadeAlphaAtTimeline}——它連時間域轉換一起做掉。
- *
- * @param {object} clip     片段（要有 in／out／fadeIn／fadeOut）
- * @param {number} localTime 片段內時間（＝時間軸時間 − clip.offset）
+ * 計算片段在「片段內部本地時間」下的不透明度倍率 (0..1)。
+ * 
+ * 線性斜坡計算，與 FFmpeg `fade` 濾鏡的預設曲線完全一致。
+ * 
+ * @param {object} clip 片段物件 (in, out, fadeIn, fadeOut)
+ * @param {number} localTime 片段內相對時間（秒，等於 時間軸時間 - clip.offset）
+ * @returns {number} 不透明度倍率 (0..1)
  */
 export function fadeAlphaAt(clip, localTime) {
   const { length, fadeIn, fadeOut, fadeOutStart } = fadeWindow(clip);
-  const t = +localTime || 0;
+  const t = Number(localTime) || 0;
   if (t < 0 || t > length) return 0;
+
   let a = 1;
   if (fadeIn > 0 && t < fadeIn) a *= t / fadeIn;
   if (fadeOut > 0 && t > fadeOutStart) a *= (length - t) / fadeOut;
+
   return Math.max(0, Math.min(1, a));
 }
 
 /**
- * 片段在「時間軸時間」的不透明度倍率（0–1）。片段還沒到或已經過去 → 0。
- *
- * 【為什麼要有這一支】
- * 預覽的三個呼叫端（app.js 的圖片疊層、decode/player.js 的合成、
- * media.js 的淡出入黑）拿到的都是**時間軸時間**，於是三處各自寫了
- * `fadeAlphaAt(c, t - c.offset)`。鐵律 §0.5 說時間域轉換不該散在呼叫端——
- * 而且它們寫得還不一樣：兩處是 `c.offset || 0`，一處是 `c.offset`，
- * 遇到沒有 offset 欄位的片段前者當 0、後者算出 NaN → **整段變全透明**，
- * 而且不會報錯。轉換收進來一次就沒有這個縫。
- *
- * @param {object} clip         片段（要有 offset／in／out／fadeIn／fadeOut）
+ * 計算片段在「時間軸全域時間」下的不透明度倍率 (0..1)。
+ * 
+ * 鐵律 §0.5 防禦：時間域轉換集中於此處理，自動補正缺失之 `offset` 欄位。
+ * 
+ * @param {object} clip 片段物件 (offset, in, out, fadeIn, fadeOut)
  * @param {number} timelineTime 時間軸時間（秒）
+ * @returns {number} 不透明度倍率 (0..1)
  */
 export function fadeAlphaAtTimeline(clip, timelineTime) {
   if (!clip) return 0;
-  return fadeAlphaAt(clip, (+timelineTime || 0) - (+clip.offset || 0));
+  return fadeAlphaAt(clip, (Number(timelineTime) || 0) - (Number(clip.offset) || 0));
 }

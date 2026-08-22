@@ -1,5 +1,22 @@
+/* ==============================================================================
+   SUB Tool — 媒體轉檔快取排程協調器 (Media Ingest Coordinator)
+   ==============================================================================
+   【架構與職責】
+   協調 Proxy 視訊轉檔、逐聲道音訊抽取、波形計算與中繼資料快取之寫入通道。
+   
+   【核心排程不變量】
+   1. 串流轉檔（Streaming Ingest）：Proxy 視訊達到可播放狀態（First Playable Bytes）即先
+      回應 Renderer（`response` 解析），但 FFmpeg 背景程序仍會持續寫入其餘快取檔案。
+   2. 通道序列化（Lane Serialization）：只有當前轉檔的背景寫入完全完成（`completion` 達成），
+      才釋放並交棒給下一個快取寫入工作，避免多個 FFmpeg 程序爭搶同一目錄的 meta.json。
+   3. 取代機制（Supersede）：當使用者切換媒體載入新檔案時，舊的轉檔工作立即中止並拋出
+      `IngestSupersededError`，釋放系統 CPU 與 I/O。
+   ============================================================================== */
 'use strict';
 
+/**
+ * 轉檔被較新工作取代之自訂錯誤類型。
+ */
 class IngestSupersededError extends Error {
   constructor() {
     super('媒體轉檔已被較新的載入取代');
@@ -8,16 +25,17 @@ class IngestSupersededError extends Error {
   }
 }
 
-/*
-  Proxy、逐聲道 AAC、波形與 meta.json 都落在同一份 per-source cache。  Streaming
-  ingest 在 proxy 可播放後就回應 renderer，但 ffmpeg 還會繼續寫其餘 cache；因此
-  "request resolved" 不能當作 lane 已空。  此 coordinator 讓 response 和 completion
-  分開，只有 completion 才會交棒給下一個 cache writer。
-*/
+/**
+ * 建立媒體轉檔排程協調器。
+ * 
+ * @param {object} [options]
+ * @param {Function} [options.killProcess] 終止行程函式注入
+ */
 function createMediaIngestCoordinator({ killProcess } = {}) {
   const kill = typeof killProcess === 'function'
     ? killProcess
     : process => { try { process?.kill?.(); } catch (error) {} };
+
   const pending = [];
   let active = null;
   let draining = false;
@@ -54,16 +72,18 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
             isCancelled: () => lease.cancelled,
           });
           const { response, completion } = asWorkResult(value);
-          // A replacement may arrive while a work function is still waiting for
-          // its first playable bytes.  Do not let that late response revive an
-          // already-superseded renderer load; still await completion below to
-          // serialize cache writers before handing the lane over.
-          if (lease.cancelled) ticket.reject(new IngestSupersededError());
-          else ticket.resolve(response);
-          /* A failed background streaming job reports its error via the ingest
-             job / task-progress channel.  It still must release this lane so a
-             later cache task can make progress. */
-          if (completion) await Promise.resolve(completion).catch(() => undefined);
+
+          // 若等待期間已被取代，拒絕 resolve 舊回應
+          if (lease.cancelled) {
+            ticket.reject(new IngestSupersededError());
+          } else {
+            ticket.resolve(response);
+          }
+
+          // 背景寫入完成前，保持通道鎖定以確保快取寫入順序
+          if (completion) {
+            await Promise.resolve(completion).catch(() => undefined);
+          }
         } catch (error) {
           ticket.reject(error);
         } finally {
@@ -93,7 +113,9 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
   });
 
   return Object.freeze({
+    /** 取代目前所有等待與執行中的轉檔工作，優先執行新任務 */
     replace: work => submit(work, { replace: true }),
+    /** 將新轉檔工作依序加入排隊佇列 */
     enqueue: work => submit(work),
   });
 }

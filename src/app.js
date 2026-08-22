@@ -38,13 +38,15 @@ import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assTo
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
 import { createCommands } from './commands.js';
-import { togglePanel } from './actions/panel-actions.js';
-import { applyCueStylePatch } from './actions/style-actions.js';
+import { togglePanel } from './ui.js';
+import { applyCueStylePatch } from './style-commands.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, cueNeighborBounds } from './timeline.js';
-import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, addCue, addCueRelative, deleteSelected, deleteCue, sortCues, searchUpdate, searchNav, searchReplace, searchSelectAll, trimTrackSpaces, snapAllCuesToFrames, refreshStyleSummaries, updateSearchCount } from './subtitles.js';
+import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount } from './subtitles.js';
+import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames } from './subtitle-model.js';
+import { searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitle-search.js';
 import { initRecentProjects } from './recent-projects.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
 import { Project, isProjectDirty, confirmDiscardUnsaved } from './project.js';

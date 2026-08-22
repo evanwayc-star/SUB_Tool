@@ -5,307 +5,55 @@
    【架構與職責總覽】
    本檔案 (keyboard.js) 是全站的鍵盤事件集散地。
    負責：快捷鍵映射 (Key Mapping)、打字輸入防抖 (Typing Debounce)、
-   以及高頻操作 (如 JKL 穿梭輪與上下左右微調) 的邏輯實作。
+   以及按鍵事件的分派。
    
-   1. 按鍵防抖與輸入框過濾
-      本專案有大量全域快捷鍵，為了防止使用者在字幕 `textarea` 或搜尋框輸入時
-      誤觸全域指令，本模組會利用 `ev.target.tagName` 與 `isContentEditable` 
-      進行過濾，確保打字時的按鍵不會被當成快捷鍵攔截。
-      
-   2. 快捷鍵設定管理
-      所有的快捷鍵行為皆可以被重新定義，透過 `KeyMap` 陣列定義並交由 UI 修改，
-      最終儲存於 localStorage 或專案設定檔中。
-      
-   【維護鐵律】
-   - 增加新的快捷鍵功能時，務必將其註冊到 `KeyMap` 中，並且不要直接在此處
-     實作複雜的業務邏輯，請將業務邏輯封裝在對應的模組，並透過 import 呼叫。
-============================================================================== */
-import { $, video, sublist } from './dom.js';
-import { State, cueSuffix, setSelection, deselect, focusTrackKind } from './state.js';
-import { clamp } from './util.js';
-import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
+   所有播放控制、JKL 穿梭定時器與時碼導航邏輯，均封裝在 transport-controller 模組中。
+   ============================================================================== */
+import { $ } from './dom.js';
+import { State, setSelection, deselect } from './state.js';
 import { Media } from './media.js';
-import { Seq } from './sequence.js';
-import { addCue, selectCue, selectCueSingle, commitCueTimeEdit, deleteSelected, addCueRelative, sortCues, cancelSwapMode, refreshSelectionUI, copyCues, pasteCues, trackLocked, cueTrackLocked } from './subtitles.js';
+import { selectCueSingle, deleteSelected, cancelSwapMode, refreshSelectionUI } from './subtitles.js';
+import { sortCues, copyCues, pasteCues } from './subtitle-model.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './timeline.js';
-import { Project, ensureProjectSaved } from './project.js';
-import { History, recordHistory, renderHistory } from './history.js';
-import { addNote, renderNotes, updateNoteActive } from './notes.js';
+import { Project } from './project.js';
+import { History, recordHistory } from './history.js';
+import { addNote } from './notes.js';
 import { emit } from './events.js';
-import { setStatus, closeModal, showOsd } from './ui.js';
+import { setStatus, closeModal } from './ui.js';
 import { matchAction } from './keybinding.js';
-import { getNoteJump, getFirstLastCue, getAdjacentCue, getCueInMinusFrames, getBoundaryStep } from './timeline-navigation.js';
-
-/* ===== JKL 穿梭輪 ======================================================= */
-/* _jklSpeed: 0=暫停, 1=正常播放, 2=2x播放, -1=1x倒帶, -2=2x倒帶 */
-let _jklSpeed = 0;
-let _jklTimer = null;
-
-function jklClear() {
-  if (_jklTimer) { clearInterval(_jklTimer); _jklTimer = null; }
-}
-function updateSpeedIndicator() {
-  const el = document.getElementById('speedIndicator');
-  if (!el) return;
-  if (_jklSpeed === 0 || _jklSpeed === 1) {
-    const rate = Math.round((video.playbackRate || 1) * 100) / 100;
-    el.textContent = rate + 'x';
-    el.style.color = Math.abs(rate - 1) < 0.001 ? 'var(--text-faint)' : 'var(--accent)';
-  } else if (_jklSpeed < 0) {
-    el.textContent = _jklSpeed + 'x';
-    el.style.color = '#ff4444';
-  } else {
-    el.textContent = _jklSpeed + 'x';
-    el.style.color = '#44ff44';
-  }
-}
-function resetPlaybackSpeed() {
-  jklClear();
-  _jklSpeed = 0;
-  Media.setRate(1);
-  updateSpeedIndicator();
-}
-/* 播放速度的右鍵選單使用這個入口，先結束 JKL 倒帶／穿梭計時器，
-   再套用使用者指定的正向速度，避免兩套控制彼此覆寫。 */
-function setManualPlaybackSpeed(rate) {
-  jklClear();
-  _jklSpeed = 0;
-  Media.setRate(rate);
-  updateSpeedIndicator();
-}
-function jklApply() {
-  jklClear();
-  if (_jklSpeed === 0) {
-    Media.pause();
-    Media.setRate(1);
-  } else if (_jklSpeed > 0) {
-    Media.setRate(_jklSpeed);
-    if (!Media.playing) Media.play();
-  } else {
-    // 負速度：暫停影片，用 interval 逐格倒退
-    Media.pause();
-    Media.setRate(1);
-    const fps = 30, step = Math.abs(_jklSpeed) / fps;
-    const capturedSpeed = _jklSpeed;
-    _jklTimer = setInterval(() => {
-      if (_jklSpeed !== capturedSpeed) { jklClear(); return; }
-      const t = Media.displayTime();
-      if (t <= 0) { jklClear(); _jklSpeed = 0; setStatus('已到開頭', ''); return; }
-      const newT = Math.max(0, t - step);
-      Media.seek(newT);
-      updatePlayhead();
-      emit('playhead:ensure');
-      emit('render:videoSub');
-      if (!video.src) {
-        const displayT=Media.displayTime();
-        $('tcCur').textContent = secToEncore(displayT, State.fps, State.dropFrame);
-        $('seekBar').value = Math.round(displayT * 1000);
-      }
-      Media.scrubAudio(newT, Math.max(step, 0.08));
-    }, 1000 / fps);
-  }
-  const spd = Math.abs(_jklSpeed);
-  const label = _jklSpeed === 0 ? '暫停' : (_jklSpeed > 0 ? `▶ ${spd}x 正播` : `◀ ${spd}x 倒帶`);
-  const osd = _jklSpeed === 0 ? '⏸' : (_jklSpeed > 0 ? `▶ ${spd}×` : `◀ ${spd}×`);
-  setStatus(label, _jklSpeed !== 0 ? 'ok' : '');
-  showOsd(osd);
-  updateSpeedIndicator();
-}
-/* 停止並重置 JKL（從外部呼叫，例如時間軸拖曳） */
-function jklReset() {
-  jklClear();
-  _jklSpeed = 0;
-  Media.pause();
-  Media.setRate(1);
-  updateSpeedIndicator();
-}
-
-/* ===== 7. 鍵盤 (I/O 上字幕) =========================================== */
-/* I = 設定目前被選字幕的「開始點」為播放點；無選取則新建一條 */
-async function setIn() {
-  await ensureProjectSaved();
-  if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
-  let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
-  let c = State.cues.find(x => x.id === State.selectedId);
-  if (!c) {
-    const tk = State.tracks.length === 0 ? 0 : Math.min(State.tracks.length - 1, Math.max(0, State.listTrack));
-    c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', tk, { historyLabel:'新增字幕(I)' });
-    if(!c) return;
-    setStatus('已新增字幕，起點 ' + fmtClock(t), 'ok');
-    return;
-  }
-  if (cueTrackLocked(c, '調整字幕起點')) return;
-  const wasUntimed = c.timed === false;
-  c.start = t;
-  if (State.subMode) {
-    // 先清理其他 _tempEnd 字幕（確保同一時間最多一條帶 _tempEnd）
-    State.cues.forEach(cue => {
-      if (cue._tempEnd && cue.id !== c.id) {
-        cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
-        delete cue._tempEnd;
-      }
-    });
-    c.end = (State.duration && State.duration > c.start) ? State.duration : c.start + 3600;
-    c._tempEnd = true;
-    // 記錄此字幕曾被 I 鍵設定，用於退出 subMode 時安全網清理
-    if (!State._subModeTouchedIds) State._subModeTouchedIds = new Set();
-    State._subModeTouchedIds.add(c.id);
-  } else if (wasUntimed || c.end <= c.start) {
-    c.end = snapTimeToFrame(c.start + 0.5, State.fps, State.dropFrame);
-  }
-  c.timed = true;
-  commitCueTimeEdit(c, 'start'); // 局部更新（順序不變時不重建整列）
-  recordHistory('設定起點 I' + cueSuffix(c)); setStatus('起點 ' + fmtClock(t), 'ok');
-}
-/* O = 設定目前被選字幕的「結束點」為播放點 */
-async function setOut() {
-  await ensureProjectSaved();
-  if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
-  let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
-  const c = State.cues.find(x => x.id === State.selectedId);
-  if (!c) { setStatus('請先選擇字幕（或按 I 新建）', 'err'); return; }
-  if (cueTrackLocked(c, '調整字幕終點')) return;
-
-  const wasUntimed = c.timed === false;
-  if (wasUntimed) {
-    c.end = t;
-    c.start = snapTimeToFrame(Math.max(0, t - 0.5), State.fps, State.dropFrame);
-  } else {
-    if (t <= c.start) { setStatus('終點不得早於或等於起點', 'err'); return; }
-    c.end = t;
-  }
-
-  c.timed = true;
-  delete c._tempEnd;
-  commitCueTimeEdit(c, 'end'); // 局部更新（end 不影響排序，必走局部）
-  recordHistory('設定終點 O' + cueSuffix(c)); setStatus('終點 ' + fmtClock(c.end), 'ok');
-  autoAdvanceSubMode();
-}
-/* 上字幕模式：O 後自動選取下一句，全部完成則關閉模式 */
-function autoAdvanceSubMode() {
-  if (!State.subMode || !State._subModeSequence) return;
-
-  const seq = State._subModeSequence;
-  const currIdx = seq.indexOf(State.selectedId);
-
-  if (currIdx >= 0) {
-    let nextIdx = currIdx + 1;
-    while (nextIdx < seq.length) {
-      const nextId = seq[nextIdx];
-      // 確保該 ID 仍存在，並且與當前選擇同軌道
-      const nextCue = State.cues.find(c => c.id === nextId);
-      const currCue = State.cues.find(c => c.id === State.selectedId);
-      if (nextCue && currCue && (nextCue.track || 0) === (currCue.track || 0)) {
-        selectCueSingle(nextId, false);
-        setStatus(`🎯 上字幕 (依原順序) — 按 I 設起點`, 'ok');
-        return;
-      }
-      nextIdx++;
-    }
-  }
-
-  selectCueSingle(null);
-  setStatus('🎯 上字幕模式：已無下一句，取消選取 ✓', 'ok');
-}
-
-/* ===== 媒體片段邊界步進 =================================================
-   上／下箭頭用於播放頭在影像、外部音訊片段的頭尾間跳轉。字幕邊界仍保留給
-   預設的 E / D（或使用者自行重新綁定的快捷鍵），因此不會混淆兩種剪輯操作。 */
-const MEDIA_BOUNDARY_EPS = 0.05;
-
-function finiteTimelineTime(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.max(0, n) : fallback;
-}
-
-function externalPlacementBoundaries(asset) {
-  if (!asset || asset.timelineVisible === false) return [];
-  // 支援目前的一來源一片段格式，也預留給同一音源被切成多個 placement 的格式。
-  const placements = Array.isArray(asset.placements) && asset.placements.length ? asset.placements : [asset];
-  const points = [];
-  for (const placement of placements) {
-    if (!placement || placement.timelineVisible === false) continue;
-    const start = finiteTimelineTime(placement.offset ?? asset.offset);
-    const inPoint = finiteTimelineTime(placement.in ?? asset.in);
-    const duration = finiteTimelineTime(placement.duration ?? asset.duration);
-    const rawOut = Number(placement.out ?? asset.out);
-    const outPoint = Number.isFinite(rawOut) && rawOut >= inPoint ? rawOut : duration;
-    const end = start + Math.max(0, outPoint - inPoint);
-    points.push(start);
-    if (end > start + MEDIA_BOUNDARY_EPS) points.push(end);
-  }
-  return points;
-}
-
-function mediaBoundaryPoints() {
-  const points = [];
-  
-  const onlyVideo = State.activeTrackKind === 'video';
-  const vtrackIdx = onlyVideo ? (State.selectedClipId ? (Seq.byId(State.selectedClipId)?.vtrack || 0) : State.activeVtrack) : null;
-
-  const onlyAudio = State.activeTrackKind === 'audio';
-  const selectedAudioId = onlyAudio ? (State.selectedAudioClipId || State.activeAudioTrackId) : null;
-
-  const onlySub = State.activeTrackKind === 'sub';
-  const subTrackIdx = onlySub ? State.listTrack : null;
-
-  if (onlySub) {
-    for (const cue of State.cues) {
-      if ((cue.track || 0) !== subTrackIdx) continue;
-      if (cue.timed === false) continue;
-      points.push(cue.start);
-      points.push(cue.end);
-    }
-  } else {
-    for (const clip of State.clips) {
-      if (!clip || clip.timelineVisible === false) continue;
-      if (onlyVideo && vtrackIdx != null && (clip.vtrack || 0) !== vtrackIdx) continue;
-      if (onlyAudio) {
-        if (clip.type === 'image' || clip.audioDetached) continue;
-        const srcId = clip.audioSourceId || clip.audioSrc || (clip.primary ? 'video' : ('clip:'+clip.id));
-        if (selectedAudioId != null && srcId !== selectedAudioId) continue;
-      }
-      const start = finiteTimelineTime(clip.offset);
-      const end = Number(Seq.clipEnd(clip));
-      points.push(start);
-      if (Number.isFinite(end) && end > start + MEDIA_BOUNDARY_EPS) points.push(end);
-    }
-    
-    for (const asset of (Media.externalAudio?.list?.() || [])) {
-      if (onlyVideo) continue; // If a video track is selected, ignore audio clips
-      if (onlyAudio && selectedAudioId != null && asset.id !== selectedAudioId && asset.audioSourceId !== selectedAudioId && asset.audioSrc !== selectedAudioId) continue;
-      points.push(...externalPlacementBoundaries(asset));
-    }
-  }
-
-  points.sort((a, b) => a - b);
-  // 同一時間點可同時是數個影像／音訊片段邊界；按一次只需停一次。
-  return points.reduce((unique, point) => {
-    if (!Number.isFinite(point)) return unique;
-    if (!unique.length || Math.abs(point - unique[unique.length - 1]) > MEDIA_BOUNDARY_EPS) unique.push(point);
-    return unique;
-  }, []);
-}
-
-function stepMediaBoundary(dir) {
-  const points = mediaBoundaryPoints();
-  if (!points.length) return false;
-  const current = Media.displayTime();
-  const target = dir > 0
-    ? points.find(point => point > current + MEDIA_BOUNDARY_EPS)
-    : [...points].reverse().find(point => point < current - MEDIA_BOUNDARY_EPS);
-  if (target == null) return false;
-  Media.seek(target);
-  updatePlayhead();
-  emit('playhead:ensure');
-  updateNoteActive(target);
-  emit('render:videoSub');
-  return true;
-}
+import {
+  jklClear,
+  jklApply,
+  jklReset,
+  getJklSpeed,
+  setJklSpeed,
+  shuttleRewind,
+  shuttlePause,
+  shuttleForward,
+  togglePlayPause,
+  stepFrame,
+  resetPlaybackSpeed,
+  setManualPlaybackSpeed,
+  updateSpeedIndicator,
+  nudge,
+  seekHome,
+  seekEnd,
+  jumpToNote,
+  jumpToFirstLastCue,
+  jumpToAdjacentCue,
+  jumpToCueInMinusFrames,
+  stepBoundary,
+  stepMediaBoundary,
+  setIn,
+  setOut,
+} from './transport-controller.js';
 
 const _keysPressed = new Set();
 window.addEventListener('keyup', e => {
   _keysPressed.delete(e.key.toLowerCase());
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    if (getJklSpeed() !== 0) jklReset();
+  }
 });
 
 window.addEventListener('keydown', e => {
@@ -346,30 +94,27 @@ window.addEventListener('keydown', e => {
       drawTimeline(); return;
     }
   }
-  /* 比對規則（含數字鍵盤那套約定）住在 src/keybinding.js——設定視窗的錄製與
-     重複檢查用的是同一份。兩邊各寫一套時 NumpadEnter 會被 {key:'enter'} 蓋掉。 */
+
   const action = matchAction(State.keymap, e);
   if (!action) return;
 
   switch (action) {
     case 'toggle_play_pause':
       e.preventDefault();
-      jklClear(); _jklSpeed = 0; Media.setRate(1); updateSpeedIndicator();
-      Media.toggle();
-      setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : '');
+      togglePlayPause();
       break;
     case 'rewind':
       e.preventDefault();
-      if (_jklSpeed >= 0) _jklSpeed = -1;
-      else _jklSpeed = Math.max(-16, _jklSpeed - 0.5);
-      jklApply(); break;
+      shuttleRewind();
+      break;
     case 'pause':
-      e.preventDefault(); _jklSpeed = 0; jklApply(); break;
+      e.preventDefault();
+      shuttlePause();
+      break;
     case 'forward':
       e.preventDefault();
-      if (_jklSpeed <= 0) _jklSpeed = 1;
-      else _jklSpeed = Math.min(16, _jklSpeed + 0.5);
-      jklApply(); break;
+      shuttleForward();
+      break;
     case 'zoom_out': e.preventDefault(); setZoom(State.pxPerSec * 0.77); break;
     case 'zoom_in': e.preventDefault(); setZoom(State.pxPerSec * 1.3); break;
     case 'zoom_fit':
@@ -388,11 +133,6 @@ window.addEventListener('keydown', e => {
       if (sd) { const show = sd.style.display === 'none' || !sd.style.display; sd.style.display = show ? 'flex' : 'none'; if (show) setTimeout(() => document.getElementById('searchInput')?.focus(), 20); }
       break;
     case 'toggle_sub_mode': e.preventDefault(); emit('action', 'sub-mode'); break;
-    /* mark_in / mark_out / mark_clear 三個 case 已移除：它們送出的
-       'mark-in' / 'mark-out' / 'mark-clear' 從來沒有對應的指令，而且
-       State.defaultKeymap 裡也沒有任何鍵綁到這三個動作——兩端都是死的，
-       所以沒有人發現。真正在用的是 exp_in / exp_out / exp_clear。
-       （指令表資料化後由 tests/commands.test.js 擋住這種兩端不對稱。） */
     case 'toggle_safe_frame': e.preventDefault(); emit('action', 'safe-frame'); break;
     case 'screenshot': e.preventDefault(); emit('action', 'screenshot'); break;
     case 'screenshot_tc': e.preventDefault(); emit('action', 'screenshot_tc'); break;
@@ -403,17 +143,13 @@ window.addEventListener('keydown', e => {
     case 'set_out': e.preventDefault(); setOut(); break;
     case 'nudge_left_1f':
       e.preventDefault();
-      if (Media.playing) { jklClear(); _jklSpeed = 0; Media.pause(); setStatus('⏸ 暫停', ''); }
-      if (e.repeat) { if (_jklSpeed >= 0) { _jklSpeed = -1; jklApply(); } }
-      else nudge(-1 / getExactFps(State.fps || 30));
+      stepFrame(-1, e.repeat);
       break;
     case 'nudge_left_1s': e.preventDefault(); nudge(-1); break;
     case 'nudge_left_5s': e.preventDefault(); nudge(-5); break;
     case 'nudge_right_1f':
       e.preventDefault();
-      if (Media.playing) { jklClear(); _jklSpeed = 0; Media.pause(); setStatus('⏸ 暫停', ''); }
-      if (e.repeat) { if (_jklSpeed <= 0) { _jklSpeed = 1; jklApply(); } }
-      else nudge(1 / getExactFps(State.fps || 30));
+      stepFrame(1, e.repeat);
       break;
     case 'nudge_right_1s': e.preventDefault(); nudge(1); break;
     case 'nudge_right_5s': e.preventDefault(); nudge(5); break;
@@ -421,13 +157,11 @@ window.addEventListener('keydown', e => {
     case 'next_note': e.preventDefault(); jumpToNote(1); break;
     case 'seek_home': e.preventDefault(); seekHome(); break;
     case 'seek_end': e.preventDefault(); seekEnd(); break;
-    case 'prev_frame': e.preventDefault(); if (Media.playing) Media.pause(); nudge(-1 / getExactFps(State.fps || 30)); break;
-    case 'next_frame': e.preventDefault(); if (Media.playing) Media.pause(); nudge(1 / getExactFps(State.fps || 30)); break;
+    case 'prev_frame': e.preventDefault(); stepFrame(-1, false); break;
+    case 'next_frame': e.preventDefault(); stepFrame(1, false); break;
     case 'step_boundary_prev':
       e.preventDefault();
       if (Media.playing) Media.pause();
-      // 預設的 ↑ / ↓ 是媒體剪輯點；E / D 仍維持舊的字幕邊界步進（含選取）。
-      // 依據使用者需求，任何軌道（視訊、音訊、字幕）的 ↑ / ↓ 都純粹在該軌切換播放點（不選取）。
       if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         stepMediaBoundary(-1);
       } else {
@@ -542,105 +276,14 @@ window.addEventListener('keydown', e => {
       break;
   }
 });
-window.addEventListener('keyup', e => {
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { if (_jklSpeed !== 0) jklReset(); }
-});
-function nudge(d) {
-  if (Media.playing) {
-    jklClear();
-    _jklSpeed = 0;
-    Media.pause();
-    setStatus('⏸ 暫停', '');
-  }
-  // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點（暫停時為已對齊幀格的 _lastSeekTime）
-  // 為基準，避免讀 video.currentTime 的浮點 ε 經 seek 重新 round 後被放大，
-  // 造成逐格時跳兩格／退不動（29.97fps 尤甚）
-  const t = Media.displayTime() + d;
-  Media.seek(t);
-  updatePlayhead();
-  emit('playhead:ensure');
-  updateNoteActive(t);
-  if (!Media.playing && Math.abs(d) < 0.2) {
-    Media.scrubAudio(t);
-  }
-}
-function seekHome() { Media.seek(0); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(0); }
-function seekEnd() { const t = State.duration || 0; Media.seek(t); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(t); }
 
-/* Ctrl+左/右：跳到上一個/下一個備註時間點 */
-function jumpToNote(dir) {
-  const targetTime = getNoteJump({ notes: State.notes, currentTime: Media.displayTime(), dir });
-  if (targetTime === null) return;
-  Media.seek(targetTime); updatePlayhead(); emit('playhead:ensure'); updateNoteActive(targetTime);
-}
-
-/* Shift+Home/End：跳到同軌第一句 / 最後一句並選取 */
-function jumpToFirstLastCue(dir) {
-  const target = getFirstLastCue({ cues: State.cues, listTrack: State.listTrack, dir });
-  if (!target) return;
-  selectCueSingle(target.id, false);
-  Media.seek(target.start);
-  updatePlayhead(); emit('playhead:ensure');
-}
-
-/* Ctrl+上/下：跳到同軌上一句/下一句的起點並選取 */
-function jumpToAdjacentCue(dir) {
-  const target = getAdjacentCue({ 
-    cues: State.cues, 
-    selectedId: State.selectedId, 
-    listTrack: State.listTrack, 
-    activeSubTrack: State.activeSubTrack, 
-    currentTime: Media.displayTime(), 
-    isPlaying: Media.playing, 
-    dir 
-  });
-  if (!target) return;
-  if (Media.playing) {
-    deselect('sub');
-    refreshSelectionUI();
-    const stSel = document.getElementById('stSel');
-    if (stSel) stSel.textContent = '';
-  } else {
-    selectCueSingle(target.id, false);
-  }
-  Media.seek(target.start);
-  updatePlayhead(); emit('playhead:ensure');
-}
-
-function jumpToCueInMinusFrames(dir, frames) {
-  const result = getCueInMinusFrames({
-    cues: State.cues,
-    selectedId: State.selectedId,
-    listTrack: State.listTrack,
-    currentTime: Media.displayTime(),
-    fps: State.fps,
-    dir,
-    frames
-  });
-  if (!result) return;
-  selectCueSingle(result.targetCue.id, false);
-  Media.seek(result.targetTime);
-  updatePlayhead(); emit('playhead:ensure');
-}
-
-function stepBoundary(dir) {
-  focusTrackKind('sub');
-  const result = getBoundaryStep({
-    cues: State.cues,
-    selectedId: State.selectedId,
-    listTrack: State.listTrack,
-    currentTime: Media.displayTime(),
-    dir,
-    eps: 0.05
-  });
-
-  if (result) {
-    selectCueSingle(result.targetId);
-    State.activeEdge = result.targetEdge;
-    Media.seek(result.targetTime);
-    emit('playhead:ensure');
-    updatePlayhead();
-  }
-}
-
-export { setIn, setOut, nudge, stepBoundary, stepMediaBoundary, jklReset, resetPlaybackSpeed, setManualPlaybackSpeed };
+export {
+  setIn,
+  setOut,
+  nudge,
+  stepBoundary,
+  stepMediaBoundary,
+  jklReset,
+  resetPlaybackSpeed,
+  setManualPlaybackSpeed,
+};

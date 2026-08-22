@@ -724,8 +724,10 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 @keyframes pulse{50%{opacity:.3}}
 
 /* toast / modal */
-.toast{position:fixed;bottom:60px;left:50%;transform:translateX(-50%) translateY(10px);background:var(--panel2);border:1px solid rgba(255,255,255,0.1);
-  color:var(--text);padding:10px 20px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.8), 0 0 12px rgba(217,119,6,0.15);z-index:1000;font-size:13px;opacity:0;
+.toast{position:fixed;bottom:60px;left:50%;transform:translateX(-50%) translateY(10px);
+  background:linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%);border:1px solid #c4b5fd;
+  color:#2e1065;font-weight:600;padding:10px 22px;border-radius:8px;
+  box-shadow:0 8px 24px rgba(0,0,0,0.6), 0 0 16px rgba(168,85,247,0.35);z-index:1000;font-size:13px;letter-spacing:0.3px;opacity:0;
   transition:opacity 0.25s cubic-bezier(0.16,1,0.3,1), transform 0.25s cubic-bezier(0.16,1,0.3,1);pointer-events:none;max-width:80%}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 @keyframes modalScaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }

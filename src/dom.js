@@ -6,13 +6,12 @@
 ============================================================================== */
 /* SUB Tool — DOM 元素參照 */
 /* DOM 快捷 */
-const $ = id => document.getElementById(id);
-const video   = $('video');
-const tlScroll= $('tlScroll');
-const tlLayer = $('tlLayer');
-const tlTracks= $('tlTracks');
-const rulerCv = $('rulerCanvas');
-const sublist=$('sublist');
-const imageLayer=$('imageLayer');
+const $ = id => (typeof document !== 'undefined' ? document.getElementById(id) : null);
+const video   = typeof document !== 'undefined' ? $('video') : null;
+const tlScroll= typeof document !== 'undefined' ? $('tlScroll') : null;
+const tlLayer = typeof document !== 'undefined' ? $('tlLayer') : null;
+const tlTracks= typeof document !== 'undefined' ? $('tlTracks') : null;
+const rulerCv = typeof document !== 'undefined' ? $('rulerCanvas') : null;
+const sublist = typeof document !== 'undefined' ? $('sublist') : null;
+const imageLayer = typeof document !== 'undefined' ? $('imageLayer') : null;
 export { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist, imageLayer };
-

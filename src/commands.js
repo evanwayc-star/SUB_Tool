@@ -1,25 +1,68 @@
+/* ==============================================================================
+   SUB Tool — 指令註冊與派送中心 (Command Registry & Dispatch)
+   ==============================================================================
+   深層模組：集中註冊並派送全專案指令，直接串接各領域核心模組。
+   ============================================================================== */
 import { emit } from './events.js';
-import { IS_DESKTOP } from './state.js';
+import { State, IS_DESKTOP, DESK } from './state.js';
+import { Media } from './media.js';
+import { AudioRouting } from './audio-routing.js';
 import { runVideoExportCommand } from './export-capability.js';
-import { showToast, openModal, closeModal } from './ui.js';
+import { showToast, openModal, closeModal, togglePanel, openCacheDialog } from './ui.js';
 import { showSettingsModal } from './settings.js';
 import { importSub, showExportDialog, showExportVideoDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
-import { renderCheckPanel } from './subtitles.js';
+import { renderCheckPanel, deleteSelected } from './subtitles.js';
+import {
+  addCueRelative,
+  trimTrackSpaces,
+  removeSrtTags,
+  toggleSubMode,
+  toggleAutoSelect,
+  toggleOverwriteMode,
+  toggleOverwriteKeep,
+  doCopyTrack,
+  doCompareTrack,
+} from './subtitle-model.js';
+import {
+  searchNext,
+  searchPrev,
+  searchClear,
+  doSearchSelectAll,
+  replaceOne,
+  replaceAll,
+} from './subtitle-search.js';
+import {
+  togglePlayPause,
+  nudge,
+  setIn,
+  setOut,
+  setExportIn,
+  setExportOut,
+  clearExport,
+} from './transport-controller.js';
+import {
+  doAddTrack,
+  zoomIn,
+  zoomOut,
+  toggleZoomFit,
+  toggleVideoTracks,
+  toggleAllVisibility,
+  toggleAllLock,
+} from './timeline.js';
+import {
+  openMedia,
+  openProject,
+  saveProject,
+  saveAsProject,
+  startNewProject,
+} from './project.js';
+import { takeScreenshot } from './screenshot-target.js';
+import { copySelectedStyle, pasteStyleToSelected } from './style-commands.js';
 import { addNote, renderNotes, clearAllNotes, exportNotes } from './notes.js';
 import { renderMixer, mixerReset, mixerMuteAll } from './mixer.js';
-import { togglePanel } from './actions/panel-actions.js';
-import { takeScreenshot } from './actions/screenshot-actions.js';
-import { openCacheDialog } from './actions/cache-actions.js';
-import { copySelectedStyle, pasteStyleToSelected } from './actions/style-actions.js';
-import { doCopyTrack, doCompareTrack } from './actions/track-actions.js';
 import { toggleSafeFrame, toggleTimecodeWatermark, _syncMpvPanel } from './video-renderer.js';
 import { History, renderHistory } from './history.js';
 import { $ } from './dom.js';
-
-import * as ProjectActions from './actions/project-actions.js';
-import * as PlaybackActions from './actions/playback-actions.js';
-import * as TimelineActions from './actions/timeline-actions.js';
-import * as SubtitleActions from './actions/subtitle-actions.js';
 
 const CLOSE_PANELS = {
   'close-shift': 'shiftPanel',
@@ -33,11 +76,11 @@ function createCommands() {
 
   const table = {
     // Project & Media
-    'open-media': ProjectActions.openMedia,
-    'open-project': ProjectActions.openProject,
-    'save-project': ProjectActions.saveProject,
-    'save-as-project': ProjectActions.saveAsProject,
-    'new': ProjectActions.startNewProject,
+    'open-media': openMedia,
+    'open-project': openProject,
+    'save-project': saveProject,
+    'save-as-project': saveAsProject,
+    'new': startNewProject,
     'cache-manage': openCacheDialog,
 
     // Subtitle I/O
@@ -50,12 +93,26 @@ function createCommands() {
       reportError: err => { console.error('匯出影片錯誤', err); showToast('匯出影片錯誤：' + err.message); },
     }),
     'export-notes': exportNotes,
-    'queue-monitor': PlaybackActions.openQueueMonitor,
-    'audio-project-settings': PlaybackActions.openAudioProjectSettings,
+    'queue-monitor': () => {
+      if (!IS_DESKTOP || typeof DESK?.openQueueMonitor !== 'function') { showToast('匯出佇列只在桌面版提供'); return; }
+      DESK.openQueueMonitor();
+    },
+    'audio-project-settings': () => {
+      AudioRouting.openOutputSettings();
+    },
 
     // Clips
-    'split-clip': PlaybackActions.splitClip,
-    'unlink-clip-audio': PlaybackActions.unlinkClipAudio,
+    'split-clip': () => {
+      if (State.selectedAudioClipId && typeof Media.splitExternalAudio === 'function')
+        void Media.splitExternalAudio(State.selectedAudioClipId, Media.displayTime());
+      else Media.splitClipAt(Media.displayTime());
+    },
+    'unlink-clip-audio': () => {
+      const id = State.selectedClipId || Media.activeClip?.()?.id;
+      if (!id) { showToast('請先選取要解除連結的影片段'); return; }
+      if (typeof Media.detachClipAudio !== 'function') { showToast('影音解除連結功能尚未就緒'); return; }
+      void Media.detachClipAudio(id);
+    },
 
     // Timecode
     'fps-convert': showFpsConvertDialog,
@@ -67,41 +124,41 @@ function createCommands() {
     'dur-adj-pct': () => applyDurAdjPct(),
 
     // Subtitle Mode
-    'sub-mode': () => SubtitleActions.toggleSubMode(false),
+    'sub-mode': () => toggleSubMode(false),
 
     // Playback
-    'playpause': PlaybackActions.togglePlayPause,
-    'back1': PlaybackActions.back1,
-    'fwd1': PlaybackActions.fwd1,
-    'frame-back': PlaybackActions.frameBack,
-    'frame-fwd': PlaybackActions.frameFwd,
-    'set-in': PlaybackActions.setInPoint,
-    'set-out': PlaybackActions.setOutPoint,
+    'playpause': togglePlayPause,
+    'back1': () => nudge(-1),
+    'fwd1': () => nudge(1),
+    'frame-back': () => nudge(-1 / (State.fps || 30)),
+    'frame-fwd': () => nudge(1 / (State.fps || 30)),
+    'set-in': setIn,
+    'set-out': setOut,
 
     // Export Range
-    'exp-in': PlaybackActions.setExportIn,
-    'exp-out': PlaybackActions.setExportOut,
-    'exp-clear': PlaybackActions.clearExport,
+    'exp-in': setExportIn,
+    'exp-out': setExportOut,
+    'exp-clear': clearExport,
 
     // Subtitle Edit
-    'add-cue-above': SubtitleActions.doAddCueAbove,
-    'add-cue-below': SubtitleActions.doAddCueBelow,
-    'del-cue': SubtitleActions.doDeleteSelectedCues,
-    'trim-track': SubtitleActions.doTrimTrackSpaces,
+    'add-cue-above': () => addCueRelative(-1),
+    'add-cue-below': () => addCueRelative(1),
+    'del-cue': () => deleteSelected(),
+    'trim-track': () => trimTrackSpaces(),
     'copy-style': copySelectedStyle,
     'paste-style': pasteStyleToSelected,
-    'remove-srt-tags': SubtitleActions.removeSrtTags,
+    'remove-srt-tags': removeSrtTags,
 
     // Timeline & Tracks
-    'add-track': TimelineActions.doAddTrack,
+    'add-track': doAddTrack,
     'copy-track': doCopyTrack,
     'compare-track': doCompareTrack,
-    'zoom-in': TimelineActions.zoomIn,
-    'zoom-out': TimelineActions.zoomOut,
-    'zoom-fit': TimelineActions.toggleZoomFit,
-    'toggle-vtracks': TimelineActions.toggleVideoTracks,
-    'toggle-all-vis': TimelineActions.toggleAllVisibility,
-    'toggle-all-lock': TimelineActions.toggleAllLock,
+    'zoom-in': zoomIn,
+    'zoom-out': zoomOut,
+    'zoom-fit': toggleZoomFit,
+    'toggle-vtracks': toggleVideoTracks,
+    'toggle-all-vis': toggleAllVisibility,
+    'toggle-all-lock': toggleAllLock,
 
     // History
     'undo': () => History.undo(),
@@ -139,21 +196,21 @@ function createCommands() {
     },
     'search-open': () => { const sd = $('searchDialog'); if (sd) { sd.style.display = 'flex'; $('searchInput').focus(); emit('mpv:sync'); } },
     'search-close': () => { const sd = $('searchDialog'); if (sd) { sd.style.display = 'none'; emit('mpv:sync'); } },
-    'search-next': SubtitleActions.searchNext,
-    'search-prev': SubtitleActions.searchPrev,
-    'search-clear': SubtitleActions.searchClear,
-    'search-select-all': SubtitleActions.doSearchSelectAll,
-    'replace-one': SubtitleActions.replaceOne,
-    'replace-all': SubtitleActions.replaceAll,
+    'search-next': searchNext,
+    'search-prev': searchPrev,
+    'search-clear': searchClear,
+    'search-select-all': doSearchSelectAll,
+    'replace-one': replaceOne,
+    'replace-all': replaceAll,
 
     // Settings / Dialogs
     'settings': showSettingsModal,
     'modal-close': closeModal,
 
     // Toggles
-    'toggle-auto-select': SubtitleActions.toggleAutoSelect,
-    'toggle-overwrite': SubtitleActions.toggleOverwriteMode,
-    'toggle-ow-keep': SubtitleActions.toggleOverwriteKeep,
+    'toggle-auto-select': toggleAutoSelect,
+    'toggle-overwrite': toggleOverwriteMode,
+    'toggle-ow-keep': toggleOverwriteKeep,
   };
 
   for (const [id, panel] of Object.entries(CLOSE_PANELS)) {

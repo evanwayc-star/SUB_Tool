@@ -539,22 +539,25 @@ export { showExportDialog, showFpsConvertDialog, showExportVideoDialog };
 
 import { Project } from './project.js';
 
-['dragover', 'dragenter'].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); $('videoWrap').classList.add('dragover'); }));
-['dragleave', 'drop'].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); if (ev !== 'drop' && e.relatedTarget) return; $('videoWrap').classList.remove('dragover'); }));
-document.addEventListener('drop', async e => {
-  e.preventDefault(); $('videoWrap').classList.remove('dragover');
-  const f = e.dataTransfer.files[0]; if (!f) return;
-  const ext = (f.name.split('.').pop() || '').toLowerCase();
-  if (['subtool', 'json'].includes(ext)) {
-    if(IS_DESKTOP&&typeof DESK.openDroppedProject==='function'){
-      const project=await DESK.openDroppedProject(f);
-      if(project) await Project.loadDesktop(project);
-    }else await Project.load(f);
-  }
-  else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
-  else if (IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)) {
-    const p = DESK.authorizeDroppedFile ? await DESK.authorizeDroppedFile(f) : DESK.getFilePath(f);
-    if (p) Media.openIncoming({ path: p }); else Media.openIncoming({ file: f });
-  }
-  else Media.openIncoming({ file: f });
-});
+if (typeof document !== 'undefined') {
+  ['dragover', 'dragenter'].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); $('videoWrap')?.classList.add('dragover'); }));
+  ['dragleave', 'drop'].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); if (ev !== 'drop' && e.relatedTarget) return; $('videoWrap')?.classList.remove('dragover'); }));
+  document.addEventListener('drop', async e => {
+    e.preventDefault(); $('videoWrap')?.classList.remove('dragover');
+    const f = e.dataTransfer.files[0]; if (!f) return;
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    if (['subtool', 'json'].includes(ext)) {
+      if(IS_DESKTOP&&typeof DESK.openDroppedProject==='function'){
+        const project=await DESK.openDroppedProject(f);
+        if(project) await Project.loadDesktop(project);
+      }else await Project.load(f);
+    }
+    else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
+    else if (IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)) {
+      const p = DESK.authorizeDroppedFile ? await DESK.authorizeDroppedFile(f) : DESK.getFilePath(f);
+      if (p) Media.openIncoming({ path: p }); else Media.openIncoming({ file: f });
+    }
+    else Media.openIncoming({ file: f });
+  });
+}
+

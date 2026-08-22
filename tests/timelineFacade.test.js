@@ -75,6 +75,7 @@ vi.mock('../src/time.js', () => ({
 
 vi.mock('../src/subtitles.js', () => ({
   selectCue: vi.fn(),
+  selectCueSingle: vi.fn(),
   refreshSelectionUI: vi.fn(),
   renderSubRow: vi.fn(),
   sortCues: vi.fn(),
@@ -156,15 +157,16 @@ describe('timeline public facade', () => {
     expect(Object.keys(timeline).sort()).toEqual([
       'ROW_H', 'RULER_H',
       'addTrack', 'clearClipSelection', 'closeClipGapLeft', 'cueNeighborBounds',
-      'deleteSelectedClip', 'drawRuler', 'drawTimeline', 'drawWave',
+      'deleteSelectedClip', 'doAddTrack', 'drawRuler', 'drawTimeline', 'drawWave',
       'fmtTick', 'layoutTimeline', 'moveSelectedToTrack',
       'niceStep', 'refreshTrackGutterActive', 'removeTrack', 'renderCueBlocks',
       'renderTrackRows', 'selectClip', 'setZoom',
       'showClipDuration', 'showClipFade', 'showCrossfade', 'showImageGeom',
       'snapTargets', 'snapVal',
-      'timeToX', 'trackFromY', 'tracksScrollTop', 'tracksTop',
-      'updatePlayhead', 'viewportW', 'xToTime', 'zoomFit', 'zoomFitVideo',
-    ]);
+      'timeToX', 'toggleAllLock', 'toggleAllVisibility', 'toggleVideoTracks', 'toggleZoomFit',
+      'trackFromY', 'tracksScrollTop', 'tracksTop',
+      'updatePlayhead', 'viewportW', 'xToTime', 'zoomFit', 'zoomFitVideo', 'zoomIn', 'zoomOut',
+    ].sort());
   });
 
   /* 只在繪製模組內部用到的名稱不該出現在接縫上；死碼更不該。 */

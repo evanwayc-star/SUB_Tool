@@ -799,4 +799,69 @@ const Project = {
   }
 };
 
-export { Project, ensureProjectSaved, isProjectGuardDone, resetProject, isProjectDirty, confirmDiscardUnsaved };
+async function openMedia({ relink: requestedRelink = null } = {}) {
+  const { pickMediaFiles, importDesktopMediaFiles, importBrowserMediaFiles } = await import('./loaders/media-loader.js');
+  const relink = requestedRelink || Project.pendingMediaRelink?.() || null;
+  if (relink) {
+    await Project.continueLoad(relink.generation, async isCurrent => {
+      const picked = IS_DESKTOP ? await DESK.openMedia() : await pickMediaFiles($('fileMedia'));
+      if (!isCurrent()) return;
+      if (IS_DESKTOP) await importDesktopMediaFiles(picked, relink);
+      else await importBrowserMediaFiles(picked, relink);
+    });
+  } else if (IS_DESKTOP) await importDesktopMediaFiles(await DESK.openMedia());
+  else await importBrowserMediaFiles(await pickMediaFiles($('fileMedia')));
+}
+
+async function openProject() {
+  const { pickFile } = await import('./util.js');
+  if (!await confirmDiscardUnsaved()) return;
+  if (IS_DESKTOP) { const r = await DESK.openProject(); if (r) Project.loadDesktop(r); }
+  else { const f = await pickFile($('fileProject')); if (f) Project.load(f); }
+}
+
+function saveProject() { Project.save(); }
+function saveAsProject() { Project.saveAs(); }
+
+function startNewProject() {
+  openModal('開新專案',
+    '<p>確定清空目前專案？字幕、備註與已載入的影音都將清除（未存檔的話）。</p>',
+    [{ label: '取消', act: closeModal },
+     { label: '確定清空', primary: true, act: () => {
+       closeModal();
+       return Project.startNewProject(async () => {
+         const { clearSelection, ensureTrackCount: ensureTk } = await import('./state.js');
+         const { video } = await import('./dom.js');
+         const { setFirstLoad } = await import('./video-renderer.js');
+         const { renderAudioTracks } = await import('./mixer.js');
+         const { toggleSubMode } = await import('./subtitle-model.js');
+         State.cues = []; State.notes = [];
+         clearSelection();
+         State.listTrack = 0; State.tracks = []; ensureTk(0);
+         if (State.subMode) toggleSubMode();
+         resetProject(); setFirstLoad(true);
+         video.pause(); video.removeAttribute('src'); video.load();
+         State.mediaName = ''; State.mediaPath = ''; State.mediaSize = 0;
+         Media.reset();
+         History.reset();
+         const nv = $('noVideo'); if (nv) nv.style.display = '';
+         emit('duration:known'); renderAudioTracks();
+         emit('render:listTrackSel'); emit('render:all'); renderNotes(); drawTimeline();
+         setStatus('新專案', 'ok');
+       });
+     } }]);
+}
+
+export {
+  Project,
+  ensureProjectSaved,
+  isProjectGuardDone,
+  resetProject,
+  isProjectDirty,
+  confirmDiscardUnsaved,
+  openMedia,
+  openProject,
+  saveProject,
+  saveAsProject,
+  startNewProject,
+};

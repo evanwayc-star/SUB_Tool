@@ -1,24 +1,51 @@
 /* ==============================================================================
-   SUB Tool — Module Architecture Protection ("src/events.js")
+   SUB Tool — 同步事件匯流排 (Synchronous Event Bus)
    ==============================================================================
-   【維護鐵律】本檔案已納入全專案終極防禦網。
-   所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作或狀態覆寫。
-============================================================================== */
-/* SUB Tool — 極簡同步事件匯流排（葉模組，零相依）
-   目的：讓低階模組只發送事件、不反向 import app.js 的渲染函式，
-   由 app.js 訂閱並呼叫對應函式，藉此切斷與協調層的雙向相依。
-   emit 為同步呼叫，語意等同直接呼叫原函式（順序、回傳時機不變）。 */
+   【架構與職責】
+   提供底層渲染與互動模組透過事件解耦（切斷對 `app.js` 的直接反向 import）。
+   
+   【不變量】
+   1. `emit` 為同步派發：派發順序與原直接函式呼叫完全一致。
+   2. 任何模組嚴禁 `import ... from './app.js'`（由 lint 靜態圍籬強制阻擋）。
+   ============================================================================== */
+
+/** @type {Map<string, Array<Function>>} */
 const _handlers = new Map();
 
-function on(evt, fn){
+/**
+ * 註冊事件監聽處理器。
+ * 
+ * @param {string} evt 事件名稱
+ * @param {Function} fn 事件處理函式
+ */
+function on(evt, fn) {
+  if (typeof fn !== 'function') return;
   let a = _handlers.get(evt);
-  if(!a){ a = []; _handlers.set(evt, a); }
+  if (!a) {
+    a = [];
+    _handlers.set(evt, a);
+  }
   a.push(fn);
 }
-function emit(evt, ...args){
+
+/**
+ * 同步派發事件至所有已註冊之處理器。
+ * 
+ * @param {string} evt 事件名稱
+ * @param {...any} args 傳遞給處理器之參數
+ */
+function emit(evt, ...args) {
   const a = _handlers.get(evt);
-  if(a) for(const fn of a) fn(...args);
+  if (a && a.length > 0) {
+    const listeners = a.slice();
+    for (const fn of listeners) {
+      try {
+        fn(...args);
+      } catch (error) {
+        console.error(`[EventBus] 處理事件 "${evt}" 發生未攔截錯誤:`, error);
+      }
+    }
+  }
 }
 
 export { on, emit };
-

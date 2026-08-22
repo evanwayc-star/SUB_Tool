@@ -1,12 +1,31 @@
+/* ==============================================================================
+   SUB Tool — 原生執行檔與編碼器偵測 (Native Tooling & Hardware Encoders)
+   ==============================================================================
+   【架構與職責】
+   負責跨平台（Windows、macOS）偵測 FFmpeg、FFprobe、MPV 執行檔路徑，
+   並根據目前作業系統與 GPU 支援情況，配置最合適的硬體加速與軟體編碼參數。
+   
+   【支援之編碼器】
+   - macOS: `h264_videotoolbox` (Apple Silicon / Intel VideoToolbox)
+   - Windows: `h264_nvenc` (NVIDIA), `h264_qsv` (Intel QuickSync), `h264_amf` (AMD), `libx264` (軟解後援)
+   ============================================================================== */
 'use strict';
 
 const path = require('path');
 const { spawnSync: nodeSpawnSync } = require('child_process');
 
+/** 去除陣列重複項與空值 */
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
+/**
+ * 取得指定原生工具（ffmpeg, ffprobe, mpv）在當前平台的候選搜尋路徑清單。
+ * 
+ * @param {string} tool 工具名稱 ('ffmpeg' | 'ffprobe' | 'mpv')
+ * @param {object} [options]
+ * @returns {string[]} 候選路徑陣列
+ */
 function nativeToolCandidates(tool, options = {}) {
   const platform = options.platform || process.platform;
   const arch = options.arch || process.arch;
@@ -57,6 +76,13 @@ function nativeToolCandidates(tool, options = {}) {
   ]);
 }
 
+/**
+ * 實際探測並驗證原生工具是否可用（執行 --version 或 -version 檢查 return code）。
+ * 
+ * @param {string} tool 工具名稱
+ * @param {object} [options]
+ * @returns {{path: string|null, attempts: Array<object>}} 探測結果與嘗試歷史
+ */
 function detectNativeTool(tool, options = {}) {
   const spawnSync = options.spawnSync || nodeSpawnSync;
   const versionArgs = options.versionArgs || (tool === 'mpv' ? ['--version'] : ['-version']);
@@ -84,6 +110,9 @@ function detectNativeTool(tool, options = {}) {
   return { path: null, attempts };
 }
 
+/**
+ * 取得打包發布時必須隨附的原生二進位清單。
+ */
 function bundledNativeRequirements(options = {}) {
   const platform = options.platform || process.platform;
   const arch = options.arch || process.arch;
@@ -107,12 +136,18 @@ function bundledNativeRequirements(options = {}) {
   throw new Error(`尚未支援 ${platform}/${arch} 的原生工具封裝`);
 }
 
+/**
+ * 依平台回傳優先嘗試的硬體加速 H.264 視訊編碼器清單。
+ */
 function videoEncoderCandidates(platform = process.platform) {
   if (platform === 'darwin') return ['h264_videotoolbox'];
   if (platform === 'win32') return ['h264_nvenc', 'h264_qsv', 'h264_amf'];
   return [];
 }
 
+/**
+ * 產生即時預覽 / Proxy 轉檔所需的 FFmpeg 快速編碼參數。
+ */
 function previewVideoEncoderArgs(encoderName) {
   switch (encoderName) {
     case 'h264_videotoolbox':
@@ -128,6 +163,9 @@ function previewVideoEncoderArgs(encoderName) {
   }
 }
 
+/**
+ * 產生正式交付匯出所需的 FFmpeg 視訊編碼參數（包含位元率與緩衝區控制）。
+ */
 function deliveryVideoEncoderArgs(encoderName, kbps) {
   const bitrate = `${kbps}k`;
   const bufferSize = `${kbps * 2}k`;
@@ -147,6 +185,7 @@ function deliveryVideoEncoderArgs(encoderName, kbps) {
   }
 }
 
+/** 檢查當前平台是否支援 MPV 視窗嵌入（目前僅限 Windows HWND 嵌入） */
 function mpvEmbeddingSupported(platform = process.platform) {
   return platform === 'win32';
 }

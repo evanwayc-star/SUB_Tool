@@ -1,17 +1,30 @@
+/* ==============================================================================
+   SUB Tool — 本機媒體資源自訂協定伺服器 (Local Resource Protocol Gateway)
+   ==============================================================================
+   【架構與職責】
+   提供渲染端（Renderer）透過安全 Capability Token 存取本機音視訊與圖檔資源。
+   
+   【安全鐵律】
+   1. 外部只看到不可猜測的 48 位元 Hex Token，絕不將本機絕對磁碟路徑暴露在 DOM/URL 中。
+   2. 每次 HTTP 請求（包含 Range 串流讀取）均即時透過 `FileAuthority` 重新校驗讀取權限。
+   3. 支援 HTTP 206 Partial Content (Range: bytes=start-end) 串流，確保 Web 播放器能快速 Seek。
+   4. BrowserWindow 毋須關閉 `webSecurity` 即可安全載入媒體。
+   ============================================================================== */
 'use strict';
 
-/* Renderer 可讀的本機資源閘道。
-   外部只看到不可猜、且不含磁碟路徑的 URL；路徑 identity、capability 重查、
-   MIME、Range 與串流都留在這個 module，BrowserWindow 不必再關閉 webSecurity。 */
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { Readable } = require('stream');
 const { fileURLToPath } = require('url');
 
+/** 本機媒體自訂協定名稱 */
 const LOCAL_RESOURCE_SCHEME = 'subtool-local';
+
+/** 本機媒體協定主機名稱 */
 const RESOURCE_HOST = 'resource';
 
+/** 副檔名與 Content-Type MIME 對應表 */
 const MIME_BY_EXTENSION = Object.freeze({
   '.aac': 'audio/aac',
   '.ass': 'text/x-ssa; charset=utf-8',
@@ -43,6 +56,10 @@ const MIME_BY_EXTENSION = Object.freeze({
   '.woff2': 'font/woff2',
 });
 
+/**
+ * 註冊特權協定（必須在 Electron app ready 事件前呼叫）。
+ * @param {import('electron').Protocol} protocolModule Electron protocol 模組
+ */
 function registerLocalResourceScheme(protocolModule) {
   protocolModule.registerSchemesAsPrivileged([{
     scheme: LOCAL_RESOURCE_SCHEME,
@@ -56,6 +73,13 @@ function registerLocalResourceScheme(protocolModule) {
   }]);
 }
 
+/**
+ * 解析 HTTP Range 標頭（僅支援單一 byte range）。
+ * 
+ * @param {string|null} value Range 標頭字串（例如 `bytes=0-1023` 或 `bytes=100-`）
+ * @param {number} size 檔案總位元組大小
+ * @returns {{start?: number, end?: number, unsatisfiable?: boolean}|null} 解析結果
+ */
 function parseSingleRange(value, size) {
   if (!value) return null;
   const match = /^bytes=(\d*)-(\d*)$/i.exec(value.trim());
@@ -79,6 +103,18 @@ function parseSingleRange(value, size) {
   return { start, end };
 }
 
+/**
+ * 建立本機媒體資源伺服器閘道。
+ * 
+ * @param {object} options
+ * @param {import('./file-authority').FileAuthority} options.fileAuthority
+ * @param {import('electron').Protocol} options.protocolModule
+ * @param {import('electron').Session} options.sessionModule
+ * @param {object} [options.fsModule=fs]
+ * @param {object} [options.pathModule=path]
+ * @param {Function} [options.randomBytes=crypto.randomBytes]
+ * @param {typeof Response} [options.ResponseClass=globalThis.Response]
+ */
 function createLocalResourceServer({
   fileAuthority,
   protocolModule,
@@ -104,7 +140,9 @@ function createLocalResourceServer({
     try {
       const resolved = pathModule.resolve(file);
       return caseInsensitivePaths ? resolved.toLowerCase() : resolved;
-    } catch (error) { return null; }
+    } catch (error) {
+      return null;
+    }
   };
 
   const responseHeaders = (file, length) => ({
@@ -123,15 +161,30 @@ function createLocalResourceServer({
     headers: { 'Cache-Control': 'no-store', 'Content-Length': '0' },
   });
 
+  /**
+   * 處理 subtool-local:// 協定之 HTTP 請求。
+   */
   async function handle(request) {
     let parsed;
-    try { parsed = new URL(request.url); } catch (error) { return denied(); }
+    try {
+      parsed = new URL(request.url);
+    } catch (error) {
+      return denied();
+    }
+
     const token = parsed.pathname.startsWith('/') ? parsed.pathname.slice(1) : parsed.pathname;
-    if (parsed.protocol !== `${LOCAL_RESOURCE_SCHEME}:` || parsed.hostname !== RESOURCE_HOST ||
-        !/^[a-f0-9]{48}$/.test(token) || parsed.search || parsed.hash) return denied();
+    if (
+      parsed.protocol !== `${LOCAL_RESOURCE_SCHEME}:` ||
+      parsed.hostname !== RESOURCE_HOST ||
+      !/^[a-f0-9]{48}$/.test(token) ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return denied();
+    }
 
     const entry = tokenToFile.get(token);
-    // URL 只證明 renderer 曾拿到 token；每一次實際讀取仍重新詢問唯一的 FileAuthority。
+    // URL 只證明 renderer 曾拿到 token；每一次實際讀取仍重新向 FileAuthority 授權校驗
     if (!entry || !fileAuthority.canExposeFileURL(entry.file)) return denied();
 
     const method = String(request.method || 'GET').toUpperCase();
@@ -153,7 +206,11 @@ function createLocalResourceServer({
     }
 
     let stat;
-    try { stat = await fsModule.promises.stat(entry.file); } catch (error) { return denied(); }
+    try {
+      stat = await fsModule.promises.stat(entry.file);
+    } catch (error) {
+      return denied();
+    }
     if (!stat.isFile()) return denied();
 
     const range = parseSingleRange(request.headers.get('range'), stat.size);
@@ -184,29 +241,31 @@ function createLocalResourceServer({
   }
 
   return Object.freeze({
+    /** 安裝自訂協定處理器與請求過濾器 */
     install() {
       if (installed) return;
       protocolModule.handle(LOCAL_RESOURCE_SCHEME, handle);
-      // file: 主頁本身在 Chromium 中仍可讀其他 file: URL，即使 webSecurity=true。
-      // 只准主行程宣告的固定 HTML 以 main-frame 載入；所有 fetch/media/sub-frame
-      // literal file: 請求一律取消，renderer 因此只能走上面的 capability protocol。
       sessionModule.defaultSession.webRequest.onBeforeRequest(
         { urls: ['file://*/*'] },
         (details, callback) => {
           let key = null;
-          try { key = canonicalPath(fileURLToPath(details.url)); } catch (error) {}
+          try {
+            key = canonicalPath(fileURLToPath(details.url));
+          } catch (error) {}
           callback({ cancel: details.resourceType !== 'mainFrame' || !key || !internalDocuments.has(key) });
         },
       );
       installed = true;
     },
 
+    /** 登記允許載入的主程式內部 HTML 檔案 */
     allowInternalDocument(file) {
       const key = canonicalPath(file);
       if (!key) throw new TypeError('internal document path must be valid');
       internalDocuments.add(key);
     },
 
+    /** 安全載入應用程式主視窗檔案 */
     loadApplicationDocument(window, builtDocument) {
       if (!window?.loadFile || !window?.loadURL) {
         return Promise.reject(new TypeError('application window loader is required'));
@@ -223,13 +282,20 @@ function createLocalResourceServer({
       return Promise.resolve(window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`));
     },
 
+    /**
+     * 為指定的本機檔案生成受控 capability URL。
+     * @param {string} file 檔案絕對路徑
+     * @returns {string|null} subtool-local:// 協定 URL
+     */
     urlFor(file) {
       if (!fileAuthority.canExposeFileURL(file)) return null;
       const key = canonicalPath(file);
       if (!key) return null;
       let token = fileToToken.get(key);
       if (!token) {
-        do { token = randomBytes(24).toString('hex'); } while (tokenToFile.has(token));
+        do {
+          token = randomBytes(24).toString('hex');
+        } while (tokenToFile.has(token));
         fileToToken.set(key, token);
         tokenToFile.set(token, { file: pathModule.resolve(file) });
       }

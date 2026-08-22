@@ -340,7 +340,8 @@ function createMpvHost(deps) {
         '--no-config', '--no-terminal', '--no-osc',
         '--no-input-default-bindings', '--input-vo-keyboard=no', '--cursor-autohide=no',
         '--vo=gpu', '--gpu-context=d3d11', '--hwdec=auto',
-        '--keep-open=always', '--pause', '--hr-seek=yes', '--sid=no',
+        '--keep-open=always', '--pause', '--hr-seek=yes', '--hr-seek-framedrop=no',
+        '--demuxer-max-bytes=150MiB', '--demuxer-readahead-secs=10', '--sid=no',
       ];
       const fontDir = fontsDir?.();
       if (fontDir) args.push('--sub-fonts-dir=' + fontDir, '--embeddedfonts=no');

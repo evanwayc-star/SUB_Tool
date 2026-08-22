@@ -1,36 +1,47 @@
 /* ==============================================================================
-   SUB Tool — 匯出檔名淨化（renderer 側，第一道防線）
+   SUB Tool — 匯出樣式檔名與路徑淨化 (Export Name Safety - Renderer First Line)
    ==============================================================================
+   【架構與職責】
+   渲染端第一道防線：處理樣式分組名稱與檔名淨化，防止路徑穿越（Path Traversal）。
+   
+   【安全鐵律】
+   1. 樣式匯出時的路徑包含來自使用者自訂的 `preset.group` 與 `preset.name`。
+   2. 資料夾名稱淨化：去除 Windows 禁用字元，並將純點字串（如 `..`）替換為底線 `_`。
+   3. 檔名淨化：去除禁用字元，後續接續 `.json` 副檔名。
+   4. 必須先對各段字串分別淨化後才進行 `join` 拼接，嚴禁拼接後整體淨化。
+   ============================================================================== */
 
-   常用樣式匯出時的檔名有一段來自【使用者匯入的 .json 內容】（preset.group）。
-   那段字串一路傳到主程序做 `path.join(選定資料夾, name)`——`path.join` 會把
-   `"../"` 正規化掉，所以未淨化的 group 可以讓檔案落在使用者選定資料夾之外，
-   不需要任何 XSS，只要「匯入別人給的樣式包 → 之後按一次匯出樣式」就會發生，
-   而且 UI 仍顯示匯出成功。
-
-   【跨行程的兩層防線】
-   主程序（`electron/export-name-safety.js`，CommonJS）在收到路徑後會再驗證一次
-   最終路徑沒有越界——那是第二道防線，不能只靠這一側。兩個模組不是同一規則的副本：
-   renderer 淨化名稱、主程序圍堵解析後路徑；`tests/exportPathSafety.test.js` 驗證兩層組合。
-============================================================================== */
-
+/** Windows 檔案與資料夾名稱禁用字元正規表達式 */
 const FORBIDDEN_CHARS = /[<>:"/\\|?*]/g;
 
-/* 資料夾名淨化：拿掉 Windows 禁用字元，並把「只有點」的字串（`.`、`..`、`....`）
-   換成底線——那個模式本身就是路徑穿越的building block，資料夾這一段必須擋死。 */
+/**
+ * 淨化資料夾/分組名稱段落（去除禁用字元，將純點 `.` 或 `..` 替換為底線）。
+ * 
+ * @param {string} name 原始資料夾/分組名稱
+ * @returns {string} 淨化後安全資料夾名稱
+ */
 export function sanitizeFolderSegment(name) {
   return String(name || '').replace(FORBIDDEN_CHARS, '_').replace(/^\.+$/, '_');
 }
 
-/* 檔名淨化：只拿掉禁用字元，**刻意不**擋「只有點」的模式——因為呼叫端一律會
-   在後面接上 `.json`，「只有點」的字串接上副檔名後必然變成類似 `...json` 這種
-   合法檔名，不可能單獨成立為 `..` 本身，也就構不成路徑穿越。
-   與 sanitizeFolderSegment 分成兩支，而不是共用一支，就是為了讓這個前提可讀。 */
+/**
+ * 淨化檔案名稱段落（去除禁用字元）。
+ * 
+ * @param {string} name 原始檔案名稱（不含副檔名）
+ * @returns {string} 淨化後安全檔案名稱
+ */
 export function sanitizeFileNameSegment(name) {
   return String(name || '').replace(FORBIDDEN_CHARS, '_');
 }
 
-/** preset → 匯出用的相對路徑（`分組/檔名.json`）。淨化後才組字串，不可先組字串再淨化。 */
+/**
+ * 產生樣式匯出時的相對路徑字串 (`分組/樣式名稱.json`)。
+ * 
+ * @param {object} preset 樣式設定物件
+ * @param {string} [preset.group] 樣式所屬分組名稱
+ * @param {string} [preset.name] 樣式名稱
+ * @returns {string} 相對檔案路徑
+ */
 export function presetExportRelativePath(preset) {
   const safeGroup = sanitizeFolderSegment(preset?.group || '');
   const folder = safeGroup ? `${safeGroup}/` : '';

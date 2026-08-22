@@ -1,18 +1,29 @@
 /* ==============================================================================
-   SUB Tool — 匯出檔名淨化與圍堵（主程序側，第二道防線）
+   SUB Tool — 匯出路徑圍堵防線 (Export Path Containment Guard)
    ==============================================================================
+   【架構與職責】
+   主行程側的第二道安全防線：驗證解析後的最終檔案路徑是否確實包含於使用者指定的目錄內。
+   
+   【安全鐵律】
+   渲染端雖然已對資料夾與檔名進行淨化，但主程序不能盲目信任。
+   透過 `path.resolve` 確保路徑中未包含跨越父層目錄的符號（例如 `../`），
+   徹底防禦路徑穿越（Path Traversal）漏洞。
+   ============================================================================== */
+'use strict';
 
-   renderer 端（`src/export-name-safety.js`）已經淨化過一次；這裡不是信任它，
-   是再驗證一次最終路徑真的落在使用者選定的資料夾內——`path.join`／`path.resolve`
-   會把 `"../"` 正規化掉，只靠呼叫端把關等於沒有把關。
-
-   兩邊是不同職責：renderer 淨化名稱，這裡圍堵解析後路徑；
-   `tests/exportPathSafety.test.js` 驗證兩層組合與路徑 containment。
-============================================================================== */
 const path = require('path');
 
-/** 拆解後的路徑是否真的落在 root 底下（不含 root 本身之外的旁支）。 */
+/**
+ * 檢查指定的子路徑或檔名在解析後是否嚴格位於根目錄範圍之內。
+ * 
+ * @param {string} root 使用者選擇的輸出根目錄絕對路徑
+ * @param {string} name 欲輸出的相對路徑或檔名
+ * @returns {boolean} 若完整路徑落在 root 目錄內（或剛好為 root）則回傳 true，否則回傳 false
+ */
 function isPathContained(root, name) {
+  if (typeof root !== 'string' || !root || typeof name !== 'string') {
+    return false;
+  }
   const r = path.resolve(root);
   const full = path.resolve(r, name);
   return full === r || full.startsWith(r + path.sep);

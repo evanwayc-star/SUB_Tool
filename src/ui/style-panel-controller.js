@@ -2,7 +2,7 @@ import { $, sublist } from '../dom.js';
 import { State, cueSuffix } from '../state.js';
 import { effStyle, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot } from '../substyle.js';
 import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from '../style-assignment.js';
-import { applyCueStylePatch, applyTrackStylePlan } from '../actions/style-actions.js';
+import { applyCueStylePatch, applyTrackStylePlan } from '../style-commands.js';
 import { recordHistory, syncCompareSnapshot } from '../history.js';
 import { openModal, closeModal, showToast } from '../ui.js';
 import { secToEncore } from '../time.js';

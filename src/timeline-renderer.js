@@ -34,12 +34,11 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVid
   setSelection, deselect, pruneSelection, focusTrackKind } from './state.js';
 import { clamp, pad, escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { Media, Wave } from './media.js';
-import { encoreParts } from './time.js';
-import { selectCue, refreshSelectionUI, renderSubRow, sortCues, sweepContainedCues, trackLocked, cueTrackLocked } from './subtitles.js';
-import { snapTimeToFrame } from './time.js';
+import { selectCue, refreshSelectionUI, renderSubRow } from './subtitles.js';
+import { sortCues, sweepContainedCues, trackLocked, cueTrackLocked } from './subtitle-model.js';
+import { encoreParts, snapTimeToFrame, fmtClock, secToSRT, secToASS, secToEncore, getExactFps } from './time.js';
 import { emit } from './events.js';
-import { ensureProjectSaved, isProjectGuardDone } from './project.js';
-import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps } from './time.js';
+import { isProjectGuardDone, ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';

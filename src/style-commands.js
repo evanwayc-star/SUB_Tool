@@ -1,22 +1,25 @@
-import { State } from '../state.js';
-import { effStyle } from '../substyle.js';
-import { showToast, setStatus } from '../ui.js';
-import { recordHistory } from '../history.js';
-import { emit } from '../events.js';
-import { applyCueStyleAssignment, planCueStyleAssignment, planTrackStyleAssignment } from '../style-assignment.js';
+/* ==============================================================================
+   SUB Tool — 字幕樣式互動指令 (Style Commands & Application)
+   ============================================================================== */
+import { State } from './state.js';
+import { effStyle } from './substyle.js';
+import { planCueStyleAssignment, planTrackStyleAssignment, applyCueStyleAssignment } from './style-assignment.js';
+import { showToast, setStatus } from './ui.js';
+import { recordHistory } from './history.js';
+import { emit } from './events.js';
 
-export function applyCueStylePatch(cue, desiredStyle, preserveKeys = []){
-  const targetTrack = State.tracks[cue?.track || 0] || null;
+export function applyCueStylePatch(cue, desiredStyle, preserveKeys = []) {
+  const targetTrack = State?.tracks?.[cue?.track || 0] || null;
   const plan = planCueStyleAssignment({ cue, targetTrack, desiredStyle, preserveKeys });
   applyCueStyleAssignment(cue, plan);
   return plan.changed;
 }
 
-export function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []){
+export function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []) {
   const plan = planTrackStyleAssignment({ track, cues, desiredStyle, preserveKeys });
-  if(!plan.changed) return false;
+  if (!plan.changed) return false;
   Object.assign(track, plan.trackPatch);
-  for(const cuePatch of plan.cuePatches) applyCueStyleAssignment(cuePatch.cue, cuePatch);
+  for (const cuePatch of plan.cuePatches) applyCueStyleAssignment(cuePatch.cue, cuePatch);
   return true;
 }
 
@@ -41,7 +44,10 @@ export function pasteStyleToSelected() {
   for (const id of ids) {
     const c = State.cues.find(x => x.id === id);
     if (!c) continue;
-    changed = applyCueStylePatch(c, _clipboardStyle) || changed;
+    const targetTrack = State.tracks[c.track || 0] || null;
+    const plan = planCueStyleAssignment({ cue: c, targetTrack, desiredStyle: _clipboardStyle });
+    applyCueStyleAssignment(c, plan);
+    changed = plan.changed || changed;
   }
   
   if (changed) {

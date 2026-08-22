@@ -1,32 +1,30 @@
 /* ==============================================================================
-   SUB Tool — 預覽合成的版面決策（Compositor Plan）
+   SUB Tool — 預覽合成決策器 (Compositor Plan Engine)
    ==============================================================================
+   【架構與職責】
+   負責預覽播放時的兩大核心決策（純資料計算）：
+   1. `needsComposite`：決定當前影格是否需要由 WebCodecs 多層合成引擎接管（處理多軌、縮放、淡入淡出、透明度）。
+   2. `stageBox`：計算專案畫布在實際視窗/Canvas 中的等比居中縮放矩形區域。
+   ============================================================================== */
 
-   「這一幀要不要自己合成、畫布上的專案畫面區在哪」——兩個純決策，
-   從 decode/player.js 抽出來。
-
-   【為什麼抽出來】
-   `decode/player.js` 有 412 行，決策與 `VideoDecoder`／`VideoFrame` 的生命週期
-   焊在一起，vitest 跑不起來，所以**沒有任何測試 import 過它**。
-   但它是三條渲染路徑的其中一條（見鐵律 §0.1），必須和另外兩條對得上——
-   v5.8.0 的兩個真實 bug（預覽與匯出差 120px、疊層溢出軌影格 24×54px）都住在這裡，
-   兩個都是靠臨時搭的比對工具抓到的，不是測試。
-
-   幾何本身走 `image-geometry.js`（已有跨行程契約測試），淡入淡出走 `clip-fade.js`；
-   這一支補的是「要不要接管」與「畫面區在哪」這兩塊還沒有接縫的決策。
-============================================================================== */
-
+/** 幾何比較微小容差 */
 const EPS = 0.001;
 
-/* mpv 只會把單一片段滿版播放，表達不了縮放、偏移、透明度與淡變。
-   凡是需要這些效果的情境，WebCodecs 就必須接管，否則畫面看起來「設定沒生效」，
-   匯出卻套用了——預覽與成品不一致，而且**不會有任何錯誤訊息**。
-
-   v5.7.0 的實例：逐片段幾何（clip.scale／posX／posY）漏了這幾條判斷，
-   設了幾何的影片段在 mpv 模式下完全看不出變化。 */
+/**
+ * 判斷當前活躍的片段與視訊軌道是否需要由 WebCodecs 引擎進行多層幾何合成。
+ * 
+ * 決策條件：
+ * 1. 同時有 2 個以上活躍片段（多層必定要合成）。
+ * 2. 單一片段具備淡入、淡出、縮放非 100%、中心點偏移或軌道不透明度小於 1。
+ * 
+ * @param {Array<object>} activeClips 當前時間點活躍的視訊/圖片片段清單
+ * @param {Array<object>} videoTracks 專案視訊軌道設定清單
+ * @returns {boolean} 是否需要多層合成接管
+ */
 export function needsComposite(activeClips, videoTracks) {
   const acts = activeClips || [];
-  if (acts.length > 1) return true;              // 多層一定要合成
+  if (acts.length > 1) return true;
+
   return acts.some(c => {
     const vt = (videoTracks || [])[c.vtrack || 0] || {};
     return (c.fadeIn || 0) > 0 || (c.fadeOut || 0) > 0
@@ -39,15 +37,25 @@ export function needsComposite(activeClips, videoTracks) {
 }
 
 /**
- * 畫布上的「專案畫面區」——把專案畫布（State.videoWidth/Height）contain 進實際畫布並置中。
- *
- * 基準必須是**專案畫布**，不是第一層素材的解析度：否則切換到不同比例的片段時
- * 整個畫面區會跟著變，字幕大小也跟著跳（症狀＝「字幕在各個影片上大小不同」，v4.25.3）。
- * 各層再 contain 進這個區域，比例不同就留黑邊，與匯出一致。
+ * 計算專案畫布在顯示畫布中的實際繪製矩形（等比縮放並置中，邊界留黑邊）。
+ * 
+ * @param {object} options
+ * @param {number} options.canvasW 顯示視窗/Canvas 寬度
+ * @param {number} options.canvasH 顯示視窗/Canvas 高度
+ * @param {number} [options.projectW=1920] 專案設定畫布寬度
+ * @param {number} [options.projectH=1080] 專案設定畫布高度
+ * @returns {{x: number, y: number, w: number, h: number}} 居中矩形區域
  */
 export function stageBox({ canvasW, canvasH, projectW, projectH }) {
-  const pw = projectW || 1920, ph = projectH || 1080;
+  const pw = projectW || 1920;
+  const ph = projectH || 1080;
   const s = Math.min(canvasW / pw, canvasH / ph);
-  const w = Math.round(pw * s), h = Math.round(ph * s);
-  return { x: (canvasW - w) >> 1, y: (canvasH - h) >> 1, w, h };
+  const w = Math.round(pw * s);
+  const h = Math.round(ph * s);
+  return {
+    x: (canvasW - w) >> 1,
+    y: (canvasH - h) >> 1,
+    w,
+    h,
+  };
 }
