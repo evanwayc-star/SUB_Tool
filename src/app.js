@@ -391,6 +391,7 @@ function renderListTrackSel(){
   sel.innerHTML=State.tracks.map((t,i)=>`<option value="${i}">${escapeHTML(t.name)}</option>`).join('');
   sel.value=String(prev);
   StylePanelController.renderTrackStyle();
+  updateSearchCount();
 }
 /* 「編輯常用樣式」模式（v4.34.0）。
    做法：暫借目前軌道當草稿——把該常用樣式套上去，使用者就能用原本那套面板控制項邊調邊

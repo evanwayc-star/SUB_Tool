@@ -792,8 +792,15 @@ function searchReplace(all) {
   _searchReplace(all, repText);
 }
 function updateSearchCount() {
-  const el=$('searchCount'); if(!el) return;
-  el.textContent = getSearchCountText();
+  const el=$('searchCount');
+  if(el) el.textContent = getSearchCountText();
+  const badge = $('searchDialogTrackBadge');
+  if(badge) {
+    const tk = State.listTrack || 0;
+    const trackName = State.tracks?.[tk]?.name || ('軌道 ' + (tk + 1));
+    badge.textContent = `[${trackName}]`;
+    badge.title = `目前搜尋範圍作用於「${trackName}」字幕軌`;
+  }
 }
 function addCue(start, end, text, track, options) {
   return _addCue(start, end, text, track, options);

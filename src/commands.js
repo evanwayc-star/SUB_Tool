@@ -194,7 +194,15 @@ function createCommands() {
       const btn = $('checkPanelBtn'); if (btn) btn.classList.remove('sub-active');
       emit('mpv:sync');
     },
-    'search-open': () => { const sd = $('searchDialog'); if (sd) { sd.style.display = 'flex'; $('searchInput').focus(); emit('mpv:sync'); } },
+    'search-open': () => {
+      const sd = $('searchDialog');
+      if (sd) {
+        sd.style.display = 'flex';
+        emit('render:searchCount');
+        $('searchInput').focus();
+        emit('mpv:sync');
+      }
+    },
     'search-close': () => { const sd = $('searchDialog'); if (sd) { sd.style.display = 'none'; emit('mpv:sync'); } },
     'search-next': searchNext,
     'search-prev': searchPrev,

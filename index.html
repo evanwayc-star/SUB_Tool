@@ -351,7 +351,10 @@
   <!-- 浮動搜尋視窗 -->
   <div class="search-dialog" id="searchDialog" style="display:none">
     <div class="sd-head" id="searchDialogHead">
-      🔍 搜尋 / 取代
+      <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
+        <span>🔍 搜尋 / 取代</span>
+        <span id="searchDialogTrackBadge" class="sd-track-badge" title="目前搜尋作用的字幕軌道">[軌道 1]</span>
+      </div>
       <button class="sd-close" data-act="search-close" title="關閉">✕</button>
     </div>
     <div class="sr-row"><input type="text" id="searchInput" placeholder="搜尋… 多關鍵字用 || 分隔"><button class="mini"
