@@ -126,7 +126,6 @@ function detectVideoEncoder() {
 }
 /* 依選定編碼器回傳「轉檔預覽影片」用的視訊參數（品質導向、yuv420p 由呼叫端的 -vf 負責） */
 
-
 /* 鐵律 §0.8 的守門員。規則本身在 export-admission.js（可測），這裡只是轉呼叫，
    保留原名讓既有呼叫端不動。_admission 在下方建立；本函式的呼叫點都在那之後。 */
 function assertMasterExportMedia(file, kind) {
@@ -152,19 +151,16 @@ function createWindow() {
   });
   mainWin = win;
   win.webContents.on('did-start-loading', () => { projectOpenReady = false; });
-  // 移除 Electron 預設的 File / Edit / View 系統選單列。autoHideMenuBar
-  // 只會暫時隱藏它，按 Alt 仍會再次出現；這裡直接解除視窗選單並關閉
-  // Alt 的選單列顯示行為，避免干擾程式既有的快捷鍵操作。
   win.setMenu(null);
   win.setAutoHideMenuBar(false);
   win.setMenuBarVisibility(false);
+
   win.maximize();
   // 讓嵌入式 mpv 覆蓋視窗跟著主視窗移動 / 縮放 / 最小化
   const reapplyMpv = () => { mpvHost.reapplyBounds(); };
   win.on('move', reapplyMpv);
   win.on('resize', reapplyMpv);
   win.on('restore', () => { mpvHost.showForParentRestore(); });
-  win.on('minimize', () => { mpvHost.hideForParent(); });
   win.on('close', (e) => {
     if (!_allowMainWindowClose && !_isAppQuitting && !win.webContents.isDestroyed()) {
       e.preventDefault();
@@ -178,8 +174,15 @@ function createWindow() {
     }
     mpvHost.dispose();
   });
-  // S2：補齊 Electron 安全基線 — 拒絕開新視窗、限制導航只能停在本機應用頁（與 dev 的 localhost）
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // S2：補齊 Electron 安全基線 — 開新外部視窗委派給預設瀏覽器、限制導航只能停在本機應用頁（與 dev 的 localhost）
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (typeof url === 'string' && (url.startsWith('https://') || url.startsWith('http://'))) {
+      const { shell } = require('electron');
+      shell.openExternal(url).catch(err => console.warn('[app] openExternal failed:', err));
+    }
+    return { action: 'deny' };
+  });
+
   win.webContents.on('will-navigate', (ev, u) => {
     if (!(u.startsWith('file:') || u.startsWith('http://localhost:8777'))) ev.preventDefault();
   });
@@ -348,11 +351,17 @@ ipcMain.handle('app:getStartupFile', async () => {
   projectOpenReady = true;
   return opened;
 });
-
 ipcMain.handle('app:openPath', async (e, p) => {
   const { shell } = require('electron');
   requirePermittedShellOpenPath(p);
   return shell.openPath(p);
+});
+ipcMain.handle('app:openExternal', async (e, url) => {
+  if (typeof url !== 'string' || !(url.startsWith('https://') || url.startsWith('http://'))) {
+    throw new TypeError('url must be http or https');
+  }
+  const { shell } = require('electron');
+  return shell.openExternal(url);
 });
 ipcMain.handle('app:showItemInFolder', async (e, p) => {
   const { shell } = require('electron');

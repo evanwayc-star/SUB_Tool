@@ -18,9 +18,9 @@
 
    【維護鐵律】
    - 擴充新的資料欄位時，請務必更新最上方的 `@typedef`，以保持 JSDoc 提示的準確性。
-   - 所有牽涉跨模組資料變更的操作，請實作在對應模組 (如 subtitles.js)，
-     然後修改 `State`，最後再發送 `emit('event')` 通知 `app.js` 重新渲染。
 ============================================================================== */
+import { applySelection, deselectItem, pruneSelections, focusTrack } from './timeline-selection.js';
+
 /**
  * @typedef {Object} Cue
  * @property {string} id - 字幕唯一識別碼
@@ -613,70 +613,27 @@ function isSel(id){ return State.selectedIds.includes(id); }
 
    注意：這裡【只管狀態】，不重繪。呼叫端仍要自己叫 refreshSelectionUI() 等，
    維持與既有程式碼相同的節奏（一次操作可能改多項狀態後才重繪一次）。 */
-const SELECTION_KINDS = new Set(['sub', 'video', 'audio']);
-
 function setSelection({ kind = null, ids = [], primary } = {}){
-  /* 只認得這三種。未知的 kind 一律視為清空，且【不可】寫進 activeTrackKind——
-     它被宣告為 'sub' | 'video' | 'audio'，塞進別的值會讓鍵盤導航的分支全部落空，
-     而且不會有任何錯誤訊息。 */
-  const k = SELECTION_KINDS.has(kind) ? kind : null;
-  const list = Array.isArray(ids) ? ids.filter(v => v != null) : (ids == null ? [] : [ids]);
-  State.selectedIds        = k === 'sub'   ? list : [];
-  State.selectedId         = k === 'sub'   ? (primary !== undefined ? primary : (list.length ? list[list.length - 1] : null)) : null;
-  State.selectedClipId     = k === 'video' ? (list.length ? list[0] : null) : null;
-  State.selectedAudioClipId= k === 'audio' ? (list.length ? list[0] : null) : null;
-  if(k) State.activeTrackKind = k;
-  return State;
+  return applySelection(State, { kind, ids, primary });
 }
 
 /* 清空三種選取但【保留】activeTrackKind——點時間軸空白處的語意是
    「取消選取，但這一軌仍是目前焦點軌」（見 docs/開發與驗證.md §4.13）。 */
 function clearSelection(){ return setSelection({ kind: null }); }
 
-/* 只放掉其中一種選取，其他兩種不動。
-   給了 id 就只在「目前選的正好是它」時才放掉——這是刪除素材、
-   取消單一片段時最常見的形狀，以前每個呼叫端各自寫一次 if 比對。
-   不動 activeTrackKind，理由同 clearSelection()。 */
+/* 只放掉其中一種選取，其他兩種不動。 */
 function deselect(kind, id){
-  if(!SELECTION_KINDS.has(kind)) return State;
-  if(kind === 'sub'){
-    if(id == null){ State.selectedIds = []; State.selectedId = null; return State; }
-    if(!State.selectedIds.includes(id) && State.selectedId !== id) return State;
-    State.selectedIds = State.selectedIds.filter(x => x !== id);
-    if(State.selectedId === id) State.selectedId = State.selectedIds[State.selectedIds.length - 1] ?? null;
-    return State;
-  }
-  const field = kind === 'video' ? 'selectedClipId' : 'selectedAudioClipId';
-  if(id == null || State[field] === id) State[field] = null;
-  return State;
+  return deselectItem(State, kind, id);
 }
 
-/* 字幕集合變動後（undo/redo、刪除、匯入）把選取修剪回仍然存在的 id。
-   主選取消失時退回剩下的第一個，而不是連同其他選取一起丟掉——
-   以前 history.js 丟、subtitles.js 與 timeline-renderer.js 留，三處寫法不一致。 */
+/* 字幕集合變動後（undo/redo、刪除、匯入）把選取修剪回仍然存在的 id。 */
 function pruneSelection(){
-  const alive = new Set(State.cues.map(c => c.id));
-  const ids = State.selectedIds.filter(id => alive.has(id));
-  State.selectedIds = ids;
-  State.selectedId = alive.has(State.selectedId) ? State.selectedId : (ids[0] ?? null);
-  return State;
+  return pruneSelections(State);
 }
 
-/* 每種焦點軌類別各有一個「是哪一軌」的夥伴欄位。這三個欄位與 activeTrackKind
-   是【同一條複合不變量】——refreshTrackGutterActive() 就是證據，它把兩者成對比對：
-     activeTrackKind==='sub'   && dataset.track        === listTrack
-     activeTrackKind==='video' && dataset.vtrack       === activeVtrack
-     activeTrackKind==='audio' && dataset.audioSourceId=== activeAudioTrackId
-   但圍籬只守了 activeTrackKind，三個夥伴欄位在圍籬外，其中 listTrack 有 13 處寫入。 */
-const FOCUS_INDEX_FIELD = { sub: 'listTrack', video: 'activeVtrack', audio: 'activeAudioTrackId' };
-
-/* 只換焦點軌類別，不動任何選取——點軌道列頭的語意。
-   給了 index 就連夥伴欄位一起寫，讓「焦點在哪一種軌的哪一軌」是一次寫入。 */
+/* 只換焦點軌類別，不動任何選取——點軌道列頭的語意。 */
 function focusTrackKind(kind, index){
-  if(!SELECTION_KINDS.has(kind)) return State;
-  State.activeTrackKind = kind;
-  if(index !== undefined) State[FOCUS_INDEX_FIELD[kind]] = index;
-  return State;
+  return focusTrack(State, kind, index);
 }
 
 function cueSuffix(c){

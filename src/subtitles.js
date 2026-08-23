@@ -646,10 +646,10 @@ function splitCueAtCursor(c, txtEl){
   },30);
 }
 
-sublist.addEventListener('click', async e => {
+sublist?.addEventListener?.('click', async e => {
 });
 
-sublist.addEventListener('mousedown', e => {
+sublist?.addEventListener?.('mousedown', e => {
   if (e.button === 2) return;
   const row = e.target.closest('.sub-row');
   if (!row) return;
@@ -674,7 +674,7 @@ sublist.addEventListener('mousedown', e => {
   selectCue(c.id, { additive: e.ctrlKey || e.metaKey, range: e.shiftKey, seek: _noMod && !_ptInside });
 });
 
-sublist.addEventListener('dblclick', async e => {
+sublist?.addEventListener?.('dblclick', async e => {
   if (e.ctrlKey || e.metaKey || e.shiftKey) return;
   const tin = e.target.closest('.tin');
   const tout = e.target.closest('.tout');
@@ -709,7 +709,7 @@ sublist.addEventListener('dblclick', async e => {
   try { const r = document.createRange(), s = window.getSelection(); r.selectNodeContents(t); r.collapse(false); s.removeAllRanges(); s.addRange(r); } catch (_) {}
 });
 
-sublist.addEventListener('contextmenu', e => {
+sublist?.addEventListener?.('contextmenu', e => {
   const row = e.target.closest('.sub-row');
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
@@ -732,7 +732,7 @@ function _debouncedHeavyEdit() {
   clearTimeout(_heavyEditT);
   _heavyEditT = setTimeout(() => { renderCueBlocks(); renderCheckPanel(); }, 120);
 }
-sublist.addEventListener('input', e => {
+sublist?.addEventListener?.('input', e => {
   const txt = e.target.closest('.txt');
   if (!txt) return;
 
@@ -751,7 +751,7 @@ sublist.addEventListener('input', e => {
   _debouncedHeavyEdit();
 });
 
-sublist.addEventListener('focusout', e => {
+sublist?.addEventListener?.('focusout', e => {
   const txt = e.target.closest('.txt');
   if (!txt || txt.contentEditable !== 'true') return;
   const row = txt.closest('.sub-row');
@@ -766,7 +766,7 @@ sublist.addEventListener('focusout', e => {
   if(!result.ok) txt.innerHTML=_txtInner(c.text);
 });
 
-sublist.addEventListener('keydown', e => {
+sublist?.addEventListener?.('keydown', e => {
   if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); return; }
   const txt = e.target.closest('.txt');
   if (!txt || txt.contentEditable !== 'true') return;

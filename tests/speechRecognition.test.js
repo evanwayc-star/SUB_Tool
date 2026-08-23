@@ -1,0 +1,367 @@
+// @vitest-environment jsdom
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
+vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
+vi.mock('../src/ui.js', () => ({ openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
+
+import { State } from '../src/state.js';
+import {
+  BUILTIN_MODELS,
+  extractClipFloat32Mono16k,
+  encodeWav16kMono,
+  insertAsrSubtitles,
+  getAsrConfig,
+  saveAsrConfig,
+  callWhisperApi
+} from '../src/speech-recognition.js';
+
+describe('語音辨識與字幕生成模組', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    State.tracks = [{ name: '軌道 1', visible: true, locked: false }];
+    State.cues = [];
+    State.fps = 30;
+    State.dropFrame = false;
+  });
+
+  describe('設定管理 (Configuration)', () => {
+    it('提供預設的 ASR 設定，預設為 Google 語音辨識', () => {
+      const conf = getAsrConfig();
+      expect(conf.provider).toBe('google');
+      expect(conf.builtinModel).toBe('onnx-community/whisper-large-v3-turbo');
+      expect(conf.language).toBe('zh');
+      expect(conf.prompt).toContain('繁體中文');
+    });
+
+    it('內建模型清單提供 Tiny, Base, Small 等級', () => {
+      expect(BUILTIN_MODELS['onnx-community/whisper-tiny']).toBeDefined();
+      expect(BUILTIN_MODELS['onnx-community/whisper-base']).toBeDefined();
+      expect(BUILTIN_MODELS['onnx-community/whisper-small']).toBeDefined();
+    });
+
+    it('能夠儲存並讀回自訂的 ASR 設定', () => {
+      saveAsrConfig({
+        provider: 'builtin',
+        builtinModel: 'onnx-community/whisper-small',
+        openaiApiKey: 'sk-test-key-1234',
+        groqApiKey: 'gsk-groq-key-5678',
+        language: 'en',
+        prompt: 'Testing prompt'
+      });
+      const conf = getAsrConfig();
+      expect(conf.provider).toBe('builtin');
+      expect(conf.builtinModel).toBe('onnx-community/whisper-small');
+      expect(conf.openaiApiKey).toBe('sk-test-key-1234');
+      expect(conf.groqApiKey).toBe('gsk-groq-key-5678');
+      expect(conf.language).toBe('en');
+    });
+  });
+
+  describe('16kHz PCM Float32 萃取 (extractClipFloat32Mono16k)', () => {
+    it('將任意取樣率之立體聲 AudioBuffer 轉換並重採樣為 16kHz 單聲道 Float32Array 並自動正規化峰值', () => {
+      const sampleRate = 48000;
+      const duration = 2; // 2 seconds (48000 * 2 = 96000 samples)
+      const length = sampleRate * duration;
+      const ch1 = new Float32Array(length).fill(0.6);
+      const ch2 = new Float32Array(length).fill(0.4);
+
+      const audioBuffer = {
+        sampleRate,
+        numberOfChannels: 2,
+        length,
+        duration,
+        getChannelData: (ch) => (ch === 0 ? ch1 : ch2)
+      };
+
+      const float32 = extractClipFloat32Mono16k(audioBuffer, 0, 2);
+      expect(float32).toBeInstanceOf(Float32Array);
+      // 2 seconds @ 16000 Hz = 32000 samples
+      expect(float32.length).toBe(32000);
+      // Normalized peak is scaled up to 0.95 for Whisper acoustic clarity
+      expect(float32[0]).toBeCloseTo(0.95, 2);
+    });
+
+    it('長度為 0 時回傳 null', () => {
+      const audioBuffer = {
+        sampleRate: 48000,
+        numberOfChannels: 1,
+        length: 48000,
+        duration: 1,
+        getChannelData: () => new Float32Array(48000)
+      };
+      expect(extractClipFloat32Mono16k(audioBuffer, 1, 1)).toBeNull();
+    });
+  });
+
+  describe('16kHz Mono WAV 編碼 (encodeWav16kMono)', () => {
+    it('將 AudioBuffer 區間轉換為標準 16kHz 16-bit Mono WAV', async () => {
+      const sampleRate = 48000;
+      const duration = 2; // 2 seconds
+      const length = sampleRate * duration;
+      const ch1 = new Float32Array(length).fill(0.5);
+      const ch2 = new Float32Array(length).fill(-0.5);
+
+      const audioBuffer = {
+        sampleRate,
+        numberOfChannels: 2,
+        length,
+        duration,
+        getChannelData: (ch) => (ch === 0 ? ch1 : ch2)
+      };
+
+      const wavBlob = encodeWav16kMono(audioBuffer, 0, 2);
+      expect(wavBlob).toBeInstanceOf(Blob);
+      expect(wavBlob.type).toBe('audio/wav');
+
+      const arrayBuf = await wavBlob.arrayBuffer();
+      const view = new DataView(arrayBuf);
+
+      // Check RIFF header
+      const riff = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+      expect(riff).toBe('RIFF');
+
+      const wave = String.fromCharCode(view.getUint8(8), view.getUint8(9), view.getUint8(10), view.getUint8(11));
+      expect(wave).toBe('WAVE');
+
+      // Check sample rate = 16000
+      expect(view.getUint32(24, true)).toBe(16000);
+      // Check channels = 1 (Mono)
+      expect(view.getUint16(22, true)).toBe(1);
+      // Check bit depth = 16
+      expect(view.getUint16(34, true)).toBe(16);
+    });
+  });
+
+  describe('字幕時碼映射與軌道注入 (insertAsrSubtitles)', () => {
+    it('自動建立專屬語音辨識軌道並將相對時碼轉換為時間軸絕對時碼', () => {
+      const clip = {
+        id: 'clip-1',
+        name: '對白_A.mp4',
+        offset: 10.0, // Timeline position 10.0s
+        in: 2.0,      // Trimmed source in
+        out: 12.0     // Trimmed source out (duration 10s)
+      };
+
+      const segments = [
+        { start: 1.0, end: 3.5, text: '第一句字幕' },
+        { start: 4.0, end: 7.2, text: '第二句字幕' }
+      ];
+
+      const count = insertAsrSubtitles([{ clip, segments }]);
+      expect(count).toBe(2);
+
+      // 檢查新軌道
+      expect(State.tracks.length).toBe(2);
+      expect(State.tracks[1].name).toBe('語音辨識');
+      expect(State.listTrack).toBe(1);
+
+      // 檢查字幕時碼
+      expect(State.cues.length).toBe(2);
+      expect(State.cues[0].track).toBe(1);
+      expect(State.cues[0].text).toBe('第一句字幕');
+      // 10.0 + 1.0 = 11.0s
+      expect(State.cues[0].start).toBeCloseTo(11.0, 2);
+      expect(State.cues[0].end).toBeCloseTo(13.5, 2);
+
+      // 10.0 + 4.0 = 14.0s
+      expect(State.cues[1].start).toBeCloseTo(14.0, 2);
+      expect(State.cues[1].end).toBeCloseTo(17.2, 2);
+    });
+
+    it('多片段辨識時，所有字幕依時間軸順序整合至同一個新軌道', () => {
+      const clip1 = { id: 'c1', offset: 0.0, in: 0, out: 5.0 };
+      const clip2 = { id: 'c2', offset: 20.0, in: 0, out: 5.0 };
+
+      const results = [
+        { clip: clip1, segments: [{ start: 0.5, end: 2.0, text: '片段一對白' }] },
+        { clip: clip2, segments: [{ start: 1.0, end: 3.0, text: '片段二對白' }] }
+      ];
+
+      const count = insertAsrSubtitles(results);
+      expect(count).toBe(2);
+      expect(State.tracks.length).toBe(2);
+      expect(State.cues[0].text).toBe('片段一對白');
+      expect(State.cues[0].start).toBeCloseTo(0.5, 2);
+      expect(State.cues[1].text).toBe('片段二對白');
+      expect(State.cues[1].start).toBeCloseTo(21.0, 2);
+    });
+  });
+
+  describe('Whisper API 調用 (callWhisperApi)', () => {
+    it('呼叫 Groq API 端點與參數格式正確', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          text: '測試對白',
+          segments: [{ id: 0, start: 0.0, end: 2.0, text: '測試對白' }]
+        })
+      });
+      global.fetch = mockFetch;
+
+      const dummyBlob = new Blob(['mock-wav'], { type: 'audio/wav' });
+      const result = await callWhisperApi({
+        audioBlob: dummyBlob,
+        provider: 'groq',
+        apiKey: 'gsk-123456',
+        language: 'zh',
+        prompt: '繁體中文'
+      });
+
+      expect(result.segments.length).toBe(1);
+      expect(result.segments[0].text).toBe('測試對白');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.groq.com/openai/v1/audio/transcriptions',
+        expect.objectContaining({
+          method: 'POST',
+          headers: { Authorization: 'Bearer gsk-123456' }
+        })
+      );
+    });
+
+    it('未輸入 API Key 時拋出清晰錯誤', async () => {
+      const dummyBlob = new Blob(['mock-wav'], { type: 'audio/wav' });
+      await expect(callWhisperApi({
+        audioBlob: dummyBlob,
+        provider: 'groq',
+        apiKey: ''
+      })).rejects.toThrow(/API Key/);
+    });
+
+    it('支援呼叫 OpenAI Whisper 官方雲端 API', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          text: 'OpenAI 辨識字幕',
+          segments: [{ id: 0, start: 0.0, end: 1.5, text: 'OpenAI 辨識字幕' }]
+        })
+      });
+      global.fetch = mockFetch;
+
+      const dummyBlob = new Blob(['mock-wav'], { type: 'audio/wav' });
+      const result = await callWhisperApi({
+        audioBlob: dummyBlob,
+        provider: 'openai',
+        apiKey: 'test-openai-key',
+        language: 'zh',
+        prompt: ''
+      });
+
+      expect(result.segments[0].text).toBe('OpenAI 辨識字幕');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.openai.com/v1/audio/transcriptions',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            Authorization: 'Bearer test-openai-key'
+          })
+        })
+      );
+    });
+  });
+
+  describe('Google Gemini 1.5 語音辨識 (Google Gemini API)', () => {
+    it('成功呼叫 Gemini API 並解析回傳的字幕 JSON 陣列', async () => {
+      const { callGeminiAudioTranscription } = await import('../src/speech-recognition.js');
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify([
+                      { start: 0.2, end: 2.1, text: 'Google 辨識第一句' },
+                      { start: 2.5, end: 4.8, text: 'Google 辨識第二句' }
+                    ])
+                  }
+                ]
+              }
+            }
+          ]
+        })
+      });
+      global.fetch = mockFetch;
+
+      const dummyBlob = new Blob(['wav-content'], { type: 'audio/wav' });
+      const result = await callGeminiAudioTranscription({
+        audioBlob: dummyBlob,
+        apiKey: 'test-google-key',
+        language: 'zh',
+        prompt: '繁體中文'
+      });
+
+      expect(result.segments.length).toBe(2);
+      expect(result.segments[0].text).toBe('Google 辨識第一句');
+      expect(result.segments[0].start).toBe(0.2);
+      expect(result.segments[0].end).toBe(2.1);
+      expect(result.segments[1].text).toBe('Google 辨識第二句');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('https://generativelanguage.googleapis.com/v1beta/models/'),
+        expect.objectContaining({
+          method: 'POST'
+        })
+      );
+    });
+
+    it('未輸入 Google API Key 時拋出錯誤', async () => {
+      const { callGeminiAudioTranscription } = await import('../src/speech-recognition.js');
+      const dummyBlob = new Blob(['wav-content'], { type: 'audio/wav' });
+      await expect(callGeminiAudioTranscription({
+        audioBlob: dummyBlob,
+        apiKey: ''
+      })).rejects.toThrow(/Google Gemini API Key/);
+    });
+  });
+
+  describe('深層推論入口 (transcribeAudioStream)', () => {
+    it('接收 AudioBuffer 並透過 Google Gemini 成功辨識串流', async () => {
+      const { transcribeAudioStream } = await import('../src/speech-recognition-engine.js');
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: JSON.stringify([{ start: 0.1, end: 1.5, text: '測試推論' }]) }]
+              }
+            }
+          ]
+        })
+      });
+      global.fetch = mockFetch;
+
+      const sampleRate = 48000;
+      const audioBuffer = {
+        sampleRate,
+        numberOfChannels: 1,
+        length: sampleRate * 2,
+        duration: 2,
+        getChannelData: () => new Float32Array(sampleRate * 2).fill(0.5)
+      };
+
+      const segments = await transcribeAudioStream({
+        audioBuffer,
+        inT: 0,
+        outT: 2,
+        provider: 'google',
+        apiKey: 'test-google-key'
+      });
+
+      expect(segments).toHaveLength(1);
+      expect(segments[0].text).toBe('測試推論');
+    });
+
+    it('未提供音訊時拋出例外', async () => {
+      const { transcribeAudioStream } = await import('../src/speech-recognition-engine.js');
+      await expect(transcribeAudioStream({
+        audioBuffer: null,
+        provider: 'google',
+        apiKey: 'test-key'
+      })).rejects.toThrow(/未提供有效的音訊來源/);
+    });
+  });
+});

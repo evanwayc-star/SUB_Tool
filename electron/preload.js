@@ -68,6 +68,7 @@ contextBridge.exposeInMainWorld('subtool', {
   writeProject: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeProject', { path: p, b64 }); },
   writeScreenshot: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeScreenshot', { path: p, b64 }); },
   openPath:     (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('app:openPath', p); },
+  openExternal: (url) => { if(typeof url!=='string') throw new TypeError('url must be a string'); return ipcRenderer.invoke('app:openExternal', url); },
   cacheInfo:    () => ipcRenderer.invoke('cache:info'),
   cacheCleanOrphans: () => ipcRenderer.invoke('cache:cleanOrphans'),
   configLoad:   () => ipcRenderer.invoke('config:load'),
@@ -115,4 +116,3 @@ contextBridge.exposeInMainWorld('subtool', {
     onEvent:   (cb)    => { ipcRenderer.removeAllListeners('mpv:event'); ipcRenderer.on('mpv:event', (_, d) => cb(d)); },
   },
 });
-

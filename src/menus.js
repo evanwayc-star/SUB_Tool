@@ -20,6 +20,7 @@ import { AudioRouting } from './audio-routing.js';
 import { setManualPlaybackSpeed } from './keyboard.js';
 import { splitMenuLabel } from './menu-label.js';
 import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './style-commands.js';
+import { openSpeechRecognitionDialog } from './speech-recognition.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -49,9 +50,11 @@ function showCtx(x,y,items){
   emit('mpv:sync'); // 定位完成後重算：選單若與影片重疊，讓 mpv 讓位（否則 mpv 為 OS 子視窗會蓋住選單）
   emit('render:videoSub');
 }
-document.addEventListener('mousedown',e=>{ if(e.button===2)return; if(!ctx.contains(e.target))hideCtx(); },true);
-window.addEventListener('blur',hideCtx);
-window.addEventListener('resize',hideCtx);
+if (typeof document !== 'undefined') {
+  document.addEventListener('mousedown',e=>{ if(e.button===2)return; if(ctx && !ctx.contains(e.target))hideCtx(); },true);
+  window.addEventListener('blur',hideCtx);
+  window.addEventListener('resize',hideCtx);
+}
 
 /* 播放窗右鍵：播放速度。音訊素材波形改由時間軸素材區塊右鍵選擇，
    不能再用這裡切換唯一音源，否則會破壞專案 A bus 的混音。 */
@@ -81,7 +84,7 @@ function showPlayerMenu(x,y){
   items.push({sep:true},{label:'自訂速度…',act:setCustomPlayerSpeed});
   showCtx(x,y,items);
 }
-$('videoWrap').addEventListener('contextmenu',e=>{ e.preventDefault(); });
+$('videoWrap')?.addEventListener('contextmenu',e=>{ e.preventDefault(); });
 $('speedIndicator')?.addEventListener('contextmenu',e=>{ e.preventDefault(); e.stopPropagation(); showPlayerMenu(e.clientX,e.clientY); });
 
 /* 字幕右鍵：移到軌道 / 上下新增 / 刪除 */
@@ -217,10 +220,10 @@ function runExternalAudioMenuAction(method,args=[],{clearSelection=false}={}){
   });
 }
 /* 時間軸區塊右鍵 / 空白軌道區右鍵 */
-tlScroll.addEventListener('contextmenu', tlContextMenuHandler);
-tlLayer.addEventListener('contextmenu', tlContextMenuHandler);
-$('tlAtracks')?.addEventListener('contextmenu', tlContextMenuHandler);
-$('tlGutterAtracks')?.addEventListener('contextmenu', tlContextMenuHandler);
+tlScroll?.addEventListener?.('contextmenu', tlContextMenuHandler);
+tlLayer?.addEventListener?.('contextmenu', tlContextMenuHandler);
+$('tlAtracks')?.addEventListener?.('contextmenu', tlContextMenuHandler);
+$('tlGutterAtracks')?.addEventListener?.('contextmenu', tlContextMenuHandler);
 
 function tlContextMenuHandler(e){
   /* 音訊素材區塊：一個檔案／來源一列。這裡只決定該素材要監看 MIX 還是哪個來源聲道；
@@ -245,8 +248,10 @@ function tlContextMenuHandler(e){
     if(isExternal){
       const start=Math.max(0,Number(audioEl.dataset.audioStart)||0);
       const end=Math.max(start,Number(audioEl.dataset.audioEnd)||start);
+      const extSrc = State.externalAudioState?.find(s => s.id === assetId);
       const playhead=Media.displayTime();
       const enabled=audioEl.dataset.audioEnabled!=='false';
+      items.push({label:'🎙 語音辨識生成字幕…',act:()=>openSpeechRecognitionDialog(extSrc || { id: assetId, name: sourceName, in: start, out: end, offset: start })});
       if(playhead>start+0.0001&&playhead<end-0.0001){
         items.push({label:'✂ 在播放點切割',act:()=>runExternalAudioMenuAction('splitExternalAudio',[assetId,playhead])});
       }
@@ -264,6 +269,20 @@ function tlContextMenuHandler(e){
           }});
         }
       }
+      items.push({sep:true});
+    } else {
+      // 主要影片音訊素材列
+      items.push({label:'🎙 語音辨識生成字幕…',act:()=>openSpeechRecognitionDialog({
+        id: 'primary-audio',
+        name: sourceName || State.mediaName || '主要音訊',
+        in: 0,
+        out: State.duration,
+        dur: State.duration,
+        offset: 0,
+        primary: true,
+        path: State.mediaPath || State.clips?.[0]?.path || null,
+        blob: State.mediaFile || State.mediaBlob || State.clips?.[0]?.blob || null
+      })});
       items.push({sep:true});
     }
     items.push({label:'🎧 軌道配置',act:()=>AudioRouting.openForSource(sourceId)});

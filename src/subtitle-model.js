@@ -105,17 +105,7 @@ export function mergeAdjacentCues(id, dir){
   recordHistory('合併字幕');
 }
 
-export function detectOverlaps(cues, eps=0.001){
-  const set=new Set();
-  const sorted=cues.filter(c=>c.timed!==false).slice().sort((a,b)=>a.start-b.start);
-  for(let i=0;i<sorted.length;i++){
-    for(let j=i+1;j<sorted.length;j++){
-      if(sorted[j].start >= sorted[i].end - eps) break;
-      set.add(sorted[i].id); set.add(sorted[j].id);
-    }
-  }
-  return set;
-}
+export { detectOverlaps } from './subtitle-audit.js';
 
 export function sweepContainedCues(changedCues) {
   if (!State.overwriteMode || State.overwriteKeep) return false;

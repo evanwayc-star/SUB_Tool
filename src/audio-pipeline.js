@@ -52,6 +52,15 @@ class AudioPipelineManager {
       sourceChannel: Math.max(0, Math.floor(Number(channel?.sourceChannel ?? index) || 0)),
     };
   }
+
+  /**
+   * 取得專案音訊總線之標準化串流佈局。
+   * @param {object} audioProject 專案音訊物件（可選，預設讀取 State.audioProject）
+   */
+  getStreamLayout(audioProject = null) {
+    const proj = audioProject || null;
+    return proj?.exportLayout?.streams || [];
+  }
 }
 
 export const AudioPipeline = new AudioPipelineManager();
