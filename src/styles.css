@@ -118,7 +118,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .menubar>.spacer{flex:1 1 auto;min-width:0}
 .menubar>.sep{margin:0 1px}
 .menubar button.icon{color:rgb(180,180,180);padding-left:6px;padding-right:6px;white-space:nowrap}
-.menubar .auto-select-btn,.menubar .ow-toggle-btn,.menubar .ow-keep-btn{
+.menubar .auto-select-btn,.menubar .ow-toggle-btn,.menubar .ow-keep-btn,.menubar .pointer-seek-btn{
   min-width:0;padding-left:7px;padding-right:7px;margin-left:0;font-size:12px;letter-spacing:.2px;white-space:nowrap}
 .brand{display:flex;align-items:center;margin-right:6px;white-space:nowrap}
 .brand img{height:28px;width:auto;display:block}
@@ -922,11 +922,11 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .dragover{outline:3px dashed var(--accent);outline-offset:-6px}
 /* 搜尋文字高亮 */
 .search-match{color:#ffeb3b;font-weight:bold;background:rgba(255,235,59,0.2);padding:0 2px;border-radius:2px}
-#stSel, #tlSel, .ow-toggle-btn, .ow-keep-btn, .auto-select-btn {
+#stSel, #tlSel, .ow-toggle-btn, .ow-keep-btn, .auto-select-btn, .pointer-seek-btn {
   padding:0 10px;border-radius:6px;font-size:13px;font-weight:600;letter-spacing:1px;min-width:115px;text-align:center;
   display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;transition:all .15s; border:none; outline:none; height:26px; cursor:default;
 }
-.ow-toggle-btn, .ow-keep-btn, .auto-select-btn { cursor:pointer; margin-left: 4px; }
+.ow-toggle-btn, .ow-keep-btn, .auto-select-btn, .pointer-seek-btn { cursor:pointer; margin-left: 4px; }
 #stSel.sel-none, #tlSel.sel-none { background:rgba(150,150,150,.15); color:var(--text-dim); }
 #stSel.sel-one, #tlSel.sel-one { background:rgba(245,158,11,.08); color:var(--cue-sel); }
 #stSel.sel-multi, #tlSel.sel-multi { background:rgba(240,100,140,.08); color:#ffcccc; }
@@ -942,7 +942,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 
 .auto-select-btn { background:rgba(150,150,150,.08); color:var(--text-dim); }
 .auto-select-btn.on { background:rgba(245,158,11,.08); color:var(--cue-sel); }
-.ow-toggle-btn:hover, .ow-keep-btn:hover, .auto-select-btn:hover { filter:brightness(1.2); }
+.pointer-seek-btn { background:rgba(59,130,246,.14); color:#93c5fd; border:1px solid rgba(147,197,253,.28); }
+.pointer-seek-btn.pause { background:rgba(245,158,11,.14); color:#fbbf24; border-color:rgba(251,191,36,.32); }
+.ow-toggle-btn:hover, .ow-keep-btn:hover, .auto-select-btn:hover, .pointer-seek-btn:hover { filter:brightness(1.2); }
 
 /* 加寬字幕列表捲軸並使顏色更顯眼、上下更長 */
 #sublist::-webkit-scrollbar { width: 16px; }

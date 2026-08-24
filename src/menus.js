@@ -21,6 +21,7 @@ import { setManualPlaybackSpeed } from './keyboard.js';
 import { splitMenuLabel } from './menu-label.js';
 import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './style-commands.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
+import { requestPointerSeek } from './pointer-seek-control.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -263,7 +264,7 @@ function tlContextMenuHandler(e){
       if(playhead>start+0.0001&&playhead<end-0.0001){
         items.push({label:'✂ 在播放點切割',act:()=>runExternalAudioMenuAction('splitExternalAudio',[assetId,playhead])});
       }
-      items.push({label:'⏱ 播放頭移到音檔開頭',act:()=>{ Media.seek(start); emit('playhead:ensure'); }});
+      items.push({label:'⏱ 播放頭移到音檔開頭',act:()=>{ requestPointerSeek(start); emit('playhead:ensure'); }});
       items.push({label:enabled?'🔇 關閉此音檔聲音':'🔊 開啟此音檔聲音',act:()=>runExternalAudioMenuAction('toggleExternalAudioEnabled',[assetId])});
       items.push({label:'🗑 從時間軸移除音檔',act:()=>runExternalAudioMenuAction('removeExternalAudio',[assetId],{clearSelection:true})});
       if (IS_DESKTOP) {
@@ -393,7 +394,7 @@ function tlContextMenuHandler(e){
         items.push({label:'🔗✂ 影音分離',act:()=>{ void Media.detachClipAudio?.(c.id); }});
         items.push({label:'🎧 音訊配線',act:()=>AudioRouting.openForClip(c.id)});
       }
-      items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ Media.seek(c.offset); emit('playhead:ensure'); }});
+      items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ requestPointerSeek(c.offset); emit('playhead:ensure'); }});
       // 移到上／下一層視訊軌（多軌疊層：上層覆蓋下層）
       const moveTrack=(dv)=>{
         const tv=(c.vtrack||0)+dv;

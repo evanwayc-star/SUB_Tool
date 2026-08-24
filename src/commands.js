@@ -61,6 +61,7 @@ import { copySelectedStyle, pasteStyleToSelected } from './style-commands.js';
 import { addNote, renderNotes, clearAllNotes, exportNotes } from './notes.js';
 import { renderMixer, mixerReset, mixerMuteAll } from './mixer.js';
 import { toggleSafeFrame, toggleTimecodeWatermark, _syncMpvPanel } from './video-renderer.js';
+import { togglePointerSeekMode } from './pointer-seek-control.js';
 import { History, renderHistory } from './history.js';
 import { $ } from './dom.js';
 
@@ -219,6 +220,7 @@ function createCommands() {
     'toggle-auto-select': toggleAutoSelect,
     'toggle-overwrite': toggleOverwriteMode,
     'toggle-ow-keep': toggleOverwriteKeep,
+    'toggle-pointer-seek': togglePointerSeekMode,
   };
 
   for (const [id, panel] of Object.entries(CLOSE_PANELS)) {

@@ -41,6 +41,12 @@ describe('Mac 工具列 responsive 版面', () => {
     expect(html).toMatch(/data-act="zoom-fit"[\s\S]*class="compact-icon"/);
   });
 
+  it('滑鼠跳轉狀態位於裁切與設定之間，並保留兩個可讀狀態', () => {
+    expect(html).toMatch(/data-act="toggle-ow-keep"[\s\S]*data-act="toggle-pointer-seek"[\s\S]*data-act="settings"/);
+    expect(html).toMatch(/class="pointer-seek-btn"[^>]*>跳轉繼續<\/button>/);
+    expect(css).toContain('.pointer-seek-btn.pause');
+  });
+
   it('時間軸標題後保留收合把手，已選取狀態與縮放控制項獨立於收合群組外保持常駐', () => {
     expect(html).toMatch(/tl-toolbar-title[\s\S]*id="tlToolbarToggle"[\s\S]*id="tlToolbarOptions"[\s\S]*project-audio-count[\s\S]*data-act="zoom-fit"/);
     expect(html).toMatch(/id="tlToolbarOptions"[\s\S]*project-audio-count[\s\S]*<\/div>\s*<div class="spacer"><\/div>\s*<span id="tlSel">[\s\S]*class="zoom"/);

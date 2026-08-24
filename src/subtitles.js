@@ -12,6 +12,7 @@ import { escapeHTML, tcKeyAllowed, escapeHTMLWithSpaces } from './util.js';
 import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
+import { requestPointerSeek } from './pointer-seek-control.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
 import { emit } from './events.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
@@ -297,7 +298,7 @@ function renderCheckPanel(){
   panel.querySelectorAll('.cp-num').forEach(el=>{
     el.onclick=()=>{
       const idx=parseInt(el.dataset.idx)-1; const c=list[idx]; if(!c)return;
-      selectCue(c.id,{seek:true});
+      selectCue(c.id,{seek:true,pointer:true});
       const row=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);
       if(row)row.scrollIntoView({block:'center'});
     };
@@ -464,6 +465,12 @@ function renderSubRow(id){
   if(txt&&txt.contentEditable!=='true') txt.innerHTML=_txtInner(c.text);
 }
 
+function seekCueFromSelection(target, pointer) {
+  if(pointer) requestPointerSeek(target); else Media.seek(target);
+  emit('playhead:ensure');
+  emit('render:videoSub');
+}
+
 function selectCue(id,opts){
   opts=opts||{};
   let changed = false;
@@ -504,7 +511,8 @@ function selectCue(id,opts){
     if(c.timed!==false){
       const t = Media.displayTime();
       if(t < c.start || t >= c.end){
-        Media.seek(snapTimeToFrame(c.start, State.fps, State.dropFrame)); emit('playhead:ensure'); emit('render:videoSub');
+        const target=snapTimeToFrame(c.start, State.fps, State.dropFrame);
+        seekCueFromSelection(target, opts.pointer);
       }
     }else{
       const tkCues = State.cues.filter(x=>(x.track||0)===(c.track||0));
@@ -512,7 +520,8 @@ function selectCue(id,opts){
       if(idx>0){
         let prev = tkCues[idx-1];
         if(prev.timed!==false){
-          Media.seek(snapTimeToFrame(prev.end, State.fps, State.dropFrame)); emit('playhead:ensure'); emit('render:videoSub');
+          const target=snapTimeToFrame(prev.end, State.fps, State.dropFrame);
+          seekCueFromSelection(target, opts.pointer);
         }
       }
     }
@@ -672,7 +681,7 @@ sublist?.addEventListener?.('mousedown', e => {
   const _alreadySel = _noMod && State.selectedId === c.id && State.selectedIds.length === 1;
   const _pt = Media.displayTime();
   const _ptInside = _alreadySel && c.timed !== false && _pt >= c.start && _pt <= c.end;
-  selectCue(c.id, { additive: e.ctrlKey || e.metaKey, range: e.shiftKey, seek: _noMod && !_ptInside });
+  selectCue(c.id, { additive: e.ctrlKey || e.metaKey, range: e.shiftKey, seek: _noMod && !_ptInside, pointer: true });
 });
 
 sublist?.addEventListener?.('dblclick', async e => {

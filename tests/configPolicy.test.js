@@ -13,12 +13,14 @@ describe('renderer config policy', () => {
     const result = mergeRendererConfig(current, {
       recentProjects: [{ path: 'C:\\secret.json' }],
       autoSelect: true,
+      pointerSeekPauses: true,
       arbitraryMainKey: 'injected',
     });
 
     expect(result).toEqual({
       recentProjects: [{ path: 'C:\\Projects\\trusted.subtool' }],
       autoSelect: true,
+      pointerSeekPauses: true,
     });
   });
 

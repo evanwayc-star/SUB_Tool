@@ -8,6 +8,7 @@ import { openModal, closeModal, showToast } from '../ui.js';
 import { secToEncore } from '../time.js';
 import { escapeHTML, clamp } from '../util.js';
 import { Media } from '../media.js';
+import { requestPointerSeek } from '../pointer-seek-control.js';
 import { emit } from '../events.js';
 import { ensureProjectSaved } from '../project.js';
 import { editCue, splitCue } from '../subtitle-model.js';
@@ -212,7 +213,7 @@ async function openCueEditModal(c){
     [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:closeModal}],
     { keepVideo:true }); // 對話框靠右停、遮罩透明、不隱藏 mpv → 編輯時看得到後面的畫面
   // seek 到這句的起點，讓後面顯示的正是這句對應的畫面（方便對著影像改字）
-  try{ Media.seek(c.start); }catch(e){}
+  try{ requestPointerSeek(c.start); }catch(e){}
   setTimeout(()=>{
     const ta=$('cueEditTa');
     if(ta){

@@ -15,6 +15,7 @@ import { State, newId } from './state.js';
 import { secToEncore } from './time.js';
 import { escapeHTML, downloadBytes, tcKeyAllowed, bytesToB64, b64ToBytes } from './util.js';
 import { Media } from './media.js';
+import { requestPointerSeek } from './pointer-seek-control.js';
 import { updatePlayhead, drawRuler } from './timeline.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';
@@ -102,7 +103,7 @@ function renderNotes(){
     timeEl.addEventListener('click',e=>{
       e.stopPropagation();
       if(timeEl.querySelector('input')) return;
-      setNoteActive(n.id); Media.seek(n.time); updatePlayhead(); emit('playhead:ensure');
+      setNoteActive(n.id); requestPointerSeek(n.time); updatePlayhead(); emit('playhead:ensure');
     });
     timeEl.addEventListener('dblclick',e=>{
       e.stopPropagation();
@@ -164,7 +165,7 @@ function renderNotes(){
         else { _selectedNoteIds.add(n.id); _lastSelectedNoteId=n.id; }
       } else {
         _selectedNoteIds.clear(); _selectedNoteIds.add(n.id); _lastSelectedNoteId=n.id;
-        Media.seek(n.time); updatePlayhead(); emit('playhead:ensure');
+        requestPointerSeek(n.time); updatePlayhead(); emit('playhead:ensure');
       }
       setNoteActive(n.id);
       _refreshNoteSelectionUI();

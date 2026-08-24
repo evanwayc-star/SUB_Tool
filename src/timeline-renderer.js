@@ -50,6 +50,7 @@ import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
 import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
+import { requestPointerSeek } from './pointer-seek-control.js';
 import { planCueStyleAssignment } from './style-assignment.js';
 import { effStyle } from './substyle.js';
 
@@ -1253,16 +1254,15 @@ tlScroll.addEventListener('mousedown',e=>{
         } else {
           _noteClickState={id:hitNote.id,t:now};
         }
-        Media.seek(hitNote.time); updatePlayhead(); emit('render:videoSub'); emit('playhead:ensure');
+        requestPointerSeek(hitNote.time); updatePlayhead(); emit('render:videoSub'); emit('playhead:ensure');
         e.preventDefault(); return;
       }
     }
-    jklReset(); // 播放中拖曳時間尺 → 暫停
     const snaps = snapTargets(new Set());
     const currentThr = e.altKey ? 0 : 8/State.pxPerSec;
     const t = xToTime(x);
     const sn = snapVal(t, snaps, currentThr);
-    Media.seek(sn !== t ? sn : snapFrame(t)); updatePlayhead(); emit('render:videoSub');
+    requestPointerSeek(sn !== t ? sn : snapFrame(t)); updatePlayhead(); emit('render:videoSub');
     drag={mode:'scrub', snaps}; e.preventDefault(); return;
   }
   drag={mode:'rubber',startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,x0:x,y0:y,moved:false,additive:e.ctrlKey||e.metaKey};
@@ -1316,7 +1316,7 @@ const _handleDragUpdate = (e) => {
   if(drag.mode==='scrub'){
     const t = xToTime(e.clientX-rect.left);
     const sn = snapVal(t, drag.snaps, currentThr);
-    Media.seek(sn !== t ? sn : snapFrame(t));
+    requestPointerSeek(sn !== t ? sn : snapFrame(t));
     updatePlayhead(); emit('render:videoSub'); 
     updateSnapGuide(null); return;
   }
@@ -1630,7 +1630,7 @@ window.addEventListener('mouseup',e=>{
       const tkIdx=yToTrack(Math.max(0,drag.y0-tracksTop()+sc));
       if(tkIdx>=0){ focusTrackKind('sub', tkIdx); } // 類別與「哪一軌」是同一條不變量，一次寫入
       
-      Media.seek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub');
+      requestPointerSeek(xToTime(e.clientX-rect.left)); updatePlayhead(); emit('render:videoSub');
       if(!e.shiftKey){
         deselect('sub'); State.activeEdge='start';
         clearClipSelection();

@@ -38,6 +38,7 @@ import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assTo
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
 import { createCommands } from './commands.js';
+import { renderPointerSeekControl, requestPointerSeek } from './pointer-seek-control.js';
 import { togglePanel } from './ui.js';
 import { applyCueStylePatch } from './style-commands.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
@@ -314,7 +315,7 @@ video.addEventListener('ended',()=>{ if(Media.seqContinueAtEnd()) return; Media.
 });
 
 /* seek bar */
-$('seekBar').addEventListener('input',e=>{ renderSeekBar(e.target); const t=(+e.target.value)/1000; Media.seek(t); updateNoteActive(t); });
+$('seekBar').addEventListener('input',e=>{ renderSeekBar(e.target); const t=(+e.target.value)/1000; requestPointerSeek(t); updateNoteActive(t); });
 // rateSel removed from UI — speed controlled via JKL keys
 $('fpsSel').addEventListener('change',e=>{
   const prev=State.fps,prevDf=State.dropFrame;
@@ -955,6 +956,7 @@ function updateConfigUI() {
     btn.classList.toggle('keep', State.overwriteKeep);
     btn.classList.toggle('del', !State.overwriteKeep);
   });
+  renderPointerSeekControl();
 
 }
 
@@ -1172,7 +1174,7 @@ async function initDesktop(){
         renderSubList();
       }
       selectCueSingle(cueId, false);
-      Media.seek(cue.start);
+      requestPointerSeek(cue.start);
       return true;
     },
     onMatchStyle: ({ targetCueId, sourceCueId }) => {

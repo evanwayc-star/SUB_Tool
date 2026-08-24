@@ -387,6 +387,9 @@ const State = {
   // Media 每次編輯時同步它，供 History 還原幾何與靜音狀態。
   externalAudioState: [],
   autoSelect: false,   // 播放時是否自動選取對應字幕
+  // 滑鼠點選／拖曳到新時間點時，true＝定位後暫停；false＝保持目前播放。
+  // 屬於程式偏好，不寫入 .subtool 專案。
+  pointerSeekPauses: false,
   selectedId: null,    // 主選取（鍵盤/IO 對象）
   selectedIds: [],     // 多選集合
   activeEdge: 'start', // 上下鍵步進中目前停在 start 或 end
@@ -465,6 +468,7 @@ const _settings = makeSettingsStore(DESK);
 function applyConfig(conf) {
   if (!conf || typeof conf !== 'object') return;
   if (typeof conf.autoSelect === 'boolean') State.autoSelect = conf.autoSelect;
+  if (typeof conf.pointerSeekPauses === 'boolean') State.pointerSeekPauses = conf.pointerSeekPauses;
   if (typeof conf.overwriteMode === 'boolean') State.overwriteMode = conf.overwriteMode;
   if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
   if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
@@ -478,6 +482,7 @@ async function loadConfig() {
 function saveConfig() {
   return _settings.save('config', {
     autoSelect: State.autoSelect,
+    pointerSeekPauses: State.pointerSeekPauses,
     overwriteMode: State.overwriteMode,
     overwriteKeep: State.overwriteKeep,
     safeFrame: State.safeFrame,

@@ -10,6 +10,7 @@ let addCue;
 let addCueRelative;
 let Subtitles;
 let StylePanelController;
+let Media;
 let renderInvalidations = 0;
 
 function mountSystemDom() {
@@ -37,6 +38,8 @@ beforeAll(async () => {
   ({ History } = await import('../src/history.js'));
   ({ splitCue, addCue, addCueRelative } = await import('../src/subtitle-model.js'));
   Subtitles = await import('../src/subtitles.js');
+  ({ Media } = await import('../src/media.js'));
+  await import('../src/transport-controller.js');
   ({ StylePanelController } = await import('../src/ui/style-panel-controller.js'));
   StylePanelController.bindStylePanelEvents({
     renderAll: Subtitles.renderSubList,
@@ -197,6 +200,33 @@ describe('字幕編輯交易：拆分字幕', () => {
       renderInvalidations: 0,
       toast: '🔒「對白」已鎖定，無法拆分字幕',
     });
+  });
+});
+
+describe('字幕區塊滑鼠跳轉政策', () => {
+  it('跳轉暫停時，開啟字幕編輯會先停播再定位到字幕起點', async () => {
+    State.pointerSeekPauses = true;
+    Media.playing = true;
+    const calls = [];
+    const pauseSpy = vi.spyOn(Media, 'pause').mockImplementation(() => {
+      calls.push('pause');
+      Media.playing = false;
+    });
+    const seekSpy = vi.spyOn(Media, 'seek').mockImplementation(time => {
+      calls.push(`seek:${time}`);
+    });
+
+    try {
+      await StylePanelController.openCueEditModal(State.cues.find(cue => cue.id === 'target'));
+
+      expect(calls).toEqual(['pause', 'seek:10']);
+    } finally {
+      document.querySelector('#modalFoot button:last-child')?.click();
+      State.pointerSeekPauses = false;
+      Media.playing = false;
+      pauseSpy.mockRestore();
+      seekSpy.mockRestore();
+    }
   });
 });
 

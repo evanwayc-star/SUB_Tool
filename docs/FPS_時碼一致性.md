@@ -118,6 +118,7 @@ FPS-SYNC
 | `media.js` | `detectFpsWeb()` 區塊 | 實測 FPS（非檔名） | I1 |
 | `media.js` | `displayTime()` | 權威播放位置 | I4 |
 | `media.js` | `seek()` 的 snap／純字幕通知 | seek 對齊影格；無播放器時仍通知預覽讀回 `displayTime()` | I3, I4 |
+| `pointer-seek-control.js` | `requestPointerSeek()` | 滑鼠互動傳入時間軸時間，播放狀態處理後仍統一交給 `Media.seek()` 吸附影格 | I3, I4 |
 | `media.js` | `pause()` 的 snap | 暫停點對齊影格 | I3 |
 | `media.js` | mpv `time-pos` handler | 暫停時同源同格 + 抖動容忍 | I4, I6 |
 | `loaders/media-loader.js` | 原生 `seeked` 對齊 | 暫停載入完成後仍回到權威影格 | I3, I4 |

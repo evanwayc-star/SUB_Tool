@@ -14,6 +14,7 @@
 /** 允許由渲染端更新之布林開關設定鍵名 */
 const BOOLEAN_KEYS = Object.freeze([
   'autoSelect',
+  'pointerSeekPauses',
   'overwriteMode',
   'overwriteKeep',
   'safeFrame',

@@ -19,7 +19,7 @@ import { updatePlayhead, drawTimeline } from './timeline.js';
 import { ensureProjectSaved } from './project.js';
 import { recordHistory } from './history.js';
 import { updateNoteActive } from './notes.js';
-import { emit } from './events.js';
+import { emit, on } from './events.js';
 import { setStatus, showOsd } from './ui.js';
 import { getNoteJump, getFirstLastCue, getAdjacentCue, getCueInMinusFrames, getBoundaryStep } from './timeline-navigation.js';
 
@@ -69,6 +69,17 @@ function jklReset() {
   resetPlaybackSpeed();
 }
 
+/* 「跳轉暫停」只在互動發生當下停止已在運作的 transport。
+   反向 seek fallback 期間 Media.playing=false，但 _jklSpeed 仍非 0，
+   所以不能只看 Media.playing，否則計時器會在滑鼠定位後繼續往回拉。 */
+function pauseForPointerSeek() {
+  if (!Media.playing && _jklSpeed === 0) return false;
+  resetPlaybackSpeed();
+  if (Media.playing) Media.pause();
+  return true;
+}
+
+on('transport:pointerSeekPause', pauseForPointerSeek);
 
 function setManualPlaybackSpeed(rate) {
   jklClear();
