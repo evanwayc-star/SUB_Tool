@@ -9,11 +9,20 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const css = fs.readFileSync(path.join(ROOT, 'src/styles.css'), 'utf8');
 const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+const app = fs.readFileSync(path.join(ROOT, 'src/app.js'), 'utf8');
+const subtitleModel = fs.readFileSync(path.join(ROOT, 'src/subtitle-model.js'), 'utf8');
 
 function declarations(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]+)\\}`));
   expect(match, `找不到 ${selector} CSS 規則`).not.toBeNull();
+  return match[1].replace(/\s+/g, '');
+}
+
+function standaloneDeclarations(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = css.match(new RegExp(`(?:^|})\\s*${escaped}\\s*\\{([^}]+)\\}`));
+  expect(match, `找不到獨立的 ${selector} CSS 規則`).not.toBeNull();
   return match[1].replace(/\s+/g, '');
 }
 
@@ -46,6 +55,28 @@ describe('Mac 工具列 responsive 版面', () => {
     expect(html).toMatch(/data-act="toggle-ow-keep"[^>]*>[^<]*<\/button>\s*<div class="sep"><\/div>\s*<button[^>]*data-act="toggle-pointer-seek"/);
     expect(html).toMatch(/class="pointer-seek-btn"[^>]*>跳轉繼續<\/button>/);
     expect(css).toContain('.pointer-seek-btn.pause');
+  });
+
+  it('頂部狀態按鈕統一使用純文字與無外框色塊', () => {
+    expect(html).toMatch(/class="ow-toggle-btn"[^>]*>不覆蓋<\/button>/);
+    expect(html).toMatch(/class="ow-keep-btn[^"]*"[^>]*>保留<\/button>/);
+    for (const source of [app, subtitleModel]) {
+      expect(source).toContain("State.overwriteMode ? '可覆蓋' : '不覆蓋'");
+      expect(source).toContain("State.overwriteKeep ? '保留' : '裁切'");
+    }
+    for (const selector of [
+      '.ow-keep-btn',
+      '.ow-keep-btn.del',
+      '.ow-keep-btn.inactive-mode',
+      '.pointer-seek-btn',
+      '.pointer-seek-btn.pause',
+    ]) {
+      expect(standaloneDeclarations(selector)).not.toContain('border');
+    }
+    expect(standaloneDeclarations('.ow-keep-btn.del')).toContain('background:rgba(239,68,68,.08)');
+    expect(standaloneDeclarations('.ow-keep-btn.inactive-mode')).toContain('background:rgba(150,150,150,.08)');
+    expect(standaloneDeclarations('.pointer-seek-btn')).toContain('background:rgba(59,130,246,.08)');
+    expect(standaloneDeclarations('.pointer-seek-btn.pause')).toContain('background:rgba(245,158,11,.08)');
   });
 
   it('時間軸標題後保留收合把手，已選取狀態與縮放控制項獨立於收合群組外保持常駐', () => {

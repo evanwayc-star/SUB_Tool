@@ -649,7 +649,7 @@ export function toggleOverwriteMode({ force } = {}) {
   if (State.subMode && !force) { setStatus('上字幕模式中強制鎖定不可覆蓋', 'err'); return; }
   State.overwriteMode = !State.overwriteMode;
   document.querySelectorAll('.ow-toggle-btn').forEach(btn => {
-    btn.textContent = State.overwriteMode ? '🔓 可覆蓋' : '🔒 不覆蓋';
+    btn.textContent = State.overwriteMode ? '可覆蓋' : '不覆蓋';
     btn.classList.toggle('primary', State.overwriteMode);
   });
   document.querySelectorAll('.ow-keep-btn').forEach(btn => {
@@ -663,7 +663,7 @@ export function toggleOverwriteKeep({ force } = {}) {
   if (State.subMode && !force) { setStatus('上字幕模式中強制保留後方字幕', 'err'); return; }
   State.overwriteKeep = !State.overwriteKeep;
   document.querySelectorAll('.ow-keep-btn').forEach(btn => {
-    btn.textContent = State.overwriteKeep ? '📌 保留' : '✂️ 裁切';
+    btn.textContent = State.overwriteKeep ? '保留' : '裁切';
     btn.classList.toggle('keep', State.overwriteKeep);
     btn.classList.toggle('del', !State.overwriteKeep);
   });
