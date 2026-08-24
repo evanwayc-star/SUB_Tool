@@ -366,6 +366,9 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .ts-clr:hover{border-color:var(--text-dim)}
 .ts-clr.active{border-color:var(--accent);box-shadow:0 0 0 1.5px var(--accent)}
 .track-style.disabled{opacity:.45;pointer-events:none}
+.track-style.selection-disabled .ts-group{opacity:.45}
+.track-style.selection-disabled .ts-title{color:var(--text-faint)}
+.track-style.selection-disabled :is(button,input,select,textarea){cursor:not-allowed}
 .track-style input[type=number]{width:48px;text-align:center;font-size:11px;padding:1px 3px}
 .track-style input[type=color]{width:28px;height:22px;padding:1px 2px;cursor:pointer;border-radius:3px;flex-shrink:0}
 /* 字幕時間重疊警告 */

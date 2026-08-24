@@ -20,7 +20,7 @@ State.presetEdit = null;
 let _covCleared = false;
 
 
-function styleTarget(){
+function styleDisplayTarget(){
   const i=State.listTrack, trk=State.tracks[i];
   if(!trk) return null;
   // 編輯常用樣式期間：攔截樣式目標，導向獨立的草稿 (draft)
@@ -31,20 +31,38 @@ function styleTarget(){
   return { i, trk, cues, cue: cues[0] || null };
 }
 
+function styleTarget(){
+  const target=styleDisplayTarget();
+  if(!target || (!State.presetEdit && !target.cues.length)) return null;
+  return target;
+}
+
+const CUE_SOURCE_CONTROL_IDS=new Set(['tsPresetSel','tsPresetSave','tsPresetMgr','tsUnify','tsUnifyExclude']);
+
+function setStylePanelInteractivity(panel, { hasCue, editingPreset }){
+  const enabled=hasCue || editingPreset;
+  panel.classList.toggle('selection-disabled', !enabled);
+  panel.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  panel.querySelectorAll('button, input, select, textarea').forEach(control=>{
+    control.disabled=!enabled || (editingPreset && CUE_SOURCE_CONTROL_IDS.has(control.id));
+  });
+}
+
 function renderTrackStyle(){
-  const panel=$('trackStyle'); const t=styleTarget();
-  if(!t){ panel.classList.add('disabled'); $('tsTitle').textContent='字幕樣式'; return; }
+  const panel=$('trackStyle'); const t=styleDisplayTarget();
+  const editingPreset=!!t && !!State.presetEdit;
+  setStylePanelInteractivity(panel, { hasCue:!!t?.cues.length, editingPreset });
+  if(!t){ panel.classList.add('disabled'); $('tsTitle').textContent='字幕樣式｜請先選取字幕'; return; }
   panel.classList.remove('disabled');
   const { trk, cue, cues }=t;
   const idx=cue ? State.cues.filter(c=>(c.track||0)===State.listTrack).indexOf(cue)+1 : 0;
   const multi=cues.length>1;
-  const editingPreset = State.presetEdit;
-  const labelStr = editingPreset ? `✎ 編輯常用樣式：${editingPreset.name}`
-                           : cue ? `第 ${idx} 句樣式` : `「${trk.name}」樣式`;
+  const labelStr = editingPreset ? `✎ 編輯常用樣式：${State.presetEdit.name}`
+                           : cue ? `第 ${idx} 句樣式` : '字幕樣式｜請先選取字幕';
   $('tsTitle').textContent = labelStr;
   $('tsTitle').title = multi ? `改動會同時套用到選取的這 ${cues.length} 句（面板顯示的是第 ${idx} 句的值）`
-                     : cue ? '改動只影響這一句；要套用到整軌請按「⇩ 全軌統一」'
-                     : '沒有選取字幕 → 改動套用到整條軌道';
+                     : cue ? '改動只影響這一句；要套用到整軌請按「全軌套用」'
+                     : '請先在字幕列表或時間軸選取一則字幕，再調整樣式';
   panel.classList.toggle('per-cue', !!cue);
   const st=effStyle(cue, trk); // 生效值（缺欄位以預設後援）
   const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
@@ -356,7 +374,7 @@ let _tsSetTimer = null;
     tsSet('font', e.target.value);
   });
   // 常用樣式庫：存 / 套用 / 管理（跨專案，存 config）
-  // 存＝面板目前顯示的那組生效樣式（選取句 or 整軌）；套用＝同樣寫回面板當前的對象
+  // 正常模式只接受已選取字幕；編輯常用樣式時則寫入明確建立的 draft，不再默默回退到整軌。
   $('tsPresetSave').addEventListener('click',async()=>{
     const t=styleTarget(); if(!t)return;
     const curSt = effStyle(t.cue, t.trk);
@@ -443,7 +461,7 @@ let _tsSetTimer = null;
   /* 常用樣式庫（管理視窗、編輯模式、匯入匯出）：見 initPresetLibrary()。
      這一段與樣式面板的接線互不相干，抽出來讓 initUI 只剩面板本身。 */
   initPresetLibrary();
-  /* 全軌統一：清掉本軌所有「逐句樣式覆蓋」，讓每句都回到軌道樣式。
+  /* 全軌套用：清掉本軌所有「逐句樣式覆蓋」，讓每句都回到軌道樣式。
      ── 軌道樣式本來就是全軌生效；唯一會脫隊的就是設過覆蓋的句子（列表標 ✱ 自訂）。
         本鈕＝那些句子的一鍵歸隊，而非「把樣式複製到每一句」。 */
   $('tsUnify')?.addEventListener('click',()=>{
