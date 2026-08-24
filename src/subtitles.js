@@ -229,7 +229,7 @@ function formatSubSelectionHTML(){
     const tkName = State.tracks[tk]?.name || ('軌道 ' + (tk + 1));
     const tkCues = State.cues.filter(c => (c.track || 0) === tk);
     const cueIdx = tkCues.indexOf(pc) + 1;
-    extra = `．<span class="sel-track-name">[${escapeHTML(tkName)}]</span> - #${cueIdx}`;
+    extra = ` · <span class="sel-track-name">[${escapeHTML(tkName)}]</span> - <span class="sel-cue-idx">#${cueIdx}</span>`;
   }
   return `已選取 ${State.selectedIds.length} 句${extra}`;
 }
@@ -243,10 +243,11 @@ function formatSubSelectionText(){
     const tkName = State.tracks[tk]?.name || ('軌道 ' + (tk + 1));
     const tkCues = State.cues.filter(c => (c.track || 0) === tk);
     const cueIdx = tkCues.indexOf(pc) + 1;
-    extra = `．[${tkName}] - #${cueIdx}`;
+    extra = ` · [${tkName}] - #${cueIdx}`;
   }
   return `已選取 ${State.selectedIds.length} 句${extra}`;
 }
+
 
 function updateTlSel(){
   const el = $('stSel');
@@ -819,3 +820,5 @@ export {
   searchUpdate, searchNav, searchReplace, updateSearchCount, searchSelectAll, openInlineTimeEdit, refreshStyleSummaries,
   copyCues, pasteCues, trackLocked, cueTrackLocked, snapAllCuesToFrames, sweepContainedCues
 };
+
+

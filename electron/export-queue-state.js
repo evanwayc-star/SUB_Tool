@@ -1,6 +1,8 @@
 'use strict';
 
 const { JOB_STATUS, canTransition, isRetryable, isLiveWork } = require('./export-job-status');
+const { EXPORT_JOB_STATES, isTerminalState, transitionJob } = require('../shared/export-job-state-machine.cjs');
+
 
 /* 匯出佇列唯一的順序來源。這裡不保存第二份「可執行清單」：監控畫面、持久化 order
    與 scheduler 都從同一個有序 collection 讀取，避免重試或拖曳後兩種順序分歧。 */
@@ -117,4 +119,5 @@ class ExportQueueState {
   }
 }
 
-module.exports = { ExportQueueState };
+module.exports = { ExportQueueState, EXPORT_JOB_STATES, isTerminalState, transitionJob };
+

@@ -25,7 +25,7 @@ describe('時間軸工具列收合按鈕', () => {
     expect(control.options.hidden).toBe(true);
     expect(control.button.getAttribute('aria-expanded')).toBe('false');
     expect(control.button.getAttribute('aria-label')).toBe('展開時間軸工具');
-    expect(control.button.textContent.trim()).toBe('▶');
+    expect(control.button.textContent.trim()).toBe('»');
   });
 
   it('同一顆按鈕可重新展開所有選項', () => {
@@ -36,6 +36,7 @@ describe('時間軸工具列收合按鈕', () => {
     expect(control.options.hidden).toBe(false);
     expect(control.button.getAttribute('aria-expanded')).toBe('true');
     expect(control.button.getAttribute('aria-label')).toBe('收合時間軸工具');
-    expect(control.button.textContent.trim()).toBe('◀');
+    expect(control.button.textContent.trim()).toBe('«');
   });
+
 });

@@ -254,3 +254,8 @@ export function activateMpvTransport(desk) {
   runtime.setMpvBridge(desk?.mpv);
   return runtime;
 }
+
+export {
+  timeToFrameIndex, frameIndexToTime, stepFrameTime, measureClockDrift, createMasterClock
+} from './media-presentation-core.js';
+

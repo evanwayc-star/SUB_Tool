@@ -663,14 +663,19 @@ export function toggleOverwriteKeep({ force } = {}) {
   if (State.subMode && !force) { setStatus('上字幕模式中強制保留後方字幕', 'err'); return; }
   State.overwriteKeep = !State.overwriteKeep;
   document.querySelectorAll('.ow-keep-btn').forEach(btn => {
-    btn.textContent = State.overwriteKeep ? '📌 保留後方' : '✂️ 裁切後方';
-    btn.classList.toggle('primary', State.overwriteKeep);
+    btn.textContent = State.overwriteKeep ? '📌 保留' : '✂️ 裁切';
+    btn.classList.toggle('keep', State.overwriteKeep);
+    btn.classList.toggle('del', !State.overwriteKeep);
   });
-  setStatus(`重疊行為：${State.overwriteKeep ? '保留後方 (起點推移)' : '裁切後方 (直接截斷)'}`, 'ok');
+  setStatus(`重疊行為：${State.overwriteKeep ? '保留 (起點推移)' : '裁切 (直接截斷)'}`, 'ok');
+
   import('./state.js').then(({ saveConfig }) => saveConfig?.());
 }
 
-/* 相容既有 import；規則已移到 subtitle-track-names.js，交付對話框、ASS 與 queue payload
-   都從同一份實際輸出 cues 推導。 */
 export { burnedSubtitleTrackNames };
+
+export {
+  splitCueAtTime, mergeTwoCues, swapCueTexts
+} from './subtitle-edit-pipeline.js';
+
 

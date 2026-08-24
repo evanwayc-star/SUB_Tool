@@ -27,6 +27,7 @@ export {
 } from './timeline-renderer.js';
 
 export {
+
   timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds
 } from './timeline-interaction.js';
 

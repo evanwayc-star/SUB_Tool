@@ -441,3 +441,8 @@ export const Wave = {
     return peaks;
   }
 };
+
+export {
+  extractChannelPeaks, downsamplePeaks
+} from './waveform-peak-engine.js';
+

@@ -28,6 +28,8 @@ const ExportWatchdog = require('./export-watchdog');
 const { FileAuthority } = require('./file-authority');
 const { createLocalResourceServer, registerLocalResourceScheme } = require('./local-resource');
 const { createProjectWorkspace } = require('./project-workspace');
+const { sanitizeWindowBounds, decideWindowCloseAction } = require('./window-lifecycle-authority');
+
 const { mergeRendererConfig } = require('./config-policy');
 const { isPathContained } = require('./export-name-safety');
 const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');

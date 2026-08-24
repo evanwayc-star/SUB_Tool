@@ -146,9 +146,12 @@ afterEach(async () => {
   }
   activeApps.clear();
   for (const root of tempRoots) {
-    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    try {
+      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    } catch {}
   }
   tempRoots.clear();
+
 });
 
 describe('本機媒體資源 capability URL', () => {

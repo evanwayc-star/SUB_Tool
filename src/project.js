@@ -32,6 +32,8 @@ import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets, loadFonts } from './substyle.js';
 import { ProjectLoadSession } from './project-load-session.js';
+import { createProjectSnapshot, migrateProjectSchema, validateProjectIntegrity } from './project-workspace-authority.js';
+
 
 /* ===== 自動備份狀態 ===== */
 let _editGuardDone = false;  // 本 session 是否已顯示過「請先儲存」提示
@@ -864,4 +866,8 @@ export {
   saveProject,
   saveAsProject,
   startNewProject,
+  createProjectSnapshot,
+  migrateProjectSchema,
+  validateProjectIntegrity,
 };
+
