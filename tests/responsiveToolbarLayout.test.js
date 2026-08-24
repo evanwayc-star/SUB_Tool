@@ -43,6 +43,7 @@ describe('Mac 工具列 responsive 版面', () => {
 
   it('滑鼠跳轉狀態位於裁切與設定之間，並保留兩個可讀狀態', () => {
     expect(html).toMatch(/data-act="toggle-ow-keep"[\s\S]*data-act="toggle-pointer-seek"[\s\S]*data-act="settings"/);
+    expect(html).toMatch(/data-act="toggle-ow-keep"[^>]*>[^<]*<\/button>\s*<div class="sep"><\/div>\s*<button[^>]*data-act="toggle-pointer-seek"/);
     expect(html).toMatch(/class="pointer-seek-btn"[^>]*>跳轉繼續<\/button>/);
     expect(css).toContain('.pointer-seek-btn.pause');
   });
