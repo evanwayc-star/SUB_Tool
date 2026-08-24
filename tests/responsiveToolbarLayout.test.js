@@ -103,4 +103,12 @@ describe('Mac 工具列 responsive 版面', () => {
     expect(declarations('.ts-group')).toContain('flex:00auto');
     expect(html.match(/class="ts-group"/g)?.length).toBeGreaterThanOrEqual(10);
   });
+
+  it('全軌套用與保留座標使用兩種可區分的功能圖示', () => {
+    expect(html).toMatch(/id="tsUnify"[^>]*>[\s\S]*class="ts-unify-icon ts-unify-icon--all"[^>]*aria-hidden="true"[\s\S]*<span>全軌套用<\/span>/);
+    expect(html).toMatch(/id="tsUnifyExclude"[^>]*>[\s\S]*class="ts-unify-icon ts-unify-icon--preserve-position"[^>]*aria-hidden="true"[\s\S]*<span>全軌套用-排除座標<\/span>/);
+    expect(declarations('.ts-unify-action')).toContain('display:inline-flex');
+    expect(declarations('.ts-unify-icon')).toContain('stroke:currentColor');
+    expect(html).not.toMatch(/id="tsUnify(?:Exclude)?"[^>]*>\s*⇩/);
+  });
 });

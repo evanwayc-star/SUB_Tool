@@ -252,8 +252,21 @@
               <button class="ts-preset" id="tsPresetMgr" title="管理常用樣式（改名／刪除）">⚙ 管理</button>
             </div>
             <div class="ts-group" style="display:flex;gap:5px;">
-                <button class="ts-preset" id="tsUnify" title="把目前這句的樣式套用到整條軌道的每一句">⇩ 全軌套用</button>
-                <button class="ts-preset" id="tsUnifyExclude" title="把目前這句的樣式套用到整條軌道（排除座標與角度）">⇩ 全軌套用-排除座標</button>
+                <button class="ts-preset ts-unify-action" id="tsUnify" title="把目前這句的完整樣式（包含座標與角度）套用到整條軌道">
+                  <svg class="ts-unify-icon ts-unify-icon--all" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="m12 3 8 4-8 4-8-4 8-4Z"></path>
+                    <path d="m4 12 8 4 8-4"></path>
+                    <path d="m4 17 8 4 8-4"></path>
+                  </svg>
+                  <span>全軌套用</span>
+                </button>
+                <button class="ts-preset ts-unify-action" id="tsUnifyExclude" title="只套用外觀樣式到整條軌道，保留各句原本的座標與角度">
+                  <svg class="ts-unify-icon ts-unify-icon--preserve-position" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <circle cx="12" cy="12" r="6.5"></circle>
+                    <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4 4l16 16"></path>
+                  </svg>
+                  <span>全軌套用-排除座標</span>
+                </button>
               </div>
           </div>
         </div>

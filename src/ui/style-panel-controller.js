@@ -455,7 +455,7 @@ let _tsSetTimer = null;
     const idx=cue ? State.cues.filter(c=>(c.track||0)===i).indexOf(cue)+1 : 0;
     const 來源 = cue ? `第 ${idx} 句` : '目前';
     if(!others.length){ showToast('本軌只有這一句'); return; }
-    openModal('⇩ 全軌套用', `<div style="font-size:13px;line-height:1.7">`+
+    openModal('全軌套用', `<div style="font-size:13px;line-height:1.7">`+
       `把<b style="color:var(--accent)">${來源}的樣式</b>套用到「${escapeHTML(trk.name)}」的<b>全部 ${others.length+ (cue?1:0)} 句</b>。<br>`+
       (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會一併被覆蓋。<br>` : '')+
       `<span style="color:var(--text-faint)">位置與角度也會一起套用（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
@@ -479,7 +479,7 @@ let _tsSetTimer = null;
     const idx=cue ? State.cues.filter(c=>(c.track||0)===i).indexOf(cue)+1 : 0;
     const 來源 = cue ? `第 ${idx} 句` : '目前';
     if(!others.length){ showToast('本軌只有這一句'); return; }
-    openModal('⇩ 全軌套用-排除座標', `<div style="font-size:13px;line-height:1.7">`+
+    openModal('全軌套用-排除座標', `<div style="font-size:13px;line-height:1.7">`+
       `把<b style="color:var(--accent)">${來源}的樣式</b>套用到「${escapeHTML(trk.name)}」的<b>全部 ${others.length+ (cue?1:0)} 句</b>。<br>`+
       `（將排除座標與角度的變更）<br>`+
       (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會部分覆蓋。<br>` : '')+
