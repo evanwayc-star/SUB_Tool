@@ -556,29 +556,6 @@ function toggleTimelineSourceMute(source,{external=false,fallbackSourceId=null,s
   drawTimeline();
   return true;
 }
-function sourceMapForClip(c){
-  const maps=State.audioProject?.sourceMaps;
-  if(!maps || typeof maps!=='object') return null;
-  const sourceId=clipAudioSourceId(c);
-  const get=(key)=>maps instanceof Map ? maps.get(key) : maps[key];
-  return get(sourceId) || (c?.audioSrc && c.audioSrc!==sourceId ? get(c.audioSrc) : null) || null;
-}
-function sourceRoutingSummary(c){
-  const routes=sourceMapForClip(c)?.channels;
-  if(!Array.isArray(routes)||!routes.length) return '尚未配線';
-  const buses=State.audioProject?.buses||[];
-  const byId=new Map(buses.map((bus,index)=>[String(bus.id),bus?.name||`A${index+1}`]));
-  const ids=[];
-  for(const route of routes){
-    if(!route||route.enabled===false) continue;
-    for(const id of (Array.isArray(route.busIds)?route.busIds:[route.busIds])){
-      if(id!=null&&!ids.includes(String(id))) ids.push(String(id));
-    }
-  }
-  if(!ids.length) return '未送往專案音軌';
-  const labels=ids.map((id,index)=>byId.get(id)||`A${index+1}`);
-  return `→ ${labels.length<=4?labels.join('、'):`${labels.slice(0,4).join('、')} +${labels.length-4}`}`;
-}
 function openAudioRoutingForSource(source){
   if(!source) return;
   const isExternal=source.kind==='external-audio';
@@ -762,10 +739,7 @@ function renderAudioTrackRows(){
       block.dataset.audioEnd=String(e);
       block.dataset.audioEnabled=String(!muted);
       const wave=sourceWaveDetail(c,external);
-      const waveLabel=sourceWaveLabel(c,wave.selection);
-      const routeText=sourceRoutingSummary(c);
       block.dataset.waveSelection=wave.selection||'mix';
-      block.title=`${c.name||(external?'外部音檔':'影音片段')}\n聲音：${muted?'已關閉':'已開啟'}（右鍵選單切換）\n波形：${waveLabel}${wave.fallback?'（暫以 MIX 顯示）':''}\n${external?'拖曳＝移動｜拖左右邊緣＝修剪｜右鍵＝切割、刪除、靜音與波形':'右鍵：切換 MIX／來源聲道'}\n${routeText}`;
       block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span>${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}`;
       const peak=wave.peaks;
       if(peak && peak.length){

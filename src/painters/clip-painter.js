@@ -32,7 +32,6 @@ export function paintClipBlocks(container, displayList) {
       const trimmedMarker = c.trimmed ? ' ✂' : '';
       const fadeMarker = c.hasFade ? ' ⌁' : '';
       el.innerHTML = `<div class="edge l"></div><div class="clip-label">${icon} ${c.escapedName}${trimmedMarker}${fadeMarker}</div><div class="edge r"></div>`;
-      el.title = `${c.name}（${c.trackName}）\n位置 ${c.timeRangeStr}\n修剪 in ${c.inStr}s / out ${c.outStr}s（來源長 ${c.durStr}s）\n拖曳＝移動（上下拖可換視訊軌）｜拖左右邊緣＝修剪\n${c.isImg ? '在預覽畫面可直接縮放與移動圖片位置' : ''}`;
       row.appendChild(el);
     } catch(err) {
       console.error('renderClipBlocks error on clip', c, err);
