@@ -99,6 +99,7 @@ contextBridge.exposeInMainWorld('subtool', {
     screenshot:(p)     => ipcRenderer.invoke('mpv:screenshot', p),
     play:      ()      => ipcRenderer.invoke('mpv:play'),
     pause:     ()      => ipcRenderer.invoke('mpv:pause'),
+    direction: (v)     => ipcRenderer.invoke('mpv:direction', v),
     mute:      (v)     => ipcRenderer.invoke('mpv:mute', v),
     rate:      (r)     => ipcRenderer.invoke('mpv:rate', r),
     brightness:(v)     => ipcRenderer.invoke('mpv:brightness', v),

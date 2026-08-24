@@ -150,6 +150,7 @@ const Media = {
   objectURLs:[],
   get mpvMode(){ return getPlayerAdapter().mode === 'mpv'; },
   _mpvTime:0, _mpvDuration:0, _bgVersion:0,
+  _nativeReverse:false,
   /* mpv 畫面接管旗標：true＝WebCodecs 已接管、mpv 視窗讓位。 */
   _wcTakeover:false,
   _intakeSession:new MediaIntakeSession(),
@@ -2217,6 +2218,16 @@ const Media = {
 
   /* --- 播放控制 --- */
   play(){
+    // mpv 原生倒播只讓影像 transport 運作。Web Audio／外部音訊元素沒有可靠的
+    // 反向播放能力，若沿用一般 play() 路徑會聽到「音訊正播、畫面倒播」。
+    if(this._nativeReverse){
+      this.ensureCtx();
+      this.stopBufferSources(); this.stopElementSources();
+      getPlayerAdapter().play().catch(()=>{});
+      this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play'));
+      this._lastSeekTime=null;
+      return;
+    }
     // 序列：起播位置可能在間隙或另一個 clip 上，先路由
     if(this.seqOn()){
       const t = this.displayTime();
@@ -2266,6 +2277,25 @@ const Media = {
     this._lastSeekTime=null;
   },
   pause(){
+    if(this._nativeReverse){
+      const c=this.seqOn()?this._activeClip():null;
+      const paused=this._transport.pause({
+        sourceTime:this.vTime(),clip:c,virtual:false,playbackRate:video.playbackRate||1,
+        useGap:this.seqOn(),fps:State.fps,dropFrame:State.dropFrame,
+      });
+      const sourceTime=this._transport.sourceTime(paused,c);
+      const adapter=getPlayerAdapter();
+      adapter.pause().catch(()=>{});
+      this._nativeReverse=false;
+      adapter.direction('forward').catch(()=>{});
+      adapter.rate(1).catch(()=>{});
+      this._mpvTime=sourceTime;
+      adapter.seek(sourceTime).catch(()=>{});
+      this.stopBufferSources(); this.stopElementSources();
+      this.playing=false; $('playBtn').textContent='▶';
+      this.syncMuteState();
+      return;
+    }
     const virtual=this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'));
     const _c=this.seqOn()?this._activeClip():null;
     const paused=this._transport.pause({
@@ -2544,7 +2574,41 @@ const Media = {
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ tr.el.playbackRate=r; if('preservesPitch' in tr.el) tr.el.preservesPitch=pp; } }
     if(!this.mpvMode && this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }
   },
+  supportsNativeReverse(){
+    const adapter=getPlayerAdapter();
+    if(!this.mpvMode||this._wcTakeover||!adapter.supportsNativeReverse()) return false;
+    // 原生倒播目前只用於一支未修剪、沒有時間軸位移的影片。多片段、間隙與修剪邊界
+    // 仍交給既有時間軸 seek 路徑，避免 mpv 倒出目前 clip 的來源範圍。
+    const clips=State.clips.filter(clip=>clip.type!=='image');
+    if(clips.length!==1||this._gap) return false;
+    const clip=clips[0];
+    return clip.id===this.activeClipId
+      &&Math.abs(Number(clip.offset)||0)<1e-6
+      &&Math.abs(Number(clip.in)||0)<1e-6
+      &&Math.abs((Number(clip.out)||0)-(Number(clip.dur)||0))<0.05;
+  },
+  async setPlaybackDirection(direction){
+    const next=direction==='backward'?'backward':'forward';
+    const adapter=getPlayerAdapter();
+    if(next==='backward'&&!this.supportsNativeReverse()) return false;
+    if(!adapter.supportsNativeReverse()){
+      this._nativeReverse=false;
+      return false;
+    }
+    if(next==='backward'){
+      this.stopBufferSources(); this.stopElementSources();
+      await adapter.mute(true);
+      await adapter.direction('backward');
+      this._nativeReverse=true;
+      return true;
+    }
+    this._nativeReverse=false;
+    await adapter.direction('forward');
+    this.syncMuteState();
+    return true;
+  },
   reset(options={}){
+    this._nativeReverse=false;
     this._intakeSession.invalidate();
     this._setActiveStreamLease(null);
     this._assetEpoch.invalidate();

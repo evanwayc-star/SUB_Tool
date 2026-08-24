@@ -26,6 +26,27 @@ describe('desktop player adapter guide contract', () => {
 });
 
 describe('active transport', () => {
+  it('mpv mode exposes native reverse direction while HTML5 keeps the fallback contract', async () => {
+    const direction = vi.fn().mockResolvedValue(true);
+    const runtime = resetPlayerAdapter({ mpv: {
+      launch: vi.fn().mockResolvedValue({ ok: true }),
+      direction,
+    } });
+
+    expect(runtime.supportsNativeReverse()).toBe(false);
+    await runtime.enterMpv({ src: 'D:/media/a.mxf' });
+    expect(runtime.supportsNativeReverse()).toBe(true);
+    await runtime.direction('backward');
+    await runtime.direction('forward');
+
+    expect(direction).toHaveBeenNthCalledWith(1, 'backward');
+    expect(direction).toHaveBeenNthCalledWith(2, 'forward');
+
+    await runtime.enterHtml5({ pause: vi.fn() });
+    expect(runtime.supportsNativeReverse()).toBe(false);
+    await expect(runtime.direction('backward')).resolves.toBe(false);
+  });
+
   it('HTML5 mode delegates transport to the injected video element', async () => {
     const videoEl = {
       play: vi.fn().mockResolvedValue(undefined),

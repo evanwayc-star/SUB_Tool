@@ -122,8 +122,8 @@ FPS-SYNC
 | `media.js` | `pause()` 的 snap | 暫停點對齊影格 | I3 |
 | `media.js` | mpv `time-pos` handler | 暫停時同源同格 + 抖動容忍 | I4, I6 |
 | `loaders/media-loader.js` | 原生 `seeked` 對齊 | 暫停載入完成後仍回到權威影格 | I3, I4 |
-| `keyboard.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
-| `keyboard.js` | JKL 倒播 timer | 以 `displayTime()` 計算下一個時間軸位置 | I4, I5 |
+| `transport-controller.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
+| `transport-controller.js` | JKL 倒播 | 單一未修剪、零位移的 mpv 片段才可用原生 backward；其他時間軸仍以 `displayTime()` 計算 absolute seek | I4, I5 |
 | `notes.js` | `addNote()` | 備註時間取自 `displayTime()` | I4 |
 | `timeline-renderer.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |
 | `app.js` | `timeupdate` handler | 三讀數同源 `displayTime()` | I4 |

@@ -82,6 +82,21 @@ function make({ duration = 123.5 } = {}) {
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it('原生倒播用 play-direction 切換方向，恢復正播時也明確寫回 forward', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    sockets[0].write.mockClear();
+
+    host.direction('backward');
+    host.direction('forward');
+
+    const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands).toEqual([
+      ['set_property', 'play-direction', 'backward'],
+      ['set_property', 'play-direction', 'forward'],
+    ]);
+  });
+
   it('連續精準定位直接改 time-pos，避免 seek 指令延後最新逐格目標', async () => {
     const { host, sockets } = make();
     await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });

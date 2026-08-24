@@ -26,6 +26,8 @@ import { getNoteJump, getFirstLastCue, getAdjacentCue, getCueInMinusFrames, getB
 /* ===== JKL 穿梭輪狀態與定時器 ============================================== */
 let _jklSpeed = 0;
 let _jklTimer = null;
+let _jklNativeReverse = false;
+let _jklApplyEpoch = 0;
 
 function jklClear() {
   if (_jklTimer) {
@@ -58,9 +60,20 @@ function setJklSpeed(speed) {
   _jklSpeed = speed;
 }
 
+function leaveNativeReverse() {
+  if (!_jklNativeReverse) return false;
+  _jklNativeReverse = false;
+  Media.pause();
+  // Media.pause() 會恢復方向；這個公開呼叫也讓 mock／替代 transport 明確收到契約。
+  Promise.resolve(Media.setPlaybackDirection?.('forward')).catch(() => {});
+  return true;
+}
+
 function resetPlaybackSpeed() {
   jklClear();
+  _jklApplyEpoch++;
   _jklSpeed = 0;
+  leaveNativeReverse();
   Media.setRate(1);
   updateSpeedIndicator();
 }
@@ -81,43 +94,76 @@ function pauseForPointerSeek() {
 
 on('transport:pointerSeekPause', pauseForPointerSeek);
 
+
 function setManualPlaybackSpeed(rate) {
   jklClear();
+  _jklApplyEpoch++;
   _jklSpeed = 0;
+  leaveNativeReverse();
   Media.setRate(rate);
   updateSpeedIndicator();
 }
 
+function startReverseSeekFallback(capturedSpeed) {
+  // HTML5、多片段與修剪片段仍以時間軸 absolute seek 倒退，維持既有邊界語義。
+  Media.pause();
+  Media.setRate(1);
+  const fps = 30, step = Math.abs(capturedSpeed) / fps;
+  _jklTimer = setInterval(() => {
+    if (_jklSpeed !== capturedSpeed) { jklClear(); return; }
+    const t = Media.displayTime();
+    if (t <= 0) { jklClear(); _jklSpeed = 0; setStatus('已到開頭', ''); updateSpeedIndicator(); return; }
+    const newT = Math.max(0, t - step);
+    Media.seek(newT);
+    updatePlayhead();
+    emit('playhead:ensure');
+    emit('render:videoSub');
+    if (!video.src) {
+      const displayT = Media.displayTime();
+      const tc = $('tcCur'); if (tc) tc.textContent = secToEncore(displayT, State.fps, State.dropFrame);
+      const sb = $('seekBar'); if (sb) sb.value = Math.round(displayT * 1000);
+    }
+    Media.scrubAudio(newT, Math.max(step, 0.08));
+  }, 1000 / fps);
+}
+
 function jklApply() {
   jklClear();
+  const applyEpoch = ++_jklApplyEpoch;
   if (_jklSpeed === 0) {
-    Media.pause();
+    if (!leaveNativeReverse()) Media.pause();
     Media.setRate(1);
   } else if (_jklSpeed > 0) {
+    leaveNativeReverse();
     Media.setRate(_jklSpeed);
     if (!Media.playing) Media.play();
   } else {
-    // 負速度：暫停影片，用 interval 逐格倒退
-    Media.pause();
-    Media.setRate(1);
-    const fps = 30, step = Math.abs(_jklSpeed) / fps;
     const capturedSpeed = _jklSpeed;
-    _jklTimer = setInterval(() => {
-      if (_jklSpeed !== capturedSpeed) { jklClear(); return; }
-      const t = Media.displayTime();
-      if (t <= 0) { jklClear(); _jklSpeed = 0; setStatus('已到開頭', ''); return; }
-      const newT = Math.max(0, t - step);
-      Media.seek(newT);
-      updatePlayhead();
-      emit('playhead:ensure');
-      emit('render:videoSub');
-      if (!video.src) {
-        const displayT = Media.displayTime();
-        const tc = $('tcCur'); if (tc) tc.textContent = secToEncore(displayT, State.fps, State.dropFrame);
-        const sb = $('seekBar'); if (sb) sb.value = Math.round(displayT * 1000);
-      }
-      Media.scrubAudio(newT, Math.max(step, 0.08));
-    }, 1000 / fps);
+    if (_jklNativeReverse) {
+      Media.setRate(Math.abs(capturedSpeed));
+      if (!Media.playing) Media.play();
+    } else if (Media.supportsNativeReverse?.()) {
+      Media.pause();
+      Promise.resolve(Media.setPlaybackDirection('backward')).then(enabled => {
+        if (applyEpoch !== _jklApplyEpoch || _jklSpeed !== capturedSpeed) {
+          // backward IPC 仍在飛行時若使用者已按 K／切回正播，晚到的完成不得把
+          // transport 留在 backward。若只是又按一次 J，則交給較新的 apply 接手。
+          if (enabled !== false && _jklSpeed >= 0) {
+            Media.pause();
+            Promise.resolve(Media.setPlaybackDirection?.('forward')).catch(() => {});
+          }
+          return;
+        }
+        if (enabled === false) { startReverseSeekFallback(capturedSpeed); return; }
+        _jklNativeReverse = true;
+        Media.setRate(Math.abs(capturedSpeed));
+        Media.play();
+      }).catch(() => {
+        if (applyEpoch === _jklApplyEpoch && _jklSpeed === capturedSpeed) startReverseSeekFallback(capturedSpeed);
+      });
+    } else {
+      startReverseSeekFallback(capturedSpeed);
+    }
   }
   const spd = Math.abs(_jklSpeed);
   const label = _jklSpeed === 0 ? '暫停' : (_jklSpeed > 0 ? `▶ ${spd}x 正播` : `◀ ${spd}x 倒帶`);
@@ -145,16 +191,24 @@ function shuttleForward() {
 }
 
 function togglePlayPause() {
+  const wasPlaying = Media.playing;
   resetPlaybackSpeed();
-  Media.toggle();
+  // 原生倒播的 reset 會先暫停並恢復 forward；此時不能再 toggle 一次，否則
+  // 空白鍵會從「倒播」意外變成「立刻正播」。
+  if (wasPlaying) {
+    if (Media.playing) Media.pause();
+  } else {
+    Media.play();
+  }
   setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : '');
 }
 
 function stepFrame(dir, repeat = false) {
   if (Media.playing) {
     jklClear();
+    _jklApplyEpoch++;
     _jklSpeed = 0;
-    Media.pause();
+    if (!leaveNativeReverse()) Media.pause();
     setStatus('⏸ 暫停', '');
   }
   if (repeat) {
@@ -169,8 +223,9 @@ function stepFrame(dir, repeat = false) {
 function nudge(d) {
   if (Media.playing) {
     jklClear();
+    _jklApplyEpoch++;
     _jklSpeed = 0;
-    Media.pause();
+    if (!leaveNativeReverse()) Media.pause();
     setStatus('⏸ 暫停', '');
   }
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點為基準，並精確吸附至影格格網

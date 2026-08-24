@@ -1699,6 +1699,7 @@ ipcMain.handle('mpv:screenshot', (event, filePath) => {
 });
 ipcMain.handle('mpv:play', () => mpvHost.play());
 ipcMain.handle('mpv:pause', () => mpvHost.pause());
+ipcMain.handle('mpv:direction', (event, value) => mpvHost.direction(value));
 ipcMain.handle('mpv:mute', (event, value) => mpvHost.mute(value));
 ipcMain.handle('mpv:rate', (event, value) => mpvHost.rate(value));
 ipcMain.handle('mpv:brightness', (event, value) => mpvHost.brightness(value));

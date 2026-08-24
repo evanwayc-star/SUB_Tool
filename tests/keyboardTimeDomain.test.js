@@ -9,6 +9,8 @@ const mediaMock = vi.hoisted(() => ({
   pause: vi.fn(),
   play: vi.fn(),
   setRate: vi.fn(),
+  setPlaybackDirection: vi.fn().mockResolvedValue(true),
+  supportsNativeReverse: vi.fn(() => false),
   externalAudio: { list: vi.fn(() => []), get: vi.fn(() => null) },
   playing: false,
 }));
@@ -87,6 +89,12 @@ describe('JKL reverse shuttle time domain', () => {
     mediaMock.vTime.mockClear();
     mediaMock.seek.mockClear();
     mediaMock.scrubAudio.mockClear();
+    mediaMock.pause.mockReset();
+    mediaMock.play.mockClear();
+    mediaMock.setRate.mockClear();
+    mediaMock.setPlaybackDirection.mockClear();
+    mediaMock.supportsNativeReverse.mockReset().mockReturnValue(false);
+    mediaMock.playing = false;
   });
 
   afterEach(() => {
@@ -106,6 +114,78 @@ describe('JKL reverse shuttle time domain', () => {
     );
     expect(mediaMock.displayTime).toHaveBeenCalled();
     expect(mediaMock.vTime).not.toHaveBeenCalled();
+  });
+
+  it('mpv 原生倒播不建立 absolute seek 迴圈，停止時恢復 forward', async () => {
+    State.keymap = {
+      rewind: [{ key: 'j' }],
+      pause: [{ key: 'k' }],
+    };
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    vi.advanceTimersByTime(250);
+
+    expect(mediaMock.setPlaybackDirection).toHaveBeenCalledWith('backward');
+    expect(mediaMock.setRate).toHaveBeenCalledWith(1);
+    expect(mediaMock.play).toHaveBeenCalled();
+    expect(mediaMock.seek).not.toHaveBeenCalled();
+    expect(mediaMock.scrubAudio).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK' }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mediaMock.pause).toHaveBeenCalled();
+    expect(mediaMock.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
+    expect(mediaMock.setRate).toHaveBeenLastCalledWith(1);
+  });
+
+  it('原生倒播中按播放暫停鍵只停止，不會緊接著切成正播', async () => {
+    State.keymap = {
+      rewind: [{ key: 'j' }],
+      toggle_play_pause: [{ key: ' ' }],
+    };
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    mediaMock.playing = true;
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    mediaMock.pause.mockClear();
+    const reversePlayCount = mediaMock.play.mock.calls.length;
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space' }));
+    await Promise.resolve();
+
+    expect(mediaMock.pause).toHaveBeenCalledTimes(1);
+    expect(mediaMock.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
+    expect(mediaMock.play).toHaveBeenCalledTimes(reversePlayCount);
+  });
+
+  it('原生倒播 IPC 尚未完成就按 K，晚到結果也會恢復 forward', async () => {
+    State.keymap = {
+      rewind: [{ key: 'j' }],
+      pause: [{ key: 'k' }],
+    };
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+    let finishBackward;
+    mediaMock.setPlaybackDirection.mockImplementationOnce(() => new Promise(resolve => {
+      finishBackward = resolve;
+    }));
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK' }));
+    finishBackward(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mediaMock.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
   });
 
   it('播放時按下左右鍵會先暫停並往左/右移動一格', async () => {

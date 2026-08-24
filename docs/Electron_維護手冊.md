@@ -98,6 +98,7 @@ Main (main.js)
 | `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置（**來源時間**；影片序列的時間軸↔來源映射在前端 media.js 處理）。host 以設定 `time-pos` 執行精準 absolute 定位，避免 mpv `seek` command 的 queued display delay 阻塞連續逐格的最新目標 |
 | `mpv.loadfile(p)` | `mpv:loadfile` | R→M | 影片序列跨段切換：同一 mpv 實例換檔（保留 --wid 嵌入與屬性），輪詢 duration 就緒後回傳 `{duration}`；只接受 FileAuthority 已授權來源 |
 | `mpv.play()` / `mpv.pause()` | `mpv:play` / `mpv:pause` | R→M | 播放 / 暫停 |
+| `mpv.direction(v)` | `mpv:direction` | R→M | 設定 mpv `play-direction` 為 `backward`／`forward`；renderer 只在單一未修剪、零位移片段使用原生倒播，其餘不得繞過時間軸映射 |
 | `mpv.mute(v)` | `mpv:mute` | R→M | 靜音切換 |
 | `mpv.rate(r)` | `mpv:rate` | R→M | 播放速率 |
 | `mpv.brightness(v)` | `mpv:brightness` | R→M | 設定 mpv 畫面亮度（−100～0）。淡入淡出的預覽提示用：HTML 疊層蓋不過 mpv 的 OS 層視窗，故改以 brightness 呈現「淡到黑」 |
@@ -378,6 +379,7 @@ ffmpeg 單次 ingest → proxy／逐聲道快取 → HTML/WebCodecs 預覽；這
 
 - `mpv:launch`：Windows 啟動 mpv IPC socket（`\\.\pipe\subtool-mpv-<token>`），建立連線後送播放指令；child process、pipe、宿主與 guide 視窗均由 `mpv-host.js` 收斂管理
 - `mpv:event` 推播：`time-pos`、`duration`、`pause`、`eof-reached`（前端用於同步播放頭）
+- `mpv:direction`：將 JKL 倒帶切成 mpv 原生 `backward`。資格與片段邊界由 renderer 的 `Media.supportsNativeReverse()` 決定；倒播時音訊靜音，任何停止／正播入口都要恢復 `forward`，包含尚未完成的 backward IPC 晚到情況
 - `mpv:subSet`：接收 base64 ASS 字串，寫入暫存 `.ass` 後用 `sub-reload` 指令更新
 - `mpv:setBounds`：更新 mpv host 視窗位置；主視窗移動/縮放時自動呼叫
 - `mpv:setImageGuide`：僅把圖片視覺疊層交給透明 guide；永久穿透與單一 DOM 互動責任的完整約束見 [`技術架構說明.md` §0.9](技術架構說明.md#09-靜態圖片也是時間軸片段不是播放器的一格畫面)
@@ -388,6 +390,7 @@ ffmpeg 單次 ingest → proxy／逐聲道快取 → HTML/WebCodecs 預覽；這
 - mpv host 與 `mainWin` 是不同的 BrowserWindow；`mainWin.minimize()` 時由 `mpvHost.hideForParent()` 一起隱藏宿主與 guide
 - `safeSend(wc, ch, data)`：視窗關閉後 IPC 回呼可能仍在執行，必須先確認 `!wc.isDestroyed()`
 - Windows mpv 版本需支援 `--input-ipc-server`；偵測失敗時 fallback 到 ffmpeg 單次轉檔
+- Windows mpv 還需支援 `play-direction`。正式發版前以隨附的 `electron/mpv/mpv.exe --list-properties` 確認，並用實際 mpv 素材驗證倒播時間連續下降、停止後回到正向；不可只驗 IPC 有送出
 
 ---
 

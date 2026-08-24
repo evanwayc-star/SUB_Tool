@@ -17,6 +17,8 @@ class Html5Transport {
     this.video.playbackRate = value;
     if ('preservesPitch' in this.video) this.video.preservesPitch = value >= 0.25 && value <= 4;
   }
+  supportsNativeReverse() { return false; }
+  async direction() { return false; }
   async mute(value) { if (this.video) this.video.muted = !!value; }
 }
 
@@ -27,6 +29,11 @@ class MpvTransport {
   async pause() { return this.mpv?.pause?.(); }
   async seek(time) { return this.mpv?.seek?.(time); }
   async rate(value) { return this.mpv?.rate?.(value); }
+  supportsNativeReverse() { return typeof this.mpv?.direction === 'function'; }
+  async direction(value) {
+    if (!this.supportsNativeReverse()) return false;
+    return this.mpv.direction(value === 'backward' ? 'backward' : 'forward');
+  }
   async mute(value) { return this.mpv?.mute?.(value); }
 }
 
@@ -166,6 +173,11 @@ export function createNativePreviewRuntime({
     async pause() { return activeTransport.pause(); },
     async seek(time) { return activeTransport.seek(time); },
     async rate(value) { return activeTransport.rate(value); },
+    supportsNativeReverse() { return mode === 'mpv' && activeTransport.supportsNativeReverse(); },
+    async direction(value) {
+      if (!runtime.supportsNativeReverse()) return false;
+      return activeTransport.direction(value);
+    },
     async mute(value) { return activeTransport.mute(value); },
     brightness(value) {
       if (!bridge?.brightness) return false;
@@ -258,4 +270,3 @@ export function activateMpvTransport(desk) {
 export {
   timeToFrameIndex, frameIndexToTime, stepFrameTime, measureClockDrift, createMasterClock
 } from './media-presentation-core.js';
-
