@@ -19,11 +19,14 @@ import {
   BUILTIN_MODELS,
   blobToBase64,
   extractClipFloat32Mono16k,
+  combineRecognitionAudioBuffers,
   encodeWav16kMono,
   loadTransformersPipeline,
   transcribeWithBuiltinModel,
   resolveGeminiModel,
   callGeminiAudioTranscription,
+  parseAzureTranscriptionResponse,
+  callAzureSpeechTranscription,
   callWhisperApi,
   transcribeAudioStream
 } from './speech-recognition-engine.js';
@@ -33,16 +36,49 @@ export {
   BUILTIN_MODELS,
   blobToBase64,
   extractClipFloat32Mono16k,
+  combineRecognitionAudioBuffers,
   encodeWav16kMono,
   loadTransformersPipeline,
   transcribeWithBuiltinModel,
   resolveGeminiModel,
   callGeminiAudioTranscription,
+  parseAzureTranscriptionResponse,
+  callAzureSpeechTranscription,
   callWhisperApi,
   transcribeAudioStream
 };
 
 const ASR_CONFIG_KEY = 'subtool_asr_config';
+const CLOUD_PROVIDER_META = Object.freeze({
+  google: Object.freeze({
+    keyField: 'googleApiKey',
+    name: 'Google Gemini',
+    keyLabel: 'Google Gemini API Key：',
+    helpLabel: '取得 Google 免費 API Key ↗',
+    helpURL: 'https://aistudio.google.com/app/apikey'
+  }),
+  azure: Object.freeze({
+    keyField: 'azureApiKey',
+    name: 'Azure Speech',
+    keyLabel: 'Azure Speech API Key：',
+    helpLabel: '建立 Azure Speech 資源 ↗',
+    helpURL: 'https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices'
+  }),
+  groq: Object.freeze({
+    keyField: 'groqApiKey',
+    name: 'Groq',
+    keyLabel: 'Groq API Key：',
+    helpLabel: '取得 Groq 免費 API Key ↗',
+    helpURL: 'https://console.groq.com/keys'
+  }),
+  openai: Object.freeze({
+    keyField: 'openaiApiKey',
+    name: 'OpenAI',
+    keyLabel: 'OpenAI API Key：',
+    helpLabel: '取得 OpenAI API Key ↗',
+    helpURL: 'https://platform.openai.com/api-keys'
+  })
+});
 
 /**
  * 讀取已儲存的 ASR 設定
@@ -59,6 +95,9 @@ export function getAsrConfig() {
           googleApiKey: parsed.googleApiKey || '',
           groqApiKey: parsed.groqApiKey || '',
           openaiApiKey: parsed.openaiApiKey || '',
+          azureApiKey: parsed.azureApiKey || '',
+          azureRegion: parsed.azureRegion || 'southeastasia',
+          azurePhraseList: parsed.azurePhraseList || '',
           language: parsed.language || 'zh',
           prompt: parsed.prompt || '以下是影音對話，請以繁體中文輸出完整字幕，精準保留標點符號。'
         };
@@ -71,6 +110,9 @@ export function getAsrConfig() {
     googleApiKey: '',
     groqApiKey: '',
     openaiApiKey: '',
+    azureApiKey: '',
+    azureRegion: 'southeastasia',
+    azurePhraseList: '',
     language: 'zh',
     prompt: '以下是影音對話，請以繁體中文輸出完整字幕，精準保留標點符號。'
   };
@@ -88,22 +130,60 @@ export function saveAsrConfig(conf) {
 /**
  * 取得指定素材的完整 AudioBuffer
  */
-export async function getClipAudioBuffer(clip) {
+export async function getClipAudioBuffer(clip, {
+  decodeAudioData = data => AudioEngine.decodeAudioData(data),
+  fetchImpl = (...args) => fetch(...args)
+} = {}) {
   if (clip.audioBuffer) return clip.audioBuffer;
 
-  if (clip.audioElement) {
-    const actx = AudioEngine.getAudioContext();
-    const resp = await fetch(clip.audioElement.src || clip.src);
-    const ab = await resp.arrayBuffer();
-    const decoded = await actx.decodeAudioData(ab);
-    return decoded;
+  const decodeURL = async url => {
+    const response = await fetchImpl(url);
+    if (response?.ok === false) throw new Error(`無法讀取素材音訊 (HTTP ${response.status})`);
+    return decodeAudioData(await response.arrayBuffer());
+  };
+
+  const recognitionTracks = Array.isArray(clip.recognitionTracks) ? clip.recognitionTracks : [];
+  if (recognitionTracks.length) {
+    const decoded = [];
+    const seenBuffers = new Set();
+    const seenURLs = new Set();
+    for (const track of recognitionTracks) {
+      if (track?.buffer && !seenBuffers.has(track.buffer)) {
+        seenBuffers.add(track.buffer);
+        decoded.push(track.buffer);
+        continue;
+      }
+      let url = track?.el?.src || track?.audioElement?.src || '';
+      if (!url && track?.file && typeof window !== 'undefined' && window.subtool?.fileURL) {
+        url = await window.subtool.fileURL(track.file);
+      }
+      if (!url || seenURLs.has(url)) continue;
+      seenURLs.add(url);
+      decoded.push(await decodeURL(url));
+    }
+    const combined = combineRecognitionAudioBuffers(decoded);
+    if (combined) return combined;
   }
 
-  if (clip.file) {
-    const actx = AudioEngine.getAudioContext();
-    const ab = await clip.file.arrayBuffer();
-    const decoded = await actx.decodeAudioData(ab);
-    return decoded;
+  if (clip.preferCache) {
+    throw new Error(`素材「${clip.name || clip.id}」的音訊快取仍在準備中，請稍後再辨識`);
+  }
+
+  if (clip.audioElement) {
+    const url = clip.audioElement.src || clip.src;
+    if (url) return decodeURL(url);
+  }
+
+  const file = clip.file || clip._file || clip.blob;
+  if (file && typeof file.arrayBuffer === 'function') {
+    return decodeAudioData(await file.arrayBuffer());
+  }
+
+  if (clip.web?.url) return decodeURL(clip.web.url);
+
+  if (clip.path && typeof window !== 'undefined' && window.subtool?.fileURL) {
+    const authorizedURL = await window.subtool.fileURL(clip.path);
+    if (authorizedURL) return decodeURL(authorizedURL);
   }
 
   throw new Error(`無法載入素材「${clip.name || clip.id}」的音訊資料`);
@@ -177,22 +257,26 @@ export function insertAsrSubtitles(results) {
 /**
  * 開啟語音辨識設定與執行對話框
  */
-export function openSpeechRecognitionDialog() {
+export function openSpeechRecognitionDialog(preferredSource = null) {
   const clips = [];
-  if (State.selectedClipId) {
+  const requested = Array.isArray(preferredSource) ? preferredSource : (preferredSource ? [preferredSource] : []);
+  for (const source of requested) {
+    if (source && typeof source === 'object' && !clips.includes(source)) clips.push(source);
+  }
+  if (clips.length === 0 && State.selectedClipId) {
     const c = State.clips.find(item => item.id === State.selectedClipId);
     if (c) clips.push(c);
   }
-  if (State.selectedAudioClipId) {
-    const c = (State.audioClips || []).find(item => item.id === State.selectedAudioClipId);
+  if (clips.length === 0 && State.selectedAudioClipId) {
+    const c = (State.externalAudioState || []).find(item => item.id === State.selectedAudioClipId);
     if (c && !clips.includes(c)) clips.push(c);
   }
 
   if (clips.length === 0) {
     if (State.clips && State.clips.length > 0) {
       clips.push(State.clips[0]);
-    } else if (State.audioClips && State.audioClips.length > 0) {
-      clips.push(State.audioClips[0]);
+    } else if (State.externalAudioState && State.externalAudioState.length > 0) {
+      clips.push(State.externalAudioState[0]);
     }
   }
 
@@ -202,16 +286,19 @@ export function openSpeechRecognitionDialog() {
   }
 
   const conf = getAsrConfig();
+  const initialProviderMeta = CLOUD_PROVIDER_META[conf.provider] || null;
+  const cloudProvider = !!initialProviderMeta;
+  const selectedApiKey = initialProviderMeta ? (conf[initialProviderMeta.keyField] || '') : '';
 
   const totalDur = clips.reduce((acc, c) => {
     const inT = Number(c.in) || 0;
-    const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur) || (State.duration || 0)));
+    const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (State.duration || 0)));
     return acc + Math.max(0, outT - inT);
   }, 0);
 
   const clipsSummary = clips.map((c, i) => {
     const inT = Number(c.in) || 0;
-    const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur) || (State.duration || 0)));
+    const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (State.duration || 0)));
     const durStr = secToEncore(Math.max(0, outT - inT), State.fps, State.dropFrame);
     return `<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>${i + 1}. ${escapeHTML(c.name || '音訊素材')}</span><span style="color:var(--text-faint)">${durStr}</span></div>`;
   }).join('');
@@ -227,6 +314,7 @@ export function openSpeechRecognitionDialog() {
         <label style="font-size:12px;font-weight:600;color:var(--text-dim);">語音辨識模式：</label>
         <select id="asrProvider" style="width:100%;">
           <option value="google" ${conf.provider === 'google' ? 'selected' : ''}>🌟 Google Gemini (大語言模型・繁體中文理解力最強)</option>
+          <option value="azure" ${conf.provider === 'azure' ? 'selected' : ''}>🎯 Azure Speech (專業語音辨識・逐句時間碼)</option>
           <option value="groq" ${conf.provider === 'groq' ? 'selected' : ''}>⚡ Groq (Whisper-large-v3，極速雲端・免費)</option>
           <option value="builtin" ${conf.provider === 'builtin' ? 'selected' : ''}>💻 程式內建本機 AI 引擎 (免設定・100% 離線)</option>
           <option value="openai" ${conf.provider === 'openai' ? 'selected' : ''}>OpenAI (Whisper-1 官方雲端)</option>
@@ -248,12 +336,18 @@ export function openSpeechRecognitionDialog() {
       </div>
 
       <!-- 雲端 API Key -->
-      <div id="asrKeyRow" style="display:${(conf.provider === 'google' || conf.provider === 'groq' || conf.provider === 'openai') ? 'flex' : 'none'};flex-direction:column;gap:5px;">
+      <div id="asrKeyRow" style="display:${cloudProvider ? 'flex' : 'none'};flex-direction:column;gap:5px;">
         <label style="font-size:12px;font-weight:600;color:var(--text-dim);display:flex;justify-content:space-between;">
           <span id="asrKeyLabel">API Key：</span>
           <span id="asrKeyHelp" style="font-size:11px;color:var(--accent);cursor:pointer;"></span>
         </label>
-        <input type="password" id="asrApiKey" placeholder="輸入您的 API Key…" value="${escapeHTML(conf.provider === 'google' ? (conf.googleApiKey || '') : (conf.provider === 'groq' ? (conf.groqApiKey || '') : (conf.openaiApiKey || '')))}" style="width:100%;">
+        <input type="password" id="asrApiKey" placeholder="輸入您的 API Key…" value="${escapeHTML(selectedApiKey || '')}" style="width:100%;">
+      </div>
+
+      <div id="asrAzureRegionRow" style="display:${conf.provider === 'azure' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
+        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">Azure Speech Region：</label>
+        <input type="text" id="asrAzureRegion" placeholder="例如 southeastasia" value="${escapeHTML(conf.azureRegion || 'southeastasia')}" style="width:100%;">
+        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">Region 必須與 Speech Key 的資源相同；台灣可使用 southeastasia。eastasia 目前不支援 Fast Transcription。</div>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
@@ -275,8 +369,8 @@ export function openSpeechRecognitionDialog() {
       </div>
 
       <div style="display:flex;flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">提示詞（Prompt / 專有名詞導引）：</label>
-        <input type="text" id="asrPrompt" placeholder="選填，例如：請以繁體中文輸出字幕，包含標點符號。" value="${escapeHTML(conf.prompt || '')}" style="width:100%;">
+        <label id="asrPromptLabel" style="font-size:12px;font-weight:600;color:var(--text-dim);">${conf.provider === 'azure' ? 'Azure 專有名詞（以逗號分隔）：' : '提示詞（Prompt / 專有名詞導引）：'}</label>
+        <input type="text" id="asrPrompt" placeholder="${conf.provider === 'azure' ? '選填，例如：SUB Tool, Evan' : '選填，例如：請以繁體中文輸出字幕，包含標點符號。'}" value="${escapeHTML(conf.provider === 'azure' ? (conf.azurePhraseList || '') : (conf.prompt || ''))}" style="width:100%;">
       </div>
 
       <div id="asrProgressContainer" style="display:none;flex-direction:column;gap:4px;">
@@ -302,6 +396,7 @@ export function openSpeechRecognitionDialog() {
         const providerEl = document.getElementById('asrProvider');
         const builtinModelEl = document.getElementById('asrBuiltinModel');
         const apiKeyEl = document.getElementById('asrApiKey');
+        const azureRegionEl = document.getElementById('asrAzureRegion');
         const langEl = document.getElementById('asrLanguage');
         const promptEl = document.getElementById('asrPrompt');
         const statusEl = document.getElementById('asrStatus');
@@ -314,17 +409,28 @@ export function openSpeechRecognitionDialog() {
         const provider = providerEl?.value || 'google';
         const builtinModel = builtinModelEl?.value || 'onnx-community/whisper-large-v3-turbo';
         const apiKey = apiKeyEl?.value?.trim() || '';
+        const azureRegion = azureRegionEl?.value?.trim() || 'southeastasia';
         const language = langEl?.value || 'zh';
         const prompt = promptEl?.value || '';
+        const azurePhrases = prompt.split(/[,，;；\n]+/u).map(item => item.trim()).filter(Boolean);
+        const providerMeta = CLOUD_PROVIDER_META[provider] || null;
 
-        if ((provider === 'google' || provider === 'groq' || provider === 'openai') && !apiKey) {
+        if (providerMeta && !apiKey) {
           if (statusEl) {
             statusEl.style.display = 'block';
             statusEl.style.color = 'var(--red)';
-            const name = provider === 'google' ? 'Google Gemini' : (provider === 'groq' ? 'Groq' : 'OpenAI');
-            statusEl.textContent = `請先輸入 ${name} API Key`;
+            statusEl.textContent = `請先輸入 ${providerMeta.name} API Key`;
           }
           apiKeyEl?.focus();
+          return;
+        }
+        if (provider === 'azure' && !/^[a-z][a-z0-9-]{1,62}$/i.test(azureRegion)) {
+          if (statusEl) {
+            statusEl.style.display = 'block';
+            statusEl.style.color = 'var(--red)';
+            statusEl.textContent = '請輸入正確的 Azure Speech Region，例如 southeastasia';
+          }
+          azureRegionEl?.focus();
           return;
         }
 
@@ -332,11 +438,13 @@ export function openSpeechRecognitionDialog() {
         const currentConf = getAsrConfig();
         currentConf.provider = provider;
         currentConf.builtinModel = builtinModel;
-        if (provider === 'google') currentConf.googleApiKey = apiKey;
-        else if (provider === 'groq') currentConf.groqApiKey = apiKey;
-        else if (provider === 'openai') currentConf.openaiApiKey = apiKey;
+        if (providerMeta) currentConf[providerMeta.keyField] = apiKey;
+        if (provider === 'azure') {
+          currentConf.azureRegion = azureRegion.toLowerCase();
+          currentConf.azurePhraseList = prompt;
+        }
         currentConf.language = language;
-        currentConf.prompt = prompt;
+        if (provider !== 'azure') currentConf.prompt = prompt;
         saveAsrConfig(currentConf);
 
         // 鎖定 UI
@@ -359,7 +467,7 @@ export function openSpeechRecognitionDialog() {
             }
             const audioBuffer = await getClipAudioBuffer(c);
             const inT = Number(c.in) || 0;
-            const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur) || (audioBuffer.duration || 0)));
+            const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (audioBuffer.duration || 0)));
 
             if (provider === 'builtin' && progressContainer) {
               progressContainer.style.display = 'flex';
@@ -372,6 +480,8 @@ export function openSpeechRecognitionDialog() {
               provider,
               builtinModel,
               apiKey,
+              azureRegion,
+              azurePhrases,
               language,
               prompt,
               onProgress: (pInfo) => {
@@ -427,6 +537,9 @@ export function openSpeechRecognitionDialog() {
     const apiKeyEl = document.getElementById('asrApiKey');
     const keyLabelEl = document.getElementById('asrKeyLabel');
     const helpEl = document.getElementById('asrKeyHelp');
+    const azureRegionRow = document.getElementById('asrAzureRegionRow');
+    const promptEl = document.getElementById('asrPrompt');
+    const promptLabelEl = document.getElementById('asrPromptLabel');
     const builtinRow = document.getElementById('asrBuiltinRow');
     const keyRow = document.getElementById('asrKeyRow');
 
@@ -434,31 +547,21 @@ export function openSpeechRecognitionDialog() {
       const updateProviderUI = () => {
         const p = providerEl.value;
         const c = getAsrConfig();
+        const meta = CLOUD_PROVIDER_META[p] || null;
 
         if (builtinRow) builtinRow.style.display = p === 'builtin' ? 'flex' : 'none';
-        if (keyRow) keyRow.style.display = (p === 'google' || p === 'groq' || p === 'openai') ? 'flex' : 'none';
+        if (keyRow) keyRow.style.display = meta ? 'flex' : 'none';
+        if (azureRegionRow) azureRegionRow.style.display = p === 'azure' ? 'flex' : 'none';
 
-        if (p === 'google' || p === 'groq' || p === 'openai') {
-          if (apiKeyEl) {
-            apiKeyEl.value = p === 'google'
-              ? (c.googleApiKey || '')
-              : (p === 'groq' ? (c.groqApiKey || '') : (c.openaiApiKey || ''));
-          }
-          if (keyLabelEl) {
-            keyLabelEl.textContent = p === 'google'
-              ? 'Google Gemini API Key：'
-              : (p === 'groq' ? 'Groq API Key：' : 'OpenAI API Key：');
-          }
+        if (meta) {
+          if (apiKeyEl) apiKeyEl.value = c[meta.keyField] || '';
+          if (keyLabelEl) keyLabelEl.textContent = meta.keyLabel;
           if (helpEl) {
-            helpEl.textContent = p === 'google'
-              ? '取得 Google 免費 API Key ↗'
-              : (p === 'groq' ? '取得 Groq 免費 API Key ↗' : '取得 OpenAI API Key ↗');
+            helpEl.textContent = meta.helpLabel;
 
             helpEl.onclick = (e) => {
               if (e) e.preventDefault();
-              const url = p === 'google'
-                ? 'https://aistudio.google.com/app/apikey'
-                : (p === 'groq' ? 'https://console.groq.com/keys' : 'https://platform.openai.com/api-keys');
+              const url = meta.helpURL;
               if (IS_DESKTOP && window.subtool?.openExternal) {
                 window.subtool.openExternal(url).catch(() => {
                   window.open(url, '_blank');
@@ -468,6 +571,15 @@ export function openSpeechRecognitionDialog() {
               }
             };
           }
+        }
+        if (promptLabelEl) promptLabelEl.textContent = p === 'azure'
+          ? 'Azure 專有名詞（以逗號分隔）：'
+          : '提示詞（Prompt / 專有名詞導引）：';
+        if (promptEl) {
+          promptEl.placeholder = p === 'azure'
+            ? '選填，例如：SUB Tool, Evan'
+            : '選填，例如：請以繁體中文輸出字幕，包含標點符號。';
+          promptEl.value = p === 'azure' ? (c.azurePhraseList || '') : (c.prompt || '');
         }
       };
 

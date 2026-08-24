@@ -3,7 +3,7 @@
    ==============================================================================
    深層語音辨識推論模組（Audio Inference Engine）。
    封裝 16kHz PCM 降採樣、WAV 二進位編碼、雲端 REST 多模態模型通訊
-   （Google Gemini / Groq Whisper / OpenAI Whisper）與本機 ONNX WebGPU/WASM 管線。
+   （Google Gemini / Azure Speech / Groq Whisper / OpenAI Whisper）與本機 ONNX WebGPU/WASM 管線。
    ============================================================================== */
 
 /** 內建支援之本機模型清單 */
@@ -58,7 +58,7 @@ export function blobToBase64(blob) {
  * 萃取指定區間並重採樣為 16,000 Hz 單聲道 Float32Array
  * （供 Transformers.js 本機推論引擎直接使用）
  */
-export function extractClipFloat32Mono16k(audioBuffer, startSec = 0, endSec = null) {
+function downmixAndResampleMono16k(audioBuffer, startSec = 0, endSec = null) {
   if (!audioBuffer) return null;
   const srcSampleRate = audioBuffer.sampleRate;
   const numChannels = audioBuffer.numberOfChannels;
@@ -92,20 +92,59 @@ export function extractClipFloat32Mono16k(audioBuffer, startSec = 0, endSec = nu
     targetSamples[i] = (1 - frac) * monoSamples[i0] + frac * monoSamples[i1];
   }
 
+  return targetSamples;
+}
+
+function normalizeRecognitionPeak(targetSamples) {
+  if (!targetSamples?.length) return targetSamples;
   // 音訊波形峰值正規化（強化低音量對白特徵並抑制噪訊）
   let maxPeak = 0;
-  for (let i = 0; i < targetLength; i++) {
+  for (let i = 0; i < targetSamples.length; i++) {
     const abs = Math.abs(targetSamples[i]);
     if (abs > maxPeak) maxPeak = abs;
   }
   if (maxPeak > 0.005 && maxPeak < 0.95) {
     const gain = Math.min(8.0, 0.95 / maxPeak);
-    for (let i = 0; i < targetLength; i++) {
+    for (let i = 0; i < targetSamples.length; i++) {
       targetSamples[i] *= gain;
     }
   }
-
   return targetSamples;
+}
+
+export function extractClipFloat32Mono16k(audioBuffer, startSec = 0, endSec = null) {
+  return normalizeRecognitionPeak(downmixAndResampleMono16k(audioBuffer, startSec, endSec));
+}
+
+/**
+ * 將 ffmpeg 逐聲道快取或多個 runtime buffer 合成 ASR 可讀的 16kHz Mono AudioBuffer-like。
+ * 只做來源聲道混音，峰值正規化仍由後續區間擷取統一執行。
+ */
+export function combineRecognitionAudioBuffers(audioBuffers) {
+  const buffers = (Array.isArray(audioBuffers) ? audioBuffers : []).filter(buffer =>
+    buffer && Number(buffer.sampleRate) > 0 && Number(buffer.numberOfChannels) > 0 && Number(buffer.length) > 0 &&
+    typeof buffer.getChannelData === 'function'
+  );
+  if (!buffers.length) return null;
+  if (buffers.length === 1) return buffers[0];
+
+  const sources = buffers.map(buffer => downmixAndResampleMono16k(buffer)).filter(samples => samples?.length);
+  if (!sources.length) return null;
+  const length = Math.max(...sources.map(samples => samples.length));
+  const mixed = new Float32Array(length);
+  for (const samples of sources) {
+    for (let i = 0; i < samples.length; i++) mixed[i] += samples[i] / sources.length;
+  }
+  return {
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    length,
+    duration: length / 16000,
+    getChannelData: channel => {
+      if (channel !== 0) throw new RangeError('ASR 混音只有一個聲道');
+      return mixed;
+    }
+  };
 }
 
 /**
@@ -442,6 +481,120 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
 }
 
 /**
+ * 將 Azure Fast Transcription 的逐句／逐字毫秒時間轉成共用的秒數契約。
+ * 這裡只保留來源音檔的相對時間；時間軸 offset 與逐格化由 UI 協調器統一處理。
+ */
+export function parseAzureTranscriptionResponse(data) {
+  const segments = [];
+  const responseDurationMs = Number(data?.durationMilliseconds);
+  const audioEnd = Number.isFinite(responseDurationMs) && responseDurationMs > 0
+    ? responseDurationMs / 1000
+    : Infinity;
+  for (const phrase of Array.isArray(data?.phrases) ? data.phrases : []) {
+    const text = typeof phrase?.text === 'string' ? phrase.text.trim() : '';
+    const offsetMs = Number(phrase?.offsetMilliseconds);
+    const durationMs = Number(phrase?.durationMilliseconds);
+    if (!text || !Number.isFinite(offsetMs) || !Number.isFinite(durationMs) || offsetMs < 0 || durationMs <= 0) continue;
+    const start = offsetMs / 1000;
+    const end = Math.min(audioEnd, (offsetMs + durationMs) / 1000);
+    if (start >= audioEnd || end <= start) continue;
+
+    const words = [];
+    for (const word of Array.isArray(phrase.words) ? phrase.words : []) {
+      const wordText = typeof word?.text === 'string' ? word.text.trim() : '';
+      const wordOffsetMs = Number(word?.offsetMilliseconds);
+      const wordDurationMs = Number(word?.durationMilliseconds);
+      if (!wordText || !Number.isFinite(wordOffsetMs) || !Number.isFinite(wordDurationMs) || wordOffsetMs < 0 || wordDurationMs <= 0) continue;
+      const wordStart = wordOffsetMs / 1000;
+      const wordEnd = Math.min(audioEnd, (wordOffsetMs + wordDurationMs) / 1000);
+      if (wordStart >= audioEnd || wordEnd <= wordStart) continue;
+      words.push({
+        text: wordText,
+        start: wordStart,
+        end: wordEnd
+      });
+    }
+
+    segments.push({
+      start,
+      end,
+      text,
+      words,
+      ...(typeof phrase.locale === 'string' && phrase.locale ? { locale: phrase.locale } : {}),
+      ...(phrase.confidence != null && Number.isFinite(Number(phrase.confidence))
+        ? { confidence: Number(phrase.confidence) }
+        : {})
+    });
+  }
+
+  const combinedText = (Array.isArray(data?.combinedPhrases) ? data.combinedPhrases : [])
+    .map(item => typeof item?.text === 'string' ? item.text.trim() : '')
+    .filter(Boolean)
+    .join('\n');
+  return { text: combinedText || segments.map(segment => segment.text).join(' '), segments };
+}
+
+const AZURE_SPEECH_LOCALES = Object.freeze({
+  zh: 'zh-TW',
+  en: 'en-US',
+  ja: 'ja-JP',
+  ko: 'ko-KR'
+});
+
+/**
+ * 呼叫 Azure Speech 2025-10-15 GA Fast Transcription。
+ * Region 只允許 Azure region identifier，端點由程式建立，避免 API Key 被送往任意主機。
+ */
+export async function callAzureSpeechTranscription({
+  audioBlob,
+  apiKey,
+  region = 'southeastasia',
+  language = 'zh',
+  phrases = []
+}) {
+  const key = typeof apiKey === 'string' ? apiKey.trim() : '';
+  if (!key) throw new Error('請輸入 Azure Speech API Key');
+  if (!(audioBlob instanceof Blob) || audioBlob.size === 0) {
+    throw new Error('未提供可供 Azure Speech 辨識的音訊');
+  }
+
+  const normalizedRegion = typeof region === 'string' ? region.trim().toLowerCase() : '';
+  if (!/^[a-z][a-z0-9-]{1,62}$/.test(normalizedRegion)) {
+    throw new Error('Azure Speech Region 格式不正確，例如 southeastasia');
+  }
+
+  const definition = {};
+  if (language && language !== 'auto') {
+    definition.locales = [AZURE_SPEECH_LOCALES[language] || language];
+  }
+  const cleanPhrases = (Array.isArray(phrases) ? phrases : [])
+    .map(phrase => typeof phrase === 'string' ? phrase.trim() : '')
+    .filter((phrase, index, list) => phrase && list.indexOf(phrase) === index)
+    .slice(0, 500);
+  if (cleanPhrases.length) definition.phraseList = { phrases: cleanPhrases };
+
+  const formData = new FormData();
+  formData.append('audio', audioBlob, 'audio.wav');
+  formData.append('definition', JSON.stringify(definition));
+
+  const endpoint = `https://${normalizedRegion}.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe?api-version=2025-10-15`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Ocp-Apim-Subscription-Key': key },
+    body: formData
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const detail = body?.error?.message || body?.message || response.statusText || '';
+    const safeDetail = detail ? String(detail).split(key).join('[已隱藏]') : '';
+    throw new Error(`Azure Speech 辨識失敗 (HTTP ${response.status})${safeDetail ? `：${safeDetail}` : ''}`);
+  }
+
+  return parseAzureTranscriptionResponse(await response.json());
+}
+
+/**
  * 呼叫 Whisper 雲端 API
  */
 export async function callWhisperApi({
@@ -528,6 +681,8 @@ export async function transcribeAudioStream({
   provider = 'google',
   builtinModel = 'onnx-community/whisper-large-v3-turbo',
   apiKey = '',
+  azureRegion = 'southeastasia',
+  azurePhrases = [],
   language = 'zh',
   prompt = '',
   onProgress = null
@@ -564,6 +719,17 @@ export async function transcribeAudioStream({
       apiKey,
       language,
       prompt
+    });
+    return Array.isArray(res?.segments) ? res.segments : [];
+  }
+
+  if (provider === 'azure') {
+    const res = await callAzureSpeechTranscription({
+      audioBlob: wavBlob,
+      apiKey,
+      region: azureRegion,
+      language,
+      phrases: azurePhrases
     });
     return Array.isArray(res?.segments) ? res.segments : [];
   }

@@ -6,6 +6,7 @@ vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/ui.js', () => ({ openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
 
 import { State } from '../src/state.js';
+import { openModal } from '../src/ui.js';
 import {
   BUILTIN_MODELS,
   extractClipFloat32Mono16k,
@@ -13,16 +14,124 @@ import {
   insertAsrSubtitles,
   getAsrConfig,
   saveAsrConfig,
-  callWhisperApi
+  callWhisperApi,
+  getClipAudioBuffer,
+  openSpeechRecognitionDialog
 } from '../src/speech-recognition.js';
 
 describe('語音辨識與字幕生成模組', () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+    Object.defineProperty(window, 'subtool', { configurable: true, value: undefined });
     localStorage.clear();
     State.tracks = [{ name: '軌道 1', visible: true, locked: false }];
     State.cues = [];
     State.fps = 30;
     State.dropFrame = false;
+  });
+
+  it('為右鍵指定的音訊來源開啟可選 Azure Speech 的辨識視窗', () => {
+    State.clips = [];
+    State.externalAudioState = [];
+    const source = {
+      id: 'external:dialogue',
+      name: 'dialogue.wav',
+      offset: 12,
+      in: 0,
+      out: 2,
+      duration: 2,
+      audioBuffer: {}
+    };
+
+    openSpeechRecognitionDialog(source);
+
+    expect(openModal).toHaveBeenCalledTimes(1);
+    const [, html] = openModal.mock.calls[0];
+    expect(html).toContain('dialogue.wav');
+    expect(html).toContain('value="azure"');
+    expect(html).toContain('id="asrAzureRegion"');
+  });
+
+  it('能從桌面核發的素材 URL 載入右鍵指定音訊', async () => {
+    const decoded = { duration: 2, sampleRate: 48000 };
+    const decodeAudioData = vi.fn().mockResolvedValue(decoded);
+    Object.defineProperty(window, 'subtool', {
+      configurable: true,
+      value: { fileURL: vi.fn().mockResolvedValue('subtool-local://resource/audio-token') }
+    });
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(16)
+    });
+
+    await expect(getClipAudioBuffer({
+      name: 'dialogue.wav',
+      path: 'C:\\media\\dialogue.wav'
+    }, { decodeAudioData, fetchImpl })).resolves.toBe(decoded);
+
+    expect(window.subtool.fileURL).toHaveBeenCalledWith('C:\\media\\dialogue.wav');
+    expect(fetchImpl).toHaveBeenCalledWith('subtool-local://resource/audio-token');
+    expect(decodeAudioData).toHaveBeenCalledTimes(1);
+  });
+
+  it('優先合併 ffmpeg runtime 聲道快取，不回頭解碼原始 MXF 容器', async () => {
+    const makeBuffer = value => ({
+      sampleRate: 48000,
+      numberOfChannels: 1,
+      length: 48000,
+      duration: 1,
+      getChannelData: () => new Float32Array(48000).fill(value)
+    });
+    const decodeAudioData = vi.fn()
+      .mockResolvedValueOnce(makeBuffer(0.2))
+      .mockResolvedValueOnce(makeBuffer(0.4));
+    const fetchImpl = vi.fn().mockImplementation(async url => ({
+      ok: true,
+      arrayBuffer: async () => new TextEncoder().encode(url).buffer
+    }));
+    Object.defineProperty(window, 'subtool', {
+      configurable: true,
+      value: { fileURL: vi.fn() }
+    });
+
+    const result = await getClipAudioBuffer({
+      name: 'interview.mxf',
+      path: 'C:\\media\\interview.mxf',
+      preferCache: true,
+      recognitionTracks: [
+        { el: { src: 'subtool-local://resource/cache-ch1' } },
+        { el: { src: 'subtool-local://resource/cache-ch1' } },
+        { el: { src: 'subtool-local://resource/cache-ch2' } }
+      ]
+    }, { decodeAudioData, fetchImpl });
+
+    expect(result).toMatchObject({ sampleRate: 16000, numberOfChannels: 1, length: 16000, duration: 1 });
+    expect(result.getChannelData(0)[0]).toBeCloseTo(0.3, 5);
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      'subtool-local://resource/cache-ch1',
+      'subtool-local://resource/cache-ch2'
+    ]);
+    expect(window.subtool.fileURL).not.toHaveBeenCalled();
+  });
+
+  it('標記 preferCache 的素材快取未就緒時不讀取母容器', async () => {
+    const fetchImpl = vi.fn();
+    Object.defineProperty(window, 'subtool', {
+      configurable: true,
+      value: { fileURL: vi.fn() }
+    });
+
+    await expect(getClipAudioBuffer({
+      id: 'external:mxf',
+      name: 'interview.mxf',
+      path: 'C:\\media\\interview.mxf',
+      preferCache: true,
+      recognitionTracks: []
+    }, { decodeAudioData: vi.fn(), fetchImpl })).rejects.toThrow('音訊快取仍在準備中');
+
+    expect(window.subtool.fileURL).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   describe('設定管理 (Configuration)', () => {
@@ -55,6 +164,25 @@ describe('語音辨識與字幕生成模組', () => {
       expect(conf.openaiApiKey).toBe('sk-test-key-1234');
       expect(conf.groqApiKey).toBe('gsk-groq-key-5678');
       expect(conf.language).toBe('en');
+    });
+
+    it('能夠儲存並讀回 Azure Speech 的 Key、Region 與專有名詞', () => {
+      saveAsrConfig({
+        provider: 'azure',
+        azureApiKey: 'azure-key',
+        azureRegion: 'southeastasia',
+        azurePhraseList: 'SUB Tool, Evan',
+        language: 'zh'
+      });
+
+      const conf = getAsrConfig();
+      expect(conf).toMatchObject({
+        provider: 'azure',
+        azureApiKey: 'azure-key',
+        azureRegion: 'southeastasia',
+        azurePhraseList: 'SUB Tool, Evan',
+        language: 'zh'
+      });
     });
   });
 

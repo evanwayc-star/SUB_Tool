@@ -236,6 +236,8 @@ function tlContextMenuHandler(e){
     const isExternal=audioEl.dataset.audioKind==='external';
     const assetId=audioEl.dataset.audioAssetId||audioEl.dataset.audioSourceId||audioEl.dataset.audioSrc||'';
     const sourceId=audioEl.dataset.audioSourceId||audioEl.dataset.sourceId||'';
+    const runtimeSourceId=audioEl.dataset.audioSrc||sourceId;
+    const recognitionTracks=typeof Media.sourceChannels==='function' ? Media.sourceChannels(runtimeSourceId) : [];
     const sourceName=(audioEl.dataset.audioSourceName||audioEl.querySelector('.audio-clip-label')?.textContent||'音訊素材')
       .trim().replace(/^[🔊🎵🔇]\s*/u,'');
     if(isExternal) selectExternalAudioForMenu(assetId,sourceName);
@@ -253,7 +255,11 @@ function tlContextMenuHandler(e){
       const extSrc = State.externalAudioState?.find(s => s.id === assetId);
       const playhead=Media.displayTime();
       const enabled=audioEl.dataset.audioEnabled!=='false';
-      items.push({label:'🎙 語音辨識生成字幕…',act:()=>openSpeechRecognitionDialog(extSrc || { id: assetId, name: sourceName, in: start, out: end, offset: start })});
+      const recognitionSource=Media.getExternalAudioSource?.(assetId)||extSrc;
+      items.push({label:'🎙 語音辨識生成字幕…',act:()=>openSpeechRecognitionDialog({
+        ...(recognitionSource || { id: assetId, name: sourceName, in: start, out: end, offset: start }),
+        recognitionTracks
+      })});
       if(playhead>start+0.0001&&playhead<end-0.0001){
         items.push({label:'✂ 在播放點切割',act:()=>runExternalAudioMenuAction('splitExternalAudio',[assetId,playhead])});
       }
@@ -273,8 +279,13 @@ function tlContextMenuHandler(e){
       }
       items.push({sep:true});
     } else {
-      // 主要影片音訊素材列
-      items.push({label:'🎙 語音辨識生成字幕…',act:()=>openSpeechRecognitionDialog({
+      // 影片音訊素材列：必須沿用右鍵命中的 clip，不可回退成全局第一支影片。
+      const clipId=audioEl.dataset.clipId||'';
+      const sourceClip=State.clips?.find(clip=>clip.id===clipId)||null;
+      const recognitionSource=sourceClip ? {
+        ...sourceClip,
+        recognitionTracks
+      } : {
         id: 'primary-audio',
         name: sourceName || State.mediaName || '主要音訊',
         in: 0,
@@ -283,8 +294,10 @@ function tlContextMenuHandler(e){
         offset: 0,
         primary: true,
         path: State.mediaPath || State.clips?.[0]?.path || null,
-        blob: State.mediaFile || State.mediaBlob || State.clips?.[0]?.blob || null
-      })});
+        blob: State.mediaFile || State.mediaBlob || State.clips?.[0]?.blob || null,
+        recognitionTracks
+      };
+      items.push({label:'🎙 語音辨識生成字幕…',act:()=>openSpeechRecognitionDialog(recognitionSource)});
       items.push({sep:true});
     }
     items.push({label:'🎧 軌道配置',act:()=>AudioRouting.openForSource(sourceId)});
