@@ -23,6 +23,7 @@
   --cyan-d:#0891b2;
   --green:#10b981;       /* Clean Emerald Green */
   --red:#ef4444;         /* Vivid Red */
+  --toast-outline:#fca5a5;
   --pink-soft:#f472b6;   /* Crisp Soft Pink */
   --cue:#2563eb;         /* Clean Vivid Blue */
   --cue-sel:#f59e0b;     /* Vivid Amber Selected */
@@ -64,8 +65,8 @@ button[data-act="open-media"]{background:rgba(255,220,80,.08);border-color:rgba(
 button[data-act="open-media"]:hover{background:rgba(255,220,80,.16)}
 button[data-act="imp-auto"]{background:rgba(60,200,100,.08);border-color:rgba(30,160,60,.35)}
 button[data-act="imp-auto"]:hover{background:rgba(60,200,100,.16)}
-button[data-act="exp-dialog"]{background:rgba(60,140,255,.08);border-color:rgba(40,100,220,.35)}
-button[data-act="exp-dialog"]:hover{background:rgba(60,140,255,.16)}
+button[data-act="save-project"],button[data-act="exp-dialog"]{background:rgba(60,140,255,.08);border-color:rgba(40,100,220,.35)}
+button[data-act="save-project"]:hover,button[data-act="exp-dialog"]:hover{background:rgba(60,140,255,.16)}
 /* color-scheme: dark 是必要的：<select> 展開後的 <option> 清單由作業系統繪製，
    不吃這裡的 CSS。少了它，深色介面上會彈出白底選單、選項幾乎看不見
    （日期／數字微調鈕與捲軸同理）。 */
@@ -727,6 +728,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* toast / modal */
 .toast{position:fixed;bottom:60px;left:50%;transform:translateX(-50%) translateY(10px);
   background:linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%);border:1px solid #c4b5fd;
+  outline-color:var(--toast-outline);outline-style:solid;outline-width:2px;outline-offset:2px;
   color:#2e1065;font-weight:600;padding:10px 22px;border-radius:8px;
   box-shadow:0 8px 24px rgba(0,0,0,0.6), 0 0 16px rgba(168,85,247,0.35);z-index:1000;font-size:13px;letter-spacing:0.3px;opacity:0;
   transition:opacity 0.25s cubic-bezier(0.16,1,0.3,1), transform 0.25s cubic-bezier(0.16,1,0.3,1);pointer-events:none;max-width:80%}
@@ -992,4 +994,26 @@ select:focus-visible {
 .input-error {
   animation: shake 0.25s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
   border-color: var(--red) !important;
+}
+
+/* 原生下拉選單不使用寬度不一的圖示，所有 ASR provider 從同一左界對齊。 */
+.asr-provider-select,
+.asr-provider-select option {
+  text-align: left;
+}
+
+.asr-provider-select {
+  text-align-last: left;
+}
+
+/* 本機 ASR 尚未完成第一個 30 秒推論段時，顯示運算中而非虛構百分比。 */
+#asrProgressBar.indeterminate {
+  width: 35% !important;
+  transition: none !important;
+  animation: asrIndeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes asrIndeterminate {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(300%); }
 }

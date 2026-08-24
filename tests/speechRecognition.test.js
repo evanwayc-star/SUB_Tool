@@ -6,6 +6,7 @@ vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/ui.js', () => ({ openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
 
 import { State } from '../src/state.js';
+import { emit } from '../src/events.js';
 import { openModal } from '../src/ui.js';
 import {
   BUILTIN_MODELS,
@@ -14,6 +15,9 @@ import {
   insertAsrSubtitles,
   getAsrConfig,
   saveAsrConfig,
+  getAsrGuidanceMeta,
+  resolveAsrGuidance,
+  convertAsrSegmentsToTraditionalChinese,
   callWhisperApi,
   getClipAudioBuffer,
   openSpeechRecognitionDialog
@@ -24,6 +28,7 @@ describe('語音辨識與字幕生成模組', () => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
     Object.defineProperty(window, 'subtool', { configurable: true, value: undefined });
+    document.body.innerHTML = '';
     localStorage.clear();
     State.tracks = [{ name: '軌道 1', visible: true, locked: false }];
     State.cues = [];
@@ -51,6 +56,121 @@ describe('語音辨識與字幕生成模組', () => {
     expect(html).toContain('dialogue.wav');
     expect(html).toContain('value="azure"');
     expect(html).toContain('id="asrAzureRegion"');
+  });
+
+  it('依指定順序排列辨識服務，並以無圖示文字維持左側對齊', () => {
+    State.clips = [];
+    State.externalAudioState = [];
+
+    openSpeechRecognitionDialog({
+      id: 'provider-order',
+      name: 'provider-order.wav',
+      in: 0,
+      out: 1,
+      duration: 1,
+      audioBuffer: {}
+    });
+
+    const [, html] = openModal.mock.calls[0];
+    document.body.innerHTML = html;
+    const providerEl = document.getElementById('asrProvider');
+    const options = [...providerEl.options];
+
+    expect(providerEl.classList.contains('asr-provider-select')).toBe(true);
+    expect(options.map(option => option.value)).toEqual([
+      'builtin',
+      'groq',
+      'openai',
+      'azure',
+      'google'
+    ]);
+    expect(options.map(option => option.textContent.trim())).toEqual([
+      '程式內建本機 AI 引擎 (免設定・100% 離線)',
+      'Groq (Whisper-large-v3，極速雲端・免費)',
+      'OpenAI (Whisper-1 官方雲端)',
+      'Azure Speech (專業語音辨識・逐句時間碼)',
+      'Google Gemini (大語言模型・繁體中文理解力最強)'
+    ]);
+  });
+
+  it('只替實際支援的辨識服務提供提示詞或專有名詞欄位', () => {
+    expect(getAsrGuidanceMeta('builtin')).toBeNull();
+    expect(getAsrGuidanceMeta('google')).toMatchObject({ kind: 'prompt' });
+    expect(getAsrGuidanceMeta('groq')).toMatchObject({ kind: 'prompt' });
+    expect(getAsrGuidanceMeta('openai')).toMatchObject({ kind: 'prompt' });
+    expect(getAsrGuidanceMeta('azure')).toMatchObject({ kind: 'phrases' });
+    expect(resolveAsrGuidance('google', '逐字轉錄')).toEqual({ prompt: '逐字轉錄' });
+    expect(resolveAsrGuidance('azure', 'SUB Tool， Evan; MXF\n字幕')).toEqual({
+      azurePhraseList: 'SUB Tool， Evan; MXF\n字幕',
+      azurePhrases: ['SUB Tool', 'Evan', 'MXF', '字幕']
+    });
+  });
+
+  it('本機辨識隱藏提示詞欄位且不會暗中送出舊提示詞', () => {
+    State.clips = [];
+    State.externalAudioState = [];
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', prompt: '不應送給本機模型' });
+
+    openSpeechRecognitionDialog({
+      id: 'local-dialogue',
+      name: 'local-dialogue.wav',
+      in: 0,
+      out: 1,
+      duration: 1,
+      audioBuffer: {}
+    });
+
+    const [, html] = openModal.mock.calls[0];
+    document.body.innerHTML = html;
+    expect(getComputedStyle(document.getElementById('asrPromptRow')).display).toBe('none');
+    expect(resolveAsrGuidance('builtin', '不應送給本機模型')).toEqual({});
+  });
+
+  it('切換辨識服務時依能力更新提示欄位', async () => {
+    State.clips = [];
+    State.externalAudioState = [];
+    saveAsrConfig({
+      ...getAsrConfig(),
+      provider: 'builtin',
+      prompt: '保留給雲端的提示詞',
+      azurePhraseList: 'SUB Tool, Evan'
+    });
+    openModal.mockImplementation((title, html) => {
+      document.body.innerHTML = html;
+    });
+
+    openSpeechRecognitionDialog({
+      id: 'switch-dialogue',
+      name: 'switch-dialogue.wav',
+      in: 0,
+      out: 1,
+      duration: 1,
+      audioBuffer: {}
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const providerEl = document.getElementById('asrProvider');
+    const promptRow = document.getElementById('asrPromptRow');
+    const promptLabel = document.getElementById('asrPromptLabel');
+    const promptEl = document.getElementById('asrPrompt');
+    expect(getComputedStyle(promptRow).display).toBe('none');
+
+    providerEl.value = 'google';
+    providerEl.onchange();
+    expect(getComputedStyle(promptRow).display).toBe('flex');
+    expect(promptLabel.textContent).toBe('提示詞（Prompt）：');
+    expect(promptEl.value).toBe('保留給雲端的提示詞');
+
+    providerEl.value = 'azure';
+    providerEl.onchange();
+    expect(getComputedStyle(promptRow).display).toBe('flex');
+    expect(promptLabel.textContent).toContain('Phrase List');
+    expect(promptEl.value).toBe('SUB Tool, Evan');
+
+    providerEl.value = 'builtin';
+    providerEl.onchange();
+    expect(getComputedStyle(promptRow).display).toBe('none');
+    expect(promptEl.value).toBe('');
   });
 
   it('能從桌面核發的素材 URL 載入右鍵指定音訊', async () => {
@@ -146,7 +266,14 @@ describe('語音辨識與字幕生成模組', () => {
     it('內建模型清單提供 Tiny, Base, Small 等級', () => {
       expect(BUILTIN_MODELS['onnx-community/whisper-tiny']).toBeDefined();
       expect(BUILTIN_MODELS['onnx-community/whisper-base']).toBeDefined();
-      expect(BUILTIN_MODELS['onnx-community/whisper-small']).toBeDefined();
+      expect(BUILTIN_MODELS['onnx-community/whisper-small']).toMatchObject({
+        webgpuDtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' },
+        wasmDtype: 'q8'
+      });
+      expect(BUILTIN_MODELS['onnx-community/whisper-large-v3-turbo']).toMatchObject({
+        webgpuDtype: 'q4',
+        wasmDtype: 'q8'
+      });
     });
 
     it('能夠儲存並讀回自訂的 ASR 設定', () => {
@@ -164,6 +291,11 @@ describe('語音辨識與字幕生成模組', () => {
       expect(conf.openaiApiKey).toBe('sk-test-key-1234');
       expect(conf.groqApiKey).toBe('gsk-groq-key-5678');
       expect(conf.language).toBe('en');
+    });
+
+    it('支援將可選 Prompt 清空，不會重新塞回預設文字', () => {
+      saveAsrConfig({ ...getAsrConfig(), prompt: '' });
+      expect(getAsrConfig().prompt).toBe('');
     });
 
     it('能夠儲存並讀回 Azure Speech 的 Key、Region 與專有名詞', () => {
@@ -184,6 +316,22 @@ describe('語音辨識與字幕生成模組', () => {
         language: 'zh'
       });
     });
+  });
+
+  it('選擇中文時把各辨識服務的簡體輸出轉為台灣繁體，且保留時間碼資料', () => {
+    const original = [{
+      start: 1.25,
+      end: 3.5,
+      text: '我来不及了，还没回来。软件和鼠标。',
+      confidence: 0.9
+    }];
+    expect(convertAsrSegmentsToTraditionalChinese(original, 'zh')).toEqual([{
+      start: 1.25,
+      end: 3.5,
+      text: '我來不及了，還沒回來。軟體和滑鼠。',
+      confidence: 0.9
+    }]);
+    expect(convertAsrSegmentsToTraditionalChinese(original, 'en')).toBe(original);
   });
 
   describe('16kHz PCM Float32 萃取 (extractClipFloat32Mono16k)', () => {
@@ -262,6 +410,17 @@ describe('語音辨識與字幕生成模組', () => {
   });
 
   describe('字幕時碼映射與軌道注入 (insertAsrSubtitles)', () => {
+    it('完成字幕軌注入後立即使時間軸失效，不必等待視窗 resize 才顯示', () => {
+      const clip = { id: 'timeline-redraw', offset: 0, in: 0, out: 2 };
+
+      insertAsrSubtitles([{
+        clip,
+        segments: [{ start: 0, end: 1, text: '立即顯示' }]
+      }]);
+
+      expect(emit).toHaveBeenCalledWith('timeline:invalidate');
+    });
+
     it('自動建立專屬語音辨識軌道並將相對時碼轉換為時間軸絕對時碼', () => {
       const clip = {
         id: 'clip-1',

@@ -21,6 +21,7 @@ import {
   extractClipFloat32Mono16k,
   combineRecognitionAudioBuffers,
   encodeWav16kMono,
+  convertAsrSegmentsToTraditionalChinese,
   loadTransformersPipeline,
   transcribeWithBuiltinModel,
   resolveGeminiModel,
@@ -38,6 +39,7 @@ export {
   extractClipFloat32Mono16k,
   combineRecognitionAudioBuffers,
   encodeWav16kMono,
+  convertAsrSegmentsToTraditionalChinese,
   loadTransformersPipeline,
   transcribeWithBuiltinModel,
   resolveGeminiModel,
@@ -49,6 +51,7 @@ export {
 };
 
 const ASR_CONFIG_KEY = 'subtool_asr_config';
+const DEFAULT_ASR_PROMPT = '以下是影音對話，請以繁體中文輸出完整字幕，精準保留標點符號。';
 const CLOUD_PROVIDER_META = Object.freeze({
   google: Object.freeze({
     keyField: 'googleApiKey',
@@ -80,6 +83,48 @@ const CLOUD_PROVIDER_META = Object.freeze({
   })
 });
 
+const ASR_GUIDANCE_META = Object.freeze({
+  google: Object.freeze({
+    kind: 'prompt',
+    label: '提示詞（Prompt）：',
+    placeholder: '選填，例如：逐字轉錄並保留標點符號。'
+  }),
+  azure: Object.freeze({
+    kind: 'phrases',
+    label: 'Azure 專有名詞（Phrase List，以逗號分隔）：',
+    placeholder: '選填，例如：SUB Tool, Evan'
+  }),
+  groq: Object.freeze({
+    kind: 'prompt',
+    label: '前文／專有名詞導引（Prompt）：',
+    placeholder: '選填，例如：China Airlines, EES, Kiosk'
+  }),
+  openai: Object.freeze({
+    kind: 'prompt',
+    label: '前文／專有名詞導引（Prompt）：',
+    placeholder: '選填，例如：China Airlines, EES, Kiosk'
+  })
+});
+
+/** 取得 provider 真正支援的提示詞／專有名詞欄位；本機辨識沒有此欄位。 */
+export function getAsrGuidanceMeta(provider) {
+  return ASR_GUIDANCE_META[provider] || null;
+}
+
+/** 將畫面欄位正規化成 provider 可接受的參數，避免隱藏欄位仍被暗中送出。 */
+export function resolveAsrGuidance(provider, rawValue = '') {
+  const meta = getAsrGuidanceMeta(provider);
+  const value = typeof rawValue === 'string' ? rawValue : '';
+  if (!meta) return {};
+  if (meta.kind === 'phrases') {
+    return {
+      azurePhraseList: value,
+      azurePhrases: value.split(/[,，;；\n]+/u).map(item => item.trim()).filter(Boolean)
+    };
+  }
+  return { prompt: value };
+}
+
 /**
  * 讀取已儲存的 ASR 設定
  */
@@ -99,7 +144,7 @@ export function getAsrConfig() {
           azureRegion: parsed.azureRegion || 'southeastasia',
           azurePhraseList: parsed.azurePhraseList || '',
           language: parsed.language || 'zh',
-          prompt: parsed.prompt || '以下是影音對話，請以繁體中文輸出完整字幕，精準保留標點符號。'
+          prompt: typeof parsed.prompt === 'string' ? parsed.prompt : DEFAULT_ASR_PROMPT
         };
       }
     }
@@ -114,7 +159,7 @@ export function getAsrConfig() {
     azureRegion: 'southeastasia',
     azurePhraseList: '',
     language: 'zh',
-    prompt: '以下是影音對話，請以繁體中文輸出完整字幕，精準保留標點符號。'
+    prompt: DEFAULT_ASR_PROMPT
   };
 }
 
@@ -132,14 +177,28 @@ export function saveAsrConfig(conf) {
  */
 export async function getClipAudioBuffer(clip, {
   decodeAudioData = data => AudioEngine.decodeAudioData(data),
-  fetchImpl = (...args) => fetch(...args)
+  fetchImpl = (...args) => fetch(...args),
+  signal = null
 } = {}) {
+  const throwIfAborted = () => {
+    if (!signal?.aborted) return;
+    if (typeof signal.throwIfAborted === 'function') signal.throwIfAborted();
+    const error = new Error('語音辨識已取消');
+    error.name = 'AbortError';
+    throw error;
+  };
+  throwIfAborted();
   if (clip.audioBuffer) return clip.audioBuffer;
 
   const decodeURL = async url => {
-    const response = await fetchImpl(url);
+    throwIfAborted();
+    const response = signal ? await fetchImpl(url, { signal }) : await fetchImpl(url);
     if (response?.ok === false) throw new Error(`無法讀取素材音訊 (HTTP ${response.status})`);
-    return decodeAudioData(await response.arrayBuffer());
+    const data = await response.arrayBuffer();
+    throwIfAborted();
+    const decoded = await decodeAudioData(data);
+    throwIfAborted();
+    return decoded;
   };
 
   const recognitionTracks = Array.isArray(clip.recognitionTracks) ? clip.recognitionTracks : [];
@@ -148,6 +207,7 @@ export async function getClipAudioBuffer(clip, {
     const seenBuffers = new Set();
     const seenURLs = new Set();
     for (const track of recognitionTracks) {
+      throwIfAborted();
       if (track?.buffer && !seenBuffers.has(track.buffer)) {
         seenBuffers.add(track.buffer);
         decoded.push(track.buffer);
@@ -156,6 +216,7 @@ export async function getClipAudioBuffer(clip, {
       let url = track?.el?.src || track?.audioElement?.src || '';
       if (!url && track?.file && typeof window !== 'undefined' && window.subtool?.fileURL) {
         url = await window.subtool.fileURL(track.file);
+        throwIfAborted();
       }
       if (!url || seenURLs.has(url)) continue;
       seenURLs.add(url);
@@ -176,13 +237,18 @@ export async function getClipAudioBuffer(clip, {
 
   const file = clip.file || clip._file || clip.blob;
   if (file && typeof file.arrayBuffer === 'function') {
-    return decodeAudioData(await file.arrayBuffer());
+    const data = await file.arrayBuffer();
+    throwIfAborted();
+    const decoded = await decodeAudioData(data);
+    throwIfAborted();
+    return decoded;
   }
 
   if (clip.web?.url) return decodeURL(clip.web.url);
 
   if (clip.path && typeof window !== 'undefined' && window.subtool?.fileURL) {
     const authorizedURL = await window.subtool.fileURL(clip.path);
+    throwIfAborted();
     if (authorizedURL) return decodeURL(authorizedURL);
   }
 
@@ -236,6 +302,7 @@ export function insertAsrSubtitles(results) {
 
   if (newCues.length === 0) {
     syncTrackCount();
+    emit('timeline:invalidate');
     emit('render:listTrackSel');
     emit('render:all');
     return 0;
@@ -248,6 +315,7 @@ export function insertAsrSubtitles(results) {
   setSelection(newCues[0].id);
   syncTrackCount();
 
+  emit('timeline:invalidate');
   emit('render:listTrackSel');
   emit('render:all');
 
@@ -287,6 +355,10 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
   const conf = getAsrConfig();
   const initialProviderMeta = CLOUD_PROVIDER_META[conf.provider] || null;
+  const initialGuidanceMeta = getAsrGuidanceMeta(conf.provider);
+  const initialGuidanceValue = initialGuidanceMeta?.kind === 'phrases'
+    ? (conf.azurePhraseList || '')
+    : (initialGuidanceMeta ? (conf.prompt || '') : '');
   const cloudProvider = !!initialProviderMeta;
   const selectedApiKey = initialProviderMeta ? (conf[initialProviderMeta.keyField] || '') : '';
 
@@ -312,12 +384,12 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
       <div style="display:flex;flex-direction:column;gap:5px;">
         <label style="font-size:12px;font-weight:600;color:var(--text-dim);">語音辨識模式：</label>
-        <select id="asrProvider" style="width:100%;">
-          <option value="google" ${conf.provider === 'google' ? 'selected' : ''}>🌟 Google Gemini (大語言模型・繁體中文理解力最強)</option>
-          <option value="azure" ${conf.provider === 'azure' ? 'selected' : ''}>🎯 Azure Speech (專業語音辨識・逐句時間碼)</option>
-          <option value="groq" ${conf.provider === 'groq' ? 'selected' : ''}>⚡ Groq (Whisper-large-v3，極速雲端・免費)</option>
-          <option value="builtin" ${conf.provider === 'builtin' ? 'selected' : ''}>💻 程式內建本機 AI 引擎 (免設定・100% 離線)</option>
+        <select id="asrProvider" class="asr-provider-select" style="width:100%;">
+          <option value="builtin" ${conf.provider === 'builtin' ? 'selected' : ''}>程式內建本機 AI 引擎 (免設定・100% 離線)</option>
+          <option value="groq" ${conf.provider === 'groq' ? 'selected' : ''}>Groq (Whisper-large-v3，極速雲端・免費)</option>
           <option value="openai" ${conf.provider === 'openai' ? 'selected' : ''}>OpenAI (Whisper-1 官方雲端)</option>
+          <option value="azure" ${conf.provider === 'azure' ? 'selected' : ''}>Azure Speech (專業語音辨識・逐句時間碼)</option>
+          <option value="google" ${conf.provider === 'google' ? 'selected' : ''}>Google Gemini (大語言模型・繁體中文理解力最強)</option>
         </select>
       </div>
 
@@ -325,13 +397,13 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       <div id="asrBuiltinRow" style="display:${conf.provider === 'builtin' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
         <label style="font-size:12px;font-weight:600;color:var(--text-dim);">內建 AI 模型等級：</label>
         <select id="asrBuiltinModel" style="width:100%;">
-          <option value="onnx-community/whisper-tiny" ${conf.builtinModel === 'onnx-community/whisper-tiny' ? 'selected' : ''}>Whisper Tiny (超輕量 39MB，速度最快)</option>
-          <option value="onnx-community/whisper-base" ${conf.builtinModel === 'onnx-community/whisper-base' ? 'selected' : ''}>Whisper Base (標準推薦 73MB，速度與平衡)</option>
-          <option value="onnx-community/whisper-small" ${conf.builtinModel === 'onnx-community/whisper-small' ? 'selected' : ''}>Whisper Small (高精度 240MB，中文佳)</option>
-          <option value="onnx-community/whisper-large-v3-turbo" ${conf.builtinModel === 'onnx-community/whisper-large-v3-turbo' ? 'selected' : ''}>Whisper Large v3 Turbo (旗艦極速 800MB，最新頂級精度)</option>
+          <option value="onnx-community/whisper-tiny" ${conf.builtinModel === 'onnx-community/whisper-tiny' ? 'selected' : ''}>Whisper Tiny (最快；CPU 約 39MB／GPU 約 150MB)</option>
+          <option value="onnx-community/whisper-base" ${conf.builtinModel === 'onnx-community/whisper-base' ? 'selected' : ''}>Whisper Base (平衡；CPU 約 73MB／GPU 約 290MB)</option>
+          <option value="onnx-community/whisper-small" ${conf.builtinModel === 'onnx-community/whisper-small' ? 'selected' : ''}>Whisper Small (中文佳；CPU 約 240MB／GPU 約 560MB)</option>
+          <option value="onnx-community/whisper-large-v3-turbo" ${conf.builtinModel === 'onnx-community/whisper-large-v3-turbo' ? 'selected' : ''}>Whisper Large v3 Turbo q4 (速度優先，約 800MB)</option>
         </select>
         <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">
-          💡 首次使用特定模型時會自動由快取下載。本機電腦有獨立顯卡時可自動啟用 WebGPU 加速。若需應對嘈雜背景音樂電影，強烈推薦選擇 Large v3 Turbo 或 Google Gemini 模式。
+          💡 首次使用特定模型時會自動下載並快取；下載量會依 GPU／CPU 執行版本而不同。本機電腦有獨立顯卡時可自動啟用 WebGPU 加速。若需應對嘈雜背景音樂電影，建議改用 Azure Speech 或 Google，並人工抽查結果。
         </div>
       </div>
 
@@ -368,9 +440,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         </div>
       </div>
 
-      <div style="display:flex;flex-direction:column;gap:5px;">
-        <label id="asrPromptLabel" style="font-size:12px;font-weight:600;color:var(--text-dim);">${conf.provider === 'azure' ? 'Azure 專有名詞（以逗號分隔）：' : '提示詞（Prompt / 專有名詞導引）：'}</label>
-        <input type="text" id="asrPrompt" placeholder="${conf.provider === 'azure' ? '選填，例如：SUB Tool, Evan' : '選填，例如：請以繁體中文輸出字幕，包含標點符號。'}" value="${escapeHTML(conf.provider === 'azure' ? (conf.azurePhraseList || '') : (conf.prompt || ''))}" style="width:100%;">
+      <div id="asrPromptRow" style="display:${initialGuidanceMeta ? 'flex' : 'none'};flex-direction:column;gap:5px;">
+        <label id="asrPromptLabel" style="font-size:12px;font-weight:600;color:var(--text-dim);">${escapeHTML(initialGuidanceMeta?.label || '')}</label>
+        <input type="text" id="asrPrompt" placeholder="${escapeHTML(initialGuidanceMeta?.placeholder || '')}" value="${escapeHTML(initialGuidanceValue)}" style="width:100%;">
       </div>
 
       <div id="asrProgressContainer" style="display:none;flex-direction:column;gap:4px;">
@@ -387,8 +459,19 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     </div>
   `;
 
+  let activeRecognitionController = null;
+  const abortActiveRecognition = () => {
+    if (activeRecognitionController && !activeRecognitionController.signal.aborted) {
+      activeRecognitionController.abort();
+    }
+  };
+  const cancelRecognition = () => {
+    abortActiveRecognition();
+    closeModal();
+  };
+
   openModal('🎙 音訊語音辨識生成字幕', html, [
-    { label: '取消', act: closeModal },
+    { label: '取消', act: cancelRecognition },
     {
       label: '🚀 開始辨識',
       primary: true,
@@ -411,8 +494,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const apiKey = apiKeyEl?.value?.trim() || '';
         const azureRegion = azureRegionEl?.value?.trim() || 'southeastasia';
         const language = langEl?.value || 'zh';
-        const prompt = promptEl?.value || '';
-        const azurePhrases = prompt.split(/[,，;；\n]+/u).map(item => item.trim()).filter(Boolean);
+        const guidance = resolveAsrGuidance(provider, promptEl?.value || '');
+        const prompt = guidance.prompt || '';
+        const azurePhrases = guidance.azurePhrases || [];
         const providerMeta = CLOUD_PROVIDER_META[provider] || null;
 
         if (providerMeta && !apiKey) {
@@ -441,16 +525,23 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         if (providerMeta) currentConf[providerMeta.keyField] = apiKey;
         if (provider === 'azure') {
           currentConf.azureRegion = azureRegion.toLowerCase();
-          currentConf.azurePhraseList = prompt;
+          currentConf.azurePhraseList = guidance.azurePhraseList;
         }
         currentConf.language = language;
-        if (provider !== 'azure') currentConf.prompt = prompt;
+        if (getAsrGuidanceMeta(provider)?.kind === 'prompt') currentConf.prompt = prompt;
         saveAsrConfig(currentConf);
 
-        // 鎖定 UI
+        const recognitionController = new AbortController();
+        const { signal } = recognitionController;
+        activeRecognitionController = recognitionController;
+        const recognitionIsActive = () => (
+          activeRecognitionController === recognitionController && !signal.aborted
+        );
+
+        // 進行中只鎖定「開始辨識」；取消必須一直可用。
         if (modalFoot) {
-          const btns = modalFoot.querySelectorAll('button');
-          btns.forEach(b => b.disabled = true);
+          const startButtons = modalFoot.querySelectorAll('button.primary');
+          startButtons.forEach(button => { button.disabled = true; });
         }
         if (statusEl) {
           statusEl.style.display = 'block';
@@ -465,7 +556,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             if (statusEl) {
               statusEl.textContent = `[${i + 1}/${clips.length}] 正在萃取「${c.name || '音訊素材'}」之音訊資料…`;
             }
-            const audioBuffer = await getClipAudioBuffer(c);
+            const audioBuffer = await getClipAudioBuffer(c, { signal });
+            if (!recognitionIsActive()) return;
             const inT = Number(c.in) || 0;
             const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (audioBuffer.duration || 0)));
 
@@ -481,26 +573,38 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
               builtinModel,
               apiKey,
               azureRegion,
-              azurePhrases,
               language,
-              prompt,
+              ...('azurePhrases' in guidance ? { azurePhrases } : {}),
+              ...('prompt' in guidance ? { prompt } : {}),
+              signal,
               onProgress: (pInfo) => {
+                if (!recognitionIsActive()) return;
                 if (pInfo.status === 'progress' && typeof pInfo.progress === 'number') {
                   const pct = Math.round(pInfo.progress);
+                  progressBar?.classList.remove('indeterminate');
                   if (progressBar) progressBar.style.width = pct + '%';
                   if (progressPercent) progressPercent.textContent = pct + '%';
                   if (progressLabel) progressLabel.textContent = `正在下載 AI 模型檔案 (${pInfo.file || ''})…`;
                 } else if (pInfo.status === 'transcribing') {
                   if (progressContainer) progressContainer.style.display = 'flex';
-                  if (progressBar) progressBar.style.width = (pInfo.percent || 50) + '%';
-                  if (progressPercent) progressPercent.textContent = (pInfo.percent || 50) + '%';
-                  if (progressLabel) progressLabel.textContent = pInfo.message || `正在推論 (${pInfo.percent || 50}%)…`;
+                  const hasMeasuredPercent = Number.isFinite(pInfo.percent) && !pInfo.indeterminate;
+                  if (hasMeasuredPercent) {
+                    const pct = Math.max(0, Math.min(100, Math.round(pInfo.percent)));
+                    progressBar?.classList.remove('indeterminate');
+                    if (progressBar) progressBar.style.width = pct + '%';
+                    if (progressPercent) progressPercent.textContent = pct + '%';
+                  } else {
+                    progressBar?.classList.add('indeterminate');
+                    if (progressPercent) progressPercent.textContent = '運算中';
+                  }
+                  if (progressLabel) progressLabel.textContent = pInfo.message || '本機 AI 正在推論…';
                   if (statusEl) statusEl.textContent = `[${i + 1}/${clips.length}] ${pInfo.message || '本機推論中…'}`;
-                } else if (pInfo.status === 'ready' || pInfo.status === 'info') {
+                } else if (pInfo.status === 'ready' || pInfo.status === 'info' || pInfo.status === 'loading' || pInfo.status === 'fallback') {
                   if (progressLabel) progressLabel.textContent = pInfo.message || '模型已就緒，開始本機推論…';
                 }
               }
             });
+            if (!recognitionIsActive()) return;
 
             results.push({
               clip: c,
@@ -512,10 +616,15 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             statusEl.textContent = '辨識完成，正在寫入專屬字幕軌…';
           }
 
+          if (!recognitionIsActive()) return;
           const count = insertAsrSubtitles(results);
-          closeModal();
+          activeRecognitionController = null;
+          closeModal({ committed: true });
           showToast(`🎙 語音辨識完成！已新增字幕軌並生成 ${count} 句字幕。`);
         } catch (err) {
+          if (signal.aborted || err?.name === 'AbortError' || activeRecognitionController !== recognitionController) {
+            return;
+          }
           console.error('ASR error:', err);
           if (statusEl) {
             statusEl.style.display = 'block';
@@ -523,13 +632,14 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             statusEl.textContent = '❌ 辨識失敗：' + (err.message || String(err));
           }
           if (modalFoot) {
-            const btns = modalFoot.querySelectorAll('button');
-            btns.forEach(b => b.disabled = false);
+            const startButtons = modalFoot.querySelectorAll('button.primary');
+            startButtons.forEach(button => { button.disabled = false; });
           }
+          activeRecognitionController = null;
         }
       }
     }
-  ], { width: '480px' });
+  ], { width: '480px', onDismiss: abortActiveRecognition });
 
   // 監聽 Provider 切換以自動更新介面
   setTimeout(() => {
@@ -538,6 +648,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     const keyLabelEl = document.getElementById('asrKeyLabel');
     const helpEl = document.getElementById('asrKeyHelp');
     const azureRegionRow = document.getElementById('asrAzureRegionRow');
+    const promptRowEl = document.getElementById('asrPromptRow');
     const promptEl = document.getElementById('asrPrompt');
     const promptLabelEl = document.getElementById('asrPromptLabel');
     const builtinRow = document.getElementById('asrBuiltinRow');
@@ -552,6 +663,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         if (builtinRow) builtinRow.style.display = p === 'builtin' ? 'flex' : 'none';
         if (keyRow) keyRow.style.display = meta ? 'flex' : 'none';
         if (azureRegionRow) azureRegionRow.style.display = p === 'azure' ? 'flex' : 'none';
+        const guidanceMeta = getAsrGuidanceMeta(p);
+        if (promptRowEl) promptRowEl.style.display = guidanceMeta ? 'flex' : 'none';
 
         if (meta) {
           if (apiKeyEl) apiKeyEl.value = c[meta.keyField] || '';
@@ -572,14 +685,12 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             };
           }
         }
-        if (promptLabelEl) promptLabelEl.textContent = p === 'azure'
-          ? 'Azure 專有名詞（以逗號分隔）：'
-          : '提示詞（Prompt / 專有名詞導引）：';
+        if (promptLabelEl) promptLabelEl.textContent = guidanceMeta?.label || '';
         if (promptEl) {
-          promptEl.placeholder = p === 'azure'
-            ? '選填，例如：SUB Tool, Evan'
-            : '選填，例如：請以繁體中文輸出字幕，包含標點符號。';
-          promptEl.value = p === 'azure' ? (c.azurePhraseList || '') : (c.prompt || '');
+          promptEl.placeholder = guidanceMeta?.placeholder || '';
+          promptEl.value = guidanceMeta?.kind === 'phrases'
+            ? (c.azurePhraseList || '')
+            : (guidanceMeta ? (c.prompt || '') : '');
         }
       };
 

@@ -5,38 +5,72 @@
    封裝 16kHz PCM 降採樣、WAV 二進位編碼、雲端 REST 多模態模型通訊
    （Google Gemini / Azure Speech / Groq Whisper / OpenAI Whisper）與本機 ONNX WebGPU/WASM 管線。
    ============================================================================== */
+import { transcribeBuiltinAudioInWorker } from './speech-recognition-worker-client.js';
+import { resolveBuiltinExecutionPlan } from './speech-recognition-worker-runtime.js';
+import OpenCC from 'opencc-js/cn2t';
+
+function throwIfRecognitionAborted(signal) {
+  if (!signal?.aborted) return;
+  if (typeof DOMException === 'function') {
+    throw new DOMException('語音辨識已取消', 'AbortError');
+  }
+  const error = new Error('語音辨識已取消');
+  error.name = 'AbortError';
+  throw error;
+}
 
 /** 內建支援之本機模型清單 */
+const WEBGPU_WHISPER_MIXED_DTYPE = Object.freeze({
+  encoder_model: 'fp32',
+  decoder_model_merged: 'q4'
+});
+
 export const BUILTIN_MODELS = {
   'onnx-community/whisper-tiny': {
     id: 'onnx-community/whisper-tiny',
-    name: 'Tiny (超輕量 39MB)',
-    size: '39MB',
-    dtype: 'fp32',
+    name: 'Tiny (CPU 約 39MB／GPU 約 150MB)',
+    size: 'CPU 約 39MB／GPU 約 150MB',
+    webgpuDtype: 'fp32',
+    wasmDtype: 'q8',
     desc: '速度極快，佔用記憶體極少，適合快速草稿。'
   },
   'onnx-community/whisper-base': {
     id: 'onnx-community/whisper-base',
-    name: 'Base (標準推薦 73MB)',
-    size: '73MB',
-    dtype: 'fp32',
+    name: 'Base (CPU 約 73MB／GPU 約 290MB)',
+    size: 'CPU 約 73MB／GPU 約 290MB',
+    webgpuDtype: 'fp32',
+    wasmDtype: 'q8',
     desc: '速度與準確度均衡，適合日常對白剪輯。'
   },
   'onnx-community/whisper-small': {
     id: 'onnx-community/whisper-small',
-    name: 'Small (高精度 240MB)',
-    size: '240MB',
-    dtype: 'q8',
-    desc: '中文與繁體字辨識度更佳，適合清晰收音內容。'
+    name: 'Small (CPU 約 240MB／GPU 約 560MB)',
+    size: 'CPU 約 240MB／GPU 約 560MB',
+    webgpuDtype: WEBGPU_WHISPER_MIXED_DTYPE,
+    wasmDtype: 'q8',
+    desc: '中文與繁體字辨識度更佳；GPU 使用高精度 encoder 與高效率 decoder。'
   },
   'onnx-community/whisper-large-v3-turbo': {
     id: 'onnx-community/whisper-large-v3-turbo',
-    name: 'Large v3 Turbo (旗艦極速 800MB)',
-    size: '800MB',
-    dtype: 'q4',
-    desc: 'OpenAI 官方最新旗艦模型，頂級繁體中文精度與極速推論。'
+    name: 'Large v3 Turbo q4 (速度優先約 800MB)',
+    size: '約 800MB',
+    webgpuDtype: 'q4',
+    wasmDtype: 'q8',
+    desc: '大型模型的相容性量化版，速度優先；精準成品仍建議比較 Small 或雲端 Speech-to-Text。'
   }
 };
+
+const simplifiedToTaiwanTraditional = OpenCC.Converter({ from: 'cn', to: 'twp' });
+
+export function convertAsrSegmentsToTraditionalChinese(segments, language = 'zh') {
+  if (language !== 'zh' || !Array.isArray(segments)) return segments;
+  return segments.map(segment => ({
+    ...segment,
+    text: typeof segment?.text === 'string'
+      ? simplifiedToTaiwanTraditional(segment.text)
+      : segment?.text
+  }));
+}
 
 /**
  * 將 Blob 轉換為 Base64 字串
@@ -194,16 +228,12 @@ export function encodeWav16kMono(audioBuffer, startSec = 0, endSec = null) {
 
 /** 本機 pipeline 單例快取 */
 let cachedTranscriber = null;
-let cachedModelId = null;
+let cachedPipelineKey = null;
 
 /**
  * 載入或重用 Transformers.js 本機語音辨識 Pipeline
  */
 export async function loadTransformersPipeline(modelId = 'onnx-community/whisper-base', onProgress = null) {
-  if (cachedTranscriber && cachedModelId === modelId) {
-    return cachedTranscriber;
-  }
-
   const moduleUrl = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
   const { pipeline, env } = await import(/* @vite-ignore */ moduleUrl);
 
@@ -211,28 +241,44 @@ export async function loadTransformersPipeline(modelId = 'onnx-community/whisper
   env.useBrowserCache = true;
 
   const modelMeta = BUILTIN_MODELS[modelId] || BUILTIN_MODELS['onnx-community/whisper-base'];
-  let device = 'wasm';
-  if (typeof navigator !== 'undefined' && navigator.gpu) {
-    device = 'webgpu';
-  }
+  const preferredPlan = resolveBuiltinExecutionPlan({
+    hasWebGpu: typeof navigator !== 'undefined' && Boolean(navigator.gpu),
+    webgpuDtype: modelMeta.webgpuDtype,
+    wasmDtype: modelMeta.wasmDtype
+  });
+  const fallbackPlan = resolveBuiltinExecutionPlan({
+    hasWebGpu: false,
+    webgpuDtype: modelMeta.webgpuDtype,
+    wasmDtype: modelMeta.wasmDtype
+  });
+  const keyFor = plan => JSON.stringify({ modelId: modelMeta.id, ...plan });
+  if (cachedTranscriber && (
+    cachedPipelineKey === keyFor(preferredPlan) || cachedPipelineKey === keyFor(fallbackPlan)
+  )) return cachedTranscriber;
 
   if (onProgress) onProgress({ status: 'loading', message: `正在載入 ${modelMeta.name} 模型檔案…` });
 
+  if (cachedTranscriber?.dispose) await cachedTranscriber.dispose();
+  cachedTranscriber = null;
+  cachedPipelineKey = null;
   let pipe = null;
+  let actualPlan = preferredPlan;
   try {
     pipe = await pipeline('automatic-speech-recognition', modelId, {
-      device,
-      dtype: modelMeta.dtype || 'fp32',
+      device: preferredPlan.device,
+      dtype: preferredPlan.dtype,
       progress_callback: (p) => {
         if (onProgress) onProgress(p);
       }
     });
   } catch (err) {
-    console.warn(`以 ${device} 載入失敗，嘗試回退至 CPU (WASM) 模式:`, err);
-    if (onProgress) onProgress({ status: 'fallback', message: '切換至 CPU 多執行緒模式載入模型…' });
+    if (preferredPlan.device === 'wasm') throw err;
+    console.warn('以 WebGPU 載入失敗，嘗試回退至 CPU (WASM) 模式:', err);
+    if (onProgress) onProgress({ status: 'fallback', message: 'WebGPU 無法啟動，切換至 CPU (WASM q8) 模式…' });
+    actualPlan = fallbackPlan;
     pipe = await pipeline('automatic-speech-recognition', modelId, {
-      device: 'wasm',
-      dtype: 'fp32',
+      device: fallbackPlan.device,
+      dtype: fallbackPlan.dtype,
       progress_callback: (p) => {
         if (onProgress) onProgress(p);
       }
@@ -240,7 +286,7 @@ export async function loadTransformersPipeline(modelId = 'onnx-community/whisper
   }
 
   cachedTranscriber = pipe;
-  cachedModelId = modelId;
+  cachedPipelineKey = keyFor(actualPlan);
   return pipe;
 }
 
@@ -252,67 +298,38 @@ export async function transcribeWithBuiltinModel({
   modelId = 'onnx-community/whisper-base',
   language = 'zh',
   prompt = '',
-  onProgress = null
+  onProgress = null,
+  signal = null
 }) {
   if (!audioFloat32 || audioFloat32.length === 0) {
     throw new Error('音訊長度為 0，無法進行辨識');
   }
-
-  const transcriber = await loadTransformersPipeline(modelId, onProgress);
-
-  if (onProgress) onProgress({ status: 'transcribing', percent: 10, message: '本機 AI 正在聆聽與分析語音…' });
-
-  const generateKwargs = {
-    return_timestamps: true,
-    chunk_length_s: 30,
-    stride_length_s: 5
-  };
-
-  if (language && language !== 'auto') {
-    generateKwargs.language = language;
-    generateKwargs.task = 'transcribe';
-  }
-  if (prompt && prompt.trim()) {
-    generateKwargs.prompt = prompt.trim();
-  }
-
-  const output = await transcriber(audioFloat32, generateKwargs);
-
-  if (onProgress) onProgress({ status: 'done', percent: 100, message: '本機辨識完成！' });
-
-  let segments = [];
-  if (output && Array.isArray(output.chunks) && output.chunks.length > 0) {
-    for (const chunk of output.chunks) {
-      if (chunk && chunk.text && chunk.text.trim()) {
-        const start = (chunk.timestamp && chunk.timestamp[0] != null) ? chunk.timestamp[0] : 0;
-        const end = (chunk.timestamp && chunk.timestamp[1] != null) ? chunk.timestamp[1] : (start + 2);
-        segments.push({
-          start,
-          end,
-          text: chunk.text.trim()
-        });
-      }
-    }
-  } else if (output && output.text && output.text.trim()) {
-    segments.push({
-      start: 0,
-      end: audioFloat32.length / 16000,
-      text: output.text.trim()
-    });
-  }
-
-  return { segments };
+  throwIfRecognitionAborted(signal);
+  const modelMeta = BUILTIN_MODELS[modelId] || BUILTIN_MODELS['onnx-community/whisper-base'];
+  return transcribeBuiltinAudioInWorker({
+    audioFloat32,
+    modelId: modelMeta.id,
+    modelName: modelMeta.name,
+    webgpuDtype: modelMeta.webgpuDtype,
+    wasmDtype: modelMeta.wasmDtype,
+    language,
+    prompt,
+    onProgress,
+    signal
+  });
 }
 
 /**
  * 自動探索目前 API Key 支援的 Gemini 模型
  */
-export async function resolveGeminiModel(apiKey) {
+export async function resolveGeminiModel(apiKey, signal = null) {
   const versions = ['v1', 'v1beta'];
   for (const v of versions) {
+    throwIfRecognitionAborted(signal);
     try {
       const resp = await fetch(`https://generativelanguage.googleapis.com/${v}/models`, {
-        headers: { 'x-goog-api-key': apiKey }
+        headers: { 'x-goog-api-key': apiKey },
+        signal
       });
       if (resp.ok) {
         const json = await resp.json();
@@ -332,7 +349,9 @@ export async function resolveGeminiModel(apiKey) {
         if (anyFlash) return { version: v, model: anyFlash };
         if (models.length > 0) return { version: v, model: models[0] };
       }
-    } catch (_) {}
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+    }
   }
   return { version: 'v1beta', model: 'gemini-1.5-flash' };
 }
@@ -344,13 +363,16 @@ export async function callGeminiAudioTranscription({
   audioBlob,
   apiKey,
   language = 'zh',
-  prompt = ''
+  prompt = '',
+  signal = null
 }) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error('請輸入 Google Gemini API Key');
   }
 
+  throwIfRecognitionAborted(signal);
   const base64Audio = await blobToBase64(audioBlob);
+  throwIfRecognitionAborted(signal);
   const langText = language === 'zh' ? '繁體中文 (Traditional Chinese)' : (language === 'en' ? '英文 (English)' : (language === 'ja' ? '日文' : '原文語言'));
 
   const systemInstruction = `你是一位專業的頂級影視對白字幕聽打專家。請聆聽所附音訊，依據人聲起迄時間精準生成字幕片段。
@@ -385,7 +407,7 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
     }
   };
 
-  const detected = await resolveGeminiModel(apiKey.trim());
+  const detected = await resolveGeminiModel(apiKey.trim(), signal);
   const candidateModels = [
     detected.model,
     'gemini-1.5-flash-latest',
@@ -403,6 +425,7 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
   for (const ver of versions) {
     if (data) break;
     for (const m of candidateModels) {
+      throwIfRecognitionAborted(signal);
       const url = `https://generativelanguage.googleapis.com/${ver}/models/${m}:generateContent`;
       try {
         const resp = await fetch(url, {
@@ -411,7 +434,8 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
             'Content-Type': 'application/json',
             'x-goog-api-key': apiKey.trim()
           },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
+          signal
         });
 
         if (resp.ok) {
@@ -425,6 +449,7 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
           }
         }
       } catch (err) {
+        if (signal?.aborted || err?.name === 'AbortError') throw err;
         lastError = err;
         if (!err.message.includes('HTTP 404') && !err.message.includes('not found')) {
           throw err;
@@ -550,7 +575,8 @@ export async function callAzureSpeechTranscription({
   apiKey,
   region = 'southeastasia',
   language = 'zh',
-  phrases = []
+  phrases = [],
+  signal = null
 }) {
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
   if (!key) throw new Error('請輸入 Azure Speech API Key');
@@ -581,7 +607,8 @@ export async function callAzureSpeechTranscription({
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Ocp-Apim-Subscription-Key': key },
-    body: formData
+    body: formData,
+    signal
   });
 
   if (!response.ok) {
@@ -603,7 +630,8 @@ export async function callWhisperApi({
   apiKey,
   localEndpoint = 'http://127.0.0.1:8080/v1/audio/transcriptions',
   language = 'zh',
-  prompt = ''
+  prompt = '',
+  signal = null
 }) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error(`請輸入 ${provider === 'groq' ? 'Groq' : 'OpenAI'} API Key`);
@@ -636,7 +664,8 @@ export async function callWhisperApi({
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers,
-    body: formData
+    body: formData,
+    signal
   });
 
   if (!resp.ok) {
@@ -685,8 +714,10 @@ export async function transcribeAudioStream({
   azurePhrases = [],
   language = 'zh',
   prompt = '',
-  onProgress = null
+  onProgress = null,
+  signal = null
 }) {
+  throwIfRecognitionAborted(signal);
   if (!audioBuffer) {
     throw new Error('未提供有效的音訊來源');
   }
@@ -702,10 +733,15 @@ export async function transcribeAudioStream({
       audioFloat32,
       modelId: builtinModel,
       language,
-      prompt,
-      onProgress
+      prompt: '',
+      onProgress,
+      signal
     });
-    return Array.isArray(res?.segments) ? res.segments : [];
+    throwIfRecognitionAborted(signal);
+    return convertAsrSegmentsToTraditionalChinese(
+      Array.isArray(res?.segments) ? res.segments : [],
+      language
+    );
   }
 
   const wavBlob = encodeWav16kMono(audioBuffer, inT, endT);
@@ -718,9 +754,14 @@ export async function transcribeAudioStream({
       audioBlob: wavBlob,
       apiKey,
       language,
-      prompt
+      prompt,
+      signal
     });
-    return Array.isArray(res?.segments) ? res.segments : [];
+    throwIfRecognitionAborted(signal);
+    return convertAsrSegmentsToTraditionalChinese(
+      Array.isArray(res?.segments) ? res.segments : [],
+      language
+    );
   }
 
   if (provider === 'azure') {
@@ -729,9 +770,14 @@ export async function transcribeAudioStream({
       apiKey,
       region: azureRegion,
       language,
-      phrases: azurePhrases
+      phrases: azurePhrases,
+      signal
     });
-    return Array.isArray(res?.segments) ? res.segments : [];
+    throwIfRecognitionAborted(signal);
+    return convertAsrSegmentsToTraditionalChinese(
+      Array.isArray(res?.segments) ? res.segments : [],
+      language
+    );
   }
 
   const res = await callWhisperApi({
@@ -739,8 +785,15 @@ export async function transcribeAudioStream({
     provider,
     apiKey,
     language,
-    prompt
+    prompt,
+    signal
   });
 
-  return Array.isArray(res?.segments) ? res.segments : (res?.text ? [{ start: 0, end: endT - inT, text: res.text }] : []);
+  throwIfRecognitionAborted(signal);
+  return convertAsrSegmentsToTraditionalChinese(
+    Array.isArray(res?.segments)
+      ? res.segments
+      : (res?.text ? [{ start: 0, end: endT - inT, text: res.text }] : []),
+    language
+  );
 }
