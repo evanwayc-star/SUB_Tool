@@ -39,6 +39,7 @@ import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
 import { createCommands } from './commands.js';
 import { renderPointerSeekControl, requestPointerSeek } from './pointer-seek-control.js';
+import { renderQueueMonitorIndicator } from './ui/queue-monitor-indicator.js';
 import { togglePanel } from './ui.js';
 import { applyCueStylePatch } from './style-commands.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
@@ -1032,7 +1033,8 @@ async function initDesktop(){
   };
   if ($('stResumeBtn')) $('stResumeBtn').onclick = () => { if (DESK.queueResume) DESK.queueResume(); };
 
-  let _queueStatus = { waitingCount: 0, missingCount: 0, isPaused: false };
+  let _queueStatus = { waitingCount: 0, missingCount: 0, liveCount: 0, isPaused: false };
+  renderQueueMonitorIndicator($('stMonitorBtn'), _queueStatus);
   if (DESK.onQueueStatus) {
     DESK.onQueueStatus(s => {
       _queueStatus = s;
@@ -1041,6 +1043,7 @@ async function initDesktop(){
   }
 
   function _updateQueueStatusUI() {
+    renderQueueMonitorIndicator($('stMonitorBtn'), _queueStatus);
     if (_queueStatus.missingCount > 0) {
       showToast(`佇列中有 ${_queueStatus.missingCount} 份工作來源遺失，已被中止`);
       _queueStatus.missingCount = 0; // only show once per update

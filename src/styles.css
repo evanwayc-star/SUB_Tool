@@ -118,6 +118,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .menubar>.spacer{flex:1 1 auto;min-width:0}
 .menubar>.sep{margin:0 1px}
 .menubar button.icon{color:rgb(180,180,180);padding-left:6px;padding-right:6px;white-space:nowrap}
+.queue-monitor-ring{width:12px;height:12px;display:inline-block;flex:0 0 12px;
+  border:2px solid var(--green);border-radius:50%;box-shadow:0 0 0 1px rgba(16,185,129,.08)}
+#stMonitorBtn.queue-running .queue-monitor-ring{border-color:rgba(245,158,11,.22);border-top-color:var(--accent);
+  animation:queue-monitor-spin .8s linear infinite}
+@keyframes queue-monitor-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){#stMonitorBtn.queue-running .queue-monitor-ring{
+  animation:none;border-color:rgba(245,158,11,.22);border-top-color:var(--accent);border-right-color:var(--accent)}}
 .menubar .auto-select-btn,.menubar .ow-toggle-btn,.menubar .ow-keep-btn,.menubar .pointer-seek-btn{
   min-width:0;padding-left:7px;padding-right:7px;margin-left:0;font-size:12px;letter-spacing:.2px;white-space:nowrap}
 .brand{display:flex;align-items:center;margin-right:6px;white-space:nowrap}

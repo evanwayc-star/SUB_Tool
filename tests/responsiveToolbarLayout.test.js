@@ -41,6 +41,14 @@ describe('Mac 工具列 responsive 版面', () => {
     expect(html).toMatch(/data-act="exp-video"[\s\S]*class="lbl">匯出影片/);
   });
 
+  it('監控序列左側使用佇列狀態圓環，並尊重減少動態效果設定', () => {
+    expect(html).toMatch(/id="stMonitorBtn"[^>]*>\s*<span class="queue-monitor-ring" aria-hidden="true"><\/span>\s*<span class="lbl">監控序列<\/span>/);
+    expect(declarations('.queue-monitor-ring')).toContain('border-radius:50%');
+    expect(declarations('#stMonitorBtn.queue-running .queue-monitor-ring')).toContain('animation:queue-monitor-spin');
+    expect(css).toContain('@keyframes queue-monitor-spin');
+    expect(css).toMatch(/@media\(prefers-reduced-motion:reduce\)[\s\S]*#stMonitorBtn\.queue-running \.queue-monitor-ring\s*\{[^}]*animation:none/);
+  });
+
   it('時間軸工具列不縮字、不折字，窄視窗改用既有圖示', () => {
     const toolbar = declarations('.tl-toolbar');
     expect(toolbar).toContain('gap:4px');
