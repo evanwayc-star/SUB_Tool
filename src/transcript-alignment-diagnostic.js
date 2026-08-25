@@ -3,13 +3,13 @@
    ============================================================================== */
 import { parseTranscriptLines } from './transcript-alignment.js';
 
-const DIAGNOSTIC_SCHEMA = 'subtool-transcript-alignment-diagnostic-v1';
+const DIAGNOSTIC_SCHEMA = 'subtool-transcript-alignment-diagnostic-v2';
 const DIAGNOSTIC_PROVIDERS = new Set(['builtin', 'groq', 'openai', 'azure', 'google']);
 const DIAGNOSTIC_LANGUAGES = new Set(['auto', 'zh', 'en', 'ja', 'ko']);
 const DIAGNOSTIC_LOCALES = new Set(['zh-TW', 'en-US', 'ja-JP', 'ko-KR']);
 const ALIGNMENT_STATUSES = new Set(['matched', 'review', 'unmatched']);
-const ALIGNMENT_RESULTS = new Set(['aligned', 'failed']);
-const TIMING_EVIDENCE = new Set(['word', 'segment', 'mixed', 'none']);
+const ALIGNMENT_RESULTS = new Set(['aligned', 'recovered', 'failed']);
+const TIMING_EVIDENCE = new Set(['word', 'segment', 'interpolated', 'mixed', 'none']);
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
 function finiteNumber(value) {
@@ -101,7 +101,19 @@ export function buildTranscriptAlignmentDiagnostic({
   const unmatched = new Set(Array.isArray(summary.unmatchedLines) ? summary.unmatchedLines : []);
   const ambiguous = new Set(Array.isArray(summary.ambiguousLines) ? summary.ambiguousLines : []);
   const lowCoverage = new Set(Array.isArray(summary.lowCoverageLines) ? summary.lowCoverageLines : []);
-  const unreliableIndexes = [...new Set([...unmatched, ...ambiguous, ...lowCoverage])]
+  const partialEvidence = new Set(Array.isArray(summary.partialEvidenceLines) ? summary.partialEvidenceLines : []);
+  const estimated = new Set(Array.isArray(summary.estimatedLines) ? summary.estimatedLines : []);
+  const discontinuousEvidence = new Set(
+    Array.isArray(summary.discontinuousEvidenceLines) ? summary.discontinuousEvidenceLines : []
+  );
+  const unreliableIndexes = [...new Set([
+    ...unmatched,
+    ...ambiguous,
+    ...lowCoverage,
+    ...partialEvidence,
+    ...estimated,
+    ...discontinuousEvidence
+  ])]
     .filter(index => Number.isInteger(index) && index >= 0 && index < lines.length)
     .sort((a, b) => a - b);
 
@@ -113,7 +125,10 @@ export function buildTranscriptAlignmentDiagnostic({
       reasons: [
         ...(unmatched.has(index) ? ['unmatched'] : []),
         ...(ambiguous.has(index) ? ['ambiguous'] : []),
-        ...(lowCoverage.has(index) ? ['low-coverage'] : [])
+        ...(lowCoverage.has(index) ? ['low-coverage'] : []),
+        ...(partialEvidence.has(index) ? ['partial-evidence'] : []),
+        ...(estimated.has(index) ? ['estimated'] : []),
+        ...(discontinuousEvidence.has(index) ? ['discontinuous-evidence'] : [])
       ],
       timed: segment.timed === true
     };

@@ -747,6 +747,77 @@ describe('語音辨識與字幕生成模組', () => {
       expect(State.cues[1].text).toBe('片段二對白');
       expect(State.cues[1].start).toBeCloseTo(21.0, 2);
     });
+
+    it('文本匹配推估時間在影格吸附後重疊時不會留下空軌或錯誤字幕', () => {
+      const clip = { id: 'alignment-frame-collapse', offset: 0, in: 0, out: 2 };
+      const segments = [
+        { start: 0, end: 1, text: '可靠前句' },
+        {
+          start: 1.001,
+          end: 1.01,
+          text: '過窄推估句',
+          alignment: { status: 'review', timingEvidence: 'interpolated' }
+        },
+        { start: 1.015, end: 2, text: '可靠後句' }
+      ];
+
+      expect(() => insertAsrSubtitles([{ clip, segments }], {
+        trackName: '文本匹配',
+        requireValidTimes: true
+      })).toThrow('影格吸附後無法維持有效且不重疊的字幕時間');
+      expect(State.tracks).toEqual([{ name: '軌道 1', visible: true, locked: false }]);
+      expect(State.cues).toEqual([]);
+    });
+
+    it('文本匹配的孤立字幕在影格吸附後縮成零長度時必須拒絕建立', () => {
+      const clip = { id: 'alignment-single-frame-collapse', offset: 0, in: 0, out: 2 };
+      const segments = [{
+        start: 1.001,
+        end: 1.01,
+        text: '過窄推估句',
+        alignment: { status: 'review', timingEvidence: 'interpolated' }
+      }];
+
+      expect(() => insertAsrSubtitles([{ clip, segments }], {
+        trackName: '文本匹配',
+        requireValidTimes: true
+      })).toThrow('影格吸附後無法維持有效且不重疊的字幕時間');
+      expect(State.tracks).toEqual([{ name: '軌道 1', visible: true, locked: false }]);
+      expect(State.cues).toEqual([]);
+    });
+
+    it('文本匹配在高影格索引仍以 30000/1001 格網驗證相鄰字幕', () => {
+      State.fps = 29.97;
+      const exactFps = 30000 / 1001;
+      const baseFrame = 1_000_000;
+      const clip = { id: 'alignment-ntsc-grid', offset: 0, in: 0, out: 40_000 };
+      const segments = [
+        {
+          start: (baseFrame + 0.1) / exactFps,
+          end: (baseFrame + 2.1) / exactFps,
+          text: 'NTSC 前句'
+        },
+        {
+          start: (baseFrame + 2.1) / exactFps,
+          end: (baseFrame + 4.1) / exactFps,
+          text: 'NTSC 後句'
+        }
+      ];
+
+      expect(insertAsrSubtitles([{ clip, segments }], {
+        trackName: '文本匹配',
+        requireValidTimes: true
+      })).toBe(2);
+      expect(State.cues.map(cue => Math.round(cue.start * exactFps))).toEqual([
+        baseFrame,
+        baseFrame + 2
+      ]);
+      expect(State.cues.map(cue => Math.round(cue.end * exactFps))).toEqual([
+        baseFrame + 2,
+        baseFrame + 4
+      ]);
+      expect(State.cues[1].start).toBeCloseTo(State.cues[0].end, 9);
+    });
   });
 
   describe('Whisper API 調用 (callWhisperApi)', () => {

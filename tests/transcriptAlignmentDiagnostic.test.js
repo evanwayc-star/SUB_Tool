@@ -60,7 +60,7 @@ describe('文本匹配安全診斷資料', () => {
     });
 
     expect(diagnostic).toEqual({
-      schema: 'subtool-transcript-alignment-diagnostic-v1',
+      schema: 'subtool-transcript-alignment-diagnostic-v2',
       generatedAt: '2026-08-25T12:34:56.000Z',
       timeDomain: 'source-relative-seconds',
       provider: 'azure',
@@ -172,5 +172,57 @@ describe('文本匹配安全診斷資料', () => {
   it('保留 UI 正式支援的日文與韓文語言代碼', () => {
     expect(buildTranscriptAlignmentDiagnostic({ language: 'ja' }).language).toBe('ja');
     expect(buildTranscriptAlignmentDiagnostic({ language: 'ko' }).language).toBe('ko');
+  });
+
+  it('恢復完成時列出推估、局部證據與不連續證據的需校對行', () => {
+    const diagnostic = buildTranscriptAlignmentDiagnostic({
+      generatedAt: '2026-08-25T13:00:00.000Z',
+      transcript: 'Partial line.\nEstimated line.\nDiscontinuous line.',
+      alignmentResult: {
+        status: 'recovered',
+        segments: [
+          {
+            timed: true,
+            start: 1,
+            end: 2,
+            alignment: { status: 'review', score: 0.4, tokenCoverage: 0.4, timingEvidence: 'word' }
+          },
+          {
+            timed: true,
+            start: 3,
+            end: 4,
+            alignment: { status: 'review', score: 0, tokenCoverage: 0, timingEvidence: 'interpolated' }
+          },
+          {
+            timed: true,
+            start: 5,
+            end: 6,
+            alignment: { status: 'review', score: 0.7, tokenCoverage: 0.6, timingEvidence: 'word' }
+          }
+        ],
+        summary: {
+          coverage: 0.96,
+          timingEvidence: 'mixed',
+          reviewCount: 3,
+          unmatchedLines: [],
+          ambiguousLines: [],
+          lowCoverageLines: [],
+          partialEvidenceLines: [0],
+          estimatedLines: [1],
+          discontinuousEvidenceLines: [2]
+        }
+      }
+    });
+
+    expect(diagnostic.alignmentStatus).toBe('recovered');
+    expect(diagnostic.unreliableLines.map(line => ({
+      lineNumber: line.lineNumber,
+      reasons: line.reasons,
+      timingEvidence: line.alignment.timingEvidence
+    }))).toEqual([
+      { lineNumber: 1, reasons: ['partial-evidence'], timingEvidence: 'word' },
+      { lineNumber: 2, reasons: ['estimated'], timingEvidence: 'interpolated' },
+      { lineNumber: 3, reasons: ['discontinuous-evidence'], timingEvidence: 'word' }
+    ]);
   });
 });

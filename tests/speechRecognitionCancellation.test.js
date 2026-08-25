@@ -306,6 +306,47 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     expect(localStorage.getItem('subtool_asr_config')).not.toContain('辨識正確。');
   });
 
+  it('零星漏句恢復後建立完整初稿並保留需校對行號與診斷入口', async () => {
+    const transcriptLines = Array.from({ length: 20 }, (_, index) => (
+      index === 10 ? 'missing phrase' : `anchor${index} a b c d e f g h i`
+    ));
+    engineMocks.transcribeAudioStream.mockResolvedValue(transcriptLines.flatMap((text, index) => (
+      index === 10 ? [] : [{ start: index * 2, end: (index * 2) + 1, text }]
+    )));
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'align' });
+    openSpeechRecognitionDialog({
+      id: 'alignment-recovered',
+      name: 'alignment-recovered.wav',
+      in: 0,
+      out: 39,
+      duration: 39,
+      audioBuffer: { duration: 39 }
+    });
+    document.getElementById('asrTranscript').value = transcriptLines.join('\n');
+
+    const [closeButton, startButton] = document.querySelectorAll('#modalFoot button');
+    startButton.click();
+    await vi.waitFor(() => expect(State.cues).toHaveLength(20));
+
+    expect(State.tracks.at(-1).name).toBe('文本匹配');
+    expect(State.cues.map(cue => cue.text)).toEqual(transcriptLines);
+    expect(document.getElementById('asrStatus').textContent).toContain('1 行使用推估時間');
+    expect(document.getElementById('asrStatus').textContent).toContain('共 20 行需人工校對');
+    expect(document.getElementById('asrStatus').textContent).toContain('不是精準對齊');
+    expect(document.getElementById('asrUnreliableLineNumbers').textContent).toContain('第 1、2');
+    expect(document.getElementById('asrUnreliableLineNumbers').textContent).toContain('、11、');
+    expect(document.getElementById('asrUnreliableLineNumbers').textContent).toContain('20 行');
+    expect(getComputedStyle(document.getElementById('asrAlignmentDiagnostic')).display).not.toBe('none');
+    expect(closeButton.textContent).toBe('關閉');
+    expect(startButton.disabled).toBe(true);
+    expect(startButton.textContent).toBe('已建立');
+    expect(closeModal).not.toHaveBeenCalledWith({ committed: true });
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('需人工校對'));
+
+    startButton.click();
+    expect(State.cues).toHaveLength(20);
+  });
+
   it('只有部分行的逐字時間重疊時，錯誤訊息只回報真正有疑義的行數', async () => {
     engineMocks.transcribeAudioStream.mockResolvedValue([{
       start: 0,

@@ -100,10 +100,20 @@ const {
             firstPcmSamples: [view.getInt16(44, true), view.getInt16(46, true)]
           };
           const mismatch = window.__asrResponseMode === 'mismatch';
+          const recovered = window.__asrResponseMode === 'recovered';
+          const recoveredLines = Array.from({ length: 20 }, (_, index) => (
+            index === 10 ? 'missing phrase' : ('anchor' + index + ' a b c d e f g h i')
+          ));
+          const recoveredPayload = {
+            text: recoveredLines.filter((_, index) => index !== 10).join(' '),
+            segments: recoveredLines.flatMap((text, index) => (
+              index === 10 ? [] : [{ start: index * 2, end: (index * 2) + 1, text }]
+            ))
+          };
           return new Response(JSON.stringify(mismatch ? {
             text: 'alpha wrong gamma other',
             segments: [{ start: 0, end: 1, text: 'alpha wrong gamma other' }]
-          } : {
+          } : recovered ? recoveredPayload : {
             text: '來源聲道三',
             segments: [{ start: 0, end: 1, text: '來源聲道三' }]
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -245,8 +255,14 @@ const {
     await client.evaluate(`(() => {
       window.__diagnosticDownloadBlob = null;
       window.__diagnosticDownloadName = '';
+      window.__diagnosticDownloadClickCount = 0;
       window.__diagnosticOriginalCreateObjectURL = URL.createObjectURL;
       window.__diagnosticOriginalAnchorClick = HTMLAnchorElement.prototype.click;
+      window.__diagnosticDownloadClickListener = () => {
+        window.__diagnosticDownloadClickCount += 1;
+      };
+      document.getElementById('asrDownloadAlignmentDiagnostic')
+        .addEventListener('click', window.__diagnosticDownloadClickListener, true);
       URL.createObjectURL = blob => {
         window.__diagnosticDownloadBlob = blob;
         return window.__diagnosticOriginalCreateObjectURL.call(URL, blob);
@@ -262,21 +278,7 @@ const {
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       return true;
     })()`);
-    const downloadRect = await waitFor(
-      () => client.evaluate(`(() => {
-        const element = document.getElementById('asrDownloadAlignmentDiagnostic');
-        const rect = element.getBoundingClientRect();
-        const x = rect.left + Math.min(20, rect.width / 2);
-        const y = rect.top + Math.min(10, rect.height / 2);
-        const hit = document.elementFromPoint(x, y);
-        if (rect.bottom <= 0 || rect.top >= innerHeight || (hit !== element && !element.contains(hit))) return null;
-        return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-      })()`),
-      '診斷下載按鈕可見且可命中'
-    );
-    await dispatchClick(client, downloadRect);
-    result.diagnostic.download = await waitFor(
-      () => client.evaluate(`(async () => {
+    const readDiagnosticDownload = () => client.evaluate(`(async () => {
         const blob = window.__diagnosticDownloadBlob;
         if (!blob || !window.__diagnosticDownloadName) return null;
         const serialized = await blob.text();
@@ -294,16 +296,120 @@ const {
           audioSelection: parsed.audioSelection,
           forbidden
         };
-      })()`),
-      '真實點擊後的診斷 JSON 內容'
-    );
+      })()`);
+    let diagnosticDownload = null;
+    let downloadClickAttempts = 0;
+    while (!diagnosticDownload && downloadClickAttempts < 3) {
+      const downloadRect = await waitFor(
+        () => client.evaluate(`(() => {
+          const element = document.getElementById('asrDownloadAlignmentDiagnostic');
+          const rect = element.getBoundingClientRect();
+          const x = rect.left + Math.min(20, rect.width / 2);
+          const y = rect.top + Math.min(10, rect.height / 2);
+          const hit = document.elementFromPoint(x, y);
+          if (rect.bottom <= 0 || rect.top >= innerHeight || (hit !== element && !element.contains(hit))) return null;
+          return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+        })()`),
+        '診斷下載按鈕可見且可命中'
+      );
+      const clickCountBefore = await client.evaluate('window.__diagnosticDownloadClickCount');
+      downloadClickAttempts += 1;
+      await dispatchClick(client, downloadRect);
+      try {
+        diagnosticDownload = await waitFor(
+          readDiagnosticDownload,
+          '真實點擊後的診斷 JSON 內容',
+          1500
+        );
+      } catch (error) {
+        const clickCountAfter = await client.evaluate('window.__diagnosticDownloadClickCount');
+        if (clickCountAfter > clickCountBefore) {
+          throw new Error(`診斷下載按鈕已收到 click，但未產生 JSON：${error.message}`);
+        }
+      }
+    }
+    if (!diagnosticDownload) {
+      throw new Error(`診斷下載按鈕連續 ${downloadClickAttempts} 次未收到 CDP click`);
+    }
+    result.diagnostic.download = diagnosticDownload;
+    result.diagnostic.downloadClickAttempts = downloadClickAttempts;
     await client.evaluate(`(() => {
+      document.getElementById('asrDownloadAlignmentDiagnostic')
+        ?.removeEventListener('click', window.__diagnosticDownloadClickListener, true);
       URL.createObjectURL = window.__diagnosticOriginalCreateObjectURL;
       HTMLAnchorElement.prototype.click = window.__diagnosticOriginalAnchorClick;
+      delete window.__diagnosticDownloadClickListener;
+      delete window.__diagnosticDownloadClickCount;
       delete window.__diagnosticOriginalCreateObjectURL;
       delete window.__diagnosticOriginalAnchorClick;
       return true;
     })()`);
+    const failedCloseRect = await client.evaluate(`(() => {
+      const element = [...document.querySelectorAll('#modalFoot button')]
+        .find(button => !button.classList.contains('primary'));
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    })()`);
+    await dispatchClick(client, failedCloseRect);
+    await waitFor(
+      () => client.evaluate("!document.getElementById('modalBg').classList.contains('show')"),
+      '低覆蓋診斷視窗關閉'
+    );
+    await client.evaluate(`(() => {
+      window.__asrResponseMode = 'recovered';
+      window.__asrCapturedWav = null;
+      return true;
+    })()`);
+    await openRecognitionDialog();
+    await waitFor(
+      () => client.evaluate("Boolean(document.getElementById('asrProvider'))"),
+      '第三次稀疏漏句恢復視窗'
+    );
+    await client.evaluate(`(() => {
+      const provider = document.getElementById('asrProvider');
+      provider.value = 'groq';
+      provider.dispatchEvent(new Event('change', { bubbles: true }));
+      document.getElementById('asrApiKey').value = 'acceptance-only-key';
+      const task = document.getElementById('asrTaskMode');
+      task.value = 'align';
+      task.dispatchEvent(new Event('change', { bubbles: true }));
+      document.getElementById('asrTranscript').value = Array.from({ length: 20 }, (_, index) => (
+        index === 10 ? 'missing phrase' : ('anchor' + index + ' a b c d e f g h i')
+      )).join('\\n');
+      return true;
+    })()`);
+    const recoveredStartRect = await client.evaluate(`(() => {
+      const element = document.querySelector('#modalFoot button.primary');
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    })()`);
+    await dispatchClick(client, recoveredStartRect);
+    result.recovered = await waitFor(
+      () => client.evaluate(`(() => {
+        const panel = document.getElementById('asrAlignmentDiagnostic');
+        const status = document.getElementById('asrStatus');
+        const lines = document.getElementById('asrUnreliableLineNumbers');
+        const buttons = [...document.querySelectorAll('#modalFoot button')];
+        const primary = buttons.find(button => button.classList.contains('primary'));
+        const close = buttons.find(button => !button.classList.contains('primary'));
+        const expectedLines = Array.from({ length: 20 }, (_, index) => (
+          index === 10 ? 'missing phrase' : ('anchor' + index + ' a b c d e f g h i')
+        ));
+        const cues = window.SUB.State.cues.filter(cue => expectedLines.includes(cue.text));
+        if (cues.length !== 20 || !panel || getComputedStyle(panel).display === 'none') return null;
+        return {
+          cueTexts: cues.map(cue => cue.text),
+          trackName: window.SUB.State.tracks[cues[0].track]?.name || '',
+          status: status.textContent.trim(),
+          lines: lines.textContent.trim(),
+          primaryText: primary?.textContent.trim(),
+          primaryDisabled: primary?.disabled === true,
+          closeText: close?.textContent.trim(),
+          modalVisible: document.getElementById('modalBg').classList.contains('show')
+        };
+      })()`),
+      '稀疏漏句建立完整初稿並保留診斷視窗'
+    );
     await client.evaluate(`(() => {
       window.fetch = window.__asrOriginalFetch;
       delete window.__asrOriginalFetch;
@@ -319,6 +425,9 @@ const {
       '來源聲道 1', '來源聲道 2', '來源聲道 3', '來源聲道 4',
       '來源聲道 5', '來源聲道 6', '來源聲道 7', '來源聲道 8'
     ];
+    const expectedRecoveredTexts = Array.from({ length: 20 }, (_, index) => (
+      index === 10 ? 'missing phrase' : `anchor${index} a b c d e f g h i`
+    ));
     if (JSON.stringify(result.options) !== JSON.stringify(expectedOptions) ||
         JSON.stringify(result.firstPcmSamples) !== JSON.stringify([31128, 0]) ||
         result.cueText !== '來源聲道三' || result.trackName !== '語音辨識' ||
@@ -332,7 +441,17 @@ const {
         JSON.stringify(result.diagnostic.download.transcriptLines) !== JSON.stringify(['alpha beta', 'gamma delta']) ||
         result.diagnostic.download.audioSelection?.mode !== 'all-source-channels' ||
         result.diagnostic.download.forbidden.length !== 0 ||
-        !result.diagnostic.download.reasons.every(reasons => reasons.includes('low-coverage'))) {
+        !result.diagnostic.download.reasons.every(reasons => reasons.includes('low-coverage')) ||
+        JSON.stringify(result.recovered.cueTexts) !== JSON.stringify(expectedRecoveredTexts) ||
+        result.recovered.trackName !== '文本匹配' ||
+        !result.recovered.status.includes('1 行使用推估時間') ||
+        !result.recovered.status.includes('共 20 行需人工校對') ||
+        !result.recovered.status.includes('不是精準對齊') ||
+        !result.recovered.lines.includes('第 1、2') ||
+        !result.recovered.lines.includes('、11、') ||
+        !result.recovered.lines.includes('20 行') ||
+        result.recovered.primaryText !== '已建立' || !result.recovered.primaryDisabled ||
+        result.recovered.closeText !== '關閉' || !result.recovered.modalVisible) {
       throw new Error(`辨識來源真機驗收失敗：${JSON.stringify(result)}`);
     }
     console.log(JSON.stringify(result, null, 2));

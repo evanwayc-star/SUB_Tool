@@ -417,19 +417,22 @@ export async function getClipAudioBuffer(clip, {
 /**
  * 將辨識結果結構轉換為字幕軌並加入時間軸
  */
+function hasValidSubtitleTime(start, end) {
+  return Number.isFinite(start) && Number.isFinite(end) && end > start;
+}
+
 export function insertAsrSubtitles(results, {
   trackName = '語音辨識',
-  historyLabel = '🎙 語音辨識生成字幕'
+  historyLabel = '🎙 語音辨識生成字幕',
+  requireValidTimes = false
 } = {}) {
   if (!results || results.length === 0) return 0;
 
+  // FPS-SYNC（詳見 FPS_時碼一致性.md）：文本匹配只在寫入時間軸前走唯一影格格網，
+  // strict 模式必須在吸附後重新拒絕零長度或重疊 cue，不可自行補成一格。
   const fps = State.fps || 24;
   const dropFrame = State.dropFrame || false;
-  const newCues = [];
-  const trackObj = newTrack(trackName);
-  State.tracks.push(trackObj);
-  const trackIdx = State.tracks.length - 1;
-  State.listTrack = trackIdx;
+  const plannedCues = [];
 
   for (const item of results) {
     const clip = item.clip;
@@ -439,21 +442,24 @@ export function insertAsrSubtitles(results, {
     for (const seg of segments) {
       if (!seg.text || !seg.text.trim()) continue;
 
-      const segStart = Number(seg.start) || 0;
-      const segEnd = Number(seg.end) || (segStart + 1.5);
+      const rawStart = Number(seg.start);
+      const rawEnd = Number(seg.end);
+      if (requireValidTimes && !hasValidSubtitleTime(rawStart, rawEnd)) {
+        throw new Error('文本匹配包含無效字幕時間，未建立字幕軌');
+      }
+      const segStart = Number.isFinite(rawStart) ? rawStart : 0;
+      const segEnd = Number.isFinite(rawEnd) ? rawEnd : (segStart + 1.5);
 
       const timelineStartRaw = clipStartTimeline + segStart;
       const timelineEndRaw = clipStartTimeline + segEnd;
 
       const start = Math.max(0, snapTimeToFrame(timelineStartRaw, fps, dropFrame));
       let end = snapTimeToFrame(timelineEndRaw, fps, dropFrame);
-      if (end <= start) {
+      if (end <= start && !requireValidTimes) {
         end = snapTimeToFrame(start + (1 / fps), fps, dropFrame);
       }
 
-      newCues.push({
-        id: newId(),
-        track: trackIdx,
+      plannedCues.push({
         start,
         end,
         text: seg.text.trim(),
@@ -462,20 +468,34 @@ export function insertAsrSubtitles(results, {
     }
   }
 
-  if (newCues.length === 0) {
-    syncTrackCount();
-    emit('timeline:invalidate');
-    emit('render:listTrackSel');
-    emit('render:all');
-    return 0;
+  if (plannedCues.length === 0) return 0;
+
+  if (requireValidTimes) {
+    const ordered = [...plannedCues].sort((a, b) => a.start - b.start || a.end - b.end);
+    for (let index = 0; index < ordered.length; index++) {
+      const cue = ordered[index];
+      const previous = ordered[index - 1];
+      if (!hasValidSubtitleTime(cue.start, cue.end) || (previous && cue.start < previous.end - 0.000001)) {
+        throw new Error('影格吸附後無法維持有效且不重疊的字幕時間，未建立字幕軌');
+      }
+    }
   }
 
-  recordHistory(historyLabel);
+  const trackObj = newTrack(trackName);
+  State.tracks.push(trackObj);
+  const trackIdx = State.tracks.length - 1;
+  State.listTrack = trackIdx;
+  const newCues = plannedCues.map(cue => ({
+    ...cue,
+    id: newId(),
+    track: trackIdx
+  }));
 
   State.cues.push(...newCues);
   sortCues();
   setSelection(newCues[0].id);
   syncTrackCount();
+  recordHistory(historyLabel);
 
   emit('timeline:invalidate');
   emit('render:listTrackSel');
@@ -724,7 +744,10 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         };
 
         latestAlignmentDiagnostic = null;
-        if (alignmentDiagnosticEl) alignmentDiagnosticEl.style.display = 'none';
+        if (alignmentDiagnosticEl) {
+          alignmentDiagnosticEl.style.display = 'none';
+          alignmentDiagnosticEl.style.borderColor = 'var(--red)';
+        }
         if (unreliableLineNumbersEl) unreliableLineNumbersEl.textContent = '';
 
         if (taskMode === 'align' && clips.length !== 1) {
@@ -780,6 +803,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         try {
           const results = [];
           let alignmentReviewCount = 0;
+          let recoveredAlignmentLineNumbers = [];
+          let recoveredEstimatedLineCount = 0;
           for (let i = 0; i < clips.length; i++) {
             const c = clips[i];
             if (statusEl) {
@@ -842,7 +867,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                 transcript,
                 evidenceSegments
               });
-              if (aligned.status !== 'aligned') {
+              if (aligned.status === 'failed') {
                 const unreliableLines = new Set([
                   ...(aligned.summary?.unmatchedLines || []),
                   ...(aligned.summary?.ambiguousLines || []),
@@ -869,6 +894,35 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                   : '文字稿與聲音的整體相似度不足';
                 throw new Error(`${mismatchSummary}，未建立字幕；請確認稿件版本、語言或改用較準確的聲音分析引擎。`);
               }
+              if (aligned.status === 'recovered') {
+                recoveredEstimatedLineCount = (aligned.summary?.estimatedLines || []).length;
+                const reviewIndexes = [...new Set([
+                  ...(aligned.segments || []).flatMap((segment, index) => (
+                    segment.alignment?.status === 'review' ? [index] : []
+                  )),
+                  ...(aligned.summary?.estimatedLines || []),
+                  ...(aligned.summary?.partialEvidenceLines || []),
+                  ...(aligned.summary?.discontinuousEvidenceLines || [])
+                ])].sort((a, b) => a - b);
+                recoveredAlignmentLineNumbers = reviewIndexes.map(index => index + 1);
+                latestAlignmentDiagnostic = buildTranscriptAlignmentDiagnostic({
+                  provider,
+                  language,
+                  audioSelection: recognitionSelection,
+                  transcript,
+                  evidenceSegments,
+                  alignmentResult: aligned
+                });
+                if (alignmentDiagnosticEl) {
+                  alignmentDiagnosticEl.style.display = 'flex';
+                  alignmentDiagnosticEl.style.borderColor = 'var(--accent)';
+                }
+                if (unreliableLineNumbersEl) {
+                  unreliableLineNumbersEl.textContent = recoveredAlignmentLineNumbers.length
+                    ? `需校對行號：第 ${recoveredAlignmentLineNumbers.join('、')} 行`
+                    : '部分時間使用估算，請人工校對。';
+                }
+              }
               alignmentReviewCount += Number(aligned.summary?.reviewCount) || 0;
               segments = aligned.segments;
             }
@@ -888,13 +942,38 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           if (!recognitionIsActive()) return;
           const count = insertAsrSubtitles(results, taskMode === 'align' ? {
             trackName: '文本匹配',
-            historyLabel: '📝 文本匹配生成字幕'
+            historyLabel: '📝 文本匹配生成字幕',
+            requireValidTimes: true
           } : undefined);
           activeRecognitionController = null;
-          closeModal({ committed: true });
+          const recoveredAlignment = taskMode === 'align' && recoveredAlignmentLineNumbers.length > 0;
+          if (!recoveredAlignment) closeModal({ committed: true });
           if (taskMode === 'align') {
-            const reviewHint = alignmentReviewCount > 0 ? ' 目前為句級估算，請抽查時間碼。' : '';
-            showToast(`文本匹配完成！已保留逐行文字稿並生成 ${count} 句時間碼。${reviewHint}`);
+            if (recoveredAlignment) {
+              const estimatedMessage = recoveredEstimatedLineCount > 0
+                ? `${recoveredEstimatedLineCount} 行使用推估時間`
+                : '沒有整行使用推估時間';
+              if (statusEl) {
+                statusEl.style.display = 'block';
+                statusEl.style.color = 'var(--accent)';
+                statusEl.textContent = `已建立 ${count} 句完整初稿；${estimatedMessage}，共 ${recoveredAlignmentLineNumbers.length} 行需人工校對，這不是精準對齊。`;
+              }
+              if (modalFoot) {
+                const buttons = [...modalFoot.querySelectorAll('button')];
+                const closeButton = buttons.find(button => !button.classList.contains('primary'));
+                const primaryButton = buttons.find(button => button.classList.contains('primary'));
+                if (closeButton) closeButton.textContent = '關閉';
+                if (primaryButton) {
+                  primaryButton.disabled = true;
+                  primaryButton.dataset.alignmentCommitted = 'true';
+                  primaryButton.textContent = '已建立';
+                }
+              }
+              showToast(`文本匹配已生成 ${count} 句完整初稿；其中 ${recoveredAlignmentLineNumbers.length} 行需人工校對。`);
+            } else {
+              const reviewHint = alignmentReviewCount > 0 ? ' 目前為句級估算，請抽查時間碼。' : '';
+              showToast(`文本匹配完成！已保留逐行文字稿並生成 ${count} 句時間碼。${reviewHint}`);
+            }
           } else {
             showToast(`🎙 語音辨識完成！已新增字幕軌並生成 ${count} 句字幕。`);
           }
@@ -957,7 +1036,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       if (transcriptRow) transcriptRow.style.display = alignMode ? 'flex' : 'none';
       if (targetSummary) targetSummary.value = `自動建立「${alignMode ? '文本匹配' : '語音辨識'}」新軌`;
       const primaryButton = document.querySelector('#modalFoot button.primary');
-      if (primaryButton) primaryButton.textContent = alignMode ? '開始匹配' : '🚀 開始辨識';
+      if (primaryButton && primaryButton.dataset.alignmentCommitted !== 'true') {
+        primaryButton.textContent = alignMode ? '開始匹配' : '🚀 開始辨識';
+      }
     };
 
     if (taskModeEl) {
