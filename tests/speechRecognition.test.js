@@ -113,6 +113,70 @@ describe('語音辨識與字幕生成模組', () => {
     expect(transcript.value).toBe('第一行。第二句仍在同一行！');
   });
 
+  it('可從 TXT 匯入大量逐行文字稿並顯示檔名與有效行數', async () => {
+    const sourceLines = Array.from({ length: 5000 }, (_, index) => `Line ${index + 1}.`);
+    const importedText = `  ${sourceLines[0]}  \r\n\r\n${sourceLines.slice(1).join('\r\n')}\r\n`;
+    const bytes = new Uint8Array(2 + importedText.length * 2);
+    bytes[0] = 0xFF;
+    bytes[1] = 0xFE;
+    for (let index = 0; index < importedText.length; index++) {
+      const code = importedText.charCodeAt(index);
+      bytes[2 + index * 2] = code & 0xFF;
+      bytes[3 + index * 2] = code >> 8;
+    }
+    class ImmediateFileReader {
+      readAsArrayBuffer() {
+        this.result = bytes.buffer;
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal('FileReader', ImmediateFileReader);
+
+    try {
+      State.clips = [];
+      State.externalAudioState = [];
+      saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'align' });
+      openModal.mockImplementation((_title, html) => { document.body.innerHTML = html; });
+
+      openSpeechRecognitionDialog({
+        id: 'alignment-import-txt',
+        name: 'alignment-import-txt.wav',
+        in: 0,
+        out: 1,
+        duration: 1,
+        audioBuffer: {}
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const importButton = document.getElementById('asrImportTranscriptButton');
+      const fileInput = document.getElementById('asrTranscriptFileInput');
+      const transcript = document.getElementById('asrTranscript');
+      const fileSummary = document.getElementById('asrTranscriptFileSummary');
+      const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(() => {});
+
+      importButton.click();
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(fileInput.accept).toContain('.txt');
+
+      Object.defineProperty(fileInput, 'files', {
+        configurable: true,
+        value: [{ name: 'many-lines.txt', size: bytes.byteLength }]
+      });
+      fileInput.dispatchEvent(new Event('change'));
+
+      await vi.waitFor(() => expect(transcript.value).toContain('Line 5000.'));
+      expect(transcript.value.startsWith('  Line 1.  \n\nLine 2.')).toBe(true);
+      expect(fileSummary.textContent).toContain('many-lines.txt');
+      expect(fileSummary.textContent).toContain('5000 行');
+
+      transcript.value += '手動新增的一行';
+      transcript.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(getComputedStyle(fileSummary).display).toBe('none');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('依指定順序排列辨識服務，並以無圖示文字維持左側對齊', () => {
     State.clips = [];
     State.externalAudioState = [];

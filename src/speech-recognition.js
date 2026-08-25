@@ -14,7 +14,7 @@ import { sortCues } from './subtitle-model.js';
 import { recordHistory } from './history.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { emit } from './events.js';
-import { escapeHTML } from './util.js';
+import { decodeText, escapeHTML, readFile } from './util.js';
 import { alignTranscriptToEvidence, parseTranscriptLines } from './transcript-alignment.js';
 import {
   BUILTIN_MODELS,
@@ -400,8 +400,13 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       </div>
 
       <div id="asrTranscriptRow" style="display:${initialTaskMode === 'align' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">逐行文字稿：</label>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <label style="font-size:12px;font-weight:600;color:var(--text-dim);">逐行文字稿：</label>
+          <button type="button" id="asrImportTranscriptButton" style="padding:4px 9px;font-size:11px;">匯入 TXT</button>
+        </div>
+        <input type="file" id="asrTranscriptFileInput" accept=".txt,text/plain" hidden>
         <textarea id="asrTranscript" rows="7" placeholder="在此貼上已分行的文字稿…" style="width:100%;resize:vertical;min-height:120px;box-sizing:border-box;line-height:1.5;"></textarea>
+        <div id="asrTranscriptFileSummary" style="display:none;font-size:11px;color:var(--accent);"></div>
         <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">每個非空白行固定為一條字幕；只裁掉行首、行尾空白，不會重新分行、分句或改寫內容。</div>
       </div>
 
@@ -714,6 +719,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
   setTimeout(() => {
     const taskModeEl = document.getElementById('asrTaskMode');
     const transcriptRow = document.getElementById('asrTranscriptRow');
+    const transcriptEl = document.getElementById('asrTranscript');
+    const transcriptFileInput = document.getElementById('asrTranscriptFileInput');
+    const importTranscriptButton = document.getElementById('asrImportTranscriptButton');
+    const transcriptFileSummary = document.getElementById('asrTranscriptFileSummary');
+    const statusEl = document.getElementById('asrStatus');
     const targetSummary = document.getElementById('asrTargetSummary');
     const providerEl = document.getElementById('asrProvider');
     const apiKeyEl = document.getElementById('asrApiKey');
@@ -737,6 +747,56 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     if (taskModeEl) {
       taskModeEl.onchange = updateTaskUI;
       updateTaskUI();
+    }
+
+    if (importTranscriptButton && transcriptFileInput && transcriptEl) {
+      const showTranscriptImportError = message => {
+        if (!statusEl) return;
+        statusEl.style.display = 'block';
+        statusEl.style.color = 'var(--red)';
+        statusEl.textContent = message;
+      };
+      transcriptEl.addEventListener('input', () => {
+        if (!transcriptFileSummary) return;
+        transcriptFileSummary.style.display = 'none';
+        transcriptFileSummary.textContent = '';
+      });
+      importTranscriptButton.onclick = () => {
+        transcriptFileInput.value = '';
+        transcriptFileInput.click();
+      };
+      transcriptFileInput.onchange = async () => {
+        const file = transcriptFileInput.files?.[0];
+        if (!file) return;
+        if (!/\.txt$/i.test(file.name || '')) {
+          showTranscriptImportError('請選擇 .txt 純文字檔案。');
+          return;
+        }
+        importTranscriptButton.disabled = true;
+        if (transcriptFileSummary) {
+          transcriptFileSummary.style.display = 'block';
+          transcriptFileSummary.textContent = `正在讀取 ${file.name}…`;
+        }
+        try {
+          const text = decodeText(await readFile(file));
+          if (!document.contains(transcriptEl)) return;
+          transcriptEl.value = text;
+          const lineCount = parseTranscriptLines(text).length;
+          if (transcriptFileSummary) {
+            transcriptFileSummary.textContent = `${file.name} · ${lineCount} 行`;
+          }
+          if (statusEl) {
+            statusEl.style.display = 'none';
+            statusEl.textContent = '';
+          }
+        } catch (error) {
+          if (!document.contains(transcriptEl)) return;
+          if (transcriptFileSummary) transcriptFileSummary.style.display = 'none';
+          showTranscriptImportError(`無法匯入文字稿：${error?.message || String(error)}`);
+        } finally {
+          importTranscriptButton.disabled = false;
+        }
+      };
     }
 
     if (providerEl) {
