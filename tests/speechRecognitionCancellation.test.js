@@ -197,6 +197,41 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     consoleError.mockRestore();
   });
 
+  it.each(['builtin', 'groq', 'openai', 'azure', 'google'])(
+    '%s 文本匹配引擎整體失敗時仍建立每一行未定時原稿',
+    async provider => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      engineMocks.transcribeAudioStream.mockRejectedValue(new Error('辨識服務暫時不可用'));
+      saveAsrConfig({
+        ...getAsrConfig(),
+        provider,
+        taskMode: 'align',
+        groqApiKey: 'test-groq-key',
+        openaiApiKey: 'test-openai-key',
+        azureApiKey: 'test-azure-key',
+        googleApiKey: 'test-google-key'
+      });
+      openSpeechRecognitionDialog({
+        id: `alignment-provider-failure-${provider}`,
+        name: `alignment-provider-failure-${provider}.wav`,
+        in: 0,
+        out: 3,
+        duration: 3,
+        audioBuffer: { duration: 3 }
+      });
+      document.getElementById('asrTranscript').value = 'Line one.\nLine two.\nLine three.';
+
+      document.querySelector('#modalFoot button.primary').click();
+      await vi.waitFor(() => expect(State.cues).toHaveLength(3));
+
+      expect(State.cues.map(cue => cue.text)).toEqual(['Line one.', 'Line two.', 'Line three.']);
+      expect(State.cues.every(cue => cue.timed === false && cue.start === 0 && cue.end === 0)).toBe(true);
+      expect(document.getElementById('asrStatus').textContent).toContain('聲音分析失敗');
+      expect(document.getElementById('asrStatus').textContent).toContain('3 句無時間碼');
+      consoleError.mockRestore();
+    }
+  );
+
   it('成功時以 committed 狀態關閉，避免 onDismiss 反向觸發 abort', async () => {
     engineMocks.transcribeAudioStream.mockResolvedValue([{ start: 0, end: 1, text: '完成' }]);
     saveAsrConfig({ ...getAsrConfig(), provider: 'builtin' });
@@ -347,7 +382,7 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     expect(State.cues).toHaveLength(20);
   });
 
-  it('只有部分行的逐字時間重疊時，錯誤訊息只回報真正有疑義的行數', async () => {
+  it('只有部分行的逐字時間重疊時，仍建立可靠行並只回報真正有疑義的行數', async () => {
     engineMocks.transcribeAudioStream.mockResolvedValue([{
       start: 0,
       end: 2,
@@ -369,10 +404,12 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     document.getElementById('asrTranscript').value = '紐約\n大學\n第三行';
 
     document.querySelector('#modalFoot button.primary').click();
-    await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('無法可靠匹配'));
+    await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('已建立 3 句'));
 
-    expect(document.getElementById('asrStatus').textContent).toContain('2/3 行');
-    expect(State.tracks.map(track => track.name)).toEqual(['軌道 1']);
+    expect(document.getElementById('asrStatus').textContent).toContain('2 句無時間碼');
+    expect(State.tracks.map(track => track.name)).toEqual(['軌道 1', '文本匹配']);
+    expect(State.cues.map(cue => cue.text)).toEqual(['紐約', '大學', '第三行']);
+    expect(State.cues.map(cue => cue.timed !== false)).toEqual([false, false, true]);
   });
 
   it('文本匹配失敗時列出實際行號，並可下載不含 Azure Key 的安全診斷 JSON', async () => {
@@ -419,7 +456,7 @@ describe('本機語音辨識進行中的回饋與取消', () => {
       document.getElementById('asrTranscript').value = '紐約\n大學\n第三行';
 
       document.querySelector('#modalFoot button.primary').click();
-      await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('2/3 行'));
+      await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('已建立 3 句'));
 
       const diagnosticRow = document.getElementById('asrAlignmentDiagnostic');
       const lineNumbers = document.getElementById('asrUnreliableLineNumbers');
@@ -507,7 +544,7 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     expect(document.getElementById('asrStatus').textContent).toContain('一次只能處理一個音訊來源');
   });
 
-  it('文字稿與聲音差異過大時整批不建立字幕軌', async () => {
+  it('文字稿與聲音完全不同時仍建立原稿行並標成未定時字幕', async () => {
     engineMocks.transcribeAudioStream.mockResolvedValue([{
       start: 0,
       end: 2,
@@ -525,11 +562,71 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     document.getElementById('asrTranscript').value = 'This transcript does not match.';
 
     document.querySelector('#modalFoot button.primary').click();
-    await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('無法可靠匹配'));
+    await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('已建立 1 句'));
 
-    expect(State.tracks.map(track => track.name)).toEqual(['軌道 1']);
-    expect(State.cues).toHaveLength(0);
+    expect(State.tracks.map(track => track.name)).toEqual(['軌道 1', '文本匹配']);
+    expect(State.cues).toEqual([
+      expect.objectContaining({
+        start: 0,
+        end: 0,
+        timed: false,
+        text: 'This transcript does not match.'
+      })
+    ]);
     expect(closeModal).not.toHaveBeenCalledWith({ committed: true });
-    expect(showToast).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('1 句為無時間碼'));
   });
+
+  it.each(['builtin', 'groq', 'openai', 'azure', 'google'])(
+    '%s 文本匹配部分失敗時仍建立所有可靠字幕並列出未建立行',
+    async provider => {
+      const missingIndexes = [4, 5];
+      const transcriptLines = Array.from({ length: 10 }, (_, index) => (
+        missingIndexes.includes(index)
+          ? `missing line ${index}`
+          : `anchor${index} a b c d e f g h i`
+      ));
+      engineMocks.transcribeAudioStream.mockResolvedValue(transcriptLines.flatMap((text, index) => (
+        missingIndexes.includes(index)
+          ? []
+          : [{
+              start: index === 0 ? 0.001 : index * 2,
+              end: index === 0 ? 0.01 : (index * 2) + 1,
+              text
+            }]
+      )));
+      saveAsrConfig({
+        ...getAsrConfig(),
+        provider,
+        taskMode: 'align',
+        groqApiKey: 'test-groq-key',
+        openaiApiKey: 'test-openai-key',
+        azureApiKey: 'test-azure-key',
+        googleApiKey: 'test-google-key'
+      });
+      openSpeechRecognitionDialog({
+        id: `alignment-partial-${provider}`,
+        name: `alignment-partial-${provider}.wav`,
+        in: 0,
+        out: 20,
+        duration: 20,
+        audioBuffer: { duration: 20 }
+      });
+      document.getElementById('asrTranscript').value = transcriptLines.join('\n');
+
+      document.querySelector('#modalFoot button.primary').click();
+      await vi.waitFor(() => expect(State.cues).toHaveLength(10));
+
+      expect(State.tracks.map(track => track.name)).toEqual(['軌道 1', '文本匹配']);
+      expect(State.cues.map(cue => cue.text)).toEqual(transcriptLines);
+      expect(State.cues.map(cue => cue.timed !== false)).toEqual([
+        false, true, true, true, false, false, true, true, true, true
+      ]);
+      expect(document.getElementById('asrStatus').textContent).toContain('已建立 10 句');
+      expect(document.getElementById('asrStatus').textContent).toContain('3 句無時間碼');
+      expect(document.getElementById('asrUnreliableLineNumbers').textContent).toContain('第 1、5、6 行');
+      expect(showToast).toHaveBeenCalledWith(expect.stringContaining('10 句'));
+      expect(closeModal).not.toHaveBeenCalledWith({ committed: true });
+    }
+  );
 });

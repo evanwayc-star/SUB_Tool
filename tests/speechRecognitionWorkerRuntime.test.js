@@ -10,10 +10,10 @@ import {
 } from '../src/speech-recognition-worker-runtime.js';
 
 describe('本機 ASR Worker runtime 規則', () => {
-  it('2 分 31 秒音訊依 30 秒 window／5 秒 stride 計為 8 個真實推論段', () => {
+  it('2 分 31 秒音訊依 29 秒 window／5 秒 stride 計為 8 個真實推論段', () => {
     expect(countBuiltinInferenceChunks(151 * 16000)).toBe(8);
-    expect(countBuiltinInferenceChunks(30 * 16000)).toBe(1);
-    expect(countBuiltinInferenceChunks(31 * 16000)).toBe(2);
+    expect(countBuiltinInferenceChunks(29 * 16000)).toBe(1);
+    expect(countBuiltinInferenceChunks(30 * 16000)).toBe(2);
   });
 
   it('只有每個外層推論段真正 end 時才增加百分比', () => {
@@ -69,15 +69,15 @@ describe('本機 ASR Worker runtime 規則', () => {
     })).toEqual({ device: 'wasm', dtype: 'q8' });
   });
 
-  it('每個 30 秒 window 有 256 個新 token 的硬上限，避免無 EOS 無限拖慢', () => {
+  it('逐字時間模式以 29 秒 window 推論並保留 256 個新 token 的硬上限', () => {
     const streamer = { put() {}, end() {} };
     expect(buildBuiltinGenerationOptions({
       language: 'zh',
       prompt: '',
       streamer
     })).toEqual({
-      return_timestamps: true,
-      chunk_length_s: 30,
+      return_timestamps: 'word',
+      chunk_length_s: 29,
       stride_length_s: 5,
       max_new_tokens: BUILTIN_ASR_RUNTIME.maxNewTokens,
       language: 'zh',
@@ -87,15 +87,65 @@ describe('本機 ASR Worker runtime 規則', () => {
     expect(BUILTIN_ASR_RUNTIME.maxNewTokens).toBe(256);
   });
 
-  it('把 Whisper chunks 正規化成字幕段落並保留真正時間戳', () => {
+  it('把 Whisper 逐字 chunks 合成字幕段落並保留每個真正的 word timestamp', () => {
     expect(normalizeBuiltinAsrSegments({
       chunks: [
-        { timestamp: [0.25, 1.75], text: ' 第一段 ' },
-        { timestamp: [1.75, 3], text: '第二段' }
+        { timestamp: [0.25, 0.7], text: ' Hello' },
+        { timestamp: [0.7, 1.2], text: ' world.' },
+        { timestamp: [2.8, 3.2], text: ' Next' },
+        { timestamp: [3.2, 3.6], text: ' line!' }
       ]
     }, 5)).toEqual([
-      { start: 0.25, end: 1.75, text: '第一段' },
-      { start: 1.75, end: 3, text: '第二段' }
+      {
+        start: 0.25,
+        end: 1.2,
+        text: 'Hello world.',
+        words: [
+          { start: 0.25, end: 0.7, text: 'Hello' },
+          { start: 0.7, end: 1.2, text: 'world.' }
+        ]
+      },
+      {
+        start: 2.8,
+        end: 3.6,
+        text: 'Next line!',
+        words: [
+          { start: 2.8, end: 3.2, text: 'Next' },
+          { start: 3.2, end: 3.6, text: 'line!' }
+        ]
+      }
     ]);
+  });
+
+  it('修補 Whisper 的零長度 word timestamp 並維持時間單調', () => {
+    const result = normalizeBuiltinAsrSegments({
+      chunks: [
+        { timestamp: [0, 0], text: ' Start' },
+        { timestamp: [0.4, 0.8], text: ' now.' }
+      ]
+    }, 1);
+
+    expect(result[0].words[0]).toEqual({ start: 0, end: 0.4, text: 'Start' });
+    expect(result[0].words[1]).toEqual({ start: 0.4, end: 0.8, text: 'now.' });
+    expect(result[0].end).toBeGreaterThan(result[0].start);
+  });
+
+  it('繁中逐字時間合句時不會在漢字間插入空白', () => {
+    expect(normalizeBuiltinAsrSegments({
+      chunks: [
+        { timestamp: [0, 0.3], text: '你' },
+        { timestamp: [0.3, 0.6], text: '好' },
+        { timestamp: [0.6, 0.8], text: '！' }
+      ]
+    }, 1)).toEqual([{
+      start: 0,
+      end: 0.8,
+      text: '你好！',
+      words: [
+        { start: 0, end: 0.3, text: '你' },
+        { start: 0.3, end: 0.6, text: '好' },
+        { start: 0.6, end: 0.8, text: '！' }
+      ]
+    }]);
   });
 });

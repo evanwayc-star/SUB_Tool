@@ -52,6 +52,30 @@ describe('逐行文字稿時間匹配', () => {
     expect(result.segments).toHaveLength(2);
   });
 
+  it('完全沒有聲音辨識證據時仍逐行建立未定時結果', () => {
+    const lines = ['第一句', 'Second line', '第三句'];
+
+    const result = alignTranscriptToEvidence({
+      transcript: lines.join('\n'),
+      evidenceSegments: []
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.completeSegments).toHaveLength(3);
+    expect(result.completeSegments.map(segment => ({
+      text: segment.text,
+      transcriptLineIndex: segment.transcriptLineIndex,
+      timed: segment.timed,
+      start: segment.start,
+      end: segment.end
+    }))).toEqual([
+      { text: '第一句', transcriptLineIndex: 0, timed: false, start: 0, end: 0 },
+      { text: 'Second line', transcriptLineIndex: 1, timed: false, start: 0, end: 0 },
+      { text: '第三句', transcriptLineIndex: 2, timed: false, start: 0, end: 0 }
+    ]);
+    expect(result.summary.unmatchedLines).toEqual([0, 1, 2]);
+  });
+
   it('辨識稿漏字時仍維持單調對齊，不會拿下一行的同字補前一行', () => {
     const result = alignTranscriptToEvidence({
       transcript: '今天下雨。\n下次見。',
@@ -179,6 +203,70 @@ describe('逐行文字稿時間匹配', () => {
     expect(result.segments[10].start).toBeGreaterThanOrEqual(19);
     expect(result.segments[10].end).toBeLessThanOrEqual(22);
     expect(result.segments[10].end).toBeGreaterThan(result.segments[10].start);
+  });
+
+  it('高覆蓋長稿連續漏掉五句時只在前後可靠錨點內補出需校對時間', () => {
+    const missingIndexes = [48, 49, 50, 51, 52];
+    const transcriptLines = Array.from({ length: 100 }, (_, index) => (
+      missingIndexes.includes(index)
+        ? `missing line ${index}`
+        : `anchor${index} one two three four five six seven eight nine ten`
+    ));
+    const evidenceSegments = transcriptLines.flatMap((text, index) => (
+      missingIndexes.includes(index)
+        ? []
+        : [{ start: index * 2, end: (index * 2) + 1, text }]
+    ));
+
+    const result = alignTranscriptToEvidence({
+      transcript: transcriptLines.join('\n'),
+      evidenceSegments
+    });
+
+    expect(result.status).toBe('recovered');
+    expect(result.summary).toMatchObject({
+      unmatchedLines: [],
+      ambiguousLines: [],
+      estimatedLines: missingIndexes
+    });
+    expect(result.segments.map(segment => segment.text)).toEqual(transcriptLines);
+    expect(result.segments[47]).toMatchObject({ start: 94, end: 95 });
+    expect(result.segments[53]).toMatchObject({ start: 106, end: 107 });
+
+    const recovered = missingIndexes.map(index => result.segments[index]);
+    expect(recovered.every(segment => (
+      segment.timed === true &&
+      segment.alignment.status === 'review' &&
+      segment.alignment.timingEvidence === 'interpolated'
+    ))).toBe(true);
+    expect(recovered[0].start).toBeGreaterThanOrEqual(95);
+    expect(recovered.at(-1).end).toBeLessThanOrEqual(106);
+    for (let index = 1; index < recovered.length; index += 1) {
+      expect(recovered[index].start).toBeGreaterThanOrEqual(recovered[index - 1].end);
+    }
+  });
+
+  it('連續漏掉六句時仍拒絕大範圍推估以免掩蓋錯版文字稿', () => {
+    const missingIndexes = [57, 58, 59, 60, 61, 62];
+    const transcriptLines = Array.from({ length: 120 }, (_, index) => (
+      missingIndexes.includes(index)
+        ? `missing line ${index}`
+        : `anchor${index} one two three four five six seven eight nine ten`
+    ));
+    const evidenceSegments = transcriptLines.flatMap((text, index) => (
+      missingIndexes.includes(index)
+        ? []
+        : [{ start: index * 2, end: (index * 2) + 1, text }]
+    ));
+
+    const result = alignTranscriptToEvidence({
+      transcript: transcriptLines.join('\n'),
+      evidenceSegments
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.summary.unmatchedLines).toEqual(missingIndexes);
+    expect(result.summary.estimatedLines).toEqual([]);
   });
 
   it('漏句仍有部分逐字證據時優先使用真正的 word timestamps', () => {
@@ -337,6 +425,50 @@ describe('逐行文字稿時間匹配', () => {
     expect(result.status).toBe('failed');
     expect(result.summary.unmatchedLines).toEqual([4, 5]);
     expect(result.summary.estimatedLines).toEqual([]);
+  });
+
+  it('整體匹配失敗時仍公開可安全建立的可靠字幕與原稿行號', () => {
+    const missingIndexes = [4, 5];
+    const lines = Array.from({ length: 10 }, (_, index) => (
+      missingIndexes.includes(index) ? `missing line ${index}` : `anchor${index} a b c d e f g h i`
+    ));
+    const evidenceSegments = lines.flatMap((text, index) => (
+      missingIndexes.includes(index) ? [] : [{ start: index * 2, end: (index * 2) + 1, text }]
+    ));
+
+    const result = alignTranscriptToEvidence({
+      transcript: lines.join('\n'),
+      evidenceSegments
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.usableSegments).toEqual([
+      { ...result.segments[0], transcriptLineIndex: 0 },
+      { ...result.segments[1], transcriptLineIndex: 1 },
+      { ...result.segments[2], transcriptLineIndex: 2 },
+      { ...result.segments[3], transcriptLineIndex: 3 },
+      { ...result.segments[6], transcriptLineIndex: 6 },
+      { ...result.segments[7], transcriptLineIndex: 7 },
+      { ...result.segments[8], transcriptLineIndex: 8 },
+      { ...result.segments[9], transcriptLineIndex: 9 }
+    ]);
+    expect(result.completeSegments).toHaveLength(10);
+    expect(result.completeSegments.map(segment => segment.text)).toEqual(lines);
+    expect(result.completeSegments.map(segment => segment.transcriptLineIndex)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(result.completeSegments[4]).toMatchObject({
+      start: 0,
+      end: 0,
+      timed: false,
+      text: 'missing line 4',
+      transcriptLineIndex: 4
+    });
+    expect(result.completeSegments[5]).toMatchObject({
+      start: 0,
+      end: 0,
+      timed: false,
+      text: 'missing line 5',
+      transcriptLineIndex: 5
+    });
   });
 
   it('短稿只要一行漏句超過百分之五就必須失敗', () => {

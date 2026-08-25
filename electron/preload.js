@@ -7,6 +7,8 @@
 /* SUB Tool — preload：以 contextBridge 安全暴露桌面能力給前端 (window.subtool) */
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const isProjectFilePath = filePath => typeof filePath === 'string' && /\.(subtool|json)$/i.test(filePath);
+const MAX_SPEECH_WAV_BYTES = 20_000_000;
+const isSpeechCompressionRequestId = value => typeof value === 'string' && /^speech-[A-Za-z0-9_-]{1,96}$/.test(value);
 
 contextBridge.exposeInMainWorld('subtool', {
   isDesktop: true,
@@ -57,6 +59,24 @@ contextBridge.exposeInMainWorld('subtool', {
   extractAudio: (p, idx, duration, codec) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:extractAudio', { path: p, idx, duration, codec }); },
   waveAudio:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:waveAudio', { path: p, duration }); },
   cleanupAudio: (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:cleanup', { path: p }); },
+  compressSpeechAudio: (bytes, requestId) => {
+    if (!(bytes instanceof ArrayBuffer) && !ArrayBuffer.isView(bytes)) {
+      throw new TypeError('speech WAV bytes must be an ArrayBuffer or typed array');
+    }
+    if (bytes.byteLength < 44 || bytes.byteLength > MAX_SPEECH_WAV_BYTES) {
+      throw new RangeError('speech WAV bytes must be between 44 and 20,000,000 bytes');
+    }
+    if (!isSpeechCompressionRequestId(requestId)) {
+      throw new TypeError('speech compression requestId is invalid');
+    }
+    return ipcRenderer.invoke('speech:compressAudio', { bytes, requestId });
+  },
+  cancelSpeechAudioCompression: (requestId) => {
+    if (!isSpeechCompressionRequestId(requestId)) {
+      throw new TypeError('speech compression requestId is invalid');
+    }
+    return ipcRenderer.invoke('speech:cancelCompression', { requestId });
+  },
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
   releaseStream: (streamLeaseId) => ipcRenderer.invoke('ffmpeg:releaseStream', streamLeaseId),

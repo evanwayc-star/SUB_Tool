@@ -180,6 +180,23 @@ beforeEach(() => {
   resetScenario();
 });
 
+it('未辨識句保留原編號並在列表顯示雙重無時間碼', () => {
+  state.State.cues = [
+    { id: 'line-1', text: '第一句', start: 1, end: 2, track: 0, timed: true },
+    { id: 'line-2', text: '無法辨識句', start: 0, end: 0, track: 0, timed: false },
+    { id: 'line-3', text: '第三句', start: 3, end: 4, track: 0, timed: true },
+  ];
+
+  subtitles.renderSubList();
+
+  const rows = [...document.querySelectorAll('.sub-row')];
+  expect(rows.map(row => row.querySelector('.idx').textContent)).toEqual(['1', '2', '3']);
+  expect(rows.map(row => row.querySelector('.txt').textContent)).toEqual(['第一句', '無法辨識句', '第三句']);
+  expect(rows[1].classList.contains('no-time')).toBe(true);
+  expect(rows[1].querySelector('.times').textContent.replace(/\s+/g, ' ').trim())
+    .toBe('--:--:--:-- → --:--:--:--');
+});
+
 it('第一次點字幕會先顯示選取，再開啟專案儲存守衛', () => {
   project.guardDone = false;
 
@@ -311,4 +328,3 @@ it('moveSelectedToTrack 嘗試移動字幕至鎖定軌道時被擋下', async ()
   const cueA = state.State.cues.find(c => c.id === 'a');
   expect(cueA.track).toBe(0);
 });
-

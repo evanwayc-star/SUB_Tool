@@ -76,7 +76,7 @@ const MAX_ALIGNMENT_CELLS = 16_000_000;
 const MIN_ALIGNMENT_COVERAGE = 0.55;
 const MIN_SPARSE_RECOVERY_COVERAGE = 0.9;
 const MAX_SPARSE_RECOVERY_RATIO = 0.05;
-const MAX_SPARSE_RECOVERY_RUN = 3;
+const MAX_SPARSE_RECOVERY_RUN = 5;
 const MIN_ESTIMATED_SECONDS_PER_TOKEN = 0.18;
 const MAX_ESTIMATED_SECONDS_PER_TOKEN = 0.8;
 const MAX_LOW_CONFIDENCE_EXACT_GAP_SECONDS = 8;
@@ -416,9 +416,24 @@ export function alignTranscriptToEvidence({ transcript, evidenceSegments } = {})
   const lines = parseTranscriptLines(transcript);
   const evidenceTokens = evidenceTokensFromSegments(evidenceSegments);
   if (!lines.length || !evidenceTokens.length) {
+    const completeSegments = lines.map((text, transcriptLineIndex) => ({
+      start: 0,
+      end: 0,
+      text,
+      timed: false,
+      transcriptLineIndex,
+      alignment: {
+        status: 'unmatched',
+        score: 0,
+        tokenCoverage: 0,
+        timingEvidence: 'none'
+      }
+    }));
     return {
       status: 'failed',
-      segments: [],
+      segments: completeSegments,
+      usableSegments: [],
+      completeSegments,
       summary: {
         coverage: 0,
         timingEvidence: 'none',
@@ -547,6 +562,27 @@ export function alignTranscriptToEvidence({ transcript, evidenceSegments } = {})
       segment.alignment.tokenCoverage < MIN_ALIGNMENT_COVERAGE ? [index] : []
     ))
     : [];
+  const unusableLineIndexes = new Set([
+    ...finalUnmatchedLines,
+    ...ambiguousLines,
+    ...lowCoverageLines
+  ]);
+  const usableSegments = finalSegments.flatMap((segment, index) => (
+    segment.timed && hasValidTime(segment.start, segment.end) && !unusableLineIndexes.has(index)
+      ? [{ ...segment, transcriptLineIndex: index }]
+      : []
+  ));
+  const completeSegments = finalSegments.map((segment, transcriptLineIndex) => (
+    unusableLineIndexes.has(transcriptLineIndex) || !segment.timed || !hasValidTime(segment.start, segment.end)
+      ? {
+          ...segment,
+          start: 0,
+          end: 0,
+          timed: false,
+          transcriptLineIndex
+        }
+      : { ...segment, timed: true, transcriptLineIndex }
+  ));
   return {
     status: finalUnmatchedLines.length === 0 && ambiguousLines.length === 0 && coverage >= MIN_ALIGNMENT_COVERAGE
       ? (estimatedLines.length || partialEvidenceLines.length || discontinuousEvidenceLines.length
@@ -554,6 +590,8 @@ export function alignTranscriptToEvidence({ transcript, evidenceSegments } = {})
           : 'aligned')
       : 'failed',
     segments: finalSegments,
+    usableSegments,
+    completeSegments,
     summary: {
       coverage,
       timingEvidence,

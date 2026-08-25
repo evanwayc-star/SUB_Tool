@@ -539,10 +539,12 @@ describe('語音辨識與字幕生成模組', () => {
       expect(BUILTIN_MODELS['onnx-community/whisper-tiny']).toBeDefined();
       expect(BUILTIN_MODELS['onnx-community/whisper-base']).toBeDefined();
       expect(BUILTIN_MODELS['onnx-community/whisper-small']).toMatchObject({
+        id: 'onnx-community/whisper-small_timestamped',
         webgpuDtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' },
         wasmDtype: 'q8'
       });
       expect(BUILTIN_MODELS['onnx-community/whisper-large-v3-turbo']).toMatchObject({
+        id: 'onnx-community/whisper-large-v3-turbo_timestamped',
         webgpuDtype: 'q4',
         wasmDtype: 'q8'
       });
@@ -784,6 +786,27 @@ describe('語音辨識與字幕生成模組', () => {
       })).toThrow('影格吸附後無法維持有效且不重疊的字幕時間');
       expect(State.tracks).toEqual([{ name: '軌道 1', visible: true, locked: false }]);
       expect(State.cues).toEqual([]);
+    });
+
+    it('完整原稿模式會把吸附後無效的單句保留為未定時字幕且編號不變', () => {
+      const clip = { id: 'alignment-partial-frame-collapse', offset: 0, in: 0, out: 3 };
+      const skipped = [];
+      const segments = [
+        { start: 0, end: 1, text: '可靠前句', transcriptLineIndex: 0 },
+        { start: 1.001, end: 1.01, text: '過窄句', transcriptLineIndex: 1 },
+        { start: 1.2, end: 2, text: '可靠後句', transcriptLineIndex: 2 }
+      ];
+
+      expect(insertAsrSubtitles([{ clip, segments }], {
+        trackName: '文本匹配',
+        requireValidTimes: true,
+        preserveUntimedSegments: true,
+        onSkippedSegment: segment => skipped.push(segment.transcriptLineIndex)
+      })).toBe(3);
+      expect(State.cues.map(cue => cue.text)).toEqual(['可靠前句', '過窄句', '可靠後句']);
+      expect(State.cues.map(cue => cue.timed !== false)).toEqual([true, false, true]);
+      expect(State.cues[1]).toMatchObject({ start: 0, end: 0, text: '過窄句', timed: false });
+      expect(skipped).toEqual([1]);
     });
 
     it('文本匹配在高影格索引仍以 30000/1001 格網驗證相鄰字幕', () => {

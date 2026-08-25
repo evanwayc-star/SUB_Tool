@@ -41,6 +41,10 @@ const { createMediaIngestCoordinator } = require('./media-ingest-coordinator');
 const { createFFmpegExecution } = require('./ffmpeg-execution');
 const { createMediaIntakeRuntime } = require('./media-intake-runtime');
 const { createMediaProbe } = require('./media-probe');
+const {
+  createSpeechAudioCompressor,
+  createSpeechCompressionRuntime
+} = require('./speech-audio-compressor');
 const { authorizeDroppedMediaPath } = require('./dropped-file-admission');
 /* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
@@ -315,6 +319,7 @@ app.on('before-quit', (event) => {
   _quitSequenceStarted = true;
   _isAppQuitting = true;
   Promise.resolve()
+    .then(() => speechCompressionRuntime.cancelAllAndWait())
     .then(() => QueueManager.prepareForShutdown())
     .then(() => {
       _quitReady = true;
@@ -712,6 +717,26 @@ const mediaIntakeRuntime = createMediaIntakeRuntime({
     else console.warn(message, ...args);
   },
 });
+const speechAudioCompressor = createSpeechAudioCompressor({
+  createTempPath: tmpPath,
+  writeFile: (file, bytes) => fs.promises.writeFile(file, bytes),
+  readFile: file => fs.promises.readFile(file),
+  removeFile: async file => {
+    try {
+      await fs.promises.unlink(file);
+      tempFiles.delete(file);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        tempFiles.delete(file);
+        return;
+      }
+      // 保留在 tempFiles，讓 app 關閉時再嘗試清除，避免刪除失敗後失去追蹤。
+      throw error;
+    }
+  },
+  execute: (args, options) => runFF(args, options)
+});
+const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
 
 /* 准入政策（能不能進佇列、需要哪些檔案能力）住在 export-admission.js——
    那四條規則原本散在這裡，與 BrowserWindow／dialog／spawn 糾纏，因此一行測試都沒有，
@@ -1285,6 +1310,16 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   await runFF(['-y', '-i', src, '-map', '0:a:0', '-ar', '4000', '-c:a', 'pcm_s16le', out],
     { sender: e.sender, duration, jobId: 'wave', label: '產生波形' });
   return out;
+});
+
+/* Renderer 只能交付程式自己編出的 16 kHz mono PCM WAV bytes，不能指定輸入／輸出路徑。
+   64 kbps MP3 只活在這次辨識呼叫期間；成功、失敗都由 compressor 清掉兩個暫存檔。 */
+ipcMain.handle('speech:compressAudio', async (e, { bytes, requestId } = {}) => {
+  if (!FFMPEG) throw new Error('找不到 ffmpeg，無法建立辨識用 MP3');
+  return speechCompressionRuntime.compress(bytes, requestId);
+});
+ipcMain.handle('speech:cancelCompression', async (e, { requestId } = {}) => {
+  return speechCompressionRuntime.cancel(requestId);
 });
 
 /* ---- 字幕字型（v4.25.4）：掃描 <專案根>/font/ ----

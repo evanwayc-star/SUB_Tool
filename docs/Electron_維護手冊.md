@@ -87,6 +87,8 @@ Main (main.js)
 | `extractAudio(path, idx, dur, codec)` | `ffmpeg:extractAudio` | R→M | 抽取單一聲道 |
 | `waveAudio(path, dur)` | `ffmpeg:waveAudio` | R→M | 抽取 8kHz mono WAV（波形用） |
 | `cleanupAudio(path)` | `ffmpeg:cleanup` | R→M | 刪除暫存音訊檔 |
+| `compressSpeechAudio(bytes, requestId)` | `speech:compressAudio` | R→M | preload 在跨 IPC 前先限制 `44–20,000,000 bytes`；main 再驗證 renderer 已混音並編成的 16 kHz mono PCM16 WAV header。main 自行配置內部輸入／輸出暫存路徑，以 libmp3lame 轉 64 kbps MP3、讀回 base64，成功或失敗都清除兩個暫存檔。renderer 無法指定路徑 |
+| `cancelSpeechAudioCompression(requestId)` | `speech:cancelCompression` | R→M | 取消指定辨識壓縮、終止其 ffmpeg；關閉程式時 main 會取消並等待所有辨識壓縮收斂 |
 | `ingest(opts)` | `ffmpeg:ingest` | R→M | 單次多輸出：proxy + 所有聲道 + 波形 |
 | `streamIngest(opts)` | `ffmpeg:streamIngest` | R→M | 邊轉邊播：先回傳快取或邊轉的 URL，背景繼續 |
 | `cacheInfo()` | `cache:info` | R→M | 回傳快取統計 `{root, folders, bytes}` |
@@ -333,6 +335,7 @@ Windows 啟動時依序測試 `h264_nvenc` → `h264_qsv` → `h264_amf`；macOS
   VideoToolbox 4 Mbps realtime
 - **聲道音訊**：AAC 128kbps `.m4a`
 - **波形用音訊**：8kHz mono 16-bit PCM WAV
+- **語音辨識暫存**：已完成來源聲道混音的 16kHz mono PCM16 WAV → libmp3lame 64 kbps MP3；只在 OpenAI／Groq 本次請求期間存在，並非播放、波形、專案 bus 或交付輸入
 
 > 上列三者皆為**預覽／波形快取**，絕不可作為匯出輸入。影片匯出重讀母素材；MP4 對經混音／編組後的交付 stream 重新編 AAC（Mono 192k／Stereo 320k／5.1 640k），ProRes 與 WAV 使用 24-bit PCM。若母素材也已作為影片 input，音訊 filtergraph 必須重用該 input，而非另開同檔造成雙重磁碟讀取。
 

@@ -424,7 +424,10 @@ function hasValidSubtitleTime(start, end) {
 export function insertAsrSubtitles(results, {
   trackName = '語音辨識',
   historyLabel = '🎙 語音辨識生成字幕',
-  requireValidTimes = false
+  requireValidTimes = false,
+  allowPartialValidTimes = false,
+  preserveUntimedSegments = false,
+  onSkippedSegment = null
 } = {}) {
   if (!results || results.length === 0) return 0;
 
@@ -441,10 +444,31 @@ export function insertAsrSubtitles(results, {
 
     for (const seg of segments) {
       if (!seg.text || !seg.text.trim()) continue;
+      const planUntimed = () => plannedCues.push({
+        start: 0,
+        end: 0,
+        text: seg.text.trim(),
+        style: null,
+        timed: false,
+        sourceSegment: seg
+      });
+      if (preserveUntimedSegments && seg.timed === false) {
+        planUntimed();
+        continue;
+      }
 
       const rawStart = Number(seg.start);
       const rawEnd = Number(seg.end);
       if (requireValidTimes && !hasValidSubtitleTime(rawStart, rawEnd)) {
+        if (preserveUntimedSegments) {
+          planUntimed();
+          onSkippedSegment?.(seg);
+          continue;
+        }
+        if (allowPartialValidTimes) {
+          onSkippedSegment?.(seg);
+          continue;
+        }
         throw new Error('文本匹配包含無效字幕時間，未建立字幕軌');
       }
       const segStart = Number.isFinite(rawStart) ? rawStart : 0;
@@ -458,12 +482,23 @@ export function insertAsrSubtitles(results, {
       if (end <= start && !requireValidTimes) {
         end = snapTimeToFrame(start + (1 / fps), fps, dropFrame);
       }
+      if (requireValidTimes && end <= start && allowPartialValidTimes) {
+        onSkippedSegment?.(seg);
+        continue;
+      }
+      if (requireValidTimes && end <= start && preserveUntimedSegments) {
+        planUntimed();
+        onSkippedSegment?.(seg);
+        continue;
+      }
 
       plannedCues.push({
         start,
         end,
         text: seg.text.trim(),
-        style: null
+        style: null,
+        timed: true,
+        sourceSegment: seg
       });
     }
   }
@@ -471,22 +506,49 @@ export function insertAsrSubtitles(results, {
   if (plannedCues.length === 0) return 0;
 
   if (requireValidTimes) {
-    const ordered = [...plannedCues].sort((a, b) => a.start - b.start || a.end - b.end);
+    const ordered = plannedCues
+      .filter(cue => cue.timed !== false)
+      .sort((a, b) => a.start - b.start || a.end - b.end);
+    const accepted = [];
     for (let index = 0; index < ordered.length; index++) {
       const cue = ordered[index];
-      const previous = ordered[index - 1];
+      const previous = (allowPartialValidTimes || preserveUntimedSegments)
+        ? accepted.at(-1)
+        : ordered[index - 1];
       if (!hasValidSubtitleTime(cue.start, cue.end) || (previous && cue.start < previous.end - 0.000001)) {
+        if (preserveUntimedSegments) {
+          cue.start = 0;
+          cue.end = 0;
+          cue.timed = false;
+          onSkippedSegment?.(cue.sourceSegment);
+          continue;
+        }
+        if (allowPartialValidTimes) {
+          onSkippedSegment?.(cue.sourceSegment);
+          continue;
+        }
         throw new Error('影格吸附後無法維持有效且不重疊的字幕時間，未建立字幕軌');
       }
+      accepted.push(cue);
+    }
+    if (allowPartialValidTimes) {
+      plannedCues.length = 0;
+      plannedCues.push(...accepted);
     }
   }
+
+  if (plannedCues.length === 0) return 0;
 
   const trackObj = newTrack(trackName);
   State.tracks.push(trackObj);
   const trackIdx = State.tracks.length - 1;
   State.listTrack = trackIdx;
   const newCues = plannedCues.map(cue => ({
-    ...cue,
+    start: cue.start,
+    end: cue.end,
+    text: cue.text,
+    style: cue.style,
+    timed: cue.timed !== false,
     id: newId(),
     track: trackIdx
   }));
@@ -614,13 +676,13 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       <div id="asrBuiltinRow" style="display:${conf.provider === 'builtin' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
         <label style="font-size:12px;font-weight:600;color:var(--text-dim);">內建 AI 模型等級：</label>
         <select id="asrBuiltinModel" style="width:100%;">
-          <option value="onnx-community/whisper-tiny" ${conf.builtinModel === 'onnx-community/whisper-tiny' ? 'selected' : ''}>Whisper Tiny (最快；CPU 約 39MB／GPU 約 150MB)</option>
-          <option value="onnx-community/whisper-base" ${conf.builtinModel === 'onnx-community/whisper-base' ? 'selected' : ''}>Whisper Base (平衡；CPU 約 73MB／GPU 約 290MB)</option>
-          <option value="onnx-community/whisper-small" ${conf.builtinModel === 'onnx-community/whisper-small' ? 'selected' : ''}>Whisper Small (中文佳；CPU 約 240MB／GPU 約 560MB)</option>
-          <option value="onnx-community/whisper-large-v3-turbo" ${conf.builtinModel === 'onnx-community/whisper-large-v3-turbo' ? 'selected' : ''}>Whisper Large v3 Turbo q4 (速度優先，約 800MB)</option>
+          <option value="onnx-community/whisper-tiny" ${conf.builtinModel === 'onnx-community/whisper-tiny' ? 'selected' : ''}>Whisper Tiny 逐字時間版 (最快；CPU 約 39MB／GPU 約 150MB)</option>
+          <option value="onnx-community/whisper-base" ${conf.builtinModel === 'onnx-community/whisper-base' ? 'selected' : ''}>Whisper Base 逐字時間版 (平衡；CPU 約 73MB／GPU 約 290MB)</option>
+          <option value="onnx-community/whisper-small" ${conf.builtinModel === 'onnx-community/whisper-small' ? 'selected' : ''}>Whisper Small 逐字時間版 (中文佳；CPU 約 240MB／GPU 約 560MB)</option>
+          <option value="onnx-community/whisper-large-v3-turbo" ${conf.builtinModel === 'onnx-community/whisper-large-v3-turbo' ? 'selected' : ''}>Whisper Large v3 Turbo q4 逐字時間版 (速度優先，約 800MB)</option>
         </select>
         <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">
-          💡 首次使用特定模型時會自動下載並快取；下載量會依 GPU／CPU 執行版本而不同。本機電腦有獨立顯卡時可自動啟用 WebGPU 加速。若需應對嘈雜背景音樂電影，建議改用 Azure Speech 或 Google，並人工抽查結果。
+          💡 首次使用特定模型時會自動下載並快取逐字時間版模型；下載量會依 GPU／CPU 執行版本而不同。本機電腦有獨立顯卡時可自動啟用 WebGPU 加速。逐字時間是 Whisper 推估值；文本匹配會保留可靠錨點並標示需要校對的補時行。
         </div>
       </div>
 
@@ -805,6 +867,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           let alignmentReviewCount = 0;
           let recoveredAlignmentLineNumbers = [];
           let recoveredEstimatedLineCount = 0;
+          let failedAlignmentLineNumbers = [];
+          let alignmentProviderFailure = false;
           for (let i = 0; i < clips.length; i++) {
             const c = clips[i];
             if (statusEl) {
@@ -819,45 +883,53 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
               progressContainer.style.display = 'flex';
             }
 
-            const evidenceSegments = await transcribeAudioStream({
-              audioBuffer,
-              inT,
-              outT,
-              provider,
-              builtinModel,
-              apiKey,
-              azureRegion,
-              language,
-              ...('azurePhrases' in guidance ? { azurePhrases } : {}),
-              ...('prompt' in guidance ? { prompt } : {}),
-              signal,
-              onProgress: (pInfo) => {
-                if (!recognitionIsActive()) return;
-                if (pInfo.status === 'progress' && typeof pInfo.progress === 'number') {
-                  const pct = Math.round(pInfo.progress);
-                  progressBar?.classList.remove('indeterminate');
-                  if (progressBar) progressBar.style.width = pct + '%';
-                  if (progressPercent) progressPercent.textContent = pct + '%';
-                  if (progressLabel) progressLabel.textContent = `正在下載 AI 模型檔案 (${pInfo.file || ''})…`;
-                } else if (pInfo.status === 'transcribing') {
-                  if (progressContainer) progressContainer.style.display = 'flex';
-                  const hasMeasuredPercent = Number.isFinite(pInfo.percent) && !pInfo.indeterminate;
-                  if (hasMeasuredPercent) {
-                    const pct = Math.max(0, Math.min(100, Math.round(pInfo.percent)));
+            let evidenceSegments;
+            try {
+              evidenceSegments = await transcribeAudioStream({
+                audioBuffer,
+                inT,
+                outT,
+                provider,
+                builtinModel,
+                apiKey,
+                azureRegion,
+                language,
+                ...('azurePhrases' in guidance ? { azurePhrases } : {}),
+                ...('prompt' in guidance ? { prompt } : {}),
+                signal,
+                onProgress: (pInfo) => {
+                  if (!recognitionIsActive()) return;
+                  if (pInfo.status === 'progress' && typeof pInfo.progress === 'number') {
+                    const pct = Math.round(pInfo.progress);
                     progressBar?.classList.remove('indeterminate');
                     if (progressBar) progressBar.style.width = pct + '%';
                     if (progressPercent) progressPercent.textContent = pct + '%';
-                  } else {
-                    progressBar?.classList.add('indeterminate');
-                    if (progressPercent) progressPercent.textContent = '運算中';
+                    if (progressLabel) progressLabel.textContent = `正在下載 AI 模型檔案 (${pInfo.file || ''})…`;
+                  } else if (pInfo.status === 'transcribing') {
+                    if (progressContainer) progressContainer.style.display = 'flex';
+                    const hasMeasuredPercent = Number.isFinite(pInfo.percent) && !pInfo.indeterminate;
+                    if (hasMeasuredPercent) {
+                      const pct = Math.max(0, Math.min(100, Math.round(pInfo.percent)));
+                      progressBar?.classList.remove('indeterminate');
+                      if (progressBar) progressBar.style.width = pct + '%';
+                      if (progressPercent) progressPercent.textContent = pct + '%';
+                    } else {
+                      progressBar?.classList.add('indeterminate');
+                      if (progressPercent) progressPercent.textContent = '運算中';
+                    }
+                    if (progressLabel) progressLabel.textContent = pInfo.message || '本機 AI 正在推論…';
+                    if (statusEl) statusEl.textContent = `[${i + 1}/${clips.length}] ${pInfo.message || '本機推論中…'}`;
+                  } else if (pInfo.status === 'ready' || pInfo.status === 'info' || pInfo.status === 'loading' || pInfo.status === 'fallback') {
+                    if (progressLabel) progressLabel.textContent = pInfo.message || '模型已就緒，開始本機推論…';
                   }
-                  if (progressLabel) progressLabel.textContent = pInfo.message || '本機 AI 正在推論…';
-                  if (statusEl) statusEl.textContent = `[${i + 1}/${clips.length}] ${pInfo.message || '本機推論中…'}`;
-                } else if (pInfo.status === 'ready' || pInfo.status === 'info' || pInfo.status === 'loading' || pInfo.status === 'fallback') {
-                  if (progressLabel) progressLabel.textContent = pInfo.message || '模型已就緒，開始本機推論…';
                 }
-              }
-            });
+              });
+            } catch (error) {
+              if (taskMode !== 'align' || signal.aborted || error?.name === 'AbortError') throw error;
+              console.error('文本匹配的聲音分析失敗，改建完整未定時原稿：', error);
+              alignmentProviderFailure = true;
+              evidenceSegments = [];
+            }
             if (!recognitionIsActive()) return;
 
             let segments = evidenceSegments;
@@ -892,7 +964,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                 const mismatchSummary = unreliableLines.size > 0
                   ? `文字稿有 ${unreliableLines.size}/${transcriptLines.length} 行無法可靠匹配`
                   : '文字稿與聲音的整體相似度不足';
-                throw new Error(`${mismatchSummary}，未建立字幕；請確認稿件版本、語言或改用較準確的聲音分析引擎。`);
+                failedAlignmentLineNumbers = lineNumbers;
+                if (statusEl) statusEl.textContent = `${mismatchSummary}；將保留全部原稿行，無法匹配者使用無時間碼。`;
               }
               if (aligned.status === 'recovered') {
                 recoveredEstimatedLineCount = (aligned.summary?.estimatedLines || []).length;
@@ -924,7 +997,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                 }
               }
               alignmentReviewCount += Number(aligned.summary?.reviewCount) || 0;
-              segments = aligned.segments;
+              segments = aligned.completeSegments || aligned.segments;
             }
 
             results.push({
@@ -940,16 +1013,55 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           }
 
           if (!recognitionIsActive()) return;
+          const timelineRejectedLineNumbers = [];
           const count = insertAsrSubtitles(results, taskMode === 'align' ? {
             trackName: '文本匹配',
             historyLabel: '📝 文本匹配生成字幕',
-            requireValidTimes: true
+            requireValidTimes: true,
+            preserveUntimedSegments: true,
+            onSkippedSegment: segment => {
+              if (Number.isInteger(segment?.transcriptLineIndex)) {
+                timelineRejectedLineNumbers.push(segment.transcriptLineIndex + 1);
+              }
+            }
           } : undefined);
+          if (timelineRejectedLineNumbers.length) {
+            failedAlignmentLineNumbers = [...new Set([
+              ...failedAlignmentLineNumbers,
+              ...timelineRejectedLineNumbers
+            ])].sort((a, b) => a - b);
+            if (unreliableLineNumbersEl) {
+              unreliableLineNumbersEl.textContent = `無時間碼行號：第 ${failedAlignmentLineNumbers.join('、')} 行`;
+            }
+          }
           activeRecognitionController = null;
+          const partialAlignment = taskMode === 'align' && failedAlignmentLineNumbers.length > 0;
           const recoveredAlignment = taskMode === 'align' && recoveredAlignmentLineNumbers.length > 0;
-          if (!recoveredAlignment) closeModal({ committed: true });
+          const alignmentNeedsReview = partialAlignment || recoveredAlignment;
+          if (!alignmentNeedsReview) closeModal({ committed: true });
           if (taskMode === 'align') {
-            if (recoveredAlignment) {
+            if (partialAlignment) {
+              if (unreliableLineNumbersEl) {
+                unreliableLineNumbersEl.textContent = `無時間碼行號：第 ${failedAlignmentLineNumbers.join('、')} 行`;
+              }
+              if (statusEl) {
+                statusEl.style.display = 'block';
+                statusEl.style.color = 'var(--accent)';
+                statusEl.textContent = `${alignmentProviderFailure ? '聲音分析失敗，但' : ''}已建立 ${count} 句完整原稿；其中 ${failedAlignmentLineNumbers.length} 句無時間碼，請依上方行號自行補上 In／Out。`;
+              }
+              if (modalFoot) {
+                const buttons = [...modalFoot.querySelectorAll('button')];
+                const closeButton = buttons.find(button => !button.classList.contains('primary'));
+                const primaryButton = buttons.find(button => button.classList.contains('primary'));
+                if (closeButton) closeButton.textContent = '關閉';
+                if (primaryButton) {
+                  primaryButton.disabled = true;
+                  primaryButton.dataset.alignmentCommitted = 'true';
+                  primaryButton.textContent = '已建立完整原稿';
+                }
+              }
+              showToast(`文本匹配已建立 ${count} 句完整原稿；${failedAlignmentLineNumbers.length} 句為無時間碼。`);
+            } else if (recoveredAlignment) {
               const estimatedMessage = recoveredEstimatedLineCount > 0
                 ? `${recoveredEstimatedLineCount} 行使用推估時間`
                 : '沒有整行使用推估時間';

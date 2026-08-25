@@ -7,7 +7,16 @@
    ============================================================================== */
 import { transcribeBuiltinAudioInWorker } from './speech-recognition-worker-client.js';
 import { resolveBuiltinExecutionPlan } from './speech-recognition-worker-runtime.js';
+import { b64ToBytes } from './util.js';
 import OpenCC from 'opencc-js/cn2t';
+
+// 16 kHz / 16-bit / mono PCM 每秒 32,000 bytes。雲端 Whisper 單段固定控制在
+// 10 分鐘（約 19.2 MB WAV），為 OpenAI/Groq 的 multipart 封裝與供應商差異保留餘裕。
+const WHISPER_CLOUD_CHUNK_SECONDS = 600;
+const WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS = 10;
+const WHISPER_CLOUD_MAX_WAV_BYTES = 20_000_000;
+const WHISPER_OVERLAP_WORD_MATCH_TOLERANCE_SECONDS = 1.25;
+let whisperCompressionRequestSequence = 0;
 
 function throwIfRecognitionAborted(signal) {
   if (!signal?.aborted) return;
@@ -27,32 +36,32 @@ const WEBGPU_WHISPER_MIXED_DTYPE = Object.freeze({
 
 export const BUILTIN_MODELS = {
   'onnx-community/whisper-tiny': {
-    id: 'onnx-community/whisper-tiny',
-    name: 'Tiny (CPU 約 39MB／GPU 約 150MB)',
+    id: 'onnx-community/whisper-tiny_timestamped',
+    name: 'Tiny 逐字時間版 (CPU 約 39MB／GPU 約 150MB)',
     size: 'CPU 約 39MB／GPU 約 150MB',
     webgpuDtype: 'fp32',
     wasmDtype: 'q8',
     desc: '速度極快，佔用記憶體極少，適合快速草稿。'
   },
   'onnx-community/whisper-base': {
-    id: 'onnx-community/whisper-base',
-    name: 'Base (CPU 約 73MB／GPU 約 290MB)',
+    id: 'onnx-community/whisper-base_timestamped',
+    name: 'Base 逐字時間版 (CPU 約 73MB／GPU 約 290MB)',
     size: 'CPU 約 73MB／GPU 約 290MB',
     webgpuDtype: 'fp32',
     wasmDtype: 'q8',
     desc: '速度與準確度均衡，適合日常對白剪輯。'
   },
   'onnx-community/whisper-small': {
-    id: 'onnx-community/whisper-small',
-    name: 'Small (CPU 約 240MB／GPU 約 560MB)',
+    id: 'onnx-community/whisper-small_timestamped',
+    name: 'Small 逐字時間版 (CPU 約 240MB／GPU 約 560MB)',
     size: 'CPU 約 240MB／GPU 約 560MB',
     webgpuDtype: WEBGPU_WHISPER_MIXED_DTYPE,
     wasmDtype: 'q8',
     desc: '中文與繁體字辨識度更佳；GPU 使用高精度 encoder 與高效率 decoder。'
   },
   'onnx-community/whisper-large-v3-turbo': {
-    id: 'onnx-community/whisper-large-v3-turbo',
-    name: 'Large v3 Turbo q4 (速度優先約 800MB)',
+    id: 'onnx-community/whisper-large-v3-turbo_timestamped',
+    name: 'Large v3 Turbo q4 逐字時間版 (速度優先約 800MB)',
     size: '約 800MB',
     webgpuDtype: 'q4',
     wasmDtype: 'q8',
@@ -226,6 +235,55 @@ export function encodeWav16kMono(audioBuffer, startSec = 0, endSec = null) {
   return new Blob([buffer], { type: 'audio/wav' });
 }
 
+async function compressWhisperUploadForDesktop(wavBlob, signal) {
+  const bridge = typeof window !== 'undefined' ? window.subtool : null;
+  const compressor = bridge?.compressSpeechAudio;
+  if (typeof compressor !== 'function') return wavBlob;
+
+  try {
+    throwIfRecognitionAborted(signal);
+    const wavBytes = new Uint8Array(await wavBlob.arrayBuffer());
+    throwIfRecognitionAborted(signal);
+    const requestId = `speech-${Date.now()}-${++whisperCompressionRequestSequence}`;
+    const compressionPromise = Promise.resolve().then(() => {
+      throwIfRecognitionAborted(signal);
+      return compressor(wavBytes, requestId);
+    });
+    let abortListener = null;
+    const abortPromise = signal ? new Promise((resolve, reject) => {
+      abortListener = () => {
+        try {
+          Promise.resolve(bridge?.cancelSpeechAudioCompression?.(requestId)).catch(() => {});
+        } catch (error) {}
+        try {
+          throwIfRecognitionAborted(signal);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      signal.addEventListener('abort', abortListener, { once: true });
+      if (signal.aborted) abortListener();
+    }) : null;
+    let result;
+    try {
+      result = abortPromise
+        ? await Promise.race([compressionPromise, abortPromise])
+        : await compressionPromise;
+    } finally {
+      if (abortListener) signal.removeEventListener('abort', abortListener);
+    }
+    throwIfRecognitionAborted(signal);
+    if (!result?.b64 || result.type !== 'audio/mpeg') return wavBlob;
+    const mp3Bytes = b64ToBytes(result.b64);
+    if (!mp3Bytes.length || mp3Bytes.length >= wavBlob.size) return wavBlob;
+    return new Blob([mp3Bytes], { type: 'audio/mpeg' });
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError') throw error;
+    console.warn('辨識用 MP3 暫存壓縮失敗，改用安全 WAV 分段：', error);
+    return wavBlob;
+  }
+}
+
 /** 本機 pipeline 單例快取 */
 let cachedTranscriber = null;
 let cachedPipelineKey = null;
@@ -264,7 +322,7 @@ export async function loadTransformersPipeline(modelId = 'onnx-community/whisper
   let pipe = null;
   let actualPlan = preferredPlan;
   try {
-    pipe = await pipeline('automatic-speech-recognition', modelId, {
+    pipe = await pipeline('automatic-speech-recognition', modelMeta.id, {
       device: preferredPlan.device,
       dtype: preferredPlan.dtype,
       progress_callback: (p) => {
@@ -276,7 +334,7 @@ export async function loadTransformersPipeline(modelId = 'onnx-community/whisper
     console.warn('以 WebGPU 載入失敗，嘗試回退至 CPU (WASM) 模式:', err);
     if (onProgress) onProgress({ status: 'fallback', message: 'WebGPU 無法啟動，切換至 CPU (WASM q8) 模式…' });
     actualPlan = fallbackPlan;
-    pipe = await pipeline('automatic-speech-recognition', modelId, {
+    pipe = await pipeline('automatic-speech-recognition', modelMeta.id, {
       device: fallbackPlan.device,
       dtype: fallbackPlan.dtype,
       progress_callback: (p) => {
@@ -579,7 +637,7 @@ function locateAzureWordsInPhrase(text, words) {
   return ranges;
 }
 
-function joinAzureWordTexts(words, locale) {
+function joinTimedWordTexts(words, locale) {
   let result = '';
   let openingQuotePending = false;
   const compact = azureUsesCompactSpacing(locale, words.map(word => word.text).join(''));
@@ -634,7 +692,7 @@ function azureWordSliceText(segment, wordRanges, firstIndex, lastIndex) {
     const sliced = segment.text.slice(wordRanges[firstIndex].start, wordRanges[lastIndex].end).trim();
     if (sliced) return sliced;
   }
-  return joinAzureWordTexts(segment.words.slice(firstIndex, lastIndex + 1), segment.locale);
+  return joinTimedWordTexts(segment.words.slice(firstIndex, lastIndex + 1), segment.locale);
 }
 
 function createAzureWordSegment(segment, wordRanges, firstIndex, lastIndex) {
@@ -901,10 +959,13 @@ export async function callWhisperApi({
   }
 
   const formData = new FormData();
-  formData.append('file', audioBlob, 'audio.wav');
+  const uploadName = audioBlob?.type === 'audio/mpeg' ? 'audio.mp3' : 'audio.wav';
+  formData.append('file', audioBlob, uploadName);
   formData.append('model', model);
   formData.append('response_format', 'verbose_json');
   formData.append('temperature', '0');
+  formData.append('timestamp_granularities[]', 'word');
+  formData.append('timestamp_granularities[]', 'segment');
 
   if (language && language !== 'auto') {
     formData.append('language', language);
@@ -929,18 +990,50 @@ export async function callWhisperApi({
   }
 
   const data = await resp.json();
+  const words = Array.isArray(data?.words)
+    ? data.words.flatMap(word => {
+      const text = typeof word?.word === 'string'
+        ? word.word.trim()
+        : (typeof word?.text === 'string' ? word.text.trim() : '');
+      const start = Number(word?.start);
+      const end = Number(word?.end);
+      return text && Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? [{ start, end, text }]
+        : [];
+    })
+    : [];
   const segments = [];
 
   if (data && Array.isArray(data.segments)) {
-    for (const s of data.segments) {
+    const claimedWordIndexes = new Set();
+    for (const [segmentIndex, s] of data.segments.entries()) {
       if (s && s.text && s.text.trim()) {
+        const start = Number(s.start) || 0;
+        const end = Number(s.end) || 0;
+        const segmentWords = words.filter((word, wordIndex) => {
+          if (claimedWordIndexes.has(wordIndex)) return false;
+          const midpoint = (word.start + word.end) / 2;
+          const inside = midpoint >= start && (
+            segmentIndex === data.segments.length - 1 ? midpoint <= end : midpoint < end
+          );
+          if (inside) claimedWordIndexes.add(wordIndex);
+          return inside;
+        });
         segments.push({
-          start: Number(s.start) || 0,
-          end: Number(s.end) || 0,
-          text: s.text.trim()
+          start,
+          end,
+          text: s.text.trim(),
+          ...(segmentWords.length ? { words: segmentWords } : {})
         });
       }
     }
+  } else if (words.length) {
+    segments.push({
+      start: words[0].start,
+      end: words.at(-1).end,
+      text: typeof data?.text === 'string' ? data.text.trim() : words.map(word => word.text).join(' '),
+      words
+    });
   } else if (data && data.text && data.text.trim()) {
     segments.push({
       start: 0,
@@ -951,8 +1044,152 @@ export async function callWhisperApi({
 
   return {
     text: data.text || '',
-    segments
+    segments,
+    words
   };
+}
+
+function planWhisperCloudChunks(start, end) {
+  const windows = [];
+  for (let chunkStart = start; chunkStart < end;) {
+    const chunkEnd = Math.min(end, chunkStart + WHISPER_CLOUD_CHUNK_SECONDS);
+    windows.push({ start: chunkStart, end: chunkEnd });
+    if (chunkEnd >= end) break;
+    chunkStart = chunkEnd - WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS;
+  }
+  return windows;
+}
+
+function offsetWhisperSegments(
+  segments,
+  offsetSeconds,
+  totalDuration,
+  coreStart,
+  coreEnd,
+  includeCoreEnd = false,
+  wordRefs = null
+) {
+  return (Array.isArray(segments) ? segments : []).flatMap(segment => {
+    const text = typeof segment?.text === 'string' ? segment.text.trim() : '';
+    if (!text) return [];
+    const sourceStart = Number(segment.start);
+    const sourceEnd = Number(segment.end);
+    const start = Math.max(0, Math.min(totalDuration, (Number.isFinite(sourceStart) ? sourceStart : 0) + offsetSeconds));
+    const end = Math.max(0, Math.min(totalDuration, (Number.isFinite(sourceEnd) ? sourceEnd : 0) + offsetSeconds));
+    const sourceWords = Array.isArray(segment.words) ? segment.words : [];
+    const words = sourceWords.flatMap(word => {
+      const wordText = typeof word?.text === 'string' ? word.text.trim() : '';
+      const sourceWordStart = Number(word?.start);
+      const sourceWordEnd = Number(word?.end);
+      if (!wordText || !Number.isFinite(sourceWordStart) || !Number.isFinite(sourceWordEnd)) return [];
+      const wordStart = Math.max(0, Math.min(totalDuration, sourceWordStart + offsetSeconds));
+      const wordEnd = Math.max(0, Math.min(totalDuration, sourceWordEnd + offsetSeconds));
+      const midpoint = (wordStart + wordEnd) / 2;
+      const insideCore = midpoint >= coreStart && (includeCoreEnd ? midpoint <= coreEnd : midpoint < coreEnd);
+      const overlapRef = wordRefs?.get(word);
+      return wordEnd > wordStart && insideCore ? [{
+        start: wordStart,
+        end: wordEnd,
+        text: wordText,
+        ...(overlapRef ? { _whisperOverlapRef: overlapRef } : {})
+      }] : [];
+    });
+    const midpoint = (start + end) / 2;
+    const segmentInsideCore = midpoint >= coreStart && (includeCoreEnd ? midpoint <= coreEnd : midpoint < coreEnd);
+    if ((sourceWords.length && !words.length) || (!sourceWords.length && !segmentInsideCore)) return [];
+    const retainedText = words.length && words.length < sourceWords.length
+      ? joinTimedWordTexts(words, '')
+      : text;
+    return [{
+      start: words.length ? words[0].start : start,
+      end: words.length ? words.at(-1).end : end,
+      text: retainedText,
+      ...(words.length ? { words } : {})
+    }];
+  });
+}
+
+function createWhisperChunkWordEvidence(words, chunkIndex, offsetSeconds, totalDuration) {
+  const refByWord = new Map();
+  const globalWords = [];
+  for (const [wordIndex, word] of (Array.isArray(words) ? words : []).entries()) {
+    const ref = `${chunkIndex}:${wordIndex}`;
+    refByWord.set(word, ref);
+    const start = Math.max(0, Math.min(totalDuration, Number(word?.start) + offsetSeconds));
+    const end = Math.max(0, Math.min(totalDuration, Number(word?.end) + offsetSeconds));
+    const text = typeof word?.text === 'string' ? word.text.trim() : '';
+    if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    const normalized = text.normalize('NFKC')
+      .toLocaleLowerCase('en-US')
+      .replace(/[\p{Punctuation}\p{Symbol}\s]+/gu, '');
+    if (!normalized) continue;
+    globalWords.push({ ref, start, end, midpoint: (start + end) / 2, normalized });
+  }
+  return { refByWord, globalWords };
+}
+
+function matchWhisperOverlapWords(previousWords, currentWords, overlapStart, overlapEnd) {
+  const insideOverlap = word => word.midpoint >= overlapStart && word.midpoint <= overlapEnd;
+  const previous = previousWords.filter(insideOverlap);
+  const current = currentWords.filter(insideOverlap);
+  const candidateIndexes = (word, candidates) => candidates.flatMap((candidate, index) => (
+    candidate.normalized === word.normalized &&
+    Math.abs(candidate.midpoint - word.midpoint) <= WHISPER_OVERLAP_WORD_MATCH_TOLERANCE_SECONDS
+      ? [index]
+      : []
+  ));
+
+  const matches = [];
+  for (let previousIndex = 0; previousIndex < previous.length; previousIndex++) {
+    const currentCandidates = candidateIndexes(previous[previousIndex], current);
+    if (currentCandidates.length !== 1) continue;
+    const currentIndex = currentCandidates[0];
+    const previousCandidates = candidateIndexes(current[currentIndex], previous);
+    if (previousCandidates.length === 1 && previousCandidates[0] === previousIndex) {
+      matches.push([previous[previousIndex].ref, current[currentIndex].ref]);
+    }
+  }
+  return matches;
+}
+
+function deduplicateWhisperOverlapSegments(segments, chunkEvidence, chunks, selectionStart) {
+  const keptRefs = new Set((Array.isArray(segments) ? segments : [])
+    .flatMap(segment => Array.isArray(segment?.words) ? segment.words : [])
+    .map(word => word?._whisperOverlapRef)
+    .filter(Boolean));
+  const removeRefs = new Set();
+
+  for (let index = 1; index < chunks.length; index++) {
+    const overlapStart = chunks[index].start - selectionStart;
+    const overlapEnd = chunks[index - 1].end - selectionStart;
+    const matches = matchWhisperOverlapWords(
+      chunkEvidence[index - 1]?.globalWords || [],
+      chunkEvidence[index]?.globalWords || [],
+      overlapStart,
+      overlapEnd
+    );
+    for (const [previousRef, currentRef] of matches) {
+      if (keptRefs.has(previousRef) && keptRefs.has(currentRef)) removeRefs.add(currentRef);
+    }
+  }
+
+  return (Array.isArray(segments) ? segments : []).flatMap(segment => {
+    if (!Array.isArray(segment?.words) || !segment.words.length) return [segment];
+    const retainedWords = segment.words.filter(word => !removeRefs.has(word?._whisperOverlapRef));
+    if (!retainedWords.length) return [];
+    const words = retainedWords.map(word => {
+      const { _whisperOverlapRef, ...publicWord } = word;
+      return publicWord;
+    });
+    const removedWord = retainedWords.length !== segment.words.length;
+    return [{
+      ...segment,
+      start: words[0].start,
+      end: words.at(-1).end,
+      text: removedWord ? joinTimedWordTexts(words, '') : segment.text,
+      words
+    }];
+  });
 }
 
 /**
@@ -999,10 +1236,82 @@ export async function transcribeAudioStream({
     );
   }
 
-  const wavBlob = encodeWav16kMono(audioBuffer, inT, endT);
-  if (!wavBlob) {
-    throw new Error('音訊長度為 0');
+  if (provider === 'openai' || provider === 'groq') {
+    const chunks = planWhisperCloudChunks(inT, endT);
+    const duration = endT - inT;
+    const providerLabel = provider === 'openai' ? 'OpenAI' : 'Groq';
+    const allSegments = [];
+    const chunkEvidence = [];
+    const totalWorkSeconds = chunks.reduce((sum, chunk) => sum + (chunk.end - chunk.start), 0);
+    let completedWorkSeconds = 0;
+
+    for (let index = 0; index < chunks.length; index++) {
+      throwIfRecognitionAborted(signal);
+      const chunk = chunks[index];
+      onProgress?.({
+        status: 'transcribing',
+        percent: Math.round(completedWorkSeconds / totalWorkSeconds * 100),
+        message: `${providerLabel} 正在辨識第 ${index + 1}/${chunks.length} 段音訊…`
+      });
+      const wavBlob = encodeWav16kMono(audioBuffer, chunk.start, chunk.end);
+      if (!wavBlob) throw new Error('音訊長度為 0');
+      if (wavBlob.size > WHISPER_CLOUD_MAX_WAV_BYTES) {
+        throw new Error(`雲端語音辨識分段仍超過安全上傳大小（${wavBlob.size} bytes）`);
+      }
+      const chunkBlob = await compressWhisperUploadForDesktop(wavBlob, signal);
+      const result = await callWhisperApi({
+        audioBlob: chunkBlob,
+        provider,
+        apiKey,
+        language,
+        prompt,
+        signal
+      });
+      throwIfRecognitionAborted(signal);
+      const chunkOffset = chunk.start - inT;
+      const wordEvidence = createWhisperChunkWordEvidence(
+        result?.words,
+        index,
+        chunkOffset,
+        duration
+      );
+      chunkEvidence.push(wordEvidence);
+      const previousChunk = chunks[index - 1];
+      const nextChunk = chunks[index + 1];
+      const coreStart = previousChunk
+        ? ((chunk.start + previousChunk.end) / 2) - inT
+        : 0;
+      const coreEnd = nextChunk
+        ? ((chunk.end + nextChunk.start) / 2) - inT
+        : duration;
+      const chunkSegments = Array.isArray(result?.segments) && result.segments.length
+        ? result.segments
+        : (result?.text ? [{ start: 0, end: chunk.end - chunk.start, text: result.text }] : []);
+      allSegments.push(...offsetWhisperSegments(
+        chunkSegments,
+        chunkOffset,
+        duration,
+        coreStart,
+        coreEnd,
+        index === chunks.length - 1,
+        wordEvidence.refByWord
+      ));
+      completedWorkSeconds += chunk.end - chunk.start;
+      onProgress?.({
+        status: 'transcribing',
+        percent: Math.round(completedWorkSeconds / totalWorkSeconds * 100),
+        message: `${providerLabel} 已完成第 ${index + 1}/${chunks.length} 段音訊`
+      });
+    }
+
+    return convertAsrSegmentsToTraditionalChinese(
+      deduplicateWhisperOverlapSegments(allSegments, chunkEvidence, chunks, inT),
+      language
+    );
   }
+
+  const wavBlob = encodeWav16kMono(audioBuffer, inT, endT);
+  if (!wavBlob) throw new Error('音訊長度為 0');
 
   if (provider === 'google') {
     const res = await callGeminiAudioTranscription({
@@ -1035,20 +1344,5 @@ export async function transcribeAudioStream({
     );
   }
 
-  const res = await callWhisperApi({
-    audioBlob: wavBlob,
-    provider,
-    apiKey,
-    language,
-    prompt,
-    signal
-  });
-
-  throwIfRecognitionAborted(signal);
-  return convertAsrSegmentsToTraditionalChinese(
-    Array.isArray(res?.segments)
-      ? res.segments
-      : (res?.text ? [{ start: 0, end: endT - inT, text: res.text }] : []),
-    language
-  );
+  throw new Error(`不支援的語音辨識供應商：${provider}`);
 }

@@ -39,6 +39,7 @@ describe('語音辨識引擎取消接線', () => {
     expect(workerMocks.transcribeBuiltinAudioInWorker).toHaveBeenCalledWith(expect.objectContaining({
       signal: controller.signal,
       prompt: '',
+      modelId: 'onnx-community/whisper-small_timestamped',
       webgpuDtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' },
       wasmDtype: 'q8'
     }));

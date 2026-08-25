@@ -1019,7 +1019,7 @@ select:focus-visible {
   text-align-last: left;
 }
 
-/* 本機 ASR 尚未完成第一個 30 秒推論段時，顯示運算中而非虛構百分比。 */
+/* 本機 ASR 尚未完成第一個 29 秒推論段時，顯示運算中而非虛構百分比。 */
 #asrProgressBar.indeterminate {
   width: 35% !important;
   transition: none !important;
