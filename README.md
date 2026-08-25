@@ -217,7 +217,7 @@ electron/       Electron 主行程、preload、mpv／ffmpeg adapters
 shared/         renderer／主行程共用的零相依 CommonJS 領域規則
 scripts/        acceptance／diagnostics／release 工具
 tests/          vitest 行為、契約與結構測試
-docs/           使用、開發、架構與 ADR 文件
+docs/           使用、開發、架構、研究與 ADR 文件
 font/<資料夾名>/ 自備字型；資料夾名就是 UI 顯示名
 ```
 
@@ -237,6 +237,7 @@ font/<資料夾名>/ 自備字型；資料夾名就是 UI 顯示名
 | 了解 Electron 與 IPC | [`docs/Electron_維護手冊.md`](docs/Electron_維護手冊.md) |
 | 了解 FPS 與時間碼邏輯 | [`docs/FPS_時碼一致性.md`](docs/FPS_時碼一致性.md) |
 | 查每一版修了哪些坑 | [`docs/版本變更紀錄.md`](docs/版本變更紀錄.md) |
+| 查語音辨識供應商與模型的改善方向 | [`docs/research/語音辨識引擎改善評估.md`](docs/research/語音辨識引擎改善評估.md) |
 | 查某個詞在這裡指什麼 | [`CONTEXT.md`](CONTEXT.md)（領域詞彙表） |
 | 查某個設計為什麼這樣決定 | [`docs/adr/`](docs/adr/)（架構決策紀錄） |
 
