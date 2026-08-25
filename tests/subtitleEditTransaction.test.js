@@ -12,6 +12,7 @@ let Subtitles;
 let StylePanelController;
 let Media;
 let renderInvalidations = 0;
+let renderListSynchronously = false;
 
 function mountSystemDom() {
   const source = fs.readFileSync(path.join(process.cwd(), 'index.html'), 'utf8');
@@ -51,7 +52,14 @@ beforeAll(async () => {
     styleChanged: Subtitles.refreshStyleSummaries,
   });
   const { on } = await import('../src/events.js');
-  on('render:all', () => { renderInvalidations += 1; });
+  on('render:all', () => {
+    renderInvalidations += 1;
+    if (!renderListSynchronously) return;
+    renderListSynchronously = false;
+    const activeEditor = document.activeElement?.closest?.('#sublist .txt');
+    activeEditor?.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    Subtitles.renderSubList();
+  });
 
   const { ensureProjectSaved } = await import('../src/project.js');
   const guard = ensureProjectSaved();
@@ -77,6 +85,7 @@ beforeEach(() => {
     subMode: false,
   });
   renderInvalidations = 0;
+  renderListSynchronously = false;
   document.getElementById('toast').textContent = '';
   History.reset();
 });
@@ -251,6 +260,65 @@ describe('拆分字幕 UI adapters', () => {
     renderInvalidations = 0;
     document.getElementById('toast').textContent = '';
     History.reset();
+  });
+
+  it('字幕列表 Ctrl+Enter 拆分後會立即從原欄位移除游標後文字', () => {
+    const frameCallbacks = [];
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+
+    try {
+      State.tracks[0].locked = false;
+      Subtitles.renderSubList();
+      const textElement = document.querySelector('.sub-row[data-id="target"] .txt');
+      textElement.setAttribute('contenteditable', 'true');
+      textElement.contentEditable = 'true';
+      textElement.focus();
+      placeCursor(textElement, 2);
+      renderListSynchronously = true;
+
+      textElement.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
+      }));
+
+      const newCue = State.cues.find(cue => cue.id !== 'target');
+      frameCallbacks.splice(0).forEach(callback => callback(0));
+      const originalField = document.querySelector('.sub-row[data-id="target"] .txt');
+      const newField = document.querySelector(`.sub-row[data-id="${newCue.id}"] .txt`);
+      expect({
+        cueTexts: State.cues.map(cue => cue.text),
+        originalFieldText: originalField.innerText,
+        originalFieldEditable: originalField.contentEditable === 'true',
+        newFieldText: newField.innerText,
+        newFieldEditable: newField.contentEditable === 'true',
+        activeElement: document.activeElement,
+        historyLabels: History.stack.map(entry => entry.label),
+      }).toEqual({
+        cueTexts: ['前半', '後半'],
+        originalFieldText: '前半',
+        originalFieldEditable: false,
+        newFieldText: '後半',
+        newFieldEditable: true,
+        activeElement: newField,
+        historyLabels: ['初始', '拆分字幕'],
+      });
+
+      newField.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      expect({
+        cueTexts: State.cues.map(cue => cue.text),
+        newFieldEditable: newField.contentEditable === 'true',
+        historyLabels: History.stack.map(entry => entry.label),
+      }).toEqual({
+        cueTexts: ['前半', '後半'],
+        newFieldEditable: false,
+        historyLabels: ['初始', '拆分字幕'],
+      });
+    } finally {
+      renderListSynchronously = false;
+      rafSpy.mockRestore();
+    }
   });
 
   it('字幕列表 Ctrl+Enter 由交易入口擋下鎖定軌，不會自行 mutation', () => {

@@ -605,6 +605,8 @@ function refreshSelectionUI(opts={}){
   emit('render:trackStyle'); 
 }
 
+const _splittingTextEditors=new WeakSet();
+
 function splitCueAtCursor(c, txtEl){
   const sel=window.getSelection();
   if(!sel.rangeCount)return;
@@ -630,15 +632,30 @@ function splitCueAtCursor(c, txtEl){
   const textBefore=full.slice(0,markerPos);
   const textAfter=full.slice(markerPos);
 
-  const result=splitCue({
-    cueId:c.id,
-    textBefore,
-    textAfter,
-    timelineTime:Media.displayTime(),
-  });
-  if(!result.ok)return;
+  _splittingTextEditors.add(txtEl);
+  let result;
+  try{
+    result=splitCue({
+      cueId:c.id,
+      textBefore,
+      textAfter,
+      timelineTime:Media.displayTime(),
+    });
+    if(!result.ok)return;
+    // splitCue 會同步觸發 render:all 並重建列表。交易期間的舊 editor 若先
+    // focusout，會把尚未切除的全文寫回模型；上方 WeakSet 讓該次失焦略過提交。
+    // 同時同步舊節點與重建後的現行節點，讓沒有 render:all 訂閱者的環境也一致。
+    const currentTxt=sublist.querySelector(`.sub-row[data-id="${c.id}"] .txt`);
+    for(const editor of new Set([txtEl,currentTxt])){
+      if(!editor)continue;
+      editor.dataset.orig=textBefore;
+      editor.innerHTML=_txtInner(textBefore);
+      editor.contentEditable='false';
+    }
+  }finally{
+    _splittingTextEditors.delete(txtEl);
+  }
   const newCue=result.cue;
-  txtEl.contentEditable='false';
 
   requestAnimationFrame(()=>{
     const nr=sublist.querySelector(`.sub-row[data-id="${newCue.id}"]`);
@@ -646,6 +663,7 @@ function splitCueAtCursor(c, txtEl){
     const nt=nr.querySelector('.txt');
     if(!nt)return;
     nt.innerText=textAfter;
+    nt.dataset.orig=textAfter;
     nt.contentEditable='true';
     nt.focus();
     try{
@@ -763,7 +781,7 @@ sublist?.addEventListener?.('input', e => {
 
 sublist?.addEventListener?.('focusout', e => {
   const txt = e.target.closest('.txt');
-  if (!txt || txt.contentEditable !== 'true') return;
+  if (!txt || txt.contentEditable !== 'true' || _splittingTextEditors.has(txt)) return;
   const row = txt.closest('.sub-row');
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
