@@ -56,6 +56,61 @@ describe('語音辨識與字幕生成模組', () => {
     expect(html).toContain('dialogue.wav');
     expect(html).toContain('value="azure"');
     expect(html).toContain('id="asrAzureRegion"');
+    expect(html).toContain('placeholder="例如 japaneast"');
+  });
+
+  it('可切換為文本匹配並顯示固定逐行文字稿輸入框', () => {
+    State.clips = [];
+    State.externalAudioState = [];
+    saveAsrConfig({ ...getAsrConfig(), taskMode: 'align' });
+
+    openSpeechRecognitionDialog({
+      id: 'alignment-dialogue',
+      name: 'alignment-dialogue.wav',
+      in: 0,
+      out: 2,
+      duration: 2,
+      audioBuffer: {}
+    });
+
+    const [, html] = openModal.mock.calls[0];
+    document.body.innerHTML = html;
+    expect(document.getElementById('asrTaskMode').value).toBe('align');
+    expect(getComputedStyle(document.getElementById('asrTranscriptRow')).display).toBe('flex');
+    expect(document.getElementById('asrTranscript')).toBeInstanceOf(HTMLTextAreaElement);
+    expect(document.getElementById('asrTranscriptRow').textContent).toContain('每個非空白行固定為一條字幕');
+    expect(document.getElementById('asrTargetSummary').value).toContain('文本匹配');
+  });
+
+  it('生成方式切換只顯示或隱藏文字稿，不會改寫已貼入的行', async () => {
+    State.clips = [];
+    State.externalAudioState = [];
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'transcribe' });
+    openModal.mockImplementation((title, html) => { document.body.innerHTML = html; });
+
+    openSpeechRecognitionDialog({
+      id: 'alignment-mode-switch',
+      name: 'alignment-mode-switch.wav',
+      in: 0,
+      out: 1,
+      duration: 1,
+      audioBuffer: {}
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const mode = document.getElementById('asrTaskMode');
+    const transcript = document.getElementById('asrTranscript');
+    const row = document.getElementById('asrTranscriptRow');
+    transcript.value = '第一行。第二句仍在同一行！';
+    mode.value = 'align';
+    mode.onchange();
+    expect(getComputedStyle(row).display).toBe('flex');
+    expect(transcript.value).toBe('第一行。第二句仍在同一行！');
+
+    mode.value = 'transcribe';
+    mode.onchange();
+    expect(getComputedStyle(row).display).toBe('none');
+    expect(transcript.value).toBe('第一行。第二句仍在同一行！');
   });
 
   it('依指定順序排列辨識服務，並以無圖示文字維持左側對齊', () => {
@@ -257,10 +312,12 @@ describe('語音辨識與字幕生成模組', () => {
   describe('設定管理 (Configuration)', () => {
     it('提供預設的 ASR 設定，預設為 Google 語音辨識', () => {
       const conf = getAsrConfig();
+      expect(conf.taskMode).toBe('transcribe');
       expect(conf.provider).toBe('google');
       expect(conf.builtinModel).toBe('onnx-community/whisper-large-v3-turbo');
       expect(conf.language).toBe('zh');
       expect(conf.prompt).toContain('繁體中文');
+      expect(conf.azureRegion).toBe('japaneast');
     });
 
     it('內建模型清單提供 Tiny, Base, Small 等級', () => {
@@ -278,6 +335,7 @@ describe('語音辨識與字幕生成模組', () => {
 
     it('能夠儲存並讀回自訂的 ASR 設定', () => {
       saveAsrConfig({
+        taskMode: 'align',
         provider: 'builtin',
         builtinModel: 'onnx-community/whisper-small',
         openaiApiKey: 'sk-test-key-1234',
@@ -286,6 +344,7 @@ describe('語音辨識與字幕生成模組', () => {
         prompt: 'Testing prompt'
       });
       const conf = getAsrConfig();
+      expect(conf.taskMode).toBe('align');
       expect(conf.provider).toBe('builtin');
       expect(conf.builtinModel).toBe('onnx-community/whisper-small');
       expect(conf.openaiApiKey).toBe('sk-test-key-1234');

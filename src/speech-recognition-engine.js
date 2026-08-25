@@ -505,6 +505,249 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
   return { segments: validSegments };
 }
 
+export const DEFAULT_AZURE_SPEECH_REGION = 'japaneast';
+
+const AZURE_SUBTITLE_MAX_DURATION_SECONDS = 6;
+const AZURE_SUBTITLE_MAX_CJK_CHARS = 24;
+const AZURE_SUBTITLE_MAX_LATIN_WORDS = 14;
+const AZURE_SUBTITLE_MAX_LATIN_CHARS = 72;
+const AZURE_SUBTITLE_MERGE_GAP_SECONDS = 0.45;
+const AZURE_SUBTITLE_BREAK_GAP_SECONDS = 0.75;
+const AZURE_SPEECH_MAX_SPEAKERS = 10;
+
+function endsAzureSentence(text) {
+  const normalized = String(text || '').trim().replace(/["'”’」』）】》〉]+$/u, '');
+  if (/[。！？!?…]$/u.test(normalized) || /\.{2,}$/u.test(normalized)) return true;
+  if (!/\.$/u.test(normalized)) return false;
+  if (/^(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr)\.$/iu.test(normalized)) return false;
+  if (/^(?:[A-Za-z]\.){2,}$/u.test(normalized) || /^[A-Z]\.$/u.test(normalized)) return false;
+  return true;
+}
+
+function azureUsesCompactSpacing(locale, text = '') {
+  const normalizedLocale = String(locale || '').trim();
+  if (normalizedLocale) return /^(?:zh|ja|ko)(?:-|$)/i.test(normalizedLocale);
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(String(text || ''));
+}
+
+function isAzurePunctuationOnly(text) {
+  return /^[\p{Punctuation}\p{Symbol}]+$/u.test(String(text || '').trim());
+}
+
+function startsAzureClosingPunctuation(text) {
+  return /^[,.;:!?，。！？、；：…”’」』）】》〉]/u.test(String(text || '').trim());
+}
+
+function startsAzureOpeningQuote(text) {
+  return /^[“‘「『（【《〈]/u.test(String(text || '').trim()) ||
+    /^["'][^"']/u.test(String(text || '').trim());
+}
+
+function isAzureOpeningQuoteOnly(text) {
+  return /^["'“‘「『（【《〈]$/u.test(String(text || '').trim());
+}
+
+function isAzureTrailingSentenceCloser(text) {
+  return /^["'”’」』）】》〉]+$/u.test(String(text || '').trim());
+}
+
+function azureSubtitleFits(text, duration, locale) {
+  if (!Number.isFinite(duration) || duration <= 0 || duration > AZURE_SUBTITLE_MAX_DURATION_SECONDS) return false;
+  const normalized = String(text || '').trim();
+  if (!normalized) return false;
+  if (azureUsesCompactSpacing(locale, normalized)) {
+    return Array.from(normalized.replace(/\s/gu, '')).length <= AZURE_SUBTITLE_MAX_CJK_CHARS;
+  }
+  const wordCount = normalized.split(/\s+/u).filter(Boolean).length;
+  return wordCount <= AZURE_SUBTITLE_MAX_LATIN_WORDS &&
+    Array.from(normalized).length <= AZURE_SUBTITLE_MAX_LATIN_CHARS;
+}
+
+function locateAzureWordsInPhrase(text, words) {
+  const source = String(text || '');
+  const sourceLower = source.toLocaleLowerCase();
+  let cursor = 0;
+  const ranges = [];
+  for (const word of words) {
+    const token = String(word?.text || '');
+    let index = source.indexOf(token, cursor);
+    if (index < 0) index = sourceLower.indexOf(token.toLocaleLowerCase(), cursor);
+    if (index < 0) return null;
+    ranges.push({ start: index, end: index + token.length });
+    cursor = index + token.length;
+  }
+  return ranges;
+}
+
+function joinAzureWordTexts(words, locale) {
+  let result = '';
+  let openingQuotePending = false;
+  const compact = azureUsesCompactSpacing(locale, words.map(word => word.text).join(''));
+  for (const word of words) {
+    const token = String(word?.text || '').trim();
+    if (!token) continue;
+    if (!result) {
+      result = token;
+      openingQuotePending = isAzureOpeningQuoteOnly(token);
+      continue;
+    }
+    if (startsAzureClosingPunctuation(token)) {
+      result += token;
+      continue;
+    }
+    if (token === '"' || token === "'") {
+      const quoteCount = Array.from(result).filter(character => character === token).length;
+      if (quoteCount % 2 === 0) {
+        result += compact ? token : ` ${token}`;
+        openingQuotePending = true;
+      } else {
+        result += token;
+      }
+      continue;
+    }
+    if (openingQuotePending) {
+      result += token;
+      openingQuotePending = false;
+      continue;
+    }
+    if (startsAzureOpeningQuote(token)) {
+      result += compact ? token : ` ${token}`;
+      continue;
+    }
+    if (!compact) {
+      result += ` ${token}`;
+      continue;
+    }
+    const previousIsLatin = /[A-Za-z0-9]$/u.test(result);
+    const nextIsLatin = /^[A-Za-z0-9]/u.test(token);
+    const previousIsCjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]$/u.test(result);
+    const nextIsCjk = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(token);
+    result += (previousIsLatin && nextIsLatin) || (previousIsLatin && nextIsCjk) || (previousIsCjk && nextIsLatin)
+      ? ` ${token}`
+      : token;
+  }
+  return result;
+}
+
+function azureWordSliceText(segment, wordRanges, firstIndex, lastIndex) {
+  if (wordRanges) {
+    const sliced = segment.text.slice(wordRanges[firstIndex].start, wordRanges[lastIndex].end).trim();
+    if (sliced) return sliced;
+  }
+  return joinAzureWordTexts(segment.words.slice(firstIndex, lastIndex + 1), segment.locale);
+}
+
+function createAzureWordSegment(segment, wordRanges, firstIndex, lastIndex) {
+  const words = segment.words.slice(firstIndex, lastIndex + 1);
+  return {
+    ...segment,
+    start: words[0].start,
+    end: words[words.length - 1].end,
+    text: azureWordSliceText(segment, wordRanges, firstIndex, lastIndex),
+    words
+  };
+}
+
+function splitAzurePhraseForSubtitles(segment) {
+  if (!Array.isArray(segment?.words) || segment.words.length < 2) return [segment];
+  const wordRanges = locateAzureWordsInPhrase(segment.text, segment.words);
+  const chunks = [];
+  let firstIndex = 0;
+
+  for (let index = 0; index < segment.words.length; index++) {
+    const punctuationOnly = isAzurePunctuationOnly(segment.words[index].text);
+    if (index > firstIndex) {
+      const wordGap = segment.words[index].start - segment.words[index - 1].end;
+      if (!punctuationOnly && Number.isFinite(wordGap) && wordGap >= AZURE_SUBTITLE_BREAK_GAP_SECONDS) {
+        chunks.push(createAzureWordSegment(segment, wordRanges, firstIndex, index - 1));
+        firstIndex = index;
+      }
+    }
+    const candidateText = azureWordSliceText(segment, wordRanges, firstIndex, index);
+    const candidateDuration = segment.words[index].end - segment.words[firstIndex].start;
+    if (!punctuationOnly && !azureSubtitleFits(candidateText, candidateDuration, segment.locale) && index > firstIndex) {
+      chunks.push(createAzureWordSegment(segment, wordRanges, firstIndex, index - 1));
+      firstIndex = index;
+    }
+    const candidateEndsSentence = endsAzureSentence(azureWordSliceText(segment, wordRanges, firstIndex, index));
+    const nextIsSentenceCloser = index + 1 < segment.words.length &&
+      isAzureTrailingSentenceCloser(segment.words[index + 1].text);
+    if (candidateEndsSentence && !nextIsSentenceCloser) {
+      chunks.push(createAzureWordSegment(segment, wordRanges, firstIndex, index));
+      firstIndex = index + 1;
+    }
+  }
+
+  if (firstIndex < segment.words.length) {
+    chunks.push(createAzureWordSegment(segment, wordRanges, firstIndex, segment.words.length - 1));
+  }
+  return chunks.length > 1 ? chunks : [segment];
+}
+
+function joinAzureSegmentTexts(previous, next) {
+  const left = String(previous?.text || '').trim();
+  const right = String(next?.text || '').trim();
+  if (!left) return right;
+  if (!right) return left;
+  if (startsAzureClosingPunctuation(right) || (/^["']$/u.test(right) && endsAzureSentence(left))) {
+    return `${left}${right}`;
+  }
+  const locale = previous?.locale || next?.locale || '';
+  if (!azureUsesCompactSpacing(locale, `${left}${right}`)) return `${left} ${right}`;
+  const leftLatin = /[A-Za-z0-9]$/u.test(left);
+  const rightLatin = /^[A-Za-z0-9]/u.test(right);
+  const leftCjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]$/u.test(left);
+  const rightCjk = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(right);
+  return (leftLatin && rightLatin) || (leftLatin && rightCjk) || (leftCjk && rightLatin)
+    ? `${left} ${right}`
+    : `${left}${right}`;
+}
+
+function azureSegmentsCanMerge(previous, next, combinedText) {
+  if (!previous?.words?.length || !next?.words?.length || endsAzureSentence(previous.text)) return false;
+  if ((previous.channel ?? null) !== (next.channel ?? null)) return false;
+  if (!Number.isInteger(previous.speaker) || !Number.isInteger(next.speaker) || previous.speaker !== next.speaker) return false;
+  if (previous.locale && next.locale && previous.locale !== next.locale) return false;
+  const gap = next.start - previous.end;
+  if (!Number.isFinite(gap) || gap < -0.05 || gap > AZURE_SUBTITLE_MERGE_GAP_SECONDS) return false;
+  return azureSubtitleFits(combinedText, next.end - previous.start, previous.locale || next.locale);
+}
+
+/**
+ * 將 Azure 的 phrase／word 結果整理成字幕友善的句子：
+ * - phrase 內依句末標點切開，時間取該句首末 word。
+ * - 短停頓內、尚未出現句末標點的 phrase 碎片合併。
+ * - 缺少 word 時不猜測切點，保留 Azure 原始 phrase。
+ */
+export function refineAzureSubtitleSegments(segments) {
+  const splitSegments = (Array.isArray(segments) ? segments : [])
+    .flatMap(splitAzurePhraseForSubtitles)
+    .filter(segment => segment?.text && Number(segment.end) > Number(segment.start));
+  const refined = [];
+  for (const segment of splitSegments) {
+    const previous = refined[refined.length - 1];
+    const combinedText = previous ? joinAzureSegmentTexts(previous, segment) : '';
+    if (!previous || !azureSegmentsCanMerge(previous, segment, combinedText)) {
+      refined.push(segment);
+      continue;
+    }
+    const merged = {
+      ...previous,
+      end: segment.end,
+      text: combinedText,
+      words: [...previous.words, ...segment.words],
+      ...(previous.locale || segment.locale ? { locale: previous.locale || segment.locale } : {})
+    };
+    if (Number.isFinite(previous.confidence) && Number.isFinite(segment.confidence)) {
+      merged.confidence = Math.min(previous.confidence, segment.confidence);
+    } else {
+      delete merged.confidence;
+    }
+    refined[refined.length - 1] = merged;
+  }
+  return refined;
+}
+
 /**
  * 將 Azure Fast Transcription 的逐句／逐字毫秒時間轉成共用的秒數契約。
  * 這裡只保留來源音檔的相對時間；時間軸 offset 與逐格化由 UI 協調器統一處理。
@@ -546,17 +789,27 @@ export function parseAzureTranscriptionResponse(data) {
       text,
       words,
       ...(typeof phrase.locale === 'string' && phrase.locale ? { locale: phrase.locale } : {}),
+      ...(phrase.channel != null && Number.isInteger(Number(phrase.channel))
+        ? { channel: Number(phrase.channel) }
+        : {}),
+      ...(phrase.speaker != null && Number.isInteger(Number(phrase.speaker))
+        ? { speaker: Number(phrase.speaker) }
+        : {}),
       ...(phrase.confidence != null && Number.isFinite(Number(phrase.confidence))
         ? { confidence: Number(phrase.confidence) }
         : {})
     });
   }
 
+  const refinedSegments = refineAzureSubtitleSegments(segments);
   const combinedText = (Array.isArray(data?.combinedPhrases) ? data.combinedPhrases : [])
     .map(item => typeof item?.text === 'string' ? item.text.trim() : '')
     .filter(Boolean)
     .join('\n');
-  return { text: combinedText || segments.map(segment => segment.text).join(' '), segments };
+  return {
+    text: combinedText || refinedSegments.map(segment => segment.text).join(' '),
+    segments: refinedSegments
+  };
 }
 
 const AZURE_SPEECH_LOCALES = Object.freeze({
@@ -573,7 +826,7 @@ const AZURE_SPEECH_LOCALES = Object.freeze({
 export async function callAzureSpeechTranscription({
   audioBlob,
   apiKey,
-  region = 'southeastasia',
+  region = DEFAULT_AZURE_SPEECH_REGION,
   language = 'zh',
   phrases = [],
   signal = null
@@ -586,10 +839,12 @@ export async function callAzureSpeechTranscription({
 
   const normalizedRegion = typeof region === 'string' ? region.trim().toLowerCase() : '';
   if (!/^[a-z][a-z0-9-]{1,62}$/.test(normalizedRegion)) {
-    throw new Error('Azure Speech Region 格式不正確，例如 southeastasia');
+    throw new Error(`Azure Speech Region 格式不正確，例如 ${DEFAULT_AZURE_SPEECH_REGION}`);
   }
 
-  const definition = {};
+  const definition = {
+    diarization: { enabled: true, maxSpeakers: AZURE_SPEECH_MAX_SPEAKERS }
+  };
   if (language && language !== 'auto') {
     definition.locales = [AZURE_SPEECH_LOCALES[language] || language];
   }
@@ -710,7 +965,7 @@ export async function transcribeAudioStream({
   provider = 'google',
   builtinModel = 'onnx-community/whisper-large-v3-turbo',
   apiKey = '',
-  azureRegion = 'southeastasia',
+  azureRegion = DEFAULT_AZURE_SPEECH_REGION,
   azurePhrases = [],
   language = 'zh',
   prompt = '',

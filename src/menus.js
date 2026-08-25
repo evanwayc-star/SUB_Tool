@@ -257,7 +257,7 @@ function tlContextMenuHandler(e){
       const playhead=Media.displayTime();
       const enabled=audioEl.dataset.audioEnabled!=='false';
       const recognitionSource=Media.getExternalAudioSource?.(assetId)||extSrc;
-      items.push({label:'🎙 語音辨識生成字幕…',act:()=>openSpeechRecognitionDialog({
+      items.push({label:'🎙 語音辨識／文本匹配…',act:()=>openSpeechRecognitionDialog({
         ...(recognitionSource || { id: assetId, name: sourceName, in: start, out: end, offset: start }),
         recognitionTracks
       })});
@@ -298,7 +298,7 @@ function tlContextMenuHandler(e){
         blob: State.mediaFile || State.mediaBlob || State.clips?.[0]?.blob || null,
         recognitionTracks
       };
-      items.push({label:'🎙 語音辨識生成字幕…',act:()=>openSpeechRecognitionDialog(recognitionSource)});
+      items.push({label:'🎙 語音辨識／文本匹配…',act:()=>openSpeechRecognitionDialog(recognitionSource)});
       items.push({sep:true});
     }
     items.push({label:'🎧 軌道配置',act:()=>AudioRouting.openForSource(sourceId)});

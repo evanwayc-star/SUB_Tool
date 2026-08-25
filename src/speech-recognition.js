@@ -1,11 +1,11 @@
 /* ==============================================================================
    SUB Tool — Speech Recognition UI Module (src/speech-recognition.js)
    ==============================================================================
-   語音辨識使用者介面（UI Modal）與時間軸字幕軌生成協調器。
+   語音辨識／逐行文本匹配使用者介面（UI Modal）與時間軸字幕軌生成協調器。
    推論核心由 src/speech-recognition-engine.js 提供，本模組專注於：
    1. 互動式對話框表單（模型、API Key、提示詞、語言選擇）
    2. 進度條回饋與狀態提示
-   3. 辨識結果轉為標準時間軸字幕軌（Subtitle Track / Cues）
+   3. 辨識結果或固定逐行文字稿轉為標準時間軸字幕軌（Subtitle Track / Cues）
    ============================================================================== */
 import { State, newTrack, syncTrackCount, newId, setSelection, IS_DESKTOP } from './state.js';
 import { AudioEngine } from './audio-engine.js';
@@ -15,8 +15,10 @@ import { recordHistory } from './history.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { emit } from './events.js';
 import { escapeHTML } from './util.js';
+import { alignTranscriptToEvidence, parseTranscriptLines } from './transcript-alignment.js';
 import {
   BUILTIN_MODELS,
+  DEFAULT_AZURE_SPEECH_REGION,
   blobToBase64,
   extractClipFloat32Mono16k,
   combineRecognitionAudioBuffers,
@@ -35,6 +37,7 @@ import {
 // Re-export 推論模組介面以維持向下相容
 export {
   BUILTIN_MODELS,
+  DEFAULT_AZURE_SPEECH_REGION,
   blobToBase64,
   extractClipFloat32Mono16k,
   combineRecognitionAudioBuffers,
@@ -135,13 +138,14 @@ export function getAsrConfig() {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
         return {
+          taskMode: parsed.taskMode === 'align' ? 'align' : 'transcribe',
           provider: parsed.provider || 'google',
           builtinModel: parsed.builtinModel || 'onnx-community/whisper-large-v3-turbo',
           googleApiKey: parsed.googleApiKey || '',
           groqApiKey: parsed.groqApiKey || '',
           openaiApiKey: parsed.openaiApiKey || '',
           azureApiKey: parsed.azureApiKey || '',
-          azureRegion: parsed.azureRegion || 'southeastasia',
+          azureRegion: parsed.azureRegion || DEFAULT_AZURE_SPEECH_REGION,
           azurePhraseList: parsed.azurePhraseList || '',
           language: parsed.language || 'zh',
           prompt: typeof parsed.prompt === 'string' ? parsed.prompt : DEFAULT_ASR_PROMPT
@@ -150,13 +154,14 @@ export function getAsrConfig() {
     }
   } catch (_) {}
   return {
+    taskMode: 'transcribe',
     provider: 'google',
     builtinModel: 'onnx-community/whisper-large-v3-turbo',
     googleApiKey: '',
     groqApiKey: '',
     openaiApiKey: '',
     azureApiKey: '',
-    azureRegion: 'southeastasia',
+    azureRegion: DEFAULT_AZURE_SPEECH_REGION,
     azurePhraseList: '',
     language: 'zh',
     prompt: DEFAULT_ASR_PROMPT
@@ -258,13 +263,16 @@ export async function getClipAudioBuffer(clip, {
 /**
  * 將辨識結果結構轉換為字幕軌並加入時間軸
  */
-export function insertAsrSubtitles(results) {
+export function insertAsrSubtitles(results, {
+  trackName = '語音辨識',
+  historyLabel = '🎙 語音辨識生成字幕'
+} = {}) {
   if (!results || results.length === 0) return 0;
 
   const fps = State.fps || 24;
   const dropFrame = State.dropFrame || false;
   const newCues = [];
-  const trackObj = newTrack('語音辨識');
+  const trackObj = newTrack(trackName);
   State.tracks.push(trackObj);
   const trackIdx = State.tracks.length - 1;
   State.listTrack = trackIdx;
@@ -308,7 +316,7 @@ export function insertAsrSubtitles(results) {
     return 0;
   }
 
-  recordHistory('🎙 語音辨識生成字幕');
+  recordHistory(historyLabel);
 
   State.cues.push(...newCues);
   sortCues();
@@ -355,6 +363,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
   const conf = getAsrConfig();
   const initialProviderMeta = CLOUD_PROVIDER_META[conf.provider] || null;
+  const initialTaskMode = conf.taskMode === 'align' ? 'align' : 'transcribe';
   const initialGuidanceMeta = getAsrGuidanceMeta(conf.provider);
   const initialGuidanceValue = initialGuidanceMeta?.kind === 'phrases'
     ? (conf.azurePhraseList || '')
@@ -383,7 +392,21 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       </div>
 
       <div style="display:flex;flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">語音辨識模式：</label>
+        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">生成方式：</label>
+        <select id="asrTaskMode" style="width:100%;">
+          <option value="transcribe" ${initialTaskMode === 'transcribe' ? 'selected' : ''}>語音辨識（由聲音產生文字與時間碼）</option>
+          <option value="align" ${initialTaskMode === 'align' ? 'selected' : ''}>文本匹配（保留逐行文字稿，只匹配時間碼）</option>
+        </select>
+      </div>
+
+      <div id="asrTranscriptRow" style="display:${initialTaskMode === 'align' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
+        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">逐行文字稿：</label>
+        <textarea id="asrTranscript" rows="7" placeholder="在此貼上已分行的文字稿…" style="width:100%;resize:vertical;min-height:120px;box-sizing:border-box;line-height:1.5;"></textarea>
+        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">每個非空白行固定為一條字幕；只裁掉行首、行尾空白，不會重新分行、分句或改寫內容。</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:5px;">
+        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">聲音分析引擎：</label>
         <select id="asrProvider" class="asr-provider-select" style="width:100%;">
           <option value="builtin" ${conf.provider === 'builtin' ? 'selected' : ''}>程式內建本機 AI 引擎 (免設定・100% 離線)</option>
           <option value="groq" ${conf.provider === 'groq' ? 'selected' : ''}>Groq (Whisper-large-v3，極速雲端・免費)</option>
@@ -418,8 +441,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
       <div id="asrAzureRegionRow" style="display:${conf.provider === 'azure' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
         <label style="font-size:12px;font-weight:600;color:var(--text-dim);">Azure Speech Region：</label>
-        <input type="text" id="asrAzureRegion" placeholder="例如 southeastasia" value="${escapeHTML(conf.azureRegion || 'southeastasia')}" style="width:100%;">
-        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">Region 必須與 Speech Key 的資源相同；台灣可使用 southeastasia。eastasia 目前不支援 Fast Transcription。</div>
+        <input type="text" id="asrAzureRegion" placeholder="例如 ${DEFAULT_AZURE_SPEECH_REGION}" value="${escapeHTML(conf.azureRegion || DEFAULT_AZURE_SPEECH_REGION)}" style="width:100%;">
+        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">Region 必須與 Speech Key 的資源相同；新設定預設 ${DEFAULT_AZURE_SPEECH_REGION}，其他資源請依 Azure 入口網站顯示填寫。</div>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
@@ -436,7 +459,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
         <div style="display:flex;flex-direction:column;gap:5px;">
           <label style="font-size:12px;font-weight:600;color:var(--text-dim);">生成目標：</label>
-          <input type="text" value="自動建立「語音辨識」新軌" disabled style="width:100%;opacity:0.75;">
+          <input type="text" id="asrTargetSummary" value="自動建立「${initialTaskMode === 'align' ? '文本匹配' : '語音辨識'}」新軌" disabled style="width:100%;opacity:0.75;">
         </div>
       </div>
 
@@ -470,12 +493,14 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     closeModal();
   };
 
-  openModal('🎙 音訊語音辨識生成字幕', html, [
+  openModal('🎙 音訊辨識／文本匹配生成字幕', html, [
     { label: '取消', act: cancelRecognition },
     {
-      label: '🚀 開始辨識',
+      label: initialTaskMode === 'align' ? '開始匹配' : '🚀 開始辨識',
       primary: true,
       act: async () => {
+        const taskModeEl = document.getElementById('asrTaskMode');
+        const transcriptEl = document.getElementById('asrTranscript');
         const providerEl = document.getElementById('asrProvider');
         const builtinModelEl = document.getElementById('asrBuiltinModel');
         const apiKeyEl = document.getElementById('asrApiKey');
@@ -489,37 +514,49 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const progressBar = document.getElementById('asrProgressBar');
         const modalFoot = document.getElementById('modalFoot');
 
+        const taskMode = taskModeEl?.value === 'align' ? 'align' : 'transcribe';
+        const transcript = transcriptEl?.value || '';
+        const transcriptLines = taskMode === 'align' ? parseTranscriptLines(transcript) : [];
         const provider = providerEl?.value || 'google';
         const builtinModel = builtinModelEl?.value || 'onnx-community/whisper-large-v3-turbo';
         const apiKey = apiKeyEl?.value?.trim() || '';
-        const azureRegion = azureRegionEl?.value?.trim() || 'southeastasia';
+        const azureRegion = azureRegionEl?.value?.trim() || DEFAULT_AZURE_SPEECH_REGION;
         const language = langEl?.value || 'zh';
         const guidance = resolveAsrGuidance(provider, promptEl?.value || '');
         const prompt = guidance.prompt || '';
         const azurePhrases = guidance.azurePhrases || [];
         const providerMeta = CLOUD_PROVIDER_META[provider] || null;
 
-        if (providerMeta && !apiKey) {
+        const showValidationError = (message, focusTarget = null) => {
           if (statusEl) {
             statusEl.style.display = 'block';
             statusEl.style.color = 'var(--red)';
-            statusEl.textContent = `請先輸入 ${providerMeta.name} API Key`;
+            statusEl.textContent = message;
           }
-          apiKeyEl?.focus();
+          focusTarget?.focus();
+        };
+
+        if (taskMode === 'align' && clips.length !== 1) {
+          showValidationError('文本匹配目前一次只能處理一個音訊來源；請只選取一個素材後再試。');
+          return;
+        }
+        if (taskMode === 'align' && transcriptLines.length === 0) {
+          showValidationError('請貼上文字稿；每個非空白行會固定建立一條字幕。', transcriptEl);
+          return;
+        }
+
+        if (providerMeta && !apiKey) {
+          showValidationError(`請先輸入 ${providerMeta.name} API Key`, apiKeyEl);
           return;
         }
         if (provider === 'azure' && !/^[a-z][a-z0-9-]{1,62}$/i.test(azureRegion)) {
-          if (statusEl) {
-            statusEl.style.display = 'block';
-            statusEl.style.color = 'var(--red)';
-            statusEl.textContent = '請輸入正確的 Azure Speech Region，例如 southeastasia';
-          }
-          azureRegionEl?.focus();
+          showValidationError(`請輸入正確的 Azure Speech Region，例如 ${DEFAULT_AZURE_SPEECH_REGION}`, azureRegionEl);
           return;
         }
 
         // 儲存設定
         const currentConf = getAsrConfig();
+        currentConf.taskMode = taskMode;
         currentConf.provider = provider;
         currentConf.builtinModel = builtinModel;
         if (providerMeta) currentConf[providerMeta.keyField] = apiKey;
@@ -551,6 +588,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
         try {
           const results = [];
+          let alignmentReviewCount = 0;
           for (let i = 0; i < clips.length; i++) {
             const c = clips[i];
             if (statusEl) {
@@ -565,7 +603,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
               progressContainer.style.display = 'flex';
             }
 
-            const segments = await transcribeAudioStream({
+            const evidenceSegments = await transcribeAudioStream({
               audioBuffer,
               inT,
               outT,
@@ -606,6 +644,27 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             });
             if (!recognitionIsActive()) return;
 
+            let segments = evidenceSegments;
+            if (taskMode === 'align') {
+              if (statusEl) statusEl.textContent = '聲音分析完成，正在逐行匹配文字稿時間…';
+              const aligned = alignTranscriptToEvidence({
+                transcript,
+                evidenceSegments
+              });
+              if (aligned.status !== 'aligned') {
+                const unreliableLines = new Set([
+                  ...(aligned.summary?.unmatchedLines || []),
+                  ...(aligned.summary?.ambiguousLines || [])
+                ]);
+                const mismatchSummary = unreliableLines.size > 0
+                  ? `文字稿有 ${unreliableLines.size}/${transcriptLines.length} 行無法可靠匹配`
+                  : '文字稿與聲音的整體相似度不足';
+                throw new Error(`${mismatchSummary}，未建立字幕；請確認稿件版本、語言或改用較準確的聲音分析引擎。`);
+              }
+              alignmentReviewCount += Number(aligned.summary?.reviewCount) || 0;
+              segments = aligned.segments;
+            }
+
             results.push({
               clip: c,
               segments
@@ -613,14 +672,24 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           }
 
           if (statusEl) {
-            statusEl.textContent = '辨識完成，正在寫入專屬字幕軌…';
+            statusEl.textContent = taskMode === 'align'
+              ? '文本匹配完成，正在寫入專屬字幕軌…'
+              : '辨識完成，正在寫入專屬字幕軌…';
           }
 
           if (!recognitionIsActive()) return;
-          const count = insertAsrSubtitles(results);
+          const count = insertAsrSubtitles(results, taskMode === 'align' ? {
+            trackName: '文本匹配',
+            historyLabel: '📝 文本匹配生成字幕'
+          } : undefined);
           activeRecognitionController = null;
           closeModal({ committed: true });
-          showToast(`🎙 語音辨識完成！已新增字幕軌並生成 ${count} 句字幕。`);
+          if (taskMode === 'align') {
+            const reviewHint = alignmentReviewCount > 0 ? ' 目前為句級估算，請抽查時間碼。' : '';
+            showToast(`文本匹配完成！已保留逐行文字稿並生成 ${count} 句時間碼。${reviewHint}`);
+          } else {
+            showToast(`🎙 語音辨識完成！已新增字幕軌並生成 ${count} 句字幕。`);
+          }
         } catch (err) {
           if (signal.aborted || err?.name === 'AbortError' || activeRecognitionController !== recognitionController) {
             return;
@@ -643,6 +712,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
   // 監聽 Provider 切換以自動更新介面
   setTimeout(() => {
+    const taskModeEl = document.getElementById('asrTaskMode');
+    const transcriptRow = document.getElementById('asrTranscriptRow');
+    const targetSummary = document.getElementById('asrTargetSummary');
     const providerEl = document.getElementById('asrProvider');
     const apiKeyEl = document.getElementById('asrApiKey');
     const keyLabelEl = document.getElementById('asrKeyLabel');
@@ -653,6 +725,19 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     const promptLabelEl = document.getElementById('asrPromptLabel');
     const builtinRow = document.getElementById('asrBuiltinRow');
     const keyRow = document.getElementById('asrKeyRow');
+
+    const updateTaskUI = () => {
+      const alignMode = taskModeEl?.value === 'align';
+      if (transcriptRow) transcriptRow.style.display = alignMode ? 'flex' : 'none';
+      if (targetSummary) targetSummary.value = `自動建立「${alignMode ? '文本匹配' : '語音辨識'}」新軌`;
+      const primaryButton = document.querySelector('#modalFoot button.primary');
+      if (primaryButton) primaryButton.textContent = alignMode ? '開始匹配' : '🚀 開始辨識';
+    };
+
+    if (taskModeEl) {
+      taskModeEl.onchange = updateTaskUI;
+      updateTaskUI();
+    }
 
     if (providerEl) {
       const updateProviderUI = () => {

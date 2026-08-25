@@ -215,4 +215,156 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     await vi.waitFor(() => expect(closeModal).toHaveBeenCalledWith({ committed: true }));
     expect(showToast).toHaveBeenCalledTimes(1);
   });
+
+  it('文本匹配以使用者每一行為字幕內容，只採用辨識結果的時間證據', async () => {
+    engineMocks.transcribeAudioStream.mockResolvedValue([
+      {
+        start: 0.2,
+        end: 1.2,
+        text: '辨識正確',
+        words: [{ text: '辨識正確', start: 0.2, end: 1.2 }]
+      },
+      {
+        start: 1.5,
+        end: 2.8,
+        text: 'second line exact',
+        words: [
+          { text: 'second', start: 1.5, end: 1.9 },
+          { text: 'line', start: 2, end: 2.3 },
+          { text: 'exact', start: 2.4, end: 2.8 }
+        ]
+      }
+    ]);
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'align' });
+    openSpeechRecognitionDialog({
+      id: 'alignment-success',
+      name: 'alignment-success.wav',
+      offset: 10,
+      in: 0,
+      out: 3,
+      duration: 3,
+      audioBuffer: { duration: 3 }
+    });
+    document.getElementById('asrTranscript').value = '  辨識正確。  \n  Second line exact.  ';
+
+    document.querySelector('#modalFoot button.primary').click();
+    await vi.waitFor(() => expect(closeModal).toHaveBeenCalledWith({ committed: true }));
+
+    expect(State.tracks.at(-1).name).toBe('文本匹配');
+    expect(State.cues.map(cue => ({ text: cue.text, start: cue.start, end: cue.end }))).toEqual([
+      { text: '辨識正確。', start: 10.2, end: 11.2 },
+      { text: 'Second line exact.', start: 11.5, end: 12.8 }
+    ]);
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('文本匹配完成'));
+    expect(localStorage.getItem('subtool_asr_config')).not.toContain('辨識正確。');
+  });
+
+  it('只有部分行的逐字時間重疊時，錯誤訊息只回報真正有疑義的行數', async () => {
+    engineMocks.transcribeAudioStream.mockResolvedValue([{
+      start: 0,
+      end: 2,
+      text: '紐約大學第三行',
+      words: [
+        { text: '紐約大學', start: 0, end: 1 },
+        { text: '第三行', start: 1.2, end: 2 }
+      ]
+    }]);
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'align' });
+    openSpeechRecognitionDialog({
+      id: 'alignment-partial-ambiguity',
+      name: 'alignment-partial-ambiguity.wav',
+      in: 0,
+      out: 2,
+      duration: 2,
+      audioBuffer: { duration: 2 }
+    });
+    document.getElementById('asrTranscript').value = '紐約\n大學\n第三行';
+
+    document.querySelector('#modalFoot button.primary').click();
+    await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('無法可靠匹配'));
+
+    expect(document.getElementById('asrStatus').textContent).toContain('2/3 行');
+    expect(State.tracks.map(track => track.name)).toEqual(['軌道 1']);
+  });
+
+  it('文本匹配只有句級時間證據時會提醒使用者抽查時間碼', async () => {
+    engineMocks.transcribeAudioStream.mockResolvedValue([{
+      start: 0,
+      end: 3,
+      text: '第一行 second line'
+    }]);
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'align' });
+    openSpeechRecognitionDialog({
+      id: 'alignment-segment-evidence',
+      name: 'alignment-segment-evidence.wav',
+      in: 0,
+      out: 3,
+      duration: 3,
+      audioBuffer: { duration: 3 }
+    });
+    document.getElementById('asrTranscript').value = '第一行。\nSecond line.';
+
+    document.querySelector('#modalFoot button.primary').click();
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalled());
+
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('句級估算，請抽查'));
+  });
+
+  it('文本匹配沒有貼入逐行文字稿時不會啟動聲音分析', async () => {
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'align' });
+    openSpeechRecognitionDialog({
+      id: 'alignment-empty-transcript',
+      name: 'alignment-empty-transcript.wav',
+      in: 0,
+      out: 2,
+      duration: 2,
+      audioBuffer: { duration: 2 }
+    });
+
+    document.querySelector('#modalFoot button.primary').click();
+
+    expect(engineMocks.transcribeAudioStream).not.toHaveBeenCalled();
+    expect(document.getElementById('asrStatus').textContent).toContain('請貼上文字稿');
+    expect(document.activeElement).toBe(document.getElementById('asrTranscript'));
+  });
+
+  it('文本匹配一次選到多個素材時不會重複套用同一份文字稿', async () => {
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'align' });
+    openSpeechRecognitionDialog([
+      { id: 'alignment-source-1', name: 'one.wav', in: 0, out: 1, duration: 1, audioBuffer: { duration: 1 } },
+      { id: 'alignment-source-2', name: 'two.wav', in: 0, out: 1, duration: 1, audioBuffer: { duration: 1 } }
+    ]);
+    document.getElementById('asrTranscript').value = '固定的一行';
+
+    document.querySelector('#modalFoot button.primary').click();
+
+    expect(engineMocks.transcribeAudioStream).not.toHaveBeenCalled();
+    expect(document.getElementById('asrStatus').textContent).toContain('一次只能處理一個音訊來源');
+  });
+
+  it('文字稿與聲音差異過大時整批不建立字幕軌', async () => {
+    engineMocks.transcribeAudioStream.mockResolvedValue([{
+      start: 0,
+      end: 2,
+      text: '完全不同內容'
+    }]);
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'align' });
+    openSpeechRecognitionDialog({
+      id: 'alignment-low-coverage',
+      name: 'alignment-low-coverage.wav',
+      in: 0,
+      out: 2,
+      duration: 2,
+      audioBuffer: { duration: 2 }
+    });
+    document.getElementById('asrTranscript').value = 'This transcript does not match.';
+
+    document.querySelector('#modalFoot button.primary').click();
+    await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('無法可靠匹配'));
+
+    expect(State.tracks.map(track => track.name)).toEqual(['軌道 1']);
+    expect(State.cues).toHaveLength(0);
+    expect(closeModal).not.toHaveBeenCalledWith({ committed: true });
+    expect(showToast).not.toHaveBeenCalled();
+  });
 });
