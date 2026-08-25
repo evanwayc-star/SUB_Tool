@@ -216,6 +216,53 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     expect(showToast).toHaveBeenCalledTimes(1);
   });
 
+  it('辨識來源選單依來源座標排序，並把指定單軌而非全部平均送入辨識引擎', async () => {
+    const makeBuffer = value => ({
+      sampleRate: 16000,
+      numberOfChannels: 1,
+      length: 16,
+      duration: 0.001,
+      getChannelData: channel => {
+        if (channel !== 0) throw new RangeError('mono');
+        return new Float32Array(16).fill(value);
+      }
+    });
+    const scrambled = [7, 1, 5, 0, 6, 3, 2, 4].map(sourceStream => ({
+      sourceStream,
+      sourceChannel: 0,
+      buffer: makeBuffer((sourceStream + 1) / 10)
+    }));
+    engineMocks.transcribeAudioStream.mockResolvedValue([{ start: 0, end: 0.001, text: 'done' }]);
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', taskMode: 'transcribe' });
+    openSpeechRecognitionDialog({
+      id: 'eight-source-channels',
+      name: 'eight-source-channels.mxf',
+      in: 0,
+      out: 0.001,
+      duration: 0.001,
+      recognitionTracks: scrambled
+    });
+
+    const sourceSelect = document.getElementById('asrRecognitionAudioSource');
+    const optionLabels = [...sourceSelect.options].map(option => option.textContent.trim());
+    expect(sourceSelect.selectedOptions[0].textContent.trim()).toBe('全部來源聲道混音（8 軌）');
+    expect(optionLabels).toEqual([
+      '全部來源聲道混音（8 軌）',
+      '最後兩軌組（來源聲道 7 + 8）',
+      '來源聲道 1', '來源聲道 2', '來源聲道 3', '來源聲道 4',
+      '來源聲道 5', '來源聲道 6', '來源聲道 7', '來源聲道 8'
+    ]);
+
+    sourceSelect.value = [...sourceSelect.options]
+      .find(option => option.textContent.trim() === '來源聲道 3').value;
+    document.querySelector('#modalFoot button.primary').click();
+    await vi.waitFor(() => expect(engineMocks.transcribeAudioStream).toHaveBeenCalledTimes(1));
+
+    const sentBuffer = engineMocks.transcribeAudioStream.mock.calls[0][0].audioBuffer;
+    expect(sentBuffer.numberOfChannels).toBe(1);
+    expect(sentBuffer.getChannelData(0)[0]).toBeCloseTo(0.3, 6);
+  });
+
   it('文本匹配以使用者每一行為字幕內容，只採用辨識結果的時間證據', async () => {
     engineMocks.transcribeAudioStream.mockResolvedValue([
       {
@@ -285,6 +332,83 @@ describe('本機語音辨識進行中的回饋與取消', () => {
 
     expect(document.getElementById('asrStatus').textContent).toContain('2/3 行');
     expect(State.tracks.map(track => track.name)).toEqual(['軌道 1']);
+  });
+
+  it('文本匹配失敗時列出實際行號，並可下載不含 Azure Key 的安全診斷 JSON', async () => {
+    const originalCreateObjectURL = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
+    const originalRevokeObjectURL = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+    let downloadedBlob = null;
+    let downloadedName = '';
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(blob => { downloadedBlob = blob; return 'blob:alignment-diagnostic'; })
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click() {
+      downloadedName = this.download;
+    });
+
+    try {
+      engineMocks.transcribeAudioStream.mockResolvedValue([{
+        start: 0,
+        end: 2,
+        text: '紐約大學第三行',
+        words: [
+          { text: '紐約大學', start: 0, end: 1 },
+          { text: '第三行', start: 1.2, end: 2 }
+        ],
+        apiKey: 'nested-secret'
+      }]);
+      saveAsrConfig({
+        ...getAsrConfig(),
+        provider: 'azure',
+        taskMode: 'align',
+        azureApiKey: 'diagnostic-secret',
+        azureRegion: 'japaneast',
+        language: 'zh'
+      });
+      openSpeechRecognitionDialog({
+        id: 'alignment-diagnostic',
+        name: 'C:\\private\\alignment-diagnostic.wav',
+        in: 0,
+        out: 2,
+        duration: 2,
+        audioBuffer: { duration: 2 }
+      });
+      document.getElementById('asrTranscript').value = '紐約\n大學\n第三行';
+
+      document.querySelector('#modalFoot button.primary').click();
+      await vi.waitFor(() => expect(document.getElementById('asrStatus').textContent).toContain('2/3 行'));
+
+      const diagnosticRow = document.getElementById('asrAlignmentDiagnostic');
+      const lineNumbers = document.getElementById('asrUnreliableLineNumbers');
+      const downloadButton = document.getElementById('asrDownloadAlignmentDiagnostic');
+      expect(getComputedStyle(diagnosticRow).display).not.toBe('none');
+      expect(lineNumbers.textContent).toContain('第 1、2 行');
+      expect(downloadButton.textContent).toBe('匯出診斷 JSON');
+
+      downloadButton.click();
+      expect(downloadedName).toMatch(/^SUBTool_文本匹配診斷_.*\.json$/u);
+      expect(downloadedBlob?.type).toBe('application/json');
+      const serialized = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(downloadedBlob);
+      });
+      const diagnostic = JSON.parse(serialized);
+      expect(diagnostic.unreliableLines.map(line => line.lineNumber)).toEqual([1, 2]);
+      expect(diagnostic.audioSelection).toEqual({ mode: 'all-source-channels' });
+      expect(serialized).not.toContain('diagnostic-secret');
+      expect(serialized).not.toContain('nested-secret');
+      expect(serialized).not.toContain('C:\\private');
+    } finally {
+      anchorClick.mockRestore();
+      if (originalCreateObjectURL) Object.defineProperty(URL, 'createObjectURL', originalCreateObjectURL);
+      else delete URL.createObjectURL;
+      if (originalRevokeObjectURL) Object.defineProperty(URL, 'revokeObjectURL', originalRevokeObjectURL);
+      else delete URL.revokeObjectURL;
+    }
   });
 
   it('文本匹配只有句級時間證據時會提醒使用者抽查時間碼', async () => {

@@ -20,6 +20,7 @@ import {
   convertAsrSegmentsToTraditionalChinese,
   callWhisperApi,
   getClipAudioBuffer,
+  getRecognitionAudioSourceChoices,
   openSpeechRecognitionDialog
 } from '../src/speech-recognition.js';
 
@@ -354,6 +355,136 @@ describe('語音辨識與字幕生成模組', () => {
     expect(window.subtool.fileURL).not.toHaveBeenCalled();
   });
 
+  it('全部、單一與最後兩軌來源會產生三組不同且可驗證的 WAV PCM', async () => {
+    const patterns = [
+      [0.8, 0], [0, 0.8], [0.8, 0.8], [0.8, -0.8],
+      [0, 0], [0, 0], [0.8, 0], [0, 0.8]
+    ];
+    const clip = {
+      recognitionTracks: patterns.map((pattern, sourceStream) => ({
+        sourceStream,
+        sourceChannel: 0,
+        buffer: {
+          sampleRate: 16000,
+          numberOfChannels: 1,
+          length: 2,
+          duration: 2 / 16000,
+          getChannelData: () => new Float32Array(pattern)
+        }
+      }))
+    };
+    const choices = getRecognitionAudioSourceChoices(clip);
+    const byLabel = label => choices.find(choice => choice.label === label).selection;
+    const firstSamples = async selection => {
+      const selected = await getClipAudioBuffer(clip, { recognitionSelection: selection });
+      const wav = encodeWav16kMono(selected, 0, selected.duration);
+      const view = new DataView(await wav.arrayBuffer());
+      return [view.getInt16(44, true), view.getInt16(46, true)];
+    };
+
+    expect(await firstSamples(byLabel('來源聲道 1'))).toEqual([31128, 0]);
+    expect(await firstSamples(byLabel('最後兩軌組（來源聲道 7 + 8）'))).toEqual([31128, 31128]);
+    expect(await firstSamples(byLabel('全部來源聲道混音（8 軌）'))).toEqual([31128, 15564]);
+  });
+
+  it('全部模式會把 6 聲道與 2 聲道資源展開成 8 軌等權平均', async () => {
+    const makeBuffer = patterns => ({
+      sampleRate: 16000,
+      numberOfChannels: patterns.length,
+      length: 2,
+      duration: 2 / 16000,
+      getChannelData: channel => new Float32Array(patterns[channel])
+    });
+    const surround = makeBuffer(Array.from({ length: 6 }, () => [0.8, 0]));
+    const stereo = makeBuffer(Array.from({ length: 2 }, () => [0, 0.8]));
+    const clip = {
+      recognitionTracks: [
+        ...Array.from({ length: 6 }, (_, sourceChannel) => ({
+          sourceStream: 0,
+          sourceChannel,
+          buffer: surround
+        })),
+        ...Array.from({ length: 2 }, (_, sourceChannel) => ({
+          sourceStream: 1,
+          sourceChannel,
+          buffer: stereo
+        }))
+      ]
+    };
+
+    const mixed = await getClipAudioBuffer(clip);
+    const wav = encodeWav16kMono(mixed, 0, mixed.duration);
+    const view = new DataView(await wav.arrayBuffer());
+    expect([view.getInt16(44, true), view.getInt16(46, true)]).toEqual([31128, 10376]);
+  });
+
+  it('共用的多聲道快取可選真實聲道，但共用單聲道 URL 不製造假的單軌選項', async () => {
+    const sharedStereo = {
+      sampleRate: 16000,
+      numberOfChannels: 2,
+      length: 2,
+      duration: 2 / 16000,
+      getChannelData: channel => [
+        new Float32Array([0.7, 0]),
+        new Float32Array([0, 0.5])
+      ][channel]
+    };
+    const multichannelClip = {
+      recognitionTracks: [
+        { sourceStream: 0, sourceChannel: 1, buffer: sharedStereo },
+        { sourceStream: 0, sourceChannel: 0, buffer: sharedStereo }
+      ]
+    };
+    const choices = getRecognitionAudioSourceChoices(multichannelClip);
+    expect(choices.map(choice => choice.label)).toEqual([
+      '全部來源聲道混音（2 軌）',
+      '來源聲道 1',
+      '來源聲道 2'
+    ]);
+
+    const second = await getClipAudioBuffer(multichannelClip, {
+      recognitionSelection: choices.find(choice => choice.label === '來源聲道 2').selection
+    });
+    expect([...second.getChannelData(0)]).toEqual([0, 0.5]);
+
+    const duplicatedMonoURL = getRecognitionAudioSourceChoices({
+      recognitionTracks: [
+        { sourceStream: 0, sourceChannel: 0, el: { src: 'subtool-local://resource/shared-mono' } },
+        { sourceStream: 1, sourceChannel: 0, el: { src: 'subtool-local://resource/shared-mono' } }
+      ]
+    });
+    expect(duplicatedMonoURL.map(choice => choice.label)).toEqual(['全部來源聲道混音（2 軌）']);
+  });
+
+  it('單一來源聲道選項只投影指定 sourceChannel，不會混入同 buffer 的其他聲道', async () => {
+    const selectedBuffer = {
+      sampleRate: 16000,
+      numberOfChannels: 2,
+      length: 2,
+      duration: 2 / 16000,
+      getChannelData: channel => new Float32Array(channel === 0 ? [0.8, 0] : [0, 0.8])
+    };
+    const clip = {
+      recognitionTracks: [
+        { sourceStream: 0, sourceChannel: 0, buffer: selectedBuffer },
+        {
+          sourceStream: 1,
+          sourceChannel: 0,
+          buffer: {
+            ...selectedBuffer,
+            getChannelData: () => new Float32Array([0, 0])
+          }
+        }
+      ]
+    };
+    const selection = getRecognitionAudioSourceChoices(clip)
+      .find(choice => choice.label === '來源聲道 1').selection;
+    const selected = await getClipAudioBuffer(clip, { recognitionSelection: selection });
+    const wav = encodeWav16kMono(selected, 0, selected.duration);
+    const view = new DataView(await wav.arrayBuffer());
+    expect([view.getInt16(44, true), view.getInt16(46, true)]).toEqual([31128, 0]);
+  });
+
   it('標記 preferCache 的素材快取未就緒時不讀取母容器', async () => {
     const fetchImpl = vi.fn();
     Object.defineProperty(window, 'subtool', {
@@ -371,6 +502,26 @@ describe('語音辨識與字幕生成模組', () => {
 
     expect(window.subtool.fileURL).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('全部模式遇到任一 preferCache 來源聲道未就緒時不會靜默只混其餘聲道', async () => {
+    const readyBuffer = {
+      sampleRate: 16000,
+      numberOfChannels: 1,
+      length: 2,
+      duration: 2 / 16000,
+      getChannelData: () => new Float32Array([0.8, 0])
+    };
+
+    await expect(getClipAudioBuffer({
+      id: 'partial-cache',
+      name: 'partial-cache.mxf',
+      preferCache: true,
+      recognitionTracks: [
+        { sourceStream: 0, sourceChannel: 0, buffer: readyBuffer },
+        { sourceStream: 1, sourceChannel: 0 }
+      ]
+    })).rejects.toThrow('來源聲道快取仍在準備中');
   });
 
   describe('設定管理 (Configuration)', () => {

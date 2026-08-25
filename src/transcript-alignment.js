@@ -73,6 +73,7 @@ const ALIGN_DIAGONAL = 1;
 const ALIGN_TRANSCRIPT_GAP = 2;
 const ALIGN_EVIDENCE_GAP = 3;
 const MAX_ALIGNMENT_CELLS = 16_000_000;
+const MIN_ALIGNMENT_COVERAGE = 0.55;
 
 function alignTokenSequences(transcriptTokens, evidenceTokens) {
   const transcriptLength = transcriptTokens.length;
@@ -187,7 +188,8 @@ export function alignTranscriptToEvidence({ transcript, evidenceSegments } = {})
         timingEvidence: 'none',
         reviewCount: 0,
         unmatchedLines: lines.map((_, index) => index),
-        ambiguousLines: []
+        ambiguousLines: [],
+        lowCoverageLines: []
       }
     };
   }
@@ -255,11 +257,16 @@ export function alignTranscriptToEvidence({ transcript, evidenceSegments } = {})
   const timingEvidence = timingKinds.size === 0
     ? 'none'
     : (timingKinds.size === 1 ? [...timingKinds][0] : 'mixed');
+  const lowCoverageLines = coverage < MIN_ALIGNMENT_COVERAGE
+    ? segments.flatMap((segment, index) => (
+      segment.alignment.tokenCoverage < MIN_ALIGNMENT_COVERAGE ? [index] : []
+    ))
+    : [];
   return {
-    status: unmatchedLines.length === 0 && ambiguousLines.length === 0 && coverage >= 0.55
+    status: unmatchedLines.length === 0 && ambiguousLines.length === 0 && coverage >= MIN_ALIGNMENT_COVERAGE
       ? 'aligned'
       : 'failed',
     segments,
-    summary: { coverage, timingEvidence, reviewCount, unmatchedLines, ambiguousLines }
+    summary: { coverage, timingEvidence, reviewCount, unmatchedLines, ambiguousLines, lowCoverageLines }
   };
 }

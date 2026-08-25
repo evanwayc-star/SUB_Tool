@@ -14,8 +14,9 @@ import { sortCues } from './subtitle-model.js';
 import { recordHistory } from './history.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { emit } from './events.js';
-import { decodeText, escapeHTML, readFile } from './util.js';
+import { decodeText, downloadBytes, escapeHTML, readFile } from './util.js';
 import { alignTranscriptToEvidence, parseTranscriptLines } from './transcript-alignment.js';
+import { buildTranscriptAlignmentDiagnostic } from './transcript-alignment-diagnostic.js';
 import {
   BUILTIN_MODELS,
   DEFAULT_AZURE_SPEECH_REGION,
@@ -177,13 +178,134 @@ export function saveAsrConfig(conf) {
   } catch (_) {}
 }
 
+const ALL_RECOGNITION_SOURCE_CHANNELS = Object.freeze({ mode: 'all-source-channels' });
+
+function recognitionTrackEntries(clip) {
+  return (Array.isArray(clip?.recognitionTracks) ? clip.recognitionTracks : [])
+    .map((track, index) => ({
+      track,
+      sourceStream: Number.isInteger(Number(track?.sourceStream))
+        ? Math.max(0, Number(track.sourceStream))
+        : index,
+      sourceChannel: Number.isInteger(Number(track?.sourceChannel))
+        ? Math.max(0, Number(track.sourceChannel))
+        : 0,
+      inputIndex: index
+    }))
+    .sort((a, b) => a.sourceStream - b.sourceStream || a.sourceChannel - b.sourceChannel || a.inputIndex - b.inputIndex);
+}
+
+function recognitionTrackResourceKey(track) {
+  if (track?.buffer) return track.buffer;
+  const url = track?.el?.src || track?.audioElement?.src || '';
+  if (url) return `url:${url}`;
+  if (track?.file) return `file:${track.file}`;
+  return null;
+}
+
+function independentlySelectableRecognitionEntry(entry, entries) {
+  const key = recognitionTrackResourceKey(entry.track);
+  if (!key) return false;
+  const sharing = entries.filter(candidate => recognitionTrackResourceKey(candidate.track) === key);
+  if (sharing.length === 1) return true;
+  const buffer = entry.track?.buffer;
+  if (!buffer || Number(buffer.numberOfChannels) <= 1) return false;
+  const channelIndexes = new Set(sharing.map(candidate => candidate.sourceChannel));
+  return channelIndexes.size === sharing.length &&
+    [...channelIndexes].every(channel => channel >= 0 && channel < buffer.numberOfChannels);
+}
+
+function recognitionAudioEntries(clip) {
+  const trackEntries = recognitionTrackEntries(clip);
+  if (trackEntries.length) return trackEntries;
+  const channelCount = Math.max(0, Math.floor(Number(clip?.audioBuffer?.numberOfChannels) || 0));
+  return Array.from({ length: channelCount }, (_, sourceChannel) => ({
+    track: null,
+    sourceStream: 0,
+    sourceChannel,
+    inputIndex: sourceChannel
+  }));
+}
+
+export function getRecognitionAudioSourceChoices(clip) {
+  const entries = recognitionAudioEntries(clip);
+  if (entries.length <= 1) {
+    return [{
+      value: 'all',
+      label: '全部來源聲道混音',
+      selection: ALL_RECOGNITION_SOURCE_CHANNELS
+    }];
+  }
+  const trackEntries = recognitionTrackEntries(clip);
+  const selectable = trackEntries.length
+    ? entries.filter(entry => independentlySelectableRecognitionEntry(entry, entries))
+    : entries;
+  const choices = [{
+    value: 'all',
+    label: `全部來源聲道混音（${entries.length} 軌）`,
+    selection: ALL_RECOGNITION_SOURCE_CHANNELS
+  }];
+  const tail = entries.slice(-2);
+  if (entries.length > 2 && tail.every(entry => selectable.includes(entry))) {
+    choices.push({
+      value: 'tail',
+      label: `最後兩軌組（來源聲道 ${entries.length - 1} + ${entries.length}）`,
+      selection: {
+        mode: 'source-channels',
+        channels: tail.map(({ sourceStream, sourceChannel }) => ({ sourceStream, sourceChannel }))
+      }
+    });
+  }
+  selectable.forEach(entry => {
+    const ordinal = entries.indexOf(entry) + 1;
+    choices.push({
+      value: `channel-${ordinal}`,
+      label: `來源聲道 ${ordinal}`,
+      selection: {
+        mode: 'source-channels',
+        channels: [{ sourceStream: entry.sourceStream, sourceChannel: entry.sourceChannel }]
+      }
+    });
+  });
+  return choices;
+}
+
+function selectedRecognitionEntries(entries, selection) {
+  if (!selection || selection.mode === 'all-source-channels') return entries;
+  if (selection.mode !== 'source-channels' || !Array.isArray(selection.channels) || !selection.channels.length) {
+    throw new Error('辨識音訊來源設定無效');
+  }
+  const wanted = new Set(selection.channels.map(channel => `${channel.sourceStream}:${channel.sourceChannel}`));
+  const selected = entries.filter(entry => wanted.has(`${entry.sourceStream}:${entry.sourceChannel}`));
+  if (selected.length !== wanted.size) throw new Error('選取的來源聲道不存在或尚未就緒');
+  return selected;
+}
+
+function monoChannelView(audioBuffer, sourceChannel) {
+  if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') return null;
+  const channelCount = Math.max(0, Math.floor(Number(audioBuffer.numberOfChannels) || 0));
+  const channel = channelCount === 1 ? 0 : sourceChannel;
+  if (channel < 0 || channel >= channelCount) return null;
+  return {
+    sampleRate: audioBuffer.sampleRate,
+    numberOfChannels: 1,
+    length: audioBuffer.length,
+    duration: audioBuffer.duration,
+    getChannelData: requested => {
+      if (requested !== 0) throw new RangeError('ASR 來源聲道只有一個聲道');
+      return audioBuffer.getChannelData(channel);
+    }
+  };
+}
+
 /**
  * 取得指定素材的完整 AudioBuffer
  */
 export async function getClipAudioBuffer(clip, {
   decodeAudioData = data => AudioEngine.decodeAudioData(data),
   fetchImpl = (...args) => fetch(...args),
-  signal = null
+  signal = null,
+  recognitionSelection = ALL_RECOGNITION_SOURCE_CHANNELS
 } = {}) {
   const throwIfAborted = () => {
     if (!signal?.aborted) return;
@@ -193,7 +315,16 @@ export async function getClipAudioBuffer(clip, {
     throw error;
   };
   throwIfAborted();
-  if (clip.audioBuffer) return clip.audioBuffer;
+  if (clip.audioBuffer) {
+    if (recognitionSelection?.mode !== 'source-channels') return clip.audioBuffer;
+    const entries = selectedRecognitionEntries(recognitionAudioEntries(clip), recognitionSelection);
+    const selectedBuffers = entries
+      .map(entry => monoChannelView(clip.audioBuffer, entry.sourceChannel))
+      .filter(Boolean);
+    const combined = combineRecognitionAudioBuffers(selectedBuffers);
+    if (combined) return combined;
+    throw new Error('選取的來源聲道不存在或尚未就緒');
+  }
 
   const decodeURL = async url => {
     throwIfAborted();
@@ -208,24 +339,47 @@ export async function getClipAudioBuffer(clip, {
 
   const recognitionTracks = Array.isArray(clip.recognitionTracks) ? clip.recognitionTracks : [];
   if (recognitionTracks.length) {
+    const allEntries = recognitionTrackEntries(clip);
+    const entries = selectedRecognitionEntries(allEntries, recognitionSelection);
+    const selectingChannels = recognitionSelection?.mode === 'source-channels';
     const decoded = [];
-    const seenBuffers = new Set();
-    const seenURLs = new Set();
-    for (const track of recognitionTracks) {
+    const decodedByResource = new Map();
+    const mixedResources = new Set();
+    for (const entry of entries) {
       throwIfAborted();
-      if (track?.buffer && !seenBuffers.has(track.buffer)) {
-        seenBuffers.add(track.buffer);
-        decoded.push(track.buffer);
-        continue;
-      }
+      const track = entry.track;
+      const resourceKey = recognitionTrackResourceKey(track);
+      let sourceBuffer = resourceKey ? decodedByResource.get(resourceKey) : null;
+      if (!sourceBuffer && track?.buffer) sourceBuffer = track.buffer;
       let url = track?.el?.src || track?.audioElement?.src || '';
       if (!url && track?.file && typeof window !== 'undefined' && window.subtool?.fileURL) {
         url = await window.subtool.fileURL(track.file);
         throwIfAborted();
       }
-      if (!url || seenURLs.has(url)) continue;
-      seenURLs.add(url);
-      decoded.push(await decodeURL(url));
+      if (!sourceBuffer && url) sourceBuffer = await decodeURL(url);
+      if (!sourceBuffer) {
+        if (selectingChannels || clip.preferCache) {
+          throw new Error('辨識來源聲道快取仍在準備中，請稍後再辨識');
+        }
+        continue;
+      }
+      if (resourceKey) decodedByResource.set(resourceKey, sourceBuffer);
+      if (!selectingChannels) {
+        const mixedResourceKey = resourceKey || sourceBuffer;
+        if (mixedResources.has(mixedResourceKey)) continue;
+        mixedResources.add(mixedResourceKey);
+        const channelCount = Math.max(0, Math.floor(Number(sourceBuffer.numberOfChannels) || 0));
+        for (let sourceChannel = 0; sourceChannel < channelCount; sourceChannel++) {
+          const mono = monoChannelView(sourceBuffer, sourceChannel);
+          if (mono) decoded.push(mono);
+        }
+        continue;
+      }
+      const mono = monoChannelView(sourceBuffer, entry.sourceChannel);
+      if (!mono) {
+        throw new Error('選取的來源聲道不存在或尚未就緒');
+      }
+      decoded.push(mono);
     }
     const combined = combineRecognitionAudioBuffers(decoded);
     if (combined) return combined;
@@ -370,6 +524,15 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     : (initialGuidanceMeta ? (conf.prompt || '') : '');
   const cloudProvider = !!initialProviderMeta;
   const selectedApiKey = initialProviderMeta ? (conf[initialProviderMeta.keyField] || '') : '';
+  const recognitionAudioChoices = clips.length === 1
+    ? getRecognitionAudioSourceChoices(clips[0])
+    : [{ value: 'all', label: '全部來源聲道混音', selection: ALL_RECOGNITION_SOURCE_CHANNELS }];
+  const recognitionAudioSelectionByValue = new Map(
+    recognitionAudioChoices.map(choice => [choice.value, choice.selection])
+  );
+  const recognitionAudioOptions = recognitionAudioChoices
+    .map(choice => `<option value="${escapeHTML(choice.value)}">${escapeHTML(choice.label)}</option>`)
+    .join('');
 
   const totalDur = clips.reduce((acc, c) => {
     const inT = Number(c.in) || 0;
@@ -389,6 +552,12 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       <div style="background:var(--panel2);border:1px solid var(--border2);border-radius:6px;padding:10px;">
         <div style="font-weight:600;margin-bottom:6px;color:var(--text);">已選取 ${clips.length} 個音訊來源（總長度約 ${secToEncore(totalDur, State.fps, State.dropFrame)}）：</div>
         <div style="max-height:80px;overflow-y:auto;font-size:12px;color:var(--text-dim);">${clipsSummary}</div>
+      </div>
+
+      <div id="asrRecognitionAudioSourceRow" style="display:${recognitionAudioChoices.length > 1 ? 'flex' : 'none'};flex-direction:column;gap:5px;">
+        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">辨識音訊來源：</label>
+        <select id="asrRecognitionAudioSource" style="width:100%;">${recognitionAudioOptions}</select>
+        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">預設「全部」會逐來源聲道等權平均成 mono；只影響本次辨識，不改變播放、波形、專案音軌或輸出。</div>
       </div>
 
       <div style="display:flex;flex-direction:column;gap:5px;">
@@ -484,10 +653,18 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       </div>
 
       <div id="asrStatus" style="font-size:12px;color:var(--accent);display:none;padding:6px 0;"></div>
+      <div id="asrAlignmentDiagnostic" style="display:none;flex-direction:column;gap:6px;padding:8px;border:1px solid var(--red);border-radius:5px;background:color-mix(in srgb,var(--red) 8%,transparent);">
+        <div id="asrUnreliableLineNumbers" style="font-size:11px;line-height:1.5;color:var(--text);max-height:72px;overflow:auto;"></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:10px;line-height:1.4;color:var(--text-faint);">診斷檔含完整稿件與辨識文字／時間；不從素材或設定帶入名稱、路徑、URL、API Key、HTTP 標頭或音訊。文字本身仍可能含敏感內容，分享前請確認。</span>
+          <button type="button" id="asrDownloadAlignmentDiagnostic" style="flex:none;padding:4px 9px;font-size:11px;">匯出診斷 JSON</button>
+        </div>
+      </div>
     </div>
   `;
 
   let activeRecognitionController = null;
+  let latestAlignmentDiagnostic = null;
   const abortActiveRecognition = () => {
     if (activeRecognitionController && !activeRecognitionController.signal.aborted) {
       activeRecognitionController.abort();
@@ -506,6 +683,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       act: async () => {
         const taskModeEl = document.getElementById('asrTaskMode');
         const transcriptEl = document.getElementById('asrTranscript');
+        const recognitionAudioSourceEl = document.getElementById('asrRecognitionAudioSource');
         const providerEl = document.getElementById('asrProvider');
         const builtinModelEl = document.getElementById('asrBuiltinModel');
         const apiKeyEl = document.getElementById('asrApiKey');
@@ -518,6 +696,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const progressPercent = document.getElementById('asrProgressPercent');
         const progressBar = document.getElementById('asrProgressBar');
         const modalFoot = document.getElementById('modalFoot');
+        const alignmentDiagnosticEl = document.getElementById('asrAlignmentDiagnostic');
+        const unreliableLineNumbersEl = document.getElementById('asrUnreliableLineNumbers');
 
         const taskMode = taskModeEl?.value === 'align' ? 'align' : 'transcribe';
         const transcript = transcriptEl?.value || '';
@@ -531,6 +711,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const prompt = guidance.prompt || '';
         const azurePhrases = guidance.azurePhrases || [];
         const providerMeta = CLOUD_PROVIDER_META[provider] || null;
+        const recognitionSelection = recognitionAudioSelectionByValue.get(recognitionAudioSourceEl?.value || 'all')
+          || ALL_RECOGNITION_SOURCE_CHANNELS;
 
         const showValidationError = (message, focusTarget = null) => {
           if (statusEl) {
@@ -540,6 +722,10 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           }
           focusTarget?.focus();
         };
+
+        latestAlignmentDiagnostic = null;
+        if (alignmentDiagnosticEl) alignmentDiagnosticEl.style.display = 'none';
+        if (unreliableLineNumbersEl) unreliableLineNumbersEl.textContent = '';
 
         if (taskMode === 'align' && clips.length !== 1) {
           showValidationError('文本匹配目前一次只能處理一個音訊來源；請只選取一個素材後再試。');
@@ -599,7 +785,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             if (statusEl) {
               statusEl.textContent = `[${i + 1}/${clips.length}] 正在萃取「${c.name || '音訊素材'}」之音訊資料…`;
             }
-            const audioBuffer = await getClipAudioBuffer(c, { signal });
+            const audioBuffer = await getClipAudioBuffer(c, { signal, recognitionSelection });
             if (!recognitionIsActive()) return;
             const inT = Number(c.in) || 0;
             const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (audioBuffer.duration || 0)));
@@ -659,8 +845,25 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
               if (aligned.status !== 'aligned') {
                 const unreliableLines = new Set([
                   ...(aligned.summary?.unmatchedLines || []),
-                  ...(aligned.summary?.ambiguousLines || [])
+                  ...(aligned.summary?.ambiguousLines || []),
+                  ...(aligned.summary?.lowCoverageLines || [])
                 ]);
+                latestAlignmentDiagnostic = buildTranscriptAlignmentDiagnostic({
+                  provider,
+                  language,
+                  audioSelection: recognitionSelection,
+                  transcript,
+                  evidenceSegments,
+                  alignmentResult: aligned
+                });
+                const lineNumbers = latestAlignmentDiagnostic.unreliableLines
+                  .map(line => line.lineNumber);
+                if (alignmentDiagnosticEl) alignmentDiagnosticEl.style.display = 'flex';
+                if (unreliableLineNumbersEl) {
+                  unreliableLineNumbersEl.textContent = lineNumbers.length
+                    ? `不可靠行號：第 ${lineNumbers.join('、')} 行`
+                    : '未找到可列出的行號；請匯出診斷資料檢查整體相似度。';
+                }
                 const mismatchSummary = unreliableLines.size > 0
                   ? `文字稿有 ${unreliableLines.size}/${transcriptLines.length} 行無法可靠匹配`
                   : '文字稿與聲音的整體相似度不足';
@@ -735,6 +938,19 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     const promptLabelEl = document.getElementById('asrPromptLabel');
     const builtinRow = document.getElementById('asrBuiltinRow');
     const keyRow = document.getElementById('asrKeyRow');
+    const downloadAlignmentDiagnostic = document.getElementById('asrDownloadAlignmentDiagnostic');
+
+    if (downloadAlignmentDiagnostic) {
+      downloadAlignmentDiagnostic.onclick = () => {
+        if (!latestAlignmentDiagnostic) return;
+        const timestamp = latestAlignmentDiagnostic.generatedAt
+          .replace(/[:.]/gu, '-')
+          .replace('T', '_')
+          .replace(/Z$/u, '');
+        const bytes = new TextEncoder().encode(`${JSON.stringify(latestAlignmentDiagnostic, null, 2)}\n`);
+        downloadBytes(bytes, `SUBTool_文本匹配診斷_${timestamp}.json`, 'application/json');
+      };
+    }
 
     const updateTaskUI = () => {
       const alignMode = taskModeEl?.value === 'align';

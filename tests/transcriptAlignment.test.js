@@ -122,4 +122,29 @@ describe('逐行文字稿時間匹配', () => {
     expect(result.status).toBe('failed');
     expect(result.summary.ambiguousLines).toEqual([0, 1]);
   });
+
+  it('整體精確詞覆蓋不足時列出低覆蓋行，即使每行仍勉強有時間錨點', () => {
+    const result = alignTranscriptToEvidence({
+      transcript: 'alpha beta\ngamma delta',
+      evidenceSegments: [{
+        start: 0,
+        end: 4,
+        text: 'alpha wrong gamma other',
+        words: [
+          { text: 'alpha', start: 0, end: 0.8 },
+          { text: 'wrong', start: 1, end: 1.8 },
+          { text: 'gamma', start: 2, end: 2.8 },
+          { text: 'other', start: 3, end: 3.8 }
+        ]
+      }]
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.summary).toMatchObject({
+      coverage: 0.5,
+      unmatchedLines: [],
+      ambiguousLines: [],
+      lowCoverageLines: [0, 1]
+    });
+  });
 });
