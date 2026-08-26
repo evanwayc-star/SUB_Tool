@@ -25,6 +25,7 @@ import {
   jklClear,
   jklApply,
   jklReset,
+  stopFrameShuttle,
   getJklSpeed,
   setJklSpeed,
   shuttleRewind,
@@ -53,7 +54,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('keyup', e => {
     _keysPressed.delete(e.key.toLowerCase());
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      if (getJklSpeed() !== 0) jklReset();
+      stopFrameShuttle();
     }
   });
 

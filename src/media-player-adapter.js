@@ -27,7 +27,7 @@ class MpvTransport {
   get type() { return 'mpv'; }
   async play() { return this.mpv?.play?.(); }
   async pause() { return this.mpv?.pause?.(); }
-  async seek(time) { return this.mpv?.seek?.(time); }
+  async seek(time, options) { return this.mpv?.seek?.(time, options); }
   async rate(value) { return this.mpv?.rate?.(value); }
   supportsNativeReverse() { return typeof this.mpv?.direction === 'function'; }
   async direction(value) {
@@ -171,7 +171,7 @@ export function createNativePreviewRuntime({
     async clearGuides() { return clearGuides(); },
     async play() { return activeTransport.play(); },
     async pause() { return activeTransport.pause(); },
-    async seek(time) { return activeTransport.seek(time); },
+    async seek(time, options) { return activeTransport.seek(time, options); },
     async rate(value) { return activeTransport.rate(value); },
     supportsNativeReverse() { return mode === 'mpv' && activeTransport.supportsNativeReverse(); },
     async direction(value) {

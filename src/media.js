@@ -36,7 +36,7 @@ import { AudioPipeline } from './audio-pipeline.js';
 import { destroyScrubber } from './scrub-scheduler.js';
 import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
 import { activateHtml5Transport, getPlayerAdapter } from './media-player-adapter.js';
-import { secToEncore, snapTimeToFrame } from './time.js';
+import { getExactFps, secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset } from './external-audio.js';
@@ -149,7 +149,7 @@ const Media = {
   _webFfmpegTail:Promise.resolve(),
   objectURLs:[],
   get mpvMode(){ return getPlayerAdapter().mode === 'mpv'; },
-  _mpvTime:0, _mpvDuration:0, _bgVersion:0,
+  _mpvTime:0, _mpvDuration:0, _mpvExactSeek:false, _mpvSeekOffset:0, _bgVersion:0,
   _nativeReverse:false,
   /* mpv 畫面接管旗標：true＝WebCodecs 已接管、mpv 視窗讓位。 */
   _wcTakeover:false,
@@ -881,20 +881,22 @@ const Media = {
 
   /* --- mpv 即時開啟路徑（偵測到 mpv.exe 時使用，無需等 proxy 轉檔） --- */
   _mpvRect(){ const vw=$('videoWrap'); const r=vw.getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height}; },
-  async _bgAudioIngest(p, audio, dur, primary=Seq.primary()){
+  async _bgAudioIngest(p, audio, dur, primary=Seq.primary(), {needsProxy=true}={}){
     const myVer=this._bgVersion;
     // Background work belongs to the exact mother-source object that started
     // it.  Deleting the final clip does not reset the whole Media singleton,
     // so generation alone cannot prevent a late cache result from recreating
     // that source in audioProject/Wave.
     const current=()=>this._bgVersion===myVer&&!!this._liveClipForSource(primary);
-    setStatus('正在轉檔 Proxy 與分析音訊（背景處理，不影響播放）…','busy');
+    setStatus(needsProxy
+      ? '正在轉檔 Proxy 與分析音訊（背景處理，不影響播放）…'
+      : '正在分析音訊（背景處理，不影響播放）…','busy');
     let res;
-    // needsProxy:true（v4.22 WebCodecs 階段5）：mpv 路徑同 pass 一併產 720p proxy——
-    // proxy 就緒後 WebCodecs 預覽引擎接管畫面（即時多軌合成），mpv 退居時鐘＋兜底
+    // 一般 mpv 路徑同 pass 產 720p proxy，讓 WebCodecs 預覽引擎可在多軌合成時接管；
+    // frame-accurate H.264/H.265 MP4 則只抽音訊，不產 proxy，保持 mpv 為逐格呈現者。
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
-    try{ res=await DESK.ingest({path:p,duration:dur,needsProxy:true,audio,queue:true}); }
+    try{ res=await DESK.ingest({path:p,duration:dur,needsProxy,audio,queue:true}); }
     catch(e){ if(!current()) return; console.warn('bg audio ingest:',e); this.pendingChannels=[]; emit('media:audioTracks'); setStatus('音軌抽取失敗：'+e.message,''); return; }
     if(!current()) return; // 使用者已換另一個檔，丟棄結果
     if(res.proxy){
@@ -1419,6 +1421,7 @@ const Media = {
   async _ensureClip(c, localT, resume){
     if(this._seqSwitching||!State.clips.includes(c)) return;
     if(c.type === 'image') return; // 圖片是純視覺疊層，不經過播放引擎
+    this._setMpvSeekProfile(c);
     if(resume === undefined) resume = this.playing;
     if(this.activeClipId === c.id && !this._gap){ this._playerSeekSource(localT); return; }
     const projectOperation=this._assetOperation(null,{kind:'sequence-switch',id:c.id});
@@ -1452,7 +1455,7 @@ const Media = {
             this._mpvPath = c.path;
           }
           this._mpvTime = localT;
-          getPlayerAdapter().seek(localT).catch(()=>{});
+          this._seekMpv(localT).catch(()=>{});
           // mpv 靜音隨「當前段是否已有元素音軌」同步：有→靜音（元素接管），無→出聲
           //（否則主媒體音軌就緒後 mute(true) 會讓沒有元素音軌的新段完全無聲）
           const _srcKey = c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id));
@@ -1506,8 +1509,16 @@ const Media = {
       }
     }
   },
+  _setMpvSeekProfile(clip){
+    this._mpvExactSeek=!!clip?.mpvExactSeek;
+    this._mpvSeekOffset=Math.max(0, Number(clip?.mpvSeekOffset)||0);
+  },
+  _seekMpv(time){
+    const target=Math.max(0, time-this._mpvSeekOffset);
+    return getPlayerAdapter()?.seek(target, this._mpvExactSeek ? { exact:true } : undefined);
+  },
   _playerSeekSource(s){
-    if(this.mpvMode){ this._mpvTime = s; getPlayerAdapter()?.seek(s).catch(()=>{}); }
+    if(this.mpvMode){ this._mpvTime = s; this._seekMpv(s).catch(()=>{}); }
     else if(video.hasAttribute('src')){ try{ video.currentTime = s; }catch(e){} }
   },
   /* 播放中的每幀檢查（rafLoop 呼叫）：段尾切換 / 間隙進出 / 序列結尾停止 */
@@ -1592,6 +1603,7 @@ const Media = {
           if(base){ // 同一 asset 的切割片段：直接建 clip 共用資源
             const piece = Seq.add({ name: pc.name || base.name, path: base.path, web: base.web || null,
               dur: base.dur, fps: base.fps || 0, peaks: base.peaks, vtrack: pc.vtrack || 0,
+              mpvExactSeek:!!base.mpvExactSeek, mpvSeekOffset:base.mpvSeekOffset || 0,
               audioSrc: base.audioSrc || ('clip:' + base.id),
               audioSourceId: base.audioSourceId || pc.audioSourceId || makeAudioSourceId(),
               audioDetached:!!pc.audioDetached, locked:!!pc.locked,
@@ -1714,7 +1726,12 @@ const Media = {
   },
   async loadDesktopMedia(p, projectRestore=null) { return loadDesktopMedia(this, p, projectRestore); },
   async loadVideoFile(file, projectRestore=null) { return loadVideoFile(this, file, projectRestore); },
-  async _loadViaMpv(p, info, projectRestore=null, intakeToken=null) { return _loadViaMpv(this, p, info, projectRestore, intakeToken); },
+  async _loadViaMpv(p, info, projectRestore=null, intakeToken=null, options={}) {
+    const loaded=await _loadViaMpv(this, p, info, projectRestore, intakeToken, options);
+    this._mpvExactSeek=!!(loaded&&options.exactSeek);
+    this._mpvSeekOffset=loaded ? Math.max(0, Number(options.seekOffset)||0) : 0;
+    return loaded;
+  },
   _expandChannels(audio) { return _expandChannels(this, audio); },
 
   /* 加入影片到序列（桌面）：probe 取長度/FPS → 建 clip → 背景 ingest 音軌+波形（沿用每檔快取） */
@@ -1740,8 +1757,12 @@ const Media = {
     // natW/natH 與圖片共用同一組欄位名，讓 image-geometry 的公式對兩者一體適用。
     // 舊專案沒有這兩個值時，匯出仍可由 ffmpeg 自行 contain（結果相同），
     // 只是對話框的「符合視窗」少了精確依據。
+    const ext=(baseName(p).split('.').pop()||'').toLowerCase();
+    const hevcFrameAccurate=info?.video?.codec==='hevc'&&ext==='mp4';
     const meta = { name: baseName(p), path: p, dur, fps,
-      natW: +info?.video?.width || 0, natH: +info?.video?.height || 0 };
+      natW: +info?.video?.width || 0, natH: +info?.video?.height || 0,
+      mpvExactSeek:hevcFrameAccurate,
+      mpvSeekOffset:hevcFrameAccurate ? 0.5 / getExactFps(fps) : 0 };
     // 一律附 web url（v4.22）：mpv 模式下 WebCodecs 預覽引擎也能直接解「加入的原生檔」做即時合成
     //（非原生加入檔 demux 會失敗 → WCPreview 視同不可解、讓回 mpv 顯示，無害）
     try{
@@ -2290,7 +2311,7 @@ const Media = {
       adapter.direction('forward').catch(()=>{});
       adapter.rate(1).catch(()=>{});
       this._mpvTime=sourceTime;
-      adapter.seek(sourceTime).catch(()=>{});
+      this._seekMpv(sourceTime).catch(()=>{});
       this.stopBufferSources(); this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶';
       this.syncMuteState();
@@ -2321,7 +2342,7 @@ const Media = {
       this.playing=false; $('playBtn').textContent='▶'; return;
     }
     
-    getPlayerAdapter().seek(_ps).catch(()=>{});
+    this._seekMpv(_ps).catch(()=>{});
     this.stopBufferSources(); this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶';
   },
   toggle(){ this.playing?this.pause():this.play(); },
@@ -2354,8 +2375,8 @@ const Media = {
         return;
       }
       if(this.mpvMode || video.hasAttribute('src')){
-        if(this.mpvMode) this._mpvTime=local;
-        getPlayerAdapter().seek(local).catch(()=>{});
+        if(this.mpvMode){ this._mpvTime=local; this._setMpvSeekProfile(hit); }
+        this._seekMpv(local).catch(()=>{});
         this._syncSeqElements(t);
         if(!this.mpvMode && this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(local); }
         if(this.mpvMode) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
@@ -2383,7 +2404,7 @@ const Media = {
         t = clamp(t, 0, this._mpvDuration || 0);
         this._mpvTime = t;
       }
-      getPlayerAdapter().seek(t).catch(()=>{});
+      this._seekMpv(t).catch(()=>{});
       for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
         const source=tr.source||'';
         const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
@@ -2582,6 +2603,10 @@ const Media = {
     const clips=State.clips.filter(clip=>clip.type!=='image');
     if(clips.length!==1||this._gap) return false;
     const clip=clips[0];
+    // H.265 MP4 為了逐格精準會套用 exact seek 與半格補償；mpv 雖接受
+    // direction=backward，實際反向解碼卻可能停在同一畫格。這類 clip 必須用
+    // 時間軸逐格 seek fallback，不能誤判為可原生倒播。
+    if(clip.mpvExactSeek) return false;
     return clip.id===this.activeClipId
       &&Math.abs(Number(clip.offset)||0)<1e-6
       &&Math.abs(Number(clip.in)||0)<1e-6
@@ -2619,10 +2644,10 @@ const Media = {
       // 已載入 mpv 的 quit 與下一支素材的 launch 共用同一條 system-effect lane。
       runtime.selectHtml5(video);
       this._intakeSession.queueExclusive(()=>runtime.shutdownNative()).catch(()=>{});
-      this._mpvTime=0; this._mpvDuration=0;
       video.style.display='';
       const vs=$('videoSub'); if(vs) vs.style.display='';
     }
+    this._mpvTime=0; this._mpvDuration=0; this._mpvExactSeek=false; this._mpvSeekOffset=0;
     this._bgVersion++; this.activeSource=null; // 讓進行中的 _bgAudioIngest 知道要放棄；清除音源選擇
     this._wcProxyUrl=null; this._wcProxyPath=null; // WC 接管狀態隨媒體卸載歸零
     this.pendingChannels=[];

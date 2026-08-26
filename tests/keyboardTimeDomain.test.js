@@ -188,6 +188,19 @@ describe('JKL reverse shuttle time domain', () => {
     expect(mediaMock.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
   });
 
+  it('原生倒播停在同一格時會自動改用逐格 fallback', async () => {
+    State.keymap = { rewind: [{ key: 'j' }] };
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(34);
+
+    expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 - 1 / 30, 8));
+  });
+
   it('播放時按下左右鍵會先暫停並往左/右移動一格', async () => {
     State.keymap = {
       nudge_left_1f: [{ key: 'arrowleft' }],
@@ -207,5 +220,22 @@ describe('JKL reverse shuttle time domain', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
     expect(mediaMock.pause).toHaveBeenCalled();
     expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 + 1 / State.fps, 8));
+  });
+
+  it('長按方向鍵只啟動一次 shuttle，放開時會暫停', () => {
+    State.keymap = { nudge_right_1f: [{ key: 'arrowright' }] };
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', repeat: true }));
+    mediaMock.pause.mockClear();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', repeat: true }));
+    expect(mediaMock.pause).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight' }));
+    expect(mediaMock.pause).toHaveBeenCalled();
+    expect(mediaMock.playing).toBe(false);
   });
 });

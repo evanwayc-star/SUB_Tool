@@ -508,9 +508,11 @@ function createMpvHost(deps) {
     setSubtitles,
     setSubVisible: value => send(['set_property', 'sub-visibility', !!value]),
     loadFile,
-    // mpv 的 seek command 會為連續操作加最多 0.3s 的顯示等待；直接設定
-    // time-pos 仍走精準 absolute seek，但最新的逐格目標可以立刻取代舊目標。
-    seek: time => send(['set_property', 'time-pos', time]),
+    // time-pos 讓最新目標立即取代舊目標，適合一般連續逐格；少數 HEVC MP4 在
+    // frame boundary 會把 time-pos 呈現到下一格，改用 mpv 的 absolute+exact command。
+    seek: (time, { exact = false } = {}) => exact
+      ? send(['seek', time, 'absolute+exact'])
+      : send(['set_property', 'time-pos', time]),
     screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles']),
     play: () => send(['set_property', 'pause', false]),
     pause: () => send(['set_property', 'pause', true]),

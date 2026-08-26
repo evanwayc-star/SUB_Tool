@@ -181,6 +181,161 @@ describe('desktop mother-source intake ownership', () => {
     expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/A-wave.wav');
   });
 
+  it('uses mpv preview for a native MP4 when frame-accurate preview is available', async () => {
+    const mpv = {
+      detect: vi.fn(async () => ({ available: true })),
+      launch: vi.fn(async () => ({ duration: 12 })),
+      quit: vi.fn(async () => {}),
+      onEvent: vi.fn(),
+      setBounds: vi.fn(async () => {}),
+    };
+    window.subtool.mpv = mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'h264', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+
+    try {
+      await Media.loadDesktopMedia('C:/media/frame-accurate.mp4');
+
+      expect(Media.mpvMode).toBe(true);
+    } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
+  it('uses mpv preview for a native H.265 MP4 when frame-accurate preview is available', async () => {
+    const mpv = {
+      detect: vi.fn(async () => ({ available: true })),
+      launch: vi.fn(async () => ({ duration: 12 })),
+      quit: vi.fn(async () => {}),
+      onEvent: vi.fn(),
+      setBounds: vi.fn(async () => {}),
+      seek: vi.fn(async () => {}),
+      direction: vi.fn(async () => true),
+    };
+    window.subtool.mpv = mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'hevc', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+
+    try {
+      await Media.loadDesktopMedia('C:/media/frame-accurate-h265.mp4');
+      Media.seek(3.96);
+
+      expect(Media.mpvMode).toBe(true);
+      expect(mpv.seek).toHaveBeenLastCalledWith(3.94, { exact: true });
+      expect(Media.supportsNativeReverse()).toBe(false);
+    } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
+  it('restores normal mpv seeking when a H.264 clip follows a H.265 primary', async () => {
+    const mpv = {
+      detect: vi.fn(async () => ({ available: true })),
+      launch: vi.fn(async () => ({ duration: 12 })),
+      loadfile: vi.fn(async () => ({ ok: true, duration: 12 })),
+      quit: vi.fn(async () => {}),
+      onEvent: vi.fn(),
+      setBounds: vi.fn(async () => {}),
+      seek: vi.fn(async () => {}),
+      mute: vi.fn(async () => {}),
+    };
+    window.subtool.mpv = mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe
+      .mockResolvedValueOnce({
+        duration: 12,
+        video: { codec: 'hevc', fps: 25, width: 1920, height: 1080 },
+        audio: [],
+      })
+      .mockResolvedValueOnce({
+        duration: 12,
+        video: { codec: 'h264', fps: 25, width: 1920, height: 1080 },
+        audio: [],
+      });
+
+    try {
+      await Media.loadDesktopMedia('C:/media/primary-h265.mp4');
+      const h264 = await Media.addClipDesktop('C:/media/following-h264.mp4');
+      mpv.seek.mockClear();
+
+      Media.seek(h264.offset + 3.96);
+      await vi.waitFor(() => expect(mpv.seek).toHaveBeenCalled());
+
+      expect(mpv.seek).toHaveBeenLastCalledWith(3.96, undefined);
+    } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
+  it('keeps a compositable source URL for frame-accurate MP4 mpv preview', async () => {
+    const mpv = {
+      detect: vi.fn(async () => ({ available: true })),
+      launch: vi.fn(async () => ({ duration: 12 })),
+      quit: vi.fn(async () => {}),
+      onEvent: vi.fn(),
+      setBounds: vi.fn(async () => {}),
+    };
+    window.subtool.mpv = mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'h264', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+
+    try {
+      await Media.loadDesktopMedia('C:/media/frame-accurate.mp4');
+
+      expect(State.clips[0].web?.url).toBe('file:///C:/media/frame-accurate.mp4');
+    } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
+  it('falls back to HTML5 when frame-accurate MP4 mpv preview cannot launch', async () => {
+    const mpv = {
+      detect: vi.fn(async () => ({ available: true })),
+      launch: vi.fn(async () => { throw new Error('mpv pipe failed'); }),
+      quit: vi.fn(async () => {}),
+    };
+    window.subtool.mpv = mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'h264', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+
+    try {
+      await Media.loadDesktopMedia('C:/media/frame-accurate.mp4');
+
+      expect({ mode: Media.mpvMode, source: domMock.video.src }).toEqual({
+        mode: false,
+        source: 'file:///C:/media/frame-accurate.mp4',
+      });
+    } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
   it('serializes overlapping mpv launches and cleans the stale native runtime before B starts', async () => {
     const launches = new Map();
     const mpv = {

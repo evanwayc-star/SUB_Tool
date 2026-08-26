@@ -14,7 +14,8 @@
    `eslint.config.mjs` 的 MEDIA_INTERNAL_FILES，並記在這裡。
 
    ── 三條載入路徑（順序即優先序，前面命中就 return）──
-     (mpv) 非原生格式或多音軌且 mpv 可用 → _loadViaMpv，秒開、背景抽音軌
+     (mpv) 非原生格式、多音軌，或需逐格精準預覽的 H.264/H.265 MP4 且 mpv 可用
+           → _loadViaMpv，秒開、背景抽音軌
      (A)   純原生 + 單一 mono/stereo     → 直讀 <video>，完全不碰 ffmpeg
      (B)   其餘                          → streamIngest 邊轉邊播（mpv 不可用時的退路）
 
@@ -32,7 +33,7 @@ import { escapeHTML, baseName } from '../util.js';
 import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from '../media-player-adapter.js';
 import { Wave, WAVE_DECODE_MAX, probeAudioChannelDescriptors, detectFpsWeb, probeImageSize } from '../media.js'; 
 import { sourceChannelLabels } from '../channel-layout.js';
-import { secToEncore } from '../time.js';
+import { getExactFps, secToEncore } from '../time.js';
 import { Seq } from '../sequence.js';
 import { waitForOwnedMediaMetadata } from '../media-intake-session.js';
 export async function loadDesktopMedia(ctx, p, projectRestore=null){
@@ -57,25 +58,47 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     const containerOK=['mp4','mov','m4v','webm','mkv'].includes(ext);
     const canNative = !!(info&&info.video && nativeCodecs.includes(vCodec) && containerOK);
     const audio=info?info.audio:[];
+    const audioChannelCount=probeAudioChannelDescriptors(audio).length;
+    // Chromium 的 <video> 在部分 long-GOP H.264/H.265 MP4 暫停逐格時，會在權威播放點已更新後
+    // 仍呈現舊畫格；Windows mpv 的 time-pos 精準定位可避免這個呈現落後。只收斂到單一、低聲道
+    // 的 H.264/H.265 MP4，其他原生格式維持原本的直讀行為。
+    const frameAccurateNativeMp4 = canNative && ext==='mp4' && ['h264','hevc'].includes(vCodec)
+      && audio.length<=1 && audioChannelCount<=2;
+    const requiresMpv = !canNative || audio.length>1;
     $('noVideo').style.display='none';
     ctx.ensureCtx();
 
-    // (mpv) 非原生格式或多音軌且偵測到 mpv：秒開，背景抽音軌
+    // (mpv) 非原生格式、多音軌，或已知逐格呈現不精準的原生 H.264 MP4。
     const previewRuntime = typeof window !== 'undefined' && window.subtool
       ? activateMpvTransport(window.subtool)
       : getPlayerAdapter();
-    if((!canNative || audio.length>1) && previewRuntime.isAvailable){
+    let frameAccurateSourceUrl=null;
+    if((requiresMpv || frameAccurateNativeMp4) && previewRuntime.isAvailable){
       const mpvInfo=await previewRuntime.detect();
       if(!owns()) return;
-      if(mpvInfo && mpvInfo.available){ await ctx._loadViaMpv(p,info,projectRestore,intake); return; }
+      if(mpvInfo && mpvInfo.available){
+        if(frameAccurateNativeMp4){
+          frameAccurateSourceUrl=await DESK.fileURL(p);
+          if(!owns()) return;
+        }
+        const loadedWithMpv=await ctx._loadViaMpv(p,info,projectRestore,intake,{
+          fallbackToHtml5:frameAccurateNativeMp4,
+          needsProxy:!frameAccurateNativeMp4,
+          sourceUrl:frameAccurateSourceUrl,
+          exactSeek:vCodec==='hevc',
+          // HEVC 的 mpv time-pos boundary 以「下一格」呈現；以精確 fps 減半格，
+          // 讓視覺影格仍對齊權威的時間軸格網（FPS-SYNC）。
+          seekOffset:vCodec==='hevc' ? 0.5/getExactFps(info.video.fps) : 0,
+        });
+        if(!owns() || loadedWithMpv || requiresMpv) return;
+      }
     }
 
     // (A) 純原生 + 單一 mono/stereo 音訊：完全不需 ffmpeg，直讀最快。
     // 3 聲道以上即使只有一個 audio stream 也必須走逐聲道 ingest，否則 5.1 / 8ch
     // 只會留下瀏覽器可監聽的 L/R，無法配線或正確輸出所有專案 bus。
-    const audioChannelCount=probeAudioChannelDescriptors(audio).length;
     if(canNative && audio.length<=1 && audioChannelCount<=2){
-      const mediaUrl=await DESK.fileURL(p);
+      const mediaUrl=frameAccurateSourceUrl||await DESK.fileURL(p);
       if(!owns()) return;
       video.src=mediaUrl; await activateHtml5Transport(video);
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
@@ -280,7 +303,13 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
 
 export function _expandChannels(ctx, audio){ return sourceChannelLabels(audio); }
 
-export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken=null){
+export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken=null, {
+  fallbackToHtml5=false,
+  needsProxy=true,
+  sourceUrl=null,
+  exactSeek=false,
+  seekOffset=0,
+}={}){
     const owns=()=>!intakeToken||ctx._intakeSession.owns(intakeToken);
     const adapter = typeof window !== 'undefined' && window.subtool
       ? activateMpvTransport(window.subtool)
@@ -319,12 +348,18 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
         : await launchAndOwn();
     }
     catch(e){
-      if(!owns()) return;
+      if(!owns()) return false;
       await adapter.enterHtml5(video);
-      showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗','');
-      $('videoSub').style.display=''; video.style.display=''; return;
+      $('videoSub').style.display=''; video.style.display='';
+      if(!fallbackToHtml5){
+        showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗','');
+      }
+      return false;
     }
-    if(!res||!owns()) return;
+    if(!res||!owns()){
+      if(owns()) await adapter.enterHtml5(video);
+      return false;
+    }
     // 影片區清空為黑底，mpv 覆蓋視窗會貼合在此。必須等 ownership 確認後才改 UI，
     // 否則較舊的 launch 晚到會把新載入的 HTML video 藏起來。
     $('noVideo').style.display='none';
@@ -336,7 +371,15 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     ctx._mpvDuration=res.duration||dur||0;
     State.duration=ctx._mpvDuration;
     if(info?.video?.fps) setFps(info.video.fps);
-    const primary=ctx._registerPrimary({ name:State.mediaName, path:p, dur:ctx._mpvDuration||0, fps:info?.video?.fps||0 },projectRestore);
+    const primary=ctx._registerPrimary({
+      name:State.mediaName,
+      path:p,
+      ...(sourceUrl ? { web:{url:sourceUrl} } : {}),
+      mpvExactSeek:exactSeek,
+      mpvSeekOffset:seekOffset,
+      dur:ctx._mpvDuration||0,
+      fps:info?.video?.fps||0,
+    },projectRestore);
     AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
 
     emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
@@ -413,12 +456,15 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
 
     // 背景抽取音軌（不阻塞播放；完成後 element tracks 接管音訊，mpv 靜音）
     if(audio.length>0){
-      setStatus('mpv 預覽就緒，正在轉檔 Proxy 與分析音訊…','busy');
+      setStatus(needsProxy
+        ? 'mpv 預覽就緒，正在轉檔 Proxy 與分析音訊…'
+        : 'mpv 預覽就緒，正在分析音訊…','busy');
       ctx.ensureCtx();
-      ctx._bgAudioIngest(p,audio,dur,primary);
+      ctx._bgAudioIngest(p,audio,dur,primary,{needsProxy});
     } else {
       setStatus('媒體已載入（mpv 秒開，嵌入播放）','ok');
     }
+    return true;
   }
 
 export async function loadVideoFile(ctx, file, projectRestore=null){

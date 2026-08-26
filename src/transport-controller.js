@@ -26,6 +26,7 @@ import { getNoteJump, getFirstLastCue, getAdjacentCue, getCueInMinusFrames, getB
 /* ===== JKL 穿梭輪狀態與定時器 ============================================== */
 let _jklSpeed = 0;
 let _jklTimer = null;
+let _jklNativeStallTimer = null;
 let _jklNativeReverse = false;
 let _jklApplyEpoch = 0;
 
@@ -33,6 +34,10 @@ function jklClear() {
   if (_jklTimer) {
     clearInterval(_jklTimer);
     _jklTimer = null;
+  }
+  if (_jklNativeStallTimer) {
+    clearTimeout(_jklNativeStallTimer);
+    _jklNativeStallTimer = null;
   }
 }
 
@@ -82,6 +87,15 @@ function jklReset() {
   resetPlaybackSpeed();
 }
 
+// 方向鍵長按是暫時性的逐格 shuttle，不同於 J/K 的持續穿梭：實體按鍵放開時
+// 必須停在目前畫格。只在它真的已啟動時才暫停，避免單次逐格的 keyup 影響播放狀態。
+function stopFrameShuttle() {
+  if (_jklSpeed === 0) return false;
+  _jklSpeed = 0;
+  jklApply();
+  return true;
+}
+
 /* 「跳轉暫停」只在互動發生當下停止已在運作的 transport。
    反向 seek fallback 期間 Media.playing=false，但 _jklSpeed 仍非 0，
    所以不能只看 Media.playing，否則計時器會在滑鼠定位後繼續往回拉。 */
@@ -127,6 +141,22 @@ function startReverseSeekFallback(capturedSpeed) {
   }, 1000 / fps);
 }
 
+// mpv 某些長 GOP／廣播 MXF 會接受 backward 指令卻維持同一 time-pos。不能只因
+// IPC 成功就相信原生倒播；在短暫寬限內沒有跨過至少四分之一格，就回到可靠的
+// 時間軸逐格 seek。每次 J 都重新量測，避免舊的 watchdog 誤中止新的速度。
+function watchNativeReverseProgress(capturedSpeed, applyEpoch) {
+  const initialTime = Media.displayTime();
+  const minimumProgress = 0.25 / getExactFps(State.fps || 30);
+  _jklNativeStallTimer = setTimeout(() => {
+    _jklNativeStallTimer = null;
+    if (applyEpoch !== _jklApplyEpoch || _jklSpeed !== capturedSpeed || !_jklNativeReverse) return;
+    if (Media.displayTime() < initialTime - minimumProgress) return;
+    _jklNativeReverse = false;
+    Media.pause();
+    startReverseSeekFallback(capturedSpeed);
+  }, 400);
+}
+
 function jklApply() {
   jklClear();
   const applyEpoch = ++_jklApplyEpoch;
@@ -142,6 +172,7 @@ function jklApply() {
     if (_jklNativeReverse) {
       Media.setRate(Math.abs(capturedSpeed));
       if (!Media.playing) Media.play();
+      watchNativeReverseProgress(capturedSpeed, applyEpoch);
     } else if (Media.supportsNativeReverse?.()) {
       Media.pause();
       Promise.resolve(Media.setPlaybackDirection('backward')).then(enabled => {
@@ -158,6 +189,7 @@ function jklApply() {
         _jklNativeReverse = true;
         Media.setRate(Math.abs(capturedSpeed));
         Media.play();
+        watchNativeReverseProgress(capturedSpeed, applyEpoch);
       }).catch(() => {
         if (applyEpoch === _jklApplyEpoch && _jklSpeed === capturedSpeed) startReverseSeekFallback(capturedSpeed);
       });
@@ -204,6 +236,9 @@ function togglePlayPause() {
 }
 
 function stepFrame(dir, repeat = false) {
+  // OS auto-repeat 只是「仍按住」的通知；同方向的 shuttle 已在跑時不可每次都
+  // 暫停再播放，否則 mpv/HTML 都會產生可見卡頓。
+  if (repeat && _jklSpeed === dir && Media.playing) return;
   if (Media.playing) {
     jklClear();
     _jklApplyEpoch++;
@@ -538,6 +573,7 @@ export {
   jklClear,
   jklApply,
   jklReset,
+  stopFrameShuttle,
   getJklSpeed,
   setJklSpeed,
   shuttleRewind,
