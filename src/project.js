@@ -118,6 +118,15 @@ function _savedClips(){
   return [...live,...pending.filter(clip=>!clip?.id||!liveIds.has(clip.id))];
 }
 
+function _normalisedProjectData(rawData){
+  const data=migrateProjectSchema(rawData);
+  const integrity=validateProjectIntegrity(data);
+  if(integrity.valid) return data;
+  console.warn('invalid project document:',integrity.errors);
+  showToast('專案檔格式不完整，無法開啟');
+  return null;
+}
+
 async function _restorePendingExternalAudioSources(plan=_projectLoadSession.activePlan){
   const ownsPlan=()=>_projectLoadSession.activePlan===plan&&(!plan?.owns||plan.owns());
   const pending=_normalExternalAudioSources(plan?.pendingExternalAudioSources?.());
@@ -198,8 +207,7 @@ function _buildProjectData(){
   for (const t of State.tracks) checkStyle(effStyle(null, t));
   for (const c of State.cues) checkStyle(effStyle(c, State.tracks[c.track || 0]));
 
-  return {
-    app:'SUB Tool', version:3,
+  return createProjectSnapshot({
     playhead: Math.max(0, Media.displayTime() || 0),
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
@@ -235,7 +243,7 @@ function _buildProjectData(){
     cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false,
       ...(c.style&&Object.keys(c.style).length?{style:c.style}:{})})), // v4.23 逐句樣式覆蓋（有才存）
     usedPresets
-  };
+  });
 }
 function _buildBytes(){ return encodeUTF16LE(JSON.stringify(_buildProjectData(),null,1)); }
 
@@ -559,6 +567,8 @@ const Project = {
     downloadBytes(bytes,name,'application/json'); _onSaved(null,name); return Promise.resolve(name);
   },
   apply(data,generation=null){
+    data=_normalisedProjectData(data);
+    if(!data) return false;
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
     // Fix #19：明確排除 undefined/null，避免 version:0 被誤判為 v1（0 是 falsy）
     const isV1 = data.version === undefined || data.version === null || data.version === 1;
@@ -641,6 +651,7 @@ const Project = {
     const playhead=data.playhead != null&&typeof data.playhead==='number' ? Math.max(0,data.playhead) : null;
     _projectLoadSession.createRestorePlan(generation,{clips:pendingClips,externalAudioSources:pendingExternal,playhead,mediaRelink});
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes();
+    return true;
   },
   load(file){
     return _queueProjectLoad(generation=>this._load(file,generation));
@@ -648,7 +659,8 @@ const Project = {
   async _load(file,generation){
     const buf=await readFile(file);
     if(!_isCurrentProjectLoad(generation)) return;
-    let data; try{ data=JSON.parse(decodeText(buf)); }catch(e){ showToast('無法解析專案檔'); return; }
+    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(buf))); }catch(e){ showToast('無法解析專案檔'); return; }
+    if(!data) return;
     
     let missing = await this._checkMissingFonts(data);
     while (missing.length > 0) {
@@ -682,7 +694,7 @@ const Project = {
     // 載入另一個專案必須先清掉舊的 runtime 媒體。尤其當新專案的主影片暫時
     // 找不到時，後續還原外部音檔不能和前一個專案殘留的 asset 混在一起。
     try{ Media.reset(); }catch(e){ console.warn('reset media before project load:',e); }
-    this.apply(data,generation);
+    if(!this.apply(data,generation)) return;
     if(!_isCurrentProjectLoad(generation)) return;
     if(data.media&&data.media.name){
       const plan=_projectLoadSession.activePlan;
@@ -703,7 +715,8 @@ const Project = {
     return _queueProjectLoad(generation=>this._loadDesktop(r,generation));
   },
   async _loadDesktop(r,generation){
-    let data; try{ data=JSON.parse(decodeText(b64ToBytes(r.b64).buffer)); }catch(e){ showToast('無法解析專案檔'); return; }
+    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(b64ToBytes(r.b64).buffer))); }catch(e){ showToast('無法解析專案檔'); return; }
+    if(!data) return;
     
     let missing = await this._checkMissingFonts(data);
     while (missing.length > 0) {
@@ -746,7 +759,7 @@ const Project = {
     // 同上：即使原主影片不存在或使用者選擇「稍後」，也不能讓舊專案的
     // externalAudioSources 留在目前專案、造成播放或匯出重複音訊。
     try{ Media.reset(); }catch(e){ console.warn('reset media before desktop project load:',e); }
-    this.apply(data,generation);
+    if(!this.apply(data,generation)) return;
     const plan=_projectLoadSession.activePlan;
     // 載入既有專案時記錄儲存路徑，自動備份用
     if(r.path){ _savePath=r.path; _saveBaseName=r.path.replace(/\\/g,'/').split('/').pop().replace(/\.subtool$/i,''); if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave,3*60*1000); }
