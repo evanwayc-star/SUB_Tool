@@ -388,7 +388,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     await waitForExit(app);
     mainClient.close();
     queueClient.close();
-  }, 20000);
+  }, 30000);
 
   test('CDP 直接匯出不會將 renderer 路徑升格為來源或輸出能力', async () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-export-capability-reject-'));

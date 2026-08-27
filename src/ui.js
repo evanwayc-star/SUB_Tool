@@ -49,6 +49,7 @@ function showOsd(text) {
 let _modalKeepVideo = false;
 let _modalPrevFocus = null;
 let _modalDismiss = null;
+let _modalCloseOnBackdrop = true;
 let _lastFocusedOutsideModal = null;
 
 if (typeof document !== 'undefined') {
@@ -67,6 +68,7 @@ function _focusables() {
 
 function openModal(title, html, buttons, opts = {}) {
   _modalDismiss = typeof opts.onDismiss === 'function' ? opts.onDismiss : null;
+  _modalCloseOnBackdrop = opts.closeOnBackdrop !== false;
   const titleEl = $('modalTitle');
   if (titleEl) titleEl.textContent = title;
   const bodyEl = $('modalBody');
@@ -78,6 +80,10 @@ function openModal(title, html, buttons, opts = {}) {
       const btn = document.createElement('button');
       btn.textContent = b.label;
       if (b.primary) btn.className = 'primary';
+      if (b.id) btn.id = b.id;
+      if (b.className) btn.className = (btn.className ? btn.className + ' ' : '') + b.className;
+      if (b.hidden) btn.style.display = 'none';
+      if (b.style && typeof b.style === 'object') Object.assign(btn.style, b.style);
       btn.onclick = b.act;
       foot.appendChild(btn);
     });
@@ -102,6 +108,7 @@ function closeModal(arg) {
   const committed = !!(arg && arg.committed === true);
   const dismiss = _modalDismiss;
   _modalDismiss = null;
+  _modalCloseOnBackdrop = true;
   if (!committed && dismiss) {
     try { dismiss(); } catch (e) { console.warn('modal onDismiss:', e); }
   }
@@ -119,7 +126,7 @@ function closeModal(arg) {
 const modalBg = $('modalBg');
 if (modalBg) {
   modalBg.addEventListener('mousedown', e => {
-    if (e.target === $('modalBg') && !_modalKeepVideo) closeModal();
+    if (e.target === $('modalBg') && !_modalKeepVideo && _modalCloseOnBackdrop) closeModal();
   });
   modalBg.addEventListener('keydown', e => {
     if (e.key === 'Tab') {

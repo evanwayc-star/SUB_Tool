@@ -40,6 +40,8 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.j
 import { createCommands } from './commands.js';
 import { renderPointerSeekControl, requestPointerSeek } from './pointer-seek-control.js';
 import { renderQueueMonitorIndicator } from './ui/queue-monitor-indicator.js';
+import { renderAsrIndicator } from './ui/asr-indicator.js';
+import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
 import { togglePanel } from './ui.js';
 import { applyCueStylePatch } from './style-commands.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
@@ -1035,6 +1037,13 @@ async function initDesktop(){
 
   let _queueStatus = { waitingCount: 0, missingCount: 0, liveCount: 0, isPaused: false };
   renderQueueMonitorIndicator($('stMonitorBtn'), _queueStatus);
+  const asrMonitorBtn = $('asrMonitorBtn');
+  if (asrMonitorBtn) {
+    renderAsrIndicator(asrMonitorBtn, getAsrSession());
+    onAsrSessionChange(session => {
+      renderAsrIndicator(asrMonitorBtn, session);
+    });
+  }
   if (DESK.onQueueStatus) {
     DESK.onQueueStatus(s => {
       _queueStatus = s;

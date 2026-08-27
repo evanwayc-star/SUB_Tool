@@ -18,6 +18,7 @@ import { closeModal, openModal, showToast } from '../src/ui.js';
 import {
   getClipAudioBuffer,
   getAsrConfig,
+  getAsrSession,
   openSpeechRecognitionDialog,
   saveAsrConfig
 } from '../src/speech-recognition.js';
@@ -131,15 +132,17 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     expect(showToast).not.toHaveBeenCalled();
   });
 
-  it('Esc 或點背景關閉時可透過 onDismiss 中止同一工作', async () => {
+  it('推論中關閉視窗時透過 onDismiss 轉入背景執行而不中止工作', async () => {
     const { receivedSignal } = await beginPendingBuiltinRecognition();
     const modalOptions = openModal.mock.calls[0][3];
 
+    expect(modalOptions.closeOnBackdrop).toBe(false);
     expect(modalOptions.onDismiss).toBeTypeOf('function');
     modalOptions.onDismiss();
 
-    await vi.waitFor(() => expect(receivedSignal.aborted).toBe(true));
-    expect(showToast).not.toHaveBeenCalled();
+    expect(receivedSignal.aborted).toBe(false);
+    expect(getAsrSession()?.dialogOpen).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('背景執行'));
   });
 
   it('即使引擎忽略 abort 並晚到成功，也不會寫字幕、toast 或再次關閉 modal', async () => {

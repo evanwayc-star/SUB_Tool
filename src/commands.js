@@ -10,6 +10,7 @@ import { AudioRouting } from './audio-routing.js';
 import { runVideoExportCommand } from './export-capability.js';
 import { showToast, openModal, closeModal, togglePanel, openCacheDialog } from './ui.js';
 import { showSettingsModal } from './settings.js';
+import { openSpeechRecognitionDialog } from './speech-recognition.js';
 import { importSub, showExportDialog, showExportVideoDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
 import { renderCheckPanel, deleteSelected } from './subtitles.js';
 import {
@@ -97,6 +98,9 @@ function createCommands() {
     'queue-monitor': () => {
       if (!IS_DESKTOP || typeof DESK?.openQueueMonitor !== 'function') { showToast('匯出佇列只在桌面版提供'); return; }
       DESK.openQueueMonitor();
+    },
+    'asr-monitor': () => {
+      openSpeechRecognitionDialog();
     },
     'audio-project-settings': () => {
       AudioRouting.openOutputSettings();
