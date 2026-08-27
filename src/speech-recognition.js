@@ -17,6 +17,7 @@ import { emit } from './events.js';
 import { decodeText, downloadBytes, escapeHTML, readFile } from './util.js';
 import { alignTranscriptToEvidence, parseTranscriptLines } from './transcript-alignment.js';
 import { buildTranscriptAlignmentDiagnostic } from './transcript-alignment-diagnostic.js';
+import { resolveRecognitionAlignment } from './recognition-alignment-result.js';
 import { CLOUD_PROVIDER_META, getAsrGuidanceMeta, resolveAsrGuidance } from './recognition-guidance.js';
 import {
   BUILTIN_MODELS,
@@ -862,13 +863,16 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             }
             if (!recognitionIsActive()) return;
 
-            let segments = evidenceSegments;
+            const resolvedAlignment = resolveRecognitionAlignment({
+              taskMode,
+              transcript,
+              evidenceSegments,
+              alignTranscriptToEvidence
+            });
+            let segments = resolvedAlignment.segments;
             if (taskMode === 'align') {
               if (statusEl) statusEl.textContent = '聲音分析完成，正在逐行匹配文字稿時間…';
-              const aligned = alignTranscriptToEvidence({
-                transcript,
-                evidenceSegments
-              });
+              const aligned = resolvedAlignment.alignment;
               if (aligned.status === 'failed') {
                 const unreliableLines = new Set([
                   ...(aligned.summary?.unmatchedLines || []),
