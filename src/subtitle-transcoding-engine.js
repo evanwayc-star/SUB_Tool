@@ -34,7 +34,7 @@ export function encodeASS(cues = [], {
   for (const s of styleList) {
     const name = s.name || 'Default';
     const merged = { ...STYLE_DEFAULTS, ...s };
-    if (s.size != null && merged.fontSize == null) merged.fontSize = s.size;
+    if (s.size != null && s.fontSize == null) merged.fontSize = s.size;
     out += styleToAssStyleLine(name, merged, playResY) + '\n';
   }
 

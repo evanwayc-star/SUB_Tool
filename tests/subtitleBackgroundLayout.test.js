@@ -50,7 +50,7 @@ describe('字幕單一底色版面', () => {
   });
   
   it('直書建立垂直矩形計畫', () => {
-    const vertical = { ...STYLE_DEFAULTS, bgBox: true, vertical: true };
+    const vertical = { ...STYLE_DEFAULTS, fontSize: 60, bgBox: true, vertical: true };
     const cues = [
       { id: 'vertical', track: 0, text: '甲\n乙' },
     ];

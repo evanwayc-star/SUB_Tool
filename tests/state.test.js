@@ -42,7 +42,7 @@ describe('subtitle style defaults', () => {
     State.tracks = [];
     const track = newTrack();
 
-    expect(STYLE_DEFAULTS.fontSize).toBe(60);
+    expect(STYLE_DEFAULTS.fontSize).toBe(70);
     expect(STYLE_DEFAULTS.posY).toBe(90);
     expect(track).toEqual({
       name: '軌道 1',
@@ -50,7 +50,7 @@ describe('subtitle style defaults', () => {
       locked: false,
     });
     expect(effStyle(null, track)).toMatchObject({
-      fontSize: 60,
+      fontSize: 70,
       posX: 50,
       posY: 90,
     });

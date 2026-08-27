@@ -51,10 +51,11 @@ vi.mock('../src/subtitle-model.js', () => ({
 vi.mock('../src/subtitle-search.js', () => ({
   searchSelectAll: vi.fn(), txtHTML: value => String(value ?? ''), isSearchHit: () => false,
   getSearchCountText: () => '', searchUpdate: vi.fn(), searchNav: vi.fn(), searchReplace: vi.fn(),
+  setSelectCueHandler: vi.fn(), getSelectCueHandler: vi.fn(), searchNext: vi.fn(), searchPrev: vi.fn(),
 }));
 
 const defaultStyle = {
-  fontSize: 60, bold: false, italic: false, valign: 'bottom', align: 'center', vertical: false,
+  fontSize: 70, bold: false, italic: false, valign: 'bottom', align: 'center', vertical: false,
   color: '#ffffff', font: 'sans-serif', posX: 50, posY: 90, angle: 0, letterSpacing: 0,
   lineSpacing: 0, outlineColor: '#000000', outline: 2, shadow: 0, bgColor: '#000000',
   bgAlpha: 0, bgBox: false,

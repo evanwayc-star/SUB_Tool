@@ -50,7 +50,7 @@ import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, cueNeighborBounds } from './timeline.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount } from './subtitles.js';
 import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames } from './subtitle-model.js';
-import { searchUpdate, searchNav, searchReplace, searchSelectAll } from './subtitle-search.js';
+import { searchUpdate, searchNav, searchReplace, searchSelectAll, replaceOne } from './subtitle-search.js';
 import { initRecentProjects } from './recent-projects.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
 import { Project, isProjectDirty, confirmDiscardUnsaved } from './project.js';
@@ -446,8 +446,8 @@ function initUI(){
   $('cpContainsInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋浮動視窗
   $('searchInput').addEventListener('input',()=>searchUpdate($('searchInput').value));
-  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing) return; if(e.key==='Enter'){ searchNav(1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
-  $('replaceInput').addEventListener('keydown',e=>e.stopPropagation());
+  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing) return; if(e.key==='Enter'){ searchNav(e.shiftKey ? -1 : 1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
+  $('replaceInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing) return; if(e.key==='Enter'){ replaceOne(); } });
   // 搜尋視窗可拖曳
   { const head=$('searchDialogHead'), dlg=$('searchDialog');
     if(head&&dlg){ let ox=0,oy=0,sx=0,sy=0;

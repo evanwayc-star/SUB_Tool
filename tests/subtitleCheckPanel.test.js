@@ -34,6 +34,7 @@ vi.mock('../src/subtitle-model.js', () => ({
 vi.mock('../src/subtitle-search.js', () => ({
   searchSelectAll: vi.fn(), txtHTML: value => String(value ?? ''), isSearchHit: () => false,
   getSearchCountText: () => '', searchUpdate: vi.fn(), searchNav: vi.fn(), searchReplace: vi.fn(),
+  setSelectCueHandler: vi.fn(), getSelectCueHandler: vi.fn(), searchNext: vi.fn(), searchPrev: vi.fn(),
 }));
 vi.mock('../src/substyle.js', () => ({
   effStyle: () => ({}), getAllPresets: () => [], STYLE_DEFAULTS: {}, colorName: () => '',

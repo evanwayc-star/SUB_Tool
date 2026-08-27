@@ -6,6 +6,15 @@ import { escapeHTML, escapeHTMLWithSpaces } from './util.js';
 let _searchTerms = [];
 let _searchMatches = [];
 let _searchIdx = -1;
+let _selectCueHandler = null;
+
+export function setSelectCueHandler(fn) {
+  _selectCueHandler = typeof fn === 'function' ? fn : null;
+}
+
+export function getSelectCueHandler() {
+  return _selectCueHandler;
+}
 
 export function escRe(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
 
@@ -46,16 +55,32 @@ export function searchUpdate(raw, selectCueCb){
     const text=(c.text||'').toLowerCase();
     return _searchTerms.some(t=>text.includes(t.toLowerCase()));
   }).map(c=>c.id);
-  _searchIdx=_searchMatches.length?0:-1;
+  if(_searchMatches.length){
+    if(State.selectedId && _searchMatches.includes(State.selectedId)){
+      _searchIdx = _searchMatches.indexOf(State.selectedId);
+    } else {
+      _searchIdx = 0;
+    }
+  } else {
+    _searchIdx = -1;
+  }
   emit('render:subList');
-  if(_searchIdx>=0 && selectCueCb) selectCueCb(_searchMatches[_searchIdx],{seek:false});
+  const cb = (typeof selectCueCb === 'function' ? selectCueCb : _selectCueHandler);
+  if(_searchIdx>=0 && cb) cb(_searchMatches[_searchIdx],{seek:false});
   emit('render:searchCount');
 }
 
 export function searchNav(dir, selectCueCb){
   if(!_searchMatches.length) return;
+  if(State.selectedId && _searchMatches.includes(State.selectedId)){
+    const curIdx = _searchMatches.indexOf(State.selectedId);
+    if(curIdx !== -1) {
+      _searchIdx = curIdx;
+    }
+  }
   _searchIdx=(_searchIdx+dir+_searchMatches.length)%_searchMatches.length;
-  if(selectCueCb) selectCueCb(_searchMatches[_searchIdx],{seek:true});
+  const cb = (typeof selectCueCb === 'function' ? selectCueCb : _selectCueHandler);
+  if(cb) cb(_searchMatches[_searchIdx],{seek:true});
   emit('render:searchCount');
 }
 
@@ -94,12 +119,12 @@ export function searchSelectAll(){
   emit('render:selection');
 }
 
-export function searchNext() {
-  searchNav(1);
+export function searchNext(selectCueCb) {
+  searchNav(1, selectCueCb);
 }
 
-export function searchPrev() {
-  searchNav(-1);
+export function searchPrev(selectCueCb) {
+  searchNav(-1, selectCueCb);
 }
 
 export function searchClear() {

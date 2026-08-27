@@ -33,7 +33,7 @@ import {
 } from './subtitle-model.js';
 
 // Search imports
-import { searchSelectAll, txtHTML, isSearchHit, getSearchCountText, searchUpdate as _searchUpdate, searchNav as _searchNav, searchReplace as _searchReplace } from './subtitle-search.js';
+import { searchSelectAll, txtHTML, isSearchHit, getSearchCountText, searchUpdate as _searchUpdate, searchNav as _searchNav, searchReplace as _searchReplace, setSelectCueHandler } from './subtitle-search.js';
 
 const _presetNameCache = new Map();
 const _customCodeMap = new Map();
@@ -532,6 +532,7 @@ function selectCue(id,opts){
 }
 
 function selectCueSingle(id,seek){ selectCue(id,{seek}); }
+setSelectCueHandler(selectCue);
 
 function commitCueTimeEdit(c, edge){
   const tk=c.track||0;
