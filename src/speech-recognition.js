@@ -17,6 +17,7 @@ import { emit } from './events.js';
 import { decodeText, downloadBytes, escapeHTML, readFile } from './util.js';
 import { alignTranscriptToEvidence, parseTranscriptLines } from './transcript-alignment.js';
 import { buildTranscriptAlignmentDiagnostic } from './transcript-alignment-diagnostic.js';
+import { CLOUD_PROVIDER_META, getAsrGuidanceMeta, resolveAsrGuidance } from './recognition-guidance.js';
 import {
   BUILTIN_MODELS,
   DEFAULT_AZURE_SPEECH_REGION,
@@ -56,78 +57,7 @@ export {
 
 const ASR_CONFIG_KEY = 'subtool_asr_config';
 const DEFAULT_ASR_PROMPT = '以下是影音對話，請以繁體中文輸出完整字幕，精準保留標點符號。';
-const CLOUD_PROVIDER_META = Object.freeze({
-  google: Object.freeze({
-    keyField: 'googleApiKey',
-    name: 'Google Gemini',
-    keyLabel: 'Google Gemini API Key：',
-    helpLabel: '取得 Google 免費 API Key ↗',
-    helpURL: 'https://aistudio.google.com/app/apikey'
-  }),
-  azure: Object.freeze({
-    keyField: 'azureApiKey',
-    name: 'Azure Speech',
-    keyLabel: 'Azure Speech API Key：',
-    helpLabel: '建立 Azure Speech 資源 ↗',
-    helpURL: 'https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices'
-  }),
-  groq: Object.freeze({
-    keyField: 'groqApiKey',
-    name: 'Groq',
-    keyLabel: 'Groq API Key：',
-    helpLabel: '取得 Groq 免費 API Key ↗',
-    helpURL: 'https://console.groq.com/keys'
-  }),
-  openai: Object.freeze({
-    keyField: 'openaiApiKey',
-    name: 'OpenAI',
-    keyLabel: 'OpenAI API Key：',
-    helpLabel: '取得 OpenAI API Key ↗',
-    helpURL: 'https://platform.openai.com/api-keys'
-  })
-});
-
-const ASR_GUIDANCE_META = Object.freeze({
-  google: Object.freeze({
-    kind: 'prompt',
-    label: '提示詞（Prompt）：',
-    placeholder: '選填，例如：逐字轉錄並保留標點符號。'
-  }),
-  azure: Object.freeze({
-    kind: 'phrases',
-    label: 'Azure 專有名詞（Phrase List，以逗號分隔）：',
-    placeholder: '選填，例如：SUB Tool, Evan'
-  }),
-  groq: Object.freeze({
-    kind: 'prompt',
-    label: '前文／專有名詞導引（Prompt）：',
-    placeholder: '選填，例如：China Airlines, EES, Kiosk'
-  }),
-  openai: Object.freeze({
-    kind: 'prompt',
-    label: '前文／專有名詞導引（Prompt）：',
-    placeholder: '選填，例如：China Airlines, EES, Kiosk'
-  })
-});
-
-/** 取得 provider 真正支援的提示詞／專有名詞欄位；本機辨識沒有此欄位。 */
-export function getAsrGuidanceMeta(provider) {
-  return ASR_GUIDANCE_META[provider] || null;
-}
-
-/** 將畫面欄位正規化成 provider 可接受的參數，避免隱藏欄位仍被暗中送出。 */
-export function resolveAsrGuidance(provider, rawValue = '') {
-  const meta = getAsrGuidanceMeta(provider);
-  const value = typeof rawValue === 'string' ? rawValue : '';
-  if (!meta) return {};
-  if (meta.kind === 'phrases') {
-    return {
-      azurePhraseList: value,
-      azurePhrases: value.split(/[,，;；\n]+/u).map(item => item.trim()).filter(Boolean)
-    };
-  }
-  return { prompt: value };
-}
+export { CLOUD_PROVIDER_META, getAsrGuidanceMeta, resolveAsrGuidance } from './recognition-guidance.js';
 
 /**
  * 讀取已儲存的 ASR 設定
