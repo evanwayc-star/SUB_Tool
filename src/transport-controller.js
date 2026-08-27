@@ -22,23 +22,34 @@ import { updateNoteActive } from './notes.js';
 import { emit, on } from './events.js';
 import { setStatus, showOsd } from './ui.js';
 import { getNoteJump, getFirstLastCue, getAdjacentCue, getCueInMinusFrames, getBoundaryStep } from './timeline-navigation.js';
+import { createShuttleRuntime } from './shuttle-runtime.js';
 
 /* ===== JKL 穿梭輪狀態與定時器 ============================================== */
 let _jklSpeed = 0;
-let _jklTimer = null;
-let _jklNativeStallTimer = null;
-let _jklNativeReverse = false;
 let _jklApplyEpoch = 0;
 
+const _shuttleRuntime = createShuttleRuntime({
+  media: Media,
+  getExactFps: () => getExactFps(State.fps || 30),
+  onFallbackFrame(newT) {
+    updatePlayhead();
+    emit('playhead:ensure');
+    emit('render:videoSub');
+    if (!video.src) {
+      const displayT = Media.displayTime();
+      const tc = $('tcCur'); if (tc) tc.textContent = secToEncore(displayT, State.fps, State.dropFrame);
+      const sb = $('seekBar'); if (sb) sb.value = Math.round(displayT * 1000);
+    }
+  },
+  onReachedStart() {
+    _jklSpeed = 0;
+    setStatus('已到開頭', '');
+    updateSpeedIndicator();
+  },
+});
+
 function jklClear() {
-  if (_jklTimer) {
-    clearInterval(_jklTimer);
-    _jklTimer = null;
-  }
-  if (_jklNativeStallTimer) {
-    clearTimeout(_jklNativeStallTimer);
-    _jklNativeStallTimer = null;
-  }
+  _shuttleRuntime.clear();
 }
 
 function updateSpeedIndicator() {
@@ -66,12 +77,7 @@ function setJklSpeed(speed) {
 }
 
 function leaveNativeReverse() {
-  if (!_jklNativeReverse) return false;
-  _jklNativeReverse = false;
-  Media.pause();
-  // Media.pause() 會恢復方向；這個公開呼叫也讓 mock／替代 transport 明確收到契約。
-  Promise.resolve(Media.setPlaybackDirection?.('forward')).catch(() => {});
-  return true;
+  return _shuttleRuntime.leaveNativeReverse();
 }
 
 function resetPlaybackSpeed() {
@@ -119,47 +125,22 @@ function setManualPlaybackSpeed(rate) {
 }
 
 function startReverseSeekFallback(capturedSpeed) {
-  // HTML5、多片段與修剪片段仍以時間軸 absolute seek 倒退，維持既有邊界語義。
-  Media.pause();
-  Media.setRate(1);
-  const fps = 30, step = Math.abs(capturedSpeed) / fps;
-  _jklTimer = setInterval(() => {
-    if (_jklSpeed !== capturedSpeed) { jklClear(); return; }
-    const t = Media.displayTime();
-    if (t <= 0) { jklClear(); _jklSpeed = 0; setStatus('已到開頭', ''); updateSpeedIndicator(); return; }
-    const newT = Math.max(0, t - step);
-    Media.seek(newT);
-    updatePlayhead();
-    emit('playhead:ensure');
-    emit('render:videoSub');
-    if (!video.src) {
-      const displayT = Media.displayTime();
-      const tc = $('tcCur'); if (tc) tc.textContent = secToEncore(displayT, State.fps, State.dropFrame);
-      const sb = $('seekBar'); if (sb) sb.value = Math.round(displayT * 1000);
-    }
-    Media.scrubAudio(newT, Math.max(step, 0.08));
-  }, 1000 / fps);
+  _shuttleRuntime.setSpeed(capturedSpeed);
+  _shuttleRuntime.startReverseSeekFallback(capturedSpeed);
 }
 
 // mpv 某些長 GOP／廣播 MXF 會接受 backward 指令卻維持同一 time-pos。不能只因
 // IPC 成功就相信原生倒播；在短暫寬限內沒有跨過至少四分之一格，就回到可靠的
 // 時間軸逐格 seek。每次 J 都重新量測，避免舊的 watchdog 誤中止新的速度。
 function watchNativeReverseProgress(capturedSpeed, applyEpoch) {
-  const initialTime = Media.displayTime();
-  const minimumProgress = 0.25 / getExactFps(State.fps || 30);
-  _jklNativeStallTimer = setTimeout(() => {
-    _jklNativeStallTimer = null;
-    if (applyEpoch !== _jklApplyEpoch || _jklSpeed !== capturedSpeed || !_jklNativeReverse) return;
-    if (Media.displayTime() < initialTime - minimumProgress) return;
-    _jklNativeReverse = false;
-    Media.pause();
-    startReverseSeekFallback(capturedSpeed);
-  }, 400);
+  _shuttleRuntime.watchNativeReverseProgress(capturedSpeed, applyEpoch, () => startReverseSeekFallback(capturedSpeed));
 }
 
 function jklApply() {
   jklClear();
   const applyEpoch = ++_jklApplyEpoch;
+  const shuttleEpoch = _shuttleRuntime.beginEpoch();
+  _shuttleRuntime.setSpeed(_jklSpeed);
   if (_jklSpeed === 0) {
     if (!leaveNativeReverse()) Media.pause();
     Media.setRate(1);
@@ -169,10 +150,10 @@ function jklApply() {
     if (!Media.playing) Media.play();
   } else {
     const capturedSpeed = _jklSpeed;
-    if (_jklNativeReverse) {
+    if (_shuttleRuntime.isNativeReverse()) {
       Media.setRate(Math.abs(capturedSpeed));
       if (!Media.playing) Media.play();
-      watchNativeReverseProgress(capturedSpeed, applyEpoch);
+      watchNativeReverseProgress(capturedSpeed, shuttleEpoch);
     } else if (Media.supportsNativeReverse?.()) {
       Media.pause();
       Promise.resolve(Media.setPlaybackDirection('backward')).then(enabled => {
@@ -186,10 +167,10 @@ function jklApply() {
           return;
         }
         if (enabled === false) { startReverseSeekFallback(capturedSpeed); return; }
-        _jklNativeReverse = true;
+        _shuttleRuntime.setNativeReverse(true);
         Media.setRate(Math.abs(capturedSpeed));
         Media.play();
-        watchNativeReverseProgress(capturedSpeed, applyEpoch);
+        watchNativeReverseProgress(capturedSpeed, shuttleEpoch);
       }).catch(() => {
         if (applyEpoch === _jklApplyEpoch && _jklSpeed === capturedSpeed) startReverseSeekFallback(capturedSpeed);
       });
