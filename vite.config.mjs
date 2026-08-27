@@ -18,7 +18,7 @@ const CSP = [
   "img-src 'self' data: blob: subtool-local: https://huggingface.co https://*.huggingface.co https://*.hf.co",
   "font-src 'self' data: subtool-local:",
   "media-src 'self' blob: data: subtool-local: http://127.0.0.1:* http://localhost:*",
-  "connect-src 'self' blob: data: subtool-local: https://cdn.jsdelivr.net https://*.jsdelivr.net https://unpkg.com https://esm.sh https://huggingface.co https://*.huggingface.co https://*.hf.co https://cdn-lfs.huggingface.co https://cdn-lfs.hf.co https://api.groq.com https://api.openai.com https://generativelanguage.googleapis.com https://*.api.cognitive.microsoft.com https://dashscope.aliyuncs.com http://127.0.0.1:* http://localhost:*",
+  "connect-src 'self' blob: data: subtool-local: https://cdn.jsdelivr.net https://*.jsdelivr.net https://unpkg.com https://esm.sh https://huggingface.co https://*.huggingface.co https://*.hf.co https://cdn-lfs.huggingface.co https://cdn-lfs.hf.co https://api.groq.com https://api.openai.com https://generativelanguage.googleapis.com https://*.api.cognitive.microsoft.com https://dashscope.aliyuncs.com https://api.elevenlabs.io http://127.0.0.1:* http://localhost:*",
   "worker-src 'self' blob:",
 ].join('; ');
 

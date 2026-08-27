@@ -202,14 +202,16 @@ describe('語音辨識與字幕生成模組', () => {
       'groq',
       'openai',
       'azure',
-      'google'
+      'google',
+      'elevenlabs'
     ]);
     expect(options.map(option => option.textContent.trim())).toEqual([
       '程式內建本機 AI 引擎 (免設定・100% 離線)',
       'Groq (Whisper-large-v3，極速雲端・免費)',
       'OpenAI (Whisper-1 官方雲端)',
       'Azure Speech (專業語音辨識・逐句時間碼)',
-      'Google Gemini (大語言模型・繁體中文理解力最強)'
+      'Google Gemini (大語言模型・繁體中文理解力最強)',
+      'ElevenLabs (Scribe v2，高精準多語言・逐字時間碼)'
     ]);
   });
 
@@ -1017,6 +1019,41 @@ describe('語音辨識與字幕生成模組', () => {
         provider: 'google',
         apiKey: 'test-key'
       })).rejects.toThrow(/未提供有效的音訊來源/);
+    });
+
+    it('支援 ElevenLabs 設定存取與 UI 導引切換', async () => {
+      saveAsrConfig({
+        ...getAsrConfig(),
+        provider: 'elevenlabs',
+        elevenlabsApiKey: 'xi_test_key_123',
+        elevenlabsKeyterms: 'SUB Tool, Evan'
+      });
+
+      const conf = getAsrConfig();
+      expect(conf.provider).toBe('elevenlabs');
+      expect(conf.elevenlabsApiKey).toBe('xi_test_key_123');
+      expect(conf.elevenlabsKeyterms).toBe('SUB Tool, Evan');
+
+      const meta = getAsrGuidanceMeta('elevenlabs');
+      expect(meta.kind).toBe('keyterms');
+      expect(meta.label).toContain('Keyterms');
+
+      const resolved = resolveAsrGuidance('elevenlabs', 'SUB Tool, Evan');
+      expect(resolved.keyterms).toEqual(['SUB Tool', 'Evan']);
+      expect(resolved.elevenlabsKeytermsText).toBe('SUB Tool, Evan');
+
+      openSpeechRecognitionDialog({
+        id: 'elevenlabs-dialogue',
+        name: 'elevenlabs-test.wav',
+        in: 0,
+        out: 1,
+        duration: 1,
+        audioBuffer: {}
+      });
+
+      const [, html] = openModal.mock.calls[0];
+      expect(html).toContain('value="elevenlabs"');
+      expect(html).toContain('ElevenLabs (Scribe v2');
     });
   });
 });

@@ -71,14 +71,39 @@ export const BUILTIN_MODELS = {
 
 const simplifiedToTaiwanTraditional = OpenCC.Converter({ from: 'cn', to: 'twp' });
 
+/**
+ * 正規化字幕空白間距：
+ * 消除 CJK（中/日/韓）字元之間的不必要空白與標點前贅空，同時保持中英/數字混排自然空格。
+ */
+export function normalizeSubtitleSpacing(text, locale = 'zh') {
+  if (typeof text !== 'string' || !text) return '';
+  let result = text.trim();
+  const compact = azureUsesCompactSpacing(locale, result);
+  if (compact) {
+    // 1. 去除中/日/韓 CJK 字符之間的任何空白（包括全形空格、不斷行空格）
+    result = result.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[\s\u3000\u00A0]+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])/gu, '');
+    // 2. 去除 CJK 與中文/通用標點符號之間的空白
+    result = result.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[\s\u3000\u00A0]+(?=[，。！？、；：”’」』）】》〉!?,.:;])/gu, '');
+    result = result.replace(/(?<=[“‘「『（【《〈!?,.:;])[\s\u3000\u00A0]+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])/gu, '');
+  }
+  // 3. 多重空白收斂為單一空格
+  result = result.replace(/[\s\u3000\u00A0]+/gu, ' ').trim();
+  return result;
+}
+
 export function convertAsrSegmentsToTraditionalChinese(segments, language = 'zh') {
   if (language !== 'zh' || !Array.isArray(segments)) return segments;
-  return segments.map(segment => ({
-    ...segment,
-    text: typeof segment?.text === 'string'
-      ? simplifiedToTaiwanTraditional(segment.text)
-      : segment?.text
-  }));
+  return segments.map(segment => {
+    let text = segment?.text;
+    if (typeof text === 'string') {
+      text = simplifiedToTaiwanTraditional(text);
+      text = normalizeSubtitleSpacing(text, language);
+    }
+    return {
+      ...segment,
+      text
+    };
+  });
 }
 
 /**
@@ -934,6 +959,197 @@ export async function callAzureSpeechTranscription({
   return parseAzureTranscriptionResponse(await response.json());
 }
 
+const ELEVENLABS_MAX_CJK_CHARS = 18;
+const ELEVENLABS_HARD_MAX_CJK_CHARS = 22;
+const ELEVENLABS_MAX_DURATION_SECONDS = 4.8;
+const ELEVENLABS_HARD_MAX_DURATION_SECONDS = 6.0;
+const ELEVENLABS_NATURAL_PAUSE_GAP_SECONDS = 0.45;
+const ELEVENLABS_CLAUSE_PAUSE_GAP_SECONDS = 0.25;
+
+function isSentenceEndPunctuation(text) {
+  const normalized = String(text || '').trim().replace(/["'”’」』）】》〉]+$/u, '');
+  return /[。！？!?…\n]$/u.test(normalized) || /\.{2,}$/u.test(normalized);
+}
+
+function isClauseBreakPunctuation(text) {
+  const normalized = String(text || '').trim().replace(/["'”’」』）】》〉]+$/u, '');
+  return /[，,、;；—–\-]$/u.test(normalized);
+}
+
+/**
+ * 將 ElevenLabs Scribe 的逐字時間（word-level timestamps）與說話者標籤轉成自然良好斷句的字幕段落。
+ */
+export function parseElevenLabsTranscriptionResponse(data, audioDuration = Infinity) {
+  const responseDurationSec = Number(data?.audio_duration_secs);
+  const audioEnd = Number.isFinite(audioDuration) && audioDuration > 0
+    ? audioDuration
+    : (Number.isFinite(responseDurationSec) && responseDurationSec > 0 ? responseDurationSec : Infinity);
+
+  const rawWords = Array.isArray(data?.words) ? data.words : [];
+  const words = [];
+  for (const item of rawWords) {
+    if (item?.type === 'spacing' || item?.type === 'audio_event') continue;
+    const text = typeof item?.text === 'string' ? item.text.trim() : '';
+    const start = Number(item?.start);
+    const end = Number(item?.end);
+    if (!text || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) continue;
+    const wordStart = Math.min(audioEnd, start);
+    const wordEnd = Math.min(audioEnd, end);
+    if (wordStart >= audioEnd || wordEnd <= wordStart) continue;
+
+    words.push({
+      text,
+      start: wordStart,
+      end: wordEnd,
+      ...(typeof item?.speaker_id === 'string' && item.speaker_id ? { speaker: item.speaker_id } : {}),
+      ...(item?.logprob != null && Number.isFinite(Number(item.logprob)) ? { logprob: Number(item.logprob) } : {})
+    });
+  }
+
+  const locale = typeof data?.language_code === 'string' ? data.language_code : 'zh';
+
+  if (words.length === 0) {
+    const rawFallback = typeof data?.text === 'string' ? data.text.trim() : '';
+    const fallbackText = normalizeSubtitleSpacing(rawFallback, locale);
+    return {
+      text: fallbackText,
+      segments: fallbackText && Number.isFinite(audioEnd) && audioEnd < Infinity ? [{
+        start: 0,
+        end: audioEnd,
+        text: fallbackText,
+        words: []
+      }] : []
+    };
+  }
+
+  const segments = [];
+  let currentGroup = [];
+
+  const flushGroup = () => {
+    if (currentGroup.length === 0) return;
+    const firstWord = currentGroup[0];
+    const lastWord = currentGroup[currentGroup.length - 1];
+    let segmentText = joinTimedWordTexts(currentGroup, locale);
+    segmentText = normalizeSubtitleSpacing(segmentText, locale);
+    segmentText = segmentText.replace(/^[，,、；;:\s]+/u, '').trim();
+
+    if (segmentText) {
+      const speaker = currentGroup[0]?.speaker;
+      segments.push({
+        start: firstWord.start,
+        end: lastWord.end,
+        text: segmentText,
+        words: currentGroup.map(({ text: wText, start: wStart, end: wEnd }) => ({
+          text: normalizeSubtitleSpacing(wText, locale),
+          start: wStart,
+          end: wEnd
+        })),
+        ...(speaker != null ? { speaker } : {})
+      });
+    }
+    currentGroup = [];
+  };
+
+  for (let index = 0; index < words.length; index++) {
+    const currentWord = words[index];
+    if (currentGroup.length > 0) {
+      const prevWord = currentGroup[currentGroup.length - 1];
+      const gap = currentWord.start - prevWord.end;
+      const speakerChanged = (prevWord.speaker ?? null) !== (currentWord.speaker ?? null);
+      const endsPrevSentence = isSentenceEndPunctuation(prevWord.text);
+      const endsPrevClause = isClauseBreakPunctuation(prevWord.text);
+      const isCloser = isAzureTrailingSentenceCloser(currentWord.text);
+
+      const groupDuration = prevWord.end - currentGroup[0].start;
+      const groupCjkCount = Array.from(joinTimedWordTexts(currentGroup, locale).replace(/\s/gu, '')).length;
+
+      let shouldBreak = false;
+      if (speakerChanged) {
+        shouldBreak = true;
+      } else if (endsPrevSentence && !isCloser) {
+        shouldBreak = true;
+      } else if (!isAzurePunctuationOnly(currentWord.text) && gap >= ELEVENLABS_NATURAL_PAUSE_GAP_SECONDS) {
+        shouldBreak = true;
+      } else if (endsPrevClause && (gap >= ELEVENLABS_CLAUSE_PAUSE_GAP_SECONDS || groupCjkCount >= 8)) {
+        shouldBreak = true;
+      } else if (groupCjkCount >= ELEVENLABS_MAX_CJK_CHARS && (gap >= 0.15 || endsPrevClause)) {
+        shouldBreak = true;
+      } else if (groupCjkCount >= ELEVENLABS_HARD_MAX_CJK_CHARS || groupDuration >= ELEVENLABS_HARD_MAX_DURATION_SECONDS) {
+        shouldBreak = true;
+      }
+
+      if (shouldBreak) {
+        flushGroup();
+      }
+    }
+    currentGroup.push(currentWord);
+  }
+  flushGroup();
+
+  const rawFullText = typeof data?.text === 'string' && data.text.trim()
+    ? data.text.trim()
+    : segments.map(s => s.text).join(' ');
+  const fullText = normalizeSubtitleSpacing(rawFullText, locale);
+
+  return {
+    text: fullText,
+    segments
+  };
+}
+
+/**
+ * 呼叫 ElevenLabs Scribe v2 語音辨識 API
+ */
+export async function callElevenLabsSpeechTranscription({
+  audioBlob,
+  apiKey,
+  language = 'zh',
+  keyterms = [],
+  signal = null
+}) {
+  const key = typeof apiKey === 'string' ? apiKey.trim() : '';
+  if (!key) throw new Error('請輸入 ElevenLabs API Key');
+  if (!(audioBlob instanceof Blob) || audioBlob.size === 0) {
+    throw new Error('未提供可供 ElevenLabs 辨識的音訊');
+  }
+
+  const formData = new FormData();
+  formData.append('file', audioBlob, 'audio.wav');
+  formData.append('model_id', 'scribe_v2');
+  formData.append('diarize', 'true');
+  formData.append('tag_audio_events', 'false');
+
+  if (language && language !== 'auto') {
+    formData.append('language_code', language);
+  }
+
+  const cleanKeyterms = (Array.isArray(keyterms) ? keyterms : [])
+    .map(term => typeof term === 'string' ? term.trim() : '')
+    .filter((term, index, list) => term && list.indexOf(term) === index)
+    .slice(0, 100);
+
+  for (const term of cleanKeyterms) {
+    formData.append('keyterms', term);
+  }
+
+  const endpoint = 'https://api.elevenlabs.io/v1/speech-to-text';
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'xi-api-key': key },
+    body: formData,
+    signal
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const detail = body?.detail?.message || body?.message || body?.detail || response.statusText || '';
+    const safeDetail = detail ? String(detail).split(key).join('[已隱藏]') : '';
+    throw new Error(`ElevenLabs 語音辨識失敗 (HTTP ${response.status})${safeDetail ? `：${safeDetail}` : ''}`);
+  }
+
+  return parseElevenLabsTranscriptionResponse(await response.json());
+}
+
 /**
  * 呼叫 Whisper 雲端 API
  */
@@ -1204,6 +1420,7 @@ export async function transcribeAudioStream({
   apiKey = '',
   azureRegion = DEFAULT_AZURE_SPEECH_REGION,
   azurePhrases = [],
+  keyterms = [],
   language = 'zh',
   prompt = '',
   onProgress = null,
@@ -1344,5 +1561,24 @@ export async function transcribeAudioStream({
     );
   }
 
+  if (provider === 'elevenlabs') {
+    const effectiveKeyterms = Array.isArray(keyterms) && keyterms.length
+      ? keyterms
+      : (Array.isArray(azurePhrases) ? azurePhrases : []);
+    const res = await callElevenLabsSpeechTranscription({
+      audioBlob: wavBlob,
+      apiKey,
+      language,
+      keyterms: effectiveKeyterms,
+      signal
+    });
+    throwIfRecognitionAborted(signal);
+    return convertAsrSegmentsToTraditionalChinese(
+      Array.isArray(res?.segments) ? res.segments : [],
+      language
+    );
+  }
+
   throw new Error(`不支援的語音辨識供應商：${provider}`);
 }
+

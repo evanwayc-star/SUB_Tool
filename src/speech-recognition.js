@@ -33,6 +33,8 @@ import {
   callGeminiAudioTranscription,
   parseAzureTranscriptionResponse,
   callAzureSpeechTranscription,
+  parseElevenLabsTranscriptionResponse,
+  callElevenLabsSpeechTranscription,
   callWhisperApi,
   transcribeAudioStream
 } from './speech-recognition-engine.js';
@@ -52,6 +54,8 @@ export {
   callGeminiAudioTranscription,
   parseAzureTranscriptionResponse,
   callAzureSpeechTranscription,
+  parseElevenLabsTranscriptionResponse,
+  callElevenLabsSpeechTranscription,
   callWhisperApi,
   transcribeAudioStream
 };
@@ -77,8 +81,10 @@ export function getAsrConfig() {
           groqApiKey: parsed.groqApiKey || '',
           openaiApiKey: parsed.openaiApiKey || '',
           azureApiKey: parsed.azureApiKey || '',
+          elevenlabsApiKey: parsed.elevenlabsApiKey || '',
           azureRegion: parsed.azureRegion || DEFAULT_AZURE_SPEECH_REGION,
           azurePhraseList: parsed.azurePhraseList || '',
+          elevenlabsKeyterms: parsed.elevenlabsKeyterms || '',
           language: parsed.language || 'zh',
           prompt: typeof parsed.prompt === 'string' ? parsed.prompt : DEFAULT_ASR_PROMPT
         };
@@ -93,8 +99,10 @@ export function getAsrConfig() {
     groqApiKey: '',
     openaiApiKey: '',
     azureApiKey: '',
+    elevenlabsApiKey: '',
     azureRegion: DEFAULT_AZURE_SPEECH_REGION,
     azurePhraseList: '',
+    elevenlabsKeyterms: '',
     language: 'zh',
     prompt: DEFAULT_ASR_PROMPT
   };
@@ -534,7 +542,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
   const initialGuidanceMeta = getAsrGuidanceMeta(conf.provider);
   const initialGuidanceValue = initialGuidanceMeta?.kind === 'phrases'
     ? (conf.azurePhraseList || '')
-    : (initialGuidanceMeta ? (conf.prompt || '') : '');
+    : (initialGuidanceMeta?.kind === 'keyterms'
+      ? (conf.elevenlabsKeyterms || '')
+      : (initialGuidanceMeta ? (conf.prompt || '') : ''));
   const cloudProvider = !!initialProviderMeta;
   const selectedApiKey = initialProviderMeta ? (conf[initialProviderMeta.keyField] || '') : '';
   const recognitionAudioChoices = clips.length === 1
@@ -600,6 +610,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <option value="openai" ${conf.provider === 'openai' ? 'selected' : ''}>OpenAI (Whisper-1 官方雲端)</option>
           <option value="azure" ${conf.provider === 'azure' ? 'selected' : ''}>Azure Speech (專業語音辨識・逐句時間碼)</option>
           <option value="google" ${conf.provider === 'google' ? 'selected' : ''}>Google Gemini (大語言模型・繁體中文理解力最強)</option>
+          <option value="elevenlabs" ${conf.provider === 'elevenlabs' ? 'selected' : ''}>ElevenLabs (Scribe v2，高精準多語言・逐字時間碼)</option>
         </select>
       </div>
 
@@ -771,6 +782,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           currentConf.azureRegion = azureRegion.toLowerCase();
           currentConf.azurePhraseList = guidance.azurePhraseList;
         }
+        if (provider === 'elevenlabs') {
+          currentConf.elevenlabsKeyterms = guidance.elevenlabsKeytermsText;
+        }
         currentConf.language = language;
         if (getAsrGuidanceMeta(provider)?.kind === 'prompt') currentConf.prompt = prompt;
         saveAsrConfig(currentConf);
@@ -826,6 +840,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                 azureRegion,
                 language,
                 ...('azurePhrases' in guidance ? { azurePhrases } : {}),
+                ...('keyterms' in guidance ? { keyterms: guidance.keyterms } : {}),
                 ...('prompt' in guidance ? { prompt } : {}),
                 signal,
                 onProgress: (pInfo) => {
@@ -1178,7 +1193,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           promptEl.placeholder = guidanceMeta?.placeholder || '';
           promptEl.value = guidanceMeta?.kind === 'phrases'
             ? (c.azurePhraseList || '')
-            : (guidanceMeta ? (c.prompt || '') : '');
+            : (guidanceMeta?.kind === 'keyterms'
+              ? (c.elevenlabsKeyterms || '')
+              : (guidanceMeta ? (c.prompt || '') : ''));
         }
       };
 
