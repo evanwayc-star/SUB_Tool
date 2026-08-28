@@ -74,19 +74,16 @@ describe('Media presentation runtime', () => {
       dur: 30, in: 10, out: 20, offset: 100, vtrack: 0, primary: true,
     }];
     State.externalAudioEnd = 0;
-    Media.activeClipId = 'clip-a';
     Media.playing = false;
-    Media._gap = false;
-    Media._transport.reset();
-    Media._lastSeekTime = 105;
-    Media._presentationCore = null;
-    Media._webCodecsPresentationWaiters?.clear?.();
-    Media._wcTakeover = false;
     domMock.video.currentTime = 15;
     domMock.video.muted = false;
     domMock.video.hasAttribute.mockImplementation(name => name === 'src');
     domMock.frameCallbacks.length = 0;
     resetPlayerAdapter(null, domMock.video);
+    Media.resetPresentationSession('test-reset');
+    Media.setWebCodecsTakeover(false);
+    Media.activeClipId = 'clip-a';
+    Media.seek(105);
   });
 
   it('畫格完成前不提交播放頭，完成後才把來源時間映回時間軸', async () => {
@@ -114,7 +111,7 @@ describe('Media presentation runtime', () => {
   });
 
   it('WebCodecs 接管時會等所有合成層的實際 PTS，再提交播放頭', async () => {
-    Media._wcTakeover = true;
+    Media.setWebCodecsTakeover(true);
     const pending = Media.requestPresentation(104);
     domMock.frameCallbacks.shift()(0, { mediaTime: 14 });
 

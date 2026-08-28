@@ -141,3 +141,99 @@ export function createMediaPresentationCore({
     isPending() { return !!active; },
   };
 }
+
+/**
+ * 播放呈現工作的完整 session。
+ *
+ * core 擁有 request 排程；session 再把 WebCodecs takeover 與合成畫格 waiter
+ * 收進同一個 lifecycle，避免 Media 同時維護 core、Map 與 takeover 三份狀態。
+ */
+export function createMediaPresentationSession(options = {}) {
+  const getTolerance = typeof options.getTolerance === 'function'
+    ? options.getTolerance
+    : () => 1.5 / 30;
+  const presentTarget = options.presentTarget;
+  if (typeof presentTarget !== 'function') throw new TypeError('presentTarget must be a function');
+  let session = null;
+  const core = createMediaPresentationCore({
+    ...options,
+    presentTarget: (targetTime, request) => presentTarget(targetTime, request, session),
+  });
+  const compositeWaiters = new Map();
+  let webCodecsTakeover = false;
+
+  function waitForWebCodecsPresentation(targetTime, { requestId, signal } = {}) {
+    const key = requestId ?? Symbol('webcodecs-presentation');
+    const tolerance = Math.max(0, Number(getTolerance(targetTime, { source: 'webcodecs' })) || 0);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        signal?.removeEventListener?.('abort', abort);
+        compositeWaiters.delete(key);
+      };
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      const abort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        const error = Object.assign(new Error('WebCodecs presentation aborted'), { name: 'AbortError' });
+        reject(error);
+      };
+
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      compositeWaiters.set(key, { targetTime, tolerance, finish, abort });
+      signal?.addEventListener?.('abort', abort, { once: true });
+    });
+  }
+
+  function reportWebCodecsPresentation(presentedTimelineTimes) {
+    const times = (Array.isArray(presentedTimelineTimes) ? presentedTimelineTimes : [presentedTimelineTimes])
+      .map(Number)
+      .filter(Number.isFinite);
+    if (!times.length) return false;
+    let completed = false;
+    for (const waiter of [...compositeWaiters.values()]) {
+      if (!times.every(time => Math.abs(time - waiter.targetTime) <= waiter.tolerance)) continue;
+      waiter.finish({ backend: 'webcodecs', presentedTime: times[times.length - 1] });
+      completed = true;
+    }
+    return completed;
+  }
+
+  function reset(reason = 'media-reset') {
+    core.cancel(reason);
+    for (const waiter of [...compositeWaiters.values()]) waiter.abort();
+    compositeWaiters.clear();
+    webCodecsTakeover = false;
+  }
+
+  session = {
+    request: core.request,
+    observe: core.observe,
+    cancel: core.cancel,
+    presentedTime: core.presentedTime,
+    isPending: core.isPending,
+    waitForWebCodecsPresentation,
+    reportWebCodecsPresentation,
+    setWebCodecsTakeover(value) { webCodecsTakeover = !!value; },
+    webCodecsTakeover() { return webCodecsTakeover; },
+    reset,
+    snapshot() {
+      return {
+        pending: core.isPending(),
+        presentedTime: core.presentedTime(),
+        webCodecsTakeover,
+        compositeWaiterCount: compositeWaiters.size,
+      };
+    },
+  };
+  return session;
+}

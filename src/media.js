@@ -54,7 +54,7 @@ import { sourceChannelLabels } from './channel-layout.js'; // 來源聲道展開
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Seq } from './sequence.js';
 import { TimelineTransport } from './timeline-transport.js';
-import { createMediaPresentationCore } from './media-presentation-core.js';
+import { createMediaPresentationSession } from './media-presentation-core.js';
 import { loadDesktopMedia, _expandChannels, _loadViaMpv, loadVideoFile, canPlayNatively, webAudioCapabilityNotice, FFMPEG_MAX_BYTES, WEB_LARGE_NATIVE_AUDIO_NOTICE, WEB_LARGE_UNSUPPORTED_MEDIA_NOTICE } from './loaders/media-loader.js';
 
 /* 專案音訊路由使用的持久來源 ID。audioSrc 仍保留給既有播放同步（video / clip:<id>），
@@ -156,10 +156,7 @@ const Media = {
   _reverseProxyPath:null,
   _reverseProxySourcePath:null,
   _reverseProxyActive:false,
-  _presentationCore:null,
-  _webCodecsPresentationWaiters:new Map(),
-  /* mpv 畫面接管旗標：true＝WebCodecs 已接管、mpv 視窗讓位。 */
-  _wcTakeover:false,
+  _presentationSession:null,
   _intakeSession:new MediaIntakeSession(),
   _activeStreamLeaseId:null,
   _assetEpoch:new ResetEpoch(),
@@ -1298,22 +1295,22 @@ const Media = {
   _activeClip(){ return Seq.byId(this.activeClipId); },
 
   /* ===== 播放呈現狀態的對外查詢 ===============================================
-     以下五個是給 app.js／pointer-interaction.js／decode/player.js 用的公開入口。
-     它們背後的 _gap / _wcTakeover / _activeClip 以前是被【模組外直接讀】的底線
+     以下入口給 app.js／pointer-interaction.js／decode/player.js 使用。
+     它們背後的 _gap / presentation session / _activeClip 以前是被【模組外直接讀】的底線
      名稱——呼叫端因此得知道 Media 的內部欄位長什麼樣，改名就會靜默壞掉。
 
-     mpvPresenting() 特別值得存在：`mpvMode && !_wcTakeover` 這個組合原本在
-     app.js 與 pointer-interaction.js 手寫了七次，任何一處漏掉 `!_wcTakeover`，
+     mpvPresenting() 特別值得存在：`mpvMode && !webCodecsTakeover()` 這個組合原本在
+     app.js 與 pointer-interaction.js 手寫了七次，任何一處漏掉 takeover 判斷，
      WebCodecs 接管期間就會把 guide／命中層送去 mpv——畫面看起來正常，但點不到。 */
   activeClip(){ return this._activeClip(); },
   inGap(){ return !!this._gap; },
   sourceLocalTime(srcId, t){ return this._srcLocalT(srcId, t); },
   /* mpv 正在自己出圖（WebCodecs 尚未接管） */
-  mpvPresenting(){ return !!(this.mpvMode && !this._wcTakeover); },
+  mpvPresenting(){ return !!(this.mpvMode && !this.webCodecsTakeover()); },
   /* WebCodecs 是否已接管畫面（mpv 視窗讓位）。與 _wcComposited 不同：
      這個是「有沒有叫 mpv 讓位」，_wcComposited 是「WC 這一輪有沒有真的畫出東西」。 */
-  webCodecsTakeover(){ return !!this._wcTakeover; },
-  setWebCodecsTakeover(v){ this._wcTakeover = !!v; },
+  webCodecsTakeover(){ return !!this._presentationSession?.webCodecsTakeover(); },
+  setWebCodecsTakeover(v){ this._ensurePresentationSession().setWebCodecsTakeover(v); },
   setWebCodecsComposited(v){ this._wcComposited = !!v; },
   webCodecsProxyUrl(){ return this._wcProxyUrl; },
   webCodecsProxyPath(){ return this._wcProxyPath; },
@@ -1325,65 +1322,39 @@ const Media = {
       sourceTime:this.vTime(), clip, virtual, playbackRate:video.playbackRate||1,useGap:this.seqOn(),
     });
   },
-  _ensurePresentationCore(){
-    if(this._presentationCore) return this._presentationCore;
-    this._presentationCore=createMediaPresentationCore({
-      presentTarget:(targetTime,request)=>this._presentTimelineTarget(targetTime,request),
+  _ensurePresentationSession(){
+    if(this._presentationSession) return this._presentationSession;
+    this._presentationSession=createMediaPresentationSession({
+      presentTarget:(targetTime,request,session)=>this._presentTimelineTarget(targetTime,request,session),
       getTolerance:()=>1.5/getExactFps(State.fps||30),
       timeoutMs:500,
     });
-    return this._presentationCore;
+    return this._presentationSession;
   },
   requestPresentation(targetTime){
     const duration=Number(State.duration)||0;
     let target=snapTimeToFrame(Math.max(0,Number(targetTime)||0),State.fps,State.dropFrame);
     if(duration>0) target=Math.min(duration,target);
-    return this._ensurePresentationCore().request(target);
+    return this._ensurePresentationSession().request(target);
   },
   cancelPresentation(reason='cancelled'){
-    this._presentationCore?.cancel(reason);
+    this._presentationSession?.cancel(reason);
   },
   presentedTime(){
-    return this._presentationCore?.presentedTime()??null;
+    return this._presentationSession?.presentedTime()??null;
   },
   presentationPending(){
-    return !!this._presentationCore?.isPending();
+    return !!this._presentationSession?.isPending();
   },
   observePresentedTimelineTime(time,source='unknown'){
-    return this._ensurePresentationCore().observe(time,{source});
+    return this._ensurePresentationSession().observe(time,{source});
   },
-  _waitForWebCodecsPresentation(targetTime,{requestId,signal}={}){
-    const key=requestId??Symbol('webcodecs-presentation');
-    const tolerance=1.5/getExactFps(State.fps||30);
-    return new Promise((resolve,reject)=>{
-      const abort=()=>{
-        this._webCodecsPresentationWaiters.delete(key);
-        const error=Object.assign(new Error('WebCodecs presentation aborted'),{name:'AbortError'});
-        reject(error);
-      };
-      if(signal?.aborted){ abort(); return; }
-      this._webCodecsPresentationWaiters.set(key,{
-        targetTime,tolerance,
-        resolve:value=>{
-          signal?.removeEventListener?.('abort',abort);
-          this._webCodecsPresentationWaiters.delete(key);
-          resolve(value);
-        },
-      });
-      signal?.addEventListener?.('abort',abort,{once:true});
-    });
+  resetPresentationSession(reason='media-reset'){
+    this._presentationSession?.reset(reason);
+    this._presentationSession=null;
   },
   reportWebCodecsPresentation(presentedTimelineTimes){
-    const times=(Array.isArray(presentedTimelineTimes)?presentedTimelineTimes:[presentedTimelineTimes])
-      .map(Number).filter(Number.isFinite);
-    if(!times.length) return false;
-    let completed=false;
-    for(const waiter of [...this._webCodecsPresentationWaiters.values()]){
-      if(!times.every(time=>Math.abs(time-waiter.targetTime)<=waiter.tolerance)) continue;
-      waiter.resolve({backend:'webcodecs',presentedTime:times[times.length-1]});
-      completed=true;
-    }
-    return completed;
+    return this._presentationSession?.reportWebCodecsPresentation(presentedTimelineTimes)??false;
   },
   _commitPresentedTarget(targetTime){
     const committed=this._transport.seek(targetTime,{
@@ -1395,7 +1366,7 @@ const Media = {
     emit('media:playhead');
     return committed;
   },
-  async _presentTimelineTarget(targetTime,{signal,requestId}={}){
+  async _presentTimelineTarget(targetTime,{signal,requestId}={},presentationSession=this._ensurePresentationSession()){
     if(signal?.aborted) throw Object.assign(new Error('media presentation aborted'),{name:'AbortError'});
     const fps=getExactFps(State.fps||30);
     const tolerance=1.5/fps;
@@ -1423,7 +1394,7 @@ const Media = {
     }
 
     const webCodecsPending=this.webCodecsTakeover()
-      ? this._waitForWebCodecsPresentation(targetTime,{signal,requestId})
+      ? presentationSession.waitForWebCodecsPresentation(targetTime,{signal,requestId})
       : null;
     webCodecsPending?.catch(()=>{});
     const result=await adapter.present(sourceTarget,{
@@ -2773,7 +2744,7 @@ const Media = {
   },
   supportsNativeReverse(){
     const adapter=getPlayerAdapter();
-    if(!this.mpvMode||this._wcTakeover||!adapter.supportsNativeReverse()) return false;
+    if(!this.mpvMode||this.webCodecsTakeover()||!adapter.supportsNativeReverse()) return false;
     // 原生倒播目前只用於一支未修剪、沒有時間軸位移的影片。多片段、間隙與修剪邊界
     // 仍交給既有時間軸 seek 路徑，避免 mpv 倒出目前 clip 的來源範圍。
     const clips=State.clips.filter(clip=>clip.type!=='image');
@@ -2816,9 +2787,7 @@ const Media = {
     return true;
   },
   reset(options={}){
-    this.cancelPresentation('media-reset');
-    this._presentationCore=null;
-    this._webCodecsPresentationWaiters.clear();
+    this.resetPresentationSession('media-reset');
     this._nativeReverse=false;
     this._reverseShuttleMuted=false;
     this._reverseProxyPath=null;

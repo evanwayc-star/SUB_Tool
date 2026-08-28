@@ -134,7 +134,7 @@ FPS-SYNC
 | `loaders/media-loader.js` | 原生 `seeked`／mpv per-frame `time-pos` | 普通 seek 對齊；呈現請求另與 `playback-restart` 配對後才提交 | I3, I4, I4a |
 | `transport-controller.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
 | `shuttle-runtime.js` | `ReverseShuttleSession` | elapsed time × 倍率 × 精確 FPS 產生最新倒帶目標；持續監看原生實際呈現進度 | I3, I4a, I5 |
-| `media-presentation-core.js` | `request()`／`observe()` | 同時一個 in-flight、只保留最新 pending，依 request id 配對完成 | I4a |
+| `media-presentation-core.js` | `createMediaPresentationSession()` | 同時一個 in-flight、只保留最新 pending；同一 session 擁有 WebCodecs takeover、合成畫格 waiter、取消與 reset | I4a |
 | `decode/player.js` | WebCodecs 呈現回報 | 所有可見圖層完成繪製後回報各自實際來源時間 | I4a |
 | `notes.js` | `addNote()` | 備註時間取自 `displayTime()` | I4 |
 | `timeline-renderer.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |

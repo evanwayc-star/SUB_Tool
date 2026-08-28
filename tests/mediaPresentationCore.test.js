@@ -1,5 +1,8 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { createMediaPresentationCore } from '../src/media-presentation-core.js';
+import {
+  createMediaPresentationCore,
+  createMediaPresentationSession,
+} from '../src/media-presentation-core.js';
 
 describe('media-presentation-core', () => {
   afterEach(() => {
@@ -97,5 +100,60 @@ describe('media-presentation-core', () => {
 
     core.observe(4.95, { requestId: latestRequestId, source: 'mpv' });
     await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 4.95 });
+  });
+});
+
+describe('media presentation session', () => {
+  it('WebCodecs takeover、合成畫格等待與 request lifecycle 由同一個 session 擁有', async () => {
+    let session;
+    session = createMediaPresentationSession({
+      getTolerance: () => 0.05,
+      presentTarget(targetTime, request) {
+        return session.waitForWebCodecsPresentation(targetTime, request);
+      },
+    });
+    session.setWebCodecsTakeover(true);
+
+    const pending = session.request(12);
+    expect(session.snapshot()).toEqual({
+      pending: true,
+      presentedTime: null,
+      webCodecsTakeover: true,
+      compositeWaiterCount: 1,
+    });
+
+    expect(session.reportWebCodecsPresentation([12.01, 11.99])).toBe(true);
+    await expect(pending).resolves.toMatchObject({
+      status: 'presented', requestedTime: 12, presentedTime: 11.99, source: 'webcodecs',
+    });
+    expect(session.snapshot()).toEqual({
+      pending: false,
+      presentedTime: 11.99,
+      webCodecsTakeover: true,
+      compositeWaiterCount: 0,
+    });
+  });
+
+  it('reset 取消尚未呈現的工作並一次清掉 takeover 與合成 waiter', async () => {
+    let session;
+    session = createMediaPresentationSession({
+      presentTarget(targetTime, request) {
+        return session.waitForWebCodecsPresentation(targetTime, request);
+      },
+    });
+    session.setWebCodecsTakeover(true);
+    const pending = session.request(8);
+
+    session.reset('media-reset');
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'cancelled', requestedTime: 8, reason: 'media-reset',
+    });
+    expect(session.snapshot()).toEqual({
+      pending: false,
+      presentedTime: null,
+      webCodecsTakeover: false,
+      compositeWaiterCount: 0,
+    });
   });
 });
