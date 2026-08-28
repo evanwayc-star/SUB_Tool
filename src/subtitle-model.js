@@ -673,9 +673,3 @@ export function toggleOverwriteKeep({ force } = {}) {
 }
 
 export { burnedSubtitleTrackNames };
-
-export {
-  splitCueAtTime, mergeTwoCues, swapCueTexts
-} from './subtitle-edit-pipeline.js';
-
-

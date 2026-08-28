@@ -5,9 +5,12 @@ import path from 'node:path';
 
 let State;
 let History;
+let SubtitleModel;
 let splitCue;
 let addCue;
 let addCueRelative;
+let swapAdjacentCues;
+let mergeAdjacentCues;
 let Subtitles;
 let StylePanelController;
 let Media;
@@ -37,7 +40,8 @@ beforeAll(async () => {
   mountSystemDom();
   ({ State } = await import('../src/state.js'));
   ({ History } = await import('../src/history.js'));
-  ({ splitCue, addCue, addCueRelative } = await import('../src/subtitle-model.js'));
+  SubtitleModel = await import('../src/subtitle-model.js');
+  ({ splitCue, addCue, addCueRelative, swapAdjacentCues, mergeAdjacentCues } = SubtitleModel);
   Subtitles = await import('../src/subtitles.js');
   ({ Media } = await import('../src/media.js'));
   await import('../src/transport-controller.js');
@@ -208,6 +212,50 @@ describe('字幕編輯交易：拆分字幕', () => {
       historyLabels: ['初始'],
       renderInvalidations: 0,
       toast: '🔒「對白」已鎖定，無法拆分字幕',
+    });
+  });
+});
+
+describe('字幕編輯交易：相鄰交換與合併', () => {
+  it('production interface 不再暴露未接線的影子純函式', () => {
+    expect(['splitCueAtTime', 'mergeTwoCues', 'swapCueTexts'].filter(name => name in SubtitleModel))
+      .toEqual([]);
+  });
+
+  it('合併由真實交易一次完成內容、時間、選取、History 與畫面失效', () => {
+    mergeAdjacentCues('target', 1);
+
+    expect({
+      cues: State.cues.map(cue => ({ id: cue.id, start: cue.start, end: cue.end, text: cue.text })),
+      selectedId: State.selectedId,
+      historyLabels: History.stack.map(entry => entry.label),
+      renderInvalidations,
+    }).toEqual({
+      cues: [
+        { id: 'before', start: 1, end: 2, text: '前一句' },
+        { id: 'target', start: 10, end: 31, text: '前半後半 後一句' },
+      ],
+      selectedId: 'target',
+      historyLabels: ['初始', '合併字幕'],
+      renderInvalidations: 1,
+    });
+  });
+
+  it('相鄰換位由真實交易保留各自長度與間隔並只留一筆 History', () => {
+    swapAdjacentCues('target', 1);
+
+    expect({
+      cues: State.cues.map(cue => ({ id: cue.id, start: cue.start, end: cue.end, text: cue.text })),
+      historyLabels: History.stack.map(entry => entry.label),
+      renderInvalidations,
+    }).toEqual({
+      cues: [
+        { id: 'before', start: 1, end: 2, text: '前一句' },
+        { id: 'after', start: 10, end: 11, text: '後一句' },
+        { id: 'target', start: 21, end: 31, text: '前半後半' },
+      ],
+      historyLabels: ['初始', '相鄰換位'],
+      renderInvalidations: 1,
     });
   });
 });
