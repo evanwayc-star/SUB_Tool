@@ -54,6 +54,7 @@ import { sourceChannelLabels } from './channel-layout.js'; // 來源聲道展開
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Seq } from './sequence.js';
 import { TimelineTransport } from './timeline-transport.js';
+import { createMediaPresentationCore } from './media-presentation-core.js';
 import { loadDesktopMedia, _expandChannels, _loadViaMpv, loadVideoFile, canPlayNatively, webAudioCapabilityNotice, FFMPEG_MAX_BYTES, WEB_LARGE_NATIVE_AUDIO_NOTICE, WEB_LARGE_UNSUPPORTED_MEDIA_NOTICE } from './loaders/media-loader.js';
 
 /* 專案音訊路由使用的持久來源 ID。audioSrc 仍保留給既有播放同步（video / clip:<id>），
@@ -151,6 +152,12 @@ const Media = {
   get mpvMode(){ return getPlayerAdapter().mode === 'mpv'; },
   _mpvTime:0, _mpvDuration:0, _mpvExactSeek:false, _mpvSeekOffset:0, _bgVersion:0,
   _nativeReverse:false,
+  _reverseShuttleMuted:false,
+  _reverseProxyPath:null,
+  _reverseProxySourcePath:null,
+  _reverseProxyActive:false,
+  _presentationCore:null,
+  _webCodecsPresentationWaiters:new Map(),
   /* mpv 畫面接管旗標：true＝WebCodecs 已接管、mpv 視窗讓位。 */
   _wcTakeover:false,
   _intakeSession:new MediaIntakeSession(),
@@ -892,8 +899,8 @@ const Media = {
       ? '正在轉檔 Proxy 與分析音訊（背景處理，不影響播放）…'
       : '正在分析音訊（背景處理，不影響播放）…','busy');
     let res;
-    // 一般 mpv 路徑同 pass 產 720p proxy，讓 WebCodecs 預覽引擎可在多軌合成時接管；
-    // frame-accurate H.264/H.265 MP4 則只抽音訊，不產 proxy，保持 mpv 為逐格呈現者。
+    // 所有 mpv 路徑同 pass 產 720p 短 GOP proxy：多軌合成時交給 WebCodecs，
+    // 持續倒帶時則暫時交給 mpv，避免母素材的長 GOP 造成反向預解碼停頓。
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
     try{ res=await DESK.ingest({path:p,duration:dur,needsProxy,audio,queue:true}); }
@@ -905,6 +912,9 @@ const Media = {
         if(!current()) return;
         this._wcProxyUrl=u;
         this._wcProxyPath=p;
+        // 倒帶用同一支短 GOP preview cache；它只負責監看，匯出仍只讀母素材。
+        this._reverseProxyPath=res.proxy;
+        this._reverseProxySourcePath=p;
         this.seek(this.displayTime()); // 強制全域跳躍以觸發 WCPreview 接管與解碼
       }catch(e){ if(!current()) return; console.warn('proxy url:',e); }
     }
@@ -1314,6 +1324,129 @@ const Media = {
     return this._transport.timelineTime({
       sourceTime:this.vTime(), clip, virtual, playbackRate:video.playbackRate||1,useGap:this.seqOn(),
     });
+  },
+  _ensurePresentationCore(){
+    if(this._presentationCore) return this._presentationCore;
+    this._presentationCore=createMediaPresentationCore({
+      presentTarget:(targetTime,request)=>this._presentTimelineTarget(targetTime,request),
+      getTolerance:()=>1.5/getExactFps(State.fps||30),
+      timeoutMs:500,
+    });
+    return this._presentationCore;
+  },
+  requestPresentation(targetTime){
+    const duration=Number(State.duration)||0;
+    let target=snapTimeToFrame(Math.max(0,Number(targetTime)||0),State.fps,State.dropFrame);
+    if(duration>0) target=Math.min(duration,target);
+    return this._ensurePresentationCore().request(target);
+  },
+  cancelPresentation(reason='cancelled'){
+    this._presentationCore?.cancel(reason);
+  },
+  presentedTime(){
+    return this._presentationCore?.presentedTime()??null;
+  },
+  presentationPending(){
+    return !!this._presentationCore?.isPending();
+  },
+  observePresentedTimelineTime(time,source='unknown'){
+    return this._ensurePresentationCore().observe(time,{source});
+  },
+  _waitForWebCodecsPresentation(targetTime,{requestId,signal}={}){
+    const key=requestId??Symbol('webcodecs-presentation');
+    const tolerance=1.5/getExactFps(State.fps||30);
+    return new Promise((resolve,reject)=>{
+      const abort=()=>{
+        this._webCodecsPresentationWaiters.delete(key);
+        const error=Object.assign(new Error('WebCodecs presentation aborted'),{name:'AbortError'});
+        reject(error);
+      };
+      if(signal?.aborted){ abort(); return; }
+      this._webCodecsPresentationWaiters.set(key,{
+        targetTime,tolerance,
+        resolve:value=>{
+          signal?.removeEventListener?.('abort',abort);
+          this._webCodecsPresentationWaiters.delete(key);
+          resolve(value);
+        },
+      });
+      signal?.addEventListener?.('abort',abort,{once:true});
+    });
+  },
+  reportWebCodecsPresentation(presentedTimelineTimes){
+    const times=(Array.isArray(presentedTimelineTimes)?presentedTimelineTimes:[presentedTimelineTimes])
+      .map(Number).filter(Number.isFinite);
+    if(!times.length) return false;
+    let completed=false;
+    for(const waiter of [...this._webCodecsPresentationWaiters.values()]){
+      if(!times.every(time=>Math.abs(time-waiter.targetTime)<=waiter.tolerance)) continue;
+      waiter.resolve({backend:'webcodecs',presentedTime:times[times.length-1]});
+      completed=true;
+    }
+    return completed;
+  },
+  _commitPresentedTarget(targetTime){
+    const committed=this._transport.seek(targetTime,{
+      duration:State.duration,fps:State.fps,dropFrame:State.dropFrame,
+    });
+    const tc=$('tcCur'); if(tc) tc.textContent=secToEncore(committed,State.fps,State.dropFrame);
+    const seekBar=$('seekBar'); if(seekBar) seekBar.value=Math.round(committed*1000);
+    window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:committed}));
+    emit('media:playhead');
+    return committed;
+  },
+  async _presentTimelineTarget(targetTime,{signal,requestId}={}){
+    if(signal?.aborted) throw Object.assign(new Error('media presentation aborted'),{name:'AbortError'});
+    const fps=getExactFps(State.fps||30);
+    const tolerance=1.5/fps;
+    const adapter=getPlayerAdapter();
+    let clip=null;
+    let sourceTarget=targetTime;
+
+    if(this.seqOn()){
+      clip=Seq.clipAt(targetTime);
+      if(!clip){
+        this._enterGap(targetTime);
+        const committed=this._commitPresentedTarget(targetTime);
+        return {presentedTime:committed,source:'synthetic'};
+      }
+      sourceTarget=this._transport.sourceTime(targetTime,clip);
+      if(clip.id!==this.activeClipId||this._gap){
+        await this._ensureClip(clip,sourceTarget,false);
+        if(signal?.aborted) throw Object.assign(new Error('media presentation aborted'),{name:'AbortError'});
+      }
+      if(this.mpvMode) this._setMpvSeekProfile(clip);
+    }else if(this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'))){
+      this._transport.seekVirtual(targetTime,{running:false});
+      const committed=this._commitPresentedTarget(targetTime);
+      return {presentedTime:committed,source:'synthetic'};
+    }
+
+    const webCodecsPending=this.webCodecsTakeover()
+      ? this._waitForWebCodecsPresentation(targetTime,{signal,requestId})
+      : null;
+    webCodecsPending?.catch(()=>{});
+    const result=await adapter.present(sourceTarget,{
+      signal,
+      exact:this.mpvMode&&this._mpvExactSeek,
+      tolerance,
+    });
+    const actualSource=Number(result?.presentedSourceTime);
+    if(!Number.isFinite(actualSource)) throw new Error('player did not acknowledge a presented frame');
+    let presentedTimeline=clip
+      ? this._transport.timelineTime({sourceTime:actualSource,clip})
+      : actualSource;
+    let source=result.backend||adapter.type;
+    if(webCodecsPending){
+      const composited=await webCodecsPending;
+      presentedTimeline=composited.presentedTime;
+      source=composited.backend;
+    }
+    if(this.mpvMode) this._mpvTime=actualSource;
+    // 命令目標與實際畫格可在容差內相差一格；權威播放點必須跟著
+    // presenter 回報的位置，而不是把原本要求的位置冒充成已顯示畫格。
+    this._commitPresentedTarget(presentedTimeline);
+    return {presentedTime:presentedTimeline,source};
   },
   /* 預覽淡出入黑「黑暗程度」0..1：依最上層片段的淡入/淡出與該視訊軌透明度計算（間隙本就是黑，回 0 不另疊） */
   previewFadeDarkness(){
@@ -2347,6 +2480,7 @@ const Media = {
   },
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t){
+    this.cancelPresentation('external-seek');
     // 有影片時才設上限；無影片時允許任意位置（空專案先排字幕）。
     // FPS-SYNC：每次 seek 都由 transport 以唯一格網吸附，並記下暫停權威位置。
     t=this._transport.seek(t,{duration:State.duration,fps:State.fps,dropFrame:State.dropFrame});
@@ -2461,16 +2595,24 @@ const Media = {
   scrubAudio(t, duration = 0.15) {
     this._audioRouter.scrubAudio(t, duration);
   },
+  setReverseShuttleMuted(muted){
+    this._reverseShuttleMuted=!!muted;
+    if(this._reverseShuttleMuted){
+      this.stopBufferSources(); this.stopElementSources();
+      video.muted=true;
+      getPlayerAdapter().mute(true).catch(()=>{});
+    }else this.syncMuteState();
+  },
   syncMuteState(){
     const mix=this.hasMix();
     const active=this._activeClip();
-    video.muted = mix ? true : (State.muted || !!active?.audioDetached);
+    video.muted = this._reverseShuttleMuted||mix ? true : (State.muted || !!active?.audioDetached);
     if(this.mpvMode){
       const source=active ? (active.audioSrc || (active.primary ? 'video' : ('clip:' + active.id))) : null;
       const sourceHasElements=!!source&&this.tracks.some(track=>
         (track.kind==='buffer'||track.kind==='element')&&
         (track.source||'video')===source&&!track._srcHidden);
-      getPlayerAdapter().mute(State.muted||!!active?.audioDetached||sourceHasElements).catch(()=>{});
+      getPlayerAdapter().mute(this._reverseShuttleMuted||State.muted||!!active?.audioDetached||sourceHasElements).catch(()=>{});
     }
     this.applyGains();
   },
@@ -2595,6 +2737,40 @@ const Media = {
     for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){ tr.el.playbackRate=r; if('preservesPitch' in tr.el) tr.el.preservesPitch=pp; } }
     if(!this.mpvMode && this.playing&&this.tracks.some(t=>t.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(this.vTime()); }
   },
+  reverseShuttleProxyReady(){
+    if(!this.mpvMode||!this._reverseProxyPath||!this._reverseProxySourcePath) return false;
+    const clip=this.seqOn()?this._activeClip():null;
+    return !!clip&&clip.path===this._reverseProxySourcePath;
+  },
+  async _activateReverseShuttleProxy(){
+    if(this._reverseProxyActive||!this.reverseShuttleProxyReady()) return this._reverseProxyActive;
+    const adapter=getPlayerAdapter();
+    const sourceTime=Math.max(0,Number(this._mpvTime)||0);
+    const loaded=await adapter.loadfile(this._reverseProxyPath).catch(()=>null);
+    if(!loaded||loaded.ok===false) return false;
+    this._reverseProxyActive=true;
+    this._mpvPath=this._reverseProxyPath;
+    this._mpvTime=sourceTime;
+    await adapter.seek(sourceTime).catch(()=>{});
+    emit('mpv:refreshSubs');
+    return true;
+  },
+  async _restoreReverseShuttleSource(){
+    if(!this._reverseProxyActive) return true;
+    const adapter=getPlayerAdapter();
+    const sourceTime=Math.max(0,Number(this._mpvTime)||0);
+    const sourcePath=this._reverseProxySourcePath;
+    const loaded=await adapter.loadfile(sourcePath).catch(()=>null);
+    if(!loaded||loaded.ok===false) return false;
+    this._reverseProxyActive=false;
+    this._mpvPath=sourcePath;
+    const clip=this.seqOn()?this._activeClip():null;
+    this._setMpvSeekProfile(clip);
+    this._mpvTime=sourceTime;
+    await this._seekMpv(sourceTime).catch(()=>{});
+    emit('mpv:refreshSubs');
+    return true;
+  },
   supportsNativeReverse(){
     const adapter=getPlayerAdapter();
     if(!this.mpvMode||this._wcTakeover||!adapter.supportsNativeReverse()) return false;
@@ -2603,10 +2779,9 @@ const Media = {
     const clips=State.clips.filter(clip=>clip.type!=='image');
     if(clips.length!==1||this._gap) return false;
     const clip=clips[0];
-    // H.265 MP4 為了逐格精準會套用 exact seek 與半格補償；mpv 雖接受
-    // direction=backward，實際反向解碼卻可能停在同一畫格。這類 clip 必須用
-    // 時間軸逐格 seek fallback，不能誤判為可原生倒播。
-    if(clip.mpvExactSeek) return false;
+    // H.265 MP4 的母素材需 exact seek 與半格補償，不能直接原生倒播；
+    // 短 GOP preview Proxy 就緒後則可在相同來源時間安全反向呈現。
+    if(clip.mpvExactSeek&&!this.reverseShuttleProxyReady()) return false;
     return clip.id===this.activeClipId
       &&Math.abs(Number(clip.offset)||0)<1e-6
       &&Math.abs(Number(clip.in)||0)<1e-6
@@ -2623,17 +2798,32 @@ const Media = {
     if(next==='backward'){
       this.stopBufferSources(); this.stopElementSources();
       await adapter.mute(true);
-      await adapter.direction('backward');
+      await this._activateReverseShuttleProxy();
+      await adapter.mute(true);
+      const enabled=await adapter.direction('backward');
+      if(enabled===false){
+        this._nativeReverse=false;
+        await this._restoreReverseShuttleSource();
+        return false;
+      }
       this._nativeReverse=true;
       return true;
     }
     this._nativeReverse=false;
     await adapter.direction('forward');
+    await this._restoreReverseShuttleSource();
     this.syncMuteState();
     return true;
   },
   reset(options={}){
+    this.cancelPresentation('media-reset');
+    this._presentationCore=null;
+    this._webCodecsPresentationWaiters.clear();
     this._nativeReverse=false;
+    this._reverseShuttleMuted=false;
+    this._reverseProxyPath=null;
+    this._reverseProxySourcePath=null;
+    this._reverseProxyActive=false;
     this._intakeSession.invalidate();
     this._setActiveStreamLease(null);
     this._assetEpoch.invalidate();

@@ -1,132 +1,143 @@
 /* ==============================================================================
-   SUB Tool — 媒體預覽與主時鐘核心引擎 ("src/media-presentation-core.js")
+   SUB Tool — 媒體實際呈現協調核心 ("src/media-presentation-core.js")
    ==============================================================================
-   【架構與職責】
-   純領域計算深層模組：統籌 Master Playback Clock 主時鐘計算、逐格步進
-   (Step Frame)、音畫時鐘漂移量測 (Drift Measurement) 與多後端播放狀態協調，
-   嚴格恪守 docs/FPS_時碼一致性.md 規範。
+   深層模組：把時間軸目標交給 HTML5／mpv／WebCodecs presenter，並以實際
+   呈現回報作為提交點。它只容許一個 in-flight 請求，忙碌時只保留最新目標。
    ============================================================================== */
 
 /**
- * 依據專案精確 FPS 計算指定時間（秒）對應的絕對影格序號 (Frame Index)。
- * 
- * @param {number} timeSec 時間（秒）
- * @param {number} fps 影格率 (例如 23.976, 24, 25, 29.97, 30, 60)
- * @returns {number} 影格序號（從 0 開始）
+ * 建立「要求位置」與「實際呈現位置」之間的單一協調核心。
+ *
+ * presentTarget 只負責把命令送到目前的 renderer；命令成功不代表畫面已完成。
+ * renderer 必須以 correlated Promise 或帶 requestId 的 observe() 回報實際畫格。
  */
-export function timeToFrameIndex(timeSec, fps = 30) {
-  const t = Math.max(0, Number(timeSec) || 0);
-  const f = Math.max(1, Number(fps) || 30);
-  return Math.round(t * f);
-}
-
-/**
- * 依據絕對影格序號換算精確時間（秒）。
- * 
- * @param {number} frameIndex 影格序號
- * @param {number} fps 影格率
- * @returns {number} 時間（秒）
- */
-export function frameIndexToTime(frameIndex, fps = 30) {
-  const idx = Math.max(0, Number(frameIndex) || 0);
-  const f = Math.max(1, Number(fps) || 30);
-  return idx / f;
-}
-
-/**
- * 計算逐格前後移動後的新時間碼點。
- * 
- * @param {number} currentTime 當前時間（秒）
- * @param {number} stepFrames 步進影格數（例如 +1, -1, +5, -5）
- * @param {number} fps 影格率
- * @param {number} [duration=Infinity] 媒體總長度上限
- * @returns {number} 步進後的時間點（秒）
- */
-export function stepFrameTime(currentTime, stepFrames, fps = 30, duration = Infinity) {
-  const curIdx = timeToFrameIndex(currentTime, fps);
-  const targetIdx = Math.max(0, curIdx + (Number(stepFrames) || 0));
-  const targetTime = frameIndexToTime(targetIdx, fps);
-  return Math.min(duration > 0 ? duration : Infinity, targetTime);
-}
-
-/**
- * 量測視訊呈現時間與音訊時鐘之間的漂移量 (Drift)。
- * 
- * @param {number} videoTime 視訊當前呈現時間點（秒）
- * @param {number} audioTime 音訊基準時間點（秒）
- * @param {number} [driftTolerance=0.04] 允許之最大漂移容差（秒，約 1 格）
- * @returns {{drift: number, outOfSync: boolean, needsHardSeek: boolean}} 漂移診斷
- */
-export function measureClockDrift(videoTime, audioTime, driftTolerance = 0.04) {
-  const vt = Number(videoTime) || 0;
-  const at = Number(audioTime) || 0;
-  const drift = vt - at;
-  const absDrift = Math.abs(drift);
-
-  return {
-    drift: Number(drift.toFixed(4)),
-    outOfSync: absDrift > driftTolerance,
-    needsHardSeek: absDrift > 0.3, // 漂移超過 300ms 必須強制 Hard Seek
-  };
-}
-
-/**
- * 建立主時鐘控制器 (Master Playback Clock Controller)。
- * 
- * @param {object} [initialState]
- * @param {number} [initialState.time=0] 初始時間
- * @param {number} [initialState.speed=1.0] 初始播放速度
- * @param {number} [initialState.fps=30] 影格率
- * @returns {object} 主時鐘控制器實例
- */
-export function createMasterClock({
-  time = 0,
-  speed = 1.0,
-  fps = 30,
+export function createMediaPresentationCore({
+  presentTarget,
+  getTolerance = () => 1.5 / 30,
+  timeoutMs = 500,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
 } = {}) {
-  let _time = Math.max(0, Number(time) || 0);
-  let _speed = Number(speed) || 1.0;
-  let _fps = Number(fps) || 30;
-  let _isPlaying = false;
-  let _lastWallTime = null;
+  if (typeof presentTarget !== 'function') throw new TypeError('presentTarget must be a function');
+
+  let active = null;
+  let pending = null;
+  let lastPresentedTime = null;
+  let nextId = 1;
+
+  function makeRequest(targetTime, options) {
+    const requestedTime = Math.max(0, Number(targetTime) || 0);
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    return {
+      id: nextId++, requestedTime, options: options || {}, promise, resolve,
+      timer: null, settled: false,
+      controller: typeof AbortController !== 'undefined' ? new AbortController() : null,
+    };
+  }
+
+  function finish(request, result) {
+    if (!request || request.settled) return;
+    request.settled = true;
+    if (request.timer != null) clearTimeoutFn(request.timer);
+    request.timer = null;
+    if (result?.status !== 'presented') request.controller?.abort?.(result?.reason || result?.status);
+    request.resolve({ requestedTime: request.requestedTime, ...result });
+  }
+
+  function startNext() {
+    if (active || !pending) return;
+    const next = pending;
+    pending = null;
+    start(next);
+  }
+
+  function releaseActive(request, result) {
+    if (active !== request) return;
+    active = null;
+    finish(request, result);
+    startNext();
+  }
+
+  function start(request) {
+    active = request;
+    const requestTimeout = Number(request.options.timeoutMs ?? timeoutMs);
+    if (Number.isFinite(requestTimeout) && requestTimeout > 0) {
+      request.timer = setTimeoutFn(() => {
+        releaseActive(request, { status: 'timeout', presentedTime: lastPresentedTime });
+      }, requestTimeout);
+    }
+
+    let outbound;
+    try {
+      outbound = presentTarget(request.requestedTime, {
+        requestId: request.id,
+        signal: request.controller?.signal || null,
+      });
+    } catch (error) {
+      releaseActive(request, { status: 'failed', error });
+      return;
+    }
+
+    Promise.resolve(outbound).then(result => {
+      if (active !== request || request.settled) return;
+      const presentedTime = typeof result === 'number' ? result : result?.presentedTime;
+      if (!Number.isFinite(Number(presentedTime))) return;
+      lastPresentedTime = Math.max(0, Number(presentedTime));
+      const source = result?.source || result?.backend;
+      releaseActive(request, {
+        status: 'presented',
+        presentedTime: lastPresentedTime,
+        ...(source ? { source } : {}),
+      });
+    }).catch(error => {
+      releaseActive(request, { status: 'failed', error });
+    });
+  }
+
+  function request(targetTime, options = {}) {
+    const next = makeRequest(targetTime, options);
+    if (!active) {
+      start(next);
+      return next.promise;
+    }
+    if (Math.abs(active.requestedTime - next.requestedTime) < 1e-9) return active.promise;
+    if (pending && Math.abs(pending.requestedTime - next.requestedTime) < 1e-9) return pending.promise;
+    if (pending) finish(pending, { status: 'superseded', presentedTime: lastPresentedTime });
+    pending = next;
+    return next.promise;
+  }
+
+  function observe(presentedTime, details = {}) {
+    const observed = Number(presentedTime);
+    if (!Number.isFinite(observed)) return false;
+    lastPresentedTime = Math.max(0, observed);
+    if (!active || details?.requestId !== active.id) return false;
+    const tolerance = Math.max(0, Number(getTolerance(active.requestedTime, details)) || 0);
+    if (Math.abs(lastPresentedTime - active.requestedTime) > tolerance) return false;
+    const source = details?.source;
+    releaseActive(active, {
+      status: 'presented',
+      presentedTime: lastPresentedTime,
+      ...(source ? { source } : {}),
+    });
+    return true;
+  }
+
+  function cancel(reason = 'cancelled') {
+    const current = active;
+    const queued = pending;
+    active = null;
+    pending = null;
+    finish(current, { status: 'cancelled', reason, presentedTime: lastPresentedTime });
+    finish(queued, { status: 'cancelled', reason, presentedTime: lastPresentedTime });
+  }
 
   return {
-    getTime() { return _time; },
-    setTime(t) {
-      _time = Math.max(0, Number(t) || 0);
-      _lastWallTime = performance.now();
-      return _time;
-    },
-    getSpeed() { return _speed; },
-    setSpeed(s) {
-      _speed = Math.max(0.1, Math.min(16, Number(s) || 1.0));
-      return _speed;
-    },
-    getFps() { return _fps; },
-    setFps(f) {
-      _fps = Math.max(1, Number(f) || 30);
-      return _fps;
-    },
-    isPlaying() { return _isPlaying; },
-    play() {
-      _isPlaying = true;
-      _lastWallTime = performance.now();
-    },
-    pause() {
-      _isPlaying = false;
-      _lastWallTime = null;
-    },
-    tick(nowWallTime = performance.now()) {
-      if (!_isPlaying || _lastWallTime == null) return _time;
-      const deltaSec = (nowWallTime - _lastWallTime) / 1000;
-      _time += deltaSec * _speed;
-      _lastWallTime = nowWallTime;
-      return _time;
-    },
-    step(frameDelta) {
-      _time = stepFrameTime(_time, frameDelta, _fps);
-      _lastWallTime = performance.now();
-      return _time;
-    },
+    request,
+    observe,
+    cancel,
+    presentedTime() { return lastPresentedTime; },
+    isPending() { return !!active; },
   };
 }

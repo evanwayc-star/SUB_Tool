@@ -208,6 +208,48 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
+  it('短 GOP Proxy 就緒後倒播切到 Proxy，停止時在同一來源時間切回母素材', async () => {
+    const mpv = {
+      detect: vi.fn(async () => ({ available: true })),
+      launch: vi.fn(async () => ({ duration: 12 })),
+      loadfile: vi.fn(async () => ({ ok: true, duration: 12 })),
+      seek: vi.fn(async () => {}),
+      direction: vi.fn(async () => true),
+      mute: vi.fn(async () => {}),
+      quit: vi.fn(async () => {}),
+      onEvent: vi.fn(),
+      setBounds: vi.fn(async () => {}),
+    };
+    window.subtool.mpv = mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'h264', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+    deskMock.ingest.mockResolvedValueOnce({ proxy: 'C:/cache/short-gop-proxy.mp4', channels: [] });
+
+    try {
+      await Media.loadDesktopMedia('C:/media/long-gop.mp4');
+      await vi.waitFor(() => expect(Media.reverseShuttleProxyReady()).toBe(true));
+      expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({ needsProxy: true }));
+
+      Media._mpvTime = 8;
+      await expect(Media.setPlaybackDirection('backward')).resolves.toBe(true);
+      expect(mpv.loadfile).toHaveBeenNthCalledWith(1, 'C:/cache/short-gop-proxy.mp4');
+      expect(mpv.seek).toHaveBeenLastCalledWith(8, undefined);
+
+      Media._mpvTime = 7.5;
+      await expect(Media.setPlaybackDirection('forward')).resolves.toBe(true);
+      expect(mpv.loadfile).toHaveBeenNthCalledWith(2, 'C:/media/long-gop.mp4');
+      expect(mpv.seek).toHaveBeenLastCalledWith(7.5, undefined);
+    } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
   it('uses mpv preview for a native H.265 MP4 when frame-accurate preview is available', async () => {
     const mpv = {
       detect: vi.fn(async () => ({ available: true })),

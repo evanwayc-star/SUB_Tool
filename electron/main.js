@@ -1727,6 +1727,11 @@ ipcMain.handle('mpv:loadfile', async (event, filePath) => {
   return mpvHost.loadFile(filePath);
 });
 ipcMain.handle('mpv:seek', (event, time, options) => mpvHost.seek(time, { exact: options?.exact === true }));
+ipcMain.handle('mpv:present', (event, time, options) => mpvHost.present(time, {
+  exact: options?.exact === true,
+  tolerance: Number.isFinite(Number(options?.tolerance)) ? Number(options.tolerance) : undefined,
+}));
+ipcMain.handle('mpv:cancelPresent', () => mpvHost.cancelPresent());
 ipcMain.handle('mpv:screenshot', (event, filePath) => {
   if (!fileAuthority.canWriteScreenshot(filePath)) { console.warn('[sec] mpv:screenshot blocked (bad ext):', filePath); return null; }
   fileAuthority.grantTemporaryScreenshotRead(filePath);

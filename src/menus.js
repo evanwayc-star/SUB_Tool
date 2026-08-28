@@ -22,6 +22,12 @@ import { splitMenuLabel } from './menu-label.js';
 import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './style-commands.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
 import { requestPointerSeek } from './pointer-seek-control.js';
+import {
+  buildAudioClipMenu,
+  buildAudioTrackMenu,
+  buildVideoClipMenu,
+  normalizeWaveOptions,
+} from './timeline-context-menu-model.js';
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
@@ -36,10 +42,18 @@ function showCtx(x,y,items){
     let d;
     if(it.sep){ d=document.createElement('div'); d.className='msep'; }
     else if(it.heading){ d=document.createElement('div'); d.className='lbl'; d.textContent=it.label; }
+    else if(it.note){
+      d=document.createElement('div'); d.className='ctx-note'+(it.tone?' '+it.tone:''); d.setAttribute('role','status');
+      const { icon, text } = splitMenuLabel(it.label);
+      d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`;
+    }
     else { d=document.createElement('div'); d.className='ci'; d.setAttribute('role','menuitem');
       const { icon, text } = splitMenuLabel(it.label);
       d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`+(it.checked?'<span class="chk">✓</span>':'');
-      d.onclick=()=>{ hideCtx(); it.act&&it.act(); }; }
+      if(typeof it.act==='function') d.onclick=()=>{ hideCtx(); it.act(); };
+      else { d.classList.add('disabled'); d.setAttribute('aria-disabled','true'); }
+    }
+    if(it.id) d.dataset.menuId=it.id;
     ctx.appendChild(d);
   }
   ctx.setAttribute('role','menu');
@@ -222,6 +236,70 @@ function runExternalAudioMenuAction(method,args=[],{clearSelection=false}={}){
     showToast('無法更新音訊素材');
   });
 }
+
+function clipSourcePath(clip){
+  if(typeof clip?.path==='string'&&clip.path) return clip.path;
+  return clip?.primary&&typeof State.mediaPath==='string'&&State.mediaPath ? State.mediaPath : null;
+}
+
+function revealSourceInFolder(filePath){
+  if(!IS_DESKTOP||!filePath) return;
+  Promise.resolve(window.subtool?.showSourceInFolder?.(filePath)).catch(err=>{
+    console.warn(err);
+    showToast('無法顯示檔案位置');
+  });
+}
+
+function sourceIdMatches(source, sourceId){
+  if(!source||!sourceId) return false;
+  return [source.id,source.audioSourceId,source.audioSrc,source.timelineLaneId]
+    .some(value=>value!=null&&String(value)===String(sourceId));
+}
+
+function audioMenuContext(audioEl){
+  const declaredExternal=audioEl.dataset.audioKind==='external';
+  const assetId=audioEl.dataset.audioAssetId||'';
+  const sourceId=audioEl.dataset.audioSourceId||audioEl.dataset.sourceId||'';
+  const clipId=audioEl.dataset.clipId||'';
+  let source=null;
+  if(declaredExternal||assetId){
+    source=Media.getExternalAudioSource?.(assetId||sourceId)
+      || State.externalAudioState?.find(item=>sourceIdMatches(item,assetId||sourceId))
+      || null;
+  }else{
+    source=State.clips?.find(item=>item.id===clipId)
+      || State.clips?.find(item=>sourceIdMatches(item,sourceId))
+      || null;
+  }
+  const external=declaredExternal||source?.kind==='external-audio';
+  const runtimeSourceId=audioEl.dataset.audioSrc||source?.audioSrc||sourceId;
+  const sourceName=(audioEl.dataset.audioSourceName||source?.name||audioEl.querySelector('.audio-clip-label')?.textContent||'音訊素材')
+    .trim().replace(/^[🔊🎵🔇]\s*/u,'');
+  return {
+    source,
+    external,
+    assetId:assetId||source?.id||sourceId,
+    sourceId:sourceId||source?.audioSourceId||source?.audioSrc||'',
+    runtimeSourceId,
+    sourceName,
+    filePath:clipSourcePath(source),
+    locked:source?.locked===true,
+  };
+}
+
+function sourceWaveMenuState(sourceId){
+  const rawOptions=typeof Wave.getSourceWaveOptions==='function' ? Wave.getSourceWaveOptions(sourceId) : [];
+  const selected=typeof Wave.getSourceWaveSelection==='function' ? Wave.getSourceWaveSelection(sourceId) : 'mix';
+  return {options:normalizeWaveOptions(rawOptions),selected};
+}
+
+function selectSourceWave(sourceId,selection){
+  const changed=Wave.setSourceWaveSelection?.(sourceId,selection);
+  Promise.resolve(changed).then(()=>drawTimeline()).catch(err=>{
+    console.warn('source wave selection:',err);
+    showToast('無法載入此聲道的波形');
+  });
+}
 /* 時間軸區塊右鍵 / 空白軌道區右鍵 */
 tlScroll?.addEventListener?.('contextmenu', tlContextMenuHandler);
 tlLayer?.addEventListener?.('contextmenu', tlContextMenuHandler);
@@ -234,127 +312,70 @@ function tlContextMenuHandler(e){
   const audioEl=e.target.closest('.audio-clip-block');
   if(audioEl){
     e.preventDefault();
-    const isExternal=audioEl.dataset.audioKind==='external';
-    const assetId=audioEl.dataset.audioAssetId||audioEl.dataset.audioSourceId||audioEl.dataset.audioSrc||'';
-    const sourceId=audioEl.dataset.audioSourceId||audioEl.dataset.sourceId||'';
-    const runtimeSourceId=audioEl.dataset.audioSrc||sourceId;
+    const context=audioMenuContext(audioEl);
+    const {source,external,assetId,sourceId,runtimeSourceId,sourceName,filePath,locked}=context;
+    if(external) selectExternalAudioForMenu(assetId,sourceName);
     const recognitionTracks=typeof Media.sourceChannels==='function' ? Media.sourceChannels(runtimeSourceId) : [];
-    const sourceName=(audioEl.dataset.audioSourceName||audioEl.querySelector('.audio-clip-label')?.textContent||'音訊素材')
-      .trim().replace(/^[🔊🎵🔇]\s*/u,'');
-    if(isExternal) selectExternalAudioForMenu(assetId,sourceName);
-    const rawOptions=typeof Wave.getSourceWaveOptions==='function' ? Wave.getSourceWaveOptions(sourceId) : [];
-    const selected=typeof Wave.getSourceWaveSelection==='function' ? Wave.getSourceWaveSelection(sourceId) : 'mix';
-    const options=(Array.isArray(rawOptions)?rawOptions:[]).map((item,index)=>{
-      if(typeof item==='string') return {selection:item,label:item==='mix'?'MIX（所有聲道）':item};
-      const selection=item?.selection??item?.id??item?.value??(index===0?'mix':'');
-      return {selection:String(selection),label:item?.label||(selection==='mix'?'MIX（所有聲道）':String(selection)),ready:item?.ready!==false};
-    }).filter(item=>item.selection);
-    const items=[{heading:true,label:(isExternal?'🎵 ':'🔊 ')+sourceName}];
-    if(isExternal){
-      const start=Math.max(0,Number(audioEl.dataset.audioStart)||0);
-      const end=Math.max(start,Number(audioEl.dataset.audioEnd)||start);
-      const extSrc = State.externalAudioState?.find(s => s.id === assetId);
-      const playhead=Media.displayTime();
-      const enabled=audioEl.dataset.audioEnabled!=='false';
-      const recognitionSource=Media.getExternalAudioSource?.(assetId)||extSrc;
-      items.push({label:'🎙 語音辨識／文本匹配…',act:()=>openSpeechRecognitionDialog({
-        ...(recognitionSource || { id: assetId, name: sourceName, in: start, out: end, offset: start }),
-        recognitionTracks
-      })});
-      if(playhead>start+0.0001&&playhead<end-0.0001){
-        items.push({label:'✂ 在播放點切割',act:()=>runExternalAudioMenuAction('splitExternalAudio',[assetId,playhead])});
-      }
-      items.push({label:'⏱ 播放頭移到音檔開頭',act:()=>{ requestPointerSeek(start); emit('playhead:ensure'); }});
-      items.push({label:enabled?'🔇 關閉此音檔聲音':'🔊 開啟此音檔聲音',act:()=>runExternalAudioMenuAction('toggleExternalAudioEnabled',[assetId])});
-      items.push({label:'🗑 從時間軸移除音檔',act:()=>runExternalAudioMenuAction('removeExternalAudio',[assetId],{clearSelection:true})});
-      if (IS_DESKTOP) {
-        const extSrc = State.externalAudioState?.find(s => s.id === assetId);
-        if (extSrc && extSrc.path) {
-          items.push({label:'📂 用 檔案管理器 打開',act:()=>{
-            window.subtool?.showSourceInFolder?.(extSrc.path).catch(err => {
-              console.warn(err);
-              showToast('無法顯示檔案位置');
-            });
-          }});
-        }
-      }
-      items.push({sep:true});
-    } else {
-      // 影片音訊素材列：必須沿用右鍵命中的 clip，不可回退成全局第一支影片。
-      const clipId=audioEl.dataset.clipId||'';
-      const sourceClip=State.clips?.find(clip=>clip.id===clipId)||null;
-      const recognitionSource=sourceClip ? {
-        ...sourceClip,
-        recognitionTracks
-      } : {
-        id: 'primary-audio',
-        name: sourceName || State.mediaName || '主要音訊',
-        in: 0,
-        out: State.duration,
-        dur: State.duration,
-        offset: 0,
-        primary: true,
-        path: State.mediaPath || State.clips?.[0]?.path || null,
-        blob: State.mediaFile || State.mediaBlob || State.clips?.[0]?.blob || null,
-        recognitionTracks
-      };
-      items.push({label:'🎙 語音辨識／文本匹配…',act:()=>openSpeechRecognitionDialog(recognitionSource)});
-      items.push({sep:true});
-    }
-    items.push({label:'🎧 軌道配置',act:()=>AudioRouting.openForSource(sourceId)});
-    items.push({sep:true});
-
-    if(!options.length){
-      items.push({label:'波形正在準備中…'});
-    }else{
-      items.push({heading:true,label:'顯示此素材的波形'});
-      for(const option of options){
-        const label=option.ready?option.label:`${option.label}（準備中）`;
-        items.push({label,checked:String(selected||'mix')===option.selection,act:()=>{
-          const changed=Wave.setSourceWaveSelection?.(sourceId,option.selection);
-          Promise.resolve(changed).then(()=>drawTimeline()).catch(err=>{
-            console.warn('source wave selection:',err);
-            showToast('無法載入此聲道的波形');
-          });
-        }});
-      }
-    }
+    const start=Math.max(0,Number(audioEl.dataset.audioStart)||0);
+    const end=Math.max(start,Number(audioEl.dataset.audioEnd)||start);
+    const playhead=Media.displayTime();
+    const enabled=source?.enabled!==false&&audioEl.dataset.audioEnabled!=='false';
+    const wave=sourceWaveMenuState(sourceId);
+    const recognitionSource=source ? {...source,recognitionTracks} : {
+      id:external?assetId:'primary-audio',
+      name:sourceName||State.mediaName||'主要音訊',
+      in:external?start:0,
+      out:external?end:State.duration,
+      dur:external?Math.max(0,end-start):State.duration,
+      offset:external?start:0,
+      primary:!external,
+      path:filePath||State.mediaPath||State.clips?.[0]?.path||null,
+      blob:State.mediaFile||State.mediaBlob||State.clips?.[0]?.blob||null,
+      recognitionTracks,
+    };
+    const items=buildAudioClipMenu({
+      name:sourceName,
+      external,
+      locked,
+      canReveal:IS_DESKTOP&&!!filePath,
+      canSplit:external&&playhead>start+0.0001&&playhead<end-0.0001,
+      enabled,
+      waveOptions:wave.options,
+      selectedWave:wave.selected,
+    },{
+      revealSource:()=>revealSourceInFolder(filePath),
+      openSpeechRecognition:()=>openSpeechRecognitionDialog(recognitionSource),
+      seekStart:()=>{ requestPointerSeek(start); emit('playhead:ensure'); },
+      splitAtPlayhead:()=>runExternalAudioMenuAction('splitExternalAudio',[assetId,playhead]),
+      toggleAudio:()=>runExternalAudioMenuAction('toggleExternalAudioEnabled',[assetId]),
+      openAudioRouting:()=>AudioRouting.openForSource(sourceId),
+      selectWave:selection=>selectSourceWave(sourceId,selection),
+      removeAudio:()=>runExternalAudioMenuAction('removeExternalAudio',[assetId],{clearSelection:true}),
+    });
     showCtx(e.clientX,e.clientY,items);
     return;
   }
   
   /* 音訊軌道空白處或標頭右鍵 */
-  const audioRow=e.target.closest('.audio-project-row') || e.target.closest('.tl-source');
+  const audioRow=e.target.closest('.audio-project-row, .agtrack, .tl-source');
   if(audioRow && audioRow.dataset.audioSourceId){
     e.preventDefault();
-    const sourceId=audioRow.dataset.audioSourceId;
-    if(sourceId) {
-      const rawOptions=typeof Wave.getSourceWaveOptions==='function' ? Wave.getSourceWaveOptions(sourceId) : [];
-      const selected=typeof Wave.getSourceWaveSelection==='function' ? Wave.getSourceWaveSelection(sourceId) : 'mix';
-      const options=(Array.isArray(rawOptions)?rawOptions:[]).map((item,index)=>{
-        if(typeof item==='string') return {selection:item,label:item==='mix'?'MIX（所有聲道）':item};
-        const selection=item?.selection??item?.id??item?.value??(index===0?'mix':'');
-        return {selection:String(selection),label:item?.label||(selection==='mix'?'MIX（所有聲道）':String(selection)),ready:item?.ready!==false};
-      }).filter(item=>item.selection);
-      
-      const items=[{label:'🎧 軌道配置',act:()=>AudioRouting.openForSource(sourceId)}];
-      items.push({sep:true});
-      if(!options.length){
-        items.push({label:'波形正在準備中…'});
-      }else{
-        items.push({heading:true,label:'顯示此素材的波形'});
-        for(const option of options){
-          const label=option.ready?option.label:`${option.label}（準備中）`;
-          items.push({label,checked:String(selected||'mix')===option.selection,act:()=>{
-            const changed=Wave.setSourceWaveSelection?.(sourceId,option.selection);
-            Promise.resolve(changed).then(()=>drawTimeline()).catch(err=>{
-              showToast('無法載入此聲道的波形');
-            });
-          }});
-        }
-      }
-      showCtx(e.clientX,e.clientY,items);
-    }
+    const context=audioMenuContext(audioRow);
+    const {sourceId,sourceName,filePath,external,locked}=context;
+    const wave=sourceWaveMenuState(sourceId);
+    const items=buildAudioTrackMenu({
+      name:sourceName,
+      external,
+      locked,
+      canReveal:IS_DESKTOP&&!!filePath,
+      waveOptions:wave.options,
+      selectedWave:wave.selected,
+    },{
+      revealSource:()=>revealSourceInFolder(filePath),
+      openAudioRouting:()=>AudioRouting.openForSource(sourceId),
+      selectWave:selection=>selectSourceWave(sourceId,selection),
+    });
+    showCtx(e.clientX,e.clientY,items);
     return;
   }
   /* 影片序列區塊右鍵 */
@@ -364,75 +385,67 @@ function tlContextMenuHandler(e){
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
     const isLocked = State.videoTracks[c.vtrack||0]?.locked;
     if(!isLocked) selectClip(c.id); // 右鍵即選取（高亮，之後可直接 Del / 上下鍵切換）
-
     const isImg = c.type==='image';
-    const items = isLocked ? [{label:'🔒 此視訊軌已鎖定'}] : [{heading:true,label:(isImg?'🖼 ':'🎬 ')+c.name}];
-
-    if(!isLocked){
-      const trimmed=c.in>0.01||c.out<c.dur-0.01;
-      // 播放頭在此段內 → 可就地切割（等同 Ctrl+K）
-      const pt=Media.displayTime();
-      if(Seq.clipAt(pt)===c) items.push({label:'✂ 在播放點切割（Ctrl+K）',act:()=>{ Media.splitClipAt(pt); }});
-      
-      const filePath = c.path || (c.primary ? State.media?.path : null);
-      if (IS_DESKTOP && filePath) {
-        items.push({label:'📂 用 檔案管理器 打開',act:()=>{
-          window.subtool?.showSourceInFolder?.(filePath).catch(err => {
-            console.warn(err);
-            showToast('無法顯示檔案位置');
-          });
-        }});
-      }
-
-      // 圖片沒有原音，音訊相關項目不適用；改提供大小/位置的數值輸入
-      // （預覽拖曳把手是另一條路，兩者都寫同一組 scale/posX/posY）
-      items.push({label:`📐 ${isImg?'圖片':'影片'}大小與位置…`,act:()=>showImageGeom(c)});
-      items.push({label:'⏳ 修改持續時間…',act:()=>showClipDuration(c)});
-      if(isImg){ /* 圖片沒有原音，音訊相關項目不適用 */ }
-      else if(c.audioDetached) items.push({label:'🔇 此影片原音已解除連結'});
-      else {
-        items.push({label:'🔗✂ 影音分離',act:()=>{ void Media.detachClipAudio?.(c.id); }});
-        items.push({label:'🎧 音訊配線',act:()=>AudioRouting.openForClip(c.id)});
-      }
-      items.push({label:'⏱ 播放頭移到此段開頭',act:()=>{ requestPointerSeek(c.offset); emit('playhead:ensure'); }});
-      // 移到上／下一層視訊軌（多軌疊層：上層覆蓋下層）
-      const moveTrack=(dv)=>{
-        const tv=(c.vtrack||0)+dv;
-        if(State.videoTracks[tv]?.locked){ showToast('目標視訊軌已鎖定，無法移入'); return; }
-        Seq.moveToTrack(c, tv);
-        recordHistory('影片段移到 V'+((c.vtrack||0)+1));
-        Media.seek(Math.min(Media.displayTime(), State.duration||0));
-        drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
-      };
-      items.push({label:`⬆ 移到上層視訊軌（V${(c.vtrack||0)+2}）`,act:()=>moveTrack(1)});
-      if((c.vtrack||0)>0) items.push({label:`⬇ 移到下層視訊軌（V${(c.vtrack||0)}）`,act:()=>moveTrack(-1)});
-      items.push({label:`🎞 淡入淡出（轉場）${(c.fadeIn>0||c.fadeOut>0)?' ✓':''}…`,act:()=>showClipFade(c)});
-      items.push({label:`🔀 與前一段交叉溶接…`,act:()=>showCrossfade(c)});
-      // 相鄰段交換（同一視訊軌內、依時間軸順序；保留兩段之間的間距）
-      const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset);
-      const idx=sorted.indexOf(c);
-      const swap=(a,b)=>{ // a=前段 b=後段
-        const gap=b.offset-Seq.clipEnd(a), start=a.offset;
-        b.offset=start; a.offset=start+Seq.len(b)+gap;
-        Seq.sort(); Seq.recomputeDuration();
-        recordHistory('影片段交換');
-        Media.seek(Math.min(Media.displayTime(), State.duration||0));
-        drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
-      };
-      if(idx>0) items.push({label:'◀ 與前一段交換（同軌）',act:()=>swap(sorted[idx-1], c)});
-      if(idx<sorted.length-1) items.push({label:'▶ 與後一段交換（同軌）',act:()=>swap(c, sorted[idx+1])});
-      if(trimmed) items.push({label:'↺ 重設修剪（還原完整長度）',act:()=>{
-        const save={in:c.in,out:c.out};
-        c.in=0; c.out=c.dur;
-        const ov=State.clips.some(o=>o!==c && o.offset < Seq.clipEnd(c) - 1e-6 && Seq.clipEnd(o) > c.offset + 1e-6);
-        if(ov){ c.in=save.in; c.out=save.out; showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return; }
-        Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name); drawTimeline();
-      }});
-      items.push({sep:true});
-      items.push({label:'🗑 從序列移除',act:()=>{
+    const trimmed=c.in>0.01||c.out<c.dur-0.01;
+    const pt=Media.displayTime();
+    const filePath=clipSourcePath(c);
+    // 相鄰段交換（同一視訊軌內、依時間軸順序；保留兩段之間的間距）
+    const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset);
+    const idx=sorted.indexOf(c);
+    const swap=(a,b)=>{ // a=前段 b=後段
+      const gap=b.offset-Seq.clipEnd(a), start=a.offset;
+      b.offset=start; a.offset=start+Seq.len(b)+gap;
+      Seq.sort(); Seq.recomputeDuration();
+      recordHistory('影片段交換');
+      Media.seek(Math.min(Media.displayTime(), State.duration||0));
+      drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+    };
+    const moveTrack=(dv)=>{
+      const tv=(c.vtrack||0)+dv;
+      if(State.videoTracks[tv]?.locked){ showToast('目標視訊軌已鎖定，無法移入'); return; }
+      Seq.moveToTrack(c, tv);
+      recordHistory('影片段移到 V'+((c.vtrack||0)+1));
+      Media.seek(Math.min(Media.displayTime(), State.duration||0));
+      drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
+    };
+    const resetTrim=()=>{
+      const save={in:c.in,out:c.out};
+      c.in=0; c.out=c.dur;
+      const overlaps=State.clips.some(other=>other!==c&&other.offset<Seq.clipEnd(c)-1e-6&&Seq.clipEnd(other)>c.offset+1e-6);
+      if(overlaps){ c.in=save.in; c.out=save.out; showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return; }
+      Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name); drawTimeline();
+    };
+    const items=buildVideoClipMenu({
+      name:c.name,
+      isImage:isImg,
+      locked:isLocked,
+      canReveal:IS_DESKTOP&&!!filePath,
+      canSplit:Seq.clipAt(pt)===c,
+      trimmed,
+      audioDetached:!!c.audioDetached,
+      trackIndex:c.vtrack||0,
+      hasPrevious:idx>0,
+      hasNext:idx>=0&&idx<sorted.length-1,
+      hasFade:c.fadeIn>0||c.fadeOut>0,
+    },{
+      revealSource:()=>revealSourceInFolder(filePath),
+      seekStart:()=>{ requestPointerSeek(c.offset); emit('playhead:ensure'); },
+      splitAtPlayhead:()=>{ Media.splitClipAt(pt); },
+      editDuration:()=>showClipDuration(c),
+      editGeometry:()=>showImageGeom(c),
+      resetTrim,
+      detachAudio:()=>{ void Media.detachClipAudio?.(c.id); },
+      openAudioRouting:()=>AudioRouting.openForClip(c.id),
+      moveTrackUp:()=>moveTrack(1),
+      moveTrackDown:()=>moveTrack(-1),
+      swapPrevious:()=>swap(sorted[idx-1],c),
+      swapNext:()=>swap(c,sorted[idx+1]),
+      editFade:()=>showClipFade(c),
+      editCrossfade:()=>showCrossfade(c),
+      removeClip:()=>{
         if(Media.removeClip(c.id)){ recordHistory('移除影片段：'+c.name); drawTimeline(); }
-      }});
-    }
+      },
+    });
     showCtx(e.clientX,e.clientY,items);
     return;
   }

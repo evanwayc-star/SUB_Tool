@@ -72,6 +72,41 @@ describe('active transport', () => {
     expect(videoEl.preservesPitch).toBe(true);
   });
 
+  it('HTML5 present 會略過舊畫格，直到 compositor 回報目標附近的實際畫格', async () => {
+    const callbacks = [];
+    const videoEl = {
+      currentTime: 0,
+      requestVideoFrameCallback: vi.fn(callback => {
+        callbacks.push(callback);
+        return callbacks.length;
+      }),
+      cancelVideoFrameCallback: vi.fn(),
+    };
+    const runtime = resetPlayerAdapter(null, videoEl);
+
+    const pending = runtime.present(4.2, { tolerance: 0.05 });
+    expect(videoEl.currentTime).toBe(4.2);
+    callbacks.shift()(0, { mediaTime: 2 });
+    expect(callbacks).toHaveLength(1);
+    callbacks.shift()(0, { mediaTime: 4.18 });
+
+    await expect(pending).resolves.toEqual({ backend: 'html5', presentedSourceTime: 4.18 });
+  });
+
+  it('mpv present 交由 native bridge 回報實際 video PTS', async () => {
+    const present = vi.fn().mockResolvedValue({ backend: 'mpv', presentedSourceTime: 11.96 });
+    const runtime = resetPlayerAdapter({ mpv: {
+      launch: vi.fn().mockResolvedValue({ ok: true }),
+      present,
+    } });
+    await runtime.enterMpv({ src: 'D:/media/a.mxf' });
+
+    await expect(runtime.present(12, { exact: true, tolerance: 0.05 })).resolves.toEqual({
+      backend: 'mpv', presentedSourceTime: 11.96,
+    });
+    expect(present).toHaveBeenCalledWith(12, { exact: true, tolerance: 0.05 });
+  });
+
   it('HTML5 mode reports mpv-only transport operations as unavailable', async () => {
     const runtime = resetPlayerAdapter(null, {});
     await expect(runtime.subSet('test')).resolves.toBe(false);

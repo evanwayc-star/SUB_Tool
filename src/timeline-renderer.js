@@ -716,8 +716,13 @@ function renderAudioTrackRows(){
   for(const row of rows){
     const {sourceId,h}=row;
     const rowEl=document.createElement('div');
-    rowEl.className='audio-project-row';
+    rowEl.className='audio-project-row'+(row.source?.locked?' locked':'');
     rowEl.style.height=h+'px'; rowEl.dataset.audioSourceId=sourceId;
+    rowEl.dataset.audioKind=row.external?'external':'clip';
+    rowEl.dataset.audioAssetId=row.external?(row.source?.id||row.source?.audioSourceId||row.source?.audioSrc||''):'';
+    rowEl.dataset.clipId=row.external?'':(row.source?.id||'');
+    rowEl.dataset.audioSrc=row.source?.audioSrc||'';
+    rowEl.dataset.audioSourceName=row.label||row.source?.name||'';
     content.appendChild(rowEl);
     for(const entry of row.entries){
       const c=entry.source;
@@ -739,6 +744,7 @@ function renderAudioTrackRows(){
       block.dataset.audioStart=String(s);
       block.dataset.audioEnd=String(e);
       block.dataset.audioEnabled=String(!muted);
+      block.dataset.audioSourceName=c.name||row.label||'';
       const wave=sourceWaveDetail(c,external);
       block.dataset.waveSelection=wave.selection||'mix';
       block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span>${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}`;
@@ -922,6 +928,10 @@ function renderAtrackGutter(){
     g.style.height=row.h+'px';
     g.dataset.audioSourceId=row.sourceId;
     g.dataset.audioAssetId=row.external?(source.id||source.audioSourceId||source.audioSrc||''):'';
+    g.dataset.audioKind=row.external?'external':'clip';
+    g.dataset.clipId=row.external?'':(source.id||'');
+    g.dataset.audioSrc=source.audioSrc||'';
+    g.dataset.audioSourceName=row.label||source.name||'';
     g.title=`${row.label}\n聲音：${muted?'已關閉':'已開啟'}（點喇叭按鈕切換）\n波形：${waveLabel}\n在右側素材區塊按右鍵切換 MIX／來源聲道`;
     g.innerHTML=`<span class="alabel">S${row.index+1}</span>`+
       muteButtonMarkup(muted,row.external?'音檔':'影音素材')+

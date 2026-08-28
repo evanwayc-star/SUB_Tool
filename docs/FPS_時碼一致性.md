@@ -79,6 +79,14 @@ FPS-SYNC
 - **不可**直接用 `video.currentTime` 或 mpv 的 `e.data`：seek 後瀏覽器 / mpv 會把實際位置「沉降」到相鄰格，原始時間經 `secToEncore` 進位就會比播放點多一格（見 Bug C）。
 - 純字幕專案沒有 HTML video／mpv 的原生 `seeked` 可接手；`Media.seek()` 完成虛擬時間跳轉後仍須發出統一的 `mpv:seeked` 通知，讓字幕預覽、播放點與備註立即讀回同一個 `displayTime()`。
 
+#### (I4a) 播放目標不能冒充實際呈現位置
+
+- `Media.requestPresentation()` 的輸入是等待呈現的時間軸目標；解碼完成前不得先覆蓋 `_lastSeekTime`。
+- HTML video 以 `requestVideoFrameCallback` 的 `mediaTime`、mpv 以同一請求之後的 per-frame `time-pos` 與
+  `playback-restart`、WebCodecs 以所有可見圖層成功 `drawImage()` 的來源時間戳，作為呈現完成證據。
+- mpv `time-pos` 單獨只代表播放器內部位置；必須和該請求的 `playback-restart` 配對，呈現請求未完成時不得讓 UI 播放點先跑到目標。
+- 倒帶只保留最新尚未送出的目標，避免舊 seek 佇列讓畫面長時間追趕過期位置。
+
 ### (I5) 逐格步進以 `displayTime()` 為基準
 
 - `nudge()`（`keyboard.js`）用 `Media.displayTime() + d`，**不是** `vTime() + d`。
@@ -119,12 +127,15 @@ FPS-SYNC
 | `media.js` | `detectFpsWeb()` 區塊 | 實測 FPS（非檔名） | I1 |
 | `media.js` | `displayTime()` | 權威播放位置 | I4 |
 | `media.js` | `seek()` 的 snap／純字幕通知 | seek 對齊影格；無播放器時仍通知預覽讀回 `displayTime()` | I3, I4 |
+| `media.js` | `requestPresentation()` | 將時間軸目標映射給目前 presenter；收到實際畫格後才提交權威位置 | I3, I4, I4a |
 | `pointer-seek-control.js` | `requestPointerSeek()` | 滑鼠互動傳入時間軸時間，播放狀態處理後仍統一交給 `Media.seek()` 吸附影格 | I3, I4 |
 | `media.js` | `pause()` 的 snap | 暫停點對齊影格 | I3 |
 | `media.js` | mpv `time-pos` handler | 暫停時同源同格 + 抖動容忍 | I4, I6 |
-| `loaders/media-loader.js` | 原生 `seeked` 對齊 | 暫停載入完成後仍回到權威影格 | I3, I4 |
+| `loaders/media-loader.js` | 原生 `seeked`／mpv per-frame `time-pos` | 普通 seek 對齊；呈現請求另與 `playback-restart` 配對後才提交 | I3, I4, I4a |
 | `transport-controller.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
-| `transport-controller.js` | JKL 倒播 | 單一未修剪、零位移的 mpv 片段才可用原生 backward；其他時間軸仍以 `displayTime()` 計算 absolute seek | I4, I5 |
+| `shuttle-runtime.js` | `ReverseShuttleSession` | elapsed time × 倍率 × 精確 FPS 產生最新倒帶目標；持續監看原生實際呈現進度 | I3, I4a, I5 |
+| `media-presentation-core.js` | `request()`／`observe()` | 同時一個 in-flight、只保留最新 pending，依 request id 配對完成 | I4a |
+| `decode/player.js` | WebCodecs 呈現回報 | 所有可見圖層完成繪製後回報各自實際來源時間 | I4a |
 | `notes.js` | `addNote()` | 備註時間取自 `displayTime()` | I4 |
 | `timeline-renderer.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |
 | `app.js` | `timeupdate` handler | 三讀數同源 `displayTime()` | I4 |

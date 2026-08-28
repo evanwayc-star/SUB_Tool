@@ -22,16 +22,20 @@ import { updateNoteActive } from './notes.js';
 import { emit, on } from './events.js';
 import { setStatus, showOsd } from './ui.js';
 import { getNoteJump, getFirstLastCue, getAdjacentCue, getCueInMinusFrames, getBoundaryStep } from './timeline-navigation.js';
-import { createShuttleRuntime } from './shuttle-runtime.js';
+import { createReverseShuttleSession } from './shuttle-runtime.js';
 
 /* ===== JKL 穿梭輪狀態與定時器 ============================================== */
 let _jklSpeed = 0;
-let _jklApplyEpoch = 0;
 
-const _shuttleRuntime = createShuttleRuntime({
+const _reverseSession = createReverseShuttleSession({
   media: Media,
+  presentation: {
+    request: targetTime => Media.requestPresentation(targetTime),
+    cancel: reason => Media.cancelPresentation(reason),
+    presentedTime: () => Media.presentedTime(),
+  },
   getExactFps: () => getExactFps(State.fps || 30),
-  onFallbackFrame(newT) {
+  onPresented() {
     updatePlayhead();
     emit('playhead:ensure');
     emit('render:videoSub');
@@ -49,7 +53,7 @@ const _shuttleRuntime = createShuttleRuntime({
 });
 
 function jklClear() {
-  _shuttleRuntime.clear();
+  return _reverseSession.stop();
 }
 
 function updateSpeedIndicator() {
@@ -76,15 +80,9 @@ function setJklSpeed(speed) {
   _jklSpeed = speed;
 }
 
-function leaveNativeReverse() {
-  return _shuttleRuntime.leaveNativeReverse();
-}
-
 function resetPlaybackSpeed() {
   jklClear();
-  _jklApplyEpoch++;
   _jklSpeed = 0;
-  leaveNativeReverse();
   Media.setRate(1);
   updateSpeedIndicator();
 }
@@ -117,66 +115,21 @@ on('transport:pointerSeekPause', pauseForPointerSeek);
 
 function setManualPlaybackSpeed(rate) {
   jklClear();
-  _jklApplyEpoch++;
   _jklSpeed = 0;
-  leaveNativeReverse();
   Media.setRate(rate);
   updateSpeedIndicator();
 }
 
-function startReverseSeekFallback(capturedSpeed) {
-  _shuttleRuntime.setSpeed(capturedSpeed);
-  _shuttleRuntime.startReverseSeekFallback(capturedSpeed);
-}
-
-// mpv 某些長 GOP／廣播 MXF 會接受 backward 指令卻維持同一 time-pos。不能只因
-// IPC 成功就相信原生倒播；在短暫寬限內沒有跨過至少四分之一格，就回到可靠的
-// 時間軸逐格 seek。每次 J 都重新量測，避免舊的 watchdog 誤中止新的速度。
-function watchNativeReverseProgress(capturedSpeed, applyEpoch) {
-  _shuttleRuntime.watchNativeReverseProgress(capturedSpeed, applyEpoch, () => startReverseSeekFallback(capturedSpeed));
-}
-
 function jklApply() {
-  jklClear();
-  const applyEpoch = ++_jklApplyEpoch;
-  const shuttleEpoch = _shuttleRuntime.beginEpoch();
-  _shuttleRuntime.setSpeed(_jklSpeed);
   if (_jklSpeed === 0) {
-    if (!leaveNativeReverse()) Media.pause();
+    if (!jklClear()) Media.pause();
     Media.setRate(1);
   } else if (_jklSpeed > 0) {
-    leaveNativeReverse();
+    jklClear();
     Media.setRate(_jklSpeed);
     if (!Media.playing) Media.play();
   } else {
-    const capturedSpeed = _jklSpeed;
-    if (_shuttleRuntime.isNativeReverse()) {
-      Media.setRate(Math.abs(capturedSpeed));
-      if (!Media.playing) Media.play();
-      watchNativeReverseProgress(capturedSpeed, shuttleEpoch);
-    } else if (Media.supportsNativeReverse?.()) {
-      Media.pause();
-      Promise.resolve(Media.setPlaybackDirection('backward')).then(enabled => {
-        if (applyEpoch !== _jklApplyEpoch || _jklSpeed !== capturedSpeed) {
-          // backward IPC 仍在飛行時若使用者已按 K／切回正播，晚到的完成不得把
-          // transport 留在 backward。若只是又按一次 J，則交給較新的 apply 接手。
-          if (enabled !== false && _jklSpeed >= 0) {
-            Media.pause();
-            Promise.resolve(Media.setPlaybackDirection?.('forward')).catch(() => {});
-          }
-          return;
-        }
-        if (enabled === false) { startReverseSeekFallback(capturedSpeed); return; }
-        _shuttleRuntime.setNativeReverse(true);
-        Media.setRate(Math.abs(capturedSpeed));
-        Media.play();
-        watchNativeReverseProgress(capturedSpeed, shuttleEpoch);
-      }).catch(() => {
-        if (applyEpoch === _jklApplyEpoch && _jklSpeed === capturedSpeed) startReverseSeekFallback(capturedSpeed);
-      });
-    } else {
-      startReverseSeekFallback(capturedSpeed);
-    }
+    _reverseSession.start(_jklSpeed).catch(() => {});
   }
   const spd = Math.abs(_jklSpeed);
   const label = _jklSpeed === 0 ? '暫停' : (_jklSpeed > 0 ? `▶ ${spd}x 正播` : `◀ ${spd}x 倒帶`);
@@ -188,7 +141,7 @@ function jklApply() {
 
 function shuttleRewind() {
   if (_jklSpeed >= 0) _jklSpeed = -1;
-  else _jklSpeed = Math.max(-16, _jklSpeed - 0.5);
+  else _jklSpeed = Math.max(-5, _jklSpeed - 0.5);
   jklApply();
 }
 
@@ -199,16 +152,17 @@ function shuttlePause() {
 
 function shuttleForward() {
   if (_jklSpeed <= 0) _jklSpeed = 1;
-  else _jklSpeed = Math.min(16, _jklSpeed + 0.5);
+  else _jklSpeed = Math.min(5, _jklSpeed + 0.5);
   jklApply();
 }
 
 function togglePlayPause() {
   const wasPlaying = Media.playing;
+  const wasShuttling = _jklSpeed !== 0;
   resetPlaybackSpeed();
   // 原生倒播的 reset 會先暫停並恢復 forward；此時不能再 toggle 一次，否則
   // 空白鍵會從「倒播」意外變成「立刻正播」。
-  if (wasPlaying) {
+  if (wasPlaying || wasShuttling) {
     if (Media.playing) Media.pause();
   } else {
     Media.play();
@@ -219,12 +173,11 @@ function togglePlayPause() {
 function stepFrame(dir, repeat = false) {
   // OS auto-repeat 只是「仍按住」的通知；同方向的 shuttle 已在跑時不可每次都
   // 暫停再播放，否則 mpv/HTML 都會產生可見卡頓。
-  if (repeat && _jklSpeed === dir && Media.playing) return;
-  if (Media.playing) {
+  if (repeat && _jklSpeed === dir) return;
+  if (Media.playing || _jklSpeed !== 0) {
     jklClear();
-    _jklApplyEpoch++;
     _jklSpeed = 0;
-    if (!leaveNativeReverse()) Media.pause();
+    if (Media.playing) Media.pause();
     setStatus('⏸ 暫停', '');
   }
   if (repeat) {
@@ -237,11 +190,10 @@ function stepFrame(dir, repeat = false) {
 
 /* ===== 播放頭微調 (Nudge) ================================================= */
 function nudge(d) {
-  if (Media.playing) {
+  if (Media.playing || _jklSpeed !== 0) {
     jklClear();
-    _jklApplyEpoch++;
     _jklSpeed = 0;
-    if (!leaveNativeReverse()) Media.pause();
+    if (Media.playing) Media.pause();
     setStatus('⏸ 暫停', '');
   }
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點為基準，並精確吸附至影格格網

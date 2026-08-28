@@ -30,6 +30,8 @@ function createMpvHost(deps) {
   let client = null;
   let requestId = 0;
   const callbacks = new Map();
+  let pendingPresentation = null;
+  let directionGeneration = 0;
   let buffer = '';
   let generation = 0;
 
@@ -132,11 +134,47 @@ function createMpvHost(deps) {
     callbacks.clear();
   }
 
+  function settlePresentation(request, value = null) {
+    if (!request || request !== pendingPresentation) return false;
+    pendingPresentation = null;
+    request.resolve(value);
+    return true;
+  }
+
+  function cancelPresent() {
+    return settlePresentation(pendingPresentation, null);
+  }
+
+  function maybeFinishPresentation(request) {
+    if (!request || request !== pendingPresentation) return;
+    if (!request.commandAcknowledged || !request.restarted || request.presentedSourceTime == null) return;
+    settlePresentation(request, {
+      backend: 'mpv',
+      presentedSourceTime: request.presentedSourceTime,
+    });
+  }
+
+  function observePresentationEvent(message) {
+    const request = pendingPresentation;
+    if (!request) return;
+    if (message.event === 'property-change' && message.name === 'time-pos') {
+      const presented = Number(message.data);
+      if (Number.isFinite(presented) && Math.abs(presented - request.targetTime) <= request.tolerance) {
+        request.presentedSourceTime = presented;
+      }
+    } else if (message.event === 'playback-restart') {
+      request.restarted = true;
+    }
+    maybeFinishPresentation(request);
+  }
+
   function detachClient({ destroy = true, emitDisconnected = false } = {}) {
+    directionGeneration++;
     const current = client;
     client = null;
     buffer = '';
     clearCallbacks(null);
+    cancelPresent();
     if (destroy && current) { try { current.destroy(); } catch (error) {} }
     if (emitDisconnected) sendEvent({ event: 'disconnected' });
   }
@@ -203,6 +241,47 @@ function createMpvHost(deps) {
     });
   }
 
+  function present(time, { exact = false, tolerance = 1.5 / 30 } = {}) {
+    cancelPresent();
+    const targetTime = Math.max(0, Number(time) || 0);
+    const request = {
+      targetTime,
+      tolerance: Math.max(0, Number(tolerance) || 0),
+      commandAcknowledged: false,
+      restarted: false,
+      presentedSourceTime: null,
+      resolve: null,
+    };
+    const promise = new Promise(resolve => { request.resolve = resolve; });
+    pendingPresentation = request;
+    const command = exact
+      ? ['seek', targetTime, 'absolute+exact']
+      : ['set_property', 'time-pos', targetTime];
+    send(command, true).then(() => {
+      if (request !== pendingPresentation) return;
+      request.commandAcknowledged = true;
+      maybeFinishPresentation(request);
+    });
+    return promise;
+  }
+
+  async function setDirection(value) {
+    const backward = value === 'backward';
+    const token = ++directionGeneration;
+    if (backward) {
+      // mpv 官方明確說明硬體解碼的 frame ownership 會讓 reversal buffer
+      // 失去約束，甚至耗盡 GPU 記憶體。只在倒播期間切軟解；正播仍保留 auto。
+      await send(['set_property', 'hwdec', 'no'], true);
+      if (token !== directionGeneration) return false;
+      await send(['set_property', 'play-direction', 'backward'], true);
+      return token === directionGeneration;
+    }
+    await send(['set_property', 'play-direction', 'forward'], true);
+    if (token !== directionGeneration) return false;
+    await send(['set_property', 'hwdec', 'auto'], true);
+    return token === directionGeneration;
+  }
+
   function attachClient(connected, token) {
     client = connected;
     buffer = '';
@@ -220,7 +299,8 @@ function createMpvHost(deps) {
             callbacks.delete(message.request_id);
             clearTimer(callback.timer);
             callback.resolve(message.data ?? null);
-          } else if (message.event === 'property-change' || message.event === 'end-file') {
+          } else if (message.event === 'property-change' || message.event === 'end-file' || message.event === 'playback-restart') {
+            observePresentationEvent(message);
             sendEvent(message);
           }
         } catch (error) {}
@@ -341,7 +421,11 @@ function createMpvHost(deps) {
         '--no-input-default-bindings', '--input-vo-keyboard=no', '--cursor-autohide=no',
         '--vo=gpu', '--gpu-context=d3d11', '--hwdec=auto',
         '--keep-open=always', '--pause', '--hr-seek=yes', '--hr-seek-framedrop=no',
-        '--demuxer-max-bytes=150MiB', '--demuxer-readahead-secs=10', '--sid=no',
+        // 反向播放需要把 GOP 先正向解碼再倒序交給 VO。cache 與 decode queue
+        // 若未明確開啟，長 GOP／廣播容器會在每一批之間反覆停住。
+        '--cache=yes', '--vd-queue-enable=yes',
+        '--demuxer-max-bytes=256MiB', '--demuxer-max-back-bytes=192MiB',
+        '--demuxer-readahead-secs=10', '--demuxer-backward-playback-step=10', '--sid=no',
       ];
       const fontDir = fontsDir?.();
       if (fontDir) args.push('--sub-fonts-dir=' + fontDir, '--embeddedfonts=no');
@@ -513,10 +597,12 @@ function createMpvHost(deps) {
     seek: (time, { exact = false } = {}) => exact
       ? send(['seek', time, 'absolute+exact'])
       : send(['set_property', 'time-pos', time]),
+    present,
+    cancelPresent,
     screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles']),
     play: () => send(['set_property', 'pause', false]),
     pause: () => send(['set_property', 'pause', true]),
-    direction: value => send(['set_property', 'play-direction', value === 'backward' ? 'backward' : 'forward']),
+    direction: setDirection,
     mute: value => send(['set_property', 'mute', value]),
     rate: value => send(['set_property', 'speed', value]),
     brightness: value => send(['set_property', 'brightness', Math.max(-100, Math.min(0, Math.round(value)))]),

@@ -530,6 +530,9 @@ describe('本機語音辨識進行中的回饋與取消', () => {
 
     expect(engineMocks.transcribeAudioStream).not.toHaveBeenCalled();
     expect(document.getElementById('asrStatus').textContent).toContain('請貼上文字稿');
+    expect(document.getElementById('asrTranscriptError').hidden).toBe(false);
+    expect(document.getElementById('asrTranscriptError').textContent).toContain('請貼上文字稿');
+    expect(document.getElementById('asrTranscript').getAttribute('aria-invalid')).toBe('true');
     expect(document.activeElement).toBe(document.getElementById('asrTranscript'));
   });
 

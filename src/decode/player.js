@@ -318,6 +318,7 @@ export const WCPreview = {
 
     // 第二遍：由下而上繪製（與 ffmpeg:exportVideo 對齊：scale＝大小、posX/posY＝(可用空間)×比例、opacity×fade）
     let base = null, painted = 0, lastTs = null, lastUrl = null;
+    const presentedTimelineTimes = [];
     for(const L of layers){
       if(L.alpha <= 0.003){ painted++; continue; } // 全透明：視為已處理（下層已見）
       // 【v4.25.3】畫布＝專案輸出解析度（State.videoWidth/Height，與 ffmpeg:exportVideo 同一張畫布），
@@ -355,18 +356,30 @@ export const WCPreview = {
                Math.round(fr.w), Math.round(fr.h));
       ctx.clip();
       ctx.globalAlpha = clamp(L.alpha, 0, 1);
-      try{ ctx.drawImage(L.src, base.x + Math.round(box.x), base.y + Math.round(box.y), dw, dh);
-           painted++; if(L.ts != null){ lastTs = L.ts; lastUrl = L.url; } }catch(e){}
+      try{
+        ctx.drawImage(L.src, base.x + Math.round(box.x), base.y + Math.round(box.y), dw, dh);
+        painted++;
+        if(L.ts != null){
+          lastTs = L.ts; lastUrl = L.url;
+          const presentedTimeline=Seq.toTimeline(L.ts/1e6,L.clip);
+          if(Number.isFinite(presentedTimeline)) presentedTimelineTimes.push(presentedTimeline);
+        }
+      }catch(e){}
       ctx.globalAlpha = 1;
       ctx.restore();
     }
     if(painted && lastTs != null){
       this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media.setWebCodecsComposited(true);
       if(mpv) this._setTakeover(true);
+      const visibleLayerCount=layers.filter(layer=>layer.alpha>0.003).length;
+      if(layers.length===acts.length&&presentedTimelineTimes.length===visibleLayerCount){
+        Media.reportWebCodecsPresentation?.(presentedTimelineTimes);
+      }
     }
     else if(painted){ // 全部層皆全透明（淡出到底）＝黑畫面，屬正確結果
       this.mode = 'black'; this.lastPresentedUs = null; Media.setWebCodecsComposited(true);
       if(mpv) this._setTakeover(true);
+      if(layers.length===acts.length) Media.reportWebCodecsPresentation?.([t]);
     }else{ this.mode = 'black'; this.lastPresentedUs = null; }
   },
 

@@ -26,7 +26,7 @@ export function encodeASS(cues = [], {
   playResY = 1080,
   styles = [],
 } = {}) {
-  let out = `[Script Info]\nTitle: ${title}\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\nYCbCr Matrix: None\nPlayResX: ${playResX}\nPlayResY: ${playResY}\n\n`;
+  let out = `[Script Info]\nTitle: ${title}\nScriptType: v4.00+\nWrapStyle: 2\nScaledBorderAndShadow: yes\nYCbCr Matrix: None\nPlayResX: ${playResX}\nPlayResY: ${playResY}\n\n`;
 
   out += `[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n`;
 

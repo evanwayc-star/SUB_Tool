@@ -22,11 +22,13 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
    後來陸續加了十四種都沒人回來補）。
    改成掃原始碼之後，新圖示會自動進入涵蓋範圍；漏拆就會當場紅。 */
 const ICONS = (() => {
-  const src = ['src/timeline-renderer.js', 'src/menus.js', 'src/app.js']
+  const src = ['src/timeline-renderer.js', 'src/menus.js', 'src/timeline-context-menu-model.js', 'src/app.js']
     .map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n');
   const found = new Set();
-  for (const m of src.matchAll(/label:\s*[`'"]([^`'"]{1,40})/g)) {
-    const first = [...m[1]][0];
+  /* 選單模型可用 `{ label: '…' }`，也可用 `action(id, '…')` 這類 builder；
+     掃描所有短字串常值，才能在重構後仍涵蓋實際標籤，而不是綁死物件寫法。 */
+  for (const m of src.matchAll(/[`'"]([^`'"\r\n]{1,80})[`'"]/g)) {
+    const first = [...m[1].trimStart()][0];
     if (first && /[\p{Extended_Pictographic}\p{So}\p{Sm}]/u.test(first)) found.add(first);
   }
   return [...found];

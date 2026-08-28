@@ -110,6 +110,10 @@ describe('語音辨識背景執行與進度視窗切換', () => {
     startBtn.click();
     expect(startBtn.disabled).toBe(true);
     expect(minimizeBtn.style.display).toBe('');
+    expect(document.querySelector('.asr-config-workspace').getAttribute('aria-busy')).toBe('true');
+    expect(document.getElementById('asrModeTranscribe').disabled).toBe(true);
+    expect(getComputedStyle(document.getElementById('asrProgressContainer')).display).toBe('flex');
+    expect(document.getElementById('asrProgressBar').classList.contains('indeterminate')).toBe(true);
 
     const session = getAsrSession();
     expect(session).toBeTruthy();
@@ -171,6 +175,9 @@ describe('語音辨識背景執行與進度視窗切換', () => {
     );
 
     renderModalFromMock();
+    expect(document.querySelector('.asr-monitor-workspace')).toBeTruthy();
+    expect(document.getElementById('asrProgressBar').getAttribute('role')).toBe('progressbar');
+    expect(document.getElementById('asrStatus').getAttribute('aria-live')).toBe('polite');
     const [cancelModalBtn] = document.querySelectorAll('#modalFoot button');
     expect(cancelModalBtn.textContent).toContain('取消');
 

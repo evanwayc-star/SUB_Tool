@@ -60,6 +60,58 @@ describe('語音辨識與字幕生成模組', () => {
     expect(html).toContain('placeholder="例如 japaneast"');
   });
 
+  it('提供可鍵盤操作的現代化模式工作台、逐行統計與 API Key 顯示切換', async () => {
+    State.clips = [];
+    State.externalAudioState = [];
+    saveAsrConfig({ ...getAsrConfig(), provider: 'google', taskMode: 'transcribe' });
+    openModal.mockImplementation((_title, html) => {
+      document.body.innerHTML = `${html}<div id="modalFoot"><button class="primary">開始辨識</button></div>`;
+    });
+
+    openSpeechRecognitionDialog({
+      id: 'modern-asr-dialogue',
+      name: 'modern-asr-dialogue.wav',
+      in: 0,
+      out: 3,
+      duration: 3,
+      audioBuffer: {}
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(document.querySelector('.asr-workspace.asr-config-workspace')).toBeTruthy();
+    expect(document.querySelector('.asr-settings-grid')).toBeTruthy();
+    expect(document.getElementById('asrRecognitionAudioSourceRow').parentElement.classList.contains('asr-source-card')).toBe(true);
+    expect(document.querySelector('.asr-mode-heading')).toBeNull();
+    expect(document.getElementById('asrTranscribeSummary')).toBeNull();
+    expect(getComputedStyle(document.getElementById('asrContentCard')).display).toBe('none');
+    expect(document.querySelector('label[for="asrTranscript"]')).toBeTruthy();
+    expect(document.querySelector('label[for="asrProvider"]')).toBeTruthy();
+    expect(document.getElementById('asrStatus').getAttribute('aria-live')).toBe('polite');
+
+    const taskMode = document.getElementById('asrTaskMode');
+    const alignButton = document.getElementById('asrModeAlign');
+    const transcribeButton = document.getElementById('asrModeTranscribe');
+    expect(transcribeButton.getAttribute('aria-pressed')).toBe('true');
+    alignButton.click();
+    expect(taskMode.value).toBe('align');
+    expect(alignButton.getAttribute('aria-pressed')).toBe('true');
+    expect(transcribeButton.getAttribute('aria-pressed')).toBe('false');
+    expect(getComputedStyle(document.getElementById('asrTranscriptRow')).display).toBe('flex');
+    expect(getComputedStyle(document.getElementById('asrContentCard')).display).toBe('flex');
+
+    const transcript = document.getElementById('asrTranscript');
+    transcript.value = '第一行\n\n第二行';
+    transcript.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(document.getElementById('asrTranscriptLineCount').textContent).toBe('2 行');
+
+    const apiKey = document.getElementById('asrApiKey');
+    const toggleApiKey = document.getElementById('asrToggleApiKey');
+    expect(apiKey.type).toBe('password');
+    toggleApiKey.click();
+    expect(apiKey.type).toBe('text');
+    expect(toggleApiKey.getAttribute('aria-label')).toBe('隱藏 API Key');
+  });
+
   it('可切換為文本匹配並顯示固定逐行文字稿輸入框', () => {
     State.clips = [];
     State.externalAudioState = [];

@@ -21,6 +21,7 @@ describe('subtitle-transcoding-engine', () => {
     expect(ass).toContain('[Script Info]');
     expect(ass).toContain('PlayResX: 1920');
     expect(ass).toContain('PlayResY: 1080');
+    expect(ass).toContain('WrapStyle: 2');
     expect(ass).toContain('Style: Default,更紗黑體,60');
     expect(ass).toContain('Dialogue: 0,0:00:01.00,0:00:03.50,Default,,0,0,0,,第一行字幕');
     expect(ass).toContain('Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,第二行字幕\\N包含換行');

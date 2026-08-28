@@ -198,6 +198,36 @@ it('未辨識句保留原編號並在列表顯示雙重無時間碼', () => {
     .toBe('--:--:--:-- → --:--:--:--');
 });
 
+it('字幕列表以淺綠 Enter 記號標出真正換行，但不把記號混進字幕文字或編輯器', async () => {
+  state.State.cues = [
+    { id: 'multi', text: '第一行\n第二行\n第三行', start: 1, end: 2, track: 0, timed: true },
+    { id: 'single', text: '單行字幕', start: 3, end: 4, track: 0, timed: true },
+  ];
+
+  subtitles.renderSubList();
+
+  const multiText = document.querySelector('.sub-row[data-id="multi"] .txt');
+  const markers = [...multiText.querySelectorAll('.line-break-mark')];
+  expect(markers).toHaveLength(2);
+  expect(markers.map(marker => ({
+    symbol: marker.dataset.symbol,
+    label: marker.getAttribute('aria-label'),
+    text: marker.textContent,
+    followedByBreak: marker.nextElementSibling?.tagName === 'BR',
+  }))).toEqual([
+    { symbol: '↵', label: '換行', text: '', followedByBreak: true },
+    { symbol: '↵', label: '換行', text: '', followedByBreak: true },
+  ]);
+  expect(multiText.textContent).toBe('第一行第二行第三行');
+  expect(document.querySelector('.sub-row[data-id="single"] .line-break-mark')).toBeNull();
+
+  multiText.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+  await Promise.resolve();
+  expect(multiText.contentEditable).toBe('true');
+  expect(multiText.querySelector('.line-break-mark')).toBeNull();
+  expect(multiText.querySelectorAll('br')).toHaveLength(2);
+});
+
 it('第一次點字幕會先顯示選取，再開啟專案儲存守衛', () => {
   project.guardDone = false;
 

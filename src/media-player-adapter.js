@@ -2,6 +2,12 @@
 // NativePreviewRuntime 是 renderer 的單一預覽 owner；HTML5／mpv transport adapters
 // 留在模組內部，OS 視窗、guide 與 bounds 不會因 active transport 改變而掉進 no-op。
 
+function presentationAbortError() {
+  const error = new Error('media presentation aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 class Html5Transport {
   constructor(video) { this.video = video; }
   get type() { return 'html5'; }
@@ -12,6 +18,62 @@ class Html5Transport {
   }
   async pause() { this.video?.pause?.(); }
   async seek(time) { if (this.video) this.video.currentTime = time; }
+  async present(time, { signal, tolerance = 1.5 / 30 } = {}) {
+    if (!this.video) throw new Error('HTML5 video element is unavailable');
+    if (signal?.aborted) throw presentationAbortError();
+    const target = Math.max(0, Number(time) || 0);
+    const allowedDrift = Math.max(0, Number(tolerance) || 0);
+    const video = this.video;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let frameCallbackId = null;
+      let seekedHandler = null;
+
+      const cleanup = () => {
+        if (frameCallbackId != null) video.cancelVideoFrameCallback?.(frameCallbackId);
+        frameCallbackId = null;
+        if (seekedHandler) video.removeEventListener?.('seeked', seekedHandler);
+        seekedHandler = null;
+        signal?.removeEventListener?.('abort', abort);
+      };
+      const finish = presentedSourceTime => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ backend: 'html5', presentedSourceTime });
+      };
+      const abort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(presentationAbortError());
+      };
+      const accept = value => {
+        const presented = Number(value);
+        if (!Number.isFinite(presented) || Math.abs(presented - target) > allowedDrift) return false;
+        finish(presented);
+        return true;
+      };
+      const requestFrame = () => {
+        if (settled) return;
+        frameCallbackId = video.requestVideoFrameCallback((unusedNow, metadata) => {
+          frameCallbackId = null;
+          if (!accept(metadata?.mediaTime)) requestFrame();
+        });
+      };
+
+      signal?.addEventListener?.('abort', abort, { once: true });
+      try { video.currentTime = target; } catch (error) { cleanup(); reject(error); return; }
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        requestFrame();
+      } else if (typeof video.addEventListener === 'function') {
+        seekedHandler = () => { accept(video.currentTime); };
+        video.addEventListener('seeked', seekedHandler);
+      } else {
+        queueMicrotask(() => accept(video.currentTime));
+      }
+    });
+  }
   async rate(value) {
     if (!this.video) return;
     this.video.playbackRate = value;
@@ -28,6 +90,36 @@ class MpvTransport {
   async play() { return this.mpv?.play?.(); }
   async pause() { return this.mpv?.pause?.(); }
   async seek(time, options) { return this.mpv?.seek?.(time, options); }
+  async present(time, options = {}) {
+    if (typeof this.mpv?.present !== 'function') throw new Error('mpv presentation acknowledgement is unavailable');
+    const { signal, ...bridgeOptions } = options;
+    if (signal?.aborted) throw presentationAbortError();
+    const pending = Promise.resolve(this.mpv.present(time, bridgeOptions));
+    if (!signal?.addEventListener) return pending;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => signal.removeEventListener?.('abort', abort);
+      const abort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        Promise.resolve(this.mpv?.cancelPresent?.()).catch(() => {});
+        reject(presentationAbortError());
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      pending.then(result => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      }, error => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
+    });
+  }
   async rate(value) { return this.mpv?.rate?.(value); }
   supportsNativeReverse() { return typeof this.mpv?.direction === 'function'; }
   async direction(value) {
@@ -172,6 +264,7 @@ export function createNativePreviewRuntime({
     async play() { return activeTransport.play(); },
     async pause() { return activeTransport.pause(); },
     async seek(time, options) { return activeTransport.seek(time, options); },
+    async present(time, options) { return activeTransport.present(time, options); },
     async rate(value) { return activeTransport.rate(value); },
     supportsNativeReverse() { return mode === 'mpv' && activeTransport.supportsNativeReverse(); },
     async direction(value) {
@@ -266,7 +359,3 @@ export function activateMpvTransport(desk) {
   runtime.setMpvBridge(desk?.mpv);
   return runtime;
 }
-
-export {
-  timeToFrameIndex, frameIndexToTime, stepFrameTime, measureClockDrift, createMasterClock
-} from './media-presentation-core.js';

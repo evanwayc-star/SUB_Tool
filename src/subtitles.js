@@ -428,10 +428,12 @@ function _lineLenHTML(line){
   return escapeHTMLWithSpaces(line.slice(0,_checkLenLimit))+`<span class="over-len">${escapeHTMLWithSpaces(line.slice(_checkLenLimit))}</span>`;
 }
 
+const LINE_BREAK_MARK_HTML = '<span class="line-break-mark" role="img" aria-label="換行" title="換行" data-symbol="↵"></span><br>';
+
 function _txtInner(text){
   if(!(text||'').trim()) return '<span class="blank-label">(空白字幕)</span>';
-  if(!_checkLenLimit) return txtHTML(text||'').replace(/\n/g, '<br>');
-  return (text||'').split(/\n/).map(_lineLenHTML).join('<br>');
+  if(!_checkLenLimit) return txtHTML(text||'').replace(/\r?\n/g, LINE_BREAK_MARK_HTML);
+  return (text||'').split(/\r?\n/).map(_lineLenHTML).join(LINE_BREAK_MARK_HTML);
 }
 
 function _subRowHTML(c,i,overlaps){
@@ -791,8 +793,9 @@ sublist?.addEventListener?.('focusout', e => {
   if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
   txt.contentEditable = 'false';
   const orig = txt.dataset.orig || '';
-  const result=editCue({ cueId:c.id, operation:'text', value:val, baseline:orig });
-  if(!result.ok) txt.innerHTML=_txtInner(c.text);
+  editCue({ cueId:c.id, operation:'text', value:val, baseline:orig });
+  const currentTxt=sublist.querySelector(`.sub-row[data-id="${c.id}"] .txt`);
+  if(currentTxt&&currentTxt.contentEditable!=='true') currentTxt.innerHTML=_txtInner(c.text);
 });
 
 sublist?.addEventListener?.('keydown', e => {

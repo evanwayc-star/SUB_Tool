@@ -5,11 +5,15 @@ const mediaMock = vi.hoisted(() => ({
   displayTime: vi.fn(() => 105),
   vTime: vi.fn(() => 15),
   seek: vi.fn(),
+  requestPresentation: vi.fn(target => Promise.resolve({ status: 'presented', presentedTime: target })),
+  cancelPresentation: vi.fn(),
+  presentedTime: vi.fn(() => null),
   scrubAudio: vi.fn(),
   pause: vi.fn(),
   play: vi.fn(),
   setRate: vi.fn(),
   setPlaybackDirection: vi.fn().mockResolvedValue(true),
+  setReverseShuttleMuted: vi.fn(),
   supportsNativeReverse: vi.fn(() => false),
   externalAudio: { list: vi.fn(() => []), get: vi.fn(() => null) },
   playing: false,
@@ -61,6 +65,10 @@ vi.mock('../src/ui.js', () => ({
 
 let State;
 let jklReset;
+let getJklSpeed;
+let shuttleRewind;
+let shuttleForward;
+let stepFrame;
 
 describe('JKL reverse shuttle time domain', () => {
   beforeEach(async () => {
@@ -75,6 +83,7 @@ describe('JKL reverse shuttle time domain', () => {
     `;
     ({ State } = await import('../src/state.js'));
     ({ jklReset } = await import('../src/keyboard.js'));
+    ({ getJklSpeed, shuttleRewind, shuttleForward, stepFrame } = await import('../src/transport-controller.js'));
     State.keymap = { rewind: [{ key: 'j' }] };
     State.clips = [{
       id: 'offset-clip',
@@ -88,11 +97,17 @@ describe('JKL reverse shuttle time domain', () => {
     mediaMock.displayTime.mockClear();
     mediaMock.vTime.mockClear();
     mediaMock.seek.mockClear();
+    mediaMock.requestPresentation.mockReset().mockImplementation(target => Promise.resolve({
+      status: 'presented', presentedTime: target,
+    }));
+    mediaMock.cancelPresentation.mockClear();
+    mediaMock.presentedTime.mockReset().mockReturnValue(null);
     mediaMock.scrubAudio.mockClear();
     mediaMock.pause.mockReset();
     mediaMock.play.mockClear();
     mediaMock.setRate.mockClear();
     mediaMock.setPlaybackDirection.mockClear();
+    mediaMock.setReverseShuttleMuted.mockClear();
     mediaMock.supportsNativeReverse.mockReset().mockReturnValue(false);
     mediaMock.playing = false;
   });
@@ -103,15 +118,14 @@ describe('JKL reverse shuttle time domain', () => {
     vi.useRealTimers();
   });
 
-  it('passes timeline time to seek and audio scrub', () => {
+  it('持續倒帶走時間軸 presentation，但不播放正向 scrub 音訊', async () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
-    vi.advanceTimersByTime(34);
+    await vi.advanceTimersByTimeAsync(60);
 
-    expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 - 1 / 30, 8));
-    expect(mediaMock.scrubAudio).toHaveBeenCalledWith(
-      expect.closeTo(105 - 1 / 30, 8),
-      expect.any(Number),
-    );
+    expect(mediaMock.requestPresentation).toHaveBeenCalledWith(expect.any(Number));
+    expect(mediaMock.requestPresentation.mock.calls[0][0]).toBeLessThan(105);
+    expect(mediaMock.scrubAudio).not.toHaveBeenCalled();
+    expect(mediaMock.setReverseShuttleMuted).toHaveBeenCalledWith(true);
     expect(mediaMock.displayTime).toHaveBeenCalled();
     expect(mediaMock.vTime).not.toHaveBeenCalled();
   });
@@ -166,6 +180,21 @@ describe('JKL reverse shuttle time domain', () => {
     expect(mediaMock.play).toHaveBeenCalledTimes(reversePlayCount);
   });
 
+  it('fallback 倒帶中按播放暫停鍵只停止，不會意外開始正播', async () => {
+    State.keymap = {
+      rewind: [{ key: 'j' }],
+      toggle_play_pause: [{ key: ' ' }],
+    };
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
+    const reversePlayCount = mediaMock.play.mock.calls.length;
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space' }));
+    await Promise.resolve();
+
+    expect(mediaMock.play).toHaveBeenCalledTimes(reversePlayCount);
+    expect(mediaMock.setReverseShuttleMuted).toHaveBeenLastCalledWith(false);
+  });
+
   it('原生倒播 IPC 尚未完成就按 K，晚到結果也會恢復 forward', async () => {
     State.keymap = {
       rewind: [{ key: 'j' }],
@@ -195,10 +224,10 @@ describe('JKL reverse shuttle time domain', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
     await Promise.resolve();
     await Promise.resolve();
-    vi.advanceTimersByTime(500);
-    vi.advanceTimersByTime(34);
+    // 長 GOP 第一次反向畫格允許 1.2 秒暖機；超過後仍完全沒進度才 fallback。
+    await vi.advanceTimersByTimeAsync(1300);
 
-    expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 - 1 / 30, 8));
+    expect(mediaMock.requestPresentation).toHaveBeenCalled();
   });
 
   it('播放時按下左右鍵會先暫停並往左/右移動一格', async () => {
@@ -212,6 +241,9 @@ describe('JKL reverse shuttle time domain', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
     expect(mediaMock.pause).toHaveBeenCalled();
     expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 - 1 / State.fps, 8));
+    expect(mediaMock.scrubAudio).toHaveBeenCalledWith(
+      expect.closeTo(105 - 1 / State.fps, 8), 0.08,
+    );
 
     mediaMock.pause.mockClear();
     mediaMock.seek.mockClear();
@@ -237,5 +269,24 @@ describe('JKL reverse shuttle time domain', () => {
     window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight' }));
     expect(mediaMock.pause).toHaveBeenCalled();
     expect(mediaMock.playing).toBe(false);
+  });
+
+  it('長按左鍵的 repeat 不會反覆重啟 fallback session', () => {
+    stepFrame(-1, false);
+    stepFrame(-1, true);
+    const startedCalls = mediaMock.setReverseShuttleMuted.mock.calls.length;
+    stepFrame(-1, true);
+
+    expect(mediaMock.setReverseShuttleMuted).toHaveBeenCalledTimes(startedCalls);
+    stepFrame(-1, false);
+    expect(mediaMock.setReverseShuttleMuted).toHaveBeenLastCalledWith(false);
+  });
+
+  it('J/L 穿梭倍率依文件上限固定在正負 5x', () => {
+    for(let i=0;i<20;i++) shuttleRewind();
+    expect(getJklSpeed()).toBe(-5);
+    jklReset();
+    for(let i=0;i<20;i++) shuttleForward();
+    expect(getJklSpeed()).toBe(5);
   });
 });

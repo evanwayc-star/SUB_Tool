@@ -84,6 +84,45 @@ export {
 
 const ASR_CONFIG_KEY = 'subtool_asr_config';
 const DEFAULT_ASR_PROMPT = '以下是影音對話，請以繁體中文輸出完整字幕，精準保留標點符號。';
+const ASR_PROVIDER_UI_META = Object.freeze({
+  builtin: {
+    badge: '本機離線',
+    hint: '音訊留在這台電腦上處理；第一次使用模型時需要下載模型檔。'
+  },
+  groq: {
+    badge: '高速雲端',
+    hint: '適合快速建立初稿；本次所選音訊會傳送至 Groq 進行辨識。'
+  },
+  openai: {
+    badge: '雲端逐字時間',
+    hint: '使用 Whisper-1 取得字幕文字與逐字時間；本次所選音訊會傳送至 OpenAI。'
+  },
+  azure: {
+    badge: '專業雲端',
+    hint: '支援 Phrase List 與逐句／逐字時間；Region 必須和 Speech Key 所屬資源一致。'
+  },
+  google: {
+    badge: '語意理解',
+    hint: '適合繁體中文語意與上下文理解；時間邊界仍建議在完成後抽查。'
+  },
+  elevenlabs: {
+    badge: '高精準雲端',
+    hint: 'Scribe v2 支援多語言、逐字時間與專有名詞 Keyterms。'
+  }
+});
+
+const ASR_ICONS = Object.freeze({
+  source: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 7v10m4-13v16m4-12v8m4-5v2"/></svg>',
+  mode: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v5H5zM5 15h6v5H5zm10 0h4v5h-4z"/></svg>',
+  transcript: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6zM9 8h6m-6 4h6m-6 4h4"/></svg>',
+  engine: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6l1 3 3 1v6l-3 1-1 3H9l-1-3-3-1V7l3-1z"/><circle cx="12" cy="10" r="2.5"/></svg>',
+  progress: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 8-8M4 4v6h6"/></svg>',
+  info: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/></svg>'
+});
+
+function asrIcon(name) {
+  return `<span class="asr-section-icon">${ASR_ICONS[name] || ASR_ICONS.info}</span>`;
+}
 export { CLOUD_PROVIDER_META, getAsrGuidanceMeta, resolveAsrGuidance } from './recognition-guidance.js';
 
 /**
@@ -547,42 +586,57 @@ export function openAsrMonitorDialog(session) {
   const providerName = CLOUD_PROVIDER_META[session.provider]?.name || (session.provider === 'builtin' ? '程式內建 AI' : session.provider);
   const taskTitle = session.taskMode === 'align' ? '文本匹配' : '語音辨識';
 
+  const percent = Number.isFinite(session.progress?.percent)
+    ? Math.max(0, Math.min(100, Math.round(session.progress.percent)))
+    : null;
   const html = `
-    <div class="asr-form" style="display:flex;flex-direction:column;gap:12px;">
-      <div style="background:var(--panel2);border:1px solid var(--border2);border-radius:6px;padding:10px;">
-        <div style="font-weight:600;margin-bottom:4px;color:var(--text);">
-          模式：${taskTitle}（${escapeHTML(providerName)}）
+    <div class="asr-form asr-workspace asr-monitor-workspace">
+      <section class="asr-card asr-monitor-summary" aria-labelledby="asrMonitorSummaryTitle">
+        <div class="asr-card-heading">
+          ${asrIcon('progress')}
+          <div class="asr-heading-copy">
+            <span class="asr-eyebrow">背景工作</span>
+            <h4 id="asrMonitorSummaryTitle">${taskTitle}</h4>
+          </div>
+          <span class="asr-provider-badge">${escapeHTML(providerName)}</span>
         </div>
-        <div style="font-size:12px;color:var(--text-dim);">
-          處理素材：${session.clips.length} 個音訊來源 · 總長度約 ${durStr}
+        <div class="asr-monitor-meta">
+          <span><strong>${session.clips.length}</strong> 個音訊來源</span>
+          <span aria-hidden="true">·</span>
+          <span>總長度約 <strong>${durStr}</strong></span>
         </div>
-      </div>
+      </section>
 
-      <div id="asrProgressContainer" style="display:flex;flex-direction:column;gap:4px;">
-        <div id="asrProgressLabel" style="font-size:11px;color:var(--text-dim);display:flex;justify-content:space-between;">
+      <section id="asrProgressContainer" class="asr-card asr-progress-card" role="region" aria-label="辨識進度">
+        <div id="asrProgressLabel" class="asr-progress-label">
           <span>${escapeHTML(session.progress?.message || '正在進行語音辨識推論…')}</span>
-          <span id="asrProgressPercent" style="font-weight:600;color:var(--accent);">
-            ${Number.isFinite(session.progress?.percent) ? Math.round(session.progress.percent) + '%' : (session.progress?.indeterminate ? '推論中' : '0%')}
+          <span id="asrProgressPercent" class="asr-progress-percent">
+            ${percent !== null ? `${percent}%` : (session.progress?.indeterminate ? '推論中' : '0%')}
           </span>
         </div>
-        <div style="width:100%;height:6px;background:var(--border2);border-radius:3px;overflow:hidden;">
-          <div id="asrProgressBar" class="${session.progress?.indeterminate ? 'indeterminate' : ''}" style="width:${Number.isFinite(session.progress?.percent) ? Math.max(0, Math.min(100, Math.round(session.progress.percent))) + '%' : '0%'};height:100%;background:var(--accent);transition:width 0.2s ease;"></div>
+        <div class="asr-progress-track">
+          <div id="asrProgressBar" class="asr-progress-bar ${session.progress?.indeterminate ? 'indeterminate' : ''}"
+            role="progressbar" aria-label="辨識完成比例" aria-valuemin="0" aria-valuemax="100"
+            ${percent !== null ? `aria-valuenow="${percent}"` : ''} style="width:${percent !== null ? `${percent}%` : '0%'};"></div>
+        </div>
+        <div id="asrStatus" class="asr-status is-running" role="status" aria-live="polite">
+          ${escapeHTML(session.statusText || session.progress?.message || '辨識進行中…')}
+        </div>
+      </section>
+
+      <div class="asr-callout">
+        ${asrIcon('info')}
+        <div>
+          <strong>可以繼續剪輯</strong>
+          <span>縮小視窗後工作仍會在背景執行；完成時會自動建立字幕軌並通知你。</span>
         </div>
       </div>
 
-      <div id="asrStatus" style="font-size:12px;color:var(--accent);padding:4px 0;">
-        ${escapeHTML(session.statusText || session.progress?.message || '辨識進行中…')}
-      </div>
-
-      <div style="font-size:11px;color:var(--text-faint);line-height:1.4;background:var(--panel2);border:1px solid var(--border2);border-radius:6px;padding:8px;">
-        💡 辨識已在背景持續執行中。您可以隨時點擊「縮小至背景」回到主介面繼續播放與編輯字幕；辨識完成時會自動建立專屬字幕軌並發出通知。
-      </div>
-
-      <div id="asrAlignmentDiagnostic" style="display:${session.diagnostic ? 'flex' : 'none'};flex-direction:column;gap:6px;padding:8px;border:1px solid var(--red);border-radius:5px;background:color-mix(in srgb,var(--red) 8%,transparent);">
-        <div id="asrUnreliableLineNumbers" style="font-size:11px;line-height:1.5;color:var(--text);max-height:72px;overflow:auto;"></div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-          <span style="font-size:10px;line-height:1.4;color:var(--text-faint);">診斷檔含完整稿件與辨識文字／時間；不從素材或設定帶入名稱、路徑、URL、API Key、HTTP 標頭或音訊。</span>
-          <button type="button" id="asrDownloadAlignmentDiagnostic" style="flex:none;padding:4px 9px;font-size:11px;">匯出診斷 JSON</button>
+      <div id="asrAlignmentDiagnostic" class="asr-diagnostic" style="display:${session.diagnostic ? 'flex' : 'none'};">
+        <div id="asrUnreliableLineNumbers" class="asr-diagnostic-lines"></div>
+        <div class="asr-diagnostic-actions">
+          <span>診斷檔含完整稿件與辨識文字／時間；分享前請先檢查內容。</span>
+          <button type="button" id="asrDownloadAlignmentDiagnostic" class="asr-compact-button">匯出診斷 JSON</button>
         </div>
       </div>
     </div>
@@ -600,11 +654,11 @@ export function openAsrMonitorDialog(session) {
     showToast('語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
   };
 
-  openModal(`🎙 ${taskTitle}進度`, html, [
-    { label: '🛑 取消辨識', act: cancelSession },
-    { label: '🔽 縮小至背景', primary: true, act: minimizeSession }
+  openModal(`${taskTitle}進度`, html, [
+    { label: '取消工作', act: cancelSession, className: 'asr-danger-button' },
+    { label: '縮小至背景', primary: true, act: minimizeSession }
   ], {
-    width: '480px',
+    width: '620px',
     closeOnBackdrop: false,
     onDismiss: () => {
       setAsrSessionDialogOpen(false);
@@ -625,10 +679,13 @@ export function openAsrMonitorDialog(session) {
     if (progressBar && s.progress) {
       if (s.progress.indeterminate) {
         progressBar.classList.add('indeterminate');
+        progressBar.removeAttribute('aria-valuenow');
       } else {
         progressBar.classList.remove('indeterminate');
         if (Number.isFinite(s.progress.percent)) {
-          progressBar.style.width = Math.max(0, Math.min(100, Math.round(s.progress.percent))) + '%';
+          const nextPercent = Math.max(0, Math.min(100, Math.round(s.progress.percent)));
+          progressBar.style.width = nextPercent + '%';
+          progressBar.setAttribute('aria-valuenow', String(nextPercent));
         }
       }
     }
@@ -644,9 +701,13 @@ export function openAsrMonitorDialog(session) {
     }
     if (statusEl) {
       if (s.progress?.status === 'failed') {
-        statusEl.style.color = 'var(--red)';
+        statusEl.className = 'asr-status is-error';
+        statusEl.setAttribute('role', 'alert');
       } else {
-        statusEl.style.color = 'var(--accent)';
+        statusEl.className = s.progress?.status === 'completed'
+          ? 'asr-status is-success'
+          : 'asr-status is-running';
+        statusEl.setAttribute('role', 'status');
       }
       statusEl.textContent = s.statusText || s.progress?.message || '';
     }
@@ -742,44 +803,85 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     const inT = Number(c.in) || 0;
     const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (State.duration || 0)));
     const durStr = secToEncore(Math.max(0, outT - inT), State.fps, State.dropFrame);
-    return `<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>${i + 1}. ${escapeHTML(c.name || '音訊素材')}</span><span style="color:var(--text-faint)">${durStr}</span></div>`;
+    const sourceName = escapeHTML(c.name || '音訊素材');
+    return `<div class="asr-source-item" role="listitem"><span class="asr-source-index">${i + 1}</span><span class="asr-source-name" title="${sourceName}">${sourceName}</span><span class="asr-source-duration">${durStr}</span></div>`;
   }).join('');
 
   const html = `
-    <div class="asr-form" style="display:flex;flex-direction:column;gap:12px;">
-      <div style="background:var(--panel2);border:1px solid var(--border2);border-radius:6px;padding:10px;">
-        <div style="font-weight:600;margin-bottom:6px;color:var(--text);">已選取 ${clips.length} 個音訊來源（總長度約 ${secToEncore(totalDur, State.fps, State.dropFrame)}）：</div>
-        <div style="max-height:80px;overflow-y:auto;font-size:12px;color:var(--text-dim);">${clipsSummary}</div>
-      </div>
+    <div class="asr-form asr-workspace asr-config-workspace">
+      <section class="asr-card asr-source-card" aria-labelledby="asrSourceTitle">
+        <div class="asr-card-heading">
+          ${asrIcon('source')}
+          <div class="asr-heading-copy">
+            <span class="asr-eyebrow">本次輸入</span>
+            <h4 id="asrSourceTitle">已選取 ${clips.length} 個音訊來源</h4>
+          </div>
+          <span class="asr-duration-pill">約 ${secToEncore(totalDur, State.fps, State.dropFrame)}</span>
+        </div>
+        <div class="asr-source-list" role="list">${clipsSummary}</div>
+        <div id="asrRecognitionAudioSourceRow" class="asr-field asr-source-selector" style="display:${recognitionAudioChoices.length > 1 ? 'flex' : 'none'};">
+          <label for="asrRecognitionAudioSource">辨識音訊來源</label>
+          <select id="asrRecognitionAudioSource">${recognitionAudioOptions}</select>
+          <div class="asr-helper">預設會把來源聲道等權混合為 mono；只影響這次辨識。</div>
+        </div>
+      </section>
 
-      <div id="asrRecognitionAudioSourceRow" style="display:${recognitionAudioChoices.length > 1 ? 'flex' : 'none'};flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">辨識音訊來源：</label>
-        <select id="asrRecognitionAudioSource" style="width:100%;">${recognitionAudioOptions}</select>
-        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">預設「全部」會逐來源聲道等權平均成 mono；只影響本次辨識，不改變播放、波形、專案音軌或輸出。</div>
-      </div>
-
-      <div style="display:flex;flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">生成方式：</label>
-        <select id="asrTaskMode" style="width:100%;">
+      <section class="asr-mode-panel" aria-label="工作方式">
+        <div class="asr-mode-options" role="group" aria-label="選擇語音辨識或文本匹配">
+          <button type="button" id="asrModeTranscribe" class="asr-mode-option" data-asr-mode="transcribe" aria-pressed="${initialTaskMode === 'transcribe'}">
+            <span class="asr-mode-option-title">語音辨識</span>
+            <span class="asr-mode-option-copy">從聲音產生字幕文字與時間碼</span>
+          </button>
+          <button type="button" id="asrModeAlign" class="asr-mode-option" data-asr-mode="align" aria-pressed="${initialTaskMode === 'align'}">
+            <span class="asr-mode-option-title">文本匹配</span>
+            <span class="asr-mode-option-copy">保留逐行原稿，只分析對應時間</span>
+          </button>
+        </div>
+        <select id="asrTaskMode" class="asr-native-mode-select" aria-label="生成方式" tabindex="-1">
           <option value="transcribe" ${initialTaskMode === 'transcribe' ? 'selected' : ''}>語音辨識（由聲音產生文字與時間碼）</option>
           <option value="align" ${initialTaskMode === 'align' ? 'selected' : ''}>文本匹配（保留逐行文字稿，只匹配時間碼）</option>
         </select>
-      </div>
+      </section>
 
-      <div id="asrTranscriptRow" style="display:${initialTaskMode === 'align' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-          <label style="font-size:12px;font-weight:600;color:var(--text-dim);">逐行文字稿：</label>
-          <button type="button" id="asrImportTranscriptButton" style="padding:4px 9px;font-size:11px;">匯入 TXT</button>
-        </div>
-        <input type="file" id="asrTranscriptFileInput" accept=".txt,text/plain" hidden>
-        <textarea id="asrTranscript" rows="7" placeholder="在此貼上已分行的文字稿…" style="width:100%;resize:vertical;min-height:120px;box-sizing:border-box;line-height:1.5;"></textarea>
-        <div id="asrTranscriptFileSummary" style="display:none;font-size:11px;color:var(--accent);"></div>
-        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">每個非空白行固定為一條字幕；只裁掉行首、行尾空白，不會重新分行、分句或改寫內容。</div>
-      </div>
+      <div class="asr-settings-grid ${initialTaskMode === 'align' ? 'is-align' : 'is-transcribe'}">
+        <section id="asrContentCard" class="asr-card asr-content-card" aria-labelledby="asrContentTitle" style="display:${initialTaskMode === 'align' ? 'flex' : 'none'};">
+          <div class="asr-card-heading asr-card-heading-compact">
+            ${asrIcon('transcript')}
+            <div class="asr-heading-copy">
+              <span class="asr-eyebrow">內容與輸出</span>
+              <h4 id="asrContentTitle">${initialTaskMode === 'align' ? '逐行文字稿' : '辨識輸出'}</h4>
+            </div>
+          </div>
 
-      <div style="display:flex;flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">聲音分析引擎：</label>
-        <select id="asrProvider" class="asr-provider-select" style="width:100%;">
+          <div id="asrTranscriptRow" class="asr-field asr-transcript-field" style="display:${initialTaskMode === 'align' ? 'flex' : 'none'};">
+            <div class="asr-field-heading">
+              <label for="asrTranscript">逐行文字稿</label>
+              <div class="asr-transcript-actions">
+                <span id="asrTranscriptLineCount" class="asr-line-count" aria-live="polite">0 行</span>
+                <button type="button" id="asrImportTranscriptButton" class="asr-compact-button">匯入 TXT</button>
+              </div>
+            </div>
+            <input type="file" id="asrTranscriptFileInput" accept=".txt,text/plain" hidden>
+            <textarea id="asrTranscript" rows="8" placeholder="貼上已校對、已分行的文字稿…" aria-describedby="asrTranscriptHelp asrTranscriptError"></textarea>
+            <div id="asrTranscriptFileSummary" class="asr-file-summary" style="display:none;"></div>
+            <div id="asrTranscriptError" class="asr-field-error" role="alert" hidden></div>
+            <div id="asrTranscriptHelp" class="asr-helper">每個非空白行固定為一條字幕；只裁掉行首、行尾空白，不會重新分行、分句或改寫內容。</div>
+          </div>
+        </section>
+
+        <section class="asr-card asr-engine-card" aria-labelledby="asrEngineTitle">
+          <div class="asr-card-heading asr-card-heading-compact">
+            ${asrIcon('engine')}
+            <div class="asr-heading-copy">
+              <span class="asr-eyebrow">處理設定</span>
+              <h4 id="asrEngineTitle">辨識引擎</h4>
+            </div>
+            <span id="asrProviderBadge" class="asr-provider-badge">${escapeHTML(ASR_PROVIDER_UI_META[conf.provider]?.badge || '')}</span>
+          </div>
+
+          <div class="asr-field asr-provider-field">
+            <label for="asrProvider">聲音分析引擎</label>
+            <select id="asrProvider" class="asr-provider-select">
           <option value="builtin" ${conf.provider === 'builtin' ? 'selected' : ''}>程式內建本機 AI 引擎 (免設定・100% 離線)</option>
           <option value="groq" ${conf.provider === 'groq' ? 'selected' : ''}>Groq (Whisper-large-v3，極速雲端・免費)</option>
           <option value="openai" ${conf.provider === 'openai' ? 'selected' : ''}>OpenAI (Whisper-1 官方雲端)</option>
@@ -787,76 +889,76 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <option value="google" ${conf.provider === 'google' ? 'selected' : ''}>Google Gemini (大語言模型・繁體中文理解力最強)</option>
           <option value="elevenlabs" ${conf.provider === 'elevenlabs' ? 'selected' : ''}>ElevenLabs (Scribe v2，高精準多語言・逐字時間碼)</option>
         </select>
-      </div>
+            <div id="asrProviderHint" class="asr-helper">${escapeHTML(ASR_PROVIDER_UI_META[conf.provider]?.hint || '')}</div>
+          </div>
 
       <!-- 內建模型選擇 -->
-      <div id="asrBuiltinRow" style="display:${conf.provider === 'builtin' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">內建 AI 模型等級：</label>
-        <select id="asrBuiltinModel" style="width:100%;">
+          <div id="asrBuiltinRow" class="asr-field" style="display:${conf.provider === 'builtin' ? 'flex' : 'none'};">
+            <label for="asrBuiltinModel">內建 AI 模型等級</label>
+            <select id="asrBuiltinModel">
           <option value="onnx-community/whisper-tiny" ${conf.builtinModel === 'onnx-community/whisper-tiny' ? 'selected' : ''}>Whisper Tiny 逐字時間版 (最快；CPU 約 39MB／GPU 約 150MB)</option>
           <option value="onnx-community/whisper-base" ${conf.builtinModel === 'onnx-community/whisper-base' ? 'selected' : ''}>Whisper Base 逐字時間版 (平衡；CPU 約 73MB／GPU 約 290MB)</option>
           <option value="onnx-community/whisper-small" ${conf.builtinModel === 'onnx-community/whisper-small' ? 'selected' : ''}>Whisper Small 逐字時間版 (中文佳；CPU 約 240MB／GPU 約 560MB)</option>
           <option value="onnx-community/whisper-large-v3-turbo" ${conf.builtinModel === 'onnx-community/whisper-large-v3-turbo' ? 'selected' : ''}>Whisper Large v3 Turbo q4 逐字時間版 (速度優先，約 800MB)</option>
         </select>
-        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">
-          💡 首次使用特定模型時會自動下載並快取逐字時間版模型；下載量會依 GPU／CPU 執行版本而不同。本機電腦有獨立顯卡時可自動啟用 WebGPU 加速。逐字時間是 Whisper 推估值；文本匹配會保留可靠錨點並標示需要校對的補時行。
-        </div>
-      </div>
+            <div class="asr-helper">首次使用會下載並快取模型；有獨立顯卡時可自動啟用 WebGPU。</div>
+          </div>
 
       <!-- 雲端 API Key -->
-      <div id="asrKeyRow" style="display:${cloudProvider ? 'flex' : 'none'};flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);display:flex;justify-content:space-between;">
-          <span id="asrKeyLabel">API Key：</span>
-          <span id="asrKeyHelp" style="font-size:11px;color:var(--accent);cursor:pointer;"></span>
-        </label>
-        <input type="password" id="asrApiKey" placeholder="輸入您的 API Key…" value="${escapeHTML(selectedApiKey || '')}" style="width:100%;">
-      </div>
+          <div id="asrKeyRow" class="asr-field" style="display:${cloudProvider ? 'flex' : 'none'};">
+            <div class="asr-field-heading">
+              <label id="asrKeyLabel" for="asrApiKey">API Key</label>
+              <button type="button" id="asrKeyHelp" class="asr-inline-link"></button>
+            </div>
+            <div class="asr-secret-input">
+              <input type="password" id="asrApiKey" placeholder="輸入 API Key…" value="${escapeHTML(selectedApiKey || '')}" autocomplete="off" aria-describedby="asrApiKeyError">
+              <button type="button" id="asrToggleApiKey" aria-pressed="false" aria-label="顯示 API Key">顯示</button>
+            </div>
+            <div id="asrApiKeyError" class="asr-field-error" role="alert" hidden></div>
+          </div>
 
-      <div id="asrAzureRegionRow" style="display:${conf.provider === 'azure' ? 'flex' : 'none'};flex-direction:column;gap:5px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-dim);">Azure Speech Region：</label>
-        <input type="text" id="asrAzureRegion" placeholder="例如 ${DEFAULT_AZURE_SPEECH_REGION}" value="${escapeHTML(conf.azureRegion || DEFAULT_AZURE_SPEECH_REGION)}" style="width:100%;">
-        <div style="font-size:11px;color:var(--text-faint);line-height:1.4;">Region 必須與 Speech Key 的資源相同；新設定預設 ${DEFAULT_AZURE_SPEECH_REGION}，其他資源請依 Azure 入口網站顯示填寫。</div>
-      </div>
+          <div id="asrAzureRegionRow" class="asr-field" style="display:${conf.provider === 'azure' ? 'flex' : 'none'};">
+            <label for="asrAzureRegion">Azure Speech Region</label>
+            <input type="text" id="asrAzureRegion" placeholder="例如 ${DEFAULT_AZURE_SPEECH_REGION}" value="${escapeHTML(conf.azureRegion || DEFAULT_AZURE_SPEECH_REGION)}" aria-describedby="asrAzureRegionHelp asrAzureRegionError">
+            <div id="asrAzureRegionError" class="asr-field-error" role="alert" hidden></div>
+            <div id="asrAzureRegionHelp" class="asr-helper">必須和 Speech Key 所屬資源的 Region 一致。</div>
+          </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-        <div style="display:flex;flex-direction:column;gap:5px;">
-          <label style="font-size:12px;font-weight:600;color:var(--text-dim);">語言：</label>
-          <select id="asrLanguage" style="width:100%;">
+          <div class="asr-field">
+            <label for="asrLanguage">音訊語言</label>
+            <select id="asrLanguage">
             <option value="zh" ${conf.language === 'zh' ? 'selected' : ''}>繁體中文 (Chinese)</option>
             <option value="en" ${conf.language === 'en' ? 'selected' : ''}>英文 (English)</option>
             <option value="ja" ${conf.language === 'ja' ? 'selected' : ''}>日文 (Japanese)</option>
             <option value="ko" ${conf.language === 'ko' ? 'selected' : ''}>韓文 (Korean)</option>
             <option value="auto" ${conf.language === 'auto' ? 'selected' : ''}>自動偵測 (Auto)</option>
           </select>
-        </div>
+          </div>
 
-        <div style="display:flex;flex-direction:column;gap:5px;">
-          <label style="font-size:12px;font-weight:600;color:var(--text-dim);">生成目標：</label>
-          <input type="text" id="asrTargetSummary" value="自動建立「${initialTaskMode === 'align' ? '文本匹配' : '語音辨識'}」新軌" disabled style="width:100%;opacity:0.75;">
-        </div>
+          <div id="asrPromptRow" class="asr-field asr-guidance-field" style="display:${initialGuidanceMeta ? 'flex' : 'none'};">
+            <label id="asrPromptLabel" for="asrPrompt">${escapeHTML(initialGuidanceMeta?.label || '')}</label>
+            <input type="text" id="asrPrompt" placeholder="${escapeHTML(initialGuidanceMeta?.placeholder || '')}" value="${escapeHTML(initialGuidanceValue)}">
+          </div>
+        </section>
       </div>
+      <input type="hidden" id="asrTargetSummary" value="自動建立「${initialTaskMode === 'align' ? '文本匹配' : '語音辨識'}」新軌">
 
-      <div id="asrPromptRow" style="display:${initialGuidanceMeta ? 'flex' : 'none'};flex-direction:column;gap:5px;">
-        <label id="asrPromptLabel" style="font-size:12px;font-weight:600;color:var(--text-dim);">${escapeHTML(initialGuidanceMeta?.label || '')}</label>
-        <input type="text" id="asrPrompt" placeholder="${escapeHTML(initialGuidanceMeta?.placeholder || '')}" value="${escapeHTML(initialGuidanceValue)}" style="width:100%;">
-      </div>
-
-      <div id="asrProgressContainer" style="display:none;flex-direction:column;gap:4px;">
-        <div id="asrProgressLabel" style="font-size:11px;color:var(--text-dim);display:flex;justify-content:space-between;">
+      <section id="asrProgressContainer" class="asr-card asr-progress-card" role="region" aria-label="辨識進度" style="display:none;">
+        <div id="asrProgressLabel" class="asr-progress-label">
           <span>正在進行語音辨識推論…</span>
-          <span id="asrProgressPercent" style="font-weight:600;color:var(--accent);">0%</span>
+          <span id="asrProgressPercent" class="asr-progress-percent">0%</span>
         </div>
-        <div style="width:100%;height:6px;background:var(--border2);border-radius:3px;overflow:hidden;">
-          <div id="asrProgressBar" style="width:0%;height:100%;background:var(--accent);transition:width 0.2s ease;"></div>
+        <div class="asr-progress-track">
+          <div id="asrProgressBar" class="asr-progress-bar" role="progressbar" aria-label="辨識完成比例" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="width:0%;"></div>
         </div>
-      </div>
+      </section>
 
-      <div id="asrStatus" style="font-size:12px;color:var(--accent);display:none;padding:6px 0;"></div>
-      <div id="asrAlignmentDiagnostic" style="display:none;flex-direction:column;gap:6px;padding:8px;border:1px solid var(--red);border-radius:5px;background:color-mix(in srgb,var(--red) 8%,transparent);">
-        <div id="asrUnreliableLineNumbers" style="font-size:11px;line-height:1.5;color:var(--text);max-height:72px;overflow:auto;"></div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-          <span style="font-size:10px;line-height:1.4;color:var(--text-faint);">診斷檔含完整稿件與辨識文字／時間；不從素材或設定帶入名稱、路徑、URL、API Key、HTTP 標頭或音訊。文字本身仍可能含敏感內容，分享前請確認。</span>
-          <button type="button" id="asrDownloadAlignmentDiagnostic" style="flex:none;padding:4px 9px;font-size:11px;">匯出診斷 JSON</button>
+      <div id="asrStatus" class="asr-status" role="status" aria-live="polite" style="display:none;"></div>
+      <div id="asrAlignmentDiagnostic" class="asr-diagnostic" style="display:none;">
+        <div id="asrUnreliableLineNumbers" class="asr-diagnostic-lines"></div>
+        <div class="asr-diagnostic-actions">
+          <span>診斷檔含完整稿件與辨識文字／時間；文字仍可能含敏感內容，分享前請確認。</span>
+          <button type="button" id="asrDownloadAlignmentDiagnostic" class="asr-compact-button">匯出診斷 JSON</button>
         </div>
       </div>
     </div>
@@ -889,10 +991,10 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     showToast('語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
   };
 
-  openModal('🎙 音訊辨識／文本匹配生成字幕', html, [
+  openModal('音訊辨識與文本匹配', html, [
     { label: '取消', act: cancelRecognition },
     {
-      label: initialTaskMode === 'align' ? '開始匹配' : '🚀 開始辨識',
+      label: initialTaskMode === 'align' ? '開始匹配' : '開始辨識',
       primary: true,
       act: async () => {
         const taskModeEl = document.getElementById('asrTaskMode');
@@ -912,6 +1014,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const modalFoot = document.getElementById('modalFoot');
         const alignmentDiagnosticEl = document.getElementById('asrAlignmentDiagnostic');
         const unreliableLineNumbersEl = document.getElementById('asrUnreliableLineNumbers');
+        const workspaceEl = document.querySelector('.asr-config-workspace');
 
         const taskMode = taskModeEl?.value === 'align' ? 'align' : 'transcribe';
         const transcript = transcriptEl?.value || '';
@@ -928,15 +1031,40 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const recognitionSelection = recognitionAudioSelectionByValue.get(recognitionAudioSourceEl?.value || 'all')
           || ALL_RECOGNITION_SOURCE_CHANNELS;
 
+        const clearValidationErrors = () => {
+          document.querySelectorAll('.asr-field-error').forEach(errorEl => {
+            errorEl.hidden = true;
+            errorEl.textContent = '';
+          });
+          document.querySelectorAll('.asr-field [aria-invalid="true"]').forEach(fieldEl => {
+            fieldEl.removeAttribute('aria-invalid');
+            fieldEl.classList.remove('input-error');
+          });
+        };
         const showValidationError = (message, focusTarget = null) => {
           if (statusEl) {
             statusEl.style.display = 'block';
-            statusEl.style.color = 'var(--red)';
+            statusEl.className = 'asr-status is-error';
+            statusEl.setAttribute('role', 'alert');
             statusEl.textContent = message;
           }
+          const fieldError = focusTarget?.closest('.asr-field')?.querySelector('.asr-field-error');
+          if (fieldError) {
+            fieldError.hidden = false;
+            fieldError.textContent = message;
+          }
+          focusTarget?.setAttribute('aria-invalid', 'true');
+          focusTarget?.classList.add('input-error');
           focusTarget?.focus();
         };
+        const setFormProcessing = processing => {
+          workspaceEl?.setAttribute('aria-busy', String(processing));
+          workspaceEl?.querySelectorAll('input, select, textarea, button').forEach(control => {
+            control.disabled = processing;
+          });
+        };
 
+        clearValidationErrors();
         latestAlignmentDiagnostic = null;
         if (alignmentDiagnosticEl) {
           alignmentDiagnosticEl.style.display = 'none';
@@ -1004,13 +1132,22 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         // 進行中只鎖定「開始辨識」；取消必須一直可用，並顯示「縮小至背景」。
         if (modalFoot) {
           const startButtons = modalFoot.querySelectorAll('button.primary');
-          startButtons.forEach(button => { button.disabled = true; });
+          startButtons.forEach(button => {
+            button.disabled = true;
+            button.textContent = '處理中…';
+          });
           const minimizeBtn = document.getElementById('asrMinimizeBtn');
           if (minimizeBtn) minimizeBtn.style.display = '';
         }
+        setFormProcessing(true);
+        if (progressContainer) progressContainer.style.display = 'flex';
+        progressBar?.classList.add('indeterminate');
+        progressBar?.removeAttribute('aria-valuenow');
+        if (progressPercent) progressPercent.textContent = '準備中';
         if (statusEl) {
           statusEl.style.display = 'block';
-          statusEl.style.color = 'var(--accent)';
+          statusEl.className = 'asr-status is-running';
+          statusEl.setAttribute('role', 'status');
           statusEl.textContent = '正在準備音訊並進行分析…';
         }
 
@@ -1066,7 +1203,10 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                     });
                     updateAsrSessionStatus(msg);
                     progressBar?.classList.remove('indeterminate');
-                    if (progressBar) progressBar.style.width = pct + '%';
+                    if (progressBar) {
+                      progressBar.style.width = pct + '%';
+                      progressBar.setAttribute('aria-valuenow', String(pct));
+                    }
                     if (progressPercent) progressPercent.textContent = pct + '%';
                     if (progressLabel) progressLabel.textContent = msg;
                   } else if (pInfo.status === 'transcribing') {
@@ -1083,10 +1223,14 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                     updateAsrSessionStatus(`[${i + 1}/${clips.length}] ${msg}`);
                     if (hasMeasuredPercent) {
                       progressBar?.classList.remove('indeterminate');
-                      if (progressBar) progressBar.style.width = pct + '%';
+                      if (progressBar) {
+                        progressBar.style.width = pct + '%';
+                        progressBar.setAttribute('aria-valuenow', String(pct));
+                      }
                       if (progressPercent) progressPercent.textContent = pct + '%';
                     } else {
                       progressBar?.classList.add('indeterminate');
+                      progressBar?.removeAttribute('aria-valuenow');
                       if (progressPercent) progressPercent.textContent = '運算中';
                     }
                     if (progressLabel) progressLabel.textContent = msg;
@@ -1223,6 +1367,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           }
           activeRecognitionController = null;
           completeAsrSession(results);
+          workspaceEl?.setAttribute('aria-busy', 'false');
+          const diagnosticButton = document.getElementById('asrDownloadAlignmentDiagnostic');
+          if (diagnosticButton) diagnosticButton.disabled = false;
 
           const partialAlignment = taskMode === 'align' && failedAlignmentLineNumbers.length > 0;
           const recoveredAlignment = taskMode === 'align' && recoveredAlignmentLineNumbers.length > 0;
@@ -1241,7 +1388,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
               updateAsrSessionStatus(summaryMsg);
               if (statusEl) {
                 statusEl.style.display = 'block';
-                statusEl.style.color = 'var(--accent)';
+                statusEl.className = 'asr-status is-warning';
+                statusEl.setAttribute('role', 'status');
                 statusEl.textContent = summaryMsg;
               }
               if (modalFoot) {
@@ -1264,7 +1412,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
               updateAsrSessionStatus(summaryMsg);
               if (statusEl) {
                 statusEl.style.display = 'block';
-                statusEl.style.color = 'var(--accent)';
+                statusEl.className = 'asr-status is-warning';
+                statusEl.setAttribute('role', 'status');
                 statusEl.textContent = summaryMsg;
               }
               if (modalFoot) {
@@ -1294,13 +1443,19 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           failAsrSession(err);
           if (statusEl) {
             statusEl.style.display = 'block';
-            statusEl.style.color = 'var(--red)';
+            statusEl.className = 'asr-status is-error';
+            statusEl.setAttribute('role', 'alert');
             statusEl.textContent = '❌ 辨識失敗：' + (err.message || String(err));
           }
           if (modalFoot) {
             const startButtons = modalFoot.querySelectorAll('button.primary');
-            startButtons.forEach(button => { button.disabled = false; });
+            startButtons.forEach(button => {
+              button.disabled = false;
+              button.textContent = taskMode === 'align' ? '開始匹配' : '開始辨識';
+            });
           }
+          setFormProcessing(false);
+          progressBar?.classList.remove('indeterminate');
           activeRecognitionController = null;
           if (!currentSession.dialogOpen) {
             showToast('❌ 語音辨識失敗：' + (err.message || String(err)), 4000);
@@ -1308,8 +1463,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         }
       }
     },
-    { label: '🔽 縮小至背景', act: minimizeToBackground, id: 'asrMinimizeBtn', hidden: true }
-  ], { width: '480px', closeOnBackdrop: false, onDismiss: abortActiveRecognition });
+    { label: '縮小至背景', act: minimizeToBackground, id: 'asrMinimizeBtn', hidden: true }
+  ], { width: '860px', closeOnBackdrop: false, onDismiss: abortActiveRecognition });
 
   // 監聽 Provider 切換以自動更新介面
   setTimeout(() => {
@@ -1319,12 +1474,20 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     const transcriptFileInput = document.getElementById('asrTranscriptFileInput');
     const importTranscriptButton = document.getElementById('asrImportTranscriptButton');
     const transcriptFileSummary = document.getElementById('asrTranscriptFileSummary');
+    const transcriptLineCount = document.getElementById('asrTranscriptLineCount');
+    const contentCard = document.getElementById('asrContentCard');
+    const contentTitle = document.getElementById('asrContentTitle');
+    const settingsGrid = document.querySelector('.asr-settings-grid');
+    const modeButtons = [...document.querySelectorAll('[data-asr-mode]')];
     const statusEl = document.getElementById('asrStatus');
     const targetSummary = document.getElementById('asrTargetSummary');
     const providerEl = document.getElementById('asrProvider');
     const apiKeyEl = document.getElementById('asrApiKey');
+    const toggleApiKey = document.getElementById('asrToggleApiKey');
     const keyLabelEl = document.getElementById('asrKeyLabel');
     const helpEl = document.getElementById('asrKeyHelp');
+    const providerBadge = document.getElementById('asrProviderBadge');
+    const providerHint = document.getElementById('asrProviderHint');
     const azureRegionRow = document.getElementById('asrAzureRegionRow');
     const promptRowEl = document.getElementById('asrPromptRow');
     const promptEl = document.getElementById('asrPrompt');
@@ -1345,32 +1508,65 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       };
     }
 
+    const updateTranscriptCount = () => {
+      if (!transcriptLineCount) return;
+      const count = parseTranscriptLines(transcriptEl?.value || '').length;
+      transcriptLineCount.textContent = `${count} 行`;
+    };
+
     const updateTaskUI = () => {
       const alignMode = taskModeEl?.value === 'align';
       if (transcriptRow) transcriptRow.style.display = alignMode ? 'flex' : 'none';
+      if (contentCard) contentCard.style.display = alignMode ? 'flex' : 'none';
+      if (contentTitle) contentTitle.textContent = alignMode ? '逐行文字稿' : '辨識輸出';
+      settingsGrid?.classList.toggle('is-align', alignMode);
+      settingsGrid?.classList.toggle('is-transcribe', !alignMode);
       if (targetSummary) targetSummary.value = `自動建立「${alignMode ? '文本匹配' : '語音辨識'}」新軌`;
+      modeButtons.forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.asrMode === (alignMode ? 'align' : 'transcribe')));
+      });
       const primaryButton = document.querySelector('#modalFoot button.primary');
       if (primaryButton && primaryButton.dataset.alignmentCommitted !== 'true') {
-        primaryButton.textContent = alignMode ? '開始匹配' : '🚀 開始辨識';
+        primaryButton.textContent = alignMode ? '開始匹配' : '開始辨識';
       }
     };
 
     if (taskModeEl) {
       taskModeEl.onchange = updateTaskUI;
+      modeButtons.forEach(button => {
+        button.onclick = () => {
+          taskModeEl.value = button.dataset.asrMode === 'align' ? 'align' : 'transcribe';
+          taskModeEl.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+      });
       updateTaskUI();
+    }
+
+    if (toggleApiKey && apiKeyEl) {
+      toggleApiKey.onclick = () => {
+        const reveal = apiKeyEl.type === 'password';
+        apiKeyEl.type = reveal ? 'text' : 'password';
+        toggleApiKey.textContent = reveal ? '隱藏' : '顯示';
+        toggleApiKey.setAttribute('aria-pressed', String(reveal));
+        toggleApiKey.setAttribute('aria-label', reveal ? '隱藏 API Key' : '顯示 API Key');
+        apiKeyEl.focus();
+      };
     }
 
     if (importTranscriptButton && transcriptFileInput && transcriptEl) {
       const showTranscriptImportError = message => {
         if (!statusEl) return;
         statusEl.style.display = 'block';
-        statusEl.style.color = 'var(--red)';
+        statusEl.className = 'asr-status is-error';
+        statusEl.setAttribute('role', 'alert');
         statusEl.textContent = message;
       };
       transcriptEl.addEventListener('input', () => {
-        if (!transcriptFileSummary) return;
-        transcriptFileSummary.style.display = 'none';
-        transcriptFileSummary.textContent = '';
+        updateTranscriptCount();
+        if (transcriptFileSummary) {
+          transcriptFileSummary.style.display = 'none';
+          transcriptFileSummary.textContent = '';
+        }
       });
       importTranscriptButton.onclick = () => {
         transcriptFileInput.value = '';
@@ -1393,6 +1589,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           if (!document.contains(transcriptEl)) return;
           transcriptEl.value = text;
           const lineCount = parseTranscriptLines(text).length;
+          updateTranscriptCount();
           if (transcriptFileSummary) {
             transcriptFileSummary.textContent = `${file.name} · ${lineCount} 行`;
           }
@@ -1408,6 +1605,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           importTranscriptButton.disabled = false;
         }
       };
+      updateTranscriptCount();
     }
 
     if (providerEl) {
@@ -1415,12 +1613,15 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const p = providerEl.value;
         const c = getAsrConfig();
         const meta = CLOUD_PROVIDER_META[p] || null;
+        const uiMeta = ASR_PROVIDER_UI_META[p] || { badge: '', hint: '' };
 
         if (builtinRow) builtinRow.style.display = p === 'builtin' ? 'flex' : 'none';
         if (keyRow) keyRow.style.display = meta ? 'flex' : 'none';
         if (azureRegionRow) azureRegionRow.style.display = p === 'azure' ? 'flex' : 'none';
         const guidanceMeta = getAsrGuidanceMeta(p);
         if (promptRowEl) promptRowEl.style.display = guidanceMeta ? 'flex' : 'none';
+        if (providerBadge) providerBadge.textContent = uiMeta.badge;
+        if (providerHint) providerHint.textContent = uiMeta.hint;
 
         if (meta) {
           if (apiKeyEl) apiKeyEl.value = c[meta.keyField] || '';
@@ -1440,6 +1641,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
               }
             };
           }
+        } else if (helpEl) {
+          helpEl.textContent = '';
+          helpEl.onclick = null;
         }
         if (promptLabelEl) promptLabelEl.textContent = guidanceMeta?.label || '';
         if (promptEl) {

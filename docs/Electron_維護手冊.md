@@ -98,6 +98,8 @@ Main (main.js)
 | `mpv.detect()` | `mpv:detect` | R→M | 回傳 `{available, supported, exe}`；Apple Silicon 第一版固定 `supported:false` |
 | `mpv.launch(opts)` | `mpv:launch` | R→M | Windows 啟動 mpv 嵌入播放（`{src, bounds, audio}`）；其他平台 fail closed |
 | `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置（**來源時間**；影片序列的時間軸↔來源映射在前端 media.js 處理）。host 以設定 `time-pos` 執行精準 absolute 定位，避免 mpv `seek` command 的 queued display delay 阻塞連續逐格的最新目標 |
+| `mpv.present(t, opts)` | `mpv:present` | R→M | 呈現來源時間目標；等待同一請求的 command ack、per-frame `time-pos` 抵達容差內且收到 `playback-restart` 後，回傳實際 `presentedSourceTime` |
+| `mpv.cancelPresent()` | `mpv:cancelPresent` | R→M | 取消未完成的呈現等待；一般 `mpv.seek()` 仍維持 fire-and-forget，不共用佇列 |
 | `mpv.loadfile(p)` | `mpv:loadfile` | R→M | 影片序列跨段切換：同一 mpv 實例換檔（保留 --wid 嵌入與屬性），輪詢 duration 就緒後回傳 `{duration}`；只接受 FileAuthority 已授權來源 |
 | `mpv.play()` / `mpv.pause()` | `mpv:play` / `mpv:pause` | R→M | 播放 / 暫停 |
 | `mpv.direction(v)` | `mpv:direction` | R→M | 設定 mpv `play-direction` 為 `backward`／`forward`；renderer 只在單一未修剪、零位移片段使用原生倒播，其餘不得繞過時間軸映射 |
@@ -113,7 +115,7 @@ Main (main.js)
 | `mpv.show(v)` | `mpv:show` | R→M | 顯示 / 隱藏 mpv 視窗。mpv 為 OS 層子視窗、HTML z-index 蓋不過：前端 `_syncMpvPanel()`（app.js）在對話框（含快捷鍵設定）、重疊影片的浮動面板／搜尋視窗／右鍵選單開啟時自動呼叫此方法讓位，關閉後恢復（`mpv:sync` 事件） |
 | `mpv.subSet(ass)` | `mpv:subSet` | R→M | 餵入 ASS 字幕（防抖 100ms） |
 | `mpv.quit()` | `mpv:quit` | R→M | 關閉 mpv |
-| `mpv.onEvent(cb)` | `mpv:event` | M→R | mpv 事件推播（`time-pos`, `duration`, `pause`, `eof` 等） |
+| `mpv.onEvent(cb)` | `mpv:event` | M→R | mpv 事件推播（`time-pos`, `playback-restart`, `duration`, `pause`, `eof` 等） |
 
 ### 設定 / 字型 / 應用生命週期（v4.23 以後陸續加入）
 
@@ -381,8 +383,10 @@ ffmpeg 單次 ingest → proxy／逐聲道快取 → HTML/WebCodecs 預覽；這
 ### 主要行為
 
 - `mpv:launch`：Windows 啟動 mpv IPC socket（`\\.\pipe\subtool-mpv-<token>`），建立連線後送播放指令；child process、pipe、宿主與 guide 視窗均由 `mpv-host.js` 收斂管理
-- `mpv:event` 推播：`time-pos`、`duration`、`pause`、`eof-reached`（前端用於同步播放頭）
-- `mpv:direction`：將 JKL 倒帶切成 mpv 原生 `backward`。資格與片段邊界由 renderer 的 `Media.supportsNativeReverse()` 決定；倒播時音訊靜音，任何停止／正播入口都要恢復 `forward`，包含尚未完成的 backward IPC 晚到情況
+- `mpv:event` 推播：`time-pos`、`playback-restart`、`duration`、`pause`、`eof-reached`。內附 mpv 0.41 沒有可觀測的 `video-pts`；`time-pos` 在播放中每畫格更新，但 seek 呈現完成仍須和 `playback-restart` 配對
+- `mpv:present`：每次只保留一個 host 端等待者；command ack、容差內 per-frame `time-pos` 與同一請求的 `playback-restart` 三者都成立才回報實際畫格，取消或換目標會讓舊等待者失效
+- `mpv:direction`：將 JKL 倒帶切成 mpv 原生 `backward`。資格與片段邊界由 renderer 的 `Media.supportsNativeReverse()` 決定；Proxy 就緒時先以 `loadfile` 在同一來源時間切到 0.5 秒 keyframe 的 preview Proxy，停止後載回母素材。倒播時音訊靜音，整段倒播持續監看 per-frame `time-pos` 是否下降，停住即改走時間軸 fallback。任何停止／正播入口都要恢復 `forward`，包含尚未完成的 backward IPC 晚到情況
+- mpv 啟動固定開 `cache=yes`、video decode queue 與前／後 demux cache；進入 backward 前只暫時把 `hwdec` 切成 `no`，恢復 forward 後切回 `auto`。依據是 [mpv 官方 backward playback 調校說明](https://mpv.io/manual/master/#options-play-direction)；硬體解碼在反向緩衝下不可靠，正播則不應永久失去硬解
 - `mpv:subSet`：接收 base64 ASS 字串，寫入暫存 `.ass` 後用 `sub-reload` 指令更新
 - `mpv:setBounds`：更新 mpv host 視窗位置；主視窗移動/縮放時自動呼叫
 - `mpv:setImageGuide`：僅把圖片視覺疊層交給透明 guide；永久穿透與單一 DOM 互動責任的完整約束見 [`技術架構說明.md` §0.9](技術架構說明.md#09-靜態圖片也是時間軸片段不是播放器的一格畫面)

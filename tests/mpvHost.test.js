@@ -82,18 +82,38 @@ function make({ duration = 123.5 } = {}) {
 }
 
 describe('Windows mpv host lifecycle', () => {
-  it('原生倒播用 play-direction 切換方向，恢復正播時也明確寫回 forward', async () => {
+  it('原生倒播先切軟解與反向佇列，恢復正播時明確寫回 forward 與 auto hwdec', async () => {
     const { host, sockets } = make();
     await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
     sockets[0].write.mockClear();
 
-    host.direction('backward');
-    host.direction('forward');
+    await host.direction('backward');
+    await host.direction('forward');
 
     const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
     expect(commands).toEqual([
+      ['set_property', 'hwdec', 'no'],
       ['set_property', 'play-direction', 'backward'],
       ['set_property', 'play-direction', 'forward'],
+      ['set_property', 'hwdec', 'auto'],
+    ]);
+  });
+
+  it('尚未完成的倒播切換被 forward 取代後，不會晚到再寫回 backward', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    sockets[0].write.mockClear();
+
+    const backward = host.direction('backward');
+    const forward = host.direction('forward');
+    await expect(backward).resolves.toBe(false);
+    await expect(forward).resolves.toBe(true);
+
+    const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands).toEqual([
+      ['set_property', 'hwdec', 'no'],
+      ['set_property', 'play-direction', 'forward'],
+      ['set_property', 'hwdec', 'auto'],
     ]);
   });
 
@@ -114,6 +134,40 @@ describe('Windows mpv host lifecycle', () => {
     ]);
   });
 
+  it('present 等到 seek 後的 time-pos 與 playback-restart 才回報實際畫格', async () => {
+    const { host, sockets, events } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    const socket = sockets[0];
+    socket.write.mockClear();
+
+    const pending = host.present(10, { exact: true, tolerance: 0.05 });
+    await Promise.resolve();
+    socket.emit('data', Buffer.from(JSON.stringify({
+      event: 'property-change', name: 'time-pos', data: 9.98,
+    }) + '\n'));
+
+    let settled = false;
+    pending.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    socket.emit('data', Buffer.from(JSON.stringify({ event: 'playback-restart' }) + '\n'));
+    await expect(pending).resolves.toEqual({ backend: 'mpv', presentedSourceTime: 9.98 });
+    expect(events).toContainEqual({ event: 'playback-restart' });
+    expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('absolute+exact'));
+  });
+
+  it('只觀測內附 mpv 實際提供的 time-pos，不註冊不存在的 video-pts', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+
+    const observed = sockets[0].write.mock.calls
+      .map(([raw]) => JSON.parse(raw).command)
+      .filter(command => command?.[0] === 'observe_property');
+    expect(observed).toContainEqual(['observe_property', 1, 'time-pos']);
+    expect(observed.some(command => command[2] === 'video-pts')).toBe(false);
+  });
+
   it('launch owns both native windows, embeds mpv, connects the pipe, and cleans all resources on quit', async () => {
     const { host, children, sockets } = make();
 
@@ -129,6 +183,9 @@ describe('Windows mpv host lifecycle', () => {
     expect(children[0].args).toEqual(expect.arrayContaining([
       '--wid=4660', '--sub-fonts-dir=C:/fonts', '--', 'D:/media/source.mxf',
       '--lavfi-complex=[aid1][aid2]amix=inputs=2:normalize=0[ao]',
+      '--cache=yes', '--vd-queue-enable=yes',
+      '--demuxer-max-bytes=256MiB', '--demuxer-max-back-bytes=192MiB',
+      '--demuxer-backward-playback-step=10',
     ]));
     expect(sockets[0].write).toHaveBeenCalledWith(expect.stringContaining('observe_property'));
     expect(host.snapshot()).toMatchObject({ hasHostWindow: true, hasGuideWindow: true, hasClient: true, hasProcess: true });

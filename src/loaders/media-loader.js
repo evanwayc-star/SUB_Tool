@@ -83,7 +83,9 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         }
         const loadedWithMpv=await ctx._loadViaMpv(p,info,projectRestore,intake,{
           fallbackToHtml5:frameAccurateNativeMp4,
-          needsProxy:!frameAccurateNativeMp4,
+          // 逐格精準 MP4 正播仍直接看母素材，但 JKL 倒播需要背景短 GOP
+          // Proxy；匯出路徑不會使用這支 preview cache。
+          needsProxy:true,
           sourceUrl:frameAccurateSourceUrl,
           exactSeek:vCodec==='hevc',
           // HEVC 的 mpv time-pos boundary 以「下一格」呈現；以精確 fps 減半格，
@@ -401,6 +403,11 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
           //  - 若是大幅變動（例如在 mpv 視窗內拖拉），才吸附到最近格並更新 _lastSeekTime。
           // 播放中則用原始時間平滑前進。（比較與顯示一律在時間軸域）
           const driverTimeline=ctx._transport.timelineTime({sourceTime:e.data,clip:_ac});
+          // 目前內附的 mpv 0.41 沒有 video-pts property；time-pos 是它提供的
+          // per-frame 位置。presentation host 仍會另外要求同一請求的 playback-restart
+          // 才完成提交，因此這裡只更新呈現觀測，不直接把命令目標寫進權威播放頭。
+          ctx.observePresentedTimelineTime(driverTimeline,'mpv');
+          if(ctx.presentationPending?.()) return;
           const t=ctx._transport.observeSourceTime(e.data,{
             clip:_ac,playing:ctx.playing,fps:State.fps,dropFrame:State.dropFrame,
           });
@@ -455,7 +462,7 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     Wave.initLive();
 
     // 背景抽取音軌（不阻塞播放；完成後 element tracks 接管音訊，mpv 靜音）
-    if(audio.length>0){
+    if(audio.length>0||needsProxy){
       setStatus(needsProxy
         ? 'mpv 預覽就緒，正在轉檔 Proxy 與分析音訊…'
         : 'mpv 預覽就緒，正在分析音訊…','busy');
