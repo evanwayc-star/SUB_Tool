@@ -45,7 +45,7 @@ import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
-import { beginTimelineGesture } from './timeline-gesture-transaction.js';
+import { beginTimelineGesture, cancelTimelineGesture } from './timeline-gesture-transaction.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
 import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction.js';
@@ -1290,33 +1290,29 @@ function stopTimelineAutoScroll(){
 function cancelTimelineDrag(){
   if(!drag) return;
   const pending=drag;
-  updateSnapGuide(null);
-  stopTimelineAutoScroll();
-  if(pending.mode==='rubber') $('tlRubber').style.display='none';
-  if(pending.mode==='audio-move'||pending.mode==='audio-l'||pending.mode==='audio-r'){
-    try{
-      if(pending.pointerId!=null&&pending.audioEl?.hasPointerCapture?.(pending.pointerId)) pending.audioEl.releasePointerCapture(pending.pointerId);
-    }catch(_){}
+  try{
+    cancelTimelineGesture(pending,{
+      clearSnapGuide:()=>updateSnapGuide(null),
+      stopAutoScroll:stopTimelineAutoScroll,
+      hideRubberBand:()=>{ $('tlRubber').style.display='none'; },
+      releaseAudioPointer:()=>{
+        try{
+          if(pending.pointerId!=null&&pending.audioEl?.hasPointerCapture?.(pending.pointerId)) pending.audioEl.releasePointerCapture(pending.pointerId);
+        }catch(_){}
+      },
+      restoreClipMapping:()=>{
+        Seq.sort(); Seq.recomputeDuration();
+        Media.seek(Math.min(Media.displayTime(),State.duration||0));
+      },
+      // Cue mousedown 會先隱藏 overlap badge；即使尚未移動，取消仍須完整重繪。
+      redraw:drawTimeline,
+      refreshPreview:()=>{ emit('render:videoSub'); emit('mpv:refreshSubs'); },
+      // copy-drag rollback 先回復 selection，再把結果同步到列表與狀態列。
+      refreshSelection:refreshSelectionUI,
+    });
+  }finally{
+    drag=null;
   }
-  const restored=pending.transaction?.cancel?.()||false;
-  // Cue mousedown hides overlap badges before the 3px movement threshold.  A
-  // cancel before movement has nothing to restore (`restored === false`) but
-  // still needs a full redraw to put those preview-only DOM changes back.
-  if(pending.transaction){
-    if(restored&&(pending.mode==='clip-move'||pending.mode==='clip-l'||pending.mode==='clip-r')){
-      Seq.sort(); Seq.recomputeDuration();
-      Media.seek(Math.min(Media.displayTime(),State.duration||0));
-    }
-    drawTimeline();
-    emit('render:videoSub'); emit('mpv:refreshSubs');
-    // copy drag temporarily selected the cloned cues.  The rollback restored
-    // State selection; mirror it back to the subtitle list/status immediately
-    // instead of leaving the removed clone highlighted until a later render.
-    if(pending.isCopyDrag){
-      refreshSelectionUI();
-    }
-  }
-  drag=null;
 }
 
 const _handleDragUpdate = (e) => {

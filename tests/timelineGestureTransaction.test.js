@@ -1,10 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { beginTimelineGesture } from '../src/timeline-gesture-transaction.js';
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+import {
+  beginTimelineGesture,
+  cancelTimelineGesture,
+} from '../src/timeline-gesture-transaction.js';
 
 describe('timeline gesture transaction', () => {
   it('restores every preview field and registered copy rollback when a gesture is cancelled', () => {
@@ -68,16 +66,43 @@ describe('timeline gesture transaction', () => {
     expect(clip).toMatchObject({ offset: 5, in: 1, out: 9, vtrack: 1 });
   });
 
-  it('is wired into renderer drag cancellation instead of leaving preview mutations behind', () => {
-    const source = fs.readFileSync(path.join(ROOT, 'src', 'timeline-renderer.js'), 'utf8');
+  it('透過 production cancellation seam 依序回復影片片段、畫面與播放呈現', () => {
+    const clip = { offset: 2, in: 1, out: 9, vtrack: 0 };
+    const transaction = beginTimelineGesture({
+      targets: [{ target: clip, fields: ['offset', 'in', 'out', 'vtrack'] }],
+    });
+    const calls = [];
+    clip.offset = 5;
+    clip.vtrack = 1;
+    transaction.markMoved();
 
-    expect(source).toMatch(/beginTimelineGesture/);
-    expect(source).toMatch(/function cancelTimelineDrag/);
-    expect(source).toMatch(/window\.addEventListener\('blur',\s*cancelTimelineDrag/);
-    expect(source).toMatch(/window\.addEventListener\('pointercancel',\s*cancelTimelineDrag/);
-    const cancel = source.slice(source.indexOf('function cancelTimelineDrag'), source.indexOf('const _handleDragUpdate'));
-    expect(cancel).toMatch(/if\(pending\.transaction\)/);
-    expect(cancel).not.toMatch(/if\(restored\)\{/);
-    expect(source).toMatch(/addCancelEffect\(\(\)=>previewRowIds\.forEach\(renderSubRow\)\)/);
+    const result = cancelTimelineGesture({ mode: 'clip-move', transaction }, {
+      clearSnapGuide: () => calls.push('snap'),
+      stopAutoScroll: () => calls.push('scroll'),
+      restoreClipMapping: () => calls.push(`clip:${clip.offset}:${clip.vtrack}`),
+      redraw: () => calls.push('draw'),
+      refreshPreview: () => calls.push('preview'),
+    });
+
+    expect(result).toEqual({ cancelled: true, restored: true });
+    expect(clip).toEqual({ offset: 2, in: 1, out: 9, vtrack: 0 });
+    expect(calls).toEqual(['snap', 'scroll', 'clip:2:0', 'draw', 'preview']);
+  });
+
+  it('取消 copy-drag 時在 rollback 與重繪後才同步 selection UI', () => {
+    const cues = [{ id: 'original' }, { id: 'copy' }];
+    const transaction = beginTimelineGesture();
+    transaction.addRollback(() => cues.pop());
+    transaction.markMoved();
+    const calls = [];
+
+    cancelTimelineGesture({ mode: 'move', isCopyDrag: true, transaction }, {
+      redraw: () => calls.push(`draw:${cues.length}`),
+      refreshPreview: () => calls.push('preview'),
+      refreshSelection: () => calls.push(`selection:${cues.length}`),
+    });
+
+    expect(cues).toEqual([{ id: 'original' }]);
+    expect(calls).toEqual(['draw:1', 'preview', 'selection:1']);
   });
 });
