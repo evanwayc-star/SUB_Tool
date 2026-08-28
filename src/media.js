@@ -1325,17 +1325,39 @@ const Media = {
   _ensurePresentationSession(){
     if(this._presentationSession) return this._presentationSession;
     this._presentationSession=createMediaPresentationSession({
-      presentTarget:(targetTime,request,session)=>this._presentTimelineTarget(targetTime,request,session),
       getTolerance:()=>1.5/getExactFps(State.fps||30),
       timeoutMs:500,
+      timeline:{
+        // FPS-SYNC (I1/I5)：所有入口先在時間軸時間域依專案 FPS 正規化一次。
+        normalizeTarget:targetTime=>{
+          const duration=Number(State.duration)||0;
+          let target=snapTimeToFrame(Math.max(0,Number(targetTime)||0),State.fps,State.dropFrame);
+          if(duration>0) target=Math.min(duration,target);
+          return target;
+        },
+        hasSequence:()=>this.seqOn(),
+        clipAt:targetTime=>Seq.clipAt(targetTime),
+        enterGap:targetTime=>this._enterGap(targetTime),
+        sourceTime:(targetTime,clip)=>this._transport.sourceTime(targetTime,clip),
+        requiresClip:clip=>clip.id!==this.activeClipId||this._gap,
+        ensureClip:(clip,sourceTarget,resume)=>this._ensureClip(clip,sourceTarget,resume),
+        isVirtual:()=>this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src')),
+        seekVirtual:(targetTime,options)=>this._transport.seekVirtual(targetTime,options),
+        timelineTime:(sourceTime,clip)=>this._transport.timelineTime({sourceTime,clip}),
+      },
+      player:{
+        adapter:()=>getPlayerAdapter(),
+        isNative:()=>this.mpvMode,
+        configureNativeSeek:clip=>this._setMpvSeekProfile(clip),
+        exactSeek:()=>this._mpvExactSeek,
+        setPresentedSourceTime:sourceTime=>{ this._mpvTime=sourceTime; },
+      },
+      commitPresented:presentedTime=>this._commitPresentedTarget(presentedTime),
     });
     return this._presentationSession;
   },
   requestPresentation(targetTime){
-    const duration=Number(State.duration)||0;
-    let target=snapTimeToFrame(Math.max(0,Number(targetTime)||0),State.fps,State.dropFrame);
-    if(duration>0) target=Math.min(duration,target);
-    return this._ensurePresentationSession().request(target);
+    return this._ensurePresentationSession().request(targetTime);
   },
   cancelPresentation(reason='cancelled'){
     this._presentationSession?.cancel(reason);
@@ -1365,59 +1387,6 @@ const Media = {
     window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:committed}));
     emit('media:playhead');
     return committed;
-  },
-  async _presentTimelineTarget(targetTime,{signal,requestId}={},presentationSession=this._ensurePresentationSession()){
-    if(signal?.aborted) throw Object.assign(new Error('media presentation aborted'),{name:'AbortError'});
-    const fps=getExactFps(State.fps||30);
-    const tolerance=1.5/fps;
-    const adapter=getPlayerAdapter();
-    let clip=null;
-    let sourceTarget=targetTime;
-
-    if(this.seqOn()){
-      clip=Seq.clipAt(targetTime);
-      if(!clip){
-        this._enterGap(targetTime);
-        const committed=this._commitPresentedTarget(targetTime);
-        return {presentedTime:committed,source:'synthetic'};
-      }
-      sourceTarget=this._transport.sourceTime(targetTime,clip);
-      if(clip.id!==this.activeClipId||this._gap){
-        await this._ensureClip(clip,sourceTarget,false);
-        if(signal?.aborted) throw Object.assign(new Error('media presentation aborted'),{name:'AbortError'});
-      }
-      if(this.mpvMode) this._setMpvSeekProfile(clip);
-    }else if(this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'))){
-      this._transport.seekVirtual(targetTime,{running:false});
-      const committed=this._commitPresentedTarget(targetTime);
-      return {presentedTime:committed,source:'synthetic'};
-    }
-
-    const webCodecsPending=this.webCodecsTakeover()
-      ? presentationSession.waitForWebCodecsPresentation(targetTime,{signal,requestId})
-      : null;
-    webCodecsPending?.catch(()=>{});
-    const result=await adapter.present(sourceTarget,{
-      signal,
-      exact:this.mpvMode&&this._mpvExactSeek,
-      tolerance,
-    });
-    const actualSource=Number(result?.presentedSourceTime);
-    if(!Number.isFinite(actualSource)) throw new Error('player did not acknowledge a presented frame');
-    let presentedTimeline=clip
-      ? this._transport.timelineTime({sourceTime:actualSource,clip})
-      : actualSource;
-    let source=result.backend||adapter.type;
-    if(webCodecsPending){
-      const composited=await webCodecsPending;
-      presentedTimeline=composited.presentedTime;
-      source=composited.backend;
-    }
-    if(this.mpvMode) this._mpvTime=actualSource;
-    // 命令目標與實際畫格可在容差內相差一格；權威播放點必須跟著
-    // presenter 回報的位置，而不是把原本要求的位置冒充成已顯示畫格。
-    this._commitPresentedTarget(presentedTimeline);
-    return {presentedTime:presentedTimeline,source};
   },
   /* 預覽淡出入黑「黑暗程度」0..1：依最上層片段的淡入/淡出與該視訊軌透明度計算（間隙本就是黑，回 0 不另疊） */
   previewFadeDarkness(){

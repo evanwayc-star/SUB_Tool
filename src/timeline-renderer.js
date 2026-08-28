@@ -45,7 +45,7 @@ import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
-import { beginTimelineGesture, cancelTimelineGesture } from './timeline-gesture-transaction.js';
+import { beginTimelineGestureLifecycle } from './timeline-gesture-transaction.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
 import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction.js';
@@ -690,11 +690,11 @@ function beginExternalAudioDrag(ev,asset,entry,block){
   drag={
     mode, audioAssetId:assetId, audioEl:block,
     pointerId:block._audioPointerId,
-    startX:ev.clientX,startY:ev.clientY,startScroll:tlScroll.scrollLeft,moved:false,
+    startX:ev.clientX,startY:ev.clientY,startScroll:tlScroll.scrollLeft,
     os:entry.start,oin:inPoint,oout:outPoint,duration:Math.max(outPoint,Number(asset.duration)||0),
     preview:{offset:entry.start,in:inPoint,out:outPoint},
     snaps:snapTargets(new Set()),
-    transaction:beginTimelineGesture(),
+    gesture:beginRendererGesture(mode),
   };
   jklReset();
   ev.preventDefault(); ev.stopPropagation();
@@ -1147,6 +1147,32 @@ document.addEventListener('mousedown',e=>{
 /* 時間軸滑鼠互動：時間尺拖曳=移動播放點 / 軌道空白拖曳=框選 / 拖區塊=移動換軌或縮放 */
 let drag=null;
 let _noteClickState=null; // 備註標記雙擊偵測 { id, t }
+
+/* Gesture module 擁有 start／preview／commit／cancel 的順序；這裡只提供
+   timeline 專屬的 model 與 DOM adapters。 */
+function beginRendererGesture(mode,{targets=[],context={}}={}){
+  return beginTimelineGestureLifecycle({
+    mode,targets,context,
+    effects:{
+      clearSnapGuide:()=>updateSnapGuide(null),
+      stopAutoScroll:stopTimelineAutoScroll,
+      hideRubberBand:()=>{ $('tlRubber').style.display='none'; },
+      releaseAudioPointer:pending=>{
+        try{
+          if(pending.pointerId!=null&&pending.audioEl?.hasPointerCapture?.(pending.pointerId)) pending.audioEl.releasePointerCapture(pending.pointerId);
+        }catch(_){ }
+      },
+      restoreClipMapping:()=>{
+        Seq.sort(); Seq.recomputeDuration();
+        Media.seek(Math.min(Media.displayTime(),State.duration||0));
+      },
+      redraw:drawTimeline,
+      refreshPreview:()=>{ emit('render:videoSub'); emit('mpv:refreshSubs'); },
+      refreshSelection:refreshSelectionUI,
+    },
+  });
+}
+
 tlScroll.addEventListener('mousedown',e=>{
   if(e.button!==0)return;
   hideCtx();
@@ -1162,11 +1188,11 @@ tlScroll.addEventListener('mousedown',e=>{
     const nb=Seq.neighborBounds(c);
     // selectClip 內 renderClipBlocks() 已把原 clipEl 重建成新節點；必須重抓，否則拖曳更新的是脫離 DOM 的孤兒（框不動、只有波形動）
     const liveEl=(tlVtracks&&tlVtracks.querySelector(`.clip-block[data-clip-id="${c.id}"]`))||clipEl;
-    drag={mode, clip:c, clipEl:liveEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft, moved:false,
+    drag={mode, clip:c, clipEl:liveEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft,
       os:c.offset, oin:c.in, oout:c.out,
       leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+(c.out-c.in)), // 右鄰左緣（時間軸）
       nb, snaps:[...snapTargets(new Set()), ...Seq.snapEdges(c.id)],
-      transaction:beginTimelineGesture({targets:[{target:c,fields:['offset','in','out','vtrack']}]}),};
+      gesture:beginRendererGesture(mode,{targets:[{target:c,fields:['offset','in','out','vtrack']}]}),};
     e.preventDefault(); return;
   }
   const overlap=e.target.closest('.cue-overlap');
@@ -1242,14 +1268,17 @@ tlScroll.addEventListener('mousedown',e=>{
     const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
       .map(cc=>{ const b=cueNeighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart,origStyle:cc.style ? {...cc.style} : undefined}; }); // P3：快取區塊 element 參照
     const selectionBefore={ids:[...State.selectedIds],primary:State.selectedId,activeEdge:State.activeEdge};
-    const transaction=beginTimelineGesture({targets:grp.map(item=>({target:item.c,fields:['start','end','track','style']}))});
+    const gesture=beginRendererGesture(mode,{
+      targets:grp.map(item=>({target:item.c,fields:['start','end','track','style']})),
+      context:{isCopyDrag},
+    });
     // renderSubRow is part of the drag preview.  Cancellation must refresh the
     // same rows after model rollback, otherwise their TC/duration stays stale.
     const previewRowIds=grp.map(item=>item.c.id);
-    transaction.addCancelEffect(()=>previewRowIds.forEach(renderSubRow));
-    drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,moved:false,
+    gesture.addCancelEffect(()=>previewRowIds.forEach(renderSubRow));
+    drag={c,mode,startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,os:c.start,oe:c.end,ot:c.track||0,grp,
       snaps:snapTargets(exSet), isCtrl,isCopyDrag,selectOnPlainClickRelease,selectionBefore,
-      transaction};
+      gesture};
     tlTracks.querySelectorAll('.cue-overlap').forEach(el=>el.style.display='none'); // P3：拖曳開始隱藏重疊一次（拖曳期間不重建），免每 frame 全掃
     e.preventDefault(); return;
   }
@@ -1273,9 +1302,10 @@ tlScroll.addEventListener('mousedown',e=>{
     const t = xToTime(x);
     const sn = snapVal(t, snaps, currentThr);
     requestPointerSeek(sn !== t ? sn : snapFrame(t)); updatePlayhead(); emit('render:videoSub');
-    drag={mode:'scrub', snaps}; e.preventDefault(); return;
+    drag={mode:'scrub', snaps, gesture:beginRendererGesture('scrub')}; e.preventDefault(); return;
   }
-  drag={mode:'rubber',startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,x0:x,y0:y,moved:false,additive:e.ctrlKey||e.metaKey};
+  drag={mode:'rubber',startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,x0:x,y0:y,additive:e.ctrlKey||e.metaKey,
+    gesture:beginRendererGesture('rubber')};
   e.preventDefault();
 });
 let _autoScrollId = null;
@@ -1291,25 +1321,7 @@ function cancelTimelineDrag(){
   if(!drag) return;
   const pending=drag;
   try{
-    cancelTimelineGesture(pending,{
-      clearSnapGuide:()=>updateSnapGuide(null),
-      stopAutoScroll:stopTimelineAutoScroll,
-      hideRubberBand:()=>{ $('tlRubber').style.display='none'; },
-      releaseAudioPointer:()=>{
-        try{
-          if(pending.pointerId!=null&&pending.audioEl?.hasPointerCapture?.(pending.pointerId)) pending.audioEl.releasePointerCapture(pending.pointerId);
-        }catch(_){}
-      },
-      restoreClipMapping:()=>{
-        Seq.sort(); Seq.recomputeDuration();
-        Media.seek(Math.min(Media.displayTime(),State.duration||0));
-      },
-      // Cue mousedown 會先隱藏 overlap badge；即使尚未移動，取消仍須完整重繪。
-      redraw:drawTimeline,
-      refreshPreview:()=>{ emit('render:videoSub'); emit('mpv:refreshSubs'); },
-      // copy-drag rollback 先回復 selection，再把結果同步到列表與狀態列。
-      refreshSelection:refreshSelectionUI,
-    });
+    pending.gesture?.cancel(pending);
   }finally{
     drag=null;
   }
@@ -1320,17 +1332,19 @@ const _handleDragUpdate = (e) => {
   const rect=tlLayer.getBoundingClientRect();
   const currentThr = e.altKey ? 0 : 8 / State.pxPerSec;
   if(drag.mode==='scrub'){
-    const t = xToTime(e.clientX-rect.left);
-    const sn = snapVal(t, drag.snaps, currentThr);
-    requestPointerSeek(sn !== t ? sn : snapFrame(t));
-    updatePlayhead(); emit('render:videoSub'); 
-    updateSnapGuide(null); return;
+    drag.gesture.preview(()=>{
+      const t = xToTime(e.clientX-rect.left);
+      const sn = snapVal(t, drag.snaps, currentThr);
+      requestPointerSeek(sn !== t ? sn : snapFrame(t));
+      updatePlayhead(); emit('render:videoSub');
+      updateSnapGuide(null);
+    });
+    return;
   }
-  if(drag.mode!=='scrub'){ // 含 cue 模式與 clip-move/clip-l/clip-r
-    if (!drag.moved && (Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)) {
-      drag.moved = true;
-      drag.transaction?.markMoved();
-      if (drag.isCopyDrag && drag.mode === 'move' && drag.grp) {
+  // scrub 已在上方返回；rubber、字幕、影片與音訊都由同一門檻開始 preview lifecycle。
+  if (!drag.gesture.hasMoved() && (Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)) {
+    drag.gesture.startPreview(()=>{
+      if (!(drag.isCopyDrag && drag.mode === 'move' && drag.grp)) return;
         // Clone cues
         const newIds = [];
         const copied = new Set();
@@ -1342,7 +1356,7 @@ const _handleDragUpdate = (e) => {
            it.c = cloned;
         });
         const before=drag.selectionBefore;
-        drag.transaction?.addRollback(()=>{
+        drag.gesture.addRollback(()=>{
           State.cues=State.cues.filter(cue=>!copied.has(cue));
           setSelection({kind:'sub',ids:before.ids,primary:before.primary});
           State.activeEdge=before.activeEdge;
@@ -1354,22 +1368,24 @@ const _handleDragUpdate = (e) => {
         drag.grp.forEach(it => {
            it.el = tlTracks.querySelector(`.cue-block[data-id="${it.c.id}"]`);
         });
-        refreshSelectionUI();
-      }
-    }
+      refreshSelectionUI();
+    });
   }
-  if(drag.mode==='rubber'){
-    const currentX0 = drag.x0 - (tlScroll.scrollLeft - drag.startScroll);
-    const x1=clamp(e.clientX-rect.left,0,viewportW()), y1=clamp(e.clientY-rect.top,0,tlLayer.clientHeight);
-    const rb=$('tlRubber'); rb.style.display='block';
-    rb.style.left=Math.min(currentX0,x1)+'px'; rb.style.top=Math.min(drag.y0,y1)+'px';
-    rb.style.width=Math.abs(x1-currentX0)+'px'; rb.style.height=Math.abs(y1-drag.y0)+'px';
+  if(drag.gesture.kind==='rubber'){
+    drag.gesture.preview(()=>{
+      const currentX0 = drag.x0 - (tlScroll.scrollLeft - drag.startScroll);
+      const x1=clamp(e.clientX-rect.left,0,viewportW()), y1=clamp(e.clientY-rect.top,0,tlLayer.clientHeight);
+      const rb=$('tlRubber'); rb.style.display='block';
+      rb.style.left=Math.min(currentX0,x1)+'px'; rb.style.top=Math.min(drag.y0,y1)+'px';
+      rb.style.width=Math.abs(x1-currentX0)+'px'; rb.style.height=Math.abs(y1-drag.y0)+'px';
+    });
     return;
   }
-  if(!drag.moved) return; // 未超過門檻：單擊不應移動/縮放字幕
+  if(!drag.gesture.hasMoved()) return; // 未超過門檻：單擊不應移動/縮放字幕
+  drag.gesture.preview(()=>{
   let dt=(e.clientX-drag.startX + (tlScroll.scrollLeft - drag.startScroll))/State.pxPerSec;
   /* ---- 影片序列區塊拖曳 ---- */
-  if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
+  if(drag.gesture.kind==='clip'){
     const c=drag.clip, minL=0.2; // 最短保留 0.2s
     let tgt=null;
     if(drag.mode==='clip-move'){
@@ -1426,7 +1442,7 @@ const _handleDragUpdate = (e) => {
   /* ---- 外部音訊素材拖曳 ----
      拖曳中只更新 DOM 預覽，放開時才寫回 Media；這樣不會每一個 mousemove 都重建
      AudioNode / cache，也避免波形在拖曳期間閃爍。 */
-  if(drag.mode==='audio-move'||drag.mode==='audio-l'||drag.mode==='audio-r'){
+  if(drag.gesture.kind==='audio'){
     const minL=Math.min(0.2,Math.max(0.02,(drag.oout-drag.oin)/2));
     const maxOut=Math.max(drag.oin+minL,drag.duration||drag.oout);
     let offset=drag.os, inPoint=drag.oin, outPoint=drag.oout, target=null;
@@ -1558,6 +1574,7 @@ const _handleDragUpdate = (e) => {
     }
   }
   if(drag.c) renderSubRow(drag.c.id);
+  });
 };
 
 function updateSnapGuide(snTime = null) {
@@ -1611,12 +1628,15 @@ window.addEventListener('mousemove',e=>{
 
 window.addEventListener('mouseup',e=>{
   if(!drag)return;
+  const pending=drag;
+  try{
+  pending.gesture.commit(()=>{
   updateSnapGuide(null);
   stopTimelineAutoScroll();
-  if(drag.mode==='rubber'){
+  if(drag.gesture.kind==='rubber'){
     $('tlRubber').style.display='none';
     const rect=tlLayer.getBoundingClientRect();
-    if(drag.moved){
+    if(drag.gesture.hasMoved()){
       const currentX0 = drag.x0 - (tlScroll.scrollLeft - drag.startScroll);
       const x1=clamp(e.clientX-rect.left,0,viewportW()), y1=e.clientY-rect.top;
       const ta=xToTime(Math.min(currentX0,x1)), tb=xToTime(Math.max(currentX0,x1));
@@ -1644,10 +1664,10 @@ window.addEventListener('mouseup',e=>{
       }
     }
     refreshTrackGutterActive();
-    if(drag.moved) clearClipSelection(); // 框選字幕時取消影片段選取
-  }else if(drag.mode==='clip-move'||drag.mode==='clip-l'||drag.mode==='clip-r'){
-    const moved=drag.moved, m=drag.mode, c=drag.clip;
-    if(!moved){ selectClip(c.id); drag.transaction?.commit?.(); drag=null; return; } // 未拖動＝點選該影片段（高亮，供上下鍵/Del）
+    if(drag.gesture.hasMoved()) clearClipSelection(); // 框選字幕時取消影片段選取
+  }else if(drag.gesture.kind==='clip'){
+    const moved=drag.gesture.hasMoved(), m=drag.mode, c=drag.clip;
+    if(!moved){ selectClip(c.id); return; } // 未拖動＝點選該影片段（高亮，供上下鍵/Del）
     if(m==='clip-move'){ Seq.resolveOverlaps(c); Seq.compact(); } // 自由拖放：同軌連鎖右推；收斂空的頂部視訊軌
     Seq.sort(); Seq.recomputeDuration();
     recordHistory(m==='clip-move'?('移動影片：'+c.name):('修剪影片：'+c.name));
@@ -1655,13 +1675,13 @@ window.addEventListener('mouseup',e=>{
     Media.seek(Math.min(Media.displayTime(), State.duration||0));
     emit('render:videoSub'); emit('mpv:refreshSubs');
     drawTimeline();
-  }else if(drag.mode==='audio-move'||drag.mode==='audio-l'||drag.mode==='audio-r'){
-    const moved=drag.moved, mode=drag.mode, assetId=drag.audioAssetId, preview=drag.preview;
+  }else if(drag.gesture.kind==='audio'){
+    const moved=drag.gesture.hasMoved(), mode=drag.mode, assetId=drag.audioAssetId, preview=drag.preview;
     try{
       if(drag.pointerId!=null&&drag.audioEl?.hasPointerCapture?.(drag.pointerId)) drag.audioEl.releasePointerCapture(drag.pointerId);
     }catch(_){}
     _ignoreAudioClickUntil=performance.now()+350;
-    if(!moved){ selectExternalAudioClip(assetId); drag.transaction?.commit?.(); drag=null; return; }
+    if(!moved){ selectExternalAudioClip(assetId); return; }
     if(mode==='audio-move'){
       runExternalAudioAction('moveExternalAudio',[assetId,preview.offset]);
     }else if(mode==='audio-l'){
@@ -1670,7 +1690,7 @@ window.addEventListener('mouseup',e=>{
       runExternalAudioAction('trimExternalAudio',[assetId,'end',preview.offset+Math.max(0,preview.out-preview.in)]);
     }
   }else if(drag.mode!=='scrub'){
-    const moved=drag.moved, m=drag.mode;
+    const moved=drag.gesture.hasMoved(), m=drag.mode;
     if (!moved && drag.selectOnPlainClickRelease) {
       selectCue(drag.c.id);
     } else if (!moved && drag.isCtrl && m==='move') {
@@ -1681,8 +1701,10 @@ window.addEventListener('mouseup',e=>{
       recordHistory(drag.isCopyDrag ? `複製字幕` : (m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}句)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)));
     }
   }
-  drag.transaction?.commit?.();
-  drag=null;
+  });
+  }finally{
+    drag=null;
+  }
 });
 
 window.addEventListener('blur',cancelTimelineDrag);

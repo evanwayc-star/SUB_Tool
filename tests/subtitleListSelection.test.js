@@ -75,7 +75,20 @@ vi.mock('../src/painters/subtitle-painter.js', () => ({ paintSubtitleBlocks: vi.
 vi.mock('../src/painters/waveform-painter.js', () => ({ paintClipWave: vi.fn() }));
 vi.mock('../src/timeline-edit-transaction.js', () => ({ beginTimelineTrackEdit: vi.fn(), updateTimelineTrack: vi.fn() }));
 vi.mock('../src/timeline-gesture-transaction.js', () => ({
-  beginTimelineGesture: () => ({ markMoved: vi.fn(), addCancelEffect: vi.fn(), commit: vi.fn(), cancel: vi.fn() }),
+  beginTimelineGestureLifecycle: () => {
+    let moved = false;
+    let active = true;
+    return {
+      startPreview(effect) { if (!active || moved) return false; moved = true; effect?.(); return true; },
+      preview(effect) { if (!active) return false; effect?.(); return true; },
+      commit(effect) {
+        if (!active) return { committed: false, moved: false };
+        effect?.({ moved }); active = false; return { committed: true, moved };
+      },
+      cancel: vi.fn(() => { active = false; return { cancelled: true, restored: moved }; }),
+      addRollback: vi.fn(), addCancelEffect: vi.fn(), hasMoved: () => moved, isActive: () => active,
+    };
+  },
 }));
 vi.mock('../src/sequence.js', () => ({
   Seq: { active: () => false, byId: vi.fn(), neighborBounds: vi.fn(), clipEnd: vi.fn(), snapEdges: () => [] },

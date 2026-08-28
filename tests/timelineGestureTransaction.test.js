@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   beginTimelineGesture,
-  cancelTimelineGesture,
+  beginTimelineGestureLifecycle,
 } from '../src/timeline-gesture-transaction.js';
 
 describe('timeline gesture transaction', () => {
@@ -66,23 +66,49 @@ describe('timeline gesture transaction', () => {
     expect(clip).toMatchObject({ offset: 5, in: 1, out: 9, vtrack: 1 });
   });
 
-  it('透過 production cancellation seam 依序回復影片片段、畫面與播放呈現', () => {
-    const clip = { offset: 2, in: 1, out: 9, vtrack: 0 };
-    const transaction = beginTimelineGesture({
-      targets: [{ target: clip, fields: ['offset', 'in', 'out', 'vtrack'] }],
-    });
+  it('同一個 production lifecycle 依序執行 start、preview 與 commit', () => {
+    const cue = { start: 1, end: 2 };
     const calls = [];
+    const gesture = beginTimelineGestureLifecycle({
+      mode: 'move',
+      targets: [{ target: cue, fields: ['start', 'end'] }],
+    });
+
+    expect(gesture.kind).toBe('cue');
+    expect(gesture.startPreview(() => calls.push('start'))).toBe(true);
+    expect(gesture.preview(() => {
+      cue.start = 3;
+      cue.end = 4;
+      calls.push('preview');
+    })).toBe(true);
+    expect(gesture.commit(() => calls.push(`commit:${cue.start}:${cue.end}`))).toEqual({
+      committed: true,
+      moved: true,
+    });
+
+    expect(calls).toEqual(['start', 'preview', 'commit:3:4']);
+    expect(gesture.cancel()).toEqual({ cancelled: false, restored: false });
+  });
+
+  it('透過 production lifecycle 依序回復影片片段、畫面與播放呈現', () => {
+    const clip = { offset: 2, in: 1, out: 9, vtrack: 0 };
+    const calls = [];
+    const gesture = beginTimelineGestureLifecycle({
+      mode: 'clip-move',
+      targets: [{ target: clip, fields: ['offset', 'in', 'out', 'vtrack'] }],
+      effects: {
+        clearSnapGuide: () => calls.push('snap'),
+        stopAutoScroll: () => calls.push('scroll'),
+        restoreClipMapping: () => calls.push(`clip:${clip.offset}:${clip.vtrack}`),
+        redraw: () => calls.push('draw'),
+        refreshPreview: () => calls.push('preview'),
+      },
+    });
     clip.offset = 5;
     clip.vtrack = 1;
-    transaction.markMoved();
+    gesture.startPreview();
 
-    const result = cancelTimelineGesture({ mode: 'clip-move', transaction }, {
-      clearSnapGuide: () => calls.push('snap'),
-      stopAutoScroll: () => calls.push('scroll'),
-      restoreClipMapping: () => calls.push(`clip:${clip.offset}:${clip.vtrack}`),
-      redraw: () => calls.push('draw'),
-      refreshPreview: () => calls.push('preview'),
-    });
+    const result = gesture.cancel();
 
     expect(result).toEqual({ cancelled: true, restored: true });
     expect(clip).toEqual({ offset: 2, in: 1, out: 9, vtrack: 0 });
@@ -91,16 +117,20 @@ describe('timeline gesture transaction', () => {
 
   it('取消 copy-drag 時在 rollback 與重繪後才同步 selection UI', () => {
     const cues = [{ id: 'original' }, { id: 'copy' }];
-    const transaction = beginTimelineGesture();
-    transaction.addRollback(() => cues.pop());
-    transaction.markMoved();
     const calls = [];
-
-    cancelTimelineGesture({ mode: 'move', isCopyDrag: true, transaction }, {
-      redraw: () => calls.push(`draw:${cues.length}`),
-      refreshPreview: () => calls.push('preview'),
-      refreshSelection: () => calls.push(`selection:${cues.length}`),
+    const gesture = beginTimelineGestureLifecycle({
+      mode: 'move',
+      context: { isCopyDrag: true },
+      effects: {
+        redraw: () => calls.push(`draw:${cues.length}`),
+        refreshPreview: () => calls.push('preview'),
+        refreshSelection: () => calls.push(`selection:${cues.length}`),
+      },
     });
+    gesture.addRollback(() => cues.pop());
+    gesture.startPreview();
+
+    gesture.cancel();
 
     expect(cues).toEqual([{ id: 'original' }]);
     expect(calls).toEqual(['draw:1', 'preview', 'selection:1']);

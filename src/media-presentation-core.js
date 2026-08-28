@@ -149,16 +149,15 @@ export function createMediaPresentationCore({
  * 收進同一個 lifecycle，避免 Media 同時維護 core、Map 與 takeover 三份狀態。
  */
 export function createMediaPresentationSession(options = {}) {
-  const getTolerance = typeof options.getTolerance === 'function'
-    ? options.getTolerance
-    : () => 1.5 / 30;
-  const presentTarget = options.presentTarget;
-  if (typeof presentTarget !== 'function') throw new TypeError('presentTarget must be a function');
-  let session = null;
-  const core = createMediaPresentationCore({
-    ...options,
-    presentTarget: (targetTime, request) => presentTarget(targetTime, request, session),
-  });
+  // FPS-SYNC (I4a)：容差永遠由呼叫端的專案精確 FPS 提供；session 不自行猜測影格率。
+  const getTolerance = options.getTolerance;
+  const timeline = options.timeline || {};
+  const player = options.player || {};
+  const commitPresented = options.commitPresented;
+  if (typeof getTolerance !== 'function') throw new TypeError('getTolerance must be a function');
+  if (typeof timeline.normalizeTarget !== 'function') throw new TypeError('timeline.normalizeTarget must be a function');
+  if (typeof player.adapter !== 'function') throw new TypeError('player.adapter must be a function');
+  if (typeof commitPresented !== 'function') throw new TypeError('commitPresented must be a function');
   const compositeWaiters = new Map();
   let webCodecsTakeover = false;
 
@@ -208,6 +207,72 @@ export function createMediaPresentationSession(options = {}) {
     return completed;
   }
 
+  async function presentTimelineTarget(targetTime, { signal, requestId } = {}) {
+    if (signal?.aborted) {
+      throw Object.assign(new Error('media presentation aborted'), { name: 'AbortError' });
+    }
+
+    let clip = null;
+    let sourceTarget = targetTime;
+    if (timeline.hasSequence?.()) {
+      clip = timeline.clipAt?.(targetTime) || null;
+      if (!clip) {
+        timeline.enterGap?.(targetTime);
+        const committed = commitPresented(targetTime);
+        return { presentedTime: committed, source: 'synthetic' };
+      }
+      sourceTarget = timeline.sourceTime?.(targetTime, clip);
+      if (!Number.isFinite(Number(sourceTarget))) throw new Error('timeline source mapping is unavailable');
+      if (timeline.requiresClip?.(clip)) {
+        await timeline.ensureClip?.(clip, sourceTarget, false);
+        if (signal?.aborted) {
+          throw Object.assign(new Error('media presentation aborted'), { name: 'AbortError' });
+        }
+      }
+      if (player.isNative?.()) player.configureNativeSeek?.(clip);
+    } else if (timeline.isVirtual?.()) {
+      timeline.seekVirtual?.(targetTime, { running: false });
+      const committed = commitPresented(targetTime);
+      return { presentedTime: committed, source: 'synthetic' };
+    }
+
+    const adapter = player.adapter();
+    if (!adapter || typeof adapter.present !== 'function') throw new Error('player adapter is unavailable');
+    const webCodecsPending = webCodecsTakeover
+      ? waitForWebCodecsPresentation(targetTime, { signal, requestId })
+      : null;
+    webCodecsPending?.catch(() => {});
+    const tolerance = Math.max(0, Number(getTolerance(targetTime, { source: adapter.type })) || 0);
+    const result = await adapter.present(sourceTarget, {
+      signal,
+      exact: !!(player.isNative?.() && player.exactSeek?.()),
+      tolerance,
+    });
+    const actualSource = Number(result?.presentedSourceTime);
+    if (!Number.isFinite(actualSource)) throw new Error('player did not acknowledge a presented frame');
+    let presentedTimeline = clip
+      ? Number(timeline.timelineTime?.(actualSource, clip))
+      : actualSource;
+    if (!Number.isFinite(presentedTimeline)) throw new Error('timeline presentation mapping is unavailable');
+    let source = result.backend || adapter.type;
+    if (webCodecsPending) {
+      const composited = await webCodecsPending;
+      presentedTimeline = composited.presentedTime;
+      source = composited.backend;
+    }
+    if (player.isNative?.()) player.setPresentedSourceTime?.(actualSource);
+    commitPresented(presentedTimeline);
+    return { presentedTime: presentedTimeline, source };
+  }
+
+  const core = createMediaPresentationCore({
+    getTolerance,
+    timeoutMs: options.timeoutMs,
+    setTimeoutFn: options.setTimeoutFn,
+    clearTimeoutFn: options.clearTimeoutFn,
+    presentTarget: presentTimelineTarget,
+  });
+
   function reset(reason = 'media-reset') {
     core.cancel(reason);
     for (const waiter of [...compositeWaiters.values()]) waiter.abort();
@@ -215,25 +280,18 @@ export function createMediaPresentationSession(options = {}) {
     webCodecsTakeover = false;
   }
 
-  session = {
-    request: core.request,
+  const session = {
+    request(targetTime, requestOptions) {
+      return core.request(timeline.normalizeTarget(targetTime), requestOptions);
+    },
     observe: core.observe,
     cancel: core.cancel,
     presentedTime: core.presentedTime,
     isPending: core.isPending,
-    waitForWebCodecsPresentation,
     reportWebCodecsPresentation,
     setWebCodecsTakeover(value) { webCodecsTakeover = !!value; },
     webCodecsTakeover() { return webCodecsTakeover; },
     reset,
-    snapshot() {
-      return {
-        pending: core.isPending(),
-        presentedTime: core.presentedTime(),
-        webCodecsTakeover,
-        compositeWaiterCount: compositeWaiters.size,
-      };
-    },
   };
   return session;
 }
