@@ -1,49 +1,34 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
+
 const require = createRequire(import.meta.url);
-const {
-  EXPORT_JOB_STATES,
-  canTransition,
-  isTerminalState,
-  transitionJob,
-} = require('../shared/export-job-state-machine.cjs');
+const QueueModule = require('../electron/export-queue-state');
+const { JOB_STATUS } = require('../electron/export-job-status');
 
-describe('export-job-state-machine contract', () => {
-  it('嚴格約束合法的狀態轉換路徑', () => {
-    // queued -> running (合法)
-    expect(canTransition(EXPORT_JOB_STATES.QUEUED, EXPORT_JOB_STATES.RUNNING)).toBe(true);
+function job(id, status = JOB_STATUS.QUEUED) {
+  return { id, status, pct: 0, elapsedMs: 0, etaS: null, errorMsg: null };
+}
 
-    // running -> finished (合法)
-    expect(canTransition(EXPORT_JOB_STATES.RUNNING, EXPORT_JOB_STATES.FINISHED)).toBe(true);
-
-    // running -> error (合法)
-    expect(canTransition(EXPORT_JOB_STATES.RUNNING, EXPORT_JOB_STATES.ERROR)).toBe(true);
-
-    // finished -> running (非法：已完成不可重跑)
-    expect(canTransition(EXPORT_JOB_STATES.FINISHED, EXPORT_JOB_STATES.RUNNING)).toBe(false);
-
-    // error -> queued (合法：重試)
-    expect(canTransition(EXPORT_JOB_STATES.ERROR, EXPORT_JOB_STATES.QUEUED)).toBe(true);
+describe('匯出工作生命週期的單一 production interface', () => {
+  it('queue module 不再暴露另一套平行狀態機', () => {
+    expect(Object.keys(QueueModule).sort()).toEqual(['ExportQueueState']);
   });
 
-  it('正確判定終態 (Terminal States)', () => {
-    expect(isTerminalState(EXPORT_JOB_STATES.FINISHED)).toBe(true);
-    expect(isTerminalState(EXPORT_JOB_STATES.ERROR)).toBe(true);
-    expect(isTerminalState(EXPORT_JOB_STATES.CANCELLED)).toBe(true);
-    expect(isTerminalState(EXPORT_JOB_STATES.RUNNING)).toBe(false);
-    expect(isTerminalState(EXPORT_JOB_STATES.QUEUED)).toBe(false);
+  it('透過 ExportQueueState 執行正式七狀態的合法轉移', () => {
+    const state = new QueueModule.ExportQueueState([job('delivery')]);
+
+    expect(state.setStatus('delivery', JOB_STATUS.RUNNING)?.status).toBe(JOB_STATUS.RUNNING);
+    expect(state.setStatus('delivery', JOB_STATUS.DONE)?.status).toBe(JOB_STATUS.DONE);
+    expect(state.setStatus('delivery', JOB_STATUS.RUNNING)).toBeNull();
+    expect(state.get('delivery')?.status).toBe(JOB_STATUS.DONE);
   });
 
-  it('執行純函式狀態轉換與例外防護', () => {
-    const job = { id: 'job_1', status: EXPORT_JOB_STATES.QUEUED };
+  it('拒絕影子狀態語彙，不讓 finished/error/cancelled 混入持久化 queue', () => {
+    const state = new QueueModule.ExportQueueState([job('delivery')]);
 
-    const runningJob = transitionJob(job, EXPORT_JOB_STATES.RUNNING, { progress: 0 });
-    expect(runningJob.status).toBe(EXPORT_JOB_STATES.RUNNING);
-    expect(runningJob.progress).toBe(0);
-    expect(runningJob.updatedAt).toBeDefined();
-
-    // 嘗試從 finished 跳回 running 應拋出例外
-    const finishedJob = { id: 'job_1', status: EXPORT_JOB_STATES.FINISHED };
-    expect(() => transitionJob(finishedJob, EXPORT_JOB_STATES.RUNNING)).toThrow(/非法匯出狀態轉換/);
+    for (const legacyStatus of ['paused', 'finished', 'error', 'cancelled']) {
+      expect(state.setStatus('delivery', legacyStatus), legacyStatus).toBeNull();
+      expect(state.get('delivery')?.status).toBe(JOB_STATUS.QUEUED);
+    }
   });
 });
