@@ -48,4 +48,31 @@ describe('note time domain', () => {
     vi.clearAllTimers();
     vi.useRealTimers();
   });
+
+  it('新增空白備註時不開啟面板，也不搶走影片編輯焦點', () => {
+    const editingSurface = document.createElement('button');
+    editingSurface.type = 'button';
+    editingSurface.textContent = '影片編輯區';
+    document.body.appendChild(editingSurface);
+    editingSurface.focus();
+
+    addNote();
+    vi.advanceTimersByTime(50);
+
+    const noteText = document.querySelector('.note-item .nt-text');
+    expect({
+      noteText: State.notes[0]?.text,
+      panelOpened: document.getElementById('notesPanel').classList.contains('show'),
+      noteEditable: noteText?.getAttribute('contenteditable'),
+      activeElement: document.activeElement,
+    }).toEqual({
+      noteText: '',
+      panelOpened: false,
+      noteEditable: 'false',
+      activeElement: editingSurface,
+    });
+
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
 });

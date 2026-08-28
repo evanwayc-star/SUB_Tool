@@ -56,12 +56,8 @@ function addNote(){
   State.notes.push(n); State.notes.sort((a,b)=>a.time-b.time);
   _selectedNoteIds.clear(); _selectedNoteIds.add(n.id); _lastSelectedNoteId=n.id;
   setNoteActive(n.id);
-  $('notesPanel').classList.add('show'); renderNotes(); drawRuler();
+  renderNotes(); drawRuler();
   recordHistory('新增備註');
-  setTimeout(()=>{
-    const r=$('notesList').querySelector(`.note-item[data-id="${n.id}"] .nt-text`);
-    if(r){ r.innerText=''; r.contentEditable='true'; r.focus(); }
-  },30);
 }
 
 function clearAllNotes(){
