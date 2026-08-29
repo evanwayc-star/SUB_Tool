@@ -77,13 +77,18 @@ describe('Media presentation runtime', () => {
     Media.playing = false;
     domMock.video.currentTime = 15;
     domMock.video.muted = false;
+    domMock.video.play.mockClear();
+    domMock.video.pause.mockClear();
+    domMock.video.dispatchEvent.mockClear();
     domMock.video.hasAttribute.mockImplementation(name => name === 'src');
     domMock.frameCallbacks.length = 0;
     resetPlayerAdapter(null, domMock.video);
     Media.resetPresentationSession('test-reset');
     Media.setWebCodecsTakeover(false);
     Media.activeClipId = 'clip-a';
-    Media.seek(105);
+    Media._gap = false;
+    Media._seqSwitching = false;
+    Media._transport.seek(105, { duration: State.duration, fps: State.fps, dropFrame: State.dropFrame });
   });
 
   it('畫格完成前不提交播放頭，完成後才把來源時間映回時間軸', async () => {
@@ -126,5 +131,37 @@ describe('Media presentation runtime', () => {
       status: 'presented', requestedTime: 104, presentedTime: 103.95, source: 'webcodecs',
     });
     expect(Media.displayTime()).toBe(103.96);
+  });
+
+  it('一般跳轉後立刻播放，必須等實際畫格呈現才啟動 presenter 時鐘', async () => {
+    const pending = Media.seek(104);
+
+    Media.play();
+
+    expect(Media.playing).toBe(true);
+    expect(Media.playbackTransitionPending()).toBe(true);
+    expect(Media.presenterClockMoving()).toBe(false);
+    expect(domMock.video.play).not.toHaveBeenCalled();
+
+    domMock.frameCallbacks.shift()(0, { mediaTime: 14 });
+    await pending;
+
+    expect(domMock.video.play).toHaveBeenCalledTimes(1);
+    expect(Media.playbackTransitionPending()).toBe(false);
+    expect(Media.presenterClockMoving()).toBe(true);
+  });
+
+  it('跳轉後先播放再暫停，晚到畫格不得重新啟動播放', async () => {
+    const pending = Media.seek(104);
+
+    Media.play();
+    Media.pause();
+    domMock.frameCallbacks.shift()(0, { mediaTime: 14 });
+    await pending;
+
+    expect(Media.playing).toBe(false);
+    expect(Media.playbackTransitionPending()).toBe(false);
+    expect(Media.presenterClockMoving()).toBe(false);
+    expect(domMock.video.play).not.toHaveBeenCalled();
   });
 });

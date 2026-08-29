@@ -166,13 +166,24 @@ async function capture(client, outputPath) {
         const row = document.getElementById('asrTranscriptRow');
         const button = document.getElementById('asrModeAlign');
         if (button.getAttribute('aria-pressed') !== 'true') return null;
+        const modeRect = document.querySelector('.asr-mode-options').getBoundingClientRect();
+        const contentRect = document.getElementById('asrContentCard').getBoundingClientRect();
+        const engineRect = document.querySelector('.asr-engine-card').getBoundingClientRect();
+        const lowerDividerCenter = (contentRect.right + engineRect.left) / 2;
+        const providerLabels = [...document.getElementById('asrProvider').options].map(option => option.textContent.trim());
+        const builtinLabels = [...document.getElementById('asrBuiltinModel').options].map(option => option.textContent.trim());
         return {
           taskMode: document.getElementById('asrTaskMode').value,
           transcriptDisplay: getComputedStyle(row).display,
           contentDisplay: getComputedStyle(document.getElementById('asrContentCard')).display,
           lineCount: document.getElementById('asrTranscriptLineCount').textContent.trim(),
           target: document.getElementById('asrTargetSummary').value,
-          primaryAction: document.querySelector('#modalFoot button.primary').textContent.trim()
+          primaryAction: document.querySelector('#modalFoot button.primary').textContent.trim(),
+          equalColumnDelta: Math.abs(contentRect.width - engineRect.width),
+          centerDelta: Math.abs(lowerDividerCenter - (modeRect.left + modeRect.width / 2)),
+          providerLabels,
+          builtinLabels,
+          modelLabelsArePlain: [...providerLabels, ...builtinLabels].every(label => !/[()（）]/u.test(label))
         };
       })()`),
       '文本匹配模式切換'
@@ -208,6 +219,7 @@ async function capture(client, outputPath) {
         !wide.labelledFields || wide.horizontalOverflow || wide.modeButtonMinHeight < 58 ||
         align.taskMode !== 'align' || align.transcriptDisplay !== 'flex' || align.contentDisplay !== 'flex' || align.lineCount !== '3 行' ||
         !align.target.includes('文本匹配') || align.primaryAction !== '開始匹配' ||
+        align.equalColumnDelta > 1 || align.centerDelta > 1 || !align.modelLabelsArePlain ||
         narrow.horizontalOverflow || !narrow.footerVisible || narrow.modalWidth > 620) {
       throw new Error(`ASR UI 真機驗收失敗：${JSON.stringify({ wide, align, narrow })}`);
     }

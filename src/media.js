@@ -133,7 +133,11 @@ const Media = {
   _syncEngine: null,
   initSyncEngine() { if(!this._syncEngine) { this._syncEngine = new PlaybackSyncEngine(this); this._syncEngine.start(); } return this._syncEngine; },
   invalidateExternalActivity() { this._syncEngine?.invalidateExternalActivity?.(); },
-  seqTick() { this.initSyncEngine(); return this._syncEngine.seqTick(); },
+  seqTick() {
+    if(!this.presenterClockMoving()) return;
+    this.initSyncEngine();
+    return this._syncEngine.seqTick();
+  },
   seqContinueAtEnd() { this.initSyncEngine(); return this._syncEngine.seqContinueAtEnd(); },
   _syncSeqElements(t) { this.initSyncEngine(); return this._syncEngine._syncSeqElements(t); },
 
@@ -157,6 +161,8 @@ const Media = {
   _reverseProxySourcePath:null,
   _reverseProxyActive:false,
   _presentationSession:null,
+  _seqSwitchSettled:null,
+  _resolveSeqSwitch:null,
   _intakeSession:new MediaIntakeSession(),
   _activeStreamLeaseId:null,
   _assetEpoch:new ResetEpoch(),
@@ -1271,7 +1277,9 @@ const Media = {
     const virtual=this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'));
     const clip=this.seqOn()?this._activeClip():null;
     return this._transport.displayTime({
-      playing:this.playing, sourceTime:this.vTime(), clip, virtual,
+      // seek→play 的實際畫格尚未呈現時，播放器來源 clock 仍停在舊畫格；
+      // 此時維持已吸附的目標位置，不能讓播放頭倒退到舊來源時間。
+      playing:this.presenterClockMoving(), sourceTime:this.vTime(), clip, virtual,
       playbackRate:video.playbackRate||1,useGap:this.seqOn(),
     });
   },
@@ -1316,6 +1324,7 @@ const Media = {
   webCodecsProxyPath(){ return this._wcProxyPath; },
   /* 時間軸權威時間（播放中） */
   tlTime(){
+    if(this.playbackTransitionPending()) return this.displayTime();
     const virtual=this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'));
     const clip=this.seqOn()?this._activeClip():null;
     return this._transport.timelineTime({
@@ -1339,7 +1348,9 @@ const Media = {
         clipAt:targetTime=>Seq.clipAt(targetTime),
         enterGap:targetTime=>this._enterGap(targetTime),
         sourceTime:(targetTime,clip)=>this._transport.sourceTime(targetTime,clip),
-        requiresClip:clip=>clip.id!==this.activeClipId||this._gap,
+        requiresClip:clip=>clip.id!==this.activeClipId||this._gap||
+          (this.mpvMode?!!clip.path&&clip.path!==this._mpvPath:
+            !!clip.web?.url&&clip.web.url!==video.src),
         ensureClip:(clip,sourceTarget,resume)=>this._ensureClip(clip,sourceTarget,resume),
         isVirtual:()=>this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src')),
         seekVirtual:(targetTime,options)=>this._transport.seekVirtual(targetTime,options),
@@ -1350,7 +1361,13 @@ const Media = {
         isNative:()=>this.mpvMode,
         configureNativeSeek:clip=>this._setMpvSeekProfile(clip),
         exactSeek:()=>this._mpvExactSeek,
+        presentationTarget:sourceTime=>Math.max(0,sourceTime-(this.mpvMode?this._mpvSeekOffset:0)),
         setPresentedSourceTime:sourceTime=>{ this._mpvTime=sourceTime; },
+      },
+      playback:{
+        suspend:()=>this._suspendPlaybackForPresentation(),
+        resume:()=>this._resumePlaybackAfterPresentation(),
+        fail:result=>this._failPlaybackPresentation(result),
       },
       commitPresented:presentedTime=>this._commitPresentedTarget(presentedTime),
     });
@@ -1367,6 +1384,12 @@ const Media = {
   },
   presentationPending(){
     return !!this._presentationSession?.isPending();
+  },
+  playbackTransitionPending(){
+    return !!this._presentationSession?.isPlaybackPending();
+  },
+  presenterClockMoving(){
+    return !!this.playing&&!this.playbackTransitionPending();
   },
   observePresentedTimelineTime(time,source='unknown'){
     return this._ensurePresentationSession().observe(time,{source});
@@ -1492,17 +1515,33 @@ const Media = {
   },
   /* 把播放器對到指定 clip 的來源時間（必要時換檔）。resume=切換後是否續播 */
   async _ensureClip(c, localT, resume){
-    if(this._seqSwitching||!State.clips.includes(c)) return;
+    if(this._seqSwitching){
+      const switching=this._seqSwitchSettled;
+      if(switching) await switching;
+      if(!State.clips.includes(c)) return;
+      return this._ensureClip(c,localT,resume);
+    }
+    if(!State.clips.includes(c)) return;
     if(c.type === 'image') return; // 圖片是純視覺疊層，不經過播放引擎
     this._setMpvSeekProfile(c);
-    if(resume === undefined) resume = this.playing;
-    if(this.activeClipId === c.id && !this._gap){ this._playerSeekSource(localT); return; }
+    // 不保存開始載入那一刻的 play/pause；完成時必須重新讀最新意圖。
+    // requestPlayback 明確傳 false，確保畫格證明到達前永不偷跑。
+    const shouldResume=()=>resume!==false&&this.playing&&
+      (this._presentationSession?.playbackIntent?.()??true);
+    const activeSourceReady=this.mpvMode
+      ?(!c.path||this._mpvPath===c.path)
+      :(!c.web?.url||video.src===c.web.url);
+    if(this.activeClipId===c.id&&!this._gap&&activeSourceReady){ this._playerSeekSource(localT); return; }
     const projectOperation=this._assetOperation(null,{kind:'sequence-switch',id:c.id});
     const switchToken=Object.freeze({projectOperation,clip:c});
     const owns=()=>this._seqSwitchToken===switchToken&&this._ownsAssetOperation(projectOperation)&&
       State.clips.includes(c)&&this.activeClipId===c.id;
     this._seqSwitchToken=switchToken;
     this._seqSwitching = true;
+    let settleSwitch;
+    const switchSettled=new Promise(resolve=>{ settleSwitch=resolve; });
+    this._seqSwitchSettled=switchSettled;
+    this._resolveSeqSwitch=settleSwitch;
     let retryIfSuperseded=true;
     try{
       this.activeClipId = c.id;
@@ -1535,7 +1574,7 @@ const Media = {
           const _hasEls = this.tracks.some(tr => (tr.source||'video') === _srcKey && tr.kind === 'element');
           getPlayerAdapter().mute(_hasEls || c.audioDetached || State.muted).catch(()=>{});
           emit('mpv:refreshSubs'); // 換 clip 後字幕需以新映射重擠（app.js 會做 offset 位移）
-          if(resume){ getPlayerAdapter().play().catch(()=>{}); this.startElementSources(localT, Seq.toTimeline(localT, c)); }
+          if(shouldResume()){ getPlayerAdapter().play().catch(()=>{}); this.startElementSources(localT, Seq.toTimeline(localT, c)); }
           else getPlayerAdapter().pause().catch(()=>{});
         }
       } else {
@@ -1559,7 +1598,7 @@ const Media = {
         }
         if(!owns()) return;
         try{ video.currentTime = localT; }catch(e){}
-        if(resume){
+        if(shouldResume()){
           try{ video.play(); }catch(e){}
           this.startElementSources(localT, Seq.toTimeline(localT, c));
           if(this.tracks.some(t=>t.kind==='buffer'&&!t._srcHidden)) this.startBufferSources(localT);
@@ -1579,6 +1618,11 @@ const Media = {
             if(!this._seqSwitching&&this.seqOn()) this.seek(retryAt);
           });
         }
+      }
+      settleSwitch();
+      if(this._seqSwitchSettled===switchSettled){
+        this._seqSwitchSettled=null;
+        this._resolveSeqSwitch=null;
       }
     }
   },
@@ -2311,6 +2355,71 @@ const Media = {
   },
 
   /* --- 播放控制 --- */
+  _suspendPlaybackForPresentation(){
+    getPlayerAdapter().pause().catch(()=>{});
+    this.stopBufferSources();
+    this.stopElementSources();
+    if(this._gap) this._transport.freezeGap({playbackRate:video.playbackRate||1});
+    if(this._transport.virtualStartedAt!==null){
+      this._transport.freezeVirtual({playbackRate:video.playbackRate||1});
+    }
+  },
+  _resumePlaybackAfterPresentation(){
+    if(!this.playing) return;
+    const target=this._transport.pausedTime??this.displayTime();
+    this._startPresentedPlayback(target);
+  },
+  _failPlaybackPresentation(result){
+    this.stopBufferSources();
+    this.stopElementSources();
+    getPlayerAdapter().pause().catch(()=>{});
+    this.playing=false;
+    const playBtn=$('playBtn'); if(playBtn) playBtn.textContent='▶';
+    video.dispatchEvent(new Event('pause'));
+    const reason=result?.status==='timeout'?'等待畫面逾時':'畫面載入失敗';
+    setStatus(`${reason}，播放已暫停`,'err');
+  },
+  _startPresentedPlayback(targetTime){
+    const requested=Math.max(0,Number(targetTime)||0);
+    // 序列：呈現 session 應已完成 clip activation；此處只准啟動已就緒的 presenter。
+    if(this.seqOn()){
+      const hit=Seq.clipAt(requested);
+      if(!hit){
+        this.ensureCtx();
+        this._lastSeekTime=null;
+        this._enterGap(requested);
+        this.startElementSources(requested,requested);
+        return;
+      }
+      if(hit.id!==this.activeClipId||this._gap){
+        this._failPlaybackPresentation({status:'failed'});
+        return;
+      }
+    }
+    // 影片片段已全部移除時仍可把外部音訊當成一條完整時間軸播放；保留黑畫面。
+    if(this.audioOnlyTimeline()){
+      const t=Math.min(requested,Math.max(0,State.duration));
+      this._transport.startVirtual(t,{playbackRate:video.playbackRate||1});
+      this.ensureCtx();
+      getPlayerAdapter().pause().catch(()=>{});
+      if(!this.mpvMode) video.style.visibility='hidden';
+      this._lastSeekTime=null;
+      this.startElementSources(t,t);
+      return;
+    }
+    this.ensureCtx();
+    if(!this.mpvMode&&!video.hasAttribute('src')){
+      this._transport.startVirtual(requested,{playbackRate:video.playbackRate||1});
+      if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(requested);
+      this.startElementSources(requested,requested);
+    }else{
+      getPlayerAdapter().play().catch(()=>{});
+      const current=this.mpvMode?this._mpvTime:video.currentTime;
+      if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(current);
+      this.startElementSources(current,requested);
+    }
+    this._lastSeekTime=null;
+  },
   play(){
     // mpv 原生倒播只讓影像 transport 運作。Web Audio／外部音訊元素沒有可靠的
     // 反向播放能力，若沿用一般 play() 路徑會聽到「音訊正播、畫面倒播」。
@@ -2322,56 +2431,23 @@ const Media = {
       this._lastSeekTime=null;
       return;
     }
-    // 序列：起播位置可能在間隙或另一個 clip 上，先路由
-    if(this.seqOn()){
-      const t = this.displayTime();
-      const hit = Seq.clipAt(t);
-      if(!hit){
-        // 間隙起播：黑畫面、播放頭以虛擬時鐘續走（seqTick 進入 clip 時自動切換）
-        this.ensureCtx();
-        this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play'));
-        this._lastSeekTime=null;
-        this._enterGap(t);
-        this.startElementSources(t, t); // ext-* 參考音照播（clip 綁定音軌因 _srcHidden 跳過）
-        return;
-      }
-      if(hit.id !== this.activeClipId || this._gap){
-        this.ensureCtx();
-        this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play'));
-        this._lastSeekTime=null;
-        this._ensureClip(hit, this._transport.sourceTime(t,hit), true);
-        return;
-      }
+    const target=this.displayTime();
+    const session=this._ensurePresentationSession();
+    this.playing=true;
+    const playBtn=$('playBtn'); if(playBtn) playBtn.textContent='⏸';
+    video.dispatchEvent(new Event('play'));
+
+    const hit=this.seqOn()?Seq.clipAt(target):null;
+    const needsActivation=!!hit&&(hit.id!==this.activeClipId||this._gap);
+    // 若另一種呈現工作仍在進行，也把目前播放目標併入同一 session，避免舊畫格先起播。
+    if(!session.isPlaybackPending()&&(needsActivation||session.isPending())){
+      session.requestPlayback(target,{timeoutMs:10000});
     }
-    // 影片片段已全部移除時仍可把外部音訊當成一條完整時間軸播放；保留黑畫面，
-    // 不讓先前載入的 video/mpv 在背景重新發聲或把播放頭鎖回影片長度。
-    if(this.audioOnlyTimeline()){
-      const t=Math.min(Math.max(0,this.displayTime()),Math.max(0,State.duration));
-      this._transport.startVirtual(t,{playbackRate:video.playbackRate||1});
-      this.ensureCtx();
-      getPlayerAdapter().pause().catch(()=>{});
-      if(!this.mpvMode) video.style.visibility='hidden';
-      this.playing=true; $('playBtn').textContent='⏸'; this._lastSeekTime=null;
-      this.startElementSources(t,t);
-      video.dispatchEvent(new Event('play'));
-      return;
-    }
-    this.ensureCtx();
-    if(!this.mpvMode && !video.hasAttribute('src')){
-      this._transport.resumeVirtual({playbackRate:video.playbackRate||1});
-      if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(this._vTime);
-      this.startElementSources(this._vTime);
-    } else {
-      getPlayerAdapter().play().catch(()=>{});
-      const current = this.mpvMode ? this._mpvTime : video.currentTime;
-      if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(current);
-      this.startElementSources(current, this.tlTime());
-    }
-    this.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play'));
-    this._lastSeekTime=null;
+    session.setPlaybackIntent(true);
   },
   pause(){
     if(this._nativeReverse){
+      this._presentationSession?.setPlaybackIntent(false);
       const c=this.seqOn()?this._activeClip():null;
       const paused=this._transport.pause({
         sourceTime:this.vTime(),clip:c,virtual:false,playbackRate:video.playbackRate||1,
@@ -2388,6 +2464,17 @@ const Media = {
       this.stopBufferSources(); this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶';
       this.syncMuteState();
+      return;
+    }
+    const transitionPending=this.playbackTransitionPending();
+    this._presentationSession?.setPlaybackIntent(false);
+    if(transitionPending){
+      // 使用者在 seek 尚未呈現時又按暫停：保留目標播放點，讓晚到畫格只完成
+      // 靜止呈現，不得拿舊 presenter clock 覆寫或重新啟動音訊。
+      this._suspendPlaybackForPresentation();
+      this.playing=false;
+      const playBtn=$('playBtn'); if(playBtn) playBtn.textContent='▶';
+      video.dispatchEvent(new Event('pause'));
       return;
     }
     const virtual=this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'));
@@ -2420,93 +2507,23 @@ const Media = {
   },
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t){
-    this.cancelPresentation('external-seek');
     // 有影片時才設上限；無影片時允許任意位置（空專案先排字幕）。
     // FPS-SYNC：每次 seek 都由 transport 以唯一格網吸附，並記下暫停權威位置。
     t=this._transport.seek(t,{duration:State.duration,fps:State.fps,dropFrame:State.dropFrame});
-    /* 序列：t 為時間軸時間 → 解析所在 clip（間隙→黑畫面；跨 clip→換檔；同 clip→來源時間） */
-    if(this.seqOn()){
-      $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-      $('seekBar').value=Math.round(t*1000);
-      // 外部音檔依其 placement 換算來源時間；尚無 metadata 的舊 ext-* 仍等同從 timeline 0 秒開始。
-      for(const tr of this.tracks){
-        const source=tr.source||'';
-        if(tr.kind!=='element'||!tr.el||!source.startsWith('ext-')) continue;
-        const off=this.externalAudio.sourceTime(source,t);
-        try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
-      }
-      const hit = Seq.clipAt(t);
-      if(!hit){
-        this._enterGap(t);
-        if(this.playing){ this._transport.enterGap(t,{running:true}); this.startElementSources(t, t); } // ext-* 參考音續播（clip 音軌因 _srcHidden 跳過）
-        window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t})); // 讓播放頭/字幕/備註重繪
-        return;
-      }
-      const local = this._transport.sourceTime(t,hit);
-      if(hit.id !== this.activeClipId || this._gap){
-        this._ensureClip(hit, local, this.playing);
-        window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
-        return;
-      }
-      if(this.mpvMode || video.hasAttribute('src')){
-        if(this.mpvMode){ this._mpvTime=local; this._setMpvSeekProfile(hit); }
-        this._seekMpv(local).catch(()=>{});
-        this._syncSeqElements(t);
-        if(!this.mpvMode && this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(local); }
-        if(this.mpvMode) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
-        return;
-      }
-    }
-    if(this.audioOnlyTimeline()){
-      this._transport.seekVirtual(t,{running:this._transport.virtualStartedAt!==null});
-      if(this.mpvMode) getPlayerAdapter()?.pause?.().catch(()=>{});
-      else { try{ video.pause(); }catch(e){} video.style.visibility='hidden'; }
-      $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-      $('seekBar').value=Math.round(t*1000);
-      for(const tr of this.tracks){
-        if(tr.kind!=='element'||!tr.el) continue;
-        const source=tr.source||'';
-        if(!source.startsWith('ext-')){ try{tr.el.pause();}catch(e){} continue; }
-        const off=this.externalAudio.sourceTime(source,t);
-        try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
-      }
-      window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
-      return;
-    }
-    if(this.mpvMode || video.hasAttribute('src')){
-      if (this.mpvMode) {
-        t = clamp(t, 0, this._mpvDuration || 0);
-        this._mpvTime = t;
-      }
-      this._seekMpv(t).catch(()=>{});
-      for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
-        const source=tr.source||'';
-        const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
-        try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
-      } }
-      
-      if(this.mpvMode) {
-        $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-        $('seekBar').value=Math.round(t*1000);
-        window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
-      } else {
-        if(this.playing && this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
-      }
-      return;
-    }
-    
-    this._transport.seekVirtual(t,{running:this._transport.virtualStartedAt!==null});
-    $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-    $('seekBar').value=Math.round(t*1000);
-    for(const tr of this.tracks){ if(tr.kind==='element'&&tr.el){
+    const tc=$('tcCur'); if(tc) tc.textContent=secToEncore(t,State.fps,State.dropFrame);
+    const seekBar=$('seekBar'); if(seekBar) seekBar.value=Math.round(t*1000);
+    // 外部音檔依 placement 先對到播放目標；真正起播仍要等 session 收到實際畫格。
+    for(const tr of this.tracks){
+      if(tr.kind!=='element'||!tr.el) continue;
       const source=tr.source||'';
-      const off=source.startsWith('ext-')?this.externalAudio.sourceTime(source,t):t;
+      if(!source.startsWith('ext-')) continue;
+      const off=this.externalAudio.sourceTime(source,t);
       try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
-    } }
-    if(this.playing&&this.tracks.some(tr=>tr.kind==='buffer')){ this.stopBufferSources(); this.startBufferSources(t); }
-    // 純字幕專案沒有 video/mpv 的 seeked 事件可接手；仍須通知播放器預覽、播放頭與備註
-    // 已換到新的時間點。否則從比對視窗或 seek bar 跳句時，時碼會改但字幕畫面停在上一格。
+    }
+    // 保留 UI 對目標位置的即時回應；presentation session 稍後會用實際畫格再提交一次。
     window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
+    emit('media:playhead');
+    return this._ensurePresentationSession().requestPlayback(t,{timeoutMs:10000});
   },
   /* 外部音訊不隸屬影片 clip；在它自己的開始／結束邊界才一次性 seek/play 或 pause。
      這可處理「影片已結束但音檔稍後才開始」與修剪後的音檔尾端，且不會每幀造成播放抖動。 */
@@ -2809,6 +2826,9 @@ const Media = {
     Seq.clear(); this.activeClipId=null; this._mpvPath=null; deselect('video'); deselect('audio'); 
     if(!options.keepVideoTracks) resetVideoTracks();
     if(!options.keepObjectURLs) delete this._preservedImageTimeline;
+    this._resolveSeqSwitch?.();
+    this._seqSwitchSettled=null;
+    this._resolveSeqSwitch=null;
     this._seqSwitchToken=null;
     this._seqSwitching=false;
     video.style.visibility='';

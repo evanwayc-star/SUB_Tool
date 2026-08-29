@@ -230,7 +230,7 @@ describe('語音辨識與字幕生成模組', () => {
     }
   });
 
-  it('依指定順序排列辨識服務，並以無圖示文字維持左側對齊', () => {
+  it('依指定順序排列辨識服務，只顯示名稱且維持原本 provider value', () => {
     State.clips = [];
     State.externalAudioState = [];
 
@@ -258,13 +258,49 @@ describe('語音辨識與字幕生成模組', () => {
       'elevenlabs'
     ]);
     expect(options.map(option => option.textContent.trim())).toEqual([
-      '程式內建本機 AI 引擎 (免設定・100% 離線)',
-      'Groq (Whisper-large-v3，極速雲端・免費)',
-      'OpenAI (Whisper-1 官方雲端)',
-      'Azure Speech (專業語音辨識・逐句時間碼)',
-      'Google Gemini (大語言模型・繁體中文理解力最強)',
-      'ElevenLabs (Scribe v2，高精準多語言・逐字時間碼)'
+      '程式內建本機 AI 引擎',
+      'Groq',
+      'OpenAI',
+      'Azure Speech',
+      'Google Gemini',
+      'ElevenLabs'
     ]);
+    expect(options.every(option => !/[()（）]/u.test(option.textContent))).toBe(true);
+    expect(document.getElementById('asrProviderHint').textContent).toContain('語意');
+  });
+
+  it('內建模型選單只顯示模型名稱並維持原本 model id', () => {
+    State.clips = [];
+    State.externalAudioState = [];
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin' });
+
+    openSpeechRecognitionDialog({
+      id: 'builtin-model-labels',
+      name: 'builtin-model-labels.wav',
+      in: 0,
+      out: 1,
+      duration: 1,
+      audioBuffer: {}
+    });
+
+    const [, html] = openModal.mock.calls[0];
+    document.body.innerHTML = html;
+    const options = [...document.getElementById('asrBuiltinModel').options];
+
+    expect(options.map(option => option.value)).toEqual([
+      'onnx-community/whisper-tiny',
+      'onnx-community/whisper-base',
+      'onnx-community/whisper-small',
+      'onnx-community/whisper-large-v3-turbo'
+    ]);
+    expect(options.map(option => option.textContent.trim())).toEqual([
+      'Whisper Tiny 逐字時間版',
+      'Whisper Base 逐字時間版',
+      'Whisper Small 逐字時間版',
+      'Whisper Large v3 Turbo q4 逐字時間版'
+    ]);
+    expect(options.every(option => !/[()（）]/u.test(option.textContent))).toBe(true);
+    expect(document.getElementById('asrBuiltinRow').textContent).toContain('首次使用會下載並快取模型');
   });
 
   it('只替實際支援的辨識服務提供提示詞或專有名詞欄位', () => {
@@ -602,6 +638,7 @@ describe('語音辨識與字幕生成模組', () => {
         webgpuDtype: 'q4',
         wasmDtype: 'q8'
       });
+      expect(Object.values(BUILTIN_MODELS).every(model => !/[()（）]/u.test(model.name))).toBe(true);
     });
 
     it('能夠儲存並讀回自訂的 ASR 設定', () => {
@@ -1105,7 +1142,8 @@ describe('語音辨識與字幕生成模組', () => {
 
       const [, html] = openModal.mock.calls[0];
       expect(html).toContain('value="elevenlabs"');
-      expect(html).toContain('ElevenLabs (Scribe v2');
+      expect(html).toContain('>ElevenLabs</option>');
+      expect(html).not.toContain('ElevenLabs (Scribe v2');
     });
   });
 });

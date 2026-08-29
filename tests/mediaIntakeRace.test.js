@@ -258,6 +258,7 @@ describe('desktop mother-source intake ownership', () => {
       onEvent: vi.fn(),
       setBounds: vi.fn(async () => {}),
       seek: vi.fn(async () => {}),
+      present: vi.fn(async time => ({ backend: 'mpv', presentedSourceTime: time })),
       direction: vi.fn(async () => true),
     };
     window.subtool.mpv = mpv;
@@ -270,10 +271,11 @@ describe('desktop mother-source intake ownership', () => {
 
     try {
       await Media.loadDesktopMedia('C:/media/frame-accurate-h265.mp4');
-      Media.seek(3.96);
+      await Media.seek(3.96);
 
       expect(Media.mpvMode).toBe(true);
-      expect(mpv.seek).toHaveBeenLastCalledWith(3.94, { exact: true });
+      expect(mpv.present.mock.calls.at(-1)[0]).toBeCloseTo(3.94, 8);
+      expect(mpv.present.mock.calls.at(-1)[1]).toEqual(expect.objectContaining({ exact: true }));
       expect(Media.supportsNativeReverse()).toBe(false);
     } finally {
       Media.reset();

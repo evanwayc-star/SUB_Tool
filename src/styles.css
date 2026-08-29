@@ -1073,7 +1073,7 @@ select:focus-visible {
 .asr-mode-option[aria-pressed="true"] .asr-mode-option-copy{color:#c7c7cc}
 .asr-native-mode-select{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 
-.asr-settings-grid{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(0,.92fr);gap:14px;align-items:start}
+.asr-settings-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
 .asr-content-card,.asr-engine-card{display:flex;flex-direction:column;gap:14px;min-width:0}
 .asr-settings-grid.is-transcribe .asr-engine-card{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
 .asr-settings-grid.is-transcribe .asr-engine-card>.asr-card-heading,

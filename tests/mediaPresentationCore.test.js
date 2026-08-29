@@ -104,6 +104,11 @@ describe('media-presentation-core', () => {
 });
 
 describe('media presentation session', () => {
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
   it('拒絕在沒有專案 FPS 容差時猜測固定影格率', () => {
     expect(() => createMediaPresentationSession({
       timeline: { normalizeTarget: value => value },
@@ -144,16 +149,182 @@ describe('media presentation session', () => {
       calls.push(`commit:${target}`);
       return target;
     });
+    const playback = {
+      suspend: vi.fn(),
+      resume: vi.fn(),
+      fail: vi.fn(),
+      ...overrides.playback,
+    };
     const session = createMediaPresentationSession({
       getTolerance: () => 0.05,
       timeoutMs: 1000,
       timeline,
       player,
       commitPresented,
+      playback,
       ...overrides.options,
     });
-    return { session, calls, clip, adapter, timeline, player, commitPresented };
+    return { session, calls, clip, adapter, timeline, player, commitPresented, playback };
   }
+
+  it('一般跳轉後的播放意圖會等實際畫格呈現完成才恢復', async () => {
+    let finishPresentation;
+    const waitingAdapter = {
+      type: 'html5',
+      present: vi.fn(() => new Promise(resolve => { finishPresentation = resolve; })),
+    };
+    const { session, playback } = createSession({
+      player: { adapter: () => waitingAdapter },
+    });
+
+    const pending = session.requestPlayback(104);
+    expect(session.isPlaybackPending()).toBe(true);
+    expect(session.setPlaybackIntent(true)).toBe(true);
+    expect(session.playbackIntent()).toBe(true);
+    expect(playback.resume).not.toHaveBeenCalled();
+
+    finishPresentation({ backend: 'html5', presentedSourceTime: 4 });
+    await expect(pending).resolves.toMatchObject({
+      status: 'presented', requestedTime: 104, presentedTime: 104,
+    });
+    await Promise.resolve();
+
+    expect(playback.resume).toHaveBeenCalledOnce();
+    expect(session.isPlaybackPending()).toBe(false);
+  });
+
+  it('等待呈現期間又改成暫停，晚到畫格不可恢復播放', async () => {
+    let finishPresentation;
+    const waitingAdapter = {
+      type: 'html5',
+      present: vi.fn(() => new Promise(resolve => { finishPresentation = resolve; })),
+    };
+    const { session, playback } = createSession({
+      player: { adapter: () => waitingAdapter },
+    });
+
+    const pending = session.requestPlayback(104);
+    expect(session.setPlaybackIntent(true)).toBe(true);
+    expect(session.setPlaybackIntent(false)).toBe(false);
+
+    finishPresentation({ backend: 'html5', presentedSourceTime: 4 });
+    await pending;
+    await Promise.resolve();
+
+    expect(playback.resume).not.toHaveBeenCalled();
+    expect(session.playbackIntent()).toBe(false);
+    expect(session.isPlaybackPending()).toBe(false);
+  });
+
+  it('最新播放跳轉逾時時回報失敗並清除播放意圖', async () => {
+    vi.useFakeTimers();
+    const waitingAdapter = { type: 'html5', present: vi.fn(() => new Promise(() => {})) };
+    const { session, playback } = createSession({
+      player: { adapter: () => waitingAdapter },
+      options: { timeoutMs: 50 },
+    });
+
+    const pending = session.requestPlayback(104);
+    session.setPlaybackIntent(true);
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(pending).resolves.toMatchObject({ status: 'timeout', requestedTime: 104 });
+    await Promise.resolve();
+
+    expect(playback.fail).toHaveBeenCalledOnce();
+    expect(playback.fail).toHaveBeenCalledWith(expect.objectContaining({ status: 'timeout' }));
+    expect(session.playbackIntent()).toBe(false);
+    expect(session.isPlaybackPending()).toBe(false);
+  });
+
+  it('reset 會清除播放 transition，舊呈現結果晚到也不可恢復', async () => {
+    let finishPresentation;
+    const waitingAdapter = {
+      type: 'html5',
+      present: vi.fn(() => new Promise(resolve => { finishPresentation = resolve; })),
+    };
+    const { session, playback } = createSession({
+      player: { adapter: () => waitingAdapter },
+    });
+    session.setPlaybackIntent(true);
+    playback.resume.mockClear();
+    const pending = session.requestPlayback(104);
+
+    session.reset('media-reset');
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled', reason: 'media-reset' });
+    expect(session.playbackIntent()).toBe(false);
+    expect(session.isPlaybackPending()).toBe(false);
+
+    finishPresentation({ backend: 'html5', presentedSourceTime: 4 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(playback.resume).not.toHaveBeenCalled();
+  });
+
+  it('播放中連續跳轉只暫停一次，且只有最新目標能恢復', async () => {
+    const presentations = [];
+    const waitingAdapter = {
+      type: 'html5',
+      present: vi.fn(() => new Promise(resolve => { presentations.push(resolve); })),
+    };
+    const { session, playback } = createSession({
+      player: { adapter: () => waitingAdapter },
+    });
+    session.setPlaybackIntent(true);
+    playback.resume.mockClear();
+
+    const first = session.requestPlayback(103);
+    const obsolete = session.requestPlayback(102);
+    const latest = session.requestPlayback(104);
+
+    expect(playback.suspend).toHaveBeenCalledOnce();
+    await expect(obsolete).resolves.toMatchObject({ status: 'superseded', requestedTime: 102 });
+
+    presentations[0]({ backend: 'html5', presentedSourceTime: 3 });
+    await expect(first).resolves.toMatchObject({ status: 'presented', presentedTime: 103 });
+    await Promise.resolve();
+    expect(playback.resume).not.toHaveBeenCalled();
+    expect(session.isPlaybackPending()).toBe(true);
+
+    presentations[1]({ backend: 'html5', presentedSourceTime: 4 });
+    await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 104 });
+    await Promise.resolve();
+    expect(playback.resume).toHaveBeenCalledOnce();
+    expect(session.isPlaybackPending()).toBe(false);
+  });
+
+  it('最新播放跳轉失敗時使用 fail port，較舊結果不會接管', async () => {
+    const failingAdapter = {
+      type: 'html5',
+      present: vi.fn().mockRejectedValue(new Error('decoder failed')),
+    };
+    const { session, playback } = createSession({
+      player: { adapter: () => failingAdapter },
+    });
+
+    const pending = session.requestPlayback(104);
+    session.setPlaybackIntent(true);
+    await expect(pending).resolves.toMatchObject({ status: 'failed', requestedTime: 104 });
+    await Promise.resolve();
+
+    expect(playback.fail).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', error: expect.objectContaining({ message: 'decoder failed' }),
+    }));
+    expect(playback.resume).not.toHaveBeenCalled();
+    expect(session.playbackIntent()).toBe(false);
+  });
+
+  it('cancel 與 reset 一樣會清除一般播放 transition', async () => {
+    const waitingAdapter = { type: 'html5', present: vi.fn(() => new Promise(() => {})) };
+    const { session } = createSession({ player: { adapter: () => waitingAdapter } });
+    const pending = session.requestPlayback(104);
+    session.setPlaybackIntent(true);
+
+    session.cancel('external-seek');
+
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled', reason: 'external-seek' });
+    expect(session.playbackIntent()).toBe(false);
+    expect(session.isPlaybackPending()).toBe(false);
+  });
 
   it('HTML5 呈現由 session 完成來源映射並只提交實際畫格', async () => {
     const { session, adapter, calls } = createSession();

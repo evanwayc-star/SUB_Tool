@@ -31,6 +31,9 @@ function createMpvHost(deps) {
   let requestId = 0;
   const callbacks = new Map();
   let pendingPresentation = null;
+  // mpv 由 --pause 啟動。暫停中的 seek 會更新 time-pos／畫格，卻不保證在
+  // unpause 前送 playback-restart；播放中的 seek 則仍要等 restart 才能視為呈現完成。
+  let playerPaused = true;
   let directionGeneration = 0;
   let buffer = '';
   let generation = 0;
@@ -147,7 +150,8 @@ function createMpvHost(deps) {
 
   function maybeFinishPresentation(request) {
     if (!request || request !== pendingPresentation) return;
-    if (!request.commandAcknowledged || !request.restarted || request.presentedSourceTime == null) return;
+    if (!request.commandAcknowledged || request.presentedSourceTime == null) return;
+    if (!playerPaused && !request.restarted) return;
     settlePresentation(request, {
       backend: 'mpv',
       presentedSourceTime: request.presentedSourceTime,
@@ -155,6 +159,9 @@ function createMpvHost(deps) {
   }
 
   function observePresentationEvent(message) {
+    if (message.event === 'property-change' && message.name === 'pause') {
+      playerPaused = !!message.data;
+    }
     const request = pendingPresentation;
     if (!request) return;
     if (message.event === 'property-change' && message.name === 'time-pos') {
@@ -173,6 +180,7 @@ function createMpvHost(deps) {
     const current = client;
     client = null;
     buffer = '';
+    playerPaused = true;
     clearCallbacks(null);
     cancelPresent();
     if (destroy && current) { try { current.destroy(); } catch (error) {} }
@@ -257,9 +265,18 @@ function createMpvHost(deps) {
     const command = exact
       ? ['seek', targetTime, 'absolute+exact']
       : ['set_property', 'time-pos', targetTime];
-    send(command, true).then(() => {
+    send(command, true).then(async () => {
       if (request !== pendingPresentation) return;
       request.commandAcknowledged = true;
+      maybeFinishPresentation(request);
+      if (request !== pendingPresentation) return;
+      // 定位到「已經正在顯示的同一格」時，mpv 可以只回覆 command 而不再送
+      // property-change。向播放器讀回實際 time-pos，避免這種有效定位占住 session。
+      const observed = await send(['get_property', 'time-pos'], true);
+      if (request !== pendingPresentation || !Number.isFinite(observed)) return;
+      if (Math.abs(observed - request.targetTime) <= request.tolerance) {
+        request.presentedSourceTime = observed;
+      }
       maybeFinishPresentation(request);
     });
     return promise;

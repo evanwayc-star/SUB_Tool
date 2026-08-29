@@ -120,4 +120,22 @@ describe('PlaybackSyncEngine fallback gap', () => {
     expect(events).toEqual(['play', 'pause', 'play']);
     expect(audio.paused).toBe(false);
   });
+
+  it('呈現切換尚未完成時不以舊 presenter clock 推進片段或 gap', () => {
+    const media = {
+      playing: true,
+      presenterClockMoving: () => false,
+      _seqSwitching: false,
+      _gap: false,
+      tracks: [],
+      externalAudio: { sourceTime: () => null },
+      audioOnlyTimeline: () => false,
+      seqOn: () => true,
+      tlTime: vi.fn(() => 12),
+    };
+
+    new PlaybackSyncEngine(media).seqTick();
+
+    expect(media.tlTime).not.toHaveBeenCalled();
+  });
 });

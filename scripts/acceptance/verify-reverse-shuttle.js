@@ -5,8 +5,9 @@
      node scripts/acceptance/verify-reverse-shuttle.js
 
    產生一支帶聲音的長 GOP H.264 測試片，以獨立 user-data-dir 開啟真正的
-   Electron + mpv，分別量測 1x 正播與 1x 倒播的實際 video PTS。驗收看的
-   是呈現畫格 cadence、跳格幅度與 UI 漂移，不以「IPC 有送出」代替畫面。
+   Electron + mpv，先做長距離 seek 後立刻按播放，再分別量測 1x 正播與 1x
+   倒播的實際 video PTS。驗收看的是呈現畫格 cadence、跳格幅度與 UI 漂移，
+   不以「IPC 有送出」代替畫面。
    ============================================================================ */
 const fs = require('fs');
 const os = require('os');
@@ -173,13 +174,44 @@ async function samplePresentation(client) {
       document.activeElement?.blur?.();
       document.body.tabIndex = -1;
       document.body.focus();
-      window.SUB.Media.seek(8);
+      window.SUB.Media.seek(15);
       return true;
     })()`);
-    await delay(600);
 
     await dispatchKey(client, 'l', 'KeyL');
-    await waitFor(() => client.evaluate('window.SUB.Media.playing === true'), '1x 正播啟動');
+    const immediatePlayState = await client.evaluate(`(() => ({
+      playing: window.SUB.Media.playing,
+      presentationPending: window.SUB.Media.presentationPending(),
+      playbackTransitionPending: window.SUB.Media.playbackTransitionPending(),
+      presenterClockMoving: window.SUB.Media.presenterClockMoving(),
+      displayTime: window.SUB.Media.displayTime()
+    }))()`);
+    try {
+      await waitFor(
+        () => client.evaluate(`window.SUB.Media.playing === true
+          && window.SUB.Media.playbackTransitionPending() === false
+          && window.SUB.Media.presenterClockMoving() === true`),
+        '長距離 seek 的實際畫格與 1x 播放時鐘啟動',
+        10000
+      );
+    } catch (error) {
+      const readiness = await client.evaluate(`(() => ({
+        playing: window.SUB.Media.playing,
+        presentationPending: window.SUB.Media.presentationPending(),
+        playbackTransitionPending: window.SUB.Media.playbackTransitionPending(),
+        playbackIntent: window.SUB.Media._presentationSession?.playbackIntent?.(),
+        presenterClockMoving: window.SUB.Media.presenterClockMoving(),
+        displayTime: window.SUB.Media.displayTime(),
+        presentedTime: window.SUB.Media.presentedTime(),
+        mpvTime: window.SUB.Media._mpvTime,
+        activeClipId: window.SUB.Media.activeClipId,
+        inGap: window.SUB.Media.inGap(),
+        sequenceSwitching: window.SUB.Media._seqSwitching,
+        status: document.getElementById('status')?.textContent || ''
+      }))()`);
+      error.message += `；readiness=${JSON.stringify(readiness)}`;
+      throw error;
+    }
     const forwardSamples = await samplePresentation(client);
     await dispatchKey(client, 'k', 'KeyK');
     await waitFor(() => client.evaluate('window.SUB.Media.playing === false'), '正播停止');
@@ -215,6 +247,7 @@ async function samplePresentation(client) {
         codec: 'H.264', fps: FPS, gopFrames: 250, seconds: 20, audio: 'AAC',
         reverseProxyKeyframeSeconds: 0.5,
       },
+      immediatePlayState,
       forward,
       reverse,
       reverseStayedMuted,

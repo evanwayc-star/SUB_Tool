@@ -882,12 +882,12 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <div class="asr-field asr-provider-field">
             <label for="asrProvider">聲音分析引擎</label>
             <select id="asrProvider" class="asr-provider-select">
-          <option value="builtin" ${conf.provider === 'builtin' ? 'selected' : ''}>程式內建本機 AI 引擎 (免設定・100% 離線)</option>
-          <option value="groq" ${conf.provider === 'groq' ? 'selected' : ''}>Groq (Whisper-large-v3，極速雲端・免費)</option>
-          <option value="openai" ${conf.provider === 'openai' ? 'selected' : ''}>OpenAI (Whisper-1 官方雲端)</option>
-          <option value="azure" ${conf.provider === 'azure' ? 'selected' : ''}>Azure Speech (專業語音辨識・逐句時間碼)</option>
-          <option value="google" ${conf.provider === 'google' ? 'selected' : ''}>Google Gemini (大語言模型・繁體中文理解力最強)</option>
-          <option value="elevenlabs" ${conf.provider === 'elevenlabs' ? 'selected' : ''}>ElevenLabs (Scribe v2，高精準多語言・逐字時間碼)</option>
+          <option value="builtin" ${conf.provider === 'builtin' ? 'selected' : ''}>程式內建本機 AI 引擎</option>
+          <option value="groq" ${conf.provider === 'groq' ? 'selected' : ''}>Groq</option>
+          <option value="openai" ${conf.provider === 'openai' ? 'selected' : ''}>OpenAI</option>
+          <option value="azure" ${conf.provider === 'azure' ? 'selected' : ''}>Azure Speech</option>
+          <option value="google" ${conf.provider === 'google' ? 'selected' : ''}>Google Gemini</option>
+          <option value="elevenlabs" ${conf.provider === 'elevenlabs' ? 'selected' : ''}>ElevenLabs</option>
         </select>
             <div id="asrProviderHint" class="asr-helper">${escapeHTML(ASR_PROVIDER_UI_META[conf.provider]?.hint || '')}</div>
           </div>
@@ -896,10 +896,10 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <div id="asrBuiltinRow" class="asr-field" style="display:${conf.provider === 'builtin' ? 'flex' : 'none'};">
             <label for="asrBuiltinModel">內建 AI 模型等級</label>
             <select id="asrBuiltinModel">
-          <option value="onnx-community/whisper-tiny" ${conf.builtinModel === 'onnx-community/whisper-tiny' ? 'selected' : ''}>Whisper Tiny 逐字時間版 (最快；CPU 約 39MB／GPU 約 150MB)</option>
-          <option value="onnx-community/whisper-base" ${conf.builtinModel === 'onnx-community/whisper-base' ? 'selected' : ''}>Whisper Base 逐字時間版 (平衡；CPU 約 73MB／GPU 約 290MB)</option>
-          <option value="onnx-community/whisper-small" ${conf.builtinModel === 'onnx-community/whisper-small' ? 'selected' : ''}>Whisper Small 逐字時間版 (中文佳；CPU 約 240MB／GPU 約 560MB)</option>
-          <option value="onnx-community/whisper-large-v3-turbo" ${conf.builtinModel === 'onnx-community/whisper-large-v3-turbo' ? 'selected' : ''}>Whisper Large v3 Turbo q4 逐字時間版 (速度優先，約 800MB)</option>
+          <option value="onnx-community/whisper-tiny" ${conf.builtinModel === 'onnx-community/whisper-tiny' ? 'selected' : ''}>Whisper Tiny 逐字時間版</option>
+          <option value="onnx-community/whisper-base" ${conf.builtinModel === 'onnx-community/whisper-base' ? 'selected' : ''}>Whisper Base 逐字時間版</option>
+          <option value="onnx-community/whisper-small" ${conf.builtinModel === 'onnx-community/whisper-small' ? 'selected' : ''}>Whisper Small 逐字時間版</option>
+          <option value="onnx-community/whisper-large-v3-turbo" ${conf.builtinModel === 'onnx-community/whisper-large-v3-turbo' ? 'selected' : ''}>Whisper Large v3 Turbo q4 逐字時間版</option>
         </select>
             <div class="asr-helper">首次使用會下載並快取模型；有獨立顯卡時可自動啟用 WebGPU。</div>
           </div>

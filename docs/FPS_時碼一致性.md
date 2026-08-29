@@ -82,10 +82,14 @@ FPS-SYNC
 #### (I4a) 播放目標不能冒充實際呈現位置
 
 - `Media.requestPresentation()` 的輸入是等待呈現的時間軸目標；解碼完成前不得先覆蓋 `_lastSeekTime`。
-- HTML video 以 `requestVideoFrameCallback` 的 `mediaTime`、mpv 以同一請求之後的 per-frame `time-pos` 與
-  `playback-restart`、WebCodecs 以所有可見圖層成功 `drawImage()` 的來源時間戳，作為呈現完成證據。
-- mpv `time-pos` 單獨只代表播放器內部位置；必須和該請求的 `playback-restart` 配對，呈現請求未完成時不得讓 UI 播放點先跑到目標。
+- HTML video 以 `requestVideoFrameCallback` 的 `mediaTime`、mpv 以同一請求確認後的 per-frame `time-pos`
+  （播放中另須 `playback-restart`）、WebCodecs 以所有可見圖層成功 `drawImage()` 的來源時間戳，作為呈現完成證據。
+- mpv 播放中的 `time-pos` 必須和該請求的 `playback-restart` 配對；暫停中的精準定位不會先送 restart，
+  此時以 IPC 指令已確認且 `time-pos` 命中目標為準。若目標就是目前畫格而沒有新的 property-change，
+  host 必須主動讀回 `time-pos`；兩種情況都不得用 seek 前的舊位置完成請求。
 - 倒帶只保留最新尚未送出的目標，避免舊 seek 佇列讓畫面長時間追趕過期位置。
+- 一般 seek 後立刻按播放時，play/pause 只先更新為最新意圖；HTML5／mpv／WebCodecs 尚未回報實際畫格前，
+  不得啟動 presenter、片段推進或音訊 drift correction。等待中再按暫停時，晚到畫格只能完成靜止呈現。
 
 ### (I5) 逐格步進以 `displayTime()` 為基準
 
@@ -131,10 +135,10 @@ FPS-SYNC
 | `pointer-seek-control.js` | `requestPointerSeek()` | 滑鼠互動傳入時間軸時間，播放狀態處理後仍統一交給 `Media.seek()` 吸附影格 | I3, I4 |
 | `media.js` | `pause()` 的 snap | 暫停點對齊影格 | I3 |
 | `media.js` | mpv `time-pos` handler | 暫停時同源同格 + 抖動容忍 | I4, I6 |
-| `loaders/media-loader.js` | 原生 `seeked`／mpv per-frame `time-pos` | 普通 seek 對齊；呈現請求另與 `playback-restart` 配對後才提交 | I3, I4, I4a |
+| `loaders/media-loader.js` | 原生 `seeked`／mpv per-frame `time-pos` | 普通 seek 對齊；mpv 播放中另與 `playback-restart` 配對，暫停中以 command ack + 目標 `time-pos` 提交 | I3, I4, I4a |
 | `transport-controller.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
 | `shuttle-runtime.js` | `ReverseShuttleSession` | elapsed time × 倍率 × 精確 FPS 產生最新倒帶目標；持續監看原生實際呈現進度 | I3, I4a, I5 |
-| `media-presentation-core.js` | `createMediaPresentationSession()` | 同時一個 in-flight、只保留最新 pending；同一 session 擁有 WebCodecs takeover、合成畫格 waiter、取消與 reset | I4a |
+| `media-presentation-core.js` | `createMediaPresentationSession()` | 同時一個 in-flight、只保留最新 pending；同一 session 擁有 WebCodecs takeover、合成畫格 waiter、一般 seek 的最新播放意圖、取消與 reset | I4a |
 | `decode/player.js` | WebCodecs 呈現回報 | 所有可見圖層完成繪製後回報各自實際來源時間 | I4a |
 | `notes.js` | `addNote()` | 備註時間取自 `displayTime()` | I4 |
 | `timeline-renderer.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |

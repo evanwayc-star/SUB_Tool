@@ -37,7 +37,7 @@ const WEBGPU_WHISPER_MIXED_DTYPE = Object.freeze({
 export const BUILTIN_MODELS = {
   'onnx-community/whisper-tiny': {
     id: 'onnx-community/whisper-tiny_timestamped',
-    name: 'Tiny 逐字時間版 (CPU 約 39MB／GPU 約 150MB)',
+    name: 'Tiny 逐字時間版',
     size: 'CPU 約 39MB／GPU 約 150MB',
     webgpuDtype: 'fp32',
     wasmDtype: 'q8',
@@ -45,7 +45,7 @@ export const BUILTIN_MODELS = {
   },
   'onnx-community/whisper-base': {
     id: 'onnx-community/whisper-base_timestamped',
-    name: 'Base 逐字時間版 (CPU 約 73MB／GPU 約 290MB)',
+    name: 'Base 逐字時間版',
     size: 'CPU 約 73MB／GPU 約 290MB',
     webgpuDtype: 'fp32',
     wasmDtype: 'q8',
@@ -53,7 +53,7 @@ export const BUILTIN_MODELS = {
   },
   'onnx-community/whisper-small': {
     id: 'onnx-community/whisper-small_timestamped',
-    name: 'Small 逐字時間版 (CPU 約 240MB／GPU 約 560MB)',
+    name: 'Small 逐字時間版',
     size: 'CPU 約 240MB／GPU 約 560MB',
     webgpuDtype: WEBGPU_WHISPER_MIXED_DTYPE,
     wasmDtype: 'q8',
@@ -61,7 +61,7 @@ export const BUILTIN_MODELS = {
   },
   'onnx-community/whisper-large-v3-turbo': {
     id: 'onnx-community/whisper-large-v3-turbo_timestamped',
-    name: 'Large v3 Turbo q4 逐字時間版 (速度優先約 800MB)',
+    name: 'Large v3 Turbo q4 逐字時間版',
     size: '約 800MB',
     webgpuDtype: 'q4',
     wasmDtype: 'q8',
@@ -1581,4 +1581,3 @@ export async function transcribeAudioStream({
 
   throw new Error(`不支援的語音辨識供應商：${provider}`);
 }
-

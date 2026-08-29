@@ -191,7 +191,7 @@ export class PlaybackSyncEngine {
   }
 
   seqTick() {
-    if (!this.media.playing || this.media._seqSwitching) return;
+    if (!this.media.playing || this.media._seqSwitching || this.media.presenterClockMoving?.() === false) return;
     if (this.media.audioOnlyTimeline()) {
       const t = this.media.tlTime();
       this._syncExternalElementActivity(t);

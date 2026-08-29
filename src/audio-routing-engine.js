@@ -158,6 +158,9 @@ export class MediaAudioRouter {
   }
 
   syncDrift() {
+    // 呈現切換期間，video/mpv 的來源時間仍可能停在舊畫格。若拿這個停止的
+    // clock 校正元素／buffer 音訊，會把同一小段聲音反覆拉回播放。
+    if (this.media.presenterClockMoving?.() === false) return;
     if (this.media.tracks.some(t => t.kind === 'buffer' && !t._srcHidden)) {
       AudioEngine.syncBuffers(this.media.vTime(), { inGap: this.media.inGap() });
     }

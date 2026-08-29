@@ -153,6 +153,7 @@ export function createMediaPresentationSession(options = {}) {
   const getTolerance = options.getTolerance;
   const timeline = options.timeline || {};
   const player = options.player || {};
+  const playback = options.playback || {};
   const commitPresented = options.commitPresented;
   if (typeof getTolerance !== 'function') throw new TypeError('getTolerance must be a function');
   if (typeof timeline.normalizeTarget !== 'function') throw new TypeError('timeline.normalizeTarget must be a function');
@@ -160,6 +161,10 @@ export function createMediaPresentationSession(options = {}) {
   if (typeof commitPresented !== 'function') throw new TypeError('commitPresented must be a function');
   const compositeWaiters = new Map();
   let webCodecsTakeover = false;
+  let wantsPlayback = false;
+  let playbackPending = false;
+  let playbackRunning = false;
+  let playbackRequestToken = 0;
 
   function waitForWebCodecsPresentation(targetTime, { requestId, signal } = {}) {
     const key = requestId ?? Symbol('webcodecs-presentation');
@@ -243,7 +248,9 @@ export function createMediaPresentationSession(options = {}) {
       : null;
     webCodecsPending?.catch(() => {});
     const tolerance = Math.max(0, Number(getTolerance(targetTime, { source: adapter.type })) || 0);
-    const result = await adapter.present(sourceTarget, {
+    const presentationTarget = Number(player.presentationTarget?.(sourceTarget, clip) ?? sourceTarget);
+    if (!Number.isFinite(presentationTarget)) throw new Error('player presentation target is unavailable');
+    const result = await adapter.present(presentationTarget, {
       signal,
       exact: !!(player.isNative?.() && player.exactSeek?.()),
       tolerance,
@@ -273,7 +280,69 @@ export function createMediaPresentationSession(options = {}) {
     presentTarget: presentTimelineTarget,
   });
 
+  function invokePlayback(name, ...args) {
+    const effect = playback[name];
+    if (typeof effect !== 'function') return;
+    try {
+      const result = effect(...args);
+      result?.catch?.(() => {});
+    } catch (error) {}
+  }
+
+  function requestPlayback(targetTime, requestOptions) {
+    const token = ++playbackRequestToken;
+    if (!playbackPending && playbackRunning) {
+      invokePlayback('suspend');
+      playbackRunning = false;
+    }
+    playbackPending = true;
+    const pending = core.request(timeline.normalizeTarget(targetTime), requestOptions);
+    pending.then(result => {
+      if (token !== playbackRequestToken) return;
+      playbackPending = false;
+      if (result?.status === 'presented') {
+        if (!wantsPlayback) return;
+        invokePlayback('resume');
+        playbackRunning = true;
+        return;
+      }
+      if ((result?.status === 'timeout' || result?.status === 'failed') && wantsPlayback) {
+        wantsPlayback = false;
+        playbackRunning = false;
+        invokePlayback('fail', result);
+      }
+    });
+    return pending;
+  }
+
+  function setPlaybackIntent(value) {
+    wantsPlayback = !!value;
+    if (!wantsPlayback) {
+      if (playbackRunning) invokePlayback('suspend');
+      playbackRunning = false;
+      return false;
+    }
+    if (playbackPending) return true;
+    if (!playbackRunning) invokePlayback('resume');
+    playbackRunning = true;
+    return false;
+  }
+
+  function clearPlaybackTransition() {
+    playbackRequestToken += 1;
+    playbackPending = false;
+    wantsPlayback = false;
+    if (playbackRunning) invokePlayback('suspend');
+    playbackRunning = false;
+  }
+
+  function cancel(reason = 'cancelled') {
+    clearPlaybackTransition();
+    core.cancel(reason);
+  }
+
   function reset(reason = 'media-reset') {
+    clearPlaybackTransition();
     core.cancel(reason);
     for (const waiter of [...compositeWaiters.values()]) waiter.abort();
     compositeWaiters.clear();
@@ -284,8 +353,12 @@ export function createMediaPresentationSession(options = {}) {
     request(targetTime, requestOptions) {
       return core.request(timeline.normalizeTarget(targetTime), requestOptions);
     },
+    requestPlayback,
+    setPlaybackIntent,
+    isPlaybackPending() { return playbackPending; },
+    playbackIntent() { return wantsPlayback; },
     observe: core.observe,
-    cancel: core.cancel,
+    cancel,
     presentedTime: core.presentedTime,
     isPending: core.isPending,
     reportWebCodecsPresentation,

@@ -118,4 +118,31 @@ describe('MediaAudioRouter buffer drift clock', () => {
     router.syncDrift();
     expect(el.pause).toHaveBeenCalled();
   });
+
+  it('presentation 尚未就緒時不會把音訊反覆校正到停止的 presenter 時鐘', () => {
+    const el = {
+      paused: false,
+      currentTime: 18,
+      pause: vi.fn(),
+    };
+    const media = {
+      tracks: [{ kind: 'element', source: 'video', el, _srcHidden: false }],
+      playing: true,
+      presenterClockMoving: () => false,
+      activeSource: 'video',
+      activeClipId: null,
+      seqOn: () => false,
+      inGap: () => false,
+      tlTime: () => 2,
+      vTime: () => 2,
+      sourceLocalTime: () => 2,
+      externalAudio: { sourceTime: () => null },
+    };
+    const router = new MediaAudioRouter(media, { playbackRate: 1 }, { muted: false });
+
+    router.syncDrift();
+
+    expect(el.currentTime).toBe(18);
+    expect(el.pause).not.toHaveBeenCalled();
+  });
 });

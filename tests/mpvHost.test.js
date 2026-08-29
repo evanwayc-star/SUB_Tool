@@ -134,11 +134,59 @@ describe('Windows mpv host lifecycle', () => {
     ]);
   });
 
-  it('present 等到 seek 後的 time-pos 與 playback-restart 才回報實際畫格', async () => {
+  it('暫停中的 present 在指令確認且 time-pos 到達後回報實際畫格，不等待播放重啟', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    const socket = sockets[0];
+    socket.write.mockClear();
+    socket.emit('data', Buffer.from(JSON.stringify({
+      event: 'property-change', name: 'pause', data: true,
+    }) + '\n'));
+
+    const pending = host.present(10, { exact: true, tolerance: 0.05 });
+    await Promise.resolve();
+    socket.emit('data', Buffer.from(JSON.stringify({
+      event: 'property-change', name: 'time-pos', data: 9.98,
+    }) + '\n'));
+
+    await expect(pending).resolves.toEqual({ backend: 'mpv', presentedSourceTime: 9.98 });
+    expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('absolute+exact'));
+  });
+
+  it('暫停中定位到已在顯示的同一格時，主動查詢 time-pos，避免沒有 property-change 而卡住後續請求', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    const socket = sockets[0];
+    socket.write.mockClear();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (typeof message.request_id !== 'number') return;
+      const isTimePositionQuery = message.command?.[0] === 'get_property' && message.command?.[1] === 'time-pos';
+      queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({
+        request_id: message.request_id,
+        data: isTimePositionQuery ? 10 : null,
+      }) + '\n')));
+    });
+
+    const pending = host.present(10, { exact: true, tolerance: 0.05 });
+    const result = await Promise.race([
+      pending,
+      new Promise(resolve => setTimeout(() => resolve('still-pending'), 20)),
+    ]);
+
+    expect(result).toEqual({ backend: 'mpv', presentedSourceTime: 10 });
+    const commands = socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands).toContainEqual(['get_property', 'time-pos']);
+  });
+
+  it('播放中的 present 仍等到 seek 後的 time-pos 與 playback-restart 才回報實際畫格', async () => {
     const { host, sockets, events } = make();
     await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
     const socket = sockets[0];
     socket.write.mockClear();
+    socket.emit('data', Buffer.from(JSON.stringify({
+      event: 'property-change', name: 'pause', data: false,
+    }) + '\n'));
 
     const pending = host.present(10, { exact: true, tolerance: 0.05 });
     await Promise.resolve();
