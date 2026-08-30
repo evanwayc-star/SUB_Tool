@@ -1,9 +1,5 @@
 import { State } from './state.js';
 import { Media } from './media.js';
-import { detectWaveformTransients, findNearestWaveformSnap } from './waveform-snapping-engine.js';
-
-export { detectWaveformTransients, findNearestWaveformSnap };
-
 export function timeToX(t, viewStart = State.viewStart, pxPerSec = State.pxPerSec) {
   return (t - viewStart) * pxPerSec;
 }

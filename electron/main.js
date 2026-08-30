@@ -7,7 +7,7 @@
 /* SUB Tool — Electron 主程序
    提供：原生檔案對話框、平台原生 ffmpeg/ffprobe（MXF 轉檔、多音軌抽取、波形）、
          專案/字幕直接讀寫磁碟。前端沿用同一份 index.html。 */
-const { app, BrowserWindow, ipcMain, dialog, protocol, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, session, webContents } = require('electron');
 const path = require('path');
 const fs = require('fs');
 /* RecentProjects 的 missing probe 會觸及 SMB 路徑，不可用同步 stat 阻塞
@@ -21,19 +21,17 @@ const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const QueueStore = require('./queue-store');
 const QueueHistory = require('./queue-history');
-const { relayQueueRunnerEvent, runnerFailureProgress } = require('./queue-runner-adapter');
-const { ExportQueueState } = require('./export-queue-state');
+const { createDeliveryRunner } = require('./delivery-runner');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
 const { FileAuthority } = require('./file-authority');
 const { createLocalResourceServer, registerLocalResourceScheme } = require('./local-resource');
 const { createProjectWorkspace } = require('./project-workspace');
-const { sanitizeWindowBounds, decideWindowCloseAction } = require('./window-lifecycle-authority');
 
 const { mergeRendererConfig } = require('./config-policy');
 const { isPathContained } = require('./export-name-safety');
 const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
-const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
+const { JOB_STATUS, reservesOutput } = require('./export-job-status');
 const { createExportAdmission } = require('./export-admission');
 const { createExportQueue } = require('./export-queue');
 const { createMpvHost } = require('./mpv-host');
@@ -650,7 +648,6 @@ function vencArgsBitrate(kbps) {
    留在這裡的是需要副作用的部分：找字型要讀檔。 */
 const {
   imageBoxForExport,
-  buildDeliveryArgv,
   _finiteNumber,
   _filterNumber,
   _exportPlanError,
@@ -701,6 +698,39 @@ const ffmpegExecution = createFFmpegExecution({
   },
 });
 const runFF = (args, options) => ffmpegExecution.execute(args, options);
+const deliveryRunner = createDeliveryRunner({
+  queue: {
+    assertJobCapabilities: job => QueueManager.assertJobCapabilities(job),
+    reportProgress: (jobId, progress) => QueueManager.reportProgress(jobId, progress),
+    registerActiveJob: (jobId, active) => QueueManager.registerActiveJob(jobId, active),
+    clearActiveJob: jobId => QueueManager.clearActiveJob(jobId),
+    activeJob: jobId => QueueManager.activeJob(jobId),
+  },
+  queueDir: () => EXPORT_QUEUE_DIR,
+  tempDir: TMP,
+  mediaProbe: () => mediaProbe,
+  runFfmpeg: runFF,
+  encoder: {
+    name: () => VENC,
+    hwdecArgs,
+    bitrateArgs: vencArgsBitrate,
+    proresArgs,
+  },
+  fonts: {
+    root: fontsRoot,
+    timecodeFile: _findExportTimecodeFont,
+  },
+  events: {
+    senderForId: senderId => {
+      try {
+        const sender = webContents.fromId(senderId);
+        return sender && !sender.isDestroyed() ? sender : null;
+      } catch (error) { return null; }
+    },
+    fallbackSender: () => mainWin && !mainWin.isDestroyed() ? mainWin.webContents : null,
+    send: safeSend,
+  },
+});
 
 /* cache identity / metadata / fragmented-MP4 HTTP registry / ingest commit 由同一個
    runtime 持有；main 只保留 Electron IPC、FileAuthority 與原生工具的組裝點。 */
@@ -855,24 +885,18 @@ function queueStatusSnapshot() {
    於是 main.js 成為唯一持有狀態的地方，同時還持有媒體快取、字型掃描、
    本機 HTTP 伺服器、mpv 整合⋯⋯十種互不相關的狀態。
 
-   現在佇列【自己擁有】那些狀態，這裡只留接線：
-   視窗生命週期與 _runJobLogic（spawn／log／進度回報）仍是 main.js 的職責，
-   由 onChanged / runJob 注入。 */
+   現在佇列【自己擁有】那些狀態；單份工作的完整執行交易則由
+   delivery-runner.js 持有。這裡只負責 Electron adapters 與事件接線。 */
 QueueManager = createExportQueue({
   dir: () => EXPORT_QUEUE_DIR,
-  createState: () => new ExportQueueState(),
   store: QueueStore,
   history: QueueHistory,
-  JOB_STATUS,
-  isLiveWork,
-  isRetryable,
-  reservesOutput,
   admission: _admission,
   grantPersistedCapabilities: grantPersistedQueueJobCapabilities,
   canReadSource: file => fileAuthority.canRead(file),
   canWriteDelivery: file => fileAuthority.canWriteDelivery(file),
   isFile: p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } },
-  runJob: job => _runJobLogic(job),
+  runJob: job => deliveryRunner.run(job),
   prepareDeliveryUpdate: prepareQueueDeliveryUpdate,
   onChanged: () => {
     safeWinSend(mainWin, 'queue:update');
@@ -936,7 +960,7 @@ ipcMain.handle('queue:reorderJob', (e, jobId, newIndex) => {
    （同資料夾、同主檔名、只換副檔名）。renderer 給不了路徑，所以沒有注入空間；
    未知格式由 expectedExportExtension 直接擋掉（fail-closed）。
 
-   為什麼改 payload 就夠：_runJobLogic 是在【執行時】才從 job.payload 重新推導
+   為什麼改 payload 就夠：delivery runner 是在【執行時】才從 job.payload 重新推導
    format / isWav / isPro / audioPlan / timecodeWatermark 的，不是在入列時凍結的。
    （TC 浮水印在轉成 WAV 時會自動變成 null，因為那條路徑本來就寫 `isWav ? null : …`。） */
 ipcMain.handle('queue:updateDelivery', (e, jobId, patch) => {
@@ -970,7 +994,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
 
   /* 燒入 TC。WAV 沒有畫面可燒——這條規則在 delivery-list.js toJobs 是
      `(!isWav && r.burnTimecode) ? {…} : null`，這裡必須一致，否則從 MP4 改成 WAV
-     之後 payload 還留著 watermark，_runJobLogic 那邊雖然也會擋（isWav ? null : …），
+     之後 payload 還留著 watermark，delivery runner 雖然也會擋（isWav ? null : …），
      但佇列畫面會顯示「燒入 TC」而實際不會燒——顯示說謊比不顯示更糟。 */
   const wantsTc = patch?.burnTimecode != null ? !!patch.burnTimecode : !!p.timecodeWatermark;
   let timecodeWatermark = null;
@@ -1063,154 +1087,6 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   openQueueWindow();
   return jobId;
 });
-
-async function _runJobLogic(job) {
-  // 解構 job.payload 變數
-  // [v5.4.4] 將 width, height, fps, duration 重新命名為 payloadWidth, payloadHeight, payloadFps, payloadDuration
-  // 避免與後續 ffmpeg 生成參數時使用的短變數 W, H, R, D 產生命名衝突 (ReferenceError)。
-  const { clips, videoTracks, width: payloadWidth, height: payloadHeight, fps: payloadFps, format, duration: payloadDuration, outPath, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark } = job.payload;
-  const jobId = job.id;
-  // Get sender if available
-  let sender = null;
-  try {
-    const wc = require('electron').webContents.fromId(job.senderId);
-    if (wc && !wc.isDestroyed()) sender = wc;
-  } catch (err) {}
-  
-  const fallbackSender = mainWin && !mainWin.isDestroyed() ? mainWin.webContents : null;
-  const dispatch = (evt, data) => {
-    // 進度與 terminal transition 都由 QueueManager 擁有；runJob adapter 只轉送。
-    // 這避免 main.js 和 queue 各自改 job.status，造成合法狀態機被繞過。
-    relayQueueRunnerEvent({
-      reportProgress: (id, progress) => QueueManager.reportProgress(id, progress),
-      send: (event, payload) => {
-        if (sender) safeSend(sender, event, payload);
-        else if (fallbackSender) safeSend(fallbackSender, event, payload);
-      },
-    }, jobId, evt, data);
-  };
-
-  const isWav = format === 'wav';
-  const audioPlan = _normalizeAudioPlan(rawAudioPlan, { requireStreams: !isWav });
-  const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, payloadFps);
-  const isPro = format === 'prores';
-  QueueManager.assertJobCapabilities(job);
-  
-  // 載入分離的 assText
-  let assText = null;
-  if (job.assRef) {
-    const assPath = QueueStore.safeAssPath(EXPORT_QUEUE_DIR, job.assRef);
-    try {
-      if (!assPath) throw new Error('字幕暫存路徑無效');
-      assText = fs.readFileSync(assPath, 'utf8');
-    } catch (cause) {
-      const error = new Error(`找不到字幕快照：${assPath || job.assRef}`);
-      error.code = 'MISSING_SOURCE';
-      error.cause = cause;
-      throw error;
-    }
-  }
-
-
-    try {
-      // 匯出工作只能使用建立時已經過可信入口授權的來源；不能因序列化 payload
-      // 在背景執行時再次把 renderer 資料升格成檔案能力。
-      // 交付規格 → argv 的整段決策住在 export-plan.js（零 require、可在 vitest 直接測）。
-      // 這裡只留真正需要副作用的事：建暫存目錄、把字幕快照寫成 .ass、spawn、回報。
-      ensureTmp();
-      let assName = null;
-      if (assText && assText.trim()) {
-        assName = QueueStore.burnAssFileName(jobId);
-        fs.writeFileSync(path.join(TMP, assName), assText, 'utf8');
-      }
-      const audioPresence = new Map(await Promise.all(
-        [...new Set((clips || [])
-          .filter(clip => clip?.path && clip.type !== 'image')
-          .map(clip => clip.path))]
-          .map(async sourcePath => [sourcePath, await mediaProbe.hasAudio(sourcePath)]),
-      ));
-      const plan = buildDeliveryArgv({
-        format, clips, videoTracks,
-        width: payloadWidth, height: payloadHeight, fps: payloadFps,
-        duration: payloadDuration, videoKbps, audioPlan, timecodeWatermark,
-        assFileName: assName, outPath,
-      }, {
-        hwdecArgs, vencArgsBitrate, proresArgs,
-        encoderName: VENC,
-        hasAudioStream: sourcePath => audioPresence.get(sourcePath) ?? true,
-        fontsDir: fontsRoot(),
-        timecodeFontFile: _findExportTimecodeFont(),
-      });
-      const { args, label, duration: D, kbps, audioBitrates } = plan;
-
-      if (isWav) {
-        const t0 = Date.now();
-        await runFF(args, { duration: D, jobId, label, outPath,
-          onProgress: data => dispatch('task-progress', data),
-          onProcess: controller => {
-            QueueManager.registerActiveJob(jobId, {
-              controller,
-              p: controller.process,
-              stop: controller.stop,
-              completion: controller.completion,
-              outPath,
-              stopped: false,
-            });
-          }
-        });
-        QueueManager.clearActiveJob(jobId);
-        const r = { outPath, encoder: plan.plannedEncoder, gpu: false, elapsedMs: Date.now() - t0, videoKbps: null, audioChannels: plan.audioChannels };
-        dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
-        return;
-      }
-
-      let usedEncoder = plan.plannedEncoder;
-      const t0 = Date.now();
-      try {
-        const rr = await runFF(args, { duration: D, jobId, label, cwd: TMP, outPath,
-          onProgress: data => dispatch('task-progress', data),
-          onProcess: controller => {
-            QueueManager.registerActiveJob(jobId, {
-              id: jobId,
-              controller,
-              p: controller.process,
-              stop: controller.stop,
-              completion: controller.completion,
-              outPath,
-              stopped: false,
-            });
-          }
-        });
-    // ffmpeg 的串流對應行是「實際使用」的地面真相（非我們的猜測）：
-    //   例 "mpeg2video (native) -> h264 (h264_nvenc)" → 取箭頭右側括號內的編碼器
-    const vmap = (rr.maps || []).find(m => /->/.test(m) && /h264|prores|hevc/i.test(m));
-    const em = vmap && /->\s*[^(]*\(([^)]+)\)\s*$/.exec(vmap.trim());
-    if (em) usedEncoder = em[1].trim();
-  } finally {
-    if (assName) { try { fs.unlinkSync(path.join(TMP, assName)); } catch (e2) {} }
-  }
-  // 回傳 ffmpeg 實際使用的編碼器與耗時，供 renderer 顯示「這次真的用了 GPU 沒有」
-      QueueManager.clearActiveJob(jobId);
-      const r = {
-        outPath, encoder: usedEncoder, gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder),
-        elapsedMs: Date.now() - t0, videoKbps: isPro ? null : kbps,
-        audioBitrates: isPro ? null : audioBitrates,
-        audioActualBitrates: isPro ? null : await mediaProbe.audioBitrates(outPath)
-      };
-      dispatch( 'task-progress', { jobId, label, pct: 100, done: true, result: r });
-    } catch (err) {
-      const active = QueueManager.activeJob(jobId);
-      const wasShutdown = !!active?.shutdown;
-      const wasStopped = !!active?.stopped;
-      QueueManager.clearActiveJob(jobId);
-      /* 手動停止優先於隨後的 app shutdown；否則 stopping 會被關機當作 queued 恢復，
-         使用者明確取消的工作在重啟後反而重新執行。 */
-      const progress = runnerFailureProgress({ stopped: wasStopped, shutdown: wasShutdown, error: err });
-      if (progress) dispatch('task-progress', { jobId, ...progress });
-    }
-  
-}
-
 
 ipcMain.handle('dialog:importDirectory', async () => {
   const r = await dialog.showOpenDialog({

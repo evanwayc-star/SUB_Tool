@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 const QueueStore = require('../electron/queue-store.js');
 const { createExportQueue } = require('../electron/export-queue.js');
 const { ExportQueueState } = require('../electron/export-queue-state.js');
-const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('../electron/export-job-status.js');
+const { JOB_STATUS } = require('../electron/export-job-status.js');
 
 function makeQueue(queueDir, state, store = QueueStore, overrides = {}) {
   return createExportQueue({
@@ -16,10 +16,6 @@ function makeQueue(queueDir, state, store = QueueStore, overrides = {}) {
     state,
     store,
     history: { append: () => {}, remove: () => {}, load: () => [] },
-    JOB_STATUS,
-    isLiveWork,
-    isRetryable,
-    reservesOutput,
     admission: {
       sourcePathsOf: job => job.sourcePaths || job.payload?.sources || [],
       assertMasterMedia: () => {},

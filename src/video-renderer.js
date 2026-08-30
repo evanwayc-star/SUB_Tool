@@ -635,8 +635,3 @@ export const previewDrag = createPreviewDrag({
   }
 });
 previewDrag.bind({ imageLayer: document.getElementById('imageLayer'), videoSub: _videoSub, videoWrap: _videoWrap });
-
-export {
-  computePreviewViewport, computeSafeFrameBounds, computeScaledFontSize
-} from './video-overlay-compositor.js';
-

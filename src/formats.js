@@ -11,10 +11,6 @@
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, getExactFps } from './time.js';
 import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';
-import { encodeASS, encodeSRT, encodeVTT, parseSubtitleStream } from './subtitle-transcoding-engine.js';
-
-export { encodeASS, encodeSRT, encodeVTT, parseSubtitleStream };
-
 function finiteBackgroundLayout(layout){
   if(!layout || typeof layout !== 'object') return null;
   const lineIndex = Number(layout.lineIndex);

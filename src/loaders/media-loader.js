@@ -428,9 +428,9 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
             if(c && Math.abs(ctx.vTime()-c.out)<0.3 && (Seq.clipAt(Seq.clipEnd(c)+0.001)||Seq.nextAfter(Seq.clipEnd(c))||State.duration>Seq.clipEnd(c)+0.001)){
               ctx._mpvTime=c.out; ctx.seqContinueAtEnd(); return;
             }
-            ctx.stopElementSources(); ctx.playing=false; $('playBtn').textContent='▶'; video.dispatchEvent(new Event('pause'));
+            ctx.observePlayerPlaybackState(false,{source:'mpv',reason:'pause'});
           }
-          else if(!paused&&!ctx.playing){ ctx.ensureCtx(); ctx.startElementSources(ctx._mpvTime, ctx.tlTime()); ctx.playing=true; $('playBtn').textContent='⏸'; video.dispatchEvent(new Event('play')); }
+          else if(!paused&&!ctx.playing){ ctx.observePlayerPlaybackState(true,{source:'mpv',reason:'play'}); }
         }
         if(e.name==='duration'&&typeof e.data==='number'&&e.data>0){
           ctx._mpvDuration=e.data;
@@ -444,14 +444,14 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
         // 讓虛擬播放頭與外部音訊繼續走到專案最右端。
         if(ctx._gap || ctx.audioOnlyTimeline()) return;
         if(e.reason==='error'){ // mpv 播放失敗（解碼/濾鏡錯誤）：浮上來，不當成段尾推進
-          ctx.stopElementSources(); ctx.playing=false; $('playBtn').textContent='▶';
+          ctx.observePlayerPlaybackState(false,{source:'mpv',reason:'error'});
           setStatus('mpv 播放失敗（解碼或濾鏡錯誤）','err'); showToast('mpv 播放此影片段失敗');
           return;
         }
         // 序列：來源播到底（out===dur）→ 若還有後續，推進而非停止
         const c=ctx.seqOn()?ctx._activeClip():null;
         if(c && ctx.playing){ ctx._mpvTime=c.out; if(ctx.seqContinueAtEnd()) return; }
-        ctx.stopElementSources(); ctx.playing=false; $('playBtn').textContent='▶';
+        ctx.observePlayerPlaybackState(false,{source:'mpv',reason:'end-file'});
       }
     });
 

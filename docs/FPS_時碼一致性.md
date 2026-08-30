@@ -11,8 +11,9 @@
 FPS-SYNC
 ```
 
-> 想一次找到全部標記：用編輯器全域搜尋 `FPS-SYNC`（目前 13 處，分布於 9 個檔案：
-> `time.js / media.js / loaders/media-loader.js / timeline-renderer.js / transport-controller.js / pointer-seek-control.js / playback-transport-engine.js / speech-recognition.js / app.js`）。
+> 想一次找到全部標記：用編輯器全域搜尋 `FPS-SYNC`。核心位置包含
+> `time.js / media.js / loaders/media-loader.js / timeline-renderer.js / transport-controller.js / pointer-seek-control.js / timeline-transport.js / speech-recognition.js / app.js`；
+> 不要手動維護「共幾處」這種會隨程式演進失真的數字。
 
 ---
 

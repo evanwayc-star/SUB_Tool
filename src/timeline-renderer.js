@@ -28,8 +28,6 @@
 import { paintClipBlocks } from './painters/clip-painter.js';
 import { paintSubtitleBlocks } from './painters/subtitle-painter.js';
 import { paintClipWave } from './painters/waveform-painter.js';
-import { visibleTimeRange } from './timeline-viewport-culling.js';
-import { buildTimelineSceneGraph, computeRulerTicks } from './timeline-presentation-engine.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
 import { fitScale } from './image-geometry.js'; // 「符合視窗」與匯出共用同一條 contain 公式
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId,

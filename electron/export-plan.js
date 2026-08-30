@@ -26,7 +26,6 @@
    兩者以前在這裡各有一份手抄副本。 */
 const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
 const { clipLength } = require('../shared/clip-fade.cjs');
-const { escapeFfmpegFilterPath, buildSubtitlesFilter, buildScaleAndPadFilter } = require('../shared/export-filtergraph-planner.cjs');
 
 const _EXPORT_LAYOUTS = Object.freeze({
 
@@ -641,9 +640,6 @@ module.exports = {
   _normaliseExportTimecodeWatermark,
   _buildExportTimecodeFilter,
   _drawtextValue,
-  escapeFfmpegFilterPath,
-  buildSubtitlesFilter,
-  buildScaleAndPadFilter,
 };
 
 

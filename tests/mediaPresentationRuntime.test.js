@@ -164,4 +164,15 @@ describe('Media presentation runtime', () => {
     expect(Media.presenterClockMoving()).toBe(false);
     expect(domMock.video.play).not.toHaveBeenCalled();
   });
+
+  it('播放器實際停止後，下一次播放意圖會重新啟動 adapter', () => {
+    Media.play();
+    expect(domMock.video.play).toHaveBeenCalledTimes(1);
+
+    Media.observePlayerPlaybackState(false, { source: 'mpv', reason: 'pause' });
+    expect(Media.playing).toBe(false);
+
+    Media.play();
+    expect(domMock.video.play).toHaveBeenCalledTimes(2);
+  });
 });

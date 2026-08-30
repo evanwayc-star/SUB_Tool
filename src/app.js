@@ -306,7 +306,10 @@ video.addEventListener('pause',()=>{
 });
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(Media.displayTime());});
 window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});
-video.addEventListener('ended',()=>{ if(Media.seqContinueAtEnd()) return; Media.pause(); }); // 序列有後續→推進不暫停
+video.addEventListener('ended',()=>{
+  if(Media.seqContinueAtEnd()) return;
+  Media.observePlayerPlaybackState(false,{source:'html5',reason:'ended'});
+}); // 兩種 presenter 的實際結束都回到 presentation session
 
 /* 影片視窗與時間碼 滾輪逐格播放 */
 ['videoWrap', 'tcCur'].forEach(id => {

@@ -18,25 +18,24 @@
    【什麼不在這裡】
    - 佇列監控【視窗】的生命週期（BrowserWindow、關閉確認）留在 main.js：
      那是視窗管理，不是排程。本檔只在狀態變動時呼叫注入的 onChanged()。
-   - 實際跑 ffmpeg 的 _runJobLogic 留在 main.js，由 runJob 注入——
-     它牽涉 spawn、log 檔、進度回報，是另一項職責。
+   - 實際跑 ffmpeg 的 delivery runner 由 runJob adapter 注入。
    - 准入政策在 export-admission.js。
 
-   【相依一律注入】不 require electron，也不直接碰 BrowserWindow，
-   所以起得了 vitest。
-============================================================================== */
+   正式狀態語彙與 ExportQueueState 是本 module 的 implementation，不可由 caller
+   置換；electron、filesystem、runner 等外部效果才透過 adapter 注入。
+ ============================================================================== */
+
+'use strict';
+
+const { ExportQueueState } = require('./export-queue-state');
+const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
 
 /**
  * @param {object} deps 全部由呼叫端注入
  * @param {()=>string|null} deps.dir            佇列資料夾（app ready 後才知道）
- * @param {object} [deps.state]                 ExportQueueState 實例（測試可注入）
- * @param {()=>object} [deps.createState]       正式執行時建立狀態的工廠
+ * @param {object} [deps.state]                 僅供 recovery 測試注入正式 ExportQueueState
  * @param {object} deps.store                   QueueStore
  * @param {object} deps.history                 QueueHistory
- * @param {object} deps.JOB_STATUS
- * @param {(s:string)=>boolean} deps.isLiveWork
- * @param {(s:string)=>boolean} deps.reservesOutput
- * @param {(s:string)=>boolean} [deps.isRetryable]
  * @param {object} deps.admission               export-admission 實例
  * @param {(job:object)=>void} deps.grantPersistedCapabilities  恢復時重新授予檔案能力
  * @param {(p:string)=>boolean} deps.canReadSource
@@ -50,12 +49,12 @@
  */
 function createExportQueue(deps) {
   const {
-    dir, store, history, JOB_STATUS, isLiveWork, reservesOutput,
+    dir, store, history,
     admission, grantPersistedCapabilities, canReadSource, canWriteDelivery,
-    isFile, runJob, onChanged, onJobFailed, isRetryable, prepareDeliveryUpdate, shutdownRunnerTimeoutMs,
+    isFile, runJob, onChanged, onJobFailed, prepareDeliveryUpdate, shutdownRunnerTimeoutMs,
   } = deps;
-  const state = deps.state || deps.createState?.();
-  if (!state) throw new TypeError('匯出佇列需要 ExportQueueState');
+  const state = deps.state || new ExportQueueState();
+  if (!(state instanceof ExportQueueState)) throw new TypeError('匯出佇列只接受正式 ExportQueueState');
   const activeJobs = deps.activeJobs || new Map();
 
   const log = (msg, err) => console.error(`[Queue] ${msg}`, err ?? '');
@@ -69,7 +68,7 @@ function createExportQueue(deps) {
   const persistedTerminalJobs = new Set();
   const pendingTerminalMutations = new Map();
   const pendingTerminalRunnerExited = new Set();
-  /* watchdog 的 completion 只代表 child 已結束；_runJobLogic 還可能在寫 log、發 terminal
+  /* watchdog 的 completion 只代表 child 已結束；delivery runner 還可能在寫 log、發 terminal
      progress，必須另外保有 queue runner promise，關機時才不會搶在終態前降回 queued。 */
   const activeQueueRunners = new Map();
   /* 關機開始時已存在的 runner 必須自行收尾，或由它的 finally 以 durable snapshot
@@ -190,7 +189,7 @@ function createExportQueue(deps) {
     refreshViews() { onChanged(); },
 
     /* 准入檢查的轉呼叫。主行程在【入列以外】的地方也要跑它
-       （送出前的授權檢查、_runJobLogic 開跑前再確認一次）。 */
+       （送出前的授權檢查、delivery runner 開跑前再確認一次）。 */
     assertJobCapabilities(job) { return admission.assertJobAdmissible(job); },
 
     setPaused(v) {
@@ -797,7 +796,7 @@ function createExportQueue(deps) {
       }
       const shutdown = (async () => {
         await Promise.all(closingProcesses);
-        /* watchdog controller 關閉後，_runJobLogic 仍可能 await finishLog() 才 dispatch done。
+        /* watchdog controller 關閉後，delivery runner 仍可能 await finishLog() 才 dispatch done。
            必須等 queue runner 的 finally 也結束，否則 STOPPING→QUEUED 會讓晚到 done
            變成非法轉移、遺失唯一的 terminal intent。 */
         if (closingRunners.length) {

@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createExportQueue } = require('../electron/export-queue.js');
 const { ExportQueueState } = require('../electron/export-queue-state.js');
-const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('../electron/export-job-status.js');
+const { JOB_STATUS } = require('../electron/export-job-status.js');
 
 function make({
   persistJob = () => {}, activeJobs, runJob = async () => {}, onJobFailed, prepareDeliveryUpdate,
@@ -57,7 +57,6 @@ function make({
       },
     },
     history: { append: historyAppend, remove: historyRemove, load: () => storedHistory },
-    JOB_STATUS, isLiveWork, isRetryable, reservesOutput,
     admission: {
       sourcePathsOf: job => job.sourcePaths || job.payload?.sources || [],
       assertMasterMedia: () => {}, assertOutputFormat: () => {}, assertOutputAvailable: () => {}, assertJobAdmissible: () => {},

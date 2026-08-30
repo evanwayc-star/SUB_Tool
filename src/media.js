@@ -13,8 +13,8 @@
       
    2. 時間同步機制 (Time Synchronization)
       因為音訊、影片、以及 mpv IPC 都有各自的時間來源，
-      本模組使用 `requestAnimationFrame` 與定期 Tick，將這三者的時間軸
-      強制對齊。所有的 `currentTime` 必須經由 `sequence.js` 轉換為
+      本模組由 `app-ticker.js` 的單一 `requestAnimationFrame` 時鐘驅動，將這三者的時間軸
+      強制對齊；不得另開第二個同步 interval。所有的 `currentTime` 必須經由 `sequence.js` 轉換為
       「來源時間 (Source Time)」後，才能餵給底層播放器，以實現影片裁切
       (In/Out) 與偏移 (Offset) 的視覺連貫。
       
@@ -131,15 +131,56 @@ function pickImageTrack(c){
 /* ===== 3. 媒體引擎 ==================================================== */
 const Media = {
   _syncEngine: null,
-  initSyncEngine() { if(!this._syncEngine) { this._syncEngine = new PlaybackSyncEngine(this); this._syncEngine.start(); } return this._syncEngine; },
-  invalidateExternalActivity() { this._syncEngine?.invalidateExternalActivity?.(); },
-  seqTick() {
-    if(!this.presenterClockMoving()) return;
-    this.initSyncEngine();
-    return this._syncEngine.seqTick();
+  initSyncEngine() {
+    if(!this._syncEngine) {
+      this._syncEngine = new PlaybackSyncEngine({
+        clock: {
+          isPlaying:()=>this.playing,
+          isSwitching:()=>this._seqSwitching,
+          presenterMoving:()=>this.presenterClockMoving(),
+          timelineTime:()=>this.tlTime(),
+          sourceTime:()=>this.vTime(),
+          playbackRate:()=>video.playbackRate||1,
+        },
+        sequence: {
+          audioOnly:()=>this.audioOnlyTimeline(),
+          enabled:()=>this.seqOn(),
+          duration:()=>Math.max(0,Number(State.duration)||0),
+          inGap:()=>this._gap,
+          activeClip:()=>this._activeClip(),
+          activeClipId:()=>this.activeClipId,
+          videoClips:()=>State.clips.filter(c=>c.type!=='image'),
+          clipAt:t=>Seq.clipAt(t),
+          clipsAt:t=>Seq.clipsAt(t),
+          nextAfter:t=>Seq.nextAfter(t),
+          clipEnd:c=>Seq.clipEnd(c),
+          sourceTime:(t,c)=>this._transport.sourceTime(t,c),
+        },
+        audio: {
+          tracks:()=>this.tracks,
+          externalSourceTime:(source,t)=>this.externalAudio.sourceTime(source,t),
+          sourceLocalTime:(source,t)=>this._srcLocalT(source,t),
+        },
+        actions: {
+          pause:()=>this.pause(),
+          seek:t=>this.seek(t),
+          enterGap:t=>this._enterGap(t),
+          ensureClip:(clip,sourceTime,resume)=>this._ensureClip(clip,sourceTime,resume),
+          applyClipAudio:(clip,t)=>this._applyClipAudio(clip,t),
+          startElementSources:(sourceTime,t)=>this.startElementSources(sourceTime,t),
+          stopBufferSources:()=>this.stopBufferSources(),
+          startBufferSources:sourceTime=>this.startBufferSources(sourceTime),
+          overlapKey:()=>this._lastOverlapKey,
+          setOverlapKey:key=>{ this._lastOverlapKey=key; },
+        },
+      });
+    }
+    return this._syncEngine;
   },
+  invalidateExternalActivity() { this._syncEngine?.invalidateExternalActivity?.(); },
+  seqTick() { return this.initSyncEngine().seqTick(); },
   seqContinueAtEnd() { this.initSyncEngine(); return this._syncEngine.seqContinueAtEnd(); },
-  _syncSeqElements(t) { this.initSyncEngine(); return this._syncEngine._syncSeqElements(t); },
+  _syncSeqElements(t) { return this.initSyncEngine().syncSequenceElements(t); },
 
   // AudioContext 與引擎封裝在 AudioEngine 中，這裡不再維護 ctx 等細節。
   master:null,         // master gain
@@ -1368,6 +1409,7 @@ const Media = {
         suspend:()=>this._suspendPlaybackForPresentation(),
         resume:()=>this._resumePlaybackAfterPresentation(),
         fail:result=>this._failPlaybackPresentation(result),
+        commit:(running,detail)=>this._commitObservedPlaybackState(running,detail),
       },
       commitPresented:presentedTime=>this._commitPresentedTarget(presentedTime),
     });
@@ -2355,6 +2397,27 @@ const Media = {
   },
 
   /* --- 播放控制 --- */
+  observePlayerPlaybackState(running,detail={}){
+    return this._ensurePresentationSession().observePlaybackState(running,detail);
+  },
+  _commitObservedPlaybackState(running){
+    if(running){
+      this.ensureCtx();
+      const sourceTime=this.mpvMode?this._mpvTime:video.currentTime;
+      const timelineTime=this.tlTime();
+      if(this.tracks.some(track=>track.kind==='buffer')) this.startBufferSources(sourceTime);
+      this.startElementSources(sourceTime,timelineTime);
+      this.playing=true;
+      const playBtn=$('playBtn'); if(playBtn) playBtn.textContent='⏸';
+      video.dispatchEvent(new Event('play'));
+      return;
+    }
+    this.stopBufferSources();
+    this.stopElementSources();
+    this.playing=false;
+    const playBtn=$('playBtn'); if(playBtn) playBtn.textContent='▶';
+    video.dispatchEvent(new Event('pause'));
+  },
   _suspendPlaybackForPresentation(){
     getPlayerAdapter().pause().catch(()=>{});
     this.stopBufferSources();

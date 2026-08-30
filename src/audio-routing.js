@@ -422,7 +422,3 @@ if(typeof window!=='undefined'){
 }
 
 export { AudioRouting };
-
-export {
-  buildAudioRoutingGraph, computeEffectiveBusGain, buildFfmpegAudioPanFilter
-} from './audio-synthesis-engine.js';

@@ -18,45 +18,16 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { createExportQueue } = require(path.join(ROOT, 'electron/export-queue.js'));
-
-const JOB_STATUS = {
-  QUEUED: 'queued', RUNNING: 'running', STOPPING: 'stopping',
-  DONE: 'done', FAILED: 'failed', STOPPED: 'stopped', MISSING_SOURCE: 'missing-source',
-};
-const LIVE = new Set(['queued', 'running', 'stopping']);
-const RESERVES = new Set(['queued', 'running', 'stopping']);
-
-/* 夠用的假 ExportQueueState——真的那支已由 exportQueueState.test.js 測過。 */
-function fakeState() {
-  let jobs = [];
-  return {
-    jobs: () => jobs,
-    load: v => { jobs = v.slice(); },
-    add: j => { jobs.push(j); },
-    get: id => jobs.find(j => j.id === id),
-    remove: id => { const i = jobs.findIndex(j => j.id === id); return i < 0 ? null : jobs.splice(i, 1)[0]; },
-    setStatus: (id, s, fields) => {
-      const j = jobs.find(x => x.id === id);
-      if (!j) return null;
-      j.status = s;
-      if (fields && typeof fields === 'object') Object.assign(j, fields);
-      return j;
-    },
-    nextQueued: () => jobs.find(j => j.status === 'queued') || null,
-    statusSnapshot: p => ({ paused: p, total: jobs.length }),
-    liveWorkCount: () => jobs.filter(j => LIVE.has(j.status)).length,
-    reorder: () => null, retry: () => null, stop: () => null,
-  };
-}
+const { ExportQueueState } = require(path.join(ROOT, 'electron/export-queue-state.js'));
 
 function make(over = {}) {
-  const state = over.state || fakeState();
+  const state = over.state || new ExportQueueState();
   const persisted = [];
   const appended = [];
   const onChanged = vi.fn();
   const queue = createExportQueue({
     dir: () => 'D:/queue',
-    state,
+    ...(over.omitState ? {} : { state }),
     store: {
       ensureDir: vi.fn(),
       persistJob: (d, job, order) => persisted.push({ id: job.id, status: job.status, order }),
@@ -77,9 +48,6 @@ function make(over = {}) {
       remove: vi.fn(),
       load: () => over.storedHistory || [],
     },
-    JOB_STATUS,
-    isLiveWork: s => LIVE.has(s),
-    reservesOutput: s => RESERVES.has(s),
     admission: {
       sourcePathsOf: j => j.sourcePaths || j.payload?.sources || [],
       assertMasterMedia: () => {},
@@ -307,10 +275,21 @@ describe('恢復', () => {
 });
 
 describe('模組保持可測', () => {
-  it('不 require electron／fs——相依一律注入', () => {
+  it('不 require electron／fs——只在 module 內組合正式狀態規則', () => {
     const fs = require('node:fs');
     const src = fs.readFileSync(path.join(ROOT, 'electron/export-queue.js'), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-    expect(src).not.toMatch(/\brequire\s*\(/);
+    expect(src).not.toMatch(/require\(['"](?:electron|node:fs|fs)['"]\)/);
+  });
+
+  it('未注入 state 時仍建立正式 ExportQueueState，queued 不會被誤算成 live work', () => {
+    const { queue } = make({ omitState: true, storedJobs: [job('queued-only')] });
+    queue.restoreJobs();
+    expect(queue.jobs()).toHaveLength(1);
+    expect(queue.liveWorkCount()).toBe(0);
+  });
+
+  it('拒絕影子 state implementation', () => {
+    expect(() => make({ state: { jobs: () => [] } })).toThrow(/ExportQueueState/);
   });
 });

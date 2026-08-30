@@ -328,6 +328,22 @@ export function createMediaPresentationSession(options = {}) {
     return false;
   }
 
+  /* 播放器 adapter 回報的是已發生的狀態，不可再呼叫 resume/suspend 形成回授。
+     呈現 transition 期間的 pause 是 session 主動 suspend 的 acknowledgement；
+     只更新 running，不可清掉使用者最新的播放意圖。 */
+  function observePlaybackState(value, detail = {}) {
+    const running = !!value;
+    if (playbackPending) {
+      if (running) invokePlayback('suspend');
+      playbackRunning = false;
+      return false;
+    }
+    wantsPlayback = running;
+    playbackRunning = running;
+    invokePlayback('commit', running, detail);
+    return true;
+  }
+
   function clearPlaybackTransition() {
     playbackRequestToken += 1;
     playbackPending = false;
@@ -355,6 +371,7 @@ export function createMediaPresentationSession(options = {}) {
     },
     requestPlayback,
     setPlaybackIntent,
+    observePlaybackState,
     isPlaybackPending() { return playbackPending; },
     playbackIntent() { return wantsPlayback; },
     observe: core.observe,

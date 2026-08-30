@@ -153,6 +153,7 @@ describe('media presentation session', () => {
       suspend: vi.fn(),
       resume: vi.fn(),
       fail: vi.fn(),
+      commit: vi.fn(),
       ...overrides.playback,
     };
     const session = createMediaPresentationSession({
@@ -324,6 +325,33 @@ describe('media presentation session', () => {
     await expect(pending).resolves.toMatchObject({ status: 'cancelled', reason: 'external-seek' });
     expect(session.playbackIntent()).toBe(false);
     expect(session.isPlaybackPending()).toBe(false);
+  });
+
+  it('mpv 實際停止會提交到 session，下一次播放意圖必須重新 resume', () => {
+    const { session, playback } = createSession();
+    session.setPlaybackIntent(true);
+    playback.resume.mockClear();
+
+    expect(session.observePlaybackState(false, { source: 'mpv', reason: 'pause' })).toBe(true);
+    expect(session.playbackIntent()).toBe(false);
+    expect(playback.commit).toHaveBeenCalledWith(false, { source: 'mpv', reason: 'pause' });
+
+    session.setPlaybackIntent(true);
+    expect(playback.resume).toHaveBeenCalledOnce();
+  });
+
+  it('呈現中的 pause 是 session 主動 suspend 的回報，不可清掉最新播放意圖', () => {
+    const waitingAdapter = { type: 'mpv', present: vi.fn(() => new Promise(() => {})) };
+    const { session, playback } = createSession({
+      player: { adapter: () => waitingAdapter, isNative: () => true },
+    });
+    session.requestPlayback(104);
+    session.setPlaybackIntent(true);
+
+    expect(session.observePlaybackState(false, { source: 'mpv', reason: 'pause' })).toBe(false);
+    expect(session.playbackIntent()).toBe(true);
+    expect(session.isPlaybackPending()).toBe(true);
+    expect(playback.commit).not.toHaveBeenCalled();
   });
 
   it('HTML5 呈現由 session 完成來源映射並只提交實際畫格', async () => {

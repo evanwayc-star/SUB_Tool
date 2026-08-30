@@ -11,7 +11,8 @@
 | 角色 | 檔案 | 職責 |
 |------|------|------|
 | **Main Process** | `electron/main.js` | 視窗／IPC／平台能力的頂層組裝；不自行持有 ffmpeg execution 或媒體 intake 狀態 |
-| **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。**零 `require`** ——保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）。需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由 `main.js` 傳入 |
+| **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）；副作用一律由 delivery runner adapters 提供 |
+| **交付執行交易** | `electron/delivery-runner.js` | 讀 frozen ASS、probe、建立 argv、執行 ffmpeg、提交 queue 終態、通知 renderer 與清理暫存的單一 owner |
 | **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
 | **拖放檔案准入** | `electron/dropped-file-admission.js` | 一般影音拖放只授權精確來源；`.subtool/.json` 必須走原子可信專案 intake，不得先取得 read／截圖目錄能力 |
 | **可信專案匯入** | `electron/trusted-project-intake.js` | 只接受由 main process 讀取或選檔取得的 `.subtool` bytes，再從其中衍生專案與媒體 read capability；renderer 不可用自帶 path/b64 擴權 |
@@ -152,6 +153,7 @@ Main (main.js)
 | `onUpdate(cb)` | `queue:update` | M→R | 佇列內容或狀態變更通知 |
 
 佇列的持久化真相來源在 `<userData>/export-queue/`：`ExportQueueState` 是唯一的記憶體順序來源，
+`export-queue.js` 只直接使用它與 `export-job-status.js` 的正式分類，不接受呼叫端注入影子狀態機。
 每份可恢復工作各有一個
 `<id>.json`，有字幕時另存 `<id>.ass`，失敗記錄固定為 `<id>.log`。新增與排序都會原子寫入；程式重啟後，
 沒有已知終態意圖的 `running` 會退回 `queued`，所有恢復工作保持暫停，直到使用者明確按「繼續佇列」。
@@ -178,6 +180,10 @@ ffmpeg log 會保留到使用者明確清除；重試使用遞增 attempt，較�
 維持 `stopping`，等 runner 真正收尾後才原子寫回 `queued`，絕不把未結清工作交給重啟猜測。
 使用者先按「停止」再關閉程式時，`stopped` 終態優先於 shutdown：關機只等待既有停止收尾，不能覆寫為
 可恢復的 `queued`。
+
+單份工作的執行交易在 `delivery-runner.js`。完成／失敗 payload 會先交給 queue durable commit；
+只有 queue 接受後才送 renderer，所以畫面不可能先於磁碟真相顯示完成。`main.js` 只建立真實的
+FileAuthority、probe、ffmpeg、字型與 `webContents` adapters。
 
 ### 匯出工作的狀態機（`electron/export-job-status.js`；v5.11.0 起）
 
