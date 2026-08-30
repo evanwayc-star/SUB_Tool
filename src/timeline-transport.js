@@ -1,4 +1,5 @@
-/* 時間軸 transport：唯一負責來源時間、時間軸時間、虛擬時鐘與 gap 時鐘的映射。 */
+/* FPS-SYNC：時間軸 transport 是來源時間、時間軸時間、虛擬時鐘、gap 時鐘與
+   靜止影格吸附的唯一 owner；修改前必讀 docs/FPS_時碼一致性.md。 */
 import { snapTimeToFrame } from './time.js';
 
 const defaultNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -41,6 +42,7 @@ export class TimelineTransport {
   set pausedTime(value) { this._pausedTime = value == null ? null : nonNegative(value); }
 
   sourceTime(timelineTime, clip) {
+    // FPS-SYNC（I5）：跨時間域只走注入的 sequence 映射，不在呼叫端手刻 offset。
     const t = nonNegative(timelineTime);
     return nonNegative(clip ? this._toSource(t, clip) : t);
   }
@@ -70,6 +72,7 @@ export class TimelineTransport {
   }
 
   seek(time, { duration = 0, fps, dropFrame = false } = {}) {
+    // FPS-SYNC（I3）：所有靜止目標都由 snapTimeToFrame() 的唯一格網提交。
     const max = nonNegative(duration);
     const bounded = max > 0 ? Math.min(nonNegative(time), max) : nonNegative(time);
     const snapped = this._snap(bounded, fps, dropFrame);
@@ -139,6 +142,7 @@ export class TimelineTransport {
   }
 
   observeSourceTime(sourceTime, { clip = null, playing = false, fps, dropFrame = false, settleFrames = 4.0 } = {}) {
+    // FPS-SYNC（I4/I6）：暫停讀數保留已提交目標，只容忍原生 presenter 的沉降抖動。
     let timeline = this.timelineTime({ sourceTime, clip });
     if (!playing) {
       const frame = 1 / (finite(fps, 25) || 25);

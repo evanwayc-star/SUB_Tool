@@ -175,4 +175,16 @@ describe('Media presentation runtime', () => {
     Media.play();
     expect(domMock.video.play).toHaveBeenCalledTimes(2);
   });
+
+  it('HTML5 ended 的實際停止位置會吸附到專案影格格網', () => {
+    domMock.video.currentTime = 15.019;
+    Media.play();
+    expect(Media.displayTime()).toBeCloseTo(105.019, 6);
+
+    Media.observePlayerPlaybackState(false, { source: 'html5', reason: 'ended' });
+
+    expect(Media.playing).toBe(false);
+    expect(Media.displayTime()).toBe(105);
+    expect(Media._transport.pausedTime).toBe(105);
+  });
 });

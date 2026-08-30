@@ -334,9 +334,19 @@ export function createMediaPresentationSession(options = {}) {
   function observePlaybackState(value, detail = {}) {
     const running = !!value;
     if (playbackPending) {
-      if (running) invokePlayback('suspend');
-      playbackRunning = false;
-      return false;
+      // present() 期間的 pause 是 session 主動 suspend 的 acknowledgement，
+      // 必須保留最新播放意圖；error／end-file 則是 presenter 真正終止，
+      // 不可等 timeout 後又 resume 一個已失敗或已播完的來源。
+      if (running || detail?.reason === 'pause') {
+        if (running) invokePlayback('suspend');
+        playbackRunning = false;
+        return false;
+      }
+      const reason = detail?.reason || 'stopped';
+      clearPlaybackTransition();
+      core.cancel(`player-${reason}`);
+      invokePlayback('commit', false, detail);
+      return true;
     }
     wantsPlayback = running;
     playbackRunning = running;

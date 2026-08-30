@@ -2412,6 +2412,14 @@ const Media = {
       video.dispatchEvent(new Event('play'));
       return;
     }
+    // FPS-SYNC（I3/I4）：播放器回報真正停止時只提交時鐘，不再反向控制播放器；
+    // 但靜止權威位置仍必須經唯一格網吸附，不能留下 ended 的任意來源秒數。
+    const virtual=this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'));
+    const clip=this.seqOn()?this._activeClip():null;
+    this._transport.pause({
+      sourceTime:this.vTime(),clip,virtual,playbackRate:video.playbackRate||1,
+      useGap:this.seqOn(),fps:State.fps,dropFrame:State.dropFrame,
+    });
     this.stopBufferSources();
     this.stopElementSources();
     this.playing=false;

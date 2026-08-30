@@ -354,6 +354,28 @@ describe('media presentation session', () => {
     expect(playback.commit).not.toHaveBeenCalled();
   });
 
+  it.each(['error', 'end-file', 'ended'])(
+    '呈現中的 %s 是真正終止，必須取消 transition 並提交停止',
+    async reason => {
+      const waitingAdapter = { type: 'mpv', present: vi.fn(() => new Promise(() => {})) };
+      const { session, playback } = createSession({
+        player: { adapter: () => waitingAdapter, isNative: () => true },
+      });
+      const pending = session.requestPlayback(104);
+      session.setPlaybackIntent(true);
+
+      expect(session.observePlaybackState(false, { source: 'mpv', reason })).toBe(true);
+
+      await expect(pending).resolves.toMatchObject({
+        status: 'cancelled', reason: `player-${reason}`,
+      });
+      expect(session.playbackIntent()).toBe(false);
+      expect(session.isPlaybackPending()).toBe(false);
+      expect(playback.commit).toHaveBeenCalledWith(false, { source: 'mpv', reason });
+      expect(playback.resume).not.toHaveBeenCalled();
+    },
+  );
+
   it('HTML5 呈現由 session 完成來源映射並只提交實際畫格', async () => {
     const { session, adapter, calls } = createSession();
 
