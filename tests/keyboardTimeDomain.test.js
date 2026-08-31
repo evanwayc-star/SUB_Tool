@@ -240,7 +240,10 @@ describe('JKL reverse shuttle time domain', () => {
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
     expect(mediaMock.pause).toHaveBeenCalled();
-    expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 - 1 / State.fps, 8));
+    expect(mediaMock.seek).toHaveBeenCalledWith(
+      expect.closeTo(105 - 1 / State.fps, 8),
+      { presentationTolerance: expect.closeTo(0.45 / State.fps, 8) },
+    );
     expect(mediaMock.scrubAudio).toHaveBeenCalledWith(
       expect.closeTo(105 - 1 / State.fps, 8), 0.08,
     );
@@ -251,7 +254,18 @@ describe('JKL reverse shuttle time domain', () => {
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
     expect(mediaMock.pause).toHaveBeenCalled();
-    expect(mediaMock.seek).toHaveBeenCalledWith(expect.closeTo(105 + 1 / State.fps, 8));
+    expect(mediaMock.seek).toHaveBeenCalledWith(
+      expect.closeTo(105 + 1 / State.fps, 8),
+      { presentationTolerance: expect.closeTo(0.45 / State.fps, 8) },
+    );
+  });
+
+  it('秒級微調保留一般 seek 容差，不套用逐格的嚴格門檻', () => {
+    State.keymap = { nudge_right_1s: [{ key: 'd' }] };
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', code: 'KeyD' }));
+
+    expect(mediaMock.seek).toHaveBeenCalledWith(106);
   });
 
   it('長按方向鍵只啟動一次 shuttle，放開時會暫停', () => {

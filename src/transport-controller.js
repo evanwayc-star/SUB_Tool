@@ -197,10 +197,20 @@ function nudge(d) {
     setStatus('⏸ 暫停', '');
   }
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點為基準，並精確吸附至影格格網
+  const exactFps = getExactFps(State.fps || 30);
   const currentT = Media.displayTime();
   const rawTarget = currentT + d;
   const t = snapTimeToFrame(rawTarget, State.fps, State.dropFrame);
-  Media.seek(t);
+  const frameDuration = 1 / exactFps;
+  const frameDistance = Math.abs(t - currentT) * exactFps;
+  const isSingleFrame = frameDistance > 0.5 && frameDistance <= 1.01;
+  if (isSingleFrame) {
+    // 單格微調的上一格距目標只有一格；一般 seek 的 1.5 格完成容差會讓 mpv
+    // 偶爾把舊畫格誤判成新目標。縮到半格內，必須真的跨到目標格才算完成。
+    Media.seek(t, { presentationTolerance: 0.45 * frameDuration });
+  } else {
+    Media.seek(t);
+  }
   updatePlayhead();
   emit('playhead:ensure');
   updateNoteActive(t);

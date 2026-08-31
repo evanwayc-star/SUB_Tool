@@ -25,6 +25,18 @@ export function createMediaPresentationCore({
   let lastPresentedTime = null;
   let nextId = 1;
 
+  function requestTolerance(request) {
+    const value = Number(request?.options?.tolerance);
+    return request?.options?.tolerance != null && Number.isFinite(value)
+      ? Math.max(0, value)
+      : null;
+  }
+
+  function canSharePresentation(left, right) {
+    return Math.abs(left.requestedTime - right.requestedTime) < 1e-9
+      && requestTolerance(left) === requestTolerance(right);
+  }
+
   function makeRequest(targetTime, options) {
     const requestedTime = Math.max(0, Number(targetTime) || 0);
     let resolve;
@@ -70,9 +82,16 @@ export function createMediaPresentationCore({
 
     let outbound;
     try {
+      const requestedTolerance = Number(request.options.tolerance);
+      const hasRequestedTolerance = request.options.tolerance != null
+        && Number.isFinite(requestedTolerance);
       outbound = presentTarget(request.requestedTime, {
         requestId: request.id,
         signal: request.controller?.signal || null,
+        isLatestRequest: () => active === request && pending == null,
+        ...(hasRequestedTolerance
+          ? { tolerance: Math.max(0, requestedTolerance) }
+          : {}),
       });
     } catch (error) {
       releaseActive(request, { status: 'failed', error });
@@ -101,8 +120,16 @@ export function createMediaPresentationCore({
       start(next);
       return next.promise;
     }
-    if (Math.abs(active.requestedTime - next.requestedTime) < 1e-9) return active.promise;
-    if (pending && Math.abs(pending.requestedTime - next.requestedTime) < 1e-9) return pending.promise;
+    // 相同時間但不同容差是不同呈現契約：逐格的嚴格請求不可共用先前的一般 seek，
+    // 否則一般容差內的舊畫格可能讓逐格請求提早完成。
+    if (canSharePresentation(active, next)) {
+      if (pending) {
+        finish(pending, { status: 'superseded', presentedTime: lastPresentedTime });
+        pending = null;
+      }
+      return active.promise;
+    }
+    if (pending && canSharePresentation(pending, next)) return pending.promise;
     if (pending) finish(pending, { status: 'superseded', presentedTime: lastPresentedTime });
     pending = next;
     return next.promise;
@@ -113,7 +140,10 @@ export function createMediaPresentationCore({
     if (!Number.isFinite(observed)) return false;
     lastPresentedTime = Math.max(0, observed);
     if (!active || details?.requestId !== active.id) return false;
-    const tolerance = Math.max(0, Number(getTolerance(active.requestedTime, details)) || 0);
+    const requestedTolerance = Number(active.options.tolerance);
+    const tolerance = active.options.tolerance != null && Number.isFinite(requestedTolerance)
+      ? Math.max(0, requestedTolerance)
+      : Math.max(0, Number(getTolerance(active.requestedTime, details)) || 0);
     if (Math.abs(lastPresentedTime - active.requestedTime) > tolerance) return false;
     const source = details?.source;
     releaseActive(active, {
@@ -166,9 +196,11 @@ export function createMediaPresentationSession(options = {}) {
   let playbackRunning = false;
   let playbackRequestToken = 0;
 
-  function waitForWebCodecsPresentation(targetTime, { requestId, signal } = {}) {
+  function waitForWebCodecsPresentation(targetTime, { requestId, signal, tolerance: requestedTolerance } = {}) {
     const key = requestId ?? Symbol('webcodecs-presentation');
-    const tolerance = Math.max(0, Number(getTolerance(targetTime, { source: 'webcodecs' })) || 0);
+    const tolerance = requestedTolerance != null && Number.isFinite(Number(requestedTolerance))
+      ? Math.max(0, Number(requestedTolerance))
+      : Math.max(0, Number(getTolerance(targetTime, { source: 'webcodecs' })) || 0);
     return new Promise((resolve, reject) => {
       let settled = false;
       const cleanup = () => {
@@ -212,10 +244,20 @@ export function createMediaPresentationSession(options = {}) {
     return completed;
   }
 
-  async function presentTimelineTarget(targetTime, { signal, requestId } = {}) {
+  async function presentTimelineTarget(targetTime, {
+    signal,
+    requestId,
+    tolerance: requestedTolerance,
+    isLatestRequest,
+  } = {}) {
     if (signal?.aborted) {
       throw Object.assign(new Error('media presentation aborted'), { name: 'AbortError' });
     }
+    const commitIfLatest = presentedTime => (
+      typeof isLatestRequest === 'function' && !isLatestRequest()
+        ? presentedTime
+        : commitPresented(presentedTime)
+    );
 
     let clip = null;
     let sourceTarget = targetTime;
@@ -223,7 +265,7 @@ export function createMediaPresentationSession(options = {}) {
       clip = timeline.clipAt?.(targetTime) || null;
       if (!clip) {
         timeline.enterGap?.(targetTime);
-        const committed = commitPresented(targetTime);
+        const committed = commitIfLatest(targetTime);
         return { presentedTime: committed, source: 'synthetic' };
       }
       sourceTarget = timeline.sourceTime?.(targetTime, clip);
@@ -237,17 +279,19 @@ export function createMediaPresentationSession(options = {}) {
       if (player.isNative?.()) player.configureNativeSeek?.(clip);
     } else if (timeline.isVirtual?.()) {
       timeline.seekVirtual?.(targetTime, { running: false });
-      const committed = commitPresented(targetTime);
+      const committed = commitIfLatest(targetTime);
       return { presentedTime: committed, source: 'synthetic' };
     }
 
     const adapter = player.adapter();
     if (!adapter || typeof adapter.present !== 'function') throw new Error('player adapter is unavailable');
+    const tolerance = requestedTolerance != null && Number.isFinite(Number(requestedTolerance))
+      ? Math.max(0, Number(requestedTolerance))
+      : Math.max(0, Number(getTolerance(targetTime, { source: adapter.type })) || 0);
     const webCodecsPending = webCodecsTakeover
-      ? waitForWebCodecsPresentation(targetTime, { signal, requestId })
+      ? waitForWebCodecsPresentation(targetTime, { signal, requestId, tolerance })
       : null;
     webCodecsPending?.catch(() => {});
-    const tolerance = Math.max(0, Number(getTolerance(targetTime, { source: adapter.type })) || 0);
     const presentationTarget = Number(player.presentationTarget?.(sourceTarget, clip) ?? sourceTarget);
     if (!Number.isFinite(presentationTarget)) throw new Error('player presentation target is unavailable');
     const result = await adapter.present(presentationTarget, {
@@ -268,7 +312,7 @@ export function createMediaPresentationSession(options = {}) {
       source = composited.backend;
     }
     if (player.isNative?.()) player.setPresentedSourceTime?.(actualSource);
-    commitPresented(presentedTimeline);
+    commitIfLatest(presentedTimeline);
     return { presentedTime: presentedTimeline, source };
   }
 

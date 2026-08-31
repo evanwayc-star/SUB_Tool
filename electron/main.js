@@ -70,6 +70,7 @@ let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null;
 let FFMPEG_DETECTION = null, FFPROBE_DETECTION = null;
 let mediaProbe = null;
 let projectOpenReady = false;
+const IS_TRANSPORT_ACCEPTANCE = process.argv.includes('--subtool-transport-acceptance');
 const TMP = path.join(os.tmpdir(), 'subtool_cache');
 const tempFiles = new Set();
 let tmpSeq = 0;
@@ -737,6 +738,8 @@ const deliveryRunner = createDeliveryRunner({
 const mediaIntakeRuntime = createMediaIntakeRuntime({
   cacheRoot: () => CACHE,
   tempRoot: TMP,
+  // 真機驗收必須維持母素材唯讀；所有衍生檔只進隔離 profile 的中央 cache。
+  allowSidecarCache: !IS_TRANSPORT_ACCEPTANCE,
   fileAuthority,
   ffmpegExecution,
   getEncoder: () => VENC,
@@ -1370,8 +1373,14 @@ ipcMain.handle('ffmpeg:cleanup', async (e, { path: p }) => {
 /* ---- 單次讀取多輸出：整個來源檔只讀一遍，同時產生 proxy + 每聲道音訊 + 混音波形 ----
    每聲道以 asplit 分流（不直接 -map 同一條 stream，避免 filtergraph 與 -map 雙重消費而 deadlock）。
    結果由 media-intake-runtime 存入持久快取，重開同檔直接命中、秒開。 */
+function getConfigDir() {
+  return app.isPackaged || IS_TRANSPORT_ACCEPTANCE
+    ? path.join(app.getPath('userData'), 'config')
+    : path.join(app.getAppPath(), '.config');
+}
+
 function getConfigPath() {
-  const configDir = app.isPackaged ? path.join(app.getPath('userData'), 'config') : path.join(app.getAppPath(), '.config');
+  const configDir = getConfigDir();
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
   return path.join(configDir, 'settings.json');
 }
@@ -1395,7 +1404,7 @@ ipcMain.handle('config:save', (e, data) => {
 });
 
 function getKeysPath() {
-  const configDir = app.isPackaged ? path.join(app.getPath('userData'), 'config') : path.join(app.getAppPath(), '.config');
+  const configDir = getConfigDir();
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
   return path.join(configDir, 'key.json');
 }

@@ -2577,7 +2577,7 @@ const Media = {
     this.stopBufferSources(); this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶';
   },
   toggle(){ this.playing?this.pause():this.play(); },
-  seek(t){
+  seek(t, options={}){
     // 有影片時才設上限；無影片時允許任意位置（空專案先排字幕）。
     // FPS-SYNC：每次 seek 都由 transport 以唯一格網吸附，並記下暫停權威位置。
     t=this._transport.seek(t,{duration:State.duration,fps:State.fps,dropFrame:State.dropFrame});
@@ -2594,7 +2594,15 @@ const Media = {
     // 保留 UI 對目標位置的即時回應；presentation session 稍後會用實際畫格再提交一次。
     window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
     emit('media:playhead');
-    return this._ensurePresentationSession().requestPlayback(t,{timeoutMs:10000});
+    const presentationTolerance=Number(options?.presentationTolerance);
+    const hasPresentationTolerance=options?.presentationTolerance!=null
+      &&Number.isFinite(presentationTolerance);
+    return this._ensurePresentationSession().requestPlayback(t,{
+      timeoutMs:10000,
+      ...(hasPresentationTolerance
+        ? {tolerance:Math.max(0,presentationTolerance)}
+        : {}),
+    });
   },
   /* 外部音訊不隸屬影片 clip；在它自己的開始／結束邊界才一次性 seek/play 或 pause。
      這可處理「影片已結束但音檔稍後才開始」與修剪後的音檔尾端，且不會每幀造成播放抖動。 */

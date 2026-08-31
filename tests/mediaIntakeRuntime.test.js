@@ -104,6 +104,46 @@ describe('native media intake runtime', () => {
     expect(authority.canRead(first.proxy)).toBe(true);
   });
 
+  it('驗收模式可強制使用隔離中央 cache，不在母素材旁建立 sidecar', async () => {
+    const root = makeTempRoot();
+    const cacheRoot = path.join(root, 'user-data', 'mediacache');
+    const tempRoot = path.join(root, 'temp');
+    const sourceDir = path.join(root, 'source');
+    const source = path.join(sourceDir, 'master.mov');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.writeFileSync(source, Buffer.from('mother-source-content'));
+
+    const authority = new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] });
+    authority.grantTrustedFile(source, { read: true, write: false });
+    const execution = createFFmpegExecution({
+      getFFmpegPath: () => 'ffmpeg-test',
+      getUserDataDir: () => path.join(root, 'user-data'),
+      spawnDirect(executable, args) {
+        return successfulProcess(() => fs.writeFileSync(args.at(-1), Buffer.from('proxy-bytes')));
+      },
+    });
+    const runtime = createMediaIntakeRuntime({
+      cacheRoot,
+      tempRoot,
+      fileAuthority: authority,
+      ffmpegExecution: execution,
+      getEncoder: () => 'libx264',
+      delay: async () => {},
+      allowSidecarCache: false,
+    });
+
+    const result = await runtime.ingest({
+      src: source,
+      duration: 10,
+      needsProxy: true,
+      audio: [],
+    }, { isCancelled: () => false, ownProcess() {} });
+
+    expect(path.dirname(path.dirname(result.proxy))).toBe(cacheRoot);
+    expect(fs.existsSync(path.join(sourceDir, '.subtool_Cache'))).toBe(false);
+  });
+
   it('stream cache hit 建立不可猜測的 loopback URL，並以 HTTP Range 供應 proxy bytes', async () => {
     const root = makeTempRoot();
     const userDataDir = path.join(root, 'user-data');

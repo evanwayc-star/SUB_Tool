@@ -12,6 +12,7 @@ function createMediaIntakeRuntime(options = {}) {
   const fileAuthority = options.fileAuthority;
   const ffmpegExecution = options.ffmpegExecution;
   const tempRoot = options.tempRoot;
+  const allowSidecarCache = options.allowSidecarCache !== false;
   const getEncoder = options.getEncoder || (() => 'libx264');
   const delay = options.delay || (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const createStreamId = options.createStreamId
@@ -48,10 +49,12 @@ function createMediaIntakeRuntime(options = {}) {
   function cacheCandidates(src) {
     const key = cacheKeyFor(src);
     const candidates = [];
-    try {
-      const sourceDir = path.dirname(src);
-      if (sourceDir && sourceDir !== '.') candidates.push(path.join(sourceDir, '.subtool_Cache', key));
-    } catch (error) {}
+    if (allowSidecarCache) {
+      try {
+        const sourceDir = path.dirname(src);
+        if (sourceDir && sourceDir !== '.') candidates.push(path.join(sourceDir, '.subtool_Cache', key));
+      } catch (error) {}
+    }
     candidates.push(path.join(cacheRoot(), key));
     return candidates;
   }

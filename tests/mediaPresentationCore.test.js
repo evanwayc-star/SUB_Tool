@@ -101,6 +101,49 @@ describe('media-presentation-core', () => {
     core.observe(4.95, { requestId: latestRequestId, source: 'mpv' });
     await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 4.95 });
   });
+
+  it('同目標的新嚴格容差不能合併進仍在等待的一般請求', async () => {
+    const presentTarget = vi.fn();
+    const core = createMediaPresentationCore({
+      presentTarget,
+      getTolerance: () => 0.05,
+    });
+
+    const ordinary = core.request(5);
+    const strict = core.request(5, { tolerance: 0.01 });
+
+    expect(strict).not.toBe(ordinary);
+    expect(presentTarget).toHaveBeenCalledTimes(1);
+
+    const ordinaryRequestId = presentTarget.mock.calls[0][1].requestId;
+    expect(core.observe(5.04, { requestId: ordinaryRequestId, source: 'mpv' })).toBe(true);
+    await expect(ordinary).resolves.toMatchObject({ status: 'presented', presentedTime: 5.04 });
+
+    expect(presentTarget).toHaveBeenNthCalledWith(2, 5, expect.objectContaining({
+      tolerance: 0.01,
+    }));
+    const strictRequestId = presentTarget.mock.calls[1][1].requestId;
+    expect(core.observe(5.04, { requestId: strictRequestId, source: 'mpv' })).toBe(false);
+    expect(core.observe(5.005, { requestId: strictRequestId, source: 'mpv' })).toBe(true);
+    await expect(strict).resolves.toMatchObject({ status: 'presented', presentedTime: 5.005 });
+  });
+
+  it('最新目標回到 active 時會淘汰中間 pending，避免稍後反跳', async () => {
+    const presentTarget = vi.fn();
+    const core = createMediaPresentationCore({ presentTarget });
+
+    const first = core.request(5);
+    const stale = core.request(6);
+    const latest = core.request(5);
+
+    expect(latest).toBe(first);
+    await expect(stale).resolves.toMatchObject({ status: 'superseded', requestedTime: 6 });
+
+    const requestId = presentTarget.mock.calls[0][1].requestId;
+    expect(core.observe(5, { requestId, source: 'mpv' })).toBe(true);
+    await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 5 });
+    expect(presentTarget).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('media presentation session', () => {
@@ -267,7 +310,7 @@ describe('media presentation session', () => {
       type: 'html5',
       present: vi.fn(() => new Promise(resolve => { presentations.push(resolve); })),
     };
-    const { session, playback } = createSession({
+    const { session, playback, commitPresented } = createSession({
       player: { adapter: () => waitingAdapter },
     });
     session.setPlaybackIntent(true);
@@ -283,12 +326,15 @@ describe('media presentation session', () => {
     presentations[0]({ backend: 'html5', presentedSourceTime: 3 });
     await expect(first).resolves.toMatchObject({ status: 'presented', presentedTime: 103 });
     await Promise.resolve();
+    expect(commitPresented).not.toHaveBeenCalled();
     expect(playback.resume).not.toHaveBeenCalled();
     expect(session.isPlaybackPending()).toBe(true);
 
     presentations[1]({ backend: 'html5', presentedSourceTime: 4 });
     await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 104 });
     await Promise.resolve();
+    expect(commitPresented).toHaveBeenCalledOnce();
+    expect(commitPresented).toHaveBeenCalledWith(104);
     expect(playback.resume).toHaveBeenCalledOnce();
     expect(session.isPlaybackPending()).toBe(false);
   });
@@ -388,6 +434,16 @@ describe('media presentation session', () => {
       signal: expect.any(Object),
     }));
     expect(calls).toEqual(['commit:103.99']);
+  });
+
+  it('單次請求可縮小呈現容差，逐格時不能把上一格當成目標格', async () => {
+    const { session, adapter } = createSession();
+
+    await session.request(104, { tolerance: 0.01 });
+
+    expect(adapter.present).toHaveBeenCalledWith(4, expect.objectContaining({
+      tolerance: 0.01,
+    }));
   });
 
   it('mpv 呈現由 session 選擇 exact seek 並回寫來源時間', async () => {

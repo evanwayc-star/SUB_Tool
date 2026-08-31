@@ -97,6 +97,8 @@ FPS-SYNC
 - `nudge()`（`keyboard.js`）用 `Media.displayTime() + d`，**不是** `vTime() + d`。
 - 因為 `vTime()` 帶有瀏覽器沉降的浮點 ε，`+1格` 後再 `round` 會被放大成跳兩格 / 退不動（29.97 尤甚，見 Bug B）。
 - Windows mpv host 對外仍只接受**來源時間**，但 IPC 實作要設定 `time-pos`，不可改回連續送 `seek absolute`。mpv 的 `seek` command 會刻意排入舊畫面的顯示等待，快速送出 ±1／±2 格時可能讓最新目標額外等約 0.3 秒；`time-pos` setter 仍是精準 absolute 定位，且可立即接手最新目標。
+- 單次逐格的呈現完成容差必須 **< 0.5 格**。一般跳轉可容忍 1.5 格的播放器沉降，但目標只差一格時，該容差會讓「目前舊畫格」也落在成功範圍內，造成方向鍵偶爾看似沒動。
+- 連續逐格已有更新的 pending 目標時，較早畫格即使真的呈現完成，也不可再 commit 回權威播放點；否則下一次方向鍵會從被蓋回的舊格計算，出現按鍵少走一格或反跳。
 
 ### (I6) 不可用「原始播放時間」覆蓋權威值 `_lastSeekTime`
 
@@ -137,9 +139,9 @@ FPS-SYNC
 | `media.js` | `pause()` 的 snap | 暫停點對齊影格 | I3 |
 | `media.js` | mpv `time-pos` handler | 暫停時同源同格 + 抖動容忍 | I4, I6 |
 | `loaders/media-loader.js` | 原生 `seeked`／mpv per-frame `time-pos` | 普通 seek 對齊；mpv 播放中另與 `playback-restart` 配對，暫停中以 command ack + 目標 `time-pos` 提交 | I3, I4, I4a |
-| `transport-controller.js` | `nudge()` | 逐格步進以權威值為基準 | I5 |
+| `transport-controller.js` | `nudge()` | 逐格步進以權威值為基準，並要求小於半格的呈現容差 | I5 |
 | `shuttle-runtime.js` | `ReverseShuttleSession` | elapsed time × 倍率 × 精確 FPS 產生最新倒帶目標；持續監看原生實際呈現進度 | I3, I4a, I5 |
-| `media-presentation-core.js` | `createMediaPresentationSession()` | 同時一個 in-flight、只保留最新 pending；同一 session 擁有 WebCodecs takeover、合成畫格 waiter、一般 seek 的最新播放意圖、取消與 reset | I4a |
+| `media-presentation-core.js` | `createMediaPresentationSession()` | 同時一個 in-flight、只保留最新 pending，且舊呈現不可覆寫更新目標；同一 session 擁有 WebCodecs takeover、合成畫格 waiter、一般 seek 的最新播放意圖、取消與 reset | I4a, I5 |
 | `decode/player.js` | WebCodecs 呈現回報 | 所有可見圖層完成繪製後回報各自實際來源時間 | I4a |
 | `notes.js` | `addNote()` | 備註時間取自 `displayTime()` | I4 |
 | `timeline-renderer.js` | `fmtTick()` | 刻度標籤走 `encoreParts` | I2 |

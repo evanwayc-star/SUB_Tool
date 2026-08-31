@@ -151,6 +151,22 @@ describe('Media presentation runtime', () => {
     expect(Media.presenterClockMoving()).toBe(true);
   });
 
+  it('逐格可要求小於半格的呈現容差，舊畫格不能提前完成請求', async () => {
+    const pending = Media.seek(104, { presentationTolerance: 0.01 });
+    let settled = false;
+    pending.then(() => { settled = true; });
+
+    domMock.frameCallbacks.shift()(0, { mediaTime: 13.95 });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(domMock.frameCallbacks).toHaveLength(1);
+
+    domMock.frameCallbacks.shift()(0, { mediaTime: 13.995 });
+    await expect(pending).resolves.toMatchObject({
+      status: 'presented', requestedTime: 104, presentedTime: 103.995,
+    });
+  });
+
   it('跳轉後先播放再暫停，晚到畫格不得重新啟動播放', async () => {
     const pending = Media.seek(104);
 
