@@ -122,7 +122,8 @@ describe('語音辨識背景執行與進度視窗切換', () => {
     // 點擊縮小至背景
     minimizeBtn.click();
     expect(uiMocks.closeModal).toHaveBeenCalledWith({ committed: true });
-    expect(session.dialogOpen).toBe(false);
+    expect(session.dialogOpen).toBe(true); // 舊快照保持不可變
+    expect(getAsrSession().dialogOpen).toBe(false);
 
     await vi.waitFor(() => expect(engineMocks.transcribeAudioStream).toHaveBeenCalledTimes(1));
 
@@ -134,8 +135,9 @@ describe('語音辨識背景執行與進度視窗切換', () => {
       message: '本機 AI 正在推論 (50%)…'
     });
 
-    expect(session.progress.percent).toBe(50);
-    expect(session.statusText).toContain('50%');
+    const halfway = getAsrSession();
+    expect(halfway.progress.percent).toBe(45); // 預留最後 10% 給時間軸提交
+    expect(halfway.statusText).toContain('50%');
 
     // 背景推論完成，自動注入字幕軌並發出通知
     finishRecognition([
@@ -146,6 +148,18 @@ describe('語音辨識背景執行與進度視窗切換', () => {
     await vi.waitFor(() => expect(State.cues.length).toBe(2));
     expect(State.tracks.at(-1).name).toBe('語音辨識');
     expect(uiMocks.showToast).toHaveBeenCalledWith(expect.stringContaining('語音辨識完成'));
+
+    const completedSession = getAsrSession();
+    expect(completedSession.progress.status).toBe('completed');
+    openSpeechRecognitionDialog();
+    expect(getAsrSession().id).toBe(completedSession.id);
+    expect(uiMocks.openModal.mock.calls.at(-1)[0]).toContain('進度');
+
+    renderModalFromMock();
+    const [acknowledgeButton] = document.querySelectorAll('#modalFoot button');
+    expect(acknowledgeButton.textContent).toBe('關閉');
+    acknowledgeButton.click();
+    expect(getAsrSession()).toBeNull();
   });
 
   it('在背景執行期間可隨時透過 openSpeechRecognitionDialog 喚回進度監控視窗', async () => {

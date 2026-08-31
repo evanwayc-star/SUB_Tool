@@ -63,7 +63,7 @@ describe('頂部工具列語音辨識指示器 (asr-indicator)', () => {
     expect(button.title).toContain('文本匹配進行中');
   });
 
-  it('結束狀態時隱藏指示器', () => {
+  it('完成後保留可點擊的結果入口，且不顯示 running 動畫', () => {
     const session = {
       taskMode: 'transcribe',
       progress: {
@@ -75,11 +75,13 @@ describe('頂部工具列語音辨識指示器 (asr-indicator)', () => {
     };
 
     renderAsrIndicator(button, session);
-    expect(button.style.display).toBe('none');
+    expect(button.style.display).toBe('');
     expect(button.classList.contains('asr-running')).toBe(false);
+    expect(button.textContent).toContain('完成');
+    expect(button.title).toContain('點擊查看結果');
   });
 
-  it('失敗時隱藏指示器', () => {
+  it('失敗後保留可點擊的錯誤入口', () => {
     const session = {
       taskMode: 'transcribe',
       progress: {
@@ -90,7 +92,8 @@ describe('頂部工具列語音辨識指示器 (asr-indicator)', () => {
     };
 
     renderAsrIndicator(button, session);
-    expect(button.style.display).toBe('none');
+    expect(button.style.display).toBe('');
     expect(button.classList.contains('asr-running')).toBe(false);
+    expect(button.textContent).toContain('失敗');
   });
 });

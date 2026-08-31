@@ -131,6 +131,7 @@ FPS-SYNC
 | `time.js` | `secToASS()` | ASS 百分秒不預先位移；回匯可回同一影格 | I3 |
 | `time.js` | `snapTimeToFrame()` | 唯一的影格格網 | I3 |
 | `speech-recognition.js` | `insertAsrSubtitles(requireValidTimes)` | 文本匹配寫入前吸附專案格網；無效／重疊行保留為 `timed:false`，不可替它吸附或偽造時間碼 | I3 |
+| `timeline-gesture-transaction.js` | `snapFrameWithin()` 與三種 preview planner | 透過 renderer 注入的 `snapTimeToFrame()` 逐格化，並在逐格後重驗鄰居／素材邊界，防止重新重疊 | I3 |
 | `media.js` | `detectFpsWeb()` 區塊 | 實測 FPS（非檔名） | I1 |
 | `media.js` | `displayTime()` | 權威播放位置 | I4 |
 | `media.js` | `seek()` 的 snap／純字幕通知 | seek 對齊影格；無播放器時仍通知預覽讀回 `displayTime()` | I3, I4 |

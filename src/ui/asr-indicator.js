@@ -11,14 +11,15 @@ export function renderAsrIndicator(button, session = null) {
     session &&
     status !== 'completed' &&
     status !== 'failed' &&
-    status !== 'cancelled' &&
-    !session.signal?.aborted
+    status !== 'cancelled'
   );
+  const reviewable = !!(session && (status === 'completed' || status === 'failed'));
+  const visible = running || reviewable;
 
   button.classList.toggle('asr-running', running);
-  button.style.display = running ? '' : 'none';
+  button.style.display = visible ? '' : 'none';
 
-  if (!running) {
+  if (!visible) {
     button.removeAttribute('aria-label');
     button.removeAttribute('title');
     return false;
@@ -30,12 +31,15 @@ export function renderAsrIndicator(button, session = null) {
   const taskLabel = session.taskMode === 'align' ? '文本匹配' : '語音辨識';
 
   const labelEl = button.querySelector('#asrMonitorLbl') || button.querySelector('.lbl');
+  const stateText = status === 'completed' ? '完成' : (status === 'failed' ? '失敗' : percentText);
   if (labelEl) {
-    labelEl.textContent = `🎙 ${taskLabel} ${percentText}`;
+    labelEl.textContent = `🎙 ${taskLabel} ${stateText}`;
   }
 
   const detail = session.statusText || session.progress?.message || '';
-  const tooltip = `${taskLabel}進行中（${percentText}${detail ? ` · ${detail}` : ''}）— 點擊查看進度視窗`;
+  const tooltip = reviewable
+    ? `${taskLabel}${stateText}${detail ? `（${detail}）` : ''}— 點擊查看結果`
+    : `${taskLabel}進行中（${percentText}${detail ? ` · ${detail}` : ''}）— 點擊查看進度視窗`;
   button.title = tooltip;
   button.setAttribute('aria-label', tooltip);
 

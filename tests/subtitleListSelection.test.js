@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { beforeAll, beforeEach, expect, it, vi } from 'vitest';
 
+const mediaMocks = vi.hoisted(() => ({
+  externalAudioList: [],
+  externalAudioById: new Map(),
+}));
+
 vi.mock('../src/dom.js', () => ({
   $: id => document.getElementById(id),
   video: document.getElementById('video'),
@@ -13,7 +18,15 @@ vi.mock('../src/dom.js', () => ({
 }));
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/media.js', () => ({
-  Media: { displayTime: () => 0, seek: vi.fn(), externalAudio: { list: () => [], get: () => null }, mpvMode: false },
+  Media: {
+    displayTime: () => 0,
+    seek: vi.fn(),
+    externalAudio: {
+      list: () => mediaMocks.externalAudioList,
+      get: id => mediaMocks.externalAudioById.get(id) || null,
+    },
+    mpvMode: false
+  },
   Wave: {},
 }));
 vi.mock('../src/timeline.js', () => ({
@@ -73,22 +86,10 @@ vi.mock('../src/time.js', () => ({
 vi.mock('../src/painters/clip-painter.js', () => ({ paintClipBlocks: vi.fn() }));
 vi.mock('../src/painters/subtitle-painter.js', () => ({ paintSubtitleBlocks: vi.fn() }));
 vi.mock('../src/painters/waveform-painter.js', () => ({ paintClipWave: vi.fn() }));
-vi.mock('../src/timeline-edit-transaction.js', () => ({ beginTimelineTrackEdit: vi.fn(), updateTimelineTrack: vi.fn() }));
-vi.mock('../src/timeline-gesture-transaction.js', () => ({
-  beginTimelineGestureLifecycle: () => {
-    let moved = false;
-    let active = true;
-    return {
-      startPreview(effect) { if (!active || moved) return false; moved = true; effect?.(); return true; },
-      preview(effect) { if (!active) return false; effect?.(); return true; },
-      commit(effect) {
-        if (!active) return { committed: false, moved: false };
-        effect?.({ moved }); active = false; return { committed: true, moved };
-      },
-      cancel: vi.fn(() => { active = false; return { cancelled: true, restored: moved }; }),
-      addRollback: vi.fn(), addCancelEffect: vi.fn(), hasMoved: () => moved, isActive: () => active,
-    };
-  },
+vi.mock('../src/timeline-edit-transaction.js', async importOriginal => ({
+  ...(await importOriginal()),
+  beginTimelineTrackEdit: vi.fn(),
+  updateTimelineTrack: vi.fn(),
 }));
 vi.mock('../src/sequence.js', () => ({
   Seq: { active: () => false, byId: vi.fn(), neighborBounds: vi.fn(), clipEnd: vi.fn(), snapEdges: () => [] },
@@ -147,6 +148,7 @@ function dragBlock(block, { dx = 80, dy = 0 } = {}) {
 
 let state;
 let subtitles;
+let timelineRenderer;
 let blockB;
 
 function resetScenario() {
@@ -184,12 +186,14 @@ beforeAll(async () => {
   );
   state = await import('../src/state.js');
   subtitles = await import('../src/subtitles.js');
-  await import('../src/timeline-renderer.js');
+  timelineRenderer = await import('../src/timeline-renderer.js');
   blockB = document.querySelector('.cue-block[data-id="b"]');
 });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mediaMocks.externalAudioList.length = 0;
+  mediaMocks.externalAudioById.clear();
   project.guardDone = true;
   resetScenario();
 });
@@ -371,4 +375,35 @@ it('moveSelectedToTrack 嘗試移動字幕至鎖定軌道時被擋下', async ()
   moveSelectedToTrack(1);
   const cueA = state.State.cues.find(c => c.id === 'a');
   expect(cueA.track).toBe(0);
+});
+
+it('鎖定音訊可選取，但 pointer／mouse 事件不會冒泡成時間軸手勢', () => {
+  const asset = {
+    id: 'locked-audio', audioSourceId: 'locked-source', timelineLaneId: 'locked-lane',
+    name: '鎖定音訊', offset: 0, in: 0, out: 2, duration: 2, locked: true
+  };
+  mediaMocks.externalAudioList.push(asset);
+  mediaMocks.externalAudioById.set(asset.id, asset);
+  state.State.selectedAudioClipId = null;
+  document.getElementById('rulerCanvas').getContext = () => ({
+    save: vi.fn(), scale: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(),
+    beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), closePath: vi.fn(),
+    stroke: vi.fn(), fill: vi.fn(), fillText: vi.fn(), restore: vi.fn(),
+  });
+  timelineRenderer.drawTimeline();
+
+  const block = document.querySelector('.external-audio-block[data-audio-asset-id="locked-audio"]');
+  expect(block).toBeTruthy();
+  block.setPointerCapture = vi.fn();
+  let bubbled = 0;
+  const onTimelineMouseDown = () => { bubbled += 1; };
+  document.getElementById('tlScroll').addEventListener('mousedown', onTimelineMouseDown);
+
+  block.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+  block.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+
+  expect(block.setPointerCapture).not.toHaveBeenCalled();
+  expect(state.State.selectedAudioClipId).toBe('locked-audio');
+  expect(bubbled).toBe(0);
+  document.getElementById('tlScroll').removeEventListener('mousedown', onTimelineMouseDown);
 });

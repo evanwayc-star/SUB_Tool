@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   beginTimelineGesture,
   beginTimelineGestureLifecycle,
+  planCueGesturePreview,
+  planClipGesturePreview,
+  planAudioGesturePreview,
 } from '../src/timeline-gesture-transaction.js';
 
 describe('timeline gesture transaction', () => {
@@ -90,6 +93,24 @@ describe('timeline gesture transaction', () => {
     expect(gesture.cancel()).toEqual({ cancelled: false, restored: false });
   });
 
+  it('新手勢會取消並回復尚未結束的舊手勢', () => {
+    const cue = { start: 1, end: 2 };
+    const first = beginTimelineGestureLifecycle({
+      mode: 'move',
+      targets: [{ target: cue, fields: ['start', 'end'] }]
+    });
+    first.startPreview();
+    cue.start = 4;
+    cue.end = 5;
+
+    const second = beginTimelineGestureLifecycle({ mode: 'rubber' });
+
+    expect(first.isActive()).toBe(false);
+    expect(cue).toEqual({ start: 1, end: 2 });
+    expect(second.isActive()).toBe(true);
+    second.cancel();
+  });
+
   it('透過 production lifecycle 依序回復影片片段、畫面與播放呈現', () => {
     const clip = { offset: 2, in: 1, out: 9, vtrack: 0 };
     const calls = [];
@@ -134,5 +155,80 @@ describe('timeline gesture transaction', () => {
 
     expect(cues).toEqual([{ id: 'original' }]);
     expect(calls).toEqual(['draw:1', 'preview', 'selection:1']);
+  });
+
+  it('手勢自己判定 3px 拖曳門檻，並凍結開始時的意圖與目標', () => {
+    const target = { id: 'cue-1', start: 1, end: 2 };
+    const gesture = beginTimelineGestureLifecycle({
+      mode: 'move',
+      targets: [{ target, fields: ['start', 'end'] }],
+      context: {
+        startPoint: { x: 10, y: 20 },
+        modifiers: { alt: true },
+        targetIds: ['cue-1']
+      }
+    });
+
+    expect(gesture.acceptSample({ x: 13, y: 20 })).toEqual({ accepted: false, started: false });
+    expect(gesture.acceptSample({ x: 14, y: 20 })).toEqual({ accepted: true, started: true });
+    expect(gesture.intent).toMatchObject({
+      mode: 'move', kind: 'cue', targetIds: ['cue-1'], modifiers: { alt: true }
+    });
+    expect(Object.isFrozen(gesture.intent)).toBe(true);
+  });
+
+  it('字幕群組移動集中處理防重疊、鎖定目的軌、磁吸與影格格網', () => {
+    const snapFrame = value => Math.round(value * 10) / 10;
+    const plan = planCueGesturePreview({
+      mode: 'move',
+      originals: [{ start: 1, end: 2, track: 0, prevEnd: 0, nextStart: 5 }],
+      deltaTime: 0.26,
+      targetTrackDelta: 1,
+      trackCount: 2,
+      lockedTracks: [false, true],
+      overwriteMode: false,
+      snaps: [1.3],
+      snapThreshold: 0.1,
+      snapFrame
+    });
+
+    expect(plan.items).toEqual([{ start: 1.3, end: 2.3, track: 0 }]);
+    expect(plan.snapTarget).toBe(1.3);
+  });
+
+  it('字幕逐格化後仍不可越過鄰居邊界', () => {
+    const snapFrame = value => Math.round(value * 24) / 24;
+    const plan = planCueGesturePreview({
+      mode: 'move',
+      originals: [{ start: 1.5, end: 2.5, track: 0, prevEnd: 1.02, nextStart: 5 }],
+      deltaTime: -0.5,
+      trackCount: 1,
+      snapFrame,
+      frameStep: 1 / 24
+    });
+
+    expect(plan.items[0].start).toBeGreaterThanOrEqual(1.02);
+    expect(plan.items[0].start * 24).toBeCloseTo(Math.round(plan.items[0].start * 24), 8);
+  });
+
+  it('影片與外部音訊使用同一組純 preview planner，不直接改 model', () => {
+    const snapFrame = value => Math.round(value * 10) / 10;
+    const clip = { offset: 2, in: 1, out: 5, duration: 8, vtrack: 0, type: 'video' };
+    const clipPlan = planClipGesturePreview({
+      mode: 'clip-move', original: clip, deltaTime: 0.24,
+      targetTrack: 1, targetTrackLocked: true,
+      snaps: [2.2], snapThreshold: 0.1, snapFrame,
+      leftLimit: 0, rightLimit: Infinity
+    });
+    const audio = { offset: 3, in: 1, out: 5, duration: 8 };
+    const audioPlan = planAudioGesturePreview({
+      mode: 'audio-r', original: audio, deltaTime: -0.64,
+      snaps: [6.4], snapThreshold: 0.1, snapFrame
+    });
+
+    expect(clipPlan).toMatchObject({ offset: 2.2, in: 1, out: 5, vtrack: 0, snapTarget: 2.2 });
+    expect(clip).toEqual({ offset: 2, in: 1, out: 5, duration: 8, vtrack: 0, type: 'video' });
+    expect(audioPlan).toMatchObject({ offset: 3, in: 1, out: 4.4, snapTarget: 6.4 });
+    expect(audio).toEqual({ offset: 3, in: 1, out: 5, duration: 8 });
   });
 });

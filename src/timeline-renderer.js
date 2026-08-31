@@ -43,7 +43,12 @@ import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
-import { beginTimelineGestureLifecycle } from './timeline-gesture-transaction.js';
+import {
+  beginTimelineGestureLifecycle,
+  planCueGesturePreview,
+  planClipGesturePreview,
+  planAudioGesturePreview,
+} from './timeline-gesture-transaction.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
 import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction.js';
@@ -676,6 +681,7 @@ function runExternalAudioAction(method,args=[],{clearSelection=false}={}){
 }
 function beginExternalAudioDrag(ev,asset,entry,block){
   if(ev.button!==0 || ev.target.closest('button')) return;
+  if(drag) cancelTimelineDrag();
   const assetId=asset?.id||asset?.audioSourceId||asset?.audioSrc;
   if(!assetId) return;
   const mode=ev.target.classList.contains('edge')
@@ -692,7 +698,10 @@ function beginExternalAudioDrag(ev,asset,entry,block){
     os:entry.start,oin:inPoint,oout:outPoint,duration:Math.max(outPoint,Number(asset.duration)||0),
     preview:{offset:entry.start,in:inPoint,out:outPoint},
     snaps:snapTargets(new Set()),
-    gesture:beginRendererGesture(mode),
+    gesture:beginRendererGesture(mode,{context:{
+      startPoint:{x:ev.clientX,y:ev.clientY},
+      modifiers:{alt:ev.altKey,ctrl:ev.ctrlKey||ev.metaKey,shift:ev.shiftKey},
+    }}),
   };
   jklReset();
   ev.preventDefault(); ev.stopPropagation();
@@ -762,11 +771,24 @@ function renderAudioTrackRows(){
       if(external){
         block.addEventListener('pointerdown',ev=>{
           if(ev.button!==0||ev.target.closest('button')) return;
+          if(c.locked){
+            selectExternalAudioClip(c.id,{redraw:false});
+            block.classList.add('selected');
+            ev.preventDefault();
+            ev.stopPropagation();
+            return;
+          }
           try{ block.setPointerCapture(ev.pointerId); block._audioPointerId=ev.pointerId; }catch(_){}
         });
       }
       block.addEventListener('mousedown',ev=>{
-        if(c.locked) return;
+        if(c.locked){
+          if(external) selectExternalAudioClip(c.id,{redraw:false});
+          else selectClip(c.id);
+          ev.preventDefault();
+          ev.stopPropagation();
+          return;
+        }
         if(external){ beginExternalAudioDrag(ev,c,entry,block); return; }
         ev.stopPropagation();
       });
@@ -1173,12 +1195,13 @@ function beginRendererGesture(mode,{targets=[],context={}}={}){
 
 tlScroll.addEventListener('mousedown',e=>{
   if(e.button!==0)return;
+  if(drag) cancelTimelineDrag();
   hideCtx();
   /* 影片序列區塊：拖曳=移動 offset、拖左右邊緣=修剪 in/out（不可與相鄰影片重疊） */
   const clipEl=e.target.closest('.clip-block');
   if(clipEl){
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
-    if(State.videoTracks[c.vtrack||0]?.locked){ e.preventDefault(); return; } // 鎖定軌：禁止選取／移動／修剪
+    if(State.videoTracks[c.vtrack||0]?.locked){ selectClip(c.id); e.preventDefault(); return; } // 鎖定軌：允許選取，禁止移動／修剪
     const mode=e.target.classList.contains('edge')?(e.target.classList.contains('l')?'clip-l':'clip-r'):'clip-move'; // 需在 selectClip 重繪前判斷（用 e.target 的 class）
     selectClip(c.id); // 點擊即選取（非破壞性，先做——不受存檔守衛擋住）
     if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; } // 拖曳/修剪前先存檔
@@ -1187,10 +1210,13 @@ tlScroll.addEventListener('mousedown',e=>{
     // selectClip 內 renderClipBlocks() 已把原 clipEl 重建成新節點；必須重抓，否則拖曳更新的是脫離 DOM 的孤兒（框不動、只有波形動）
     const liveEl=(tlVtracks&&tlVtracks.querySelector(`.clip-block[data-clip-id="${c.id}"]`))||clipEl;
     drag={mode, clip:c, clipEl:liveEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft,
-      os:c.offset, oin:c.in, oout:c.out,
+      os:c.offset, oin:c.in, oout:c.out, ov:c.vtrack||0,
       leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+(c.out-c.in)), // 右鄰左緣（時間軸）
       nb, snaps:[...snapTargets(new Set()), ...Seq.snapEdges(c.id)],
-      gesture:beginRendererGesture(mode,{targets:[{target:c,fields:['offset','in','out','vtrack']}]}),};
+      gesture:beginRendererGesture(mode,{targets:[{target:c,fields:['offset','in','out','vtrack']}],context:{
+        startPoint:{x:e.clientX,y:e.clientY},
+        modifiers:{alt:e.altKey,ctrl:e.ctrlKey||e.metaKey,shift:e.shiftKey},
+      }}),};
     e.preventDefault(); return;
   }
   const overlap=e.target.closest('.cue-overlap');
@@ -1268,7 +1294,7 @@ tlScroll.addEventListener('mousedown',e=>{
     const selectionBefore={ids:[...State.selectedIds],primary:State.selectedId,activeEdge:State.activeEdge};
     const gesture=beginRendererGesture(mode,{
       targets:grp.map(item=>({target:item.c,fields:['start','end','track','style']})),
-      context:{isCopyDrag},
+      context:{isCopyDrag,startPoint:{x:e.clientX,y:e.clientY},modifiers:{alt:e.altKey,ctrl:isCtrl,shift:e.shiftKey}},
     });
     // renderSubRow is part of the drag preview.  Cancellation must refresh the
     // same rows after model rollback, otherwise their TC/duration stays stale.
@@ -1300,10 +1326,12 @@ tlScroll.addEventListener('mousedown',e=>{
     const t = xToTime(x);
     const sn = snapVal(t, snaps, currentThr);
     requestPointerSeek(sn !== t ? sn : snapFrame(t)); updatePlayhead(); emit('render:videoSub');
-    drag={mode:'scrub', snaps, gesture:beginRendererGesture('scrub')}; e.preventDefault(); return;
+    drag={mode:'scrub', snaps, gesture:beginRendererGesture('scrub',{context:{
+      modifiers:{alt:e.altKey,ctrl:e.ctrlKey||e.metaKey,shift:e.shiftKey},
+    }})}; e.preventDefault(); return;
   }
   drag={mode:'rubber',startX:e.clientX,startY:e.clientY,startScroll:tlScroll.scrollLeft,x0:x,y0:y,additive:e.ctrlKey||e.metaKey,
-    gesture:beginRendererGesture('rubber')};
+    gesture:beginRendererGesture('rubber',{context:{startPoint:{x:e.clientX,y:e.clientY},modifiers:{ctrl:e.ctrlKey||e.metaKey}}})};
   e.preventDefault();
 });
 let _autoScrollId = null;
@@ -1328,7 +1356,8 @@ function cancelTimelineDrag(){
 const _handleDragUpdate = (e) => {
   if(!drag)return;
   const rect=tlLayer.getBoundingClientRect();
-  const currentThr = e.altKey ? 0 : 8 / State.pxPerSec;
+  const currentThr = drag.gesture.intent.modifiers.alt ? 0 : 8 / State.pxPerSec;
+  const frameStep = 1 / getExactFps(State.fps || 24);
   if(drag.mode==='scrub'){
     drag.gesture.preview(()=>{
       const t = xToTime(e.clientX-rect.left);
@@ -1340,8 +1369,8 @@ const _handleDragUpdate = (e) => {
     return;
   }
   // scrub 已在上方返回；rubber、字幕、影片與音訊都由同一門檻開始 preview lifecycle。
-  if (!drag.gesture.hasMoved() && (Math.abs(e.clientX-drag.startX)>3||Math.abs(e.clientY-drag.startY)>3)) {
-    drag.gesture.startPreview(()=>{
+  if (!drag.gesture.hasMoved()) {
+    drag.gesture.acceptSample({x:e.clientX,y:e.clientY},()=>{
       if (!(drag.isCopyDrag && drag.mode === 'move' && drag.grp)) return;
         // Clone cues
         const newIds = [];
@@ -1384,177 +1413,94 @@ const _handleDragUpdate = (e) => {
   let dt=(e.clientX-drag.startX + (tlScroll.scrollLeft - drag.startScroll))/State.pxPerSec;
   /* ---- 影片序列區塊拖曳 ---- */
   if(drag.gesture.kind==='clip'){
-    const c=drag.clip, minL=0.2; // 最短保留 0.2s
-    let tgt=null;
-    if(drag.mode==='clip-move'){
-      // 自由拖移（如一般剪輯軟體）：不受鄰居夾限，可放到時間軸任意位置；
-      // 重疊在放開時由 Seq.resolveOverlaps 以插入語義解算（被壓到的段落連鎖右推）
-      let no=drag.os+dt;
-      const L=drag.oout-drag.oin;
-      const s1=snapVal(no,drag.snaps,currentThr), s2=snapVal(no+L,drag.snaps,currentThr);
-      if(s1!==no){ no=s1; tgt=s1; } else if(s2!==no+L){ no=s2-L; tgt=s2; }
-      if(no<0)no=0;
-      c.offset=snapFrame(no);
-      // 上下拖曳＝換視訊軌（於現有軌間移動；要新增軌請用列頭的＋）
-      const nv=clipTrackFromY(e.clientY);
-      if(nv!==(c.vtrack||0) && !State.videoTracks[nv]?.locked) c.vtrack=nv; // 不可放入鎖定軌
-    } else if(drag.mode==='clip-l'){
-      // 修剪左緣：offset 與 in 同步位移 d；界線＝in≥0 (圖片除外)、留 minL、不越左鄰
-      let d=dt;
-      const leftBound = c.type === 'image' ? drag.leftLim - drag.os : Math.max(-drag.oin, drag.leftLim - drag.os);
-      d = Math.max(d, leftBound);
-      d = Math.min(d, (drag.oout-minL)-drag.oin);
-      let nl=drag.os+d;
-      const sn=snapVal(nl,drag.snaps,currentThr);
-      if(sn!==nl){ const cd=sn-drag.os;
-        if(cd>=leftBound-1e-9 && cd<=(drag.oout-minL)-drag.oin+1e-9 && sn>=drag.leftLim-1e-9){ d=cd; nl=sn; tgt=sn; } }
-      nl=snapFrame(Math.max(0,nl)); d=nl-drag.os;
-      c.offset=nl; 
-      if (c.type === 'image') {
-        c.out = drag.oout - d;
-      } else {
-        c.in = Math.max(0, drag.oin+d);
-      }
-    } else {
-      // 修剪右緣：out∈[in+minL, dur]；時間軸右緣不越右鄰
-      let edge=drag.os+(drag.oout+dt-drag.oin); // 時間軸右緣
-      const maxEdge=Math.min(drag.rightLim, drag.os+(c.dur-drag.oin));
-      const minEdge=drag.os+minL;
-      edge=clamp(edge,minEdge,maxEdge);
-      const sn=snapVal(edge,drag.snaps,currentThr);
-      if(sn!==edge && sn>=minEdge-1e-9 && sn<=maxEdge+1e-9){ edge=sn; tgt=sn; }
-      edge=snapFrame(edge);
-      c.out=clamp(drag.oin+(edge-drag.os), drag.oin+minL, c.dur);
-    }
-    updateSnapGuide(tgt);
+    const c=drag.clip;
+    const targetTrack=clipTrackFromY(e.clientY);
+    const plan=planClipGesturePreview({
+      mode:drag.mode,
+      original:{
+        offset:drag.os,in:drag.oin,out:drag.oout,
+        duration:c.dur,type:c.type,vtrack:drag.ov,
+      },
+      deltaTime:dt,
+      targetTrack,
+      targetTrackLocked:!!State.videoTracks[targetTrack]?.locked,
+      snaps:drag.snaps,
+      snapThreshold:currentThr,
+      snapFrame,
+      frameStep,
+      leftLimit:drag.leftLim,
+      rightLimit:drag.rightLim,
+    });
+    c.offset=plan.offset;
+    c.in=plan.in;
+    c.out=plan.out;
+    c.vtrack=plan.vtrack;
+    updateSnapGuide(plan.snapTarget);
     const x1=timeToX(c.offset), x2=timeToX(Seq.clipEnd(c));
     drag.clipEl.style.left=x1+'px'; drag.clipEl.style.width=Math.max(6,x2-x1)+'px';
-    // 換軌時把片段移入對應視訊軌列（top/height 由 CSS 相對列自動決定）
-    if(drag.mode==='clip-move' && tlVtracks){
+    if(drag.mode==='clip-move'&&tlVtracks){
       const row=tlVtracks.querySelector(`.vtrack-row[data-vtrack="${c.vtrack||0}"]`);
-      if(row && drag.clipEl.parentElement!==row) row.appendChild(drag.clipEl);
+      if(row&&drag.clipEl.parentElement!==row) row.appendChild(drag.clipEl);
     }
-    drawWave(); // 波形跟著區塊走
+    drawWave();
     return;
   }
   /* ---- 外部音訊素材拖曳 ----
      拖曳中只更新 DOM 預覽，放開時才寫回 Media；這樣不會每一個 mousemove 都重建
      AudioNode / cache，也避免波形在拖曳期間閃爍。 */
   if(drag.gesture.kind==='audio'){
-    const minL=Math.min(0.2,Math.max(0.02,(drag.oout-drag.oin)/2));
-    const maxOut=Math.max(drag.oin+minL,drag.duration||drag.oout);
-    let offset=drag.os, inPoint=drag.oin, outPoint=drag.oout, target=null;
-    if(drag.mode==='audio-move'){
-      let next=Math.max(0,drag.os+dt);
-      const len=drag.oout-drag.oin;
-      const atStart=snapVal(next,drag.snaps,currentThr);
-      const atEnd=snapVal(next+len,drag.snaps,currentThr);
-      if(atStart!==next){ next=atStart; target=atStart; }
-      else if(atEnd!==next+len){ next=atEnd-len; target=atEnd; }
-      offset=snapFrame(Math.max(0,next));
-    }else if(drag.mode==='audio-l'){
-      const minLeft=Math.max(0,drag.os-drag.oin);
-      const maxLeft=drag.os+(drag.oout-drag.oin-minL);
-      let next=clamp(drag.os+dt,minLeft,maxLeft);
-      const snapped=snapVal(next,drag.snaps,currentThr);
-      if(snapped>=minLeft-1e-9&&snapped<=maxLeft+1e-9&&snapped!==next){ next=snapped; target=snapped; }
-      offset=snapFrame(next);
-      inPoint=clamp(drag.oin+(offset-drag.os),0,drag.oout-minL);
-    }else{
-      const minRight=drag.os+minL;
-      const maxRight=drag.os+(maxOut-drag.oin);
-      let right=clamp(drag.os+(drag.oout-drag.oin)+dt,minRight,maxRight);
-      const snapped=snapVal(right,drag.snaps,currentThr);
-      if(snapped>=minRight-1e-9&&snapped<=maxRight+1e-9&&snapped!==right){ right=snapped; target=snapped; }
-      right=snapFrame(right);
-      outPoint=clamp(drag.oin+(right-drag.os),drag.oin+minL,maxOut);
-    }
-    drag.preview={offset,in:inPoint,out:outPoint};
-    updateSnapGuide(target);
-    const x1=timeToX(offset), x2=timeToX(offset+Math.max(0,outPoint-inPoint));
+    const plan=planAudioGesturePreview({
+      mode:drag.mode,
+      original:{offset:drag.os,in:drag.oin,out:drag.oout,duration:drag.duration},
+      deltaTime:dt,
+      snaps:drag.snaps,
+      snapThreshold:currentThr,
+      snapFrame,
+      frameStep,
+    });
+    drag.preview={offset:plan.offset,in:plan.in,out:plan.out};
+    updateSnapGuide(plan.snapTarget);
+    const x1=timeToX(plan.offset), x2=timeToX(plan.offset+Math.max(0,plan.out-plan.in));
     drag.audioEl.style.left=x1+'px';
     drag.audioEl.style.width=Math.max(6,x2-x1)+'px';
     drag.audioEl.classList.add('dragging');
     return;
   }
-  if(drag.mode==='move'){
-    // 防重疊：限制 dt 使每條都不越過同軌鄰居
-    if(!State.overwriteMode){
-      for(const it of drag.grp){
-        const minDt=it.prevEnd-it.os, maxDt=(it.nextStart===Infinity?Infinity:it.nextStart-it.oe);
-        if(dt<minDt)dt=minDt; if(maxDt!==Infinity&&dt>maxDt)dt=maxDt;
-      }
+  const cuePlan=planCueGesturePreview({
+    mode:drag.mode,
+    originals:drag.grp.map(item=>({
+      start:item.os,end:item.oe,track:item.ot,
+      prevEnd:item.prevEnd,nextStart:item.nextStart,
+    })),
+    deltaTime:dt,
+    targetTrackDelta:trackFromY(e.clientY)-drag.ot,
+    trackCount:State.trackCount,
+    lockedTracks:State.tracks.map(track=>!!track?.locked),
+    overwriteMode:State.overwriteMode,
+    snaps:drag.snaps,
+    snapThreshold:currentThr,
+    snapFrame,
+    frameStep,
+  });
+  updateSnapGuide(cuePlan.snapTarget);
+  drag.grp.forEach((item,index)=>{
+    const next=cuePlan.items[index];
+    if(!next)return;
+    item.c.start=next.start;
+    item.c.end=next.end;
+    item.c.track=next.track;
+    if(next.track!==item.ot){
+      const oldEffStyle=effStyle({style:item.origStyle},State.tracks[item.ot]);
+      const stylePlan=planCueStyleAssignment({
+        cue:{style:item.origStyle},
+        targetTrack:State.tracks[next.track],
+        desiredStyle:oldEffStyle,
+      });
+      item.c.style=stylePlan.style;
+    }else{
+      item.c.style=item.origStyle;
     }
-    const minOs=Math.min(...drag.grp.map(g=>g.os)); if(minOs+dt<0)dt=-minOs;
-    // 磁吸（單選時依主字幕起/訖 → 播放點與其他字幕邊界）
-    let targetSn = null;
-    let snapAnchor = 'start';
-    if(drag.grp.length===1){
-      const it=drag.grp[0], len=it.oe-it.os, ns=it.os+dt;
-      const s1=snapVal(ns,drag.snaps,currentThr), s2=snapVal(ns+len,drag.snaps,currentThr);
-      let snapped=ns; 
-      if(s1!==ns) { snapped=s1; targetSn=s1; snapAnchor='start'; } 
-      else if(s2!==ns+len) { snapped=s2-len; targetSn=s2; snapAnchor='end'; }
-      let sdt=snapped-it.os;
-      if(!State.overwriteMode){
-        const minDt=it.prevEnd-it.os, maxDt=(it.nextStart===Infinity?Infinity:it.nextStart-it.oe);
-        if(sdt<minDt)sdt=minDt; if(maxDt!==Infinity&&sdt>maxDt)sdt=maxDt;
-      }
-      if(it.os+sdt<0)sdt=-it.os;
-      dt=sdt;
-    }
-    updateSnapGuide(targetSn);
-    const minOt=Math.min(...drag.grp.map(g=>g.ot)), maxOt=Math.max(...drag.grp.map(g=>g.ot));
-    const rawDTk=clamp(trackFromY(e.clientY)-drag.ot, -minOt, State.trackCount-1-maxOt);
-    const canMoveToTrack = drag.grp.every(it => {
-      const targetTk = it.ot + rawDTk;
-      return targetTk >= 0 && targetTk < State.trackCount && !State.tracks[targetTk]?.locked;
-    });
-    const dTk = canMoveToTrack ? rawDTk : 0;
-    for(const it of drag.grp){
-      const len=it.oe-it.os;
-      if (snapAnchor === 'end') {
-        it.c.end = snapFrame(it.oe+dt);
-        it.c.start = snapFrame(it.c.end-len);
-      } else {
-        it.c.start = snapFrame(it.os+dt);
-        it.c.end = snapFrame(it.c.start+len);
-      }
-      const newTrackIdx = it.ot + dTk;
-      if (it.c.track !== newTrackIdx) {
-        it.c.track = newTrackIdx;
-        if (newTrackIdx !== it.ot) {
-          const oldEffStyle = effStyle({ style: it.origStyle }, State.tracks[it.ot]);
-          const plan = planCueStyleAssignment({ 
-            cue: { style: it.origStyle }, 
-            targetTrack: State.tracks[newTrackIdx], 
-            desiredStyle: oldEffStyle 
-          });
-          it.c.style = plan.style;
-        } else {
-          it.c.style = it.origStyle;
-        }
-      }
-    }
-  }else if(drag.mode==='l'){
-    const it=drag.grp[0];
-    let ns=State.overwriteMode ? Math.max(0, it.os+dt) : clamp(it.os+dt, it.prevEnd, drag.c.end-0.05);
-    const sn=snapVal(ns,drag.snaps,currentThr);
-    let targetSn = null;
-    if(State.overwriteMode){ if(sn>=0 && sn<=drag.c.end-0.05) { ns=sn; targetSn=sn; } }
-    else { if(sn>=it.prevEnd && sn<=drag.c.end-0.05) { ns=sn; targetSn=sn; } }
-    drag.c.start=snapFrame(ns);
-    updateSnapGuide(targetSn);
-  }else if(drag.mode==='r'){
-    const it=drag.grp[0];
-    let ne=State.overwriteMode ? (drag.oe+dt) : clamp(drag.oe+dt, drag.c.start+0.05, it.nextStart);
-    const sn=snapVal(ne,drag.snaps,currentThr);
-    let targetSn = null;
-    if(State.overwriteMode){ if(sn>=drag.c.start+0.05) { ne=sn; targetSn=sn; } }
-    else { if(sn>=drag.c.start+0.05 && sn<=it.nextStart) { ne=sn; targetSn=sn; } }
-    drag.c.end=snapFrame(ne);
-    updateSnapGuide(targetSn);
-  }
+  });
   
   // P3：拖曳期間只更新樣式，用 mousedown 快取的 element 參照（免每 frame 字串選擇器、免全掃 overlap）
   const rows = tlTracks.querySelectorAll('.tl-track');

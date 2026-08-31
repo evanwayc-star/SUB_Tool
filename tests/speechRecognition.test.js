@@ -823,6 +823,22 @@ describe('語音辨識與字幕生成模組', () => {
       expect(State.cues[1].end).toBeCloseTo(17.2, 2);
     });
 
+    it('可使用工作開始時凍結的 FPS，不受提交當下 State 變更影響', () => {
+      State.fps = 24;
+      const clip = { id: 'frozen-fps', offset: 0, in: 0, out: 2 };
+
+      insertAsrSubtitles([{
+        clip,
+        segments: [{ start: 1.02, end: 1.06, text: '凍結格網' }]
+      }], {
+        timelineFps: 25,
+        timelineDropFrame: false
+      });
+
+      expect(State.cues[0].start).toBeCloseTo(1.04, 9);
+      expect(State.cues[0].end).toBeCloseTo(1.08, 9);
+    });
+
     it('多片段辨識時，所有字幕依時間軸順序整合至同一個新軌道', () => {
       const clip1 = { id: 'c1', offset: 0.0, in: 0, out: 5.0 };
       const clip2 = { id: 'c2', offset: 20.0, in: 0, out: 5.0 };

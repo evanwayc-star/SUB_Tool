@@ -21,15 +21,11 @@ import { resolveRecognitionAlignment } from './recognition-alignment-result.js';
 import { CLOUD_PROVIDER_META, getAsrGuidanceMeta, resolveAsrGuidance } from './recognition-guidance.js';
 import {
   getAsrSession,
-  startAsrSession,
-  updateAsrSessionProgress,
-  updateAsrSessionStatus,
   setAsrSessionDialogOpen,
   cancelActiveAsrSession,
-  completeAsrSession,
-  failAsrSession,
   onAsrSessionChange,
-  clearAsrSession
+  clearAsrSession,
+  startAsrWork
 } from './speech-recognition-session.js';
 import {
   BUILTIN_MODELS,
@@ -71,15 +67,11 @@ export {
   callWhisperApi,
   transcribeAudioStream,
   getAsrSession,
-  startAsrSession,
-  updateAsrSessionProgress,
-  updateAsrSessionStatus,
   setAsrSessionDialogOpen,
   cancelActiveAsrSession,
-  completeAsrSession,
-  failAsrSession,
   onAsrSessionChange,
-  clearAsrSession
+  clearAsrSession,
+  startAsrWork
 };
 
 const ASR_CONFIG_KEY = 'subtool_asr_config';
@@ -421,20 +413,33 @@ function hasValidSubtitleTime(start, end) {
   return Number.isFinite(start) && Number.isFinite(end) && end > start;
 }
 
+function downloadAlignmentDiagnostic(diagnostic) {
+  if (!diagnostic) return false;
+  const timestamp = String(diagnostic.generatedAt || new Date().toISOString())
+    .replace(/[:.]/gu, '-')
+    .replace('T', '_')
+    .replace(/Z$/u, '');
+  const bytes = new TextEncoder().encode(`${JSON.stringify(diagnostic, null, 2)}\n`);
+  downloadBytes(bytes, `SUBTool_文本匹配診斷_${timestamp}.json`, 'application/json');
+  return true;
+}
+
 export function insertAsrSubtitles(results, {
   trackName = '語音辨識',
   historyLabel = '🎙 語音辨識生成字幕',
   requireValidTimes = false,
   allowPartialValidTimes = false,
   preserveUntimedSegments = false,
-  onSkippedSegment = null
+  onSkippedSegment = null,
+  timelineFps = State.fps || 24,
+  timelineDropFrame = State.dropFrame || false
 } = {}) {
   if (!results || results.length === 0) return 0;
 
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：文本匹配只在寫入時間軸前走唯一影格格網，
   // strict 模式必須在吸附後重新拒絕零長度或重疊 cue，不可自行補成一格。
-  const fps = State.fps || 24;
-  const dropFrame = State.dropFrame || false;
+  const fps = Number(timelineFps) || 24;
+  const dropFrame = !!timelineDropFrame;
   const plannedCues = [];
 
   for (const item of results) {
@@ -571,7 +576,8 @@ export function insertAsrSubtitles(results, {
  */
 export function openAsrMonitorDialog(session) {
   if (!session) return;
-  setAsrSessionDialogOpen(true);
+  setAsrSessionDialogOpen(true, session.id);
+  const terminalStatus = ['completed', 'failed', 'cancelled'].includes(session.progress?.status);
 
   const durStr = secToEncore(
     session.clips.reduce((acc, c) => {
@@ -589,6 +595,10 @@ export function openAsrMonitorDialog(session) {
   const percent = Number.isFinite(session.progress?.percent)
     ? Math.max(0, Math.min(100, Math.round(session.progress.percent)))
     : null;
+  const statusClass = session.progress?.status === 'failed'
+    ? 'is-error'
+    : (session.progress?.status === 'completed' ? 'is-success' : 'is-running');
+  const statusRole = session.progress?.status === 'failed' ? 'alert' : 'status';
   const html = `
     <div class="asr-form asr-workspace asr-monitor-workspace">
       <section class="asr-card asr-monitor-summary" aria-labelledby="asrMonitorSummaryTitle">
@@ -619,7 +629,7 @@ export function openAsrMonitorDialog(session) {
             role="progressbar" aria-label="辨識完成比例" aria-valuemin="0" aria-valuemax="100"
             ${percent !== null ? `aria-valuenow="${percent}"` : ''} style="width:${percent !== null ? `${percent}%` : '0%'};"></div>
         </div>
-        <div id="asrStatus" class="asr-status is-running" role="status" aria-live="polite">
+        <div id="asrStatus" class="asr-status ${statusClass}" role="${statusRole}" aria-live="polite">
           ${escapeHTML(session.statusText || session.progress?.message || '辨識進行中…')}
         </div>
       </section>
@@ -627,8 +637,10 @@ export function openAsrMonitorDialog(session) {
       <div class="asr-callout">
         ${asrIcon('info')}
         <div>
-          <strong>可以繼續剪輯</strong>
-          <span>縮小視窗後工作仍會在背景執行；完成時會自動建立字幕軌並通知你。</span>
+          <strong>${terminalStatus ? '結果已保留' : '可以繼續剪輯'}</strong>
+          <span>${terminalStatus
+            ? '確認結果與診斷後按「關閉」即可清除這筆工作通知。'
+            : '縮小視窗後工作仍會在背景執行；完成時會自動建立字幕軌並通知你。'}</span>
         </div>
       </div>
 
@@ -643,27 +655,55 @@ export function openAsrMonitorDialog(session) {
   `;
 
   const cancelSession = () => {
-    cancelActiveAsrSession();
+    cancelActiveAsrSession(session.id);
     closeModal({ committed: true });
     showToast('已取消語音辨識。');
   };
 
   const minimizeSession = () => {
-    setAsrSessionDialogOpen(false);
+    setAsrSessionDialogOpen(false, session.id);
     closeModal({ committed: true });
     showToast('語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
   };
 
-  openModal(`${taskTitle}進度`, html, [
-    { label: '取消工作', act: cancelSession, className: 'asr-danger-button' },
-    { label: '縮小至背景', primary: true, act: minimizeSession }
-  ], {
+  const acknowledgeSession = () => {
+    clearAsrSession(session.id);
+    closeModal({ committed: true });
+  };
+
+  const monitorButtons = terminalStatus
+    ? [{ label: '關閉', primary: true, act: acknowledgeSession }]
+    : [
+      { label: '取消工作', act: cancelSession, className: 'asr-danger-button' },
+      { label: '縮小至背景', primary: true, act: minimizeSession }
+    ];
+
+  openModal(`${taskTitle}進度`, html, monitorButtons, {
     width: '620px',
     closeOnBackdrop: false,
     onDismiss: () => {
-      setAsrSessionDialogOpen(false);
+      setAsrSessionDialogOpen(false, session.id);
     }
   });
+
+  const bindMonitorDiagnostic = snapshot => {
+    const diagnosticRow = document.getElementById('asrAlignmentDiagnostic');
+    const lineNumbers = document.getElementById('asrUnreliableLineNumbers');
+    const downloadButton = document.getElementById('asrDownloadAlignmentDiagnostic');
+    const failed = snapshot?.failedAlignmentLineNumbers || [];
+    const recovered = snapshot?.recoveredAlignmentLineNumbers || [];
+    if (diagnosticRow) diagnosticRow.style.display = snapshot?.diagnostic ? 'flex' : 'none';
+    if (lineNumbers) {
+      lineNumbers.textContent = failed.length
+        ? `無時間碼行號：第 ${failed.join('、')} 行`
+        : (recovered.length ? `需校對行號：第 ${recovered.join('、')} 行` : '');
+    }
+    if (downloadButton) {
+      downloadButton.disabled = !snapshot?.diagnostic;
+      downloadButton.onclick = () => downloadAlignmentDiagnostic(snapshot?.diagnostic);
+    }
+  };
+  bindMonitorDiagnostic(session);
 
   const unsub = onAsrSessionChange(s => {
     if (!s || s.id !== session.id) {
@@ -675,6 +715,7 @@ export function openAsrMonitorDialog(session) {
     const progressLabel = document.getElementById('asrProgressLabel')?.firstElementChild;
     const statusEl = document.getElementById('asrStatus');
     const modalFoot = document.getElementById('modalFoot');
+    bindMonitorDiagnostic(s);
 
     if (progressBar && s.progress) {
       if (s.progress.indeterminate) {
@@ -718,7 +759,7 @@ export function openAsrMonitorDialog(session) {
         const closeBtn = document.createElement('button');
         closeBtn.textContent = '關閉';
         closeBtn.className = 'primary';
-        closeBtn.onclick = () => closeModal({ committed: true });
+        closeBtn.onclick = acknowledgeSession;
         modalFoot.appendChild(closeBtn);
       }
       unsub();
@@ -734,10 +775,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
   const isRunning = activeSession &&
     activeSession.progress?.status !== 'completed' &&
     activeSession.progress?.status !== 'failed' &&
-    activeSession.progress?.status !== 'cancelled' &&
-    !activeSession.signal?.aborted;
+    activeSession.progress?.status !== 'cancelled';
 
-  if (!preferredSource && isRunning) {
+  if (!preferredSource && activeSession) {
     openAsrMonitorDialog(activeSession);
     return;
   }
@@ -964,29 +1004,23 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     </div>
   `;
 
-  let activeRecognitionController = null;
   let latestAlignmentDiagnostic = null;
   const abortActiveRecognition = () => {
     const session = getAsrSession();
-    if (session && session.progress?.status !== 'completed' && session.progress?.status !== 'failed' && session.progress?.status !== 'cancelled' && !session.signal?.aborted) {
-      setAsrSessionDialogOpen(false);
+    if (session && session.progress?.status !== 'completed' && session.progress?.status !== 'failed' && session.progress?.status !== 'cancelled') {
+      setAsrSessionDialogOpen(false, session.id);
       showToast('🎙 語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
       return;
     }
     cancelActiveAsrSession();
-    if (activeRecognitionController && !activeRecognitionController.signal.aborted) {
-      activeRecognitionController.abort();
-    }
   };
   const cancelRecognition = () => {
     cancelActiveAsrSession();
-    if (activeRecognitionController && !activeRecognitionController.signal.aborted) {
-      activeRecognitionController.abort();
-    }
     closeModal({ committed: true });
   };
   const minimizeToBackground = () => {
-    setAsrSessionDialogOpen(false);
+    const session = getAsrSession();
+    setAsrSessionDialogOpen(false, session?.id);
     closeModal({ committed: true });
     showToast('語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
   };
@@ -1107,29 +1141,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         if (getAsrGuidanceMeta(provider)?.kind === 'prompt') currentConf.prompt = prompt;
         saveAsrConfig(currentConf);
 
-        const recognitionController = new AbortController();
-        const { signal } = recognitionController;
-        activeRecognitionController = recognitionController;
-        const currentSession = startAsrSession({
-          controller: recognitionController,
-          taskMode,
-          provider,
-          builtinModel,
-          language,
-          clips,
-          transcript,
-          transcriptLines,
-          recognitionSelection,
-          guidance,
-          conf: currentConf,
-          dialogOpen: true
-        });
-
-        const recognitionIsActive = () => (
-          activeRecognitionController === recognitionController && !signal.aborted
-        );
-
-        // 進行中只鎖定「開始辨識」；取消必須一直可用，並顯示「縮小至背景」。
+        // UI 只負責把外部系統接到辨識工作；identity、取消、迴圈、對齊與提交由 session 擁有。
         if (modalFoot) {
           const startButtons = modalFoot.querySelectorAll('button.primary');
           startButtons.forEach(button => {
@@ -1151,241 +1163,134 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           statusEl.textContent = '正在準備音訊並進行分析…';
         }
 
-        try {
-          const results = [];
-          let alignmentReviewCount = 0;
-          let recoveredAlignmentLineNumbers = [];
-          let recoveredEstimatedLineCount = 0;
-          let failedAlignmentLineNumbers = [];
-          let alignmentProviderFailure = false;
-          for (let i = 0; i < clips.length; i++) {
-            const c = clips[i];
-            const extractMsg = `[${i + 1}/${clips.length}] 正在萃取「${c.name || '音訊素材'}」之音訊資料…`;
-            updateAsrSessionStatus(extractMsg);
-            if (statusEl) {
-              statusEl.textContent = extractMsg;
+        const renderWorkSnapshot = session => {
+          if (!session) return;
+          const progress = session.progress || {};
+          if (progressBar) {
+            progressBar.classList.toggle('indeterminate', !!progress.indeterminate);
+            if (progress.indeterminate || !Number.isFinite(progress.percent)) {
+              progressBar.removeAttribute('aria-valuenow');
+            } else {
+              const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
+              progressBar.style.width = percent + '%';
+              progressBar.setAttribute('aria-valuenow', String(percent));
             }
-            const audioBuffer = await getClipAudioBuffer(c, { signal, recognitionSelection });
-            if (!recognitionIsActive()) return;
-            const inT = Number(c.in) || 0;
-            const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (audioBuffer.duration || 0)));
+          }
+          if (progressPercent) {
+            progressPercent.textContent = progress.indeterminate
+              ? (progress.status === 'transcribing' ? '運算中' : '準備中')
+              : (Number.isFinite(progress.percent) ? Math.round(progress.percent) + '%' : '準備中');
+          }
+          if (progressLabel && progress.message) progressLabel.textContent = progress.message;
+          if (statusEl) statusEl.textContent = session.statusText || progress.message || '';
+        };
 
-            if (provider === 'builtin' && progressContainer) {
-              progressContainer.style.display = 'flex';
-            }
-
-            let evidenceSegments;
-            try {
-              evidenceSegments = await transcribeAudioStream({
-                audioBuffer,
-                inT,
-                outT,
-                provider,
-                builtinModel,
-                apiKey,
-                azureRegion,
-                language,
-                ...('azurePhrases' in guidance ? { azurePhrases } : {}),
-                ...('keyterms' in guidance ? { keyterms: guidance.keyterms } : {}),
-                ...('prompt' in guidance ? { prompt } : {}),
-                signal,
-                onProgress: (pInfo) => {
-                  if (!recognitionIsActive()) return;
-                  if (pInfo.status === 'progress' && typeof pInfo.progress === 'number') {
-                    const pct = Math.round(pInfo.progress);
-                    const msg = `正在下載 AI 模型檔案 (${pInfo.file || ''})…`;
-                    updateAsrSessionProgress({
-                      status: 'loading',
-                      percent: pct,
-                      indeterminate: false,
-                      message: msg,
-                      file: pInfo.file || ''
-                    });
-                    updateAsrSessionStatus(msg);
-                    progressBar?.classList.remove('indeterminate');
-                    if (progressBar) {
-                      progressBar.style.width = pct + '%';
-                      progressBar.setAttribute('aria-valuenow', String(pct));
-                    }
-                    if (progressPercent) progressPercent.textContent = pct + '%';
-                    if (progressLabel) progressLabel.textContent = msg;
-                  } else if (pInfo.status === 'transcribing') {
-                    if (progressContainer) progressContainer.style.display = 'flex';
-                    const hasMeasuredPercent = Number.isFinite(pInfo.percent) && !pInfo.indeterminate;
-                    const pct = hasMeasuredPercent ? Math.max(0, Math.min(100, Math.round(pInfo.percent))) : null;
-                    const msg = pInfo.message || '本機 AI 正在推論…';
-                    updateAsrSessionProgress({
-                      status: 'transcribing',
-                      percent: pct,
-                      indeterminate: !hasMeasuredPercent,
-                      message: msg
-                    });
-                    updateAsrSessionStatus(`[${i + 1}/${clips.length}] ${msg}`);
-                    if (hasMeasuredPercent) {
-                      progressBar?.classList.remove('indeterminate');
-                      if (progressBar) {
-                        progressBar.style.width = pct + '%';
-                        progressBar.setAttribute('aria-valuenow', String(pct));
-                      }
-                      if (progressPercent) progressPercent.textContent = pct + '%';
-                    } else {
-                      progressBar?.classList.add('indeterminate');
-                      progressBar?.removeAttribute('aria-valuenow');
-                      if (progressPercent) progressPercent.textContent = '運算中';
-                    }
-                    if (progressLabel) progressLabel.textContent = msg;
-                    if (statusEl) statusEl.textContent = `[${i + 1}/${clips.length}] ${msg}`;
-                  } else if (pInfo.status === 'ready' || pInfo.status === 'info' || pInfo.status === 'loading' || pInfo.status === 'fallback') {
-                    const msg = pInfo.message || '模型已就緒，開始本機推論…';
-                    updateAsrSessionProgress({
-                      status: 'preparing',
-                      message: msg
-                    });
-                    updateAsrSessionStatus(msg);
-                    if (progressLabel) progressLabel.textContent = msg;
-                  }
-                }
-              });
-            } catch (error) {
-              if (taskMode !== 'align' || signal.aborted || error?.name === 'AbortError') throw error;
-              console.error('文本匹配的聲音分析失敗，改建完整未定時原稿：', error);
-              alignmentProviderFailure = true;
-              evidenceSegments = [];
-            }
-            if (!recognitionIsActive()) return;
-
-            const resolvedAlignment = resolveRecognitionAlignment({
-              taskMode,
-              transcript,
+        const work = startAsrWork({
+          taskMode,
+          provider,
+          builtinModel,
+          language,
+          clips,
+          transcript,
+          transcriptLines,
+          recognitionSelection,
+          guidance,
+          apiKey,
+          azureRegion,
+          timelineFps: State.fps || 24,
+          timelineDropFrame: State.dropFrame || false,
+          dialogOpen: true
+        }, {
+          extractAudio: (clip, { signal, recognitionSelection: selectedAudio }) => (
+            getClipAudioBuffer(clip, { signal, recognitionSelection: selectedAudio })
+          ),
+          transcribe: ({ audioBuffer, inT, outT, spec, signal, onProgress }) => transcribeAudioStream({
+            audioBuffer,
+            inT,
+            outT,
+            provider: spec.provider,
+            builtinModel: spec.builtinModel,
+            apiKey: spec.apiKey,
+            azureRegion: spec.azureRegion,
+            language: spec.language,
+            ...('azurePhrases' in spec.guidance ? { azurePhrases: spec.guidance.azurePhrases } : {}),
+            ...('keyterms' in spec.guidance ? { keyterms: spec.guidance.keyterms } : {}),
+            ...('prompt' in spec.guidance ? { prompt: spec.guidance.prompt } : {}),
+            signal,
+            onProgress
+          }),
+          resolveAlignment: ({ taskMode: mode, transcript: fixedTranscript, evidenceSegments }) => (
+            resolveRecognitionAlignment({
+              taskMode: mode,
+              transcript: fixedTranscript,
               evidenceSegments,
               alignTranscriptToEvidence
+            })
+          ),
+          buildDiagnostic: buildTranscriptAlignmentDiagnostic,
+          commit: (results, { taskMode: mode, timelineFps: frozenFps, timelineDropFrame: frozenDropFrame }) => {
+            const timelineRejectedLineNumbers = [];
+            const count = insertAsrSubtitles(results, mode === 'align' ? {
+              trackName: '文本匹配',
+              historyLabel: '📝 文本匹配生成字幕',
+              requireValidTimes: true,
+              preserveUntimedSegments: true,
+              timelineFps: frozenFps,
+              timelineDropFrame: frozenDropFrame,
+              onSkippedSegment: segment => {
+                if (Number.isInteger(segment?.transcriptLineIndex)) {
+                  timelineRejectedLineNumbers.push(segment.transcriptLineIndex + 1);
+                }
+              }
+            } : {
+              timelineFps: frozenFps,
+              timelineDropFrame: frozenDropFrame
             });
-            let segments = resolvedAlignment.segments;
-            if (taskMode === 'align') {
-              const alignMsg = '聲音分析完成，正在逐行匹配文字稿時間…';
-              updateAsrSessionStatus(alignMsg);
-              if (statusEl) statusEl.textContent = alignMsg;
-              const aligned = resolvedAlignment.alignment;
-              if (aligned.status === 'failed') {
-                const unreliableLines = new Set([
-                  ...(aligned.summary?.unmatchedLines || []),
-                  ...(aligned.summary?.ambiguousLines || []),
-                  ...(aligned.summary?.lowCoverageLines || [])
-                ]);
-                latestAlignmentDiagnostic = buildTranscriptAlignmentDiagnostic({
-                  provider,
-                  language,
-                  audioSelection: recognitionSelection,
-                  transcript,
-                  evidenceSegments,
-                  alignmentResult: aligned
-                });
-                const lineNumbers = latestAlignmentDiagnostic.unreliableLines
-                  .map(line => line.lineNumber);
-                if (alignmentDiagnosticEl) alignmentDiagnosticEl.style.display = 'flex';
-                if (unreliableLineNumbersEl) {
-                  unreliableLineNumbersEl.textContent = lineNumbers.length
-                    ? `不可靠行號：第 ${lineNumbers.join('、')} 行`
-                    : '未找到可列出的行號；請匯出診斷資料檢查整體相似度。';
-                }
-                const mismatchSummary = unreliableLines.size > 0
-                  ? `文字稿有 ${unreliableLines.size}/${transcriptLines.length} 行無法可靠匹配`
-                  : '文字稿與聲音的整體相似度不足';
-                failedAlignmentLineNumbers = lineNumbers;
-                const statusSummary = `${mismatchSummary}；將保留全部原稿行，無法匹配者使用無時間碼。`;
-                updateAsrSessionStatus(statusSummary);
-                if (statusEl) statusEl.textContent = statusSummary;
-              }
-              if (aligned.status === 'recovered') {
-                recoveredEstimatedLineCount = (aligned.summary?.estimatedLines || []).length;
-                const reviewIndexes = [...new Set([
-                  ...(aligned.segments || []).flatMap((segment, index) => (
-                    segment.alignment?.status === 'review' ? [index] : []
-                  )),
-                  ...(aligned.summary?.estimatedLines || []),
-                  ...(aligned.summary?.partialEvidenceLines || []),
-                  ...(aligned.summary?.discontinuousEvidenceLines || [])
-                ])].sort((a, b) => a - b);
-                recoveredAlignmentLineNumbers = reviewIndexes.map(index => index + 1);
-                latestAlignmentDiagnostic = buildTranscriptAlignmentDiagnostic({
-                  provider,
-                  language,
-                  audioSelection: recognitionSelection,
-                  transcript,
-                  evidenceSegments,
-                  alignmentResult: aligned
-                });
-                if (alignmentDiagnosticEl) {
-                  alignmentDiagnosticEl.style.display = 'flex';
-                  alignmentDiagnosticEl.style.borderColor = 'var(--accent)';
-                }
-                if (unreliableLineNumbersEl) {
-                  unreliableLineNumbersEl.textContent = recoveredAlignmentLineNumbers.length
-                    ? `需校對行號：第 ${recoveredAlignmentLineNumbers.join('、')} 行`
-                    : '部分時間使用估算，請人工校對。';
-                }
-              }
-              alignmentReviewCount += Number(aligned.summary?.reviewCount) || 0;
-              segments = aligned.completeSegments || aligned.segments;
-            }
-
-            results.push({
-              clip: c,
-              segments
-            });
+            return { count, timelineRejectedLineNumbers };
           }
+        });
+        const unsubscribe = onAsrSessionChange(session => {
+          if (session?.id === work.id) renderWorkSnapshot(session);
+        });
+        renderWorkSnapshot(getAsrSession());
 
-          const injectMsg = taskMode === 'align'
-            ? '文本匹配完成，正在寫入專屬字幕軌…'
-            : '辨識完成，正在寫入專屬字幕軌…';
-          updateAsrSessionStatus(injectMsg);
-          if (statusEl) {
-            statusEl.textContent = injectMsg;
-          }
+        try {
+          const outcome = await work.promise;
+          if (outcome.status !== 'completed') return;
 
-          if (!recognitionIsActive()) return;
-          const timelineRejectedLineNumbers = [];
-          const count = insertAsrSubtitles(results, taskMode === 'align' ? {
-            trackName: '文本匹配',
-            historyLabel: '📝 文本匹配生成字幕',
-            requireValidTimes: true,
-            preserveUntimedSegments: true,
-            onSkippedSegment: segment => {
-              if (Number.isInteger(segment?.transcriptLineIndex)) {
-                timelineRejectedLineNumbers.push(segment.transcriptLineIndex + 1);
-              }
-            }
-          } : undefined);
-          if (timelineRejectedLineNumbers.length) {
-            failedAlignmentLineNumbers = [...new Set([
-              ...failedAlignmentLineNumbers,
-              ...timelineRejectedLineNumbers
-            ])].sort((a, b) => a - b);
-            if (unreliableLineNumbersEl) {
-              unreliableLineNumbersEl.textContent = `無時間碼行號：第 ${failedAlignmentLineNumbers.join('、')} 行`;
-            }
-          }
-          activeRecognitionController = null;
-          completeAsrSession(results);
+          latestAlignmentDiagnostic = outcome.diagnostic || null;
           workspaceEl?.setAttribute('aria-busy', 'false');
           const diagnosticButton = document.getElementById('asrDownloadAlignmentDiagnostic');
-          if (diagnosticButton) diagnosticButton.disabled = false;
+          if (diagnosticButton) diagnosticButton.disabled = !latestAlignmentDiagnostic;
 
+          const failedAlignmentLineNumbers = outcome.quality?.untimedLineNumbers || [];
+          const recoveredAlignmentLineNumbers = outcome.quality?.recoveredLineNumbers || [];
+          const recoveredEstimatedLineCount = outcome.quality?.estimatedLineCount || 0;
+          const alignmentReviewCount = outcome.quality?.reviewCount || 0;
+          const alignmentProviderFailure = !!outcome.quality?.providerFailure;
           const partialAlignment = taskMode === 'align' && failedAlignmentLineNumbers.length > 0;
           const recoveredAlignment = taskMode === 'align' && recoveredAlignmentLineNumbers.length > 0;
           const alignmentNeedsReview = partialAlignment || recoveredAlignment;
           const isModalShowing = document.getElementById('asrStatus') !== null;
 
-          if (!alignmentNeedsReview && isModalShowing) {
-            closeModal({ committed: true });
+          if (latestAlignmentDiagnostic && alignmentDiagnosticEl) {
+            alignmentDiagnosticEl.style.display = 'flex';
+            alignmentDiagnosticEl.style.borderColor = recoveredAlignment ? 'var(--accent)' : 'var(--red)';
           }
+          if (unreliableLineNumbersEl) {
+            if (partialAlignment) {
+              unreliableLineNumbersEl.textContent = `無時間碼行號：第 ${failedAlignmentLineNumbers.join('、')} 行`;
+            } else if (recoveredAlignment) {
+              unreliableLineNumbersEl.textContent = recoveredAlignmentLineNumbers.length
+                ? `需校對行號：第 ${recoveredAlignmentLineNumbers.join('、')} 行`
+                : '部分時間使用估算，請人工校對。';
+            }
+          }
+
+          if (!alignmentNeedsReview && isModalShowing) closeModal({ committed: true });
           if (taskMode === 'align') {
             if (partialAlignment) {
-              if (unreliableLineNumbersEl) {
-                unreliableLineNumbersEl.textContent = `無時間碼行號：第 ${failedAlignmentLineNumbers.join('、')} 行`;
-              }
-              const summaryMsg = `${alignmentProviderFailure ? '聲音分析失敗，但' : ''}已建立 ${count} 句完整原稿；其中 ${failedAlignmentLineNumbers.length} 句無時間碼，請依上方行號自行補上 In／Out。`;
-              updateAsrSessionStatus(summaryMsg);
+              const summaryMsg = `${alignmentProviderFailure ? '聲音分析失敗，但' : ''}已建立 ${outcome.count} 句完整原稿；其中 ${failedAlignmentLineNumbers.length} 句無時間碼，請依上方行號自行補上 In／Out。`;
               if (statusEl) {
                 statusEl.style.display = 'block';
                 statusEl.className = 'asr-status is-warning';
@@ -1403,13 +1308,12 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                   primaryButton.textContent = '已建立完整原稿';
                 }
               }
-              showToast(`文本匹配已建立 ${count} 句完整原稿；${failedAlignmentLineNumbers.length} 句為無時間碼。`);
+              showToast(`文本匹配已建立 ${outcome.count} 句完整原稿；${failedAlignmentLineNumbers.length} 句為無時間碼。`);
             } else if (recoveredAlignment) {
               const estimatedMessage = recoveredEstimatedLineCount > 0
                 ? `${recoveredEstimatedLineCount} 行使用推估時間`
                 : '沒有整行使用推估時間';
-              const summaryMsg = `已建立 ${count} 句完整初稿；${estimatedMessage}，共 ${recoveredAlignmentLineNumbers.length} 行需人工校對，這不是精準對齊。`;
-              updateAsrSessionStatus(summaryMsg);
+              const summaryMsg = `已建立 ${outcome.count} 句完整初稿；${estimatedMessage}，共 ${recoveredAlignmentLineNumbers.length} 行需人工校對，這不是精準對齊。`;
               if (statusEl) {
                 statusEl.style.display = 'block';
                 statusEl.className = 'asr-status is-warning';
@@ -1427,20 +1331,16 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                   primaryButton.textContent = '已建立';
                 }
               }
-              showToast(`文本匹配已生成 ${count} 句完整初稿；其中 ${recoveredAlignmentLineNumbers.length} 行需人工校對。`);
+              showToast(`文本匹配已生成 ${outcome.count} 句完整初稿；其中 ${recoveredAlignmentLineNumbers.length} 行需人工校對。`);
             } else {
               const reviewHint = alignmentReviewCount > 0 ? ' 目前為句級估算，請抽查時間碼。' : '';
-              showToast(`文本匹配完成！已保留逐行文字稿並生成 ${count} 句時間碼。${reviewHint}`);
+              showToast(`文本匹配完成！已保留逐行文字稿並生成 ${outcome.count} 句時間碼。${reviewHint}`);
             }
           } else {
-            showToast(`🎙 語音辨識完成！已新增字幕軌並生成 ${count} 句字幕。`);
+            showToast(`🎙 語音辨識完成！已新增字幕軌並生成 ${outcome.count} 句字幕。`);
           }
         } catch (err) {
-          if (signal.aborted || err?.name === 'AbortError' || activeRecognitionController !== recognitionController) {
-            return;
-          }
           console.error('ASR error:', err);
-          failAsrSession(err);
           if (statusEl) {
             statusEl.style.display = 'block';
             statusEl.className = 'asr-status is-error';
@@ -1456,10 +1356,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           }
           setFormProcessing(false);
           progressBar?.classList.remove('indeterminate');
-          activeRecognitionController = null;
-          if (!currentSession.dialogOpen) {
+          if (!getAsrSession()?.dialogOpen) {
             showToast('❌ 語音辨識失敗：' + (err.message || String(err)), 4000);
           }
+        } finally {
+          unsubscribe();
         }
       }
     },
@@ -1494,17 +1395,12 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     const promptLabelEl = document.getElementById('asrPromptLabel');
     const builtinRow = document.getElementById('asrBuiltinRow');
     const keyRow = document.getElementById('asrKeyRow');
-    const downloadAlignmentDiagnostic = document.getElementById('asrDownloadAlignmentDiagnostic');
+    const downloadAlignmentDiagnosticButton = document.getElementById('asrDownloadAlignmentDiagnostic');
 
-    if (downloadAlignmentDiagnostic) {
-      downloadAlignmentDiagnostic.onclick = () => {
+    if (downloadAlignmentDiagnosticButton) {
+      downloadAlignmentDiagnosticButton.onclick = () => {
         if (!latestAlignmentDiagnostic) return;
-        const timestamp = latestAlignmentDiagnostic.generatedAt
-          .replace(/[:.]/gu, '-')
-          .replace('T', '_')
-          .replace(/Z$/u, '');
-        const bytes = new TextEncoder().encode(`${JSON.stringify(latestAlignmentDiagnostic, null, 2)}\n`);
-        downloadBytes(bytes, `SUBTool_文本匹配診斷_${timestamp}.json`, 'application/json');
+        downloadAlignmentDiagnostic(latestAlignmentDiagnostic);
       };
     }
 
