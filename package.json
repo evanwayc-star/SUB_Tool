@@ -20,6 +20,8 @@
     "release:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/verify-release-install.ps1",
     "lint": "eslint src electron shared scripts",
     "test": "vitest run",
+    "test:ci:portable": "node scripts/ci/run-test-group.mjs portable",
+    "test:ci:windows": "node scripts/ci/run-test-group.mjs windows",
     "test:watch": "vitest"
   },
   "build": {

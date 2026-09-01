@@ -1,3 +1,4 @@
+// @subtool-ci windows
 import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 

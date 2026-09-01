@@ -1,3 +1,4 @@
+// @subtool-ci windows
 import { afterEach, describe, expect, test } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';

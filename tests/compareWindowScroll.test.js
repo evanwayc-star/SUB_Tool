@@ -1,3 +1,4 @@
+// @subtool-ci windows
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import path from 'node:path';
@@ -111,18 +112,17 @@ async function runScrollFixture() {
     let afterWheel = 0;
     for (let attempt = 0; attempt < 4 && afterWheel <= before.scrollTop; attempt++) {
       await client.send('Page.bringToFront');
-      void client.send('Input.synthesizeScrollGesture', {
+      await client.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
         x: before.x,
         y: before.y,
-        xDistance: 0,
-        yDistance: -240,
-        speed: 800,
-        gestureSourceType: 'mouse',
-      }).catch(() => {});
+        deltaX: 0,
+        deltaY: 240,
+      });
       afterWheel = await waitUntil(async () => {
         const value = await client.evaluate(`document.getElementById('container').scrollTop`);
         return value > before.scrollTop ? value : null;
-      }, 500).catch(() => 0);
+      }, 1000).catch(() => 0);
     }
     client.close();
     client = null;
