@@ -2,6 +2,7 @@ import { State, setSelection } from './state.js';
 import { emit } from './events.js';
 import { recordHistory } from './history.js';
 import { escapeHTML, escapeHTMLWithSpaces } from './util.js';
+import { trackLocked } from './subtitle-model.js';
 
 let _searchTerms = [];
 let _searchMatches = [];
@@ -86,6 +87,7 @@ export function searchNav(dir, selectCueCb){
 
 export function searchReplace(all, repText){
   if(!_searchTerms.length) return;
+  if(trackLocked(State.listTrack, '取代字幕內容')) return;
   const cues=all
     ? State.cues.filter(c=>(c.track||0)===State.listTrack)
     : (_searchIdx>=0?[State.cues.find(c=>c.id===_searchMatches[_searchIdx])].filter(Boolean):[]);
@@ -148,4 +150,3 @@ export function replaceAll() {
   const repText = ri ? ri.value : '';
   searchReplace(true, repText);
 }
-

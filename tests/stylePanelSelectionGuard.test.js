@@ -77,6 +77,27 @@ describe('字幕樣式面板選取守衛', () => {
     expect(document.getElementById('tsTitle').textContent).toBe('第 1 句樣式');
   });
 
+  it('選取鎖定軌字幕時樣式面板唯讀且輸入事件不能修改樣式', () => {
+    State.tracks[0].locked = true;
+    State.selectedId = 'cue-1';
+    State.selectedIds = ['cue-1'];
+    State.cues[0].style = { fontSize: 60 };
+    StylePanelController.renderTrackStyle();
+
+    const panel = document.getElementById('trackStyle');
+    const controls = [...panel.querySelectorAll('button, input, select, textarea')];
+    const sizeInput = document.getElementById('tsSize');
+    expect(controls.every(control => control.disabled)).toBe(true);
+    expect(panel.classList.contains('selection-disabled')).toBe(true);
+    expect(panel.getAttribute('aria-disabled')).toBe('true');
+    expect(StylePanelController.styleTarget()).toBeNull();
+    expect(document.getElementById('tsTitle').textContent).toBe('字幕樣式｜軌道已鎖定');
+
+    sizeInput.value = '120';
+    sizeInput.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(State.cues[0].style).toEqual({ fontSize: 60 });
+  });
+
   it('明確編輯常用樣式時只開放樣式欄位，仍停用需要字幕來源的全軌操作', () => {
     State.tracks[0].fontSize = 60;
     State.presetEdit = {

@@ -60,6 +60,25 @@ describe('語音辨識與字幕生成模組', () => {
     expect(html).toContain('placeholder="例如 japaneast"');
   });
 
+  it('單一素材只顯示該素材時長，多素材才另外顯示總時長', () => {
+    State.clips = [];
+    State.externalAudioState = [];
+    const first = { id: 'source-1', name: 'first.mov', in: 0, out: 2, duration: 2, audioBuffer: {} };
+    const second = { id: 'source-2', name: 'second.wav', in: 0, out: 3, duration: 3, audioBuffer: {} };
+
+    openSpeechRecognitionDialog(first);
+    let [, html] = openModal.mock.calls.at(-1);
+    expect(html).toContain('first.mov');
+    expect(html).not.toContain('asr-duration-pill');
+    expect(html.match(/asr-source-duration/g)).toHaveLength(1);
+
+    openSpeechRecognitionDialog([first, second]);
+    [, html] = openModal.mock.calls.at(-1);
+    expect(html).toContain('總計約');
+    expect(html.match(/asr-duration-pill/g)).toHaveLength(1);
+    expect(html.match(/asr-source-duration/g)).toHaveLength(2);
+  });
+
   it('提供可鍵盤操作的現代化模式工作台、逐行統計與 API Key 顯示切換', async () => {
     State.clips = [];
     State.externalAudioState = [];

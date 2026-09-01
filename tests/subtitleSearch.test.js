@@ -1,11 +1,20 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const ui = vi.hoisted(() => ({
+  showToast: vi.fn(),
+  openModal: vi.fn(),
+  closeModal: vi.fn(),
+  setStatus: vi.fn(),
+}));
+
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
+vi.mock('../src/ui.js', () => ui);
 
 import { State } from '../src/state.js';
 import { emit } from '../src/events.js';
+import { recordHistory } from '../src/history.js';
 import {
   searchUpdate,
   searchNav,
@@ -137,6 +146,22 @@ describe('字幕搜尋與導航定位 (subtitle-search)', () => {
     searchReplace(true, '範例');
     expect(State.cues.find(c => c.id === 'c3').text).toBe('第三句也是範例內容');
     expect(State.cues.find(c => c.id === 'c4').text).toBe('第四句包含範例詞彙');
+  });
+
+  it('目前字幕軌鎖定時搜尋取代不會修改內容或寫入 History', () => {
+    State.tracks[0].locked = true;
+    searchUpdate('測試');
+
+    searchReplace(true, '禁止修改');
+
+    expect(State.cues.filter(c => c.track === 0).map(c => c.text)).toEqual([
+      '這是第一句測試字幕',
+      '第二句沒有關鍵字',
+      '第三句也是測試內容',
+      '第四句包含測試詞彙',
+    ]);
+    expect(recordHistory).not.toHaveBeenCalled();
+    expect(ui.showToast.mock.calls.at(-1)?.[0]).toContain('取代字幕內容');
   });
 
   it('txtHTML 能正確將搜尋詞用 search-match 高亮包覆', () => {

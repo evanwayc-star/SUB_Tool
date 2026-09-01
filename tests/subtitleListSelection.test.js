@@ -83,7 +83,6 @@ vi.mock('../src/time.js', () => ({
   encoreParts: () => ({ hh: 0, mm: 0, ss: 0, ff: 0 }), fmtClock: String,
   secToSRT: String, secToASS: String, getExactFps: value => value || 25,
 }));
-vi.mock('../src/painters/clip-painter.js', () => ({ paintClipBlocks: vi.fn() }));
 vi.mock('../src/painters/subtitle-painter.js', () => ({ paintSubtitleBlocks: vi.fn() }));
 vi.mock('../src/painters/waveform-painter.js', () => ({ paintClipWave: vi.fn() }));
 vi.mock('../src/timeline-edit-transaction.js', async importOriginal => ({
@@ -92,14 +91,13 @@ vi.mock('../src/timeline-edit-transaction.js', async importOriginal => ({
   updateTimelineTrack: vi.fn(),
 }));
 vi.mock('../src/sequence.js', () => ({
-  Seq: { active: () => false, byId: vi.fn(), neighborBounds: vi.fn(), clipEnd: vi.fn(), snapEdges: () => [] },
+  Seq: { active: vi.fn(() => false), byId: vi.fn(), neighborBounds: vi.fn(), clipEnd: vi.fn(), snapEdges: () => [] },
 }));
 vi.mock('../src/timeline-interaction.js', () => ({
   timeToX: value => value * 80, xToTime: value => value / 80, snapTargets: () => [],
   snapVal: value => value, cueNeighborBounds: () => ({ prevEnd: -Infinity, nextStart: Infinity }),
 }));
 vi.mock('../src/style-assignment.js', () => ({ planCueStyleAssignment: ({ cue }) => ({ style: cue.style }) }));
-vi.mock('../src/clip-model.js', () => ({ selectClip: vi.fn(), clearClipSelection: vi.fn() }));
 
 function mount() {
   Element.prototype.scrollIntoView = vi.fn();
@@ -149,6 +147,7 @@ function dragBlock(block, { dx = 80, dy = 0 } = {}) {
 let state;
 let subtitles;
 let timelineRenderer;
+let sequence;
 let blockB;
 
 function resetScenario() {
@@ -160,6 +159,8 @@ function resetScenario() {
       { id: 'b', text: 'B', start: 3, end: 4, track: 1, timed: true },
     ],
     listTrack: 0, selectedId: null, selectedIds: [], activeTrackKind: 'sub', activeEdge: 'start',
+    videoTracks: [{ name: 'V1', visible: true, locked: false }], clips: [],
+    selectedClipId: null, selectedAudioClipId: null,
     duration: 10, fps: 25, dropFrame: false, pxPerSec: 80, viewStart: 0, overwriteMode: false,
   });
   subtitles.renderSubList();
@@ -187,6 +188,7 @@ beforeAll(async () => {
   state = await import('../src/state.js');
   subtitles = await import('../src/subtitles.js');
   timelineRenderer = await import('../src/timeline-renderer.js');
+  sequence = await import('../src/sequence.js');
   blockB = document.querySelector('.cue-block[data-id="b"]');
 });
 
@@ -196,6 +198,9 @@ beforeEach(() => {
   mediaMocks.externalAudioById.clear();
   project.guardDone = true;
   resetScenario();
+  sequence.Seq.active.mockReturnValue(false);
+  sequence.Seq.byId.mockReturnValue(null);
+  sequence.Seq.clipEnd.mockImplementation(c => c.offset + (c.out - c.in));
 });
 
 it('未辨識句保留原編號並在列表顯示雙重無時間碼', () => {
@@ -377,14 +382,107 @@ it('moveSelectedToTrack 嘗試移動字幕至鎖定軌道時被擋下', async ()
   expect(cueA.track).toBe(0);
 });
 
-it('鎖定音訊可選取，但 pointer／mouse 事件不會冒泡成時間軸手勢', () => {
+it('鎖定字幕軌本身也不能被刪除', () => {
+  state.State.tracks.push({ name: '鎖定空軌', visible: true, locked: true });
+  state.State.trackCount = state.State.tracks.length;
+  document.getElementById('rulerCanvas').getContext = () => ({
+    save: vi.fn(), scale: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(),
+    beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), closePath: vi.fn(),
+    stroke: vi.fn(), fill: vi.fn(), fillText: vi.fn(), restore: vi.fn(),
+  });
+
+  timelineRenderer.removeTrack(2);
+
+  expect(state.State.tracks.map(track => track.name)).toEqual(['T0', 'T1', '鎖定空軌']);
+});
+
+it('鎖定字幕軌不能進入文字交換模式或交換軌內內容', () => {
+  state.State.tracks[1].locked = true;
+  state.State.listTrack = 1;
+  state.State.cues = [
+    { id: 'b1', text: '第一句', start: 1, end: 2, track: 1, timed: true },
+    { id: 'b2', text: '第二句', start: 3, end: 4, track: 1, timed: true },
+  ];
+  subtitles.renderSubList();
+
+  subtitles.enterSwapMode('b1');
+  document.querySelector('.sub-row[data-id="b2"] .txt').dispatchEvent(new MouseEvent('mousedown', {
+    bubbles: true, button: 0,
+  }));
+
+  expect(state.State.cues.map(cue => cue.text)).toEqual(['第一句', '第二句']);
+  expect(document.getElementById('sublist').classList.contains('swap-mode')).toBe(false);
+});
+
+it('鎖定影像軌的區塊左鍵點擊不改變既有字幕選取', () => {
+  const lockedClip = {
+    id: 'locked-video', name: '鎖定影片', offset: 0, in: 0, out: 2, dur: 2, vtrack: 1,
+  };
+  state.State.videoTracks = [
+    { name: 'V1', visible: true, locked: false },
+    { name: 'V2', visible: true, locked: true },
+  ];
+  state.State.clips = [lockedClip];
+  subtitles.selectCue('a');
+  sequence.Seq.active.mockReturnValue(true);
+  sequence.Seq.byId.mockImplementation(id => state.State.clips.find(clip => clip.id === id) || null);
+  document.getElementById('rulerCanvas').getContext = () => ({
+    save: vi.fn(), scale: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(),
+    beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), closePath: vi.fn(),
+    stroke: vi.fn(), fill: vi.fn(), fillText: vi.fn(), restore: vi.fn(),
+  });
+  timelineRenderer.drawTimeline();
+
+  const block = document.querySelector('.clip-block[data-clip-id="locked-video"]');
+  expect(block).toBeTruthy();
+  block.dispatchEvent(new MouseEvent('mousedown', {
+    bubbles: true, cancelable: true, button: 0, detail: 1, clientX: 100, clientY: 100,
+  }));
+
+  expect({
+    selectedId: state.State.selectedId,
+    selectedIds: [...state.State.selectedIds],
+    selectedClipId: state.State.selectedClipId,
+    selectedAudioClipId: state.State.selectedAudioClipId,
+  }).toEqual({ selectedId: 'a', selectedIds: ['a'], selectedClipId: null, selectedAudioClipId: null });
+});
+
+it('鎖定的影片來源音訊區塊左鍵點擊不改變既有字幕選取', () => {
+  const lockedSource = {
+    id: 'locked-linked-audio', name: '影片內音訊', type: 'video', audioSourceId: 'linked-source',
+    offset: 0, in: 0, out: 2, dur: 2, vtrack: 0, locked: true, audioDetached: false,
+  };
+  state.State.clips = [lockedSource];
+  subtitles.selectCue('b');
+  sequence.Seq.byId.mockImplementation(id => state.State.clips.find(clip => clip.id === id) || null);
+  document.getElementById('rulerCanvas').getContext = () => ({
+    save: vi.fn(), scale: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(),
+    beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), closePath: vi.fn(),
+    stroke: vi.fn(), fill: vi.fn(), fillText: vi.fn(), restore: vi.fn(),
+  });
+  timelineRenderer.drawTimeline();
+
+  const block = document.querySelector('.audio-clip-block[data-clip-id="locked-linked-audio"]');
+  expect(block).toBeTruthy();
+  block.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+  block.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+
+  expect({
+    selectedId: state.State.selectedId,
+    selectedIds: [...state.State.selectedIds],
+    selectedClipId: state.State.selectedClipId,
+    selectedAudioClipId: state.State.selectedAudioClipId,
+  }).toEqual({ selectedId: 'b', selectedIds: ['b'], selectedClipId: null, selectedAudioClipId: null });
+});
+
+it('鎖定音訊區塊的完整左鍵點擊不改變既有影片選取，也不冒泡成時間軸手勢', () => {
   const asset = {
     id: 'locked-audio', audioSourceId: 'locked-source', timelineLaneId: 'locked-lane',
     name: '鎖定音訊', offset: 0, in: 0, out: 2, duration: 2, locked: true
   };
   mediaMocks.externalAudioList.push(asset);
   mediaMocks.externalAudioById.set(asset.id, asset);
-  state.State.selectedAudioClipId = null;
+  state.setSelection({ kind: 'video', ids: 'current-video' });
   document.getElementById('rulerCanvas').getContext = () => ({
     save: vi.fn(), scale: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(),
     beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), closePath: vi.fn(),
@@ -401,9 +499,15 @@ it('鎖定音訊可選取，但 pointer／mouse 事件不會冒泡成時間軸�
 
   block.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
   block.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+  block.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
 
   expect(block.setPointerCapture).not.toHaveBeenCalled();
-  expect(state.State.selectedAudioClipId).toBe('locked-audio');
+  expect({
+    selectedId: state.State.selectedId,
+    selectedIds: [...state.State.selectedIds],
+    selectedClipId: state.State.selectedClipId,
+    selectedAudioClipId: state.State.selectedAudioClipId,
+  }).toEqual({ selectedId: null, selectedIds: [], selectedClipId: 'current-video', selectedAudioClipId: null });
   expect(bubbled).toBe(0);
   document.getElementById('tlScroll').removeEventListener('mousedown', onTimelineMouseDown);
 });

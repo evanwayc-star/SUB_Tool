@@ -3,7 +3,7 @@ import { $ } from './dom.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { sortCues } from './subtitle-model.js';
+import { sortCues, trackLocked } from './subtitle-model.js';
 import { burnedSubtitleTrackNames } from './subtitle-track-names.js';
 import { drawTimeline, layoutTimeline } from './timeline.js';
 import { emit } from './events.js';
@@ -30,6 +30,7 @@ function showFpsConvertDialog() {
   const tkIdx = State.listTrack;
   const tk = State.tracks[tkIdx];
   if (!tk) { showToast('請先選擇一個字幕軌道'); return; }
+  if (trackLocked(tkIdx, '轉換字幕時間碼')) return;
   const FPS_OPTS = [23.976, 24, 25, 29.97, 30];
   const opts = FPS_OPTS.map(f => `<option value="${f}">${f === 23.976 ? '23.976 (23.98)' : f === 29.97 ? '29.97' : '' + f}</option>`).join('');
   const curFps = State.fps;

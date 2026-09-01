@@ -13,7 +13,7 @@ import { $ } from './dom.js';
 import { State, setSelection, deselect } from './state.js';
 import { Media } from './media.js';
 import { selectCueSingle, deleteSelected, cancelSwapMode, refreshSelectionUI } from './subtitles.js';
-import { sortCues, copyCues, pasteCues } from './subtitle-model.js';
+import { sortCues, copyCues, pasteCues, cuesTrackLocked } from './subtitle-model.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './timeline.js';
 import { Project } from './project.js';
 import { History, recordHistory } from './history.js';
@@ -232,6 +232,7 @@ if (typeof window !== 'undefined') {
       if (!ids.length) break;
       const jCues = ids.map(id => State.cues.find(c => c.id === id)).filter(c => c && c.timed !== false);
       if (!jCues.length) break;
+      if (cuesTrackLocked(jCues, '修改字幕時間')) break;
       const minStart = Math.min(...jCues.map(c => c.start));
       const jt = Media.displayTime(), delta = jt - minStart;
       for (const jc of jCues) { jc.start = Math.max(0, jc.start + delta); jc.end = Math.max(jc.start + 0.001, jc.end + delta); }

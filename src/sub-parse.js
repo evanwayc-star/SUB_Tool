@@ -7,7 +7,7 @@ import { getAllPresets, loadFonts } from './substyle.js';
 import { buildSubtitleImportPlan } from './subimport.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { sortCues } from './subtitle-model.js';
+import { sortCues, trackLocked } from './subtitle-model.js';
 import { drawTimeline } from './timeline.js';
 import { emit } from './events.js';
 
@@ -99,6 +99,7 @@ export function _openImportModal(title, parsed, kind) {
     [{
       label: '匯入', primary: true, act: () => {
         const selVal = $('importTkSel').value;
+        if (selVal !== 'new' && trackLocked(+selVal, '匯入字幕')) return;
         const presetVal = hasRoundTripMetadata ? '' : $('importPresetSel').value;
         const selectedPreset = presetVal ? getAllPresets().find(p => p.name === presetVal) : null;
         const importPlan = kind === 'ass'
@@ -127,7 +128,10 @@ export function _openImportModal(title, parsed, kind) {
         });
         if (kind === 'txt') newCues.forEach(c => c.timed = false);
         if (append) { State.cues.push(...newCues); }
-        else { State.cues = newCues; }
+        else {
+          State.cues = State.cues.filter(c => (c.track || 0) !== targetTk);
+          State.cues.push(...newCues);
+        }
         
         newCues.forEach(c => {
           if (c.timed === false) return;

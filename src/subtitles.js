@@ -166,6 +166,8 @@ let _checkLenLimit = 0;
 let _checkContains = [];
 
 function enterSwapMode(id){
+  const cue=State.cues.find(c=>c.id===id);
+  if(!cue || cueTrackLocked(cue, '交換字幕文字')) return;
   _swapSource = id;
   sublist.querySelectorAll('.sub-row').forEach(r=>r.classList.remove('swap-src'));
   const srcRow=sublist.querySelector(`.sub-row[data-id="${id}"]`);
@@ -691,7 +693,9 @@ sublist?.addEventListener?.('mousedown', e => {
     e.preventDefault();
     if (c.id !== _swapSource) {
       const src = State.cues.find(x => x.id === _swapSource);
-      if (src) { const tmp = src.text || ''; src.text = c.text || ''; c.text = tmp; emit('render:all'); recordHistory('文字交換'); }
+      if (src && !cueTrackLocked(src, '交換字幕文字') && !cueTrackLocked(c, '交換字幕文字')) {
+        const tmp = src.text || ''; src.text = c.text || ''; c.text = tmp; emit('render:all'); recordHistory('文字交換');
+      }
     }
     cancelSwapMode(); return;
   }

@@ -193,29 +193,19 @@ _videoSub?.addEventListener('contextmenu', e => {
   
   const items = [];
   items.push({label:'↔ 水平置中', act:()=>{
-    let targetObj;
-    if(State.presetEdit) targetObj = State.presetEdit.draft;
-    else {
-      const c = State.cues.find(cu=>cu.id===cid);
-      if(c) targetObj = c.style = c.style || {};
-    }
-    if(targetObj) {
-      targetObj.posX = 50;
-      targetObj.align = 'center';
+    const changed = State.presetEdit
+      ? Object.assign(State.presetEdit.draft, { posX:50, align:'center' })
+      : applyCueStylePatch(State.cues.find(cu=>cu.id===cid), { posX:50, align:'center' });
+    if(changed) {
       styleChanged();
       recordHistory('字幕水平置中');
     }
   }});
   items.push({label:'↕ 垂直置中', act:()=>{
-    let targetObj;
-    if(State.presetEdit) targetObj = State.presetEdit.draft;
-    else {
-      const c = State.cues.find(cu=>cu.id===cid);
-      if(c) targetObj = c.style = c.style || {};
-    }
-    if(targetObj) {
-      targetObj.posY = 50;
-      targetObj.valign = 'middle';
+    const changed = State.presetEdit
+      ? Object.assign(State.presetEdit.draft, { posY:50, valign:'middle' })
+      : applyCueStylePatch(State.cues.find(cu=>cu.id===cid), { posY:50, valign:'middle' });
+    if(changed) {
       styleChanged();
       recordHistory('字幕垂直置中');
     }
@@ -647,8 +637,12 @@ function initPresetLibrary(){
     if(p){ p.style=draft; savePresets(list); }
     // 同步：進入前就符合舊樣式的，一起換成新樣式
     let n=0;
-    for(const i of E.targets.tracks){ if(State.tracks[i]){ Object.assign(State.tracks[i],draft); n++; } }
-    for(const c of E.targets.cues){ applyCueStylePatch(c, draft); n++; }
+    for(const i of E.targets.tracks){
+      if(State.tracks[i] && !State.tracks[i].locked){ Object.assign(State.tracks[i],draft); n++; }
+    }
+    for(const c of E.targets.cues){
+      if(!State.tracks[c.track||0]?.locked && applyCueStylePatch(c, draft)) n++;
+    }
     styleChanged(); recordHistory('編輯常用樣式：'+E.name);
     showToast(`已更新「${E.name}」` + (n?`，同步 ${n} 處`:'（目前沒有套用它的字幕）'));
   }

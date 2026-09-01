@@ -129,6 +129,11 @@ async function capture(client, outputPath) {
       const status = document.getElementById('asrStatus');
       const modeButtons = [...document.querySelectorAll('.asr-mode-option')];
       const engineCard = document.querySelector('.asr-engine-card');
+      const keyLabelRect = document.querySelector('#asrKeyRow>.asr-field-heading').getBoundingClientRect();
+      const languageLabelRect = document.querySelector('.asr-language-field>label').getBoundingClientRect();
+      const keyControlRect = document.querySelector('.asr-secret-input').getBoundingClientRect();
+      const languageControlRect = document.getElementById('asrLanguage').getBoundingClientRect();
+      const sourceName = document.querySelector('.asr-source-name');
       const rect = modal.getBoundingClientRect();
       return {
         viewport: { width: innerWidth, height: innerHeight },
@@ -144,6 +149,17 @@ async function capture(client, outputPath) {
         statusLive: status.getAttribute('aria-live'),
         labelledFields: ['asrTranscript', 'asrProvider', 'asrApiKey', 'asrLanguage'].every(id =>
           Boolean(document.querySelector('label[for="' + id + '"]'))),
+        credentialAlignment: {
+          labelTopDelta: Math.abs(keyLabelRect.top - languageLabelRect.top),
+          labelHeightDelta: Math.abs(keyLabelRect.height - languageLabelRect.height),
+          controlTopDelta: Math.abs(keyControlRect.top - languageControlRect.top),
+          controlHeightDelta: Math.abs(keyControlRect.height - languageControlRect.height),
+        },
+        sourceSummary: {
+          nameColor: getComputedStyle(sourceName).color,
+          durationPillCount: document.querySelectorAll('.asr-duration-pill').length,
+          rowDurationCount: document.querySelectorAll('.asr-source-duration').length,
+        },
         horizontalOverflow: document.querySelector('.asr-workspace').scrollWidth > document.querySelector('.asr-workspace').clientWidth
       };
     })()`);
@@ -217,6 +233,10 @@ async function capture(client, outputPath) {
         !wide.sourceSelectorParent.includes('asr-source-card') || wide.contentDisplay !== 'none' ||
         wide.engineWidth < 760 || wide.hasRedundantModeHeading || wide.hasRedundantSummary ||
         !wide.labelledFields || wide.horizontalOverflow || wide.modeButtonMinHeight < 58 ||
+        wide.credentialAlignment.labelTopDelta > 1 || wide.credentialAlignment.labelHeightDelta > 1 ||
+        wide.credentialAlignment.controlTopDelta > 1 || wide.credentialAlignment.controlHeightDelta > 1 ||
+        wide.sourceSummary.nameColor !== 'rgb(147, 197, 253)' ||
+        wide.sourceSummary.durationPillCount !== 0 || wide.sourceSummary.rowDurationCount !== 1 ||
         align.taskMode !== 'align' || align.transcriptDisplay !== 'flex' || align.contentDisplay !== 'flex' || align.lineCount !== '3 行' ||
         !align.target.includes('文本匹配') || align.primaryAction !== '開始匹配' ||
         align.equalColumnDelta > 1 || align.centerDelta > 1 || !align.modelLabelsArePlain ||

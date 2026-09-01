@@ -119,6 +119,17 @@ describe('deleteSelected：選取跨到鎖定軌時整批擋下', () => {
     expect(State.cues.map(c => c.id)).toEqual(['a', 'b']);
     expect(ui.showToast).toHaveBeenCalled();
   });
+
+  it('直接呼叫核心刪除命令也不能繞過鎖定', async () => {
+    const { deleteSelectedCues } = await import('../src/subtitle-model.js');
+    const { recordHistory } = await import('../src/history.js');
+
+    deleteSelectedCues(['b']);
+
+    expect(State.cues.map(c => c.id)).toEqual(['a', 'b']);
+    expect(recordHistory).not.toHaveBeenCalled();
+    expect(ui.showToast.mock.calls.at(-1)?.[0]).toContain('刪除字幕');
+  });
 });
 
 describe('pasteCues 鎖定防護', () => {
@@ -129,5 +140,171 @@ describe('pasteCues 鎖定防護', () => {
     pasteCues();
     expect(State.cues.length).toBe(2);
     expect(ui.showToast).toHaveBeenCalled();
+  });
+});
+
+describe('字幕樣式命令鎖定防護', () => {
+  it('單句與全軌樣式命令都不能改寫鎖定軌', async () => {
+    const { applyCueStylePatch, applyTrackStylePlan } = await import('../src/style-commands.js');
+
+    expect(applyCueStylePatch(State.cues[1], { fontSize: 99 })).toBe(false);
+    expect(applyTrackStylePlan(State.tracks[1], [State.cues[1]], { fontSize: 88 })).toBe(false);
+
+    expect(State.cues[1].style).toBeUndefined();
+    expect(State.tracks[1].fontSize).toBeUndefined();
+    expect(ui.showToast).toHaveBeenCalledTimes(2);
+  });
+
+  it('貼上樣式到鎖定軌字幕時整批擋下且不寫入 History', async () => {
+    const { copySelectedStyle, pasteStyleToSelected } = await import('../src/style-commands.js');
+    const { recordHistory } = await import('../src/history.js');
+    State.cues[0].style = { fontSize: 72, color: '#ff0000' };
+    State.selectedId = 'a';
+    State.selectedIds = ['a'];
+    copySelectedStyle();
+
+    State.selectedId = 'b';
+    State.selectedIds = ['b'];
+    pasteStyleToSelected();
+
+    expect(State.cues[1].style).toBeUndefined();
+    expect(recordHistory).not.toHaveBeenCalled();
+    expect(ui.showToast.mock.calls.at(-1)?.[0]).toContain('貼上字幕樣式');
+  });
+});
+
+describe('批次 In/Out 命令鎖定防護', () => {
+  it('時間位移與持續時間調整都不能修改鎖定軌字幕', async () => {
+    document.body.insertAdjacentHTML('beforeend', `
+      <input id="tcShiftInput" value="00:00:01:00">
+      <input id="durAdjTcInput" value="00:00:01:00">
+      <input id="durAdjPctInput" value="150">
+      <select id="tcShiftSel"><option value="sel" selected>sel</option></select>
+    `);
+    const { parseTimecodeInput } = await import('../src/tcparse.js');
+    parseTimecodeInput.mockReturnValue(1);
+    const { recordHistory } = await import('../src/history.js');
+    const { applyTcShift, applyDurAdjTc, applyDurAdjPct } = await import('../src/timeline-edit-batch.js');
+    State.selectedId = 'b';
+    State.selectedIds = ['b'];
+
+    for (const command of [() => applyTcShift(1), () => applyDurAdjTc(1), applyDurAdjPct]) {
+      State.cues[1].start = 2;
+      State.cues[1].end = 3;
+      command();
+      expect({ start: State.cues[1].start, end: State.cues[1].end }).toEqual({ start: 2, end: 3 });
+    }
+    expect(recordHistory).not.toHaveBeenCalled();
+    expect(ui.showToast.mock.calls.at(-1)?.[0]).toContain('修改字幕時間');
+  });
+});
+
+describe('字幕模型內容與 In/Out 命令鎖定防護', () => {
+  it('清除字幕時間點不能讓鎖定軌字幕變成無時間字幕', async () => {
+    const { clearSelectedCuesTime } = await import('../src/subtitle-model.js');
+    const { recordHistory } = await import('../src/history.js');
+    State.selectedId = 'b';
+    State.selectedIds = ['b'];
+
+    clearSelectedCuesTime();
+
+    expect(State.cues[1].timed).not.toBe(false);
+    expect(recordHistory).not.toHaveBeenCalled();
+    expect(ui.showToast.mock.calls.at(-1)?.[0]).toContain('清除字幕時間點');
+  });
+
+  it('Trim 不能修改目前鎖定軌的字幕內容', async () => {
+    const { trimTrackSpaces } = await import('../src/subtitle-model.js');
+    const { recordHistory } = await import('../src/history.js');
+    State.listTrack = 1;
+    State.cues[1].text = '  鎖定內容  ';
+
+    trimTrackSpaces();
+
+    expect(State.cues[1].text).toBe('  鎖定內容  ');
+    expect(recordHistory).not.toHaveBeenCalled();
+    expect(ui.showToast.mock.calls.at(-1)?.[0]).toContain('整理字幕頭尾空白');
+  });
+
+  it('全域清除標籤只修改未鎖定軌並提示已跳過鎖定軌', async () => {
+    const { removeSrtTags } = await import('../src/subtitle-model.js');
+    State.cues[0].text = '<b>可修改</b>';
+    State.cues[1].text = '<i>鎖定內容</i>';
+
+    removeSrtTags();
+
+    expect(State.cues[0].text).toBe('可修改');
+    expect(State.cues[1].text).toBe('<i>鎖定內容</i>');
+    expect(ui.setStatus.mock.calls.at(-1)?.[0]).toContain('跳過鎖定軌');
+  });
+
+  it('相鄰換位、合併與文字上下移都不能修改鎖定軌內容', async () => {
+    const { swapAdjacentCues, mergeAdjacentCues, shiftTextsDown, shiftTextsUp } = await import('../src/subtitle-model.js');
+    const { recordHistory } = await import('../src/history.js');
+    const resetLockedCues = (firstText = '第一句', secondText = '第二句') => {
+      State.cues = [
+        { id: 'b1', start: 0, end: 1, text: firstText, track: 1, timed: true },
+        { id: 'b2', start: 2, end: 3, text: secondText, track: 1, timed: true },
+      ];
+      return structuredClone(State.cues);
+    };
+
+    let original = resetLockedCues();
+    swapAdjacentCues('b1', 1);
+    expect(State.cues).toEqual(original);
+
+    original = resetLockedCues();
+    mergeAdjacentCues('b1', 1);
+    expect(State.cues).toEqual(original);
+
+    original = resetLockedCues('第一句', '');
+    shiftTextsDown('b2');
+    expect(State.cues).toEqual(original);
+
+    original = resetLockedCues('', '第二句');
+    shiftTextsUp('b1');
+    expect(State.cues).toEqual(original);
+    expect(recordHistory).not.toHaveBeenCalled();
+    expect(ui.showToast).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('字幕匯入鎖定防護', () => {
+  it('不能把匯入結果寫入已鎖定的既有字幕軌', async () => {
+    document.body.insertAdjacentHTML('beforeend', `
+      <select id="importTkSel"><option value="1" selected>歌詞</option></select>
+      <select id="importPresetSel"><option value="" selected>無</option></select>
+      <input id="importNewTkName" value="新字幕軌">
+      <input id="importAppend" type="checkbox">
+    `);
+    const { _openImportModal } = await import('../src/sub-parse.js');
+    const original = structuredClone(State.cues);
+    _openImportModal('匯入字幕', [{ start: 5, end: 6, text: '新內容' }], 'srt');
+    const buttons = ui.openModal.mock.calls.at(-1)?.[2];
+
+    buttons[0].act();
+
+    expect(State.cues).toEqual(original);
+    expect(ui.closeModal).not.toHaveBeenCalled();
+    expect(ui.showToast.mock.calls.at(-1)?.[0]).toContain('匯入字幕');
+  });
+
+  it('取代未鎖定軌的字幕時保留其他鎖定軌內容', async () => {
+    document.body.insertAdjacentHTML('beforeend', `
+      <select id="importTkSel"><option value="0" selected>對白</option></select>
+      <select id="importPresetSel"><option value="" selected>無</option></select>
+      <input id="importNewTkName" value="新字幕軌">
+      <input id="importAppend" type="checkbox">
+    `);
+    const { _openImportModal } = await import('../src/sub-parse.js');
+    _openImportModal('匯入字幕', [{ start: 5, end: 6, text: '取代內容' }], 'srt');
+    const buttons = ui.openModal.mock.calls.at(-1)?.[2];
+
+    buttons[0].act();
+
+    expect(State.cues.map(c => ({ text: c.text, track: c.track }))).toEqual([
+      { text: 'y', track: 1 },
+      { text: '取代內容', track: 0 },
+    ]);
   });
 });

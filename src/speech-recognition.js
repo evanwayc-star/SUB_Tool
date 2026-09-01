@@ -846,6 +846,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     const sourceName = escapeHTML(c.name || '音訊素材');
     return `<div class="asr-source-item" role="listitem"><span class="asr-source-index">${i + 1}</span><span class="asr-source-name" title="${sourceName}">${sourceName}</span><span class="asr-source-duration">${durStr}</span></div>`;
   }).join('');
+  const totalDurationSummary = clips.length > 1
+    ? `<span class="asr-duration-pill">總計約 ${secToEncore(totalDur, State.fps, State.dropFrame)}</span>`
+    : '';
 
   const html = `
     <div class="asr-form asr-workspace asr-config-workspace">
@@ -856,7 +859,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             <span class="asr-eyebrow">本次輸入</span>
             <h4 id="asrSourceTitle">已選取 ${clips.length} 個音訊來源</h4>
           </div>
-          <span class="asr-duration-pill">約 ${secToEncore(totalDur, State.fps, State.dropFrame)}</span>
+          ${totalDurationSummary}
         </div>
         <div class="asr-source-list" role="list">${clipsSummary}</div>
         <div id="asrRecognitionAudioSourceRow" class="asr-field asr-source-selector" style="display:${recognitionAudioChoices.length > 1 ? 'flex' : 'none'};">
@@ -964,7 +967,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             <div id="asrAzureRegionHelp" class="asr-helper">必須和 Speech Key 所屬資源的 Region 一致。</div>
           </div>
 
-          <div class="asr-field">
+          <div class="asr-field asr-language-field">
             <label for="asrLanguage">音訊語言</label>
             <select id="asrLanguage">
             <option value="zh" ${conf.language === 'zh' ? 'selected' : ''}>繁體中文 (Chinese)</option>

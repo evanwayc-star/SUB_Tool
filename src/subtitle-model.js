@@ -26,6 +26,7 @@ export function snapAllCuesToFrames() {
 export function swapAdjacentCues(id, dir){
   const cue = State.cues.find(c => c.id === id);
   if (!cue) return;
+  if (cueTrackLocked(cue, '交換字幕順序')) return;
   const tk = cue.track || 0;
   const list = State.cues.filter(c => (c.track || 0) === tk);
   const idx = list.findIndex(c => c.id === id);
@@ -67,6 +68,7 @@ export function swapAdjacentCues(id, dir){
 export function mergeAdjacentCues(id, dir){
   const cue = State.cues.find(c => c.id === id);
   if (!cue) return;
+  if (cueTrackLocked(cue, '合併字幕')) return;
   const tk = cue.track || 0;
   const list = State.cues.filter(c => (c.track || 0) === tk);
   const idx = list.findIndex(c => c.id === id);
@@ -207,8 +209,15 @@ export function cueTrackLocked(c, action = '修改'){
   return trackLocked(c?.track || 0, action); 
 }
 
+export function cuesTrackLocked(cues, action = '修改'){
+  const lockedCue = (Array.isArray(cues) ? cues : []).find(c => State.tracks[c?.track || 0]?.locked);
+  return lockedCue ? cueTrackLocked(lockedCue, action) : false;
+}
+
 export function deleteSelectedCues(ids){
   if(!ids || !ids.length) return;
+  const cues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(Boolean);
+  if(cuesTrackLocked(cues, '刪除字幕')) return;
   _doDeleteCues(ids);
 }
 
@@ -221,9 +230,10 @@ export function deleteCue(id){
 export function clearSelectedCuesTime() {
   const ids=State.selectedIds.length?State.selectedIds.slice():[State.selectedId].filter(Boolean);
   if(!ids.length)return;
+  const cues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(Boolean);
+  if(cuesTrackLocked(cues, '清除字幕時間點')) return;
   let changed = false;
-  ids.forEach(id => {
-    const c = State.cues.find(x => x.id === id);
+  cues.forEach(c => {
     if (c && c.timed !== false) {
       c.timed = false;
       changed = true;
@@ -237,6 +247,7 @@ export function clearSelectedCuesTime() {
 
 export function shiftTextsDown(id){
   const c=State.cues.find(x=>x.id===id); if(!c||(c.text||'').trim())return;
+  if(cueTrackLocked(c, '移動字幕內容')) return;
   const tk=c.track||0;
   const list=State.cues.filter(x=>(x.track||0)===tk);
   const i=list.findIndex(x=>x.id===id); if(i<=0||!(list[i-1].text||'').trim())return;
@@ -249,6 +260,7 @@ export function shiftTextsDown(id){
 
 export function shiftTextsUp(id){
   const c=State.cues.find(x=>x.id===id); if(!c||(c.text||'').trim())return;
+  if(cueTrackLocked(c, '移動字幕內容')) return;
   const tk=c.track||0;
   const list=State.cues.filter(x=>(x.track||0)===tk);
   const i=list.findIndex(x=>x.id===id); if(i>=list.length-1||!(list[i+1].text||'').trim())return;
@@ -474,6 +486,7 @@ export function pasteCues(){
 }
 
 export function trimTrackSpaces() {
+  if(trackLocked(State.listTrack, '整理字幕頭尾空白')) return;
   let changed = 0;
   State.cues.forEach(c => {
     if ((c.track || 0) === State.listTrack) {
@@ -574,14 +587,22 @@ function requireTrackStyleSnapshot() {
 
 export function removeSrtTags() {
   let changed = false;
+  let skippedLocked = false;
   State.cues.forEach(c => {
     if (c.text) {
       const nt = c.text.replace(/<[^>]+>|\{\\[^}]+\}/g, '');
-      if (nt !== c.text) { c.text = nt; changed = true; }
+      if (nt !== c.text) {
+        if (State.tracks[c.track || 0]?.locked) { skippedLocked = true; return; }
+        c.text = nt; changed = true;
+      }
     }
   });
-  if (changed) { recordHistory('清除 SRT 標籤'); emit('render:all'); setStatus('已清除所有標籤', 'ok'); }
-  else setStatus('未發現可清除的標籤', '');
+  if (changed) {
+    recordHistory('清除 SRT 標籤'); emit('render:all');
+    setStatus(skippedLocked ? '已清除未鎖定軌標籤，並跳過鎖定軌' : '已清除所有標籤', 'ok');
+  } else {
+    setStatus(skippedLocked ? '未修改：已跳過鎖定軌字幕' : '未發現可清除的標籤', '');
+  }
 }
 
 export function toggleSubMode(force = false) {

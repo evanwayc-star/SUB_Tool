@@ -9,7 +9,7 @@ import {
   planCueStyleAssignment,
   planTrackStyleAssignment,
   applyCueStyleAssignment,
-  applyTrackStylePlan,
+  applyTrackStylePlan as applyTrackStylePlanEngine,
   hasClipboardStyle,
   copyCueStyle,
   pasteClipboardStyle,
@@ -17,8 +17,11 @@ import {
 import { showToast, setStatus } from './ui.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';
+import { cueTrackLocked, cuesTrackLocked, trackLocked } from './subtitle-model.js';
 
 export function applyCueStylePatch(cue, desiredStyle, preserveKeys = []) {
+  if (!cue) return false;
+  if (cueTrackLocked(cue, '修改字幕樣式')) return false;
   const targetTrack = State?.tracks?.[cue?.track || 0] || null;
   const plan = planCueStyleAssignment({ cue, targetTrack, desiredStyle, preserveKeys });
   applyCueStyleAssignment(cue, plan);
@@ -40,6 +43,7 @@ export function pasteStyleToSelected() {
   if (!ids.length) { showToast('請先選取字幕'); return; }
 
   const selectedCues = ids.map(id => State.cues.find(x => x.id === id)).filter(Boolean);
+  if (cuesTrackLocked(selectedCues, '貼上字幕樣式')) return;
   const changed = pasteClipboardStyle(selectedCues, State.tracks);
 
   if (changed) {
@@ -49,7 +53,12 @@ export function pasteStyleToSelected() {
   }
 }
 
+export function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []) {
+  const trackIndex = State.tracks.indexOf(track);
+  if (trackIndex >= 0 ? trackLocked(trackIndex, '修改字幕樣式') : cuesTrackLocked(cues, '修改字幕樣式')) return false;
+  return applyTrackStylePlanEngine(track, cues, desiredStyle, preserveKeys);
+}
+
 export {
-  applyTrackStylePlan,
   hasClipboardStyle,
 };

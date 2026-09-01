@@ -1058,7 +1058,7 @@ select:focus-visible {
 .asr-source-item{display:grid;grid-template-columns:22px minmax(0,1fr) auto;align-items:center;gap:8px;min-height:34px;border-bottom:1px solid var(--asr-border-soft);color:var(--asr-muted);font-size:12px}
 .asr-source-item:last-child{border-bottom:0}
 .asr-source-index{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;background:var(--asr-surface-raised);color:var(--asr-faint);font-size:10px;font-weight:700}
-.asr-source-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dddde1}
+.asr-source-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#93c5fd}
 .asr-source-duration{color:var(--asr-faint);font-variant-numeric:tabular-nums}
 .asr-source-selector{margin-top:10px;padding-top:12px;border-top:1px solid var(--asr-border-soft)}
 
@@ -1100,6 +1100,10 @@ select:focus-visible {
 .asr-inline-link:hover{background:transparent;border:0;color:#fde68a;text-decoration:underline}
 .asr-secret-input{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
 .asr-secret-input button{min-width:54px;height:40px;justify-content:center;border-radius:7px;background:#18181b}
+/* 雲端 API Key 標題列含說明連結；語言欄保留同高標題槽，讓兩欄標籤與控制項精準對齊。 */
+.asr-settings-grid.is-transcribe #asrKeyRow>.asr-field-heading,
+.asr-settings-grid.is-transcribe .asr-language-field>label{min-height:28px}
+.asr-settings-grid.is-transcribe .asr-language-field>label{display:flex;align-items:center}
 .asr-progress-card{display:flex;flex-direction:column;gap:9px}
 .asr-progress-label{display:flex;align-items:center;justify-content:space-between;gap:16px;color:#c9c9ce;font-size:12px}
 .asr-progress-label>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

@@ -679,6 +679,26 @@ function runExternalAudioAction(method,args=[],{clearSelection=false}={}){
   });
   return true;
 }
+function seekLockedMediaAtClientX(clientX){
+  const rect=tlLayer.getBoundingClientRect();
+  requestPointerSeek(xToTime(clientX-rect.left));
+  updatePlayhead();
+  emit('render:videoSub');
+}
+function beginLockedMediaScrub(ev){
+  if(drag) cancelTimelineDrag();
+  seekLockedMediaAtClientX(ev.clientX);
+  drag={
+    mode:'scrub',
+    snaps:[],
+    gesture:beginRendererGesture('scrub',{context:{
+      startPoint:{x:ev.clientX,y:ev.clientY},
+      modifiers:{alt:ev.altKey,ctrl:ev.ctrlKey||ev.metaKey,shift:ev.shiftKey},
+    }}),
+  };
+  ev.preventDefault();
+  ev.stopPropagation();
+}
 function beginExternalAudioDrag(ev,asset,entry,block){
   if(ev.button!==0 || ev.target.closest('button')) return;
   if(drag) cancelTimelineDrag();
@@ -771,22 +791,13 @@ function renderAudioTrackRows(){
       if(external){
         block.addEventListener('pointerdown',ev=>{
           if(ev.button!==0||ev.target.closest('button')) return;
-          if(c.locked){
-            selectExternalAudioClip(c.id,{redraw:false});
-            block.classList.add('selected');
-            ev.preventDefault();
-            ev.stopPropagation();
-            return;
-          }
+          if(c.locked) return;
           try{ block.setPointerCapture(ev.pointerId); block._audioPointerId=ev.pointerId; }catch(_){}
         });
       }
       block.addEventListener('mousedown',ev=>{
         if(c.locked){
-          if(external) selectExternalAudioClip(c.id,{redraw:false});
-          else selectClip(c.id);
-          ev.preventDefault();
-          ev.stopPropagation();
+          beginLockedMediaScrub(ev);
           return;
         }
         if(external){ beginExternalAudioDrag(ev,c,entry,block); return; }
@@ -795,6 +806,7 @@ function renderAudioTrackRows(){
       block.addEventListener('click',ev=>{
         if(performance.now()<_ignoreAudioClickUntil) return;
         ev.preventDefault();
+        if(c.locked){ ev.stopPropagation(); return; }
         if(external) selectExternalAudioClip(c.id);
         else selectClip(c.id);
         if(!external) renderAudioTrackRows();
@@ -1201,7 +1213,10 @@ tlScroll.addEventListener('mousedown',e=>{
   const clipEl=e.target.closest('.clip-block');
   if(clipEl){
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
-    if(State.videoTracks[c.vtrack||0]?.locked){ selectClip(c.id); e.preventDefault(); return; } // 鎖定軌：允許選取，禁止移動／修剪
+    if(State.videoTracks[c.vtrack||0]?.locked){
+      beginLockedMediaScrub(e);
+      return;
+    } // 鎖定軌：保留選取、不允許編輯，但仍可點擊定位播放點
     const mode=e.target.classList.contains('edge')?(e.target.classList.contains('l')?'clip-l':'clip-r'):'clip-move'; // 需在 selectClip 重繪前判斷（用 e.target 的 class）
     selectClip(c.id); // 點擊即選取（非破壞性，先做——不受存檔守衛擋住）
     if(!isProjectGuardDone()){ ensureProjectSaved(); e.preventDefault(); return; } // 拖曳/修剪前先存檔
@@ -1685,6 +1700,7 @@ export function trackFromY(clientY){
 export function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); emit('render:listTrackSel'); recordHistory('新增軌道'); }
 
 export function removeTrack(i){
+  if(trackLocked(i, '刪除軌道')) return;
   const n=State.cues.filter(c=>(c.track||0)===i).length;
   const doRemove=()=>{
     State.cues=State.cues.filter(c=>(c.track||0)!==i);

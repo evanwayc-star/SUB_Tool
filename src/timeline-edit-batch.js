@@ -2,7 +2,7 @@ import { State } from './state.js';
 import { $ } from './dom.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { showToast, setStatus } from './ui.js';
-import { sortCues } from './subtitle-model.js';
+import { sortCues, cuesTrackLocked } from './subtitle-model.js';
 import { drawTimeline } from './timeline.js';
 import { recordHistory } from './history.js';
 import { snapTimeToFrame } from './time.js';
@@ -35,6 +35,7 @@ export function applyTcShift(sign) {
   const delta = sign * t;
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可以位移'); return; }
+  if (cuesTrackLocked(cues, '修改字幕時間')) return;
   for (const c of cues) { c.start = Math.max(0, c.start + delta); c.end = Math.max(c.start + 0.001, c.end + delta); }
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('時間碼位移');
@@ -49,6 +50,7 @@ export function applyDurAdjTc(sign) {
   const minDur = 1 / Math.max(State.fps || 25, 1);
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可調整'); return; }
+  if (cuesTrackLocked(cues, '修改字幕時間')) return;
   let adjusted = 0, skipped = 0;
   for (const c of cues) {
     const nextIn = _nextInPoint(c);
@@ -70,6 +72,7 @@ export function applyDurAdjPct() {
   const minDur = 1 / Math.max(State.fps || 25, 1);
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可調整'); return; }
+  if (cuesTrackLocked(cues, '修改字幕時間')) return;
   let adjusted = 0, skipped = 0;
   for (const c of cues) {
     const nextIn = _nextInPoint(c);

@@ -61,6 +61,8 @@ vi.mock('../src/ui.js', () => ({
   setStatus: vi.fn(),
   closeModal: vi.fn(),
   showOsd: vi.fn(),
+  showToast: vi.fn(),
+  openModal: vi.fn(),
 }));
 
 let State;
@@ -266,6 +268,22 @@ describe('JKL reverse shuttle time domain', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', code: 'KeyD' }));
 
     expect(mediaMock.seek).toHaveBeenCalledWith(106);
+  });
+
+  it('P 時間碼位移不能修改鎖定字幕軌的 In/Out', async () => {
+    State.keymap = { shift_timecode: [{ key: 'p' }] };
+    State.tracks = [{ name: '鎖定字幕', locked: true }];
+    State.cues = [{ id: 'locked-cue', start: 100, end: 102, text: '內容', track: 0, timed: true }];
+    State.selectedId = 'locked-cue';
+    State.selectedIds = ['locked-cue'];
+    const { recordHistory } = await import('../src/history.js');
+    const { showToast } = await import('../src/ui.js');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', code: 'KeyP' }));
+
+    expect({ start: State.cues[0].start, end: State.cues[0].end }).toEqual({ start: 100, end: 102 });
+    expect(recordHistory).not.toHaveBeenCalled();
+    expect(showToast.mock.calls.at(-1)?.[0]).toContain('修改字幕時間');
   });
 
   it('長按方向鍵只啟動一次 shuttle，放開時會暫停', () => {

@@ -31,9 +31,14 @@ function styleDisplayTarget(){
   return { i, trk, cues, cue: cues[0] || null };
 }
 
+function styleTargetLocked(target){
+  if(State.presetEdit || !target?.cue) return false;
+  return !!State.tracks[target.cue.track || 0]?.locked;
+}
+
 function styleTarget(){
   const target=styleDisplayTarget();
-  if(!target || (!State.presetEdit && !target.cues.length)) return null;
+  if(!target || (!State.presetEdit && (!target.cues.length || styleTargetLocked(target)))) return null;
   return target;
 }
 
@@ -51,13 +56,15 @@ function setStylePanelInteractivity(panel, { hasCue, editingPreset }){
 function renderTrackStyle(){
   const panel=$('trackStyle'); const t=styleDisplayTarget();
   const editingPreset=!!t && !!State.presetEdit;
-  setStylePanelInteractivity(panel, { hasCue:!!t?.cues.length, editingPreset });
+  const locked=styleTargetLocked(t);
+  setStylePanelInteractivity(panel, { hasCue:!!t?.cues.length && !locked, editingPreset });
   if(!t){ panel.classList.add('disabled'); $('tsTitle').textContent='字幕樣式｜請先選取字幕'; return; }
   panel.classList.remove('disabled');
   const { trk, cue, cues }=t;
   const idx=cue ? State.cues.filter(c=>(c.track||0)===State.listTrack).indexOf(cue)+1 : 0;
   const multi=cues.length>1;
   const labelStr = editingPreset ? `✎ 編輯常用樣式：${State.presetEdit.name}`
+                           : locked ? '字幕樣式｜軌道已鎖定'
                            : cue ? `第 ${idx} 句樣式` : '字幕樣式｜請先選取字幕';
   $('tsTitle').textContent = labelStr;
   $('tsTitle').title = multi ? `改動會同時套用到選取的這 ${cues.length} 句（面板顯示的是第 ${idx} 句的值）`
