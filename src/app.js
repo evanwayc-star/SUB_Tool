@@ -2,6 +2,7 @@ import { startAppTicker } from './app-ticker.js';
 import { StylePanelController } from './ui/style-panel-controller.js';
 import { bindNumberInputWheel } from './number-input-wheel.js';
 import { initMediaView } from './media-view.js';
+import { bindPlayerFullscreen } from './player-fullscreen.js';
 /* ==============================================================================
    SUB Tool — 應用程式協調層與 UI 進入點 (App Layer / Entry Point)
    ==============================================================================
@@ -103,6 +104,10 @@ on('selection:clipCleared', ()=>{ const el=$('stSel'); if(el) el.textContent='';
 on('playhead:ensure', ensurePlayheadVisible);
 on('duration:known', onDurationKnown);
 on('mpv:refreshSubs', refreshMpvSubs);
+bindPlayerFullscreen({
+  element: _videoWrap,
+  onChange: () => requestAnimationFrame(() => renderVideoSub()),
+});
 /* 這裡曾有 on('panel:toggle', togglePanel)，但全專案零個 emit——收了沒人發的死訂閱。
    面板開關實際是 doAction() 直接呼叫 togglePanel()（見 'history'／'notes'／'mixer' 等 case）。
    日後若真需要跨模組開面板，請【同時】加上發送端，不要只留一半（見 docs/技術架構說明.md 的 events.js 章節）。 */

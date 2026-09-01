@@ -162,6 +162,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 
 /* 影片預覽 */
 .video-wrap{flex:1;display:flex;align-items:center;justify-content:center;position:relative;min-height:0;background:#000;overflow:hidden}
+.video-wrap:fullscreen{width:100vw;height:100vh;min-height:100vh;max-width:none;max-height:none;flex:none;background:#000}
+.video-wrap:fullscreen::backdrop{background:#000}
 /* object-fit:contain 填滿 videoWrap 並保比例（內部留黑邊）→ 原生影片的實際顯示區
    ＝_stageRect()＝字幕層＝安全框，四者對齊。舊寫法只有 max-width/height：小於視窗的影片
    會停在原生尺寸不放大，導致字幕／安全框（用 _stageRect）跟畫面對不上（v4.33 修）。 */
