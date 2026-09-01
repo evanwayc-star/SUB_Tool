@@ -33,6 +33,10 @@ describe('GitHub Actions 平台分流', () => {
     expect(pkg.scripts['test:ci:portable']).toBe('node scripts/ci/run-test-group.mjs portable');
     expect(pkg.scripts['test:ci:windows']).toBe('node scripts/ci/run-test-group.mjs windows');
 
+    const runner = readFileSync(path.join(ROOT, 'scripts', 'ci', 'run-test-group.mjs'), 'utf8');
+    expect(runner).toContain("testEnv.FFMPEG_PATH = require('ffmpeg-static')");
+    expect(runner).toContain("testEnv.FFPROBE_PATH = require('@derhuerst/ffprobe-static')");
+
     const windowsJob = workflow.slice(workflow.indexOf('  windows-desktop:'));
     expect(windowsJob.indexOf('npm run build')).toBeGreaterThan(-1);
     expect(windowsJob.indexOf('npm run build')).toBeLessThan(windowsJob.indexOf('npm run test:ci:windows'));

@@ -1,11 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TEST_ROOT = path.join(ROOT, 'tests');
 const WINDOWS_MARKER = '// @subtool-ci windows';
+const require = createRequire(import.meta.url);
 
 function collectTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
@@ -48,8 +50,14 @@ if (group === 'portable') {
 }
 
 const vitest = path.join(ROOT, 'node_modules', 'vitest', 'vitest.mjs');
+const testEnv = { ...process.env };
+if (group === 'windows') {
+  testEnv.FFMPEG_PATH = require('ffmpeg-static');
+  testEnv.FFPROBE_PATH = require('@derhuerst/ffprobe-static');
+}
 const result = spawnSync(process.execPath, [vitest, ...args], {
   cwd: ROOT,
+  env: testEnv,
   stdio: 'inherit',
 });
 
