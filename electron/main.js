@@ -226,6 +226,10 @@ function hideMainWindow() {
   return true;
 }
 
+function isMainWindowSender(event) {
+  return !!(mainWin && !mainWin.isDestroyed() && event?.sender === mainWin.webContents);
+}
+
 ipcMain.handle('app:close', () => {
   if (!mainWin || mainWin.isDestroyed()) return false;
   // 監控視窗還在時保留 renderer 與未儲存專案，只隱藏主視窗；監控視窗可再叫回來。
@@ -241,6 +245,12 @@ ipcMain.handle('app:close', () => {
   _allowMainWindowClose = true;
   try { mainWin.close(); } finally { _allowMainWindowClose = false; }
   return true;
+});
+
+ipcMain.handle('app:minimize', event => {
+  if (!isMainWindowSender(event)) return false;
+  mainWin.minimize();
+  return mainWin.isMinimized();
 });
 
 ipcMain.handle('app:showMainWindow', () => showMainWindow());
@@ -1665,16 +1675,12 @@ function openCompareWindow(payload) {
   });
 }
 
-function isMainCompareSender(event) {
-  return !!(mainWin && !mainWin.isDestroyed() && event?.sender === mainWin.webContents);
-}
-
 function isCompareWindowSender(event) {
   return !!(compareWin && !compareWin.isDestroyed() && event?.sender === compareWin.webContents);
 }
 
 ipcMain.on('open-compare-window', (event, payload) => {
-  if (!isMainCompareSender(event)) return;
+  if (!isMainWindowSender(event)) return;
   openCompareWindow(payload);
 });
 
@@ -1684,7 +1690,7 @@ ipcMain.on('compare:command', (event, command) => {
 });
 
 ipcMain.on('sync-compare-window', (event, payload) => {
-  if (!isMainCompareSender(event)) return;
+  if (!isMainWindowSender(event)) return;
   if (compareWin && !compareWin.isDestroyed()) {
     compareWin.webContents.send('compare:update-data', payload);
   }

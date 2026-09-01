@@ -102,6 +102,7 @@ contextBridge.exposeInMainWorld('subtool', {
   onCompareCommand: (cb) => ipcRenderer.on('compare:command', (e, command) => cb(command)),
   onCompareClosed: (cb) => ipcRenderer.on('compare:closed', () => cb()),
   onAppRequestClose: (cb) => ipcRenderer.on('app:request-close', () => cb()),
+  minimizeApp: () => ipcRenderer.invoke('app:minimize'),
   closeApp: () => ipcRenderer.invoke('app:close'),
   onOpenFile:    (cb) => ipcRenderer.on('app:open-file', (e, path) => cb(path)),
   queueResume:  () => ipcRenderer.invoke('queue:resume'),

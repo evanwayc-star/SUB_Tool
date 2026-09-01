@@ -1,6 +1,6 @@
 // @subtool-ci windows
 import { afterEach, describe, expect, test } from 'vitest';
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -169,45 +169,6 @@ async function launchSecondInstance(profileDir) {
   return stderr.join('');
 }
 
-function minimizeMainWindow(processId) {
-  const script = `
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public static class SubToolWindowTest {
-  public delegate bool EnumProc(IntPtr handle, IntPtr state);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr state);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr handle, StringBuilder text, int count);
-  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr handle, int command);
-}
-"@
-$script:found = $false
-[SubToolWindowTest]::EnumWindows({
-  param([IntPtr]$handle, [IntPtr]$state)
-  [uint32]$owner = 0
-  [SubToolWindowTest]::GetWindowThreadProcessId($handle, [ref]$owner) | Out-Null
-  if ($owner -eq ${processId}) {
-    $title = New-Object System.Text.StringBuilder 512
-    [SubToolWindowTest]::GetWindowText($handle, $title, $title.Capacity) | Out-Null
-    if ($title.ToString() -like 'SUB TOOL*') {
-      [SubToolWindowTest]::ShowWindowAsync($handle, 6) | Out-Null
-      $script:found = $true
-      return $false
-    }
-  }
-  return $true
-}, [IntPtr]::Zero) | Out-Null
-if (-not $script:found) { exit 2 }
-`;
-  const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  execFileSync('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
-    windowsHide: true,
-    stdio: 'pipe',
-  });
-}
-
 async function waitForExit(app) {
   await Promise.race([
     app.closed,
@@ -374,7 +335,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const mainClient = await connectTarget(mainTarget);
     const queueClient = await openQueueMonitor(app, mainClient);
     await mainClient.send('Page.bringToFront');
-    minimizeMainWindow(app.child.pid);
+    expect(await mainClient.evaluate('window.subtool.minimizeApp()')).toBe(true);
 
     await queueClient.send('Page.close').catch(() => {});
     await delay(300);
