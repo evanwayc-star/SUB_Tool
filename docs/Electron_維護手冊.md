@@ -1,518 +1,274 @@
-# SUB Tool — Electron 維護手冊
+# SUB Tool Electron 維護手冊
 
-> 本文件針對本專案實際架構撰寫；每次異動 IPC 通道、ffmpeg 流程、mpv 整合或打包設定時請同步更新。
+這份文件只談桌面邊界：視窗、preload、IPC、檔案能力、ffmpeg、mpv、匯出佇列與封裝。Renderer 架構見 [技術架構說明](技術架構說明.md)。
 
----
+## 1. 系統總覽
 
-## 1. 系統架構總覽
-
-本專案採用 **Vite + Electron** 架構，核心角色與後端支援模組如下：
-
-| 角色 | 檔案 | 職責 |
-|------|------|------|
-| **Main Process** | `electron/main.js` | 視窗／IPC／平台能力的頂層組裝；不自行持有 ffmpeg execution 或媒體 intake 狀態 |
-| **匯出計畫（純邏輯）** | `electron/export-plan.js` | 音訊路由、filtergraph 片段、AAC bitrate、時間碼浮水印濾鏡。保持純函式才能在 vitest 直接測（見 `tests/exportPlan.test.js`）；副作用一律由 delivery runner adapters 提供 |
-| **交付執行交易** | `electron/delivery-runner.js` | 讀 frozen ASS、probe、建立 argv、執行 ffmpeg、提交 queue 終態、通知 renderer 與清理暫存的單一 owner |
-| **檔案能力權威** | `electron/file-authority.js` | 精確 read/write、專案 autosave、交付輸出、截圖、佇列 log 與內部 cache 的分離 capability；renderer 的字串路徑不會自動升權 |
-| **拖放檔案准入** | `electron/dropped-file-admission.js` | 一般影音拖放只授權精確來源；`.subtool/.json` 必須走原子可信專案 intake，不得先取得 read／截圖目錄能力 |
-| **可信專案匯入** | `electron/trusted-project-intake.js` | 只接受由 main process 讀取或選檔取得的 `.subtool` bytes，再從其中衍生專案與媒體 read capability；renderer 不可用自帶 path/b64 擴權 |
-| **專案寫入准入** | `electron/project-write-admission.js` | Save As／原檔覆寫共用的 write transaction；renderer bytes 內每個 media path 必須已有 read capability，write 成功後才清除舊 relink declaration |
-| **專案檔案 Gateway** | `electron/project-file-gateway.js` | 將讀取→解析→授權→最近清單與准入→寫入→清舊 declaration 封成可執行交易，IPC handler 不得自行拆開步驟 |
-| **Renderer 設定政策** | `electron/config-policy.js` | allowlist renderer 可保存的設定鍵；`recentProjects` 等 main-owned 欄位不可由 renderer 注入 |
-| **媒體 ingest 協調器** | `electron/media-ingest-coordinator.js` | 串流 ingest 的 response/completion 與 queued cache work 的單一序列 lane；取代工作會取消舊流程與其晚到 process |
-| **原生媒體 intake runtime** | `electron/media-intake-runtime.js` | 快取 identity／metadata／清理、fragmented-MP4 HTTP Range registry、batch／stream ingest commit 與 cancel 的單一 owner |
-| **FFmpeg execution** | `electron/ffmpeg-execution.js` | 統一 stderr parser、進度、queue log、錯誤分析與 outcome；交付走 watchdog，可重建快取走 direct child |
-| **匯出工作狀態機** | `electron/export-job-status.js` | **七種狀態與四個分類的唯一定義**（見下方「匯出工作的狀態機」）。零 `require`，純資料＋述詞 |
-| **匯出佇列儲存** | `electron/queue-store.js` | 工作 JSON／ASS／log 的原子寫入、讀取、排序與來源檔蒐集；終態 outcome／待刪除 journal |
-| **完成紀錄** | `electron/queue-history.js` | 已完成交付的稽核紀錄（跨重啟保留、上限 200 筆）。**刻意不走 queue-store**：只存渲染完成卡片需要的欄位，**不含 `payload` 的 `clips`／`audioPlan`**，因此不可能被重新排程執行 |
-| **匯出佇列狀態** | `electron/export-queue-state.js` | 唯一有序工作集合；scheduler、監控畫面、重試與持久化都讀同一份順序。`liveWorkCount()`（running＋stopping）是「還在轉檔嗎」的唯一定義，兩個關閉決策都讀它 |
-| **匯出輸出鎖** | `electron/export-lease.js` | 依正規化輸出路徑建立原子 lease，避免不同工作同時以 `-y` 寫入同一檔案 |
-| **匯出監護程序** | `electron/export-watchdog.js` | 獨立持有交付匯出的 ffmpeg；主程序中斷後停止子程序、刪除半成品，並提供啟動復原用的 token pipe |
-| **Renderer Process** | `dist/index.html`（Vite 打包） | UI 介面、字幕編輯、時間軸（完整前端邏輯） |
-| **Preload Script** | `electron/preload.js` | `contextBridge` → `window.subtool`，安全橋接 Node 能力給前端 |
-
-```
-Renderer (dist/index.html)
-    │  window.subtool.*（contextBridge）
-    ▼
-Preload (preload.js)
-    │  ipcRenderer.invoke(channel, ...)
-    ▼
-Main (main.js)
-    │  ipcMain.handle(channel, ...)
-    ├─→ 系統對話框（dialog）
-    ├─→ 本機檔案系統（fs）
-    ├─→ 交付匯出 watchdog ─→ ffmpeg
-    ├─→ ffprobe／預覽快取 ffmpeg（child_process.spawn）
-    └─→ mpv 子行程（spawn）
+```mermaid
+flowchart LR
+  R[Renderer] -->|window.subtool| P[preload.js]
+  P -->|validated IPC| M[main.js]
+  M --> F[file authority]
+  M --> I[media intake]
+  M --> V[mpv host]
+  M --> Q[export queue]
+  Q --> D[delivery runner]
+  I --> N[ffprobe / ffmpeg]
+  D --> N
 ```
 
----
+| 模組 | 唯一責任 |
+|---|---|
+| `electron/main.js` | BrowserWindow、IPC 註冊與 adapter 組裝 |
+| `electron/preload.js` | contextBridge 與 renderer 輸入型別守門 |
+| `electron/local-resource.js` | `subtool-local:` capability URL |
+| `electron/file-authority.js` | 精確 read／write／project／screenshot／delivery 權限 |
+| `electron/trusted-project-intake.js` | 由可信 `.subtool` bytes 衍生媒體能力 |
+| `electron/project-write-admission.js` | Save As／覆寫專案的原子寫入 |
+| `electron/media-intake-runtime.js` | probe、Proxy、波形、聲道快取與 lease |
+| `electron/native-tooling.js` | ffmpeg／ffprobe 路徑與 encoder 能力 |
+| `electron/mpv-host.js` | Windows mpv 視窗、IPC 與精準畫格呈現 |
+| `electron/export-queue.js` | 背景排程、並行、停止、重試與持久化 |
+| `electron/delivery-runner.js` | 單一交付工作的 ffmpeg 交易 |
+| `electron/export-watchdog.js` | ffmpeg 子程序與 owner process 崩潰隔離 |
 
-## 2. IPC 通訊機制
+`main.js` 可以組裝，不應重新實作各 owner 已擁有的規則。
 
-### 所有通道一覽（`electron/preload.js` 暴露的介面）
+## 2. 安全與檔案能力
 
-| `window.subtool` 方法 | IPC Channel | 方向 | 說明 |
-|---|---|---|---|
-| `status()` | `app:status` | R→M | 回傳 `{isDesktop, ffmpeg, ffprobe, ffmpegPath, ffprobePath, venc, platform, arch, ffmpegDetection, ffprobeDetection}`；兩份 detection 含逐候選探測結果 |
-| `fileURL(path)` | `fs:fileURL` | R→M | 已授權唯讀檔案 → 可播放 URL；查詢不會取得新授權 |
-| `stat(path)` | `fs:stat` | R→M | 已授權唯讀檔案才回傳 `{exists, size}` |
-| `getFilePath(file)` | —（preload 內直接呼叫 `webUtils.getPathForFile`，無 IPC） | R | 拖放的 `File` 物件 → 絕對路徑。Electron 32 起 `File.path` 已移除；只接受真正的 File 物件、失敗回 `null`。供拖放影音走桌面載入路徑（`loadDesktopMedia`） |
-| `authorizeDroppedFile(file)` | `fs:authorizeDroppedFile` | R→M | preload 從真實拖放 `File` 取得精確路徑後，授予該單一影音檔唯讀能力；專案副檔名 fail closed |
-| `openDroppedProject(file)` | `project:openDroppedFile` | R→M | preload 從真實拖放 `File` 取得專案路徑；main 先 read／parse 成功，再以可信 bytes 原子授予專案與其精確媒體能力 |
-| `readB64(path)` | `fs:readB64` | R→M | 只讀已授權檔案，回傳 base64 字串 |
-| `writeProject(path, b64)` | `fs:writeProject` | R→M | 只可寫回已選取專案本身或其 `.subtool_AutoSave/`；bytes 宣告的所有媒體須已授權，成功覆寫才清除舊 relink declaration |
-| `findRelinkTarget(projectPath, oldMediaPath)` | `fs:findRelinkTarget` | R→M | 只接受 main 從該份可信專案 bytes 記錄過的精確 oldMediaPath，再於專案樹中搜尋同名替代檔 |
-| `writeScreenshot(path, b64)` | `fs:writeScreenshot` | R→M | 只可寫入已授權截圖目錄的 `.jpg/.jpeg/.png` |
-| `reserveScreenshotPath(directory, suffix)` | `fs:reserveScreenshotPath` | R→M | 在已授權截圖目錄內保留下一個 `Shot-NNN*.jpg`；檔案清單不交給 renderer |
-| `listDir(path)` | `fs:listDir` | R→M | 只列出已選擇的交付目錄，供交付同名衝突提示 |
-| `openMedia()` | `dialog:openMedia` | R→M | 系統開檔對話框（影音），為每個回傳檔授予精確唯讀能力 |
-| `openAudio()` | `dialog:openAudio` | R→M | 系統開檔對話框（音訊），每個回傳檔都取得精確唯讀能力 |
-| `openProject()` | `dialog:openProject` | R→M | 開啟 `.subtool` 專案，回傳 `{b64, path}`；只解析明確 media 欄位並授予那些精確來源。開啟成功後記進「最近開啟」 |
-| `recentProjects()` | `project:recentList` | R→M | 最近開啟的專案（最多 10 筆）。**只回顯示用的字串與索引，不授予任何能力**；`missing` 讓選單能把已不存在的檔案標灰 |
-| `openRecentProject(i)` | `project:openRecent` | R→M | 依**索引**開啟——清單由主程序持有，renderer 給不了路徑，所以沒有「叫主程序讀任意檔案」的路。`fileAuthority` 的授權是每次工作階段的，這裡才重新授予那一個檔案。檔案不存在時從清單移除並丟錯 |
-| `clearRecentProjects()` | `project:clearRecent` | R→M | 清空最近開啟清單 |
-| `saveProject(name, b64)` | `dialog:saveProject` | R→M | 另存 `.subtool` 專案並授予該專案與 autosave 的限定寫入能力 |
-| `importSub(kind)` | `dialog:importSub` | R→M | 開啟字幕檔，回傳 `{b64, name}` |
-| `exportSub(name, b64, ext)` | `dialog:exportSub` | R→M | 儲存字幕檔，回傳儲存路徑 |
-| `importDirectory()` | `dialog:importDirectory` | R→M | 選一個資料夾後批次讀入其中的 `.json`（常用樣式批次匯入用）；回傳的 `name` 是**相對於所選資料夾的路徑**，呼叫端據此還原樣式資料夾結構 |
-| `importFont()` | `dialog:importFont` | R→M | 匯入字型檔，複製進使用者資料夾（`userData`，避免安裝目錄的 Windows 寫入權限問題） |
-| `exportVideo(opts)` | `ffmpeg:exportVideo` | R→M | 將凍結後的影片序列加入持久化佇列並回傳工作 ID：`format` 只可為 `'h264'\|'prores'\|'wav'`，輸出副檔名必須分別是 `.mp4/.mov/.wav`。影像／音訊都必須是已授權母素材，輸出必須來自原生選取的交付位置；handler 會拒絕 `proxy.mp4`／`chN.m4a` 快取與任意 `presetOut`。同一 filtergraph 疊合片段與靜態圖片（`type:'image'` 會以 `-loop 1` 供應全段）、燒字幕，選用時再疊交付用時間碼。 |
-| `stopExport(jobId)` | `ffmpeg:stopExport` | R→M | 停止主狀態列目前顯示的匯出工作；傳入 jobId 避免並行時停止到另一份工作 |
-| `openQueueMonitor()` | `queue:openMonitor` | R→M | 顯示／聚焦獨立的匯出佇列監控視窗 |
-| `queueResume()` | `queue:resume` | R→M | 解除佇列層級暫停並開始下一份等待工作 |
-| `onQueueStatus(cb)` | `queue:getStatus` + `queue-status` | R→M + M→R | 註冊後先主動取得、之後持續接收 `{waitingCount,missingCount,isPaused}`，確保重啟恢復的工作不會因監聽時序而漏掉提示 |
-| `probe(path)` | `ffprobe` | R→M | ffprobe 探測，回傳 `{duration, fps, video, audio[]}` |
-| `makeProxy(path, dur)` | `ffmpeg:proxy` | R→M | 轉製 720p proxy（非即時，阻塞） |
-| `extractAudio(path, idx, dur, codec)` | `ffmpeg:extractAudio` | R→M | 抽取單一聲道 |
-| `waveAudio(path, dur)` | `ffmpeg:waveAudio` | R→M | 抽取 8kHz mono WAV（波形用） |
-| `cleanupAudio(path)` | `ffmpeg:cleanup` | R→M | 刪除暫存音訊檔 |
-| `compressSpeechAudio(bytes, requestId)` | `speech:compressAudio` | R→M | preload 在跨 IPC 前先限制 `44–20,000,000 bytes`；main 再驗證 renderer 已混音並編成的 16 kHz mono PCM16 WAV header。main 自行配置內部輸入／輸出暫存路徑，以 libmp3lame 轉 64 kbps MP3、讀回 base64，成功或失敗都清除兩個暫存檔。renderer 無法指定路徑 |
-| `cancelSpeechAudioCompression(requestId)` | `speech:cancelCompression` | R→M | 取消指定辨識壓縮、終止其 ffmpeg；關閉程式時 main 會取消並等待所有辨識壓縮收斂 |
-| `ingest(opts)` | `ffmpeg:ingest` | R→M | 單次多輸出：proxy + 所有聲道 + 波形 |
-| `streamIngest(opts)` | `ffmpeg:streamIngest` | R→M | 邊轉邊播：先回傳快取或邊轉的 URL，背景繼續 |
-| `cacheInfo()` | `cache:info` | R→M | 回傳快取統計 `{root, folders, bytes}` |
-| `cacheCleanOrphans()` | `cache:cleanOrphans` | R→M | 刪除無效快取資料夾 |
-| `cacheClearAll(src)` | `cache:clearAll` | R→M | 清除全部快取 |
-| `onProgress(cb)` | `task-progress` | M→R | ffmpeg 進度推播 `{jobId, label, pct, done}` |
-| `mpv.detect()` | `mpv:detect` | R→M | 回傳 `{available, supported, exe}`；Apple Silicon 第一版固定 `supported:false` |
-| `mpv.launch(opts)` | `mpv:launch` | R→M | Windows 啟動 mpv 嵌入播放（`{src, bounds, audio}`）；其他平台 fail closed |
-| `mpv.seek(t)` | `mpv:seek` | R→M | 跳轉播放位置（**來源時間**；影片序列的時間軸↔來源映射在前端 media.js 處理）。host 以設定 `time-pos` 執行精準 absolute 定位，避免 mpv `seek` command 的 queued display delay 阻塞連續逐格的最新目標 |
-| `mpv.present(t, opts)` | `mpv:present` | R→M | 呈現來源時間目標；等待同一請求的 command ack、per-frame `time-pos` 抵達容差內且收到 `playback-restart` 後，回傳實際 `presentedSourceTime` |
-| `mpv.cancelPresent()` | `mpv:cancelPresent` | R→M | 取消未完成的呈現等待；一般 `mpv.seek()` 仍維持 fire-and-forget，不共用佇列 |
-| `mpv.loadfile(p)` | `mpv:loadfile` | R→M | 影片序列跨段切換：同一 mpv 實例換檔（保留 --wid 嵌入與屬性），輪詢 duration 就緒後回傳 `{duration}`；只接受 FileAuthority 已授權來源 |
-| `mpv.play()` / `mpv.pause()` | `mpv:play` / `mpv:pause` | R→M | 播放 / 暫停 |
-| `mpv.direction(v)` | `mpv:direction` | R→M | 設定 mpv `play-direction` 為 `backward`／`forward`；renderer 只在單一未修剪、零位移片段使用原生倒播，其餘不得繞過時間軸映射 |
-| `mpv.mute(v)` | `mpv:mute` | R→M | 靜音切換 |
-| `mpv.rate(r)` | `mpv:rate` | R→M | 播放速率 |
-| `mpv.brightness(v)` | `mpv:brightness` | R→M | 設定 mpv 畫面亮度（−100～0）。淡入淡出的預覽提示用：HTML 疊層蓋不過 mpv 的 OS 層視窗，故改以 brightness 呈現「淡到黑」 |
-| `mpv.screenshot(p)` | `mpv:screenshot` | R→M | 由 mpv 直接截圖到已授權截圖位置（含字幕）；限定圖片副檔名，固定暫存截圖只取得精確 read capability |
-| `mpv.subVisible(v)` | `mpv:subVisible` | R→M | 切換 mpv 的 libass 字幕顯示（拖曳字幕時暫時隱藏，改由 HTML 層預覽新位置） |
-| `mpv.setBounds(b)` | `mpv:setBounds` | R→M | 更新 mpv 覆蓋視窗位置與大小 |
-| `mpv.setGuide(g)` | `mpv:setGuide` | R→M | 更新一般安全框／字幕操作 guide |
-| `mpv.setImageGuide(data)` | `mpv:setImageGuide` | R→M | 將圖片疊層 HTML 與播放器矩形交給透明 guide 顯示；只負責視覺，互動契約見 [`技術架構說明.md` §0.9](技術架構說明.md#09-靜態圖片也是時間軸片段不是播放器的一格畫面) |
-| `mpv.setTimecodeWatermark(data)` / `clearTimecodeWatermark()` | `mpv:setTimecodeWatermark` / `mpv:clearTimecodeWatermark` | R→M | 在原生 mpv 畫面上顯示／清除僅監看的時間碼，資料為 `{text,rect}`；不經 ASS、不會燒進輸出 |
-| `mpv.show(v)` | `mpv:show` | R→M | 顯示 / 隱藏 mpv 視窗。mpv 為 OS 層子視窗、HTML z-index 蓋不過：前端 `_syncMpvPanel()`（app.js）在對話框（含快捷鍵設定）、重疊影片的浮動面板／搜尋視窗／右鍵選單開啟時自動呼叫此方法讓位，關閉後恢復（`mpv:sync` 事件） |
-| `mpv.subSet(ass)` | `mpv:subSet` | R→M | 餵入 ASS 字幕（防抖 100ms） |
-| `mpv.quit()` | `mpv:quit` | R→M | 關閉 mpv |
-| `mpv.onEvent(cb)` | `mpv:event` | M→R | mpv 事件推播（`time-pos`, `playback-restart`, `duration`, `pause`, `eof` 等） |
-
-### 設定 / 字型 / 應用生命週期（v4.23 以後陸續加入）
-
-| `window.subtool` 方法 | IPC Channel | 方向 | 說明 |
-|---|---|---|---|
-| `isDesktop` | —（preload 內的常數 `true`） | — | 前端 `state.js` 用它判定桌面版（`DESK`）；網頁版沒有 `window.subtool`，取值為 undefined |
-| `fontsList()` | `fonts:list` | R→M | 掃 `font/` 下每個子資料夾，回傳 `{fonts:[{name, file, family}]}`。`name`＝資料夾名（UI 顯示）、`family`＝**字型檔內部家族名**（ASS 要用這個，見鐵律 §0.3）。此 handler 只授予已掃描字型根的唯讀能力，renderer 才取得到 `fs:fileURL` |
-| `configLoad()` | `config:load` | R→M | 讀 Electron `userData/config/settings.json`（設定、常用樣式 `subPresets` 等） |
-| `configSave(data)` | `config:save` | R→M | 只合併 `config-policy.js` allowlist 內的 renderer-owned 設定鍵；`recentProjects` 等 main-owned 欄位會被剝除 |
-| `keysLoad()` | `keys:load` | R→M | 讀自訂快捷鍵對應表 |
-| `keysSave(data)` | `keys:save` | R→M | 寫自訂快捷鍵對應表（快捷鍵設定視窗另有匯出／匯入 JSON 檔） |
-| `exportDirectory(files)` | `dialog:exportDirectory` | R→M | 選資料夾批次寫入字幕樣式包；只有 `files` 為空的「選擇交付目錄」流程會授予 ffmpeg delivery capability |
-| `getStartupFile()` | `app:getStartupFile` | R→M | 取「雙擊 `.subtool` 啟動」時帶進來的檔案路徑（前端啟動後主動問一次） |
-| `onOpenFile(cb)` | `app:open-file` | M→R | 程式已在執行時又雙擊 `.subtool` → 推播路徑 |
-| `onAppRequestClose(cb)` | `app:request-close` | M→R | 使用者按視窗關閉鈕 → 主行程**先攔下來**問前端（前端跳「未儲存」確認） |
-| `closeApp()` | `app:close` | R→M | 前端完成未儲存確認後關閉主視窗；監控視窗仍開啟時改為隱藏主視窗，以保留 renderer 與專案狀態。**還有工作在轉檔（`liveWorkCount() > 0`）時不結束程式**，改為叫出監控視窗並隱藏主視窗（見下方「視窗關閉與轉檔中的工作」） |
-
-### 匯出佇列監控視窗（`electron/queue-preload.js`）
-
-| `window.queueAPI` 方法 | IPC Channel | 方向 | 說明 |
-|---|---|---|---|
-| `getAll()` | `queue:getAll` | R→M | 取得全部工作、暫停狀態與並行數 |
-| `setPause(v)` | `queue:pause` | R→M | 設定佇列層級暫停；不會中斷已經執行中的工作 |
-| `setConcurrency(v)` | `queue:setConcurrency` | R→M | 設定同時執行數（1–3） |
-| `stopJob(id)` | `queue:stopJob` | R→M | 停止工作；執行中會要求 watchdog 結束 ffmpeg，等程序關閉後再刪除半成品與釋放輸出鎖 |
-| `retryJob(id)` | `queue:retryJob` | R→M | 重新驗證來源後，以原本凍結快照重試 |
-| `clearJob(id)` | `queue:clearJob` | R→M | 清除工作紀錄及其 JSON／ASS 暫存與失敗 log |
-| `clearCompleted()` | `queue:clearCompleted` | R→M | 清除所有已完成工作 |
-| `reorderJob(id,index)` | `queue:reorderJob` | R→M | 調整等待工作順序並同步寫回持久化檔 |
-| `changeFormat(id,format)` | `queue:changeFormat` | R→M | 改【等待中】工作的交付格式。**renderer 只送 format，輸出路徑一律由主程序從既有 outPath 推導**（同資料夾、同主檔名、只換副檔名），所以沒有路徑注入空間；未知格式由 `expectedExportExtension` fail-closed 擋掉，並重跑一次准入檢查（格式／同路徑互斥／檔案能力） |
-| `showMainWindow()` | `app:showMainWindow` | R→M | 顯示／重建主視窗；用於主視窗關閉後從監控視窗返回 |
-| `openPath(path)` | `app:openPath` | R→M | 只可用系統預設程式開啟受控 `<userData>/export-queue/*.log` |
-| `showItemInFolder(path)` | `app:showItemInFolder` | R→M | 只可在檔案總管顯示已通過驗證的精確交付輸出檔 |
-| `onUpdate(cb)` | `queue:update` | M→R | 佇列內容或狀態變更通知 |
-
-佇列的持久化真相來源在 `<userData>/export-queue/`：`ExportQueueState` 是唯一的記憶體順序來源，
-`export-queue.js` 只直接使用它與 `export-job-status.js` 的正式分類，不接受呼叫端注入影子狀態機。
-每份可恢復工作各有一個
-`<id>.json`，有字幕時另存 `<id>.ass`，失敗記錄固定為 `<id>.log`。新增與排序都會原子寫入；程式重啟後，
-沒有已知終態意圖的 `running` 會退回 `queued`，所有恢復工作保持暫停，直到使用者明確按「繼續佇列」。
-恢復及開始前都會驗證 `clips[].path`、片段音訊及 `audioPlan` 的來源；缺檔工作標為
-`missing-source`，不會靜默輸出缺字幕或缺素材的成品。恢復 app 自己持久化的工作時，才重新授予
-snapshot 中每個精確來源與輸出檔的能力；renderer 後來附加的 payload 路徑仍會被拒絕。格式或副檔名
-不符的工作會失敗，不能以錯誤容器交付。`done`／`failed`／`stopped` 是 **terminal**：
-它們不保留成可恢復的工作 JSON；舊 terminal JSON 即使殘留，`loadJobs()` 也會刪掉並跳過。
-**這是安全設計，不是疏漏**——它保證已完成的工作不會在重啟後被誤當 `queued` 重跑，
-以 `-y` 覆寫掉已經交付出去的成品（見 `tests/queueStore.test.js`）。
-
-終態會先寫入 `.queue-terminal-outcomes`，清除意圖會先寫入 `.queue-pending-deletes`；兩份
-journal 都必須成功寫入才會通知 renderer。啟動時會在任何工作進入 State 前，以 journal 與
-工作 JSON 一起復原／對帳：若 journal 損毀或無法讀取，佇列保持 fail-closed，避免把已完成或已清除的工作重新排程。
-成功交付的 log 與 ASS snapshot 可隨終態清理；`failed`／`stopped` 則把完整 frozen snapshot 留在
-outcome journal，重啟後還原成不可排程、但可重試／清除／開啟 log 的列。這些列的 ASS 與完整
-ffmpeg log 會保留到使用者明確清除；重試使用遞增 attempt，較新的 queued snapshot 在重啟時會勝過舊 outcome。
-關機時 runner 已知的 `done`／`failed`／`stopped` 若仍無法寫入 outcome journal，會保持 `stopping` 並**取消退出**；
-不可把它降回 `queued`，否則舊 snapshot 在下次啟動會重跑並覆寫可能已交付的輸出。反過來，已中斷的
-`stopping` 轉回 `queued` 後若 fallback snapshot 無法原子寫入，也會取消退出；否則 terminal tombstone
-可能讓該工作在重啟後整筆消失。
-這裡等待的是 queue runner 完整收尾，不只是 watchdog child 的 `completion`：後者之後仍可能在寫 log 並
-發出 `done`／`failed`，因此 runner 結束前不可把 `stopping` 轉成 `queued`。等待有上限；逾時會取消退出並
-維持 `stopping`，等 runner 真正收尾後才原子寫回 `queued`，絕不把未結清工作交給重啟猜測。
-使用者先按「停止」再關閉程式時，`stopped` 終態優先於 shutdown：關機只等待既有停止收尾，不能覆寫為
-可恢復的 `queued`。
-
-單份工作的執行交易在 `delivery-runner.js`。完成／失敗 payload 會先交給 queue durable commit；
-只有 queue 接受後才送 renderer，所以畫面不可能先於磁碟真相顯示完成。`main.js` 只建立真實的
-FileAuthority、probe、ffmpeg、字型與 `webContents` adapters。
-
-### 匯出工作的狀態機（`electron/export-job-status.js`；v5.11.0 起）
-
-工作有七種狀態，以及四個「這個狀態算什麼」的分類。**它們只有這一份定義**：
-
-| 分類 | 成員 | 誰在讀 | 漏掉的後果 |
-|------|------|--------|-----------|
-| `terminal` | done／failed／stopped／stopping | `queue-store` 的墓碑機制 | 已完成的工作重啟後被當 `queued` 重跑，以 `-y` 覆寫已交付的成品 |
-| `restorable` | queued／running／missing-source | `queue-store.loadJobs()` | 重啟後工作整批消失 |
-| `liveWork` | running／stopping | 兩個關閉決策、並行度 | 關閉程式時把轉檔中的工作連同 ffmpeg 一起殺掉 |
-| `retryable` | failed／stopped／missing-source | 重試 | 把還在跑的工作推回佇列 |
-| `reservesOutput` | queued／running／stopping／missing-source | 輸出 lease | 兩份工作同時以 `-y` 寫同一個檔案 |
-
-兩條不變量寫在測試裡（`tests/exportJobStatus.test.js`），新增狀態卻不分類就會紅：
-
-- `terminal` 與 `restorable` **互斥且窮盡**——磁碟上的每一筆記錄，重開程式時不是被恢復、
-  就是被當墓碑刪掉，沒有第三種。
-- `liveWork` 與 `terminal` **刻意重疊於 `stopping`**：ffmpeg 還活著（關閉程式要先問），
-  但萬一程式在這個狀態下死掉，那筆工作不該被恢復。**這不是筆誤。**
-
-> v5.11.0 之前，狀態是散在 `electron/` 的 46 處字面字串，而上面五份分類分別住在
-> `queue-store.js`、`main.js`、`export-queue-state.js` 三支檔案裡。新增一種狀態時，
-> 沒有任何機制告訴你「還有三個地方要表態」，而漏掉其中一個**不會報錯**。
-
-### 完成紀錄（`history.json`）
-
-使用者需要「關掉軟體後仍看得到交付了什麼」，但上面那條 terminal 規則不能動。因此
-完成紀錄走**另一條路**：`<userData>/export-queue/history.json`，由
-`electron/queue-history.js` 維護。
-
-- 只存 `id`／`status:'done'`／`createdAt`／`completedAt`／`elapsedMs` 與
-  `payload` 的 `outPath`／`duration`／`format` —— 也就是 `queue.html` 的
-  `createJobCard()` 渲染完成卡片實際會用到的欄位，**其餘一律不存**。
-- 沒有 `clips`／`audioPlan`／`assRef`／`sourcePaths`，所以它**本質上不可執行**；
-  `restoreJobs()` 把它們以 `done` 身分放回 `ExportQueueState`，`nextQueued()`
-  永遠不會選到，`OUTPUT_RESERVED_STATUSES` 也不含 `done`（不會擋住同路徑重新匯出）。
-- 上限 200 筆，超出丟最舊的。JSON 損毀或版本不符時**回空陣列而不是拋錯**——
-  稽核資料不該擋住程式啟動。
-- `queue:clearJob`／`queue:clearCompleted` 先寫待刪除 journal，再清掉 `history.json` 與工作暫存；
-  即使 Windows 暫時鎖住其中一個檔案，重啟復原也會完成清除，工作不會重新出現。
-
-### 視窗關閉與轉檔中的工作
-
-`prepareForShutdown()` 會停掉執行中的 ffmpeg 並清半成品，所以任何「會結束程式」的
-路徑在還有工作轉檔時都必須先擋下來：
-
-| 情境 | 行為 |
-|------|------|
-| 關閉主視窗，監控視窗開著 | 隱藏主視窗（保留 renderer 與專案狀態），既有行為 |
-| 關閉主視窗，`liveWorkCount() > 0` | **不結束程式**：`openQueueWindow()` ＋ `hideMainWindow()`，轉檔繼續 |
-| 關閉主視窗，沒有工作在轉檔 | 正常關閉流程 |
-| 關閉監控視窗，主視窗還開著 | 直接關（只是收起監控畫面，轉檔照跑），不打擾 |
-| 關閉監控視窗且這次關閉會結束程式（`queueWindowCloseEndsApp()`）、`liveWorkCount() > 0` | `preventDefault()` ＋ `dialog.showMessageBox` 確認；預設與 `Esc` 都落在「繼續轉檔」 |
-
-`queueWindowCloseEndsApp()` ＝ 主視窗已不存在，或主視窗是為了讓監控視窗獨自存在而被隱藏
-（`_mainHiddenForQueue`）——也就是 `closed` handler 會呼叫 `app.quit()` 的那兩種情況。
-
-交付匯出另在 `<userData>/export-queue/output-leases/<SHA-256>.lock/owner.json`
-記錄輸出路徑所有權。同一路徑在 `queued`／`running`／`stopping`／`missing-source`
-任一狀態已被保留時，新工作與重試都會回報 `OUTPUT_BUSY`，不會等前一份結束後再以
-`-y` 覆寫。每個執行中的工作由獨立 watchdog 持有 ffmpeg；正常停止會先等 ffmpeg
-真正關閉，才刪半成品並以 owner token 釋放 lease。若主程序被工作管理員強制終止，
-watchdog 會由 IPC disconnect 進入同一套清理；Windows 若連 watchdog 一起被終止，
-下次啟動會在還原工作 JSON **之前**復原殘留 lease。
-
-啟動復原只透過 owner 的 token pipe 確認仍存活的 watchdog；pipe 不存在時視為 stale，
-只刪半成品並以正確 token 釋放 lease，**絕不依持久化 PID 直接 taskkill**，避免 PID
-被 Windows 重用後誤殺其他程序。`owner.json` 損壞、token 不符或半成品刪除失敗時一律
-fail closed：保留 lease 並記錄警告，不能在身份或清理結果不明時放行同一路徑。
-
-主視窗與監控視窗的關閉語意不同：監控視窗存在時關主視窗只會隱藏主視窗，
-可用 `app:showMainWindow` 原樣叫回；接著再關監控視窗才會真正退出程式。判斷使用
-明確的 `_mainHiddenForQueue` 旗標，不可用 `BrowserWindow.isVisible()` 代替，因為
-Windows 最小化時它也可能回傳 `false`。
-
-> **新增 IPC 通道時**：① `preload.js` 加 `ipcRenderer.invoke`；② `main.js` 加 `ipcMain.handle`；③ 更新此表。
->
-> **路徑安全**：主行程唯一權威是 `FileAuthority`，而不是「看過路徑就授權」的資料夾白名單。
-> 原生對話框、OS 開檔、preload 驗證的真實拖放 `File` 與 app 自己持久化的 queue snapshot 才能授予
-> capability。read、project/autosave write、delivery write、screenshot write、queue log shell-open 與
-> delivery reveal 各自分離；新增 IPC 時必須選對能力，不能用 `fs:fileURL`／`stat`／任意 payload 當升權入口。
-
----
-
-## 3. 開發環境
-
-### 前置需求
-
-- Node.js 18+（`npm install` 安裝 Vite / Electron 相依）
-- ffmpeg / ffprobe（MXF / 多音軌功能）：Windows 發版機使用 `electron/ffmpeg/*.exe`；
-  Apple Silicon 由 `npm run native:prepare:mac` 準備 `electron/ffmpeg/darwin-arm64/`
-- mpv（Windows 秒開功能）：放在 `electron/mpv/`；macOS 第一版不啟用 Windows 專用嵌入
-
-### 開發流程
-
-```bash
-# 方式一：開發模式（熱更新 + DevTools）
-npm run dev               # 終端機 1：Vite dev server → http://localhost:8777
-npm run electron:dev      # 終端機 2：Electron 載入 localhost:8777
-
-# 方式二：build 後啟動（接近正式使用者體驗）
-npm run electron          # build → dist/index.html → Electron
-```
-
-`--dev` 旗標由 `process.argv.includes('--dev')` 偵測，`electron:dev` 自動帶入。
-
-### 安全性設定（`main.js` createWindow）
+主視窗設定：
 
 ```js
-webPreferences: {
-  preload: 'electron/preload.js',
-  contextIsolation: true,   // preload 與 renderer 完全隔離
-  nodeIntegration: false,   // renderer 不可直接用 Node API
-  webSecurity: false        // 允許 file:// 本地媒體讀取（本機信任程式）
-}
+contextIsolation: true
+nodeIntegration: false
+webSecurity: true
 ```
 
-> `webSecurity: false` 僅在桌面版使用；網頁版維持瀏覽器預設值（安全）。
+Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案。
 
----
+### 拖放
 
-## 4. ffmpeg / ffprobe 整合
+- Preload 用 `webUtils.getPathForFile()` 從真實 File 取得路徑。
+- 一般媒體交給 `fs:authorizeDroppedFile`，只授權精確來源。
+- `.subtool`／`.json` 不走一般檔案授權，直接進 `trusted-project-intake`。
+- Renderer 自己提供的 path／base64 不可把能力擴張到其他檔案。
 
-### 路徑偵測順序（`native-tooling.js`）
+### 專案
 
-| 順位 | Windows | Apple Silicon macOS |
-|------|---------|---------------------|
-| 1 | `electron/ffmpeg/<tool>.exe` | `electron/ffmpeg/darwin-arm64/<tool>` |
-| 2 | `resources/app.asar.unpacked/electron/ffmpeg/<tool>.exe` | `resources/app.asar.unpacked/electron/ffmpeg/darwin-arm64/<tool>` |
-| 3 | `FFMPEG_PATH`／`FFPROBE_PATH` | 同左 |
-| 4 | PATH 中的 `ffmpeg`／`ffprobe` | 同左 |
-| 5 | `C:\Program Files\FFMPEG\bin\`、`C:\ffmpeg\bin\` | `/opt/homebrew/bin`、`/usr/local/bin`、`/opt/local/bin`、`~/.local/bin` |
+- 開啟專案：main 先讀可信 bytes，再授權專案內已宣告媒體。
+- Save As：每個 media path 必須已具 read capability。
+- 寫入成功後才更新 current project 與 relink 狀態。
+- 最近開啟清單只接受索引，不讓 renderer 回傳任意路徑。
 
-每個候選都真的執行 `-version`；`app:status` 回傳最後採用路徑及每次探測的 status／signal／
-error code，不能再只靠「檔案存在」推定可執行。
+### 本機資源 URL
 
-`electron/ffmpeg/` 與 `electron/mpv/` 刻意不進版控。Windows 發版機仍需手動放好 gyan
-full_build 與 mpv（約 538 MB；見 §7）。Apple Silicon 則由固定版本的 `ffmpeg-static` 與
-`@derhuerst/ffprobe-static` 在 **darwin/arm64 本機**下載正確架構，複製相鄰的 LICENSE／
-README，並實際探測 `ass`、`libx264`、`prores_ks`、`pcm_s24le`、`mxf` 後才允許打包。
+`file://` 不作為一般資源通道。`local-resource.js` 發出不透明 `subtool-local:` URL，並在每次請求時核對：
 
-`scripts/release/verify-native-binaries.js` 是 Windows/macOS 共用的唯一封裝需求檢查器：Windows 要求
-ffmpeg.exe、ffprobe.exe、mpv.exe、d3dcompiler_43.dll；darwin-arm64 只要求 ffmpeg/ffprobe，
-並額外檢查 Unix executable bit。Windows `predist` 明確帶入 `win32/x64`，`dist:mac:test`
-明確帶入 `darwin/arm64`；
-`tests/verifyNativeBinaries.test.js` 真的餵缺檔與殘檔情境，不只比對 script 字串。
+- capability token
+- 精確資源
+- 允許的 range
+- 呼叫視窗
+- 失效與釋放狀態
 
-### 硬體視訊編碼器偵測
+不要用關閉 `webSecurity` 解決本機字型或媒體載入。
 
-Windows 啟動時依序測試 `h264_nvenc` → `h264_qsv` → `h264_amf`；macOS 測試
-`h264_videotoolbox`。全部失敗才用 `libx264`。結果存入 `VENC`。
-可在 DevTools console 執行 `await window.subtool.status()` 查看 `venc` 欄位。
+## 3. Preload／IPC 介面
 
-### 轉檔輸出規格
+完整可呼叫 API 以 `electron/preload.js` 為唯一真相來源；文件只列分組，避免手抄每個函式後漂移。
 
-- **Proxy 影片**：720p、yuv420p；libx264 CRF 26、NVENC cq 26、QSV global_quality 26、
-  VideoToolbox 4 Mbps realtime
-- **聲道音訊**：AAC 128kbps `.m4a`
-- **波形用音訊**：8kHz mono 16-bit PCM WAV
-- **語音辨識暫存**：已完成來源聲道混音的 16kHz mono PCM16 WAV → libmp3lame 64 kbps MP3；只在 OpenAI／Groq 本次請求期間存在，並非播放、波形、專案 bus 或交付輸入
+| `window.subtool` 分組 | 用途 |
+|---|---|
+| `status`、`minimizeApp`、`closeApp` | App 狀態與生命週期 |
+| `openMedia`、`openAudio`、`openProject` | 原生選檔 |
+| `saveProject`、`importSub`、`exportSub` | 專案與字幕對話框 |
+| `recentProjects*` | 最近專案 |
+| `authorizeDroppedFile`、`openDroppedProject` | 拖放准入 |
+| `fileURL`、`stat`、`listDir`、`readB64` | 受權檔案能力 |
+| `probe`、`ingest`、`streamIngest` | 媒體 probe／ingest |
+| `makeProxy`、`extractAudio`、`waveAudio` | 預覽快取 |
+| `compressSpeechAudio` | 雲端辨識前的受限音訊壓縮 |
+| `exportVideo`、`stopExport` | 提交／停止交付 |
+| `openQueueMonitor`、`onQueueStatus` | 佇列監控 |
+| `config*`、`keys*` | 偏好與快捷鍵 |
+| `mpv.*` | Windows mpv adapter |
 
-> 上列三者皆為**預覽／波形快取**，絕不可作為匯出輸入。影片匯出重讀母素材；MP4 對經混音／編組後的交付 stream 重新編 AAC（Mono 192k／Stereo 320k／5.1 640k），ProRes 與 WAV 使用 24-bit PCM。若母素材也已作為影片 input，音訊 filtergraph 必須重用該 input，而非另開同檔造成雙重磁碟讀取。
+Preload 原則：
 
-### 交付匯出的崩潰隔離
+- 所有 path、ArrayBuffer、request id 與選項先做型別／大小檢查。
+- Renderer callback 不直接取得 Electron event。
+- 事件訂閱需要清理舊 listener，避免重複通知。
+- 新 IPC 要同時補 main 白名單、preload guard、測試與本文件分組。
 
-MP4／ProRes／WAV 的佇列工作不由 Electron main 直接持有 ffmpeg，而是由
-`export-watchdog.js` 啟動並監護；進度與 stderr 經 IPC 回傳 main。Proxy、ingest、
-波形等可重建的短期快取仍由 main 直接 spawn，以免把持久化工作語意套到快取流程。
-兩條 adapter 都由 `ffmpeg-execution.js` 統一收斂 parser、progress、log、error 與 outcome；
-呼叫端不可自行複製這份協定。
-watchdog 必須在成功取得輸出 lease 後才可啟動 ffmpeg；結束碼非 0、使用者停止、
-main IPC 中斷時都必須先確認 ffmpeg 已關閉，再處理半成品。刪除失敗時保留 lease，
-讓後續工作無法靜默覆寫尚未清乾淨的路徑。
+獨立視窗：
 
-### 媒體快取
+- `queue-preload.js` 只暴露 queue monitor 需要的命令。
+- `compare-preload.js` 只暴露字幕比較同步命令。
+- 不要為方便直接重用整份主 preload。
 
-`media-intake-runtime.js` 是快取 identity、metadata、讀寫／清理與 HTTP 串流 job registry
-的唯一 owner；`main.js` 的 cache／ingest IPC 只做 FileAuthority 與 session 組裝。
+## 4. ffmpeg／ffprobe 整合
 
-快取鍵 = `SHA-1(basename + size + 前 1MB 內容)`（不含修改時間，跨電腦可用）
+### Native tool 解析
 
-候選目錄（依序讀取第一個有效的、寫入第一個可寫的）：
-1. 影片所在目錄旁的 `.subtool_Cache/<key>/`
-2. `<userData>/mediacache/<key>/`（`CACHE` = `app.getPath('userData')`；Windows 通常在
-   `%APPDATA%\sub-tool`，macOS 通常在 `~/Library/Application Support/sub-tool`）
+`native-tooling.js` 依目前平台與架構選擇封裝工具；開發環境可回退到受控的專案／環境位置。正式安裝包不可依賴使用者 PATH。
 
-暫存路徑：`path.join(os.tmpdir(), 'subtool_cache')`（程式退出時清除）。
+Windows 封裝需要：
 
----
+- `electron/ffmpeg/ffmpeg.exe`
+- `electron/ffmpeg/ffprobe.exe`
 
-## 5. mpv 嵌入整合（Windows-only）
+macOS arm64 封裝需要：
 
-Windows 的 mpv 以**子視窗**方式嵌入：`mpv-host.js` 啟動無框 BrowserWindow 宿主
-並用 `--wid=<HWND>` 蓋在播放區域上方。這條實作依賴 Windows HWND、D3D compiler 與
-`\\.\pipe\...` named pipe，不能只換一支 macOS mpv binary 就宣稱跨平台。
+- `electron/ffmpeg/darwin-arm64/ffmpeg`
+- `electron/ffmpeg/darwin-arm64/ffprobe`
 
-Apple Silicon 第一版由 `mpvEmbeddingSupported('darwin')` 明確回傳 false：`mpv:detect` 回報
-`supported:false, available:false`，`mpv:launch` 也會 fail closed。renderer 會走現有的
-ffmpeg 單次 ingest → proxy／逐聲道快取 → HTML/WebCodecs 預覽；這條路徑較慢，但不會執行
-未驗證的 Windows 視窗控制碼。未來若要做 macOS mpv，必須另行設計原生視窗嵌入與 IPC，
-不能移除這個平台閘門當成完成。
+`scripts/release/verify-native-binaries.js` 在封裝前驗證存在、平台、架構與能力。
 
-### 主要行為
+### 媒體 intake
 
-- `mpv:launch`：Windows 啟動 mpv IPC socket（`\\.\pipe\subtool-mpv-<token>`），建立連線後送播放指令；child process、pipe、宿主與 guide 視窗均由 `mpv-host.js` 收斂管理
-- `mpv:event` 推播：`time-pos`、`playback-restart`、`duration`、`pause`、`eof-reached`。內附 mpv 0.41 沒有可觀測的 `video-pts`；`time-pos` 在播放中每畫格更新，但 seek 呈現完成仍須和 `playback-restart` 配對
-- `mpv:present`：每次只保留一個 host 端等待者；command ack、容差內 per-frame `time-pos` 與同一請求的 `playback-restart` 三者都成立才回報實際畫格，取消或換目標會讓舊等待者失效
-- `mpv:direction`：將 JKL 倒帶切成 mpv 原生 `backward`。資格與片段邊界由 renderer 的 `Media.supportsNativeReverse()` 決定；Proxy 就緒時先以 `loadfile` 在同一來源時間切到 0.5 秒 keyframe 的 preview Proxy，停止後載回母素材。倒播時音訊靜音，整段倒播持續監看 per-frame `time-pos` 是否下降，停住即改走時間軸 fallback。任何停止／正播入口都要恢復 `forward`，包含尚未完成的 backward IPC 晚到情況
-- mpv 啟動固定開 `cache=yes`、video decode queue 與前／後 demux cache；進入 backward 前只暫時把 `hwdec` 切成 `no`，恢復 forward 後切回 `auto`。依據是 [mpv 官方 backward playback 調校說明](https://mpv.io/manual/master/#options-play-direction)；硬體解碼在反向緩衝下不可靠，正播則不應永久失去硬解
-- `mpv:subSet`：接收 base64 ASS 字串，寫入暫存 `.ass` 後用 `sub-reload` 指令更新
-- `mpv:setBounds`：更新 mpv host 視窗位置；主視窗移動/縮放時自動呼叫
-- `mpv:setImageGuide`：僅把圖片視覺疊層交給透明 guide；永久穿透與單一 DOM 互動責任的完整約束見 [`技術架構說明.md` §0.9](技術架構說明.md#09-靜態圖片也是時間軸片段不是播放器的一格畫面)
-- `mpv:setTimecodeWatermark`：原生 mpv 模式由 guide 顯示監看 TC；一般 HTML 預覽仍由 renderer DOM 顯示。兩者都從 `Media.displayTime()` 取得同一個時碼來源。
+`media-intake-runtime.js` 管理：
 
-### 注意事項
+1. ffprobe metadata
+2. 來源指紋
+3. 720p 預覽 Proxy
+4. 逐聲道音訊快取
+5. 低取樣波形
+6. 短 GOP 倒帶 Proxy
+7. 串流 lease 與清理
 
-- mpv host 與 `mainWin` 是不同的 BrowserWindow；`mainWin.minimize()` 時由 `mpvHost.hideForParent()` 一起隱藏宿主與 guide
-- `safeSend(wc, ch, data)`：視窗關閉後 IPC 回呼可能仍在執行，必須先確認 `!wc.isDestroyed()`
-- Windows mpv 版本需支援 `--input-ipc-server`；偵測失敗時 fallback 到 ffmpeg 單次轉檔
-- Windows mpv 還需支援 `play-direction`。正式發版前以隨附的 `electron/mpv/mpv.exe --list-properties` 確認，並用實際 mpv 素材驗證倒播時間連續下降、停止後回到正向；不可只驗 IPC 有送出
+快取只供預覽。交付 runner 會拒絕把 `.subtool_Cache`、Proxy 或 `ch_*.m4a` 當母素材。
 
----
+### 交付
 
-## 6. 打包與發布
+Renderer 提交凍結工作；`delivery-runner.js`：
+
+1. 核對檔案能力與輸出 lease
+2. probe 母素材
+3. 由 `export-plan.js`／pipeline builder 建立 argv
+4. 啟動 watchdog 與 ffmpeg
+5. 解析 progress
+6. probe 成品內容
+7. 提交完成／錯誤
+8. 清理 ASS、半成品與 lease
+
+Windows filtergraph 路徑要跳脫兩層；ASS Fontname 必須是字型檔內部 family。
+
+### Encoder
+
+可用時優先硬體 H.264 encoder；實際採用者要出現在狀態與完成訊息。不能只因命令沒有報錯就宣稱使用 GPU。
+
+## 5. mpv 嵌入整合（Windows）
+
+mpv 不是 DOM 元素，而是獨立的 OS 子視窗。`mpv-host.js` 負責：
+
+- 啟動 `mpv.exe` 與 named pipe JSON IPC
+- 設定 bounds、可見度與 always-on-top 關係
+- 載入母素材或倒帶 Proxy
+- play、pause、rate、direction、mute
+- 精準 `time-pos` setter
+- 監聽 `time-pos`、`playback-restart` 與 property change
+- 載入 live ASS
+- 更新透明 guide 與監看 TC
+
+### 精準呈現
+
+`mpv:present` 接受來源時間與 tolerance。播放中的完成證據需要目標 `time-pos` 與同一請求的 `playback-restart` 配對；暫停精準定位則以 command ack 加命中目標的 `time-pos` 為準。
+
+逐格使用 `time-pos` setter，不使用連續 `seek absolute`。後者會排隊等待舊畫面，快速左右鍵時容易讓最新目標多等數百毫秒。
+
+只保留最新 pending 呈現；舊 request 完成後不可回寫播放點。
+
+### Guide 與互動
+
+透明 guide 視窗永久 `setIgnoreMouseEvents(true, { forward:true })`。字幕、圖片與播放點互動由主 renderer 的 DOM layer 處理。
+
+mpv 蓋住 HTML 時，`_syncMpvPanel()` 依操作需要暫時隱藏或讓 WebCodecs 接管。不要新增第二套 guide pointer 命令。
+
+### macOS
+
+目前 Apple Silicon 測試包不含 mpv；`mpv.detect()` 必須回傳不支援，並自動使用 ffmpeg ingest／HTML／WebCodecs 路徑。
+
+## 6. 匯出佇列
+
+工作狀態：
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued
+  queued --> running
+  running --> completed
+  running --> stopping
+  stopping --> paused
+  running --> failed
+  failed --> queued: retry
+  queued --> missing_source
+  missing_source --> queued: relink
+```
+
+主要保證：
+
+- 一個工作使用送出當下的凍結快照。
+- 同一路徑同時只允許一個 live job。
+- `output-leases/*.lock/owner.json` 防止多程序寫同一檔案。
+- watchdog 在 owner 崩潰時停止 ffmpeg。
+- 重啟先復原 stale work、刪半成品、釋放 lease，再載入佇列。
+- 完成紀錄保存在 `history.json`，重開不重跑。
+- 有執行中工作時關閉主視窗，監控視窗接手；真正退出前再次確認。
+
+`queue-store.js` 擁有 live state 持久化，`queue-history.js` 擁有完成紀錄。UI 不是真相來源。
+
+## 7. 打包與發布
+
+Windows：
 
 ```bash
-npm run dist          # 明確鎖定 Windows x64：NSIS Setup
-npm run dist:mac:test # Apple Silicon：unsigned 本機測試 DMG + ZIP
+npm run dist
 ```
 
-Windows 輸出 `release/SUB Tool Setup <版本>.exe`（NSIS）；Apple Silicon 輸出
-`release/SUB Tool-<版本>-mac-arm64.dmg` 與 `.zip`，unpacked App 位於
-`release/mac-arm64/SUB Tool.app`。兩個平台都關聯 `.subtool`。
+`package.json` 重要設定：
 
-`dist:mac:test` 明確設為 unsigned 並關閉 hardened runtime，只供擁有原始碼的人在自己的 Mac
-驗證功能；不可上傳成正式 Release。第一階段不提供正式 Mac 發布指令；之後必須在同一個已驗收
-commit 上另行加入 Developer ID、hardened runtime 與 Apple notarization 的 fail-closed 流程，
-並驗證 DMG 安裝位置、Finder 檔案關聯、啟動版本及 Gatekeeper。
-共通正式發布流程與人工驗收清單見 [`開發與驗證.md`](開發與驗證.md)。
+- `asarUnpack`：mpv、ffmpeg、watchdog、lease
+- `extraResources`：`font/`
+- `perMachine: true`
+- 桌面與開始功能表捷徑
+- `.subtool` file association
 
-**`package.json` electron-builder 設定**（實際值）：
-```json
-{
-  "win":  {
-    "target": "nsis",
-    "files": [
-      "dist/**/*",
-      { "from": "electron", "to": "electron", "filter": ["**/*", "!ffmpeg/**", "!mpv/**"] },
-      { "from": "electron/ffmpeg", "to": "electron/ffmpeg", "filter": ["ffmpeg.exe", "ffprobe.exe"] },
-      { "from": "electron/mpv", "to": "electron/mpv", "filter": ["mpv.exe", "d3dcompiler_43.dll"] }
-    ]
-  },
-  "mac":  {
-    "target": [
-      { "target": "dmg", "arch": ["arm64"] },
-      { "target": "zip", "arch": ["arm64"] }
-    ],
-    "files": [
-      "dist/**/*",
-      { "from": "electron", "to": "electron", "filter": ["**/*", "!ffmpeg/**", "!mpv/**"] },
-      { "from": "electron/ffmpeg/darwin-arm64", "to": "electron/ffmpeg/darwin-arm64", "filter": ["**/*"] }
-    ]
-  },
-  "nsis": { "oneClick": false, "perMachine": true, "allowToChangeInstallationDirectory": true,
-            "createDesktopShortcut": true, "createStartMenuShortcut": true },
-  "fileAssociations": [{ "ext": "subtool", "role": "Editor" }],
-  "directories": { "output": "release" },
-  "extraResources":[{ "from": "font", "to": "font", "filter": ["**/*"] }],
-  "asarUnpack":    [
-    "electron/mpv/**",
-    "electron/ffmpeg/**",
-    "electron/export-watchdog.js",
-    "electron/export-lease.js"
-  ]
-}
+正式驗收：
+
+1. `npm run release:verify-source`
+2. `verify-native-binaries.js`
+3. 產生 Setup
+4. 正常安裝到 Program Files
+5. `npm run release:verify-install`
+6. 驗證 App 內版本、捷徑、解除安裝與 file association
+7. 比對 GitHub asset SHA-256
+
+不要在專案根目錄跑 `asar extract-file`。需要檢查 asar 時，先建立獨立 temp 目錄，在該目錄解出並核對。
+
+Apple Silicon：
+
+```bash
+npm run dist:mac:test
 ```
 
-- `asarUnpack` 確保各平台 ffmpeg、Windows mpv 與獨立啟動的 export watchdog／lease 模組不被
-  asar 封裝，可由 `child_process.spawn` 直接執行並在安裝版正確 `require`。
-- Mac 的 platform-specific `files` 先排除整個 `electron/mpv` 與 `electron/ffmpeg`，再只加入
-  `darwin-arm64` 子目錄；因此從 Windows 搬來的忽略檔不會污染 DMG。
-- Windows 也先排除兩個原生工具目錄，再只加入四個 x64 必要檔；因此 Mac 建置留下的
-  `darwin-arm64` 子目錄不會污染 NSIS Setup。
-- **`extraResources` 是字型能不能用的關鍵**：平台 `files` 只收 `dist/` 與 `electron/`，`font/`
-  必須另外用 `extraResources` 送進 `resources/font`。v4.26 少了這一段 → **開發時字型正常、
-   裝起來的 exe 一個字型都沒有**（v4.27.0 修）。`fontsRoot()` 依 dev（專案根）→
-   `resources/font` → 安裝目錄 順序尋找。
-- `nsis.perMachine: true` 讓正式 Setup 以 UAC 安裝到 `C:\Program Files\SUB Tool` 為預設。
-  Setup 會建立真正的系統安裝與捷徑，不能拿 `/D=<workspace>` 當封裝 smoke；完整防呆流程見
-  [`開發與驗證.md` 的「安裝器 smoke 的安全邊界」](開發與驗證.md#安裝器-smoke-的安全邊界)。
-- Windows 換 ffmpeg build 前先讀 §7 與變更紀錄：**BtbN 的 gpl-shared 版會截斷多串流
-  MXF 的音訊**，目前固定用 gyan full_build。Mac static build 雖有能力探針，仍必須拿同一支
-  真實多音軌 MXF 驗證，不能用 `-demuxers` 列得到 `mxf` 當成內容正確。
+unsigned DMG／ZIP 只供內部驗收，不可當正式 Mac Release。
 
----
+## 8. 排查
 
-## 7. 常見問題排查
+| 現象 | 先檢查 |
+|---|---|
+| App 開不起來 | native binaries、`shared/**/*` 是否進包、main console |
+| 找不到 ffmpeg／mpv | `window.subtool.status()`、`mpv.detect()`、封裝路徑 |
+| 媒體每次重轉 | 來源大小／前 1MB 指紋、cache metadata |
+| MXF 畫面黑 | mpv launch／loadfile、Proxy 狀態、視窗 bounds |
+| 左右鍵偶爾沒動 | present tolerance、舊 request 是否覆寫、mpv 是否仍用 seek command |
+| 字幕位置三路不同 | `effStyle()`、PlayResY 高度縮放、ASS alignment |
+| 字型 fallback | 內部 family、fontsdir 雙層跳脫、libass `fontselect` |
+| 圖片框可見但不能拖 | guide 是否誤接滑鼠、`#imageLayer` 是否存在 |
+| 鎖定軌會改掉選取 | pointer seek 與 selection 是否仍分離 |
+| 匯出音訊不對 | 母素材、source→bus、bus→stream、ffprobe 成品 |
+| 同路徑不能重試 | live job、stopping 狀態、stale output lease |
+| 關閉後留下半成品 | watchdog log、owner.json、啟動復原 |
+| 按鈕沒反應 | 是否誤用 `window.prompt()` |
+| 本機資源被擋 | 不要關 webSecurity；檢查 `subtool-local:` capability |
 
-| 症狀 | 檢查項目 |
-|------|----------|
-| 點擊原生對話框（開啟影音/專案等）時整個程式卡死 40 秒才跳出視窗 | 全球已知 Electron 結合 Win11 的 OS 級 Bug。主因是預設路徑為網路磁碟時，若 Win11 的「公用網路」或「網路探索」因尋找幽靈設備而 Timeout，會鎖死對話框的 COM 執行緒並凍結整個 App 畫面。**唯一解法**：進入 Windows「進階共用設定」，將目前網卡的**「網路探索」關閉**。原生軟體因使用多執行緒能避開此問題，但 Electron 受限架構無法倖免。 |
-| 主視窗無法啟動 | 確認 `npm install` 完成；檢查 `electron/main.js` Node 相依 |
-| 前端無法呼叫 `window.subtool` | `preload.js` 是否正確載入；`contextBridge.exposeInMainWorld` 是否成功 |
-| ffmpeg 功能無效 | `await window.subtool.status()` → 看 `ffmpegPath` 與 `ffmpegDetection.attempts`；安裝版應先命中 `app.asar.unpacked`，不是只確認 PATH |
-| 影片黑畫面（4:2:2）| ffmpeg 未加 `-vf format=yuv420p`；proxy 輸出格式不相容 |
-| mpv 無法啟動 | 只適用 Windows：確認內建 mpv 與 `d3dcompiler_43.dll`；查看 `%TEMP%\subtool_cache\mpv-last.log` 與 `subtool-mpv-<token>` named pipe 是否建立。macOS 的 `supported:false` 是第一版預期行為 |
-| GPU 編碼器不可用 | Windows 確認顯示卡驅動；Mac 確認 static ffmpeg 列出且能實跑 `h264_videotoolbox`；`status()` 回傳 `libx264` 表示已 fallback |
-| Mac App 被 Gatekeeper 擋下 | `dist:mac:test` 是 unsigned，只能對自己剛建出的可信產物依 Apple「隱私權與安全性 → 仍要打開」放行；公開版本必須 Developer ID 簽署與 notarize |
-| Mac DMG 異常巨大或含 `.exe` | 檢查 `build.mac.files` 是否仍先排除 `electron/ffmpeg/**`、`electron/mpv/**` 再只加入 `darwin-arm64`；解開 App 實看內容，不能只看 build 成功 |
-| Mac 選完輸出目錄卻被 fileAuthority 拒絕 | 檢查 renderer 送出的 `outPath` 是否把 POSIX 目錄組成 `Output\\file.mp4`。`delivery-list.js` 必須依原生選擇器回傳格式保留 `/` 或 `\\`，不能固定使用 Windows 分隔符；POSIX 根目錄與 Windows 磁碟根目錄都有單元測試 |
-| 快取未命中（每次都重新轉） | 來源檔前 1MB 或大小有變動；可手動刪除 `.subtool_Cache` 強制重建 |
-| `task-progress` 無回報 | 呼叫端是否把 progress target 傳入 `ffmpeg-execution`／`media-intake-runtime` session；`safeSend` 是否因視窗已銷毀而跳過 |
-| **完全無法匯出影片**（filterchain 解析失敗） | `fontsdir=` 的 Windows 磁碟機冒號要跳脫**兩層**（`C\\:/`）。單反斜線會讓 ffmpeg 把 `:` 當選項分隔符。注意手動在 shell 跑也會撞到同一個錯，很容易誤判成「shell 吃掉跳脫字元」——用 `spawn`（無 shell 介入）重測才能確認 |
-| 匯出的字幕**字型不對**（變成微軟正黑體） | ASS 的 Fontname 必須是**字型檔內部家族名**（`fontsList()` 回的 `family`），不是資料夾名。libass 配不到會**靜默**退回，沒有錯誤訊息——查 libass 的 `fontselect:` 輸出，退回旗標 1 ＝ 沒配到 |
-| 安裝版沒有任何字型可選 | `package.json` 少了 `extraResources`（見 §6） |
-| 使用者說某個按鈕「按了沒反應」 | 是不是用到了 `window.prompt()`？**Electron 停用了它**，回傳永遠是 null，靜默失敗。改用 `ui.js` 的 `promptModal()` |
-| HTML 疊層（字幕拖曳、安全框）在 MXF 模式下看不到 / 點不到 | mpv 是 **OS 層 always-on-top 子視窗**，蓋在所有 HTML 之上；需要 `mpv.show(false)` 讓位（`_syncMpvPanel()`） |
-| 圖片在 mpv 預覽看得到框但不能拖曳，或拖曳時字幕／安全框消失 | guide 視窗**刻意永久穿透**，互動一律由主視窗的 `#imageLayer` DOM 處理（見 [`技術架構說明.md` §0.9](技術架構說明.md#09-靜態圖片也是時間軸片段不是播放器的一格畫面)）。確認 `mpv-host.js` 仍固定 `setIgnoreMouseEvents(true, { forward: true })`，以及 `#imageLayer` 仍為**無條件建立**；不可再建 guide pointer IPC。 |
-| 圖片匯出只顯示第一格或後段變黑 | 檢查 renderer 是否保留 `clip.type === 'image'`；主程序必須對該輸入加 `-loop 1 -framerate <project fps>`，並把每個 clip 的 `scale/posX/posY` 傳進 filtergraph。 |
-| TC 監看在 mpv 模式不顯示 | 先確認播放器 TC 開關為開，再檢查透明 guide 是否建立；這是監看 overlay，與匯出視窗的「壓入時間碼浮水印」為兩個獨立開關。 |
-| 解除影音顯示無法建立獨立音訊 | 不要以 Chromium `<audio>` 直接讀 MXF／部分 MOV 容器；確認 `ffmpeg:ingest` 有產出逐聲道 `.m4a` 快取，並確認還原資料保留 `preferCache:true` |
-| 匯出 MP4 的音訊 bitrate 看似偏低 | 先看匯出完成狀態的「音訊 AAC 實測」。確認使用新版安裝檔；該值是輸出 AAC，而不是母素材原始 bitrate。若需要無損音訊，改用 ProRes（24-bit PCM）或 WAV。 |
-| 同一路徑無法再加入或重試匯出 | 先看監控視窗是否仍有 `queued`／`running`／`stopping`／`missing-source` 工作保留該路徑。若 `<userData>/export-queue/output-leases/` 仍有鎖，先完整重啟讓啟動復原處理；不要直接刪 `owner.json` 或依其中 PID 手動 taskkill。 |
-| 強制關閉後留下半成品或輸出鎖 | 重啟一次，確認啟動復原會在載入佇列前刪除 stale 半成品並釋放 lease。若仍保留，查看終端機的 `[Export watchdog]` 警告；通常代表 `owner.json` 損壞或檔案被其他程式占用，系統刻意 fail closed。 |
-
----
-
-## 8. 變更紀錄
-
-各版本詳細變更請見 [`版本變更紀錄.md`](版本變更紀錄.md)。
-
-每次修改 IPC 通道或架構後，請同步更新本文件第 2 節通道列表。
+問題回報至少附 main log、renderer console、素材 metadata、工作 id、輸出路徑與可重現時間碼。

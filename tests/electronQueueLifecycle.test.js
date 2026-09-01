@@ -346,7 +346,9 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       '最小化後主視窗仍存在',
     );
 
-    await mainClient.evaluate('window.subtool.closeApp(); true');
+    // 先讓 CDP 回覆，再關閉承載 CDP 的 renderer；否則高負載時 Page 會先銷毀，
+    // Runtime.evaluate 永遠收不到結果，測試便誤判為產品沒有退出。
+    await mainClient.evaluate('setTimeout(() => window.subtool.closeApp(), 0); true');
     await waitForExit(app);
     mainClient.close();
     queueClient.close();
