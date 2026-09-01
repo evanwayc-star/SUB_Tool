@@ -32,6 +32,10 @@ describe('GitHub Actions 平台分流', () => {
     expect(workflow).not.toContain('actions/setup-node@v4');
     expect(pkg.scripts['test:ci:portable']).toBe('node scripts/ci/run-test-group.mjs portable');
     expect(pkg.scripts['test:ci:windows']).toBe('node scripts/ci/run-test-group.mjs windows');
+
+    const windowsJob = workflow.slice(workflow.indexOf('  windows-desktop:'));
+    expect(windowsJob.indexOf('npm run build')).toBeGreaterThan(-1);
+    expect(windowsJob.indexOf('npm run build')).toBeLessThan(windowsJob.indexOf('npm run test:ci:windows'));
   });
 
   it('所有直接啟動 Electron 的測試都明確歸入 Windows 群組', () => {
