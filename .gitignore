@@ -8,7 +8,8 @@ test-media/
 
 # 第三方 agent skill 的安裝結果，性質同 node_modules/——由工具裝到本機，不是本專案的原始碼。
 # 曾有 112 個檔案被 git add -A 掃進版控（見 v5.0.0 稽核第 6 批）。
-.agents/skills/
+.agents/
+skills-lock.json
 
 # 文件插圖工具的專案偏好；只影響本機產圖流程，不屬於產品原始碼。
 .baoyu-skills/
