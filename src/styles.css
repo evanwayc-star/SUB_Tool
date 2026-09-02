@@ -206,8 +206,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);
 .safe-frame.on{display:block}
 /* 100% 滿版安全框邊界：使用亮藍色 (#00A3FF) 來與 90% (白) 區分，確保在預覽畫面邊緣能清楚辨識 */
 .sf-100 { position:absolute; inset:0; border:2px solid #00A3FF; box-sizing:border-box; pointer-events:none; }
-.sf-90 { position:absolute; left:10%; top:10%; right:10%; bottom:10%; border:1px solid rgba(255,255,255,.55); pointer-events:none; }
-.sf-80 { position:absolute; left:20%; top:20%; right:20%; bottom:20%; border:2px dashed rgba(255,220,90,.7); pointer-events:none; }
+.sf-90 { position:absolute; left:5%; top:5%; right:5%; bottom:5%; border:1px solid rgba(255,255,255,.55); pointer-events:none; }
+.sf-80 { position:absolute; left:10%; top:10%; right:10%; bottom:10%; border:2px dashed rgba(255,220,90,.7); pointer-events:none; }
 .sf-cx { position:absolute; left:50%; top:0; bottom:0; width:1px; background:rgba(255,255,255,.35); transform:translateX(-50%); pointer-events:none; }
 .sf-cy { position:absolute; top:50%; left:0; right:0; height:1px; background:rgba(255,255,255,.35); transform:translateY(-50%); pointer-events:none; }
 #safeFrameBtn.active{background:var(--accent);border-color:var(--accent);color:#0d0d0d}

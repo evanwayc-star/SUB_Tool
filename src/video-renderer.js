@@ -65,10 +65,10 @@ export function refreshMpvSubs(revealAfter=false, live=false){
         // 以 1920x1080 畫布為基準產生四邊矩形邊框
         // 100%
         sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFA300&\\3a&H00&\\bord2}m 2 2 l 1918 2 l 1918 1078 l 2 1078`);
-        // 90% 白線 (Y = 108 ~ 972，底線為 90% = 972)
-        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFFFFF&\\3a&H77&\\bord1}m 192 108 l 1728 108 l 1728 972 l 192 972`);
-        // 80% 黃線 (Y = 216 ~ 864，底線為 80% = 864)
-        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&H5ADCF0&\\3a&H55&\\bord2}m 384 216 l 1536 216 l 1536 864 l 384 864`);
+        // 90%
+        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFFFFF&\\3a&H77&\\bord1}m 96 54 l 1824 54 l 1824 1026 l 96 1026`);
+        // 80%
+        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&H5ADCF0&\\3a&H55&\\bord2}m 192 108 l 1728 108 l 1728 972 l 192 972`);
         // 中心十字線 (垂直、水平)
         sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(960,0)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m -1 0 l 1 0 l 1 1080 l -1 1080`);
         sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,540)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m 0 -1 l 1920 -1 l 1920 1 l 0 1`);
