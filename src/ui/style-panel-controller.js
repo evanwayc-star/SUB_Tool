@@ -345,7 +345,15 @@ let _tsSetTimer = null;
     el.addEventListener('input',e=>tsSet(k, clamp(+e.target.value, lo, hi)));
     el.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} }); };
   const tsToggle=(id,k)=>{ const el=$(id); if(!el)return;
-    el.addEventListener('click',()=>{ const t=styleTarget(); if(!t)return; tsSet(k, !effStyle(t.cue, t.trk)[k]); }); };
+    el.addEventListener('click',()=>{
+      const t=styleTarget(); if(!t)return;
+      const cur=effStyle(t.cue, t.trk);
+      const next=!cur[k];
+      tsSet(k, next);
+      if(k==='bgBox' && next && (cur.bgAlpha == null || cur.bgAlpha === 0.3)){
+        tsSet('bgAlpha', 0.5);
+      }
+    }); };
   tsNum('tsOutline','outline',0,10); tsNum('tsShadow','shadow',0,10);
   tsNum('tsAngle','angle',-180,180); // 旋轉角度（度，順時針為正；繞錨點）
   tsNum('tsSpacing','letterSpacing',0,100); tsNum('tsLineSp','lineSpacing',1,100);

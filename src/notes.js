@@ -42,24 +42,42 @@ function _refreshNoteSelectionUI(){
     r.classList.toggle('nt-selected',_selectedNoteIds.has(id));
   });
 }
+function findNoteAtTime(t, fps = State.fps || 24){
+  const W = 0.5 / fps;
+  let best = null, bd = Infinity;
+  for(const n of State.notes){
+    const d = Math.abs(n.time - t);
+    if(d <= W && d < bd){ bd = d; best = n; }
+  }
+  return best;
+}
+
 function updateNoteActive(t){
-  const W=0.5/(State.fps||24);
-  let best=null, bd=Infinity;
-  for(const n of State.notes){ const d=Math.abs(n.time-t); if(d<=W&&d<bd){bd=d;best=n;} }
-  setNoteActive(best?.id??null);
+  const best = findNoteAtTime(t);
+  setNoteActive(best?.id ?? null);
 }
 
 /* ===== 備註 ===== */
 function addNote(){
-  const t=Media.displayTime();
-  const n={id:newId(),time:t,text:'',done:false};
-  State.notes.push(n); State.notes.sort((a,b)=>a.time-b.time);
-  _selectedNoteIds.clear(); _selectedNoteIds.add(n.id); _lastSelectedNoteId=n.id;
+  const t = Media.displayTime();
+  const existing = findNoteAtTime(t);
+  if(existing){
+    State.notes = State.notes.filter(x => x.id !== existing.id);
+    _selectedNoteIds.delete(existing.id);
+    if(_activeNoteId === existing.id) _activeNoteId = null;
+    if(_lastSelectedNoteId === existing.id) _lastSelectedNoteId = null;
+    renderNotes(); drawRuler();
+    recordHistory('刪除備註');
+    showToast('已刪除該時間點的備註');
+    return;
+  }
+  const n = { id: newId(), time: t, text: '', done: false };
+  State.notes.push(n); State.notes.sort((a,b) => a.time - b.time);
+  _selectedNoteIds.clear(); _selectedNoteIds.add(n.id); _lastSelectedNoteId = n.id;
   setNoteActive(n.id);
   renderNotes(); drawRuler();
   recordHistory('新增備註');
 }
-
 function clearAllNotes(){
   if(!State.notes.length){ showToast('沒有備註可清除'); return; }
   // Fix #15：改用 openModal，風格一致且在 Electron 中不會被系統 confirm 截取

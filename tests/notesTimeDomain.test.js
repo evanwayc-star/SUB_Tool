@@ -75,4 +75,23 @@ describe('note time domain', () => {
     vi.clearAllTimers();
     vi.useRealTimers();
   });
+
+  it('在已有備註的時間點上再次新增備註，會刪除該時間點的備註', () => {
+    // 第一次：在 t=105 新增備註
+    addNote();
+    expect(State.notes).toHaveLength(1);
+    expect(State.notes[0].time).toBe(105);
+
+    // 第二次：在同一時間點 t=105 再次新增，應刪除備註
+    addNote();
+    expect(State.notes).toHaveLength(0);
+
+    // 第三次：再次執行，應重新新增備註
+    addNote();
+    expect(State.notes).toHaveLength(1);
+    expect(State.notes[0].time).toBe(105);
+
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
 });

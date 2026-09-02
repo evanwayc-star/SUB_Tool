@@ -208,8 +208,8 @@ function escapeHTML(s) {
  */
 function escapeHTMLWithSpaces(s) {
   return escapeHTML(s || '')
-    .replace(/ /g, '<span style="color:#00bfff;font-weight:bold;-webkit-text-stroke:0.5px #00bfff;user-select:none;font-family:monospace;pointer-events:none;">\u2423</span>')
-    .replace(/　/g, '<span style="color:#00bfff;font-weight:bold;user-select:none;font-family:monospace;pointer-events:none;">\u25A1</span>');
+    .replace(/ /g, '<span class="space-mark space-mark-half">\u2423</span>')
+    .replace(/　/g, '<span class="space-mark space-mark-full">\u25A1</span>');
 }
 
 /** 時間碼輸入欄位允許之導覽與編輯鍵清單 */

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { clamp, pad, decodeText, encodeUTF16LE, b64ToBytes, bytesToB64, baseName, escapeHTML, tcKeyAllowed } from '../src/util.js';
+import { clamp, pad, decodeText, encodeUTF16LE, b64ToBytes, bytesToB64, baseName, escapeHTML, escapeHTMLWithSpaces, tcKeyAllowed } from '../src/util.js';
 
 describe('clamp / pad', () => {
   it('clamp 夾在範圍內', () => {
@@ -23,6 +23,11 @@ describe('escapeHTML / baseName', () => {
     expect(baseName('C:\\a\\b\\c.srt')).toBe('c.srt');
     expect(baseName('/a/b.txt')).toBe('b.txt');
     expect(baseName('plain.ass')).toBe('plain.ass');
+  });
+  it('escapeHTMLWithSpaces 將半形空白轉為 space-mark-half 標籤，全形空白轉為 space-mark-full 標籤', () => {
+    const res = escapeHTMLWithSpaces('A B　C');
+    expect(res).toContain('class="space-mark space-mark-half"');
+    expect(res).toContain('class="space-mark space-mark-full"');
   });
 });
 
