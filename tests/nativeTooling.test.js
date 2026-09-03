@@ -86,6 +86,7 @@ describe('原生工具候選路徑', () => {
       '-b:v', '4M',
       '-realtime', '1',
       '-allow_sw', '1',
+      '-bf', '0',
     ]);
     expect(deliveryVideoEncoderArgs('h264_videotoolbox', 8000)).toEqual([
       '-c:v', 'h264_videotoolbox',
@@ -100,7 +101,7 @@ describe('原生工具候選路徑', () => {
   it('抽出參數映射後仍保留既有 Windows 與 libx264 行為', () => {
     expect(previewVideoEncoderArgs('h264_nvenc')).toContain('h264_nvenc');
     expect(previewVideoEncoderArgs('libx264')).toEqual([
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '26',
     ]);
     expect(deliveryVideoEncoderArgs('h264_qsv', 6000)).toEqual([
       '-c:v', 'h264_qsv', '-b:v', '6000k', '-maxrate', '6000k', '-bufsize', '12000k',

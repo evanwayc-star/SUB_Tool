@@ -123,9 +123,20 @@ function jklApply() {
     if (!jklClear()) Media.pause();
     Media.setRate(1);
   } else if (_jklSpeed > 0) {
+    const wasReversing = _reverseSession.isActive?.() ?? false;
     jklClear();
     Media.setRate(_jklSpeed);
-    if (!Media.playing) Media.play();
+    if (!Media.playing) {
+      if (wasReversing) {
+        Promise.resolve(_reverseSession.stopPromise?.()).then(() => {
+          if (_jklSpeed > 0 && !Media.playing) Media.play();
+        }).catch(() => {
+          if (_jklSpeed > 0 && !Media.playing) Media.play();
+        });
+      } else {
+        Media.play();
+      }
+    }
   } else {
     _reverseSession.start(_jklSpeed).catch(() => {});
   }

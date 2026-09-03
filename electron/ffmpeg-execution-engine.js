@@ -129,15 +129,15 @@ function videoEncoderCandidates(platform = process.platform) {
 function previewVideoEncoderArgs(encoderName) {
   switch (encoderName) {
     case 'h264_videotoolbox':
-      return ['-c:v', 'h264_videotoolbox', '-b:v', '4M', '-realtime', '1', '-allow_sw', '1'];
+      return ['-c:v', 'h264_videotoolbox', '-b:v', '4M', '-realtime', '1', '-allow_sw', '1', '-bf', '0'];
     case 'h264_nvenc':
-      return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '26', '-forced-idr', '1'];
+      return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '26', '-forced-idr', '1', '-bf', '0', '-delay', '0'];
     case 'h264_qsv':
-      return ['-c:v', 'h264_qsv', '-global_quality', '26'];
+      return ['-c:v', 'h264_qsv', '-global_quality', '26', '-bf', '0'];
     case 'h264_amf':
-      return ['-c:v', 'h264_amf', '-rc', 'cqp', '-qp_i', '26', '-qp_p', '26'];
+      return ['-c:v', 'h264_amf', '-rc', 'cqp', '-qp_i', '26', '-qp_p', '26', '-bf', '0'];
     default:
-      return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26'];
+      return ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '26'];
   }
 }
 
@@ -268,9 +268,9 @@ function buildIngestArgs({
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
 
     if (isStream) {
-      args.push('-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxyPath);
+      args.push('-flags', '+cgop', '-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxyPath);
     } else {
-      args.push('-force_key_frames', 'expr:gte(t,n_forced*0.5)');
+      args.push('-flags', '+cgop', '-force_key_frames', 'expr:gte(t,n_forced*0.5)');
       args.push('-movflags', '+faststart', proxyPath);
     }
   }

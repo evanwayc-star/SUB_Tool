@@ -172,6 +172,8 @@ export function createReverseShuttleSession({
     return Promise.resolve(mode === 'native');
   }
 
+  let lastStopPromise = null;
+
   function stop() {
     if (!active && mode === 'idle') return false;
     const shouldRestoreDirection = mode === 'native' || mode === 'starting-native';
@@ -180,12 +182,22 @@ export function createReverseShuttleSession({
     clearTimers();
     presentation?.cancel?.('reverse-stopped');
     media?.pause?.();
-    if (shouldRestoreDirection) restoreForwardDirection();
+    lastStopPromise = shouldRestoreDirection
+      ? Promise.resolve(restoreForwardDirection()).catch(() => false)
+      : Promise.resolve(true);
     media?.setRate?.(1);
     media?.setReverseShuttleMuted?.(false);
     mode = 'idle';
     return true;
   }
 
-  return { start, update, stop };
+  function isActive() {
+    return active || mode !== 'idle';
+  }
+
+  function stopPromise() {
+    return lastStopPromise || Promise.resolve(true);
+  }
+
+  return { start, update, stop, isActive, stopPromise };
 }

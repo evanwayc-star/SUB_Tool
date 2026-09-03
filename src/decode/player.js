@@ -155,7 +155,21 @@ class SourceStream {
     // 放寬對首幀的容忍度到 1000ms，避免某些 proxy mp4 的 pts 偏移過大導致完全無法接管
     if(!best && this.frames.length && this.frames[0].timestamp - tUs < 1000e3) best = this.frames[0];
     if(best){
-      while(this.frames.length && this.frames[0] !== best){
+      const bestIdx = this.frames.indexOf(best);
+      // 雙向影格快取視窗：保留 best 之前的歷史影格（最多 45 幀，約 1.5 秒）。
+      // 當使用者在同一小段左右鍵來回微調（← →）或短距離倒退時，直接從記憶體快取命中，
+      // 杜絕重新解碼整個 GOP 的 O(N^2) 效能黑洞，達成 0ms 瞬間響應。
+      const MAX_BACKWARD_FRAMES = 45;
+      const MAX_TOTAL_FRAMES = 75;
+      if(bestIdx > MAX_BACKWARD_FRAMES){
+        const trimCount = bestIdx - MAX_BACKWARD_FRAMES;
+        for(let i = 0; i < trimCount; i++){
+          const f = this.frames.shift();
+          try{ f.close(); }catch(e){}
+          this._discarded = true;
+        }
+      }
+      while(this.frames.length > MAX_TOTAL_FRAMES){
         const f = this.frames.shift();
         try{ f.close(); }catch(e){}
         this._discarded = true;
