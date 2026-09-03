@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MediaAudioRouter } from '../src/media-audio-router.js';
+import { MediaAudioRouter } from '../src/audio-routing-engine.js';
 
 function fakeAudioContext() {
   const created = [];

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ProjectLoadSession } from '../src/project-load-session.js';
+import { ProjectLoadSession } from '../src/project-intake-engine.js';
 
 function deferred() {
   let resolve;

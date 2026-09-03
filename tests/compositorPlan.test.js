@@ -5,7 +5,7 @@
    v5.8.0 的兩個真實 bug 都住在那裡（預覽與匯出差 120px、疊層溢出軌影格 24×54px），
    兩個都是靠臨時搭的比對工具抓到的，不是測試。 */
 import { describe, expect, it } from 'vitest';
-import { needsComposite, stageBox } from '../src/compositor-plan.js';
+import { needsComposite, stageBox } from '../src/image-compositor-engine.js';
 
 const clip = (o = {}) => ({ vtrack: 0, ...o });
 

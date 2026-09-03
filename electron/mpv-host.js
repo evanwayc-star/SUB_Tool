@@ -617,8 +617,14 @@ function createMpvHost(deps) {
     present,
     cancelPresent,
     screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles']),
-    play: () => send(['set_property', 'pause', false]),
-    pause: () => send(['set_property', 'pause', true]),
+    play: () => {
+      playerPaused = false;
+      return send(['set_property', 'pause', false]);
+    },
+    pause: () => {
+      playerPaused = true;
+      return send(['set_property', 'pause', true]);
+    },
     direction: setDirection,
     mute: value => send(['set_property', 'mute', value]),
     rate: value => send(['set_property', 'speed', value]),

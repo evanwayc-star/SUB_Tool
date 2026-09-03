@@ -15,7 +15,7 @@
    壞掉的樣子：預覽裡圖片已經淡完，匯出的影片卻還亮著（或反過來）。
    不會報錯，只有把兩邊的畫面並排比對才看得出來。 */
 import { describe, expect, it } from 'vitest';
-import { clipLength, fadeAlphaAt, fadeAlphaAtTimeline, fadeWindow } from '../src/clip-fade.js';
+import { clipLength, fadeAlphaAt, fadeAlphaAtTimeline, fadeWindow } from '../src/image-compositor-engine.js';
 import { buildDeliveryArgv } from '../electron/export-plan.js';
 
 const clip = (o = {}) => ({

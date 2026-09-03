@@ -15,7 +15,7 @@ import { State, newId } from './state.js';
 import { secToEncore } from './time.js';
 import { escapeHTML, downloadBytes, tcKeyAllowed, bytesToB64, b64ToBytes } from './util.js';
 import { Media } from './media.js';
-import { requestPointerSeek } from './pointer-seek-control.js';
+import { requestPointerSeek } from './timeline-interaction-engine.js';
 import { updatePlayhead, drawRuler } from './timeline.js';
 import { recordHistory } from './history.js';
 import { emit } from './events.js';

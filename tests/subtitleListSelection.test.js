@@ -45,7 +45,7 @@ vi.mock('../src/keyboard.js', () => ({ jklReset: vi.fn(), nudge: vi.fn() }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));
 vi.mock('../src/subtitle-text-check.js', () => ({ inspectSubtitleCharacters: () => ({}) }));
 vi.mock('../src/subtitle-view.js', () => ({ deleteSelectedWithPrompt: vi.fn() }));
-vi.mock('../src/subtitle-analyzer.js', () => ({
+vi.mock('../src/subtitle-audit.js', () => ({
   analyzeSubtitles: () => ({
     overlapNums: [], multiNums: [], twoNums: [], blankNums: [], bNums: [], iNums: [], uNums: [],
     fontNums: [], posNums: [], trimNums: [], overLenNums: [], containsNums: [], nonTraditionalIssues: [],
@@ -93,11 +93,15 @@ vi.mock('../src/timeline-edit-transaction.js', async importOriginal => ({
 vi.mock('../src/sequence.js', () => ({
   Seq: { active: vi.fn(() => false), byId: vi.fn(), neighborBounds: vi.fn(), clipEnd: vi.fn(), snapEdges: () => [] },
 }));
-vi.mock('../src/timeline-interaction.js', () => ({
-  timeToX: value => value * 80, xToTime: value => value / 80, snapTargets: () => [],
-  snapVal: value => value, cueNeighborBounds: () => ({ prevEnd: -Infinity, nextStart: Infinity }),
-}));
-vi.mock('../src/style-assignment.js', () => ({ planCueStyleAssignment: ({ cue }) => ({ style: cue.style }) }));
+vi.mock('../src/timeline-interaction-engine.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    timeToX: value => value * 80, xToTime: value => value / 80, snapTargets: () => [],
+    snapVal: value => value, cueNeighborBounds: () => ({ prevEnd: -Infinity, nextStart: Infinity }),
+  };
+});
+vi.mock('../src/subtitle-style-engine.js', () => ({ planCueStyleAssignment: ({ cue }) => ({ style: cue.style }) }));
 
 function mount() {
   Element.prototype.scrollIntoView = vi.fn();

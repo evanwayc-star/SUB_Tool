@@ -31,7 +31,7 @@ import { renderNotes } from './notes.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets, loadFonts } from './substyle.js';
-import { ProjectLoadSession } from './project-load-session.js';
+import { ProjectLoadSession } from './project-intake-engine.js';
 import { createProjectSnapshot, migrateProjectSchema, validateProjectIntegrity } from './project-workspace-authority.js';
 
 

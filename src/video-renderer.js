@@ -9,11 +9,12 @@ import { effStyle, styleToCss, ASS_PLAY_RES, anchorPct } from './substyle.js';
 import { escapeHTML } from './util.js';
 import { getPlayerAdapter } from './media-player-adapter.js';
 import { toASSFromState } from './subio.js';
-import { createPreviewDrag } from './pointer-interaction.js';
-import { drawTimeline } from './timeline.js';
-import { imageBoxOnStage } from './image-geometry.js';
-import { fadeAlphaAtTimeline } from './clip-fade.js';
-import { renderASS } from './ass-render.js';
+import { createPreviewDrag } from './timeline-interaction-engine.js';
+import { drawTimeline, updatePlayhead } from './timeline.js';
+import { renderAudioTracks, clearMeterStrips } from './mixer.js';
+import { Wave } from './media.js';
+import { imageBoxOnStage, fadeAlphaAtTimeline } from './image-compositor-engine.js';
+import { renderASS } from './subtitle-snapshot-engine.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { recordHistory } from './history.js';
 import { showToast, setMpvWindowVisible } from './ui.js';
@@ -635,3 +636,31 @@ export const previewDrag = createPreviewDrag({
   }
 });
 previewDrag.bind({ imageLayer: document.getElementById('imageLayer'), videoSub: _videoSub, videoWrap: _videoWrap });
+
+/* ==============================================================================
+   播放器全螢幕與媒體視圖事件控制
+   ============================================================================== */
+
+export function initMediaView() {
+  on('media:audioTracks', renderAudioTracks);
+  on('media:timeline',    drawTimeline);
+  on('media:clearMeters',  clearMeterStrips);
+  on('media:playhead',     updatePlayhead);
+  on('media:srcSel',       renderSrcSel);
+}
+
+function renderSrcSel() {
+  const sel = $('waveSrcSel'); if (!sel) return;
+  const activeSrcId = Media.activeSource || 'video';
+  const matching = Wave.sources.map((s, i) => ({ s, i }))
+      .filter(x => (x.s.sourceId || 'video') === activeSrcId);
+  const show = matching.length > 1;
+  sel.innerHTML = matching.map(x =>
+    `<option value="${x.i}">${escapeHTML(String(x.s.label ?? ''))}</option>`
+  ).join('');
+  if (!matching.find(x => x.i === Wave.srcIdx) && matching.length > 0) {
+    Wave.selectSource(matching[0].i);
+  }
+  sel.value = String(Math.max(0, Wave.srcIdx));
+  sel.style.display = show ? '' : 'none';
+}

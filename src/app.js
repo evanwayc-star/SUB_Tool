@@ -1,8 +1,8 @@
 import { startAppTicker } from './app-ticker.js';
 import { StylePanelController } from './ui/style-panel-controller.js';
-import { bindNumberInputWheel } from './number-input-wheel.js';
-import { initMediaView } from './media-view.js';
-import { bindPlayerFullscreen } from './player-fullscreen.js';
+import { bindNumberInputWheel } from './keybinding-engine.js';
+import { initMediaView } from './video-renderer.js';
+import { bindPlayerFullscreen } from './media-player-adapter.js';
 /* ==============================================================================
    SUB Tool — 應用程式協調層與 UI 進入點 (App Layer / Entry Point)
    ==============================================================================
@@ -39,7 +39,7 @@ import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assTo
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
 import { createCommands } from './commands.js';
-import { renderPointerSeekControl, requestPointerSeek } from './pointer-seek-control.js';
+import { renderPointerSeekControl, requestPointerSeek } from './timeline-interaction-engine.js';
 import { renderQueueMonitorIndicator } from './ui/queue-monitor-indicator.js';
 import { renderAsrIndicator } from './ui/asr-indicator.js';
 import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
@@ -61,19 +61,18 @@ import { History, recordHistory, renderHistory, syncCompareSnapshot } from './hi
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/diagnostics.js'; // WebCodecs 診斷入口（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct, styleMatchesPreset, pruneRedundantCueStyle } from './substyle.js'; // v4.23 字幕樣式系統
-import { closeSubtitleCompareSession, configureSubtitleCompareSession, handleSubtitleCompareCommand } from './subtitle-compare-session.js';
+import { closeSubtitleCompareSession, configureSubtitleCompareSession, handleSubtitleCompareCommand } from './subtitle-comparison-engine.js';
 import { addNote, renderNotes, setNoteActive, updateNoteActive } from './notes.js';
-import { createPreviewDrag } from './pointer-interaction.js';
+import { createPreviewDrag } from './timeline-interaction-engine.js';
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal, closeMenus, openMenu } from './ui.js';
 import { renderAudioTracks, renderMixer, updateMeters } from './mixer.js';
 import { applyDurAdjPct, toASSFromState } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
-import { imageBoxOnStage } from './image-geometry.js'; // v4.7 圖片疊層幾何：預覽／mpv guide／匯出 共用同一組公式
-import { fadeAlphaAtTimeline } from './clip-fade.js'; // v5.9 淡入淡出：預覽與匯出共用同一份規格
-import { presetExportRelativePath } from './export-name-safety.js';
-import { renderSeekBar } from './seekbar.js';
+import { imageBoxOnStage, fadeAlphaAtTimeline } from './image-compositor-engine.js'; // 圖片疊層幾何與淡入淡出：三路共用同一份規格
+import { presetExportRelativePath } from './export-job-engine.js';
+import { renderSeekBar } from './timeline-interaction-engine.js';
 import { on, emit } from './events.js';
-import { setTimelineToolbarCollapsed, toggleTimelineToolbar } from './timeline-toolbar.js';
+import { setTimelineToolbarCollapsed, toggleTimelineToolbar } from './timeline-interaction-engine.js';
 
 if (typeof __APP_VERSION__ !== 'undefined') {
   const el = document.getElementById('appVersion');
@@ -282,22 +281,6 @@ video.addEventListener('pause',()=>{
   renderSeekBar($('seekBar'), t);
   renderTimecodeWatermark(t);
   updatePlayhead();
-  
-  if (!State.subMode && State.selectedId) {
-    const c = State.cues.find(x => x.id === State.selectedId);
-    if (c) {
-      const tkCues = State.cues.filter(x => (x.track || 0) === (c.track || 0));
-      const idx = tkCues.findIndex(x => x.id === c.id);
-      const nextCue = idx >= 0 && idx < tkCues.length - 1 ? tkCues[idx + 1] : null;
-      const targetOut = nextCue ? nextCue.end : c.end;
-      if (t > targetOut) {
-        deselect('sub');
-        refreshSelectionUI();
-        const stSel = $('stSel');
-        if(stSel) stSel.textContent='';
-      }
-    }
-  }
 });
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(Media.displayTime());});
 window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});

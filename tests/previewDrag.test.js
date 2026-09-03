@@ -13,7 +13,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../src/media.js', () => ({ Media: { mpvPresenting: () => false } }));
 
 import { State } from '../src/state.js';
-import { createPreviewDrag } from '../src/pointer-interaction.js';
+import { createPreviewDrag } from '../src/timeline-interaction-engine.js';
 
 const RECT = { w: 1000, h: 500 };
 

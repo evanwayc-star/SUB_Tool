@@ -15,9 +15,8 @@ import { recordHistory } from './history.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { emit } from './events.js';
 import { decodeText, downloadBytes, escapeHTML, readFile } from './util.js';
-import { alignTranscriptToEvidence, parseTranscriptLines } from './transcript-alignment.js';
+import { alignTranscriptToEvidence, parseTranscriptLines, resolveRecognitionAlignment } from './transcript-alignment.js';
 import { buildTranscriptAlignmentDiagnostic } from './transcript-alignment-diagnostic.js';
-import { resolveRecognitionAlignment } from './recognition-alignment-result.js';
 import { CLOUD_PROVIDER_META, getAsrGuidanceMeta, resolveAsrGuidance } from './recognition-guidance.js';
 import {
   getAsrSession,
@@ -50,28 +49,7 @@ import {
   transcribeAudioStream
 } from './speech-recognition-engine.js';
 
-// Re-export 推論模組介面以維持向下相容
 export {
-  BUILTIN_MODELS,
-  DEFAULT_AZURE_SPEECH_REGION,
-  applyVocalEnhancementFilter,
-  blobToBase64,
-  extractClipFloat32Mono16k,
-  combineRecognitionAudioBuffers,
-  encodeWav16kMono,
-  convertAsrSegmentsToTraditionalChinese,
-  loadTransformersPipeline,
-  transcribeWithBuiltinModel,
-  resolveGeminiModel,
-  callGeminiAudioTranscription,
-  parseAzureTranscriptionResponse,
-  callAzureSpeechTranscription,
-  parseElevenLabsTranscriptionResponse,
-  callElevenLabsSpeechTranscription,
-  callWhisperApi,
-  findSilenceSplitPoint,
-  planWhisperCloudChunks,
-  transcribeAudioStream,
   getAsrSession,
   setAsrSessionDialogOpen,
   cancelActiveAsrSession,

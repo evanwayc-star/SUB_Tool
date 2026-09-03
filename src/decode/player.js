@@ -20,12 +20,11 @@ import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
 import { getPlayerAdapter } from '../media-player-adapter.js';
 import { emit } from '../events.js';
-import { fadeAlphaAtTimeline } from '../clip-fade.js';  // 淡入淡出：預覽與匯出共用同一份規格
-import { needsComposite, stageBox } from '../compositor-plan.js';
+import { fadeAlphaAtTimeline, needsComposite, stageBox } from '../image-compositor-engine.js';
 import { showToast } from '../ui.js';
 import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
 import { keyIndexBefore } from './sample-index.js';
-import { imageBoxOnStage, trackFrame } from '../image-geometry.js'; // 預覽／mpv guide／匯出 三路共用的唯一幾何公式
+import { imageBoxOnStage, trackFrame } from '../image-compositor-engine.js'; // 預覽／mpv guide／匯出 三路共用的唯一幾何公式
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）

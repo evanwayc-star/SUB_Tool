@@ -200,3 +200,5 @@ export function validateSubtitlesBeforeExport(wordLimit = null) {
 
   return errors;
 }
+
+export const analyzeSubtitles = auditSubtitles;

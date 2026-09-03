@@ -34,7 +34,7 @@ import { renderAudioTracks } from './mixer.js';
 import { escapeHTML } from './util.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast } from './ui.js';
-import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './delivery-audio.js';
+import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './export-job-engine.js';
 import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, monoStreamsForBuses, deliveryStreamsForPreset, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-model.js';
 
 

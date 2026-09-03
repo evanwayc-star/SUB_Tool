@@ -27,9 +27,8 @@ export {
 } from './timeline-renderer.js';
 
 export {
-
   timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds
-} from './timeline-interaction.js';
+} from './timeline-interaction-engine.js';
 
 export { selectClip, clearClipSelection, deleteSelectedClip, closeClipGapLeft } from './clip-model.js';
 export { showClipFade, showCrossfade, showImageGeom, showClipDuration } from './clip-view.js';
@@ -81,3 +80,4 @@ export function toggleAllLock() {
   if (!anyUnlocked) { clearSelection(); const el = document.getElementById('stSel'); if (el) el.textContent = ''; }
   drawTimeline();
 }
+

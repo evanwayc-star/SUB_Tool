@@ -18,7 +18,7 @@ import { State, ensureAudioBusCount, ensureAudioSourceMap, resetAudioProject } f
 import { Seq } from '../src/sequence.js';
 import { buildExportSnapshot, buildProjectAudioPlan } from '../src/delivery-job.js';
 import { createProjectAudioInterpretation } from '../src/project-audio.js';
-import { composeDeliveryAudioPlan } from '../src/delivery-audio.js';
+import { composeDeliveryAudioPlan } from '../src/export-job-engine.js';
 
 const ExportPlan = createRequire(import.meta.url)('../electron/export-plan.js');
 

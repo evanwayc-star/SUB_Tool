@@ -12,7 +12,7 @@ import { secToEncore } from './time.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { escapeHTML } from './util.js';
 import { recordHistory } from './history.js';
-import { fitScale } from './image-geometry.js';
+import { fitScale } from './image-compositor-engine.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 
 

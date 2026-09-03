@@ -32,10 +32,10 @@ import { emit } from '../events.js';
 import { escapeHTML, baseName } from '../util.js';
 import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from '../media-player-adapter.js';
 import { Wave, WAVE_DECODE_MAX, probeAudioChannelDescriptors, detectFpsWeb, probeImageSize } from '../media.js'; 
-import { sourceChannelLabels } from '../channel-layout.js';
+import { sourceChannelLabels } from '../audio-routing-engine.js';
 import { getExactFps, secToEncore } from '../time.js';
 import { Seq } from '../sequence.js';
-import { waitForOwnedMediaMetadata } from '../media-intake-session.js';
+import { waitForOwnedMediaMetadata } from '../media-intake-engine.js';
 export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx._resetForFirstVideo(projectRestore ? { keepVideoTracks: true } : {});
     const intake=ctx._intakeSession.begin(p);

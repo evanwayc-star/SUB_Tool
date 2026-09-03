@@ -1,11 +1,10 @@
 import { State, newId, setSelection, pruneSelection, ensureTrackCount, cueSuffix } from './state.js';
 import { emit } from './events.js';
-import { burnedSubtitleTrackNames } from './subtitle-track-names.js';
 import { Media } from './media.js';
 import { snapTimeToFrame } from './time.js';
 import { recordHistory } from './history.js';
 import { showToast, openModal, closeModal, setStatus } from './ui.js';
-import { planCueStyleAssignment } from './style-assignment.js';
+import { planCueStyleAssignment } from './subtitle-style-engine.js';
 import { effStyle, STYLE_DEFAULTS } from './substyle.js';
 
 export function snapAllCuesToFrames() {
@@ -521,7 +520,7 @@ export function doCompareTrack() {
   if (State.tracks.length < 1) { showToast('沒有足夠的字幕軌道可供比對'); return; }
   const DESK = (typeof window !== 'undefined' && window.subtool) || null;
   if (DESK?.openCompareWindow) {
-    import('./subtitle-compare-session.js').then(({ openSubtitleCompareSession }) => {
+    import('./subtitle-comparison-engine.js').then(({ openSubtitleCompareSession }) => {
       openSubtitleCompareSession(currentSubtitleCompareSnapshot());
     });
   } else {
@@ -693,4 +692,5 @@ export function toggleOverwriteKeep({ force } = {}) {
   import('./state.js').then(({ saveConfig }) => saveConfig?.());
 }
 
-export { burnedSubtitleTrackNames };
+
+export { burnedSubtitleTrackNames } from './subtitle-snapshot-engine.js';

@@ -123,7 +123,7 @@ describe('timeline public facade', () => {
     });
 
     const engine = await import('../src/timeline-renderer.js');
-    const interaction = await import('../src/timeline-interaction.js');
+    const interaction = await import('../src/timeline-interaction-engine.js');
     const timeline = await import('../src/timeline.js');
 
     const engineOps = [

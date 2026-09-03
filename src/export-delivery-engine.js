@@ -1,3 +1,4 @@
+
 /* ==============================================================================
    SUB Tool — Export Delivery Engine ("src/export-delivery-engine.js")
    ==============================================================================
@@ -9,10 +10,9 @@
    4. 凍結事務防護與衝突檢查邊界 (Run Frozen Export Submission)
    ============================================================================== */
 
-import { renderASS } from './ass-render.js';
 import { secToEncore } from './time.js';
-import { composeDeliveryAudioPlan } from './delivery-audio.js';
-import { burnedSubtitleTrackNames } from './subtitle-track-names.js';
+import { composeDeliveryAudioPlan } from './export-job-engine.js';
+import { renderASS, burnedSubtitleTrackNames } from './subtitle-snapshot-engine.js';
 
 /**
  * 凍結當前專案與匯出範圍快照。

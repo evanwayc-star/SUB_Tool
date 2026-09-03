@@ -9,15 +9,12 @@
    對外提供小介面，完全隱藏定時器與跨領域同步細節。
    ============================================================================== */
 import { $, video } from './dom.js';
-import { State, cueSuffix, deselect, focusTrackKind } from './state.js';
+import { State, deselect, focusTrackKind } from './state.js';
 import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
-import { selectCueSingle, commitCueTimeEdit } from './subtitles.js';
-import { addCue, cueTrackLocked, sortCues } from './subtitle-model.js';
-import { updatePlayhead, drawTimeline } from './timeline.js';
-import { ensureProjectSaved } from './project.js';
-import { recordHistory } from './history.js';
+import { selectCueSingle } from './subtitles.js';
+import { updatePlayhead } from './timeline.js';
 import { updateNoteActive } from './notes.js';
 import { emit, on } from './events.js';
 import { setStatus, showOsd } from './ui.js';
@@ -35,6 +32,7 @@ const _reverseSession = createReverseShuttleSession({
     presentedTime: () => Media.presentedTime(),
   },
   getExactFps: () => getExactFps(State.fps || 30),
+  snapFrame: t => snapTimeToFrame(t, State.fps, State.dropFrame),
   onPresented() {
     updatePlayhead();
     emit('playhead:ensure');
@@ -177,14 +175,28 @@ function stepFrame(dir, repeat = false) {
   if (Media.playing || _jklSpeed !== 0) {
     jklClear();
     _jklSpeed = 0;
-    if (Media.playing) Media.pause();
+    if (Media.playing) Media.pause({ seekOnPause: false });
     setStatus('⏸ 暫停', '');
   }
   if (repeat) {
     if (dir < 0 && _jklSpeed >= 0) { _jklSpeed = -1; jklApply(); }
     else if (dir > 0 && _jklSpeed <= 0) { _jklSpeed = 1; jklApply(); }
   } else {
-    nudge(dir / getExactFps(State.fps || 30));
+    // FPS-SYNC (I5): 以目前權威呈現位置 displayTime() 的整數影格為基準加減整數格
+    // 嚴禁從浮點相加微小殘差，徹底防止右鍵跳兩格或左鍵不動
+    const exactFps = getExactFps(State.fps || 30);
+    const currentT = Media.displayTime();
+    const currentFrame = Math.round(currentT * exactFps);
+    const targetFrame = Math.max(0, currentFrame + dir);
+    const t = snapTimeToFrame(targetFrame / exactFps, State.fps, State.dropFrame);
+    const frameDuration = 1 / exactFps;
+    Media.seek(t, { presentationTolerance: 0.45 * frameDuration });
+    updatePlayhead();
+    emit('playhead:ensure');
+    updateNoteActive(t);
+    if (!Media.playing) {
+      Media.scrubAudio(t, 0.08);
+    }
   }
 }
 
@@ -193,7 +205,7 @@ function nudge(d) {
   if (Media.playing || _jklSpeed !== 0) {
     jklClear();
     _jklSpeed = 0;
-    if (Media.playing) Media.pause();
+    if (Media.playing) Media.pause({ seekOnPause: false });
     setStatus('⏸ 暫停', '');
   }
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點為基準，並精確吸附至影格格網
@@ -284,6 +296,7 @@ function jumpToCueInMinusFrames(dir, frames) {
     listTrack: State.listTrack,
     currentTime: Media.displayTime(),
     fps: State.fps,
+    dropFrame: State.dropFrame,
     dir,
     frames,
   });
@@ -405,112 +418,9 @@ function stepMediaBoundary(dir) {
   return true;
 }
 
-/* ===== 字幕 I/O 上字幕控制 ================================================ */
-async function setIn() {
-  await ensureProjectSaved();
-  if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
-  let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
-  let c = State.cues.find(x => x.id === State.selectedId);
-  if (!c) {
-    const tk = State.tracks.length === 0 ? 0 : Math.min(State.tracks.length - 1, Math.max(0, State.listTrack));
-    c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', tk, { historyLabel: '新增字幕(I)' });
-    if (!c) return;
-    setStatus('已新增字幕，起點 ' + fmtClock(t), 'ok');
-    return;
-  }
-  if (cueTrackLocked(c, '調整字幕起點')) return;
-  const wasUntimed = c.timed === false;
-  c.start = t;
-  if (State.subMode) {
-    State.cues.forEach(cue => {
-      if (cue._tempEnd && cue.id !== c.id) {
-        cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
-        delete cue._tempEnd;
-      }
-    });
-    c.end = (State.duration && State.duration > c.start) ? State.duration : c.start + 3600;
-    c._tempEnd = true;
-    if (!State._subModeTouchedIds) State._subModeTouchedIds = new Set();
-    State._subModeTouchedIds.add(c.id);
-  } else if (wasUntimed || c.end <= c.start) {
-    c.end = snapTimeToFrame(c.start + 0.5, State.fps, State.dropFrame);
-  }
-  c.timed = true;
-  commitCueTimeEdit(c, 'start');
-  recordHistory('設定起點 I' + cueSuffix(c)); setStatus('起點 ' + fmtClock(t), 'ok');
-}
-
-async function setOut() {
-  await ensureProjectSaved();
-  if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
-  let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
-  const c = State.cues.find(x => x.id === State.selectedId);
-  if (!c) { setStatus('請先選擇字幕（或按 I 新建）', 'err'); return; }
-  if (cueTrackLocked(c, '調整字幕終點')) return;
-
-  const wasUntimed = c.timed === false;
-  if (wasUntimed) {
-    c.end = t;
-    c.start = snapTimeToFrame(Math.max(0, t - 0.5), State.fps, State.dropFrame);
-  } else {
-    if (t <= c.start) { setStatus('終點不得早於或等於起點', 'err'); return; }
-    c.end = t;
-  }
-
-  c.timed = true;
-  delete c._tempEnd;
-  commitCueTimeEdit(c, 'end');
-  recordHistory('設定終點 O' + cueSuffix(c)); setStatus('終點 ' + fmtClock(c.end), 'ok');
-  autoAdvanceSubMode();
-}
-
-function autoAdvanceSubMode() {
-  if (!State.subMode || !State._subModeSequence) return;
-
-  const seq = State._subModeSequence;
-  const currIdx = seq.indexOf(State.selectedId);
-
-  if (currIdx >= 0) {
-    let nextIdx = currIdx + 1;
-    while (nextIdx < seq.length) {
-      const nextId = seq[nextIdx];
-      const nextCue = State.cues.find(c => c.id === nextId);
-      const currCue = State.cues.find(c => c.id === State.selectedId);
-      if (nextCue && currCue && (nextCue.track || 0) === (currCue.track || 0)) {
-        selectCueSingle(nextId, false);
-        setStatus(`🎯 上字幕 (依原順序) — 按 I 設起點`, 'ok');
-        return;
-      }
-      nextIdx++;
-    }
-  }
-
-  selectCueSingle(null);
-  setStatus('🎯 上字幕模式：已無下一句，取消選取 ✓', 'ok');
-}
-
-/* ===== 輸出範圍標記 ======================================================== */
-function setExportIn() {
-  State.exportIn = Media.displayTime();
-  drawTimeline();
-  recordHistory('設定輸出起點 [In]');
-  setStatus(`輸出起點已設為 ${fmtClock(State.exportIn)}`, 'ok');
-}
-
-function setExportOut() {
-  State.exportOut = Media.displayTime();
-  drawTimeline();
-  recordHistory('設定輸出終點 [Out]');
-  setStatus(`輸出終點已設為 ${fmtClock(State.exportOut)}`, 'ok');
-}
-
-function clearExport() {
-  State.exportIn = null;
-  State.exportOut = null;
-  drawTimeline();
-  recordHistory('清除輸出範圍');
-  setStatus('輸出範圍已清除', 'ok');
-}
+/* ===== 字幕 I/O 上字幕控制與輸出範圍標記（轉發自領域深模組） ================ */
+import { setIn, setOut, autoAdvanceSubMode } from './subtitle-editing.js';
+import { setExportIn, setExportOut, clearExport } from './export-range.js';
 
 export {
   jklClear,

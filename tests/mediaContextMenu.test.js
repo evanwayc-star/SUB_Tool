@@ -76,7 +76,7 @@ vi.mock('../src/subtitle-model.js', () => ({
   pasteCues: vi.fn(),
 }));
 
-vi.mock('../src/timeline.js', () => ({
+vi.mock('../src/timeline-interaction-engine.js', () => ({
   moveSelectedToTrack: vi.fn(),
   xToTime: vi.fn(() => 0),
   trackFromY: vi.fn(() => 0),
@@ -113,7 +113,7 @@ vi.mock('../src/style-commands.js', () => ({
   hasClipboardStyle: vi.fn(() => false),
 }));
 vi.mock('../src/speech-recognition.js', () => ({ openSpeechRecognitionDialog: vi.fn() }));
-vi.mock('../src/pointer-seek-control.js', () => ({ requestPointerSeek: vi.fn() }));
+vi.mock('../src/timeline.js', () => ({ requestPointerSeek: vi.fn() }));
 
 function resetState() {
   Object.assign(mocks.State, {

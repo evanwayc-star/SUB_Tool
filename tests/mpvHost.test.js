@@ -286,4 +286,29 @@ describe('Windows mpv host lifecycle', () => {
     expect(guideWindow.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
     expect(guideWindow.webContents.executeJavaScript).toHaveBeenCalledWith(expect.stringContaining('window.setImages'), true);
   });
+
+  it('播放中呼叫 pause 後立即 present，能以暫停呈現完成，不等待永遠不會發生的 playback-restart', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    const socket = sockets[0];
+    socket.write.mockClear();
+
+    // 模擬播放狀態中
+    socket.emit('data', Buffer.from(JSON.stringify({
+      event: 'property-change', name: 'pause', data: false,
+    }) + '\n'));
+
+    // 播放中按往後一格：先 pause()，緊接著 present()
+    host.pause();
+    const pending = host.present(9.96, { exact: true, tolerance: 0.05 });
+
+    // socket 收到 seek 指令並確認，且回報 time-pos
+    await Promise.resolve();
+    socket.emit('data', Buffer.from(JSON.stringify({
+      event: 'property-change', name: 'time-pos', data: 9.96,
+    }) + '\n'));
+
+    // 應順利完成，不被播放狀態的 restarted 阻擋
+    await expect(pending).resolves.toEqual({ backend: 'mpv', presentedSourceTime: 9.96 });
+  });
 });

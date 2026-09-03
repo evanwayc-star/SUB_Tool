@@ -68,7 +68,7 @@ import { applySelection, deselectItem, pruneSelections, focusTrack } from './tim
    更新 UI 並依 'df' 後綴設定 dropFrame)、newId(遞增 cue id)、isSel/cueSuffix、DESK/IS_DESKTOP(Electron 偵測)。 */
 import { emit } from './events.js';
 import { makeSettingsStore } from './settings-store.js';
-import { repairAudioExportStreams } from './audio-stream-layout.js';
+import { repairAudioExportStreams } from './audio-routing-engine.js';
 
 /* ===== 專案音訊路由 ====================================================
    音訊資料刻意與 Media（AudioContext、HTMLAudioElement、ffmpeg 暫存檔）分離：

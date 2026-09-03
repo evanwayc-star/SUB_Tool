@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clipSourceFingerprint, clipSourceStillReferenced, liveClipForSource } from '../src/media-source-lease.js';
+import { clipSourceFingerprint, clipSourceStillReferenced, liveClipForSource } from '../src/media-intake-engine.js';
 
 describe('media source lease', () => {
   it('survives placement splitting while any piece still references the same source', () => {

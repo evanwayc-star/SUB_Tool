@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { imageBox } from '../src/image-geometry.js';
+import { imageBox } from '../src/image-compositor-engine.js';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

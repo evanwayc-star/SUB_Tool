@@ -37,7 +37,7 @@ vi.mock('../src/media.js', () => ({ Media: {
 vi.mock('../src/sequence.js', () => ({ Seq: { clipAt: () => null, clips: () => [] } }));
 vi.mock('../src/subio.js', () => ({ toASSFromState: () => '' }));
 vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn() }));
-vi.mock('../src/pointer-interaction.js', () => ({
+vi.mock('../src/timeline-interaction-engine.js', () => ({
   createPreviewDrag: () => ({ bind: vi.fn(), begin: vi.fn(), end: vi.fn() }),
 }));
 

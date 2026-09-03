@@ -9,7 +9,7 @@ import { State, saveKeys, DESK, IS_DESKTOP } from './state.js';
 import { setStatus, showToast } from './ui.js';
 import { emit } from './events.js';
 import { downloadBytes, pickFile, readFile, decodeText, bytesToB64 } from './util.js';
-import { bindFromEvent, findConflict, formatBind, mergeImportedKeymap, stripEmptyBinds } from './keybinding.js';
+import { bindFromEvent, findConflict, formatBind, mergeImportedKeymap, stripEmptyBinds } from './keybinding-engine.js';
 
 const actionCategories = [
   {

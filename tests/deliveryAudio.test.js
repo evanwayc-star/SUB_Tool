@@ -6,7 +6,7 @@ import {
   createDeliveryAudioSpec,
   ensureDeliveryAudioExportDefaults,
   resizeDeliveryAudioBuses,
-} from '../src/delivery-audio.js';
+} from '../src/export-job-engine.js';
 
 describe('交付音訊規格', () => {
   it('從專案與交付列建立彼此獨立的音訊規格快照', () => {

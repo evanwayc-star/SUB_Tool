@@ -4,7 +4,7 @@ import { $, video } from './dom.js';
 import { secToEncore } from './time.js';
 import { updatePlayhead, drawWave } from './timeline.js';
 import { WCPreview } from './decode/player.js';
-import { renderSeekBar } from './seekbar.js';
+import { renderSeekBar } from './timeline-interaction-engine.js';
 import { updateNoteActive } from './notes.js';
 import { updateMeters } from './mixer.js';
 import { selectCueSingle } from './subtitles.js';

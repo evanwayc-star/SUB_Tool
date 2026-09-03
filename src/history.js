@@ -13,7 +13,7 @@ import { drawTimeline } from './timeline.js';
 import { renderNotes } from './notes.js';
 import { emit, on } from './events.js';
 import { setStatus } from './ui.js';
-import { syncSubtitleCompareSession } from './subtitle-compare-session.js';
+import { syncSubtitleCompareSession } from './subtitle-comparison-engine.js';
 
 export function syncCompareSnapshot(){
   return syncSubtitleCompareSession({

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { bindPlayerFullscreen } from '../src/player-fullscreen.js';
+import { bindPlayerFullscreen } from '../src/media-player-adapter.js';
 
 describe('播放器雙擊全螢幕', () => {
   let player;

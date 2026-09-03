@@ -47,12 +47,10 @@ vi.mock('../src/sequence.js', () => ({
 vi.mock('../src/media-player-adapter.js', () => ({ getPlayerAdapter: () => ({}) }));
 vi.mock('../src/events.js', () => ({ emit: vi.fn() }));
 vi.mock('../src/ui.js', () => ({ showToast: vi.fn() }));
-vi.mock('../src/clip-fade.js', () => ({ fadeAlphaAtTimeline: () => 1 }));
-vi.mock('../src/compositor-plan.js', () => ({
+vi.mock('../src/image-compositor-engine.js', () => ({
+  fadeAlphaAtTimeline: () => 1,
   needsComposite: () => true,
   stageBox: ({ canvasW, canvasH }) => ({ x: 0, y: 0, w: canvasW, h: canvasH }),
-}));
-vi.mock('../src/image-geometry.js', () => ({
   imageBoxOnStage: ({ stageW, stageH }) => ({ x: 0, y: 0, w: stageW, h: stageH }),
   trackFrame: ({ stageW, stageH }) => ({ x: 0, y: 0, w: stageW, h: stageH }),
 }));

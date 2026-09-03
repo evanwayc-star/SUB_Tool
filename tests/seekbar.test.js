@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { renderSeekBar } from '../src/seekbar.js';
+import { renderSeekBar } from '../src/timeline-interaction-engine.js';
 
 describe('播放器進度條端點', () => {
   function bar(value = '0') {

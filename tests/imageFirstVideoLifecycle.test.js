@@ -21,7 +21,7 @@ vi.mock('../src/timeline.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()})
 
 import { State } from '../src/state.js';
 import { Media } from '../src/media.js';
-import { ProjectLoadSession } from '../src/project-load-session.js';
+import { ProjectLoadSession } from '../src/project-intake-engine.js';
 
 describe('first video after image-only timeline',()=>{
   beforeEach(()=>{

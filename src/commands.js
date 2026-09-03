@@ -7,7 +7,7 @@ import { emit } from './events.js';
 import { State, IS_DESKTOP, DESK } from './state.js';
 import { Media } from './media.js';
 import { AudioRouting } from './audio-routing.js';
-import { runVideoExportCommand } from './export-capability.js';
+import { runVideoExportCommand } from './export-job-engine.js';
 import { showToast, openModal, closeModal, togglePanel, openCacheDialog } from './ui.js';
 import { showSettingsModal } from './settings.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
@@ -35,12 +35,9 @@ import {
 import {
   togglePlayPause,
   nudge,
-  setIn,
-  setOut,
-  setExportIn,
-  setExportOut,
-  clearExport,
 } from './transport-controller.js';
+import { setIn, setOut } from './subtitle-editing.js';
+import { setExportIn, setExportOut, clearExport } from './export-range.js';
 import {
   doAddTrack,
   zoomIn,
@@ -62,7 +59,7 @@ import { copySelectedStyle, pasteStyleToSelected } from './style-commands.js';
 import { addNote, renderNotes, clearAllNotes, exportNotes } from './notes.js';
 import { renderMixer, mixerReset, mixerMuteAll } from './mixer.js';
 import { toggleSafeFrame, toggleTimecodeWatermark, _syncMpvPanel } from './video-renderer.js';
-import { togglePointerSeekMode } from './pointer-seek-control.js';
+import { togglePointerSeekMode } from './timeline-interaction-engine.js';
 import { History, renderHistory } from './history.js';
 import { $ } from './dom.js';
 

@@ -20,7 +20,7 @@ import { History, recordHistory } from './history.js';
 import { addNote } from './notes.js';
 import { emit } from './events.js';
 import { setStatus, closeModal } from './ui.js';
-import { matchAction } from './keybinding.js';
+import { matchAction } from './keybinding-engine.js';
 import {
   jklClear,
   jklApply,
@@ -45,9 +45,8 @@ import {
   jumpToCueInMinusFrames,
   stepBoundary,
   stepMediaBoundary,
-  setIn,
-  setOut,
 } from './transport-controller.js';
+import { setIn, setOut } from './subtitle-editing.js';
 
 const _keysPressed = new Set();
 if (typeof window !== 'undefined') {

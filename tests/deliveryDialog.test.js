@@ -28,7 +28,7 @@ vi.mock('../src/substyle.js', async (importOriginal) => {
     ASS_PLAY_RES: { x: 1920, y: 1080 }, getAllPresets: () => [], loadFonts: vi.fn(),
   };
 });
-vi.mock('../src/subimport.js', () => ({ buildSubtitleImportPlan: vi.fn() }));
+vi.mock('../src/project-intake-engine.js', () => ({ buildSubtitleImportPlan: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));
 vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));

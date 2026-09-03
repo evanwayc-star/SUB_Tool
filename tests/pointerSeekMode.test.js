@@ -49,7 +49,7 @@ describe('滑鼠跳轉的播放狀態政策', () => {
 
     ({ State } = await import('../src/state.js'));
     ({ getJklSpeed, setJklSpeed } = await import('../src/transport-controller.js'));
-    ({ requestPointerSeek, renderPointerSeekControl, togglePointerSeekMode } = await import('../src/pointer-seek-control.js'));
+    ({ requestPointerSeek, renderPointerSeekControl, togglePointerSeekMode } = await import('../src/timeline-interaction-engine.js'));
     State.pointerSeekPauses = false;
   });
 

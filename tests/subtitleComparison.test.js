@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSubtitleComparisonPlan, subtitleFrameIndex } from '../src/subtitle-comparison.js';
+import { buildSubtitleComparisonPlan, subtitleFrameIndex } from '../src/subtitle-comparison-engine.js';
 import { getExactFps, snapTimeToFrame } from '../src/time.js';
 
 describe('字幕比對 plan', () => {

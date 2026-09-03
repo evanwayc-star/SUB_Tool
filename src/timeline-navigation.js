@@ -8,6 +8,8 @@
    2. 必須是 Pure Functions，以利完全獨立於播放器與 UI 進行測試。
 ============================================================================== */
 
+import { getExactFps, snapTimeToFrame } from './time.js';
+
 export function getNoteJump({ notes, currentTime, dir }) {
   if (!notes || !notes.length) return null;
   const EPS = 1e-4;
@@ -56,7 +58,7 @@ export function getAdjacentCue({ cues, selectedId, listTrack, activeSubTrack, cu
   return list[idx] || null;
 }
 
-export function getCueInMinusFrames({ cues, selectedId, listTrack, currentTime, fps, dir, frames }) {
+export function getCueInMinusFrames({ cues, selectedId, listTrack, currentTime, fps, dropFrame = false, dir, frames }) {
   const sel = cues.find(c => c.id === selectedId);
   const track = sel ? (sel.track || 0) : listTrack;
   const list = cues.filter(c => (c.track || 0) === track);
@@ -77,7 +79,10 @@ export function getCueInMinusFrames({ cues, selectedId, listTrack, currentTime, 
   const target = list[idx];
   if (!target) return null;
 
-  const targetTime = Math.max(0, target.start - (frames / fps));
+  // FPS-SYNC (I3): 以精確 FPS 計算倒退秒數並吸附至影格格網
+  const exactFps = getExactFps(fps || 30);
+  const rawTarget = Math.max(0, target.start - (frames / exactFps));
+  const targetTime = snapTimeToFrame(rawTarget, fps || 30, dropFrame || false);
   return { targetCue: target, targetTime };
 }
 

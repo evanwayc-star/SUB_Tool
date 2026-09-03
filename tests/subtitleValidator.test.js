@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { validateSubtitlesBeforeExport } from '../src/subtitle-validator.js';
+import { validateSubtitlesBeforeExport } from '../src/subtitle-audit.js';
 import * as stateModule from '../src/state.js';
 
 // Mock State

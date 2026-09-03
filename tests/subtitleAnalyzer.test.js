@@ -6,7 +6,7 @@ vi.mock('../src/subtitle-text-check.js', () => ({
   inspectSubtitleCharacters: () => ({ simplified: [], unsupported: [] }),
 }));
 
-import { analyzeSubtitles } from '../src/subtitle-analyzer.js';
+import { analyzeSubtitles } from '../src/subtitle-audit.js';
 
 describe('連續相同字幕診斷', () => {
   it('只把同一影格頭尾黏接的一對都標為深綠編號', () => {

@@ -31,26 +31,26 @@
 ============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { AudioEngine } from './audio-engine.js';
-import { MediaAudioRouter } from './media-audio-router.js';
+import { MediaAudioRouter } from './audio-routing-engine.js';
 import { AudioPipeline } from './audio-pipeline.js';
-import { destroyScrubber } from './scrub-scheduler.js';
+import { destroyScrubber } from './audio-engine.js';
 import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
 import { activateHtml5Transport, getPlayerAdapter } from './media-player-adapter.js';
 import { getExactFps, secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset } from './external-audio.js';
-import { MediaIntakeSession, waitForOwnedMediaMetadata } from './media-intake-session.js';
+import { MediaIntakeSession, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 import { ResetEpoch } from './reset-epoch.js';
-import { clipSourceFingerprint, liveClipForSource } from './media-source-lease.js';
+import { clipSourceFingerprint, liveClipForSource } from './media-intake-engine.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
 import { emit, on } from './events.js';
 import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
 
 import { PlaybackSyncEngine } from './playback-sync-engine.js';
 
-import { fadeAlphaAtTimeline } from './clip-fade.js';   // 淡入淡出：預覽與匯出共用同一份規格
-import { sourceChannelLabels } from './channel-layout.js'; // 來源聲道展開順序：與主程序 ingest 同一份約定
+import { fadeAlphaAtTimeline } from './image-compositor-engine.js';   // 淡入淡出：預覽與匯出共用同一份規格
+import { sourceChannelLabels } from './audio-routing-engine.js'; // 來源聲道展開順序：與主程序 ingest 同一份約定
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Seq } from './sequence.js';
 import { TimelineTransport } from './timeline-transport.js';

@@ -21,7 +21,7 @@ import { setManualPlaybackSpeed } from './keyboard.js';
 import { splitMenuLabel } from './menu-label.js';
 import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './style-commands.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
-import { requestPointerSeek } from './pointer-seek-control.js';
+import { requestPointerSeek } from './timeline-interaction-engine.js';
 import {
   buildAudioClipMenu,
   buildAudioTrackMenu,

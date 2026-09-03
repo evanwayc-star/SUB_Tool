@@ -4,7 +4,7 @@ import { decodeText, b64ToBytes, readFile, pickFile, escapeHTML } from './util.j
 import { snapTimeToFrame } from './time.js';
 import { SubFormats } from './formats.js';
 import { getAllPresets, loadFonts } from './substyle.js';
-import { buildSubtitleImportPlan } from './subimport.js';
+import { buildSubtitleImportPlan } from './project-intake-engine.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
 import { sortCues, trackLocked } from './subtitle-model.js';

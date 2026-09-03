@@ -1,8 +1,8 @@
 /* ensureAudioBusCount / ensureAudioExportDefaults 曾在這裡被 import 卻從未使用
    （本專案刻意關閉 no-unused-vars，所以沒有任何東西會提醒）。已移除。 */
 import { normalizeAudioProject, pruneRemovedAudioBuses } from './state.js';
-import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './delivery-audio.js';
-import { repairAudioExportStreams } from './audio-stream-layout.js';
+import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './export-job-engine.js';
+import { repairAudioExportStreams } from './audio-routing-engine.js';
 
 export const LAYOUTS = {
   mono: { label: 'Mono', channels: 1 },

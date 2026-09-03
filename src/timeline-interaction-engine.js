@@ -8,7 +8,9 @@
    ============================================================================== */
 
 import { clamp } from './util.js';
-import { State, cueSuffix } from './state.js';
+import { State, cueSuffix, saveConfig } from './state.js';
+import { emit } from './events.js';
+import { setStatus } from './ui.js';
 import { Seq } from './sequence.js';
 import { Media } from './media.js';
 import { anchorPct, effStyle } from './substyle.js';
@@ -289,4 +291,120 @@ export function createPreviewDrag(deps = {}) {
     imageDrag: () => _imgDrag,
     subtitleDrag: () => _subDrag,
   };
+}
+
+export function timeToX(t, viewStart = State.viewStart, pxPerSec = State.pxPerSec) {
+  return (t - viewStart) * pxPerSec;
+}
+
+export function xToTime(x, viewStart = State.viewStart, pxPerSec = State.pxPerSec) {
+  return viewStart + x / pxPerSec;
+}
+
+export function snapTargets(excludeIds, extraSnapPoints = []) {
+  let t = [0, State.duration > 0 ? State.duration : 1];
+  for (const c of State.cues) {
+    if (excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id))) continue;
+    if (c.timed === false) continue;
+    t.push(c.start); t.push(c.end);
+  }
+  if (Media.mpvMode) t.push(Media.displayTime());
+  if (Array.isArray(extraSnapPoints)) {
+    for (const p of extraSnapPoints) {
+      if (typeof p === 'number' && Number.isFinite(p)) t.push(p);
+      else if (typeof p?.time === 'number' && Number.isFinite(p.time)) t.push(p.time);
+    }
+  }
+  return t;
+}
+
+export function snapVal(t, targets, thr) {
+  let best = t, bd = thr;
+  for (const x of targets) {
+    const d = Math.abs(x - t);
+    if (d < bd) {
+      bd = d;
+      best = x;
+    }
+  }
+  return best;
+}
+
+export function cueNeighborBounds(os, oe, track, excludeIds) {
+  let prevEnd = 0, nextStart = Infinity;
+  const oMid = (os + oe) / 2;
+  for (const c of State.cues) {
+    if (c.timed === false || c.track !== track) continue;
+    if (excludeIds && (excludeIds.has ? excludeIds.has(c.id) : excludeIds.includes(c.id))) continue;
+    const cMid = (c.start + c.end) / 2;
+    if (cMid < oMid && c.end > prevEnd) prevEnd = c.end;
+    if (cMid > oMid && c.start < nextStart) nextStart = c.start;
+  }
+  return { prevEnd, nextStart };
+}
+
+export function renderPointerSeekControl() {
+  const pauses = !!State.pointerSeekPauses;
+  const label = pauses ? '跳轉暫停' : '跳轉繼續';
+  const title = pauses
+    ? '滑鼠跳到其他時間點時暫停播放；按下切換為跳轉後繼續播放'
+    : '滑鼠跳到其他時間點後繼續播放；按下切換為跳轉後暫停';
+  if (typeof document !== 'undefined') {
+    document.querySelectorAll('.pointer-seek-btn').forEach(btn => {
+      btn.textContent = label;
+      btn.classList.toggle('pause', pauses);
+      btn.setAttribute('aria-pressed', String(pauses));
+      btn.setAttribute('title', title);
+      btn.setAttribute('aria-label', title);
+    });
+  }
+}
+
+export function togglePointerSeekMode() {
+  State.pointerSeekPauses = !State.pointerSeekPauses;
+  renderPointerSeekControl();
+  setStatus(State.pointerSeekPauses
+    ? '滑鼠跳轉：定位後暫停'
+    : '滑鼠跳轉：定位後繼續播放', 'ok');
+  void saveConfig();
+}
+
+export function requestPointerSeek(timelineTime) {
+  if (State.pointerSeekPauses) emit('transport:pointerSeekPause');
+  Media.seek(timelineTime);
+}
+
+export function renderSeekBar(bar, timelineSeconds) {
+  if (!bar) return 0;
+
+  if (Number.isFinite(timelineSeconds)) {
+    bar.value = String(Math.round(Math.max(0, timelineSeconds) * 1000));
+  }
+
+  const min = Number(bar.min);
+  const max = Number(bar.max);
+  const value = Number(bar.value);
+  const span = max - min;
+  const ratio = Number.isFinite(span) && span > 0 && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, (value - min) / span))
+    : 0;
+  const percent = ratio * 100;
+  bar.style.setProperty('--seek-progress', `${percent}%`);
+  return percent;
+}
+
+export function setTimelineToolbarCollapsed({ button, options } = {}, collapsed = false) {
+  if (!button || !options) return false;
+  const next = !!collapsed;
+  options.hidden = next;
+  button.setAttribute('aria-expanded', String(!next));
+  button.setAttribute('aria-label', next ? '展開時間軸工具' : '收合時間軸工具');
+  button.title = next ? '展開音軌數與時間軸工具' : '收合音軌數與時間軸工具';
+  const icon = button.querySelector('[data-role="timeline-toolbar-icon"]');
+  if (icon) icon.textContent = next ? '»' : '«';
+  return next;
+}
+
+export function toggleTimelineToolbar({ button, options } = {}) {
+  return setTimelineToolbarCollapsed({ button, options }, !options?.hidden);
 }

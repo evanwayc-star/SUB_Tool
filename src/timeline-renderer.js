@@ -29,7 +29,7 @@ import { paintClipBlocks } from './painters/clip-painter.js';
 import { paintSubtitleBlocks } from './painters/subtitle-painter.js';
 import { paintClipWave } from './painters/waveform-painter.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
-import { fitScale } from './image-geometry.js'; // 「符合視窗」與匯出共用同一條 contain 公式
+import { fitScale } from './image-compositor-engine.js'; // 「符合視窗」與匯出共用同一條 contain 公式
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId,
   setSelection, deselect, pruneSelection, focusTrackKind } from './state.js';
 import { clamp, pad, escapeHTML, escapeHTMLWithSpaces } from './util.js';
@@ -51,10 +51,9 @@ import {
 } from './timeline-gesture-transaction.js';
 import { hideCtx, showCueMenu } from './menus.js';
 import { Seq } from './sequence.js';
-import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction.js';
+import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds, requestPointerSeek } from './timeline-interaction-engine.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
-import { requestPointerSeek } from './pointer-seek-control.js';
-import { planCueStyleAssignment } from './style-assignment.js';
+import { planCueStyleAssignment } from './subtitle-style-engine.js';
 import { effStyle } from './substyle.js';
 
 import { on as _onEvent } from './events.js';
@@ -62,7 +61,7 @@ import { selectClip, clearClipSelection } from './clip-model.js';
 _onEvent('clip:blocksChanged', ()=>renderClipBlocks());
 
 /* ===== 5. 時間軸 ====================================================== */
-import * as L from './timeline-layout.js';
+import * as L from './timeline-interaction-engine.js';
 const { RULER_H, ROW_H } = L;
 
 /* 影片序列：獨立視訊軌列容器（在專案音訊軌上方），與字幕軌列同一套「列＋列頭」機制。

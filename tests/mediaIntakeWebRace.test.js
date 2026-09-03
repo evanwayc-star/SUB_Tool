@@ -186,7 +186,7 @@ describe('web mother-source intake ownership', () => {
   });
 
   it('releases the ffmpeg lane when A loses ownership while waiting for shared-video metadata', async () => {
-    const { waitForOwnedMediaMetadata } = await import('../src/media-intake-session.js');
+    const { waitForOwnedMediaMetadata } = await import('../src/media-intake-engine.js');
     const element = new EventTarget();
     Object.defineProperty(element, 'readyState', { configurable: true, value: 0 });
     const existingHandler = vi.fn();

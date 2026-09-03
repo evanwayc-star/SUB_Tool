@@ -134,7 +134,7 @@ sequenceDiagram
 | `loaders/media-loader.js` | HTML／mpv 實際畫格回報 |
 | `decode/player.js` | WebCodecs 多層繪製與 timestamp |
 | `timeline-renderer.js` | 播放點與刻度 |
-| `export-job-builder.js` | 凍結輸出起點與燒入 TC |
+| `export-delivery-engine.js` | 凍結輸出起點與燒入 TC |
 
 ## 5. 常見失敗
 

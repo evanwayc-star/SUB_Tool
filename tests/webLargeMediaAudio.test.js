@@ -25,7 +25,7 @@ beforeEach(async () => {
   ({ Media, Wave } = await import('../src/media.js'));
   ({ State } = await import('../src/state.js'));
   ({ renderAudioTracks } = await import('../src/mixer.js'));
-  const { initMediaView } = await import('../src/media-view.js');
+  const { initMediaView } = await import('../src/video-renderer.js');
   initMediaView();
   State.audioProject = {
     mode: 'auto',

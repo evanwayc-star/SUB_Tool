@@ -11,6 +11,7 @@ export function createReverseShuttleSession({
   clearIntervalFn = clearInterval,
   nativeStallMs = 400,
   nativeStartupGraceMs = 1200,
+  snapFrame,
 } = {}) {
   let active = false;
   let mode = 'idle';
@@ -63,7 +64,8 @@ export function createReverseShuttleSession({
     const fps = exactFps();
     const elapsedSeconds = Math.max(0, (now() - anchorWallTime) / 1000);
     const rawTarget = Math.max(0, anchorTime - elapsedSeconds * rate);
-    const targetTime = Math.max(0, Math.round(rawTarget * fps) / fps);
+    // FPS-SYNC (I3): 依格網吸附，若提供 snapFrame 則使用其精確 frame metadata
+    const targetTime = Math.max(0, typeof snapFrame === 'function' ? snapFrame(rawTarget) : (Math.round(rawTarget * fps) / fps));
     Promise.resolve(presentation.request(targetTime)).then(result => {
       if (!active || token !== generation || mode !== 'fallback') return;
       if (result?.status !== 'presented') return;

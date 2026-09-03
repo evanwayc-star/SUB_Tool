@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { imageBox, trackFrame, imageBoxOnStage, fitScale } from '../src/image-geometry.js';
+import { imageBox, trackFrame, imageBoxOnStage, fitScale } from '../src/image-compositor-engine.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 

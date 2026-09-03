@@ -25,7 +25,7 @@
    測不到：原生 ffmpeg binary 真正解碼特定母檔後的聲音內容；那一層仍需 §4 大檔真機驗收。 */
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
-import { flattenSourceChannels, sourceChannelLabels } from '../src/channel-layout.js';
+import { flattenSourceChannels, sourceChannelLabels } from '../src/audio-routing-engine.js';
 
 const require = createRequire(import.meta.url);
 const main = require('../electron/channel-layout.js');

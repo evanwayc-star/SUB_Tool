@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from '../src/style-assignment.js';
+import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from '../src/subtitle-style-engine.js';
 
 describe('字幕樣式 assignment plan', () => {
   it('把 desired effective style 轉為相對目標軌道的最小 cue override', () => {

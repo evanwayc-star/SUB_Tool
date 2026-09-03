@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { MediaIntakeSession, waitForOwnedMediaMetadata } from '../src/media-intake-session.js';
+import { MediaIntakeSession, waitForOwnedMediaMetadata } from '../src/media-intake-engine.js';
 
 const deferred = () => {
   let resolve;

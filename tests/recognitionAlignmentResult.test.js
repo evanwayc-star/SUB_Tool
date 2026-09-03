@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { resolveRecognitionAlignment } from '../src/recognition-alignment-result.js';
+import { resolveRecognitionAlignment } from '../src/transcript-alignment.js';
 
 describe('recognition alignment result', () => {
   it('轉錄模式保留原始時間證據而不呼叫對齊器', () => {

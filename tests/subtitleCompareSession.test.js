@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createSubtitleCompareSession } from '../src/subtitle-compare-session.js';
+import { createSubtitleCompareSession } from '../src/subtitle-comparison-engine.js';
 
 function snapshot() {
   return {

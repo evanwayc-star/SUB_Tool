@@ -12,7 +12,7 @@ import { escapeHTML, tcKeyAllowed, escapeHTMLWithSpaces } from './util.js';
 import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
-import { requestPointerSeek } from './pointer-seek-control.js';
+import { requestPointerSeek } from './timeline-interaction-engine.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
 import { emit } from './events.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
@@ -22,7 +22,7 @@ import { recordHistory } from './history.js';
 import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx, styleMatchesPreset } from './substyle.js';
 import { showCueMenu } from './menus.js';
 import { deleteSelectedWithPrompt } from './subtitle-view.js';
-import { analyzeSubtitles } from './subtitle-analyzer.js';
+import { analyzeSubtitles } from './subtitle-audit.js';
 
 // Domain imports
 import { 

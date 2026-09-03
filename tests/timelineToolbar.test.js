@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest';
-import { setTimelineToolbarCollapsed, toggleTimelineToolbar } from '../src/timeline-toolbar.js';
+import { setTimelineToolbarCollapsed, toggleTimelineToolbar } from '../src/timeline-interaction-engine.js';
 
 describe('時間軸工具列收合按鈕', () => {
   beforeEach(() => {

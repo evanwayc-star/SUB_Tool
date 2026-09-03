@@ -13,17 +13,22 @@ import {
   applyVocalEnhancementFilter,
   extractClipFloat32Mono16k,
   encodeWav16kMono,
-  insertAsrSubtitles,
-  getAsrConfig,
-  saveAsrConfig,
-  getAsrGuidanceMeta,
-  resolveAsrGuidance,
   convertAsrSegmentsToTraditionalChinese,
   callWhisperApi,
   findSilenceSplitPoint,
   planWhisperCloudChunks,
   callElevenLabsSpeechTranscription,
   callAzureSpeechTranscription,
+  callGeminiAudioTranscription
+} from '../src/speech-recognition-engine.js';
+import {
+  getAsrGuidanceMeta,
+  resolveAsrGuidance
+} from '../src/recognition-guidance.js';
+import {
+  insertAsrSubtitles,
+  getAsrConfig,
+  saveAsrConfig,
   getClipAudioBuffer,
   getRecognitionAudioSourceChoices,
   openSpeechRecognitionDialog
@@ -1057,7 +1062,7 @@ describe('語音辨識與字幕生成模組', () => {
 
   describe('Google Gemini 1.5 語音辨識 (Google Gemini API)', () => {
     it('成功呼叫 Gemini API 並解析回傳的字幕 JSON 陣列', async () => {
-      const { callGeminiAudioTranscription } = await import('../src/speech-recognition.js');
+      const { callGeminiAudioTranscription } = await import('../src/speech-recognition-engine.js');
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({
@@ -1102,7 +1107,7 @@ describe('語音辨識與字幕生成模組', () => {
     });
 
     it('未輸入 Google API Key 時拋出錯誤', async () => {
-      const { callGeminiAudioTranscription } = await import('../src/speech-recognition.js');
+      const { callGeminiAudioTranscription } = await import('../src/speech-recognition-engine.js');
       const dummyBlob = new Blob(['wav-content'], { type: 'audio/wav' });
       await expect(callGeminiAudioTranscription({
         audioBlob: dummyBlob,

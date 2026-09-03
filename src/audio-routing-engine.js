@@ -11,7 +11,7 @@
 import { flattenSourceChannels, channelFileName } from '../shared/channel-layout.cjs';
 import { AudioEngine } from './audio-engine.js';
 import { Seq } from './sequence.js';
-import { scheduleScrub } from './scrub-scheduler.js';
+import { scheduleScrub } from './audio-engine.js';
 
 export { flattenSourceChannels, channelFileName };
 

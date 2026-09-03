@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   bindFromEvent, findConflict, formatBind, isNumpadCode,
   matchAction, mergeImportedKeymap, sameBind, stripEmptyBinds,
-} from '../src/keybinding.js';
+} from '../src/keybinding-engine.js';
 import { State } from '../src/state.js';
 
 /** 造一個 keydown 事件的替身。 */

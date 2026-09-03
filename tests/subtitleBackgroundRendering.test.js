@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { renderASS } from '../src/ass-render.js';
+import { renderASS } from '../src/subtitle-snapshot-engine.js';
 import { planSubtitleBackgroundLayouts } from '../src/subtitle-background-layout.js';
 import { STYLE_DEFAULTS, styleToCss, subtitleBackgroundCssMetrics } from '../src/substyle.js';
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SubFormats } from '../src/formats.js';
-import { buildSubtitleImportPlan } from '../src/subimport.js';
+import { buildSubtitleImportPlan } from '../src/project-intake-engine.js';
 import { effStyle } from '../src/substyle.js';
 import { getExactFps } from '../src/time.js';
 

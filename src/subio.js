@@ -4,19 +4,17 @@ import { secToEncore, snapTimeToFrame } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
 import { sortCues, trackLocked } from './subtitle-model.js';
-import { burnedSubtitleTrackNames } from './subtitle-track-names.js';
+import { burnedSubtitleTrackNames, renderASS } from './subtitle-snapshot-engine.js';
 import { drawTimeline, layoutTimeline } from './timeline.js';
 import { emit } from './events.js';
 import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
 import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
-import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec } from './delivery-audio.js';
+import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec, videoExportCapability } from './export-job-engine.js';
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
-import { buildExportJobs, freezeExportSubmission, subtitleCuesForSubmission } from './export-job-builder.js';
-import { runFrozenExportSubmission } from './export-submission-transaction.js';
-import { videoExportCapability } from './export-capability.js';
+import { buildExportJobs, freezeExportSubmission, subtitleCuesForSubmission, runFrozenExportSubmission } from './export-delivery-engine.js';
 import { escapeHTML } from './util.js';
 import { Media } from './media.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
@@ -250,7 +248,7 @@ function _mixerSummary() {
   return `：目前 <b>${audible}</b>/${total} 條聲道會發聲`;
 }
 
-import { validateSubtitlesBeforeExport } from './subtitle-validator.js';
+import { validateSubtitlesBeforeExport } from './subtitle-audit.js';
 
 async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
   const capability = videoExportCapability(IS_DESKTOP);
@@ -568,3 +566,8 @@ if (typeof document !== 'undefined') {
   });
 }
 
+
+
+
+
+export { renderASS };

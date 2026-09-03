@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe,expect,it,vi } from 'vitest';
-import { bindNumberInputWheel } from '../src/number-input-wheel.js';
+import { bindNumberInputWheel } from '../src/keybinding-engine.js';
 
 describe('數值輸入框滑鼠滾輪',()=>{
   it('行距依 step 每格調整 0.1，並維持乾淨的小數值',()=>{

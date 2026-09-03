@@ -1,7 +1,7 @@
 import { State, IS_DESKTOP, DESK } from './state.js';
 import { encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes } from './util.js';
 import { SubFormats } from './formats.js';
-import { renderASS } from './ass-render.js';
+import { renderASS } from './subtitle-snapshot-engine.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { setStatus, showToast } from './ui.js';
 import { buildXLSX } from './xlsx-export.js';
