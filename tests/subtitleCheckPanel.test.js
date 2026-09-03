@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { beforeAll, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,7 +12,7 @@ vi.mock('../src/dom.js', () => ({
   sublist: document.getElementById('sublist'),
 }));
 vi.mock('../src/media.js', () => ({ Media: { displayTime: () => 0, seek: vi.fn() }, Wave: {} }));
-vi.mock('../src/timeline.js', () => ({
+vi.mock('../src/timeline-renderer.js', () => ({
   renderCueBlocks: vi.fn(), updatePlayhead: vi.fn(), refreshTrackGutterActive: vi.fn(),
 }));
 vi.mock('../src/events.js', () => ({ emit: vi.fn() }));
@@ -23,7 +23,6 @@ vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
 vi.mock('../src/keyboard.js', () => ({ jklReset: vi.fn(), nudge: vi.fn() }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));
 vi.mock('../src/subtitle-text-check.js', () => ({ inspectSubtitleCharacters: () => ({ simplified: [], unsupported: [] }) }));
-vi.mock('../src/subtitle-view.js', () => ({ deleteSelectedWithPrompt: vi.fn() }));
 vi.mock('../src/subtitle-model.js', () => ({
   detectOverlaps: () => new Set(), sweepContainedCues: vi.fn(), addCue: vi.fn(), addCueRelative: vi.fn(),
   deleteSelectedCues: vi.fn(), deleteCue: vi.fn(), clearSelectedCuesTime: vi.fn(), shiftTextsDown: vi.fn(),

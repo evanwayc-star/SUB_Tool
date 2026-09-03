@@ -1,18 +1,18 @@
-import { $, sublist } from '../dom.js';
-import { State, cueSuffix } from '../state.js';
-import { effStyle, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot } from '../substyle.js';
-import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from '../subtitle-style-engine.js';
-import { applyCueStylePatch, applyTrackStylePlan } from '../style-commands.js';
-import { recordHistory, syncCompareSnapshot } from '../history.js';
-import { openModal, closeModal, showToast } from '../ui.js';
-import { secToEncore } from '../time.js';
-import { escapeHTML, clamp } from '../util.js';
-import { Media } from '../media.js';
-import { requestPointerSeek } from '../timeline-interaction-engine.js';
-import { emit } from '../events.js';
-import { ensureProjectSaved } from '../project.js';
-import { editCue, splitCue } from '../subtitle-model.js';
-import { showCtx, hideCtx } from '../menus.js';
+import { $, sublist } from './dom.js';
+import { State, cueSuffix } from './state.js';
+import { effStyle, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot } from './substyle.js';
+import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from './subtitle-style-engine.js';
+import { applyCueStylePatch, applyTrackStylePlan } from './subtitles.js';
+import { recordHistory, syncCompareSnapshot } from './history.js';
+import { openModal, closeModal, showToast } from './ui.js';
+import { secToEncore } from './time.js';
+import { escapeHTML, clamp } from './util.js';
+import { Media } from './media.js';
+import { requestPointerSeek } from './timeline-interaction-engine.js';
+import { emit } from './events.js';
+import { ensureProjectSaved } from './project.js';
+import { editCue, splitCue } from './subtitle-model.js';
+import { showCtx, hideCtx } from './menus.js';
 
 let renderAll, renderVideoSub, refreshMpvSubs, drawTimeline, refreshStyleSummaries, initPresetLibrary, styleChanged;
 

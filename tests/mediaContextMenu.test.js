@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -62,6 +62,9 @@ vi.mock('../src/subtitles.js', () => ({
   refreshSelectionUI: vi.fn(),
   enterSwapMode: vi.fn(),
   deleteSelected: vi.fn(),
+  copySelectedStyle: vi.fn(),
+  pasteStyleToSelected: vi.fn(),
+  hasClipboardStyle: vi.fn(() => false),
 }));
 
 vi.mock('../src/subtitle-model.js', () => ({
@@ -107,13 +110,9 @@ vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/events.js', () => ({ emit: mocks.emit }));
 vi.mock('../src/audio-routing.js', () => ({ AudioRouting: { openForSource: vi.fn(), openForClip: vi.fn() } }));
 vi.mock('../src/keyboard.js', () => ({ setManualPlaybackSpeed: vi.fn() }));
-vi.mock('../src/style-commands.js', () => ({
-  copySelectedStyle: vi.fn(),
-  pasteStyleToSelected: vi.fn(),
-  hasClipboardStyle: vi.fn(() => false),
-}));
+
 vi.mock('../src/speech-recognition.js', () => ({ openSpeechRecognitionDialog: vi.fn() }));
-vi.mock('../src/timeline.js', () => ({ requestPointerSeek: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ requestPointerSeek: vi.fn() }));
 
 function resetState() {
   Object.assign(mocks.State, {

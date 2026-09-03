@@ -2,9 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { createExportQueue } = require('../electron/export-queue.js');
-const { ExportQueueState } = require('../electron/export-queue-state.js');
-const { JOB_STATUS } = require('../electron/export-job-status.js');
+const { createExportQueue, ExportQueueState, JOB_STATUS } = require('../electron/export-queue.js');
 
 function make({
   persistJob = () => {}, activeJobs, runJob = async () => {}, onJobFailed, prepareDeliveryUpdate,

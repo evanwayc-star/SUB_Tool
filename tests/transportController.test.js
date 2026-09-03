@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-vi.mock('../src/timeline.js', () => ({
+vi.mock('../src/timeline-renderer.js', () => ({
   updatePlayhead: vi.fn(),
   drawTimeline: vi.fn(),
 }));
@@ -18,10 +18,8 @@ vi.mock('../src/history.js', () => ({
 
 import { State } from '../src/state.js';
 import { getExactFps, snapTimeToFrame, secToEncore } from '../src/time.js';
-import { stepFrame, getJklSpeed, setJklSpeed } from '../src/transport-controller.js';
+import { stepFrame, getJklSpeed, setJklSpeed, setExportIn, setExportOut, clearExport, getCueInMinusFrames } from '../src/transport-controller.js';
 import { Media } from '../src/media.js';
-import { getCueInMinusFrames } from '../src/timeline-navigation.js';
-import { setExportIn, setExportOut, clearExport } from '../src/export-range.js';
 
 describe('TransportController 與 FPS/時碼不變量', () => {
   beforeEach(() => {

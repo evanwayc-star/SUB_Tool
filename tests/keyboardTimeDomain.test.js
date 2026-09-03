@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mediaMock = vi.hoisted(() => ({
@@ -33,7 +33,7 @@ vi.mock('../src/subtitles.js', () => ({
   copyCues: vi.fn(),
   pasteCues: vi.fn(),
 }));
-vi.mock('../src/timeline.js', () => ({
+vi.mock('../src/timeline-renderer.js', () => ({
   updatePlayhead: vi.fn(),
   zoomFit: vi.fn(),
   zoomFitVideo: vi.fn(),

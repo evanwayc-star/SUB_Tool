@@ -28,14 +28,14 @@
 import { State, ensureAudioExportDefaults, normalizeAudioProject } from './state.js';
 import { Seq } from './sequence.js';
 import { Media } from './media.js';
-import { AudioPipeline } from './audio-pipeline.js';
-import { drawTimeline } from './timeline.js';
+import { AudioPipeline } from './audio-routing-engine.js';
+import { drawTimeline } from './timeline-renderer.js';
 import { renderAudioTracks } from './mixer.js';
 import { escapeHTML } from './util.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './export-job-engine.js';
-import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, monoStreamsForBuses, deliveryStreamsForPreset, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-model.js';
+import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, monoStreamsForBuses, deliveryStreamsForPreset, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-engine.js';
 
 
 function project(){

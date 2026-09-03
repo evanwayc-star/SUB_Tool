@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { isRestorable, isTerminal } = require('./export-job-status');
+const { isRestorable, isTerminal, JOB_STATUS } = require('./export-queue');
 
 const STORE_VERSION = 1;
 /* 跨多檔刪除／終態切換不能靠「依序 unlink」假裝交易：Windows 在 JSON 已刪、ASS
@@ -415,3 +415,119 @@ module.exports = {
   terminalOutcomeJournalPath,
   writeAssFile,
 };
+
+/* ==============================================================================
+   已完成匯出歷史紀錄持久化 (Queue History Store)
+   ============================================================================== */
+
+const HISTORY_VERSION = 1;
+const HISTORY_FILE = 'history.json';
+const MAX_ENTRIES = 200;
+
+function historyPath(queueDir) {
+  return path.join(queueDir, HISTORY_FILE);
+}
+
+function finiteOr(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toHistoryEntry(job) {
+  if (!job || typeof job.id !== 'string' || !job.id) return null;
+  const outPath = job.payload?.outPath;
+  if (typeof outPath !== 'string' || !outPath.trim()) return null;
+  return {
+    id: job.id,
+    status: JOB_STATUS.DONE,
+    createdAt: finiteOr(job.createdAt, 0),
+    completedAt: finiteOr(job.completedAt, Date.now()),
+    elapsedMs: finiteOr(job.elapsedMs, 0),
+    payload: {
+      outPath,
+      duration: finiteOr(job.payload?.duration, 0),
+      format: typeof job.payload?.format === 'string' ? job.payload.format : null,
+      width: finiteOr(job.payload?.width, 0),
+      height: finiteOr(job.payload?.height, 0),
+      fps: finiteOr(job.payload?.fps, 0),
+      videoKbps: finiteOr(job.payload?.videoKbps, 0),
+      subtitleTracks: Array.isArray(job.payload?.subtitleTracks)
+        ? job.payload.subtitleTracks.filter(n => typeof n === 'string')
+        : undefined,
+      timecodeWatermark: job.payload?.timecodeWatermark ? { start: null } : null,
+    },
+  };
+}
+
+function loadHistory(queueDir) {
+  if (!queueDir) return [];
+  let raw;
+  try {
+    raw = fs.readFileSync(historyPath(queueDir), 'utf8');
+  } catch (error) {
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return [];
+  }
+  if (!parsed || parsed.version !== HISTORY_VERSION || !Array.isArray(parsed.entries)) return [];
+  const seen = new Set();
+  const entries = [];
+  for (const candidate of parsed.entries) {
+    const entry = toHistoryEntry(candidate);
+    if (!entry || seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function saveHistory(queueDir, entries) {
+  if (!queueDir) return [];
+  const trimmed = entries.slice(-MAX_ENTRIES);
+  fs.mkdirSync(queueDir, { recursive: true });
+  writeAtomic(historyPath(queueDir), `${JSON.stringify({ version: HISTORY_VERSION, entries: trimmed }, null, 2)}\n`);
+  return trimmed;
+}
+
+function appendHistory(queueDir, job) {
+  const entry = toHistoryEntry(job);
+  if (!entry) return loadHistory(queueDir);
+  const entries = loadHistory(queueDir).filter(item => item.id !== entry.id);
+  entries.push(entry);
+  return saveHistory(queueDir, entries);
+}
+
+function removeHistory(queueDir, jobId) {
+  const entries = loadHistory(queueDir);
+  const next = entries.filter(entry => entry.id !== jobId);
+  if (next.length === entries.length) return entries;
+  return saveHistory(queueDir, next);
+}
+
+function clearHistory(queueDir) {
+  if (!queueDir) return [];
+  try { fs.unlinkSync(historyPath(queueDir)); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  return [];
+}
+
+const QueueHistory = Object.freeze({
+  HISTORY_VERSION,
+  HISTORY_FILE,
+  MAX_ENTRIES,
+  historyPath,
+  toEntry: toHistoryEntry,
+  load: loadHistory,
+  save: saveHistory,
+  append: appendHistory,
+  remove: removeHistory,
+  clear: clearHistory,
+});
+
+module.exports.QueueHistory = QueueHistory;
+

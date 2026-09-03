@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { mergeRendererConfig } = require('../electron/config-policy.js');
+const { mergeRendererConfig } = require('../electron/ipc-guards.js');
 
 describe('renderer config policy', () => {
   it('keeps main-owned recent projects immutable while accepting renderer settings', () => {

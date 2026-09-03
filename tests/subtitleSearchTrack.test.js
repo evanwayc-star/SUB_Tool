@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/dom.js', () => {
@@ -16,7 +16,7 @@ vi.mock('../src/dom.js', () => {
 });
 vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
-vi.mock('../src/timeline.js', () => ({
+vi.mock('../src/timeline-renderer.js', () => ({
   renderCueBlocks: vi.fn(),
   drawTimeline: vi.fn(),
   updatePlayhead: vi.fn(),

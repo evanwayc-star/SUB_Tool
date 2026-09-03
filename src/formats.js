@@ -814,5 +814,12 @@ function splitN(str,n){
   out.push(str.slice(i)); return out;
 }
 
-export { SubFormats, splitN, decodeLegacyLineBreaks, decodeAssDialogueText };
+export function renderASS(cues, { fps, tracks = [], dropFrame = false, ...options } = {}) {
+  const { x: RX, y: RY } = ASS_PLAY_RES;
+  return SubFormats.toASS(Array.isArray(cues) ? cues : [], fps, tracks, RX, RY, {
+    ...options,
+    dropFrame,
+  });
+}
 
+export { SubFormats, splitN, decodeLegacyLineBreaks, decodeAssDialogueText };

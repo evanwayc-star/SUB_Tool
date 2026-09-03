@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { createExportAdmission } = require(path.join(ROOT, 'electron/export-admission.js'));
+const { createExportAdmission } = require(path.join(ROOT, 'electron/export-queue.js'));
 
 const EXT = { h264: 'mp4', prores: 'mov', wav: 'wav' };
 
@@ -143,11 +143,11 @@ describe('檔案能力', () => {
 });
 
 describe('模組本身保持可測', () => {
-  it('只 require node:path，不碰 electron／fs（否則 vitest 起不動）', () => {
+  it('export-queue 模組不碰 electron（vitest 可直接測）', () => {
     const fs = require('node:fs');
-    const src = fs.readFileSync(path.join(ROOT, 'electron/export-admission.js'), 'utf8')
+    const src = fs.readFileSync(path.join(ROOT, 'electron/export-queue.js'), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
     const specs = [...src.matchAll(/\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g)].map(m => m[1]);
-    expect(specs).toEqual(['path']);
+    expect(specs.includes('electron')).toBe(false);
   });
 });

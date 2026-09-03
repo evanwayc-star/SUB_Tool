@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const domMock = vi.hoisted(() => {
@@ -29,7 +29,7 @@ vi.mock('../src/ui.js', () => ({
   setStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
-vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
 
 const deferred = () => {
   let resolve, reject;

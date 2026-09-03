@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 /* 「這條聲道現在聽得到嗎」的判定必須只有一份。
 
    以前有兩份：media.js 的 projectRouteState（applyGains 用，含外部素材的
@@ -36,7 +36,7 @@ vi.mock('../src/ui.js', () => ({
   setStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
-vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
 
 let Media, State;
 

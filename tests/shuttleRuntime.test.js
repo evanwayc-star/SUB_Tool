@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createMediaPresentationCore } from '../src/media-presentation-core.js';
-import { createReverseShuttleSession } from '../src/shuttle-runtime.js';
+import { createReverseShuttleSession } from '../src/transport-controller.js';
 
 function deferred() {
   let resolve;

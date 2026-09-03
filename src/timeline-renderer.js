@@ -25,13 +25,10 @@
    - 繪製函式中 (特別是 requestAnimationFrame 的迴圈)，【絕對禁止】頻繁呼叫
      引起 Reflow 的屬性 (如 offsetWidth, clientHeight)。請改讀取緩存的 `viewportW` 變數。
 ============================================================================== */
-import { paintClipBlocks } from './painters/clip-painter.js';
-import { paintSubtitleBlocks } from './painters/subtitle-painter.js';
-import { paintClipWave } from './painters/waveform-painter.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv } from './dom.js';
 import { fitScale } from './image-compositor-engine.js'; // 「符合視窗」與匯出共用同一條 contain 公式
 import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks, newId,
-  setSelection, deselect, pruneSelection, focusTrackKind } from './state.js';
+  setSelection, deselect, pruneSelection, focusTrackKind, clearSelection } from './state.js';
 import { clamp, pad, escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow } from './subtitles.js';
@@ -42,6 +39,7 @@ import { isProjectGuardDone, ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
+import { refreshMpvSubs } from './video-renderer.js';
 import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
 import {
   beginTimelineGestureLifecycle,
@@ -66,8 +64,8 @@ const { RULER_H, ROW_H } = L;
 
 /* 影片序列：獨立視訊軌列容器（在專案音訊軌上方），與字幕軌列同一套「列＋列頭」機制。
    容器 pointer-events:none、片段本身 auto——空白處仍可拖曳捲動/框選。 */
-const tlVtracks=document.getElementById('tlVtracks');
-const tlAtracks=document.getElementById('tlAtracks');
+const tlVtracks = typeof document !== 'undefined' ? document.getElementById('tlVtracks') : null;
+const tlAtracks = typeof document !== 'undefined' ? document.getElementById('tlAtracks') : null;
 function trackH(tk){ return L.trackH(State.tracks, tk); }
 function _tracksHeight(){ return L.tracksHeight(State.tracks, State.trackCount); }
 function yToTrack(y){ return L.yToTrack(State.tracks, State.trackCount, y); }
@@ -1156,7 +1154,7 @@ function drawTimeline(){
   syncVideoTracks(); layoutTimeline(); drawRuler(); drawWave(); renderVtrackGutter(); renderAtrackGutter(); renderTrackRows(); updatePlayhead();
 }
 /* 時間軸捲動 */
-tlScroll.addEventListener('scroll',()=>{
+tlScroll?.addEventListener?.('scroll',()=>{
   State.viewStart=tlScroll.scrollLeft/State.pxPerSec;
   drawRuler();drawWave();
   // 重新定位 layer 內容（sticky 已固定，重畫即可）
@@ -1170,7 +1168,7 @@ tlScroll.addEventListener('scroll',()=>{
 
 
 /* 點擊任何地方都會確認正在編輯的軌道名稱（capture 階段先於 preventDefault） */
-document.addEventListener('mousedown',e=>{
+if (typeof document !== 'undefined') document.addEventListener('mousedown',e=>{
   const gn=document.querySelector('.gname[contenteditable="true"]');
   if(gn&&!gn.contains(e.target)) gn.blur();
 },true);
@@ -1204,7 +1202,7 @@ function beginRendererGesture(mode,{targets=[],context={}}={}){
   });
 }
 
-tlScroll.addEventListener('mousedown',e=>{
+tlScroll?.addEventListener?.('mousedown',e=>{
   if(e.button!==0)return;
   if(drag) cancelTimelineDrag();
   hideCtx();
@@ -1546,7 +1544,7 @@ function updateSnapGuide(snTime = null) {
   }
 }
 
-tlLayer.addEventListener('mousemove', e => {
+tlLayer?.addEventListener?.('mousemove', e => {
   if (drag) return; // dragging handles its own snap guide
   const rect = tlLayer.getBoundingClientRect();
   const x = e.clientX - rect.left;
@@ -1557,10 +1555,11 @@ tlLayer.addEventListener('mousemove', e => {
   if (sn !== t) updateSnapGuide(sn);
   else updateSnapGuide(null);
 });
-tlLayer.addEventListener('mouseleave', () => {
+tlLayer?.addEventListener?.('mouseleave', () => {
   if (!drag) updateSnapGuide(null);
 });
 
+if (typeof window !== 'undefined') {
 window.addEventListener('mousemove',e=>{
   if(!drag)return;
   drag.lastEvent = e;
@@ -1667,9 +1666,10 @@ window.addEventListener('mouseup',e=>{
 
 window.addEventListener('blur',cancelTimelineDrag);
 window.addEventListener('pointercancel',cancelTimelineDrag,true);
+}
 
 /* 滾輪縮放（Ctrl）/ 平移 / 逐格 */
-tlScroll.addEventListener('wheel',e=>{
+tlScroll?.addEventListener?.('wheel',e=>{
   if(e.ctrlKey||e.metaKey){
     e.preventDefault();
     const factor = Math.pow(2, -e.deltaY / 500);
@@ -1733,7 +1733,7 @@ export function moveSelectedToTrack(target){
 export function setZoom(px,centerTime){
   const c = centerTime!=null?centerTime:Media.displayTime();
   State.pxPerSec=clamp(px,0.1,4000);
-  $('zoomBar').value=clamp(State.pxPerSec,0.1,4000);
+  const zb = $('zoomBar'); if (zb) zb.value = clamp(State.pxPerSec, 0.1, 4000);
   layoutTimeline();
   const target=c*State.pxPerSec - viewportW()/2;
   tlScroll.scrollLeft=clamp(target,0,Math.max(0,tlTotal()*State.pxPerSec-viewportW()));
@@ -1768,6 +1768,170 @@ export function zoomFitVideo(){
 }
 
 
+
+export function doAddTrack() {
+  addTrack();
+}
+
+export function zoomIn() {
+  setZoom(State.pxPerSec * 1.3);
+}
+
+export function zoomOut() {
+  setZoom(State.pxPerSec * 0.77);
+}
+
+export function toggleZoomFit() {
+  if (window._lastZoomMode === 'fit') { zoomFitVideo(); window._lastZoomMode = 'video'; }
+  else { zoomFit(); window._lastZoomMode = 'fit'; }
+}
+
+export function toggleVideoTracks() {
+  State.vtracksCollapsed = !State.vtracksCollapsed;
+  const btn = document.getElementById('btnToggleVtracks');
+  if (btn) btn.style.opacity = State.vtracksCollapsed ? '0.4' : '1';
+  drawTimeline();
+}
+
+export function toggleAllVisibility() {
+  const buses = State.audioProject?.buses || [];
+  const anyVis = State.tracks.some(t => t.visible !== false) || State.videoTracks.some(t => t.visible !== false) || buses.some(t => t.visible !== false);
+  State.tracks.forEach(t => t.visible = !anyVis);
+  State.videoTracks.forEach(t => t.visible = !anyVis);
+  buses.forEach(t => t.visible = !anyVis);
+  recordHistory(anyVis ? '隱藏全部軌道' : '顯示全部軌道');
+  drawTimeline(); emit('render:videoSub'); refreshMpvSubs();
+}
+
+export function toggleAllLock() {
+  const buses = State.audioProject?.buses || [];
+  const extAudio = Media.externalAudioSources || [];
+  const anyUnlocked = State.tracks.some(t => !t.locked) || State.videoTracks.some(t => !t.locked) || buses.some(t => !t.locked) || State.clips.some(c => !c.locked) || extAudio.some(a => !a.locked);
+  State.tracks.forEach(t => t.locked = anyUnlocked);
+  State.videoTracks.forEach(t => t.locked = anyUnlocked);
+  buses.forEach(t => t.locked = anyUnlocked);
+  State.clips.forEach(c => c.locked = anyUnlocked);
+  extAudio.forEach(a => a.locked = anyUnlocked);
+  recordHistory(anyUnlocked ? '鎖定全部軌道' : '解鎖全部軌道');
+  if (!anyUnlocked) { clearSelection(); const el = document.getElementById('stSel'); if (el) el.textContent = ''; }
+  drawTimeline();
+}
+
+export function paintClipBlocks(container, displayList) {
+  if (!container) return;
+  container.innerHTML = '';
+  
+  const rowByV = [];
+  for (const rowConfig of (displayList.rows || [])) {
+    const row = document.createElement('div');
+    row.className = 'vtrack-row' + (rowConfig.visible ? '' : ' hidden-tk');
+    row.style.top = rowConfig.top + 'px';
+    row.style.height = rowConfig.height + 'px';
+    row.dataset.vtrack = rowConfig.vtrack;
+    container.appendChild(row);
+    rowByV[rowConfig.vtrack] = row;
+  }
+
+  for (const c of (displayList.clips || [])) {
+    const row = rowByV[c.vtrack] || rowByV[0];
+    if (!row) continue;
+    const el = document.createElement('div');
+    let cls = 'clip-block';
+    if (c.active) cls += ' active';
+    if (c.selected) cls += ' selected';
+    if (c.locked) cls += ' locked';
+    el.className = cls;
+    el.style.left = c.x + 'px';
+    el.style.width = Math.max(6, c.w) + 'px';
+    el.dataset.clipId = c.id;
+    el.dataset.vtrack = c.vtrack;
+    
+    try {
+      const icon = c.isImg ? '🖼️' : '🎬';
+      const trimmedMarker = c.trimmed ? ' ✂' : '';
+      const fadeMarker = c.hasFade ? ' ⌁' : '';
+      el.innerHTML = `<div class="edge l"></div><div class="clip-label">${icon} ${c.escapedName}${trimmedMarker}${fadeMarker}</div><div class="edge r"></div>`;
+      row.appendChild(el);
+    } catch(err) {
+      console.error('renderClipBlocks error on clip', c, err);
+      el.innerHTML = `<div class="edge l"></div><div class="clip-label">⚠️ ERROR</div><div class="edge r"></div>`;
+      row.appendChild(el);
+    }
+  }
+}
+
+export function paintSubtitleBlocks(trackRows, displayList) {
+  for (const row of trackRows) {
+    row.querySelectorAll('.cue-block, .cue-overlap').forEach(e => e.remove());
+  }
+
+  for (const c of (displayList.cues || [])) {
+    const row = trackRows[Math.min(c.track, trackRows.length - 1)];
+    if (!row) continue;
+    const el = document.createElement('div');
+    let cls = 'cue-block';
+    if (c.selected) cls += ' sel';
+    if (c.selectedMulti) cls += ' multi';
+    if (c.primary) cls += ' primary';
+    el.className = cls;
+    el.style.left = c.x + 'px';
+    el.style.width = Math.max(2, c.w) + 'px';
+    el.dataset.id = c.id;
+    const styleMarker = c.hasStyle ? '<span title="此句有樣式覆蓋" style="color:var(--accent)">✱ </span>' : '';
+    const displayIndex = c.isLast ? `${c.cueIndex} ＃` : c.cueIndex;
+    const idxHtml = c.cueIndex ? `<div style="padding:0 8px 0 12px;font-size:12px;font-weight:600;color:rgba(255,255,255,0.7);pointer-events:none;display:flex;align-items:center;">${displayIndex}</div>` : '';
+    el.innerHTML = '<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;padding:0 6px;">' + styleMarker + c.htmlText + '</div>' + idxHtml + '<div class="edge r"></div>';
+    row.appendChild(el);
+  }
+
+  for (const ov of (displayList.overlaps || [])) {
+    const row = trackRows[Math.min(ov.track, trackRows.length - 1)];
+    if (!row) continue;
+    const el = document.createElement('div');
+    el.className = 'cue-overlap';
+    el.style.left = ov.x + 'px';
+    el.style.width = Math.max(2, ov.w) + 'px';
+    el.dataset.id1 = ov.id1;
+    el.dataset.id2 = ov.id2;
+    row.appendChild(el);
+  }
+}
+
+export function paintClipWave(ctx, displayList) {
+  const { Hpx, cvw, res, n, pk, dpr, timeToXMap } = displayList;
+  
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  const mid = Hpx / 2;
+  const amp = Hpx * 1.2;
+  
+  ctx.strokeStyle = 'rgba(190,230,255,.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  
+  for (let cx = 0; cx < cvw; cx++) {
+    const t1 = timeToXMap[cx];
+    const b = Math.floor(t1 * res);
+    if (b < 0 || b >= n) continue;
+    
+    let mn = pk[b * 2];
+    let mx = pk[b * 2 + 1];
+    
+    const t2 = timeToXMap[cx + 1] || t1;
+    const b2 = Math.min(n - 1, Math.floor(t2 * res));
+    
+    for (let k = b + 1; k <= b2; k++) {
+      if (pk[k * 2] < mn) mn = pk[k * 2];
+      if (pk[k * 2 + 1] > mx) mx = pk[k * 2 + 1];
+    }
+    
+    ctx.moveTo(cx + 0.5, mid - mx * amp);
+    ctx.lineTo(cx + 0.5, mid - mn * amp);
+  }
+  
+  ctx.stroke();
+  ctx.restore();
+}
 
 export { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, 
   layoutTimeline, drawTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks,

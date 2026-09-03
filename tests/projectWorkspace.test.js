@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { createProjectWorkspace } = require('../electron/project-workspace.js');
+const { createProjectWorkspace } = require('../electron/project-file-authority-engine.js');
 
 const bytes = project => Buffer.from(JSON.stringify(project));
 

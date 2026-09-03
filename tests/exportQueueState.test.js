@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { ExportQueueState } = require('../electron/export-queue-state');
+const { ExportQueueState } = require('../electron/export-queue');
 
 function job(id, status = 'queued', extra = {}) {
   return {

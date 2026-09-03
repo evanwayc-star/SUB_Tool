@@ -60,7 +60,7 @@ const mediaPrivateFence = {
 
 /* Media 實作的一部分——可以碰 Media 的私有欄位。
    清單刻意短：每多一個，就代表 Media 的實作又散到一個檔案。 */
-const MEDIA_INTERNAL_FILES = ['src/media.js', 'src/loaders/media-loader.js', 'src/waveform-decoder.js'];
+const MEDIA_INTERNAL_FILES = ['src/media.js', 'src/media-loader.js', 'src/waveform-decoder.js'];
 
 const encapsulationFences = [selectionFence, mediaPrivateFence];
 

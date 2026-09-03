@@ -1,5 +1,4 @@
-import { startAppTicker } from './app-ticker.js';
-import { StylePanelController } from './ui/style-panel-controller.js';
+import { StylePanelController } from './style-panel-controller.js';
 import { bindNumberInputWheel } from './keybinding-engine.js';
 import { initMediaView } from './video-renderer.js';
 import { bindPlayerFullscreen } from './media-player-adapter.js';
@@ -39,16 +38,14 @@ import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assTo
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
 import { createCommands } from './commands.js';
-import { renderPointerSeekControl, requestPointerSeek } from './timeline-interaction-engine.js';
-import { renderQueueMonitorIndicator } from './ui/queue-monitor-indicator.js';
-import { renderAsrIndicator } from './ui/asr-indicator.js';
+import { renderPointerSeekControl, requestPointerSeek, timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction-engine.js';
 import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
-import { togglePanel } from './ui.js';
-import { applyCueStylePatch } from './style-commands.js';
+import { togglePanel, renderQueueMonitorIndicator, renderAsrIndicator } from './ui.js';
+import { applyCueStylePatch } from './subtitle-style-engine.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { AudioRouting } from './audio-routing.js';
-import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, timeToX, xToTime, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, snapTargets, snapVal, cueNeighborBounds } from './timeline.js';
+import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline-renderer.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount } from './subtitles.js';
 import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames } from './subtitle-model.js';
 import { searchUpdate, searchNav, searchReplace, searchSelectAll, replaceOne } from './subtitle-search.js';
@@ -945,7 +942,68 @@ function updateConfigUI() {
     btn.classList.toggle('del', !State.overwriteKeep);
   });
   renderPointerSeekControl();
+}
 
+let _rafFrame = 0, _rafLastIdx = 0;
+let _rafId = null;
+
+function rafLoop(renderVideoSubCallback) {
+  if (Media.playing) {
+    Media.seqTick();
+    const t = Media.displayTime();
+    if (!video.src || Media.inGap()) {
+      $('tcCur').textContent = secToEncore(t, State.fps, State.dropFrame);
+      renderSeekBar($('seekBar'), t);
+    }
+    if (window._ensurePlayheadVisible) window._ensurePlayheadVisible();
+    updatePlayhead();
+    renderVideoSubCallback();
+    if (Wave.live) { Wave.captureLive(); if ((_rafFrame++ % 6) === 0) drawWave(); }
+    
+    const _t = t + 0.001;
+    let act = null;
+    if (_rafLastIdx >= 0 && _rafLastIdx < State.cues.length) {
+      const lc = State.cues[_rafLastIdx];
+      if (lc.timed !== false && _t >= lc.start && _t <= lc.end) act = lc;
+    }
+    if (!act) {
+      const lo = Math.max(0, _rafLastIdx - 2), hi = Math.min(State.cues.length - 1, _rafLastIdx + 2);
+      for (let i = lo; i <= hi; i++) {
+        const c = State.cues[i]; if (c && c.timed !== false && _t >= c.start && _t <= c.end) { act = c; _rafLastIdx = i; break; }
+      }
+    }
+    if (!act) {
+      for (let i = 0; i < State.cues.length; i++) {
+        const c = State.cues[i]; if (c.timed !== false && _t >= c.start && _t <= c.end) { act = c; _rafLastIdx = i; break; }
+      }
+    }
+    if (act && act.id !== State.activeId) {
+      State.activeId = act.id;
+      if (window._markActiveRow) window._markActiveRow(act.id);
+    }
+
+    if (State.autoSelect) {
+      const tk = State.listTrack || 0;
+      if (act && (act.track || 0) === tk && act.id !== State.selectedId) {
+        const editing = document.activeElement && document.activeElement.classList.contains('txt') && document.activeElement.contentEditable === 'true';
+        if (!editing) {
+          selectCueSingle(act.id, false);
+        }
+      }
+    }
+
+    if (State.notes.length && $('notesPanel').classList.contains('show')) updateNoteActive(t);
+    Media.syncAudioDrift();
+  }
+  try { WCPreview.tick(); } catch (e) {}
+  try { Media.applyPreviewFade(); } catch (e) {}
+  updateMeters();
+  _rafId = requestAnimationFrame(() => rafLoop(renderVideoSubCallback));
+}
+
+function startAppTicker(renderVideoSubCallback) {
+  if (_rafId) cancelAnimationFrame(_rafId);
+  _rafId = requestAnimationFrame(() => rafLoop(renderVideoSubCallback));
 }
 
 async function init(){

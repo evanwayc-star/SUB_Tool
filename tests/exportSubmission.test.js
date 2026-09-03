@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { createDeliveryList } from '../src/delivery-list.js';
-import { buildExportJobs, freezeExportSubmission, subtitleCuesForSubmission, runFrozenExportSubmission } from '../src/export-delivery-engine.js';
+import { buildExportJobs, freezeExportSubmission, subtitleCuesForSubmission, runFrozenExportSubmission } from '../src/subio.js';
 import { runVideoExportCommand, videoExportCapability } from '../src/export-job-engine.js';
 import fs from 'node:fs';
 import path from 'node:path';

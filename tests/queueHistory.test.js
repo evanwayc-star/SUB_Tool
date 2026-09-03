@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const QueueHistory = require(path.join(ROOT, 'electron/queue-history.js'));
+const { QueueHistory } = require(path.join(ROOT, 'electron/queue-store.js'));
 
 const dirs = new Set();
 function makeDir() {

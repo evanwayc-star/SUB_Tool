@@ -19,7 +19,7 @@ import { createRequire } from 'node:module';
 import { sanitizeFolderSegment, sanitizeFileNameSegment, presetExportRelativePath } from '../src/export-job-engine.js';
 
 const require = createRequire(import.meta.url);
-const { isPathContained } = require('../electron/export-name-safety.js');
+const { isPathContained } = require('../electron/file-authority.js');
 
 const ATTACKS = [
   '../../../../Windows/System32',

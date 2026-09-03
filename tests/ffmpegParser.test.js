@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { FFmpegOutputParser, FFmpegErrorAnalyzer } from '../electron/ffmpeg-parser.js';
+import { FFmpegOutputParser, FFmpegErrorAnalyzer } from '../electron/ffmpeg-execution-engine.js';
 
 describe('FFmpegOutputParser', () => {
   it('parses stream maps correctly', () => {

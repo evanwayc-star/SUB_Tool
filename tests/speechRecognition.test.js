@@ -22,10 +22,9 @@ import {
   callGeminiAudioTranscription
 } from '../src/speech-recognition-engine.js';
 import {
+  CLOUD_PROVIDER_META,
   getAsrGuidanceMeta,
-  resolveAsrGuidance
-} from '../src/recognition-guidance.js';
-import {
+  resolveAsrGuidance,
   insertAsrSubtitles,
   getAsrConfig,
   saveAsrConfig,

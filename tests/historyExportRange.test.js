@@ -1,7 +1,7 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 vi.mock('../src/ui.js', () => ({ setStatus: vi.fn() }));
 

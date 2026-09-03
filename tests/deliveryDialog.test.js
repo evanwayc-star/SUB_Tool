@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const spies = vi.hoisted(() => ({
@@ -31,7 +31,7 @@ vi.mock('../src/substyle.js', async (importOriginal) => {
 vi.mock('../src/project-intake-engine.js', () => ({ buildSubtitleImportPlan: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));
-vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));
 vi.mock('../src/project.js', () => ({ Project: {} }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn() }));
 vi.mock('../src/xlsx-export.js', () => ({ buildXLSX: vi.fn() }));

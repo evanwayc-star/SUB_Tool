@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TimelineTransport } from '../src/timeline-transport.js';
+import { TimelineTransport } from '../src/media.js';
 
 function createClock(){
   let now = 0;

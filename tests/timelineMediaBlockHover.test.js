@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { paintClipBlocks } from '../src/painters/clip-painter.js';
+vi.hoisted(() => {
+  document.body.innerHTML = `
+    <div id="tlScroll"><div id="tlLayer"></div><div id="tlTracks"></div></div>
+    <canvas id="rulerCanvas"></canvas>
+  `;
+});
+
+import { paintClipBlocks } from '../src/timeline-renderer.js';
 
 describe('時間軸素材區塊的懸停行為', () => {
   it('音訊素材區塊本身不設定原生 title，滑鼠停留時不會跳出多行資訊框', () => {

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const domMock=vi.hoisted(()=>{
@@ -17,7 +17,7 @@ vi.mock('../src/dom.js',()=>domMock);
 vi.mock('../src/events.js',()=>({emit:vi.fn(),on:vi.fn()}));
 vi.mock('../src/ui.js',()=>({setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
 vi.mock('../src/mixer.js',()=>({renderAudioTracks:vi.fn(),clearMeterStrips:vi.fn()}));
-vi.mock('../src/timeline.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()}));
+vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()}));
 
 import { State } from '../src/state.js';
 import { Media } from '../src/media.js';

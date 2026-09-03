@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+﻿import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -73,7 +73,7 @@ describe('release transaction', () => {
       version: '6.3.31',
       date: '2026-08-20',
       body: '### 修復\n\n- 外部音訊在前段 gap 仍會持續播放。\n\n### 驗證\n\n- 行為測試通過。',
-      sourceFiles: ['src/playback-sync-engine.js'],
+      sourceFiles: ['src/media-presentation-core.js'],
     });
 
     expect(result).toEqual({
@@ -106,7 +106,7 @@ describe('release transaction', () => {
       version: '6.3.31',
       date: '2026-08-20',
       body: '### 修復\n\n- 修正播放同步。\n\n### 驗證\n\n- 行為測試通過。',
-      sourceFiles: ['src/playback-sync-engine.js'],
+      sourceFiles: ['src/media-presentation-core.js'],
     });
 
     for (const file of ['package.json', 'package-lock.json', 'CHANGELOG.md']) {
@@ -139,7 +139,7 @@ describe('release transaction', () => {
 
   it('驗證跨平台換行並拒絕目前版本重複', () => {
     const rootDir = createRepositoryFixture();
-    const sourceFiles = ['src/playback-sync-engine.js'];
+    const sourceFiles = ['src/media-presentation-core.js'];
     prepareRelease({
       rootDir,
       changelogPath: 'CHANGELOG.md',
@@ -152,7 +152,7 @@ describe('release transaction', () => {
     expect(verifyReleaseState({ rootDir, changelogPath: 'CHANGELOG.md', sourceFiles })).toEqual({
       version: '6.3.31',
       firstVersion: '6.3.31',
-      productionSourceFiles: ['src/playback-sync-engine.js'],
+      productionSourceFiles: ['src/media-presentation-core.js'],
     });
 
     const changelogPath = path.join(rootDir, 'CHANGELOG.md');
@@ -167,7 +167,7 @@ describe('release transaction', () => {
 
   it('保留不同日期重用舊版號的歷史事實', () => {
     const rootDir = createRepositoryFixture();
-    const sourceFiles = ['src/playback-sync-engine.js'];
+    const sourceFiles = ['src/media-presentation-core.js'];
     prepareRelease({
       rootDir,
       changelogPath: 'CHANGELOG.md',
@@ -351,7 +351,7 @@ describe('release transaction', () => {
       version: '6.3.31',
       date: '2026-08-20',
       body: '### 修復\n\n- 修正播放同步。',
-      sourceFiles: ['src/playback-sync-engine.js'],
+      sourceFiles: ['src/media-presentation-core.js'],
     })).toThrow(/warning/i);
 
     expect(readFileSync(path.join(rootDir, 'package.json'), 'utf8')).toBe(packageBefore);
@@ -379,7 +379,7 @@ describe('release transaction', () => {
         version: '6.3.31',
         date: '2026-08-20',
         body: '### 修復\n\n- 修正播放同步。\n\n### 驗證\n\n- 行為測試通過。',
-        sourceFiles: ['src/playback-sync-engine.js'],
+        sourceFiles: ['src/media-presentation-core.js'],
       })).toThrow(/simulated disk failure/i);
     } finally {
       writeSpy.mockRestore();
@@ -399,7 +399,7 @@ describe('release transaction', () => {
       version: '6.3.31',
       date: '2026-08-20',
       body: '### 修復\n\n- 只說修了什麼，沒有記錄怎麼驗。',
-      sourceFiles: ['src/playback-sync-engine.js'],
+      sourceFiles: ['src/media-presentation-core.js'],
     })).toThrow(/verification section/i);
   });
 
@@ -415,7 +415,7 @@ describe('release transaction', () => {
       version: '6.3.31',
       date: '2026-08-20',
       body: '### 修復\n\n- 修正播放同步。\n\n### 驗證',
-      sourceFiles: ['src/playback-sync-engine.js'],
+      sourceFiles: ['src/media-presentation-core.js'],
     })).toThrow(/verification evidence/i);
 
     expect(readFileSync(path.join(rootDir, 'package.json'), 'utf8')).toBe(packageBefore);
@@ -433,7 +433,7 @@ describe('release transaction', () => {
       version: '6.3.31',
       date: '2026-08-20',
       body: '### 修復\n\n- 合法內文。\n\n### 驗證\n\n- 測試通過。\n\n## [v9.9.9] - 2099-01-01',
-      sourceFiles: ['src/playback-sync-engine.js'],
+      sourceFiles: ['src/media-presentation-core.js'],
     })).toThrow(/must not contain a version heading/i);
 
     expect(readFileSync(path.join(rootDir, 'CHANGELOG.md'), 'utf8')).toBe(changelogBefore);
@@ -450,7 +450,7 @@ describe('release transaction', () => {
       version: '6.3.31',
       date: '2026-08-20',
       body: '### 修復\n\n- 合法內文。\n\n### 驗證\n\n- 測試通過。\n\n ## [v9.9.9] - 2099-01-01',
-      sourceFiles: ['src/playback-sync-engine.js'],
+      sourceFiles: ['src/media-presentation-core.js'],
     })).toThrow(/must not contain a version heading/i);
 
     expect(readFileSync(changelogPath, 'utf8')).toBe(changelogBefore);
@@ -458,7 +458,7 @@ describe('release transaction', () => {
 
   it('verify 也拒絕手動縮排加入的目前版本標題', () => {
     const rootDir = createRepositoryFixture();
-    const sourceFiles = ['src/playback-sync-engine.js'];
+    const sourceFiles = ['src/media-presentation-core.js'];
     prepareRelease({
       rootDir,
       changelogPath: 'CHANGELOG.md',

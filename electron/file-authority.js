@@ -364,6 +364,22 @@ class FileAuthority {
   }
 }
 
+/**
+ * 檢查指定的子路徑或檔名在解析後是否嚴格位於根目錄範圍之內（防範路徑穿越）。
+ * 
+ * @param {string} root 使用者選擇的輸出根目錄絕對路徑
+ * @param {string} name 欲輸出的相對路徑或檔名
+ * @returns {boolean} 若完整路徑落在 root 目錄內（或剛好為 root）則回傳 true，否則回傳 false
+ */
+function isPathContained(root, name) {
+  if (typeof root !== 'string' || !root || typeof name !== 'string') {
+    return false;
+  }
+  const r = path.resolve(root);
+  const full = path.resolve(r, name);
+  return full === r || full.startsWith(r + path.sep);
+}
+
 module.exports = {
   FileAuthority,
   PROJECT_FILE,
@@ -373,4 +389,6 @@ module.exports = {
   collectProjectMediaPaths,
   collectProjectMediaPathsFromBuffer,
   parseProjectBuffer,
+  isPathContained,
 };
+

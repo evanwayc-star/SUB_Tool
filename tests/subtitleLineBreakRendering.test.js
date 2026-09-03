@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { renderASS } from '../src/subtitle-snapshot-engine.js';
+import { renderASS } from '../src/formats.js';
 import { STYLE_DEFAULTS } from '../src/substyle.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

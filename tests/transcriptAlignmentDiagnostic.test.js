@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTranscriptAlignmentDiagnostic } from '../src/transcript-alignment-diagnostic.js';
+import { buildTranscriptAlignmentDiagnostic } from '../src/transcript-alignment.js';
 
 describe('文本匹配安全診斷資料', () => {
   it('只匯出解析後的文字與時間，並以一基行號列出不可靠行', () => {

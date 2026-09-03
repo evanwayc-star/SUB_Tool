@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mediaMock = vi.hoisted(() => ({
@@ -12,7 +12,7 @@ const mediaMock = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/media.js', () => ({ Media: mediaMock }));
-vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 vi.mock('../src/ui.js', () => ({
   openModal: vi.fn(),

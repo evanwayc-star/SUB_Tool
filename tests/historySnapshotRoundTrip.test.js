@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 /* 復原快照的**往返**：snap() 寫進去的每一個欄位，restore() 都要讀回來。
 
    History.snap() 目前收 12 個欄位。它與 restore() 是兩份手寫清單，
@@ -15,7 +15,7 @@
    由另一支模組序列化的，兩邊同樣是兩份手寫清單。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 vi.mock('../src/ui.js', () => ({ setStatus: vi.fn() }));
 

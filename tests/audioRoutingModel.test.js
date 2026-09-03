@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { AudioRoutingModel, DELIVERY_PRESETS, resizeProjectAudioBuses } from '../src/audio-routing-model.js';
+import { AudioRoutingModel, DELIVERY_PRESETS, resizeProjectAudioBuses } from '../src/audio-routing-engine.js';
 import { normalizeAudioProject } from '../src/state.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

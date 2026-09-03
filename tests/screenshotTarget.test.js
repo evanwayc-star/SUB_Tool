@@ -4,7 +4,7 @@
    全專案唯一不可被其他模組 import 的檔案，所以住在那裡的東西
    **結構上就測不到**——搬出來之後才有這支測試。 */
 import { describe, expect, it } from 'vitest';
-import { fallbackScreenshotName, screenshotDir, timecodeSuffix } from '../src/screenshot-target.js';
+import { fallbackScreenshotName, screenshotDir, timecodeSuffix } from '../src/commands.js';
 
 describe('時間碼後綴', () => {
   it('冒號換成連字號（Windows 檔名不允許冒號）', () => {

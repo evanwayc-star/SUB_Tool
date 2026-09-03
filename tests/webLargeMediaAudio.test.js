@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 /* 網頁版不能把超過 ffmpeg.wasm 上限的大型多音軌檔案誤呈現成完整音訊。
    這支測試執行真的 Media.probeAndMaybeExtract() 與 mixer render，鎖住使用者看得到的
    持續警告；不是掃原始碼裡有沒有某段文字。 */
@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../src/ui.js', () => ({
   setStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
-vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
 
 let Media, Wave, State, renderAudioTracks;
 

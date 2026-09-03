@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { renderQueueMonitorIndicator } from '../src/ui/queue-monitor-indicator.js';
+import { renderQueueMonitorIndicator } from '../src/ui.js';
 
 describe('監控序列圓形進度環', () => {
   let button;

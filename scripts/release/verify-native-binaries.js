@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { bundledNativeRequirements } = require('../../electron/native-tooling');
+const { bundledNativeRequirements } = require('../../electron/ffmpeg-execution-engine');
 
 const MIN_BYTES = {
   ffmpeg: 10 * 1024 * 1024,

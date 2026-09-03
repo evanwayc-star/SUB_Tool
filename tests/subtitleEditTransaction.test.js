@@ -45,7 +45,7 @@ beforeAll(async () => {
   Subtitles = await import('../src/subtitles.js');
   ({ Media } = await import('../src/media.js'));
   await import('../src/transport-controller.js');
-  ({ StylePanelController } = await import('../src/ui/style-panel-controller.js'));
+  ({ StylePanelController } = await import('../src/style-panel-controller.js'));
   StylePanelController.bindStylePanelEvents({
     renderAll: Subtitles.renderSubList,
     renderVideoSub: Subtitles.renderSubList,

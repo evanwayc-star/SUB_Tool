@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 /* 開啟另一個專案前的「未存檔變更」確認（src/project.js confirmDiscardUnsaved）。
 
    真實災情：手上有兩份 .subtool。已經開著其中一份並改了東西，再從 Explorer 雙擊
@@ -26,7 +26,7 @@ vi.mock('../src/media.js', () => ({ Media: {
   seek: vi.fn(),
   waitForPendingProjectRestore: vi.fn().mockResolvedValue(),
 } }));
-vi.mock('../src/timeline.js', () => ({ drawTimeline: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 
 let Project;

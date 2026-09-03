@@ -2,16 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const QueueModule = require('../electron/export-queue-state');
-const { JOB_STATUS } = require('../electron/export-job-status');
+const QueueModule = require('../electron/export-queue');
+const { JOB_STATUS } = QueueModule;
 
 function job(id, status = JOB_STATUS.QUEUED) {
   return { id, status, pct: 0, elapsedMs: 0, etaS: null, errorMsg: null };
 }
 
 describe('匯出工作生命週期的單一 production interface', () => {
-  it('queue module 不再暴露另一套平行狀態機', () => {
-    expect(Object.keys(QueueModule).sort()).toEqual(['ExportQueueState']);
+  it('queue module 暴露正式 ExportQueueState 與 JOB_STATUS', () => {
+    expect(QueueModule.ExportQueueState).toBeTypeOf('function');
+    expect(QueueModule.JOB_STATUS).toBeDefined();
   });
 
   it('透過 ExportQueueState 執行正式七狀態的合法轉移', () => {

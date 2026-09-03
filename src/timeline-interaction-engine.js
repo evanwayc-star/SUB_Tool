@@ -167,6 +167,7 @@ export function createPreviewDrag(deps = {}) {
   }
 
   function bindImageDomEvents(imageLayer) {
+    if (typeof document === 'undefined' || !imageLayer) return;
     function startDomImageDrag(e, pointerId=null) {
       if(e.button !== 0) return false;
       const wrap = e.target.closest?.('.img-wrap') || document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.img-wrap');

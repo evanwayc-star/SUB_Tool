@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, beforeEach } from 'vitest';
-import { renderAsrIndicator } from '../src/ui/asr-indicator.js';
+import { renderAsrIndicator } from '../src/ui.js';
 
 describe('頂部工具列語音辨識指示器 (asr-indicator)', () => {
   let button;

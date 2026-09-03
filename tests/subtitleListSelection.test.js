@@ -29,9 +29,12 @@ vi.mock('../src/media.js', () => ({
   },
   Wave: {},
 }));
-vi.mock('../src/timeline.js', () => ({
-  renderCueBlocks: vi.fn(), drawTimeline: vi.fn(), updatePlayhead: vi.fn(), refreshTrackGutterActive: vi.fn(),
+
+vi.mock('../src/timeline-renderer.js', async importOriginal => ({
+  ...(await importOriginal()),
+  renderCueBlocks: vi.fn(),
 }));
+
 
 const project = vi.hoisted(() => ({ guardDone: true, ensureProjectSaved: vi.fn() }));
 vi.mock('../src/project.js', () => ({
@@ -44,7 +47,6 @@ vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
 vi.mock('../src/keyboard.js', () => ({ jklReset: vi.fn(), nudge: vi.fn() }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));
 vi.mock('../src/subtitle-text-check.js', () => ({ inspectSubtitleCharacters: () => ({}) }));
-vi.mock('../src/subtitle-view.js', () => ({ deleteSelectedWithPrompt: vi.fn() }));
 vi.mock('../src/subtitle-audit.js', () => ({
   analyzeSubtitles: () => ({
     overlapNums: [], multiNums: [], twoNums: [], blankNums: [], bNums: [], iNums: [], uNums: [],
@@ -73,7 +75,8 @@ const defaultStyle = {
   lineSpacing: 0, outlineColor: '#000000', outline: 2, shadow: 0, bgColor: '#000000',
   bgAlpha: 0, bgBox: false,
 };
-vi.mock('../src/substyle.js', () => ({
+vi.mock('../src/substyle.js', async importOriginal => ({
+  ...(await importOriginal()),
   effStyle: cue => ({ ...defaultStyle, ...(cue?.style || {}) }),
   getAllPresets: () => [], STYLE_DEFAULTS: defaultStyle, colorName: () => '',
   posToPx: style => ({ x: Math.round(style.posX), y: Math.round(style.posY) }), styleMatchesPreset: () => false,
@@ -83,8 +86,6 @@ vi.mock('../src/time.js', () => ({
   encoreParts: () => ({ hh: 0, mm: 0, ss: 0, ff: 0 }), fmtClock: String,
   secToSRT: String, secToASS: String, getExactFps: value => value || 25,
 }));
-vi.mock('../src/painters/subtitle-painter.js', () => ({ paintSubtitleBlocks: vi.fn() }));
-vi.mock('../src/painters/waveform-painter.js', () => ({ paintClipWave: vi.fn() }));
 vi.mock('../src/timeline-edit-transaction.js', async importOriginal => ({
   ...(await importOriginal()),
   beginTimelineTrackEdit: vi.fn(),

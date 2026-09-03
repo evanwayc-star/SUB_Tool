@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 
-import { PlaybackSyncEngine } from '../src/playback-sync-engine.js';
+import { PlaybackSyncEngine } from '../src/media-presentation-core.js';
 
 function createHarness(overrides = {}) {
   const state = {

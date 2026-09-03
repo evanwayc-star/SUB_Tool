@@ -14,7 +14,8 @@ import { State, setSelection, deselect } from './state.js';
 import { Media } from './media.js';
 import { selectCueSingle, deleteSelected, cancelSwapMode, refreshSelectionUI } from './subtitles.js';
 import { sortCues, copyCues, pasteCues, cuesTrackLocked } from './subtitle-model.js';
-import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './timeline.js';
+import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline-renderer.js';
+import { deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './clip-model.js';
 import { Project } from './project.js';
 import { History, recordHistory } from './history.js';
 import { addNote } from './notes.js';
@@ -45,8 +46,9 @@ import {
   jumpToCueInMinusFrames,
   stepBoundary,
   stepMediaBoundary,
+  setIn,
+  setOut,
 } from './transport-controller.js';
-import { setIn, setOut } from './subtitle-editing.js';
 
 const _keysPressed = new Set();
 if (typeof window !== 'undefined') {

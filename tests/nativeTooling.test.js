@@ -10,7 +10,7 @@ const {
   nativeToolCandidates,
   previewVideoEncoderArgs,
   videoEncoderCandidates,
-} = require('../electron/native-tooling.js');
+} = require('../electron/ffmpeg-execution-engine.js');
 
 describe('原生工具候選路徑', () => {
   it('Apple Silicon 只產生 macOS arm64 路徑，不混入 Windows 執行檔', () => {

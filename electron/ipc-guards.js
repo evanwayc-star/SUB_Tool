@@ -119,4 +119,46 @@ function expectedExportExtension(format) {
   throw error;
 }
 
-module.exports = { createIpcGuards, expectedExportExtension };
+/** 允許由渲染端更新之布林開關設定鍵名 */
+const BOOLEAN_KEYS = Object.freeze([
+  'autoSelect',
+  'pointerSeekPauses',
+  'overwriteMode',
+  'overwriteKeep',
+  'safeFrame',
+  'timecodeWatermark',
+]);
+
+/**
+ * 依據安全白名單將渲染端設定安全合併進現有設定中。
+ * 
+ * @param {object} [current] 目前主行程儲存之完整設定物件
+ * @param {object} [incoming] 渲染端請求更新之設定補丁
+ * @returns {object} 合併後之安全新設定物件
+ */
+function mergeRendererConfig(current, incoming) {
+  const next = current && typeof current === 'object' && !Array.isArray(current)
+    ? { ...current }
+    : {};
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+    return next;
+  }
+
+  for (const key of BOOLEAN_KEYS) {
+    if (typeof incoming[key] === 'boolean') {
+      next[key] = incoming[key];
+    }
+  }
+  if (Array.isArray(incoming.subPresets)) {
+    next.subPresets = incoming.subPresets;
+  }
+  return next;
+}
+
+module.exports = {
+  createIpcGuards,
+  expectedExportExtension,
+  BOOLEAN_KEYS,
+  mergeRendererConfig,
+};
+

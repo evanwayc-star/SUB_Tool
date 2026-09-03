@@ -24,7 +24,7 @@ vi.mock('../src/media.js', () => ({ Media: {
   externalAudio: { list: () => [], get: () => null },
   seek: vi.fn(), scrubAudio: vi.fn(), pause: vi.fn(), setRate: vi.fn(),
 }, Wave: {} }));
-vi.mock('../src/timeline.js', () => ({
+vi.mock('../src/timeline-renderer.js', () => ({
   drawTimeline: vi.fn(), updatePlayhead: vi.fn(), renderCueBlocks: vi.fn(),
   refreshTrackGutterActive: vi.fn(),
 }));
@@ -145,7 +145,7 @@ describe('pasteCues 鎖定防護', () => {
 
 describe('字幕樣式命令鎖定防護', () => {
   it('單句與全軌樣式命令都不能改寫鎖定軌', async () => {
-    const { applyCueStylePatch, applyTrackStylePlan } = await import('../src/style-commands.js');
+    const { applyCueStylePatch, applyTrackStylePlan } = await import('../src/subtitles.js');
 
     expect(applyCueStylePatch(State.cues[1], { fontSize: 99 })).toBe(false);
     expect(applyTrackStylePlan(State.tracks[1], [State.cues[1]], { fontSize: 88 })).toBe(false);
@@ -156,7 +156,7 @@ describe('字幕樣式命令鎖定防護', () => {
   });
 
   it('貼上樣式到鎖定軌字幕時整批擋下且不寫入 History', async () => {
-    const { copySelectedStyle, pasteStyleToSelected } = await import('../src/style-commands.js');
+    const { copySelectedStyle, pasteStyleToSelected } = await import('../src/subtitles.js');
     const { recordHistory } = await import('../src/history.js');
     State.cues[0].style = { fontSize: 72, color: '#ff0000' };
     State.selectedId = 'a';
@@ -184,7 +184,7 @@ describe('批次 In/Out 命令鎖定防護', () => {
     const { parseTimecodeInput } = await import('../src/tcparse.js');
     parseTimecodeInput.mockReturnValue(1);
     const { recordHistory } = await import('../src/history.js');
-    const { applyTcShift, applyDurAdjTc, applyDurAdjPct } = await import('../src/timeline-edit-batch.js');
+    const { applyTcShift, applyDurAdjTc, applyDurAdjPct } = await import('../src/subio.js');
     State.selectedId = 'b';
     State.selectedIds = ['b'];
 
@@ -277,7 +277,7 @@ describe('字幕匯入鎖定防護', () => {
       <input id="importNewTkName" value="新字幕軌">
       <input id="importAppend" type="checkbox">
     `);
-    const { _openImportModal } = await import('../src/sub-parse.js');
+    const { _openImportModal } = await import('../src/subio.js');
     const original = structuredClone(State.cues);
     _openImportModal('匯入字幕', [{ start: 5, end: 6, text: '新內容' }], 'srt');
     const buttons = ui.openModal.mock.calls.at(-1)?.[2];
@@ -296,7 +296,7 @@ describe('字幕匯入鎖定防護', () => {
       <input id="importNewTkName" value="新字幕軌">
       <input id="importAppend" type="checkbox">
     `);
-    const { _openImportModal } = await import('../src/sub-parse.js');
+    const { _openImportModal } = await import('../src/subio.js');
     _openImportModal('匯入字幕', [{ start: 5, end: 6, text: '取代內容' }], 'srt');
     const buttons = ui.openModal.mock.calls.at(-1)?.[2];
 

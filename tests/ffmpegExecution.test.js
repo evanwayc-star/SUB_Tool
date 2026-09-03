@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { createFFmpegExecution } = require('../electron/ffmpeg-execution.js');
+const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 
 const tempRoots = [];
 

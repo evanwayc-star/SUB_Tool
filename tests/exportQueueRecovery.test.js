@@ -6,9 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const QueueStore = require('../electron/queue-store.js');
-const { createExportQueue } = require('../electron/export-queue.js');
-const { ExportQueueState } = require('../electron/export-queue-state.js');
-const { JOB_STATUS } = require('../electron/export-job-status.js');
+const { createExportQueue, ExportQueueState, JOB_STATUS } = require('../electron/export-queue.js');
 
 function makeQueue(queueDir, state, store = QueueStore, overrides = {}) {
   return createExportQueue({

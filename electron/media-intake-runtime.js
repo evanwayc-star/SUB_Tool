@@ -5,8 +5,69 @@ const fsp = require('fs/promises');
 const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
-const { buildAudioIngestPlan } = require('./channel-layout');
-const { buildIngestArgs } = require('./ffmpeg-pipeline-builder');
+const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
+const { buildIngestArgs } = require('./ffmpeg-execution-engine');
+
+/**
+ * ffprobe audio[] → 單次 ffmpeg ingest 的跨平台音訊規劃。
+ */
+function buildAudioIngestPlan(audio) {
+  const filters = [];
+  const channels = [];
+  const channelMaps = [];
+  const waveContribs = [];
+  const audioArr = Array.isArray(audio) ? audio : [];
+  let channelIndex = 0;
+
+  audioArr.forEach((stream, streamIndex) => {
+    const count = sourceChannelCount(stream);
+    const base = (stream && (stream.title || stream.lang)) || `音軌 ${streamIndex + 1}`;
+
+    if (count === 1) {
+      filters.push(`[0:a:${streamIndex}]asplit=2[co${channelIndex}][wv${streamIndex}]`);
+      channels.push({
+        label: base,
+        file: channelFileName(channelIndex),
+        sourceStream: streamIndex,
+        sourceChannel: 0,
+      });
+      channelMaps.push(`[co${channelIndex}]`);
+      waveContribs.push(`[wv${streamIndex}]`);
+      channelIndex++;
+      return;
+    }
+
+    const splitPads = Array.from({ length: count }, (_, sourceChannel) => `sp${streamIndex}_${sourceChannel}`);
+    filters.push(
+      `[0:a:${streamIndex}]asplit=${count + 1}${splitPads.map(pad => `[${pad}]`).join('')}[wv${streamIndex}]`,
+    );
+    for (let sourceChannel = 0; sourceChannel < count; sourceChannel++) {
+      filters.push(`[${splitPads[sourceChannel]}]pan=mono|c0=c${sourceChannel}[co${channelIndex}]`);
+      channels.push({
+        label: `${base} · 聲道${sourceChannel + 1}`,
+        file: channelFileName(channelIndex),
+        sourceStream: streamIndex,
+        sourceChannel,
+      });
+      channelMaps.push(`[co${channelIndex}]`);
+      channelIndex++;
+    }
+    const average = (1 / count).toFixed(4);
+    const sum = Array.from({ length: count }, (_, sourceChannel) => `${average}*c${sourceChannel}`).join('+');
+    filters.push(`[wv${streamIndex}]pan=mono|c0=${sum}[wm${streamIndex}]`);
+    waveContribs.push(`[wm${streamIndex}]`);
+  });
+
+  let waveLabel = null;
+  if (waveContribs.length === 1) {
+    waveLabel = waveContribs[0];
+  } else if (waveContribs.length > 1) {
+    filters.push(`${waveContribs.join('')}amix=inputs=${waveContribs.length}:normalize=0[wavemix]`);
+    waveLabel = '[wavemix]';
+  }
+
+  return { filters, channels, channelMaps, waveLabel };
+}
 
 function createMediaIntakeRuntime(options = {}) {
   const fileAuthority = options.fileAuthority;
@@ -530,4 +591,117 @@ function createMediaIntakeRuntime(options = {}) {
   });
 }
 
-module.exports = { createMediaIntakeRuntime };
+/**
+ * 轉檔被較新工作取代之自訂錯誤類型。
+ */
+class IngestSupersededError extends Error {
+  constructor() {
+    super('媒體轉檔已被較新的載入取代');
+    this.name = 'IngestSupersededError';
+    this.code = 'INGEST_SUPERSEDED';
+  }
+}
+
+/**
+ * 建立媒體轉檔排程協調器。
+ * 
+ * @param {object} [options]
+ * @param {Function} [options.killProcess] 終止行程函式注入
+ */
+function createMediaIngestCoordinator({ killProcess } = {}) {
+  const kill = typeof killProcess === 'function'
+    ? killProcess
+    : process => { try { process?.kill?.(); } catch (error) {} };
+
+  const pending = [];
+  let active = null;
+  let draining = false;
+
+  const cancel = lease => {
+    if (!lease || lease.cancelled) return;
+    lease.cancelled = true;
+    if (lease.process) kill(lease.process);
+  };
+
+  const asWorkResult = value => {
+    if (value && typeof value === 'object'
+      && (Object.prototype.hasOwnProperty.call(value, 'response')
+        || Object.prototype.hasOwnProperty.call(value, 'completion'))) {
+      return { response: value.response, completion: value.completion };
+    }
+    return { response: value, completion: null };
+  };
+
+  const drain = async () => {
+    if (draining) return;
+    draining = true;
+    try {
+      while (pending.length) {
+        const ticket = pending.shift();
+        const lease = { cancelled: false, process: null };
+        active = lease;
+        try {
+          const value = await ticket.work({
+            setProcess(process) {
+              lease.process = process || null;
+              if (lease.cancelled && lease.process) kill(lease.process);
+            },
+            isCancelled: () => lease.cancelled,
+          });
+          const { response, completion } = asWorkResult(value);
+
+          // 若等待期間已被取代，拒絕 resolve 舊回應
+          if (lease.cancelled) {
+            ticket.reject(new IngestSupersededError());
+          } else {
+            ticket.resolve(response);
+          }
+
+          // 背景寫入完成前，保持通道鎖定以確保快取寫入順序
+          if (completion) {
+            await Promise.resolve(completion).catch(() => undefined);
+          }
+        } catch (error) {
+          ticket.reject(error);
+        } finally {
+          if (active === lease) active = null;
+        }
+      }
+    } finally {
+      draining = false;
+      if (pending.length) void drain();
+    }
+  };
+
+  const submit = (work, { replace = false } = {}) => new Promise((resolve, reject) => {
+    if (typeof work !== 'function') {
+      reject(new TypeError('media ingest work must be a function'));
+      return;
+    }
+    if (replace) {
+      const superseded = new IngestSupersededError();
+      while (pending.length) pending.shift().reject(superseded);
+      cancel(active);
+    }
+    const ticket = { work, resolve, reject };
+    if (replace) pending.unshift(ticket);
+    else pending.push(ticket);
+    void drain();
+  });
+
+  return Object.freeze({
+    /** 取代目前所有等待與執行中的轉檔工作，優先執行新任務 */
+    replace: work => submit(work, { replace: true }),
+    /** 將新轉檔工作依序加入排隊佇列 */
+    enqueue: work => submit(work),
+  });
+}
+
+module.exports = {
+  createMediaIntakeRuntime,
+  createMediaIngestCoordinator,
+  IngestSupersededError,
+  buildAudioIngestPlan,
+  flattenSourceChannels,
+  channelFileName,
+};

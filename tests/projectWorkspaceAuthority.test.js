@@ -1,10 +1,11 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import {
   createProjectSnapshot,
   migrateProjectSchema,
   validateProjectIntegrity,
   CURRENT_PROJECT_SCHEMA_VERSION,
-} from '../src/project-workspace-authority.js';
+} from '../src/project.js';
 
 describe('project-workspace-authority', () => {
   it('以 production 專案檔版本建立快照，並保留傳入的領域資料', () => {

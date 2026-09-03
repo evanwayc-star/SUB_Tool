@@ -7,7 +7,7 @@ import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { emit } from './events.js';
 import { refreshSelectionUI } from './subtitles.js';
-import { refreshTrackGutterActive } from './timeline.js';
+import { refreshTrackGutterActive } from './timeline-renderer.js';
 import { secToEncore } from './time.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { escapeHTML } from './util.js';

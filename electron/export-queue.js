@@ -27,8 +27,204 @@
 
 'use strict';
 
-const { ExportQueueState } = require('./export-queue-state');
-const { JOB_STATUS, isLiveWork, isRetryable, reservesOutput } = require('./export-job-status');
+const path = require('path');
+
+/**
+ * 匯出工作狀態枚舉。
+ * @readonly
+ * @enum {string}
+ */
+const JOB_STATUS = Object.freeze({
+  QUEUED: 'queued',
+  RUNNING: 'running',
+  STOPPING: 'stopping',
+  DONE: 'done',
+  FAILED: 'failed',
+  STOPPED: 'stopped',
+  MISSING_SOURCE: 'missing-source',
+});
+
+const ALL_STATUSES = Object.freeze(Object.values(JOB_STATUS));
+
+const TERMINAL = new Set([
+  JOB_STATUS.DONE,
+  JOB_STATUS.FAILED,
+  JOB_STATUS.STOPPED,
+  JOB_STATUS.STOPPING,
+]);
+
+const RESTORABLE = new Set([
+  JOB_STATUS.QUEUED,
+  JOB_STATUS.RUNNING,
+  JOB_STATUS.MISSING_SOURCE,
+]);
+
+const LIVE_WORK = new Set([
+  JOB_STATUS.RUNNING,
+  JOB_STATUS.STOPPING,
+]);
+
+const RETRYABLE = new Set([
+  JOB_STATUS.FAILED,
+  JOB_STATUS.STOPPED,
+  JOB_STATUS.MISSING_SOURCE,
+]);
+
+const OUTPUT_RESERVED = new Set([
+  JOB_STATUS.QUEUED,
+  JOB_STATUS.RUNNING,
+  JOB_STATUS.STOPPING,
+  JOB_STATUS.MISSING_SOURCE,
+]);
+
+const TRANSITIONS = Object.freeze({
+  [JOB_STATUS.QUEUED]: [
+    JOB_STATUS.RUNNING,
+    JOB_STATUS.STOPPED,
+    JOB_STATUS.FAILED,
+    JOB_STATUS.MISSING_SOURCE,
+  ],
+  [JOB_STATUS.RUNNING]: [
+    JOB_STATUS.DONE,
+    JOB_STATUS.FAILED,
+    JOB_STATUS.STOPPING,
+    JOB_STATUS.STOPPED,
+    JOB_STATUS.QUEUED,
+    JOB_STATUS.MISSING_SOURCE,
+  ],
+  [JOB_STATUS.STOPPING]: [
+    JOB_STATUS.STOPPED,
+    JOB_STATUS.FAILED,
+    JOB_STATUS.DONE,
+    JOB_STATUS.QUEUED,
+  ],
+  [JOB_STATUS.MISSING_SOURCE]: [
+    JOB_STATUS.QUEUED,
+    JOB_STATUS.STOPPED,
+    JOB_STATUS.FAILED,
+  ],
+  [JOB_STATUS.FAILED]: [JOB_STATUS.QUEUED],
+  [JOB_STATUS.STOPPED]: [JOB_STATUS.QUEUED],
+  [JOB_STATUS.DONE]: [],
+});
+
+const isKnownStatus = s => ALL_STATUSES.includes(s);
+const isTerminal = s => TERMINAL.has(s);
+const isRestorable = s => RESTORABLE.has(s);
+const isLiveWork = s => LIVE_WORK.has(s);
+const isRetryable = s => RETRYABLE.has(s);
+const reservesOutput = s => OUTPUT_RESERVED.has(s);
+
+function canTransition(from, to) {
+  if (!isKnownStatus(from) || !isKnownStatus(to)) return false;
+  return (TRANSITIONS[from] || []).includes(to);
+}
+
+function assertJob(job) {
+  if (!job || typeof job !== 'object' || typeof job.id !== 'string' || !job.id) {
+    throw new TypeError('匯出工作缺少有效 id');
+  }
+  return job;
+}
+
+class ExportQueueState {
+  constructor(jobs = []) {
+    this._jobs = [];
+    this.load(jobs);
+  }
+
+  load(jobs = []) {
+    if (!Array.isArray(jobs)) throw new TypeError('匯出佇列必須是工作陣列');
+    const ids = new Set();
+    const next = jobs.map(job => {
+      assertJob(job);
+      if (ids.has(job.id)) throw new Error(`匯出工作 id 重複：${job.id}`);
+      ids.add(job.id);
+      return job;
+    });
+    this._jobs = next;
+    return this.jobs();
+  }
+
+  jobs() {
+    return this._jobs.slice();
+  }
+
+  get(jobId) {
+    return this._jobs.find(job => job.id === jobId) || null;
+  }
+
+  add(job) {
+    assertJob(job);
+    if (this.get(job.id)) throw new Error(`匯出工作 id 重複：${job.id}`);
+    this._jobs.push(job);
+    return job;
+  }
+
+  nextQueued() {
+    return this._jobs.find(job => job.status === JOB_STATUS.QUEUED) || null;
+  }
+
+  retry(jobId) {
+    const job = this.get(jobId);
+    if (!job || !isRetryable(job.status)) return null;
+    const queued = this.setStatus(jobId, JOB_STATUS.QUEUED, {
+      pct: 0,
+      elapsedMs: 0,
+      etaS: null,
+      errorMsg: null,
+    });
+    if (!queued) return null;
+    delete job.completedAt;
+    return job;
+  }
+
+  setStatus(jobId, status, fields = null) {
+    const job = this.get(jobId);
+    if (!job || typeof status !== 'string' || !status) return null;
+    if (job.status !== status && !canTransition(job.status, status)) return null;
+    job.status = status;
+    if (fields && typeof fields === 'object') Object.assign(job, fields);
+    return job;
+  }
+
+  stop(jobId) {
+    const job = this.get(jobId);
+    if (!job) return null;
+    if (job.status === JOB_STATUS.QUEUED) return this.setStatus(jobId, JOB_STATUS.STOPPED);
+    if (job.status === JOB_STATUS.RUNNING) return this.setStatus(jobId, JOB_STATUS.STOPPING);
+    return null;
+  }
+
+  remove(jobId) {
+    const index = this._jobs.findIndex(job => job.id === jobId);
+    if (index < 0) return null;
+    return this._jobs.splice(index, 1)[0];
+  }
+
+  reorder(jobId, newIndex) {
+    const oldIndex = this._jobs.findIndex(job => job.id === jobId);
+    if (oldIndex < 0) return null;
+    const [job] = this._jobs.splice(oldIndex, 1);
+    const rawIndex = Number(newIndex);
+    const target = Number.isFinite(rawIndex) ? Math.trunc(rawIndex) : this._jobs.length;
+    this._jobs.splice(Math.max(0, Math.min(this._jobs.length, target)), 0, job);
+    return job;
+  }
+
+  liveWorkCount() {
+    return this._jobs.filter(job => isLiveWork(job.status)).length;
+  }
+
+  statusSnapshot(isPaused = false) {
+    return {
+      waitingCount: this._jobs.filter(job => job.status === 'queued').length,
+      missingCount: this._jobs.filter(job => job.status === 'missing-source').length,
+      liveCount: this.liveWorkCount(),
+      isPaused: !!isPaused,
+    };
+  }
+}
 
 /**
  * @param {object} deps 全部由呼叫端注入
@@ -963,4 +1159,119 @@ function createExportQueue(deps) {
   return queue;
 }
 
-module.exports = { createExportQueue };
+/**
+ * @param {object} deps 全部由呼叫端注入——本模組不 require electron、不碰檔案系統
+ * @param {(format:string)=>string} deps.expectedExtensionFor  format → 預期副檔名（不含點）
+ * @param {(outPath:string)=>string} deps.outputKeyFor         輸出路徑 → 佔用鍵（大小寫／路徑正規化）
+ * @param {(payload:object, sourcePaths:string[])=>string[]} deps.mergeSourcePaths
+ * @param {()=>Array} deps.currentJobs                         目前佇列裡的工作
+ * @param {(status:string)=>boolean} deps.reservesOutput       這個狀態算不算佔用輸出
+ * @param {(file:string)=>boolean} deps.canReadSource
+ * @param {(file:string)=>boolean} deps.canWriteDelivery
+ * @param {(file:string)=>boolean} deps.isPreviewCacheMedia    §0.8：是不是播放快取
+ */
+function createExportAdmission(deps) {
+  const {
+    expectedExtensionFor, outputKeyFor, mergeSourcePaths, currentJobs,
+    reservesOutput: depsReservesOutput, canReadSource, canWriteDelivery, isPreviewCacheMedia,
+  } = deps;
+
+  const activeReservesOutput = typeof depsReservesOutput === 'function' ? depsReservesOutput : reservesOutput;
+
+  const fail = (message, code) => {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  };
+
+  /** 輸出路徑 → 佔用鍵。缺路徑就是資料有問題，不可以靜靜放過。 */
+  function outputKey(job) {
+    const outPath = job?.payload?.outPath;
+    if (typeof outPath !== 'string' || !outPath.trim()) {
+      throw fail('匯出工作缺少有效的輸出路徑', 'INVALID_OUTPUT_PATH');
+    }
+    return outputKeyFor(outPath);
+  }
+
+  /* renderer 用一份 format→副檔名的表組出 outPath，主程序用另一份驗它。
+     兩份目前只靠人工維持一致；這裡是它們真正相遇的地方。 */
+  function assertOutputFormat(job) {
+    const outPath = job?.payload?.outPath;
+    const expected = expectedExtensionFor(job?.payload?.format);
+    const actual = typeof outPath === 'string' ? path.extname(outPath).slice(1).toLowerCase() : '';
+    if (actual === expected) return expected;
+    throw fail(
+      `匯出格式 ${job?.payload?.format || '(empty)'} 必須使用 .${expected} 副檔名`,
+      'INVALID_OUTPUT_EXTENSION',
+    );
+  }
+
+  /* 同一個輸出檔同時被兩份交付寫入＝後者覆蓋前者，而兩邊都會回報成功。
+     注意這是【入列時】的檢查；export-watchdog 那邊另有一道磁碟上的 lease，
+     在真正 spawn 前再擋一次。兩道時機不同，都需要。 */
+  function assertOutputAvailable(job, excludeId = job?.id) {
+    const key = outputKey(job);
+    for (const existing of currentJobs()) {
+      if (!existing || existing.id === excludeId || !activeReservesOutput(existing.status)) continue;
+      let existingKey;
+      try { existingKey = outputKey(existing); } catch (error) { continue; }
+      if (existingKey !== key) continue;
+      const error = fail(`同一個輸出檔案已在匯出佇列中：${job.payload.outPath}`, 'OUTPUT_BUSY');
+      error.conflictingJobId = existing.id;
+      throw error;
+    }
+    return key;
+  }
+
+  /* 匯出 payload 是 renderer 的資料快照，不能因為進了佇列就自動升格成檔案能力。 */
+  function sourcePathsOf(job) {
+    return mergeSourcePaths(job?.payload, job?.sourcePaths);
+  }
+
+  /** 鐵律 §0.8：交付只准讀母素材，絕不可回退播放快取（proxy.mp4／chNN.m4a）。 */
+  function assertMasterMedia(file, kind) {
+    if (isPreviewCacheMedia(file)) {
+      throw fail(`${kind} 匯出不能使用 Proxy 或播放快取。請重新連結母素材後再匯出。`, 'PREVIEW_CACHE_MEDIA');
+    }
+  }
+
+  /**
+   * 入列前的完整檢查。通過才可以進佇列。
+   * @returns {string[]} 這份工作實際需要讀取的來源路徑
+   */
+  function assertJobAdmissible(job) {
+    assertOutputFormat(job);
+    const sourcePaths = sourcePathsOf(job);
+    for (const sourcePath of sourcePaths) {
+      if (!canReadSource(sourcePath)) {
+        throw fail(`匯出來源未經授權：${sourcePath}`, 'UNAUTHORIZED_PATH');
+      }
+      assertMasterMedia(sourcePath, '匯出來源');
+    }
+    if (!canWriteDelivery(job?.payload?.outPath)) {
+      throw fail(`匯出輸出位置未經授權：${job?.payload?.outPath}`, 'UNAUTHORIZED_OUTPUT_PATH');
+    }
+    return sourcePaths;
+  }
+
+  return {
+    outputKey, assertOutputFormat, assertOutputAvailable,
+    sourcePathsOf, assertMasterMedia, assertJobAdmissible,
+  };
+}
+
+module.exports = {
+  createExportQueue,
+  createExportAdmission,
+  ExportQueueState,
+  JOB_STATUS,
+  ALL_STATUSES,
+  TRANSITIONS,
+  isKnownStatus,
+  isTerminal,
+  isRestorable,
+  isLiveWork,
+  isRetryable,
+  reservesOutput,
+  canTransition,
+};

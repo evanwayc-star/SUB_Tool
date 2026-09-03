@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { commitAdmittedProjectWrite, inspectProjectWrite } = require('../electron/project-write-admission.js');
-const { createTrustedProjectIntake } = require('../electron/trusted-project-intake.js');
+const { commitAdmittedProjectWrite, inspectProjectWrite, createTrustedProjectIntake } = require('../electron/project-file-authority-engine.js');
 
 function projectBytes(project, encoding = 'utf8') {
   if (encoding === 'utf16le') {

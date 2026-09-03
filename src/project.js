@@ -25,14 +25,84 @@ import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount, ensu
 import { $ } from './dom.js';
 import { encodeUTF16LE, decodeText, bytesToB64, b64ToBytes, downloadBytes, readFile, escapeHTML } from './util.js';
 import { Media } from './media.js';
-import { drawTimeline } from './timeline.js';
+import { drawTimeline } from './timeline-renderer.js';
 import { History } from './history.js';
 import { renderNotes } from './notes.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets, loadFonts } from './substyle.js';
 import { ProjectLoadSession } from './project-intake-engine.js';
-import { createProjectSnapshot, migrateProjectSchema, validateProjectIntegrity } from './project-workspace-authority.js';
+export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
+const PROJECT_APP = 'SUB Tool';
+
+function isRecord(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function cloneProjectValue(value) {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+/**
+ * 將已由 project.js 蒐集好的專案純資料封裝為目前 .subtool 格式。
+ * 不加儲存時間，否則 dirty 判斷會在未編輯時持續變動。
+ */
+function createProjectSnapshot(document = {}) {
+  const data = isRecord(document) ? cloneProjectValue(document) : {};
+  return {
+    ...data,
+    app: PROJECT_APP,
+    version: CURRENT_PROJECT_SCHEMA_VERSION,
+  };
+}
+
+/**
+ * 將歷史檔案整理成 Project.apply 可消費的資料形狀；不改寫既有欄位語意。
+ * 缺少版本的舊檔保留為 v1，讓既有字幕軌索引轉換繼續生效。
+ */
+function migrateProjectSchema(rawProject) {
+  if (!isRecord(rawProject)) return null;
+  const data = cloneProjectValue(rawProject);
+  const rawVersion = data.version;
+  if (rawVersion === undefined || rawVersion === null) data.version = 1;
+  else {
+    const version = Number(rawVersion);
+    data.version = Number.isFinite(version) && version >= 1 ? Math.floor(version) : 1;
+  }
+
+  data.tracks = arrayOrEmpty(data.tracks);
+  if (!data.tracks.length) data.tracks = [{ name: '軌道 1', visible: true, locked: false }];
+  data.cues = arrayOrEmpty(data.cues);
+  data.clips = arrayOrEmpty(data.clips);
+  data.videoTracks = arrayOrEmpty(data.videoTracks);
+  data.notes = arrayOrEmpty(data.notes);
+  data.usedPresets = arrayOrEmpty(data.usedPresets);
+  data.externalAudioSources = arrayOrEmpty(data.externalAudioSources);
+  if (!isRecord(data.media)) data.media = {};
+  if (!isRecord(data.audioProject)) delete data.audioProject;
+  return data;
+}
+
+/** 驗證正規化後仍可安全套用的最低契約；不以嚴格 schema 阻斷舊檔。 */
+function validateProjectIntegrity(projectData) {
+  const errors = [];
+  if (!isRecord(projectData)) return { valid: false, errors: ['專案資料必須是 JSON 物件'] };
+  if (!Number.isFinite(Number(projectData.version)) || Number(projectData.version) < 1) {
+    errors.push('專案版本必須是大於等於 1 的數值');
+  }
+  if (projectData.fps !== undefined && (!Number.isFinite(Number(projectData.fps)) || Number(projectData.fps) <= 0)) {
+    errors.push('專案 FPS 必須為大於 0 的數值');
+  }
+  for (const key of ['tracks', 'cues', 'clips']) {
+    if (!Array.isArray(projectData[key])) errors.push(`專案 ${key} 必須為陣列`);
+  }
+  return { valid: errors.length === 0, errors };
+}
 
 
 /* ===== 自動備份狀態 ===== */
@@ -815,7 +885,7 @@ const Project = {
 };
 
 async function openMedia({ relink: requestedRelink = null } = {}) {
-  const { pickMediaFiles, importDesktopMediaFiles, importBrowserMediaFiles } = await import('./loaders/media-loader.js');
+  const { pickMediaFiles, importDesktopMediaFiles, importBrowserMediaFiles } = await import('./media-loader.js');
   const relink = requestedRelink || Project.pendingMediaRelink?.() || null;
   if (relink) {
     await Project.continueLoad(relink.generation, async isCurrent => {

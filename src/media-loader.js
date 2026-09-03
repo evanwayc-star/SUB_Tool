@@ -1,5 +1,5 @@
 /* ==============================================================================
-   SUB Tool — 母素材載入路徑（"src/loaders/media-loader.js"）
+   SUB Tool — 母素材載入路徑（"src/media-loader.js"）
    ==============================================================================
    【這支是 Media 實作的一部分，不是獨立模組。】
 
@@ -23,19 +23,18 @@
    後者請放到自己的模組（例如 channel-layout.js／media-intake-session.js），
    不要繼續加大這支對 Media 內部的相依。
 ============================================================================== */
-import { $, video } from '../dom.js';
-import { State, DESK, setFps } from '../state.js';
-import { setStatus, showToast } from '../ui.js';
-import { AudioPipeline } from '../audio-pipeline.js';
-import { AudioEngine } from '../audio-engine.js';
-import { emit } from '../events.js';
-import { escapeHTML, baseName } from '../util.js';
-import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from '../media-player-adapter.js';
-import { Wave, WAVE_DECODE_MAX, probeAudioChannelDescriptors, detectFpsWeb, probeImageSize } from '../media.js'; 
-import { sourceChannelLabels } from '../audio-routing-engine.js';
-import { getExactFps, secToEncore } from '../time.js';
-import { Seq } from '../sequence.js';
-import { waitForOwnedMediaMetadata } from '../media-intake-engine.js';
+import { $, video } from './dom.js';
+import { State, DESK, setFps } from './state.js';
+import { setStatus, showToast } from './ui.js';
+import { AudioEngine } from './audio-engine.js';
+import { emit } from './events.js';
+import { escapeHTML, baseName } from './util.js';
+import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from './media-player-adapter.js';
+import { Wave, WAVE_DECODE_MAX, probeAudioChannelDescriptors, detectFpsWeb, probeImageSize } from './media.js'; 
+import { sourceChannelLabels, AudioPipeline } from './audio-routing-engine.js';
+import { getExactFps, secToEncore } from './time.js';
+import { Seq } from './sequence.js';
+import { waitForOwnedMediaMetadata } from './media-intake-engine.js';
 export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx._resetForFirstVideo(projectRestore ? { keepVideoTracks: true } : {});
     const intake=ctx._intakeSession.begin(p);
@@ -577,8 +576,8 @@ export function pickMediaFiles(input) {
 }
 
 export async function importDesktopMediaFiles(value, explicitRelink = null) {
-  const { Project } = await import('../project.js');
-  const { Media } = await import('../media.js');
+  const { Project } = await import('./project.js');
+  const { Media } = await import('./media.js');
   const relink = explicitRelink || Project.pendingMediaRelink?.() || null;
   const projectRestore = relink?.plan || null;
   const paths = (Array.isArray(value) ? value : (value ? [value] : [])).filter(path => typeof path === 'string' && path);
@@ -600,8 +599,8 @@ export async function importDesktopMediaFiles(value, explicitRelink = null) {
 }
 
 export async function importBrowserMediaFiles(files, explicitRelink = null) {
-  const { Project } = await import('../project.js');
-  const { Media } = await import('../media.js');
+  const { Project } = await import('./project.js');
+  const { Media } = await import('./media.js');
   const relink = explicitRelink || Project.pendingMediaRelink?.() || null;
   const projectRestore = relink?.plan || null;
   const list = Array.isArray(files) ? files.filter(Boolean) : [];

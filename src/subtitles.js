@@ -13,15 +13,22 @@ import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
 import { requestPointerSeek } from './timeline-interaction-engine.js';
-import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline.js';
+import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline-renderer.js';
 import { emit } from './events.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
-import { showToast, openModal, closeModal } from './ui.js';
+import { showToast, openModal, closeModal, setStatus } from './ui.js';
 import { recordHistory } from './history.js';
 import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx, styleMatchesPreset } from './substyle.js';
+import {
+  planCueStyleAssignment,
+  applyCueStyleAssignment,
+  applyTrackStylePlan as applyTrackStylePlanEngine,
+  hasClipboardStyle,
+  copyCueStyle,
+  pasteClipboardStyle,
+} from './subtitle-style-engine.js';
 import { showCueMenu } from './menus.js';
-import { deleteSelectedWithPrompt } from './subtitle-view.js';
 import { analyzeSubtitles } from './subtitle-audit.js';
 
 // Domain imports
@@ -29,7 +36,7 @@ import {
   snapAllCuesToFrames, swapAdjacentCues, mergeAdjacentCues, detectOverlaps, sweepContainedCues,
   addCue as _addCue, addCueRelative as _addCueRelative, deleteSelectedCues, deleteCue, clearSelectedCuesTime, 
   shiftTextsDown, shiftTextsUp, sortCues, copyCues, pasteCues as _pasteCues, trimTrackSpaces,
-  trackLocked, cueTrackLocked, editCue, splitCue
+  trackLocked, cueTrackLocked, cuesTrackLocked, editCue, splitCue
 } from './subtitle-model.js';
 
 // Search imports
@@ -848,12 +855,69 @@ function pasteCues() {
   _pasteCues();
 }
 
+function deleteSelectedWithPrompt() {
+  const ids = State.selectedIds.length ? State.selectedIds.slice() : [State.selectedId].filter(Boolean);
+  if (!ids.length) return;
+  const onLocked = State.cues.find(c => ids.includes(c.id) && State.tracks[c.track||0]?.locked);
+  if (onLocked && cueTrackLocked(onLocked, '刪除字幕')) return;
+
+  if (ids.length > 1) {
+    openModal(`刪除 ${ids.length} 條字幕`,
+      `<p>確定要刪除選取的 <b>${ids.length}</b> 條字幕嗎？</p>`,
+      [{label:'取消', act:closeModal},
+       {label:'確定刪除', primary:true, act:()=>{ closeModal(); deleteSelectedCues(ids); }}]);
+    return;
+  }
+  deleteSelectedCues(ids);
+}
+
+function applyCueStylePatch(cue, desiredStyle, preserveKeys = []) {
+  if (!cue) return false;
+  if (cueTrackLocked(cue, '修改字幕樣式')) return false;
+  const targetTrack = State?.tracks?.[cue?.track || 0] || null;
+  const plan = planCueStyleAssignment({ cue, targetTrack, desiredStyle, preserveKeys });
+  applyCueStyleAssignment(cue, plan);
+  return plan.changed;
+}
+
+function copySelectedStyle() {
+  if (!State.selectedId) { showToast('請先選取一條字幕'); return; }
+  const c = State.cues.find(x => x.id === State.selectedId);
+  if (!c) return;
+  const tk = State.tracks[c.track || 0];
+  copyCueStyle(c, tk);
+  setStatus('已拷貝字幕樣式', 'ok');
+}
+
+function pasteStyleToSelected() {
+  if (!hasClipboardStyle()) { showToast('尚未拷貝樣式'); return; }
+  const ids = State.selectedIds.length ? State.selectedIds : [State.selectedId].filter(Boolean);
+  if (!ids.length) { showToast('請先選取字幕'); return; }
+
+  const selectedCues = ids.map(id => State.cues.find(x => x.id === id)).filter(Boolean);
+  if (cuesTrackLocked(selectedCues, '貼上字幕樣式')) return;
+  const changed = pasteClipboardStyle(selectedCues, State.tracks);
+
+  if (changed) {
+    recordHistory('貼上字幕樣式');
+    emit('render:all');
+    setStatus('已貼上樣式', 'ok');
+  }
+}
+
+function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []) {
+  const trackIndex = State.tracks.indexOf(track);
+  if (trackIndex >= 0 ? trackLocked(trackIndex, '修改字幕樣式') : cuesTrackLocked(cues, '修改字幕樣式')) return false;
+  return applyTrackStylePlanEngine(track, cues, desiredStyle, preserveKeys);
+}
+
 export { 
   renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel, formatSubSelectionText, formatSubSelectionHTML,
-  addCue, addCueRelative, deleteSelectedWithPrompt as deleteSelected, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
+  addCue, addCueRelative, deleteSelectedWithPrompt as deleteSelected, deleteSelectedWithPrompt, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, updateSearchCount, searchSelectAll, openInlineTimeEdit, refreshStyleSummaries,
-  copyCues, pasteCues, trackLocked, cueTrackLocked, snapAllCuesToFrames, sweepContainedCues
+  copyCues, pasteCues, trackLocked, cueTrackLocked, snapAllCuesToFrames, sweepContainedCues,
+  applyCueStylePatch, copySelectedStyle, pasteStyleToSelected, applyTrackStylePlan, hasClipboardStyle
 };
 
 

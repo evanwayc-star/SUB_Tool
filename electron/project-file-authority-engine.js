@@ -12,7 +12,65 @@
 
 const path = require('path');
 const { PROJECT_FILE, collectProjectMediaPaths, parseProjectBuffer } = require('./file-authority');
-const RecentProjects = require('./recent-projects');
+
+const RECENT_MAX_ENTRIES = 10;
+
+/** 只留下形狀正確的項目——設定檔是使用者可改的，不可信任它的內容。 */
+function sanitizeRecentList(list, max = RECENT_MAX_ENTRIES) {
+  return (Array.isArray(list) ? list : [])
+    .filter(item => item && typeof item.path === 'string' && item.path.trim())
+    .slice(0, max);
+}
+
+/** 把一個路徑推到清單最前面。 */
+function addRecent(list, filePath, { max = RECENT_MAX_ENTRIES, now = 0 } = {}) {
+  if (typeof filePath !== 'string' || !filePath.trim()) return sanitizeRecentList(list, max);
+  let resolved;
+  try { resolved = path.resolve(filePath); } catch (e) { return sanitizeRecentList(list, max); }
+
+  const key = resolved.toLowerCase();
+  const next = [{ path: resolved, name: path.basename(resolved), at: now }];
+  for (const item of sanitizeRecentList(list, Infinity)) {
+    if (String(item.path).toLowerCase() === key) continue;
+    next.push(item);
+    if (next.length >= max) break;
+  }
+  return next;
+}
+
+/** 從清單移除一筆（檔案已不存在時用）。 */
+function removeRecent(list, filePath) {
+  const key = String(filePath || '').toLowerCase();
+  return sanitizeRecentList(list, Infinity).filter(item => String(item.path).toLowerCase() !== key);
+}
+
+/** 造一支「這個路徑還在不在」的探測器。 */
+function createMissingProbe({ stat, timeoutMs = 400 }) {
+  return async function missing(p) {
+    let timer;
+    try {
+      const st = await Promise.race([
+        stat(p),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('__timeout__')), timeoutMs);
+        }),
+      ]);
+      return !st.isFile();
+    } catch (e) {
+      return !!e && (e.code === 'ENOENT' || e.code === 'ENOTDIR');
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+const RecentProjects = Object.freeze({
+  MAX_ENTRIES: RECENT_MAX_ENTRIES,
+  sanitize: sanitizeRecentList,
+  addRecent,
+  removeRecent,
+  createMissingProbe,
+});
 
 /**
  * 檢查路徑是否為專案檔 (.subtool 或 .json)。
@@ -343,4 +401,5 @@ module.exports = {
   finalizeProjectWrite,
   inspectProjectWrite,
   isProjectFilePath,
+  RecentProjects,
 };

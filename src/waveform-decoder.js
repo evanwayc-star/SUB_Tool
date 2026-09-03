@@ -2,7 +2,7 @@ import { State, DESK } from './state.js';
 import { emit } from './events.js';
 import { readFile } from './util.js';
 import { AudioEngine } from './audio-engine.js';
-import { AudioPipeline } from './audio-pipeline.js';
+import { AudioPipeline } from './audio-routing-engine.js';
 import { Media } from './media.js';
 import { $, video } from './dom.js';
 import { setStatus } from './ui.js';

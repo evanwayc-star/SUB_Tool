@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const R = require(path.join(ROOT, 'electron/recent-projects.js'));
+const { RecentProjects: R } = require(path.join(ROOT, 'electron/project-file-authority-engine.js'));
 
 /* 用平台原生的絕對路徑組測資——addRecent 會 path.resolve()，
    在 POSIX 上寫 'D:/x' 不是絕對路徑，測到的會是別的東西。 */

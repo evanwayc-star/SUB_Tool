@@ -20,41 +20,35 @@ const net = require('net');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const QueueStore = require('./queue-store');
-const QueueHistory = require('./queue-history');
+const QueueHistory = QueueStore.QueueHistory;
 const { createDeliveryRunner } = require('./delivery-runner');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
-const { FileAuthority } = require('./file-authority');
+const { FileAuthority, isPathContained } = require('./file-authority');
 const { createLocalResourceServer, registerLocalResourceScheme } = require('./local-resource');
-const { createProjectWorkspace } = require('./project-workspace');
+const { createProjectWorkspace, authorizeDroppedMediaPath } = require('./project-file-authority-engine');
 
-const { mergeRendererConfig } = require('./config-policy');
-const { isPathContained } = require('./export-name-safety');
-const { createIpcGuards, expectedExportExtension } = require('./ipc-guards');
-const { JOB_STATUS, reservesOutput } = require('./export-job-status');
-const { createExportAdmission } = require('./export-admission');
-const { createExportQueue } = require('./export-queue');
+const { createIpcGuards, expectedExportExtension, mergeRendererConfig } = require('./ipc-guards');
+const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput } = require('./export-queue');
 const { createMpvHost } = require('./mpv-host');
-const { createMediaIngestCoordinator } = require('./media-ingest-coordinator');
-const { createFFmpegExecution } = require('./ffmpeg-execution');
-const { createMediaIntakeRuntime } = require('./media-intake-runtime');
+const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('./media-intake-runtime');
 const { createMediaProbe } = require('./media-probe');
 const {
   createSpeechAudioCompressor,
-  createSpeechCompressionRuntime
+  createSpeechCompressionRuntime,
 } = require('./speech-audio-compressor');
-const { authorizeDroppedMediaPath } = require('./dropped-file-admission');
 /* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
 const { deliveryResolution, suggestKbps } = require('../shared/delivery-resolution.cjs');
 const {
+  buildIngestArgs,
+  createFFmpegExecution,
   deliveryVideoEncoderArgs,
   detectNativeTool,
   mpvEmbeddingSupported,
   previewVideoEncoderArgs,
   videoEncoderCandidates,
-} = require('./native-tooling');
-const { buildIngestArgs } = require('./ffmpeg-pipeline-builder');
+} = require('./ffmpeg-execution-engine');
 
 // 自訂 scheme 的 privileges 必須在 app ready 前註冊；實際 handler 於 ready 後安裝。
 registerLocalResourceScheme(protocol);

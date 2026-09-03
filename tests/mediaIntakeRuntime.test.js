@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { FileAuthority } = require('../electron/file-authority.js');
-const { createFFmpegExecution } = require('../electron/ffmpeg-execution.js');
+const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 const { createMediaIntakeRuntime } = require('../electron/media-intake-runtime.js');
 
 const tempRoots = [];

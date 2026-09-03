@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { createMediaIngestCoordinator, IngestSupersededError } = require('../electron/media-ingest-coordinator.js');
+const { createMediaIngestCoordinator, IngestSupersededError } = require('../electron/media-intake-runtime.js');
 
 const deferred = () => {
   let resolve;

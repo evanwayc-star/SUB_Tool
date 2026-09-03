@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NODE_SCRIPT = path.join(ROOT, 'scripts', 'release', 'verify-native-binaries.js');
 const require = createRequire(import.meta.url);
-const { bundledNativeRequirements } = require('../electron/native-tooling.js');
+const { bundledNativeRequirements } = require('../electron/ffmpeg-execution-engine.js');
 
 function run(repoRoot, platform, arch) {
   return spawnSync(process.execPath, [

@@ -9,7 +9,7 @@ import { State, syncTrackCount, setFps, normalizeAudioProject, pruneSelection } 
 import { Seq } from './sequence.js';
 import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
-import { drawTimeline } from './timeline.js';
+import { drawTimeline } from './timeline-renderer.js';
 import { renderNotes } from './notes.js';
 import { emit, on } from './events.js';
 import { setStatus } from './ui.js';

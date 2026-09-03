@@ -35,9 +35,12 @@ import {
 import {
   togglePlayPause,
   nudge,
+  setIn,
+  setOut,
+  setExportIn,
+  setExportOut,
+  clearExport,
 } from './transport-controller.js';
-import { setIn, setOut } from './subtitle-editing.js';
-import { setExportIn, setExportOut, clearExport } from './export-range.js';
 import {
   doAddTrack,
   zoomIn,
@@ -46,7 +49,7 @@ import {
   toggleVideoTracks,
   toggleAllVisibility,
   toggleAllLock,
-} from './timeline.js';
+} from './timeline-renderer.js';
 import {
   openMedia,
   openProject,
@@ -54,8 +57,7 @@ import {
   saveAsProject,
   startNewProject,
 } from './project.js';
-import { takeScreenshot } from './screenshot-target.js';
-import { copySelectedStyle, pasteStyleToSelected } from './style-commands.js';
+import { copySelectedStyle, pasteStyleToSelected } from './subtitles.js';
 import { addNote, renderNotes, clearAllNotes, exportNotes } from './notes.js';
 import { renderMixer, mixerReset, mixerMuteAll } from './mixer.js';
 import { toggleSafeFrame, toggleTimecodeWatermark, _syncMpvPanel } from './video-renderer.js';
@@ -240,4 +242,183 @@ function createCommands() {
   return registry;
 }
 
-export { createCommands, CLOSE_PANELS };
+export {
+  createCommands,
+  CLOSE_PANELS,
+  timecodeSuffix,
+  screenshotDir,
+  fallbackScreenshotName,
+  takeScreenshot,
+};
+
+/* ==============================================================================
+   截圖檔名規則與編排實作 (Screenshot Target & Capture)
+   ============================================================================== */
+
+function timecodeSuffix(timecode) {
+  if (!timecode) return '';
+  return '_' + String(timecode).replace(/[:;]/g, '-');
+}
+
+function screenshotDir({ projectDir, mediaPath }) {
+  let dir = projectDir || '';
+  if (!dir && mediaPath) {
+    const norm = String(mediaPath).replace(/\\/g, '/');
+    const sep = norm.lastIndexOf('/');
+    if (sep > 0) dir = String(mediaPath).substring(0, sep);
+  }
+  return dir ? dir.replace(/[\\/]+$/, '') : null;
+}
+
+function fallbackScreenshotName(displaySeconds, suffix = '') {
+  return `Shot-${Math.floor(Math.max(0, +displaySeconds || 0))}${suffix}.jpg`;
+}
+
+async function takeScreenshot(withTimecode = false) {
+  const { State, IS_DESKTOP, DESK } = await import('./state.js');
+  const { Media } = await import('./media.js');
+  const { getProjectDir } = await import('./project.js');
+  const { showToast, setStatus } = await import('./ui.js');
+  const { secToEncore } = await import('./time.js');
+  const { getPlayerAdapter } = await import('./media-player-adapter.js');
+
+  if (!State.duration && !State.mediaPath) { showToast('尚未載入影音'); return; }
+
+  const tcStr = withTimecode ? secToEncore(Media.displayTime(), State.fps, State.dropFrame) : '';
+  const tcSuffix = withTimecode ? timecodeSuffix(tcStr) : '';
+  const dir = screenshotDir({ projectDir: getProjectDir(), mediaPath: State.mediaPath });
+
+  let fullPath = '';
+  let name = '';
+  if (dir && IS_DESKTOP && DESK?.reserveScreenshotPath) {
+    try {
+      const reserved = await DESK.reserveScreenshotPath(dir, tcSuffix);
+      fullPath = reserved?.path || '';
+      name = reserved?.name || '';
+    } catch (e) { console.error('[screenshot] reserve path error:', e); }
+  } else {
+    name = fallbackScreenshotName(Media.displayTime(), tcSuffix);
+  }
+
+  if (Media.mpvMode && IS_DESKTOP && DESK && getPlayerAdapter() && getPlayerAdapter().screenshot && fullPath) {
+    if (!withTimecode) {
+      try {
+        await getPlayerAdapter().screenshot(fullPath);
+        await new Promise(r => setTimeout(r, 300));
+        setStatus(`截圖已儲存：${name}`, 'ok');
+      } catch (e) {
+        console.error('[screenshot] mpv screenshot error:', e);
+        showToast('截圖失敗');
+      }
+      return;
+    } else {
+      const tempPath = dir + '/.subtool_temp_shot.jpg';
+      try {
+        await getPlayerAdapter().screenshot(tempPath);
+        await new Promise(r => setTimeout(r, 300));
+        
+        const b64 = await DESK.readB64(tempPath);
+        if (!b64) throw new Error('Cannot read temp screenshot');
+        
+        const img = new Image();
+        await new Promise((res, rej) => {
+          img.onload = res; img.onerror = rej;
+          img.src = 'data:image/jpeg;base64,' + b64;
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const canvas2d = canvas.getContext('2d');
+        canvas2d.drawImage(img, 0, 0);
+        
+        const fontSize = Math.floor(canvas.height * 0.05);
+        canvas2d.font = 'bold ' + fontSize + 'px monospace';
+        canvas2d.textAlign = 'center';
+        canvas2d.textBaseline = 'bottom';
+        const x = canvas.width / 2;
+        const y = canvas.height * 0.95;
+        const textWidth = canvas2d.measureText(tcStr).width;
+        
+        canvas2d.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        canvas2d.fillRect(x - textWidth / 2 - 10, y - fontSize - 5, textWidth + 20, fontSize + 10);
+        canvas2d.fillStyle = '#fff';
+        canvas2d.fillText(tcStr, x, y);
+        
+        const outB64 = await new Promise(r => {
+          canvas.toBlob(b => {
+            const reader = new FileReader();
+            reader.onloadend = () => r(reader.result.split(',')[1]);
+            reader.readAsDataURL(b);
+          }, 'image/jpeg', 0.9);
+        });
+        
+        const result = await DESK.writeScreenshot(fullPath, outB64);
+        if (result) {
+          setStatus(`截圖已儲存：${name}`, 'ok');
+        } else {
+          throw new Error('writeScreenshot failed');
+        }
+      } catch (e) {
+        console.error('[screenshot] MPV timecode shot error:', e);
+        showToast('截圖失敗');
+      }
+      return;
+    }
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = State.videoWidth || 1920;
+  canvas.height = State.videoHeight || 1080;
+  const canvas2d = canvas.getContext('2d');
+  
+  const vid = document.getElementById('video');
+  if (vid && vid.readyState >= 2) {
+    canvas2d.drawImage(vid, 0, 0, canvas.width, canvas.height);
+  } else {
+    canvas2d.fillStyle = '#000';
+    canvas2d.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  
+  if (withTimecode) {
+    const fontSize = Math.floor(canvas.height * 0.05);
+    canvas2d.font = 'bold ' + fontSize + 'px monospace';
+    canvas2d.textAlign = 'center';
+    canvas2d.textBaseline = 'bottom';
+    const x = canvas.width / 2;
+    const y = canvas.height * 0.95;
+    
+    const textWidth = canvas2d.measureText(tcStr).width;
+    canvas2d.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    canvas2d.fillRect(x - textWidth / 2 - 10, y - fontSize - 5, textWidth + 20, fontSize + 10);
+    canvas2d.fillStyle = '#fff';
+    canvas2d.fillText(tcStr, x, y);
+  }
+  
+  canvas.toBlob(async (blob) => {
+    try {
+      if (fullPath && DESK) {
+        const b64 = await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result.split(',')[1]);
+          reader.readAsDataURL(blob);
+        });
+        const result = await DESK.writeScreenshot(fullPath, b64);
+        if (result) setStatus(`截圖已儲存：${name}`, 'ok');
+        else showToast('截圖儲存失敗');
+        return;
+      }
+      
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus(`截圖已儲存：${name}`, 'ok');
+    } catch (e) {
+      console.error('[screenshot] browser screenshot save error:', e);
+      showToast('截圖儲存失敗');
+    }
+  }, 'image/jpeg', 0.9);
+}

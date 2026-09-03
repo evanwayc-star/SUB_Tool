@@ -25,37 +25,202 @@
       並最終輸出。同時，這也為波形 (Waveform) 的繪製提供了 PCM 資料來源。
 
    【維護鐵律】
+      「來源時間 (Source Time)」後，才能餵給底層播放器，以實現影片裁切
+      (In/Out) 與偏移 (Offset) 的視覺連貫。
+      
+   3. 多軌音訊與匯流排 (Web Audio API Routing & Bus)
+      為了讓使用者能在一條時間軸上排列多支影片並對其音軌進行混音，
+      本檔案建立了一套 AudioContext 的連線圖 (Audio Graph)。
+      將不同的音訊來源 (AudioSourceNode) 映射至各匯流排 (AudioBusNode)，
+      並最終輸出。同時，這也為波形 (Waveform) 的繪製提供了 PCM 資料來源。
+
+   【維護鐵律】
    - 所有牽涉播放頭時間的操作，請務必先釐清目前變數是「專案全局時間軸」還是
      「該片段的影片來源時間」。這兩者的轉換請統一呼叫 sequence 模組的方法，
      千萬不要在此檔案內手刻算式。
 ============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { AudioEngine } from './audio-engine.js';
-import { MediaAudioRouter } from './audio-routing-engine.js';
-import { AudioPipeline } from './audio-pipeline.js';
+import { MediaAudioRouter, AudioPipeline } from './audio-routing-engine.js';
 import { destroyScrubber } from './audio-engine.js';
 import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
+import { setStatus, showToast, openModal, closeModal } from './ui.js';
+import { Seq } from './sequence.js';
+
+const _defaultNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+const _finite = (value, fallback = 0) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
+const _nonNegative = value => Math.max(0, _finite(value));
+const _rateOf = value => {
+  const rate = _finite(value, 1);
+  return rate === 0 ? 1 : rate;
+};
+
+/* FPS-SYNC：時間軸 transport 是來源時間、時間軸時間、虛擬時鐘、gap 時鐘與
+   靜止影格吸附的唯一 owner；修改前必讀 docs/FPS_時碼一致性.md。 */
+export class TimelineTransport {
+  constructor({ now = _defaultNow, snap = snapTimeToFrame, toTimeline = value => value, toSource = value => value } = {}) {
+    this._now = now;
+    this._snap = snap;
+    this._toTimeline = toTimeline;
+    this._toSource = toSource;
+    this.reset();
+  }
+
+  reset() {
+    this._virtualTime = 0;
+    this._virtualStartedAt = null;
+    this._gap = false;
+    this._gapTime = 0;
+    this._gapStartedAt = null;
+    this._pausedTime = null;
+  }
+
+  get gap() { return this._gap; }
+  set gap(value) { this._gap = !!value; }
+  get gapTime() { return this._gapTime; }
+  set gapTime(value) { this._gapTime = _nonNegative(value); }
+  get gapStartedAt() { return this._gapStartedAt; }
+  set gapStartedAt(value) { this._gapStartedAt = value == null ? null : _finite(value); }
+  get virtualTime() { return this._virtualTime; }
+  set virtualTime(value) { this._virtualTime = _nonNegative(value); }
+  get virtualStartedAt() { return this._virtualStartedAt; }
+  set virtualStartedAt(value) { this._virtualStartedAt = value == null ? null : _finite(value); }
+  get pausedTime() { return this._pausedTime; }
+  set pausedTime(value) { this._pausedTime = value == null ? null : _nonNegative(value); }
+
+  sourceTime(timelineTime, clip) {
+    // FPS-SYNC（I5）：跨時間域只走注入的 sequence 映射，不在呼叫端手刻 offset。
+    const t = _nonNegative(timelineTime);
+    return _nonNegative(clip ? this._toSource(t, clip) : t);
+  }
+
+  _clockTime(anchor, startedAt, playbackRate) {
+    if (startedAt == null) return anchor;
+    return anchor + (Math.max(0, this._now() - startedAt) / 1000) * _rateOf(playbackRate);
+  }
+
+  virtualTimeAt(playbackRate = 1) {
+    return this._clockTime(this._virtualTime, this._virtualStartedAt, playbackRate);
+  }
+
+  gapTimeAt(playbackRate = 1) {
+    return this._clockTime(this._gapTime, this._gapStartedAt, playbackRate);
+  }
+
+  timelineTime({ sourceTime = 0, clip = null, virtual = false, playbackRate = 1, useGap = true } = {}) {
+    if (useGap && this._gap) return this.gapTimeAt(playbackRate);
+    const source = virtual ? this.virtualTimeAt(playbackRate) : _nonNegative(sourceTime);
+    return _nonNegative(clip ? this._toTimeline(source, clip) : source);
+  }
+
+  displayTime({ playing = false, ...position } = {}) {
+    if (!playing && this._pausedTime !== null) return this._pausedTime;
+    return this.timelineTime(position);
+  }
+
+  seek(time, { duration = 0, fps, dropFrame = false } = {}) {
+    // FPS-SYNC（I3）：所有靜止目標都由 snapTimeToFrame() 的唯一格網提交。
+    const max = _nonNegative(duration);
+    const bounded = max > 0 ? Math.min(_nonNegative(time), max) : _nonNegative(time);
+    const snapped = this._snap(bounded, fps, dropFrame);
+    this._pausedTime = _nonNegative(snapped);
+    return this._pausedTime;
+  }
+
+  clearPausedTime() { this._pausedTime = null; }
+
+  startVirtual(time = this.virtualTimeAt(), { playbackRate = 1 } = {}) {
+    this._virtualTime = _nonNegative(time);
+    this._virtualStartedAt = this._now();
+    void playbackRate;
+    return this._virtualTime;
+  }
+
+  resumeVirtual({ playbackRate = 1 } = {}) {
+    return this.startVirtual(this.virtualTimeAt(playbackRate), { playbackRate });
+  }
+
+  freezeVirtual({ playbackRate = 1 } = {}) {
+    this._virtualTime = this.virtualTimeAt(playbackRate);
+    this._virtualStartedAt = null;
+    return this._virtualTime;
+  }
+
+  seekVirtual(time, { running = this._virtualStartedAt !== null } = {}) {
+    this._virtualTime = _nonNegative(time);
+    this._virtualStartedAt = running ? this._now() : null;
+    return this._virtualTime;
+  }
+
+  reanchorVirtual({ playbackRate = 1 } = {}) {
+    if (this._virtualStartedAt === null) return this._virtualTime;
+    return this.resumeVirtual({ playbackRate });
+  }
+
+  enterGap(time, { running = false } = {}) {
+    this._gap = true;
+    this._gapTime = _nonNegative(time);
+    this._gapStartedAt = running ? this._now() : null;
+    return this._gapTime;
+  }
+
+  leaveGap() {
+    this._gap = false;
+    this._gapStartedAt = null;
+  }
+
+  freezeGap({ playbackRate = 1 } = {}) {
+    this._gapTime = this.gapTimeAt(playbackRate);
+    this._gapStartedAt = null;
+    return this._gapTime;
+  }
+
+  pause({ sourceTime = 0, clip = null, virtual = false, playbackRate = 1, useGap = true, fps, dropFrame = false } = {}) {
+    const paused = this.seek(this.timelineTime({ sourceTime, clip, virtual, playbackRate, useGap }), { fps, dropFrame });
+    if (useGap && this._gap) {
+      this._gapTime = paused;
+      this._gapStartedAt = null;
+    }
+    if (virtual) {
+      this._virtualTime = clip ? this.sourceTime(paused, clip) : paused;
+      this._virtualStartedAt = null;
+    }
+    return paused;
+  }
+
+  observeSourceTime(sourceTime, { clip = null, playing = false, fps, dropFrame = false, settleFrames = 4.0 } = {}) {
+    // FPS-SYNC（I4/I6）：暫停讀數保留已提交目標，只容忍原生 presenter 的沉降抖動。
+    let timeline = this.timelineTime({ sourceTime, clip });
+    if (!playing) {
+      const frame = 1 / (_finite(fps, 25) || 25);
+      if (this._pausedTime !== null && Math.abs(timeline - this._pausedTime) < settleFrames * frame) {
+        timeline = this._pausedTime;
+      } else {
+        timeline = this.seek(timeline, { fps, dropFrame });
+      }
+    }
+    return timeline;
+  }
+}
+
 import { activateHtml5Transport, getPlayerAdapter } from './media-player-adapter.js';
 import { getExactFps, secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset } from './external-audio.js';
 import { MediaIntakeSession, waitForOwnedMediaMetadata } from './media-intake-engine.js';
-import { ResetEpoch } from './reset-epoch.js';
+import { ResetEpoch, PlaybackSyncEngine, createMediaPresentationSession } from './media-presentation-core.js';
 import { clipSourceFingerprint, liveClipForSource } from './media-intake-engine.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
 import { emit, on } from './events.js';
 import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
 
-import { PlaybackSyncEngine } from './playback-sync-engine.js';
+
 
 import { fadeAlphaAtTimeline } from './image-compositor-engine.js';   // 淡入淡出：預覽與匯出共用同一份規格
 import { sourceChannelLabels } from './audio-routing-engine.js'; // 來源聲道展開順序：與主程序 ingest 同一份約定
-import { setStatus, showToast, openModal, closeModal } from './ui.js';
-import { Seq } from './sequence.js';
-import { TimelineTransport } from './timeline-transport.js';
-import { createMediaPresentationSession } from './media-presentation-core.js';
-import { loadDesktopMedia, _expandChannels, _loadViaMpv, loadVideoFile, canPlayNatively, webAudioCapabilityNotice, FFMPEG_MAX_BYTES, WEB_LARGE_NATIVE_AUDIO_NOTICE, WEB_LARGE_UNSUPPORTED_MEDIA_NOTICE } from './loaders/media-loader.js';
+
+import { loadDesktopMedia, _expandChannels, _loadViaMpv, loadVideoFile, canPlayNatively, webAudioCapabilityNotice, FFMPEG_MAX_BYTES, WEB_LARGE_NATIVE_AUDIO_NOTICE, WEB_LARGE_UNSUPPORTED_MEDIA_NOTICE } from './media-loader.js';
 
 /* 專案音訊路由使用的持久來源 ID。audioSrc 仍保留給既有播放同步（video / clip:<id>），
    但它會隨本次載入的 clip id 改變，因此不能拿來儲存聲道配線。 */

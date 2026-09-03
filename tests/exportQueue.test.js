@@ -17,8 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { createExportQueue } = require(path.join(ROOT, 'electron/export-queue.js'));
-const { ExportQueueState } = require(path.join(ROOT, 'electron/export-queue-state.js'));
+const { createExportQueue, ExportQueueState } = require(path.join(ROOT, 'electron/export-queue.js'));
 
 function make(over = {}) {
   const state = over.state || new ExportQueueState();

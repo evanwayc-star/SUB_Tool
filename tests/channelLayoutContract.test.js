@@ -28,7 +28,7 @@ import { createRequire } from 'node:module';
 import { flattenSourceChannels, sourceChannelLabels } from '../src/audio-routing-engine.js';
 
 const require = createRequire(import.meta.url);
-const main = require('../electron/channel-layout.js');
+const main = require('../electron/media-intake-runtime.js');
 
 /* 涵蓋單聲道、立體聲、5.1、多 stream 混合，以及缺欄位的防呆。 */
 const MATRIX = [

@@ -17,9 +17,8 @@
       其內層屬性必須是可序列化的 (Serializable JSON Object)。
 
    【維護鐵律】
-   - 擴充新的資料欄位時，請務必更新最上方的 `@typedef`，以保持 JSDoc 提示的準確性。
 ============================================================================== */
-import { applySelection, deselectItem, pruneSelections, focusTrack } from './timeline-selection.js';
+
 
 /**
  * @typedef {Object} Cue
@@ -618,6 +617,68 @@ function isSel(id){ return State.selectedIds.includes(id); }
 
    注意：這裡【只管狀態】，不重繪。呼叫端仍要自己叫 refreshSelectionUI() 等，
    維持與既有程式碼相同的節奏（一次操作可能改多項狀態後才重繪一次）。 */
+export const SELECTION_KINDS = new Set(['sub', 'video', 'audio']);
+export const FOCUS_INDEX_FIELD = { sub: 'listTrack', video: 'activeVtrack', audio: 'activeAudioTrackId' };
+
+export function applySelection(state, { kind = null, ids = [], primary } = {}) {
+  const k = SELECTION_KINDS.has(kind) ? kind : null;
+  const list = Array.isArray(ids) ? ids.filter(v => v != null) : (ids == null ? [] : [ids]);
+
+  state.selectedIds = k === 'sub' ? list : [];
+  state.selectedId = k === 'sub' ? (primary !== undefined ? primary : (list.length ? list[list.length - 1] : null)) : null;
+  state.selectedClipId = k === 'video' ? (list.length ? list[0] : null) : null;
+  state.selectedAudioClipId = k === 'audio' ? (list.length ? list[0] : null) : null;
+
+  if (k) state.activeTrackKind = k;
+  return state;
+}
+
+export function deselectItem(state, kind, id) {
+  if (!SELECTION_KINDS.has(kind)) return state;
+  if (kind === 'sub') {
+    if (id == null) {
+      state.selectedIds = [];
+      state.selectedId = null;
+      return state;
+    }
+    if (!state.selectedIds.includes(id) && state.selectedId !== id) return state;
+    state.selectedIds = state.selectedIds.filter(x => x !== id);
+    if (state.selectedId === id) {
+      state.selectedId = state.selectedIds[state.selectedIds.length - 1] ?? null;
+    }
+    return state;
+  }
+
+  const field = kind === 'video' ? 'selectedClipId' : 'selectedAudioClipId';
+  if (id == null || state[field] === id) {
+    state[field] = null;
+  }
+  return state;
+}
+
+export function pruneSelections(state) {
+  if (!state) return state;
+  const aliveCues = new Set((state.cues || []).map(c => c?.id).filter(Boolean));
+  const ids = (state.selectedIds || []).filter(id => aliveCues.has(id));
+  state.selectedIds = ids;
+  state.selectedId = aliveCues.has(state.selectedId) ? state.selectedId : (ids[0] ?? null);
+
+  if (state.selectedClipId && !state.clips?.some(c => c?.id === state.selectedClipId)) {
+    state.selectedClipId = null;
+  }
+  return state;
+}
+
+export function focusTrack(state, kind, index) {
+  if (!SELECTION_KINDS.has(kind)) return state;
+  state.activeTrackKind = kind;
+  if (index !== undefined) {
+    const field = FOCUS_INDEX_FIELD[kind];
+    if (field) state[field] = index;
+  }
+  return state;
+}
+
 function setSelection({ kind = null, ids = [], primary } = {}){
   return applySelection(State, { kind, ids, primary });
 }

@@ -11,7 +11,7 @@ beforeAll(async () => {
   const parsed = new DOMParser().parseFromString(source, 'text/html');
   document.body.innerHTML = parsed.body.innerHTML;
   ({ State } = await import('../src/state.js'));
-  ({ StylePanelController } = await import('../src/ui/style-panel-controller.js'));
+  ({ StylePanelController } = await import('../src/style-panel-controller.js'));
   const noop = () => {};
   StylePanelController.bindStylePanelEvents({
     renderAll: noop,

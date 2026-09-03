@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
-const { authorizeDroppedMediaPath } = require('../electron/dropped-file-admission.js');
+const { authorizeDroppedMediaPath } = require('../electron/project-file-authority-engine.js');
 
 describe('dropped desktop project intake', () => {
   it('generic media-drop admission cannot pre-authorize project files or their screenshot directory', () => {

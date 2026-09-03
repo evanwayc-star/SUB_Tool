@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const S = require('../electron/export-job-status.js');
+const S = require('../electron/export-queue.js');
 
 describe('狀態集合', () => {
   it('七種狀態，值與磁碟上既有記錄相容', () => {

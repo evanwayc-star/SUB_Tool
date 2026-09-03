@@ -10,11 +10,11 @@ import { escapeHTML } from './util.js';
 import { getPlayerAdapter } from './media-player-adapter.js';
 import { toASSFromState } from './subio.js';
 import { createPreviewDrag } from './timeline-interaction-engine.js';
-import { drawTimeline, updatePlayhead } from './timeline.js';
+import { drawTimeline, updatePlayhead } from './timeline-renderer.js';
 import { renderAudioTracks, clearMeterStrips } from './mixer.js';
 import { Wave } from './media.js';
 import { imageBoxOnStage, fadeAlphaAtTimeline } from './image-compositor-engine.js';
-import { renderASS } from './subtitle-snapshot-engine.js';
+import { renderASS } from './formats.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { recordHistory } from './history.js';
 import { showToast, setMpvWindowVisible } from './ui.js';
@@ -635,7 +635,7 @@ export const previewDrag = createPreviewDrag({
     }
   }
 });
-previewDrag.bind({ imageLayer: document.getElementById('imageLayer'), videoSub: _videoSub, videoWrap: _videoWrap });
+previewDrag.bind({ imageLayer: typeof document !== 'undefined' ? document.getElementById('imageLayer') : null, videoSub: _videoSub, videoWrap: _videoWrap });
 
 /* ==============================================================================
    播放器全螢幕與媒體視圖事件控制

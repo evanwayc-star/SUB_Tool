@@ -9,17 +9,222 @@
    對外提供小介面，完全隱藏定時器與跨領域同步細節。
    ============================================================================== */
 import { $, video } from './dom.js';
-import { State, deselect, focusTrackKind } from './state.js';
+import { State, deselect, focusTrackKind, cueSuffix } from './state.js';
 import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
-import { selectCueSingle } from './subtitles.js';
-import { updatePlayhead } from './timeline.js';
+import { selectCueSingle, commitCueTimeEdit } from './subtitles.js';
+import { addCue, cueTrackLocked } from './subtitle-model.js';
+import { ensureProjectSaved } from './project.js';
+import { updatePlayhead, drawTimeline } from './timeline-renderer.js';
+import { recordHistory } from './history.js';
 import { updateNoteActive } from './notes.js';
 import { emit, on } from './events.js';
 import { setStatus, showOsd } from './ui.js';
-import { getNoteJump, getFirstLastCue, getAdjacentCue, getCueInMinusFrames, getBoundaryStep } from './timeline-navigation.js';
-import { createReverseShuttleSession } from './shuttle-runtime.js';
+
+/* 倒帶工作階段：集中管理方向、速率、取消、呈現節流與持續健康檢查。
+   對外與 presentation port 一律使用時間軸時間；播放器來源時間只存在 Media 邊界內。 */
+function createReverseShuttleSession({
+  media,
+  presentation,
+  getExactFps,
+  onPresented,
+  onReachedStart,
+  now = () => performance.now(),
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+  nativeStallMs = 400,
+  nativeStartupGraceMs = 1200,
+  snapFrame,
+} = {}) {
+  let active = false;
+  let mode = 'idle';
+  let rate = 1;
+  let generation = 0;
+  let fallbackTimer = null;
+  let healthTimer = null;
+  let anchorTime = 0;
+  let anchorWallTime = 0;
+  let lastNativePresented = null;
+  let lastNativeProgressAt = 0;
+  let nativeProgressSeen = false;
+
+  function exactFps() {
+    return Math.max(1, Number(getExactFps?.()) || 30);
+  }
+
+  function normalizedRate(value) {
+    return Math.min(5, Math.max(0.1, Math.abs(Number(value) || 1)));
+  }
+
+  function clearTimers() {
+    if (fallbackTimer != null) clearIntervalFn(fallbackTimer);
+    if (healthTimer != null) clearIntervalFn(healthTimer);
+    fallbackTimer = null;
+    healthTimer = null;
+  }
+
+  function latestPresentedTime({ allowDisplayFallback = true } = {}) {
+    const rawObserved = presentation?.presentedTime?.();
+    const observed = Number(rawObserved);
+    if (rawObserved != null && rawObserved !== '' && Number.isFinite(observed)) return Math.max(0, observed);
+    if (!allowDisplayFallback) return null;
+    return Math.max(0, Number(media?.displayTime?.()) || 0);
+  }
+
+  function restoreForwardDirection() {
+    return Promise.resolve(media?.setPlaybackDirection?.('forward')).catch(() => false);
+  }
+
+  function finishAtStart(token, presentedTime) {
+    if (!active || token !== generation) return;
+    onPresented?.(presentedTime);
+    stop();
+    onReachedStart?.();
+  }
+
+  function requestFallbackFrame(token) {
+    if (!active || token !== generation || mode !== 'fallback') return;
+    const fps = exactFps();
+    const elapsedSeconds = Math.max(0, (now() - anchorWallTime) / 1000);
+    const rawTarget = Math.max(0, anchorTime - elapsedSeconds * rate);
+    // FPS-SYNC (I3): 依格網吸附，若提供 snapFrame 則使用其精確 frame metadata
+    const targetTime = Math.max(0, typeof snapFrame === 'function' ? snapFrame(rawTarget) : (Math.round(rawTarget * fps) / fps));
+    Promise.resolve(presentation.request(targetTime)).then(result => {
+      if (!active || token !== generation || mode !== 'fallback') return;
+      if (result?.status !== 'presented') return;
+      const presentedTime = Number(result.presentedTime);
+      if (!Number.isFinite(presentedTime)) return;
+      if (presentedTime <= 0.5 / fps && targetTime === 0) {
+        finishAtStart(token, Math.max(0, presentedTime));
+        return;
+      }
+      onPresented?.(presentedTime);
+    }).catch(() => {});
+  }
+
+  function beginFallback(token, { restoreDirection = false } = {}) {
+    if (!active || token !== generation) return;
+    if (healthTimer != null) clearIntervalFn(healthTimer);
+    healthTimer = null;
+    if (restoreDirection) {
+      media?.pause?.();
+      restoreForwardDirection();
+    } else {
+      media?.pause?.();
+    }
+    media?.setRate?.(1);
+    media?.setReverseShuttleMuted?.(true);
+    presentation?.cancel?.('reverse-fallback-start');
+    mode = 'fallback';
+    anchorTime = latestPresentedTime();
+    anchorWallTime = now();
+    const frameInterval = 1000 / Math.min(60, exactFps());
+    fallbackTimer = setIntervalFn(() => requestFallbackFrame(token), frameInterval);
+  }
+
+  function monitorNative(token) {
+    if (!active || token !== generation || mode !== 'native') return;
+    const observed = latestPresentedTime({ allowDisplayFallback: false });
+    const currentWallTime = now();
+    const minimumProgress = 0.25 / exactFps();
+    if (observed != null && (lastNativePresented == null || observed < lastNativePresented - minimumProgress)) {
+      lastNativePresented = observed;
+      lastNativeProgressAt = currentWallTime;
+      nativeProgressSeen = true;
+      if (observed <= 0.5 / exactFps()) finishAtStart(token, Math.max(0, observed));
+      return;
+    }
+    const allowedStall = nativeProgressSeen ? nativeStallMs : nativeStartupGraceMs;
+    if (currentWallTime - lastNativeProgressAt >= allowedStall) {
+      beginFallback(token, { restoreDirection: true });
+    }
+  }
+
+  async function start(nextRate = -1) {
+    if (active) return update(nextRate);
+    active = true;
+    rate = normalizedRate(nextRate);
+    const token = ++generation;
+    mode = 'starting';
+    clearTimers();
+    presentation?.cancel?.('reverse-started');
+    media?.setReverseShuttleMuted?.(true);
+    media?.pause?.();
+
+    if (!media?.supportsNativeReverse?.()) {
+      beginFallback(token);
+      return false;
+    }
+
+    mode = 'starting-native';
+    let enabled = false;
+    try {
+      enabled = await media.setPlaybackDirection('backward');
+    } catch (error) {
+      enabled = false;
+    }
+    if (!active || token !== generation) {
+      if (enabled !== false) await restoreForwardDirection();
+      return false;
+    }
+    if (enabled === false) {
+      beginFallback(token);
+      return false;
+    }
+
+    mode = 'native';
+    media.setRate?.(rate);
+    media.play?.();
+    lastNativePresented = latestPresentedTime();
+    lastNativeProgressAt = now();
+    nativeProgressSeen = false;
+    healthTimer = setIntervalFn(() => monitorNative(token), 100);
+    return true;
+  }
+
+  function update(nextRate) {
+    if (!active) return start(nextRate);
+    rate = normalizedRate(nextRate);
+    if (mode === 'native') {
+      media?.setRate?.(rate);
+    } else if (mode === 'fallback') {
+      presentation?.cancel?.('reverse-speed-changed');
+      anchorTime = latestPresentedTime();
+      anchorWallTime = now();
+    }
+    return Promise.resolve(mode === 'native');
+  }
+
+  let lastStopPromise = null;
+
+  function stop() {
+    if (!active && mode === 'idle') return false;
+    const shouldRestoreDirection = mode === 'native' || mode === 'starting-native';
+    active = false;
+    generation += 1;
+    clearTimers();
+    presentation?.cancel?.('reverse-stopped');
+    media?.pause?.();
+    lastStopPromise = shouldRestoreDirection
+      ? Promise.resolve(restoreForwardDirection()).catch(() => false)
+      : Promise.resolve(true);
+    media?.setRate?.(1);
+    media?.setReverseShuttleMuted?.(false);
+    mode = 'idle';
+    return true;
+  }
+
+  function isActive() {
+    return active || mode !== 'idle';
+  }
+
+  function stopPromise() {
+    return lastStopPromise || Promise.resolve(true);
+  }
+
+  return { start, update, stop, isActive, stopPromise };
+}
 
 /* ===== JKL 穿梭輪狀態與定時器 ============================================== */
 let _jklSpeed = 0;
@@ -436,11 +641,113 @@ function stepMediaBoundary(dir) {
   return true;
 }
 
-/* ===== 字幕 I/O 上字幕控制與輸出範圍標記（轉發自領域深模組） ================ */
-import { setIn, setOut, autoAdvanceSubMode } from './subtitle-editing.js';
-import { setExportIn, setExportOut, clearExport } from './export-range.js';
+async function setIn() {
+  await ensureProjectSaved();
+  if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
+  let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
+  let c = State.cues.find(x => x.id === State.selectedId);
+  if (!c) {
+    const tk = State.tracks.length === 0 ? 0 : Math.min(State.tracks.length - 1, Math.max(0, State.listTrack));
+    c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', tk, { historyLabel: '新增字幕(I)' });
+    if (!c) return;
+    setStatus('已新增字幕，起點 ' + fmtClock(t), 'ok');
+    return;
+  }
+  if (cueTrackLocked(c, '調整字幕起點')) return;
+  const wasUntimed = c.timed === false;
+  c.start = t;
+  if (State.subMode) {
+    State.cues.forEach(cue => {
+      if (cue._tempEnd && cue.id !== c.id) {
+        cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
+        delete cue._tempEnd;
+      }
+    });
+    c.end = (State.duration && State.duration > c.start) ? State.duration : c.start + 3600;
+    c._tempEnd = true;
+    if (!State._subModeTouchedIds) State._subModeTouchedIds = new Set();
+    State._subModeTouchedIds.add(c.id);
+  } else if (wasUntimed || c.end <= c.start) {
+    c.end = snapTimeToFrame(c.start + 0.5, State.fps, State.dropFrame);
+  }
+  c.timed = true;
+  commitCueTimeEdit(c, 'start');
+  recordHistory('設定起點 I' + cueSuffix(c)); setStatus('起點 ' + fmtClock(t), 'ok');
+}
+
+async function setOut() {
+  await ensureProjectSaved();
+  if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
+  let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
+  const c = State.cues.find(x => x.id === State.selectedId);
+  if (!c) { setStatus('請先選擇字幕（或按 I 新建）', 'err'); return; }
+  if (cueTrackLocked(c, '調整字幕終點')) return;
+
+  const wasUntimed = c.timed === false;
+  if (wasUntimed) {
+    c.end = t;
+    c.start = snapTimeToFrame(Math.max(0, t - 0.5), State.fps, State.dropFrame);
+  } else {
+    if (t <= c.start) { setStatus('終點不得早於或等於起點', 'err'); return; }
+    c.end = t;
+  }
+
+  c.timed = true;
+  delete c._tempEnd;
+  commitCueTimeEdit(c, 'end');
+  recordHistory('設定終點 O' + cueSuffix(c)); setStatus('終點 ' + fmtClock(c.end), 'ok');
+  autoAdvanceSubMode();
+}
+
+function autoAdvanceSubMode() {
+  if (!State.subMode || !State._subModeSequence) return;
+
+  const seq = State._subModeSequence;
+  const currIdx = seq.indexOf(State.selectedId);
+
+  if (currIdx >= 0) {
+    let nextIdx = currIdx + 1;
+    while (nextIdx < seq.length) {
+      const nextId = seq[nextIdx];
+      const nextCue = State.cues.find(c => c.id === nextId);
+      const currCue = State.cues.find(c => c.id === State.selectedId);
+      if (nextCue && currCue && (nextCue.track || 0) === (currCue.track || 0)) {
+        selectCueSingle(nextId, false);
+        setStatus(`🎯 上字幕 (依原順序) — 按 I 設起點`, 'ok');
+        return;
+      }
+      nextIdx++;
+    }
+  }
+
+  selectCueSingle(null);
+  setStatus('🎯 上字幕模式：已無下一句，取消選取 ✓', 'ok');
+}
+
+function setExportIn() {
+  State.exportIn = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
+  drawTimeline();
+  recordHistory('設定輸出起點 [In]');
+  setStatus(`輸出起點已設為 ${fmtClock(State.exportIn)}`, 'ok');
+}
+
+function setExportOut() {
+  State.exportOut = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
+  drawTimeline();
+  recordHistory('設定輸出終點 [Out]');
+  setStatus(`輸出終點已設為 ${fmtClock(State.exportOut)}`, 'ok');
+}
+
+function clearExport() {
+  State.exportIn = null;
+  State.exportOut = null;
+  drawTimeline();
+  recordHistory('清除輸出範圍');
+  setStatus('輸出範圍已清除', 'ok');
+}
 
 export {
+  createReverseShuttleSession,
   jklClear,
   jklApply,
   jklReset,
@@ -466,7 +773,164 @@ export {
   stepMediaBoundary,
   setIn,
   setOut,
+  autoAdvanceSubMode,
   setExportIn,
   setExportOut,
   clearExport,
 };
+
+/* ==============================================================================
+   時間軸導航計算純函式 (Timeline Navigation Logic)
+   ============================================================================== */
+
+export function getNoteJump({ notes, currentTime, dir }) {
+  if (!notes || !notes.length) return null;
+  const EPS = 1e-4;
+  let target = null;
+  if (dir > 0) {
+    for (const n of notes) {
+      if (n.time > currentTime + EPS && (target === null || n.time < target.time)) {
+        target = n;
+      }
+    }
+  } else {
+    for (const n of notes) {
+      if (n.time < currentTime - EPS && (target === null || n.time > target.time)) {
+        target = n;
+      }
+    }
+  }
+  return target ? target.time : null;
+}
+
+export function getFirstLastCue({ cues, listTrack, dir }) {
+  const list = cues.filter(c => (c.track || 0) === listTrack && c.timed !== false);
+  if (!list.length) return null;
+  return dir < 0 ? list[0] : list[list.length - 1];
+}
+
+export function getAdjacentCue({ cues, selectedId, listTrack, activeSubTrack, currentTime, isPlaying, dir }) {
+  const sel = cues.find(c => c.id === selectedId);
+  const track = sel ? (sel.track || 0) : (activeSubTrack !== undefined ? activeSubTrack : listTrack);
+  const list = cues.filter(c => (c.track || 0) === track);
+  if (!list.length) return null;
+
+  let idx;
+  if (sel) {
+    idx = list.findIndex(c => c.id === sel.id) + dir;
+  } else {
+    if (dir < 0) {
+      idx = list.filter(c => c.start < currentTime - 1e-4).length - 1;
+      if (isPlaying) idx -= 1;
+    } else {
+      idx = list.findIndex(c => c.start > currentTime + 1e-4);
+    }
+  }
+
+  idx = Math.max(0, Math.min(list.length - 1, idx));
+  return list[idx] || null;
+}
+
+export function getCueInMinusFrames({ cues, selectedId, listTrack, currentTime, fps, dropFrame = false, dir, frames }) {
+  const sel = cues.find(c => c.id === selectedId);
+  const track = sel ? (sel.track || 0) : listTrack;
+  const list = cues.filter(c => (c.track || 0) === track);
+  if (!list.length) return null;
+
+  let idx;
+  if (sel) {
+    idx = list.findIndex(c => c.id === sel.id) + dir;
+  } else {
+    if (dir < 0) {
+      idx = list.filter(c => c.start < currentTime - 1e-4).length - 1;
+    } else {
+      idx = list.findIndex(c => c.start > currentTime + 1e-4);
+    }
+  }
+
+  idx = Math.max(0, Math.min(list.length - 1, idx));
+  const target = list[idx];
+  if (!target) return null;
+
+  // FPS-SYNC (I3): 以精確 FPS 計算倒退秒數並吸附至影格格網
+  const exactFps = getExactFps(fps || 30);
+  const rawTarget = Math.max(0, target.start - (frames / exactFps));
+  const targetTime = snapTimeToFrame(rawTarget, fps || 30, dropFrame || false);
+  return { targetCue: target, targetTime };
+}
+
+export function getBoundaryStep({ cues, selectedId, listTrack, currentTime, dir, eps = 0.05 }) {
+  const timed = cues.filter(c => c.timed !== false && (c.track || 0) === listTrack);
+  if (!timed.length) return null;
+
+  const selIdx = timed.findIndex(c => c.id === selectedId);
+  let c = selIdx >= 0 ? timed[selIdx] : null;
+  let cIdx = selIdx;
+
+  if (c && (currentTime < c.start - eps || currentTime > c.end + eps)) {
+    c = null;
+    cIdx = -1;
+  }
+
+  let targetId = null;
+  let targetEdge = 'start';
+  let targetTime = 0;
+
+  if (dir > 0) {
+    if (!c) {
+      const bnd = [];
+      for (const cue of timed) {
+        bnd.push({ id: cue.id, edge: 'start', t: cue.start });
+        bnd.push({ id: cue.id, edge: 'end', t: cue.end });
+      }
+      bnd.sort((a, b) => a.t - b.t);
+      const nextBnd = bnd.find(b => b.t > currentTime + eps);
+      if (nextBnd) { targetId = nextBnd.id; targetEdge = nextBnd.edge; targetTime = nextBnd.t; }
+    } else {
+      if (currentTime < c.start - eps) {
+        targetId = c.id; targetEdge = 'start'; targetTime = c.start;
+      } else if (currentTime < c.end - eps) {
+        targetId = c.id; targetEdge = 'end'; targetTime = c.end;
+      } else {
+        if (cIdx < timed.length - 1) {
+          const next = timed[cIdx + 1];
+          targetId = next.id; targetEdge = 'start'; targetTime = next.start;
+        } else {
+          return null;
+        }
+      }
+    }
+  } else {
+    if (!c) {
+      const bnd = [];
+      for (const cue of timed) {
+        bnd.push({ id: cue.id, edge: 'start', t: cue.start });
+        bnd.push({ id: cue.id, edge: 'end', t: cue.end });
+      }
+      bnd.sort((a, b) => a.t - b.t);
+      let prevBnd = null;
+      for (let i = bnd.length - 1; i >= 0; i--) {
+        if (bnd[i].t < currentTime - eps) { prevBnd = bnd[i]; break; }
+      }
+      if (prevBnd) { targetId = prevBnd.id; targetEdge = prevBnd.edge; targetTime = prevBnd.t; }
+    } else {
+      if (currentTime > c.end + eps) {
+        targetId = c.id; targetEdge = 'end'; targetTime = c.end;
+      } else if (currentTime > c.start + eps) {
+        targetId = c.id; targetEdge = 'start'; targetTime = c.start;
+      } else {
+        if (cIdx > 0) {
+          const prev = timed[cIdx - 1];
+          targetId = prev.id; targetEdge = 'end'; targetTime = prev.end;
+        } else {
+          return null;
+        }
+      }
+    }
+  }
+
+  if (targetId) {
+    return { targetId, targetEdge, targetTime };
+  }
+  return null;
+}

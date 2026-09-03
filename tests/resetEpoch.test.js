@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ResetEpoch } from '../src/reset-epoch.js';
+import { ResetEpoch } from '../src/media-presentation-core.js';
 
 describe('reset-scoped project asset epoch', () => {
   it('allows concurrent work in one project but invalidates all old work on reset', () => {
