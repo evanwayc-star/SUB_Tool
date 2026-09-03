@@ -179,35 +179,42 @@ function togglePlayPause() {
   setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : '');
 }
 
+let _lastRepeatDir = 0;
+let _lastRepeatTime = 0;
+
 function stepFrame(dir, repeat = false) {
-  // OS auto-repeat 只是「仍按住」的通知；同方向的 shuttle 已在跑時不可每次都
-  // 暫停再播放，否則 mpv/HTML 都會產生可見卡頓。
-  if (repeat && _jklSpeed === dir) return;
   if (Media.playing || _jklSpeed !== 0) {
     jklClear();
     _jklSpeed = 0;
     if (Media.playing) Media.pause({ seekOnPause: false });
     setStatus('⏸ 暫停', '');
   }
+
+  // 方向鍵長按 (repeat=true) 維持純粹的連續逐格步進，節流在 50ms（約 20fps），
+  // 嚴禁切換成 JKL 倒帶/快轉穿梭，徹底消除誤轉倒播與放開按鍵時 loadfile 造成的劇烈抖動。
   if (repeat) {
-    if (dir < 0 && _jklSpeed >= 0) { _jklSpeed = -1; jklApply(); }
-    else if (dir > 0 && _jklSpeed <= 0) { _jklSpeed = 1; jklApply(); }
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (dir === _lastRepeatDir && now - _lastRepeatTime < 50) return;
+    _lastRepeatDir = dir;
+    _lastRepeatTime = now;
   } else {
-    // FPS-SYNC (I5): 以目前權威呈現位置 displayTime() 的整數影格為基準加減整數格
-    // 嚴禁從浮點相加微小殘差，徹底防止右鍵跳兩格或左鍵不動
-    const exactFps = getExactFps(State.fps || 30);
-    const currentT = Media.displayTime();
-    const currentFrame = Math.round(currentT * exactFps);
-    const targetFrame = Math.max(0, currentFrame + dir);
-    const t = snapTimeToFrame(targetFrame / exactFps, State.fps, State.dropFrame);
-    const frameDuration = 1 / exactFps;
-    Media.seek(t, { presentationTolerance: 0.45 * frameDuration });
-    updatePlayhead();
-    emit('playhead:ensure');
-    updateNoteActive(t);
-    if (!Media.playing) {
-      Media.scrubAudio(t, 0.08);
-    }
+    _lastRepeatDir = 0;
+  }
+
+  // FPS-SYNC (I5): 以目前權威呈現位置 displayTime() 的整數影格為基準加減整數格
+  // 嚴禁從浮點相加微小殘差，徹底防止右鍵跳兩格或左鍵不動
+  const exactFps = getExactFps(State.fps || 30);
+  const currentT = Media.displayTime();
+  const currentFrame = Math.round(currentT * exactFps);
+  const targetFrame = Math.max(0, currentFrame + dir);
+  const t = snapTimeToFrame(targetFrame / exactFps, State.fps, State.dropFrame);
+  const frameDuration = 1 / exactFps;
+  Media.seek(t, { presentationTolerance: 0.45 * frameDuration });
+  updatePlayhead();
+  emit('playhead:ensure');
+  updateNoteActive(t);
+  if (!Media.playing) {
+    Media.scrubAudio(t, 0.08);
   }
 }
 

@@ -286,32 +286,36 @@ describe('JKL reverse shuttle time domain', () => {
     expect(showToast.mock.calls.at(-1)?.[0]).toContain('修改字幕時間');
   });
 
-  it('長按方向鍵只啟動一次 shuttle，放開時會暫停', () => {
+  it('長按方向鍵維持平滑逐格步進，不誤啟動 shuttle，放開時零管線抖動', () => {
     State.keymap = { nudge_right_1f: [{ key: 'arrowright' }] };
     mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
     mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    mediaMock.seek.mockClear();
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    expect(mediaMock.seek).toHaveBeenCalled();
+    expect(mediaMock.play).not.toHaveBeenCalled();
+    expect(getJklSpeed()).toBe(0);
+
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', repeat: true }));
+    expect(mediaMock.play).not.toHaveBeenCalled();
+    expect(getJklSpeed()).toBe(0);
+
     mediaMock.pause.mockClear();
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', repeat: true }));
-    expect(mediaMock.pause).not.toHaveBeenCalled();
-
     window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight' }));
-    expect(mediaMock.pause).toHaveBeenCalled();
+    // 零抖動：未進入 shuttle，放開時無需重複觸發 pause 或重載母素材
     expect(mediaMock.playing).toBe(false);
   });
 
-  it('長按左鍵的 repeat 不會反覆重啟 fallback session', () => {
+  it('長按左鍵的 repeat 維持逐格步進，不觸發倒帶 session', () => {
+    mediaMock.setReverseShuttleMuted.mockClear();
     stepFrame(-1, false);
     stepFrame(-1, true);
-    const startedCalls = mediaMock.setReverseShuttleMuted.mock.calls.length;
     stepFrame(-1, true);
 
-    expect(mediaMock.setReverseShuttleMuted).toHaveBeenCalledTimes(startedCalls);
-    stepFrame(-1, false);
-    expect(mediaMock.setReverseShuttleMuted).toHaveBeenLastCalledWith(false);
+    // 絕不誤切入倒帶穿梭 session
+    expect(mediaMock.setReverseShuttleMuted).not.toHaveBeenCalled();
+    expect(getJklSpeed()).toBe(0);
   });
 
   it('J/L 穿梭倍率依文件上限固定在正負 5x', () => {
