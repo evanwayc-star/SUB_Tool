@@ -87,6 +87,17 @@ describe('本機 ASR Worker runtime 規則', () => {
     expect(BUILTIN_ASR_RUNTIME.maxNewTokens).toBe(256);
   });
 
+  it('支援指定 returnTimestamps 為 true 以使用原生時間戳記', () => {
+    const streamer = { put() {}, end() {} };
+    const options = buildBuiltinGenerationOptions({
+      language: 'zh',
+      prompt: '',
+      streamer,
+      returnTimestamps: true
+    });
+    expect(options.return_timestamps).toBe(true);
+  });
+
   it('把 Whisper 逐字 chunks 合成字幕段落並保留每個真正的 word timestamp', () => {
     expect(normalizeBuiltinAsrSegments({
       chunks: [

@@ -100,7 +100,12 @@ function freezeWorkSpec(initData = {}) {
     transcript: typeof initData.transcript === 'string' ? initData.transcript : '',
     transcriptLines: Object.freeze(Array.isArray(initData.transcriptLines) ? [...initData.transcriptLines] : []),
     recognitionSelection: deepFreeze(clonePlain(initData.recognitionSelection || 'all')),
-    guidance: deepFreeze(clonePlain(initData.guidance || {}))
+    guidance: deepFreeze(clonePlain(initData.guidance || {})),
+    vocalFilter: !!initData.vocalFilter,
+    temperature: typeof initData.temperature === 'number' ? initData.temperature : 0,
+    elevenlabsNumSpeakers: initData.elevenlabsNumSpeakers || '',
+    elevenlabsTagAudioEvents: !!initData.elevenlabsTagAudioEvents,
+    azureProfanity: initData.azureProfanity || 'Raw'
   });
 }
 

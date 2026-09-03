@@ -30,6 +30,7 @@ import {
 import {
   BUILTIN_MODELS,
   DEFAULT_AZURE_SPEECH_REGION,
+  applyVocalEnhancementFilter,
   blobToBase64,
   extractClipFloat32Mono16k,
   combineRecognitionAudioBuffers,
@@ -44,6 +45,8 @@ import {
   parseElevenLabsTranscriptionResponse,
   callElevenLabsSpeechTranscription,
   callWhisperApi,
+  findSilenceSplitPoint,
+  planWhisperCloudChunks,
   transcribeAudioStream
 } from './speech-recognition-engine.js';
 
@@ -51,6 +54,7 @@ import {
 export {
   BUILTIN_MODELS,
   DEFAULT_AZURE_SPEECH_REGION,
+  applyVocalEnhancementFilter,
   blobToBase64,
   extractClipFloat32Mono16k,
   combineRecognitionAudioBuffers,
@@ -65,6 +69,8 @@ export {
   parseElevenLabsTranscriptionResponse,
   callElevenLabsSpeechTranscription,
   callWhisperApi,
+  findSilenceSplitPoint,
+  planWhisperCloudChunks,
   transcribeAudioStream,
   getAsrSession,
   setAsrSessionDialogOpen,
@@ -139,7 +145,12 @@ export function getAsrConfig() {
           azurePhraseList: parsed.azurePhraseList || '',
           elevenlabsKeyterms: parsed.elevenlabsKeyterms || '',
           language: parsed.language || 'zh',
-          prompt: typeof parsed.prompt === 'string' ? parsed.prompt : DEFAULT_ASR_PROMPT
+          prompt: typeof parsed.prompt === 'string' ? parsed.prompt : DEFAULT_ASR_PROMPT,
+          vocalFilter: typeof parsed.vocalFilter === 'boolean' ? parsed.vocalFilter : false,
+          temperature: typeof parsed.temperature === 'number' ? parsed.temperature : 0,
+          elevenlabsNumSpeakers: typeof parsed.elevenlabsNumSpeakers === 'number' || typeof parsed.elevenlabsNumSpeakers === 'string' ? parsed.elevenlabsNumSpeakers : '',
+          elevenlabsTagAudioEvents: Boolean(parsed.elevenlabsTagAudioEvents),
+          azureProfanity: typeof parsed.azureProfanity === 'string' ? (parsed.azureProfanity === 'Raw' ? 'None' : parsed.azureProfanity) : 'None'
         };
       }
     }
@@ -156,8 +167,13 @@ export function getAsrConfig() {
     azureRegion: DEFAULT_AZURE_SPEECH_REGION,
     azurePhraseList: '',
     elevenlabsKeyterms: '',
+    elevenlabsNumSpeakers: '',
+    elevenlabsTagAudioEvents: false,
+    azureProfanity: 'None',
     language: 'zh',
-    prompt: DEFAULT_ASR_PROMPT
+    prompt: DEFAULT_ASR_PROMPT,
+    vocalFilter: false,
+    temperature: 0
   };
 }
 
@@ -850,6 +866,17 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     ? `<span class="asr-duration-pill">總計約 ${secToEncore(totalDur, State.fps, State.dropFrame)}</span>`
     : '';
 
+  const allAvailableClips = [
+    ...(Array.isArray(State.clips) ? State.clips : []),
+    ...(Array.isArray(State.externalAudioState) ? State.externalAudioState : [])
+  ];
+  const clipChoicesHtml = allAvailableClips.map(c => {
+    const isVideo = (State.clips || []).includes(c);
+    const typeLabel = isVideo ? '視訊音訊' : '外部音軌';
+    const isCurrent = clips.some(item => item.id === c.id);
+    return `<option value="${escapeHTML(c.id)}" ${isCurrent ? 'selected' : ''}>[${typeLabel}] ${escapeHTML(c.name || '音訊素材')}</option>`;
+  }).join('');
+
   const html = `
     <div class="asr-form asr-workspace asr-config-workspace">
       <section class="asr-card asr-source-card" aria-labelledby="asrSourceTitle">
@@ -862,6 +889,18 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           ${totalDurationSummary}
         </div>
         <div class="asr-source-list" role="list">${clipsSummary}</div>
+        <div id="asrClipSelectorRow" class="asr-field asr-source-selector" style="display:${allAvailableClips.length > 1 ? 'flex' : 'none'};">
+          <label for="asrClipSelect">指定辨識素材（多軌／人聲分離軌）</label>
+          <select id="asrClipSelect">${clipChoicesHtml}</select>
+          <div class="asr-helper">可選擇主要視訊聲音或已匯入的人聲分離軌道（例如 Demucs / UVR 分離之 vocals.wav）。</div>
+        </div>
+        <div class="asr-callout asr-vocal-callout">
+          <div class="asr-section-icon">${asrIcon('info')}</div>
+          <div>
+            <strong>💡 人聲分離技巧：</strong>
+            <span class="asr-helper">若影片伴奏或環境雜音較大，可先使用 AI 工具（如 UVR5 或 Demucs）分離出純人聲（vocals.wav），匯入時間軸音軌後於此處直接選取該音軌進行辨識。</span>
+          </div>
+        </div>
         <div id="asrRecognitionAudioSourceRow" class="asr-field asr-source-selector" style="display:${recognitionAudioChoices.length > 1 ? 'flex' : 'none'};">
           <label for="asrRecognitionAudioSource">辨識音訊來源</label>
           <select id="asrRecognitionAudioSource">${recognitionAudioOptions}</select>
@@ -943,6 +982,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <option value="onnx-community/whisper-base" ${conf.builtinModel === 'onnx-community/whisper-base' ? 'selected' : ''}>Whisper Base 逐字時間版</option>
           <option value="onnx-community/whisper-small" ${conf.builtinModel === 'onnx-community/whisper-small' ? 'selected' : ''}>Whisper Small 逐字時間版</option>
           <option value="onnx-community/whisper-large-v3-turbo" ${conf.builtinModel === 'onnx-community/whisper-large-v3-turbo' ? 'selected' : ''}>Whisper Large v3 Turbo q4 逐字時間版</option>
+          <option value="onnx-community/whisper-large-v3" ${conf.builtinModel === 'onnx-community/whisper-large-v3' ? 'selected' : ''}>Whisper Large v3 旗艦多語言版</option>
         </select>
             <div class="asr-helper">首次使用會下載並快取模型；有獨立顯卡時可自動啟用 WebGPU。</div>
           </div>
@@ -981,6 +1021,54 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <div id="asrPromptRow" class="asr-field asr-guidance-field" style="display:${initialGuidanceMeta ? 'flex' : 'none'};">
             <label id="asrPromptLabel" for="asrPrompt">${escapeHTML(initialGuidanceMeta?.label || '')}</label>
             <input type="text" id="asrPrompt" placeholder="${escapeHTML(initialGuidanceMeta?.placeholder || '')}" value="${escapeHTML(initialGuidanceValue)}">
+          </div>
+
+          <div class="asr-field asr-vocal-filter-field">
+            <label class="asr-checkbox-label" for="asrVocalFilter">
+              <input type="checkbox" id="asrVocalFilter" ${conf.vocalFilter ? 'checked' : ''}>
+              <span>啟用人聲增強濾波（Fast Vocal Filter）</span>
+            </label>
+            <div class="asr-helper">預設關閉（原音直通最佳）。若錄音有嚴重空調轟鳴或低頻風切時再勾選（75Hz 高通線性濾除，不破壞子音）。</div>
+          </div>
+
+          <div id="asrTemperatureRow" class="asr-field asr-temperature-field" style="display:${(conf.provider === 'builtin' || conf.provider === 'groq' || conf.provider === 'openai') ? 'flex' : 'none'};">
+            <label for="asrTemperature">Whisper 解碼溫度（Temperature）</label>
+            <select id="asrTemperature">
+              <option value="0" ${Number(conf.temperature) === 0 ? 'selected' : ''}>0.0（確定性最高精度，推薦）</option>
+              <option value="0.2" ${Number(conf.temperature) === 0.2 ? 'selected' : ''}>0.2（微調彈性重試）</option>
+              <option value="0.5" ${Number(conf.temperature) === 0.5 ? 'selected' : ''}>0.5（一般取樣）</option>
+            </select>
+            <div class="asr-helper">固定為 0.0 可杜絕隨機跳針與幻覺，保持最穩定、精確的文字輸出。</div>
+          </div>
+
+          <div id="asrAzureProfanityRow" class="asr-field" style="display:${conf.provider === 'azure' ? 'flex' : 'none'};">
+            <label for="asrAzureProfanity">Azure 不雅字詞處理</label>
+            <select id="asrAzureProfanity">
+              <option value="None" ${(conf.azureProfanity === 'None' || conf.azureProfanity === 'Raw' || !conf.azureProfanity) ? 'selected' : ''}>None（保留原字，推薦字幕製作）</option>
+              <option value="Masked" ${conf.azureProfanity === 'Masked' ? 'selected' : ''}>Masked（星號遮罩 ***）</option>
+              <option value="Removed" ${conf.azureProfanity === 'Removed' ? 'selected' : ''}>Removed（移除不雅字）</option>
+            </select>
+            <div class="asr-helper">字幕通常建議選擇 None，避免受訪者口頭禪或敏感字詞被置換成星號缺字。</div>
+          </div>
+
+          <div id="asrElevenLabsSpeakersRow" class="asr-field" style="display:${conf.provider === 'elevenlabs' ? 'flex' : 'none'};">
+            <label for="asrElevenLabsSpeakers">ElevenLabs 說話者人數（選填）</label>
+            <select id="asrElevenLabsSpeakers">
+              <option value="" ${!conf.elevenlabsNumSpeakers ? 'selected' : ''}>自動偵測（預設）</option>
+              <option value="1" ${String(conf.elevenlabsNumSpeakers) === '1' ? 'selected' : ''}>1 人（單人獨白/演講/課程）</option>
+              <option value="2" ${String(conf.elevenlabsNumSpeakers) === '2' ? 'selected' : ''}>2 人（雙人對談/訪談）</option>
+              <option value="3" ${String(conf.elevenlabsNumSpeakers) === '3' ? 'selected' : ''}>3 人</option>
+              <option value="4" ${String(conf.elevenlabsNumSpeakers) === '4' ? 'selected' : ''}>4 人</option>
+              <option value="5" ${String(conf.elevenlabsNumSpeakers) === '5' ? 'selected' : ''}>5 人以上</option>
+            </select>
+            <div class="asr-helper">明確指定說話者人數可輔助聲紋分離演算法，大幅減少人物切換錯置並讓斷句更自然。</div>
+          </div>
+
+          <div id="asrElevenLabsAudioEventsRow" class="asr-field" style="display:${conf.provider === 'elevenlabs' ? 'flex' : 'none'};">
+            <label class="asr-checkbox-label" for="asrElevenLabsAudioEvents">
+              <input type="checkbox" id="asrElevenLabsAudioEvents" ${conf.elevenlabsTagAudioEvents ? 'checked' : ''}>
+              <span>標記環境音效事件（如 [laughter] 笑聲、[applause] 掌聲）</span>
+            </label>
           </div>
         </section>
       </div>
@@ -1136,12 +1224,24 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         if (provider === 'azure') {
           currentConf.azureRegion = azureRegion.toLowerCase();
           currentConf.azurePhraseList = guidance.azurePhraseList;
+          const azureProfanityEl = document.getElementById('asrAzureProfanity');
+          if (azureProfanityEl) currentConf.azureProfanity = azureProfanityEl.value || 'None';
         }
         if (provider === 'elevenlabs') {
           currentConf.elevenlabsKeyterms = guidance.elevenlabsKeytermsText;
+          const speakersEl = document.getElementById('asrElevenLabsSpeakers');
+          const audioEventsEl = document.getElementById('asrElevenLabsAudioEvents');
+          if (speakersEl) currentConf.elevenlabsNumSpeakers = speakersEl.value;
+          if (audioEventsEl) currentConf.elevenlabsTagAudioEvents = audioEventsEl.checked;
         }
         currentConf.language = language;
         if (getAsrGuidanceMeta(provider)?.kind === 'prompt') currentConf.prompt = prompt;
+        const vocalFilterEl = document.getElementById('asrVocalFilter');
+        const temperatureEl = document.getElementById('asrTemperature');
+        const vocalFilter = vocalFilterEl ? vocalFilterEl.checked : false;
+        const temperature = temperatureEl ? Number(temperatureEl.value) : 0;
+        currentConf.vocalFilter = vocalFilter;
+        currentConf.temperature = temperature;
         saveAsrConfig(currentConf);
 
         // UI 只負責把外部系統接到辨識工作；identity、取消、迴圈、對齊與提交由 session 擁有。
@@ -1200,6 +1300,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           guidance,
           apiKey,
           azureRegion,
+          azureProfanity: currentConf.azureProfanity,
+          elevenlabsNumSpeakers: currentConf.elevenlabsNumSpeakers,
+          elevenlabsTagAudioEvents: currentConf.elevenlabsTagAudioEvents,
+          vocalFilter,
+          temperature,
           timelineFps: State.fps || 24,
           timelineDropFrame: State.dropFrame || false,
           dialogOpen: true
@@ -1215,10 +1320,15 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             builtinModel: spec.builtinModel,
             apiKey: spec.apiKey,
             azureRegion: spec.azureRegion,
+            azureProfanity: spec.azureProfanity,
             language: spec.language,
             ...('azurePhrases' in spec.guidance ? { azurePhrases: spec.guidance.azurePhrases } : {}),
             ...('keyterms' in spec.guidance ? { keyterms: spec.guidance.keyterms } : {}),
             ...('prompt' in spec.guidance ? { prompt: spec.guidance.prompt } : {}),
+            elevenlabsNumSpeakers: spec.elevenlabsNumSpeakers,
+            elevenlabsTagAudioEvents: spec.elevenlabsTagAudioEvents,
+            vocalFilter: spec.vocalFilter,
+            temperature: spec.temperature,
             signal,
             onProgress
           }),
@@ -1522,6 +1632,19 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         if (providerBadge) providerBadge.textContent = uiMeta.badge;
         if (providerHint) providerHint.textContent = uiMeta.hint;
 
+        const isWhisper = p === 'builtin' || p === 'groq' || p === 'openai';
+        const tempRow = document.getElementById('asrTemperatureRow');
+        if (tempRow) tempRow.style.display = isWhisper ? 'flex' : 'none';
+
+        const azureProfanityRow = document.getElementById('asrAzureProfanityRow');
+        if (azureProfanityRow) azureProfanityRow.style.display = p === 'azure' ? 'flex' : 'none';
+
+        const elevenLabsSpeakersRow = document.getElementById('asrElevenLabsSpeakersRow');
+        if (elevenLabsSpeakersRow) elevenLabsSpeakersRow.style.display = p === 'elevenlabs' ? 'flex' : 'none';
+
+        const elevenLabsAudioEventsRow = document.getElementById('asrElevenLabsAudioEventsRow');
+        if (elevenLabsAudioEventsRow) elevenLabsAudioEventsRow.style.display = p === 'elevenlabs' ? 'flex' : 'none';
+
         if (meta) {
           if (apiKeyEl) apiKeyEl.value = c[meta.keyField] || '';
           if (keyLabelEl) keyLabelEl.textContent = meta.keyLabel;
@@ -1557,6 +1680,29 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
       providerEl.onchange = updateProviderUI;
       updateProviderUI();
+    }
+
+    const clipSelectEl = document.getElementById('asrClipSelect');
+    if (clipSelectEl) {
+      clipSelectEl.onchange = () => {
+        const chosenId = clipSelectEl.value;
+        const chosen = allAvailableClips.find(c => c.id === chosenId);
+        if (chosen) {
+          clips.length = 0;
+          clips.push(chosen);
+          const newChoices = getRecognitionAudioSourceChoices(chosen);
+          const audioSourceSelect = document.getElementById('asrRecognitionAudioSource');
+          const audioSourceRow = document.getElementById('asrRecognitionAudioSourceRow');
+          if (audioSourceSelect && audioSourceRow) {
+            audioSourceRow.style.display = newChoices.length > 1 ? 'flex' : 'none';
+            audioSourceSelect.innerHTML = newChoices
+              .map(choice => `<option value="${escapeHTML(choice.value)}">${escapeHTML(choice.label)}</option>`)
+              .join('');
+          }
+          recognitionAudioSelectionByValue.clear();
+          newChoices.forEach(choice => recognitionAudioSelectionByValue.set(choice.value, choice.selection));
+        }
+      };
     }
   }, 0);
 }

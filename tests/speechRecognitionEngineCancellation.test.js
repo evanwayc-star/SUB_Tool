@@ -32,13 +32,13 @@ describe('語音辨識引擎取消接線', () => {
       audioBuffer: createAudioBuffer(),
       provider: 'builtin',
       builtinModel: 'onnx-community/whisper-small',
-      prompt: '本機不應收到的舊提示詞',
+      prompt: '本機專有名詞提示詞',
       signal: controller.signal
     });
 
     expect(workerMocks.transcribeBuiltinAudioInWorker).toHaveBeenCalledWith(expect.objectContaining({
       signal: controller.signal,
-      prompt: '',
+      prompt: '本機專有名詞提示詞',
       modelId: 'onnx-community/whisper-small_timestamped',
       webgpuDtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' },
       wasmDtype: 'q8'

@@ -445,6 +445,7 @@ describe('Azure Speech Fast Transcription', () => {
     expect(options.body.get('audio')).toBeInstanceOf(Blob);
     expect(JSON.parse(options.body.get('definition'))).toEqual({
       diarization: { enabled: true, maxSpeakers: 10 },
+      profanityFilterMode: 'None',
       locales: ['zh-TW'],
       phraseList: { phrases: ['SUB Tool', 'Evan'] }
     });
@@ -519,6 +520,7 @@ describe('Azure Speech Fast Transcription', () => {
     expect(url).toContain('southeastasia.api.cognitive.microsoft.com');
     expect(JSON.parse(options.body.get('definition'))).toEqual({
       diarization: { enabled: true, maxSpeakers: 10 },
+      profanityFilterMode: 'None',
       locales: ['en-US'],
       phraseList: { phrases: ['Azure Speech'] }
     });

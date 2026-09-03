@@ -8,6 +8,7 @@ export const CLOUD_PROVIDER_META = Object.freeze({
 });
 
 const ASR_GUIDANCE_META = Object.freeze({
+  builtin: Object.freeze({ kind: 'prompt', label: '前文／專有名詞導引（Prompt）：', placeholder: '選填，例如：以下為繁體中文對話，包含專有名詞…' }),
   google: Object.freeze({ kind: 'prompt', label: '提示詞（Prompt）：', placeholder: '選填，例如：逐字轉錄並保留標點符號。' }),
   azure: Object.freeze({ kind: 'phrases', label: 'Azure 專有名詞（Phrase List，以逗號分隔）：', placeholder: '選填，例如：SUB Tool, Evan' }),
   groq: Object.freeze({ kind: 'prompt', label: '前文／專有名詞導引（Prompt）：', placeholder: '選填，例如：China Airlines, EES, Kiosk' }),

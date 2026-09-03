@@ -10,6 +10,7 @@ import { emit } from '../src/events.js';
 import { openModal } from '../src/ui.js';
 import {
   BUILTIN_MODELS,
+  applyVocalEnhancementFilter,
   extractClipFloat32Mono16k,
   encodeWav16kMono,
   insertAsrSubtitles,
@@ -19,6 +20,10 @@ import {
   resolveAsrGuidance,
   convertAsrSegmentsToTraditionalChinese,
   callWhisperApi,
+  findSilenceSplitPoint,
+  planWhisperCloudChunks,
+  callElevenLabsSpeechTranscription,
+  callAzureSpeechTranscription,
   getClipAudioBuffer,
   getRecognitionAudioSourceChoices,
   openSpeechRecognitionDialog
@@ -310,24 +315,27 @@ describe('語音辨識與字幕生成模組', () => {
       'onnx-community/whisper-tiny',
       'onnx-community/whisper-base',
       'onnx-community/whisper-small',
-      'onnx-community/whisper-large-v3-turbo'
+      'onnx-community/whisper-large-v3-turbo',
+      'onnx-community/whisper-large-v3'
     ]);
     expect(options.map(option => option.textContent.trim())).toEqual([
       'Whisper Tiny 逐字時間版',
       'Whisper Base 逐字時間版',
       'Whisper Small 逐字時間版',
-      'Whisper Large v3 Turbo q4 逐字時間版'
+      'Whisper Large v3 Turbo q4 逐字時間版',
+      'Whisper Large v3 旗艦多語言版'
     ]);
     expect(options.every(option => !/[()（）]/u.test(option.textContent))).toBe(true);
     expect(document.getElementById('asrBuiltinRow').textContent).toContain('首次使用會下載並快取模型');
   });
 
-  it('只替實際支援的辨識服務提供提示詞或專有名詞欄位', () => {
-    expect(getAsrGuidanceMeta('builtin')).toBeNull();
+  it('替包含本機 Whisper 在內之支援服務提供提示詞或專有名詞欄位', () => {
+    expect(getAsrGuidanceMeta('builtin')).toMatchObject({ kind: 'prompt' });
     expect(getAsrGuidanceMeta('google')).toMatchObject({ kind: 'prompt' });
     expect(getAsrGuidanceMeta('groq')).toMatchObject({ kind: 'prompt' });
     expect(getAsrGuidanceMeta('openai')).toMatchObject({ kind: 'prompt' });
     expect(getAsrGuidanceMeta('azure')).toMatchObject({ kind: 'phrases' });
+    expect(resolveAsrGuidance('builtin', '繁體中文與專有名詞')).toEqual({ prompt: '繁體中文與專有名詞' });
     expect(resolveAsrGuidance('google', '逐字轉錄')).toEqual({ prompt: '逐字轉錄' });
     expect(resolveAsrGuidance('azure', 'SUB Tool， Evan; MXF\n字幕')).toEqual({
       azurePhraseList: 'SUB Tool， Evan; MXF\n字幕',
@@ -335,10 +343,10 @@ describe('語音辨識與字幕生成模組', () => {
     });
   });
 
-  it('本機辨識隱藏提示詞欄位且不會暗中送出舊提示詞', () => {
+  it('本機辨識與雲端 Whisper 皆支援提示詞欄位以導引專有名詞與繁體中文', () => {
     State.clips = [];
     State.externalAudioState = [];
-    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', prompt: '不應送給本機模型' });
+    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', prompt: '繁體中文與專有名詞導引' });
 
     openSpeechRecognitionDialog({
       id: 'local-dialogue',
@@ -351,8 +359,8 @@ describe('語音辨識與字幕生成模組', () => {
 
     const [, html] = openModal.mock.calls[0];
     document.body.innerHTML = html;
-    expect(getComputedStyle(document.getElementById('asrPromptRow')).display).toBe('none');
-    expect(resolveAsrGuidance('builtin', '不應送給本機模型')).toEqual({});
+    expect(getComputedStyle(document.getElementById('asrPromptRow')).display).not.toBe('none');
+    expect(resolveAsrGuidance('builtin', '繁體中文與專有名詞導引')).toEqual({ prompt: '繁體中文與專有名詞導引' });
   });
 
   it('切換辨識服務時依能力更新提示欄位', async () => {
@@ -360,7 +368,7 @@ describe('語音辨識與字幕生成模組', () => {
     State.externalAudioState = [];
     saveAsrConfig({
       ...getAsrConfig(),
-      provider: 'builtin',
+      provider: 'azure',
       prompt: '保留給雲端的提示詞',
       azurePhraseList: 'SUB Tool, Evan'
     });
@@ -382,7 +390,6 @@ describe('語音辨識與字幕生成模組', () => {
     const promptRow = document.getElementById('asrPromptRow');
     const promptLabel = document.getElementById('asrPromptLabel');
     const promptEl = document.getElementById('asrPrompt');
-    expect(getComputedStyle(promptRow).display).toBe('none');
 
     providerEl.value = 'google';
     providerEl.onchange();
@@ -398,8 +405,9 @@ describe('語音辨識與字幕生成模組', () => {
 
     providerEl.value = 'builtin';
     providerEl.onchange();
-    expect(getComputedStyle(promptRow).display).toBe('none');
-    expect(promptEl.value).toBe('');
+    expect(getComputedStyle(promptRow).display).toBe('flex');
+    expect(promptLabel.textContent).toContain('Prompt');
+    expect(promptEl.value).toBe('保留給雲端的提示詞');
   });
 
   it('能從桌面核發的素材 URL 載入右鍵指定音訊', async () => {
@@ -644,7 +652,7 @@ describe('語音辨識與字幕生成模組', () => {
       expect(conf.azureRegion).toBe('japaneast');
     });
 
-    it('內建模型清單提供 Tiny, Base, Small 等級', () => {
+    it('內建模型清單提供 Tiny, Base, Small, Large-Turbo 與 Large-v3 旗艦版', () => {
       expect(BUILTIN_MODELS['onnx-community/whisper-tiny']).toBeDefined();
       expect(BUILTIN_MODELS['onnx-community/whisper-base']).toBeDefined();
       expect(BUILTIN_MODELS['onnx-community/whisper-small']).toMatchObject({
@@ -654,6 +662,11 @@ describe('語音辨識與字幕生成模組', () => {
       });
       expect(BUILTIN_MODELS['onnx-community/whisper-large-v3-turbo']).toMatchObject({
         id: 'onnx-community/whisper-large-v3-turbo_timestamped',
+        webgpuDtype: 'q4',
+        wasmDtype: 'q8'
+      });
+      expect(BUILTIN_MODELS['onnx-community/whisper-large-v3']).toMatchObject({
+        id: 'onnx-community/whisper-large-v3-ONNX',
         webgpuDtype: 'q4',
         wasmDtype: 'q8'
       });
@@ -1179,6 +1192,188 @@ describe('語音辨識與字幕生成模組', () => {
       expect(html).toContain('value="elevenlabs"');
       expect(html).toContain('>ElevenLabs</option>');
       expect(html).not.toContain('ElevenLabs (Scribe v2');
+    });
+  });
+
+  describe('人聲增強濾波器與高精度 Whisper 參數', () => {
+    it('濾除 50Hz 超低頻雜訊與高頻雜訊，並良好保留人聲頻段', () => {
+      const sampleRate = 16000;
+      const length = 1600; // 0.1s
+      const lowFreqSamples = new Float32Array(length);
+      const voiceSamples = new Float32Array(length);
+
+      for (let i = 0; i < length; i++) {
+        const t = i / sampleRate;
+        lowFreqSamples[i] = 0.5 * Math.sin(2 * Math.PI * 50 * t);
+        voiceSamples[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * t);
+      }
+
+      const filteredLow = applyVocalEnhancementFilter(lowFreqSamples, sampleRate);
+      const filteredVoice = applyVocalEnhancementFilter(voiceSamples, sampleRate);
+
+      const rms = arr => Math.sqrt(arr.reduce((s, v) => s + v * v, 0) / arr.length);
+
+      // 50Hz 低頻經 85Hz 高通濾波後應明顯衰減
+      expect(rms(filteredLow)).toBeLessThan(rms(lowFreqSamples) * 0.5);
+      // 1000Hz 人聲頻段應良好保留
+      expect(rms(filteredVoice)).toBeGreaterThan(rms(voiceSamples) * 0.7);
+    });
+
+    it('線性濾波保持弱音訊號完整，不產生交越失真', () => {
+      const sampleRate = 16000;
+      const length = 1600;
+      const tinyVoice = new Float32Array(length);
+      for (let i = 0; i < length; i++) {
+        const t = i / sampleRate;
+        tinyVoice[i] = 0.001 * Math.sin(2 * Math.PI * 1000 * t);
+      }
+      const filtered = applyVocalEnhancementFilter(tinyVoice, sampleRate);
+      const rms = arr => Math.sqrt(arr.reduce((s, v) => s + v * v, 0) / arr.length);
+      // 1000Hz 弱音仍保持大於 70% 振幅，絕不被噪音門強行截斷
+      expect(rms(filtered)).toBeGreaterThan(rms(tinyVoice) * 0.7);
+    });
+
+    it('支援儲存與讀取 ElevenLabs 與 Azure 進階設定', () => {
+      saveAsrConfig({
+        ...getAsrConfig(),
+        vocalFilter: false,
+        temperature: 0.2,
+        elevenlabsNumSpeakers: 2,
+        elevenlabsTagAudioEvents: true,
+        azureProfanity: 'None'
+      });
+      const conf = getAsrConfig();
+      expect(conf.vocalFilter).toBe(false);
+      expect(conf.temperature).toBe(0.2);
+      expect(conf.elevenlabsNumSpeakers).toBe(2);
+      expect(conf.elevenlabsTagAudioEvents).toBe(true);
+      expect(conf.azureProfanity).toBe('None');
+
+      // 復原
+      saveAsrConfig({
+        ...getAsrConfig(),
+        vocalFilter: false,
+        temperature: 0,
+        elevenlabsNumSpeakers: '',
+        elevenlabsTagAudioEvents: false,
+        azureProfanity: 'None'
+      });
+      const restored = getAsrConfig();
+      expect(restored.vocalFilter).toBe(false);
+      expect(restored.temperature).toBe(0);
+    });
+
+    it('彈窗介面動態呈現不同服務專屬欄位（Whisper 溫度、ElevenLabs 說話者、Azure 不雅字）', async () => {
+      State.clips = [{ id: 'video-clip-1', name: 'main_video.mp4', in: 0, out: 10 }];
+      State.externalAudioState = [{ id: 'vocal-clip-1', name: 'vocals.wav', in: 0, out: 10 }];
+      openModal.mockImplementation((title, html) => {
+        document.body.innerHTML = html;
+      });
+
+      openSpeechRecognitionDialog(State.clips[0]);
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const providerEl = document.getElementById('asrProvider');
+      const tempRow = document.getElementById('asrTemperatureRow');
+      const azureProfanityRow = document.getElementById('asrAzureProfanityRow');
+      const elevenLabsSpeakersRow = document.getElementById('asrElevenLabsSpeakersRow');
+      const elevenLabsAudioEventsRow = document.getElementById('asrElevenLabsAudioEventsRow');
+
+      // 預設切到 Google：Whisper 溫度、ElevenLabs 說話者、Azure 不雅字應全部隱藏
+      providerEl.value = 'google';
+      providerEl.onchange();
+      expect(getComputedStyle(tempRow).display).toBe('none');
+      expect(getComputedStyle(azureProfanityRow).display).toBe('none');
+      expect(getComputedStyle(elevenLabsSpeakersRow).display).toBe('none');
+
+      // 切到 Groq：只有 Whisper 溫度顯示
+      providerEl.value = 'groq';
+      providerEl.onchange();
+      expect(getComputedStyle(tempRow).display).toBe('flex');
+      expect(getComputedStyle(azureProfanityRow).display).toBe('none');
+      expect(getComputedStyle(elevenLabsSpeakersRow).display).toBe('none');
+
+      // 切到 ElevenLabs：只有 ElevenLabs 相關顯示，Whisper 溫度應隱藏
+      providerEl.value = 'elevenlabs';
+      providerEl.onchange();
+      expect(getComputedStyle(tempRow).display).toBe('none');
+      expect(getComputedStyle(azureProfanityRow).display).toBe('none');
+      expect(getComputedStyle(elevenLabsSpeakersRow).display).toBe('flex');
+      expect(getComputedStyle(elevenLabsAudioEventsRow).display).toBe('flex');
+
+      // 切到 Azure：只有 Azure 不雅字顯示，Whisper 溫度應隱藏
+      providerEl.value = 'azure';
+      providerEl.onchange();
+      expect(getComputedStyle(tempRow).display).toBe('none');
+      expect(getComputedStyle(azureProfanityRow).display).toBe('flex');
+      expect(getComputedStyle(elevenLabsSpeakersRow).display).toBe('none');
+    });
+
+    it('ElevenLabs API 呼叫支援 num_speakers 與 tag_audio_events', async () => {
+      let capturedFormData = null;
+      global.fetch = vi.fn().mockImplementation((url, init) => {
+        capturedFormData = init.body;
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ text: 'test', words: [] })
+        });
+      });
+
+      const audioBlob = new Blob([new Uint8Array(100)], { type: 'audio/wav' });
+      await callElevenLabsSpeechTranscription({
+        audioBlob,
+        apiKey: 'xi-test-key',
+        numSpeakers: 2,
+        tagAudioEvents: true
+      });
+
+      expect(capturedFormData.get('model_id')).toBe('scribe_v2');
+      expect(capturedFormData.get('num_speakers')).toBe('2');
+      expect(capturedFormData.get('tag_audio_events')).toBe('true');
+    });
+
+    it('Azure API 呼叫支援 profanityFilterMode', async () => {
+      let capturedFormData = null;
+      global.fetch = vi.fn().mockImplementation((url, init) => {
+        capturedFormData = init.body;
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ combinedPhrases: [] })
+        });
+      });
+
+      const audioBlob = new Blob([new Uint8Array(100)], { type: 'audio/wav' });
+      await callAzureSpeechTranscription({
+        audioBlob,
+        apiKey: 'azure-key',
+        profanityFilterMode: 'Raw' // 驗證 Raw 會自動規範化為 REST API 的 None
+      });
+
+      const definition = JSON.parse(capturedFormData.get('definition'));
+      expect(definition.profanityFilterMode).toBe('None');
+    });
+
+    it('findSilenceSplitPoint 能在搜尋區間內找到音量能量最低之停頓點', () => {
+      const sampleRate = 16000;
+      const duration = 10;
+      const totalSamples = sampleRate * duration;
+      const bufferData = new Float32Array(totalSamples).fill(0.8); // 80% 音量 (講話聲)
+      // 在 5.0 秒到 5.5 秒製造一段 500ms 靜音 (0 音量)
+      const silenceStart = 5 * sampleRate;
+      const silenceEnd = Math.floor(5.5 * sampleRate);
+      for (let i = silenceStart; i < silenceEnd; i++) {
+        bufferData[i] = 0;
+      }
+
+      const mockBuffer = {
+        sampleRate,
+        numberOfChannels: 1,
+        getChannelData: () => bufferData
+      };
+
+      const splitPoint = findSilenceSplitPoint(mockBuffer, 4, 7);
+      expect(splitPoint).toBeGreaterThanOrEqual(5.0);
+      expect(splitPoint).toBeLessThanOrEqual(5.5);
     });
   });
 });

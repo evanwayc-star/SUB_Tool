@@ -66,6 +66,15 @@ export const BUILTIN_MODELS = {
     webgpuDtype: 'q4',
     wasmDtype: 'q8',
     desc: '大型模型的相容性量化版，速度優先；精準成品仍建議比較 Small 或雲端 Speech-to-Text。'
+  },
+  'onnx-community/whisper-large-v3': {
+    id: 'onnx-community/whisper-large-v3-ONNX',
+    name: 'Large v3 旗艦多語言版',
+    size: '約 1.5GB',
+    webgpuDtype: 'q4',
+    wasmDtype: 'q8',
+    returnTimestamps: true,
+    desc: '完整 Large v3 多語言旗艦版，詞彙庫最完整、精準度最高；首次使用需下載較多資料。'
   }
 };
 
@@ -180,8 +189,75 @@ function normalizeRecognitionPeak(targetSamples) {
   return targetSamples;
 }
 
-export function extractClipFloat32Mono16k(audioBuffer, startSec = 0, endSec = null) {
-  return normalizeRecognitionPeak(downmixAndResampleMono16k(audioBuffer, startSec, endSec));
+/**
+ * 人聲頻帶增強 DSP 濾波器（線性二階高通/低通濾波，純數值運算，零外部相依）：
+ * 1. 75Hz 二階高通濾波（Butterworth High-Pass）：濾除超低頻風切聲、空調轟鳴與麥克風爆音。
+ * 2. 8000Hz 二階低通濾波（Butterworth Low-Pass）：濾除超高頻電氣雜訊。
+ * 採純線性直接 II 型轉置架構，不包含任何非線性噪音門，杜絕交越失真，100% 保持微弱子音訊號完整。
+ */
+export function applyVocalEnhancementFilter(samples, sampleRate = 16000) {
+  if (!samples || samples.length === 0) return samples;
+  const output = new Float32Array(samples.length);
+
+  // 1. High-Pass Filter: f0 = 75Hz, Q = 0.7071
+  const hp_f0 = 75;
+  const hp_w0 = (2 * Math.PI * hp_f0) / sampleRate;
+  const hp_cos = Math.cos(hp_w0);
+  const hp_alpha = Math.sin(hp_w0) / (2 * 0.7071);
+  const hp_b0 = (1 + hp_cos) / 2;
+  const hp_b1 = -(1 + hp_cos);
+  const hp_b2 = (1 + hp_cos) / 2;
+  const hp_a0 = 1 + hp_alpha;
+  const hp_a1 = -2 * hp_cos;
+  const hp_a2 = 1 - hp_alpha;
+
+  // 2. Low-Pass Filter: f0 = 8000Hz, Q = 0.7071
+  const lp_f0 = 8000;
+  const lp_w0 = (2 * Math.PI * lp_f0) / sampleRate;
+  const lp_cos = Math.cos(lp_w0);
+  const lp_alpha = Math.sin(lp_w0) / (2 * 0.7071);
+  const lp_b0 = (1 - lp_cos) / 2;
+  const lp_b1 = 1 - lp_cos;
+  const lp_b2 = (1 - lp_cos) / 2;
+  const lp_a0 = 1 + lp_alpha;
+  const lp_a1 = -2 * lp_cos;
+  const lp_a2 = 1 - lp_alpha;
+
+  let hp_d1 = 0, hp_d2 = 0;
+  let lp_d1 = 0, lp_d2 = 0;
+
+  const hp_b0_n = hp_b0 / hp_a0, hp_b1_n = hp_b1 / hp_a0, hp_b2_n = hp_b2 / hp_a0;
+  const hp_a1_n = hp_a1 / hp_a0, hp_a2_n = hp_a2 / hp_a0;
+
+  const lp_b0_n = lp_b0 / lp_a0, lp_b1_n = lp_b1 / lp_a0, lp_b2_n = lp_b2 / lp_a0;
+  const lp_a1_n = lp_a1 / lp_a0, lp_a2_n = lp_a2 / lp_a0;
+
+  for (let i = 0; i < samples.length; i++) {
+    const x = samples[i];
+
+    // High-pass filter
+    const hp_y = hp_b0_n * x + hp_d1;
+    hp_d1 = hp_b1_n * x - hp_a1_n * hp_y + hp_d2;
+    hp_d2 = hp_b2_n * x - hp_a2_n * hp_y;
+
+    // Low-pass filter
+    const lp_y = lp_b0_n * hp_y + lp_d1;
+    lp_d1 = lp_b1_n * hp_y - lp_a1_n * hp_y + lp_d2;
+    lp_d2 = lp_b2_n * hp_y - lp_a2_n * lp_y;
+
+    output[i] = Math.max(-1, Math.min(1, lp_y));
+  }
+
+  return output;
+}
+
+export function extractClipFloat32Mono16k(audioBuffer, startSec = 0, endSec = null, { vocalFilter = false } = {}) {
+  let samples = downmixAndResampleMono16k(audioBuffer, startSec, endSec);
+  if (!samples?.length) return samples;
+  if (vocalFilter) {
+    samples = applyVocalEnhancementFilter(samples);
+  }
+  return normalizeRecognitionPeak(samples);
 }
 
 /**
@@ -219,8 +295,8 @@ export function combineRecognitionAudioBuffers(audioBuffers) {
  * 將 AudioBuffer 指定區間轉換並重新採樣為 16kHz 16-bit Mono WAV 格式 Blob
  * （供雲端 API 與外部伺服器使用）
  */
-export function encodeWav16kMono(audioBuffer, startSec = 0, endSec = null) {
-  const pcmFloat = extractClipFloat32Mono16k(audioBuffer, startSec, endSec);
+export function encodeWav16kMono(audioBuffer, startSec = 0, endSec = null, { vocalFilter = false } = {}) {
+  const pcmFloat = extractClipFloat32Mono16k(audioBuffer, startSec, endSec, { vocalFilter });
   if (!pcmFloat || pcmFloat.length === 0) return null;
 
   const targetSampleRate = 16000;
@@ -395,6 +471,7 @@ export async function transcribeWithBuiltinModel({
     modelName: modelMeta.name,
     webgpuDtype: modelMeta.webgpuDtype,
     wasmDtype: modelMeta.wasmDtype,
+    returnTimestamps: modelMeta.returnTimestamps || 'word',
     language,
     prompt,
     onProgress,
@@ -912,6 +989,7 @@ export async function callAzureSpeechTranscription({
   region = DEFAULT_AZURE_SPEECH_REGION,
   language = 'zh',
   phrases = [],
+  profanityFilterMode = 'Raw',
   signal = null
 }) {
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
@@ -925,8 +1003,13 @@ export async function callAzureSpeechTranscription({
     throw new Error(`Azure Speech Region 格式不正確，例如 ${DEFAULT_AZURE_SPEECH_REGION}`);
   }
 
+  const normalizedProfanity = (profanityFilterMode === 'Raw' || profanityFilterMode === 'None')
+    ? 'None'
+    : (profanityFilterMode === 'Removed' ? 'Removed' : 'Masked');
+
   const definition = {
-    diarization: { enabled: true, maxSpeakers: AZURE_SPEECH_MAX_SPEAKERS }
+    diarization: { enabled: true, maxSpeakers: AZURE_SPEECH_MAX_SPEAKERS },
+    profanityFilterMode: normalizedProfanity
   };
   if (language && language !== 'auto') {
     definition.locales = [AZURE_SPEECH_LOCALES[language] || language];
@@ -951,8 +1034,8 @@ export async function callAzureSpeechTranscription({
 
   if (!response.ok) {
     const body = await response.json().catch(() => null);
-    const detail = body?.error?.message || body?.message || response.statusText || '';
-    const safeDetail = detail ? String(detail).split(key).join('[已隱藏]') : '';
+    const detail = body?.error?.message || body?.error?.details?.[0]?.message || body?.message || response.statusText || '';
+    const safeDetail = detail ? String(detail).split(key).join('[已隱藏]') : (body ? JSON.stringify(body).split(key).join('[已隱藏]') : '');
     throw new Error(`Azure Speech 辨識失敗 (HTTP ${response.status})${safeDetail ? `：${safeDetail}` : ''}`);
   }
 
@@ -1105,6 +1188,8 @@ export async function callElevenLabsSpeechTranscription({
   apiKey,
   language = 'zh',
   keyterms = [],
+  numSpeakers = null,
+  tagAudioEvents = false,
   signal = null
 }) {
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
@@ -1117,7 +1202,11 @@ export async function callElevenLabsSpeechTranscription({
   formData.append('file', audioBlob, 'audio.wav');
   formData.append('model_id', 'scribe_v2');
   formData.append('diarize', 'true');
-  formData.append('tag_audio_events', 'false');
+  formData.append('tag_audio_events', tagAudioEvents ? 'true' : 'false');
+  const numSpk = Number(numSpeakers);
+  if (Number.isInteger(numSpk) && numSpk > 0) {
+    formData.append('num_speakers', String(numSpk));
+  }
 
   if (language && language !== 'auto') {
     formData.append('language_code', language);
@@ -1160,6 +1249,7 @@ export async function callWhisperApi({
   localEndpoint = 'http://127.0.0.1:8080/v1/audio/transcriptions',
   language = 'zh',
   prompt = '',
+  temperature = 0,
   signal = null
 }) {
   if (!apiKey || !apiKey.trim()) {
@@ -1179,7 +1269,7 @@ export async function callWhisperApi({
   formData.append('file', audioBlob, uploadName);
   formData.append('model', model);
   formData.append('response_format', 'verbose_json');
-  formData.append('temperature', '0');
+  formData.append('temperature', String(temperature ?? 0));
   formData.append('timestamp_granularities[]', 'word');
   formData.append('timestamp_granularities[]', 'segment');
 
@@ -1265,13 +1355,62 @@ export async function callWhisperApi({
   };
 }
 
-function planWhisperCloudChunks(start, end) {
+export function findSilenceSplitPoint(audioBuffer, searchStartSec, searchEndSec) {
+  if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') return null;
+  const sampleRate = Number(audioBuffer.sampleRate) || 16000;
+  let channelData = null;
+  try {
+    channelData = audioBuffer.getChannelData(0);
+  } catch (error) {
+    return null;
+  }
+  if (!channelData || !channelData.length) return null;
+
+  const startIdx = Math.max(0, Math.floor(searchStartSec * sampleRate));
+  const endIdx = Math.min(channelData.length, Math.floor(searchEndSec * sampleRate));
+  if (endIdx <= startIdx) return null;
+
+  const windowSamples = Math.floor(0.2 * sampleRate);
+  const hopSamples = Math.floor(0.05 * sampleRate);
+  if (windowSamples <= 0 || endIdx - startIdx < windowSamples) return null;
+
+  let minEnergy = Infinity;
+  let bestSplitSample = Math.floor((startIdx + endIdx) / 2);
+
+  for (let pos = startIdx; pos + windowSamples <= endIdx; pos += hopSamples) {
+    let sumSq = 0;
+    for (let i = 0; i < windowSamples; i++) {
+      const val = channelData[pos + i];
+      sumSq += val * val;
+    }
+    const energy = sumSq / windowSamples;
+    if (energy < minEnergy) {
+      minEnergy = energy;
+      bestSplitSample = pos + Math.floor(windowSamples / 2);
+    }
+  }
+
+  return bestSplitSample / sampleRate;
+}
+
+export function planWhisperCloudChunks(start, end, audioBuffer = null) {
   const windows = [];
   for (let chunkStart = start; chunkStart < end;) {
-    const chunkEnd = Math.min(end, chunkStart + WHISPER_CLOUD_CHUNK_SECONDS);
+    const rawTargetEnd = chunkStart + WHISPER_CLOUD_CHUNK_SECONDS;
+    let chunkEnd = Math.min(end, rawTargetEnd);
+
+    if (chunkEnd < end && audioBuffer) {
+      const searchStart = Math.max(chunkStart + 60, rawTargetEnd - 45);
+      const searchEnd = Math.min(end, rawTargetEnd);
+      const silencePoint = findSilenceSplitPoint(audioBuffer, searchStart, searchEnd);
+      if (Number.isFinite(silencePoint) && silencePoint > chunkStart + 30 && silencePoint <= end) {
+        chunkEnd = silencePoint;
+      }
+    }
+
     windows.push({ start: chunkStart, end: chunkEnd });
     if (chunkEnd >= end) break;
-    chunkStart = chunkEnd - WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS;
+    chunkStart = Math.max(chunkStart + 1, chunkEnd - WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS);
   }
   return windows;
 }
@@ -1420,9 +1559,14 @@ export async function transcribeAudioStream({
   apiKey = '',
   azureRegion = DEFAULT_AZURE_SPEECH_REGION,
   azurePhrases = [],
+  azureProfanity = 'Raw',
   keyterms = [],
+  elevenlabsNumSpeakers = null,
+  elevenlabsTagAudioEvents = false,
   language = 'zh',
   prompt = '',
+  temperature = 0,
+  vocalFilter = false,
   onProgress = null,
   signal = null
 }) {
@@ -1434,7 +1578,7 @@ export async function transcribeAudioStream({
   const endT = (outT && outT > inT) ? outT : (inT + (audioBuffer.duration || 0));
 
   if (provider === 'builtin') {
-    const audioFloat32 = extractClipFloat32Mono16k(audioBuffer, inT, endT);
+    const audioFloat32 = extractClipFloat32Mono16k(audioBuffer, inT, endT, { vocalFilter });
     if (!audioFloat32 || audioFloat32.length === 0) {
       throw new Error('音訊長度為 0');
     }
@@ -1442,7 +1586,8 @@ export async function transcribeAudioStream({
       audioFloat32,
       modelId: builtinModel,
       language,
-      prompt: '',
+      prompt: prompt || '',
+      temperature,
       onProgress,
       signal
     });
@@ -1454,7 +1599,7 @@ export async function transcribeAudioStream({
   }
 
   if (provider === 'openai' || provider === 'groq') {
-    const chunks = planWhisperCloudChunks(inT, endT);
+    const chunks = planWhisperCloudChunks(inT, endT, audioBuffer);
     const duration = endT - inT;
     const providerLabel = provider === 'openai' ? 'OpenAI' : 'Groq';
     const allSegments = [];
@@ -1470,7 +1615,7 @@ export async function transcribeAudioStream({
         percent: Math.round(completedWorkSeconds / totalWorkSeconds * 100),
         message: `${providerLabel} 正在辨識第 ${index + 1}/${chunks.length} 段音訊…`
       });
-      const wavBlob = encodeWav16kMono(audioBuffer, chunk.start, chunk.end);
+      const wavBlob = encodeWav16kMono(audioBuffer, chunk.start, chunk.end, { vocalFilter });
       if (!wavBlob) throw new Error('音訊長度為 0');
       if (wavBlob.size > WHISPER_CLOUD_MAX_WAV_BYTES) {
         throw new Error(`雲端語音辨識分段仍超過安全上傳大小（${wavBlob.size} bytes）`);
@@ -1482,6 +1627,7 @@ export async function transcribeAudioStream({
         apiKey,
         language,
         prompt,
+        temperature,
         signal
       });
       throwIfRecognitionAborted(signal);
@@ -1527,7 +1673,7 @@ export async function transcribeAudioStream({
     );
   }
 
-  const wavBlob = encodeWav16kMono(audioBuffer, inT, endT);
+  const wavBlob = encodeWav16kMono(audioBuffer, inT, endT, { vocalFilter });
   if (!wavBlob) throw new Error('音訊長度為 0');
 
   if (provider === 'google') {
@@ -1552,6 +1698,7 @@ export async function transcribeAudioStream({
       region: azureRegion,
       language,
       phrases: azurePhrases,
+      profanityFilterMode: azureProfanity,
       signal
     });
     throwIfRecognitionAborted(signal);
@@ -1570,6 +1717,8 @@ export async function transcribeAudioStream({
       apiKey,
       language,
       keyterms: effectiveKeyterms,
+      numSpeakers: elevenlabsNumSpeakers,
+      tagAudioEvents: elevenlabsTagAudioEvents,
       signal
     });
     throwIfRecognitionAborted(signal);

@@ -43,6 +43,7 @@ export class BuiltinAsrWorkerClient {
     modelName = 'Whisper Base',
     webgpuDtype = 'fp32',
     wasmDtype = 'q8',
+    returnTimestamps = 'word',
     language = 'zh',
     prompt = '',
     onProgress = null,
@@ -87,6 +88,7 @@ export class BuiltinAsrWorkerClient {
           modelName,
           webgpuDtype,
           wasmDtype,
+          returnTimestamps,
           language,
           prompt
         }, [audioFloat32.buffer]);

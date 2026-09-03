@@ -112,6 +112,7 @@ async function transcribe({
   modelName,
   webgpuDtype,
   wasmDtype,
+  returnTimestamps = 'word',
   language,
   prompt
 }) {
@@ -163,11 +164,32 @@ async function transcribe({
   const generateKwargs = buildBuiltinGenerationOptions({
     language,
     prompt,
-    streamer
+    streamer,
+    returnTimestamps
   });
 
   const audioDuration = audioFloat32.length / BUILTIN_ASR_RUNTIME.sampleRate;
-  const output = await transcriber(audioFloat32, generateKwargs);
+  let output;
+  try {
+    output = await transcriber(audioFloat32, generateKwargs);
+  } catch (error) {
+    const isAttnError = typeof error?.message === 'string' &&
+      (error.message.includes('cross attentions') || error.message.includes('output_attentions'));
+    if (isAttnError && generateKwargs.return_timestamps === 'word') {
+      postProgress(jobId, {
+        status: 'transcribing',
+        device: executionPlan.device,
+        message: '模型無 cross attention 逐字對齊層，自動切換為句級原生時間碼…'
+      });
+      const fallbackKwargs = {
+        ...generateKwargs,
+        return_timestamps: true
+      };
+      output = await transcriber(audioFloat32, fallbackKwargs);
+    } else {
+      throw error;
+    }
+  }
   postProgress(jobId, { status: 'done', percent: 100, message: '本機辨識完成！' });
   return normalizeBuiltinAsrSegments(output, audioDuration);
 }

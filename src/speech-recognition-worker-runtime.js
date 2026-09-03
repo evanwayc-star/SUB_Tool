@@ -16,9 +16,9 @@ export function resolveBuiltinExecutionPlan({
     : { device: 'wasm', dtype: wasmDtype };
 }
 
-export function buildBuiltinGenerationOptions({ language, prompt, streamer } = {}) {
+export function buildBuiltinGenerationOptions({ language, prompt, streamer, returnTimestamps = 'word' } = {}) {
   const options = {
-    return_timestamps: 'word',
+    return_timestamps: returnTimestamps,
     chunk_length_s: CHUNK_LENGTH_SECONDS,
     stride_length_s: STRIDE_LENGTH_SECONDS,
     max_new_tokens: MAX_NEW_TOKENS,
