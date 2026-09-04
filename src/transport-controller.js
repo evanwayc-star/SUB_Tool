@@ -418,7 +418,9 @@ function stepFrame(dir, repeat = false) {
   updatePlayhead();
   emit('playhead:ensure');
   updateNoteActive(t);
-  if (!Media.playing) {
+  // 長按連續逐格（repeat=true）期間專注於畫面極速切換，不堆疊音訊切片；
+  // 單次按鍵逐格（repeat=false）保留 0.08 秒短促 scrub 音訊反饋。
+  if (!Media.playing && !repeat) {
     Media.scrubAudio(t, 0.08);
   }
 }
@@ -641,10 +643,18 @@ function stepMediaBoundary(dir) {
   return true;
 }
 
+/**
+ * 設定字幕起點（In 點）或於當前播放點新建字幕。
+ * 
+ * 【時間碼精確度保證】
+ * 在函式進入點第一時間同步凍結按鍵當下的 Media.displayTime()，
+ * 徹底杜絕任何 ensureProjectSaved() 非同步微任務或彈窗延遲所造成的時碼漂移。
+ */
 async function setIn() {
+  const capturedTime = Media.displayTime();
   await ensureProjectSaved();
   if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
-  let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
+  let t = snapTimeToFrame(capturedTime, State.fps, State.dropFrame);
   let c = State.cues.find(x => x.id === State.selectedId);
   if (!c) {
     const tk = State.tracks.length === 0 ? 0 : Math.min(State.tracks.length - 1, Math.max(0, State.listTrack));
@@ -675,10 +685,17 @@ async function setIn() {
   recordHistory('設定起點 I' + cueSuffix(c)); setStatus('起點 ' + fmtClock(t), 'ok');
 }
 
+/**
+ * 設定字幕終點（Out 點）。
+ * 
+ * 【時間碼精確度保證】
+ * 同步捕獲按鍵當下的 Media.displayTime()，杜絕邊播邊聽打點時的非同步微任務時間漂移。
+ */
 async function setOut() {
+  const capturedTime = Media.displayTime();
   await ensureProjectSaved();
   if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
-  let t = snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame);
+  let t = snapTimeToFrame(capturedTime, State.fps, State.dropFrame);
   const c = State.cues.find(x => x.id === State.selectedId);
   if (!c) { setStatus('請先選擇字幕（或按 I 新建）', 'err'); return; }
   if (cueTrackLocked(c, '調整字幕終點')) return;

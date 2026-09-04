@@ -1,4 +1,4 @@
-import { State, newId, setSelection, pruneSelection, ensureTrackCount, cueSuffix } from './state.js';
+import { State, newId, setSelection, pruneSelection, ensureTrackCount, cueSuffix, saveConfig } from './state.js';
 import { emit } from './events.js';
 import { Media } from './media.js';
 import { snapTimeToFrame } from './time.js';
@@ -654,6 +654,14 @@ export function toggleSubMode(force = false) {
   }
 }
 
+/**
+ * 切換「播放時自動選取對應字幕」模式。
+ * 
+ * 附帶防禦：上字幕模式（subMode）期間強制關閉自動選取，避免按鍵與選取狀態互相干擾。
+ * 
+ * @param {object} [options]
+ * @param {boolean} [options.force=false] 是否忽略 subMode 限制強制切換
+ */
 export function toggleAutoSelect({ force } = {}) {
   if (State.subMode && !force) { setStatus('上字幕模式中強制關閉自動選取', 'err'); return; }
   State.autoSelect = !State.autoSelect;
@@ -662,9 +670,17 @@ export function toggleAutoSelect({ force } = {}) {
     btn.classList.toggle('on', State.autoSelect);
   });
   setStatus(`播放時自動選取：${State.autoSelect ? '開' : '關'}`, 'ok');
-  import('./state.js').then(({ saveConfig }) => saveConfig?.());
+  saveConfig();
 }
 
+/**
+ * 切換「字幕覆蓋鎖定」模式（解鎖可自由重疊 vs 鎖定不可覆蓋）。
+ * 
+ * 附帶防禦：上字幕模式（subMode）期間強制鎖定為不可覆蓋。
+ * 
+ * @param {object} [options]
+ * @param {boolean} [options.force=false] 是否忽略 subMode 限制強制切換
+ */
 export function toggleOverwriteMode({ force } = {}) {
   if (State.subMode && !force) { setStatus('上字幕模式中強制鎖定不可覆蓋', 'err'); return; }
   State.overwriteMode = !State.overwriteMode;
@@ -676,9 +692,17 @@ export function toggleOverwriteMode({ force } = {}) {
     btn.classList.toggle('inactive-mode', !State.overwriteMode);
   });
   setStatus(`覆蓋模式：${State.overwriteMode ? '解鎖 (可自由重疊)' : '鎖定 (不可覆蓋)'}`, 'ok');
-  import('./state.js').then(({ saveConfig }) => saveConfig?.());
+  saveConfig();
 }
 
+/**
+ * 切換字幕重疊時的行為（保留起點推移 vs 裁切直接截斷）。
+ * 
+ * 附帶防禦：上字幕模式（subMode）期間強制維持保留後方字幕。
+ * 
+ * @param {object} [options]
+ * @param {boolean} [options.force=false] 是否忽略 subMode 限制強制切換
+ */
 export function toggleOverwriteKeep({ force } = {}) {
   if (State.subMode && !force) { setStatus('上字幕模式中強制保留後方字幕', 'err'); return; }
   State.overwriteKeep = !State.overwriteKeep;
@@ -688,8 +712,7 @@ export function toggleOverwriteKeep({ force } = {}) {
     btn.classList.toggle('del', !State.overwriteKeep);
   });
   setStatus(`重疊行為：${State.overwriteKeep ? '保留 (起點推移)' : '裁切 (直接截斷)'}`, 'ok');
-
-  import('./state.js').then(({ saveConfig }) => saveConfig?.());
+  saveConfig();
 }
 
 

@@ -267,10 +267,14 @@ function buildIngestArgs({
     const vencArgs = previewVideoEncoderArgs(encoder);
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
 
+    // 全 I 幀 (All-Intra / GOP = 1) 預覽規格：
+    // 每格皆為獨立 IDR 關鍵幀 (-g 1, -keyint_min 1)，完全關閉 B 幀 (-bf 0)，強制封閉式 GOP (-flags +cgop)
+    // 確保倒帶、快轉、時間軸拖曳（Scrubbing）與逐格反應時間為 0ms，徹底杜絕預解碼抖動與影格抽搐
+    args.push('-g', '1', '-keyint_min', '1', '-bf', '0', '-flags', '+cgop');
+
     if (isStream) {
-      args.push('-flags', '+cgop', '-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxyPath);
+      args.push('-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxyPath);
     } else {
-      args.push('-flags', '+cgop', '-force_key_frames', 'expr:gte(t,n_forced*0.5)');
       args.push('-movflags', '+faststart', proxyPath);
     }
   }

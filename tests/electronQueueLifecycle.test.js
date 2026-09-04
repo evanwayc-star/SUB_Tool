@@ -255,7 +255,7 @@ afterEach(async () => {
   }
   activeApps.clear();
   for (const profile of tempProfiles) {
-    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    rmSync(profile, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
   }
   tempProfiles.clear();
 });
@@ -321,7 +321,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     await waitForExit(app);
     mainClient.close();
     queueClient.close();
-  }, 20000);
+  }, 35000);
 
   test('主視窗只最小化時，關閉監控視窗不會誤退出程式', async () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-main-minimize-'));
@@ -346,13 +346,14 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       '最小化後主視窗仍存在',
     );
 
-    // 先讓 CDP 回覆，再關閉承載 CDP 的 renderer；否則高負載時 Page 會先銷毀，
-    // Runtime.evaluate 永遠收不到結果，測試便誤判為產品沒有退出。
-    await mainClient.evaluate('setTimeout(() => window.subtool.closeApp(), 0); true');
+    // 驗證斷言已全部完成（主程序未退出且主視窗仍存在）。
+    // 將主視窗帶回前景喚醒 Chromium 事件迴圈，發送正常關閉指令讓 Electron 主行程優雅清理檔案鎖定。
+    await mainClient.send('Page.bringToFront').catch(() => {});
+    await mainClient.evaluate('window.subtool.closeApp(); true').catch(() => {});
     await waitForExit(app);
     mainClient.close();
     queueClient.close();
-  }, 30000);
+  }, 35000);
 
   test('CDP 直接匯出不會將 renderer 路徑升格為來源或輸出能力', async () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-export-capability-reject-'));

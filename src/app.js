@@ -946,15 +946,28 @@ function updateConfigUI() {
 
 let _rafFrame = 0, _rafLastIdx = 0;
 let _rafId = null;
+let _lastCurTcStr = ''; // 記錄上一影格渲染之時碼字串，確保換格時才寫入 DOM
 
+/**
+ * 應用程式核心動畫與狀態監看迴圈（Ticker Loop）。
+ * 
+ * 【FPS-SYNC 規範與渲染流暢度保證】
+ * 1. 播放期間每個動畫幀（約 60fps/120fps）依據權威 Media.displayTime() 計算影格時碼。
+ * 2. 採用 _lastCurTcStr 字串值快取：同畫格內零 DOM 寫入，跨畫格瞬間以 0ms 延遲即時更新，
+ *    徹底消除過去依賴 HTML5 video timeupdate（每秒僅 4 次）造成的時間碼頓挫跳動感。
+ * 3. seekBar 進度條隨播放即時滑動，保持與時間軸播放頭完全同步。
+ */
 function rafLoop(renderVideoSubCallback) {
   if (Media.playing) {
     Media.seqTick();
     const t = Media.displayTime();
-    if (!video.src || Media.inGap()) {
-      $('tcCur').textContent = secToEncore(t, State.fps, State.dropFrame);
-      renderSeekBar($('seekBar'), t);
+    const tcStr = secToEncore(t, State.fps, State.dropFrame);
+    if (tcStr !== _lastCurTcStr) {
+      _lastCurTcStr = tcStr;
+      $('tcCur').textContent = tcStr;
+      renderTimecodeWatermark(t);
     }
+    renderSeekBar($('seekBar'), t);
     if (window._ensurePlayheadVisible) window._ensurePlayheadVisible();
     updatePlayhead();
     renderVideoSubCallback();

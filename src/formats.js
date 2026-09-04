@@ -1,13 +1,9 @@
 /* ==============================================================================
-   SUB Tool — Module Architecture Protection ("src/formats.js")
-   ==============================================================================
-/* ==============================================================================
-   SUB Tool — Module Architecture Protection ("src/formats.js")
+   SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT / formats.js）
    ==============================================================================
    【維護鐵律】本檔案已納入全專案終極防禦網。
    所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
 ============================================================================== */
-/* SUB Tool — 字幕格式 解析 / 序列化（SRT / ASS / Encore / TXT） */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, getExactFps } from './time.js';
 import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';

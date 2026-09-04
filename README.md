@@ -60,7 +60,7 @@ flowchart LR
 - 語音辨識：由聲音建立文字與時間碼。
 - 文本匹配：保留已校對的逐行原稿，只分析各行時間。
 - 可選全部來源聲道混音或指定來源聲道。
-- 支援程式內建本機 AI、Groq、OpenAI、Azure Speech、Google Gemini 與 ElevenLabs。
+- 支援程式內建本機 AI、Groq、OpenAI、Azure Speech、Google Gemini（優先採用 2.5／2.0 Flash）與 ElevenLabs，並相容本機自建之 OpenAI 格式端點。
 
 ### 背景交付
 

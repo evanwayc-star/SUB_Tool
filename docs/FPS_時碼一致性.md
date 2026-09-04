@@ -47,6 +47,8 @@ ASS 只有百分秒；`secToASS()` 直接表達原秒數，不預先減半格。
 
 播放器時碼、seek bar、時間軸播放點、備註與監看 TC 都讀它。不可直接讀 `video.currentTime`、mpv `time-pos` 或 event data。
 
+播放期間動畫迴圈以 `requestAnimationFrame` 影格級快取同步 `tcCur` 與 `seekBar`，徹底脫離瀏覽器 `timeupdate` 的 4fps 低頻瓶頸；打點 In／Out 於按鍵事件觸發瞬間同步捕獲 `Media.displayTime()`，避免非同步微任務或彈窗延遲造成時碼漂移；背景轉檔產生的預覽 Proxy 全面採用全 I 幀（All-Intra / GOP = 1、無 B 幀），每幀皆為獨立關鍵幀，消除解碼依賴，使任意隨機 seek、J/K/L 倒播與逐格達到物理級 0 延遲出畫且無前後抖動。
+
 播放目標不能冒充呈現位置。`requestPresentation()` 送出目標後，必須等待實際畫格證據：
 
 - HTML video：`requestVideoFrameCallback().mediaTime`

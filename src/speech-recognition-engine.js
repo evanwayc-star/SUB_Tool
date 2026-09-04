@@ -480,7 +480,16 @@ export async function transcribeWithBuiltinModel({
 }
 
 /**
- * 自動探索目前 API Key 支援的 Gemini 模型
+ * 自動探索目前 API Key 支援的 Gemini 模型版本與名稱。
+ * 
+ * 優先順序策略：
+ * 1. 優先探測並採用最新一代極速模型（gemini-2.5-flash / gemini-2.0-flash），
+ *    兼具卓越的時間軸邊界理解力、超低延遲與穩定性。
+ * 2. 次選經典 1.5 Flash / Pro 模型做為平滑備援。
+ * 
+ * @param {string} apiKey Google Gemini API 金鑰
+ * @param {AbortSignal} [signal] 取消訊號
+ * @returns {Promise<{ version: string, model: string }>} 探索到的版本與模型名稱
  */
 export async function resolveGeminiModel(apiKey, signal = null) {
   const versions = ['v1', 'v1beta'];
@@ -495,11 +504,12 @@ export async function resolveGeminiModel(apiKey, signal = null) {
         const json = await resp.json();
         const models = (json.models || []).map(m => m.name.replace(/^models\//, ''));
         const preferred = [
+          'gemini-2.5-flash',
+          'gemini-2.0-flash',
           'gemini-1.5-flash-latest',
           'gemini-1.5-flash',
           'gemini-1.5-pro-latest',
           'gemini-1.5-pro',
-          'gemini-2.0-flash',
           'gemini-2.0-flash-exp'
         ];
         for (const p of preferred) {
@@ -513,7 +523,7 @@ export async function resolveGeminiModel(apiKey, signal = null) {
       if (signal?.aborted || error?.name === 'AbortError') throw error;
     }
   }
-  return { version: 'v1beta', model: 'gemini-1.5-flash' };
+  return { version: 'v1beta', model: 'gemini-2.0-flash' };
 }
 
 /**
@@ -570,10 +580,11 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
   const detected = await resolveGeminiModel(apiKey.trim(), signal);
   const candidateModels = [
     detected.model,
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
     'gemini-1.5-flash-latest',
     'gemini-1.5-flash',
     'gemini-1.5-pro-latest',
-    'gemini-2.0-flash',
     'gemini-2.0-flash-exp'
   ].filter((v, idx, arr) => arr.indexOf(v) === idx);
 
@@ -1240,7 +1251,18 @@ export async function callElevenLabsSpeechTranscription({
 }
 
 /**
- * 呼叫 Whisper 雲端 API
+ * 呼叫 Whisper 語音辨識 API（支援 Groq 雲端、OpenAI 官方以及本地/自建相容端點）。
+ * 
+ * @param {object} params
+ * @param {Blob} params.audioBlob 欲辨識的音訊二進位 Blob (WAV/MP3)
+ * @param {'groq'|'openai'|'local'} [params.provider='groq'] 辨識供應商識別
+ * @param {string} [params.apiKey] 供應商授權 API Key（若為 local 且伺服器無密碼時可為空）
+ * @param {string} [params.localEndpoint='http://127.0.0.1:8080/v1/audio/transcriptions'] 本地或自建 OpenAI 相容伺服器端點
+ * @param {string} [params.language='zh'] 辨識語言代碼（如 'zh'、'en'、'ja' 或 'auto'）
+ * @param {string} [params.prompt=''] 提示詞與專有名詞引導
+ * @param {number} [params.temperature=0] 採樣溫度 (0~1)
+ * @param {AbortSignal} [params.signal=null] 取消訊號
+ * @returns {Promise<{ words: Array<{start: number, end: number, text: string}>, segments: Array<{start: number, end: number, text: string}>, text?: string }>}
  */
 export async function callWhisperApi({
   audioBlob,
@@ -1252,7 +1274,8 @@ export async function callWhisperApi({
   temperature = 0,
   signal = null
 }) {
-  if (!apiKey || !apiKey.trim()) {
+  const isLocal = provider === 'local' || (typeof localEndpoint === 'string' && localEndpoint.trim() && localEndpoint !== 'http://127.0.0.1:8080/v1/audio/transcriptions' && provider !== 'groq' && provider !== 'openai');
+  if (!isLocal && (!apiKey || !apiKey.trim())) {
     throw new Error(`請輸入 ${provider === 'groq' ? 'Groq' : 'OpenAI'} API Key`);
   }
 
@@ -1261,6 +1284,9 @@ export async function callWhisperApi({
 
   if (provider === 'openai') {
     endpoint = 'https://api.openai.com/v1/audio/transcriptions';
+    model = 'whisper-1';
+  } else if (isLocal) {
+    endpoint = (localEndpoint && localEndpoint.trim()) || 'http://127.0.0.1:8080/v1/audio/transcriptions';
     model = 'whisper-1';
   }
 
@@ -1281,7 +1307,9 @@ export async function callWhisperApi({
   }
 
   const headers = {};
-  headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+  if (apiKey && apiKey.trim()) {
+    headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+  }
 
   const resp = await fetch(endpoint, {
     method: 'POST',
