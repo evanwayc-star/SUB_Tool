@@ -1,6 +1,6 @@
 // @subtool-ci windows
 import { afterEach, describe, expect, test } from 'vitest';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -18,6 +18,19 @@ let capabilitySeedCounter = 0;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function killProcessTree(child) {
+  if (!child || child.exitCode !== null) return;
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch {
+      try { child.kill('SIGKILL'); } catch {}
+    }
+  } else {
+    try { child.kill('SIGKILL'); } catch {}
+  }
 }
 
 function processIsRunning(pid) {
@@ -250,7 +263,7 @@ async function exportError(mainClient, payload) {
 
 afterEach(async () => {
   for (const app of [...activeApps]) {
-    if (app.child.exitCode === null) app.child.kill('SIGKILL');
+    killProcessTree(app.child);
     await Promise.race([app.closed, delay(5000)]);
   }
   activeApps.clear();
@@ -347,12 +360,11 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     );
 
     // 驗證斷言已全部完成（主程序未退出且主視窗仍存在）。
-    // 將主視窗帶回前景喚醒 Chromium 事件迴圈，發送正常關閉指令讓 Electron 主行程優雅清理檔案鎖定。
-    await mainClient.send('Page.bringToFront').catch(() => {});
-    await mainClient.evaluate('window.subtool.closeApp(); true').catch(() => {});
-    await waitForExit(app);
+    // 關閉 CDP 連線並使用 killProcessTree 徹底終止包含 GPU Process 的進程樹，確保 Windows 檔案鎖完整釋放。
     mainClient.close();
     queueClient.close();
+    killProcessTree(app.child);
+    await Promise.race([app.closed, delay(3000)]);
   }, 35000);
 
   test('CDP 直接匯出不會將 renderer 路徑升格為來源或輸出能力', async () => {

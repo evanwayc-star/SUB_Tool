@@ -267,10 +267,12 @@ function buildIngestArgs({
     const vencArgs = previewVideoEncoderArgs(encoder);
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
 
-    // 全 I 幀 (All-Intra / GOP = 1) 預覽規格：
-    // 每格皆為獨立 IDR 關鍵幀 (-g 1, -keyint_min 1)，完全關閉 B 幀 (-bf 0)，強制封閉式 GOP (-flags +cgop)
-    // 確保倒帶、快轉、時間軸拖曳（Scrubbing）與逐格反應時間為 0ms，徹底杜絕預解碼抖動與影格抽搐
-    args.push('-g', '1', '-keyint_min', '1', '-bf', '0', '-flags', '+cgop');
+    // 全 I 幀 (All-Intra / Ultra-Short GOP) 預覽規格：
+    // NVIDIA NVENC SDK 強制要求 gopLength > numBFrames + 1，在 -bf 0 條件下其硬體最小合法 GOP 為 2；
+    // 其他編碼器 (libx264, QSV, VideoToolbox) 則支援物理級 GOP = 1。
+    // 兩者皆完全關閉 B 幀 (-bf 0) 並強制閉合 GOP (-flags +cgop)，達到 0ms 零延遲隨機 seek 與零抖動。
+    const gop = encoder === 'h264_nvenc' ? '2' : '1';
+    args.push('-g', gop, '-keyint_min', gop, '-bf', '0', '-flags', '+cgop');
 
     if (isStream) {
       args.push('-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxyPath);

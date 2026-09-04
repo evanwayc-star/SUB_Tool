@@ -34,7 +34,7 @@ describe('Proxy 全 I 幀（All-Intra）轉檔契約', () => {
     expect(args).not.toContain('expr:gte(t,n_forced*0.5)');
   });
 
-  it('邊轉邊看串流 Ingest（isStream: true）亦維持全 I 幀與 fragment 輸出', () => {
+  it('邊轉邊看串流 Ingest（isStream: true）亦維持極短 GOP/全 I 幀與 fragment 輸出', () => {
     const args = buildIngestArgs({
       src: 'C:/media/source.mp4',
       needsProxy: true,
@@ -43,10 +43,11 @@ describe('Proxy 全 I 幀（All-Intra）轉檔契約', () => {
       isStream: true,
     });
 
+    // NVENC 遵循 SDK 規範設置 -g 2
     expect(args).toContain('-g');
-    expect(args[args.indexOf('-g') + 1]).toBe('1');
+    expect(args[args.indexOf('-g') + 1]).toBe('2');
     expect(args).toContain('-keyint_min');
-    expect(args[args.indexOf('-keyint_min') + 1]).toBe('1');
+    expect(args[args.indexOf('-keyint_min') + 1]).toBe('2');
     expect(args).toContain('-bf');
     expect(args[args.indexOf('-bf') + 1]).toBe('0');
     expect(args).toContain('-flags');
@@ -55,7 +56,7 @@ describe('Proxy 全 I 幀（All-Intra）轉檔契約', () => {
     expect(args[args.indexOf('-movflags') + 1]).toBe('frag_keyframe+empty_moov+default_base_moof');
   });
 
-  it('硬體加速編碼器（如 h264_nvenc / h264_videotoolbox）皆正確繼承全 I 幀結構', () => {
+  it('硬體加速編碼器皆正確繼承極短 GOP / 全 I 幀結構（NVENC 為 2，其餘為 1）', () => {
     for (const encoder of ['h264_nvenc', 'h264_videotoolbox', 'h264_qsv', 'h264_amf']) {
       const args = buildIngestArgs({
         src: 'C:/media/source.mp4',
@@ -65,10 +66,11 @@ describe('Proxy 全 I 幀（All-Intra）轉檔契約', () => {
         isStream: false,
       });
 
+      const expectedGop = encoder === 'h264_nvenc' ? '2' : '1';
       expect(args).toContain('-g');
-      expect(args[args.indexOf('-g') + 1]).toBe('1');
+      expect(args[args.indexOf('-g') + 1]).toBe(expectedGop);
       expect(args).toContain('-keyint_min');
-      expect(args[args.indexOf('-keyint_min') + 1]).toBe('1');
+      expect(args[args.indexOf('-keyint_min') + 1]).toBe(expectedGop);
       expect(args).toContain('-bf');
       expect(args[args.indexOf('-bf') + 1]).toBe('0');
       expect(args).toContain('-flags');
