@@ -524,6 +524,92 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .audio-clip-config{position:relative;z-index:3;flex:0 0 auto;padding:1px 5px;border:1px solid rgba(138,234,217,.55);border-radius:3px;
   background:rgba(4,28,25,.7);color:#cafff5;font-size:10px;line-height:1.35;cursor:pointer;white-space:nowrap}
 .audio-clip-config:hover{background:rgba(67,204,178,.22);border-color:#9affea;color:#fff}
+.audio-clip-block.has-limiter{
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.45), rgba(126, 34, 206, 0.50)) !important;
+  border: 1.5px solid #c084fc !important;
+  box-shadow: inset 0 0 0 1px rgba(192, 132, 252, 0.6), 0 0 12px rgba(168, 85, 247, 0.35) !important;
+  color: #f3e8ff !important;
+}
+.audio-clip-block.has-limiter:hover{
+  background: linear-gradient(135deg, rgba(192, 132, 252, 0.62), rgba(147, 51, 234, 0.65)) !important;
+  border-color: #d8b4fe !important;
+  box-shadow: inset 0 0 0 1.5px rgba(216, 180, 254, 0.8), 0 0 16px rgba(168, 85, 247, 0.55) !important;
+}
+.audio-clip-block.has-limiter.selected{
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.78), rgba(126, 34, 206, 0.82)) !important;
+  border-color: #ffffff !important;
+  box-shadow: 0 0 0 2px #c084fc, 0 0 18px rgba(192, 132, 252, 0.65) !important;
+}
+.audio-clip-block.has-limiter .audio-clip-wave{
+  opacity: 0.98;
+  filter: drop-shadow(0 0 2px rgba(243, 232, 255, 0.85));
+}
+.audio-clip-block.has-limiter .audio-clip-fx-badge{
+  background: linear-gradient(135deg, #7e22ce, #a855f7);
+  border: 1px solid rgba(243, 232, 255, 0.6);
+  color: #faf5ff;
+}
+.audio-clip-fx-badge{
+  position: relative;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  margin: 0 4px;
+  height: 18px;
+  line-height: 16px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #4f46e5, #0ea5e9);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.35);
+  cursor: default;
+  user-select: none;
+}
+.audio-clip-fx-badge:hover{
+  background: linear-gradient(135deg, #6366f1, #38bdf8);
+}
+.audio-clip-block.is-normalizing{
+  border: 1.5px solid #38bdf8 !important;
+  box-shadow: inset 0 0 0 1.5px rgba(56,189,248,0.85), 0 0 16px rgba(56,189,248,0.55) !important;
+  animation: audioPulse 1.2s ease-in-out infinite !important;
+}
+@keyframes audioPulse {
+  0%, 100% { box-shadow: inset 0 0 0 1.5px rgba(56,189,248,0.7), 0 0 10px rgba(56,189,248,0.35); }
+  50% { box-shadow: inset 0 0 0 2px rgba(56,189,248,1), 0 0 20px rgba(56,189,248,0.75); }
+}
+@keyframes fxSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.audio-clip-fx-badge.processing{
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: #f0f9ff;
+  border: 1px solid rgba(255,255,255,0.5);
+  box-shadow: 0 0 8px rgba(56,189,248,0.6);
+}
+.audio-clip-fx-badge.processing .fx-spin{
+  display: inline-block;
+  animation: fxSpin 1.2s linear infinite;
+  margin-right: 2px;
+}
+.audio-clip-progress-bar{
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 4px;
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
+  box-shadow: 0 0 8px #38bdf8;
+  border-radius: 0 2px 2px 0;
+  z-index: 6;
+  pointer-events: none;
+  transition: width 0.15s ease-out;
+}
 /* 音訊配線／輸出設定：採用調音台 patchbay 的緊湊表格，而不是一般設定卡片。
    左邊永遠是來源，右邊永遠是專案 A 軌或交付 stream，讓聲道順序能一眼校對。 */
 .audio-route-dialog,.audio-output-dialog{font-size:14px;color:var(--text);min-width:0}
@@ -899,29 +985,228 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .note-item.nt-active{background:rgba(255,210,60,.14)}
 .note-item.nt-selected{background:rgba(100,140,255,.22);outline:1px solid rgba(100,140,255,.4)}
 .note-item.nt-selected.nt-active{background:rgba(100,140,255,.30)}
-/* 混音器：逐聲道電平表 */
-.mixer-panel{min-width:340px;width:auto;max-width:92vw;max-height:90vh;overflow:hidden}
-.mixer-panel .fp-body{padding:8px 12px;overflow:hidden;box-sizing:border-box}
-.mixer-toolbar{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
-.mixer-toolbar .mini{flex:0 0 auto}
-.mixer-strips{display:flex;gap:8px;align-items:flex-end;overflow-x:auto;overflow-y:hidden;padding-bottom:2px}
-.mx-strip{display:flex;flex-direction:column;align-items:center;gap:5px;width:50px;flex:0 0 auto}
-.mx-meter{position:relative;width:30px;height:220px;border:1px solid var(--border);border-radius:3px;overflow:hidden;
-  background:linear-gradient(to top,#33c93a 0%,#33c93a 55%,#e6d23a 78%,#e0432a 100%)}
-.mx-mask{position:absolute;left:0;right:0;top:0;height:100%;background:#0d0d0f}
-.mx-peak{position:absolute;left:0;right:0;bottom:0;height:2px;background:#fff;opacity:.85}
-/* 音量推桿：直立、覆蓋在電平表上，把手為白色橫條 */
-.mx-fader{position:absolute;inset:0;width:100%;height:100%;margin:0;cursor:ns-resize;
-  -webkit-appearance:none;appearance:none;background:transparent;writing-mode:vertical-lr;direction:rtl}
+/* ==============================================================================
+   專業音訊混音器面板 (Studio Mixer Console - Sleek Fashion Minimalist)
+   ============================================================================== */
+.mixer-panel{
+  min-width:340px;width:auto;max-width:96vw;max-height:86vh;overflow:hidden;
+  background:#0c0e14;
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:12px;
+  box-shadow:0 24px 64px rgba(0,0,0,0.85), 0 0 1px rgba(99,102,241,0.25), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+.mixer-panel .fp-head{
+  background:linear-gradient(180deg, #161a24 0%, #10131c 100%);
+  border-bottom:1px solid rgba(255,255,255,0.07);
+  padding:9px 14px;font-size:12.5px;letter-spacing:0.5px;color:#f8fafc;font-weight:600;
+}
+.mixer-panel .fp-body{padding:10px 12px;overflow:auto;max-height:calc(86vh - 42px);box-sizing:border-box}
+
+/* 工具列：高端時尚微調分組步進器 (Sleek Segmented Toolbar Controls) */
+.mixer-toolbar{display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap}
+.mx-tool-group{
+  display:inline-flex;align-items:center;background:#141722;
+  border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:2px;gap:2px;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,0.5);
+}
+.mx-tool-sep{width:1px;height:16px;background:rgba(255,255,255,0.08);margin:0 2px}
+.mx-tool-btn{
+  flex:0 0 auto;height:22px;line-height:20px;padding:0 9px;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  font-size:11px;font-weight:600;letter-spacing:0.3px;
+  background:#1a1e2b;border:1px solid rgba(255,255,255,0.05);color:#e2e8f0;border-radius:4px;
+  cursor:pointer;user-select:none;transition:all 0.15s ease;box-sizing:border-box;
+}
+.mx-tool-btn:hover{
+  background:#262c3e;border-color:rgba(99,102,241,0.45);color:#ffffff;
+  box-shadow:0 2px 8px rgba(0,0,0,0.4);
+}
+.mx-tool-btn:active{transform:scale(0.96)}
+.mx-tool-btn.on{
+  background:#ff2a5f !important;color:#fff !important;border-color:#ff4d79 !important;
+  box-shadow:0 0 12px rgba(255,42,95,0.5) !important;
+}
+
+/* 通道條底板卡匣槽 (Rack Bed) */
+.mixer-strips{
+  display:flex;gap:10px;align-items:stretch;overflow-x:auto;overflow-y:hidden;
+  padding:8px;background:#080a0f;border:1px solid rgba(255,255,255,0.05);border-radius:10px;
+  box-shadow:inset 0 2px 8px rgba(0,0,0,0.9);
+}
+.mixer-strips::-webkit-scrollbar{height:5px}
+.mixer-strips::-webkit-scrollbar-track{background:#080a0f}
+.mixer-strips::-webkit-scrollbar-thumb{background:#1e2330;border-radius:3px}
+.mixer-strips::-webkit-scrollbar-thumb:hover{background:#333c52}
+
+/* 單條專業卡匣 (時尚曜黑底板、透亮電平柱、簡約純白推子) */
+.mx-strip{
+  width:104px;
+  flex:0 0 104px;
+  display:flex;
+  flex-direction:column;
+  align-items:stretch;
+  gap:6px;
+  padding:8px 7px 7px;
+  background:linear-gradient(180deg, #151926 0%, #0e111a 100%);
+  border:1px solid rgba(255,255,255,0.07);
+  border-radius:8px;
+  box-sizing:border-box;
+  box-shadow:0 6px 16px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.06);
+  user-select:none;
+  position:relative;
+  transition:all 0.15s ease;
+}
+.mx-strip:hover{border-color:rgba(99,102,241,0.4);box-shadow:0 8px 24px rgba(0,0,0,0.7), 0 0 12px rgba(99,102,241,0.12)}
+.mx-strip.is-muted{border-color:rgba(255,42,95,0.45);box-shadow:0 0 12px rgba(255,42,95,0.2)}
+.mx-strip.is-muted .mx-fader-track{opacity:0.3;filter:grayscale(0.9)}
+.mx-strip.is-muted .mx-fader-val{border-color:rgba(255,42,95,0.6);color:#ffa3ba}
+
+/* 通道條頂部極簡時尚標籤 */
+.mx-strip-head{
+  width:100%;display:flex;align-items:center;justify-content:center;
+  gap:5px;padding:0 0 4px;border-bottom:1px solid rgba(255,255,255,0.06);
+}
+.mx-bus-label{
+  font-size:10px;font-weight:700;color:#a5b4fc;letter-spacing:0.4px;
+  background:rgba(99,102,241,0.16);border:1px solid rgba(99,102,241,0.36);
+  padding:1px 5px;border-radius:4px;
+}
+.mx-bus-name{font-size:9.5px;color:#94a3b8;max-width:54px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 按鈕列 M / S (時尚微型按鈕) */
+.mx-btns-row{width:100%;display:flex;gap:4px;justify-content:center}
+.mx-btn{
+  flex:1;height:19px;line-height:17px;
+  background:#181c28;border:1px solid rgba(255,255,255,0.07);border-radius:4px;
+  font-size:10px;font-weight:700;color:#94a3b8;cursor:pointer;
+  text-align:center;padding:0;transition:all 0.12s ease;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);
+}
+.mx-btn:hover{color:#ffffff;background:#242a3c;border-color:rgba(255,255,255,0.18)}
+.mx-mute.on{background:#ff2a5f !important;color:#fff !important;border-color:#ff4d79 !important;box-shadow:0 0 12px rgba(255,42,95,0.55) !important}
+.mx-solo.on{background:#ff9800 !important;color:#fff !important;border-color:#ffb74d !important;box-shadow:0 0 12px rgba(255,152,0,0.55) !important}
+
+/* 推子與電平主區域 */
+.mx-meter-fader-area{display:flex;align-items:stretch;width:100%;height:175px;margin:1px 0;gap:6px;position:relative}
+
+/* 左側微型精密推子欄 (時尚極簡純白滑塊) */
+.mx-fader-column{width:22px;flex:0 0 22px;display:flex;align-items:stretch;position:relative;box-sizing:border-box}
+.mx-fader-scale{
+  display:flex;flex-direction:column;justify-content:space-between;
+  font-size:7px;color:#64748b;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  line-height:1;padding:2px 0;width:9px;text-align:right;user-select:none;flex-shrink:0;
+}
+.mx-fader-scale .unity{color:#cbd5e1;font-weight:700}
+.mx-fader-track{flex:1;position:relative;display:flex;justify-content:center;align-items:stretch}
+.mx-fader-slot{
+  position:absolute;top:3px;bottom:3px;left:calc(50% - 1px);width:2px;
+  background:#080b12;border:1px solid rgba(255,255,255,0.07);border-radius:1px;
+  box-shadow:inset 0 1px 3px rgba(0,0,0,0.95);
+}
+.mx-unity-mark{
+  position:absolute;top:50%;left:0;right:0;height:1px;
+  background:rgba(0,245,212,0.45);pointer-events:none;z-index:2;
+}
+.mx-fader{
+  -webkit-appearance:none;appearance:none;position:absolute;inset:0;
+  width:100%;height:100%;margin:0;background:transparent;
+  writing-mode:vertical-lr;direction:rtl;cursor:ns-resize;z-index:5;
+}
 .mx-fader::-webkit-slider-runnable-track{background:transparent;border:0}
-.mx-fader::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:30px;height:6px;border-radius:2px;
-  background:#fff;border:1px solid #000;cursor:ns-resize;box-shadow:0 0 3px rgba(0,0,0,.8)}
-.mx-name{font-size:10px;color:var(--text-dim);max-width:50px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
-.mx-btns{display:flex;flex-direction:column;gap:3px;width:100%}
-.mx-solo,.mx-mute{font-size:12px;font-weight:700;letter-spacing:.04em;width:100%;height:30px;line-height:1;padding:0 4px;border:1px solid var(--border);background:var(--panel2);color:var(--text-dim);border-radius:4px;cursor:pointer;white-space:nowrap;transition:background .12s,color .12s}
-.mx-solo:hover,.mx-mute:hover{color:var(--text)}
-.mx-solo.on{background:#c9a72e;color:#000;border-color:#c9a72e}
-.mx-mute.on{background:var(--red);color:#fff;border-color:var(--red)}
+.mx-fader::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;width:14px;height:8px;border-radius:2px;
+  background:#ffffff;
+  border:1px solid rgba(0,0,0,0.25);
+  box-shadow:0 2px 6px rgba(0,0,0,0.6), 0 0 4px rgba(255,255,255,0.4);
+  cursor:ns-resize;position:relative;
+}
+
+/* 右側單音軌大面積波形電平表欄 (極光漸層、高透光感、無比鮮活) */
+.mx-meter-column{
+  flex:1;display:flex;flex-direction:column;align-items:stretch;position:relative;box-sizing:border-box;min-width:0;
+}
+.mx-clip-indicators{display:flex;height:4px;margin-bottom:3px;cursor:pointer;width:40px}
+.mx-clip-led{
+  width:100%;height:4px;border-radius:1px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
+  transition:all 0.12s ease;
+}
+.mx-clip-led.clip{background:#ff0055 !important;border-color:#ff3377 !important;box-shadow:0 0 10px #ff0055 !important}
+.mx-dual-meter,
+.mx-single-meter{
+  position:absolute;top:7px;bottom:0;left:0;width:40px;
+  display:flex;
+  background:#080b12;border:1px solid rgba(255,255,255,0.08);border-radius:3px;padding:1px;box-sizing:border-box;overflow:hidden;
+  box-shadow:inset 0 1px 4px rgba(0,0,0,0.9);
+}
+.mx-channel-meter{
+  width:100%;height:100%;position:relative;background:#080b12;overflow:hidden;border-radius:2px;
+}
+.mx-bar-bg{
+  position:absolute;inset:0;
+  background:
+    repeating-linear-gradient(to top, rgba(0,0,0,0.18) 0px, rgba(0,0,0,0.18) 1px, transparent 1px, transparent 4px),
+    linear-gradient(to top, 
+      #00d2ff 0%, 
+      #00f5d4 35%, 
+      #10b981 60%, 
+      #facc15 78%, 
+      #fb923c 88%, 
+      #ff2a5f 96%, 
+      #ff0055 100%
+    );
+}
+.mx-mask{position:absolute;top:0;left:0;right:0;height:100%;background:#080b12}
+.mx-peak{
+  position:absolute;left:0;right:0;bottom:0;height:2px;
+  background:#ffffff;box-shadow:0 0 6px #00f5d4, 0 0 2px #ffffff;opacity:0.95;z-index:3;
+}
+.mx-meter-scale{
+  position:absolute;top:7px;bottom:0;right:0;width:20px;display:flex;flex-direction:column;
+  justify-content:space-between;font-size:7px;color:#64748b;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  line-height:1;user-select:none;pointer-events:none;text-align:right;box-sizing:border-box;
+}
+.mx-meter-scale .unity{color:#f8fafc;font-weight:700}
+
+/* 底部 OLED 科技讀數區 (上方即時電光冰青峰值，下方高對比設定值) */
+.mx-readout-box{
+  width:100%;display:flex;flex-direction:column;gap:3px;margin-top:3px;
+  box-sizing:border-box;
+}
+.mx-meter-val{
+  width:100%;height:19px;display:flex;align-items:center;justify-content:center;
+  font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  font-size:10px;font-weight:700;color:#00f5d4;letter-spacing:0.3px;
+  background:#090d15;border:1px solid rgba(0,245,212,0.22);border-radius:4px;
+  user-select:none;box-sizing:border-box;white-space:nowrap;
+  text-shadow:0 0 6px rgba(0,245,212,0.4);
+}
+.mx-meter-val.is-over{
+  color:#ff0055 !important;
+  border-color:rgba(255,0,85,0.45) !important;
+  text-shadow:0 0 8px rgba(255,0,85,0.6) !important;
+}
+.mx-fader-val{
+  width:100%;height:19px;display:flex;align-items:center;justify-content:center;
+  font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  font-size:10px;font-weight:600;letter-spacing:0.3px;color:#f1f5f9;
+  background:#121622;border:1px solid rgba(255,255,255,0.08);border-radius:4px;
+  cursor:pointer;user-select:none;transition:all 0.15s ease;box-sizing:border-box;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.mx-fader-val:hover{
+  background:#1a2030;border-color:rgba(99,102,241,0.55);
+  box-shadow:0 0 8px rgba(99,102,241,0.3);color:#ffffff;
+}
+.mx-fader-inline-input{
+  width:100%;height:100%;background:#090d15;border:1px solid #00f5d4;
+  border-radius:3px;color:#00f5d4;
+  font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  font-size:10px;font-weight:700;text-align:center;outline:none;padding:0;margin:0;
+  box-shadow:0 0 6px rgba(0,245,212,0.5);box-sizing:border-box;
+}
+
+
 /* 混音器：準備中（背景抽取音軌時）的占位推桿 */
 .mx-strip.pending{opacity:.55}
 .mx-strip.pending .mx-meter{background:var(--panel2)}

@@ -59,7 +59,7 @@ import {
 } from './project.js';
 import { copySelectedStyle, pasteStyleToSelected } from './subtitles.js';
 import { addNote, renderNotes, clearAllNotes, exportNotes } from './notes.js';
-import { renderMixer, mixerReset, mixerMuteAll } from './mixer.js';
+import { renderMixer, mixerReset, mixerMuteAll, mixerZeroFaders, mixerAdjustAllDb } from './mixer.js';
 import { toggleSafeFrame, toggleTimecodeWatermark, _syncMpvPanel } from './video-renderer.js';
 import { togglePointerSeekMode } from './timeline-interaction-engine.js';
 import { History, renderHistory } from './history.js';
@@ -178,6 +178,9 @@ function createCommands() {
     'mixer': () => { togglePanel('mixerPanel'); renderMixer(); },
     'mixer-reset': mixerReset,
     'mixer-muteall': mixerMuteAll,
+    'mixer-zero-faders': mixerZeroFaders,
+    'mixer-step-down': () => mixerAdjustAllDb(-1),
+    'mixer-step-up': () => mixerAdjustAllDb(1),
 
     // Preview Tools
     'safe-frame': toggleSafeFrame,

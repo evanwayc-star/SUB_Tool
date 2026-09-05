@@ -37,6 +37,7 @@ const {
   createSpeechAudioCompressor,
   createSpeechCompressionRuntime,
 } = require('./speech-audio-compressor');
+const { createAudioNormalizationRuntime } = require('./audio-normalization-runtime');
 /* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
 const { deliveryResolution, suggestKbps } = require('../shared/delivery-resolution.cjs');
@@ -774,6 +775,18 @@ const speechAudioCompressor = createSpeechAudioCompressor({
   execute: (args, options) => runFF(args, options)
 });
 const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
+const audioNormalizationRuntime = createAudioNormalizationRuntime({
+  createTempPath: tmpPath,
+  execute: (args, options) => runFF(args, options),
+  removeFile: async file => {
+    try {
+      await fs.promises.unlink(file);
+      tempFiles.delete(file);
+    } catch (error) {
+      if (error?.code === 'ENOENT') tempFiles.delete(file);
+    }
+  },
+});
 
 /* 准入政策（能不能進佇列、需要哪些檔案能力）住在 export-admission.js——
    那四條規則原本散在這裡，與 BrowserWindow／dialog／spawn 糾纏，因此一行測試都沒有，
@@ -1193,6 +1206,27 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   await runFF(['-y', '-i', src, '-map', '0:a:0', '-ar', '4000', '-c:a', 'pcm_s16le', out],
     { sender: e.sender, duration, jobId: 'wave', label: '產生波形' });
   return out;
+});
+
+ipcMain.handle('audio:normalize', async (e, { path: src, options, duration }) => {
+  if (!FFMPEG) throw new Error('找不到 ffmpeg，無法執行音訊平衡化');
+  requireReadablePath('audio:normalize', src);
+  return audioNormalizationRuntime.normalize(src, options, {
+    duration,
+    onProgress: p => {
+      try {
+        if (e.sender && !e.sender.isDestroyed()) {
+          e.sender.send('audio:normalize-progress', { ...p, src });
+        }
+      } catch (_) {}
+    },
+  });
+});
+
+ipcMain.handle('audio:analyzeLoudness', async (e, { path: src, duration }) => {
+  if (!FFMPEG) throw new Error('找不到 ffmpeg，無法執行音訊聲量分析');
+  requireReadablePath('audio:analyzeLoudness', src);
+  return audioNormalizationRuntime.analyze(src, { duration });
 });
 
 /* Renderer 只能交付程式自己編出的 16 kHz mono PCM WAV bytes，不能指定輸入／輸出路徑。

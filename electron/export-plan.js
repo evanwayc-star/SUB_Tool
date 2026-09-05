@@ -26,6 +26,7 @@
    兩者以前在這裡各有一份手抄副本。 */
 const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
 const { clipLength } = require('../shared/clip-fade.cjs');
+const { buildLimiterFilter } = require('../shared/audio-loudness.cjs');
 
 const _EXPORT_LAYOUTS = Object.freeze({
 
@@ -119,7 +120,7 @@ function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
     }
     return { id, name: _streamMetadataName(stream?.name), layout, busIds, spec };
   });
-  return { buses, streams };
+  return { buses, streams, ...(raw.loudness ? { loudness: raw.loudness } : {}) };
 }
 function _planDuration(plan) {
   let end = 0;
@@ -216,19 +217,36 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
       label = `[apS${si}]`;
       fc.push(_joinFilter(inputLabels, stream.spec.channelLayout, stream.spec.channelNames, label));
     }
+    const loudnessOpts = plan.loudness || stream.loudness;
+    if (loudnessOpts?.enabled) {
+      const normLabel = `[apS${si}Norm]`;
+      const filterRes = buildLimiterFilter(loudnessOpts);
+      fc.push(`${label}${filterRes.filter}${normLabel}`);
+      label = normLabel;
+    }
     streamLabels.push({ label, stream });
   });
   return { inputIndex: ii, busLabels, streamLabels };
 }
 function _buildWavOutput(busLabels, plan, fc) {
   const labels = plan.buses.map(bus => busLabels.get(bus.id));
-  if (labels.length === 1) return { label: labels[0], channels: 1 };
-  if (labels.length > _WAV_CHANNEL_ORDER.length)
-    _exportPlanError(`WAV 單檔目前最多可輸出 ${_WAV_CHANNEL_ORDER.length} 條獨立 mono 音軌。`);
-  const names = _WAV_CHANNEL_ORDER.slice(0, labels.length);
-  const label = '[wavOut]';
-  fc.push(_joinFilter(labels, names.join('+'), names, label));
-  return { label, channels: labels.length };
+  let label;
+  let channels = labels.length;
+  if (labels.length === 1) label = labels[0];
+  else {
+    if (labels.length > _WAV_CHANNEL_ORDER.length)
+      _exportPlanError(`WAV 單檔目前最多可輸出 ${_WAV_CHANNEL_ORDER.length} 條獨立 mono 音軌。`);
+    const names = _WAV_CHANNEL_ORDER.slice(0, labels.length);
+    label = '[wavOut]';
+    fc.push(_joinFilter(labels, names.join('+'), names, label));
+  }
+  if (plan.loudness?.enabled && label) {
+    const normWav = '[wavNorm]';
+    const filterRes = buildLimiterFilter(plan.loudness);
+    fc.push(`${label}${filterRes.filter}${normWav}`);
+    label = normWav;
+  }
+  return { label, channels };
 }
 // MP4 仍需 AAC，但不能用所有聲道共用的 192k：5.1 或多條 stereo 會明顯不足。
 // 這是輸出編碼位元率；輸入始終由母素材直接解碼（見 _buildPlannedAudio）。

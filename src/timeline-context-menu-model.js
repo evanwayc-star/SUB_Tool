@@ -62,7 +62,7 @@ function waveformItems(options, selected, actions) {
 
 export function buildVideoClipMenu(context, actions = {}) {
   const {
-    name = '未命名素材',
+    name = '影片片段',
     isImage = false,
     locked = false,
     canReveal = false,
@@ -73,6 +73,8 @@ export function buildVideoClipMenu(context, actions = {}) {
     hasPrevious = false,
     hasNext = false,
     hasFade = false,
+    hasLimiter = false,
+    limiterLabel = '',
   } = context || {};
 
   const typeLabel = isImage ? '圖片' : '影片';
@@ -98,6 +100,7 @@ export function buildVideoClipMenu(context, actions = {}) {
       ? [note('audio_detached_status', '🔇 此影片原音已解除連結')]
       : [
           action('detach_audio', '🔗✂ 影音分離', actions.detachAudio),
+          action('hard_limiter', hasLimiter ? `🎚 音訊平衡化 [已開啟 ${limiterLabel || ''}]…` : '🎚 音訊平衡化 (強限制器 / ITU 1770)…', actions.openHardLimiter),
           action('audio_routing', '🎧 音訊配線…', actions.openAudioRouting),
         ]);
   }
@@ -130,6 +133,8 @@ export function buildAudioClipMenu(context, actions = {}) {
     enabled = true,
     waveOptions = [],
     selectedWave = 'mix',
+    hasLimiter = false,
+    limiterLabel = '',
   } = context || {};
 
   const items = [heading(`${external ? '🎵' : '🔊'} ${name}`)];
@@ -155,6 +160,7 @@ export function buildAudioClipMenu(context, actions = {}) {
   }
 
   appendGroup(items, [
+    action('hard_limiter', hasLimiter ? `🎚 音訊平衡化 [已開啟 ${limiterLabel || ''}]…` : '🎚 音訊平衡化 (強限制器 / ITU 1770)…', actions.openHardLimiter),
     action('audio_routing', '🎧 音訊配線…', actions.openAudioRouting),
   ]);
   appendGroup(items, waveformItems(waveOptions, selectedWave, actions));
@@ -175,6 +181,8 @@ export function buildAudioTrackMenu(context, actions = {}) {
     canReveal = false,
     waveOptions = [],
     selectedWave = 'mix',
+    hasLimiter = false,
+    limiterLabel = '',
   } = context || {};
 
   const items = [heading(`${external ? '🎵' : '🔊'} ${name}`)];
@@ -183,6 +191,7 @@ export function buildAudioTrackMenu(context, actions = {}) {
     canReveal ? action('reveal_source', '📂 在檔案管理器中顯示', actions.revealSource) : null,
   ], { separator: false });
   appendGroup(items, [
+    action('hard_limiter', hasLimiter ? `🎚 音訊平衡化 [已開啟 ${limiterLabel || ''}]…` : '🎚 音訊平衡化 (強限制器 / ITU 1770)…', actions.openHardLimiter),
     action('audio_routing', '🎧 音訊配線…', actions.openAudioRouting),
   ]);
   appendGroup(items, waveformItems(waveOptions, selectedWave, actions));

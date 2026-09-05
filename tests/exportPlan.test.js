@@ -338,4 +338,25 @@ describe('交付 argv：WAV', () => {
     expect(() => P.buildDeliveryArgv({ format: 'wav', duration: 8, outPath: 'C:/out/mix.wav', audioPlan: null }, {}))
       .toThrow(/專案音軌路由/);
   });
+
+  it('啟用音訊平衡化 (loudness) 時，注入 loudnorm 濾鏡', () => {
+    const planWithLoudness = {
+      ...wavPlan,
+      loudness: {
+        enabled: true,
+        maximumAmplitude: -6.0,
+        targetLoudness: -12.0,
+        isTruePeak: true,
+      },
+    };
+    const { args } = P.buildDeliveryArgv({
+      format: 'wav',
+      duration: 8,
+      outPath: 'C:/out/mix_norm.wav',
+      audioPlan: P._normalizeAudioPlan(planWithLoudness, { requireStreams: false }),
+    }, {});
+    const fc = args[args.indexOf('-filter_complex') + 1];
+    expect(fc).toContain('loudnorm=I=-12.0:TP=-6.0');
+    expect(args[args.indexOf('-map') + 1]).toBe('[wavNorm]');
+  });
 });

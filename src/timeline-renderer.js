@@ -476,6 +476,8 @@ function renderClipBlocks(){
       trimmed: c.in > 0.01 || c.out < c.dur - 0.01,
       hasFade: c.fadeIn > 0 || c.fadeOut > 0,
       isImg: c.type === 'image',
+      hasAudioLimiter: Boolean(c.hasAudioLimiter),
+      audioNormalizing: Boolean(c.audioNormalizing),
       name: c.name,
       escapedName: escapeHTML(c.name || ''),
       trackName: State.videoTracks[v]?.name || ('視訊軌 V' + (v+1)),
@@ -490,6 +492,7 @@ function renderClipBlocks(){
 /* 在片段區塊內畫該段音波：畫布覆蓋片段的【可視範圍】，x0abs＝畫布左緣的絕對時間軸 px；
    逐畫布像素以 xToTime 反推來源時間 → 取 peaks（縮放時畫布寬≤視窗，不會超過 canvas 上限）。 */
 function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs){
+  const hasLimiter = !!(c.hasAudioLimiter || c.asset?.hasAudioLimiter);
   const res = Wave.resolution, n = pk.length / 2;
   const timeToXMap = new Float64Array(cvw + 1);
   for (let cx = 0; cx <= cvw; cx++) {
@@ -500,7 +503,8 @@ function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs){
     Hpx, cvw, res, n, pk, 
     startIn: c.in, startOffset: c.offset, x0abs,
     dpr: devicePixelRatio,
-    timeToXMap
+    timeToXMap,
+    hasLimiter
   };
   paintClipWave(cv.getContext('2d'), displayList);
 }
@@ -758,7 +762,21 @@ function renderAudioTrackRows(){
       const externalSelected=external&&State.selectedAudioClipId===c.id;
       const block=document.createElement('div');
       const isLocked=!!c.locked;
-      block.className='audio-clip-block'+(external?' external-audio-block':'')+(!external&&c.id===State.selectedClipId?' selected':'')+(external&&(externalSelected||Media.activeSource===c.audioSrc)?' selected':'')+(muted?' muted':'')+(isLocked?' locked':'');
+      const isNormalizing = !!(c.audioNormalizing || c.asset?.audioNormalizing);
+      const normalizeProgress = Math.max(0, Math.min(100, Math.round(Number(c.audioNormalizeProgress ?? c.asset?.audioNormalizeProgress ?? 0))));
+      const hasLimiter = !isNormalizing && !!(
+        c.hasAudioLimiter ||
+        c.asset?.hasAudioLimiter ||
+        (external && Media.externalAudio?.find?.(c.id)?.hasAudioLimiter) ||
+        (!external && State.clips?.some(clip => (clip.primary || clip.audioSrc === 'video') && clip.hasAudioLimiter))
+      );
+      const limiterRef = c.hasAudioLimiter ? c : (c.asset?.hasAudioLimiter ? c.asset : (!external ? State.clips?.find(clip => (clip.primary || clip.audioSrc === 'video') && clip.hasAudioLimiter) : null));
+      const limiterLabel = limiterRef?.audioLimiterLabel || c.audioLimiterLabel || c.asset?.audioLimiterLabel || '平衡化';
+      const limiterSpec = limiterRef?.audioLimiterSpec || c.audioLimiterSpec || c.asset?.audioLimiterSpec;
+      const limiterTooltip = limiterSpec
+        ? `已套用音訊平衡化濾鏡 (最大: ${limiterSpec.max ?? -6} dB, 目標: ${limiterSpec.min ?? -12} dB)`
+        : `已套用音訊平衡化濾鏡 (${limiterLabel})`;
+      block.className='audio-clip-block'+(external?' external-audio-block':'')+(!external&&c.id===State.selectedClipId?' selected':'')+(external&&(externalSelected||Media.activeSource===c.audioSrc)?' selected':'')+(muted?' muted':'')+(isLocked?' locked':'')+(hasLimiter?' has-limiter':'')+(isNormalizing?' is-normalizing':'');
       block.style.left=x1+'px'; block.style.width=Math.max(6,x2-x1)+'px';
       block.dataset.clipId=c.id||'';
       block.dataset.audioAssetId=external?(c.id||c.audioSourceId||c.audioSrc||''):'';
@@ -771,7 +789,16 @@ function renderAudioTrackRows(){
       block.dataset.audioSourceName=c.name||row.label||'';
       const wave=sourceWaveDetail(c,external);
       block.dataset.waveSelection=wave.selection||'mix';
-      block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span>${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}`;
+      let fxBadge = '';
+      if (isNormalizing) {
+        fxBadge = `<span class="audio-clip-fx-badge processing" title="正在進行音訊平衡化處理 (${normalizeProgress}%)"><span class="fx-spin">⏳</span> 運算中 ${normalizeProgress}%</span>`;
+      } else if (hasLimiter) {
+        fxBadge = `<span class="audio-clip-fx-badge" title="${escapeHTML(limiterTooltip)}">🎚 濾鏡 ${escapeHTML(limiterLabel)}</span>`;
+      }
+      const progressBar = isNormalizing
+        ? `<div class="audio-clip-progress-bar" style="width:${normalizeProgress}%;"></div>`
+        : '';
+      block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span>${fxBadge}${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}${progressBar}`;
       const peak=wave.peaks;
       if(peak && peak.length){
         const vx0=Math.max(0,x1), vx1=Math.min(vw,x2), cvw=Math.round(vx1-vx0);
@@ -1850,7 +1877,8 @@ export function paintClipBlocks(container, displayList) {
       const icon = c.isImg ? '🖼️' : '🎬';
       const trimmedMarker = c.trimmed ? ' ✂' : '';
       const fadeMarker = c.hasFade ? ' ⌁' : '';
-      el.innerHTML = `<div class="edge l"></div><div class="clip-label">${icon} ${c.escapedName}${trimmedMarker}${fadeMarker}</div><div class="edge r"></div>`;
+      const fxMarker = c.audioNormalizing ? ' ⏳' : (c.hasAudioLimiter ? ' 🎚' : '');
+      el.innerHTML = `<div class="edge l"></div><div class="clip-label">${icon} ${c.escapedName}${trimmedMarker}${fadeMarker}${fxMarker}</div><div class="edge r"></div>`;
       row.appendChild(el);
     } catch(err) {
       console.error('renderClipBlocks error on clip', c, err);
@@ -1898,15 +1926,15 @@ export function paintSubtitleBlocks(trackRows, displayList) {
 }
 
 export function paintClipWave(ctx, displayList) {
-  const { Hpx, cvw, res, n, pk, dpr, timeToXMap } = displayList;
+  const { Hpx, cvw, res, n, pk, dpr, timeToXMap, hasLimiter } = displayList;
   
   ctx.save();
   ctx.scale(dpr, dpr);
   const mid = Hpx / 2;
   const amp = Hpx * 1.2;
   
-  ctx.strokeStyle = 'rgba(190,230,255,.5)';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = hasLimiter ? 'rgba(165,180,252,0.95)' : 'rgba(190,230,255,.5)';
+  ctx.lineWidth = hasLimiter ? 1.2 : 1;
   ctx.beginPath();
   
   for (let cx = 0; cx < cvw; cx++) {

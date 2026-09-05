@@ -21,6 +21,7 @@ import { setManualPlaybackSpeed } from './keyboard.js';
 import { splitMenuLabel } from './menu-label.js';
 import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './subtitles.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
+import { openHardLimiterDialog } from './audio-normalizer-dialog.js';
 import { requestPointerSeek } from './timeline-interaction-engine.js';
 import {
   buildAudioClipMenu,
@@ -333,6 +334,11 @@ function tlContextMenuHandler(e){
       blob:State.mediaFile||State.mediaBlob||State.clips?.[0]?.blob||null,
       recognitionTracks,
     };
+    const resolvedTarget = external
+      ? (Media.externalAudio?.find?.(assetId) || (State.externalAudioState || []).find(a => a.id === assetId))
+      : (source || State.clips?.find(c => c.id === assetId || c.primary || c.audioSrc === 'video') || State.clips?.[0]);
+    const hasLimiter = Boolean(resolvedTarget?.hasAudioLimiter || audioEl.classList.contains('has-limiter'));
+    const limiterLabel = resolvedTarget?.audioLimiterLabel || '';
     const items=buildAudioClipMenu({
       name:sourceName,
       external,
@@ -342,9 +348,20 @@ function tlContextMenuHandler(e){
       enabled,
       waveOptions:wave.options,
       selectedWave:wave.selected,
+      hasLimiter,
+      limiterLabel,
     },{
       revealSource:()=>revealSourceInFolder(filePath),
       openSpeechRecognition:()=>openSpeechRecognitionDialog(recognitionSource),
+      openHardLimiter:()=>openHardLimiterDialog({
+        id:assetId,
+        path:filePath,
+        name:sourceName,
+        duration:end-start,
+        asset:external ? resolvedTarget : null,
+        target:resolvedTarget,
+        isPrimary:!external,
+      }),
       seekStart:()=>{ requestPointerSeek(start); emit('playhead:ensure'); },
       splitAtPlayhead:()=>runExternalAudioMenuAction('splitExternalAudio',[assetId,playhead]),
       toggleAudio:()=>runExternalAudioMenuAction('toggleExternalAudioEnabled',[assetId]),
@@ -363,6 +380,11 @@ function tlContextMenuHandler(e){
     const context=audioMenuContext(audioRow);
     const {sourceId,sourceName,filePath,external,locked}=context;
     const wave=sourceWaveMenuState(sourceId);
+    const resolvedTrackTarget = external
+      ? (Media.externalAudio?.find?.(sourceId) || (State.externalAudioState || []).find(a => a.id === sourceId))
+      : (State.clips?.find(c => c.primary || c.audioSrc === 'video' || c.id === sourceId) || State.clips?.[0]);
+    const hasLimiter = Boolean(resolvedTrackTarget?.hasAudioLimiter);
+    const limiterLabel = resolvedTrackTarget?.audioLimiterLabel || '';
     const items=buildAudioTrackMenu({
       name:sourceName,
       external,
@@ -370,8 +392,18 @@ function tlContextMenuHandler(e){
       canReveal:IS_DESKTOP&&!!filePath,
       waveOptions:wave.options,
       selectedWave:wave.selected,
+      hasLimiter,
+      limiterLabel,
     },{
       revealSource:()=>revealSourceInFolder(filePath),
+      openHardLimiter:()=>openHardLimiterDialog({
+        id:sourceId,
+        path:filePath,
+        name:sourceName,
+        asset:external ? resolvedTrackTarget : null,
+        target:resolvedTrackTarget,
+        isPrimary:!external,
+      }),
       openAudioRouting:()=>AudioRouting.openForSource(sourceId),
       selectWave:selection=>selectSourceWave(sourceId,selection),
     });
@@ -427,6 +459,8 @@ function tlContextMenuHandler(e){
       hasPrevious:idx>0,
       hasNext:idx>=0&&idx<sorted.length-1,
       hasFade:c.fadeIn>0||c.fadeOut>0,
+      hasLimiter:Boolean(c.hasAudioLimiter),
+      limiterLabel:c.audioLimiterLabel||'',
     },{
       revealSource:()=>revealSourceInFolder(filePath),
       seekStart:()=>{ requestPointerSeek(c.offset); emit('playhead:ensure'); },
@@ -435,6 +469,13 @@ function tlContextMenuHandler(e){
       editGeometry:()=>showImageGeom(c),
       resetTrim,
       detachAudio:()=>{ void Media.detachClipAudio?.(c.id); },
+      openHardLimiter:()=>openHardLimiterDialog({
+        id:c.id,
+        path:filePath,
+        name:c.name,
+        duration:c.dur,
+        isPrimary:true,
+      }),
       openAudioRouting:()=>AudioRouting.openForClip(c.id),
       moveTrackUp:()=>moveTrack(1),
       moveTrackDown:()=>moveTrack(-1),

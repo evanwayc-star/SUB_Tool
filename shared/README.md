@@ -16,6 +16,7 @@ import { imageBox } from '../shared/image-geometry.cjs';
 
 | 檔案 | 唯一責任 |
 |---|---|
+| `audio-loudness.cjs` | 音訊強限制器與 ITU-R BS.1770 響度純邏輯 |
 | `channel-layout.cjs` | 來源聲道展開順序 |
 | `clip-fade.cjs` | 片段長度與淡入淡出視窗 |
 | `delivery-resolution.cjs` | 交付解析度正規化 |

@@ -1730,6 +1730,15 @@ const Media = {
     }
     if(!State.clips.includes(c)) return;
     if(c.type === 'image') return; // 圖片是純視覺疊層，不經過播放引擎
+    // 防禦自癒：若視訊片段 path 被誤寫為純音訊 wav，自 _originalPath 或 State.mediaPath 還原視訊路徑
+    if(c.type !== 'audio' && typeof c.path === 'string' && c.path.toLowerCase().endsWith('.wav')){
+      const restorePath = (c._originalPath && !c._originalPath.toLowerCase().endsWith('.wav'))
+        ? c._originalPath
+        : (State.mediaPath && !State.mediaPath.toLowerCase().endsWith('.wav') ? State.mediaPath : null);
+      if(restorePath){
+        c.path = restorePath;
+      }
+    }
     this._setMpvSeekProfile(c);
     // 不保存開始載入那一刻的 play/pause；完成時必須重新讀最新意圖。
     // requestPlayback 明確傳 false，確保畫格證明到達前永不偷跑。

@@ -61,6 +61,7 @@
       <div class="sep"></div>
 
       <button class="icon" data-act="settings" title="自訂快捷鍵">⚙ <span class="lbl">設定</span></button>
+      <button class="icon desktop-only" data-act="cache-manage" title="管理轉檔快取（音軌／波形）">🗂 <span class="lbl">快取</span></button>
       <button class="icon" id="asrMonitorBtn" data-act="asr-monitor" title="語音辨識進度" style="display:none"><span class="asr-monitor-ring" aria-hidden="true"></span><span class="lbl" id="asrMonitorLbl">🎙 辨識中 0%</span></button>
       <button class="icon desktop-only" id="stMonitorBtn" data-act="queue-monitor" title="監控匯出佇列（.）" style="display:none"><span class="queue-monitor-ring" aria-hidden="true"></span><span class="lbl">監控序列</span></button>
       <button class="icon desktop-only" data-act="exp-video" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV" style="display:none">🎞 <span class="lbl">匯出影片</span></button>
@@ -450,9 +451,18 @@
     <div class="fp-head"><span>🎚 音量表</span><span class="spacer"></span><button class="fp-close"
         data-act="close-mixer">✕</button></div>
     <div class="fp-body">
-      <div class="mixer-toolbar"><button class="mini" data-act="mixer-reset" title="取消所有專案音訊軌的獨奏與靜音">重製</button><button
-          class="mini" data-act="mixer-muteall" title="將所有軌道靜音">全靜音</button><span class="spacer"
-          style="flex:1"></span><button class="mini" data-act="cache-manage" title="管理轉檔快取（音軌／波形）">🗂 快取</button></div>
+      <div class="mixer-toolbar">
+        <div class="mx-tool-group">
+          <button class="mini mx-tool-btn" data-act="mixer-zero-faders" title="所有推子回歸 0.0 dB (Unity)">0 dB 歸零</button>
+          <button class="mini mx-tool-btn" data-act="mixer-step-down" title="全體音訊軌音量 −1 dB">−1 dB</button>
+          <button class="mini mx-tool-btn" data-act="mixer-step-up" title="全體音訊軌音量 +1 dB">+1 dB</button>
+        </div>
+        <div class="mx-tool-sep"></div>
+        <div class="mx-tool-group">
+          <button class="mini mx-tool-btn" data-act="mixer-muteall" id="mixerMuteAllBtn" title="切換所有音訊軌靜音/取消靜音">🔇 全靜音</button>
+          <button class="mini mx-tool-btn" data-act="mixer-reset" title="完整重設所有軌道音量為 0 dB 並取消靜音">⟲ 重設</button>
+        </div>
+      </div>
       <div class="mixer-strips" id="mixerStrips"></div>
     </div>
   </div>

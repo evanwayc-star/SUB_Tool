@@ -58,6 +58,14 @@ contextBridge.exposeInMainWorld('subtool', {
   makeProxy:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:proxy', { path: p, duration }); },
   extractAudio: (p, idx, duration, codec) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:extractAudio', { path: p, idx, duration, codec }); },
   waveAudio:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:waveAudio', { path: p, duration }); },
+  normalizeAudio: (p, options, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:normalize', { path: p, options, duration }); },
+  analyzeAudioLoudness: (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:analyzeLoudness', { path: p, duration }); },
+  onAudioNormalizeProgress: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('audio:normalize-progress', handler);
+    return () => ipcRenderer.removeListener('audio:normalize-progress', handler);
+  },
   cleanupAudio: (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:cleanup', { path: p }); },
   compressSpeechAudio: (bytes, requestId) => {
     if (!(bytes instanceof ArrayBuffer) && !ArrayBuffer.isView(bytes)) {
