@@ -10,6 +10,7 @@
    抽離成獨立模組使 `tests/fileAuthority.test.js` 與 `tests/ipcGuards.test.js`
    能對真實授權狀態進行單元驗證，而非僅靠靜態字面掃描。
    ============================================================================== */
+const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
 
 /**
  * 建立 IPC 呼叫的檔案存取守衛集合。
@@ -104,6 +105,7 @@ function createIpcGuards(fileAuthority) {
  * - `wav` -> `wav`
  * - `prores` -> `mov`
  * - `h264` -> `mp4`
+ * - `mod-fhd` -> `ts`
  * 
  * @param {string} format 請求之匯出格式識別字串
  * @returns {string} 預期的副檔名
@@ -111,6 +113,8 @@ function createIpcGuards(fileAuthority) {
  */
 function expectedExportExtension(format) {
   const fmt = typeof format === 'string' ? format.trim().toLowerCase() : '';
+  const preset = getDeliveryFormatPreset(fmt);
+  if (preset) return preset.extension.replace(/^\./, '');
   if (fmt === 'wav') return 'wav';
   if (fmt === 'prores') return 'mov';
   if (fmt === 'h264') return 'mp4';
@@ -161,4 +165,3 @@ module.exports = {
   BOOLEAN_KEYS,
   mergeRendererConfig,
 };
-

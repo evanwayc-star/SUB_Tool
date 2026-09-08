@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const QueueStore = require('./queue-store');
+const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio } = require('../shared/delivery-formats.cjs');
 const {
   buildDeliveryArgv,
   _normalizeAudioPlan,
@@ -70,8 +71,9 @@ function createDeliveryRunner(options = {}) {
     const sendProgress = data => dispatch(target, jobId, 'task-progress', data);
     const isWav = format === 'wav';
     const isPro = format === 'prores';
-    const audioPlan = _normalizeAudioPlan(rawAudioPlan, { requireStreams: !isWav });
-    const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
+    const preset = getDeliveryFormatPreset(format);
+    const audioPlan = _normalizeAudioPlan(normalizeDeliveryPresetAudio(format, rawAudioPlan), { requireStreams: !isWav });
+    const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, preset?.fps || fps);
 
     queue.assertJobCapabilities(job);
 
@@ -139,6 +141,7 @@ function createDeliveryRunner(options = {}) {
       let usedEncoder = plan.plannedEncoder;
       const result = await runFfmpeg(args, {
         duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
+        outputFormat: format,
         onProgress: sendProgress,
         onProcess: controller => queue.registerActiveJob(jobId, activeRecord(jobId, controller, outPath)),
       });

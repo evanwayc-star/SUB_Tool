@@ -87,6 +87,87 @@ beforeEach(() => {
 });
 
 describe('匯出交付清單', () => {
+  it('MOD-FHD 顯示鎖定規格、TS 檔名與 AAC 音訊，仍可指定 bus 與燒入 TC', async () => {
+    await showExportVideoDialog();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const format = document.querySelector('.ev-format');
+    format.value = 'mod-fhd';
+    format.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const resolution = document.querySelector('.ev-res');
+    expect(resolution.value).toBe('1080');
+    expect(resolution.selectedOptions[0].textContent).toBe('1920×1080i');
+    expect(resolution.disabled).toBe(true);
+    expect(document.querySelector('.ev-fps').value).toBe('29.97');
+    expect(document.querySelector('.ev-fps').disabled).toBe(true);
+    expect(document.querySelector('.ev-kbps').value).toBe('7280');
+    expect(document.querySelector('.ev-kbps').disabled).toBe(true);
+    expect(document.querySelector('.ev-name').value).toBe('ST_交付測試_MOD-FHD_1080i_29.97fps.ts');
+    expect(document.body.textContent).toContain('MPEG-2 AAC-LC / ADTS');
+    expect(document.body.textContent).toContain('48 kHz / 256 kbps');
+
+    const timecode = document.querySelector('.ev-tc');
+    timecode.checked = true;
+    timecode.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(document.querySelector('.ev-name').value).toBe('ST_交付測試_MOD-FHD_1080i_29.97fps_TC.ts');
+    document.querySelector('.ev-audio-btn').click();
+    expect(spies.openDeliveryOutputSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        streams: [expect.objectContaining({ layout: 'stereo', busIds: State.audioProject.buses.map(bus => bus.id) })],
+      }),
+      expect.any(Function), { deliveryFormat: 'mod-fhd' },
+    );
+    expect(State.audioProject.exportLayout.streams).toHaveLength(2);
+    expect(State.fps).toBe(25);
+
+    spies.openDeliveryOutputSettings.mock.calls[0][1]({ saved: false });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(document.querySelector('.ev-format').value).toBe('mod-fhd');
+    expect(document.querySelector('.ev-fps').disabled).toBe(true);
+    expect(document.querySelector('.ev-tc').checked).toBe(true);
+    const backToMp4 = document.querySelector('.ev-format');
+    backToMp4.value = 'h264';
+    backToMp4.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(document.querySelector('.ev-res').disabled).toBe(false);
+    expect(document.querySelector('.ev-fps').disabled).toBe(false);
+    expect(document.querySelector('.ev-kbps').disabled).toBe(false);
+  });
+
+  it('MOD-FHD 的多串流音訊顯示阻擋訊息並保留音軌修正入口', async () => {
+    ensureAudioBusCount(6);
+    await showExportVideoDialog();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/交付';
+    outDir.dispatchEvent(new Event('change', { bubbles: true }));
+    const format = document.querySelector('.ev-format');
+    format.value = 'mod-fhd';
+    format.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const message = document.getElementById('evConflictMsg');
+    expect(message.textContent).toContain('MOD-FHD 需要單一 Stereo');
+    expect(getComputedStyle(message).display).toBe('flex');
+    expect(document.querySelector('.ev-audio-btn').disabled).toBe(false);
+    expect(State.audioProject.exportLayout.streams).toHaveLength(6);
+  });
+
+  it('可逐列選 FPS，折返音軌設定仍保留，WAV 隱藏 FPS', async () => {
+    await showExportVideoDialog();
+    await new Promise(resolve=>setTimeout(resolve,25));
+    const select = document.querySelector('.ev-fps');
+    expect(select.value).toBe('0');
+    expect([...select.options].map(o=>o.value)).toEqual(['0','23.976','24','25','29.97','30','48','50','59.94','60']);
+    select.value='29.97';select.dispatchEvent(new Event('change',{bubbles:true}));
+    expect(document.querySelector('.ev-name').value).toContain('_29.97fps');
+    document.querySelector('.ev-audio-btn').click();
+    const callback=spies.openDeliveryOutputSettings.mock.calls[0][1];
+    callback({saved:false});
+    await new Promise(resolve=>setTimeout(resolve,25));
+    expect(document.querySelector('.ev-fps').value).toBe('29.97');
+    const format=document.querySelector('.ev-format');format.value='wav';format.dispatchEvent(new Event('change',{bubbles:true}));
+    expect(document.querySelector('.ev-fps')).toBeNull();
+    expect(State.fps).toBe(25);expect(State.exportIn).toBe(12);expect(State.exportOut).toBe(32);
+  });
   it('不把 startup 專案所在資料夾誤當成已授權的交付輸出目錄', async () => {
     window.subtool.getStartupFile.mockResolvedValue('C:\\Projects\\cut.subtool');
 

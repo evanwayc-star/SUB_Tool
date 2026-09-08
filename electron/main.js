@@ -41,6 +41,7 @@ const { createAudioNormalizationRuntime } = require('./audio-normalization-runti
 /* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
 const { deliveryResolution, suggestKbps } = require('../shared/delivery-resolution.cjs');
+const { MOD_FHD, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
 const {
   buildIngestArgs,
   createFFmpegExecution,
@@ -936,7 +937,8 @@ ipcMain.handle('project:openDroppedFile', (e, projectFile) => {
 ipcMain.handle('queue:getAll', () => ({
   jobs: QueueManager.jobs(),
   isPaused: QueueManager.isPaused,
-  concurrency: QueueManager.concurrency
+  concurrency: QueueManager.concurrency,
+  deliveryFormatPresets: [MOD_FHD],
 }));
 ipcMain.handle('queue:getStatus', () => queueStatusSnapshot());
 
@@ -992,21 +994,27 @@ function prepareQueueDeliveryUpdate(job, patch) {
   if (job.status !== JOB_STATUS.QUEUED) throw new Error('只有等待中的工作可以修改交付設定');
 
   const p = job.payload || {};
-  const format = patch?.format != null ? String(patch.format) : String(p.format || '');
+  const format = String(patch?.format != null ? patch.format : (p.format || '')).trim().toLowerCase();
   const ext = expectedExportExtension(format); // 未知格式在這裡就丟 INVALID_EXPORT_FORMAT
   const isWav = format === 'wav';
+  const preset = getDeliveryFormatPreset(format);
+  // 已入列工作的 TC 起點依原交付 FPS 凍結；切入固定 FPS 必須從交付清單重建。
+  if (preset && p.format !== format) throw new Error('請回交付清單新增 MOD-FHD，以重新套用影格率、時間碼與音軌設定');
+  const audioPlan = normalizeDeliveryPresetAudio(format, p.audioPlan);
+  const audioProblem = deliveryPresetAudioProblem(format, audioPlan);
+  if (audioProblem) throw new Error(audioProblem);
 
   /* 解析度：以【專案畫布】的比例重算，不是拿目前的交付尺寸回推——
      交付尺寸的寬度已經取過偶數，反覆換算會累積誤差。畫布原值在入列時就存進 payload。
      舊工作沒有 canvasW/H 時退回目前的交付尺寸，比例仍然正確。 */
   const canvasW = Number(p.canvasW) > 0 ? Number(p.canvasW) : Number(p.width) || 1920;
   const canvasH = Number(p.canvasH) > 0 ? Number(p.canvasH) : Number(p.height) || 1080;
-  const targetH = patch?.targetH != null ? Math.max(0, Math.floor(Number(patch.targetH) || 0)) : (Number(p.targetH) || 0);
-  const { w, h } = deliveryResolution({ canvasW, canvasH, targetH, isWav });
+  const targetH = preset?.height || (patch?.targetH != null ? Math.max(0, Math.floor(Number(patch.targetH) || 0)) : (Number(p.targetH) || 0));
+  const { w, h } = preset ? { w: preset.width, h: preset.height } : deliveryResolution({ canvasW, canvasH, targetH, isWav });
 
   /* 碼率只有 H.264 用得到。給了就用給的，沒給而解析度變了就重新建議——
      1080p 的碼率套在 720p 上是浪費、套在 4K 上會糊掉（v4.32 的「輸出像 proxy」）。 */
-  let videoKbps = Number(p.videoKbps) || 0;
+  let videoKbps = preset?.videoKbps || Number(p.videoKbps) || 0;
   if (format === 'h264') {
     if (patch?.kbps != null) videoKbps = Math.max(1, Math.floor(Number(patch.kbps) || 0));
     else if (w !== Number(p.width) || h !== Number(p.height)) videoKbps = suggestKbps({ w, h });
@@ -1037,13 +1045,14 @@ function prepareQueueDeliveryUpdate(job, patch) {
 
   /* 先用候選物件跑一次准入檢查，通過才真的改到 job 上——
      失敗時 job 必須維持原狀，不可以留下改到一半的狀態。 */
-  const nextPayload = { ...p, format, outPath: newPath, width: w, height: h, targetH, videoKbps, canvasW, canvasH, timecodeWatermark };
+  const fps = preset?.fps || p.fps;
+  const nextPayload = { ...p, format, outPath: newPath, width: w, height: h, targetH, videoKbps, fps, audioPlan, canvasW, canvasH, timecodeWatermark };
   const candidate = { ...job, payload: nextPayload };
   _admission.assertOutputFormat(candidate);
   _admission.assertOutputAvailable(candidate, job.id); // 排除自己；擋同路徑撞車
   return {
     payload: nextPayload,
-    result: { format, outPath: newPath, width: w, height: h, targetH, videoKbps, burnTimecode: !!timecodeWatermark },
+    result: { format, outPath: newPath, width: w, height: h, targetH, videoKbps, fps, burnTimecode: !!timecodeWatermark },
     /* 同資料夾、同主檔名，只換副檔名。能力只在 job 快照成功落盤後才擴張，
        失敗時不留下 renderer 看不到的半份授權。 */
     onCommitted: newPath !== oldPath ? () => fileAuthority.grantDeliveryFile(newPath) : undefined,
@@ -1056,10 +1065,15 @@ ipcMain.handle('queue:openMonitor', () => {
 
 ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
+  payload = { ...payload, format: String(payload?.format || '').trim().toLowerCase() };
+  const preset = getDeliveryFormatPreset(payload?.format);
+  if (preset) payload = { ...payload, width: preset.width, height: preset.height, targetH: preset.height, fps: preset.fps, videoKbps: preset.videoKbps };
   const { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark } = payload;
   const ext = expectedExportExtension(format);
   const isWav = format === 'wav';
-  const audioPlan = _normalizeAudioPlan(rawAudioPlan, { requireStreams: !isWav });
+  const audioPlan = _normalizeAudioPlan(normalizeDeliveryPresetAudio(format, rawAudioPlan), { requireStreams: !isWav });
+  const audioProblem = deliveryPresetAudioProblem(format, audioPlan);
+  if (audioProblem) throw new Error(audioProblem);
   const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
   const isPro = format === 'prores';
   
@@ -1067,7 +1081,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!outPath) {
     const r = await dialog.showSaveDialog(mainWin, {
       title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
-      filters: [{ name: isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)'), extensions: [ext] }],
+      filters: [{ name: preset ? `${preset.label} (MPEG-TS)` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
     });
     if (r.canceled) return null;
     outPath = r.filePath;

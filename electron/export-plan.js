@@ -26,6 +26,8 @@
    兩者以前在這裡各有一份手抄副本。 */
 const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
 const { clipLength } = require('../shared/clip-fade.cjs');
+const { deliveryFrameRateRatio, sameDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
+const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
 const { buildLimiterFilter } = require('../shared/audio-loudness.cjs');
 
 const _EXPORT_LAYOUTS = Object.freeze({
@@ -342,6 +344,14 @@ function imageBoxForExport({ frameW, frameH, natW, natH, scale = 1, posX = 0.5, 
    回傳 { args, label, duration, plannedEncoder, isGpu, kbps, audioBitrates,
           audioChannels }；呼叫端只負責 spawn 與回報。 */
 function buildDeliveryArgv(spec = {}, env = {}) {
+  const preset = getDeliveryFormatPreset(spec.format);
+  if (preset) {
+    const audio = normalizeDeliveryPresetAudio(spec.format, spec.audioPlan);
+    const problem = deliveryPresetAudioProblem(spec.format, audio);
+    if (problem) throw new Error(problem);
+    spec = { ...spec, width: preset.width, height: preset.height, fps: preset.fps,
+      videoKbps: preset.videoKbps, audioPlan: _normalizeAudioPlan(audio) };
+  }
   const {
     format, clips, videoTracks, width, height, fps, duration,
     videoKbps, audioPlan, timecodeWatermark, assFileName, outPath,
@@ -381,7 +391,11 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   }
 
   const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
-  const R = fps || 25;
+  // FPS-SYNC：NTSC 格率必須用精確有理數；轉換只改 cadence，不改時間軸秒數。
+  const outputRate = deliveryFrameRateRatio(fps);
+  // MOD-FHD 先以每秒 59.94 個時刻合成，再交織成上場優先的 29.97 幀；
+  // 只標記 TFF 會把逐行畫面偽裝成隔行，並丟掉來源的場間運動。
+  const R = preset ? '60000/1001' : outputRate;
   // ===== 多軌合成 filtergraph（v4.11.0）=====
   //  影像：每視訊軌各自 concat 成整條時間軸（片段放 offset、間隙【透明】），再由下而上 overlay 疊到黑底；
   //        上層片段覆蓋下層（比照預覽 top-occludes），透明間隙讓下層透出。
@@ -391,8 +405,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   if (!list.length) throw new Error('沒有可匯出的影片段');
   const inputs = [], fc = [];
   const EPS = 0.01;
-  const isPassthrough = !isWav && !isPro && !assFileName && !timecodeWatermark &&
+  const isPassthrough = !preset && !isWav && !isPro && !assFileName && !timecodeWatermark &&
     list.length === 1 && list[0].type === 'video' &&
+    sameDeliveryFrameRate(list[0].fps, fps || 25) &&
     !list[0].crop && !list[0].transform &&
     !list[0].fadeIn && !list[0].fadeOut &&
     (list[0].opacity == null || list[0].opacity === 1) &&
@@ -426,7 +441,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       pathMinIn.set(p, minIn);
       // 這個 input 本身就是母素材；音訊 routing 可重用它，不必再多開一次同一個 MXF/MOV。
       reusableMasterInputs.set(p, { index: inputIndex, seekStart: minIn });
-      const hw = isPassthrough ? [] : hwdecArgs(); // passthrough 不需硬解
+      const hw = (isPassthrough || preset) ? [] : hwdecArgs(); // MOD 的場處理使用 CPU 影格
       inputs.push(...hw, '-ss', minIn.toFixed(3), '-i', p);
     }
   });
@@ -492,12 +507,13 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           ? imageBoxForExport({ frameW: SW, frameH: SH, natW: +c.natW, natH: +c.natH,
                                 scale: clipScale, posX: pxClip, posY: pyClip })
           : null;
+        const fields = preset && c.type !== 'image' ? 'bwdif=mode=send_field:parity=auto:deint=interlaced,' : '';
         if (box) {
           const bw = Math.max(2, Math.round(box.w)), bh = Math.max(2, Math.round(box.h));
-          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${bw}:${bh},format=yuva420p,setsar=1[${IM}]`);
+          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,${fields}fps=${R},scale=${bw}:${bh},format=yuva420p,setsar=1[${IM}]`);
           vchain = `[${BG}][${IM}]overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}:format=auto:eof_action=pass,format=yuva420p,setsar=1`;
         } else {
-          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
+          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,${fields}fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
           vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
         }
       }
@@ -591,7 +607,11 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     fc.push(`${vc}ass=${assFileName}${fdirArg}[vout]`);
     vfinal = '[vout]';
   }
-  // 時間碼是交付用 burn-in，必須接在 ASS 後面，才能保證始終位於字幕與所有影像之上。
+  if (preset) {
+    fc.push(`${vfinal}format=yuv420p,tinterlace=mode=interleave_top,setfield=tff[vmod]`);
+    vfinal = '[vmod]';
+  }
+  // 時間碼在 ASS／場交織之後，按輸出幀率計數，避免 59.94 場合成時跑成兩倍速。
   if (timecodeWatermark) {
     const tcOut = '[vtimecode]';
     fc.push(_buildExportTimecodeFilter(vfinal, timecodeWatermark, W, H, tcOut, timecodeFontFile));
@@ -604,12 +624,25 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const audioMaps = plannedAudio
     ? plannedAudio.streamLabels.flatMap(({ label }) => ['-map', label])
     : ['-map', '[ac]'];
-  const audioBitrates = isPro
+  const audioBitrates = preset ? [`${preset.audioKbps}k`] : isPro
     ? []
     : (plannedAudio
       ? plannedAudio.streamLabels.map(({ stream }) => aacBitrateForChannels(stream.spec.channels))
       : [aacBitrateForChannels(2)]);
-  const encode = isPro
+  const encode = preset
+    ? ['-c:v', 'libx264', '-preset', 'medium', '-profile:v', 'high', '-level:v', '4.1',
+      '-pix_fmt', 'yuv420p', '-b:v', `${kbps}k`, '-minrate', `${kbps}k`, '-maxrate', `${kbps}k`,
+      // Carbon VBV=0 是 encoder 自動值；x264 HRD/CBR 必須有明確 buffer，採一秒。
+      '-bufsize', `${kbps}k`, '-flags:v', '+ilme+ildct', '-top', '1',
+      '-x264-params', 'tff=1:nal-hrd=cbr:force-cfr=1:aud=1:repeat-headers=1:keyint=32:min-keyint=1:scenecut=40:open-gop=0:bframes=2:b-adapt=1:b-pyramid=none:ref=4:cabac=1:slices=1:weightp=0:weightb=0:deblock=-1,-1:chroma-qp-offset=1:aq-mode=0',
+      '-c:a', 'aac', '-profile:a', 'aac_low', '-aac_pns', '0', '-b:a:0', `${preset.audioKbps}k`,
+      '-ar', String(preset.sampleRate), '-ac', '2', '-metadata:s:a:0', 'language=eng',
+      '-f', 'mpegts', '-mpegts_m2ts_mode', '0', '-muxrate', `${preset.muxKbps}k`,
+      '-mpegts_transport_stream_id', '1', '-mpegts_service_id', '1',
+      '-mpegts_pmt_start_pid', String(preset.pmtPid),
+      '-streamid', `0:${preset.videoPid}`, '-streamid', `1:${preset.audioPid}`,
+      '-pcr_period', '40', '-pat_period', '0.1', '-pes_payload_size', '0']
+    : isPro
     ? proresArgs()
     : isPassthrough
       ? ['-c:v', 'copy', '-c:a', 'aac', ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart']
@@ -624,16 +657,16 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const args = ['-y', ...inputs];
   if (fc.length > 0) args.push('-filter_complex', fc.join(';'));
   args.push('-map', vfinal, ...audioMaps);
-  if (!isPassthrough) args.push('-r', String(R));
+  if (!isPassthrough) args.push('-r', outputRate);
   args.push(...encode, ...audioMetadata, outPath);
 
   // 進度標籤即顯示本次實際送出的編碼器（GPU 或 CPU）與位元率，使用者在狀態列就看得到
-  const plannedEncoder = isPro ? 'prores_ks' : (isPassthrough ? 'copy' : (encoderName || 'libx264'));
+  const plannedEncoder = preset ? 'libx264' : isPro ? 'prores_ks' : (isPassthrough ? 'copy' : (encoderName || 'libx264'));
   const isGpu = !isPro && plannedEncoder !== 'libx264' && plannedEncoder !== 'copy';
   const accel = isGpu ? 'GPU ' + plannedEncoder.replace('h264_', '').toUpperCase() : (isPassthrough ? 'Direct Stream Copy' : 'CPU ' + plannedEncoder);
   return {
     args,
-    label: `匯出 ${isPro ? 'ProRes 422 HQ' : 'MP4 ' + (kbps / 1000).toFixed(1) + 'Mbps'}（${accel}）`,
+    label: `匯出 ${preset ? 'MOD-FHD 1080i 7.28Mbps' : isPro ? 'ProRes 422 HQ' : 'MP4 ' + (kbps / 1000).toFixed(1) + 'Mbps'}（${accel}）`,
     duration: D,
     plannedEncoder,
     isGpu,

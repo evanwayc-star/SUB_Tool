@@ -93,7 +93,7 @@ timelineTime = offset + (sourceTime - in)
 - 交付「壓入時間碼」：從凍結工作的 `timelineStart` 起算。
 - WAV 沒有畫面，不提供燒入 TC。
 
-兩者都使用專案 FPS 與 DF／NDF，但不是同一個開關。
+監看使用專案 FPS；交付可逐列指定輸出 FPS（預設依專案），燒入 TC 的起點由同一時間軸秒數按該列 FPS 換算。DF 偏好只在 29.97／59.94 生效，其他格率使用 NDF。影格率轉換不改片段、字幕或音訊的秒數；兩者不是同一個開關。
 
 ## 3. 呈現生命週期
 
@@ -136,7 +136,8 @@ sequenceDiagram
 | `loaders/media-loader.js` | HTML／mpv 實際畫格回報 |
 | `decode/player.js` | WebCodecs 多層繪製與 timestamp |
 | `timeline-renderer.js` | 播放點與刻度 |
-| `export-delivery-engine.js` | 凍結輸出起點與燒入 TC |
+| `subio.js`、`delivery-list.js` | 凍結輸出起點、逐列交付 FPS 與燒入 TC |
+| `shared/delivery-frame-rate.cjs`、`electron/export-plan.js` | 精確輸出格率與轉碼；不同或未知來源格率禁止 stream copy |
 
 ## 5. 常見失敗
 

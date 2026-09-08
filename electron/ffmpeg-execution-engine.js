@@ -324,6 +324,7 @@ function createFFmpegExecution(options = {}) {
     cwd,
     outPath,
     shouldSend,
+    outputFormat,
   } = {}) {
     return new Promise((resolve, reject) => {
       const ffmpegPath = getFFmpegPath();
@@ -437,6 +438,7 @@ function createFFmpegExecution(options = {}) {
           outPath,
           jobId,
           queueDir,
+          ...(outputFormat === 'mod-fhd' ? { outputFormat } : {}),
         }, {
           scriptPath: watchdogScriptPath(),
           onStderr: consumeStderr,

@@ -19,6 +19,8 @@ import { imageBox } from '../shared/image-geometry.cjs';
 | `audio-loudness.cjs` | 音訊強限制器與 ITU-R BS.1770 響度純邏輯 |
 | `channel-layout.cjs` | 來源聲道展開順序 |
 | `clip-fade.cjs` | 片段長度與淡入淡出視窗 |
+| `delivery-frame-rate.cjs` | 交付 FPS 選項、精確有理數與來源格率比對 |
+| `delivery-formats.cjs` | 固定交付格式規格與 MOD-FHD 雙聲道編組限制 |
 | `delivery-resolution.cjs` | 交付解析度正規化 |
 | `image-geometry.cjs` | 圖片／片段疊層幾何 |
 

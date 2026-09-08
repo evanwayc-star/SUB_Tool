@@ -23,16 +23,18 @@
         因為那些模組本身也不准 require 任何東西（見 shared/README.md）。
    - 磁碟上的同名檔案檢查**不在這裡**——那是 I/O，留在對話框。
      這裡只做純規則的驗證（缺目錄／缺檔名／同一目錄內重複檔名）。
-   - 交付解析度的寬度必須是偶數（H.264 要求），推導公式只有 deliveryResolution()
-     一份，送出與 UI 都吃它。
+   - 自訂交付解析度的寬度必須是偶數（H.264 要求），推導公式只有 deliveryResolution()
+     一份。MOD-FHD 的固定規格則由 shared/delivery-formats.cjs 提供。
 ============================================================================== */
+import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
+import { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } from '../shared/delivery-formats.cjs';
 import { deliveryResolution, suggestKbps } from '../shared/delivery-resolution.cjs';
 
 const EXT_BY_FORMAT = { wav: '.wav', prores: '.mov', h264: '.mp4' };
 
 /** 交付格式對應的副檔名；未知格式一律當 MP4。 */
 export function extensionFor(format) {
-  return EXT_BY_FORMAT[format] || '.mp4';
+  return getDeliveryFormatPreset(format)?.extension || EXT_BY_FORMAT[format] || '.mp4';
 }
 
 /* 專案代號：檔名慣例是 `ST_<代號>_<fps>fps…`，而素材檔名常常已經帶了
@@ -68,10 +70,12 @@ function audioTagFrom(audioPlan) {
 /** 一列交付的預設檔名。純函式：同樣的輸入永遠得到同樣的名字。 */
 export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPlan, burnTimecode }) {
   const ext = extensionFor(format);
+  const preset = getDeliveryFormatPreset(format);
+  const tcTag = burnTimecode ? '_TC' : '';
+  if (preset) return `ST_${projectTag}_${preset.label}_${preset.height}i_${preset.fps}fps${tcTag}${ext}`;
   const isWav = format === 'wav';
   const tag = (!isWav && targetH > 0) ? '_' + targetH + 'p' : '';
-  const tcTag = burnTimecode ? '_TC' : '';
-  return `ST_${projectTag}_${Math.floor(fps || 25)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
+  return `ST_${projectTag}_${normalizeDeliveryFrameRate(fps)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
 }
 
 /* 交付解析度與建議碼率的規則住在 `shared/delivery-resolution.cjs`——
@@ -100,11 +104,22 @@ function newRow({ audioOnly, defaultAudioLayout, outDir = '' }) {
     format: audioOnly ? 'wav' : 'h264',
     kbps: 8000,
     targetH: 0,
+    targetFps: 0,
     burnTimecode: false,
     audioPlan: JSON.parse(JSON.stringify(defaultAudioLayout || {})),
     customName: '',
     outDir,
   };
+}
+
+function applyFormatPreset(row) {
+  const preset = getDeliveryFormatPreset(row.format);
+  if (preset) {
+    row.targetH = preset.height;
+    row.targetFps = preset.fps;
+    row.kbps = preset.videoKbps;
+    row.audioPlan = normalizeDeliveryPresetAudio(row.format, row.audioPlan);
+  }
 }
 
 /**
@@ -129,7 +144,7 @@ export function createDeliveryList({
     : [newRow({ audioOnly, defaultAudioLayout })];
 
   const nameFor = r => defaultDeliveryName({
-    projectTag, fps, format: r.format, targetH: r.targetH, audioPlan: r.audioPlan, burnTimecode: r.burnTimecode
+    projectTag, fps: r.format === 'wav' ? fps : normalizeDeliveryFrameRate(r.targetFps, fps || 25), format: r.format, targetH: r.targetH, audioPlan: r.audioPlan, burnTimecode: r.burnTimecode
   });
 
   /* 使用者沒有自己改過名字的列，要跟著格式／解析度／編組變動重新產生。
@@ -149,6 +164,7 @@ export function createDeliveryList({
       const row = last
         ? { ...JSON.parse(JSON.stringify(last)), customName: '', nameModified: false, outDir: last.outDir }
         : newRow({ audioOnly, defaultAudioLayout });
+      applyFormatPreset(row);
       rows.push(row);
       refreshName(row);
       return row;
@@ -159,6 +175,7 @@ export function createDeliveryList({
     setFormat(i, format) {
       const r = at(i); if (!r) return;
       r.format = format;
+      applyFormatPreset(r);
       if (!r.nameModified) r.customName = nameFor(r);
       else if (r.customName) r.customName = r.customName.replace(/\.[a-zA-Z0-9]+$/, '') + extensionFor(format);
     },
@@ -167,14 +184,23 @@ export function createDeliveryList({
        套在 4K 上則會糊掉（v4.32 使用者回報「輸出像 proxy」的成因）。 */
     setTargetHeight(i, h) {
       const r = at(i); if (!r) return;
-      r.targetH = Number(h) || 0;
+      r.targetH = getDeliveryFormatPreset(r.format)?.height || Number(h) || 0;
       if (r.format === 'h264') {
         r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav: false }));
       }
       refreshName(r);
     },
 
-    setKbps(i, kbps) { const r = at(i); if (r) r.kbps = parseInt(kbps, 10) || 0; },
+    setTargetFps(i, value) {
+      const r = at(i); if (!r) return;
+      r.targetFps = getDeliveryFormatPreset(r.format)?.fps || normalizeDeliveryFrameRate(value, 0);
+      refreshName(r);
+    },
+
+    setKbps(i, kbps) {
+      const r = at(i);
+      if (r) r.kbps = getDeliveryFormatPreset(r.format)?.videoKbps || parseInt(kbps, 10) || 0;
+    },
     setBurnTimecode(i, on) { 
       const r = at(i); 
       if (r) { 
@@ -210,6 +236,7 @@ export function createDeliveryList({
     applyRow(i, next) {
       if (!at(i)) return;
       rows[i] = next;
+      applyFormatPreset(rows[i]);
       refreshName(rows[i]);
     },
 
@@ -230,6 +257,10 @@ export function createDeliveryList({
       }
       const n = rows.findIndex(r => !r.customName);
       if (n !== -1) out.push({ kind: 'blocking', code: 'missing-name', index: n, message: `錯誤：第 ${n + 1} 列缺少檔名！` });
+      rows.forEach((r, index) => {
+        const message = deliveryPresetAudioProblem(r.format, r.audioPlan);
+        if (message) out.push({ kind: 'blocking', code: 'preset-audio', index, message: `第 ${index + 1} 列：${message}` });
+      });
 
       if (desktop) {
         /* 比對的是「目錄＋檔名」而不是單純檔名——同名但不同目錄是合法的。
@@ -257,10 +288,19 @@ export function createDeliveryList({
      * 這裡是「交付規格 → 匯出工作」的唯一轉換點：解析度、時間碼浮水印、
      * 輸出路徑都在這裡決定，呼叫端只負責把 snapshot 與 assText 遞進來。
      */
-    toJobs({ clips, videoTracks, duration, assText, subtitleTracks, timelineStartTimecode, composeAudioPlan, compiledAudioPlan }) {
+    toJobs({ clips, videoTracks, duration, assText, subtitleTracks, timelineStartTimecode, timecodeForFps, composeAudioPlan, compiledAudioPlan }) {
       return rows.map(r => {
         const isWav = r.format === 'wav';
-        const { w, h } = deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav });
+        const preset = getDeliveryFormatPreset(r.format);
+        // FPS-SYNC：固定格式以規格的 FPS 換算 TC，專案時間軸的秒數不變。
+        const outputFps = preset?.fps || normalizeDeliveryFrameRate(isWav ? fps : r.targetFps, normalizeDeliveryFrameRate(fps));
+        const startTimecode = timecodeForFps ? timecodeForFps(outputFps) : timelineStartTimecode;
+        const { w, h } = preset ? { w: preset.width, h: preset.height }
+          : deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav });
+        const audioPlan = normalizeDeliveryPresetAudio(r.format,
+          composeAudioPlan ? composeAudioPlan(compiledAudioPlan, r) : compiledAudioPlan);
+        const audioProblem = deliveryPresetAudioProblem(r.format, audioPlan);
+        if (audioProblem) throw new Error(audioProblem);
         return {
           clips, videoTracks,
           width: w, height: h,
@@ -268,21 +308,21 @@ export function createDeliveryList({
              width/height 是【已經算好的交付解析度】，不是畫布。反覆換解析度時
              用交付尺寸回推會累積捨入誤差（寬度取偶數），所以把畫布原值帶著走。
              targetH 則是為了讓下拉能顯示目前選的是哪一項（0＝來源解析度）。 */
-          canvasW, canvasH, targetH: r.targetH,
+          canvasW, canvasH, targetH: preset?.height || r.targetH,
           /* 會被燒進這份交付的字幕軌名稱。與 ASS 產生端同一條篩選規則
              （formats.js 依 tracks[tk].visible === false 排除），所以顯示不會說謊。 */
           subtitleTracks: Array.isArray(subtitleTracks) ? subtitleTracks.slice() : [],
-          fps: fps || 25,
+          fps: outputFps,
           assText,
           format: r.format,
           duration,
-          videoKbps: r.kbps,
-          audioPlan: composeAudioPlan ? composeAudioPlan(compiledAudioPlan, r) : compiledAudioPlan,
-          timecodeWatermark: (!isWav && r.burnTimecode) ? { start: timelineStartTimecode } : null,
+          videoKbps: preset?.videoKbps || r.kbps,
+          audioPlan,
+          timecodeWatermark: (!isWav && r.burnTimecode) ? { start: startTimecode } : null,
           /* 即使這一列沒有勾燒入 TC 也要存起來：匯出佇列監控可以事後把 TC 打開，
              那時必須用【送出當下的時間軸起點】重建 watermark。少了它就只能猜
              00:00:00:00——設過 In 點的專案會燒出錯的時間碼，而且畫面一切正常。 */
-          timelineStartTimecode,
+          timelineStartTimecode: startTimecode,
           defaultName: r.customName,
           outPath: joinPath(r.outDir, r.customName),
         };
@@ -291,6 +331,6 @@ export function createDeliveryList({
   };
 
   // 初始列可能是空名字（新建或從音軌視窗折返）→ 補上預設名
-  rows.forEach(refreshName);
+  rows.forEach(r => { applyFormatPreset(r); refreshName(r); });
   return api;
 }

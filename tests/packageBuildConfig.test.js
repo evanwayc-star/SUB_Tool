@@ -4,6 +4,9 @@ import { describe, expect, it } from 'vitest';
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 describe('Windows 安裝檔設定', () => {
+  it('watchdog 的 MOD-FHD 封裝收尾模組必須能由獨立 Node 程序載入', () => {
+    expect(packageJson.build.asarUnpack).toContain('electron/mod-fhd-transport.js');
+  });
   it('預設採每台電腦安裝，讓正式程式落在 Program Files', () => {
     expect(packageJson.build.win.target).toBe('nsis');
     expect(packageJson.build.nsis.perMachine).toBe(true);

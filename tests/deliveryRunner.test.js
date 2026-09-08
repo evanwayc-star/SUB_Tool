@@ -80,6 +80,17 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it('MOD-FHD 把封裝模式傳到 execution，編碼器與音訊結果反映固定規格', async () => {
+    const setup = make();
+    const job = videoJob();
+    job.payload.format = 'mod-fhd';
+    job.payload.outPath = 'D:/out/delivery.ts';
+    await setup.runner.run(job);
+    expect(setup.runFfmpeg).toHaveBeenCalledWith(expect.arrayContaining(['-f', 'mpegts']),
+      expect.objectContaining({ outputFormat: 'mod-fhd' }));
+    expect(setup.sent.at(-1)?.payload).toMatchObject({ done: true,
+      result: { encoder: 'libx264', gpu: false, videoKbps: 7280, audioBitrates: ['256k'] } });
+  });
   it('以完整交易執行計畫、註冊程序並提交可觀察結果', async () => {
     let clock = 1000;
     const setup = make({ now: () => (clock += 250) });

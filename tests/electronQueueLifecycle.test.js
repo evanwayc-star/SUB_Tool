@@ -157,7 +157,11 @@ async function launchApp(profileDir) {
   const app = { child, port, stderr, closed };
   activeApps.add(app);
   child.once('close', () => activeApps.delete(app));
-  await waitForTarget(port, target => target.type === 'page' && target.title === 'SUB TOOL', '主視窗啟動');
+  try {
+    await waitForTarget(port, target => target.type === 'page' && target.title === 'SUB TOOL', '主視窗啟動');
+  } catch (error) {
+    throw new Error(`${error.message}\n${stderr.join('')}`, { cause: error });
+  }
   return app;
 }
 
@@ -434,11 +438,60 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     queueClient.close();
   }, 20000);
 
-  test('實際匯出由 watchdog 完成並釋放輸出鎖', async () => {
+  test('MOD-FHD 入列固定規格、音訊編組與修改限制由主程序執行', async () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'subtool-mod-fhd-queue-'));
+    tempProfiles.add(profile);
+    const outPath = path.join(profile, 'mod-output.ts');
+    const audioPath = path.join(profile, 'source.wav');
+    writeFileSync(audioPath, Buffer.from('paused queue audio source'));
+    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [audioPath], outPath, format: 'mod-fhd' });
+    const app = await launchApp(profile);
+    const mainClient = await connectTarget(await waitForTarget(app.port,
+      target => target.type === 'page' && target.title === 'SUB TOOL', 'MOD-FHD 測試主視窗'));
+    const queueClient = await restoreSeededCapabilities(app, mainClient, [seedId], { resume: false });
+    const payload = {
+      format: ' MOD-FHD ', outPath, clips: [], duration: 1,
+      width: 640, height: 360, targetH: 360, fps: 29.97, videoKbps: 1000,
+      timelineStartTimecode: '01:00:00;00', timecodeWatermark: { start: '01:00:00;00' },
+      audioPlan: {
+        buses: ['a1', 'a2'].map((id, channel) => ({ id, inputs: [{
+          file: audioPath, sourceStream: 0, sourceChannel: channel, offset: 0, trimStart: 0, trimEnd: 1,
+        }] })),
+        streams: ['a1', 'a2'].map(id => ({ id, layout: 'mono', busIds: [id] })),
+      },
+    };
+    expect(await exportError(mainClient, { ...payload, audioPlan: {
+      ...payload.audioPlan, streams: [{ id: 'only-one', layout: 'mono', busIds: ['a1'] }],
+    } })).toContain('單一 Stereo');
+    const jobId = await mainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
+    const snapshot = await queueClient.evaluate('window.queueAPI.getAll()');
+    expect(snapshot.deliveryFormatPresets).toEqual(expect.arrayContaining([expect.objectContaining({ format: 'mod-fhd' })]));
+    expect(snapshot.jobs).toHaveLength(1);
+    expect(snapshot.jobs[0].payload).toMatchObject({
+      format: 'mod-fhd', width: 1920, height: 1080, targetH: 1080, fps: 29.97, videoKbps: 7280,
+      audioPlan: { streams: [{ layout: 'stereo', busIds: ['a1', 'a2'] }] },
+    });
+    await queueClient.evaluate(`window.queueAPI.updateDelivery(${JSON.stringify(jobId)}, { targetH: 720, kbps: 2000 })`);
+    const fixed = (await queueClient.evaluate('window.queueAPI.getAll()')).jobs[0].payload;
+    expect(fixed).toMatchObject({ width: 1920, height: 1080, targetH: 1080, videoKbps: 7280, fps: 29.97 });
+    await queueClient.evaluate(`window.queueAPI.updateDelivery(${JSON.stringify(jobId)}, { format: 'h264', targetH: 720, kbps: 3000 })`);
+    const changed = (await queueClient.evaluate('window.queueAPI.getAll()')).jobs[0].payload;
+    expect(changed).toMatchObject({ format: 'h264', height: 720, videoKbps: 3000, fps: 29.97, timecodeWatermark: { start: '01:00:00;00' } });
+    const rejected = await queueClient.evaluate(`(async () => {
+      try { await window.queueAPI.updateDelivery(${JSON.stringify(jobId)}, { format: 'mod-fhd' }); return null; }
+      catch (error) { return error.message; }
+    })()`);
+    expect(rejected).toContain('請回交付清單新增 MOD-FHD');
+    expect((await queueClient.evaluate('window.queueAPI.getAll()')).jobs[0].payload).toEqual(changed);
+    mainClient.close();
+    queueClient.close();
+  }, 25000);
+
+  test.each(['h264', 'mod-fhd'])('實際 %s 匯出由 watchdog 完成並釋放輸出鎖', async format => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-watchdog-export-'));
     tempProfiles.add(profile);
     const imagePath = path.join(profile, 'one-pixel.png');
-    const outPath = path.join(profile, 'watchdog-output.mp4');
+    const outPath = path.join(profile, format === 'mod-fhd' ? 'watchdog-output.ts' : 'watchdog-output.mp4');
     writeFileSync(
       imagePath,
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
@@ -461,11 +514,11 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       width: 320,
       height: 180,
       fps: 25,
-      format: 'h264',
+      format,
       videoKbps: 500,
       audioPlan: null,
     };
-    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [imagePath], outPath });
+    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [imagePath], outPath, format });
 
     const app = await launchApp(profile);
     const mainTarget = await waitForTarget(
@@ -490,6 +543,21 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(finished.completedAt).toEqual(expect.any(Number));
     expect(existsSync(outPath)).toBe(true);
     expect(statSync(outPath).size).toBeGreaterThan(0);
+    if (format === 'mod-fhd') {
+      const data = readFileSync(outPath);
+      const ids = [];
+      for (let offset = 0; offset < data.length; offset += 188) {
+        const packet = data.subarray(offset, offset + 188);
+        const pid = ((packet[1] & 31) << 8) | packet[2];
+        if (pid !== 4130 || !(packet[1] & 64)) continue;
+        const start = 4 + ((packet[3] & 32) ? 1 + packet[4] : 0);
+        const adts = start + 9 + packet[start + 8];
+        expect(packet[adts]).toBe(0xff);
+        ids.push((packet[adts + 1] >> 3) & 1);
+      }
+      expect(ids.length).toBeGreaterThan(0);
+      expect(ids.every(id => id === 1), '完成事件之前所有 ADTS 必須已標記 MPEG-2').toBe(true);
+    }
     const leaseDir = path.join(profile, 'export-queue', 'output-leases');
     expect(existsSync(leaseDir) ? readdirSync(leaseDir).filter(name => name.endsWith('.lock')) : [])
       .toEqual([]);

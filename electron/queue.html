@@ -650,6 +650,7 @@
 
     let _isPaused = false;
     let _jobs = [];
+    let _deliveryFormatPresets = [];
     let _isDragging = false;
 
     // Format seconds
@@ -703,7 +704,8 @@
         + ` · ${pad2(h12)}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${suffix}`;
     };
 
-    const FORMAT_LABEL = { h264: 'MP4', prores: 'ProRes', wav: 'WAV' };
+    const FORMAT_LABEL = { h264: 'MP4', prores: 'ProRes', wav: 'WAV', 'mod-fhd': 'MOD-FHD' };
+    const deliveryPreset = format => _deliveryFormatPresets.find(preset => preset.format === format);
     const burnsTimecode = payload => !!payload?.timecodeWatermark;
 
     const fmtSubtitles = payload => {
@@ -720,7 +722,8 @@
         parts.push(`${w} x ${h} px`);
       }
       const kbps = Number(payload?.videoKbps);
-      if (format === 'h264' && Number.isFinite(kbps) && kbps > 0) parts.push(`${kbps} kbps`);
+      if (format === 'mod-fhd' && Number(payload?.fps) > 0) parts.push(`${Number(payload.fps)} fps`);
+      if ((format === 'h264' || deliveryPreset(format)) && Number.isFinite(kbps) && kbps > 0) parts.push(`${kbps} kbps`);
       return parts.join(' / ');
     };
     const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -920,13 +923,17 @@
       const curTargetH = Number(p.targetH) || 0;
       const curKbps = Number(p.videoKbps) || 0;
       const known = RES_OPTIONS.some(([v]) => v === curTargetH);
+      const formatOptions = [['h264', 'MP4 (H.264)'], ['prores', 'ProRes'], ['wav', 'WAV (純音訊)']];
+      // MOD-FHD 的 TC／音訊在送出前完成設定，既有一般工作要從交付清單新增。
+      const currentPreset = deliveryPreset(curFormat);
+      if (currentPreset) formatOptions.push([currentPreset.format, currentPreset.label]);
 
       const box = document.createElement('div');
       box.className = 'job-editor';
       box.innerHTML = `
         <label>格式
           <select data-f="format">
-            ${[['h264', 'MP4 (H.264)'], ['prores', 'ProRes'], ['wav', 'WAV (純音訊)']]
+            ${formatOptions
               .map(([v, t]) => `<option value="${v}"${v === curFormat ? ' selected' : ''}>${t}</option>`).join('')}
           </select>
         </label>
@@ -942,6 +949,7 @@
         <label data-only="h264">碼率
           <input type="number" data-f="kbps" min="1" step="100" value="${curKbps}" style="width:80px"> kbps
         </label>
+        <span data-preset-spec hidden></span>
         <label data-only="video"><input type="checkbox" data-f="tc"${burnsTimecode(p) ? ' checked' : ''}> 燒入 TC</label>
         <span class="job-editor-actions">
           <button type="button" data-f="cancel">取消</button>
@@ -953,8 +961,19 @@
       const errEl = q('.job-editor-error');
       const syncVisibility = () => {
         const f = q('[data-f="format"]').value;
+        const preset = deliveryPreset(f);
         box.querySelectorAll('[data-only="video"]').forEach(n => { n.hidden = (f === 'wav'); });
         box.querySelectorAll('[data-only="h264"]').forEach(n => { n.hidden = (f !== 'h264'); });
+        q('[data-f="res"]').disabled = !!preset;
+        q('[data-f="customH"]').disabled = !!preset;
+        q('[data-f="kbps"]').disabled = !!preset;
+        if (preset) q('[data-f="res"]').value = String(preset.height);
+        for (const option of q('[data-f="res"]').options) {
+          const normalLabel = RES_OPTIONS.find(([value]) => String(value) === option.value)?.[1];
+          if (normalLabel) option.textContent = preset && option.value === String(preset.height) ? `${preset.width}×${preset.height}i` : normalLabel;
+        }
+        q('[data-preset-spec]').hidden = !preset;
+        q('[data-preset-spec]').textContent = preset ? `固定 ${preset.width} × ${preset.height} / ${preset.fps} fps / ${preset.videoKbps} kbps` : '';
         const isCustom = q('[data-f="res"]').value === 'custom';
         box.querySelector('[data-custom]').hidden = (f === 'wav') || !isCustom;
       };
@@ -1094,6 +1113,7 @@
     async function loadData() {
       const data = await window.queueAPI.getAll();
       _jobs = data.jobs;
+      _deliveryFormatPresets = Array.isArray(data.deliveryFormatPresets) ? data.deliveryFormatPresets : [];
       _isPaused = data.isPaused;
       
       if (_isPaused) {

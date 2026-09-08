@@ -156,6 +156,14 @@ Windows filtergraph 路徑要跳脫兩層；ASS Fontname 必須是字型檔內�
 
 可用時優先硬體 H.264 encoder；實際採用者要出現在狀態與完成訊息。不能只因命令沒有報錯就宣稱使用 GPU。
 
+MOD-FHD 固定使用 CPU libx264，參照 `fdst_MOD-FHD.cpf` 與 Carbon 參數畫面：1920×1080、30000/1001 fps、TFF/MBAFF、High@4.1、CBR 7280 kbps、GOP 上限 32、2 B 幀、4 reference frames、CABAC、單 slice、AUD／HRD。合成先在 60000/1001 場時刻進行，隔行來源先以 bwdif 還原場，再交織為 TFF；TC 在交織後依輸出格率計數。
+
+TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PMT PID 1280、TS/program ID 1、PAT/PMT 100 ms、PCR 40 ms。音訊固定單一 AAC-LC stereo、48 kHz、256 kbps、ADTS／eng；關閉 MPEG-4 PNS，watchdog 在 lease 釋放前用 `mod-fhd-transport.js` 驗證 TS/PES/ADTS framing，再將 ADTS ID 設為 MPEG-2。收尾失敗或取消沿用半成品清理，不回報成功。封裝時該模組須與 watchdog 一起 asarUnpack。
+
+這是跨編碼器的參數對應：Carbon 的 VBV=0（自動）在 x264 明確採一秒 buffer；CBR 下停用的最大碼率 10000 不當作實際碼率。Carbon 的 adaptive deblocking、運動搜尋、量化策略與 sequence-end-code 開關沒有全部逐項等價的 x264 介面；目前不額外插入 end-of-sequence NAL，不宣稱位元流與 Carbon 完全一致。FFmpeg 參數依據見 [MPEG-TS／ADTS muxer 文件](https://ffmpeg.org/ffmpeg-formats.html)。
+
+`node scripts/acceptance/verify-mod-fhd.js` 以逐行與隔行合成素材跑正式計畫及 watchdog，檢查實際 TFF 像素、完整解碼、影音 codec／FPS／時長、ADTS MPEG-2 位元、PID、PCR 量測碼率與 PAT 間隔；證據留在系統 temp。
+
 ## 5. mpv 嵌入整合（Windows）
 
 mpv 不是 DOM 元素，而是獨立的 OS 子視窗。`mpv-host.js` 負責：

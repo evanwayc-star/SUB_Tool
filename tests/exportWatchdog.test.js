@@ -124,7 +124,7 @@ if (mode === 'success') {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function launch(mode, outPath = path.join(tempDir, `${mode}.mp4`), jobId = mode) {
+  function launch(mode, outPath = path.join(tempDir, `${mode}.mp4`), jobId = mode, extra = {}) {
     const stderr = [];
     const controller = spawnExportWatchdog({
       ffmpegPath: process.execPath,
@@ -133,6 +133,7 @@ if (mode === 'success') {
       outPath,
       jobId,
       queueDir,
+      ...extra,
     }, {
       onStderr: chunk => stderr.push(Buffer.from(chunk)),
     });
@@ -142,6 +143,33 @@ if (mode === 'success') {
     controllers.push(controller);
     return { controller, outPath, stderr };
   }
+
+  it('MOD-FHD 封裝驗證失敗會刪除半成品且不回報成功', async () => {
+    const { controller, outPath } = launch('success', path.join(tempDir, 'invalid.ts'), 'mod-invalid', { outputFormat: 'mod-fhd' });
+    await controller.ready;
+    const result = await controller.completion;
+    expect(result.ok).toBe(false);
+    expect(result.cleanup).toMatchObject({ reason: 'mod-fhd-finalize-failed', removed: true, released: true });
+    expect(fs.existsSync(outPath)).toBe(false);
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('MOD-FHD 回報完成以前先修正 ADTS MPEG-2 標記並釋放 lease', async () => {
+    const packet = Buffer.alloc(188, 0xff);
+    const payload = Buffer.from([0, 0, 1, 0xc0, 0, 11, 0x80, 0, 0,
+      0xff, 0xf1, 0x4c, 0x80, 1, 0x1f, 0xfc, 0]);
+    packet.set([0x47, 0x50, 0x22, 0x30, 183 - payload.length, 0]);
+    payload.copy(packet, 188 - payload.length);
+    fs.writeFileSync(fakeFfmpeg, `require('fs').writeFileSync(process.argv[2], Buffer.from('${packet.toString('base64')}', 'base64'));`);
+    const { controller, outPath } = launch('success', path.join(tempDir, 'valid.ts'), 'mod-valid', { outputFormat: 'mod-fhd' });
+    await controller.ready;
+    const result = await controller.completion;
+    expect(result.ok).toBe(true);
+    const expected = Buffer.from(packet);
+    expected[188 - payload.length + 10] = 0xf9;
+    expect(fs.readFileSync(outPath)).toEqual(expected);
+    expect(listLeases(queueDir)).toEqual([]);
+  });
 
   it('正常結束會保留完整成品並釋放 output lease', async () => {
     const { controller, outPath, stderr } = launch('success');

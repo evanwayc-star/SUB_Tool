@@ -19,6 +19,27 @@ const snapshot = {
 };
 
 describe('frozen export submission', () => {
+  it('轉換輸出 FPS 只改畫格格率與燒入 TC，不變更字幕秒數或音訊', () => {
+    const submission = freezeExportSubmission({ ...snapshot, timelineStart: 1.8 }, {
+      fps: 29.97, dropFrame: true,
+      cues: [{ start: 2, end: 3, text: '固定秒數', track: 0 }], tracks: [{ name: '對白', visible: true }],
+    });
+    const list = createDeliveryList({ projectTag: 'test', fps: submission.fps });
+    list.setBurnTimecode(0, true);
+    const [before] = buildExportJobs(submission, list);
+    list.setTargetFps(0, 24);
+    const [after] = buildExportJobs(submission, list);
+    expect(after.fps).toBe(24);
+    expect(after.timelineStartTimecode).toBe('00:00:01:19');
+    expect(after.timecodeWatermark).toEqual({ start: '00:00:01:19' });
+    expect(after.assText).toBe(before.assText);
+    expect(after.clips).toEqual(before.clips);
+    expect(after.audioPlan).toEqual(before.audioPlan);
+    expect(submission.fps).toBe(29.97);
+    expect(submission.duration).toBe(after.duration);
+    list.setTargetFps(0, 59.94);
+    expect(buildExportJobs(submission, list)[0].timelineStartTimecode).toBe('00:00:01;48');
+  });
   it('keeps subtitles, track visibility, fps, and timecode from the moment the work is submitted', () => {
     const source = {
       cues: [{ id: 'cue-1', start: 11, end: 12, text: '已凍結', track: 0 }],
@@ -50,6 +71,7 @@ describe('frozen export submission', () => {
     // Simulate an edit made after clicking submit while the async overwrite
     // check is still in flight.  It must not change the already captured row.
     list.setFormat(0, 'prores');
+    list.setTargetFps(0, 60);
     list.setName(0, 'after-click.mov');
 
     const [job] = buildExportJobs(submission, submittedList);

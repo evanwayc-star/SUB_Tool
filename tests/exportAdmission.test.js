@@ -19,14 +19,15 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { createExportAdmission } = require(path.join(ROOT, 'electron/export-queue.js'));
+const { expectedExportExtension } = require(path.join(ROOT, 'electron/ipc-guards.js'));
 
-const EXT = { h264: 'mp4', prores: 'mov', wav: 'wav' };
+const EXT = { h264: 'mp4', prores: 'mov', wav: 'wav', 'mod-fhd': 'ts' };
 
 /* 預設全部放行，測哪一條就只關哪一條——才不會因為別的規則先擋下來而假綠。 */
 function make(overrides = {}) {
   const jobs = overrides.jobs || [];
   return createExportAdmission({
-    expectedExtensionFor: fmt => EXT[fmt] || 'mp4',
+    expectedExtensionFor: expectedExportExtension,
     outputKeyFor: p => String(p).toLowerCase(),
     mergeSourcePaths: (payload, sourcePaths) => sourcePaths || payload?.sources || [],
     currentJobs: () => jobs,
@@ -50,6 +51,7 @@ describe('輸出副檔名必須與 format 一致', () => {
     ['h264', 'D:/out/a.mp4'],
     ['prores', 'D:/out/a.mov'],
     ['wav', 'D:/out/a.wav'],
+    ['mod-fhd', 'D:/out/a.ts'],
   ])('%s → %s 放行', (format, outPath) => {
     expect(make().assertOutputFormat(job({ payload: { format, outPath } }))).toBe(EXT[format]);
   });
@@ -61,6 +63,13 @@ describe('輸出副檔名必須與 format 一致', () => {
 
   it('副檔名比對不分大小寫（Windows 上 .MP4 與 .mp4 是同一個檔）', () => {
     expect(make().assertOutputFormat(job({ payload: { format: 'h264', outPath: 'D:/out/A.MP4' } }))).toBe('mp4');
+  });
+
+  it('MOD-FHD 只放行 TS 容器，未知格式仍拒絕', () => {
+    expect(() => make().assertOutputFormat(job({ payload: { format: 'mod-fhd', outPath: 'D:/out/a.mp4' } })))
+      .toThrow(/必須使用 \.ts/);
+    expect(() => make().assertOutputFormat(job({ payload: { format: 'unknown' } })))
+      .toThrow(expect.objectContaining({ code: 'INVALID_EXPORT_FORMAT' }));
   });
 });
 

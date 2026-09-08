@@ -13,6 +13,8 @@ import { AudioRouting } from './audio-routing.js';
 import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec, videoExportCapability } from './export-job-engine.js';
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
+import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
+import { MOD_FHD, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { escapeHTML, encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
@@ -325,6 +327,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
 
   function renderRow(r, i) {
     const isWav = r.format === 'wav';
+    const preset = getDeliveryFormatPreset(r.format);
 
     const ap = r.audioPlan;
     let audioDesc = '依專案音軌順序';
@@ -351,22 +354,31 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           <select class="ev-format delivery-select" data-idx="${i}" style="width:116px;">
             <option value="h264" ${r.format==='h264'?'selected':''} ${audioOnly?'disabled':''}>MP4 (H.264)</option>
             <option value="prores" ${r.format==='prores'?'selected':''} ${audioOnly?'disabled':''}>MOV (ProRes)</option>
+            <option value="${MOD_FHD.format}" ${preset?'selected':''} ${audioOnly?'disabled':''}>MOD-FHD (.ts)</option>
             <option value="wav" ${r.format==='wav'?'selected':''} ${!hasProjectAudio?'disabled':''}>WAV (純音訊)</option>
           </select>
           ${!isWav ? `
-            <select class="ev-res delivery-select" data-idx="${i}" style="width:118px;">
+            <select class="ev-res delivery-select" data-idx="${i}" aria-label="輸出解析度" style="width:${preset ? 154 : 118}px;" ${preset?'disabled title="MOD-FHD 固定為 1920×1080，上場優先交錯掃描"':''}>
+              ${preset ? `<option value="${preset.height}" selected>${preset.width}×${preset.height}i</option>` : `
               <option value="0" ${r.targetH===0?'selected':''}>來源解析度</option>
               <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
               <option value="1080" ${r.targetH===1080?'selected':''}>1080p</option>
               <option value="720" ${r.targetH===720?'selected':''}>720p</option>
               <option value="custom" ${(r.targetH>0 && ![1080,720,2160].includes(r.targetH))?'selected':''}>自訂...</option>
+              `}
             </select>
-            ${(r.targetH>0 && ![1080,720,2160].includes(r.targetH)) ? 
+            ${(!preset && r.targetH>0 && ![1080,720,2160].includes(r.targetH)) ?
               `<input type="number" class="ev-custom-res delivery-input" data-idx="${i}" value="${r.targetH}" style="width:60px;" placeholder="高度">` 
               : ''}
-            ${r.format==='h264' ? `
+            <select class="ev-fps delivery-select" data-idx="${i}" aria-label="輸出 FPS" title="輸出影格率；維持原本播放時長" style="width:152px;" ${preset?'disabled':''}>
+              ${preset ? `<option value="${preset.fps}" selected>${preset.fps} FPS（固定）</option>` : `
+              <option value="0" ${!r.targetFps?'selected':''}>依專案 (${normalizeDeliveryFrameRate(data.fps)} FPS)</option>
+              ${DELIVERY_FRAME_RATES.map(rate=>`<option value="${rate.value}" ${r.targetFps===rate.value?'selected':''}>${rate.label} FPS</option>`).join('')}
+              `}
+            </select>
+            ${r.format==='h264' || preset ? `
               <div style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim);">
-                <input type="number" class="ev-kbps delivery-input" data-idx="${i}" value="${r.kbps}" style="width:72px;" title="目標視訊碼率 (kbps)"> kbps
+                <input type="number" class="ev-kbps delivery-input" data-idx="${i}" value="${preset?.videoKbps || r.kbps}" style="width:72px;" title="目標視訊碼率 (kbps)" ${preset?'disabled':''}> kbps
               </div>
             ` : ''}
             <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 燒入 TC</label>
@@ -384,6 +396,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           <div style="display:flex;align-items:center;gap:6px;">
             <span class="delivery-audio-info">🎧 音訊: ${audioDesc}</span>
             <button class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="設定此列輸出的音軌">⚙ 音軌</button>
+            ${preset ? `<span class="delivery-audio-info">單一 Stereo · MPEG-2 AAC-LC / ADTS · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps</span>` : ''}
           </div>
         </div>
       </div>
@@ -406,6 +419,11 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       after();
     });
     $$('.ev-custom-res').forEach(el => el.onchange = e => { list.setTargetHeight(idxOf(e), parseInt(e.target.value, 10)); after(); });
+    $$('.ev-fps').forEach(el => el.onchange = e => {
+      const idx = idxOf(e);
+      list.setTargetFps(idx, e.target.value); after();
+      document.querySelector(`.ev-fps[data-idx="${idx}"]`)?.focus();
+    });
     $$('.ev-kbps').forEach(el => el.onchange = e => list.setKbps(idxOf(e), e.target.value));
     $$('.ev-name').forEach(el => el.onchange = e => { list.setName(idxOf(e), e.target.value); after(); });
     $$('.ev-outdir').forEach(el => el.onchange = e => { list.setOutDir(idxOf(e), e.target.value); after(); });
@@ -995,6 +1013,8 @@ export function buildExportJobs(submission, list) {
     assText: subtitlePayload.assText,
     subtitleTracks: burnedSubtitleTrackNames(submission.tracks, subtitlePayload.cues),
     timelineStartTimecode: secToEncore(expIn, submission.fps, submission.dropFrame),
+    // FPS-SYNC：保留時間軸秒數，燒入 TC 以每份交付的影格率換算。
+    timecodeForFps: fps => secToEncore(expIn, fps, submission.dropFrame),
     composeAudioPlan: composeDeliveryAudioPlan,
     compiledAudioPlan: submission.audioPlan,
   });

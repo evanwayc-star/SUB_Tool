@@ -18,13 +18,14 @@ describe('副檔名', () => {
     expect(extensionFor('h264')).toBe('.mp4');
     expect(extensionFor('prores')).toBe('.mov');
     expect(extensionFor('wav')).toBe('.wav');
+    expect(extensionFor('mod-fhd')).toBe('.ts');
     expect(extensionFor('未知')).toBe('.mp4');
   });
 });
 
 describe('專案代號', () => {
   it('去掉副檔名並跳過 ST_／V_ 前綴', () => {
-    expect(projectTagFrom('ST_拼桌_29fps.mp4')).toBe('拼桌');
+    expect(projectTagFrom('ST_拼桌_29.97fps.mp4')).toBe('拼桌');
     expect(projectTagFrom('V_專訪_25fps.mov')).toBe('專訪');
     expect(projectTagFrom('訪談.mxf')).toBe('訪談');
   });
@@ -34,9 +35,9 @@ describe('專案代號', () => {
 });
 
 describe('預設檔名', () => {
-  it('帶入 fps（無條件捨去）與交付解析度', () => {
+  it('帶入完整 fps（保留小數）與交付解析度', () => {
     expect(defaultDeliveryName({ projectTag: '拼桌', fps: 29.97, format: 'h264', targetH: 1080 }))
-      .toBe('ST_拼桌_29fps_1080p.mp4');
+      .toBe('ST_拼桌_29.97fps_1080p.mp4');
   });
   it('targetH=0（來源解析度）不加解析度標記', () => {
     expect(defaultDeliveryName({ projectTag: '拼桌', fps: 25, format: 'h264', targetH: 0 }))
@@ -49,7 +50,7 @@ describe('預設檔名', () => {
   it('聲道編組寫進檔名，多條 stream 以 + 相連', () => {
     const audioPlan = { streams: [{ layout: '5.1' }, { layout: 'stereo' }] };
     expect(defaultDeliveryName({ projectTag: '拼桌', fps: 29.97, format: 'h264', targetH: 0, audioPlan }))
-      .toBe('ST_拼桌_29fps_51FM+20FM.mp4');
+      .toBe('ST_拼桌_29.97fps_51FM+20FM.mp4');
   });
   it('有設定 stream 名稱時，優先使用名稱並移除點與減號（如 ME、雙語）', () => {
     const audioPlan = { streams: [{ layout: 'stereo', name: '2.0-FM' }, { layout: 'stereo', name: '2.0-ME' }] };
@@ -93,7 +94,7 @@ describe('清單操作', () => {
   it('新列預設一列，並自動帶預設檔名', () => {
     const l = base();
     expect(l.count()).toBe(1);
-    expect(l.get(0).customName).toBe('ST_拼桌_29fps.mp4');
+    expect(l.get(0).customName).toBe('ST_拼桌_29.97fps.mp4');
   });
 
   it('audioOnly 時新列預設為 wav', () => {
@@ -105,7 +106,7 @@ describe('清單操作', () => {
   it('換格式會換副檔名', () => {
     const l = base();
     l.setFormat(0, 'prores');
-    expect(l.get(0).customName).toBe('ST_拼桌_29fps.mov');
+    expect(l.get(0).customName).toBe('ST_拼桌_29.97fps.mov');
   });
 
   it('使用者改過名字後，換格式只換副檔名、不蓋掉名字', () => {
@@ -119,7 +120,7 @@ describe('清單操作', () => {
   it('沒改過名字的列，換解析度會重新產生檔名', () => {
     const l = base();
     l.setTargetHeight(0, 720);
-    expect(l.get(0).customName).toBe('ST_拼桌_29fps_720p.mp4');
+    expect(l.get(0).customName).toBe('ST_拼桌_29.97fps_720p.mp4');
   });
 
   it('換解析度會一併更新 H.264 的建議碼率', () => {
@@ -133,9 +134,9 @@ describe('清單操作', () => {
   it('把名字改回等同預設值時，視為沒有自訂', () => {
     const l = base();
     l.setName(0, '亂打');
-    l.setName(0, 'ST_拼桌_29fps.mp4');
+    l.setName(0, 'ST_拼桌_29.97fps.mp4');
     l.setTargetHeight(0, 720);
-    expect(l.get(0).customName).toBe('ST_拼桌_29fps_720p.mp4');
+    expect(l.get(0).customName).toBe('ST_拼桌_29.97fps_720p.mp4');
   });
 
   it('補副檔名時不區分大小寫，不會重複附加', () => {
@@ -151,7 +152,7 @@ describe('清單操作', () => {
     const added = l.add();
     expect(added.outDir).toBe('D:\\交付');
     expect(added.format).toBe('prores');
-    expect(added.customName).toBe('ST_拼桌_29fps.mov');
+    expect(added.customName).toBe('ST_拼桌_29.97fps.mov');
   });
 
   it('刪除列', () => {
@@ -231,26 +232,26 @@ describe('轉成匯出工作', () => {
     const l = base();
     l.setOutDir(0, 'D:\\交付\\');
     const [job] = l.toJobs(snapshot);
-    expect(job.outPath).toBe('D:\\交付\\ST_拼桌_29fps.mp4');
-    expect(job.defaultName).toBe('ST_拼桌_29fps.mp4');
+    expect(job.outPath).toBe('D:\\交付\\ST_拼桌_29.97fps.mp4');
+    expect(job.defaultName).toBe('ST_拼桌_29.97fps.mp4');
   });
 
   it('macOS 輸出目錄使用 POSIX 斜線，不可混入 Windows 反斜線', () => {
     const l = base();
     l.setOutDir(0, '/Users/evan/Movies/SUBTool_Output/');
     const [job] = l.toJobs(snapshot);
-    expect(job.outPath).toBe('/Users/evan/Movies/SUBTool_Output/ST_拼桌_29fps.mp4');
+    expect(job.outPath).toBe('/Users/evan/Movies/SUBTool_Output/ST_拼桌_29.97fps.mp4');
     expect(job.outPath).not.toContain('\\');
   });
 
   it('POSIX 根目錄與 Windows 磁碟根目錄都只保留一個分隔符', () => {
     const posix = base();
     posix.setOutDir(0, '/');
-    expect(posix.toJobs(snapshot)[0].outPath).toBe('/ST_拼桌_29fps.mp4');
+    expect(posix.toJobs(snapshot)[0].outPath).toBe('/ST_拼桌_29.97fps.mp4');
 
     const windows = base();
     windows.setOutDir(0, 'D:\\');
-    expect(windows.toJobs(snapshot)[0].outPath).toBe('D:\\ST_拼桌_29fps.mp4');
+    expect(windows.toJobs(snapshot)[0].outPath).toBe('D:\\ST_拼桌_29.97fps.mp4');
   });
 
   it('交付解析度走同一條公式', () => {
@@ -292,5 +293,103 @@ describe('轉成匯出工作', () => {
     const composeAudioPlan = (compiled, row) => ({ compiled, format: row.format });
     const [job] = l.toJobs({ ...snapshot, composeAudioPlan });
     expect(job.audioPlan).toEqual({ compiled: { streams: [] }, format: 'h264' });
+  });
+});
+
+describe('MOD-FHD 固定交付規格', () => {
+  const stereoPlan = { streams: [{ layout: 'stereo', busIds: ['mix-l', 'mix-r'] }] };
+  const monoPlan = { streams: [
+    { layout: 'mono', busIds: ['mix-r'] },
+    { layout: 'mono', busIds: ['mix-l'] },
+  ] };
+  const snapshot = {
+    clips: [{ name: 'master.mov' }], videoTracks: [], duration: 12,
+    assText: '[Script Info]', compiledAudioPlan: stereoPlan,
+    timecodeForFps: fps => fps === 29.97 ? '01:00:00;00' : '01:00:00:00',
+  };
+
+  it('檔名標示 MOD-FHD 與 1080i，與專案 FPS、畫布和編組名稱無關', () => {
+    expect(defaultDeliveryName({
+      projectTag: '節目', fps: 24, format: 'mod-fhd', targetH: 720, audioPlan: stereoPlan,
+    })).toBe('ST_節目_MOD-FHD_1080i_29.97fps.ts');
+    expect(defaultDeliveryName({
+      projectTag: '節目', fps: 24, format: 'mod-fhd', burnTimecode: true,
+    })).toBe('ST_節目_MOD-FHD_1080i_29.97fps_TC.ts');
+  });
+
+  it('選格式後固定解析度、FPS、碼率，編輯入口不能覆寫', () => {
+    const list = base({ fps: 24, canvasW: 4096, canvasH: 2160 });
+    list.setFormat(0, 'mod-fhd');
+    list.setTargetHeight(0, 720);
+    list.setTargetFps(0, 60);
+    list.setKbps(0, 20000);
+    expect(list.get(0)).toMatchObject({ targetH: 1080, targetFps: 29.97, kbps: 7280 });
+    expect(list.get(0).customName).toBe('ST_拼桌_MOD-FHD_1080i_29.97fps.ts');
+  });
+
+  it('自訂檔名換成 ts，TC 仍可切換', () => {
+    const list = base();
+    list.setName(0, '客戶交付');
+    list.setFormat(0, 'mod-fhd');
+    list.setBurnTimecode(0, true);
+    expect(list.get(0).customName).toBe('客戶交付_TC.ts');
+    list.setBurnTimecode(0, false);
+    expect(list.get(0).customName).toBe('客戶交付.ts');
+  });
+
+  it('雙 Mono 依原 bus 順序合成 Stereo，不改動專案的預設編組', () => {
+    const list = base({ defaultAudioLayout: monoPlan });
+    list.setFormat(0, 'mod-fhd');
+    expect(list.get(0).audioPlan.streams).toEqual([
+      expect.objectContaining({ layout: 'stereo', busIds: ['mix-r', 'mix-l'] }),
+    ]);
+    expect(monoPlan.streams.map(stream => stream.layout)).toEqual(['mono', 'mono']);
+  });
+
+  it('折返草稿與套用音軌設定時也會固定規格並合併雙 Mono', () => {
+    const list = base({ initial: [{ format: 'mod-fhd', targetH: 720, targetFps: 24, kbps: 10, audioPlan: monoPlan }] });
+    expect(list.get(0)).toMatchObject({ targetH: 1080, targetFps: 29.97, kbps: 7280 });
+    expect(list.get(0).audioPlan.streams).toHaveLength(1);
+    list.applyRow(0, { ...list.get(0), targetH: 480, targetFps: 25, kbps: 50, audioPlan: monoPlan });
+    expect(list.get(0)).toMatchObject({ targetH: 1080, targetFps: 29.97, kbps: 7280 });
+    expect(list.get(0).audioPlan.streams[0].busIds).toEqual(['mix-r', 'mix-l']);
+  });
+
+  it.each([
+    { streams: [{ layout: '5.1', busIds: ['l', 'r', 'c', 'lfe', 'ls', 'rs'] }] },
+    { streams: [...stereoPlan.streams, { layout: 'stereo', busIds: ['me-l', 'me-r'] }] },
+  ])('不默默捨棄不相容音訊，而是阻擋並要求選兩條專案音軌：%j', audioPlan => {
+    const list = base({ defaultAudioLayout: audioPlan });
+    list.setOutDir(0, 'D:/交付');
+    list.setFormat(0, 'mod-fhd');
+    expect(list.get(0).audioPlan).toEqual(audioPlan);
+    expect(list.problems()).toEqual([
+      expect.objectContaining({ kind: 'blocking', code: 'preset-audio', index: 0, message: expect.stringContaining('單一 Stereo') }),
+    ]);
+  });
+
+  it('交付工作使用固定尺寸與 FPS 的時間碼，即使 live row 被直接改寫', () => {
+    const list = base({ fps: 24, canvasW: 4096, canvasH: 2160, defaultAudioLayout: stereoPlan });
+    list.setOutDir(0, 'D:/交付');
+    list.setFormat(0, 'mod-fhd');
+    list.setBurnTimecode(0, true);
+    Object.assign(list.get(0), { targetH: 480, targetFps: 60, kbps: 20000 });
+    expect(list.toJobs(snapshot)[0]).toMatchObject({
+      format: 'mod-fhd', width: 1920, height: 1080, targetH: 1080, fps: 29.97, videoKbps: 7280,
+      canvasW: 4096, canvasH: 2160,
+      timelineStartTimecode: '01:00:00;00', timecodeWatermark: { start: '01:00:00;00' },
+      outPath: 'D:/交付/ST_拼桌_MOD-FHD_1080i_29.97fps_TC.ts',
+    });
+  });
+
+  it('工作合成後再次合併雙 Mono，拒絕不相容的實際音訊計畫', () => {
+    const list = base({ defaultAudioLayout: stereoPlan });
+    list.setFormat(0, 'mod-fhd');
+    const job = list.toJobs({ ...snapshot, composeAudioPlan: () => monoPlan })[0];
+    expect(job.audioPlan.streams).toEqual([
+      expect.objectContaining({ layout: 'stereo', busIds: ['mix-r', 'mix-l'] }),
+    ]);
+    const surround = { streams: [{ layout: '5.1', busIds: ['l', 'r', 'c', 'lfe', 'ls', 'rs'] }] };
+    expect(() => list.toJobs({ ...snapshot, composeAudioPlan: () => surround })).toThrow('單一 Stereo');
   });
 });

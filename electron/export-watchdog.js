@@ -289,6 +289,7 @@ async function startWatchdogRuntime(config, options = {}) {
   let cleanupReason = null;
   let finalizing = null;
   let finalResult = null;
+  const finalizerAbort = new AbortController();
   let resolveDone;
   const done = new Promise(resolve => {
     resolveDone = resolve;
@@ -297,6 +298,17 @@ async function startWatchdogRuntime(config, options = {}) {
   const finalize = (code, signal, childError = null) => {
     if (finalizing) return finalizing;
     finalizing = (async () => {
+      // MPEG-2 AAC 的 ADTS ID 必須在釋放 lease 與回報成功以前完成。
+      // 同一個 watchdog 持有檔案；停止或主程序斷線也能取消並清理半成品。
+      if (!cleanupReason && !childError && code === 0 && config.outputFormat === 'mod-fhd') {
+        try {
+          const { finalizeModFhdTransport } = require('./mod-fhd-transport');
+          await finalizeModFhdTransport(config.outPath, { signal: finalizerAbort.signal });
+        } catch (error) {
+          childError = error;
+          cleanupReason ||= 'mod-fhd-finalize-failed';
+        }
+      }
       const needsCleanup = !!cleanupReason || childError || code !== 0;
       let cleanup = null;
       let release = null;
@@ -393,6 +405,7 @@ async function startWatchdogRuntime(config, options = {}) {
 
   const requestCleanup = async (reason = 'stop') => {
     if (!cleanupReason) cleanupReason = reason;
+    finalizerAbort.abort();
     if (finalResult) return finalResult.cleanup || {
       reason,
       removed: false,

@@ -1,13 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import deliveryFormats from '../shared/delivery-formats.cjs';
 
 const queueHtml = readFileSync(new URL('../electron/queue.html', import.meta.url), 'utf8');
 const openWindows = [];
 
 async function openQueueWindow(jobs) {
   const queueAPI = {
-    getAll: vi.fn().mockResolvedValue({ jobs, isPaused: false, concurrency: 1 }),
+    getAll: vi.fn().mockResolvedValue({ jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: [deliveryFormats.MOD_FHD] }),
     setPause: vi.fn().mockResolvedValue(),
     setConcurrency: vi.fn().mockResolvedValue(),
     stopJob: vi.fn().mockResolvedValue(),
@@ -284,6 +285,47 @@ describe('匯出佇列監控緊湊工作區', () => {
     await new Promise(r => setTimeout(r, 0));
     // WAV 沒有視訊碼率，不可以送 kbps
     expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1', { format: 'wav', targetH: 0 });
+  });
+
+  it('MOD-FHD 顯示固定交付規格，編輯時鎖定解析度與碼率', async () => {
+    const jobs = [{ id: 'mod', status: 'queued', payload: {
+      outPath: 'C:\\out\\a.ts', format: 'mod-fhd', width: 1920, height: 1080,
+      targetH: 1080, fps: 29.97, videoKbps: 7280,
+    } }];
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    const row = document.querySelector('[data-job-id="mod"]');
+    expect(row.querySelector('.job-chip--spec').textContent)
+      .toBe('MOD-FHD / 1920 x 1080 px / 29.97 fps / 7280 kbps');
+    row.querySelector('[data-action="edit"]').click();
+    const box = row.querySelector('.job-editor');
+    expect(box.querySelector('[data-f="format"]').value).toBe('mod-fhd');
+    expect(box.querySelector('[data-f="res"]').disabled).toBe(true);
+    expect(box.querySelector('[data-f="res"]').selectedOptions[0].textContent).toBe('1920×1080i');
+    expect(box.querySelector('[data-f="kbps"]').disabled).toBe(true);
+    expect(document.defaultView.getComputedStyle(box.querySelector('[data-preset-spec]')).display).not.toBe('none');
+    expect(box.querySelector('[data-preset-spec]').textContent).toContain('固定 1920 × 1080 / 29.97 fps / 7280 kbps');
+    box.querySelector('[data-f="save"]').click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('mod', { format: 'mod-fhd', targetH: 1080, burnTimecode: false });
+  });
+
+  it('一般工作不提供切入 MOD-FHD；已有 MOD-FHD 可切出並重新啟用一般格式欄位', async () => {
+    const jobs = [
+      { id: 'mp4', status: 'queued', payload: { outPath: 'C:\\out\\a.mp4', format: 'h264' } },
+      { id: 'mod', status: 'queued', payload: { outPath: 'C:\\out\\b.ts', format: 'mod-fhd', targetH: 1080 } },
+    ];
+    const { document } = await openQueueWindow(jobs);
+    const mp4 = document.querySelector('[data-job-id="mp4"]');
+    mp4.querySelector('[data-action="edit"]').click();
+    expect(mp4.querySelector('option[value="mod-fhd"]')).toBeNull();
+    const mod = document.querySelector('[data-job-id="mod"]');
+    mod.querySelector('[data-action="edit"]').click();
+    const format = mod.querySelector('[data-f="format"]');
+    format.value = 'h264';
+    format.dispatchEvent(new document.defaultView.Event('change'));
+    expect(mod.querySelector('[data-f="res"]').disabled).toBe(false);
+    expect(mod.querySelector('[data-f="kbps"]').disabled).toBe(false);
+    expect(document.defaultView.getComputedStyle(mod.querySelector('[data-preset-spec]')).display).toBe('none');
   });
 
   it('緊湊列仍保留操作按鈕，工作文字不會被當成 HTML', async () => {

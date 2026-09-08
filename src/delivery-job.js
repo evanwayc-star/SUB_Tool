@@ -154,6 +154,7 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
     return {
       name: c.name, web: c.web,
       path: c.path, type: image ? 'image' : 'video',
+      ...(!image && Number.isFinite(c.fps) ? { fps: c.fps } : {}),
       in: +c.in.toFixed(3), out: +c.out.toFixed(3),
       offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0,
       audio: c.audioDetached ? [] : clipAudioSpec(c, mediaTracks),
