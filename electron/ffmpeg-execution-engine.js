@@ -15,6 +15,7 @@ const nodeFs = require('fs');
 const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require('child_process');
 const QueueStore = require('./queue-store');
 const ExportWatchdog = require('./export-watchdog');
+const { deliveryOutputPaths } = require('./airline-output');
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
@@ -438,7 +439,7 @@ function createFFmpegExecution(options = {}) {
           outPath,
           jobId,
           queueDir,
-          ...(outputFormat === 'mod-fhd' ? { outputFormat } : {}),
+          ...(outputFormat ? { outputFormat, outputPaths: deliveryOutputPaths(outputFormat, outPath) } : {}),
         }, {
           scriptPath: watchdogScriptPath(),
           onStderr: consumeStderr,

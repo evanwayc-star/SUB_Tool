@@ -8,7 +8,7 @@ const openWindows = [];
 
 async function openQueueWindow(jobs) {
   const queueAPI = {
-    getAll: vi.fn().mockResolvedValue({ jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: [deliveryFormats.MOD_FHD] }),
+    getAll: vi.fn().mockResolvedValue({ jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: deliveryFormats.DELIVERY_FORMAT_PRESETS }),
     setPause: vi.fn().mockResolvedValue(),
     setConcurrency: vi.fn().mockResolvedValue(),
     stopJob: vi.fn().mockResolvedValue(),
@@ -44,6 +44,33 @@ afterEach(() => {
 });
 
 describe('匯出佇列監控緊湊工作區', () => {
+  it.each([
+    ['airline-s3k', '航空-S3K', 352, 240, '.m1v'],
+    ['airline-dmpes', '航空-DMPES', 720, 480, '.h264'],
+  ])('%s 顯示分流完成並可檢視鎖定規格，保留後續 Manzanita 合成提示', async (format, label, width, height, extension) => {
+    const payload = { format, width, height, fps: 29.97, targetH: height, videoKbps: 1500, outPath: 'C:\\out\\flight' + extension };
+    const { document, queueAPI } = await openQueueWindow([
+      { id: 'done-air', status: 'done', payload },
+      { id: 'queued-air', status: 'queued', payload: { ...payload, outPath: 'C:\\out\\next' + extension } },
+    ]);
+    expect(document.querySelector('[data-job-id="done-air"] .job-status').textContent).toContain('影音分流完成');
+    expect(document.querySelector('[data-job-id="done-air"] .job-chip--spec').textContent)
+      .toBe(`${label} / ${width} x ${height} px / 29.97 fps / 1500 kbps`);
+    expect(document.querySelector('[data-job-id="done-air"] .job-chip--handoff').textContent)
+      .toContain('待 Manzanita 合成 .mpg');
+    const queued = document.querySelector('[data-job-id="queued-air"]');
+    queued.querySelector('[data-action="edit"]').click();
+    const resolution = queued.querySelector('[data-f="res"]');
+    expect(resolution.value).toBe(String(height));
+    expect(resolution.disabled).toBe(true);
+    expect(resolution.selectedOptions[0].textContent).toBe(`${width}×${height}p`);
+    expect(queued.querySelector('[data-f="customH"]').disabled).toBe(true);
+    expect(queued.querySelector('[data-preset-spec]').textContent).toContain('待 Manzanita 合成 .mpg');
+    queued.querySelector('[data-f="save"]').click();
+    await Promise.resolve();
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('queued-air', { format, targetH: height, burnTimecode: false });
+  });
+
   it('把未完成工作集中至主要工作區，完成紀錄採收合區塊', async () => {
     const jobs = [
       {

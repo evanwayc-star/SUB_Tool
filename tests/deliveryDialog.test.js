@@ -84,9 +84,56 @@ beforeEach(() => {
   State.externalAudioState = [];
   mediaMock.tracks = [];
   window.subtool.getStartupFile.mockResolvedValue(null);
+  window.subtool.listDir.mockResolvedValue([]);
 });
 
 describe('匯出交付清單', () => {
+  it.each([
+    ['airline-s3k', '352×240p', '.m1v', 'MPEG-1 Audio Layer-2 / CRC'],
+    ['airline-dmpes', '720×480p', '.h264', 'AAC-LC / ADTS'],
+  ])('%s 提供固定循序掃描規格與 Manzanita 合成說明', async (formatName, resolutionText, extension, audioLabel) => {
+    await showExportVideoDialog();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const format = document.querySelector('.ev-format');
+    format.value = formatName;
+    format.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(document.querySelector('.ev-format').value).toBe(formatName);
+    const resolution = document.querySelector('.ev-res');
+    expect(resolution.selectedOptions[0].textContent).toBe(resolutionText);
+    expect(resolution.disabled).toBe(true);
+    expect(document.querySelector('.ev-fps').value).toBe('29.97');
+    expect(document.querySelector('.ev-fps').disabled).toBe(true);
+    expect(document.querySelector('.ev-kbps').value).toBe('1500');
+    expect(document.querySelector('.ev-kbps').disabled).toBe(true);
+    expect(document.querySelector('.ev-name').value.endsWith(extension)).toBe(true);
+    expect(document.body.textContent).toContain(audioLabel);
+    expect(document.body.textContent).toContain('48 kHz / 128 kbps');
+    expect(document.querySelector('.delivery-airline-handoff').textContent).toContain('Manzanita MP2TSME');
+    expect(document.querySelector('.delivery-airline-handoff').textContent).toContain('合成 .mpg');
+    expect(State.fps).toBe(25);
+  });
+
+  it('航空輸出的音訊或設定檔已存在時，即使影像不存在也顯示覆寫警告', async () => {
+    await showExportVideoDialog();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const format = document.querySelector('.ev-format');
+    format.value = 'airline-dmpes';
+    format.dispatchEvent(new Event('change', { bubbles: true }));
+    const name = document.querySelector('.ev-name');
+    name.value = 'flight.h264';
+    name.dispatchEvent(new Event('change', { bubbles: true }));
+    window.subtool.listDir.mockResolvedValue(['flight.aac', 'flight.manzanita.cfg']);
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/交付';
+    outDir.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const message = document.getElementById('evConflictMsg');
+    expect(message.textContent).toContain('flight.aac');
+    expect(message.textContent).toContain('flight.manzanita.cfg');
+    expect(message.textContent).not.toContain('flight.h264');
+    expect(getComputedStyle(message).display).not.toBe('none');
+  });
+
   it('MOD-FHD 顯示鎖定規格、TS 檔名與 AAC 音訊，仍可指定 bus 與燒入 TC', async () => {
     await showExportVideoDialog();
     await new Promise(resolve => setTimeout(resolve, 25));

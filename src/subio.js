@@ -14,7 +14,7 @@ import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSp
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { MOD_FHD, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
+import { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { escapeHTML, encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
@@ -351,15 +351,15 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     return `
       <div class="delivery-card">
         <div class="delivery-ctrl-row">
-          <select class="ev-format delivery-select" data-idx="${i}" style="width:116px;">
+          <select class="ev-format delivery-select" data-idx="${i}" style="width:166px;">
             <option value="h264" ${r.format==='h264'?'selected':''} ${audioOnly?'disabled':''}>MP4 (H.264)</option>
             <option value="prores" ${r.format==='prores'?'selected':''} ${audioOnly?'disabled':''}>MOV (ProRes)</option>
-            <option value="${MOD_FHD.format}" ${preset?'selected':''} ${audioOnly?'disabled':''}>MOD-FHD (.ts)</option>
+            ${DELIVERY_FORMAT_PRESETS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${audioOnly?'disabled':''}>${option.label} (${option.extension})</option>`).join('')}
             <option value="wav" ${r.format==='wav'?'selected':''} ${!hasProjectAudio?'disabled':''}>WAV (純音訊)</option>
           </select>
           ${!isWav ? `
-            <select class="ev-res delivery-select" data-idx="${i}" aria-label="輸出解析度" style="width:${preset ? 154 : 118}px;" ${preset?'disabled title="MOD-FHD 固定為 1920×1080，上場優先交錯掃描"':''}>
-              ${preset ? `<option value="${preset.height}" selected>${preset.width}×${preset.height}i</option>` : `
+            <select class="ev-res delivery-select" data-idx="${i}" aria-label="輸出解析度" style="width:${preset ? 154 : 118}px;" ${preset?`disabled title="${preset.label} 固定為 ${preset.width}×${preset.height}，${preset.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
+              ${preset ? `<option value="${preset.height}" selected>${preset.width}×${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
               <option value="0" ${r.targetH===0?'selected':''}>來源解析度</option>
               <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
               <option value="1080" ${r.targetH===1080?'selected':''}>1080p</option>
@@ -396,9 +396,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           <div style="display:flex;align-items:center;gap:6px;">
             <span class="delivery-audio-info">🎧 音訊: ${audioDesc}</span>
             <button class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="設定此列輸出的音軌">⚙ 音軌</button>
-            ${preset ? `<span class="delivery-audio-info">單一 Stereo · MPEG-2 AAC-LC / ADTS · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps</span>` : ''}
+            ${preset ? `<span class="delivery-audio-info">單一 Stereo · ${preset.audioLabel} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps</span>` : ''}
           </div>
         </div>
+        ${preset?.audioExtension ? `<div class="delivery-ctrl-row delivery-airline-handoff"><span class="delivery-audio-info">${preset.displayAspect ? `顯示比例 ${preset.displayAspect} · ` : ''}輸出 ${preset.extension} 影像、${preset.audioExtension} 音訊與 .manzanita.cfg 設定檔；請在 Manzanita MP2TSME 載入後合成 .mpg。</span></div>` : ''}
       </div>
     `;
   }

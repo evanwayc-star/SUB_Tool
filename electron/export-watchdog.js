@@ -6,6 +6,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { deliveryOutputPaths, finalizeAirlineOutput } = require('./airline-output');
 const {
   acquireLease,
   updateLease,
@@ -57,6 +58,12 @@ function validateConfig(config) {
   }
   if (config.cwd != null && (typeof config.cwd !== 'string' || !config.cwd.trim())) {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog cwd 必須是有效路徑');
+  }
+  const expectedPaths = deliveryOutputPaths(config.outputFormat, config.outPath);
+  if (config.outputPaths != null && (!Array.isArray(config.outputPaths)
+    || config.outputPaths.length !== expectedPaths.length
+    || config.outputPaths.some((value, index) => value !== expectedPaths[index]))) {
+    throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog 輸出檔案與格式不符');
   }
 }
 
@@ -283,7 +290,10 @@ async function startWatchdogRuntime(config, options = {}) {
 
   const token = crypto.randomBytes(32).toString('hex');
   const pipeName = makePipeName();
-  let lease = null;
+  const outputPaths = deliveryOutputPaths(config.outputFormat, config.outPath);
+  const leasedPaths = [];
+  let leasesAcquired = false;
+  let outputStarted = false;
   let child = null;
   let childClosed = false;
   let cleanupReason = null;
@@ -294,6 +304,22 @@ async function startWatchdogRuntime(config, options = {}) {
   const done = new Promise(resolve => {
     resolveDone = resolve;
   });
+
+  const releaseOutputs = async () => {
+    const files = [];
+    let firstError;
+    for (const outPath of leasedPaths) {
+      try {
+        const released = await Promise.resolve(releaseLease({ queueDir: config.queueDir, outPath, token }));
+        files.push({ outPath, released });
+      } catch (error) {
+        firstError ||= serializeError(error);
+        files.push({ outPath, error: serializeError(error) });
+      }
+    }
+    if (firstError) return { files, error: firstError, retainedLease: true };
+    return outputPaths.length === 1 ? files[0]?.released : { files };
+  };
 
   const finalize = (code, signal, childError = null) => {
     if (finalizing) return finalizing;
@@ -309,12 +335,33 @@ async function startWatchdogRuntime(config, options = {}) {
           cleanupReason ||= 'mod-fhd-finalize-failed';
         }
       }
+      if (!cleanupReason && !childError && code === 0 && outputPaths.length > 1) {
+        try {
+          await finalizeAirlineOutput(config.outputFormat, config.outPath, { signal: finalizerAbort.signal });
+        } catch (error) {
+          childError = error;
+          cleanupReason ||= 'airline-finalize-failed';
+        }
+      }
       const needsCleanup = !!cleanupReason || childError || code !== 0;
       let cleanup = null;
       let release = null;
 
       if (needsCleanup) {
-        const deletion = await deletePartialFile(config.outPath, options);
+        const files = [];
+        for (const outPath of leasedPaths) {
+          files.push({ outPath, ...(outputStarted
+            ? await deletePartialFile(outPath, options)
+            : { removed: false, missing: false, untouched: true }) });
+        }
+        const failed = files.find(file => !file.removed && !file.missing && !file.untouched);
+        const deletion = outputPaths.length === 1 ? files[0] : {
+          files,
+          removed: !failed && files.some(file => file.removed),
+          missing: files.every(file => file.missing),
+          untouched: !outputStarted,
+          ...(failed ? { error: failed.error } : {}),
+        };
         cleanup = {
           reason: cleanupReason || (childError ? 'ffmpeg-error' : 'ffmpeg-nonzero'),
           ...deletion,
@@ -322,23 +369,17 @@ async function startWatchdogRuntime(config, options = {}) {
           retainedLease: false,
         };
 
-        if (deletion.removed || deletion.missing) {
-          try {
-            release = await Promise.resolve(releaseLease({
-              queueDir: config.queueDir,
-              outPath: config.outPath,
-              token,
-            }));
-            cleanup.released = true;
-          } catch (error) {
+        if (!failed) {
+          release = await releaseOutputs();
+          if (release?.error) {
             cleanup.retainedLease = true;
-            cleanup.releaseError = serializeError(error);
-          }
+            cleanup.releaseError = release.error;
+          } else cleanup.released = true;
         } else {
           cleanup.retainedLease = true;
         }
         sendIpc({ type: 'cleanup', jobId: config.jobId, ...cleanup });
-        if (!deletion.removed && !deletion.missing) {
+        if (failed) {
           sendIpc({
             type: 'error',
             jobId: config.jobId,
@@ -354,19 +395,13 @@ async function startWatchdogRuntime(config, options = {}) {
           });
         }
       } else {
-        try {
-          release = await Promise.resolve(releaseLease({
-            queueDir: config.queueDir,
-            outPath: config.outPath,
-            token,
-          }));
-        } catch (error) {
-          release = { error: serializeError(error), retainedLease: true };
+        release = await releaseOutputs();
+        if (release?.error) {
           sendIpc({
             type: 'error',
             jobId: config.jobId,
             code: 'LEASE_RELEASE_FAILED',
-            message: error.message,
+            message: release.error.message,
           });
         }
       }
@@ -416,7 +451,7 @@ async function startWatchdogRuntime(config, options = {}) {
 
     if (child && !childClosed) {
       terminateProcessTree(child);
-    } else if (lease) {
+    } else if (leasesAcquired) {
       void finalize(null, null);
     }
 
@@ -438,15 +473,18 @@ async function startWatchdogRuntime(config, options = {}) {
 
   try {
     await control.listenPromise;
-    lease = await Promise.resolve(acquireLease({
-      queueDir: config.queueDir,
-      outPath: config.outPath,
-      jobId: config.jobId,
-      token,
-      watchdogPid: process.pid,
-      pipeName,
-    }));
+    for (const outPath of outputPaths) {
+      await Promise.resolve(acquireLease({
+        queueDir: config.queueDir, outPath, jobId: config.jobId,
+        token, watchdogPid: process.pid, pipeName,
+      }));
+      leasedPaths.push(outPath);
+    }
+    leasesAcquired = true;
   } catch (error) {
+    // No FFmpeg has started: only release reservations, never delete an
+    // existing deliverable when a sibling is owned by another job.
+    await releaseOutputs();
     await control.close();
     throw error;
   }
@@ -457,6 +495,7 @@ async function startWatchdogRuntime(config, options = {}) {
   }
 
   try {
+    outputStarted = true;
     child = spawn(config.ffmpegPath, config.args, {
       cwd: config.cwd || undefined,
       windowsHide: true,
@@ -500,14 +539,12 @@ async function startWatchdogRuntime(config, options = {}) {
   }
 
   try {
-    await Promise.resolve(updateLease({
-      queueDir: config.queueDir,
-      outPath: config.outPath,
-      token,
-      watchdogPid: process.pid,
-      ffmpegPid: child.pid,
-      pipeName,
-    }));
+    for (const outPath of leasedPaths) {
+      await Promise.resolve(updateLease({
+        queueDir: config.queueDir, outPath, token,
+        watchdogPid: process.pid, ffmpegPid: child.pid, pipeName,
+      }));
+    }
   } catch (error) {
     cleanupReason = 'lease-update-failed';
     sendIpc({

@@ -27,7 +27,7 @@
      一份。MOD-FHD 的固定規格則由 shared/delivery-formats.cjs 提供。
 ============================================================================== */
 import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } from '../shared/delivery-formats.cjs';
+import { getDeliveryFormatPreset, deliveryOutputNames, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } from '../shared/delivery-formats.cjs';
 import { deliveryResolution, suggestKbps } from '../shared/delivery-resolution.cjs';
 
 const EXT_BY_FORMAT = { wav: '.wav', prores: '.mov', h264: '.mp4' };
@@ -72,7 +72,7 @@ export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPla
   const ext = extensionFor(format);
   const preset = getDeliveryFormatPreset(format);
   const tcTag = burnTimecode ? '_TC' : '';
-  if (preset) return `ST_${projectTag}_${preset.label}_${preset.height}i_${preset.fps}fps${tcTag}${ext}`;
+  if (preset) return `ST_${projectTag}_${preset.label}_${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}_${preset.fps}fps${tcTag}${ext}`;
   const isWav = format === 'wav';
   const tag = (!isWav && targetH > 0) ? '_' + targetH + 'p' : '';
   return `ST_${projectTag}_${normalizeDeliveryFrameRate(fps)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
@@ -265,7 +265,7 @@ export function createDeliveryList({
       if (desktop) {
         /* 比對的是「目錄＋檔名」而不是單純檔名——同名但不同目錄是合法的。
            訊息要講清楚是「同一目錄內」重複，否則使用者會以為不同資料夾也不准同名。 */
-        const paths = rows.map(r => joinPath(r.outDir, r.customName).toLowerCase());
+        const paths = api.outPaths().map(output => output.path.toLowerCase());
         if (new Set(paths).size !== paths.length) {
           out.push({
             kind: 'blocking', code: 'duplicate-path', index: -1,
@@ -277,9 +277,10 @@ export function createDeliveryList({
       return out;
     },
 
-    /** 每一列的完整輸出路徑（桌面版用；供 I/O 層去問磁碟有沒有同名檔）。 */
+    /** 每一列的所有輸出路徑，含航空影音分流及設定檔（供 I/O 層檢查覆寫）。 */
     outPaths() {
-      return rows.map(r => ({ dir: r.outDir, name: r.customName, path: joinPath(r.outDir, r.customName) }));
+      return rows.flatMap(r => deliveryOutputNames(r.format, r.customName)
+        .map(name => ({ dir: r.outDir, name, path: joinPath(r.outDir, name) })));
     },
 
     /**

@@ -164,6 +164,21 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 
 `node scripts/acceptance/verify-mod-fhd.js` 以逐行與隔行合成素材跑正式計畫及 watchdog，檢查實際 TFF 像素、完整解碼、影音 codec／FPS／時長、ADTS MPEG-2 位元、PID、PCR 量測碼率與 PAT 間隔；證據留在系統 temp。
 
+### 航空分流與 Manzanita 交接
+
+`airline-encoding.js` 提供 Carbon CPF 對應的 CPU codec 參數，由 delivery runner 注入純 `export-plan.js`。計畫先用顯示比例合成、燒字幕與 TC，再縮為編碼尺寸並設定 SAR；航空來源若隔行則以 bwdif send_frame 轉逐行，不走 MOD-FHD 的場交織。
+
+- S3K：MPEG-1、352×240、30000/1001、CBR 1500 kbps、GOP 上限 15、2 B 幀、open GOP、scene change 關閉；VBV 224 KiB。Carbon 的 MPEG-1 aspect code 12 對應 SAR 200:219（表中 1.0950 為其倒數）。libtwolame 輸出 Layer-2 Stereo、48 kHz、128 kbps，16-bit input、CRC 開啟，copyright/original 關閉。
+- DMPES：H.264 Main@3.0、720×480、30000/1001、CBR 1500 kbps、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD、關閉 deblocking／weighted prediction／B pyramid。依使用者確認的 **16:9 顯示比例，設定 SAR 32:27**；明確優先於 CPF 的 6:5 及參考成品的 40:33。其餘採參考成品 SPS 實測的 NAL HRD CBR、NTSC limited range；音訊依獨立 AAC preset 輸出 MPEG-4 AAC-LC／ADTS Stereo、48 kHz、128 kbps。
+
+上述是跨編碼器的參數對應。S3K 的 224 KiB VBV 在此碼率超出 MPEG-1 `vbv_delay` 可表範圍，FFmpeg 寫入 0xffff；DMPES 的 130202-byte VBV 傳入 1041616 bits，x264 內部取整為 kilobits。Carbon 專用搜尋／量化策略不保證等價；DMPES sequence-end 畫面與 CPF 不同，目前依 CPF 不追加結尾 NAL。不能宣稱與 Carbon 位元流完全一致或已通過航空設備驗收。
+
+`delivery-formats.cjs` 統一定義主檔、音訊與 cfg 名稱；admission 同時檢查三個輸出的來源衝突、授權與佇列佔用。watchdog 持有全組 lease，確認兩個分流存在且非空後，透過 `airline-output.js` 寫入 Manzanita 設定；取消或收尾失敗清理全組，清理失敗保留 lease。watchdog 的 helper 與共用格式模組須一併 asarUnpack。
+
+提供的 cfg 保留 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes 及 Video Rate -1（Minimum）。參考成品確認 188-byte MPEG-TS、MPEG-4 AAC／ADTS，整體 CBR 約 1.855594 Mbps；這是 Manzanita 對該成品算出的 Minimum，不硬套為所有內容的固定碼率。軟體仍由使用者操作合成，操作步驟見 [使用說明](使用說明.md#航空檔案的-manzanita-合成)。
+
+`tests/airlineEncoding.test.js` 直接驗證原生 sequence header／SPS／PPS／CRC 與低複雜度 CBR；`tests/electronQueueLifecycle.test.js` 驗證兩種航空格式經真實 Electron IPC、watchdog 與 ffmpeg 完成分流及 cfg，並釋放全組鎖。
+
 ## 5. mpv 嵌入整合（Windows）
 
 mpv 不是 DOM 元素，而是獨立的 OS 子視窗。`mpv-host.js` 負責：

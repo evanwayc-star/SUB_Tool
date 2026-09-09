@@ -6,7 +6,8 @@
 const fs = require('fs');
 const path = require('path');
 const QueueStore = require('./queue-store');
-const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio } = require('../shared/delivery-formats.cjs');
+const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryOutputNames } = require('../shared/delivery-formats.cjs');
+const { airlineElementaryEncoding } = require('./airline-encoding');
 const {
   buildDeliveryArgv,
   _normalizeAudioPlan,
@@ -72,6 +73,9 @@ function createDeliveryRunner(options = {}) {
     const isWav = format === 'wav';
     const isPro = format === 'prores';
     const preset = getDeliveryFormatPreset(format);
+    const outputFiles = deliveryOutputNames(format, path.basename(outPath)).map(name => path.join(path.dirname(outPath), name));
+    const elementaryEncoding = airlineElementaryEncoding(format);
+    const audioOutPath = elementaryEncoding ? outputFiles[1] : null;
     const audioPlan = _normalizeAudioPlan(normalizeDeliveryPresetAudio(format, rawAudioPlan), { requireStreams: !isWav });
     const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, preset?.fps || fps);
 
@@ -117,6 +121,7 @@ function createDeliveryRunner(options = {}) {
         hasAudioStream: sourcePath => audioPresence.get(sourcePath) ?? true,
         fontsDir: fonts.root?.() || null,
         timecodeFontFile: fonts.timecodeFile?.() || null,
+        elementaryEncoding, audioOutPath,
       });
       const { args, label, duration: plannedDuration, kbps, audioBitrates } = plan;
       const startedAt = now();
@@ -145,7 +150,7 @@ function createDeliveryRunner(options = {}) {
         onProgress: sendProgress,
         onProcess: controller => queue.registerActiveJob(jobId, activeRecord(jobId, controller, outPath)),
       });
-      const videoMap = (result.maps || []).find(map => /->/.test(map) && /h264|prores|hevc/i.test(map));
+      const videoMap = (result.maps || []).find(map => /->/.test(map) && /h264|prores|hevc|mpeg1video/i.test(map));
       const encoderMatch = videoMap && /->\s*[^(]*\(([^)]+)\)\s*$/.exec(videoMap.trim());
       if (encoderMatch) usedEncoder = encoderMatch[1].trim();
 
@@ -154,12 +159,13 @@ function createDeliveryRunner(options = {}) {
         jobId, label, pct: 100, done: true,
         result: {
           outPath,
+          ...(elementaryEncoding ? { outputFiles, requiresManzanita: true } : {}),
           encoder: usedEncoder,
           gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder),
           elapsedMs: now() - startedAt,
           videoKbps: isPro ? null : kbps,
           audioBitrates: isPro ? null : audioBitrates,
-          audioActualBitrates: isPro ? null : await probe.audioBitrates(outPath),
+          audioActualBitrates: isPro ? null : await probe.audioBitrates(audioOutPath || outPath),
         },
       });
     } catch (error) {

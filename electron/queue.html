@@ -716,13 +716,13 @@
     };
     const fmtDeliverySpec = payload => {
       const format = String(payload?.format || '');
-      const parts = [FORMAT_LABEL[format] || format.toUpperCase() || '—'];
+      const parts = [deliveryPreset(format)?.label || FORMAT_LABEL[format] || format.toUpperCase() || '—'];
       const w = Number(payload?.width), h = Number(payload?.height);
       if (format !== 'wav' && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
         parts.push(`${w} x ${h} px`);
       }
       const kbps = Number(payload?.videoKbps);
-      if (format === 'mod-fhd' && Number(payload?.fps) > 0) parts.push(`${Number(payload.fps)} fps`);
+      if (deliveryPreset(format) && Number(payload?.fps) > 0) parts.push(`${Number(payload.fps)} fps`);
       if ((format === 'h264' || deliveryPreset(format)) && Number.isFinite(kbps) && kbps > 0) parts.push(`${kbps} kbps`);
       return parts.join(' / ');
     };
@@ -775,7 +775,8 @@
         if (job.status === 'queued') { statusText = '等待中'; icon = ICONS.queued; }
         if (job.status === 'running') { statusText = '執行中 ' + pctValue.toFixed(1) + '%'; icon = ICONS.running; }
         if (job.status === 'stopping') { statusText = '停止中'; icon = ICONS.stopped; }
-        if (job.status === 'done') { statusText = '完成'; icon = ICONS.done; }
+        const airlineOutput = !!deliveryPreset(job.payload?.format)?.audioExtension;
+        if (job.status === 'done') { statusText = airlineOutput ? '影音分流完成' : '完成'; icon = ICONS.done; }
         if (job.status === 'failed') { statusText = '失敗'; icon = ICONS.failed; }
         if (job.status === 'missing-source') { statusText = '來源遺失'; icon = ICONS.failed; }
         if (job.status === 'stopped') { statusText = '已停止'; icon = ICONS.stopped; }
@@ -880,6 +881,7 @@
               <span class="job-chip job-chip--spec">${escapeHTML(deliverySpec)}</span>
               ${subtitleLabel ? `<span class="job-chip job-subs" title="${escapeHTML('會燒進這份交付的字幕軌：' + subtitleLabel)}">${escapeHTML(subtitleLabel)}</span>` : ''}
               ${burnsTimecode(job.payload) ? '<span class="job-chip job-chip--tc" title="會在畫面上燒入時間碼">燒入 TC</span>' : ''}
+              ${airlineOutput ? '<span class="job-chip job-chip--handoff">影音分流與設定檔 · 待 Manzanita 合成 .mpg</span>' : ''}
               ${enqueuedAt ? `<span class="job-enqueued" title="加入佇列時間">${escapeHTML(enqueuedAt)}</span>` : ''}
             </p>
             ${(job.status === 'queued' || !metaText) ? '' : `<p class="job-meta">${escapeHTML(metaText)}</p>`}
@@ -924,7 +926,7 @@
       const curKbps = Number(p.videoKbps) || 0;
       const known = RES_OPTIONS.some(([v]) => v === curTargetH);
       const formatOptions = [['h264', 'MP4 (H.264)'], ['prores', 'ProRes'], ['wav', 'WAV (純音訊)']];
-      // MOD-FHD 的 TC／音訊在送出前完成設定，既有一般工作要從交付清單新增。
+      // 固定格式的 TC／音訊在送出前完成設定，既有一般工作要從交付清單新增。
       const currentPreset = deliveryPreset(curFormat);
       if (currentPreset) formatOptions.push([currentPreset.format, currentPreset.label]);
 
@@ -967,13 +969,24 @@
         q('[data-f="res"]').disabled = !!preset;
         q('[data-f="customH"]').disabled = !!preset;
         q('[data-f="kbps"]').disabled = !!preset;
-        if (preset) q('[data-f="res"]').value = String(preset.height);
+        if (preset) {
+          const resolution = q('[data-f="res"]');
+          if (![...resolution.options].some(option => option.value === String(preset.height))) {
+            const option = document.createElement('option');
+            option.value = String(preset.height);
+            option.dataset.presetResolution = String(preset.height);
+            resolution.appendChild(option);
+          }
+          resolution.value = String(preset.height);
+        }
         for (const option of q('[data-f="res"]').options) {
-          const normalLabel = RES_OPTIONS.find(([value]) => String(value) === option.value)?.[1];
-          if (normalLabel) option.textContent = preset && option.value === String(preset.height) ? `${preset.width}×${preset.height}i` : normalLabel;
+          const normalLabel = RES_OPTIONS.find(([value]) => String(value) === option.value)?.[1]
+            || (option.dataset.presetResolution ? `${option.value}p` : '');
+          if (normalLabel) option.textContent = preset && option.value === String(preset.height)
+            ? `${preset.width}×${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}` : normalLabel;
         }
         q('[data-preset-spec]').hidden = !preset;
-        q('[data-preset-spec]').textContent = preset ? `固定 ${preset.width} × ${preset.height} / ${preset.fps} fps / ${preset.videoKbps} kbps` : '';
+        q('[data-preset-spec]').textContent = preset ? `固定 ${preset.width} × ${preset.height}${preset.displayAspect ? ` (${preset.displayAspect})` : ''} / ${preset.fps} fps / ${preset.videoKbps} kbps${preset.audioExtension ? ' · 待 Manzanita 合成 .mpg' : ''}` : '';
         const isCustom = q('[data-f="res"]').value === 'custom';
         box.querySelector('[data-custom]').hidden = (f === 'wav') || !isCustom;
       };

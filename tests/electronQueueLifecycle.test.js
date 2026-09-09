@@ -487,11 +487,12 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     queueClient.close();
   }, 25000);
 
-  test.each(['h264', 'mod-fhd'])('實際 %s 匯出由 watchdog 完成並釋放輸出鎖', async format => {
+  test.each(['h264', 'mod-fhd', 'airline-s3k', 'airline-dmpes'])('實際 %s 匯出由 watchdog 完成並釋放輸出鎖', async format => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-watchdog-export-'));
     tempProfiles.add(profile);
     const imagePath = path.join(profile, 'one-pixel.png');
-    const outPath = path.join(profile, format === 'mod-fhd' ? 'watchdog-output.ts' : 'watchdog-output.mp4');
+    const extensions = { h264: '.mp4', 'mod-fhd': '.ts', 'airline-s3k': '.m1v', 'airline-dmpes': '.h264' };
+    const outPath = path.join(profile, `watchdog-output${extensions[format]}`);
     writeFileSync(
       imagePath,
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
@@ -543,6 +544,21 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(finished.completedAt).toEqual(expect.any(Number));
     expect(existsSync(outPath)).toBe(true);
     expect(statSync(outPath).size).toBeGreaterThan(0);
+    if (format.startsWith('airline-')) {
+      const { deliveryOutputPaths, MANZANITA_CONFIG } = require('../electron/airline-output.js');
+      const outputFiles = deliveryOutputPaths(format, outPath);
+      expect(outputFiles.every(file => statSync(file).size > 0)).toBe(true);
+      expect(readFileSync(outputFiles[2], 'utf8')).toBe(MANZANITA_CONFIG);
+      const probe = file => JSON.parse(execFileSync(path.join(ROOT, 'electron/ffmpeg/ffprobe.exe'),
+        ['-v', 'error', '-show_streams', '-of', 'json', file], { windowsHide: true, encoding: 'utf8' })).streams;
+      expect(probe(outPath)).toEqual([expect.objectContaining({ codec_name: format === 'airline-s3k' ? 'mpeg1video' : 'h264',
+        width: format === 'airline-s3k' ? 352 : 720, height: format === 'airline-s3k' ? 240 : 480,
+        sample_aspect_ratio: format === 'airline-s3k' ? '200:219' : '32:27',
+        display_aspect_ratio: format === 'airline-s3k' ? '880:657' : '16:9' })]);
+      expect(probe(outputFiles[1])).toEqual([expect.objectContaining({ codec_name: format === 'airline-s3k' ? 'mp2' : 'aac',
+        sample_rate: '48000', channels: 2 })]);
+      expect(existsSync(path.join(profile, 'watchdog-output.mpg'))).toBe(false);
+    }
     if (format === 'mod-fhd') {
       const data = readFileSync(outPath);
       const ids = [];

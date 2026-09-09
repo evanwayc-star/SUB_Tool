@@ -130,6 +130,23 @@ describe('鐵律 §0.8：交付只准讀母素材', () => {
 });
 
 describe('檔案能力', () => {
+  it('航空輸出必須同時授權影音分流與設定檔，且不可覆蓋任何母素材', () => {
+    const airline = job({ payload: { format: 'airline-dmpes', outPath: 'D:/out/air.h264' } });
+    const denied = make({ deps: { canWriteDelivery: file => !file.endsWith('.aac') } });
+    expect(() => denied.assertJobAdmissible(airline))
+      .toThrow(expect.objectContaining({ code: 'UNAUTHORIZED_OUTPUT_PATH' }));
+    airline.sourcePaths = [path.join('D:/out', 'air.aac')];
+    expect(() => make().assertJobAdmissible(airline))
+      .toThrow(expect.objectContaining({ code: 'OUTPUT_OVERWRITES_SOURCE' }));
+  });
+
+  it('不同航空格式共用同名 cfg 也算輸出碰撞', () => {
+    const existing = job({ id: 's3k', status: 'queued', payload: { format: 'airline-s3k', outPath: 'D:/out/air.m1v' } });
+    const next = job({ payload: { format: 'airline-dmpes', outPath: 'D:/out/air.h264' } });
+    expect(() => make({ jobs: [existing] }).assertOutputAvailable(next))
+      .toThrow(expect.objectContaining({ code: 'OUTPUT_BUSY', conflictingJobId: 's3k' }));
+  });
+
   it('來源未授權 → UNAUTHORIZED_PATH', () => {
     const admission = make({ deps: { canReadSource: () => false } });
     expect(() => admission.assertJobAdmissible(job()))

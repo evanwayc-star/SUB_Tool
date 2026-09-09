@@ -41,7 +41,8 @@ const { createAudioNormalizationRuntime } = require('./audio-normalization-runti
 /* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
 const { deliveryResolution, suggestKbps } = require('../shared/delivery-resolution.cjs');
-const { MOD_FHD, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
+const { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
+const { deliveryOutputPaths } = require('./airline-output');
 const {
   buildIngestArgs,
   createFFmpegExecution,
@@ -823,8 +824,12 @@ function grantPersistedQueueJobCapabilities(job) {
   }
   try {
     assertQueueOutputFormat(job);
-    fileAuthority.grantDeliveryFile(job.payload.outPath);
+    grantDeliveryOutputs(job.payload.format, job.payload.outPath);
   } catch (error) {}
+}
+
+function grantDeliveryOutputs(format, outPath) {
+  for (const file of deliveryOutputPaths(format, outPath)) fileAuthority.grantDeliveryFile(file);
 }
 
 function openQueueWindow() {
@@ -938,7 +943,7 @@ ipcMain.handle('queue:getAll', () => ({
   jobs: QueueManager.jobs(),
   isPaused: QueueManager.isPaused,
   concurrency: QueueManager.concurrency,
-  deliveryFormatPresets: [MOD_FHD],
+  deliveryFormatPresets: DELIVERY_FORMAT_PRESETS,
 }));
 ipcMain.handle('queue:getStatus', () => queueStatusSnapshot());
 
@@ -999,7 +1004,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
   const isWav = format === 'wav';
   const preset = getDeliveryFormatPreset(format);
   // 已入列工作的 TC 起點依原交付 FPS 凍結；切入固定 FPS 必須從交付清單重建。
-  if (preset && p.format !== format) throw new Error('請回交付清單新增 MOD-FHD，以重新套用影格率、時間碼與音軌設定');
+  if (preset && p.format !== format) throw new Error(`請回交付清單新增 ${preset.label}，以重新套用影格率、時間碼與音軌設定`);
   const audioPlan = normalizeDeliveryPresetAudio(format, p.audioPlan);
   const audioProblem = deliveryPresetAudioProblem(format, audioPlan);
   if (audioProblem) throw new Error(audioProblem);
@@ -1055,7 +1060,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
     result: { format, outPath: newPath, width: w, height: h, targetH, videoKbps, fps, burnTimecode: !!timecodeWatermark },
     /* 同資料夾、同主檔名，只換副檔名。能力只在 job 快照成功落盤後才擴張，
        失敗時不留下 renderer 看不到的半份授權。 */
-    onCommitted: newPath !== oldPath ? () => fileAuthority.grantDeliveryFile(newPath) : undefined,
+    onCommitted: newPath !== oldPath ? () => grantDeliveryOutputs(format, newPath) : undefined,
   };
 }
 
@@ -1081,11 +1086,20 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!outPath) {
     const r = await dialog.showSaveDialog(mainWin, {
       title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
-      filters: [{ name: preset ? `${preset.label} (MPEG-TS)` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
+      filters: [{ name: preset ? `${preset.label} (${preset.audioExtension ? '影音分流' : 'MPEG-TS'})` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
     });
     if (r.canceled) return null;
     outPath = r.filePath;
-    fileAuthority.grantDeliveryFile(outPath);
+    const existingSidecars = deliveryOutputPaths(format, outPath).slice(1).filter(file => fs.existsSync(file));
+    if (existingSidecars.length) {
+      const overwrite = await dialog.showMessageBox(mainWin, {
+        type: 'warning', title: '覆寫航空分流檔',
+        message: '同名音訊或 Manzanita 設定檔已存在，是否覆寫？',
+        detail: existingSidecars.join('\n'), buttons: ['取消', '覆寫'], defaultId: 0, cancelId: 0,
+      });
+      if (overwrite.response !== 1) return null;
+    }
+    grantDeliveryOutputs(format, outPath);
   }
 
   // presetOut 只能來自已選取的交付目錄；不允許 renderer 以略過 save dialog 的
@@ -1094,7 +1108,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   QueueManager.assertJobCapabilities({ payload: authorizationPayload });
   // 交付目錄能力只代表「可建立候選檔」；工作通過格式、來源與路徑驗證後，
   // 才給這一個成品 shell reveal 的精確能力。
-  fileAuthority.grantDeliveryFile(outPath);
+  grantDeliveryOutputs(format, outPath);
 
   const jobId = newJobId('export-');
   // 分離 assText 存為獨立檔案

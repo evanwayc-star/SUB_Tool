@@ -161,6 +161,30 @@ describe('FFmpeg execution', () => {
     }]);
   });
 
+  it('航空 watchdog 路徑由格式與主輸出推導，不接受呼叫端提供的旁檔列表', async () => {
+    const userDataDir = makeTempRoot();
+    const queueDir = path.join(userDataDir, 'export-queue');
+    const outPath = path.join(userDataDir, 'air.h264');
+    let config;
+    const execution = createFFmpegExecution({
+      getFFmpegPath: () => 'ffmpeg-test',
+      getUserDataDir: () => userDataDir,
+      getQueueDir: () => queueDir,
+      ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
+      spawnWatchdog(value) {
+        config = value;
+        return { ready: Promise.resolve(), completion: Promise.resolve({ ok: true, code: 0 }) };
+      },
+    });
+    await execution.execute([outPath], {
+      jobId: 'export-air', outPath, outputFormat: 'airline-dmpes',
+      outputPaths: [path.join(userDataDir, 'unrelated.txt')],
+    });
+    expect(config.outputPaths).toEqual([
+      outPath, path.join(userDataDir, 'air.aac'), path.join(userDataDir, 'air.manzanita.cfg'),
+    ]);
+  });
+
   it('watchdog 失敗會以穩定 error code、outcome 與 log path 回報', async () => {
     const userDataDir = makeTempRoot();
     const queueDir = path.join(userDataDir, 'export-queue');

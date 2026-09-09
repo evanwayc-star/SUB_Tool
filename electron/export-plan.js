@@ -364,7 +364,15 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     hasAudioStream = () => true,
     fontsDir = null,
     timecodeFontFile = null,
+    elementaryEncoding = null,
+    audioOutPath = null,
   } = env;
+
+  const isAirline = !!preset?.audioExtension;
+  const isInterlaced = preset?.scan === 'interlaced';
+  if (isAirline && (!elementaryEncoding || !audioOutPath)) {
+    throw new Error('航空交付缺少影音分流編碼設定或音訊輸出路徑');
+  }
 
   const isWav = format === 'wav';
   const isPro = format === 'prores';
@@ -390,12 +398,17 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     };
   }
 
-  const W = Math.max(2, Math.round(width || 1920)), H = Math.max(2, Math.round(height || 1080));
+  const encodedW = Math.max(2, Math.round(width || 1920));
+  const H = Math.max(2, Math.round(height || 1080));
+  // 非方形像素先以顯示比例合成與燒字幕，最後才壓成規格的編碼尺寸。
+  // 直接在 720×480 / 352×240 上 contain 會把字幕與素材一起橫向拉變形。
+  const sarParts = isAirline ? elementaryEncoding.sar.split('/').map(Number) : [1, 1];
+  const W = isAirline ? Math.max(2, Math.round(encodedW * sarParts[0] / sarParts[1] / 2) * 2) : encodedW;
   // FPS-SYNC：NTSC 格率必須用精確有理數；轉換只改 cadence，不改時間軸秒數。
   const outputRate = deliveryFrameRateRatio(fps);
   // MOD-FHD 先以每秒 59.94 個時刻合成，再交織成上場優先的 29.97 幀；
   // 只標記 TFF 會把逐行畫面偽裝成隔行，並丟掉來源的場間運動。
-  const R = preset ? '60000/1001' : outputRate;
+  const R = isInterlaced ? '60000/1001' : outputRate;
   // ===== 多軌合成 filtergraph（v4.11.0）=====
   //  影像：每視訊軌各自 concat 成整條時間軸（片段放 offset、間隙【透明】），再由下而上 overlay 疊到黑底；
   //        上層片段覆蓋下層（比照預覽 top-occludes），透明間隙讓下層透出。
@@ -507,7 +520,8 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           ? imageBoxForExport({ frameW: SW, frameH: SH, natW: +c.natW, natH: +c.natH,
                                 scale: clipScale, posX: pxClip, posY: pyClip })
           : null;
-        const fields = preset && c.type !== 'image' ? 'bwdif=mode=send_field:parity=auto:deint=interlaced,' : '';
+        const fields = preset && c.type !== 'image'
+          ? `bwdif=mode=${isInterlaced ? 'send_field' : 'send_frame'}:parity=auto:deint=interlaced,` : '';
         if (box) {
           const bw = Math.max(2, Math.round(box.w)), bh = Math.max(2, Math.round(box.h));
           fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,${fields}fps=${R},scale=${bw}:${bh},format=yuva420p,setsar=1[${IM}]`);
@@ -607,7 +621,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     fc.push(`${vc}ass=${assFileName}${fdirArg}[vout]`);
     vfinal = '[vout]';
   }
-  if (preset) {
+  if (isInterlaced) {
     fc.push(`${vfinal}format=yuv420p,tinterlace=mode=interleave_top,setfield=tff[vmod]`);
     vfinal = '[vmod]';
   }
@@ -616,6 +630,10 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     const tcOut = '[vtimecode]';
     fc.push(_buildExportTimecodeFilter(vfinal, timecodeWatermark, W, H, tcOut, timecodeFontFile));
     vfinal = tcOut;
+  }
+  if (isAirline) {
+    fc.push(`${vfinal}scale=${encodedW}:${H}:flags=lanczos,setsar=${elementaryEncoding.sar},format=yuv420p,setfield=prog[vairline]`);
+    vfinal = '[vairline]';
   }
 
   // MP4：影像使用使用者指定的目標位元率；每條 AAC stream 依聲道數給足交付 bitrate。
@@ -629,6 +647,17 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     : (plannedAudio
       ? plannedAudio.streamLabels.map(({ stream }) => aacBitrateForChannels(stream.spec.channels))
       : [aacBitrateForChannels(2)]);
+  if (isAirline) {
+    return {
+      args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
+        '-map', vfinal, ...elementaryEncoding.videoArgs, outPath,
+        ...audioMaps, ...elementaryEncoding.audioArgs, audioOutPath],
+      label: `匯出 ${preset.label} 影音分流（待 Manzanita 合成）`,
+      duration: D,
+      plannedEncoder: format === 'airline-s3k' ? 'mpeg1video' : 'libx264',
+      isGpu: false, kbps, audioBitrates, audioChannels: 2,
+    };
+  }
   const encode = preset
     ? ['-c:v', 'libx264', '-preset', 'medium', '-profile:v', 'high', '-level:v', '4.1',
       '-pix_fmt', 'yuv420p', '-b:v', `${kbps}k`, '-minrate', `${kbps}k`, '-maxrate', `${kbps}k`,
