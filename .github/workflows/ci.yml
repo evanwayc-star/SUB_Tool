@@ -32,5 +32,21 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Match the packaged full build: ffmpeg-static lacks libtwolame/CRC.
+      - name: Prepare full FFmpeg for airline acceptance
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg-full.7z'
+          $toolsDir = Join-Path $env:RUNNER_TEMP 'ffmpeg-full'
+          Invoke-WebRequest -Uri 'https://github.com/GyanD/codexffmpeg/releases/download/2026-01-22-git-4561fc5e48/ffmpeg-2026-01-22-git-4561fc5e48-full_build.7z' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '70ad2ba7636385b4f00f16893768add38956e9e40608200a3283b0be8c510a93') { throw 'FFmpeg archive checksum mismatch' }
+          7z x $archive "-o$toolsDir" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg extraction failed' }
+          $ffmpeg = @(Get-ChildItem -LiteralPath $toolsDir -Filter ffmpeg.exe -File -Recurse)
+          if ($ffmpeg.Count -ne 1) { throw 'Expected one FFmpeg binary' }
+          $ffprobe = Join-Path $ffmpeg[0].DirectoryName 'ffprobe.exe'
+          if (-not (Test-Path -LiteralPath $ffprobe)) { throw 'FFprobe missing' }
+          "FFMPEG_PATH=$($ffmpeg[0].FullName)" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "FFPROBE_PATH=$ffprobe" | Add-Content -LiteralPath $env:GITHUB_ENV
       - run: npm run build
       - run: npm run test:ci:windows

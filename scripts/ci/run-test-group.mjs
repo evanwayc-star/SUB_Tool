@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,8 +52,10 @@ if (group === 'portable') {
 const vitest = path.join(ROOT, 'node_modules', 'vitest', 'vitest.mjs');
 const testEnv = { ...process.env };
 if (group === 'windows') {
-  testEnv.FFMPEG_PATH = require('ffmpeg-static');
-  testEnv.FFPROBE_PATH = require('@derhuerst/ffprobe-static');
+  const bundledFfmpeg = path.join(ROOT, 'electron', 'ffmpeg', 'ffmpeg.exe');
+  const bundledFfprobe = path.join(ROOT, 'electron', 'ffmpeg', 'ffprobe.exe');
+  testEnv.FFMPEG_PATH ||= existsSync(bundledFfmpeg) ? bundledFfmpeg : require('ffmpeg-static');
+  testEnv.FFPROBE_PATH ||= existsSync(bundledFfprobe) ? bundledFfprobe : require('@derhuerst/ffprobe-static');
 }
 const result = spawnSync(process.execPath, [vitest, ...args], {
   cwd: ROOT,

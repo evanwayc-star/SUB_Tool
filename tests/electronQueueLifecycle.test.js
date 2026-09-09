@@ -549,7 +549,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       const outputFiles = deliveryOutputPaths(format, outPath);
       expect(outputFiles.every(file => statSync(file).size > 0)).toBe(true);
       expect(readFileSync(outputFiles[2], 'utf8')).toBe(MANZANITA_CONFIG);
-      const probe = file => JSON.parse(execFileSync(path.join(ROOT, 'electron/ffmpeg/ffprobe.exe'),
+      const probe = file => JSON.parse(execFileSync(process.env.FFPROBE_PATH || path.join(ROOT, 'electron/ffmpeg/ffprobe.exe'),
         ['-v', 'error', '-show_streams', '-of', 'json', file], { windowsHide: true, encoding: 'utf8' })).streams;
       expect(probe(outPath)).toEqual([expect.objectContaining({ codec_name: format === 'airline-s3k' ? 'mpeg1video' : 'h264',
         width: format === 'airline-s3k' ? 352 : 720, height: format === 'airline-s3k' ? 240 : 480,
