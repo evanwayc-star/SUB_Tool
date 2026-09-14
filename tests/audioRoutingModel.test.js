@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { AudioRoutingModel, DELIVERY_PRESETS, resizeProjectAudioBuses } from '../src/audio-routing-engine.js';
 import { normalizeAudioProject } from '../src/state.js';
+import { buildProjectAudioPlan } from '../src/project-audio.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -27,6 +28,24 @@ const realProject = busCount => normalizeAudioProject({
 });
 
 describe('AudioRoutingModel - Project Adapter', () => {
+  it.each(['2-fm', '6-fm'])('從 %s 切回 5.1FM + 2.0FM 保留母素材第 7–8 聲道', presetId => {
+    const project = realProject(8);
+    project.sourceMaps.master = { channels: project.buses.map((bus, sourceChannel) => ({
+      sourceStream: 0, sourceChannel, busIds: [bus.id], enabled: true, gain: 1,
+    })) };
+    const adapter = AudioRoutingModel.createProjectAdapter(project);
+    adapter.applyDeliveryPreset(DELIVERY_PRESETS.find(p => p.id === presetId));
+    expect(adapter.current().buses).toEqual(project.buses);
+    adapter.applyDeliveryPreset(DELIVERY_PRESETS.find(p => p.id === '8-fm'));
+    const plan = buildProjectAudioPlan({ audioProject: adapter.current(), clips: [{
+      audioSourceId: 'master', path: 'C:/master/eight-channel.mov', in: 0, out: 3, offset: 0,
+    }] });
+    const stereo = plan.streams.find(stream => stream.name === '2.0-FM');
+    expect(stereo.busIds.map(id => plan.buses.find(bus => bus.id === id).inputs.map(input => input.sourceChannel)))
+      .toEqual([[6], [7]]);
+    expect(adapter.current().sourceMaps).toEqual(project.sourceMaps);
+  });
+
   it('clones state and applies preset safely', () => {
     const initialState = { ...realProject(2), exportLayout: { streams: [] } };
 
@@ -45,6 +64,22 @@ describe('AudioRoutingModel - Project Adapter', () => {
     
     // Ensure original state is untouched
     expect(initialState.buses.length).toBe(2);
+  });
+
+  it('套用輸出預設保留自訂、停用與刻意留空的來源配線', () => {
+    const project = realProject(8);
+    project.buses[7].locked = true;
+    project.buses[6].volume = 0.5;
+    project.sourceMaps.master = { channels: [
+      { sourceStream: 0, sourceChannel: 0, busIds: [project.buses[7].id], enabled: true, gain: 0.7 },
+      { sourceStream: 0, sourceChannel: 6, busIds: [], enabled: true, gain: 1 },
+      { sourceStream: 0, sourceChannel: 7, busIds: [project.buses[6].id], enabled: false, gain: 1 },
+    ] };
+    const adapter = AudioRoutingModel.createProjectAdapter(project);
+    adapter.applyDeliveryPreset(DELIVERY_PRESETS.find(p => p.id === '2-fm'));
+    adapter.applyDeliveryPreset(DELIVERY_PRESETS.find(p => p.id === '8-fm'));
+    expect(adapter.current().sourceMaps).toEqual(project.sourceMaps);
+    expect(adapter.current().buses).toEqual(project.buses);
   });
 
   it('can manually add a stream', () => {

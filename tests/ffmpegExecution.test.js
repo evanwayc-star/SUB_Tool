@@ -164,7 +164,7 @@ describe('FFmpeg execution', () => {
   it('航空 watchdog 路徑由格式與主輸出推導，不接受呼叫端提供的旁檔列表', async () => {
     const userDataDir = makeTempRoot();
     const queueDir = path.join(userDataDir, 'export-queue');
-    const outPath = path.join(userDataDir, 'air.h264');
+    const outPath = path.join(userDataDir, 'air.mpg');
     let config;
     const execution = createFFmpegExecution({
       getFFmpegPath: () => 'ffmpeg-test',
@@ -180,9 +180,7 @@ describe('FFmpeg execution', () => {
       jobId: 'export-air', outPath, outputFormat: 'airline-dmpes',
       outputPaths: [path.join(userDataDir, 'unrelated.txt')],
     });
-    expect(config.outputPaths).toEqual([
-      outPath, path.join(userDataDir, 'air.aac'), path.join(userDataDir, 'air.manzanita.cfg'),
-    ]);
+    expect(config.outputPaths).toEqual([outPath]);
   });
 
   it('watchdog 失敗會以穩定 error code、outcome 與 log path 回報', async () => {

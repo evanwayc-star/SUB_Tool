@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { airlineElementaryEncoding } from '../electron/airline-encoding.js';
+import { airlineEncoding, airlineMuxArgs } from '../electron/airline-encoding.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FFMPEG = process.env.FFMPEG_PATH || path.join(ROOT, 'electron/ffmpeg/ffmpeg.exe');
@@ -44,12 +44,24 @@ function bits(bytes, byteOffset, bitOffset, length) {
   return value;
 }
 
-describe('航空 elementary codec 選擇', () => {
-  it('普通交付格式不啟用分流编码，回傳的參數不共用可變陣列', () => {
-    expect(airlineElementaryEncoding('h264')).toBeNull();
-    const first = airlineElementaryEncoding('airline-s3k');
+describe('航空 codec 選擇', () => {
+  it('普通交付格式不啟用航空編碼，回傳的參數不共用可變陣列', () => {
+    expect(airlineEncoding('h264')).toBeNull();
+    const first = airlineEncoding('airline-s3k');
     first.audioArgs.push('changed');
-    expect(airlineElementaryEncoding('airline-s3k').audioArgs).not.toContain('changed');
+    expect(airlineEncoding('airline-s3k').audioArgs).not.toContain('changed');
+    const mux = airlineMuxArgs();
+    mux.push('changed');
+    expect(airlineMuxArgs()).not.toContain('changed');
+  });
+
+  it('影音 encoder 可共同寫入 transport，不會在編碼參數中關閉另一條 stream', () => {
+    for (const format of ['airline-s3k', 'airline-dmpes']) {
+      const encoding = airlineEncoding(format);
+      expect([...encoding.videoArgs, ...encoding.audioArgs]).not.toEqual(expect.arrayContaining(['-an']));
+      expect([...encoding.videoArgs, ...encoding.audioArgs]).not.toEqual(expect.arrayContaining(['-vn']));
+      expect([...encoding.videoArgs, ...encoding.audioArgs]).not.toEqual(expect.arrayContaining(['-f']));
+    }
   });
 });
 
@@ -59,7 +71,7 @@ describe.skipIf(!nativeAvailable)('航空原生 elementary bitstream', () => {
   beforeAll(() => {
     directory = mkdtempSync(path.join(tmpdir(), 'subtool-airline-encoding-test-'));
     for (const format of ['airline-s3k', 'airline-dmpes']) {
-      const encoding = airlineElementaryEncoding(format);
+      const encoding = airlineEncoding(format);
       const size = format === 'airline-s3k' ? '352x240' : '720x480';
       const video = path.join(directory, format + encoding.videoExtension);
       const audio = path.join(directory, format + encoding.audioExtension);
@@ -67,8 +79,8 @@ describe.skipIf(!nativeAvailable)('航空原生 elementary bitstream', () => {
         '-hide_banner', '-nostdin', '-y', '-f', 'lavfi', '-i',
         `testsrc2=size=${size}:rate=30000/1001:duration=3`,
         '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3',
-        '-map', '0:v', ...encoding.videoArgs, video,
-        '-map', '1:a', ...encoding.audioArgs, audio,
+        '-map', '0:v', ...encoding.videoArgs, '-an', '-f', format === 'airline-s3k' ? 'mpeg1video' : 'h264', video,
+        '-map', '1:a', ...encoding.audioArgs, '-vn', '-f', format === 'airline-s3k' ? 'mp2' : 'adts', audio,
       ]);
       outputs.set(format, { video, audio });
     }
@@ -155,11 +167,12 @@ describe.skipIf(!nativeAvailable)('航空原生 elementary bitstream', () => {
 
   it('低複雜度純黑也維持 1.5 Mbps 目標，DMPES filler 可用且沒有偷偷改成 VBR', () => {
     for (const format of ['airline-s3k', 'airline-dmpes']) {
-      const encoding = airlineElementaryEncoding(format);
+      const encoding = airlineEncoding(format);
       const file = path.join(directory, `black-${format}${encoding.videoExtension}`);
       const size = format === 'airline-s3k' ? '352x240' : '720x480';
       run(FFMPEG, ['-hide_banner', '-nostdin', '-y', '-f', 'lavfi', '-i',
-        `color=black:size=${size}:rate=30000/1001:duration=8`, ...encoding.videoArgs, file]);
+        `color=black:size=${size}:rate=30000/1001:duration=8`, ...encoding.videoArgs,
+        '-an', '-f', format === 'airline-s3k' ? 'mpeg1video' : 'h264', file]);
       const bytes = readFileSync(file);
       const average = bytes.length * 8 / 8;
       // VBV startup/final buffering means a finite clip need not average exactly 1.5 Mbps.

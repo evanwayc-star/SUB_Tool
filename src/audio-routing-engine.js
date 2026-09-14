@@ -320,18 +320,10 @@ export class AudioRoutingModel {
       },
       
       applyDeliveryPreset(preset) {
-        const oldLayout = structuredClone(p.exportLayout);
-        if (p.buses.length > preset.count) {
-          p.exportLayout = { streams: deliveryStreamsForPreset(preset, p.buses.slice(0, preset.count)) };
-          if (!this.setBusCount(preset.count)) {
-            p.exportLayout = oldLayout;
-            return false;
-          }
-        } else if (p.buses.length < preset.count) {
-          this.setBusCount(preset.count);
-        } else {
-          p.mode = 'manual';
-        }
+        // 輸出編組只選取需要的 bus；縮小預設不能刪除來源配線，否則切回
+        // 5.1 + 2.0 時 A7–A8 會因沒有輸入而被匯出為靜音。
+        if (p.buses.length < preset.count) this.setBusCount(preset.count);
+        p.mode = 'manual';
         p.exportLayout = { streams: deliveryStreamsForPreset(preset, p.buses) };
         return true;
       },

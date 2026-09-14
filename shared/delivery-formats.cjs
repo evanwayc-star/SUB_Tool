@@ -10,13 +10,13 @@ const MOD_FHD = Object.freeze({
 });
 
 const AIRLINE_S3K = Object.freeze({
-  format: 'airline-s3k', label: '航空-S3K', extension: '.m1v', audioExtension: '.m1a',
+  format: 'airline-s3k', label: '航空-S3K', extension: '.mpg', transport: 'airline',
   scan: 'progressive', audioLabel: 'MPEG-1 Audio Layer-2 / CRC',
   width: 352, height: 240, fps: 29.97, videoKbps: 1500, audioKbps: 128, sampleRate: 48000,
 });
 
 const AIRLINE_DMPES = Object.freeze({
-  format: 'airline-dmpes', label: '航空-DMPES', extension: '.h264', audioExtension: '.aac',
+  format: 'airline-dmpes', label: '航空-DMPES', extension: '.mpg', transport: 'airline',
   displayAspect: '16:9',
   scan: 'progressive', audioLabel: 'AAC-LC / ADTS',
   width: 720, height: 480, fps: 29.97, videoKbps: 1500, audioKbps: 128, sampleRate: 48000,
@@ -28,15 +28,10 @@ function getDeliveryFormatPreset(format) {
   return DELIVERY_FORMAT_PRESETS.find(preset => preset.format === format) || null;
 }
 
-// 同一航空工作輸出影音分流與 Manzanita 設定檔；名稱規則也供碰撞檢查與輸出租約使用。
+// 每份交付輸出單一成品；航空影音在 SubTool 內合成為 .mpg。
 // 只推導檔名，路徑解析與寫入授權仍由主程序負責。
-function deliveryOutputNames(format, primaryName) {
-  const name = String(primaryName || '');
-  const preset = getDeliveryFormatPreset(format);
-  if (!preset?.audioExtension || !name) return [name];
-  const stem = name.toLowerCase().endsWith(preset.extension)
-    ? name.slice(0, -preset.extension.length) : name;
-  return [name, `${stem}${preset.audioExtension}`, `${stem}.manzanita.cfg`];
+function deliveryOutputNames(_format, primaryName) {
+  return [String(primaryName || '')];
 }
 
 // 兩條 mono 可無損地編組為 L/R；其他多串流或 5.1 配置必須由使用者選擇。

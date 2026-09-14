@@ -16,7 +16,7 @@ const {
   listLeases,
   normalizeOutputPath,
 } = require('../electron/export-lease');
-const { deliveryOutputPaths, MANZANITA_CONFIG } = require('../electron/airline-output');
+const { deliveryOutputPaths } = require('../electron/airline-output');
 
 const WAIT_TIMEOUT_MS = 6000;
 
@@ -146,50 +146,60 @@ if (mode === 'success') {
   }
 
   function airlineScript(format, mode = 'success') {
-    const outPath = path.join(tempDir, format === 'airline-s3k' ? 'air.m1v' : 'air.h264');
+    const outPath = path.join(tempDir, 'air.mpg');
     const paths = deliveryOutputPaths(format, outPath);
+    const packet = (pid, data, pcr = false) => {
+      const bytes = Buffer.alloc(188, 0xff);
+      bytes.set([0x47, (pid >> 8) | 0x40, pid & 255, 0x30, 183 - data.length, pcr ? 0x10 : 0]);
+      if (pcr) bytes.set([0, 0, 0, 0, 0x7e, 0], 6);
+      data.copy(bytes, 188 - data.length);
+      return bytes;
+    };
+    const pat = Buffer.from('0000b00d0001c100000001e03fd69d4f8c', 'hex');
+    const pmt = Buffer.from(format === 'airline-s3k'
+      ? '0002b0170001c10000e030f00002e030f00003e031f000947a0d66'
+      : '0002b0170001c10000e030f0001be030f0000fe031f0004d74b7a8', 'hex');
+    const bytes = Buffer.concat([packet(0, pat), packet(63, pmt), packet(48, Buffer.from([0,0,1,0xe0]), true), packet(49, Buffer.from([0,0,1,0xc0]))]);
     fs.writeFileSync(fakeFfmpeg, `
       const fs = require('fs');
-      const paths = ${JSON.stringify(paths)};
-      fs.writeFileSync(paths[0], 'video-complete');
-      fs.writeFileSync(paths[1], 'audio-complete');
-      ${mode === 'wait' ? "fs.writeFileSync(paths[2], 'partial-config'); setInterval(() => {}, 1000);" : 'setTimeout(() => process.exit(0), 80);'}
+      fs.writeFileSync(process.argv[2], Buffer.from('${bytes.toString('base64')}', 'base64'));
+      ${mode === 'wait' ? 'setInterval(() => {}, 1000);' : 'setTimeout(() => process.exit(0), 80);'}
     `);
     return { paths, outPath };
   }
 
-  it.each(['airline-s3k', 'airline-dmpes'])('%s 成功時保留兩個分流並輸出完整 Manzanita 設定', async format => {
+  it.each(['airline-s3k', 'airline-dmpes'])('%s 成功前完成 TS 修整，只留下單一 MPG', async format => {
     const { paths, outPath } = airlineScript(format);
     const { controller } = launch('success', outPath, format, { outputFormat: format });
     await controller.ready;
     const result = await controller.completion;
     expect(result.ok).toBe(true);
-    expect(fs.readFileSync(paths[0], 'utf8')).toBe('video-complete');
-    expect(fs.readFileSync(paths[1], 'utf8')).toBe('audio-complete');
-    expect(fs.readFileSync(paths[2], 'utf8')).toBe(MANZANITA_CONFIG);
-    expect(MANZANITA_CONFIG).toContain('PMTPID = 0x3f\r\nPCRPID = 0x30');
-    expect(MANZANITA_CONFIG).toContain('Rate = -1.000\r\nPID = 0x30');
+    expect(paths).toEqual([outPath]);
+    const data = fs.readFileSync(outPath);
+    expect(data.length).toBe(188 * 4);
+    for (const i of [1, 2, 3]) expect(data[188 * i + 1] & 32).toBe(32);
+    expect(data[188 * 2 - 26 + 12]).toBe(format === 'airline-s3k' ? 1 : 27);
+    expect(fs.readdirSync(tempDir).filter(name => /\.(m1v|h264|m1a|aac|cfg)$/.test(name))).toEqual([]);
     expect(listLeases(queueDir)).toEqual([]);
   });
 
-  it('航空作業停止會刪除全組半成品，然後一起釋放三個鎖', async () => {
+  it('航空作業停止會刪除 MPG 半成品，然後釋放鎖', async () => {
     const { paths, outPath } = airlineScript('airline-dmpes', 'wait');
     const { controller } = launch('wait', outPath, 'air-stop', { outputFormat: 'airline-dmpes' });
     await controller.ready;
-    await waitFor(() => paths.every(file => fs.existsSync(file)), '航空分流尚未建立');
-    expect(listLeases(queueDir)).toHaveLength(3);
+    await waitFor(() => paths.every(file => fs.existsSync(file)), '航空 MPG 尚未建立');
+    expect(listLeases(queueDir)).toHaveLength(1);
     controller.stop('user-stop');
     const result = await controller.completion;
     expect(result.cleanup).toMatchObject({ removed: true, released: true, retainedLease: false });
-    expect(result.cleanup.files).toHaveLength(3);
     expect(paths.some(file => fs.existsSync(file))).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
   });
 
-  it('航空音訊旁檔已被佔用時不得啟動 FFmpeg 或刪除已有成品', async () => {
+  it('航空 MPG 已被佔用時不得啟動 FFmpeg 或刪除已有成品', async () => {
     const { paths, outPath } = airlineScript('airline-dmpes');
     for (const file of paths) fs.writeFileSync(file, 'original');
-    acquireLease({ queueDir, outPath: paths[1], jobId: 'owner', token: 'owner-token' });
+    acquireLease({ queueDir, outPath, jobId: 'owner', token: 'owner-token' });
     const { controller } = launch('success', outPath, 'air-conflict', { outputFormat: 'airline-dmpes' });
     await expect(controller.ready).rejects.toMatchObject({ code: 'OUTPUT_BUSY' });
     await controller.completion.catch(() => {});
@@ -198,8 +208,8 @@ if (mode === 'success') {
     expect(listLeases(queueDir)[0].owner.jobId).toBe('owner');
   });
 
-  it('航空 FFmpeg 成功卻缺音訊時不產生設定檔或假完成', async () => {
-    const outPath = path.join(tempDir, 'missing-audio.h264');
+  it('航空 FFmpeg 成功但 TS 無效時清理半成品而不假完成', async () => {
+    const outPath = path.join(tempDir, 'invalid.mpg');
     const { controller } = launch('success', outPath, 'air-missing', { outputFormat: 'airline-dmpes' });
     await controller.ready;
     const result = await controller.completion;
@@ -208,19 +218,18 @@ if (mode === 'success') {
     expect(deliveryOutputPaths('airline-dmpes', outPath).some(file => fs.existsSync(file))).toBe(false);
   });
 
-  it('航空任一半成品無法刪除會保留全組鎖', async () => {
+  it('航空 MPG 半成品無法刪除會保留鎖', async () => {
     const { paths, outPath } = airlineScript('airline-s3k', 'wait');
     const { controller } = launch('wait', outPath, 'air-retain', { outputFormat: 'airline-s3k' });
     await controller.ready;
-    await waitFor(() => fs.existsSync(paths[2]), '航空分流尚未建立');
-    fs.unlinkSync(paths[2]);
-    fs.mkdirSync(paths[2]);
+    await waitFor(() => fs.existsSync(paths[0]), '航空 MPG 尚未建立');
+    fs.unlinkSync(paths[0]);
+    fs.mkdirSync(paths[0]);
     controller.stop('user-stop');
     const result = await controller.completion;
     expect(result.cleanup).toMatchObject({ released: false, retainedLease: true });
-    expect(listLeases(queueDir)).toHaveLength(3);
-    expect(fs.existsSync(paths[0])).toBe(false);
-    expect(fs.existsSync(paths[1])).toBe(false);
+    expect(listLeases(queueDir)).toHaveLength(1);
+    expect(fs.statSync(paths[0]).isDirectory()).toBe(true);
   });
 
   it('MOD-FHD 封裝驗證失敗會刪除半成品且不回報成功', async () => {

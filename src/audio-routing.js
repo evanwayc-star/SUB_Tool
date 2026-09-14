@@ -218,7 +218,8 @@ function projectOutputEditor(originalLayout=null,originalBusState=null){
   const p = project();
   initial={
     layout:originalLayout||structuredClone(p.exportLayout),
-    buses:originalBusState||structuredClone({mode:p.mode,buses:p.buses})
+    buses:originalBusState||structuredClone({mode:p.mode,buses:p.buses}),
+    sourceMaps:structuredClone(p.sourceMaps)
   };
   
   const model = AudioRoutingModel.createProjectAdapter(State.audioProject);
@@ -241,11 +242,10 @@ function projectOutputEditor(originalLayout=null,originalBusState=null){
     update:label=>updateViews(label),
     cancel(){
       if(!initial) return;
-      const current=project();
       State.audioProject=normalizeAudioProject({
         mode:initial.buses.mode,
         buses:initial.buses.buses,
-        sourceMaps:current.sourceMaps,
+        sourceMaps:initial.sourceMaps,
         exportLayout:initial.layout
       });
       Media.applyGains(); renderAudioTracks(); drawTimeline();

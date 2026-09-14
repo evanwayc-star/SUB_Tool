@@ -775,8 +775,9 @@
         if (job.status === 'queued') { statusText = '等待中'; icon = ICONS.queued; }
         if (job.status === 'running') { statusText = '執行中 ' + pctValue.toFixed(1) + '%'; icon = ICONS.running; }
         if (job.status === 'stopping') { statusText = '停止中'; icon = ICONS.stopped; }
-        const airlineOutput = !!deliveryPreset(job.payload?.format)?.audioExtension;
-        if (job.status === 'done') { statusText = airlineOutput ? '影音分流完成' : '完成'; icon = ICONS.done; }
+        const airlineOutput = deliveryPreset(job.payload?.format)?.transport === 'airline';
+        const legacyAirlineOutput = airlineOutput && /\.(m1v|h264)$/i.test(job.payload?.outPath || '');
+        if (job.status === 'done') { statusText = legacyAirlineOutput ? '舊版分流完成' : '完成'; icon = ICONS.done; }
         if (job.status === 'failed') { statusText = '失敗'; icon = ICONS.failed; }
         if (job.status === 'missing-source') { statusText = '來源遺失'; icon = ICONS.failed; }
         if (job.status === 'stopped') { statusText = '已停止'; icon = ICONS.stopped; }
@@ -881,7 +882,7 @@
               <span class="job-chip job-chip--spec">${escapeHTML(deliverySpec)}</span>
               ${subtitleLabel ? `<span class="job-chip job-subs" title="${escapeHTML('會燒進這份交付的字幕軌：' + subtitleLabel)}">${escapeHTML(subtitleLabel)}</span>` : ''}
               ${burnsTimecode(job.payload) ? '<span class="job-chip job-chip--tc" title="會在畫面上燒入時間碼">燒入 TC</span>' : ''}
-              ${airlineOutput ? '<span class="job-chip job-chip--handoff">影音分流與設定檔 · 待 Manzanita 合成 .mpg</span>' : ''}
+              ${airlineOutput ? `<span class="job-chip job-chip--output">${legacyAirlineOutput ? '舊版分流檔 · 請從交付清單重送以產生 .mpg' : '自動合成 .mpg · MPEG-TS'}</span>` : ''}
               ${enqueuedAt ? `<span class="job-enqueued" title="加入佇列時間">${escapeHTML(enqueuedAt)}</span>` : ''}
             </p>
             ${(job.status === 'queued' || !metaText) ? '' : `<p class="job-meta">${escapeHTML(metaText)}</p>`}
@@ -986,7 +987,7 @@
             ? `${preset.width}×${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}` : normalLabel;
         }
         q('[data-preset-spec]').hidden = !preset;
-        q('[data-preset-spec]').textContent = preset ? `固定 ${preset.width} × ${preset.height}${preset.displayAspect ? ` (${preset.displayAspect})` : ''} / ${preset.fps} fps / ${preset.videoKbps} kbps${preset.audioExtension ? ' · 待 Manzanita 合成 .mpg' : ''}` : '';
+        q('[data-preset-spec]').textContent = preset ? `固定 ${preset.width} × ${preset.height}${preset.displayAspect ? ` (${preset.displayAspect})` : ''} / ${preset.fps} fps / ${preset.videoKbps} kbps${preset.transport === 'airline' ? ' · 自動合成 .mpg（MPEG-TS）' : ''}` : '';
         const isCustom = q('[data-f="res"]').value === 'custom';
         box.querySelector('[data-custom]').hidden = (f === 'wav') || !isCustom;
       };

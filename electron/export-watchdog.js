@@ -6,7 +6,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { deliveryOutputPaths, finalizeAirlineOutput } = require('./airline-output');
+const { deliveryOutputPaths, isAirlineOutput, finalizeAirlineOutput } = require('./airline-output');
 const {
   acquireLease,
   updateLease,
@@ -335,7 +335,7 @@ async function startWatchdogRuntime(config, options = {}) {
           cleanupReason ||= 'mod-fhd-finalize-failed';
         }
       }
-      if (!cleanupReason && !childError && code === 0 && outputPaths.length > 1) {
+      if (!cleanupReason && !childError && code === 0 && isAirlineOutput(config.outputFormat)) {
         try {
           await finalizeAirlineOutput(config.outputFormat, config.outPath, { signal: finalizerAbort.signal });
         } catch (error) {

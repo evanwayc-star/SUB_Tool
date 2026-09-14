@@ -399,7 +399,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
             ${preset ? `<span class="delivery-audio-info">單一 Stereo · ${preset.audioLabel} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps</span>` : ''}
           </div>
         </div>
-        ${preset?.audioExtension ? `<div class="delivery-ctrl-row delivery-airline-handoff"><span class="delivery-audio-info">${preset.displayAspect ? `顯示比例 ${preset.displayAspect} · ` : ''}輸出 ${preset.extension} 影像、${preset.audioExtension} 音訊與 .manzanita.cfg 設定檔；請在 Manzanita MP2TSME 載入後合成 .mpg。</span></div>` : ''}
+        ${preset?.transport === 'airline' ? `<div class="delivery-ctrl-row delivery-airline-output"><span class="delivery-audio-info">${preset.displayAspect ? `顯示比例 ${preset.displayAspect} · ` : ''}SubTool 自動合成影音，直接輸出 .mpg（MPEG-TS）。</span></div>` : ''}
       </div>
     `;
   }

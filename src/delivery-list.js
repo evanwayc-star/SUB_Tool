@@ -277,7 +277,7 @@ export function createDeliveryList({
       return out;
     },
 
-    /** 每一列的所有輸出路徑，含航空影音分流及設定檔（供 I/O 層檢查覆寫）。 */
+    /** 每一列的成品輸出路徑（供 I/O 層檢查覆寫）。 */
     outPaths() {
       return rows.flatMap(r => deliveryOutputNames(r.format, r.customName)
         .map(name => ({ dir: r.outDir, name, path: joinPath(r.outDir, name) })));

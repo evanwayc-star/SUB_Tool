@@ -42,7 +42,6 @@ const { createAudioNormalizationRuntime } = require('./audio-normalization-runti
    匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
 const { deliveryResolution, suggestKbps } = require('../shared/delivery-resolution.cjs');
 const { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
-const { deliveryOutputPaths } = require('./airline-output');
 const {
   buildIngestArgs,
   createFFmpegExecution,
@@ -824,12 +823,8 @@ function grantPersistedQueueJobCapabilities(job) {
   }
   try {
     assertQueueOutputFormat(job);
-    grantDeliveryOutputs(job.payload.format, job.payload.outPath);
+    fileAuthority.grantDeliveryFile(job.payload.outPath);
   } catch (error) {}
-}
-
-function grantDeliveryOutputs(format, outPath) {
-  for (const file of deliveryOutputPaths(format, outPath)) fileAuthority.grantDeliveryFile(file);
 }
 
 function openQueueWindow() {
@@ -1060,7 +1055,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
     result: { format, outPath: newPath, width: w, height: h, targetH, videoKbps, fps, burnTimecode: !!timecodeWatermark },
     /* 同資料夾、同主檔名，只換副檔名。能力只在 job 快照成功落盤後才擴張，
        失敗時不留下 renderer 看不到的半份授權。 */
-    onCommitted: newPath !== oldPath ? () => grantDeliveryOutputs(format, newPath) : undefined,
+    onCommitted: newPath !== oldPath ? () => fileAuthority.grantDeliveryFile(newPath) : undefined,
   };
 }
 
@@ -1086,20 +1081,11 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!outPath) {
     const r = await dialog.showSaveDialog(mainWin, {
       title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
-      filters: [{ name: preset ? `${preset.label} (${preset.audioExtension ? '影音分流' : 'MPEG-TS'})` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
+      filters: [{ name: preset ? `${preset.label} (MPEG-TS)` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
     });
     if (r.canceled) return null;
     outPath = r.filePath;
-    const existingSidecars = deliveryOutputPaths(format, outPath).slice(1).filter(file => fs.existsSync(file));
-    if (existingSidecars.length) {
-      const overwrite = await dialog.showMessageBox(mainWin, {
-        type: 'warning', title: '覆寫航空分流檔',
-        message: '同名音訊或 Manzanita 設定檔已存在，是否覆寫？',
-        detail: existingSidecars.join('\n'), buttons: ['取消', '覆寫'], defaultId: 0, cancelId: 0,
-      });
-      if (overwrite.response !== 1) return null;
-    }
-    grantDeliveryOutputs(format, outPath);
+    fileAuthority.grantDeliveryFile(outPath);
   }
 
   // presetOut 只能來自已選取的交付目錄；不允許 renderer 以略過 save dialog 的
@@ -1108,7 +1094,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   QueueManager.assertJobCapabilities({ payload: authorizationPayload });
   // 交付目錄能力只代表「可建立候選檔」；工作通過格式、來源與路徑驗證後，
   // 才給這一個成品 shell reveal 的精確能力。
-  grantDeliveryOutputs(format, outPath);
+  fileAuthority.grantDeliveryFile(outPath);
 
   const jobId = newJobId('export-');
   // 分離 assText 存為獨立檔案

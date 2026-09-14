@@ -364,14 +364,14 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     hasAudioStream = () => true,
     fontsDir = null,
     timecodeFontFile = null,
-    elementaryEncoding = null,
-    audioOutPath = null,
+    airlineEncoding = null,
+    airlineMuxArgs = null,
   } = env;
 
-  const isAirline = !!preset?.audioExtension;
+  const isAirline = preset?.transport === 'airline';
   const isInterlaced = preset?.scan === 'interlaced';
-  if (isAirline && (!elementaryEncoding || !audioOutPath)) {
-    throw new Error('航空交付缺少影音分流編碼設定或音訊輸出路徑');
+  if (isAirline && (!airlineEncoding || !airlineMuxArgs)) {
+    throw new Error('航空交付缺少影音編碼或 TS 合成設定');
   }
 
   const isWav = format === 'wav';
@@ -402,7 +402,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const H = Math.max(2, Math.round(height || 1080));
   // 非方形像素先以顯示比例合成與燒字幕，最後才壓成規格的編碼尺寸。
   // 直接在 720×480 / 352×240 上 contain 會把字幕與素材一起橫向拉變形。
-  const sarParts = isAirline ? elementaryEncoding.sar.split('/').map(Number) : [1, 1];
+  const sarParts = isAirline ? airlineEncoding.sar.split('/').map(Number) : [1, 1];
   const W = isAirline ? Math.max(2, Math.round(encodedW * sarParts[0] / sarParts[1] / 2) * 2) : encodedW;
   // FPS-SYNC：NTSC 格率必須用精確有理數；轉換只改 cadence，不改時間軸秒數。
   const outputRate = deliveryFrameRateRatio(fps);
@@ -632,7 +632,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     vfinal = tcOut;
   }
   if (isAirline) {
-    fc.push(`${vfinal}scale=${encodedW}:${H}:flags=lanczos,setsar=${elementaryEncoding.sar},format=yuv420p,setfield=prog[vairline]`);
+    fc.push(`${vfinal}scale=${encodedW}:${H}:flags=lanczos,setsar=${airlineEncoding.sar},format=yuv420p,setfield=prog[vairline]`);
     vfinal = '[vairline]';
   }
 
@@ -650,9 +650,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   if (isAirline) {
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
-        '-map', vfinal, ...elementaryEncoding.videoArgs, outPath,
-        ...audioMaps, ...elementaryEncoding.audioArgs, audioOutPath],
-      label: `匯出 ${preset.label} 影音分流（待 Manzanita 合成）`,
+        '-map', vfinal, ...audioMaps, ...airlineEncoding.videoArgs,
+        ...airlineEncoding.audioArgs, ...airlineMuxArgs, outPath],
+      label: `匯出 ${preset.label} MPG（自動合成 TS）`,
       duration: D,
       plannedEncoder: format === 'airline-s3k' ? 'mpeg1video' : 'libx264',
       isGpu: false, kbps, audioBitrates, audioChannels: 2,

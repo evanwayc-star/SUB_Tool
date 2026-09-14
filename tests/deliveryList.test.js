@@ -20,8 +20,8 @@ describe('副檔名', () => {
     expect(extensionFor('prores')).toBe('.mov');
     expect(extensionFor('wav')).toBe('.wav');
     expect(extensionFor('mod-fhd')).toBe('.ts');
-    expect(extensionFor('airline-s3k')).toBe('.m1v');
-    expect(extensionFor('airline-dmpes')).toBe('.h264');
+    expect(extensionFor('airline-s3k')).toBe('.mpg');
+    expect(extensionFor('airline-dmpes')).toBe('.mpg');
     expect(extensionFor('未知')).toBe('.mp4');
   });
 });
@@ -299,13 +299,13 @@ describe('轉成匯出工作', () => {
   });
 });
 
-describe('航空影音分流交付', () => {
+describe('航空 MPEG-TS 交付', () => {
   const stereoPlan = { streams: [{ layout: 'stereo', busIds: ['l', 'r'] }] };
 
   it.each([
-    ['airline-s3k', '航空-S3K', 352, 240, '.m1v', '.m1a'],
-    ['airline-dmpes', '航空-DMPES', 720, 480, '.h264', '.aac'],
-  ])('%s 固定規格與檔名，並列出三個需檢查覆寫的輸出', (format, label, width, height, videoExt, audioExt) => {
+    ['airline-s3k', '航空-S3K', 352, 240],
+    ['airline-dmpes', '航空-DMPES', 720, 480],
+  ])('%s 固定規格與檔名，只列出最終 mpg 成品供檢查覆寫', (format, label, width, height) => {
     const list = base({ fps: 24, canvasW: 4096, canvasH: 2160, defaultAudioLayout: stereoPlan });
     list.setOutDir(0, 'D:\\交付');
     list.setFormat(0, format);
@@ -314,10 +314,10 @@ describe('航空影音分流交付', () => {
     list.setKbps(0, 20000);
     expect(list.get(0)).toMatchObject({ targetH: height, targetFps: 29.97, kbps: 1500 });
     const stem = `ST_拼桌_${label}_${height}p_29.97fps`;
-    expect(list.get(0).customName).toBe(stem + videoExt);
-    expect(list.outPaths()).toEqual([videoExt, audioExt, '.manzanita.cfg'].map(extension => ({
-      dir: 'D:\\交付', name: stem + extension, path: `D:\\交付\\${stem}${extension}`,
-    })));
+    expect(list.get(0).customName).toBe(stem + '.mpg');
+    expect(list.outPaths()).toEqual([{
+      dir: 'D:\\交付', name: stem + '.mpg', path: `D:\\交付\\${stem}.mpg`,
+    }]);
     const [job] = list.toJobs({
       clips: [], videoTracks: [], duration: 12.5, compiledAudioPlan: stereoPlan,
       timecodeForFps: fps => `fps:${fps}`,
@@ -327,7 +327,7 @@ describe('航空影音分流交付', () => {
     expect(list.outPaths().every(output => output.name.startsWith(stem + '_TC.'))).toBe(true);
   });
 
-  it('S3K 與 DMPES 同名時，即使影像副檔名不同仍會撞到設定檔', () => {
+  it('S3K 與 DMPES 使用同一成品檔名時會阻擋輸出碰撞', () => {
     const list = base({ defaultAudioLayout: stereoPlan });
     list.setOutDir(0, 'D:\\交付');
     list.setFormat(0, 'airline-s3k');
@@ -340,11 +340,11 @@ describe('航空影音分流交付', () => {
     expect(list.problems()).toHaveLength(0);
   });
 
-  it('副檔名不分大小寫、保留多段檔名，普通格式只有單一輸出', () => {
-    expect(deliveryOutputNames('airline-s3k', '節目.v2.M1V'))
-      .toEqual(['節目.v2.M1V', '節目.v2.m1a', '節目.v2.manzanita.cfg']);
-    expect(deliveryOutputNames('airline-dmpes', 'film.H264'))
-      .toEqual(['film.H264', 'film.aac', 'film.manzanita.cfg']);
+  it('各格式只保留成品檔名，不建立同名音訊或設定檔', () => {
+    expect(deliveryOutputNames('airline-s3k', '節目.v2.MPG'))
+      .toEqual(['節目.v2.MPG']);
+    expect(deliveryOutputNames('airline-dmpes', 'film.mpg'))
+      .toEqual(['film.mpg']);
     expect(deliveryOutputNames('mod-fhd', 'film.ts')).toEqual(['film.ts']);
     expect(deliveryOutputNames('h264', 'film.mp4')).toEqual(['film.mp4']);
   });

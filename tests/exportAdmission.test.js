@@ -21,7 +21,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { createExportAdmission } = require(path.join(ROOT, 'electron/export-queue.js'));
 const { expectedExportExtension } = require(path.join(ROOT, 'electron/ipc-guards.js'));
 
-const EXT = { h264: 'mp4', prores: 'mov', wav: 'wav', 'mod-fhd': 'ts' };
+const EXT = { h264: 'mp4', prores: 'mov', wav: 'wav', 'mod-fhd': 'ts', 'airline-s3k': 'mpg', 'airline-dmpes': 'mpg' };
 
 /* 預設全部放行，測哪一條就只關哪一條——才不會因為別的規則先擋下來而假綠。 */
 function make(overrides = {}) {
@@ -52,6 +52,8 @@ describe('輸出副檔名必須與 format 一致', () => {
     ['prores', 'D:/out/a.mov'],
     ['wav', 'D:/out/a.wav'],
     ['mod-fhd', 'D:/out/a.ts'],
+    ['airline-s3k', 'D:/out/a.mpg'],
+    ['airline-dmpes', 'D:/out/a.mpg'],
   ])('%s → %s 放行', (format, outPath) => {
     expect(make().assertOutputFormat(job({ payload: { format, outPath } }))).toBe(EXT[format]);
   });
@@ -70,6 +72,14 @@ describe('輸出副檔名必須與 format 一致', () => {
       .toThrow(/必須使用 \.ts/);
     expect(() => make().assertOutputFormat(job({ payload: { format: 'unknown' } })))
       .toThrow(expect.objectContaining({ code: 'INVALID_EXPORT_FORMAT' }));
+  });
+
+  it.each([
+    ['airline-s3k', 'D:/out/old.m1v'],
+    ['airline-dmpes', 'D:/out/old.h264'],
+  ])('恢復 %s 舊版分流工作時拒絕沿用 %s，避免用錯副檔名寫入 MPEG-TS', (format, outPath) => {
+    expect(() => make().assertJobAdmissible(job({ payload: { format, outPath } })))
+      .toThrow(expect.objectContaining({ code: 'INVALID_OUTPUT_EXTENSION', message: expect.stringContaining('必須使用 .mpg') }));
   });
 });
 
@@ -130,19 +140,22 @@ describe('鐵律 §0.8：交付只准讀母素材', () => {
 });
 
 describe('檔案能力', () => {
-  it('航空輸出必須同時授權影音分流與設定檔，且不可覆蓋任何母素材', () => {
-    const airline = job({ payload: { format: 'airline-dmpes', outPath: 'D:/out/air.h264' } });
-    const denied = make({ deps: { canWriteDelivery: file => !file.endsWith('.aac') } });
+  it('航空輸出只授權最終 MPG，且不可覆蓋母素材', () => {
+    const outPath = path.join('D:/out', 'air.mpg');
+    const airline = job({ payload: { format: 'airline-dmpes', outPath } });
+    expect(make({ deps: { canWriteDelivery: file => file === outPath } }).assertJobAdmissible(airline))
+      .toEqual(airline.sourcePaths);
+    const denied = make({ deps: { canWriteDelivery: file => file !== outPath } });
     expect(() => denied.assertJobAdmissible(airline))
       .toThrow(expect.objectContaining({ code: 'UNAUTHORIZED_OUTPUT_PATH' }));
-    airline.sourcePaths = [path.join('D:/out', 'air.aac')];
+    airline.sourcePaths = [outPath];
     expect(() => make().assertJobAdmissible(airline))
       .toThrow(expect.objectContaining({ code: 'OUTPUT_OVERWRITES_SOURCE' }));
   });
 
-  it('不同航空格式共用同名 cfg 也算輸出碰撞', () => {
-    const existing = job({ id: 's3k', status: 'queued', payload: { format: 'airline-s3k', outPath: 'D:/out/air.m1v' } });
-    const next = job({ payload: { format: 'airline-dmpes', outPath: 'D:/out/air.h264' } });
+  it('不同航空格式寫入同一 MPG 時阻擋輸出碰撞', () => {
+    const existing = job({ id: 's3k', status: 'queued', payload: { format: 'airline-s3k', outPath: 'D:/out/air.mpg' } });
+    const next = job({ payload: { format: 'airline-dmpes', outPath: 'D:/out/air.mpg' } });
     expect(() => make({ jobs: [existing] }).assertOutputAvailable(next))
       .toThrow(expect.objectContaining({ code: 'OUTPUT_BUSY', conflictingJobId: 's3k' }));
   });

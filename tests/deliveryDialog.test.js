@@ -89,9 +89,9 @@ beforeEach(() => {
 
 describe('匯出交付清單', () => {
   it.each([
-    ['airline-s3k', '352×240p', '.m1v', 'MPEG-1 Audio Layer-2 / CRC'],
-    ['airline-dmpes', '720×480p', '.h264', 'AAC-LC / ADTS'],
-  ])('%s 提供固定循序掃描規格與 Manzanita 合成說明', async (formatName, resolutionText, extension, audioLabel) => {
+    ['airline-s3k', '352×240p', '.mpg', 'MPEG-1 Audio Layer-2 / CRC'],
+    ['airline-dmpes', '720×480p', '.mpg', 'AAC-LC / ADTS'],
+  ])('%s 提供固定循序掃描規格並直接合成 MPG', async (formatName, resolutionText, extension, audioLabel) => {
     await showExportVideoDialog();
     await new Promise(resolve => setTimeout(resolve, 25));
     const format = document.querySelector('.ev-format');
@@ -108,29 +108,31 @@ describe('匯出交付清單', () => {
     expect(document.querySelector('.ev-name').value.endsWith(extension)).toBe(true);
     expect(document.body.textContent).toContain(audioLabel);
     expect(document.body.textContent).toContain('48 kHz / 128 kbps');
-    expect(document.querySelector('.delivery-airline-handoff').textContent).toContain('Manzanita MP2TSME');
-    expect(document.querySelector('.delivery-airline-handoff').textContent).toContain('合成 .mpg');
+    expect(document.querySelector('.delivery-airline-output').textContent).toContain('自動合成影音');
+    expect(document.querySelector('.delivery-airline-output').textContent).toContain('.mpg（MPEG-TS）');
+    if (formatName === 'airline-dmpes') expect(document.querySelector('.delivery-airline-output').textContent).toContain('16:9');
+    expect(document.body.textContent).not.toContain('Manzanita');
     expect(State.fps).toBe(25);
   });
 
-  it('航空輸出的音訊或設定檔已存在時，即使影像不存在也顯示覆寫警告', async () => {
+  it('航空 MPG 已存在時顯示覆寫警告，只檢查目前會輸出的成品', async () => {
     await showExportVideoDialog();
     await new Promise(resolve => setTimeout(resolve, 25));
     const format = document.querySelector('.ev-format');
     format.value = 'airline-dmpes';
     format.dispatchEvent(new Event('change', { bubbles: true }));
     const name = document.querySelector('.ev-name');
-    name.value = 'flight.h264';
+    name.value = 'flight.mpg';
     name.dispatchEvent(new Event('change', { bubbles: true }));
-    window.subtool.listDir.mockResolvedValue(['flight.aac', 'flight.manzanita.cfg']);
+    window.subtool.listDir.mockResolvedValue(['flight.mpg', 'flight.aac', 'flight.manzanita.cfg']);
     const outDir = document.querySelector('.ev-outdir');
     outDir.value = 'D:/交付';
     outDir.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(resolve => setTimeout(resolve, 25));
     const message = document.getElementById('evConflictMsg');
-    expect(message.textContent).toContain('flight.aac');
-    expect(message.textContent).toContain('flight.manzanita.cfg');
-    expect(message.textContent).not.toContain('flight.h264');
+    expect(message.textContent).toContain('flight.mpg');
+    expect(message.textContent).not.toContain('flight.aac');
+    expect(message.textContent).not.toContain('flight.manzanita.cfg');
     expect(getComputedStyle(message).display).not.toBe('none');
   });
 

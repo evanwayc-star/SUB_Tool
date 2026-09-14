@@ -45,19 +45,20 @@ afterEach(() => {
 
 describe('匯出佇列監控緊湊工作區', () => {
   it.each([
-    ['airline-s3k', '航空-S3K', 352, 240, '.m1v'],
-    ['airline-dmpes', '航空-DMPES', 720, 480, '.h264'],
-  ])('%s 顯示分流完成並可檢視鎖定規格，保留後續 Manzanita 合成提示', async (format, label, width, height, extension) => {
-    const payload = { format, width, height, fps: 29.97, targetH: height, videoKbps: 1500, outPath: 'C:\\out\\flight' + extension };
+    ['airline-s3k', '航空-S3K', 352, 240],
+    ['airline-dmpes', '航空-DMPES', 720, 480],
+  ])('%s 顯示 MPG 完成並可檢視自動合成及鎖定規格', async (format, label, width, height) => {
+    const payload = { format, width, height, fps: 29.97, targetH: height, videoKbps: 1500, outPath: 'C:\\out\\flight.mpg' };
     const { document, queueAPI } = await openQueueWindow([
       { id: 'done-air', status: 'done', payload },
-      { id: 'queued-air', status: 'queued', payload: { ...payload, outPath: 'C:\\out\\next' + extension } },
+      { id: 'queued-air', status: 'queued', payload: { ...payload, outPath: 'C:\\out\\next.mpg' } },
     ]);
-    expect(document.querySelector('[data-job-id="done-air"] .job-status').textContent).toContain('影音分流完成');
+    expect(document.querySelector('[data-job-id="done-air"] .job-status').textContent.trim()).toBe('完成');
     expect(document.querySelector('[data-job-id="done-air"] .job-chip--spec').textContent)
       .toBe(`${label} / ${width} x ${height} px / 29.97 fps / 1500 kbps`);
-    expect(document.querySelector('[data-job-id="done-air"] .job-chip--handoff').textContent)
-      .toContain('待 Manzanita 合成 .mpg');
+    expect(document.querySelector('[data-job-id="done-air"] .job-chip--output').textContent)
+      .toContain('自動合成 .mpg');
+    expect(document.body.textContent).not.toContain('Manzanita');
     const queued = document.querySelector('[data-job-id="queued-air"]');
     queued.querySelector('[data-action="edit"]').click();
     const resolution = queued.querySelector('[data-f="res"]');
@@ -65,10 +66,19 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(resolution.disabled).toBe(true);
     expect(resolution.selectedOptions[0].textContent).toBe(`${width}×${height}p`);
     expect(queued.querySelector('[data-f="customH"]').disabled).toBe(true);
-    expect(queued.querySelector('[data-preset-spec]').textContent).toContain('待 Manzanita 合成 .mpg');
+    expect(queued.querySelector('[data-preset-spec]').textContent).toContain('自動合成 .mpg');
+    if (format === 'airline-dmpes') expect(queued.querySelector('[data-preset-spec]').textContent).toContain('16:9');
     queued.querySelector('[data-f="save"]').click();
     await Promise.resolve();
     expect(queueAPI.updateDelivery).toHaveBeenCalledWith('queued-air', { format, targetH: height, burnTimecode: false });
+  });
+
+  it('歷史 ES 完成項仍標示舊版分流，不冒充已合成的 MPG', async () => {
+    const { document } = await openQueueWindow([
+      { id: 'old-air', status: 'done', payload: { format: 'airline-dmpes', outPath: 'C:\\out\\flight.h264' } },
+    ]);
+    expect(document.querySelector('[data-job-id="old-air"] .job-status').textContent).toContain('舊版分流完成');
+    expect(document.querySelector('[data-job-id="old-air"] .job-chip--output').textContent).toContain('請從交付清單重送');
   });
 
   it('把未完成工作集中至主要工作區，完成紀錄採收合區塊', async () => {

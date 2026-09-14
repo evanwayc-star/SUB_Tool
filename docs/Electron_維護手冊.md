@@ -164,7 +164,7 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 
 `node scripts/acceptance/verify-mod-fhd.js` 以逐行與隔行合成素材跑正式計畫及 watchdog，檢查實際 TFF 像素、完整解碼、影音 codec／FPS／時長、ADTS MPEG-2 位元、PID、PCR 量測碼率與 PAT 間隔；證據留在系統 temp。
 
-### 航空分流與 Manzanita 交接
+### 航空 MPG 自動合成
 
 `airline-encoding.js` 提供 Carbon CPF 對應的 CPU codec 參數，由 delivery runner 注入純 `export-plan.js`。計畫先用顯示比例合成、燒字幕與 TC，再縮為編碼尺寸並設定 SAR；航空來源若隔行則以 bwdif send_frame 轉逐行，不走 MOD-FHD 的場交織。
 
@@ -173,11 +173,13 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 
 上述是跨編碼器的參數對應。S3K 的 224 KiB VBV 在此碼率超出 MPEG-1 `vbv_delay` 可表範圍，FFmpeg 寫入 0xffff；DMPES 的 130202-byte VBV 傳入 1041616 bits，x264 內部取整為 kilobits。Carbon 專用搜尋／量化策略不保證等價；DMPES sequence-end 畫面與 CPF 不同，目前依 CPF 不追加結尾 NAL。不能宣稱與 Carbon 位元流完全一致或已通過航空設備驗收。
 
-`delivery-formats.cjs` 統一定義主檔、音訊與 cfg 名稱；admission 同時檢查三個輸出的來源衝突、授權與佇列佔用。watchdog 持有全組 lease，確認兩個分流存在且非空後，透過 `airline-output.js` 寫入 Manzanita 設定；取消或收尾失敗清理全組，清理失敗保留 lease。watchdog 的 helper 與共用格式模組須一併 asarUnpack。
+`delivery-formats.cjs` 統一定義單一 `.mpg` 輸出，容器由 `-f mpegts` 明確指定為 188-byte MPEG-TS。同一 ffmpeg 程序直接編碼與合成影音，不產生 ES／cfg，也不從缺少 PTS/DTS 的 raw H.264 重建 B 幀時間戳。admission 檢查成品的來源衝突、授權與佇列佔用；舊版 `.h264`／`.m1v` 工作因副檔名不符被拒絕，需從交付清單重新送出。
 
-提供的 cfg 保留 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes 及 Video Rate -1（Minimum）。參考成品確認 188-byte MPEG-TS、MPEG-4 AAC／ADTS，整體 CBR 約 1.855594 Mbps；這是 Manzanita 對該成品算出的 Minimum，不硬套為所有內容的固定碼率。軟體仍由使用者操作合成，操作步驟見 [使用說明](使用說明.md#航空檔案的-manzanita-合成)。
+合成沿用 Panasonic cfg 的 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes。固定 1500／128 kbps 的航空規格採參考成品 PCR 實測的 1855594 bps CBR，PCR 約 90 ms、PAT/PMT 約 100 ms；這是明確的內建 mux 設定，不宣稱重現 Manzanita 的 Minimum 演算法或專用 AVC descriptors。保留編碼器提供的音訊 priming 時間戳，不強制將音訊第一個封包與影像第一格對齊。
 
-`tests/airlineEncoding.test.js` 直接驗證原生 sequence header／SPS／PPS／CRC 與低複雜度 CBR；`tests/electronQueueLifecycle.test.js` 驗證兩種航空格式經真實 Electron IPC、watchdog 與 ffmpeg 完成分流及 cfg，並釋放全組鎖。
+watchdog 在 lease 內透過 `airline-output.js` 驗證成品並修整 TS header：設定指定 PID 的 priority、把額外 SDT 封包換為等長 null packet、將 S3K 的 PMT video stream_type 修為 MPEG-1 並重算 CRC。影音內容與 PCR／PTS／DTS 不變。取消或收尾失敗清理半成品，清理失敗保留 lease；helper 與共用格式模組須一併 asarUnpack。
+
+`tests/airlineEncoding.test.js` 驗證原生 sequence header／SPS／PPS／CRC 與低複雜度 CBR；`tests/airlineTransport.test.js` 檢查直接合成的內容、格序及 TS 封包；`tests/electronQueueLifecycle.test.js` 驗證兩種格式經真實 Electron IPC、watchdog 與 ffmpeg 產生單一成品並釋放鎖。
 
 ## 5. mpv 嵌入整合（Windows）
 

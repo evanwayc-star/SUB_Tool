@@ -20,7 +20,7 @@ import { imageBox } from '../shared/image-geometry.cjs';
 | `channel-layout.cjs` | 來源聲道展開順序 |
 | `clip-fade.cjs` | 片段長度與淡入淡出視窗 |
 | `delivery-frame-rate.cjs` | 交付 FPS 選項、精確有理數與來源格率比對 |
-| `delivery-formats.cjs` | 固定交付格式、雙聲道編組限制與航空分流檔名 |
+| `delivery-formats.cjs` | 固定交付格式、雙聲道編組限制與輸出檔名 |
 | `delivery-resolution.cjs` | 交付解析度正規化 |
 | `image-geometry.cjs` | 圖片／片段疊層幾何 |
 
