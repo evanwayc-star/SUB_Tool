@@ -4,7 +4,7 @@
    驗證不需要 jsdom、不需要 mock 任何模組，直接呼叫就好。
    對照 tests/deliveryDialog.test.js——那支要 mock 六個模組才動得起來。 */
 import { describe, expect, it } from 'vitest';
-import { deliveryOutputNames, deliveryPresetAudioProblem } from '../shared/delivery-formats.cjs';
+import { deliveryOutputNames, deliveryPresetAudioProblem, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
 import {
   createDeliveryList, defaultDeliveryName, deliveryResolution,
   extensionFor, projectTagFrom, suggestKbps,
@@ -22,6 +22,9 @@ describe('副檔名', () => {
     expect(extensionFor('mod-fhd')).toBe('.ts');
     expect(extensionFor('airline-s3k')).toBe('.mpg');
     expect(extensionFor('airline-dmpes')).toBe('.mpg');
+    expect(extensionFor('airline-dmpes-4m')).toBe('.mpg');
+    expect(extensionFor('dvd-iso')).toBe('.iso');
+    expect(extensionFor('bd-iso')).toBe('.iso');
     expect(extensionFor('未知')).toBe('.mp4');
   });
 });
@@ -303,16 +306,17 @@ describe('航空 MPEG-TS 交付', () => {
   const stereoPlan = { streams: [{ layout: 'stereo', busIds: ['l', 'r'] }] };
 
   it.each([
-    ['airline-s3k', '航空-S3K', 352, 240],
-    ['airline-dmpes', '航空-DMPES', 720, 480],
-  ])('%s 固定規格與檔名，只列出最終 mpg 成品供檢查覆寫', (format, label, width, height) => {
+    ['airline-s3k', '航空-S3K-MPEG1-1.5M', 352, 240, 1500],
+    ['airline-dmpes', '航空-DMPES-H264-1.5M', 720, 480, 1500],
+    ['airline-dmpes-4m', '航空-DMPES-H264-4M', 720, 480, 4000],
+  ])('%s 固定規格與檔名，只列出最終 mpg 成品供檢查覆寫', (format, label, width, height, videoKbps) => {
     const list = base({ fps: 24, canvasW: 4096, canvasH: 2160, defaultAudioLayout: stereoPlan });
     list.setOutDir(0, 'D:\\交付');
     list.setFormat(0, format);
     list.setTargetHeight(0, 720);
     list.setTargetFps(0, 60);
     list.setKbps(0, 20000);
-    expect(list.get(0)).toMatchObject({ targetH: height, targetFps: 29.97, kbps: 1500 });
+    expect(list.get(0)).toMatchObject({ targetH: height, targetFps: 29.97, kbps: videoKbps });
     const stem = `ST_拼桌_${label}_${height}p_29.97fps`;
     expect(list.get(0).customName).toBe(stem + '.mpg');
     expect(list.outPaths()).toEqual([{
@@ -322,7 +326,7 @@ describe('航空 MPEG-TS 交付', () => {
       clips: [], videoTracks: [], duration: 12.5, compiledAudioPlan: stereoPlan,
       timecodeForFps: fps => `fps:${fps}`,
     });
-    expect(job).toMatchObject({ format, width, height, fps: 29.97, videoKbps: 1500, duration: 12.5 });
+    expect(job).toMatchObject({ format, width, height, fps: 29.97, videoKbps, duration: 12.5 });
     list.setBurnTimecode(0, true);
     expect(list.outPaths().every(output => output.name.startsWith(stem + '_TC.'))).toBe(true);
   });
@@ -350,15 +354,86 @@ describe('航空 MPEG-TS 交付', () => {
   });
 
   it('多串流阻擋訊息使用各航空格式名稱，兩條 mono 仍依使用者次序編成 Stereo', () => {
-    expect(deliveryPresetAudioProblem('airline-s3k', { streams: [] })).toContain('航空-S3K 需要單一 Stereo');
-    expect(deliveryPresetAudioProblem('airline-dmpes', { streams: [] })).toContain('航空-DMPES 需要單一 Stereo');
+    expect(deliveryPresetAudioProblem('airline-s3k', { streams: [] })).toContain('航空-S3K-MPEG1-1.5M (立體聲) 需要單一 Stereo');
+    expect(deliveryPresetAudioProblem('airline-dmpes', { streams: [] })).toContain('航空-DMPES-H264-1.5M (立體聲) 需要單一 Stereo');
     const list = base({ defaultAudioLayout: { streams: [
       { layout: 'mono', busIds: ['r'] }, { layout: 'mono', busIds: ['l'] },
     ] } });
     list.setFormat(0, 'airline-s3k');
     expect(list.get(0).audioPlan.streams).toEqual([{
-      id: 'airline-s3k-stereo', name: '航空-S3K Stereo', layout: 'stereo', busIds: ['r', 'l'],
+      id: 'airline-s3k-stereo', name: '航空-S3K-MPEG1-1.5M (立體聲) Stereo', layout: 'stereo', busIds: ['r', 'l'],
     }]);
+  });
+});
+
+describe('DVD 與 BD 光碟映像交付', () => {
+  const audioPlan = { streams: [
+    { layout: '5.1', busIds: ['l', 'r', 'c', 'lfe', 'ls', 'rs'] },
+    { layout: 'stereo', busIds: ['fm-l', 'fm-r'] },
+  ] };
+
+  it.each([
+    ['dvd-iso', 720, 480, 29.97, '480i', 4500000000, 8],
+    ['bd-iso', 1920, 1080, 24, '1080p', 24000000000, 32],
+  ])('%s 保留多串流聲音，使用固定光碟尺寸與動態容量碼率', (format, width, height, fps, sizeTag, capacityBytes, maxAudioStreams) => {
+    const list = base({ fps: 25, defaultAudioLayout: audioPlan });
+    list.setOutDir(0, 'D:/交付');
+    list.setFormat(0, format);
+    list.setTargetHeight(0, 720);
+    list.setTargetFps(0, 60);
+    list.setKbps(0, 50000);
+    list.setBurnTimecode(0, true);
+    expect(list.get(0)).toMatchObject({ targetH: height, targetFps: fps, kbps: null, audioPlan });
+    expect(list.get(0).customName).toContain(`_${sizeTag}_${fps}fps_TC.iso`);
+    expect(list.problems()).toEqual([]);
+    expect(getDeliveryFormatPreset(format)).toMatchObject({ kind: 'disc', capacityBytes, maxAudioStreams });
+    const [job] = list.toJobs({
+      clips: [], videoTracks: [], duration: 7928, assText: '[Script Info]', compiledAudioPlan: audioPlan,
+      timecodeForFps: outputFps => `fps:${outputFps}`,
+    });
+    expect(job).toMatchObject({
+      format, width, height, fps, duration: 7928, videoKbps: null, audioPlan,
+      assText: '[Script Info]', timecodeWatermark: { start: `fps:${fps}` },
+    });
+    expect(list.outPaths()).toEqual([{ dir: 'D:/交付', name: job.defaultName, path: job.outPath }]);
+    list.setFormat(0, 'h264');
+    expect(list.get(0).kbps).toBeGreaterThan(0);
+  });
+
+  it.each(['dvd-iso', 'bd-iso'])('%s 不改寫雙 Mono，但拒絕超出串流數與不完整編組', format => {
+    const mono = { streams: [{ layout: 'mono', busIds: ['r'] }, { layout: 'mono', busIds: ['l'] }] };
+    const list = base({ defaultAudioLayout: mono });
+    list.setFormat(0, format);
+    expect(list.get(0).audioPlan).toEqual(mono);
+    const limit = getDeliveryFormatPreset(format).maxAudioStreams;
+    expect(deliveryPresetAudioProblem(format, {
+      streams: Array.from({ length: limit }, (_, i) => ({ layout: 'mono', busIds: [`bus-${i}`] })),
+    })).toBeNull();
+    expect(deliveryPresetAudioProblem(format, {
+      streams: Array.from({ length: limit + 1 }, (_, i) => ({ layout: 'mono', busIds: [`bus-${i}`] })),
+    })).toContain(`1–${limit}`);
+    expect(deliveryPresetAudioProblem(format, { streams: [{ layout: '5.1', busIds: ['l', 'r'] }] })).toContain('完整');
+    expect(deliveryPresetAudioProblem(format, { streams: [] })).toContain('完整');
+  });
+
+  it.each(['dvd-iso', 'bd-iso'])('%s 保留 Lt/Rt 兩聲道，不改為普通 Stereo', format => {
+    const ltRt = { streams: [{ layout: 'stereoLtRt', busIds: ['lt', 'rt'] }] };
+    const list = base({ defaultAudioLayout: ltRt });
+    list.setOutDir(0, 'D:/交付');
+    list.setFormat(0, format);
+    expect(list.get(0).audioPlan).toEqual(ltRt);
+    expect(list.problems()).toEqual([]);
+  });
+
+  it.each(['dvd-iso', 'bd-iso', 'mod-fhd', 'airline-s3k', 'airline-dmpes', 'airline-dmpes-4m'])('%s 只允許 null 音訊回退；明確傳入的無效編組回報錯誤', format => {
+    expect(deliveryPresetAudioProblem(format, null)).toBeNull();
+    for (const plan of [
+      {}, { streams: [] }, { streams: 'stereo' }, { streams: [null] },
+      { streams: [{ layout: 'stereo', busIds: 'ab' }] },
+      { streams: [{ layout: 'stereo', busIds: ['', 'r'] }] },
+      { streams: [{ layout: 'stereo', busIds: ['l', 'l'] }] },
+      { streams: [{ layout: 'mono', busIds: ['l'] }, null] },
+    ]) expect(deliveryPresetAudioProblem(format, plan), JSON.stringify(plan)).toBeTypeOf('string');
   });
 });
 

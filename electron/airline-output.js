@@ -3,6 +3,7 @@
 const { open } = require('node:fs/promises');
 const path = require('path');
 const { deliveryOutputNames, getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
+const { reshapeAirlineTransport } = require('./airline-transport');
 
 const TS_SIZE = 188;
 const READ_SIZE = TS_SIZE * 1024;
@@ -214,7 +215,7 @@ async function writeExact(file, bytes, position) {
 }
 
 /** Validate before writing; caller retains the output lease and owns cleanup. */
-async function finalizeAirlineOutput(format, outPath, { signal } = {}) {
+async function validateAndPatchAirlineOutput(format, outPath, { signal } = {}) {
   if (!isAirlineOutput(format)) return null;
   signal?.throwIfAborted();
   const file = await open(outPath, 'r+');
@@ -259,4 +260,11 @@ async function finalizeAirlineOutput(format, outPath, { signal } = {}) {
   }
 }
 
-module.exports = { deliveryOutputPaths, isAirlineOutput, finalizeAirlineOutput };
+async function finalizeAirlineOutput(format, outPath, options = {}) {
+  const validation = await validateAndPatchAirlineOutput(format, outPath, options);
+  if (!validation) return null;
+  const schedule = await reshapeAirlineTransport(format, outPath, options);
+  return { ...validation, ...schedule };
+}
+
+module.exports = { deliveryOutputPaths, isAirlineOutput, finalizeAirlineOutput, validateAndPatchAirlineOutput };

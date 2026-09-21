@@ -12,7 +12,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FFMPEG = process.env.FFMPEG_PATH || path.join(ROOT, 'electron/ffmpeg/ffmpeg.exe');
 const FFPROBE = process.env.FFPROBE_PATH || path.join(ROOT, 'electron/ffmpeg/ffprobe.exe');
 const nativeAvailable = existsSync(FFMPEG) && existsSync(FFPROBE);
-const FORMATS = ['airline-s3k', 'airline-dmpes'];
+const FORMATS = ['airline-s3k', 'airline-dmpes', 'airline-dmpes-4m'];
 const BAD_ENCODER_LOG = /error parsing option|buffer (?:underflow|overflow)|VBV underflow|dts < pcr|non.?monoton|timestamps are unset/i;
 
 function run(binary, args, { binaryOutput = false } = {}) {
@@ -41,11 +41,20 @@ function sectionCrc(bytes) {
   return crc;
 }
 
-function inspectTransport(bytes) {
+function pesTimestamp(bytes, offset) {
+  return (bytes[offset] & 14) * 536870912 + bytes[offset + 1] * 4194304
+    + (bytes[offset + 2] & 254) * 16384 + bytes[offset + 3] * 128 + (bytes[offset + 4] >> 1);
+}
+
+function inspectTransport(bytes, format) {
+  const muxRate = format === 'airline-dmpes-4m' ? 4600000 : 1855594;
   expect(bytes.length % 188).toBe(0);
   const pids = new Map();
   const tables = [];
   const pcr = [];
+  const decodeTimestamps = new Map();
+  let clockAnchor;
+  let minimumDecodeLead = Infinity;
   for (let offset = 0; offset < bytes.length; offset += 188) {
     expect(bytes[offset]).toBe(0x47);
     expect(bytes[offset + 1] & 0x80).toBe(0); // transport error
@@ -68,9 +77,26 @@ function inspectTransport(bytes) {
         const pos = payload + 2;
         const base = bytes[pos] * 33554432 + bytes[pos + 1] * 131072 + bytes[pos + 2] * 512
           + bytes[pos + 3] * 2 + (bytes[pos + 4] >> 7);
-        pcr.push({ offset, ticks: base * 300 + ((bytes[pos + 4] & 1) << 8) + bytes[pos + 5] });
+        const ticks = base * 300 + ((bytes[pos + 4] & 1) << 8) + bytes[pos + 5];
+        pcr.push({ offset, ticks });
+        clockAnchor = { offset: pos + 6, ticks };
       }
       payload += 1 + length;
+    }
+    if ((adaptation & 1) && [48, 49].includes(pid)) {
+      if (start) {
+        expect(bytes.subarray(payload, payload + 3)).toEqual(Buffer.from([0, 0, 1]));
+        const flags = (bytes[payload + 7] >> 6) & 3;
+        expect([2, 3]).toContain(flags);
+        decodeTimestamps.set(pid, pesTimestamp(bytes, payload + (flags === 3 ? 14 : 9)));
+      }
+      if (clockAnchor && decodeTimestamps.has(pid)) {
+        // Check arrival of the entire PES, including continuation packets. An
+        // encoder can return 0 (or suppress the warning) after missing its DTS.
+        const arrival = clockAnchor.ticks / 27000000
+          + (offset + 188 - clockAnchor.offset) * 8 / muxRate;
+        minimumDecodeLead = Math.min(minimumDecodeLead, decodeTimestamps.get(pid) / 90000 - arrival);
+      }
     }
     if (!(adaptation & 1) || !start || ![0, 63].includes(pid)) continue;
     const first = payload + 1 + bytes[payload];
@@ -82,10 +108,12 @@ function inspectTransport(bytes) {
   }
   expect([...pids.keys()].sort((a, b) => a - b)).toEqual([0, 48, 49, 63, 8191]);
   expect(pcr.length).toBeGreaterThan(10);
+  expect(Number.isFinite(minimumDecodeLead)).toBe(true);
+  expect(minimumDecodeLead, '每個影音 PES 必須在 DTS 解碼期限前完整送達').toBeGreaterThanOrEqual(0);
   const first = pcr[0];
   const last = pcr.at(-1);
   const rate = (last.offset - first.offset) * 8 * 27000000 / (last.ticks - first.ticks);
-  expect(rate).toBeCloseTo(1855594, 0);
+  expect(rate).toBeCloseTo(muxRate, 0);
   for (let index = 1; index < pcr.length; index += 1) {
     const interval = (pcr[index].ticks - pcr[index - 1].ticks) / 27000000;
     expect(interval).toBeGreaterThan(0);
@@ -154,29 +182,34 @@ describe.skipIf(!nativeAvailable)('航空內建 MPEG transport 合成', () => {
   beforeAll(() => { directory = mkdtempSync(path.join(tmpdir(), 'subtool-airline-transport-test-')); });
   afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
 
-  async function encode(format, pattern, seconds) {
+  async function encode(format, pattern, seconds, cpus = 4) {
     const encoding = airlineEncoding(format);
     const size = format === 'airline-s3k' ? '352x240' : '720x480';
     const source = pattern === 'motion'
-      ? `testsrc2=size=${size}:rate=30000/1001:duration=${seconds},noise=alls=35:allf=t+u`
+      ? `testsrc2=size=${size}:rate=30000/1001:duration=${seconds},noise=alls=35:allf=t+u:all_seed=1`
       : `color=black:size=${size}:rate=30000/1001:duration=${seconds}`
         + (pattern === 'sync' ? ",drawbox=color=white:t=fill:enable='between(t,1,1.05)'" : '');
     const sound = pattern === 'sync'
       ? `aevalsrc='0.7*sin(2*PI*997*t)*between(t,1,1.05)':s=48000:d=${seconds}`
       : `sine=frequency=997:sample_rate=48000:duration=${seconds}`;
-    const output = path.join(directory, `${format}-${pattern}.mpg`);
-    const result = run(FFMPEG, ['-hide_banner', '-nostdin', '-y',
+    const output = path.join(directory, `${format}-${pattern}-${seconds}s-${cpus}cpu.mpg`);
+    const result = run(FFMPEG, ['-hide_banner', '-nostdin', '-y', '-cpucount', String(cpus),
       '-f', 'lavfi', '-i', source, '-f', 'lavfi', '-i', sound,
       '-map', '0:v:0', '-map', '1:a:0', '-vf', `setsar=${encoding.sar}`,
-      ...encoding.videoArgs, ...encoding.audioArgs, ...airlineMuxArgs(), output]);
+      ...encoding.videoArgs, ...encoding.audioArgs, ...airlineMuxArgs(format), output]);
     expect(result.stderr).not.toMatch(BAD_ENCODER_LOG);
     await finalizeAirlineOutput(format, output);
-    expectTables(inspectTransport(readFileSync(output)), format);
+    expectTables(inspectTransport(readFileSync(output), format), format);
     const timing = expectTimeline(probe(output), format, Math.ceil(seconds * 30000 / 1001));
     // Decode every audio and video packet. Exit 0 without this check can hide a broken PMT or truncated stream.
     const decoded = run(FFMPEG, ['-v', 'warning', '-xerror', '-threads', '1', '-err_detect', 'crccheck+explode',
       '-i', output, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
     expect(decoded.stderr.trim()).toBe('');
+    const elementary = run(FFMPEG, ['-v', 'error', '-i', output, '-map', '0:v', '-c:v', 'copy',
+      '-f', format === 'airline-s3k' ? 'mpeg1video' : 'h264', '-'], { binaryOutput: true }).stdout;
+    const ending = format === 'airline-s3k' ? Buffer.from([0, 0, 1, 0xb7])
+      : Buffer.from([0, 0, 1, 10, 128, 0, 0, 1, 11, 128]);
+    expect(elementary.subarray(-ending.length)).toEqual(ending);
     return { output, timing };
   }
 
@@ -202,5 +235,9 @@ describe.skipIf(!nativeAvailable)('航空內建 MPEG transport 合成', () => {
   it.each(FORMATS)('%s：12 秒純黑及高動態影片均可完整解碼且沒有 mux overflow', async format => {
     await encode(format, 'black', 12);
     await encode(format, 'motion', 12);
+  }, 90000);
+
+  it.each([1, 4])('S3K：%s 核心下 60 秒固定雜訊，所有 PES 均在 DTS 前送達', async cpus => {
+    await encode('airline-s3k', 'motion', 60, cpus);
   }, 90000);
 });

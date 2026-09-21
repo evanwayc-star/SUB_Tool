@@ -169,17 +169,25 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 `airline-encoding.js` 提供 Carbon CPF 對應的 CPU codec 參數，由 delivery runner 注入純 `export-plan.js`。計畫先用顯示比例合成、燒字幕與 TC，再縮為編碼尺寸並設定 SAR；航空來源若隔行則以 bwdif send_frame 轉逐行，不走 MOD-FHD 的場交織。
 
 - S3K：MPEG-1、352×240、30000/1001、CBR 1500 kbps、GOP 上限 15、2 B 幀、open GOP、scene change 關閉；VBV 224 KiB。Carbon 的 MPEG-1 aspect code 12 對應 SAR 200:219（表中 1.0950 為其倒數）。libtwolame 輸出 Layer-2 Stereo、48 kHz、128 kbps，16-bit input、CRC 開啟，copyright/original 關閉。
-- DMPES：H.264 Main@3.0、720×480、30000/1001、CBR 1500 kbps、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD、關閉 deblocking／weighted prediction／B pyramid。依使用者確認的 **16:9 顯示比例，設定 SAR 32:27**；明確優先於 CPF 的 6:5 及參考成品的 40:33。其餘採參考成品 SPS 實測的 NAL HRD CBR、NTSC limited range；音訊依獨立 AAC preset 輸出 MPEG-4 AAC-LC／ADTS Stereo、48 kHz、128 kbps。
+- DMPES：H.264 Main@3.0、720×480、30000/1001、CBR 1500 或 4000 kbps、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD、關閉 deblocking／weighted prediction／B pyramid。依使用者確認的 **16:9 顯示比例，設定 SAR 32:27**；明確優先於 CPF 的 6:5 及參考成品的 40:33。其餘採參考成品 SPS 實測的 NAL HRD CBR、NTSC limited range；音訊輸出 MPEG-4 AAC-LC／ADTS Stereo、48 kHz、128 kbps。
 
-上述是跨編碼器的參數對應。S3K 的 224 KiB VBV 在此碼率超出 MPEG-1 `vbv_delay` 可表範圍，FFmpeg 寫入 0xffff；DMPES 的 130202-byte VBV 傳入 1041616 bits，x264 內部取整為 kilobits。Carbon 專用搜尋／量化策略不保證等價；DMPES sequence-end 畫面與 CPF 不同，目前依 CPF 不追加結尾 NAL。不能宣稱與 Carbon 位元流完全一致或已通過航空設備驗收。
+上述是跨編碼器的參數對應。S3K 的 224 KiB VBV 在此碼率超出 MPEG-1 `vbv_delay` 可表範圍，FFmpeg 寫入 0xffff；DMPES 1.5M 的 130202-byte VBV 傳入 1041616 bits，x264 內部取整，排程使用實際 HRD 容量 130124 bytes，4M 為 347124 bytes。收尾在最後一個 video PES 加入 MPEG-1 sequence end 或 AVC end-of-sequence／end-of-stream，修正 TSA 報表缺少 EOS 的警告。Carbon 專用搜尋／量化策略不保證等價，不能宣稱位元流完全一致或已通過航空設備驗收。
 
 `delivery-formats.cjs` 統一定義單一 `.mpg` 輸出，容器由 `-f mpegts` 明確指定為 188-byte MPEG-TS。同一 ffmpeg 程序直接編碼與合成影音，不產生 ES／cfg，也不從缺少 PTS/DTS 的 raw H.264 重建 B 幀時間戳。admission 檢查成品的來源衝突、授權與佇列佔用；舊版 `.h264`／`.m1v` 工作因副檔名不符被拒絕，需從交付清單重新送出。
 
-合成沿用 Panasonic cfg 的 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes。固定 1500／128 kbps 的航空規格採參考成品 PCR 實測的 1855594 bps CBR，PCR 約 90 ms、PAT/PMT 約 100 ms；這是明確的內建 mux 設定，不宣稱重現 Manzanita 的 Minimum 演算法或專用 AVC descriptors。保留編碼器提供的音訊 priming 時間戳，不強制將音訊第一個封包與影像第一格對齊。
+合成沿用 Panasonic cfg 的 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes。1.5M 規格採參考成品 PCR 實測的 1855594 bps CBR；4M 使用 4600000 bps。`airline-transport.js` 依 DTS／PTS 重新排程 PES，影片 TB 目標不超過 400 bytes（上限 512），音訊僅提前約 0.1 秒並限制主緩衝，影片保留量依實際 VBV 限制；PCR 約 50 ms，PAT／PMT 約 90 ms。單純增大 mux delay 會讓主緩衝更容易溢位，因此不能作為 TSA 錯誤的修復。保留編碼器提供的 PTS／DTS 與音訊 priming 關係，不改影音播放速度。
 
-watchdog 在 lease 內透過 `airline-output.js` 驗證成品並修整 TS header：設定指定 PID 的 priority、把額外 SDT 封包換為等長 null packet、將 S3K 的 PMT video stream_type 修為 MPEG-1 並重算 CRC。影音內容與 PCR／PTS／DTS 不變。取消或收尾失敗清理半成品，清理失敗保留 lease；helper 與共用格式模組須一併 asarUnpack。
+watchdog 先以 `airline-output.js` 檢查 TS 結構，再將封包重排至 lease 目錄中的暫存 TS，依固定碼率重新產生 PCR／PSI／null packet。僅保留一個 PES 與固定大小讀寫區塊，不建立整片影片的封包索引；跨磁碟寫回成品可取消。取消或收尾失敗會清理半成品，清理失敗保留 lease。`airline-output.js`、`airline-transport.js`、`airline-encoding.js` 與共用格式模組須一併 asarUnpack。
 
-`tests/airlineEncoding.test.js` 驗證原生 sequence header／SPS／PPS／CRC 與低複雜度 CBR；`tests/airlineTransport.test.js` 檢查直接合成的內容、格序及 TS 封包；`tests/electronQueueLifecycle.test.js` 驗證兩種格式經真實 Electron IPC、watchdog 與 ffmpeg 產生單一成品並釋放鎖。
+`tests/airlineEncoding.test.js` 驗證 sequence header／SPS／PPS／CRC 與 CBR；`tests/airlineTransport.test.js` 檢查內容、格序與每個 PES 最後封包的解碼期限；`tests/airlineBuffers.test.js` 使用獨立封包抵達模型先重現舊版溢位，再確認三種規格的 TB、影片及音訊緩衝限制。實際 Electron IPC 與取消清理另由 queue lifecycle／watchdog 測試涵蓋。
+
+### DVD／BD ISO 自動製作
+
+`disc-authoring.js` 依共用格式及實際交付時長配置視訊碼率，扣除 AC-3 多串流、64 MiB 導覽資料與 8% 封裝預留；DVD 使用 MPEG-2 720×480 TFF／29.97，BD 使用 Blu-ray compatible AVC High@4.1 1080p24。字幕先以顯示比例燒錄，再轉成儲存尺寸。
+
+watchdog 將一次 FFmpeg 編碼結果保存在 lease 暫存目錄；DVD 由 dvdauthor 產生 VIDEO_TS，再由 mkisofs 建立 UDF 1.02 ISO，BD 由 tsMuxeR 建立 UDF 2.50 ISO。無選單且首播 title 1。只有驗證 UDF 與容量上限後才回報完成；每次啟動原生合成程序都更新 lease PID，取消時先等待程序退出再清檔。尚未開始寫入 ISO 的失敗會保留原成品，復原時也讀取 `outputStarted`；清理失敗保留 owner 資訊供重試。
+
+`npm run native:prepare:disc` 依 `electron/disc-tools.json` 的固定來源及 SHA-256 下載工具、DLL 與授權文字，正式 Windows 包只收 manifest 所列檔案。Mac 測試包不帶這些 Windows 工具。`tests/discAuthoring.test.js` 以原生工具檢查 ISO 結構及多音軌解碼；`tests/discWatchdog.test.js` 驗證取消、復原與既有 ISO 保護。
 
 ## 5. mpv 嵌入整合（Windows）
 

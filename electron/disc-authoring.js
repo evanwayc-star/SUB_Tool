@@ -1,0 +1,233 @@
+'use strict';
+
+const fs = require('fs/promises');
+const path = require('path');
+const { spawn } = require('child_process');
+const { DVD_ISO, BD_ISO } = require('../shared/delivery-formats.cjs');
+
+const DISC_FORMATS = Object.freeze({
+  'dvd-iso': Object.freeze({ ...DVD_ISO, maxStreams: DVD_ISO.maxAudioStreams, maxVideoKbps: 8500, extension: '.mpg' }),
+  'bd-iso': Object.freeze({ ...BD_ISO, maxStreams: BD_ISO.maxAudioStreams, maxVideoKbps: 30000, extension: '.ts' }),
+});
+const WORK_PREFIX = 'subtool-disc-';
+
+function fail(code, message) { return Object.assign(new Error(message), { code }); }
+function abortIfNeeded(signal) { if (signal?.aborted) throw fail('ABORT_ERR', '光碟合成已取消'); }
+function discFormat(format) {
+  const spec = DISC_FORMATS[format];
+  if (!spec) throw fail('INVALID_DISC_FORMAT', `不支援的光碟格式：${format}`);
+  return spec;
+}
+function discAudioStreams(format, audioPlan) {
+  const spec = discFormat(format);
+  const streams = audioPlan == null ? [{ layout: 'stereo' }] : audioPlan.streams;
+  if (!Array.isArray(streams) || !streams.length || streams.length > spec.maxStreams) {
+    throw fail('INVALID_DISC_AUDIO', `此光碟格式需要 1–${spec.maxStreams} 組音訊`);
+  }
+  return streams.map(stream => {
+    const channels = stream.layout === 'mono' ? 1 : stream.layout === '5.1' ? 6
+      : ['stereo', 'stereoLtRt'].includes(stream.layout) ? 2 : 0;
+    if (!channels) throw fail('INVALID_DISC_AUDIO', '光碟音訊僅支援 Mono、Stereo、LtRt 或 5.1 編組');
+    return { channels, layout: stream.layout };
+  });
+}
+
+// Reserve filesystem/navigation space and mux overhead before assigning video bits.
+// A CBR elementary stream keeps the single encoding pass within this conservative budget.
+function discEncoding(format, { duration, audioPlan } = {}) {
+  const spec = discFormat(format);
+  const audio = discAudioStreams(format, audioPlan);
+  if (!Number.isFinite(duration) || duration <= 0) throw fail('INVALID_DISC_DURATION', '光碟時長必須大於零');
+  const audioKbps = spec.audioKbps * audio.length;
+  const budgetKbps = Math.floor(((spec.capacityBytes - 64 * 1024 * 1024) * 0.92 * 8 / duration / 1000 - audioKbps) / 100) * 100;
+  const peakLimit = format === 'dvd-iso' ? 10080 - audioKbps - 500 : 48000 - audioKbps - 2000;
+  const videoKbps = Math.min(spec.maxVideoKbps, budgetKbps, Math.floor(peakLimit / 100) * 100);
+  if (videoKbps < 1000) throw fail('DISC_CAPACITY_EXCEEDED', '影片長度或音訊組數超過光碟容量；請縮短交付範圍或減少音訊組數');
+  const audioArgs = audio.flatMap((stream, index) => [
+    `-c:a:${index}`, 'ac3', `-b:a:${index}`, `${spec.audioKbps}k`, `-ar:a:${index}`, '48000',
+    ...(stream.layout === 'stereoLtRt' ? [`-dsur_mode:a:${index}`, 'on'] : []),
+  ]);
+  const rate = ['-b:v', `${videoKbps}k`, '-minrate:v', `${videoKbps}k`, '-maxrate:v', `${videoKbps}k`];
+  if (format === 'dvd-iso') return {
+    ...spec, videoKbps,
+    videoArgs: ['-c:v', 'mpeg2video', '-pix_fmt', 'yuv420p', '-g', '18', '-bf', '2', ...rate,
+      '-bufsize:v', '1835008', '-flags:v', '+ilme+ildct', '-top', '1', '-aspect', '16:9'],
+    audioArgs,
+    muxArgs: ['-f', 'dvd', '-muxrate', '10080k', '-packetsize', '2048'],
+  };
+  return {
+    ...spec, videoKbps,
+    videoArgs: ['-c:v', 'libx264', '-preset', 'medium', '-profile:v', 'high', '-level:v', '4.1', '-pix_fmt', 'yuv420p',
+      ...rate, '-bufsize:v', '30000k', '-x264-params',
+      'bluray-compat=1:ref=3:bframes=3:b-pyramid=strict:keyint=24:min-keyint=1:open-gop=0:aud=1:nal-hrd=cbr:force-cfr=1'],
+    audioArgs,
+    muxArgs: ['-f', 'mpegts', '-mpegts_start_pid', '256', '-streamid', '0:256',
+      ...audio.flatMap((_, index) => ['-streamid', `${index + 1}:${index + 257}`])],
+  };
+}
+
+async function prepareDiscOutput(format, { tempDir } = {}) {
+  const spec = discFormat(format);
+  if (typeof tempDir !== 'string' || !path.isAbsolute(tempDir)) throw fail('INVALID_DISC_TEMP', '光碟暫存目錄必須為絕對路徑');
+  const workDir = await fs.mkdtemp(path.join(tempDir, WORK_PREFIX));
+  return { workDir, encodedPath: path.join(workDir, `internal${spec.extension}`) };
+}
+
+async function cleanupDiscOutput({ workDir } = {}, { tempDir } = {}) {
+  if (typeof workDir !== 'string' || typeof tempDir !== 'string') throw fail('INVALID_DISC_TEMP', '光碟暫存路徑無效');
+  const absolute = path.resolve(workDir), parent = path.resolve(tempDir);
+  if (path.dirname(absolute) !== parent || !path.basename(absolute).startsWith(WORK_PREFIX)) {
+    throw fail('INVALID_DISC_TEMP', '拒絕清除非本工作的光碟暫存目錄');
+  }
+  const stat = await fs.lstat(absolute).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (!stat) return;
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw fail('INVALID_DISC_TEMP', '光碟暫存目錄不可為連結');
+  await fs.rm(absolute, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+function nativeDiscPaths(directory = path.join(__dirname, 'disc')) {
+  return Object.fromEntries(['dvdauthor', 'mkisofs', 'tsmuxer'].map(name => [name,
+    path.join(directory, `${name === 'tsmuxer' ? 'tsMuxeR' : name}${process.platform === 'win32' ? '.exe' : ''}`)]));
+}
+
+async function stopNative(child) {
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
+  if (process.platform === 'win32') {
+    await new Promise(resolve => {
+      const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      killer.once('error', resolve); killer.once('close', resolve);
+    });
+  }
+  if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+}
+
+async function runNative(executable, args, { cwd, signal, onProgress, onProcess, onOutputStart } = {}) {
+  abortIfNeeded(signal);
+  if (typeof executable !== 'string' || !executable) throw fail('DISC_NATIVE_MISSING', '缺少光碟合成工具');
+  await fs.access(executable).catch(() => { throw fail('DISC_NATIVE_MISSING', `找不到光碟合成工具：${path.basename(executable)}`); });
+  abortIfNeeded(signal);
+  await onOutputStart?.();
+  abortIfNeeded(signal);
+  const child = spawn(executable, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let detail = '';
+  const closed = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, childSignal) => resolve({ code, childSignal }));
+  });
+  const spawned = new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  // Keep a rejection handler installed while the lease callback is pending.
+  void closed.catch(() => {});
+  const receive = chunk => {
+    const text = chunk.toString('utf8'); detail = (detail + text).slice(-16000);
+    const match = /(?:^|\s)(\d+(?:\.\d+)?)%/.exec(text);
+    if (match && onProgress) onProgress(Math.min(100, Number(match[1])));
+  };
+  child.stdout.on('data', receive); child.stderr.on('data', receive);
+  const abort = () => { void stopNative(child).catch(() => {}); };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    if (signal?.aborted) abort();
+    await spawned;
+    await onProcess?.(child);
+    const result = await closed;
+    abortIfNeeded(signal);
+    if (result.code !== 0) throw fail('DISC_AUTHORING_FAILED', `${path.basename(executable)} 合成失敗（${result.code ?? result.childSignal}）：${detail.trim()}`);
+  } catch (error) {
+    await stopNative(child);
+    await closed.catch(() => {});
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+function dvdAuthorXml(audioPlan) {
+  const audio = discAudioStreams('dvd-iso', audioPlan);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<dvdauthor dest="dvd">\n` +
+    '  <vmgm><fpc>jump title 1;</fpc><menus><video format="ntsc" /></menus></vmgm>\n' +
+    '  <titleset><titles><video format="ntsc" aspect="16:9" resolution="720x480" widescreen="nopanscan" />\n' +
+    audio.map(stream => `    <audio format="ac3" channels="${stream.channels}" samplerate="48khz"${stream.layout === 'stereoLtRt' ? ' dolby="surround"' : ''} />\n`).join('') +
+    '    <pgc><vob file="internal.mpg" /><post>exit;</post></pgc>\n  </titles></titleset>\n</dvdauthor>\n';
+}
+
+function blurayMeta(audioPlan) {
+  const audio = discAudioStreams('bd-iso', audioPlan);
+  return 'MUXOPT --blu-ray --vbr --vbv-len=500 --auto-chapters=5 --label="SUB_TOOL"\n' +
+    'V_MPEG4/ISO/AVC, "internal.ts", track=256, fps=24, insertSEI, contSPS\n' +
+    audio.map((_, index) => `A_AC3, "internal.ts", track=${257 + index}${index === 0 ? ', default' : ''}\n`).join('');
+}
+
+async function verifyDiscIso(format, outPath) {
+  const spec = discFormat(format);
+  const file = await fs.open(outPath, 'r');
+  try {
+    const { size } = await file.stat();
+    if (size <= 32768 || size % 2048 !== 0) throw fail('INVALID_DISC_ISO', '光碟映像大小或扇區排列無效');
+    if (size > spec.capacityBytes) throw fail('DISC_CAPACITY_EXCEEDED', `光碟映像超過 ${spec.capacityBytes / 1e9} GB 容量上限`);
+    const descriptors = Buffer.alloc(2048 * 16);
+    await file.read(descriptors, 0, descriptors.length, 2048 * 16);
+    if (!descriptors.includes(Buffer.from('BEA01')) || !descriptors.includes(Buffer.from(format === 'bd-iso' ? 'NSR03' : 'NSR02'))) {
+      throw fail('INVALID_DISC_ISO', '合成結果缺少正確 UDF 光碟檔案系統');
+    }
+    const anchor = Buffer.alloc(2048);
+    const anchorRead = await file.read(anchor, 0, anchor.length, 256 * 2048);
+    if (anchorRead.bytesRead !== anchor.length || anchor.readUInt16LE(0) !== 2) {
+      throw fail('INVALID_DISC_ISO', '光碟映像缺少 UDF anchor');
+    }
+    const sequenceBytes = anchor.readUInt32LE(16), sequenceStart = anchor.readUInt32LE(20) * 2048;
+    if (!sequenceBytes || sequenceBytes > 1024 * 1024 || sequenceStart + sequenceBytes > size) {
+      throw fail('INVALID_DISC_ISO', 'UDF 描述區超出光碟映像');
+    }
+    let revision = 0;
+    for (let offset = 0; offset < sequenceBytes; offset += 2048) {
+      const descriptor = Buffer.alloc(2048);
+      const read = await file.read(descriptor, 0, descriptor.length, sequenceStart + offset);
+      if (read.bytesRead !== descriptor.length) throw fail('INVALID_DISC_ISO', 'UDF 描述區不完整');
+      if (descriptor.readUInt16LE(0) !== 6) continue;
+      if (descriptor.readUInt32LE(212) !== 2048 || descriptor.toString('ascii', 217, 236) !== '*OSTA UDF Compliant') {
+        throw fail('INVALID_DISC_ISO', 'UDF logical volume 無效');
+      }
+      revision = descriptor.readUInt16LE(240);
+      break;
+    }
+    if (revision !== (format === 'bd-iso' ? 0x250 : 0x102)) {
+      throw fail('INVALID_DISC_ISO', '光碟 UDF 版本不符 DVD 1.02／BD 2.50 規格');
+    }
+    return { outputFiles: [outPath], container: 'iso', capacityBytes: spec.capacityBytes, bytes: size,
+      udfVersion: format === 'bd-iso' ? '2.50' : '1.02' };
+  } finally { await file.close(); }
+}
+
+async function finalizeDiscOutput(format, encodedPath, outPath, { signal, nativePaths = nativeDiscPaths(), audioPlan, onProgress, onProcess, onOutputStart } = {}) {
+  const spec = discFormat(format);
+  discAudioStreams(format, audioPlan);
+  abortIfNeeded(signal);
+  if (!path.isAbsolute(encodedPath) || path.basename(encodedPath) !== `internal${spec.extension}`
+    || !path.isAbsolute(outPath) || path.extname(outPath).toLowerCase() !== '.iso') {
+    throw fail('INVALID_DISC_PATH', '光碟合成路徑無效');
+  }
+  const cwd = path.dirname(encodedPath);
+  if (!path.basename(cwd).startsWith(WORK_PREFIX)) throw fail('INVALID_DISC_TEMP', '光碟來源不是本工作暫存檔');
+  const options = { cwd, signal, onProgress, onProcess };
+  if (format === 'dvd-iso') {
+    await fs.writeFile(path.join(cwd, 'disc.xml'), dvdAuthorXml(audioPlan), 'utf8');
+    await runNative(nativePaths.dvdauthor, ['-x', 'disc.xml'], options);
+    abortIfNeeded(signal);
+    for (const filename of ['VIDEO_TS.IFO', 'VIDEO_TS.BUP', 'VTS_01_0.IFO', 'VTS_01_0.BUP', 'VTS_01_1.VOB']) {
+      const stat = await fs.stat(path.join(cwd, 'dvd', 'VIDEO_TS', filename));
+      if (!stat.size) throw fail('INVALID_DISC_STRUCTURE', `DVD 缺少內容：${filename}`);
+    }
+    // mkisofs' Cygwin build accepts Windows forward-slash paths, including spaces.
+    await runNative(nativePaths.mkisofs, ['-dvd-video', '-udf', '-V', 'SUB_TOOL', '-o', outPath.replace(/\\/g, '/'), 'dvd'], { ...options, onOutputStart });
+  } else {
+    await fs.writeFile(path.join(cwd, 'disc.meta'), blurayMeta(audioPlan), 'utf8');
+    await runNative(nativePaths.tsmuxer, ['disc.meta', outPath], { ...options, onOutputStart });
+  }
+  abortIfNeeded(signal);
+  return verifyDiscIso(format, outPath);
+}
+
+module.exports = { DISC_FORMATS, discEncoding, prepareDiscOutput, cleanupDiscOutput, nativeDiscPaths, finalizeDiscOutput, dvdAuthorXml, blurayMeta, verifyDiscIso };

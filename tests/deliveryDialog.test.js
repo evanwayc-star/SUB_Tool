@@ -88,10 +88,45 @@ beforeEach(() => {
 });
 
 describe('匯出交付清單', () => {
+  it('依需求列出九種交付格式與兩種獨立 DMPES 碼率', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-format')).not.toBeNull());
+    expect([...document.querySelector('.ev-format').options].map(option => option.textContent)).toEqual([
+      'ProRes422HQ-MOV', 'H264-MP4', 'WAV', 'DVD-ISO (4.5G)', 'BD-ISO (24G)', 'MOD-FHD',
+      '航空-DMPES-H264-1.5M (立體聲)', '航空-DMPES-H264-4M (立體聲)', '航空-S3K-MPEG1-1.5M (立體聲)',
+    ]);
+  });
+
   it.each([
-    ['airline-s3k', '352×240p', '.mpg', 'MPEG-1 Audio Layer-2 / CRC'],
-    ['airline-dmpes', '720×480p', '.mpg', 'AAC-LC / ADTS'],
-  ])('%s 提供固定循序掃描規格並直接合成 MPG', async (formatName, resolutionText, extension, audioLabel) => {
+    ['dvd-iso', '720×480i', '29.97', '4.5 GB', '8'],
+    ['bd-iso', '1920×1080p', '24', '24 GB', '32'],
+  ])('%s 顯示容量、無選單與自動碼率，不提供誤導的固定碼率欄位', async (formatName, resolutionText, fps, capacity, streamLimit) => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-format')).not.toBeNull());
+    const format = document.querySelector('.ev-format');
+    format.value = formatName;
+    format.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(document.querySelector('.ev-res').selectedOptions[0].textContent).toBe(resolutionText);
+    expect(document.querySelector('.ev-res').disabled).toBe(true);
+    expect(document.querySelector('.ev-fps').value).toBe(fps);
+    expect(document.querySelector('.ev-fps').disabled).toBe(true);
+    expect(document.querySelector('.ev-kbps')).toBeNull();
+    expect(document.querySelector('.delivery-disc-bitrate').textContent).toContain('碼率依片長與容量自動計算');
+    expect(document.querySelector('.ev-name').value.endsWith('.iso')).toBe(true);
+    const detail = document.querySelector('.delivery-disc-output');
+    expect(getComputedStyle(detail).display).not.toBe('none');
+    expect(detail.textContent).toContain(capacity);
+    expect(detail.textContent).toContain('無選單、放入即播放');
+    expect(detail.textContent).toContain('字幕依交付設定燒錄');
+    expect(document.body.textContent).toContain(`最多 ${streamLimit} 條 Mono / Stereo / Lt/Rt / 5.1`);
+    expect(State.fps).toBe(25);
+  });
+
+  it.each([
+    ['airline-s3k', '352×240p', '.mpg', 'MPEG-1 Audio Layer-2 / CRC', '1500'],
+    ['airline-dmpes', '720×480p', '.mpg', 'AAC-LC / ADTS', '1500'],
+    ['airline-dmpes-4m', '720×480p', '.mpg', 'AAC-LC / ADTS', '4000'],
+  ])('%s 提供固定循序掃描規格並直接合成 MPG', async (formatName, resolutionText, extension, audioLabel, videoKbps) => {
     await showExportVideoDialog();
     await new Promise(resolve => setTimeout(resolve, 25));
     const format = document.querySelector('.ev-format');
@@ -103,14 +138,14 @@ describe('匯出交付清單', () => {
     expect(resolution.disabled).toBe(true);
     expect(document.querySelector('.ev-fps').value).toBe('29.97');
     expect(document.querySelector('.ev-fps').disabled).toBe(true);
-    expect(document.querySelector('.ev-kbps').value).toBe('1500');
+    expect(document.querySelector('.ev-kbps').value).toBe(videoKbps);
     expect(document.querySelector('.ev-kbps').disabled).toBe(true);
     expect(document.querySelector('.ev-name').value.endsWith(extension)).toBe(true);
     expect(document.body.textContent).toContain(audioLabel);
     expect(document.body.textContent).toContain('48 kHz / 128 kbps');
     expect(document.querySelector('.delivery-airline-output').textContent).toContain('自動合成影音');
     expect(document.querySelector('.delivery-airline-output').textContent).toContain('.mpg（MPEG-TS）');
-    if (formatName === 'airline-dmpes') expect(document.querySelector('.delivery-airline-output').textContent).toContain('16:9');
+    if (formatName.startsWith('airline-dmpes')) expect(document.querySelector('.delivery-airline-output').textContent).toContain('16:9');
     expect(document.body.textContent).not.toContain('Manzanita');
     expect(State.fps).toBe(25);
   });

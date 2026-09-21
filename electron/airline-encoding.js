@@ -26,7 +26,8 @@ function airlineEncoding(format) {
       ],
     };
   }
-  if (format !== 'airline-dmpes') return null;
+  if (!['airline-dmpes', 'airline-dmpes-4m'].includes(format)) return null;
+  const videoKbps = format === 'airline-dmpes-4m' ? 4000 : 1500;
   return {
     videoExtension: '.h264',
     audioExtension: '.aac',
@@ -38,9 +39,9 @@ function airlineEncoding(format) {
     videoArgs: [
       '-c:v', 'libx264', '-preset', 'medium', '-profile:v', 'main', '-level:v', '3.0',
       '-pix_fmt', 'yuv420p', '-s:v', '720x480', '-r', '30000/1001',
-      '-aspect:v', '16:9', '-b:v', '1500k', '-minrate:v', '1500k', '-maxrate:v', '1500k',
+      '-aspect:v', '16:9', '-b:v', `${videoKbps}k`, '-minrate:v', `${videoKbps}k`, '-maxrate:v', `${videoKbps}k`,
       // CPF bytes -> FFmpeg bits. libx264 internally uses whole kilobits.
-      '-bufsize:v', '1041616', '-flags:v', '-ildct-ilme',
+      '-bufsize:v', String(Math.floor(1041616 * videoKbps / 1500)), '-flags:v', '-ildct-ilme',
       '-x264-params', [
         'interlaced=0', 'nal-hrd=cbr', 'filler=1', 'force-cfr=1', 'videoformat=ntsc', 'fullrange=off',
         'aud=1', 'repeat-headers=1', 'keyint=15', 'min-keyint=1', 'scenecut=40',
@@ -57,13 +58,21 @@ function airlineEncoding(format) {
   };
 }
 
-// Fixed 1500 kb/s video + 128 kb/s audio: reference MPG's PCR-derived CBR.
-// Encoding and muxing share one timeline, preserving B-frame PTS/DTS and audio priming.
-function airlineMuxArgs() {
+function airlineTransportProfile(format = 'airline-dmpes') {
+  const high = format === 'airline-dmpes-4m';
+  return { muxRate: high ? 4600000 : 1855594,
+    videoDrain: high ? 4800000 : 1799961.6,
+    videoBuffer: format === 'airline-s3k' ? 229376 : high ? 347124 : 130124,
+    initialLead: format === 'airline-s3k' ? 1 : 0.7 };
+}
+
+// FFmpeg produces PES timestamps; the final packet scheduler applies the
+// decoder-buffer and transport-buffer constraints before publication.
+function airlineMuxArgs(format) {
   return ['-mpegts_transport_stream_id', '1', '-mpegts_service_id', '1',
     '-mpegts_pmt_start_pid', '63', '-streamid', '0:48', '-streamid', '1:49',
-    '-muxrate', '1855594', '-pcr_period', '90', '-pat_period', '0.1',
+    '-muxrate', String(airlineTransportProfile(format).muxRate), '-muxdelay', '1', '-pcr_period', '90', '-pat_period', '0.1',
     '-pes_payload_size', '0', '-mpegts_m2ts_mode', '0', '-f', 'mpegts'];
 }
 
-module.exports = { airlineEncoding, airlineMuxArgs };
+module.exports = { airlineEncoding, airlineMuxArgs, airlineTransportProfile };

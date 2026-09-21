@@ -366,13 +366,16 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     timecodeFontFile = null,
     airlineEncoding = null,
     airlineMuxArgs = null,
+    discEncoding = null,
   } = env;
 
   const isAirline = preset?.transport === 'airline';
+  const isDisc = preset?.kind === 'disc';
   const isInterlaced = preset?.scan === 'interlaced';
   if (isAirline && (!airlineEncoding || !airlineMuxArgs)) {
     throw new Error('航空交付缺少影音編碼或 TS 合成設定');
   }
+  if (isDisc && !discEncoding) throw new Error('光碟交付缺少影音編碼與容量設定');
 
   const isWav = format === 'wav';
   const isPro = format === 'prores';
@@ -402,8 +405,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const H = Math.max(2, Math.round(height || 1080));
   // 非方形像素先以顯示比例合成與燒字幕，最後才壓成規格的編碼尺寸。
   // 直接在 720×480 / 352×240 上 contain 會把字幕與素材一起橫向拉變形。
-  const sarParts = isAirline ? airlineEncoding.sar.split('/').map(Number) : [1, 1];
-  const W = isAirline ? Math.max(2, Math.round(encodedW * sarParts[0] / sarParts[1] / 2) * 2) : encodedW;
+  const outputSar = isAirline ? airlineEncoding.sar : format === 'dvd-iso' ? '32/27' : '1/1';
+  const sarParts = outputSar.split('/').map(Number);
+  const W = isAirline || isDisc ? Math.max(2, Math.round(encodedW * sarParts[0] / sarParts[1] / 2) * 2) : encodedW;
   // FPS-SYNC：NTSC 格率必須用精確有理數；轉換只改 cadence，不改時間軸秒數。
   const outputRate = deliveryFrameRateRatio(fps);
   // MOD-FHD 先以每秒 59.94 個時刻合成，再交織成上場優先的 29.97 幀；
@@ -635,14 +639,18 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     fc.push(`${vfinal}scale=${encodedW}:${H}:flags=lanczos,setsar=${airlineEncoding.sar},format=yuv420p,setfield=prog[vairline]`);
     vfinal = '[vairline]';
   }
+  if (isDisc) {
+    fc.push(`${vfinal}scale=${encodedW}:${H}:flags=lanczos,setsar=${outputSar},format=yuv420p,setfield=${isInterlaced ? 'tff' : 'prog'}[vdisc]`);
+    vfinal = '[vdisc]';
+  }
 
   // MP4：影像使用使用者指定的目標位元率；每條 AAC stream 依聲道數給足交付 bitrate。
   // ProRes 則固定輸出 24-bit PCM，避免母素材音訊再經有損 AAC 編碼。
-  const kbps = Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
+  const kbps = discEncoding?.videoKbps ?? Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
   const audioMaps = plannedAudio
     ? plannedAudio.streamLabels.flatMap(({ label }) => ['-map', label])
     : ['-map', '[ac]'];
-  const audioBitrates = preset ? [`${preset.audioKbps}k`] : isPro
+  const audioBitrates = preset ? Array.from({ length: plannedAudio?.streamLabels.length || 1 }, () => `${preset.audioKbps}k`) : isPro
     ? []
     : (plannedAudio
       ? plannedAudio.streamLabels.map(({ stream }) => aacBitrateForChannels(stream.spec.channels))
@@ -656,6 +664,16 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       duration: D,
       plannedEncoder: format === 'airline-s3k' ? 'mpeg1video' : 'libx264',
       isGpu: false, kbps, audioBitrates, audioChannels: 2,
+    };
+  }
+  if (isDisc) {
+    return {
+      args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
+        '-map', vfinal, ...audioMaps, '-r', outputRate, ...discEncoding.videoArgs,
+        ...discEncoding.audioArgs, ...discEncoding.muxArgs, outPath],
+      label: `匯出 ${preset.label}（${(kbps / 1000).toFixed(2)} Mbps）`,
+      duration: D, plannedEncoder: format === 'dvd-iso' ? 'mpeg2video' : 'libx264',
+      isGpu: false, kbps, audioBitrates, audioChannels: null,
     };
   }
   const encode = preset

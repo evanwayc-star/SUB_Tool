@@ -57,13 +57,23 @@ describe('跨平台原生執行檔核對', () => {
     try {
       const r = run(empty, 'win32', 'x64');
       expect(r.status).not.toBe(0);
-      for (const name of ['ffmpeg.exe', 'ffprobe.exe', 'mpv.exe', 'd3dcompiler_43.dll']) {
+      for (const name of ['ffmpeg.exe', 'ffprobe.exe', 'mpv.exe', 'd3dcompiler_43.dll', 'dvdauthor.exe', 'mkisofs.exe', 'tsMuxeR.exe']) {
         expect(r.stderr, `訊息裡應該點名 ${name}`).toContain(name);
       }
       expect(r.stderr).toContain('docs/Electron_維護手冊.md');
     } finally {
       rmSync(empty, { recursive: true, force: true });
     }
+  });
+  it('光碟工具即使存在也必須符合固定 SHA-256', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'verify-disc-corrupt-'));
+    try {
+      mkdirSync(path.join(dir, 'electron', 'disc'), { recursive: true });
+      writeFileSync(path.join(dir, 'electron', 'disc', 'dvdauthor.exe'), 'not the approved binary');
+      const r = run(dir, 'win32', 'x64');
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('SHA-256 不符');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   /* 下載中斷的殘檔比「完全沒有」更危險——目錄結構看起來對，內容是壞的。
@@ -102,13 +112,13 @@ describe('package.json：predist 有接上這支腳本', () => {
 
   /* asarUnpack 或需求清單搬了位置卻沒同步，electron-builder 仍可能靜默產出缺功能的包。 */
   it('Windows 與 macOS 的原生需求都落在 package.json 的 asarUnpack 內', () => {
-    const nativeUnpackPaths = pkg.build.asarUnpack.filter(p => /ffmpeg|mpv/.test(p));
+    const nativeUnpackPaths = pkg.build.asarUnpack.filter(p => /(?:ffmpeg|mpv|disc)\/\*\*/.test(p));
     const requirements = [
       ...bundledNativeRequirements({ platform: 'win32', arch: 'x64' }),
       ...bundledNativeRequirements({ platform: 'darwin', arch: 'arm64' }),
     ];
 
-    expect(nativeUnpackPaths).toEqual(['electron/mpv/**', 'electron/ffmpeg/**']);
+    expect(nativeUnpackPaths).toEqual(['electron/mpv/**', 'electron/ffmpeg/**', 'electron/disc/**']);
     for (const requirement of requirements) {
       expect(
         nativeUnpackPaths.some(pattern => requirement.relativePath.startsWith(pattern.slice(0, -2))),

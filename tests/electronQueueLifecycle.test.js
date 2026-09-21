@@ -646,7 +646,10 @@ describeElectron('Electron 匯出佇列生命週期', () => {
         if (!existsSync(leaseDir) || !existsSync(outPath)) return null;
         const lock = readdirSync(leaseDir).find(name => name.endsWith('.lock'));
         if (!lock) return null;
-        return JSON.parse(readFileSync(path.join(leaseDir, lock, 'owner.json'), 'utf8'));
+        const leaseOwner = JSON.parse(readFileSync(path.join(leaseDir, lock, 'owner.json'), 'utf8'));
+        // Output creation can precede the watchdog's PID update. Wait for the
+        // process we are about to verify instead of accepting the initial lease.
+        return Number.isInteger(leaseOwner.ffmpegPid) && leaseOwner.ffmpegPid > 0 ? leaseOwner : null;
       },
       'ffmpeg 已啟動並建立 output lease',
       15000,

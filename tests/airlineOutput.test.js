@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { finalizeAirlineOutput } from '../electron/airline-output.js';
+import { validateAndPatchAirlineOutput } from '../electron/airline-output.js';
 
 const PAT = Buffer.from('00b00d0001c100000001e03fd69d4f8c', 'hex');
 const PMT_S3K = Buffer.from('02b0170001c10000e030f00002e030f00003e031f000947a0d66', 'hex');
@@ -50,7 +50,7 @@ function fixture(format = 'airline-s3k') {
 }
 async function convert(packets, format = 'airline-s3k', options) {
   await writeFile(output, Buffer.concat(packets));
-  return finalizeAirlineOutput(format, output, options);
+  return validateAndPatchAirlineOutput(format, output, options);
 }
 
 describe('航空內建 MPG 傳輸串流完成檢查', () => {
@@ -64,7 +64,7 @@ describe('航空內建 MPG 傳輸串流完成檢查', () => {
       transportPackets: 6, patSections: 1, pmtSections: 1, videoPackets: 1, audioPackets: 1, pcrPackets: 1,
       priorityPackets: 3, replacedSdtPackets: 1, patchedPmtSections: format === 'airline-s3k' ? 1 : 0 });
     expect(await readFile(output)).toEqual(Buffer.concat(expected));
-    expect(await finalizeAirlineOutput(format, output)).toMatchObject({ priorityPackets: 0, replacedSdtPackets: 0, patchedPmtSections: 0 });
+    expect(await validateAndPatchAirlineOutput(format, output)).toMatchObject({ priorityPackets: 0, replacedSdtPackets: 0, patchedPmtSections: 0 });
     expect(await readFile(output)).toEqual(Buffer.concat(expected));
   });
 
@@ -119,20 +119,20 @@ describe('航空內建 MPG 傳輸串流完成檢查', () => {
     if (fault === 'wrong-codec') packets[1] = psi(63, PMT_DMPES)[0];
     const source = Buffer.concat(packets);
     await writeFile(output, source);
-    await expect(finalizeAirlineOutput('airline-s3k', output)).rejects.toMatchObject({ code: 'INVALID_AIRLINE_TRANSPORT' });
+    await expect(validateAndPatchAirlineOutput('airline-s3k', output)).rejects.toMatchObject({ code: 'INVALID_AIRLINE_TRANSPORT' });
     expect(await readFile(output)).toEqual(source);
   });
 
   it.each([0, 187, 189])('拒絕 %s bytes 的空白或不完整 TS', async length => {
     await writeFile(output, Buffer.alloc(length));
-    await expect(finalizeAirlineOutput('airline-dmpes', output)).rejects.toThrow('188-byte');
+    await expect(validateAndPatchAirlineOutput('airline-dmpes', output)).rejects.toThrow('188-byte');
   });
 
   it('取消會中止分塊驗證且釋放 handle，cleanup owner 能立刻刪除檔案', async () => {
     const source = Buffer.concat([...fixture(), ...Array.from({ length: 8192 }, nullPacket)]);
     await writeFile(output, source);
     const controller = new AbortController();
-    const promise = finalizeAirlineOutput('airline-s3k', output, { signal: controller.signal });
+    const promise = validateAndPatchAirlineOutput('airline-s3k', output, { signal: controller.signal });
     controller.abort();
     await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
     expect(await readFile(output)).toEqual(source);
@@ -142,7 +142,7 @@ describe('航空內建 MPG 傳輸串流完成檢查', () => {
   it('取消在開檔前即拒絕，非航空格式不觸碰檔案', async () => {
     const controller = new AbortController();
     controller.abort();
-    await expect(finalizeAirlineOutput('airline-dmpes', output, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
-    expect(await finalizeAirlineOutput('h264', output)).toBeNull();
+    await expect(validateAndPatchAirlineOutput('airline-dmpes', output, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(await validateAndPatchAirlineOutput('h264', output)).toBeNull();
   });
 });

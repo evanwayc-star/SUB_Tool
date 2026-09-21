@@ -45,17 +45,18 @@ afterEach(() => {
 
 describe('匯出佇列監控緊湊工作區', () => {
   it.each([
-    ['airline-s3k', '航空-S3K', 352, 240],
-    ['airline-dmpes', '航空-DMPES', 720, 480],
-  ])('%s 顯示 MPG 完成並可檢視自動合成及鎖定規格', async (format, label, width, height) => {
-    const payload = { format, width, height, fps: 29.97, targetH: height, videoKbps: 1500, outPath: 'C:\\out\\flight.mpg' };
+    ['airline-s3k', '航空-S3K-MPEG1-1.5M (立體聲)', 352, 240, 1500],
+    ['airline-dmpes', '航空-DMPES-H264-1.5M (立體聲)', 720, 480, 1500],
+    ['airline-dmpes-4m', '航空-DMPES-H264-4M (立體聲)', 720, 480, 4000],
+  ])('%s 顯示 MPG 完成並可檢視自動合成及鎖定規格', async (format, label, width, height, videoKbps) => {
+    const payload = { format, width, height, fps: 29.97, targetH: height, videoKbps, outPath: 'C:\\out\\flight.mpg' };
     const { document, queueAPI } = await openQueueWindow([
       { id: 'done-air', status: 'done', payload },
       { id: 'queued-air', status: 'queued', payload: { ...payload, outPath: 'C:\\out\\next.mpg' } },
     ]);
     expect(document.querySelector('[data-job-id="done-air"] .job-status').textContent.trim()).toBe('完成');
     expect(document.querySelector('[data-job-id="done-air"] .job-chip--spec').textContent)
-      .toBe(`${label} / ${width} x ${height} px / 29.97 fps / 1500 kbps`);
+      .toBe(`${label} / ${width} x ${height} px / 29.97 fps / ${videoKbps} kbps`);
     expect(document.querySelector('[data-job-id="done-air"] .job-chip--output').textContent)
       .toContain('自動合成 .mpg');
     expect(document.body.textContent).not.toContain('Manzanita');
@@ -191,8 +192,8 @@ describe('匯出佇列監控緊湊工作區', () => {
     const { document } = await openQueueWindow(jobs);
     const spec = id => document.querySelector(`[data-job-id="${id}"] .job-chip--spec`)?.textContent;
 
-    expect(spec('mp4')).toBe('MP4 / 1920 x 1080 px / 8000 kbps');
-    expect(spec('pro')).toBe('ProRes / 1920 x 1080 px');
+    expect(spec('mp4')).toBe('H264-MP4 / 1920 x 1080 px / 8000 kbps');
+    expect(spec('pro')).toBe('ProRes422HQ-MOV / 1920 x 1080 px');
     expect(spec('wav')).toBe('WAV');
 
     /* 不顯示年份——佇列裡的工作都是近期的，年份只是噪音。
@@ -363,6 +364,61 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(mod.querySelector('[data-f="res"]').disabled).toBe(false);
     expect(mod.querySelector('[data-f="kbps"]').disabled).toBe(false);
     expect(document.defaultView.getComputedStyle(mod.querySelector('[data-preset-spec]')).display).toBe('none');
+  });
+
+  it.each([
+    ['dvd-iso', 'DVD-ISO (4.5G)', 720, 480, 29.97, 'i', '4.5 GB'],
+    ['bd-iso', 'BD-ISO (24G)', 1920, 1080, 24, 'p', '24 GB'],
+  ])('%s 監控與編輯器顯示容量及自動碼率，送出不帶固定碼率', async (format, label, width, height, fps, scan, capacity) => {
+    const { document, queueAPI } = await openQueueWindow([{ id: 'disc', status: 'queued', payload: {
+      format, outPath: 'C:\\out\\disc.iso', width, height, fps, targetH: height, videoKbps: null,
+    } }]);
+    const row = document.querySelector('[data-job-id="disc"]');
+    expect(row.querySelector('.job-chip--spec').textContent).toBe(`${label} / ${width} x ${height} px / ${fps} fps / ${capacity} 上限 / 自動碼率`);
+    row.querySelector('[data-action="edit"]').click();
+    const resolution = row.querySelector('[data-f="res"]');
+    expect(resolution.disabled).toBe(true);
+    expect(resolution.selectedOptions[0].textContent).toBe(`${width}×${height}${scan}`);
+    expect(row.querySelector('[data-only="h264"]').hidden).toBe(true);
+    const details = row.querySelector('[data-preset-spec]');
+    expect(document.defaultView.getComputedStyle(details).display).not.toBe('none');
+    expect(details.textContent).toContain(capacity);
+    expect(details.textContent).toContain('碼率依片長與容量自動計算');
+    expect(details.textContent).toContain('無選單、放入即播放');
+    expect(details.textContent).not.toContain('null kbps');
+    row.querySelector('[data-f="save"]').click();
+    await Promise.resolve();
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('disc', { format, targetH: height, burnTimecode: false });
+  });
+
+  it('九種格式工作均使用交付清單的完整名稱', async () => {
+    const { document } = await openQueueWindow(deliveryFormats.DELIVERY_FORMAT_OPTIONS.map(option => ({
+      id: option.format, status: 'queued', payload: { format: option.format, outPath: `C:/out/file${option.extension}` },
+    })));
+    for (const option of deliveryFormats.DELIVERY_FORMAT_OPTIONS) {
+      const row = document.querySelector(`[data-job-id="${option.format}"]`);
+      expect(row.querySelector('.job-chip--spec').textContent.split(' / ')[0]).toBe(option.label);
+      row.querySelector('[data-action="edit"]').click();
+      expect(row.querySelector('[data-f="format"]').selectedOptions[0].textContent).toBe(option.label);
+    }
+  });
+
+  it('ISO 切回 H264-MP4 後提供有效的初始碼率', async () => {
+    const { document, queueAPI } = await openQueueWindow([{ id: 'disc', status: 'queued', payload: {
+      format: 'dvd-iso', outPath: 'C:\\out\\disc.iso', targetH: 480, videoKbps: null,
+    } }]);
+    const row = document.querySelector('[data-job-id="disc"]');
+    row.querySelector('[data-action="edit"]').click();
+    const format = row.querySelector('[data-f="format"]');
+    format.value = 'h264';
+    format.dispatchEvent(new document.defaultView.Event('change'));
+    const bitrate = row.querySelector('[data-f="kbps"]');
+    expect(Number(bitrate.value)).toBeGreaterThan(0);
+    expect(bitrate.disabled).toBe(false);
+    expect(row.querySelector('[data-preset-spec]').hidden).toBe(true);
+    row.querySelector('[data-f="save"]').click();
+    await Promise.resolve();
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('disc', expect.objectContaining({ format: 'h264', kbps: 8000 }));
   });
 
   it('緊湊列仍保留操作按鈕，工作文字不會被當成 HTML', async () => {

@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 1,
+  "platform": "win32",
+  "arch": "x64",
+  "files": [
+    {
+      "name": "dvdauthor.exe",
+      "sha256": "74f725dcdd89579e34cd23a41f7b982d4e5e50e8bcfd06f15139f15404da485e",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/local.w10/bin/dvdauthor.exe",
+      "license": "GPL-2.0-or-later",
+      "source": "https://github.com/fabnicol/dvda-author/tree/8fca43a55330d7dd4c09c28fec9d873862e11a54/dvdauthor-0.7.1",
+      "version": "0.7.1-patched",
+      "executable": true
+    },
+    {
+      "name": "mkisofs.exe",
+      "sha256": "d1c1b9805ecc81c2f369467784b6ae6eeb0321c4e76c3a18bea2d65319365ffa",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/local.w10/bin/mkisofs.exe",
+      "license": "GPL-2.0-only AND CDDL-1.0",
+      "source": "https://github.com/fabnicol/dvda-author/tree/8fca43a55330d7dd4c09c28fec9d873862e11a54/cdrtools-3.02",
+      "version": "3.02a09",
+      "executable": true
+    },
+    {
+      "name": "cygwin1.dll",
+      "sha256": "4f7a2e8c5d627cd053850a57fa266271ef6bce01d127d89c222ec3d8db159a47",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/local.w10/bin/cygwin1.dll",
+      "license": "GPL-3.0-or-later WITH Cygwin-exception-3.0",
+      "source": "https://github.com/mirror/newlib-cygwin/tree/99590589326b5537d549cdd41ca4177ce7051d4a",
+      "version": "2.3.1",
+      "executable": false
+    },
+    {
+      "name": "libiconv-2.dll",
+      "sha256": "1a821165c375b54969014f5bd9f8323792fa7ab436e8a3b1f7bfc7cd547ef475",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/local.w10/bin/libiconv-2.dll",
+      "license": "LGPL-2.1-or-later",
+      "source": "https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.16.tar.gz",
+      "version": "1.16",
+      "executable": false
+    },
+    {
+      "name": "libxml2-2.dll",
+      "sha256": "e1c11a2bee7f8d818ee012cbcd7f8de57bfa33784dd74380fe7ee85eda547018",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/local.w10/bin/libxml2-2.dll",
+      "license": "MIT",
+      "source": "https://github.com/GNOME/libxml2/tree/f8a8c1f59db355b46962577e7b74f1a1e8149dc6",
+      "version": "2.9.9",
+      "executable": false
+    },
+    {
+      "name": "liblzma-5.dll",
+      "sha256": "b12704e0066d2cdaa2c73c3314cce8e78acb04ad28b6c6770dd537d6e641d487",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/local.w10/bin/liblzma-5.dll",
+      "license": "LicenseRef-Public-Domain",
+      "source": "https://github.com/tukaani-project/xz/tree/b5be61cc06088bb07f488f9baf7d447ff47b37c1",
+      "version": "5.2.4",
+      "executable": false
+    },
+    {
+      "name": "zlib1.dll",
+      "sha256": "45b5390a26c39cd9ab78043913ad4c0302091c9e2323d3aa95f073e7ac74fbba",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/local.w10/bin/zlib1.dll",
+      "license": "Zlib",
+      "source": "https://github.com/madler/zlib/tree/v1.2.11",
+      "version": "1.2.11",
+      "executable": false
+    },
+    {
+      "name": "tsMuxeR.exe",
+      "sha256": "12434db81e879927d78fad932bf37b5be5dca911b4bf741b1d8e0d98609cc2ab",
+      "archive": {
+        "url": "https://github.com/justdan96/tsMuxer/releases/download/2.7.0/tsMuxer-2.7.0-win64.zip",
+        "sha256": "e3cf117d2c6f01332188123641c63fe38ab9731ae7aa23645f6f9a261a7a301c",
+        "entry": "tsMuxeR.exe"
+      },
+      "source": "https://github.com/justdan96/tsMuxer/tree/f06ac394c55ccee1cb76ae54f4636532a2d10253",
+      "license": "Apache-2.0",
+      "version": "2.7.0",
+      "executable": true
+    },
+    {
+      "name": "dvdauthor.LICENSE",
+      "sha256": "32b1062f7da84967e7019d01ab805935caa7ab7321a7ced0e30ebe75e5df1670",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/dvdauthor-0.7.1/COPYING",
+      "source": "https://github.com/fabnicol/dvda-author/tree/8fca43a55330d7dd4c09c28fec9d873862e11a54/dvdauthor-0.7.1",
+      "license": "GPL-2.0-or-later",
+      "executable": false
+    },
+    {
+      "name": "mkisofs.LICENSE",
+      "sha256": "6007ff76c786d413b17cf786a1ea46f4c9cb03c743c488969b5516c4f1674765",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/cdrtools-3.02/COPYING",
+      "source": "https://github.com/fabnicol/dvda-author/tree/8fca43a55330d7dd4c09c28fec9d873862e11a54/cdrtools-3.02",
+      "license": "GPL-2.0-only AND CDDL-1.0",
+      "executable": false
+    },
+    {
+      "name": "mkisofs-GPL.LICENSE",
+      "sha256": "c1ea5a53b847202a18290ff458315a4f4a86d204ab0a7c3b988ec510d11d7e6a",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/cdrtools-3.02/GPL-2.0.txt",
+      "source": "https://github.com/fabnicol/dvda-author/tree/8fca43a55330d7dd4c09c28fec9d873862e11a54/cdrtools-3.02",
+      "license": "GPL-2.0-only",
+      "executable": false
+    },
+    {
+      "name": "mkisofs-CDDL.LICENSE",
+      "sha256": "0770cbf84caf67c6e776ef1dcf89dc0cda47f8ede144f170a2850df9008739c7",
+      "url": "https://raw.githubusercontent.com/fabnicol/dvda-author/8fca43a55330d7dd4c09c28fec9d873862e11a54/cdrtools-3.02/CDDL.Schily.txt",
+      "source": "https://github.com/fabnicol/dvda-author/tree/8fca43a55330d7dd4c09c28fec9d873862e11a54/cdrtools-3.02",
+      "license": "CDDL-1.0",
+      "executable": false
+    },
+    {
+      "name": "tsMuxeR.LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "url": "https://raw.githubusercontent.com/justdan96/tsMuxer/f06ac394c55ccee1cb76ae54f4636532a2d10253/LICENSE",
+      "source": "https://github.com/justdan96/tsMuxer/tree/f06ac394c55ccee1cb76ae54f4636532a2d10253",
+      "license": "Apache-2.0",
+      "executable": false
+    },
+    {
+      "name": "cygwin.LICENSE",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "url": "https://raw.githubusercontent.com/mirror/newlib-cygwin/99590589326b5537d549cdd41ca4177ce7051d4a/winsup/COPYING",
+      "source": "https://github.com/mirror/newlib-cygwin/tree/99590589326b5537d549cdd41ca4177ce7051d4a",
+      "license": "GPL-3.0-or-later WITH Cygwin-exception-3.0",
+      "executable": false
+    },
+    {
+      "name": "cygwin-exception.LICENSE",
+      "sha256": "dd3f9748d5e63d61ba873305a2f9dac9a1fbc2152e923bf656ce329ed1898411",
+      "url": "https://raw.githubusercontent.com/mirror/newlib-cygwin/99590589326b5537d549cdd41ca4177ce7051d4a/winsup/CYGWIN_LICENSE",
+      "source": "https://github.com/mirror/newlib-cygwin/tree/99590589326b5537d549cdd41ca4177ce7051d4a",
+      "license": "GPL-3.0-or-later WITH Cygwin-exception-3.0",
+      "executable": false
+    },
+    {
+      "name": "libiconv.LICENSE",
+      "sha256": "56bdea73b6145ef6ac5259b3da390b981d840c24cb03b8e1cbc678de7ecfa18d",
+      "url": "https://raw.githubusercontent.com/winlibs/libiconv/libiconv-1.16-1/source/COPYING.LIB",
+      "source": "https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.16.tar.gz",
+      "license": "LGPL-2.1-or-later",
+      "executable": false
+    },
+    {
+      "name": "libxml2.LICENSE",
+      "sha256": "c5c63674f8a83c4d2e385d96d1c670a03cb871ba2927755467017317878574bd",
+      "url": "https://raw.githubusercontent.com/GNOME/libxml2/f8a8c1f59db355b46962577e7b74f1a1e8149dc6/Copyright",
+      "source": "https://github.com/GNOME/libxml2/tree/f8a8c1f59db355b46962577e7b74f1a1e8149dc6",
+      "license": "MIT",
+      "executable": false
+    },
+    {
+      "name": "liblzma.LICENSE",
+      "sha256": "bcb02973ef6e87ea73d331b3a80df7748407f17efdb784b61b47e0e610d3bb5c",
+      "url": "https://raw.githubusercontent.com/tukaani-project/xz/b5be61cc06088bb07f488f9baf7d447ff47b37c1/COPYING",
+      "source": "https://github.com/tukaani-project/xz/tree/b5be61cc06088bb07f488f9baf7d447ff47b37c1",
+      "license": "LicenseRef-Public-Domain",
+      "executable": false
+    },
+    {
+      "name": "zlib.LICENSE",
+      "sha256": "7960b6b1cc63e619abb77acaea5427159605afee8c8b362664f4effc7d7f7d15",
+      "url": "https://raw.githubusercontent.com/madler/zlib/v1.2.11/README",
+      "source": "https://github.com/madler/zlib/tree/v1.2.11",
+      "license": "Zlib",
+      "executable": false
+    }
+  ]
+}

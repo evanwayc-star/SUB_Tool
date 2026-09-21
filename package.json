@@ -1,6 +1,6 @@
 {
   "name": "sub-tool",
-  "version": "7.11.0",
+  "version": "7.12.0",
   "description": "SUB Tool 上字幕工具",
   "author": "Evan",
   "repository": "evanwayc-star/SUB_Tool",
@@ -14,6 +14,7 @@
     "predist": "npm run release:verify-source && node scripts/release/verify-native-binaries.js --platform win32 --arch x64",
     "dist": "vite build && electron-builder --win --x64",
     "native:prepare:mac": "node scripts/release/prepare-macos-native-binaries.js",
+    "native:prepare:disc": "node scripts/release/prepare-windows-disc-tools.js",
     "dist:mac:test": "npm run native:prepare:mac && node scripts/release/verify-native-binaries.js --platform darwin --arch arm64 && npm run build && electron-builder --mac --arm64 -c.mac.identity=null -c.mac.hardenedRuntime=false",
     "release:prepare": "node scripts/release/release-transaction.js prepare",
     "release:verify-source": "node scripts/release/release-transaction.js verify",
@@ -54,6 +55,10 @@
       "electron/export-watchdog.js",
       "electron/mod-fhd-transport.js",
       "electron/airline-output.js",
+      "electron/airline-transport.js",
+      "electron/airline-encoding.js",
+      "electron/disc-authoring.js",
+      "electron/disc/**",
       "shared/delivery-formats.cjs",
       "electron/export-lease.js"
     ],
@@ -68,7 +73,8 @@
           "filter": [
             "**/*",
             "!ffmpeg/**",
-            "!mpv/**"
+            "!mpv/**",
+            "!disc/**"
           ]
         },
         {
@@ -85,6 +91,31 @@
           "filter": [
             "mpv.exe",
             "d3dcompiler_43.dll"
+          ]
+        },
+        {
+          "from": "electron/disc",
+          "to": "electron/disc",
+          "filter": [
+            "dvdauthor.exe",
+            "mkisofs.exe",
+            "cygwin1.dll",
+            "libiconv-2.dll",
+            "libxml2-2.dll",
+            "liblzma-5.dll",
+            "zlib1.dll",
+            "tsMuxeR.exe",
+            "dvdauthor.LICENSE",
+            "mkisofs.LICENSE",
+            "mkisofs-GPL.LICENSE",
+            "mkisofs-CDDL.LICENSE",
+            "tsMuxeR.LICENSE",
+            "cygwin.LICENSE",
+            "cygwin-exception.LICENSE",
+            "libiconv.LICENSE",
+            "libxml2.LICENSE",
+            "liblzma.LICENSE",
+            "zlib.LICENSE"
           ]
         }
       ]
@@ -115,7 +146,8 @@
           "filter": [
             "**/*",
             "!ffmpeg/**",
-            "!mpv/**"
+            "!mpv/**",
+            "!disc/**"
           ]
         },
         {
@@ -138,6 +170,7 @@
   },
   "devDependencies": {
     "@derhuerst/ffprobe-static": "5.3.0",
+    "7zip-bin": "5.2.0",
     "acorn": "^8.18.0",
     "electron": "^32.3.3",
     "electron-builder": "^25.1.8",

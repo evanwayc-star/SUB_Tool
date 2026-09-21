@@ -14,7 +14,7 @@ import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSp
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
+import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { escapeHTML, encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
@@ -351,11 +351,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     return `
       <div class="delivery-card">
         <div class="delivery-ctrl-row">
-          <select class="ev-format delivery-select" data-idx="${i}" style="width:166px;">
-            <option value="h264" ${r.format==='h264'?'selected':''} ${audioOnly?'disabled':''}>MP4 (H.264)</option>
-            <option value="prores" ${r.format==='prores'?'selected':''} ${audioOnly?'disabled':''}>MOV (ProRes)</option>
-            ${DELIVERY_FORMAT_PRESETS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${audioOnly?'disabled':''}>${option.label} (${option.extension})</option>`).join('')}
-            <option value="wav" ${r.format==='wav'?'selected':''} ${!hasProjectAudio?'disabled':''}>WAV (純音訊)</option>
+          <select class="ev-format delivery-select" data-idx="${i}" aria-label="交付格式" style="width:264px;">
+            ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(option.format === 'wav' ? !hasProjectAudio : audioOnly)?'disabled':''}>${option.label}</option>`).join('')}
           </select>
           ${!isWav ? `
             <select class="ev-res delivery-select" data-idx="${i}" aria-label="輸出解析度" style="width:${preset ? 154 : 118}px;" ${preset?`disabled title="${preset.label} 固定為 ${preset.width}×${preset.height}，${preset.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
@@ -376,7 +373,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
               ${DELIVERY_FRAME_RATES.map(rate=>`<option value="${rate.value}" ${r.targetFps===rate.value?'selected':''}>${rate.label} FPS</option>`).join('')}
               `}
             </select>
-            ${r.format==='h264' || preset ? `
+            ${preset?.kind === 'disc' ? '<span class="delivery-disc-bitrate delivery-audio-info">碼率依片長與容量自動計算</span>' : r.format==='h264' || preset ? `
               <div style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim);">
                 <input type="number" class="ev-kbps delivery-input" data-idx="${i}" value="${preset?.videoKbps || r.kbps}" style="width:72px;" title="目標視訊碼率 (kbps)" ${preset?'disabled':''}> kbps
               </div>
@@ -396,10 +393,11 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           <div style="display:flex;align-items:center;gap:6px;">
             <span class="delivery-audio-info">🎧 音訊: ${audioDesc}</span>
             <button class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="設定此列輸出的音軌">⚙ 音軌</button>
-            ${preset ? `<span class="delivery-audio-info">單一 Stereo · ${preset.audioLabel} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps</span>` : ''}
+            ${preset ? `<span class="delivery-audio-info">${preset.kind === 'disc' ? `最多 ${preset.maxAudioStreams} 條 Mono / Stereo / Lt/Rt / 5.1` : '單一 Stereo'} · ${preset.audioLabel} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps${preset.kind === 'disc' ? '／串流' : ''}</span>` : ''}
           </div>
         </div>
         ${preset?.transport === 'airline' ? `<div class="delivery-ctrl-row delivery-airline-output"><span class="delivery-audio-info">${preset.displayAspect ? `顯示比例 ${preset.displayAspect} · ` : ''}SubTool 自動合成影音，直接輸出 .mpg（MPEG-TS）。</span></div>` : ''}
+        ${preset?.kind === 'disc' ? `<div class="delivery-ctrl-row delivery-disc-output"><span class="delivery-audio-info">${preset.capacityBytes / 1000000000} GB 容量上限 · 16:9 · 無選單、放入即播放 · 字幕依交付設定燒錄 · 輸出 .iso 光碟映像。</span></div>` : ''}
       </div>
     `;
   }

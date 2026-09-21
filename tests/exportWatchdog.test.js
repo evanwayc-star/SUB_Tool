@@ -159,7 +159,17 @@ if (mode === 'success') {
     const pmt = Buffer.from(format === 'airline-s3k'
       ? '0002b0170001c10000e030f00002e030f00003e031f000947a0d66'
       : '0002b0170001c10000e030f0001be030f0000fe031f0004d74b7a8', 'hex');
-    const bytes = Buffer.concat([packet(0, pat), packet(63, pmt), packet(48, Buffer.from([0,0,1,0xe0]), true), packet(49, Buffer.from([0,0,1,0xc0]))]);
+    // A complete PES with PTS = 2 s is needed by the transport scheduler;
+    // a bare stream ID has never represented decodable timestamped media.
+    const pts = Buffer.from([0x21, 0, 0x0b, 0x7e, 0x41]);
+    const pes = (streamId, payload) => {
+      const bytes = Buffer.concat([Buffer.from([0, 0, 1, streamId, 0, 0, 0x80, 0x80, 5]), pts, payload]);
+      bytes.writeUInt16BE(bytes.length - 6, 4);
+      return bytes;
+    };
+    const bytes = Buffer.concat([packet(0, pat), packet(63, pmt),
+      packet(48, pes(0xe0, Buffer.from([0, 0, 1, format === 'airline-s3k' ? 0 : 0x65, 0x80])), true),
+      packet(49, pes(0xc0, Buffer.from([0xff, 0xf1, 0x4c, 0x80, 1, 0x1f, 0xfc, 0])))]);
     fs.writeFileSync(fakeFfmpeg, `
       const fs = require('fs');
       fs.writeFileSync(process.argv[2], Buffer.from('${bytes.toString('base64')}', 'base64'));
@@ -176,9 +186,14 @@ if (mode === 'success') {
     expect(result.ok).toBe(true);
     expect(paths).toEqual([outPath]);
     const data = fs.readFileSync(outPath);
-    expect(data.length).toBe(188 * 4);
-    for (const i of [1, 2, 3]) expect(data[188 * i + 1] & 32).toBe(32);
-    expect(data[188 * 2 - 26 + 12]).toBe(format === 'airline-s3k' ? 1 : 27);
+    expect(data.length % 188).toBe(0);
+    const packets = Array.from({ length: data.length / 188 }, (_, index) => data.subarray(index * 188, (index + 1) * 188));
+    const pid = packet => ((packet[1] & 31) << 8) | packet[2];
+    for (const packet of packets.filter(packet => [48, 49, 63].includes(pid(packet)))) expect(packet[1] & 32).toBe(32);
+    const outputPmt = packets.find(packet => pid(packet) === 63);
+    const payloadStart = outputPmt[3] & 32 ? 5 + outputPmt[4] : 4;
+    const sectionStart = payloadStart + 1 + outputPmt[payloadStart];
+    expect(outputPmt[sectionStart + 12]).toBe(format === 'airline-s3k' ? 1 : 27);
     expect(fs.readdirSync(tempDir).filter(name => /\.(m1v|h264|m1a|aac|cfg)$/.test(name))).toEqual([]);
     expect(listLeases(queueDir)).toEqual([]);
   });
@@ -392,7 +407,7 @@ if (mode === 'success') {
     await controller.completion;
   });
 
-  it('recover 找不到 owner pipe 時只刪半成品，不依 PID 終止任何程序', async () => {
+  it('recover 找不到 owner pipe 且沒有存活程序時刪除半成品', async () => {
     const outPath = path.join(tempDir, 'stale.mp4');
     fs.writeFileSync(outPath, 'partial', 'utf8');
     acquireLease({
@@ -400,7 +415,7 @@ if (mode === 'success') {
       outPath,
       jobId: 'stale',
       token: 'stale-token',
-      watchdogPid: process.pid,
+      watchdogPid: null,
       pipeName: process.platform === 'win32'
         ? '\\\\.\\pipe\\subtool-export-does-not-exist'
         : path.join(tempDir, 'does-not-exist.sock'),
@@ -418,6 +433,19 @@ if (mode === 'success') {
     ]);
     expect(fs.existsSync(outPath)).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it.each(['watchdogPid', 'ffmpegPid'])('recover 找不到 pipe 但 %s 仍存在時保留鎖和檔案', async field => {
+    const outPath = path.join(tempDir, 'live-orphan.iso');
+    fs.writeFileSync(outPath, 'in progress');
+    const lease = acquireLease({ queueDir, outPath, jobId: 'live-orphan', token: 'orphan-token' });
+    const ownerPath = path.join(lease.lockPath, 'owner.json');
+    fs.writeFileSync(ownerPath, JSON.stringify({ ...lease.owner, [field]: process.pid }));
+    const recovery = await recoverExportLeases(queueDir);
+    expect(recovery.recovered).toEqual([]);
+    expect(recovery.warnings).toEqual([expect.objectContaining({ code: 'EXPORT_PROCESS_RUNNING' })]);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('in progress');
+    expect(listLeases(queueDir)).toHaveLength(1);
   });
 
   it('recover 遇到 corrupt lease 必須保留鎖並提出警告', async () => {

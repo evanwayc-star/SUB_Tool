@@ -72,7 +72,7 @@ export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPla
   const ext = extensionFor(format);
   const preset = getDeliveryFormatPreset(format);
   const tcTag = burnTimecode ? '_TC' : '';
-  if (preset) return `ST_${projectTag}_${preset.label}_${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}_${preset.fps}fps${tcTag}${ext}`;
+  if (preset) return `ST_${projectTag}_${preset.fileLabel || preset.label}_${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}_${preset.fps}fps${tcTag}${ext}`;
   const isWav = format === 'wav';
   const tag = (!isWav && targetH > 0) ? '_' + targetH + 'p' : '';
   return `ST_${projectTag}_${normalizeDeliveryFrameRate(fps)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
@@ -176,6 +176,9 @@ export function createDeliveryList({
       const r = at(i); if (!r) return;
       r.format = format;
       applyFormatPreset(r);
+      if (format === 'h264' && !(r.kbps > 0)) {
+        r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav: false }));
+      }
       if (!r.nameModified) r.customName = nameFor(r);
       else if (r.customName) r.customName = r.customName.replace(/\.[a-zA-Z0-9]+$/, '') + extensionFor(format);
     },
@@ -199,7 +202,9 @@ export function createDeliveryList({
 
     setKbps(i, kbps) {
       const r = at(i);
-      if (r) r.kbps = getDeliveryFormatPreset(r.format)?.videoKbps || parseInt(kbps, 10) || 0;
+      if (!r) return;
+      const preset = getDeliveryFormatPreset(r.format);
+      r.kbps = preset ? preset.videoKbps : parseInt(kbps, 10) || 0;
     },
     setBurnTimecode(i, on) { 
       const r = at(i); 
@@ -317,7 +322,7 @@ export function createDeliveryList({
           assText,
           format: r.format,
           duration,
-          videoKbps: preset?.videoKbps || r.kbps,
+          videoKbps: preset ? preset.videoKbps : r.kbps,
           audioPlan,
           timecodeWatermark: (!isWav && r.burnTimecode) ? { start: startTimecode } : null,
           /* 即使這一列沒有勾燒入 TC 也要存起來：匯出佇列監控可以事後把 TC 打開，

@@ -2,11 +2,19 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const discTools = JSON.parse(readFileSync(new URL('../electron/disc-tools.json', import.meta.url), 'utf8'));
 
 describe('Windows 安裝檔設定', () => {
   it('航空輸出 watchdog 可從 unpacked 位置載入全部收尾相依', () => {
     expect(packageJson.build.asarUnpack).toContain('electron/airline-output.js');
+    expect(packageJson.build.asarUnpack).toContain('electron/airline-transport.js');
+    expect(packageJson.build.asarUnpack).toContain('electron/airline-encoding.js');
     expect(packageJson.build.asarUnpack).toContain('shared/delivery-formats.cjs');
+  });
+  it('光碟合成模組與工具可由獨立 watchdog 載入', () => {
+    expect(packageJson.build.asarUnpack).toContain('electron/disc-authoring.js');
+    expect(packageJson.build.asarUnpack).toContain('electron/disc/**');
+    expect(packageJson.scripts['native:prepare:disc']).toContain('prepare-windows-disc-tools.js');
   });
   it('watchdog 的 MOD-FHD 封裝收尾模組必須能由獨立 Node 程序載入', () => {
     expect(packageJson.build.asarUnpack).toContain('electron/mod-fhd-transport.js');
@@ -33,7 +41,7 @@ describe('Windows 安裝檔設定', () => {
       {
         from: 'electron',
         to: 'electron',
-        filter: ['**/*', '!ffmpeg/**', '!mpv/**'],
+        filter: ['**/*', '!ffmpeg/**', '!mpv/**', '!disc/**'],
       },
       {
         from: 'electron/ffmpeg',
@@ -45,6 +53,7 @@ describe('Windows 安裝檔設定', () => {
         to: 'electron/mpv',
         filter: ['mpv.exe', 'd3dcompiler_43.dll'],
       },
+      { from: 'electron/disc', to: 'electron/disc', filter: discTools.files.map(file => file.name) },
     ]);
   });
 });
@@ -66,7 +75,7 @@ describe('Apple Silicon 安裝檔設定', () => {
       {
         from: 'electron',
         to: 'electron',
-        filter: ['**/*', '!ffmpeg/**', '!mpv/**'],
+        filter: ['**/*', '!ffmpeg/**', '!mpv/**', '!disc/**'],
       },
       {
         from: 'electron/ffmpeg/darwin-arm64',

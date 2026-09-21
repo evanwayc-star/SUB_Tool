@@ -140,6 +140,9 @@ function validateOwner(owner, lockPath, expectedOutPath = null) {
       throw corruptError(lockPath, `${field} is invalid`);
     }
   }
+  if (owner.outputStarted != null && typeof owner.outputStarted !== 'boolean') {
+    throw corruptError(lockPath, 'outputStarted is invalid');
+  }
   if (
     owner.pipeName != null
     && (typeof owner.pipeName !== 'string' || owner.pipeName.trim() === '')
@@ -191,7 +194,11 @@ function acquireLease({
   token = crypto.randomUUID(),
   watchdogPid = null,
   pipeName = null,
+  outputStarted,
 } = {}) {
+  if (outputStarted != null && typeof outputStarted !== 'boolean') {
+    throw leaseError('INVALID_LEASE_ARGUMENT', 'outputStarted must be a boolean');
+  }
   const normalizedOutPath = normalizeOutputPath(outPath);
   const key = outputKey(normalizedOutPath);
   const root = leaseRoot(queueDir);
@@ -204,6 +211,7 @@ function acquireLease({
     ffmpegPid: null,
     pipeName: optionalPipeName(pipeName),
     createdAt: new Date().toISOString(),
+    ...(outputStarted == null ? {} : { outputStarted }),
   };
 
   fs.mkdirSync(root, { recursive: true });
@@ -257,6 +265,12 @@ function updateLease(options = {}) {
   if (Object.hasOwn(options, 'pipeName')) {
     owner.pipeName = optionalPipeName(options.pipeName);
   }
+  if (Object.hasOwn(options, 'outputStarted')) {
+    if (typeof options.outputStarted !== 'boolean') {
+      throw leaseError('INVALID_LEASE_ARGUMENT', 'outputStarted must be a boolean');
+    }
+    owner.outputStarted = options.outputStarted;
+  }
 
   const ownerPath = path.join(location.lockPath, 'owner.json');
   const tempPath = path.join(
@@ -290,7 +304,29 @@ function releaseLease({ queueDir, outPath, token } = {}) {
   if (!fs.existsSync(location.lockPath)) return false;
   const owner = readOwner(location.lockPath, location.outPath);
   assertOwnerToken(owner, token, location.lockPath);
-  fs.rmSync(location.lockPath, { recursive: true, force: false });
+  // Disc encodes and transport replacements can be large and temporarily busy.
+  // Keep owner.json readable until all private work has actually been removed,
+  // otherwise a failed recursive delete would strand an unrecoverable lock.
+  for (const name of fs.readdirSync(location.lockPath)) {
+    if (name !== 'owner.json') {
+      fs.rmSync(path.join(location.lockPath, name), { recursive: true, force: false });
+    }
+  }
+  const latest = readOwner(location.lockPath, location.outPath);
+  assertOwnerToken(latest, token, location.lockPath);
+  const ownerPath = path.join(location.lockPath, 'owner.json');
+  fs.unlinkSync(ownerPath);
+  try {
+    fs.rmdirSync(location.lockPath);
+  } catch (error) {
+    // Preserve recovery information if the directory cannot be removed (for
+    // example another handle or a late-created private file). Never replace a
+    // new owner if an unrelated process already recreated owner.json.
+    try {
+      fs.writeFileSync(ownerPath, `${JSON.stringify(latest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    } catch {}
+    throw error;
+  }
   return true;
 }
 

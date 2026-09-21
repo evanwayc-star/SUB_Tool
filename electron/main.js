@@ -1014,7 +1014,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
 
   /* 碼率只有 H.264 用得到。給了就用給的，沒給而解析度變了就重新建議——
      1080p 的碼率套在 720p 上是浪費、套在 4K 上會糊掉（v4.32 的「輸出像 proxy」）。 */
-  let videoKbps = preset?.videoKbps || Number(p.videoKbps) || 0;
+  let videoKbps = preset ? preset.videoKbps : Number(p.videoKbps) || 0;
   if (format === 'h264') {
     if (patch?.kbps != null) videoKbps = Math.max(1, Math.floor(Number(patch.kbps) || 0));
     else if (w !== Number(p.width) || h !== Number(p.height)) videoKbps = suggestKbps({ w, h });
@@ -1081,7 +1081,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!outPath) {
     const r = await dialog.showSaveDialog(mainWin, {
       title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
-      filters: [{ name: preset ? `${preset.label} (MPEG-TS)` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
+      filters: [{ name: preset ? `${preset.label} (${preset.kind === 'disc' ? 'ISO' : 'MPEG-TS'})` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
     });
     if (r.canceled) return null;
     outPath = r.filePath;

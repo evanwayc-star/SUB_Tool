@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('crypto');
 const { bundledNativeRequirements } = require('../../electron/ffmpeg-execution-engine');
 
 const MIN_BYTES = {
@@ -45,6 +46,9 @@ function verifyNativeBinaries(options = {}) {
     if (stat.size < minimum) {
       failures.push(`${requirement.relativePath} 只有 ${stat.size} bytes，看起來是損毀或未下載完整的殘檔`);
     }
+    if (requirement.sha256 && createHash('sha256').update(fs.readFileSync(fullPath)).digest('hex') !== requirement.sha256) {
+      failures.push(`${requirement.relativePath} SHA-256 不符，請重新執行 npm run native:prepare:disc`);
+    }
     if (platform !== 'win32' && requirement.executable && (stat.mode & 0o111) === 0) {
       failures.push(`${requirement.relativePath} 沒有執行權限（請執行 chmod +x）`);
     }
@@ -58,7 +62,7 @@ function remediationFor(platform, arch) {
     return '請先執行 npm ci，再執行 npm run native:prepare:mac 下載並核對 Apple Silicon 原生工具。';
   }
   if (platform === 'win32' && arch === 'x64') {
-    return '請依 docs/Electron_維護手冊.md §4／§5，將指定版本放入 electron/ffmpeg 與 electron/mpv。';
+    return '請依 docs/Electron_維護手冊.md §4／§5 準備 ffmpeg/mpv，並執行 npm run native:prepare:disc。';
   }
   return '請先確認此平台的原生工具封裝規格。';
 }

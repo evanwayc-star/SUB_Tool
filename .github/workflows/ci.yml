@@ -48,5 +48,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $ffprobe)) { throw 'FFprobe missing' }
           "FFMPEG_PATH=$($ffmpeg[0].FullName)" | Add-Content -LiteralPath $env:GITHUB_ENV
           "FFPROBE_PATH=$ffprobe" | Add-Content -LiteralPath $env:GITHUB_ENV
+      - name: Prepare verified DVD and BD authoring tools
+        run: npm run native:prepare:disc
       - run: npm run build
       - run: npm run test:ci:windows

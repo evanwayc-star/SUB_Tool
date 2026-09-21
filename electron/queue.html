@@ -704,7 +704,7 @@
         + ` · ${pad2(h12)}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${suffix}`;
     };
 
-    const FORMAT_LABEL = { h264: 'MP4', prores: 'ProRes', wav: 'WAV', 'mod-fhd': 'MOD-FHD' };
+    const FORMAT_LABEL = { prores: 'ProRes422HQ-MOV', h264: 'H264-MP4', wav: 'WAV' };
     const deliveryPreset = format => _deliveryFormatPresets.find(preset => preset.format === format);
     const burnsTimecode = payload => !!payload?.timecodeWatermark;
 
@@ -716,14 +716,16 @@
     };
     const fmtDeliverySpec = payload => {
       const format = String(payload?.format || '');
-      const parts = [deliveryPreset(format)?.label || FORMAT_LABEL[format] || format.toUpperCase() || '—'];
+      const preset = deliveryPreset(format);
+      const parts = [preset?.label || FORMAT_LABEL[format] || format.toUpperCase() || '—'];
       const w = Number(payload?.width), h = Number(payload?.height);
       if (format !== 'wav' && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
         parts.push(`${w} x ${h} px`);
       }
       const kbps = Number(payload?.videoKbps);
-      if (deliveryPreset(format) && Number(payload?.fps) > 0) parts.push(`${Number(payload.fps)} fps`);
-      if ((format === 'h264' || deliveryPreset(format)) && Number.isFinite(kbps) && kbps > 0) parts.push(`${kbps} kbps`);
+      if (preset && Number(payload?.fps) > 0) parts.push(`${Number(payload.fps)} fps`);
+      if (preset?.kind === 'disc') parts.push(`${preset.capacityBytes / 1000000000} GB 上限`, '自動碼率');
+      else if ((format === 'h264' || preset) && Number.isFinite(kbps) && kbps > 0) parts.push(`${kbps} kbps`);
       return parts.join(' / ');
     };
     const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -924,9 +926,9 @@
       const p = job.payload || {};
       const curFormat = String(p.format || 'h264');
       const curTargetH = Number(p.targetH) || 0;
-      const curKbps = Number(p.videoKbps) || 0;
+      const curKbps = Number(p.videoKbps) > 0 ? Number(p.videoKbps) : 8000;
       const known = RES_OPTIONS.some(([v]) => v === curTargetH);
-      const formatOptions = [['h264', 'MP4 (H.264)'], ['prores', 'ProRes'], ['wav', 'WAV (純音訊)']];
+      const formatOptions = Object.entries(FORMAT_LABEL);
       // 固定格式的 TC／音訊在送出前完成設定，既有一般工作要從交付清單新增。
       const currentPreset = deliveryPreset(curFormat);
       if (currentPreset) formatOptions.push([currentPreset.format, currentPreset.label]);
@@ -987,7 +989,12 @@
             ? `${preset.width}×${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}` : normalLabel;
         }
         q('[data-preset-spec]').hidden = !preset;
-        q('[data-preset-spec]').textContent = preset ? `固定 ${preset.width} × ${preset.height}${preset.displayAspect ? ` (${preset.displayAspect})` : ''} / ${preset.fps} fps / ${preset.videoKbps} kbps${preset.transport === 'airline' ? ' · 自動合成 .mpg（MPEG-TS）' : ''}` : '';
+        q('[data-preset-spec]').textContent = preset
+          ? `固定 ${preset.width} × ${preset.height}${preset.displayAspect ? ` (${preset.displayAspect})` : ''} / ${preset.fps} fps / `
+            + (preset.kind === 'disc'
+              ? `${preset.capacityBytes / 1000000000} GB 上限 · 碼率依片長與容量自動計算 · 無選單、放入即播放`
+              : `${preset.videoKbps} kbps${preset.transport === 'airline' ? ' · 自動合成 .mpg（MPEG-TS）' : ''}`)
+          : '';
         const isCustom = q('[data-f="res"]').value === 'custom';
         box.querySelector('[data-custom]').hidden = (f === 'wav') || !isCustom;
       };

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const { createDeliveryRunner } = require('../electron/delivery-runner.js');
+const { discEncoding } = require('../electron/disc-authoring.js');
 
 const tempRoots = [];
 afterEach(() => {
@@ -80,6 +81,29 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it.each(['dvd-iso', 'bd-iso'])('%s 缺省音訊沿用 stereo，最後回報單一 ISO', async format => {
+    const setup = make();
+    const job = videoJob();
+    Object.assign(job.payload, { format, outPath: 'D:/out/disc.iso' });
+    await setup.runner.run(job);
+    expect(setup.runFfmpeg).toHaveBeenCalledWith(expect.any(Array),
+      expect.objectContaining({ outputFormat: format, discAudioPlan: null }));
+    expect(setup.sent.at(-1)?.payload).toMatchObject({ done: true,
+      result: { container: 'iso', outputFiles: [path.join('D:/out', 'disc.iso')], audioActualBitrates: null } });
+  });
+  it('光碟容量估算包含超出影像範圍的音訊尾端', async () => {
+    const setup = make();
+    const job = videoJob();
+    const audioPlan = { buses: [{ id: 'a', inputs: [{ file: 'long.wav', trimStart: 0, trimEnd: 7200 }] }],
+      streams: [{ layout: 'mono', busIds: ['a'] }] };
+    Object.assign(job.payload, { format: 'dvd-iso', outPath: 'D:/out/disc.iso', audioPlan });
+    await setup.runner.run(job);
+    const expected = discEncoding('dvd-iso', { duration: 7200, audioPlan });
+    expect(setup.runFfmpeg).toHaveBeenCalledWith(expect.arrayContaining(['-b:v', `${expected.videoKbps}k`]),
+      expect.objectContaining({ duration: 7200, discAudioPlan: { streams: expect.arrayContaining([
+        expect.objectContaining({ layout: 'mono', busIds: ['a'] }),
+      ]) } }));
+  });
   it('MOD-FHD 把封裝模式傳到 execution，編碼器與音訊結果反映固定規格', async () => {
     const setup = make();
     const job = videoJob();

@@ -16,6 +16,7 @@ const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require('child_process');
 const QueueStore = require('./queue-store');
 const ExportWatchdog = require('./export-watchdog');
 const { deliveryOutputPaths } = require('./airline-output');
+const discTools = require('./disc-tools.json');
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
@@ -115,6 +116,9 @@ function bundledNativeRequirements(options = {}) {
       { relativePath: 'electron/ffmpeg/ffprobe.exe', executable: true },
       { relativePath: 'electron/mpv/mpv.exe', executable: true },
       { relativePath: 'electron/mpv/d3dcompiler_43.dll', executable: false },
+      ...discTools.files.map(file => ({
+        relativePath: `electron/disc/${file.name}`, executable: !!file.executable, sha256: file.sha256,
+      })),
     ];
   }
 
@@ -326,6 +330,7 @@ function createFFmpegExecution(options = {}) {
     outPath,
     shouldSend,
     outputFormat,
+    discAudioPlan,
   } = {}) {
     return new Promise((resolve, reject) => {
       const ffmpegPath = getFFmpegPath();
@@ -397,7 +402,10 @@ function createFFmpegExecution(options = {}) {
         tail += text;
         if (tail.length > 8000) tail = tail.slice(-8000);
         const progress = parser.parseChunk(text);
-        if (progress && (sender || onProgress)) report(progress);
+        if (progress && (sender || onProgress)) {
+          const isDisc = outputFormat === 'dvd-iso' || outputFormat === 'bd-iso';
+          report(isDisc ? { ...progress, pct: progress.pct * 0.95 } : progress);
+        }
       };
 
       const finishProcess = async (code, watchdogResult = null) => {
@@ -440,11 +448,13 @@ function createFFmpegExecution(options = {}) {
           jobId,
           queueDir,
           ...(outputFormat ? { outputFormat, outputPaths: deliveryOutputPaths(outputFormat, outPath) } : {}),
+          ...(discAudioPlan ? { discAudioPlan } : {}),
         }, {
           scriptPath: watchdogScriptPath(),
           onStderr: consumeStderr,
           onMessage: message => {
             if (message?.type === 'error' && !watchdogFailure) watchdogFailure = message;
+            if (message?.type === 'progress') report(message.progress);
           },
         });
         controller.ready.catch(() => {});

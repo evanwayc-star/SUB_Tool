@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   existsSync,
   mkdirSync,
@@ -14,6 +14,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const nativeFs = require('node:fs');
 const {
   acquireLease,
   leaseRoot,
@@ -33,6 +34,7 @@ function makeTempDir() {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const dir of tempDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -167,6 +169,29 @@ describe('取得匯出檔案鎖', () => {
 });
 
 describe('更新與釋放匯出檔案鎖', () => {
+  test('光碟鎖先記錄尚未寫最終檔，合成開始時原子更新且保留 owner 身分', () => {
+    const queueDir = makeTempDir();
+    const outPath = path.join(queueDir, 'movie.iso');
+    const lease = acquireLease({ queueDir, outPath, jobId: 'disc', token: 'disc-token', outputStarted: false });
+    expect(listLeases(queueDir)[0].owner.outputStarted).toBe(false);
+    const updated = updateLease({ queueDir, outPath, token: 'disc-token', outputStarted: true, ffmpegPid: 4321 });
+    expect(updated.owner).toEqual({ ...lease.owner, outputStarted: true, ffmpegPid: 4321 });
+    expect(listLeases(queueDir)[0].owner).toEqual(updated.owner);
+  });
+
+  test('拒絕無效 outputStarted，也不默默信任損壞的復原旗標', () => {
+    const queueDir = makeTempDir();
+    const outPath = path.join(queueDir, 'movie.iso');
+    expect(() => acquireLease({ queueDir, outPath, jobId: 'disc', outputStarted: 'false' }))
+      .toThrow(expect.objectContaining({ code: 'INVALID_LEASE_ARGUMENT' }));
+    const lease = acquireLease({ queueDir, outPath, jobId: 'disc', token: 'disc-token', outputStarted: false });
+    expect(() => updateLease({ queueDir, outPath, token: 'disc-token', outputStarted: 1 }))
+      .toThrow(expect.objectContaining({ code: 'INVALID_LEASE_ARGUMENT' }));
+    expect(listLeases(queueDir)[0].owner.outputStarted).toBe(false);
+    writeFileSync(path.join(lease.lockPath, 'owner.json'), JSON.stringify({ ...lease.owner, outputStarted: 'false' }));
+    expect(listLeases(queueDir)[0]).toMatchObject({ valid: false, error: { code: 'LEASE_CORRUPT' } });
+  });
+
   test('持有者可補上 ffmpeg PID，且 owner 的識別欄位保持不變', () => {
     const queueDir = makeTempDir();
     const outPath = path.join(queueDir, 'movie.mp4');
@@ -240,6 +265,42 @@ describe('更新與釋放匯出檔案鎖', () => {
     expect(releaseLease({ queueDir, outPath, token: 'token-1' })).toBe(true);
     expect(existsSync(lease.lockPath)).toBe(false);
     expect(releaseLease({ queueDir, outPath, token: 'token-1' })).toBe(false);
+  });
+
+  test('刪除私有素材失敗後 owner 仍可讀取，解除占用即可重試釋放', () => {
+    const queueDir = makeTempDir();
+    const outPath = path.join(queueDir, 'movie.iso');
+    const lease = acquireLease({ queueDir, outPath, jobId: 'disc', token: 'disc-token', outputStarted: false });
+    const stage = path.join(lease.lockPath, 'subtool-disc-stage');
+    mkdirSync(stage);
+    writeFileSync(path.join(stage, 'internal.ts'), 'busy encoded file');
+    const originalRemove = nativeFs.rmSync;
+    const mocked = vi.spyOn(nativeFs, 'rmSync').mockImplementation((file, options) => {
+      if (file === stage) throw Object.assign(new Error('file busy'), { code: 'EBUSY' });
+      return originalRemove(file, options);
+    });
+    expect(() => releaseLease({ queueDir, outPath, token: 'disc-token' }))
+      .toThrow(expect.objectContaining({ code: 'EBUSY' }));
+    expect(listLeases(queueDir)).toEqual([{ valid: true, ...lease }]);
+    mocked.mockRestore();
+    expect(releaseLease({ queueDir, outPath, token: 'disc-token' })).toBe(true);
+    expect(existsSync(lease.lockPath)).toBe(false);
+  });
+
+  test('最後刪目錄失敗仍補回 owner，不把 lease 留成損壞狀態', () => {
+    const queueDir = makeTempDir();
+    const outPath = path.join(queueDir, 'movie.iso');
+    const lease = acquireLease({ queueDir, outPath, jobId: 'disc', token: 'disc-token' });
+    const originalRemove = nativeFs.rmdirSync;
+    const mocked = vi.spyOn(nativeFs, 'rmdirSync').mockImplementation((file, options) => {
+      if (file === lease.lockPath) throw Object.assign(new Error('directory busy'), { code: 'EBUSY' });
+      return originalRemove(file, options);
+    });
+    expect(() => releaseLease({ queueDir, outPath, token: 'disc-token' }))
+      .toThrow(expect.objectContaining({ code: 'EBUSY' }));
+    expect(listLeases(queueDir)).toEqual([{ valid: true, ...lease }]);
+    mocked.mockRestore();
+    expect(releaseLease({ queueDir, outPath, token: 'disc-token' })).toBe(true);
   });
 });
 
