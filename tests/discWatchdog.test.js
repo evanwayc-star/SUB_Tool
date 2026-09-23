@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 const { spawnExportWatchdog, recoverExportLeases } = require('../electron/export-watchdog');
 const { acquireLease, listLeases } = require('../electron/export-lease');
 const helperPath = require.resolve('../electron/disc-authoring');
+const watchdogPath = require.resolve('../electron/export-watchdog');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function waitFor(check) {
@@ -22,14 +23,14 @@ async function waitFor(check) {
 // The watchdog and encoder/authoring child lifetimes are real processes. Only
 // the native authoring adapter is replaced, so these tests run without DVD tools.
 describe('光碟 watchdog 暫存、取消與復原', () => {
-  let tempDir, queueDir, outPath, encoderPath, preloadPath, controllers;
+  let tempDir, queueDir, outPath, encoderPath, bootstrapPath, controllers;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-disc-watchdog-'));
     queueDir = path.join(tempDir, 'queue');
     outPath = path.join(tempDir, 'existing.iso');
     encoderPath = path.join(tempDir, 'encoder.cjs');
-    preloadPath = path.join(tempDir, 'native-adapter.cjs');
+    bootstrapPath = path.join(tempDir, 'watchdog-bootstrap.cjs');
     controllers = [];
     fs.writeFileSync(outPath, 'original ISO');
     fs.writeFileSync(encoderPath, `
@@ -39,14 +40,15 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
       if (process.env.DISC_TEST_MODE === 'encoding-wait') setInterval(() => {}, 1000);
       else setTimeout(() => process.exit(process.env.DISC_TEST_MODE === 'encoding-fail' ? 7 : 0), 50);
     `);
-    fs.writeFileSync(preloadPath, `
+    fs.writeFileSync(bootstrapPath, `
       const fs = require('fs');
       const { spawn } = require('child_process');
       const helperPath = ${JSON.stringify(helperPath)};
       const actual = require(helperPath);
+      const { runStandalone } = require(${JSON.stringify(watchdogPath)});
       const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       const abortError = () => Object.assign(new Error('cancelled'), {code:'ABORT_ERR'});
-      require.cache[helperPath].exports = {
+      const disc = {
         ...actual,
         async prepareDiscOutput(format, options) {
           const stage = await actual.prepareDiscOutput(format, options);
@@ -66,7 +68,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
           if (process.env.DISC_TEST_MODE === 'author-preflight-fail') throw Object.assign(new Error('tool missing'), {code:'DISC_TOOL_MISSING'});
           await options.onOutputStart?.();
           const program = 'const fs=require("fs");fs.writeFileSync(process.argv[1],"partial ISO");fs.writeFileSync(process.argv[2],String(process.pid));setInterval(()=>{},1000);';
-          const child = spawn(process.execPath, ['-e', program, target, process.env.DISC_TEST_AUTHOR], {windowsHide:true, stdio:'ignore',env:{...process.env,NODE_OPTIONS:''}});
+          const child = spawn(process.execPath, ['-e', program, target, process.env.DISC_TEST_AUTHOR], {windowsHide:true, stdio:'ignore'});
           const closed = new Promise((resolve, reject) => { child.once('close', resolve); child.once('error', reject); });
           const stop = () => { child.kill(); };
           options.signal.addEventListener('abort', stop, {once:true});
@@ -85,6 +87,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
           }
         },
       };
+      void runStandalone({ artifactAdapters: { disc } });
     `);
   });
 
@@ -104,8 +107,8 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
       ffmpegPath: process.execPath, args: [encoderPath, outPath], outPath,
       queueDir, jobId: mode, outputFormat: format,
     }, {
+      scriptPath: bootstrapPath,
       env: {
-        NODE_OPTIONS: `--require ${JSON.stringify(preloadPath)}`,
         DISC_TEST_MODE: mode,
         DISC_TEST_PREPARED: path.join(tempDir, 'prepared.json'),
         DISC_TEST_ENCODER: path.join(tempDir, 'encoded.log'),

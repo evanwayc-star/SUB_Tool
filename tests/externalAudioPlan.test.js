@@ -97,6 +97,40 @@ describe('external audio project export plan', () => {
     expect(data.audioPlan.buses.flatMap(bus => bus.inputs)).toHaveLength(2);
   });
 
+  it('freezes each external source effect through delivery composition before channel routing and trimming', () => {
+    liveExternalSources[0].hasAudioLimiter = true;
+    liveExternalSources[0].audioLimiterSpec = { max: -6, min: -12, isTruePeak: true };
+    const data = snapshot();
+    liveExternalSources[0].audioLimiterSpec.max = -1;
+    const plan = ExportPlan._normalizeAudioPlan(composeDeliveryAudioPlan(data.audioPlan), { requireStreams: false });
+    expect(plan.buses[0].inputs[0].audioLimiterSpec.max).toBe(-6);
+    expect(plan.buses[0].inputs[0].file).toBe('C:/master/music.wav');
+    const { args } = ExportPlan.buildDeliveryArgv({ format: 'wav', duration: data.duration, audioPlan: plan, outPath: 'C:/out/test.wav' });
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('[0:a:0]loudnorm=I=-12.0:TP=-6.0');
+    expect(graph).toMatch(/loudnorm=[^;]+,pan=mono\|c0=c1,asetpts=PTS-STARTPTS,atrim=start=3\.000000:end=8\.000000/);
+    expect(graph).not.toContain('[wavNorm]');
+    expect(args.join(' ')).not.toContain('C:/cache');
+  });
+
+  it('carries video effects into both legacy branches without reusing a seeked picture input', () => {
+    resetAudioProject();
+    liveExternalSources = [];
+    State.clips = [{ id: 'effect', path: 'C:/master/effect.mov', in: 10, out: 20, offset: 0,
+      audioSrc: 'clip:effect', hasAudioLimiter: true, audioLimiterSpec: { max: -6, min: -12, isTruePeak: false, inputBoost: 4 } }];
+    for (const withChannels of [false, true]) {
+      mediaTracks = withChannels ? [{ source: 'clip:effect', file: 'C:/cache/mono.m4a', kind: 'element', volume: 1, sourceStream: 1, sourceChannel: 2 }] : [];
+      const data = snapshot();
+      expect(data.clips[0].audioLimiterSpec.max).toBe(-6);
+      const { args } = ExportPlan.buildDeliveryArgv({ ...data, format: 'mp4', width: 1920, height: 1080, fps: 25, outPath: 'C:/out/test.mp4' }, { hasAudioStream: () => true });
+      const graph = args[args.indexOf('-filter_complex') + 1];
+      expect(args.filter(value => value === 'C:/master/effect.mov')).toHaveLength(2);
+      expect(graph).toMatch(/\[1:a(?::1)?\]volume=4\.00dB,alimiter=/);
+      expect(graph).toContain('atrim=start=10.000000:end=20.000000');
+      if (withChannels) expect(graph).toContain('pan=mono|c0=c2');
+    }
+  });
+
   it('keeps a muted external source in the exported timeline length without routing its sound', () => {
     State.clips = [{ id: 'clip-video', path: 'C:/source/video.mov', in: 0, out: 8, offset: 0, vtrack: 0 }];
     liveExternalSources[0] = { ...liveExternalSources[0], enabled: false, offset: 20, in: 2, out: 7 };
@@ -315,7 +349,7 @@ describe('模組本身保持純淨', () => {
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
     expect([...code.matchAll(/from\s+['"]([^'"]+)['"]/g)].map(match => match[1]))
-      .toEqual(['./project-audio.js']);
+      .toEqual(['./project-audio.js', '../shared/audio-loudness.cjs']);
     for (const pureCode of [code, interpretation]) {
       expect(pureCode).not.toMatch(/from\s+['"].*(state|media|sequence|dom)/i);
       expect(pureCode).not.toMatch(/\bdocument\b/);

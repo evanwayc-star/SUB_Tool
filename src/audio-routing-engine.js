@@ -297,6 +297,14 @@ export function resizeProjectAudioBuses(projectDraft, rawCount) {
 }
 
 export class AudioRoutingModel {
+  static editProject(project, effects = {}) {
+    return createRoutingEdit(project, value => AudioRoutingModel.createProjectAdapter(value), effects);
+  }
+
+  static editDelivery(spec, { wav = false } = {}) {
+    return createRoutingEdit(spec || { buses: [], streams: [] }, value => AudioRoutingModel.createDeliveryAdapter(value), { output: true, wav });
+  }
+
   static createProjectAdapter(projectDraft) {
     let p = structuredClone(projectDraft);
     
@@ -311,6 +319,19 @@ export class AudioRoutingModel {
       
       setStreams(streams) {
         p.exportLayout = { streams: structuredClone(streams) };
+      },
+
+      setRoutes(sourceId, changes) {
+        const channels = p.sourceMaps?.[sourceId]?.channels || [];
+        const buses = new Map(p.buses.map(bus => [String(bus.id), bus]));
+        for (const change of changes) {
+          const route = channels.find(item => item.sourceStream === change.sourceStream && item.sourceChannel === change.sourceChannel);
+          if (!route) continue;
+          const bus = buses.get(String(change.busId));
+          if (bus?.locked && !(route.busIds || []).includes(bus.id)) continue;
+          route.busIds = bus ? [bus.id] : [];
+          route.enabled = !!bus;
+        }
       },
       
       applyAllMonoLayout() {
@@ -393,6 +414,100 @@ export class AudioRoutingModel {
       }
     };
   }
+}
+
+/* 一次配線編輯包含來源頁與輸出頁；子頁只提交到父草稿，只有根頁會記 History。
+   正式 UI 與測試走同一個 interface。preview adapter 負責套用播放增益，module
+   負責何時投影、回復、驗證與提交；DOM 呼叫端不再持有 rollback 快照。 */
+function createRoutingEdit(initialValue, makeAdapter, {
+  preview = () => {}, record = () => {}, owns = () => true,
+  finished = () => {},
+  label = '設定輸出音訊聲道', output = false, wav = false,
+  parent = null,
+} = {}) {
+  const initial = structuredClone(initialValue);
+  let model = makeAdapter(initial);
+  let active = true;
+  let child = null;
+  let released = false;
+  const release = () => { if (!parent && !released) { released = true; finished(); } };
+  const snapshot = () => structuredClone(model.result ? model.result() : model.current());
+  const live = () => active && owns() && (!parent || parent.live());
+  const publish = () => preview(structuredClone(model.current()));
+  const change = (method, ...args) => {
+    if (!live() || child) return false;
+    const before = JSON.stringify(snapshot());
+    const result = model[method](...args);
+    if (JSON.stringify(snapshot()) !== before) publish();
+    return result;
+  };
+  const abandon = () => {
+    child?.abandon();
+    child = null;
+    active = false;
+  };
+  const accept = value => {
+    model = makeAdapter(value);
+    child = null;
+  };
+  const cancel = () => {
+    if (!live()) { abandon(); release(); return false; }
+    abandon();
+    if (parent) { parent.accept(initial); parent.publish(); }
+    else preview(structuredClone(initial));
+    release();
+    return true;
+  };
+  const dismiss = () => active && parent ? parent.dismiss() : cancel();
+  const edit = {
+    current() { return structuredClone(model.current()); },
+    isActive: live,
+    setStreams: streams => change('setStreams', streams),
+    setBusCount: count => change('setBusCount', count),
+    allMono: () => change('applyAllMonoLayout'),
+    preset: preset => change('applyDeliveryPreset', preset),
+    addStream: () => change('addStream'),
+    setRoutes: (sourceId, routes) => change('setRoutes', sourceId, routes),
+    output() {
+      if (!live() || child) return null;
+      const parentState = { live, accept, publish, dismiss };
+      const nested = createRoutingEdit(snapshot(), makeAdapter, { preview, owns, output: true, parent: parentState });
+      child = nested;
+      return nested.edit;
+    },
+    commit() {
+      if (!live() || child) return { saved: false, error: '音訊設定已被其他操作取代，請重新開啟。' };
+      if (output) {
+        const current = model.current();
+        const validBuses = new Set(current.buses.map(bus => String(bus.id)));
+        const seen = new Set();
+        const valid = current.exportLayout.streams.every(stream => {
+          const ids = stream.busIds || [];
+          if (ids.length !== layoutWidth(stream.layout)) return false;
+          for (const id of ids) {
+            const key = String(id);
+            if (!validBuses.has(key) || seen.has(key)) return false;
+            seen.add(key);
+          }
+          return true;
+        });
+        if (!valid) return { saved: false, error: wav ? '每個 WAV 群組需要足夠且不重複的專案音訊軌。' : '每個 Stream 需要足夠且不重複的專案音訊軌。' };
+        if (wav) model.syncWavBusIds();
+      }
+      const result = snapshot();
+      active = false;
+      if (parent) parent.accept(result);
+      else {
+        release();
+        if (JSON.stringify(result) !== JSON.stringify(initial)) record(label);
+      }
+      return { saved: true, spec: result };
+    },
+    cancel,
+    dismiss,
+  };
+  // 子編輯的失效操作只供本 module 使用，不能成為 UI 的生命週期責任。
+  return parent ? { edit, abandon } : edit;
 }
 
 class AudioPipelineManager {

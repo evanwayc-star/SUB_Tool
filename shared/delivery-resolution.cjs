@@ -64,4 +64,31 @@ function suggestKbps({ w, h } = {}) {
   return Math.max(0, Math.round((width * height * 30 * 0.1) / 1000));
 }
 
-module.exports = { deliveryResolution, suggestKbps };
+// 交付清單建立工作與佇列修改工作共用同一份規格派生。呼叫端保留各自的
+// 時間碼來源：新工作以輸出 FPS 換算，已入列工作使用送出時凍結的起點。
+function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH = 0,
+  fps, videoKbps = 0, previousWidth, previousHeight, kbpsOverride,
+  burnTimecode = false, timecodeStart = null } = {}) {
+  const isWav = format === 'wav';
+  const height = preset?.height || targetH;
+  const { w, h } = preset
+    ? { w: preset.width, h: preset.height }
+    : deliveryResolution({ canvasW, canvasH, targetH: height, isWav });
+  let kbps = preset ? preset.videoKbps : Number(videoKbps) || 0;
+  if (format === 'h264') {
+    if (kbpsOverride != null) kbps = Math.max(1, Math.floor(Number(kbpsOverride) || 0));
+    else if (previousWidth != null && previousHeight != null
+      && (w !== Number(previousWidth) || h !== Number(previousHeight))) kbps = suggestKbps({ w, h });
+  }
+  if (!isWav && burnTimecode && !timecodeStart) {
+    throw new Error('這份工作沒有記錄時間軸起點，無法補上燒入 TC；請重新從交付清單送出');
+  }
+  return {
+    width: w, height: h, targetH: height,
+    fps: preset?.fps || fps,
+    videoKbps: kbps,
+    timecodeWatermark: !isWav && burnTimecode ? { start: timecodeStart } : null,
+  };
+}
+
+module.exports = { deliveryResolution, suggestKbps, deriveDeliverySpec };

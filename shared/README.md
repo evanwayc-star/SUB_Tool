@@ -16,12 +16,12 @@ import { imageBox } from '../shared/image-geometry.cjs';
 
 | 檔案 | 唯一責任 |
 |---|---|
-| `audio-loudness.cjs` | 音訊強限制器與 ITU-R BS.1770 響度純邏輯 |
+| `audio-loudness.cjs` | 音訊效果序列化、母素材路徑、強限制器與 ITU-R BS.1770 共用濾鏡規則 |
 | `channel-layout.cjs` | 來源聲道展開順序 |
 | `clip-fade.cjs` | 片段長度與淡入淡出視窗 |
 | `delivery-frame-rate.cjs` | 交付 FPS 選項、精確有理數與來源格率比對 |
-| `delivery-formats.cjs` | 九種交付選項、固定規格、音訊編組限制與輸出檔名 |
-| `delivery-resolution.cjs` | 交付解析度正規化 |
+| `delivery-formats.cjs` | 九種交付選項、固定規格與音訊編組限制 |
+| `delivery-resolution.cjs` | 交付解析度、碼率與 TC 浮水印的共用規格派生 |
 | `image-geometry.cjs` | 圖片／片段疊層幾何 |
 
 ## 加入條件

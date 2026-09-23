@@ -33,6 +33,9 @@ function socketThatReportsDuration(duration = 123.5) {
   socket.destroy = vi.fn(() => socket.emit('close'));
   socket.write = vi.fn(raw => {
     const message = JSON.parse(raw);
+    if (message.command?.[0] === 'loadfile') {
+      queueMicrotask(() => socket.emit('data', Buffer.from('{"event":"file-loaded"}\n')));
+    }
     if (typeof message.request_id !== 'number') return;
     queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data: duration }) + '\n')));
   });
@@ -45,6 +48,7 @@ function make({ duration = 123.5 } = {}) {
   const children = [];
   const sockets = [];
   const events = [];
+  const delays = [];
   const host = createMpvHost({
     BrowserWindow: FakeWindow,
     spawn: vi.fn((exe, args) => {
@@ -74,14 +78,29 @@ function make({ duration = 123.5 } = {}) {
     onEvent: event => events.push(event),
     log: vi.fn(),
     now: vi.fn(() => 9001),
-    delay: async () => {},
-    setTimer: fn => { fn(); return 0; },
+    delay: async ms => { delays.push(ms); },
+    setTimer: () => 0,
     clearTimer: vi.fn(),
   });
-  return { host, parent, children, sockets, events };
+  return { host, parent, children, sockets, events, delays };
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it('啟動與換檔在來源就緒時立即回傳，不固定等待 400ms 或反覆查 duration', async () => {
+    const { host, sockets, delays } = make();
+    await expect(host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } }))
+      .resolves.toEqual({ ok: true, duration: 123.5 });
+    expect(delays).toEqual([]);
+
+    sockets[0].write.mockClear();
+    await expect(host.loadFile('D:/media/b.mxf')).resolves.toEqual({ ok: true, duration: 123.5 });
+    const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands.filter(command => command[0] === 'get_property')).toEqual([
+      ['get_property', 'duration'],
+    ]);
+    expect(delays).toEqual([]);
+  });
+
   it('原生倒播先切軟解與反向佇列，恢復正播時明確寫回 forward 與 auto hwdec', async () => {
     const { host, sockets } = make();
     await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });

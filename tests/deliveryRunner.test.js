@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const { createDeliveryRunner } = require('../electron/delivery-runner.js');
-const { discEncoding } = require('../electron/disc-authoring.js');
 
 const tempRoots = [];
 afterEach(() => {
@@ -40,10 +39,10 @@ function make(overrides = {}) {
     queue,
     queueDir: () => queueDir,
     tempDir,
-    mediaProbe: () => ({
+    mediaProbe: overrides.mediaProbe || (() => ({
       hasAudio: vi.fn(async () => false),
       audioBitrates: vi.fn(async () => ['320k']),
-    }),
+    })),
     runFfmpeg,
     encoder: {
       name: () => 'libx264',
@@ -81,6 +80,20 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it('航空來源的音訊前導時間送入正式轉檔計畫', async () => {
+    const setup = make({ mediaProbe: () => ({
+      hasAudio: async () => true,
+      audioVideoStartOffsets: async () => [-481 / 48000],
+      audioBitrates: async () => [{ channels: 2, kbps: 128 }],
+    }) });
+    const job = videoJob();
+    Object.assign(job.payload, { format: 'airline-s3k', outPath: 'D:/out/delivery.mpg' });
+    await setup.runner.run(job);
+    const argv = setup.runFfmpeg.mock.calls[0][0];
+    expect(argv[argv.indexOf('-filter_complex') + 1])
+      .toContain('asetpts=PTS-STARTPTS-0.010021/TB,aresample=first_pts=0');
+  });
+
   it.each(['dvd-iso', 'bd-iso'])('%s 缺省音訊沿用 stereo，最後回報單一 ISO', async format => {
     const setup = make();
     const job = videoJob();
@@ -98,8 +111,7 @@ describe('delivery runner public interface', () => {
       streams: [{ layout: 'mono', busIds: ['a'] }] };
     Object.assign(job.payload, { format: 'dvd-iso', outPath: 'D:/out/disc.iso', audioPlan });
     await setup.runner.run(job);
-    const expected = discEncoding('dvd-iso', { duration: 7200, audioPlan });
-    expect(setup.runFfmpeg).toHaveBeenCalledWith(expect.arrayContaining(['-b:v', `${expected.videoKbps}k`]),
+    expect(setup.runFfmpeg).toHaveBeenCalledWith(expect.arrayContaining(['-b:v', '4100k']),
       expect.objectContaining({ duration: 7200, discAudioPlan: { streams: expect.arrayContaining([
         expect.objectContaining({ layout: 'mono', busIds: ['a'] }),
       ]) } }));

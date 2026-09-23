@@ -336,7 +336,9 @@ describe('模組本身保持純淨', () => {
     const src = fs.readFileSync(path.join(root, 'src/external-audio.js'), 'utf8');
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
-    expect(code).not.toMatch(/\bimport\b/);
+    // 共用效果資料仍是零 I/O 純規則；不能重新引入 renderer runtime。
+    expect([...code.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map(match=>match[1]))
+      .toEqual(['../shared/audio-loudness.cjs']);
     expect(code).not.toMatch(/\bdocument\b/);
     expect(code).not.toMatch(/\bState\b/);
   });

@@ -31,6 +31,7 @@ function createMpvHost(deps) {
   let requestId = 0;
   const callbacks = new Map();
   let pendingPresentation = null;
+  let pendingFileLoad = null;
   // mpv 由 --pause 啟動。暫停中的 seek 會更新 time-pos／畫格，卻不保證在
   // unpause 前送 playback-restart；播放中的 seek 則仍要等 restart 才能視為呈現完成。
   let playerPaused = true;
@@ -148,6 +149,25 @@ function createMpvHost(deps) {
     return settlePresentation(pendingPresentation, null);
   }
 
+  function settleFileLoad(ready) {
+    const waiter = pendingFileLoad;
+    if (!waiter) return;
+    pendingFileLoad = null;
+    clearTimer(waiter.timer);
+    waiter.resolve(ready);
+  }
+
+  function waitForFileLoad() {
+    settleFileLoad(false);
+    return new Promise(resolve => {
+      const waiter = { resolve, timer: null };
+      pendingFileLoad = waiter;
+      waiter.timer = setTimer(() => {
+        if (pendingFileLoad === waiter) settleFileLoad(false);
+      }, 8000);
+    });
+  }
+
   function maybeFinishPresentation(request) {
     if (!request || request !== pendingPresentation) return;
     if (!request.commandAcknowledged || request.presentedSourceTime == null) return;
@@ -183,6 +203,7 @@ function createMpvHost(deps) {
     playerPaused = true;
     clearCallbacks(null);
     cancelPresent();
+    settleFileLoad(false);
     if (destroy && current) { try { current.destroy(); } catch (error) {} }
     if (emitDisconnected) sendEvent({ event: 'disconnected' });
   }
@@ -251,6 +272,7 @@ function createMpvHost(deps) {
 
   function present(time, { exact = false, tolerance = 1.5 / 30 } = {}) {
     cancelPresent();
+    const startedAt = now();
     const targetTime = Math.max(0, Number(time) || 0);
     const request = {
       targetTime,
@@ -279,7 +301,11 @@ function createMpvHost(deps) {
       }
       maybeFinishPresentation(request);
     });
-    return promise;
+    return promise.then(result => {
+      const elapsed = now() - startedAt;
+      if (elapsed >= 1000) log('[mpv] slow present:', Math.round(elapsed) + 'ms', 'target=' + targetTime);
+      return result;
+    });
   }
 
   async function setDirection(value) {
@@ -316,6 +342,9 @@ function createMpvHost(deps) {
             callbacks.delete(message.request_id);
             clearTimer(callback.timer);
             callback.resolve(message.data ?? null);
+          } else if (message.event === 'file-loaded') {
+            settleFileLoad(true);
+            sendEvent(message);
           } else if (message.event === 'property-change' || message.event === 'end-file' || message.event === 'playback-restart') {
             observePresentationEvent(message);
             sendEvent(message);
@@ -472,7 +501,8 @@ function createMpvHost(deps) {
       client.write(JSON.stringify({ command: ['observe_property', 1, 'time-pos'] }) + '\n');
       client.write(JSON.stringify({ command: ['observe_property', 2, 'pause'] }) + '\n');
       client.write(JSON.stringify({ command: ['observe_property', 3, 'duration'] }) + '\n');
-      await delay(400);
+      // pipe 已連線即可查詢；等待固定 400ms 只會延後每次首畫格啟動。
+      // 來源 duration 尚未就緒時 renderer 會沿用先前 ffprobe 的值，後續再由 property-change 更新。
       const duration = await send(['get_property', 'duration'], true);
       return { ok: true, duration: typeof duration === 'number' ? duration : 0 };
     } catch (error) {
@@ -582,14 +612,15 @@ function createMpvHost(deps) {
     await send(['set_property', 'pause', true]);
     await send(['set_property', 'lavfi-complex', '']);
     log('[mpv] loadfile:', filePath);
-    await send(['loadfile', filePath, 'replace'], true);
-    for (let i = 0; i < 80; i++) {
-      const duration = await send(['get_property', 'duration'], true);
-      if (typeof duration === 'number' && duration > 0) return { ok: true, duration };
-      await delay(100);
+    // 建立 waiter 後才送命令，避免快速載入的 file-loaded 先於 command ack 到達。
+    const ready = waitForFileLoad();
+    await send(['loadfile', filePath, 'replace']);
+    if (!await ready) {
+      log('[mpv] loadfile: file-loaded not received after 8s:', filePath);
+      return { ok: false, duration: 0 };
     }
-    log('[mpv] loadfile: duration not ready after 8s:', filePath);
-    return { ok: false, duration: 0 };
+    const duration = await send(['get_property', 'duration'], true);
+    return { ok: true, duration: typeof duration === 'number' ? duration : 0 };
   }
 
   return {

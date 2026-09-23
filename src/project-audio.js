@@ -9,6 +9,8 @@
    推導。播放用的逐聲道檔只提供控制狀態，交付永遠重新讀母素材 path。
 ============================================================================== */
 
+import { audioLimiterSnapshot } from '../shared/audio-loudness.cjs';
+
 const nonNeg = value => Math.max(0, Number(value) || 0);
 const gainValue = (value, fallback = 1) => {
   const numeric = Number(value);
@@ -253,6 +255,7 @@ class ProjectAudioInterpretation {
           if (!target || volume <= 0) continue;
           target.inputs.push({
             file: masterPath,
+            ...audioLimiterSnapshot(source),
             sourceStream,
             sourceChannel,
             offset: +placement.offset.toFixed(6),

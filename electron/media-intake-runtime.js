@@ -415,9 +415,6 @@ function createMediaIntakeRuntime(options = {}) {
 
   async function ingest({ src, duration, needsProxy, audio }, session = {}) {
     const audioSources = Array.isArray(audio) ? audio : [];
-    const ingestLabel = needsProxy && audioSources.length
-      ? '正在轉檔 Proxy 與分析音訊'
-      : (needsProxy ? '正在轉檔 Proxy' : '正在分析音訊');
     const hit = readCache(src);
     if (hit
       && (!audioSources.length || hit.routingMetadataComplete)
@@ -428,19 +425,28 @@ function createMediaIntakeRuntime(options = {}) {
       return Object.assign({ cached: true }, hit.meta);
     }
 
-    const dir = writeCacheDir(src);
+    // 先前只抽音軌的巨大母素材，補建 Proxy 時沿用已完成的聲道／波形，
+    // 不再把整支影片的音訊重抽一次；失敗前保留原本的完整音訊快取。
+    const reuseAudio = needsProxy && hit && !hit.meta?.proxy
+      && (!audioSources.length || hit.routingMetadataComplete)
+      && isDirWritable(hit.dir);
+    const ingestLabel = needsProxy && audioSources.length && !reuseAudio
+      ? '正在轉檔 Proxy 與分析音訊'
+      : (needsProxy ? '正在轉檔 Proxy' : '正在分析音訊');
+    const dir = reuseAudio ? hit.dir : writeCacheDir(src);
     const metaPath = path.join(dir, 'meta.json');
     fs.mkdirSync(dir, { recursive: true });
-    const audioPlan = buildAudioIngestPlan(audioSources);
-    const channels = audioPlan.channels.map(channel => ({ ...channel, file: path.join(dir, channel.file) }));
+    const audioPlan = buildAudioIngestPlan(reuseAudio ? [] : audioSources);
+    const channels = reuseAudio ? hit.meta.channels
+      : audioPlan.channels.map(channel => ({ ...channel, file: path.join(dir, channel.file) }));
     const proxy = needsProxy ? path.join(dir, 'proxy.mp4') : null;
-    const wave = audioPlan.waveLabel ? path.join(dir, 'wave.wav') : null;
+    const wave = reuseAudio ? hit.meta.wave : (audioPlan.waveLabel ? path.join(dir, 'wave.wav') : null);
     const args = buildIngestArgs({
       src,
       needsProxy,
       proxyPath: proxy,
       fc: audioPlan.filters,
-      channels,
+      channels: reuseAudio ? [] : channels,
       chMaps: audioPlan.channelMaps,
       waveLabel: audioPlan.waveLabel,
       wavePath: wave,

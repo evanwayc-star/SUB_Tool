@@ -6,15 +6,8 @@
 const fs = require('fs');
 const path = require('path');
 const QueueStore = require('./queue-store');
-const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryOutputNames } = require('../shared/delivery-formats.cjs');
-const { airlineEncoding, airlineMuxArgs } = require('./airline-encoding');
-const { discEncoding } = require('./disc-authoring');
-const {
-  buildDeliveryArgv,
-  _normalizeAudioPlan,
-  _planDuration,
-  _normaliseExportTimecodeWatermark,
-} = require('./export-plan');
+const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
+const { buildDeliveryArgv } = require('./export-plan');
 
 function failureProgress({ stopped = false, shutdown = false, error = null } = {}) {
   const partialCleanup = error?.code === 'PARTIAL_CLEANUP_FAILED'
@@ -76,13 +69,8 @@ function createDeliveryRunner(options = {}) {
     const isPro = format === 'prores';
     const preset = getDeliveryFormatPreset(format);
     const isDisc = preset?.kind === 'disc';
-    const outputFiles = deliveryOutputNames(format, path.basename(outPath)).map(name => path.join(path.dirname(outPath), name));
-    const encoding = airlineEncoding(format);
-    const audioPlan = _normalizeAudioPlan(normalizeDeliveryPresetAudio(format, rawAudioPlan), { requireStreams: !isWav });
-    const disc = isDisc ? discEncoding(format, {
-      duration: Math.max(0.05, Number(duration) || 0, _planDuration(audioPlan)), audioPlan,
-    }) : null;
-    const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, preset?.fps || fps);
+    const isAirline = preset?.transport === 'airline';
+    const outputFiles = [path.normalize(outPath)];
 
     queue.assertJobCapabilities(job);
 
@@ -109,25 +97,30 @@ function createDeliveryRunner(options = {}) {
       }
 
       const probe = mediaProbe();
-      const audioPresence = new Map(await Promise.all(
-        [...new Set((clips || [])
-          .filter(clip => clip?.path && clip.type !== 'image')
-          .map(clip => clip.path))]
-          .map(async sourcePath => [sourcePath, await probe.hasAudio(sourcePath)]),
-      ));
+      const sourcePaths = [...new Set((clips || [])
+        .filter(clip => clip?.path && clip.type !== 'image')
+        .map(clip => clip.path))];
+      const audioPresence = new Map(await Promise.all(sourcePaths
+        .map(async sourcePath => [sourcePath, await probe.hasAudio(sourcePath)])));
+      const sourceStartOffsets = new Map();
+      if (getDeliveryFormatPreset(format)?.transport === 'airline' && probe.audioVideoStartOffsets) {
+        await Promise.all(sourcePaths.filter(sourcePath => audioPresence.get(sourcePath))
+          .map(async sourcePath => sourceStartOffsets.set(sourcePath,
+            await probe.audioVideoStartOffsets(sourcePath))));
+      }
       const plan = buildDeliveryArgv({
         format, clips, videoTracks, width, height, fps, duration, videoKbps,
-        audioPlan, timecodeWatermark, assFileName: assName, outPath,
+        audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName: assName, outPath,
       }, {
         hwdecArgs: encoder.hwdecArgs,
         vencArgsBitrate: encoder.bitrateArgs,
         proresArgs: encoder.proresArgs,
         encoderName: encoder.name?.() || null,
         hasAudioStream: sourcePath => audioPresence.get(sourcePath) ?? true,
+        audioVideoStartOffset: (sourcePath, streamIndex = 0) =>
+          sourceStartOffsets.get(sourcePath)?.[streamIndex] ?? 0,
         fontsDir: fonts.root?.() || null,
         timecodeFontFile: fonts.timecodeFile?.() || null,
-        airlineEncoding: encoding, airlineMuxArgs: encoding ? airlineMuxArgs(format) : null,
-        discEncoding: disc,
       });
       const { args, label, duration: plannedDuration, kbps, audioBitrates } = plan;
       const startedAt = now();
@@ -153,7 +146,7 @@ function createDeliveryRunner(options = {}) {
       const result = await runFfmpeg(args, {
         duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
         outputFormat: format,
-        ...(isDisc ? { discAudioPlan: audioPlan ? { streams: audioPlan.streams } : null } : {}),
+        ...(isDisc ? { discAudioPlan: plan.discAudioPlan } : {}),
         onProgress: sendProgress,
         onProcess: controller => queue.registerActiveJob(jobId, activeRecord(jobId, controller, outPath)),
       });
@@ -166,7 +159,7 @@ function createDeliveryRunner(options = {}) {
         jobId, label, pct: 100, done: true,
         result: {
           outPath,
-          ...(encoding || isDisc ? { outputFiles, container: isDisc ? 'iso' : 'mpegts' } : {}),
+          ...(isAirline || isDisc ? { outputFiles, container: isDisc ? 'iso' : 'mpegts' } : {}),
           encoder: usedEncoder,
           gpu: /nvenc|qsv|amf|videotoolbox|vaapi/i.test(usedEncoder),
           elapsedMs: now() - startedAt,

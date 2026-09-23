@@ -19,6 +19,20 @@ function completedProcess({ stdout = '', stderr = '', status = 0 } = {}) {
 }
 
 describe('媒體探測 interface', () => {
+  it('保留壓縮來源音訊相對影像的起始時間，供航空交付去除前導', async () => {
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => completedProcess({
+      stdout: JSON.stringify({ streams: [
+        { codec_type: 'video', start_time: '0', disposition: { attached_pic: 1 } },
+        { codec_type: 'video', start_time: '2.033367' },
+        { codec_type: 'audio', start_time: '2.023344' },
+        { codec_type: 'audio', start_time: '2.033367' },
+      ] }),
+    }) });
+    await expect(probe.audioVideoStartOffsets('D:/media/encoded.mpg'))
+      .resolves.toEqual([expect.closeTo(-0.010023, 6), 0]);
+  });
+
   it('把 ffprobe 輸出正規化成 renderer 使用的 descriptor', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
     const spawnProcess = vi.fn(() => completedProcess({

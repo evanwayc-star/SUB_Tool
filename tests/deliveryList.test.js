@@ -4,7 +4,8 @@
    驗證不需要 jsdom、不需要 mock 任何模組，直接呼叫就好。
    對照 tests/deliveryDialog.test.js——那支要 mock 六個模組才動得起來。 */
 import { describe, expect, it } from 'vitest';
-import { deliveryOutputNames, deliveryPresetAudioProblem, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
+import { deliveryPresetAudioProblem, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
+import { deriveDeliverySpec } from '../shared/delivery-resolution.cjs';
 import {
   createDeliveryList, defaultDeliveryName, deliveryResolution,
   extensionFor, projectTagFrom, suggestKbps,
@@ -93,6 +94,29 @@ describe('交付解析度', () => {
   it('WAV 不做縮放', () => {
     expect(deliveryResolution({ canvasW: 1920, canvasH: 1080, targetH: 720, isWav: true }))
       .toEqual({ w: 1920, h: 1080 });
+  });
+});
+
+describe('清單與佇列共用交付規格', () => {
+  it('已入列的 H.264 換解析度會重算碼率，並保留凍結的 TC 起點', () => {
+    expect(deriveDeliverySpec({ format: 'h264', canvasW: 1920, canvasH: 1080,
+      targetH: 720, fps: 29.97, videoKbps: 8000, previousWidth: 1920, previousHeight: 1080,
+      burnTimecode: true, timecodeStart: '01:02:03;04' })).toEqual({
+      width: 1280, height: 720, targetH: 720, fps: 29.97,
+      videoKbps: suggestKbps({ w: 1280, h: 720 }),
+      timecodeWatermark: { start: '01:02:03;04' },
+    });
+  });
+  it('固定規格主導尺寸、FPS 與碼率；WAV 永遠沒有畫面 TC', () => {
+    const preset = getDeliveryFormatPreset('airline-dmpes-4m');
+    expect(deriveDeliverySpec({ format: preset.format, preset, canvasW: 1920, canvasH: 1080,
+      targetH: 720, fps: 25, videoKbps: 8000 })).toMatchObject({
+      width: 720, height: 480, targetH: 480, fps: 29.97, videoKbps: 4000,
+    });
+    expect(deriveDeliverySpec({ format: 'wav', canvasW: 1920, canvasH: 1080,
+      targetH: 720, fps: 25, burnTimecode: true })).toMatchObject({
+      width: 1920, height: 1080, timecodeWatermark: null,
+    });
   });
 });
 
@@ -344,13 +368,12 @@ describe('航空 MPEG-TS 交付', () => {
     expect(list.problems()).toHaveLength(0);
   });
 
-  it('各格式只保留成品檔名，不建立同名音訊或設定檔', () => {
-    expect(deliveryOutputNames('airline-s3k', '節目.v2.MPG'))
-      .toEqual(['節目.v2.MPG']);
-    expect(deliveryOutputNames('airline-dmpes', 'film.mpg'))
-      .toEqual(['film.mpg']);
-    expect(deliveryOutputNames('mod-fhd', 'film.ts')).toEqual(['film.ts']);
-    expect(deliveryOutputNames('h264', 'film.mp4')).toEqual(['film.mp4']);
+  it('每列只有一個成品輸出路徑', () => {
+    const list = base();
+    list.setOutDir(0, 'D:\\交付');
+    list.setFormat(0, 'airline-dmpes');
+    list.setName(0, 'film');
+    expect(list.outPaths()).toEqual([{ dir: 'D:\\交付', name: 'film.mpg', path: 'D:\\交付\\film.mpg' }]);
   });
 
   it('多串流阻擋訊息使用各航空格式名稱，兩條 mono 仍依使用者次序編成 Stereo', () => {

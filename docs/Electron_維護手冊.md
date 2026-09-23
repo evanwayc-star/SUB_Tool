@@ -31,6 +31,7 @@ flowchart LR
 | `electron/export-queue.js` | 背景排程、並行、停止、重試與持久化 |
 | `electron/delivery-runner.js` | 單一交付工作的 ffmpeg 交易 |
 | `electron/export-watchdog.js` | ffmpeg 子程序與 owner process 崩潰隔離 |
+| `electron/export-artifact.js` | watchdog 內部的成品準備、封裝驗證與私有素材清理 |
 
 `main.js` 可以組裝，不應重新實作各 owner 已擁有的規則。
 
@@ -86,6 +87,7 @@ Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案
 | `fileURL`、`stat`、`listDir`、`readB64` | 受權檔案能力 |
 | `probe`、`ingest`、`streamIngest` | 媒體 probe／ingest |
 | `makeProxy`、`extractAudio`、`waveAudio` | 預覽快取 |
+| `normalizeAudio`、`cancelAudioNormalization`、`onAudioNormalizeProgress` | 音訊平衡處理與逐工作進度／取消 |
 | `compressSpeechAudio` | 雲端辨識前的受限音訊壓縮 |
 | `exportVideo`、`stopExport` | 提交／停止交付 |
 | `openQueueMonitor`、`onQueueStatus` | 佇列監控 |
@@ -139,16 +141,11 @@ macOS arm64 封裝需要：
 
 ### 交付
 
-Renderer 提交凍結工作；`delivery-runner.js`：
+Renderer 提交凍結工作；`delivery-runner.js` 核對檔案能力、probe 母素材，將完整工作交給 `export-plan.js` 決定 argv 與實際輸出資訊。計畫自行計算音訊尾端、光碟容量及格式設定，runner 不組裝 codec／mux 的配對。執行成功後才提交佇列完成資訊，最後清理其 ASS 暫存。
 
-1. 核對檔案能力與輸出 lease
-2. probe 母素材
-3. 由 `export-plan.js`／pipeline builder 建立 argv
-4. 啟動 watchdog 與 ffmpeg
-5. 解析 progress
-6. probe 成品內容
-7. 提交完成／錯誤
-8. 清理 ASS、半成品與 lease
+watchdog 取得輸出 lease 後，以 `export-artifact.js` 的成品階段準備編碼目的地，啟動 ffmpeg，等待格式封裝／驗證及私有素材清理，最後裁定完成與釋放 lease。MOD、航空與 ISO 的格式分支集中在成品階段；watchdog 保有唯一的取消、程序存活及輸出 owner 權威。寫入最終 ISO 前必須先持久化 owner，新的原生程序須登記 PID；清理失敗保留 lease，復原流程確認程序停止後才能清理。
+
+成品階段的測試 adapter 只從可信 Node 程式入口注入，renderer IPC 與持久化工作不能指定要載入的模組。測試透過同一成品 interface 控制準備、失敗與取消；真正跨程序的 watchdog 測試仍驗證停止、斷線與復原。
 
 Windows filtergraph 路徑要跳脫兩層；ASS Fontname 必須是字型檔內部 family。
 
@@ -166,7 +163,7 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 
 ### 航空 MPG 自動合成
 
-`airline-encoding.js` 提供 Carbon CPF 對應的 CPU codec 參數，由 delivery runner 注入純 `export-plan.js`。計畫先用顯示比例合成、燒字幕與 TC，再縮為編碼尺寸並設定 SAR；航空來源若隔行則以 bwdif send_frame 轉逐行，不走 MOD-FHD 的場交織。
+`airline-encoding.js` 提供 Carbon CPF 對應的 CPU codec 與 transport profile，由純 `export-plan.js` 依同一格式選擇。計畫先用顯示比例合成、燒字幕與 TC，再縮為編碼尺寸並設定 SAR；航空來源若隔行則以 bwdif send_frame 轉逐行，不走 MOD-FHD 的場交織。
 
 - S3K：MPEG-1、352×240、30000/1001、CBR 1500 kbps、GOP 上限 15、2 B 幀、open GOP、scene change 關閉；VBV 224 KiB。Carbon 的 MPEG-1 aspect code 12 對應 SAR 200:219（表中 1.0950 為其倒數）。libtwolame 輸出 Layer-2 Stereo、48 kHz、128 kbps，16-bit input、CRC 開啟，copyright/original 關閉。
 - DMPES：H.264 Main@3.0、720×480、30000/1001、CBR 1500 或 4000 kbps、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD、關閉 deblocking／weighted prediction／B pyramid。依使用者確認的 **16:9 顯示比例，設定 SAR 32:27**；明確優先於 CPF 的 6:5 及參考成品的 40:33。其餘採參考成品 SPS 實測的 NAL HRD CBR、NTSC limited range；音訊輸出 MPEG-4 AAC-LC／ADTS Stereo、48 kHz、128 kbps。
@@ -177,13 +174,15 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 
 合成沿用 Panasonic cfg 的 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes。1.5M 規格採參考成品 PCR 實測的 1855594 bps CBR；4M 使用 4600000 bps。`airline-transport.js` 依 DTS／PTS 重新排程 PES，影片 TB 目標不超過 400 bytes（上限 512），音訊僅提前約 0.1 秒並限制主緩衝，影片保留量依實際 VBV 限制；PCR 約 50 ms，PAT／PMT 約 90 ms。單純增大 mux delay 會讓主緩衝更容易溢位，因此不能作為 TSA 錯誤的修復。保留編碼器提供的 PTS／DTS 與音訊 priming 關係，不改影音播放速度。
 
+TSA 驗收另須確認每個標示 `random_access_indicator` 的視訊 TS 封包同時帶 PCR，且 S3K 視訊封包抵達時間距 DTS 不超過 1 秒；S3K 的 30000/1001 GOP 時碼標示 drop-frame。TSA 若顯示 S3K `Aspect Ratio: Reserved value (>7)`，應對照 Carbon CPF 與 [ARIB STD-B24 的 MPEG-1 參數表](https://www.arib.or.jp/english/html/overview/doc/6-STD-B24v5_2-1p3-E1.pdf)：352×240、525 線 4:3 使用 aspect code 12；此欄不計入該份報表的 error／warning，不應為清除顯示而變更交付比例。
+
 watchdog 先以 `airline-output.js` 檢查 TS 結構，再將封包重排至 lease 目錄中的暫存 TS，依固定碼率重新產生 PCR／PSI／null packet。僅保留一個 PES 與固定大小讀寫區塊，不建立整片影片的封包索引；跨磁碟寫回成品可取消。取消或收尾失敗會清理半成品，清理失敗保留 lease。`airline-output.js`、`airline-transport.js`、`airline-encoding.js` 與共用格式模組須一併 asarUnpack。
 
 `tests/airlineEncoding.test.js` 驗證 sequence header／SPS／PPS／CRC 與 CBR；`tests/airlineTransport.test.js` 檢查內容、格序與每個 PES 最後封包的解碼期限；`tests/airlineBuffers.test.js` 使用獨立封包抵達模型先重現舊版溢位，再確認三種規格的 TB、影片及音訊緩衝限制。實際 Electron IPC 與取消清理另由 queue lifecycle／watchdog 測試涵蓋。
 
 ### DVD／BD ISO 自動製作
 
-`disc-authoring.js` 依共用格式及實際交付時長配置視訊碼率，扣除 AC-3 多串流、64 MiB 導覽資料與 8% 封裝預留；DVD 使用 MPEG-2 720×480 TFF／29.97，BD 使用 Blu-ray compatible AVC High@4.1 1080p24。字幕先以顯示比例燒錄，再轉成儲存尺寸。
+交付計畫透過純規格模組 `disc-encoding.js`，依共用格式及實際交付時長配置視訊碼率，扣除 AC-3 多串流、64 MiB 導覽資料與 8% 封裝預留；`disc-authoring.js` 執行原生封裝及驗證。DVD 使用 MPEG-2 720×480 TFF／29.97，BD 使用 Blu-ray compatible AVC High@4.1 1080p24。字幕先以顯示比例燒錄，再轉成儲存尺寸。
 
 watchdog 將一次 FFmpeg 編碼結果保存在 lease 暫存目錄；DVD 由 dvdauthor 產生 VIDEO_TS，再由 mkisofs 建立 UDF 1.02 ISO，BD 由 tsMuxeR 建立 UDF 2.50 ISO。無選單且首播 title 1。只有驗證 UDF 與容量上限後才回報完成；每次啟動原生合成程序都更新 lease PID，取消時先等待程序退出再清檔。尚未開始寫入 ISO 的失敗會保留原成品，復原時也讀取 `outputStarted`；清理失敗保留 owner 資訊供重試。
 

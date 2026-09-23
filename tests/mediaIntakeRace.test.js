@@ -208,7 +208,51 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
+  it('大型 Canopus AVI 初次匯入只建音訊快取，加入第二支影片才補做主影片 Proxy', async () => {
+    const source='C:/media/large-canopus.avi';
+    const mpv={
+      detect:vi.fn(async()=>({available:true})),
+      launch:vi.fn(async()=>({duration:7448.441})),
+      quit:vi.fn(async()=>{}), onEvent:vi.fn(), setBounds:vi.fn(async()=>{}),
+      seek:vi.fn(async()=>{}), mute:vi.fn(async()=>{}),
+    };
+    window.subtool.mpv=mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.stat.mockResolvedValueOnce({exists:true,size:116_524_384_242});
+    deskMock.probe.mockResolvedValueOnce({
+      duration:7448.441,
+      video:{codec:'hq_hqa',fps:30000/1001,width:1920,height:1080},
+      audio:[{channels:2,codec:'pcm_s16le'}],
+    });
+    deskMock.ingest.mockImplementation(async ({path,needsProxy})=>({
+      channels:[],
+      ...(path===source&&needsProxy?{proxy:'C:/cache/canopus-proxy.mp4'}:{}),
+    }));
+
+    try{
+      await Media.loadDesktopMedia(source);
+      expect(State.duration).toBe(7448.441);
+      expect(deskMock.ingest).not.toHaveBeenCalled();
+      Media._commitPresentedTarget(0);
+      await vi.waitFor(()=>expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({
+        path:source,needsProxy:false,
+      })));
+      expect(Media.webCodecsProxyPath()).toBeNull();
+
+      await Media.addClipDesktop('C:/media/second.mp4');
+      await vi.waitFor(()=>expect(Media.webCodecsProxyPath()).toBe(source));
+      expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({
+        path:source,needsProxy:true,
+      }));
+    } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
   it('短 GOP Proxy 就緒後倒播切到 Proxy，停止時在同一來源時間切回母素材', async () => {
+    let notifyMpv = () => {};
     const mpv = {
       detect: vi.fn(async () => ({ available: true })),
       launch: vi.fn(async () => ({ duration: 12 })),
@@ -217,7 +261,7 @@ describe('desktop mother-source intake ownership', () => {
       direction: vi.fn(async () => true),
       mute: vi.fn(async () => {}),
       quit: vi.fn(async () => {}),
-      onEvent: vi.fn(),
+      onEvent: vi.fn(callback => { notifyMpv = callback; }),
       setBounds: vi.fn(async () => {}),
     };
     window.subtool.mpv = mpv;
@@ -238,11 +282,33 @@ describe('desktop mother-source intake ownership', () => {
       await expect(Media.setPlaybackDirection('backward')).resolves.toBe(true);
       expect(mpv.loadfile).toHaveBeenNthCalledWith(1, 'C:/cache/short-gop-proxy.mp4');
       expect(mpv.seek).toHaveBeenLastCalledWith(8, undefined);
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 0 });
+      expect(Media._mpvTime).toBe(8);
+      expect(Media.presentedTime()).toBeNull();
+      notifyMpv({ event: 'property-change', name: 'duration', data: 11 });
+      expect(State.duration).toBe(12);
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 8 });
+      expect(Media.presentedTime()).toBe(8);
 
       Media._mpvTime = 7.5;
       await expect(Media.setPlaybackDirection('forward')).resolves.toBe(true);
       expect(mpv.loadfile).toHaveBeenNthCalledWith(2, 'C:/media/long-gop.mp4');
       expect(mpv.seek).toHaveBeenLastCalledWith(7.5, undefined);
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 0 });
+      expect(Media._mpvTime).toBe(7.5);
+
+      mpv.seek.mockRejectedValueOnce(new Error('seek failed'));
+      await expect(Media.setPlaybackDirection('backward')).resolves.toBe(false);
+      expect(mpv.loadfile).toHaveBeenNthCalledWith(3, 'C:/cache/short-gop-proxy.mp4');
+      expect(mpv.loadfile).toHaveBeenNthCalledWith(4, 'C:/media/long-gop.mp4');
+      expect(Media._reverseProxyActive).toBe(false);
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 7.5 });
+      expect(Media.mpvSourceTransitionPending()).toBe(false);
+
+      mpv.loadfile.mockResolvedValueOnce({ ok: false });
+      await expect(Media.setPlaybackDirection('backward')).resolves.toBe(false);
+      expect(Media.mpvSourceTransitionPending()).toBe(false);
+      expect(Media._reverseProxyActive).toBe(false);
     } finally {
       Media.reset();
       delete window.subtool.mpv;

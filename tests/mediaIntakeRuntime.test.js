@@ -50,6 +50,40 @@ afterEach(() => {
 });
 
 describe('native media intake runtime', () => {
+  it('音軌先完成後才補做 Proxy 時沿用音軌與波形，不重抽完整母素材音訊', async () => {
+    const root = makeTempRoot();
+    const source = path.join(root, 'large-canopus.avi');
+    const cacheRoot = path.join(root, 'cache');
+    fs.writeFileSync(source, 'source');
+    const authority = new FileAuthority({ internalDirectories: [cacheRoot] });
+    authority.grantTrustedFile(source, { read: true, write: false });
+    const calls = [];
+    const runtime = createMediaIntakeRuntime({
+      cacheRoot, tempRoot: root, fileAuthority: authority, allowSidecarCache: false,
+      getEncoder: () => 'libx264', delay: async () => {},
+      ffmpegExecution: { async execute(args) {
+        calls.push(args);
+        for (const output of args.filter(value => /\.(?:m4a|wav|mp4)$/.test(value))) {
+          fs.writeFileSync(output, 'cache');
+        }
+      } },
+    });
+    const request = { src: source, duration: 7448.441, audio: [{channels:2,codec:'pcm_s16le'}] };
+    const first = await runtime.ingest({ ...request, needsProxy:false });
+    const second = await runtime.ingest({ ...request, needsProxy:true });
+    const third = await runtime.ingest({ ...request, needsProxy:true });
+
+    expect(calls).toHaveLength(2);
+    expect(first.proxy).toBeNull();
+    expect(first.channels).toHaveLength(2);
+    expect(second.channels).toEqual(first.channels);
+    expect(second.wave).toBe(first.wave);
+    expect(second.proxy).toMatch(/proxy\.mp4$/);
+    expect(calls[1]).not.toContain('-filter_complex');
+    expect(calls[1].filter(value => /\.(?:m4a|wav)$/.test(value))).toEqual([]);
+    expect(third.cached).toBe(true);
+  });
+
   it('batch ingest 完成後，新 runtime 從持久 cache 回傳相同素材 outcome 而不重跑 ffmpeg', async () => {
     const root = makeTempRoot();
     const userDataDir = path.join(root, 'user-data');

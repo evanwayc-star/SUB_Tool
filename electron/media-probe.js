@@ -232,6 +232,25 @@ function createMediaProbe({
     }
   }
 
+  // Stream start times are part of the source A/V synchronization contract.
+  // A compressed audio stream can start before video to carry encoder priming;
+  // resetting the two streams independently would turn that primer into delay.
+  async function audioVideoStartOffsets(filePath) {
+    const stdout = await run([
+      '-v', 'error', '-show_entries', 'stream=codec_type,start_time:stream_disposition=attached_pic',
+      '-of', 'json', filePath,
+    ]);
+    const streams = JSON.parse(stdout).streams || [];
+    const video = streams.find(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic);
+    const audio = streams.filter(stream => stream.codec_type === 'audio');
+    const videoStart = Number(video?.start_time);
+    return audio.map(stream => {
+      const audioStart = Number(stream.start_time);
+      return Number.isFinite(videoStart) && Number.isFinite(audioStart)
+        ? audioStart - videoStart : 0;
+    });
+  }
+
   /**
    * 查詢媒體檔案各音訊 Stream 之聲道數與碼率。
    * @param {string} filePath 媒體檔案路徑
@@ -253,7 +272,7 @@ function createMediaProbe({
     }
   }
 
-  return Object.freeze({ describe, hasAudio, audioBitrates });
+  return Object.freeze({ describe, hasAudio, audioVideoStartOffsets, audioBitrates });
 }
 
 module.exports = { createMediaProbe, descriptorOf };

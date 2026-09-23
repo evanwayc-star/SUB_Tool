@@ -27,14 +27,12 @@
      一份。MOD-FHD 的固定規格則由 shared/delivery-formats.cjs 提供。
 ============================================================================== */
 import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { getDeliveryFormatPreset, deliveryOutputNames, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } from '../shared/delivery-formats.cjs';
-import { deliveryResolution, suggestKbps } from '../shared/delivery-resolution.cjs';
-
-const EXT_BY_FORMAT = { wav: '.wav', prores: '.mov', h264: '.mp4' };
+import { getDeliveryFormatPreset, getDeliveryFormatOption, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } from '../shared/delivery-formats.cjs';
+import { deliveryResolution, suggestKbps, deriveDeliverySpec } from '../shared/delivery-resolution.cjs';
 
 /** 交付格式對應的副檔名；未知格式一律當 MP4。 */
 export function extensionFor(format) {
-  return getDeliveryFormatPreset(format)?.extension || EXT_BY_FORMAT[format] || '.mp4';
+  return getDeliveryFormatOption(format)?.extension || '.mp4';
 }
 
 /* 專案代號：檔名慣例是 `ST_<代號>_<fps>fps…`，而素材檔名常常已經帶了
@@ -78,7 +76,7 @@ export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPla
   return `ST_${projectTag}_${normalizeDeliveryFrameRate(fps)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
 }
 
-/* 交付解析度與建議碼率的規則住在 `shared/delivery-resolution.cjs`——
+/* 交付規格派生、解析度與建議碼率的規則住在 `shared/delivery-resolution.cjs`——
    匯出佇列監控（另一個 BrowserWindow）與主行程也要用它來改已入列工作的解析度，
    而那兩邊都拿不到 renderer 的 ES 模組。
 
@@ -284,8 +282,7 @@ export function createDeliveryList({
 
     /** 每一列的成品輸出路徑（供 I/O 層檢查覆寫）。 */
     outPaths() {
-      return rows.flatMap(r => deliveryOutputNames(r.format, r.customName)
-        .map(name => ({ dir: r.outDir, name, path: joinPath(r.outDir, name) })));
+      return rows.map(r => ({ dir: r.outDir, name: r.customName, path: joinPath(r.outDir, r.customName) }));
     },
 
     /**
@@ -301,30 +298,33 @@ export function createDeliveryList({
         // FPS-SYNC：固定格式以規格的 FPS 換算 TC，專案時間軸的秒數不變。
         const outputFps = preset?.fps || normalizeDeliveryFrameRate(isWav ? fps : r.targetFps, normalizeDeliveryFrameRate(fps));
         const startTimecode = timecodeForFps ? timecodeForFps(outputFps) : timelineStartTimecode;
-        const { w, h } = preset ? { w: preset.width, h: preset.height }
-          : deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav });
+        const spec = deriveDeliverySpec({
+          format: r.format, preset, canvasW, canvasH, targetH: r.targetH,
+          fps: outputFps, videoKbps: r.kbps,
+          burnTimecode: r.burnTimecode, timecodeStart: startTimecode,
+        });
         const audioPlan = normalizeDeliveryPresetAudio(r.format,
           composeAudioPlan ? composeAudioPlan(compiledAudioPlan, r) : compiledAudioPlan);
         const audioProblem = deliveryPresetAudioProblem(r.format, audioPlan);
         if (audioProblem) throw new Error(audioProblem);
         return {
           clips, videoTracks,
-          width: w, height: h,
+          width: spec.width, height: spec.height,
           /* 匯出佇列監控要能改已入列工作的解析度，那需要【專案畫布】的比例——
              width/height 是【已經算好的交付解析度】，不是畫布。反覆換解析度時
              用交付尺寸回推會累積捨入誤差（寬度取偶數），所以把畫布原值帶著走。
              targetH 則是為了讓下拉能顯示目前選的是哪一項（0＝來源解析度）。 */
-          canvasW, canvasH, targetH: preset?.height || r.targetH,
+          canvasW, canvasH, targetH: spec.targetH,
           /* 會被燒進這份交付的字幕軌名稱。與 ASS 產生端同一條篩選規則
              （formats.js 依 tracks[tk].visible === false 排除），所以顯示不會說謊。 */
           subtitleTracks: Array.isArray(subtitleTracks) ? subtitleTracks.slice() : [],
-          fps: outputFps,
+          fps: spec.fps,
           assText,
           format: r.format,
           duration,
-          videoKbps: preset ? preset.videoKbps : r.kbps,
+          videoKbps: spec.videoKbps,
           audioPlan,
-          timecodeWatermark: (!isWav && r.burnTimecode) ? { start: startTimecode } : null,
+          timecodeWatermark: spec.timecodeWatermark,
           /* 即使這一列沒有勾燒入 TC 也要存起來：匯出佇列監控可以事後把 TC 打開，
              那時必須用【送出當下的時間軸起點】重建 watermark。少了它就只能猜
              00:00:00:00——設過 In 點的專案會燒出錯的時間碼，而且畫面一切正常。 */

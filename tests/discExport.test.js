@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { buildDeliveryArgv } from '../electron/export-plan.js';
-import { discEncoding } from '../electron/disc-authoring.js';
 
 const audioPlan = {
   buses: Array.from({ length: 8 }, (_, i) => ({ id: `a${i}`, inputs: [{
@@ -14,11 +13,10 @@ const audioPlan = {
 
 describe('光碟交付計畫', () => {
   it.each(['dvd-iso', 'bd-iso'])('%s 保留多聲道且以顯示比例燒字幕', format => {
-    const encoding = discEncoding(format, { duration: 3, audioPlan });
     const plan = buildDeliveryArgv({ format, duration: 3, width: 320, height: 240, fps: 25,
       outPath: 'final.iso', assFileName: 'burn.ass', audioPlan,
       clips: [{ path: 'master.mov', type: 'video', in: 0, out: 3, offset: 0, natW: 1920, natH: 1080 }],
-    }, { discEncoding: encoding, hwdecArgs: () => ['-hwaccel', 'auto'] });
+    }, { hwdecArgs: () => ['-hwaccel', 'auto'] });
     const graph = plan.args[plan.args.indexOf('-filter_complex') + 1];
     const dvd = format === 'dvd-iso';
     expect(graph).toContain(dvd ? 's=854x480:r=60000/1001' : 's=1920x1080:r=24');

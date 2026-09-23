@@ -27,6 +27,7 @@
      ④ 對外吐出的資料絕不帶 File／AudioElement／波形（_file 一律剝掉）。
 ============================================================================== */
 
+import { audioLimiterSnapshot, audioMotherPath, restoreAudioLimiterState } from '../shared/audio-loudness.cjs';
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const nonNeg = v => Math.max(0, Number(v) || 0);
 
@@ -62,8 +63,11 @@ function assetRange(asset){
 /* 對 State / History 暴露的只會是純資料（不變量④）。 */
 function serializeAsset(asset){
   if (!asset) return null;
-  const { _file, ...plain } = asset;
-  return { ...plain, descriptors: (asset.descriptors || []).map(channel => ({ ...channel })) };
+  const plain={};
+  for(const key of ['id','kind','name','audioSourceId','timelineLaneId','audioSrc','source','offset','in','out','duration','gain','fadeIn','fadeOut','enabled','locked','height','preferCache']){
+    if(asset[key]!==undefined) plain[key]=asset[key];
+  }
+  return { ...plain, path:audioMotherPath(asset), ...audioLimiterSnapshot(asset), descriptors: (asset.descriptors || []).map(channel => ({ ...channel })) };
 }
 
 class ExternalAudioLibrary {
@@ -114,6 +118,7 @@ class ExternalAudioLibrary {
       kind: 'external-audio',
       name: (typeof details.name === 'string' && details.name.trim()) || '外部音訊',
       path: typeof details.path === 'string' && details.path ? details.path : null,
+      ...audioLimiterSnapshot(details),
       audioSourceId,
       timelineLaneId,
       audioSrc: source,
@@ -277,6 +282,7 @@ class ExternalAudioLibrary {
         in: cut,
         out: range.out,
         gain: asset.gain,
+        ...audioLimiterSnapshot(asset),
         fadeIn: 0,
         fadeOut: asset.fadeOut,
         enabled: asset.enabled,
@@ -347,6 +353,7 @@ class ExternalAudioLibrary {
   /* 把快照的欄位套回仍存在的 asset。只碰資料，不碰 runtime。 */
   applyRestored(asset, source){
     if (!asset || !source) return null;
+    restoreAudioLimiterState(asset,source);
     asset.name = source.name || asset.name;
     if (source.path) asset.path = source.path;
     if (typeof source.timelineLaneId === 'string' && source.timelineLaneId.trim()) asset.timelineLaneId = source.timelineLaneId.trim();

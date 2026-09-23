@@ -36,6 +36,7 @@ describe('FFmpeg execution', () => {
     const spawned = [];
     const owned = [];
     const progress = [];
+    const stderr = [];
     const child = directProcess(
       'Stream #0:0 -> #0:0 (h264 (native) -> h264 (libx264))\n'
       + 'frame=25 time=00:00:05.00 speed=1.0x\n',
@@ -59,6 +60,7 @@ describe('FFmpeg execution', () => {
       cwd: userDataDir,
       onProcess: process => owned.push(process),
       onProgress: value => progress.push(value),
+      onStderr: value => stderr.push(value),
     });
 
     expect(spawned).toEqual([{
@@ -74,6 +76,7 @@ describe('FFmpeg execution', () => {
     })]);
     expect(outcome.maps).toEqual(['h264 (native) -> h264 (libx264)']);
     expect(outcome.tail).toContain('time=00:00:05.00');
+    expect(stderr.join('')).toBe(outcome.tail);
   });
 
   it('每份交付各自走 watchdog adapter，並把可停止的 controller 交給 owner', async () => {
@@ -180,7 +183,8 @@ describe('FFmpeg execution', () => {
       jobId: 'export-air', outPath, outputFormat: 'airline-dmpes',
       outputPaths: [path.join(userDataDir, 'unrelated.txt')],
     });
-    expect(config.outputPaths).toEqual([outPath]);
+    expect(config.outPath).toBe(outPath);
+    expect(config).not.toHaveProperty('outputPaths');
   });
 
   it('watchdog 失敗會以穩定 error code、outcome 與 log path 回報', async () => {

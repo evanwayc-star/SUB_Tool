@@ -57,7 +57,7 @@ function showFpsConvertDialog() {
           c.end = ne;
         }
         const maxEnd = State.cues.reduce((m, c) => c.end > m ? c.end : m, 0);
-        if (maxEnd > State.duration) { State.duration = maxEnd; $('tcDur').textContent = secToEncore(maxEnd, State.fps, State.dropFrame); }
+        if (maxEnd > State.duration) { State.duration = maxEnd; emit('duration:display'); }
         closeModal(); sortCues(); emit('render:all'); layoutTimeline(); drawTimeline();
         recordHistory(`FPS 轉換 ${from}→${to}`);
         setStatus(`已將「${tk.name}」從 ${from}fps 轉換至 ${to}fps（${cues.length} 條）`, 'ok');
@@ -350,7 +350,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
 
     return `
       <div class="delivery-card">
-        <div class="delivery-ctrl-row">
+        <div class="delivery-ctrl-row delivery-ctrl-row--settings">
           <select class="ev-format delivery-select" data-idx="${i}" aria-label="交付格式" style="width:264px;">
             ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(option.format === 'wav' ? !hasProjectAudio : audioOnly)?'disabled':''}>${option.label}</option>`).join('')}
           </select>
@@ -378,11 +378,14 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
                 <input type="number" class="ev-kbps delivery-input" data-idx="${i}" value="${preset?.videoKbps || r.kbps}" style="width:72px;" title="目標視訊碼率 (kbps)" ${preset?'disabled':''}> kbps
               </div>
             ` : ''}
-            <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 燒入 TC</label>
-            <span class="delivery-sub-chip" title="${activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕'}">${activeSubs.length ? '💬 字幕: '+activeSubs.join(', ') : '無字幕'}</span>
           ` : ''}
-          <div style="flex:1"></div>
-          <button class="ev-del delivery-btn-del icon" data-idx="${i}" title="刪除此列">✕</button>
+          <div class="delivery-ctrl-actions">
+            ${!isWav ? `
+              <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 燒入 TC</label>
+              <span class="delivery-sub-chip" title="${activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕'}">${activeSubs.length ? '💬 字幕: '+activeSubs.join(', ') : '無字幕'}</span>
+            ` : ''}
+            <button class="ev-del delivery-btn-del icon" data-idx="${i}" title="刪除此列">✕</button>
+          </div>
         </div>
         <div class="delivery-ctrl-row" style="display:flex;gap:8px;align-items:center;">
           <input type="text" class="ev-name delivery-input" data-idx="${i}" value="${r.customName}" style="flex:3;min-width:0;" placeholder="檔名 (含副檔名)" title="${escapeHTML(r.customName || '')}">

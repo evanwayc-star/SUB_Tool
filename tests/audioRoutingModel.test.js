@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -230,6 +230,56 @@ describe('新增的 bus 與 state.js 的擁有者同形', () => {
     expect(layout.streams.length).toBe(1);
     expect(layout.streams[0].layout).toBe('stereo');
     expect(layout.streams[0].busIds).toEqual(base.buses.map(bus => bus.id));
+  });
+});
+
+describe('AudioRoutingModel 編輯 interface', () => {
+  it('current 回傳快照，根取消使子編輯失效且不接受晚到操作', () => {
+    const initial=realProject(8), preview=vi.fn(), record=vi.fn(), finished=vi.fn();
+    const edit=AudioRoutingModel.editProject(initial,{preview,record,finished});
+    edit.current().buses[0].volume=0;
+    expect(edit.current().buses[0].volume).toBe(1);
+    const child=edit.output();
+    child.setBusCount(4);
+    edit.cancel();
+    expect(preview).toHaveBeenLastCalledWith(initial);
+    expect(child.setBusCount(2)).toBe(false);
+    expect(child.commit().saved).toBe(false);
+    child.dismiss(); edit.cancel();
+    expect(finished).toHaveBeenCalledTimes(1);
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('未操作的自訂、多bus、停用與刻意空白配線在巢狀保存後保留', () => {
+    const initial=realProject(8);
+    initial.sourceMaps.master={channels:[
+      {sourceStream:0,sourceChannel:0,busIds:initial.buses.slice(0,2).map(bus=>bus.id),enabled:true,gain:0.4},
+      {sourceStream:0,sourceChannel:6,busIds:[],enabled:true,gain:1},
+      {sourceStream:0,sourceChannel:7,busIds:[initial.buses[7].id],enabled:false,gain:0.7},
+    ]};
+    const record=vi.fn(), edit=AudioRoutingModel.editProject(initial,{record});
+    const child=edit.output();
+    child.preset(DELIVERY_PRESETS.find(preset=>preset.id==='6-fm'));
+    child.preset(DELIVERY_PRESETS.find(preset=>preset.id==='8-fm'));
+    expect(child.commit().saved).toBe(true);
+    child.dismiss(); // 已保存的子頁不再擁有根編輯。
+    expect(edit.isActive()).toBe(true);
+    expect(edit.current().sourceMaps).toEqual(initial.sourceMaps);
+    expect(edit.commit().saved).toBe(true);
+    expect(record).toHaveBeenCalledTimes(1);
+  });
+
+  it('無更動保存不產生 History，非法重複 bus 必須留在可修正的草稿', () => {
+    const initial=realProject(2), record=vi.fn();
+    const unchanged=AudioRoutingModel.editProject(initial,{output:true,record});
+    expect(unchanged.commit().saved).toBe(true);
+    expect(record).not.toHaveBeenCalled();
+    const edit=AudioRoutingModel.editProject(initial,{output:true,record});
+    edit.setStreams([{id:'one',layout:'stereo',busIds:[initial.buses[0].id,initial.buses[0].id]}]);
+    expect(edit.commit().saved).toBe(false);
+    expect(edit.isActive()).toBe(true);
+    edit.allMono();
+    expect(edit.commit().saved).toBe(true);
   });
 });
 

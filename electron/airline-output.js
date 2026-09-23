@@ -2,7 +2,7 @@
 
 const { open } = require('node:fs/promises');
 const path = require('path');
-const { deliveryOutputNames, getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
+const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
 const { reshapeAirlineTransport } = require('./airline-transport');
 
 const TS_SIZE = 188;
@@ -10,11 +10,6 @@ const READ_SIZE = TS_SIZE * 1024;
 const VIDEO_PID = 48;
 const AUDIO_PID = 49;
 const PMT_PID = 63;
-
-function deliveryOutputPaths(format, outPath) {
-  const dir = path.dirname(outPath);
-  return deliveryOutputNames(format, path.basename(outPath)).map(name => path.join(dir, name));
-}
 
 function isAirlineOutput(format) {
   return getDeliveryFormatPreset(format)?.transport === 'airline';
@@ -254,7 +249,7 @@ async function validateAndPatchAirlineOutput(format, outPath, { signal } = {}) {
     }
     signal?.throwIfAborted();
     await file.sync();
-    return { ...result, bytes: original.size, outputPaths: [outPath], requiresManzanita: false };
+    return { ...result, bytes: original.size, outPath, requiresManzanita: false };
   } finally {
     await file.close();
   }
@@ -267,4 +262,4 @@ async function finalizeAirlineOutput(format, outPath, options = {}) {
   return { ...validation, ...schedule };
 }
 
-module.exports = { deliveryOutputPaths, isAirlineOutput, finalizeAirlineOutput, validateAndPatchAirlineOutput };
+module.exports = { isAirlineOutput, finalizeAirlineOutput, validateAndPatchAirlineOutput };

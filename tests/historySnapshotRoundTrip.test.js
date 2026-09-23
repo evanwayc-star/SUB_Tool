@@ -58,6 +58,13 @@ function resetState() {
    再用 read() 取出目前的值來比對。read 回傳可比較的純資料。 */
 const FIELDS = [
   {
+    name: '影片音訊效果（不包含可重建的快取）',
+    a: () => { State.clips=[videoClip()]; },
+    b: () => { Object.assign(State.clips[0],{hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12,inputBoost:0},normalizedAudioPath:'C:/temp/effect.wav'}); },
+    read: () => State.clips.map(c=>c.audioLimiterSpec?.max ?? null),
+    expectA: [null], expectB: [-6],
+  },
+  {
     name: 'cues（字幕）',
     a: () => { State.cues = [cue(0, 2, '第一句')]; },
     b: () => { State.cues = [cue(0, 2, '第一句'), cue(3, 5, '第二句')]; },

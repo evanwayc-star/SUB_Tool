@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'acorn';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -16,36 +17,50 @@ const P = require(path.join(ROOT, 'electron/export-plan.js'));
 
 describe('模組本身保持純淨', () => {
   const fs = require('node:fs');
-  const stripComments = src =>
-    src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-  const requiresIn = src =>
-    [...stripComments(src).matchAll(/\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g)].map(m => m[1]);
+  const requiresIn = source => {
+    const dependencies = [];
+    const visit = node => {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'ImportExpression') throw new Error('純計畫不可動態 import');
+      if (node.type === 'CallExpression' && node.callee?.type === 'Identifier' && node.callee.name === 'require') {
+        if (node.arguments.length !== 1 || node.arguments[0].type !== 'Literal' || typeof node.arguments[0].value !== 'string') {
+          throw new Error('純計畫的 require 必須是可靜態驗證的字串');
+        }
+        dependencies.push(node.arguments[0].value);
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(visit);
+        else if (value && typeof value === 'object') visit(value);
+      }
+    };
+    visit(parse(source, { ecmaVersion: 'latest', sourceType: 'script' }));
+    return dependencies;
+  };
 
-  /* 這條是這個接縫的立身之本：一旦有人在裡面 require('electron') 或 require('fs')，
-     它就再也不能在 vitest 裡跑，測試會整批消失而沒有人發現。
-
-     v6.1.2 之前這裡斷言的是「一個 require 都不可以有」。那是用來代替真正想守的
-     東西——【沒有副作用、起得了 vitest】——的一個近似。為了讓片段幾何與淡入淡出
-     的規則能與 renderer 共用同一份實作（shared/*.cjs），這裡改成守真正的那件事：
-     只准 require `shared/` 底下的零相依純模組，而且那些模組自己也不可以 require
-     任何東西（純淨必須是遞移的，否則 shared/ 會變成偷渡 fs 的後門）。 */
-  it('只 require shared/ 底下的純模組，不碰 electron/fs/spawn', () => {
-    const src = fs.readFileSync(path.join(ROOT, 'electron/export-plan.js'), 'utf8');
-    for (const spec of requiresIn(src)) {
-      expect(spec, `export-plan.js 不可 require「${spec}」`).toMatch(/^\.\.\/shared\/[\w-]+\.cjs$/);
-    }
-  });
-
-  it('被 require 的 shared/ 模組自己也零相依（純淨是遞移的）', () => {
-    const src = fs.readFileSync(path.join(ROOT, 'electron/export-plan.js'), 'utf8');
-    const specs = requiresIn(src);
-    expect(specs.length, 'shared/ 模組沒被 require＝這條測試變成空轉').toBeGreaterThan(0);
-    for (const spec of specs) {
-      const full = path.join(ROOT, 'electron', spec);
-      expect(fs.existsSync(full), `${spec} 不存在——打包時 require 會在啟動就失敗`).toBe(true);
-      expect(requiresIn(fs.readFileSync(full, 'utf8')),
-        `${spec} 自己 require 了東西，純淨不再遞移`).toEqual([]);
-    }
+  /* 純編碼決策是 main 專用，不能為了 import 限制塞進 renderer 共用的 shared。
+     允許明確列出的兩支純 helper，但遞移檢查整條依賴，不能藉此帶入 fs／spawn。 */
+  it('編碼計畫的依賴遞移保持純淨，shared 仍零相依', () => {
+    const visited = new Set();
+    const visit = filename => {
+      if (visited.has(filename)) return;
+      visited.add(filename);
+      const specs = requiresIn(fs.readFileSync(filename, 'utf8'));
+      if (path.dirname(filename) === path.join(ROOT, 'shared')) {
+        expect(specs, `${filename} 不可 require 任何相依`).toEqual([]);
+        return;
+      }
+      for (const spec of specs) {
+        expect(spec, `${filename} 不可 require「${spec}」`)
+          .toMatch(/^(\.\.\/shared\/[\w-]+\.cjs|\.\/(airline|disc)-encoding)$/);
+        const full = path.resolve(path.dirname(filename), spec.endsWith('.cjs') ? spec : `${spec}.js`);
+        expect(fs.existsSync(full), `${spec} 不存在——安裝版將無法啟動`).toBe(true);
+        visit(full);
+      }
+    };
+    visit(path.join(ROOT, 'electron/export-plan.js'));
+    expect(visited.has(path.join(ROOT, 'electron/airline-encoding.js'))).toBe(true);
+    expect(visited.has(path.join(ROOT, 'electron/disc-encoding.js'))).toBe(true);
+    expect([...visited].some(file => path.dirname(file) === path.join(ROOT, 'shared'))).toBe(true);
   });
 });
 
@@ -337,6 +352,23 @@ describe('交付 argv：WAV', () => {
   it('沒有專案音軌路由時明確擋下，不會輸出一個無聲的 WAV', () => {
     expect(() => P.buildDeliveryArgv({ format: 'wav', duration: 8, outPath: 'C:/out/mix.wav', audioPlan: null }, {}))
       .toThrow(/專案音軌路由/);
+  });
+
+  it('來源效果只處理自身完整 stream，使用其 two-pass report，其他來源不變', () => {
+    const raw = structuredClone(wavPlan);
+    raw.buses[0].inputs[0].sourceStream = 1;
+    raw.buses[0].inputs[0].audioLimiterSpec = {
+      max: -6, min: -12, isTruePeak: true,
+      reports: { '1': { input_i: '-21', input_tp: '-8', input_lra: '3', input_thresh: '-31', target_offset: '0.4' } },
+    };
+    const plan = P._normalizeAudioPlan(raw, { requireStreams: false });
+    const { args } = P.buildDeliveryArgv({ format: 'wav', duration: 8, outPath: 'C:/out/effect.wav', audioPlan: plan });
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('[0:a:1]loudnorm=I=-12.0:TP=-6.0');
+    expect(graph).toContain('measured_I=-21.0');
+    expect(graph).toContain('[0:a:0]pan=mono|c0=c1,asetpts=PTS-STARTPTS,atrim=');
+    expect(graph.match(/loudnorm=/g)).toHaveLength(1);
+    expect(graph).not.toContain('[wavNorm]');
   });
 
   it('啟用音訊平衡化 (loudness) 時，注入 loudnorm 濾鏡', () => {

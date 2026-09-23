@@ -3,7 +3,7 @@
 const { open, rename, rm } = require('node:fs/promises');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
-const { airlineTransportProfile } = require('./airline-encoding');
+const { airlineTransportProfile, S3K_AUDIO_PREROLL_SAMPLES } = require('./airline-encoding');
 const PACKET = 188;
 const CHUNK = PACKET * 1024;
 const CLOCK = 27000000;
@@ -16,6 +16,22 @@ function invalid(message) {
 function timestamp(bytes, offset) {
   return (bytes[offset] & 14) * 536870912 + bytes[offset + 1] * 4194304
     + (bytes[offset + 2] & 254) * 16384 + bytes[offset + 3] * 128 + (bytes[offset + 4] >> 1);
+}
+function writeTimestamp(bytes, offset, value) {
+  const ticks = ((value % 8589934592) + 8589934592) % 8589934592;
+  bytes[offset] = (bytes[offset] & 0xf0) | (Math.floor(ticks / 1073741824) & 7) * 2 | 1;
+  bytes[offset + 1] = Math.floor(ticks / 4194304) & 255;
+  bytes[offset + 2] = (Math.floor(ticks / 32768) & 127) * 2 | 1;
+  bytes[offset + 3] = Math.floor(ticks / 128) & 255;
+  bytes[offset + 4] = (ticks & 127) * 2 | 1;
+}
+function rebaseAudio(frame, shift) {
+  if (!frame || !shift) return frame;
+  writeTimestamp(frame.bytes, 9, timestamp(frame.bytes, 9) - shift);
+  if ((frame.bytes[7] >> 6) === 3) writeTimestamp(frame.bytes, 14, timestamp(frame.bytes, 14) - shift);
+  frame.pts -= shift / 90000;
+  frame.dts -= shift / 90000;
+  return frame;
 }
 function crc32(bytes) {
   let crc = 0xffffffff;
@@ -90,15 +106,19 @@ function pcrPacket(ticks) {
   bytes[10] = (base % 2) * 128 + 126 + (extension >> 8); bytes[11] = extension & 255;
   return bytes;
 }
-function mediaPacket(frame, pid) {
+function mediaPacket(frame, pid, randomPcrTicks = null) {
   const first = frame.offset === 0;
   const random = first && frame.randomAccess;
-  const count = Math.min(random ? 182 : 184, frame.bytes.length - frame.offset);
+  const videoRandom = random && pid === 48;
+  // TSA requires PCR in the same video packet that marks random access.
+  // Seven adaptation bytes hold the flags and PCR, leaving 176 payload bytes.
+  const count = Math.min(videoRandom ? 176 : random ? 182 : 184, frame.bytes.length - frame.offset);
   const bytes = Buffer.alloc(PACKET, 0xff);
   bytes.set([0x47, 0x20 | (first ? 64 : 0), pid, count === 184 ? 0x10 : 0x30]);
   if (count < 184) {
     bytes[4] = 183 - count;
-    if (bytes[4]) bytes[5] = random ? 64 : 0;
+    if (bytes[4]) bytes[5] = videoRandom ? 0x50 : random ? 0x40 : 0;
+    if (videoRandom) pcrPacket(randomPcrTicks).copy(bytes, 6, 6, 12);
   }
   frame.bytes.copy(bytes, PACKET - count, frame.offset, frame.offset + count);
   const elementary = Math.max(0, frame.offset + count - Math.max(frame.offset, frame.header));
@@ -139,7 +159,7 @@ async function publishFromLease(temporary, output, signal) {
   }
 }
 
-/** Constant-rate T-STD packet scheduling. PES order and timestamps never change. */
+/** Constant-rate T-STD packet scheduling, with only S3K audio-preroll removal. */
 async function reshapeAirlineTransport(format, output, { signal, tempDir } = {}) {
   signal?.throwIfAborted();
   const profile = airlineTransportProfile(format);
@@ -155,6 +175,27 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
     if (!video || !audio) throw invalid('缺少影音 PES');
     // MPEG-1 uses a different sequence terminator; do not add AVC NALs.
     const s3k = format === 'airline-s3k';
+    let audioShift = 0;
+    if (s3k) {
+      // libtwolame's 481 priming samples plus 671 silent input samples fill
+      // exactly one 1152-sample MP2 frame. Drop only that frame. Rebase the
+      // following PES to video time zero so MediaInfo reports 0 ms while the
+      // first real programme sample remains in the delivered stream.
+      const firstFrame = audio.bytes.subarray(audio.header);
+      if (firstFrame.length !== 384 || !firstFrame.subarray(0, 4).equals(Buffer.from([0xff, 0xfc, 0x84, 0x00]))) {
+        throw invalid('S3K 前導音訊不是單一 48 kHz／128 kbps MP2 影格');
+      }
+      const initialPts = timestamp(audio.bytes, 9);
+      audio = (await audioReader.next()).value;
+      if (!audio) throw invalid('S3K 缺少前導後的正式音訊');
+      audioShift = timestamp(audio.bytes, 9) - timestamp(video.bytes, 9);
+      const expectedShift = S3K_AUDIO_PREROLL_SAMPLES * 90000 / 48000;
+      if (Math.abs(audioShift - expectedShift) > 1
+        || Math.abs(timestamp(video.bytes, 9) - initialPts - 481 * 90000 / 48000) > 1) {
+        throw invalid('S3K 音訊前導與影像起點不符');
+      }
+      rebaseAudio(audio, audioShift);
+    }
     const origin = Math.min(video.dts - profile.initialLead, audio.dts - 0.12);
     if (origin < 0) throw invalid('解碼時間沒有足夠的初始預載區間');
     destination = await open(temporary, 'wx');
@@ -187,7 +228,10 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
         tb += PACKET; stats.maximumVideoTb = Math.max(stats.maximumVideoTb, tb); nextPcr = time + 0.05; continue;
       }
       const audioReady = audio && audio.dts - arrival <= 0.1 && retained[49] + 184 <= 3000;
-      const videoReady = video && tb + PACKET <= 400 && retained[48] + 184 <= profile.videoBuffer - 2048;
+      // S3K's large MPEG-1 buffer otherwise sends later access units more
+      // than a second before DTS, which Manzanita reports as decode errors.
+      const videoReady = video && video.dts - arrival <= (s3k ? 0.95 : Infinity)
+        && tb + PACKET <= 400 && retained[48] + 184 <= profile.videoBuffer - 2048;
       let frame, pid;
       if (audioReady) { frame = audio; pid = 49; }
       else if (videoReady) { frame = video; pid = 48; }
@@ -195,17 +239,22 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
         const bytes = Buffer.alloc(PACKET, 0xff); bytes.set([0x47, 0x1f, 0xff, 0x10]); await enqueue(bytes); continue;
       }
       if (!frame.offset) queues[pid].push(frame);
-      const packet = mediaPacket(frame, pid);
+      const random = pid === 48 && !frame.offset && frame.randomAccess;
+      const packet = mediaPacket(frame, pid,
+        random ? Math.round((time + 12 * 8 / profile.muxRate) * CLOCK) : null);
       retained[pid] += packet.elementary;
       await enqueue(packet.bytes);
-      if (pid === 48) { tb += PACKET; stats.maximumVideoTb = Math.max(stats.maximumVideoTb, tb); }
+      if (pid === 48) {
+        tb += PACKET; stats.maximumVideoTb = Math.max(stats.maximumVideoTb, tb);
+        if (random) nextPcr = time + 0.05;
+      }
       stats.maximumVideoBuffer = Math.max(stats.maximumVideoBuffer, retained[48]);
       stats.maximumAudioBuffer = Math.max(stats.maximumAudioBuffer, retained[49]);
       stats.minimumDecodeLead = Math.min(stats.minimumDecodeLead, frame.dts - arrival);
       if (frame.offset === frame.bytes.length) {
         if (pid === 48) {
           video = (await videoReader.next()).value;
-        } else audio = (await audioReader.next()).value;
+        } else audio = rebaseAudio((await audioReader.next()).value, audioShift);
       }
     }
     signal?.throwIfAborted();

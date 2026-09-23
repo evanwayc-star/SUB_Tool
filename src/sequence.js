@@ -16,6 +16,7 @@
    ★ clipAt(t) 回傳「最上層」的作用中 clip（top-occludes）；播放預覽即顯示它。 */
 import { State, ensureVideoTrackCount, videoTrackVisible } from './state.js';
 import { emit } from './events.js';
+import { audioLimiterSnapshot, audioMotherPath, restoreAudioLimiterState } from '../shared/audio-loudness.cjs';
 
 let _clipSeq = 1;
 const EPS = 1e-6;
@@ -170,7 +171,7 @@ const Seq = {
   /* 歷史快照：幾何 + 成員（切割/移除/加入才能正確 undo）。
      peaks（Float32Array）不入快照（大且可再共享）；還原時依來源（path/url）從現存 clip 重新連結。 */
   snapshot(){
-    return State.clips.map(c => ({ id: c.id, name: c.name, path: c.path || null,
+    return State.clips.map(c => ({ id: c.id, name: c.name, path: audioMotherPath(c), ...audioLimiterSnapshot(c),
       web: c.web ? { url: c.web.url } : null, dur: c.dur, fps: c.fps || 0,
       primary: !!c.primary,
       // 圖片的幾何屬於 clip（不是整條視訊軌）。歷史快照必須記下它，
@@ -190,6 +191,7 @@ const Seq = {
     for(const s of list){
       const ex = old.get(s.id);
       if(ex){
+        restoreAudioLimiterState(ex,s);
         ex.in = s.in; ex.out = s.out; ex.offset = s.offset; ex.vtrack = s.vtrack || 0; ex.fadeIn = s.fadeIn || 0; ex.fadeOut = s.fadeOut || 0; ex.audioDetached=!!s.audioDetached;
         if(s.type==='image'){
           ex.type='image'; ex.scale=s.scale??1; ex.posX=s.posX??0.5; ex.posY=s.posY??0.5;

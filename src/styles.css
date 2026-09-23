@@ -288,6 +288,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);
   display:inline-flex;align-items:center;padding:4px 9px;background:#07090e;border:1px solid rgba(255,255,255,0.09);border-radius:6px;box-shadow:inset 0 1px 3px rgba(0,0,0,0.6)}
 .tc .cur{color:var(--accent);font-weight:800}
 .tc .tc-sep{margin:0 5px;color:var(--text-faint);user-select:none;opacity:0.75}
+.tc .tc-duration{display:inline-flex;flex-direction:column;gap:2px}
+.tc .tc-clock{font-size:10px;font-weight:500;color:var(--text-dim)}
+.tc .tc-clock[hidden]{display:none}
 .transport .btns{display:flex;gap:3px;align-items:center}
 .transport .btns .icon{min-width:29px;height:28px;padding:1px 4px;justify-content:center;gap:1px;font-size:10.5px;font-weight:600;line-height:1;border-radius:6px;border:1px solid rgba(255,255,255,0.09);background:#151922;color:#cbd5e1;transition:all .14s ease}
 .transport .btns .icon:hover{background:#1e2432;border-color:var(--border-strong);color:#ffffff}
@@ -907,10 +910,15 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .delivery-card{border:1px solid rgba(255,255,255,0.09);background:linear-gradient(180deg, #151922 0%, #10141a 100%);padding:10px 12px;border-radius:8px;display:flex;flex-direction:column;gap:8px;box-shadow:0 4px 12px rgba(0,0,0,0.35);transition:border-color .18s ease}
 .delivery-card:hover{border-color:rgba(255,255,255,0.18)}
 .delivery-ctrl-row{display:flex;gap:8px;align-items:center}
+.delivery-ctrl-row--settings{flex-wrap:wrap}
+.delivery-ctrl-row--settings>.delivery-select,.delivery-ctrl-row--settings>.delivery-input{flex-shrink:0;box-sizing:border-box;max-width:100%}
+.delivery-ctrl-actions{display:flex;flex:1 1 auto;align-items:center;gap:8px;min-width:0}
+.delivery-ctrl-actions .delivery-sub-chip{min-width:0}
+.delivery-ctrl-actions .delivery-btn-del{flex:0 0 24px;margin-left:auto}
 .delivery-select,.delivery-input{height:28px;padding:3px 8px;font-size:12px;background:#080b0f;color:var(--text);border:1px solid rgba(255,255,255,0.12);border-radius:6px;transition:all .15s ease;font-family:inherit}
 .delivery-select:hover,.delivery-input:hover{border-color:rgba(255,255,255,0.24);background:#0d1218}
 .delivery-select:focus,.delivery-input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(245,158,11,0.2)}
-.delivery-tc-label{font-size:11px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;padding:2px 7px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:5px;color:var(--text);transition:all .15s ease}
+.delivery-tc-label{font-size:11px;display:inline-flex;flex:none;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;padding:2px 7px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:5px;color:var(--text);transition:all .15s ease}
 .delivery-tc-label:hover{background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.16)}
 .delivery-tc-label input[type="checkbox"]{cursor:pointer;accent-color:var(--accent)}
 .delivery-sub-chip{font-size:11px;color:var(--cyan);background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.25);padding:2px 7px;border-radius:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}

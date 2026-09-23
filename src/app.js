@@ -57,6 +57,7 @@ import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory, syncCompareSnapshot } from './history.js';
 import { pocTest as _wcPocTest, demuxFile as _wcDemux, TrackDecoder as _wcTrackDecoder, demuxIndex as _wcDemuxIndex, SampleReader as _wcSampleReader } from './decode/diagnostics.js'; // WebCodecs 診斷入口（掛 window.SUB.WC）
 import { WCPreview } from './decode/player.js'; // 階段1：WebCodecs 接管原生預覽畫面（rafLoop 每幀 tick）
+import { subtitlePreviewIndex } from './subtitle-preview-index.js';
 import { effStyle, styleToCss, verticalChars, STYLE_DEFAULTS, CUE_STYLE_KEYS, ASS_PLAY_RES, loadPresets, getPresets, getAllPresets, BUILTIN_PRESETS, isBuiltinPresetName, savePresets, styleSnapshot, loadFonts, getFonts, posToPx, anchorPct, styleMatchesPreset, pruneRedundantCueStyle } from './substyle.js'; // v4.23 字幕樣式系統
 import { closeSubtitleCompareSession, configureSubtitleCompareSession, handleSubtitleCompareCommand } from './subtitle-comparison-engine.js';
 import { addNote, renderNotes, setNoteActive, updateNoteActive } from './notes.js';
@@ -123,7 +124,7 @@ on('fps:changed', ()=>{
   const sel=$('fpsSel'); if(sel) sel.value=State.dropFrame?String(State.fps)+'df':String(State.fps);
   const t=Media.displayTime();
   $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-  $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
+  renderDurationReadout();
   renderTimecodeWatermark(t);
   
   setTimeout(() => {
@@ -133,6 +134,21 @@ on('fps:changed', ()=>{
     }
   }, 0);
 });
+on('duration:display', renderDurationReadout);
+
+function renderDurationReadout(){
+  // FPS-SYNC：總長度的時碼仍由 encoreParts/秒→格唯一入口產生。
+  // 29.97 NDF 數影格，兩小時約比實際經過時間少 7 秒；另列牆鐘長度避免誤判截短。
+  const duration=$('tcDur');
+  const clock=$('tcClock');
+  duration.textContent=secToEncore(State.duration,State.fps,State.dropFrame);
+  const showClock=State.fps===29.97&&!State.dropFrame&&State.duration>=60;
+  clock.hidden=!showClock;
+  clock.textContent=showClock?`實際 ${fmtClock(State.duration)}`:'';
+  duration.title=showClock
+    ? `29.97 NDF 時碼是影格編號；實際片長 ${fmtClock(State.duration)}。可在上方 FPS 選擇 29.97 (DF) 讓時碼接近實際時間。`
+    : '時間軸總長度時碼';
+}
 
 /* ============================================================================
    SUB TOOL — 線上上字幕工具  (single-file, vanilla JS)
@@ -218,7 +234,7 @@ _videoWrap?.addEventListener('pointermove', e => { if(!previewDrag.subtitleDrag(
 _videoWrap?.addEventListener('pointerleave', () => { if(!previewDrag.subtitleDrag()) _setSubtitleHover(null); });
 
 function onDurationKnown(){
-  $('tcDur').textContent=secToEncore(State.duration,State.fps,State.dropFrame);
+  renderDurationReadout();
   $('seekBar').max=Math.max(1,Math.round(State.duration*1000));
   renderSeekBar($('seekBar'), Media.displayTime());
   $('stMedia').textContent=State.mediaName?(State.mediaName+(State.mediaSize?(' · '+(State.mediaSize/1e6).toFixed(1)+'MB'):'')):'';
@@ -970,26 +986,12 @@ function rafLoop(renderVideoSubCallback) {
     renderSeekBar($('seekBar'), t);
     if (window._ensurePlayheadVisible) window._ensurePlayheadVisible();
     updatePlayhead();
-    renderVideoSubCallback();
+    renderVideoSubCallback(true);
     if (Wave.live) { Wave.captureLive(); if ((_rafFrame++ % 6) === 0) drawWave(); }
     
-    const _t = t + 0.001;
-    let act = null;
-    if (_rafLastIdx >= 0 && _rafLastIdx < State.cues.length) {
-      const lc = State.cues[_rafLastIdx];
-      if (lc.timed !== false && _t >= lc.start && _t <= lc.end) act = lc;
-    }
-    if (!act) {
-      const lo = Math.max(0, _rafLastIdx - 2), hi = Math.min(State.cues.length - 1, _rafLastIdx + 2);
-      for (let i = lo; i <= hi; i++) {
-        const c = State.cues[i]; if (c && c.timed !== false && _t >= c.start && _t <= c.end) { act = c; _rafLastIdx = i; break; }
-      }
-    }
-    if (!act) {
-      for (let i = 0; i < State.cues.length; i++) {
-        const c = State.cues[i]; if (c.timed !== false && _t >= c.start && _t <= c.end) { act = c; _rafLastIdx = i; break; }
-      }
-    }
+    const active=subtitlePreviewIndex.activeAtTime(State.cues,getExactFps(State.fps||25),t+0.001,_rafLastIdx);
+    const act=active?.cue||null;
+    _rafLastIdx=active?.index??-1;
     if (act && act.id !== State.activeId) {
       State.activeId = act.id;
       if (window._markActiveRow) window._markActiveRow(act.id);

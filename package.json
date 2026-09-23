@@ -1,6 +1,6 @@
 {
   "name": "sub-tool",
-  "version": "7.12.0",
+  "version": "8.1.0",
   "description": "SUB Tool 上字幕工具",
   "author": "Evan",
   "repository": "evanwayc-star/SUB_Tool",
@@ -53,13 +53,16 @@
       "electron/mpv/**",
       "electron/ffmpeg/**",
       "electron/export-watchdog.js",
+      "electron/export-artifact.js",
       "electron/mod-fhd-transport.js",
       "electron/airline-output.js",
       "electron/airline-transport.js",
       "electron/airline-encoding.js",
       "electron/disc-authoring.js",
+      "electron/disc-encoding.js",
       "electron/disc/**",
       "shared/delivery-formats.cjs",
+      "shared/delivery-frame-rate.cjs",
       "electron/export-lease.js"
     ],
     "win": {

@@ -139,8 +139,11 @@ export function createMediaPresentationCore({
   function observe(presentedTime, details = {}) {
     const observed = Number(presentedTime);
     if (!Number.isFinite(observed)) return false;
+    // 進行中的 request 只接受同一 id 的畫格。mpv 在快速 seek／方向切換時
+    // 可能晚送前一次的 time-pos；它不能把目前的呈現權威值拉回舊位置。
+    if (active && details?.requestId !== active.id) return false;
     lastPresentedTime = Math.max(0, observed);
-    if (!active || details?.requestId !== active.id) return false;
+    if (!active) return false;
     const requestedTolerance = Number(active.options.tolerance);
     const tolerance = active.options.tolerance != null && Number.isFinite(requestedTolerance)
       ? Math.max(0, requestedTolerance)
@@ -623,4 +626,3 @@ export class PlaybackSyncEngine {
     }
   }
 }
-

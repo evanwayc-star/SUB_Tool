@@ -25,14 +25,26 @@ export function syncCompareSnapshot(){
 }
 
 /* ===== 動作紀錄（復原 / 重做） ===== */
+// 即時配線預覽仍供播放器讀 State；其他背景工作的快照只收已提交的配線。
+// token 由 History 持有，舊編輯的解除函式不能移除較新的投影。
+let audioPreview = null;
+function audioProjectForSnapshot(){
+  if(audioPreview && !audioPreview.owns()) audioPreview=null;
+  return audioPreview ? audioPreview.initial : State.audioProject;
+}
 const History = {
   stack:[], hi:-1, max:120,
+  beginAudioPreview(initial, owns=()=>true){
+    const token={initial:structuredClone(initial),owns};
+    audioPreview=token;
+    return ()=>{ if(audioPreview===token) audioPreview=null; };
+  },
   // clipGeo：影片幾何；externalAudioState：外部音訊的可編輯純資料。
   // AudioElement、波形與快取檔都不入 undo，Media 會依這份純資料重用或重建 runtime asset。
   snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
-    audioProject:normalizeAudioProject(State.audioProject),externalAudioState:State.externalAudioState||[],
+    audioProject:normalizeAudioProject(audioProjectForSnapshot()),externalAudioState:State.externalAudioState||[],
     fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clipGeo:Seq.snapshot()}); },
-  reset(){ this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); syncCompareSnapshot(); },
+  reset(){ audioPreview=null; this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); syncCompareSnapshot(); },
   /* 專案可先載入字幕、之後才重新連結媒體。媒體真正就緒時，把新出現的
      專案 clip 補進先前「尚無媒體」的歷史步驟，保留期間的字幕 Undo，
      同時避免任何一步復原後把剛重連的影片刪掉。 */
@@ -93,6 +105,7 @@ const History = {
   },
   restore(i){
     if(i<0||i>=this.stack.length)return;
+    audioPreview=null;
     const d=structuredClone(this.stack[i].snap);
     // 必須在任何 State mutation 前保存位置；音訊或 duration 還原也可能改變 tlTime。
     emit('media:sequenceWillRestore');

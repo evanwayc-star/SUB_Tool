@@ -53,10 +53,8 @@ function getDeliveryFormatPreset(format) {
   return DELIVERY_FORMAT_PRESETS.find(preset => preset.format === format) || null;
 }
 
-// 每份交付輸出單一成品；航空影音在 SubTool 內合成為 .mpg。
-// 只推導檔名，路徑解析與寫入授權仍由主程序負責。
-function deliveryOutputNames(_format, primaryName) {
-  return [String(primaryName || '')];
+function getDeliveryFormatOption(format) {
+  return DELIVERY_FORMAT_OPTIONS.find(option => option.format === format) || null;
 }
 
 function validStreamBuses(stream, count) {
@@ -96,6 +94,6 @@ function deliveryPresetAudioProblem(format, plan) {
 
 module.exports = {
   MOD_FHD, AIRLINE_S3K, AIRLINE_DMPES, AIRLINE_DMPES_4M, DVD_ISO, BD_ISO,
-  DELIVERY_FORMAT_PRESETS, DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset,
-  deliveryOutputNames, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem,
+  DELIVERY_FORMAT_PRESETS, DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, getDeliveryFormatOption,
+  normalizeDeliveryPresetAudio, deliveryPresetAudioProblem,
 };

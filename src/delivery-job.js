@@ -28,6 +28,7 @@ import {
   anySourceSolo,
   sourceTrackAudible,
 } from './project-audio.js';
+import { audioLimiterSnapshot } from '../shared/audio-loudness.cjs';
 
 /* ── 內部工具 ───────────────────────────────────────────────────────────── */
 
@@ -59,6 +60,7 @@ function clipAudioSpec(clip, mediaTracks){
                 // 即使舊專案尚未記錄 sourceStream/sourceChannel，也只讀母素材；
                 // 少了座標時 main process 會讀該母素材的預設 audio stream，絕不回退 m4a cache。
                 file: masterPath,
+                ...audioLimiterSnapshot(clip),
                 ...(hasSourceCoordinates ? { sourceStream: t.sourceStream, sourceChannel: t.sourceChannel } : {}),
                 volume: +(t.volume != null ? t.volume : 1).toFixed(3),
               };
@@ -158,6 +160,7 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
       in: +c.in.toFixed(3), out: +c.out.toFixed(3),
       offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0,
       audio: c.audioDetached ? [] : clipAudioSpec(c, mediaTracks),
+      ...audioLimiterSnapshot(c),
       fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
       ...(image ? {
         scale: Math.max(0.01, finite(c.scale, 1)),

@@ -140,9 +140,7 @@ describe('JKL reverse shuttle time domain', () => {
     mediaMock.supportsNativeReverse.mockReturnValue(true);
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
-    await Promise.resolve();
-    await Promise.resolve();
-    vi.advanceTimersByTime(250);
+    await vi.advanceTimersByTimeAsync(250);
 
     expect(mediaMock.setPlaybackDirection).toHaveBeenCalledWith('backward');
     expect(mediaMock.setRate).toHaveBeenCalledWith(1);
@@ -151,8 +149,7 @@ describe('JKL reverse shuttle time domain', () => {
     expect(mediaMock.scrubAudio).not.toHaveBeenCalled();
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK' }));
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(mediaMock.pause).toHaveBeenCalled();
     expect(mediaMock.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
@@ -167,15 +164,14 @@ describe('JKL reverse shuttle time domain', () => {
     mediaMock.supportsNativeReverse.mockReturnValue(true);
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ' }));
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     mediaMock.playing = true;
     mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
     mediaMock.pause.mockClear();
     const reversePlayCount = mediaMock.play.mock.calls.length;
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space' }));
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(mediaMock.pause).toHaveBeenCalledTimes(1);
     expect(mediaMock.setPlaybackDirection).toHaveBeenLastCalledWith('forward');

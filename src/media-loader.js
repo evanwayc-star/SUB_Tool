@@ -35,6 +35,7 @@ import { sourceChannelLabels, AudioPipeline } from './audio-routing-engine.js';
 import { getExactFps, secToEncore } from './time.js';
 import { Seq } from './sequence.js';
 import { waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { autoBuildPreviewProxy, isLargeCanopusAvi } from './preview-proxy-policy.js';
 export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx._resetForFirstVideo(projectRestore ? { keepVideoTracks: true } : {});
     const intake=ctx._intakeSession.begin(p);
@@ -83,8 +84,10 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         const loadedWithMpv=await ctx._loadViaMpv(p,info,projectRestore,intake,{
           fallbackToHtml5:frameAccurateNativeMp4,
           // 逐格精準 MP4 正播仍直接看母素材，但 JKL 倒播需要背景短 GOP
-          // Proxy；匯出路徑不會使用這支 preview cache。
-          needsProxy:true,
+          // Proxy；大型逐格獨立編碼的 Canopus AVI 可等疊層時再建。
+          // 匯出路徑不會使用這支 preview cache。
+          needsProxy:autoBuildPreviewProxy({codec:vCodec,extension:ext,size:State.mediaSize}),
+          deferInitialAudio:isLargeCanopusAvi({codec:vCodec,extension:ext,size:State.mediaSize}),
           sourceUrl:frameAccurateSourceUrl,
           exactSeek:vCodec==='hevc',
           // HEVC 的 mpv time-pos boundary 以「下一格」呈現；以精確 fps 減半格，
@@ -307,6 +310,7 @@ export function _expandChannels(ctx, audio){ return sourceChannelLabels(audio); 
 export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken=null, {
   fallbackToHtml5=false,
   needsProxy=true,
+  deferInitialAudio=false,
   sourceUrl=null,
   exactSeek=false,
   seekOffset=0,
@@ -381,6 +385,7 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
       dur:ctx._mpvDuration||0,
       fps:info?.video?.fps||0,
     },projectRestore);
+    ctx._deferredPrimaryProxy=needsProxy?null:{path:p,duration:dur,audio,primary};
     AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
 
     emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
@@ -393,6 +398,9 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
           // 純音訊時間軸與影片間隙都刻意讓 mpv 停住；這時殘留的 time-pos
           // 不能覆寫虛擬播放頭，否則最後一段影片刪除後會跳回舊影片時間。
           if(ctx._seqSwitching || ctx._gap || ctx.audioOnlyTimeline()) return;
+          // Proxy／母素材 loadfile 會先回報新檔的 0 秒。等同一來源時間的
+          // seek 確實出畫後才交還播放點權威，避免倒播瞬間跳回片頭。
+          if(!ctx.acceptMpvSourceTime(e.data)) return;
           const prev=ctx._mpvTime; ctx._mpvTime=e.data;
           const _ac=ctx.seqOn()?ctx._activeClip():null;
           // FPS-SYNC（詳見 FPS_時碼一致性.md）：暫停時讓播放器時碼與時間軸播放點同源同格：
@@ -417,7 +425,7 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
         }
         if(e.name==='pause'){
           const paused=!!e.data;
-          if(ctx._seqSwitching) return; // loadfile 過程中的暫停屬內部操作
+          if(ctx._seqSwitching || ctx.mpvSourceTransitionPending()) return; // loadfile 過程中的暫停屬內部操作
           // 進入影片間隙／純音訊模式時，是本層主動暫停 mpv 來保持黑畫面；
           // 不可把這個內部事件當成使用者停止整個時間軸，否則外部音訊會被停掉。
           if(ctx._gap || ctx.audioOnlyTimeline()) return;
@@ -432,13 +440,14 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
           else if(!paused&&!ctx.playing){ ctx.observePlayerPlaybackState(true,{source:'mpv',reason:'play'}); }
         }
         if(e.name==='duration'&&typeof e.data==='number'&&e.data>0){
+          if(ctx.mpvSourceTransitionPending() || ctx._reverseProxyActive) return; // preview Proxy 長度不覆寫母素材時間軸
           ctx._mpvDuration=e.data;
           if(ctx.seqOn()){ const c=ctx._activeClip(); if(c) Seq.updateSourceDur(c, e.data); }
           else if(!ctx.audioOnlyTimeline()){ State.duration=e.data; emit('duration:known'); }
         }
       }
       if(e.event==='end-file'&&ctx.mpvMode){
-        if(ctx._seqSwitching) return; // loadfile 造成的舊檔 end-file
+        if(ctx._seqSwitching || ctx.mpvSourceTransitionPending()) return; // loadfile 造成的舊檔 end-file
         // _enterGap()/純音訊模式已主動停住 mpv；忽略其後到達的舊檔結束事件，
         // 讓虛擬播放頭與外部音訊繼續走到專案最右端。
         if(ctx._gap || ctx.audioOnlyTimeline()) return;
@@ -466,7 +475,9 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
         ? 'mpv 預覽就緒，正在轉檔 Proxy 與分析音訊…'
         : 'mpv 預覽就緒，正在分析音訊…','busy');
       ctx.ensureCtx();
-      ctx._bgAudioIngest(p,audio,dur,primary,{needsProxy});
+      const startIngest=()=>ctx._bgAudioIngest(p,audio,dur,primary,{needsProxy});
+      if(deferInitialAudio) ctx.deferInitialAudioIngest(startIngest,owns);
+      else startIngest();
     } else {
       setStatus('媒體已載入（mpv 秒開，嵌入播放）','ok');
     }

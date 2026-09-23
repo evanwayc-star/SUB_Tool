@@ -28,7 +28,6 @@
 'use strict';
 
 const path = require('path');
-const { deliveryOutputPaths } = require('./airline-output');
 
 /**
  * 匯出工作狀態枚舉。
@@ -1194,11 +1193,6 @@ function createExportAdmission(deps) {
     return outputKeyFor(outPath);
   }
 
-  function outputPathsOf(job) {
-    outputKey(job);
-    return deliveryOutputPaths(job.payload.format, job.payload.outPath);
-  }
-
   /* renderer 用一份 format→副檔名的表組出 outPath，主程序用另一份驗它。
      兩份目前只靠人工維持一致；這裡是它們真正相遇的地方。 */
   function assertOutputFormat(job) {
@@ -1216,19 +1210,17 @@ function createExportAdmission(deps) {
      注意這是【入列時】的檢查；export-watchdog 那邊另有一道磁碟上的 lease，
      在真正 spawn 前再擋一次。兩道時機不同，都需要。 */
   function assertOutputAvailable(job, excludeId = job?.id) {
-    const paths = outputPathsOf(job);
-    const keys = paths.map(outputKeyFor);
+    const key = outputKey(job);
     for (const existing of currentJobs()) {
       if (!existing || existing.id === excludeId || !activeReservesOutput(existing.status)) continue;
-      let existingKeys;
-      try { existingKeys = outputPathsOf(existing).map(outputKeyFor); } catch (error) { continue; }
-      const collision = keys.findIndex(key => existingKeys.includes(key));
-      if (collision < 0) continue;
-      const error = fail(`同一個輸出檔案已在匯出佇列中：${paths[collision]}`, 'OUTPUT_BUSY');
+      let existingKey;
+      try { existingKey = outputKey(existing); } catch (error) { continue; }
+      if (key !== existingKey) continue;
+      const error = fail(`同一個輸出檔案已在匯出佇列中：${job.payload.outPath}`, 'OUTPUT_BUSY');
       error.conflictingJobId = existing.id;
       throw error;
     }
-    return keys[0];
+    return key;
   }
 
   /* 匯出 payload 是 renderer 的資料快照，不能因為進了佇列就自動升格成檔案能力。 */
@@ -1257,19 +1249,18 @@ function createExportAdmission(deps) {
       assertMasterMedia(sourcePath, '匯出來源');
     }
     const sourceKeys = sourcePaths.map(outputKeyFor);
-    for (const outputPath of outputPathsOf(job)) {
-      if (!canWriteDelivery(outputPath)) {
-        throw fail(`匯出輸出位置未經授權：${outputPath}`, 'UNAUTHORIZED_OUTPUT_PATH');
-      }
-      if (sourceKeys.includes(outputKeyFor(outputPath))) {
-        throw fail(`匯出不可覆蓋母素材：${outputPath}`, 'OUTPUT_OVERWRITES_SOURCE');
-      }
+    const outputPath = job.payload.outPath;
+    if (!canWriteDelivery(outputPath)) {
+      throw fail(`匯出輸出位置未經授權：${outputPath}`, 'UNAUTHORIZED_OUTPUT_PATH');
+    }
+    if (sourceKeys.includes(outputKey(job))) {
+      throw fail(`匯出不可覆蓋母素材：${outputPath}`, 'OUTPUT_OVERWRITES_SOURCE');
     }
     return sourcePaths;
   }
 
   return {
-    outputKey, outputPathsOf, assertOutputFormat, assertOutputAvailable,
+    outputKey, assertOutputFormat, assertOutputAvailable,
     sourcePathsOf, assertMasterMedia, assertJobAdmissible,
   };
 }

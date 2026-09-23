@@ -32,6 +32,7 @@ import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets, loadFonts } from './substyle.js';
 import { ProjectLoadSession } from './project-intake-engine.js';
+import { audioLimiterSnapshot, audioMotherPath } from '../shared/audio-loudness.cjs';
 export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
 const PROJECT_APP = 'SUB Tool';
 
@@ -147,7 +148,8 @@ function _normalExternalAudioSources(rawSources){
     sources.push({
       name:(typeof raw.name==='string'&&raw.name.trim())||'外部音訊',
       // 網頁版不會保存或重開本機路徑；使用者仍可自行重新匯入。
-      path:IS_DESKTOP&&typeof raw.path==='string'&&raw.path?raw.path:null,
+      path:IS_DESKTOP?audioMotherPath(raw):null,
+      ...audioLimiterSnapshot(raw),
       audioSourceId, timelineLaneId,
       offset:nonNegative(raw.offset), in:inPoint, out, duration,
       gain:nonNegative(raw.gain,1), fadeIn:nonNegative(raw.fadeIn), fadeOut:nonNegative(raw.fadeOut),
@@ -295,7 +297,7 @@ function _buildProjectData(){
       ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})})),
     videoTrackCount:State.videoTracks.length||1, // 向下相容：舊版讀取用
     vtracksCollapsed:!!State.vtracksCollapsed,
-    clips:_savedClips().map(c=>({name:c.name,path:c.path||null,dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,locked:!!c.locked,
+    clips:_savedClips().map(c=>({name:c.name,path:audioMotherPath(c),...audioLimiterSnapshot(c),dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,locked:!!c.locked,
       // 圖片需保留型別與自己的幾何。少了 type 會在重開專案時被誤當成影片
       // 丟給 ffprobe；少了 scale/posX/posY 則會回到預設滿版中央。
       // natW/natH＝圖片原始像素尺寸；少了它重開專案要等背景重量一次才對得準互動框。

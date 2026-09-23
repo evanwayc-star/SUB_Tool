@@ -64,7 +64,7 @@ function createAudioNormalizationRuntime({
       return parseVolumeAnalysis(stderr);
     },
 
-    async normalize(src, rawOptions = {}, { duration = 0, onProgress = null } = {}) {
+    async normalize(src, rawOptions = {}, { duration = 0, onProgress = null, signal = null } = {}) {
       if (typeof src !== 'string' || !src.trim()) {
         throw new TypeError('缺少有效的來源音訊路徑');
       }
@@ -72,56 +72,111 @@ function createAudioNormalizationRuntime({
       const options = normalizeLimiterOptions(rawOptions);
       const outWav = createTempPath('wav');
 
-      // 1. True Peak 模式：兩遍分析 (Two-Pass) 確保 ITU-R BS.1770 精準度與無聲保護
-      if (options.isTruePeak) {
-        let pass1Stderr = '';
-        const pass1Filter = buildLimiterFilter(options, null).filter;
-
+      const sourceStream = rawOptions.sourceStream ?? 0;
+      if (!Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream > 255) throw new TypeError('無效的來源音訊串流');
+      const check = () => { if (signal?.aborted) { const error = new Error('音訊工作已取消'); error.name = 'AbortError'; throw error; } };
+      const run = async (args, executionOptions) => {
+        check();
+        let child;
+        const abort = () => child?.kill?.();
+        signal?.addEventListener('abort', abort, { once: true });
         try {
-          await execute([
+          const result = await execute(args, { ...executionOptions, onProcess: process => { child = process; if (signal?.aborted) abort(); } });
+          check();
+          return result;
+        } finally { signal?.removeEventListener('abort', abort); }
+      };
+      try {
+        // 1. True Peak 模式：兩遍分析 (Two-Pass) 確保 ITU-R BS.1770 精準度與無聲保護
+        if (options.isTruePeak) {
+          let pass1Stderr = '';
+          const pass1Filter = buildLimiterFilter(options, null).filter;
+
+          try {
+            await run([
+              '-y',
+              '-hide_banner',
+              '-i', src,
+              '-map', `0:a:${sourceStream}`,
+              '-vn',
+              '-af', pass1Filter,
+              '-f', 'null',
+              '-',
+            ], {
+              duration,
+              jobId: 'loudnorm-p1',
+              label: '分析音訊響度 (Pass 1)',
+              onStderr: chunk => {
+                pass1Stderr += chunk;
+              },
+              onProgress: p => {
+                if (typeof onProgress === 'function') {
+                  const mappedPct = Math.min(45, Math.round((p.pct || 0) * 0.45));
+                  onProgress({ ...p, pct: mappedPct, stage: 'pass1', label: `分析音訊響度 (${mappedPct}%)` });
+                }
+              },
+            });
+          } catch (err) {
+            check();
+            // 若 Pass 1 執行失敗，記錄警告並嘗試單遍處理
+            console.warn('[audio-norm] Pass 1 分析失敗，退回單遍模式：', err);
+          }
+
+          const report = extractLoudnormJson(pass1Stderr);
+
+          // 無聲保護：若判定為純無聲或低於 -70 LKFS 門限，保持 0 dB 增益，不拉大底噪
+          if (options.silenceProtection && report && isAudioReportSilence(report)) {
+            await run([
+              '-y',
+              '-hide_banner',
+              '-i', src,
+              '-map', `0:a:${sourceStream}`,
+              '-vn',
+              '-c:a', 'pcm_s16le',
+              outWav,
+            ], {
+              duration,
+              jobId: 'loudnorm-p2-silence',
+              label: '無聲保護輸出 (維持 0 dB)',
+              onProgress: p => {
+                if (typeof onProgress === 'function') {
+                  const mappedPct = Math.min(99, Math.round(45 + (p.pct || 0) * 0.54));
+                  onProgress({ ...p, pct: mappedPct, stage: 'silence', label: `無聲保護輸出 (${mappedPct}%)` });
+                }
+              },
+            });
+
+            if (typeof onProgress === 'function') {
+              onProgress({ pct: 100, stage: 'done', label: '完成' });
+            }
+
+            return {
+              outputPath: outWav,
+              isSilence: true,
+              report,
+              options,
+            };
+          }
+
+          // 正常音訊：執行 Pass 2
+          const p2FilterObj = buildLimiterFilter(options, report);
+          await run([
             '-y',
             '-hide_banner',
             '-i', src,
-            '-af', pass1Filter,
-            '-f', 'null',
-            '-',
-          ], {
-            duration,
-            jobId: 'loudnorm-p1',
-            label: '分析音訊響度 (Pass 1)',
-            onStderr: chunk => {
-              pass1Stderr += chunk;
-            },
-            onProgress: p => {
-              if (typeof onProgress === 'function') {
-                const mappedPct = Math.min(45, Math.round((p.pct || 0) * 0.45));
-                onProgress({ ...p, pct: mappedPct, stage: 'pass1', label: `分析音訊響度 (${mappedPct}%)` });
-              }
-            },
-          });
-        } catch (err) {
-          // 若 Pass 1 執行失敗，記錄警告並嘗試單遍處理
-          console.warn('[audio-norm] Pass 1 分析失敗，退回單遍模式：', err);
-        }
-
-        const report = extractLoudnormJson(pass1Stderr);
-
-        // 無聲保護：若判定為純無聲或低於 -70 LKFS 門限，保持 0 dB 增益，不拉大底噪
-        if (options.silenceProtection && report && isAudioReportSilence(report)) {
-          await execute([
-            '-y',
-            '-hide_banner',
-            '-i', src,
+              '-map', `0:a:${sourceStream}`,
+              '-vn',
+            '-af', p2FilterObj.filter,
             '-c:a', 'pcm_s16le',
             outWav,
           ], {
             duration,
-            jobId: 'loudnorm-p2-silence',
-            label: '無聲保護輸出 (維持 0 dB)',
+            jobId: 'loudnorm-p2',
+            label: '套用平衡化效果 (Pass 2)',
             onProgress: p => {
               if (typeof onProgress === 'function') {
                 const mappedPct = Math.min(99, Math.round(45 + (p.pct || 0) * 0.54));
-                onProgress({ ...p, pct: mappedPct, stage: 'silence', label: `無聲保護輸出 (${mappedPct}%)` });
+                onProgress({ ...p, pct: mappedPct, stage: 'pass2', label: `套用平衡化 (${mappedPct}%)` });
               }
             },
           });
@@ -132,29 +187,31 @@ function createAudioNormalizationRuntime({
 
           return {
             outputPath: outWav,
-            isSilence: true,
+            isSilence: false,
             report,
             options,
           };
         }
 
-        // 正常音訊：執行 Pass 2
-        const p2FilterObj = buildLimiterFilter(options, report);
-        await execute([
+        // 2. Peak 模式 (Hard Limiter：直接使用 alimiter)
+        const pFilterObj = buildLimiterFilter(options, null);
+        await run([
           '-y',
           '-hide_banner',
           '-i', src,
-          '-af', p2FilterObj.filter,
+              '-map', `0:a:${sourceStream}`,
+              '-vn',
+          '-af', pFilterObj.filter,
           '-c:a', 'pcm_s16le',
           outWav,
         ], {
           duration,
-          jobId: 'loudnorm-p2',
-          label: '套用平衡化效果 (Pass 2)',
+          jobId: 'limiter-peak',
+          label: '套用強限制器 (Hard Limiter)',
           onProgress: p => {
             if (typeof onProgress === 'function') {
-              const mappedPct = Math.min(99, Math.round(45 + (p.pct || 0) * 0.54));
-              onProgress({ ...p, pct: mappedPct, stage: 'pass2', label: `套用平衡化 (${mappedPct}%)` });
+              const pct = Math.min(99, Math.round(p.pct || 0));
+              onProgress({ ...p, pct, stage: 'peak', label: `套用強限制器 (${pct}%)` });
             }
           },
         });
@@ -166,42 +223,14 @@ function createAudioNormalizationRuntime({
         return {
           outputPath: outWav,
           isSilence: false,
-          report,
+          report: null,
           options,
         };
+      } catch (error) {
+        if (typeof removeFile === 'function') { try { await removeFile(outWav); } catch (_) {} }
+        check();
+        throw error;
       }
-
-      // 2. Peak 模式 (Hard Limiter：直接使用 alimiter)
-      const pFilterObj = buildLimiterFilter(options, null);
-      await execute([
-        '-y',
-        '-hide_banner',
-        '-i', src,
-        '-af', pFilterObj.filter,
-        '-c:a', 'pcm_s16le',
-        outWav,
-      ], {
-        duration,
-        jobId: 'limiter-peak',
-        label: '套用強限制器 (Hard Limiter)',
-        onProgress: p => {
-          if (typeof onProgress === 'function') {
-            const pct = Math.min(99, Math.round(p.pct || 0));
-            onProgress({ ...p, pct, stage: 'peak', label: `套用強限制器 (${pct}%)` });
-          }
-        },
-      });
-
-      if (typeof onProgress === 'function') {
-        onProgress({ pct: 100, stage: 'done', label: '完成' });
-      }
-
-      return {
-        outputPath: outWav,
-        isSilence: false,
-        report: null,
-        options,
-      };
     },
   };
 }

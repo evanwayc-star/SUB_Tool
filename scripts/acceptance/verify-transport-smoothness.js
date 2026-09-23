@@ -31,6 +31,8 @@ const {
 } = require('./cdp-electron-harness.js');
 
 const FFPROBE = path.join(ROOT, 'electron', 'ffmpeg', 'ffprobe.exe');
+const PACKAGED_EXE = process.env.SUBTOOL_ACCEPTANCE_EXE
+  ? path.resolve(process.env.SUBTOOL_ACCEPTANCE_EXE) : null;
 const SAMPLE_MS = 25;
 const SAMPLE_DURATION_MS = 1800;
 const STEP_COUNT = 6;
@@ -80,6 +82,17 @@ function summarizeCadence(samples, direction) {
   const signedAverageRate = elapsed > 0 ? signedSpan / elapsed : 0;
   return {
     samples: finite.length,
+    firstPresented: Number(first.toFixed(3)),
+    lastPresented: Number(last.toFixed(3)),
+    ...(direction < 0 ? { trace: finite.filter((sample, index) => index % 8 === 0 || index === finite.length - 1)
+      .map(sample => ({
+        presented: Number(sample.presented.toFixed(3)),
+        sourceTime: Number(sample.sourceTime?.toFixed(3)),
+        nativeReverse: sample.nativeReverse,
+        reverseProxy: sample.reverseProxy,
+        reverseShuttleMuted: sample.reverseShuttleMuted,
+        presentationPending: sample.presentationPending,
+      })) } : {}),
     progressFrames: progress.length,
     spanSeconds: Number(span.toFixed(3)),
     averageRate: Number((direction * signedAverageRate).toFixed(3)),
@@ -173,6 +186,10 @@ async function samplePresentation(client) {
           ? Number(window.SUB.State.viewStart) + playheadLeft / pixelsPerSecond
           : null,
         presented: media.presentedTime(),
+        sourceTime: media.vTime(),
+        nativeReverse: media._nativeReverse,
+        reverseProxy: media._reverseProxyActive,
+        reverseShuttleMuted: media._reverseShuttleMuted,
         playing: media.playing,
         presentationPending: media.presentationPending(),
       });
@@ -528,8 +545,8 @@ async function runMedia(mediaPath) {
     const projectPath = path.join(profileDir, 'transport-acceptance.subtool');
     fs.writeFileSync(projectPath, projectBytes(mediaPath, info, playhead));
     const port = await reservePort();
-    child = spawn(ELECTRON, [
-      '.',
+    child = spawn(PACKAGED_EXE || ELECTRON, [
+      ...(!PACKAGED_EXE ? ['.'] : []),
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${profileDir}`,
       '--subtool-transport-acceptance',
@@ -633,6 +650,10 @@ async function runMedia(mediaPath) {
     };
     return result;
   } catch (error) {
+    const mpvLog = profileDir && path.join(profileDir, 'temp', 'subtool_cache', 'mpv-last.log');
+    if (mpvLog && fs.existsSync(mpvLog)) {
+      error.message += `\nmpv log:\n${fs.readFileSync(mpvLog, 'utf8').slice(-6000)}`;
+    }
     if (errors.length) error.message += `\nElectron stderr:\n${errors.join('').slice(-6000)}`;
     throw error;
   } finally {

@@ -25,7 +25,7 @@
         **從未被 emit、也從未有訂閱者**，照做等於什麼都沒發生（`events.js` 的 emit
         在無 handler 時是靜默 no-op，不會報錯，所以錯得很安靜）。
 ============================================================================== */
-import { State, ensureAudioExportDefaults, normalizeAudioProject } from './state.js';
+import { State, normalizeAudioProject } from './state.js';
 import { Seq } from './sequence.js';
 import { Media } from './media.js';
 import { AudioPipeline } from './audio-routing-engine.js';
@@ -33,9 +33,9 @@ import { drawTimeline } from './timeline-renderer.js';
 import { renderAudioTracks } from './mixer.js';
 import { escapeHTML } from './util.js';
 import { emit } from './events.js';
+import { History } from './history.js';
 import { openModal, closeModal, showToast } from './ui.js';
-import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './export-job-engine.js';
-import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, monoStreamsForBuses, deliveryStreamsForPreset, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-engine.js';
+import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-engine.js';
 
 
 function project(){
@@ -48,14 +48,26 @@ function clipSourceId(clip){
   return clip.audioSourceId || clip.audioSrc || (clip.primary ? 'video' : ('clip:'+clip.id));
 }
 function busName(bus,index){ return bus?.name||`A${index+1}`; }
-function busById(id){ return project().buses.find(bus=>String(bus.id)===String(id))||null; }
-function routeKey(route){ return `${route.sourceStream}:${route.sourceChannel}`; }
 function displaySource(route){ return `Stream ${route.sourceStream+1} · Ch ${route.sourceChannel+1}`; }
-function updateViews(label){
+function updateViews(){
   Media.applyGains();
   renderAudioTracks();
   drawTimeline();
-  emit('history:record',label);
+}
+let activeProjectEditor=null;
+function projectEditor({ output=false, label='設定輸出音訊聲道' }={}){
+  activeProjectEditor?.dismiss();
+  let owned=project();
+  const owns=()=>State.audioProject===owned;
+  const finish=History.beginAudioPreview(owned,owns);
+  activeProjectEditor=AudioRoutingModel.editProject(owned,{
+    output,label,
+    owns,
+    preview:draft=>{ State.audioProject=draft; updateViews(); owned=State.audioProject; },
+    record:message=>emit('history:record',message),
+    finished:finish,
+  });
+  return activeProjectEditor;
 }
 function routesForSource(source){
   const sourceId=clipSourceId(source);
@@ -81,8 +93,7 @@ function setBusCount(rawCount){
   State.audioProject=transition.project;
   return true;
 }
-function routeTableHtml(clip,routes){
-  const buses=project().buses;
+function routeTableHtml(routes,buses){
   if(!routes.length){
     return `<div class="audio-route-empty">來源音訊仍在分析；完成後會顯示每一條來源聲道。</div>`;
   }
@@ -103,32 +114,29 @@ function routeTableHtml(clip,routes){
     <thead><tr><th>來源聲道</th><th>專案音訊軌</th><th>狀態</th></tr></thead><tbody>${rows}</tbody>
   </table></div>`;
 }
-function syncRouteDraftFromDialog(sourceId){
-  const map=project().sourceMaps[sourceId];
-  if(!map) return;
-  const byKey=new Map(map.channels.map(route=>[routeKey(route),route]));
+function syncRouteDraftFromDialog(editor,sourceId){
+  const changes=[];
   document.querySelectorAll('.audio-route-table tbody tr').forEach(row=>{
-    const route=byKey.get(`${row.dataset.stream}:${row.dataset.channel}`);
     const select=row.querySelector('.audio-route-target');
-    if(!route||!select||select.dataset.dirty!=='1') return;
-    const id=select.value||'';
-    route.busIds=id?[id]:[];
-    route.enabled=!!id;
+    if(!select||select.dataset.dirty!=='1') return;
+    changes.push({sourceStream:Number(row.dataset.stream),sourceChannel:Number(row.dataset.channel),busId:select.value||''});
+    select.dataset.dirty='0';
+    row.querySelector('.audio-route-state').textContent=select.value?'已配線':'未配線';
   });
+  if(changes.length) editor.setRoutes(sourceId,changes);
 }
-function restoreRouteDraft(sourceId,initialMap){
-  const p=project();
-  if(initialMap) p.sourceMaps[sourceId]=structuredClone(initialMap);
-  else delete p.sourceMaps[sourceId];
-  Media.applyGains(); renderAudioTracks(); drawTimeline();
-}
-function openForRoutingSource(source, originalMap=null){
+function openForRoutingSource(source, editor=null){
   if(!source){ showToast('找不到這個音訊來源'); return; }
   const sourceId=clipSourceId(source);
   if(!sourceId){ showToast('此來源沒有可配線的音訊識別'); return; }
-  const routes=routesForSource(source);
-  const p=project();
-  const initialMap=originalMap||structuredClone(p.sourceMaps[sourceId]||null);
+  if(!editor){
+    activeProjectEditor?.dismiss();
+    routesForSource(source);
+    editor=projectEditor({label:'設定音訊配線：'+(source.name||'音訊來源')});
+  }
+  if(!editor.isActive()) return;
+  const p=editor.current();
+  const routes=p.sourceMaps[sourceId]?.channels||[];
   const count=p.buses.length;
   openModal('音訊配線',
     `<div class="audio-route-dialog">
@@ -146,38 +154,44 @@ function openForRoutingSource(source, originalMap=null){
       </div>
       <div class="audio-route-actions"><button id="audioRouteAuto" type="button">自動順序對應</button><button id="audioRouteClear" type="button">清除這個來源的配線</button><button id="audioRouteOutput" type="button">輸出聲道設定…</button></div>
       <div class="audio-route-help">例如：來源 Stream 1 · Ch 1–6 可分別指定到 A3–A8。不同影片各自保存自己的分配。</div>
-      ${routeTableHtml(source,routes)}
+      ${routeTableHtml(routes,p.buses)}
     </div>`,
     [{label:'儲存配線',primary:true,act:()=>{
-      syncRouteDraftFromDialog(sourceId);
-      closeModal(); updateViews('設定音訊配線：'+(source.name||'音訊來源'));
-    }},{label:'取消',act:()=>{ restoreRouteDraft(sourceId,initialMap); closeModal(); }}],{width:'680px'});
+      syncRouteDraftFromDialog(editor,sourceId);
+      const result=editor.commit();
+      if(!result.saved){ showToast(result.error); return; }
+      closeModal({committed:true});
+    }},{label:'取消',act:()=>closeModal()}],{width:'680px',onDismiss:()=>editor.dismiss()});
   setTimeout(()=>{
-    const rerender=()=>openForRoutingSource(source,initialMap);
+    if(!editor.isActive()||!document.querySelector('.audio-route-dialog')) return;
+    const rerender=()=>openForRoutingSource(source,editor);
+    const sync=()=>syncRouteDraftFromDialog(editor,sourceId);
     const countInput=document.getElementById('audioBusCount');
-    document.getElementById('audioBusCountApply')?.addEventListener('click',()=>{ syncRouteDraftFromDialog(sourceId); if(setBusCount(countInput?.value)){ updateViews('調整專案音訊軌數'); rerender(); } });
-    document.querySelectorAll('.audio-count-preset').forEach(button=>button.addEventListener('click',()=>{ if(countInput) countInput.value=button.dataset.count||''; syncRouteDraftFromDialog(sourceId); if(setBusCount(button.dataset.count)){ updateViews('調整專案音訊軌數'); rerender(); } }));
-    document.querySelectorAll('.audio-route-target').forEach(select=>select.addEventListener('change',()=>{ select.dataset.dirty='1'; }));
+    document.getElementById('audioBusCountApply')?.addEventListener('click',()=>{ sync(); if(editor.setBusCount(countInput?.value)) rerender(); });
+    document.querySelectorAll('.audio-count-preset').forEach(button=>button.addEventListener('click',()=>{ sync(); if(editor.setBusCount(button.dataset.count)) rerender(); }));
+    document.querySelectorAll('.audio-route-target').forEach(select=>select.addEventListener('change',()=>{ select.dataset.dirty='1'; sync(); }));
     document.getElementById('audioRouteAuto')?.addEventListener('click',()=>{
-      const available=project().buses.filter(bus=>!bus.locked);
+      const available=editor.current().buses.filter(bus=>!bus.locked);
       document.querySelectorAll('.audio-route-target').forEach((select,index)=>{ select.value=available[index]?.id||''; select.dataset.dirty='1'; });
+      sync();
     });
     document.getElementById('audioRouteClear')?.addEventListener('click',()=>{
       document.querySelectorAll('.audio-route-target').forEach(select=>{ select.value=''; select.dataset.dirty='1'; });
+      sync();
     });
-    document.getElementById('audioRouteOutput')?.addEventListener('click',()=>{ syncRouteDraftFromDialog(sourceId); openOutputSettings(()=>openForRoutingSource(source,initialMap)); });
+    document.getElementById('audioRouteOutput')?.addEventListener('click',()=>{ sync(); const child=editor.output(); if(child) openOutputSettingsEditor(child,rerender); });
   },0);
 }
-function openForClip(clipId, originalMap=null){
+function openForClip(clipId){
   const clip=Seq.byId(clipId);
   if(!clip){ showToast('找不到這個影片片段'); return; }
-  openForRoutingSource(clip,originalMap);
+  openForRoutingSource(clip);
 }
-function openForSource(sourceKey, originalMap=null){
+function openForSource(sourceKey){
   const external=Media.getExternalAudioSource?.(sourceKey);
-  if(external){ openForRoutingSource(external,originalMap); return; }
+  if(external){ openForRoutingSource(external); return; }
   const clip=Seq.byId(sourceKey)||State.clips.find(item=>clipSourceId(item)===sourceKey);
-  if(clip){ openForRoutingSource(clip,originalMap); return; }
+  if(clip){ openForRoutingSource(clip); return; }
   showToast('找不到這個音訊來源');
 }
 function outputRowHtml(stream,index,buses=project().buses){
@@ -210,80 +224,9 @@ function outputStreamsFromDialog(buses, existingStreams){
   });
   return streams;
 }
-/* 目前專案與交付列共用同一個輸出編組 UI；差別只在資料擁有者。這個 adapter 將
-   State.audioProject 的既有操作包成 editor，下面的對話框不必知道資料是否為全域專案。 */
-function projectOutputEditor(originalLayout=null,originalBusState=null){
-  let initial=null;
-  ensureAudioExportDefaults({appendMissing:false});
-  const p = project();
-  initial={
-    layout:originalLayout||structuredClone(p.exportLayout),
-    buses:originalBusState||structuredClone({mode:p.mode,buses:p.buses}),
-    sourceMaps:structuredClone(p.sourceMaps)
-  };
-  
-  const model = AudioRoutingModel.createProjectAdapter(State.audioProject);
-  
-  return {
-    prepare(){
-      return model.current();
-    },
-    current(){ return model.current(); },
-    /* 草稿寫回 State 時只有【新增 bus】那條路徑需要正規化——bus 的 id 與欄位由
-       state.js 的 _normalBus 產生，模型自己捏過一份形狀不同的（v6.1.2 修）。
-       其餘幾條刻意【不】呼叫 normalizeAudioProject：它在 exportLayout 為空時會
-       自己補上「每條 bus 一個 mono stream」，使用者若把輸出清空就會被自動填回去，
-       等於改掉他的編輯結果。模型的 setBusCount 已經在內部正規化過。 */
-    setStreams(streams){ model.setStreams(streams); State.audioProject = model.current(); },
-    setBusCount(c){ const r = model.setBusCount(c); State.audioProject = model.current(); return r; },
-    allMono(){ const r = model.applyAllMonoLayout(); State.audioProject = model.current(); return r; },
-    preset(p){ const r = model.applyDeliveryPreset(p); State.audioProject = model.current(); return r; },
-    addStream(){ model.addStream(); State.audioProject = model.current(); },
-    update:label=>updateViews(label),
-    cancel(){
-      if(!initial) return;
-      State.audioProject=normalizeAudioProject({
-        mode:initial.buses.mode,
-        buses:initial.buses.buses,
-        sourceMaps:initial.sourceMaps,
-        exportLayout:initial.layout
-      });
-      Media.applyGains(); renderAudioTracks(); drawTimeline();
-    }
-  };
-}
-
-/* 每一列交付有自己的 buses / streams。這個 editor 完全不讀也不寫 State，因此改交付
-   A 軌數量、取消對話框或同時排多列，不會意外重配正在播放專案的來源聲道。 */
-function deliveryOutputEditor(spec){
-  let initial=structuredClone(spec||{buses:[],streams:[]});
-  let model = AudioRoutingModel.createDeliveryAdapter(initial);
-  
-  return {
-    prepare(){ return model.current(); },
-    current(){ return model.current(); },
-    setStreams(streams){ model.setStreams(streams); },
-    setBusCount(c){ return model.setBusCount(c); },
-    allMono(){ 
-      const res = model.applyAllMonoLayout(); 
-      if(!res) showToast('請先設定至少一條專案音訊軌。'); 
-      return res; 
-    },
-    preset(p){ 
-      const res = model.applyDeliveryPreset(p); 
-      if(res.error) { showToast(res.error); return false; }
-      return true; 
-    },
-    addStream(){ model.addStream(); },
-    syncWavBusIds(){ model.syncWavBusIds(); },
-    update(){},
-    cancel(){ model = AudioRoutingModel.createDeliveryAdapter(initial); },
-    result(){ return model.result(); }
-  };
-}
-
 function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
-  const p=editor.prepare();
+  if(!editor.isActive()) return;
+  const p=editor.current();
   const wavDelivery=deliveryFormat==='wav';
   const streams=p.exportLayout.streams;
   const rows=streams.map((stream,index)=>outputRowHtml(stream,index,p.buses)).join('')||'<tr><td colspan="4" class="audio-route-empty">尚無可輸出的專案音訊軌。</td></tr>';
@@ -322,33 +265,17 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
     </div>`,
     [{label:'儲存輸出設定',primary:true,act:()=>{
       const current=editor.current();
-      const busList=current.buses;
-      const seen=new Set();
-      const next=[];
-      let valid=true;
-      document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]').forEach(row=>{
-        const old=current.exportLayout.streams.find(stream=>stream.id===row.dataset.streamId);
-        if(!old) return;
-        const layout=row.querySelector('.audio-output-layout')?.value||'mono';
-        const start=row.querySelector('.audio-output-start')?.value||'';
-        const name=(row.querySelector('.audio-output-name')?.value||'').trim();
-        const startIndex=busList.findIndex(bus=>String(bus.id)===String(start));
-        const width=layoutWidth(layout);
-        const busIds=startIndex>=0?busList.slice(startIndex,startIndex+width).map(bus=>bus.id):[];
-        if(busIds.length!==width||busIds.some(id=>seen.has(id))) valid=false;
-        busIds.forEach(id=>seen.add(id));
-        next.push({id:old.id,layout,busIds,...(name?{name}:{})});
-      });
-      if(!valid){ showToast(wavDelivery?'每個 WAV 群組需要足夠且不重複的專案音訊軌。':'每個 Stream 需要足夠且不重複的專案音訊軌。'); return; }
-      editor.setStreams(next);
-      if(wavDelivery) editor.syncWavBusIds?.();
-      closeModal(); editor.update('設定輸出音訊聲道');
-      if(onBack) onBack({saved:true,spec:editor.result?.()});
+      editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
+      const result=editor.commit();
+      if(!result.saved){ showToast(result.error); return; }
+      closeModal({committed:true});
+      if(onBack) onBack(result);
     }},{label:onBack?'返回配線':'取消',act:()=>{
-      editor.cancel();
-      closeModal(); if(onBack) onBack({saved:false});
-    }}],{width:'860px'});
+      if(onBack){ editor.cancel(); closeModal({committed:true}); onBack({saved:false}); }
+      else closeModal();
+    }}],{width:'860px',onDismiss:()=>editor.dismiss()});
   setTimeout(()=>{
+    if(!editor.isActive()||!document.querySelector('.audio-output-dialog')) return;
     const rerender=()=>{
       // 版面重畫會重新建立「可連續分配」的選項；先保存畫面上的暫存選擇，
       // 才不會在 Mono / Stereo / 5.1 切換時把使用者剛選的編組還原掉。
@@ -360,34 +287,41 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
     document.getElementById('audioOutputBusApply')?.addEventListener('click',()=>{
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      if(editor.setBusCount(countInput?.value)){ editor.update('調整專案音訊軌數'); rerender(); }
+      if(editor.setBusCount(countInput?.value)) openOutputSettingsEditor(editor,onBack,{deliveryFormat});
     });
     document.querySelectorAll('.audio-output-count-preset').forEach(button=>button.addEventListener('click',()=>{
       if(countInput) countInput.value=button.dataset.count||'';
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      if(editor.setBusCount(button.dataset.count)){ editor.update('調整專案音訊軌數'); rerender(); }
+      if(editor.setBusCount(button.dataset.count)) openOutputSettingsEditor(editor,onBack,{deliveryFormat});
     }));
     document.getElementById('audioOutputAllMono')?.addEventListener('click',()=>{
       if(!editor.allMono()) return;
-      editor.update('設定全部 Mono 輸出');
       openOutputSettingsEditor(editor,onBack,{deliveryFormat});
     });
     document.querySelectorAll('.audio-delivery-preset').forEach(button=>button.addEventListener('click',()=>{
       const preset=DELIVERY_PRESETS.find(item=>item.id===button.dataset.preset);
-      if(!preset||!editor.preset(preset)) return;
-      editor.update('套用常用輸出配置：'+preset.label);
+      if(!preset) return;
+      const result=editor.preset(preset);
+      if(result?.error){ showToast(result.error); return; }
+      if(!result) return;
       openOutputSettingsEditor(editor,onBack,{deliveryFormat});
     }));
     document.querySelectorAll('.audio-output-layout,.audio-output-start').forEach(select=>select.addEventListener('change',()=>{
       // layout 改變時需要重建可選的連續 bus 範圍；只在 layout 欄變動才重畫。
       if(select.classList.contains('audio-output-layout')) rerender();
+      else { const current=editor.current(); editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams)); }
+    }));
+    document.querySelectorAll('.audio-output-name').forEach(input=>input.addEventListener('input',()=>{
+      const current=editor.current(); editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
     }));
     document.querySelectorAll('.audio-output-remove').forEach(button=>button.addEventListener('click',()=>{
       const row=button.closest('tr');
       const rows=[...document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]')];
       if(rows.length<=1){ showToast('至少保留一個輸出 Stream。'); return; }
       row?.remove();
+      const current=editor.current();
+      editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
       document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]').forEach((streamRow,index)=>{
         const numberCell=streamRow.querySelector('.audio-output-index');
         if(numberCell) numberCell.textContent=String(index+1);
@@ -404,11 +338,12 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
   },0);
 }
 
-function openOutputSettings(onBack=null, originalLayout=null, originalBusState=null, {deliveryFormat=null}={}){
-  openOutputSettingsEditor(projectOutputEditor(originalLayout,originalBusState),onBack,{deliveryFormat});
+function openOutputSettings(){
+  openOutputSettingsEditor(projectEditor({output:true}));
 }
 function openDeliveryOutputSettings(spec,onBack=null,{deliveryFormat=null}={}){
-  openOutputSettingsEditor(deliveryOutputEditor(spec),onBack,{deliveryFormat});
+  activeProjectEditor?.dismiss();
+  openOutputSettingsEditor(AudioRoutingModel.editDelivery(spec,{wav:deliveryFormat==='wav'}),onBack,{deliveryFormat});
 }
 
 const AudioRouting={openForClip,openForSource,openOutputSettings,openDeliveryOutputSettings,setBusCount};

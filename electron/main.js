@@ -38,9 +38,9 @@ const {
   createSpeechCompressionRuntime,
 } = require('./speech-audio-compressor');
 const { createAudioNormalizationRuntime } = require('./audio-normalization-runtime');
-/* 交付解析度／建議碼率的規則與 renderer 共用同一份（見 shared/README.md）——
-   匯出佇列監控可以改已入列工作的解析度，那必須與交付對話框算出同樣的結果。 */
-const { deliveryResolution, suggestKbps } = require('../shared/delivery-resolution.cjs');
+/* 交付規格派生與 renderer 共用同一份（見 shared/README.md）。已入列工作的
+   時間碼起點仍使用送出時凍結的值，不從目前專案狀態重算。 */
+const { deriveDeliverySpec } = require('../shared/delivery-resolution.cjs');
 const { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
 const {
   buildIngestArgs,
@@ -996,7 +996,6 @@ function prepareQueueDeliveryUpdate(job, patch) {
   const p = job.payload || {};
   const format = String(patch?.format != null ? patch.format : (p.format || '')).trim().toLowerCase();
   const ext = expectedExportExtension(format); // 未知格式在這裡就丟 INVALID_EXPORT_FORMAT
-  const isWav = format === 'wav';
   const preset = getDeliveryFormatPreset(format);
   // 已入列工作的 TC 起點依原交付 FPS 凍結；切入固定 FPS 必須從交付清單重建。
   if (preset && p.format !== format) throw new Error(`請回交付清單新增 ${preset.label}，以重新套用影格率、時間碼與音軌設定`);
@@ -1009,50 +1008,32 @@ function prepareQueueDeliveryUpdate(job, patch) {
      舊工作沒有 canvasW/H 時退回目前的交付尺寸，比例仍然正確。 */
   const canvasW = Number(p.canvasW) > 0 ? Number(p.canvasW) : Number(p.width) || 1920;
   const canvasH = Number(p.canvasH) > 0 ? Number(p.canvasH) : Number(p.height) || 1080;
-  const targetH = preset?.height || (patch?.targetH != null ? Math.max(0, Math.floor(Number(patch.targetH) || 0)) : (Number(p.targetH) || 0));
-  const { w, h } = preset ? { w: preset.width, h: preset.height } : deliveryResolution({ canvasW, canvasH, targetH, isWav });
-
-  /* 碼率只有 H.264 用得到。給了就用給的，沒給而解析度變了就重新建議——
-     1080p 的碼率套在 720p 上是浪費、套在 4K 上會糊掉（v4.32 的「輸出像 proxy」）。 */
-  let videoKbps = preset ? preset.videoKbps : Number(p.videoKbps) || 0;
-  if (format === 'h264') {
-    if (patch?.kbps != null) videoKbps = Math.max(1, Math.floor(Number(patch.kbps) || 0));
-    else if (w !== Number(p.width) || h !== Number(p.height)) videoKbps = suggestKbps({ w, h });
-  }
-
-  /* 燒入 TC。WAV 沒有畫面可燒——這條規則在 delivery-list.js toJobs 是
-     `(!isWav && r.burnTimecode) ? {…} : null`，這裡必須一致，否則從 MP4 改成 WAV
-     之後 payload 還留著 watermark，delivery runner 雖然也會擋（isWav ? null : …），
-     但佇列畫面會顯示「燒入 TC」而實際不會燒——顯示說謊比不顯示更糟。 */
   const wantsTc = patch?.burnTimecode != null ? !!patch.burnTimecode : !!p.timecodeWatermark;
-  let timecodeWatermark = null;
-  if (!isWav && wantsTc) {
-    /* 重建 watermark 時必須用【送出當下的時間軸起點】。payload.timelineStartTimecode
-       就是為此而存的（見 delivery-list.js toJobs）。取不到就【不要猜】——
-       猜 00:00:00:00 在設過 In 點的專案會燒出錯的時間碼，而畫面一切正常。
-       舊工作沒有這個欄位，寧可擋下來要使用者重送。 */
-    const start = p.timecodeWatermark?.start ?? p.timelineStartTimecode;
-    if (!start) throw new Error('這份工作沒有記錄時間軸起點，無法補上燒入 TC；請重新從交付清單送出');
-    timecodeWatermark = { start };
-  }
+  const spec = deriveDeliverySpec({
+    format, preset, canvasW, canvasH,
+    targetH: patch?.targetH != null ? Math.max(0, Math.floor(Number(patch.targetH) || 0)) : (Number(p.targetH) || 0),
+    fps: p.fps, videoKbps: p.videoKbps, previousWidth: p.width, previousHeight: p.height,
+    kbpsOverride: patch?.kbps, burnTimecode: wantsTc,
+    timecodeStart: p.timecodeWatermark?.start ?? p.timelineStartTimecode,
+  });
 
   const oldPath = String(p.outPath || '');
   if (!oldPath) throw new Error('這份工作沒有輸出路徑');
   /* 檔名的 _TC 後綴要跟著 TC 開關走（defaultDeliveryName 就是這樣命名的）。
      不同步的話，關掉 TC 之後檔名還叫 …_TC.mp4，交付出去會被誤認。 */
   const stem = oldPath.replace(/\.[^.\\/]*$/, '').replace(/_TC$/, '');
-  const newPath = stem + (timecodeWatermark ? '_TC' : '') + '.' + ext;
+  const newPath = stem + (spec.timecodeWatermark ? '_TC' : '') + '.' + ext;
 
   /* 先用候選物件跑一次准入檢查，通過才真的改到 job 上——
      失敗時 job 必須維持原狀，不可以留下改到一半的狀態。 */
-  const fps = preset?.fps || p.fps;
-  const nextPayload = { ...p, format, outPath: newPath, width: w, height: h, targetH, videoKbps, fps, audioPlan, canvasW, canvasH, timecodeWatermark };
+  const nextPayload = { ...p, format, outPath: newPath, ...spec, audioPlan, canvasW, canvasH };
   const candidate = { ...job, payload: nextPayload };
   _admission.assertOutputFormat(candidate);
   _admission.assertOutputAvailable(candidate, job.id); // 排除自己；擋同路徑撞車
   return {
     payload: nextPayload,
-    result: { format, outPath: newPath, width: w, height: h, targetH, videoKbps, fps, burnTimecode: !!timecodeWatermark },
+    result: { format, outPath: newPath, width: spec.width, height: spec.height, targetH: spec.targetH,
+      videoKbps: spec.videoKbps, fps: spec.fps, burnTimecode: !!spec.timecodeWatermark },
     /* 同資料夾、同主檔名，只換副檔名。能力只在 job 快照成功落盤後才擴張，
        失敗時不留下 renderer 看不到的半份授權。 */
     onCommitted: newPath !== oldPath ? () => fileAuthority.grantDeliveryFile(newPath) : undefined,
@@ -1222,19 +1203,39 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   return out;
 });
 
-ipcMain.handle('audio:normalize', async (e, { path: src, options, duration }) => {
+const audioNormalizationJobs = new Map();
+function audioNormalizationKey(sender, requestId) {
+  if (typeof requestId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(requestId)) throw new TypeError('無效的音訊工作識別');
+  return `${sender.id}:${requestId}`;
+}
+ipcMain.handle('audio:normalize-cancel', (e, { requestId }) => {
+  const controller = audioNormalizationJobs.get(audioNormalizationKey(e.sender, requestId));
+  controller?.abort();
+  return !!controller;
+});
+ipcMain.handle('audio:normalize', async (e, { path: src, options, duration, requestId }) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg，無法執行音訊平衡化');
   requireReadablePath('audio:normalize', src);
-  return audioNormalizationRuntime.normalize(src, options, {
+  const key = requestId == null ? Symbol('legacy-audio-normalization') : audioNormalizationKey(e.sender, requestId);
+  if (audioNormalizationJobs.has(key)) throw new Error('音訊工作識別重複');
+  const controller = new AbortController();
+  audioNormalizationJobs.set(key, controller);
+  const cancel = () => controller.abort();
+  e.sender.once('destroyed', cancel);
+  try { return await audioNormalizationRuntime.normalize(src, options, {
+    signal: controller.signal,
     duration,
     onProgress: p => {
       try {
         if (e.sender && !e.sender.isDestroyed()) {
-          e.sender.send('audio:normalize-progress', { ...p, src });
+          e.sender.send('audio:normalize-progress', { ...p, src, requestId });
         }
       } catch (_) {}
     },
-  });
+  }); } finally {
+    audioNormalizationJobs.delete(key);
+    e.sender.removeListener('destroyed', cancel);
+  }
 });
 
 ipcMain.handle('audio:analyzeLoudness', async (e, { path: src, duration }) => {

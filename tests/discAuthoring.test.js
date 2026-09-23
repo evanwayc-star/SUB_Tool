@@ -58,6 +58,7 @@ describe('光碟編碼與容量預算', () => {
     expect(dvdAuthorXml(AUDIO)).toContain('channels="6"');
     expect(dvdAuthorXml(AUDIO)).toContain('dolby="surround"');
     expect(dvdAuthorXml(AUDIO)).toContain('<fpc>jump title 1;</fpc>');
+    expect(blurayMeta(AUDIO)).toContain('--label="BD"');
     expect(blurayMeta(AUDIO)).toContain('track=259');
     expect(() => discEncoding('bd-iso', { duration: 3, audioPlan: { streams: [{ layout: '7.1' }] } })).toThrow(/音訊/);
   });
@@ -128,6 +129,7 @@ describe.skipIf(!nativeAvailable)('原生 DVD／BD 合成內容與生命週期',
     it(`${preset.label} 有正確 UDF、導覽結構、影像及三組可解碼音訊`, () => {
       const { extracted, listing, result } = generated.get(preset.format);
       expect(result.bytes).toBeLessThan(preset.capacityBytes);
+      expect(result.volumeLabel).toBe(preset.format === 'dvd-iso' ? 'DVD' : 'BD');
       expect(listing).toContain(`Version = ${preset.format === 'dvd-iso' ? '1.02' : '2.50'}`);
       const content = preset.format === 'dvd-iso' ? 'VIDEO_TS/VTS_01_1.VOB' : 'BDMV/STREAM/00000.m2ts';
       const required = preset.format === 'dvd-iso' ? ['VIDEO_TS/VIDEO_TS.IFO', 'VIDEO_TS/VIDEO_TS.BUP', 'VIDEO_TS/VTS_01_0.IFO']

@@ -19,6 +19,7 @@ import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.j
 import { recordHistory } from './history.js';
 import { showToast, setMpvWindowVisible } from './ui.js';
 import { refreshSelectionUI, selectCueSingle } from './subtitles.js';
+import { subtitlePreviewIndex } from './subtitle-preview-index.js';
 
 let _mpvSubT=null;
 let _lastMpvSubSend=0;
@@ -269,7 +270,9 @@ export function toggleTimecodeWatermark(){
 }
 
 let _lastStageH = 0;
-export function renderVideoSub(){
+export function renderVideoSub(fromPlayback=false){
+  // 編輯／Undo／匯入由直接 render 或 render:videoSub 進來；只有播放 tick 可沿用索引。
+  if(fromPlayback!==true) subtitlePreviewIndex.invalidate();
   drawSafeFrame(); // 安全框跟著畫面每幀對齊
   renderTimecodeWatermark(); // 同步播放器監看時間碼（不參與輸出）
   // 【雙引擎渲染架構說明 (v5.2.0)】
@@ -317,6 +320,13 @@ export function renderVideoSub(){
     for(let tk=0; tk<State.trackCount; tk++) if(trackVisible(tk)) tks.push(tk);
     if(State.presetEdit) tks = [0];
 
+    const visibleCues=State.presetEdit ? [] : subtitlePreviewIndex.visibleAtFrame(State.cues,exactFps,currentFrame);
+    const byTrack=new Map();
+    for(const cue of visibleCues){
+      const tk=cue.track||0;
+      if(!byTrack.has(tk)) byTrack.set(tk,[]);
+      byTrack.get(tk).push(cue);
+    }
     for(const tk of tks){
       let cur = [], trk = {};
       if(State.presetEdit){
@@ -324,12 +334,7 @@ export function renderVideoSub(){
         cur = [{ id: 'draft_preview', text: previewText, style: {} }];
         trk = State.presetEdit.draft;
       }else{
-        cur = State.cues.filter(c => {
-          if ((c.track||0)!==tk || c.timed===false) return false;
-          const startFrame = Math.round(c.start * exactFps);
-          const endFrame = Math.round(c.end * exactFps);
-          return currentFrame >= startFrame && currentFrame < endFrame;
-        });
+        cur = byTrack.get(tk)||[];
         if(!cur.length)continue;
         trk=State.tracks[tk]||{};
       }

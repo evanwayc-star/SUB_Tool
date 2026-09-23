@@ -6,9 +6,8 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { deliveryOutputPaths, isAirlineOutput, finalizeAirlineOutput } = require('./airline-output');
 const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
-const { prepareDiscOutput, cleanupDiscOutput, finalizeDiscOutput } = require('./disc-authoring');
+const { createExportArtifact } = require('./export-artifact');
 const {
   acquireLease,
   updateLease,
@@ -61,15 +60,12 @@ function validateConfig(config) {
   if (config.cwd != null && (typeof config.cwd !== 'string' || !config.cwd.trim())) {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog cwd 必須是有效路徑');
   }
-  const expectedPaths = deliveryOutputPaths(config.outputFormat, config.outPath);
   if (getDeliveryFormatPreset(config.outputFormat)?.kind === 'disc'
     && (config.args.at(-1) !== config.outPath || path.extname(config.outPath).toLowerCase() !== '.iso')) {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '光碟匯出必須使用單一 ISO 輸出路徑');
   }
-  if (config.outputPaths != null && (!Array.isArray(config.outputPaths)
-    || config.outputPaths.length !== expectedPaths.length
-    || config.outputPaths.some((value, index) => value !== expectedPaths[index]))) {
-    throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog 輸出檔案與格式不符');
+  if (config.outputPaths != null) {
+    throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog 僅接受單一 outPath');
   }
 }
 
@@ -296,12 +292,7 @@ async function startWatchdogRuntime(config, options = {}) {
 
   const token = crypto.randomBytes(32).toString('hex');
   const pipeName = makePipeName();
-  const outputPaths = deliveryOutputPaths(config.outputFormat, config.outPath);
-  const leasedPaths = [];
-  const isDisc = getDeliveryFormatPreset(config.outputFormat)?.kind === 'disc';
-  let discStage = null;
-  let discTempDir = null;
-  let finalizerTempDir = null;
+  let artifactTempDir = null;
   let leasesAcquired = false;
   let starting = true;
   let outputStarted = false;
@@ -311,103 +302,51 @@ async function startWatchdogRuntime(config, options = {}) {
   let finalizing = null;
   let finalResult = null;
   const finalizerAbort = new AbortController();
+  const artifact = createExportArtifact(config, {
+    signal: finalizerAbort.signal,
+    onOutputStart: () => {
+      if (leasesAcquired) updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, outputStarted: true });
+      outputStarted = true;
+    },
+    onProcess: childProcess => updateLease({
+      queueDir: config.queueDir, outPath: config.outPath, token, ffmpegPid: childProcess.pid,
+    }),
+    onProgress: progress => sendIpc({ type: 'progress', progress }),
+  }, options.artifactAdapters);
   let resolveDone;
   const done = new Promise(resolve => {
     resolveDone = resolve;
   });
 
   const releaseOutputs = async () => {
-    const files = [];
-    let firstError;
-    for (const outPath of leasedPaths) {
-      try {
-        const released = await Promise.resolve(releaseLease({ queueDir: config.queueDir, outPath, token }));
-        files.push({ outPath, released });
-      } catch (error) {
-        firstError ||= serializeError(error);
-        files.push({ outPath, error: serializeError(error) });
-      }
+    if (!leasesAcquired) return undefined;
+    try {
+      return await Promise.resolve(releaseLease({ queueDir: config.queueDir, outPath: config.outPath, token }));
+    } catch (error) {
+      return { error: serializeError(error), retainedLease: true };
     }
-    if (firstError) return { files, error: firstError, retainedLease: true };
-    return outputPaths.length === 1 ? files[0]?.released : { files };
   };
 
   const finalize = (code, signal, childError = null) => {
     if (finalizing) return finalizing;
     finalizing = (async () => {
-      // MPEG-2 AAC 的 ADTS ID 必須在釋放 lease 與回報成功以前完成。
-      // 同一個 watchdog 持有檔案；停止或主程序斷線也能取消並清理半成品。
-      if (!cleanupReason && !childError && code === 0 && config.outputFormat === 'mod-fhd') {
-        try {
-          const { finalizeModFhdTransport } = require('./mod-fhd-transport');
-          await finalizeModFhdTransport(config.outPath, { signal: finalizerAbort.signal });
-        } catch (error) {
-          childError = error;
-          cleanupReason ||= 'mod-fhd-finalize-failed';
-        }
-      }
-      if (!cleanupReason && !childError && code === 0 && isAirlineOutput(config.outputFormat)) {
-        try {
-          await finalizeAirlineOutput(config.outputFormat, config.outPath, {
-            signal: finalizerAbort.signal, tempDir: finalizerTempDir,
-          });
-        } catch (error) {
-          childError = error;
-          cleanupReason ||= 'airline-finalize-failed';
-        }
-      }
-      if (!cleanupReason && !childError && code === 0 && isDisc) {
-        try {
-          // The staging directory belongs to the lease. Crash recovery can remove
-          // it only after confirming that its authoring process has stopped.
-          const label = config.outputFormat === 'dvd-iso' ? '製作 DVD ISO' : '製作 BD ISO';
-          sendIpc({ type: 'progress', progress: { label, pct: 95 } });
-          await finalizeDiscOutput(config.outputFormat, discStage.encodedPath, config.outPath, {
-            signal: finalizerAbort.signal,
-            audioPlan: config.discAudioPlan,
-            onOutputStart: () => {
-              updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, outputStarted: true });
-              outputStarted = true;
-            },
-            onProgress: percent => sendIpc({ type: 'progress', progress: { label, pct: 95 + percent * 0.04 } }),
-            onProcess: process => updateLease({
-              queueDir: config.queueDir, outPath: config.outPath, token, ffmpegPid: process.pid,
-            }),
-          });
-        } catch (error) {
-          childError = error;
-          cleanupReason ||= 'disc-finalize-failed';
-        }
-      }
-      let stageCleanupError = null;
-      if (discStage) {
-        try {
-          await cleanupDiscOutput(discStage, { tempDir: discTempDir });
-        } catch (error) {
-          stageCleanupError = serializeError(error);
-          childError ||= error;
-          cleanupReason ||= 'disc-cleanup-failed';
-        }
-      }
+      // The artifact settles all format-specific writers and private workspace
+      // cleanup before this owner may remove output, release a lease or succeed.
+      const artifactResult = await artifact.settle({ encoded: !cleanupReason && !childError && code === 0 });
+      childError ||= artifactResult.error;
+      cleanupReason ||= artifactResult.reason;
+      const stageCleanupError = artifactResult.cleanupError ? serializeError(artifactResult.cleanupError) : null;
       const needsCleanup = !!cleanupReason || childError || code !== 0;
       let cleanup = null;
       let release = null;
 
       if (needsCleanup) {
-        const files = [];
-        for (const outPath of leasedPaths) {
-          files.push({ outPath, ...(outputStarted
-            ? await deletePartialFile(outPath, options)
-            : { removed: false, missing: false, untouched: true }) });
-        }
-        const failed = files.find(file => !file.removed && !file.missing && !file.untouched) || stageCleanupError;
-        const deletion = outputPaths.length === 1 ? files[0] : {
-          files,
-          removed: !failed && files.some(file => file.removed),
-          missing: files.every(file => file.missing),
-          untouched: !outputStarted,
-          ...(failed ? { error: failed.error } : {}),
-        };
+        const deletion = leasesAcquired
+          ? { outPath: config.outPath, ...(outputStarted
+            ? await deletePartialFile(config.outPath, options)
+            : { removed: false, missing: false, untouched: true }) }
+          : { removed: false, missing: false, untouched: true };
+        const failed = (!deletion.removed && !deletion.missing && !deletion.untouched ? deletion : null) || stageCleanupError;
         cleanup = {
           reason: cleanupReason || (childError ? 'ffmpeg-error' : 'ffmpeg-nonzero'),
           ...deletion,
@@ -527,17 +466,13 @@ async function startWatchdogRuntime(config, options = {}) {
 
   try {
     await control.listenPromise;
-    for (const outPath of outputPaths) {
-      const lease = await Promise.resolve(acquireLease({
-        queueDir: config.queueDir, outPath, jobId: config.jobId,
-        token, watchdogPid: process.pid, pipeName,
-        ...(isDisc ? { outputStarted: false } : {}),
-      }));
-      leasedPaths.push(outPath);
-      finalizerTempDir ||= lease.lockPath;
-      if (isDisc) discTempDir = lease.lockPath;
-    }
+    const lease = await Promise.resolve(acquireLease({
+      queueDir: config.queueDir, outPath: config.outPath, jobId: config.jobId,
+      token, watchdogPid: process.pid, pipeName,
+      outputStarted: false,
+    }));
     leasesAcquired = true;
+    artifactTempDir = lease.lockPath;
   } catch (error) {
     // No FFmpeg has started: only release reservations, never delete an
     // existing deliverable when a sibling is owned by another job.
@@ -560,11 +495,7 @@ async function startWatchdogRuntime(config, options = {}) {
   }
 
   try {
-    let args = config.args;
-    if (isDisc) {
-      discStage = await prepareDiscOutput(config.outputFormat, { tempDir: discTempDir });
-      args = [...config.args.slice(0, -1), discStage.encodedPath];
-    } else outputStarted = true;
+    const args = await artifact.prepare({ tempDir: artifactTempDir });
     starting = false;
     if (cleanupReason) {
       void finalize(null, null);
@@ -577,8 +508,9 @@ async function startWatchdogRuntime(config, options = {}) {
     });
   } catch (error) {
     starting = false;
-    cleanupReason = 'ffmpeg-spawn-failed';
-    void finalize(null, null, error);
+    cleanupReason ||= 'ffmpeg-spawn-failed';
+    const startupError = finalizerAbort.signal.aborted && error === finalizerAbort.signal.reason ? null : error;
+    void finalize(null, null, startupError);
     return { done, requestCleanup, close, pipeName, token };
   }
 
@@ -614,12 +546,10 @@ async function startWatchdogRuntime(config, options = {}) {
   }
 
   try {
-    for (const outPath of leasedPaths) {
-      await Promise.resolve(updateLease({
-        queueDir: config.queueDir, outPath, token,
-        watchdogPid: process.pid, ffmpegPid: child.pid, pipeName,
-      }));
-    }
+    await Promise.resolve(updateLease({
+      queueDir: config.queueDir, outPath: config.outPath, token,
+      watchdogPid: process.pid, ffmpegPid: child.pid, pipeName,
+    }));
   } catch (error) {
     cleanupReason = 'lease-update-failed';
     sendIpc({
@@ -976,7 +906,7 @@ function spawnExportWatchdog(config, options = {}) {
   };
 }
 
-async function runStandalone() {
+async function runStandalone(options = {}) {
   let runtime = null;
   let started = false;
   let pendingCleanupReason = null;
@@ -1001,7 +931,7 @@ async function runStandalone() {
       started = true;
       void (async () => {
         try {
-          runtime = await startWatchdogRuntime(message, { signal: startupAbort.signal });
+          runtime = await startWatchdogRuntime(message, { signal: startupAbort.signal, artifactAdapters: options.artifactAdapters });
           if (pendingCleanupReason) {
             void runtime.requestCleanup(pendingCleanupReason);
           }
@@ -1036,4 +966,5 @@ if (require.main === module) {
 module.exports = {
   spawnExportWatchdog,
   recoverExportLeases,
+  runStandalone,
 };

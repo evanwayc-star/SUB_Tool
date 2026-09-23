@@ -60,7 +60,7 @@ describe('航空內建 MPG 傳輸串流完成檢查', () => {
     for (const index of [1, 2, 3]) expected[index][1] |= 0x20;
     if (format === 'airline-s3k') PMT_S3K_FIXED.copy(expected[1], 188 - PMT_S3K_FIXED.length);
     expected[4] = nullPacket();
-    expect(await convert(packets, format)).toMatchObject({ outputPaths: [output], requiresManzanita: false,
+    expect(await convert(packets, format)).toMatchObject({ outPath: output, requiresManzanita: false,
       transportPackets: 6, patSections: 1, pmtSections: 1, videoPackets: 1, audioPackets: 1, pcrPackets: 1,
       priorityPackets: 3, replacedSdtPackets: 1, patchedPmtSections: format === 'airline-s3k' ? 1 : 0 });
     expect(await readFile(output)).toEqual(Buffer.concat(expected));

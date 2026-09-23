@@ -40,6 +40,7 @@ import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { recordHistory } from './history.js';
 import { refreshMpvSubs } from './video-renderer.js';
+import { subtitlePreviewIndex } from './subtitle-preview-index.js';
 import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
 import {
   beginTimelineGestureLifecycle,
@@ -1540,6 +1541,8 @@ const _handleDragUpdate = (e) => {
       item.c.style=item.origStyle;
     }
   });
+  // 手勢預覽直接改動 cue 時間且尚未 emit 重繪事件，播放中的作用字幕須立刻更新。
+  subtitlePreviewIndex.invalidate();
   
   // P3：拖曳期間只更新樣式，用 mousedown 快取的 element 參照（免每 frame 字串選擇器、免全掃 overlap）
   const rows = tlTracks.querySelectorAll('.tl-track');

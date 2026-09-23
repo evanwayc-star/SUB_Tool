@@ -1,10 +1,43 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parse } from 'acorn';
 import { describe, expect, it } from 'vitest';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const discTools = JSON.parse(readFileSync(new URL('../electron/disc-tools.json', import.meta.url), 'utf8'));
 
 describe('Windows 安裝檔設定', () => {
+  it('獨立 Node watchdog 的本機 require 相依閉包全部解包，避免只在開發環境可載入', () => {
+    const root = fileURLToPath(new URL('../', import.meta.url));
+    const visited = new Set();
+    const visit = relativePath => {
+      if (visited.has(relativePath)) return;
+      visited.add(relativePath);
+      expect(packageJson.build.asarUnpack, `${relativePath} 必須可由獨立 Node 載入`).toContain(relativePath);
+      const filename = path.join(root, relativePath);
+      if (relativePath.endsWith('.json')) return;
+      const ast = parse(readFileSync(filename, 'utf8'), { ecmaVersion: 'latest', sourceType: 'script' });
+      const walk = node => {
+        if (!node || typeof node !== 'object') return;
+        if (node.type === 'CallExpression' && node.callee?.name === 'require') {
+          const requested = node.arguments[0]?.value;
+          if (typeof requested === 'string' && requested.startsWith('.')) {
+            const base = path.resolve(path.dirname(filename), requested);
+            const resolved = [base, `${base}.js`, `${base}.cjs`, `${base}.json`].find(existsSync);
+            expect(resolved, `${relativePath} 的 ${requested} 必須存在`).toBeTruthy();
+            visit(path.relative(root, resolved).replaceAll('\\', '/'));
+          }
+        }
+        for (const value of Object.values(node)) {
+          if (Array.isArray(value)) value.forEach(walk);
+          else if (value && typeof value === 'object') walk(value);
+        }
+      };
+      walk(ast);
+    };
+    visit('electron/export-watchdog.js');
+  });
   it('航空輸出 watchdog 可從 unpacked 位置載入全部收尾相依', () => {
     expect(packageJson.build.asarUnpack).toContain('electron/airline-output.js');
     expect(packageJson.build.asarUnpack).toContain('electron/airline-transport.js');

@@ -37,6 +37,32 @@ describe('audio-normalization-runtime.js', () => {
   });
 
   describe('createAudioNormalizationRuntime 執行管線', () => {
+    it('兩遍都明確選取指定來源stream，且原始report可供交付重建', async () => {
+      const report={input_i:'-22',input_tp:'-2',input_lra:'0',input_thresh:'-32',target_offset:'0'};
+      const execute=vi.fn(async (args,options)=>options.onStderr?.(JSON.stringify(report)));
+      const runtime=createAudioNormalizationRuntime({createTempPath:()=>'/temp/one.wav',execute});
+      const result=await runtime.normalize('master.mxf',{sourceStream:1,isTruePeak:true});
+      expect(result.report).toEqual(report);
+      for(const [args] of execute.mock.calls) expect(args.slice(args.indexOf('-map'),args.indexOf('-map')+2)).toEqual(['-map','0:a:1']);
+      expect(execute.mock.calls[1][0].join(' ')).toContain('measured_LRA=0.0');
+    });
+    it('取消正在執行的Pass1會停止子程序、清理輸出，不能再做Pass2', async () => {
+      const controller=new AbortController();const removeFile=vi.fn();const kill=vi.fn();
+      let reject;
+      const execute=vi.fn((args,options)=>{options.onProcess({kill});return new Promise((_,r)=>{reject=r;});});
+      const runtime=createAudioNormalizationRuntime({createTempPath:()=>'/temp/cancel.wav',execute,removeFile});
+      const pending=runtime.normalize('master.mxf',{isTruePeak:true},{signal:controller.signal});
+      controller.abort();reject(new Error('killed'));
+      await expect(pending).rejects.toMatchObject({name:'AbortError'});
+      expect(kill).toHaveBeenCalledOnce();expect(execute).toHaveBeenCalledOnce();
+      expect(removeFile).toHaveBeenCalledWith('/temp/cancel.wav');
+    });
+    it('在開始前取消不會執行ffmpeg',async()=>{
+      const execute=vi.fn();const controller=new AbortController();controller.abort();
+      const runtime=createAudioNormalizationRuntime({createTempPath:()=>'/temp/pre.wav',execute});
+      await expect(runtime.normalize('master.wav',{}, {signal:controller.signal})).rejects.toMatchObject({name:'AbortError'});
+      expect(execute).not.toHaveBeenCalled();
+    });
     it('缺少必要 adapter 時拋出 TypeError', () => {
       expect(() => createAudioNormalizationRuntime()).toThrow(TypeError);
     });

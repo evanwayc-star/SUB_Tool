@@ -92,6 +92,7 @@ describe('media-presentation-core', () => {
     await first;
     const latestRequestId = presentTarget.mock.calls[1][1].requestId;
     core.observe(5, { requestId: firstRequestId, source: 'mpv' });
+    expect(core.presentedTime()).toBeNull();
 
     let latestSettled = false;
     latest.then(() => { latestSettled = true; });

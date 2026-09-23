@@ -28,6 +28,20 @@ let isProjectDirty;
 let saveProject;
 
 describe('project image persistence',()=>{
+  it('音訊效果與母素材一起保存，重開後仍可保存，播放快取不進專案',async()=>{
+    State.clips=[{id:'v',name:'master.mp4',path:'C:/master.mp4',dur:4,in:0,out:4,offset:0,primary:true,
+      audioSourceId:'a',hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12,inputBoost:0},normalizedAudioPath:'C:/temp/processed.wav'}];
+    mediaMock.externalAudio.list.mockReturnValue([{audioSourceId:'external',name:'voice.wav',path:'C:/voice.wav',duration:4,in:0,out:4,
+      hasAudioLimiter:true,audioLimiterSpec:{max:-12,min:-18,inputBoost:0},normalizedAudioPath:'C:/temp/voice.wav'}]);
+    await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(saveProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.clips[0]).toMatchObject({path:'C:/master.mp4',hasAudioLimiter:true,audioLimiterSpec:{max:-6,inputBoost:0}});
+    expect(saved.externalAudioSources[0]).toMatchObject({path:'C:/voice.wav',audioLimiterSpec:{max:-12}});
+    expect(JSON.stringify(saved)).not.toContain('C:/temp/');
+    State.clips=[];Project.apply(saved);await Project.saveAs();
+    const reopened=JSON.parse(Buffer.from(saveProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+    expect(reopened.clips[0].audioLimiterSpec).toEqual(saved.clips[0].audioLimiterSpec);
+  });
   beforeEach(async()=>{
     vi.resetModules();
     saveProject=vi.fn().mockResolvedValue('C:/projects/image-test.subtool');

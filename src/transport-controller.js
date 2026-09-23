@@ -48,6 +48,9 @@ function createReverseShuttleSession({
   let lastNativePresented = null;
   let lastNativeProgressAt = 0;
   let nativeProgressSeen = false;
+  let lastStopPromise = null;
+  let pendingDirectionRestore = null;
+  let startingDirectionPromise = null;
 
   function exactFps() {
     return Math.max(1, Number(getExactFps?.()) || 30);
@@ -109,7 +112,7 @@ function createReverseShuttleSession({
     healthTimer = null;
     if (restoreDirection) {
       media?.pause?.();
-      restoreForwardDirection();
+      pendingDirectionRestore = restoreForwardDirection();
     } else {
       media?.pause?.();
     }
@@ -120,7 +123,21 @@ function createReverseShuttleSession({
     anchorTime = latestPresentedTime();
     anchorWallTime = now();
     const frameInterval = 1000 / Math.min(60, exactFps());
-    fallbackTimer = setIntervalFn(() => requestFallbackFrame(token), frameInterval);
+    const startFallback = () => {
+      if (!active || token !== generation || mode !== 'fallback') return;
+      // 原生倒播必須先完全恢復正向，否則 fallback 的 seek 仍可能從後往前解讀。
+      anchorTime = latestPresentedTime();
+      anchorWallTime = now();
+      fallbackTimer = setIntervalFn(() => requestFallbackFrame(token), frameInterval);
+    };
+    if (pendingDirectionRestore) {
+      const restoring = pendingDirectionRestore;
+      restoring.then(startFallback).finally(() => {
+        if (pendingDirectionRestore === restoring) pendingDirectionRestore = null;
+      });
+    } else {
+      startFallback();
+    }
   }
 
   function monitorNative(token) {
@@ -149,6 +166,10 @@ function createReverseShuttleSession({
     mode = 'starting';
     clearTimers();
     presentation?.cancel?.('reverse-started');
+    // 前一輪 J/K 已停止時，先等來源與方向切回母素材，再開始新倒播。
+    // 否則兩個非同步 loadfile 會交錯，舊來源的 file-loaded 會被新請求接走。
+    if (lastStopPromise) await lastStopPromise;
+    if (!active || token !== generation) return false;
     media?.setReverseShuttleMuted?.(true);
     media?.pause?.();
 
@@ -158,14 +179,14 @@ function createReverseShuttleSession({
     }
 
     mode = 'starting-native';
-    let enabled = false;
-    try {
-      enabled = await media.setPlaybackDirection('backward');
-    } catch (error) {
-      enabled = false;
-    }
+    const directionPromise = Promise.resolve()
+      .then(() => active && token === generation ? media.setPlaybackDirection('backward') : false)
+      .catch(() => false);
+    startingDirectionPromise = directionPromise;
+    const enabled = await directionPromise;
+    if (startingDirectionPromise === directionPromise) startingDirectionPromise = null;
     if (!active || token !== generation) {
-      if (enabled !== false) await restoreForwardDirection();
+      // stop() 已接手等待這輪 backward 完成後恢復正向。
       return false;
     }
     if (enabled === false) {
@@ -196,19 +217,22 @@ function createReverseShuttleSession({
     return Promise.resolve(mode === 'native');
   }
 
-  let lastStopPromise = null;
-
   function stop() {
     if (!active && mode === 'idle') return false;
-    const shouldRestoreDirection = mode === 'native' || mode === 'starting-native';
+    const stoppingMode = mode;
+    const previousStop = lastStopPromise;
     active = false;
     generation += 1;
     clearTimers();
     presentation?.cancel?.('reverse-stopped');
     media?.pause?.();
-    lastStopPromise = shouldRestoreDirection
-      ? Promise.resolve(restoreForwardDirection()).catch(() => false)
-      : Promise.resolve(true);
+    if (stoppingMode === 'starting-native' && startingDirectionPromise) {
+      lastStopPromise = startingDirectionPromise.then(enabled => enabled === false ? false : restoreForwardDirection());
+    } else if (stoppingMode === 'native') {
+      lastStopPromise = Promise.resolve(restoreForwardDirection()).catch(() => false);
+    } else {
+      lastStopPromise = pendingDirectionRestore || previousStop || Promise.resolve(true);
+    }
     media?.setRate?.(1);
     media?.setReverseShuttleMuted?.(false);
     mode = 'idle';

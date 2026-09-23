@@ -8,46 +8,71 @@
 
 'use strict';
 
+const LIMITER_DB_RANGE = Object.freeze({ min: -50, max: -1 });
+
+// 可保存的來源效果；播放快取與工作進度永遠不屬於此快照。
+function normalizeAudioLimiterSpec(spec) {
+  if (!spec || typeof spec !== 'object') return null;
+  const options = normalizeLimiterOptions({
+    maximumAmplitude: spec.max ?? spec.maximumAmplitude,
+    targetLoudness: spec.min ?? spec.targetLoudness,
+    inputBoost: spec.inputBoost ?? Math.abs(Number(spec.max ?? -6) - Number(spec.min ?? -12)),
+    lookAheadTime: spec.lookAhead ?? spec.lookAheadTime,
+    releaseTime: spec.release ?? spec.releaseTime,
+    isTruePeak: spec.isTruePeak,
+    linkChannels: spec.linkChannels,
+  });
+  const reports = {};
+  for (const [stream, report] of Object.entries(spec.reports || {})) {
+    if (!/^\d+$/.test(stream) || Number(stream) > 255 || !report || typeof report !== 'object') continue;
+    const safe = {};
+    for (const key of ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset']) {
+      const value = Number(report[key]);
+      if (Number.isFinite(value)) safe[key] = value;
+      else if (String(report[key]).toLowerCase() === '-inf') safe[key] = '-inf';
+    }
+    if (Object.keys(safe).length === 5) reports[stream] = safe;
+  }
+  return {
+    max: options.maximumAmplitude, min: options.targetLoudness, inputBoost: options.inputBoost,
+    lookAhead: options.lookAheadTime, release: options.releaseTime,
+    isTruePeak: options.isTruePeak, linkChannels: options.linkChannels, silenceProtection: true,
+    ...(Object.keys(reports).length ? { reports } : {}),
+  };
+}
+
+function audioLimiterSnapshot(source) {
+  const spec = source?.hasAudioLimiter !== false && normalizeAudioLimiterSpec(source?.audioLimiterSpec);
+  return spec ? { hasAudioLimiter: true, audioLimiterSpec: spec } : {};
+}
+
+function restoreAudioLimiterState(target, saved) {
+  const snapshot = audioLimiterSnapshot(saved);
+  delete target.hasAudioLimiter;
+  delete target.audioLimiterSpec;
+  delete target.audioLimiterLabel;
+  Object.assign(target, snapshot);
+  if (snapshot.hasAudioLimiter) target.audioLimiterLabel = `${snapshot.audioLimiterSpec.max} dB`;
+}
+
+function audioMotherPath(source) {
+  return source?._originalPath || source?.path || null;
+}
+
+function audioLimiterFilter(spec, sourceStream = 0) {
+  const normalized = normalizeAudioLimiterSpec(spec);
+  if (!normalized) return 'anull';
+  return buildLimiterFilter({
+    maximumAmplitude: normalized.max, targetLoudness: normalized.min, inputBoost: normalized.inputBoost,
+    lookAheadTime: normalized.lookAhead, releaseTime: normalized.release,
+    isTruePeak: normalized.isTruePeak, linkChannels: normalized.linkChannels,
+  }, normalized.reports?.[String(sourceStream)] || null).filter;
+}
+
 const HARD_LIMITER_PRESETS = Object.freeze([
   {
-    id: 'balance_minus_12_to_minus_6',
-    label: '整體平衡 (-12 dB ~ -6 dB，建議)',
-    maximumAmplitude: -6.0,
-    inputBoost: 6.0,
-    targetLoudness: -12.0,
-    isTruePeak: true,
-    lookAheadTime: 7,
-    releaseTime: 100,
-    linkChannels: true,
-    silenceProtection: true,
-  },
-  {
-    id: 'limit_minus_6db',
-    label: '限制至 -6 dB (強限制器)',
-    maximumAmplitude: -6.0,
-    inputBoost: 0.0,
-    targetLoudness: -12.0,
-    isTruePeak: true,
-    lookAheadTime: 7,
-    releaseTime: 100,
-    linkChannels: true,
-    silenceProtection: true,
-  },
-  {
-    id: 'limit_minus_3db',
-    label: '限制至 -3 dB (保留動態)',
-    maximumAmplitude: -3.0,
-    inputBoost: 0.0,
-    targetLoudness: -14.0,
-    isTruePeak: true,
-    lookAheadTime: 7,
-    releaseTime: 100,
-    linkChannels: true,
-    silenceProtection: true,
-  },
-  {
     id: 'limit_minus_1db',
-    label: '限制至 -1 dB (防止破音削波)',
+    label: '提高限制到 -1 db',
     maximumAmplitude: -1.0,
     inputBoost: 0.0,
     targetLoudness: -14.0,
@@ -58,11 +83,11 @@ const HARD_LIMITER_PRESETS = Object.freeze([
     silenceProtection: true,
   },
   {
-    id: 'streaming_youtube',
-    label: 'YouTube 串流標準 (-14 LUFS / -1 dBTP)',
-    maximumAmplitude: -1.0,
+    id: 'limit_minus_6db',
+    label: '提高限制到 -6 db',
+    maximumAmplitude: -6.0,
     inputBoost: 0.0,
-    targetLoudness: -14.0,
+    targetLoudness: -12.0,
     isTruePeak: true,
     lookAheadTime: 7,
     releaseTime: 100,
@@ -70,11 +95,11 @@ const HARD_LIMITER_PRESETS = Object.freeze([
     silenceProtection: true,
   },
   {
-    id: 'broadcast_ebu_r128',
-    label: '電視廣播標準 EBU R128 (-23 LUFS / -1 dBTP)',
-    maximumAmplitude: -1.0,
+    id: 'limit_minus_12db',
+    label: '提高限制到 -12 db',
+    maximumAmplitude: -12.0,
     inputBoost: 0.0,
-    targetLoudness: -23.0,
+    targetLoudness: -18.0,
     isTruePeak: true,
     lookAheadTime: 7,
     releaseTime: 100,
@@ -112,14 +137,14 @@ function linearToDb(linear) {
  * 正規化限制器／平衡化參數
  */
 function normalizeLimiterOptions(raw = {}) {
-  const maximumAmplitude = _clamp(raw.maximumAmplitude, -100, 0, -6.0);
+  const maximumAmplitude = _clamp(raw.maximumAmplitude, LIMITER_DB_RANGE.min, LIMITER_DB_RANGE.max, -6.0);
   const inputBoost = _clamp(raw.inputBoost, -100, 50, 0.0);
-  const targetLoudness = _clamp(raw.targetLoudness, -70, -5, -12.0);
+  const targetLoudness = _clamp(raw.targetLoudness, LIMITER_DB_RANGE.min, LIMITER_DB_RANGE.max, -12.0);
   const isTruePeak = raw.isTruePeak !== false; // 預設使用 True Peak (ITU 1770)
   const lookAheadTime = _clamp(raw.lookAheadTime, 1, 50, 7); // ms
   const releaseTime = _clamp(raw.releaseTime, 10, 1000, 100); // ms
   const linkChannels = raw.linkChannels !== false; // 預設 true
-  const silenceProtection = raw.silenceProtection !== false; // 預設 true（無聲維持 0dB）
+  const silenceProtection = true; // 固定保留無聲保護；保留欄位相容性，忽略舊專案的 false
   const preset = typeof raw.preset === 'string' ? raw.preset : '';
 
   return {
@@ -141,6 +166,7 @@ function normalizeLimiterOptions(raw = {}) {
  */
 function isAudioReportSilence(report) {
   if (!report || typeof report !== 'object') return false;
+  if (String(report.input_i).toLowerCase() === '-inf' || String(report.input_tp).toLowerCase() === '-inf') return true;
   const i = Number(report.input_i);
   const thresh = Number(report.input_thresh);
   const tp = Number(report.input_tp);
@@ -176,23 +202,31 @@ function buildLimiterFilter(opts, measuredReport = null) {
   // 2. True Peak 模式 (ITU-R BS.1770)
   if (norm.isTruePeak) {
     const lra = Math.max(1, Math.min(50, Math.round(Math.abs(maxAmp - norm.targetLoudness)) || 6));
+    // loudnorm 的 I 上限為 -5 LUFS、TP 下限為 -9 dBTP。以中間 I / TP 和後級增益
+    // 支援完整 UI 範圍；兩者無法同時達成時優先保留峰值上限，原始目標值不被改寫。
+    // Pass 1 / 2 使用相同中間目標，量測的輸入值不需換算。
+    const postGain = Math.min(maxAmp + 9, Math.max(0, norm.targetLoudness + 5));
+    const loudnormPeak = maxAmp - postGain;
+    // 自訂目標若高於低峰值上限可實現的範圍，仍須遵守 loudnorm 的 I 上限 -5。
+    const loudnormTarget = Math.min(-5, norm.targetLoudness - postGain);
+    const postFilter = postGain !== 0 ? `,volume=${postGain.toFixed(2)}dB` : '';
     
     // 若已有 Pass 1 測量結果，組裝精準 Two-Pass loudnorm
     if (measuredReport) {
       const parts = [
-        `loudnorm=I=${norm.targetLoudness.toFixed(1)}`,
-        `TP=${maxAmp.toFixed(1)}`,
+        `loudnorm=I=${loudnormTarget.toFixed(1)}`,
+        `TP=${loudnormPeak.toFixed(1)}`,
         `LRA=${lra.toFixed(1)}`,
-        `measured_I=${Number(measuredReport.input_i || -24).toFixed(1)}`,
-        `measured_TP=${Number(measuredReport.input_tp || -2).toFixed(1)}`,
-        `measured_LRA=${Number(measuredReport.input_lra || 7).toFixed(1)}`,
-        `measured_thresh=${Number(measuredReport.input_thresh || -34).toFixed(1)}`,
+        `measured_I=${Number(measuredReport.input_i ?? -24).toFixed(1)}`,
+        `measured_TP=${Number(measuredReport.input_tp ?? -2).toFixed(1)}`,
+        `measured_LRA=${Number(measuredReport.input_lra ?? 7).toFixed(1)}`,
+        `measured_thresh=${Number(measuredReport.input_thresh ?? -34).toFixed(1)}`,
         `offset=${Number(measuredReport.target_offset || 0).toFixed(2)}`,
         'linear=true',
         'print_format=summary',
       ];
       return {
-        filter: parts.join(':'),
+        filter: parts.join(':') + postFilter,
         isSilence: false,
         gainOffset: Number(measuredReport.target_offset || 0),
         mode: 'itu1770_two_pass',
@@ -201,14 +235,14 @@ function buildLimiterFilter(opts, measuredReport = null) {
 
     // 單遍 Pass 1 或即時模式
     const parts = [
-      `loudnorm=I=${norm.targetLoudness.toFixed(1)}`,
-      `TP=${maxAmp.toFixed(1)}`,
+      `loudnorm=I=${loudnormTarget.toFixed(1)}`,
+      `TP=${loudnormPeak.toFixed(1)}`,
       `LRA=${lra.toFixed(1)}`,
       'linear=true',
       'print_format=json',
     ];
     return {
-      filter: parts.join(':'),
+      filter: parts.join(':') + postFilter,
       isSilence: false,
       gainOffset: 0,
       mode: 'itu1770_single_pass',
@@ -216,12 +250,20 @@ function buildLimiterFilter(opts, measuredReport = null) {
   }
 
   // 3. Peak 模式 (Hard Limiter: alimiter)
-  // alimiter 濾鏡：limit=線性振幅, attack=ms, release=ms, asc=0 (手動模式)
+  // alimiter 的 limit 下限為 0.0625。較低上限須前級提高、後級等量衰減，
+  // 使低於上限的聲音仍只套用原 inputBoost；關閉 auto level，避免峰值被拉回 0 dB。
+  const nativeLimit = Math.max(0.0625, limitLinear);
+  const postGain = linearToDb(limitLinear / nativeLimit);
+  const inputGain = boost - postGain;
+  const gainDigits = postGain < 0 ? 6 : 2;
   const filterParts = [];
-  if (Math.abs(boost) > 0.01) {
-    filterParts.push(`volume=${boost.toFixed(2)}dB`);
+  if (postGain < 0 || Math.abs(inputGain) > 0.01) {
+    filterParts.push(`volume=${inputGain.toFixed(gainDigits)}dB`);
   }
-  filterParts.push(`alimiter=limit=${limitLinear.toFixed(6)}:attack=${norm.lookAheadTime}:release=${norm.releaseTime}:asc=0`);
+  filterParts.push(`alimiter=limit=${nativeLimit.toFixed(6)}:attack=${norm.lookAheadTime}:release=${norm.releaseTime}:asc=0:level=false`);
+  if (postGain < 0) {
+    filterParts.push(`volume=${postGain.toFixed(gainDigits)}dB`);
+  }
 
   return {
     filter: filterParts.join(','),
@@ -352,6 +394,12 @@ function parseVolumeAnalysis(stderrText) {
 }
 
 module.exports = {
+  normalizeAudioLimiterSpec,
+  audioLimiterSnapshot,
+  restoreAudioLimiterState,
+  audioMotherPath,
+  audioLimiterFilter,
+  LIMITER_DB_RANGE,
   HARD_LIMITER_PRESETS,
   dbToLinear,
   linearToDb,

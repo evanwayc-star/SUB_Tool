@@ -390,6 +390,39 @@ describe('reset-scoped media ownership', () => {
     expect(Media.tracks).toEqual([]);
   });
 
+  it('publishes a ready preview Proxy without restarting playback at the same frame', async () => {
+    const primary = {
+      id: 'primary-A', name: 'A.mov', path: 'C:/media/A.mov', dur: 5,
+      in: 0, out: 5, offset: 0, vtrack: 0, primary: true,
+      audioSrc: 'video', audioSourceId: 'source-A',
+    };
+    State.clips = [primary];
+    desktopMock.ingest.mockResolvedValue({ proxy: 'C:/cache/A-proxy.mp4', channels: [] });
+    desktopMock.fileURL.mockResolvedValue('file:///C:/cache/A-proxy.mp4');
+    const seek = vi.spyOn(Media, 'seek');
+
+    await Media._bgAudioIngest(primary.path, [], primary.dur, primary);
+
+    expect(Media.webCodecsProxyUrl()).toBe('file:///C:/cache/A-proxy.mp4');
+    expect(seek).not.toHaveBeenCalled();
+    seek.mockRestore();
+  });
+
+  it('大型素材即使未操作播放點，也會在等待期限後開始準備音軌', async () => {
+    vi.useFakeTimers();
+    const start = vi.fn();
+    try {
+      Media.deferInitialAudioIngest(start, () => true);
+      await vi.advanceTimersByTimeAsync(9999);
+      expect(start).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(start).toHaveBeenCalledTimes(1);
+    } finally {
+      Media.reset();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps source work alive when a split placement still references the mother source', async () => {
     const ingest = deferred();
     const primary = {

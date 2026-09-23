@@ -115,6 +115,7 @@ describe('reverse shuttle session', () => {
     h.run(healthTick);
     h.setNow(700);
     h.run(healthTick);
+    await flushPromises();
 
     expect(h.media.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
     expect(h.scheduled).toHaveLength(2);
@@ -141,8 +142,25 @@ describe('reverse shuttle session', () => {
 
     h.setNow(1400);
     h.run(healthTick);
+    await flushPromises();
     expect(h.scheduled).toHaveLength(2);
     expect(h.media.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
+  });
+
+  it('原生倒播停滯後先切回正向，完成後才讓 fallback 開始逐格 seek', async () => {
+    const restored = deferred();
+    const h = makeHarness({ native: true });
+    h.media.setPlaybackDirection
+      .mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => restored.promise);
+    await h.session.start(-1);
+
+    h.setNow(1200);
+    h.run(h.scheduled[0]);
+    expect(h.scheduled).toHaveLength(1);
+    restored.resolve(true);
+    await flushPromises();
+    expect(h.scheduled).toHaveLength(2);
   });
 
   it('停止會封鎖晚到的 backward 啟動結果', async () => {
@@ -151,6 +169,7 @@ describe('reverse shuttle session', () => {
     h.media.setPlaybackDirection.mockImplementationOnce(() => startDirection.promise);
 
     const starting = h.session.start(-1);
+    await flushPromises();
     h.session.stop();
     startDirection.resolve(true);
     await starting;
@@ -159,6 +178,46 @@ describe('reverse shuttle session', () => {
     expect(h.media.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
     expect(h.media.play).not.toHaveBeenCalled();
     expect(h.presentation.cancel).toHaveBeenCalled();
+  });
+
+  it('停止後的新倒播等待前一輪來源切回完成', async () => {
+    const restore = deferred();
+    const h = makeHarness({ native: true });
+    h.media.setPlaybackDirection
+      .mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => restore.promise)
+      .mockResolvedValueOnce(true);
+
+    await h.session.start(-1);
+    h.session.stop();
+    const restarting = h.session.start(-4);
+    await flushPromises();
+    expect(h.media.setPlaybackDirection).toHaveBeenCalledTimes(2);
+
+    restore.resolve(true);
+    await restarting;
+    expect(h.media.setPlaybackDirection).toHaveBeenNthCalledWith(3, 'backward');
+  });
+
+  it('啟動中的倒播被停止後，重啟仍等舊 backward 和 forward 都完成', async () => {
+    const oldBackward = deferred();
+    const h = makeHarness({ native: true });
+    h.media.setPlaybackDirection
+      .mockImplementationOnce(() => oldBackward.promise)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+
+    const first = h.session.start(-1);
+    await flushPromises();
+    h.session.stop();
+    const second = h.session.start(-4);
+    await flushPromises();
+    expect(h.media.setPlaybackDirection).toHaveBeenCalledTimes(1);
+
+    oldBackward.resolve(true);
+    await Promise.all([first, second]);
+    expect(h.media.setPlaybackDirection.mock.calls.map(([direction]) => direction))
+      .toEqual(['backward', 'forward', 'backward']);
   });
 
   it('實際呈現開頭後只停止並通知一次', async () => {

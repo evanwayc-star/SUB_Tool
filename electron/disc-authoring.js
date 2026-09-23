@@ -3,69 +3,11 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
-const { DVD_ISO, BD_ISO } = require('../shared/delivery-formats.cjs');
-
-const DISC_FORMATS = Object.freeze({
-  'dvd-iso': Object.freeze({ ...DVD_ISO, maxStreams: DVD_ISO.maxAudioStreams, maxVideoKbps: 8500, extension: '.mpg' }),
-  'bd-iso': Object.freeze({ ...BD_ISO, maxStreams: BD_ISO.maxAudioStreams, maxVideoKbps: 30000, extension: '.ts' }),
-});
+const { DISC_FORMATS, discFormat, discAudioStreams, discEncoding } = require('./disc-encoding');
 const WORK_PREFIX = 'subtool-disc-';
 
 function fail(code, message) { return Object.assign(new Error(message), { code }); }
 function abortIfNeeded(signal) { if (signal?.aborted) throw fail('ABORT_ERR', '光碟合成已取消'); }
-function discFormat(format) {
-  const spec = DISC_FORMATS[format];
-  if (!spec) throw fail('INVALID_DISC_FORMAT', `不支援的光碟格式：${format}`);
-  return spec;
-}
-function discAudioStreams(format, audioPlan) {
-  const spec = discFormat(format);
-  const streams = audioPlan == null ? [{ layout: 'stereo' }] : audioPlan.streams;
-  if (!Array.isArray(streams) || !streams.length || streams.length > spec.maxStreams) {
-    throw fail('INVALID_DISC_AUDIO', `此光碟格式需要 1–${spec.maxStreams} 組音訊`);
-  }
-  return streams.map(stream => {
-    const channels = stream.layout === 'mono' ? 1 : stream.layout === '5.1' ? 6
-      : ['stereo', 'stereoLtRt'].includes(stream.layout) ? 2 : 0;
-    if (!channels) throw fail('INVALID_DISC_AUDIO', '光碟音訊僅支援 Mono、Stereo、LtRt 或 5.1 編組');
-    return { channels, layout: stream.layout };
-  });
-}
-
-// Reserve filesystem/navigation space and mux overhead before assigning video bits.
-// A CBR elementary stream keeps the single encoding pass within this conservative budget.
-function discEncoding(format, { duration, audioPlan } = {}) {
-  const spec = discFormat(format);
-  const audio = discAudioStreams(format, audioPlan);
-  if (!Number.isFinite(duration) || duration <= 0) throw fail('INVALID_DISC_DURATION', '光碟時長必須大於零');
-  const audioKbps = spec.audioKbps * audio.length;
-  const budgetKbps = Math.floor(((spec.capacityBytes - 64 * 1024 * 1024) * 0.92 * 8 / duration / 1000 - audioKbps) / 100) * 100;
-  const peakLimit = format === 'dvd-iso' ? 10080 - audioKbps - 500 : 48000 - audioKbps - 2000;
-  const videoKbps = Math.min(spec.maxVideoKbps, budgetKbps, Math.floor(peakLimit / 100) * 100);
-  if (videoKbps < 1000) throw fail('DISC_CAPACITY_EXCEEDED', '影片長度或音訊組數超過光碟容量；請縮短交付範圍或減少音訊組數');
-  const audioArgs = audio.flatMap((stream, index) => [
-    `-c:a:${index}`, 'ac3', `-b:a:${index}`, `${spec.audioKbps}k`, `-ar:a:${index}`, '48000',
-    ...(stream.layout === 'stereoLtRt' ? [`-dsur_mode:a:${index}`, 'on'] : []),
-  ]);
-  const rate = ['-b:v', `${videoKbps}k`, '-minrate:v', `${videoKbps}k`, '-maxrate:v', `${videoKbps}k`];
-  if (format === 'dvd-iso') return {
-    ...spec, videoKbps,
-    videoArgs: ['-c:v', 'mpeg2video', '-pix_fmt', 'yuv420p', '-g', '18', '-bf', '2', ...rate,
-      '-bufsize:v', '1835008', '-flags:v', '+ilme+ildct', '-top', '1', '-aspect', '16:9'],
-    audioArgs,
-    muxArgs: ['-f', 'dvd', '-muxrate', '10080k', '-packetsize', '2048'],
-  };
-  return {
-    ...spec, videoKbps,
-    videoArgs: ['-c:v', 'libx264', '-preset', 'medium', '-profile:v', 'high', '-level:v', '4.1', '-pix_fmt', 'yuv420p',
-      ...rate, '-bufsize:v', '30000k', '-x264-params',
-      'bluray-compat=1:ref=3:bframes=3:b-pyramid=strict:keyint=24:min-keyint=1:open-gop=0:aud=1:nal-hrd=cbr:force-cfr=1'],
-    audioArgs,
-    muxArgs: ['-f', 'mpegts', '-mpegts_start_pid', '256', '-streamid', '0:256',
-      ...audio.flatMap((_, index) => ['-streamid', `${index + 1}:${index + 257}`])],
-  };
-}
-
 async function prepareDiscOutput(format, { tempDir } = {}) {
   const spec = discFormat(format);
   if (typeof tempDir !== 'string' || !path.isAbsolute(tempDir)) throw fail('INVALID_DISC_TEMP', '光碟暫存目錄必須為絕對路徑');
@@ -155,9 +97,15 @@ function dvdAuthorXml(audioPlan) {
 
 function blurayMeta(audioPlan) {
   const audio = discAudioStreams('bd-iso', audioPlan);
-  return 'MUXOPT --blu-ray --vbr --vbv-len=500 --auto-chapters=5 --label="SUB_TOOL"\n' +
+  return 'MUXOPT --blu-ray --vbr --vbv-len=500 --auto-chapters=5 --label="BD"\n' +
     'V_MPEG4/ISO/AVC, "internal.ts", track=256, fps=24, insertSEI, contSPS\n' +
     audio.map((_, index) => `A_AC3, "internal.ts", track=${257 + index}${index === 0 ? ', default' : ''}\n`).join('');
+}
+
+function udfVolumeLabel(field) {
+  const length = field[field.length - 1];
+  if (field[0] !== 8 || length < 2 || length >= field.length) return '';
+  return field.toString('latin1', 1, length).replace(/\0+$/, '');
 }
 
 async function verifyDiscIso(format, outPath) {
@@ -182,6 +130,7 @@ async function verifyDiscIso(format, outPath) {
       throw fail('INVALID_DISC_ISO', 'UDF 描述區超出光碟映像');
     }
     let revision = 0;
+    let volumeLabel = '';
     for (let offset = 0; offset < sequenceBytes; offset += 2048) {
       const descriptor = Buffer.alloc(2048);
       const read = await file.read(descriptor, 0, descriptor.length, sequenceStart + offset);
@@ -191,13 +140,18 @@ async function verifyDiscIso(format, outPath) {
         throw fail('INVALID_DISC_ISO', 'UDF logical volume 無效');
       }
       revision = descriptor.readUInt16LE(240);
+      volumeLabel = udfVolumeLabel(descriptor.subarray(84, 212));
       break;
     }
     if (revision !== (format === 'bd-iso' ? 0x250 : 0x102)) {
       throw fail('INVALID_DISC_ISO', '光碟 UDF 版本不符 DVD 1.02／BD 2.50 規格');
     }
+    const expectedLabel = format === 'bd-iso' ? 'BD' : 'DVD';
+    if (volumeLabel !== expectedLabel) {
+      throw fail('INVALID_DISC_ISO', `光碟標籤應為 ${expectedLabel}，實際為 ${volumeLabel || '空白'}`);
+    }
     return { outputFiles: [outPath], container: 'iso', capacityBytes: spec.capacityBytes, bytes: size,
-      udfVersion: format === 'bd-iso' ? '2.50' : '1.02' };
+      udfVersion: format === 'bd-iso' ? '2.50' : '1.02', volumeLabel };
   } finally { await file.close(); }
 }
 
@@ -221,7 +175,7 @@ async function finalizeDiscOutput(format, encodedPath, outPath, { signal, native
       if (!stat.size) throw fail('INVALID_DISC_STRUCTURE', `DVD 缺少內容：${filename}`);
     }
     // mkisofs' Cygwin build accepts Windows forward-slash paths, including spaces.
-    await runNative(nativePaths.mkisofs, ['-dvd-video', '-udf', '-V', 'SUB_TOOL', '-o', outPath.replace(/\\/g, '/'), 'dvd'], { ...options, onOutputStart });
+    await runNative(nativePaths.mkisofs, ['-dvd-video', '-udf', '-V', 'DVD', '-o', outPath.replace(/\\/g, '/'), 'dvd'], { ...options, onOutputStart });
   } else {
     await fs.writeFile(path.join(cwd, 'disc.meta'), blurayMeta(audioPlan), 'utf8');
     await runNative(nativePaths.tsmuxer, ['disc.meta', outPath], { ...options, onOutputStart });

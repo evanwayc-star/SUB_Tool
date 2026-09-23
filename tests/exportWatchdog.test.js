@@ -16,7 +16,6 @@ const {
   listLeases,
   normalizeOutputPath,
 } = require('../electron/export-lease');
-const { deliveryOutputPaths } = require('../electron/airline-output');
 
 const WAIT_TIMEOUT_MS = 6000;
 
@@ -147,7 +146,7 @@ if (mode === 'success') {
 
   function airlineScript(format, mode = 'success') {
     const outPath = path.join(tempDir, 'air.mpg');
-    const paths = deliveryOutputPaths(format, outPath);
+    const paths = [outPath];
     const packet = (pid, data, pcr = false) => {
       const bytes = Buffer.alloc(188, 0xff);
       bytes.set([0x47, (pid >> 8) | 0x40, pid & 255, 0x30, 183 - data.length, pcr ? 0x10 : 0]);
@@ -178,7 +177,8 @@ if (mode === 'success') {
     return { paths, outPath };
   }
 
-  it.each(['airline-s3k', 'airline-dmpes'])('%s 成功前完成 TS 修整，只留下單一 MPG', async format => {
+  it('airline-dmpes 成功前完成 TS 修整，只留下單一 MPG', async () => {
+    const format = 'airline-dmpes';
     const { paths, outPath } = airlineScript(format);
     const { controller } = launch('success', outPath, format, { outputFormat: format });
     await controller.ready;
@@ -193,8 +193,19 @@ if (mode === 'success') {
     const outputPmt = packets.find(packet => pid(packet) === 63);
     const payloadStart = outputPmt[3] & 32 ? 5 + outputPmt[4] : 4;
     const sectionStart = payloadStart + 1 + outputPmt[payloadStart];
-    expect(outputPmt[sectionStart + 12]).toBe(format === 'airline-s3k' ? 1 : 27);
+    expect(outputPmt[sectionStart + 12]).toBe(27);
     expect(fs.readdirSync(tempDir).filter(name => /\.(m1v|h264|m1a|aac|cfg)$/.test(name))).toEqual([]);
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('S3K 缺少完整 MP2 前導影格時拒絕交付並清理半成品', async () => {
+    const { paths, outPath } = airlineScript('airline-s3k');
+    const { controller } = launch('success', outPath, 'air-s3k-missing-preroll', { outputFormat: 'airline-s3k' });
+    await controller.ready;
+    const result = await controller.completion;
+    expect(result.ok).toBe(false);
+    expect(result.cleanup).toMatchObject({ reason: 'airline-finalize-failed', released: true });
+    expect(paths.some(file => fs.existsSync(file))).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
   });
 
@@ -230,7 +241,7 @@ if (mode === 'success') {
     const result = await controller.completion;
     expect(result.ok).toBe(false);
     expect(result.cleanup).toMatchObject({ reason: 'airline-finalize-failed', released: true });
-    expect(deliveryOutputPaths('airline-dmpes', outPath).some(file => fs.existsSync(file))).toBe(false);
+    expect(fs.existsSync(outPath)).toBe(false);
   });
 
   it('航空 MPG 半成品無法刪除會保留鎖', async () => {

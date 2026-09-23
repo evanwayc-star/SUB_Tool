@@ -8,12 +8,12 @@
    的地方（見 docs/技術架構說明.md §0.6）。它原本整段長在 ipcMain.handle 裡，
    與 dialog、ffprobe spawn 糾纏，vitest 起不了 Electron，於是一行測試都沒有。
 
-   本檔【只可】require `shared/` 底下的零相依純模組（那些是與 renderer 共用的
-   領域規則，見 shared/README.md）。**不可** require electron／fs／child_process
-   ——一旦碰了，vitest 就再也起不動它，測試會整批消失而沒有人發現。
+   本檔只可 require `shared/` 的零相依純規則，以及 airline-encoding／disc-encoding
+   的純編碼規則。這兩支本機規則只依賴 shared；不把 native authoring 帶進來。
+   **不可** require electron／fs／child_process，或間接載入有 I/O 的 runtime。
    需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由呼叫端傳入。
    這條由 tests/exportPlan.test.js 守著，而且純淨是【遞移】的：被 require 的
-   shared/ 模組自己也不可以 require 任何東西。
+   shared/ 模組自己也不可以 require 任何東西；本機編碼規則也須遞移保持純淨。
 ============================================================================== */
 /* ===== 專案音訊輸出（v4.36） =====
    audioPlan 將「來源檔案」與「專案匯流排」分開：
@@ -28,7 +28,9 @@ const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
 const { clipLength } = require('../shared/clip-fade.cjs');
 const { deliveryFrameRateRatio, sameDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
 const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
-const { buildLimiterFilter } = require('../shared/audio-loudness.cjs');
+const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter } = require('../shared/audio-loudness.cjs');
+const { airlineEncoding } = require('./airline-encoding');
+const { discEncoding } = require('./disc-encoding');
 
 const _EXPORT_LAYOUTS = Object.freeze({
 
@@ -53,6 +55,14 @@ function _finiteNumber(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 function _filterNumber(v, fallback = 0) { return _finiteNumber(v, fallback).toFixed(6); }
+function _audioTimelineStart(file, streamIndex, startOffsetFor) {
+  const offset = Number(startOffsetFor?.(file, streamIndex ?? 0));
+  if (!Number.isFinite(offset) || Math.abs(offset) < 0.000001) return 'asetpts=PTS-STARTPTS,';
+  // Keep the source audio/video start relationship before trimming a clip.
+  // A negative lead carries encoder priming; resampling removes those samples
+  // before timeline time zero. A positive lead becomes initial silence.
+  return `asetpts=PTS-STARTPTS${offset > 0 ? '+' : ''}${_filterNumber(offset)}/TB,aresample=first_pts=0,`;
+}
 /* stream.name 是可持久化的交付預設名稱（例如「M&E」、「5.1 主混音」）；它只作為
    container metadata 傳給 ffmpeg argv，仍移除控制字元並限制長度，絕不進入 filtergraph。 */
 function _streamMetadataName(value) {
@@ -82,8 +92,10 @@ function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
       const sourceChannel = Number.isInteger(input.sourceChannel) && input.sourceChannel >= 0 ? input.sourceChannel : null;
       if ((sourceStream == null) !== (sourceChannel == null))
         _exportPlanError(`音軌 ${bi + 1} 的輸入 ${ii + 1} 母素材聲道座標不完整。`);
+      const audioLimiterSpec = normalizeAudioLimiterSpec(input.audioLimiterSpec);
       return {
         file: input.file,
+        ...(audioLimiterSpec ? { audioLimiterSpec } : {}),
         // 有值時從母素材的第 N 個 audio stream / 第 M 個 channel 取單聲道；
         // null 只保留給舊版「未分離聲道」的母素材輸入，絕不表示可用 preview cache。
         sourceStream,
@@ -139,7 +151,7 @@ function _joinFilter(inputLabels, channelLayout, channelNames, outputLabel) {
    來源 Stream/Channel；因此輸出不會碰到預覽用 proxy 或單聲道 AAC cache。
    若同一母素材已作為影片輸入開啟，reusableMasterInputs 會直接重用那個 input，避免影片＋音訊
    各自重讀一次大型 MXF/MOV，維持母素材品質的同時縮短匯出時間。 */
-function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMasterInputs = null) {
+function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMasterInputs = null, startOffsetFor = null) {
   const busLabels = new Map();
   let ii = inputIndex;
   const audioInputMap = new Map();
@@ -158,7 +170,8 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
       const reusable = reusableMasterInputs?.get(input.file);
       // 影片 input 已以 -ss=seekStart 打開；只有所需 audio 範圍在其後才可重用。
       // 否則另開同一母素材的 audio input，保證不會少掉時間軸較前面的外部音訊。
-      const canReuse = reusable && input.trimStart >= reusable.seekStart - 0.000001;
+      const effect = normalizeAudioLimiterSpec(input.audioLimiterSpec);
+      const canReuse = !effect && reusable && input.trimStart >= reusable.seekStart - 0.000001;
       let mappedIdx, seekStart = 0;
       if (canReuse) {
         mappedIdx = reusable.index;
@@ -174,12 +187,14 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
       const label = `[apB${bi}I${pi}]`;
       const streamSelector = input.sourceStream == null ? '' : `:${input.sourceStream}`;
       let chain = `[${mappedIdx}:a${streamSelector}]`;
+      // 效果屬於完整母素材 stream，必須在聲道擷取與片段裁切之前處理。
+      if (effect) chain += `${audioLimiterFilter(effect, input.sourceStream ?? 0)},`;
       // 有來源聲道座標時不可再讓 aformat 自動 downmix，否則路由到 A3/A4 的離散聲道
       // 可能被混入其他 channel。pan 先精準取出單聲道，再做 trim / gain / fade。
       if (input.sourceChannel != null) chain += `pan=mono|c0=c${input.sourceChannel},`;
       const trimStart = Math.max(0, input.trimStart - seekStart);
       const trimEnd = input.trimEnd == null ? null : Math.max(trimStart, input.trimEnd - seekStart);
-      chain += `asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(trimStart)}`;
+      chain += `${_audioTimelineStart(input.file, input.sourceStream, startOffsetFor)}atrim=start=${_filterNumber(trimStart)}`;
       if (trimEnd != null) chain += `:end=${_filterNumber(trimEnd)}`;
       chain += ',asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono';
       if (Math.abs(input.volume - 1) > 0.000001) chain += `,volume=${_filterNumber(input.volume, 1)}`;
@@ -274,7 +289,8 @@ function _normaliseExportTimecodeWatermark(raw, fps) {
   if (raw == null || raw === false) return null;
   if (!raw || typeof raw !== 'object' || typeof raw.start !== 'string')
     throw new Error('時間碼浮水印設定無效。');
-  const start = raw.start.trim();
+  // 已凍結工作可能帶著先前正規化的 FFmpeg DF 小數點；重複驗證仍按 SMPTE 處理。
+  const start = raw.start.trim().replace(/\.(\d{2,3})$/, ';$1');
   const match = _EXPORT_TIMECODE_RE.exec(start);
   const spec = _exportTimecodeRate(fps);
   if (!match || Number(match[5]) >= spec.timebase)
@@ -342,19 +358,23 @@ function imageBoxForExport({ frameW, frameH, natW, natH, scale = 1, posX = 0.5, 
      timecodeFontFile        交付 TC 專用等寬字型檔
 
    回傳 { args, label, duration, plannedEncoder, isGpu, kbps, audioBitrates,
-          audioChannels }；呼叫端只負責 spawn 與回報。 */
+          audioChannels }；光碟另帶 discAudioPlan，供 authoring 沿用相同輸出串流。
+   呼叫端只負責 spawn 與回報，不預先配對 codec／mux 或計算容量時長。 */
 function buildDeliveryArgv(spec = {}, env = {}) {
   const preset = getDeliveryFormatPreset(spec.format);
+  const isWav = spec.format === 'wav';
+  const normalizedAudio = normalizeDeliveryPresetAudio(spec.format, spec.audioPlan);
+  const problem = deliveryPresetAudioProblem(spec.format, normalizedAudio);
+  if (problem) throw new Error(problem);
+  const normalizedPlan = _normalizeAudioPlan(normalizedAudio, { requireStreams: !isWav });
+  spec = { ...spec, audioPlan: normalizedPlan };
   if (preset) {
-    const audio = normalizeDeliveryPresetAudio(spec.format, spec.audioPlan);
-    const problem = deliveryPresetAudioProblem(spec.format, audio);
-    if (problem) throw new Error(problem);
     spec = { ...spec, width: preset.width, height: preset.height, fps: preset.fps,
-      videoKbps: preset.videoKbps, audioPlan: _normalizeAudioPlan(audio) };
+      videoKbps: preset.videoKbps };
   }
   const {
     format, clips, videoTracks, width, height, fps, duration,
-    videoKbps, audioPlan, timecodeWatermark, assFileName, outPath,
+    videoKbps, audioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName, outPath,
   } = spec;
   const {
     hwdecArgs = () => [],
@@ -364,24 +384,19 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     hasAudioStream = () => true,
     fontsDir = null,
     timecodeFontFile = null,
-    airlineEncoding = null,
-    airlineMuxArgs = null,
-    discEncoding = null,
   } = env;
 
   const isAirline = preset?.transport === 'airline';
   const isDisc = preset?.kind === 'disc';
   const isInterlaced = preset?.scan === 'interlaced';
-  if (isAirline && (!airlineEncoding || !airlineMuxArgs)) {
-    throw new Error('航空交付缺少影音編碼或 TS 合成設定');
-  }
-  if (isDisc && !discEncoding) throw new Error('光碟交付缺少影音編碼與容量設定');
-
-  const isWav = format === 'wav';
   const isPro = format === 'prores';
   // 佇列顯示與 runFF 必須共用同一個實際交付時長：音訊 plan 的尾端若較長，
   // ffmpeg 會以它延長成品。
   const D = Math.max(0.05, _finiteNumber(duration, 0), _planDuration(audioPlan));
+  // 編碼與容量只從本次已正規化的交付推導，caller 不得預先用另一份時長／格式配對。
+  const airline = isAirline ? airlineEncoding(format) : null;
+  const disc = isDisc ? discEncoding(format, { duration: D, audioPlan }) : null;
+  const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
 
   if (isWav) {
     if (!audioPlan) _exportPlanError('WAV 匯出需要專案音軌路由資料。');
@@ -405,7 +420,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const H = Math.max(2, Math.round(height || 1080));
   // 非方形像素先以顯示比例合成與燒字幕，最後才壓成規格的編碼尺寸。
   // 直接在 720×480 / 352×240 上 contain 會把字幕與素材一起橫向拉變形。
-  const outputSar = isAirline ? airlineEncoding.sar : format === 'dvd-iso' ? '32/27' : '1/1';
+  const outputSar = airline?.sar || disc?.sar || '1/1';
   const sarParts = outputSar.split('/').map(Number);
   const W = isAirline || isDisc ? Math.max(2, Math.round(encodedW * sarParts[0] / sarParts[1] / 2) * 2) : encodedW;
   // FPS-SYNC：NTSC 格率必須用精確有理數；轉換只改 cadence，不改時間軸秒數。
@@ -560,7 +575,8 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   let plannedAudio = null;
   const audioInputMap = new Map();
   if (audioPlan) {
-    plannedAudio = _buildPlannedAudio(audioPlan, inputs, fc, ii, D, reusableMasterInputs);
+    plannedAudio = _buildPlannedAudio(audioPlan, inputs, fc, ii, D, reusableMasterInputs,
+      isAirline ? env.audioVideoStartOffset : null);
   } else {
     const aLabels = [];
     list.forEach((c, i) => {
@@ -570,7 +586,8 @@ function buildDeliveryArgv(spec = {}, env = {}) {
         const mono = [];
         c.audio.forEach((ch, j) => {
           const reusable = reusableMasterInputs.get(ch.file);
-          const canReuse = reusable && c.in >= reusable.seekStart - 0.000001;
+          const effect = normalizeAudioLimiterSpec(ch.audioLimiterSpec || c.audioLimiterSpec);
+          const canReuse = !effect && reusable && c.in >= reusable.seekStart - 0.000001;
           let mappedIdx, seekStart = 0;
           if (canReuse) {
             mappedIdx = reusable.index;
@@ -583,9 +600,10 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           // ch.file 已是母素材；必須先精準擷取該離散 channel，不能讓 ffmpeg 自行 downmix。
           const streamSelector = Number.isInteger(ch.sourceStream) && ch.sourceStream >= 0 ? `:${ch.sourceStream}` : '';
           let chain = `[${mappedIdx}:a${streamSelector}]`;
+          if (effect) chain += `${audioLimiterFilter(effect, ch.sourceStream ?? 0)},`;
           if (Number.isInteger(ch.sourceChannel) && ch.sourceChannel >= 0)
             chain += `pan=mono|c0=c${ch.sourceChannel},`;
-          chain += `asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
+          chain += `${_audioTimelineStart(ch.file, ch.sourceStream, isAirline ? env.audioVideoStartOffset : null)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
           fc.push(chain);
           mono.push(`[am${i}_${j}]`);
         });
@@ -595,8 +613,16 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           : `${mono[0]}aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else if (c.type !== 'image' && hasAudioStream(c.path)) {
         al = `[aa${i}]`;
-        const seekStart = reusableMasterInputs.get(c.path)?.seekStart || 0;
-        fc.push(`[${videoInputIndices[i]}:a]asetpts=PTS-STARTPTS,atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+        const effect = normalizeAudioLimiterSpec(c.audioLimiterSpec);
+        let mappedIdx = videoInputIndices[i];
+        let seekStart = reusableMasterInputs.get(c.path)?.seekStart || 0;
+        if (effect) {
+          seekStart = 0;
+          mappedIdx = audioInputMap.get(c.path);
+          if (mappedIdx === undefined) { mappedIdx = ii++; inputs.push('-i', c.path); audioInputMap.set(c.path, mappedIdx); }
+        }
+        const effectFilter = effect ? `${audioLimiterFilter(effect, 0)},` : '';
+        fc.push(`[${mappedIdx}:a]${effectFilter}${_audioTimelineStart(c.path, 0, isAirline ? env.audioVideoStartOffset : null)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else return;
       const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
       // 轉場：音訊淡入/淡出（與影像同步）
@@ -636,7 +662,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     vfinal = tcOut;
   }
   if (isAirline) {
-    fc.push(`${vfinal}scale=${encodedW}:${H}:flags=lanczos,setsar=${airlineEncoding.sar},format=yuv420p,setfield=prog[vairline]`);
+    fc.push(`${vfinal}scale=${encodedW}:${H}:flags=lanczos,setsar=${outputSar},format=yuv420p,setfield=prog[vairline]`);
     vfinal = '[vairline]';
   }
   if (isDisc) {
@@ -646,7 +672,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
 
   // MP4：影像使用使用者指定的目標位元率；每條 AAC stream 依聲道數給足交付 bitrate。
   // ProRes 則固定輸出 24-bit PCM，避免母素材音訊再經有損 AAC 編碼。
-  const kbps = discEncoding?.videoKbps ?? Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
+  const kbps = disc?.videoKbps ?? Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
   const audioMaps = plannedAudio
     ? plannedAudio.streamLabels.flatMap(({ label }) => ['-map', label])
     : ['-map', '[ac]'];
@@ -656,24 +682,32 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       ? plannedAudio.streamLabels.map(({ stream }) => aacBitrateForChannels(stream.spec.channels))
       : [aacBitrateForChannels(2)]);
   if (isAirline) {
+    let airlineAudioMaps = audioMaps;
+    if (airline.audioPrerollSamples) {
+      const sourceLabel = plannedAudio ? plannedAudio.streamLabels[0]?.label : '[ac]';
+      if (!sourceLabel) _exportPlanError('S3K 缺少單一 Stereo 音訊');
+      fc.push(`${sourceLabel}adelay=${airline.audioPrerollSamples}S:all=1[airlineS3kAudio]`);
+      airlineAudioMaps = ['-map', '[airlineS3kAudio]'];
+    }
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
-        '-map', vfinal, ...audioMaps, ...airlineEncoding.videoArgs,
-        ...airlineEncoding.audioArgs, ...airlineMuxArgs, outPath],
+        '-map', vfinal, ...airlineAudioMaps, ...airline.videoArgs,
+        ...airline.audioArgs, ...airline.muxArgs, outPath],
       label: `匯出 ${preset.label} MPG（自動合成 TS）`,
       duration: D,
-      plannedEncoder: format === 'airline-s3k' ? 'mpeg1video' : 'libx264',
+      plannedEncoder: airline.plannedEncoder,
       isGpu: false, kbps, audioBitrates, audioChannels: 2,
     };
   }
   if (isDisc) {
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
-        '-map', vfinal, ...audioMaps, '-r', outputRate, ...discEncoding.videoArgs,
-        ...discEncoding.audioArgs, ...discEncoding.muxArgs, outPath],
+        '-map', vfinal, ...audioMaps, '-r', outputRate, ...disc.videoArgs,
+        ...disc.audioArgs, ...disc.muxArgs, outPath],
       label: `匯出 ${preset.label}（${(kbps / 1000).toFixed(2)} Mbps）`,
-      duration: D, plannedEncoder: format === 'dvd-iso' ? 'mpeg2video' : 'libx264',
+      duration: D, plannedEncoder: disc.plannedEncoder,
       isGpu: false, kbps, audioBitrates, audioChannels: null,
+      discAudioPlan: audioPlan ? { streams: audioPlan.streams } : null,
     };
   }
   const encode = preset

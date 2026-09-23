@@ -15,7 +15,6 @@ const nodeFs = require('fs');
 const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require('child_process');
 const QueueStore = require('./queue-store');
 const ExportWatchdog = require('./export-watchdog');
-const { deliveryOutputPaths } = require('./airline-output');
 const discTools = require('./disc-tools.json');
 
 function unique(values) {
@@ -320,6 +319,7 @@ function createFFmpegExecution(options = {}) {
   }
 
   function execute(args, {
+    onStderr,
     onProgress,
     duration,
     sender,
@@ -398,6 +398,7 @@ function createFFmpegExecution(options = {}) {
       };
       const consumeStderr = data => {
         const text = data.toString();
+        if (typeof onStderr === 'function') onStderr(text);
         writeLog(text);
         tail += text;
         if (tail.length > 8000) tail = tail.slice(-8000);
@@ -447,7 +448,7 @@ function createFFmpegExecution(options = {}) {
           outPath,
           jobId,
           queueDir,
-          ...(outputFormat ? { outputFormat, outputPaths: deliveryOutputPaths(outputFormat, outPath) } : {}),
+          ...(outputFormat ? { outputFormat } : {}),
           ...(discAudioPlan ? { discAudioPlan } : {}),
         }, {
           scriptPath: watchdogScriptPath(),
