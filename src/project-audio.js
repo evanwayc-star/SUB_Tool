@@ -70,6 +70,10 @@ function externalAudioPlacements(externalSources){
         trimEnd,
         fadeIn: nonNeg(asset.fadeIn),
         fadeOut: nonNeg(asset.fadeOut),
+        ...(asset.fadeSourceLength != null ? {
+          fadeSourceOffset: nonNeg(asset.fadeSourceOffset),
+          fadeSourceLength: nonNeg(asset.fadeSourceLength),
+        } : {}),
         gain: gainValue(asset.gain),
       };
     })
@@ -86,6 +90,10 @@ function clipPlacements(clips){
       trimEnd: nonNeg(clip.out),
       fadeIn: nonNeg(clip.fadeIn),
       fadeOut: nonNeg(clip.fadeOut),
+      ...(clip.fadeSourceLength != null ? {
+        fadeSourceOffset: nonNeg(clip.fadeSourceOffset),
+        fadeSourceLength: nonNeg(clip.fadeSourceLength),
+      } : {}),
       gain: 1,
     }));
 }
@@ -264,6 +272,10 @@ class ProjectAudioInterpretation {
             volume: +volume.toFixed(6),
             fadeIn: +placement.fadeIn.toFixed(6),
             fadeOut: +placement.fadeOut.toFixed(6),
+            ...(placement.fadeSourceLength != null ? {
+              fadeSourceOffset: +placement.fadeSourceOffset.toFixed(6),
+              fadeSourceLength: +placement.fadeSourceLength.toFixed(6),
+            } : {}),
           });
         }
       }

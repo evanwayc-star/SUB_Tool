@@ -26,7 +26,7 @@
    兩者以前在這裡各有一份手抄副本。 */
 const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
 const { clipLength } = require('../shared/clip-fade.cjs');
-const { deliveryFrameRateRatio, sameDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
+const { deliveryFrameRateRatio } = require('../shared/delivery-frame-rate.cjs');
 const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
 const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter } = require('../shared/audio-loudness.cjs');
 const { airlineEncoding } = require('./airline-encoding');
@@ -55,6 +55,25 @@ function _finiteNumber(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 function _filterNumber(v, fallback = 0) { return _finiteNumber(v, fallback).toFixed(6); }
+function _fadeFilters(input, duration, { audio = false, digits = 3 } = {}) {
+  const origin = Math.max(0, _finiteNumber(input.fadeSourceOffset, 0));
+  const sourceLength = Math.max(duration + origin, _finiteNumber(input.fadeSourceLength, duration));
+  const fadeIn = Math.min(sourceLength, Math.max(0, _finiteNumber(input.fadeIn, 0)));
+  const fadeOut = Math.min(sourceLength, Math.max(0, _finiteNumber(input.fadeOut, 0)));
+  if (!fadeIn && !fadeOut) return [];
+  const format = n => n.toFixed(digits);
+  const pts = audio ? 'asetpts' : 'setpts';
+  const fade = audio ? 'afade' : 'fade';
+  const alpha = audio ? '' : ':alpha=1';
+  const filters = [];
+  // ffmpeg fade/afade cannot accept a negative start time. Temporarily move
+  // cropped samples back to their original clip clock, then restore PTS.
+  if (origin > 0) filters.push(`${pts}=PTS+${format(origin)}/TB`);
+  if (fadeIn > 0) filters.push(`${fade}=t=in:st=0:d=${format(fadeIn)}${alpha}`);
+  if (fadeOut > 0) filters.push(`${fade}=t=out:st=${format(Math.max(0, sourceLength - fadeOut))}:d=${format(fadeOut)}${alpha}`);
+  if (origin > 0) filters.push(`${pts}=PTS-${format(origin)}/TB`);
+  return filters;
+}
 function _audioTimelineStart(file, streamIndex, startOffsetFor) {
   const offset = Number(startOffsetFor?.(file, streamIndex ?? 0));
   if (!Number.isFinite(offset) || Math.abs(offset) < 0.000001) return 'asetpts=PTS-STARTPTS,';
@@ -106,6 +125,8 @@ function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
         volume: Math.max(0, Math.min(64, _finiteNumber(input.volume, 1))),
         fadeIn: Math.max(0, _finiteNumber(input.fadeIn, 0)),
         fadeOut: Math.max(0, _finiteNumber(input.fadeOut, 0)),
+        fadeSourceOffset: Math.max(0, _finiteNumber(input.fadeSourceOffset, 0)),
+        fadeSourceLength: input.fadeSourceLength == null ? null : Math.max(0, _finiteNumber(input.fadeSourceLength, 0)),
       };
     });
     return { id, inputs };
@@ -199,10 +220,9 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
       chain += ',asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono';
       if (Math.abs(input.volume - 1) > 0.000001) chain += `,volume=${_filterNumber(input.volume, 1)}`;
       const inputDuration = input.trimEnd == null ? null : input.trimEnd - input.trimStart;
-      const fadeIn = inputDuration == null ? input.fadeIn : Math.min(input.fadeIn, inputDuration);
-      const fadeOut = inputDuration == null ? 0 : Math.min(input.fadeOut, inputDuration);
-      if (fadeIn > 0) chain += `,afade=t=in:st=0:d=${_filterNumber(fadeIn)}`;
-      if (fadeOut > 0) chain += `,afade=t=out:st=${_filterNumber(Math.max(0, inputDuration - fadeOut))}:d=${_filterNumber(fadeOut)}`;
+      const fades = _fadeFilters(inputDuration == null ? { ...input, fadeOut: 0 } : input,
+        inputDuration ?? duration, { audio: true, digits: 6 });
+      if (fades.length) chain += `,${fades.join(',')}`;
       const offMs = Math.max(0, Math.round(input.offset * 1000));
       chain += `,adelay=${offMs}:all=1,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${label}`;
       fc.push(chain);
@@ -360,18 +380,29 @@ function imageBoxForExport({ frameW, frameH, natW, natH, scale = 1, posX = 0.5, 
    回傳 { args, label, duration, plannedEncoder, isGpu, kbps, audioBitrates,
           audioChannels }；光碟另帶 discAudioPlan，供 authoring 沿用相同輸出串流。
    呼叫端只負責 spawn 與回報，不預先配對 codec／mux 或計算容量時長。 */
-function buildDeliveryArgv(spec = {}, env = {}) {
+function prepareDeliveryPayload(spec = {}) {
   const preset = getDeliveryFormatPreset(spec.format);
   const isWav = spec.format === 'wav';
   const normalizedAudio = normalizeDeliveryPresetAudio(spec.format, spec.audioPlan);
   const problem = deliveryPresetAudioProblem(spec.format, normalizedAudio);
   if (problem) throw new Error(problem);
   const normalizedPlan = _normalizeAudioPlan(normalizedAudio, { requireStreams: !isWav });
-  spec = { ...spec, audioPlan: normalizedPlan };
-  if (preset) {
-    spec = { ...spec, width: preset.width, height: preset.height, fps: preset.fps,
-      videoKbps: preset.videoKbps };
-  }
+  const prepared = { ...spec, audioPlan: normalizedPlan,
+    ...(preset ? { width: preset.width, height: preset.height, fps: preset.fps,
+      videoKbps: preset.videoKbps } : {}) };
+  // The persisted job keeps SMPTE ';'. FFmpeg's '.' spelling belongs only in argv.
+  if (!isWav) _normaliseExportTimecodeWatermark(prepared.timecodeWatermark, prepared.fps);
+  return {
+    ...prepared,
+    duration: Math.max(0.05, _finiteNumber(prepared.duration, 0), _planDuration(normalizedPlan)),
+    timecodeWatermark: isWav ? null : prepared.timecodeWatermark,
+  };
+}
+
+function buildDeliveryArgv(spec = {}, env = {}) {
+  spec = prepareDeliveryPayload(spec);
+  const preset = getDeliveryFormatPreset(spec.format);
+  const isWav = spec.format === 'wav';
   const {
     format, clips, videoTracks, width, height, fps, duration,
     videoKbps, audioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName, outPath,
@@ -392,7 +423,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const isPro = format === 'prores';
   // 佇列顯示與 runFF 必須共用同一個實際交付時長：音訊 plan 的尾端若較長，
   // ffmpeg 會以它延長成品。
-  const D = Math.max(0.05, _finiteNumber(duration, 0), _planDuration(audioPlan));
+  const D = duration;
   // 編碼與容量只從本次已正規化的交付推導，caller 不得預先用另一份時長／格式配對。
   const airline = isAirline ? airlineEncoding(format) : null;
   const disc = isDisc ? discEncoding(format, { duration: D, audioPlan }) : null;
@@ -437,21 +468,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   if (!list.length) throw new Error('沒有可匯出的影片段');
   const inputs = [], fc = [];
   const EPS = 0.01;
-  const isPassthrough = !preset && !isWav && !isPro && !assFileName && !timecodeWatermark &&
-    list.length === 1 && list[0].type === 'video' &&
-    sameDeliveryFrameRate(list[0].fps, fps || 25) &&
-    !list[0].crop && !list[0].transform &&
-    !list[0].fadeIn && !list[0].fadeOut &&
-    (list[0].opacity == null || list[0].opacity === 1) &&
-    (list[0].scale == null || list[0].scale === 1) &&
-    (list[0].posX == null || list[0].posX === 0.5) &&
-    (list[0].posY == null || list[0].posY === 0.5) &&
-    list[0].natW === W && list[0].natH === H &&
-    (list[0].offset || 0) <= EPS &&
-    (list[0].speed == null || list[0].speed === 1) &&
-    (list[0].out - list[0].in) >= D - EPS &&
-    (list[0].in || 0) <= EPS &&
-    (!videoTracks || videoTracks.every(t => (t.scale == null || t.scale === 1) && (t.opacity == null || t.opacity === 1) && (t.posX == null || t.posX === 0.5) && (t.posY == null || t.posY === 0.5)));
+  // H264-MP4 must actually contain H.264 and end at the delivery duration.
+  // A clip snapshot carries neither a verified codec nor packet/keyframe limits;
+  // stream copy could silently deliver the source codec or an untrimmed tail.
 
   // 1) 去重複輸入：同一個實體檔案只開啟一次，避免建立過多 hwaccel 實例耗盡 VRAM
   // 並且計算每個實體檔案最早被用到的時間（minIn），用 -ss 加在 -i 前，避免 ffmpeg 從 0 開始慢速解碼 44GB 大檔！
@@ -473,21 +492,17 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       pathMinIn.set(p, minIn);
       // 這個 input 本身就是母素材；音訊 routing 可重用它，不必再多開一次同一個 MXF/MOV。
       reusableMasterInputs.set(p, { index: inputIndex, seekStart: minIn });
-      const hw = (isPassthrough || preset) ? [] : hwdecArgs(); // MOD 的場處理使用 CPU 影格
+      const hw = preset ? [] : hwdecArgs(); // MOD 的場處理使用 CPU 影格
       inputs.push(...hw, '-ss', minIn.toFixed(3), '-i', p);
     }
   });
   const videoInputIndices = list.map(c => uniqueVideoPaths.indexOf(c.path));
   let ii = uniqueVideoPaths.length; // 之後的逐聲道音訊檔輸入從此接續編號
 
-  let vc = null; // 疊層後的最終影像標籤
-  if (isPassthrough) {
-    vc = '0:v:0';
-  } else {
-    // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
-    fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${D.toFixed(3)},format=yuv420p,setsar=1[base]`);
-    const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
-    let baseLabel = '[base]';
+  // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
+  fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${D.toFixed(3)},format=yuv420p,setsar=1[base]`);
+  const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
+  let baseLabel = '[base]';
   vtracks.forEach((T, ti) => {
     const vt = T.vt || 0;
     const scale = Math.max(0.02, Math.min(1, +T.scale || 1));
@@ -502,7 +517,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     for (const { c, vIdx } of trk) {
       if (c.offset > cursor + EPS) gap(c.offset - cursor);
       const L = `t${ti}s${si++}`;
-      const fi = Math.max(0, +c.fadeIn || 0), fo = Math.max(0, +c.fadeOut || 0), clen = clipLength(c);
+      const clen = clipLength(c);
       const minIn = pathMinIn.get(c.path);
       const adjIn = c.in - minIn;
       const adjOut = c.out - minIn;
@@ -552,8 +567,8 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       }
 
       // 轉場：淡入/淡出（fade alpha＝淡到透明，讓下層/黑底露出→軌間溶接）
-      if (fi > 0) vchain += `,fade=t=in:st=0:d=${Math.min(fi, clen).toFixed(3)}:alpha=1`;
-      if (fo > 0) vchain += `,fade=t=out:st=${Math.max(0, clen - Math.min(fo, clen)).toFixed(3)}:d=${Math.min(fo, clen).toFixed(3)}:alpha=1`;
+      const fades = _fadeFilters(c, clen);
+      if (fades.length) vchain += `,${fades.join(',')}`;
       fc.push(`${vchain}[${L}]`);
       segs.push(`[${L}]`);
       cursor = c.offset + clipLength(c);
@@ -568,8 +583,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     fc.push(`${baseLabel}${trkLabel}overlay=x=(W-w)*${px.toFixed(4)}:y=(H-h)*${py.toFixed(4)}:eof_action=pass:format=auto${out}`);
     baseLabel = out;
   });
-  vc = baseLabel;
-  }
+  const vc = baseLabel;
   // 3) 音訊：有 project audioPlan 時，依 bus / stream 路由輸出；沒有時完整保留舊版
   // 「所有來源混成一條 stereo」的行為，讓既有專案與自動化呼叫不受影響。
   let plannedAudio = null;
@@ -626,10 +640,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       } else return;
       const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
       // 轉場：音訊淡入/淡出（與影像同步）
-      const afi = Math.max(0, +c.fadeIn || 0), afo = Math.max(0, +c.fadeOut || 0), aclen = clipLength(c);
-      const afParts = [];
-      if (afi > 0) afParts.push(`afade=t=in:st=0:d=${Math.min(afi, aclen).toFixed(3)}`);
-      if (afo > 0) afParts.push(`afade=t=out:st=${Math.max(0, aclen - Math.min(afo, aclen)).toFixed(3)}:d=${Math.min(afo, aclen).toFixed(3)}`);
+      const afParts = _fadeFilters(c, clipLength(c), { audio: true });
       let asrc = al;
       if (afParts.length) { const afl = `[af${i}]`; fc.push(`${al}${afParts.join(',')}${afl}`); asrc = afl; }
       fc.push(`${asrc}adelay=${offMs}:all=1[ad${i}]`);
@@ -725,10 +736,8 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       '-pcr_period', '40', '-pat_period', '0.1', '-pes_payload_size', '0']
     : isPro
     ? proresArgs()
-    : isPassthrough
-      ? ['-c:v', 'copy', '-c:a', 'aac', ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart']
-      : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac',
-        ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart'];
+    : [...vencArgsBitrate(kbps), '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+      ...audioBitrates.flatMap((bitrate, i) => [`-b:a:${i}`, bitrate]), '-movflags', '+faststart'];
   /* Lt/Rt 與普通 stereo 的 codec channel layout 都是 FL/FR；以 stream metadata 明確標示，
      方便剪輯軟體／檢視工具辨識交付意圖，不會把 Lt/Rt 誤標為離散 L/R。 */
   const audioMetadata = plannedAudio
@@ -738,13 +747,13 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const args = ['-y', ...inputs];
   if (fc.length > 0) args.push('-filter_complex', fc.join(';'));
   args.push('-map', vfinal, ...audioMaps);
-  if (!isPassthrough) args.push('-r', outputRate);
+  args.push('-r', outputRate);
   args.push(...encode, ...audioMetadata, outPath);
 
   // 進度標籤即顯示本次實際送出的編碼器（GPU 或 CPU）與位元率，使用者在狀態列就看得到
-  const plannedEncoder = preset ? 'libx264' : isPro ? 'prores_ks' : (isPassthrough ? 'copy' : (encoderName || 'libx264'));
-  const isGpu = !isPro && plannedEncoder !== 'libx264' && plannedEncoder !== 'copy';
-  const accel = isGpu ? 'GPU ' + plannedEncoder.replace('h264_', '').toUpperCase() : (isPassthrough ? 'Direct Stream Copy' : 'CPU ' + plannedEncoder);
+  const plannedEncoder = preset ? 'libx264' : isPro ? 'prores_ks' : (encoderName || 'libx264');
+  const isGpu = !isPro && plannedEncoder !== 'libx264';
+  const accel = isGpu ? 'GPU ' + plannedEncoder.replace('h264_', '').toUpperCase() : 'CPU ' + plannedEncoder;
   return {
     args,
     label: `匯出 ${preset ? 'MOD-FHD 1080i 7.28Mbps' : isPro ? 'ProRes 422 HQ' : 'MP4 ' + (kbps / 1000).toFixed(1) + 'Mbps'}（${accel}）`,
@@ -760,10 +769,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
 module.exports = {
   imageBoxForExport,
   buildDeliveryArgv,
-  _EXPORT_LAYOUTS,
+  prepareDeliveryPayload,
   _finiteNumber,
   _filterNumber,
-  _exportPlanError,
   _normalizeAudioPlan,
   _planDuration,
   _buildPlannedAudio,

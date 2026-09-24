@@ -152,6 +152,27 @@ describe('時間碼浮水印的正規化', () => {
   });
 });
 
+describe('入列與編碼共用交付計畫', () => {
+  it('固定格式、較長音訊尾端與 SMPTE 時碼在入列時一致決定', () => {
+    const audioPlan = {
+      buses: ['left', 'right'].map(id => ({ id, inputs: [{
+        file: 'source.mov', offset: 2, trimStart: 0, trimEnd: 3,
+      }] })),
+      streams: ['left', 'right'].map(id => ({ id, layout: 'mono', busIds: [id] })),
+    };
+    const prepared = P.prepareDeliveryPayload({
+      format: 'mod-fhd', width: 640, height: 360, fps: 25, videoKbps: 1000,
+      duration: 1, audioPlan, timecodeWatermark: { start: '01:00:00;00' },
+    });
+    expect(prepared).toMatchObject({
+      width: 1920, height: 1080, fps: 29.97, videoKbps: 7280, duration: 5,
+      timecodeWatermark: { start: '01:00:00;00' },
+      audioPlan: { streams: [{ layout: 'stereo', busIds: ['left', 'right'] }] },
+    });
+    expect(audioPlan.streams).toHaveLength(2);
+  });
+});
+
 describe('數值進 filtergraph 前一律定點化', () => {
   /* 直接把 JS 數字塞進 filtergraph 會出現 1e-7 這種科學記號，ffmpeg 解析不了。 */
   /* 實務值域：時間（秒）、音量倍率、0..1 的位置比例。

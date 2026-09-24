@@ -9,6 +9,39 @@ const deferred = () => {
 };
 
 describe('MediaIntakeSession resource ownership', () => {
+  it('音訊 metadata 逾時時拒絕載入並釋放失敗元素', async () => {
+    const session = new MediaIntakeSession();
+    const element = { src: '', readyState: 0, pause: vi.fn() };
+    await expect(session.materializeAudioElements([{ file: 'broken.wav' }], {
+      resolveFileURL: async () => 'file:///broken.wav',
+      createAudio: () => element,
+      timeoutMs: 3,
+    })).rejects.toThrow('metadata');
+    expect(element.pause).toHaveBeenCalledOnce();
+    expect(element.src).toBe('');
+  });
+
+  it('任一音軌 metadata 出錯時整組音訊元素都清理', async () => {
+    const session = new MediaIntakeSession();
+    const elements = [];
+    const work = session.materializeAudioElements([{ file: 'good.wav' }, { file: 'bad.wav' }], {
+      resolveFileURL: async file => `file:///${file}`,
+      createAudio: () => {
+        const element = { src: '', readyState: elements.length === 0 ? 1 : 0, pause: vi.fn() };
+        elements.push(element);
+        return element;
+      },
+      timeoutMs: 100,
+    });
+    await vi.waitFor(() => expect(elements).toHaveLength(2));
+    elements[1].onerror?.(new Error('broken codec'));
+    await expect(work).rejects.toThrow('metadata');
+    for (const element of elements) {
+      expect(element.pause).toHaveBeenCalledOnce();
+      expect(element.src).toBe('');
+    }
+  });
+
   it('disposes materialized elements when another channel URL fails', async () => {
     const session = new MediaIntakeSession();
     const token = session.begin('program.mov');

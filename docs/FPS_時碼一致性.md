@@ -133,11 +133,12 @@ sequenceDiagram
 | `transport-controller.js` | 左右逐格、JKL、播放意圖 |
 | `pointer-seek-control.js` | 滑鼠 jump／drag 與跳轉後播放政策 |
 | `shuttle-runtime.js` | 反向穿梭目標與 cadence |
-| `loaders/media-loader.js` | HTML／mpv 實際畫格回報 |
+| `media-loader.js` | 媒體載入、mpv 事件註冊及 intake ownership 檢查 |
+| `media.js` 的 `observeMpvEvent()` | mpv 來源時間回報、播放狀態與呈現位置裁定 |
 | `decode/player.js` | WebCodecs 多層繪製與 timestamp |
 | `timeline-renderer.js` | 播放點與刻度 |
 | `subio.js`、`delivery-list.js` | 凍結輸出起點、逐列交付 FPS 與燒入 TC |
-| `shared/delivery-frame-rate.cjs`、`electron/export-plan.js` | 精確輸出格率與轉碼；不同或未知來源格率禁止 stream copy |
+| `shared/delivery-frame-rate.cjs`、`electron/export-plan.js` | 精確輸出格率與轉碼；H264-MP4 從交付快照重編，避免來源 codec 未證實或片尾超出交付範圍 |
 
 ## 5. 常見失敗
 

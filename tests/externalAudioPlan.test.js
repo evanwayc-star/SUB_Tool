@@ -187,6 +187,39 @@ describe('external audio project export plan', () => {
     expect(data.clips[0]).toMatchObject({ in: 4, out: 12, offset: 0 });
   });
 
+  it('匯出範圍保留影片與外部音訊原本的淡化時間位置', () => {
+    State.clips = [{ id: 'video', path: 'C:/source/video.mov', type: 'video',
+      in: 0, out: 60, offset: 0, vtrack: 0, fadeIn: 5, fadeOut: 5 }];
+    liveExternalSources[0] = { ...liveExternalSources[0], offset: 0, in: 0, out: 60,
+      fadeIn: 5, fadeOut: 5 };
+    const planFor = (start, end) => {
+      State.exportIn = start;
+      State.exportOut = end;
+      const data = snapshot();
+      const plan = ExportPlan.buildDeliveryArgv({ ...data, format: 'mp4',
+        width: 1920, height: 1080, fps: 25, outPath: 'C:/out/range.mp4' });
+      return { data, graph: plan.args[plan.args.indexOf('-filter_complex') + 1] };
+    };
+
+    const middle = planFor(10, 20);
+    expect(middle.data.clips[0]).toMatchObject({ fadeIn: 0, fadeOut: 0 });
+    expect(middle.data.audioPlan.buses.flatMap(bus => bus.inputs).every(input =>
+      input.fadeIn === 0 && input.fadeOut === 0)).toBe(true);
+    expect(middle.graph).not.toContain('fade=t=');
+
+    const opening = planFor(2, 8);
+    expect(opening.data.clips[0]).toMatchObject({ fadeIn: 5, fadeOut: 0,
+      fadeSourceOffset: 2, fadeSourceLength: 60 });
+    expect(opening.graph).toContain('setpts=PTS+2.000/TB,fade=t=in:st=0:d=5.000:alpha=1,setpts=PTS-2.000/TB');
+    expect(opening.graph).toContain('asetpts=PTS+2.000000/TB,afade=t=in:st=0:d=5.000000,asetpts=PTS-2.000000/TB');
+
+    const ending = planFor(56, 58);
+    expect(ending.data.clips[0]).toMatchObject({ fadeIn: 0, fadeOut: 5,
+      fadeSourceOffset: 56, fadeSourceLength: 60 });
+    expect(ending.graph).toContain('setpts=PTS+56.000/TB,fade=t=out:st=55.000:d=5.000:alpha=1,setpts=PTS-56.000/TB');
+    expect(ending.graph).toContain('asetpts=PTS+56.000000/TB,afade=t=out:st=55.000000:d=5.000000,asetpts=PTS-56.000000/TB');
+  });
+
   it('reports unresolved routed sources instead of silently exporting silence', () => {
     liveExternalSources[0] = { ...liveExternalSources[0], path: null };
     const plan = audioPlan();

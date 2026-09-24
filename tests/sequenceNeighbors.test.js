@@ -126,3 +126,38 @@ describe('maxLengthOnTrack（可以多長）由同一份事實導出', () => {
     expect(move.hi + Seq.len(b)).toBe(25);
   });
 });
+
+describe('來源長度回報不破壞同軌不重疊', () => {
+  it('較長的實測片長不會蓋住緊貼的右鄰', () => {
+    const first = { ...clip({ id: 'first', out: 10 }), dur: 10 };
+    const next = { ...clip({ id: 'next', out: 10, offset: 10 }), dur: 10 };
+    State.clips = [first, next];
+
+    Seq.updateSourceDur(first, 12);
+
+    expect(first.dur).toBe(12);
+    expect(first.out).toBe(10);
+    expect(Seq.clipAtOnTrack(11, 0)).toBe(next);
+  });
+
+  it('無同軌右鄰時可延長，不同軌的疊層不構成限制', () => {
+    const first = { ...clip({ id: 'first', out: 10 }), dur: 10 };
+    const overlay = { ...clip({ id: 'overlay', out: 10, offset: 10, vtrack: 1 }), dur: 10 };
+    State.clips = [first, overlay];
+
+    Seq.updateSourceDur(first, 12);
+
+    expect(first.out).toBe(12);
+    expect(Seq.clipAtOnTrack(11, 0)).toBe(first);
+  });
+
+  it('原本修剪過的片段保持修剪，來源縮短時才夾回', () => {
+    const first = { ...clip({ id: 'first', out: 8 }), dur: 10 };
+    State.clips = [first];
+
+    Seq.updateSourceDur(first, 12);
+    expect(first.out).toBe(8);
+    Seq.updateSourceDur(first, 6);
+    expect(first.out).toBe(6);
+  });
+});

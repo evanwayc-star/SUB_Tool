@@ -211,7 +211,7 @@ import { getExactFps, secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset } from './external-audio.js';
-import { MediaIntakeSession, waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { MediaIntakeSession, maxKnownSourceDuration, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 import { ResetEpoch, PlaybackSyncEngine, createMediaPresentationSession } from './media-presentation-core.js';
 import { clipSourceFingerprint, liveClipForSource } from './media-intake-engine.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
@@ -1802,6 +1802,68 @@ const Media = {
   observePresentedTimelineTime(time,source='unknown'){
     return this._ensurePresentationSession().observe(time,{source});
   },
+  // FPS-SYNC（I4/I6）：mpv 只回報來源時間；播放狀態、時間域與呈現位置在此統一裁定。
+  // media-loader 僅負責 intake ownership 與事件註冊，不解讀播放器的內部事件。
+  observeMpvEvent(e){
+    if(e.event==='property-change'){
+      if(e.name==='time-pos'&&e.data!=null){
+        // 間隙與純音訊播放頭使用虛擬時鐘，不能被舊來源的 time-pos 覆寫。
+        if(this._seqSwitching || this._gap || this.audioOnlyTimeline()) return;
+        // loadfile 的初始 0 秒不是呈現證據；等來源切換命中目標才採用。
+        if(!this.acceptMpvSourceTime(e.data)) return;
+        const prev=this._mpvTime; this._mpvTime=e.data;
+        const clip=this.seqOn()?this._activeClip():null;
+        const driverTimeline=this._transport.timelineTime({sourceTime:e.data,clip});
+        // mpv 0.41 以 per-frame time-pos 觀測；presentation host 另需同一請求
+        // 的 playback-restart/command ack，故此處不能直接提交命令目標。
+        this.observePresentedTimelineTime(driverTimeline,'mpv');
+        if(this.presentationPending?.()) return;
+        const t=this._transport.observeSourceTime(e.data,{
+          clip,playing:this.playing,fps:State.fps,dropFrame:State.dropFrame,
+        });
+        $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
+        $('seekBar').value=Math.round(t*1000);
+        emit('media:playhead');
+        if(Math.abs(e.data-prev)>0.5) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:driverTimeline}));
+      }
+      if(e.name==='pause'){
+        const paused=!!e.data;
+        if(this._seqSwitching || this.mpvSourceTransitionPending()) return;
+        // 進入影片間隙／純音訊時間軸是本層主動暫停 mpv，不能當使用者暫停。
+        if(this._gap || this.audioOnlyTimeline()) return;
+        if(paused&&this.playing){
+          const c=this.seqOn()?this._activeClip():null;
+          if(c && Math.abs(this.vTime()-c.out)<0.3 && (Seq.clipAt(Seq.clipEnd(c)+0.001)||Seq.nextAfter(Seq.clipEnd(c))||State.duration>Seq.clipEnd(c)+0.001)){
+            this._mpvTime=c.out; this.seqContinueAtEnd(); return;
+          }
+          this.observePlayerPlaybackState(false,{source:'mpv',reason:'pause'});
+        }
+        else if(!paused&&!this.playing){ this.observePlayerPlaybackState(true,{source:'mpv',reason:'play'}); }
+      }
+      if(e.name==='duration'&&Number.isFinite(e.data)&&e.data>0){
+        if(this.mpvSourceTransitionPending() || this._reverseProxyActive) return;
+        // ffprobe 已知的母素材片長不可被 mpv 載入初期或暫存 Proxy 的較短值縮掉。
+        const c=this.seqOn()?this._activeClip():null;
+        const duration=Math.max(e.data,c?.dur||0,this.seqOn()?0:this._mpvDuration||0);
+        this._mpvDuration=duration;
+        if(this.seqOn()){ if(c) Seq.updateSourceDur(c,duration); }
+        else if(!this.audioOnlyTimeline()){ State.duration=duration; emit('duration:known'); }
+      }
+    }
+    if(e.event==='end-file'&&this.mpvMode){
+      if(this._seqSwitching || this.mpvSourceTransitionPending()) return;
+      // 主動停住的 mpv 舊 end-file 不可停止間隙或外部音訊播放頭。
+      if(this._gap || this.audioOnlyTimeline()) return;
+      if(e.reason==='error'){
+        this.observePlayerPlaybackState(false,{source:'mpv',reason:'error'});
+        setStatus('mpv 播放失敗（解碼或濾鏡錯誤）','err'); showToast('mpv 播放此影片段失敗');
+        return;
+      }
+      const c=this.seqOn()?this._activeClip():null;
+      if(c && this.playing){ this._mpvTime=c.out; if(this.seqContinueAtEnd()) return; }
+      this.observePlayerPlaybackState(false,{source:'mpv',reason:'end-file'});
+    }
+  },
   resetPresentationSession(reason='media-reset'){
     this._presentationSession?.reset(reason);
     this._presentationSession=null;
@@ -1981,7 +2043,9 @@ const Media = {
               this._enterGap(_tl);
               return;
             }
-            if(r && r.duration) Seq.updateSourceDur(c, r.duration);
+            // FFprobe supplied c.dur at intake. A newly loaded mpv source may
+            // report a provisional shorter duration; preserve the known end.
+            if(r && r.duration) Seq.updateSourceDur(c, maxKnownSourceDuration(c.dur,r.duration));
             this._mpvPath = c.path;
           }
           this._mpvTime = localT;
@@ -2012,7 +2076,7 @@ const Media = {
             this._enterGap(_tl);
             return;
           }
-          if(video.duration) Seq.updateSourceDur(c, video.duration);
+          if(video.duration) Seq.updateSourceDur(c, maxKnownSourceDuration(c.dur,video.duration));
         }
         if(!owns()) return;
         try{ video.currentTime = localT; }catch(e){}

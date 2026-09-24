@@ -303,21 +303,19 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
   let html = `
     <div class="delivery-dialog">
       <div class="delivery-header">
-        <div>
-          <div class="delivery-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent);"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            交付清單
-          </div>
+        <div class="delivery-intro">
+          <p class="delivery-eyebrow">建立輸出項目</p>
+          <p class="delivery-lead">設定格式、檔名與儲存位置，送出後可在匯出序列查看進度。</p>
+          <p class="delivery-source" title="${escapeHTML(data.mediaName || '未命名專案')}">來源：${escapeHTML(data.mediaName || '未命名專案')}</p>
           <div id="evOutputDuration" class="delivery-duration-pill" data-seconds="${data.duration}">
-            本次輸出時長：<b>${secToEncore(data.duration, data.fps, data.dropFrame)}</b>${data.hasCustomRange ? ' <span class="delivery-tag-custom">(自訂範圍)</span>' : ''}
+            輸出時長 <b>${secToEncore(data.duration, data.fps, data.dropFrame)}</b>${data.hasCustomRange ? ' <span class="delivery-tag-custom">自訂範圍</span>' : ''}
           </div>
         </div>
-        <button id="evAddRowBtn" class="delivery-add-btn">＋ 新增一列</button>
+        <button id="evAddRowBtn" type="button" class="delivery-add-btn">＋ 新增輸出項目</button>
       </div>
-      
+      <div class="delivery-list-heading"><span>輸出項目</span><span id="evRowCount" aria-live="polite"></span></div>
       <div id="evRowsContainer" class="delivery-rows"></div>
-      
-      <div id="evConflictMsg" class="delivery-conflict-banner"></div>
+      <div id="evConflictMsg" class="delivery-conflict-banner" role="status" aria-live="polite"></div>
     </div>
   `;
 
@@ -349,59 +347,65 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     }
 
     return `
-      <div class="delivery-card">
-        <div class="delivery-ctrl-row delivery-ctrl-row--settings">
-          <select class="ev-format delivery-select" data-idx="${i}" aria-label="交付格式" style="width:264px;">
-            ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(option.format === 'wav' ? !hasProjectAudio : audioOnly)?'disabled':''}>${option.label}</option>`).join('')}
-          </select>
+      <section class="delivery-card" aria-label="輸出項目 ${i + 1}">
+        <div class="delivery-card-head">
+          <span class="delivery-item-number">${String(i + 1).padStart(2, '0')}</span>
+          <span class="delivery-item-title">輸出項目 ${i + 1}</span>
+          ${preset ? '<span class="delivery-fixed-badge">固定規格</span>' : ''}
+          <button type="button" class="ev-del delivery-btn-del" data-idx="${i}" aria-label="刪除輸出項目 ${i + 1}" title="刪除此輸出項目">刪除</button>
+        </div>
+        <div class="delivery-spec-grid">
+          <label class="delivery-field delivery-field--format"><span>交付格式</span>
+            <select class="ev-format delivery-select" data-idx="${i}">
+              ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(option.format === 'wav' ? !hasProjectAudio : audioOnly)?'disabled':''}>${option.label}</option>`).join('')}
+            </select>
+          </label>
           ${!isWav ? `
-            <select class="ev-res delivery-select" data-idx="${i}" aria-label="輸出解析度" style="width:${preset ? 154 : 118}px;" ${preset?`disabled title="${preset.label} 固定為 ${preset.width}×${preset.height}，${preset.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
-              ${preset ? `<option value="${preset.height}" selected>${preset.width}×${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
-              <option value="0" ${r.targetH===0?'selected':''}>來源解析度</option>
-              <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
-              <option value="1080" ${r.targetH===1080?'selected':''}>1080p</option>
-              <option value="720" ${r.targetH===720?'selected':''}>720p</option>
-              <option value="custom" ${(r.targetH>0 && ![1080,720,2160].includes(r.targetH))?'selected':''}>自訂...</option>
-              `}
-            </select>
+            <label class="delivery-field"><span>畫面尺寸</span>
+              <select class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 固定為 ${preset.width}×${preset.height}，${preset.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
+                ${preset ? `<option value="${preset.height}" selected>${preset.width}×${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
+                <option value="0" ${r.targetH===0?'selected':''}>來源解析度</option>
+                <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
+                <option value="1080" ${r.targetH===1080?'selected':''}>1080p</option>
+                <option value="720" ${r.targetH===720?'selected':''}>720p</option>
+                <option value="custom" ${(r.targetH>0 && ![1080,720,2160].includes(r.targetH))?'selected':''}>自訂...</option>
+                `}
+              </select>
+            </label>
             ${(!preset && r.targetH>0 && ![1080,720,2160].includes(r.targetH)) ?
-              `<input type="number" class="ev-custom-res delivery-input" data-idx="${i}" value="${r.targetH}" style="width:60px;" placeholder="高度">` 
+              `<label class="delivery-field delivery-field--custom"><span>高度（px）</span><input type="number" class="ev-custom-res delivery-input" data-idx="${i}" value="${r.targetH}" min="16" step="2"></label>`
               : ''}
-            <select class="ev-fps delivery-select" data-idx="${i}" aria-label="輸出 FPS" title="輸出影格率；維持原本播放時長" style="width:152px;" ${preset?'disabled':''}>
-              ${preset ? `<option value="${preset.fps}" selected>${preset.fps} FPS（固定）</option>` : `
-              <option value="0" ${!r.targetFps?'selected':''}>依專案 (${normalizeDeliveryFrameRate(data.fps)} FPS)</option>
-              ${DELIVERY_FRAME_RATES.map(rate=>`<option value="${rate.value}" ${r.targetFps===rate.value?'selected':''}>${rate.label} FPS</option>`).join('')}
-              `}
-            </select>
-            ${preset?.kind === 'disc' ? '<span class="delivery-disc-bitrate delivery-audio-info">碼率依片長與容量自動計算</span>' : r.format==='h264' || preset ? `
-              <div style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim);">
-                <input type="number" class="ev-kbps delivery-input" data-idx="${i}" value="${preset?.videoKbps || r.kbps}" style="width:72px;" title="目標視訊碼率 (kbps)" ${preset?'disabled':''}> kbps
-              </div>
+            <label class="delivery-field"><span>影格率</span>
+              <select class="ev-fps delivery-select" data-idx="${i}" title="輸出影格率；維持原本播放時長" ${preset?'disabled':''}>
+                ${preset ? `<option value="${preset.fps}" selected>${preset.fps} FPS（固定）</option>` : `
+                <option value="0" ${!r.targetFps?'selected':''}>依專案 (${normalizeDeliveryFrameRate(data.fps)} FPS)</option>
+                ${DELIVERY_FRAME_RATES.map(rate=>`<option value="${rate.value}" ${r.targetFps===rate.value?'selected':''}>${rate.label} FPS</option>`).join('')}
+                `}
+              </select>
+            </label>
+            ${preset?.kind === 'disc' ? '<div class="delivery-field"><span>視訊碼率</span><span class="delivery-disc-bitrate delivery-readonly">碼率依片長與容量自動計算</span></div>' : r.format==='h264' || preset ? `
+              <label class="delivery-field delivery-field--bitrate"><span>視訊碼率</span><span class="delivery-unit-control">
+                <input type="number" class="ev-kbps delivery-input" data-idx="${i}" value="${preset?.videoKbps || r.kbps}" min="1" ${preset?'disabled':''}><span>kbps</span>
+              </span></label>
             ` : ''}
           ` : ''}
-          <div class="delivery-ctrl-actions">
-            ${!isWav ? `
-              <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 燒入 TC</label>
-              <span class="delivery-sub-chip" title="${activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕'}">${activeSubs.length ? '💬 字幕: '+activeSubs.join(', ') : '無字幕'}</span>
-            ` : ''}
-            <button class="ev-del delivery-btn-del icon" data-idx="${i}" title="刪除此列">✕</button>
-          </div>
         </div>
-        <div class="delivery-ctrl-row" style="display:flex;gap:8px;align-items:center;">
-          <input type="text" class="ev-name delivery-input" data-idx="${i}" value="${r.customName}" style="flex:3;min-width:0;" placeholder="檔名 (含副檔名)" title="${escapeHTML(r.customName || '')}">
-          <input type="text" class="ev-outdir delivery-input" data-idx="${i}" value="${r.outDir || ''}" style="flex:2;min-width:0;${!IS_DESKTOP?'display:none;':''}" title="${escapeHTML(r.outDir || '')}" placeholder="選擇輸出目錄...">
-          <button class="ev-dir-btn delivery-btn-browse" data-idx="${i}" style="flex:none;${!IS_DESKTOP?'display:none;':''}">瀏覽...</button>
+        <div class="delivery-output-grid">
+          <label class="delivery-field"><span>輸出檔名</span><input type="text" class="ev-name delivery-input" data-idx="${i}" value="${escapeHTML(r.customName || '')}" title="${escapeHTML(r.customName || '')}" placeholder="檔名（含副檔名）"></label>
+          ${IS_DESKTOP ? `<div class="delivery-field"><label for="evOutDir${i}">儲存位置</label><div class="delivery-dir-control">
+            <input id="evOutDir${i}" type="text" class="ev-outdir delivery-input" data-idx="${i}" value="${escapeHTML(r.outDir || '')}" title="${escapeHTML(r.outDir || '')}" placeholder="選擇輸出資料夾">
+            <button type="button" class="ev-dir-btn delivery-btn-browse" data-idx="${i}">瀏覽</button>
+          </div></div>` : ''}
         </div>
-        <div class="delivery-ctrl-row" style="display:flex;gap:8px;align-items:center;">
-          <div style="display:flex;align-items:center;gap:6px;">
-            <span class="delivery-audio-info">🎧 音訊: ${audioDesc}</span>
-            <button class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="設定此列輸出的音軌">⚙ 音軌</button>
-            ${preset ? `<span class="delivery-audio-info">${preset.kind === 'disc' ? `最多 ${preset.maxAudioStreams} 條 Mono / Stereo / Lt/Rt / 5.1` : '單一 Stereo'} · ${preset.audioLabel} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps${preset.kind === 'disc' ? '／串流' : ''}</span>` : ''}
-          </div>
+        <div class="delivery-card-options">
+          <div class="delivery-audio-line"><span class="delivery-options-label">音訊</span><span class="delivery-audio-info">${escapeHTML(audioDesc)}</span><button type="button" class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="設定此項目的輸出音軌">設定音軌</button></div>
+          ${!isWav ? `<div class="delivery-visual-options"><span class="delivery-sub-chip" title="${escapeHTML(activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕')}">${activeSubs.length ? '字幕：'+escapeHTML(activeSubs.join(', ')) : '無字幕'}</span>
+            <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 畫面燒入時間碼</label></div>` : ''}
         </div>
-        ${preset?.transport === 'airline' ? `<div class="delivery-ctrl-row delivery-airline-output"><span class="delivery-audio-info">${preset.displayAspect ? `顯示比例 ${preset.displayAspect} · ` : ''}SubTool 自動合成影音，直接輸出 .mpg（MPEG-TS）。</span></div>` : ''}
-        ${preset?.kind === 'disc' ? `<div class="delivery-ctrl-row delivery-disc-output"><span class="delivery-audio-info">${preset.capacityBytes / 1000000000} GB 容量上限 · 16:9 · 無選單、放入即播放 · 字幕依交付設定燒錄 · 輸出 .iso 光碟映像。</span></div>` : ''}
-      </div>
+        ${preset ? `<div class="delivery-preset-note">${preset.kind === 'disc' ? `最多 ${preset.maxAudioStreams} 條 Mono / Stereo / Lt/Rt / 5.1` : '單一 Stereo'} · ${escapeHTML(preset.audioLabel)} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps${preset.kind === 'disc' ? '／串流' : ''}</div>` : ''}
+        ${preset?.transport === 'airline' ? `<div class="delivery-airline-output delivery-format-note">${preset.displayAspect ? `顯示比例 ${preset.displayAspect} · ` : ''}SubTool 自動合成影音，直接輸出 .mpg（MPEG-TS）。</div>` : ''}
+        ${preset?.kind === 'disc' ? `<div class="delivery-disc-output delivery-format-note">${preset.capacityBytes / 1000000000} GB 容量上限 · 16:9 · 無選單、放入即播放 · 字幕依交付設定燒錄 · 輸出 .iso 光碟映像。</div>` : ''}
+      </section>
     `;
   }
 
@@ -411,6 +415,9 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     const c = $('evRowsContainer');
     if (!c) return;
     c.innerHTML = list.rows().map((r, i) => renderRow(r, i)).join('');
+    c.querySelectorAll('.ev-format').forEach(el => { el.title = el.selectedOptions[0]?.textContent || ''; });
+    const rowCount = $('evRowCount');
+    if (rowCount) rowCount.textContent = `${list.count()} 項`;
     
     const idxOf = e => +e.target.dataset.idx;
     const after = () => { updateRows(); checkConflicts(); };
@@ -494,16 +501,22 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       audioOnly: !!submission.audioOnly,
       defaultAudioLayout: submission.defaultAudioLayout || {},
       desktop: IS_DESKTOP,
-      // `rows()` is intentionally live while the dialog is editable.  Clone
-      // once at click time so async conflict checks cannot let later UI edits
-      // alter the jobs that this submission builds.
-      initial: structuredClone(list.rows()),
+      // rows() is a detached snapshot. Async conflict checks cannot let later
+      // UI edits alter the jobs built for this submission.
+      initial: list.rows(),
     });
   }
 
-  openModal('匯出交付清單', html, [
+  openModal('匯出影片', html, [
     { label: '取消', act: closeModal },
-    { label: '全部送出', primary: true, act: async () => {
+    { label: '加入匯出序列', id: 'evSubmitBtn', primary: true, act: async () => {
+      const submitButton = $('evSubmitBtn');
+      if (submitButton?.disabled) return;
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = '加入中…';
+        submitButton.setAttribute('aria-busy', 'true');
+      }
       try {
         const result = await runFrozenExportSubmission({
           // D3: capture project data and editable delivery rows synchronously,
@@ -542,11 +555,22 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       } catch (err) {
         showToast('送出失敗: ' + (err.message || err));
         console.error(err);
+      } finally {
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = '加入匯出序列';
+          submitButton.removeAttribute('aria-busy');
+        }
       }
     }}
-  ], { width: '820px' });
+  ], { width: 'min(920px,96vw)' });
 
-  $('evAddRowBtn').onclick = () => { list.add(); updateRows(); checkConflicts(); };
+  $('evAddRowBtn').onclick = () => {
+    list.add(); updateRows(); checkConflicts();
+    const newest = $('evRowsContainer')?.lastElementChild;
+    if (typeof newest?.scrollIntoView === 'function') newest.scrollIntoView({ block: 'nearest' });
+    newest?.querySelector('.ev-format')?.focus();
+  };
 
   setTimeout(() => {
     updateRows();

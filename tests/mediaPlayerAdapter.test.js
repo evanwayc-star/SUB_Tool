@@ -93,6 +93,47 @@ describe('active transport', () => {
     await expect(pending).resolves.toEqual({ backend: 'html5', presentedSourceTime: 4.18 });
   });
 
+  it('HTML5 seeked 不會搶在畫格回呼前提交播放位置', async () => {
+    let frameCallback;
+    const listeners = new Map();
+    const videoEl = {
+      currentTime: 0,
+      requestVideoFrameCallback: vi.fn(callback => { frameCallback = callback; return 1; }),
+      cancelVideoFrameCallback: vi.fn(),
+      addEventListener: vi.fn((name, callback) => listeners.set(name, callback)),
+      removeEventListener: vi.fn((name) => listeners.delete(name)),
+    };
+    const runtime = resetPlayerAdapter(null, videoEl);
+    let settled = false;
+    const pending = runtime.present(7, { tolerance: 0.02 }).then(result => {
+      settled = true;
+      return result;
+    });
+
+    listeners.get('seeked')?.();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(videoEl.addEventListener).not.toHaveBeenCalledWith('seeked', expect.any(Function));
+
+    frameCallback(0, { mediaTime: 7 });
+    await expect(pending).resolves.toEqual({ backend: 'html5', presentedSourceTime: 7 });
+  });
+
+  it('沒有畫格回呼的 HTML5 環境仍可在 seeked 後完成定位', async () => {
+    const listeners = new Map();
+    const videoEl = {
+      currentTime: 0,
+      addEventListener: vi.fn((name, callback) => listeners.set(name, callback)),
+      removeEventListener: vi.fn((name) => listeners.delete(name)),
+    };
+    const runtime = resetPlayerAdapter(null, videoEl);
+    const pending = runtime.present(3.5, { tolerance: 0.02 });
+    expect(videoEl.currentTime).toBe(3.5);
+    listeners.get('seeked')();
+    await expect(pending).resolves.toEqual({ backend: 'html5', presentedSourceTime: 3.5 });
+    expect(listeners.has('seeked')).toBe(false);
+  });
+
   it('mpv present 交由 native bridge 回報實際 video PTS', async () => {
     const present = vi.fn().mockResolvedValue({ backend: 'mpv', presentedSourceTime: 11.96 });
     const runtime = resetPlayerAdapter({ mpv: {

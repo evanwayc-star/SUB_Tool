@@ -130,7 +130,19 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
     if (newOffset < 0) { newIn += (-newOffset); newOffset = 0; }
     const newDur = newOut - newIn;
     if (newOffset + newDur > (expOut - expIn)) newOut = newIn + ((expOut - expIn) - newOffset);
-    return { ...c, in: newIn, out: newOut, trimStart: newIn, trimEnd: newOut, offset: newOffset };
+    const frontCut = newIn - startProp;
+    const backCut = endProp - newOut;
+    const fadeIn = Math.min(nonNeg(c.fadeIn), cDur);
+    const fadeOut = Math.min(nonNeg(c.fadeOut), cDur);
+    // A delivery range can begin/end inside a fade. Keep its original local
+    // clock so the first exported frame/sample has the previewed gain/alpha.
+    return {
+      ...c, in: newIn, out: newOut, trimStart: newIn, trimEnd: newOut, offset: newOffset,
+      fadeIn: frontCut < fadeIn ? fadeIn : 0,
+      fadeOut: backCut < fadeOut ? fadeOut : 0,
+      fadeSourceOffset: frontCut,
+      fadeSourceLength: cDur,
+    };
   }
 
   const sourceClips = rawSourceClips.map(slice).filter(Boolean);
@@ -162,6 +174,8 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
       audio: c.audioDetached ? [] : clipAudioSpec(c, mediaTracks),
       ...audioLimiterSnapshot(c),
       fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
+      fadeSourceOffset: +c.fadeSourceOffset.toFixed(6),
+      fadeSourceLength: +c.fadeSourceLength.toFixed(6),
       ...(image ? {
         scale: Math.max(0.01, finite(c.scale, 1)),
         posX: ratio(c.posX, 0.5), posY: ratio(c.posY, 0.5),

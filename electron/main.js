@@ -651,20 +651,10 @@ function proresArgs() { return ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor
 function vencArgsBitrate(kbps) {
   return deliveryVideoEncoderArgs(VENC, kbps);
 }
-/* 匯出的純決策邏輯已抽到 ./export-plan.js（零 require、可在 vitest 直接測）。
-   留在這裡的是需要副作用的部分：找字型要讀檔。 */
+/* 匯出的純決策邏輯由 export-plan.js 擁有；這裡只取准入時實際需要的規則。
+   找交付用字型仍在 main，因為它需要讀取檔案系統。 */
 const {
-  imageBoxForExport,
-  _finiteNumber,
-  _filterNumber,
-  _exportPlanError,
-  _normalizeAudioPlan,
-  _planDuration,
-  _buildPlannedAudio,
-  _buildWavOutput,
-  aacBitrateForChannels,
-  _normaliseExportTimecodeWatermark,
-  _buildExportTimecodeFilter,
+  prepareDeliveryPayload,
 } = require('./export-plan');
 
 /* 交付用 TC 必須固定使用專案隨附的更紗黑體等寬版本。
@@ -1046,16 +1036,12 @@ ipcMain.handle('queue:openMonitor', () => {
 
 ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
-  payload = { ...payload, format: String(payload?.format || '').trim().toLowerCase() };
+  payload = prepareDeliveryPayload({ ...payload, format: String(payload?.format || '').trim().toLowerCase() });
   const preset = getDeliveryFormatPreset(payload?.format);
-  if (preset) payload = { ...payload, width: preset.width, height: preset.height, targetH: preset.height, fps: preset.fps, videoKbps: preset.videoKbps };
-  const { clips, videoTracks, width, height, fps, assText, format, duration, defaultName, outPath: presetOut, videoKbps, audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark } = payload;
+  if (preset) payload = { ...payload, targetH: preset.height };
+  const { assText, format, defaultName, outPath: presetOut } = payload;
   const ext = expectedExportExtension(format);
   const isWav = format === 'wav';
-  const audioPlan = _normalizeAudioPlan(normalizeDeliveryPresetAudio(format, rawAudioPlan), { requireStreams: !isWav });
-  const audioProblem = deliveryPresetAudioProblem(format, audioPlan);
-  if (audioProblem) throw new Error(audioProblem);
-  const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
   const isPro = format === 'prores';
   
   let outPath = presetOut || null;
@@ -1071,7 +1057,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
 
   // presetOut 只能來自已選取的交付目錄；不允許 renderer 以略過 save dialog 的
   // payload 取得任意寫檔能力。先驗證再寫 ASS 暫存，失敗不留下半份 queue artifact。
-  const authorizationPayload = { ...payload, audioPlan, outPath };
+  const authorizationPayload = { ...payload, outPath };
   QueueManager.assertJobCapabilities({ payload: authorizationPayload });
   // 交付目錄能力只代表「可建立候選檔」；工作通過格式、來源與路徑驗證後，
   // 才給這一個成品 shell reveal 的精確能力。
@@ -1088,8 +1074,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   
   // 佇列顯示與 runFF 必須共用同一個實際交付時長：音訊 plan 的尾端若較長，
   // ffmpeg 會以它延長成品，不能讓等待中的列仍顯示較短的前端宣告值。
-  const effectiveDuration = Math.max(0.05, _finiteNumber(duration, 0), _planDuration(audioPlan));
-  const savedPayload = { ...payload, audioPlan, assText: null, outPath, duration: effectiveDuration };
+  const savedPayload = { ...payload, assText: null, outPath };
   const job = { id: jobId, status: JOB_STATUS.QUEUED, createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
   try {
     QueueManager.addJob(job);

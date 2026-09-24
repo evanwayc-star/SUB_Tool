@@ -88,10 +88,15 @@ const Seq = {
   sort(){ State.clips.sort((a, b) => (vt(a) - vt(b)) || (a.offset - b.offset)); },
   /* 來源實際長度更新（mpv/元素回報比 probe 準時）：未修剪過的 out 跟著延伸 */
   updateSourceDur(c, dur){
-    if(!dur || Math.abs(dur - c.dur) < 0.01) return;
+    dur = Number(dur);
+    if(!Number.isFinite(dur) || dur <= 0 || Math.abs(dur - c.dur) < 0.01) return;
     const untrimmed = Math.abs(c.out - c.dur) < 0.01;
+    // Metadata can arrive after another clip was placed directly to the right.
+    // Keep the measured source length, but never extend this clip across its
+    // same-track neighbor. Other tracks are intentionally independent.
+    const maxOut = c.in + this.maxLengthOnTrack(c);
     c.dur = dur;
-    if(untrimmed) c.out = dur;          // 未修剪過：out 跟著新長度延伸
+    if(untrimmed) c.out = Math.min(dur, maxOut);
     else if(c.out > dur) c.out = dur;   // 修剪點超出新長度：夾回
     if(c.in >= c.out) c.in = Math.max(0, c.out - 0.2);
     this.recomputeDuration();

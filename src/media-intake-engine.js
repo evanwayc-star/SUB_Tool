@@ -35,6 +35,14 @@ export function clipSourceStillReferenced(clips, sourceClip) {
   return !!liveClipForSource(clips, sourceClip);
 }
 
+// 母素材的完整長度不能被尚在生成中的 Proxy 或播放器暫時 metadata 縮短。
+export function maxKnownSourceDuration(...durations) {
+  return Math.max(0, ...durations.map(value => {
+    const duration = Number(value);
+    return Number.isFinite(duration) && duration > 0 ? duration : 0;
+  }));
+}
+
 function disposeAudioElements(elements) {
   for (const element of (Array.isArray(elements) ? elements : [])) {
     if (!element) continue;
@@ -44,18 +52,41 @@ function disposeAudioElements(elements) {
 }
 
 function waitForMetadata(element, timeoutMs) {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     let settled = false;
-    const finish = () => {
+    let timer = null;
+    const hasEventListeners = typeof element.addEventListener === 'function';
+    const previousMetadata = element.onloadedmetadata;
+    const previousError = element.onerror;
+    const remove = () => {
+      clearTimeout(timer);
+      if (hasEventListeners) {
+        element.removeEventListener?.('loadedmetadata', onMetadata);
+        element.removeEventListener?.('error', onError);
+      } else {
+        if (element.onloadedmetadata === onMetadata) element.onloadedmetadata = previousMetadata;
+        if (element.onerror === onError) element.onerror = previousError;
+      }
+    };
+    const finish = error => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      resolve(element);
+      remove();
+      if (error) reject(error);
+      else resolve(element);
     };
-    const timer = setTimeout(finish, timeoutMs);
-    element.onloadedmetadata = finish;
-    element.onerror = finish;
-    if (element.readyState >= 1) finish();
+    const onMetadata = () => finish(Number(element.readyState) >= 1
+      ? null : new Error('音訊 metadata 尚未就緒'));
+    const onError = () => finish(new Error('音訊 metadata 讀取失敗'));
+    if (hasEventListeners) {
+      element.addEventListener('loadedmetadata', onMetadata);
+      element.addEventListener('error', onError);
+    } else {
+      element.onloadedmetadata = onMetadata;
+      element.onerror = onError;
+    }
+    timer = setTimeout(() => finish(new Error('音訊 metadata 讀取逾時')), Math.max(1, timeoutMs));
+    if (Number(element.readyState) >= 1) finish();
   });
 }
 
@@ -143,14 +174,16 @@ export class MediaIntakeSession {
     if (!owns()) return null;
 
     const outcomes = await Promise.all(list.map(async channel => {
+      let element = null;
       try {
         const url = await resolveFileURL(channel.file);
         if (!owns()) return { element: null, error: null };
-        const element = createAudio();
+        element = createAudio();
         element.src = url;
         element.preload = 'auto';
         return { element: await waitForMetadata(element, timeoutMs), error: null };
       } catch (error) {
+        disposeAudioElements([element]);
         return { element: null, error };
       }
     }));

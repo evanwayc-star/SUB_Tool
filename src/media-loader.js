@@ -5,12 +5,12 @@
 
    它收下的 `ctx` 就是 Media 本身（media.js 把每個進入點再包成方法：
    `loadDesktopMedia(p){ return loadDesktopMedia(this, p, …) }`），並直接讀寫
-   Media 的 17 個私有欄位、共 40 處。那在這裡是**允許的**——它屬於 Media 的
+   Media 的私有欄位。那在這裡是**允許的**——它屬於 Media 的
    【內部接縫】，與 media.js 同一個實作範圍。
 
    但這件事以前從來沒有被寫下來，而是靠 eslint 圍籬的一個漏洞默許的：
    `mediaPrivateFence` 比對的是「物件叫不叫 Media」，而這裡叫 `ctx`，
-   於是 40 處存取從頭到尾沒有被檢查過。現在明確列進
+   於是相關存取從頭到尾沒有被檢查過。現在明確列進
    `eslint.config.mjs` 的 MEDIA_INTERNAL_FILES，並記在這裡。
 
    ── 三條載入路徑（順序即優先序，前面命中就 return）──
@@ -21,7 +21,8 @@
 
    **加新東西前先問：這是 Media 的實作，還是可以獨立測的規則？**
    後者請放到自己的模組（例如 channel-layout.js／media-intake-session.js），
-   不要繼續加大這支對 Media 內部的相依。
+   不要繼續加大這支對 Media 內部的相依。mpv 事件仍由這裡註冊與檢查
+   intake ownership；播放狀態和來源／時間軸位置的裁定交給 Media.observeMpvEvent()。
 ============================================================================== */
 import { $, video } from './dom.js';
 import { State, DESK, setFps } from './state.js';
@@ -32,9 +33,8 @@ import { escapeHTML, baseName } from './util.js';
 import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from './media-player-adapter.js';
 import { Wave, WAVE_DECODE_MAX, probeAudioChannelDescriptors, detectFpsWeb, probeImageSize } from './media.js'; 
 import { sourceChannelLabels, AudioPipeline } from './audio-routing-engine.js';
-import { getExactFps, secToEncore } from './time.js';
-import { Seq } from './sequence.js';
-import { waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { getExactFps } from './time.js';
+import { maxKnownSourceDuration, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 import { autoBuildPreviewProxy, isLargeCanopusAvi } from './preview-proxy-policy.js';
 export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx._resetForFirstVideo(projectRestore ? { keepVideoTracks: true } : {});
@@ -108,7 +108,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(!owns()||metadata==='cancelled') return;
       if(metadata!=='ready'){ showToast('無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
-      State.duration=video.duration||dur||0;
+      State.duration=maxKnownSourceDuration(dur,video.duration);
       const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
       const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
       AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio),audio.length?0:0);
@@ -162,7 +162,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         ctx._setActiveStreamLease(null);
         showToast('轉檔串流無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return;
       }
-      State.duration=video.duration||dur||0;
+      State.duration=maxKnownSourceDuration(dur,video.duration);
       video.muted=true;
       const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:res.streamUrl}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
       const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
@@ -224,9 +224,15 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         }
         if(ownsPrimary()) setStatus('媒體已載入','ok');
       };
+      const reportTrackFailure=error=>{
+        if(!ownsPrimary()) return;
+        console.warn('stream ingest tracks:',error);
+        showToast('音訊預覽載入失敗：'+(error?.message||String(error)));
+        setStatus('影片已載入，但音訊預覽載入失敗','err');
+      };
 
       if(res.cached){
-        void loadTracksAndWave(res).catch(error=>{ if(ownsPrimary()) console.warn('stream ingest tracks:',error); });
+        void loadTracksAndWave(res).catch(reportTrackFailure);
       } else {
         setStatus('視訊播放就緒，正在背景轉檔 Proxy 與分析音訊…','busy');
         // 只在「本次轉檔工作」完成時才載入；用 ingestJobId 過濾其他工作的完成事件，並在換檔時移除
@@ -234,7 +240,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
           if(!ownsPrimary()){ window.removeEventListener('desk:ingest-done',handler); self._ingestDoneHandler=null; return; }
           if(res.ingestJobId && ev?.detail?.jobId && ev.detail.jobId!==res.ingestJobId) return; // 非本次轉檔，忽略
           window.removeEventListener('desk:ingest-done',handler); self._ingestDoneHandler=null;
-          void loadTracksAndWave(res).catch(error=>{ if(ownsPrimary()) console.warn('stream ingest tracks:',error); });
+          void loadTracksAndWave(res).catch(reportTrackFailure);
         };
         ctx._ingestDoneHandler=handler;
         window.addEventListener('desk:ingest-done', handler);
@@ -256,7 +262,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
     if(!owns()||metadata==='cancelled') return;
     if(metadata!=='ready'){ showToast('轉檔結果無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
-    State.duration=video.duration||dur||0;
+    State.duration=maxKnownSourceDuration(dur,video.duration);
     video.muted=true;
     const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
     const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
@@ -264,14 +270,23 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
 
     const chs=res.channels||[];
     let els=[];
+    let audioLoadError=null;
     if(chs.length){
       setStatus(`載入 ${chs.length} 條聲道…`,'busy');
-      els=await ctx._intakeSession.materializeAudioElements(chs,{
-        owns:ownsPrimary,
-        resolveFileURL:file=>DESK.fileURL(file),
-        createAudio:()=>new Audio(),
-      });
-      if(!els||!ownsPrimary()) return;
+      try{
+        els=await ctx._intakeSession.materializeAudioElements(chs,{
+          owns:ownsPrimary,
+          resolveFileURL:file=>DESK.fileURL(file),
+          createAudio:()=>new Audio(),
+        });
+      }catch(error){
+        if(!ownsPrimary()) return;
+        audioLoadError=error;
+        console.warn('ingest tracks:',error);
+        showToast('音訊預覽載入失敗：'+(error?.message||String(error)));
+      }
+      if(!ownsPrimary()) return;
+      if(!els) els=[];
     }
     const descriptors=AudioPipeline.registerSource(primary,chs,chs.length);
     if(chs.length){
@@ -302,7 +317,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     } else if(ownsPrimary()) Wave.initLive();
 
     if(!ownsPrimary()) return;
-    setStatus('媒體已載入（桌面模式）','ok'); emit('duration:known');
+    setStatus(audioLoadError?'影片已載入，但音訊預覽載入失敗':'媒體已載入（桌面模式）',audioLoadError?'err':'ok'); emit('duration:known');
   }
 
 export function _expandChannels(ctx, audio){ return sourceChannelLabels(audio); }
@@ -373,7 +388,8 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     ctx._mpvTime=0; ctx._mpvPath=p;
     // mpv 顯示時仍要建立透明的 DOM 字幕命中層，才能直接拖曳字幕。
     emit('render:videoSub');
-    ctx._mpvDuration=res.duration||dur||0;
+    // ffprobe 已知的母素材片長不可被 mpv 啟動時尚未穩定的較短讀數縮掉。
+    ctx._mpvDuration=maxKnownSourceDuration(dur,res.duration);
     State.duration=ctx._mpvDuration;
     if(info?.video?.fps) setFps(info.video.fps);
     const primary=ctx._registerPrimary({
@@ -390,77 +406,10 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
 
     emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
 
-    // 監聽 mpv 事件（時碼同步 / 播放狀態）。序列模式：e.data 為【來源時間】，顯示前換算為時間軸時間。
+    // 只在本次 intake 仍有效時轉交 mpv 事件；來源時間與播放狀態由 Media 處理。
     adapter.onEvent(e=>{
       if(!owns()) return;
-      if(e.event==='property-change'){
-        if(e.name==='time-pos'&&e.data!=null){
-          // 純音訊時間軸與影片間隙都刻意讓 mpv 停住；這時殘留的 time-pos
-          // 不能覆寫虛擬播放頭，否則最後一段影片刪除後會跳回舊影片時間。
-          if(ctx._seqSwitching || ctx._gap || ctx.audioOnlyTimeline()) return;
-          // Proxy／母素材 loadfile 會先回報新檔的 0 秒。等同一來源時間的
-          // seek 確實出畫後才交還播放點權威，避免倒播瞬間跳回片頭。
-          if(!ctx.acceptMpvSourceTime(e.data)) return;
-          const prev=ctx._mpvTime; ctx._mpvTime=e.data;
-          const _ac=ctx.seqOn()?ctx._activeClip():null;
-          // FPS-SYNC（詳見 FPS_時碼一致性.md）：暫停時讓播放器時碼與時間軸播放點同源同格：
-          //  - 若 mpv 回報只是 seek 後的 settling 抖動（與權威 _lastSeekTime 差 <1.5 格），
-          //    維持 _lastSeekTime，避免用未對齊的原始時間經 secToEncore 進位多一格、
-          //    也避免拉偏權威值而破壞逐格精度；
-          //  - 若是大幅變動（例如在 mpv 視窗內拖拉），才吸附到最近格並更新 _lastSeekTime。
-          // 播放中則用原始時間平滑前進。（比較與顯示一律在時間軸域）
-          const driverTimeline=ctx._transport.timelineTime({sourceTime:e.data,clip:_ac});
-          // 目前內附的 mpv 0.41 沒有 video-pts property；time-pos 是它提供的
-          // per-frame 位置。presentation host 仍會另外要求同一請求的 playback-restart
-          // 才完成提交，因此這裡只更新呈現觀測，不直接把命令目標寫進權威播放頭。
-          ctx.observePresentedTimelineTime(driverTimeline,'mpv');
-          if(ctx.presentationPending?.()) return;
-          const t=ctx._transport.observeSourceTime(e.data,{
-            clip:_ac,playing:ctx.playing,fps:State.fps,dropFrame:State.dropFrame,
-          });
-          $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
-          $('seekBar').value=Math.round(t*1000);
-          emit('media:playhead');
-          if(Math.abs(e.data-prev)>0.5) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:driverTimeline}));
-        }
-        if(e.name==='pause'){
-          const paused=!!e.data;
-          if(ctx._seqSwitching || ctx.mpvSourceTransitionPending()) return; // loadfile 過程中的暫停屬內部操作
-          // 進入影片間隙／純音訊模式時，是本層主動暫停 mpv 來保持黑畫面；
-          // 不可把這個內部事件當成使用者停止整個時間軸，否則外部音訊會被停掉。
-          if(ctx._gap || ctx.audioOnlyTimeline()) return;
-          if(paused&&ctx.playing){
-            // 序列：keep-open 在段尾自動暫停 → 若後面還有內容，交給推進而非停止
-            const c=ctx.seqOn()?ctx._activeClip():null;
-            if(c && Math.abs(ctx.vTime()-c.out)<0.3 && (Seq.clipAt(Seq.clipEnd(c)+0.001)||Seq.nextAfter(Seq.clipEnd(c))||State.duration>Seq.clipEnd(c)+0.001)){
-              ctx._mpvTime=c.out; ctx.seqContinueAtEnd(); return;
-            }
-            ctx.observePlayerPlaybackState(false,{source:'mpv',reason:'pause'});
-          }
-          else if(!paused&&!ctx.playing){ ctx.observePlayerPlaybackState(true,{source:'mpv',reason:'play'}); }
-        }
-        if(e.name==='duration'&&typeof e.data==='number'&&e.data>0){
-          if(ctx.mpvSourceTransitionPending() || ctx._reverseProxyActive) return; // preview Proxy 長度不覆寫母素材時間軸
-          ctx._mpvDuration=e.data;
-          if(ctx.seqOn()){ const c=ctx._activeClip(); if(c) Seq.updateSourceDur(c, e.data); }
-          else if(!ctx.audioOnlyTimeline()){ State.duration=e.data; emit('duration:known'); }
-        }
-      }
-      if(e.event==='end-file'&&ctx.mpvMode){
-        if(ctx._seqSwitching || ctx.mpvSourceTransitionPending()) return; // loadfile 造成的舊檔 end-file
-        // _enterGap()/純音訊模式已主動停住 mpv；忽略其後到達的舊檔結束事件，
-        // 讓虛擬播放頭與外部音訊繼續走到專案最右端。
-        if(ctx._gap || ctx.audioOnlyTimeline()) return;
-        if(e.reason==='error'){ // mpv 播放失敗（解碼/濾鏡錯誤）：浮上來，不當成段尾推進
-          ctx.observePlayerPlaybackState(false,{source:'mpv',reason:'error'});
-          setStatus('mpv 播放失敗（解碼或濾鏡錯誤）','err'); showToast('mpv 播放此影片段失敗');
-          return;
-        }
-        // 序列：來源播到底（out===dur）→ 若還有後續，推進而非停止
-        const c=ctx.seqOn()?ctx._activeClip():null;
-        if(c && ctx.playing){ ctx._mpvTime=c.out; if(ctx.seqContinueAtEnd()) return; }
-        ctx.observePlayerPlaybackState(false,{source:'mpv',reason:'end-file'});
-      }
+      ctx.observeMpvEvent(e);
     });
 
     // 混音器立即顯示「準備中」推桿（聲道數在 ffprobe 階段就已知）

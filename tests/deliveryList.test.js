@@ -121,6 +121,29 @@ describe('清單與佇列共用交付規格', () => {
 });
 
 describe('清單操作', () => {
+  it('讀取與套用列不洩漏可改寫的內部音訊編組', () => {
+    const audioPlan = { streams: [{ layout: 'stereo', busIds: ['a1', 'a2'] }] };
+    const input = [{ format: 'h264', outDir: 'D:/交付', customName: '原始.mp4', nameModified: true, audioPlan }];
+    const list = base({ initial: input });
+    input[0].audioPlan.streams[0].busIds[0] = '外部修改';
+
+    const row = list.get(0);
+    row.customName = '繞過驗證.mp4';
+    row.audioPlan.streams[0].busIds[1] = '外部修改';
+    const rows = list.rows();
+    rows[0].audioPlan.streams[0].busIds[0] = '外部修改';
+    expect(list.outPaths()[0].name).toBe('原始.mp4');
+    expect(list.get(0).audioPlan.streams[0].busIds).toEqual(['a1', 'a2']);
+
+    const replacement = { ...list.get(0), audioPlan: { streams: [{ layout: 'stereo', busIds: ['b1', 'b2'] }] } };
+    list.applyRow(0, replacement);
+    replacement.audioPlan.streams[0].busIds[0] = '外部修改';
+    expect(list.get(0).audioPlan.streams[0].busIds).toEqual(['b1', 'b2']);
+    const added = list.add();
+    added.audioPlan.streams[0].busIds[0] = '外部修改';
+    expect(list.get(1).audioPlan.streams[0].busIds).toEqual(['b1', 'b2']);
+  });
+
   it('新列預設一列，並自動帶預設檔名', () => {
     const l = base();
     expect(l.count()).toBe(1);

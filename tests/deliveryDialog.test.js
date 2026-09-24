@@ -290,30 +290,42 @@ describe('匯出交付清單', () => {
     expect(State.audioProject.exportLayout.streams).toHaveLength(2);
   });
 
-  /* 交付檔名常常很長（專案代號＋fps＋聲道編組），和其他控制項擠在同一列時尾端會被
-     截掉。三列的分工：格式／解析度／碼率／燒入TC ｜ 檔名＋輸出目錄 ｜ 音軌。
-     這條鎖住那個分列，避免日後有人為了省高度又併回去。 */
-  it('檔名與輸出目錄獨佔一列，燒入TC 在格式列，音軌自成一列', async () => {
+  /* 長檔名與目錄需要各自伸縮，規格、檔案位置、音訊與字幕則要有清楚的分區。 */
+  it('交付項目以規格、檔案位置、音訊與字幕分區並標示欄位', async () => {
     await showExportVideoDialog();
     await new Promise(resolve => setTimeout(resolve, 25));
 
-    const nameRow = document.querySelector('.ev-name').parentElement;
-    expect(nameRow.querySelector('.ev-outdir'), '輸出目錄應與檔名同列').not.toBeNull();
-    expect(nameRow.querySelector('.ev-dir-btn'), '瀏覽鈕應與檔名同列').not.toBeNull();
-    expect(nameRow.querySelector('.ev-audio-btn'), '音軌不該和檔名同列').toBeNull();
-    expect(nameRow.querySelector('.ev-tc'), '燒入TC 不該和檔名同列').toBeNull();
+    const card = document.querySelector('.delivery-card');
+    expect(card.querySelector('.delivery-card-head .ev-del')).not.toBeNull();
+    const spec = card.querySelector('.delivery-spec-grid');
+    expect(spec.querySelector('.ev-format')).not.toBeNull();
+    expect(spec.querySelector('.ev-res')).not.toBeNull();
+    expect(spec.querySelector('.ev-fps')).not.toBeNull();
+    expect(spec.querySelector('.ev-kbps')).not.toBeNull();
+    expect(spec.textContent).toContain('交付格式');
+    expect(spec.textContent).toContain('畫面尺寸');
+    expect(spec.textContent).toContain('影格率');
+    expect(spec.textContent).toContain('視訊碼率');
 
-    // 燒入TC 與格式／解析度／碼率同列
-    const formatRow = document.querySelector('.ev-format').parentElement;
-    expect(formatRow.querySelector('.ev-tc'), '燒入TC 應在格式列').not.toBeNull();
-    expect(formatRow.querySelector('.ev-del'), '刪除鈕仍在格式列最右').not.toBeNull();
+    const output = card.querySelector('.delivery-output-grid');
+    expect(output.querySelector('.ev-name')).not.toBeNull();
+    expect(output.querySelector('.ev-outdir')).not.toBeNull();
+    expect(output.querySelector('.ev-dir-btn')).not.toBeNull();
+    expect(output.querySelector('.ev-audio-btn')).toBeNull();
+    expect(output.querySelector('.ev-tc')).toBeNull();
+    expect(output.textContent).toContain('輸出檔名');
+    expect(output.textContent).toContain('儲存位置');
 
-    const audioRow = document.querySelector('.ev-audio-btn').parentElement.parentElement;
-    expect(audioRow.querySelector('.ev-tc'), '燒入TC 已移走，不該還在音軌列').toBeNull();
-    expect(audioRow.querySelector('.ev-name'), '檔名不該和音軌同列').toBeNull();
+    const options = card.querySelector('.delivery-card-options');
+    expect(options.querySelector('.ev-audio-btn')).not.toBeNull();
+    expect(options.querySelector('.ev-tc')).not.toBeNull();
+    expect(options.querySelector('.delivery-sub-chip')).not.toBeNull();
+    expect(document.querySelector('#evRowCount').textContent).toBe('1 項');
+    expect(card.querySelector('.ev-name').title).toBe(card.querySelector('.ev-name').value);
+    expect(card.querySelector('.ev-format').title).toBe(card.querySelector('.ev-format').selectedOptions[0].textContent);
 
-    // 檔名欄位要拿到比目錄更大的份額，長檔名才看得到全貌
-    expect(document.querySelector('.ev-name').style.flexGrow).toBe('3');
-    expect(document.querySelector('.ev-outdir').style.flexGrow).toBe('2');
+    document.querySelector('#evAddRowBtn').click();
+    expect(document.querySelector('#evRowCount').textContent).toBe('2 項');
+    expect(document.activeElement).toBe(document.querySelector('.delivery-card:last-child .ev-format'));
   });
 });

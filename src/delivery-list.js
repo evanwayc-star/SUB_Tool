@@ -137,8 +137,11 @@ export function createDeliveryList({
   projectTag, fps, canvasW, canvasH,
   audioOnly = false, defaultAudioLayout = {}, desktop = true, initial = null,
 }) {
+  // A row is editable only through this module's methods. Audio plans contain
+  // nested arrays, so a shallow copy would still let a dialog bypass presets.
+  const copyRow = row => structuredClone(row);
   const rows = Array.isArray(initial) && initial.length
-    ? initial.map(r => ({ ...r }))
+    ? initial.map(copyRow)
     : [newRow({ audioOnly, defaultAudioLayout })];
 
   const nameFor = r => defaultDeliveryName({
@@ -152,20 +155,20 @@ export function createDeliveryList({
   const at = i => rows[i] || null;
 
   const api = {
-    rows() { return rows; },
+    rows() { return rows.map(copyRow); },
     count() { return rows.length; },
-    get(i) { return at(i); },
+    get(i) { const r = at(i); return r ? copyRow(r) : null; },
     defaultNameFor(i) { const r = at(i); return r ? nameFor(r) : ''; },
 
     add() {
       const last = rows[rows.length - 1];
       const row = last
-        ? { ...JSON.parse(JSON.stringify(last)), customName: '', nameModified: false, outDir: last.outDir }
+        ? { ...copyRow(last), customName: '', nameModified: false, outDir: last.outDir }
         : newRow({ audioOnly, defaultAudioLayout });
       applyFormatPreset(row);
       rows.push(row);
       refreshName(row);
-      return row;
+      return copyRow(row);
     },
 
     removeAt(i) { if (at(i)) rows.splice(i, 1); },
@@ -238,7 +241,7 @@ export function createDeliveryList({
     /* 音軌設定視窗回來後套用：編組變了，沒改過名字的列要跟著換掉 `_51FM+20FM` 那一段。 */
     applyRow(i, next) {
       if (!at(i)) return;
-      rows[i] = next;
+      rows[i] = copyRow(next);
       applyFormatPreset(rows[i]);
       refreshName(rows[i]);
     },

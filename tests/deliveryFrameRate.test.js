@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { DELIVERY_FRAME_RATES, deliveryFrameRateRatio, normalizeDeliveryFrameRate, sameDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { createDeliveryList } from '../src/delivery-list.js';
 import { buildDeliveryArgv } from '../electron/export-plan.js';
+import { buildExportSnapshot } from '../src/delivery-job.js';
 
 describe('交付 FPS', () => {
   it('NTSC 使用精確分數，24 與 30 不會誤認為 NTSC', () => {
@@ -30,7 +31,7 @@ describe('交付 FPS', () => {
     expect(restored.toJobs({})[0].fps).toBe(25);
   });
 
-  it('不同或未知來源 FPS 禁止直接複製影片，改用精確 FPS 重編碼', () => {
+  it('H264-MP4 一律編碼，未知來源 codec 不能以相同 FPS 冒充 H264', () => {
     const spec = {
       format: 'h264', width: 320, height: 180, fps: 29.97, duration: 2, outPath: 'out.mp4',
       clips: [{ path: 'master.mp4', type: 'video', in: 0, out: 2, offset: 0, natW: 320, natH: 180, fps: 25 }],
@@ -41,7 +42,17 @@ describe('交付 FPS', () => {
     expect(converted.args[converted.args.indexOf('-r') + 1]).toBe('30000/1001');
     expect(converted.args[converted.args.indexOf('-filter_complex') + 1]).toContain('fps=30000/1001');
     const matched = buildDeliveryArgv({ ...spec, fps: 25 }, env);
-    expect(matched.plannedEncoder).toBe('copy');
+    expect(matched.plannedEncoder).toBe('libx264');
+    expect(matched.args).not.toContain('copy');
     expect(buildDeliveryArgv({ ...spec, clips: [{ ...spec.clips[0], fps: undefined }] }, env).plannedEncoder).toBe('libx264');
+
+    const snapshot = buildExportSnapshot({
+      state: { clips: [{ path: 'master.mov', type: 'video', in: 0, out: 10, offset: 0,
+        fps: 25, natW: 320, natH: 180 }], exportIn: 0, exportOut: 2 },
+      sequenceEnd: 10,
+    });
+    const actual = buildDeliveryArgv({ ...snapshot, ...spec, fps: 25, clips: snapshot.clips }, env);
+    expect(actual.plannedEncoder).toBe('libx264');
+    expect(actual.args[actual.args.indexOf('-filter_complex') + 1]).toContain('trim=start=0:end=2');
   });
 });

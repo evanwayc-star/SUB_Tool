@@ -65,6 +65,8 @@ let Wave;
 let State;
 let resetAudioProject;
 let resetPlayerAdapter;
+let setStatus;
+let showToast;
 let pending;
 
 describe('desktop mother-source intake ownership', () => {
@@ -85,6 +87,7 @@ describe('desktop mother-source intake ownership', () => {
     ({ Media, Wave } = await import('../src/media.js'));
     ({ State, resetAudioProject } = await import('../src/state.js'));
     ({ resetPlayerAdapter } = await import('../src/media-player-adapter.js'));
+    ({ setStatus, showToast } = await import('../src/ui.js'));
   });
 
   beforeEach(() => {
@@ -95,6 +98,8 @@ describe('desktop mother-source intake ownership', () => {
     deskMock.ingest.mockReset();
     deskMock.waveAudio.mockReset();
     deskMock.cleanupAudio.mockReset();
+    setStatus.mockClear();
+    showToast.mockClear();
     deskMock.ingest.mockImplementation(({ path }) => {
       const work = deferred();
       pending.set(path, work);
@@ -111,6 +116,113 @@ describe('desktop mother-source intake ownership', () => {
     domMock.video.src = '';
     domMock.video.readyState = 1;
     domMock.video.duration = 12;
+    delete window.subtool.streamIngest;
+  });
+
+  it('原生預覽 metadata 較短時保留 ffprobe 母素材片長', async () => {
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 120,
+      video: { codec: 'vp9', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+    domMock.video.duration = 30;
+
+    await Media.loadDesktopMedia('C:/media/native.webm');
+
+    expect(State.duration).toBe(120);
+    expect(State.clips[0].dur).toBe(120);
+  });
+
+  it('邊轉邊播 Proxy 的暫時片長不縮短母素材', async () => {
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 120,
+      video: { codec: 'prores', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+    window.subtool.streamIngest = vi.fn(async () => ({
+      streamUrl: 'file:///C:/cache/growing-proxy.mp4', cached: true, channels: [],
+    }));
+    domMock.video.duration = 30;
+
+    await Media.loadDesktopMedia('C:/media/growing.mov');
+
+    expect(State.duration).toBe(120);
+    expect(State.clips[0].dur).toBe(120);
+  });
+
+  it('一般 ingest Proxy 的 metadata 較短時保留母素材片長', async () => {
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 120,
+      video: { codec: 'vp9', fps: 25, width: 1920, height: 1080 },
+      audio: [{ channels: 6, channelLayout: '5.1' }],
+    });
+    deskMock.ingest.mockResolvedValueOnce({ channels: [] });
+    domMock.video.duration = 30;
+
+    await Media.loadDesktopMedia('C:/media/multichannel.webm');
+
+    expect(State.duration).toBe(120);
+    expect(State.clips[0].dur).toBe(120);
+  });
+
+  it('切到另一段原生影片時不讓較短 metadata 覆寫其已探測片長', async () => {
+    const info = {
+      duration: 120,
+      video: { codec: 'vp9', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    };
+    deskMock.probe.mockResolvedValueOnce(info).mockResolvedValueOnce(info);
+    await Media.loadDesktopMedia('C:/media/first.webm');
+    const second = await Media.addClipDesktop('C:/media/second.webm');
+    domMock.video.duration = 30;
+
+    await Media._ensureClip(second, 0, false);
+
+    expect(second.dur).toBe(120);
+    expect(second.out).toBe(120);
+  });
+
+  it('一般 ingest 音訊 metadata 失敗時保留影片並顯示錯誤', async () => {
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'vp9', fps: 25, width: 1920, height: 1080 },
+      audio: [{ channels: 6, channelLayout: '5.1' }],
+    });
+    deskMock.ingest.mockResolvedValueOnce({ channels: [{ file: 'C:/cache/bad.wav' }] });
+    const audio = vi.spyOn(Media._intakeSession, 'materializeAudioElements')
+      .mockRejectedValueOnce(new Error('metadata 讀取失敗'));
+
+    try {
+      await Media.loadDesktopMedia('C:/media/audio-error.webm');
+      expect(State.clips[0].path).toBe('C:/media/audio-error.webm');
+      expect(showToast).toHaveBeenCalledWith(expect.stringContaining('metadata 讀取失敗'));
+      expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗', 'err');
+    } finally {
+      audio.mockRestore();
+    }
+  });
+
+  it('邊轉邊播音訊 metadata 失敗時顯示錯誤', async () => {
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'prores', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+    window.subtool.streamIngest = vi.fn(async () => ({
+      streamUrl: 'file:///C:/cache/growing-proxy.mp4', cached: true,
+      channels: [{ file: 'C:/cache/bad.wav' }],
+    }));
+    const audio = vi.spyOn(Media._intakeSession, 'materializeAudioElements')
+      .mockRejectedValueOnce(new Error('metadata 讀取失敗'));
+
+    try {
+      await Media.loadDesktopMedia('C:/media/audio-error.mov');
+      await vi.waitFor(() => expect(setStatus).toHaveBeenLastCalledWith(
+        '影片已載入，但音訊預覽載入失敗', 'err'));
+      expect(showToast).toHaveBeenCalledWith(expect.stringContaining('metadata 讀取失敗'));
+    } finally {
+      audio.mockRestore();
+    }
   });
 
   it('discarding A after B starts prevents late ingest results from replacing B', async () => {
@@ -208,12 +320,49 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
+  it('maps mpv source time through the active clip and ignores stale time-pos in a gap', async () => {
+    let notifyMpv = () => {};
+    const mpv = {
+      detect: vi.fn(async () => ({ available: true })),
+      launch: vi.fn(async () => ({ duration: 12 })),
+      quit: vi.fn(async () => {}),
+      onEvent: vi.fn(callback => { notifyMpv = callback; }),
+      setBounds: vi.fn(async () => {}),
+    };
+    window.subtool.mpv = mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'h264', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+
+    try {
+      await Media.loadDesktopMedia('C:/media/offset-clip.mp4');
+      const clip = State.clips[0];
+      Object.assign(clip, { in: 1, out: 11, offset: 10 });
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 2 });
+      expect(Media.displayTime()).toBe(11);
+      expect(domMock.$('tcCur').textContent).toBe('00:00:11:00');
+      expect(domMock.$('seekBar').value).toBe(11000);
+
+      Media._gap = true;
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 5 });
+      expect(Media._mpvTime).toBe(2);
+    } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
   it('大型 Canopus AVI 初次匯入只建音訊快取，加入第二支影片才補做主影片 Proxy', async () => {
     const source='C:/media/large-canopus.avi';
+    let notifyMpv=()=>{};
     const mpv={
       detect:vi.fn(async()=>({available:true})),
-      launch:vi.fn(async()=>({duration:7448.441})),
-      quit:vi.fn(async()=>{}), onEvent:vi.fn(), setBounds:vi.fn(async()=>{}),
+      launch:vi.fn(async()=>({duration:7400})),
+      quit:vi.fn(async()=>{}), onEvent:vi.fn(callback=>{ notifyMpv=callback; }), setBounds:vi.fn(async()=>{}),
       seek:vi.fn(async()=>{}), mute:vi.fn(async()=>{}),
     };
     window.subtool.mpv=mpv;
@@ -232,6 +381,9 @@ describe('desktop mother-source intake ownership', () => {
     try{
       await Media.loadDesktopMedia(source);
       expect(State.duration).toBe(7448.441);
+      notifyMpv({event:'property-change',name:'duration',data:7400});
+      expect(State.duration).toBe(7448.441);
+      expect(State.clips[0].dur).toBe(7448.441);
       expect(deskMock.ingest).not.toHaveBeenCalled();
       Media._commitPresentedTarget(0);
       await vi.waitFor(()=>expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({
@@ -350,11 +502,11 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
-  it('restores normal mpv seeking when a H.264 clip follows a H.265 primary', async () => {
+  it('restores normal mpv seeking without shortening a probed clip after source switch', async () => {
     const mpv = {
       detect: vi.fn(async () => ({ available: true })),
       launch: vi.fn(async () => ({ duration: 12 })),
-      loadfile: vi.fn(async () => ({ ok: true, duration: 12 })),
+      loadfile: vi.fn(async () => ({ ok: true, duration: 8 })),
       quit: vi.fn(async () => {}),
       onEvent: vi.fn(),
       setBounds: vi.fn(async () => {}),
@@ -384,6 +536,7 @@ describe('desktop mother-source intake ownership', () => {
       await vi.waitFor(() => expect(mpv.seek).toHaveBeenCalled());
 
       expect(mpv.seek).toHaveBeenLastCalledWith(3.96, undefined);
+      expect(h264.dur).toBe(12);
     } finally {
       Media.reset();
       delete window.subtool.mpv;

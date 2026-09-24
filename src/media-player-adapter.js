@@ -63,13 +63,15 @@ class Html5Transport {
       };
 
       signal?.addEventListener?.('abort', abort, { once: true });
-      if (typeof video.addEventListener === 'function') {
+      // FPS-SYNC: seeked confirms a new source position, not a composited frame.
+      // Chromium's frame callback is the presentation evidence when available.
+      if (typeof video.requestVideoFrameCallback !== 'function' && typeof video.addEventListener === 'function') {
         seekedHandler = () => { accept(video.currentTime); };
         video.addEventListener('seeked', seekedHandler);
       }
       try { video.currentTime = target; } catch (error) { cleanup(); reject(error); return; }
       if (typeof video.requestVideoFrameCallback === 'function') {
-        requestFrame();
+        try { requestFrame(); } catch (error) { cleanup(); reject(error); }
       } else if (!seekedHandler) {
         queueMicrotask(() => accept(video.currentTime));
       }
