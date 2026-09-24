@@ -13,7 +13,7 @@
 - 為每句字幕調整內容、In／Out、位置、旋轉、字型與樣式。
 - 鎖定視訊、音訊或字幕軌，避免誤改；鎖定軌仍可點擊或拖曳播放點。
 - 以本機 Whisper 或雲端服務執行語音辨識與逐行文本匹配。
-- 一次建立多份 MP4、ProRes、WAV 交付，交由背景佇列執行。
+- 一次建立 MP4、ProRes MOV、WAV、DVD／BD ISO、MOD-FHD 與航空 MPG 等九種交付，交由背景佇列執行。
 
 ## 工作方式
 
@@ -64,7 +64,7 @@ flowchart LR
 
 ### 背景交付
 
-- MP4 H.264、MOV ProRes、WAV 與字幕檔。
+- 九種交付格式：ProRes422HQ-MOV、H264-MP4、WAV、DVD-ISO (4.5G)、BD-ISO (24G)、MOD-FHD，以及三種航空 DMPES／S3K 規格；字幕檔另行匯出。各格式限制見[使用說明](docs/使用說明.md#影片與音訊交付)。
 - 匯出影片視窗按規格、檔案位置、音訊與字幕分區；多份交付可一起送出，工作送出後使用凍結快照，不受後續編輯影響。
 - 匯出序列視窗集中顯示進度、待處理項目與已完成成品。
 - 佇列支援並行、停止、重試、排序、崩潰復原與同一路徑互斥。
@@ -112,8 +112,10 @@ npm run electron:dev
 | [Electron 維護手冊](docs/Electron_維護手冊.md) | IPC、檔案權限、ffmpeg、mpv 與佇列 |
 | [FPS／時碼一致性](docs/FPS_時碼一致性.md) | seek、逐格、DF／NDF 與時間域規則 |
 | [領域詞彙表](CONTEXT.md) | 專案統一用語 |
+| [共用領域規則](shared/README.md) | renderer 與主行程共用模組的加入條件 |
 | [版本變更紀錄](docs/版本變更紀錄.md) | 歷史版本與驗證證據 |
 | [架構決策](docs/adr/) | 已採用的架構決策與代價 |
+| [研究紀錄](docs/research/) | 註明日期與來源的技術評估快照 |
 
 ## 專案結構
 

@@ -10,10 +10,8 @@
 本 repo 是**單一 context**，沒有 `CONTEXT-MAP.md`，也沒有 context 專屬的
 `src/<context>/docs/adr/`。
 
-> **這些檔案不存在時，安靜跳過就好。** 不要特別指出它們缺席，也不要一開始就
-> 建議建立。`/domain-modeling`（由 `/grill-with-docs` 與
-> `/improve-codebase-architecture` 帶起）會在真的解決了某個詞彙或決策時
-> **順勢建立**它們。
+`CONTEXT.md` 與 `docs/adr/` 已存在。特定領域尚無 ADR 時，不要先建立空殼；
+`/domain-modeling` 在真的解決某個詞彙或決策時再補上。
 
 ## 檔案結構
 
@@ -22,7 +20,8 @@
 ├── CONTEXT.md
 ├── docs/adr/
 │   ├── 0001-<決策標題>.md
-│   └── 0002-<決策標題>.md
+│   ├── 0002-<決策標題>.md
+│   └── 0003-<決策標題>.md
 └── src/
 ```
 

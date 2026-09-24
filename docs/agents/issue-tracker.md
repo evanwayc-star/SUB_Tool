@@ -5,7 +5,7 @@
 
 ## 慣例
 
-- **建立 issue**：`gh issue create --title "..." --body "..."`。多行內容用 heredoc。
+- **建立 issue**：`gh issue create --title "..." --body-file <UTF-8 暫存檔>`。多行內容先寫入檔案，保留實際換行；不要把 PowerShell 字串跳脫後的 `\n` 當作換行。
 - **讀取 issue**：`gh issue view <number> --comments`，並一併取得 labels。
 - **列出 issue**：
   ```bash

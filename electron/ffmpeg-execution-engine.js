@@ -273,8 +273,8 @@ function buildIngestArgs({
 
     // 全 I 幀 (All-Intra / Ultra-Short GOP) 預覽規格：
     // NVIDIA NVENC SDK 強制要求 gopLength > numBFrames + 1，在 -bf 0 條件下其硬體最小合法 GOP 為 2；
-    // 其他編碼器 (libx264, QSV, VideoToolbox) 則支援物理級 GOP = 1。
-    // 兩者皆完全關閉 B 幀 (-bf 0) 並強制閉合 GOP (-flags +cgop)，達到 0ms 零延遲隨機 seek 與零抖動。
+    // 其他編碼器 (libx264, QSV, VideoToolbox) 則支援 GOP = 1。
+    // 兩者皆關閉 B 幀 (-bf 0) 並使用閉合 GOP (-flags +cgop)，減少隨機 seek 的解碼依賴；實際呈現延遲仍取決於 I/O 與播放器。
     const gop = encoder === 'h264_nvenc' ? '2' : '1';
     args.push('-g', gop, '-keyint_min', gop, '-bf', '0', '-flags', '+cgop');
 

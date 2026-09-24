@@ -160,7 +160,7 @@ npm run release:prepare -- --version X.Y.Z --date YYYY-MM-DD --notes <notes檔�
 #    → 只更新兩份 manifest 版號，並在 changelog 導言後插入單一版本區段
 npm run dist                                 # ⑤ → release/SUB Tool Setup X.Y.Z.exe
 # ⑥ 實際安裝並確認 app 內顯示的版號
-git add -A && git commit && git push origin main
+git add <本版確認的檔案> && git commit && git push origin main
 # ⑦ 建立 GitHub Release，附上同一支 .exe
 ```
 

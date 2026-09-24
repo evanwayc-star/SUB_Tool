@@ -155,6 +155,8 @@ Windows filtergraph 路徑要跳脫兩層；ASS Fontname 必須是字型檔內�
 
 MOD-FHD 固定使用 CPU libx264，參照 `fdst_MOD-FHD.cpf` 與 Carbon 參數畫面：1920×1080、30000/1001 fps、TFF/MBAFF、High@4.1、CBR 7280 kbps、GOP 上限 32、2 B 幀、4 reference frames、CABAC、單 slice、AUD／HRD。合成先在 60000/1001 場時刻進行，隔行來源先以 bwdif 還原場，再交織為 TFF；TC 在交織後依輸出格率計數。
 
+音訊在 `export-plan.js` 檢查實際選用的 bus／來源效果：若沒有專案音量平衡，對最終單一 Stereo 混音套用「−12 dB」預設（真峰值上限 −12 dBTP、非靜音整體目標 −18 LUFS）；若已有設定則沿用，不做第二次平衡。純靜音繞過可能產生無效量測值的正規化，維持無聲並完成 AAC 編碼。
+
 TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PMT PID 1280、TS/program ID 1、PAT/PMT 100 ms、PCR 40 ms。音訊固定單一 AAC-LC stereo、48 kHz、256 kbps、ADTS／eng；關閉 MPEG-4 PNS，watchdog 在 lease 釋放前用 `mod-fhd-transport.js` 驗證 TS/PES/ADTS framing，再將 ADTS ID 設為 MPEG-2。收尾失敗或取消沿用半成品清理，不回報成功。封裝時該模組須與 watchdog 一起 asarUnpack。
 
 這是跨編碼器的參數對應：Carbon 的 VBV=0（自動）在 x264 明確採一秒 buffer；CBR 下停用的最大碼率 10000 不當作實際碼率。Carbon 的 adaptive deblocking、運動搜尋、量化策略與 sequence-end-code 開關沒有全部逐項等價的 x264 介面；目前不額外插入 end-of-sequence NAL，不宣稱位元流與 Carbon 完全一致。FFmpeg 參數依據見 [MPEG-TS／ADTS muxer 文件](https://ffmpeg.org/ffmpeg-formats.html)。
@@ -182,9 +184,9 @@ watchdog 先以 `airline-output.js` 檢查 TS 結構，再將封包重排至 lea
 
 ### DVD／BD ISO 自動製作
 
-交付計畫透過純規格模組 `disc-encoding.js`，依共用格式及實際交付時長配置視訊碼率，扣除 AC-3 多串流、64 MiB 導覽資料與 8% 封裝預留；`disc-authoring.js` 執行原生封裝及驗證。DVD 使用 MPEG-2 720×480 TFF／29.97，BD 使用 Blu-ray compatible AVC High@4.1 1080p24。字幕先以顯示比例燒錄，再轉成儲存尺寸。
+交付計畫透過純規格模組 `disc-encoding.js`，依共用格式及實際交付時長配置視訊碼率，扣除 AC-3 多串流、64 MiB 導覽資料與 8% 封裝預留；`disc-authoring.js` 執行原生封裝及驗證。DVD 使用 MPEG-2 720×480 TFF／29.97；BD 使用 Blu-ray compatible AVC High@4.1，依專案 FPS 選擇不低於來源、最高 29.97 FPS 的模式：23.976／24 FPS 為 1080p，25／29.97 FPS 為 1080i。字幕先以顯示比例燒錄，再轉成儲存尺寸。
 
-watchdog 將一次 FFmpeg 編碼結果保存在 lease 暫存目錄；DVD 由 dvdauthor 產生 VIDEO_TS，再由 mkisofs 建立 UDF 1.02 ISO，BD 由 tsMuxeR 建立 UDF 2.50 ISO。無選單且首播 title 1。只有驗證 UDF 與容量上限後才回報完成；每次啟動原生合成程序都更新 lease PID，取消時先等待程序退出再清檔。尚未開始寫入 ISO 的失敗會保留原成品，復原時也讀取 `outputStarted`；清理失敗保留 owner 資訊供重試。
+watchdog 將一次 FFmpeg 編碼結果保存在 lease 暫存目錄；DVD 由 dvdauthor 產生 VIDEO_TS，再由 mkisofs 建立 UDF 1.02、標籤 `DVD` 的 ISO，BD 由 tsMuxeR 建立 UDF 2.50、標籤 `BD` 的 ISO。無選單且首播 title 1。只有驗證 UDF、標籤與容量上限後才回報完成；每次啟動原生合成程序都更新 lease PID，取消時先等待程序退出再清檔。尚未開始寫入 ISO 的失敗會保留原成品，復原時也讀取 `outputStarted`；清理失敗保留 owner 資訊供重試。
 
 `npm run native:prepare:disc` 依 `electron/disc-tools.json` 的固定來源及 SHA-256 下載工具、DLL 與授權文字，正式 Windows 包只收 manifest 所列檔案。Mac 測試包不帶這些 Windows 工具。`tests/discAuthoring.test.js` 以原生工具檢查 ISO 結構及多音軌解碼；`tests/discWatchdog.test.js` 驗證取消、復原與既有 ISO 保護。
 
