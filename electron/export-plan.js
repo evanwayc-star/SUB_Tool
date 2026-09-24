@@ -27,10 +27,11 @@
 const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
 const { clipLength } = require('../shared/clip-fade.cjs');
 const { deliveryFrameRateRatio } = require('../shared/delivery-frame-rate.cjs');
-const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
-const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter } = require('../shared/audio-loudness.cjs');
+const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
+const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter, HARD_LIMITER_PRESETS } = require('../shared/audio-loudness.cjs');
 const { airlineEncoding } = require('./airline-encoding');
 const { discEncoding } = require('./disc-encoding');
+const MOD_AUDIO_BALANCE = HARD_LIMITER_PRESETS.find(preset => preset.id === 'limit_minus_12db');
 
 const _EXPORT_LAYOUTS = Object.freeze({
 
@@ -387,8 +388,13 @@ function prepareDeliveryPayload(spec = {}) {
   const problem = deliveryPresetAudioProblem(spec.format, normalizedAudio);
   if (problem) throw new Error(problem);
   const normalizedPlan = _normalizeAudioPlan(normalizedAudio, { requireStreams: !isWav });
+  const bdMode = spec.format === 'bd-iso' ? bdVideoMode(spec.fps) : null;
+  if (spec.format === 'bd-iso' && (!bdMode || (spec.projectFps != null && bdMode.fps + 0.001 < Number(spec.projectFps)))) {
+    throw new Error('BD 輸出影格率必須是支援的光碟格式，且不得低於專案 FPS');
+  }
+  const fixedMode = bdMode || preset;
   const prepared = { ...spec, audioPlan: normalizedPlan,
-    ...(preset ? { width: preset.width, height: preset.height, fps: preset.fps,
+    ...(preset ? { width: fixedMode.width, height: fixedMode.height, fps: fixedMode.fps,
       videoKbps: preset.videoKbps } : {}) };
   // The persisted job keeps SMPTE ';'. FFmpeg's '.' spelling belongs only in argv.
   if (!isWav) _normaliseExportTimecodeWatermark(prepared.timecodeWatermark, prepared.fps);
@@ -419,14 +425,14 @@ function buildDeliveryArgv(spec = {}, env = {}) {
 
   const isAirline = preset?.transport === 'airline';
   const isDisc = preset?.kind === 'disc';
-  const isInterlaced = preset?.scan === 'interlaced';
   const isPro = format === 'prores';
   // 佇列顯示與 runFF 必須共用同一個實際交付時長：音訊 plan 的尾端若較長，
   // ffmpeg 會以它延長成品。
   const D = duration;
   // 編碼與容量只從本次已正規化的交付推導，caller 不得預先用另一份時長／格式配對。
   const airline = isAirline ? airlineEncoding(format) : null;
-  const disc = isDisc ? discEncoding(format, { duration: D, audioPlan }) : null;
+  const disc = isDisc ? discEncoding(format, { duration: D, audioPlan, fps }) : null;
+  const isInterlaced = (disc || preset)?.scan === 'interlaced';
   const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
 
   if (isWav) {
@@ -456,9 +462,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const W = isAirline || isDisc ? Math.max(2, Math.round(encodedW * sarParts[0] / sarParts[1] / 2) * 2) : encodedW;
   // FPS-SYNC：NTSC 格率必須用精確有理數；轉換只改 cadence，不改時間軸秒數。
   const outputRate = deliveryFrameRateRatio(fps);
-  // MOD-FHD 先以每秒 59.94 個時刻合成，再交織成上場優先的 29.97 幀；
+  // 隔行輸出先以每幀兩個場的時率合成，再交織成上場優先的影格；
   // 只標記 TFF 會把逐行畫面偽裝成隔行，並丟掉來源的場間運動。
-  const R = isInterlaced ? '60000/1001' : outputRate;
+  const R = isInterlaced ? deliveryFrameRateRatio(fps * 2) : outputRate;
   // ===== 多軌合成 filtergraph（v4.11.0）=====
   //  影像：每視訊軌各自 concat 成整條時間軸（片段放 offset、間隙【透明】），再由下而上 overlay 疊到黑底；
   //        上層片段覆蓋下層（比照預覽 top-occludes），透明間隙讓下層透出。
@@ -684,9 +690,28 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   // MP4：影像使用使用者指定的目標位元率；每條 AAC stream 依聲道數給足交付 bitrate。
   // ProRes 則固定輸出 24-bit PCM，避免母素材音訊再經有損 AAC 編碼。
   const kbps = disc?.videoKbps ?? Math.max(100, Math.min(200000, Math.round(videoKbps || 5000)));
-  const audioMaps = plannedAudio
+  let audioMaps = plannedAudio
     ? plannedAudio.streamLabels.flatMap(({ label }) => ['-map', label])
     : ['-map', '[ac]'];
+  // MOD 的自動上限只套在最後的 Stereo 混音。專案若已有平衡化設定，尊重原設定，
+  // 不在交付時疊加第二次 loudnorm（來源效果已在 _buildPlannedAudio 套用）。
+  if (format === 'mod-fhd') {
+    const routedBuses = new Set(audioPlan?.streams.flatMap(stream => stream.busIds) || []);
+    const balanced = audioPlan
+      ? !!audioPlan.loudness?.enabled || audioPlan.buses.some(bus => routedBuses.has(bus.id)
+        && bus.inputs.some(input => !!normalizeAudioLimiterSpec(input.audioLimiterSpec)))
+      : list.some(clip => !!normalizeAudioLimiterSpec(clip.audioLimiterSpec)
+        || clip.audio?.some(channel => !!normalizeAudioLimiterSpec(channel.audioLimiterSpec)));
+    if (!balanced) {
+      const sourceLabel = plannedAudio ? plannedAudio.streamLabels[0]?.label : '[ac]';
+      if (!sourceLabel) _exportPlanError('MOD-FHD 缺少 Stereo 音訊');
+      // FFmpeg loudnorm 在整段完全無聲時可能輸出 NaN，AAC 會因此拒絕編碼。
+      // 只把非有限樣本還原為數位零，保留真正的靜音與正常節目的響度。
+      const finiteStereo = "aeval=exprs='if(isnan(val(0)),0,val(0))|if(isnan(val(1)),0,val(1))',aformat=channel_layouts=stereo";
+      fc.push(`${sourceLabel}${buildLimiterFilter(MOD_AUDIO_BALANCE).filter},${finiteStereo}[modBalancedAudio]`);
+      audioMaps = ['-map', '[modBalancedAudio]'];
+    }
+  }
   const audioBitrates = preset ? Array.from({ length: plannedAudio?.streamLabels.length || 1 }, () => `${preset.audioKbps}k`) : isPro
     ? []
     : (plannedAudio
@@ -719,6 +744,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       duration: D, plannedEncoder: disc.plannedEncoder,
       isGpu: false, kbps, audioBitrates, audioChannels: null,
       discAudioPlan: audioPlan ? { streams: audioPlan.streams } : null,
+      discVideoFps: fps,
     };
   }
   const encode = preset

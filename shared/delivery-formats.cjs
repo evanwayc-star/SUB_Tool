@@ -41,6 +41,24 @@ const BD_ISO = Object.freeze({
   audioLabel: 'AC-3', audioKbps: 640, sampleRate: 48000, maxAudioStreams: 32,
 });
 
+// BD-ROM 1080p 僅支援電影格率；25／29.97 以 1080i 交付。產品上限為 29.97 FPS。
+const BD_VIDEO_MODES = Object.freeze([
+  [23.976, 1920, 1080, 'progressive', '1080p'],
+  [24, 1920, 1080, 'progressive', '1080p'],
+  [25, 1920, 1080, 'interlaced', '1080i50'],
+  [29.97, 1920, 1080, 'interlaced', '1080i59.94'],
+].map(([fps, width, height, scan, label]) => Object.freeze({ fps, width, height, scan, label })));
+
+function bdVideoMode(fps) {
+  const rate = Number(fps);
+  return Number.isFinite(rate) ? BD_VIDEO_MODES.find(mode => Math.abs(mode.fps - rate) < 0.01) || null : null;
+}
+
+function availableBdVideoModes(projectFps) {
+  const source = Number(projectFps);
+  return BD_VIDEO_MODES.filter(mode => !Number.isFinite(source) || mode.fps + 0.001 >= source);
+}
+
 const DELIVERY_FORMAT_PRESETS = Object.freeze([DVD_ISO, BD_ISO, MOD_FHD, AIRLINE_DMPES, AIRLINE_DMPES_4M, AIRLINE_S3K]);
 const DELIVERY_FORMAT_OPTIONS = Object.freeze([
   Object.freeze({ format: 'prores', label: 'ProRes422HQ-MOV', extension: '.mov' }),
@@ -94,6 +112,7 @@ function deliveryPresetAudioProblem(format, plan) {
 
 module.exports = {
   MOD_FHD, AIRLINE_S3K, AIRLINE_DMPES, AIRLINE_DMPES_4M, DVD_ISO, BD_ISO,
+  BD_VIDEO_MODES, bdVideoMode, availableBdVideoModes,
   DELIVERY_FORMAT_PRESETS, DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, getDeliveryFormatOption,
   normalizeDeliveryPresetAudio, deliveryPresetAudioProblem,
 };

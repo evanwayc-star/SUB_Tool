@@ -419,14 +419,14 @@ describe('DVD 與 BD 光碟映像交付', () => {
   ] };
 
   it.each([
-    ['dvd-iso', 720, 480, 29.97, '480i', 4500000000, 8],
-    ['bd-iso', 1920, 1080, 24, '1080p', 24000000000, 32],
-  ])('%s 保留多串流聲音，使用固定光碟尺寸與動態容量碼率', (format, width, height, fps, sizeTag, capacityBytes, maxAudioStreams) => {
+    ['dvd-iso', 720, 480, 29.97, '480i', 4500000000, 8, 60],
+    ['bd-iso', 1920, 1080, 29.97, '1080i', 24000000000, 32, 29.97],
+  ])('%s 保留多串流聲音，使用光碟相容尺寸與動態容量碼率', (format, width, height, fps, sizeTag, capacityBytes, maxAudioStreams, requestedFps) => {
     const list = base({ fps: 25, defaultAudioLayout: audioPlan });
     list.setOutDir(0, 'D:/交付');
     list.setFormat(0, format);
     list.setTargetHeight(0, 720);
-    list.setTargetFps(0, 60);
+    list.setTargetFps(0, requestedFps);
     list.setKbps(0, 50000);
     list.setBurnTimecode(0, true);
     expect(list.get(0)).toMatchObject({ targetH: height, targetFps: fps, kbps: null, audioPlan });
@@ -444,6 +444,24 @@ describe('DVD 與 BD 光碟映像交付', () => {
     expect(list.outPaths()).toEqual([{ dir: 'D:/交付', name: job.defaultName, path: job.outPath }]);
     list.setFormat(0, 'h264');
     expect(list.get(0).kbps).toBeGreaterThan(0);
+  });
+
+  it('BD 只允許不低於專案格率的模式，25p 使用 1080i50 並保留在工作中', () => {
+    const list = base({ fps: 25, defaultAudioLayout: audioPlan });
+    list.setFormat(0, 'bd-iso');
+    expect(list.get(0)).toMatchObject({ targetFps: 25, targetH: 1080 });
+    expect(list.get(0).customName).toContain('_1080i_25fps.iso');
+    expect(() => list.setTargetFps(0, 24)).toThrow(/低於專案/);
+    list.setTargetFps(0, 29.97);
+    expect(list.toJobs({ compiledAudioPlan: audioPlan })[0]).toMatchObject({
+      fps: 29.97, projectFps: 25, width: 1920, height: 1080,
+    });
+  });
+
+  it('專案 FPS 超過 29.97 時不可選 BD，拒絕後保留原格式', () => {
+    const list = base({ fps: 30 });
+    expect(() => list.setFormat(0, 'bd-iso')).toThrow(/超出 BD-ISO/);
+    expect(list.get(0).format).toBe('h264');
   });
 
   it.each(['dvd-iso', 'bd-iso'])('%s 不改寫雙 Mono，但拒絕超出串流數與不完整編組', format => {

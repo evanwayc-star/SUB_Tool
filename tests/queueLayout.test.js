@@ -369,6 +369,8 @@ describe('匯出佇列監控緊湊工作區', () => {
   it.each([
     ['dvd-iso', 'DVD-ISO (4.5G)', 720, 480, 29.97, 'i', '4.5 GB'],
     ['bd-iso', 'BD-ISO (24G)', 1920, 1080, 24, 'p', '24 GB'],
+    ['bd-iso', 'BD-ISO (24G)', 1920, 1080, 25, 'i', '24 GB'],
+    ['bd-iso', 'BD-ISO (24G)', 1920, 1080, 29.97, 'i', '24 GB'],
   ])('%s 監控與編輯器顯示容量及自動碼率，送出不帶固定碼率', async (format, label, width, height, fps, scan, capacity) => {
     const { document, queueAPI } = await openQueueWindow([{ id: 'disc', status: 'queued', payload: {
       format, outPath: 'C:\\out\\disc.iso', width, height, fps, targetH: height, videoKbps: null,

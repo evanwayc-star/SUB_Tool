@@ -67,12 +67,18 @@ function suggestKbps({ w, h } = {}) {
 // 交付清單建立工作與佇列修改工作共用同一份規格派生。呼叫端保留各自的
 // 時間碼來源：新工作以輸出 FPS 換算，已入列工作使用送出時凍結的起點。
 function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH = 0,
+  projectFps, bdMode = null,
   fps, videoKbps = 0, previousWidth, previousHeight, kbpsOverride,
   burnTimecode = false, timecodeStart = null } = {}) {
   const isWav = format === 'wav';
-  const height = preset?.height || targetH;
-  const { w, h } = preset
-    ? { w: preset.width, h: preset.height }
+  if (format === 'bd-iso' && (!bdMode || Math.abs(bdMode.fps - Number(fps)) > 0.001
+      || (Number.isFinite(Number(projectFps)) && bdMode.fps + 0.001 < Number(projectFps)))) {
+    throw new Error('BD 輸出影格率必須是支援的光碟格式，且不得低於專案 FPS');
+  }
+  const fixed = bdMode || preset;
+  const height = fixed?.height || targetH;
+  const { w, h } = fixed
+    ? { w: fixed.width, h: fixed.height }
     : deliveryResolution({ canvasW, canvasH, targetH: height, isWav });
   let kbps = preset ? preset.videoKbps : Number(videoKbps) || 0;
   if (format === 'h264') {
@@ -85,7 +91,7 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH =
   }
   return {
     width: w, height: h, targetH: height,
-    fps: preset?.fps || fps,
+    fps: bdMode?.fps || preset?.fps || fps,
     videoKbps: kbps,
     timecodeWatermark: !isWav && burnTimecode ? { start: timecodeStart } : null,
   };

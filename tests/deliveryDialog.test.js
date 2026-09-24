@@ -135,7 +135,7 @@ describe('匯出交付清單', () => {
 
   it.each([
     ['dvd-iso', '720×480i', '29.97', '4.5 GB', '8'],
-    ['bd-iso', '1920×1080p', '24', '24 GB', '32'],
+    ['bd-iso', '1920×1080i', '25', '24 GB', '32'],
   ])('%s 顯示容量、無選單與自動碼率，不提供誤導的固定碼率欄位', async (formatName, resolutionText, fps, capacity, streamLimit) => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-format')).not.toBeNull());
@@ -145,7 +145,16 @@ describe('匯出交付清單', () => {
     expect(document.querySelector('.ev-res').selectedOptions[0].textContent).toBe(resolutionText);
     expect(document.querySelector('.ev-res').disabled).toBe(true);
     expect(document.querySelector('.ev-fps').value).toBe(fps);
-    expect(document.querySelector('.ev-fps').disabled).toBe(true);
+    expect(document.querySelector('.ev-fps').disabled).toBe(formatName !== 'bd-iso');
+    if (formatName === 'bd-iso') {
+      expect([...document.querySelector('.ev-fps').options].map(option => Number(option.value)))
+        .toEqual([25, 29.97]);
+      const select = document.querySelector('.ev-fps');
+      select.value = '29.97';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      expect(document.querySelector('.ev-res').selectedOptions[0].textContent).toBe('1920×1080i');
+      expect(document.querySelector('.ev-name').value).toContain('_1080i_29.97fps.iso');
+    }
     expect(document.querySelector('.ev-kbps')).toBeNull();
     expect(document.querySelector('.delivery-disc-bitrate').textContent).toContain('碼率依片長與容量自動計算');
     expect(document.querySelector('.ev-name').value.endsWith('.iso')).toBe(true);
@@ -156,6 +165,13 @@ describe('匯出交付清單', () => {
     expect(detail.textContent).toContain('字幕依交付設定燒錄');
     expect(document.body.textContent).toContain(`最多 ${streamLimit} 條 Mono / Stereo / Lt/Rt / 5.1`);
     expect(State.fps).toBe(25);
+  });
+
+  it('專案 FPS 高於 29.97 時停用 BD 格式選項', async () => {
+    State.fps = 30;
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-format')).not.toBeNull());
+    expect(document.querySelector('.ev-format option[value="bd-iso"]').disabled).toBe(true);
   });
 
   it.each([

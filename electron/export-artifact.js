@@ -11,7 +11,7 @@ const { finalizeModFhdTransport } = require('./mod-fhd-transport');
  * Adapters are injected by the standalone bootstrap, never by the IPC payload.
  */
 function createExportArtifact(config, owner = {}, adapters = {}) {
-  const { outputFormat: format, outPath, args, discAudioPlan } = config;
+  const { outputFormat: format, outPath, args, discAudioPlan, discVideoFps } = config;
   const preset = getDeliveryFormatPreset(format);
   const isDisc = preset?.kind === 'disc';
   const disc = adapters.disc || nativeDisc;
@@ -53,7 +53,7 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
             const label = format === 'dvd-iso' ? '製作 DVD ISO' : '製作 BD ISO';
             onProgress?.({ label, pct: 95 });
             await disc.finalizeDiscOutput(format, stage.encodedPath, outPath, {
-              signal, audioPlan: discAudioPlan, onOutputStart, onProcess,
+              signal, audioPlan: discAudioPlan, fps: discVideoFps, onOutputStart, onProcess,
               onProgress: percent => onProgress?.({ label, pct: 95 + percent * 0.04 }),
             });
           } else if (preset?.transport === 'airline') {

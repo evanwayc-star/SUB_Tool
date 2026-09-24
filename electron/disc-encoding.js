@@ -1,7 +1,7 @@
 'use strict';
 
 // 光碟的純編碼與容量規則；原生工具、檔案與程序生命週期留在 disc-authoring。
-const { DVD_ISO, BD_ISO } = require('../shared/delivery-formats.cjs');
+const { DVD_ISO, BD_ISO, bdVideoMode } = require('../shared/delivery-formats.cjs');
 
 const DISC_FORMATS = Object.freeze({
   'dvd-iso': Object.freeze({ ...DVD_ISO, maxStreams: DVD_ISO.maxAudioStreams, maxVideoKbps: 8500, extension: '.mpg' }),
@@ -31,8 +31,10 @@ function discAudioStreams(format, audioPlan) {
 
 // Reserve filesystem/navigation space and mux overhead before assigning video bits.
 // A CBR elementary stream keeps the single encoding pass within this conservative budget.
-function discEncoding(format, { duration, audioPlan } = {}) {
+function discEncoding(format, { duration, audioPlan, fps } = {}) {
   const spec = discFormat(format);
+  const bdMode = format === 'bd-iso' ? bdVideoMode(fps ?? spec.fps) : null;
+  if (format === 'bd-iso' && !bdMode) throw fail('INVALID_BD_FPS', 'BD 輸出不支援此影格率');
   const audio = discAudioStreams(format, audioPlan);
   if (!Number.isFinite(duration) || duration <= 0) throw fail('INVALID_DISC_DURATION', '光碟時長必須大於零');
   const audioKbps = spec.audioKbps * audio.length;
@@ -52,11 +54,14 @@ function discEncoding(format, { duration, audioPlan } = {}) {
     audioArgs,
     muxArgs: ['-f', 'dvd', '-muxrate', '10080k', '-packetsize', '2048'],
   };
+  const keyint = Math.round(bdMode.fps);
   return {
-    ...spec, videoKbps, sar: '1/1', plannedEncoder: 'libx264',
+    ...spec, ...bdMode, videoKbps, sar: '1/1', plannedEncoder: 'libx264',
     videoArgs: ['-c:v', 'libx264', '-preset', 'medium', '-profile:v', 'high', '-level:v', '4.1', '-pix_fmt', 'yuv420p',
-      ...rate, '-bufsize:v', '30000k', '-x264-params',
-      'bluray-compat=1:ref=3:bframes=3:b-pyramid=strict:keyint=24:min-keyint=1:open-gop=0:aud=1:nal-hrd=cbr:force-cfr=1'],
+      ...rate, '-bufsize:v', '30000k',
+      ...(bdMode.scan === 'interlaced' ? ['-flags:v', '+ilme+ildct', '-top', '1'] : []),
+      '-x264-params',
+      `bluray-compat=1:ref=3:bframes=3:b-pyramid=strict:keyint=${keyint}:min-keyint=1:open-gop=0:aud=1:nal-hrd=cbr:force-cfr=1${bdMode.scan === 'interlaced' ? ':tff=1' : ''}`],
     audioArgs,
     muxArgs: ['-f', 'mpegts', '-mpegts_start_pid', '256', '-streamid', '0:256',
       ...audio.flatMap((_, index) => ['-streamid', `${index + 1}:${index + 257}`])],

@@ -22,7 +22,7 @@ describe('完整交付規格由正式 plan 編譯', () => {
     ['h264', 'libx264', '1280x720', '25', 8000],
     ['wav', 'pcm_s24le', null, null, null],
     ['dvd-iso', 'mpeg2video', '854x480', '60000/1001', 8500],
-    ['bd-iso', 'libx264', '1920x1080', '24', 30000],
+    ['bd-iso', 'libx264', '1920x1080', '50', 30000],
     ['mod-fhd', 'libx264', '1920x1080', '60000/1001', 7280],
     ['airline-dmpes', 'libx264', '854x480', '30000/1001', 1500],
     ['airline-dmpes-4m', 'libx264', '854x480', '30000/1001', 4000],
@@ -59,6 +59,18 @@ describe('完整交付規格由正式 plan 編譯', () => {
     expect((plan.kbps + 384) * 1000 / 8 * plan.duration).toBeLessThan(4500000000 * 0.92);
     expect(plan.discAudioPlan.streams).toHaveLength(1);
     expect(value(plan.args, '-filter_complex')).toContain('d=7200.000');
+  });
+
+  it('BD 以選定格率編碼與封裝，拒絕低於專案 FPS 或非相容格率', () => {
+    const interlaced = buildDeliveryArgv(spec('bd-iso', { fps: 29.97, projectFps: 25 }));
+    expect(interlaced.discVideoFps).toBe(29.97);
+    expect(value(interlaced.args, '-r')).toBe('30000/1001');
+    expect(value(interlaced.args, '-filter_complex')).toContain('tinterlace=mode=interleave_top');
+    const progressive = buildDeliveryArgv(spec('bd-iso', { fps: 24, projectFps: 23.976 }));
+    expect(value(progressive.args, '-filter_complex')).toContain('s=1920x1080:r=24');
+    expect(value(progressive.args, '-filter_complex')).not.toContain('tinterlace=');
+    expect(() => buildDeliveryArgv(spec('bd-iso', { fps: 24, projectFps: 25 }))).toThrow(/低於專案/);
+    expect(() => buildDeliveryArgv(spec('bd-iso', { fps: 50, projectFps: 25 }))).toThrow(/支援/);
   });
 
   it('DMPES 4M 固定選同規格 codec 與 4.6 Mbps mux，不接受另配 1.5M 封裝', () => {

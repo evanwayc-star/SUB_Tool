@@ -1001,6 +1001,10 @@
       const syncVisibility = () => {
         const f = q('[data-f="format"]').value;
         const preset = deliveryPreset(f);
+        const shown = preset?.format === 'bd-iso'
+          ? { ...preset, width: p.width, height: p.height, fps: p.fps,
+            scan: Number(p.height) === 1080 && Number(p.fps) > 24 ? 'interlaced' : 'progressive' }
+          : preset;
         box.querySelectorAll('[data-only="video"]').forEach(n => { n.hidden = (f === 'wav'); });
         box.querySelectorAll('[data-only="h264"]').forEach(n => { n.hidden = (f !== 'h264'); });
         q('[data-f="res"]').disabled = !!preset;
@@ -1008,23 +1012,23 @@
         q('[data-f="kbps"]').disabled = !!preset;
         if (preset) {
           const resolution = q('[data-f="res"]');
-          if (![...resolution.options].some(option => option.value === String(preset.height))) {
+          if (![...resolution.options].some(option => option.value === String(shown.height))) {
             const option = document.createElement('option');
-            option.value = String(preset.height);
-            option.dataset.presetResolution = String(preset.height);
+            option.value = String(shown.height);
+            option.dataset.presetResolution = String(shown.height);
             resolution.appendChild(option);
           }
-          resolution.value = String(preset.height);
+          resolution.value = String(shown.height);
         }
         for (const option of q('[data-f="res"]').options) {
           const normalLabel = RES_OPTIONS.find(([value]) => String(value) === option.value)?.[1]
             || (option.dataset.presetResolution ? `${option.value}p` : '');
-          if (normalLabel) option.textContent = preset && option.value === String(preset.height)
-            ? `${preset.width}×${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}` : normalLabel;
+          if (normalLabel) option.textContent = preset && option.value === String(shown.height)
+            ? `${shown.width}×${shown.height}${shown.scan === 'interlaced' ? 'i' : 'p'}` : normalLabel;
         }
         q('[data-preset-spec]').hidden = !preset;
         q('[data-preset-spec]').textContent = preset
-          ? `固定 ${preset.width} × ${preset.height}${preset.displayAspect ? ` (${preset.displayAspect})` : ''} / ${preset.fps} fps / `
+          ? `固定 ${shown.width} × ${shown.height}${shown.displayAspect ? ` (${shown.displayAspect})` : ''} / ${shown.fps} fps / `
             + (preset.kind === 'disc'
               ? `${preset.capacityBytes / 1000000000} GB 上限 · 碼率依片長與容量自動計算 · 無選單、放入即播放`
               : `${preset.videoKbps} kbps${preset.transport === 'airline' ? ' · 自動合成 .mpg（MPEG-TS）' : ''}`)

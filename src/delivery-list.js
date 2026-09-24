@@ -27,7 +27,7 @@
      一份。MOD-FHD 的固定規格則由 shared/delivery-formats.cjs 提供。
 ============================================================================== */
 import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { getDeliveryFormatPreset, getDeliveryFormatOption, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } from '../shared/delivery-formats.cjs';
+import { getDeliveryFormatPreset, getDeliveryFormatOption, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { deliveryResolution, suggestKbps, deriveDeliverySpec } from '../shared/delivery-resolution.cjs';
 
 /** 交付格式對應的副檔名；未知格式一律當 MP4。 */
@@ -70,7 +70,10 @@ export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPla
   const ext = extensionFor(format);
   const preset = getDeliveryFormatPreset(format);
   const tcTag = burnTimecode ? '_TC' : '';
-  if (preset) return `ST_${projectTag}_${preset.fileLabel || preset.label}_${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}_${preset.fps}fps${tcTag}${ext}`;
+  if (preset) {
+    const mode = format === 'bd-iso' ? bdVideoMode(fps) || preset : preset;
+    return `ST_${projectTag}_${preset.fileLabel || preset.label}_${mode.height}${mode.scan === 'interlaced' ? 'i' : 'p'}_${mode.fps}fps${tcTag}${ext}`;
+  }
   const isWav = format === 'wav';
   const tag = (!isWav && targetH > 0) ? '_' + targetH + 'p' : '';
   return `ST_${projectTag}_${normalizeDeliveryFrameRate(fps)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
@@ -110,11 +113,15 @@ function newRow({ audioOnly, defaultAudioLayout, outDir = '' }) {
   };
 }
 
-function applyFormatPreset(row) {
+function applyFormatPreset(row, projectFps) {
   const preset = getDeliveryFormatPreset(row.format);
   if (preset) {
-    row.targetH = preset.height;
-    row.targetFps = preset.fps;
+    const mode = row.format === 'bd-iso'
+      ? availableBdVideoModes(projectFps).find(item => item.fps === row.targetFps) || availableBdVideoModes(projectFps)[0]
+      : preset;
+    if (!mode) throw new Error('專案 FPS 超出 BD-ISO 支援的影格率');
+    row.targetH = mode.height;
+    row.targetFps = mode.fps;
     row.kbps = preset.videoKbps;
     row.audioPlan = normalizeDeliveryPresetAudio(row.format, row.audioPlan);
   }
@@ -165,7 +172,7 @@ export function createDeliveryList({
       const row = last
         ? { ...copyRow(last), customName: '', nameModified: false, outDir: last.outDir }
         : newRow({ audioOnly, defaultAudioLayout });
-      applyFormatPreset(row);
+      applyFormatPreset(row, fps);
       rows.push(row);
       refreshName(row);
       return copyRow(row);
@@ -175,8 +182,11 @@ export function createDeliveryList({
 
     setFormat(i, format) {
       const r = at(i); if (!r) return;
+      if (format === 'bd-iso' && !availableBdVideoModes(fps).length)
+        throw new Error('專案 FPS 超出 BD-ISO 支援的影格率');
+      if (r.format !== format && format === 'bd-iso') r.targetFps = 0;
       r.format = format;
-      applyFormatPreset(r);
+      applyFormatPreset(r, fps);
       if (format === 'h264' && !(r.kbps > 0)) {
         r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav: false }));
       }
@@ -188,7 +198,7 @@ export function createDeliveryList({
        套在 4K 上則會糊掉（v4.32 使用者回報「輸出像 proxy」的成因）。 */
     setTargetHeight(i, h) {
       const r = at(i); if (!r) return;
-      r.targetH = getDeliveryFormatPreset(r.format)?.height || Number(h) || 0;
+      r.targetH = (r.format === 'bd-iso' ? bdVideoMode(r.targetFps)?.height : getDeliveryFormatPreset(r.format)?.height) || Number(h) || 0;
       if (r.format === 'h264') {
         r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav: false }));
       }
@@ -197,7 +207,12 @@ export function createDeliveryList({
 
     setTargetFps(i, value) {
       const r = at(i); if (!r) return;
-      r.targetFps = getDeliveryFormatPreset(r.format)?.fps || normalizeDeliveryFrameRate(value, 0);
+      if (r.format === 'bd-iso') {
+        const mode = bdVideoMode(value);
+        if (!mode || !availableBdVideoModes(fps).includes(mode)) throw new Error('BD 輸出 FPS 不支援或低於專案 FPS');
+        r.targetFps = mode.fps;
+        r.targetH = mode.height;
+      } else r.targetFps = getDeliveryFormatPreset(r.format)?.fps || normalizeDeliveryFrameRate(value, 0);
       refreshName(r);
     },
 
@@ -242,7 +257,7 @@ export function createDeliveryList({
     applyRow(i, next) {
       if (!at(i)) return;
       rows[i] = copyRow(next);
-      applyFormatPreset(rows[i]);
+      applyFormatPreset(rows[i], fps);
       refreshName(rows[i]);
     },
 
@@ -299,10 +314,12 @@ export function createDeliveryList({
         const isWav = r.format === 'wav';
         const preset = getDeliveryFormatPreset(r.format);
         // FPS-SYNC：固定格式以規格的 FPS 換算 TC，專案時間軸的秒數不變。
-        const outputFps = preset?.fps || normalizeDeliveryFrameRate(isWav ? fps : r.targetFps, normalizeDeliveryFrameRate(fps));
+        const outputFps = (preset && r.format !== 'bd-iso' ? preset.fps : null)
+          || normalizeDeliveryFrameRate(isWav ? fps : r.targetFps, normalizeDeliveryFrameRate(fps));
         const startTimecode = timecodeForFps ? timecodeForFps(outputFps) : timelineStartTimecode;
         const spec = deriveDeliverySpec({
-          format: r.format, preset, canvasW, canvasH, targetH: r.targetH,
+          format: r.format, preset, canvasW, canvasH, targetH: r.targetH, projectFps: fps,
+          bdMode: r.format === 'bd-iso' ? bdVideoMode(outputFps) : null,
           fps: outputFps, videoKbps: r.kbps,
           burnTimecode: r.burnTimecode, timecodeStart: startTimecode,
         });
@@ -322,6 +339,7 @@ export function createDeliveryList({
              （formats.js 依 tracks[tk].visible === false 排除），所以顯示不會說謊。 */
           subtitleTracks: Array.isArray(subtitleTracks) ? subtitleTracks.slice() : [],
           fps: spec.fps,
+          ...(r.format === 'bd-iso' ? { projectFps: normalizeDeliveryFrameRate(fps) } : {}),
           assText,
           format: r.format,
           duration,
@@ -340,6 +358,6 @@ export function createDeliveryList({
   };
 
   // 初始列可能是空名字（新建或從音軌視窗折返）→ 補上預設名
-  rows.forEach(r => { applyFormatPreset(r); refreshName(r); });
+  rows.forEach(r => { applyFormatPreset(r, fps); refreshName(r); });
   return api;
 }

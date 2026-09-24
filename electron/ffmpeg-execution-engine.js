@@ -331,6 +331,7 @@ function createFFmpegExecution(options = {}) {
     shouldSend,
     outputFormat,
     discAudioPlan,
+    discVideoFps,
   } = {}) {
     return new Promise((resolve, reject) => {
       const ffmpegPath = getFFmpegPath();
@@ -450,6 +451,7 @@ function createFFmpegExecution(options = {}) {
           queueDir,
           ...(outputFormat ? { outputFormat } : {}),
           ...(discAudioPlan ? { discAudioPlan } : {}),
+          ...(discVideoFps ? { discVideoFps } : {}),
         }, {
           scriptPath: watchdogScriptPath(),
           onStderr: consumeStderr,

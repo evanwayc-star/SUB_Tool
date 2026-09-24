@@ -100,7 +100,8 @@ describe('delivery runner public interface', () => {
     Object.assign(job.payload, { format, outPath: 'D:/out/disc.iso' });
     await setup.runner.run(job);
     expect(setup.runFfmpeg).toHaveBeenCalledWith(expect.any(Array),
-      expect.objectContaining({ outputFormat: format, discAudioPlan: null }));
+      expect.objectContaining({ outputFormat: format, discAudioPlan: null,
+        discVideoFps: format === 'bd-iso' ? 25 : 29.97 }));
     expect(setup.sent.at(-1)?.payload).toMatchObject({ done: true,
       result: { container: 'iso', outputFiles: [path.join('D:/out', 'disc.iso')], audioActualBitrates: null } });
   });

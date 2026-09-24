@@ -60,7 +60,22 @@ describe('光碟編碼與容量預算', () => {
     expect(dvdAuthorXml(AUDIO)).toContain('<fpc>jump title 1;</fpc>');
     expect(blurayMeta(AUDIO)).toContain('--label="BD"');
     expect(blurayMeta(AUDIO)).toContain('track=259');
+    expect(blurayMeta(AUDIO, 29.97)).toContain('fps=29.97');
+    expect(() => blurayMeta(AUDIO, 30)).toThrow(/影格率/);
     expect(() => discEncoding('bd-iso', { duration: 3, audioPlan: { streams: [{ layout: '7.1' }] } })).toThrow(/音訊/);
+  });
+
+  it('BD 不同格率選擇最高 29.97 FPS 的 1080p 或 1080i 編碼模式', () => {
+    for (const [fps, width, height, scan] of [
+      [23.976, 1920, 1080, 'progressive'], [24, 1920, 1080, 'progressive'],
+      [25, 1920, 1080, 'interlaced'], [29.97, 1920, 1080, 'interlaced'],
+    ]) {
+      const encoded = discEncoding('bd-iso', { duration: 3, fps });
+      expect(encoded).toMatchObject({ fps, width, height, scan });
+      expect(encoded.videoArgs.includes('+ilme+ildct')).toBe(scan === 'interlaced');
+      expect(blurayMeta(null, fps)).toContain(`fps=${fps}`);
+    }
+    expect(() => discEncoding('bd-iso', { duration: 3, fps: 50 })).toThrow(/影格率/);
   });
 
   it('映像檔完成後仍硬性檢查實際容量', async () => {
@@ -156,6 +171,32 @@ describe.skipIf(!nativeAvailable)('原生 DVD／BD 合成內容與生命週期',
       }
     });
   }
+
+  it.each([
+    [25, 1920, 1080, 'tt'],
+    [29.97, 1920, 1080, 'tt'],
+  ])('BD %s FPS 實際封裝成可解碼的光碟視訊模式', async (fps, width, height, fieldOrder) => {
+    const work = await prepareDiscOutput('bd-iso', { tempDir: directory });
+    try {
+      const encoding = discEncoding('bd-iso', { duration: 1, fps });
+      const filter = encoding.scan === 'interlaced' ? ['-vf', 'tinterlace=mode=interleave_top,setfield=tff'] : [];
+      run(FFMPEG, ['-v', 'warning', '-nostdin', '-y', '-f', 'lavfi', '-i',
+        `testsrc2=size=${width}x${height}:rate=${encoding.scan === 'interlaced' ? fps * 2 : fps}:duration=1`,
+        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=1',
+        '-map', '0:v', '-map', '1:a', ...filter, '-r', String(fps),
+        ...encoding.videoArgs, ...encoding.audioArgs, ...encoding.muxArgs, work.encodedPath]);
+      const outPath = path.join(directory, `bd-${fps}.iso`);
+      await finalizeDiscOutput('bd-iso', work.encodedPath, outPath, { fps, nativePaths: NATIVE });
+      const extracted = path.join(directory, `bd-${fps}`);
+      run(SEVENZIP, ['x', '-y', `-o${extracted}`, outPath]);
+      const stream = path.join(extracted, 'BDMV/STREAM/00000.m2ts');
+      const probe = JSON.parse(run(FFPROBE, ['-v', 'error', '-show_streams', '-of', 'json', stream]).stdout);
+      const video = probe.streams.find(item => item.codec_type === 'video');
+      expect([video.width, video.height, video.avg_frame_rate, video.field_order])
+        .toEqual([width, height, fps === 29.97 ? '30000/1001' : `${fps}/1`, fieldOrder]);
+      expect(run(FFMPEG, ['-v', 'error', '-i', stream, '-f', 'null', '-']).stderr.trim()).toBe('');
+    } finally { await cleanupDiscOutput(work, { tempDir: directory }); }
+  });
 
   it('拒絕有 UDF 字樣卻沒有合法 anchor 的損壞映像', async () => {
     const bytes = readFileSync(generated.get('bd-iso').outPath);

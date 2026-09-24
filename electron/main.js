@@ -41,7 +41,7 @@ const { createAudioNormalizationRuntime } = require('./audio-normalization-runti
 /* 交付規格派生與 renderer 共用同一份（見 shared/README.md）。已入列工作的
    時間碼起點仍使用送出時凍結的值，不從目前專案狀態重算。 */
 const { deriveDeliverySpec } = require('../shared/delivery-resolution.cjs');
-const { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem } = require('../shared/delivery-formats.cjs');
+const { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
 const {
   buildIngestArgs,
   createFFmpegExecution,
@@ -1010,7 +1010,8 @@ function prepareQueueDeliveryUpdate(job, patch) {
   const spec = deriveDeliverySpec({
     format, preset, canvasW, canvasH,
     targetH: patch?.targetH != null ? Math.max(0, Math.floor(Number(patch.targetH) || 0)) : (Number(p.targetH) || 0),
-    fps: p.fps, videoKbps: p.videoKbps, previousWidth: p.width, previousHeight: p.height,
+    fps: p.fps, projectFps: p.projectFps, bdMode: format === 'bd-iso' ? bdVideoMode(p.fps) : null,
+    videoKbps: p.videoKbps, previousWidth: p.width, previousHeight: p.height,
     kbpsOverride: patch?.kbps, burnTimecode: wantsTc,
     timecodeStart: p.timecodeWatermark?.start ?? p.timelineStartTimecode,
   });

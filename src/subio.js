@@ -14,7 +14,7 @@ import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSp
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset } from '../shared/delivery-formats.cjs';
+import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { escapeHTML, encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
@@ -326,6 +326,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
   function renderRow(r, i) {
     const isWav = r.format === 'wav';
     const preset = getDeliveryFormatPreset(r.format);
+    const bdMode = r.format === 'bd-iso' ? bdVideoMode(r.targetFps) : null;
+    const displayMode = bdMode || preset;
 
     const ap = r.audioPlan;
     let audioDesc = '依專案音軌順序';
@@ -357,13 +359,13 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         <div class="delivery-spec-grid">
           <label class="delivery-field delivery-field--format"><span>交付格式</span>
             <select class="ev-format delivery-select" data-idx="${i}">
-              ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(option.format === 'wav' ? !hasProjectAudio : audioOnly)?'disabled':''}>${option.label}</option>`).join('')}
+              ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(option.format === 'wav' ? !hasProjectAudio : audioOnly) || (option.format === 'bd-iso' && availableBdVideoModes(data.fps).length === 0)?'disabled':''}>${option.label}</option>`).join('')}
             </select>
           </label>
           ${!isWav ? `
             <label class="delivery-field"><span>畫面尺寸</span>
-              <select class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 固定為 ${preset.width}×${preset.height}，${preset.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
-                ${preset ? `<option value="${preset.height}" selected>${preset.width}×${preset.height}${preset.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
+              <select class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 此格率為 ${displayMode.width}×${displayMode.height}，${displayMode.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
+                ${preset ? `<option value="${displayMode.height}" selected>${displayMode.width}×${displayMode.height}${displayMode.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
                 <option value="0" ${r.targetH===0?'selected':''}>來源解析度</option>
                 <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
                 <option value="1080" ${r.targetH===1080?'selected':''}>1080p</option>
@@ -376,8 +378,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
               `<label class="delivery-field delivery-field--custom"><span>高度（px）</span><input type="number" class="ev-custom-res delivery-input" data-idx="${i}" value="${r.targetH}" min="16" step="2"></label>`
               : ''}
             <label class="delivery-field"><span>影格率</span>
-              <select class="ev-fps delivery-select" data-idx="${i}" title="輸出影格率；維持原本播放時長" ${preset?'disabled':''}>
-                ${preset ? `<option value="${preset.fps}" selected>${preset.fps} FPS（固定）</option>` : `
+              <select class="ev-fps delivery-select" data-idx="${i}" title="輸出影格率；維持原本播放時長" ${preset && r.format !== 'bd-iso'?'disabled':''}>
+                ${r.format === 'bd-iso' ? availableBdVideoModes(data.fps).map(mode => `<option value="${mode.fps}" ${r.targetFps === mode.fps ? 'selected' : ''}>${mode.fps} FPS · ${mode.label}</option>`).join('') : preset ? `<option value="${preset.fps}" selected>${preset.fps} FPS（固定）</option>` : `
                 <option value="0" ${!r.targetFps?'selected':''}>依專案 (${normalizeDeliveryFrameRate(data.fps)} FPS)</option>
                 ${DELIVERY_FRAME_RATES.map(rate=>`<option value="${rate.value}" ${r.targetFps===rate.value?'selected':''}>${rate.label} FPS</option>`).join('')}
                 `}
@@ -404,7 +406,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         </div>
         ${preset ? `<div class="delivery-preset-note">${preset.kind === 'disc' ? `最多 ${preset.maxAudioStreams} 條 Mono / Stereo / Lt/Rt / 5.1` : '單一 Stereo'} · ${escapeHTML(preset.audioLabel)} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps${preset.kind === 'disc' ? '／串流' : ''}</div>` : ''}
         ${preset?.transport === 'airline' ? `<div class="delivery-airline-output delivery-format-note">${preset.displayAspect ? `顯示比例 ${preset.displayAspect} · ` : ''}SubTool 自動合成影音，直接輸出 .mpg（MPEG-TS）。</div>` : ''}
-        ${preset?.kind === 'disc' ? `<div class="delivery-disc-output delivery-format-note">${preset.capacityBytes / 1000000000} GB 容量上限 · 16:9 · 無選單、放入即播放 · 字幕依交付設定燒錄 · 輸出 .iso 光碟映像。</div>` : ''}
+        ${preset?.kind === 'disc' ? `<div class="delivery-disc-output delivery-format-note">${preset.capacityBytes / 1000000000} GB 容量上限 · 16:9 · 無選單、放入即播放 · 字幕依交付設定燒錄 · 輸出 .iso 光碟映像。${bdMode ? `所選 ${bdMode.fps} FPS 使用 ${bdMode.label} 光碟模式。` : ''}</div>` : ''}
+        ${r.format === 'mod-fhd' ? '<div class="delivery-format-note">未設定專案音量平衡時，MOD 音訊自動套用 −12 dBTP 峰值上限與 −18 LUFS 響度目標；純靜音保持無聲。</div>' : ''}
       </section>
     `;
   }

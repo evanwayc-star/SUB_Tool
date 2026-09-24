@@ -4,6 +4,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
 const { DISC_FORMATS, discFormat, discAudioStreams, discEncoding } = require('./disc-encoding');
+const { bdVideoMode } = require('../shared/delivery-formats.cjs');
 const WORK_PREFIX = 'subtool-disc-';
 
 function fail(code, message) { return Object.assign(new Error(message), { code }); }
@@ -95,10 +96,11 @@ function dvdAuthorXml(audioPlan) {
     '    <pgc><vob file="internal.mpg" /><post>exit;</post></pgc>\n  </titles></titleset>\n</dvdauthor>\n';
 }
 
-function blurayMeta(audioPlan) {
+function blurayMeta(audioPlan, fps = 24) {
   const audio = discAudioStreams('bd-iso', audioPlan);
+  if (!bdVideoMode(fps)) throw fail('INVALID_BD_FPS', 'BD 封裝不支援此影格率');
   return 'MUXOPT --blu-ray --vbr --vbv-len=500 --auto-chapters=5 --label="BD"\n' +
-    'V_MPEG4/ISO/AVC, "internal.ts", track=256, fps=24, insertSEI, contSPS\n' +
+    `V_MPEG4/ISO/AVC, "internal.ts", track=256, fps=${fps}, insertSEI, contSPS\n` +
     audio.map((_, index) => `A_AC3, "internal.ts", track=${257 + index}${index === 0 ? ', default' : ''}\n`).join('');
 }
 
@@ -155,7 +157,7 @@ async function verifyDiscIso(format, outPath) {
   } finally { await file.close(); }
 }
 
-async function finalizeDiscOutput(format, encodedPath, outPath, { signal, nativePaths = nativeDiscPaths(), audioPlan, onProgress, onProcess, onOutputStart } = {}) {
+async function finalizeDiscOutput(format, encodedPath, outPath, { signal, nativePaths = nativeDiscPaths(), audioPlan, fps, onProgress, onProcess, onOutputStart } = {}) {
   const spec = discFormat(format);
   discAudioStreams(format, audioPlan);
   abortIfNeeded(signal);
@@ -177,7 +179,7 @@ async function finalizeDiscOutput(format, encodedPath, outPath, { signal, native
     // mkisofs' Cygwin build accepts Windows forward-slash paths, including spaces.
     await runNative(nativePaths.mkisofs, ['-dvd-video', '-udf', '-V', 'DVD', '-o', outPath.replace(/\\/g, '/'), 'dvd'], { ...options, onOutputStart });
   } else {
-    await fs.writeFile(path.join(cwd, 'disc.meta'), blurayMeta(audioPlan), 'utf8');
+    await fs.writeFile(path.join(cwd, 'disc.meta'), blurayMeta(audioPlan, fps), 'utf8');
     await runNative(nativePaths.tsmuxer, ['disc.meta', outPath], { ...options, onOutputStart });
   }
   abortIfNeeded(signal);

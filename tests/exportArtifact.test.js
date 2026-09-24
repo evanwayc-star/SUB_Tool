@@ -28,7 +28,8 @@ describe('watchdog 私有成品 lifecycle interface', () => {
   });
 
   function create(format, owner = {}, adapters = {}) {
-    return createExportArtifact({ outputFormat: format, outPath, args, discAudioPlan: { streams: [{ layout: 'stereo' }] } }, {
+    return createExportArtifact({ outputFormat: format, outPath, args, discAudioPlan: { streams: [{ layout: 'stereo' }] },
+      discVideoFps: 29.97 }, {
       signal: controller.signal, ...owner,
     }, adapters);
   }
@@ -85,6 +86,7 @@ describe('watchdog 私有成品 lifecycle interface', () => {
       async finalizeDiscOutput(actualFormat, encoded, target, options) {
         expect(actualFormat).toBe(format);
         expect(options.audioPlan.streams).toEqual([{ layout: 'stereo' }]);
+        expect(options.fps).toBe(29.97);
         expect(fs.readFileSync(encoded, 'utf8')).toBe('encoded');
         await options.onOutputStart();
         fs.writeFileSync(target, 'partial');

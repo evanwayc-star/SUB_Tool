@@ -19,10 +19,10 @@ describe('光碟交付計畫', () => {
     }, { hwdecArgs: () => ['-hwaccel', 'auto'] });
     const graph = plan.args[plan.args.indexOf('-filter_complex') + 1];
     const dvd = format === 'dvd-iso';
-    expect(graph).toContain(dvd ? 's=854x480:r=60000/1001' : 's=1920x1080:r=24');
+    expect(graph).toContain(dvd ? 's=854x480:r=60000/1001' : 's=1920x1080:r=50');
     expect(graph.indexOf('ass=burn.ass')).toBeLessThan(graph.indexOf('[vdisc]'));
     expect(graph).toContain(dvd ? 'setsar=32/27' : 'setsar=1/1');
-    expect(graph.includes('tinterlace=mode=interleave_top')).toBe(dvd);
+    expect(graph).toContain('tinterlace=mode=interleave_top');
     expect(graph).toContain('pan=mono|c0=c7');
     expect(plan.args).toContain('-c:a:1');
     expect(plan.args).toContain('-dsur_mode:a:1');

@@ -146,7 +146,7 @@ function createDeliveryRunner(options = {}) {
       const result = await runFfmpeg(args, {
         duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
         outputFormat: format,
-        ...(isDisc ? { discAudioPlan: plan.discAudioPlan } : {}),
+        ...(isDisc ? { discAudioPlan: plan.discAudioPlan, discVideoFps: plan.discVideoFps } : {}),
         onProgress: sendProgress,
         onProcess: controller => queue.registerActiveJob(jobId, activeRecord(jobId, controller, outPath)),
       });
