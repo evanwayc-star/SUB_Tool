@@ -900,10 +900,10 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 /* ===== 匯出交付清單（Delivery Manifest）專屬樣式 ===== */
 .modal:has(.delivery-dialog){max-width:96vw;max-height:90dvh;display:flex;flex-direction:column;overflow:hidden;background:#101318;border-radius:14px}
 .modal:has(.delivery-dialog) h3{flex:none;padding:16px 22px;background:#171b22;border-bottom:1px solid rgba(255,255,255,.09);font-size:16px;cursor:move}
-.modal:has(.delivery-dialog) .mbody{flex:1;min-height:0;overflow:hidden;padding:0;background:#101318}
+.modal:has(.delivery-dialog) .mbody{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:0;background:#101318}
 .modal:has(.delivery-dialog) .mfoot{flex:none;padding:14px 22px;background:#171b22}
 .modal:has(.delivery-dialog) .mfoot button{min-height:40px;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:650}
-.delivery-dialog{width:100%;height:100%;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;gap:14px;padding:18px 22px;font-size:13px;color:#e7ebf1}
+.delivery-dialog{width:100%;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;gap:14px;padding:18px 22px;font-size:13px;color:#e7ebf1}
 .delivery-header{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex:none}
 .delivery-intro{min-width:0}
 .delivery-eyebrow{margin:0 0 4px;color:#fbbf24;font-size:12px;font-weight:750;letter-spacing:.04em}
@@ -916,7 +916,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .delivery-add-btn:hover{background:rgba(245,158,11,.2);border-color:#fbbf24;color:#fff}
 .delivery-list-heading{display:flex;justify-content:space-between;align-items:center;flex:none;padding:0 2px;color:#eef2f7;font-size:12px;font-weight:700}
 .delivery-list-heading #evRowCount{color:#94a3b8;font-weight:600}
-.delivery-rows{display:flex;flex:1;min-height:0;flex-direction:column;gap:12px;overflow-y:auto;padding:1px 4px 2px 1px}
+.delivery-rows{display:flex;flex-direction:column;gap:12px;padding:1px 4px 2px 1px}
 .delivery-card{flex:none;display:flex;flex-direction:column;gap:14px;min-width:0;padding:16px;border:1px solid rgba(255,255,255,.11);border-radius:10px;background:#191e26;transition:border-color .16s ease}
 .delivery-card:hover{border-color:rgba(255,255,255,.22)}
 .delivery-card-head{display:flex;align-items:center;gap:9px;min-width:0;padding-bottom:11px;border-bottom:1px solid rgba(255,255,255,.08)}

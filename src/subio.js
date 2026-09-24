@@ -434,8 +434,26 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       document.querySelector(`.ev-fps[data-idx="${idx}"]`)?.focus();
     });
     $$('.ev-kbps').forEach(el => el.onchange = e => list.setKbps(idxOf(e), e.target.value));
-    $$('.ev-name').forEach(el => el.onchange = e => { list.setName(idxOf(e), e.target.value); after(); });
-    $$('.ev-outdir').forEach(el => el.onchange = e => { list.setOutDir(idxOf(e), e.target.value); after(); });
+    // 文字欄位失焦時若重建整列，下一個被點擊的 input 會在 mouseup 前消失，
+    // 看起來就像檔名完全無法輸入。輸入時同步草稿，失焦只更新驗證與欄位顯示。
+    $$('.ev-name').forEach(el => {
+      el.oninput = e => list.setName(idxOf(e), e.target.value);
+      el.onchange = e => {
+        list.setName(idxOf(e), e.target.value);
+        const name = list.get(idxOf(e))?.customName || '';
+        e.target.value = name;
+        e.target.title = name;
+        checkConflicts();
+      };
+    });
+    $$('.ev-outdir').forEach(el => {
+      el.oninput = e => list.setOutDir(idxOf(e), e.target.value);
+      el.onchange = e => {
+        list.setOutDir(idxOf(e), e.target.value);
+        e.target.title = e.target.value;
+        checkConflicts();
+      };
+    });
     $$('.ev-tc').forEach(el => el.onchange = e => { list.setBurnTimecode(idxOf(e), e.target.checked); after(); });
 
     const pickDir = async e => {

@@ -7,7 +7,7 @@
 /* SUB Tool — Electron 主程序
    提供：原生檔案對話框、平台原生 ffmpeg/ffprobe（MXF 轉檔、多音軌抽取、波形）、
          專案/字幕直接讀寫磁碟。前端沿用同一份 index.html。 */
-const { app, BrowserWindow, ipcMain, dialog, protocol, session, webContents } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, session, webContents, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 /* RecentProjects 的 missing probe 會觸及 SMB 路徑，不可用同步 stat 阻塞
@@ -824,11 +824,19 @@ function openQueueWindow() {
     queueWin.focus();
     return;
   }
+  const display = mainWin && !mainWin.isDestroyed()
+    ? screen.getDisplayMatching(mainWin.getBounds())
+    : screen.getPrimaryDisplay();
+  const { x, y, width: availableWidth, height: availableHeight } = display.workArea;
+  const width = Math.min(1240, availableWidth);
+  const height = Math.min(availableHeight, Math.max(760, Math.round(availableHeight * 0.92)));
   queueWin = new BrowserWindow({
-    width: 1240,
-    height: 760,
-    minWidth: 960,
-    minHeight: 600,
+    x: x + Math.round((availableWidth - width) / 2),
+    y: y + Math.round((availableHeight - height) / 2),
+    width,
+    height,
+    minWidth: Math.min(960, availableWidth),
+    minHeight: Math.min(600, availableHeight),
     title: '匯出佇列監控',
     autoHideMenuBar: true,
     webPreferences: {

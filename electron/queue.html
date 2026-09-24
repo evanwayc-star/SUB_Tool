@@ -188,6 +188,7 @@
     }
     .panel-heading {
       display: flex;
+      flex: none;
       gap: 14px;
       align-items: center;
       justify-content: space-between;
@@ -228,6 +229,7 @@
     .drag-hint { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
 
     .job-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .job-list > .job { flex: none; }
     .job-list--active {
       flex: 1 1 auto;
       min-height: 0;
@@ -533,6 +535,21 @@
     .completed-history .job-list { max-height: min(24vh, 185px); padding: 7px; overflow-y: auto; }
     .completed-history .job { min-height: 44px; padding-block: 6px; }
 
+    /* 沒有待處理工作時，已完成數量已在統計列顯示，將空白工作區讓給完成清單。 */
+    .queue-workspace:has(.queue-empty):has(.completed-history[open]) .work-panel {
+      display: none;
+    }
+    .queue-workspace:has(.queue-empty):has(.completed-history[open]) .completed-history {
+      flex: 1 1 auto;
+      min-height: 0;
+      position: relative;
+    }
+    .queue-workspace:has(.queue-empty):has(.completed-history[open]) .completed-history .job-list {
+      position: absolute;
+      inset: 36px 0 0;
+      max-height: none;
+    }
+
     .job[draggable="true"] { cursor: grab; }
     .job[draggable="true"]:active { cursor: grabbing; }
     .job.dragging { opacity: .4; }
@@ -555,6 +572,14 @@
       .job--compact .job-actions { grid-column: 3; }
       .job--compact .job-main { grid-column: auto; }
       .job-editor { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .queue-workspace:has(.queue-empty):has(.completed-history[open]) .completed-history {
+        flex: none;
+        height: auto;
+      }
+      .queue-workspace:has(.queue-empty):has(.completed-history[open]) .completed-history .job-list {
+        position: static;
+        overflow: visible;
+      }
     }
 
     @media (max-width: 620px) {

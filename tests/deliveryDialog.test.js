@@ -83,11 +83,47 @@ beforeEach(() => {
   State.exportOut = 32;
   State.externalAudioState = [];
   mediaMock.tracks = [];
+  window.subtool.exportVideo.mockClear();
   window.subtool.getStartupFile.mockResolvedValue(null);
   window.subtool.listDir.mockResolvedValue([]);
 });
 
 describe('匯出交付清單', () => {
+  it('從儲存位置切到檔名時保留點擊目標，不重建正在聚焦的欄位', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-name')).not.toBeNull());
+    const name = document.querySelector('.ev-name');
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/交付';
+    outDir.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(name.isConnected).toBe(true);
+    name.focus();
+    expect(document.activeElement).toBe(name);
+    name.value = '客戶版.mp4';
+    name.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(outDir.isConnected).toBe(true);
+  });
+
+  it('檔名欄位仍在編輯時送出，使用畫面上的檔名建立工作', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-name')).not.toBeNull());
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/交付';
+    outDir.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const name = document.querySelector('.ev-name');
+    name.value = '客戶版.mp4';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    const submit = spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn');
+    await submit.act();
+
+    expect(window.subtool.exportVideo).toHaveBeenCalledWith(expect.objectContaining({
+      defaultName: '客戶版.mp4',
+      outPath: 'D:/交付/客戶版.mp4',
+    }));
+  });
+
   it('依需求列出九種交付格式與兩種獨立 DMPES 碼率', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-format')).not.toBeNull());
