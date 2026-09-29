@@ -1268,9 +1268,14 @@ async function initDesktop(){
   if (DESK.onAppRequestClose) {
     DESK.onAppRequestClose(() => {
       if (isProjectDirty()) {
-        openModal('儲存變更', '關閉前是否要儲存專案？', [
+        const dialog = openModal('儲存變更', '關閉前是否要儲存專案？', [
           // 等儲存真正完成（拿到路徑）才關閉；使用者取消存檔對話框則回到編輯畫面，避免資料遺失
-          {label: '儲存', primary: true, act: async () => { const pth = await Project.save(); if (pth) { closeModal(); DESK.closeApp(); } else closeModal(); }},
+          {label: '儲存', primary: true, act: async () => {
+            const pth = await Project.save();
+            if (!dialog.isCurrent()) return;
+            dialog.close({ committed: true });
+            if (pth && !isProjectDirty()) DESK.closeApp();
+          }},
           {label: '不儲存', act: () => { closeModal(); DESK.closeApp(); }},
           {label: '取消', act: () => { closeModal(); }}
         ]);

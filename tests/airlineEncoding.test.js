@@ -1,7 +1,7 @@
 // @subtool-ci windows
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,32 +36,39 @@ function starts(bytes) {
   return result;
 }
 
-function bits(bytes, byteOffset, bitOffset, length) {
-  let value = 0;
-  for (let i = bitOffset; i < bitOffset + length; i += 1) {
-    value = value * 2 + ((bytes[byteOffset + (i >> 3)] >> (7 - (i & 7))) & 1);
-  }
-  return value;
-}
-
 describe('航空 codec 選擇', () => {
   it('普通交付格式不啟用航空編碼，回傳的參數不共用可變陣列', () => {
     expect(airlineEncoding('h264')).toBeNull();
-    const first = airlineEncoding('airline-s3k');
+    const first = airlineEncoding('airline-exw');
     first.audioArgs.push('changed');
-    expect(airlineEncoding('airline-s3k').audioArgs).not.toContain('changed');
+    expect(airlineEncoding('airline-exw').audioArgs).not.toContain('changed');
+    expect(airlineEncoding('airline-s3k')).toBeNull();
     const mux = airlineMuxArgs();
     mux.push('changed');
     expect(airlineMuxArgs()).not.toContain('changed');
   });
 
   it('影音 encoder 可共同寫入 transport，不會在編碼參數中關閉另一條 stream', () => {
-    for (const format of ['airline-s3k', 'airline-dmpes']) {
+    for (const format of ['airline-exw', 'airline-dmpes']) {
       const encoding = airlineEncoding(format);
       expect([...encoding.videoArgs, ...encoding.audioArgs]).not.toEqual(expect.arrayContaining(['-an']));
       expect([...encoding.videoArgs, ...encoding.audioArgs]).not.toEqual(expect.arrayContaining(['-vn']));
       expect([...encoding.videoArgs, ...encoding.audioArgs]).not.toEqual(expect.arrayContaining(['-f']));
     }
+  });
+
+  it('exW 套用 CPF 的 500/2000 kbps VBR、125000-byte VBV 與 64 kbps AAC-LC，不指定 CBR muxrate', () => {
+    const encoding = airlineEncoding('airline-exw');
+    const value = (args, key) => args[args.indexOf(key) + 1];
+    expect(value(encoding.videoArgs, '-b:v')).toBe('500k');
+    expect(value(encoding.videoArgs, '-maxrate:v')).toBe('2000k');
+    expect(value(encoding.videoArgs, '-bufsize:v')).toBe('1000000');
+    expect(encoding.videoArgs).not.toContain('-minrate:v');
+    expect(value(encoding.audioArgs, '-c:a')).toBe('aac');
+    expect(value(encoding.audioArgs, '-profile:a')).toBe('aac_low');
+    expect(value(encoding.audioArgs, '-b:a')).toBe('64k');
+    expect(encoding.muxArgs).not.toContain('-muxrate');
+    expect(airlineMuxArgs('airline-dmpes')).toContain('-muxrate');
   });
 });
 
@@ -70,71 +77,44 @@ describe.skipIf(!nativeAvailable)('航空原生 elementary bitstream', () => {
   const outputs = new Map();
   beforeAll(() => {
     directory = mkdtempSync(path.join(tmpdir(), 'subtool-airline-encoding-test-'));
-    for (const format of ['airline-s3k', 'airline-dmpes']) {
+    for (const format of ['airline-exw', 'airline-dmpes']) {
       const encoding = airlineEncoding(format);
-      const size = format === 'airline-s3k' ? '352x240' : '720x480';
+      const size = format === 'airline-exw' ? '640x360' : '720x480';
       const video = path.join(directory, format + encoding.videoExtension);
       const audio = path.join(directory, format + encoding.audioExtension);
       run(FFMPEG, [
         '-hide_banner', '-nostdin', '-y', '-f', 'lavfi', '-i',
         `testsrc2=size=${size}:rate=30000/1001:duration=3`,
         '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3',
-        '-map', '0:v', ...encoding.videoArgs, '-an', '-f', format === 'airline-s3k' ? 'mpeg1video' : 'h264', video,
-        '-map', '1:a', ...encoding.audioArgs, '-vn', '-f', format === 'airline-s3k' ? 'mp2' : 'adts', audio,
+        '-map', '0:v', ...encoding.videoArgs, '-an', '-f', 'h264', video,
+        '-map', '1:a', ...encoding.audioArgs, '-vn', '-f', 'adts', audio,
       ]);
       outputs.set(format, { video, audio });
     }
   }, 60000);
   afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
 
-  it('S3K sequence header 保留 aspect code 12、NTSC、CBR、224 KiB VBV 與每 15 格 GOP', () => {
-    const { video } = outputs.get('airline-s3k');
+  it('exW H.264 為 640×360、Main@3.0、正方形像素與 15 格 GOP', () => {
+    const { video, audio } = outputs.get('airline-exw');
     expect(probe(video)).toMatchObject({
-      codec_name: 'mpeg1video', width: 352, height: 240, field_order: 'progressive',
-      pix_fmt: 'yuv420p', sample_aspect_ratio: '200:219', display_aspect_ratio: '880:657',
+      codec_name: 'h264', profile: 'Main', level: 30, width: 640, height: 360,
+      field_order: 'progressive', pix_fmt: 'yuv420p', sample_aspect_ratio: '1:1', display_aspect_ratio: '16:9',
     });
-    // Raw ES demuxers may assume 25 fps: check the actual sequence header instead.
-    const bytes = readFileSync(video);
-    const units = starts(bytes);
-    const headers = units.filter(unit => unit.code === 0xb3);
-    expect(headers.length).toBeGreaterThanOrEqual(6);
-    for (const { payload } of headers) {
-      expect(bits(bytes, payload, 0, 12)).toBe(352);
-      expect(bits(bytes, payload, 12, 12)).toBe(240);
-      expect(bits(bytes, payload, 24, 4)).toBe(12);
-      expect(bits(bytes, payload, 28, 4)).toBe(4); // 30000/1001
-      expect(bits(bytes, payload, 32, 18) * 400).toBe(1500000);
-      expect(bits(bytes, payload, 51, 10) * 16384).toBe(224 * 1024 * 8);
-    }
-    const pictures = units.filter(unit => unit.code === 0);
-    expect(pictures).toHaveLength(90);
-    const intra = pictures.flatMap((unit, index) => bits(bytes, unit.payload, 10, 3) === 1 ? [index] : []);
-    expect(intra[0]).toBe(0);
-    const boundaries = [...intra, pictures.length];
-    expect(boundaries.slice(1).every((n, i) => n - boundaries[i] <= 15)).toBe(true);
-    const gops = units.filter(unit => unit.code === 0xb8);
-    expect(gops).toHaveLength(headers.length);
-    expect(gops.slice(1).every(unit => bits(bytes, unit.payload, 25, 1) === 0)).toBe(true);
-  });
-
-  it('S3K MPEG-1 Layer-2 Stereo 每一格帶有效 CRC，48 kHz/128 kbps 且不設 copyright/original', () => {
-    const { audio } = outputs.get('airline-s3k');
-    expect(probe(audio)).toMatchObject({ codec_name: 'mp2', sample_rate: '48000', channels: 2, bit_rate: '128000' });
-    const bytes = readFileSync(audio);
-    // 1152 samples at 48 kHz and 128 kbps is exactly 384 bytes per Layer-2 frame.
-    expect(bytes.length % 384).toBe(0);
-    for (let offset = 0; offset < bytes.length; offset += 384) {
-      expect(bytes[offset]).toBe(0xff);
-      expect(bytes[offset + 1]).toBe(0xfc); // MPEG-1, Layer-2, protection enabled
-      expect(bytes[offset + 2]).toBe(0x84); // 128 kbps, 48 kHz, no padding
-      expect(bytes[offset + 3]).toBe(0); // Stereo, no copyright/original/emphasis
-    }
-    const decode = file => run(FFMPEG, ['-v', 'warning', '-err_detect', 'crccheck', '-i', file, '-f', 'null', '-']);
-    expect(decode(audio).stderr).not.toMatch(/CRC mismatch/);
-    bytes[4] ^= 0xff;
-    const corrupted = path.join(directory, 'bad-crc.m1a');
-    writeFileSync(corrupted, bytes);
-    expect(decode(corrupted).stderr).toMatch(/CRC mismatch/); // prove the decoder actually checks CRC
+    const trace = run(FFMPEG, ['-hide_banner', '-i', video, '-c:v', 'copy',
+      '-bsf:v', 'trace_headers', '-frames:v', '5', '-f', 'null', '-']).stderr;
+    for (const [field, value] of Object.entries({
+      profile_idc: 77, level_idc: 30, max_num_ref_frames: 2, frame_mbs_only_flag: 1,
+      aspect_ratio_idc: 1, num_units_in_tick: 1001, time_scale: 60000,
+      nal_hrd_parameters_present_flag: 0, entropy_coding_mode_flag: 1,
+      disable_deblocking_filter_idc: 1,
+    })) expect(trace).toMatch(new RegExp(`\\b${field}\\s+[01]+ = ${value}\\s`));
+    const units = starts(readFileSync(video));
+    expect(units.filter(unit => (unit.code & 31) === 9)).toHaveLength(90);
+    expect(units.filter(unit => (unit.code & 31) === 5)).toHaveLength(6);
+    expect(probe(audio)).toMatchObject({ codec_name: 'aac', profile: 'LC', sample_rate: '48000', channels: 2 });
+    const adts = readFileSync(audio);
+    expect(adts[2] >> 6).toBe(1);
+    expect((adts[2] >> 2) & 15).toBe(3);
   });
 
   it('DMPES 720×480 顯示 16:9，Main@3.0、29.97p、2 refs、CABAC、CBR HRD 與停用去區塊', () => {
@@ -166,19 +146,19 @@ describe.skipIf(!nativeAvailable)('航空原生 elementary bitstream', () => {
   });
 
   it('低複雜度純黑也維持 1.5 Mbps 目標，DMPES filler 可用且沒有偷偷改成 VBR', () => {
-    for (const format of ['airline-s3k', 'airline-dmpes']) {
+    for (const format of ['airline-dmpes']) {
       const encoding = airlineEncoding(format);
       const file = path.join(directory, `black-${format}${encoding.videoExtension}`);
-      const size = format === 'airline-s3k' ? '352x240' : '720x480';
+      const size = '720x480';
       run(FFMPEG, ['-hide_banner', '-nostdin', '-y', '-f', 'lavfi', '-i',
         `color=black:size=${size}:rate=30000/1001:duration=8`, ...encoding.videoArgs,
-        '-an', '-f', format === 'airline-s3k' ? 'mpeg1video' : 'h264', file]);
+        '-an', '-f', 'h264', file]);
       const bytes = readFileSync(file);
       const average = bytes.length * 8 / 8;
       // VBV startup/final buffering means a finite clip need not average exactly 1.5 Mbps.
       expect(average).toBeGreaterThan(1400000);
       expect(average).toBeLessThan(1600000);
-      if (format === 'airline-dmpes') expect(starts(bytes).some(unit => (unit.code & 31) === 12)).toBe(true);
+      expect(starts(bytes).some(unit => (unit.code & 31) === 12)).toBe(true);
     }
   });
 });

@@ -30,9 +30,11 @@ function setupPageScenario() {
       duration: 170,
       pxPerSec: 25,
       trackCount: 2,
+      // This browser fixture has no desktop font bridge. Use an installed font
+      // so the real missing-font prompt does not intercept the selection test.
       tracks: [
-        { name: 'T0', visible: true, locked: false },
-        { name: 'T1', visible: true, locked: false },
+        { name: 'T0', font: 'Arial', visible: true, locked: false },
+        { name: 'T1', font: 'Arial', visible: true, locked: false },
       ],
       cues,
       notes: [],

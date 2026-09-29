@@ -9,10 +9,11 @@ const MOD_FHD = Object.freeze({
   videoPid: 4131, audioPid: 4130, pmtPid: 1280,
 });
 
-const AIRLINE_S3K = Object.freeze({
-  format: 'airline-s3k', label: '航空-S3K-MPEG1-1.5M (立體聲)', fileLabel: '航空-S3K-MPEG1-1.5M', extension: '.mpg', transport: 'airline',
-  scan: 'progressive', audioLabel: 'MPEG-1 Audio Layer-2 / CRC',
-  width: 352, height: 240, fps: 29.97, videoKbps: 1500, audioKbps: 128, sampleRate: 48000,
+const AIRLINE_EXW = Object.freeze({
+  format: 'airline-exw', label: '航空-exW-H264-500K (立體聲)', fileLabel: '航空-exW-H264-500K', extension: '.mpg', transport: 'airline',
+  displayAspect: '16:9', scan: 'progressive', audioLabel: 'AAC-LC / ADTS',
+  width: 640, height: 360, fps: 29.97, videoKbps: 500, videoMaxKbps: 2000,
+  videoBufferBytes: 125000, audioKbps: 64, sampleRate: 48000,
 });
 
 const AIRLINE_DMPES = Object.freeze({
@@ -59,7 +60,7 @@ function availableBdVideoModes(projectFps) {
   return BD_VIDEO_MODES.filter(mode => !Number.isFinite(source) || mode.fps + 0.001 >= source);
 }
 
-const DELIVERY_FORMAT_PRESETS = Object.freeze([DVD_ISO, BD_ISO, MOD_FHD, AIRLINE_DMPES, AIRLINE_DMPES_4M, AIRLINE_S3K]);
+const DELIVERY_FORMAT_PRESETS = Object.freeze([DVD_ISO, BD_ISO, MOD_FHD, AIRLINE_DMPES, AIRLINE_DMPES_4M, AIRLINE_EXW]);
 const DELIVERY_FORMAT_OPTIONS = Object.freeze([
   Object.freeze({ format: 'prores', label: 'ProRes422HQ-MOV', extension: '.mov' }),
   Object.freeze({ format: 'h264', label: 'H264-MP4', extension: '.mp4' }),
@@ -111,7 +112,7 @@ function deliveryPresetAudioProblem(format, plan) {
 }
 
 module.exports = {
-  MOD_FHD, AIRLINE_S3K, AIRLINE_DMPES, AIRLINE_DMPES_4M, DVD_ISO, BD_ISO,
+  MOD_FHD, AIRLINE_EXW, AIRLINE_DMPES, AIRLINE_DMPES_4M, DVD_ISO, BD_ISO,
   BD_VIDEO_MODES, bdVideoMode, availableBdVideoModes,
   DELIVERY_FORMAT_PRESETS, DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, getDeliveryFormatOption,
   normalizeDeliveryPresetAudio, deliveryPresetAudioProblem,

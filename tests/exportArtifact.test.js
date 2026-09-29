@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { createExportArtifact } = require('../electron/export-artifact');
+const { createExportArtifact, artifactProgress } = require('../electron/export-artifact');
 const nativeDisc = require('../electron/disc-authoring');
 
 function deferred() {
@@ -15,6 +15,18 @@ function deferred() {
 }
 
 describe('watchdog 私有成品 lifecycle interface', () => {
+  it('光碟編碼、ISO 製作與完成驗證共用同一條單調進度尺', () => {
+    for (const format of ['dvd-iso', 'bd-iso']) {
+      expect(artifactProgress(format, 'encode', 0)).toBe(0);
+      expect(artifactProgress(format, 'encode', 50)).toBe(47.5);
+      expect(artifactProgress(format, 'encode', 100)).toBe(95);
+      expect(artifactProgress(format, 'finalize', 0)).toBe(95);
+      expect(artifactProgress(format, 'finalize', 25)).toBe(96);
+      expect(artifactProgress(format, 'finalize', 100)).toBe(99);
+    }
+    expect(artifactProgress('airline-dmpes', 'encode', 50)).toBe(50);
+    expect(artifactProgress('mod-fhd', 'encode', 50)).toBe(50);
+  });
   let tempDir, outPath, controller, args;
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-artifact-'));
@@ -54,7 +66,7 @@ describe('watchdog 私有成品 lifecycle interface', () => {
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
   });
 
-  it.each(['mod-fhd', 'airline-dmpes', 'airline-dmpes-4m', 'airline-s3k'])('%s 等封裝驗證完成才 settle，失敗保留原錯誤', async format => {
+  it.each(['mod-fhd', 'airline-dmpes', 'airline-dmpes-4m', 'airline-exw'])('%s 等封裝驗證完成才 settle，失敗保留原錯誤', async format => {
     const checked = deferred();
     const gate = deferred();
     const error = Object.assign(new Error('invalid transport'), { code: 'INVALID_TRANSPORT' });

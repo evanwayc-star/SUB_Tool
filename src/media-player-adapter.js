@@ -151,6 +151,8 @@ export function createNativePreviewRuntime({
   let boundsTimer = null;
   let lastBounds = null;
   let generation = 0;
+  // Native resources exist while launch is pending, before mpv becomes the active transport.
+  let nativeRequested = false;
 
   const sameBounds = (left, right) => !!(left && right
     && left.x === right.x && left.y === right.y && left.w === right.w && left.h === right.h);
@@ -207,7 +209,11 @@ export function createNativePreviewRuntime({
   }
 
   async function shutdownNative() {
+    const token = generation;
     await clearGuides();
+    // A newer launch now owns the shared host. Old cleanup must never quit it.
+    if (token !== generation) return false;
+    nativeRequested = false;
     return bridge?.quit ? bridge.quit() : false;
   }
 
@@ -219,6 +225,7 @@ export function createNativePreviewRuntime({
     async enterMpv({ src, bounds, audio, readBounds, boundsElement } = {}) {
       const token = ++generation;
       if (!bridge?.launch) throw new Error('mpv preview bridge is unavailable');
+      nativeRequested = true;
       let result;
       try {
         result = await bridge.launch({ src, bounds, audio });
@@ -230,7 +237,7 @@ export function createNativePreviewRuntime({
         throw error;
       }
       if (token !== generation) {
-        await Promise.resolve(bridge.quit?.()).catch(() => {});
+        // The operation which superseded this launch owns shutdown/replacement.
         return null;
       }
       mode = 'mpv';
@@ -241,7 +248,7 @@ export function createNativePreviewRuntime({
     },
 
     async enterHtml5(nextVideo = video) {
-      const nativeWasActive = mode === 'mpv';
+      const nativeWasActive = nativeRequested;
       selectHtml5(nextVideo);
       if (nativeWasActive) await Promise.resolve(shutdownNative()).catch(() => {});
     },
@@ -302,10 +309,8 @@ export function createNativePreviewRuntime({
     async detect() { return bridge?.detect ? bridge.detect() : null; },
     onEvent(callback) { return bridge?.onEvent?.(callback); },
     async quit() {
-      generation += 1;
-      stopBoundsFeeder();
-      await clearGuides();
-      return bridge?.quit ? bridge.quit() : false;
+      selectHtml5(video);
+      return shutdownNative();
     },
     async launch(options) {
       return runtime.enterMpv(options);

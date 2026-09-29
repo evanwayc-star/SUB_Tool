@@ -21,7 +21,8 @@ describe('副檔名', () => {
     expect(extensionFor('prores')).toBe('.mov');
     expect(extensionFor('wav')).toBe('.wav');
     expect(extensionFor('mod-fhd')).toBe('.ts');
-    expect(extensionFor('airline-s3k')).toBe('.mpg');
+    expect(extensionFor('airline-exw')).toBe('.mpg');
+    expect(extensionFor('airline-s3k')).toBe('.mp4');
     expect(extensionFor('airline-dmpes')).toBe('.mpg');
     expect(extensionFor('airline-dmpes-4m')).toBe('.mpg');
     expect(extensionFor('dvd-iso')).toBe('.iso');
@@ -353,7 +354,7 @@ describe('航空 MPEG-TS 交付', () => {
   const stereoPlan = { streams: [{ layout: 'stereo', busIds: ['l', 'r'] }] };
 
   it.each([
-    ['airline-s3k', '航空-S3K-MPEG1-1.5M', 352, 240, 1500],
+    ['airline-exw', '航空-exW-H264-500K', 640, 360, 500],
     ['airline-dmpes', '航空-DMPES-H264-1.5M', 720, 480, 1500],
     ['airline-dmpes-4m', '航空-DMPES-H264-4M', 720, 480, 4000],
   ])('%s 固定規格與檔名，只列出最終 mpg 成品供檢查覆寫', (format, label, width, height, videoKbps) => {
@@ -378,10 +379,10 @@ describe('航空 MPEG-TS 交付', () => {
     expect(list.outPaths().every(output => output.name.startsWith(stem + '_TC.'))).toBe(true);
   });
 
-  it('S3K 與 DMPES 使用同一成品檔名時會阻擋輸出碰撞', () => {
+  it('exW 與 DMPES 使用同一成品檔名時會阻擋輸出碰撞', () => {
     const list = base({ defaultAudioLayout: stereoPlan });
     list.setOutDir(0, 'D:\\交付');
-    list.setFormat(0, 'airline-s3k');
+    list.setFormat(0, 'airline-exw');
     list.setName(0, '節目');
     list.add();
     list.setFormat(1, 'airline-dmpes');
@@ -400,14 +401,14 @@ describe('航空 MPEG-TS 交付', () => {
   });
 
   it('多串流阻擋訊息使用各航空格式名稱，兩條 mono 仍依使用者次序編成 Stereo', () => {
-    expect(deliveryPresetAudioProblem('airline-s3k', { streams: [] })).toContain('航空-S3K-MPEG1-1.5M (立體聲) 需要單一 Stereo');
+    expect(deliveryPresetAudioProblem('airline-exw', { streams: [] })).toContain('航空-exW-H264-500K (立體聲) 需要單一 Stereo');
     expect(deliveryPresetAudioProblem('airline-dmpes', { streams: [] })).toContain('航空-DMPES-H264-1.5M (立體聲) 需要單一 Stereo');
     const list = base({ defaultAudioLayout: { streams: [
       { layout: 'mono', busIds: ['r'] }, { layout: 'mono', busIds: ['l'] },
     ] } });
-    list.setFormat(0, 'airline-s3k');
+    list.setFormat(0, 'airline-exw');
     expect(list.get(0).audioPlan.streams).toEqual([{
-      id: 'airline-s3k-stereo', name: '航空-S3K-MPEG1-1.5M (立體聲) Stereo', layout: 'stereo', busIds: ['r', 'l'],
+      id: 'airline-exw-stereo', name: '航空-exW-H264-500K (立體聲) Stereo', layout: 'stereo', busIds: ['r', 'l'],
     }]);
   });
 });
@@ -489,7 +490,7 @@ describe('DVD 與 BD 光碟映像交付', () => {
     expect(list.problems()).toEqual([]);
   });
 
-  it.each(['dvd-iso', 'bd-iso', 'mod-fhd', 'airline-s3k', 'airline-dmpes', 'airline-dmpes-4m'])('%s 只允許 null 音訊回退；明確傳入的無效編組回報錯誤', format => {
+  it.each(['dvd-iso', 'bd-iso', 'mod-fhd', 'airline-exw', 'airline-dmpes', 'airline-dmpes-4m'])('%s 只允許 null 音訊回退；明確傳入的無效編組回報錯誤', format => {
     expect(deliveryPresetAudioProblem(format, null)).toBeNull();
     for (const plan of [
       {}, { streams: [] }, { streams: 'stereo' }, { streams: [null] },

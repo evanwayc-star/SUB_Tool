@@ -42,7 +42,7 @@ function socketThatReportsDuration(duration = 123.5) {
   return socket;
 }
 
-function make({ duration = 123.5 } = {}) {
+function make({ duration = 123.5, guideLoad } = {}) {
   FakeWindow.instances = [];
   const parent = { isDestroyed: () => false, getContentBounds: () => ({ x: 100, y: 200 }) };
   const children = [];
@@ -50,7 +50,12 @@ function make({ duration = 123.5 } = {}) {
   const events = [];
   const delays = [];
   const host = createMpvHost({
-    BrowserWindow: FakeWindow,
+    BrowserWindow: guideLoad ? class extends FakeWindow {
+      constructor(options) {
+        super(options);
+        this.loadURL = vi.fn(url => url.startsWith('file:') ? guideLoad() : Promise.resolve());
+      }
+    } : FakeWindow,
     spawn: vi.fn((exe, args) => {
       const child = new EventEmitter();
       child.kill = vi.fn();
@@ -86,6 +91,22 @@ function make({ duration = 123.5 } = {}) {
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it('被新來源取代的 guide 載入完成後不可再啟動舊 mpv 或覆寫新宿主', async () => {
+    let finishOldGuide;
+    const oldGuide = new Promise(resolve => { finishOldGuide = resolve; });
+    const guideLoad = vi.fn().mockReturnValueOnce(oldGuide).mockResolvedValue(undefined);
+    const { host, children } = make({ guideLoad });
+    const oldLaunch = host.launch({ src: 'D:/media/old.mxf' });
+    const oldResult = expect(oldLaunch).rejects.toThrow('mpv 啟動已被新的媒體取代');
+    await host.launch({ src: 'D:/media/new.mxf' });
+    finishOldGuide();
+    await oldResult;
+
+    expect(children).toHaveLength(1);
+    expect(children[0].args.at(-1)).toBe('D:/media/new.mxf');
+    expect(children[0].child.kill).not.toHaveBeenCalled();
+  });
+
   it('啟動與換檔在來源就緒時立即回傳，不固定等待 400ms 或反覆查 duration', async () => {
     const { host, sockets, delays } = make();
     await expect(host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } }))

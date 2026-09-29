@@ -21,12 +21,12 @@ flowchart LR
 |---|---|
 | `electron/main.js` | BrowserWindow、IPC 註冊與 adapter 組裝 |
 | `electron/preload.js` | contextBridge 與 renderer 輸入型別守門 |
-| `electron/local-resource.js` | `subtool-local:` capability URL |
+| `electron/local-resource.js` | `subtool-local:` capability URL 與應用視窗導航限制 |
 | `electron/file-authority.js` | 精確 read／write／project／screenshot／delivery 權限 |
-| `electron/trusted-project-intake.js` | 由可信 `.subtool` bytes 衍生媒體能力 |
-| `electron/project-write-admission.js` | Save As／覆寫專案的原子寫入 |
+| `electron/project-file-authority-engine.js` | 可信專案讀取、媒體能力衍生、Save As／覆寫准入與近期清單 |
+| `electron/settings-file.js` | 設定、近期專案與對話框目錄共用的 settings.json 寫入交易 |
 | `electron/media-intake-runtime.js` | probe、Proxy、波形、聲道快取與 lease |
-| `electron/native-tooling.js` | ffmpeg／ffprobe 路徑與 encoder 能力 |
+| `electron/ffmpeg-execution-engine.js` | ffmpeg／ffprobe 路徑、encoder 能力與程序執行 |
 | `electron/mpv-host.js` | Windows mpv 視窗、IPC 與精準畫格呈現 |
 | `electron/export-queue.js` | 背景排程、並行、停止、重試與持久化 |
 | `electron/delivery-runner.js` | 單一交付工作的 ffmpeg 交易 |
@@ -51,7 +51,7 @@ Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案
 
 - Preload 用 `webUtils.getPathForFile()` 從真實 File 取得路徑。
 - 一般媒體交給 `fs:authorizeDroppedFile`，只授權精確來源。
-- `.subtool`／`.json` 不走一般檔案授權，直接進 `trusted-project-intake`。
+- `.subtool`／`.json` 不走一般檔案授權，直接進 `project-file-authority-engine` 的可信專案讀取。
 - Renderer 自己提供的 path／base64 不可把能力擴張到其他檔案。
 
 ### 專案
@@ -72,6 +72,12 @@ Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案
 - 失效與釋放狀態
 
 不要用關閉 `webSecurity` 解決本機字型或媒體載入。
+
+主視窗、佇列與字幕比較視窗都由 `protectApplicationWindow()` 限制為自己的應用 HTML。只有明確以 `--dev` 啟動時，主視窗才允許指定開發 origin 與 pathname；禁止其他導航、重新導向及子視窗，主視窗的外部 HTTP(S) 連結交給系統瀏覽器。
+
+### 設定檔持久化
+
+`settings-file.js` 統一 settings.json 的讀改寫：renderer 設定、近期專案與最近目錄都先寫相鄰暫存檔，再以 rename 替換。解析失敗時先保存 `.corrupt-*` 原始位元組副本，保存失敗則拒絕覆寫。寫入失敗會保留原檔，並向呼叫端回報失敗；renderer 的設定 adapter 不把明確的 false 轉成成功。
 
 ## 3. Preload／IPC 介面
 
@@ -111,7 +117,7 @@ Preload 原則：
 
 ### Native tool 解析
 
-`native-tooling.js` 依目前平台與架構選擇封裝工具；開發環境可回退到受控的專案／環境位置。正式安裝包不可依賴使用者 PATH。
+`ffmpeg-execution-engine.js` 依目前平台與架構選擇封裝工具；開發環境可回退到受控的專案／環境位置。正式安裝包不可依賴使用者 PATH。
 
 Windows 封裝需要：
 
@@ -167,18 +173,18 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 
 `airline-encoding.js` 提供 Carbon CPF 對應的 CPU codec 與 transport profile，由純 `export-plan.js` 依同一格式選擇。計畫先用顯示比例合成、燒字幕與 TC，再縮為編碼尺寸並設定 SAR；航空來源若隔行則以 bwdif send_frame 轉逐行，不走 MOD-FHD 的場交織。
 
-- S3K：MPEG-1、352×240、30000/1001、CBR 1500 kbps、GOP 上限 15、2 B 幀、open GOP、scene change 關閉；VBV 224 KiB。Carbon 的 MPEG-1 aspect code 12 對應 SAR 200:219（表中 1.0950 為其倒數）。libtwolame 輸出 Layer-2 Stereo、48 kHz、128 kbps，16-bit input、CRC 開啟，copyright/original 關閉。
+- exW：H.264 Main@3.0、640×360 正方形像素、30000/1001 逐行、VBR 目標 500 kbps／上限 2000 kbps、VBV 125000 bytes、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD；關閉 deblocking、weighted prediction、B pyramid 與 HRD。依交付要求，每個 access unit 的 AUD 後加入 AFD 完整 16:9（T.35／DTG1，active_format=10）SEI。音訊為 AAC-LC／ADTS Stereo、48 kHz、64 kbps。
 - DMPES：H.264 Main@3.0、720×480、30000/1001、CBR 1500 或 4000 kbps、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD、關閉 deblocking／weighted prediction／B pyramid。依使用者確認的 **16:9 顯示比例，設定 SAR 32:27**；明確優先於 CPF 的 6:5 及參考成品的 40:33。其餘採參考成品 SPS 實測的 NAL HRD CBR、NTSC limited range；音訊輸出 MPEG-4 AAC-LC／ADTS Stereo、48 kHz、128 kbps。
 
-上述是跨編碼器的參數對應。S3K 的 224 KiB VBV 在此碼率超出 MPEG-1 `vbv_delay` 可表範圍，FFmpeg 寫入 0xffff；DMPES 1.5M 的 130202-byte VBV 傳入 1041616 bits，x264 內部取整，排程使用實際 HRD 容量 130124 bytes，4M 為 347124 bytes。收尾在最後一個 video PES 加入 MPEG-1 sequence end 或 AVC end-of-sequence／end-of-stream，修正 TSA 報表缺少 EOS 的警告。Carbon 專用搜尋／量化策略不保證等價，不能宣稱位元流完全一致或已通過航空設備驗收。
+上述是跨編碼器的參數對應。DMPES 1.5M 的 130202-byte VBV 傳入 1041616 bits，x264 內部取整，排程使用實際 HRD 容量 130124 bytes，4M 為 347124 bytes。exW 依 CPF 設定 125000-byte VBV。收尾在最後一個 video PES 加入 AVC end-of-sequence／end-of-stream，修正 TSA 報表缺少 EOS 的警告。Carbon 專用搜尋／量化策略不保證等價，不能宣稱位元流完全一致或已通過航空設備驗收。
 
 `delivery-formats.cjs` 統一定義單一 `.mpg` 輸出，容器由 `-f mpegts` 明確指定為 188-byte MPEG-TS。同一 ffmpeg 程序直接編碼與合成影音，不產生 ES／cfg，也不從缺少 PTS/DTS 的 raw H.264 重建 B 幀時間戳。admission 檢查成品的來源衝突、授權與佇列佔用；舊版 `.h264`／`.m1v` 工作因副檔名不符被拒絕，需從交付清單重新送出。
 
-合成沿用 Panasonic cfg 的 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes。1.5M 規格採參考成品 PCR 實測的 1855594 bps CBR；4M 使用 4600000 bps。`airline-transport.js` 依 DTS／PTS 重新排程 PES，影片 TB 目標不超過 400 bytes（上限 512），音訊僅提前約 0.1 秒並限制主緩衝，影片保留量依實際 VBV 限制；PCR 約 50 ms，PAT／PMT 約 90 ms。單純增大 mux delay 會讓主緩衝更容易溢位，因此不能作為 TSA 錯誤的修復。保留編碼器提供的 PTS／DTS 與音訊 priming 關係，不改影音播放速度。
+合成沿用 Panasonic cfg 的 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes。DMPES 1.5M 規格採參考成品 PCR 實測的 1855594 bps CBR；4M 使用 4600000 bps。exW 參照 MP2TSME 9 cfg 的 VBR=yes，空閒時不填入 null packet，保留最高 2.5 Mbps 的封包排程上限。`airline-transport.js` 依 DTS／PTS 重新排程 PES，影片 TB 目標不超過 400 bytes（上限 512），DMPES 音訊最多提前約 0.1 秒、exW 最多約 0.35 秒，並限制主緩衝；影片保留量依實際 VBV 限制，PCR 約 50 ms，PAT／PMT 約 90 ms。單純增大 mux delay 會讓主緩衝更容易溢位，因此不能作為 TSA 錯誤的修復。保留編碼器提供的 PTS／DTS 與音訊 priming 關係，不改影音播放速度。
 
-TSA 驗收另須確認每個標示 `random_access_indicator` 的視訊 TS 封包同時帶 PCR，且 S3K 視訊封包抵達時間距 DTS 不超過 1 秒；S3K 的 30000/1001 GOP 時碼標示 drop-frame。TSA 若顯示 S3K `Aspect Ratio: Reserved value (>7)`，應對照 Carbon CPF 與 [ARIB STD-B24 的 MPEG-1 參數表](https://www.arib.or.jp/english/html/overview/doc/6-STD-B24v5_2-1p3-E1.pdf)：352×240、525 線 4:3 使用 aspect code 12；此欄不計入該份報表的 error／warning，不應為清除顯示而變更交付比例。
+TSA 驗收另須確認每個標示 `random_access_indicator` 的視訊 TS 封包同時帶 PCR。exW 尚需以 Manzanita TSA 對實際成品驗證 VBR 封裝與緩衝限制。
 
-watchdog 先以 `airline-output.js` 檢查 TS 結構，再將封包重排至 lease 目錄中的暫存 TS，依固定碼率重新產生 PCR／PSI／null packet。僅保留一個 PES 與固定大小讀寫區塊，不建立整片影片的封包索引；跨磁碟寫回成品可取消。取消或收尾失敗會清理半成品，清理失敗保留 lease。`airline-output.js`、`airline-transport.js`、`airline-encoding.js` 與共用格式模組須一併 asarUnpack。
+watchdog 先以 `airline-output.js` 檢查 TS 結構，再將封包重排至 lease 目錄中的暫存 TS，重新產生 PCR／PSI；CBR 格式填入 null packet，exW 以 VBR 省略空閒封包。僅保留一個 PES 與固定大小讀寫區塊，不建立整片影片的封包索引；跨磁碟寫回成品可取消。取消或收尾失敗會清理半成品，清理失敗保留 lease。`airline-output.js`、`airline-transport.js`、`airline-encoding.js` 與共用格式模組須一併 asarUnpack。
 
 `tests/airlineEncoding.test.js` 驗證 sequence header／SPS／PPS／CRC 與 CBR；`tests/airlineTransport.test.js` 檢查內容、格序與每個 PES 最後封包的解碼期限；`tests/airlineBuffers.test.js` 使用獨立封包抵達模型先重現舊版溢位，再確認三種規格的 TB、影片及音訊緩衝限制。實際 Electron IPC 與取消清理另由 queue lifecycle／watchdog 測試涵蓋。
 
@@ -248,7 +254,7 @@ stateDiagram-v2
 - 完成紀錄保存在 `history.json`，重開不重跑。
 - 有執行中工作時關閉主視窗，監控視窗接手；真正退出前再次確認。
 
-`queue-store.js` 擁有 live state 持久化，`queue-history.js` 擁有完成紀錄。UI 不是真相來源。
+`queue-store.js` 擁有 live state 持久化及 `QueueHistory` 完成紀錄。UI 不是真相來源。
 
 ## 7. 打包與發布
 

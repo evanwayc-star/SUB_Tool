@@ -274,6 +274,7 @@ export function openHardLimiterDialog(audioSource) {
   openModal(`音訊效果 — 強限制器／平衡化 (ITU 1770) — ${escapeHTML(sourceName)}`, html, buttons, {
     width: '560px',
   });
+  const analysisPanel = document.getElementById('hlAnalysisStatus')?.closest('.hard-limiter-panel');
 
   // 綁定雙向 UI 互動與即時輸入
   const toggleEnable = document.getElementById('hlToggleEnable');
@@ -399,12 +400,13 @@ export function openHardLimiterDialog(audioSource) {
   const duration = audioSource?.duration || audioSource?.asset?.duration || 0;
   if (DESK?.analyzeAudioLoudness && filePath) {
     DESK.analyzeAudioLoudness(filePath, duration).then(res => {
-      if (!res) return;
-      const maxEl = document.getElementById('hlAnalyzedMax');
-      const meanEl = document.getElementById('hlAnalyzedMean');
-      const minEl = document.getElementById('hlAnalyzedMin');
-      const drEl = document.getElementById('hlAnalyzedDR');
-      const tagEl = document.getElementById('hlAnalysisStatus');
+      // A later modal replaces modalBody; its identical IDs must not receive this source's result.
+      if (!res || !analysisPanel?.isConnected) return;
+      const maxEl = analysisPanel.querySelector('#hlAnalyzedMax');
+      const meanEl = analysisPanel.querySelector('#hlAnalyzedMean');
+      const minEl = analysisPanel.querySelector('#hlAnalyzedMin');
+      const drEl = analysisPanel.querySelector('#hlAnalyzedDR');
+      const tagEl = analysisPanel.querySelector('#hlAnalysisStatus');
 
       if (maxEl) maxEl.textContent = `${res.maxDb > -90 ? res.maxDb : '無聲'} dB`;
       if (meanEl) meanEl.textContent = `${res.meanDb > -90 ? res.meanDb : '無聲'} dB`;

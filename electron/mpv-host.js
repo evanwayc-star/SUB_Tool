@@ -446,6 +446,9 @@ function createMpvHost(deps) {
     try {
       createHostWindows();
       await loadGuideDocument();
+      // loadURL yields while quit()/launch() can transfer ownership of the shared
+      // windows. A stale launch must stop before touching that newer host or spawning.
+      if (token !== generation) throw new Error('mpv 啟動已被新的媒體取代');
       visible = true;
       applyBounds(bounds);
       if (timecodeWatermark) {
@@ -504,6 +507,7 @@ function createMpvHost(deps) {
       // pipe 已連線即可查詢；等待固定 400ms 只會延後每次首畫格啟動。
       // 來源 duration 尚未就緒時 renderer 會沿用先前 ffprobe 的值，後續再由 property-change 更新。
       const duration = await send(['get_property', 'duration'], true);
+      if (token !== generation) throw new Error('mpv 啟動已被新的媒體取代');
       return { ok: true, duration: typeof duration === 'number' ? duration : 0 };
     } catch (error) {
       if (token === generation) quit();

@@ -1,7 +1,64 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createNativePreviewRuntime } from '../src/media-player-adapter.js';
 
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe('native preview runtime', () => {
+  it('舊啟動完成時不會關閉較新來源的原生預覽', async () => {
+    const oldLaunch = deferred();
+    const mpv = {
+      launch: vi.fn().mockReturnValueOnce(oldLaunch.promise).mockResolvedValue({ ok: true }),
+      quit: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = createNativePreviewRuntime({ mpv });
+    const first = runtime.enterMpv({ src: 'old.mxf' });
+    await runtime.enterMpv({ src: 'new.mxf' });
+    oldLaunch.resolve({ ok: true });
+
+    await expect(first).resolves.toBeNull();
+    expect(mpv.quit).not.toHaveBeenCalled();
+    expect(runtime.mode).toBe('mpv');
+  });
+
+  it('尚在啟動時切回 HTML5 會立即取消原生宿主，晚到回應不再重複關閉', async () => {
+    const launch = deferred();
+    const mpv = {
+      launch: vi.fn(() => launch.promise),
+      quit: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = createNativePreviewRuntime({ mpv });
+    const pending = runtime.enterMpv({ src: 'old.mxf' });
+    await runtime.enterHtml5();
+    expect(mpv.quit).toHaveBeenCalledOnce();
+
+    launch.resolve({ ok: true });
+    await expect(pending).resolves.toBeNull();
+    expect(mpv.quit).toHaveBeenCalledOnce();
+    expect(runtime.mode).toBe('html5');
+  });
+
+  it('舊 HTML5 清理等待 guide 回覆期間，新原生預覽不會被 quit', async () => {
+    const clearing = deferred();
+    const mpv = {
+      launch: vi.fn().mockResolvedValue({ ok: true }),
+      quit: vi.fn().mockResolvedValue(undefined),
+      setGuide: vi.fn(() => clearing.promise),
+    };
+    const runtime = createNativePreviewRuntime({ mpv });
+    await runtime.enterMpv({ src: 'old.mxf' });
+    const shutdown = runtime.enterHtml5();
+    await runtime.enterMpv({ src: 'new.mxf' });
+    clearing.resolve();
+    await shutdown;
+
+    expect(mpv.quit).not.toHaveBeenCalled();
+    expect(runtime.mode).toBe('mpv');
+  });
+
   it('從 mpv 切回 HTML5 後仍能讓 OS 視窗讓位，並清掉 guides 與 bounds feeder', async () => {
     const calls = [];
     const mpv = {

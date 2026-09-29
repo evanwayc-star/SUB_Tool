@@ -32,6 +32,7 @@ describe('media-presentation-core', () => {
     await expect(first).resolves.toMatchObject({
       status: 'presented', requestedTime: 9, presentedTime: 9.01, source: 'html5',
     });
+    expect(core.presentedTime()).toBeNull(); // 新目標已排隊，舊畫格不可成為暫停權威值
     expect(presentTarget).toHaveBeenNthCalledWith(2, 7, expect.objectContaining({
       requestId: expect.any(Number), signal: expect.any(Object),
     }));
@@ -60,6 +61,21 @@ describe('media-presentation-core', () => {
 
     core.observe(3, { requestId: presentTarget.mock.calls[1][1].requestId });
     await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 3 });
+  });
+
+  it('舊 adapter Promise 晚到時不覆寫最新呈現位置', async () => {
+    const finish = [];
+    const core = createMediaPresentationCore({
+      presentTarget: () => new Promise(resolve => finish.push(resolve)),
+    });
+    const old = core.request(5);
+    const latest = core.request(7);
+    finish[0]({ presentedTime: 5 });
+    await expect(old).resolves.toMatchObject({ status: 'presented', presentedTime: 5 });
+    expect(core.presentedTime()).toBeNull();
+    finish[1]({ presentedTime: 7 });
+    await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 7 });
+    expect(core.presentedTime()).toBe(7);
   });
 
   it('取消後晚到的呈現回報不會完成舊請求', async () => {
@@ -465,6 +481,28 @@ describe('media presentation session', () => {
     });
     expect(nativeAdapter.present).toHaveBeenCalledWith(4, expect.objectContaining({ exact: true }));
     expect(calls).toEqual(['profile:clip-a', 'source:4.02', 'commit:104.02']);
+  });
+
+  it('mpv 舊畫格完成時不回寫來源時間或提交播放點', async () => {
+    const finish = [];
+    const nativeAdapter = {
+      type: 'mpv',
+      present: vi.fn(() => new Promise(resolve => finish.push(resolve))),
+    };
+    const { session, calls } = createSession({
+      player: { adapter: () => nativeAdapter, isNative: () => true },
+    });
+    const old = session.request(104);
+    const latest = session.request(106);
+    finish[0]({ backend: 'mpv', presentedSourceTime: 4 });
+    await old;
+    expect(calls).not.toContain('source:4');
+    expect(calls).not.toContain('commit:104');
+    expect(session.presentedTime()).toBeNull();
+    finish[1]({ backend: 'mpv', presentedSourceTime: 6 });
+    await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 106 });
+    expect(calls).toContain('source:6');
+    expect(calls).toContain('commit:106');
   });
 
   it('gap 與虛擬時間軸由 session 合成呈現，不會呼叫播放器', async () => {

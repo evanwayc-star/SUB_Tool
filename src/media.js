@@ -43,7 +43,7 @@ let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，
 import { AudioEngine } from './audio-engine.js';
 import { MediaAudioRouter, AudioPipeline } from './audio-routing-engine.js';
 import { destroyScrubber } from './audio-engine.js';
-import { State, DESK, setFps, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
+import { State, DESK, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Seq } from './sequence.js';
 import { createAudioEffects } from './audio-effects.js';
@@ -211,7 +211,7 @@ import { getExactFps, secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset } from './external-audio.js';
-import { MediaIntakeSession, maxKnownSourceDuration, waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { MediaIntakeSession, maxKnownSourceDuration, probeAudioChannelDescriptors, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 import { ResetEpoch, PlaybackSyncEngine, createMediaPresentationSession } from './media-presentation-core.js';
 import { clipSourceFingerprint, liveClipForSource } from './media-intake-engine.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
@@ -224,6 +224,8 @@ import { fadeAlphaAtTimeline } from './image-compositor-engine.js';   // 淡入�
 import { sourceChannelLabels } from './audio-routing-engine.js'; // 來源聲道展開順序：與主程序 ingest 同一份約定
 
 import { loadDesktopMedia, _expandChannels, _loadViaMpv, loadVideoFile, canPlayNatively, webAudioCapabilityNotice, FFMPEG_MAX_BYTES, WEB_LARGE_NATIVE_AUDIO_NOTICE, WEB_LARGE_UNSUPPORTED_MEDIA_NOTICE } from './media-loader.js';
+export { probeAudioChannelDescriptors } from './media-intake-engine.js';
+export { detectFpsWeb } from './media-loader.js';
 
 /* 專案音訊路由使用的持久來源 ID。audioSrc 仍保留給既有播放同步（video / clip:<id>），
    但它會隨本次載入的 clip id 改變，因此不能拿來儲存聲道配線。 */
@@ -233,36 +235,6 @@ function audioSourceIdForClip(c){
   if(!c.audioSourceId) c.audioSourceId=makeAudioSourceId();
   return c.audioSourceId;
 }
-export function probeAudioChannelDescriptors(audio){
-  const out=[];
-  (audio||[]).forEach((stream,sourceStream)=>{
-    const count=Math.max(0,Math.floor(Number(stream?.channels)||0));
-    for(let sourceChannel=0;sourceChannel<count;sourceChannel++) out.push({sourceStream,sourceChannel});
-  });
-  return out;
-}
-
-/* ===== 播放窗：自動偵測 FPS（網頁版，播放時取樣） =====
-   FPS-SYNC：影格率一律【實測】——這裡用 requestVideoFrameCallback 量真實影格時間戳，
-   桌面版則用 ffprobe（DESK.probe → info.video.fps）。【絕不可依檔名判斷 FPS】，
-   因為檔名可能寫錯（例：標 24FPS 實為 29.97）。詳見 FPS_時碼一致性.md。 */
-export function detectFpsWeb(owns=()=>true){
-  if(!('requestVideoFrameCallback' in HTMLVideoElement.prototype))return;
-  let last=null, deltas=[], frames=0;
-  const cb=(now,meta)=>{
-    if(!owns()) return;
-    if(last!=null){ const d=meta.mediaTime-last; if(d>0.0005)deltas.push(d); }
-    last=meta.mediaTime; frames++;
-    if(deltas.length<12 && frames<60){ try{ if(owns()) video.requestVideoFrameCallback(cb); }catch(e){} return; }
-    if(deltas.length>=6){ deltas.sort((a,b)=>a-b); const med=deltas[deltas.length>>1]; const raw=1/med;
-      // 不可先 Math.round：整數化會把 29.97→30、23.976→24，毀掉 NTSC 分數影格率的偵測；
-      // 直接把實測值交給 snapFps 對齊到支援集合（23.976/24/25/29.97/30）
-      if(raw>=10&&raw<=120&&owns()){ const fps=snapFps(raw); setFps(String(fps)); // 經 setFps 統一處理：偵測到的影格率一律視為非 Drop-frame，清除殘留的 dropFrame
-        setStatus('偵測到影片 FPS：'+fps,'ok'); } }
-  };
-  try{ if(owns()) video.requestVideoFrameCallback(cb); }catch(e){}
-}
-
 /* 圖片原始像素尺寸（v4.7）。互動框要貼合 contain 之後的圖片本體，沒有這組數字
    就只能退回「整個畫框」＝把手離素材老遠、下緣還會被播放列蓋住。
    還原專案時 geo 已帶著存檔值，直接沿用不必再解一次。 */

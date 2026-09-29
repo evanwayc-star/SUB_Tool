@@ -3,10 +3,13 @@
 const { open, rename, rm } = require('node:fs/promises');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
-const { airlineTransportProfile, S3K_AUDIO_PREROLL_SAMPLES } = require('./airline-encoding');
+const { airlineTransportProfile } = require('./airline-encoding');
 const PACKET = 188;
 const CHUNK = PACKET * 1024;
 const CLOCK = 27000000;
+// SCTE 128-1 / DVB AFD: registered T.35 user data, DTG1, active_format 10
+// (full 16:9). Keep AUD first in each access unit, then insert this SEI.
+const EXW_AFD_SEI = Buffer.from('000001060409b500314454473141fa80', 'hex');
 
 function invalid(message) {
   const error = new Error(`航空 MPG 排程失敗：${message}`);
@@ -25,14 +28,6 @@ function writeTimestamp(bytes, offset, value) {
   bytes[offset + 3] = Math.floor(ticks / 128) & 255;
   bytes[offset + 4] = (ticks & 127) * 2 | 1;
 }
-function rebaseAudio(frame, shift) {
-  if (!frame || !shift) return frame;
-  writeTimestamp(frame.bytes, 9, timestamp(frame.bytes, 9) - shift);
-  if ((frame.bytes[7] >> 6) === 3) writeTimestamp(frame.bytes, 14, timestamp(frame.bytes, 14) - shift);
-  frame.pts -= shift / 90000;
-  frame.dts -= shift / 90000;
-  return frame;
-}
 function crc32(bytes) {
   let crc = 0xffffffff;
   for (const byte of bytes) {
@@ -41,9 +36,9 @@ function crc32(bytes) {
   }
   return crc >>> 0;
 }
-function table(pid, s3k) {
+function table(pid) {
   const section = pid === 0 ? Buffer.from('00b00d0001c100000001e03f00000000', 'hex')
-    : Buffer.from(`02b0170001c10000e030f000${s3k ? '01' : '1b'}e030f000${s3k ? '03' : '0f'}e031f00000000000`, 'hex');
+    : Buffer.from('02b0170001c10000e030f0001be030f0000fe031f00000000000', 'hex');
   section.writeUInt32BE(crc32(section.subarray(0, -4)), section.length - 4);
   const bytes = Buffer.alloc(PACKET, 0xff);
   bytes.set([0x47, 0x40 | (pid === 63 ? 0x20 : 0), pid, 0x10, 0]);
@@ -51,9 +46,23 @@ function table(pid, s3k) {
   return bytes;
 }
 
+function withExwAfd(bytes, header) {
+  const prefix = bytes[header + 2] === 1 ? 3 : bytes[header + 2] === 0 && bytes[header + 3] === 1 ? 4 : 0;
+  if (!prefix || (bytes[header + prefix] & 31) !== 9) throw invalid('exW 視訊缺少 Access Unit Delimiter');
+  let next = -1;
+  for (let i = header + prefix + 1; i < bytes.length - 3; i++) {
+    if (bytes[i] === 0 && bytes[i + 1] === 0 && (bytes[i + 2] === 1
+      || (bytes[i + 2] === 0 && bytes[i + 3] === 1))) { next = i; break; }
+  }
+  if (next < 0) throw invalid('exW 視訊 Access Unit 缺少後續 NAL');
+  const result = Buffer.concat([bytes.subarray(0, next), EXW_AFD_SEI, bytes.subarray(next)]);
+  if (result.readUInt16BE(4)) result.writeUInt16BE(result.length - 6, 4);
+  return result;
+}
+
 // Two independent sequential readers retain one PES each, regardless of movie
 // length. No elementary sidecars or whole-movie packet index are created.
-async function* elementaryPackets(file, pid, signal, s3k) {
+async function* elementaryPackets(file, pid, signal, exwAfd = false) {
   const read = Buffer.allocUnsafe(CHUNK);
   let position = 0, parts = [], size = 0, randomAccess = false;
   const make = (last = false) => {
@@ -65,12 +74,14 @@ async function* elementaryPackets(file, pid, signal, s3k) {
     const dts = flags === 3 ? timestamp(bytes, 14) / 90000 : pts;
     // End-of-sequence and end-of-stream NALs belong to the final video PES.
     // Appending a timestamp-less PES would invent an extra packet/frame.
-    const end = s3k ? Buffer.from([0, 0, 1, 0xb7]) : Buffer.from([0, 0, 1, 11, 128]);
+    const end = Buffer.from([0, 0, 1, 11, 128]);
     if (last && pid === 48 && !bytes.subarray(-end.length).equals(end)) {
-      bytes = Buffer.concat([bytes, s3k ? end : Buffer.from([0, 0, 1, 10, 128, 0, 0, 1, 11, 128])]);
+      bytes = Buffer.concat([bytes, Buffer.from([0, 0, 1, 10, 128, 0, 0, 1, 11, 128])]);
       if (bytes.readUInt16BE(4)) bytes.writeUInt16BE(bytes.length - 6, 4);
     }
-    return { bytes, pts, dts, randomAccess, offset: 0, header: 9 + bytes[8], retained: 0 };
+    const header = 9 + bytes[8];
+    if (pid === 48 && exwAfd) bytes = withExwAfd(bytes, header);
+    return { bytes, pts, dts, randomAccess, offset: 0, header, retained: 0 };
   };
   for (;;) {
     signal?.throwIfAborted();
@@ -159,7 +170,7 @@ async function publishFromLease(temporary, output, signal) {
   }
 }
 
-/** Constant-rate T-STD packet scheduling, with only S3K audio-preroll removal. */
+/** T-STD packet scheduling; exW omits idle null packets for VBR transport. */
 async function reshapeAirlineTransport(format, output, { signal, tempDir } = {}) {
   signal?.throwIfAborted();
   const profile = airlineTransportProfile(format);
@@ -168,33 +179,36 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
   const source = await open(output, 'r');
   let destination;
   try {
-    const videoReader = elementaryPackets(source, 48, signal, format === 'airline-s3k');
+    const videoReader = elementaryPackets(source, 48, signal, format === 'airline-exw');
     const audioReader = elementaryPackets(source, 49, signal);
     let video = (await videoReader.next()).value;
     let audio = (await audioReader.next()).value;
     if (!video || !audio) throw invalid('缺少影音 PES');
-    // MPEG-1 uses a different sequence terminator; do not add AVC NALs.
-    const s3k = format === 'airline-s3k';
-    let audioShift = 0;
-    if (s3k) {
-      // libtwolame's 481 priming samples plus 671 silent input samples fill
-      // exactly one 1152-sample MP2 frame. Drop only that frame. Rebase the
-      // following PES to video time zero so MediaInfo reports 0 ms while the
-      // first real programme sample remains in the delivered stream.
-      const firstFrame = audio.bytes.subarray(audio.header);
-      if (firstFrame.length !== 384 || !firstFrame.subarray(0, 4).equals(Buffer.from([0xff, 0xfc, 0x84, 0x00]))) {
-        throw invalid('S3K 前導音訊不是單一 48 kHz／128 kbps MP2 影格');
+    if (format === 'airline-exw') {
+      // FFmpeg's native AAC-LC encoder emits one 1024-sample primer at -21.33 ms.
+      // A PES may contain several ADTS frames (notably for quiet short clips).
+      // Remove only the primer frame, retaining any programme frames in the
+      // same PES, then move that PES's PTS to the first programme sample.
+      if (Math.abs((video.pts - audio.pts) - 1024 / 48000) > 1 / 90000) {
+        throw invalid('exW AAC 前導影格與影片起點不符');
       }
-      const initialPts = timestamp(audio.bytes, 9);
-      audio = (await audioReader.next()).value;
-      if (!audio) throw invalid('S3K 缺少前導後的正式音訊');
-      audioShift = timestamp(audio.bytes, 9) - timestamp(video.bytes, 9);
-      const expectedShift = S3K_AUDIO_PREROLL_SAMPLES * 90000 / 48000;
-      if (Math.abs(audioShift - expectedShift) > 1
-        || Math.abs(timestamp(video.bytes, 9) - initialPts - 481 * 90000 / 48000) > 1) {
-        throw invalid('S3K 音訊前導與影像起點不符');
+      const at = audio.header, bytes = audio.bytes;
+      if (bytes.length - at < 7 || bytes[at] !== 0xff || (bytes[at + 1] & 0xf6) !== 0xf0) {
+        throw invalid('exW AAC 前導不是 ADTS 影格');
       }
-      rebaseAudio(audio, audioShift);
+      const firstLength = ((bytes[at + 3] & 3) << 11) | (bytes[at + 4] << 3) | (bytes[at + 5] >> 5);
+      if (firstLength < 7 || at + firstLength > bytes.length) throw invalid('exW AAC 前導影格長度無效');
+      if (at + firstLength === bytes.length) audio = (await audioReader.next()).value;
+      else {
+        audio.bytes = Buffer.concat([bytes.subarray(0, at), bytes.subarray(at + firstLength)]);
+        if (audio.bytes.readUInt16BE(4)) audio.bytes.writeUInt16BE(audio.bytes.length - 6, 4);
+        writeTimestamp(audio.bytes, 9, timestamp(audio.bytes, 9) + 1920);
+        audio.pts += 1024 / 48000;
+        audio.dts += 1024 / 48000;
+      }
+      if (!audio || Math.abs(audio.pts - video.pts) > 1 / 90000) {
+        throw invalid('exW AAC 正式音訊與影片起點不符');
+      }
     }
     const origin = Math.min(video.dts - profile.initialLead, audio.dts - 0.12);
     if (origin < 0) throw invalid('解碼時間沒有足夠的初始預載區間');
@@ -203,7 +217,7 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
     const queues = { 48: [], 49: [] }, retained = { 48: 0, 49: 0 };
     const stats = { transportPackets: 0, maximumVideoTb: 0, maximumVideoBuffer: 0,
       maximumAudioBuffer: 0, minimumDecodeLead: Infinity, muxRate: profile.muxRate };
-    let buffered = 0, lastTbTime = origin, tb = 0, nextPcr = origin, nextPat = origin, nextPmt = origin;
+    let buffered = 0, lastTbTime = origin, tb = 0, nextPcr = origin, nextPat = origin, nextPmt = origin, slots = 0;
     const step = PACKET * 8 / profile.muxRate;
     const enqueue = async bytes => {
       const pid = ((bytes[1] & 31) << 8) | bytes[2];
@@ -214,29 +228,30 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
       if (buffered === CHUNK) { signal?.throwIfAborted(); await writeAll(destination, chunk); buffered = 0; }
     };
     while (video || audio) {
-      const time = origin + stats.transportPackets * step;
+      const time = origin + slots++ * step;
       const arrival = time + step;
       tb = Math.max(0, tb - (arrival - lastTbTime) * profile.videoDrain / 8); lastTbTime = arrival;
       for (const pid of [48, 49]) {
         while (queues[pid].length && queues[pid][0].dts <= arrival) retained[pid] -= queues[pid].shift().retained;
       }
       if ((video && video.dts <= arrival) || (audio && audio.dts <= arrival)) throw invalid('影音封包超過 DTS 解碼期限');
-      if (time >= nextPat) { await enqueue(table(0, s3k)); nextPat = time + 0.09; continue; }
-      if (time >= nextPmt) { await enqueue(table(63, s3k)); nextPmt = time + 0.09; continue; }
+      if (time >= nextPat) { await enqueue(table(0)); nextPat = time + 0.09; continue; }
+      if (time >= nextPmt) { await enqueue(table(63)); nextPmt = time + 0.09; continue; }
       if (time >= nextPcr && tb + PACKET <= 400) {
         await enqueue(pcrPacket(Math.round((time + 12 * 8 / profile.muxRate) * CLOCK)));
         tb += PACKET; stats.maximumVideoTb = Math.max(stats.maximumVideoTb, tb); nextPcr = time + 0.05; continue;
       }
-      const audioReady = audio && audio.dts - arrival <= 0.1 && retained[49] + 184 <= 3000;
-      // S3K's large MPEG-1 buffer otherwise sends later access units more
-      // than a second before DTS, which Manzanita reports as decode errors.
-      const videoReady = video && video.dts - arrival <= (s3k ? 0.95 : Infinity)
-        && tb + PACKET <= 400 && retained[48] + 184 <= profile.videoBuffer - 2048;
+      const audioReady = audio && audio.dts - arrival <= profile.audioLead && retained[49] + 184 <= 3000;
+      const videoReady = video && tb + PACKET <= 400
+        && retained[48] + 184 <= profile.videoBuffer - 2048;
       let frame, pid;
       if (audioReady) { frame = audio; pid = 49; }
       else if (videoReady) { frame = video; pid = 48; }
       if (!frame) {
-        const bytes = Buffer.alloc(PACKET, 0xff); bytes.set([0x47, 0x1f, 0xff, 0x10]); await enqueue(bytes); continue;
+        if (!profile.variableRate) {
+          const bytes = Buffer.alloc(PACKET, 0xff); bytes.set([0x47, 0x1f, 0xff, 0x10]); await enqueue(bytes);
+        }
+        continue;
       }
       if (!frame.offset) queues[pid].push(frame);
       const random = pid === 48 && !frame.offset && frame.randomAccess;
@@ -254,7 +269,7 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
       if (frame.offset === frame.bytes.length) {
         if (pid === 48) {
           video = (await videoReader.next()).value;
-        } else audio = rebaseAudio((await audioReader.next()).value, audioShift);
+        } else audio = (await audioReader.next()).value;
       }
     }
     signal?.throwIfAborted();

@@ -176,12 +176,11 @@ export function ensureDeliveryAudioExportDefaults(spec, { appendMissing = true }
   }
   if (appendMissing) {
     const assigned = new Set(next.streams.flatMap(stream => Array.isArray(stream?.busIds) ? stream.busIds.map(String) : []));
-    const used = next.streams;
     for (const bus of next.buses) {
       if (!assigned.has(String(bus.id))) {
-        const id = _nextDeliveryId('delivery-stream-', used);
-        used.push({ id });
+        const id = _nextDeliveryId('delivery-stream-', next.streams);
         next.streams.push({ id, layout: 'mono', busIds: [bus.id] });
+        assigned.add(String(bus.id));
       }
     }
   }

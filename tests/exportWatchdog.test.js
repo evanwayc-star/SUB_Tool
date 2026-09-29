@@ -144,7 +144,7 @@ if (mode === 'success') {
     return { controller, outPath, stderr };
   }
 
-  function airlineScript(format, mode = 'success') {
+  function airlineScript(mode = 'success') {
     const outPath = path.join(tempDir, 'air.mpg');
     const paths = [outPath];
     const packet = (pid, data, pcr = false) => {
@@ -155,9 +155,7 @@ if (mode === 'success') {
       return bytes;
     };
     const pat = Buffer.from('0000b00d0001c100000001e03fd69d4f8c', 'hex');
-    const pmt = Buffer.from(format === 'airline-s3k'
-      ? '0002b0170001c10000e030f00002e030f00003e031f000947a0d66'
-      : '0002b0170001c10000e030f0001be030f0000fe031f0004d74b7a8', 'hex');
+    const pmt = Buffer.from('0002b0170001c10000e030f0001be030f0000fe031f0004d74b7a8', 'hex');
     // A complete PES with PTS = 2 s is needed by the transport scheduler;
     // a bare stream ID has never represented decodable timestamped media.
     const pts = Buffer.from([0x21, 0, 0x0b, 0x7e, 0x41]);
@@ -167,7 +165,7 @@ if (mode === 'success') {
       return bytes;
     };
     const bytes = Buffer.concat([packet(0, pat), packet(63, pmt),
-      packet(48, pes(0xe0, Buffer.from([0, 0, 1, format === 'airline-s3k' ? 0 : 0x65, 0x80])), true),
+      packet(48, pes(0xe0, Buffer.from([0, 0, 1, 0x65, 0x80])), true),
       packet(49, pes(0xc0, Buffer.from([0xff, 0xf1, 0x4c, 0x80, 1, 0x1f, 0xfc, 0])))]);
     fs.writeFileSync(fakeFfmpeg, `
       const fs = require('fs');
@@ -179,7 +177,7 @@ if (mode === 'success') {
 
   it('airline-dmpes 成功前完成 TS 修整，只留下單一 MPG', async () => {
     const format = 'airline-dmpes';
-    const { paths, outPath } = airlineScript(format);
+    const { paths, outPath } = airlineScript();
     const { controller } = launch('success', outPath, format, { outputFormat: format });
     await controller.ready;
     const result = await controller.completion;
@@ -198,9 +196,9 @@ if (mode === 'success') {
     expect(listLeases(queueDir)).toEqual([]);
   });
 
-  it('S3K 缺少完整 MP2 前導影格時拒絕交付並清理半成品', async () => {
-    const { paths, outPath } = airlineScript('airline-s3k');
-    const { controller } = launch('success', outPath, 'air-s3k-missing-preroll', { outputFormat: 'airline-s3k' });
+  it('exW 缺少完整 AAC 前導影格時拒絕交付並清理半成品', async () => {
+    const { paths, outPath } = airlineScript();
+    const { controller } = launch('success', outPath, 'air-exw-missing-preroll', { outputFormat: 'airline-exw' });
     await controller.ready;
     const result = await controller.completion;
     expect(result.ok).toBe(false);
@@ -210,7 +208,7 @@ if (mode === 'success') {
   });
 
   it('航空作業停止會刪除 MPG 半成品，然後釋放鎖', async () => {
-    const { paths, outPath } = airlineScript('airline-dmpes', 'wait');
+    const { paths, outPath } = airlineScript('wait');
     const { controller } = launch('wait', outPath, 'air-stop', { outputFormat: 'airline-dmpes' });
     await controller.ready;
     await waitFor(() => paths.every(file => fs.existsSync(file)), '航空 MPG 尚未建立');
@@ -223,7 +221,7 @@ if (mode === 'success') {
   });
 
   it('航空 MPG 已被佔用時不得啟動 FFmpeg 或刪除已有成品', async () => {
-    const { paths, outPath } = airlineScript('airline-dmpes');
+    const { paths, outPath } = airlineScript();
     for (const file of paths) fs.writeFileSync(file, 'original');
     acquireLease({ queueDir, outPath, jobId: 'owner', token: 'owner-token' });
     const { controller } = launch('success', outPath, 'air-conflict', { outputFormat: 'airline-dmpes' });
@@ -245,8 +243,8 @@ if (mode === 'success') {
   });
 
   it('航空 MPG 半成品無法刪除會保留鎖', async () => {
-    const { paths, outPath } = airlineScript('airline-s3k', 'wait');
-    const { controller } = launch('wait', outPath, 'air-retain', { outputFormat: 'airline-s3k' });
+    const { paths, outPath } = airlineScript('wait');
+    const { controller } = launch('wait', outPath, 'air-retain', { outputFormat: 'airline-exw' });
     await controller.ready;
     await waitFor(() => fs.existsSync(paths[0]), '航空 MPG 尚未建立');
     fs.unlinkSync(paths[0]);

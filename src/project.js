@@ -113,6 +113,9 @@ let _saveBaseName  = null;   // 基礎名稱（不含副檔名），自動備份
 let _autoSaveTimer = null;
 let _lastSavedDataStr = null; // 用於判斷專案是否被修改
 const _projectLoadSession = new ProjectLoadSession();
+let _saveEpoch = 0;
+let _saveTail = Promise.resolve();
+let _cancelFontPrompt = null;
 
 function _defaultSaveName(){
   return (State.mediaName ? State.mediaName.replace(/\.[^.]+$/,'') : 'project')+'.subtool';
@@ -325,7 +328,7 @@ function _timestamp(){
          '-'+String(n.getHours()).padStart(2,'0')+String(n.getMinutes()).padStart(2,'0');
 }
 
-function _onSaved(fullPath, webName){
+function _onSaved(fullPath, webName, snapshot){
   if(fullPath){
     _savePath=fullPath;
     _saveBaseName=fullPath.replace(/\\/g,'/').split('/').pop().replace(/\.subtool$/i,'');
@@ -334,8 +337,42 @@ function _onSaved(fullPath, webName){
     _saveBaseName=(webName||'').replace(/\.subtool$/i,'');
     setStatus('專案已儲存：'+webName,'ok');
   }
-  _lastSavedDataStr = JSON.stringify(_buildProjectData());
+  _lastSavedDataStr = snapshot;
   if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave, 3*60*1000);
+}
+
+function _saveProject(asNew){
+  // Capture the bytes and dirty baseline together, before any picker or disk IO.
+  const data=_buildProjectData();
+  const snapshot=JSON.stringify(data);
+  const bytes=encodeUTF16LE(JSON.stringify(data,null,1));
+  const name=_defaultSaveName();
+  const epoch=_saveEpoch, generation=_projectLoadSession.generation;
+  const owns=()=>epoch===_saveEpoch&&_isCurrentProjectLoad(generation);
+  const result=_saveTail.then(async()=>{
+    if(!owns()) return null;
+    try{
+      const saveAs=asNew||!_savePath;
+      let pth=null;
+      if(IS_DESKTOP){
+        pth=await (saveAs?DESK.saveProject(name,bytesToB64(bytes)):DESK.writeProject(_savePath,bytesToB64(bytes)));
+        if(!owns()) return null;
+        if(!pth){
+          if(!saveAs) showToast('儲存專案失敗，請嘗試「另存新檔」');
+          return null;
+        }
+      }else downloadBytes(bytes,name,'application/json');
+      _onSaved(pth,name,snapshot);
+      showToast(saveAs?'已另存新檔':'已儲存專案');
+      return pth||name;
+    }catch(error){
+      if(owns()) showToast('儲存專案失敗：'+error.message);
+      return null;
+    }
+  });
+  // One writer per project: a slower older save must never overwrite a newer save.
+  _saveTail=result.catch(()=>{});
+  return result;
 }
 
 async function _autoSave(){
@@ -368,18 +405,12 @@ function ensureProjectSaved(){
     openModal('開始前先儲存專案',
       `<p style="margin:0 0 10px;font-size:13px;color:var(--text-faint)">開始編輯前建議先儲存專案，<br>儲存後每 3 分鐘自動備份一份。</p>`,
       [{label:'立即儲存',primary:true,act:async()=>{
-        closeModal();
-        const name=_defaultSaveName();
-        if(IS_DESKTOP){
-          const pth=await DESK.saveProject(name,bytesToB64(_buildBytes()));
-          if(pth) _onSaved(pth);
-        } else {
-          downloadBytes(_buildBytes(),name,'application/json');
-          _onSaved(null,name);
-        }
+        closeModal({committed:true});
+        await Project.saveAs();
         resolve();
       }},
-      {label:'稍後再說',act:()=>{ closeModal(); resolve(); }}]
+      {label:'稍後再說',act:()=>{ closeModal(); resolve(); }}],
+      {onDismiss:resolve,onReplaced:resolve}
     );
   });
 }
@@ -397,6 +428,9 @@ function isProjectGuardDone(){ return _editGuardDone; }
 function confirmDiscardUnsaved(title = '開啟另一個專案'){
   if(!isProjectDirty()) return Promise.resolve(true);
   return new Promise(resolve=>{
+    let done=false;
+    const cancel=()=>{ done=true; resolve(false); };
+    const finish=value=>{ if(done) return; done=true; closeModal({committed:true}); resolve(value); };
     openModal(title,
       '<p>目前的專案有未儲存的變更，開啟另一個專案會失去這些變更。<br>要先儲存嗎？</p>',
       [
@@ -404,17 +438,17 @@ function confirmDiscardUnsaved(title = '開啟另一個專案'){
         // 與關閉視窗時的處理一致，避免「以為存好了其實沒有」。
         {label:'儲存後開啟',primary:true,act:async()=>{
           const pth=await Project.save();
-          if(pth){ closeModal(); resolve(true); }
-          else closeModal(), resolve(false);
+          finish(!!pth&&!isProjectDirty());
         }},
-        {label:'不儲存直接開啟',act:()=>{ closeModal(); resolve(true); }},
-        {label:'取消',act:()=>{ closeModal(); resolve(false); }},
-      ]);
+        {label:'不儲存直接開啟',act:()=>finish(true)},
+        {label:'取消',act:()=>finish(false)},
+      ],{onDismiss:cancel,onReplaced:cancel});
   });
 }
 
 /* 開新專案時重置所有儲存狀態 */
 function resetProject(){
+  _saveEpoch++;
   _editGuardDone=false;
   _savePath=null;
   _saveBaseName=null;
@@ -436,7 +470,7 @@ function isProjectDirty() {
   // v3 的 bus / routing / export layout 是可獨立於字幕存在的專案內容，不能被舊的「無字幕＝未修改」捷徑忽略。
   // 圖片／影片 clip 也是專案內容；尤其圖片大小或位置被調整後，不能因為沒有字幕
   // 就讓關閉視窗流程誤判為未修改。
-  if (State.cues.length === 0 && State.notes.length === 0 && !_hasAudioProjectData() && _savedClips().length===0) return false;
+  if (!_lastSavedDataStr && State.cues.length === 0 && State.notes.length === 0 && !_hasAudioProjectData() && _savedClips().length===0 && _savedExternalAudioSources().length===0) return false;
   if (!_lastSavedDataStr) return true;
   
   const currentStr = JSON.stringify(_buildProjectData());
@@ -483,7 +517,55 @@ function _isCurrentProjectLoad(generation){ return _projectLoadSession.isCurrent
 function _appendProjectLoad(generation,work){ return _projectLoadSession.append(generation,work); }
 function _queueProjectLoad(work){
   const generation=_projectLoadSession.begin();
+  _cancelFontPrompt?.();
   return _appendProjectLoad(generation,()=>work(generation));
+}
+
+async function _confirmProjectFonts(data,generation){
+  while(_isCurrentProjectLoad(generation)){
+    const missing=await Project._checkMissingFonts(data);
+    if(!_isCurrentProjectLoad(generation)) return false;
+    if(!missing.length) return true;
+    const proceed=await new Promise(resolve=>{
+      let done=false, session;
+      const finish=(value,close=true)=>{
+        if(done) return;
+        done=true;
+        if(_cancelFontPrompt===cancel) _cancelFontPrompt=null;
+        if(close){
+          if(session) session.close({committed:true});
+          else closeModal({committed:true});
+        }
+        resolve(value);
+      };
+      const cancel=()=>finish('cancel');
+      _cancelFontPrompt=cancel;
+      const buttons=[];
+      if(IS_DESKTOP&&DESK?.importFont){
+        buttons.push({label:'匯入字體檔案',act:async()=>{
+          try{
+            const imported=await DESK.importFont();
+            if(done||!_isCurrentProjectLoad(generation)) return;
+            if(imported){
+              await loadFonts(true);
+              if(!done&&_isCurrentProjectLoad(generation)) finish('recheck');
+            }
+          }catch(error){
+            if(!done&&_isCurrentProjectLoad(generation)) showToast('匯入字體失敗：'+error.message);
+          }
+        }});
+      }
+      buttons.push({label:'先退出',primary:true,act:cancel});
+      buttons.push({label:'強制繼續開啟',act:()=>finish('continue')});
+      const dismiss=()=>finish('cancel',false);
+      session=openModal('缺少字體',
+        `此專案使用了您電腦上尚未安裝的字體：<br><br><b>${missing.map(escapeHTML).join(', ')}</b><br><br>繼續開啟可能會導致字形樣式被破壞。您要先退出以匯入該字體檔案，還是強制繼續開啟？`,
+        buttons,{onDismiss:dismiss,onReplaced:dismiss});
+    });
+    if(proceed==='cancel') return false;
+    if(proceed==='continue') return _isCurrentProjectLoad(generation);
+  }
+  return false;
 }
 
 function _restoreSubtitleTrack(raw,index){
@@ -569,9 +651,11 @@ const Project = {
   finishBrowserMediaRelink(generation,plan){ return this.finishMediaRelink(generation,plan); },
   startNewProject(work){
     const generation=_projectLoadSession.begin();
+    _cancelFontPrompt?.();
     return _appendProjectLoad(generation,work);
   },
   async _checkMissingFonts(data) {
+    await loadFonts();
     const requiredFonts = new Set();
     if (Array.isArray(data.tracks) && data.tracks.length > 0) {
       for (const t of data.tracks) {
@@ -596,16 +680,15 @@ const Project = {
   },
   _isFontAvailable(fontName) {
     if (!fontName) return true;
-    try {
-      if (typeof document !== 'undefined' && document.fonts && document.fonts.check(`12px "${fontName}"`)) return true;
-    } catch(e) {}
     if (typeof document === 'undefined') return true;
     
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
     if (!context) return true;
     
-    const text = "abcdefghijklmnopqrstuvwxyz0123456789";
+    // FontFaceSet.check() also returns true when no matching face exists; it only
+    // describes loading readiness. Compare actual glyph metrics against fallbacks.
+    const text = "abcdefghijklmnopqrstuvwxyz0123456789字幕字型測試";
     
     context.font = "72px monospace";
     const baselineMono = context.measureText(text).width;
@@ -622,25 +705,16 @@ const Project = {
     return false;
   },
   save(){
-    const bytes=_buildBytes();
-    if(IS_DESKTOP && _savePath){
-      return DESK.writeProject(_savePath, bytesToB64(bytes)).then(pth=>{
-        if(pth){ _onSaved(pth); setStatus('已儲存專案', 'ok'); showToast('已儲存專案'); return pth; }
-        showToast('儲存專案失敗，請嘗試「另存新檔」'); return null;
-      });
-    } else {
-      return this.saveAs();
-    }
+    return _saveProject(false);
   },
   saveAs(){
-    const bytes=_buildBytes();
-    const name=_defaultSaveName();
-    if(IS_DESKTOP){ return DESK.saveProject(name,bytesToB64(bytes)).then(pth=>{ if(pth) { _onSaved(pth); setStatus('已另存新檔', 'ok'); showToast('已另存新檔'); } return pth||null; }); }
-    downloadBytes(bytes,name,'application/json'); _onSaved(null,name); return Promise.resolve(name);
+    return _saveProject(true);
   },
   apply(data,generation=null){
+    if(generation!=null&&!_isCurrentProjectLoad(generation)) return false;
     data=_normalisedProjectData(data);
     if(!data) return false;
+    _saveEpoch++;
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
     // Fix #19：明確排除 undefined/null，避免 version:0 被誤判為 v1（0 是 falsy）
     const isV1 = data.version === undefined || data.version === null || data.version === 1;
@@ -679,10 +753,12 @@ const Project = {
       const list = [...getPresets()];
       let changed = false;
       for (const p of data.usedPresets) {
-        if (!p.name || !p.style || isBuiltinPresetName(p.name)) continue;
+        if (!isRecord(p) || typeof p.name !== 'string' || !p.name.trim() || !isRecord(p.style)
+          || (p.group != null && typeof p.group !== 'string') || isBuiltinPresetName(p.name)) continue;
         const ex = list.findIndex(x => x.name === p.name);
         if (ex >= 0) {
-           const isDiff = Object.keys(STYLE_DEFAULTS).some(k => (list[ex].style[k]!=null?list[ex].style[k]:STYLE_DEFAULTS[k]) !== (p.style[k]!=null?p.style[k]:STYLE_DEFAULTS[k]));
+           const existingStyle = list[ex].style || {};
+           const isDiff = Object.keys(STYLE_DEFAULTS).some(k => (existingStyle[k]!=null?existingStyle[k]:STYLE_DEFAULTS[k]) !== (p.style[k]!=null?p.style[k]:STYLE_DEFAULTS[k]));
            if (isDiff) {
               p.name = p.name + ' (專案)';
               const ex2 = list.findIndex(x => x.name === p.name);
@@ -734,34 +810,7 @@ const Project = {
     let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(buf))); }catch(e){ showToast('無法解析專案檔'); return; }
     if(!data) return;
     
-    let missing = await this._checkMissingFonts(data);
-    while (missing.length > 0) {
-      const proceed = await new Promise(resolve => {
-        const buttons = [];
-        if (IS_DESKTOP && DESK && DESK.importFont) {
-          buttons.push({label:'匯入字體檔案', act: async ()=>{
-            const imported = await DESK.importFont();
-            if (imported) {
-              await loadFonts(true);
-              closeModal();
-              resolve('recheck');
-            }
-          }});
-        }
-        buttons.push({label:'先退出', primary:true, act:()=>{ closeModal(); resolve('cancel'); }});
-        buttons.push({label:'強制繼續開啟', act:()=>{ closeModal(); resolve('continue'); }});
-        
-        openModal('缺少字體',
-          `此專案使用了您電腦上尚未安裝的字體：<br><br><b>${missing.map(escapeHTML).join(', ')}</b><br><br>繼續開啟可能會導致字形樣式被破壞。您要先退出以匯入該字體檔案，還是強制繼續開啟？`,
-          buttons
-        );
-      });
-      if (proceed === 'cancel') return;
-      if (proceed === 'continue') break;
-      if (proceed === 'recheck') {
-        missing = await this._checkMissingFonts(data);
-      }
-    }
+    if(!await _confirmProjectFonts(data,generation)) return;
 
     // 載入另一個專案必須先清掉舊的 runtime 媒體。尤其當新專案的主影片暫時
     // 找不到時，後續還原外部音檔不能和前一個專案殘留的 asset 混在一起。
@@ -790,34 +839,7 @@ const Project = {
     let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(b64ToBytes(r.b64).buffer))); }catch(e){ showToast('無法解析專案檔'); return; }
     if(!data) return;
     
-    let missing = await this._checkMissingFonts(data);
-    while (missing.length > 0) {
-      const proceed = await new Promise(resolve => {
-        const buttons = [];
-        if (IS_DESKTOP && DESK && DESK.importFont) {
-          buttons.push({label:'匯入字體檔案', act: async ()=>{
-            const imported = await DESK.importFont();
-            if (imported) {
-              await loadFonts(true);
-              closeModal();
-              resolve('recheck');
-            }
-          }});
-        }
-        buttons.push({label:'先退出', primary:true, act:()=>{ closeModal(); resolve('cancel'); }});
-        buttons.push({label:'強制繼續開啟', act:()=>{ closeModal(); resolve('continue'); }});
-        
-        openModal('缺少字體',
-          `此專案使用了您電腦上尚未安裝的字體：<br><br><b>${missing.map(escapeHTML).join(', ')}</b><br><br>繼續開啟可能會導致字形樣式被破壞。您要先退出以匯入該字體檔案，還是強制繼續開啟？`,
-          buttons
-        );
-      });
-      if (proceed === 'cancel') return;
-      if (proceed === 'continue') break;
-      if (proceed === 'recheck') {
-        missing = await this._checkMissingFonts(data);
-      }
-    }
+    if(!await _confirmProjectFonts(data,generation)) return;
 
     await _autoRelinkMissingMedia(data, r.path);
     if(!_isCurrentProjectLoad(generation)) return;

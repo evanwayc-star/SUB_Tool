@@ -25,6 +25,8 @@ let State;
 let effStyle;
 let trackStyleSnapshot;
 let saveProject;
+let getPresets;
+let savePresets;
 
 function savedData() {
   const b64 = saveProject.mock.calls.at(-1)[1];
@@ -55,7 +57,7 @@ describe('subtitle style project persistence', () => {
       value: { isDesktop: true, saveProject },
     });
     ({ State } = await import('../src/state.js'));
-    ({ effStyle, trackStyleSnapshot } = await import('../src/substyle.js'));
+    ({ effStyle, trackStyleSnapshot, getPresets, savePresets } = await import('../src/substyle.js'));
     ({ Project } = await import('../src/project.js'));
     State.tracks = [];
     State.cues = [];
@@ -91,6 +93,51 @@ describe('subtitle style project persistence', () => {
       fontSize: 70,
       posY: 90,
     });
+  });
+
+  it('does not treat FontFaceSet readiness as proof that a font exists', () => {
+    const context = {
+      font: '',
+      measureText() { return { width: this.font.endsWith('monospace') ? 100 : 150 }; },
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context);
+    Object.defineProperty(document, 'fonts', { configurable: true, value: { check: () => true } });
+    expect(Project._isFontAvailable('__missing_font__')).toBe(false);
+    context.measureText = () => ({ width: context.font.includes('"Available"') ? 120 : context.font.endsWith('monospace') ? 100 : 150 });
+    expect(Project._isFontAvailable('Available')).toBe(true);
+    vi.restoreAllMocks();
+    delete document.fonts;
+  });
+
+  it.each([undefined, null])('loads a project preset that shares a name with a sparse saved preset (%s)', style => {
+    savePresets([{ name: 'Shared', ...(style === undefined ? {} : { style }) }]);
+    const project = baseProject([{ name: 'Imported', fontSize: 44 }]);
+    project.usedPresets = [{ name: 'Shared', style: { fontSize: 44 } }];
+
+    expect(Project.apply(project)).toBe(true);
+
+    expect(effStyle(null, State.tracks[0]).fontSize).toBe(44);
+    expect(getPresets()).toEqual([
+      { name: 'Shared', ...(style === undefined ? {} : { style }) },
+      { name: 'Shared (專案)', style: { fontSize: 44 } },
+    ]);
+  });
+
+  it('ignores malformed project preset entries while loading the valid project data', () => {
+    const project = baseProject([{ name: 'Imported', fontSize: 44 }]);
+    project.cues = [{ start: 0, end: 1, text: 'Kept subtitle', track: 1 }];
+    project.usedPresets = [
+      null, false, 7, 'invalid', [],
+      { name: 23, style: {} }, { name: ' ', style: {} },
+      { name: 'Invalid style', style: [] }, { name: 'Missing style' },
+      { name: 'Invalid group', style: {}, group: {} },
+      { name: 'Imported', style: { fontSize: 44 } },
+    ];
+
+    expect(Project.apply(project)).toBe(true);
+
+    expect(State.cues.map(cue => cue.text)).toEqual(['Kept subtitle']);
+    expect(getPresets()).toEqual([{ name: 'Imported', style: { fontSize: 44 } }]);
   });
 
   it('preserves explicit historical values and migrates legacy aliases only when present', () => {

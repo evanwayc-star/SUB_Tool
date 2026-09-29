@@ -7,7 +7,7 @@
    原因是 isProjectDirty() 只被關閉視窗的流程用到（app.js onAppRequestClose），
    三條「開啟專案」的路徑（選單開啟、Explorer 雙擊、瀏覽器版選檔）全都直接呼叫
    Project.load*()，中間沒有任何確認。 */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ui = vi.hoisted(() => ({
   openModal: vi.fn(),
@@ -33,6 +33,7 @@ let Project;
 let State;
 let confirmDiscardUnsaved;
 let isProjectDirty;
+let resetProject;
 
 /* 取出 openModal 收到的按鈕，用標籤點它——測的是使用者真的按下去會發生什麼。 */
 function clickModalButton(label) {
@@ -47,17 +48,19 @@ beforeEach(async () => {
   vi.clearAllMocks();
   Object.defineProperty(window, 'subtool', {
     configurable: true,
-    value: { isDesktop: true, stat: vi.fn().mockResolvedValue({ exists: true, size: 100 }) },
+    value: { isDesktop: true, stat: vi.fn().mockResolvedValue({ exists: true, size: 100 }), saveProject: vi.fn().mockResolvedValue('C:/proj/a.subtool') },
   });
 
   ({ State } = await import('../src/state.js'));
-  ({ Project, confirmDiscardUnsaved, isProjectDirty } = await import('../src/project.js'));
+  ({ Project, confirmDiscardUnsaved, isProjectDirty, resetProject } = await import('../src/project.js'));
 
   State.cues = [];
   State.notes = [];
   State.clips = [];
   State.tracks = [];
 });
+
+afterEach(() => resetProject?.());
 
 /* 讓專案變成「有內容且未存檔」——isProjectDirty() 的前提是至少有字幕／備註／
    clip／音訊路由其中之一，否則空專案永遠不算 dirty。 */
@@ -102,12 +105,31 @@ describe('有未存檔變更時三個選項的行為', () => {
   });
 
   it('「儲存後開啟」等儲存真的成功才放行', async () => {
-    const save = vi.spyOn(Project, 'save').mockResolvedValue('C:/proj/a.subtool');
+    const save = vi.spyOn(Project, 'save');
     const pending = confirmDiscardUnsaved();
     await Promise.resolve();
     await clickModalButton('儲存後開啟');
     await expect(pending).resolves.toBe(true);
     expect(save).toHaveBeenCalled();
+  });
+
+  it('關閉或取代提示視窗會取消開啟，不留下未完成的 Promise', async () => {
+    for (const action of ['onDismiss', 'onReplaced']) {
+      const pending = confirmDiscardUnsaved();
+      ui.openModal.mock.calls.at(-1)[3][action]();
+      await expect(pending).resolves.toBe(false);
+    }
+  });
+
+  it('存檔期間新增的修改不能隨儲存後開啟一起丟棄', async () => {
+    window.subtool.saveProject.mockImplementation(async () => {
+      State.cues[0].text = 'changed during save';
+      return 'C:/proj/a.subtool';
+    });
+    const pending = confirmDiscardUnsaved();
+    await clickModalButton('儲存後開啟');
+    await expect(pending).resolves.toBe(false);
+    expect(isProjectDirty()).toBe(true);
   });
 
   /* 使用者在存檔對話框按了取消 → Project.save() 回 null。這時【不能】繼續開新專案，

@@ -718,16 +718,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       ? plannedAudio.streamLabels.map(({ stream }) => aacBitrateForChannels(stream.spec.channels))
       : [aacBitrateForChannels(2)]);
   if (isAirline) {
-    let airlineAudioMaps = audioMaps;
-    if (airline.audioPrerollSamples) {
-      const sourceLabel = plannedAudio ? plannedAudio.streamLabels[0]?.label : '[ac]';
-      if (!sourceLabel) _exportPlanError('S3K 缺少單一 Stereo 音訊');
-      fc.push(`${sourceLabel}adelay=${airline.audioPrerollSamples}S:all=1[airlineS3kAudio]`);
-      airlineAudioMaps = ['-map', '[airlineS3kAudio]'];
-    }
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
-        '-map', vfinal, ...airlineAudioMaps, ...airline.videoArgs,
+        '-map', vfinal, ...audioMaps, ...airline.videoArgs,
         ...airline.audioArgs, ...airline.muxArgs, outPath],
       label: `匯出 ${preset.label} MPG（自動合成 TS）`,
       duration: D,

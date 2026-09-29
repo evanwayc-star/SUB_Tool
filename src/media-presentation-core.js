@@ -103,11 +103,14 @@ export function createMediaPresentationCore({
       if (active !== request || request.settled) return;
       const presentedTime = typeof result === 'number' ? result : result?.presentedTime;
       if (!Number.isFinite(Number(presentedTime))) return;
-      lastPresentedTime = Math.max(0, Number(presentedTime));
+      const observed = Math.max(0, Number(presentedTime));
+      // 舊請求仍可能交回畫格，但新的 pending 已是使用者權威意圖。
+      // 只讓目前最新的請求更新暫停呈現位置。
+      if (!pending) lastPresentedTime = observed;
       const source = result?.source || result?.backend;
       releaseActive(request, {
         status: 'presented',
-        presentedTime: lastPresentedTime,
+        presentedTime: observed,
         ...(source ? { source } : {}),
       });
     }).catch(error => {
@@ -142,17 +145,17 @@ export function createMediaPresentationCore({
     // 進行中的 request 只接受同一 id 的畫格。mpv 在快速 seek／方向切換時
     // 可能晚送前一次的 time-pos；它不能把目前的呈現權威值拉回舊位置。
     if (active && details?.requestId !== active.id) return false;
-    lastPresentedTime = Math.max(0, observed);
+    if (!active || !pending) lastPresentedTime = Math.max(0, observed);
     if (!active) return false;
     const requestedTolerance = Number(active.options.tolerance);
     const tolerance = active.options.tolerance != null && Number.isFinite(requestedTolerance)
       ? Math.max(0, requestedTolerance)
       : Math.max(0, Number(getTolerance(active.requestedTime, details)) || 0);
-    if (Math.abs(lastPresentedTime - active.requestedTime) > tolerance) return false;
+    if (Math.abs(observed - active.requestedTime) > tolerance) return false;
     const source = details?.source;
     releaseActive(active, {
       status: 'presented',
-      presentedTime: lastPresentedTime,
+      presentedTime: Math.max(0, observed),
       ...(source ? { source } : {}),
     });
     return true;
@@ -257,11 +260,11 @@ export function createMediaPresentationSession(options = {}) {
     if (signal?.aborted) {
       throw Object.assign(new Error('media presentation aborted'), { name: 'AbortError' });
     }
-    const commitIfLatest = presentedTime => (
-      typeof isLatestRequest === 'function' && !isLatestRequest()
-        ? presentedTime
-        : commitPresented(presentedTime)
-    );
+    const commitIfLatest = (presentedTime, sourceTime = null) => {
+      if (typeof isLatestRequest === 'function' && !isLatestRequest()) return presentedTime;
+      if (sourceTime != null && player.isNative?.()) player.setPresentedSourceTime?.(sourceTime);
+      return commitPresented(presentedTime);
+    };
 
     let clip = null;
     let sourceTarget = targetTime;
@@ -315,8 +318,7 @@ export function createMediaPresentationSession(options = {}) {
       presentedTimeline = composited.presentedTime;
       source = composited.backend;
     }
-    if (player.isNative?.()) player.setPresentedSourceTime?.(actualSource);
-    commitIfLatest(presentedTimeline);
+    commitIfLatest(presentedTimeline, actualSource);
     return { presentedTime: presentedTimeline, source };
   }
 

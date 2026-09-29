@@ -80,6 +80,11 @@ describe('桌面 adapter（IPC）', () => {
     expect(desk.keysSave).toHaveBeenCalledWith({ x: 1 });
   });
 
+  it.each([['config', 'configSave'], ['keys', 'keysSave']])('%s 保留主程序回報的寫入失敗', async (name, method) => {
+    const store = makeSettingsStore({ [method]: vi.fn().mockResolvedValue(false) });
+    expect(await store.save(name, { setting: true })).toBe(false);
+  });
+
   it('desk 的方法丟例外時，load 回 null、save 回 false（不讓啟動流程崩掉）', async () => {
     const desk = {
       configLoad: async () => { throw new Error('IPC 斷線'); },

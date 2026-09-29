@@ -408,4 +408,42 @@ describe('project load transactions', () => {
     expect(cleared).toBe(true);
     expect(State.cues).toEqual([]);
   });
+
+  it('cancels a missing-font prompt when a newer project is requested', async () => {
+    vi.spyOn(Project, '_checkMissingFonts').mockImplementation(async data => data.cues[0].text === 'A' ? ['Missing Font'] : []);
+    desk.stat.mockResolvedValue({ exists: true });
+    mediaMock.loadDesktopMedia.mockResolvedValue();
+    const loadingA = Project.loadDesktop(request('A', 'C:/media/A.mov'));
+    await vi.waitFor(() => expect(uiMock.openModal).toHaveBeenCalledWith('缺少字體', expect.any(String), expect.any(Array), expect.any(Object)));
+    const oldButtons = uiMock.openModal.mock.calls.at(-1)[2];
+    const loadingB = Project.loadDesktop(request('B', 'C:/media/B.mov'));
+    await Promise.all([loadingA, loadingB]);
+    oldButtons.find(button => button.label === '強制繼續開啟').act();
+    expect(State.cues.map(cue => cue.text)).toEqual(['B']);
+    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledOnce();
+  });
+
+  it('dismisses a missing-font prompt without blocking later loads', async () => {
+    vi.spyOn(Project, '_checkMissingFonts').mockResolvedValueOnce(['Missing Font']).mockResolvedValue([]);
+    desk.stat.mockResolvedValue({ exists: true });
+    const loadingA = Project.loadDesktop(request('A', 'C:/media/A.mov'));
+    await vi.waitFor(() => expect(uiMock.openModal).toHaveBeenCalled());
+    uiMock.openModal.mock.calls.at(-1)[3].onDismiss();
+    await loadingA;
+    expect(mediaMock.reset).not.toHaveBeenCalled();
+    await Project.loadDesktop(request('B', 'C:/media/B.mov'));
+    expect(State.cues.map(cue => cue.text)).toEqual(['B']);
+  });
+
+  it('does not apply a browser project after its font check loses ownership', async () => {
+    const fonts = deferred();
+    vi.spyOn(Project, '_checkMissingFonts').mockReturnValueOnce(fonts.promise).mockResolvedValue([]);
+    const loadingA = Project.load(projectFile(projectData('A', 'C:/media/A.mov')));
+    await vi.waitFor(() => expect(Project._checkMissingFonts).toHaveBeenCalled());
+    const startingNew = Project.startNewProject(() => resetProject());
+    fonts.resolve([]);
+    await Promise.all([loadingA, startingNew]);
+    expect(mediaMock.reset).not.toHaveBeenCalled();
+    expect(State.cues).toEqual([]);
+  });
 });

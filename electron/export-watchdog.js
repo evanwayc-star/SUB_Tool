@@ -6,8 +6,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
-const { createExportArtifact } = require('./export-artifact');
+const { createExportArtifact, isDiscOutput } = require('./export-artifact');
 const {
   acquireLease,
   updateLease,
@@ -60,7 +59,7 @@ function validateConfig(config) {
   if (config.cwd != null && (typeof config.cwd !== 'string' || !config.cwd.trim())) {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog cwd 必須是有效路徑');
   }
-  if (getDeliveryFormatPreset(config.outputFormat)?.kind === 'disc'
+  if (isDiscOutput(config.outputFormat)
     && (config.args.at(-1) !== config.outPath || path.extname(config.outPath).toLowerCase() !== '.iso')) {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '光碟匯出必須使用單一 ISO 輸出路徑');
   }

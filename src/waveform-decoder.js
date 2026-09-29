@@ -110,20 +110,28 @@ export const Wave = {
   registerSourceWaveforms(source,{mixPath,mixPeaks,channels}={}){
     const state=this._sourceState(source,true);
     if(!state) return null;
-    if(mixPath!==undefined) state.mix.path=mixPath||null;
+    const nextMixPath=mixPath!==undefined?mixPath||null:state.mix.path;
+    if(nextMixPath!==state.mix.path||(mixPeaks?.length&&mixPeaks!==state.mix.peaks)){
+      // A new file or supplied peaks supersedes any in-flight decode for the old entry.
+      state.mix={path:nextMixPath,peaks:nextMixPath===state.mix.path?state.mix.peaks:null,loading:null};
+    }
     if(mixPeaks&&mixPeaks.length) state.mix.peaks=mixPeaks;
     if(Array.isArray(channels)){
       for(let index=0;index<channels.length;index++){
         const raw=channels[index]||{};
         const desc=this._channelDescriptor(raw,index);
         const old=state.channels.get(desc.key);
-        state.channels.set(desc.key,{
-          ...desc,
-          label:raw.label||old?.label||`Ch ${desc.sourceChannel+1}`,
-          path:raw.file||raw.path||old?.path||null,
-          peaks:raw.peaks||old?.peaks||null,
-          loading:old?.loading||null
-        });
+        const nextPath=raw.file||raw.path||old?.path||null;
+        const nextPeaks=raw.peaks||null;
+        if(!old||nextPath!==old.path||(nextPeaks&&nextPeaks!==old.peaks)){
+          state.channels.set(desc.key,{
+            ...desc,
+            label:raw.label||old?.label||`Ch ${desc.sourceChannel+1}`,
+            path:nextPath,
+            peaks:nextPeaks||(nextPath===old?.path?old?.peaks:null)||null,
+            loading:null
+          });
+        }else old.label=raw.label||old.label||`Ch ${desc.sourceChannel+1}`;
       }
     }
     return state;

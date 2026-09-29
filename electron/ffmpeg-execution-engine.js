@@ -15,6 +15,7 @@ const nodeFs = require('fs');
 const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require('child_process');
 const QueueStore = require('./queue-store');
 const ExportWatchdog = require('./export-watchdog');
+const { artifactProgress } = require('./export-artifact');
 const discTools = require('./disc-tools.json');
 
 function unique(values) {
@@ -405,8 +406,7 @@ function createFFmpegExecution(options = {}) {
         if (tail.length > 8000) tail = tail.slice(-8000);
         const progress = parser.parseChunk(text);
         if (progress && (sender || onProgress)) {
-          const isDisc = outputFormat === 'dvd-iso' || outputFormat === 'bd-iso';
-          report(isDisc ? { ...progress, pct: progress.pct * 0.95 } : progress);
+          report({ ...progress, pct: artifactProgress(outputFormat, 'encode', progress.pct) });
         }
       };
 

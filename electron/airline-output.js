@@ -90,8 +90,7 @@ function sectionReader(tableId, onSection) {
   };
 }
 
-function createParser(format, patch) {
-  const s3k = format === 'airline-s3k';
+function createParser(patch) {
   const stats = { transportPackets: 0, patSections: 0, pmtSections: 0,
     videoPackets: 0, audioPackets: 0, pcrPackets: 0,
     priorityPackets: 0, replacedSdtPackets: 0, patchedPmtSections: 0 };
@@ -103,7 +102,7 @@ function createParser(format, patch) {
     }
     stats.patSections++;
   });
-  const pmt = sectionReader(2, (section, positions) => {
+  const pmt = sectionReader(2, section => {
     if (section.length < 26 || section.readUInt16BE(3) !== 1
       || (section.readUInt16BE(8) & 8191) !== VIDEO_PID) throw invalid('PMT 必須指定 Program 1 與 PCR PID 48');
     const end = section.length - 4;
@@ -120,19 +119,10 @@ function createParser(format, patch) {
       || !streams.has(VIDEO_PID) || !streams.has(AUDIO_PID)) throw invalid('PMT 必須只有 PID 48 影片與 PID 49 音訊');
     const video = streams.get(VIDEO_PID);
     const audio = streams.get(AUDIO_PID);
-    if (!(s3k ? [1, 2].includes(video.type) && audio.type === 3 : video.type === 0x1b && audio.type === 0x0f)) {
+    if (video.type !== 0x1b || audio.type !== 0x0f) {
       throw invalid('PMT 影音 stream_type 與航空格式不符');
     }
     stats.pmtSections++;
-    // FFmpeg labels MPEG-1 and MPEG-2 video as 0x02. S3K is MPEG-1; correct
-    // only its PMT declaration and CRC, preserving every elementary byte.
-    if (s3k && video.type === 2) {
-      section[video.offset] = 1;
-      section.writeUInt32BE(crc32(section.subarray(0, end)), end);
-      patch?.(positions[video.offset], Buffer.from([1]));
-      for (let i = end; i < section.length; i++) patch?.(positions[i], section.subarray(i, i + 1));
-      stats.patchedPmtSections++;
-    }
   });
   return {
     packet(packet, position) {
@@ -223,7 +213,7 @@ async function validateAndPatchAirlineOutput(format, outPath, { signal } = {}) {
       let chunkStart = 0;
       let modified = false;
       let earlier = [];
-      const parser = createParser(format, pass === 0 ? null : (offset, bytes) => {
+      const parser = createParser(pass === 0 ? null : (offset, bytes) => {
         if (offset < chunkStart) earlier.push({ offset, bytes: Buffer.from(bytes) });
         else { bytes.copy(buffer, offset - chunkStart); modified = true; }
       });

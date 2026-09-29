@@ -85,9 +85,9 @@ export function demuxFile(arrayBuffer){
       且不給 Content-Range】，而真正忽略 Range 的實作會回「整個檔案」。兩者狀態碼相同，
       只有長度能分辨。長度不符一律報錯——絕不把「整檔」當成「某一段」餵進 decoder
       （那會解出花屏，而且錯得很安靜）。 */
-async function fetchRange(url, start, end, allowShort){
+async function fetchRange(url, start, end, allowShort, signal){
   const want = end - start;
-  const r = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` } });
+  const r = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` }, signal });
   if(!r.ok && r.status !== 206) throw new Error('取位元組失敗 HTTP ' + r.status);
   const ab = await r.arrayBuffer();
   if(ab.byteLength !== want && !(allowShort && ab.byteLength < want))
@@ -172,10 +172,11 @@ export class SampleReader {
     this.url = url; this.index = index; this.maxEnd = maxEnd;
     this.wins = new Map();  // startIdx → {from,to,bytes:Uint8Array|null,base,promise}
     this.order = [];        // LRU（最舊在前）
+    this._disposed = false;
   }
   /* 位元組已就位 → Uint8Array；否則 null（呼叫端應先 ensure()、本幀先跳過） */
   data(i){
-    if(i < 0 || i >= this.index.length) return null;
+    if(this._disposed || i < 0 || i >= this.index.length) return null;
     const w = this.wins.get(planWindow(this.index, i).from);
     if(!w || !w.bytes) return null;
     const b = sliceBounds(this.index, i, w);
@@ -183,22 +184,33 @@ export class SampleReader {
   }
   /* 觸發抓取（非同步、不等待）。同一視窗重覆呼叫只會抓一次。 */
   ensure(i){
-    if(i < 0 || i >= this.index.length) return;
+    if(this._disposed || i < 0 || i >= this.index.length) return;
     const { from, to } = planWindow(this.index, i);
     let w = this.wins.get(from);
     if(w){ this.order = touchWindow(this.order, from); return; }
     const { base, end } = windowByteRange(this.index, from, to, this.maxEnd);
-    w = { from, to, base, bytes: null };
+    w = { from, to, base, bytes: null, controller: new AbortController() };
     this.wins.set(from, w); this.order.push(from);
-    w.promise = fetchRange(this.url, base, end, false)
+    w.promise = fetchRange(this.url, base, end, false, w.controller.signal)
       .then(ab => { if(this.wins.get(from) === w) w.bytes = new Uint8Array(ab); })
-      .catch(e => { this.wins.delete(from); const k = this.order.indexOf(from); if(k >= 0) this.order.splice(k, 1);
+      .catch(e => {
+        // 同一位置可能已被淘汰再重抓；舊 IO 失敗不可刪掉新視窗。
+        if(this.wins.get(from) !== w) return;
+        this.wins.delete(from); const k = this.order.indexOf(from); if(k >= 0) this.order.splice(k, 1);
         console.warn('[WC] 取位元組失敗:', e && (e.message || e)); });
     const { keep, drop } = evictWindows(this.order);
-    for(const k of drop) this.wins.delete(k);
+    for(const k of drop){
+      const evicted = this.wins.get(k);
+      this.wins.delete(k);
+      evicted?.controller.abort();
+    }
     this.order = keep;
   }
-  dispose(){ this.wins.clear(); this.order = []; }
+  dispose(){
+    this._disposed = true;
+    for(const w of this.wins.values()) w.controller.abort();
+    this.wins.clear(); this.order = [];
+  }
 }
 
 /* 整檔路的同介面讀取器（位元組已全在記憶體）：讓 player.js 兩條路共用同一段程式碼 */

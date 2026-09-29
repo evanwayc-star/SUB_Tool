@@ -25,17 +25,34 @@
    intake ownership；播放狀態和來源／時間軸位置的裁定交給 Media.observeMpvEvent()。
 ============================================================================== */
 import { $, video } from './dom.js';
-import { State, DESK, setFps } from './state.js';
+import { State, DESK, setFps, snapFps } from './state.js';
 import { setStatus, showToast } from './ui.js';
 import { AudioEngine } from './audio-engine.js';
 import { emit } from './events.js';
 import { escapeHTML, baseName } from './util.js';
 import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from './media-player-adapter.js';
-import { Wave, WAVE_DECODE_MAX, probeAudioChannelDescriptors, detectFpsWeb, probeImageSize } from './media.js'; 
+import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
 import { sourceChannelLabels, AudioPipeline } from './audio-routing-engine.js';
 import { getExactFps } from './time.js';
-import { maxKnownSourceDuration, waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { maxKnownSourceDuration, probeAudioChannelDescriptors, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 import { autoBuildPreviewProxy, isLargeCanopusAvi } from './preview-proxy-policy.js';
+
+/* FPS-SYNC：網頁版在播放時量實際影格時間，不依檔名猜測；失去 intake ownership 後停止。 */
+export function detectFpsWeb(owns=()=>true){
+  if(!('requestVideoFrameCallback' in HTMLVideoElement.prototype))return;
+  let last=null, deltas=[], frames=0;
+  const cb=(now,meta)=>{
+    if(!owns()) return;
+    if(last!=null){ const d=meta.mediaTime-last; if(d>0.0005)deltas.push(d); }
+    last=meta.mediaTime; frames++;
+    if(deltas.length<12 && frames<60){ try{ if(owns()) video.requestVideoFrameCallback(cb); }catch(e){} return; }
+    if(deltas.length>=6){ deltas.sort((a,b)=>a-b); const med=deltas[deltas.length>>1]; const raw=1/med;
+      // NTSC 分數影格率不可先 Math.round；統一交給 snapFps 與 setFps。
+      if(raw>=10&&raw<=120&&owns()){ const fps=snapFps(raw); setFps(String(fps));
+        setStatus('偵測到影片 FPS：'+fps,'ok'); } }
+  };
+  try{ if(owns()) video.requestVideoFrameCallback(cb); }catch(e){}
+}
 export async function loadDesktopMedia(ctx, p, projectRestore=null){
     ctx._resetForFirstVideo(projectRestore ? { keepVideoTracks: true } : {});
     const intake=ctx._intakeSession.begin(p);

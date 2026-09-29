@@ -87,7 +87,7 @@ describe('delivery runner public interface', () => {
       audioBitrates: async () => [{ channels: 2, kbps: 128 }],
     }) });
     const job = videoJob();
-    Object.assign(job.payload, { format: 'airline-s3k', outPath: 'D:/out/delivery.mpg' });
+    Object.assign(job.payload, { format: 'airline-exw', outPath: 'D:/out/delivery.mpg' });
     await setup.runner.run(job);
     const argv = setup.runFfmpeg.mock.calls[0][0];
     expect(argv[argv.indexOf('-filter_complex') + 1])

@@ -16,8 +16,8 @@ function timestamp(b, o) {
 // Independent packet-arrival model: 188-byte TB at 1.2 * AVC HRD bit_rate,
 // PES elementary bytes retained until DTS, audio retained until its PTS.
 function buffers(bytes, format) {
-  const rate = format === 'airline-dmpes-4m' ? 4600000 : 1855594;
-  const drain = format === 'airline-dmpes-4m' ? 4800000 : 1799961.6;
+  const rate = format === 'airline-exw' ? 2500000 : format === 'airline-dmpes-4m' ? 4600000 : 1855594;
+  const drain = format === 'airline-exw' ? 2400000 : format === 'airline-dmpes-4m' ? 4800000 : 1799961.6;
   const queue = { 48: [], 49: [] }, level = { 48: 0, 49: 0 }, maximum = { 48: 0, 49: 0 };
   const current = new Map();
   let anchor, previous = 0, tb = 0, maxTb = 0, minLead = Infinity;
@@ -58,7 +58,7 @@ function buffers(bytes, format) {
 function encode(format, name) {
   const encoding = airlineEncoding(format);
   const output = path.join(directory, name);
-  const size = format === 'airline-s3k' ? '352x240' : '720x480';
+  const size = format === 'airline-exw' ? '640x360' : '720x480';
   const result = spawnSync(ffmpeg, ['-v', 'error', '-y', '-cpucount', '4', '-f', 'lavfi', '-i',
     `testsrc2=size=${size}:rate=30000/1001:duration=8,noise=alls=35:allf=t+u:all_seed=1`,
     '-f', 'lavfi', '-i', 'sine=frequency=997:sample_rate=48000:duration=8', '-map', '0:v', '-map', '1:a',
@@ -69,7 +69,7 @@ function encode(format, name) {
 }
 
 describe.skipIf(!existsSync(ffmpeg))('航空 T-STD 緩衝與解碼期限', () => {
-  it.each(['airline-dmpes', 'airline-dmpes-4m', 'airline-s3k'])('%s 影片 TB、VBV 與音訊主緩衝不能重現 TSA 報表溢位', async format => {
+  it.each(['airline-dmpes', 'airline-dmpes-4m', 'airline-exw'])('%s 影片 TB、VBV 與音訊主緩衝不能重現 TSA 報表溢位', async format => {
     const output = encode(format, `${format}-motion.mpg`);
     const before = buffers(readFileSync(output), format);
     if (format === 'airline-dmpes') {
@@ -77,14 +77,23 @@ describe.skipIf(!existsSync(ffmpeg))('航空 T-STD 緩衝與解碼期限', () =>
       expect(before.maximum[49]).toBeGreaterThan(3584);
     }
     const tempDir = mkdtempSync(path.join(directory, 'lease-'));
-    await finalizeAirlineOutput(format, output, { tempDir });
+    const scheduled = await finalizeAirlineOutput(format, output, { tempDir });
     expect(readdirSync(tempDir)).toEqual([]);
+    if (format === 'airline-exw') {
+      // VBR gaps are represented by elapsed PCR time, not null packets. The
+      // fixed-rate offset/PCR model below applies only to the DMPES variants.
+      expect(scheduled.maximumVideoTb).toBeLessThanOrEqual(400);
+      expect(scheduled.maximumAudioBuffer).toBeLessThanOrEqual(3584);
+      expect(scheduled.maximumVideoBuffer).toBeLessThanOrEqual(125000);
+      expect(scheduled.minimumDecodeLead).toBeGreaterThanOrEqual(0);
+      return;
+    }
     const measured = buffers(readFileSync(output), format);
     expect(measured.maxTb, JSON.stringify(measured)).toBeLessThanOrEqual(512);
     expect(measured.maximum[49]).toBeLessThanOrEqual(3584);
     expect(measured.minLead).toBeGreaterThanOrEqual(0);
     expect(measured.maximum[48]).toBeGreaterThan(1000);
-    expect(measured.maximum[48]).toBeLessThanOrEqual(format === 'airline-s3k' ? 229376
+    expect(measured.maximum[48]).toBeLessThanOrEqual(format === 'airline-exw' ? 125000
       : format === 'airline-dmpes-4m' ? 347124 : 130124);
   }, 90000);
 

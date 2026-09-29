@@ -404,6 +404,13 @@ export const BUILTIN_PRESETS = [
 ];
 const LS_KEY = 'subtool.subPresets';
 let _presets = null; // [{name, style:{...軌道級欄位子集}}]（僅使用者自訂；內建的不存檔）
+function validPresetList(value){
+  const record = entry => entry && typeof entry === 'object' && !Array.isArray(entry);
+  return (Array.isArray(value) ? value : []).filter(p => record(p)
+    && typeof p.name === 'string' && p.name.trim()
+    && (p.group == null || typeof p.group === 'string')
+    && (p.style == null || record(p.style)));
+}
 export async function loadPresets(){
   if(_presets) return _presets;
   try{
@@ -412,7 +419,9 @@ export async function loadPresets(){
     else _presets = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
   }catch(e){ _presets = []; }
   
-  if (_presets) {
+  // 設定檔與 localStorage 是不可信的持久化輸入；遷移前先驗證集合及各筆形狀。
+  _presets = validPresetList(_presets);
+  if (_presets.length) {
     let migrated = false;
     _presets.forEach(p => {
       if (!p.group && p.name && p.name.indexOf('-') > 0) {
@@ -432,7 +441,7 @@ export function getPresets(){ return _presets || []; }        // 僅使用者自
 export function getAllPresets(){ return [...BUILTIN_PRESETS, ...(_presets || [])]; }
 export function isBuiltinPresetName(name){ return BUILTIN_PRESETS.some(p => p.name === name); }
 export function savePresets(list){
-  _presets = (list || []).filter(p => p && !isBuiltinPresetName(p.name)); // 內建的永不寫進使用者清單
+  _presets = validPresetList(list).filter(p => !isBuiltinPresetName(p.name)); // 內建的永不寫進使用者清單
   try{
     const DESK = window.subtool;
     if(DESK && DESK.configSave) DESK.configSave({ subPresets: _presets });
@@ -442,6 +451,7 @@ export function savePresets(list){
 /* ---- 字幕字型（v4.25.4）：桌面版掃 <專案根>/font/，以 FontFace 註冊供預覽；
    匯出（libass）由主程序以 fontsdir 指向同一資料夾 → 預覽＝燒錄同一份字型。 ---- */
 let _fonts = null; // [{name:資料夾名（UI／CSS 用）, file, family:檔案內部家族名（ASS 用）}]
+let _fontsLoading = null;
 export function getFonts(){ return _fonts || []; }
 
 /* 資料夾名 → ASS Fontname（v4.29.3 修）。
@@ -470,7 +480,19 @@ export function uiFontNameFromAss(name, fonts=getFonts()){
   return found?.name || source;
 }
 export async function loadFonts(force = false){
+  // The list is populated before FontFace finishes loading. Concurrent callers
+  // must await the same operation, especially the project's missing-font check.
+  if(_fontsLoading){
+    await _fontsLoading;
+    return force ? loadFonts(true) : _fonts;
+  }
   if(_fonts && !force) return _fonts;
+  _fontsLoading = _loadFontFaces();
+  try { return await _fontsLoading; }
+  finally { _fontsLoading = null; }
+}
+
+async function _loadFontFaces(){
   _fonts = [];
   try{
     const DESK = window.subtool;

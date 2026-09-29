@@ -265,6 +265,40 @@ function createLocalResourceServer({
       internalDocuments.add(key);
     },
 
+    /** 將 preload 的能力限制在該視窗自己的應用頁；外部頁面只可交給系統瀏覽器。 */
+    protectApplicationWindow(window, { document, developmentURL = null, openExternal } = {}) {
+      const documentKey = canonicalPath(document);
+      if (!documentKey || !window?.webContents) throw new TypeError('application window and document are required');
+      internalDocuments.add(documentKey);
+      const development = developmentURL ? new URL(developmentURL) : null;
+      const permitsNavigation = value => {
+        try {
+          const target = new URL(value);
+          if (target.username || target.password) return false;
+          if (target.protocol === 'file:') return canonicalPath(fileURLToPath(target)) === documentKey;
+          return !!development && target.origin === development.origin && target.pathname === development.pathname;
+        } catch (error) {
+          return false;
+        }
+      };
+      const guardNavigation = (event, value) => {
+        if (!permitsNavigation(value)) event.preventDefault();
+      };
+      window.webContents.on('will-navigate', guardNavigation);
+      window.webContents.on('will-redirect', guardNavigation);
+      window.webContents.setWindowOpenHandler(({ url: value }) => {
+        try {
+          const target = new URL(value);
+          if (typeof openExternal === 'function' && ['http:', 'https:'].includes(target.protocol)) {
+            Promise.resolve().then(() => openExternal(value)).catch(error => {
+              console.warn('[app] openExternal failed:', error);
+            });
+          }
+        } catch (error) {}
+        return { action: 'deny' };
+      });
+    },
+
     /** 安全載入應用程式主視窗檔案 */
     loadApplicationDocument(window, builtDocument) {
       if (!window?.loadFile || !window?.loadURL) {

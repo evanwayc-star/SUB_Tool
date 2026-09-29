@@ -487,11 +487,11 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     queueClient.close();
   }, 25000);
 
-  test.each(['h264', 'mod-fhd', 'airline-s3k', 'airline-dmpes'])('實際 %s 匯出由 watchdog 完成並釋放輸出鎖', async format => {
+  test.each(['h264', 'mod-fhd', 'airline-exw', 'airline-dmpes'])('實際 %s 匯出由 watchdog 完成並釋放輸出鎖', async format => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-watchdog-export-'));
     tempProfiles.add(profile);
     const imagePath = path.join(profile, 'one-pixel.png');
-    const extensions = { h264: '.mp4', 'mod-fhd': '.ts', 'airline-s3k': '.mpg', 'airline-dmpes': '.mpg' };
+    const extensions = { h264: '.mp4', 'mod-fhd': '.ts', 'airline-exw': '.mpg', 'airline-dmpes': '.mpg' };
     const outPath = path.join(profile, `watchdog-output${extensions[format]}`);
     writeFileSync(
       imagePath,
@@ -548,11 +548,11 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       const probe = file => JSON.parse(execFileSync(process.env.FFPROBE_PATH || path.join(ROOT, 'electron/ffmpeg/ffprobe.exe'),
         ['-v', 'error', '-show_streams', '-of', 'json', file], { windowsHide: true, encoding: 'utf8' })).streams;
       const streams = probe(outPath);
-      expect(streams).toEqual([expect.objectContaining({ codec_name: format === 'airline-s3k' ? 'mpeg1video' : 'h264',
-        width: format === 'airline-s3k' ? 352 : 720, height: format === 'airline-s3k' ? 240 : 480,
-        sample_aspect_ratio: format === 'airline-s3k' ? '200:219' : '32:27',
-        display_aspect_ratio: format === 'airline-s3k' ? '880:657' : '16:9' }),
-      expect.objectContaining({ codec_name: format === 'airline-s3k' ? 'mp2' : 'aac',
+      expect(streams).toEqual([expect.objectContaining({ codec_name: 'h264',
+        width: format === 'airline-exw' ? 640 : 720, height: format === 'airline-exw' ? 360 : 480,
+        sample_aspect_ratio: format === 'airline-exw' ? '1:1' : '32:27',
+        display_aspect_ratio: '16:9' }),
+      expect.objectContaining({ codec_name: 'aac', profile: 'LC',
         sample_rate: '48000', channels: 2 })]);
       expect(streams[1].start_pts).toBe(streams[0].start_pts);
       const data = readFileSync(outPath);
@@ -564,7 +564,8 @@ describeElectron('Electron 匯出佇列生命週期', () => {
         pids.add(pid);
         if ([48, 49, 63].includes(pid)) expect(data[offset + 1] & 32).toBe(32);
       }
-      expect([...pids].sort((a, b) => a - b)).toEqual([0, 48, 49, 63, 8191]);
+      expect([...pids].sort((a, b) => a - b)).toEqual(format === 'airline-exw'
+        ? [0, 48, 49, 63] : [0, 48, 49, 63, 8191]);
       expect(readdirSync(profile).filter(name => /\.(h264|m1v|aac|m1a|cfg)$/.test(name))).toEqual([]);
     }
     if (format === 'mod-fhd') {

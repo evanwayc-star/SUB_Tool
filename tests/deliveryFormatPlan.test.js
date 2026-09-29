@@ -26,7 +26,7 @@ describe('完整交付規格由正式 plan 編譯', () => {
     ['mod-fhd', 'libx264', '1920x1080', '60000/1001', 7280],
     ['airline-dmpes', 'libx264', '854x480', '30000/1001', 1500],
     ['airline-dmpes-4m', 'libx264', '854x480', '30000/1001', 4000],
-    ['airline-s3k', 'mpeg1video', '322x240', '30000/1001', 1500],
+    ['airline-exw', 'libx264', '640x360', '30000/1001', 500],
   ])('%s 不需 caller 配對格式設定，保留 codec、畫面與碼率', (format, encoder, size, cadence, kbps) => {
     const input = spec(format);
     const original = structuredClone(input);

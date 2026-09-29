@@ -31,6 +31,31 @@ afterEach(() => {
 });
 
 describe('FFmpeg execution', () => {
+  it.each([
+    ['dvd-iso', '.iso', 47.5],
+    ['bd-iso', '.iso', 47.5],
+    ['airline-dmpes', '.mpg', 50],
+  ])('%s 的 watchdog 編碼進度遵守成品階段進度尺', async (format, extension, expected) => {
+    const userDataDir = makeTempRoot();
+    const queueDir = path.join(userDataDir, 'export-queue');
+    const outPath = path.join(userDataDir, `delivery${extension}`);
+    const progress = [];
+    const execution = createFFmpegExecution({
+      getFFmpegPath: () => 'ffmpeg-test',
+      getUserDataDir: () => userDataDir,
+      getQueueDir: () => queueDir,
+      ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
+      spawnWatchdog(config, handlers) {
+        handlers.onStderr(Buffer.from('frame=25 time=00:00:05.00 speed=1.0x\n'));
+        return { ready: Promise.resolve(), completion: Promise.resolve({ ok: true, code: 0 }) };
+      },
+    });
+    await execution.execute([outPath], {
+      duration: 10, jobId: `export-${format}`, outPath, outputFormat: format,
+      onProgress: event => progress.push(event),
+    });
+    expect(progress).toContainEqual(expect.objectContaining({ pct: expected }));
+  });
   it('可重建快取工作走 direct child adapter，並從公開 outcome 回傳進度與 stream maps', async () => {
     const userDataDir = makeTempRoot();
     const spawned = [];

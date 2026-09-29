@@ -129,7 +129,7 @@ describe('匯出交付清單', () => {
     await vi.waitFor(() => expect(document.querySelector('.ev-format')).not.toBeNull());
     expect([...document.querySelector('.ev-format').options].map(option => option.textContent)).toEqual([
       'ProRes422HQ-MOV', 'H264-MP4', 'WAV', 'DVD-ISO (4.5G)', 'BD-ISO (24G)', 'MOD-FHD',
-      '航空-DMPES-H264-1.5M (立體聲)', '航空-DMPES-H264-4M (立體聲)', '航空-S3K-MPEG1-1.5M (立體聲)',
+      '航空-DMPES-H264-1.5M (立體聲)', '航空-DMPES-H264-4M (立體聲)', '航空-exW-H264-500K (立體聲)',
     ]);
   });
 
@@ -175,7 +175,7 @@ describe('匯出交付清單', () => {
   });
 
   it.each([
-    ['airline-s3k', '352×240p', '.mpg', 'MPEG-1 Audio Layer-2 / CRC', '1500'],
+    ['airline-exw', '640×360p', '.mpg', 'AAC-LC / ADTS', '500'],
     ['airline-dmpes', '720×480p', '.mpg', 'AAC-LC / ADTS', '1500'],
     ['airline-dmpes-4m', '720×480p', '.mpg', 'AAC-LC / ADTS', '4000'],
   ])('%s 提供固定循序掃描規格並直接合成 MPG', async (formatName, resolutionText, extension, audioLabel, videoKbps) => {
@@ -194,7 +194,7 @@ describe('匯出交付清單', () => {
     expect(document.querySelector('.ev-kbps').disabled).toBe(true);
     expect(document.querySelector('.ev-name').value.endsWith(extension)).toBe(true);
     expect(document.body.textContent).toContain(audioLabel);
-    expect(document.body.textContent).toContain('48 kHz / 128 kbps');
+    expect(document.body.textContent).toContain(formatName === 'airline-exw' ? '48 kHz / 64 kbps' : '48 kHz / 128 kbps');
     expect(document.querySelector('.delivery-airline-output').textContent).toContain('自動合成影音');
     expect(document.querySelector('.delivery-airline-output').textContent).toContain('.mpg（MPEG-TS）');
     if (formatName.startsWith('airline-dmpes')) expect(document.querySelector('.delivery-airline-output').textContent).toContain('16:9');

@@ -49,6 +49,8 @@ function showOsd(text) {
 let _modalKeepVideo = false;
 let _modalPrevFocus = null;
 let _modalDismiss = null;
+let _modalReplaced = null;
+let _modalGeneration = 0;
 let _modalCloseOnBackdrop = true;
 let _lastFocusedOutsideModal = null;
 
@@ -67,7 +69,16 @@ function _focusables() {
 }
 
 function openModal(title, html, buttons, opts = {}) {
+  const replaced = _modalReplaced;
+  const generation = ++_modalGeneration;
+  const session = {
+    isCurrent: () => generation === _modalGeneration,
+    close: arg => { if (generation === _modalGeneration) closeModal(arg); },
+  };
   _modalDismiss = typeof opts.onDismiss === 'function' ? opts.onDismiss : null;
+  _modalReplaced = typeof opts.onReplaced === 'function' ? opts.onReplaced : null;
+  // Replacement is opt-in: routing dialogs intentionally redraw the same draft.
+  if (replaced) replaced();
   _modalCloseOnBackdrop = opts.closeOnBackdrop !== false;
   const titleEl = $('modalTitle');
   if (titleEl) titleEl.textContent = title;
@@ -89,7 +100,7 @@ function openModal(title, html, buttons, opts = {}) {
     });
   }
   const bg = $('modalBg');
-  if (!bg) return;
+  if (!bg) return session;
   const modalEl = bg.querySelector('.modal');
   if (modalEl) {
     modalEl.style.width = opts.width || '';
@@ -100,27 +111,30 @@ function openModal(title, html, buttons, opts = {}) {
   bg.classList.toggle('clear-bg', _modalKeepVideo);
   _modalPrevFocus = _lastFocusedOutsideModal || document.activeElement;
   bg.classList.add('show');
-  setTimeout(() => { _focusables()[0]?.focus(); }, 0);
+  setTimeout(() => { if (session.isCurrent()) _focusables()[0]?.focus(); }, 0);
   if (!_modalKeepVideo && Media.mpvMode) setMpvWindowVisible(false);
+  return session;
 }
 
 function closeModal(arg) {
   const committed = !!(arg && arg.committed === true);
   const dismiss = _modalDismiss;
+  const generation = ++_modalGeneration;
   _modalDismiss = null;
+  _modalReplaced = null;
   _modalCloseOnBackdrop = true;
-  if (!committed && dismiss) {
-    try { dismiss(); } catch (e) { console.warn('modal onDismiss:', e); }
-  }
   const prev = _modalPrevFocus;
   _modalPrevFocus = null;
   const bg = $('modalBg');
   if (bg) bg.classList.remove('show', 'dock-right', 'clear-bg');
   _modalKeepVideo = false;
   if (prev && prev.focus) {
-    setTimeout(() => { try { prev.focus(); } catch (e) {} }, 0);
+    setTimeout(() => { if (generation === _modalGeneration) { try { prev.focus(); } catch (e) {} } }, 0);
   }
   if (Media.mpvMode) setMpvWindowVisible(true);
+  if (!committed && dismiss) {
+    try { dismiss(); } catch (e) { console.warn('modal onDismiss:', e); }
+  }
 }
 
 const modalBg = $('modalBg');
@@ -151,15 +165,17 @@ function promptModal(title, label, defVal = '', { placeholder = '', okLabel = '�
   return new Promise(resolve => {
     const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     let done = false;
-    const finish = v => { if (done) return; done = true; closeModal(); resolve(v); };
+    const cancel = () => { if (!done) { done = true; resolve(null); } };
+    const finish = v => { if (done) return; done = true; closeModal({ committed: true }); resolve(v); };
     openModal(title,
       `<div style="font-size:13px;color:var(--text-dim);margin-bottom:8px">${esc(label)}</div>` +
       `<input type="text" id="__promptInput" value="${esc(defVal)}" placeholder="${esc(placeholder)}" ` +
       `style="width:100%;box-sizing:border-box;font-size:14px;padding:7px 9px;background:var(--bg2);` +
       `border:1px solid var(--border2);border-radius:5px;color:var(--text)">`,
       [{ label: okLabel, primary: true, act: () => { const v = ($('__promptInput')?.value || '').trim(); finish(v || null); } },
-       { label: '取消', act: () => finish(null) }]);
-    setTimeout(() => { const el = $('__promptInput'); if (el) { el.focus(); el.select(); } }, 30);
+       { label: '取消', act: () => finish(null) }], { onDismiss: cancel, onReplaced: cancel });
+    const input = $('__promptInput');
+    setTimeout(() => { if (!done && input?.isConnected) { input.focus(); input.select(); } }, 30);
   });
 }
 
@@ -254,13 +270,10 @@ function _fmtBytes(n) {
   return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
 }
 
-let _cacheDlgGen = 0;
-
 async function openCacheDialog() {
   const DESK = window.subtool;
   if (!DESK || !DESK.cacheInfo) { showToast('快取管理僅在桌面版可用'); return; }
-  const myGen = ++_cacheDlgGen;
-  openModal('🗂 轉檔快取', '<div style="padding:6px 2px">讀取中…</div>', [{ label: '關閉', primary: true, act: closeModal }]);
+  const loading = openModal('🗂 轉檔快取', '<div style="padding:6px 2px">讀取中…</div>', [{ label: '關閉', primary: true, act: closeModal }]);
   
   let info;
   try {
@@ -269,7 +282,7 @@ async function openCacheDialog() {
     info = { folders: 0, bytes: 0, root: '' };
   }
   
-  if (myGen !== _cacheDlgGen || !$('modalBg')?.classList.contains('show')) return;
+  if (!loading.isCurrent()) return;
   
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const html =
@@ -281,18 +294,29 @@ async function openCacheDialog() {
     
   const buttons = [
     { label: '清理孤兒檔', act: async () => {
-        const r = await DESK.cacheCleanOrphans();
-        showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}`);
-        openCacheDialog();
+        try {
+          const r = await DESK.cacheCleanOrphans();
+          if (!session.isCurrent()) return;
+          showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}`);
+          await openCacheDialog();
+        } catch (error) {
+          if (session.isCurrent()) showToast('清理快取失敗：' + error.message);
+        }
       },
     },
     { label: '全部清除', act: () => {
-        openModal('確認清除', '<div style="padding:6px 2px">將刪除所有中央快取，以及目前開啟影片旁的 .subtool_Cache 資料夾。<br>下次開啟同檔需重新轉檔。確定？</div>', [
+        const confirmation = openModal('確認清除', '<div style="padding:6px 2px">將刪除所有中央快取，以及目前開啟影片旁的 .subtool_Cache 資料夾。<br>下次開啟同檔需重新轉檔。確定？</div>', [
           { label: '確定清除', primary: true, act: async () => {
+            try {
               const State = (await import('./state.js')).State;
+              if (!confirmation.isCurrent()) return;
               const r = await DESK.cacheClearAll(State.mediaPath || null);
+              if (!confirmation.isCurrent()) return;
               showToast(`已清除快取，釋放 ${_fmtBytes(r.bytes)}`);
-              closeModal();
+              confirmation.close();
+            } catch (error) {
+              if (confirmation.isCurrent()) showToast('清除快取失敗：' + error.message);
+            }
             },
           },
           { label: '取消', act: openCacheDialog },
@@ -301,7 +325,7 @@ async function openCacheDialog() {
     },
     { label: '關閉', primary: true, act: closeModal },
   ];
-  openModal('🗂 轉檔快取', html, buttons);
+  const session = openModal('🗂 轉檔快取', html, buttons);
 }
 
 export function renderQueueMonitorIndicator(button, snapshot = {}) {

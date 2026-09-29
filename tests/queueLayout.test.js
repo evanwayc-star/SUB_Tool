@@ -45,7 +45,7 @@ afterEach(() => {
 
 describe('匯出佇列監控緊湊工作區', () => {
   it.each([
-    ['airline-s3k', '航空-S3K-MPEG1-1.5M (立體聲)', 352, 240, 1500],
+    ['airline-exw', '航空-exW-H264-500K (立體聲)', 640, 360, 500],
     ['airline-dmpes', '航空-DMPES-H264-1.5M (立體聲)', 720, 480, 1500],
     ['airline-dmpes-4m', '航空-DMPES-H264-4M (立體聲)', 720, 480, 4000],
   ])('%s 顯示 MPG 完成並可檢視自動合成及鎖定規格', async (format, label, width, height, videoKbps) => {

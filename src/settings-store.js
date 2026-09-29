@@ -57,8 +57,8 @@ export function makeSettingsStore(desk, storage) {
     if (!slot) return false;
     if (desk && typeof desk[slot.deskSave] === 'function') {
       try {
-        await desk[slot.deskSave](data);
-        return true;
+        const saved = await desk[slot.deskSave](data);
+        return saved !== false;
       } catch (e) {
         console.error('儲存設定失敗（桌面）:', name, e);
         return false;

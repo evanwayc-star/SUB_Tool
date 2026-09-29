@@ -35,6 +35,18 @@ export function clipSourceStillReferenced(clips, sourceClip) {
   return !!liveClipForSource(clips, sourceClip);
 }
 
+/** ffprobe 的 stream/channel 清單轉為來源聲道座標，供所有載入路徑共用。 */
+export function probeAudioChannelDescriptors(audio) {
+  const out = [];
+  (audio || []).forEach((stream, sourceStream) => {
+    const count = Math.max(0, Math.floor(Number(stream?.channels) || 0));
+    for (let sourceChannel = 0; sourceChannel < count; sourceChannel++) {
+      out.push({ sourceStream, sourceChannel });
+    }
+  });
+  return out;
+}
+
 // 母素材的完整長度不能被尚在生成中的 Proxy 或播放器暫時 metadata 縮短。
 export function maxKnownSourceDuration(...durations) {
   return Math.max(0, ...durations.map(value => {

@@ -128,6 +128,23 @@ describe('交付音訊規格', () => {
     expect(resized.buses.at(-1).id).toBe(`a${MAX_DELIVERY_AUDIO_BUSES}`);
   });
 
+  it('既有編組只為未配置的 bus 補一份 Mono stream，重複套用不增加聲道', () => {
+    const spec = {
+      buses: [{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }, { id: 'a4' }],
+      streams: [{ id: 'delivery-stream-1', layout: 'stereo', busIds: ['a1', 'a2'] }],
+    };
+
+    const defaults = ensureDeliveryAudioExportDefaults(spec);
+
+    expect(defaults.streams).toEqual([
+      { id: 'delivery-stream-1', layout: 'stereo', busIds: ['a1', 'a2'] },
+      { id: 'delivery-stream-2', layout: 'mono', busIds: ['a3'] },
+      { id: 'delivery-stream-3', layout: 'mono', busIds: ['a4'] },
+    ]);
+    expect(ensureDeliveryAudioExportDefaults(defaults)).toEqual(defaults);
+    expect(spec.streams).toHaveLength(1);
+  });
+
   it('不會讓交付列憑空建立無聲 bus，舊草稿引用未知 bus 時明確拒絕', () => {
     const project = { buses: [{ id: 'a1' }, { id: 'a2' }], exportLayout: { streams: [] } };
     const spec = createDeliveryAudioSpec(project, {});

@@ -27,6 +27,7 @@ const ExportWatchdog = require('./export-watchdog');
 const { FileAuthority, isPathContained } = require('./file-authority');
 const { createLocalResourceServer, registerLocalResourceScheme } = require('./local-resource');
 const { createProjectWorkspace, authorizeDroppedMediaPath } = require('./project-file-authority-engine');
+const { createSettingsFile } = require('./settings-file');
 
 const { createIpcGuards, expectedExportExtension, mergeRendererConfig } = require('./ipc-guards');
 const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput } = require('./export-queue');
@@ -175,26 +176,20 @@ function createWindow() {
     }
     mpvHost.dispose();
   });
-  // S2：補齊 Electron 安全基線 — 開新外部視窗委派給預設瀏覽器、限制導航只能停在本機應用頁（與 dev 的 localhost）
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (typeof url === 'string' && (url.startsWith('https://') || url.startsWith('http://'))) {
-      const { shell } = require('electron');
-      shell.openExternal(url).catch(err => console.warn('[app] openExternal failed:', err));
-    }
-    return { action: 'deny' };
-  });
-
-  win.webContents.on('will-navigate', (ev, u) => {
-    if (!(u.startsWith('file:') || u.startsWith('http://localhost:8777'))) ev.preventDefault();
+  const built = path.join(__dirname, '..', 'dist', 'index.html');
+  const developmentURL = process.argv.includes('--dev') ? 'http://localhost:8777/' : null;
+  localResourceServer.protectApplicationWindow(win, {
+    document: built,
+    developmentURL,
+    openExternal: value => require('electron').shell.openExternal(value),
   });
   win.webContents.once('did-finish-load', () => {
     try { QueueManager.refreshViews(); } catch (e) {}
   });
-  if (process.argv.includes('--dev')) {
-    win.loadURL('http://localhost:8777'); // 需先執行 npm run dev
+  if (developmentURL) {
+    win.loadURL(developmentURL); // 需先執行 npm run dev
     win.webContents.openDevTools({ mode: 'detach' });
   } else {
-    const built = path.join(__dirname, '..', 'dist', 'index.html');
     void localResourceServer.loadApplicationDocument(win, built).catch(error => {
       console.error('[app] 無法載入 application document：', error);
     });
@@ -502,8 +497,7 @@ let _lastDirs = null;
 function lastDir(kind) {
   if (!_lastDirs) {
     try {
-      const p = getConfigPath();
-      _lastDirs = (fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')).lastDirs : null) || {};
+      _lastDirs = settingsFile.read().lastDirs || {};
     } catch (e) { _lastDirs = {}; }
   }
   const d = _lastDirs[kind];
@@ -517,10 +511,9 @@ function rememberDir(kind, filePath) {
     const dir = path.dirname(filePath);
     if (!_lastDirs) lastDir(kind);
     if (_lastDirs[kind] === dir) return;
-    _lastDirs[kind] = dir;
-    const p = getConfigPath();
-    const current = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
-    fs.writeFileSync(p, JSON.stringify({ ...current, lastDirs: _lastDirs }, null, 2), 'utf8');
+    const lastDirs = { ..._lastDirs, [kind]: dir };
+    settingsFile.update(current => ({ ...current, lastDirs }));
+    _lastDirs = lastDirs;
   } catch (e) {}
 }
 
@@ -565,18 +558,13 @@ ipcMain.handle('dialog:openAudio', async () => {
    確實開過哪些檔，並且只在從這份清單開啟時才重新授予那一個檔案。 */
 function loadRecentProjects() {
   try {
-    const p = getConfigPath();
-    if (!fs.existsSync(p)) return [];
-    return JSON.parse(fs.readFileSync(p, 'utf8'))?.recentProjects || [];
+    return settingsFile.read().recentProjects || [];
   } catch (e) { return []; }
 }
 
 function saveRecentProjects(list) {
-  try {
-    const p = getConfigPath();
-    const current = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
-    fs.writeFileSync(p, JSON.stringify({ ...current, recentProjects: list }, null, 2), 'utf8');
-  } catch (e) { console.error('[recent] save err', e); }
+  // 失敗交回 workspace，才能讓 clearRecent 回報 false，而非假裝清除成功。
+  settingsFile.update(current => ({ ...current, recentProjects: list }));
 }
 
 /* 清單本身不含能力授予——只是給選單顯示用。
@@ -850,7 +838,7 @@ function openQueueWindow() {
      兩個視窗對鍵盤的行為不一致本身就是意外的來源，補齊。 */
   queueWin.setMenu(null);
   const queueDocument = path.join(__dirname, 'queue.html');
-  localResourceServer.allowInternalDocument(queueDocument);
+  localResourceServer.protectApplicationWindow(queueWin, { document: queueDocument });
   queueWin.loadFile(queueDocument);
   /* 關掉監控視窗如果會順帶結束整個程式，而且還有工作在轉檔，就先問過使用者。
      這裡不能只看「有沒有在轉檔」——主視窗還開著時，關監控視窗只是收起監控畫面，
@@ -1432,20 +1420,18 @@ function getConfigPath() {
   return path.join(configDir, 'settings.json');
 }
 
+const settingsFile = createSettingsFile({ filePath: getConfigPath });
+
 ipcMain.handle('config:load', () => {
   try {
-    const p = getConfigPath();
-    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    return settingsFile.read();
   } catch(e) { console.error('[config] load err', e); }
   return {};
 });
 
 ipcMain.handle('config:save', (e, data) => {
   try {
-    const p = getConfigPath();
-    const current = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
-    const merged = mergeRendererConfig(current, data);
-    fs.writeFileSync(p, JSON.stringify(merged, null, 2), 'utf8');
+    settingsFile.update(current => mergeRendererConfig(current, data));
     return true;
   } catch(e) { console.error('[config] save err', e); return false; }
 });
@@ -1701,7 +1687,7 @@ function openCompareWindow(payload) {
   });
   compareWin.setMenu(null);
   const compareDocument = path.join(__dirname, 'compare.html');
-  localResourceServer.allowInternalDocument(compareDocument);
+  localResourceServer.protectApplicationWindow(compareWin, { document: compareDocument });
   compareWin.loadFile(compareDocument);
   compareWin.webContents.once('did-finish-load', () => {
     compareWin.webContents.send('compare:update-data', payload);
