@@ -29,8 +29,13 @@ function airlineEncoding(format) {
       // CPF bytes -> FFmpeg bits. libx264 internally uses whole kilobits.
       '-bufsize:v', String(exw ? preset.videoBufferBytes * 8 : Math.floor(1041616 * videoKbps / 1500)), '-flags:v', '-ildct-ilme',
       '-x264-params', [
-        'interlaced=0', ...(exw ? [] : ['nal-hrd=cbr', 'filler=1']), 'force-cfr=1', 'videoformat=ntsc', 'fullrange=off',
-        'aud=1', 'repeat-headers=1', 'keyint=15', 'min-keyint=1', 'scenecut=40',
+        'interlaced=0', ...(exw ? [] : ['nal-hrd=cbr', 'filler=1']), 'force-cfr=1',
+        // Keep exW picture timing explicit for both TSA6 and TSA7.
+        ...(exw ? ['pic-struct=1'] : []), 'videoformat=ntsc', 'fullrange=off',
+        // Early scene-cut IDRs make TSA6 infer reorder depth 4 and reject PTS;
+        // fixed 15-frame GOPs keep both TSA6 and TSA7 at depth 2.
+        'aud=1', 'repeat-headers=1', 'keyint=15', 'min-keyint=1',
+        exw ? 'scenecut=0' : 'scenecut=40',
         'open-gop=0', 'ref=2', 'bframes=3', 'b-adapt=0', 'b-pyramid=none',
         'cabac=1', 'slices=1', 'weightp=0', 'weightb=0', 'no-deblock=1',
         // Psy RDO otherwise silently subtracts 2 from the signalled chroma QP.

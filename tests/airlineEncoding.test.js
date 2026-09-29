@@ -105,9 +105,11 @@ describe.skipIf(!nativeAvailable)('航空原生 elementary bitstream', () => {
     for (const [field, value] of Object.entries({
       profile_idc: 77, level_idc: 30, max_num_ref_frames: 2, frame_mbs_only_flag: 1,
       aspect_ratio_idc: 1, num_units_in_tick: 1001, time_scale: 60000,
-      nal_hrd_parameters_present_flag: 0, entropy_coding_mode_flag: 1,
+      nal_hrd_parameters_present_flag: 0, pic_struct_present_flag: 1,
+      entropy_coding_mode_flag: 1,
       disable_deblocking_filter_idc: 1,
     })) expect(trace).toMatch(new RegExp(`\\b${field}\\s+[01]+ = ${value}\\s`));
+    expect(trace).toMatch(/\bpic_struct\s+[01]+ = 0\s/);
     const units = starts(readFileSync(video));
     expect(units.filter(unit => (unit.code & 31) === 9)).toHaveLength(90);
     expect(units.filter(unit => (unit.code & 31) === 5)).toHaveLength(6);
@@ -115,6 +117,18 @@ describe.skipIf(!nativeAvailable)('航空原生 elementary bitstream', () => {
     const adts = readFileSync(audio);
     expect(adts[2] >> 6).toBe(1);
     expect((adts[2] >> 2) & 15).toBe(3);
+  });
+
+  it('exW 場景切換不提前插入 IDR，維持固定 15 格 GOP', () => {
+    const output = path.join(directory, 'airline-exw-scene-cut.h264');
+    const source = "testsrc2=size=640x360:rate=30000/1001:duration=3,drawbox=color=black:t=fill:enable='lt(t,0.1)'";
+    run(FFMPEG, ['-hide_banner', '-nostdin', '-y', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', source, '-map', '0:v',
+      ...airlineEncoding('airline-exw').videoArgs, '-an', '-f', 'h264', output]);
+    const { frames } = JSON.parse(run(FFPROBE, ['-v', 'error', '-select_streams', 'v:0',
+      '-show_frames', '-show_entries', 'frame=key_frame', '-of', 'json', output]).stdout);
+    expect(frames.flatMap((frame, index) => frame.key_frame ? [index] : []))
+      .toEqual([0, 15, 30, 45, 60, 75]);
   });
 
   it('DMPES 720×480 顯示 16:9，Main@3.0、29.97p、2 refs、CABAC、CBR HRD 與停用去區塊', () => {

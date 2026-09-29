@@ -173,7 +173,7 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 
 `airline-encoding.js` 提供 Carbon CPF 對應的 CPU codec 與 transport profile，由純 `export-plan.js` 依同一格式選擇。計畫先用顯示比例合成、燒字幕與 TC，再縮為編碼尺寸並設定 SAR；航空來源若隔行則以 bwdif send_frame 轉逐行，不走 MOD-FHD 的場交織。
 
-- exW：H.264 Main@3.0、640×360 正方形像素、30000/1001 逐行、VBR 目標 500 kbps／上限 2000 kbps、VBV 125000 bytes、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD；關閉 deblocking、weighted prediction、B pyramid 與 HRD。依交付要求，每個 access unit 的 AUD 後加入 AFD 完整 16:9（T.35／DTG1，active_format=10）SEI。音訊為 AAC-LC／ADTS Stereo、48 kHz、64 kbps。
+- exW：H.264 Main@3.0、640×360 正方形像素、30000/1001 逐行、VBR 目標 500 kbps／上限 2000 kbps、VBV 125000 bytes、固定 15 格 GOP、3 B 幀、2 reference frames、CABAC、單 slice、AUD；關閉 deblocking、weighted prediction、B pyramid 與 HRD，開啟逐格 pic timing SEI。依交付要求，每個 access unit 的 AUD 後加入 AFD 完整 16:9（T.35／DTG1，active_format=10）SEI。音訊為 AAC-LC／ADTS Stereo、48 kHz、64 kbps。
 - DMPES：H.264 Main@3.0、720×480、30000/1001、CBR 1500 或 4000 kbps、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD、關閉 deblocking／weighted prediction／B pyramid。依使用者確認的 **16:9 顯示比例，設定 SAR 32:27**；明確優先於 CPF 的 6:5 及參考成品的 40:33。其餘採參考成品 SPS 實測的 NAL HRD CBR、NTSC limited range；音訊輸出 MPEG-4 AAC-LC／ADTS Stereo、48 kHz、128 kbps。
 
 上述是跨編碼器的參數對應。DMPES 1.5M 的 130202-byte VBV 傳入 1041616 bits，x264 內部取整，排程使用實際 HRD 容量 130124 bytes，4M 為 347124 bytes。exW 依 CPF 設定 125000-byte VBV。收尾在最後一個 video PES 加入 AVC end-of-sequence／end-of-stream，修正 TSA 報表缺少 EOS 的警告。Carbon 專用搜尋／量化策略不保證等價，不能宣稱位元流完全一致或已通過航空設備驗收。
@@ -182,7 +182,7 @@ TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PM
 
 合成沿用 Panasonic cfg 的 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes。DMPES 1.5M 規格採參考成品 PCR 實測的 1855594 bps CBR；4M 使用 4600000 bps。exW 參照 MP2TSME 9 cfg 的 VBR=yes，空閒時不填入 null packet，保留最高 2.5 Mbps 的封包排程上限。`airline-transport.js` 依 DTS／PTS 重新排程 PES，影片 TB 目標不超過 400 bytes（上限 512），DMPES 音訊最多提前約 0.1 秒、exW 最多約 0.35 秒，並限制主緩衝；影片保留量依實際 VBV 限制，PCR 約 50 ms，PAT／PMT 約 90 ms。單純增大 mux delay 會讓主緩衝更容易溢位，因此不能作為 TSA 錯誤的修復。保留編碼器提供的 PTS／DTS 與音訊 priming 關係，不改影音播放速度。
 
-TSA 驗收另須確認每個標示 `random_access_indicator` 的視訊 TS 封包同時帶 PCR。exW 尚需以 Manzanita TSA 對實際成品驗證 VBR 封裝與緩衝限制。
+TSA 驗收另須確認每個標示 `random_access_indicator` 的視訊 TS 封包同時帶 PCR。exW 的 CPF 啟用場景變換偵測，但實測提前插入 IDR 會讓 TSA6 將 reorder depth 判成 4，對幾乎每格報 `4-16e`；TSA7 判成 2 且不報錯。為兼容兩版，exW 停用提前場景切換 IDR，保留每 15 格一組 GOP，並明確寫入 pic timing。以 3 格黑畫面後切到動態畫面的測試鎖定 IDR 間隔；使用者提供的 112 秒成品再編碼診斷檔在 TSA6 v6.0.0 與 TSA7 v7.0.69 均為 0 錯誤、0 警告。此診斷檔是二次編碼，不當作正式交付驗收；實際專案輸出仍須逐片 TSA 檢測 VBR 封裝與緩衝限制。
 
 watchdog 先以 `airline-output.js` 檢查 TS 結構，再將封包重排至 lease 目錄中的暫存 TS，重新產生 PCR／PSI；CBR 格式填入 null packet，exW 以 VBR 省略空閒封包。僅保留一個 PES 與固定大小讀寫區塊，不建立整片影片的封包索引；跨磁碟寫回成品可取消。取消或收尾失敗會清理半成品，清理失敗保留 lease。`airline-output.js`、`airline-transport.js`、`airline-encoding.js` 與共用格式模組須一併 asarUnpack。
 
