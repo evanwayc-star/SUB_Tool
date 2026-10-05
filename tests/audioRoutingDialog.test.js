@@ -12,7 +12,7 @@ import { AudioRouting } from '../src/audio-routing.js';
 import { Media } from '../src/media.js';
 import { History, recordHistory } from '../src/history.js';
 import { on } from '../src/events.js';
-import { closeModal } from '../src/ui.js';
+import { closeModal, openModal } from '../src/ui.js';
 import { buildProjectAudioPlan } from '../src/project-audio.js';
 import { createDeliveryAudioSpec } from '../src/export-job-engine.js';
 
@@ -148,6 +148,30 @@ it('已替換專案後舊視窗取消不能覆寫新專案', () => {
   open(); click('.audio-output-count-preset[data-count="4"]');
   resetAudioProject(); const replacement=structuredClone(State.audioProject);
   closeModal(); expect(State.audioProject).toEqual(replacement);
+});
+
+it.each(['root','child'])('其他 Modal 取代 %s 配線頁會取消整段預覽', page => {
+  const initial=structuredClone(State.audioProject);
+  if(page==='child'){ source(); click('#audioRouteClear'); click('#audioRouteOutput'); }
+  else open();
+  click('.audio-output-count-preset[data-count="4"]');
+  const detachedSave=button('儲存輸出設定');
+  openModal('其他工作','replacement',[]);
+  expect(State.audioProject).toEqual(initial);
+  expect(History.snap().audioProject).toEqual(initial);
+  detachedSave.click();
+  expect(document.getElementById('modalTitle').textContent).toBe('其他工作');
+  expect(History.stack).toHaveLength(1);
+});
+
+it('同類配線頁快速替換時，舊延後 binding 不會重複套用新頁事件', () => {
+  AudioRouting.openOutputSettings();
+  AudioRouting.openOutputSettings();
+  vi.runAllTimers();
+  click('#audioOutputAdd');
+  expect(document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]')).toHaveLength(9);
+  act('取消');
+  expect(History.stack).toHaveLength(1);
 });
 
 it('輸出編輯直接重入來源配線時先撤回舊草稿，不把預覽當成新起點', () => {

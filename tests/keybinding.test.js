@@ -289,6 +289,16 @@ describe('匯入合併', () => {
     const { keymap } = mergeImportedKeymap(defaults, { keymap: { play: [{ key: 'p' }, null, 'x', 3] } });
     expect(keymap.play).toEqual([{ key: 'p' }]);
   });
+  it('拒絕錯誤鍵名及修飾鍵，保留有效綁定與刻意清空的 action',()=>{
+    const {keymap,applied}=mergeImportedKeymap(defaults,{play:[{key:42},{code:[]},[],{key:'P',ctrl:true},{key:'q',alt:'false'}],stop:[]});
+    expect(keymap.play).toEqual([{key:'p',ctrl:true}]);
+    expect(keymap.stop).toEqual([]);
+    expect(applied).toBe(2);
+    expect(formatBind(keymap.play[0])).toBe('Ctrl + P');
+    expect(formatBind({key:42})).toBe('');
+    expect(formatBind({code:'KeyA'})).toBe('KeyA');
+    expect(()=>mergeImportedKeymap(defaults,{play:[{key:42},{}]})).toThrow(/沒有可用/);
+  });
 
   it('格式不符或沒有可用綁定時丟例外（由呼叫端轉成錯誤訊息）', () => {
     expect(() => mergeImportedKeymap(defaults, null)).toThrow(/格式不符/);

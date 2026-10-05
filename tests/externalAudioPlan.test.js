@@ -22,6 +22,35 @@ import { composeDeliveryAudioPlan } from '../src/export-job-engine.js';
 
 const ExportPlan = createRequire(import.meta.url)('../electron/export-plan.js');
 
+describe('匯出影像快照',()=>{
+  it('毀損的非有限淡化 metadata 依共享規則歸零，不能送出 Infinity filter 參數',()=>{
+    const state={clips:[{name:'video.mov',path:'C:/video.mov',in:0,out:10,offset:0,vtrack:0,
+      fadeIn:Infinity,fadeOut:Infinity,fadeSourceOffset:Infinity,fadeSourceLength:Infinity}],videoTracks:[],audioProject:null};
+    expect(buildExportSnapshot({state,sequenceEnd:10}).clips[0]).toMatchObject({
+      fadeIn:0,fadeOut:0,fadeSourceOffset:0,fadeSourceLength:10,
+    });
+  });
+  it('影片和圖片皆凍結個別幾何與軌道可見性；隱藏不刪除來源',()=>{
+    const state={clips:[
+      {id:'v',name:'video.mov',path:'C:/video.mov',type:'video',in:0,out:10,offset:0,vtrack:0,scale:1.4,posX:0.2,posY:0.7,natW:1920,natH:1080},
+      {id:'i',name:'image.png',path:'C:/image.png',type:'image',in:0,out:10,offset:0,vtrack:1,scale:0.5,posX:0.8,posY:0.3,natW:800,natH:600},
+    ],videoTracks:[{visible:true},{visible:false}],audioProject:null};
+    const data=buildExportSnapshot({state,sequenceEnd:10});
+    state.clips[0].scale=8; state.videoTracks[1].visible=true;
+    expect(data.clips[0]).toMatchObject({scale:1.4,posX:0.2,posY:0.7,natW:1920,natH:1080});
+    expect(data.clips[1]).toMatchObject({scale:0.5,posX:0.8,posY:0.3,natW:800,natH:600});
+    expect(data.videoTracks.map(track=>track.visible)).toEqual([true,false]);
+    expect(data.clips).toHaveLength(2);
+  });
+  it('分割後的片段再裁交付範圍，沿用原始淡化窗口',()=>{
+    const state={clips:[{name:'video.mov',path:'C:/video.mov',in:5,out:10,offset:5,vtrack:0,
+      fadeIn:8,fadeOut:4,fadeSourceOffset:5,fadeSourceLength:10}],videoTracks:[],audioProject:null,exportIn:6,exportOut:9};
+    expect(buildExportSnapshot({state,sequenceEnd:10}).clips[0]).toMatchObject({
+      in:6,out:9,offset:0,fadeIn:8,fadeOut:4,fadeSourceOffset:6,fadeSourceLength:10,
+    });
+  });
+});
+
 /* 呼叫端在正式程式裡是 subio.js 的 _exportSnapshot()：把 State／Media／Seq 交給模組。
    測試裡由這兩個小工具扮演同一個角色，Media 只是一組普通陣列。 */
 let mediaTracks = [];
@@ -382,7 +411,7 @@ describe('模組本身保持純淨', () => {
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
     expect([...code.matchAll(/from\s+['"]([^'"]+)['"]/g)].map(match => match[1]))
-      .toEqual(['./project-audio.js', '../shared/audio-loudness.cjs']);
+      .toEqual(['./project-audio.js', '../shared/audio-loudness.cjs', '../shared/clip-fade.cjs']);
     for (const pureCode of [code, interpretation]) {
       expect(pureCode).not.toMatch(/from\s+['"].*(state|media|sequence|dom)/i);
       expect(pureCode).not.toMatch(/\bdocument\b/);

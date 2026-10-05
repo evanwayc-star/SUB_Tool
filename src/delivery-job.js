@@ -29,12 +29,13 @@ import {
   sourceTrackAudible,
 } from './project-audio.js';
 import { audioLimiterSnapshot } from '../shared/audio-loudness.cjs';
+import { fadeWindow } from '../shared/clip-fade.cjs';
 
 /* ── 內部工具 ───────────────────────────────────────────────────────────── */
 
 const finite = (value, fallback) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
 const ratio = (value, fallback) => Math.max(0, Math.min(1, finite(value, fallback)));
-const nonNeg = value => Math.max(0, Number(value) || 0);
+const nonNeg = value => Math.max(0, finite(value, 0));
 
 /* 依混音器狀態算出某影片段要輸出哪些聲道（比照 applyGains：有獨奏則只留獨奏，
    否則留未靜音；套用音量）。預覽用的逐聲道 AAC 快取只拿來讀 M/S/音量與來源聲道
@@ -131,17 +132,17 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
     const newDur = newOut - newIn;
     if (newOffset + newDur > (expOut - expIn)) newOut = newIn + ((expOut - expIn) - newOffset);
     const frontCut = newIn - startProp;
-    const backCut = endProp - newOut;
-    const fadeIn = Math.min(nonNeg(c.fadeIn), cDur);
-    const fadeOut = Math.min(nonNeg(c.fadeOut), cDur);
+    const sourceOffset = nonNeg(c.fadeSourceOffset) + frontCut;
+    const {length:sourceLength,fadeIn,fadeOut}=fadeWindow({...c,in:startProp,out:endProp});
+    const backCut = sourceLength - (sourceOffset + newOut - newIn);
     // A delivery range can begin/end inside a fade. Keep its original local
     // clock so the first exported frame/sample has the previewed gain/alpha.
     return {
       ...c, in: newIn, out: newOut, trimStart: newIn, trimEnd: newOut, offset: newOffset,
-      fadeIn: frontCut < fadeIn ? fadeIn : 0,
+      fadeIn: sourceOffset < fadeIn ? fadeIn : 0,
       fadeOut: backCut < fadeOut ? fadeOut : 0,
-      fadeSourceOffset: frontCut,
-      fadeSourceLength: cDur,
+      fadeSourceOffset: sourceOffset,
+      fadeSourceLength: sourceLength,
     };
   }
 
@@ -176,15 +177,13 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
       fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
       fadeSourceOffset: +c.fadeSourceOffset.toFixed(6),
       fadeSourceLength: +c.fadeSourceLength.toFixed(6),
-      ...(image ? {
-        scale: Math.max(0.01, finite(c.scale, 1)),
-        posX: ratio(c.posX, 0.5), posY: ratio(c.posY, 0.5),
+      scale: Math.max(0.01, finite(c.scale, 1)),
+      posX: ratio(c.posX, 0.5), posY: ratio(c.posY, 0.5),
         /* 原生尺寸讓主程序能用【與預覽同一條公式】算出精確的 contain 尺寸
            （兩側 consumer 都取用 shared/image-geometry.cjs 的唯一公式）。
            舊專案可能沒有這兩個值，主程序會退回讓 ffmpeg 自己算 —— 結果相同，
            只是少了「兩邊用同一份實作」的保證。 */
-        natW: Math.max(0, finite(c.natW, 0)), natH: Math.max(0, finite(c.natH, 0)),
-      } : {}),
+      natW: Math.max(0, finite(c.natW, 0)), natH: Math.max(0, finite(c.natH, 0)),
     };
   });
 
@@ -193,6 +192,7 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
     const t = (state.videoTracks || [])[vt] || {};
     return {
       vt,
+      visible: t.visible !== false,
       scale: +(t.scale != null ? t.scale : 1),
       posX: +(t.posX != null ? t.posX : 0.5),
       posY: +(t.posY != null ? t.posY : 0.5),

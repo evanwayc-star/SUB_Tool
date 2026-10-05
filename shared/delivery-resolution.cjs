@@ -68,7 +68,7 @@ function suggestKbps({ w, h } = {}) {
 // 時間碼來源：新工作以輸出 FPS 換算，已入列工作使用送出時凍結的起點。
 function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH = 0,
   projectFps, bdMode = null,
-  fps, videoKbps = 0, previousWidth, previousHeight, kbpsOverride,
+  fps, videoKbps = 0, previousWidth, previousHeight, kbpsOverride, resetVideoBitrate = false,
   burnTimecode = false, timecodeStart = null } = {}) {
   const isWav = format === 'wav';
   if (format === 'bd-iso' && (!bdMode || Math.abs(bdMode.fps - Number(fps)) > 0.001
@@ -80,11 +80,11 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH =
   const { w, h } = fixed
     ? { w: fixed.width, h: fixed.height }
     : deliveryResolution({ canvasW, canvasH, targetH: height, isWav });
-  let kbps = preset ? preset.videoKbps : Number(videoKbps) || 0;
+  let kbps = preset ? preset.videoKbps : (resetVideoBitrate ? 0 : Number(videoKbps) || 0);
   if (format === 'h264') {
     if (kbpsOverride != null) kbps = Math.max(1, Math.floor(Number(kbpsOverride) || 0));
-    else if (previousWidth != null && previousHeight != null
-      && (w !== Number(previousWidth) || h !== Number(previousHeight))) kbps = suggestKbps({ w, h });
+    else if (resetVideoBitrate || kbps <= 0 || (previousWidth != null && previousHeight != null
+      && (w !== Number(previousWidth) || h !== Number(previousHeight)))) kbps = suggestKbps({ w, h });
   }
   if (!isWav && burnTimecode && !timecodeStart) {
     throw new Error('這份工作沒有記錄時間軸起點，無法補上燒入 TC；請重新從交付清單送出');

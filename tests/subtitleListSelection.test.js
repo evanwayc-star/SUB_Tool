@@ -38,11 +38,23 @@ vi.mock('../src/timeline-renderer.js', async importOriginal => ({
 
 const project = vi.hoisted(() => ({ guardDone: true, ensureProjectSaved: vi.fn() }));
 vi.mock('../src/project.js', () => ({
+  Project: { captureWorkspaceOwnership:()=>()=>true },
   ensureProjectSaved: project.ensureProjectSaved,
   isProjectGuardDone: () => project.guardDone,
 }));
 vi.mock('../src/ui.js', () => ({ showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn() }));
-vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
+vi.mock('../src/history.js', () => ({
+  recordHistory: vi.fn(),
+  History: {
+    beginPreview: vi.fn(() => {
+      let active=true;
+      const release=()=>{active=false;};
+      release.isCurrent=()=>active;
+      release.addTarget=vi.fn();
+      return release;
+    }),
+  },
+}));
 vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
 vi.mock('../src/keyboard.js', () => ({ jklReset: vi.fn(), nudge: vi.fn() }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));
@@ -54,7 +66,8 @@ vi.mock('../src/subtitle-audit.js', () => ({
     noTimeNums: [], consecutiveIdenticalNums: [],
   }),
 }));
-vi.mock('../src/subtitle-model.js', () => ({
+vi.mock('../src/subtitle-model.js', async importOriginal => ({
+  ...(await importOriginal()),
   snapAllCuesToFrames: vi.fn(), swapAdjacentCues: vi.fn(), mergeAdjacentCues: vi.fn(),
   detectOverlaps: () => new Set(), sweepContainedCues: vi.fn(), addCue: vi.fn(), addCueRelative: vi.fn(),
   deleteSelectedCues: vi.fn(), deleteCue: vi.fn(), clearSelectedCuesTime: vi.fn(), shiftTextsDown: vi.fn(),

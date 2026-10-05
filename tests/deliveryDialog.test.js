@@ -1,11 +1,17 @@
 ﻿// @vitest-environment jsdom
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const modalState = vi.hoisted(() => ({ generation: 0 }));
 const spies = vi.hoisted(() => ({
   openModal: vi.fn((title, html) => {
+    const generation = ++modalState.generation;
     document.body.innerHTML = html;
+    return {
+      isCurrent: () => generation === modalState.generation,
+      close: () => { if (generation === modalState.generation) modalState.generation++; },
+    };
   }),
-  closeModal: vi.fn(),
+  closeModal: vi.fn(() => { modalState.generation++; }),
   openOutputSettings: vi.fn(),
   openDeliveryOutputSettings: vi.fn(),
 }));
@@ -54,6 +60,7 @@ beforeAll(async () => {
     exportVideo: vi.fn(),
     getStartupFile: vi.fn().mockResolvedValue(null),
     listDir: vi.fn().mockResolvedValue([]),
+    exportDirectory: vi.fn().mockResolvedValue(null),
   };
   ({ State, resetAudioProject, ensureAudioBusCount } = await import('../src/state.js'));
   ({ showExportVideoDialog } = await import('../src/subio.js'));
@@ -86,6 +93,7 @@ beforeEach(() => {
   window.subtool.exportVideo.mockClear();
   window.subtool.getStartupFile.mockResolvedValue(null);
   window.subtool.listDir.mockResolvedValue([]);
+  window.subtool.exportDirectory.mockResolvedValue(null);
 });
 
 describe('匯出交付清單', () => {
@@ -221,6 +229,77 @@ describe('匯出交付清單', () => {
     expect(message.textContent).not.toContain('flight.aac');
     expect(message.textContent).not.toContain('flight.manzanita.cfg');
     expect(getComputedStyle(message).display).not.toBe('none');
+  });
+
+  it('切換儲存位置後，較慢完成的舊目錄檢查不能覆寫最新警告', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-outdir')).not.toBeNull());
+    const name = document.querySelector('.ev-name').value;
+    const pending = new Map();
+    window.subtool.listDir.mockImplementation(dir => new Promise(resolve => pending.set(dir, resolve)));
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/舊目錄';
+    outDir.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(pending.has('D:/舊目錄')).toBe(true));
+    outDir.value = 'D:/新目錄';
+    outDir.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(pending.has('D:/新目錄')).toBe(true));
+
+    pending.get('D:/新目錄')([]);
+    await vi.waitFor(() => expect(document.getElementById('evConflictMsg').style.display).toBe('none'));
+    pending.get('D:/舊目錄')([name]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const message = document.getElementById('evConflictMsg');
+    expect(message.style.display).toBe('none');
+    expect(message.textContent).not.toContain('警告：硬碟上已存在同名檔案');
+  });
+
+  it('舊匯出視窗的目錄選擇結果不能寫進重新開啟的視窗', async () => {
+    let finishPicker;
+    window.subtool.exportDirectory.mockImplementation(() => new Promise(resolve => { finishPicker = resolve; }));
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-dir-btn')).not.toBeNull());
+    document.querySelector('.ev-dir-btn').click();
+    expect(window.subtool.exportDirectory).toHaveBeenCalledTimes(1);
+
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-outdir')).not.toBeNull());
+    finishPicker('D:/舊視窗');
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(document.querySelector('.ev-outdir').value).toBe('');
+  });
+
+  it('選擇資料夾期間較新的手動目錄輸入優先', async () => {
+    let finishPicker;
+    window.subtool.exportDirectory.mockImplementation(() => new Promise(resolve => { finishPicker = resolve; }));
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-dir-btn')).not.toBeNull());
+    document.querySelector('.ev-dir-btn').click();
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/新輸入';
+    outDir.dispatchEvent(new Event('input', { bubbles: true }));
+    finishPicker('D:/舊選擇');
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(document.querySelector('.ev-outdir').value).toBe('D:/新輸入');
+  });
+
+  it('關閉匯出視窗後，較慢完成的同名檔案檢查不能排入舊工作', async () => {
+    let finishCheck;
+    window.subtool.listDir.mockImplementation(() => new Promise(resolve => { finishCheck = resolve; }));
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-outdir')).not.toBeNull());
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/交付';
+    outDir.dispatchEvent(new Event('change', { bubbles: true }));
+    const submit = spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn');
+    const sending = submit.act();
+    await vi.waitFor(() => expect(typeof finishCheck).toBe('function'));
+    spies.closeModal();
+    finishCheck([]);
+    await sending;
+    expect(window.subtool.exportVideo).not.toHaveBeenCalled();
   });
 
   it('MOD-FHD 顯示鎖定規格、TS 檔名與 AAC 音訊，仍可指定 bus 與燒入 TC', async () => {

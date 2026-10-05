@@ -79,6 +79,15 @@ describe('來源聲道展開：renderer ↔ 主程序', () => {
     expect(flattenSourceChannels(null)).toEqual([]);
     expect(flattenSourceChannels(undefined)).toEqual(main.flattenSourceChannels(undefined));
   });
+
+  it('非整數但大於零的異常聲道數不會讓整條 stream 消失', () => {
+    expect(flattenSourceChannels([{ channels: 0.5 }, { channels: 2 }]))
+      .toEqual([
+        { sourceStream: 0, sourceChannel: 0, index: 0 },
+        { sourceStream: 1, sourceChannel: 0, index: 1 },
+        { sourceStream: 1, sourceChannel: 1, index: 2 },
+      ]);
+  });
 });
 
 describe('桌面版原生 ingest 規劃', () => {

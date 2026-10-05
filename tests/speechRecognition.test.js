@@ -194,6 +194,70 @@ describe('語音辨識與字幕生成模組', () => {
     expect(transcript.value).toBe('第一行。第二句仍在同一行！');
   });
 
+  it.each(['success', 'error'])('TXT 延遲 %s 不得覆寫讀取期間較新的手動文字', async result => {
+    const readers = [];
+    class DeferredFileReader {
+      readAsArrayBuffer() { readers.push(this); }
+    }
+    vi.stubGlobal('FileReader', DeferredFileReader);
+    try {
+      openModal.mockImplementation((_title, html) => { document.body.innerHTML = html; });
+      openSpeechRecognitionDialog({ id: 'revision-txt', name: 'a.wav', in: 0, out: 1, duration: 1, audioBuffer: {} });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const fileInput = document.getElementById('asrTranscriptFileInput');
+      const transcript = document.getElementById('asrTranscript');
+      const button = document.getElementById('asrImportTranscriptButton');
+      const summary = document.getElementById('asrTranscriptFileSummary');
+      Object.defineProperty(fileInput, 'files', { configurable: true, value: [{ name: 'old.txt', size: 5 }] });
+      const completion = fileInput.onchange();
+      expect(button.disabled).toBe(true);
+      transcript.value = '最新手動文字';
+      transcript.dispatchEvent(new Event('input', { bubbles: true }));
+      if (result === 'success') {
+        readers[0].result = new TextEncoder().encode('過期檔案文字').buffer;
+        readers[0].onload();
+      } else {
+        readers[0].onerror();
+      }
+      await completion;
+      expect(transcript.value).toBe('最新手動文字');
+      expect(getComputedStyle(summary).display).toBe('none');
+      expect(getComputedStyle(document.getElementById('asrStatus')).display).toBe('none');
+      expect(button.disabled).toBe(false);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('兩個 TXT 讀取交錯時只讓最新請求提交或解除 disabled', async () => {
+    const readers = [];
+    class DeferredFileReader {
+      readAsArrayBuffer() { readers.push(this); }
+    }
+    vi.stubGlobal('FileReader', DeferredFileReader);
+    try {
+      openModal.mockImplementation((_title, html) => { document.body.innerHTML = html; });
+      openSpeechRecognitionDialog({ id: 'latest-txt', name: 'a.wav', in: 0, out: 1, duration: 1, audioBuffer: {} });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const input = document.getElementById('asrTranscriptFileInput');
+      const button = document.getElementById('asrImportTranscriptButton');
+      const transcript = document.getElementById('asrTranscript');
+      Object.defineProperty(input, 'files', { configurable: true, value: [{ name: 'first.txt', size: 5 }] });
+      const first = input.onchange();
+      Object.defineProperty(input, 'files', { configurable: true, value: [{ name: 'second.txt', size: 5 }] });
+      const second = input.onchange();
+      readers[0].result = new TextEncoder().encode('first').buffer;
+      readers[0].onload();
+      await first;
+      expect(transcript.value).toBe('');
+      expect(button.disabled).toBe(true);
+      readers[1].result = new TextEncoder().encode('second').buffer;
+      readers[1].onload();
+      await second;
+      expect(transcript.value).toBe('second');
+      expect(button.disabled).toBe(false);
+      expect(document.getElementById('asrTranscriptFileSummary').textContent).toContain('second.txt');
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('可從 TXT 匯入大量逐行文字稿並顯示檔名與有效行數', async () => {
     const sourceLines = Array.from({ length: 5000 }, (_, index) => `Line ${index + 1}.`);
     const importedText = `  ${sourceLines[0]}  \r\n\r\n${sourceLines.slice(1).join('\r\n')}\r\n`;

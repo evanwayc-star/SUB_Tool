@@ -2,12 +2,15 @@ import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import deliveryFormats from '../shared/delivery-formats.cjs';
+import frameRates from '../shared/delivery-frame-rate.cjs';
+import { secToEncore } from '../src/time.js';
 
 const queueHtml = readFileSync(new URL('../electron/queue.html', import.meta.url), 'utf8');
 const openWindows = [];
 
 async function openQueueWindow(jobs) {
   const queueAPI = {
+    exactFrameRate: rate => frameRates.exactDeliveryFrameRate(rate),
     getAll: vi.fn().mockResolvedValue({ jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: deliveryFormats.DELIVERY_FORMAT_PRESETS }),
     setPause: vi.fn().mockResolvedValue(),
     setConcurrency: vi.fn().mockResolvedValue(),
@@ -44,6 +47,82 @@ afterEach(() => {
 });
 
 describe('匯出佇列監控緊湊工作區', () => {
+  it.each([23.976, 29.97, 59.94])('長片 %s FPS 的輸出時長與 canonical 時碼一致', async fps => {
+    const duration = 21600;
+    const { document } = await openQueueWindow([{ id: 'long', status: 'queued', payload: { outPath: 'C:/out/long.mp4', duration, fps } }]);
+    expect(document.querySelector('[data-job-id="long"] .job-duration b').textContent).toBe(secToEncore(duration, fps));
+  });
+
+  it('取消editor後呈現被editor壓住的最後完成更新', async () => {
+    const queued = { id: 'editing', status: 'queued', payload: { format: 'h264', outPath: 'C:/out/a.mp4' } };
+    const running = { id: 'running', status: 'running', etaS: null, payload: { outPath: 'C:/out/b.mp4' } };
+    const { document, queueAPI } = await openQueueWindow([queued, running]);
+    document.querySelector('[data-job-id="editing"] [data-action="edit"]').click();
+    queueAPI.getAll.mockResolvedValue({ jobs: [{ ...queued, status: 'running' }, { ...running, status: 'done' }], concurrency: 1 });
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await vi.waitFor(() => expect(queueAPI.getAll).toHaveBeenCalledTimes(2));
+    // queue.html owns a separate realm: allow its awaited getAll result to settle.
+    await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+    expect(document.querySelector('[data-job-id="running"]').dataset.status).toBe('running');
+    document.querySelector('[data-f="cancel"]').click();
+    expect(document.querySelector('[data-job-id="running"]').dataset.status).toBe('done');
+    expect(document.querySelector('[data-job-id="editing"]').draggable).toBe(false);
+    expect(document.getElementById('completedCount').textContent).toBe('1');
+    expect(document.getElementById('clearCompletedBtn').disabled).toBe(false);
+  });
+
+  it.each([null, undefined, NaN, Infinity, -1])('未知ETA %s 顯示估算中，實際零秒仍正確顯示', async etaS => {
+    const { document } = await openQueueWindow([
+      { id: 'unknown', status: 'running', elapsedMs: 1000, etaS, payload: {} },
+      { id: 'zero', status: 'running', elapsedMs: 1000, etaS: 0, payload: {} },
+    ]);
+    const timing = document.querySelector('[data-job-id="unknown"] .job-timing').textContent;
+    expect(timing).toContain('估算中');
+    expect(timing).not.toContain('剩 00:00');
+    const zero = document.querySelector('[data-job-id="zero"] .job-timing').textContent;
+    expect(zero).toContain('剩 00:00');
+    expect(zero).toContain('預計 00:01');
+  });
+
+  it('複製錯誤等待clipboard後仍有正確按鈕owner與成功回饋', async () => {
+    const { document } = await openQueueWindow([{ id: 'failed', status: 'failed', errorMsg: 'encoder failed', payload: { outPath: 'C:/out/a.mp4' } }]);
+    let finish;
+    const clipboard = document.defaultView.navigator.clipboard.writeText;
+    clipboard.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const button = document.querySelector('[data-action="copy-error"]');
+    button.click();
+    expect(button.disabled).toBe(true);
+    expect(clipboard).toHaveBeenCalledWith('encoder failed');
+    finish();
+    await vi.waitFor(() => expect(button.textContent).toBe('已複製！'));
+    expect(button.disabled).toBe(false);
+  });
+
+  it('clipboard拒絕時在原按鈕提供重試回饋，不留下unhandled rejection', async () => {
+    const { document } = await openQueueWindow([{ id: 'failed', status: 'failed', errorMsg: 'failed', payload: {} }]);
+    document.defaultView.navigator.clipboard.writeText.mockRejectedValue(new Error('clipboard denied'));
+    const button = document.querySelector('[data-action="copy-error"]');
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe('複製失敗，請重試'));
+    expect(button.disabled).toBe(false);
+  });
+
+  it('clipboard等待期間queue重繪不讓舊回應更動新card', async () => {
+    const { document, queueAPI } = await openQueueWindow([{ id: 'failed', status: 'failed', errorMsg: 'failed', payload: {} }]);
+    let finish;
+    document.defaultView.navigator.clipboard.writeText.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const old = document.querySelector('[data-action="copy-error"]');
+    old.click();
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await vi.waitFor(() => expect(document.querySelector('[data-action="copy-error"]')).not.toBe(old));
+    const fresh = document.querySelector('[data-action="copy-error"]');
+    finish();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fresh.textContent).toBe('複製錯誤');
+    expect(fresh.disabled).toBe(false);
+  });
+
   it.each([
     ['airline-exw', '航空-exW-H264-500K (立體聲)', 640, 360, 500],
     ['airline-dmpes', '航空-DMPES-H264-1.5M (立體聲)', 720, 480, 1500],
@@ -421,6 +500,23 @@ describe('匯出佇列監控緊湊工作區', () => {
     row.querySelector('[data-f="save"]').click();
     await Promise.resolve();
     expect(queueAPI.updateDelivery).toHaveBeenCalledWith('disc', expect.objectContaining({ format: 'h264', kbps: 8000 }));
+  });
+
+  it('航空 exW 切回 H264-MP4 後不沿用 500 kbps 固定碼率', async () => {
+    const { document, queueAPI } = await openQueueWindow([{ id: 'exw', status: 'queued', payload: {
+      format: 'airline-exw', outPath: 'C:\\out\\exw.mpg', targetH: 360,
+      width: 640, height: 360, canvasW: 1920, canvasH: 1080, videoKbps: 500,
+    } }]);
+    const row = document.querySelector('[data-job-id="exw"]');
+    row.querySelector('[data-action="edit"]').click();
+    const format = row.querySelector('[data-f="format"]');
+    format.value = 'h264';
+    format.dispatchEvent(new document.defaultView.Event('change'));
+    const bitrate = row.querySelector('[data-f="kbps"]');
+    expect(Number(bitrate.value)).toBe(8000);
+    row.querySelector('[data-f="save"]').click();
+    await Promise.resolve();
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('exw', expect.objectContaining({ format: 'h264', kbps: 8000 }));
   });
 
   it('緊湊列仍保留操作按鈕，工作文字不會被當成 HTML', async () => {

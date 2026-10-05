@@ -11,15 +11,67 @@ vi.mock('../src/notes.js', () => ({
 vi.mock('../src/ui.js', () => ({
   setStatus: vi.fn(),
   showOsd: vi.fn(),
+  showToast: vi.fn(),
 }));
+vi.mock('../src/subtitles.js', () => ({ selectCueSingle: vi.fn(), commitCueTimeEdit: vi.fn() }));
 vi.mock('../src/history.js', () => ({
   recordHistory: vi.fn(),
 }));
+vi.mock('../src/project.js', async importOriginal => ({
+  ...await importOriginal(),
+  ensureProjectSaved: vi.fn(async () => {}),
+}));
 
-import { State } from '../src/state.js';
+import { State, setSelection } from '../src/state.js';
 import { getExactFps, snapTimeToFrame, secToEncore } from '../src/time.js';
-import { stepFrame, getJklSpeed, setJklSpeed, setExportIn, setExportOut, clearExport, getCueInMinusFrames } from '../src/transport-controller.js';
+import { stepFrame, getJklSpeed, setJklSpeed, setExportIn, setExportOut, clearExport, getCueInMinusFrames, setIn, setOut } from '../src/transport-controller.js';
 import { Media } from '../src/media.js';
+import { ensureProjectSaved } from '../src/project.js';
+import { recordHistory } from '../src/history.js';
+
+describe('I/O 打點等待儲存提示的工作歸屬', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks(); vi.clearAllMocks();
+    document.body.innerHTML = '';
+    State.fps = 25; State.dropFrame = false; State.subMode = false;
+    State.listTrack = 0;
+    State.tracks = [{ name: 'Original', locked: false }];
+    State.cues = [{ id: 'original', start: 1, end: 3, track: 0, text: '' }, { id: 'other', start: 20, end: 30, track: 0, text: '' }];
+    setSelection({ kind: 'sub', ids: ['original'], primary: 'original' });
+  });
+
+  it.each(['setIn', 'setOut'])('%s 保留按鍵瞬間時間，容許同專案背景新增字幕', async action => {
+    let release;
+    ensureProjectSaved.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    let time = 2;
+    vi.spyOn(Media, 'displayTime').mockImplementation(() => time);
+    const result = action === 'setIn' ? setIn() : setOut();
+    time = 10;
+    State.cues.push({ id: 'background', start: 4, end: 5, text: '', track: 0 });
+    release(); await result;
+    expect(State.cues[0][action === 'setIn' ? 'start' : 'end']).toBe(2);
+    expect(recordHistory).toHaveBeenCalledTimes(1);
+    expect(State.cues[2].id).toBe('background');
+  });
+
+  it.each(['selection', 'workspace', 'fps', 'lock'])('延遲打點的 %s 已變更時不得修改目前字幕', async change => {
+    let release;
+    ensureProjectSaved.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    vi.spyOn(Media, 'displayTime').mockReturnValue(2);
+    const result = setIn();
+    if (change === 'selection') setSelection({ kind: 'sub', ids: ['other'], primary: 'other' });
+    if (change === 'workspace') {
+      State.tracks = [{ name: 'Replacement', locked: false }];
+      State.cues = [{ id: 'original', start: 20, end: 30, text: 'Replacement', track: 0 }];
+    }
+    if (change === 'fps') State.fps = 24;
+    if (change === 'lock') State.tracks[0].locked = true;
+    const expected = JSON.stringify(State.cues);
+    release(); await result;
+    expect(JSON.stringify(State.cues)).toBe(expected);
+    expect(recordHistory).not.toHaveBeenCalled();
+  });
+});
 
 describe('TransportController 與 FPS/時碼不變量', () => {
   beforeEach(() => {

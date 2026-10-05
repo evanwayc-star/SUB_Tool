@@ -5,16 +5,16 @@ import { $, video, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
 import { State, isSel, setSelection, deselect, IS_DESKTOP } from './state.js';
 import { Media, Wave } from './media.js';
-import { selectCue, refreshSelectionUI, enterSwapMode, deleteSelected } from './subtitles.js';
+import { selectCue, refreshSelectionUI, filteredSubtitleCues, enterSwapMode, deleteSelected } from './subtitles.js';
 import { addCue, addCueRelative, clearSelectedCuesTime, shiftTextsDown, shiftTextsUp, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitle-model.js';
 import { moveSelectedToTrack, trackFromY, tracksTop, drawTimeline } from './timeline-renderer.js';
 import { xToTime } from './timeline-interaction-engine.js';
-import { selectClip, fitClipToStage, crossfadeWithPrev } from './clip-model.js';
+import { selectClip, fitClipToStage, crossfadeWithPrev, captureClipEdit, setClipDuration, setClipFade, resetClipTrim } from './clip-model.js';
 import { Seq } from './sequence.js';
 import { showToast, promptModal, openModal, closeModal } from './ui.js';
 import { secToEncore } from './time.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
-import { recordHistory } from './history.js';
+import { History, recordHistory } from './history.js';
 import { emit } from './events.js';
 import { AudioRouting } from './audio-routing.js';
 import { setManualPlaybackSpeed } from './keyboard.js';
@@ -104,7 +104,12 @@ $('videoWrap')?.addEventListener('contextmenu',e=>{ e.preventDefault(); });
 $('speedIndicator')?.addEventListener('contextmenu',e=>{ e.preventDefault(); e.stopPropagation(); showPlayerMenu(e.clientX,e.clientY); });
 
 /* 字幕右鍵：移到軌道 / 上下新增 / 刪除 */
-function showCueMenu(x,y){
+function showCueMenu(x,y,contextCue=null){
+  const target=contextCue || State.cues.find(c=>c.id===State.selectedId);
+  if(target && State.tracks[target.track||0]?.locked){
+    showCtx(x,y,[{note:true,label:'🔒 此字幕軌已鎖定',tone:'locked'}]);
+    return;
+  }
   const n=State.selectedIds.length||(State.selectedId?1:0);
   const items=[{heading:true,label:`已選 ${n} 條字幕`}];
   items.push({label:`複製 ${n} 條字幕`,act:()=>copyCues()});
@@ -144,22 +149,25 @@ function showCueMenu(x,y){
     const _c=State.cues.find(c=>c.id===State.selectedId);
     if(_c){
       const _tk=_c.track||0;
-      const _list=State.cues.filter(c=>(c.track||0)===_tk);
+      const _track=State.tracks[_tk];
+      const _list=filteredSubtitleCues(_tk);
       const _i=_list.findIndex(c=>c.id===State.selectedId);
+      const selectRange=above=>{
+        if(!(_track && State.tracks[_tk]===_track && !_track.locked)
+          || State.cues.find(c=>c.id===_c.id)!==_c || (_c.track||0)!==_tk) return;
+        const current=filteredSubtitleCues(_tk);
+        const index=current.indexOf(_c);
+        if(index<0) return;
+        const ids=(above ? current.slice(0,index+1) : current.slice(index)).map(c=>c.id);
+        setSelection({ kind:'sub', ids, primary:_c.id }); State.activeEdge='start';
+        refreshSelectionUI();
+      };
       let addedSel=false;
       if(_i>0){
-        items.push({label:'⬆ 將以上字幕選取',act:()=>{
-          const ids=_list.slice(0,_i+1).map(c=>c.id);
-          setSelection({ kind:'sub', ids, primary:_c.id }); State.activeEdge='start';
-          refreshSelectionUI();
-        }}); addedSel=true;
+        items.push({label:'⬆ 將以上字幕選取',act:()=>selectRange(true)}); addedSel=true;
       }
       if(_i>=0 && _i<_list.length-1){
-        items.push({label:'⬇ 將以下字幕選取',act:()=>{
-          const ids=_list.slice(_i).map(c=>c.id);
-          setSelection({ kind:'sub', ids, primary:_c.id }); State.activeEdge='start';
-          refreshSelectionUI();
-        }}); addedSel=true;
+        items.push({label:'⬇ 將以下字幕選取',act:()=>selectRange(false)}); addedSel=true;
       }
       if(addedSel)items.push({sep:true});
     }
@@ -415,7 +423,8 @@ function tlContextMenuHandler(e){
   if(clipEl){
     e.preventDefault();
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
-    const isLocked = State.videoTracks[c.vtrack||0]?.locked;
+    const isLocked = c.locked || State.videoTracks[c.vtrack||0]?.locked;
+    const owns=captureClipEdit(c);
     if(!isLocked) selectClip(c.id); // 右鍵即選取（高亮，之後可直接 Del / 上下鍵切換）
     const isImg = c.type==='image';
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
@@ -425,6 +434,9 @@ function tlContextMenuHandler(e){
     const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset);
     const idx=sorted.indexOf(c);
     const swap=(a,b)=>{ // a=前段 b=後段
+      if(!owns() || !captureClipEdit(a)() || !captureClipEdit(b)() || (a.vtrack||0)!==(b.vtrack||0)) return;
+      const current=Seq.trackClips(c.vtrack||0).sort((x,y)=>x.offset-y.offset);
+      if(current[current.indexOf(a)+1]!==b) return;
       const gap=b.offset-Seq.clipEnd(a), start=a.offset;
       b.offset=start; a.offset=start+Seq.len(b)+gap;
       Seq.sort(); Seq.recomputeDuration();
@@ -433,6 +445,7 @@ function tlContextMenuHandler(e){
       drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
     };
     const moveTrack=(dv)=>{
+      if(!owns()) return;
       const tv=(c.vtrack||0)+dv;
       if(State.videoTracks[tv]?.locked){ showToast('目標視訊軌已鎖定，無法移入'); return; }
       Seq.moveToTrack(c, tv);
@@ -441,11 +454,7 @@ function tlContextMenuHandler(e){
       drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
     };
     const resetTrim=()=>{
-      const save={in:c.in,out:c.out};
-      c.in=0; c.out=c.dur;
-      const overlaps=State.clips.some(other=>other!==c&&other.offset<Seq.clipEnd(c)-1e-6&&Seq.clipEnd(other)>c.offset+1e-6);
-      if(overlaps){ c.in=save.in; c.out=save.out; showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return; }
-      Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name); drawTimeline();
+      if(resetClipTrim(c)) drawTimeline();
     };
     const items=buildVideoClipMenu({
       name:c.name,
@@ -464,19 +473,19 @@ function tlContextMenuHandler(e){
     },{
       revealSource:()=>revealSourceInFolder(filePath),
       seekStart:()=>{ requestPointerSeek(c.offset); emit('playhead:ensure'); },
-      splitAtPlayhead:()=>{ Media.splitClipAt(pt); },
+      splitAtPlayhead:()=>{ if(owns() && Seq.clipAt(pt)===c) Media.splitClipAt(pt); },
       editDuration:()=>showClipDuration(c),
       editGeometry:()=>showImageGeom(c),
       resetTrim,
-      detachAudio:()=>{ void Media.detachClipAudio?.(c.id); },
-      openHardLimiter:()=>openHardLimiterDialog({
+      detachAudio:()=>{ if(owns()) void Media.detachClipAudio?.(c.id); },
+      openHardLimiter:()=>owns() && openHardLimiterDialog({
         id:c.id,
         path:filePath,
         name:c.name,
         duration:c.dur,
         isPrimary:true,
       }),
-      openAudioRouting:()=>AudioRouting.openForClip(c.id),
+      openAudioRouting:()=>{ if(owns()) AudioRouting.openForClip(c.id); },
       moveTrackUp:()=>moveTrack(1),
       moveTrackDown:()=>moveTrack(-1),
       swapPrevious:()=>swap(sorted[idx-1],c),
@@ -484,6 +493,7 @@ function tlContextMenuHandler(e){
       editFade:()=>showClipFade(c),
       editCrossfade:()=>showCrossfade(c),
       removeClip:()=>{
+        if(!owns()) return;
         if(Media.removeClip(c.id)){ recordHistory('移除影片段：'+c.name); drawTimeline(); }
       },
     });
@@ -506,6 +516,12 @@ function tlContextMenuHandler(e){
     return;
   }
   e.preventDefault();
+  const cue=State.cues.find(c=>c.id===block.dataset.id);
+  if(!cue) return;
+  if(State.tracks[cue.track||0]?.locked){
+    showCueMenu(e.clientX,e.clientY,cue);
+    return;
+  }
   if(!isSel(block.dataset.id))selectCue(block.dataset.id);
   else { setSelection({ kind:'sub', ids:State.selectedIds, primary:block.dataset.id }); refreshSelectionUI(); }
   showCueMenu(e.clientX,e.clientY);
@@ -518,21 +534,27 @@ function tlContextMenuHandler(e){
    ============================================================================== */
 
 export function showImageGeom(c){
-  if(!c) return;
-  if(State.videoTracks[c.vtrack||0]?.locked){ showToast('此視訊軌已鎖定'); return; }
+  if(!c || Seq.byId(c.id)!==c) return;
+  const canEdit=captureClipEdit(c);
+  if(!canEdit()) return;
   const S=Math.round((c.scale??1)*100), X=Math.round((c.posX??0.5)*100), Y=Math.round((c.posY??0.5)*100);
   const row=(id,label,val,min,max,unit)=>
     `<div>${label}：<input type="range" id="ig${id}R" min="${min}" max="${max}" step="1" value="${val}" style="width:180px;vertical-align:middle">`+
     ` <input type="number" id="ig${id}" min="${min}" max="${max}" step="1" value="${val}" style="width:64px">${unit}</div>`;
-  const snap={ scale:c.scale??1, posX:c.posX??0.5, posY:c.posY??0.5 };
-  const restore=()=>{ c.scale=snap.scale; c.posX=snap.posX; c.posY=snap.posY;
+  let snap, release;
+  const owns = canEdit.isCurrent;
+  const current = () => session.isCurrent() && canEdit() && release.isCurrent();
+  const restore=()=>{ const active=release?.isCurrent(); release?.(); if(!active || !owns() || !snap) return;
+    for(const [key,original] of Object.entries(snap)) {
+      if(original.present) c[key]=original.value; else delete c[key];
+    }
     emit('media:timeline'); emit('render:videoSub'); };
-  const commit=label=>{ closeModal({committed:true}); emit('media:timeline'); emit('render:videoSub'); recordHistory(label); };
+  const commit=label=>{ release(); session.close({committed:true}); emit('media:timeline'); emit('render:videoSub'); recordHistory(label); };
   const syncInputs=()=>{
     const set=(id,val)=>{ const r=$('ig'+id+'R'), n=$('ig'+id); if(r)r.value=val; if(n)n.value=val; };
     set('S',Math.round((c.scale??1)*100)); set('X',Math.round((c.posX??0.5)*100)); set('Y',Math.round((c.posY??0.5)*100));
   };
-  openModal(`${c.type==='image'?'圖片':'影片'}大小與位置 — ${escapeHTML(c.name||'')}`,
+  const session = openModal(`${c.type==='image'?'圖片':'影片'}大小與位置 — ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.2">`+
     row('S','大小',S,2,800,'%')+row('X','水平位置',X,0,100,'%')+row('Y','垂直位置',Y,0,100,'%')+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">`+
@@ -540,21 +562,26 @@ export function showImageGeom(c){
     `${c.natW>0?`原始尺寸 ${c.natW}×${c.natH}。`:''}預覽與匯出使用同一組數值。<br>`+
     `<b>符合視窗</b>＝維持目前位置，等比例放大到上下左右最先碰到的那個邊界為止。</div>`+
     `</div>`,
-    [{label:'符合視窗',act:()=>{ fitClipToStage(c); syncInputs(); emit('render:videoSub'); }},
-     {label:'重設',act:()=>{ c.scale=1; c.posX=0.5; c.posY=0.5; commit('重設大小與位置：'+(c.name||'')); }},
-     {label:'取消',act:()=>{ closeModal(); }},
+    [{label:'符合視窗',act:()=>{ if(!current()) return; fitClipToStage(c); syncInputs(); emit('render:videoSub'); }},
+     {label:'重設',act:()=>{ if(!current()) return; c.scale=1; c.posX=0.5; c.posY=0.5; commit('重設大小與位置：'+(c.name||'')); }},
+     {label:'取消',act:()=>session.close()},
      {label:'套用',primary:true,act:()=>{
+        if(!current()) return;
         const v=(id,d)=>{ const n=+($(('ig'+id))?.value); return Number.isFinite(n)?n:d; };
         c.scale=Math.max(0.02,Math.min(8, v('S',S)/100));
         c.posX =Math.max(0,Math.min(1, v('X',X)/100));
         c.posY =Math.max(0,Math.min(1, v('Y',Y)/100));
         commit('大小與位置：'+(c.name||''));
      }}],
-    { onDismiss:restore });
+    { onDismiss:restore, onReplaced:restore });
+  snap=Object.fromEntries(['scale','posX','posY'].map(key=>[key,{present:Object.hasOwn(c,key),value:c[key]}]));
+  release=History.beginPreview([{target:c,fields:['scale','posX','posY']}],owns);
+  syncInputs();
   setTimeout(()=>{
+    if(!current()) return;
     for(const id of ['S','X','Y']){
       const r=$('ig'+id+'R'), n=$('ig'+id); if(!r||!n) continue;
-      const live=()=>{ const val=+n.value;
+      const live=()=>{ if(!current()) return; const val=+n.value;
         if(id==='S') c.scale=Math.max(0.02,Math.min(8,val/100));
         else if(id==='X') c.posX=Math.max(0,Math.min(1,val/100));
         else c.posY=Math.max(0,Math.min(1,val/100));
@@ -567,17 +594,21 @@ export function showImageGeom(c){
 
 export function showClipFade(c){
   if(!c) return;
+  const owns=captureClipEdit(c);
+  if(!owns()) return;
+  const current=()=>session.isCurrent() && owns();
   const len=Math.max(0.1, Seq.len(c));
   const maxF=Math.max(0.1, +len.toFixed(1));
   const fi=Math.min(+(c.fadeIn||0), maxF), fo=Math.min(+(c.fadeOut||0), maxF);
-  openModal(`淡入淡出（轉場）— ${escapeHTML(c.name||'')}`,
+  const session=openModal(`淡入淡出（轉場）— ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.2">`+
     `<div>淡入：<input type="range" id="cfIn" min="0" max="${maxF}" step="0.001" value="${fi}" style="width:180px;vertical-align:middle"> <input type="text" id="cfInV" value="${secToEncore(fi, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
     `<div>淡出：<input type="range" id="cfOut" min="0" max="${maxF}" step="0.001" value="${fo}" style="width:180px;vertical-align:middle"> <input type="text" id="cfOutV" value="${secToEncore(fo, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">淡入從透明漸顯、淡出漸隱到透明（露出下層／黑底），音訊同步淡變。<b>匯出時生效</b>。若此片段在上層視訊軌且與下層重疊，淡變即為<b>軌間溶接</b>。</div>`+
     `</div>`,
-    [{label:'清除',act:()=>{ c.fadeIn=0; c.fadeOut=0; closeModal(); emit('media:timeline'); recordHistory('清除轉場：'+(c.name||'')); }},
+    [{label:'清除',act:()=>{ if(current() && setClipFade(c,0,0)) session.close({committed:true}); }},
      {label:'套用',primary:true,act:()=>{
+        if(!current()) return;
         let vi = parseTimecodeInput($('cfInV').value);
         if(vi===null) vi = parseFloat($('cfInV').value);
         if(isNaN(vi)) vi = +$('cfIn').value;
@@ -586,10 +617,10 @@ export function showClipFade(c){
         if(vo===null) vo = parseFloat($('cfOutV').value);
         if(isNaN(vo)) vo = +$('cfOut').value;
 
-        c.fadeIn=Math.max(0,Math.min(maxF,vi)); c.fadeOut=Math.max(0,Math.min(maxF,vo));
-        closeModal(); emit('media:timeline'); recordHistory('轉場：'+(c.name||''));
+        if(setClipFade(c,vi,vo)) session.close({committed:true});
      }}]);
   setTimeout(()=>{
+    if(!current()) return;
     const a=$('cfIn'), b=$('cfOut'), aV=$('cfInV'), bV=$('cfOutV');
     if(aV) setupTimecodeInput(aV);
     if(bV) setupTimecodeInput(bV);
@@ -610,7 +641,9 @@ export function showClipFade(c){
 
 export function showClipDuration(c){
   if(!c) return;
-  if(State.videoTracks[c.vtrack||0]?.locked){ showToast('此視訊軌已鎖定'); return; }
+  const owns=captureClipEdit(c);
+  if(!owns()) return;
+  const current=()=>session.isCurrent() && owns();
   const isImg = c.type === 'image';
   const cur = Seq.len(c);
   const maxBySource = Math.max(0.001, (+c.dur || 0) - (+c.in || 0));
@@ -620,7 +653,7 @@ export function showClipDuration(c){
     ? '（受同軌下一段起點限制）'
     : (isImg ? '（圖片可自由延長）' : '（受來源素材長度限制）');
 
-  openModal(`修改持續時間 — ${escapeHTML(c.name||'')}`,
+  const session=openModal(`修改持續時間 — ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.2">`+
     `<div>持續時間：<input type="text" id="cdVal" value="${secToEncore(cur, State.fps, State.dropFrame)}" `+
     `style="width:120px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:3px 4px;border-radius:3px;text-align:center;font-family:'Cascadia Mono','JetBrains Mono',Consolas,monospace"></div>`+
@@ -628,42 +661,44 @@ export function showClipDuration(c){
     `最長 <b>${secToEncore(Math.min(maxLen, 359999.9), State.fps, State.dropFrame)}</b> ${limitNote}<br>`+
     `可直接輸入時碼，或用上下方向鍵微調。起點不變，只調整這一段播多久。</div>`+
     `</div>`,
-    [{label:'取消',act:()=>{ closeModal(); }},
+    [{label:'取消',act:()=>session.close()},
      {label:'套用',primary:true,act:()=>{
+        if(!current()) return;
         let v = parseTimecodeInput($('cdVal').value);
         if(v===null) v = parseFloat($('cdVal').value);
         if(!Number.isFinite(v) || v<=0){ showToast('請輸入有效的持續時間'); return; }
-        const clamped = Math.min(v, maxLen);
-        c.out = (+c.in || 0) + clamped;
-        Seq.recomputeDuration();
-        closeModal({committed:true});
-        Media.seek(Math.min(Media.displayTime(), State.duration||0));
-        emit('media:timeline'); emit('render:videoSub'); emit('mpv:refreshSubs');
-        recordHistory('修改持續時間：'+(c.name||''));
-        if(clamped < v - 1e-6) showToast(`已設為可用的最長 ${secToEncore(clamped, State.fps, State.dropFrame)}${limitNote}`);
+        const clamped=setClipDuration(c,v);
+        if(clamped===null) return;
+        session.close({committed:true});
+        if(clamped < v - 1e-6) showToast(`已設為可用的最長 ${secToEncore(clamped, State.fps, State.dropFrame)}`);
      }}]);
-  setTimeout(()=>{ const el=$('cdVal'); if(el){ setupTimecodeInput(el); el.focus(); el.select(); } },0);
+  setTimeout(()=>{ if(!current()) return; const el=$('cdVal'); if(el){ setupTimecodeInput(el); el.focus(); el.select(); } },0);
 }
 
 export function showCrossfade(c){
   if(!c) return;
+  const owns=captureClipEdit(c);
+  if(!owns()) return;
+  const current=()=>session.isCurrent() && owns();
   const prev=Seq.trackClips(c.vtrack||0).filter(x=>x!==c && x.offset < c.offset - 1e-4).sort((a,b)=>b.offset-a.offset)[0] || null;
   if(!prev){ showToast('前面沒有可溶接的片段（同一視訊軌）'); return; }
   const maxT=Math.max(0.2, Math.min(Seq.len(c), Seq.len(prev)));
   const defT=Math.min(1, maxT);
-  openModal(`交叉溶接 — ${escapeHTML(prev.name||'')} → ${escapeHTML(c.name||'')}`,
+  const session=openModal(`交叉溶接 — ${escapeHTML(prev.name||'')} → ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.1">`+
     `<div>溶接時間：<input type="range" id="xfT" min="0.001" max="${maxT.toFixed(3)}" step="0.001" value="${defT}" style="width:180px;vertical-align:middle"> <input type="text" id="xfTV" value="${secToEncore(defT, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">會把此片段移到<b>上一層視訊軌</b>並提前與前一段尾端重疊，兩段在重疊處淡出／淡入＝交叉溶接（匯出時合成）。</div>`+
     `</div>`,
-    [{label:'取消',act:closeModal},
+    [{label:'取消',act:()=>session.close()},
      {label:'建立溶接',primary:true,act:()=>{
+         if(!current()) return;
          let T = parseTimecodeInput($('xfTV').value);
          if(T===null) T = parseFloat($('xfTV').value);
          if(isNaN(T)) T = +$('xfT').value;
-         closeModal(); crossfadeWithPrev(c, T);
+         if(crossfadeWithPrev(c,T,prev)) session.close({committed:true});
      }}]);
   setTimeout(()=>{
+    if(!current()) return;
     const s=$('xfT'), sV=$('xfTV');
     if(sV) setupTimecodeInput(sV);
     if(s) s.oninput=()=>{ if(sV) sV.value=secToEncore(+s.value, State.fps, State.dropFrame); };

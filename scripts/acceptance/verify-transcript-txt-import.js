@@ -17,7 +17,7 @@ const {
   reservePort,
   getJSON,
   waitFor,
-  CdpClient,
+  CdpClient, trackElectron, stopElectron,
   dispatchClick,
   verifiedCleanup
 } = require('./cdp-electron-harness.js');
@@ -37,7 +37,7 @@ const {
 
   const port = await reservePort();
   const errors = [];
-  const child = spawn(ELECTRON, [
+  const child = trackElectron(spawn(ELECTRON, [
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
@@ -49,7 +49,7 @@ const {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['ignore', 'ignore', 'pipe']
-  });
+  }));
   child.stderr.on('data', chunk => errors.push(chunk.toString()));
 
   let client;
@@ -179,8 +179,7 @@ const {
     console.log(JSON.stringify(imported, null, 2));
   } finally {
     client?.close();
-    if (child.exitCode === null) child.kill('SIGKILL');
-    await Promise.race([new Promise(resolve => child.once('close', resolve)), delay(5000)]);
+    await stopElectron(child);
     verifiedCleanup(profileDir, 'subtool-txt-cdp-');
   }
 })().catch(error => {

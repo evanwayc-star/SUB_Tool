@@ -19,7 +19,7 @@ const {
   reservePort,
   getJSON,
   waitFor,
-  CdpClient,
+  CdpClient, trackElectron, stopElectron,
   dispatchClick,
   verifiedCleanup,
 } = require('./cdp-electron-harness.js');
@@ -88,7 +88,7 @@ async function dispatchDrag(client, rect, deltaX) {
   const profileDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-locked-selection-cdp-'));
   const port = await reservePort();
   const errors = [];
-  const child = spawn(ELECTRON, [
+  const child = trackElectron(spawn(ELECTRON, [
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
@@ -100,7 +100,7 @@ async function dispatchDrag(client, rect, deltaX) {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['ignore', 'ignore', 'pipe'],
-  });
+  }));
   child.stderr.on('data', chunk => errors.push(chunk.toString()));
 
   let client;
@@ -236,10 +236,8 @@ async function dispatchDrag(client, rect, deltaX) {
     console.log(JSON.stringify({ passed: true, results }, null, 2));
   } finally {
     client?.close();
-    if (!child.killed) child.kill();
-    await delay(500);
-    try { verifiedCleanup(profileDir, 'subtool-locked-selection-cdp-'); }
-    catch (error) { console.warn(error.message); }
+    await stopElectron(child);
+    verifiedCleanup(profileDir, 'subtool-locked-selection-cdp-');
     if (errors.length) {
       const important = errors.join('').split(/\r?\n/).filter(line => /error|failed|exception/i.test(line));
       if (important.length) console.warn(important.join('\n'));

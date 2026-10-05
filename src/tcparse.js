@@ -8,7 +8,7 @@
    ============================================================================== */
 import { State } from './state.js';
 import { pad } from './util.js';
-import { encoreToSec } from './time.js';
+import { encoreToSec, encoreParts, getExactFps } from './time.js';
 import { showCtx } from './menus.js';
 
 /**
@@ -84,6 +84,19 @@ function handleTimecodeArrowKeys(e) {
   else part = 3;
 
   const dir = e.key === 'ArrowUp' ? 1 : -1;
+  const fps = State.fps || 24;
+  const exactFps = getExactFps(fps);
+  const dropFrame = State.dropFrame;
+
+  if (part === 3) {
+    // FPS-SYNC: 上下鍵加減實際影格，而非進位不存在的 DF 標籤。
+    const seconds = encoreToSec(`${h}:${m}:${s}:${f}`, fps, dropFrame);
+    const frame = Math.max(0, Math.round(seconds * exactFps) + dir);
+    const next = encoreParts(frame / exactFps, fps, dropFrame);
+    input.value = sign + pad(next.hh) + ':' + pad(next.mm) + ':' + pad(next.ss) + sep + pad(next.ff, f.length);
+    input.setSelectionRange(pos, pos);
+    return;
+  }
 
   if (part === 0) {
     hh = Math.max(0, hh + dir);
@@ -110,31 +123,18 @@ function handleTimecodeArrowKeys(e) {
       mm++;
       if (mm > 59) { mm = 0; hh++; }
     }
-  } else if (part === 3) {
-    const fpsR = Math.round(State?.fps) || 24;
-    const maxF = fpsR - 1;
-    ff += dir;
-    if (ff < 0) {
-      if (ss > 0 || mm > 0 || hh > 0) {
-        ff = maxF;
-        ss--;
-        if (ss < 0) {
-          ss = 59;
-          mm--;
-          if (mm < 0) { mm = 59; hh--; }
-        }
-      } else {
-        ff = 0;
-      }
-    } else if (ff > maxF) {
-      ff = 0;
-      ss++;
-      if (ss > 59) {
-        ss = 0;
-        mm++;
-        if (mm > 59) { mm = 0; hh++; }
-      }
+  }
+
+  // 時／分／秒維持文字分量意圖；遇跳號則前進至該秒第一個有效標籤。
+  if (dropFrame) {
+    let seconds = encoreToSec(`${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`, fps, dropFrame);
+    let next = encoreParts(seconds, fps, dropFrame);
+    const targetClock = hh * 3600 + mm * 60 + ss;
+    while (next.hh * 3600 + next.mm * 60 + next.ss < targetClock) {
+      seconds += 1 / exactFps;
+      next = encoreParts(seconds, fps, dropFrame);
     }
+    hh = next.hh; mm = next.mm; ss = next.ss; ff = next.ff;
   }
 
   const frameStr = pad(ff, f.length);

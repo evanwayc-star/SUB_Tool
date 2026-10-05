@@ -24,15 +24,19 @@ const QueueHistory = QueueStore.QueueHistory;
 const { createDeliveryRunner } = require('./delivery-runner');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
-const { FileAuthority, isPathContained } = require('./file-authority');
+const { FileAuthority } = require('./file-authority');
 const { createLocalResourceServer, registerLocalResourceScheme } = require('./local-resource');
-const { createProjectWorkspace, authorizeDroppedMediaPath } = require('./project-file-authority-engine');
+const { createProjectWorkspace, createAtomicProjectWriter, authorizeDroppedMediaPath } = require('./project-file-authority-engine');
 const { createSettingsFile } = require('./settings-file');
+const { collectStyleDirectoryFiles } = require('./style-directory-import');
+const { writeDirectoryFiles } = require('./directory-output');
+const { createScreenshotOutput } = require('./screenshot-output');
 
 const { createIpcGuards, expectedExportExtension, mergeRendererConfig } = require('./ipc-guards');
 const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput } = require('./export-queue');
 const { createMpvHost } = require('./mpv-host');
 const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('./media-intake-runtime');
+const { createCompareWindow } = require('./compare-window');
 const { createMediaProbe } = require('./media-probe');
 const {
   createSpeechAudioCompressor,
@@ -42,6 +46,7 @@ const { createAudioNormalizationRuntime } = require('./audio-normalization-runti
 /* 交付規格派生與 renderer 共用同一份（見 shared/README.md）。已入列工作的
    時間碼起點仍使用送出時凍結的值，不從目前專案狀態重算。 */
 const { deriveDeliverySpec } = require('../shared/delivery-resolution.cjs');
+const { exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
 const { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
 const {
   buildIngestArgs,
@@ -79,6 +84,7 @@ const mediaIngestCoordinator = createMediaIngestCoordinator();
    renderer 路徑不會因 fs:fileURL／stat 等查詢被靜默升格；只接受原生對話框、OS 開檔、
    preload 驗證過的拖放 File 與內部快取。專案內已宣告的媒體則只給「那一個檔案」的唯讀能力。 */
 const fileAuthority = new FileAuthority({ internalDirectories: [TMP] });
+const screenshotOutput = createScreenshotOutput({ fileAuthority });
 const localResourceServer = createLocalResourceServer({
   fileAuthority,
   protocolModule: protocol,
@@ -86,7 +92,7 @@ const localResourceServer = createLocalResourceServer({
 });
 const projectWorkspace = createProjectWorkspace({
   readFile: projectFile => fs.promises.readFile(projectFile),
-  writeFile: (projectFile, contents) => fs.promises.writeFile(projectFile, contents),
+  writeFile: createAtomicProjectWriter(),
   ensureDirectory: projectFile => fs.promises.mkdir(path.dirname(projectFile), { recursive: true }),
   grantProjectFile: projectFile => fileAuthority.grantProjectFile(projectFile),
   grantMediaFile: mediaPath => fileAuthority.grantTrustedFile(mediaPath, { read: true, write: false }),
@@ -251,7 +257,7 @@ async function deliverExternalProjectOpen(projectPath) {
     projectWorkspace.stageStartup(projectPath);
     return;
   }
-  const opened = await projectWorkspace.openLatest(projectPath);
+  const opened = await projectWorkspace.open(projectPath);
   if (!opened) return;
   if (!projectOpenReady || !mainWin || mainWin.isDestroyed()) {
     projectWorkspace.stageStartup(projectPath);
@@ -319,8 +325,17 @@ app.on('before-quit', (event) => {
   _quitSequenceStarted = true;
   _isAppQuitting = true;
   Promise.resolve()
-    .then(() => speechCompressionRuntime.cancelAllAndWait())
-    .then(() => QueueManager.prepareForShutdown())
+    .then(async () => {
+      for (const controller of audioNormalizationJobs.values()) controller.abort();
+      await Promise.all([
+        ffmpegExecution.cancelAllAndWait(),
+        speechCompressionRuntime.cancelAllAndWait(),
+        mediaIngestCoordinator.cancelAllAndWait(),
+        QueueManager.prepareForShutdown(),
+      ]);
+      await mediaIntakeRuntime.close();
+      await screenshotOutput.close();
+    })
     .then(() => {
       _quitReady = true;
       app.quit();
@@ -328,14 +343,16 @@ app.on('before-quit', (event) => {
     .catch(e => {
       /* outcome journal 尚未 durable 時不能「照樣退出」：那會遺失唯一知道 ffmpeg
          已結束的 intent，重啟後把舊 running snapshot 當 queued 重新以 -y 執行。 */
-      console.error('[Queue] 無法安全保存關閉前狀態，已取消退出：', e);
+      console.error('[Shutdown] 原生工作或匯出狀態尚未安全結清，已取消退出：', e);
       _quitSequenceStarted = false;
       _isAppQuitting = false;
+      ffmpegExecution.resume();
+      mediaIngestCoordinator.resume();
       const options = {
         type: 'error',
         title: '尚未能安全關閉',
-        message: '匯出終態或中斷工作的恢復快照尚未保存，已取消關閉。',
-        detail: '請確認儲存空間或防毒軟體鎖定狀態後，再次嘗試關閉。',
+        message: '原生媒體工作尚未結束，或匯出恢復狀態尚未保存，已取消關閉。',
+        detail: `${e.message || e}\n請確認儲存空間或檔案鎖定狀態後，再次嘗試關閉。`,
       };
       const owner = mainWin && !mainWin.isDestroyed() ? mainWin : null;
       const show = owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options);
@@ -455,23 +472,8 @@ ipcMain.handle('fs:authorizeDroppedFile', (e, p) => {
     grantScreenshotDirectory: directory => fileAuthority.grantScreenshotDirectory(directory),
   });
 });
-ipcMain.handle('fs:reserveScreenshotPath', (e, { directory, suffix } = {}) => {
-  if (!fileAuthority.canUseScreenshotDirectory(directory)) {
-    console.warn('[sec] reserve screenshot blocked (unauthorized directory):', directory);
-    return null;
-  }
-  let maxNum = 0;
-  try {
-    for (const file of fs.readdirSync(directory)) {
-      const hit = /^Shot-(\d{3})/i.exec(file);
-      if (hit) maxNum = Math.max(maxNum, Number(hit[1]) || 0);
-    }
-  } catch (error) { return null; }
-  const safeSuffix = typeof suffix === 'string' ? suffix.replace(/[^0-9A-Za-z_-]/g, '') : '';
-  const name = `Shot-${String(maxNum + 1).padStart(3, '0')}${safeSuffix}.jpg`;
-  const target = path.join(directory, name);
-  return fileAuthority.canWriteScreenshot(target) ? { path: target, name } : null;
-});
+ipcMain.handle('fs:reserveScreenshotPath', (e, { directory, suffix } = {}) => screenshotOutput.reserve(directory, suffix));
+ipcMain.handle('fs:releaseScreenshotPath', (e, filePath) => screenshotOutput.release(filePath));
 
 
 
@@ -573,7 +575,7 @@ ipcMain.handle('project:recentList', () => projectWorkspace.listRecent());
 
 /* renderer 只送【索引】，路徑由主程序自己的清單決定——沒有路徑注入空間。
    讀取前才授予那一個檔案的能力（fileAuthority 是每次工作階段的）。 */
-ipcMain.handle('project:openRecent', (e, index) => projectWorkspace.openRecent(index));
+ipcMain.handle('project:openRecent', (e, token) => projectWorkspace.openRecent(token));
 
 ipcMain.handle('project:clearRecent', () => projectWorkspace.clearRecent());
 
@@ -657,7 +659,6 @@ function _findExportTimecodeFont() {
 /* ===== 背景匯出佇列與 QueueManager ===== */
 let EXPORT_QUEUE_DIR = null;
 let queueWin = null;
-let compareWin = null;
 let QueueManager = null;
 /* 分類的唯一來源在 export-job-status.js */
 const OUTPUT_RESERVED_STATUSES = { has: reservesOutput };
@@ -682,7 +683,7 @@ const ffmpegExecution = createFFmpegExecution({
     console.error(`[Queue] 無法寫入 ffmpeg 記錄 ${logPath}：`, error);
   },
 });
-const runFF = (args, options) => ffmpegExecution.execute(args, options);
+const runFF = (args, options) => ffmpegExecution.execute(args, { ...options, executionKind: 'direct' });
 const deliveryRunner = createDeliveryRunner({
   queue: {
     assertJobCapabilities: job => QueueManager.assertJobCapabilities(job),
@@ -694,7 +695,7 @@ const deliveryRunner = createDeliveryRunner({
   queueDir: () => EXPORT_QUEUE_DIR,
   tempDir: TMP,
   mediaProbe: () => mediaProbe,
-  runFfmpeg: runFF,
+  runFfmpeg: (args, options) => ffmpegExecution.execute(args, options),
   encoder: {
     name: () => VENC,
     hwdecArgs,
@@ -920,6 +921,19 @@ ipcMain.handle('project:openDroppedFile', (e, projectFile) => {
   return projectWorkspace.open(projectFile);
 });
 
+// 僅限佇列視窗的同步純數值查詢；returnValue 賦值就會送出回覆，每條路徑只能寫一次。
+ipcMain.on('queue:exactFrameRate', (event, value) => {
+  if (!queueWin || queueWin.isDestroyed() || event.sender !== queueWin.webContents) {
+    event.returnValue = null;
+    return;
+  }
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    event.returnValue = null;
+    return;
+  }
+  event.returnValue = exactDeliveryFrameRate(value);
+});
+
 ipcMain.handle('queue:getAll', () => ({
   jobs: QueueManager.jobs(),
   isPaused: QueueManager.isPaused,
@@ -1000,6 +1014,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
     targetH: patch?.targetH != null ? Math.max(0, Math.floor(Number(patch.targetH) || 0)) : (Number(p.targetH) || 0),
     fps: p.fps, projectFps: p.projectFps, bdMode: format === 'bd-iso' ? bdVideoMode(p.fps) : null,
     videoKbps: p.videoKbps, previousWidth: p.width, previousHeight: p.height,
+    resetVideoBitrate: p.format !== format && !!getDeliveryFormatPreset(p.format),
     kbpsOverride: patch?.kbps, burnTimecode: wantsTc,
     timecodeStart: p.timecodeWatermark?.start ?? p.timelineStartTimecode,
   });
@@ -1092,22 +1107,11 @@ ipcMain.handle('dialog:importDirectory', async () => {
   });
   if (r.canceled || r.filePaths.length === 0) return null;
   const dir = r.filePaths[0];
-  fileAuthority.grantTrustedDirectory(dir, { read: true, write: false });
-  const files = [];
   /* name 必須是【相對於所選資料夾】的路徑：呼叫端（app.js 匯入樣式）就是靠 name 的第一段
      還原「樣式資料夾」。之前這裡只回檔名，遞迴進子目錄後資料夾資訊就沒了 → 匯出時建好的
-     資料夾結構再匯入回來全部被攤平、group 全部遺失。分隔符一律正規化成 "/"。 */
-  function scan(d) {
-    for (const f of fs.readdirSync(d)) {
-      const p = path.join(d, f);
-      if (fs.statSync(p).isDirectory()) scan(p);
-      else if (f.endsWith('.json')) {
-        files.push({ name: path.relative(dir, p).split(path.sep).join('/'), b64: fs.readFileSync(p).toString('base64') });
-      }
-    }
-  }
-  scan(dir);
-  return files;
+     資料夾結構再匯入回來全部被攤平、group 全部遺失。此處已直接讀取 JSON，
+     不必把整個資料夾授予 renderer 的 fileURL／readB64 能力。 */
+  return collectStyleDirectoryFiles(dir);
 });
 
 ipcMain.handle('dialog:exportDirectory', async (e, files) => {
@@ -1122,25 +1126,8 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
   // 由本 handler 直接寫入即可，不能順便升格成後續影片覆寫權。
   const isDeliveryDirectory = !Array.isArray(files) || files.length === 0;
   if (isDeliveryDirectory) fileAuthority.grantDeliveryDirectory(dir);
-  /* 檔名可能源自使用者匯入的資料（例如樣式包 .json 裡的 group 欄位），renderer 端已淨化，
-     這裡再擋一次：path.join 會把 "../" 正規化掉，光靠呼叫端把關等於沒有把關。
-     一律要求最終路徑落在使用者剛剛選定的資料夾底下，否則跳過並記錄。
-     圍堵判斷在 export-name-safety.js（跨行程契約的另一側）。 */
-  const root = path.resolve(dir);
-  let written = 0, blocked = 0;
-  for (const f of files || []) {
-    const data = f && (f.content || f.b64);
-    if (!f || typeof f.name !== 'string' || !f.name || !data) continue;
-    const fullPath = path.resolve(root, f.name);
-    if (!isPathContained(root, f.name)) {
-      blocked++; console.warn('[sec] exportDirectory blocked (escapes target dir):', f.name);
-      continue;
-    }
-    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-    fs.writeFileSync(fullPath, Buffer.from(data, 'base64'));
-    written++;
-  }
-  if (blocked) console.warn(`[sec] exportDirectory: ${blocked} 個檔案因路徑越界被略過（已寫入 ${written} 個）`);
+  const { written, blocked } = writeDirectoryFiles(dir, files);
+  if (blocked) console.warn(`[sec] exportDirectory: ${blocked} 個檔案因路徑越界或連結被略過（已寫入 ${written} 個）`);
   return dir;
 });
 
@@ -1489,8 +1476,8 @@ ipcMain.handle('fs:writeProject', async (e, { path: p, b64 }) => {
   catch (err) { return null; }
 });
 ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
-  if (!fileAuthority.canWriteScreenshot(p)) { console.warn('[sec] writeScreenshot blocked:', p); return null; }
-  try { await fs.promises.mkdir(path.dirname(p), { recursive: true }); await fs.promises.writeFile(p, Buffer.from(b64, 'base64')); return p; } catch (err) { console.error('[writeScreenshot] error:', err.message); return null; }
+  try { return await screenshotOutput.write(p, b64); }
+  catch (err) { console.error('[writeScreenshot] error:', err.message); return null; }
 });
 
 /* ---- 邊轉邊播 ingest（MXF 等非原生格式秒開）：fragmented MP4 + 本機 HTTP 伺服器 ----
@@ -1571,9 +1558,12 @@ window.setImages = (h, r) => {
       }
       
       const ni = next.querySelector('img'), oi = old.querySelector('img');
-      if (ni && oi && oi.getAttribute('src') !== ni.getAttribute('src')) {
-        oi.setAttribute('src', ni.getAttribute('src'));
+      if (ni && oi) {
+        oi.setAttribute('style', ni.getAttribute('style') || '');
+        if (oi.getAttribute('src') !== ni.getAttribute('src')) oi.setAttribute('src', ni.getAttribute('src'));
       }
+      // 快照順序就是疊層順序；重用節點也必須移到本次位置。
+      imgContainer.appendChild(old);
       existing.delete(id);
     } else {
       imgContainer.appendChild(next);
@@ -1651,7 +1641,7 @@ ipcMain.handle('mpv:present', (event, time, options) => mpvHost.present(time, {
 }));
 ipcMain.handle('mpv:cancelPresent', () => mpvHost.cancelPresent());
 ipcMain.handle('mpv:screenshot', (event, filePath) => {
-  if (!fileAuthority.canWriteScreenshot(filePath)) { console.warn('[sec] mpv:screenshot blocked (bad ext):', filePath); return null; }
+  if (!fileAuthority.canWriteScreenshot(filePath)) throw new Error('未授權的截圖輸出路徑');
   fileAuthority.grantTemporaryScreenshotRead(filePath);
   return mpvHost.screenshot(filePath);
 });
@@ -1664,57 +1654,25 @@ ipcMain.handle('mpv:brightness', (event, value) => mpvHost.brightness(value));
 ipcMain.handle('mpv:quit', () => mpvHost.quit());
 /* ===== 字幕比對視窗 =====
    比對規則與 revision 住在 renderer 的 SubtitleCompareSession；本檔只做受限 IPC adapter。 */
-function openCompareWindow(payload) {
-  if (compareWin && !compareWin.isDestroyed()) {
-    if (compareWin.isMinimized()) compareWin.restore();
-    compareWin.show();
-    compareWin.focus();
-    compareWin.webContents.send('compare:update-data', payload);
-    return;
-  }
-  compareWin = new BrowserWindow({
-    width: 1200,
-    height: 700,
-    minWidth: 800,
-    minHeight: 500,
-    title: '字幕比對',
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: path.join(__dirname, 'compare-preload.js'),
-      nodeIntegration: false,
-      contextIsolation: true
-    }
-  });
-  compareWin.setMenu(null);
-  const compareDocument = path.join(__dirname, 'compare.html');
-  localResourceServer.protectApplicationWindow(compareWin, { document: compareDocument });
-  compareWin.loadFile(compareDocument);
-  compareWin.webContents.once('did-finish-load', () => {
-    compareWin.webContents.send('compare:update-data', payload);
-  });
-  compareWin.on('closed', () => {
-    compareWin = null;
-    safeWinSend(mainWin, 'compare:closed');
-  });
-}
-
-function isCompareWindowSender(event) {
-  return !!(compareWin && !compareWin.isDestroyed() && event?.sender === compareWin.webContents);
-}
+const compareWindow = createCompareWindow({
+  createWindow: options => new BrowserWindow(options),
+  document: path.join(__dirname, 'compare.html'),
+  preload: path.join(__dirname, 'compare-preload.js'),
+  protectWindow: (window, options) => localResourceServer.protectApplicationWindow(window, options),
+  onClosed: () => safeWinSend(mainWin, 'compare:closed'),
+});
 
 ipcMain.on('open-compare-window', (event, payload) => {
   if (!isMainWindowSender(event)) return;
-  openCompareWindow(payload);
+  compareWindow.open(payload);
 });
 
 ipcMain.on('compare:command', (event, command) => {
-  if (!isCompareWindowSender(event) || !command || typeof command !== 'object') return;
+  if (!compareWindow.isSender(event?.sender) || !command || typeof command !== 'object') return;
   safeWinSend(mainWin, 'compare:command', command);
 });
 
 ipcMain.on('sync-compare-window', (event, payload) => {
   if (!isMainWindowSender(event)) return;
-  if (compareWin && !compareWin.isDestroyed()) {
-    compareWin.webContents.send('compare:update-data', payload);
-  }
+  compareWindow.sync(payload);
 });

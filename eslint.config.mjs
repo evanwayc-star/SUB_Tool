@@ -111,6 +111,16 @@ export default [
     },
     rules: silentBugRules,
   },
+  // CI launcher 使用 Node ESM；與 .js 相同的安全規則不能因副檔名而失效。
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+    rules: silentBugRules,
+  },
   /* acceptance/in-page/ 是送進頁面執行的載荷；以資料夾作為 seam，避免逐檔白名單漂移。 */
   {
     files: IN_PAGE_SCRIPTS,

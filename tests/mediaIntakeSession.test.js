@@ -9,6 +9,76 @@ const deferred = () => {
 };
 
 describe('MediaIntakeSession resource ownership', () => {
+  it.each(['replacement', 'failure'])('cancels ready siblings during unresolved URL IPC after %s', async cause => {
+    vi.useFakeTimers();
+    const secondURL = deferred();
+    const elements = [];
+    try {
+      const session = new MediaIntakeSession();
+      const token = session.begin('old');
+      const work = session.materializeAudioElements([{ file: 'a' }, { file: 'b' }], {
+        token,
+        resolveFileURL: file => file === 'a' ? Promise.resolve('file:///a') : secondURL.promise,
+        createAudio: () => {
+          const element = { src: '', readyState: cause === 'replacement' ? 1 : 0, pause: vi.fn() };
+          elements.push(element);
+          return element;
+        },
+        timeoutMs: 10000,
+      });
+      // Attach the rejection assertion before firing the controlled failure.
+      const result = cause === 'replacement'
+        ? expect(work).resolves.toBeNull()
+        : expect(work).rejects.toThrow('metadata');
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(elements).toHaveLength(1);
+      if (cause === 'replacement') {
+        session.invalidate();
+        await vi.advanceTimersByTimeAsync(25);
+      } else elements[0].onerror();
+      await result;
+      expect(elements[0].src).toBe('');
+      expect(elements[0].pause).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+
+      secondURL.resolve('file:///b');
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(elements).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+  it('等待另一聲道 metadata 時專案替換立即取消整組，不等長 timeout',async()=>{
+    vi.useFakeTimers();
+    try{
+      const session=new MediaIntakeSession(),token=session.begin('old');
+      const elements=[];
+      const work=session.materializeAudioElements([{file:'a'},{file:'b'}],{
+        token,resolveFileURL:async file=>file,createAudio:()=>{
+          const element={src:'',readyState:elements.length===0?1:0,pause:vi.fn()};
+          elements.push(element);return element;
+        },timeoutMs:10000,
+      });
+      await Promise.resolve();await Promise.resolve();
+      session.invalidate();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(work).resolves.toBeNull();
+      expect(elements).toHaveLength(2);
+      for(const element of elements){expect(element.src).toBe('');expect(element.pause).toHaveBeenCalledOnce();expect(element.onloadedmetadata).toBeUndefined();}
+    }finally{vi.useRealTimers();}
+  });
+  it('一聲道出錯會立即撤銷其他未就緒聲道的 metadata listeners',async()=>{
+    const elements=[];
+    const session=new MediaIntakeSession();
+    const work=session.materializeAudioElements([{file:'a'},{file:'b'}],{
+      resolveFileURL:async file=>file,createAudio:()=>{const el={src:'',readyState:0,pause:vi.fn()};elements.push(el);return el;},timeoutMs:10000,
+    });
+    await Promise.resolve();await Promise.resolve();
+    elements[0].onerror();
+    await expect(work).rejects.toThrow('metadata');
+    expect(elements[1].onloadedmetadata).toBeUndefined();
+    expect(elements[1].pause).toHaveBeenCalledOnce();
+  });
   it('音訊 metadata 逾時時拒絕載入並釋放失敗元素', async () => {
     const session = new MediaIntakeSession();
     const element = { src: '', readyState: 0, pause: vi.fn() };

@@ -11,6 +11,8 @@
 'use strict';
 
 const path = require('path');
+const fsp = require('fs/promises');
+const crypto = require('crypto');
 const { PROJECT_FILE, collectProjectMediaPaths, parseProjectBuffer } = require('./file-authority');
 
 const RECENT_MAX_ENTRIES = 10;
@@ -23,15 +25,20 @@ function sanitizeRecentList(list, max = RECENT_MAX_ENTRIES) {
 }
 
 /** 把一個路徑推到清單最前面。 */
+function recentPathKey(filePath) {
+  const resolved = path.resolve(filePath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 function addRecent(list, filePath, { max = RECENT_MAX_ENTRIES, now = 0 } = {}) {
   if (typeof filePath !== 'string' || !filePath.trim()) return sanitizeRecentList(list, max);
   let resolved;
   try { resolved = path.resolve(filePath); } catch (e) { return sanitizeRecentList(list, max); }
 
-  const key = resolved.toLowerCase();
+  const key = recentPathKey(resolved);
   const next = [{ path: resolved, name: path.basename(resolved), at: now }];
   for (const item of sanitizeRecentList(list, Infinity)) {
-    if (String(item.path).toLowerCase() === key) continue;
+    if (recentPathKey(item.path) === key) continue;
     next.push(item);
     if (next.length >= max) break;
   }
@@ -40,8 +47,9 @@ function addRecent(list, filePath, { max = RECENT_MAX_ENTRIES, now = 0 } = {}) {
 
 /** 從清單移除一筆（檔案已不存在時用）。 */
 function removeRecent(list, filePath) {
-  const key = String(filePath || '').toLowerCase();
-  return sanitizeRecentList(list, Infinity).filter(item => String(item.path).toLowerCase() !== key);
+  if (typeof filePath !== 'string' || !filePath.trim()) return sanitizeRecentList(list, Infinity);
+  const key = recentPathKey(filePath);
+  return sanitizeRecentList(list, Infinity).filter(item => recentPathKey(item.path) !== key);
 }
 
 /** 造一支「這個路徑還在不在」的探測器。 */
@@ -203,6 +211,38 @@ function finalizeProjectWrite(projectFile, { clearTrustedDeclarations } = {}) {
   return projectFile;
 }
 
+// 保存只在完整 sibling 檔案關閉後才發佈，失敗不能先截斷上一份專案。
+// 同一目標依呼叫順序保存，避免 autosave／手動保存以較慢的旧寫入覆蓋新資料。
+function createAtomicProjectWriter({ fsModule = fsp, createToken = crypto.randomUUID } = {}) {
+  const pending = new Map();
+  return function writeProject(projectFile, contents) {
+    const target = path.resolve(projectFile);
+    const key = process.platform === 'win32' ? target.toLowerCase() : target;
+    const operation = (pending.get(key) || Promise.resolve()).then(async () => {
+      const temporary = `${target}.${createToken()}.tmp`;
+      let handle;
+      let ownsTemporary = false;
+      try {
+        handle = await fsModule.open(temporary, 'wx');
+        ownsTemporary = true;
+        await handle.writeFile(contents);
+        await handle.sync();
+        await handle.close();
+        handle = null;
+        await fsModule.rename(temporary, target);
+      } finally {
+        if (handle) { try { await handle.close(); } catch (error) {} }
+        if (ownsTemporary) { try { await fsModule.unlink(temporary); } catch (error) {} }
+      }
+    });
+    const tail = operation.catch(() => {}).finally(() => {
+      if (pending.get(key) === tail) pending.delete(key);
+    });
+    pending.set(key, tail);
+    return operation;
+  };
+}
+
 async function commitAdmittedProjectWrite(projectFile, buffer, {
   ensureDirectory,
   writeFile,
@@ -263,6 +303,8 @@ function createProjectWorkspace({
   const remember = projectFile => saveRecent(
     RecentProjects.addRecent(recentList(), projectFile, { now: now() }),
   );
+  // 身分只用來在目前受信清單內定位，不能以 renderer 的路徑擴張授權。
+  const recentToken = item => crypto.createHash('sha256').update(recentPathKey(item.path)).digest('hex');
 
   async function readProject(projectFile) {
     if (!isProjectPath(projectFile) || typeof readFile !== 'function') return null;
@@ -281,11 +323,6 @@ function createProjectWorkspace({
   }
 
   async function open(projectFile, options) {
-    const buffer = await readProject(projectFile);
-    return commitOpen(projectFile, buffer, options);
-  }
-
-  async function openLatest(projectFile, options) {
     const generation = ++latestOpenGeneration;
     const buffer = await readProject(projectFile);
     if (generation !== latestOpenGeneration) return null;
@@ -311,7 +348,7 @@ function createProjectWorkspace({
       pendingStartupPath = null;
       fallback = null;
       if (!projectFile) return result;
-      result = await openLatest(projectFile);
+      result = await open(projectFile);
     } while (pendingStartupPath);
     return result;
   }
@@ -357,6 +394,7 @@ function createProjectWorkspace({
     const missing = await Promise.all(list.map(item => missingProbe(item.path)));
     return list.map((item, index) => ({
       index,
+      token: recentToken(item),
       path: item.path,
       name: item.name || path.basename(item.path),
       at: item.at || 0,
@@ -364,13 +402,13 @@ function createProjectWorkspace({
     }));
   }
 
-  async function openRecent(index) {
+  async function openRecent(token) {
     const list = recentList();
-    const item = list[Math.trunc(Number(index))];
+    const item = typeof token === 'string' ? list.find(entry => recentToken(entry) === token) : null;
     if (!item) return null;
     const result = await open(item.path);
     if (!result && await missingProbe(item.path)) {
-      saveRecent(RecentProjects.removeRecent(list, item.path));
+      saveRecent(RecentProjects.removeRecent(recentList(), item.path));
     }
     return result;
   }
@@ -385,7 +423,6 @@ function createProjectWorkspace({
     clearRecent,
     listRecent,
     open,
-    openLatest,
     openRecent,
     openStartup,
     stageStartup,
@@ -396,6 +433,7 @@ function createProjectWorkspace({
 module.exports = {
   authorizeDroppedMediaPath,
   commitAdmittedProjectWrite,
+  createAtomicProjectWriter,
   createProjectWorkspace,
   createTrustedProjectIntake,
   finalizeProjectWrite,

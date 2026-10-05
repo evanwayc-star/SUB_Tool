@@ -64,7 +64,8 @@ describe('pruneRedundantCueStyle', () => {
 
   it('軌道不是預設時，把預設套到單句 → 覆蓋有意義，必須保留', () => {
     const cue = { style: { ...STYLE_DEFAULTS } };
-    pruneRedundantCueStyle(cue, track);
+    const differentTrack = { ...track, fontSize: STYLE_DEFAULTS.fontSize + 20 };
+    pruneRedundantCueStyle(cue, differentTrack);
     expect(cue.style.fontSize).toBe(STYLE_DEFAULTS.fontSize);
     expect(cue.style.color).toBe(STYLE_DEFAULTS.color);
   });

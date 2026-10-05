@@ -105,19 +105,18 @@ function measurerFor(documentRef){
   root.style.cssText = 'position:fixed;left:-100000px;top:0;visibility:hidden;pointer-events:none;width:max-content;height:max-content;contain:layout style paint;';
   documentRef.body.appendChild(root);
   entry = (line, st) => {
-    const key = JSON.stringify([
-      line, st.font, st.fontSize, st.bold, st.italic, st.letterSpacing,
-    ]);
-    if(cache.has(key)) return cache.get(key);
-    const span = documentRef.createElement('span');
-    span.textContent = line;
-    span.style.cssText = styleToCss({
+    const measurementCss = styleToCss({
       ...st,
       bgBox: false,
       outline: 0,
       shadow: 0,
       angle: 0,
     }, 1);
+    const key = JSON.stringify([line, measurementCss]);
+    if(cache.has(key)) return cache.get(key);
+    const span = documentRef.createElement('span');
+    span.textContent = line;
+    span.style.cssText = measurementCss;
     // styleToCss 的非底色路徑會為拖曳框預留 ink overflow；文字寬度量測不可吃它。
     span.style.position = 'relative';
     span.style.display = 'inline-block';

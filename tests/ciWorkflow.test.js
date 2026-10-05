@@ -44,9 +44,13 @@ describe('GitHub Actions 平台分流', () => {
     expect(windowsJob.indexOf('npm run build')).toBeLessThan(windowsJob.indexOf('npm run test:ci:windows'));
   });
 
-  it('所有直接啟動 Electron 的測試都明確歸入 Windows 群組', () => {
+  it('所有直接啟動 Electron 或使用 Windows FFmpeg 的測試都明確歸入 Windows 群組', () => {
     const unclassified = testFiles(path.join(ROOT, 'tests'))
-      .filter(file => /\bspawn\s*\(\s*ELECTRON\s*,/.test(readFileSync(file, 'utf8')))
+      .filter(file => {
+        const source = readFileSync(file, 'utf8');
+        return /\bspawn(?:Sync)?\s*\(\s*ELECTRON\s*,/.test(source)
+          || /\bconst FFMPEG\s*=\s*[^;]*ffmpeg\.exe/.test(source);
+      })
       .filter(file => !isWindowsTest(readFileSync(file, 'utf8')))
       .map(file => path.relative(ROOT, file).replaceAll('\\', '/'));
 

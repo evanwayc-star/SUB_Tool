@@ -148,6 +148,36 @@ describe('字幕搜尋與導航定位 (subtitle-search)', () => {
     expect(State.cues.find(c => c.id === 'c4').text).toBe('第四句包含範例詞彙');
   });
 
+  it('多個搜尋詞取代時不會再次改寫剛產生的取代文字', () => {
+    State.cues[0].text = 'A B';
+    searchUpdate('A||B');
+
+    searchReplace(false, 'B!');
+
+    expect(State.cues[0].text).toBe('B! B!');
+  });
+
+  it('取代文字中的美元符號依輸入原樣寫入字幕', () => {
+    State.cues[0].text = '測試';
+    searchUpdate('測試');
+
+    searchReplace(false, '$&1');
+
+    expect(State.cues[0].text).toBe('$&1');
+  });
+
+  it('切換列表軌道後，未傳入新查詢時仍使用搜尋框現有內容', () => {
+    document.getElementById('searchInput').value = '測試';
+    searchUpdate('測試');
+    State.listTrack = 1;
+
+    searchUpdate();
+
+    expect(isSearchHit('c5')).toBe(true);
+    expect(isSearchHit('c1')).toBe(false);
+    expect(getSearchCountText()).toBe('1/1');
+  });
+
   it('目前字幕軌鎖定時搜尋取代不會修改內容或寫入 History', () => {
     State.tracks[0].locked = true;
     searchUpdate('測試');

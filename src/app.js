@@ -41,17 +41,16 @@ import { createCommands } from './commands.js';
 import { renderPointerSeekControl, requestPointerSeek, timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction-engine.js';
 import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
 import { togglePanel, renderQueueMonitorIndicator, renderAsrIndicator } from './ui.js';
-import { applyCueStylePatch } from './subtitle-style-engine.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline-renderer.js';
-import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount } from './subtitles.js';
+import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, applyCueStylePatch } from './subtitles.js';
 import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames } from './subtitle-model.js';
-import { searchUpdate, searchNav, searchReplace, searchSelectAll, replaceOne } from './subtitle-search.js';
+import { searchUpdate, searchNav, searchReplace, searchSelectAll, replaceOne, setSelectCueHandler } from './subtitle-search.js';
 import { initRecentProjects } from './recent-projects.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
-import { Project, isProjectDirty, confirmDiscardUnsaved } from './project.js';
+import { Project, isProjectDirty } from './project.js';
 import { Seq } from './sequence.js';
 import { showCtx, hideCtx, showCueMenu, showPlayerMenu } from './menus.js';
 import { History, recordHistory, renderHistory, syncCompareSnapshot } from './history.js';
@@ -67,7 +66,7 @@ import { renderAudioTracks, renderMixer, updateMeters } from './mixer.js';
 import { applyDurAdjPct, toASSFromState } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { imageBoxOnStage, fadeAlphaAtTimeline } from './image-compositor-engine.js'; // 圖片疊層幾何與淡入淡出：三路共用同一份規格
-import { presetExportRelativePath } from './export-job-engine.js';
+import { initPresetLibrary } from './preset-library.js';
 import { renderSeekBar } from './timeline-interaction-engine.js';
 import { on, emit } from './events.js';
 import { setTimelineToolbarCollapsed, toggleTimelineToolbar } from './timeline-interaction-engine.js';
@@ -180,7 +179,8 @@ function renderDurationReadout(){
 
 
 /* ===== 9. UI 接線 / 渲染 / 初始化 ==================================== */
-function renderAll(){ renderSubList(); renderCueBlocks(); renderVideoSub(); updateTlSel(); refreshMpvSubs(); }
+let syncPresetDraft = () => {};
+function renderAll(){ syncPresetDraft(); renderSubList(); renderCueBlocks(); renderVideoSub(); updateTlSel(); refreshMpvSubs(); }
 /* render:trackStyle 的訂閱在上面（第 78 行附近），這裡曾經【又註冊一次】。
    events.js 的 on() 是 push、不去重，所以每次 emit 都會把整個樣式面板
    （含 preset 的 <optgroup> DOM）重建兩遍——選取一變更就發生，完全無徵兆。
@@ -417,18 +417,20 @@ let _covCleared=false; // 本次開窗有沒有按過「清除全部覆蓋」（
 
 /* ===== UI 接線（區塊切換 / 樣式 / 分隔線 / 捲動同步 / 雙擊） ===== */
 function initUI(){
+  // 搜尋 → 字幕選取是 UI 接線；待模組初始化完成後再註冊，避免循環載入時回寫 TDZ。
+  setSelectCueHandler(selectCue);
   // 軌道切換下拉
   $('listTrackSel').addEventListener('change',e=>{ State.listTrack=+e.target.value; deselect('sub'); $('stSel').textContent=''; searchUpdate(); renderSubList(); StylePanelController.renderTrackStyle(); refreshSelectionUI(); refreshTrackGutterActive(); });
   const sf = $('subStyleFilter');
   if (sf) {
-    sf.addEventListener('change', () => { deselect('sub'); $('stSel').textContent=''; renderSubList(); });
+    sf.addEventListener('change', () => { deselect('sub'); $('stSel').textContent=''; renderSubList(); refreshSelectionUI({preventScroll:true}); });
   }
   const waveGlobalSrcSel=$('waveGlobalSrcSel');
   if(waveGlobalSrcSel) waveGlobalSrcSel.addEventListener('change',e=>{ Media.switchSource(e.target.value==='__all__'?null:e.target.value); renderMixer(); e.target.blur(); });
 
   /* 唯一的樣式寫入點（v4.31）：有選取字幕 → 寫該句的逐句覆蓋；沒選 → 寫整軌。
      ── 面板九個控件本來各自 `State.tracks[i][k]=v`，等於「改樣式一律套全軌」。 */
-    StylePanelController.bindStylePanelEvents({ renderAll, renderVideoSub, refreshMpvSubs, drawTimeline, refreshStyleSummaries, initPresetLibrary, styleChanged });
+    StylePanelController.bindStylePanelEvents({ renderAll, renderVideoSub, refreshMpvSubs, drawTimeline, refreshStyleSummaries, initPresetLibrary: () => { syncPresetDraft = initPresetLibrary({ styleChanged }); }, styleChanged });
   ;
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
@@ -536,287 +538,7 @@ function initUI(){
 
 }
 
-/* 常用樣式庫：管理視窗（列表／套用／改名／刪除／分組）、編輯模式，以及匯入匯出。
-   從 initUI 抽出來的連續區塊——執行順序不變（initUI 在原位置呼叫它）。
-   抽出的理由是責任分離：這一段與「樣式面板九個控件的接線」互不相干，
-   混在同一支 565 行的函式裡讓兩邊都不好讀。 */
-function initPresetLibrary(){
-  /* 常用樣式管理：每列＝小色票預覽＋名稱＋套用/改名/刪除。事件用委派（一次綁在 modalBody），
-     操作後就地重繪列表、不關視窗（可連續管理）。 */
-  const _presetSwatch=st=>`<span style="display:inline-block;min-width:30px;padding:2px 7px;border-radius:4px;`+
-    `font-size:12px;font-weight:${st.bold?700:400};font-style:${st.italic?'italic':'normal'};`+
-    `background:${st.bgBox?st.bgColor:'#222'};color:${st.color};`+
-    `border:1px solid rgba(255,255,255,.2);${st.outline>0?`text-shadow:0 0 2px ${st.outlineColor},0 0 2px ${st.outlineColor};`:''}">字</span>`;
-  function _renderPresetMgr(){
-    // 清單＝內建（第一筆，不可改名／刪除）＋使用者自訂
-    const list=getAllPresets();
-    const body=$('modalBody'); if(!body)return;
-    
-    // 分組
-    const groups = {};
-    const orphans = [];
-    list.forEach((p, i) => {
-      if (p.builtin) {
-        orphans.push({ p, i, text: p.name });
-        return;
-      }
-      if (p.group) {
-        if (!groups[p.group]) groups[p.group] = [];
-        groups[p.group].push({ p, i, text: p.name });
-      } else {
-        orphans.push({ p, i, text: p.name });
-      }
-    });
 
-    const renderItem = (item, isGrouped) => {
-      const { p, i, text } = item;
-      const st=Object.assign({},STYLE_DEFAULTS,p.style||{});
-      const ui=i-BUILTIN_PRESETS.length;
-      return `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border);">`+
-        _presetSwatch(st)+
-        `<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(text)}`+
-        (p.builtin?`<span style="margin-left:6px;font-size:10px;padding:1px 5px;border-radius:8px;background:var(--panel3);color:var(--text-faint)">內建</span>`:'')+
-        `</span>`+
-        `<button class="ts-preset" data-pre-apply="${i}" title="套用到目前選取的字幕（或整軌）">套用</button>`+
-        (p.builtin
-          ? `<span style="font-size:11px;color:var(--text-faint);opacity:.6;padding:0 6px">不可修改</span>`
-          : `<button class="ts-preset" data-pre-edit="${ui}" title="在樣式面板上修改這組樣式；完成後所有套用它的字幕一起變">修改參數</button>`+
-            `<button class="ts-preset" data-pre-ren="${ui}" title="重新命名，或是將它移入/移出資料夾">改名 / 移動</button>`+
-            `<button class="ts-preset" data-pre-del="${ui}" style="color:var(--red,#e66)">刪除</button>`)+
-        `</div>`;
-    };
-
-    let itemsHtml = orphans.map(o => renderItem(o, false)).join('');
-    for (const g in groups) {
-      itemsHtml += `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border);cursor:pointer;" onclick="if(event.target.closest('button'))return; const c=this.nextElementSibling; const e=c.style.display==='none'; c.style.display=e?'block':'none';">`+
-        `<span style="font-size:14px;color:#ffca28;min-width:30px;text-align:center;">📁</span>`+
-        `<span style="flex:1;font-size:14px;font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(g)}</span>`+
-        `<button class="ts-preset" data-pre-ren-grp="${escapeHTML(g)}">改名</button>`+
-        `<button class="ts-preset" data-pre-del-grp="${escapeHTML(g)}" style="color:var(--red,#e66)">刪除</button>`+
-        `</div>`;
-      itemsHtml += `<div style="margin-left:15px; padding-left:10px; border-left:1px solid #444; display:block;">` + groups[g].map(o => renderItem(o, true)).join('') + `</div>`;
-    }
-
-    body.innerHTML=`<div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:10px;padding:0 4px">`+
-      `<button class="btn" id="preExportBtn" title="把自訂樣式存成 .json 檔">⭳ 匯出</button>`+
-      `<button class="btn" id="preImportBtn" title="讀取 .json 檔並加入樣式庫">⭱ 匯入</button>`+
-      `</div>`+
-      `<div style="max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:2px">`+
-      itemsHtml +
-      (getPresets().length?'':`<div style="color:var(--text-faint);font-size:12px;padding:10px 2px">尚未建立自訂樣式——在樣式面板調好後按「☆ 存為常用」即可新增。</div>`)+
-      `</div>`;
-  }
-  const openPresetMgr = () => {
-    openModal('⚙ 常用樣式管理','',[{label:'關閉',primary:true,act:closeModal}]); // 內建那筆一定在，不再擋空清單
-    _renderPresetMgr();
-  };
-  $('tsPresetMgr').addEventListener('click', openPresetMgr);
-  /* 判準只有 substyle.js 的 styleMatchesPreset 一份（v5.9.1 起）。
-     以前這裡自己寫一份、subtitles.js 另有兩份，靠註解維持同步；
-     而那些註解指名的函式早就改名了，註解沒跟上——這正是為什麼不能靠註解。 */
-  const _sameStyle=(st,ps)=>styleMatchesPreset(st,ps);
-  function _presetEditBegin(ui){
-    const p=getPresets()[ui]; if(!p)return;
-    const t=StylePanelController.styleTarget(); if(!t){ showToast('沒有字幕軌可用來編輯'); return; }
-    const old=Object.assign({},STYLE_DEFAULTS,p.style||{});
-    // 先掃出「進入編輯前就符合舊樣式」的軌與句——套上草稿之後就分不出來了
-    const targets={ tracks:[], cues:[] };
-    State.tracks.forEach((tk,i)=>{ if(tk && _sameStyle(effStyle(null,tk),old)) targets.tracks.push(i); });
-    for(const c of State.cues) if(c.style && Object.keys(c.style).length &&
-      _sameStyle(effStyle(c,State.tracks[c.track||0]||null),old)) targets.cues.push(c);
-    State.presetEdit={ name:p.name, ui, trackIdx:t.i, targets, old, draft: Object.assign({}, old) };
-    closeModal();
-    $('tsEditBar').hidden=false; $('tsEditName').textContent=p.name;
-    styleChanged();
-  }
-  function _presetEditEnd(save){
-    const E=State.presetEdit; if(!E)return;
-    const draft = E.draft;
-    State.presetEdit=null; $('tsEditBar').hidden=true;      // 先清旗標，StylePanelController.styleTarget 才回正常行為
-    if(!save || !draft){ styleChanged(); showToast('已取消編輯'); return; }
-    const list=[...getPresets()]; const p=list[E.ui];
-    if(p){ p.style=draft; savePresets(list); }
-    // 同步：進入前就符合舊樣式的，一起換成新樣式
-    let n=0;
-    for(const i of E.targets.tracks){
-      if(State.tracks[i] && !State.tracks[i].locked){ Object.assign(State.tracks[i],draft); n++; }
-    }
-    for(const c of E.targets.cues){
-      if(!State.tracks[c.track||0]?.locked && applyCueStylePatch(c, draft)) n++;
-    }
-    styleChanged(); recordHistory('編輯常用樣式：'+E.name);
-    showToast(`已更新「${E.name}」` + (n?`，同步 ${n} 處`:'（目前沒有套用它的字幕）'));
-  }
-  /* 直接呼叫上面那兩個函式。原本寫的是 State.presetEditEnd(...)，但 State 上
-     【從來沒有】這兩個成員（全 repo 只有讀、沒有任何一處賦值），於是「完成」
-     「取消」「修改參數」三顆按鈕一按就丟 TypeError。State 是無型別的物件袋、
-     no-undef 也不檢查成員存取，app.js 又沒有測試，三道防線同時看不到。 */
-  $('tsEditDone')?.addEventListener('click',()=>_presetEditEnd(true));
-  $('tsEditCancel')?.addEventListener('click',()=>_presetEditEnd(false));
-  $('tsEditPreviewText')?.addEventListener('input', () => { if(State.presetEdit) { renderVideoSub(); refreshMpvSubs(false, true); } });
-  $('tsEditPreviewText')?.addEventListener('keydown', e => { e.stopPropagation(); });
-  $('modalBody').addEventListener('click',async e=>{
-    const applyB=e.target.closest('[data-pre-apply]');
-    const editB=e.target.closest('[data-pre-edit]');
-    const renB=e.target.closest('[data-pre-ren]');
-    const renGrpB=e.target.closest('[data-pre-ren-grp]');
-    const delB=e.target.closest('[data-pre-del]');
-    const delGrpB=e.target.closest('[data-pre-del-grp]');
-    const expB=e.target.closest('#preExportBtn');
-    const impB=e.target.closest('#preImportBtn');
-
-    if(renGrpB) {
-      const oldG = renGrpB.dataset.preRenGrp;
-      const newG = await promptModal('資料夾改名', '新名稱', oldG);
-      if(!newG || newG === oldG) { openPresetMgr(); return; }
-      const l = [...getPresets()];
-      let changed = false;
-      for (const p of l) {
-        if ((p.group||'') === oldG) { p.group = newG; changed = true; }
-      }
-      if(changed) { savePresets(l); StylePanelController.renderTrackStyle(); refreshStyleSummaries(); }
-      openPresetMgr();
-      return;
-    }
-
-    if(delGrpB){ 
-      const grp = delGrpB.dataset.preDelGrp;
-      if (confirm(`確定要刪除「${grp}」資料夾以及裡面所有的樣式嗎？\n\n（注意：刪除後無法復原）`)) {
-        const l = getPresets().filter(p => p.group !== grp);
-        savePresets(l); StylePanelController.renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); showToast('已刪除資料夾：' + grp);
-      }
-      return; 
-    }
-
-    function _importPresets(j){
-      if(!Array.isArray(j)){ showToast('檔案格式不符：非樣式陣列'); return; }
-      const list = [...getPresets()];
-      let count = 0;
-      j.forEach(p => {
-        if(p.name && p.style && !isBuiltinPresetName(p.name)){
-          const ex = list.findIndex(x=>x.name===p.name);
-          if(ex>=0) list[ex]=p; else list.push(p);
-          count++;
-        }
-      });
-      if(count>0){
-        savePresets(list); _renderPresetMgr(); StylePanelController.renderTrackStyle(); refreshStyleSummaries();
-        showToast(`已匯入 ${count} 組樣式`);
-      }else{
-        showToast('找不到可匯入的樣式');
-      }
-    }
-
-    if(expB){
-      const presets = getPresets(); // 只匯出自訂樣式
-      if(!presets.length){ showToast('沒有自訂樣式可匯出'); return; }
-      if (IS_DESKTOP && DESK.exportDirectory) {
-        const files = presets.map(p => {
-          // 淨化規則在 export-name-safety.js（跨行程契約的一側，見該檔頭註解）。
-          // group 直接來自匯入的 .json 內容（見下方匯入分支，items 原封不動 push
-          // 進來），未洗過的 "../.." 會讓主程序的 path.join 正規化後跳出使用者
-          // 選定的資料夾，把檔案寫到磁碟上任意位置。
-          const str = JSON.stringify([p], null, 2);
-          const bytes = new TextEncoder().encode(str);
-          return { name: presetExportRelativePath(p), b64: bytesToB64(bytes) };
-        });
-        DESK.exportDirectory(files).then(dir => {
-          if (dir) showToast('已匯出至：' + dir.split(/[\\/]/).pop());
-        });
-      } else {
-        const str = JSON.stringify(presets, null, 2);
-        const bytes = new TextEncoder().encode(str);
-        const name = `presets_${new Date().toISOString().replace(/\\D/g,'').slice(0,14)}.json`;
-        downloadBytes(bytes, name, 'application/json'); showToast('已匯出樣式設定');
-      }
-      return;
-    }
-    if(impB){
-      if(IS_DESKTOP && DESK.importDirectory){
-        DESK.importDirectory().then(files => {
-          if(!files || !files.length) return;
-          const all = [];
-          for (const f of files) {
-            try { 
-              const str = new TextDecoder().decode(b64ToBytes(f.b64));
-              const j = JSON.parse(str); 
-              
-              // Extract OS folder from path if it exists
-              // f.name is a relative path like "My Folder/style.json"
-              const parts = (f.name || '').replace(/\\/g, '/').split('/');
-              const osFolder = parts.length > 1 ? parts[0] : null;
-
-              const items = Array.isArray(j) ? j : [j];
-              items.forEach(p => {
-                 if (osFolder) p.group = osFolder; // Map OS folder to UI folder
-                 all.push(p);
-              });
-            } catch(e){}
-          }
-          if (all.length) _importPresets(all);
-        });
-      }else{
-        const fi=document.createElement('input'); fi.type='file'; fi.accept='.json'; fi.multiple=true;
-        fi.onchange=async()=>{
-          if(!fi.files.length)return;
-          const all = [];
-          for (const f of Array.from(fi.files)) {
-            try { const j = JSON.parse(await f.text()); if (Array.isArray(j)) all.push(...j); else all.push(j); } catch(e){}
-          }
-          if (all.length) _importPresets(all);
-        };
-        fi.click();
-      }
-      return;
-    }
-    if(editB){ _presetEditBegin(+editB.dataset.preEdit); return; }
-    if(applyB){ const p=getAllPresets()[+applyB.dataset.preApply]; const t=StylePanelController.styleTarget();
-      if(p&&t){
-        if(t.cues.length){
-          for(const c of t.cues){
-            applyCueStylePatch(c, p.style);
-          }
-        } else Object.assign(t.trk,p.style);
-        styleChanged(); recordHistory('套用常用樣式：'+p.name); showToast('已套用：'+p.name); } return; }
-    if(renB){ 
-      const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;
-      const groups = [...new Set(l.filter(x=>x.group).map(x=>x.group))];
-      const groupOpts = groups.map(g => `<option value="${escapeHTML(g)}">`).join('');
-      
-      openModal('編輯名稱與資料夾',
-        `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">資料夾 (選填，可直接修改)</div>`+
-        `<input type="text" id="__presetGroupRen" list="__presetGroupListRen" value="${escapeHTML(p.group||'')}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`+
-        `<datalist id="__presetGroupListRen">${groupOpts}</datalist>`+
-        `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">樣式名稱</div>`+
-        `<input type="text" id="__presetNameRen" value="${escapeHTML(p.name)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
-        [
-          { label: '儲存', primary: true, act: () => {
-            const nn = ($('__presetNameRen')?.value || '').trim();
-            const ng = ($('__presetGroupRen')?.value || '').trim();
-            if(!nn) { showToast('名稱不可為空'); return; }
-            if(isBuiltinPresetName(nn)){ showToast('這是內建樣式的保留名稱，請換一個'); return; }
-            
-            const ex = l.find(x => x !== p && x.name === nn && (x.group||'') === ng);
-            if (ex) {
-              showToast('該資料夾中已有同名的樣式，請換一個名稱');
-              return; 
-            }
-            
-            p.name=nn; 
-            if(ng) p.group=ng; else delete p.group;
-            
-            savePresets(l); StylePanelController.renderTrackStyle(); refreshStyleSummaries(); 
-            openPresetMgr(); // 重新開啟管理視窗
-          }},
-          { label: '取消', act: openPresetMgr }
-        ]
-      );
-      setTimeout(() => { const el = $('__presetNameRen'); if(el){ el.focus(); el.select(); } }, 30);
-      return; 
-    }
-    if(delB){ const l=[...getPresets()]; l.splice(+delB.dataset.preDel,1); savePresets(l); StylePanelController.renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); showToast('已刪除'); }
-  });
-}
 
 function openNoteInPanel(n){
   $('notesPanel').classList.add('show');
@@ -1198,9 +920,10 @@ async function initDesktop(){
     }
     if(d.done) {
       delete _taskStarts[d.jobId];
-      setStatus((d.label||'轉檔')+'完成', 'ok', 'unlock');
+      const succeeded = d.outcome === 'success';
+      setStatus((d.label||'轉檔')+(succeeded?'完成':'失敗'), succeeded?'ok':'err', 'unlock');
       if ($('stMedia')) $('stMedia').style.display = ''; // 恢復顯示
-      window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:d}));
+      if(succeeded) window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:d}));
     }
   });
   
@@ -1211,18 +934,21 @@ async function initDesktop(){
      使用者連一句提示都看不到。 */
   const handleStartupFile = async (incoming, { fromLaunch = false } = {}) => {
     if (!incoming) return;
-    if (!fromLaunch && !await confirmDiscardUnsaved()) return;
     try {
-      const opened = typeof incoming === 'object' && typeof incoming.path === 'string'
-        ? incoming
-        : { path: incoming, b64: await DESK.readB64(incoming) };
-      if (opened.b64) Project.loadDesktop(opened);
-      else setStatus('無法讀取專案檔內容');
-    } catch(e) { console.error(e); }
+      await Project.open(async () => {
+        const file = await incoming;
+        if (!file) return null;
+        const opened = typeof file === 'object' && typeof file.path === 'string'
+          ? file
+          : { path: file, b64: await DESK.readB64(file) };
+        if (!opened.b64) throw new Error('無法讀取專案檔內容');
+        return opened;
+      }, { confirm: !fromLaunch });
+    } catch(e) { console.error(e); setStatus(e?.message || '無法讀取專案檔內容','err'); }
   };
 
   if (DESK.getStartupFile) {
-    DESK.getStartupFile().then(file => handleStartupFile(file, { fromLaunch: true }));
+    void handleStartupFile(DESK.getStartupFile(), { fromLaunch: true });
   }
   if (DESK.onOpenFile) {
     DESK.onOpenFile(file => handleStartupFile(file));

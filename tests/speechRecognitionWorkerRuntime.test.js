@@ -82,9 +82,20 @@ describe('本機 ASR Worker runtime 規則', () => {
       max_new_tokens: BUILTIN_ASR_RUNTIME.maxNewTokens,
       language: 'zh',
       task: 'transcribe',
-      streamer
+      streamer,
+      do_sample: false
     });
     expect(BUILTIN_ASR_RUNTIME.maxNewTokens).toBe(256);
+  });
+
+  it('正溫度啟用sampling；零或無效溫度不傳入禁止為零的warper',()=>{
+    expect(buildBuiltinGenerationOptions({temperature:0.5})).toMatchObject({do_sample:true,temperature:0.5});
+    expect(buildBuiltinGenerationOptions({temperature:2})).toMatchObject({do_sample:true,temperature:1});
+    for(const temperature of [0,-1,NaN,Infinity]){
+      const options=buildBuiltinGenerationOptions({temperature});
+      expect(options.do_sample).toBe(false);
+      expect(options).not.toHaveProperty('temperature');
+    }
   });
 
   it('支援指定 returnTimestamps 為 true 以使用原生時間戳記', () => {

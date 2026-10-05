@@ -2,11 +2,12 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
+const { createAudioNormalizationRuntime } = require('../electron/audio-normalization-runtime.js');
 
 const tempRoots = [];
 
@@ -31,6 +32,111 @@ afterEach(() => {
 });
 
 describe('FFmpeg execution', () => {
+  it('關閉時取消音訊 Pass 1，即使 close 回傳成功也不能啟動 Pass 2', async () => {
+    const root = makeTempRoot();
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn();
+    const spawnDirect = vi.fn(() => child);
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg', getUserDataDir: () => root, spawnDirect });
+    const signalOwner = new AbortController();
+    const removeFile = vi.fn();
+    const runtime = createAudioNormalizationRuntime({
+      createTempPath: () => path.join(root, 'normalized.wav'),
+      execute: (args, options) => execution.execute(args, { ...options, executionKind: 'direct' }),
+      removeFile,
+    });
+    const work = runtime.normalize('master.wav', { isTruePeak: true }, { signal: signalOwner.signal }).catch(error => error);
+    signalOwner.abort();
+    const closing = execution.cancelAllAndWait();
+    child.emit('close', 0);
+    await expect(work).resolves.toMatchObject({ name: 'AbortError' });
+    await closing;
+    expect(spawnDirect).toHaveBeenCalledOnce();
+    expect(removeFile).toHaveBeenCalledWith(path.join(root, 'normalized.wav'));
+  });
+
+  it('shutdown 統一終止 direct child，close 前不結束且拒絕新工作', async () => {
+    const root = makeTempRoot();
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn();
+    const spawnDirect = vi.fn(() => child);
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg', getUserDataDir: () => root, spawnDirect });
+    const work = execution.execute(['-version'], { executionKind: 'direct' }).catch(error => error);
+    let finished = false;
+    const shutdown = execution.cancelAllAndWait().then(() => { finished = true; });
+    expect(child.kill).toHaveBeenCalledOnce();
+    await expect(execution.execute(['-version'], { executionKind: 'direct' })).rejects.toMatchObject({ code: 'FFMPEG_SHUTTING_DOWN' });
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    child.emit('close', null);
+    await work;
+    await shutdown;
+    expect(finished).toBe(true);
+    expect(spawnDirect).toHaveBeenCalledOnce();
+  });
+
+  it('error 事件尚未 close 時保留 native ownership；shutdown timeout 明確拒絕', async () => {
+    const root = makeTempRoot();
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn();
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg', getUserDataDir: () => root, spawnDirect: () => child });
+    let settled = false;
+    const failure = new Error('spawn/runtime failed');
+    const work = execution.execute(['-version'], { executionKind: 'direct' }).catch(error => { settled = true; return error; });
+    child.emit('error', failure);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await expect(execution.cancelAllAndWait({ timeoutMs: 20 })).rejects.toMatchObject({ code: 'FFMPEG_TERMINATION_PENDING' });
+    expect(execution.resume()).toBe(false);
+    child.emit('close', 1);
+    await expect(work).resolves.toBe(failure);
+    await execution.cancelAllAndWait();
+    expect(execution.resume()).toBe(true);
+  });
+
+  it('缺少明確執行種類或 watchdog 必要資料時直接拒絕，不啟動任何程序', async () => {
+    const userDataDir = makeTempRoot();
+    let queueDir = null;
+    let spawned = 0;
+    const execution = createFFmpegExecution({
+      getFFmpegPath: () => 'ffmpeg-test',
+      getUserDataDir: () => userDataDir,
+      getQueueDir: () => queueDir,
+      spawnDirect() { spawned++; throw new Error('不可啟動 direct'); },
+      spawnWatchdog() { spawned++; throw new Error('不可啟動 watchdog'); },
+    });
+    const outPath = path.join(userDataDir, 'delivery.mov');
+    await expect(execution.execute([outPath], { jobId: 'export-legacy', outPath }))
+      .rejects.toThrow(/executionKind/);
+    await expect(execution.execute([outPath], { executionKind: 'unknown', jobId: 'export-legacy', outPath }))
+      .rejects.toThrow(/executionKind/);
+    await expect(execution.execute([outPath], { executionKind: 'queued-delivery', jobId: 'delivery-abc', outPath }))
+      .rejects.toThrow(/佇列目錄/);
+    queueDir = path.join(userDataDir, 'export-queue');
+    await expect(execution.execute([outPath], { executionKind: 'queued-delivery', jobId: 'delivery-abc' }))
+      .rejects.toThrow(/輸出路徑/);
+    await expect(execution.execute([outPath], { executionKind: 'queued-delivery', outPath }))
+      .rejects.toThrow(/工作識別/);
+    expect(spawned).toBe(0);
+  });
+
+  it('直接執行不會因工作 ID 帶 export- 前綴而切到 watchdog', async () => {
+    const userDataDir = makeTempRoot();
+    let directCalls = 0;
+    const execution = createFFmpegExecution({
+      getFFmpegPath: () => 'ffmpeg-test',
+      getUserDataDir: () => userDataDir,
+      getQueueDir: () => path.join(userDataDir, 'export-queue'),
+      spawnDirect() { directCalls++; return directProcess('', 0); },
+      spawnWatchdog() { throw new Error('直接執行不可啟動 watchdog'); },
+    });
+    await execution.execute(['-version'], { executionKind: 'direct', jobId: 'export-preview' });
+    expect(directCalls).toBe(1);
+  });
+
   it.each([
     ['dvd-iso', '.iso', 47.5],
     ['bd-iso', '.iso', 47.5],
@@ -51,7 +157,7 @@ describe('FFmpeg execution', () => {
       },
     });
     await execution.execute([outPath], {
-      duration: 10, jobId: `export-${format}`, outPath, outputFormat: format,
+      executionKind: 'queued-delivery', duration: 10, jobId: `export-${format}`, outPath, outputFormat: format,
       onProgress: event => progress.push(event),
     });
     expect(progress).toContainEqual(expect.objectContaining({ pct: expected }));
@@ -79,6 +185,7 @@ describe('FFmpeg execution', () => {
     });
 
     const outcome = await execution.execute(['-i', 'master.mxf', 'proxy.mp4'], {
+      executionKind: 'direct',
       duration: 10,
       jobId: 'proxy',
       label: '轉檔預覽影片',
@@ -98,7 +205,7 @@ describe('FFmpeg execution', () => {
       jobId: 'proxy',
       label: '轉檔預覽影片',
       pct: 50,
-    })]);
+    }), expect.objectContaining({ jobId: 'proxy', done: true, outcome: 'success', pct: 100 })]);
     expect(outcome.maps).toEqual(['h264 (native) -> h264 (libx264)']);
     expect(outcome.tail).toContain('time=00:00:05.00');
     expect(stderr.join('')).toBe(outcome.tail);
@@ -134,8 +241,9 @@ describe('FFmpeg execution', () => {
     });
 
     const outcome = await execution.execute(['-i', 'master.mxf', outPath], {
+      executionKind: 'queued-delivery',
       duration: 12,
-      jobId: 'export-abc',
+      jobId: 'delivery-abc',
       label: '匯出 ProRes',
       outPath,
       cwd: userDataDir,
@@ -147,7 +255,7 @@ describe('FFmpeg execution', () => {
       args: ['-i', 'master.mxf', outPath],
       cwd: userDataDir,
       outPath,
-      jobId: 'export-abc',
+      jobId: 'delivery-abc',
       queueDir,
     })]);
     expect(owned).toEqual([controller]);
@@ -181,7 +289,7 @@ describe('FFmpeg execution', () => {
       },
     });
 
-    await execution.execute(['-version'], { jobId: 'probe' });
+    await execution.execute(['-version'], { executionKind: 'direct', jobId: 'probe' });
 
     expect(logErrors).toEqual([{
       logPath: expect.stringMatching(/export-\d+-probe\.log$/),
@@ -205,7 +313,7 @@ describe('FFmpeg execution', () => {
       },
     });
     await execution.execute([outPath], {
-      jobId: 'export-air', outPath, outputFormat: 'airline-dmpes',
+      executionKind: 'queued-delivery', jobId: 'export-air', outPath, outputFormat: 'airline-dmpes',
       outputPaths: [path.join(userDataDir, 'unrelated.txt')],
     });
     expect(config.outPath).toBe(outPath);
@@ -232,6 +340,7 @@ describe('FFmpeg execution', () => {
     });
 
     await expect(execution.execute(['-i', 'master.mxf', outPath], {
+      executionKind: 'queued-delivery',
       jobId: 'export-busy',
       outPath,
     })).rejects.toMatchObject({

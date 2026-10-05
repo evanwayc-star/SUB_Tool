@@ -705,7 +705,7 @@ function createExportQueue(deps) {
       }
       if (job.status !== JOB_STATUS.RUNNING) return false;
       const active = activeJobs.get(jobId);
-      if (!active?.p) return false;
+      if (!active || (!active.p && typeof active.stop !== 'function')) return false;
       const committed = mutatePersistedJob(jobId, current => state.stop(current.id));
       if (!committed.ok) {
         if (committed.error) log(`無法保存工作 ${jobId} 的停止狀態：`, committed.error);
@@ -962,7 +962,7 @@ function createExportQueue(deps) {
         const runner = activeQueueRunners.get(job.id);
         if (runner) closingRunners.push(Promise.resolve(runner).catch(() => {}));
         const active = activeJobs.get(job.id);
-        if (!active?.p) continue;
+        if (!active || (!active.p && typeof active.stop !== 'function')) continue;
         const alreadyStopped = !!active.stopped;
         if (!alreadyStopped) active.shutdown = true;
         if (typeof active.stop === 'function') {

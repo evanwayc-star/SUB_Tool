@@ -7,7 +7,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 vi.mock('../src/menus.js', () => ({ showCtx: () => {} }));
 import { State } from '../src/state.js';
-import { parseTimecodeInput } from '../src/tcparse.js';
+import { parseTimecodeInput, setupTimecodeInput } from '../src/tcparse.js';
+import { encoreToSec, getExactFps } from '../src/time.js';
 
 describe('parseTimecodeInput 絕對時碼（非 DF）', () => {
   beforeEach(() => { State.fps = 24; State.dropFrame = false; });
@@ -48,5 +49,38 @@ describe('parseTimecodeInput Drop-frame', () => {
   it('DF 時碼經 encoreToSec 反推', () => {
     // frame 1800 -> 00:01:00;02 -> 1800*1001/30000
     expect(parseTimecodeInput('00:01:00;02')).toBeCloseTo((1800 * 1001) / 30000, 4);
+  });
+});
+
+describe('時間碼輸入真實按鍵與影格格網', () => {
+  it.each([
+    [29.97, true, '00:00:59;29', 'ArrowUp', '00:01:00;02'],
+    [29.97, true, '00:01:00;02', 'ArrowDown', '00:00:59;29'],
+    [59.94, true, '00:00:59;59', 'ArrowUp', '00:01:00;04'],
+    [59.94, true, '00:01:00;04', 'ArrowDown', '00:00:59;59'],
+    [29.97, true, '00:09:59;29', 'ArrowUp', '00:10:00;00'],
+    [59.94, true, '00:09:59;59', 'ArrowUp', '00:10:00;00'],
+    [29.97, false, '00:00:59:29', 'ArrowUp', '00:01:00:00'],
+    [24, false, '00:00:00:00', 'ArrowDown', '00:00:00:00'],
+  ])('%s DF=%s %s %s → %s', (fps, df, before, key, after) => {
+    State.fps = fps; State.dropFrame = df;
+    const input = document.createElement('input');
+    input.value = before; input.setSelectionRange(10, 10);
+    setupTimecodeInput(input);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key, cancelable: true }));
+    expect(input.value).toBe(after);
+    expect(input.selectionStart).toBe(10);
+    const actualStep = Math.round((encoreToSec(input.value, fps, df) - encoreToSec(before, fps, df)) * getExactFps(fps));
+    expect(actualStep).toBe(before === after ? 0 : key === 'ArrowUp' ? 1 : -1);
+  });
+
+  it.each([[29.97, '00:00:00;00', 4, '00:01:00;02'], [59.94, '+00:00:59;00', 8, '+00:01:00;04']])('秒或分微調也只產生有效 DF 標籤', (fps, before, cursor, expected) => {
+    State.fps = fps; State.dropFrame = true;
+    const input = document.createElement('input');
+    input.value = before; input.setSelectionRange(cursor, cursor);
+    setupTimecodeInput(input);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', cancelable: true }));
+    expect(input.value).toBe(expected);
+    expect(input.selectionStart).toBe(cursor);
   });
 });

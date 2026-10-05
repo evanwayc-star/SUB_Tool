@@ -86,6 +86,10 @@ function planClipGesturePreview({
     in: inPoint,
     out: outPoint,
     vtrack: Number(original.vtrack) || 0,
+    ...(original.fadeSourceLength != null ? {
+      fadeSourceOffset: Number.isFinite(Number(original.fadeSourceOffset)) ? Math.max(0, Number(original.fadeSourceOffset)) : 0,
+      fadeSourceLength: original.fadeSourceLength,
+    } : {}),
     snapTarget: null,
   };
 
@@ -130,6 +134,8 @@ function planClipGesturePreview({
     result.offset = left;
     if (original.type === 'image') result.out = outPoint - delta;
     else result.in = Math.max(0, inPoint + delta);
+    // 原窗屬母段：保留內容的修剪須沿用原時間位置，影片與圖片都一樣。
+    if (result.fadeSourceLength != null) result.fadeSourceOffset = Math.max(0, result.fadeSourceOffset + delta);
     return Object.freeze(result);
   }
 
@@ -415,21 +421,35 @@ let activeLifecycle = null;
 function beginTimelineGestureLifecycle({ mode, targets = [], context = {}, effects = {} } = {}) {
   if (activeLifecycle?.isActive()) activeLifecycle.cancel({ cancelReason: 'replaced' });
   const transaction = beginTimelineGesture({ targets });
+  // mousedown 與首個 preview 之間也可能完成背景編輯，投影不能把它當成手勢寫入。
+  transaction.rememberPreview();
   const kind = gestureKind(mode);
   const intent = freezeIntent(mode, kind, targets, context);
   let active = true;
   let lifecycle = null;
+  const endPreview=effects.beginPreview?.(targets.map(entry=>({
+    ...entry,
+    ownsField:field=>entry.ownsField?.(field)!==false && transaction.ownsField(entry.target,field),
+  })));
+  const owns = () => !endPreview || endPreview.isCurrent();
+  const canEdit=()=>effects.canEdit?.()!==false && transaction.isCurrent();
 
   function startPreview(startEffect) {
     if (!active || transaction.hasMoved()) return false;
+    if(!owns() || !canEdit()){ cancel(); return false; }
     transaction.markMoved();
-    if (typeof startEffect === 'function') startEffect();
+    if (typeof startEffect === 'function') {
+      startEffect();
+      transaction.rememberPreview();
+    }
     return true;
   }
 
   function preview(previewEffect) {
     if (!active || typeof previewEffect !== 'function') return false;
+    if(!owns() || !canEdit()){ cancel(); return false; }
     previewEffect();
+    transaction.rememberPreview();
     return true;
   }
 
@@ -447,6 +467,8 @@ function beginTimelineGestureLifecycle({ mode, targets = [], context = {}, effec
 
   function commit(commitEffect) {
     if (!active) return { committed: false, moved: false };
+    if (!owns() || !canEdit()) { cancel(); return { committed:false,moved:false }; }
+    endPreview?.();
     if (typeof commitEffect === 'function') commitEffect({ mode, moved: transaction.hasMoved() });
     const moved = transaction.commit();
     active = false;
@@ -456,8 +478,10 @@ function beginTimelineGestureLifecycle({ mode, targets = [], context = {}, effec
 
   function cancel(extraContext = {}) {
     if (!active) return { cancelled: false, restored: false };
+    const current=owns();
+    endPreview?.();
     const result = cancelTimelineGesture(
-      { ...context, ...extraContext, mode, kind, transaction },
+      { ...context, ...extraContext, mode, kind, transaction:current ? transaction : null },
       effects,
     );
     active = false;
@@ -474,6 +498,7 @@ function beginTimelineGestureLifecycle({ mode, targets = [], context = {}, effec
     commit,
     cancel,
     addRollback: rollback => transaction.addRollback(rollback),
+    addPreviewTarget: (target,fields,options) => endPreview?.addTarget(target,fields,options),
     addCancelEffect: effect => transaction.addCancelEffect(effect),
     hasMoved: () => transaction.hasMoved(),
     isActive: () => active,

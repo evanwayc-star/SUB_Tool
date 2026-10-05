@@ -110,6 +110,23 @@ function udfVolumeLabel(field) {
   return field.toString('latin1', 1, length).replace(/\0+$/, '');
 }
 
+function validUdfTag(descriptor, id, sector) {
+  if (descriptor.readUInt16LE(0) !== id || descriptor.readUInt32LE(12) !== sector) return false;
+  let tagSum = 0;
+  for (let index = 0; index < 16; index++) {
+    if (index !== 4) tagSum = (tagSum + descriptor[index]) & 255;
+  }
+  if (tagSum !== descriptor[4]) return false;
+  const crcLength = descriptor.readUInt16LE(10);
+  if (!crcLength || crcLength > descriptor.length - 16) return false;
+  let crc = 0;
+  for (let index = 16; index < 16 + crcLength; index++) {
+    crc ^= descriptor[index] << 8;
+    for (let bit = 0; bit < 8; bit++) crc = ((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0)) & 0xffff;
+  }
+  return crc === descriptor.readUInt16LE(8);
+}
+
 async function verifyDiscIso(format, outPath) {
   const spec = discFormat(format);
   const file = await fs.open(outPath, 'r');
@@ -124,7 +141,7 @@ async function verifyDiscIso(format, outPath) {
     }
     const anchor = Buffer.alloc(2048);
     const anchorRead = await file.read(anchor, 0, anchor.length, 256 * 2048);
-    if (anchorRead.bytesRead !== anchor.length || anchor.readUInt16LE(0) !== 2) {
+    if (anchorRead.bytesRead !== anchor.length || !validUdfTag(anchor, 2, 256)) {
       throw fail('INVALID_DISC_ISO', '光碟映像缺少 UDF anchor');
     }
     const sequenceBytes = anchor.readUInt32LE(16), sequenceStart = anchor.readUInt32LE(20) * 2048;
@@ -138,6 +155,9 @@ async function verifyDiscIso(format, outPath) {
       const read = await file.read(descriptor, 0, descriptor.length, sequenceStart + offset);
       if (read.bytesRead !== descriptor.length) throw fail('INVALID_DISC_ISO', 'UDF 描述區不完整');
       if (descriptor.readUInt16LE(0) !== 6) continue;
+      if (!validUdfTag(descriptor, 6, sequenceStart / 2048 + offset / 2048)) {
+        throw fail('INVALID_DISC_ISO', 'UDF logical volume 描述符校驗失敗');
+      }
       if (descriptor.readUInt32LE(212) !== 2048 || descriptor.toString('ascii', 217, 236) !== '*OSTA UDF Compliant') {
         throw fail('INVALID_DISC_ISO', 'UDF logical volume 無效');
       }

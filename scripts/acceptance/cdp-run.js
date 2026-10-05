@@ -16,8 +16,7 @@
 ============================================================================== */
 const fs = require('fs');
 const path = require('path');
-const http = require('http');
-const WebSocket = require('ws');
+const { CdpClient, getJSON } = require('./cdp-electron-harness');
 
 const file = process.argv[2];
 const port = Number(process.argv[3] || 9223);
@@ -27,84 +26,63 @@ if (!file) {
 }
 const source = fs.readFileSync(path.resolve(file), 'utf8');
 
-const getJSON = url => new Promise((resolve, reject) => {
-  http.get(url, res => {
-    let body = '';
-    res.on('data', d => { body += d; });
-    res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
-  }).on('error', reject);
-});
-
 (async () => {
   /* 一律用 127.0.0.1：Windows 上 localhost 會先解析成 IPv6 ::1，
      而 Electron 的偵錯連接埠只綁 IPv4，連 ::1 會直接 ERR_CONNECTION_CLOSED。 */
   const targets = await getJSON(`http://127.0.0.1:${port}/json/list`).catch(err => {
-    console.error(`連不上 127.0.0.1:${port} —— app 有用 --remote-debugging-port=${port} 啟動嗎？`);
-    console.error(err.message);
-    process.exit(1);
+    throw new Error(`連不上 127.0.0.1:${port} —— app 有用 --remote-debugging-port=${port} 啟動嗎？${err.message}`);
   });
 
   const page = targets.find(t => t.type === 'page' && /index\.html/.test(t.url || ''));
   if (!page) {
-    console.error('找不到 SUB Tool 的主頁面。目前的目標：');
-    targets.forEach(t => console.error(`  [${t.type}] ${t.url}`));
-    process.exit(1);
+    throw new Error(`找不到 SUB Tool 的主頁面。目前的目標：\n${targets.map(t => `  [${t.type}] ${t.url}`).join('\n')}`);
   }
   console.log(`→ 連上 ${page.title || page.url}\n`);
 
-  const ws = new WebSocket(page.webSocketDebuggerUrl, { perMessageDeflate: false });
-  let id = 0;
-  const pending = new Map();
-  const send = (method, params = {}) => new Promise((resolve, reject) => {
-    const msgId = ++id;
-    pending.set(msgId, { resolve, reject });
-    ws.send(JSON.stringify({ id: msgId, method, params }));
-  });
+  const client = new CdpClient(page.webSocketDebuggerUrl);
+  try {
+    await client.connect();
+    client.ws.on('message', raw => {
+      const msg = JSON.parse(raw);
+      if (msg.id) return; // 指令回覆由共用 CdpClient 配對；這裡只轉發頁面事件。
+      /* 把頁面裡的 console 轉發到終端機——驗證腳本的表格就是這樣印出來的。
+         %c 樣式參數在終端機沒有意義，濾掉。 */
+      if (msg.method === 'Runtime.consoleAPICalled') {
+        const args = (msg.params.args || [])
+          .filter(a => !(typeof a.value === 'string' && /^(color|background|font-weight):/.test(a.value)))
+          .map(a => (a.value !== undefined ? a.value : (a.description || '')))
+          .join(' ')
+          .replace(/%c/g, '');
+        if (args.trim()) console.log(args);
+      }
+      if (msg.method === 'Runtime.exceptionThrown') {
+        console.error('！頁面丟出例外：', msg.params.exceptionDetails?.exception?.description
+          || msg.params.exceptionDetails?.text);
+      }
+    });
 
-  ws.on('message', raw => {
-    const msg = JSON.parse(raw);
-    if (msg.id && pending.has(msg.id)) {
-      const { resolve, reject } = pending.get(msg.id);
-      pending.delete(msg.id);
-      msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
-      return;
+    await client.send('Runtime.enable');
+    const result = await client.send('Runtime.evaluate', {
+      expression: source,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true,
+    });
+
+    if (result.exceptionDetails) {
+      throw new Error(`執行失敗：${result.exceptionDetails.exception?.description
+        || result.exceptionDetails.text}`);
     }
-    /* 把頁面裡的 console 轉發到終端機——驗證腳本的表格就是這樣印出來的。
-       %c 樣式參數在終端機沒有意義，濾掉。 */
-    if (msg.method === 'Runtime.consoleAPICalled') {
-      const args = (msg.params.args || [])
-        .filter(a => !(typeof a.value === 'string' && /^(color|background|font-weight):/.test(a.value)))
-        .map(a => (a.value !== undefined ? a.value : (a.description || '')))
-        .join(' ')
-        .replace(/%c/g, '');
-      if (args.trim()) console.log(args);
+    if (result.result && result.result.value !== undefined) {
+      console.log('\n=== 回傳值 ===');
+      console.log(JSON.stringify(result.result.value, null, 2));
     }
-    if (msg.method === 'Runtime.exceptionThrown') {
-      console.error('！頁面丟出例外：', msg.params.exceptionDetails?.exception?.description
-        || msg.params.exceptionDetails?.text);
-    }
-  });
-
-  await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
-  await send('Runtime.enable');
-
-  const result = await send('Runtime.evaluate', {
-    expression: source,
-    awaitPromise: true,
-    returnByValue: true,
-    userGesture: true,
-  });
-
-  if (result.exceptionDetails) {
-    console.error('\n！執行失敗：', result.exceptionDetails.exception?.description
-      || result.exceptionDetails.text);
-    ws.close();
-    process.exit(1);
+    // consoleAPICalled 非同步送達，保留短暫等待以顯示最後幾行。
+    await new Promise(resolve => setTimeout(resolve, 400));
+  } finally {
+    client.close();
   }
-  if (result.result && result.result.value !== undefined) {
-    console.log('\n=== 回傳值 ===');
-    console.log(JSON.stringify(result.result.value, null, 2));
-  }
-  /* consoleAPICalled 是非同步送達的，關太快會漏掉最後幾行。 */
-  setTimeout(() => { ws.close(); process.exit(0); }, 400);
-})();
+})().catch(error => {
+  console.error(`CDP 驗收失敗：${error.message}`);
+  process.exitCode = 1;
+});

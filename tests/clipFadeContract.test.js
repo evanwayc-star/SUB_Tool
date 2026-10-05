@@ -102,6 +102,19 @@ describe('片段淡入淡出跨行程契約：預覽規格 ↔ 匯出 filtergrap
     expect(got.vOut).toHaveLength(0);
   });
 
+  it('切割後兩半依原始淡化時鐘保持整段 opacity，原窗非有限值安全回退', () => {
+    const original={...clip({out:10,fadeIn:6,fadeOut:6})};
+    const left={...original,out:5,fadeSourceOffset:0,fadeSourceLength:10};
+    const right={...original,in:5,offset:5,fadeSourceOffset:5,fadeSourceLength:10};
+    for(const t of [0,1,4,4.9,5,5.1,6,9,10]){
+      expect(fadeAlphaAtTimeline(t<=5?left:right,t)).toBeCloseTo(fadeAlphaAtTimeline(original,t),6);
+    }
+    const invalid={...original,fadeSourceOffset:Infinity,fadeSourceLength:Infinity};
+    expect(fadeWindow(invalid)).toEqual(fadeWindow(original));
+    expect(fadeAlphaAtTimeline(invalid,2)).toBeCloseTo(fadeAlphaAtTimeline(original,2),6);
+    expect(argvFor(invalid).join(' ')).not.toContain('Infinity');
+  });
+
   it('長度為 0 的片段兩邊都夾到 0.001，不會除以零也不會出現 d=0', () => {
     const c = clip({ in: 5, out: 5, fadeIn: 1 });
     expect(clipLength(c)).toBe(0.001);

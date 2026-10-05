@@ -345,7 +345,9 @@ export const Wave = {
     if(!sourceIsCurrent()) return false;
     const ab=await AudioEngine.decodeAudioData(buf.slice(0));
     if(!sourceIsCurrent()) return false;
-    if(ab.duration>State.duration){State.duration=ab.duration;emit('duration:known');}
+    // 波形使用完整來源時間；時間軸長度由 trim/offset 的 owner 決定。
+    if(source&&typeof source==='object') Media.recomputeTimelineDuration?.();
+    else if(ab.duration>State.duration){State.duration=ab.duration;emit('duration:known');}
     if(!sourceIsCurrent()) return false;
     this.setSourceBuffer(currentSource(),ab); emit('media:timeline');
     setStatus('波形已產生','ok');

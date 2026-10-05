@@ -35,10 +35,10 @@ import { selectCue, refreshSelectionUI, renderSubRow } from './subtitles.js';
 import { sortCues, sweepContainedCues, trackLocked, cueTrackLocked } from './subtitle-model.js';
 import { encoreParts, snapTimeToFrame, fmtClock, secToSRT, secToASS, secToEncore, getExactFps } from './time.js';
 import { emit } from './events.js';
-import { isProjectGuardDone, ensureProjectSaved } from './project.js';
+import { isProjectGuardDone, ensureProjectSaved, Project } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
-import { recordHistory } from './history.js';
+import { History, recordHistory } from './history.js';
 import { refreshMpvSubs } from './video-renderer.js';
 import { subtitlePreviewIndex } from './subtitle-preview-index.js';
 import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
@@ -254,6 +254,8 @@ function renderTrackRows(){
   tlTracks.innerHTML='';
   const gut=$('tlGutterTracks'); if(gut)gut.innerHTML='';
   for(let tk=0;tk<State.trackCount;tk++){
+    const meta=State.tracks[tk];
+    const update=(field,value)=>updateTimelineTrack({kind:'subtitle',index:State.tracks.indexOf(meta),expectedTarget:meta,field,value});
     const vis=trackVisible(tk);
     const row=document.createElement('div');
     row.className='tl-track'+(vis?'':' hidden-tk')+(tk===State.listTrack?' tl-active':''); row.style.height=trackH(tk)+'px'; row.dataset.track=tk;
@@ -269,7 +271,7 @@ function renderTrackRows(){
         `<button class="glock${isLocked?' locked':''}" title="${isLocked?'解鎖':'鎖定'}此軌">${isLocked?'🔒':'🔓'}</button>`;
       g.querySelector('.eye').onclick=(e)=>{
         e.stopPropagation();
-        updateTimelineTrack({kind:'subtitle',index:tk,field:'visible',value:!vis});
+        update('visible',meta.visible===false);
       };
       g.addEventListener('click', e => {
         if (e.target.closest('.eye,.glock,.gdel,.drag-handle') || nm.contentEditable === 'true') return;
@@ -291,16 +293,16 @@ function renderTrackRows(){
           try{const r=document.createRange(),s=window.getSelection();r.selectNodeContents(nm);s.removeAllRanges();s.addRange(r);}catch(_){}
         }
       });
-      nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=State.tracks[tk].name;nm.blur();} };
+      nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
       nm.onblur=()=>{
         nm.contentEditable='false';
-        updateTimelineTrack({kind:'subtitle',index:tk,field:'name',value:nm.innerText});
+        update('name',nm.innerText);
       };
       g.querySelector('.glock').onclick=(e)=>{
         e.stopPropagation();
-        updateTimelineTrack({kind:'subtitle',index:tk,field:'locked',value:!State.tracks[tk].locked});
+        update('locked',!meta.locked);
       };
-      g.querySelector('.gdel').onclick=(e)=>{e.stopPropagation();removeTrack(tk);};
+      g.querySelector('.gdel').onclick=(e)=>{e.stopPropagation();removeTrack(State.tracks.indexOf(meta),meta);};
       // 高度縮放把手
       const resH=document.createElement('div');
       resH.className='tl-resize-handle';
@@ -309,12 +311,12 @@ function renderTrackRows(){
         const now=performance.now();
         if(_lastHandleClick.tk===tk && now-_lastHandleClick.t<400){
           _lastHandleClick={tk:-1,t:0};
-          updateTimelineTrack({kind:'subtitle',index:tk,field:'height',value:undefined});
+          update('height',undefined);
           return;
         }
         _lastHandleClick={tk,t:now};
         _rowResize={type:'track',tk,startY:e.clientY,startH:trackH(tk),
-          edit:beginTimelineTrackEdit({kind:'subtitle',index:tk,field:'height'})};
+          edit:beginTimelineTrackEdit({kind:'subtitle',index:State.tracks.indexOf(meta),expectedTarget:meta,field:'height',beginPreview:targets=>History.beginPreview(targets)})};
         document.addEventListener('mousemove',_onRowResizeMove);
         document.addEventListener('mouseup',_onRowResizeUp,{once:true});
       });
@@ -322,7 +324,7 @@ function renderTrackRows(){
       // 拖曳重排
       g.querySelector('.drag-handle').addEventListener('mousedown',e=>{
         e.preventDefault(); e.stopPropagation();
-        _trackDrag={fromTk:tk,g,gut:gut};
+        _trackDrag={track:meta,owns:Project.captureWorkspaceOwnership(),g,gut:gut};
         g.classList.add('tl-dragging');
         document.addEventListener('mousemove',_onTrackDragMove);
         document.addEventListener('mouseup',_onTrackDragUp,{once:true});
@@ -368,20 +370,22 @@ function _onTrackDragMove(e){
   const gutRect=gut.getBoundingClientRect();
   const relY=e.clientY-gutRect.top;
   let targetTk=clamp(yToTrack(relY),0,State.trackCount-1);
+  const fromTk=State.tracks.indexOf(_trackDrag.track);
   gut.querySelectorAll('.tl-gtrack').forEach((g,i)=>{
-    g.classList.toggle('tl-drag-target',i===targetTk&&i!==_trackDrag.fromTk);
+      g.classList.toggle('tl-drag-target',i===targetTk&&i!==fromTk);
   });
-  _trackDrag.toTk=targetTk;
+  _trackDrag.toTrack=State.tracks[targetTk];
 }
 function _onTrackDragUp(){
   document.removeEventListener('mousemove',_onTrackDragMove);
   if(!_trackDrag)return;
-  const {fromTk,toTk}=_trackDrag;
+  const {track,toTrack,owns}=_trackDrag;
+  const fromTk=State.tracks.indexOf(track),toTk=State.tracks.indexOf(toTrack);
   _trackDrag.g.classList.remove('tl-dragging');
   const gut=_trackDrag.gut;
   gut.querySelectorAll('.tl-gtrack').forEach(g=>g.classList.remove('tl-drag-target'));
   _trackDrag=null;
-  if(toTk!==undefined && toTk!==fromTk){
+  if(owns() && fromTk>=0 && toTk>=0 && toTk!==fromTk){
     // 重排 tracks 陣列
     const [moved]=State.tracks.splice(fromTk,1);
     State.tracks.splice(toTk,0,moved);
@@ -435,6 +439,17 @@ function _onRowResizeUp(){
   if(resize?.edit) resize.edit.commit();
   else drawTimeline();
 }
+function cancelRowResize(){
+  const resize=_rowResize;
+  if(!resize) return;
+  document.removeEventListener('mousemove',_onRowResizeMove);
+  document.removeEventListener('mouseup',_onRowResizeUp);
+  if(resize._raf) cancelAnimationFrame(resize._raf);
+  _rowResize=null;
+  resize.edit?.cancel();
+  drawTimeline();
+}
+if(typeof window!=='undefined') window.addEventListener('blur',cancelRowResize);
 /* 影片序列：把各段畫進「對應視訊軌列」（各軌獨立成列，比照字幕軌）。
    先在 tlVtracks 內建立每軌的列 .vtrack-row（由上而下：最高軌在最上面），再把片段放入其列。
    片段位置＝offset、寬＝修剪後長度；拖曳移動、拖邊緣修剪、右鍵選單。 */
@@ -864,6 +879,7 @@ function renderVtrackGutter(){
   for(let disp=0; disp<N; disp++){
     const v=N-1-disp;
     const meta=State.videoTracks[v]||(State.videoTracks[v]={name:'視訊軌 '+(v+1),visible:true,locked:false});
+    const update=(field,value)=>updateTimelineTrack({kind:'video',index:State.videoTracks.indexOf(meta),expectedTarget:meta,field,value});
     const vis=videoTrackVisible(v);
     const g=document.createElement('div');
     g.className='vgtrack'+(vis?'':' hidden-tk'); g.style.height=vtrackH(v)+'px'; g.dataset.vtrack=v;
@@ -889,7 +905,7 @@ function renderVtrackGutter(){
     });
     g.querySelector('.eye').onclick=(e)=>{
       e.stopPropagation();
-      updateTimelineTrack({kind:'video',index:v,field:'visible',value:!vis});
+      update('visible',meta.visible===false);
     };
     const nm=g.querySelector('.gname');
     nm.addEventListener('mousedown',e=>{
@@ -900,14 +916,14 @@ function renderVtrackGutter(){
     nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
     nm.onblur=()=>{
       nm.contentEditable='false';
-      updateTimelineTrack({kind:'video',index:v,field:'name',value:nm.innerText});
+      update('name',nm.innerText);
     };
     g.querySelector('.glock').onclick=(e)=>{
       e.stopPropagation();
-      updateTimelineTrack({kind:'video',index:v,field:'locked',value:!meta.locked});
+      update('locked',!meta.locked);
     };
-    g.querySelector('.gadd').onclick=(e)=>{ e.stopPropagation(); addVideoTrack(v+1); };
-    g.querySelector('.gdel').onclick=(e)=>{ e.stopPropagation(); removeVideoTrack(v); };
+    g.querySelector('.gadd').onclick=(e)=>{ e.stopPropagation(); const index=State.videoTracks.indexOf(meta);if(index>=0)addVideoTrack(index+1); };
+    g.querySelector('.gdel').onclick=(e)=>{ e.stopPropagation(); removeVideoTrack(State.videoTracks.indexOf(meta),meta); };
     const resH=document.createElement('div');
     resH.className='tl-resize-handle';
     resH.addEventListener('mousedown',e=>{
@@ -915,12 +931,12 @@ function renderVtrackGutter(){
       const now=performance.now();
       if(_lastHandleClick.tk==='v'+v && now-_lastHandleClick.t<400){
         _lastHandleClick={tk:-1,t:0};
-        updateTimelineTrack({kind:'video',index:v,field:'height',value:undefined});
+        update('height',undefined);
         return;
       }
       _lastHandleClick={tk:'v'+v,t:now};
       _rowResize={type:'vtrack',tk:v,startY:e.clientY,startH:vtrackH(v),
-        edit:beginTimelineTrackEdit({kind:'video',index:v,field:'height'})};
+        edit:beginTimelineTrackEdit({kind:'video',index:State.videoTracks.indexOf(meta),expectedTarget:meta,field:'height',beginPreview:targets=>History.beginPreview(targets)})};
       document.addEventListener('mousemove',_onRowResizeMove);
       document.addEventListener('mouseup',_onRowResizeUp,{once:true});
     });
@@ -936,22 +952,30 @@ function addVideoTrack(idx){
   Seq.sort(); drawTimeline(); recordHistory('新增視訊軌'); emit('render:videoSub');
 }
 /* 刪除指定視訊軌（連同其片段）；畫面列至少保留一軌，但主影片素材本身可被刪除。 */
-function removeVideoTrack(v){
+function removeVideoTrack(v,expectedTrack=State.videoTracks[v]){
+  if(!expectedTrack || State.videoTracks[v]!==expectedTrack || expectedTrack.locked) return;
   if(State.videoTracks.length<=1){ showToast('至少保留一條視訊軌'); return; }
   const clipsOn=State.clips.filter(c=>(c.vtrack||0)===v);
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
   const doRemove=()=>{
+    if(!ownsWorkspace() || expectedTrack.locked) return false;
+    v=State.videoTracks.indexOf(expectedTrack);
+    if(v<0 || State.videoTracks.length<=1) return false;
+    const current=State.clips.filter(c=>(c.vtrack||0)===v);
+    if(current.length!==clipsOn.length || !clipsOn.every(c=>current.includes(c))){showToast('軌道內容已變更，請重新確認刪除');return false;}
     for(const c of clipsOn) Media.removeClip(c.id);         // removeClip 會處理 Seq 與音軌清理
     for(const c of State.clips){ if((c.vtrack||0)>v) c.vtrack=(c.vtrack||0)-1; } // 上方軌下移一軌
     State.videoTracks.splice(v,1);
     if(!State.videoTracks.length) resetVideoTracks();
     Seq.sort(); Seq.recomputeDuration();
     drawTimeline(); recordHistory('刪除視訊軌'); emit('render:videoSub'); emit('mpv:refreshSubs');
+    return true;
   };
   if(clipsOn.length){
-    openModal(`刪除視訊軌「${escapeHTML(State.videoTracks[v].name)}」`,
+    const session=openModal(`刪除視訊軌「${escapeHTML(State.videoTracks[v].name)}」`,
       `<p>此視訊軌有 <b>${clipsOn.length}</b> 段影片，刪除後一併移除。確定繼續？</p>`,
-      [{label:'取消',act:closeModal},
-       {label:'確定刪除',primary:true,act:()=>{ closeModal(); doRemove(); }}]);
+      [{label:'取消',act:()=>session.close()},
+       {label:'確定刪除',primary:true,act:()=>{ if(session.isCurrent() && doRemove()) session.close({committed:true}); }}]);
   } else doRemove();
 }
 
@@ -1063,6 +1087,9 @@ function renderAtrackGutter(){
       const audioTarget = row.external
         ? (Media.externalAudio?.find?.(row.sourceId) || source)
         : source;
+      const previewTargets = row.external
+        ? State.externalAudioState.filter(item => item.id === audioTarget.id)
+        : State.clips.filter(item => clipAudioSourceId(item) === row.sourceId);
       _rowResize={
         type:'atrack',
         tk:row.sourceId,
@@ -1073,7 +1100,12 @@ function renderAtrackGutter(){
           id:row.sourceId,
           field:'height',
           target:audioTarget,
-          onApply:applyAudioHeight
+          onApply:applyAudioHeight,
+          beginPreview:targets=>History.beginPreview(previewTargets.map(target=>({
+            target, fields:['height'],
+            ownsField:targets[0].ownsField,
+            ...(row.external ? {resolveTarget:()=>State.externalAudioState.find(item=>item.id===target.id)} : {}),
+          })),()=>row.external ? Media.externalAudio?.find?.(row.sourceId)===audioTarget : State.clips.includes(audioTarget))
         })
       };
       document.addEventListener('mousemove',_onRowResizeMove);
@@ -1208,9 +1240,22 @@ let _noteClickState=null; // 備註標記雙擊偵測 { id, t }
 /* Gesture module 擁有 start／preview／commit／cancel 的順序；這裡只提供
    timeline 專屬的 model 與 DOM adapters。 */
 function beginRendererGesture(mode,{targets=[],context={}}={}){
+  const tracks=mode.startsWith('clip-') ? State.videoTracks : State.tracks;
+  const trackOwners=[...tracks];
+  const trackField=mode.startsWith('clip-') ? 'vtrack' : 'track';
+  const sourceTracks=targets.map(({target})=>({index:target[trackField]||0,track:tracks[target[trackField]||0]}));
+  const ownsWorkspace=targets.length ? Project.captureWorkspaceOwnership() : ()=>true;
+  const owns=()=>!targets.length || ownsWorkspace() && (mode.startsWith('clip-') ? State.videoTracks : State.tracks)===tracks
+    && sourceTracks.every(({index,track})=>tracks[index]===track);
   return beginTimelineGestureLifecycle({
     mode,targets,context,
     effects:{
+      beginPreview:targets=>History.beginPreview(targets,owns),
+      canEdit:()=>sourceTracks.every(({track})=>!track?.locked)
+        && targets.every(({target})=>(!mode.startsWith('clip-') || !target.locked)
+          && tracks[target[trackField]||0]===trackOwners[target[trackField]||0]
+          && !tracks[target[trackField]||0]?.locked)
+        && (!context.isCopyDrag || !drag?.grp?.some(({c})=>tracks[c.track||0]?.locked)),
       clearSnapGuide:()=>updateSnapGuide(null),
       stopAutoScroll:stopTimelineAutoScroll,
       hideRubberBand:()=>{ $('tlRubber').style.display='none'; },
@@ -1238,7 +1283,7 @@ tlScroll?.addEventListener?.('mousedown',e=>{
   const clipEl=e.target.closest('.clip-block');
   if(clipEl){
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
-    if(State.videoTracks[c.vtrack||0]?.locked){
+    if(c.locked || State.videoTracks[c.vtrack||0]?.locked){
       beginLockedMediaScrub(e);
       return;
     } // 鎖定軌：保留選取、不允許編輯，但仍可點擊定位播放點
@@ -1251,9 +1296,10 @@ tlScroll?.addEventListener?.('mousedown',e=>{
     const liveEl=(tlVtracks&&tlVtracks.querySelector(`.clip-block[data-clip-id="${c.id}"]`))||clipEl;
     drag={mode, clip:c, clipEl:liveEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft,
       os:c.offset, oin:c.in, oout:c.out, ov:c.vtrack||0,
+      ofadeSourceOffset:c.fadeSourceOffset, ofadeSourceLength:c.fadeSourceLength,
       leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+(c.out-c.in)), // 右鄰左緣（時間軸）
       nb, snaps:[...snapTargets(new Set()), ...Seq.snapEdges(c.id)],
-      gesture:beginRendererGesture(mode,{targets:[{target:c,fields:['offset','in','out','vtrack']}],context:{
+      gesture:beginRendererGesture(mode,{targets:[{target:c,fields:['offset','in','out','vtrack','fadeSourceOffset','fadeSourceLength']}],context:{
         startPoint:{x:e.clientX,y:e.clientY},
         modifiers:{alt:e.altKey,ctrl:e.ctrlKey||e.metaKey,shift:e.shiftKey},
       }}),};
@@ -1281,6 +1327,7 @@ tlScroll?.addEventListener?.('mousedown',e=>{
   const x=e.clientX-rect.left, y=e.clientY-rect.top;
   if(block){
     const c=State.cues.find(z=>z.id===block.dataset.id); if(!c)return;
+    if(State.tracks[c.track||0]?.locked){ beginLockedMediaScrub(e); return; }
     if(e.detail>=2 && !e.shiftKey){ selectCue(c.id); emit('cue:openEdit', c); e.preventDefault(); return; }
     const mode = e.target.classList.contains('edge')? (e.target.classList.contains('l')?'l':'r') : 'move';
     const isCtrl = e.ctrlKey||e.metaKey;
@@ -1290,10 +1337,6 @@ tlScroll?.addEventListener?.('mousedown',e=>{
     if(!isProjectGuardDone()){
       if(isPlainClick) selectCue(c.id);
       ensureProjectSaved(); e.preventDefault(); return;
-    }
-    if(State.tracks[c.track||0]?.locked){
-      // 鎖定軌道：僅允許選取，不允許拖曳移動
-      if(isPlainClick || !isSel(c.id)) selectCue(c.id); e.preventDefault(); return;
     }
     if(e.shiftKey && State.selectedId){
       // 同軌道範圍多選
@@ -1418,15 +1461,20 @@ const _handleDragUpdate = (e) => {
         drag.grp.forEach(it => {
            const cloned = { ...it.c, id: newId(), style: it.c.style ? JSON.parse(JSON.stringify(it.c.style)) : undefined };
            State.cues.push(cloned);
+           drag.gesture.addPreviewTarget(cloned,[],{added:true});
            copied.add(cloned);
            newIds.push(cloned.id);
            it.c = cloned;
         });
         const before=drag.selectionBefore;
         drag.gesture.addRollback(()=>{
+          const ownsSelection=State.activeTrackKind==='sub' && State.selectedIds.length===newIds.length
+            && newIds.every(id=>State.selectedIds.includes(id));
           State.cues=State.cues.filter(cue=>!copied.has(cue));
-          setSelection({kind:'sub',ids:before.ids,primary:before.primary});
-          State.activeEdge=before.activeEdge;
+          if(ownsSelection){
+            setSelection({kind:'sub',ids:before.ids,primary:before.primary});
+            State.activeEdge=before.activeEdge;
+          }else pruneSelection();
         });
         setSelection({ kind:'sub', ids:newIds });
         State.activeEdge = 'start';
@@ -1460,6 +1508,7 @@ const _handleDragUpdate = (e) => {
       original:{
         offset:drag.os,in:drag.oin,out:drag.oout,
         duration:c.dur,type:c.type,vtrack:drag.ov,
+        fadeSourceOffset:drag.ofadeSourceOffset,fadeSourceLength:drag.ofadeSourceLength,
       },
       deltaTime:dt,
       targetTrack,
@@ -1475,6 +1524,7 @@ const _handleDragUpdate = (e) => {
     c.in=plan.in;
     c.out=plan.out;
     c.vtrack=plan.vtrack;
+    if(plan.fadeSourceLength!=null){ c.fadeSourceOffset=plan.fadeSourceOffset; c.fadeSourceLength=plan.fadeSourceLength; }
     updateSnapGuide(plan.snapTarget);
     const x1=timeToX(c.offset), x2=timeToX(Seq.clipEnd(c));
     drag.clipEl.style.left=x1+'px'; drag.clipEl.style.width=Math.max(6,x2-x1)+'px';
@@ -1595,6 +1645,7 @@ window.addEventListener('mousemove',e=>{
   drag.lastEvent = e;
   drag.lastClientX = e.clientX;
   _handleDragUpdate(e);
+  if(!drag?.gesture.isActive()){ drag=null; return; }
   if(!_autoScrollId) {
     const _autoScroll = () => {
       if(!drag) { _autoScrollId = null; return; }
@@ -1630,7 +1681,7 @@ window.addEventListener('mouseup',e=>{
       const sc=tracksScrollTop();
       const rowA=yToTrack(Math.max(0,Math.min(drag.y0,y1)-tracksTop()+sc));
       const rowB=yToTrack(Math.max(0,Math.max(drag.y0,y1)-tracksTop()+sc));
-      const hit=State.cues.filter(c=>c.timed!==false&&(c.track||0)>=rowA&&(c.track||0)<=rowB&&c.end>=ta&&c.start<=tb).map(c=>c.id);
+      const hit=State.cues.filter(c=>!State.tracks[c.track||0]?.locked&&c.timed!==false&&(c.track||0)>=rowA&&(c.track||0)<=rowB&&c.end>=ta&&c.start<=tb).map(c=>c.id);
       const picked = drag.additive
         ? [...State.selectedIds, ...hit.filter(id=>!State.selectedIds.includes(id))]
         : hit;
@@ -1728,10 +1779,17 @@ export function trackFromY(clientY){
 
 export function addTrack(){ State.tracks.push(newTrack()); syncTrackCount(); drawTimeline(); emit('render:listTrackSel'); recordHistory('新增軌道'); }
 
-export function removeTrack(i){
+export function removeTrack(i,expectedTrack=State.tracks[i]){
+  if(!expectedTrack || State.tracks[i]!==expectedTrack) return;
   if(trackLocked(i, '刪除軌道')) return;
-  const n=State.cues.filter(c=>(c.track||0)===i).length;
+  const targets=State.cues.filter(c=>(c.track||0)===i),n=targets.length;
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
   const doRemove=()=>{
+    if(!ownsWorkspace() || expectedTrack.locked) return false;
+    i=State.tracks.indexOf(expectedTrack);
+    if(i<0) return false;
+    const current=State.cues.filter(c=>(c.track||0)===i);
+    if(current.length!==targets.length || !targets.every(c=>current.includes(c))){showToast('軌道內容已變更，請重新確認刪除');return false;}
     State.cues=State.cues.filter(c=>(c.track||0)!==i);
     State.cues.forEach(c=>{ if((c.track||0)>i)c.track=(c.track||0)-1; });
     State.tracks.splice(i,1); syncTrackCount();
@@ -1739,12 +1797,13 @@ export function removeTrack(i){
     if(!State.cues.some(c=>c.id===State.selectedId)) State.activeEdge='start';
     pruneSelection();
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); recordHistory('刪除軌道');
+    return true;
   };
   if(n>0){
-    openModal(`刪除軌道「${escapeHTML(State.tracks[i].name)}」`,
+    const session=openModal(`刪除軌道「${escapeHTML(State.tracks[i].name)}」`,
       `<p>此軌道有 <b>${n}</b> 條字幕，刪除後一併移除。確定繼續？</p>`,
-      [{label:'取消',act:closeModal},
-       {label:'確定刪除',primary:true,act:()=>{ closeModal(); doRemove(); }}]);
+      [{label:'取消',act:()=>session.close()},
+       {label:'確定刪除',primary:true,act:()=>{ if(session.isCurrent() && doRemove()) session.close({committed:true}); }}]);
   } else { doRemove(); }
 }
 
@@ -1843,7 +1902,7 @@ export function toggleAllLock() {
   State.clips.forEach(c => c.locked = anyUnlocked);
   extAudio.forEach(a => a.locked = anyUnlocked);
   recordHistory(anyUnlocked ? '鎖定全部軌道' : '解鎖全部軌道');
-  if (!anyUnlocked) { clearSelection(); const el = document.getElementById('stSel'); if (el) el.textContent = ''; }
+  if (anyUnlocked) { clearSelection(); const el = document.getElementById('stSel'); if (el) el.textContent = ''; }
   drawTimeline();
 }
 

@@ -21,49 +21,12 @@
 
    同時記錄事件當下的 visibilityState，避免又把節流混進來。
 ============================================================================== */
-const http = require('http');
-const WebSocket = require('ws');
+
+
 const { execFileSync } = require('child_process');
+const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const getJSON = url => new Promise((res, rej) => {
-  http.get(url, r => {
-    let b = '';
-    r.on('data', d => { b += d; });
-    r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } });
-  }).on('error', rej);
-});
-
-function connect(target) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
-    let id = 0;
-    const pend = new Map();
-    const bail = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error('inspector 逾時')); }, 10000);
-    ws.on('open', () => {
-      clearTimeout(bail);
-      resolve({
-        eval: expr => new Promise((res, rej) => {
-          const i = ++id;
-          pend.set(i, { res, rej });
-          ws.send(JSON.stringify({ id: i, method: 'Runtime.evaluate',
-            params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true } }));
-        }),
-        close: () => { try { ws.close(); } catch (e) {} },
-      });
-    });
-    ws.on('message', raw => {
-      const m = JSON.parse(raw);
-      if (!m.id || !pend.has(m.id)) return;
-      const { res, rej } = pend.get(m.id);
-      pend.delete(m.id);
-      if (m.error) rej(new Error(m.error.message));
-      else if (m.result?.exceptionDetails) rej(new Error(JSON.stringify(m.result.exceptionDetails).slice(0, 300)));
-      else res(m.result?.result?.value);
-    });
-    ws.on('error', reject);
-  });
-}
 
 function findMainPid() {
   const ps = 'Get-CimInstance Win32_Process | '
@@ -157,10 +120,12 @@ async function waitForPid(prev) {
 
     let main;
     try {
-      main = await connect((await getJSON('http://127.0.0.1:9229/json/list'))[0]);
-      await main.eval(inPage(ARM));
-      await main.eval(ARM_DIALOG);
+      main = new CdpClient(((await getJSON('http://127.0.0.1:9229/json/list'))[0]).webSocketDebuggerUrl);
+    await main.connect();
+      await main.evaluate(inPage(ARM));
+      await main.evaluate(ARM_DIALOG);
     } catch (e) {
+      main?.close();
       console.error('掛上失敗，重試：', e.message);
       pid = 0; await sleep(2000); continue;
     }
@@ -179,7 +144,7 @@ async function waitForPid(prev) {
     let seen = 0, alive = true;
     while (alive) {
       let list = [];
-      try { list = JSON.parse(await main.eval(inPage('JSON.stringify(window.__inp || [])'))); }
+      try { list = JSON.parse(await main.evaluate(inPage('JSON.stringify(window.__inp || [])'))); }
       catch (e) { alive = false; break; }
       for (let i = seen; i < list.length; i++) {
         const r = list[i];

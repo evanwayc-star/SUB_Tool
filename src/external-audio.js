@@ -28,8 +28,9 @@
 ============================================================================== */
 
 import { audioLimiterSnapshot, audioMotherPath, restoreAudioLimiterState } from '../shared/audio-loudness.cjs';
+import { fadeWindow } from '../shared/clip-fade.cjs';
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const nonNeg = v => Math.max(0, Number(v) || 0);
+const nonNeg = v => Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : 0;
 
 let _audioSourceSeq = 1;
 function makeAudioSourceId(){
@@ -64,10 +65,35 @@ function assetRange(asset){
 function serializeAsset(asset){
   if (!asset) return null;
   const plain={};
-  for(const key of ['id','kind','name','audioSourceId','timelineLaneId','audioSrc','source','offset','in','out','duration','gain','fadeIn','fadeOut','enabled','locked','height','preferCache']){
+  for(const key of ['id','kind','name','audioSourceId','timelineLaneId','audioSrc','source','offset','in','out','duration','gain','fadeIn','fadeOut','fadeSourceOffset','fadeSourceLength','enabled','locked','height','preferCache']){
     if(asset[key]!==undefined) plain[key]=asset[key];
   }
   return { ...plain, path:audioMotherPath(asset), ...audioLimiterSnapshot(asset), descriptors: (asset.descriptors || []).map(channel => ({ ...channel })) };
+}
+
+/* 專案、歷史與素材建立共用的持久規格；runtime identity 由 library.add 配發。 */
+export function normalizeExternalAudioData(details = {}){
+  const range=assetRange(details);
+  const audioSourceId=typeof details.audioSourceId==='string'?details.audioSourceId.trim():undefined;
+  const originalFade=details.fadeSourceLength!=null;
+  const window=fadeWindow({...details,in:range.in,out:range.out});
+  const fadeLength=range.length>0?(originalFade?window.length:range.length):0;
+  const normalized={
+    name:(typeof details.name==='string'&&details.name.trim())||'外部音訊',
+    path:audioMotherPath(details), ...audioLimiterSnapshot(details),
+    audioSourceId,
+    timelineLaneId:(typeof details.timelineLaneId==='string'&&details.timelineLaneId.trim())||audioSourceId,
+    offset:range.offset,in:range.in,out:range.out,duration:range.duration,
+    gain:nonNeg(details.gain??1),
+    fadeIn:Math.min(nonNeg(details.fadeIn),fadeLength),
+    fadeOut:Math.min(nonNeg(details.fadeOut),fadeLength),
+    ...(originalFade?{fadeSourceOffset:nonNeg(details.fadeSourceOffset),fadeSourceLength:window.length}:{}),
+    enabled:details.enabled!==false,locked:!!details.locked,
+    descriptors:sourceChannelDescriptors(details.descriptors,details.fallbackCount),
+    ...(details.preferCache===true?{preferCache:true}:{}),
+  };
+  if(details.height!=null&&Number.isFinite(Number(details.height))) normalized.height=clamp(Number(details.height),32,160);
+  return normalized;
 }
 
 class ExternalAudioLibrary {
@@ -97,9 +123,10 @@ class ExternalAudioLibrary {
   /* ── 建立與移除 ─────────────────────────────────────────────────────── */
 
   add(details = {}){
-    const duration = nonNeg(details.duration);
-    const fallbackCount = Math.max(0, Math.floor(Number(details.fallbackCount) || 0));
-    const descriptors = sourceChannelDescriptors(details.descriptors, fallbackCount);
+    const original=details;
+    const persistent=normalizeExternalAudioData(details);
+    const duration=persistent.duration;
+    const descriptors=persistent.descriptors;
     const requestedId = typeof details.audioSourceId === 'string' ? details.audioSourceId.trim() : '';
     // 不變量③：要求的 id 只有在沒被佔用時才採納，其餘一律另發。
     const audioSourceId = requestedId && !this.assets.some(asset => asset.audioSourceId === requestedId)
@@ -109,30 +136,14 @@ class ExternalAudioLibrary {
     const requestedLaneId = typeof details.timelineLaneId === 'string' ? details.timelineLaneId.trim() : '';
     const timelineLaneId = requestedLaneId || audioSourceId;
     const source = 'ext-' + audioSourceId;
-    const inPoint = Math.max(0, Number(details.in ?? details.trimStart) || 0);
-    const requestedOut = Number(details.out ?? details.trimEnd);
-    const out = Number.isFinite(requestedOut) && requestedOut >= inPoint
-      ? (duration ? Math.min(requestedOut, duration) : requestedOut) : duration;
     const asset = {
+      ...persistent,
       id: 'external:' + audioSourceId,
       kind: 'external-audio',
-      name: (typeof details.name === 'string' && details.name.trim()) || '外部音訊',
-      path: typeof details.path === 'string' && details.path ? details.path : null,
-      ...audioLimiterSnapshot(details),
       audioSourceId,
       timelineLaneId,
       audioSrc: source,
       source,
-      offset: nonNeg(details.offset),
-      in: inPoint,
-      out,
-      duration,
-      gain: Math.max(0, Number(details.gain == null ? 1 : details.gain) || 0),
-      fadeIn: nonNeg(details.fadeIn),
-      fadeOut: nonNeg(details.fadeOut),
-      enabled: details.enabled !== false,
-      locked: details.locked === true,
-      ...(Number.isFinite(Number(details.height)) ? { height: clamp(Number(details.height), 32, 160) } : {}),
       // 影片容器（例如 MXF／部分 MOV）未必能被 Chromium 的 <audio> 解碼。
       // 這個旗標會隨專案保存，讓它在重開後直接復用 ffmpeg 的逐聲道快取，
       // 而不是再次嘗試載入原始影片容器後才失敗。
@@ -140,6 +151,7 @@ class ExternalAudioLibrary {
       descriptors,
       // 瀏覽器版切割同一個 File 時需要保留來源；此欄位永不寫入專案檔。
       _file: details.file || null,
+      _unknownDuration: !(duration>0)&&original.out==null&&original.trimEnd==null,
     };
     this.assets.push(asset);
     return asset;
@@ -164,9 +176,14 @@ class ExternalAudioLibrary {
     asset.in = range.in;
     asset.out = range.out;
     asset.gain = Math.max(0, Number(asset.gain == null ? 1 : asset.gain) || 0);
-    // 不變量②
-    asset.fadeIn = Math.min(range.length, nonNeg(asset.fadeIn));
-    asset.fadeOut = Math.min(range.length, nonNeg(asset.fadeOut));
+    // 切片保存母段的淡化視窗，不能以較短的片段長度重新縮放曲線。
+    const normalized=normalizeExternalAudioData(asset);
+    asset.fadeIn = normalized.fadeIn;
+    asset.fadeOut = normalized.fadeOut;
+    if(normalized.fadeSourceLength!=null){
+      asset.fadeSourceOffset=normalized.fadeSourceOffset;
+      asset.fadeSourceLength=normalized.fadeSourceLength;
+    }
     asset.enabled = asset.enabled !== false;
     asset.locked = asset.locked === true;
     if (asset.height != null) {
@@ -196,6 +213,7 @@ class ExternalAudioLibrary {
     if (isStart) {
       const newOffset = clamp(t, 0, range.offset + range.length - MIN);
       asset.in = clamp(range.in + (newOffset - range.offset), 0, range.out - MIN);
+      if(asset.fadeSourceLength!=null) asset.fadeSourceOffset=nonNeg(asset.fadeSourceOffset)+(asset.in-range.in);
       asset.offset = newOffset;
     } else {
       asset.out = clamp(range.in + (t - range.offset), range.in + MIN, range.duration || Infinity);
@@ -248,8 +266,9 @@ class ExternalAudioLibrary {
     const previous = nonNeg(asset.duration);
     asset.duration = duration;
     // 尚未被時間軸編輯修剪過時，out 跟著實際 metadata 長度更新。
-    if (!(asset.out > 0) || Math.abs(Number(asset.out) - previous) < 0.000001) asset.out = duration;
+    if (asset._unknownDuration || (previous>0 && Math.abs(Number(asset.out) - previous) < 0.000001)) asset.out = duration;
     else asset.out = Math.min(Number(asset.out), duration);
+    asset._unknownDuration=false;
     return this.normalize(asset);
   }
 
@@ -267,12 +286,14 @@ class ExternalAudioLibrary {
     const MIN = this.minLength(range);
     if (range.length <= MIN || t <= range.offset + MIN || t >= range.offset + range.length - MIN) return null;
     const cut = range.in + (t - range.offset);
+    const fadeSourceOffset=nonNeg(asset.fadeSourceOffset);
+    const fadeSourceLength=fadeWindow(asset).length;
     return {
       asset,
       cut,
       // 還原用：右段建立失敗時要能把左段原封不動放回去
-      previous: { out: asset.out, fadeOut: asset.fadeOut },
-      left: { out: cut, fadeOut: 0 },
+      previous: { out: asset.out, fadeOut: asset.fadeOut, fadeSourceOffset:asset.fadeSourceOffset, fadeSourceLength:asset.fadeSourceLength },
+      left: { out: cut, fadeOut:asset.fadeOut, fadeSourceOffset, fadeSourceLength },
       right: {
         name: asset.name,
         timelineLaneId: asset.timelineLaneId || asset.audioSourceId,
@@ -283,8 +304,10 @@ class ExternalAudioLibrary {
         out: range.out,
         gain: asset.gain,
         ...audioLimiterSnapshot(asset),
-        fadeIn: 0,
+        fadeIn: asset.fadeIn,
         fadeOut: asset.fadeOut,
+        fadeSourceOffset:fadeSourceOffset+t-range.offset,
+        fadeSourceLength,
         enabled: asset.enabled,
         locked: asset.locked === true,
         preferCache: asset.preferCache === true,
@@ -369,6 +392,9 @@ class ExternalAudioLibrary {
     asset.gain = source.gain;
     asset.fadeIn = source.fadeIn;
     asset.fadeOut = source.fadeOut;
+    for(const key of ['fadeSourceOffset','fadeSourceLength']){
+      if(source[key]!=null) asset[key]=source[key]; else delete asset[key];
+    }
     asset.enabled = source.enabled !== false;
     asset.locked = source.locked === true;
     asset.preferCache = source.preferCache === true;

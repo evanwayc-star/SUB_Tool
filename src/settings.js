@@ -122,8 +122,9 @@ const actionCategories = [
 ];
 
 let tempKeymap = null;
+let activeSettingsClose = null;
 
-function renderSettingsTable(tbody) {
+function renderSettingsTable(tbody, isCurrent, onChange) {
   tbody.innerHTML = '';
   
   // Flat map for looking up labels
@@ -193,6 +194,7 @@ function renderSettingsTable(tbody) {
         
         if (!isFixed) {
           input.addEventListener('keydown', (e) => {
+            if (!isCurrent()) return;
             e.preventDefault();
             e.stopPropagation();
           
@@ -204,6 +206,7 @@ function renderSettingsTable(tbody) {
           if (e.key === 'Backspace' || e.key === 'Delete') {
             binds[i] = null;
             tempKeymap[action] = binds.filter(b => b !== null);
+            onChange();
             input.value = '';
             updateStyle();
             return;
@@ -233,6 +236,7 @@ function renderSettingsTable(tbody) {
 
           binds[i] = bind;
           tempKeymap[action] = binds;
+          onChange();
           input.value = formatBind(bind);
           updateStyle();
           input.blur();
@@ -248,10 +252,13 @@ function renderSettingsTable(tbody) {
 }
 
 export function showSettingsModal() {
+  // Closing a previous instance also releases its document-level Escape listener.
+  activeSettingsClose?.();
   const existing = document.getElementById('settingsModal');
   if (existing) existing.remove();
 
   tempKeymap = JSON.parse(JSON.stringify(State.keymap));
+  let draftRevision = 0;
 
   const modal = document.createElement('div');
   modal.id = 'settingsModal';
@@ -284,12 +291,24 @@ export function showSettingsModal() {
   document.body.appendChild(modal);
   emit('mpv:sync'); // mpv 是 OS 層子視窗會蓋住本對話框，開啟期間讓 mpv 讓位
 
+  const isCurrent = () => activeSettingsClose === close && document.getElementById('settingsModal') === modal;
+  const close = () => {
+    document.removeEventListener('keydown', onEsc, true);
+    if (activeSettingsClose === close) activeSettingsClose = null;
+    modal.remove();
+    emit('mpv:sync');
+  };
+  activeSettingsClose = close;
+
   const tbody = document.getElementById('settingsTbody');
-  renderSettingsTable(tbody);
+  const renderDraft = () => renderSettingsTable(tbody, isCurrent, () => { draftRevision++; });
+  renderDraft();
 
   document.getElementById('settingsRestoreBtn').onclick = () => {
+    if (!isCurrent()) return;
+    draftRevision++;
     tempKeymap = JSON.parse(JSON.stringify(State.defaultKeymap));
-    renderSettingsTable(tbody);
+    renderDraft();
   };
 
   // 匯出：把目前編輯中的這份 keymap 存成 json（桌面走原生存檔對話框、網頁走下載）
@@ -300,30 +319,33 @@ export function showSettingsModal() {
     try {
       if (IS_DESKTOP && DESK.exportSub) {
         const p = await DESK.exportSub(name, bytesToB64(bytes), 'json');
-        if (p) showToast('已匯出快捷鍵：' + p.split(/[\\/]/).pop());
+        if (p && isCurrent()) showToast('已匯出快捷鍵：' + p.split(/[\\/]/).pop());
       } else { downloadBytes(bytes, name, 'application/json'); showToast('已匯出快捷鍵設定'); }
-    } catch (e) { setStatus('匯出失敗：' + (e?.message || e), 'err'); }
+    } catch (e) { if (isCurrent()) setStatus('匯出失敗：' + (e?.message || e), 'err'); }
   };
 
   // 匯入：讀 json → 驗證 → 併到預設 keymap（缺項用預設補、未知動作忽略）→ 重繪表格（需按「儲存」才寫入）
   document.getElementById('settingsImportBtn').onclick = async () => {
+    if (!isCurrent()) return;
+    const revision = ++draftRevision;
+    const ownsImport = () => isCurrent() && revision === draftRevision;
     const f = await pickFile(document.getElementById('settingsImportFile')); if (!f) return;
+    if (!ownsImport()) return;
     try {
       const obj = JSON.parse(decodeText(await readFile(f)));
+      if (!ownsImport()) return;
       // 只採用「本版本認得的動作」，其餘一律以預設補齊（規則見 keybinding.js）
       const { keymap: merged, applied } = mergeImportedKeymap(State.defaultKeymap, obj);
       tempKeymap = merged;
-      renderSettingsTable(tbody);
+      renderDraft();
       showToast(`已匯入 ${applied} 項快捷鍵；按「儲存」才會生效`);
-    } catch (e) { setStatus('匯入失敗：' + (e?.message || e), 'err'); showToast('匯入失敗：' + (e?.message || e)); }
+    } catch (e) { if (ownsImport()) { setStatus('匯入失敗：' + (e?.message || e), 'err'); showToast('匯入失敗：' + (e?.message || e)); } }
   };
 
   /* 取消＝丟棄 tempKeymap 直接關掉（尚未寫進 State.keymap）。
      Esc 與「取消」走同一條路，不可各寫一份。 */
   const cancel = () => {
-    document.removeEventListener('keydown', onEsc, true);
-    modal.remove();
-    emit('mpv:sync');
+    if (isCurrent()) close();
   };
 
   /* 這個對話框是自己 createElement 出來的，不走 ui.js 的 openModal，
@@ -336,7 +358,7 @@ export function showSettingsModal() {
      所以焦點在綁定輸入框裡時要讓開，交給輸入框自己處理。 */
   const onEsc = (e) => {
     if (e.key !== 'Escape') return;
-    if (!document.getElementById('settingsModal')) { document.removeEventListener('keydown', onEsc, true); return; }
+    if (!isCurrent()) { document.removeEventListener('keydown', onEsc, true); return; }
     const t = e.target;
     if (t && t.tagName === 'INPUT' && t.closest('#settingsModal')) return; // 錄製中：讓輸入框自己 blur
     e.preventDefault();
@@ -348,11 +370,11 @@ export function showSettingsModal() {
   document.getElementById('settingsCancelBtn').onclick = cancel;
 
   document.getElementById('settingsSaveBtn').onclick = () => {
+    if (!isCurrent()) return;
+    draftRevision++;
     State.keymap = stripEmptyBinds(tempKeymap);
     saveKeys();
-    document.removeEventListener('keydown', onEsc, true);
-    modal.remove();
-    emit('mpv:sync');
+    close();
     setStatus('快捷鍵設定已儲存', 'ok');
   };
 }

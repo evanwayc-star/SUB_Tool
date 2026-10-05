@@ -15,6 +15,7 @@ const {
   leaseRoot,
   listLeases,
   normalizeOutputPath,
+  stageOutputPath,
 } = require('../electron/export-lease');
 
 const WAIT_TIMEOUT_MS = 6000;
@@ -86,7 +87,7 @@ describe('export watchdog', () => {
     fs.writeFileSync(fakeFfmpeg, `
 'use strict';
 const fs = require('fs');
-const [outPath, mode, markerPath] = process.argv.slice(2);
+const [mode, markerPath, outPath] = process.argv.slice(2);
 fs.mkdirSync(require('path').dirname(outPath), { recursive: true });
 fs.writeFileSync(outPath, 'partial', 'utf8');
 fs.appendFileSync(markerPath, process.pid + '\\n', 'utf8');
@@ -128,7 +129,7 @@ if (mode === 'success') {
     const stderr = [];
     const controller = spawnExportWatchdog({
       ffmpegPath: process.execPath,
-      args: [fakeFfmpeg, outPath, mode, markerPath],
+      args: [fakeFfmpeg, mode, markerPath, outPath],
       cwd: tempDir,
       outPath,
       jobId,
@@ -142,6 +143,10 @@ if (mode === 'success') {
     controller.completion.catch(() => {});
     controllers.push(controller);
     return { controller, outPath, stderr };
+  }
+
+  function activeStage() {
+    return listLeases(queueDir)[0]?.owner?.stagePath;
   }
 
   function airlineScript(mode = 'success') {
@@ -169,7 +174,7 @@ if (mode === 'success') {
       packet(49, pes(0xc0, Buffer.from([0xff, 0xf1, 0x4c, 0x80, 1, 0x1f, 0xfc, 0])))]);
     fs.writeFileSync(fakeFfmpeg, `
       const fs = require('fs');
-      fs.writeFileSync(process.argv[2], Buffer.from('${bytes.toString('base64')}', 'base64'));
+       fs.writeFileSync(process.argv.at(-1), Buffer.from('${bytes.toString('base64')}', 'base64'));
       ${mode === 'wait' ? 'setInterval(() => {}, 1000);' : 'setTimeout(() => process.exit(0), 80);'}
     `);
     return { paths, outPath };
@@ -211,11 +216,13 @@ if (mode === 'success') {
     const { paths, outPath } = airlineScript('wait');
     const { controller } = launch('wait', outPath, 'air-stop', { outputFormat: 'airline-dmpes' });
     await controller.ready;
-    await waitFor(() => paths.every(file => fs.existsSync(file)), '航空 MPG 尚未建立');
+    const stagePath = activeStage();
+    await waitFor(() => fs.existsSync(stagePath), '航空 MPG 暫存檔尚未建立');
     expect(listLeases(queueDir)).toHaveLength(1);
     controller.stop('user-stop');
     const result = await controller.completion;
     expect(result.cleanup).toMatchObject({ removed: true, released: true, retainedLease: false });
+    expect(fs.existsSync(stagePath)).toBe(false);
     expect(paths.some(file => fs.existsSync(file))).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
   });
@@ -246,14 +253,15 @@ if (mode === 'success') {
     const { paths, outPath } = airlineScript('wait');
     const { controller } = launch('wait', outPath, 'air-retain', { outputFormat: 'airline-exw' });
     await controller.ready;
-    await waitFor(() => fs.existsSync(paths[0]), '航空 MPG 尚未建立');
-    fs.unlinkSync(paths[0]);
-    fs.mkdirSync(paths[0]);
+    const stagePath = activeStage();
+    await waitFor(() => fs.existsSync(stagePath), '航空 MPG 暫存檔尚未建立');
+    fs.unlinkSync(stagePath);
+    fs.mkdirSync(stagePath);
     controller.stop('user-stop');
     const result = await controller.completion;
     expect(result.cleanup).toMatchObject({ released: false, retainedLease: true });
     expect(listLeases(queueDir)).toHaveLength(1);
-    expect(fs.statSync(paths[0]).isDirectory()).toBe(true);
+    expect(fs.statSync(stagePath).isDirectory()).toBe(true);
   });
 
   it('MOD-FHD 封裝驗證失敗會刪除半成品且不回報成功', async () => {
@@ -272,7 +280,7 @@ if (mode === 'success') {
       0xff, 0xf1, 0x4c, 0x80, 1, 0x1f, 0xfc, 0]);
     packet.set([0x47, 0x50, 0x22, 0x30, 183 - payload.length, 0]);
     payload.copy(packet, 188 - payload.length);
-    fs.writeFileSync(fakeFfmpeg, `require('fs').writeFileSync(process.argv[2], Buffer.from('${packet.toString('base64')}', 'base64'));`);
+    fs.writeFileSync(fakeFfmpeg, `require('fs').writeFileSync(process.argv.at(-1), Buffer.from('${packet.toString('base64')}', 'base64'));`);
     const { controller, outPath } = launch('success', path.join(tempDir, 'valid.ts'), 'mod-valid', { outputFormat: 'mod-fhd' });
     await controller.ready;
     const result = await controller.completion;
@@ -295,11 +303,84 @@ if (mode === 'success') {
     expect(listLeases(queueDir)).toEqual([]);
   });
 
+  it('既有成品在 FFmpeg 無法啟動時仍保持原內容', async () => {
+    const outPath = path.join(tempDir, 'existing-spawn.mp4');
+    fs.writeFileSync(outPath, 'original');
+    const { controller } = launch('success', outPath, 'preserve-spawn', {
+      ffmpegPath: path.join(tempDir, 'missing-ffmpeg.exe'),
+    });
+    await expect(controller.ready).rejects.toBeTruthy();
+    await controller.completion.catch(() => {});
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('拒絕最後參數不是輸出路徑的工作，不能錯替其他參數而覆蓋正式檔', () => {
+    const outPath = path.join(tempDir, 'invalid-argv.mp4');
+    fs.writeFileSync(outPath, 'original');
+    expect(() => spawnExportWatchdog({
+      ffmpegPath: process.execPath,
+      args: [fakeFfmpeg, outPath, 'stray-last-argument'],
+      outPath,
+      jobId: 'invalid-argv',
+      queueDir,
+      outputFormat: 'h264-mp4',
+    })).toThrow(expect.objectContaining({ code: 'INVALID_WATCHDOG_CONFIG' }));
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('FFmpeg 回傳成功但沒有建立暫存成品時，不得將既有檔誤判為新成品', async () => {
+    const outPath = path.join(tempDir, 'missing-stage.mp4');
+    fs.writeFileSync(outPath, 'original');
+    fs.writeFileSync(fakeFfmpeg, 'process.exit(0);');
+    const { controller } = launch('success', outPath, 'missing-stage');
+    const result = await controller.completion;
+    expect(result).toMatchObject({ ok: false, cleanup: { reason: 'artifact-commit-failed' } });
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('既有成品在編碼失敗或取消時仍保持原內容', async () => {
+    for (const mode of ['fail', 'wait']) {
+      const outPath = path.join(tempDir, `existing-${mode}.mp4`);
+      fs.writeFileSync(outPath, 'original');
+      const { controller } = launch(mode, outPath, `preserve-${mode}`);
+      await controller.ready;
+      const [lease] = listLeases(queueDir);
+      expect(lease.owner.stagePath).toBe(stageOutputPath(outPath, lease.owner.token));
+      await waitFor(() => fs.existsSync(lease.owner.stagePath), '暫存成品尚未建立');
+      expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+      if (mode === 'wait') controller.stop('user-stop');
+      const result = await controller.completion;
+      expect(result.ok).toBe(false);
+      expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+      expect(fs.existsSync(lease.owner.stagePath)).toBe(false);
+      expect(listLeases(queueDir)).toEqual([]);
+    }
+  });
+
+  it('成功時驗證後才以私有暫存成品取代既有成品', async () => {
+    const outPath = path.join(tempDir, 'existing-success.mp4');
+    fs.writeFileSync(outPath, 'original');
+    const { controller } = launch('success', outPath, 'replace-success');
+    await controller.ready;
+    const [lease] = listLeases(queueDir);
+    await waitFor(() => fs.existsSync(lease.owner.stagePath), '暫存成品尚未建立');
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+    const result = await controller.completion;
+    expect(result.ok).toBe(true);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('complete');
+    expect(fs.existsSync(lease.owner.stagePath)).toBe(false);
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
   it('stop 會先等 ffmpeg 關閉，再刪半成品與釋放 lease', async () => {
     const { controller, outPath } = launch('wait', undefined, 'stop-job');
 
     await controller.ready;
-    await waitFor(() => fs.existsSync(outPath), 'fake ffmpeg 沒有建立半成品');
+    const stagePath = activeStage();
+    await waitFor(() => fs.existsSync(stagePath), 'fake ffmpeg 沒有建立暫存成品');
     expect(controller.stop('user-stop')).toBe(true);
     const result = await controller.completion;
 
@@ -310,6 +391,7 @@ if (mode === 'success') {
       retainedLease: false,
     });
     expect(fs.existsSync(outPath)).toBe(false);
+    expect(fs.existsSync(stagePath)).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
   });
 
@@ -318,12 +400,14 @@ if (mode === 'success') {
     const completion = controller.completion.catch(error => error);
 
     await controller.ready;
-    await waitFor(() => fs.existsSync(outPath), 'fake ffmpeg 沒有建立半成品');
+    const stagePath = activeStage();
+    await waitFor(() => fs.existsSync(stagePath), 'fake ffmpeg 沒有建立暫存成品');
     expect(controller.disconnect()).toBe(true);
     await waitForExit(controller.child);
     await completion;
 
     expect(fs.existsSync(outPath)).toBe(false);
+    expect(fs.existsSync(stagePath)).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
   });
 
@@ -331,7 +415,8 @@ if (mode === 'success') {
     const { controller, outPath } = launch('noisy', undefined, 'broken-stderr');
 
     await controller.ready;
-    await waitFor(() => fs.existsSync(outPath), 'fake ffmpeg 沒有建立半成品');
+    const stagePath = activeStage();
+    await waitFor(() => fs.existsSync(stagePath), 'fake ffmpeg 沒有建立暫存成品');
     controller.child.stderr.destroy();
     await wait(100);
     expect(controller.child.exitCode).toBeNull();
@@ -344,6 +429,7 @@ if (mode === 'success') {
       retainedLease: false,
     });
     expect(fs.existsSync(outPath)).toBe(false);
+    expect(fs.existsSync(stagePath)).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
   });
 
@@ -386,13 +472,15 @@ if (mode === 'success') {
   it('控制 pipe 的錯誤 token 不得停止工作或清理輸出', async () => {
     const { controller, outPath } = launch('wait', undefined, 'wrong-token');
     await controller.ready;
-    await waitFor(() => fs.existsSync(outPath), 'fake ffmpeg 沒有建立半成品');
+    const stagePath = activeStage();
+    await waitFor(() => fs.existsSync(stagePath), 'fake ffmpeg 沒有建立暫存成品');
 
     const [lease] = listLeases(queueDir);
     const response = await sendControl(lease.owner.pipeName, 'definitely-wrong-token');
 
     expect(response).toMatchObject({ ok: false, code: 'TOKEN_MISMATCH' });
-    expect(fs.existsSync(outPath)).toBe(true);
+    expect(fs.existsSync(stagePath)).toBe(true);
+    expect(fs.existsSync(outPath)).toBe(false);
     expect(listLeases(queueDir)).toHaveLength(1);
     expect(controller.child.exitCode).toBeNull();
 
@@ -403,7 +491,8 @@ if (mode === 'success') {
   it('recover 會先透過 live watchdog 的 token pipe 清理，再等待 lease 消失', async () => {
     const { controller, outPath } = launch('wait', undefined, 'live-recovery');
     await controller.ready;
-    await waitFor(() => fs.existsSync(outPath), 'fake ffmpeg 沒有建立半成品');
+    const stagePath = activeStage();
+    await waitFor(() => fs.existsSync(stagePath), 'fake ffmpeg 沒有建立暫存成品');
 
     const recovery = await recoverExportLeases(queueDir);
 
@@ -412,6 +501,7 @@ if (mode === 'success') {
       expect.objectContaining({ outPath: normalizeOutputPath(outPath), mode: 'live' }),
     ]);
     expect(fs.existsSync(outPath)).toBe(false);
+    expect(fs.existsSync(stagePath)).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
     await controller.completion;
   });
@@ -441,6 +531,34 @@ if (mode === 'success') {
       expect.objectContaining({ outPath: normalizeOutputPath(outPath), mode: 'stale' }),
     ]);
     expect(fs.existsSync(outPath)).toBe(false);
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('staging lease 的 crash recovery 只清本次暫存檔，不碰既有成品', async () => {
+    const outPath = path.join(tempDir, 'recover-existing.mp4');
+    const token = 'recover-stage-token';
+    const stagePath = stageOutputPath(outPath, token);
+    fs.writeFileSync(outPath, 'original');
+    fs.writeFileSync(stagePath, 'partial');
+    acquireLease({ queueDir, outPath, jobId: 'recover-stage', token, stagePath, outputStarted: true });
+    const recovery = await recoverExportLeases(queueDir);
+    expect(recovery.warnings).toEqual([]);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+    expect(fs.existsSync(stagePath)).toBe(false);
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('成品已原子提交但 watchdog 尚未釋放 lease 時，復原不可刪新成品', async () => {
+    const outPath = path.join(tempDir, 'committed-existing.mp4');
+    const token = 'committed-stage-token';
+    const stagePath = stageOutputPath(outPath, token);
+    fs.writeFileSync(outPath, 'original');
+    fs.writeFileSync(stagePath, 'verified');
+    acquireLease({ queueDir, outPath, jobId: 'committed-stage', token, stagePath, outputStarted: true });
+    fs.renameSync(stagePath, outPath);
+    const recovery = await recoverExportLeases(queueDir);
+    expect(recovery.warnings).toEqual([]);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('verified');
     expect(listLeases(queueDir)).toEqual([]);
   });
 

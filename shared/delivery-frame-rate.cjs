@@ -14,6 +14,14 @@ function numericRate(value) {
   return Number(value);
 }
 
+// 與交付選项共用 NTSC 有理數，保留 time 核心允許自訂正 FPS 的語意。
+function exactDeliveryFrameRate(value, fallback = 30) {
+  const n = numericRate(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  const fractional = DELIVERY_FRAME_RATES.find(item => item.rate.includes('/') && Math.abs(item.value - n) < 0.01);
+  return fractional ? numericRate(fractional.rate) : n;
+}
+
 function normalizeDeliveryFrameRate(value, fallback = 25) {
   const n = numericRate(value);
   if (!Number.isFinite(n) || n < 1 || n > 240) return fallback;
@@ -31,4 +39,4 @@ function sameDeliveryFrameRate(a, b) {
   return first !== null && second !== null && first === second;
 }
 
-module.exports = { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate, deliveryFrameRateRatio, sameDeliveryFrameRate };
+module.exports = { DELIVERY_FRAME_RATES, exactDeliveryFrameRate, normalizeDeliveryFrameRate, deliveryFrameRateRatio, sameDeliveryFrameRate };

@@ -86,12 +86,125 @@ beforeEach(() => {
     selectedAudioClipId: null,
     activeTrackKind: 'sub',
     activeEdge: 'start',
+    listTrack: 0,
+    trackCount: 1,
     subMode: false,
   });
   renderInvalidations = 0;
   renderListSynchronously = false;
   document.getElementById('toast').textContent = '';
   History.reset();
+});
+
+describe('字幕複製保留獨立覆蓋',()=>{
+  it('拆分、剪貼簿與軌道複製都保留逐句樣式且不共用物件',()=>{
+    const source=State.cues.find(cue=>cue.id==='target');
+    source.style={fontSize:72,color:'#ff0000',posX:30,angle:15,bgBox:true};
+    const expected=structuredClone(source.style);
+    SubtitleModel.copyCues();
+    source.style.color='#00ff00';
+    expect(State.clipboard[0].style).toEqual(expected);
+    source.style=structuredClone(expected);
+    const split=splitCue({cueId:source.id,textBefore:'前半',textAfter:'後半',timelineTime:15});
+    expect(split.cue.style).toEqual(expected);
+    split.cue.style.angle=90;
+    expect(source.style.angle).toBe(15);
+    SubtitleModel.doCopyTrack();
+    document.querySelector('#modalFoot button.primary').click();
+    const copied=State.cues.find(cue=>cue.track===1 && cue.text==='前半');
+    expect(copied.style).toEqual(expected);
+    copied.style.posX=80;
+    expect(source.style.posX).toBe(30);
+  });
+});
+
+describe('字幕編輯擁有者',()=>{
+  it('等待存檔守衛期间 cue 被重建，不能開啟舊 cue 的編輯 modal',async()=>{
+    const project=await import('../src/project.js');
+    let finish;
+    const saved=vi.spyOn(project,'ensureProjectSaved').mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+    const ui=await import('../src/ui.js');
+    ui.openModal('當前視窗','<p>保留</p>');
+    try {
+      const request=StylePanelController.openCueEditModal(State.cues[1]);
+      State.cues=structuredClone(State.cues);
+      finish();await request;
+      expect(document.getElementById('modalTitle').textContent).toBe('當前視窗');
+      expect(document.getElementById('cueEditTa')).toBeNull();
+    } finally {saved.mockRestore();ui.closeModal();}
+  });
+  it('幾何 modal 預覽由替換撤銷，背景 History 不收暫存位置',async()=>{
+    const {showImageGeom}=await import('../src/menus.js');
+    const ui=await import('../src/ui.js');
+    const clip={id:'logo',name:'logo.png',type:'image',path:'C:/logo.png',in:0,out:5,offset:0,dur:5,vtrack:0,scale:1,posX:0.5,posY:0.5};
+    State.clips=[clip];State.videoTracks=[{name:'V1',visible:true,locked:false}];History.reset();
+    showImageGeom(clip);await vi.advanceTimersByTimeAsync(0);
+    const input=document.getElementById('igX');input.value='80';input.dispatchEvent(new Event('input'));
+    expect(clip.posX).toBe(0.8);
+    State.cues[0].text='背景完成';History.record('背景工作');
+    ui.openModal('當前視窗','<p>保留</p>');
+    expect(clip.posX).toBe(0.5);
+    expect(document.getElementById('modalTitle').textContent).toBe('當前視窗');
+    expect(History.stack.at(-1).snap.clipGeo[0].posX).toBe(0.5);
+    expect(History.stack.at(-1).snap.cues[0].text).toBe('背景完成');
+    ui.closeModal();
+  });
+  it('沒有合法 editor session 的鎖定列 input 會還原畫面且不寫入 model 或 History',()=>{
+    State.tracks[0].locked=true;
+    Subtitles.renderSubList();
+    const editor=document.querySelector('.sub-row[data-id="target"] .txt');
+    editor.dataset.orig=State.cues[1].text;
+    editor.contentEditable='true';
+    editor.innerText='不應寫入';
+    editor.dispatchEvent(new InputEvent('input',{bubbles:true}));
+    editor.dispatchEvent(new FocusEvent('focusout',{bubbles:true}));
+    expect(editor.innerText).toBe('前半後半');
+    expect(editor.contentEditable).toBe('false');
+    expect(State.cues[1].text).toBe('前半後半');
+    expect(History.stack).toHaveLength(1);
+  });
+  it('快速 A→B 開 modal時，A的延遲 handler不能寫入B欄位或提交A',async()=>{
+    const first=State.cues[0],second=State.cues[1];
+    await StylePanelController.openCueEditModal(first);
+    await StylePanelController.openCueEditModal(second);
+    await vi.advanceTimersByTimeAsync(30);
+    const editor=document.getElementById('cueEditTa');
+    expect(editor.innerText).toBe(second.text);
+    editor.innerText='只改B';
+    editor.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+    expect(first.text).toBe('前一句');
+    expect(second.text).toBe('只改B');
+    expect(History.stack).toHaveLength(2);
+  });
+  it('modal開啟後cue identity被重建，舊確認不能更改同ID的新cue',async()=>{
+    const cue=State.cues[1];
+    await StylePanelController.openCueEditModal(cue);
+    await vi.advanceTimersByTimeAsync(30);
+    document.getElementById('cueEditTa').innerText='舊視窗內容';
+    State.cues=structuredClone(State.cues);
+    document.querySelector('#modalFoot button.primary').click();
+    expect(State.cues[1].text).toBe('前半後半');
+    expect(History.stack).toHaveLength(1);
+  });
+  it('文字即時預覽期間的背景history只收已提交文字，Escape後undo/redo保持背景編輯',async()=>{
+    Subtitles.renderSubList();
+    const editor=document.querySelector('.sub-row[data-id="target"] .txt');
+    editor.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));
+    await Promise.resolve(); await Promise.resolve();
+    editor.innerText='預覽草稿';
+    editor.dispatchEvent(new InputEvent('input',{bubbles:true}));
+    State.cues[0].text='背景完成';
+    History.record('背景工作');
+    expect(History.stack.at(-1).snap.cues.find(cue=>cue.id==='target').text).toBe('前半後半');
+    editor.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    editor.dispatchEvent(new FocusEvent('focusout',{bubbles:true}));
+    const canvas=vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockImplementation(()=>new Proxy({measureText:()=>({width:0})},{get:(target,key)=>target[key]??(()=>{})}));
+    const pause=vi.spyOn(HTMLMediaElement.prototype,'pause').mockImplementation(()=>{});
+    try { History.undo(); History.redo(); }
+    finally { canvas.mockRestore(); pause.mockRestore(); }
+    expect(State.cues.find(cue=>cue.id==='target').text).toBe('前半後半');
+    expect(State.cues.find(cue=>cue.id==='before').text).toBe('背景完成');
+  });
 });
 
 describe('字幕編輯交易：拆分字幕', () => {
@@ -310,7 +423,7 @@ describe('拆分字幕 UI adapters', () => {
     History.reset();
   });
 
-  it('字幕列表 Ctrl+Enter 拆分後會立即從原欄位移除游標後文字', () => {
+  it('字幕列表 Ctrl+Enter 拆分後會立即從原欄位移除游標後文字', async () => {
     const frameCallbacks = [];
     const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
       frameCallbacks.push(callback);
@@ -321,9 +434,8 @@ describe('拆分字幕 UI adapters', () => {
       State.tracks[0].locked = false;
       Subtitles.renderSubList();
       const textElement = document.querySelector('.sub-row[data-id="target"] .txt');
-      textElement.setAttribute('contenteditable', 'true');
-      textElement.contentEditable = 'true';
-      textElement.focus();
+      textElement.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));
+      await Promise.resolve(); await Promise.resolve();
       placeCursor(textElement, 2);
       renderListSynchronously = true;
 
@@ -369,11 +481,14 @@ describe('拆分字幕 UI adapters', () => {
     }
   });
 
-  it('字幕列表 Ctrl+Enter 由交易入口擋下鎖定軌，不會自行 mutation', () => {
+  it('字幕列表 Ctrl+Enter 由交易入口擋下編輯後才鎖定的軌，不會自行 mutation', async () => {
+    State.tracks[0].locked = false;
     Subtitles.renderSubList();
     const textElement = document.querySelector('.sub-row[data-id="target"] .txt');
-    textElement.contentEditable = 'true';
+    textElement.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));
+    await Promise.resolve(); await Promise.resolve();
     placeCursor(textElement, 2);
+    State.tracks[0].locked = true;
 
     textElement.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
@@ -391,10 +506,12 @@ describe('拆分字幕 UI adapters', () => {
   });
 
   it('修改字幕 modal 的 Ctrl+Enter 由同一交易入口擋下鎖定軌', async () => {
+    State.tracks[0].locked = false;
     await StylePanelController.openCueEditModal(State.cues[0]);
     vi.runOnlyPendingTimers();
     const textElement = document.getElementById('cueEditTa');
     placeCursor(textElement, 2);
+    State.tracks[0].locked = true;
 
     textElement.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
@@ -467,8 +584,8 @@ describe('字幕編輯交易：新增字幕', () => {
 });
 
 describe('字幕一般編輯 UI adapters', () => {
-  it('字幕列的起點編輯由交易入口擋下鎖定軌，不留 mutation 或 History', async () => {
-    State.tracks[0].locked = true;
+  it('字幕列的起點編輯由交易入口擋下開啟後才鎖定的軌，不留 mutation 或 History', async () => {
+    State.tracks[0].locked = false;
     State.fps = 25;
     State.dropFrame = false;
     Subtitles.renderSubList();
@@ -479,6 +596,7 @@ describe('字幕一般編輯 UI adapters', () => {
     await Promise.resolve();
     const editor = startCell.querySelector('input');
     expect(editor).not.toBeNull();
+    State.tracks[0].locked = true;
     editor.value = '00:00:12:00';
     editor.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Enter', bubbles: true, cancelable: true,
@@ -495,8 +613,8 @@ describe('字幕一般編輯 UI adapters', () => {
     });
   });
 
-  it('字幕列的終點編輯也不能繞過同一個鎖軌交易', async () => {
-    State.tracks[0].locked = true;
+  it('字幕列的終點編輯也不能繞過開啟後才鎖定的同一個交易', async () => {
+    State.tracks[0].locked = false;
     State.fps = 25;
     State.dropFrame = false;
     Subtitles.renderSubList();
@@ -506,6 +624,8 @@ describe('字幕一般編輯 UI adapters', () => {
     await Promise.resolve();
     await Promise.resolve();
     const editor = endCell.querySelector('input');
+    expect(editor).not.toBeNull();
+    State.tracks[0].locked = true;
     editor.value = '00:00:18:00';
     editor.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Enter', bubbles: true, cancelable: true,
@@ -546,12 +666,13 @@ describe('字幕一般編輯 UI adapters', () => {
   });
 
   it('時間軸區塊的 inline textarea 不再自己寫 cue 或 History', async () => {
-    State.tracks[0].locked = true;
+    State.tracks[0].locked = false;
     const block = document.createElement('div');
     document.getElementById('tlLayer').appendChild(block);
 
     await StylePanelController.startInlineEdit(block, State.cues.find(cue => cue.id === 'target'));
     const editor = document.querySelector('.cue-inline-edit');
+    State.tracks[0].locked = true;
     editor.value = '時間軸不應寫入';
     editor.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Enter', bubbles: true, cancelable: true,
@@ -569,11 +690,12 @@ describe('字幕一般編輯 UI adapters', () => {
   });
 
   it('修改字幕 modal 的文字與樣式在同一筆交易中被鎖軌擋下', async () => {
-    State.tracks[0].locked = true;
+    State.tracks[0].locked = false;
     const cue = State.cues.find(item => item.id === 'target');
 
     await StylePanelController.openCueEditModal(cue);
     await vi.advanceTimersByTimeAsync(30);
+    State.tracks[0].locked = true;
     document.getElementById('cueEditTa').innerText = '對話框不應寫入';
     document.getElementById('covK_bold').checked = true;
     document.getElementById('covV_bold').value = '1';

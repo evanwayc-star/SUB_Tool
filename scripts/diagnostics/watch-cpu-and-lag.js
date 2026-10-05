@@ -18,51 +18,13 @@
    如果 renderer 的延遲與 ffmpeg 的 CPU 佔用同進同退，那就是 CPU 被吃光，
    修法是把 ingest 的優先權調低，而不是去改 renderer 的 JS。
 ============================================================================== */
-const http = require('http');
-const WebSocket = require('ws');
+
+
 const { execFileSync } = require('child_process');
+const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const CORES = require('os').cpus().length;
-
-const getJSON = url => new Promise((res, rej) => {
-  http.get(url, r => {
-    let b = '';
-    r.on('data', d => { b += d; });
-    r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } });
-  }).on('error', rej);
-});
-
-function connect(target) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
-    let id = 0;
-    const pend = new Map();
-    const bail = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error('inspector 逾時')); }, 10000);
-    ws.on('open', () => {
-      clearTimeout(bail);
-      resolve({
-        eval: expr => new Promise((res, rej) => {
-          const i = ++id;
-          pend.set(i, { res, rej });
-          ws.send(JSON.stringify({ id: i, method: 'Runtime.evaluate',
-            params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true } }));
-        }),
-        close: () => { try { ws.close(); } catch (e) {} },
-      });
-    });
-    ws.on('message', raw => {
-      const m = JSON.parse(raw);
-      if (!m.id || !pend.has(m.id)) return;
-      const { res, rej } = pend.get(m.id);
-      pend.delete(m.id);
-      if (m.error) rej(new Error(m.error.message));
-      else if (m.result?.exceptionDetails) rej(new Error(JSON.stringify(m.result.exceptionDetails).slice(0, 300)));
-      else res(m.result?.result?.value);
-    });
-    ws.on('error', reject);
-  });
-}
 
 const ps = script => {
   try { return execFileSync('powershell', ['-NoProfile', '-Command', script], { encoding: 'utf8' }).trim(); }
@@ -154,8 +116,9 @@ const READ = `(async () => {
   try { process._debugProcess(pid); } catch (e) {}
   await sleep(1200);
 
-  const main = await connect((await getJSON('http://127.0.0.1:9229/json/list'))[0]);
-  await main.eval(ARM);
+  const main = new CdpClient(((await getJSON('http://127.0.0.1:9229/json/list'))[0]).webSocketDebuggerUrl);
+    await main.connect();
+  await main.evaluate(ARM);
 
   console.log('\n★ 請【載入影音】。Ctrl+C 結束。\n');
   console.log('  時間      新增延遲   總CPU%  ffmpeg%   可見性/焦點          ffmpeg 工作');
@@ -177,7 +140,7 @@ const READ = `(async () => {
     prev = now;
     const pct = s => Math.round((s / (EVERY / 1000)) * 100 / CORES);
     let st = { lag: 0, vis: '?', focus: false, winMin: false };
-    try { st = JSON.parse(await main.eval(READ)); } catch (e) {}
+    try { st = JSON.parse(await main.evaluate(READ)); } catch (e) {}
     const dLag = Math.max(0, st.lag - prevLag); prevLag = st.lag;
     /* 延遲大但頁面 hidden／沒有焦點 → 是【背景節流】，不是被擋住。 */
     const throttled = st.vis !== 'visible' || !st.focus;

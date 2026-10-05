@@ -55,6 +55,23 @@ function updateViews(){
   drawTimeline();
 }
 let activeProjectEditor=null;
+let activeRoutingModal=null;
+/* Routing 頁面的重畫與父子導航是同一次 editor handoff；其他 Modal 的 replacement
+   才終止整段編輯。Modal lease 同時擋掉旧頁的延後綁定與 detached button。 */
+function openRoutingModal(editor,title,html,buttons,opts={}){
+  activeRoutingModal?.session?.close?.({committed:true});
+  const owner={editor,session:null};
+  const owns=()=>activeRoutingModal===owner&&(owner.session?.isCurrent?.()??true);
+  const dismiss=()=>{
+    if(activeRoutingModal===owner) activeRoutingModal=null;
+    editor.dismiss();
+  };
+  activeRoutingModal=owner;
+  owner.session=openModal(title,html,buttons.map(button=>({...button,act:(...args)=>{
+    if(owns()&&editor.isActive()) return button.act?.(...args);
+  }})),{...opts,onDismiss:dismiss,onReplaced:dismiss});
+  return {isCurrent:owns};
+}
 function projectEditor({ output=false, label='設定輸出音訊聲道' }={}){
   activeProjectEditor?.dismiss();
   let owned=project();
@@ -138,7 +155,7 @@ function openForRoutingSource(source, editor=null){
   const p=editor.current();
   const routes=p.sourceMaps[sourceId]?.channels||[];
   const count=p.buses.length;
-  openModal('音訊配線',
+  const modalSession=openRoutingModal(editor,'音訊配線',
     `<div class="audio-route-dialog">
       <div class="audio-route-source"><b>${escapeHTML(source.name||'未命名音訊來源')}</b><span>來源音訊獨立對應至專案總輸出音軌</span></div>
       <div class="audio-bus-count"><label>專案音訊軌數
@@ -161,9 +178,9 @@ function openForRoutingSource(source, editor=null){
       const result=editor.commit();
       if(!result.saved){ showToast(result.error); return; }
       closeModal({committed:true});
-    }},{label:'取消',act:()=>closeModal()}],{width:'680px',onDismiss:()=>editor.dismiss()});
+    }},{label:'取消',act:()=>closeModal()}],{width:'680px'});
   setTimeout(()=>{
-    if(!editor.isActive()||!document.querySelector('.audio-route-dialog')) return;
+    if(!modalSession.isCurrent()||!editor.isActive()) return;
     const rerender=()=>openForRoutingSource(source,editor);
     const sync=()=>syncRouteDraftFromDialog(editor,sourceId);
     const countInput=document.getElementById('audioBusCount');
@@ -243,7 +260,7 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
   const outputHelp=wavDelivery
     ? '這份 WAV 會把下列表格選取的專案音訊軌，依表格由上而下的順序寫入同一個多聲道 WAV；未在此列設定過的 WAV 仍會依全部 A 軌順序輸出。'
     : '影片輸出會依下列 Stream mux 音訊；WAV 則固定把所有專案音訊軌依 A 軌順序寫入同一個多聲道 WAV。';
-  openModal(wavDelivery?'WAV 音軌設定':'Audio Channel Configuration',
+  const modalSession=openRoutingModal(editor,wavDelivery?'WAV 音軌設定':'Audio Channel Configuration',
     `<div class="audio-output-dialog">
       <div class="audio-route-help">${outputHelp}</div>
       ${wavDelivery?'':`<div class="audio-bus-count"><label>專案音訊軌數
@@ -273,9 +290,9 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
     }},{label:onBack?'返回配線':'取消',act:()=>{
       if(onBack){ editor.cancel(); closeModal({committed:true}); onBack({saved:false}); }
       else closeModal();
-    }}],{width:'860px',onDismiss:()=>editor.dismiss()});
+    }}],{width:'860px'});
   setTimeout(()=>{
-    if(!editor.isActive()||!document.querySelector('.audio-output-dialog')) return;
+    if(!modalSession.isCurrent()||!editor.isActive()) return;
     const rerender=()=>{
       // 版面重畫會重新建立「可連續分配」的選項；先保存畫面上的暫存選擇，
       // 才不會在 Mono / Stereo / 5.1 切換時把使用者剛選的編組還原掉。

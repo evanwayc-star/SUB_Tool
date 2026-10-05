@@ -137,22 +137,36 @@ function readFile(file) {
   });
 }
 
+const pendingFilePickers = new WeakMap();
 /**
  * 喚起隱藏之 input[type=file] 元素選擇檔案。
  * @param {HTMLInputElement} inputEl
- * @returns {Promise<File|null>}
+ * @returns {Promise<File[]>}
  */
-function pickFile(inputEl) {
+function pickFiles(inputEl) {
   return new Promise(res => {
     if (!inputEl) {
-      res(null);
+      res([]);
       return;
     }
+    pendingFilePickers.get(inputEl)?.([]);
+    const finish = files => {
+      if (pendingFilePickers.get(inputEl) !== finish) return;
+      pendingFilePickers.delete(inputEl);
+      inputEl.removeEventListener('change', onChange);
+      inputEl.removeEventListener('cancel', onCancel);
+      res(files);
+    };
+    const onChange = () => finish(Array.from(inputEl.files || []));
+    const onCancel = () => finish([]);
+    pendingFilePickers.set(inputEl, finish);
     inputEl.value = '';
-    inputEl.onchange = () => res(inputEl.files?.[0] || null);
-    inputEl.click();
+    inputEl.addEventListener('change', onChange);
+    inputEl.addEventListener('cancel', onCancel);
+    try { inputEl.click(); } catch { finish([]); }
   });
 }
+function pickFile(inputEl) { return pickFiles(inputEl).then(files => files[0] || null); }
 
 /**
  * Base64 字串轉 Uint8Array。
@@ -237,6 +251,7 @@ export {
   downloadBytes,
   readFile,
   pickFile,
+  pickFiles,
   b64ToBytes,
   bytesToB64,
   baseName,

@@ -36,11 +36,11 @@ import {
   snapAllCuesToFrames, swapAdjacentCues, mergeAdjacentCues, detectOverlaps, sweepContainedCues,
   addCue as _addCue, addCueRelative as _addCueRelative, deleteSelectedCues, deleteCue, clearSelectedCuesTime, 
   shiftTextsDown, shiftTextsUp, sortCues, copyCues, pasteCues as _pasteCues, trimTrackSpaces,
-  trackLocked, cueTrackLocked, cuesTrackLocked, editCue, splitCue
+  trackLocked, cueTrackLocked, cuesTrackLocked, editCue, captureCueDeletion, captureCueTextSwap, beginCueEdit, finalizeCueTimeEdit, finalizeProvisionalCueEnds
 } from './subtitle-model.js';
 
 // Search imports
-import { searchSelectAll, txtHTML, isSearchHit, getSearchCountText, searchUpdate as _searchUpdate, searchNav as _searchNav, searchReplace as _searchReplace, setSelectCueHandler } from './subtitle-search.js';
+import { searchSelectAll, txtHTML, isSearchHit, getSearchCountText, searchUpdate as _searchUpdate, searchNav as _searchNav, searchReplace as _searchReplace } from './subtitle-search.js';
 
 const _presetNameCache = new Map();
 const _customCodeMap = new Map();
@@ -53,7 +53,6 @@ function clearPresetNameCache(){
   const keys = Object.keys(STYLE_DEFAULTS);
   const presets = getAllPresets();
   for (const c of State.cues) {
-    if (c.style && Object.keys(c.style).length > 0) {
       const st = effStyle(c, State.tracks[c.track || 0] || null);
       let name = '';
       for (const p of presets) {
@@ -64,7 +63,6 @@ function clearPresetNameCache(){
         for (const k of keys) key += st[k] + '|';
         activeKeys.add(key);
       }
-    }
   }
   for (const oldKey of _customCodeMap.keys()) {
     if (!activeKeys.has(oldKey)) _customCodeMap.delete(oldKey);
@@ -117,13 +115,29 @@ function styleNameHtml(c){
     const cls = isCustom ? 'nm custom' : 'nm';
     if (isOv) return `<span class="${cls}" title="此句有逐句樣式覆蓋，等同常用樣式：${escapeHTML(n)}">✱ ${escapeHTML(n)}</span>`;
     return `<span class="${cls}" title="常用樣式：${escapeHTML(n)}">${escapeHTML(n)}</span>`;
-  } else {
-    if (isOv) {
-      const code = _getCustomCodeForStyle(st);
-      return `<span class="nm ov-custom" title="此句有逐句樣式覆蓋">✱ ${code}</span>`;
-    }
-    return '';
   }
+  const code = _getCustomCodeForStyle(st);
+  return `<span class="nm ${isOv?'ov-custom':'custom'}" title="${isOv?'此句有逐句樣式覆蓋':'繼承軌道自訂樣式'}">${isOv?'✱ ':''}${code}</span>`;
+}
+
+function styleFilterInfo(c){
+  const st=effStyle(c,State.tracks[c.track||0]||null);
+  const name=_getPresetNameForStyle(st);
+  const override=!!c.style && Object.keys(c.style).length>0;
+  return {
+    custom:!styleMatchesPreset(st,STYLE_DEFAULTS),
+    label:(override?'✱ ':'')+(name||_getCustomCodeForStyle(st)),
+  };
+}
+
+function filteredSubtitleCues(track=State.listTrack){
+  const filter=track===State.listTrack ? $('subStyleFilter')?.value||'' : '';
+  return State.cues.filter(c=>{
+    if((c.track||0)!==track) return false;
+    if(!filter) return true;
+    const info=styleFilterInfo(c);
+    return filter==='__non_default' ? info.custom : info.label===filter;
+  });
 }
 
 function inkOn(hex){
@@ -168,14 +182,15 @@ function styleSummaryHtml(c){
     `</span>`;
 }
 
-let _swapSource = null;
+let _swapEdit = null;
 let _checkLenLimit = 0;
 let _checkContains = [];
 
 function enterSwapMode(id){
   const cue=State.cues.find(c=>c.id===id);
   if(!cue || cueTrackLocked(cue, '交換字幕文字')) return;
-  _swapSource = id;
+  _swapEdit?.cancel();
+  _swapEdit = captureCueTextSwap(cue);
   sublist.querySelectorAll('.sub-row').forEach(r=>r.classList.remove('swap-src'));
   const srcRow=sublist.querySelector(`.sub-row[data-id="${id}"]`);
   if(srcRow)srcRow.classList.add('swap-src');
@@ -183,7 +198,8 @@ function enterSwapMode(id){
   showToast('文字交換模式：點選目標字幕（Esc 取消）');
 }
 function cancelSwapMode(){
-  _swapSource=null;
+  _swapEdit?.cancel();
+  _swapEdit=null;
   sublist.querySelectorAll('.sub-row').forEach(r=>r.classList.remove('swap-src'));
   sublist.classList.remove('swap-mode');
 }
@@ -325,7 +341,9 @@ function refreshStyleSummaries(){
       const allList = State.cues.filter(c=>(c.track||0)===State.listTrack);
       const oldVal = filterEl.value;
       const newVal = updateStyleFilterOptions(allList);
-      if (oldVal !== newVal) {
+      const expected=filteredSubtitleCues().map(c=>c.id);
+      const shown=[...sublist.querySelectorAll('.sub-row')].map(row=>row.dataset.id);
+      if (oldVal !== newVal || expected.length!==shown.length || expected.some((id,i)=>id!==shown[i])) {
         renderSubList();
         return;
       }
@@ -347,18 +365,11 @@ function updateStyleFilterOptions(allList) {
   
   const usedStyles = new Set();
   for (const c of allList) {
-    const isOv = c.style && Object.keys(c.style).length > 0;
-    const st = effStyle(c, State.tracks[c.track || 0] || null);
-    const n = _getPresetNameForStyle(st);
-    if (n) {
-      usedStyles.add(isOv ? `✱ ${n}` : n);
-    } else if (isOv) {
-      usedStyles.add(`✱ 自訂`);
-    }
+    usedStyles.add(styleFilterInfo(c).label);
   }
   
   const curVal = filterEl.value;
-  let html = `<option value="">所有樣式</option><option value="__non_default">非預設樣式</option>`;
+  let html = `<option value="">所有樣式</option><option value="__non_default">自訂樣式（非預設）</option>`;
   const sorted = Array.from(usedStyles).sort();
   for (const s of sorted) {
     html += `<option value="${escapeHTML(s)}">${escapeHTML(s)}</option>`;
@@ -375,6 +386,7 @@ function updateStyleFilterOptions(allList) {
 }
 
 function renderSubList(){
+  for(const txt of textEditors.keys()) endTextEditor(txt,true);
   sublist.innerHTML='';
   clearPresetNameCache();
   
@@ -385,22 +397,7 @@ function renderSubList(){
     updateStyleFilterOptions(allList);
   }
 
-  const activeFilter = filterEl ? filterEl.value : '';
-  let list = allList;
-  if (activeFilter) {
-    list = allList.filter(c => {
-      const isOv = c.style && Object.keys(c.style).length > 0;
-      const st = effStyle(c, State.tracks[c.track || 0] || null);
-      const n = _getPresetNameForStyle(st);
-      
-      if (activeFilter === '__non_default') {
-        return n !== '預設' || isOv;
-      }
-      
-      const label = n ? (isOv ? `✱ ${n}` : n) : `✱ 自訂`;
-      return label === activeFilter;
-    });
-  }
+  const list = filteredSubtitleCues();
 
   if(list.length===0){
     sublist.innerHTML='<div class="empty">'+(State.cues.length?'此軌道沒有符合篩選條件的字幕':'尚無字幕<br><br>· 匯入字幕檔，或<br>· 選一條字幕後按 <b>I</b>/<b>O</b> 設定起訖<br>· 或點 <b>⬆＋ / ⬇＋</b> 新增')+'</div>';
@@ -484,17 +481,26 @@ function seekCueFromSelection(target, pointer) {
 
 function selectCue(id,opts){
   opts=opts||{};
-  let changed = false;
-  State.cues.forEach(cue => {
-    if (cue._tempEnd && cue.id !== id) {
-      cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
-      delete cue._tempEnd;
-      changed = true;
+  const target=State.cues.find(c=>c.id===id);
+  if(id!=null && !target) return false;
+  if(target && State.tracks[target.track||0]?.locked){
+    const time=Media.displayTime();
+    if(opts.seek && target.timed!==false && (time<target.start || time>=target.end)){
+      seekCueFromSelection(snapTimeToFrame(target.start,State.fps,State.dropFrame),opts.pointer);
+      updatePlayhead();
     }
-  });
-  if (changed) {
-    emit('render:videoSub'); emit('mpv:refreshSubs');
-    emit('render:all');
+    return false;
+  }
+  finalizeProvisionalCueEnds(id);
+
+  if(id==null){
+    deselect('sub');
+    State.activeEdge='start';
+    refreshSelectionUI(opts);
+    const status=$('stSel');
+    if(status) status.innerHTML=formatSubSelectionHTML();
+    updatePlayhead();
+    return true;
   }
 
   let picked, primary;
@@ -504,7 +510,7 @@ function selectCue(id,opts){
     if(i>=0)picked.splice(i,1); else picked.push(id);
     primary=picked[picked.length-1]??null;
   }else if(opts.range && State.selectedId){
-    const ids=State.cues.map(c=>c.id);
+    const ids=filteredSubtitleCues(target.track||0).map(c=>c.id);
     const a=ids.indexOf(State.selectedId), b=ids.indexOf(id);
     picked = (a>=0&&b>=0) ? ids.slice(Math.min(a,b),Math.max(a,b)+1) : [...State.selectedIds];
     primary=State.selectedId; 
@@ -543,32 +549,12 @@ function selectCue(id,opts){
 }
 
 function selectCueSingle(id,seek){ selectCue(id,{seek}); }
-setSelectCueHandler(selectCue);
 
 function commitCueTimeEdit(c, edge){
   const tk=c.track||0;
-  sweepContainedCues([c]);
-
-  if (edge === 'start' || edge === 'both' || !edge) {
-    const idx = State.cues.indexOf(c);
-    if (idx !== -1) {
-      let nextIdx = idx + 1;
-      let offset = 0.001;
-      while (nextIdx < State.cues.length) {
-        const nextC = State.cues[nextIdx];
-        if ((nextC.track || 0) !== tk) { nextIdx++; continue; }
-        if (nextC.timed !== false) break;
-        nextC.start = c.start + offset;
-        nextC.end = nextC.start;
-        offset += 0.001;
-        nextIdx++;
-      }
-    }
-  }
-
   const order=()=>State.cues.filter(x=>(x.track||0)===tk).map(x=>x.id).join(',');
   const before=order();
-  sortCues();
+  finalizeCueTimeEdit(c,edge,{select:false,render:false});
   if(tk===State.listTrack && before===order()){
     renderSubRow(c.id);
     const ov=detectOverlaps(State.cues.filter(x=>x.timed!==false&&(x.track||0)===tk), 0.001);
@@ -584,6 +570,13 @@ function commitCueTimeEdit(c, edge){
 
 function refreshSelectionUI(opts={}){
   const revealSeq=++_selectionRevealSeq;
+  const filter=$('subStyleFilter');
+  if(!opts.preventScroll && filter?.value){
+    const visible=new Set(filteredSubtitleCues().map(c=>c.id));
+    if(State.cues.some(c=>(c.track||0)===State.listTrack && isSel(c.id) && !visible.has(c.id))){
+      filter.value='';renderSubList();
+    }
+  }
   sublist.querySelectorAll('.sub-row').forEach(r=>{
     r.classList.toggle('sel',isSel(r.dataset.id));
     r.classList.toggle('primary',r.dataset.id===State.selectedId);
@@ -619,7 +612,35 @@ function refreshSelectionUI(opts={}){
 
 const _splittingTextEditors=new WeakSet();
 
+const textEditors=new Map();
+function beginTextEditor(txt,c){
+  const owner=beginCueEdit(c,{preview:true});
+  if(!owner){ txt.contentEditable='false'; return null; }
+  const entry={cue:c,owner};
+  textEditors.set(txt,entry);
+  return entry;
+}
+function ownedTextEditor(txt,c){
+  const entry=textEditors.get(txt);
+  return entry?.cue===c && entry.owner.isCurrent() ? entry : null;
+}
+function endTextEditor(txt,cancel=false){
+  const entry=textEditors.get(txt);
+  if(!entry) return;
+  if(cancel) entry.owner.cancel(); else entry.owner.release();
+  textEditors.delete(txt);
+}
+function discardUnownedTextEditor(txt,c){
+  endTextEditor(txt);
+  txt.contentEditable='false';
+  if(c) {
+    cueTrackLocked(c,'編輯字幕');
+    txt.innerHTML=_txtInner(c.text);
+  }
+}
+
 function splitCueAtCursor(c, txtEl){
+  if(!ownedTextEditor(txtEl,c)) return;
   const sel=window.getSelection();
   if(!sel.rangeCount)return;
 
@@ -647,11 +668,11 @@ function splitCueAtCursor(c, txtEl){
   _splittingTextEditors.add(txtEl);
   let result;
   try{
-    result=splitCue({
-      cueId:c.id,
+    result=ownedTextEditor(txtEl,c).owner.split({
       textBefore,
       textAfter,
       timelineTime:Media.displayTime(),
+      beforeCommit:()=>endTextEditor(txtEl),
     });
     if(!result.ok)return;
     // splitCue 會同步觸發 render:all 並重建列表。交易期間的舊 editor 若先
@@ -670,6 +691,7 @@ function splitCueAtCursor(c, txtEl){
   const newCue=result.cue;
 
   requestAnimationFrame(()=>{
+    if(!State.cues.includes(newCue)) return;
     const nr=sublist.querySelector(`.sub-row[data-id="${newCue.id}"]`);
     if(!nr)return;
     const nt=nr.querySelector('.txt');
@@ -677,6 +699,7 @@ function splitCueAtCursor(c, txtEl){
     nt.innerText=textAfter;
     nt.dataset.orig=textAfter;
     nt.contentEditable='true';
+    beginTextEditor(nt,newCue);
     nt.focus();
     try{
       const r=document.createRange(),s=window.getSelection();
@@ -696,14 +719,9 @@ sublist?.addEventListener?.('mousedown', e => {
   const c = State.cues.find(x => x.id === row.dataset.id);
   if (!c) return;
 
-  if (_swapSource !== null) {
+  if (_swapEdit !== null) {
     e.preventDefault();
-    if (c.id !== _swapSource) {
-      const src = State.cues.find(x => x.id === _swapSource);
-      if (src && !cueTrackLocked(src, '交換字幕文字') && !cueTrackLocked(c, '交換字幕文字')) {
-        const tmp = src.text || ''; src.text = c.text || ''; c.text = tmp; emit('render:all'); recordHistory('文字交換');
-      }
-    }
+    _swapEdit.commit(c);
     cancelSwapMode(); return;
   }
   const txtEl = row.querySelector('.txt');
@@ -726,14 +744,17 @@ sublist?.addEventListener?.('dblclick', async e => {
     if (!row) return;
     const c = State.cues.find(x => x.id === row.dataset.id);
     if (!c) return;
+    const track=State.tracks[c.track||0];
+    if(cueTrackLocked(c,'編輯字幕時間')) return;
     await ensureProjectSaved();
+    if(!row.isConnected || State.cues.find(item=>item.id===c.id)!==c || State.tracks[c.track||0]!==track || cueTrackLocked(c,'編輯字幕時間')) return;
     if (tin) {
       openInlineTimeEdit(tin, c.start || 0, t => {
-        editCue({ cueId: c.id, operation: 'start', value: t });
+        if(State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===track) editCue({ cueId: c.id, operation: 'start', value: t });
       });
     } else {
       openInlineTimeEdit(tout, c.end || 0, t => {
-        editCue({ cueId: c.id, operation: 'end', value: t });
+        if(State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===track) editCue({ cueId: c.id, operation: 'end', value: t });
       });
     }
     return;
@@ -742,12 +763,17 @@ sublist?.addEventListener?.('dblclick', async e => {
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
   if (!c) return;
+  const track=State.tracks[c.track||0];
   e.preventDefault();
+  if(cueTrackLocked(c,'編輯字幕')) return;
   await ensureProjectSaved();
+  if(!row.isConnected || State.cues.find(item=>item.id===c.id)!==c || State.tracks[c.track||0]!==track || cueTrackLocked(c,'編輯字幕')) return;
   const t = row.querySelector('.txt');
+  endTextEditor(t,true);
   t.dataset.orig = c.text || '';
   t.innerHTML = escapeHTML(c.text || '').replace(/\n/g, '<br>');
   t.contentEditable = 'true'; t.focus();
+  beginTextEditor(t,c);
   try { const r = document.createRange(), s = window.getSelection(); r.selectNodeContents(t); r.collapse(false); s.removeAllRanges(); s.addRange(r); } catch (_) {}
 });
 
@@ -764,6 +790,10 @@ sublist?.addEventListener?.('contextmenu', e => {
   }
 
   e.preventDefault();
+  if(State.tracks[c.track||0]?.locked){
+    showCueMenu(e.clientX,e.clientY,c);
+    return;
+  }
   if (!isSel(c.id)) selectCue(c.id);
   else { setSelection({ kind:'sub', ids:State.selectedIds, primary:c.id }); refreshSelectionUI(); }
   showCueMenu(e.clientX, e.clientY);
@@ -781,11 +811,11 @@ sublist?.addEventListener?.('input', e => {
   const row = txt.closest('.sub-row');
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
-  if (!c) return;
+  if (!c || !ownedTextEditor(txt,c)) { discardUnownedTextEditor(txt,c); return; }
 
   let val = txt.innerText;
   if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
-  const preview=editCue({ cueId:c.id, operation:'text-preview', value:val });
+  const preview=ownedTextEditor(txt,c).owner.previewText(val);
   if(!preview.ok){ val=c.text||''; txt.innerText=val; }
   const rc2 = _rowClass(c);
   row.classList.remove('no-time', 'blank', 'two-line', 'multi-line'); 
@@ -799,12 +829,12 @@ sublist?.addEventListener?.('focusout', e => {
   const row = txt.closest('.sub-row');
   if (!row) return;
   const c = State.cues.find(x => x.id === row.dataset.id);
-  if (!c) return;
+  if (!c || !ownedTextEditor(txt,c)) { discardUnownedTextEditor(txt,c); return; }
   let val = txt.innerText;
   if(val.endsWith('\n') && !(txt.dataset.orig||'').endsWith('\n')) val = val.slice(0, -1);
   txt.contentEditable = 'false';
-  const orig = txt.dataset.orig || '';
-  editCue({ cueId:c.id, operation:'text', value:val, baseline:orig });
+  ownedTextEditor(txt,c).owner.commit({text:val});
+  textEditors.delete(txt);
   const currentTxt=sublist.querySelector(`.sub-row[data-id="${c.id}"] .txt`);
   if(currentTxt&&currentTxt.contentEditable!=='true') currentTxt.innerHTML=_txtInner(c.text);
 });
@@ -862,10 +892,11 @@ function deleteSelectedWithPrompt() {
   if (onLocked && cueTrackLocked(onLocked, '刪除字幕')) return;
 
   if (ids.length > 1) {
-    openModal(`刪除 ${ids.length} 條字幕`,
+    const commit=captureCueDeletion(ids);
+    const session=openModal(`刪除 ${ids.length} 條字幕`,
       `<p>確定要刪除選取的 <b>${ids.length}</b> 條字幕嗎？</p>`,
-      [{label:'取消', act:closeModal},
-       {label:'確定刪除', primary:true, act:()=>{ closeModal(); deleteSelectedCues(ids); }}]);
+      [{label:'取消', act:()=>session.close()},
+       {label:'確定刪除', primary:true, act:()=>{ if(session.isCurrent() && commit()) session.close({committed:true}); }}]);
     return;
   }
   deleteSelectedCues(ids);
@@ -912,7 +943,7 @@ function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []) {
 }
 
 export { 
-  renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel, formatSubSelectionText, formatSubSelectionHTML,
+  renderSubList, renderCheckPanel, renderSubRow, filteredSubtitleCues, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel, formatSubSelectionText, formatSubSelectionHTML,
   addCue, addCueRelative, deleteSelectedWithPrompt as deleteSelected, deleteSelectedWithPrompt, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,
   searchUpdate, searchNav, searchReplace, updateSearchCount, searchSelectAll, openInlineTimeEdit, refreshStyleSummaries,

@@ -10,6 +10,8 @@
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import fs from 'node:fs';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
@@ -95,16 +97,37 @@ describe('sanitize', () => {
 });
 
 describe('removeRecent', () => {
-  it('移除指定路徑（不分大小寫）', () => {
+  it('移除指定路徑（Windows 不分大小寫）', () => {
     let list = R.addRecent([], abs('a.subtool'), { now: 1 });
     list = R.addRecent(list, abs('b.subtool'), { now: 2 });
-    const out = R.removeRecent(list, abs('a.subtool').toUpperCase());
+    const file = abs('a.subtool');
+    const out = R.removeRecent(list, process.platform === 'win32' ? file.toUpperCase() : file);
     expect(out.map(x => x.name)).toEqual(['b.subtool']);
   });
 
   it('移除不存在的路徑不會改變清單', () => {
     const list = R.addRecent([], abs('a.subtool'), { now: 1 });
     expect(R.removeRecent(list, abs('zzz.subtool'))).toEqual(list);
+  });
+});
+
+describe('不同平台的recent檔案身分', () => {
+  it.each(['darwin', 'linux', 'win32'])('%s 保留其檔案系統的大小寫與絕對路徑規則', platform => {
+    const platformPath = platform === 'win32' ? path.win32 : path.posix;
+    const module = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'electron/project-file-authority-engine.js'), 'utf8'), {
+      module, process: { platform }, Buffer, setTimeout, clearTimeout,
+      require: id => id === 'path' ? platformPath : require(id.startsWith('.') ? path.resolve(ROOT, 'electron', id) : id),
+    });
+    const recent = module.exports.RecentProjects;
+    const upper = platformPath.resolve(platform === 'win32' ? 'C:/Project/Project.subtool' : '/Project/Project.subtool');
+    const lower = platformPath.resolve(platform === 'win32' ? 'C:/Project/project.subtool' : '/Project/project.subtool');
+    let list = recent.addRecent([], upper);
+    list = recent.addRecent(list, lower);
+    expect(list).toHaveLength(platform === 'win32' ? 1 : 2);
+    expect(recent.removeRecent(list, lower)).toHaveLength(platform === 'win32' ? 0 : 1);
+    const relative = platformPath.join(platformPath.dirname(lower), '..', platformPath.basename(platformPath.dirname(lower)), platformPath.basename(lower));
+    expect(recent.addRecent(list, relative)).toHaveLength(list.length);
   });
 });
 

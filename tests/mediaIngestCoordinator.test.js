@@ -12,6 +12,26 @@ const deferred = () => {
 };
 
 describe('media ingest coordinator', () => {
+  it('shutdown 取消 active、清 pending 並等完整背景 completion，不能再准入', async () => {
+    const coordinator = createMediaIngestCoordinator();
+    const completion = deferred();
+    const child = { kill: vi.fn() };
+    await coordinator.replace(({ setProcess }) => { setProcess(child); return { response: 'ready', completion: completion.promise }; });
+    const pendingWork = vi.fn(() => 'obsolete');
+    const pending = coordinator.enqueue(pendingWork).catch(error => error);
+    let ended = false;
+    const closing = coordinator.cancelAllAndWait().then(() => { ended = true; });
+    expect(child.kill).toHaveBeenCalledOnce();
+    await expect(pending).resolves.toBeInstanceOf(IngestSupersededError);
+    await expect(coordinator.replace(() => 'new')).rejects.toBeInstanceOf(IngestSupersededError);
+    expect(ended).toBe(false);
+    expect(pendingWork).not.toHaveBeenCalled();
+    completion.resolve();
+    await closing;
+    expect(coordinator.resume()).toBe(true);
+    await expect(coordinator.enqueue(() => 'resumed')).resolves.toBe('resumed');
+  });
+
   it('holds queued cache work until a streaming ingest actually finishes', async () => {
     const coordinator = createMediaIngestCoordinator();
     const completion = deferred();

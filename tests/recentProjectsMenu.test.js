@@ -25,6 +25,11 @@
    所以這支測試刻意**照 app.js 的順序**先註冊通用處理器，再呼叫 initRecentProjects，
    然後模擬真人點一下——測的是「使用者按下去會不會看到清單」，不是任一支函式的回傳值。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { createProjectWorkspace } = require('../electron/project-file-authority-engine.js');
 
 const ui = vi.hoisted(() => ({
   showToast: vi.fn(),
@@ -38,14 +43,20 @@ const ui = vi.hoisted(() => ({
   syncMenuOverlay: vi.fn(),
 }));
 vi.mock('../src/ui.js', () => ui);
-vi.mock('../src/project.js', () => ({
-  Project: { loadDesktop: vi.fn() },
-  confirmDiscardUnsaved: vi.fn().mockResolvedValue(true),
-}));
+vi.mock('../src/project.js', () => {
+  const confirmDiscardUnsaved=vi.fn().mockResolvedValue(true);
+  const Project={loadDesktop:vi.fn()};
+  Project.open=vi.fn(async read=>{
+    if(!await confirmDiscardUnsaved()) return;
+    const input=await read();
+    if(input) return Project.loadDesktop(input);
+  });
+  return {Project,confirmDiscardUnsaved};
+});
 
 const RECENT = [
-  { index: 0, name: 'A.subtool', path: 'D:\\proj\\A.subtool', at: 1786011143592, missing: false },
-  { index: 1, name: 'B.subtool', path: 'D:\\proj\\B.subtool', at: 1786011135104, missing: true },
+  { index: 0, token: 'recent-a', name: 'A.subtool', path: 'D:\\proj\\A.subtool', at: 1786011143592, missing: false },
+  { index: 1, token: 'recent-b', name: 'B.subtool', path: 'D:\\proj\\B.subtool', at: 1786011135104, missing: true },
 ];
 
 let recentProjects;
@@ -99,6 +110,70 @@ beforeEach(async () => {
 });
 
 describe('最近開啟選單', () => {
+  it('較舊讀取晚到不得蓋掉最新清單', async () => {
+    let oldDone, latestDone;
+    recentProjects.mockReturnValueOnce(new Promise(resolve=>{oldDone=resolve;}))
+      .mockReturnValueOnce(new Promise(resolve=>{latestDone=resolve;}));
+    const {renderRecentMenu}=await import('../src/recent-projects.js');
+    const old=renderRecentMenu(), latest=renderRecentMenu();
+    latestDone([{token:'latest',name:'最新.subtool',at:1}]);
+    await latest;
+    oldDone(RECENT);
+    await old;
+    expect(projectRows().map(row=>row.textContent)).toEqual([expect.stringContaining('最新.subtool')]);
+  });
+
+  it('清除清單時失效舊讀取，晚到結果不得恢復已清除項目', async () => {
+    const {renderRecentMenu}=await import('../src/recent-projects.js');
+    await renderRecentMenu();
+    let oldDone;
+    recentProjects.mockReturnValueOnce(new Promise(resolve=>{oldDone=resolve;})).mockResolvedValue([]);
+    const old=renderRecentMenu();
+    [...document.querySelectorAll('#recentItems button')].find(b=>b.textContent==='清除清單').click();
+    await vi.waitFor(()=>expect(document.getElementById('recentItems').textContent).toContain('還沒有開啟過專案'));
+    oldDone(RECENT);
+    await old;
+    expect(projectRows()).toHaveLength(0);
+  });
+
+  it('等待讀取時替換了選單節點，不發布結果或干擾 mpv overlay', async () => {
+    let finish;
+    recentProjects.mockReturnValueOnce(new Promise(resolve=>{finish=resolve;}));
+    const {renderRecentMenu}=await import('../src/recent-projects.js');
+    const pending=renderRecentMenu();
+    const old=document.getElementById('recentItems');
+    old.replaceWith(old.cloneNode());
+    finish(RECENT);
+    await pending;
+    expect(old.childElementCount).toBe(0);
+    expect(document.getElementById('recentItems').childElementCount).toBe(0);
+    expect(ui.syncMenuOverlay).not.toHaveBeenCalled();
+  });
+
+  it('點選 B 後於守衛等待期間保存 C，真工作區仍開啟 B', async () => {
+    const a = path.resolve('recent-a.subtool'), b = path.resolve('recent-b.subtool'), c = path.resolve('current-c.subtool');
+    let list = [{ path: a }, { path: b }], finish;
+    const bytes = Buffer.from(JSON.stringify({ cues: [] }));
+    const grants = [];
+    const workspace = createProjectWorkspace({
+      readFile: async () => bytes, writeFile: async () => {},
+      grantProjectFile: file => grants.push(file), grantMediaFile: () => {}, canReadMedia: () => true,
+      readRecent: () => list, writeRecent: next => { list = next; },
+    });
+    recentProjects.mockImplementation(() => workspace.listRecent());
+    openRecentProject.mockImplementation(token => workspace.openRecent(token));
+    const { confirmDiscardUnsaved, Project } = await import('../src/project.js');
+    confirmDiscardUnsaved.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    initRecentProjects();
+    await vi.waitFor(() => expect(projectRows()).toHaveLength(2));
+    projectRows()[1].click();
+    expect(openRecentProject).not.toHaveBeenCalled();
+    await workspace.writeRendererProject(c, bytes.toString('base64'), { remember: true });
+    finish(true);
+    await vi.waitFor(() => expect(Project.loadDesktop).toHaveBeenCalledWith(expect.objectContaining({ path: b })));
+    expect(grants).toEqual([c, b]);
+  });
+
   it('第一次點開就看得到清單（不是空的）', async () => {
     initRecentProjects();
     click('recentBtn');
@@ -137,13 +212,13 @@ describe('最近開啟選單', () => {
     expect(missing.disabled).toBe(false);
   });
 
-  it('點某一列送出的是【索引】而不是路徑', async () => {
+  it('點某一列送出固定項目身分，不提供任意檔案路徑', async () => {
     initRecentProjects();
     await vi.waitFor(() => expect(projectRows()).toHaveLength(2));
     projectRows()[1].click();
-    await vi.waitFor(() => expect(openRecentProject).toHaveBeenCalledWith(1));
+    await vi.waitFor(() => expect(openRecentProject).toHaveBeenCalledWith('recent-b'));
     /* renderer 不可以有能力指定路徑——那等於一條「叫主程序讀任意檔案」的路。 */
-    expect(openRecentProject.mock.calls.flat().some(a => typeof a === 'string')).toBe(false);
+    expect(openRecentProject).not.toHaveBeenCalledWith(RECENT[1].path);
   });
 
   /* mpv 是 OS 層子視窗，HTML 蓋不過它。選單內容是【非同步】填進來的，高度到那一刻

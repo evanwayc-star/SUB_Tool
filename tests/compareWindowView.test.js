@@ -40,6 +40,55 @@ function planPayload(overrides = {}) {
 }
 
 describe('字幕比對視窗 view adapter', () => {
+  it('收到新plan時清掉舊選單，不得用最新revision包裝先前pair IDs', () => {
+    const { dom, callbacks, commands } = openCompareView();
+    callbacks[0](planPayload());
+    const left = dom.window.document.querySelector('[data-cue-id="left"]');
+    left.dispatchEvent(new dom.window.MouseEvent('contextmenu', { bubbles: true }));
+    expect(dom.window.document.getElementById('ctxMenu').classList.contains('show')).toBe(true);
+    const next = planPayload();
+    next.revision = 5;
+    next.plan.rows[0].right.id = 'new-source';
+    callbacks[0](next);
+    expect(dom.window.document.getElementById('ctxMenu').classList.contains('show')).toBe(false);
+    dom.window.document.getElementById('miMatchStyle').click();
+    expect(commands).toEqual([]);
+    const fresh = dom.window.document.querySelector('[data-cue-id="left"]');
+    fresh.dispatchEvent(new dom.window.MouseEvent('contextmenu', { bubbles: true }));
+    dom.window.document.getElementById('miMatchStyle').click();
+    expect(commands).toEqual([{ type: 'match-style', revision: 5, targetCueId: 'left', sourceCueId: 'new-source' }]);
+    dom.window.close();
+  });
+
+  it('比對列重繪關閉舊選單與命令context', () => {
+    const { dom, callbacks, commands } = openCompareView();
+    callbacks[0](planPayload());
+    dom.window.document.querySelector('[data-cue-id="left"]')
+      .dispatchEvent(new dom.window.MouseEvent('contextmenu', { bubbles: true }));
+    const toggle = dom.window.document.getElementById('hideIdentical');
+    toggle.checked = true;
+    toggle.dispatchEvent(new dom.window.Event('change'));
+    dom.window.document.getElementById('miMatchStyle').click();
+    expect(commands).toEqual([]);
+    dom.window.close();
+  });
+
+  it.each([
+    ['a&b', 'a<b'], ['&amp;', '&lt;'], ['"a\'b>', '"a\'b<'],
+    ['前😀後', '前😁後'], ['', '<img src=x onerror="throw 1">'],
+  ])('保留特殊字元原文並以完整字元標示差異：%s / %s', (left, right) => {
+    const { dom, callbacks } = openCompareView();
+    const payload = planPayload();
+    payload.plan.rows[0].left.text = left;
+    payload.plan.rows[0].right.text = right;
+    callbacks[0](payload);
+    const cells = [...dom.window.document.querySelectorAll('.txt')];
+    expect(cells.map(cell => cell.textContent)).toEqual([left, right]);
+    expect(dom.window.document.querySelector('img')).toBeNull();
+    if (left.includes('😀')) expect(cells[0].querySelector('.diff-text').textContent).toBe('😀');
+    dom.window.close();
+  });
+
   it('只渲染 session 傳來的 plan，不自行重算時碼', () => {
     const { dom, callbacks } = openCompareView();
     callbacks[0](planPayload());

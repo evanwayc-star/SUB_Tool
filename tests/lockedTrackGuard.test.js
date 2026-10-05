@@ -30,7 +30,7 @@ vi.mock('../src/timeline-renderer.js', () => ({
 }));
 vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
 vi.mock('../src/history.js', () => ({ History: {}, recordHistory: vi.fn(), renderHistory: vi.fn() }));
-vi.mock('../src/project.js', () => ({ Project: {}, ensureProjectSaved: vi.fn().mockResolvedValue() }));
+vi.mock('../src/project.js', () => ({ Project: {captureWorkspaceOwnership:()=>()=>true}, ensureProjectSaved: vi.fn().mockResolvedValue() }));
 vi.mock('../src/substyle.js', async orig => ({ ...(await orig()) }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));
 
@@ -42,6 +42,7 @@ let deleteSelected;
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
+  ui.openModal.mockReturnValue({isCurrent:()=>true,close:ui.closeModal});
   document.body.innerHTML = '<div id="sublist"></div><div id="stSel"></div><video id="video"></video>';
   ({ State } = await import('../src/state.js'));
   ({ trackLocked, cueTrackLocked, deleteSelected } = await import('../src/subtitles.js'));

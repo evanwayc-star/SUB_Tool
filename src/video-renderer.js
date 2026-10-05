@@ -13,10 +13,10 @@ import { createPreviewDrag } from './timeline-interaction-engine.js';
 import { drawTimeline, updatePlayhead } from './timeline-renderer.js';
 import { renderAudioTracks, clearMeterStrips } from './mixer.js';
 import { Wave } from './media.js';
-import { imageBoxOnStage, fadeAlphaAtTimeline } from './image-compositor-engine.js';
+import { imageBoxOnStage, imageLayerPlan, imageSourceUrl, visualStackPlan, stageBox, fadeAlphaAtTimeline } from './image-compositor-engine.js';
 import { renderASS } from './formats.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
-import { recordHistory } from './history.js';
+import { History, recordHistory } from './history.js';
 import { showToast, setMpvWindowVisible } from './ui.js';
 import { refreshSelectionUI, selectCueSingle } from './subtitles.js';
 import { subtitlePreviewIndex } from './subtitle-preview-index.js';
@@ -489,9 +489,7 @@ function _imageNat(c, src){
 
 /* clip 的圖片來源 URL（純檔案路徑才補 legacy file:///；opaque capability URL 一律照用） */
 function _imageSrc(c){
-  let src = c.web?.url || c.path || '';
-  if(src && !/^(https?|file|blob|data|subtool-local):/i.test(src)) src = 'file:///' + src.replace(/\\/g, '/');
-  return src;
+  return imageSourceUrl(c);
 }
 /* 圖片在畫框內的實際矩形；拖曳與渲染共用，避免兩邊各算一次而漂移 */
 export function _imageBoxOf(c, rect){
@@ -526,7 +524,12 @@ export function renderImageOverlays(){
     st.aspectRatio='auto'; st.maxWidth='none'; st.maxHeight='none';
   }
 
-  const t = Media.displayTime();
+  const composition=Media.previewComposition?.();
+  const t=composition?.time??Media.displayTime();
+  const imagesComposited=!!composition?.imagesComposited;
+  // mixed stack 在 decode/proxy 準備期間也只准由 compositor 出圖；不能把
+  // 下層圖片暫時搬到 native/HTML 影片之上。操作框仍由主 renderer 保留。
+  const bitmapInCanvas=imagesComposited||visualStackPlan(Seq.clipsAt(t),State.videoTracks).mixedImages;
   // 只處理 type === 'image' 且 trackVisible 的
   const imageClips = Seq.clipsAt(t).filter(c => c.type === 'image' && videoTrackVisible(c.vtrack || 0));
   
@@ -545,22 +548,26 @@ export function renderImageOverlays(){
     /* 互動框＝圖片【實際被畫出來的那塊】（見 image-geometry.js）。
        舊版直接把「scale×畫框」當成 .img-wrap，非 16:9 的素材會讓虛線框與四角把手
        離圖片本體上百 px，下緣兩顆還會掉到播放列底下＝拉不到、也移不準。 */
-    const box = _imageBoxOf(c, rect);
+    const nat=_imageNat(c,imgSrc);
+    const {box,frame,visible}=imageLayerPlan({stageW:rect.w,stageH:rect.h,
+      track:State.videoTracks[c.vtrack||0],clip:c,natW:nat.w,natH:nat.h,time:t});
+    const crop=[Math.max(0,frame.y-box.y),Math.max(0,box.x+box.w-frame.x-frame.w),
+      Math.max(0,box.y+box.h-frame.y-frame.h),Math.max(0,frame.x-box.x)];
     const contStyle = `left:${box.x.toFixed(2)}px; top:${box.y.toFixed(2)}px; width:${box.w.toFixed(2)}px; height:${box.h.toFixed(2)}px; opacity:${alpha};`;
     /* 把手吸附回【畫面內】：圖片被放大到超出畫框時，四角會跑到看不見的地方，
        使用者就再也縮不回來（只剩右鍵數值面板可救）。這裡把把手夾在
        「圖片 ∩ 畫框」的可見矩形四角，圖片完全在框內時與貼齊四角等價。 */
     const HS = 10; // 把手邊長，需與 styles.css / MPV_GUIDE_HTML 一致
-    const visL = Math.min(Math.max(0, -box.x), Math.max(0, box.w - HS));
-    const visT = Math.min(Math.max(0, -box.y), Math.max(0, box.h - HS));
-    const visR = Math.max(Math.min(box.w, rect.w - box.x), visL + HS);
-    const visB = Math.max(Math.min(box.h, rect.h - box.y), visT + HS);
+    const visL = Math.min(Math.max(0, visible.x-box.x), Math.max(0, box.w - HS));
+    const visT = Math.min(Math.max(0, visible.y-box.y), Math.max(0, box.h - HS));
+    const visR = Math.max(Math.min(box.w, visible.x+visible.w-box.x), visL + HS);
+    const visB = Math.max(Math.min(box.h, visible.y+visible.h-box.y), visT + HS);
     const hPos = (cx, cy) =>
       `left:${(cx === 'w' ? visL : visR - HS).toFixed(1)}px;top:${(cy === 'n' ? visT : visB - HS).toFixed(1)}px;right:auto;bottom:auto;`;
     // 被選取的圖片留下操作框，讓使用者能一眼辨識目前可拖曳／縮放的素材。
     const selected = c.id === State.selectedClipId || previewDrag.imageDrag()?.clip?.id === c.id;
     html += `<div class="img-wrap${selected ? ' selected' : ''}" data-id="${c.id}" style="${contStyle}">
-      <img draggable="false" src="${escapeHTML(imgSrc)}" />
+      <img draggable="false" src="${escapeHTML(imgSrc)}" style="visibility:${bitmapInCanvas?'hidden':'visible'};clip-path:inset(${crop.map(v=>v.toFixed(2)+'px').join(' ')});" />
       <div class="resize-handle rh-nw" data-corner="nw" style="${hPos('w','n')}"></div>
       <div class="resize-handle rh-ne" data-corner="ne" style="${hPos('e','n')}"></div>
       <div class="resize-handle rh-sw" data-corner="sw" style="${hPos('w','s')}"></div>
@@ -620,6 +627,7 @@ export const previewDrag = createPreviewDrag({
   renderVideoSub,
   drawTimeline,
   recordHistory,
+  beginPreview:targets=>History.beginPreview(targets),
   imageBoxOf: _imageBoxOf,
   getPresetEdit: () => State.presetEdit,
   refreshMpvSubs,
@@ -652,6 +660,91 @@ export function initMediaView() {
   on('media:clearMeters',  clearMeterStrips);
   on('media:playhead',     updatePlayhead);
   on('media:srcSel',       renderSrcSel);
+}
+
+function loadCaptureImage(url){
+  return new Promise((resolve,reject)=>{
+    const image=new Image();
+    image.onload=()=>resolve(image);
+    image.onerror=()=>reject(new Error('無法載入截圖影像'));
+    image.src=url;
+  });
+}
+
+// The snapshot owns its canvas and image plan before any save-dialog or file
+// allocation awaits. Callers do not select a hidden playback adapter themselves.
+export async function capturePreviewFrame({nativePath,readBase64}={}){
+  const preview=$('previewCanvas');
+  const previewVisible=preview&&getComputedStyle(preview).display!=='none'&&getComputedStyle(preview).visibility!=='hidden';
+  const composition=previewVisible?Media.previewComposition?.():null;
+  const width=composition?.width||State.videoWidth||1920,height=composition?.height||State.videoHeight||1080;
+  const hasCanvas=previewVisible&&preview.width&&preview.height&&(!Media.inGap()||composition);
+  const time=composition?.time??Media.displayTime(),fps=State.fps,dropFrame=State.dropFrame;
+  const videoDarkness=Math.max(0,Math.min(1,Media.previewFadeDarkness()));
+  const stack=visualStackPlan(Seq.clipsAt(time).filter(c=>videoTrackVisible(c.vtrack||0)),State.videoTracks);
+  const images=stack.images
+    .map(c=>({clip:{...c},track:{...State.videoTracks[c.vtrack||0]},src:_imageSrc(c)}));
+  const topVideo=stack.videos.at(-1);
+  const videoLayer=topVideo?{clip:{...topVideo},track:{...State.videoTracks[topVideo.vtrack||0]}}:null;
+  const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+  const ctx=canvas.getContext('2d');
+  ctx.fillStyle='#000';ctx.fillRect(0,0,width,height);
+  let presenter='black',sourceFrame=null;
+  if(!hasCanvas&&!Media.inGap()&&Media.mpvPresenting()){
+    if(!nativePath||!readBase64) throw new Error('原生播放器截圖沒有儲存目錄');
+    const result=await getPlayerAdapter().screenshot(nativePath);
+    if(!result||result.ok===false) throw new Error('原生播放器截圖失敗');
+    const b64=await readBase64(nativePath);
+    if(!b64) throw new Error('無法讀取原生播放器截圖');
+    const image=await loadCaptureImage('data:image/jpeg;base64,'+b64);
+    sourceFrame=image;
+    const rect=stageBox({canvasW:width,canvasH:height,projectW:image.naturalWidth||image.width,projectH:image.naturalHeight||image.height});
+    ctx.drawImage(image,rect.x,rect.y,rect.w,rect.h);presenter='mpv';
+  }else if(hasCanvas||!Media.inGap()){
+    if(hasCanvas){
+      const rect=stageBox({canvasW:preview.width,canvasH:preview.height,projectW:width,projectH:height});
+      ctx.drawImage(preview,rect.x,rect.y,rect.w,rect.h,0,0,width,height);presenter='webcodecs';
+    }else if(video?.readyState>=2&&getComputedStyle(video).visibility!=='hidden'&&getComputedStyle(video).display!=='none'){
+      const rect=stageBox({canvasW:width,canvasH:height,projectW:video.videoWidth||width,projectH:video.videoHeight||height});
+      sourceFrame=document.createElement('canvas');sourceFrame.width=video.videoWidth||width;sourceFrame.height=video.videoHeight||height;
+      sourceFrame.getContext('2d').drawImage(video,0,0,sourceFrame.width,sourceFrame.height);
+      ctx.save();ctx.globalAlpha=stack.mixedImages?1:1-videoDarkness;
+      ctx.drawImage(sourceFrame,rect.x,rect.y,rect.w,rect.h);ctx.restore();presenter='html5';
+    }
+  }
+  // 畫布與 ownership 在第一個 await 前一起凍結。held frame 的圖片與幾何已在
+  // physical canvas 裡，不能再拿目前時間軸的新圖片重疊一次。
+  if(presenter==='webcodecs'&&composition&&(composition.imagesComposited||stack.mixedImages)) return {canvas,time,fps,dropFrame,presenter};
+  const paintImage=async layer=>{
+    const image=await loadCaptureImage(layer.src);
+    const {box,frame,alpha}=imageLayerPlan({stageW:width,stageH:height,track:layer.track,
+      clip:layer.clip,natW:layer.clip.natW||image.naturalWidth,natH:layer.clip.natH||image.naturalHeight,time});
+    ctx.save();ctx.beginPath();ctx.rect(frame.x,frame.y,frame.w,frame.h);ctx.clip();
+    ctx.globalAlpha=alpha;ctx.drawImage(image,box.x,box.y,box.w,box.h);ctx.restore();
+  };
+  if(stack.mixedImages&&videoLayer&&presenter!=='black'){
+    const frame=document.createElement('canvas');frame.width=width;frame.height=height;
+    frame.getContext('2d').drawImage(canvas,0,0,width,height);
+    ctx.fillStyle='#000';ctx.fillRect(0,0,width,height);
+    const below=images.filter(layer=>(layer.clip.vtrack||0)<=(videoLayer.clip.vtrack||0));
+    for(const layer of below) await paintImage(layer);
+    const {box,frame:track,alpha}=imageLayerPlan({stageW:width,stageH:height,track:videoLayer.track,
+      clip:videoLayer.clip,natW:videoLayer.clip.natW||width,natH:videoLayer.clip.natH||height,time});
+    ctx.save();ctx.beginPath();ctx.rect(track.x,track.y,track.w,track.h);ctx.clip();
+    if(presenter==='webcodecs'){
+      // Video-only compositor already placed its picture; preserve that rectangle.
+      ctx.drawImage(frame,track.x,track.y,track.w,track.h,track.x,track.y,track.w,track.h);
+    }else{
+      // Native/HTML fallback is one source frame; place it between the frozen images.
+      ctx.globalAlpha=alpha;
+      ctx.drawImage(sourceFrame||frame,box.x,box.y,box.w,box.h);
+    }
+    ctx.restore();
+    for(const layer of images.filter(layer=>!below.includes(layer))) await paintImage(layer);
+  }else{
+    for(const layer of images) await paintImage(layer);
+  }
+  return {canvas,time,fps,dropFrame,presenter};
 }
 
 function renderSrcSel() {

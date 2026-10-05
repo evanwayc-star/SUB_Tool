@@ -220,6 +220,18 @@ describe('persistAll', () => {
 });
 
 describe('關機收尾', () => {
+  it('準備期沒有 child 也能透過 active session 停止或關閉', async () => {
+    const stop = vi.fn();
+    const active = { p: null, stopped: false, completion: Promise.resolve(), stop };
+    const { queue, state } = make({ activeJobs: new Map([['a', active]]) });
+    state.load([job('a', { status: 'running' })]);
+    expect(queue.stopJob('a')).toBe(true);
+    expect(stop).toHaveBeenCalledWith('user-stop');
+    expect(state.get('a').status).toBe('stopping');
+    await queue.prepareForShutdown();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
   it('執行中的工作落回 queued 並清掉進度（重啟後才能重跑）', async () => {
     const { queue, state } = make({ activeJobs: new Map() });
     const j = job('a', { status: 'running', pct: 55, elapsedMs: 1000, errorMsg: 'x' });

@@ -1,3 +1,4 @@
+// @subtool-ci windows
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, unlinkSync, rmdirSync } from 'node:fs';

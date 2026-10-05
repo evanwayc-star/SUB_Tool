@@ -198,43 +198,55 @@ export function createMediaPresentationSession(options = {}) {
   if (typeof commitPresented !== 'function') throw new TypeError('commitPresented must be a function');
   const compositeWaiters = new Map();
   let webCodecsTakeover = false;
+  let presenterRevision = 0;
   let wantsPlayback = false;
   let playbackPending = false;
   let playbackRunning = false;
   let playbackRequestToken = 0;
 
-  function waitForWebCodecsPresentation(targetTime, { requestId, signal, tolerance: requestedTolerance } = {}) {
+  function presentationWaiter(targetTime, { requestId, signal, tolerance: requestedTolerance } = {}) {
     const key = requestId ?? Symbol('webcodecs-presentation');
     const tolerance = requestedTolerance != null && Number.isFinite(Number(requestedTolerance))
       ? Math.max(0, Number(requestedTolerance))
       : Math.max(0, Number(getTolerance(targetTime, { source: 'webcodecs' })) || 0);
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const cleanup = () => {
-        signal?.removeEventListener?.('abort', abort);
-        compositeWaiters.delete(key);
-      };
-      const finish = value => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(value);
-      };
-      const abort = () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        const error = Object.assign(new Error('WebCodecs presentation aborted'), { name: 'AbortError' });
-        reject(error);
-      };
-
-      if (signal?.aborted) {
-        abort();
-        return;
-      }
-      compositeWaiters.set(key, { targetTime, tolerance, finish, abort });
-      signal?.addEventListener?.('abort', abort, { once: true });
-    });
+    let native = null, composited = null, waiting = null, aborted = false;
+    const decision = () => {
+      if (!native) return null;
+      const shown = webCodecsTakeover ? composited : native;
+      return shown ? { ...shown, revision: presenterRevision } : null;
+    };
+    const notify = () => {
+      const shown = decision();
+      if (shown && waiting) { const pending=waiting;waiting=null;pending.resolve(shown); }
+    };
+    const dispose = () => {
+      signal?.removeEventListener?.('abort', abort);
+      compositeWaiters.delete(key);
+    };
+    const abort = () => {
+      aborted=true;
+      const error=Object.assign(new Error('media presentation aborted'),{name:'AbortError'});
+      if(waiting){const pending=waiting;waiting=null;pending.reject(error);}
+      dispose();
+    };
+    const waiter = {
+      targetTime,tolerance,abort,dispose,
+      acknowledge(value){native=value;notify();},
+      report(times){
+        if(aborted||!webCodecsTakeover||!times.every(time=>Math.abs(time-targetTime)<=tolerance)) return false;
+        composited={source:'webcodecs',presentedTime:times[times.length-1]};notify();return true;
+      },
+      handoff(){ if(webCodecsTakeover) composited=null;notify(); },
+      next(){
+        if(aborted||signal?.aborted) return Promise.reject(Object.assign(new Error('media presentation aborted'),{name:'AbortError'}));
+        const shown=decision();
+        return shown?Promise.resolve(shown):new Promise((resolve,reject)=>{waiting={resolve,reject};});
+      },
+    };
+    compositeWaiters.set(key,waiter);
+    signal?.addEventListener?.('abort',abort,{once:true});
+    if(signal?.aborted) abort();
+    return waiter;
   }
 
   function reportWebCodecsPresentation(presentedTimelineTimes) {
@@ -244,9 +256,7 @@ export function createMediaPresentationSession(options = {}) {
     if (!times.length) return false;
     let completed = false;
     for (const waiter of [...compositeWaiters.values()]) {
-      if (!times.every(time => Math.abs(time - waiter.targetTime) <= waiter.tolerance)) continue;
-      waiter.finish({ backend: 'webcodecs', presentedTime: times[times.length - 1] });
-      completed = true;
+      if(waiter.report(times)) completed=true;
     }
     return completed;
   }
@@ -295,10 +305,9 @@ export function createMediaPresentationSession(options = {}) {
     const tolerance = requestedTolerance != null && Number.isFinite(Number(requestedTolerance))
       ? Math.max(0, Number(requestedTolerance))
       : Math.max(0, Number(getTolerance(targetTime, { source: adapter.type })) || 0);
-    const webCodecsPending = webCodecsTakeover
-      ? waitForWebCodecsPresentation(targetTime, { signal, requestId, tolerance })
-      : null;
-    webCodecsPending?.catch(() => {});
+    // 每個請求從 native seek 開始便持有呈現工作，接管可在 ACK 前後改變。
+    const waiter=presentationWaiter(targetTime,{signal,requestId,tolerance});
+    try{
     const presentationTarget = Number(player.presentationTarget?.(sourceTarget, clip) ?? sourceTarget);
     if (!Number.isFinite(presentationTarget)) throw new Error('player presentation target is unavailable');
     const result = await adapter.present(presentationTarget, {
@@ -308,18 +317,19 @@ export function createMediaPresentationSession(options = {}) {
     });
     const actualSource = Number(result?.presentedSourceTime);
     if (!Number.isFinite(actualSource)) throw new Error('player did not acknowledge a presented frame');
-    let presentedTimeline = clip
+    const presentedTimeline = clip
       ? Number(timeline.timelineTime?.(actualSource, clip))
       : actualSource;
     if (!Number.isFinite(presentedTimeline)) throw new Error('timeline presentation mapping is unavailable');
-    let source = result.backend || adapter.type;
-    if (webCodecsPending) {
-      const composited = await webCodecsPending;
-      presentedTimeline = composited.presentedTime;
-      source = composited.backend;
+    waiter.acknowledge({presentedTime:presentedTimeline,source:result.backend||adapter.type});
+    while(true){
+      const shown=await waiter.next();
+      // Promise 完成到 continuation 之間也可能換 presenter；只提交目前可見者。
+      if(shown.revision!==presenterRevision) continue;
+      commitIfLatest(shown.presentedTime,actualSource);
+      return {presentedTime:shown.presentedTime,source:shown.source};
     }
-    commitIfLatest(presentedTimeline, actualSource);
-    return { presentedTime: presentedTimeline, source };
+    }finally{waiter.dispose();}
   }
 
   const core = createMediaPresentationCore({
@@ -340,6 +350,7 @@ export function createMediaPresentationSession(options = {}) {
   }
 
   function requestPlayback(targetTime, requestOptions) {
+    invokePlayback('cancelScrubs');
     const token = ++playbackRequestToken;
     if (!playbackPending && playbackRunning) {
       invokePlayback('suspend');
@@ -427,6 +438,8 @@ export function createMediaPresentationSession(options = {}) {
 
   const session = {
     request(targetTime, requestOptions) {
+      // FPS-SYNC（I4）：暫停時仍可能有待載入的逐格聲音；新定位必須撤銷它。
+      invokePlayback('cancelScrubs');
       return core.request(timeline.normalizeTarget(targetTime), requestOptions);
     },
     requestPlayback,
@@ -439,7 +452,11 @@ export function createMediaPresentationSession(options = {}) {
     presentedTime: core.presentedTime,
     isPending: core.isPending,
     reportWebCodecsPresentation,
-    setWebCodecsTakeover(value) { webCodecsTakeover = !!value; },
+    setWebCodecsTakeover(value) {
+      const next=!!value;if(next===webCodecsTakeover) return;
+      webCodecsTakeover=next;presenterRevision+=1;
+      for(const waiter of compositeWaiters.values()) waiter.handoff();
+    },
     webCodecsTakeover() { return webCodecsTakeover; },
     reset,
   };

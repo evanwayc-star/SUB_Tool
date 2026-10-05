@@ -42,8 +42,7 @@ function createAudioNormalizationRuntime({
       }
 
       let stderr = '';
-      try {
-        await execute([
+      await execute([
           '-hide_banner',
           '-i', src,
           '-af', 'volumedetect,loudnorm=print_format=json',
@@ -56,12 +55,10 @@ function createAudioNormalizationRuntime({
           onStderr: chunk => {
             stderr += chunk;
           },
-        });
-      } catch (err) {
-        console.warn('[audio-norm] 快速量測 stderr 截取：', err.message || err);
-      }
-
-      return parseVolumeAnalysis(stderr);
+      });
+      const report = parseVolumeAnalysis(stderr);
+      if (!report) throw new Error('音訊量測未產生有效的聲量資料');
+      return report;
     },
 
     async normalize(src, rawOptions = {}, { duration = 0, onProgress = null, signal = null } = {}) {

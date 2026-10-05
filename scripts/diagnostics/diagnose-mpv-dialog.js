@@ -26,57 +26,12 @@
    - **`document.elementFromPoint()`** → 它回答「這個座標上使用者實際點得到誰」，
      會如實反映裁切。
 ============================================================================== */
-const http = require('http');
-const WebSocket = require('ws');
+
+
 const { execFileSync } = require('child_process');
+const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const getJSON = url => new Promise((res, rej) => {
-  http.get(url, r => {
-    let b = '';
-    r.on('data', d => { b += d; });
-    r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } });
-  }).on('error', rej);
-});
-
-function connect(target) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
-    let id = 0;
-    const pend = new Map();
-    /* 沒有這道逾時的話，連不上就是【無聲地卡住】——先前使用者跑到一半沒有任何輸出，
-       就是卡在這裡。寧可明確失敗也不要讓人盯著空白終端機。 */
-    const bail = setTimeout(() => {
-      try { ws.close(); } catch (e) {}
-      reject(new Error('連上 inspector 逾時（10 秒）。'
-        + '常見原因：已經有另一個偵錯工具佔著這個 session（DevTools、VS Code、或上一次沒關乾淨的執行）。'));
-    }, 10000);
-    ws.on('open', () => {
-      clearTimeout(bail);
-      resolve({
-        eval: expr => new Promise((res, rej) => {
-          const i = ++id;
-          pend.set(i, { res, rej });
-          ws.send(JSON.stringify({
-            id: i, method: 'Runtime.evaluate',
-            params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true },
-          }));
-        }),
-        close: () => { try { ws.close(); } catch (e) {} },
-      });
-    });
-    ws.on('message', raw => {
-      const m = JSON.parse(raw);
-      if (!m.id || !pend.has(m.id)) return;
-      const { res, rej } = pend.get(m.id);
-      pend.delete(m.id);
-      if (m.error) rej(new Error(m.error.message));
-      else if (m.result?.exceptionDetails) rej(new Error(JSON.stringify(m.result.exceptionDetails).slice(0, 300)));
-      else res(m.result?.result?.value);
-    });
-    ws.on('error', reject);
-  });
-}
 
 /** 在 renderer 裡執行一段 JS（透過主行程的 webContents，不需要另外連 renderer）。 */
 const inPage = js => `(async () => {
@@ -136,11 +91,12 @@ function findMainPid() {
   let t;
   try { t = (await getJSON('http://127.0.0.1:9229/json/list'))[0]; }
   catch (e) { console.error('連不上主行程的 inspector（9229）：' + e.message); process.exit(1); }
-  const main = await connect(t);
+  const main = new CdpClient((t).webSocketDebuggerUrl);
+    await main.connect();
 
   const dump = async label => {
     console.log(`\n【${label}】`);
-    for (const w of JSON.parse(await main.eval(WINDOWS))) {
+    for (const w of JSON.parse(await main.evaluate(WINDOWS))) {
       console.log(`  視窗 id=${String(w.id).padStart(2)}  可見=${String(w.可見).padEnd(5)}` +
         `  ${w.是子視窗 ? '子' : '主'}  ${w.url}`);
     }
@@ -148,16 +104,16 @@ function findMainPid() {
 
   console.log('\n================ 1. 下拉選單看不看得到 ================');
   await dump('打開選單前');
-  await main.eval(inPage(`document.getElementById('recentBtn').click(); true`));
+  await main.evaluate(inPage(`document.getElementById('recentBtn').click(); true`));
   await sleep(1000);
   await dump('打開選單後');
-  console.log('  ' + (await main.eval(inPage(VISIBLE_PART))).split('\n').join('\n  '));
-  await main.eval(inPage(`document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open')); true`));
+  console.log('  ' + (await main.evaluate(inPage(VISIBLE_PART))).split('\n').join('\n  '));
+  await main.evaluate(inPage(`document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open')); true`));
   await sleep(400);
   await dump('關閉選單後');
 
   console.log('\n================ 2. 主行程有沒有被擋住 ================');
-  const lag = await main.eval(inPage(`window.subtool && window.subtool.mainLoopLag
+  const lag = await main.evaluate(inPage(`window.subtool && window.subtool.mainLoopLag
     ? window.subtool.mainLoopLag(false).then(x => JSON.stringify(x)) : '"（此版本沒有 mainLoopLag）"'`));
   console.log('  事件迴圈延遲（ms）:', lag);
 

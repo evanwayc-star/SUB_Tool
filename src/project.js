@@ -25,13 +25,17 @@ import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount, ensu
 import { $ } from './dom.js';
 import { encodeUTF16LE, decodeText, bytesToB64, b64ToBytes, downloadBytes, readFile, escapeHTML } from './util.js';
 import { Media } from './media.js';
+import { Seq } from './sequence.js';
 import { drawTimeline } from './timeline-renderer.js';
 import { History } from './history.js';
 import { renderNotes } from './notes.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
-import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets, loadFonts } from './substyle.js';
+import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets, loadFonts,
+  presetIdentity, validPresetList, normalizeStyleRecord, normalizeStyleValue } from './substyle.js';
 import { ProjectLoadSession } from './project-intake-engine.js';
+import { clearAsrSession } from './speech-recognition-session.js';
+import { normalizeExternalAudioData } from './external-audio.js';
 import { audioLimiterSnapshot, audioMotherPath } from '../shared/audio-loudness.cjs';
 export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
 const PROJECT_APP = 'SUB Tool';
@@ -112,7 +116,9 @@ let _savePath      = null;   // 上次儲存的完整路徑（desktop only）
 let _saveBaseName  = null;   // 基礎名稱（不含副檔名），自動備份用
 let _autoSaveTimer = null;
 let _lastSavedDataStr = null; // 用於判斷專案是否被修改
+let _autoRelinkNeedsSave = false; // 載入時找到新素材路徑，但磁碟上的專案尚未寫入新路徑
 const _projectLoadSession = new ProjectLoadSession();
+let _openRequestGeneration = 0;
 let _saveEpoch = 0;
 let _saveTail = Promise.resolve();
 let _cancelFontPrompt = null;
@@ -130,37 +136,18 @@ export function getProjectDir() {
    物件一律不寫入。瀏覽器版不保留本機絕對路徑，與主影片的儲存規則一致。 */
 function _normalExternalAudioSources(rawSources){
   const seen=new Set();
-  const safeNumber=(value,fallback=0)=>Number.isFinite(Number(value))?Number(value):fallback;
-  const nonNegative=(value,fallback=0)=>Math.max(0,safeNumber(value,fallback));
   const sources=[];
   for(const raw of (Array.isArray(rawSources)?rawSources:[])){
     if(!raw||typeof raw!=='object') continue;
     const audioSourceId=typeof raw.audioSourceId==='string'?raw.audioSourceId.trim():'';
     if(!audioSourceId||seen.has(audioSourceId)) continue;
     seen.add(audioSourceId);
-    const timelineLaneId=typeof raw.timelineLaneId==='string'&&raw.timelineLaneId.trim()
-      ? raw.timelineLaneId.trim() : audioSourceId;
-    const inPoint=nonNegative(raw.in??raw.trimStart);
-    const rawOut=safeNumber(raw.out??raw.trimEnd,NaN);
-    const duration=nonNegative(raw.duration);
-    const out=Number.isFinite(rawOut)?Math.max(inPoint,duration?Math.min(rawOut,duration):rawOut):duration;
-    const descriptors=(Array.isArray(raw.descriptors)?raw.descriptors:[]).map((channel,index)=>({
-      sourceStream:Math.max(0,Math.floor(safeNumber(channel?.sourceStream,0))),
-      sourceChannel:Math.max(0,Math.floor(safeNumber(channel?.sourceChannel,index)))
-    }));
+    const normalized=normalizeExternalAudioData(raw);
     sources.push({
-      name:(typeof raw.name==='string'&&raw.name.trim())||'外部音訊',
+      ...normalized,
       // 網頁版不會保存或重開本機路徑；使用者仍可自行重新匯入。
       path:IS_DESKTOP?audioMotherPath(raw):null,
-      ...audioLimiterSnapshot(raw),
-      audioSourceId, timelineLaneId,
-      offset:nonNegative(raw.offset), in:inPoint, out, duration,
-      gain:nonNegative(raw.gain,1), fadeIn:nonNegative(raw.fadeIn), fadeOut:nonNegative(raw.fadeOut),
-      enabled:raw.enabled!==false, locked:!!raw.locked,
-      // 已解除自影片容器的音訊必須在重開專案時仍直接走 ffmpeg cache；否則 MXF／
-      // 部分 MOV 會再次被 Chromium <audio> 拒絕，讓「解除影音」看似消失。
-      ...(raw.preferCache===true?{preferCache:true}:{}),
-      descriptors
+      audioSourceId,
     });
   }
   return sources;
@@ -264,6 +251,17 @@ async function _restorePendingExternalAudioSources(plan=_projectLoadSession.acti
 }
 
 function _buildProjectData(){
+  // 先合併 pending 素材，再由 History 的同一 seam 排除尚未提交的預覽。
+  // 輸入只含純 metadata；runtime Audio / File / waveform 不跨這個 interface。
+  const savedClips=_savedClips().map(c=>Seq.persistentMetadata(c));
+  const savedAudio=_savedExternalAudioSources();
+  const committed=History.committedSnapshot({clips:savedClips,externalAudioState:savedAudio});
+  const cueEnd=committed.cues.reduce((end,cue)=>cue.timed!==false?Math.max(end,Number(cue.end)||0):end,0);
+  const clipEnd=committed.clips.reduce((end,c)=>Math.max(end,Math.max(0,Number(c.offset)||0)
+    +Math.max(0,(Number(c.out)||0)-(Number(c.in)||0))),0);
+  const duration=savedClips.length||savedAudio.length
+    ? Math.max(cueEnd,_externalAudioEnd(committed.externalAudioState),clipEnd)
+    : State.duration;
   const usedPresets = [];
   const allPresets = getAllPresets();
   const keys = Object.keys(STYLE_DEFAULTS);
@@ -273,49 +271,45 @@ function _buildProjectData(){
       if (p.builtin) continue;
       const ps = p.style || {};
       const match = keys.every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k]);
-      if (match && !usedPresets.some(x => x.name === p.name)) {
-        usedPresets.push({ name: p.name, style: p.style });
+      if (match && !usedPresets.some(x => presetIdentity(x) === presetIdentity(p))) {
+        usedPresets.push({ name: p.name, ...(p.group?{group:p.group}:{}), style: structuredClone(p.style) });
       }
     }
   };
   
-  for (const t of State.tracks) checkStyle(effStyle(null, t));
-  for (const c of State.cues) checkStyle(effStyle(c, State.tracks[c.track || 0]));
+  for (const t of committed.tracks) checkStyle(effStyle(null, t));
+  for (const c of committed.cues) checkStyle(effStyle(c, committed.tracks[c.track || 0]));
 
   return createProjectSnapshot({
     playhead: Math.max(0, Media.displayTime() || 0),
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
-    fps:State.fps, dropFrame:State.dropFrame, duration:State.duration, trackCount:State.trackCount,
+    fps:committed.fps, dropFrame:committed.dropFrame, duration, trackCount:committed.trackCount,
     // 存檔時固定展開「當下生效樣式」，避免日後 STYLE_DEFAULTS 調整後讓既有專案外觀漂移。
     // posPct 僅供舊版 SUB Tool 讀取；新版以同值的 posY 為準。
-    tracks:State.tracks.map(t=>{
+    tracks:committed.tracks.map(t=>{
       const st=trackStyleSnapshot(t);
-      return {name:t.name,visible:t.visible!==false,locked:!!t.locked,...st,posPct:st.posY};
+      return {name:t.name,visible:t.visible!==false,locked:!!t.locked,...trackHeight(t,20),...st,posPct:st.posY};
     }),
     pxPerSec:State.pxPerSec,
-    ...(State.exportIn!=null?{exportIn:State.exportIn}:{}),
-    ...(State.exportOut!=null?{exportOut:State.exportOut}:{}),
+    ...(committed.exportIn!=null?{exportIn:committed.exportIn}:{}),
+    ...(committed.exportOut!=null?{exportOut:committed.exportOut}:{}),
     // 影片序列（v4.5.0；v4.10.0 起含多視訊軌）：各段的來源路徑與幾何；網頁版無路徑（開啟時需手動重加）
-    videoTracks:State.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked,
+    videoTracks:committed.videoTracks.map(t=>({name:t.name,visible:t.visible!==false,locked:!!t.locked,...trackHeight(t,24),
       ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})})),
-    videoTrackCount:State.videoTracks.length||1, // 向下相容：舊版讀取用
+    videoTrackCount:committed.videoTracks.length||1, // 向下相容：舊版讀取用
     vtracksCollapsed:!!State.vtracksCollapsed,
-    clips:_savedClips().map(c=>({name:c.name,path:audioMotherPath(c),...audioLimiterSnapshot(c),dur:c.dur,in:c.in,out:c.out,offset:c.offset,vtrack:c.vtrack||0,fps:c.fps||0,primary:!!c.primary,locked:!!c.locked,
-      // 圖片需保留型別與自己的幾何。少了 type 會在重開專案時被誤當成影片
-      // 丟給 ffprobe；少了 scale/posX/posY 則會回到預設滿版中央。
-      // natW/natH＝圖片原始像素尺寸；少了它重開專案要等背景重量一次才對得準互動框。
-      ...(c.type==='image'?{type:'image',scale:c.scale!=null?c.scale:1,posX:c.posX!=null?c.posX:0.5,posY:c.posY!=null?c.posY:0.5,
-        ...(c.natW>0&&c.natH>0?{natW:c.natW,natH:c.natH}:{})}:{}),
-      ...(c.audioSourceId!=null?{audioSourceId:String(c.audioSourceId)}:(c.audioSrc!=null?{audioSourceId:String(c.audioSrc)}:{})),
-      ...(c.audioDetached?{audioDetached:true}:{}),
-      ...(c.muted?{muted:true}:{}),
-      ...(c.fadeIn?{fadeIn:c.fadeIn}:{}),...(c.fadeOut?{fadeOut:c.fadeOut}:{})})),
+    clips:committed.clips.map(c=>{
+      const metadata=Seq.persistentMetadata(c);
+      delete metadata.id; delete metadata.audioSrc; delete metadata.web;
+      if(!metadata.audioSourceId&&c.audioSrc) metadata.audioSourceId=String(c.audioSrc);
+      return metadata;
+    }),
     // v3：只存純資料的 project bus / source routing / export stream；Media 的 runtime 資源絕不寫入專案檔。
-    audioProject:normalizeAudioProject(State.audioProject),
+    audioProject:committed.audioProject,
     // v3：外部音檔獨立於影片 clip，路徑只在桌面版用來重開。
-    externalAudioSources:_savedExternalAudioSources(),
-    notes:State.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
-    cues:State.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false,
+    externalAudioSources:committed.externalAudioState,
+    notes:committed.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
+    cues:committed.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false,
       ...(c.style&&Object.keys(c.style).length?{style:c.style}:{})})), // v4.23 逐句樣式覆蓋（有才存）
     usedPresets
   });
@@ -338,6 +332,7 @@ function _onSaved(fullPath, webName, snapshot){
     setStatus('專案已儲存：'+webName,'ok');
   }
   _lastSavedDataStr = snapshot;
+  _autoRelinkNeedsSave = false;
   if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave, 3*60*1000);
 }
 
@@ -448,11 +443,16 @@ function confirmDiscardUnsaved(title = '開啟另一個專案'){
 
 /* 開新專案時重置所有儲存狀態 */
 function resetProject(){
+  clearAsrSession();
+  State.presetEdit=null;
+  emit('render:all');
+  ++_openRequestGeneration;
   _saveEpoch++;
   _editGuardDone=false;
   _savePath=null;
   _saveBaseName=null;
   _lastSavedDataStr=null;
+  _autoRelinkNeedsSave=false;
   if(_autoSaveTimer){ clearInterval(_autoSaveTimer); _autoSaveTimer=null; }
   resetAudioProject();
   State.vtracksCollapsed=false;
@@ -461,19 +461,21 @@ function resetProject(){
   _projectLoadSession.clearPlan();
 }
 
-function _hasAudioProjectData(){
-  const ap=normalizeAudioProject(State.audioProject);
+function _hasAudioProjectData(audioProject){
+  const ap=normalizeAudioProject(audioProject);
   return ap.mode!=='auto'||ap.buses.length>0||Object.keys(ap.sourceMaps).length>0||ap.exportLayout.streams.length>0;
 }
 
 function isProjectDirty() {
+  if (_autoRelinkNeedsSave) return true;
+  const data=_buildProjectData();
   // v3 的 bus / routing / export layout 是可獨立於字幕存在的專案內容，不能被舊的「無字幕＝未修改」捷徑忽略。
   // 圖片／影片 clip 也是專案內容；尤其圖片大小或位置被調整後，不能因為沒有字幕
   // 就讓關閉視窗流程誤判為未修改。
-  if (!_lastSavedDataStr && State.cues.length === 0 && State.notes.length === 0 && !_hasAudioProjectData() && _savedClips().length===0 && _savedExternalAudioSources().length===0) return false;
+  if (!_lastSavedDataStr && data.cues.length === 0 && data.notes.length === 0 && !_hasAudioProjectData(data.audioProject) && data.clips.length===0 && data.externalAudioSources.length===0) return false;
   if (!_lastSavedDataStr) return true;
   
-  const currentStr = JSON.stringify(_buildProjectData());
+  const currentStr = JSON.stringify(data);
   if (currentStr === _lastSavedDataStr) return false;
   
   // 忽略 playhead 的差異（播放點改變不應視為專案已修改而阻擋關閉）
@@ -568,30 +570,39 @@ async function _confirmProjectFonts(data,generation){
   return false;
 }
 
+function trackHeight(track,minimum){
+  const height=track?.height;
+  return typeof height==='number' && Number.isFinite(height) ? {height:Math.max(minimum,height)} : {};
+}
+
 function _restoreSubtitleTrack(raw,index){
   const saved=raw&&typeof raw==='object'?raw:{};
   const track={
     name:saved.name||('軌道 '+(index+1)),
     visible:saved.visible!==false,
-    locked:!!saved.locked
+    locked:!!saved.locked,
+    ...trackHeight(saved,20)
   };
   // 只還原專案內實際存在的 canonical 欄位；缺值繼續交由 effStyle 的單一預設來源處理。
-  for(const key of Object.keys(STYLE_DEFAULTS)){
-    if(saved[key]!=null) track[key]=saved[key];
-  }
+  Object.assign(track,normalizeStyleRecord(saved));
   // 舊格式別名只在 canonical 欄位不存在時遷移，不能覆蓋使用者曾明確存下的 65／91.2037。
   if(track.fontSize==null&&saved.fontScale!=null){
     const scale=Number(saved.fontScale);
-    if(Number.isFinite(scale)) track.fontSize=Math.round(60*scale);
+    const size=normalizeStyleValue('fontSize',Math.round(60*scale));
+    if(size!=null) track.fontSize=size;
   }
-  if(track.posY==null&&saved.posPct!=null) track.posY=saved.posPct;
+  if(track.posY==null&&saved.posPct!=null){
+    const position=normalizeStyleValue('posY',saved.posPct);
+    if(position!=null) track.posY=position;
+  }
   return track;
 }
 
 /* ===== 8. 專案 .subtool ============================================== */
 
 async function _autoRelinkMissingMedia(data, projectPath) {
-  if (!IS_DESKTOP || typeof DESK.findRelinkTarget !== 'function') return;
+  if (!IS_DESKTOP || typeof DESK.findRelinkTarget !== 'function') return false;
+  let changed = false;
   
   async function checkAndRelink(obj, pathKey) {
     if (!obj || !obj[pathKey]) return;
@@ -600,7 +611,10 @@ async function _autoRelinkMissingMedia(data, projectPath) {
       const stat = await DESK.stat(p);
       if (!stat.exists) {
         const newPath = await DESK.findRelinkTarget(projectPath, p);
-        if (newPath) obj[pathKey] = newPath;
+        if (newPath && newPath !== p) {
+          obj[pathKey] = newPath;
+          changed = true;
+        }
       }
     } catch(e) {}
   }
@@ -619,9 +633,38 @@ async function _autoRelinkMissingMedia(data, projectPath) {
       await checkAndRelink(src, 'path');
     }
   }
+  return changed;
 }
 
 const Project = {
+  /* 開啟意圖從確認／picker／IPC 等待前開始。runtime load generation 仍只在
+     真正接受檔案時啟動，取消 picker 不清掉目前專案的 restore plan。 */
+  async open(read, { confirm = true } = {}){
+    const request=++_openRequestGeneration, generation=_projectLoadSession.generation;
+    // 同一 generation 的既有 runtime 完成並 apply 時可增加 save epoch；它並非
+    // 較新的開啟意圖，不能因此撤銷本次尚在等待 reader 的請求。
+    const current=()=>request===_openRequestGeneration&&_isCurrentProjectLoad(generation);
+    if(confirm&&!await confirmDiscardUnsaved()) return false;
+    if(!current()) return false;
+    const consentSnapshot=JSON.stringify({..._buildProjectData(),playhead:0});
+    let input;
+    try{ input=await read(); }
+    catch(error){ if(!current()) return false; throw error; }
+    if(!current()||!input) return false;
+    // picker／讀檔期間合法新增的修改不屬於先前的丟棄同意；播放點移動不算修改。
+    if(isProjectDirty()&&consentSnapshot!==JSON.stringify({..._buildProjectData(),playhead:0})){
+      if(!await confirmDiscardUnsaved()||!current()) return false;
+    }
+    if(typeof input.b64==='string'){
+      if(!input.b64) return false;
+      return this.loadDesktop(input);
+    }
+    return this.load(input);
+  },
+  captureWorkspaceOwnership(){
+    const epoch=_saveEpoch,generation=_projectLoadSession.generation;
+    return ()=>epoch===_saveEpoch&&_isCurrentProjectLoad(generation);
+  },
   // save/saveAs 回傳 Promise<路徑|名稱|null>：null=失敗或使用者取消。
   // 呼叫端（如關閉前儲存流程）可 await 確認真正寫入完成後再繼續。
   continueLoad(generation,work){
@@ -714,7 +757,11 @@ const Project = {
     if(generation!=null&&!_isCurrentProjectLoad(generation)) return false;
     data=_normalisedProjectData(data);
     if(!data) return false;
+    if(generation==null) ++_openRequestGeneration;
+    clearAsrSession();
+    State.presetEdit=null;
     _saveEpoch++;
+    _autoRelinkNeedsSave = false;
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
     // Fix #19：明確排除 undefined/null，避免 version:0 被誤判為 v1（0 是 falsy）
     const isV1 = data.version === undefined || data.version === null || data.version === 1;
@@ -729,8 +776,9 @@ const Project = {
     State.cues=(data.cues||[]).map(c=>{
       let tk = c.track||0;
       if (!isV1 && c.track !== undefined) tk = Math.max(0, c.track - 1);
+      const style=normalizeStyleRecord(c.style);
       return {id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:tk,timed:c.timed!==false,
-        ...(c.style&&typeof c.style==='object'?{style:{...c.style}}:{})}; // v4.23 逐句樣式覆蓋
+        ...(style&&Object.keys(style).length?{style}:{})}; // v4.23 逐句樣式覆蓋
     });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
     const maxTk=State.cues.length > 0 ? State.cues.reduce((m,c)=>Math.max(m,c.track||0),0) : -1;
@@ -752,16 +800,15 @@ const Project = {
     if (Array.isArray(data.usedPresets) && data.usedPresets.length > 0) {
       const list = [...getPresets()];
       let changed = false;
-      for (const p of data.usedPresets) {
-        if (!isRecord(p) || typeof p.name !== 'string' || !p.name.trim() || !isRecord(p.style)
-          || (p.group != null && typeof p.group !== 'string') || isBuiltinPresetName(p.name)) continue;
-        const ex = list.findIndex(x => x.name === p.name);
+      for (const p of validPresetList(data.usedPresets)) {
+        if (!isRecord(p.style) || isBuiltinPresetName(p.name)) continue;
+        const ex = list.findIndex(x => presetIdentity(x) === presetIdentity(p));
         if (ex >= 0) {
            const existingStyle = list[ex].style || {};
            const isDiff = Object.keys(STYLE_DEFAULTS).some(k => (existingStyle[k]!=null?existingStyle[k]:STYLE_DEFAULTS[k]) !== (p.style[k]!=null?p.style[k]:STYLE_DEFAULTS[k]));
            if (isDiff) {
               p.name = p.name + ' (專案)';
-              const ex2 = list.findIndex(x => x.name === p.name);
+              const ex2 = list.findIndex(x => presetIdentity(x) === presetIdentity(p));
               if (ex2 >= 0) list[ex2] = p; else list.push(p);
               changed = true;
            }
@@ -779,7 +826,7 @@ const Project = {
     // 影片序列：先暫存，待第一支影片載入完成（Media._registerPrimary）時還原幾何並補載其餘段
     // 視訊軌：新版存 videoTracks 陣列（名稱/顯示/鎖定）；舊版只有 videoTrackCount → 補足空軌
     if(Array.isArray(data.videoTracks) && data.videoTracks.length)
-      State.videoTracks = data.videoTracks.map((t,i)=>({name:t.name||('視訊軌 '+(i+1)),visible:t.visible!==false,locked:!!t.locked,
+      State.videoTracks = data.videoTracks.map((t,i)=>({name:t.name||('視訊軌 '+(i+1)),visible:t.visible!==false,locked:!!t.locked,...trackHeight(t,24),
         ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})}));
     else { resetVideoTracks(); ensureVideoTrackCount(Math.max(1, data.videoTrackCount || 1)); }
     // 視訊軌收合屬於專案工作區狀態；舊專案沒有此欄位時維持原本的展開預設。
@@ -841,7 +888,7 @@ const Project = {
     
     if(!await _confirmProjectFonts(data,generation)) return;
 
-    await _autoRelinkMissingMedia(data, r.path);
+    const autoRelinked = await _autoRelinkMissingMedia(data, r.path);
     if(!_isCurrentProjectLoad(generation)) return;
     const mp=data.media&&data.media.path;
     // stat 是唯讀，可在碰 State 之前先完成；若期間有更新請求，舊專案完全不進入 runtime。
@@ -854,6 +901,7 @@ const Project = {
     // externalAudioSources 留在目前專案、造成播放或匯出重複音訊。
     try{ Media.reset(); }catch(e){ console.warn('reset media before desktop project load:',e); }
     if(!this.apply(data,generation)) return;
+    _autoRelinkNeedsSave = autoRelinked;
     const plan=_projectLoadSession.activePlan;
     // 載入既有專案時記錄儲存路徑，自動備份用
     if(r.path){ _savePath=r.path; _saveBaseName=r.path.replace(/\\/g,'/').split('/').pop().replace(/\.subtool$/i,''); if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave,3*60*1000); }
@@ -922,22 +970,25 @@ async function openMedia({ relink: requestedRelink = null } = {}) {
   else await importBrowserMediaFiles(await pickMediaFiles($('fileMedia')));
 }
 
-async function openProject() {
-  const { pickFile } = await import('./util.js');
-  if (!await confirmDiscardUnsaved()) return;
-  if (IS_DESKTOP) { const r = await DESK.openProject(); if (r) Project.loadDesktop(r); }
-  else { const f = await pickFile($('fileProject')); if (f) Project.load(f); }
+function openProject() {
+  return Project.open(async()=>{
+    if(IS_DESKTOP) return DESK.openProject();
+    const { pickFile }=await import('./util.js');
+    return pickFile($('fileProject'));
+  });
 }
 
 function saveProject() { Project.save(); }
 function saveAsProject() { Project.saveAs(); }
 
 function startNewProject() {
-  openModal('開新專案',
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const session=openModal('開新專案',
     '<p>確定清空目前專案？字幕、備註與已載入的影音都將清除（未存檔的話）。</p>',
-    [{ label: '取消', act: closeModal },
+    [{ label: '取消', act: () => session.close() },
      { label: '確定清空', primary: true, act: () => {
-       closeModal();
+       if(!session.isCurrent() || !ownsWorkspace()) return;
+       session.close({committed:true});
        return Project.startNewProject(async () => {
          const { clearSelection, ensureTrackCount: ensureTk } = await import('./state.js');
          const { video } = await import('./dom.js');

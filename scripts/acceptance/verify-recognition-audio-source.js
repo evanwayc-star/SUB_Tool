@@ -17,7 +17,7 @@ const {
   reservePort,
   getJSON,
   waitFor,
-  CdpClient,
+  CdpClient, trackElectron, stopElectron,
   dispatchClick,
   dispatchKey,
   verifiedCleanup
@@ -30,7 +30,7 @@ const {
   const profileDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-asr-source-cdp-'));
   const port = await reservePort();
   const errors = [];
-  const child = spawn(ELECTRON, [
+  const child = trackElectron(spawn(ELECTRON, [
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
@@ -42,7 +42,7 @@ const {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['ignore', 'ignore', 'pipe']
-  });
+  }));
   child.stderr.on('data', chunk => errors.push(chunk.toString()));
 
   let client;
@@ -469,8 +469,7 @@ const {
       })()`).catch(() => {});
     }
     client?.close();
-    if (child.exitCode === null) child.kill('SIGKILL');
-    await Promise.race([new Promise(resolve => child.once('close', resolve)), delay(5000)]);
+    await stopElectron(child);
     verifiedCleanup(profileDir, 'subtool-asr-source-cdp-');
   }
 })().catch(error => {

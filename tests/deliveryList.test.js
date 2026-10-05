@@ -119,6 +119,15 @@ describe('清單與佇列共用交付規格', () => {
       width: 1920, height: 1080, timecodeWatermark: null,
     });
   });
+  it('佇列離開固定規格時不沿用其碼率，回到 H.264 依尺寸重新建議', () => {
+    const options = { canvasW: 1920, canvasH: 1080, targetH: 360, fps: 29.97,
+      videoKbps: 500, previousWidth: 640, previousHeight: 360, resetVideoBitrate: true };
+    expect(deriveDeliverySpec({ ...options, format: 'prores' }).videoKbps).toBe(0);
+    expect(deriveDeliverySpec({ ...options, format: 'h264' }).videoKbps)
+      .toBe(suggestKbps({ w: 640, h: 360 }));
+    expect(deriveDeliverySpec({ ...options, format: 'h264', kbpsOverride: 9000 }).videoKbps)
+      .toBe(9000);
+  });
 });
 
 describe('清單操作', () => {
@@ -183,6 +192,18 @@ describe('清單操作', () => {
     l.setTargetHeight(0, 720);
     expect(l.get(0).kbps).toBe(suggestKbps({ w: 1280, h: 720 }));
     expect(l.get(0).kbps).not.toBe(before);
+  });
+
+  it('從航空固定碼率切回 H.264 時依目前尺寸重新建議碼率', () => {
+    const l = base();
+    l.setFormat(0, 'airline-exw');
+    expect(l.get(0).kbps).toBe(500);
+    l.setFormat(0, 'h264');
+    expect(l.get(0).kbps).toBe(suggestKbps({ w: 640, h: 360 }));
+    l.setFormat(0, 'airline-exw');
+    l.setFormat(0, 'wav');
+    l.setFormat(0, 'h264');
+    expect(l.get(0).kbps).toBe(suggestKbps({ w: 640, h: 360 }));
   });
 
   it('把名字改回等同預設值時，視為沒有自訂', () => {

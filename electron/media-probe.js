@@ -191,6 +191,7 @@ function createMediaProbe({
           terminate(error);
         };
         signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
       }
     });
   }
@@ -220,13 +221,14 @@ function createMediaProbe({
    * @param {string} filePath 媒體檔案路徑
    * @returns {Promise<boolean>}
    */
-  async function hasAudio(filePath) {
+  async function hasAudio(filePath, options) {
     try {
       const stdout = await run([
         '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', filePath,
-      ]);
+      ], options);
       return !!stdout.trim();
     } catch (error) {
+      if (options?.signal?.aborted) throw error;
       // 舊專案若無完整聲道規劃，不輕易丟棄音訊，交由 FFmpeg 實際 map 報錯
       return true;
     }
@@ -235,11 +237,11 @@ function createMediaProbe({
   // Stream start times are part of the source A/V synchronization contract.
   // A compressed audio stream can start before video to carry encoder priming;
   // resetting the two streams independently would turn that primer into delay.
-  async function audioVideoStartOffsets(filePath) {
+  async function audioVideoStartOffsets(filePath, options) {
     const stdout = await run([
       '-v', 'error', '-show_entries', 'stream=codec_type,start_time:stream_disposition=attached_pic',
       '-of', 'json', filePath,
-    ]);
+    ], options);
     const streams = JSON.parse(stdout).streams || [];
     const video = streams.find(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic);
     const audio = streams.filter(stream => stream.codec_type === 'audio');
@@ -256,11 +258,11 @@ function createMediaProbe({
    * @param {string} filePath 媒體檔案路徑
    * @returns {Promise<Array<{channels: number, kbps: number}>>}
    */
-  async function audioBitrates(filePath) {
+  async function audioBitrates(filePath, options) {
     try {
       const stdout = await run([
         '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=bit_rate,channels', '-of', 'json', filePath,
-      ]);
+      ], options);
       const streams = JSON.parse(stdout).streams;
       if (!Array.isArray(streams)) return [];
       return streams.map(stream => ({
@@ -268,6 +270,7 @@ function createMediaProbe({
         kbps: Math.max(0, Math.round(finiteNumber(stream.bit_rate, 0) / 1000)),
       }));
     } catch (error) {
+      if (options?.signal?.aborted) throw error;
       return [];
     }
   }

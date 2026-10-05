@@ -1,5 +1,36 @@
 import { describe, it, expect } from 'vitest';
-import { clamp, pad, decodeText, encodeUTF16LE, b64ToBytes, bytesToB64, baseName, escapeHTML, escapeHTMLWithSpaces, tcKeyAllowed } from '../src/util.js';
+import { clamp, pad, decodeText, encodeUTF16LE, b64ToBytes, bytesToB64, baseName, escapeHTML, escapeHTMLWithSpaces, tcKeyAllowed, pickFile, pickFiles } from '../src/util.js';
+
+describe('檔案選擇生命週期',()=>{
+  const input=()=>Object.assign(new EventTarget(),{value:'old',files:[],click(){}});
+  it('取消選檔會完成 promise；下一次選擇只回傳新檔案',async()=>{
+    const el=input();
+    const cancelled=pickFile(el);
+    el.dispatchEvent(new Event('cancel'));
+    expect(await cancelled).toBe(null);
+    const selected=pickFile(el),file={name:'new.srt'};
+    el.files=[file]; el.dispatchEvent(new Event('change'));
+    expect(await selected).toBe(file);
+  });
+  it('重開同一選擇器會完成舊 promise，舊 listener不再接收新選擇',async()=>{
+    const el=input();
+    const first=pickFile(el),second=pickFile(el),file={name:'latest.srt'};
+    el.files=[file]; el.dispatchEvent(new Event('change'));
+    expect(await first).toBe(null);
+    expect(await second).toBe(file);
+    el.dispatchEvent(new Event('cancel'));
+  });
+  it('多選共用取消與重入生命週期，保留原有 change listener',async()=>{
+    const el=input();let originalChanges=0;
+    el.addEventListener('change',()=>originalChanges++);
+    const cancelled=pickFiles(el);el.dispatchEvent(new Event('cancel'));
+    expect(await cancelled).toEqual([]);
+    const old=pickFiles(el),latest=pickFiles(el);
+    el.files=[{name:'a.mov'},{name:'b.wav'}];el.dispatchEvent(new Event('change'));
+    expect(await old).toEqual([]);expect(await latest).toEqual(el.files);
+    expect(originalChanges).toBe(1);
+  });
+});
 
 describe('clamp / pad', () => {
   it('clamp 夾在範圍內', () => {

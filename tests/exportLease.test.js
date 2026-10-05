@@ -22,6 +22,7 @@ const {
   normalizeOutputPath,
   outputKey,
   releaseLease,
+  stageOutputPath,
   updateLease,
 } = require('../electron/export-lease.js');
 
@@ -165,6 +166,23 @@ describe('取得匯出檔案鎖', () => {
     expect(readdirSync(leaseRoot(queueDir)).sort()).toEqual(
       [`${first.key}.lock`, `${second.key}.lock`].sort(),
     );
+  });
+
+  test('暫存成品必須由原輸出路徑與 token 決定，拒絕任意刪檔路徑', () => {
+    const queueDir = makeTempDir();
+    const outPath = path.join(queueDir, 'exports', 'movie.mp4');
+    mkdirSync(path.dirname(outPath));
+    const token = 'stage-token';
+    const stagePath = stageOutputPath(outPath, token);
+    expect(path.dirname(stagePath)).toBe(path.dirname(normalizeOutputPath(outPath)));
+    expect(path.extname(stagePath)).toBe('.mp4');
+    expect(stagePath).not.toBe(normalizeOutputPath(outPath));
+    expect(() => acquireLease({ queueDir, outPath, jobId: 'bad', token, stagePath: outPath }))
+      .toThrow(expect.objectContaining({ code: 'INVALID_LEASE_ARGUMENT' }));
+    const lease = acquireLease({ queueDir, outPath, jobId: 'good', token, stagePath });
+    expect(listLeases(queueDir)[0].owner.stagePath).toBe(stagePath);
+    writeFileSync(path.join(lease.lockPath, 'owner.json'), JSON.stringify({ ...lease.owner, stagePath: outPath }));
+    expect(listLeases(queueDir)[0]).toMatchObject({ valid: false, error: { code: 'LEASE_CORRUPT' } });
   });
 });
 

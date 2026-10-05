@@ -351,32 +351,37 @@ function parseVolumeAnalysis(stderrText) {
   }
 
   // 2. 嘗試解析 volumedetect
-  let maxVolume = null;
-  let meanVolume = null;
-  const maxMatch = stderrText.match(/max_volume:\s*([-+]?\d+(?:\.\d+)?)\s*dB/);
-  if (maxMatch) maxVolume = parseFloat(maxMatch[1]);
-  const meanMatch = stderrText.match(/mean_volume:\s*([-+]?\d+(?:\.\d+)?)\s*dB/);
-  if (meanMatch) meanVolume = parseFloat(meanMatch[1]);
+  const decibels = value => {
+    if (typeof value === 'string' && /^-inf(?:inity)?$/i.test(value.trim())) return -100;
+    if (value == null || value === '') return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const maxMatch = stderrText.match(/max_volume:\s*([-+]?(?:\d+(?:\.\d+)?|inf(?:inity)?))\s*dB/i);
+  const meanMatch = stderrText.match(/mean_volume:\s*([-+]?(?:\d+(?:\.\d+)?|inf(?:inity)?))\s*dB/i);
+  const maxVolume = decibels(maxMatch?.[1]);
+  const meanVolume = decibels(meanMatch?.[1]);
 
   // 3. 整合最精確的指標
-  const maxDb = loudnormData?.input_tp != null
-    ? +parseFloat(loudnormData.input_tp).toFixed(1)
-    : (maxVolume != null ? +maxVolume.toFixed(1) : -100);
-
-  const meanDb = loudnormData?.input_i != null
-    ? +parseFloat(loudnormData.input_i).toFixed(1)
-    : (meanVolume != null ? +meanVolume.toFixed(1) : -100);
+  const measuredMax = decibels(loudnormData?.input_tp) ?? maxVolume;
+  const measuredMean = decibels(loudnormData?.input_i) ?? meanVolume;
+  // 失敗 stderr／半份 report 不是靜音；只有實際測得的 peak 與平均才能發布。
+  if (measuredMax == null || measuredMean == null) return null;
+  const maxDb = +measuredMax.toFixed(1);
+  const meanDb = +measuredMean.toFixed(1);
 
   let minDb = -100;
-  if (loudnormData?.input_thresh != null) {
-    minDb = +parseFloat(loudnormData.input_thresh).toFixed(1);
+  const threshold = decibels(loudnormData?.input_thresh);
+  if (threshold != null) {
+    minDb = +threshold.toFixed(1);
   } else if (meanVolume != null) {
     minDb = +Math.max(-90, meanVolume - 20).toFixed(1);
   }
 
   let dynamicRangeDb = 0;
-  if (loudnormData?.input_lra != null) {
-    dynamicRangeDb = +parseFloat(loudnormData.input_lra).toFixed(1);
+  const loudnessRange = decibels(loudnormData?.input_lra);
+  if (loudnessRange != null && loudnessRange >= 0) {
+    dynamicRangeDb = +loudnessRange.toFixed(1);
   } else if (maxDb > -90 && minDb > -90) {
     dynamicRangeDb = Math.max(0, +(maxDb - minDb).toFixed(1));
   }

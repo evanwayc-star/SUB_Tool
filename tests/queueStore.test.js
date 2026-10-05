@@ -16,6 +16,7 @@ const {
   loadTerminalOutcomes,
   mergeSourcePaths,
   persistJob,
+  QueueHistory,
   removeLogFile,
   resolvePendingDeletes,
   resolveTerminalOutcomes,
@@ -56,6 +57,17 @@ afterEach(() => {
 });
 
 describe('匯出佇列持久化', () => {
+  test('完成歷史與待執行工作共用目錄時，不把 history 當成損毀工作', () => {
+    const dir = makeTempDir();
+    persistJob(dir, makeJob({ id: 'pending' }));
+    QueueHistory.append(dir, makeJob({ id: 'finished', status: 'done' }));
+
+    const restored = loadJobs(dir);
+    expect(restored.jobs.map(job => job.id)).toEqual(['pending']);
+    expect(restored.warnings).toEqual([]);
+    expect(QueueHistory.load(dir).map(job => job.id)).toEqual(['finished']);
+  });
+
   test('保存凍結 payload、工作順序，並將 running 恢復成 queued', () => {
     const dir = makeTempDir();
     const first = makeJob({ id: 'first', status: 'running' });

@@ -17,15 +17,22 @@ import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 /**
  * 檢測字幕時間重疊集合
  */
-export function detectOverlaps(cues, eps = 0.001) {
-  const set = new Set();
+function overlapPredecessors(cues,eps){
+  const overlaps=new Map(),latestByTrack=new Map();
   const sorted = cues.filter(c => c && c.timed !== false).slice().sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0));
-  for (let i = 0; i < sorted.length; i++) {
-    for (let j = i + 1; j < sorted.length; j++) {
-      if (sorted[j].start >= sorted[i].end - eps) break;
-      set.add(sorted[i].id);
-      set.add(sorted[j].id);
-    }
+  for(const cue of sorted){
+    if(!Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.end<=cue.start) continue;
+    const track=cue.track||0,previous=latestByTrack.get(track);
+    if(previous && cue.start<previous.end-eps) overlaps.set(cue,previous);
+    if(!previous || cue.end>previous.end) latestByTrack.set(track,cue);
+  }
+  return overlaps;
+}
+
+export function detectOverlaps(cues, eps = 0.001) {
+  const set=new Set();
+  for(const [cue,previous] of overlapPredecessors(cues,eps)){
+    set.add(cue.id); set.add(previous.id);
   }
   return set;
 }
@@ -155,6 +162,7 @@ export function validateSubtitlesBeforeExport(wordLimit = null) {
   for (const [tk, cues] of tracksMap.entries()) {
     // 依據開始時間遞增排序
     cues.sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0));
+    const overlaps=overlapPredecessors(cues,0.01);
 
     for (let i = 0; i < cues.length; i++) {
       const c = cues[i];
@@ -173,13 +181,11 @@ export function validateSubtitlesBeforeExport(wordLimit = null) {
       }
 
       // 2. 時間碼重疊檢查（含 0.01 秒微小浮點容差）
-      if (i > 0) {
-        const prevC = cues[i - 1];
-        if (c.start < prevC.end - 0.01) {
+      if (overlaps.has(c)) {
+        const prevC = overlaps.get(c);
           const currentStart = typeof c.start === 'number' ? secToEncore(c.start, State.fps, State.dropFrame) : '??:??:??:??';
           const prevEnd = typeof prevC.end === 'number' ? secToEncore(prevC.end, State.fps, State.dropFrame) : '??:??:??:??';
           errors.push(`${prefix}: 時間碼與前一句重疊 (本句開始 ${currentStart}, 前句結束 ${prevEnd})`);
-        }
       }
 
       // 3. 行數過多檢查（超過 2 個換行）

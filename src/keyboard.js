@@ -12,8 +12,8 @@
 import { $ } from './dom.js';
 import { State, setSelection, deselect } from './state.js';
 import { Media } from './media.js';
-import { selectCueSingle, deleteSelected, cancelSwapMode, refreshSelectionUI } from './subtitles.js';
-import { sortCues, copyCues, pasteCues, cuesTrackLocked } from './subtitle-model.js';
+import { selectCueSingle, deleteSelected, cancelSwapMode, refreshSelectionUI, filteredSubtitleCues } from './subtitles.js';
+import { sortCues, copyCues, pasteCues, shiftCueTimes } from './subtitle-model.js';
 import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline-renderer.js';
 import { deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './clip-model.js';
 import { Project } from './project.js';
@@ -200,7 +200,8 @@ if (typeof window !== 'undefined') {
       break;
     case 'select_all':
       e.preventDefault();
-      const tkCues = State.cues.filter(c => (c.track || 0) === State.listTrack);
+      if(State.tracks[State.listTrack]?.locked) break;
+      const tkCues = filteredSubtitleCues();
       if (tkCues.length) {
         setSelection({ kind: 'sub', ids: tkCues.map(c => c.id), primary: tkCues[0].id });
         refreshSelectionUI();
@@ -233,10 +234,9 @@ if (typeof window !== 'undefined') {
       if (!ids.length) break;
       const jCues = ids.map(id => State.cues.find(c => c.id === id)).filter(c => c && c.timed !== false);
       if (!jCues.length) break;
-      if (cuesTrackLocked(jCues, '修改字幕時間')) break;
       const minStart = Math.min(...jCues.map(c => c.start));
       const jt = Media.displayTime(), delta = jt - minStart;
-      for (const jc of jCues) { jc.start = Math.max(0, jc.start + delta); jc.end = Math.max(jc.start + 0.001, jc.end + delta); }
+      if(!shiftCueTimes(jCues,delta)) break;
       // v4.2.0 政策：位移不自動裁切/刪除被重疊的鄰居（與 subio.js applyTcShift 一致）
       sortCues(); emit('render:all'); drawTimeline();
       recordHistory('時間碼位移 P');

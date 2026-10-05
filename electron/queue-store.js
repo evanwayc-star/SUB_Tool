@@ -305,7 +305,7 @@ function loadJobs(queueDir, { protectedAssRefs = [] } = {}) {
   const protectedAss = new Set((protectedAssRefs || []).filter(isSafeAssRef));
 
   const files = fs.readdirSync(queueDir)
-    .filter(name => name.endsWith('.json'))
+    .filter(name => name.endsWith('.json') && name !== HISTORY_FILE)
     .sort((a, b) => a.localeCompare(b));
   const ids = new Set();
 
@@ -530,4 +530,3 @@ const QueueHistory = Object.freeze({
 });
 
 module.exports.QueueHistory = QueueHistory;
-

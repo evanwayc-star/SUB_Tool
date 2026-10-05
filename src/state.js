@@ -68,6 +68,7 @@
 import { emit } from './events.js';
 import { makeSettingsStore } from './settings-store.js';
 import { repairAudioExportStreams } from './audio-routing-engine.js';
+import { mergeImportedKeymap } from './keybinding-engine.js';
 
 /* ===== 專案音訊路由 ====================================================
    音訊資料刻意與 Media（AudioContext、HTMLAudioElement、ffmpeg 暫存檔）分離：
@@ -434,7 +435,10 @@ function resetVideoTracks(){ State.videoTracks=[{name:'視訊軌 1',visible:true
 const FPS_SET=[23.976,24,25,29.97,30];
 function snapFps(v){ let best=24,bd=1e9; for(const f of FPS_SET){const d=Math.abs(f-v);if(d<bd){bd=d;best=f;}} return best; }
 // A1：純函式 — 只改 State、零 DOM 相依，可在 node 環境單元測試
+let fpsRevision=0;
+function getFpsRevision(){ return fpsRevision; }
 function applyFps(v){
+  fpsRevision+=1; // 同值的明確選擇也會撤銷背景 FPS 初始化權。
   let df=false;
   if(typeof v==='string'&&v.endsWith('df')){ df=true; v=parseFloat(v); }
   State.fps=snapFps(typeof v==='number'?v:parseFloat(v)||24); State.dropFrame=df;
@@ -570,7 +574,12 @@ State.keymap = JSON.parse(JSON.stringify(State.defaultKeymap));
 async function loadKeys() {
   const loaded = await _settings.load('keys');
   if (loaded && Object.keys(loaded).length > 0) {
-    State.keymap = Object.assign(JSON.parse(JSON.stringify(State.defaultKeymap)), loaded);
+    try {
+      const candidate = structuredClone(loaded.keymap || loaded);
+      _migrateKeymap(candidate);
+      State.keymap = mergeImportedKeymap(State.defaultKeymap, candidate).keymap;
+    }
+    catch { State.keymap = structuredClone(State.defaultKeymap); }
     _migrateKeymap(State.keymap);
   }
 }
@@ -714,6 +723,6 @@ function cueSuffix(c){
 export { State, newTrack, syncTrackCount, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks,
   newAudioBus, normalizeAudioProject, resetAudioProject, ensureAudioBusCount, ensureAudioExportDefaults,
   ensureAudioSourceMap, routeForChannel, pruneRemovedAudioBuses,
-  FPS_SET, snapFps, applyFps, setFps, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel,
+  FPS_SET, snapFps, applyFps, setFps, getFpsRevision, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel,
   setSelection, clearSelection, deselect, pruneSelection, focusTrackKind, cueSuffix,
   loadConfig, saveConfig, loadKeys, saveKeys };

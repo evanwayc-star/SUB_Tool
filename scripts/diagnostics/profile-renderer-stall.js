@@ -23,54 +23,12 @@
    採樣結果在【主行程裡】就地彙總，只把前幾名送回來——整份 profile 有幾十 MB，
    透過 CDP 傳回來只會自己卡住。
 ============================================================================== */
-const http = require('http');
-const WebSocket = require('ws');
+
+
 const { execFileSync } = require('child_process');
+const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const getJSON = url => new Promise((res, rej) => {
-  http.get(url, r => {
-    let b = '';
-    r.on('data', d => { b += d; });
-    r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } });
-  }).on('error', rej);
-});
-
-function connect(target) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
-    let id = 0;
-    const pend = new Map();
-    const bail = setTimeout(() => {
-      try { ws.close(); } catch (e) {}
-      reject(new Error('連上 inspector 逾時（10 秒）'));
-    }, 10000);
-    ws.on('open', () => {
-      clearTimeout(bail);
-      resolve({
-        eval: expr => new Promise((res, rej) => {
-          const i = ++id;
-          pend.set(i, { res, rej });
-          ws.send(JSON.stringify({
-            id: i, method: 'Runtime.evaluate',
-            params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true },
-          }));
-        }),
-        close: () => { try { ws.close(); } catch (e) {} },
-      });
-    });
-    ws.on('message', raw => {
-      const m = JSON.parse(raw);
-      if (!m.id || !pend.has(m.id)) return;
-      const { res, rej } = pend.get(m.id);
-      pend.delete(m.id);
-      if (m.error) rej(new Error(m.error.message));
-      else if (m.result?.exceptionDetails) rej(new Error(JSON.stringify(m.result.exceptionDetails).slice(0, 400)));
-      else res(m.result?.result?.value);
-    });
-    ws.on('error', reject);
-  });
-}
 
 /* 找 Electron 的【主】行程（沒有 --type= 的那個）。
 
@@ -166,10 +124,11 @@ const READ_LAG = `(async () => {
   let t;
   try { t = (await getJSON('http://127.0.0.1:9229/json/list'))[0]; }
   catch (e) { console.error('連不上 9229：' + e.message); process.exit(1); }
-  const main = await connect(t);
+  const main = new CdpClient((t).webSocketDebuggerUrl);
+    await main.connect();
 
-  await main.eval(ARM_LAG);
-  const started = await main.eval(START_PROFILE);
+  await main.evaluate(ARM_LAG);
+  const started = await main.evaluate(START_PROFILE);
   if (started !== 'ok') { console.error(started); process.exit(1); }
   console.log('\nCPU profiler 已啟動。');
   console.log('★ 現在請【載入影音】。偵測到 renderer 開始卡住就會計時，結束後自動報告。\n');
@@ -178,7 +137,7 @@ const READ_LAG = `(async () => {
   const deadline = Date.now() + 60 * 60 * 1000;
   let seen = 0, quietSince = 0, sawBlock = false;
   while (Date.now() < deadline) {
-    const total = Number(await main.eval(READ_LAG)) || 0;
+    const total = Number(await main.evaluate(READ_LAG)) || 0;
     if (total > seen) { seen = total; quietSince = 0; if (!sawBlock && total > 8000) { sawBlock = true; console.log(`偵測到 renderer 卡住（累計 ${Math.round(total / 1000)} 秒），繼續採樣…`); } }
     else if (sawBlock) { if (!quietSince) quietSince = Date.now(); else if (Date.now() - quietSince > 8000) break; }
     process.stdout.write(sawBlock ? '#' : '.');
@@ -186,7 +145,7 @@ const READ_LAG = `(async () => {
   }
   console.log('\n');
 
-  const raw = await main.eval(STOP_PROFILE);
+  const raw = await main.evaluate(STOP_PROFILE);
   const out = JSON.parse(raw);
   if (out.err) { console.error(out.err); process.exit(1); }
 

@@ -184,9 +184,13 @@ export function createDeliveryList({
       const r = at(i); if (!r) return;
       if (format === 'bd-iso' && !availableBdVideoModes(fps).length)
         throw new Error('專案 FPS 超出 BD-ISO 支援的影格率');
+      const leavingPreset = r.format !== format && !!getDeliveryFormatPreset(r.format);
       if (r.format !== format && format === 'bd-iso') r.targetFps = 0;
       r.format = format;
       applyFormatPreset(r, fps);
+      // A fixed format's bitrate is not an editable H.264 preference. Drop it
+      // even when passing through ProRes/WAV before returning to H.264.
+      if (leavingPreset && !getDeliveryFormatPreset(format)) r.kbps = 0;
       if (format === 'h264' && !(r.kbps > 0)) {
         r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav: false }));
       }

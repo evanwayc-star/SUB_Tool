@@ -4,6 +4,58 @@ import {
   createMediaPresentationSession,
 } from '../src/media-presentation-core.js';
 
+function handoffSession(){
+  const acknowledgements=[];
+  const adapter={type:'mpv',present:vi.fn(()=>new Promise(resolve=>{acknowledgements.push(resolve);} ))};
+  const commit=vi.fn(time=>time);
+  const session=createMediaPresentationSession({getTolerance:()=>0.01,timeoutMs:2000,
+    timeline:{normalizeTarget:t=>t,hasSequence:()=>false,isVirtual:()=>false},
+    player:{adapter:()=>adapter,isNative:()=>true},commitPresented:commit});
+  return {session,commit,ack:(time)=>acknowledgements.shift()({backend:'mpv',presentedSourceTime:time})};
+}
+
+describe('visible presenter may change during an acknowledged seek',()=>{
+  it('WC yields to native before ACK without waiting for an obsolete compositor',async()=>{
+    const {session,ack}=handoffSession();session.setWebCodecsTakeover(true);
+    const pending=session.request(4);session.setWebCodecsTakeover(false);ack(4);
+    await expect(pending).resolves.toMatchObject({status:'presented',presentedTime:4,source:'mpv'});
+  });
+
+  it('native ACK cannot complete a seek after WC takes over until every WC layer hits the target',async()=>{
+    const {session,ack,commit}=handoffSession();
+    const pending=session.request(4);session.setWebCodecsTakeover(true);ack(4);
+    await Promise.resolve();await Promise.resolve();
+    expect(session.isPending()).toBe(true);expect(commit).not.toHaveBeenCalled();
+    expect(session.reportWebCodecsPresentation([4,3])).toBe(false);
+    expect(session.reportWebCodecsPresentation([4,4])).toBe(true);
+    await expect(pending).resolves.toMatchObject({status:'presented',presentedTime:4,source:'webcodecs'});
+  });
+
+  it('a second WC takeover invalidates evidence from the first takeover',async()=>{
+    const {session,ack}=handoffSession();session.setWebCodecsTakeover(true);
+    const pending=session.request(4);
+    expect(session.reportWebCodecsPresentation([4])).toBe(true);
+    session.setWebCodecsTakeover(false);session.setWebCodecsTakeover(true);ack(4);
+    await Promise.resolve();await Promise.resolve();
+    expect(session.isPending()).toBe(true);
+    session.reportWebCodecsPresentation([4]);
+    await expect(pending).resolves.toMatchObject({status:'presented',source:'webcodecs'});
+  });
+
+  it('reset removes an old handoff waiter, and late evidence cannot complete the new target',async()=>{
+    const {session,ack,commit}=handoffSession();session.setWebCodecsTakeover(true);
+    const old=session.request(4);session.reset('new-media');ack(4);
+    await expect(old).resolves.toMatchObject({status:'cancelled'});
+    session.setWebCodecsTakeover(true);
+    const current=session.request(8);ack(8);
+    await Promise.resolve();await Promise.resolve();
+    expect(session.reportWebCodecsPresentation([4])).toBe(false);expect(commit).not.toHaveBeenCalled();
+    session.reportWebCodecsPresentation([8]);
+    await expect(current).resolves.toMatchObject({status:'presented',presentedTime:8});
+    expect(commit).toHaveBeenCalledOnce();
+  });
+});
+
 describe('media-presentation-core', () => {
   afterEach(() => {
     vi.clearAllTimers();

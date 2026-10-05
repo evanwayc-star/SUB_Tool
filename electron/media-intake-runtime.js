@@ -8,6 +8,49 @@ const crypto = require('crypto');
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
 const { buildIngestArgs } = require('./ffmpeg-execution-engine');
 
+function cacheKeyFor(src) {
+  const resolved = path.resolve(src);
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile()) throw new Error('快取來源不是檔案');
+  // v2 隔離舊 key：只看 basename、大小與前 1 MiB 會把同名素材或原地改寫
+  // 後段的素材誤認成同一份，直接播放舊 Proxy／聲道。
+  const sourcePath = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  const hash = crypto.createHash('sha256').update(JSON.stringify([
+    'source-v2', sourcePath, stat.size, stat.mtimeMs, stat.ctimeMs, stat.dev, stat.ino,
+  ]));
+  const sample = (fd, position, length) => {
+    const bytes = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const n = fs.readSync(fd, bytes, read, length - read, position + read);
+      if (!n) throw new Error('快取來源在讀取時變更');
+      read += n;
+    }
+    hash.update(String(position)).update(':').update(bytes);
+  };
+  if (stat.size > 0) {
+    const fd = fs.openSync(resolved, 'r');
+    try {
+      const firstLength = Math.min(1024 * 1024, stat.size);
+      sample(fd, 0, firstLength);
+      if (stat.size > firstLength) {
+        const window = Math.min(65536, stat.size - firstLength);
+        const middle = Math.floor((stat.size - window) / 2);
+        sample(fd, middle, window);
+        sample(fd, stat.size - window, window);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  const after = fs.statSync(resolved);
+  if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs
+    || after.dev !== stat.dev || after.ino !== stat.ino) {
+    throw new Error('快取來源在讀取時變更');
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
 /**
  * ffprobe audio[] → 單次 ffmpeg ingest 的跨平台音訊規劃。
  */
@@ -79,32 +122,23 @@ function createMediaIntakeRuntime(options = {}) {
   const createStreamId = options.createStreamId
     || (prefix => prefix + crypto.randomBytes(12).toString('hex'));
   let streamServer = null;
+  let streamServerReady = null;
   let streamPort = null;
+  let closed = false;
   const streamJobs = new Map();
+  const activeCacheDirs = new Map();
   const cacheRoot = () => {
     const value = typeof options.cacheRoot === 'function' ? options.cacheRoot() : options.cacheRoot;
     return value || tempRoot;
   };
 
-  function cacheKeyFor(src) {
-    try {
-      const stat = fs.statSync(src);
-      const readLength = Math.min(1024 * 1024, stat.size);
-      const hash = crypto.createHash('sha1').update(path.basename(src) + '|' + stat.size + '|');
-      if (readLength > 0) {
-        const fd = fs.openSync(src, 'r');
-        try {
-          const buffer = Buffer.alloc(readLength);
-          fs.readSync(fd, buffer, 0, readLength, 0);
-          hash.update(buffer);
-        } finally {
-          fs.closeSync(fd);
-        }
-      }
-      return hash.digest('hex').slice(0, 16);
-    } catch (error) {
-      return crypto.createHash('sha1').update(path.basename(String(src))).digest('hex').slice(0, 16);
-    }
+  function protectCacheDir(dir) {
+    activeCacheDirs.set(dir, (activeCacheDirs.get(dir) || 0) + 1);
+    return () => {
+      const count = activeCacheDirs.get(dir) || 0;
+      if (count <= 1) activeCacheDirs.delete(dir);
+      else activeCacheDirs.set(dir, count - 1);
+    };
   }
 
   function cacheCandidates(src) {
@@ -121,7 +155,14 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   function resolveMeta(raw, dir) {
-    const resolveFile = file => file ? path.join(dir, path.basename(file)) : file;
+    const resolveFile = file => {
+      if (!file) return file;
+      // 舊 meta 只存 basename；補建的完整元件可位於同一 cache 的 generation。
+      const relative = path.isAbsolute(file) ? path.basename(file) : file;
+      const resolved = path.resolve(dir, relative);
+      if (!resolved.startsWith(path.resolve(dir) + path.sep)) throw new Error('快取元件超出目錄');
+      return resolved;
+    };
     return {
       proxy: resolveFile(raw.proxy),
       wave: resolveFile(raw.wave),
@@ -136,36 +177,44 @@ function createMediaIntakeRuntime(options = {}) {
     };
   }
 
-  function metaToStore(meta) {
-    const basename = file => file ? path.basename(file) : file;
+  function metaToStore(meta, dir) {
+    const relative = file => file ? path.relative(dir, file).split(path.sep).join('/') : file;
     return {
-      proxy: basename(meta.proxy),
-      wave: basename(meta.wave),
+      proxy: relative(meta.proxy),
+      wave: relative(meta.wave),
       channels: (meta.channels || []).map(channel => ({
         label: channel.label,
-        file: basename(channel.file),
+        file: relative(channel.file),
         sourceStream: Number.isInteger(channel.sourceStream) ? channel.sourceStream : null,
         sourceChannel: Number.isInteger(channel.sourceChannel) ? channel.sourceChannel : null,
       })),
     };
   }
 
-  function hasRoutingMetadata(meta) {
-    return (meta.channels || []).every(channel =>
-      Number.isInteger(channel.sourceStream) && channel.sourceStream >= 0
-      && Number.isInteger(channel.sourceChannel) && channel.sourceChannel >= 0);
+  function completeFile(file) {
+    try { const stat = fs.statSync(file); return stat.isFile() && stat.size > 0; }
+    catch (error) { return false; }
+  }
+
+  function coversAudioRequest(meta, audio) {
+    if (!audio.length) return true;
+    const expected = flattenSourceChannels(audio);
+    return completeFile(meta.wave) && meta.channels.length === expected.length
+      && expected.every((channel, index) =>
+        meta.channels[index].sourceStream === channel.sourceStream
+        && meta.channels[index].sourceChannel === channel.sourceChannel);
   }
 
   function metaValid(meta) {
-    return (!meta.proxy || fs.existsSync(meta.proxy))
-      && (meta.channels || []).every(channel => fs.existsSync(channel.file))
-      && (!meta.wave || fs.existsSync(meta.wave));
+    return (!meta.proxy || completeFile(meta.proxy))
+      && (meta.channels || []).every(channel => completeFile(channel.file))
+      && (!meta.wave || completeFile(meta.wave));
   }
 
   function writeMeta(metaPath, meta) {
     try {
       const temporaryPath = metaPath + '.tmp';
-      fs.writeFileSync(temporaryPath, JSON.stringify(metaToStore(meta)));
+      fs.writeFileSync(temporaryPath, JSON.stringify(metaToStore(meta, path.dirname(metaPath))));
       fs.renameSync(temporaryPath, metaPath);
     } catch (error) {}
   }
@@ -178,7 +227,7 @@ function createMediaIntakeRuntime(options = {}) {
         const meta = resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir);
         if (!metaValid(meta)) continue;
         fileAuthority.grantManagedCacheDirectory(dir);
-        return { dir, meta, routingMetadataComplete: hasRoutingMetadata(meta) };
+        return { dir, meta };
       } catch (error) {}
     }
     return null;
@@ -243,6 +292,7 @@ function createMediaIntakeRuntime(options = {}) {
       for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
         const dir = path.join(root, entry.name);
+        if (activeCacheDirs.has(dir)) continue;
         const metaPath = path.join(dir, 'meta.json');
         let remove = false;
         if (!fs.existsSync(metaPath)) remove = true;
@@ -268,11 +318,28 @@ function createMediaIntakeRuntime(options = {}) {
 
   function clearAll(currentSrc) {
     const root = cacheRoot();
-    let bytes = dirSize(root);
-    try {
-      fs.rmSync(root, { recursive: true, force: true });
-      fs.mkdirSync(root, { recursive: true });
-    } catch (error) {}
+    const canonical = file => {
+      const resolved = path.resolve(file);
+      return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    };
+    const removeUnleased = target => {
+      const resolved = canonical(target);
+      const writers = [...activeCacheDirs.keys()].map(canonical);
+      if (writers.includes(resolved)) return 0;
+      if (writers.some(writer => writer.startsWith(resolved + path.sep))) {
+        let removed = 0;
+        try {
+          for (const entry of fs.readdirSync(target)) removed += removeUnleased(path.join(target, entry));
+        } catch (error) {}
+        return removed;
+      }
+      let size = dirSize(target);
+      try { const stat = fs.statSync(target); if (stat.isFile()) size = stat.size; } catch (error) {}
+      try { fs.rmSync(target, { recursive: true, force: true }); return size; }
+      catch (error) { return 0; }
+    };
+    let bytes = removeUnleased(root);
+    try { fs.mkdirSync(root, { recursive: true }); } catch (error) {}
     if (currentSrc && fileAuthority.canRead(currentSrc)) {
       try {
         const sidecarDir = path.join(
@@ -281,8 +348,7 @@ function createMediaIntakeRuntime(options = {}) {
           cacheKeyFor(currentSrc),
         );
         if (fs.existsSync(sidecarDir)) {
-          bytes += dirSize(sidecarDir);
-          fs.rmSync(sidecarDir, { recursive: true, force: true });
+          bytes += removeUnleased(sidecarDir);
         }
       } catch (error) {}
     } else if (currentSrc) {
@@ -330,16 +396,56 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   async function ensureStreamServer() {
-    if (streamServer) return streamPort;
-    return new Promise((resolve, reject) => {
+    if (closed) throw new Error('媒體串流 runtime 已關閉');
+    if (streamServerReady) return streamServerReady;
+    streamServerReady = new Promise((resolve, reject) => {
       streamServer = http.createServer((request, response) => {
-        const id = decodeURIComponent(request.url.slice(1).split('?')[0]);
+        let id;
+        try { id = decodeURIComponent((request.url || '').slice(1).split('?')[0]); }
+        catch (error) { response.writeHead(400); response.end(); return; }
         const job = streamJobs.get(id);
         if (!job?.filePath) {
           response.writeHead(404);
           response.end();
           return;
         }
+        // 每個 HTTP 回應的 reader／輪詢與 URL lease 共用同一份 lifetime。
+        // 回應斷線、lease 釋放或 runtime 關閉都會走 cancel，不能留下重試 timer。
+        const sessions = job.requests ||= new Set();
+        let reader = null;
+        let timer = null;
+        let ended = false;
+        const cancel = () => {
+          if (ended) return;
+          ended = true;
+          clearTimeout(timer);
+          reader?.destroy();
+          sessions.delete(cancel);
+          response.destroy();
+        };
+        sessions.add(cancel);
+        request.once('aborted', cancel);
+        response.once('close', cancel);
+        const live = () => !ended && !response.destroyed && streamJobs.get(id) === job;
+        const fail = (error, status = 500) => {
+          if (!live()) return;
+          if (error) options.log?.('[HTTP] range 供應失敗：', error);
+          if (!response.headersSent) { response.writeHead(status); response.end(); }
+          else cancel();
+        };
+        const pipe = (streamOptions, end = true) => {
+          if (!live()) return;
+          reader = fs.createReadStream(job.filePath, streamOptions);
+          reader.once('error', error => fail(error));
+          reader.pipe(response, { end });
+        };
+        const schedule = (work, ms) => {
+          if (!live()) return;
+          timer = setTimeout(() => {
+            timer = null;
+            if (live()) Promise.resolve().then(work).catch(error => fail(error));
+          }, ms);
+        };
         const range = request.headers.range;
         if (!range) {
           response.writeHead(200, {
@@ -347,23 +453,27 @@ function createMediaIntakeRuntime(options = {}) {
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'no-store',
           });
-          const reader = fs.createReadStream(job.filePath);
-          reader.pipe(response, { end: false });
-          reader.on('end', () => {
-            if (job.done) {
-              response.end();
+          let offset = 0;
+          const pump = async () => {
+            if (!live()) return;
+            const size = (await fsp.stat(job.filePath)).size;
+            if (!live()) return;
+            if (job.error) { fail(new Error(job.error)); return; }
+            if (size <= offset) {
+              if (job.done) response.end();
+              else schedule(pump, 400);
               return;
             }
-            const poll = () => {
-              if (job.done || job.error) response.end();
-              else setTimeout(poll, 400);
-            };
-            poll();
-          });
-          request.on('close', () => reader.destroy());
+            // 非 Range 請求也須供應後續增長的 bytes，不能只等 writer 完成後
+            // 關閉最初的短回應，否則會交付截斷的 fragmented MP4。
+            pipe({ start: offset, end: size - 1 }, false);
+            reader.on('data', chunk => { offset += chunk.length; });
+            reader.once('end', () => { void pump().catch(error => fail(error)); });
+          };
+          void pump().catch(error => fail(error));
           return;
         }
-        const match = /bytes=(\d+)-(\d*)/.exec(range);
+        const match = /^bytes=(\d+)-(\d*)$/.exec(range);
         if (!match) {
           response.writeHead(400);
           response.end();
@@ -371,13 +481,21 @@ function createMediaIntakeRuntime(options = {}) {
         }
         const start = Number(match[1]);
         const requestedEnd = match[2] ? Number(match[2]) : undefined;
+        if (!Number.isSafeInteger(start) || (requestedEnd !== undefined
+          && (!Number.isSafeInteger(requestedEnd) || requestedEnd < start))) {
+          fail(null, 416);
+          return;
+        }
         /* Proxy 多半在素材旁的 .subtool_Cache；SMB 上的 Range 輪詢必須用
            非同步 stat，否則每 500ms 會鎖住 Electron 主執行緒與原生檔案對話框。 */
         const tryRange = async attempt => {
+          if (!live()) return;
           let size = 0;
           try { size = (await fsp.stat(job.filePath)).size; } catch (error) {}
+          if (!live()) return;
+          if (job.error) { fail(new Error(job.error)); return; }
           if (size <= start && !job.done && attempt < 120) {
-            setTimeout(() => { void tryRange(attempt + 1); }, 500);
+            schedule(() => tryRange(attempt + 1), 500);
             return;
           }
           if (size <= start) {
@@ -393,17 +511,9 @@ function createMediaIntakeRuntime(options = {}) {
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'no-store',
           });
-          fs.createReadStream(job.filePath, { start, end }).pipe(response);
+          pipe({ start, end });
         };
-        void tryRange(0).catch(error => {
-          options.log?.('[HTTP] range 供應失敗：', error);
-          try {
-            if (!response.headersSent) {
-              response.writeHead(500);
-              response.end();
-            }
-          } catch (ignored) {}
-        });
+        void tryRange(0).catch(error => fail(error));
       });
       streamServer.listen(0, '127.0.0.1', () => {
         streamPort = streamServer.address().port;
@@ -411,39 +521,35 @@ function createMediaIntakeRuntime(options = {}) {
       });
       streamServer.on('error', reject);
     });
+    return streamServerReady;
   }
 
-  async function ingest({ src, duration, needsProxy, audio }, session = {}) {
+  // cache coverage 與補建publication共用一個owner，batch/stream不能各自重抽已完成元件。
+  function planIntake({ src, needsProxy, audio }, isStream) {
     const audioSources = Array.isArray(audio) ? audio : [];
-    const hit = readCache(src);
+    let hit = readCache(src);
     if (hit
-      && (!audioSources.length || hit.routingMetadataComplete)
-      && (!needsProxy || (hit.meta?.proxy && fs.existsSync(hit.meta.proxy)))) {
-      options.sendProgress?.(session.progressTarget, {
-        jobId: 'ingest', label: '使用既有快取', pct: 100, done: true,
-      });
-      return Object.assign({ cached: true }, hit.meta);
+      && coversAudioRequest(hit.meta, audioSources)
+      && (!needsProxy || hit.meta.proxy)) {
+      return { cached: true, dir: hit.dir, meta: hit.meta };
     }
-
-    // 先前只抽音軌的巨大母素材，補建 Proxy 時沿用已完成的聲道／波形，
-    // 不再把整支影片的音訊重抽一次；失敗前保留原本的完整音訊快取。
-    const reuseAudio = needsProxy && hit && !hit.meta?.proxy
-      && (!audioSources.length || hit.routingMetadataComplete)
-      && isDirWritable(hit.dir);
-    const ingestLabel = needsProxy && audioSources.length && !reuseAudio
-      ? '正在轉檔 Proxy 與分析音訊'
-      : (needsProxy ? '正在轉檔 Proxy' : '正在分析音訊');
-    const dir = reuseAudio ? hit.dir : writeCacheDir(src);
+    if (hit && !isDirWritable(hit.dir)) hit = null;
+    const dir = hit ? hit.dir : writeCacheDir(src);
     const metaPath = path.join(dir, 'meta.json');
-    fs.mkdirSync(dir, { recursive: true });
+    // 補建只寫新generation，直到完整成功才讓meta指向它；失敗不破壞舊cache。
+    const outputDir = hit ? path.join(dir, 'generation-' + crypto.randomBytes(12).toString('hex')) : dir;
+    fs.mkdirSync(outputDir, { recursive: true });
+    const reuseAudio = hit && coversAudioRequest(hit.meta, audioSources);
+    const buildProxy = needsProxy && !hit?.meta.proxy;
     const audioPlan = buildAudioIngestPlan(reuseAudio ? [] : audioSources);
     const channels = reuseAudio ? hit.meta.channels
-      : audioPlan.channels.map(channel => ({ ...channel, file: path.join(dir, channel.file) }));
-    const proxy = needsProxy ? path.join(dir, 'proxy.mp4') : null;
-    const wave = reuseAudio ? hit.meta.wave : (audioPlan.waveLabel ? path.join(dir, 'wave.wav') : null);
+      : audioPlan.channels.map(channel => ({ ...channel, file: path.join(outputDir, channel.file) }));
+    const proxy = hit?.meta.proxy || (buildProxy ? path.join(outputDir, 'proxy.mp4') : null);
+    const wave = reuseAudio ? hit.meta.wave : (audioPlan.waveLabel ? path.join(outputDir, 'wave.wav') : null);
+    const meta = { proxy, channels, wave };
     const args = buildIngestArgs({
       src,
-      needsProxy,
+      needsProxy: buildProxy,
       proxyPath: proxy,
       fc: audioPlan.filters,
       channels: reuseAudio ? [] : channels,
@@ -451,137 +557,174 @@ function createMediaIntakeRuntime(options = {}) {
       waveLabel: audioPlan.waveLabel,
       wavePath: wave,
       encoder: getEncoder(),
-      isStream: false,
+      isStream,
     });
+    let committed = false;
+    return {
+      cached: false, dir, args, meta,
+      label: buildProxy && audioPlan.channels.length ? '正在轉檔 Proxy 與分析音訊'
+        : (buildProxy ? '正在轉檔 Proxy' : '正在分析音訊'),
+      commit() {
+        if (cacheKeyFor(src) !== path.basename(dir)) throw new Error('母素材在轉檔期間變更，請重新載入');
+        if (!metaValid(meta)) throw new Error('媒體轉檔沒有產生完整快取');
+        writeMeta(metaPath, meta);
+        committed = true;
+      },
+      dispose() {
+        if (!committed && outputDir !== dir) fs.rmSync(outputDir, { recursive: true, force: true });
+      },
+    };
+  }
 
-    await delay(1000);
-    if (cancelled(session)) throw new Error('媒體轉檔已被較新的載入取代');
-    await ffmpegExecution.execute(args, {
-      sender: session.progressTarget,
-      duration,
-      jobId: 'ingest',
-      label: ingestLabel,
-      onProcess: process => session.ownProcess?.(process),
-      shouldSend: () => !cancelled(session),
+  function reportCacheHit(session) {
+    options.sendProgress?.(session.progressTarget, {
+      jobId: 'ingest', label: '使用既有快取', pct: 100, done: true, outcome: 'success',
     });
-    if (cancelled(session)) throw new Error('媒體轉檔已被較新的載入取代');
-    const meta = { proxy, channels, wave };
-    writeMeta(metaPath, meta);
-    return Object.assign({ cached: false }, meta);
+  }
+
+  async function ingest(request, session = {}) {
+    const plan = planIntake(request, false);
+    if (plan.cached) {
+      reportCacheHit(session);
+      return Object.assign({ cached: true }, plan.meta);
+    }
+
+    const unprotect = protectCacheDir(plan.dir);
+    try {
+      await delay(1000);
+      if (cancelled(session)) throw new Error('媒體轉檔已被較新的載入取代');
+      await ffmpegExecution.execute(plan.args, {
+        executionKind: 'direct',
+        sender: session.progressTarget,
+        duration: request.duration,
+        jobId: 'ingest',
+        label: plan.label,
+        onProcess: process => session.ownProcess?.(process),
+        shouldSend: () => !cancelled(session),
+      });
+      if (cancelled(session)) throw new Error('媒體轉檔已被較新的載入取代');
+      plan.commit();
+      return Object.assign({ cached: false }, plan.meta);
+    } finally {
+      try { plan.dispose(); } finally { unprotect(); }
+    }
   }
 
   async function stream({ src, duration, audio }, session = {}) {
-    const audioSources = Array.isArray(audio) ? audio : [];
     const port = await ensureStreamServer();
     if (cancelled(session)) return { response: null, completion: null };
-    const hit = readCache(src);
-    if (hit
-      && (!audioSources.length || hit.routingMetadataComplete)
-      && hit.meta.proxy
-      && fs.existsSync(hit.meta.proxy)) {
-      options.sendProgress?.(session.progressTarget, {
-        jobId: 'ingest', label: '使用既有快取', pct: 100, done: true,
-      });
+    const plan = planIntake({ src, needsProxy: true, audio }, true);
+    if (plan.cached) {
+      reportCacheHit(session);
       const id = createStreamId('c-');
-      streamJobs.set(id, { filePath: hit.meta.proxy, done: true, error: null });
+      streamJobs.set(id, {
+        filePath: plan.meta.proxy, done: true, error: null,
+        releaseCache: protectCacheDir(plan.dir),
+      });
       return Object.assign({
         cached: true,
         streamUrl: `http://127.0.0.1:${port}/${id}`,
         streamLeaseId: id,
-      }, hit.meta);
+      }, plan.meta);
     }
 
-    const dir = writeCacheDir(src);
-    const metaPath = path.join(dir, 'meta.json');
-    fs.mkdirSync(dir, { recursive: true });
-    const audioPlan = buildAudioIngestPlan(audioSources);
-    const channels = audioPlan.channels.map(channel => ({ ...channel, file: path.join(dir, channel.file) }));
-    const proxy = path.join(dir, 'proxy.mp4');
-    const wave = audioPlan.waveLabel ? path.join(dir, 'wave.wav') : null;
-    const args = buildIngestArgs({
-      src,
-      needsProxy: true,
-      proxyPath: proxy,
-      fc: audioPlan.filters,
-      channels,
-      chMaps: audioPlan.channelMaps,
-      waveLabel: audioPlan.waveLabel,
-      wavePath: wave,
-      encoder: getEncoder(),
-      isStream: true,
-    });
+    const { proxy, channels, wave } = plan.meta;
 
     const id = createStreamId('l-');
-    const job = { filePath: proxy, done: false, error: null };
+    // HTTP reader 與 writer 各自持有引用；writer 完成不代表播放端已釋放。
+    const job = { filePath: proxy, done: false, error: null, releaseCache: protectCacheDir(plan.dir) };
     streamJobs.set(id, job);
     if (cancelled(session)) {
       job.done = true;
       job.error = '媒體轉檔已被較新的載入取代';
-      streamJobs.delete(id);
+      releaseStream(id);
+      plan.dispose();
       return { response: null, completion: null };
     }
-    const completion = ffmpegExecution.execute(args, {
-      sender: session.progressTarget,
-      duration,
-      jobId: id,
-      label: '正在背景轉檔 Proxy 與分析音訊',
-      onProcess: process => session.ownProcess?.(process),
-      shouldSend: () => !cancelled(session),
-    }).then(() => {
+    const unprotect = protectCacheDir(plan.dir);
+    let execution;
+    try {
+      execution = ffmpegExecution.execute(plan.args, {
+        executionKind: 'direct',
+        sender: session.progressTarget,
+        duration,
+        jobId: id,
+        label: plan.label,
+        onProcess: process => session.ownProcess?.(process),
+        shouldSend: () => !cancelled(session),
+      });
+    } catch (error) {
+      execution = Promise.reject(error);
+    }
+    const completion = Promise.resolve(execution).then(() => {
       job.done = true;
-      if (!cancelled(session)) writeMeta(metaPath, { proxy, channels, wave });
+      if (!cancelled(session)) plan.commit();
     }).catch(error => {
       job.done = true;
       job.error = error.message;
-    });
+    }).finally(() => { try { plan.dispose(); } finally { unprotect(); } });
 
     const startedAt = Date.now();
-    /* 可播門檻的 300ms 輪詢也可能打到 SMB sidecar，因此只用 fsp.stat。 */
-    while (Date.now() - startedAt < 60000) {
-      if (cancelled(session)) {
-        streamJobs.delete(id);
-        return { response: null, completion };
+    let published = false;
+    try {
+      /* 可播門檻的 300ms 輪詢也可能打到 SMB sidecar，因此只用 fsp.stat。 */
+      while (Date.now() - startedAt < 60000) {
+        if (cancelled(session)) return { response: null, completion };
+        if (job.error) throw new Error('轉檔失敗：' + job.error);
+        let size = 0;
+        try { size = (await fsp.stat(proxy)).size; } catch (error) {}
+        if (cancelled(session)) return { response: null, completion };
+        if (job.error) throw new Error('轉檔失敗：' + job.error);
+        if (size >= 131072 || (job.done && size > 0)) break;
+        await delay(300);
+        if (cancelled(session)) return { response: null, completion };
       }
-      try {
-        if ((await fsp.stat(proxy)).size >= 131072) break;
-      } catch (error) {}
-      if (cancelled(session)) {
-        streamJobs.delete(id);
-        return { response: null, completion };
-      }
-      if (job.error) throw new Error('轉檔失敗：' + job.error);
-      await delay(300);
-      if (cancelled(session)) {
-        streamJobs.delete(id);
-        return { response: null, completion };
-      }
-    }
 
-    return {
-      response: {
-        cached: false,
-        streamUrl: `http://127.0.0.1:${port}/${id}`,
-        streamLeaseId: id,
-        proxy,
-        channels,
-        wave,
-        ingestJobId: id,
-      },
-      completion,
-    };
+      published = true;
+      return {
+        response: {
+          cached: false,
+          streamUrl: `http://127.0.0.1:${port}/${id}`,
+          streamLeaseId: id,
+          proxy,
+          channels,
+          wave,
+          ingestJobId: id,
+        },
+        completion,
+      };
+    } catch (error) {
+      // 未交付的exception也必須等writer settle，不能讓coordinator提前准入下一個。
+      await completion;
+      throw error;
+    } finally {
+      if (!published) releaseStream(id);
+    }
   }
 
-  function close() {
-    if (!streamServer) return Promise.resolve();
+  async function close() {
+    closed = true;
+    if (!streamServer) return;
     const server = streamServer;
+    await streamServerReady.catch(() => {});
     streamServer = null;
+    streamServerReady = null;
     streamPort = null;
+    for (const id of streamJobs.keys()) releaseStream(id);
     streamJobs.clear();
-    return new Promise(resolve => server.close(() => resolve()));
+    await new Promise(resolve => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
   }
 
   function releaseStream(streamLeaseId) {
-    return typeof streamLeaseId === 'string' && streamJobs.delete(streamLeaseId);
+    if (typeof streamLeaseId !== 'string') return false;
+    const job = streamJobs.get(streamLeaseId);
+    if (!job) return false;
+    for (const cancel of job.requests || []) cancel();
+    job.releaseCache?.();
+    return streamJobs.delete(streamLeaseId);
   }
 
   return Object.freeze({
@@ -622,6 +765,9 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
   const pending = [];
   let active = null;
   let draining = false;
+  let closing = false;
+  let drainFinished = Promise.resolve();
+  let resumeWhenIdle = false;
 
   const cancel = lease => {
     if (!lease || lease.cancelled) return;
@@ -641,6 +787,8 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
   const drain = async () => {
     if (draining) return;
     draining = true;
+    let finishDrain;
+    drainFinished = new Promise(resolve => { finishDrain = resolve; });
     try {
       while (pending.length) {
         const ticket = pending.shift();
@@ -675,11 +823,14 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
       }
     } finally {
       draining = false;
+      if (resumeWhenIdle && !pending.length) closing = false;
+      finishDrain();
       if (pending.length) void drain();
     }
   };
 
   const submit = (work, { replace = false } = {}) => new Promise((resolve, reject) => {
+    if (closing) { reject(new IngestSupersededError()); return; }
     if (typeof work !== 'function') {
       reject(new TypeError('media ingest work must be a function'));
       return;
@@ -700,10 +851,24 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
     replace: work => submit(work, { replace: true }),
     /** 將新轉檔工作依序加入排隊佇列 */
     enqueue: work => submit(work),
+    cancelAllAndWait() {
+      closing = true;
+      resumeWhenIdle = false;
+      while (pending.length) pending.shift().reject(new IngestSupersededError());
+      cancel(active);
+      return drainFinished;
+    },
+    resume() {
+      resumeWhenIdle = true;
+      if (draining) return false;
+      closing = false;
+      return true;
+    },
   });
 }
 
 module.exports = {
+  cacheKeyFor,
   createMediaIntakeRuntime,
   createMediaIngestCoordinator,
   IngestSupersededError,

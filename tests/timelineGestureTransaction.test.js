@@ -100,8 +100,10 @@ describe('timeline gesture transaction', () => {
       targets: [{ target: cue, fields: ['start', 'end'] }]
     });
     first.startPreview();
-    cue.start = 4;
-    cue.end = 5;
+    first.preview(() => {
+      cue.start = 4;
+      cue.end = 5;
+    });
 
     const second = beginTimelineGestureLifecycle({ mode: 'rubber' });
 
@@ -125,9 +127,11 @@ describe('timeline gesture transaction', () => {
         refreshPreview: () => calls.push('preview'),
       },
     });
-    clip.offset = 5;
-    clip.vtrack = 1;
     gesture.startPreview();
+    gesture.preview(() => {
+      clip.offset = 5;
+      clip.vtrack = 1;
+    });
 
     const result = gesture.cancel();
 

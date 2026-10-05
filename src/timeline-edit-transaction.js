@@ -93,17 +93,19 @@ function notify(kind, index, field, phase, selectionChanged = false){
   if (selectionChanged) emit('render:all');
 }
 
-function beginTimelineTrackEdit({ kind, index, id, field, label = null, target: providedTarget = null, onApply = null } = {}){
+function beginTimelineTrackEdit({ kind, index, id, field, label = null, target: providedTarget = null, expectedTarget = null, onApply = null, beginPreview = null } = {}){
   if (!KIND_LABEL[kind] || !ALLOWED_FIELDS.has(field)) return null;
   const target = providedTarget || trackAt(kind, index, id);
-  if (!target) return null;
+  if (!target || (expectedTarget && target!==expectedTarget)) return null;
   const before = readValue(target, field);
   let latest = before;
   let active = true;
+  const ownsField = () => Object.is(readValue(target, field), latest);
+  const endPreview=beginPreview?.([{target,fields:[field],ownsField}]);
 
-  const live = () => active && (providedTarget ? true : trackAt(kind, index, id) === target);
+  const live = () => active && (!endPreview || endPreview.isCurrent()) && (providedTarget ? true : trackAt(kind, index, id) === target);
   const apply = (value, phase) => {
-    if (!live()) return false;
+    if (!live() || !ownsField()) return false;
     const next = normalizedValue(kind, index, field, value);
     if (Object.is(latest, next)) return false;
     writeValue(target, field, next);
@@ -113,12 +115,16 @@ function beginTimelineTrackEdit({ kind, index, id, field, label = null, target: 
     return true;
   };
   // 拖曳預覽由 renderer 在 requestAnimationFrame 內局部更新；完整重繪只在 commit。
-  const preview = value => apply(value, null);
+  const preview = value => {
+    if (!live() || !ownsField()) { cancel(); return false; }
+    return apply(value, null);
+  };
 
   const commit = (...args) => {
-    if (!live()) return false;
+    if (!live() || !ownsField()) { endPreview?.(); active=false; return false; }
     if (args.length) apply(args[0], null);
     if (!live() || Object.is(before, latest)) {
+      endPreview?.();
       active = false;
       return false;
     }
@@ -133,6 +139,7 @@ function beginTimelineTrackEdit({ kind, index, id, field, label = null, target: 
       }
     }
     active = false;
+    endPreview?.();
     if (clearedClipId) emit('selection:clipCleared', { id: clearedClipId, reason: 'track-locked' });
     notify(kind, index ?? id, field, 'commit', selectionChanged);
     emit('history:record', label || defaultLabel({ kind, field, before, after: latest, target }));
@@ -140,15 +147,17 @@ function beginTimelineTrackEdit({ kind, index, id, field, label = null, target: 
   };
 
   const cancel = () => {
-    if (!live()) return false;
+    if (!live()) { endPreview?.(); active=false; return false; }
     const changed = !Object.is(before, latest);
-    if (changed) {
+    const restored=changed && ownsField();
+    if (restored) {
       writeValue(target, field, before);
       if (typeof onApply === 'function') onApply(before, target);
       notify(kind, index ?? id, field, 'cancel');
     }
     active = false;
-    return changed;
+    endPreview?.();
+    return restored;
   };
 
   return Object.freeze({ preview, commit, cancel });
@@ -165,9 +174,20 @@ function snapshotTarget(target, fields) {
     target,
     values: (Array.isArray(fields) ? fields : []).map(field => ({
       field,
-      value: Object.prototype.hasOwnProperty.call(target || {}, field) ? target[field] : ABSENT,
+      value: cloneFieldValue(readValue(target, field)),
     })),
   };
+}
+
+function cloneFieldValue(value) {
+  return value === ABSENT ? ABSENT : structuredClone(value);
+}
+
+function sameFieldValue(left, right) {
+  if (Object.is(left, right)) return true;
+  return !!(left !== ABSENT && right !== ABSENT && left && right
+    && typeof left === 'object' && typeof right === 'object'
+    && JSON.stringify(left) === JSON.stringify(right));
 }
 
 function beginTimelineGesture({ targets = [] } = {}) {
@@ -176,14 +196,28 @@ function beginTimelineGesture({ targets = [] } = {}) {
     .map(entry => snapshotTarget(entry.target, entry.fields));
   const rollbacks = [];
   const cancelEffects = [];
+  const valuesByTarget = new Map();
+  for (const { target, values } of snapshots) {
+    const fields = valuesByTarget.get(target) || new Map();
+    for (const value of values) fields.set(value.field, value);
+    valuesByTarget.set(target, fields);
+  }
   let active = true;
   let moved = false;
+  let hasPreviewValues = false;
+
+  // 回復及持久快照共用這份最後寫入證據；背景工作改寫的同欄位不再屬於手勢。
+  const ownsField = (target, field) => {
+    if (!hasPreviewValues) return true;
+    const value = valuesByTarget.get(target)?.get(field);
+    return !!value && sameFieldValue(readValue(target, field), value.latest);
+  };
 
   const restore = () => {
     for (const { target, values } of snapshots) {
       for (const { field, value } of values) {
-        if (value === ABSENT) delete target[field];
-        else target[field] = value;
+        if (!ownsField(target, field)) continue;
+        writeValue(target, field, cloneFieldValue(value));
       }
     }
     for (let index = rollbacks.length - 1; index >= 0; index--) {
@@ -192,6 +226,18 @@ function beginTimelineGesture({ targets = [] } = {}) {
   };
 
   return Object.freeze({
+    ownsField,
+    isCurrent() {
+      return !hasPreviewValues || snapshots.every(({ target, values }) => values.every(({ field }) => ownsField(target, field)));
+    },
+    rememberPreview() {
+      if (!active) return false;
+      for (const { target, values } of snapshots) {
+        for (const value of values) value.latest = cloneFieldValue(readValue(target, value.field));
+      }
+      hasPreviewValues = true;
+      return true;
+    },
     markMoved() {
       if (!active) return false;
       moved = true;

@@ -18,7 +18,7 @@ const {
   reservePort,
   getJSON,
   waitFor,
-  CdpClient,
+  CdpClient, trackElectron, stopElectron,
   dispatchKey,
   verifiedCleanup,
 } = require('./cdp-electron-harness.js');
@@ -30,7 +30,7 @@ const {
   const profileDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-locked-subtitle-cdp-'));
   const port = await reservePort();
   const errors = [];
-  const child = spawn(ELECTRON, [
+  const child = trackElectron(spawn(ELECTRON, [
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
@@ -42,7 +42,7 @@ const {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['ignore', 'ignore', 'pipe'],
-  });
+  }));
   child.stderr.on('data', chunk => errors.push(chunk.toString()));
 
   let client;
@@ -137,10 +137,8 @@ const {
     console.log(JSON.stringify({ passed: true, before, after }, null, 2));
   } finally {
     client?.close();
-    if (!child.killed) child.kill();
-    await delay(500);
-    try { verifiedCleanup(profileDir, 'subtool-locked-subtitle-cdp-'); }
-    catch (error) { console.warn(error.message); }
+    await stopElectron(child);
+    verifiedCleanup(profileDir, 'subtool-locked-subtitle-cdp-');
     if (errors.length) {
       const important = errors.join('').split(/\r?\n/).filter(line => /error|failed|exception/i.test(line));
       if (important.length) console.warn(important.join('\n'));

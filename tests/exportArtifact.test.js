@@ -39,8 +39,8 @@ describe('watchdog 私有成品 lifecycle interface', () => {
     fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
-  function create(format, owner = {}, adapters = {}) {
-    return createExportArtifact({ outputFormat: format, outPath, args, discAudioPlan: { streams: [{ layout: 'stereo' }] },
+  function create(format, owner = {}, adapters = {}, stagePath = null) {
+    return createExportArtifact({ outputFormat: format, outPath, stagePath, args, discAudioPlan: { streams: [{ layout: 'stereo' }] },
       discVideoFps: 29.97 }, {
       signal: controller.signal, ...owner,
     }, adapters);
@@ -63,6 +63,18 @@ describe('watchdog 私有成品 lifecycle interface', () => {
     expect(artifact.settle({ encoded: false })).toBe(settled);
     expect(await settled).toEqual({ error: null, reason: null, cleanupError: null });
     await expect(artifact.prepare({ tempDir })).rejects.toThrow('已結束');
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+  });
+
+  it('輸出暫存路徑同時供 FFmpeg 與原生驗證使用，正式成品保持原內容', async () => {
+    const stagePath = path.join(tempDir, '.existing.stage.mpg');
+    const airline = vi.fn(async (format, target) => fs.writeFileSync(target, 'verified transport'));
+    const artifact = create('airline-dmpes', {}, { finalizeAirline: airline }, stagePath);
+    expect((await artifact.prepare({ tempDir })).at(-1)).toBe(stagePath);
+    fs.writeFileSync(stagePath, 'encoded transport');
+    expect(await artifact.settle({ encoded: true })).toEqual({ error: null, reason: null, cleanupError: null });
+    expect(airline).toHaveBeenCalledWith('airline-dmpes', stagePath, expect.any(Object));
+    expect(fs.readFileSync(stagePath, 'utf8')).toBe('verified transport');
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
   });
 
@@ -125,6 +137,51 @@ describe('watchdog 私有成品 lifecycle interface', () => {
     expect(await settled).toEqual({ error: null, reason: null, cleanupError: null });
     expect(fs.existsSync(path.dirname(encodedPath))).toBe(false);
     expect(fs.readFileSync(outPath, 'utf8')).toBe('verified ISO');
+  });
+
+  it.each(['dvd-iso', 'bd-iso'])('%s 封裝成功前只寫 token stage，正式 ISO 保持原內容', async format => {
+    const stagePath = path.join(tempDir, `.private-${format}.iso`);
+    const writing = deferred(), finished = deferred();
+    const artifact = create(format, {}, { disc: {
+      ...nativeDisc,
+      async finalizeDiscOutput(actualFormat, encoded, target) {
+        expect(actualFormat).toBe(format);
+        expect(target).toBe(stagePath);
+        expect(fs.readFileSync(encoded, 'utf8')).toBe('encoded');
+        fs.writeFileSync(target, 'partial ISO');
+        writing.resolve();
+        await finished.promise;
+        fs.writeFileSync(target, 'verified ISO');
+      },
+    } }, stagePath);
+    const encodedPath = (await artifact.prepare({ tempDir })).at(-1);
+    fs.writeFileSync(encodedPath, 'encoded');
+    const settled = artifact.settle({ encoded: true });
+    await writing.promise;
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+    finished.resolve();
+    expect(await settled).toEqual({ error: null, reason: null, cleanupError: null });
+    expect(fs.readFileSync(stagePath, 'utf8')).toBe('verified ISO');
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
+  });
+
+  it.each(['dvd-iso', 'bd-iso'])('%s 封裝失敗後仍保留既有 ISO', async format => {
+    const stagePath = path.join(tempDir, `.failed-${format}.iso`);
+    const failure = new Error('invalid ISO');
+    const artifact = create(format, {}, { disc: {
+      ...nativeDisc,
+      async finalizeDiscOutput(actualFormat, encoded, target) {
+        fs.writeFileSync(target, 'partial ISO');
+        throw failure;
+      },
+    } }, stagePath);
+    const encodedPath = (await artifact.prepare({ tempDir })).at(-1);
+    fs.writeFileSync(encodedPath, 'encoded');
+    expect(await artifact.settle({ encoded: true })).toMatchObject({
+      error: failure, reason: 'disc-finalize-failed',
+    });
+    expect(fs.readFileSync(stagePath, 'utf8')).toBe('partial ISO');
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
   });
 
   it('取消準備中的工作時 settle 等 prepare 交回 stage 才清理，且不啟動封裝', async () => {

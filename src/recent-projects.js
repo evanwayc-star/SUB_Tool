@@ -6,7 +6,7 @@
 
    【清單不在這裡】
    路徑由【主程序】持有並持久化（`electron/main.js` 的 project:recentList /
-   project:openRecent）。這一支只負責顯示，開啟時送出去的是**索引**，不是路徑。
+   project:openRecent）。這一支只負責顯示，開啟時送出去的是**固定項目身分**，不是路徑。
 
    為什麼這樣分：`fileAuthority` 的授權是每次工作階段的，重開程式後舊路徑本來
    就不再被授權。若讓 renderer 記住路徑再送回去開，等於給了它一條「叫主程序讀
@@ -18,7 +18,9 @@
 import { $ } from './dom.js';
 import { IS_DESKTOP, DESK } from './state.js';
 import { showToast, closeMenus, syncMenuOverlay } from './ui.js';
-import { Project, confirmDiscardUnsaved } from './project.js';
+import { Project } from './project.js';
+
+let _renderGeneration = 0;
 
 /* 8月6日 · 11:05 am —— 與匯出佇列監控的「加入時間」同一種寫法。 */
 function fmtWhen(ms) {
@@ -31,12 +33,10 @@ function fmtWhen(ms) {
   return `${d.getMonth() + 1}月${d.getDate()}日 · ${pad2(h12)}:${pad2(d.getMinutes())} ${h24 < 12 ? 'am' : 'pm'}`;
 }
 
-async function openByIndex(index) {
+async function openByToken(token) {
   /* 與工具列的「開啟專案」同一道守衛：沒存檔就先問，不可以直接蓋掉。 */
-  if (!await confirmDiscardUnsaved()) return;
   try {
-    const r = await DESK.openRecentProject(index);
-    if (r) Project.loadDesktop(r);
+    await Project.open(() => DESK.openRecentProject(token));
   } catch (err) {
     /* 檔案被移走或改名時主程序會把它從清單移除並丟錯，這裡如實告訴使用者，
        並重畫選單——否則那一列會一直留著讓人一再踩空。 */
@@ -46,11 +46,13 @@ async function openByIndex(index) {
 }
 
 export async function renderRecentMenu() {
+  const generation = ++_renderGeneration;
   const box = $('recentItems');
   if (!box) return;
   let list = [];
   try { list = await DESK.recentProjects(); } catch (e) { list = []; }
 
+  if (generation !== _renderGeneration || $('recentItems') !== box) return;
   box.replaceChildren();
   if (!list.length) {
     const empty = document.createElement('div');
@@ -77,7 +79,7 @@ export async function renderRecentMenu() {
     b.append(name, when);
     b.addEventListener('click', () => {
       closeMenus();
-      void openByIndex(item.index);
+      void openByToken(item.token);
     });
     box.appendChild(b);
   }
@@ -88,6 +90,8 @@ export async function renderRecentMenu() {
   clear.type = 'button';
   clear.textContent = '清除清單';
   clear.addEventListener('click', async () => {
+    if ($('recentItems') !== box) return;
+    ++_renderGeneration;
     closeMenus();
     try { await DESK.clearRecentProjects(); } catch (e) {}
     await renderRecentMenu();

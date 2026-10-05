@@ -73,6 +73,7 @@ const KEY_LABELS = {
 
 /** 顯示成 `Ctrl + Shift + ↑` 這種字串；空綁定回空字串。 */
 export function formatBind(bind) {
+  bind = normalizeKeyBinding(bind);
   if (!bind) return '';
   const parts = [];
   if (bind.ctrl) parts.push('Ctrl');
@@ -80,6 +81,8 @@ export function formatBind(bind) {
   if (bind.alt) parts.push('Alt');
   if (isNumpadCode(bind.code)) {
     parts.push(NUMPAD_LABELS[bind.code] || bind.code.replace('Numpad', 'Num '));
+  } else if (bind.code) {
+    parts.push(bind.code);
   } else if (bind.key) {
     parts.push(KEY_LABELS[bind.key] || (bind.key.charAt(0).toUpperCase() + bind.key.slice(1)));
   }
@@ -126,6 +129,17 @@ export function matchAction(keymap, ev) {
 /**
  * 匯入的 keymap 併到預設上：只採用本版本認得的動作，其餘一律以預設補齊。
  */
+export function normalizeKeyBinding(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const hasKey = typeof value.key === 'string' && value.key.length > 0;
+  const hasCode = typeof value.code === 'string' && value.code.length > 0;
+  if (!hasKey && !hasCode) return null;
+  if (['ctrl', 'shift', 'alt'].some(key => value[key] != null && typeof value[key] !== 'boolean')) return null;
+  const bind = hasCode ? { code: value.code } : { key: value.key.toLowerCase() };
+  for (const key of ['ctrl', 'shift', 'alt']) if (value[key]) bind[key] = true;
+  return bind;
+}
+
 export function mergeImportedKeymap(defaults, imported) {
   const source = (imported && imported.keymap) ? imported.keymap : imported;
   if (!source || typeof source !== 'object' || Array.isArray(source)) {
@@ -135,7 +149,9 @@ export function mergeImportedKeymap(defaults, imported) {
   let applied = 0;
   for (const action of Object.keys(merged)) {
     if (Array.isArray(source[action])) {
-      merged[action] = source[action].filter(b => b && typeof b === 'object');
+      const bindings = source[action].map(normalizeKeyBinding).filter(Boolean);
+      if (source[action].length && !bindings.length) continue;
+      merged[action] = bindings;
       applied++;
     }
   }

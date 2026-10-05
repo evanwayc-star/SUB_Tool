@@ -457,6 +457,7 @@ export async function transcribeWithBuiltinModel({
   modelId = 'onnx-community/whisper-base',
   language = 'zh',
   prompt = '',
+  temperature = 0,
   onProgress = null,
   signal = null
 }) {
@@ -474,6 +475,7 @@ export async function transcribeWithBuiltinModel({
     returnTimestamps: modelMeta.returnTimestamps || 'word',
     language,
     prompt,
+    temperature,
     onProgress,
     signal
   });

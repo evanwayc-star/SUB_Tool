@@ -25,7 +25,7 @@
    片段幾何是鐵律 §0.9、淡入淡出視窗是 clipFadeContract 守的那條——
    兩者以前在這裡各有一份手抄副本。 */
 const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
-const { clipLength } = require('../shared/clip-fade.cjs');
+const { clipLength, fadeWindow } = require('../shared/clip-fade.cjs');
 const { deliveryFrameRateRatio } = require('../shared/delivery-frame-rate.cjs');
 const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
 const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter, HARD_LIMITER_PRESETS } = require('../shared/audio-loudness.cjs');
@@ -58,9 +58,7 @@ function _finiteNumber(v, fallback = 0) {
 function _filterNumber(v, fallback = 0) { return _finiteNumber(v, fallback).toFixed(6); }
 function _fadeFilters(input, duration, { audio = false, digits = 3 } = {}) {
   const origin = Math.max(0, _finiteNumber(input.fadeSourceOffset, 0));
-  const sourceLength = Math.max(duration + origin, _finiteNumber(input.fadeSourceLength, duration));
-  const fadeIn = Math.min(sourceLength, Math.max(0, _finiteNumber(input.fadeIn, 0)));
-  const fadeOut = Math.min(sourceLength, Math.max(0, _finiteNumber(input.fadeOut, 0)));
+  const { fadeIn, fadeOut, fadeOutStart } = fadeWindow({ ...input, in: 0, out: duration });
   if (!fadeIn && !fadeOut) return [];
   const format = n => n.toFixed(digits);
   const pts = audio ? 'asetpts' : 'setpts';
@@ -71,7 +69,7 @@ function _fadeFilters(input, duration, { audio = false, digits = 3 } = {}) {
   // cropped samples back to their original clip clock, then restore PTS.
   if (origin > 0) filters.push(`${pts}=PTS+${format(origin)}/TB`);
   if (fadeIn > 0) filters.push(`${fade}=t=in:st=0:d=${format(fadeIn)}${alpha}`);
-  if (fadeOut > 0) filters.push(`${fade}=t=out:st=${format(Math.max(0, sourceLength - fadeOut))}:d=${format(fadeOut)}${alpha}`);
+  if (fadeOut > 0) filters.push(`${fade}=t=out:st=${format(fadeOutStart)}:d=${format(fadeOut)}${alpha}`);
   if (origin > 0) filters.push(`${pts}=PTS-${format(origin)}/TB`);
   return filters;
 }
@@ -225,13 +223,17 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
         inputDuration ?? duration, { audio: true, digits: 6 });
       if (fades.length) chain += `,${fades.join(',')}`;
       const offMs = Math.max(0, Math.round(input.offset * 1000));
-      chain += `,adelay=${offMs}:all=1,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${label}`;
+      // adelay 可先送出 PTS=NOPTS 的靜音；用輸出 sample clock 補上完整時間軸，
+      // 才能 trim/rebase。否則 STARTPTS 以第一個有 timestamp 的音訊為起點，抹掉 placement offset。
+      chain += `,adelay=${offMs}:all=1,asetpts=N/SR/TB,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${label}`;
       fc.push(chain);
       parts.push(label);
     });
     const busLabel = `[apB${bi}]`;
     if (parts.length) {
-      fc.push(`${parts.join('')}amix=inputs=${parts.length}:normalize=0:dropout_transition=0,atrim=0:${_filterNumber(duration)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono${busLabel}`);
+      // join ends when a constituent bus reaches EOF. Pad each bus before
+      // grouping so a short channel cannot discard another channel's tail.
+      fc.push(`${parts.join('')}amix=inputs=${parts.length}:normalize=0:dropout_transition=0,apad=whole_dur=${_filterNumber(duration)},atrim=0:${_filterNumber(duration)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono${busLabel}`);
     } else {
       fc.push(`anullsrc=r=48000:cl=mono,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${busLabel}`);
     }
@@ -510,6 +512,8 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
   let baseLabel = '[base]';
   vtracks.forEach((T, ti) => {
+    // 隱藏只影響畫面；母素材與音訊 routing 仍保留，不能把 visible 當 mute。
+    if (T.visible === false) return;
     const vt = T.vt || 0;
     const scale = Math.max(0.02, Math.min(1, +T.scale || 1));
     const opacity = Math.max(0, Math.min(1, T.opacity == null ? 1 : +T.opacity));

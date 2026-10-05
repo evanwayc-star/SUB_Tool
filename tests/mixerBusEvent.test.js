@@ -20,6 +20,7 @@ const mediaMock = vi.hoisted(() => ({
   tracks: [],
 }));
 vi.mock('../src/media.js', () => ({ Media: mediaMock, Wave: {} }));
+vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), drawRuler: vi.fn() }));
 
 let on, State, renderAudioTracks, renderMixer, mixerMuteAll;
 let seen;
@@ -44,6 +45,20 @@ beforeEach(async () => {
 });
 
 describe('混音器 UI → audio:busChanged', () => {
+  it('滾輪音量透過共用提交入口建立可復原的動作', async () => {
+    const { History } = await import('../src/history.js');
+    on('history:record', label => History.record(label));
+      History.reset();
+      renderMixer();
+      document.querySelector('#mixerStrips .mx-fader-val').dispatchEvent(new WheelEvent('wheel', { deltaY: -1, cancelable: true }));
+      const volume = State.audioProject.buses[0].volume;
+      expect(volume).toBeGreaterThan(1);
+      History.undo();
+      expect(State.audioProject.buses[0].volume).toBe(1);
+      History.redo();
+      expect(State.audioProject.buses[0].volume).toBe(volume);
+  });
+
   it('點靜音鈕會翻轉狀態並發出事件（帶 busId / field / value）', () => {
     renderMixer();
     document.querySelector('#mixerStrips .mx-mute').click();

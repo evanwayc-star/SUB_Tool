@@ -17,6 +17,26 @@ const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const clamp01 = (v, d) => Math.max(0, Math.min(1, num(v, d)));
 const EPS = 0.001;
 
+export function imageSourceUrl(clip){
+  let url=clip?.web?.url||clip?.path||'';
+  if(url&&!/^(https?|file|blob|data|subtool-local):/i.test(url)) url='file:///'+url.replace(/\\/g,'/');
+  return url;
+}
+
+/* Native guide 可畫在影片之上的圖片；圖片插在影片下方或中間時，必須由
+   同一個 compositor 畫完整層序，不能把兩種素材拆成各自的 stack。 */
+export function visualStackPlan(activeClips,videoTracks){
+  const clips=(activeClips||[]).filter(c=>videoTracks?.[c.vtrack||0]?.visible!==false)
+    .slice().sort((a,b)=>(a.vtrack||0)-(b.vtrack||0));
+  const videos=clips.filter(c=>c.type!=='image');
+  const images=clips.filter(c=>c.type==='image');
+  const lastVideo=clips.findLastIndex(c=>c.type!=='image');
+  const mixedImages=images.length>0&&clips.some((c,index)=>c.type==='image'&&index<lastVideo);
+  const composited=mixedImages?clips:videos;
+  return {clips,videos,images,composited,mixedImages,
+    needsComposite:videos.length>0&&(mixedImages||needsComposite(videos,videoTracks))};
+}
+
 /**
  * 計算素材「符合視窗」所需的縮放倍率。
  */
@@ -73,6 +93,17 @@ export function imageBoxOnStage({ stageW, stageH, track, natW, natH, scale, posX
   return { x: f.x + b.x, y: f.y + b.y, w: b.w, h: b.h };
 }
 
+/** One image layer includes its containing track frame, not just its bitmap box. */
+export function imageLayerPlan({stageW,stageH,track,clip,natW,natH,time}={}){
+  const box=imageBoxOnStage({stageW,stageH,track,natW,natH,scale:clip?.scale,posX:clip?.posX,posY:clip?.posY});
+  const frame=trackFrame({stageW,stageH,scale:track?.scale,posX:track?.posX,posY:track?.posY});
+  const x=Math.max(0,frame.x,box.x),y=Math.max(0,frame.y,box.y);
+  const right=Math.min(stageW,frame.x+frame.w,box.x+box.w);
+  const bottom=Math.min(stageH,frame.y+frame.h,box.y+box.h);
+  return {box,frame,visible:{x,y,w:Math.max(0,right-x),h:Math.max(0,bottom-y)},
+    alpha:clamp01(track?.opacity,1)*fadeAlphaAtTimeline(clip,time)};
+}
+
 /**
  * 判斷當前活躍的片段與視訊軌道是否需要由 WebCodecs 引擎進行多層幾何合成。
  */
@@ -113,7 +144,10 @@ export function stageBox({ canvasW, canvasH, projectW, projectH }) {
  */
 export function fadeAlphaAt(clip, localTime) {
   const { length, fadeIn, fadeOut, fadeOutStart } = fadeWindow(clip);
-  const t = Number(localTime) || 0;
+  const local=Number(localTime)||0;
+  if(local<0||local>clipLength(clip)) return 0;
+  const rawOrigin = Number(clip?.fadeSourceOffset);
+  const t = local + (Number.isFinite(rawOrigin) ? Math.max(0, rawOrigin) : 0);
   if (t < 0 || t > length) return 0;
 
   let a = 1;

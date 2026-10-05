@@ -619,7 +619,7 @@ export function resolveRecognitionAlignment({ taskMode, transcript, evidenceSegm
    Safe transcript-alignment diagnostic contract
    ============================================================================== */
 const DIAGNOSTIC_SCHEMA = 'subtool-transcript-alignment-diagnostic-v2';
-const DIAGNOSTIC_PROVIDERS = new Set(['builtin', 'groq', 'openai', 'azure', 'google']);
+const DIAGNOSTIC_PROVIDERS = new Set(['builtin', 'groq', 'openai', 'azure', 'google', 'elevenlabs']);
 const DIAGNOSTIC_LANGUAGES = new Set(['auto', 'zh', 'en', 'ja', 'ko']);
 const DIAGNOSTIC_LOCALES = new Set(['zh-TW', 'en-US', 'ja-JP', 'ko-KR']);
 const ALIGNMENT_STATUSES = new Set(['matched', 'review', 'unmatched']);

@@ -32,6 +32,7 @@ function createMpvHost(deps) {
   const callbacks = new Map();
   let pendingPresentation = null;
   let pendingFileLoad = null;
+  let fileLoadSession = null;
   // mpv 由 --pause 啟動。暫停中的 seek 會更新 time-pos／畫格，卻不保證在
   // unpause 前送 playback-restart；播放中的 seek 則仍要等 restart 才能視為呈現完成。
   let playerPaused = true;
@@ -132,8 +133,12 @@ function createMpvHost(deps) {
   }
 
   function clearCallbacks(value = null) {
-    for (const { resolve, timer } of callbacks.values()) {
-      try { clearTimer(timer); resolve(value); } catch (error) {}
+    for (const { resolve, reject, requireSuccess, timer } of callbacks.values()) {
+      try {
+        clearTimer(timer);
+        if (requireSuccess) reject(new Error('mpv 已中斷，截圖未完成'));
+        else resolve(value);
+      } catch (error) {}
     }
     callbacks.clear();
   }
@@ -157,10 +162,10 @@ function createMpvHost(deps) {
     waiter.resolve(ready);
   }
 
-  function waitForFileLoad() {
+  function waitForFileLoad(session) {
     settleFileLoad(false);
     return new Promise(resolve => {
-      const waiter = { resolve, timer: null };
+      const waiter = { resolve, timer: null, session };
       pendingFileLoad = waiter;
       waiter.timer = setTimer(() => {
         if (pendingFileLoad === waiter) settleFileLoad(false);
@@ -204,6 +209,7 @@ function createMpvHost(deps) {
     clearCallbacks(null);
     cancelPresent();
     settleFileLoad(false);
+    fileLoadSession = null;
     if (destroy && current) { try { current.destroy(); } catch (error) {} }
     if (emitDisconnected) sendEvent({ event: 'disconnected' });
   }
@@ -242,18 +248,19 @@ function createMpvHost(deps) {
     return executable;
   }
 
-  function send(command, wantReply = false) {
-    if (!client) return Promise.resolve(null);
-    return new Promise(resolve => {
+  function send(command, wantReply = false, { requireSuccess = false } = {}) {
+    if (!client) return requireSuccess ? Promise.reject(new Error('mpv 尚未連線')) : Promise.resolve(null);
+    return new Promise((resolve, reject) => {
       const id = ++requestId;
       if (wantReply) {
         const timer = setTimer(() => {
           const callback = callbacks.get(id);
           if (!callback) return;
           callbacks.delete(id);
-          callback.resolve(null);
+          if (requireSuccess) callback.reject(new Error('mpv 截圖逾時'));
+          else callback.resolve(null);
         }, 5000);
-        callbacks.set(id, { resolve, timer });
+        callbacks.set(id, { resolve, reject, requireSuccess, timer });
       } else {
         resolve(null);
       }
@@ -264,7 +271,8 @@ function createMpvHost(deps) {
         if (callback) {
           callbacks.delete(id);
           clearTimer(callback.timer);
-          callback.resolve(null);
+          if (requireSuccess) callback.reject(error);
+          else callback.resolve(null);
         }
       }
     });
@@ -341,9 +349,20 @@ function createMpvHost(deps) {
             const callback = callbacks.get(message.request_id);
             callbacks.delete(message.request_id);
             clearTimer(callback.timer);
-            callback.resolve(message.data ?? null);
+            if (callback.requireSuccess && message.error !== 'success') {
+              callback.reject(new Error('mpv 截圖失敗：' + (message.error || '無效的命令回覆')));
+            } else callback.resolve(message.data ?? null);
           } else if (message.event === 'file-loaded') {
-            settleFileLoad(true);
+            const waiter = pendingFileLoad;
+            if (waiter) {
+              // file-loaded 沒有來源 path；舊 load 的晚到事件不可完成新來源的 waiter。
+              const canonical = value => typeof value === 'string' ? value.replace(/\\/g, '/').toLowerCase() : null;
+              void send(['get_property', 'path'], true).then(loadedPath => {
+                if (waiter === pendingFileLoad && waiter.session === fileLoadSession
+                  && waiter.session.client === client && waiter.session.generation === generation
+                  && canonical(loadedPath) === canonical(waiter.session.path)) settleFileLoad(true);
+              });
+            }
             sendEvent(message);
           } else if (message.event === 'property-change' || message.event === 'end-file' || message.event === 'playback-restart') {
             observePresentationEvent(message);
@@ -462,7 +481,9 @@ function createMpvHost(deps) {
       ensureTmp?.();
       let logStream = null;
       try { logStream = fs.createWriteStream(logPath); } catch (error) {}
-      const pipeName = 'subtool-mpv-' + now();
+      // quit() 會先要求舊 child 結束，但舊 named pipe 可能還活著。同一毫秒
+      // 換片時必須使用新的位址，否則新連線可能接到舊 mpv。
+      const pipeName = 'subtool-mpv-' + process.pid + '-' + token + '-' + now();
       const args = [
         '--wid=' + hwnd,
         '--input-ipc-server=\\\\.\\pipe\\' + pipeName,
@@ -598,7 +619,7 @@ function createMpvHost(deps) {
     try {
       if (!subFile) {
         ensureTmp?.();
-        subFile = path.join(tmpDir, 'subtool-mpv-' + now() + '.ass');
+        subFile = path.join(tmpDir, 'subtool-mpv-' + process.pid + '-' + generation + '-' + now() + '.ass');
         tempFiles?.add(subFile);
       }
       fs.writeFileSync(subFile, assText || '', 'utf8');
@@ -612,18 +633,29 @@ function createMpvHost(deps) {
 
   async function loadFile(filePath) {
     if (!client) return null;
+    settleFileLoad(false);
+    const session = { client, generation, path: filePath };
+    fileLoadSession = session;
+    const current = () => session === fileLoadSession && session.client === client && session.generation === generation;
+    const superseded = () => ({ ok: false, duration: 0 });
+    // 同一個 mpv process 會沿用 pipe，但舊來源的呈現請求絕不可由新來源的
+    // time-pos／playback-restart 完成。
+    cancelPresent();
     subAdded = false;
     await send(['set_property', 'pause', true]);
+    if (!current()) return superseded();
     await send(['set_property', 'lavfi-complex', '']);
+    if (!current()) return superseded();
     log('[mpv] loadfile:', filePath);
     // 建立 waiter 後才送命令，避免快速載入的 file-loaded 先於 command ack 到達。
-    const ready = waitForFileLoad();
+    const ready = waitForFileLoad(session);
     await send(['loadfile', filePath, 'replace']);
-    if (!await ready) {
+    if (!await ready || !current()) {
       log('[mpv] loadfile: file-loaded not received after 8s:', filePath);
       return { ok: false, duration: 0 };
     }
     const duration = await send(['get_property', 'duration'], true);
+    if (!current()) return superseded();
     return { ok: true, duration: typeof duration === 'number' ? duration : 0 };
   }
 
@@ -651,7 +683,8 @@ function createMpvHost(deps) {
       : send(['set_property', 'time-pos', time]),
     present,
     cancelPresent,
-    screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles']),
+    screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles'], true, { requireSuccess: true })
+      .then(() => ({ ok: true })),
     play: () => {
       playerPaused = false;
       return send(['set_property', 'pause', false]);

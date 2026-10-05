@@ -25,7 +25,7 @@ const {
   reservePort,
   getJSON,
   waitFor,
-  CdpClient,
+  CdpClient, trackElectron, stopElectron,
   dispatchKey,
   verifiedCleanup,
 } = require('./cdp-electron-harness.js');
@@ -545,7 +545,7 @@ async function runMedia(mediaPath) {
     const projectPath = path.join(profileDir, 'transport-acceptance.subtool');
     fs.writeFileSync(projectPath, projectBytes(mediaPath, info, playhead));
     const port = await reservePort();
-    child = spawn(PACKAGED_EXE || ELECTRON, [
+    child = trackElectron(spawn(PACKAGED_EXE || ELECTRON, [
       ...(!PACKAGED_EXE ? ['.'] : []),
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${profileDir}`,
@@ -565,7 +565,7 @@ async function runMedia(mediaPath) {
       },
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'pipe'],
-    });
+    }));
     child.stderr.on('data', chunk => errors.push(chunk.toString()));
     const spawnError = new Promise((resolve, reject) => {
       child.once('error', reject);
@@ -658,12 +658,8 @@ async function runMedia(mediaPath) {
     throw error;
   } finally {
     client?.close();
-    if (child) {
-      killTree(child);
-      if (child.exitCode === null) {
-        await Promise.race([new Promise(resolve => child.once('close', resolve)), delay(5000)]);
-      }
-    }
+    await stopElectron(child);
+    if (child) killTree(child);
     if (profileDir) verifiedCleanup(profileDir, 'subtool-transport-cdp-');
   }
 }

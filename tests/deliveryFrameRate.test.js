@@ -3,8 +3,40 @@ import { DELIVERY_FRAME_RATES, deliveryFrameRateRatio, normalizeDeliveryFrameRat
 import { createDeliveryList } from '../src/delivery-list.js';
 import { buildDeliveryArgv } from '../electron/export-plan.js';
 import { buildExportSnapshot } from '../src/delivery-job.js';
+import frameRates from '../shared/delivery-frame-rate.cjs';
+import { getExactFps } from '../src/time.js';
+import fs from 'node:fs';
+import vm from 'node:vm';
 
 describe('交付 FPS', () => {
+  it('共享精確 FPS 對照沿用 time 核心的 fallback 與範圍語意', () => {
+    for (const [value, expected] of [[23.976, 24000 / 1001], [29.97, 30000 / 1001], [59.94, 60000 / 1001], [24, 24], [30, 30], [23.98, 24000 / 1001], [24.005, 24.005], [0.5, 0.5], [480, 480], [0, 30], [undefined, 30], [Infinity, 30]]) {
+      expect(frameRates.exactDeliveryFrameRate(value)).toBe(expected);
+      expect(getExactFps(value)).toBe(expected);
+    }
+    expect(frameRates.exactDeliveryFrameRate('30000/1001')).toBe(30000 / 1001);
+    expect(getExactFps('30000/1001')).toBe(30); // time 的舊入口只接受數值，不改变 fallback。
+    expect(frameRates.exactDeliveryFrameRate(-1, 25)).toBe(25);
+  });
+
+  it('sandbox queue preload 經同步 IPC 取得共享精確格率', () => {
+    const source = new URL('../electron/queue-preload.js', import.meta.url);
+    let api;
+    vm.runInNewContext(fs.readFileSync(source, 'utf8'), { require: name => {
+      if (name !== 'electron') throw new Error(`sandbox preload cannot require ${name}`);
+      return {
+        contextBridge: { exposeInMainWorld: (name, value) => { if (name === 'queueAPI') api = value; } },
+        ipcRenderer: { sendSync: (channel, value) => {
+          expect(channel).toBe('queue:exactFrameRate');
+          return frameRates.exactDeliveryFrameRate(value);
+        } },
+      };
+    } });
+    expect(api.exactFrameRate(29.97)).toBe(getExactFps(29.97));
+    expect(api.exactFrameRate(59.94)).toBe(getExactFps(59.94));
+    expect(api.exactFrameRate(25)).toBe(25);
+  });
+
   it('NTSC 使用精確分數，24 與 30 不會誤認為 NTSC', () => {
     expect(DELIVERY_FRAME_RATES.map(r => deliveryFrameRateRatio(r.value))).toEqual([
       '24000/1001', '24', '25', '30000/1001', '30', '48', '50', '60000/1001', '60',

@@ -26,15 +26,21 @@
 
 不可先 `Math.round()`；否則 23.976 變 24、29.97 變 30。實際素材檔名可能同時寫 24FPS 與 30P，因此檔名只能當線索。
 
+素材 FPS 與專案格網各自保存：新專案第一次匯入可用實測 FPS 初始化格網；重開或重新連結專案只更新片段來源 FPS，保留專案保存的 FPS／DF。網頁版延後完成的偵測必須仍持有格網修改資格，不能覆寫使用者已選擇的 FPS，即使新選擇和原值相同。
+
 `getExactFps()` 的比對容差必須小於 0.024；目前 0.01。放寬到 0.05 會把 24 誤判為 24000/1001。
 
-### I2. 秒轉時碼只有 encoreParts()
+### I2. 時間軸位置轉時碼只有 encoreParts()
 
 播放器、字幕列表、時間軸刻度、匯出與監看 TC 都由 `encoreParts()`／`secToEncore()` 產生。禁止在其他地方自行 `Math.floor` 拼字串。
+
+佇列的輸出片長標籤由凍結工作的 duration／fps 產生，固定使用 NDF。`queue.html` 的顯示 adapter 透過 preload 取得共用精確 FPS，將整數格分解成片長標籤；契約測試逐項比對 `secToEncore(duration, fps)`，尤其包含六小時的 NTSC 格率。該 adapter 不參與播放點、監看或燒入 TC 的位置計算。
 
 ### I3. 影格格網只有 snapTimeToFrame()
 
 seek、pause、滑鼠拖曳、逐格、字幕時間與手勢交易都用 `snapTimeToFrame()`。
+
+`subio.js` 的批次字幕時長調整以 `getExactFps()` 計算至少一格的下限，再把下限向上、下一句邊界向下轉成合法格網，最後才限制新結束時間。相鄰字幕的非整格邊界若容不下一格，保留原句，避免限制步驟把已吸附的結果拉回非格網。
 
 ASS 只有百分秒；`secToASS()` 直接表達原秒數，不預先減半格。SUB Tool 自產 ASS 的精確 frame metadata 負責往返還原。
 
@@ -56,6 +62,8 @@ ASS 只有百分秒；`secToASS()` 直接表達原秒數，不預先減半格。
 - mpv 暫停：command ack 加命中目標的 `time-pos`
 - WebCodecs：所有可見層完成繪製後的來源 timestamp
 
+請求等待期間切換 mpv／WebCodecs 時，要重新判定目前可見 presenter 的完成證據；不能沿用送出當下的 takeover 布林值。mpv ack 不能代替尚未完成的可見 Canvas，已切回 mpv 時也不能繼續等待隱藏 Canvas。圖片須完成載入才繪製整個合成畫面，但不參與影片來源 timestamp 的格網比對。
+
 ### I5. 逐格以 displayTime() 為基準
 
 `stepFrame()`／`nudge()` 從目前呈現格加減整數格，再交給 `Media.seek()`。
@@ -71,11 +79,13 @@ targetTime  = targetFrame / exactFps
 
 mpv 逐格使用 `time-pos` setter，不使用連續 `seek absolute`。快速連按時只保留最新 pending；舊畫格即使晚到，也不可覆寫權威位置。
 
+時碼輸入欄位的上下鍵也共用 `time.js`：格分量先轉成整數影格，加減一格後再由 `encoreParts()` 產生標籤。29.97 DF 的 `00:00:59;29` 下一格為 `00:01:00;02`，59.94 DF 則跳至 `;04`；第十個整分鐘仍從 `;00` 起算。時／分／秒分量保留文字分量的進位意圖，遇到不存在的 DF 標籤時前進至該秒第一個有效格，不能自行複製跳號公式。
+
 ### I6. 原始播放器時間不可覆寫暫停權威值
 
 mpv 暫停時可能持續回報偏離格網的 `time-pos`：
 
-- 與權威值差小於 1.5 格：視為沉降抖動，不覆寫。
+- 與權威值差小於 4 格：視為沉降抖動，不覆寫。
 - 明顯大幅變動：視為 mpv 內直接跳轉，吸附後提交。
 
 ### I7. 片段邊界永遠是時間軸時間
@@ -118,27 +128,30 @@ sequenceDiagram
 - 同時最多一個 in-flight。
 - 只保存最新 pending。
 - newer intent 可在畫格到達前改成 play 或 pause。
-- reset、換素材、換專案與 presenter takeover 會取消舊請求。
+- reset、換素材與換專案會取消舊請求；presenter 接管或交回時，未完成請求改用目前可見 presenter 的證據。
 - 音訊 follower 只能在實際畫格提交後啟動或校正。
 
 ## 4. 關鍵 owner
 
 | 模組 | 責任 |
 |---|---|
-| `time.js` | exact FPS、DF／NDF、時碼、frame snap |
-| `timeline-transport.js` | 暫停權威時間與時間域轉換 |
+| `time.js` | 使用共用精確 FPS，擁有 DF／NDF、時碼與 frame snap |
+| `tcparse.js` | 時碼輸入解析與分量上下鍵；DF 標籤仍交由 `time.js` 決定 |
+| `subio.js` 的批次時長調整 | 共用精確格率與 frame snap，先換算合法上下限再限制結束時間 |
 | `media-presentation-core.js` | in-flight／pending／取消／commit |
-| `media.js` | presenter 選擇、`displayTime()`、seek 與 audio lifecycle |
+| `media.js` | presenter 選擇、`displayTime()`、時間域轉換、seek 與 audio lifecycle |
 | `media-player-adapter.js` | HTML／mpv 共同操作 |
 | `transport-controller.js` | 左右逐格、JKL、播放意圖 |
-| `pointer-seek-control.js` | 滑鼠 jump／drag 與跳轉後播放政策 |
-| `shuttle-runtime.js` | 反向穿梭目標與 cadence |
+| `timeline-interaction-engine.js`、`transport-controller.js` | 滑鼠 jump／drag 與跳轉後播放政策 |
+| `media.js` 的反向播放流程 | 反向穿梭目標、cadence 與逐次 await 的素材歸屬 |
 | `media-loader.js` | 媒體載入、mpv 事件註冊及 intake ownership 檢查 |
 | `media.js` 的 `observeMpvEvent()` | mpv 來源時間回報、播放狀態與呈現位置裁定 |
 | `decode/player.js` | WebCodecs 多層繪製與 timestamp |
 | `timeline-renderer.js` | 播放點與刻度 |
 | `subio.js`、`delivery-list.js` | 凍結輸出起點、逐列交付 FPS 與燒入 TC |
-| `shared/delivery-frame-rate.cjs`、`electron/export-plan.js` | 精確輸出格率與轉碼；H264-MP4 從交付快照重編，避免來源 codec 未證實或片尾超出交付範圍 |
+| `shared/delivery-frame-rate.cjs` | renderer、佇列顯示及輸出共用精確 NTSC 有理數對照 |
+| `electron/main.js`、`electron/queue-preload.js`、`electron/queue.html` | main 提供共用精確 FPS 的純值 adapter，preload 取得結果，畫面將片長轉成整數格的 NDF 標籤；IPC 細節見 [Electron 維護手冊](Electron_維護手冊.md) |
+| `electron/export-plan.js` | 精確輸出格率與轉碼；H264-MP4 從交付快照重編，避免來源 codec 未證實或片尾超出交付範圍 |
 
 ## 5. 常見失敗
 

@@ -20,7 +20,9 @@
 
    測不到的：真正的聲音。那需要真機驗收（AGENTS.md §4）。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createAudioEngineForTest } from '../src/audio-engine.js';
+import { createAudioEngineForTest, scheduleScrub, destroyScrubber } from '../src/audio-engine.js';
+import { createProjectAudioInterpretation } from '../src/project-audio.js';
+import { State } from '../src/state.js';
 
 /* 夠用就好的假 AudioContext——只實作被碰到的那幾個工廠與屬性。 */
 function fakeContext() {
@@ -61,6 +63,7 @@ function engineWith(env = {}, { ready = true } = {}) {
     sourceTimeFor: env.sourceTimeFor || (() => null),
     externalSourceTimeFor: env.externalSourceTimeFor || (() => null),
     clipSourceTimeFor: env.clipSourceTimeFor || (() => 0),
+    interpretation:()=>env.interpretation?.()||null,
   });
   return { engine, ctx };
 }
@@ -325,6 +328,47 @@ describe('startElements：來源類型決定用哪個時間域（§0.5）', () =
 });
 
 describe('scrub：可聽性只有一份判準', () => {
+  it.each([null,4])('native scrub remains available alongside external audio at source offset %s',offset=>{
+    const native={kind:'native',source:'video',volume:1,muted:false,solo:false};
+    const external=bufferTrack({source:'ext-1'});
+    const {engine,ctx}=engineWith({tracks:[native,external],activeSource:'video',externalSourceTimeFor:()=>offset});
+    expect(engine.scrub(11)).toEqual({scrubMainVideo:true,localT:11});
+    expect(ctx._created).toHaveLength(offset==null?0:1);
+    if(offset!=null) expect(ctx._created[0].start).toHaveBeenCalledWith(0,4,0.08);
+  });
+
+  it('a same-source cache suppresses duplicate native scrub, while still using its source-local offset',()=>{
+    const native={kind:'native',source:'video',volume:1,muted:false,solo:false};
+    const cached=bufferTrack({source:'video'});
+    const {engine,ctx}=engineWith({tracks:[native,cached],activeSource:'video'});
+    expect(engine.scrub(3)).toEqual({scrubMainVideo:false,localT:3});
+    expect(ctx._created).toHaveLength(1);expect(ctx._created[0].start).toHaveBeenCalledWith(0,3,0.08);
+  });
+  it('重疊影片與外部音訊各自換算來源秒數，不共用最上層 trim', () => {
+    const oldClips=State.clips;
+    State.clips=[{id:'mother',primary:true,in:10,out:30,offset:10,vtrack:0},
+      {id:'upper',in:0,out:20,offset:10,vtrack:1}];
+    const source=key=>({tagName:'AUDIO',src:key+'.wav',duration:100});
+    const mother=elementTrack({el:source('mother')}),upper=elementTrack({source:'clip:upper',el:source('upper')}),external=elementTrack({source:'ext-ref',el:source('external')});
+    const buffered=bufferTrack({source:'video'});
+    const {engine,ctx}=engineWith({tracks:[buffered,mother,upper,external],seqOn:true,activeClipId:'upper',
+      clipSourceTimeFor:()=>1,sourceTimeFor:key=>key==='video'?11:1,externalSourceTimeFor:()=>4});
+    const clones=[];
+    const create=vi.spyOn(document,'createElement').mockImplementation(()=>{
+      const clone={src:'',readyState:1,play:vi.fn().mockResolvedValue(),pause:vi.fn()};clones.push(clone);return clone;
+    });
+    ctx.createMediaElementSource=()=>({connect:vi.fn(),disconnect:vi.fn()});
+    ctx.createChannelSplitter=()=>({connect:vi.fn(),disconnect:vi.fn()});
+    try{
+      engine.scrub(11);
+      clones.forEach(clone=>clone.onloadedmetadata());
+      expect(ctx._created[0].start).toHaveBeenCalledWith(0,11,0.08);
+      expect(clones.map(clone=>clone.currentTime)).toEqual([11,1,4]);
+    }finally{
+      for(const track of [mother,upper,external]) destroyScrubber(track.el);
+      create.mockRestore();State.clips=oldClips;
+    }
+  });
   it('播放中或靜音時什麼都不做', () => {
     const a = engineWith({ tracks: [bufferTrack()], playing: true });
     expect(a.engine.scrub(1)).toBeUndefined();
@@ -361,13 +405,74 @@ describe('scrub：可聽性只有一份判準', () => {
     expect(ctx._created.length).toBe(1);
   });
 
-  it('全部不可聽且 activeSource 是主影片時，回報要改 scrub 主 <video>', () => {
+  it('來源已靜音時不以主影片 scrub 繞過 mixer', () => {
     const { engine } = engineWith({ tracks: [bufferTrack({ muted: true })], activeSource: 'video' });
-    expect(engine.scrub(1, 0.15)).toEqual({ scrubMainVideo: true, localT: 1 });
+    expect(engine.scrub(1, 0.15)).toEqual({ scrubMainVideo: false, localT: 1 });
   });
 
   it('有可聽的軌時不要求主影片接手', () => {
     const { engine } = engineWith({ tracks: [bufferTrack()], activeSource: 'video' });
     expect(engine.scrub(1, 0.15).scrubMainVideo).toBe(false);
+  });
+  it('scrub 使用專案bus/route解讀，clone經來源gain保留放大與聲道',()=>{
+    const el={tagName:'AUDIO',src:'voice.wav',duration:10};
+    const track=elementTrack({el,audioSourceId:'a',sourceStream:0,sourceChannel:0,volume:0.5,gain:{gain:{value:1}}});
+    const project={buses:[{id:'b',muted:true,volume:5}],sourceMaps:{a:{channels:[{sourceStream:0,sourceChannel:0,busIds:['b'],gain:1,enabled:true}]}}};
+    const env={tracks:[track],interpretation:()=>createProjectAudioInterpretation({audioProject:project,mediaTracks:[track]})};
+    const {engine,ctx}=engineWith(env);
+    const clone={src:'',readyState:1,play:vi.fn().mockResolvedValue(),pause:vi.fn()};
+    const create=vi.spyOn(document,'createElement').mockReturnValue(clone);
+    const node={connect:vi.fn(),disconnect:vi.fn()},splitter={connect:vi.fn(),disconnect:vi.fn()};
+    ctx.createMediaElementSource=vi.fn(()=>node);ctx.createChannelSplitter=vi.fn(()=>splitter);
+    try{
+      expect(engine.scrub(1).scrubMainVideo).toBe(false);
+      expect(create).not.toHaveBeenCalled();
+      project.buses[0].muted=false;
+      engine.scrub(1);clone.onloadedmetadata();
+      expect(track.gain.gain.value).toBe(2.5);
+      expect(splitter.connect).toHaveBeenCalledWith(track.gain,0);
+      expect(clone.play).toHaveBeenCalledOnce();
+      project.sourceMaps.a.channels[0].enabled=false;
+      engine.scrub(2);
+      expect(clone.play).toHaveBeenCalledOnce();
+    }finally{destroyScrubber(el);create.mockRestore();}
+  });
+  it.each(['metadata','play'])('scrubber銷毀後晚到%s不重新播放pending要求',async stage=>{
+    let finish;
+    const promise=new Promise(resolve=>{finish=resolve;});
+    const source={tagName:'AUDIO',src:'old.wav',duration:10};
+    const clone={src:'',readyState:1,play:vi.fn(()=>promise),pause:vi.fn()};
+    const create=vi.spyOn(document,'createElement').mockReturnValue(clone);
+    try{
+      scheduleScrub(source,1);
+      const metadata=clone.onloadedmetadata;
+      if(stage==='play'){metadata();scheduleScrub(source,2);}
+      destroyScrubber(source);
+      metadata();finish();await Promise.resolve();await Promise.resolve();
+      expect(clone.play).toHaveBeenCalledTimes(stage==='play'?1:0);
+      expect(clone.pause).toHaveBeenCalled();expect(clone.src).toBe('');expect(clone.onloadedmetadata).toBeNull();
+    }finally{destroyScrubber(source);create.mockRestore();}
+  });
+  it('較早 metadata callback 不可播放已被新播放點或來源取代的要求', () => {
+    const source = { tagName: 'AUDIO', src: 'old.wav', duration: 10 };
+    const clone = { src: '', readyState: 0, play: vi.fn(), pause: vi.fn() };
+    const create = vi.spyOn(document, 'createElement').mockReturnValue(clone);
+    try {
+      scheduleScrub(source, 1);
+      const oldMetadata = clone.onloadedmetadata;
+      scheduleScrub(source, 4);
+      const currentMetadata = clone.onloadedmetadata;
+      oldMetadata();
+      expect(clone.play).not.toHaveBeenCalled();
+      currentMetadata();
+      expect(clone.currentTime).toBe(4);
+      expect(clone.play).toHaveBeenCalledOnce();
+
+      scheduleScrub(source, 5);
+      const replacedSourceMetadata = clone.onloadedmetadata;
+      source.src = 'new.wav';
+      replacedSourceMetadata();
+      expect(clone.play).toHaveBeenCalledOnce();
+    } finally { destroyScrubber(source); create.mockRestore(); }
   });
 });

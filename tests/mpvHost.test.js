@@ -31,18 +31,21 @@ class FakeWindow {
 function socketThatReportsDuration(duration = 123.5) {
   const socket = new EventEmitter();
   socket.destroy = vi.fn(() => socket.emit('close'));
+  let loadedPath = null;
   socket.write = vi.fn(raw => {
     const message = JSON.parse(raw);
     if (message.command?.[0] === 'loadfile') {
+      loadedPath = message.command[1];
       queueMicrotask(() => socket.emit('data', Buffer.from('{"event":"file-loaded"}\n')));
     }
     if (typeof message.request_id !== 'number') return;
-    queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data: duration }) + '\n')));
+    const data = message.command?.[1] === 'path' ? loadedPath : duration;
+    queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data }) + '\n')));
   });
   return socket;
 }
 
-function make({ duration = 123.5, guideLoad } = {}) {
+function make({ duration = 123.5, guideLoad, setTimer = () => 0 } = {}) {
   FakeWindow.instances = [];
   const parent = { isDestroyed: () => false, getContentBounds: () => ({ x: 100, y: 200 }) };
   const children = [];
@@ -84,13 +87,99 @@ function make({ duration = 123.5, guideLoad } = {}) {
     log: vi.fn(),
     now: vi.fn(() => 9001),
     delay: async ms => { delays.push(ms); },
-    setTimer: () => 0,
+    setTimer,
     clearTimer: vi.fn(),
   });
   return { host, parent, children, sockets, events, delays };
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it('截圖等待 matching acknowledgement，錯誤回覆不冒充成功', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf' });
+    const socket = sockets[0];
+    socket.write.mockClear();
+    socket.write.mockImplementation(() => {});
+    let settled = false;
+    const screenshot = host.screenshot('D:/out/Shot-001.jpg');
+    screenshot.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    const message = JSON.parse(socket.write.mock.calls[0][0]);
+    expect(message.request_id).toEqual(expect.any(Number));
+    socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id + 1, error: 'success' }) + '\n'));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'success' }) + '\n'));
+    await expect(screenshot).resolves.toEqual({ ok: true });
+    const failed = host.screenshot('D:/out/Shot-002.jpg');
+    const rejection = expect(failed).rejects.toThrow('writing-error');
+    const second = JSON.parse(socket.write.mock.calls[1][0]);
+    socket.emit('data', Buffer.from(JSON.stringify({ request_id: second.request_id, error: 'writing-error' }) + '\n'));
+    await rejection;
+    host.quit();
+  });
+
+  it('pipe 失敗、斷線、逾時均讓截圖失敗，不能 fulfilled(null)', async () => {
+    const timers = [];
+    const { host, sockets } = make({ setTimer: fn => { timers.push(fn); return timers.length; } });
+    await host.launch({ src: 'D:/media/a.mxf' });
+    const socket = sockets[0];
+    socket.write.mockImplementation(() => { throw new Error('pipe write failed'); });
+    await expect(host.screenshot('D:/out/a.jpg')).rejects.toThrow('pipe write failed');
+    socket.write.mockImplementation(() => {});
+    const timed = host.screenshot('D:/out/b.jpg');
+    const timeout = expect(timed).rejects.toThrow('逾時');
+    timers.at(-1)();
+    await timeout;
+    const pending = host.screenshot('D:/out/c.jpg');
+    const disconnected = expect(pending).rejects.toThrow('中斷');
+    socket.emit('close');
+    await disconnected;
+    await expect(host.screenshot('D:/out/d.jpg')).rejects.toThrow('尚未連線');
+    host.quit();
+  });
+
+  it('舊來源的 file-loaded 不能完成新換檔，只有 path 確認後才回報 duration', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0];
+    let loadedPath = 'D:/media/a.mxf';
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (typeof message.request_id !== 'number') return;
+      const data = message.command[1] === 'path' ? loadedPath : 200;
+      queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data }) + '\n')));
+    });
+    const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+    const old = host.loadFile('D:/media/a.mxf');
+    await flush();
+    const latest = host.loadFile('D:/media/b.mxf');
+    let latestSettled = false;
+    latest.then(() => { latestSettled = true; });
+    await flush();
+    await expect(old).resolves.toEqual({ ok: false, duration: 0 });
+    socket.emit('data', Buffer.from('{"event":"file-loaded"}\n'));
+    await flush();
+    expect(latestSettled).toBe(false);
+    loadedPath = 'D:\\media\\b.mxf';
+    socket.emit('data', Buffer.from('{"event":"file-loaded"}\n'));
+    await expect(latest).resolves.toEqual({ ok: true, duration: 200 });
+    host.quit();
+  });
+
+  it('換檔 pause await 期間 quit/relaunch，舊 request 不會寫入新 pipe', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const old = host.loadFile('D:/media/obsolete.mxf');
+    host.quit();
+    await host.launch({ src: 'D:/media/latest.mxf' });
+    await expect(old).resolves.toEqual({ ok: false, duration: 0 });
+    const commands = sockets[1].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands.some(command => command[0] === 'loadfile')).toBe(false);
+    host.quit();
+  });
+
   it('被新來源取代的 guide 載入完成後不可再啟動舊 mpv 或覆寫新宿主', async () => {
     let finishOldGuide;
     const oldGuide = new Promise(resolve => { finishOldGuide = resolve; });
@@ -117,6 +206,7 @@ describe('Windows mpv host lifecycle', () => {
     await expect(host.loadFile('D:/media/b.mxf')).resolves.toEqual({ ok: true, duration: 123.5 });
     const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
     expect(commands.filter(command => command[0] === 'get_property')).toEqual([
+      ['get_property', 'path'],
       ['get_property', 'duration'],
     ]);
     expect(delays).toEqual([]);
@@ -299,6 +389,36 @@ describe('Windows mpv host lifecycle', () => {
     expect(sockets[0].destroy).toHaveBeenCalledTimes(1);
     expect(oldWindows.every(window => window.destroyed)).toBe(true);
     expect(host.snapshot()).toMatchObject({ hasHostWindow: true, hasClient: true, hasProcess: true });
+  });
+
+  it('同一毫秒快速換片仍使用不同的 pipe 與字幕檔，避免連到尚未退出的舊 mpv', async () => {
+    const { host, children, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf' });
+    host.setSubtitles('[Script Info]\nTitle: A');
+
+    await host.launch({ src: 'D:/media/b.mxf' });
+    host.setSubtitles('[Script Info]\nTitle: B');
+
+    const pipeOf = launch => launch.args.find(arg => arg.startsWith('--input-ipc-server='));
+    const subtitleOf = socket => socket.write.mock.calls
+      .map(([raw]) => JSON.parse(raw).command)
+      .find(command => command?.[0] === 'sub-add')?.[1];
+    expect(pipeOf(children[0])).toBeTruthy();
+    expect(pipeOf(children[1])).not.toBe(pipeOf(children[0]));
+    expect(subtitleOf(sockets[0])).toBeTruthy();
+    expect(subtitleOf(sockets[1])).not.toBe(subtitleOf(sockets[0]));
+  });
+
+  it('同一 mpv 程序換來源時取消舊畫格請求，不讓新檔 time-pos 完成舊請求', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf' });
+    const oldPresentation = host.present(10, { exact: true, tolerance: 0.01 });
+
+    await expect(host.loadFile('D:/media/b.mxf')).resolves.toMatchObject({ ok: true });
+    sockets[0].emit('data', Buffer.from(JSON.stringify({
+      event: 'property-change', name: 'time-pos', data: 10,
+    }) + '\n'));
+    await expect(oldPresentation).resolves.toBeNull();
   });
 
   it('mpv 異常結束時也收掉 pipe 與兩個透明視窗，不能留下空白 native overlay', async () => {

@@ -185,3 +185,33 @@ describe('mixer.js 不再自己解讀 Media.tracks 的路由與增益', () => {
     expect(src).not.toMatch(/_trackLevel\(track\).*track\.volume.*busGain/);
   });
 });
+
+describe('native audio replacement is scoped to the same source',()=>{
+  it.each([0,100])('an unrelated external placement at %s does not mute primary playback or its meter gain',offset=>{
+    State.muted=false;State.clips=[];Media.activeClipId=null;
+    State.audioProject.sourceMaps.ext={channels:[{sourceStream:0,sourceChannel:0,enabled:true,gain:1,busIds:['a1']}]};
+    const native=track({kind:'native',source:'video',gain:{gain:{value:0}}});
+    const external=track({kind:'element',source:'ext-1',audioSourceId:'ext',gain:{gain:{value:0}}});
+    Media.tracks=[native,external];
+    Media.externalAudioSources=[{id:'ext-1',audioSourceId:'ext',audioSrc:'ext-1',offset,in:0,out:2,duration:2,enabled:true,gain:1}];
+    Media.syncMuteState();
+    expect(domMock.video.muted).toBe(false);
+    expect(native.gain.gain.value).toBe(1);
+    expect(Media.routedTrackStatesForBus('a1')).toContainEqual({track:native,gain:1});
+    external.muted=true;Media.syncMuteState();
+    expect(native.gain.gain.value).toBe(1);expect(domMock.video.muted).toBe(false);
+  });
+
+  it('same-source playback cache replaces native exactly once, and hidden cache yields back',()=>{
+    State.muted=false;State.clips=[];Media.activeClipId=null;
+    const native=track({kind:'native',source:'video',gain:{gain:{value:1}}});
+    const cached=track({kind:'buffer',source:'video',gain:{gain:{value:0}}});
+    Media.tracks=[native,cached];Media.syncMuteState();
+    expect(domMock.video.muted).toBe(true);
+    expect(native.gain.gain.value).toBe(0);expect(cached.gain.gain.value).toBe(1);
+    expect(Media.routedTrackStatesForBus('a1')).toEqual([{track:cached,gain:1}]);
+    cached._srcHidden=true;Media.syncMuteState();
+    expect(domMock.video.muted).toBe(false);expect(native.gain.gain.value).toBe(1);
+    expect(cached.gain.gain.value).toBe(0);
+  });
+});

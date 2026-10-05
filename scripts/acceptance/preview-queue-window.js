@@ -31,6 +31,7 @@
 ============================================================================== */
 const fs = require('fs');
 const path = require('path');
+const { exactDeliveryFrameRate } = require('../../shared/delivery-frame-rate.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const OUT = process.argv[2] || path.join(ROOT, 'dist', '__queue-preview.html');
@@ -75,6 +76,7 @@ const JOBS = [
 
 const stub = `<script>
 window.queueAPI = {
+  exactFrameRate: value => (${JSON.stringify(Object.fromEntries(JOBS.map(job => [String(job.payload.fps), exactDeliveryFrameRate(job.payload.fps)])))})[String(value)] ?? 30,
   getAll: () => Promise.resolve({ jobs: ${JSON.stringify(JOBS)}, isPaused: false, concurrency: 1 }),
   setPause: () => Promise.resolve(), setConcurrency: () => Promise.resolve(),
   stopJob: () => Promise.resolve(), retryJob: () => Promise.resolve(),

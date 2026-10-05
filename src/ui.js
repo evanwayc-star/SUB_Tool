@@ -304,8 +304,8 @@ async function openCacheDialog() {
         }
       },
     },
-    { label: '全部清除', act: () => {
-        const confirmation = openModal('確認清除', '<div style="padding:6px 2px">將刪除所有中央快取，以及目前開啟影片旁的 .subtool_Cache 資料夾。<br>下次開啟同檔需重新轉檔。確定？</div>', [
+    { label: '清除快取', act: () => {
+        const confirmation = openModal('確認清除', '<div style="padding:6px 2px">將刪除所有中央快取，以及目前影片在 .subtool_Cache 內對應的快取項目；其他素材與舊版留下的項目不受影響。<br>下次開啟同檔可能需要重新轉檔。確定？</div>', [
           { label: '確定清除', primary: true, act: async () => {
             try {
               const State = (await import('./state.js')).State;

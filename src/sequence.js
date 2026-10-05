@@ -17,6 +17,7 @@
 import { State, ensureVideoTrackCount, videoTrackVisible } from './state.js';
 import { emit } from './events.js';
 import { audioLimiterSnapshot, audioMotherPath, restoreAudioLimiterState } from '../shared/audio-loudness.cjs';
+import { fadeWindow } from '../shared/clip-fade.cjs';
 
 let _clipSeq = 1;
 const EPS = 1e-6;
@@ -71,6 +72,44 @@ const Seq = {
   },
 
   /* ---- 變更 ---- */
+  persistentMetadata(c){
+    return {id:c.id,name:c.name,path:audioMotherPath(c),...audioLimiterSnapshot(c),
+      web:c.web?{url:c.web.url}:null,dur:c.dur,fps:c.fps||0,primary:!!c.primary,
+      ...(c.type?{type:c.type}:{}),scale:c.scale??1,posX:c.posX??0.5,posY:c.posY??0.5,
+      ...(c.natW>0&&c.natH>0?{natW:c.natW,natH:c.natH}:{}),
+      ...(c.height!=null?{height:c.height}:{}),
+      locked:!!c.locked,muted:!!c.muted,mpvExactSeek:!!c.mpvExactSeek,mpvSeekOffset:c.mpvSeekOffset||0,
+      audioSrc:c.audioSrc||null,audioSourceId:c.audioSourceId||null,audioDetached:!!c.audioDetached,
+      in:c.in,out:c.out,offset:c.offset,vtrack:vt(c),fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,
+      ...(c.fadeSourceLength!=null?{fadeSourceOffset:c.fadeSourceOffset||0,fadeSourceLength:c.fadeSourceLength}:{}),
+    };
+  },
+  restoreMetadata(c,s){
+    restoreAudioLimiterState(c,s);
+    const metadata=this.persistentMetadata(s);
+    for(const key of ['in','out','offset','vtrack','fadeIn','fadeOut','scale','posX','posY','locked','muted','mpvExactSeek','mpvSeekOffset','audioDetached']) c[key]=metadata[key];
+    for(const key of ['fadeSourceOffset','fadeSourceLength','height']){
+      if(s[key]!=null) c[key]=s[key]; else delete c[key];
+    }
+    if(s.type==='image') c.type='image';
+    if(s.natW>0&&s.natH>0){c.natW=s.natW;c.natH=s.natH;}
+    return c;
+  },
+  planSplit(c,t,{minimum=0.2}={}){
+    if(!c||c.locked) return null;
+    const cut=this.toSource(t,c);
+    if(cut<c.in+minimum||cut>c.out-minimum) return null;
+    const rawOrigin=Number(c.fadeSourceOffset);
+    const origin=Number.isFinite(rawOrigin)?Math.max(0,rawOrigin):0;
+    const {length}=fadeWindow(c);
+    const metadata=this.persistentMetadata(c);
+    delete metadata.id;
+    return {
+      left:{out:cut,fadeSourceOffset:origin,fadeSourceLength:length},
+      right:{...metadata,primary:false,peaks:c.peaks,web:c.web||null,in:cut,offset:t,
+        fadeSourceOffset:origin+cut-c.in,fadeSourceLength:length},
+    };
+  },
   add(meta){
     const c = { id: 'clip' + (_clipSeq++), in: 0, vtrack: 0, peaks: null, primary: false, ...meta };
     if(c.out == null) c.out = c.dur;
@@ -176,16 +215,7 @@ const Seq = {
   /* 歷史快照：幾何 + 成員（切割/移除/加入才能正確 undo）。
      peaks（Float32Array）不入快照（大且可再共享）；還原時依來源（path/url）從現存 clip 重新連結。 */
   snapshot(){
-    return State.clips.map(c => ({ id: c.id, name: c.name, path: audioMotherPath(c), ...audioLimiterSnapshot(c),
-      web: c.web ? { url: c.web.url } : null, dur: c.dur, fps: c.fps || 0,
-      primary: !!c.primary,
-      // 圖片的幾何屬於 clip（不是整條視訊軌）。歷史快照必須記下它，
-      // 否則調整大小／位置後的 Undo/Redo 會保留錯誤尺寸。
-      ...(c.type==='image'?{type:'image',scale:c.scale??1,posX:c.posX??0.5,posY:c.posY??0.5,natW:c.natW||0,natH:c.natH||0}:{}),
-      // audioSrc 是播放器執行期用的來源鍵；audioSourceId 則是可存檔、
-      // 可在重新載入後套回每個媒體聲道配線的穩定識別。
-      audioSrc: c.audioSrc || null, audioSourceId: c.audioSourceId || null, audioDetached:!!c.audioDetached,
-      in: c.in, out: c.out, offset: c.offset, vtrack: vt(c), fadeIn: c.fadeIn || 0, fadeOut: c.fadeOut || 0 }));
+    return State.clips.map(c=>this.persistentMetadata(c));
   },
   restore(list){
     if(!Array.isArray(list)) return;
@@ -196,12 +226,7 @@ const Seq = {
     for(const s of list){
       const ex = old.get(s.id);
       if(ex){
-        restoreAudioLimiterState(ex,s);
-        ex.in = s.in; ex.out = s.out; ex.offset = s.offset; ex.vtrack = s.vtrack || 0; ex.fadeIn = s.fadeIn || 0; ex.fadeOut = s.fadeOut || 0; ex.audioDetached=!!s.audioDetached;
-        if(s.type==='image'){
-          ex.type='image'; ex.scale=s.scale??1; ex.posX=s.posX??0.5; ex.posY=s.posY??0.5;
-          if(s.natW>0&&s.natH>0){ ex.natW=s.natW; ex.natH=s.natH; }
-        }
+        this.restoreMetadata(ex,s);
         State.clips.push(ex);
       }
       else{

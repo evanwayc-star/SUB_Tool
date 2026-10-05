@@ -204,7 +204,31 @@ describe.skipIf(!nativeAvailable)('原生 DVD／BD 合成內容與生命週期',
     const corrupt = path.join(directory, 'corrupt.iso');
     writeFileSync(corrupt, bytes);
     await expect(verifyDiscIso('bd-iso', corrupt)).rejects.toMatchObject({ code: 'INVALID_DISC_ISO' });
+    const checksumCorrupt = readFileSync(generated.get('bd-iso').outPath);
+    checksumCorrupt[256 * 2048 + 4] ^= 1;
+    const checksumPath = path.join(directory, 'corrupt-anchor-checksum.iso');
+    writeFileSync(checksumPath, checksumCorrupt);
+    await expect(verifyDiscIso('bd-iso', checksumPath)).rejects.toMatchObject({ code: 'INVALID_DISC_ISO' });
     await expect(verifyDiscIso('dvd-iso', generated.get('bd-iso').outPath)).rejects.toMatchObject({ code: 'INVALID_DISC_ISO' });
+  });
+
+  it.each(['tag checksum', 'descriptor CRC'])('拒絕 logical volume %s 已損壞的映像', async fault => {
+    const bytes = readFileSync(generated.get('bd-iso').outPath);
+    const anchor = 256 * 2048;
+    const sequenceStart = bytes.readUInt32LE(anchor + 20) * 2048;
+    const sequenceBytes = bytes.readUInt32LE(anchor + 16);
+    let logicalVolume = -1;
+    for (let offset = 0; offset < sequenceBytes; offset += 2048) {
+      if (bytes.readUInt16LE(sequenceStart + offset) === 6) {
+        logicalVolume = sequenceStart + offset;
+        break;
+      }
+    }
+    expect(logicalVolume).toBeGreaterThan(0);
+    bytes[logicalVolume + (fault === 'tag checksum' ? 4 : 300)] ^= 1;
+    const corrupt = path.join(directory, `corrupt-${fault.replace(' ', '-')}.iso`);
+    writeFileSync(corrupt, bytes);
+    await expect(verifyDiscIso('bd-iso', corrupt)).rejects.toMatchObject({ code: 'INVALID_DISC_ISO' });
   });
 
   it('DVD 長片預算降低實際 VOB／ISO 碼率，muxrate 不會把成品補滿為 10.08 Mbps', async () => {

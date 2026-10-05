@@ -7,12 +7,31 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { JSDOM } from 'jsdom';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = file => fs.readFileSync(path.join(ROOT, file), 'utf8');
 const stripComments = source => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
 describe('guide 只畫、不接 pointer', () => {
+  it('重用圖片節點時同步裁切、清除舊樣式並依快照更新疊層順序', () => {
+    const html = read('electron/main.js').match(/const MPV_GUIDE_HTML = `([\s\S]*?)`;\s*\/\* Windows/)[1];
+    const dom = new JSDOM(html, { runScripts: 'dangerously' });
+    const image = (id, style = '') => `<div class="img-wrap" data-id="${id}"><img src="data:image/png;base64,AA==" style="${style}"></div>`;
+    const bounds = { x: 0, y: 0, w: 640, h: 360 };
+    try {
+      dom.window.setImages(image('lower') + image('upper'), bounds);
+      const lower = dom.window.document.querySelector('[data-id="lower"]');
+      dom.window.setImages(image('upper') + image('middle') + image('lower', 'clip-path:inset(0px 320px 180px 0px)'), bounds);
+      expect(dom.window.document.querySelector('[data-id="lower"]')).toBe(lower);
+      expect(lower.querySelector('img').style.clipPath).toBe('inset(0px 320px 180px 0px)');
+      expect([...dom.window.document.querySelectorAll('#imgContainer .img-wrap')].map(node => node.dataset.id)).toEqual(['upper', 'middle', 'lower']);
+      dom.window.setImages(image('lower'), bounds);
+      expect(lower.querySelector('img').style.clipPath).toBe('');
+      expect([...dom.window.document.querySelectorAll('#imgContainer .img-wrap')]).toEqual([lower]);
+    } finally { dom.window.close(); }
+  });
+
   it('mpv host 永久啟用原生視窗穿透，不再有條件切換輸入抓取', () => {
     const host = stripComments(read('electron/mpv-host.js'));
 

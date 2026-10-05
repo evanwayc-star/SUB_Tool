@@ -29,6 +29,7 @@ vi.mock('../src/ui.js', () => uiMock);
 let History;
 let Project;
 let resetProject;
+let isProjectDirty;
 let State;
 let desk;
 let on;
@@ -107,7 +108,7 @@ describe('project load transactions', () => {
 
     ({ State } = await import('../src/state.js'));
     ({ History } = await import('../src/history.js'));
-    ({ Project, resetProject } = await import('../src/project.js'));
+    ({ Project, resetProject, isProjectDirty } = await import('../src/project.js'));
     ({ on, emit } = await import('../src/events.js'));
 
     History.stack = [];
@@ -126,6 +127,111 @@ describe('project load transactions', () => {
     uiMock.openModal.mockClear();
     uiMock.closeModal.mockClear();
     uiMock.setStatus.mockClear();
+  });
+
+  it('開啟入口依使用者請求順序，較早 picker 晚返回不得蓋掉最新專案', async () => {
+    const a=deferred(), b=deferred();
+    desk.stat.mockResolvedValue({exists:true});
+    desk.openProject=vi.fn().mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise);
+    const {openProject}=await import('../src/project.js');
+    const openingA=openProject();
+    await vi.waitFor(()=>expect(desk.openProject).toHaveBeenCalledTimes(1));
+    const openingB=openProject();
+    await vi.waitFor(()=>expect(desk.openProject).toHaveBeenCalledTimes(2));
+    b.resolve(request('B','C:/media/B.mov'));
+    await openingB;
+    a.resolve(request('A','C:/media/A.mov'));
+    await openingA;
+    expect(State.cues.map(c=>c.text)).toEqual(['B']);
+    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledOnce();
+  });
+
+  it('較晚取消開啟仍使較早等待中的讀檔失效，保留目前專案', async () => {
+    const a=deferred(), started=deferred();
+    const old=Project.open(()=>{started.resolve();return a.promise;});
+    await started.promise;
+    await expect(Project.open(async()=>null)).resolves.toBe(false);
+    a.resolve(request('A','C:/media/A.mov'));
+    await expect(old).resolves.toBe(false);
+    expect(State.cues).toEqual([]);
+    expect(mediaMock.reset).not.toHaveBeenCalled();
+  });
+
+  it('跨入口載入新工作區後，舊 reader 的錯誤不干擾目前專案', async () => {
+    const a=deferred(), started=deferred();
+    const old=Project.open(()=>{started.resolve();return a.promise;});
+    await started.promise;
+    desk.stat.mockResolvedValue({exists:true});
+    await Project.loadDesktop(request('B','C:/media/B.mov'));
+    a.reject(new Error('舊專案網路讀取失敗'));
+    await expect(old).resolves.toBe(false);
+    expect(State.cues.map(c=>c.text)).toEqual(['B']);
+  });
+
+  it('目前 reader 的錯誤仍交給原入口顯示', async () => {
+    await expect(Project.open(async()=>{throw new Error('讀檔失敗');})).rejects.toThrow('讀檔失敗');
+    expect(mediaMock.reset).not.toHaveBeenCalled();
+  });
+
+  it('已開始的舊 runtime 完成時，不撤銷較新的等待中開啟意圖', async () => {
+    const statA=deferred(),readB=deferred(),started=deferred();
+    desk.stat.mockImplementation(file=>file==='C:/media/A.mov'?statA.promise:Promise.resolve({exists:true}));
+    const loadingA=Project.loadDesktop(request('A','C:/media/A.mov'));
+    await vi.waitFor(()=>expect(desk.stat).toHaveBeenCalledWith('C:/media/A.mov'));
+    const openingB=Project.open(()=>{started.resolve();return readB.promise;});
+    await started.promise;
+    statA.resolve({exists:true});
+    await loadingA;
+    expect(State.cues.map(c=>c.text)).toEqual(['A']);
+    readB.resolve(request('B','C:/media/B.mov'));
+    await openingB;
+    expect(State.cues.map(c=>c.text)).toEqual(['B']);
+  });
+
+  it.each(['reset','apply'])('工作區 %s 不容許尚在讀取的舊意圖提交', async action => {
+    const input=deferred(),started=deferred();
+    const pending=Project.open(()=>{started.resolve();return input.promise;});
+    await started.promise;
+    if(action==='reset') resetProject();
+    else Project.apply(projectData('Replacement',''));
+    input.resolve(request('Old','C:/media/Old.mov'));
+    await expect(pending).resolves.toBe(false);
+    expect(State.cues.some(c=>c.text==='Old')).toBe(false);
+  });
+
+  it('同一開啟 owner 接受 browser File，保持真 FileReader 解析與還原', async () => {
+    const file=projectFile({...projectData('Browser',''),media:{name:'',path:null},clips:[]});
+    await Project.open(async()=>file);
+    expect(State.cues.map(c=>c.text)).toEqual(['Browser']);
+    expect(isProjectDirty()).toBe(false);
+    expect(mediaMock.reset).toHaveBeenCalledOnce();
+  });
+
+  it('讀檔期間新增的內容要重新確認，取消不得丟棄合法修改', async () => {
+    const a=deferred(), started=deferred();
+    const opening=Project.open(()=>{started.resolve();return a.promise;});
+    await started.promise;
+    State.cues=[{id:'new-edit',track:0,start:0,end:1,text:'讀取期間新增'}];
+    a.resolve(request('A','C:/media/A.mov'));
+    await vi.waitFor(()=>expect(uiMock.openModal).toHaveBeenCalled());
+    uiMock.openModal.mock.calls.at(-1)[2].find(b=>b.label==='取消').act();
+    await expect(opening).resolves.toBe(false);
+    expect(State.cues.map(c=>c.text)).toEqual(['讀取期間新增']);
+    expect(mediaMock.reset).not.toHaveBeenCalled();
+  });
+
+  it('drop 專案也需確認未存內容，取消時不讀檔且不改字幕', async () => {
+    State.cues=[{id:'unsaved',track:0,start:0,end:1,text:'未存檔'}];
+    desk.openDroppedProject=vi.fn().mockResolvedValue(request('Dropped','C:/media/Dropped.mov'));
+    await import('../src/subio.js');
+    const event=new Event('drop',{bubbles:true,cancelable:true});
+    Object.defineProperty(event,'dataTransfer',{value:{files:[new File(['unused'],'Dropped.subtool')]}});
+    document.dispatchEvent(event);
+    await vi.waitFor(()=>expect(uiMock.openModal).toHaveBeenCalledWith('開啟另一個專案',expect.any(String),expect.any(Array),expect.any(Object)));
+    expect(desk.openDroppedProject).not.toHaveBeenCalled();
+    uiMock.openModal.mock.calls.at(-1)[2].find(b=>b.label==='取消').act();
+    await Promise.resolve();
+    expect(State.cues.map(c=>c.text)).toEqual(['未存檔']);
   });
 
   it('skips stale work when a newer project is requested during the first stat', async () => {
@@ -181,6 +287,31 @@ describe('project load transactions', () => {
     expect(mediaMock.loadDesktopMedia).toHaveBeenCalledTimes(1);
     expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith('C:/media/B.mov', expect.any(Object));
     expect(mediaMock.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks auto-relinked media paths unsaved until the new paths reach the project file', async () => {
+    const oldPath = 'C:/media/A.mov';
+    const newPath = 'C:/projects/media/A.mov';
+    desk.stat.mockImplementation(path => Promise.resolve({ exists: path === newPath || path === 'C:/media/B.mov' }));
+    desk.findRelinkTarget = vi.fn().mockResolvedValue(newPath);
+    desk.writeProject = vi.fn().mockResolvedValue('C:/projects/A.subtool');
+    mediaMock.loadDesktopMedia.mockResolvedValue();
+
+    await Project.loadDesktop(request('A', oldPath));
+
+    expect(desk.findRelinkTarget).toHaveBeenCalledWith('C:/projects/A.subtool', oldPath);
+    expect(mediaMock.loadDesktopMedia).toHaveBeenCalledWith(newPath, expect.any(Object));
+    expect(State.mediaPath).toBe(newPath);
+    expect(isProjectDirty()).toBe(true);
+
+    await Project.save();
+    const saved = JSON.parse(Buffer.from(desk.writeProject.mock.calls[0][1], 'base64').subarray(2).toString('utf16le'));
+    expect(saved.media.path).toBe(newPath);
+    expect(saved.clips[0].path).toBe(newPath);
+    expect(isProjectDirty()).toBe(false);
+
+    await Project.loadDesktop(request('B', 'C:/media/B.mov'));
+    expect(isProjectDirty()).toBe(false);
   });
 
   it('does not commit external-audio metadata after a rejected restore loses the project plan', async () => {

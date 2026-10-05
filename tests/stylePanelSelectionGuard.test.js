@@ -5,13 +5,16 @@ import path from 'node:path';
 
 let State;
 let StylePanelController;
+let savePresets;
+let loadKeys;
 
 beforeAll(async () => {
   const source = fs.readFileSync(path.join(process.cwd(), 'index.html'), 'utf8');
   const parsed = new DOMParser().parseFromString(source, 'text/html');
   document.body.innerHTML = parsed.body.innerHTML;
-  ({ State } = await import('../src/state.js'));
+  ({ State, loadKeys } = await import('../src/state.js'));
   ({ StylePanelController } = await import('../src/style-panel-controller.js'));
+  ({ savePresets } = await import('../src/substyle.js'));
   const noop = () => {};
   StylePanelController.bindStylePanelEvents({
     renderAll: noop,
@@ -36,6 +39,33 @@ beforeEach(() => {
 });
 
 describe('字幕樣式面板選取守衛', () => {
+  it('持久化快捷鍵中的錯誤綁定會正規化，設定重啟後仍能格式化全部動作',async()=>{
+    const original=structuredClone(State.keymap);
+    localStorage.setItem('subtool_keys',JSON.stringify({toggle_play_pause:[{key:42},{key:'P',ctrl:true}],step_boundary_prev:[{code:[]}],step_boundary_next:[]}));
+    try {
+      await loadKeys();
+      const {formatBind}=await import('../src/keybinding-engine.js');
+      expect(State.keymap.toggle_play_pause).toEqual([{key:'p',ctrl:true}]);
+      expect(State.keymap.step_boundary_prev).toEqual(State.defaultKeymap.step_boundary_prev);
+      expect(State.keymap.step_boundary_next).toEqual([]);
+      expect(()=>Object.values(State.keymap).flat().map(formatBind)).not.toThrow();
+    } finally { State.keymap=original;localStorage.removeItem('subtool_keys'); }
+  });
+  it('合法樣式資料夾使用物件保留字時仍能渲染下拉選單', async () => {
+    await savePresets([
+      {name:'樣式 A',group:'__proto__',style:{fontSize:72}},
+      {name:'樣式 B',group:'constructor',style:{fontSize:60}},
+    ]);
+    try {
+      StylePanelController.renderTrackStyle();
+      const groups=[...document.querySelectorAll('#tsPresetSel optgroup')];
+      expect(groups.map(group=>group.label)).toEqual(['📁 __proto__','📁 constructor']);
+      const {presetIdentity}=await import('../src/substyle.js');
+      expect(groups.map(group=>group.querySelector('option').value)).toEqual([
+        presetIdentity({name:'樣式 A',group:'__proto__'}),presetIdentity({name:'樣式 B',group:'constructor'}),
+      ]);
+    } finally { await savePresets([]); }
+  });
   it('沒有選取字幕時不提供可寫入整軌的樣式目標', () => {
     expect(StylePanelController.styleTarget()).toBeNull();
   });

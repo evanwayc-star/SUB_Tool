@@ -157,6 +157,27 @@ describe('web mother-source intake ownership', () => {
     }
   });
 
+  it.each(['restore','manual-same-value','fresh'])('來源 FPS 偵測只在仍有專案格網 ownership 時初始化：%s',async mode=>{
+    const {setFps}=await import('../src/state.js');
+    const prototype=Object.getOwnPropertyDescriptor(HTMLVideoElement.prototype,'requestVideoFrameCallback');
+    const original=domMock.video.requestVideoFrameCallback;
+    const callbacks=[],detected=[];
+    Object.defineProperty(HTMLVideoElement.prototype,'requestVideoFrameCallback',{configurable:true,value:()=>1});
+    domMock.video.requestVideoFrameCallback=callback=>{callbacks.push(callback);return callbacks.length;};
+    try{
+      setFps('29.97df');
+      detectFpsWeb(()=>true,{initializeGrid:mode!=='restore',onDetected:fps=>detected.push(fps)});
+      if(mode==='manual-same-value') setFps('29.97df');
+      for(let frame=0;frame<13;frame++) callbacks[frame](0,{mediaTime:frame/30});
+      expect(detected).toEqual([30]);
+      expect({fps:State.fps,dropFrame:State.dropFrame}).toEqual(mode==='fresh'?{fps:30,dropFrame:false}:{fps:29.97,dropFrame:true});
+    }finally{
+      if(prototype) Object.defineProperty(HTMLVideoElement.prototype,'requestVideoFrameCallback',prototype);
+      else delete HTMLVideoElement.prototype.requestVideoFrameCallback;
+      domMock.video.requestVideoFrameCallback=original;
+    }
+  });
+
   it('serializes the shared ffmpeg.wasm worker and drops queued stale work', async () => {
     Media._webFfmpegTail = Promise.resolve();
     const firstGate = deferred();

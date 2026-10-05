@@ -237,11 +237,89 @@ describe('圖片疊層：結束拖曳', () => {
     b.finishImageDrag();
     expect(a.imageDrag()).not.toBe(null);
   });
+
+  it('另一個 pointer 放開時不提交目前的圖片拖曳', () => {
+    const labels = [];
+    const d = makeDrag({ recordHistory: label => labels.push(label) });
+    const imageLayer = document.getElementById('imageLayer');
+    d.bind({ imageLayer });
+    d.startImageDrag({ id: 'i1', x: 0, y: 0, pointerId: 7, captureTarget: imageLayer });
+    d.moveImageDrag(100, 50);
+
+    const unrelatedUp = new Event('pointerup', { bubbles: true });
+    Object.defineProperty(unrelatedUp, 'pointerId', { value: 8 });
+    document.dispatchEvent(unrelatedUp);
+
+    expect(d.imageDrag()).not.toBe(null);
+    expect(State.clips[0].posX).toBeCloseTo(0.6);
+    expect(labels).toEqual([]);
+  });
+
+  it('mousedown fallback 拖曳只由 mouseup 收尾，其他 pointer 事件不會干擾', () => {
+    const labels = [];
+    const d = makeDrag({ recordHistory: label => labels.push(label) });
+    const imageLayer = document.getElementById('imageLayer');
+    imageLayer.innerHTML = '<div class="img-wrap" data-id="i1"><div class="resize-handle" data-corner="se"></div></div>';
+    d.bind({ imageLayer });
+    imageLayer.querySelector('.resize-handle').dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true, button: 0, clientX: 0, clientY: 0,
+    }));
+    expect(d.imageDrag()?.pointerId).toBe(null);
+    d.moveImageDrag(100, 50);
+
+    for(const type of ['pointerup', 'pointercancel']){
+      const unrelated = new Event(type, { bubbles: true });
+      Object.defineProperty(unrelated, 'pointerId', { value: 8 });
+      document.dispatchEvent(unrelated);
+      expect(d.imageDrag(), type).not.toBe(null);
+      expect(State.clips[0].scale, type).toBeCloseTo(2);
+      expect(labels, type).toEqual([]);
+    }
+
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(d.imageDrag()).toBe(null);
+    expect(labels).toEqual(['調整圖片大小']);
+  });
+
+  it('圖片拖曳被 pointercancel 中斷時還原預覽且不記歷史', () => {
+    const labels = [];
+    const d = makeDrag({ recordHistory: label => labels.push(label) });
+    const imageLayer = document.getElementById('imageLayer');
+    d.bind({ imageLayer });
+    d.startImageDrag({ id: 'i1', x: 0, y: 0, pointerId: 7, captureTarget: imageLayer });
+    d.moveImageDrag(100, 50);
+
+    const cancel = new Event('pointercancel', { bubbles: true });
+    Object.defineProperty(cancel, 'pointerId', { value: 7 });
+    document.dispatchEvent(cancel);
+
+    expect(d.imageDrag()).toBe(null);
+    expect(State.clips[0]).toMatchObject({ posX: 0.5, posY: 0.5, scale: 1 });
+    expect(labels).toEqual([]);
+  });
+
+  it('視窗失焦時取消圖片拖曳，並保留原本未設定的幾何欄位', () => {
+    const clip = State.clips[0];
+    delete clip.posX;
+    delete clip.posY;
+    const labels = [];
+    const d = makeDrag({ recordHistory: label => labels.push(label) });
+    d.bind({ imageLayer: document.getElementById('imageLayer') });
+    d.startImageDrag({ id: 'i1', x: 0, y: 0 });
+    d.moveImageDrag(100, 50);
+
+    window.dispatchEvent(new Event('blur'));
+
+    expect(d.imageDrag()).toBe(null);
+    expect(Object.hasOwn(clip, 'posX')).toBe(false);
+    expect(Object.hasOwn(clip, 'posY')).toBe(false);
+    expect(labels).toEqual([]);
+  });
 });
 
 /* ---- 字幕拖曳：只走 DOM 事件那條路 ---- */
 
-function mountSubtitle({ alt = false } = {}) {
+function mountSubtitle({ alt = false, deps = {} } = {}) {
   document.body.innerHTML = `
     <div id="imageLayer"></div>
     <div id="videoWrap"><div id="videoSub">
@@ -250,7 +328,7 @@ function mountSubtitle({ alt = false } = {}) {
   State.cues = [{ id: 'c1', start: 0, end: 2, text: '測試', track: 0 }];
   const videoSub = document.getElementById('videoSub');
   const el = videoSub.querySelector('.vsub-track');
-  const drag = makeDrag();
+  const drag = makeDrag(deps);
   drag.bind({ imageLayer: document.getElementById('imageLayer'), videoSub, videoWrap: document.getElementById('videoWrap') });
   return { drag, videoSub, el, alt };
 }
@@ -300,6 +378,39 @@ describe('字幕拖曳：移動位置', () => {
     videoSub.dispatchEvent(pointer('pointermove', 900, 100));
     expect(State.cues[0].style.posX).toBe(after);
     expect(labels[0]).toMatch(/^移動字幕位置/);
+  });
+
+  it('字幕拖曳被 pointercancel 中斷時還原原樣式且不記歷史', () => {
+    const labels = [];
+    const { videoSub, el, drag } = mountSubtitle({ deps: { recordHistory: label => labels.push(label) } });
+    el.dispatchEvent(pointer('pointerdown', 100, 100));
+    videoSub.dispatchEvent(pointer('pointermove', 200, 100));
+    expect(State.cues[0].style.posX).toBeCloseTo(60);
+
+    videoSub.dispatchEvent(pointer('pointercancel', 200, 100));
+
+    expect(drag.subtitleDrag()).toBe(null);
+    expect(State.cues[0].style).toBeUndefined();
+    expect(labels).toEqual([]);
+  });
+
+  it('其他 pointer 的移動與放開不會修改或提交字幕拖曳', () => {
+    const labels = [];
+    const { videoSub, el, drag } = mountSubtitle({ deps: { recordHistory: label => labels.push(label) } });
+    const send = (target, type, id, x) => {
+      const event = pointer(type, x, 100);
+      Object.defineProperty(event, 'pointerId', { value: id });
+      target.dispatchEvent(event);
+    };
+    send(el, 'pointerdown', 7, 100);
+    send(videoSub, 'pointermove', 8, 200);
+    send(videoSub, 'pointerup', 8, 200);
+
+    expect(State.cues[0].style).toBeUndefined();
+    expect(drag.subtitleDrag()).not.toBe(null);
+    expect(labels).toEqual([]);
+    send(videoSub, 'pointercancel', 7, 100);
+    expect(drag.subtitleDrag()).toBe(null);
   });
 });
 

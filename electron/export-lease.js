@@ -33,6 +33,17 @@ function outputKey(outPath) {
     .digest('hex');
 }
 
+// A delivery is encoded beside its final file so the validated result can
+// replace an existing deliverable with one same-volume rename. The token is
+// hashed into a fixed filename; neither the caller nor recovery may choose an
+// arbitrary deletion target.
+function stageOutputPath(outPath, token) {
+  const normalized = normalizeOutputPath(outPath);
+  const digest = crypto.createHash('sha256').update(requireToken(token), 'utf8').digest('hex');
+  const extension = path.extname(normalized);
+  return path.join(path.dirname(normalized), `.subtool-${outputKey(normalized).slice(0, 16)}-${digest.slice(0, 32)}.stage${extension}`);
+}
+
 function leaseRoot(queueDir) {
   return path.join(path.resolve(requirePath(queueDir, 'queueDir')), 'output-leases');
 }
@@ -143,6 +154,10 @@ function validateOwner(owner, lockPath, expectedOutPath = null) {
   if (owner.outputStarted != null && typeof owner.outputStarted !== 'boolean') {
     throw corruptError(lockPath, 'outputStarted is invalid');
   }
+  if (Object.hasOwn(owner, 'stagePath')
+    && (typeof owner.stagePath !== 'string' || owner.stagePath !== stageOutputPath(owner.outPath, owner.token))) {
+    throw corruptError(lockPath, 'stagePath does not match outPath and owner token');
+  }
   if (
     owner.pipeName != null
     && (typeof owner.pipeName !== 'string' || owner.pipeName.trim() === '')
@@ -195,11 +210,15 @@ function acquireLease({
   watchdogPid = null,
   pipeName = null,
   outputStarted,
+  stagePath,
 } = {}) {
   if (outputStarted != null && typeof outputStarted !== 'boolean') {
     throw leaseError('INVALID_LEASE_ARGUMENT', 'outputStarted must be a boolean');
   }
   const normalizedOutPath = normalizeOutputPath(outPath);
+  if (stagePath != null && stagePath !== stageOutputPath(normalizedOutPath, token)) {
+    throw leaseError('INVALID_LEASE_ARGUMENT', 'stagePath must be derived from outPath and token');
+  }
   const key = outputKey(normalizedOutPath);
   const root = leaseRoot(queueDir);
   const lockPath = path.join(root, `${key}.lock`);
@@ -212,6 +231,7 @@ function acquireLease({
     pipeName: optionalPipeName(pipeName),
     createdAt: new Date().toISOString(),
     ...(outputStarted == null ? {} : { outputStarted }),
+    ...(stagePath == null ? {} : { stagePath }),
   };
 
   fs.mkdirSync(root, { recursive: true });
@@ -386,5 +406,6 @@ module.exports = {
   normalizeOutputPath,
   outputKey,
   releaseLease,
+  stageOutputPath,
   updateLease,
 };

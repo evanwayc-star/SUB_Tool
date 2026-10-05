@@ -1,8 +1,8 @@
 // @subtool-ci windows
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,26 +11,16 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const QueueStore = require(path.join(ROOT, 'electron', 'queue-store.js'));
+const { DELIVERY_FRAME_RATES, exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
+const { CdpClient, getJSON, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const activeApps = new Set();
+const activeClients = new Set();
 const tempProfiles = new Set();
 let capabilitySeedCounter = 0;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function killProcessTree(child) {
-  if (!child || child.exitCode !== null) return;
-  if (process.platform === 'win32') {
-    try {
-      execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-    } catch {
-      try { child.kill('SIGKILL'); } catch {}
-    }
-  } else {
-    try { child.kill('SIGKILL'); } catch {}
-  }
 }
 
 function processIsRunning(pid) {
@@ -69,9 +59,7 @@ async function waitUntil(fn, label, timeoutMs = 10000) {
 }
 
 async function listTargets(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-  if (!response.ok) throw new Error(`CDP 回應 ${response.status}`);
-  return response.json();
+  return getJSON(`http://127.0.0.1:${port}/json/list`);
 }
 
 async function waitForTarget(port, predicate, label) {
@@ -81,58 +69,9 @@ async function waitForTarget(port, predicate, label) {
   );
 }
 
-class CdpClient {
-  constructor(url) {
-    this.url = url;
-    this.nextId = 0;
-    this.pending = new Map();
-    this.ws = null;
-  }
-
-  async connect() {
-    this.ws = new WebSocket(this.url);
-    await new Promise((resolve, reject) => {
-      this.ws.addEventListener('open', resolve, { once: true });
-      this.ws.addEventListener('error', reject, { once: true });
-    });
-    this.ws.addEventListener('message', event => {
-      const message = JSON.parse(event.data);
-      if (!message.id) return;
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error.message));
-      else pending.resolve(message.result);
-    });
-  }
-
-  send(method, params = {}) {
-    const id = ++this.nextId;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  async evaluate(expression) {
-    const result = await this.send('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.exception?.description || 'Renderer 執行失敗');
-    }
-    return result.result.value;
-  }
-
-  close() {
-    this.ws?.close();
-  }
-}
-
 async function connectTarget(target) {
-  const client = new CdpClient(target.webSocketDebuggerUrl);
+  const client = new CdpClient(target.webSocketDebuggerUrl, { timeoutMs: 30000 });
+  activeClients.add(client);
   await client.connect();
   return client;
 }
@@ -152,11 +91,11 @@ async function launchApp(profileDir) {
       env: { ...process.env, TEMP: isolatedTemp, TMP: isolatedTemp },
     },
   );
+  trackElectron(child);
   child.stderr.on('data', chunk => stderr.push(chunk.toString()));
   const closed = new Promise(resolve => child.once('close', resolve));
   const app = { child, port, stderr, closed };
   activeApps.add(app);
-  child.once('close', () => activeApps.delete(app));
   try {
     await waitForTarget(port, target => target.type === 'page' && target.title === 'SUB TOOL', '主視窗啟動');
   } catch (error) {
@@ -175,24 +114,24 @@ async function launchSecondInstance(profileDir) {
     stdio: ['ignore', 'ignore', 'pipe'],
     env: { ...process.env, TEMP: isolatedTemp, TMP: isolatedTemp },
   });
+  trackElectron(child);
+  const app = { child, stderr, closed: new Promise(resolve => child.once('close', resolve)) };
+  activeApps.add(app);
   child.stderr.on('data', chunk => stderr.push(chunk.toString()));
-  await Promise.race([
-    new Promise(resolve => child.once('close', resolve)),
-    delay(10000).then(() => {
-      child.kill('SIGKILL');
-      throw new Error(`第二執行個體未結束：${stderr.join('')}`);
-    }),
-  ]);
+  await waitForExit(app);
   return stderr.join('');
 }
 
 async function waitForExit(app) {
-  await Promise.race([
-    app.closed,
-    delay(10000).then(() => {
-      throw new Error(`Electron 未結束：${app.stderr.join('')}`);
-    }),
-  ]);
+  let timer;
+  try {
+    await Promise.race([
+      app.closed,
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Electron 未結束：${app.stderr.join('')}`)), 10000);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
 }
 
 async function openQueueMonitor(app, mainClient) {
@@ -265,16 +204,67 @@ async function exportError(mainClient, payload) {
   })()`);
 }
 
+async function cleanupProfile(profile, { maxRetries = 30, retryDelay = 200 } = {}) {
+  for (let retry = 0; existsSync(profile); retry++) {
+    try {
+      // 每次重試都重新核對 realpath；Windows 在程序 close 後仍可能短暫持有 profile。
+      verifiedCleanup(profile, 'subtool-', { maxRetries: 0 });
+      return;
+    } catch (error) {
+      if (!['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES'].includes(error.code) || retry >= maxRetries) {
+        throw error;
+      }
+      await delay(retryDelay);
+    }
+  }
+}
+
 afterEach(async () => {
+  for (const client of activeClients) client.close();
+  activeClients.clear();
   for (const app of [...activeApps]) {
-    killProcessTree(app.child);
-    await Promise.race([app.closed, delay(5000)]);
+    await stopElectron(app.child);
+    activeApps.delete(app);
   }
-  activeApps.clear();
-  for (const profile of tempProfiles) {
-    rmSync(profile, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 });
+  for (const profile of [...tempProfiles]) {
+    await cleanupProfile(profile);
+    tempProfiles.delete(profile);
   }
-  tempProfiles.clear();
+}, 20000);
+
+describe('Electron 驗收 profile 的有界清理', () => {
+  test('close 後短暫被占用的 profile 會重新驗證並等待釋放', async () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'subtool-profile-release-'));
+    tempProfiles.add(profile);
+    const fs = require('node:fs');
+    const remove = fs.rmSync;
+    const locked = Object.assign(new Error('profile 仍被占用'), { code: 'EPERM' });
+    let failures = 2;
+    const removal = vi.spyOn(fs, 'rmSync').mockImplementation((target, options) => {
+      expect(tempProfiles.has(profile)).toBe(true);
+      expect(options.maxRetries).toBe(0);
+      if (failures-- > 0) throw locked;
+      return remove(target, options);
+    });
+    try {
+      await cleanupProfile(profile, { maxRetries: 2, retryDelay: 1 });
+      expect(removal).toHaveBeenCalledTimes(3);
+      expect(existsSync(profile)).toBe(false);
+    } finally { removal.mockRestore(); }
+  });
+
+  test('profile 持續被占用時保留 ownership 並回報最後錯誤', async () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'subtool-profile-timeout-'));
+    tempProfiles.add(profile);
+    const locked = Object.assign(new Error('profile 仍被占用'), { code: 'EPERM' });
+    const removal = vi.spyOn(require('node:fs'), 'rmSync').mockImplementation(() => { throw locked; });
+    try {
+      await expect(cleanupProfile(profile, { maxRetries: 2, retryDelay: 1 })).rejects.toBe(locked);
+      expect(removal).toHaveBeenCalledTimes(3);
+      expect(existsSync(profile)).toBe(true);
+      expect(tempProfiles.has(profile)).toBe(true);
+    } finally { removal.mockRestore(); }
+  });
 });
 
 const describeElectron = process.platform === 'win32' ? describe.sequential : describe.skip;
@@ -291,6 +281,11 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     );
     const mainClient = await connectTarget(mainTarget);
     const queueClient = await openQueueMonitor(app, mainClient);
+
+    await waitUntil(() => queueClient.evaluate('typeof window.queueAPI?.exactFrameRate === "function"'), 'sandbox 佇列 preload 已提供格率規則');
+    const standardRates = DELIVERY_FRAME_RATES.map(item => item.value);
+    const actualRates = await queueClient.evaluate(`${JSON.stringify(standardRates)}.map(value => window.queueAPI.exactFrameRate(value))`);
+    expect(actualRates).toEqual(standardRates.map(value => exactDeliveryFrameRate(value)));
 
     // 模擬 renderer 完成既有「是否儲存」確認後，要求主行程關閉主視窗。
     await mainClient.evaluate('window.subtool.closeApp(); true');
@@ -364,11 +359,10 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     );
 
     // 驗證斷言已全部完成（主程序未退出且主視窗仍存在）。
-    // 關閉 CDP 連線並使用 killProcessTree 徹底終止包含 GPU Process 的進程樹，確保 Windows 檔案鎖完整釋放。
+    // 等 shared harness 確認程序樹退出後，才讓 afterEach 清除 profile。
     mainClient.close();
     queueClient.close();
-    killProcessTree(app.child);
-    await Promise.race([app.closed, delay(3000)]);
+    await stopElectron(app.child);
   }, 35000);
 
   test('CDP 直接匯出不會將 renderer 路徑升格為來源或輸出能力', async () => {
@@ -643,13 +637,14 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     await firstMainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
     const owner = await waitUntil(
       async () => {
-        if (!existsSync(leaseDir) || !existsSync(outPath)) return null;
+        if (!existsSync(leaseDir)) return null;
         const lock = readdirSync(leaseDir).find(name => name.endsWith('.lock'));
         if (!lock) return null;
         const leaseOwner = JSON.parse(readFileSync(path.join(leaseDir, lock, 'owner.json'), 'utf8'));
-        // Output creation can precede the watchdog's PID update. Wait for the
-        // process we are about to verify instead of accepting the initial lease.
-        return Number.isInteger(leaseOwner.ffmpegPid) && leaseOwner.ffmpegPid > 0 ? leaseOwner : null;
+        // Encoding writes the token-owned stage. Wait for the actual child and
+        // its file instead of mistaking the reserved lease for active output.
+        return leaseOwner.stagePath && existsSync(leaseOwner.stagePath)
+          && Number.isInteger(leaseOwner.ffmpegPid) && leaseOwner.ffmpegPid > 0 ? leaseOwner : null;
       },
       'ffmpeg 已啟動並建立 output lease',
       15000,
@@ -678,6 +673,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       ? readdirSync(leaseDir).filter(name => name.endsWith('.lock'))
       : [];
     expect(existsSync(outPath)).toBe(false);
+    expect(existsSync(owner.stagePath)).toBe(false);
     expect(locksAfterRecovery).toEqual([]);
     const restored = await secondQueueClient.evaluate('window.queueAPI.getAll()');
     expect(restored.isPaused).toBe(true);

@@ -317,8 +317,11 @@ function renderMixer(){
         const curDb = curVol <= 0.001 ? -60 : 20 * Math.log10(curVol);
         const nextDb = Math.max(-60, Math.min(12, curDb + step));
         const newVol = nextDb <= -59.5 ? 0 : Math.pow(10, nextDb / 20);
-        bus.volume = Number(newVol.toFixed(4));
+        const next = Number(newVol.toFixed(4));
+        if (Math.abs(next - curVol) <= 0.00001) return;
+        bus.volume = next;
         notifyBusChange(bus, 'volume', bus.volume);
+        recordBusHistory('調整音訊軌音量', bus, index);
         refreshBusViews();
       }, { passive: false });
 

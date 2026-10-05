@@ -233,6 +233,18 @@ describe('交付 argv：影像合成', () => {
   const env = (over = {}) => ({ hasAudioStream: () => false, ...over });
   const fcOf = args => args[args.indexOf('-filter_complex') + 1];
 
+  it('隱藏視訊軌只略過畫面，母素材音訊仍依同一時間軸交付', () => {
+    const { args } = P.buildDeliveryArgv(spec({ videoTracks: [{ vt: 0, visible: false }] }), env({ hasAudioStream: () => true }));
+    const graph = fcOf(args);
+    expect(graph).toContain('color=c=black:s=1920x1080');
+    expect(graph).not.toContain('overlay=');
+    expect(graph).not.toContain('[0:v]');
+    expect(graph).toContain('[0:a]');
+    expect(args[args.indexOf('-map') + 1]).toBe('[base]');
+    const visible = P.buildDeliveryArgv(spec(), env());
+    expect(fcOf(visible.args)).toContain('overlay=');
+  });
+
   it('沒有片段時明確失敗，不會產生一組會跑出空檔的 argv', () => {
     expect(() => P.buildDeliveryArgv(spec({ clips: [] }), env())).toThrow('沒有可匯出的影片段');
   });

@@ -10,49 +10,12 @@
    但監聽器一旦裝進頁面就會【一直留著】，不受外部行程生死影響。
    所以裝一次、之後隨時讀，比讓一個行程活著可靠得多。
 ============================================================================== */
-const http = require('http');
-const WebSocket = require('ws');
+
+
 const { execFileSync } = require('child_process');
+const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const getJSON = url => new Promise((res, rej) => {
-  http.get(url, r => {
-    let b = '';
-    r.on('data', d => { b += d; });
-    r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } });
-  }).on('error', rej);
-});
-
-function connect(target) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
-    let id = 0;
-    const pend = new Map();
-    const bail = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error('inspector 逾時')); }, 10000);
-    ws.on('open', () => {
-      clearTimeout(bail);
-      resolve({
-        eval: expr => new Promise((res, rej) => {
-          const i = ++id;
-          pend.set(i, { res, rej });
-          ws.send(JSON.stringify({ id: i, method: 'Runtime.evaluate',
-            params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true } }));
-        }),
-        close: () => { try { ws.close(); } catch (e) {} },
-      });
-    });
-    ws.on('message', raw => {
-      const m = JSON.parse(raw);
-      if (!m.id || !pend.has(m.id)) return;
-      const { res, rej } = pend.get(m.id);
-      pend.delete(m.id);
-      if (m.error) rej(new Error(m.error.message));
-      else if (m.result?.exceptionDetails) rej(new Error(JSON.stringify(m.result.exceptionDetails).slice(0, 300)));
-      else res(m.result?.result?.value);
-    });
-    ws.on('error', reject);
-  });
-}
 
 function findMainPid() {
   const ps = 'Get-CimInstance Win32_Process | '
@@ -76,14 +39,15 @@ const inPage = js => `(async () => {
   try { process._debugProcess(pid); } catch (e) {}
   await sleep(1200);
 
-  const main = await connect((await getJSON('http://127.0.0.1:9229/json/list'))[0]);
-  const armed = await main.eval(inPage('!!window.__inpArmed'));
+  const main = new CdpClient(((await getJSON('http://127.0.0.1:9229/json/list'))[0]).webSocketDebuggerUrl);
+    await main.connect();
+  const armed = await main.evaluate(inPage('!!window.__inpArmed'));
   if (!armed) {
     console.error('頁面裡沒有探針。請先跑 scripts/diagnostics/measure-input-latency.js 裝上，');
     console.error('而且【不要在裝好之後重開 app】——重開會把它清掉。');
     process.exit(1);
   }
-  const list = JSON.parse(await main.eval(inPage('JSON.stringify(window.__inp || [])')));
+  const list = JSON.parse(await main.evaluate(inPage('JSON.stringify(window.__inp || [])')));
   if (!list.length) { console.log('探針在，但一次輸入都沒記錄到。'); process.exit(0); }
 
   console.log(`\n共 ${list.length} 筆輸入\n`);
@@ -104,7 +68,7 @@ const inPage = js => `(async () => {
   /* 主行程側的對話框計時：把每一次點擊與它之後的 showOpenDialog 配對起來。
      我們這一側已經確定不到 5 毫秒，所以 enter→resolved 幾乎就是
      「Windows 畫出視窗」＋「使用者操作」。 */
-  const dlg = JSON.parse(await main.eval('JSON.stringify(globalThis.__dlgLog || [])'));
+  const dlg = JSON.parse(await main.evaluate('JSON.stringify(globalThis.__dlgLog || [])'));
   if (!dlg.length) {
     console.log('\n（主行程的對話框探針沒有記錄——這一輪沒開過檔案對話框，'
       + '或探針是在 app 重開之後才裝的）');

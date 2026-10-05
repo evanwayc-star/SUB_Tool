@@ -18,9 +18,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 vi.mock('../src/ui.js', () => ({ setStatus: vi.fn() }));
+vi.mock('../src/media.js', () => ({ Media: {mpvPresenting:()=>false} }));
 
 import { State, syncTrackCount } from '../src/state.js';
 import { History } from '../src/history.js';
+import { beginTimelineGestureLifecycle } from '../src/timeline-gesture-transaction.js';
+import { beginTimelineTrackEdit } from '../src/timeline-edit-transaction.js';
+import { createPreviewDrag } from '../src/timeline-interaction-engine.js';
 
 const cue = (start, end, text) => ({ id: 'c' + start, start, end, text, track: 0, timed: true });
 
@@ -242,5 +246,74 @@ describe('快照欄位清單', () => {
     History.record('改字');
     History.undo();
     expect(State.cues[0].text).toBe('原文');
+  });
+});
+
+describe('即時預覽與背景 History 的隔離',()=>{
+  beforeEach(()=>{resetState();History.reset();});
+
+  it('取消時間軸移動後，Undo/Redo 保留背景修改且不恢復暫存時間或 copy cue',()=>{
+    const original=cue(1,3,'原字幕');State.cues=[original];History.reset();
+    const gesture=beginTimelineGestureLifecycle({mode:'move',targets:[{target:original,fields:['start','end','track']}],effects:{beginPreview:targets=>History.beginPreview(targets)}});
+    gesture.startPreview();
+    gesture.preview(()=>{original.start=9;original.end=11;});
+    const copied={...original,id:'copy'};State.cues.push(copied);
+    gesture.addPreviewTarget(copied,[],{added:true});
+    gesture.addRollback(()=>{State.cues=State.cues.filter(item=>item!==copied);});
+    original.text='背景修改';History.record('背景工作');
+    expect(History.stack.at(-1).snap.cues).toEqual([{...original,start:1,end:3}]);
+    gesture.cancel();History.undo();History.redo();
+    expect(State.cues).toEqual([{...original,start:1,end:3}]);
+  });
+
+  it('圖片直接拖曳期間的背景紀錄只保存原幾何，失焦取消後 Undo/Redo 不恢復草稿',()=>{
+    State.clips=[imageClip()];History.reset();
+    const layer=document.createElement('div');layer.id='imageLayer';document.body.appendChild(layer);
+    const drag=createPreviewDrag({getStageRect:()=>({w:1000,h:500}),imageBoxOf:()=>({w:200,h:100}),beginPreview:targets=>History.beginPreview(targets),recordHistory:label=>History.record(label)});
+    drag.bind({imageLayer:layer});drag.startImageDrag({id:'i1',x:0,y:0});drag.moveImageDrag(100,50);
+    expect(State.clips[0].posX).toBe(0.6);
+    State.notes=[{id:'background',text:'背景完成',t:1}];History.record('背景工作');
+    window.dispatchEvent(new Event('blur'));
+    History.undo();History.redo();
+    expect(State.clips[0]).toMatchObject({posX:0.5,posY:0.5,scale:1});
+    expect(State.notes[0].text).toBe('背景完成');
+  });
+
+  it('背景插入軌道後依目前位置投影高度，不能改到前一條軌',()=>{
+    const track=State.tracks[0];track.height=64;History.reset();
+    const release=History.beginPreview([{target:track,fields:['height']}]);
+    track.height=120;
+    State.tracks.unshift({name:'背景新增軌',height:48,visible:true});
+    History.record('背景新增軌');
+    expect(History.stack.at(-1).snap.tracks.map(item=>item.height)).toEqual([48,64]);
+    track.height=64;release();History.undo();History.redo();
+    expect(State.tracks.map(item=>item.height)).toEqual([48,64]);
+  });
+
+  it('外部音訊每次重序列化仍由 runtime owner 投影已提交高度，取消保留背景欄位',()=>{
+    const asset={id:'audio',name:'配樂'};
+    State.externalAudioState=[{...asset}];History.reset();
+    const current=()=>State.externalAudioState.find(item=>item.id===asset.id);
+    const edit=beginTimelineTrackEdit({kind:'audio',id:'audio',field:'height',target:asset,
+      onApply:value=>{State.externalAudioState=State.externalAudioState.map(item=>({...item,...(typeof value==='symbol'?{}:{height:value})}));if(typeof value==='symbol')delete current().height;},
+      beginPreview:()=>History.beginPreview([{target:current(),fields:['height'],resolveTarget:current}],()=>asset.id==='audio'),
+    });
+    edit.preview(100);current().name='背景重新命名';History.record('背景工作');
+    expect(History.stack.at(-1).snap.externalAudioState[0]).toEqual({id:'audio',name:'背景重新命名'});
+    edit.cancel();History.undo();History.redo();
+    expect(State.externalAudioState[0]).toEqual({id:'audio',name:'背景重新命名'});
+  });
+
+  it('Undo 撤銷草稿 owner，舊手勢不能提交到同 ID 的新物件且常用樣式草稿清除',()=>{
+    State.cues=[cue(1,3,'原文')];History.reset();
+    State.cues[0].text='已提交';History.record('改字');
+    const old=State.cues[0];
+    const gesture=beginTimelineGestureLifecycle({mode:'move',targets:[{target:old,fields:['start']}],effects:{beginPreview:targets=>History.beginPreview(targets)}});
+    gesture.startPreview();gesture.preview(()=>{old.start=9;});State.presetEdit={draft:{fontSize:99}};
+    History.undo();
+    expect(gesture.commit(()=>History.record('舊手勢')).committed).toBe(false);
+    expect(State.cues[0]).toMatchObject({text:'原文',start:1});
+    expect(State.presetEdit).toBeNull();
+    expect(History.stack).toHaveLength(2);
   });
 });

@@ -14,8 +14,8 @@ import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { selectCueSingle, commitCueTimeEdit } from './subtitles.js';
-import { addCue, cueTrackLocked } from './subtitle-model.js';
-import { ensureProjectSaved } from './project.js';
+import { addCue, cueTrackLocked, subtitleTimeOnFrame, finalizeProvisionalCueEnds } from './subtitle-model.js';
+import { Project, ensureProjectSaved } from './project.js';
 import { updatePlayhead, drawTimeline } from './timeline-renderer.js';
 import { recordHistory } from './history.js';
 import { updateNoteActive } from './notes.js';
@@ -674,12 +674,30 @@ function stepMediaBoundary(dir) {
  * 在函式進入點第一時間同步凍結按鍵當下的 Media.displayTime()，
  * 徹底杜絕任何 ensureProjectSaved() 非同步微任務或彈窗延遲所造成的時碼漂移。
  */
+function captureCueTimingIntent() {
+  const ownsWorkspace = Project.captureWorkspaceOwnership();
+  const time = Media.displayTime(), fps = State.fps, dropFrame = State.dropFrame;
+  const selectedId = State.selectedId, selectedIds = [...State.selectedIds];
+  const listTrack = State.listTrack, kind = State.activeTrackKind, subMode = State.subMode;
+  const cue = State.cues.find(item => item.id === selectedId);
+  const trackIndex = cue?.track ?? listTrack;
+  const track = State.tracks[trackIndex];
+  const timing = cue ? { start: cue.start, end: cue.end, timed: cue.timed, track: cue.track } : null;
+  return { time, fps, dropFrame, cue, trackIndex, isCurrent: () => ownsWorkspace()
+    && State.fps === fps && State.dropFrame === dropFrame && State.subMode === subMode
+    && State.selectedId === selectedId && State.listTrack === listTrack && State.activeTrackKind === kind
+    && State.selectedIds.length === selectedIds.length && selectedIds.every(id => State.selectedIds.includes(id))
+    && State.tracks[trackIndex] === track
+    && (!cue || (State.cues.includes(cue) && Object.keys(timing).every(key => cue[key] === timing[key]))) };
+}
+
 async function setIn() {
-  const capturedTime = Media.displayTime();
+  const intent = captureCueTimingIntent();
   await ensureProjectSaved();
+  if (!intent.isCurrent()) return;
   if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
-  let t = snapTimeToFrame(capturedTime, State.fps, State.dropFrame);
-  let c = State.cues.find(x => x.id === State.selectedId);
+  const t = snapTimeToFrame(intent.time, intent.fps, intent.dropFrame);
+  let c = intent.cue;
   if (!c) {
     const tk = State.tracks.length === 0 ? 0 : Math.min(State.tracks.length - 1, Math.max(0, State.listTrack));
     c = addCue(t, snapTimeToFrame(t + 2, State.fps, State.dropFrame), '', tk, { historyLabel: '新增字幕(I)' });
@@ -689,18 +707,15 @@ async function setIn() {
   }
   if (cueTrackLocked(c, '調整字幕起點')) return;
   const wasUntimed = c.timed === false;
+  const frame=1/getExactFps(intent.fps);
+  const provisionalLimit=(State.duration && State.duration>t) ? State.duration : t+3600;
+  const provisionalEnd=State.subMode ? subtitleTimeOnFrame(provisionalLimit,t+frame,provisionalLimit) : null;
+  if(State.subMode && provisionalEnd==null) { setStatus('起點之後沒有完整影格', 'err'); return; }
   c.start = t;
   if (State.subMode) {
-    State.cues.forEach(cue => {
-      if (cue._tempEnd && cue.id !== c.id) {
-        cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
-        delete cue._tempEnd;
-      }
-    });
-    c.end = (State.duration && State.duration > c.start) ? State.duration : c.start + 3600;
+    finalizeProvisionalCueEnds(c.id,{history:false});
+    c.end = provisionalEnd;
     c._tempEnd = true;
-    if (!State._subModeTouchedIds) State._subModeTouchedIds = new Set();
-    State._subModeTouchedIds.add(c.id);
   } else if (wasUntimed || c.end <= c.start) {
     c.end = snapTimeToFrame(c.start + 0.5, State.fps, State.dropFrame);
   }
@@ -716,11 +731,12 @@ async function setIn() {
  * 同步捕獲按鍵當下的 Media.displayTime()，杜絕邊播邊聽打點時的非同步微任務時間漂移。
  */
 async function setOut() {
-  const capturedTime = Media.displayTime();
+  const intent = captureCueTimingIntent();
   await ensureProjectSaved();
+  if (!intent.isCurrent()) return;
   if (State.selectedIds.length > 1) { setStatus('多選模式 — 請用 P 鍵整體位移', 'err'); return; }
-  let t = snapTimeToFrame(capturedTime, State.fps, State.dropFrame);
-  const c = State.cues.find(x => x.id === State.selectedId);
+  const t = snapTimeToFrame(intent.time, intent.fps, intent.dropFrame);
+  const c = intent.cue;
   if (!c) { setStatus('請先選擇字幕（或按 I 新建）', 'err'); return; }
   if (cueTrackLocked(c, '調整字幕終點')) return;
 

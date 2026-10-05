@@ -13,6 +13,7 @@
 const path = require('path');
 const nodeFs = require('fs');
 const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require('child_process');
+const { StringDecoder } = require('string_decoder');
 const QueueStore = require('./queue-store');
 const ExportWatchdog = require('./export-watchdog');
 const { artifactProgress } = require('./export-artifact');
@@ -174,12 +175,43 @@ class FFmpegOutputParser {
     this.duration = Math.max(0, Number(duration) || 0);
     this.speeds = [];
     this.maps = [];
+    this.carry = '';
+    this.discardingRecord = false;
   }
 
   parseChunk(chunk) {
     if (typeof chunk !== 'string') return null;
+    let latest = null;
+    let start = 0;
+    for (const delimiter of chunk.matchAll(/[\r\n]/g)) {
+      this.appendRecord(chunk.slice(start, delimiter.index));
+      if (!this.discardingRecord) latest = this.parseRecord(this.carry) || latest;
+      this.carry = '';
+      this.discardingRecord = false;
+      start = delimiter.index + 1;
+    }
+    this.appendRecord(chunk.slice(start));
+    return latest;
+  }
 
-    const sMatch = /speed=\s*([\d.]+)x/.exec(chunk);
+  appendRecord(text) {
+    if (this.discardingRecord) return;
+    // Discard the whole oversized record, including its suffix, until CR/LF.
+    if (this.carry.length + text.length > 65536) {
+      this.carry = '';
+      this.discardingRecord = true;
+    } else this.carry += text;
+  }
+
+  flush() {
+    const progress = this.discardingRecord ? null : this.parseRecord(this.carry);
+    this.carry = '';
+    this.discardingRecord = false;
+    return progress;
+  }
+
+  parseRecord(record) {
+    const sMatch = /speed=\s*([\d.]+)x/.exec(record);
     if (sMatch) {
       const speedVal = parseFloat(sMatch[1]);
       if (Number.isFinite(speedVal) && speedVal > 0) {
@@ -188,11 +220,18 @@ class FFmpegOutputParser {
       }
     }
 
-    for (const mm of chunk.matchAll(/Stream #\d+:\d+ -> #\d+:\d+ \(([^\n]*)\)/g)) {
-      if (this.maps.length < 8) this.maps.push(mm[1]);
+    const map = /^\s*Stream #\d+:\d+ -> #\d+:\d+ \((.*)\)\s*$/.exec(record);
+    if (map && this.maps.length < 8) {
+      let depth = 0;
+      for (const char of map[1]) {
+        if (char === '(') depth++;
+        else if (char === ')') depth--;
+        if (depth < 0) break;
+      }
+      if (depth === 0) this.maps.push(map[1]);
     }
 
-    const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(chunk);
+    const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(record);
     if (m && this.duration > 0) {
       const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
       let etaS = null;
@@ -305,6 +344,92 @@ function createFFmpegExecution(options = {}) {
   const getUserDataDir = options.getUserDataDir || (() => process.cwd());
   const getQueueDir = options.getQueueDir || (() => null);
   const now = options.now || (() => Date.now());
+  const directExecutions = new Set();
+  let shuttingDown = false;
+  let resumeWhenIdle = false;
+
+  const shutdownError = () => {
+    const error = new Error('FFmpeg 執行環境正在關閉');
+    error.code = 'FFMPEG_SHUTTING_DOWN';
+    return error;
+  };
+  function execute(args, executionOptions = {}) {
+    const startedAt = now();
+    let lastPct = 0;
+    const isDirect = executionOptions.executionKind === 'direct';
+    const entry = isDirect && !shuttingDown ? { process: null, cancelled: false, completion: null } : null;
+    if (entry) directExecutions.add(entry);
+    const work = isDirect && shuttingDown ? Promise.reject(shutdownError()) : executeProcess(args, {
+      ...executionOptions,
+      isCancelled: () => Boolean(entry?.cancelled),
+      onProgress: progress => {
+        lastPct = progress.pct;
+        executionOptions.onProgress?.(progress);
+      },
+      onProcess: process => {
+        if (entry) {
+          entry.process = process;
+          if (entry.cancelled) { try { process.kill(); } catch (error) {} }
+        }
+        executionOptions.onProcess?.(process);
+      },
+    });
+    const terminal = (outcome, error) => {
+      const payload = {
+        jobId: executionOptions.jobId, label: executionOptions.label,
+        pct: outcome === 'success' ? 100 : lastPct,
+        done: true, outcome, elapsedMs: now() - startedAt,
+        ...(error ? { errorCode: error.code || 'FFMPEG_EXIT', errorMsg: error.message || String(error) } : {}),
+      };
+      // A progress observer cannot change the native result after it has settled.
+      try {
+        if (executionOptions.sender && (typeof executionOptions.shouldSend !== 'function' || executionOptions.shouldSend())) {
+          options.send?.(executionOptions.sender, 'task-progress', payload);
+        }
+      } catch (ignored) {}
+      // Queued callbacks describe encoding/authoring; only the artifact owner completes them.
+      if (isDirect) { try { executionOptions.onProgress?.(payload); } catch (ignored) {} }
+    };
+    const completion = work.then(result => {
+      terminal('success');
+      return result;
+    }, error => {
+      terminal('failed', error);
+      throw error;
+    });
+    if (entry) {
+      entry.completion = completion.catch(() => {}).finally(() => {
+        directExecutions.delete(entry);
+        if (resumeWhenIdle && !directExecutions.size) shuttingDown = false;
+      });
+    }
+    return completion;
+  }
+
+  async function cancelAllAndWait({ timeoutMs = 10000 } = {}) {
+    shuttingDown = true;
+    resumeWhenIdle = false;
+    for (const entry of directExecutions) {
+      const wasCancelled = entry.cancelled;
+      entry.cancelled = true;
+      if (entry.process && entry.process.exitCode == null && entry.process.signalCode == null) {
+        try { entry.process.kill(wasCancelled ? 'SIGKILL' : 'SIGTERM'); } catch (error) {}
+      }
+    }
+    let timer;
+    try {
+      await Promise.race([
+        Promise.all([...directExecutions].map(entry => entry.completion)),
+        new Promise((resolve, reject) => {
+          timer = setTimeout(() => {
+            const error = new Error('FFmpeg 尚未確認關閉，不能清除暫存檔');
+            error.code = 'FFMPEG_TERMINATION_PENDING';
+            reject(error);
+          }, timeoutMs);
+        }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
 
   function watchdogScriptPath() {
     const moduleDir = options.moduleDir || __dirname;
@@ -319,7 +444,8 @@ function createFFmpegExecution(options = {}) {
     return fs.existsSync(unpackedPath) ? unpackedPath : localPath;
   }
 
-  function execute(args, {
+  function executeProcess(args, {
+    executionKind,
     onStderr,
     onProgress,
     duration,
@@ -333,21 +459,28 @@ function createFFmpegExecution(options = {}) {
     outputFormat,
     discAudioPlan,
     discVideoFps,
+    isCancelled,
   } = {}) {
     return new Promise((resolve, reject) => {
+      if (executionKind !== 'direct' && executionKind !== 'queued-delivery') {
+        reject(new TypeError('FFmpeg 執行缺少有效的 executionKind'));
+        return;
+      }
+      const isQueueExport = executionKind === 'queued-delivery';
+      const queueDir = isQueueExport ? getQueueDir() : null;
+      if (isQueueExport && (typeof queueDir !== 'string' || !queueDir.trim()
+        || typeof jobId !== 'string' || !jobId.trim()
+        || typeof outPath !== 'string' || !outPath.trim())) {
+        reject(new Error('匯出 watchdog 缺少佇列目錄、工作識別或輸出路徑'));
+        return;
+      }
       const ffmpegPath = getFFmpegPath();
       if (!ffmpegPath) {
         reject(new Error('找不到 ffmpeg'));
         return;
       }
 
-      const queueDir = getQueueDir();
-      const isQueueExport = typeof jobId === 'string' && jobId.startsWith('export-') && queueDir;
       if (isQueueExport) options.ensureQueueDir?.();
-      if (isQueueExport && (typeof outPath !== 'string' || !outPath)) {
-        reject(new Error('匯出 watchdog 缺少輸出路徑'));
-        return;
-      }
 
       const startedAt = now();
       const logPath = isQueueExport
@@ -360,6 +493,7 @@ function createFFmpegExecution(options = {}) {
       let settled = false;
       let watchdogFailure = null;
       const parser = new FFmpegOutputParser(duration);
+      const stderrDecoder = new StringDecoder('utf8');
       const maySend = () => typeof shouldSend !== 'function' || shouldSend();
 
       logStream.on('error', error => {
@@ -398,26 +532,36 @@ function createFFmpegExecution(options = {}) {
         }
         if (onProgress) onProgress(payload);
       };
-      const consumeStderr = data => {
-        const text = data.toString();
+      const reportParsedProgress = progress => {
+        if (progress && (sender || onProgress)) report({ ...progress, pct: artifactProgress(outputFormat, 'encode', progress.pct) });
+      };
+      const consumeText = text => {
+        if (!text) return;
         if (typeof onStderr === 'function') onStderr(text);
-        writeLog(text);
         tail += text;
         if (tail.length > 8000) tail = tail.slice(-8000);
-        const progress = parser.parseChunk(text);
-        if (progress && (sender || onProgress)) {
-          report({ ...progress, pct: artifactProgress(outputFormat, 'encode', progress.pct) });
-        }
+        reportParsedProgress(parser.parseChunk(text));
+      };
+      const consumeStderr = data => {
+        if (settled) return;
+        const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        writeLog(bytes); // retain the original pipe bytes in the diagnostic log
+        consumeText(stderrDecoder.write(bytes));
       };
 
-      const finishProcess = async (code, watchdogResult = null) => {
+      const finishProcess = async (code, watchdogResult = null, processError = null, signal = null) => {
         if (settled) return;
         settled = true;
+        consumeText(stderrDecoder.end());
+        reportParsedProgress(parser.flush());
         await finishLog();
-        if (sender && maySend() && typeof options.send === 'function') {
-          options.send(sender, 'task-progress', { jobId, label, pct: 100, done: true });
+        if (processError) { reject(processError); return; }
+        if (isCancelled?.()) {
+          const error = new Error('FFmpeg 工作已取消');
+          error.name = 'AbortError'; error.code = 'ABORT_ERR';
+          reject(error); return;
         }
-        if (code === 0 && (!watchdogResult || watchdogResult.ok)) {
+        if (code === 0 && !signal && (!watchdogResult || watchdogResult.ok)) {
           fs.unlink(logPath, () => {});
           resolve({ tail, maps: parser.maps });
           return;
@@ -437,12 +581,14 @@ function createFFmpegExecution(options = {}) {
         const failure = new Error(`[LOG_PATH]${logPath}[/LOG_PATH]ffmpeg 結束碼 ${code}\n${summary}`);
         failure.code = errorCode;
         failure.watchdogResult = watchdogResult;
+        if (signal) failure.signal = signal;
         reject(failure);
       };
 
       writeLog(`> ffmpeg ${args.map(value => value.includes(' ') ? `"${value}"` : value).join(' ')}\n\n`);
       if (isQueueExport) {
-        const controller = spawnWatchdog({
+        let controller;
+        try { controller = spawnWatchdog({
           ffmpegPath,
           args,
           cwd,
@@ -459,12 +605,14 @@ function createFFmpegExecution(options = {}) {
             if (message?.type === 'error' && !watchdogFailure) watchdogFailure = message;
             if (message?.type === 'progress') report(message.progress);
           },
-        });
+        }); } catch (error) { void finishProcess(1, null, error); return; }
         controller.ready.catch(() => {});
-        if (onProcess) onProcess(controller);
+        let processError = null;
+        try { onProcess?.(controller); }
+        catch (error) { processError = error; try { controller.stop(); } catch (ignored) {} }
         controller.completion.then(result => {
           const code = result.ok ? 0 : (Number.isInteger(result.code) ? result.code : 1);
-          return finishProcess(code, result);
+          return finishProcess(code, result, processError);
         }).catch(error => {
           watchdogFailure ||= error;
           return finishProcess(1, { ok: false, startupError: true });
@@ -472,22 +620,30 @@ function createFFmpegExecution(options = {}) {
         return;
       }
 
-      const process = spawnDirect(ffmpegPath, args, cwd ? { cwd } : {});
-      if (onProcess) onProcess(process);
-      process.stderr.on('data', consumeStderr);
-      process.on('error', async error => {
-        if (settled) return;
-        settled = true;
-        await finishLog();
-        reject(error);
-      });
-      process.on('close', async code => {
-        await finishProcess(code);
-      });
+      let process;
+      try { process = spawnDirect(ffmpegPath, args, cwd ? { cwd } : {}); }
+      catch (error) { void finishProcess(1, null, error); return; }
+      let processError = null;
+      process.stderr?.on('data', consumeStderr);
+      process.once('error', error => { processError ||= error; });
+      process.once('close', (code, signal) => { void finishProcess(code, null, processError, signal); });
+      // listener 必須先裝好：取消可在 onProcess 内同步 kill，仍須等 close 才settle。
+      try { onProcess?.(process); }
+      catch (error) { processError = error; try { process.kill(); } catch (ignored) {} }
     });
   }
 
-  return Object.freeze({ execute });
+  return Object.freeze({
+    execute,
+    cancelAllAndWait,
+    resume() {
+      // 關閉被上層取消時，只在既有 writer 全部 settle 後重新准入。
+      resumeWhenIdle = true;
+      if (directExecutions.size) return false;
+      shuttingDown = false;
+      return true;
+    },
+  });
 }
 
 module.exports = {

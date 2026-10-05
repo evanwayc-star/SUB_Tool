@@ -11,7 +11,6 @@ const mediaMock = vi.hoisted(() => ({
 
 vi.mock('../src/media.js', () => ({ Media: mediaMock }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
-vi.mock('../src/history.js', () => ({ History: { reset: vi.fn() } }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 vi.mock('../src/ui.js', () => ({
   openModal: vi.fn(),
@@ -74,7 +73,7 @@ describe('subtitle style project persistence', () => {
 
     expect(track).toMatchObject({
       name: 'Sparse',
-      fontSize: 70,
+      fontSize: 80,
       posX: 50,
       posY: 90,
       posPct: 90,
@@ -90,7 +89,7 @@ describe('subtitle style project persistence', () => {
       locked: false,
     });
     expect(effStyle(null, State.tracks[0])).toMatchObject({
-      fontSize: 70,
+      fontSize: 80,
       posY: 90,
     });
   });
@@ -206,7 +205,7 @@ describe('subtitle style project persistence', () => {
 
     const html = new DOMParser().parseFromString(readFileSync('index.html', 'utf8'), 'text/html');
     expect([...html.querySelectorAll('[data-ts-size]')].map(button => button.dataset.tsSize))
-      .toEqual(['45', '70']);
+      .toEqual(['45', '80']);
     for (const id of [
       'tsSize', 'tsColor', 'tsPosX', 'tsPosY', 'tsAngle', 'tsSpacing', 'tsLineSp',
       'tsOutlineColor', 'tsOutline', 'tsShadow', 'tsBgColor', 'tsBgAlpha',

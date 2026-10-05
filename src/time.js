@@ -16,6 +16,7 @@
    4. 容差判斷：29.97 與 23.976 的精確 FPS 容差必須小於 0.024，防範整數 24/30 FPS 被誤判。
    ============================================================================== */
 import { pad } from './util.js';
+import { exactDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 
 /**
  * 將秒數格式化為 UI 播放器毫秒制時鐘字串 (00:00:00.000)。
@@ -72,13 +73,7 @@ function secToASS(s, fps = 25) {
  * @returns {number} 精確浮點格率
  */
 export function getExactFps(fps) {
-  const rawFps = Number(fps);
-  if (!Number.isFinite(rawFps) || rawFps <= 0) return 30;
-  let exactFps = rawFps;
-  if (Math.abs(rawFps - 29.97) < 0.01) exactFps = 30000 / 1001;
-  else if (Math.abs(rawFps - 23.976) < 0.01) exactFps = 24000 / 1001;
-  else if (Math.abs(rawFps - 59.94) < 0.01) exactFps = 60000 / 1001;
-  return exactFps;
+  return exactDeliveryFrameRate(Number(fps));
 }
 
 /**

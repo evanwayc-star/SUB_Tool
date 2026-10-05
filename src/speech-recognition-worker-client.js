@@ -46,6 +46,7 @@ export class BuiltinAsrWorkerClient {
     returnTimestamps = 'word',
     language = 'zh',
     prompt = '',
+    temperature = 0,
     onProgress = null,
     signal = null
   }) {
@@ -90,7 +91,8 @@ export class BuiltinAsrWorkerClient {
           wasmDtype,
           returnTimestamps,
           language,
-          prompt
+          prompt,
+          temperature
         }, [audioFloat32.buffer]);
       } catch (error) {
         this.finishJob(job, { error });

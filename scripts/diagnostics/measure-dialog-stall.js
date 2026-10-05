@@ -21,54 +21,12 @@
    同時在【主行程】與【renderer】各埋一個事件迴圈阻塞偵測（>200ms 才記錄），
    所以「哪一條執行緒被卡住」也會直接寫在輸出裡。
 ============================================================================== */
-const http = require('http');
-const WebSocket = require('ws');
+
+
 const { execFileSync } = require('child_process');
+const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const getJSON = url => new Promise((res, rej) => {
-  http.get(url, r => {
-    let b = '';
-    r.on('data', d => { b += d; });
-    r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } });
-  }).on('error', rej);
-});
-
-function connect(target) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
-    let id = 0;
-    const pend = new Map();
-    const bail = setTimeout(() => {
-      try { ws.close(); } catch (e) {}
-      reject(new Error('連上 inspector 逾時（10 秒）——是不是已經有別的偵錯工具佔著？'));
-    }, 10000);
-    ws.on('open', () => {
-      clearTimeout(bail);
-      resolve({
-        eval: expr => new Promise((res, rej) => {
-          const i = ++id;
-          pend.set(i, { res, rej });
-          ws.send(JSON.stringify({
-            id: i, method: 'Runtime.evaluate',
-            params: { expression: expr, awaitPromise: true, returnByValue: true, includeCommandLineAPI: true },
-          }));
-        }),
-        close: () => { try { ws.close(); } catch (e) {} },
-      });
-    });
-    ws.on('message', raw => {
-      const m = JSON.parse(raw);
-      if (!m.id || !pend.has(m.id)) return;
-      const { res, rej } = pend.get(m.id);
-      pend.delete(m.id);
-      if (m.error) rej(new Error(m.error.message));
-      else if (m.result?.exceptionDetails) rej(new Error(JSON.stringify(m.result.exceptionDetails).slice(0, 300)));
-      else res(m.result?.result?.value);
-    });
-    ws.on('error', reject);
-  });
-}
 
 const inPage = js => `(async () => {
   const B = require('electron').BrowserWindow;
@@ -130,10 +88,11 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
   let t;
   try { t = (await getJSON('http://127.0.0.1:9229/json/list'))[0]; }
   catch (e) { console.error('連不上主行程的 inspector（9229）：' + e.message); process.exit(1); }
-  const main = await connect(t);
+  const main = new CdpClient((t).webSocketDebuggerUrl);
+    await main.connect();
 
   /* 主行程：攔 dialog.showOpenDialog，記錄進入／回傳的時間。 */
-  await main.eval(`(() => {
+  await main.evaluate(`(() => {
     const d = require('electron').dialog;
     if (!globalThis.__dlgArmed) {
       const orig = d.showOpenDialog.bind(d);
@@ -149,10 +108,10 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
     globalThis.__dlgLog = [];
     return true;
   })()`);
-  await main.eval(LAG_PROBE('main'));
+  await main.evaluate(LAG_PROBE('main'));
 
   /* renderer：記錄按鈕點擊時間 + 自己的阻塞偵測。 */
-  await main.eval(inPage(`(() => {
+  await main.evaluate(inPage(`(() => {
     window.__clickLog = [];
     if (!window.__clickArmed) {
       document.addEventListener('click', e => {
@@ -185,13 +144,13 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
   const deadline = Date.now() + 10 * 60 * 1000;
   let dlg = [], clk = [];
   while (Date.now() < deadline) {
-    dlg = JSON.parse(await main.eval(`JSON.stringify(globalThis.__dlgLog || [])`));
-    clk = JSON.parse(await main.eval(inPage(`JSON.stringify(window.__clickLog || [])`)));
+    dlg = JSON.parse(await main.evaluate(`JSON.stringify(globalThis.__dlgLog || [])`));
+    clk = JSON.parse(await main.evaluate(inPage(`JSON.stringify(window.__clickLog || [])`)));
     const media = clk.filter(c => /media/.test(c.act)).pop();
     if (media && dlg.some(x => x.phase === 'enter' && x.t >= media.t)) {
       /* 抓到了。再等一下把 resolved（使用者按取消／選檔）也收進來。 */
       await sleep(1500);
-      dlg = JSON.parse(await main.eval(`JSON.stringify(globalThis.__dlgLog || [])`));
+      dlg = JSON.parse(await main.evaluate(`JSON.stringify(globalThis.__dlgLog || [])`));
       break;
     }
     process.stdout.write('.');
@@ -199,9 +158,9 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
   }
   console.log('\n');
 
-  clk = JSON.parse(await main.eval(inPage(`JSON.stringify(window.__clickLog || [])`)));
-  const lagMain = JSON.parse(await main.eval(`JSON.stringify(globalThis.__lag_main || [])`));
-  const lagRend = JSON.parse(await main.eval(inPage(`JSON.stringify(window.__lag_rend || [])`)));
+  clk = JSON.parse(await main.evaluate(inPage(`JSON.stringify(window.__clickLog || [])`)));
+  const lagMain = JSON.parse(await main.evaluate(`JSON.stringify(globalThis.__lag_main || [])`));
+  const lagRend = JSON.parse(await main.evaluate(inPage(`JSON.stringify(window.__lag_rend || [])`)));
   const hhmmssms = t2 => new Date(t2).toTimeString().slice(0, 8) + '.' + String(t2 % 1000).padStart(3, '0');
 
   /* 配對【那一次】開啟影音的點擊與它之後的 showOpenDialog——不是第一次的。

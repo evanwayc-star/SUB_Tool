@@ -6,7 +6,7 @@
 ============================================================================== */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, getExactFps } from './time.js';
-import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss } from './substyle.js';
+import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss, normalizeStyleValue, normalizeStyleRecord } from './substyle.js';
 function finiteBackgroundLayout(layout){
   if(!layout || typeof layout !== 'object') return null;
   const lineIndex = Number(layout.lineIndex);
@@ -228,12 +228,6 @@ const MAX_SUBTOOL_META_SECONDS = 1000000000;
 const MAX_SUBTOOL_META_FRAME = 1000000000000;
 const TRACK_META_KEYS = new Set(['name', 'visible', 'locked', 'posPct', ...Object.keys(STYLE_DEFAULTS)]);
 const CUE_META_KEYS = new Set(['id', 'startFrame', 'endFrame', 'start', 'end', 'text', 'track', 'timed', 'style']);
-const META_STYLE_BOOL_KEYS = new Set(['bold', 'italic', 'vertical', 'bgBox']);
-const META_STYLE_COLOR_KEYS = new Set(['color', 'outlineColor', 'bgColor']);
-const META_STYLE_NUMBER_LIMITS = {
-  fontSize: [10, 300], letterSpacing: [0, 30], lineSpacing: [1, 3], outline: [0, 10], shadow: [0, 10],
-  bgAlpha: [0, 1], posX: [0, 100], posY: [0, 100], angle: [-180, 180],
-};
 
 function hasOwn(obj, key){ return Object.prototype.hasOwnProperty.call(obj, key); }
 function isPlainRecord(value){
@@ -247,41 +241,8 @@ function boundedNumber(value, min, max){
 function safeLabel(value){
   return typeof value === 'string' && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
 }
-function safeFont(value){
-  const label=safeLabel(value);
-  // metadata 會以 Base64 JSON 存放，預覽 CSS 也把字型名置於單引號內；逗號與分號都
-  // 是安全的字面字元，不能讓自產 ASS 因 `Family, Variant` 靜默失去 metadata。引號／
-  // 反斜線才會突破 CSS 字串；標準 ASS Style 的逗號限制則由其序列化層另行處理。
-  return label != null && !/['"{}\\]/.test(label) ? label : null;
-}
 function safeCueText(value){
   return typeof value === 'string' && value.length <= MAX_SUBTOOL_META_TEXT && !/[\u0000\u007f]/.test(value) ? value : null;
-}
-function normalizeStyleValue(key, value){
-  if(META_STYLE_BOOL_KEYS.has(key)) return typeof value === 'boolean' ? value : null;
-  if(META_STYLE_COLOR_KEYS.has(key)) return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : null;
-  if(key === 'font') return safeFont(value);
-  if(key === 'align') return ['left', 'center', 'right'].includes(value) ? value : null;
-  if(key === 'valign') return ['top', 'middle', 'bottom'].includes(value) ? value : null;
-  const limits=META_STYLE_NUMBER_LIMITS[key];
-  return limits ? boundedNumber(value, limits[0], limits[1]) : null;
-}
-function normalizeStyleRecord(value, strict=false){
-  if(!isPlainRecord(value)) return strict ? null : {};
-  const out={};
-  for(const [key, raw] of Object.entries(value)){
-    if(!CUE_STYLE_KEYS.includes(key)){
-      if(strict) return null;
-      continue;
-    }
-    const clean=normalizeStyleValue(key, raw);
-    if(clean == null){
-      if(strict) return null;
-      continue;
-    }
-    out[key]=clean;
-  }
-  return out;
 }
 function normalizeTrackRecord(value, strict=false){
   if(!isPlainRecord(value)) return strict ? null : {};
@@ -295,7 +256,7 @@ function normalizeTrackRecord(value, strict=false){
     if(key === 'name') clean=safeLabel(raw);
     else if(key === 'visible' || key === 'locked') clean=typeof raw === 'boolean' ? raw : null;
     else if(key === 'posPct') clean=boundedNumber(raw, 0, 100);
-    else clean=normalizeStyleValue(key, raw);
+    else clean=normalizeStyleValue(key, raw, true);
     if(clean == null){
       if(strict) return null;
       continue;
@@ -329,7 +290,7 @@ function metadataCue(value, exactFps){
   };
   if((typeof cue.id === 'string' && safeLabel(cue.id) != null) || (typeof cue.id === 'number' && Number.isSafeInteger(cue.id))) out.id=cue.id;
   if(cue.style != null){
-    const style=normalizeStyleRecord(cue.style, true);
+    const style=normalizeStyleRecord(cue.style, true, true);
     if(style == null) return null;
     if(Object.keys(style).length) out.style=style;
   }
@@ -404,7 +365,7 @@ function validateMetadataCue(value, trackCount){
     out.id=value.id;
   }
   if(hasOwn(value, 'style')){
-    const style=normalizeStyleRecord(value.style, true);
+    const style=normalizeStyleRecord(value.style, true, true);
     if(style == null) return null;
     out.style=style;
   }
@@ -537,7 +498,7 @@ function assResetMarginAnchors(style){
 }
 function assStyleFromRecord(record, res){
   const style={...STYLE_DEFAULTS};
-  const font=safeFont(uiFontNameFromAss(record.fontname)); if(font != null) style.font=font;
+  const font=normalizeStyleValue('font',uiFontNameFromAss(record.fontname)); if(font != null) style.font=font;
   const fontSize=assScaled(record.fontsize,res.scaleY,10,300); if(fontSize != null) style.fontSize=fontSize;
   const primary=assColour(record.primarycolour); if(primary) style.color=primary.color;
   const outline=assColour(record.outlinecolour || record.tertiarycolour); if(outline) style.outlineColor=outline.color;
@@ -593,7 +554,7 @@ function assApplyLeadingOverrides(baseStyle, baseMargins, text, styles, styleMar
         style={...(reset || baseStyle)};
         margins=raw ? (styleMargins.get(resetKey)||baseMargins) : baseMargins;
       }else if(tag==='fn'){
-        const font=safeFont(uiFontNameFromAss(raw)); if(font != null) style.font=font;
+        const font=normalizeStyleValue('font',uiFontNameFromAss(raw)); if(font != null) style.font=font;
       }else if(tag==='fs'){
         const relative=/^[+-]/.test(raw), sourceSize=assFinite(raw,-100000,100000);
         if(sourceSize != null){

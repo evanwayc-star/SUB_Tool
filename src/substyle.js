@@ -28,7 +28,7 @@ import { State } from './state.js';
 export const STYLE_DEFAULTS = {
   font: '更紗黑體', // 預設字型＝font/ 底下的資料夾名（v4.29.4 由台北黑體改為更紗黑體）
   bold: true, italic: false,
-  fontSize: 70, color: '#ffffff',
+  fontSize: 80, color: '#ffffff',
   letterSpacing: 1,     // px 字距（ASS Spacing / CSS letter-spacing）；直書時不適用（逐字換行）
   lineSpacing: 1.0,     // 行高倍數 1.0~3.0（CSS line-height；ASS 行間墊高 hack）；直書時＝字與字的間隔
   outline: 2,           // px 框線厚度（ASS Outline / CSS text-stroke）
@@ -50,6 +50,42 @@ export const STYLE_DEFAULTS = {
    沒有 inline tag → 由 formats.js 為有覆蓋的句子額外生一條 Style（見 STYLE_ONLY_KEYS）。 */
 export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letterSpacing','lineSpacing','outline','outlineColor','shadow','vertical','angle','posX','posY','align','valign','bgBox','bgColor','bgAlpha'];
 
+const STYLE_BOOL_KEYS = new Set(['bold','italic','vertical','bgBox']);
+const STYLE_COLOR_KEYS = new Set(['color','outlineColor','bgColor']);
+const STYLE_NUMBER_LIMITS = {
+  fontSize:[10,300], letterSpacing:[0,30], lineSpacing:[1,3], outline:[0,10], shadow:[0,10],
+  bgAlpha:[0,1], posX:[0,100], posY:[0,100], angle:[-180,180],
+};
+
+// 持久化資料只能在這個入口取得 canonical style；metadata 可要求既有的嚴格範圍。
+// 一般專案／preset 不把較大字級、畫面外座標或多圈旋轉截成 UI slider 的範圍。
+export function normalizeStyleValue(key,value,strictBounds=false){
+  if(STYLE_BOOL_KEYS.has(key)) return typeof value==='boolean' ? value : null;
+  if(STYLE_COLOR_KEYS.has(key)) return typeof value==='string' && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : null;
+  if(key==='font') return typeof value==='string' && value.length<=200 && !/[\u0000-\u001f\u007f'"{}\\]/.test(value) ? value : null;
+  if(key==='align') return ['left','center','right'].includes(value) ? value : null;
+  if(key==='valign') return ['top','middle','bottom'].includes(value) ? value : null;
+  const limits=STYLE_NUMBER_LIMITS[key];
+  if(!limits || typeof value!=='number' || !Number.isFinite(value)) return null;
+  if(strictBounds && (value<limits[0] || value>limits[1])) return null;
+  if(key==='bgAlpha' && (value<0 || value>1)) return null;
+  if(['fontSize','lineSpacing'].includes(key) && value<=0) return null;
+  if(['outline','shadow'].includes(key) && value<0) return null;
+  return value;
+}
+
+export function normalizeStyleRecord(value,strict=false,strictBounds=false){
+  if(!value || typeof value!=='object' || Array.isArray(value)
+    || ![Object.prototype,null].includes(Object.getPrototypeOf(value))) return strict ? null : {};
+  const out={};
+  for(const [key,raw] of Object.entries(value)){
+    const clean=CUE_STYLE_KEYS.includes(key) ? normalizeStyleValue(key,raw,strictBounds) : null;
+    if(clean==null){ if(strict) return null; continue; }
+    out[key]=clean;
+  }
+  return out;
+}
+
 /* 只有 ASS Style 行表達得出來的欄位（無對應 inline tag）→ 該句得自帶一條 Style */
 export const STYLE_ONLY_KEYS = ['bgBox','bgColor','bgAlpha'];
 
@@ -63,7 +99,7 @@ export function effStyle(cue, track){
   }
   if(cue && cue.style){
     for(const k of CUE_STYLE_KEYS){ if(cue.style[k] != null) st[k] = cue.style[k]; }
-    if(cue.style.bgAlpha === 0.3 && !cue.style.bgBox) st.bgAlpha = 0.5;
+    if(cue.style.bgAlpha === 0.3 && !st.bgBox) st.bgAlpha = 0.5;
   }
   return st;
 }
@@ -396,7 +432,7 @@ export function verticalAssCols(st, text, vww, vwh){
 
 /* ---- 常用樣式庫（跨專案；桌面存 config.json、網頁存 localStorage） ---- */
 /* 內建預設樣式：不可改名／刪除／編輯，永遠排在第一個，供隨時一鍵回到標準字幕外觀。
-   內容＝STYLE_DEFAULTS 本身（字級70／白字／黑框2／陰影0／中對齊＋下對齊／粗體／
+   內容＝STYLE_DEFAULTS 本身（字級80／白字／黑框2／陰影0／中對齊＋下對齊／粗體／
    座標(50%,90%)＝水平置中且貼齊 80% 安全框底線／角度0／無底色／字距行距皆 1）。
    ── 刻意直接引用 STYLE_DEFAULTS 而非另抄一份：兩份會漂掉。 */
 export const BUILTIN_PRESETS = [
@@ -404,12 +440,17 @@ export const BUILTIN_PRESETS = [
 ];
 const LS_KEY = 'subtool.subPresets';
 let _presets = null; // [{name, style:{...軌道級欄位子集}}]（僅使用者自訂；內建的不存檔）
-function validPresetList(value){
+export function validPresetList(value){
   const record = entry => entry && typeof entry === 'object' && !Array.isArray(entry);
   return (Array.isArray(value) ? value : []).filter(p => record(p)
     && typeof p.name === 'string' && p.name.trim()
     && (p.group == null || typeof p.group === 'string')
-    && (p.style == null || record(p.style)));
+    && (p.style == null || record(p.style)))
+    .map(p=>({name:p.name,...(p.group?{group:p.group}:{}),
+      ...(p.style===null?{style:null}:p.style!==undefined?{style:normalizeStyleRecord(p.style)}:{})}));
+}
+export function presetIdentity(preset){
+  return JSON.stringify([preset?.builtin===true?'builtin':'user',preset?.group||'',preset?.name||'']);
 }
 export async function loadPresets(){
   if(_presets) return _presets;
@@ -426,8 +467,14 @@ export async function loadPresets(){
     _presets.forEach(p => {
       if (!p.group && p.name && p.name.indexOf('-') > 0) {
         const idx = p.name.indexOf('-');
-        p.group = p.name.substring(0, idx).trim();
-        p.name = p.name.substring(idx + 1).trim();
+        const group = p.name.substring(0, idx).trim();
+        const name = p.name.substring(idx + 1).trim();
+        // 新版允許名稱含連字號；只有完整的舊「資料夾-名稱」才可拆分。
+        if (!group || !name) return;
+        const key = presetIdentity({ ...p, group, name });
+        if (isBuiltinPresetName(name) || _presets.some(other => other !== p && presetIdentity(other) === key)) return;
+        p.group = group;
+        p.name = name;
         migrated = true;
       }
     });
@@ -447,6 +494,23 @@ export function savePresets(list){
     if(DESK && DESK.configSave) DESK.configSave({ subPresets: _presets });
     else localStorage.setItem(LS_KEY, JSON.stringify(_presets));
   }catch(e){}
+}
+
+/* 單筆確認只重寫它的 key；持久化會複製物件，所以用原始 key＋內容辨識，
+   不把其他工作在確認期間新增的樣式庫內容回放成舊快照。 */
+export function capturePresetUpdate(preset){
+  const key=presetIdentity(preset),original=JSON.stringify(preset);
+  return patch=>{
+    const current=getPresets(),index=current.findIndex(p=>presetIdentity(p)===key);
+    if(index<0 || JSON.stringify(current[index])!==original) return {ok:false,reason:'changed'};
+    const replacement={...current[index],...patch};
+    if(!replacement.group) delete replacement.group;
+    if(isBuiltinPresetName(replacement.name) || current.some((p,i)=>i!==index && presetIdentity(p)===presetIdentity(replacement)))
+      return {ok:false,reason:'name-conflict'};
+    const next=[...current]; next[index]=replacement;
+    savePresets(next);
+    return {ok:true};
+  };
 }
 /* ---- 字幕字型（v4.25.4）：桌面版掃 <專案根>/font/，以 FontFace 註冊供預覽；
    匯出（libass）由主程序以 fontsdir 指向同一資料夾 → 預覽＝燒錄同一份字型。 ---- */

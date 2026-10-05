@@ -7,16 +7,15 @@
    這些全部跑在【主行程的 UI 執行緒】上，而原生檔案對話框的訊息迴圈也在那條執行緒。
    只要其中一段慢，「按下開啟影音 → 對話框出現」就會等那麼久。
 
-     cacheKeyFor()   statSync + open + 【同步讀前 1MB】——對象是 SMB 上的大檔
+     cacheKeyFor()   metadata + 前／中／尾段同步取樣——對象是 SMB 上的大檔
      isDirWritable() mkdir + 寫一個測試檔 + 刪掉——在 SMB 上是三次往返
      metaValid()     對 meta 裡【每一個】聲道檔各做一次 existsSync
 
-   readCache() 與 writeCacheDir() 各會呼叫一次 cacheCandidates()，
-   而 cacheCandidates() 每次都重算 cacheKeyFor()——同一次載入會重複算好幾遍。
+   重複取樣是成本比較；實際呼叫次數以當前 media-intake-runtime 的載入路徑為準。
 ============================================================================== */
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
+const { cacheKeyFor } = require('../../electron/media-intake-runtime.js');
 
 const SRC = process.argv[2];
 if (!SRC) {
@@ -33,26 +32,13 @@ const time = (label, fn) => {
   return out;
 };
 
-/* 與 electron/main.js 的 cacheKeyFor 同一份邏輯。 */
-function cacheKeyFor(src) {
-  const s = fs.statSync(src);
-  const readLen = Math.min(1024 * 1024, s.size);
-  const h = crypto.createHash('sha1').update(path.basename(src) + '|' + s.size + '|');
-  if (readLen > 0) {
-    const fd = fs.openSync(src, 'r');
-    try { const buf = Buffer.alloc(readLen); fs.readSync(fd, buf, 0, readLen, 0); h.update(buf); }
-    finally { fs.closeSync(fd); }
-  }
-  return h.digest('hex').slice(0, 16);
-}
-
 console.log(`來源：${SRC}\n`);
 
 console.log('第一次（冷）：');
 time('statSync', () => fs.statSync(SRC));
-const key = time('cacheKeyFor（含同步讀 1MB）', () => cacheKeyFor(SRC));
+const key = time('cacheKeyFor（現行來源 fingerprint）', () => cacheKeyFor(SRC));
 
-console.log('\n重複四次（載入一支素材期間會重算這麼多遍）：');
+console.log('\n重複四次（暖快取成本比較）：');
 let total = 0;
 for (let i = 0; i < 4; i++) {
   const a = process.hrtime.bigint();

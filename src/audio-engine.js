@@ -1,7 +1,7 @@
 import { State } from './state.js';
 import { clamp } from './util.js';
 import { Seq } from './sequence.js';
-import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
+import { createProjectAudioInterpretation } from './project-audio.js';
 
 /* AudioContext 的建立是這個模組唯一的外部相依，也是它長期【零測試】的原因：
    模組層直接 `new AudioContext()`，vitest 的 node 環境起不動它，jsdom 也沒有
@@ -27,6 +27,7 @@ const UNBOUND = Object.freeze({
   sourceTimeFor: () => null,
   externalSourceTimeFor: () => null,
   clipSourceTimeFor: () => 0,
+  interpretation:()=>null,
 });
 
 class AudioEngineCore {
@@ -38,6 +39,7 @@ class AudioEngineCore {
     this.analyser = null;
     this._anBuf = null;
     this._bufferClock = null;
+    this._scrubElements = new Set();
   }
 
   /* 接上播放狀態的來源。
@@ -151,6 +153,7 @@ class AudioEngineCore {
      其餘（音軌、序列模式、播放速率、時間域轉換）由 bind() 注入的 env 提供。
      時間域見鐵律 §0.5：localT 是來源時間、tlT／at 是時間軸時間，不可互換。 */
   startBuffers(offset) {
+    this.stopScrubs();
     if (!this.ctx) return null;
     const env = this._env;
     const tracks = env.tracks();
@@ -179,6 +182,7 @@ class AudioEngineCore {
   }
 
   stopBuffers() {
+    this.stopScrubs();
     for (const tr of this._env.tracks()) {
       if (tr.srcNode) {
         try { tr.srcNode.stop(); } catch (e) {}
@@ -207,6 +211,7 @@ class AudioEngineCore {
 
   /* localT＝目前 clip 的來源時間；tlT＝時間軸時間（ext-* 參考音用）。兩者不可互換，見 §0.5。 */
   startElements(localT, tlT) {
+    this.stopScrubs();
     const env = this._env;
     const seqOn = env.seqOn();
     const playbackRate = env.playbackRate();
@@ -248,6 +253,7 @@ class AudioEngineCore {
   }
 
   stopElements() {
+    this.stopScrubs();
     for (const tr of this._env.tracks()) {
       if (tr.kind === 'element' && tr.el) {
         try { tr.el.pause(); } catch (e) {}
@@ -255,9 +261,26 @@ class AudioEngineCore {
     }
   }
 
+  // 主影片與外部 element 的 clone 也屬於 transport；停止／起播時取消其待載入工作。
+  scrubElement(element,at,options={}) {
+    this._scrubElements.add(element);
+    scheduleScrub(element,at,options);
+  }
+
+  stopScrubs() {
+    for(const element of this._scrubElements) schedulers.get(element)?.cancel();
+    this._scrubElements.clear();
+    for(const track of this._env.tracks()) {
+      if(!track._scrubNode) continue;
+      try{track._scrubNode.stop();}catch(_){}
+      try{track._scrubNode.disconnect();}catch(_){}
+      track._scrubNode=null;
+    }
+  }
+
   /* at＝【時間軸時間】（鐵律 §0.5）。序列模式下才轉成來源時間。
-     回傳 { scrubMainVideo, localT }：scrubMainVideo=true 代表沒有任何可聽的
-     Web Audio 軌，呼叫端要改為 scrub 主 <video>。 */
+     回傳 { scrubMainVideo, localT }：主影片沒有同源替代音軌時，呼叫端還須
+     scrub 主 <video>；其他來源的 buffer／element 已在這裡一併排程。 */
   scrub(at, duration = 0.08) {
     const env = this._env;
     if (env.playing() || env.muted()) return;
@@ -271,12 +294,17 @@ class AudioEngineCore {
       if (!c || c.id !== env.activeClipId()) return;
       localT = env.clipSourceTimeFor(t, c);
     }
+    const timeFor = tr => {
+      const source = tr.source || 'video';
+      if (source.startsWith('ext-')) return env.externalSourceTimeFor(source, t);
+      return env.seqOn() ? env.sourceTimeFor(source, t) : localT;
+    };
 
     /* 預覽語意：被來源篩選藏起來的聲道不算進 Solo（respectHidden:true）。
        這一行以前寫 `tracks.some(x => x.solo)`——沒有排除 _srcHidden，
        與同一個函式下方第二處判斷【不一致】。規則現在只有 project-audio.js 一份。 */
-    const anySolo = anySourceSolo(tracks, { respectHidden: true });
-
+    const interpretation=env.interpretation()||createProjectAudioInterpretation({mediaTracks:tracks});
+    const stateFor=track=>interpretation.trackState(track);
     if (this.ctx) {
       if (this.ctx.state === 'suspended') {
         try { this.ctx.resume(); } catch (e) {}
@@ -284,8 +312,10 @@ class AudioEngineCore {
       for (const tr of tracks) {
         if (tr._srcHidden) continue;
         if (tr.kind === 'buffer' && tr.buffer) {
-          const audible = sourceTrackAudible(tr, anySolo);
-          if (audible) {
+          const audible = stateFor(tr).audible;
+          const offset = timeFor(tr);
+          if (audible && offset != null) {
+            if(tr.gain?.gain) tr.gain.gain.value=stateFor(tr).gain;
             if (tr._scrubNode) { try { tr._scrubNode.stop(); } catch (e) {} }
             try {
               const src = this.ctx.createBufferSource();
@@ -293,7 +323,7 @@ class AudioEngineCore {
               src.playbackRate.value = playbackRate || 1;
               src.connect(tr.gain);
               const maxDur = Math.max(0, (tr.buffer.duration || 0) - 0.01);
-              src.start(0, clamp(localT, 0, maxDur), duration);
+              src.start(0, clamp(offset, 0, maxDur), duration);
               tr._scrubNode = src;
             } catch (e) {}
           }
@@ -301,30 +331,34 @@ class AudioEngineCore {
       }
     }
 
-    const activeMix = tracks.some(tr =>
-      (tr.kind === 'buffer' || tr.kind === 'element') && !tr._srcHidden && sourceTrackAudible(tr, anySolo));
-
-    if (!activeMix && (activeSource === 'video' || activeSource === null)) {
-      // Return true to indicate main video should be scrubbed
-      return { scrubMainVideo: true, localT };
-    }
+    const scrubMainVideo = (!tracks.length || tracks.some(tr =>
+      (tr.kind==='native'||tr.kind==='nativeTrack') && stateFor(tr).audible && timeFor(tr)!=null))
+      && (activeSource === 'video' || activeSource === null);
     
+    const groups=new Map();
     for (const tr of tracks) {
       if (tr._srcHidden) continue;
       if (tr.kind === 'element' && tr.el) {
-        const audible = sourceTrackAudible(tr, anySolo);
+        const state=stateFor(tr);
+        const audible = state.audible;
         if (audible) {
-          const source = tr.source || '';
-          const off = source.startsWith('ext-') ? env.externalSourceTimeFor(source, t) : localT;
+          const off = timeFor(tr);
           if (off != null) {
-            const rate = env.playbackRate();
-            const preservesPitch = rate >= 0.25 && rate <= 4;
-            scheduleScrub(tr.el, off, { rate, preservesPitch, isMuted: env.muted(), durationMs: duration * 1000 });
+            if(tr.gain?.gain) tr.gain.gain.value=state.gain;
+            const siblings=tracks.filter(other=>other.kind==='element'&&other.el===tr.el);
+            const group=groups.get(tr.el)||{off,routes:[],channels:siblings.length};
+            group.routes.push({gain:tr.gain,channel:siblings.indexOf(tr)});
+            groups.set(tr.el,group);
           }
         }
       }
     }
-    return { scrubMainVideo: false, localT };
+    for(const [element,group] of groups){
+      const rate=env.playbackRate();
+      this.scrubElement(element,group.off,{rate,preservesPitch:rate>=0.25&&rate<=4,isMuted:env.muted(),durationMs:duration*1000,
+        context:this.ctx,routes:group.routes,channels:group.channels});
+    }
+    return { scrubMainVideo, localT };
   }
 }
 
@@ -349,12 +383,16 @@ class ElementScrubber {
     this.playPromise = null;
     this.pauseTimer = null;
     this.pending = null;
+    this.destroyed=false;
+    this.generation=0;
+    this.node=null;
+    this.splitter=null;
   }
   
-  scrub(targetT, { rate = 1, preservesPitch = false, isMuted = false, durationMs = 150 }) {
-    if (!this.sourceEl.src) return;
+  scrub(targetT, { rate = 1, preservesPitch = false, isMuted = false, durationMs = 150,context=null,routes=null,channels=1 }) {
+    if (this.destroyed||!this.sourceEl.src) return;
     
-    this.pending = { targetT, rate, preservesPitch, isMuted, durationMs };
+    this.pending = { targetT, rate, preservesPitch, isMuted, durationMs,context,routes,channels };
     
     if (this.playPromise) {
       // Let the current play finish, the pending one will be picked up
@@ -365,28 +403,38 @@ class ElementScrubber {
   }
   
   _processPending() {
-    if (!this.pending) return;
+    if (this.destroyed||!this.pending) return;
     const task = this.pending;
     this.pending = null;
+    const generation = ++this.generation;
+    const source = this.sourceEl.src;
+    const metadataReady = () => {
+      if (this.destroyed || generation !== this.generation || source !== this.sourceEl.src) return;
+      this.scrubEl.onloadedmetadata = null;
+      this._execute(task);
+    };
     
     if (this.scrubEl.src !== this.sourceEl.src) {
       this.scrubEl.src = this.sourceEl.src;
-      this.scrubEl.onloadedmetadata = () => {
-        this.scrubEl.onloadedmetadata = null;
-        this._execute(task);
-      };
+      this.scrubEl.onloadedmetadata = metadataReady;
     } else if (this.scrubEl.readyState >= 1) {
       this._execute(task);
     } else {
-      this.scrubEl.onloadedmetadata = () => {
-        this.scrubEl.onloadedmetadata = null;
-        this._execute(task);
-      };
+      this.scrubEl.onloadedmetadata = metadataReady;
     }
   }
   
   _execute(task) {
+    if(this.destroyed) return;
+    const generation=this.generation;
     clearTimeout(this.pauseTimer);
+    if(task.context&&task.routes){
+      if(!this.node) this.node=task.context.createMediaElementSource(this.scrubEl);
+      this.node.disconnect();this.splitter?.disconnect();
+      this.splitter=task.context.createChannelSplitter(Math.max(1,task.channels));
+      this.node.connect(this.splitter);
+      for(const route of task.routes){ if(route.gain) this.splitter.connect(route.gain,route.channel); }
+    }
     
     this.scrubEl.playbackRate = task.rate;
     if ('preservesPitch' in this.scrubEl) {
@@ -400,6 +448,7 @@ class ElementScrubber {
     if (p !== undefined) {
       this.playPromise = p;
       p.then(() => {
+        if(this.destroyed||generation!==this.generation) return;
         this.playPromise = null;
         if (this.pending) {
           // If a new scrub request came in while we were playing, execute it immediately instead of pausing
@@ -408,23 +457,32 @@ class ElementScrubber {
         } else {
           // No pending scrubs, schedule the pause
           this.pauseTimer = setTimeout(() => {
-            this.scrubEl.pause();
+            if(generation===this.generation) this.scrubEl.pause();
           }, task.durationMs);
         }
       }).catch(() => {
+        if(this.destroyed||generation!==this.generation) return;
         this.playPromise = null;
         if (this.pending) this._processPending();
       });
     } else {
       // For older browsers where play() doesn't return a promise
       this.pauseTimer = setTimeout(() => {
-        this.scrubEl.pause();
+        if(generation===this.generation) this.scrubEl.pause();
       }, task.durationMs);
     }
   }
   
-  destroy() {
+  cancel() {
+    this.pending=null;this.generation++;this.playPromise=null;
     clearTimeout(this.pauseTimer);
+    this.scrubEl.onloadedmetadata=null;
+    try{this.scrubEl.pause();}catch(_){}
+    try{this.node?.disconnect();this.splitter?.disconnect();}catch(_){}
+  }
+
+  destroy() {
+    this.cancel();this.destroyed=true;
     this.scrubEl.src = '';
   }
 }

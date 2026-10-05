@@ -5,8 +5,8 @@
 const fs=require('fs');
 const os=require('os');
 const path=require('path');
-const {spawn,execFileSync}=require('child_process');
-const {ROOT,ELECTRON,delay,reservePort,getJSON,waitFor,CdpClient,verifiedCleanup}=require('./cdp-electron-harness.js');
+const {spawn}=require('child_process');
+const {ROOT,ELECTRON,delay,reservePort,getJSON,waitFor,CdpClient, trackElectron, stopElectron,verifiedCleanup}=require('./cdp-electron-harness.js');
 const PACKAGED_EXE=process.env.SUBTOOL_ACCEPTANCE_EXE ? path.resolve(process.env.SUBTOOL_ACCEPTANCE_EXE) : null;
 
 async function main(){
@@ -23,10 +23,10 @@ async function main(){
   const errors=[];
   try{
     const port=await reservePort();
-    child=spawn(PACKAGED_EXE||ELECTRON,[...(!PACKAGED_EXE?['.']:[]),`--remote-debugging-port=${port}`,`--user-data-dir=${profile}`,
+    child=trackElectron(spawn(PACKAGED_EXE||ELECTRON,[...(!PACKAGED_EXE?['.']:[]),`--remote-debugging-port=${port}`,`--user-data-dir=${profile}`,
       '--subtool-transport-acceptance','--no-sandbox','--disable-background-timer-throttling',
       '--disable-renderer-backgrounding','--disable-backgrounding-occluded-windows',project],{
-      cwd:ROOT,env:{...process.env,TEMP:temp,TMP:temp,TMPDIR:temp},windowsHide:true,stdio:['ignore','ignore','pipe']});
+      cwd:ROOT,env:{...process.env,TEMP:temp,TMP:temp,TMPDIR:temp},windowsHide:true,stdio:['ignore','ignore','pipe']}));
     child.stderr.on('data',chunk=>errors.push(chunk.toString()));
     const target=await waitFor(async()=>{
       const targets=await getJSON(`http://127.0.0.1:${port}/json/list`);
@@ -114,10 +114,7 @@ async function main(){
     throw error;
   }finally{
     client?.close();
-    if(child){
-      try{ execFileSync('taskkill',['/PID',String(child.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'}); }catch(e){}
-      if(child.exitCode===null) await Promise.race([new Promise(resolve=>child.once('close',resolve)),delay(5000)]);
-    }
+    await stopElectron(child);
     verifiedCleanup(profile,'subtool-preview-cdp-');
   }
 }

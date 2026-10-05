@@ -12,6 +12,7 @@ const {
   updateLease,
   releaseLease,
   listLeases,
+  stageOutputPath,
 } = require('./export-lease');
 
 const CONTROL_PROTOCOL_VERSION = 1;
@@ -59,12 +60,18 @@ function validateConfig(config) {
   if (config.cwd != null && (typeof config.cwd !== 'string' || !config.cwd.trim())) {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog cwd 必須是有效路徑');
   }
+  if (config.args.at(-1) !== config.outPath) {
+    throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog 的最後一個 FFmpeg 參數必須是單一 outPath');
+  }
   if (isDiscOutput(config.outputFormat)
-    && (config.args.at(-1) !== config.outPath || path.extname(config.outPath).toLowerCase() !== '.iso')) {
+    && path.extname(config.outPath).toLowerCase() !== '.iso') {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '光碟匯出必須使用單一 ISO 輸出路徑');
   }
   if (config.outputPaths != null) {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog 僅接受單一 outPath');
+  }
+  if (config.stagePath != null) {
+    throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出暫存路徑只能由 watchdog 建立');
   }
 }
 
@@ -291,21 +298,20 @@ async function startWatchdogRuntime(config, options = {}) {
 
   const token = crypto.randomBytes(32).toString('hex');
   const pipeName = makePipeName();
+  const stagePath = stageOutputPath(config.outPath, token);
   let artifactTempDir = null;
   let leasesAcquired = false;
   let starting = true;
-  let outputStarted = false;
   let child = null;
   let childClosed = false;
   let cleanupReason = null;
   let finalizing = null;
   let finalResult = null;
   const finalizerAbort = new AbortController();
-  const artifact = createExportArtifact(config, {
+  const artifact = createExportArtifact({ ...config, stagePath }, {
     signal: finalizerAbort.signal,
     onOutputStart: () => {
       if (leasesAcquired) updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, outputStarted: true });
-      outputStarted = true;
     },
     onProcess: childProcess => updateLease({
       queueDir: config.queueDir, outPath: config.outPath, token, ffmpegPid: childProcess.pid,
@@ -335,15 +341,30 @@ async function startWatchdogRuntime(config, options = {}) {
       childError ||= artifactResult.error;
       cleanupReason ||= artifactResult.reason;
       const stageCleanupError = artifactResult.cleanupError ? serializeError(artifactResult.cleanupError) : null;
-      const needsCleanup = !!cleanupReason || childError || code !== 0;
+      let outputCommitted = false;
+      if (!cleanupReason && !childError && code === 0 && !finalizerAbort.signal.aborted) {
+        try {
+          const stageInfo = await fs.promises.lstat(stagePath);
+          if (!stageInfo.isFile() || stageInfo.size <= 0) {
+            throw errorWithCode('INVALID_DELIVERY_STAGE', '匯出暫存成品缺少有效檔案內容');
+          }
+          finalizerAbort.signal.throwIfAborted();
+          // Both paths are in the same output directory. After FFmpeg and any
+          // format-specific checks succeed, this rename is the commit point.
+          await fs.promises.rename(stagePath, config.outPath);
+          outputCommitted = true;
+        } catch (error) {
+          childError = error;
+          cleanupReason = 'artifact-commit-failed';
+        }
+      }
+      const needsCleanup = !outputCommitted;
       let cleanup = null;
       let release = null;
 
       if (needsCleanup) {
         const deletion = leasesAcquired
-          ? { outPath: config.outPath, ...(outputStarted
-            ? await deletePartialFile(config.outPath, options)
-            : { removed: false, missing: false, untouched: true }) }
+          ? { outPath: config.outPath, stagePath, ...await deletePartialFile(stagePath, options) }
           : { removed: false, missing: false, untouched: true };
         const failed = (!deletion.removed && !deletion.missing && !deletion.untouched ? deletion : null) || stageCleanupError;
         cleanup = {
@@ -468,7 +489,7 @@ async function startWatchdogRuntime(config, options = {}) {
     const lease = await Promise.resolve(acquireLease({
       queueDir: config.queueDir, outPath: config.outPath, jobId: config.jobId,
       token, watchdogPid: process.pid, pipeName,
-      outputStarted: false,
+      outputStarted: false, stagePath,
     }));
     leasesAcquired = true;
     artifactTempDir = lease.lockPath;
@@ -748,9 +769,13 @@ async function recoverExportLeases(queueDir, options = {}) {
         message: '匯出程序仍可能執行中，暫存檔與輸出鎖已保留' });
       continue;
     }
-    const deletion = owner.outputStarted === false
-      ? { removed: false, missing: false, untouched: true }
-      : await deletePartialFile(owner.outPath, options);
+    // New leases only own their token-derived sibling stage. Older leases
+    // predate this field and retain their original partial-file semantics.
+    const deletion = owner.stagePath
+      ? await deletePartialFile(owner.stagePath, options)
+      : owner.outputStarted === false
+        ? { removed: false, missing: false, untouched: true }
+        : await deletePartialFile(owner.outPath, options);
     if (!deletion.removed && !deletion.missing && !deletion.untouched) {
       warnings.push({
         code: 'PARTIAL_CLEANUP_FAILED',

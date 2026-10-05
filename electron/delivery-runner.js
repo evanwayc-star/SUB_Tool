@@ -44,18 +44,6 @@ function createDeliveryRunner(options = {}) {
     return true;
   }
 
-  function activeRecord(jobId, controller, outPath) {
-    return {
-      id: jobId,
-      controller,
-      p: controller.process,
-      stop: controller.stop,
-      completion: controller.completion,
-      outPath,
-      stopped: false,
-    };
-  }
-
   async function run(job) {
     const payload = job?.payload || {};
     const {
@@ -89,7 +77,42 @@ function createDeliveryRunner(options = {}) {
     }
 
     let assName = null;
+    const abort = new AbortController();
+    let finish;
+    const active = {
+      id: jobId, controller: null, p: null, outPath, stopped: false, shutdown: false,
+      completion: new Promise(resolve => { finish = resolve; }),
+      stop(reason) {
+        if (reason === 'shutdown') { if (!active.stopped) active.shutdown = true; }
+        else active.stopped = true;
+        abort.abort();
+        active.controller?.stop?.(reason);
+      },
+    };
+    queue.registerActiveJob(jobId, active);
+    const checkCancelled = () => {
+      if (!abort.signal.aborted) return;
+      const error = new Error('交付工作已取消');
+      error.name = 'AbortError';
+      throw error;
+    };
+    const settleProbes = async promises => {
+      let firstFailure = null;
+      const outcomes = await Promise.allSettled(promises.map(promise => Promise.resolve(promise).catch(error => {
+        firstFailure ||= { error };
+        abort.abort();
+        throw error;
+      })));
+      if (firstFailure) throw firstFailure.error;
+      return outcomes.map(outcome => outcome.value);
+    };
+    const ownController = controller => {
+      active.controller = controller;
+      active.p = controller.process;
+      if (abort.signal.aborted) controller.stop?.(active.stopped ? 'user-stop' : 'shutdown');
+    };
     try {
+      checkCancelled();
       fs.mkdirSync(tempDir, { recursive: true });
       if (assText && assText.trim()) {
         assName = QueueStore.burnAssFileName(jobId);
@@ -100,14 +123,16 @@ function createDeliveryRunner(options = {}) {
       const sourcePaths = [...new Set((clips || [])
         .filter(clip => clip?.path && clip.type !== 'image')
         .map(clip => clip.path))];
-      const audioPresence = new Map(await Promise.all(sourcePaths
-        .map(async sourcePath => [sourcePath, await probe.hasAudio(sourcePath)])));
+      const audioPresence = new Map(await settleProbes(sourcePaths
+        .map(async sourcePath => [sourcePath, await probe.hasAudio(sourcePath, { signal: abort.signal })])));
+      checkCancelled();
       const sourceStartOffsets = new Map();
       if (getDeliveryFormatPreset(format)?.transport === 'airline' && probe.audioVideoStartOffsets) {
-        await Promise.all(sourcePaths.filter(sourcePath => audioPresence.get(sourcePath))
+        await settleProbes(sourcePaths.filter(sourcePath => audioPresence.get(sourcePath))
           .map(async sourcePath => sourceStartOffsets.set(sourcePath,
-            await probe.audioVideoStartOffsets(sourcePath))));
+            await probe.audioVideoStartOffsets(sourcePath, { signal: abort.signal }))));
       }
+      checkCancelled();
       const plan = buildDeliveryArgv({
         format, clips, videoTracks, width, height, fps, duration, videoKbps,
         audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName: assName, outPath,
@@ -127,11 +152,10 @@ function createDeliveryRunner(options = {}) {
 
       if (isWav) {
         await runFfmpeg(args, {
-          duration: plannedDuration, jobId, label, outPath,
+          executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, outPath,
           onProgress: sendProgress,
-          onProcess: controller => queue.registerActiveJob(jobId, activeRecord(jobId, controller, outPath)),
+          onProcess: ownController,
         });
-        queue.clearActiveJob(jobId);
         sendProgress({
           jobId, label, pct: 100, done: true,
           result: {
@@ -144,17 +168,24 @@ function createDeliveryRunner(options = {}) {
 
       let usedEncoder = plan.plannedEncoder;
       const result = await runFfmpeg(args, {
-        duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
+        executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
         outputFormat: format,
         ...(isDisc ? { discAudioPlan: plan.discAudioPlan, discVideoFps: plan.discVideoFps } : {}),
         onProgress: sendProgress,
-        onProcess: controller => queue.registerActiveJob(jobId, activeRecord(jobId, controller, outPath)),
+        onProcess: ownController,
       });
       const videoMap = (result.maps || []).find(map => /->/.test(map) && /h264|prores|hevc|mpeg[12]video/i.test(map));
       const encoderMatch = videoMap && /->\s*[^(]*\(([^)]+)\)\s*$/.exec(videoMap.trim());
       if (encoderMatch) usedEncoder = encoderMatch[1].trim();
 
-      queue.clearActiveJob(jobId);
+      // watchdog 已發佈成品後，取消結果資訊 probe 只能略過 metadata，不能把成品降回失敗。
+      active.controller = null;
+      active.p = null;
+      let audioActualBitrates = null;
+      if (!isPro && !isDisc) {
+        try { audioActualBitrates = await probe.audioBitrates(outPath, { signal: abort.signal }); }
+        catch (error) { if (!abort.signal.aborted) throw error; }
+      }
       sendProgress({
         jobId, label, pct: 100, done: true,
         result: {
@@ -165,22 +196,22 @@ function createDeliveryRunner(options = {}) {
           elapsedMs: now() - startedAt,
           videoKbps: isPro ? null : kbps,
           audioBitrates: isPro ? null : audioBitrates,
-          audioActualBitrates: isPro || isDisc ? null : await probe.audioBitrates(outPath),
+          audioActualBitrates,
         },
       });
     } catch (error) {
-      const active = queue.activeJob(jobId);
       const progress = failureProgress({
         stopped: !!active?.stopped,
         shutdown: !!active?.shutdown,
         error,
       });
-      queue.clearActiveJob(jobId);
       if (progress) sendProgress({ jobId, ...progress });
     } finally {
       if (assName) {
         try { fs.unlinkSync(path.join(tempDir, assName)); } catch (error) {}
       }
+      queue.clearActiveJob(jobId);
+      finish();
     }
   }
 

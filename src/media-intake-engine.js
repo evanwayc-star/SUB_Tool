@@ -63,45 +63,6 @@ function disposeAudioElements(elements) {
   }
 }
 
-function waitForMetadata(element, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let timer = null;
-    const hasEventListeners = typeof element.addEventListener === 'function';
-    const previousMetadata = element.onloadedmetadata;
-    const previousError = element.onerror;
-    const remove = () => {
-      clearTimeout(timer);
-      if (hasEventListeners) {
-        element.removeEventListener?.('loadedmetadata', onMetadata);
-        element.removeEventListener?.('error', onError);
-      } else {
-        if (element.onloadedmetadata === onMetadata) element.onloadedmetadata = previousMetadata;
-        if (element.onerror === onError) element.onerror = previousError;
-      }
-    };
-    const finish = error => {
-      if (settled) return;
-      settled = true;
-      remove();
-      if (error) reject(error);
-      else resolve(element);
-    };
-    const onMetadata = () => finish(Number(element.readyState) >= 1
-      ? null : new Error('音訊 metadata 尚未就緒'));
-    const onError = () => finish(new Error('音訊 metadata 讀取失敗'));
-    if (hasEventListeners) {
-      element.addEventListener('loadedmetadata', onMetadata);
-      element.addEventListener('error', onError);
-    } else {
-      element.onloadedmetadata = onMetadata;
-      element.onerror = onError;
-    }
-    timer = setTimeout(() => finish(new Error('音訊 metadata 讀取逾時')), Math.max(1, timeoutMs));
-    if (Number(element.readyState) >= 1) finish();
-  });
-}
-
 /**
  * 等待媒體元素載入中繼資料，並在工作階段失去所有權時安全取消。
  */
@@ -109,17 +70,27 @@ export function waitForOwnedMediaMetadata(element, {
   owns = () => true,
   timeoutMs = 10000,
   pollMs = 25,
+  signal = null,
 } = {}) {
   const stillOwns = typeof owns === 'function' ? owns : () => true;
   return new Promise(resolve => {
     let settled = false;
     let timer = null;
     let poll = null;
+    const eventAdapter=typeof element?.addEventListener==='function';
+    const previousMetadata=element?.onloadedmetadata;
+    const previousError=element?.onerror;
     const remove = () => {
       if (timer) clearTimeout(timer);
       if (poll) clearInterval(poll);
-      element?.removeEventListener?.('loadedmetadata', onMetadata);
-      element?.removeEventListener?.('error', onError);
+      signal?.removeEventListener('abort',onAbort);
+      if(eventAdapter){
+        element.removeEventListener?.('loadedmetadata',onMetadata);
+        element.removeEventListener?.('error',onError);
+      }else if(element){
+        if(element.onloadedmetadata===onMetadata) element.onloadedmetadata=previousMetadata;
+        if(element.onerror===onError) element.onerror=previousError;
+      }
     };
     const finish = outcome => {
       if (settled) return;
@@ -128,14 +99,21 @@ export function waitForOwnedMediaMetadata(element, {
       resolve(outcome);
     };
     const check = () => {
-      if (!stillOwns()) finish('cancelled');
+      if (signal?.aborted||!stillOwns()) finish('cancelled');
       else if (Number(element?.readyState) >= 1) finish('ready');
     };
-    const onMetadata = () => finish(stillOwns() ? 'ready' : 'cancelled');
+    const onMetadata = () => finish(stillOwns() ? (Number(element?.readyState)>=1?'ready':'error') : 'cancelled');
     const onError = () => finish(stillOwns() ? 'error' : 'cancelled');
+    const onAbort=()=>finish('cancelled');
 
-    element?.addEventListener?.('loadedmetadata', onMetadata, { once: true });
-    element?.addEventListener?.('error', onError, { once: true });
+    if(eventAdapter){
+      element.addEventListener('loadedmetadata',onMetadata,{once:true});
+      element.addEventListener('error',onError,{once:true});
+    }else if(element){
+      element.onloadedmetadata=onMetadata;
+      element.onerror=onError;
+    }
+    signal?.addEventListener('abort',onAbort,{once:true});
     timer = setTimeout(() => finish(stillOwns() ? 'timeout' : 'cancelled'), Math.max(1, timeoutMs));
     poll = setInterval(check, Math.max(1, pollMs));
     check();
@@ -184,26 +162,55 @@ export class MediaIntakeSession {
   } = {}) {
     const list = Array.isArray(channels) ? channels : [];
     if (!owns()) return null;
-
-    const outcomes = await Promise.all(list.map(async channel => {
+    const controller = new AbortController();
+    const created = [];
+    let failure = null;
+    let resolveCancellation;
+    const cancellation = new Promise(resolve => { resolveCancellation = resolve; });
+    const stillOwns = () => owns() && !controller.signal.aborted;
+    const cancel = () => {
+      if (controller.signal.aborted) return;
+      controller.abort();
+      disposeAudioElements(created);
+      resolveCancellation(null);
+    };
+    // The group owns URL resolution as well as metadata. A channel still waiting
+    // for IPC must not keep ready siblings alive after replacement or failure.
+    const poll = setInterval(() => { if (!owns()) cancel(); }, 25);
+    const timer = setTimeout(() => {
+      if (owns()) failure = new Error('音訊 metadata 讀取逾時');
+      cancel();
+    }, Math.max(1, timeoutMs));
+    const materializing = Promise.all(list.map(async channel => {
       let element = null;
       try {
         const url = await resolveFileURL(channel.file);
-        if (!owns()) return { element: null, error: null };
+        if (!stillOwns()) return { element: null, error: null };
         element = createAudio();
+        created.push(element);
         element.src = url;
         element.preload = 'auto';
-        return { element: await waitForMetadata(element, timeoutMs), error: null };
+        const outcome=await waitForOwnedMediaMetadata(element,{owns:stillOwns,timeoutMs,signal:controller.signal});
+        if(outcome==='cancelled'){cancel();return {element:null,error:null};}
+        if(outcome!=='ready') throw new Error(outcome==='timeout'?'音訊 metadata 讀取逾時':'音訊 metadata 讀取失敗');
+        return { element, error: null };
       } catch (error) {
-        disposeAudioElements([element]);
+        if(owns()&&!controller.signal.aborted) failure=error;
+        cancel();
         return { element: null, error };
       }
     }));
+    const outcomes = await Promise.race([materializing, cancellation]);
+    clearInterval(poll);
+    clearTimeout(timer);
+    if (!outcomes) {
+      if (failure && owns()) throw failure;
+      return null;
+    }
     const elements = outcomes.map(outcome => outcome.element);
-    const failure = outcomes.find(outcome => outcome.error)?.error;
-    if (failure || !owns()) {
-      disposeAudioElements(elements);
-      if (failure) throw failure;
+    if (failure || !owns() || controller.signal.aborted) {
+      cancel();
+      if (failure&&owns()) throw failure;
       return null;
     }
     return elements;

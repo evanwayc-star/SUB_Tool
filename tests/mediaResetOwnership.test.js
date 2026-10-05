@@ -59,6 +59,152 @@ vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePla
 let Media, Wave, State, resetAudioProject, resetPlayerAdapter;
 
 describe('reset-scoped media ownership', () => {
+  it('播放gap中改倍速不跳時間，後續時鐘才採用新斜率',()=>{
+    let now=0;
+    const clock=vi.spyOn(Media._transport,'_now').mockImplementation(()=>now);
+    domMock.video.playbackRate=1;
+    Media._transport.enterGap(10,{running:true});now=2000;
+    expect(Media._transport.gapTimeAt(1)).toBe(12);
+    Media.setRate(2);
+    expect(Media._transport.gapTimeAt(2)).toBe(12);
+    now=3000;expect(Media._transport.gapTimeAt(2)).toBe(14);
+    Media.setRate(0.5);expect(Media._transport.gapTimeAt(0.5)).toBe(14);
+    now=5000;expect(Media._transport.gapTimeAt(0.5)).toBe(15);
+    Media._transport.freezeGap({playbackRate:0.5});Media.setRate(1);
+    now=9000;expect(Media._transport.gapTimeAt(1)).toBe(15);
+    clock.mockRestore();domMock.video.playbackRate=1;
+  });
+
+  it.each(['primary','secondary','external'])('late %s 原音cache只供還原，不能覆蓋已安裝effect與wave',async kind=>{
+    resetAudioProject();Media.ensureCtx();
+    const processing={max:-6,min:-12,inputBoost:0};
+    const processedPeaks=new Float32Array([0.05]),rawPeaks=new Float32Array([0.2]);
+    let owner;
+    if(kind==='external') owner=Media.createExternalAudioSource({name:'A.wav',path:'C:/A.wav',duration:10,fallbackCount:1,audioLimiterSpec:processing});
+    else{
+      owner={id:'A',name:'A.mov',path:'C:/A.mov',dur:10,in:0,out:10,offset:0,vtrack:0,
+        primary:kind==='primary',audioSrc:kind==='primary'?'video':'clip:A',audioSourceId:'mother',audioLimiterSpec:processing};
+      State.clips=[owner];
+    }
+    owner.peaks=processedPeaks;
+    const processed={id:'processed',kind:'element',source:owner.audioSrc,audioSourceId:owner.audioSourceId,
+      sourceStream:0,sourceChannel:0,_audioEffect:true,file:'processed.wav',volume:0.4,solo:true,muted:false,
+      el:{pause:vi.fn(),src:'processed.wav'},gain:{gain:{value:0.4},disconnect:vi.fn()}};
+    Media.tracks=[processed];Wave.peaks=processedPeaks;
+    const gate=deferred();desktopMock.ingest.mockReturnValue(gate.promise);
+    desktopMock.fileURL.mockImplementation(path=>Promise.resolve('file:///'+path));
+    const original={pause:vi.fn(),src:'raw.m4a'};
+    const elements=vi.spyOn(Media._intakeSession,'materializeAudioElements').mockResolvedValue([original]);
+    const peaks=vi.spyOn(Wave,'calcFromWav').mockReturnValue(rawPeaks);
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:async()=>new ArrayBuffer(2)}));
+    try{
+      const pending=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],10,owner,{needsProxy:false})
+        :kind==='secondary'?Media._clipIngest(owner,{audio:[{channels:1}]})
+          :Media.cacheExternalRoutingAudio(owner,owner.path,10,[{channels:1}]);
+      gate.resolve({channels:[{file:'raw.m4a',sourceStream:0,sourceChannel:0}],wave:'raw-wave.wav'});
+      await pending;
+      expect(Media.tracks).toEqual([processed]);
+      expect(processed.el.src).toBe('processed.wav');
+      expect(owner.peaks).toBe(processedPeaks);
+      expect(Media._effectOriginalPeaks.get(owner.audioSourceId)).toBe(rawPeaks);
+      expect(Media._effectOriginalTracks.get(owner.audioSourceId)[0]).toMatchObject({file:'raw.m4a',volume:0.4,solo:true});
+      expect(Media._effectOriginalTracks.get(owner.audioSourceId)[0].gain.gain.value).toBe(0);
+      Media._installAudioEffect(owner,null,null);
+      expect(Media.tracks).toHaveLength(1);
+      expect(Media.tracks[0].file).toBe('raw.m4a');
+      expect(Media.tracks[0]._audioEffect).not.toBe(true);
+      expect(owner.peaks).toBe(rawPeaks);
+    }finally{elements.mockRestore();peaks.mockRestore();vi.unstubAllGlobals();}
+  });
+
+  it('解除切割影片保留兩段的效果與原淡化視窗',async()=>{
+    resetAudioProject();
+    const left={id:'left',name:'A.mov',path:'C:/A.mov',dur:10,in:0,out:5,offset:0,vtrack:0,
+      audioSrc:'video',audioSourceId:'mother',fadeIn:8,fadeOut:3,fadeSourceOffset:0,fadeSourceLength:10,
+      hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12,inputBoost:0}};
+    const right={...left,id:'right',in:5,out:10,offset:5,fadeSourceOffset:5};State.clips=[left,right];
+    const cache=vi.spyOn(Media,'_addDesktopCachedAudio').mockImplementation(async(path,restore)=>Media.createExternalAudioSource({...restore,path,fallbackCount:1}));
+    try{
+      const result=await Media.detachClipAudio('left');
+      expect(result).toHaveLength(2);
+      expect(result.map(asset=>asset.fadeSourceOffset)).toEqual([0,5]);
+      for(const asset of result) expect(asset).toMatchObject({fadeIn:8,fadeOut:3,fadeSourceLength:10,hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12},path:'C:/A.mov'});
+      expect(State.clips.every(item=>item.audioDetached)).toBe(true);
+    }finally{cache.mockRestore();}
+  });
+  it.each(['loadfile','mute','direction'])('reset 撤銷倒放 %s 之後的 continuation，不污染下一個來源',async stage=>{
+    const gate=deferred();
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true}),quit:vi.fn().mockResolvedValue(),
+      loadfile:vi.fn(()=>stage==='loadfile'?gate.promise:Promise.resolve({ok:true})),
+      mute:vi.fn(()=>stage==='mute'?gate.promise:Promise.resolve()),
+      direction:vi.fn(()=>stage==='direction'?gate.promise:Promise.resolve(true)),seek:vi.fn().mockResolvedValue(true),
+    };
+    desktopMock.mpv=bridge;
+    const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    await runtime.enterMpv({src:'old.mov'});
+    State.clips=[{id:'old',path:'old.mov',in:0,out:5,dur:5,offset:0,primary:true}];
+    Media.activeClipId='old';Media._gap=false;
+    Media._reverseProxyPath='proxy.mov';Media._reverseProxySourcePath='old.mov';
+    Media._mpvPath='old.mov';
+    const switching=Media.setPlaybackDirection('backward');
+    await vi.waitFor(()=>expect(bridge[stage]).toHaveBeenCalled());
+    Media.reset();
+    Media._mpvPath='new.mov';
+    gate.resolve({ok:true});
+    await expect(switching).resolves.toBe(false);
+    expect(Media._mpvPath).toBe('new.mov');
+    expect(Media._nativeReverse).toBe(false);
+    expect(bridge.direction).toHaveBeenCalledTimes(stage==='direction'?1:0);
+    expect(bridge.seek).toHaveBeenCalledTimes(stage==='direction'?1:0);
+  });
+  it.each([2,3])('V%s 影片切割保留效果/幾何/seek profile與原淡化窗口，snapshot可還原',async trackNumber=>{
+    const vtrack=trackNumber-1;
+    const {Seq}=await import('../src/sequence.js');
+    const {fadeAlphaAtTimeline}=await import('../src/image-compositor-engine.js');
+    State.fps=25;State.dropFrame=false;
+    State.videoTracks=[{visible:true},{visible:true},{visible:true}];
+    const original=Seq.add({name:'video',path:'source.mov',dur:10,in:0,out:10,offset:0,vtrack,
+      natW:1920,natH:1080,height:96,
+      scale:0.4,posX:0.2,posY:0.3,muted:true,mpvExactSeek:true,mpvSeekOffset:0.02,
+      hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12,inputBoost:0},fadeIn:6,fadeOut:6});
+    const originalAlpha=fadeAlphaAtTimeline(original,5);
+    expect(Media.splitClipAt(5)).toBe(true);
+    const right=State.clips.find(clip=>clip!==original);
+    expect(right).toMatchObject({vtrack,natW:1920,natH:1080,height:96,scale:0.4,posX:0.2,posY:0.3,muted:true,mpvExactSeek:true,mpvSeekOffset:0.02,
+      hasAudioLimiter:true,audioLimiterSpec:{max:-6},fadeSourceOffset:5,fadeSourceLength:10});
+    expect(fadeAlphaAtTimeline(original,5)).toBeCloseTo(originalAlpha);
+    expect(fadeAlphaAtTimeline(right,5)).toBeCloseTo(originalAlpha);
+    const saved=Seq.snapshot();
+    right.scale=2;right.height=140;right.locked=true;right.muted=false;right.mpvSeekOffset=8;delete right.fadeSourceLength;
+    Seq.restore(saved);
+    expect(Seq.byId(right.id)).toMatchObject({scale:0.4,height:96,locked:false,muted:true,mpvSeekOffset:0.02,fadeSourceLength:10});
+    delete saved.find(clip=>clip.id===right.id).height;
+    Seq.restore(saved);
+    expect(Seq.byId(right.id).height).toBeUndefined();
+  });
+  it('倒放Proxy尚在load時切回正放，先等load完成再恢復母素材',async()=>{
+    const gate=deferred();
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true}),quit:vi.fn().mockResolvedValue(),
+      loadfile:vi.fn().mockReturnValueOnce(gate.promise).mockResolvedValue({ok:true}),
+      mute:vi.fn().mockResolvedValue(),direction:vi.fn().mockResolvedValue(true),seek:vi.fn().mockResolvedValue(true),
+    };
+    desktopMock.mpv=bridge;
+    const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    await runtime.enterMpv({src:'mother.mov'});
+    State.clips=[{id:'v',path:'mother.mov',in:0,out:5,dur:5,offset:0,primary:true}];
+    Media.activeClipId='v';Media._gap=false;
+    Media._reverseProxyPath='proxy.mov';Media._reverseProxySourcePath='mother.mov';
+    const reverse=Media.setPlaybackDirection('backward');
+    await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalledWith('proxy.mov'));
+    const forward=Media.setPlaybackDirection('forward');
+    expect(bridge.direction).not.toHaveBeenCalled();
+    gate.resolve({ok:true});
+    await expect(reverse).resolves.toBe(false);
+    await expect(forward).resolves.toBe(true);
+    expect(bridge.loadfile.mock.calls.map(([path])=>path)).toEqual(['proxy.mov','mother.mov']);
+    expect(bridge.direction).toHaveBeenCalledExactlyOnceWith('forward');
+    expect(Media._nativeReverse).toBe(false);expect(Media._mpvPath).toBe('mother.mov');
+  });
   beforeAll(async () => {
     window.subtool = desktopMock;
     window.AudioContext = class {
@@ -136,6 +282,46 @@ describe('reset-scoped media ownership', () => {
       if (oldRevoke) Object.defineProperty(URL, 'revokeObjectURL', oldRevoke);
       else delete URL.revokeObjectURL;
     }
+  });
+
+  it.each([
+    {in:0,out:0,height:128},
+    {in:4,out:8,offset:4,height:96,fadeIn:6,fadeOut:6,fadeSourceOffset:4,fadeSourceLength:8},
+  ])('刪除並由 History 重建外部快取音訊保留高度/範圍/原淡化視窗，舊 scrub voice 已停止 %#', async savedFields => {
+    const { scheduleScrub } = await import('../src/audio-engine.js');
+    class ReadyAudio {
+      constructor(){
+        this.tagName='AUDIO'; this.readyState=1; this.src=''; this.duration=8;
+        this.pause=vi.fn(); this.load=vi.fn();
+      }
+      removeAttribute(name){ if(name==='src') this.src=''; }
+    }
+    vi.stubGlobal('Audio',ReadyAudio);
+    desktopMock.fileURL.mockImplementation(async path=>'file:///'+path);
+    desktopMock.ingest.mockResolvedValue({channels:[{file:'cache.m4a',sourceStream:0,sourceChannel:0}]});
+    const clone={src:'',readyState:0,play:vi.fn(),pause:vi.fn()};
+    const create=vi.spyOn(document,'createElement').mockReturnValue(clone);
+    try{
+      const saved={audioSourceId:'restored',path:'C:/voice.mov',name:'voice',duration:8,
+        ...savedFields,preferCache:true};
+      const asset=await Media.restoreExternalAudioSource(saved);
+      expect(asset).toMatchObject({audioSourceId:'restored',...savedFields});
+      const oldElement=Media.tracks[0].el;
+      scheduleScrub(oldElement,1);
+      const lateMetadata=clone.onloadedmetadata;
+      expect(Media.removeExternalAudio(asset.id,{record:false})).toBe(true);
+      lateMetadata();
+      expect(clone.pause).toHaveBeenCalledOnce();
+      expect(clone.play).not.toHaveBeenCalled();
+      expect(clone.src).toBe('');
+
+      Media.restoreExternalAudioEditState([saved]);
+      await vi.waitFor(()=>expect(Media.externalAudioSources).toHaveLength(1));
+      await vi.waitFor(()=>expect(Media.tracks).toHaveLength(1));
+      expect(Media.externalAudioSources[0]).toMatchObject({audioSourceId:'restored',...savedFields});
+      expect(State.externalAudioState[0]).toMatchObject(savedFields);
+      expect(Media.tracks[0].el).not.toBe(oldElement);
+    }finally{Media.reset();create.mockRestore();vi.unstubAllGlobals();}
   });
 
   it('does not recreate a removed audio asset waveform after late file decode', async () => {

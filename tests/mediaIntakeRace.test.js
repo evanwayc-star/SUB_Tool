@@ -22,6 +22,7 @@ const domMock = vi.hoisted(() => {
       if (!elements.has(id)) {
         elements.set(id, {
           style: {}, textContent: '', innerHTML: '', value: '',
+          addEventListener: vi.fn(), removeEventListener: vi.fn(),
           classList: { add: vi.fn(), remove: vi.fn() },
           querySelectorAll: () => [],
           getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 360 }),
@@ -48,10 +49,15 @@ const deskMock = vi.hoisted(() => ({
 vi.mock('../src/dom.js', () => domMock);
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/ui.js', () => ({
-  setStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
+  setStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
+vi.mock('../src/subtitles.js', () => ({ selectCueSingle: vi.fn(), commitCueTimeEdit: vi.fn() }));
+vi.mock('../src/subtitle-model.js', () => ({ addCue: vi.fn(), cueTrackLocked: vi.fn() }));
+vi.mock('../src/project.js', () => ({ ensureProjectSaved: vi.fn() }));
+vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
+vi.mock('../src/notes.js', () => ({ updateNoteActive: vi.fn() }));
 
 const deferred = () => {
   let resolve;
@@ -68,6 +74,10 @@ let resetPlayerAdapter;
 let setStatus;
 let showToast;
 let pending;
+let shuttleRewind;
+let shuttlePause;
+let stepFrame;
+let jklReset;
 
 describe('desktop mother-source intake ownership', () => {
   beforeAll(async () => {
@@ -88,6 +98,7 @@ describe('desktop mother-source intake ownership', () => {
     ({ State, resetAudioProject } = await import('../src/state.js'));
     ({ resetPlayerAdapter } = await import('../src/media-player-adapter.js'));
     ({ setStatus, showToast } = await import('../src/ui.js'));
+    ({ shuttleRewind, shuttlePause, stepFrame, jklReset } = await import('../src/transport-controller.js'));
   });
 
   beforeEach(() => {
@@ -320,6 +331,25 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
+  it.each(['24','29.97df'])('mpv 重建母素材保留專案 %s 格網，clip 記錄真實來源30fps', async savedFps => {
+    const { setFps }=await import('../src/state.js');
+    const { ProjectRestorePlan }=await import('../src/project-intake-engine.js');
+    setFps(savedFps);
+    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12})),
+      quit:vi.fn(async()=>{}),onEvent:vi.fn(),setBounds:vi.fn(async()=>{})};
+    window.subtool.mpv=mpv;resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({duration:12,video:{codec:'h264',fps:30,width:1920,height:1080},audio:[]});
+    try {
+      await Media.loadDesktopMedia('C:/media/restore-fps.mp4',new ProjectRestorePlan());
+      expect(Media.mpvMode).toBe(true);
+      expect(State.fps).toBe(savedFps==='24'?24:29.97);
+      expect(State.dropFrame).toBe(savedFps.endsWith('df'));
+      expect(State.clips[0].fps).toBe(30);
+    } finally {
+      Media.reset();delete window.subtool.mpv;resetPlayerAdapter(window.subtool);
+    }
+  });
+
   it('maps mpv source time through the active clip and ignores stale time-pos in a gap', async () => {
     let notifyMpv = () => {};
     const mpv = {
@@ -397,6 +427,71 @@ describe('desktop mother-source intake ownership', () => {
         path:source,needsProxy:true,
       }));
     } finally {
+      Media.reset();
+      delete window.subtool.mpv;
+      resetPlayerAdapter(window.subtool);
+    }
+  });
+
+  it.each([
+    ['逐格', () => stepFrame(-1), 7.96],
+    ['連續滑鼠定位', () => { shuttlePause(); Media.seek(6); Media.seek(5.5); }, 5.52],
+  ])('原生倒播轉%s時，播放目標立即更新，呈現等 Proxy 還原母素材', async (action, seek, target) => {
+    let notifyMpv = () => {};
+    const restore = deferred();
+    const mpv = {
+      detect: vi.fn(async () => ({ available: true })),
+      launch: vi.fn(async () => ({ duration: 12 })),
+      loadfile: vi.fn(async path => path === 'C:/media/long-gop.mp4'
+        ? restore.promise : { ok: true, duration: 12 }),
+      seek: vi.fn(async () => {}),
+      present: vi.fn(async time => ({ backend: 'mpv', presentedSourceTime: time })),
+      direction: vi.fn(async () => true),
+      mute: vi.fn(async () => {}),
+      pause: vi.fn(async () => {}),
+      play: vi.fn(async () => {}),
+      rate: vi.fn(async () => {}),
+      quit: vi.fn(async () => {}),
+      onEvent: vi.fn(callback => { notifyMpv = callback; }),
+      setBounds: vi.fn(async () => {}),
+    };
+    window.subtool.mpv = mpv;
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({
+      duration: 12,
+      video: { codec: 'h264', fps: 25, width: 1920, height: 1080 },
+      audio: [],
+    });
+    deskMock.ingest.mockResolvedValueOnce({ proxy: 'C:/cache/short-gop-proxy.mp4', channels: [] });
+
+    try {
+      await Media.loadDesktopMedia('C:/media/long-gop.mp4');
+      await vi.waitFor(() => expect(Media.reverseShuttleProxyReady()).toBe(true));
+      Media._mpvTime = 8;
+      shuttleRewind();
+      await vi.waitFor(() => expect(Media._nativeReverse).toBe(true));
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 8 });
+      mpv.loadfile.mockClear();
+      mpv.present.mockClear();
+
+      seek();
+      expect(domMock.$('seekBar').value).toBe(Math.round(target * 1000));
+      expect(Media.displayTime()).toBe(target);
+      await vi.waitFor(() => expect(mpv.loadfile).toHaveBeenCalledWith('C:/media/long-gop.mp4'));
+      expect(mpv.loadfile).toHaveBeenCalledTimes(1);
+      expect(mpv.present).not.toHaveBeenCalled();
+
+      restore.resolve({ ok: true, duration: 12 });
+      await vi.waitFor(() => expect(mpv.present).toHaveBeenCalledWith(
+        target, expect.objectContaining({ tolerance: expect.any(Number) }),
+      ));
+      await vi.waitFor(() => expect(Media._reverseProxyActive).toBe(false));
+      expect(mpv.loadfile).toHaveBeenCalledTimes(1);
+      expect(mpv.present).toHaveBeenCalledTimes(1);
+    } finally {
+      restore.resolve({ ok: true, duration: 12 });
+      jklReset();
+      vi.restoreAllMocks();
       Media.reset();
       delete window.subtool.mpv;
       resetPlayerAdapter(window.subtool);

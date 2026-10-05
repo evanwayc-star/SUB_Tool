@@ -12,6 +12,7 @@ import { AudioEngine } from './audio-engine.js';
 import { snapTimeToFrame, secToEncore } from './time.js';
 import { sortCues } from './subtitle-model.js';
 import { recordHistory } from './history.js';
+import { Project } from './project.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { emit } from './events.js';
 import { decodeText, downloadBytes, escapeHTML, readFile } from './util.js';
@@ -678,21 +679,37 @@ export function openAsrMonitorDialog(session) {
     </div>
   `;
 
+  let modalSession=null;
+  let alive=true;
+  let unsub=()=>{};
+  const ownsDialog=()=>alive&&(modalSession?.isCurrent?.()??true);
+  const closeOwned=()=>{
+    if(!ownsDialog()) return;
+    if(modalSession?.close) modalSession.close({committed:true}); else closeModal({committed:true});
+    alive=false; unsub();
+  };
+  const releaseDialog=()=>{
+    alive=false; unsub();
+    setAsrSessionDialogOpen(false,session.id);
+  };
   const cancelSession = () => {
+    if(!ownsDialog()) return;
     cancelActiveAsrSession(session.id);
-    closeModal({ committed: true });
+    closeOwned();
     showToast('已取消語音辨識。');
   };
 
   const minimizeSession = () => {
+    if(!ownsDialog()) return;
     setAsrSessionDialogOpen(false, session.id);
-    closeModal({ committed: true });
+    closeOwned();
     showToast('語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
   };
 
   const acknowledgeSession = () => {
+    if(!ownsDialog()) return;
     clearAsrSession(session.id);
-    closeModal({ committed: true });
+    closeOwned();
   };
 
   const monitorButtons = terminalStatus
@@ -702,15 +719,15 @@ export function openAsrMonitorDialog(session) {
       { label: '縮小至背景', primary: true, act: minimizeSession }
     ];
 
-  openModal(`${taskTitle}進度`, html, monitorButtons, {
+  modalSession=openModal(`${taskTitle}進度`, html, monitorButtons, {
     width: '620px',
     closeOnBackdrop: false,
-    onDismiss: () => {
-      setAsrSessionDialogOpen(false, session.id);
-    }
+    onDismiss:releaseDialog,onReplaced:releaseDialog,
   });
+  setAsrSessionDialogOpen(true,session.id);
 
   const bindMonitorDiagnostic = snapshot => {
+    if(!ownsDialog()) return;
     const diagnosticRow = document.getElementById('asrAlignmentDiagnostic');
     const lineNumbers = document.getElementById('asrUnreliableLineNumbers');
     const downloadButton = document.getElementById('asrDownloadAlignmentDiagnostic');
@@ -729,9 +746,13 @@ export function openAsrMonitorDialog(session) {
   };
   bindMonitorDiagnostic(session);
 
-  const unsub = onAsrSessionChange(s => {
-    if (!s || s.id !== session.id) {
+  unsub = onAsrSessionChange(s => {
+    if (!ownsDialog()) {
       unsub();
+      return;
+    }
+    if (!s || s.id !== session.id) {
+      closeOwned();
       return;
     }
     const progressBar = document.getElementById('asrProgressBar');
@@ -795,6 +816,8 @@ export function openAsrMonitorDialog(session) {
  * 開啟語音辨識設定與執行對話框
  */
 export function openSpeechRecognitionDialog(preferredSource = null) {
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  let transcriptImportRevision = 0;
   const activeSession = getAsrSession();
   const isRunning = activeSession &&
     activeSession.progress?.status !== 'completed' &&
@@ -1042,11 +1065,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <div id="asrTemperatureRow" class="asr-field asr-temperature-field" style="display:${(conf.provider === 'builtin' || conf.provider === 'groq' || conf.provider === 'openai') ? 'flex' : 'none'};">
             <label for="asrTemperature">Whisper 解碼溫度（Temperature）</label>
             <select id="asrTemperature">
-              <option value="0" ${Number(conf.temperature) === 0 ? 'selected' : ''}>0.0（確定性最高精度，推薦）</option>
-              <option value="0.2" ${Number(conf.temperature) === 0.2 ? 'selected' : ''}>0.2（微調彈性重試）</option>
+              <option value="0" ${Number(conf.temperature) === 0 ? 'selected' : ''}>0.0（穩定輸出，推薦）</option>
+              <option value="0.2" ${Number(conf.temperature) === 0.2 ? 'selected' : ''}>0.2（低溫度取樣）</option>
               <option value="0.5" ${Number(conf.temperature) === 0.5 ? 'selected' : ''}>0.5（一般取樣）</option>
             </select>
-            <div class="asr-helper">固定為 0.0 可杜絕隨機跳針與幻覺，保持最穩定、精確的文字輸出。</div>
+            <div class="asr-helper">本機 0.0 使用確定性解碼；提高溫度會改變取樣方式，不保證提升辨識品質。</div>
           </div>
 
           <div id="asrAzureProfanityRow" class="asr-field" style="display:${conf.provider === 'azure' ? 'flex' : 'none'};">
@@ -1104,32 +1127,46 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
   `;
 
   let latestAlignmentDiagnostic = null;
+  let modalSession=null;
+  let alive=true;
+  let workId=null;
+  let releaseWorkSubscription=()=>{};
+  const ownsDialog=()=>alive&&ownsWorkspace()&&(modalSession?.isCurrent?.()??true);
+  const closeOwned=()=>{
+    if(!ownsDialog()) return;
+    if(modalSession?.close) modalSession.close({committed:true}); else closeModal({committed:true});
+    alive=false;releaseWorkSubscription();
+  };
   const abortActiveRecognition = () => {
+    alive=false;releaseWorkSubscription();
     const session = getAsrSession();
+    if(!workId||session?.id!==workId) return;
     if (session && session.progress?.status !== 'completed' && session.progress?.status !== 'failed' && session.progress?.status !== 'cancelled') {
       setAsrSessionDialogOpen(false, session.id);
       showToast('🎙 語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
       return;
     }
-    cancelActiveAsrSession();
+    cancelActiveAsrSession(workId);
   };
   const cancelRecognition = () => {
-    cancelActiveAsrSession();
-    closeModal({ committed: true });
+    if(!ownsDialog()) return;
+    if(workId) cancelActiveAsrSession(workId);
+    closeOwned();
   };
   const minimizeToBackground = () => {
-    const session = getAsrSession();
-    setAsrSessionDialogOpen(false, session?.id);
-    closeModal({ committed: true });
+    if(!ownsDialog()) return;
+    if(workId) setAsrSessionDialogOpen(false, workId);
+    closeOwned();
     showToast('語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
   };
 
-  openModal('音訊辨識與文本匹配', html, [
+  modalSession=openModal('音訊辨識與文本匹配', html, [
     { label: '取消', act: cancelRecognition },
     {
       label: initialTaskMode === 'align' ? '開始匹配' : '開始辨識',
       primary: true,
       act: async () => {
+        if(!ownsDialog()) return;
         const taskModeEl = document.getElementById('asrTaskMode');
         const transcriptEl = document.getElementById('asrTranscript');
         const recognitionAudioSourceEl = document.getElementById('asrRecognitionAudioSource');
@@ -1191,6 +1228,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           focusTarget?.focus();
         };
         const setFormProcessing = processing => {
+          if (processing) transcriptImportRevision++;
           workspaceEl?.setAttribute('aria-busy', String(processing));
           workspaceEl?.querySelectorAll('input, select, textarea, button').forEach(control => {
             control.disabled = processing;
@@ -1275,6 +1313,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         }
 
         const renderWorkSnapshot = session => {
+          if(!ownsDialog()) return;
           if (!session) return;
           const progress = session.progress || {};
           if (progressBar) {
@@ -1370,14 +1409,20 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             return { count, timelineRejectedLineNumbers };
           }
         });
+        workId=work.id;
         const unsubscribe = onAsrSessionChange(session => {
           if (session?.id === work.id) renderWorkSnapshot(session);
         });
+        releaseWorkSubscription=unsubscribe;
         renderWorkSnapshot(getAsrSession());
 
         try {
           const outcome = await work.promise;
           if (outcome.status !== 'completed') return;
+          if(!ownsDialog()){
+            showToast(`${taskMode==='align'?'文本匹配':'語音辨識'}完成，已生成 ${outcome.count} 句字幕。`);
+            return;
+          }
 
           latestAlignmentDiagnostic = outcome.diagnostic || null;
           workspaceEl?.setAttribute('aria-busy', 'false');
@@ -1392,7 +1437,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           const partialAlignment = taskMode === 'align' && failedAlignmentLineNumbers.length > 0;
           const recoveredAlignment = taskMode === 'align' && recoveredAlignmentLineNumbers.length > 0;
           const alignmentNeedsReview = partialAlignment || recoveredAlignment;
-          const isModalShowing = document.getElementById('asrStatus') !== null;
+          const isModalShowing = ownsDialog();
 
           if (latestAlignmentDiagnostic && alignmentDiagnosticEl) {
             alignmentDiagnosticEl.style.display = 'flex';
@@ -1408,7 +1453,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             }
           }
 
-          if (!alignmentNeedsReview && isModalShowing) closeModal({ committed: true });
+          if (!alignmentNeedsReview && isModalShowing) closeOwned();
           if (taskMode === 'align') {
             if (partialAlignment) {
               const summaryMsg = `${alignmentProviderFailure ? '聲音分析失敗，但' : ''}已建立 ${outcome.count} 句完整原稿；其中 ${failedAlignmentLineNumbers.length} 句無時間碼，請依上方行號自行補上 In／Out。`;
@@ -1462,6 +1507,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           }
         } catch (err) {
           console.error('ASR error:', err);
+          if(!ownsDialog()){ showToast('❌ 語音辨識失敗：'+(err.message||String(err)),4000); return; }
           if (statusEl) {
             statusEl.style.display = 'block';
             statusEl.className = 'asr-status is-error';
@@ -1486,10 +1532,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       }
     },
     { label: '縮小至背景', act: minimizeToBackground, id: 'asrMinimizeBtn', hidden: true }
-  ], { width: '860px', closeOnBackdrop: false, onDismiss: abortActiveRecognition });
+  ], { width: '860px', closeOnBackdrop: false, onDismiss: abortActiveRecognition,onReplaced:abortActiveRecognition });
 
   // 監聽 Provider 切換以自動更新介面
   setTimeout(() => {
+    if(!ownsDialog()) return;
     const taskModeEl = document.getElementById('asrTaskMode');
     const transcriptRow = document.getElementById('asrTranscriptRow');
     const transcriptEl = document.getElementById('asrTranscript');
@@ -1579,6 +1626,10 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         statusEl.textContent = message;
       };
       transcriptEl.addEventListener('input', () => {
+        transcriptImportRevision++;
+        if (transcriptEl.closest('.asr-workspace')?.getAttribute('aria-busy') !== 'true') {
+          importTranscriptButton.disabled = false;
+        }
         updateTranscriptCount();
         if (transcriptFileSummary) {
           transcriptFileSummary.style.display = 'none';
@@ -1592,7 +1643,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       transcriptFileInput.onchange = async () => {
         const file = transcriptFileInput.files?.[0];
         if (!file) return;
+        const revision = ++transcriptImportRevision;
+        const ownsImport = () => ownsDialog() && document.contains(transcriptEl)
+          && transcriptImportRevision === revision;
         if (!/\.txt$/i.test(file.name || '')) {
+          importTranscriptButton.disabled = false;
           showTranscriptImportError('請選擇 .txt 純文字檔案。');
           return;
         }
@@ -1603,7 +1658,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         }
         try {
           const text = decodeText(await readFile(file));
-          if (!document.contains(transcriptEl)) return;
+          if (!ownsImport()) return;
           transcriptEl.value = text;
           const lineCount = parseTranscriptLines(text).length;
           updateTranscriptCount();
@@ -1615,11 +1670,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             statusEl.textContent = '';
           }
         } catch (error) {
-          if (!document.contains(transcriptEl)) return;
+          if (!ownsImport()) return;
           if (transcriptFileSummary) transcriptFileSummary.style.display = 'none';
           showTranscriptImportError(`無法匯入文字稿：${error?.message || String(error)}`);
         } finally {
-          importTranscriptButton.disabled = false;
+          if (ownsImport()) importTranscriptButton.disabled = false;
         }
       };
       updateTranscriptCount();

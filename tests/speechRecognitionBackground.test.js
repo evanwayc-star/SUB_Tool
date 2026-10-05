@@ -68,6 +68,42 @@ function renderModalFromMock() {
 }
 
 describe('語音辨識背景執行與進度視窗切換', () => {
+  it('專案 reset 後尚未關閉的舊設定視窗不能再開始辨識舊素材',async()=>{
+    const {resetProject}=await import('../src/project.js');
+    openSpeechRecognitionDialog();renderModalFromMock();
+    const start=uiMocks.openModal.mock.calls.at(-1)[2].find(button=>button.primary).act;
+    resetProject();
+    await start();
+    expect(getAsrSession()).toBeNull();
+    expect(engineMocks.transcribeAudioStream).not.toHaveBeenCalled();
+    expect(State.cues).toEqual([]);
+  });
+  it('舊 config completion 與已替換 monitor 的進度不能更動新來源 dialog',async()=>{
+    let complete,progress;
+    engineMocks.transcribeAudioStream.mockImplementation(options=>{
+      progress=options.onProgress;
+      return new Promise(resolve=>{complete=resolve;});
+    });
+    openSpeechRecognitionDialog();renderModalFromMock();
+    const oldOptions=uiMocks.openModal.mock.calls.at(-1)[3];
+    const oldWork=uiMocks.openModal.mock.calls.at(-1)[2].find(button=>button.primary).act();
+    await vi.waitFor(()=>expect(complete).toBeTypeOf('function'));
+    oldOptions.onReplaced();
+    openAsrMonitorDialog(getAsrSession());renderModalFromMock();
+    const monitorOptions=uiMocks.openModal.mock.calls.at(-1)[3];
+    monitorOptions.onReplaced();
+    openSpeechRecognitionDialog(State.clips[0]);renderModalFromMock();
+    await new Promise(resolve=>setTimeout(resolve,5));
+    const status=document.getElementById('asrStatus');status.textContent='new source draft';
+    const footer=document.getElementById('modalFoot').innerHTML;
+    progress({status:'transcribing',percent:99,message:'old progress'});
+    complete([{start:1,end:2,text:'old result'}]);
+    await oldWork;
+    expect(status.textContent).toBe('new source draft');
+    expect(document.getElementById('modalFoot').innerHTML).toBe(footer);
+    expect(uiMocks.closeModal).not.toHaveBeenCalled();
+    expect(State.cues).toHaveLength(1);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     clearAsrSession();

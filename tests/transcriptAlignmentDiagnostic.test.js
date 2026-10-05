@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { buildTranscriptAlignmentDiagnostic } from '../src/transcript-alignment.js';
 
 describe('文本匹配安全診斷資料', () => {
+  it('保留 ElevenLabs provider，未支援名稱仍以 unknown 記錄',()=>{
+    expect(buildTranscriptAlignmentDiagnostic({provider:'elevenlabs',transcript:'test'}).provider).toBe('elevenlabs');
+    expect(buildTranscriptAlignmentDiagnostic({provider:'invalid',transcript:'test'}).provider).toBe('unknown');
+  });
   it('只匯出解析後的文字與時間，並以一基行號列出不可靠行', () => {
     const diagnostic = buildTranscriptAlignmentDiagnostic({
       generatedAt: '2026-08-25T12:34:56.000Z',

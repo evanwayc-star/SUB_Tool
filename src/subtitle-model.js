@@ -1,11 +1,12 @@
 import { State, newId, setSelection, pruneSelection, ensureTrackCount, cueSuffix, saveConfig } from './state.js';
 import { emit } from './events.js';
 import { Media } from './media.js';
-import { snapTimeToFrame } from './time.js';
-import { recordHistory } from './history.js';
+import { snapTimeToFrame, getExactFps } from './time.js';
+import { History, recordHistory } from './history.js';
 import { showToast, openModal, closeModal, setStatus } from './ui.js';
 import { planCueStyleAssignment } from './subtitle-style-engine.js';
-import { effStyle, STYLE_DEFAULTS } from './substyle.js';
+import { effStyle, trackStyleSnapshot, CUE_STYLE_KEYS } from './substyle.js';
+import { Project } from './project.js';
 
 export function snapAllCuesToFrames() {
   if (!State.fps) return false;
@@ -214,10 +215,44 @@ export function cuesTrackLocked(cues, action = '修改'){
 }
 
 export function deleteSelectedCues(ids){
-  if(!ids || !ids.length) return;
+  if(!ids || !ids.length) return false;
   const cues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(Boolean);
-  if(cuesTrackLocked(cues, '刪除字幕')) return;
+  if(cuesTrackLocked(cues, '刪除字幕')) return false;
   _doDeleteCues(ids);
+  return true;
+}
+
+/* 延遲刪除認的是確認當下的實際句子；Undo 可還原同 id 的另一個物件。 */
+export function captureCueDeletion(ids){
+  const targets=ids.map(id=>State.cues.find(c=>c.id===id)).filter(Boolean);
+  const tracks=targets.map(c=>State.tracks[c.track||0]);
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  return ()=>{
+    if(!ownsWorkspace() || targets.length!==ids.length || !targets.every((c,i)=>
+      State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===tracks[i])) return false;
+    return deleteSelectedCues(targets.map(c=>c.id));
+  };
+}
+
+// 待定交換認實際來源與文字，不讓 Undo 的同 id 還原物件接手舊操作。
+export function captureCueTextSwap(source){
+  const track=State.tracks[source?.track||0], text=source?.text||'';
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  let active=!!source && State.cues.includes(source);
+  return Object.freeze({
+    cancel(){ active=false; },
+    commit(target){
+      if(!active) return false;
+      active=false;
+      if(!ownsWorkspace() || !State.cues.includes(source) || State.tracks[source.track||0]!==track
+        || (source.text||'')!==text || !State.cues.includes(target) || target===source) return false;
+      if(cuesTrackLocked([source,target],'交換字幕文字')) return false;
+      source.text=target.text||'';
+      target.text=text;
+      emit('render:all'); recordHistory('文字交換');
+      return true;
+    },
+  });
 }
 
 export function deleteCue(id){ 
@@ -304,11 +339,54 @@ export function sortCues() {
   }
 }
 
-function finalizeCueTimeEdit(cue, edge) {
+// FPS-SYNC：先將上下限收斂到合法格網，再 snap 與限制；不能在 snap 後加減 .001。
+export function subtitleTimeOnFrame(value, min=0, max=Infinity, {fps=State.fps,dropFrame=State.dropFrame}={}) {
+  const frame=1/getExactFps(fps || 25), epsilon=frame*1e-7;
+  let lower=snapTimeToFrame(min,fps,dropFrame);
+  if(lower<min-epsilon) lower=snapTimeToFrame(lower+frame,fps,dropFrame);
+  let upper=max;
+  if(Number.isFinite(max)) {
+    upper=snapTimeToFrame(max,fps,dropFrame);
+    if(upper>max+epsilon) upper=snapTimeToFrame(upper-frame,fps,dropFrame);
+  }
+  if(upper<lower-epsilon) return null;
+  return Math.min(upper,Math.max(lower,snapTimeToFrame(value,fps,dropFrame)));
+}
+
+// FPS-SYNC：I、切換句子與退出上字幕模式共用暫存終點收尾；不要把合法格再限制回原秒數。
+export function finalizeProvisionalCueEnds(exceptId=null, {history=true}={}) {
+  const frame=1/getExactFps(State.fps || 25);
+  let changed=false;
+  for(const cue of State.cues){
+    if(!cue._tempEnd || cue.id===exceptId || State.tracks[cue.track||0]?.locked) continue;
+    const end=subtitleTimeOnFrame(cue.start+2,cue.start+frame,State.duration||Infinity);
+    if(end!=null) cue.end=end;
+    delete cue._tempEnd;
+    changed=true;
+  }
+  if(changed && history){
+    emit('render:videoSub'); emit('mpv:refreshSubs'); emit('render:all');
+    recordHistory('完成暫存字幕時間');
+  }
+  return changed;
+}
+
+export function shiftCueTimes(cues, delta) {
+  if(cuesTrackLocked(cues,'修改字幕時間')) return false;
+  const frame=1/getExactFps(State.fps || 25);
+  for(const c of cues) {
+    if(c.timed===false) continue;
+    c.start=subtitleTimeOnFrame(Math.max(0,c.start+delta));
+    c.end=subtitleTimeOnFrame(c.end+delta,c.start+frame);
+  }
+  return true;
+}
+
+export function finalizeCueTimeEdit(cue, edge, {select=true,render=true}={}) {
   const track = cue.track || 0;
   sweepContainedCues([cue]);
 
-  if (edge === 'start' || edge === 'both') {
+  if (edge === 'start' || edge === 'both' || !edge) {
     const index = State.cues.indexOf(cue);
     let nextIndex = index + 1;
     let offset = 0.001;
@@ -324,10 +402,11 @@ function finalizeCueTimeEdit(cue, edge) {
   }
 
   sortCues();
-  setSelection({ kind: 'sub', ids: [cue.id] });
-  State.activeEdge = edge;
-  emit('render:all');
-  emit('render:selection');
+  if(select) {
+    setSelection({ kind: 'sub', ids: [cue.id] });
+    State.activeEdge = edge;
+  }
+  if(render) { emit('render:all'); emit('render:selection'); }
 }
 
 /* 一般字幕編輯的單一 public seam。UI adapter 只提供「要改什麼」；
@@ -376,28 +455,31 @@ export function editCue({ cueId, operation, value, baseline }) {
   if (operation === 'start' || operation === 'end') {
     const action = operation === 'start' ? '修改字幕起點' : '修改字幕終點';
     if (cueTrackLocked(cue, action)) return { ok: false, reason: 'track-locked' };
-    const before = { start: cue.start, end: cue.end, timed: cue.timed !== false };
+    const before = { start: cue.start, end: cue.end, timed: cue.timed !== false, temporary:!!cue._tempEnd };
+    const frame=1/getExactFps(State.fps || 25);
     let edge = operation;
     if (value === null) {
       cue.timed = false;
       edge = 'both';
     } else if (operation === 'start') {
-      cue.start = Math.max(0, Number(value) || 0);
+      const start=subtitleTimeOnFrame(Number(value)||0,0,cue.timed===false ? Infinity : cue.end-frame);
+      if(start==null) return {ok:false,reason:'no-frame-room'};
+      cue.start = start;
       if (cue.timed === false) {
-        cue.end = cue.start + 1;
+        cue.end = subtitleTimeOnFrame(cue.start+1,cue.start+frame);
         cue.timed = true;
-      } else {
-        cue.start = Math.min(cue.start, cue.end - 0.001);
       }
     } else {
-      cue.end = Math.max((cue.start || 0) + 0.001, Number(value) || 0);
+      cue.end = subtitleTimeOnFrame(Number(value)||0,cue.timed===false ? frame : (cue.start||0)+frame);
       if (cue.timed === false) {
-        cue.start = Math.max(0, cue.end - 1);
+        cue.start = subtitleTimeOnFrame(Math.max(0,cue.end-1),0,cue.end-frame);
         cue.timed = true;
         edge = 'both';
       }
     }
-    const changed = cue.start !== before.start || cue.end !== before.end || (cue.timed !== false) !== before.timed;
+    const changed = cue.start !== before.start || cue.end !== before.end || (cue.timed !== false) !== before.timed || before.temporary;
+    // 明確編輯時間後，舊 In 的暫存終點不得在下次選取時重新收尾。
+    delete cue._tempEnd;
     if (!changed) return { ok: true, changed: false, cue };
     finalizeCueTimeEdit(cue, edge);
     const label = value === null ? '清除時間碼' : operation === 'start' ? '修改起點' : '修改終點';
@@ -408,7 +490,82 @@ export function editCue({ cueId, operation, value, baseline }) {
   return { ok: false, reason: 'unsupported-operation' };
 }
 
-export function splitCue({ cueId, textBefore, textAfter, timelineTime }) {
+/* 文字草稿與 live preview 的 owner。回復與 History 投影都只認最後一次
+   自己寫入的值；同物件上的背景合法提交不能被舊 editor 取消或確認蓋掉。 */
+export function beginCueEdit(cue, { preview = false } = {}) {
+  const track = State.tracks[cue?.track || 0];
+  if (!cue || !State.cues.includes(cue) || cueTrackLocked(cue, '編輯字幕')) return null;
+  const ownsWorkspace = Project.captureWorkspaceOwnership();
+  const baseline = { text:String(cue.text || ''), style:structuredClone(cue.style || {}) };
+  let active = true, latestText = baseline.text;
+  const ownsIdentity = () => active && ownsWorkspace() && State.cues.includes(cue) && State.tracks[cue.track || 0] === track;
+  let releasePreview=null;
+  const isCurrent = () => ownsIdentity() && (!releasePreview || releasePreview.isCurrent());
+  const ownsText = () => isCurrent() && String(cue.text || '') === latestText;
+  releasePreview = preview ? History.beginPreview([
+    {target:cue, fields:['text'], ownsField:ownsText},
+  ], ownsIdentity) : null;
+  const release = () => { releasePreview?.(); active=false; };
+  const cancel = () => {
+    if (preview && ownsText()) cue.text=baseline.text;
+    release();
+  };
+  return Object.freeze({
+    baseline, isCurrent,
+    release, cancel,
+    split({textBefore, textAfter, timelineTime, beforeCommit} = {}) {
+      if (!isCurrent()) { release(); return {ok:false,reason:'stale-edit'}; }
+      if (cueTrackLocked(cue,'拆分字幕')) { cancel(); return {ok:false,reason:'track-locked'}; }
+      const nextText=String(textBefore ?? '')+String(textAfter ?? '');
+      const currentText=String(cue.text || '');
+      if ((preview && !ownsText()) || (!preview && currentText!==baseline.text && nextText!==currentText)) {
+        if(preview) cancel();
+        showToast('字幕已被其他編輯更新，請重新開啟編輯');
+        return {ok:false,reason:'edit-conflict'};
+      }
+      return splitCue({cueId:cue.id,textBefore,textAfter,timelineTime,beforeCommit:()=>{release();beforeCommit?.();}});
+    },
+    previewText(value) {
+      if (!isCurrent()) return {ok:false,reason:'stale-edit'};
+      if (!ownsText()) { cancel(); return {ok:false,reason:'edit-conflict'}; }
+      const result=editCue({cueId:cue.id,operation:'text-preview',value});
+      if(result.ok) latestText=String(cue.text || '');
+      else cancel();
+      return result;
+    },
+    commit({text, style} = {}) {
+      if (!isCurrent()) { release(); return {ok:false,reason:'stale-edit'}; }
+      if (track?.locked) { cancel(); cueTrackLocked(cue,'編輯字幕'); return {ok:false,reason:'track-locked'}; }
+      const currentText=String(cue.text || '');
+      const nextText=String(text ?? baseline.text);
+      if ((preview && !ownsText()) || (!preview && nextText!==baseline.text && currentText!==baseline.text && nextText!==currentText)) {
+        if(preview) cancel();
+        showToast('字幕已被其他編輯更新，請重新開啟編輯');
+        return {ok:false,reason:'edit-conflict'};
+      }
+      const resolvedText=preview || nextText!==baseline.text ? nextText : currentText;
+      const currentStyle=structuredClone(cue.style || {}), resolvedStyle={...currentStyle};
+      if (style !== undefined) {
+        for (const key of CUE_STYLE_KEYS) {
+          const original=baseline.style[key], desired=style?.[key], current=currentStyle[key];
+          if (Object.is(desired,original)) continue;
+          if (!Object.is(current,original) && !Object.is(current,desired)) {
+            showToast('字幕樣式已被其他編輯更新，請重新開啟編輯');
+            return {ok:false,reason:'edit-conflict'};
+          }
+          if(desired==null) delete resolvedStyle[key]; else resolvedStyle[key]=desired;
+        }
+      }
+      release();
+      return editCue({cueId:cue.id, operation:style===undefined ? 'text' : 'text-style',
+        value:style===undefined ? resolvedText : {text:resolvedText,style:resolvedStyle},
+        baseline:style===undefined ? (preview ? baseline.text : currentText) : {text:currentText,style:currentStyle},
+      });
+    },
+  });
+}
+
+export function splitCue({ cueId, textBefore, textAfter, timelineTime, beforeCommit }) {
   const cue = State.cues.find(c => c.id === cueId);
   if (!cue) return { ok: false, reason: 'cue-not-found' };
   if (cueTrackLocked(cue, '拆分字幕')) return { ok: false, reason: 'track-locked' };
@@ -418,21 +575,24 @@ export function splitCue({ cueId, textBefore, textAfter, timelineTime }) {
   }
 
   const isTimed = cue.timed !== false;
-  if (isTimed && (timelineTime < cue.start + 0.05 || timelineTime > cue.end - 0.05)) {
+  const splitTime=isTimed ? snapTimeToFrame(timelineTime,State.fps,State.dropFrame) : 0;
+  if (isTimed && (splitTime < cue.start + 0.05 || splitTime > cue.end - 0.05)) {
     showToast('切分點距離起訖太近，或是超出了字幕範圍');
     return { ok: false, reason: 'split-time-out-of-range' };
   }
   const originalEnd = cue.end;
+  beforeCommit?.();
   cue.text = textBefore;
-  if (isTimed) cue.end = timelineTime;
+  if (isTimed) cue.end = splitTime;
 
   const newCue = {
     id: newId(),
-    start: isTimed ? timelineTime : 0,
+    start: splitTime,
     end: isTimed ? originalEnd : 0,
     text: textAfter,
     track: cue.track || 0,
     timed: isTimed,
+    ...(cue.style ? { style: structuredClone(cue.style) } : {}),
   };
   const index = State.cues.indexOf(cue);
   State.cues.splice(index + 1, 0, newCue);
@@ -445,10 +605,15 @@ export function splitCue({ cueId, textBefore, textAfter, timelineTime }) {
   return { ok: true, cue: newCue };
 }
 
+const clipboardStyles = new WeakMap();
 export function copyCues(){
   const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
   if(!ids.length){ showToast('沒有選取的字幕'); return; }
-  State.clipboard=State.cues.filter(c=>ids.includes(c.id)).map(c=>({...c}));
+  State.clipboard=structuredClone(State.cues.filter(c=>ids.includes(c.id)));
+  for(const cue of State.clipboard){
+    const track=State.tracks[cue.track||0];
+    clipboardStyles.set(cue,{track,style:structuredClone(effStyle(cue,track))});
+  }
   showToast(`已複製 ${State.clipboard.length} 條字幕`);
 }
 
@@ -461,10 +626,11 @@ export function pasteCues(){
   const newCues=State.clipboard.map(c=>{
     const oldTrack = c.track || 0;
     const newTrack = State.listTrack;
-    let newStyle = c.style ? {...c.style} : undefined;
+    let newStyle = c.style ? structuredClone(c.style) : undefined;
+    const copied=clipboardStyles.get(c);
     
-    if (oldTrack !== newTrack) {
-      const oldEffStyle = effStyle({ style: newStyle }, State.tracks[oldTrack]);
+    if (copied ? copied.track !== State.tracks[newTrack] : oldTrack !== newTrack) {
+      const oldEffStyle = copied?.style || effStyle({ style: newStyle }, State.tracks[oldTrack]);
       const plan = planCueStyleAssignment({
         cue: { style: newStyle },
         targetTrack: State.tracks[newTrack],
@@ -474,8 +640,11 @@ export function pasteCues(){
     }
     
     if(c.timed===false) return {...c, id:newId(), track:newTrack, style: newStyle};
-    const s=Math.max(0, c.start+delta);
-    return {...c, id:newId(), track:newTrack, start:s, end:Math.max(s+0.001, c.end+delta), style: newStyle};
+    const s=subtitleTimeOnFrame(Math.max(0,c.start+delta));
+    const end=subtitleTimeOnFrame(c.end+delta,s+1/getExactFps(State.fps||25));
+    const pasted={...c, id:newId(), track:newTrack, start:s, end, style:newStyle};
+    delete pasted._tempEnd;
+    return pasted;
   });
   State.cues.push(...newCues);
   sortCues();
@@ -533,13 +702,25 @@ export function doCopyTrack() {
   const srcTrack = State.tracks[srcIdx];
   if (!srcTrack) { showToast('請先選擇一個字幕軌道'); return; }
   const srcCues = State.cues.filter(c => (c.track || 0) === srcIdx);
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const copy=withText=>{
+    if(!session.isCurrent() || !ownsWorkspace()) return;
+    const index=State.tracks.indexOf(srcTrack);
+    if(index<0) return;
+    const current=State.cues.filter(c=>(c.track||0)===index);
+    if(current.length!==srcCues.length || !srcCues.every(c=>current.includes(c))){
+      showToast('軌道內容已變更，請重新確認複製'); return;
+    }
+    session.close({committed:true});
+    _execCopyTrack(index,withText);
+  };
   const escapeHTML = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
-  openModal('複製字幕軌道',
+  const session=openModal('複製字幕軌道',
     `<p>將 <b>${escapeHTML(srcTrack.name)}</b> 的 <b>${srcCues.length}</b> 條字幕複製到新軌道，請選擇複製方式：</p>`,
     [
-      { label: '含文字內容', primary: true, act: () => { closeModal(); _execCopyTrack(srcIdx, true); } },
-      { label: '僅複製時間點（文字清空）', act: () => { closeModal(); _execCopyTrack(srcIdx, false); } },
-      { label: '取消', act: closeModal }
+      { label: '含文字內容', primary: true, act: () => copy(true) },
+      { label: '僅複製時間點（文字清空）', act: () => copy(false) },
+      { label: '取消', act: () => session.close() }
     ]
   );
 }
@@ -551,7 +732,6 @@ function _execCopyTrack(srcIdx, withText) {
   const names = State.tracks.map(t => t.name);
   while (names.includes(name)) name = base + (n++);
   
-  const { trackStyleSnapshot } = requireTrackStyleSnapshot();
   const tk = { name, visible: true, locked: false, ...trackStyleSnapshot(srcTrack) };
   const newIdx = State.tracks.length;
   State.tracks.push(tk);
@@ -559,7 +739,8 @@ function _execCopyTrack(srcIdx, withText) {
   
   const srcCues = State.cues.filter(c => (c.track || 0) === srcIdx);
   for (const c of srcCues) {
-    State.cues.push({ id: newId(), start: c.start, end: c.end, text: withText ? (c.text || '') : '', track: newIdx, timed: c.timed });
+    State.cues.push({ id: newId(), start: c.start, end: c.end, text: withText ? (c.text || '') : '', track: newIdx, timed: c.timed,
+      ...(c.style ? { style: structuredClone(c.style) } : {}) });
   }
   
   sortCues();
@@ -571,17 +752,6 @@ function _execCopyTrack(srcIdx, withText) {
   
   recordHistory('複製字幕軌道');
   showToast(`已複製到「${name}」（${srcCues.length} 條）`);
-}
-
-function requireTrackStyleSnapshot() {
-  return {
-    trackStyleSnapshot: track => {
-      const out = {};
-      const st = effStyle(null, track);
-      for (const k in STYLE_DEFAULTS) out[k] = st[k];
-      return out;
-    }
-  };
 }
 
 export function removeSrtTags() {
@@ -619,36 +789,15 @@ export function toggleSubMode(force = false) {
     if (!State.overwriteKeep) toggleOverwriteKeep({ force: true });
 
     State._subModeSequence = State.cues.map(c => c.id);
-    State._subModeTouchedIds = new Set();
     setStatus('🎯 上字幕模式 ON — I 設起點，O 設終點後自動前進', 'ok');
   } else {
     if (State._prevAutoSelect !== undefined && State.autoSelect !== State._prevAutoSelect) toggleAutoSelect({ force: true });
     if (State._prevOverwriteMode !== undefined && State.overwriteMode !== State._prevOverwriteMode) toggleOverwriteMode({ force: true });
     if (State._prevOverwriteKeep !== undefined && State.overwriteKeep !== State._prevOverwriteKeep) toggleOverwriteKeep({ force: true });
 
-    let changed = false;
-    State.cues.forEach(cue => {
-      if (cue._tempEnd) {
-        cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
-        delete cue._tempEnd;
-        changed = true;
-      }
-    });
-    if (State._subModeTouchedIds && State._subModeTouchedIds.size > 0) {
-      const maxReasonableDur = 600;
-      State.cues.forEach(cue => {
-        if (State._subModeTouchedIds.has(cue.id)) {
-          const dur = cue.end - cue.start;
-          if (dur > maxReasonableDur) {
-            cue.end = Math.min(cue.start + 2.0, (State.duration || Infinity));
-            changed = true;
-          }
-        }
-      });
-      delete State._subModeTouchedIds;
-    }
+    finalizeProvisionalCueEnds();
+    delete State._subModeTouchedIds;
     sortCues();
-    if (changed) { emit('render:videoSub'); emit('mpv:refreshSubs'); }
     emit('render:all');
     Media.pause(); setStatus('上字幕模式 OFF', '');
   }

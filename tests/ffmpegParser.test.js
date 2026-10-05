@@ -4,7 +4,7 @@ import { FFmpegOutputParser, FFmpegErrorAnalyzer } from '../electron/ffmpeg-exec
 describe('FFmpegOutputParser', () => {
   it('parses stream maps correctly', () => {
     const parser = new FFmpegOutputParser(100);
-    parser.parseChunk('Stream #0:0 -> #0:0 (h264 (native) -> h264 (h264_nvenc))');
+    parser.parseChunk('Stream #0:0 -> #0:0 (h264 (native) -> h264 (h264_nvenc))\n');
     expect(parser.maps.length).toBe(1);
     expect(parser.maps[0]).toBe('h264 (native) -> h264 (h264_nvenc)');
   });
@@ -12,11 +12,11 @@ describe('FFmpegOutputParser', () => {
   it('parses progress and estimates ETA based on speed', () => {
     const parser = new FFmpegOutputParser(3600); // 1 hour duration
     // Speed chunk
-    parser.parseChunk('frame=  100 fps= 50 q=28.0 size=    256kB time=00:00:02.00 bitrate=1048.5kbits/s speed=2.0x');
+    parser.parseChunk('frame=  100 fps= 50 q=28.0 size=    256kB time=00:00:02.00 bitrate=1048.5kbits/s speed=2.0x\r');
     expect(parser.speeds).toEqual([2.0]);
     
     // Time chunk (same chunk)
-    const result = parser.parseChunk('frame=  100 fps= 50 q=28.0 size=    256kB time=00:10:00.00 bitrate=1048.5kbits/s speed=2.0x');
+    const result = parser.parseChunk('frame=  100 fps= 50 q=28.0 size=    256kB time=00:10:00.00 bitrate=1048.5kbits/s speed=2.0x\r');
     expect(result.pct).toBe(17); // 10 minutes out of 60 minutes = 16.66% -> rounded to 17
     
     // Remaining time: 50 minutes (3000s). Speed is 2.0x, so ETA should be 1500s.

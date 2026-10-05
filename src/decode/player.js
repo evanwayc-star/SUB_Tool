@@ -20,7 +20,7 @@ import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
 import { getPlayerAdapter } from '../media-player-adapter.js';
 import { emit } from '../events.js';
-import { fadeAlphaAtTimeline, needsComposite, stageBox } from '../image-compositor-engine.js';
+import { fadeAlphaAtTimeline, visualStackPlan, imageSourceUrl, stageBox } from '../image-compositor-engine.js';
 import { showToast } from '../ui.js';
 import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
 import { keyIndexBefore } from './sample-index.js';
@@ -92,7 +92,7 @@ class SourceStream {
       if(this._disposed) return;
       if(!sup.supported) throw new Error('VideoDecoder 不支援 ' + config.codec);
       this.cfg = cfg; this.chunks = index; this.keyIdx = keyIdx; this.reader = reader;
-      this.frames = []; this.fedIdx = -1; this._flushed = false;
+      this.frames = []; this.frameDurations = new Map(); this.fedIdx = -1; this._flushed = false;
       this.frameDurUs = index[0].duration || 33e3;
       // 串流最早呈現時間：B-frames 編碼（如 nvenc proxy）首幀 cts 常 >0（reorder 延遲）。
       // 呈現目標須夾到此下界，否則 t=0 會被「後退」誤判 → 無限 reseek、decoder 永遠吐不出 frame。
@@ -120,7 +120,7 @@ class SourceStream {
     try{ this.dec.reset(); }catch(e){}
     try{ this.dec.configure(this.cfg); }catch(e){ this.state='failed'; return; }
     for(const f of this.frames){ try{ f.close(); }catch(e){} }
-    this.frames = []; this._flushed = false;
+    this.frames = []; this.frameDurations.clear(); this._flushed = false;
     this.fedIdx = this._keyBefore(tUs);
     this._fedFrom = this.fedIdx; // 本輪解碼路徑起點（判斷「目標是否早於本輪可達範圍」用）
     this._discarded = false;
@@ -155,6 +155,7 @@ class SourceStream {
       const data = this.reader.data(this.fedIdx);
       if(!data){ this.reader.ensure(this.fedIdx); starved = true; break; }
       const c = cs[this.fedIdx++];
+      this.frameDurations.set(c.timestamp,c.duration||this.frameDurUs);
       try{ this.dec.decode(new EncodedVideoChunk({ type:c.type, timestamp:c.timestamp, duration:c.duration, data })); }
       catch(e){ console.error('[WC] decode err:', e && (e.message||e)); this.state='failed'; return null; }
     }
@@ -177,12 +178,14 @@ class SourceStream {
         const trimCount = bestIdx - MAX_BACKWARD_FRAMES;
         for(let i = 0; i < trimCount; i++){
           const f = this.frames.shift();
+          this.frameDurations.delete(f.timestamp);
           try{ f.close(); }catch(e){}
           this._discarded = true;
         }
       }
       while(this.frames.length > MAX_TOTAL_FRAMES){
         const f = this.frames.shift();
+        this.frameDurations.delete(f.timestamp);
         try{ f.close(); }catch(e){}
         this._discarded = true;
       }
@@ -190,11 +193,15 @@ class SourceStream {
     return best;
   }
 
+  frameDuration(frame){
+    return frame.duration || this.frameDurations.get(frame.timestamp) || this.frameDurUs;
+  }
+
   dispose(){
     this._disposed=true;
     try{ this.dec && this.dec.close(); }catch(e){}
     if(this.frames) for(const f of this.frames){ try{ f.close(); }catch(e){} }
-    this.frames = []; this.chunks = null; this.keyIdx = null;
+    this.frames = []; this.frameDurations?.clear(); this.chunks = null; this.keyIdx = null;
     this.reader = null; // 視窗位元組隨 reader 一起放掉（reader 由 _demuxCache 持有、同來源共用）
     this.state = 'failed';
   }
@@ -205,6 +212,8 @@ export const WCPreview = {
   canvas: null, ctx: null,
   sources: new Map(),           // url → SourceStream
   _sourceUse: new Map(),
+  _images: new Map(),
+  _renderCanvas: null,
   mode: 'off',                  // off|wc|video|black（診斷/驗證用）
   lastPresentedUs: null, lastSrcKey: null,
 
@@ -221,7 +230,7 @@ export const WCPreview = {
     if(c.proxyUrl) return c.proxyUrl;
     if(Media.mpvMode){
       if(c.path && c.path === Media.webCodecsProxyPath()) return Media.webCodecsProxyUrl();
-      if((c.audioSrc || 'video') === 'video' || c.primary) return Media.webCodecsProxyUrl();
+      if((c.audioSrc || 'video') === 'video' || c.primary) return Media.webCodecsProxyUrl()||c.web?.url||null;
       return (c.web && c.web.url) || null; // mpv 模式下加入的檔目前無 proxy/web → 該層不可解
     }
     return (c.web && c.web.url) || (isTop ? (video.currentSrc || video.src) : null) || null;
@@ -234,21 +243,41 @@ export const WCPreview = {
     return ss;
   },
 
+  _imageFor(clip){
+    const url=imageSourceUrl(clip);
+    let entry=this._images.get(url);
+    if(!entry&&url){
+      const image=new Image();entry={image,state:'loading'};this._images.set(url,entry);
+      image.onload=()=>{if(this._images.get(url)===entry) entry.state=image.naturalWidth>0?'ready':'failed';};
+      image.onerror=()=>{if(this._images.get(url)===entry) entry.state='failed';};
+      image.src=url;
+    }
+    return entry;
+  },
+
+  _pruneImages(liveUrls){
+    for(const [url,entry] of this._images){
+      if(liveUrls.has(url)) continue;
+      entry.image.onload=null;entry.image.onerror=null;entry.image.src='';this._images.delete(url);
+    }
+  },
+
   /* 在即將開始的合成區取得所有可見層的第一張畫格，避免進入 PiP／溶接才 fetch 與解碼。
      單片段 mpv 正播也必須走這條路；不改動目前由 mpv 呈現的畫面。 */
   _warmUpcoming(t,activeKeys){
     const keep=new Set();
     let next=null;
     for(const c of State.clips){
-      if(c.type==='image'||c.offset<=t||c.offset>t+3) continue;
+      if(c.offset<=t||c.offset>t+3) continue;
       if(next&&c.offset>next.at) continue;
       const at=c.offset+0.001;
-      const future=Seq.clipsAt(at).filter(clip=>clip.type!=='image'&&State.videoTracks[clip.vtrack||0]?.visible!==false);
-      if(!needsComposite(future,State.videoTracks)) continue;
-      next={at,future};
+      const plan=visualStackPlan(Seq.clipsAt(at),State.videoTracks);
+      if(!plan.needsComposite) continue;
+      next={at,future:plan.composited};
     }
     if(!next) return keep;
     for(const layer of next.future){
+      if(layer.type==='image'){this._imageFor(layer);keep.add('image:'+imageSourceUrl(layer));continue;}
       const url=this._clipUrl(layer,layer===next.future[next.future.length-1]);
       if(!url) continue;
       const key=url+'#'+(layer.vtrack||0);
@@ -286,7 +315,7 @@ export const WCPreview = {
     const vs = $('videoSub');
     if(vs){
       vs.style.display='';
-      vs.classList.toggle('mpv-hit-layer', !v);
+      vs.classList.toggle('mpv-hit-layer', Media.mpvMode&&!v);
     }
     emit('mpv:sync'); // _syncMpvPanel 讓 mpv 視窗讓位／回歸
   },
@@ -307,7 +336,7 @@ export const WCPreview = {
     if(!on){
       this._hideCanvas();
       if(this.sources.size && !Media.seqOn()) this.disposeAll(); // 媒體已卸載 → 釋放 demux/解碼資源
-      if(mpv) this._setTakeover(false);
+      this._setTakeover(false);
       Media.setWebCodecsComposited(false); this.mode = 'off'; return;
     }
 
@@ -320,21 +349,26 @@ export const WCPreview = {
     const resized = (this.canvas.width !== bw || this.canvas.height !== bh);
 
     const t = Media.tlTime();
-    const acts = Media.inGap() ? [] : Seq.clipsAt(t).filter(c => c.type !== 'image' && State.videoTracks[c.vtrack||0]?.visible !== false);
+    const plan=visualStackPlan(Seq.clipsAt(t),State.videoTracks);
+    const acts=Media.inGap()?[]:plan.composited;
 
     // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
     // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
     // (註：單純的圖片疊層已改交由 mpv-host 的透明 guide 在原生 MPV 上方顯示，不再強制 WebCodecs 接管，確保流暢度與字體大小不變)
     // 判斷在 compositor-plan.js（純函式、可測）；這裡只依結果決定要不要讓回 mpv。
-    const mustComposite = needsComposite(acts, State.videoTracks);
+    const mustComposite=plan.needsComposite;
+    if(mpv&&mustComposite) void Media.ensurePrimaryPreviewProxy?.();
     const activeKeys=new Set();
     for(const c of acts){
+      if(c.type==='image') continue;
       const url=this._clipUrl(c,c===acts[acts.length-1]);
       if(url) activeKeys.add(url+'#'+(c.vtrack||0));
     }
     const keep=this._warmUpcoming(t,mpv&&!mustComposite ? new Set() : activeKeys);
     if(!mpv||mustComposite) for(const key of activeKeys) keep.add(key);
     this._pruneSources(keep);
+    this._pruneImages(new Set([...plan.images.map(imageSourceUrl),
+      ...[...keep].filter(key=>key.startsWith('image:')).map(key=>key.slice(6))]));
     if(mpv && acts.length && !mustComposite){
       this._hideCanvas(); this._setTakeover(false);
       Media.setWebCodecsComposited(false); this.mode='mpv'; return;
@@ -342,34 +376,47 @@ export const WCPreview = {
 
     // 第一遍：逐層取得 frame（多軌合成；clipsAt 已由下而上排序）
     const layers = [];
-    let requiredLayers=0, readyLayers=0;
-    let topBlocked = null; // mpv：'nourl'＝頂層不可解（讓回 mpv）；'decoding'＝頂層解碼中（保留上一幀）
+    let requiredLayers=0,readyLayers=0,requiredVideoLayers=0;
     for(const c of acts){
       const isTop = (c === acts[acts.length-1]);
       const vt = State.videoTracks[c.vtrack||0] || {};
       const alpha = (vt.opacity != null ? vt.opacity : 1) * this._clipFadeAlpha(c, t);
       if(alpha>0.003) requiredLayers++;
+      if(c.type==='image'){
+        if(alpha<=0.003) continue;
+        const entry=this._imageFor(c);
+        if(entry?.state==='ready'){
+          layers.push({src:entry.image,sw:entry.image.naturalWidth,sh:entry.image.naturalHeight,vt,clip:c,alpha});
+          readyLayers++;
+        }
+        continue;
+      }
+      if(alpha>0.003) requiredVideoLayers++;
       const url = this._clipUrl(c, isTop);
-      if(!url){ if(mpv && isTop) topBlocked = 'nourl'; continue; }
+      if(!url) continue;
       const key = url + '#' + (c.vtrack||0);
       const ss=this._sourceFor(url,key);
-      if(ss.state === 'failed'){ if(mpv && isTop) topBlocked = 'nourl'; continue; } // 不可解（如 mpv 下加入的非原生檔）
+      if(ss.state === 'failed') continue; // 不可解時不能發布半個 stack。
       const su = Math.round(clamp(Seq.toSource(t, c), c.in, Math.max(c.in, c.out - 1/120)) * 1e6);
       const f = ss.request(su);
-      if(f){
+      // FPS-SYNC（I4）：有快取 frame 不代表已解到目標。以來源畫格的有效時窗
+      // 判定可否提交完整 canvas；低 FPS 一格可涵蓋多個專案格，不能硬比 PTS 相等。
+      const duration=f ? Number(ss.frameDuration?.(f) || f.duration || ss.frameDurUs || 33e3) : 0;
+      const target=Math.max(su,ss.startUs??su);
+      if(f && Number.isFinite(f.timestamp) && Number.isFinite(duration) && duration>0 &&
+         target>=f.timestamp-duration/2 && target<f.timestamp+duration){
         layers.push({ src:f, sw:f.displayWidth||f.codedWidth, sh:f.displayHeight||f.codedHeight, vt, clip:c, alpha, ts:f.timestamp, url });
         if(alpha>0.003) readyLayers++;
       }
-      else if(isTop&&alpha>0.003) topBlocked = 'decoding'; // 頂層未就緒（原生與 mpv 同）
     }
 
     // 所有作用層的畫格到齊才接管。冷 seek 時只畫下層會讓上層短暫消失；
     // 已接管且尺寸未變則保留上一張完整合成畫格，等缺的層解出後再更新。
     if(readyLayers<requiredLayers && !Media.inGap() && acts.length>0){
-      if(Media.webCodecsTakeover() && !resized && topBlocked==='decoding'){
+      if(Media.webCodecsTakeover() && !resized){
         Media.setWebCodecsComposited(true); return;
       }
-      if(mpv) this._setTakeover(false);
+      this._setTakeover(false);
       this._hideCanvas(); Media.setWebCodecsComposited(false); this.mode='off'; return;
     }
 
@@ -377,35 +424,43 @@ export const WCPreview = {
     // 清掉 inline 樣式會回退到那條規則 → 畫布永遠不顯示。而 WebCodecs takeover 又會讓 mpv 讓位，
     // 結果兩邊都不見＝黑畫面只剩 HTML 字幕層（v4.33.2 修；此 bug 自 WebCodecs 預覽上線起就在，
     // 因為過去驗證都用 getImageData 讀畫布像素——隱藏的畫布照樣讀得到——所以測不出來）。
-    if(this.canvas.style.display !== 'block') this.canvas.style.display = 'block';
-    if(resized){ this.canvas.width = bw; this.canvas.height = bh; }
-    const ctx = this.ctx;
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, bw, bh);
-    Media.setWebCodecsComposited(false);
-
     if(Media.inGap() || !acts.length){ // 間隙／無作用層＝黑（mpv 下接管黑幕，gap 機制本就隱藏 mpv）
-      if(mpv) this._setTakeover(true);
+      if(resized){this.canvas.width=bw;this.canvas.height=bh;}
+      this.canvas.style.display='block';
+      this.ctx.fillStyle='#000';this.ctx.fillRect(0,0,bw,bh);
+      Media.setWebCodecsComposited(false);
+      this._setTakeover(true);
       this.mode = 'black'; this.lastPresentedUs = null; return;
     }
     if(requiredLayers===0){
-      this.mode='black'; this.lastPresentedUs=null; Media.setWebCodecsComposited(true);
-      if(mpv) this._setTakeover(true);
+      if(resized){this.canvas.width=bw;this.canvas.height=bh;}
+      this.canvas.style.display='block';
+      this.ctx.fillStyle='#000';this.ctx.fillRect(0,0,bw,bh);
+      this.mode='black'; this.lastPresentedUs=null;
+      Media.setWebCodecsComposited(true,{time:t,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});this._setTakeover(true);
       Media.reportWebCodecsPresentation?.([t]);
       return;
     }
+
+    // 先在私有畫布完成整個 stack，再一次發布。某一張 VideoFrame 已釋放或
+    // bitmap 繪製失敗時，仍保留上一個完整 physical frame 與它的 snapshot。
+    if(!this._renderCanvas) this._renderCanvas=document.createElement('canvas');
+    const render=this._renderCanvas;
+    if(render.width!==bw||render.height!==bh){render.width=bw;render.height=bh;}
+    const ctx=render.getContext('2d');
+    ctx.fillStyle='#000';ctx.fillRect(0,0,bw,bh);
 
     // 第二遍：由下而上繪製（與 ffmpeg:exportVideo 對齊：scale＝大小、posX/posY＝(可用空間)×比例、opacity×fade）
     let base = null, painted = 0, lastTs = null, lastUrl = null;
     const presentedTimelineTimes = [];
     for(const L of layers){
-      if(L.alpha <= 0.003){ painted++; continue; } // 全透明：視為已處理（下層已見）
+      if(L.alpha <= 0.003) continue; // 全透明不需要 bitmap，也不提供影片 timestamp。
       // 【v4.25.3】畫布＝專案輸出解析度（State.videoWidth/Height，與 ffmpeg:exportVideo 同一張畫布），
       // 不是「第一層的解析度」——否則換到不同比例/解析度的片時整個畫面區跟著變，
       // 字幕大小也跟著跳（症狀＝「字幕在各個影片上大小不同」）。各層再 contain 進這張畫布（比例不同就留黑邊，與匯出一致）。
       if(!base){
         const pw = State.videoWidth || 1920, ph = State.videoHeight || 1080;
         base = stageBox({ canvasW: bw, canvasH: bh, projectW: pw, projectH: ph });
-        this._stageW = pw; this._stageH = ph; // 供字幕層對齊畫面區（見 app.js _stageRect）
       }
       /* 幾何一律走 image-geometry.imageBoxOnStage()：軌影格（available-space 定位）
          → 片段方框＝scale×影格 → 素材 contain 進方框 → 方框【中心】對到 (posX,posY)。
@@ -446,17 +501,26 @@ export const WCPreview = {
       ctx.globalAlpha = 1;
       ctx.restore();
     }
-    if(painted && lastTs != null){
-      this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl; Media.setWebCodecsComposited(true);
-      if(mpv) this._setTakeover(true);
-       if(presentedTimelineTimes.length===requiredLayers){
-         Media.reportWebCodecsPresentation?.(presentedTimelineTimes);
-       }
+    if(presentedTimelineTimes.length!==requiredVideoLayers||painted<requiredLayers){
+      if(!Media.webCodecsTakeover()||resized){
+        this._hideCanvas();this._setTakeover(false);Media.setWebCodecsComposited(false);this.mode='off';
+      }
+      return;
     }
-    else if(painted){ // 全部層皆全透明（淡出到底）＝黑畫面，屬正確結果
-      this.mode = 'black'; this.lastPresentedUs = null; Media.setWebCodecsComposited(true);
-      if(mpv) this._setTakeover(true);
-      if(layers.length===acts.length) Media.reportWebCodecsPresentation?.([t]);
+    if(resized){this.canvas.width=bw;this.canvas.height=bh;}
+    this.ctx.drawImage(render,0,0);
+    this.canvas.style.display='block';
+    this._stageW=State.videoWidth||1920;this._stageH=State.videoHeight||1080;
+    const presentedTime=presentedTimelineTimes.at(-1)??t;
+    Media.setWebCodecsComposited(true,{time:presentedTime,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});
+    this._setTakeover(true);
+    if(painted && lastTs != null){
+      this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl;
+      Media.reportWebCodecsPresentation?.(presentedTimelineTimes);
+    }
+    else if(painted){ // 影片全透明而圖片仍可見：完整 stack 已發布，時間由圖片 placement 決定。
+      this.mode = 'wc'; this.lastPresentedUs = null;
+      Media.reportWebCodecsPresentation?.([t]);
     }else{ this.mode = 'black'; this.lastPresentedUs = null; }
   },
 
@@ -467,11 +531,15 @@ export const WCPreview = {
 
   setEnabled(v){
     this.enabled = !!v;
-    if(!v){ this.disposeAll(); if(this.canvas) this.canvas.style.display = 'none'; this.mode = 'off'; }
+    if(!v){ this.disposeAll(); if(this.canvas) this.canvas.style.display = 'none'; this.mode = 'off';
+      this._setTakeover(false);Media.setWebCodecsComposited(false); }
   },
   disposeAll(){
     for(const ss of this.sources.values()) ss.dispose?.();
     this.sources.clear(); this._sourceUse.clear(); releaseUnusedDemux(new Set());
+    for(const entry of this._images.values()){entry.image.onload=null;entry.image.onerror=null;entry.image.src='';}
+    this._images.clear();
+    if(this._renderCanvas){this._renderCanvas.width=0;this._renderCanvas.height=0;this._renderCanvas=null;}
   },
   stats(){
     const o = { mode:this.mode, lastPresentedUs:this.lastPresentedUs, srcKey:(this.lastSrcKey||'').slice(-42), sources:[] };

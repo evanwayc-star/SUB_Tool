@@ -110,8 +110,12 @@ function buildZip(files) {
 
 /* ---- XML helpers ---- */
 function xmlEsc(s) {
-  // 也用於屬性值（如 <sheet name="...">）：引號必須跳脫，否則含 " 的軌道名會產生非法 XML
+  // ST_Xstring 先保護 literal escape，再保存 XML 不能直接承載的字元。
+  // CR 必須編碼，否則 XML reader 會將它正規化成 LF。引號也需供分頁屬性使用。
   return String(s ?? '')
+    .replace(/_x[0-9a-f]{4}_/gi, token => '_x005F_' + token.slice(1))
+    .replace(/[\u0000-\u0008\u000B-\u001F\uFFFE\uFFFF]/g,
+      char => `_x${char.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}_`)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -227,7 +231,10 @@ function sheetXml(headerLabel, cues, fps, dropFrame) {
 
 /* ---- 分頁名稱清理（Excel 限制：≤31 字、不含 \/?*:[] 、不能空白）---- */
 function safeSheetName(raw) {
-  let s = (raw || '軌道').replace(/[\\/\?\*:\[\]]/g, '_').replace(/^'|'$/g, '').trim().substring(0, 31);
+  let s = String(raw ?? '').trim()
+    .replace(/[\\/?*:\[\]\u0000-\u001F\uFFFE\uFFFF]/g, '_')
+    .substring(0, 31).replace(/^[\s']+|[\s']+$/g, '');
+  if (s.toLowerCase() === 'history') s += '_';
   return s || '軌道';
 }
 
@@ -243,11 +250,16 @@ function buildXLSX(trackDataList, fps, dropFrame) {
 
   // 分頁名稱去重
   const sheetNames = [];
+  const usedNames = new Set();
   for (const t of trackDataList) {
-    let name = safeSheetName(t.name);
+    const name = safeSheetName(t.name);
     let final = name;
     let counter = 2;
-    while (sheetNames.includes(final)) { final = name.substring(0, 28) + '_' + counter++; }
+    while (usedNames.has(final.toLowerCase())) {
+      const suffix = '_' + counter++;
+      final = name.substring(0, 31 - suffix.length) + suffix;
+    }
+    usedNames.add(final.toLowerCase());
     sheetNames.push(final);
   }
 

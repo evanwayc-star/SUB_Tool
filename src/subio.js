@@ -1,9 +1,9 @@
-import { State, IS_DESKTOP, DESK, setFps, newTrack, syncTrackCount, newId, deselect } from './state.js';
+import { State, IS_DESKTOP, DESK, setFps, snapFps, getFpsRevision, newTrack, syncTrackCount, newId, deselect } from './state.js';
 import { $ } from './dom.js';
-import { secToEncore, snapTimeToFrame } from './time.js';
+import { secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { sortCues, trackLocked, cuesTrackLocked, burnedSubtitleTrackNames } from './subtitle-model.js';
+import { sortCues, trackLocked, cuesTrackLocked, burnedSubtitleTrackNames, subtitleTimeOnFrame, shiftCueTimes } from './subtitle-model.js';
 import { renderASS, SubFormats } from './formats.js';
 import { drawTimeline, layoutTimeline } from './timeline-renderer.js';
 import { emit } from './events.js';
@@ -21,7 +21,7 @@ import { Media } from './media.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { buildXLSX } from './xlsx-export.js';
-import { getAllPresets, loadFonts } from './substyle.js';
+import { getAllPresets, loadFonts, presetIdentity } from './substyle.js';
 import { buildSubtitleImportPlan } from './project-intake-engine.js';
 import { Project } from './project.js';
 
@@ -33,7 +33,11 @@ function showFpsConvertDialog() {
   const FPS_OPTS = [23.976, 24, 25, 29.97, 30];
   const opts = FPS_OPTS.map(f => `<option value="${f}">${f === 23.976 ? '23.976 (23.98)' : f === 29.97 ? '29.97' : '' + f}</option>`).join('');
   const curFps = State.fps;
-  openModal('FPS 時間碼轉換',
+  const dropFrame=State.dropFrame,ownsWorkspace=Project.captureWorkspaceOwnership();
+  const targets=State.cues.filter(c=>c.timed!==false && (c.track||0)===tkIdx);
+  const current=()=>session.isCurrent() && ownsWorkspace() && State.tracks.includes(tk) && !tk.locked && State.fps===curFps && State.dropFrame===dropFrame
+    && targets.every(c=>State.cues.includes(c) && State.tracks[c.track||0]===tk);
+  const session=openModal('FPS 時間碼轉換',
     `<div style="margin-bottom:12px;font-size:13px;color:var(--text-faint)">軌道：<b>${escapeHTML(tk.name)}</b></div>` +
     `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">` +
     `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">來源 FPS</div>` +
@@ -45,11 +49,12 @@ function showFpsConvertDialog() {
     `<div id="fpsPreview" style="margin-top:14px;font-size:12px;color:var(--text-faint)"></div>`,
     [{
       label: '轉換', primary: true, act: () => {
+        if(!current()) return;
         const from = +$('fpsFrom').value, to = +$('fpsTo').value;
-        if (from === to) { closeModal(); return; }
+        if (from === to) { session.close(); return; }
         const ratio = from / to;
-        const fr = 1 / Math.max(State.fps || 25, 1);
-        const cues = State.cues.filter(c => (c.track || 0) === tkIdx);
+        const fr = 1 / getExactFps(State.fps || 25);
+        const cues = targets;
         for (const c of cues) {
           c.start = snapTimeToFrame(Math.max(0, c.start * ratio), State.fps, State.dropFrame);
           let ne = snapTimeToFrame(c.end * ratio, State.fps, State.dropFrame);
@@ -58,12 +63,13 @@ function showFpsConvertDialog() {
         }
         const maxEnd = State.cues.reduce((m, c) => c.end > m ? c.end : m, 0);
         if (maxEnd > State.duration) { State.duration = maxEnd; emit('duration:display'); }
-        closeModal(); sortCues(); emit('render:all'); layoutTimeline(); drawTimeline();
+        session.close({committed:true}); sortCues(); emit('render:all'); layoutTimeline(); drawTimeline();
         recordHistory(`FPS 轉換 ${from}→${to}`);
         setStatus(`已將「${tk.name}」從 ${from}fps 轉換至 ${to}fps（${cues.length} 條）`, 'ok');
       }
-    }, { label: '取消', act: closeModal }]);
+    }, { label: '取消', act: ()=>session.close() }]);
   setTimeout(() => {
+    if(!current()) return;
     const fromSel = $('fpsFrom'), toSel = $('fpsTo');
     const nearest = FPS_OPTS.reduce((a, b) => Math.abs(b - curFps) < Math.abs(a - curFps) ? b : a);
     if (toSel) toSel.value = String(nearest);
@@ -415,6 +421,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
   function $$ (sel) { return document.querySelectorAll(sel); }
 
   function updateRows() {
+    if (!session.isCurrent()) return;
     const c = $('evRowsContainer');
     if (!c) return;
     c.innerHTML = list.rows().map((r, i) => renderRow(r, i)).join('');
@@ -461,7 +468,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
 
     const pickDir = async e => {
       const idx = idxOf(e);
+      const button = e.currentTarget;
+      const previousDir = list.get(idx)?.outDir;
       const p = await DESK.exportDirectory([]);
+      if (!session.isCurrent() || !button.isConnected || list.get(idx)?.outDir !== previousDir) return;
       if (p) { list.setOutDir(idx, p); after(); }
     };
     $$('.ev-dir-btn').forEach(el => el.onclick = pickDir);
@@ -479,9 +489,15 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     });
   }
 
+  let conflictCheckGeneration = 0;
   async function checkConflicts(isSubmitting = false, candidate = list) {
+    // A newer edit (or submission) owns the warning. Directory reads can finish out of order.
+    const generation = ++conflictCheckGeneration;
+    if (!session.isCurrent()) return false;
     const msg = $('evConflictMsg');
     if (!msg) return true;
+    const isCurrentPreview = () => session.isCurrent() &&
+      (isSubmitting || (generation === conflictCheckGeneration && $('evConflictMsg') === msg));
 
     const blocking = candidate.problems().filter(p => p.kind === 'blocking')[0];
     if (blocking) {
@@ -497,6 +513,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         for (const { dir, name } of candidate.outPaths()) {
           if (!dir) continue;
           const files = await DESK.listDir(dir);
+          if (!isCurrentPreview()) return false;
           const existing = files.map(f => (typeof f === 'string' ? f : f.name).toLowerCase());
           if (existing.includes(name.toLowerCase())) conflicts.push(name);
         }
@@ -509,6 +526,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       } catch(e){}
     }
 
+    if (!isCurrentPreview()) return false;
     msg.style.display = 'none';
     return true;
   }
@@ -528,9 +546,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     });
   }
 
-  openModal('匯出影片', html, [
+  const session = openModal('匯出影片', html, [
     { label: '取消', act: closeModal },
     { label: '加入匯出序列', id: 'evSubmitBtn', primary: true, act: async () => {
+      if (!session.isCurrent()) return;
       const submitButton = $('evSubmitBtn');
       if (submitButton?.disabled) return;
       if (submitButton) {
@@ -543,6 +562,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           // D3: capture project data and editable delivery rows synchronously,
           // before checkConflicts performs directory I/O.
           capture: () => {
+            if (!session.isCurrent()) return null;
             const submission = _captureExportDraft();
             return submission ? { submission, submittedList: freezeCurrentDeliveryList(submission) } : null;
           },
@@ -558,12 +578,13 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           },
           checkConflicts: ({ submittedList }) => checkConflicts(true, submittedList),
           dispatch: async ({ submission, submittedList }) => {
+            if (!session.isCurrent()) return 0;
             const jobs = buildExportJobs(submission, submittedList);
             for (const job of jobs) {
               const jobId = await DESK.exportVideo(job);
               if (jobId) showToast(`排入佇列: ${job.defaultName}`);
             }
-            closeModal();
+            session.close({ committed: true });
             if (typeof DESK.openQueueMonitor === 'function') {
               setTimeout(() => DESK.openQueueMonitor(), 150);
             }
@@ -594,6 +615,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
   };
 
   setTimeout(() => {
+    if (!session.isCurrent()) return;
     updateRows();
     checkConflicts();
   }, 20);
@@ -612,10 +634,10 @@ export function detectSubFormat(text, ext) {
   return 'txt';
 }
 
-export function _parseSubtitleText(text, kind) {
+export function _parseSubtitleText(text, kind, grid=State) {
   if (kind === 'srt') return SubFormats.parseSRT(text);
   if (kind === 'ass') return SubFormats.parseASS(text);
-  if (kind === 'encore') return SubFormats.parseEncore(text, State.fps, State.dropFrame);
+  if (kind === 'encore') return SubFormats.parseEncore(text, grid.fps, grid.dropFrame);
   return SubFormats.parseTXT(text);
 }
 
@@ -635,67 +657,100 @@ export function _parsedSubtitleCount(parsed) {
   return Array.isArray(parsed?.subtool?.cues) ? parsed.subtool.cues.length : (parsed?.length || 0);
 }
 
-function _askFpsModal(defaultValue = '29.97', detectedSubtoolAss = false) {
+let subtitleImportRequest = 0;
+let subtitleImportModal = null;
+const subtitleImportDrafts = new WeakMap();
+function importGrid(value) {
+  return {fps:snapFps(parseFloat(value)),dropFrame:String(value).endsWith('df')};
+}
+function beginSubtitleImport(){
+  const request=++subtitleImportRequest;
+  subtitleImportModal?.close();
+  subtitleImportModal=null;
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  return () => request===subtitleImportRequest && ownsWorkspace();
+}
+
+function _askFpsModal(defaultValue = '29.97', detectedSubtoolAss = false, owns=()=>true) {
   return new Promise(resolve => {
+    let done=false;
+    const cancel=()=>{ if(done) return; done=true; resolve(null); };
+    const finish=value=>{ if(done || !session.isCurrent()) return; done=true; session.close({committed:true}); resolve(owns()?value:null); };
     const FPS_OPTS = [
       { v: '23.976', l: '23.98' }, { v: '24', l: '24' }, { v: '25', l: '25' },
       { v: '29.97df', l: '29.97 (Drop-frame)' }, { v: '29.97', l: '29.97 (Non-Drop-frame)' }, { v: '30', l: '30' },
     ];
     const opts = FPS_OPTS.map(o => `<option value="${o.v}"${o.v === defaultValue ? ' selected' : ''}>${o.l}</option>`).join('');
-    openModal('選擇影格率 (FPS)',
+    const session=openModal('選擇影格率 (FPS)',
       `<p style="margin:0 0 12px;font-size:13px;color:var(--text-faint)">${detectedSubtoolAss ? '已從 SUB Tool ASS 偵測原始影格率；可在此確認或改為其他值。' : '尚未載入影片，請先設定字幕的影格率。'}</p>` +
       `<label>FPS：<select id="importFpsSel" style="margin-left:6px">${opts}</select></label>`,
-      [{ label: '確定', primary: true, act: () => { const val = $('importFpsSel').value; closeModal(); resolve(val); } },
-      { label: '取消', act: () => { closeModal(); resolve(null); } }]
+      [{ label: '確定', primary: true, act: () => finish($('importFpsSel').value) },
+      { label: '取消', act: () => session.close() }],
+      {onDismiss:cancel,onReplaced:cancel}
     );
+    subtitleImportModal=session;
   });
 }
 
-export async function _prepareSubtitleImport(text, kind) {
+export async function _prepareSubtitleImport(text, kind, owns=beginSubtitleImport()) {
+  const initial={fps:State.fps,dropFrame:State.dropFrame,revision:getFpsRevision()};
+  let choice=null, grid=initial;
   if (kind === 'ass') await loadFonts();
+  if(!owns()) return null;
   if (!State.mediaName && kind === 'encore') {
-    const fpsVal = await _askFpsModal();
-    if (fpsVal === null) return null;
-    setFps(fpsVal);
+    const fpsVal = await _askFpsModal('29.97',false,owns);
+    if (fpsVal === null || !owns()) return null;
+    choice=fpsVal; grid=importGrid(fpsVal);
   }
   let parsed;
-  try { parsed = _parseSubtitleText(text, kind); }
+  try { parsed = _parseSubtitleText(text, kind,grid); }
   catch (e) { showToast('解析失敗：' + e.message); return null; }
   if (_parsedSubtitleCount(parsed) === 0) { showToast('未解析到字幕（檢查格式/編碼）'); return null; }
   if (!State.mediaName && kind !== 'encore') {
     const sourceFps = _subtoolFpsValue(parsed);
-    const fpsVal = await _askFpsModal(sourceFps || '29.97', !!sourceFps);
-    if (fpsVal === null) return null;
-    setFps(fpsVal);
+    const fpsVal = await _askFpsModal(sourceFps || '29.97', !!sourceFps,owns);
+    if (fpsVal === null || !owns()) return null;
+    choice=fpsVal; grid=importGrid(fpsVal);
   }
+  // 選定的 FPS 只供本次解析／plan 使用；取消不必回寫或還原 live 格網。
+  subtitleImportDrafts.set(parsed,{choice,grid,isCurrent:()=>getFpsRevision()===initial.revision
+    && State.fps===initial.fps && State.dropFrame===initial.dropFrame});
   return parsed;
 }
 
-export function _openImportModal(title, parsed, kind) {
+export function _openImportModal(title, parsed, kind, owns=Project.captureWorkspaceOwnership()) {
+  if(!owns()) return;
+  const tracks=[...State.tracks];
+  const draft=subtitleImportDrafts.get(parsed);
+  const grid=draft?.grid || State;
+  const current=()=>session.isCurrent() && owns();
   const trackOpts = State.tracks.map((tk, i) => `<option value="${i}">軌道 ${i + 1}：${escapeHTML(tk.name)}</option>`).join('');
-  const assImportPreview = kind === 'ass' ? buildSubtitleImportPlan(parsed, { fps: State.fps, target: 'new' }) : null;
+  const assImportPreview = kind === 'ass' ? buildSubtitleImportPlan(parsed, { fps: grid.fps, target: 'new' }) : null;
   const hasRoundTripMetadata = assImportPreview?.usedMetadata === true;
   const suggestName = hasRoundTripMetadata && assImportPreview.trackPatch?.name
     ? assImportPreview.trackPatch.name : (kind.toUpperCase() + ' 字幕');
   const presets = getAllPresets();
-  const presetOpts = '<option value="">— 不套用自訂樣式 —</option>' + presets.map(p => `<option value="${escapeHTML(p.name)}">${escapeHTML(p.name)}</option>`).join('');
+  const presetOpts = '<option value="">— 不套用自訂樣式 —</option>' + presets.map(p => `<option value="${escapeHTML(presetIdentity(p))}">${escapeHTML(p.group ? p.group+' / '+p.name : p.name)}</option>`).join('');
   const styleControl = hasRoundTripMetadata
     ? `<p style="margin:0 0 8px;font-size:13px;color:var(--text-faint)">偵測到 SUB Tool ASS：會還原原始軌道與逐句樣式。${assImportPreview.usedFrameTiming ? '' : '目前專案 FPS 不同，將依原始秒數匯入。'}</p>`
     : `${assImportPreview?.usedLegacyTiming ? '<p style="margin:0 0 8px;font-size:13px;color:var(--text-faint)">偵測到舊版 SUB Tool ASS：會依目前 FPS 修正舊版百分秒造成的一格偏移。</p>' : ''}<label style="display:block;padding-bottom:8px">套用樣式：<select id="importPresetSel" style="margin-left:6px">${presetOpts}</select></label>`;
   
-  openModal(title,
+  const session=openModal(title,
     `<label style="display:block;padding:8px 0">目標軌道：<select id="importTkSel" style="margin-left:6px">${trackOpts}<option value="new" selected>＋ 新增軌道…</option></select></label>` +
     `<div id="importNewTkRow" style="padding-bottom:8px">軌道名稱：<input type="text" id="importNewTkName" style="margin-left:6px;width:160px" value="${escapeHTML(suggestName)}"></div>` +
     styleControl +
     `<label style="display:block;padding-bottom:8px"><input type="checkbox" id="importAppend"> 附加（保留現有字幕）</label>`,
     [{
       label: '匯入', primary: true, act: () => {
+        if(!current()) return;
+        if(draft && !draft.isCurrent()) { showToast('專案影格率已變更，請重新確認匯入'); return; }
         const selVal = $('importTkSel').value;
+        if(selVal!=='new' && State.tracks[+selVal]!==tracks[+selVal]) return;
         if (selVal !== 'new' && trackLocked(+selVal, '匯入字幕')) return;
         const presetVal = hasRoundTripMetadata ? '' : $('importPresetSel').value;
-        const selectedPreset = presetVal ? getAllPresets().find(p => p.name === presetVal) : null;
+        const selectedPreset = presetVal ? getAllPresets().find(p => presetIdentity(p) === presetVal) : null;
         const importPlan = kind === 'ass'
-          ? buildSubtitleImportPlan(parsed, { fps: State.fps, target: selVal === 'new' ? 'new' : 'existing' }) : null;
+          ? buildSubtitleImportPlan(parsed, { fps: grid.fps, target: selVal === 'new' ? 'new' : 'existing' }) : null;
         let targetTk;
         if (selVal === 'new') {
           const tkName = ($('importNewTkName').value.trim()) || importPlan?.trackPatch?.name || ('軌道 ' + (State.tracks.length + 1));
@@ -706,7 +761,7 @@ export function _openImportModal(title, parsed, kind) {
           targetTk = State.tracks.length - 1;
         } else { targetTk = +selVal; }
         const append = selVal === 'new' || $('importAppend').checked;
-        closeModal();
+        session.close({committed:true});
         const sourceCues = importPlan?.cues || parsed;
         const newCues = sourceCues.map(p => {
           const s = Number.isFinite(Number(p.start)) ? Number(p.start) : 0;
@@ -719,6 +774,7 @@ export function _openImportModal(title, parsed, kind) {
           return cue;
         });
         if (kind === 'txt') newCues.forEach(c => c.timed = false);
+        if(draft?.choice!=null) setFps(draft.choice);
         if (append) { State.cues.push(...newCues); }
         else {
           State.cues = State.cues.filter(c => (c.track || 0) !== targetTk);
@@ -746,8 +802,10 @@ export function _openImportModal(title, parsed, kind) {
             ? `匯入 ${newCues.length} 條字幕（已修正舊版 ASS 的一格偏移）`
             : `匯入 ${newCues.length} 條字幕`);
       }
-    }, { label: '取消', act: closeModal }]);
+    }, { label: '取消', act: ()=>session.close() }]);
+  subtitleImportModal=session;
   setTimeout(() => {
+    if(!current()) return;
     const sel = $('importTkSel'), row = $('importNewTkRow'), nm = $('importNewTkName');
     if (sel) sel.addEventListener('change', () => {
       const isNew = sel.value === 'new';
@@ -758,26 +816,28 @@ export function _openImportModal(title, parsed, kind) {
 }
 
 export async function importSub() {
+  const owns=beginSubtitleImport();
   let text, fileName = '';
   if (IS_DESKTOP) {
-    const r = await DESK.importSub('any'); if (!r) return;
+    const r = await DESK.importSub('any'); if (!r || !owns()) return;
     text = decodeText(b64ToBytes(r.b64).buffer); fileName = r.name || '';
   } else {
-    const f = await pickFile($('fileSub')); if (!f) return;
-    const buf = await readFile(f); text = decodeText(buf); fileName = f.name;
+    const f = await pickFile($('fileSub')); if (!f || !owns()) return;
+    const buf = await readFile(f); if(!owns()) return; text = decodeText(buf); fileName = f.name;
   }
   const ext = (fileName.split('.').pop() || '').toLowerCase();
   const kind = detectSubFormat(text, ext);
-  const parsed = await _prepareSubtitleImport(text, kind); if (!parsed) return;
-  _openImportModal(`匯入字幕到哪個軌道？（已辨識為 ${kind.toUpperCase()}，${_parsedSubtitleCount(parsed)} 條）`, parsed, kind);
+  const parsed = await _prepareSubtitleImport(text, kind,owns); if (!parsed || !owns()) return;
+  _openImportModal(`匯入字幕到哪個軌道？（已辨識為 ${kind.toUpperCase()}，${_parsedSubtitleCount(parsed)} 條）`, parsed, kind,owns);
 }
 
 export async function importDropped(f) {
-  const buf = await readFile(f); const text = decodeText(buf);
+  const owns=beginSubtitleImport();
+  const buf = await readFile(f); if(!owns()) return; const text = decodeText(buf);
   const ext = (f.name.split('.').pop() || '').toLowerCase();
   const kind = detectSubFormat(text, ext);
-  const parsed = await _prepareSubtitleImport(text, kind); if (!parsed) return;
-  _openImportModal(`拖入字幕（${kind.toUpperCase()}，${_parsedSubtitleCount(parsed)} 條）`, parsed, kind);
+  const parsed = await _prepareSubtitleImport(text, kind,owns); if (!parsed || !owns()) return;
+  _openImportModal(`拖入字幕（${kind.toUpperCase()}，${_parsedSubtitleCount(parsed)} 條）`, parsed, kind,owns);
 }
 
 /* ==============================================================================
@@ -804,6 +864,10 @@ export function _nextInPoint(c) {
   return next;
 }
 
+function durationEndOnFrame(c,requestedEnd,nextIn){
+  return subtitleTimeOnFrame(requestedEnd,c.start+1/getExactFps(State.fps||25),nextIn);
+}
+
 export function applyTcShift(sign) {
   const raw = ($('tcShiftInput').value || '').trim().replace(/^[+-]/, '');
   const t = parseTimecodeInput(raw);
@@ -811,8 +875,7 @@ export function applyTcShift(sign) {
   const delta = sign * t;
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可以位移'); return; }
-  if (cuesTrackLocked(cues, '修改字幕時間')) return;
-  for (const c of cues) { c.start = Math.max(0, c.start + delta); c.end = Math.max(c.start + 0.001, c.end + delta); }
+  if(!shiftCueTimes(cues,delta)) return;
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('時間碼位移');
   setStatus(`已位移 ${delta >= 0 ? '+' : ''}${delta.toFixed(3)}s（共 ${cues.length} 條）`, 'ok');
@@ -823,7 +886,6 @@ export function applyDurAdjTc(sign) {
   const t = parseTimecodeInput(raw);
   if (t == null || isNaN(t) || t <= 0) { showToast('請輸入有效的時間碼（例如 00:00:01:00）'); return; }
   const delta = sign * t;
-  const minDur = 1 / Math.max(State.fps || 25, 1);
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可調整'); return; }
   if (cuesTrackLocked(cues, '修改字幕時間')) return;
@@ -831,21 +893,19 @@ export function applyDurAdjTc(sign) {
   for (const c of cues) {
     const nextIn = _nextInPoint(c);
     if (delta > 0 && c.end > nextIn) { skipped++; continue; }
-    let newEnd = c.end + delta;
-    newEnd = Math.max(c.start + minDur, newEnd);
-    newEnd = Math.min(nextIn, newEnd);
+    const newEnd=durationEndOnFrame(c,c.end+delta,nextIn);
+    if(newEnd===null){ skipped++;continue; }
     if (newEnd !== c.end) { c.end = newEnd; adjusted++; }
   }
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('調整持續時間');
-  setStatus(`已調整 ${adjusted} 條字幕的持續時間（${sign > 0 ? '+' : '−'}${t.toFixed(3)}s${skipped ? `，跳過 ${skipped} 條已重疊` : ''}）`, 'ok');
+  setStatus(`已調整 ${adjusted} 條字幕的持續時間（${sign > 0 ? '+' : '−'}${t.toFixed(3)}s${skipped ? `，跳過 ${skipped} 條邊界受限或已重疊` : ''}）`, 'ok');
 }
 
 export function applyDurAdjPct() {
   const pct = +($('durAdjPctInput').value || '100');
-  if (isNaN(pct) || pct <= 0) { showToast('請輸入有效的百分比（例如 150）'); return; }
+  if (!Number.isFinite(pct) || pct <= 0) { showToast('請輸入有效的百分比（例如 150）'); return; }
   const ratio = pct / 100;
-  const minDur = 1 / Math.max(State.fps || 25, 1);
   const cues = _durAdjCues($('tcShiftSel').value);
   if (!cues.length) { showToast('沒有字幕可調整'); return; }
   if (cuesTrackLocked(cues, '修改字幕時間')) return;
@@ -853,14 +913,13 @@ export function applyDurAdjPct() {
   for (const c of cues) {
     const nextIn = _nextInPoint(c);
     if (ratio > 1 && c.end > nextIn) { skipped++; continue; }
-    let newEnd = snapTimeToFrame(c.start + (c.end - c.start) * ratio, State.fps, State.dropFrame);
-    newEnd = Math.max(c.start + minDur, newEnd);
-    newEnd = Math.min(nextIn, newEnd);
+    const newEnd=durationEndOnFrame(c,c.start+(c.end-c.start)*ratio,nextIn);
+    if(newEnd===null){ skipped++;continue; }
     if (newEnd !== c.end) { c.end = newEnd; adjusted++; }
   }
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('調整持續時間');
-  setStatus(`已調整 ${adjusted} 條字幕的持續時間（${pct}%${skipped ? `，跳過 ${skipped} 條已重疊` : ''}）`, 'ok');
+  setStatus(`已調整 ${adjusted} 條字幕的持續時間（${pct}%${skipped ? `，跳過 ${skipped} 條邊界受限或已重疊` : ''}）`, 'ok');
 }
 
 /* ==============================================================================
@@ -957,10 +1016,10 @@ if (typeof document !== 'undefined') {
     const f = e.dataTransfer.files[0]; if (!f) return;
     const ext = (f.name.split('.').pop() || '').toLowerCase();
     if (['subtool', 'json'].includes(ext)) {
-      if(IS_DESKTOP&&typeof DESK.openDroppedProject==='function'){
-        const project=await DESK.openDroppedProject(f);
-        if(project) await Project.loadDesktop(project);
-      }else await Project.load(f);
+      try{
+        await Project.open(()=>IS_DESKTOP&&typeof DESK.openDroppedProject==='function'
+          ? DESK.openDroppedProject(f) : f);
+      }catch(error){ showToast('開啟專案失敗：'+error.message); }
     }
     else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
     else if (IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)) {

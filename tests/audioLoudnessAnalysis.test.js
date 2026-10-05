@@ -53,6 +53,14 @@ describe('音訊聲量分析 (analyzePeaksLoudness & parseVolumeAnalysis)', () =
   });
 
   describe('parseVolumeAnalysis 純函式', () => {
+    it('錯誤或缺測量值不會被當成靜音，真正負無窮静音維持有限report', () => {
+      expect(parseVolumeAnalysis('source.wav: No such file or directory')).toBeNull();
+      expect(parseVolumeAnalysis('max_volume: -3.0 dB')).toBeNull();
+      expect(parseVolumeAnalysis('{"input_i":"bad","input_tp":"-2","target_offset":"0"}')).toBeNull();
+      const silence = parseVolumeAnalysis('{"input_i":"-inf","input_tp":"-inf","input_lra":"0","input_thresh":"-inf","target_offset":"0"}');
+      expect(silence).toMatchObject({ maxDb: -100, meanDb: -100, minDb: -100, isSilence: true });
+      expect(parseVolumeAnalysis('max_volume: 0.0 dB\nmean_volume: 0.0 dB')).toMatchObject({ maxDb: 0, meanDb: 0, isSilence: false });
+    });
     it('能解析 volumedetect 輸出', () => {
       const stderr = `
 [Parsed_volumedetect_0 @ 0x7f8a9b] n_samples: 44100
@@ -106,6 +114,18 @@ describe('音訊聲量分析 (analyzePeaksLoudness & parseVolumeAnalysis)', () =
   });
 
   describe('audioNormalizationRuntime.analyze', () => {
+    it('FFmpeg失敗不發布fake report，成功但無measurement也拒絕', async () => {
+      const execute = vi.fn(async (args, options) => {
+        options.onStderr('source.wav: No such file or directory');
+        throw new Error('ffmpeg exit 1');
+      });
+      const runtime = createAudioNormalizationRuntime({ createTempPath: () => 'unused.wav', execute });
+      await expect(runtime.analyze('source.wav')).rejects.toThrow('ffmpeg exit 1');
+      execute.mockImplementation(async (args, options) => options.onStderr('ffmpeg version test'));
+      await expect(runtime.analyze('source.wav')).rejects.toThrow('未產生有效');
+      execute.mockImplementation(async (args, options) => options.onStderr('{"input_i":"-inf","input_tp":"-inf","target_offset":"0"}'));
+      await expect(runtime.analyze('source.wav')).resolves.toMatchObject({ isSilence: true, maxDb: -100, meanDb: -100 });
+    });
     it('能呼叫 ffmpeg 執行 volumedetect 與 loudnorm 快速分析', async () => {
       let executedArgs = null;
       const mockExecute = vi.fn(async (args, opts) => {

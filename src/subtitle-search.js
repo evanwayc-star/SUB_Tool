@@ -1,5 +1,5 @@
 import { State, setSelection } from './state.js';
-import { emit } from './events.js';
+import { emit, on } from './events.js';
 import { recordHistory } from './history.js';
 import { escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { trackLocked } from './subtitle-model.js';
@@ -8,6 +8,20 @@ let _searchTerms = [];
 let _searchMatches = [];
 let _searchIdx = -1;
 let _selectCueHandler = null;
+let searchDirty = true;
+let searchCues = null, searchTrack = null, searchTrackIndex = null;
+// Render events are the editor mutation seam. Rebuild once per invalidation,
+// never once per rendered row, and never change selection during a rebuild.
+for(const event of ['render:all','render:subList','render:subRow']) on(event,()=>{searchDirty=true;if(_searchTerms.length)emit('render:searchCount');});
+function refreshSearch(force=false){
+  if(!force && !searchDirty && searchCues===State.cues && searchTrack===State.tracks[State.listTrack] && searchTrackIndex===State.listTrack) return;
+  const previous=_searchMatches[_searchIdx];
+  _searchMatches=_searchTerms.length ? State.cues.filter(c=>(c.track||0)===State.listTrack && _searchTerms.some(t=>String(c.text||'').toLowerCase().includes(t.toLowerCase()))).map(c=>c.id) : [];
+  const selected=_searchMatches.indexOf(State.selectedId);
+  const retained=_searchMatches.indexOf(previous);
+  _searchIdx=selected>=0 ? selected : retained>=0 ? retained : _searchMatches.length ? 0 : -1;
+  searchCues=State.cues;searchTrack=State.tracks[State.listTrack];searchTrackIndex=State.listTrack;searchDirty=false;
+}
 
 export function setSelectCueHandler(fn) {
   _selectCueHandler = typeof fn === 'function' ? fn : null;
@@ -45,17 +59,15 @@ export function txtHTML(text){
 }
 
 export function isSearchHit(id) {
+  refreshSearch();
   return _searchMatches.includes(id);
 }
 
 export function searchUpdate(raw, selectCueCb){
+  if(raw == null) raw = typeof document === 'undefined' ? '' : (document.getElementById('searchInput')?.value ?? '');
   if(!raw){ _searchTerms=[]; _searchMatches=[]; _searchIdx=-1; emit('render:searchCount'); emit('render:subList'); return; }
   _searchTerms=raw.split('||').filter(s=>s.length>0);
-  const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
-  _searchMatches=list.filter(c=>{
-    const text=(c.text||'').toLowerCase();
-    return _searchTerms.some(t=>text.includes(t.toLowerCase()));
-  }).map(c=>c.id);
+  refreshSearch(true);
   if(_searchMatches.length){
     if(State.selectedId && _searchMatches.includes(State.selectedId)){
       _searchIdx = _searchMatches.indexOf(State.selectedId);
@@ -67,11 +79,12 @@ export function searchUpdate(raw, selectCueCb){
   }
   emit('render:subList');
   const cb = (typeof selectCueCb === 'function' ? selectCueCb : _selectCueHandler);
-  if(_searchIdx>=0 && cb) cb(_searchMatches[_searchIdx],{seek:false});
+  if(_searchIdx>=0 && cb && !State.tracks[State.listTrack]?.locked) cb(_searchMatches[_searchIdx],{seek:false});
   emit('render:searchCount');
 }
 
 export function searchNav(dir, selectCueCb){
+  refreshSearch(true);
   if(!_searchMatches.length) return;
   if(State.selectedId && _searchMatches.includes(State.selectedId)){
     const curIdx = _searchMatches.indexOf(State.selectedId);
@@ -81,25 +94,23 @@ export function searchNav(dir, selectCueCb){
   }
   _searchIdx=(_searchIdx+dir+_searchMatches.length)%_searchMatches.length;
   const cb = (typeof selectCueCb === 'function' ? selectCueCb : _selectCueHandler);
-  if(cb) cb(_searchMatches[_searchIdx],{seek:true});
+  if(cb && !State.tracks[State.listTrack]?.locked) cb(_searchMatches[_searchIdx],{seek:true});
   emit('render:searchCount');
 }
 
 export function searchReplace(all, repText){
   if(!_searchTerms.length) return;
+  refreshSearch(true);
   if(trackLocked(State.listTrack, '取代字幕內容')) return;
+  const pattern = new RegExp(_searchTerms.map(escRe).join('|'), 'gi');
   const cues=all
     ? State.cues.filter(c=>(c.track||0)===State.listTrack)
     : (_searchIdx>=0?[State.cues.find(c=>c.id===_searchMatches[_searchIdx])].filter(Boolean):[]);
   let count=0;
   for(const c of cues){
-    if(!c) continue;
+    if(!c || (c.track||0)!==State.listTrack || trackLocked(c.track||0, '取代字幕內容')) continue;
     const orig=c.text||'';
-    let text=orig;
-    for(const term of _searchTerms){
-      const re=new RegExp(escRe(term),'gi');
-      text=text.replace(re,repText);
-    }
+    const text=orig.replace(pattern, () => repText);
     if(text!==orig){ c.text=text; count++; }
   }
   if(count){ 
@@ -110,12 +121,14 @@ export function searchReplace(all, repText){
 }
 
 export function getSearchCountText(){
+  refreshSearch();
   if(!_searchTerms.length) return '';
   return _searchMatches.length?`${_searchIdx+1}/${_searchMatches.length}`:'無結果';
 }
 
 export function searchSelectAll(){
-  if(!_searchMatches.length) return;
+  refreshSearch(true);
+  if(!_searchMatches.length || State.tracks[State.listTrack]?.locked) return;
   setSelection({ kind:'sub', ids:_searchMatches.slice() });
   State.activeEdge='start';
   emit('render:selection');

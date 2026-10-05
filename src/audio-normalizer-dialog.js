@@ -419,6 +419,14 @@ export function openHardLimiterDialog(audioSource) {
         tagEl.style.background = 'rgba(52,211,153,0.1)';
       }
     }).catch(err => {
+      if (!analysisPanel?.isConnected) return;
+      const tagEl=analysisPanel.querySelector('#hlAnalysisStatus');
+      if(tagEl){
+        tagEl.textContent=initialAnalysis?'量測失敗（保留快速預覽）':'量測失敗';
+        tagEl.style.color='#fbbf24';tagEl.style.borderColor='rgba(234,179,8,0.35)';
+        tagEl.style.background='rgba(234,179,8,0.1)';
+        tagEl.title=err?.message||String(err);
+      }
       console.warn('[HardLimiter] 背景量測失敗：', err);
     });
   }

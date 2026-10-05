@@ -28,12 +28,67 @@ export function syncCompareSnapshot(){
 // 即時配線預覽仍供播放器讀 State；其他背景工作的快照只收已提交的配線。
 // token 由 History 持有，舊編輯的解除函式不能移除較新的投影。
 let audioPreview = null;
+const editPreviews = new Set();
+let historyEpoch = 0;
+function previewLocation(target){
+  for (const [live, saved] of [['cues','cues'],['tracks','tracks'],['videoTracks','videoTracks'],['clips','clipGeo'],['externalAudioState','externalAudioState']]) {
+    const index = State[live]?.indexOf(target) ?? -1;
+    if (index >= 0) return { live, saved, index };
+  }
+  return null;
+}
+function projectEditPreviews(snapshot, collectionKeys={}){
+  for (const preview of editPreviews) {
+    if (!preview.current()) { editPreviews.delete(preview); continue; }
+    for (const entry of preview.entries) {
+      const list = snapshot[collectionKeys[entry.location.saved] || entry.location.saved];
+      const liveTarget=entry.resolveTarget ? entry.resolveTarget() : entry.target;
+      const index = liveTarget.audioSourceId && entry.location.live === 'externalAudioState'
+        ? list.findIndex(item => item.audioSourceId === liveTarget.audioSourceId)
+        : liveTarget.id ? list.findIndex(item => item.id === liveTarget.id) : State[entry.location.live].indexOf(liveTarget);
+      if (index < 0) continue;
+      if (entry.added) { list.splice(index, 1); continue; }
+      for (const { field, present, value } of entry.values) {
+        if (entry.ownsField?.(field) === false) continue;
+        // 複合欄位的預覽 owner 可只投影自己擁有的子欄位；History 不解讀領域內容。
+        const projected=entry.projectField?.(field,{present,value,current:list[index][field]});
+        if (projected) {
+          if(projected.present) list[index][field]=structuredClone(projected.value);
+          else delete list[index][field];
+        } else if (present) list[index][field] = structuredClone(value);
+        else delete list[index][field];
+      }
+    }
+  }
+  return snapshot;
+}
 function audioProjectForSnapshot(){
   if(audioPreview && !audioPreview.owns()) audioPreview=null;
   return audioPreview ? audioPreview.initial : State.audioProject;
 }
 const History = {
   stack:[], hi:-1, max:120,
+  // 即時手勢可改 State 供預覽；背景紀錄只投影被手勢擁有的欄位，保留其他已提交編輯。
+  // 結束函式必須在本次 commit 的 record 之前呼叫；reset/restore 會撤銷所有舊擁有者。
+  beginPreview(targets, owns=()=>true){
+    const preview = { entries: [], current: () => editPreviews.has(preview) && owns()
+      && preview.entries.every(entry => State[entry.location.live]?.includes(entry.resolveTarget ? entry.resolveTarget() : entry.target)) };
+    const add = (target, fields=[], { added=false, resolveTarget=null, ownsField=null, projectField=null }={}) => {
+      const location = previewLocation(target);
+      if (!location) return;
+      // 外部音訊的 runtime asset 可維持 identity，但每次預覽會重新序列化純資料。
+      // 該 adapter 可解析目前的純資料；是否仍屬於同一 asset 仍由 owns 判定。
+      preview.entries.push({ target, location, added, resolveTarget, ownsField, projectField, values: fields.map(field => ({
+        field, present:Object.hasOwn(target,field), value:structuredClone(target[field]),
+      })) });
+    };
+    for (const entry of targets || []) add(entry.target, entry.fields, entry);
+    editPreviews.add(preview);
+    const release = () => editPreviews.delete(preview);
+    release.isCurrent = preview.current;
+    release.addTarget = add;
+    return release;
+  },
   beginAudioPreview(initial, owns=()=>true){
     const token={initial:structuredClone(initial),owns};
     audioPreview=token;
@@ -41,10 +96,14 @@ const History = {
   },
   // clipGeo：影片幾何；externalAudioState：外部音訊的可編輯純資料。
   // AudioElement、波形與快取檔都不入 undo，Media 會依這份純資料重用或重建 runtime asset。
-  snap(){ return structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
-    audioProject:normalizeAudioProject(audioProjectForSnapshot()),externalAudioState:State.externalAudioState||[],
-    fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clipGeo:Seq.snapshot()}); },
-  reset(){ audioPreview=null; this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); syncCompareSnapshot(); },
+  // Project 可補入尚未重新連結的持久資料；預覽排除規則仍只有這一個 owner。
+  committedSnapshot({clips=Seq.snapshot(), externalAudioState=State.externalAudioState||[]}={}){
+    return projectEditPreviews(structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
+      audioProject:normalizeAudioProject(audioProjectForSnapshot()),externalAudioState,
+      fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clips}), {clipGeo:'clips'});
+  },
+  snap(){ const {clips,...snapshot}=this.committedSnapshot(); return {...snapshot,clipGeo:clips}; },
+  reset(){ historyEpoch++; audioPreview=null; editPreviews.clear(); this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); syncCompareSnapshot(); },
   /* 專案可先載入字幕、之後才重新連結媒體。媒體真正就緒時，把新出現的
      專案 clip 補進先前「尚無媒體」的歷史步驟，保留期間的字幕 Undo，
      同時避免任何一步復原後把剛重連的影片刪掉。 */
@@ -103,9 +162,30 @@ const History = {
     if(this.stack.length>this.max){ this.stack.shift(); }
     this.hi=this.stack.length-1; renderHistory();
   },
+  // 每次輸入立即留下 Undo；連續輸入只能改寫自己仍位於 head 的那一筆。
+  // 其他編輯介入或 reset/restore 後，舊 token 不得把後來的工作合併掉。
+  recordCoalesced(label, owner=null){
+    if(owner?.epoch===historyEpoch && owner.entry===this.stack[this.hi]
+      && owner.cues===State.cues && owner.tracks===State.tracks
+      && owner.entry.label===label && this.hi===this.stack.length-1){
+      const snapshot=this.snap();
+      if(owner.baseline && this.stack[this.hi-1]===owner.baseline
+        && JSON.stringify(snapshot)===JSON.stringify(owner.baseline.snap)){
+        this.stack.pop(); this.hi--; renderHistory(); return null;
+      }
+      owner.entry.snap=snapshot; renderHistory(); return owner;
+    }
+    const previous=this.stack[this.hi];
+    this.record(label);
+    const entry=this.stack[this.hi];
+    return entry===previous ? null : {entry,baseline:this.stack[this.hi-1]||null,epoch:historyEpoch,cues:State.cues,tracks:State.tracks};
+  },
   restore(i){
     if(i<0||i>=this.stack.length)return;
+    historyEpoch++;
     audioPreview=null;
+    editPreviews.clear();
+    State.presetEdit=null;
     const d=structuredClone(this.stack[i].snap);
     // 必須在任何 State mutation 前保存位置；音訊或 duration 還原也可能改變 tlTime。
     emit('media:sequenceWillRestore');

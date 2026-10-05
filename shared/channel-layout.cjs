@@ -28,7 +28,7 @@
  */
 function sourceChannelCount(stream) {
   const raw = stream ? Number(stream.channels) : NaN;
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 1;
+  return Number.isFinite(raw) && raw > 0 ? Math.max(1, Math.floor(raw)) : 1;
 }
 
 /**

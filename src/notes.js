@@ -11,23 +11,57 @@
    匯出 CSV(一般 + EDIUS Marker list 兩種)。
    public：addNote / renderNotes / exportNotes / setNoteActive / updateNoteActive / clearAllNotes */
 import { $ } from './dom.js';
-import { State, newId } from './state.js';
+import { State, newId, getFpsRevision } from './state.js';
 import { secToEncore } from './time.js';
 import { escapeHTML, downloadBytes, tcKeyAllowed, bytesToB64, b64ToBytes } from './util.js';
 import { Media } from './media.js';
 import { requestPointerSeek } from './timeline-interaction-engine.js';
 import { updatePlayhead, drawRuler } from './timeline-renderer.js';
-import { recordHistory } from './history.js';
+import { History, recordHistory } from './history.js';
 import { emit } from './events.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { showToast, setStatus, openModal, closeModal } from './ui.js';
 import { showCtx } from './menus.js';
 import { executeBatchExport } from './subio.js';
+import { Project } from './project.js';
 
 /* ===== 備註 active 狀態 ===== */
 let _activeNoteId=null;
 let _selectedNoteIds=new Set(); // 多選集合
 let _lastSelectedNoteId=null; // 用於 Shift 多選
+function captureNotes(targets=State.notes.slice()){
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const history=History.stack;
+  return {targets,current:()=>ownsWorkspace() && History.stack===history && targets.every(note=>State.notes.includes(note))};
+}
+// DOM 草稿不寫 State。確認前一次核對全部欄位，取消與衝突都保留已提交資料。
+function beginNoteEdit(targets, field){
+  const owner=captureNotes(targets), baseline=targets.map(note=>note[field]);
+  const fpsRevision=getFpsRevision(), fps=State.fps, dropFrame=State.dropFrame;
+  let active=true;
+  const current=()=>active && owner.current() && (field!=='time' ||
+    (getFpsRevision()===fpsRevision && State.fps===fps && State.dropFrame===dropFrame));
+  return {
+    cancel:()=>{active=false;},
+    commit(value){
+      if(!current()){active=false;return {ok:false,changed:false};}
+      // 單句未改的草稿不會把背景合法更新還原；批次確認則明確作用於所有目標。
+      if(targets.length===1 && Object.is(value,baseline[0])){active=false;return {ok:true,changed:false};}
+      if(targets.some((note,index)=>!Object.is(note[field],baseline[index]) && !Object.is(note[field],value))){
+        active=false;showToast('備註已被其他編輯更新，請重新開啟編輯');return {ok:false,changed:false};
+      }
+      active=false;
+      const changed=targets.some(note=>!Object.is(note[field],value));
+      if(changed) for(const note of targets) note[field]=value;
+      return {ok:true,changed};
+    },
+  };
+}
+function removeNotes(targets){
+  const removed=new Set(targets);
+  State.notes=State.notes.filter(note=>!removed.has(note));
+  renderNotes();drawRuler();recordHistory('刪除備註');
+}
 
 function setNoteActive(id){
   if(_activeNoteId===id)return;
@@ -80,13 +114,16 @@ function addNote(){
 }
 function clearAllNotes(){
   if(!State.notes.length){ showToast('沒有備註可清除'); return; }
+  const owner=captureNotes();
   // Fix #15：改用 openModal，風格一致且在 Electron 中不會被系統 confirm 截取
-  openModal('清除所有備註',
+  const session=openModal('清除所有備註',
     `<p>確定要清除全部 <b>${State.notes.length}</b> 條備註嗎？</p>`,
-    [{label:'取消',act:closeModal},
+    [{label:'取消',act:()=>session.close()},
      {label:'確定清除',primary:true,act:()=>{
-       closeModal();
-       State.notes=[];
+       if(!session.isCurrent() || !owner.current()) return;
+       session.close({committed:true});
+       const removed=new Set(owner.targets);
+       State.notes=State.notes.filter(note=>!removed.has(note));
        _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
        renderNotes(); drawRuler();
        recordHistory('清除所有備註');
@@ -95,10 +132,15 @@ function clearAllNotes(){
 }
 
 function renderNotes(){
+  const validIds=new Set(State.notes.map(note=>note.id));
+  _selectedNoteIds=new Set([..._selectedNoteIds].filter(id=>validIds.has(id)));
+  if(!validIds.has(_activeNoteId)) _activeNoteId=null;
+  if(!validIds.has(_lastSelectedNoteId)) _lastSelectedNoteId=null;
   const el=$('notesList'); if(!el)return;
   if(!State.notes.length){ el.innerHTML='<div class="empty">尚無備註<br>播放到某處 → 點「＋ 新增」</div>'; return; }
   el.innerHTML='';
   for(const n of State.notes){
+    const owner=captureNotes([n]);
     const isSel=_selectedNoteIds.has(n.id);
     const row=document.createElement('div');
     row.className='note-item'+(n.done?' done':'')+(n.id===_activeNoteId?' nt-active':'')+(isSel?' nt-selected':'');
@@ -110,7 +152,7 @@ function renderNotes(){
       `<button class="nt-del" title="刪除">✕</button>`;
 
     // 勾選（完成狀態）
-    row.querySelector('.nt-done-cb').onchange=e=>{ n.done=e.target.checked; row.classList.toggle('done',n.done); recordHistory('備註打勾'); };
+    row.querySelector('.nt-done-cb').onchange=e=>{ if(!owner.current())return; n.done=e.target.checked; row.classList.toggle('done',n.done); recordHistory('備註打勾'); };
 
     // 時間點：單擊 → 跳到時間點；雙擊 → 內嵌編輯時間
     const timeEl=row.querySelector('.nt-time');
@@ -121,7 +163,9 @@ function renderNotes(){
     });
     timeEl.addEventListener('dblclick',e=>{
       e.stopPropagation();
+      if(!owner.current()) return;
       if(timeEl.querySelector('input')) return;
+      const edit=beginNoteEdit([n],'time');
       const origText=timeEl.textContent;
       const inp=document.createElement('input');
       inp.className='nt-te'; inp.value=origText;
@@ -131,9 +175,9 @@ function renderNotes(){
         if(done)return; done=true;
         if(commit){
           const t=parseTimecodeInput(inp.value);
-          if(t!==null){ n.time=t; State.notes.sort((a,b)=>a.time-b.time); renderNotes(); recordHistory('修改備註時間'); return; }
+          if(t!==null && edit.commit(t).changed){ State.notes.sort((a,b)=>a.time-b.time); renderNotes(); drawRuler(); recordHistory('修改備註時間'); return; }
         }
-        inp.remove(); timeEl.textContent=origText;
+        edit.cancel();inp.remove(); timeEl.textContent=secToEncore(n.time,State.fps,State.dropFrame);
       };
       inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();fin(true);} else if(e.key==='Escape'){e.preventDefault();fin(false);} else if(!tcKeyAllowed(e))e.preventDefault(); });
       inp.addEventListener('blur',()=>fin(true));
@@ -142,19 +186,20 @@ function renderNotes(){
 
     // 備註文字：預設唯讀；雙擊進入編輯
     const txt=row.querySelector('.nt-text');
-    let _orig=n.text||'';
+    let edit=null;
     txt.addEventListener('dblclick',e=>{
       e.stopPropagation();
-      _orig=n.text||'';
+      if(!owner.current()) return;
+      edit=beginNoteEdit([n],'text');
       txt.innerText=n.text||'';
       txt.contentEditable='true'; txt.focus();
     });
-    txt.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();txt.blur();} else if(e.key==='Escape'){e.preventDefault();txt.innerText=_orig;txt.blur();} });
+    txt.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();txt.blur();} else if(e.key==='Escape'){e.preventDefault();edit?.cancel();txt.contentEditable='false';txt.innerHTML=escapeHTML(n.text);txt.blur();} });
     txt.addEventListener('blur',()=>{
       if(txt.contentEditable!=='true')return;
       const val=txt.innerText;
-      n.text=val; txt.contentEditable='false'; txt.innerHTML=escapeHTML(val);
-      if(val!==_orig) recordHistory('編輯備註');
+      const result=edit?.commit(val);edit=null;txt.contentEditable='false';txt.innerHTML=escapeHTML(n.text);
+      if(result?.changed) recordHistory('編輯備註');
     });
 
     // 整列點擊 → 多選支援（Ctrl 加選，Shift 範圍，普通單選）
@@ -196,75 +241,76 @@ function renderNotes(){
       _showNoteCtx(e.clientX,e.clientY);
     });
 
-    row.querySelector('.nt-del').onclick=e=>{ e.stopPropagation(); State.notes=State.notes.filter(x=>x.id!==n.id); _selectedNoteIds.delete(n.id); renderNotes(); drawRuler(); recordHistory('刪除備註'); };
+    row.querySelector('.nt-del').onclick=e=>{ e.stopPropagation(); if(owner.current()) removeNotes([n]); };
     el.appendChild(row);
   }
 }
 
 /* 備註右鍵選單 */
 function _showNoteCtx(x,y){
-  const cnt=_selectedNoteIds.size;
+  const owner=captureNotes(State.notes.filter(note=>_selectedNoteIds.has(note.id)));
+  const cnt=owner.targets.length;
   const items=[{heading:true,label:`已選 ${cnt} 條備註`}];
   if(cnt>=1){
-    items.push({label:'✏ 統一編輯文字…',act:()=>_batchEditNotes()});
+    items.push({label:'✏ 統一編輯文字…',act:()=>{if(owner.current()) _batchEditNotes(owner);}});
   }
   if(cnt>=2){
     items.push({label:'☑ 全部標記完成',act:()=>{
-      for(const id of _selectedNoteIds){ const n=State.notes.find(x=>x.id===id); if(n) n.done=true; }
+      if(!owner.current()) return;
+      for(const n of owner.targets) n.done=true;
       renderNotes(); recordHistory('批次標記完成');
     }});
     items.push({label:'☐ 全部取消完成',act:()=>{
-      for(const id of _selectedNoteIds){ const n=State.notes.find(x=>x.id===id); if(n) n.done=false; }
+      if(!owner.current()) return;
+      for(const n of owner.targets) n.done=false;
       renderNotes(); recordHistory('批次取消完成');
     }});
   }
   items.push({sep:true});
   items.push({label:'🗑 刪除選取備註',act:()=>{
+    if(!owner.current()) return;
     // Fix #15：cnt>1 時改用 openModal 取代 confirm()，風格一致
     if(cnt>1){
-      openModal(`刪除 ${cnt} 條備註`,
+      const session=openModal(`刪除 ${cnt} 條備註`,
         `<p>確定要刪除選取的 <b>${cnt}</b> 條備註嗎？</p>`,
-        [{label:'取消',act:closeModal},
+        [{label:'取消',act:()=>session.close()},
          {label:'確定刪除',primary:true,act:()=>{
-           closeModal();
-           State.notes=State.notes.filter(n=>!_selectedNoteIds.has(n.id));
-           _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
-           renderNotes(); drawRuler(); recordHistory('刪除備註');
+           if(!session.isCurrent() || !owner.current()) return;
+           session.close({committed:true}); removeNotes(owner.targets);
          }}]);
     } else {
-      State.notes=State.notes.filter(n=>!_selectedNoteIds.has(n.id));
-      _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
-      renderNotes(); drawRuler(); recordHistory('刪除備註');
+      removeNotes(owner.targets);
     }
   }});
   showCtx(x,y,items);
 }
 
 /* 批次編輯備註文字 */
-function _batchEditNotes(){
-  const cnt=_selectedNoteIds.size;
-  const first=State.notes.find(n=>_selectedNoteIds.has(n.id));
+function _batchEditNotes(owner){
+  const cnt=owner.targets.length;
+  const first=owner.targets[0];
   const defText=first?.text||'';
+  const edit=beginNoteEdit(owner.targets,'text');
   
-  openModal(`統一編輯 ${cnt} 條備註`, `
+  const session=openModal(`統一編輯 ${cnt} 條備註`, `
     <div style="margin-bottom:10px;color:var(--text)">將這 ${cnt} 條備註的內容統一修改為：</div>
     <textarea id="batchNoteInput" style="width:100%;height:100px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:8px;font-size:14px;resize:vertical;" placeholder="請輸入新的備註文字…">${escapeHTML(defText)}</textarea>
   `,[
-    {label:'取消', act: closeModal},
+    {label:'取消', act: ()=>session.close()},
     {label:'儲存變更', primary:true, act: ()=>{
+      if(!session.isCurrent() || !owner.current()) return;
       const newText = document.getElementById('batchNoteInput').value;
-      for(const id of _selectedNoteIds){
-        const n=State.notes.find(x=>x.id===id);
-        if(n) n.text=newText;
-      }
+      const result=edit.commit(newText);
+      if(!result.ok) return;
       renderNotes();
-      recordHistory('批次編輯備註');
+      if(result.changed) recordHistory('批次編輯備註');
       showToast(`已更新 ${cnt} 條備註`);
-      closeModal();
+      session.close({committed:true});
     }}
-  ]);
+  ],{onDismiss:edit.cancel,onReplaced:edit.cancel});
   
   setTimeout(()=>{
+    if(!session.isCurrent() || !owner.current()) return;
     const el = document.getElementById('batchNoteInput');
     if(el){ el.focus(); el.select(); }
   }, 50);

@@ -5,7 +5,7 @@
    v5.8.0 的兩個真實 bug 都住在那裡（預覽與匯出差 120px、疊層溢出軌影格 24×54px），
    兩個都是靠臨時搭的比對工具抓到的，不是測試。 */
 import { describe, expect, it } from 'vitest';
-import { needsComposite, stageBox } from '../src/image-compositor-engine.js';
+import { needsComposite, stageBox, visualStackPlan } from '../src/image-compositor-engine.js';
 
 const clip = (o = {}) => ({ vtrack: 0, ...o });
 
@@ -58,6 +58,22 @@ describe('needsComposite：要不要從 mpv 接管', () => {
     expect(needsComposite([clip({ vtrack: 9 })], [])).toBe(false);
     expect(needsComposite([clip()], undefined)).toBe(false);
     expect(needsComposite(undefined, undefined)).toBe(false);
+  });
+});
+
+describe('mixed visual stack ownership',()=>{
+  it('lower and middle images belong to the same compositor as videos',()=>{
+    const bottom=clip({id:'bottom',type:'image'}),video=clip({id:'video',vtrack:1}),top=clip({id:'top',type:'image',vtrack:2});
+    expect(visualStackPlan([top,video,bottom],[{},{},{}])).toMatchObject({needsComposite:true,mixedImages:true,composited:[bottom,video,top]});
+  });
+  it('an image suffix above one full video can remain in the native guide',()=>{
+    const video=clip({id:'video'}),image=clip({id:'image',type:'image',vtrack:1});
+    expect(visualStackPlan([image,video],[{},{}])).toMatchObject({needsComposite:false,mixedImages:false,composited:[video],images:[image]});
+  });
+  it('hidden lower images do not force takeover and image-only timelines stay in the image adapter',()=>{
+    const image=clip({type:'image'}),video=clip({vtrack:1});
+    expect(visualStackPlan([image,video],[{visible:false},{}]).needsComposite).toBe(false);
+    expect(visualStackPlan([image],[{}])).toMatchObject({needsComposite:false,mixedImages:false,composited:[]});
   });
 });
 

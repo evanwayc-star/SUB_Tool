@@ -164,11 +164,25 @@ class ProjectAudioInterpretation {
     return { audible: gain > 0, gain };
   }
 
-  trackState(track, options){
+  _trackState(track, options){
     const source = this.sourceTrackState(track, options);
     const route = this.projectRouteState(track);
     const gain = source.gain * route.gain;
     return { audible: source.audible && route.audible && gain > 0, gain };
+  }
+
+  /* 播放快取只能替代同一來源；另一個外部素材不會接管影片的聲音。
+     此規則同時給播放增益、電平表與 scrub 使用。交付仍讀母素材，不看替代群組。 */
+  sourceReplaced(source='video'){
+    return this.mediaTracks.some(track => (track?.source || 'video') === source
+      && (track.kind === 'buffer' || track.kind === 'element') && this._trackState(track).audible);
+  }
+
+  trackState(track, options){
+    const state=this._trackState(track,options);
+    if(options?.respectHidden !== false && track?.kind === 'native'
+      && this.sourceReplaced(track.source || 'video')) return {audible:false,gain:0};
+    return state;
   }
 
   routedTracksForBus(busId, { requireAnalyser = true } = {}){
@@ -184,6 +198,7 @@ class ProjectAudioInterpretation {
     const states = [];
     for (const track of this.mediaTracks) {
       if ((requireAnalyser && !track?.analyser) || !track?.audioSourceId) continue;
+      if (!this.trackState(track).audible) continue;
       const source = this.sourceTrackState(track);
       if (!source.audible) continue;
       const route = this.routeForTrack(track);

@@ -11,7 +11,6 @@
 import { flattenSourceChannels, channelFileName } from '../shared/channel-layout.cjs';
 import { AudioEngine } from './audio-engine.js';
 import { Seq } from './sequence.js';
-import { scheduleScrub } from './audio-engine.js';
 import { normalizeAudioProject, pruneRemovedAudioBuses, ensureAudioSourceMap } from './state.js';
 import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './export-job-engine.js';
 import { sourceChannelDescriptors } from './external-audio.js';
@@ -114,6 +113,7 @@ export class MediaAudioRouter {
       sourceTimeFor: (s, t) => this.media._srcLocalT(s, t),
       externalSourceTimeFor: (s, t) => this.media.externalAudio.sourceTime(s, t),
       clipSourceTimeFor: (t, c) => this.media._transport.sourceTime(t, c),
+      interpretation:()=>this.media.projectAudioInterpretation(),
     });
   }
 
@@ -146,16 +146,21 @@ export class MediaAudioRouter {
   }
 
   scrubAudio(t, duration = 0.15) {
+    this.media.applyGains();
     const res = AudioEngine.scrub(t, duration);
     if (res && res.scrubMainVideo) {
       if (!this.video.src) return;
       const rate = this.video.playbackRate || 1;
       const preservesPitch = rate >= 0.25 && rate <= 4;
-      scheduleScrub(this.video, res.localT, {
+      const native=this.media.tracks.filter(track=>track.kind==='native'||track.kind==='nativeTrack');
+      const interpretation=this.media.projectAudioInterpretation();
+      const routes=native.map((track,channel)=>({gain:track.gain,channel,state:interpretation.trackState(track)})).filter(route=>route.state.audible);
+      AudioEngine.scrubElement(this.video, res.localT, {
         rate,
         preservesPitch,
         isMuted: this.state.muted,
         durationMs: duration * 1000,
+        ...(native.length?{context:AudioEngine.context,routes,channels:native.length}:{}),
       });
     }
   }

@@ -15,7 +15,6 @@ const mediaMock=vi.hoisted(()=>(
 
 vi.mock('../src/media.js',()=>({Media:mediaMock}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn()}));
-vi.mock('../src/history.js',()=>({History:{reset:vi.fn()}}));
 vi.mock('../src/notes.js',()=>({renderNotes:vi.fn()}));
 vi.mock('../src/ui.js',()=>({
   openModal:vi.fn(),closeModal:vi.fn(),showToast:vi.fn(),setStatus:vi.fn()
@@ -28,6 +27,50 @@ let isProjectDirty;
 let saveProject;
 
 describe('project image persistence',()=>{
+  it.each(['apply','reset'])('專案 %s 撤銷舊 ASR 與 preset draft，晚到 provider 不可提交',async action=>{
+    const {startAsrWork}=await import('../src/speech-recognition-session.js');
+    let complete;
+    let signal;
+    const commit=vi.fn();
+    const transcribe=vi.fn(({signal:activeSignal})=>{signal=activeSignal;return new Promise(resolve=>{complete=resolve;});});
+    const work=startAsrWork({clips:[{name:'old.wav',in:0,out:2,dur:2}]},{extractAudio:async()=>({duration:2}),transcribe,commit});
+    await vi.waitFor(()=>expect(transcribe).toHaveBeenCalledOnce());
+    State.presetEdit={targetId:'old'};
+    if(action==='apply') Project.apply({app:'SUB Tool',version:3,tracks:[],cues:[],clips:[]});else resetProject();
+    expect(signal.aborted).toBe(true);
+    expect(State.presetEdit).toBeNull();
+    complete([{start:0,end:1,text:'old'}]);
+    await expect(work.promise).resolves.toMatchObject({status:'cancelled'});
+    expect(commit).not.toHaveBeenCalled();
+  });
+  it('無效專案不撤銷目前專案的 ASR 工作或 preset draft',async()=>{
+    const {startAsrWork}=await import('../src/speech-recognition-session.js');
+    let complete,signal;
+    const commit=vi.fn(()=>({count:1}));
+    const transcribe=vi.fn(({signal:activeSignal})=>{signal=activeSignal;return new Promise(resolve=>{complete=resolve;});});
+    const work=startAsrWork({clips:[{name:'current.wav',in:0,out:2,dur:2}]},
+      {extractAudio:async()=>({duration:2}),transcribe,commit});
+    await vi.waitFor(()=>expect(transcribe).toHaveBeenCalledOnce());
+    const draft={targetId:'current'};
+    State.presetEdit=draft;
+    expect(Project.apply({fps:-1})).toBe(false);
+    expect(signal.aborted).toBe(false);
+    expect(State.presetEdit).toBe(draft);
+    complete([{start:0,end:1,text:'current'}]);
+    await expect(work.promise).resolves.toMatchObject({status:'completed'});
+    expect(commit).toHaveBeenCalledOnce();
+  });
+  it('外部音訊 height 與空範圍跨 save/apply/save 保留',async()=>{
+    mediaMock.externalAudio.list.mockReturnValue([{audioSourceId:'a',timelineLaneId:'lane',name:'voice',path:'C:/voice.wav',duration:5,in:0,out:0,height:128}]);
+    await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(saveProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.externalAudioSources[0]).toMatchObject({height:128,in:0,out:0});
+    mediaMock.externalAudio.list.mockReturnValue([]);
+    Project.apply(saved);
+    await Project.saveAs();
+    const reopened=JSON.parse(Buffer.from(saveProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+    expect(reopened.externalAudioSources[0]).toMatchObject({height:128,in:0,out:0});
+  });
   it('音訊效果與母素材一起保存，重開後仍可保存，播放快取不進專案',async()=>{
     State.clips=[{id:'v',name:'master.mp4',path:'C:/master.mp4',dur:4,in:0,out:4,offset:0,primary:true,
       audioSourceId:'a',hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12,inputBoost:0},normalizedAudioPath:'C:/temp/processed.wav'}];

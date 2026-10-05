@@ -19,6 +19,25 @@ function completedProcess({ stdout = '', stderr = '', status = 0 } = {}) {
 }
 
 describe('媒體探測 interface', () => {
+  it.each(['hasAudio', 'audioVideoStartOffsets', 'audioBitrates'])('%s 取消不被保守 fallback 吞掉，且等待 native close', async method => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = vi.fn();
+    const controller = new AbortController();
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+    let settled = false;
+    const result = probe[method]('D:/media/slow.mxf', { signal: controller.signal }).catch(error => { settled = true; return error; });
+    await Promise.resolve();
+    controller.abort();
+    expect(child.kill).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    child.emit('close', null, 'SIGTERM');
+    await expect(result).resolves.toMatchObject({ code: 'PROBE_ABORTED' });
+  });
+
   it('保留壓縮來源音訊相對影像的起始時間，供航空交付去除前導', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
     const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => completedProcess({

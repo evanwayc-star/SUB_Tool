@@ -46,7 +46,10 @@ function clipLength(clip) {
  *          - `fadeOutStart`: 片段本地時間軸上開始淡出的時間點（秒）
  */
 function fadeWindow(clip) {
-  const length = clipLength(clip);
+  const rawOffset = Number(clip?.fadeSourceOffset);
+  const rawLength = Number(clip?.fadeSourceLength);
+  const offset = Number.isFinite(rawOffset) ? Math.max(0, rawOffset) : 0;
+  const length = Math.max(clipLength(clip) + offset, Number.isFinite(rawLength) ? rawLength : 0);
   const rawFadeIn = Number(clip?.fadeIn);
   const rawFadeOut = Number(clip?.fadeOut);
   const safeFadeIn = Number.isFinite(rawFadeIn) ? rawFadeIn : 0;

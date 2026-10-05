@@ -710,7 +710,7 @@
 
       if (Number.isFinite(rate) && rate > 0) {
         const nominal = Math.max(1, Math.round(rate));
-        let totalFrames = Math.round(duration * rate);
+        const totalFrames = Math.round(duration * window.queueAPI.exactFrameRate(rate));
         const ff = totalFrames % nominal;
         const totalSeconds = Math.floor(totalFrames / nominal);
         const hh = Math.floor(totalSeconds / 3600);
@@ -823,8 +823,9 @@
         let metaText = '等待執行；可拖曳調整順序';
         if (job.status === 'running') {
           const elS = Math.floor(finiteNumber(job.elapsedMs) / 1000);
-          const etaS = Math.floor(finiteNumber(job.etaS));
-          const totalS = elS + etaS;
+          const eta = Number(job.etaS);
+          const etaS = job.etaS != null && Number.isFinite(eta) && eta >= 0 ? Math.floor(eta) : null;
+          const totalS = etaS == null ? null : elS + etaS;
           metaText = '';
           timingHtml = `<div class="job-timing">
             <span class="job-timing-item">已 <b>${fmt(elS)}</b></span>
@@ -945,10 +946,19 @@
         el.querySelector('[data-action="show-output"]')?.addEventListener('click', () => window.queueAPI.showItemInFolder(outPath));
         el.querySelector('[data-action="open-log"]')?.addEventListener('click', () => window.queueAPI.openPath(logPath));
         el.querySelector('[data-action="copy-error"]')?.addEventListener('click', async event => {
-          await navigator.clipboard.writeText(errorMessage);
           const button = event.currentTarget;
-          button.textContent = '已複製！';
-          setTimeout(() => { button.textContent = '複製錯誤'; }, 2000);
+          button.disabled = true;
+          try {
+            await navigator.clipboard.writeText(errorMessage);
+            if (button.isConnected) button.textContent = '已複製！';
+          } catch (error) {
+            if (button.isConnected) button.textContent = '複製失敗，請重試';
+          } finally {
+            if (button.isConnected) {
+              button.disabled = false;
+              setTimeout(() => { if (button.isConnected) button.textContent = '複製錯誤'; }, 2000);
+            }
+          }
         });
         return el;
     }
@@ -960,11 +970,12 @@
       const p = job.payload || {};
       const curFormat = String(p.format || 'h264');
       const curTargetH = Number(p.targetH) || 0;
-      const curKbps = Number(p.videoKbps) > 0 ? Number(p.videoKbps) : 8000;
+      const currentPreset = deliveryPreset(curFormat);
+      // Fixed delivery bitrates (such as exW 500K) are not H.264 preferences.
+      const curKbps = !currentPreset && Number(p.videoKbps) > 0 ? Number(p.videoKbps) : 8000;
       const known = RES_OPTIONS.some(([v]) => v === curTargetH);
       const formatOptions = Object.entries(FORMAT_LABEL);
       // 固定格式的 TC／音訊在送出前完成設定，既有一般工作要從交付清單新增。
-      const currentPreset = deliveryPreset(curFormat);
       if (currentPreset) formatOptions.push([currentPreset.format, currentPreset.label]);
 
       const box = document.createElement('div');
@@ -1040,7 +1051,7 @@
       q('[data-f="res"]').addEventListener('change', syncVisibility);
       syncVisibility();
 
-      const close = () => { box.remove(); cardEl.draggable = job.status === 'queued'; };
+      const close = () => { box.remove(); renderJobs(); };
       q('[data-f="cancel"]').addEventListener('click', close);
       q('[data-f="save"]').addEventListener('click', async () => {
         const format = q('[data-f="format"]').value;

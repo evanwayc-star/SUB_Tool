@@ -114,7 +114,8 @@ async function transcribe({
   wasmDtype,
   returnTimestamps = 'word',
   language,
-  prompt
+  prompt,
+  temperature = 0
 }) {
   if (!(audioFloat32 instanceof Float32Array) || audioFloat32.length === 0) {
     throw new Error('音訊長度為 0，無法進行辨識');
@@ -164,6 +165,7 @@ async function transcribe({
   const generateKwargs = buildBuiltinGenerationOptions({
     language,
     prompt,
+    temperature,
     streamer,
     returnTimestamps
   });

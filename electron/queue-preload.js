@@ -1,6 +1,20 @@
 const { contextBridge, ipcRenderer } = require('electron');
+// Sandbox preload 只能載入 Electron；精確格率由 main 的共用規則判定。
+const frameRates = new Map();
+function exactFrameRate(value) {
+  const rate = typeof value === 'number' || typeof value === 'string' ? value : 30;
+  if (frameRates.has(rate)) return frameRates.get(rate);
+  const exact = ipcRenderer.sendSync('queue:exactFrameRate', rate);
+  if (typeof exact !== 'number' || !Number.isFinite(exact) || exact <= 0) {
+    throw new Error('無效的佇列影格率回應');
+  }
+  if (frameRates.size >= 64) frameRates.delete(frameRates.keys().next().value);
+  frameRates.set(rate, exact);
+  return exact;
+}
 
 contextBridge.exposeInMainWorld('queueAPI', {
+  exactFrameRate,
   getAll: () => ipcRenderer.invoke('queue:getAll'),
   setPause: (v) => ipcRenderer.invoke('queue:pause', v),
   setConcurrency: (v) => ipcRenderer.invoke('queue:setConcurrency', v),

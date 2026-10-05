@@ -7,6 +7,7 @@
    對應 CONTEXT.md「來源聲道／專案音軌」與 docs/技術架構說明.md §0.8。 */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ExternalAudioLibrary, sourceChannelDescriptors, assetRange } from '../src/external-audio.js';
+import { fadeAlphaAtTimeline } from '../src/image-compositor-engine.js';
 
 let lib;
 const add = (over = {}) => lib.add({
@@ -46,6 +47,29 @@ describe('建立素材', () => {
 });
 
 describe('範圍正規化（不變量①②）', () => {
+  it('metadata 更新保留明確空範圍，未知未修剪來源才延伸',()=>{
+    const empty=add({in:0,out:0,duration:12});
+    lib.updateDuration(empty,15);
+    expect(empty).toMatchObject({in:0,out:0,fadeIn:0,fadeOut:0});
+    const unknown=lib.add({duration:0});
+    lib.updateDuration(unknown,15);
+    expect(unknown.out).toBe(15);
+    const explicit=lib.add({duration:0,out:0});
+    lib.updateDuration(explicit,15);
+    expect(explicit.out).toBe(0);
+  });
+  it('建立即限制來源範圍與淡化，height 可跨序列化重建',()=>{
+    const asset=add({duration:5,in:99,out:100,height:128});
+    expect(asset).toMatchObject({in:5,out:5,fadeIn:0,fadeOut:0,height:128});
+    expect(new ExternalAudioLibrary().add(lib.get(asset.id)).height).toBe(128);
+  });
+  it('未設定高度維持預設，非有限來源資料不進持久快照',()=>{
+    const asset=add({height:null,offset:Infinity,duration:Infinity,gain:Infinity});
+    expect(asset.height).toBeUndefined();
+    expect(asset).toMatchObject({offset:0,duration:0,gain:0});
+    const saved=JSON.parse(JSON.stringify(lib.get(asset.id)));
+    expect(saved).toMatchObject({offset:0,duration:0,gain:0});
+  });
   it('out=0 是合法的空範圍，不會被回退成整段 duration', () => {
     expect(assetRange({ duration: 12, offset: 0, in: 0, out: 0 })).toMatchObject({ out: 0, length: 0 });
   });
@@ -135,9 +159,9 @@ describe('切割：只算數字，不開檔', () => {
     const plan = lib.planSplit(asset.id, 12);
 
     expect(plan.cut).toBe(5);                            // 3 + (12-10)
-    expect(plan.left).toEqual({ out: 5, fadeOut: 0 });
-    expect(plan.right).toMatchObject({ offset: 12, in: 5, out: 8, fadeIn: 0, fadeOut: 2 });
-    expect(plan.previous).toEqual({ out: 8, fadeOut: 2 });
+    expect(plan.left).toMatchObject({ out: 5, fadeOut: 2, fadeSourceOffset:0,fadeSourceLength:5 });
+    expect(plan.right).toMatchObject({ offset: 12, in: 5, out: 8, fadeIn: 1, fadeOut: 2,fadeSourceOffset:2,fadeSourceLength:5 });
+    expect(plan.previous).toMatchObject({ out: 8, fadeOut: 2 });
     // 還沒真的改動任何東西——執行是呼叫端的事
     expect(asset.out).toBe(8);
   });
@@ -155,6 +179,25 @@ describe('切割：只算數字，不開檔', () => {
     expect(lib.planSplit(asset.id, 10.05)).toBeNull();
     expect(lib.planSplit(asset.id, 14.99)).toBeNull();
     expect(lib.planSplit(asset.id, 0)).toBeNull();
+  });
+});
+
+describe('切割保留原始淡化視窗',()=>{
+  it('跨淡入/淡出與再次切割的整段曲線逐點保持一致，save/rebuild/restore不丟origin',()=>{
+    const original=add({duration:10,in:0,out:10,offset:10,fadeIn:8,fadeOut:4});
+    const before={...original};
+    const first=lib.planSplit(original.id,15);Object.assign(original,first.left);lib.normalize(original);
+    const right=lib.add(first.right),second=lib.planSplit(right.id,17);
+    Object.assign(right,second.left);lib.normalize(right);lib.add(second.right);
+    const rebuilt=new ExternalAudioLibrary();for(const saved of lib.serialize())rebuilt.add(saved);
+    for(let t=10.1;t<20;t+=.17){
+      const expected=fadeAlphaAtTimeline(before,t);
+      const actual=rebuilt.assets.reduce((value,clip)=>value+fadeAlphaAtTimeline(clip,t),0);
+      expect(actual).toBeCloseTo(expected,9);
+    }
+    const saved=lib.get(right.id);delete right.fadeSourceLength;delete right.fadeSourceOffset;
+    lib.applyRestored(right,saved);
+    expect(right).toMatchObject({fadeIn:8,fadeOut:4,fadeSourceOffset:5,fadeSourceLength:10});
   });
 });
 
@@ -338,7 +381,7 @@ describe('模組本身保持純淨', () => {
 
     // 共用效果資料仍是零 I/O 純規則；不能重新引入 renderer runtime。
     expect([...code.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map(match=>match[1]))
-      .toEqual(['../shared/audio-loudness.cjs']);
+      .toEqual(['../shared/audio-loudness.cjs','../shared/clip-fade.cjs']);
     expect(code).not.toMatch(/\bdocument\b/);
     expect(code).not.toMatch(/\bState\b/);
   });

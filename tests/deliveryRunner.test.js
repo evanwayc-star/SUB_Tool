@@ -80,6 +80,37 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it.each(['user-stop', 'shutdown'])('準備期 probe 可以 %s，未啟動 ffmpeg 前就完整取消', async reason => {
+    let signal;
+    const setup = make({ mediaProbe: () => ({
+      hasAudio: (file, options) => new Promise((resolve, reject) => {
+        signal = options.signal;
+        signal.addEventListener('abort', () => reject(new Error('probe aborted')), { once: true });
+      }),
+    }) });
+    const run = setup.runner.run(videoJob());
+    const active = setup.active.get('delivery-1');
+    expect(active.p).toBeNull();
+    active.stop(reason);
+    expect(signal.aborted).toBe(true);
+    await run;
+    await active.completion;
+    expect(setup.runFfmpeg).not.toHaveBeenCalled();
+    expect(setup.active.size).toBe(0);
+    if (reason === 'user-stop') expect(setup.sent.at(-1)?.payload).toMatchObject({ stopped: true });
+    else expect(setup.sent).toEqual([]);
+  });
+
+  it('發佈成品後取消結果 probe，仍提交 done 而不把已交付檔案降成 stopped', async () => {
+    let setup;
+    setup = make({ mediaProbe: () => ({
+      hasAudio: async () => false,
+      audioBitrates: async () => { setup.active.get('delivery-1').stop('shutdown'); throw new Error('probe aborted'); },
+    }) });
+    await setup.runner.run(videoJob());
+    expect(setup.sent.at(-1)?.payload).toMatchObject({ done: true, result: { audioActualBitrates: null } });
+  });
+
   it('航空來源的音訊前導時間送入正式轉檔計畫', async () => {
     const setup = make({ mediaProbe: () => ({
       hasAudio: async () => true,

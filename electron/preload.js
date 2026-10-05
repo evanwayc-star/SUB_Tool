@@ -43,7 +43,7 @@ contextBridge.exposeInMainWorld('subtool', {
   /* 最近開啟：清單由主程序持有並持久化。開啟時只送【索引】——
      renderer 給不了路徑，所以沒有「叫主程序讀任意檔案」的路。 */
   recentProjects:   () => ipcRenderer.invoke('project:recentList'),
-  openRecentProject: (index) => ipcRenderer.invoke('project:openRecent', index),
+  openRecentProject: (token) => ipcRenderer.invoke('project:openRecent', token),
   clearRecentProjects: () => ipcRenderer.invoke('project:clearRecent'),
   saveProject:  (name, b64) => ipcRenderer.invoke('dialog:saveProject', { name, b64 }),
   importSub:    (kind) => ipcRenderer.invoke('dialog:importSub', kind),
@@ -94,6 +94,7 @@ contextBridge.exposeInMainWorld('subtool', {
     if(typeof directory!=='string') throw new TypeError('directory must be a string');
     return ipcRenderer.invoke('fs:reserveScreenshotPath', { directory, suffix });
   },
+  releaseScreenshotPath: (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:releaseScreenshotPath', p); },
   writeProject: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeProject', { path: p, b64 }); },
   writeScreenshot: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeScreenshot', { path: p, b64 }); },
   openPath:     (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('app:openPath', p); },

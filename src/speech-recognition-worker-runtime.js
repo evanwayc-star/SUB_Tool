@@ -16,14 +16,19 @@ export function resolveBuiltinExecutionPlan({
     : { device: 'wasm', dtype: wasmDtype };
 }
 
-export function buildBuiltinGenerationOptions({ language, prompt, streamer, returnTimestamps = 'word' } = {}) {
+export function buildBuiltinGenerationOptions({ language, prompt, temperature = 0, streamer, returnTimestamps = 'word' } = {}) {
+  const value=Number(temperature);
+  const samplingTemperature=Number.isFinite(value)?Math.min(1,Math.max(0,value)):0;
   const options = {
     return_timestamps: returnTimestamps,
     chunk_length_s: CHUNK_LENGTH_SECONDS,
     stride_length_s: STRIDE_LENGTH_SECONDS,
     max_new_tokens: MAX_NEW_TOKENS,
-    streamer
+    streamer,
+    do_sample: samplingTemperature>0
   };
+  // Transformers 3.3.3 的 temperature warper 必須大於 0；0 明確用 greedy。
+  if(samplingTemperature>0) options.temperature=samplingTemperature;
   if (language && language !== 'auto') {
     options.language = language;
     options.task = 'transcribe';

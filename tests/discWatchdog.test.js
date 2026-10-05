@@ -87,6 +87,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
           }
         },
       };
+      process.on('disconnect', () => fs.writeFileSync(process.env.DISC_TEST_DISCONNECTED, 'seen'));
       void runStandalone({ artifactAdapters: { disc } });
     `);
   });
@@ -114,6 +115,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
         DISC_TEST_ENCODER: path.join(tempDir, 'encoded.log'),
         DISC_TEST_AUTHOR: path.join(tempDir, 'author.log'),
         DISC_TEST_GATE: path.join(tempDir, 'gate'),
+        DISC_TEST_DISCONNECTED: path.join(tempDir, 'disconnected.log'),
       },
       onMessage: message => messages.push(message),
     });
@@ -142,7 +144,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     await controller.ready;
     const result = await controller.completion;
     expect(result.ok).toBe(false);
-    expect(result.cleanup).toMatchObject({ untouched: true, released: true });
+    expect(result.cleanup).toMatchObject({ missing: true, released: true });
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
     expect(listLeases(queueDir)).toEqual([]);
   });
@@ -153,7 +155,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     await waitFor(() => fs.existsSync(path.join(tempDir, 'encoded.log')));
     expect(listLeases(queueDir)[0].owner.outputStarted).toBe(false);
     controller.stop('user-stop');
-    expect((await controller.completion).cleanup).toMatchObject({ untouched: true, released: true });
+    expect((await controller.completion).cleanup).toMatchObject({ missing: true, released: true });
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
     expect(listLeases(queueDir)).toEqual([]);
   });
@@ -166,7 +168,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     expect(listLeases(queueDir)).toHaveLength(1);
     fs.writeFileSync(path.join(tempDir, 'gate'), 'release');
     const result = await controller.completion;
-    expect(result.cleanup).toMatchObject({ reason: 'user-stop', untouched: true, released: true });
+    expect(result.cleanup).toMatchObject({ reason: 'user-stop', missing: true, released: true });
     expect(fs.existsSync(path.join(tempDir, 'encoded.log'))).toBe(false);
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
     expect(listLeases(queueDir)).toEqual([]);
@@ -177,13 +179,17 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     await controller.ready;
     await waitFor(() => fs.existsSync(path.join(tempDir, 'author.log')));
     const authorPid = Number(fs.readFileSync(path.join(tempDir, 'author.log'), 'utf8'));
-    expect(listLeases(queueDir)[0].owner).toMatchObject({ ffmpegPid: authorPid, outputStarted: true });
+    const [lease] = listLeases(queueDir);
+    expect(lease.owner).toMatchObject({ ffmpegPid: authorPid, outputStarted: true });
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
+    expect(fs.readFileSync(lease.owner.stagePath, 'utf8')).toBe('partial ISO');
     if (action === 'stop') controller.stop('user-stop');
     else expect((await recoverExportLeases(queueDir)).warnings).toEqual([]);
     const result = await controller.completion;
     expect(result.cleanup).toMatchObject({ removed: true, released: true });
     expect(() => process.kill(authorPid, 0)).toThrow();
-    expect(fs.existsSync(outPath)).toBe(false);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
+    expect(fs.existsSync(lease.owner.stagePath)).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
   });
 
@@ -191,6 +197,9 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     const { controller } = launch('prepare-wait');
     await waitFor(() => fs.existsSync(path.join(tempDir, 'prepared.json')));
     controller.disconnect();
+    // IPC close is asynchronous across processes. Release preparation only
+    // after the child has observed the disconnect event being tested.
+    await waitFor(() => fs.existsSync(path.join(tempDir, 'disconnected.log')));
     fs.writeFileSync(path.join(tempDir, 'gate'), 'release');
     await waitFor(() => controller.child.exitCode != null);
     expect(fs.existsSync(path.join(tempDir, 'encoded.log'))).toBe(false);
@@ -202,7 +211,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     const { controller } = launch('author-fail');
     await controller.ready;
     expect((await controller.completion).cleanup).toMatchObject({ reason: 'disc-finalize-failed', removed: true, released: true });
-    expect(fs.existsSync(outPath)).toBe(false);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
     expect(listLeases(queueDir)).toEqual([]);
   });
 

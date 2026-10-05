@@ -56,6 +56,7 @@ vi.mock('../src/state.js', () => ({
   resetVideoTracks: vi.fn(),
   newId: () => 'test-cue',
   setSelection: vi.fn(),
+  clearSelection: vi.fn(),
 }));
 
 vi.mock('../src/util.js', () => ({
@@ -92,7 +93,7 @@ vi.mock('../src/subtitles.js', () => ({
   sweepContainedCues: vi.fn(),
 }));
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
-vi.mock('../src/project.js', () => ({ ensureProjectSaved: vi.fn(), isProjectGuardDone: () => true }));
+vi.mock('../src/project.js', () => ({ Project:{captureWorkspaceOwnership:()=>()=>true}, ensureProjectSaved: vi.fn(), isProjectGuardDone: () => true }));
 vi.mock('../src/ui.js', () => ({ showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn() }));
 vi.mock('../src/keyboard.js', () => ({ jklReset: vi.fn(), nudge: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
@@ -182,5 +183,7 @@ describe('timeline-renderer commands and operations', () => {
 
     engine.toggleAllLock();
     expect(harness.State.tracks.every(t => t.locked)).toBe(true);
+    const {clearSelection}=await import('../src/state.js');
+    expect(clearSelection).toHaveBeenCalledOnce();
   });
 });

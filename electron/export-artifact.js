@@ -26,7 +26,8 @@ function artifactProgress(format, phase, percent) {
  * Adapters are injected by the standalone bootstrap, never by the IPC payload.
  */
 function createExportArtifact(config, owner = {}, adapters = {}) {
-  const { outputFormat: format, outPath, args, discAudioPlan, discVideoFps } = config;
+  const { outputFormat: format, outPath, stagePath, args, discAudioPlan, discVideoFps } = config;
+  const writePath = stagePath || outPath;
   const preset = getDeliveryFormatPreset(format);
   const isDisc = isDiscOutput(format);
   const disc = adapters.disc || nativeDisc;
@@ -51,7 +52,7 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
       }
       await onOutputStart?.();
       signal?.throwIfAborted();
-      return args;
+      return stagePath ? [...args.slice(0, -1), writePath] : args;
     })();
     return preparing;
   }
@@ -67,14 +68,14 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
           if (isDisc) {
             const label = format === 'dvd-iso' ? '製作 DVD ISO' : '製作 BD ISO';
             onProgress?.({ label, pct: artifactProgress(format, 'finalize', 0) });
-            await disc.finalizeDiscOutput(format, stage.encodedPath, outPath, {
+            await disc.finalizeDiscOutput(format, stage.encodedPath, writePath, {
               signal, audioPlan: discAudioPlan, fps: discVideoFps, onOutputStart, onProcess,
               onProgress: percent => onProgress?.({ label, pct: artifactProgress(format, 'finalize', percent) }),
             });
           } else if (preset?.transport === 'airline') {
-            await airline(format, outPath, { signal, tempDir });
+            await airline(format, writePath, { signal, tempDir });
           } else if (format === 'mod-fhd') {
-            await modFhd(outPath, { signal });
+            await modFhd(writePath, { signal });
           }
         } catch (error) {
           outcome.error = error;
