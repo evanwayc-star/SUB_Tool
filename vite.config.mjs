@@ -56,6 +56,11 @@ function crossOriginIsolation() {
 // 開發：vite（HMR）；打包：輸出單一可雙擊的 dist/index.html（含內嵌 JS/CSS）
 export default defineConfig({
   base: './',
+  // STFT package and our adapter must share one ONNX runtime instance/backend.
+  resolve: {
+    conditions: ['onnxruntime-web-use-extern-wasm','module','browser','development|production'],
+    alias: [{ find: /^onnxruntime-web$/, replacement: 'onnxruntime-web/webgpu' }],
+  },
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   plugins: [injectCSP(), viteSingleFile(), crossOriginIsolation()],
   server: { 

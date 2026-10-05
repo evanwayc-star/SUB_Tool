@@ -181,6 +181,38 @@ function verifyReleaseState({
   });
 }
 
+function _replacePreparedNotes({ rootDir, version, date, body, packageJson, packageLock,
+  changelog, sourceFiles, newline }) {
+  if (packageJson.version !== version) {
+    throw new Error(`Replace-current requires the current manifest version v${packageJson.version}, received v${version}`);
+  }
+  _inspectReleaseState({ packageJson, packageLock, changelog, sourceFiles });
+
+  const headVersion = _gitJson(rootDir, 'HEAD', 'package.json').version;
+  if (headVersion === version) {
+    throw new Error(`Cannot replace notes for committed release v${version}`);
+  }
+  const headParts = /^\d+\.\d+\.\d+$/.test(String(headVersion)) ? headVersion.split('.').map(Number) : null;
+  const nextParts = version.split('.').map(Number);
+  const firstDifference = headParts?.findIndex((part, index) => part !== nextParts[index]);
+  if (firstDifference == null || firstDifference < 0 || headParts[firstDifference] > nextParts[firstDifference]) {
+    throw new Error(`Replace-current requires an older committed manifest version, found v${headVersion}`);
+  }
+  if (_gitLines(rootDir, ['tag', '--list', `v${version}`]).length) {
+    throw new Error(`Cannot replace notes for tagged release v${version}`);
+  }
+
+  const headings = [...changelog.matchAll(/^ {0,3}## \[v[^\]]+\][^\r\n]*/gm)];
+  const first = headings[0];
+  if (first[0].trim() !== `## [v${version}] - ${date}`) {
+    throw new Error('Replace-current must retain the prepared release heading and date');
+  }
+  // Slice the original text: only the prepared notes change, not introduction or history bytes.
+  const prefix = changelog.slice(0, first.index + first[0].length);
+  const history = changelog.slice(headings[1]?.index ?? changelog.length);
+  return `${prefix}${newline}${newline}${body}${newline}${newline}${history}`;
+}
+
 function prepareRelease({
   rootDir,
   changelogPath = path.join('docs', '版本變更紀錄.md'),
@@ -188,7 +220,11 @@ function prepareRelease({
   date,
   body,
   sourceFiles,
+  replaceCurrent = false,
 }) {
+  if (typeof replaceCurrent !== 'boolean') {
+    throw new Error('replaceCurrent must be a boolean');
+  }
   if (!/^\d+\.\d+\.\d+$/.test(String(version || ''))) {
     throw new Error(`Invalid release version: ${version}`);
   }
@@ -220,20 +256,26 @@ function prepareRelease({
   if (!packageLock.packages?.['']) {
     throw new Error('package-lock.json is missing packages[""]');
   }
-  if (new RegExp(`^ {0,3}## \\[v${version.replaceAll('.', '\\.')}\\]`, 'm').test(changelog)) {
+  if (!replaceCurrent && new RegExp(`^ {0,3}## \\[v${version.replaceAll('.', '\\.')}\\]`, 'm').test(changelog)) {
     throw new Error(`Changelog already contains v${version}`);
   }
 
-  const divider = /^---(?=\r?$)/m.exec(changelog);
-  if (!divider) {
-    throw new Error('Changelog introduction divider was not found');
-  }
-  const dividerEnd = divider.index + divider[0].length;
-  const beforeVersions = changelog.slice(0, dividerEnd);
-  const versionHistory = changelog.slice(dividerEnd).replace(/^(?:\r?\n)*/, '');
   const normalizedBody = String(body).trim().replace(/\r?\n/g, newline);
-  const section = `## [v${version}] - ${date}${newline}${newline}${normalizedBody}`;
-  const nextChangelog = `${beforeVersions}${newline}${newline}${section}${newline}${newline}${versionHistory}`;
+  let nextChangelog;
+  if (replaceCurrent) {
+    nextChangelog = _replacePreparedNotes({ rootDir, version, date, body: normalizedBody,
+      packageJson, packageLock, changelog, sourceFiles, newline });
+  } else {
+    const divider = /^---(?=\r?$)/m.exec(changelog);
+    if (!divider) {
+      throw new Error('Changelog introduction divider was not found');
+    }
+    const dividerEnd = divider.index + divider[0].length;
+    const beforeVersions = changelog.slice(0, dividerEnd);
+    const versionHistory = changelog.slice(dividerEnd).replace(/^(?:\r?\n)*/, '');
+    const section = `## [v${version}] - ${date}${newline}${newline}${normalizedBody}`;
+    nextChangelog = `${beforeVersions}${newline}${newline}${section}${newline}${newline}${versionHistory}`;
+  }
 
   packageJson.version = version;
   packageLock.version = version;
@@ -250,12 +292,12 @@ function prepareRelease({
     {
       filePath: packagePath,
       previousContent: packageSource,
-      nextContent: _formatJson(packageJson, packageNewline),
+      nextContent: replaceCurrent ? packageSource : _formatJson(packageJson, packageNewline),
     },
     {
       filePath: packageLockPath,
       previousContent: packageLockSource,
-      nextContent: _formatJson(packageLock, packageLockNewline),
+      nextContent: replaceCurrent ? packageLockSource : _formatJson(packageLock, packageLockNewline),
     },
     {
       filePath: changelogFilePath,
@@ -299,7 +341,10 @@ function runCli(argv = process.argv.slice(2), io = console) {
 
   if (command === 'prepare') {
     if (!options.version || !options.date || !options.notes) {
-      throw new Error('Usage: release-transaction.js prepare --version X.Y.Z --date YYYY-MM-DD --notes PATH');
+      throw new Error('Usage: release-transaction.js prepare --version X.Y.Z --date YYYY-MM-DD --notes PATH [--replace-current true]');
+    }
+    if (options['replace-current'] != null && !['true', 'false'].includes(options['replace-current'])) {
+      throw new Error('--replace-current must be true or false');
     }
     const notesPath = path.isAbsolute(options.notes)
       ? options.notes
@@ -311,6 +356,7 @@ function runCli(argv = process.argv.slice(2), io = console) {
       date: options.date,
       body: fs.readFileSync(notesPath, 'utf8'),
       sourceFiles,
+      replaceCurrent: options['replace-current'] === 'true',
     });
     verifyReleaseState({ rootDir, changelogPath, sourceFiles });
     io.log(`Release prepared: v${result.version} (${result.changedFiles.length} files)`);

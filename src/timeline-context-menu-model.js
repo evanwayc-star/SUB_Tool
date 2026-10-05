@@ -41,19 +41,21 @@ export function normalizeWaveOptions(rawOptions) {
       selection: String(selection),
       label: item?.label || (selection === 'mix' ? 'MIX（所有聲道）' : String(selection)),
       ready: item?.ready !== false,
+      ...(item?.statusLabel ? { statusLabel: true } : {}),
     };
   }).filter(item => item.selection);
 }
 
-function waveformItems(options, selected, actions) {
+function waveformItems(options, selected, actions, scope='此素材') {
   if (!options.length) {
     return [note('wave_preparing', '波形正在準備中…')];
   }
   return [
-    { id: 'wave_heading', heading: true, label: '顯示此素材的波形' },
+    { id: 'wave_heading', heading: true, label: `顯示${scope}的波形` },
+    ...(selected==='mixed'?[note('wave_mixed','混合（依各片段）；選取後套用整列')]:[]),
     ...options.map(option => action(
       `wave:${option.selection}`,
-      option.ready ? option.label : `${option.label}（準備中）`,
+      option.ready || option.statusLabel ? option.label : `${option.label}（準備中）`,
       () => actions.selectWave?.(option.selection),
       { checked: String(selected || 'mix') === option.selection }
     )),
@@ -177,6 +179,7 @@ export function buildAudioTrackMenu(context, actions = {}) {
     canReveal = false,
     waveOptions = [],
     selectedWave = 'mix',
+    waveSourceCount = 1,
   } = context || {};
 
   const items = [heading(`${external ? '🎵' : '🔊'} ${name}`)];
@@ -188,6 +191,6 @@ export function buildAudioTrackMenu(context, actions = {}) {
     action('hard_limiter', '音訊平衡', actions.openHardLimiter),
     action('audio_routing', '🎧 音訊配線…', actions.openAudioRouting),
   ]);
-  appendGroup(items, waveformItems(waveOptions, selectedWave, actions));
+  appendGroup(items, waveformItems(waveOptions, selectedWave, actions,waveSourceCount>1?'整列各片段':'此素材'));
   return items;
 }

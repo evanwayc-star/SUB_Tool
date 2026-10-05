@@ -9,6 +9,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const isProjectFilePath = filePath => typeof filePath === 'string' && /\.(subtool|json)$/i.test(filePath);
 const MAX_SPEECH_WAV_BYTES = 20_000_000;
 const isSpeechCompressionRequestId = value => typeof value === 'string' && /^speech-[A-Za-z0-9_-]{1,96}$/.test(value);
+const isVocalWaveRequestId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
 
 contextBridge.exposeInMainWorld('subtool', {
   isDesktop: true,
@@ -58,6 +59,25 @@ contextBridge.exposeInMainWorld('subtool', {
   makeProxy:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:proxy', { path: p, duration }); },
   extractAudio: (p, idx, duration, codec) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:extractAudio', { path: p, idx, duration, codec }); },
   waveAudio:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:waveAudio', { path: p, duration }); },
+  vocalWaveFingerprint: (source) => {
+    if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
+    return ipcRenderer.invoke('audio:vocal-wave-fingerprint', source);
+  },
+  vocalWaveChunk: (request) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少人聲波形片段參數');
+    const { path, start, duration, requestId, sourceStream = 0, sourceChannel = null } = request;
+    if (typeof path !== 'string' || !path.trim() || path.length > 32767 || path.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
+    if (!isVocalWaveRequestId(requestId)) throw new TypeError('人聲波形 requestId 格式不正確');
+    if (typeof start !== 'number' || !Number.isFinite(start) || start < 0) throw new RangeError('人聲波形開始時間必須是非負有限秒數');
+    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0 || duration > 36) throw new RangeError('人聲波形片段必須大於 0 且不超過 36 秒');
+    if (!Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream > 255) throw new TypeError('無效的來源音訊串流');
+    if (sourceChannel !== null && (!Number.isInteger(sourceChannel) || sourceChannel < 0 || sourceChannel > 63)) throw new TypeError('無效的來源音訊聲道');
+    return ipcRenderer.invoke('audio:vocal-wave-chunk', { path, start, duration, requestId, sourceStream, sourceChannel });
+  },
+  cancelVocalWaveChunk: (requestId) => {
+    if (!isVocalWaveRequestId(requestId)) throw new TypeError('人聲波形 requestId 格式不正確');
+    return ipcRenderer.invoke('audio:vocal-wave-cancel', { requestId });
+  },
   normalizeAudio: (p, options, duration, requestId) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:normalize', { path: p, options, duration, requestId }); },
   cancelAudioNormalization: requestId => ipcRenderer.invoke('audio:normalize-cancel', { requestId }),
   analyzeAudioLoudness: (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:analyzeLoudness', { path: p, duration }); },

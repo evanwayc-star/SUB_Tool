@@ -57,6 +57,32 @@ function createRepositoryFixture() {
   return rootDir;
 }
 
+function createPreparedGitFixture(version = '6.3.31') {
+  const rootDir = createRepositoryFixture();
+  mkdirSync(path.join(rootDir, 'src'));
+  const sourcePath = path.join(rootDir, 'src', 'runtime.js');
+  writeFileSync(sourcePath, 'export const value = 1;\n', 'utf8');
+  execFileSync('git', ['init'], { cwd: rootDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'release-test@example.com'], { cwd: rootDir });
+  execFileSync('git', ['config', 'user.name', 'Release Test'], { cwd: rootDir });
+  execFileSync('git', ['config', 'core.autocrlf', 'false'], { cwd: rootDir });
+  execFileSync('git', ['add', '.'], { cwd: rootDir });
+  execFileSync('git', ['commit', '-m', 'fixture'], { cwd: rootDir, stdio: 'ignore' });
+  writeFileSync(sourcePath, 'export const value = 2;\n', 'utf8');
+  const options = {
+    rootDir, changelogPath: 'CHANGELOG.md', version, date: '2026-08-20',
+    body: '### 修復\n\n- 原先待發版項目。\n\n### 驗證\n\n- 已完成初次驗證。',
+    sourceFiles: ['src/runtime.js'],
+  };
+  prepareRelease(options);
+  return { rootDir, options };
+}
+
+function releaseContents(rootDir) {
+  return ['package.json', 'package-lock.json', 'CHANGELOG.md']
+    .map(file => readFileSync(path.join(rootDir, file), 'utf8'));
+}
+
 afterEach(() => {
   for (const rootDir of tempRoots.splice(0)) {
     rmSync(rootDir, { recursive: true, force: true });
@@ -64,6 +90,110 @@ afterEach(() => {
 });
 
 describe('release transaction', () => {
+  describe('replace-current prepared notes', () => {
+    const replacementBody = '### 修復\n\n- 使用者追加永久快取需求。\n\n### 驗證\n\n- 重開後快取與原波形驗證通過。';
+
+    it('只替換未提交版本的最上方 notes，保留 manifest、導言與歷史原始內容', () => {
+      const { rootDir, options } = createPreparedGitFixture();
+      const before = releaseContents(rootDir);
+      const introduction = before[2].slice(0, before[2].indexOf('### 修復'));
+      const history = before[2].slice(before[2].indexOf('## [v6.3.30]'));
+
+      expect(prepareRelease({ ...options, replaceCurrent: true, body: replacementBody }))
+        .toEqual({ version: '6.3.31', changedFiles: ['package.json', 'package-lock.json', 'CHANGELOG.md'] });
+
+      const after = releaseContents(rootDir);
+      expect(after.slice(0, 2)).toEqual(before.slice(0, 2));
+      expect(after[2]).toBe(`${introduction}${replacementBody.replaceAll('\n', '\r\n')}\r\n\r\n${history}`);
+      expect(after[2].match(/^## \[v6\.3\.31\]/gm)).toHaveLength(1);
+      expect(after[2]).not.toContain('原先待發版項目');
+      expect(JSON.parse(execFileSync('git', ['show', 'HEAD:package.json'], { cwd: rootDir, encoding: 'utf8' })).version)
+        .toBe('6.3.30');
+    });
+
+    it('一般 prepare 仍拒絕重複目前版號', () => {
+      const { rootDir, options } = createPreparedGitFixture();
+      const before = releaseContents(rootDir);
+      expect(() => prepareRelease({ ...options, body: replacementBody })).toThrow(/already contains v6\.3\.31/i);
+      expect(releaseContents(rootDir)).toEqual(before);
+    });
+
+    it.each([
+      ['不同要求版本', options => ({ ...options, version: '6.3.32' }), null, /current manifest version/i],
+      ['不同第一節版本', options => options, text => text.replace('## [v6.3.31]', '## [v6.3.32]'), /first changelog version/i],
+      ['重複目前版本', options => options, text => `${text}\r\n ## [v6.3.31] - 2026-08-20\r\n`, /duplicate changelog version/i],
+      ['更改已準備日期', options => ({ ...options, date: '2026-08-21' }), null, /retain.*heading and date/i],
+      ['缺少驗證的新 notes', options => ({ ...options, body: '### 修復\n\n- 無驗證。' }), null, /verification section/i],
+    ])('%s 在三檔寫入前拒絕', (_name, changeOptions, changeChangelog, expected) => {
+      const { rootDir, options } = createPreparedGitFixture();
+      if (changeChangelog) {
+        const changelogPath = path.join(rootDir, 'CHANGELOG.md');
+        writeFileSync(changelogPath, changeChangelog(readFileSync(changelogPath, 'utf8')), 'utf8');
+      }
+      const before = releaseContents(rootDir);
+      expect(() => prepareRelease(changeOptions({ ...options, replaceCurrent: true, body: replacementBody })))
+        .toThrow(expected);
+      expect(releaseContents(rootDir)).toEqual(before);
+    });
+
+    it.each(['committed', 'tagged'])('拒絕 %s 版本，即使有新的 production source evidence', state => {
+      const { rootDir, options } = createPreparedGitFixture();
+      if (state === 'committed') {
+        execFileSync('git', ['add', 'package.json', 'package-lock.json', 'CHANGELOG.md'], { cwd: rootDir });
+        execFileSync('git', ['commit', '-m', 'prepared release'], { cwd: rootDir, stdio: 'ignore' });
+      } else {
+        execFileSync('git', ['tag', '-a', 'v6.3.31', '-m', 'allocated release'], { cwd: rootDir });
+      }
+      const before = releaseContents(rootDir);
+      expect(() => prepareRelease({ ...options, replaceCurrent: true, body: replacementBody }))
+        .toThrow(new RegExp(`for ${state} release`, 'i'));
+      expect(releaseContents(rootDir)).toEqual(before);
+    });
+
+    it('要求 Git HEAD 的已提交 manifest 較舊，不能用替換模式回改舊版', () => {
+      const { rootDir, options } = createPreparedGitFixture('6.3.29');
+      const before = releaseContents(rootDir);
+      expect(() => prepareRelease({ ...options, replaceCurrent: true, body: replacementBody }))
+        .toThrow(/older committed manifest version/i);
+      expect(releaseContents(rootDir)).toEqual(before);
+    });
+
+    it('替換第三檔部分寫入失敗也回復三檔，保留原先 prepared notes', () => {
+      const { rootDir, options } = createPreparedGitFixture();
+      const before = releaseContents(rootDir);
+      const writeFile = nodeFs.writeFileSync.bind(nodeFs);
+      let writeCount = 0;
+      const writeSpy = vi.spyOn(nodeFs, 'writeFileSync').mockImplementation((...args) => {
+        writeCount += 1;
+        if (writeCount === 3) {
+          writeFile(args[0], 'partial notes', 'utf8');
+          throw new Error('simulated partial write');
+        }
+        return writeFile(...args);
+      });
+      try {
+        expect(() => prepareRelease({ ...options, replaceCurrent: true, body: replacementBody }))
+          .toThrow(/simulated partial write/i);
+        expect(writeSpy.mock.calls.slice(-3).map(([file]) => path.basename(file)))
+          .toEqual(['CHANGELOG.md', 'package-lock.json', 'package.json']);
+      } finally { writeSpy.mockRestore(); }
+      expect(releaseContents(rootDir)).toEqual(before);
+    });
+
+    it('CLI 的 --replace-current true 使用同一個 transaction，且拒絕非 boolean 旗標值', () => {
+      const { rootDir, options } = createPreparedGitFixture();
+      writeFileSync(path.join(rootDir, 'replacement-notes.md'), replacementBody, 'utf8');
+      const args = [RELEASE_SCRIPT, 'prepare', '--root', rootDir, '--changelog', 'CHANGELOG.md',
+        '--version', options.version, '--date', options.date, '--notes', 'replacement-notes.md', '--replace-current'];
+      expect(execFileSync(process.execPath, [...args, 'true'], { encoding: 'utf8' }).trim())
+        .toBe('Release prepared: v6.3.31 (3 files)');
+      const before = releaseContents(rootDir);
+      expect(() => execFileSync(process.execPath, [...args, 'yes'], { stdio: ['ignore', 'pipe', 'pipe'] }))
+        .toThrow(/must be true or false/i);
+      expect(releaseContents(rootDir)).toEqual(before);
+    });
+  });
+
   it('只更新兩份 manifest 版號並在導言後插入單一版本區段', () => {
     const rootDir = createRepositoryFixture();
 

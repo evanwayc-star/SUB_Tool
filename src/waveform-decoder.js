@@ -9,6 +9,15 @@ import { setStatus } from './ui.js';
 
 export const WAVE_DECODE_MAX = 5e8;    // 超過此大小不整檔解碼波形，改即時擷取
 
+let vocalSourceModule=null;
+function loadVocalSourceModule(){
+  // One lazy module load also covers all subscriptions in a split audio lane.
+  if(!vocalSourceModule) vocalSourceModule=import('./vocal-waveform-source.js').catch(error=>{
+    vocalSourceModule=null;
+    throw error;
+  });
+  return vocalSourceModule;
+}
 
 
 
@@ -30,7 +39,7 @@ export const Wave = {
    * 建一個純 runtime registry。它刻意不寫進 State / 專案檔，避免把大型
    * Float32Array 序列化；檔案重新載入後會由 ingest / decode 重新補齊。
    */
-  sourceWaveforms:new Map(), // key -> {key,runtimeSourceId,mix,channels:Map,selection}
+  sourceWaveforms:new Map(), // key -> {key,runtimeSourceId,mix,channels:Map,vocals,selection}
 
   _sourceKey(source){
     if(source&&typeof source==='object'){
@@ -68,6 +77,14 @@ export const Wave = {
         runtimeSourceId:runtime||key,
         mix:{peaks:null,path:null,loading:null},
         channels:new Map(),
+        vocals:{peaks:null,loading:null,controller:null,percent:0,label:'',error:null},
+        vocalIntent:null,
+        vocalRevision:0,
+        vocalRestore:null,
+        vocalRestoreComplete:false,
+        vocalRestoreKey:null,
+        vocalChoiceMade:false,
+        originalSelection:'mix',
         selection:'mix'
       };
       this.sourceWaveforms.set(key,state);
@@ -111,6 +128,7 @@ export const Wave = {
     const state=this._sourceState(source,true);
     if(!state) return null;
     const nextMixPath=mixPath!==undefined?mixPath||null:state.mix.path;
+    if(state.mix.path&&nextMixPath!==state.mix.path) this._cancelSourceVocals(state,{clear:true});
     if(nextMixPath!==state.mix.path||(mixPeaks?.length&&mixPeaks!==state.mix.peaks)){
       // A new file or supplied peaks supersedes any in-flight decode for the old entry.
       state.mix={path:nextMixPath,peaks:nextMixPath===state.mix.path?state.mix.peaks:null,loading:null};
@@ -134,6 +152,7 @@ export const Wave = {
         }else old.label=raw.label||old.label||`Ch ${desc.sourceChannel+1}`;
       }
     }
+    this._restoreSourceVocals(source,state);
     return state;
   },
   setSourceMixPeaks(source,peaks,{mixPath,channels}={}){
@@ -193,13 +212,85 @@ export const Wave = {
         sourceLabel:item.label,
         selected:selected===item.key,
         ready:!!item.peaks
-      }))
+      })),
+      {
+        id:'vocals',kind:'vocals',
+        label:state?.vocals.loading||state?.vocalIntent
+          ? `人聲（分離配樂 ${state.vocals.percent}%）`
+          : state?.vocals.error?'人聲（分離配樂，重試）':'人聲（分離配樂）',
+        selected:selected==='vocals',
+        ready:!!state?.vocals.peaks,
+        preparing:!!state?.vocals.loading||!!state?.vocalIntent,
+        // 分離在選取後才開始；未分析的選項不是待載入的聲道 cache。
+        statusLabel:true,
+        progress:state?.vocals.percent||0,
+        detail:state?.vocals.label||'',
+      }
     ];
+  },
+  _waveLaneSources(sources){
+    const unique=new Map();
+    for(const source of Array.isArray(sources)?sources:[]){
+      const key=this._sourceKey(source);
+      if(key&&!unique.has(key)) unique.set(key,source);
+    }
+    return [...unique.values()];
+  },
+  getSourceWaveLaneState(sources){
+    const unique=this._waveLaneSources(sources);
+    const selections=unique.map(source=>this.getSourceWaveSelection(source));
+    const selectionSet=new Set(selections);
+    const mixed=selectionSet.size>1;
+    const selection=mixed?'mixed':selections[0]||'mix';
+    const allOptions=unique.map(source=>this.getSourceWaveOptions(source));
+    const vocalOptions=allOptions.map(options=>options.find(option=>option.id==='vocals'));
+    const pending=vocalOptions.some(option=>option?.preparing);
+    const progress=Math.round(vocalOptions.reduce((sum,option)=>sum+(option?.ready?100:option?.progress||0),0)/Math.max(1,unique.length));
+    const detail=vocalOptions.find(option=>option?.preparing)?.detail||'';
+    const options=(allOptions[0]||[]).filter(option=>allOptions.every(list=>list.some(item=>item.id===option.id))).map(option=>{
+      const corresponding=allOptions.map(list=>list.find(item=>item.id===option.id));
+      return {
+        ...option,selected:selection===option.id,
+        ready:corresponding.every(item=>item.ready!==false),
+        ...(option.id==='vocals'?{
+          ready:vocalOptions.every(item=>item?.ready),preparing:pending,progress,detail,
+          label:pending?`人聲（分離配樂 ${progress}%）`:'人聲（分離配樂）',
+        }:{}),
+      };
+    });
+    return {selection,mixed,pending,progress,detail,options,
+      vocalsSelected:!!unique.length&&selections.every(value=>value==='vocals'),
+      label:mixed?'混合（依各片段）':options.find(option=>option.id===selection)?.label||'MIX（所有聲道）'};
+  },
+  setSourceWaveLaneSelection(sources,selection){
+    const unique=this._waveLaneSources(sources);
+    if(this._normaliseSelection(selection)!=='vocals') return Promise.all(unique.map(source=>
+      Promise.resolve(this.setSourceWaveSelection(source,selection))));
+    // A lane can contain several mother files. Keep its existing waveforms until
+    // every requested result is ready, then commit the still-owned intents together.
+    const requests=unique.map(source=>this._prepareVocalSelection(source));
+    emit('media:timeline');
+    return Promise.all(requests.map(request=>request?.promise)).then(async()=>{
+      const remembered=[];
+      if(requests.every(request=>this._ownsVocalIntent(request)&&request.state.vocals.peaks)){
+        for(const request of requests) remembered.push(this._commitVocalSelection(request));
+      }else{
+        for(const request of requests) if(this._ownsVocalIntent(request)) this._cancelSourceVocals(request.state);
+      }
+      emit('media:timeline');
+      await Promise.all(remembered);
+      return unique.map(source=>this.getSourceWaveSelection(source));
+    }).catch(error=>{
+      for(const request of requests) if(this._ownsVocalIntent(request)) this._cancelSourceVocals(request.state);
+      emit('media:timeline');
+      throw error;
+    });
   },
   async loadSourceWaveform(source,selection='mix'){
     const state=this._ensureSourceWaveforms(source);
     if(!state) return null;
     const key=this._normaliseSelection(selection);
+    if(key==='vocals') return this.loadSourceVocals(source);
     const entry=key==='mix'?state.mix:state.channels.get(key);
     if(!entry) return null;
     if(entry.peaks) return entry.peaks;
@@ -238,22 +329,193 @@ export const Wave = {
     entry.loading=promise;
     return promise;
   },
+  _cancelSourceVocals(state,{clear=false}={}){
+    const entry=state?.vocals;
+    if(!entry) return;
+    state.vocalRevision+=1;
+    state.vocalIntent=null;
+    state.vocalRestore?.controller.abort();
+    state.vocalRestore=null;
+    entry.controller?.abort();
+    entry.controller=null;
+    entry.loading=null;
+    entry.percent=0;
+    entry.label='';
+    if(clear){
+      state.vocalRestoreComplete=false;
+      state.vocalRestoreKey=null;
+      state.vocalChoiceMade=false;
+      state.vocals={peaks:null,loading:null,controller:null,percent:0,label:'',error:null};
+      if(state.selection==='vocals') state.selection='mix';
+    }
+  },
+  _restoreSourceVocals(source,state){
+    if(!state||state.vocalChoiceMade||state.vocalIntent||state.vocals.loading) return;
+    const registered=source&&typeof source==='object'?source:
+      [...(State.clips||[]),...(Media.externalAudioSources||[])].find(item=>
+        this._sourceKey(item)===state.key||this._runtimeSourceKey(item)===state.runtimeSourceId);
+    // Intake can first register a runtime alias, then add the mother path,
+    // duration and stream descriptors. Only a changed lookup retries a cache miss.
+    const restoreKey=JSON.stringify([
+      registered?._originalPath,registered?.path,registered?.web?.url,
+      registered?.dur??registered?.duration,
+      registered?.descriptors?.map(item=>item.sourceStream??0),
+      State.audioProject?.sourceMaps?.[registered?.audioSourceId]?.channels?.map(item=>item.sourceStream??0),
+    ]);
+    if((state.vocalRestoreComplete&&state.vocalRestoreKey===restoreKey)||state.vocalRestore?.key===restoreKey) return;
+    state.vocalRestore?.controller.abort();
+    state.vocalRestoreComplete=false;
+    state.vocalRestoreKey=restoreKey;
+    const generation=this._generation,revision=state.vocalRevision;
+    const controller=new AbortController(),restore={controller,key:restoreKey};
+    state.vocalRestore=restore;
+    const owns=()=>!controller.signal.aborted&&generation===this._generation&&state.vocalRevision===revision&&
+      state.vocalRestore===restore&&[...this.sourceWaveforms.values()].includes(state);
+    void (async()=>{
+      try{
+        const {restoreCachedSourceVocals}=await loadVocalSourceModule();
+        if(!owns()||!restoreCachedSourceVocals) return;
+        const peaks=await restoreCachedSourceVocals(source,{signal:controller.signal});
+        if(!owns()) return;
+        // Registration can precede media intake. Retry at a later registration
+        // when the cache API could not resolve the mother source yet.
+        if(peaks===undefined) return;
+        state.vocalRestoreComplete=true;
+        if(!(peaks instanceof Float32Array)||!peaks.length) return;
+        state.vocals.peaks=peaks;
+        state.vocals.percent=100;
+        state.vocals.label='已讀取人聲波形快取';
+        state.originalSelection=state.selection||'mix';
+        state.selection='vocals';
+        emit('media:timeline');
+      }catch{/* A missing or unreadable cache must keep the original waveform usable. */}
+      finally{if(state.vocalRestore===restore) state.vocalRestore=null;}
+    })();
+  },
+  _rememberVocalSelection(source,state,enabled){
+    const revision=state.vocalRevision,generation=this._generation;
+    return loadVocalSourceModule().then(({rememberSourceVocalSelection})=>{
+      if(revision!==state.vocalRevision||generation!==this._generation||
+        ![...this.sourceWaveforms.values()].includes(state)) return;
+      return rememberSourceVocalSelection?.(source,enabled);
+    }).catch(()=>{});
+  },
+  _prepareVocalSelection(source){
+    const state=this._ensureSourceWaveforms(source);
+    if(!state) return null;
+    state.vocalRevision+=1;
+    state.vocalRestore?.controller.abort();
+    state.vocalRestore=null;
+    // An explicit choice owns the display for this session, including a cache miss.
+    state.vocalRestoreComplete=true;
+    state.vocalChoiceMade=true;
+    if(state.selection!=='vocals') state.originalSelection=state.selection||'mix';
+    const request={source,state,generation:this._generation,revision:state.vocalRevision,promise:null};
+    state.vocalIntent=request;
+    request.promise=this.loadSourceVocals(source);
+    return request;
+  },
+  _ownsVocalIntent(request){
+    return !!request&&request.generation===this._generation&&request.state.vocalRevision===request.revision&&
+      request.state.vocalIntent===request&&[...this.sourceWaveforms.values()].includes(request.state);
+  },
+  _commitVocalSelection(request){
+    if(!this._ownsVocalIntent(request)||!request.state.vocals.peaks) return;
+    request.state.selection='vocals';
+    request.state.vocalIntent=null;
+    return this._rememberVocalSelection(request.source,request.state,true);
+  },
+  loadSourceVocals(source){
+    const state=this._ensureSourceWaveforms(source);
+    if(!state) return Promise.resolve(null);
+    const entry=state.vocals;
+    if(entry.peaks) return Promise.resolve(entry.peaks);
+    if(entry.loading) return entry.loading;
+    const controller=new AbortController();
+    const generation=this._generation;
+    entry.controller=controller;
+    entry.error=null;
+    entry.percent=0;
+    entry.label='準備人聲分離';
+    const owns=()=>!controller.signal.aborted&&this._generation===generation&&
+      state.vocals===entry&&entry.controller===controller&&
+      [...this.sourceWaveforms.values()].some(value=>value===state);
+    const promise=(async()=>{
+      try{
+        const {analyzeSourceVocals}=await loadVocalSourceModule();
+        if(!owns()) return null;
+        const peaks=await analyzeSourceVocals(source,{
+          signal:controller.signal,
+          onProgress:({percent,label}={})=>{
+            if(!owns()) return;
+            entry.percent=Math.min(100,Math.max(0,Math.round(Number(percent)||0)));
+            entry.label=label||'分離人聲';
+            emit('media:timeline');
+          }
+        });
+        if(!owns()) return null;
+        if(!(peaks instanceof Float32Array)||!peaks.length) throw new Error('未取得人聲波形，請重試');
+        entry.peaks=peaks;
+        entry.percent=100;
+        entry.label=entry.label.includes('快取')?'已讀取人聲波形快取':'人聲波形已完成';
+        emit('media:timeline');
+        return peaks;
+      }catch(error){
+        if(!owns()) return null;
+        entry.error=error;
+        state.selection=state.originalSelection||'mix';
+        emit('media:timeline');
+        throw error;
+      }finally{
+        if(entry.loading===promise){
+          entry.loading=null;
+          entry.controller=null;
+          emit('media:timeline');
+        }
+      }
+    })();
+    entry.loading=promise;
+    return promise;
+  },
   getSourceWaveform(source,fallbackPeaks=null){
     const state=this._ensureSourceWaveforms(source);
     if(!state) return {peaks:fallbackPeaks||null,selection:'mix',fallback:!!fallbackPeaks};
     const selection=state.selection||'mix';
+    if(selection==='vocals'){
+      // Only completed, owned results can select the human-voice display.
+      return {peaks:state.vocals.peaks,selection,fallback:false,pending:!!state.vocals.loading};
+    }
     const wanted=selection==='mix'?state.mix:state.channels.get(selection);
-    if(wanted?.peaks) return {peaks:wanted.peaks,selection,fallback:false};
+    if(wanted?.peaks) return {peaks:wanted.peaks,selection,fallback:false,pending:!!state.vocalIntent};
     // 選擇的 cache 尚未讀取時仍先畫 MIX，避免時間軸空白；非同步完成後自行重繪。
     if(wanted?.path) void this.loadSourceWaveform(source,selection);
     const mix=state.mix.peaks||fallbackPeaks||null;
-    return {peaks:mix,selection,fallback:selection!=='mix'&&!!mix,pending:!!wanted?.path};
+    return {peaks:mix,selection,fallback:selection!=='mix'&&!!mix,pending:!!state.vocalIntent||!!wanted?.path};
   },
   setSourceWaveSelection(source,selection){
     const state=this._ensureSourceWaveforms(source);
     if(!state) return 'mix';
     const next=this._normaliseSelection(selection);
-    state.selection=next==='mix'||state.channels.has(next)?next:'mix';
+    if(next==='vocals'){
+      const request=this._prepareVocalSelection(source);
+      emit('media:timeline');
+      return request.promise.then(async()=>{
+        const remembered=this._commitVocalSelection(request);
+        if(this._ownsVocalIntent(request)) state.vocalIntent=null;
+        emit('media:timeline');
+        await remembered;
+        return state.selection;
+      }).catch(error=>{
+        if(this._ownsVocalIntent(request)) state.vocalIntent=null;
+        emit('media:timeline');
+        throw error;
+      });
+    }
+    this._cancelSourceVocals(state);
+    state.vocalRestoreComplete=true;
+    state.vocalChoiceMade=true;
+    if(next!=='cancel-vocals') state.selection=next==='mix'||state.channels.has(next)?next:'mix';
+    void this._rememberVocalSelection(source,state,state.selection==='vocals');
     // 立即重繪 MIX／已快取聲道；尚未解碼的單聲道會在背景載入後再重繪。
     this.getSourceWaveform(source);
     emit('media:timeline');
@@ -262,6 +524,7 @@ export const Wave = {
   forgetSourceWaveforms(source){
     const state=this._sourceState(source,false);
     if(!state) return;
+    this._cancelSourceVocals(state,{clear:true});
     for(const [key,value] of this.sourceWaveforms){ if(value===state) this.sourceWaveforms.delete(key); }
   },
 
@@ -326,6 +589,7 @@ export const Wave = {
   },
   clearSources(){
     this._generation+=1;
+    for(const state of new Set(this.sourceWaveforms.values())) this._cancelSourceVocals(state,{clear:true});
     this.sources=[]; this.srcIdx=-1; this.sourceWaveforms.clear(); emit('media:srcSel');
   },
   async fromFile(file,source='video',{owns=()=>true}={}){

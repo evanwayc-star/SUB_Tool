@@ -53,6 +53,22 @@ describe('normalizeWaveOptions', () => {
     expect(normalizeWaveOptions(null)).toEqual([]);
     expect(normalizeWaveOptions({ selection: 'mix' })).toEqual([]);
   });
+
+  it('人聲分離選項保留自己的進度標籤，未分析時可直接開始', () => {
+    const selectWave=vi.fn();
+    const options=normalizeWaveOptions([
+      {id:'mix',label:'MIX（所有聲道）'},
+      {id:'vocals',label:'人聲（分離配樂 42%）',ready:false,statusLabel:true},
+    ]);
+    const items=buildAudioTrackMenu({waveOptions:options,selectedWave:'vocals'},{selectWave});
+    const vocal=itemById(items,'wave:vocals');
+    expect(vocal).toMatchObject({label:'人聲（分離配樂 42%）',checked:true});
+    vocal.act();
+    expect(selectWave).toHaveBeenCalledWith('vocals');
+    const original=itemById(items,'wave:mix');
+    original.act();
+    expect(selectWave).toHaveBeenLastCalledWith('mix');
+  });
 });
 
 describe('影片／圖片片段右鍵選單', () => {
@@ -297,6 +313,16 @@ describe('音訊片段右鍵選單', () => {
 });
 
 describe('音訊軌道空白區與列頭選單', () => {
+  it('同列切片波形不同時顯示混合狀態，操作明確套用整列',()=>{
+    const items=buildAudioTrackMenu({
+      waveOptions:WAVE_OPTIONS,selectedWave:'mixed',waveSourceCount:2,
+    });
+    expect(itemById(items,'wave_heading').label).toBe('顯示整列各片段的波形');
+    expect(itemById(items,'wave_mixed')).toMatchObject({note:true,label:'混合（依各片段）；選取後套用整列'});
+    expect(itemById(items,'wave:mix').checked).toBe(false);
+    expect(itemById(items,'wave:ch1').checked).toBe(false);
+  });
+
   it.each([false, true])('locked=%s 依序顯示定位、配線與波形', locked => {
     const items = buildAudioTrackMenu({
       name: 'track.wav',

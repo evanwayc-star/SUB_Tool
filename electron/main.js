@@ -43,6 +43,8 @@ const {
   createSpeechCompressionRuntime,
 } = require('./speech-audio-compressor');
 const { createAudioNormalizationRuntime } = require('./audio-normalization-runtime');
+const { createVocalWaveformRuntime, validateChunkRequest } = require('./vocal-waveform-runtime');
+const { vocalSourceFingerprint } = require('./vocal-waveform-fingerprint');
 /* 交付規格派生與 renderer 共用同一份（見 shared/README.md）。已入列工作的
    時間碼起點仍使用送出時凍結的值，不從目前專案狀態重算。 */
 const { deriveDeliverySpec } = require('../shared/delivery-resolution.cjs');
@@ -330,6 +332,7 @@ app.on('before-quit', (event) => {
       await Promise.all([
         ffmpegExecution.cancelAllAndWait(),
         speechCompressionRuntime.cancelAllAndWait(),
+        vocalWaveformRuntime.cancelAllAndWait(),
         mediaIngestCoordinator.cancelAllAndWait(),
         QueueManager.prepareForShutdown(),
       ]);
@@ -348,6 +351,7 @@ app.on('before-quit', (event) => {
       _isAppQuitting = false;
       ffmpegExecution.resume();
       mediaIngestCoordinator.resume();
+      vocalWaveformRuntime.resume();
       const options = {
         type: 'error',
         title: '尚未能安全關閉',
@@ -755,6 +759,7 @@ const speechAudioCompressor = createSpeechAudioCompressor({
   execute: (args, options) => runFF(args, options)
 });
 const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
+const vocalWaveformRuntime = createVocalWaveformRuntime({ getFFmpegPath: () => FFMPEG });
 const audioNormalizationRuntime = createAudioNormalizationRuntime({
   createTempPath: tmpPath,
   execute: (args, options) => runFF(args, options),
@@ -1171,6 +1176,20 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
     { sender: e.sender, duration, jobId: 'wave', label: '產生波形' });
   return out;
 });
+
+/* 人聲模型只讀母素材的一小段 PCM；主程序核對原有 read capability，不授權新路徑。 */
+ipcMain.handle('audio:vocal-wave-fingerprint', (e, source) => {
+  if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
+  requireReadablePath('audio:vocal-wave-fingerprint', source);
+  return vocalSourceFingerprint(source);
+});
+ipcMain.handle('audio:vocal-wave-chunk', (e, request) => {
+  const chunk = validateChunkRequest(request);
+  requireReadablePath('audio:vocal-wave-chunk', chunk.path);
+  return vocalWaveformRuntime.readChunk(e.sender, chunk);
+});
+ipcMain.handle('audio:vocal-wave-cancel', (e, { requestId } = {}) =>
+  vocalWaveformRuntime.cancel(e.sender, requestId));
 
 const audioNormalizationJobs = new Map();
 function audioNormalizationKey(sender, requestId) {

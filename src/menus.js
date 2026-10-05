@@ -296,17 +296,35 @@ function audioMenuContext(audioEl){
   };
 }
 
-function sourceWaveMenuState(sourceId){
+function sourceWaveLaneIds(row,sourceId){
+  try{
+    const ids=JSON.parse(row.dataset.audioWaveSourceIds||'null');
+    if(Array.isArray(ids)){
+      const unique=[...new Set(ids.filter(value=>typeof value==='string'&&value))];
+      if(unique.length) return unique;
+    }
+  }catch(_){ /* Older/single-source rows have no lane metadata. */ }
+  return [sourceId];
+}
+
+function sourceWaveMenuState(sourceId,sourceIds){
+  if(sourceIds?.length>1&&typeof Wave.getSourceWaveLaneState==='function'){
+    const lane=Wave.getSourceWaveLaneState(sourceIds);
+    return {options:normalizeWaveOptions(lane.options),selected:lane.selection};
+  }
   const rawOptions=typeof Wave.getSourceWaveOptions==='function' ? Wave.getSourceWaveOptions(sourceId) : [];
   const selected=typeof Wave.getSourceWaveSelection==='function' ? Wave.getSourceWaveSelection(sourceId) : 'mix';
   return {options:normalizeWaveOptions(rawOptions),selected};
 }
 
-function selectSourceWave(sourceId,selection){
-  const changed=Wave.setSourceWaveSelection?.(sourceId,selection);
+function selectSourceWave(sourceId,selection,sourceIds){
+  const changed=sourceIds?.length>1&&typeof Wave.setSourceWaveLaneSelection==='function'
+    ? Wave.setSourceWaveLaneSelection(sourceIds,selection) : Wave.setSourceWaveSelection?.(sourceId,selection);
   Promise.resolve(changed).then(()=>drawTimeline()).catch(err=>{
     console.warn('source wave selection:',err);
-    showToast('無法載入此聲道的波形');
+    showToast(selection==='vocals'
+      ? `人聲分離未完成：${err?.message||'請重試'}`
+      : '無法載入此聲道的波形');
   });
 }
 /* 時間軸區塊右鍵 / 空白軌道區右鍵 */
@@ -387,7 +405,8 @@ function tlContextMenuHandler(e){
     e.preventDefault();
     const context=audioMenuContext(audioRow);
     const {sourceId,sourceName,filePath,external,locked}=context;
-    const wave=sourceWaveMenuState(sourceId);
+    const waveSourceIds=sourceWaveLaneIds(audioRow,sourceId);
+    const wave=sourceWaveMenuState(sourceId,waveSourceIds);
     const resolvedTrackTarget = external
       ? (Media.externalAudio?.find?.(sourceId) || (State.externalAudioState || []).find(a => a.id === sourceId))
       : (State.clips?.find(c => c.primary || c.audioSrc === 'video' || c.id === sourceId) || State.clips?.[0]);
@@ -400,6 +419,7 @@ function tlContextMenuHandler(e){
       canReveal:IS_DESKTOP&&!!filePath,
       waveOptions:wave.options,
       selectedWave:wave.selected,
+      waveSourceCount:waveSourceIds.length,
       hasLimiter,
       limiterLabel,
     },{
@@ -413,7 +433,7 @@ function tlContextMenuHandler(e){
         isPrimary:!external,
       }),
       openAudioRouting:()=>AudioRouting.openForSource(sourceId),
-      selectWave:selection=>selectSourceWave(sourceId,selection),
+      selectWave:selection=>selectSourceWave(sourceId,selection,waveSourceIds),
     });
     showCtx(e.clientX,e.clientY,items);
     return;

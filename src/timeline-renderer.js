@@ -762,6 +762,7 @@ function renderAudioTrackRows(){
     const rowEl=document.createElement('div');
     rowEl.className='audio-project-row'+(row.source?.locked?' locked':'');
     rowEl.style.height=h+'px'; rowEl.dataset.audioSourceId=sourceId;
+    rowEl.dataset.audioWaveSourceIds=JSON.stringify([...new Set(row.entries.map(entry=>clipAudioSourceId(entry.source)).filter(Boolean))]);
     rowEl.dataset.audioKind=row.external?'external':'clip';
     rowEl.dataset.audioAssetId=row.external?(row.source?.id||row.source?.audioSourceId||row.source?.audioSrc||''):'';
     rowEl.dataset.clipId=row.external?'':(row.source?.id||'');
@@ -999,28 +1000,38 @@ function renderAtrackGutter(){
   for(const row of rows){
     const g=document.createElement('div');
     const source=row.source;
-    const waveSelection=typeof Wave.getSourceWaveSelection==='function'
-      ? Wave.getSourceWaveSelection(source) : 'mix';
-    const waveLabel=sourceWaveLabel(source,waveSelection);
+    const laneSources=row.entries.map(entry=>entry.source);
+    const laneWave=Wave.getSourceWaveLaneState?.(laneSources);
+    const waveSelection=laneWave?.selection||(Wave.getSourceWaveSelection?.(source)||'mix');
+    const waveLabel=laneWave?.label||sourceWaveLabel(source,waveSelection);
+    const vocalOption=Wave.getSourceWaveOptions?.(source)?.find(item=>item.id==='vocals');
+    const vocalPending=laneWave?.pending??!!vocalOption?.preparing;
+    const vocalSelected=laneWave?.vocalsSelected??waveSelection==='vocals';
+    const vocalButtonLabel=vocalPending?`取消 ${laneWave?.progress??vocalOption.progress}%`:vocalSelected?'原音':'人聲';
+    const vocalButtonTitle=vocalPending
+      ? `${laneWave?.detail||vocalOption?.detail||'分離人聲'}；目前保留既有波形，完成後切換；點擊取消整列分析`
+      : vocalSelected?'顯示整列原音波形':'分離配樂，顯示整列人聲波形（首次需要下載模型）';
     const muted=timelineSourceMuted(source,row.external,row.sourceId);
     const selected=row.external&&State.selectedAudioClipId===source.id;
     const isLocked=!!source.locked;
-    g.className='agtrack'+(row.external?' external-audio-gutter':'')+(muted?' muted':'')+(selected?' selected':'')+(isLocked?' locked':'');
+    g.className='agtrack has-vocal-control'+(row.external?' external-audio-gutter':'')+(muted?' muted':'')+(selected?' selected':'')+(isLocked?' locked':'');
     g.style.height=row.h+'px';
     g.dataset.audioSourceId=row.sourceId;
+    g.dataset.audioWaveSourceIds=JSON.stringify([...new Set(laneSources.map(item=>clipAudioSourceId(item)).filter(Boolean))]);
     g.dataset.audioAssetId=row.external?(source.id||source.audioSourceId||source.audioSrc||''):'';
     g.dataset.audioKind=row.external?'external':'clip';
     g.dataset.clipId=row.external?'':(source.id||'');
     g.dataset.audioSrc=source.audioSrc||'';
     g.dataset.audioSourceName=row.label||source.name||'';
-    g.title=`${row.label}\n聲音：${muted?'已關閉':'已開啟'}（點喇叭按鈕切換）\n波形：${waveLabel}\n在右側素材區塊按右鍵切換 MIX／來源聲道`;
+    g.title=`${row.label}\n聲音：${muted?'已關閉':'已開啟'}（點喇叭按鈕切換）\n波形：${waveLabel}\n點人聲按鈕分離配樂；按右鍵可切換 MIX／來源聲道／人聲`;
     g.innerHTML=`<span class="alabel">S${row.index+1}</span>`+
       muteButtonMarkup(muted,row.external?'音檔':'影音素材')+
       `<span class="aname" title="${escapeHTML(row.label)}">${escapeHTML(row.label)}</span>`+
-      `<span class="audio-clip-route">${escapeHTML(waveLabel)}</span>`+
+      `<span class="audio-wave-controls"><span class="audio-clip-route" title="${escapeHTML(waveLabel)}">${escapeHTML(waveLabel)}</span>`+
+      `<button type="button" class="audio-vocal-toggle${vocalSelected?' on':''}" aria-pressed="${laneWave?.mixed?'mixed':vocalSelected}" title="${escapeHTML(vocalButtonTitle)}">${escapeHTML(vocalButtonLabel)}</button></span>`+
       `<button class="alock${isLocked?' locked':''}" title="${isLocked?'解鎖此軌':'鎖定此軌'}">${isLocked?'🔒':'🔓'}</button>`;
     g.addEventListener('click', ev => {
-      if (ev.target.closest('.audio-clip-mute,.alock')) return;
+      if (ev.target.closest('.audio-clip-mute,.audio-vocal-toggle,.alock')) return;
       setSelection({ kind: 'audio', ids: [] });
       focusTrackKind('audio', row.sourceId);
       refreshSelectionUI();
@@ -1034,6 +1045,17 @@ function renderAtrackGutter(){
     mute?.addEventListener('click',ev=>{
       ev.preventDefault(); ev.stopPropagation();
       toggleTimelineSourceMute(source,{external:row.external,fallbackSourceId:row.sourceId,select:row.external});
+    });
+    const vocalBtn=g.querySelector('.audio-vocal-toggle');
+    vocalBtn?.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });
+    vocalBtn?.addEventListener('click',ev=>{
+      ev.preventDefault(); ev.stopPropagation();
+      const next=vocalPending?'cancel-vocals':vocalSelected?'mix':'vocals';
+      const changed=Wave.setSourceWaveLaneSelection
+        ? Wave.setSourceWaveLaneSelection(laneSources,next) : Wave.setSourceWaveSelection?.(source,next);
+      Promise.resolve(changed).catch(error=>{
+        showToast(`人聲分離未完成：${error?.message||'請重試'}`);
+      });
     });
     const lockBtn=g.querySelector('.alock');
     lockBtn?.addEventListener('mousedown',ev=>{ ev.preventDefault(); ev.stopPropagation(); });

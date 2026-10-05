@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => ({
   getSourceWaveOptions: vi.fn(() => ['mix']),
   getSourceWaveSelection: vi.fn(() => 'mix'),
   setSourceWaveSelection: vi.fn(),
+  getSourceWaveLaneState: vi.fn(),
+  setSourceWaveLaneSelection: vi.fn(),
 }));
 
 vi.mock('../src/state.js', () => ({
@@ -54,6 +56,8 @@ vi.mock('../src/media.js', () => ({
     getSourceWaveOptions: mocks.getSourceWaveOptions,
     getSourceWaveSelection: mocks.getSourceWaveSelection,
     setSourceWaveSelection: mocks.setSourceWaveSelection,
+    getSourceWaveLaneState: mocks.getSourceWaveLaneState,
+    setSourceWaveLaneSelection: mocks.setSourceWaveLaneSelection,
   },
 }));
 
@@ -319,5 +323,33 @@ describe('時間軸媒體右鍵選單', () => {
     reveal.click();
 
     expect(mocks.showSourceInFolder).toHaveBeenCalledWith(path);
+  });
+
+  it('外部音檔切片列頭的波形操作套用整列，片段右鍵只修改該來源',async()=>{
+    const left={id:'left',audioSourceId:'asset-left',timelineLaneId:'lane',kind:'external-audio',name:'speech.wav'};
+    const right={id:'right',audioSourceId:'asset-right',timelineLaneId:'lane',kind:'external-audio',name:'speech.wav'};
+    mocks.State.externalAudioState=[left,right];
+    mocks.getExternalAudioSource.mockImplementation(id=>[left,right].find(source=>source.id===id||source.audioSourceId===id));
+    const options=[{id:'mix',label:'MIX（所有聲道）'},{id:'vocals',label:'人聲（分離配樂）',statusLabel:true}];
+    mocks.getSourceWaveOptions.mockReturnValue(options);
+    mocks.getSourceWaveLaneState.mockReturnValue({options,selection:'mixed'});
+    mocks.setSourceWaveLaneSelection.mockResolvedValue(['vocals','vocals']);
+    const gutter=document.createElement('div');gutter.className='agtrack';
+    Object.assign(gutter.dataset,{audioKind:'external',audioAssetId:'left',audioSourceId:'asset-left',audioWaveSourceIds:JSON.stringify(['asset-left','asset-right','asset-left'])});
+    document.getElementById('tlGutterAtracks').appendChild(gutter);
+    await loadMenus();
+    openContextMenu(gutter);
+    expect(document.querySelector('[data-menu-id="wave_mixed"]').textContent).toContain('混合');
+    document.querySelector('[data-menu-id="wave:vocals"]').click();
+    expect(mocks.setSourceWaveLaneSelection).toHaveBeenCalledWith(['asset-left','asset-right'],'vocals');
+    expect(mocks.setSourceWaveSelection).not.toHaveBeenCalled();
+
+    const block=document.createElement('div');block.className='audio-clip-block';
+    Object.assign(block.dataset,{audioKind:'external',audioAssetId:'right',audioSourceId:'asset-right',audioStart:'10',audioEnd:'20'});
+    document.getElementById('tlAtracks').appendChild(block);
+    openContextMenu(block);
+    document.querySelector('[data-menu-id="wave:vocals"]').click();
+    expect(mocks.setSourceWaveSelection).toHaveBeenCalledWith('asset-right','vocals');
+    expect(mocks.setSourceWaveLaneSelection).toHaveBeenCalledOnce();
   });
 });

@@ -30,6 +30,8 @@ flowchart LR
 | `electron/media-intake-runtime.js` | probe、Proxy、波形、聲道快取與 lease |
 | `electron/ffmpeg-execution-engine.js` | ffmpeg／ffprobe 路徑、encoder 能力與程序執行 |
 | `electron/audio-normalization-runtime.js` | 聲量量測、音量平衡階段與原生程序取消 |
+| `electron/vocal-waveform-runtime.js` | 人聲波形模型的母素材 PCM 分段讀取、大小限制與逐 sender 取消 |
+| `electron/vocal-waveform-fingerprint.js` | 已授權母素材的非同步採樣指紋，供人聲波形持久快取核對 |
 | `electron/mpv-host.js` | Windows mpv 視窗、IPC 與精準畫格呈現 |
 | `electron/export-queue.js` | 背景排程、並行、停止、重試與持久化 |
 | `electron/delivery-runner.js` | 單一交付工作的 ffmpeg 交易 |
@@ -104,6 +106,8 @@ Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案
 | `probe`、`ingest`、`streamIngest` | 媒體 probe／ingest |
 | `releaseStream` | 結束串流讀取及其快取目錄 lease |
 | `makeProxy`、`extractAudio`、`waveAudio` | 預覽快取 |
+| `vocalWaveChunk`、`cancelVocalWaveChunk` | `audio:vocal-wave-chunk`／`audio:vocal-wave-cancel`：讀取已授權母素材的來源時間片段，供人聲模型分析 |
+| `vocalWaveFingerprint` | `audio:vocal-wave-fingerprint`：核對已授權母素材的路徑、stat 與前／中／後段內容，回傳持久波形快取的來源指紋 |
 | `analyzeAudioLoudness` | 回傳有效聲量量測，失敗向 renderer 傳遞 |
 | `normalizeAudio`、`cancelAudioNormalization`、`onAudioNormalizeProgress` | 音訊平衡處理與逐工作進度／取消 |
 | `compressSpeechAudio` | 雲端辨識前的受限音訊壓縮 |
@@ -178,6 +182,16 @@ macOS arm64 封裝需要：
 
 `audio-normalization-runtime.js` 的 `analyze()` 等待 FFmpeg 成功，再由 `shared/audio-loudness.cjs` 解析有效峰值與平均值。程序失敗、空報告或缺少必要量測值均回報失敗；報告中的 `-inf` 必須來自實際量測，不能用來代替失敗。Renderer 保留既有快速預覽並標示「量測失敗」，不能把失敗 stderr 轉成綠色的「精準量測」。
 
+### 人聲波形 PCM
+
+`vocal-waveform-runtime.js` 只從已授權的母素材讀取來源時間 `start`／`duration`，每段最長 36 秒；可指定原始音訊 stream 與單一來源聲道。FFmpeg 透過 stdout 回傳 44.1 kHz、交錯立體聲 Float32 PCM，最長片段約 12.7 MB，不寫入音訊快取或交付檔。影片長於音訊時，成功的短片段／零 sample 是正常 EOF；renderer 以原來的來源時間補齊靜音，不能平移已有 sample。Renderer 的人聲模型另行產生顯示波形，不能把分析結果接到播放或匯出。
+
+持久波形快取的素材指紋由 `vocal-waveform-fingerprint.js` 非同步讀取：納入實體檔案路徑、size／mtime／ctime／dev／ino，以及前 1 MiB、中後段採樣內容。讀取後再核對路徑目前的 stat，避免讀到已被替換的檔案 handle；IPC 仍須有既有 read capability。模型、來源串流與時長由 renderer 快取描述補齊；恢復規則見 [技術架構說明](技術架構說明.md#人聲波形的顯示邊界)。
+
+裸 PCM 不保存容器 PTS，因此取樣前以 `aresample=44100:async=1:first_pts=0` 還原來源時鐘：音訊比影片晚開始時補前置靜音，seek 後只保留本段尚未經過的靜音。指定來源聲道時，`pan` 與此 resampler 在同一 filter chain 執行；輸出仍受本段時長與 36 秒大小上限約束。參數語義見 [FFmpeg Resampler 文件](https://ffmpeg.org/ffmpeg-resampler.html)。
+
+每個讀取工作由發送它的 WebContents 與 request id 共同持有；相同 id 的其他 sender 不能取消它。取消、視窗銷毀或 120 秒讀取逾時先停止 FFmpeg，必要時再強制終止，確認 `close` 才移除工作。App 退出會停止新准入並等待全部片段；十秒後仍未確認程序結束，會拒絕退出，保留追蹤供再次收尾。
+
 ### 交付
 
 Renderer 提交凍結工作；`delivery-runner.js` 核對檔案能力、probe 母素材，將完整工作交給 `export-plan.js` 決定 argv 與實際輸出資訊。計畫自行計算音訊尾端、光碟容量及格式設定，runner 不組裝 codec／mux 的配對。執行成功後才提交佇列完成資訊，最後清理其 ASS 暫存。
@@ -188,7 +202,7 @@ Renderer 提交凍結工作；`delivery-runner.js` 核對檔案能力、probe �
 
 呼叫 `ffmpeg-execution-engine.js` 時必須明確指定 `executionKind`：交付為 `queued-delivery`，可重建的預覽／匯入工作為 `direct`。交付缺少佇列目錄、工作 ID 或輸出路徑會直接拒絕執行，不得因 ID 命名改變或佇列尚未就緒而退回 direct、繞過 watchdog。
 
-真正退出時，direct execution owner 關閉新工作准入，取消並等待原生程序收尾；ingest coordinator 同時撤銷尚未開始的工作。`before-quit` 等這些 barrier、辨識壓縮與佇列停止完成後才清暫存。音量平衡的下一階段不能在 shutdown 後重新啟動。
+真正退出時，direct execution owner 關閉新工作准入，取消並等待原生程序收尾；ingest coordinator 同時撤銷尚未開始的工作。`before-quit` 等這些 barrier、人聲波形片段、辨識壓縮與佇列停止完成後才清暫存。音量平衡的下一階段不能在 shutdown 後重新啟動。
 
 watchdog 取得輸出 lease 後，以 `export-artifact.js` 的成品階段準備編碼目的地，啟動 ffmpeg，等待格式封裝／驗證及私有素材清理，最後裁定完成與釋放 lease。MOD、航空與 ISO 的格式分支集中在成品階段；watchdog 保有唯一的取消、程序存活及輸出 owner 權威。每份新工作由輸出路徑與 lease token 派生同目錄的私有暫存成品路徑，FFmpeg 與格式封裝／驗證只寫入該路徑；全部成功後才以重新命名提交到正式路徑。失敗、取消與崩潰復原只刪除 owner 登記的私有暫存檔，不能刪除原有同名成品。舊 lease 仍按其原始清理規則復原。寫入 ISO 前必須先持久化 owner，新的原生程序須登記 PID；清理失敗保留 lease，復原流程確認程序停止後才能清理。
 

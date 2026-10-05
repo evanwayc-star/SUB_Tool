@@ -691,6 +691,16 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .agtrack .aeye{cursor:pointer;font-size:12px;width:18px;text-align:center;background:none;border:none;padding:0;color:var(--text)}
 .agtrack .aname{flex:1;min-width:26px;font-size:11px;color:#cef5ef;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;border:1px solid transparent;border-radius:3px;padding:1px 2px}
 .agtrack .aname:focus{outline:none;border-color:#4cb7aa;background:#102126}
+.agtrack.has-vocal-control{display:grid;grid-template-columns:20px 24px minmax(0,1fr) 20px;grid-template-rows:12px 16px;grid-template-areas:"label mute name lock" "label mute wave lock";column-gap:3px;row-gap:1px;align-content:center}
+.agtrack.has-vocal-control .alabel{grid-area:label}
+.agtrack.has-vocal-control .audio-clip-mute{grid-area:mute}
+.agtrack.has-vocal-control .aname{grid-area:name;padding:0 2px}
+.agtrack.has-vocal-control .alock{grid-area:lock;margin-left:0}
+.agtrack .audio-wave-controls{grid-area:wave;display:flex;align-items:center;gap:3px;min-width:0}
+.agtrack .audio-wave-controls .audio-clip-route{flex:1;max-width:none;font-size:9px}
+.agtrack .audio-vocal-toggle{flex:0 0 auto;height:16px;cursor:pointer;white-space:nowrap;font-size:10px;padding:0 4px;border:1px solid #46766e;border-radius:3px;background:#203d39;color:#cef5ef}
+.agtrack .audio-vocal-toggle:hover,.agtrack .audio-vocal-toggle:focus-visible{border-color:#8de2ce;outline:none;background:#2a5750}
+.agtrack .audio-vocal-toggle.on{background:#347b6c;border-color:#70ceaf;color:#fff}
 .agtrack .awm,.agtrack .aws{cursor:pointer;background:var(--panel2,#2a2f37);border:1px solid var(--border,#3a3f47);border-radius:3px;font-size:10px;width:18px;height:18px;line-height:1;padding:0;color:var(--text-dim);flex-shrink:0}
 .agtrack .awm.on{background:var(--red,#e05353);border-color:var(--red,#e05353);color:#fff}
 .agtrack .aws.on{background:#e0a53e;border-color:#e0a53e;color:#1b1b1d}
