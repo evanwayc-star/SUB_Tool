@@ -19,6 +19,43 @@ function completedProcess({ stdout = '', stderr = '', status = 0 } = {}) {
 }
 
 describe('媒體探測 interface', () => {
+  it('有效素材在 16 秒後完成探測時，仍保留完整音視訊資訊', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      const completion = setTimeout(() => {
+        child.stdout.end(JSON.stringify({
+          format: { duration: '123.5' },
+          streams: [
+            { codec_type: 'video', codec_name: 'prores', width: 2048, height: 858, avg_frame_rate: '24/1' },
+            { codec_type: 'audio', index: 1, codec_name: 'pcm_s24le', channels: 6 },
+          ],
+        }));
+        child.emit('close', 0, null);
+      }, 16000);
+      child.kill = vi.fn(() => {
+        clearTimeout(completion);
+        queueMicrotask(() => child.emit('close', null, 'SIGTERM'));
+      });
+      const { createMediaProbe } = require('../electron/media-probe');
+      const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+      const result = probe.describe('D:/media/slow-but-valid.mov').catch(error => error);
+
+      await vi.advanceTimersByTimeAsync(16000);
+
+      await expect(result).resolves.toMatchObject({
+        duration: 123.5,
+        video: { width: 2048, height: 858, fps: 24 },
+        audio: [{ streamIndex: 1, channels: 6 }],
+      });
+      expect(child.kill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['hasAudio', 'audioVideoStartOffsets', 'audioBitrates'])('%s 取消不被保守 fallback 吞掉，且等待 native close', async method => {
     const child = new EventEmitter();
     child.stdout = new PassThrough();
@@ -36,6 +73,197 @@ describe('媒體探測 interface', () => {
     expect(settled).toBe(false);
     child.emit('close', null, 'SIGTERM');
     await expect(result).resolves.toMatchObject({ code: 'PROBE_ABORTED' });
+  });
+
+  it('同時還原多個有效素材時，不會因探測搶讀而誤報超時，排隊也不占執行期限', async () => {
+    vi.useFakeTimers();
+    try {
+      let active = 0;
+      let peak = 0;
+      const spawnProcess = vi.fn(() => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        active++;
+        peak = Math.max(peak, active);
+        const completion = setTimeout(() => {
+          active--;
+          child.stdout.end(JSON.stringify({ format: { duration: '123.5' }, streams: [] }));
+          child.emit('close', 0, null);
+        }, active * 5000);
+        child.kill = vi.fn(() => {
+          clearTimeout(completion);
+          active--;
+          queueMicrotask(() => child.emit('close', null, 'SIGTERM'));
+        });
+        return child;
+      });
+      const { createMediaProbe } = require('../electron/media-probe');
+      const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, timeoutMs: 15000 });
+      const results = Promise.all(['a.mov', 'b.mxf', 'c.mp4', 'd.mov'].map(file =>
+        probe.describe(`D:/media/${file}`).catch(error => error)));
+
+      await vi.advanceTimersByTimeAsync(20000);
+
+      await expect(results).resolves.toEqual(Array.from({ length: 4 }, () => ({
+        duration: 123.5, video: null, audio: [],
+      })));
+      expect(peak).toBeLessThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('同母檔的並行探測共用進行中的 native 工作，下一次重新探測可讀到更新內容', async () => {
+    const children = [];
+    const spawnProcess = vi.fn(() => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn();
+      children.push(child);
+      return child;
+    });
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const first = probe.describe('D:/media/master.mov');
+    const second = probe.describe('D:/media/master.mov');
+    await Promise.resolve();
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+    children[0].stdout.end(JSON.stringify({ format: { duration: '12' }, streams: [] }));
+    children[0].emit('close', 0, null);
+    await expect(first).resolves.toMatchObject({ duration: 12 });
+    await expect(second).resolves.toMatchObject({ duration: 12 });
+
+    const next = probe.describe('D:/media/master.mov');
+    await Promise.resolve();
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    children[1].stdout.end(JSON.stringify({ format: { duration: '24' }, streams: [] }));
+    children[1].emit('close', 0, null);
+    await expect(next).resolves.toMatchObject({ duration: 24 });
+  });
+
+  it('排隊期間取消不會啟動 ffprobe，後續素材仍可完成探測', async () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = vi.fn();
+    const spawnProcess = vi.fn().mockReturnValueOnce(child)
+      .mockImplementation(() => completedProcess({ stdout: JSON.stringify({ streams: [] }) }));
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, maxConcurrent: 1 });
+    const first = probe.describe('D:/media/first.mov');
+    await Promise.resolve();
+    const controller = new AbortController();
+    const cancelled = probe.describe('D:/media/cancelled.mov', { signal: controller.signal }).catch(error => error);
+    const next = probe.describe('D:/media/next.mov');
+    controller.abort();
+    await expect(cancelled).resolves.toMatchObject({ code: 'PROBE_ABORTED' });
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+    expect(child.kill).not.toHaveBeenCalled();
+    child.stdout.end(JSON.stringify({ streams: [] }));
+    child.emit('close', 0, null);
+    await expect(first).resolves.toMatchObject({ audio: [] });
+    await expect(next).resolves.toMatchObject({ audio: [] });
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    expect(spawnProcess.mock.calls[1][1].at(-1)).toBe('D:/media/next.mov');
+  });
+
+  it('同母檔有取消所有者的工作不會中止其他 caller 的探測', async () => {
+    const children = [];
+    const spawnProcess = vi.fn(() => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn(() => queueMicrotask(() => child.emit('close', null, 'SIGTERM')));
+      children.push(child);
+      return child;
+    });
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const controller = new AbortController();
+    const independent = probe.describe('D:/media/master.mov');
+    const cancelled = probe.describe('D:/media/master.mov', { signal: controller.signal }).catch(error => error);
+    await Promise.resolve();
+    controller.abort();
+    await expect(cancelled).resolves.toMatchObject({ code: 'PROBE_ABORTED' });
+    expect(children[0].kill).not.toHaveBeenCalled();
+    children[0].stdout.end(JSON.stringify({ format: { duration: '12' }, streams: [] }));
+    children[0].emit('close', 0, null);
+    await expect(independent).resolves.toMatchObject({ duration: 12 });
+  });
+
+  it('spawn 失敗後共用工作與佇列會釋放，重試可取得素材資訊', async () => {
+    const spawnProcess = vi.fn().mockImplementationOnce(() => { throw new Error('process unavailable'); })
+      .mockImplementation(() => completedProcess({ stdout: JSON.stringify({ format: { duration: '12' }, streams: [] }) }));
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, maxConcurrent: 1 });
+    const first = probe.describe('D:/media/master.mov').catch(error => error);
+    const shared = probe.describe('D:/media/master.mov').catch(error => error);
+    const next = probe.describe('D:/media/next.mov');
+    await expect(first).resolves.toMatchObject({ message: 'process unavailable' });
+    await expect(shared).resolves.toMatchObject({ message: 'process unavailable' });
+    await expect(next).resolves.toMatchObject({ duration: 12 });
+    await expect(probe.describe('D:/media/master.mov')).resolves.toMatchObject({ duration: 12 });
+    expect(spawnProcess).toHaveBeenCalledTimes(3);
+  });
+
+  it('排隊工作等待期間若再有另一個行程取消，會等全部終止屏障關閉才啟動', async () => {
+    const children = [];
+    const spawnProcess = vi.fn(() => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn();
+      children.push(child);
+      return child;
+    });
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, maxConcurrent: 3 });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = probe.describe('D:/media/a.mov', { signal: firstController.signal }).catch(error => error);
+    const second = probe.describe('D:/media/b.mov', { signal: secondController.signal }).catch(error => error);
+    const third = probe.describe('D:/media/c.mov');
+    const next = probe.describe('D:/media/d.mov').catch(error => error);
+    await Promise.resolve();
+    firstController.abort();
+    children[2].stdout.end(JSON.stringify({ streams: [] }));
+    children[2].emit('close', 0, null);
+    await third;
+    secondController.abort();
+    children[0].emit('close', null, 'SIGTERM');
+    await first;
+    expect(spawnProcess).toHaveBeenCalledTimes(3);
+    children[1].emit('close', null, 'SIGTERM');
+    await second;
+    await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalledTimes(4));
+    children[3].stdout.end(JSON.stringify({ streams: [] }));
+    children[3].emit('close', 0, null);
+    await expect(next).resolves.toMatchObject({ audio: [] });
+  });
+
+  it('預設上限仍會中止永久卡住的探測，確認 close 後才回報超時', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn();
+      const { createMediaProbe } = require('../electron/media-probe');
+      const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+      let settled = false;
+      const result = probe.describe('D:/media/stuck.mov').catch(error => { settled = true; return error; });
+      await vi.advanceTimersByTimeAsync(16000);
+      expect(child.kill).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(44000);
+      expect(child.kill).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      child.emit('close', null, 'SIGTERM');
+      await expect(result).resolves.toMatchObject({ code: 'PROBE_TIMEOUT' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('保留壓縮來源音訊相對影像的起始時間，供航空交付去除前導', async () => {

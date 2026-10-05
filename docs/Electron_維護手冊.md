@@ -151,6 +151,8 @@ macOS arm64 封裝需要：
 
 `scripts/release/verify-native-binaries.js` 在封裝前驗證存在、平台、架構與能力。
 
+`media-probe.js` 統一管理 metadata、音訊存在、起始偏移與 bitrate 探測，最多同時執行兩個 ffprobe。相同指令的無取消請求共用進行中的工作，完成或失敗後即移除，避免素材被替換後沿用舊資訊；帶 `AbortSignal` 的請求各自持有取消生命週期。排隊不計入逾時，原生行程啟動後的預設上限為 60 秒，容許慢速儲存的暫時延遲。逾時或取消時仍等待 native `close`；等待期間若有其他行程取消，繼續等待最新終止屏障。無法確認關閉的行程會阻止後續探測。
+
 ### 媒體 intake
 
 `media-intake-runtime.js` 管理：

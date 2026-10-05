@@ -8,8 +8,9 @@
    【穩定度與防禦重點】
    1. 行程終止屏障（Termination Barrier）：確保逾時或取消的 ffprobe 完全關閉釋放後，
       才允許發起下一次探測，避免殭屍行程耗盡系統資源。
-   2. 嚴格逾時與 AbortSignal 整合：預設 15 秒逾時，防範損壞媒體導致 ffprobe 永久掛起。
+   2. 有界探測與 AbortSignal 整合：預設 60 秒，容許慢速儲存，但不讓損壞媒體永久掛起。
    3. JSON 安全解析與後援計算：處理無有效 FPS 或時長為 0 的特殊邊界。
+   4. 最多兩個原生工作，同一指令的無取消請求共用進行中工作；完成後不保留 metadata。
    ============================================================================== */
 'use strict';
 
@@ -80,34 +81,102 @@ function descriptorOf(document = {}) {
  * @param {object} options
  * @param {string} options.executable ffprobe 執行檔路徑
  * @param {Function} [options.spawnProcess=nodeSpawn] 行程啟動注入（測試用）
- * @param {number} [options.timeoutMs=15000] 探測逾時上限（毫秒）
+ * @param {number} [options.timeoutMs=60000] 行程啟動後的探測逾時上限（毫秒）
+ * @param {number} [options.maxConcurrent=2] 原生工作並行上限
  * @param {number} [options.terminationGraceMs=1000] 行程終止緩衝等待時間（毫秒）
  */
 function createMediaProbe({
   executable,
   spawnProcess = nodeSpawn,
-  timeoutMs = 15000,
+  timeoutMs = 60000,
+  maxConcurrent = 2,
   terminationGraceMs = 1000,
 } = {}) {
   let terminationBarrier = Promise.resolve();
   const uncertainProcesses = new Set();
+  const inFlight = new Map();
+  const queue = [];
+  const concurrency = Number.isFinite(maxConcurrent) ? Math.max(1, Math.floor(maxConcurrent)) : 2;
+  let active = 0;
+
+  function abortError() {
+    const error = new Error('ffprobe 已取消');
+    error.code = 'PROBE_ABORTED';
+    return error;
+  }
+
+  function drain() {
+    while (active < concurrency && queue.length) {
+      const job = queue.shift();
+      job.signal?.removeEventListener('abort', job.onAbort);
+      if (job.signal?.aborted) {
+        job.reject(abortError());
+        continue;
+      }
+      active++;
+      execute(job.args, { signal: job.signal }).then(value => {
+        active--;
+        job.resolve(value);
+        drain();
+      }, error => {
+        active--;
+        job.reject(error);
+        drain();
+      });
+    }
+  }
+
+  function schedule(args, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(abortError());
+        return;
+      }
+      const job = { args, signal, resolve, reject, onAbort: null };
+      job.onAbort = () => {
+        const index = queue.indexOf(job);
+        if (index < 0) return;
+        queue.splice(index, 1);
+        signal.removeEventListener('abort', job.onAbort);
+        reject(abortError());
+      };
+      signal?.addEventListener('abort', job.onAbort, { once: true });
+      queue.push(job);
+      drain();
+    });
+  }
+
+  function run(args, { signal } = {}) {
+    // 有取消所有者的工作各自保留 native lifecycle，避免一個 caller 中止其他 caller。
+    if (signal) return schedule(args, signal);
+    const key = JSON.stringify(args);
+    const existing = inFlight.get(key);
+    if (existing) return existing;
+    const result = schedule(args);
+    inFlight.set(key, result);
+    const forget = () => { if (inFlight.get(key) === result) inFlight.delete(key); };
+    result.then(forget, forget);
+    return result;
+  }
 
   /**
    * 執行 ffprobe 指令並取得標準輸出字串。
    * @private
    */
-  async function run(args, { signal } = {}) {
+  async function execute(args, { signal } = {}) {
     if (!executable) throw new Error('找不到 ffprobe');
-    await terminationBarrier;
+    let observedBarrier;
+    do {
+      observedBarrier = terminationBarrier;
+      await observedBarrier;
+    } while (observedBarrier !== terminationBarrier);
     if (uncertainProcesses.size) {
       const error = new Error('前一個 ffprobe 尚未確認結束');
       error.code = 'PROBE_TERMINATION_PENDING';
       throw error;
     }
     if (signal?.aborted) {
-      const error = new Error('ffprobe 已取消');
-      error.code = 'PROBE_ABORTED';
-      throw error;
+      throw abortError();
     }
 
     return new Promise((resolve, reject) => {
@@ -186,9 +255,7 @@ function createMediaProbe({
 
       if (signal) {
         onAbort = () => {
-          const error = new Error('ffprobe 已取消');
-          error.code = 'PROBE_ABORTED';
-          terminate(error);
+          terminate(abortError());
         };
         signal.addEventListener('abort', onAbort, { once: true });
         if (signal.aborted) onAbort();
