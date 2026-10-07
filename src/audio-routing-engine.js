@@ -109,11 +109,14 @@ export class MediaAudioRouter {
       activeSource: () => this.media.activeSource,
       activeClipId: () => this.media.activeClipId,
       playbackRate: () => this.video.playbackRate || 1,
+      playbackRateFor: (source,t) => this.media.audioSourceRate(source,t),
       timelineTime: () => this.media.tlTime(),
       sourceTimeFor: (s, t) => this.media._srcLocalT(s, t),
       externalSourceTimeFor: (s, t) => this.media.externalAudio.sourceTime(s, t),
       clipSourceTimeFor: (t, c) => this.media._transport.sourceTime(t, c),
       interpretation:()=>this.media.projectAudioInterpretation(),
+      sourcePlaybackFor:(source,t)=>this.media.audioSourcePlayback?.(source,t)||null,
+      transportMuted:()=>this.media.reverseShuttleMuted?.()||false,
     });
   }
 
@@ -134,7 +137,7 @@ export class MediaAudioRouter {
     if (!this.media.playing) return;
     const c = this.media.seqOn() ? this.media._activeClip() : null;
     const tl = this.media.tlTime();
-    this.startElementSources(c ? Seq.toSource(tl, c) : this.media.vTime(), tl);
+    this.media.startElementSources(c ? Seq.toSource(tl, c) : this.media.vTime(), tl);
   }
 
   startBufferSources(offset) {
@@ -169,6 +172,7 @@ export class MediaAudioRouter {
     // 呈現切換期間，video/mpv 的來源時間仍可能停在舊畫格。若拿這個停止的
     // clock 校正元素／buffer 音訊，會把同一小段聲音反覆拉回播放。
     if (this.media.presenterClockMoving?.() === false) return;
+    AudioEngine.syncReverseSources(this.media.tlTime());
     if (this.media.tracks.some(t => t.kind === 'buffer' && !t._srcHidden)) {
       AudioEngine.syncBuffers(this.media.vTime(), { inGap: this.media.inGap() });
     }

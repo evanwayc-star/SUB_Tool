@@ -38,6 +38,8 @@ const { createMpvHost } = require('./mpv-host');
 const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('./media-intake-runtime');
 const { createCompareWindow } = require('./compare-window');
 const { createMediaProbe } = require('./media-probe');
+const { createClipFrameCache, validateClipFrameRequest } = require('./clip-frame-cache');
+const { createClipAudioCache, validateReverseAudioRequest } = require('./clip-audio-cache');
 const {
   createSpeechAudioCompressor,
   createSpeechCompressionRuntime,
@@ -336,6 +338,8 @@ app.on('before-quit', (event) => {
         mediaIngestCoordinator.cancelAllAndWait(),
         QueueManager.prepareForShutdown(),
       ]);
+      // execution 確認程序 close 後，快取 owner 還須完成來源核對與 staging 清理。
+      await clipAudioCache.waitForIdle();
       await mediaIntakeRuntime.close();
       await screenshotOutput.close();
     })
@@ -688,6 +692,23 @@ const ffmpegExecution = createFFmpegExecution({
   },
 });
 const runFF = (args, options) => ffmpegExecution.execute(args, { ...options, executionKind: 'direct' });
+const clipFrameCache = createClipFrameCache({
+  cacheRoot: () => path.join(app.getPath('userData'), 'clip-frames'),
+  fileAuthority,
+  probe: source => {
+    if (!mediaProbe) throw new Error('找不到 ffprobe');
+    return mediaProbe.describe(source);
+  },
+  execute: runFF,
+  isPreviewCacheMedia: source => mediaIntakeRuntime.isPreviewCacheMedia(source),
+  isClosing: () => _isAppQuitting,
+});
+const clipAudioCache = createClipAudioCache({
+  cacheRoot: () => path.join(app.getPath('userData'), 'clip-audio'),
+  fileAuthority,
+  execute: runFF,
+  isClosing: () => _isAppQuitting,
+});
 const deliveryRunner = createDeliveryRunner({
   queue: {
     assertJobCapabilities: job => QueueManager.assertJobCapabilities(job),
@@ -1145,6 +1166,18 @@ ipcMain.handle('ffprobe', (e, p) => {
   if (!mediaProbe) throw new Error('找不到 ffprobe');
   requireReadablePath('ffprobe', p);
   return mediaProbe.describe(p);
+});
+
+ipcMain.handle('ffmpeg:clipFrame', (e, request) => {
+  const frame = validateClipFrameRequest(request);
+  requireReadablePath('ffmpeg:clipFrame', frame.path);
+  return clipFrameCache.frame(frame);
+});
+
+ipcMain.handle('audio:reverse-clip', (e, request) => {
+  const input = validateReverseAudioRequest(request);
+  requireReadablePath('audio:reverse-clip', input.path);
+  return clipAudioCache.reverse(input);
 });
 
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {

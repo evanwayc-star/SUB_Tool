@@ -37,8 +37,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../src/state.js', () => ({
   State: mocks.State,
   IS_DESKTOP: true,
+  DESK: {},
+  ensureVideoTrackCount: vi.fn(),
+  videoTrackVisible: track => mocks.State.videoTracks[track]?.visible !== false,
   isSel: vi.fn(() => false),
   setSelection: vi.fn(),
+  focusTrackKind: vi.fn(),
   deselect: vi.fn(),
 }));
 
@@ -96,8 +100,9 @@ vi.mock('../src/timeline-interaction-engine.js', () => ({
   showClipDuration: vi.fn(),
 }));
 
-vi.mock('../src/sequence.js', () => ({
+vi.mock('../src/sequence.js', async importOriginal => ({
   Seq: {
+    ...(await importOriginal()).Seq,
     byId: vi.fn(id => mocks.State.clips.find(clip => clip.id === id) || null),
     clipAt: vi.fn(() => null),
     trackClips: vi.fn(track => mocks.State.clips.filter(clip => (clip.vtrack || 0) === track)),
@@ -116,7 +121,7 @@ vi.mock('../src/audio-routing.js', () => ({ AudioRouting: { openForSource: vi.fn
 vi.mock('../src/keyboard.js', () => ({ setManualPlaybackSpeed: vi.fn() }));
 
 vi.mock('../src/speech-recognition.js', () => ({ openSpeechRecognitionDialog: vi.fn() }));
-vi.mock('../src/timeline-renderer.js', () => ({ requestPointerSeek: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ requestPointerSeek: vi.fn(), drawTimeline: vi.fn(), refreshTrackGutterActive: vi.fn() }));
 
 function resetState() {
   Object.assign(mocks.State, {
@@ -183,6 +188,27 @@ beforeEach(() => {
 });
 
 describe('時間軸媒體右鍵選單', () => {
+  it('影音分離與音訊平衡使用 SVG 圖示，不依賴平台字型', async () => {
+    mocks.State.clips = [{ id: 'video-icons', name: 'program.mov', vtrack: 0, offset: 0, in: 0, out: 20, dur: 20 }];
+    mocks.State.videoTracks = [{ name: 'V1', locked: false }];
+    const block = document.createElement('div');
+    block.className = 'clip-block';
+    block.dataset.clipId = 'video-icons';
+    document.getElementById('tlLayer').appendChild(block);
+    await loadMenus();
+    openContextMenu(block);
+
+    for (const [id, label] of [['detach_audio', '影音分離'], ['hard_limiter', '音訊平衡']]) {
+      const item = document.querySelector(`#ctxmenu [data-menu-id="${id}"]`);
+      expect(item.querySelector('.c-text').textContent).toBe(label);
+      const icon = item.querySelector('.c-icon svg');
+      expect(icon).not.toBeNull();
+      expect(icon.getAttribute('viewBox')).toBe('0 0 24 24');
+      expect(icon.querySelector('path')).not.toBeNull();
+      expect(icon.getAttribute('aria-hidden')).toBe('true');
+    }
+  });
+
   it('鎖定視訊軌仍可從右鍵選單在檔案管理器顯示母素材', async () => {
     const path = 'C:\\Media\\locked-program.mov';
     mocks.State.clips = [{

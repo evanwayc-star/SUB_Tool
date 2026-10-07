@@ -533,6 +533,7 @@ export class PlaybackSyncEngine {
     const onlyClip = videoClips[0];
     if (videoClips.length === 1 && onlyClip && !sequence.inGap()
       && onlyClip.offset === 0 && onlyClip.in === 0
+      && !onlyClip.reverse && !(Number(onlyClip.speed)>0&&Number(onlyClip.speed)!==1)
       && Math.abs(onlyClip.out - onlyClip.dur) < 0.05
       && sequence.activeClipId() === onlyClip.id) return;
 

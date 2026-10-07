@@ -19,6 +19,7 @@ import { imageBox } from '../shared/image-geometry.cjs';
 | `audio-loudness.cjs` | 音訊效果序列化、母素材路徑、強限制器與 ITU-R BS.1770 共用濾鏡規則 |
 | `channel-layout.cjs` | 來源聲道展開順序 |
 | `clip-fade.cjs` | 片段長度與淡入淡出視窗 |
+| `clip-visual.cjs` | 固定幀來源、來源末格格網與靜態視覺片段判斷 |
 | `delivery-frame-rate.cjs` | 交付 FPS 選項、renderer／佇列／FFmpeg 共用的精確 NTSC 有理數與來源格率比對 |
 | `delivery-formats.cjs` | 九種交付選項、固定規格與音訊編組限制 |
 | `delivery-resolution.cjs` | 交付解析度、碼率與 TC 浮水印的共用規格派生 |

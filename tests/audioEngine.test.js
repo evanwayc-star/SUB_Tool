@@ -64,6 +64,8 @@ function engineWith(env = {}, { ready = true } = {}) {
     externalSourceTimeFor: env.externalSourceTimeFor || (() => null),
     clipSourceTimeFor: env.clipSourceTimeFor || (() => 0),
     interpretation:()=>env.interpretation?.()||null,
+    sourcePlaybackFor:env.sourcePlaybackFor || (()=>null),
+    transportMuted:()=>!!env.transportMuted,
   });
   return { engine, ctx };
 }
@@ -252,6 +254,14 @@ describe('syncBuffers', () => {
 });
 
 describe('startElements：來源類型決定用哪個時間域（§0.5）', () => {
+  it('反轉片段沒有反向音源就緒時不能把正向 element 偷播出來', () => {
+    const tr=elementTrack();
+    const {engine}=engineWith({tracks:[tr],seqOn:true,sourceTimeFor:()=>7,
+      sourcePlaybackFor:()=>({reverse:true,sourceTime:7,offset:3,rate:2})});
+    engine.startElements(7,12);
+    expect(tr.el.play).not.toHaveBeenCalled();
+    expect(tr.el.pause).toHaveBeenCalled();
+  });
   it('非序列模式用 localT（來源時間）', () => {
     const tr = elementTrack();
     const { engine } = engineWith({ tracks: [tr] });
@@ -328,6 +338,19 @@ describe('startElements：來源類型決定用哪個時間域（§0.5）', () =
 });
 
 describe('scrub：可聽性只有一份判準', () => {
+  it('固定畫面期間仍可 scrub 獨立音訊，且不啟動原影片音訊',()=>{
+    const oldClips=State.clips;
+    State.clips=[{id:'fixed',in:0,out:3,offset:0,freezeTime:1}];
+    const native={kind:'native',source:'video',volume:1,muted:false,solo:false};
+    const external=bufferTrack({source:'ext-1'});
+    const {engine,ctx}=engineWith({tracks:[native,external],seqOn:true,activeClipId:null,
+      sourceTimeFor:()=>null,externalSourceTimeFor:()=>4});
+    try{
+      expect(engine.scrub(1)).toEqual({scrubMainVideo:false,localT:1});
+      expect(ctx._created).toHaveLength(1);
+      expect(ctx._created[0].start).toHaveBeenCalledWith(0,4,0.08);
+    }finally{State.clips=oldClips;}
+  });
   it.each([null,4])('native scrub remains available alongside external audio at source offset %s',offset=>{
     const native={kind:'native',source:'video',volume:1,muted:false,solo:false};
     const external=bufferTrack({source:'ext-1'});

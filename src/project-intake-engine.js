@@ -9,6 +9,7 @@
 
 import { getExactFps } from './time.js';
 import { CUE_STYLE_KEYS, effStyle, styleSnapshot } from './substyle.js';
+import { ProjectMediaRestoration } from './project-media-restore.js';
 
 const TRACK_KEYS = ['name', 'visible', 'locked', 'posPct', ...CUE_STYLE_KEYS];
 
@@ -144,6 +145,12 @@ export class ProjectLoadSession {
   #generation = 0;
   #tail = Promise.resolve();
   #activePlan = null;
+  #mediaRestoration;
+  #mediaRuns = new WeakMap();
+
+  constructor(mediaAdapters = null) {
+    this.#mediaRestoration = mediaAdapters ? new ProjectMediaRestoration(mediaAdapters) : null;
+  }
 
   get activePlan() { return this.#activePlan; }
   get generation() { return this.#generation; }
@@ -173,6 +180,26 @@ export class ProjectLoadSession {
     });
     this.#activePlan = plan;
     return plan;
+  }
+
+  // 同一 seam 用於桌面主素材、browser File relink、圖片專案與稍後重連。
+  // caller 只描述媒體目前的狀態，不需要知道 pending/audio/playhead/baseline 順序。
+  restoreMedia(generation, request = {}) {
+    const plan = this.#activePlan;
+    const owns = () => this.isCurrent(generation) && this.#activePlan === plan && !!plan?.owns();
+    if (!owns()) return Promise.resolve(false);
+    if (!this.#mediaRestoration) throw new Error('project media restoration adapters are unavailable');
+    let runs = this.#mediaRuns.get(plan);
+    if (!runs) { runs = new Map(); this.#mediaRuns.set(plan, runs); }
+    const key = JSON.stringify([request.kind || 'images', request.path || null]);
+    if (runs.has(key)) return runs.get(key);
+    const work = this.#mediaRestoration.restore(plan, request, owns);
+    runs.set(key, work);
+    // Only in-flight work is shared. A missing source can become available later
+    // in the same plan, so successful partial restores must also be retryable.
+    const release = () => { if (runs.get(key) === work) runs.delete(key); };
+    void work.then(release, release);
+    return work;
   }
 
   clearPlan(plan = null) {

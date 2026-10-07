@@ -10,6 +10,7 @@
 ============================================================================== */
 
 import { audioLimiterSnapshot } from '../shared/audio-loudness.cjs';
+import { fixedFrameTime } from '../shared/clip-visual.cjs';
 
 const nonNeg = value => Math.max(0, Number(value) || 0);
 const gainValue = (value, fallback = 1) => {
@@ -82,12 +83,14 @@ function externalAudioPlacements(externalSources){
 
 function clipPlacements(clips){
   return (Array.isArray(clips) ? clips : [])
-    .filter(clip => clip && !clip.audioDetached)
+    .filter(clip => clip && !clip.audioDetached && fixedFrameTime(clip)==null)
     .map(clip => ({
       source: clip,
       offset: nonNeg(clip.offset),
       trimStart: nonNeg(clip.in),
       trimEnd: nonNeg(clip.out),
+      speed: Number(clip.speed)>0?Number(clip.speed):1,
+      reverse: !!clip.reverse,
       fadeIn: nonNeg(clip.fadeIn),
       fadeOut: nonNeg(clip.fadeOut),
       ...(clip.fadeSourceLength != null ? {
@@ -284,6 +287,8 @@ class ProjectAudioInterpretation {
             offset: +placement.offset.toFixed(6),
             trimStart: +placement.trimStart.toFixed(6),
             trimEnd: +placement.trimEnd.toFixed(6),
+            ...(placement.speed&&placement.speed!==1?{speed:placement.speed}:{}),
+            ...(placement.reverse ? { reverse: true } : {}),
             volume: +volume.toFixed(6),
             fadeIn: +placement.fadeIn.toFixed(6),
             fadeOut: +placement.fadeOut.toFixed(6),

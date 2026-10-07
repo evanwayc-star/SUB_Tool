@@ -1,5 +1,5 @@
 /* ==============================================================================
-   SUB Tool — 時間軸軌道編輯交易（Timeline Track Edit Transaction）
+   SUB Tool — 時間軸軌道與幾何編輯交易（Timeline Edit Transaction）
    ==============================================================================
    軌道列頭的可見、名稱、鎖定與高度都是可序列化專案狀態，也都在 History 快照內。
    若 gutter 直接改 State 卻沒有立刻建立歷史邊界，下一個無關操作會把它一起收進快照，
@@ -8,6 +8,7 @@
    這裡是軌道 metadata 的唯一 mutation seam：單次按鈕操作立即 commit；高度拖曳可
    preview 多次、mouseup 只 commit 一次。模組不碰 DOM，畫面更新與 History 透過同步
    events 交給協調層，因此不會形成 timeline-renderer ↔ history 的新循環相依。
+   幾何視窗與預覽拖曳共用欄位 owner，保存與取消都依同一份最後寫入證據投影。
 ============================================================================== */
 
 import { State, deselect } from './state.js';
@@ -169,16 +170,6 @@ function updateTimelineTrack(options){
   return edit.commit(options?.value);
 }
 
-function snapshotTarget(target, fields) {
-  return {
-    target,
-    values: (Array.isArray(fields) ? fields : []).map(field => ({
-      field,
-      value: cloneFieldValue(readValue(target, field)),
-    })),
-  };
-}
-
 function cloneFieldValue(value) {
   return value === ABSENT ? ABSENT : structuredClone(value);
 }
@@ -190,17 +181,121 @@ function sameFieldValue(left, right) {
     && JSON.stringify(left) === JSON.stringify(right));
 }
 
+/* 最後寫入證據同時決定持久快照與 cancel 的投影，避免兩條路各自猜欄位 owner。 */
+function capturePreviewFields(read, fields) {
+  const original = new Map(fields.map(field => [field, cloneFieldValue(readValue(read(), field))]));
+  let latest = new Map(original);
+  const ownsField = field => latest.has(field) && sameFieldValue(readValue(read(), field), latest.get(field));
+  return {
+    ownsField,
+    isCurrent: () => fields.every(ownsField),
+    hasOwnedChanges: () => fields.some(field => ownsField(field) && !sameFieldValue(latest.get(field), original.get(field))),
+    remember() { latest = new Map(fields.map(field => [field, cloneFieldValue(readValue(read(), field))])); },
+    project(current) {
+      const value = { ...current };
+      for (const field of fields) if (ownsField(field)) writeValue(value, field, cloneFieldValue(original.get(field)));
+      return value;
+    },
+    restore(write, force = false) {
+      for (const field of fields) if (force || ownsField(field)) write(field, cloneFieldValue(original.get(field)));
+    },
+    changed: () => fields.some(field => !sameFieldValue(readValue(read(), field), original.get(field))),
+  };
+}
+
+/* 幾何預覽的兩個 model adapters：片段頂層欄位、字幕 style 子欄位。
+   draft 使用頂層欄位但不進 History；owner 由常用樣式編輯持有。 */
+function geometryAdapter(kind, target, owns) {
+  const nested = kind === 'cue';
+  const originalStyle = nested ? cloneFieldValue(readValue(target, 'style')) : ABSENT;
+  const sourceTrack = kind === 'clip' ? State.videoTracks[target.vtrack || 0]
+    : nested ? State.tracks[target.track || 0] : null;
+  const read = () => nested ? target.style || {} : target;
+  const current = () => owns() && (kind === 'draft' || (!!sourceTrack && (kind === 'clip'
+    ? State.clips.find(item => item.id === target.id) === target && State.videoTracks[target.vtrack || 0] === sourceTrack
+    : State.cues.find(item => item.id === target.id) === target && State.tracks[target.track || 0] === sourceTrack)));
+  const locked = () => !!sourceTrack?.locked || (kind === 'clip' && !!target.locked);
+  const write = (field, value) => writeValue(nested ? target.style ||= {} : target, field, value);
+  const projectStyle = (owner, currentStyle) => {
+    const value = owner.project(currentStyle || {});
+    if (Object.keys(value).length) return { present: true, value };
+    // 貼上字幕可帶 own undefined；只有仍屬於本次預覽的子欄位才可還原原空包。
+    // 背景整包清空後已失去該 ownership，必須保留它目前的空包型態。
+    const style = owner.hasOwnedChanges() ? originalStyle : readValue(target, 'style');
+    return { present: style !== ABSENT, value: style == null ? style : value };
+  };
+  return {
+    read, current, locked, write,
+    previewTarget(owner, fields) {
+      return nested ? { target, fields: ['style'], projectField: (_field, { current: style }) => projectStyle(owner, style) }
+        : { target, fields, ownsField: owner.ownsField };
+    },
+    restore(owner) {
+      if (!nested) { owner.restore(write); return; }
+      const projected = projectStyle(owner, read());
+      if (projected.present) target.style = projected.value;
+      else delete target.style;
+    },
+  };
+}
+
+/* modal 與 pointer adapters 只提供幾何數值；本交易擁有 model owner、草稿投影、
+   同欄位衝突、取消回復與 release-before-record。鎖定阻止寫入但不阻止 cancel。 */
+function beginGeometryEdit({ kind = 'clip', target, fields, owns = () => true, beginPreview = null, recordHistory = null } = {}) {
+  const allowed = kind === 'cue' || kind === 'draft' ? ['posX', 'posY', 'angle'] : ['posX', 'posY', 'scale'];
+  if (!target || !['clip', 'cue', 'draft'].includes(kind)) return null;
+  fields = [...new Set(fields || allowed)].filter(field => allowed.includes(field));
+  if (!fields.length) return null;
+  const adapter = geometryAdapter(kind, target, owns);
+  if (!adapter.current() || adapter.locked()) return null;
+  const owner = capturePreviewFields(adapter.read, fields);
+  const release = kind === 'draft' ? null : beginPreview?.([adapter.previewTarget(owner, fields)], adapter.current);
+  let active = true;
+  const current = () => active && adapter.current() && (!release || release.isCurrent());
+  const editable = () => current() && !adapter.locked() && owner.isCurrent();
+  const cancel = () => {
+    if (!active) return false;
+    const owned = current();
+    const restored = owned && owner.changed();
+    if (owned) adapter.restore(owner);
+    active = false;
+    release?.();
+    return restored;
+  };
+  const preview = patch => {
+    if (!editable()) { cancel(); return false; }
+    if (typeof patch === 'function') patch();
+    else for (const field of fields) if (Object.hasOwn(patch || {}, field)) adapter.write(field, patch[field]);
+    owner.remember();
+    return true;
+  };
+  const commit = (label, patch = null) => {
+    if (!editable()) { cancel(); return false; }
+    if (patch && !preview(patch)) return false;
+    if (!editable()) { cancel(); return false; }
+    const changed = owner.changed();
+    active = false;
+    release?.();
+    if (kind !== 'draft' && changed && label) {
+      if (recordHistory) recordHistory(label);
+      else emit('history:record', label);
+    }
+    return true;
+  };
+  return Object.freeze({ isCurrent: editable, preview, commit, cancel });
+}
+
 function beginTimelineGesture({ targets = [] } = {}) {
   const snapshots = (Array.isArray(targets) ? targets : [])
     .filter(entry => entry?.target && Array.isArray(entry.fields))
-    .map(entry => snapshotTarget(entry.target, entry.fields));
+    .map(({ target, fields }) => ({ target, fields, owner: capturePreviewFields(() => target, fields) }));
   const rollbacks = [];
   const cancelEffects = [];
-  const valuesByTarget = new Map();
-  for (const { target, values } of snapshots) {
-    const fields = valuesByTarget.get(target) || new Map();
-    for (const value of values) fields.set(value.field, value);
-    valuesByTarget.set(target, fields);
+  const ownersByTarget = new Map();
+  for (const {target,fields,owner} of snapshots) {
+    const indexed=ownersByTarget.get(target) || new Map();
+    for (const field of fields) indexed.set(field,owner);
+    ownersByTarget.set(target,indexed);
   }
   let active = true;
   let moved = false;
@@ -209,17 +304,11 @@ function beginTimelineGesture({ targets = [] } = {}) {
   // 回復及持久快照共用這份最後寫入證據；背景工作改寫的同欄位不再屬於手勢。
   const ownsField = (target, field) => {
     if (!hasPreviewValues) return true;
-    const value = valuesByTarget.get(target)?.get(field);
-    return !!value && sameFieldValue(readValue(target, field), value.latest);
+    return !!ownersByTarget.get(target)?.get(field)?.ownsField(field);
   };
 
   const restore = () => {
-    for (const { target, values } of snapshots) {
-      for (const { field, value } of values) {
-        if (!ownsField(target, field)) continue;
-        writeValue(target, field, cloneFieldValue(value));
-      }
-    }
+    for (const { target, owner } of snapshots) owner.restore((field, value) => writeValue(target, field, value), !hasPreviewValues);
     for (let index = rollbacks.length - 1; index >= 0; index--) {
       try { rollbacks[index](); } catch (error) { console.warn('timeline gesture rollback failed', error); }
     }
@@ -228,13 +317,11 @@ function beginTimelineGesture({ targets = [] } = {}) {
   return Object.freeze({
     ownsField,
     isCurrent() {
-      return !hasPreviewValues || snapshots.every(({ target, values }) => values.every(({ field }) => ownsField(target, field)));
+      return !hasPreviewValues || snapshots.every(({ owner }) => owner.isCurrent());
     },
     rememberPreview() {
       if (!active) return false;
-      for (const { target, values } of snapshots) {
-        for (const value of values) value.latest = cloneFieldValue(readValue(target, value.field));
-      }
+      for (const { owner } of snapshots) owner.remember();
       hasPreviewValues = true;
       return true;
     },
@@ -272,4 +359,4 @@ function beginTimelineGesture({ targets = [] } = {}) {
   });
 }
 
-export { beginTimelineTrackEdit, updateTimelineTrack, beginTimelineGesture, ABSENT };
+export { beginTimelineTrackEdit, updateTimelineTrack, beginTimelineGesture, beginGeometryEdit, ABSENT };

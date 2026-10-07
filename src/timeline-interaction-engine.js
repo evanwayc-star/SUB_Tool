@@ -14,6 +14,7 @@ import { setStatus } from './ui.js';
 import { Seq } from './sequence.js';
 import { Media } from './media.js';
 import { anchorPct, effStyle } from './substyle.js';
+import { beginGeometryEdit } from './timeline-edit-transaction.js';
 
 export const RULER_H = 36;
 export const ROW_H = 64;
@@ -119,17 +120,16 @@ export function createPreviewDrag(deps = {}) {
   function startImageDrag({ id, corner=null, x, y, pointerId=null, captureTarget=null }) {
     const clip = Seq.byId(id);
     const rect = ctx.getStageRect();
-    if(_imgDrag || !clip || clip.type !== 'image' || !rect?.w || !rect?.h || State.videoTracks[clip.vtrack || 0]?.locked) return false;
+    if(_imgDrag || !clip || !Seq.isStill(clip) || !rect?.w || !rect?.h) return false;
+    const edit=beginGeometryEdit({target:clip,beginPreview:ctx.beginPreview,recordHistory:ctx.recordHistory});
+    if(!edit) return false;
     _imgDrag = {
       clip, rect, x0:x, y0:y, pointerId, captureTarget,
       origPosX: clip.posX ?? 0.5, origPosY: clip.posY ?? 0.5, origScale: clip.scale ?? 1,
-      originalGeometry: Object.fromEntries(['posX', 'posY', 'scale'].map(key => [key, {
-        present: Object.hasOwn(clip, key), value: clip[key],
-      }])),
+      edit,
       origBox: ctx.imageBoxOf(clip, rect),
       corner
     };
-    _imgDrag.releasePreview=ctx.beginPreview([{target:clip,fields:['posX','posY','scale']}]);
     ctx.selectImageClip(clip, { redrawTimeline:false });
     const layer = typeof document !== 'undefined' ? document.getElementById('imageLayer') : null;
     layer?.classList.add('dragging');
@@ -140,8 +140,7 @@ export function createPreviewDrag(deps = {}) {
 
   function moveImageDrag(x, y) {
     const d = _imgDrag; if(!d) return;
-    if(Seq.byId(d.clip.id)!==d.clip || !d.releasePreview.isCurrent() || State.videoTracks[d.clip.vtrack||0]?.locked){ cancelImageDrag(); return; }
-    const clip = d.clip;
+    if(!d.edit.isCurrent()){ cancelImageDrag(); return; }
     if(d.corner){
       const sx = (d.corner === 'nw' || d.corner === 'sw') ? -1 : 1;
       const sy = (d.corner === 'nw' || d.corner === 'ne') ? -1 : 1;
@@ -150,10 +149,12 @@ export function createPreviewDrag(deps = {}) {
       const dx = (x - d.x0) * sx * 2 / bw;
       const dy = (y - d.y0) * sy * 2 / bh;
       const delta = Math.abs(dx) >= Math.abs(dy) ? dx : dy;
-      clip.scale = clamp(d.origScale * (1 + delta), 0.02, 8);
+      d.edit.preview({scale:clamp(d.origScale * (1 + delta), 0.02, 8)});
     } else {
-      clip.posX = clamp(d.origPosX + (x - d.x0) / d.rect.w, 0, 1);
-      clip.posY = clamp(d.origPosY + (y - d.y0) / d.rect.h, 0, 1);
+      d.edit.preview({
+        posX:clamp(d.origPosX + (x - d.x0) / d.rect.w, 0, 1),
+        posY:clamp(d.origPosY + (y - d.y0) / d.rect.h, 0, 1),
+      });
     }
     ctx.renderImageOverlays();
     ctx.renderVideoSub();
@@ -163,25 +164,18 @@ export function createPreviewDrag(deps = {}) {
     const d = _imgDrag; if(!d) return;
     if(d.pointerId != null && pointerId != null && pointerId !== d.pointerId) return;
     if(!cancelled && d.pointerId != null && pointerId == null) return;
-    const owns=Seq.byId(d.clip.id)===d.clip && d.releasePreview.isCurrent();
-    cancelled=cancelled || !owns || !!State.videoTracks[d.clip.vtrack||0]?.locked;
-    d.releasePreview();
+    cancelled=cancelled || !d.edit.isCurrent();
+    if(cancelled) d.edit.cancel();
+    else d.edit.commit(d.corner ? '調整圖片大小' : '移動圖片位置');
     _imgDrag = null;
     const layer = typeof document !== 'undefined' ? document.getElementById('imageLayer') : null;
     layer?.classList.remove('dragging');
-    if(cancelled && owns){
-      for(const [key, original] of Object.entries(d.originalGeometry)){
-        if(original.present) d.clip[key] = original.value;
-        else delete d.clip[key];
-      }
-    }
     if(d.captureTarget && d.pointerId != null){
       try{ d.captureTarget.releasePointerCapture(d.pointerId); }catch(_){}
     }
     ctx.renderImageOverlays();
     ctx.drawTimeline();
     if(cancelled) ctx.renderVideoSub();
-    else ctx.recordHistory(d.corner ? '調整圖片大小' : '移動圖片位置');
   }
 
   function finishImageDrag(pointerId=null) { completeImageDrag(pointerId, false); }
@@ -233,56 +227,24 @@ export function createPreviewDrag(deps = {}) {
   }
 
   function bindSubtitleDomEvents(videoSub, videoWrap) {
-    // 字幕位置／角度只擁有自己最後寫入的欄位。顏色等其他覆蓋可能在手勢中提交。
-    const beginGeometry = (cue, presetEdit, rotation) => {
-      const fields=rotation ? ['angle'] : ['posX','posY'];
-      const current=()=>presetEdit ? presetEdit.draft : (cue.style || {});
-      const original={...current()}, stylePresent=Object.hasOwn(cue,'style');
-      const latest=new Map(fields.map(field=>[field,{present:Object.hasOwn(original,field),value:original[field]}]));
-      const ownsField=field=>{
-        const value=latest.get(field), style=current();
-        return Object.hasOwn(style,field)===value.present && Object.is(style[field],value.value);
-      };
-      const project=style=>{
-        const value={...(style || {})};
-        for(const field of fields){
-          if(!ownsField(field)) continue;
-          if(Object.hasOwn(original,field)) value[field]=original[field];
-          else delete value[field];
-        }
-        return {present:stylePresent || Object.keys(value).length>0,value};
-      };
-      return {
-        owns:()=>fields.every(ownsField),
-        remember(){ for(const field of fields){ const style=current(); latest.set(field,{present:Object.hasOwn(style,field),value:style[field]}); } },
-        project,
-        cancel(){
-          const projected=project(current());
-          if(presetEdit){ for(const field of fields){ if(!ownsField(field)) continue; if(Object.hasOwn(original,field)) presetEdit.draft[field]=original[field]; else delete presetEdit.draft[field]; } }
-          else if(projected.present) cue.style=projected.value;
-          else delete cue.style;
-        },
-      };
-    };
     function subDragMove(e){
       const d = _subDrag; if(!d) return;
       if(d.pointerId != null && e.pointerId !== d.pointerId) return;
-      if(!d.owns() || !d.geometry.owns() || (!d.presetEdit && State.tracks[d.cue.track||0]?.locked)){ subDragEnd(e,true); return; }
+      if(!d.edit.isCurrent()){ subDragEnd(e,true); return; }
       if (!d.moved && (Math.abs(e.clientX - d.x0) > 3 || Math.abs(e.clientY - d.y0) > 3)) d.moved = true;
       if (!d.moved) return;
 
-      const cue = d.cue; if(!cue) return;
       const presetEdit = d.presetEdit;
-      const targetObj = presetEdit ? presetEdit.draft : (cue.style = cue.style || {});
       if(d.rot){
         let ang = d.angle + (Math.atan2(e.clientY-d.py, e.clientX-d.px)*180/Math.PI - d.a0);
         if(e.shiftKey) ang = Math.round(ang/15)*15;
-        targetObj.angle = Math.round(((ang+180)%360+360)%360-180);
+        d.edit.preview({angle:Math.round(((ang+180)%360+360)%360-180)});
       }else{
-        targetObj.posX = clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100);
-        targetObj.posY = clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100);
+        d.edit.preview({
+          posX:clamp(d.posX + (e.clientX-d.x0)/d.rect.w*100, 0, 100),
+          posY:clamp(d.posY + (e.clientY-d.y0)/d.rect.h*100, 0, 100),
+        });
       }
-      d.geometry.remember();
       if(presetEdit) ctx.renderTrackStyle(); 
       ctx.renderVideoSub();
       if(Media.mpvPresenting()) ctx.refreshMpvSubs(false,true);
@@ -292,14 +254,11 @@ export function createPreviewDrag(deps = {}) {
     function subDragEnd(e, cancelled=false){
       const d = _subDrag; if(!d) return;
       if(d.pointerId != null && e.pointerId != null && e.pointerId !== d.pointerId) return;
-      const owns=d.owns();
-      cancelled=cancelled || !owns || !d.geometry.owns() || (!d.presetEdit && !!State.tracks[d.cue.track||0]?.locked);
-      d.releasePreview?.();
+      cancelled=cancelled || !d.edit.isCurrent();
+      if(cancelled || !d.moved) d.edit.cancel();
+      else d.edit.commit((d.rot ? '旋轉字幕' : '移動字幕位置')+cueSuffix(d.cue));
       _subDrag = null;
-      if(cancelled && owns){
-        d.geometry.cancel();
-        if(d.presetEdit) ctx.renderTrackStyle();
-      }
+      if(cancelled && d.presetEdit) ctx.renderTrackStyle();
       ctx.onSubDragEndCleanup(d.pointerId ?? e.pointerId, d);
       
       const nextEl = videoSub?.querySelector(`.vsub-track.drag[data-cue="${d.cue.id}"]`);
@@ -316,7 +275,6 @@ export function createPreviewDrag(deps = {}) {
       } else {
         ctx.refreshStyleSummaries(); 
         ctx.drawTimeline(); 
-        ctx.recordHistory((d.rot ? '旋轉字幕' : '移動字幕位置')+cueSuffix(d.cue));
       }
     }
 
@@ -335,16 +293,17 @@ export function createPreviewDrag(deps = {}) {
       }
       const rect = ctx.getStageRect();
       if(!trk || !cue || trk.locked || !rect?.w || !rect?.h) return;
+      if(!presetEdit && State.tracks[cue.track||0]!==trk) return;
       const st = presetEdit ? presetEdit.draft : effStyle(cue, trk);
       const box = el.getBoundingClientRect();
       const a = anchorPct(st);
       const px = box.left + box.width*a.x/100, py = box.top + box.height*a.y/100;
       const rotation=e.altKey || !!e.target.closest('.rot');
-      const geometry=beginGeometry(cue,presetEdit,rotation);
-      const releasePreview=presetEdit ? null : ctx.beginPreview([{target:cue,fields:['style'],projectField:(_field,{current})=>geometry.project(current)}]);
-      _subDrag = { cue, rect, rot:rotation, geometry, x0: e.clientX, y0: e.clientY,
-        releasePreview, owns:()=>presetEdit ? ctx.getPresetEdit()===presetEdit
-          : State.cues.find(item=>item.id===cue.id)===cue && State.tracks[cue.track||0]===trk && releasePreview.isCurrent(),
+      const edit=beginGeometryEdit({kind:presetEdit?'draft':'cue',target:presetEdit? presetEdit.draft : cue,
+        fields:rotation?['angle']:['posX','posY'],owns:()=>!presetEdit || ctx.getPresetEdit()===presetEdit,
+        beginPreview:ctx.beginPreview,recordHistory:ctx.recordHistory});
+      if(!edit) return;
+      _subDrag = { cue, rect, rot:rotation, edit, x0: e.clientX, y0: e.clientY,
         pointerId: e.pointerId, presetEdit,
         posX: st.posX, posY: st.posY, angle: st.angle||0, px, py,
         a0: Math.atan2(e.clientY-py, e.clientX-px)*180/Math.PI, moved: false };

@@ -26,7 +26,8 @@
    兩者以前在這裡各有一份手抄副本。 */
 const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
 const { clipLength, fadeWindow } = require('../shared/clip-fade.cjs');
-const { deliveryFrameRateRatio } = require('../shared/delivery-frame-rate.cjs');
+const { fixedFrameTime } = require('../shared/clip-visual.cjs');
+const { deliveryFrameRateRatio, exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
 const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
 const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter, HARD_LIMITER_PRESETS } = require('../shared/audio-loudness.cjs');
 const { airlineEncoding } = require('./airline-encoding');
@@ -56,9 +57,30 @@ function _finiteNumber(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 function _filterNumber(v, fallback = 0) { return _finiteNumber(v, fallback).toFixed(6); }
+function _audioSpeedFilters(value){
+  let speed=Math.max(0.25,Math.min(4,_finiteNumber(value,1)));
+  const filters=[];
+  while(speed<0.5){filters.push('atempo=0.5');speed/=0.5;}
+  while(speed>2){filters.push('atempo=2');speed/=2;}
+  if(Math.abs(speed-1)>0.000001) filters.push(`atempo=${_filterNumber(speed)}`);
+  return filters.length?','+filters.join(','):'';
+}
+// Trim in mother-source time first. Direction and speed then produce the
+// clip's local timeline; gain/fades/delay operate on that resulting clock.
+function _audioPlaybackFilters(input, sourceDuration = null) {
+  let direction = '';
+  if (input.reverse) {
+    // Reverse the entire source interval, including missing audio at EOF.
+    // Padding after areverse would put that silence on the wrong end.
+    const padding = sourceDuration == null ? ''
+      : `,apad=whole_dur=${_filterNumber(sourceDuration)},atrim=duration=${_filterNumber(sourceDuration)}`;
+    direction = `,asetpts=PTS-STARTPTS${padding},areverse`;
+  }
+  return `${direction},asetpts=PTS-STARTPTS${_audioSpeedFilters(input.speed)}`;
+}
 function _fadeFilters(input, duration, { audio = false, digits = 3 } = {}) {
   const origin = Math.max(0, _finiteNumber(input.fadeSourceOffset, 0));
-  const { fadeIn, fadeOut, fadeOutStart } = fadeWindow({ ...input, in: 0, out: duration });
+  const { fadeIn, fadeOut, fadeOutStart } = fadeWindow({ ...input, in: 0, out: duration, speed: 1 });
   if (!fadeIn && !fadeOut) return [];
   const format = n => n.toFixed(digits);
   const pts = audio ? 'asetpts' : 'setpts';
@@ -73,7 +95,10 @@ function _fadeFilters(input, duration, { audio = false, digits = 3 } = {}) {
   if (origin > 0) filters.push(`${pts}=PTS-${format(origin)}/TB`);
   return filters;
 }
-function _audioTimelineStart(file, streamIndex, startOffsetFor) {
+function _audioTimelineStart(file, streamIndex, startOffsetFor, reverse = false) {
+  // FFmpeg already rebases seeked inputs. Preserve the remaining first-PTS
+  // gap before trim, so a delayed source's silence reverses with its samples.
+  if (reverse) return 'aresample=48000:async=1:first_pts=0,';
   const offset = Number(startOffsetFor?.(file, streamIndex ?? 0));
   if (!Number.isFinite(offset) || Math.abs(offset) < 0.000001) return 'asetpts=PTS-STARTPTS,';
   // Keep the source audio/video start relationship before trimming a clip.
@@ -121,6 +146,8 @@ function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
         offset: Math.max(0, _finiteNumber(input.offset, 0)),
         trimStart,
         trimEnd,
+        speed: Math.max(0.25,Math.min(4,_finiteNumber(input.speed,1))),
+        reverse: !!input.reverse,
         volume: Math.max(0, Math.min(64, _finiteNumber(input.volume, 1))),
         fadeIn: Math.max(0, _finiteNumber(input.fadeIn, 0)),
         fadeOut: Math.max(0, _finiteNumber(input.fadeOut, 0)),
@@ -159,7 +186,7 @@ function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
 function _planDuration(plan) {
   let end = 0;
   for (const bus of plan?.buses || []) for (const input of bus.inputs || []) {
-    if (input.trimEnd != null) end = Math.max(end, input.offset + Math.max(0, input.trimEnd - input.trimStart));
+    if (input.trimEnd != null) end = Math.max(end, input.offset + Math.max(0, input.trimEnd - input.trimStart)/input.speed);
   }
   return end;
 }
@@ -214,11 +241,12 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
       if (input.sourceChannel != null) chain += `pan=mono|c0=c${input.sourceChannel},`;
       const trimStart = Math.max(0, input.trimStart - seekStart);
       const trimEnd = input.trimEnd == null ? null : Math.max(trimStart, input.trimEnd - seekStart);
-      chain += `${_audioTimelineStart(input.file, input.sourceStream, startOffsetFor)}atrim=start=${_filterNumber(trimStart)}`;
+      chain += `${_audioTimelineStart(input.file, input.sourceStream, startOffsetFor, input.reverse)}atrim=start=${_filterNumber(trimStart)}`;
       if (trimEnd != null) chain += `:end=${_filterNumber(trimEnd)}`;
-      chain += ',asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono';
+      const sourceDuration = input.trimEnd == null ? null : input.trimEnd - input.trimStart;
+      chain += `${_audioPlaybackFilters(input, sourceDuration)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono`;
       if (Math.abs(input.volume - 1) > 0.000001) chain += `,volume=${_filterNumber(input.volume, 1)}`;
-      const inputDuration = input.trimEnd == null ? null : input.trimEnd - input.trimStart;
+      const inputDuration = input.trimEnd == null ? null : (input.trimEnd - input.trimStart)/input.speed;
       const fades = _fadeFilters(inputDuration == null ? { ...input, fadeOut: 0 } : input,
         inputDuration ?? duration, { audio: true, digits: 6 });
       if (fades.length) chain += `,${fades.join(',')}`;
@@ -496,12 +524,18 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       // 不必要的重複／丟格。
       inputs.push('-loop', '1', '-framerate', String(R), '-i', p);
     } else {
-      const minIn = Math.max(0, Math.min(...clipsForPath.map(c => c.in)) - 0.5);
+      const hasFixedFrame = clipsForPath.some(c => fixedFrameTime(c) != null);
+      const earliest = Math.min(...clipsForPath.map(c => fixedFrameTime(c) ?? c.in));
+      // A delivery range may start after the chosen fixed frame. Seeking only
+      // by its sliced in point would make that mother-source frame unreachable.
+      const earliestSeek = Math.max(0, earliest - 0.5);
+      const seek = earliestSeek.toFixed(hasFixedFrame ? 6 : 3);
+      const minIn = hasFixedFrame ? Number(seek) : earliestSeek;
       pathMinIn.set(p, minIn);
       // 這個 input 本身就是母素材；音訊 routing 可重用它，不必再多開一次同一個 MXF/MOV。
       reusableMasterInputs.set(p, { index: inputIndex, seekStart: minIn });
       const hw = preset ? [] : hwdecArgs(); // MOD 的場處理使用 CPU 影格
-      inputs.push(...hw, '-ss', minIn.toFixed(3), '-i', p);
+      inputs.push(...hw, '-ss', seek, '-i', p);
     }
   });
   const videoInputIndices = list.map(c => uniqueVideoPaths.indexOf(c.path));
@@ -566,12 +600,21 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           : null;
         const fields = preset && c.type !== 'image'
           ? `bwdif=mode=${isInterlaced ? 'send_field' : 'send_frame'}:parity=auto:deint=interlaced,` : '';
+        const freezeTime = c.type === 'image' ? null : fixedFrameTime(c);
+        const freezeStart = Math.max(0, (freezeTime ?? 0) - minIn - 0.25 / exactDeliveryFrameRate(c.fps, fps));
+        const videoTime = freezeTime != null
+          // Preserve the input seek's fractional first-frame PTS until the
+          // target is selected; STARTPTS first can advance the chosen frame.
+          // The quarter-frame guard matches preview extraction and absorbs
+          // the microsecond rounding in FFmpeg's seek / filter time options.
+          ? `trim=start=${_filterNumber(freezeStart)},trim=end_frame=1,setpts=PTS-STARTPTS,${fields}fps=${R},tpad=stop_mode=clone:stop_duration=${_filterNumber(clen)},trim=duration=${_filterNumber(clen)}`
+          : `setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},${c.reverse?'reverse,':''}setpts=(PTS-STARTPTS)/${_filterNumber(c.speed,1)},${fields}fps=${R}`;
         if (box) {
           const bw = Math.max(2, Math.round(box.w)), bh = Math.max(2, Math.round(box.h));
-          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,${fields}fps=${R},scale=${bw}:${bh},format=yuva420p,setsar=1[${IM}]`);
+          fc.push(`[${vIdx}:v]${videoTime},scale=${bw}:${bh},format=yuva420p,setsar=1[${IM}]`);
           vchain = `[${BG}][${IM}]overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}:format=auto:eof_action=pass,format=yuva420p,setsar=1`;
         } else {
-          fc.push(`[${vIdx}:v]setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},setpts=PTS-STARTPTS,${fields}fps=${R},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
+          fc.push(`[${vIdx}:v]${videoTime},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
           vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
         }
       }
@@ -604,6 +647,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   } else {
     const aLabels = [];
     list.forEach((c, i) => {
+      if(fixedFrameTime(c) != null) return; // 固定畫面的片段原音維持靜音。
       let al = null;
       if (Array.isArray(c.audio)) {
         if (!c.audio.length) return; // 全靜音 → 此片段不發聲
@@ -627,7 +671,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           if (effect) chain += `${audioLimiterFilter(effect, ch.sourceStream ?? 0)},`;
           if (Number.isInteger(ch.sourceChannel) && ch.sourceChannel >= 0)
             chain += `pan=mono|c0=c${ch.sourceChannel},`;
-          chain += `${_audioTimelineStart(ch.file, ch.sourceStream, isAirline ? env.audioVideoStartOffset : null)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
+          chain += `${_audioTimelineStart(ch.file, ch.sourceStream, isAirline ? env.audioVideoStartOffset : null, c.reverse)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))}${_audioPlaybackFilters(c, c.out - c.in)},aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
           fc.push(chain);
           mono.push(`[am${i}_${j}]`);
         });
@@ -646,14 +690,16 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           if (mappedIdx === undefined) { mappedIdx = ii++; inputs.push('-i', c.path); audioInputMap.set(c.path, mappedIdx); }
         }
         const effectFilter = effect ? `${audioLimiterFilter(effect, 0)},` : '';
-        fc.push(`[${mappedIdx}:a]${effectFilter}${_audioTimelineStart(c.path, 0, isAirline ? env.audioVideoStartOffset : null)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+        fc.push(`[${mappedIdx}:a]${effectFilter}${_audioTimelineStart(c.path, 0, isAirline ? env.audioVideoStartOffset : null, c.reverse)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))}${_audioPlaybackFilters(c, c.out - c.in)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else return;
       const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
       // 轉場：音訊淡入/淡出（與影像同步）
       const afParts = _fadeFilters(c, clipLength(c), { audio: true });
       let asrc = al;
       if (afParts.length) { const afl = `[af${i}]`; fc.push(`${al}${afParts.join(',')}${afl}`); asrc = afl; }
-      fc.push(`${asrc}adelay=${offMs}:all=1[ad${i}]`);
+      // adelay's leading silence can have NOPTS; retain the placement offset
+      // through amix/trim and the muxer with the same sample clock as audioPlan.
+      fc.push(`${asrc}adelay=${offMs}:all=1,asetpts=N/SR/TB[ad${i}]`);
       aLabels.push(`[ad${i}]`);
     });
     if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${D.toFixed(3)},aresample=48000[ac]`);

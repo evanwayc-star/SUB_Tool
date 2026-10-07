@@ -30,6 +30,7 @@ import {
 } from './project-audio.js';
 import { audioLimiterSnapshot } from '../shared/audio-loudness.cjs';
 import { fadeWindow } from '../shared/clip-fade.cjs';
+import { fixedFrameTime } from '../shared/clip-visual.cjs';
 
 /* ── 內部工具 ───────────────────────────────────────────────────────────── */
 
@@ -124,17 +125,26 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
   function slice(c){
     const startProp = c.in != null ? c.in : (c.trimStart || 0);
     const endProp = c.out != null ? c.out : (c.trimEnd != null ? c.trimEnd : c.duration);
-    const cDur = endProp - startProp;
+    const speed=c.type==='image'?1:(Number(c.speed)>0?Number(c.speed):1);
+    const reverse=!!c.reverse&&c.type!=='image';
+    const cDur = (endProp - startProp)/speed;
     const cEnd = (c.offset || 0) + cDur;
     if (cEnd <= expIn || (c.offset || 0) >= expOut) return null;
     let newIn = startProp, newOut = endProp, newOffset = (c.offset || 0) - expIn;
-    if (newOffset < 0) { newIn += (-newOffset); newOffset = 0; }
-    const newDur = newOut - newIn;
-    if (newOffset + newDur > (expOut - expIn)) newOut = newIn + ((expOut - expIn) - newOffset);
-    const frontCut = newIn - startProp;
+    const frontCut=Math.max(0,-newOffset);
+    if (frontCut>0) {
+      if(reverse) newOut-=frontCut*speed;
+      else newIn+=frontCut*speed;
+      newOffset=0;
+    }
+    const available=expOut-expIn-newOffset;
+    if((newOut-newIn)/speed>available){
+      if(reverse) newIn=newOut-available*speed;
+      else newOut=newIn+available*speed;
+    }
     const sourceOffset = nonNeg(c.fadeSourceOffset) + frontCut;
     const {length:sourceLength,fadeIn,fadeOut}=fadeWindow({...c,in:startProp,out:endProp});
-    const backCut = sourceLength - (sourceOffset + newOut - newIn);
+    const backCut = sourceLength - (sourceOffset + (newOut-newIn)/speed);
     // A delivery range can begin/end inside a fade. Keep its original local
     // clock so the first exported frame/sample has the previewed gain/alpha.
     return {
@@ -149,7 +159,7 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
   const sourceClips = rawSourceClips.map(slice).filter(Boolean);
   const externalSources = rawExternalSources.map(slice).filter(Boolean);
 
-  const audibleVideoClips = sourceClips.filter(c => !c.audioDetached);
+  const audibleVideoClips = sourceClips.filter(c => !c.audioDetached && fixedFrameTime(c) == null);
   const externalPlacements = externalAudioPlacements(externalSources);
   if (!sourceClips.length && !externalPlacements.length) return null;
 
@@ -166,13 +176,18 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
        看起來就像整支輸出停在開頭。圖片的個別縮放／位置也要一併交給
        匯出 filtergraph，才會和預覽一致。 */
     const image = c.type === 'image';
+    const freezeTime = image ? null : fixedFrameTime(c);
     return {
       name: c.name, web: c.web,
       path: c.path, type: image ? 'image' : 'video',
       ...(!image && Number.isFinite(c.fps) ? { fps: c.fps } : {}),
       in: +c.in.toFixed(3), out: +c.out.toFixed(3),
+      speed: Number(c.speed)>0?Number(c.speed):1, reverse:!!c.reverse,
+      // This is a mother-source frame timestamp, independent of delivery cuts.
+      // Millisecond rounding can select the following frame at NTSC rates.
+      ...(freezeTime != null ? { freezeTime } : {}),
       offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0,
-      audio: c.audioDetached ? [] : clipAudioSpec(c, mediaTracks),
+      audio: c.audioDetached || freezeTime != null ? [] : clipAudioSpec(c, mediaTracks),
       ...audioLimiterSnapshot(c),
       fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
       fadeSourceOffset: +c.fadeSourceOffset.toFixed(6),

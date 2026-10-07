@@ -32,6 +32,14 @@ afterEach(() => {
 });
 
 describe('MediaAudioRouter buffer drift clock', () => {
+  it('來源替換後重啟會走 Media 的反向音訊準備入口並轉換正確來源時間', () => {
+    const clip = { id: 'reverse', in: 1, out: 4, offset: 20, speed: 2, reverse: true };
+    const media = { playing: true, seqOn: () => true, _activeClip: () => clip, tlTime: () => 20.5,
+      startElementSources: vi.fn() };
+    const router = new MediaAudioRouter(media, { playbackRate: 1 }, { muted: false });
+    router.restartElements();
+    expect(media.startElementSources).toHaveBeenCalledWith(3, 20.5);
+  });
   it('mpv source clock advances while the inactive HTML video clock is stopped without restarting buffers', () => {
     const context = fakeAudioContext();
     window.AudioContext = function AudioContext() { return context; };

@@ -18,6 +18,7 @@ import { State, ensureVideoTrackCount, videoTrackVisible } from './state.js';
 import { emit } from './events.js';
 import { audioLimiterSnapshot, audioMotherPath, restoreAudioLimiterState } from '../shared/audio-loudness.cjs';
 import { fadeWindow } from '../shared/clip-fade.cjs';
+import { fixedFrameTime, isStillClip } from '../shared/clip-visual.cjs';
 
 let _clipSeq = 1;
 const EPS = 1e-6;
@@ -27,7 +28,9 @@ const Seq = {
   /* ---- 查詢 ---- */
   active(){ return State.clips.length > 0; },
   multi(){ return State.clips.length > 1; },
-  len(c){ return Math.max(0, c.out - c.in); },
+  isFrozen(c){ return fixedFrameTime(c)!=null; },
+  isStill(c){ return isStillClip(c); },
+  len(c){ return Math.max(0, (c.out - c.in) / (Number(c.speed) > 0 ? Number(c.speed) : 1)); },
   clipEnd(c){ return c.offset + this.len(c); },
   /* 序列結尾（所有 clip 的最右緣；無 clip 回 0） */
   end(){ return State.clips.reduce((m, c) => Math.max(m, this.clipEnd(c)), 0); },
@@ -42,17 +45,26 @@ const Seq = {
   clipAtOnTrack(t, v){ for(const c of State.clips){ if(vt(c) === v && this.isActiveAt(c, t)) return c; } return null; },
   /* t 所在、所有軌的作用中 clip（依 vtrack 由下而上排序，供匯出疊層與音訊混音） */
   clipsAt(t){ return State.clips.filter(c => this.isActiveAt(c, t)).sort((a, b) => vt(a) - vt(b)); },
+  editClipAt(t){ return this.clipsAt(t).findLast(c=>c.type!=='image'&&videoTrackVisible(vt(c)))||null; },
   /* ★ 最上層「可見」的作用中 clip（top-occludes）：播放預覽顯示它；隱藏的視訊軌不列入（跳到下一層）；圖片不列入 */
-  clipAt(t){ const a = this.clipsAt(t); for(let i = a.length - 1; i >= 0; i--){ if(a[i].type !== 'image' && videoTrackVisible(vt(a[i]))) return a[i]; } return null; },
+  clipAt(t){ const a = this.clipsAt(t); for(let i = a.length - 1; i >= 0; i--){ if(!isStillClip(a[i]) && videoTrackVisible(vt(a[i]))) return a[i]; } return null; },
   /* t 之後（不含）下一個開始的 clip（任一軌）；間隙播放時用來得知何時有內容切入 */
   nextAfter(t){
     let best = null;
-    for(const c of State.clips){ if(c.type !== 'image' && c.offset > t + EPS && (!best || c.offset < best.offset)) best = c; }
+    for(const c of State.clips){ if(!isStillClip(c) && c.offset > t + EPS && (!best || c.offset < best.offset)) best = c; }
     return best;
   },
   /* ---- 時間映射 ---- */
-  toSource(t, c){ return t - c.offset + c.in; },
-  toTimeline(s, c){ return s - c.in + c.offset; },
+  toSource(t, c){
+    const elapsed=(t-c.offset)*(Number(c.speed)>0?Number(c.speed):1);
+    return c.reverse ? c.out-elapsed : c.in+elapsed;
+  },
+  toTimeline(s, c){
+    const sourceElapsed=c.reverse ? c.out-s : s-c.in;
+    return c.offset+sourceElapsed/(Number(c.speed)>0?Number(c.speed):1);
+  },
+  // 反向音訊快取只含目前來源區間；播放器秒數仍由序列層轉換。
+  toReverseAudio(t, c){ return c.out - this.toSource(t, c); },
   /* mpv/libass 吃來源時間，但字幕與播放頭都存時間軸時間。
      live window 必須先在時間軸篩選，再做來源映射；反過來會把 offset clip 的字幕全濾掉。 */
   timedRangesForSource(ranges,clip,{center=null,radius=null}={}){
@@ -64,8 +76,10 @@ const Seq = {
       .map(range=>{
         const copy={...range};
         if(clip&&range?.timed!==false){
-          copy.start=this.toSource(Number(range.start)||0,clip);
-          copy.end=this.toSource(Number(range.end)||0,clip);
+          const start=this.toSource(Number(range.start)||0,clip);
+          const end=this.toSource(Number(range.end)||0,clip);
+          copy.start=Math.min(start,end);
+          copy.end=Math.max(start,end);
         }
         return copy;
       });
@@ -79,6 +93,8 @@ const Seq = {
       ...(c.natW>0&&c.natH>0?{natW:c.natW,natH:c.natH}:{}),
       ...(c.height!=null?{height:c.height}:{}),
       locked:!!c.locked,muted:!!c.muted,mpvExactSeek:!!c.mpvExactSeek,mpvSeekOffset:c.mpvSeekOffset||0,
+      speed:Number(c.speed)>0?Number(c.speed):1,reverse:!!c.reverse,
+      ...(fixedFrameTime(c)!=null?{freezeTime:fixedFrameTime(c)}:{}),
       audioSrc:c.audioSrc||null,audioSourceId:c.audioSourceId||null,audioDetached:!!c.audioDetached,
       in:c.in,out:c.out,offset:c.offset,vtrack:vt(c),fadeIn:c.fadeIn||0,fadeOut:c.fadeOut||0,
       ...(c.fadeSourceLength!=null?{fadeSourceOffset:c.fadeSourceOffset||0,fadeSourceLength:c.fadeSourceLength}:{}),
@@ -87,7 +103,10 @@ const Seq = {
   restoreMetadata(c,s){
     restoreAudioLimiterState(c,s);
     const metadata=this.persistentMetadata(s);
-    for(const key of ['in','out','offset','vtrack','fadeIn','fadeOut','scale','posX','posY','locked','muted','mpvExactSeek','mpvSeekOffset','audioDetached']) c[key]=metadata[key];
+    if(fixedFrameTime(c)!==fixedFrameTime(s)) delete c.freezeWeb;
+    if(fixedFrameTime(s)!=null) c.freezeTime=fixedFrameTime(s);
+    else { delete c.freezeTime; delete c.freezeWeb; }
+    for(const key of ['in','out','offset','vtrack','fadeIn','fadeOut','scale','posX','posY','locked','muted','mpvExactSeek','mpvSeekOffset','audioDetached','speed','reverse']) c[key]=metadata[key];
     for(const key of ['fadeSourceOffset','fadeSourceLength','height']){
       if(s[key]!=null) c[key]=s[key]; else delete c[key];
     }
@@ -98,16 +117,18 @@ const Seq = {
   planSplit(c,t,{minimum=0.2}={}){
     if(!c||c.locked) return null;
     const cut=this.toSource(t,c);
-    if(cut<c.in+minimum||cut>c.out-minimum) return null;
+    const minSource=minimum*(Number(c.speed)>0?Number(c.speed):1);
+    if(cut<c.in+minSource||cut>c.out-minSource) return null;
     const rawOrigin=Number(c.fadeSourceOffset);
     const origin=Number.isFinite(rawOrigin)?Math.max(0,rawOrigin):0;
     const {length}=fadeWindow(c);
     const metadata=this.persistentMetadata(c);
     delete metadata.id;
     return {
-      left:{out:cut,fadeSourceOffset:origin,fadeSourceLength:length},
-      right:{...metadata,primary:false,peaks:c.peaks,web:c.web||null,in:cut,offset:t,
-        fadeSourceOffset:origin+cut-c.in,fadeSourceLength:length},
+      left:{[c.reverse?'in':'out']:cut,fadeSourceOffset:origin,fadeSourceLength:length},
+      right:{...metadata,primary:false,peaks:c.peaks,web:c.web||null,[c.reverse?'out':'in']:cut,offset:t,
+        ...(this.isFrozen(c)?{freezeWeb:c.freezeWeb}:{}),
+        fadeSourceOffset:origin+t-c.offset,fadeSourceLength:length},
     };
   },
   add(meta){
@@ -133,7 +154,7 @@ const Seq = {
     // Metadata can arrive after another clip was placed directly to the right.
     // Keep the measured source length, but never extend this clip across its
     // same-track neighbor. Other tracks are intentionally independent.
-    const maxOut = c.in + this.maxLengthOnTrack(c);
+    const maxOut = c.in + this.maxLengthOnTrack(c) * (Number(c.speed)>0?Number(c.speed):1);
     c.dur = dur;
     if(untrimmed) c.out = Math.min(dur, maxOut);
     else if(c.out > dur) c.out = dur;   // 修剪點超出新長度：夾回

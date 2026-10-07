@@ -531,7 +531,7 @@ export function renderImageOverlays(){
   // 下層圖片暫時搬到 native/HTML 影片之上。操作框仍由主 renderer 保留。
   const bitmapInCanvas=imagesComposited||visualStackPlan(Seq.clipsAt(t),State.videoTracks).mixedImages;
   // 只處理 type === 'image' 且 trackVisible 的
-  const imageClips = Seq.clipsAt(t).filter(c => c.type === 'image' && videoTrackVisible(c.vtrack || 0));
+  const imageClips = Seq.clipsAt(t).filter(c => Seq.isStill(c) && videoTrackVisible(c.vtrack || 0));
   
   let html = '';
   // MPV 的原生畫面在主 DOM 上方，圖片外觀交給透明 guide 顯示；互動始終由

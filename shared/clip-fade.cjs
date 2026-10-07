@@ -28,7 +28,9 @@ function clipLength(clip) {
   const inTime = Number(clip?.in);
   const safeOut = Number.isFinite(outTime) ? outTime : 0;
   const safeIn = Number.isFinite(inTime) ? inTime : 0;
-  return Math.max(0.001, safeOut - safeIn);
+  const rate = Number(clip?.speed);
+  const speed = Number.isFinite(rate) && rate > 0 ? rate : 1;
+  return Math.max(0.001, (safeOut - safeIn) / speed);
 }
 
 /**

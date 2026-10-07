@@ -398,9 +398,9 @@ describe('交付編組（composeDeliveryAudioPlan）接上 export-plan 的 filte
 });
 
 /* 這兩個模組能不能被無 mock 測試，取決於它們有沒有偷偷 import 副作用來源。
-   delivery-job 只准依賴純資料的 project-audio；後者本身必須是依賴葉節點。 */
+   delivery-job 只准依賴純資料的 project-audio 與 shared 領域規則。 */
 describe('模組本身保持純淨', () => {
-  it('delivery-job.js 只依賴純音訊解讀器，兩者都不碰 State／Media／Seq／DOM', () => {
+  it('delivery-job.js 只依賴純音訊解讀器與共用規則，都不碰 State／Media／Seq／DOM', () => {
     const fs = createRequire(import.meta.url)('node:fs');
     const path = createRequire(import.meta.url)('node:path');
     const url = createRequire(import.meta.url)('node:url');
@@ -409,10 +409,12 @@ describe('模組本身保持純淨', () => {
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
     const interpretation = fs.readFileSync(path.join(root, 'src/project-audio.js'), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    const visual = fs.readFileSync(path.join(root, 'shared/clip-visual.cjs'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
     expect([...code.matchAll(/from\s+['"]([^'"]+)['"]/g)].map(match => match[1]))
-      .toEqual(['./project-audio.js', '../shared/audio-loudness.cjs', '../shared/clip-fade.cjs']);
-    for (const pureCode of [code, interpretation]) {
+      .toEqual(['./project-audio.js', '../shared/audio-loudness.cjs', '../shared/clip-fade.cjs', '../shared/clip-visual.cjs']);
+    for (const pureCode of [code, interpretation, visual]) {
       expect(pureCode).not.toMatch(/from\s+['"].*(state|media|sequence|dom)/i);
       expect(pureCode).not.toMatch(/\bdocument\b/);
       expect(pureCode).not.toMatch(/\bwindow\b/);

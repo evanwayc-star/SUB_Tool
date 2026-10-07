@@ -96,6 +96,7 @@ function shutdownHandler(vocalRuntime) {
     app: { on: (channel, listener) => { handler = listener; }, quit: vi.fn() },
     _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false,
     audioNormalizationJobs: new Map(), ffmpegExecution: nativeOwner(),
+    clipAudioCache: { waitForIdle: vi.fn().mockResolvedValue() },
     speechCompressionRuntime: nativeOwner(), mediaIngestCoordinator: nativeOwner(),
     vocalWaveformRuntime: vocalRuntime, QueueManager: { prepareForShutdown: vi.fn().mockResolvedValue() },
     mediaIntakeRuntime: { close: vi.fn().mockResolvedValue() }, screenshotOutput: { close: vi.fn().mockResolvedValue() },
@@ -343,9 +344,27 @@ describe('人聲模型的受限母素材 PCM 邊界', () => {
     expect(context.app.quit).not.toHaveBeenCalled();
     resolveVocal();
     await vi.waitFor(() => expect(context.app.quit).toHaveBeenCalledOnce());
+    expect(context.clipAudioCache.waitForIdle).toHaveBeenCalledOnce();
     expect(context.mediaIntakeRuntime.close).toHaveBeenCalledOnce();
     expect(context.screenshotOutput.close).toHaveBeenCalledOnce();
     expect(context._quitReady).toBe(true);
+  });
+
+  it('實際 main 先等 FFmpeg close，再等反向音訊 owner 清理才退出', async () => {
+    const { handler, context } = shutdownHandler({ cancelAllAndWait: vi.fn().mockResolvedValue(), resume: vi.fn() });
+    let closeWriter, cleanCache;
+    context.ffmpegExecution.cancelAllAndWait.mockImplementation(() => new Promise(resolve => { closeWriter = resolve; }));
+    context.clipAudioCache.waitForIdle.mockImplementation(() => new Promise(resolve => { cleanCache = resolve; }));
+    handler({ preventDefault: vi.fn() });
+    await vi.waitFor(() => expect(context.ffmpegExecution.cancelAllAndWait).toHaveBeenCalledOnce());
+    expect(context.clipAudioCache.waitForIdle).not.toHaveBeenCalled();
+    closeWriter();
+    await vi.waitFor(() => expect(context.clipAudioCache.waitForIdle).toHaveBeenCalledOnce());
+    expect(context.mediaIntakeRuntime.close).not.toHaveBeenCalled();
+    expect(context.app.quit).not.toHaveBeenCalled();
+    cleanCache();
+    await vi.waitFor(() => expect(context.app.quit).toHaveBeenCalledOnce());
+    expect(context.mediaIntakeRuntime.close).toHaveBeenCalledOnce();
   });
 
   it('main 收到人聲 PCM shutdown 失敗會取消退出並恢復准入', async () => {

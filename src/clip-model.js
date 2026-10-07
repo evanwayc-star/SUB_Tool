@@ -1,7 +1,7 @@
 /* clip-model.js — 影片段域邏輯（選取、刪除、轉場、幾何）
    從 timeline-renderer.js 抽出，使渲染引擎不再包含域操作。
    渲染需求透過 emit() 事件觸發，由 timeline-renderer.js 訂閱。 */
-import { State, setSelection, deselect, focusTrackKind, ensureVideoTrackCount } from './state.js';
+import { State, IS_DESKTOP, setSelection, deselect, focusTrackKind, ensureVideoTrackCount } from './state.js';
 import { $ } from './dom.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
@@ -15,6 +15,7 @@ import { recordHistory } from './history.js';
 import { fitScale } from './image-compositor-engine.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { Project } from './project.js';
+import { lastSourceFrameIndex } from '../shared/clip-visual.cjs';
 
 function clipEditable(c){
   if(!c || Seq.byId(c.id)!==c) return false;
@@ -35,7 +36,9 @@ export function captureClipEdit(c){
 }
 
 export function clipDurationLimit(c){
-  return Math.min(Math.max(0,(+c.dur||0)-(+c.in||0)),Seq.maxLengthOnTrack(c));
+  const speed=Number(c.speed)>0?Number(c.speed):1;
+  const available=c.reverse?(+c.out||0):((+c.dur||0)-(+c.in||0));
+  return Math.min(Math.max(0,available/speed),Seq.maxLengthOnTrack(c));
 }
 
 function refreshClipEdit(){
@@ -52,10 +55,66 @@ export function setClipDuration(c,seconds){
   if(earliest<c.offset+frame-epsilon) earliest=snapTimeToFrame(earliest+frame,State.fps,State.dropFrame);
   if(latest<earliest-epsilon){ showToast('同軌鄰段之間沒有可用的一格長度'); return null; }
   const end=Math.min(latest,Math.max(earliest,snapTimeToFrame(c.offset+seconds,State.fps,State.dropFrame)));
-  c.out=(+c.in||0)+(end-c.offset);
+  if(c.reverse) c.in=(+c.out||0)-(end-c.offset)*(Number(c.speed)>0?Number(c.speed):1);
+  else c.out=(+c.in||0)+(end-c.offset)*(Number(c.speed)>0?Number(c.speed):1);
   Seq.recomputeDuration(); recordHistory('修改持續時間：'+(c.name||''));
   Media.seek(Math.min(Media.displayTime(),State.duration||0)); refreshClipEdit();
   return end-c.offset;
+}
+
+export function setClipSpeed(c,speed,reverse=false){
+  if(!clipEditable(c) || c.type==='image') return false;
+  if(reverse&&!IS_DESKTOP){ showToast('反轉影片預覽目前需要桌面版'); return false; }
+  if(reverse&&!Media.supportsClipReverse()){ showToast('此素材目前未使用支援反向播放的 mpv 預覽'); return false; }
+  const rate=Number(speed);
+  if(!Number.isFinite(rate)||rate<0.25||rate>4) return false;
+  const oldRate=Number(c.speed)>0?Number(c.speed):1;
+  const oldEnd=Seq.clipEnd(c);
+  const nextEnd=c.offset+(c.out-c.in)/rate;
+  const shift=nextEnd-oldEnd;
+  const later=Seq.trackClips(c.vtrack||0).filter(other=>other!==c&&other.offset>=oldEnd-1e-6);
+  const ripple=shift>1e-9&&later.length>0&&nextEnd>later[0].offset+1e-9;
+  if(ripple&&later.some(other=>other.locked)){
+    showToast('後續片段已鎖定，無法自動往右推'); return false;
+  }
+  // 變長且碰到下一段時，才將同軌後段整組平移，保留原本間距。
+  c.speed=rate;
+  c.reverse=!!reverse;
+  if(Math.abs(rate-oldRate)>1e-9){
+    delete c.fadeSourceOffset; delete c.fadeSourceLength;
+  }
+  if(ripple) for(const other of later) other.offset+=shift;
+  Seq.sort(); Seq.recomputeDuration();
+  recordHistory('修改片段速度／反轉：'+(c.name||''));
+  const position=Math.min(Media.displayTime(),State.duration||0);
+  Promise.resolve(Media.refreshClipPlayback(c)).then(ok=>{
+    if(ok===false){ showToast('影片播放方向切換失敗，請重新定位播放點'); return; }
+    if(Seq.byId(c.id)===c) Media.seek(position);
+  }).catch(error=>showToast('影片播放方向切換失敗：'+(error?.message||error)));
+  refreshClipEdit();
+  return true;
+}
+
+export function clipFreezeTarget(c,timelineTime){
+  const fps=getExactFps(c.fps||State.fps||25);
+  const time=Math.max(c.offset,Math.min(Seq.clipEnd(c)-1/fps,timelineTime));
+  const source=Seq.toSource(time,c);
+  const last=lastSourceFrameIndex(c.dur,fps);
+  return Math.max(0,Math.min(last,Math.round(source*fps)))/fps;
+}
+
+export function setClipFreeze(c,time,preview=null){
+  if(!clipEditable(c)||c.type==='image') return false;
+  if(time!=null){
+    if(!Number.isFinite(time)||time<0||time>=c.dur||!preview?.url) return false;
+    c.freezeTime=time;c.freezeWeb={...preview,time};
+    if(preview.width>0&&preview.height>0){c.natW=preview.width;c.natH=preview.height;}
+  }else{delete c.freezeTime;delete c.freezeWeb;}
+  const position=Math.min(Media.displayTime(),State.duration||0);
+  recordHistory((time==null?'解除固定畫面：':'固定畫面：')+(c.name||''));
+  void Media.restoreSequenceEditState(position);
+  refreshClipEdit();
+  return true;
 }
 
 function writeNewClipFade(c,fadeIn,fadeOut){
@@ -76,7 +135,7 @@ export function setClipFade(c,fadeIn,fadeOut){
 
 export function resetClipTrim(c){
   if(!clipEditable(c)) return false;
-  const end=c.offset+c.dur;
+  const end=c.offset+c.dur/(Number(c.speed)>0?Number(c.speed):1);
   if(Seq.trackClips(c.vtrack||0).some(other=>other!==c && other.offset<end-1e-6 && Seq.clipEnd(other)>c.offset+1e-6)){
     showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return false;
   }

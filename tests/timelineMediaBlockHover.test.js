@@ -13,6 +13,23 @@ vi.hoisted(() => {
 import { paintClipBlocks } from '../src/timeline-renderer.js';
 
 describe('時間軸素材區塊的懸停行為', () => {
+  it.each([
+    { speed: .5, reverse: false, effects: ['speed'], text: '0.5×', tooltip: '速度：50%' },
+    { speed: 1, reverse: true, effects: ['reverse'], text: '反轉', tooltip: '反轉影片' },
+    { speed: 1.25, reverse: true, effects: ['speed', 'reverse'], text: '1.25×', tooltip: '速度：125%' },
+  ])('片段 $speed 倍速、反轉 $reverse 顯示獨立標記與簡短提示', ({ speed, reverse, effects, text, tooltip }) => {
+    const container = document.createElement('div');
+    paintClipBlocks(container, {
+      rows: [{ vtrack: 0, visible: true, top: 0, height: 42 }],
+      clips: [{ id: 'marked', vtrack: 0, x: 0, w: 320, name: 'Movie.mov', escapedName: 'Movie.mov', speed, reverse }],
+    });
+    const block = container.querySelector('.clip-block');
+    expect([...block.querySelectorAll('[data-clip-effect]')].map(badge => badge.dataset.clipEffect)).toEqual(effects);
+    expect(block.querySelector('.clip-effect-badges').textContent).toContain(text);
+    expect(block.title).toContain(tooltip);
+    expect(block.querySelectorAll('.clip-effect-badge svg path')).toHaveLength(effects.length);
+  });
+
   it('音訊素材區塊本身不設定原生 title，滑鼠停留時不會跳出多行資訊框', () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), 'src/timeline-renderer.js'),

@@ -28,10 +28,11 @@ flowchart LR
 | `electron/screenshot-output.js` | 截圖編號、輸出保留、暫存寫入與發布，以及退出時等待和清理 |
 | `electron/directory-output.js` | 所選輸出目錄的實體路徑核對、私有暫存寫入與安全替換 |
 | `electron/media-intake-runtime.js` | probe、Proxy、波形、聲道快取與 lease |
+| `electron/clip-audio-cache.js` | 已授權來源的反向片段預覽 WAV、內容指紋、完整性檢查與私有 staging |
 | `electron/ffmpeg-execution-engine.js` | ffmpeg／ffprobe 路徑、encoder 能力與程序執行 |
 | `electron/audio-normalization-runtime.js` | 聲量量測、音量平衡階段與原生程序取消 |
 | `electron/vocal-waveform-runtime.js` | 人聲波形模型的母素材 PCM 分段讀取、大小限制與逐 sender 取消 |
-| `electron/vocal-waveform-fingerprint.js` | 已授權母素材的非同步採樣指紋，供人聲波形持久快取核對 |
+| `electron/vocal-waveform-fingerprint.js` | 已授權來源的非同步採樣指紋，供人聲波形與反向音訊快取核對 |
 | `electron/mpv-host.js` | Windows mpv 視窗、IPC 與精準畫格呈現 |
 | `electron/export-queue.js` | 背景排程、並行、停止、重試與持久化 |
 | `electron/delivery-runner.js` | 單一交付工作的 ffmpeg 交易 |
@@ -106,6 +107,8 @@ Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案
 | `probe`、`ingest`、`streamIngest` | 媒體 probe／ingest |
 | `releaseStream` | 結束串流讀取及其快取目錄 lease |
 | `makeProxy`、`extractAudio`、`waveAudio` | 預覽快取 |
+| `clipFrame` | `ffmpeg:clipFrame`：從已授權母素材擷取指定來源影格，生成可重建的固定畫面預覽 PNG；交付仍讀原影片與固定來源時間 |
+| `reverseAudio` | `audio:reverse-clip`：從已授權來源的升冪 in／out 與音訊 stream 建立反向預覽 WAV，保持來源聲道；匯出仍從母素材編譯反向音訊 |
 | `vocalWaveChunk`、`cancelVocalWaveChunk` | `audio:vocal-wave-chunk`／`audio:vocal-wave-cancel`：讀取已授權母素材的來源時間片段，供人聲模型分析 |
 | `vocalWaveFingerprint` | `audio:vocal-wave-fingerprint`：核對已授權母素材的路徑、stat 與前／中／後段內容，回傳持久波形快取的來源指紋 |
 | `analyzeAudioLoudness` | 回傳有效聲量量測，失敗向 renderer 傳遞 |
@@ -254,6 +257,8 @@ watchdog 將一次 FFmpeg 編碼結果保存在 lease 暫存目錄；DVD 由 dvd
 `npm run native:prepare:disc` 依 `electron/disc-tools.json` 的固定來源及 SHA-256 下載工具、DLL 與授權文字，正式 Windows 包只收 manifest 所列檔案。Mac 測試包不帶這些 Windows 工具。`tests/discAuthoring.test.js` 以原生工具檢查 ISO 結構及多音軌解碼；`tests/discWatchdog.test.js` 驗證取消、復原與既有 ISO 保護。
 
 ## 5. mpv 嵌入整合（Windows）
+
+反向片段音訊由 `clip-audio-cache.js` 經共用 FFmpeg execution owner 生成；IPC 只接受已有 read capability 的來源、in／out 與 stream，輸出路徑由主程序決定。來源可以是已授權的音量平衡結果；來源指紋包含 stat 與前／中／後段內容，來源、裁切或 stream 改變即建立另一份快取。先按來源時鐘補齊缺聲與 EOF、裁切，再反轉完整區間。PCM WAV 長度與 chunk 完整性通過後才發布並授予單檔讀取權；同一工作去重，失敗及逾時清理私有 staging，取消與 app shutdown 等原生程序 close。renderer 的反向音訊播放與配線所有權見 [技術架構說明](技術架構說明.md#音訊效果與背景工作)。
 
 mpv 不是 DOM 元素，而是獨立的 OS 子視窗。`mpv-host.js` 負責：
 

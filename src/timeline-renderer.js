@@ -492,6 +492,9 @@ function renderClipBlocks(){
       trimmed: c.in > 0.01 || c.out < c.dur - 0.01,
       hasFade: c.fadeIn > 0 || c.fadeOut > 0,
       isImg: c.type === 'image',
+      frozen:Seq.isFrozen(c),
+      speed: c.speed,
+      reverse: !!c.reverse,
       hasAudioLimiter: Boolean(c.hasAudioLimiter),
       audioNormalizing: Boolean(c.audioNormalizing),
       name: c.name,
@@ -512,7 +515,7 @@ function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs){
   const res = Wave.resolution, n = pk.length / 2;
   const timeToXMap = new Float64Array(cvw + 1);
   for (let cx = 0; cx <= cvw; cx++) {
-    timeToXMap[cx] = c.in + (xToTime(x0abs + cx) - c.offset);
+    timeToXMap[cx] = Seq.toSource(xToTime(x0abs + cx),c);
   }
   
   const displayList = {
@@ -613,7 +616,7 @@ function externalAudioTimelineEntries(){
 function audioTimelineEntries(){
   return [
     // 已解除影音連結的影片只保留畫面；它的聲音已成為可獨立編輯的 external audio block。
-    ...State.clips.filter(clip=>!clip.audioDetached && clip.type !== 'image').map(clip=>({source:clip,start:clip.offset,end:Seq.clipEnd(clip),external:false})),
+    ...State.clips.filter(clip=>!clip.audioDetached && !Seq.isStill(clip)).map(clip=>({source:clip,start:clip.offset,end:Seq.clipEnd(clip),external:false})),
     ...externalAudioTimelineEntries()
   ];
 }
@@ -1319,7 +1322,7 @@ tlScroll?.addEventListener?.('mousedown',e=>{
     drag={mode, clip:c, clipEl:liveEl, startX:e.clientX, startY:e.clientY, startScroll:tlScroll.scrollLeft,
       os:c.offset, oin:c.in, oout:c.out, ov:c.vtrack||0,
       ofadeSourceOffset:c.fadeSourceOffset, ofadeSourceLength:c.fadeSourceLength,
-      leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+(c.out-c.in)), // 右鄰左緣（時間軸）
+      leftLim:nb.lo, rightLim:(nb.hi===Infinity?Infinity:nb.hi+Seq.len(c)), // 右鄰左緣（時間軸）
       nb, snaps:[...snapTargets(new Set()), ...Seq.snapEdges(c.id)],
       gesture:beginRendererGesture(mode,{targets:[{target:c,fields:['offset','in','out','vtrack','fadeSourceOffset','fadeSourceLength']}],context:{
         startPoint:{x:e.clientX,y:e.clientY},
@@ -1529,7 +1532,7 @@ const _handleDragUpdate = (e) => {
       mode:drag.mode,
       original:{
         offset:drag.os,in:drag.oin,out:drag.oout,
-        duration:c.dur,type:c.type,vtrack:drag.ov,
+        duration:c.dur,type:c.type,vtrack:drag.ov,speed:c.speed,reverse:c.reverse,
         fadeSourceOffset:drag.ofadeSourceOffset,fadeSourceLength:drag.ofadeSourceLength,
       },
       deltaTime:dt,
@@ -1958,11 +1961,30 @@ export function paintClipBlocks(container, displayList) {
     el.dataset.vtrack = c.vtrack;
     
     try {
-      const icon = c.isImg ? '🖼️' : '🎬';
+      const icon = c.frozen ? '🧊' : c.isImg ? '🖼️' : '🎬';
       const trimmedMarker = c.trimmed ? ' ✂' : '';
       const fadeMarker = c.hasFade ? ' ⌁' : '';
       const fxMarker = c.audioNormalizing ? ' ⏳' : (c.hasAudioLimiter ? ' 🎚' : '');
-      el.innerHTML = `<div class="edge l"></div><div class="clip-label">${icon} ${c.escapedName}${trimmedMarker}${fadeMarker}${fxMarker}</div><div class="edge r"></div>`;
+      const effects = [];
+      const rate = Number.isFinite(Number(c.speed)) && Number(c.speed) > 0 ? Number(c.speed) : 1;
+      if (!c.isImg && rate !== 1) effects.push({
+        kind: 'speed', value: `${+rate.toFixed(3)}×`, title: `速度：${+(rate * 100).toFixed(3)}%（${+rate.toFixed(3)} 倍速）`,
+        path: 'M4 17a8 8 0 1 1 16 0M12 13l4-4M4 17h16',
+      });
+      if (!c.isImg && c.reverse) effects.push({
+        kind: 'reverse', value: '反轉', title: '反轉影片',
+        path: 'm11 6-7 6 7 6V6Zm9 0-7 6 7 6V6Z',
+      });
+      let effectMarkers = '';
+      if (effects.length) {
+        el.classList.add('has-playback-effects');
+        // 標記不接收 pointer；由區塊提供簡短 tooltip，修剪邊緣與拖曳保持原事件目標。
+        el.title = effects.map(effect => effect.title).join('；');
+        effectMarkers = `<div class="clip-effect-badges${c.w < 72 ? ' compact' : ''}">${effects.map(effect =>
+          `<span class="clip-effect-badge ${effect.kind}" data-clip-effect="${effect.kind}" role="img" aria-label="${escapeHTML(effect.title)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${effect.path}"/></svg><span class="clip-effect-value">${effect.value}</span></span>`
+        ).join('')}</div>`;
+      }
+      el.innerHTML = `<div class="edge l"></div><div class="clip-label">${icon} ${c.escapedName}${trimmedMarker}${fadeMarker}${fxMarker}</div>${effectMarkers}<div class="edge r"></div>`;
       row.appendChild(el);
     } catch(err) {
       console.error('renderClipBlocks error on clip', c, err);

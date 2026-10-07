@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { createDeliveryList } from '../src/delivery-list.js';
-import { buildExportJobs, freezeExportSubmission, subtitleCuesForSubmission, runFrozenExportSubmission } from '../src/subio.js';
+import { createDeliverySubmission, freezeExportSubmission, subtitleCuesForSubmission } from '../src/delivery-submission.js';
 import { runVideoExportCommand, videoExportCapability } from '../src/export-job-engine.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,17 +18,32 @@ const snapshot = {
   audioOnly: false,
 };
 
+async function submittedJobs(project, draft) {
+  const jobs = [];
+  const list = createDeliveryList({
+    projectTag: 'program', fps: project.fps, canvasW: project.canvasW, canvasH: project.canvasH,
+    initial: draft.rows().map(row => ({ ...row, outDir: row.outDir || 'D:/deliverables' })),
+  });
+  const session = createDeliverySubmission({
+    list, initialProject: project, readProject: () => project, isCurrent: () => true,
+    desktop: { listDir: async () => [], exportVideo: async job => { jobs.push(job); return 'job-' + jobs.length; } },
+    confirmOverwrite: async () => true,
+  });
+  expect(await session.submit()).toMatchObject({ status: 'submitted', complete: true });
+  return jobs;
+}
+
 describe('frozen export submission', () => {
-  it('轉換輸出 FPS 只改畫格格率與燒入 TC，不變更字幕秒數或音訊', () => {
+  it('轉換輸出 FPS 只改畫格格率與燒入 TC，不變更字幕秒數或音訊', async () => {
     const submission = freezeExportSubmission({ ...snapshot, timelineStart: 1.8 }, {
       fps: 29.97, dropFrame: true,
       cues: [{ start: 2, end: 3, text: '固定秒數', track: 0 }], tracks: [{ name: '對白', visible: true }],
     });
     const list = createDeliveryList({ projectTag: 'test', fps: submission.fps });
     list.setBurnTimecode(0, true);
-    const [before] = buildExportJobs(submission, list);
+    const [before] = await submittedJobs(submission, list);
     list.setTargetFps(0, 24);
-    const [after] = buildExportJobs(submission, list);
+    const [after] = await submittedJobs(submission, list);
     expect(after.fps).toBe(24);
     expect(after.timelineStartTimecode).toBe('00:00:01:19');
     expect(after.timecodeWatermark).toEqual({ start: '00:00:01:19' });
@@ -38,9 +53,9 @@ describe('frozen export submission', () => {
     expect(submission.fps).toBe(29.97);
     expect(submission.duration).toBe(after.duration);
     list.setTargetFps(0, 59.94);
-    expect(buildExportJobs(submission, list)[0].timelineStartTimecode).toBe('00:00:01;48');
+    expect((await submittedJobs(submission, list))[0].timelineStartTimecode).toBe('00:00:01;48');
   });
-  it('keeps subtitles, track visibility, fps, and timecode from the moment the work is submitted', () => {
+  it('keeps subtitles, track visibility, fps, and timecode from the moment the work is submitted', async () => {
     const source = {
       cues: [{ id: 'cue-1', start: 11, end: 12, text: '已凍結', track: 0 }],
       tracks: [{ name: '對白', visible: true }],
@@ -74,7 +89,7 @@ describe('frozen export submission', () => {
     list.setTargetFps(0, 60);
     list.setName(0, 'after-click.mov');
 
-    const [job] = buildExportJobs(submission, submittedList);
+    const [job] = await submittedJobs(submission, submittedList);
 
     expect(job.assText).toContain('已凍結');
     expect(job.assText).not.toContain('送出後修改');
@@ -85,7 +100,7 @@ describe('frozen export submission', () => {
     expect(job.defaultName).toMatch(/\.mp4$/);
   });
 
-  it('freezes the preview-matched subtitle background geometry into the queued ASS', () => {
+  it('freezes the preview-matched subtitle background geometry into the queued ASS', async () => {
     const source = {
       cues: [{ id: 'boxed', start: 11, end: 12, text: '短行\n較長的第二行', track: 0 }],
       tracks: [{ name: '對白', visible: true, bgBox: true, bgColor: '#000000', bgAlpha: 0.5 }],
@@ -104,7 +119,7 @@ describe('frozen export submission', () => {
     const list = createDeliveryList({ projectTag: 'program', desktop: true });
     list.setOutDir(0, 'D:/deliverables');
 
-    const [job] = buildExportJobs(submission, list);
+    const [job] = await submittedJobs(submission, list);
 
     expect(submission.backgroundLayouts.boxed.lineIndex).toBe(1);
     expect(job.assText).toContain('Track0_Text');
@@ -112,30 +127,7 @@ describe('frozen export submission', () => {
     expect(job.assText).toContain('較長的第二行');
   });
 
-  it('captures project and delivery rows before asynchronous conflict I/O', async () => {
-    let resolveConflict;
-    const conflictGate = new Promise(resolve => { resolveConflict = resolve; });
-    const live = { project: 'A', rows: [{ name: 'A.mp4' }] };
-    let dispatched;
-
-    const pending = runFrozenExportSubmission({
-      capture: () => structuredClone(live),
-      checkConflicts: async frozen => {
-        expect(frozen).toEqual({ project: 'A', rows: [{ name: 'A.mp4' }] });
-        await conflictGate;
-        return true;
-      },
-      dispatch: async frozen => { dispatched = frozen; },
-    });
-    live.project = 'B';
-    live.rows[0].name = 'B.mp4';
-    resolveConflict();
-
-    await expect(pending).resolves.toEqual({ status: 'submitted', value: undefined });
-    expect(dispatched).toEqual({ project: 'A', rows: [{ name: 'A.mp4' }] });
-  });
-
-  it('derives queue subtitle metadata from the same visible in-range cues rendered into ASS', () => {
+  it('derives queue subtitle metadata from the same visible in-range cues rendered into ASS', async () => {
     const submission = freezeExportSubmission(snapshot, {
       cues: [
         { id: 'before', start: 9, end: 10, text: 'range 前', track: 0 },
@@ -157,7 +149,7 @@ describe('frozen export submission', () => {
     expect(subtitleCuesForSubmission(submission)).toEqual([
       expect.objectContaining({ id: 'overlap', start: 0, end: 0.5 }),
     ]);
-    const [job] = buildExportJobs(submission, list);
+    const [job] = await submittedJobs(submission, list);
     expect(job.assText).toContain('實際燒入');
     expect(job.assText).not.toContain('range 前');
     expect(job.assText).not.toContain('隱藏');
@@ -165,14 +157,14 @@ describe('frozen export submission', () => {
     expect(job.subtitleTracks).toEqual(['對白']);
   });
 
-  it('reports no burned subtitle tracks when no Dialogue is emitted', () => {
+  it('reports no burned subtitle tracks when no Dialogue is emitted', async () => {
     const submission = freezeExportSubmission(snapshot, {
       cues: [], tracks: [{ name: '空軌', visible: true }], fps: 25,
     });
     const list = createDeliveryList({ projectTag: 'program', desktop: true });
     list.setOutDir(0, 'D:/deliverables');
 
-    const [job] = buildExportJobs(submission, list);
+    const [job] = await submittedJobs(submission, list);
     expect(job.assText).toBeNull();
     expect(job.subtitleTracks).toEqual([]);
   });

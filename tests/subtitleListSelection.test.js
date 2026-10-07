@@ -104,8 +104,8 @@ vi.mock('../src/timeline-edit-transaction.js', async importOriginal => ({
   beginTimelineTrackEdit: vi.fn(),
   updateTimelineTrack: vi.fn(),
 }));
-vi.mock('../src/sequence.js', () => ({
-  Seq: { active: vi.fn(() => false), byId: vi.fn(), neighborBounds: vi.fn(), clipEnd: vi.fn(), snapEdges: () => [] },
+vi.mock('../src/sequence.js', async importOriginal => ({
+  Seq: { ...(await importOriginal()).Seq, active: vi.fn(() => false), byId: vi.fn(), neighborBounds: vi.fn(), clipEnd: vi.fn(), snapEdges: () => [] },
 }));
 vi.mock('../src/timeline-interaction-engine.js', async (importOriginal) => {
   const actual = await importOriginal();

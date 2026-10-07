@@ -415,6 +415,42 @@ describe('project load transactions', () => {
     expect(mediaMock.seek).not.toHaveBeenCalled();
   });
 
+  it.each(['稍後', '重新匯入', '取消選取'])('缺主素材後修改字幕，%s 完成不得重設 Undo 或將修改標為已保存', async action => {
+    desk.stat.mockImplementation(path => Promise.resolve({ exists: path !== 'C:/media/missing-A.mov' }));
+    const data = projectData('A', 'C:/media/missing-A.mov', 13);
+    data.externalAudioSources = [{ audioSourceId: 'audio-A', path: 'C:/audio/A.wav', in: 0, out: 10, offset: 2, duration: 10 }];
+    mediaMock.restoreExternalAudioSource.mockImplementation(async source => source);
+    await Project.loadDesktop({ path: 'C:/projects/A.subtool', b64: projectB64(data) });
+    const buttons = uiMock.openModal.mock.calls.at(-1)[2];
+    const plan = Project.pendingMediaRelink().plan;
+    State.cues[0].text = '等待期間修改';
+    History.record('修改字幕');
+    const historyLength = History.stack.length;
+    const reset = vi.spyOn(History, 'reset');
+    expect(isProjectDirty()).toBe(true);
+    if (action !== '稍後') {
+      desk.openMedia.mockResolvedValue(action === '重新匯入' ? 'C:/media/found-A.mov' : null);
+      mediaMock.loadDesktopMedia.mockImplementation(async (_path, restorePlan) => {
+        restorePlan.consumeMediaRelink();
+        const clip = { ...restorePlan.pendingClips()[0], id: 'relinked-primary', path: _path };
+        State.clips = [clip];
+        restorePlan.replaceClips([]);
+        emit('media:projectReady', { clips: [clip] });
+      });
+    }
+    await buttons[action === '稍後' ? 1 : 0].act();
+    expect(reset).not.toHaveBeenCalled();
+    expect(History.stack).toHaveLength(historyLength);
+    expect(State.cues[0].text).toBe('等待期間修改');
+    expect(isProjectDirty()).toBe(true);
+    expect(plan.peekPlayhead()).toBe(action === '重新匯入' ? null : 13);
+    if (action === '重新匯入') expect(mediaMock.seek).toHaveBeenCalledWith(13);
+    else expect(mediaMock.seek).not.toHaveBeenCalled();
+    History.undo();
+    expect(State.cues[0].text).toBe('A');
+    if (action === '重新匯入') expect(State.clips.map(clip => clip.id)).toEqual(['relinked-primary']);
+  });
+
   it('does not restore a saved playhead after starting a new project before media becomes ready', async () => {
     desk.stat.mockResolvedValue({ exists: false });
 
@@ -508,6 +544,27 @@ describe('project load transactions', () => {
     expect(mediaMock.waitForPendingProjectRestore).toHaveBeenCalledTimes(1);
     expect(mediaMock.seek).toHaveBeenCalledWith(13);
     expect(restorePlan.peekPlayhead()).toBeNull();
+  });
+
+  it('browser File 重連保留等待期間的字幕 Undo 與 dirty，使用既有 projectReady rebase', async () => {
+    await Project.load(projectFile(projectData('Browser', null, 13)));
+    const { generation, plan } = Project.pendingMediaRelink();
+    State.cues[0].text = '瀏覽器等待期間修改';
+    History.record('修改字幕');
+    const reset = vi.spyOn(History, 'reset');
+    const clip = { ...plan.pendingClips()[0], id: 'browser-primary', path: null, web: { url: 'blob:relinked' } };
+    State.clips = [clip];
+    plan.replaceClips([]);
+    plan.consumeMediaRelink();
+    emit('media:projectReady', { clips: [clip] });
+    await Project.finishBrowserMediaRelink(generation, plan);
+    expect(reset).not.toHaveBeenCalled();
+    expect(History.stack).toHaveLength(2);
+    expect(isProjectDirty()).toBe(true);
+    expect(plan.peekPlayhead()).toBeNull();
+    History.undo();
+    expect(State.cues[0].text).toBe('Browser');
+    expect(State.clips.map(item => item.id)).toEqual(['browser-primary']);
   });
 
   it('開新專案會撤銷尚未完成的瀏覽器重新連結 hand-off', async () => {

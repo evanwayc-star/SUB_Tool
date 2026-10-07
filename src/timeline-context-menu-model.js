@@ -1,6 +1,10 @@
 /* SUB Tool — 時間軸媒體右鍵選單模型
    只描述項目、順序與鎖定可用性；DOM 呈現與實際命令留在 menus.js。 */
 
+// SVG 前綴由既有 splitMenuLabel 放入圖示欄，避免依賴系統的 emoji 字型。
+const DETACH_AUDIO_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m10 7 2-2a4 4 0 0 1 6 6l-2 2M14 17l-2 2a4 4 0 0 1-6-6l2-2M3 3l18 18"/></svg>';
+const AUDIO_BALANCE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 3v4m0 4v10M12 3v10m0 4v4M19 3v4m0 4v10M3 7h4v4H3zM10 13h4v4h-4zM17 7h4v4h-4z"/></svg>';
+
 function action(id, label, act, extra = {}) {
   return {
     id,
@@ -75,6 +79,7 @@ export function buildVideoClipMenu(context, actions = {}) {
     hasPrevious = false,
     hasNext = false,
     hasFade = false,
+    frozen = false,
   } = context || {};
 
   const typeLabel = isImage ? '圖片' : '影片';
@@ -91,6 +96,9 @@ export function buildVideoClipMenu(context, actions = {}) {
   appendGroup(items, [
     canSplit ? action('split_at_playhead', '✂ 在播放點切割（Ctrl+K）', actions.splitAtPlayhead) : null,
     action('edit_duration', '⏳ 修改持續時間…', actions.editDuration),
+    !isImage ? action('edit_speed', '⏩ 修改速度／反轉影片…', actions.editSpeed) : null,
+    !isImage ? action('freeze_clip', '🧊 固定畫面…', actions.freezeClip,{checked:frozen}) : null,
+    !isImage && frozen ? action('unfreeze_clip', '▶ 解除固定畫面', actions.unfreezeClip) : null,
     action('edit_geometry', `📐 ${typeLabel}大小與位置…`, actions.editGeometry),
     trimmed ? action('reset_trim', '↺ 重設修剪（還原完整長度）', actions.resetTrim) : null,
   ]);
@@ -99,8 +107,8 @@ export function buildVideoClipMenu(context, actions = {}) {
     appendGroup(items, audioDetached
       ? [note('audio_detached_status', '🔇 此影片原音已解除連結')]
       : [
-          action('detach_audio', '🔗✂ 影音分離', actions.detachAudio),
-          action('hard_limiter', '音訊平衡', actions.openHardLimiter),
+          action('detach_audio', `${DETACH_AUDIO_ICON} 影音分離`, actions.detachAudio),
+          action('hard_limiter', `${AUDIO_BALANCE_ICON} 音訊平衡`, actions.openHardLimiter),
           action('audio_routing', '🎧 音訊配線…', actions.openAudioRouting),
         ]);
   }
@@ -158,7 +166,7 @@ export function buildAudioClipMenu(context, actions = {}) {
   }
 
   appendGroup(items, [
-    action('hard_limiter', '音訊平衡', actions.openHardLimiter),
+    action('hard_limiter', `${AUDIO_BALANCE_ICON} 音訊平衡`, actions.openHardLimiter),
     action('audio_routing', '🎧 音訊配線…', actions.openAudioRouting),
   ]);
   appendGroup(items, waveformItems(waveOptions, selectedWave, actions));
@@ -188,7 +196,7 @@ export function buildAudioTrackMenu(context, actions = {}) {
     canReveal ? action('reveal_source', '📂 在檔案管理器中顯示', actions.revealSource) : null,
   ], { separator: false });
   appendGroup(items, [
-    action('hard_limiter', '音訊平衡', actions.openHardLimiter),
+    action('hard_limiter', `${AUDIO_BALANCE_ICON} 音訊平衡`, actions.openHardLimiter),
     action('audio_routing', '🎧 音訊配線…', actions.openAudioRouting),
   ]);
   appendGroup(items, waveformItems(waveOptions, selectedWave, actions,waveSourceCount>1?'整列各片段':'此素材'));

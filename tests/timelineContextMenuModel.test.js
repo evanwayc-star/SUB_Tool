@@ -91,6 +91,8 @@ describe('影片／圖片片段右鍵選單', () => {
       'separator',
       'split_at_playhead',
       'edit_duration',
+      'edit_speed',
+      'freeze_clip',
       'edit_geometry',
       'reset_trim',
       'separator',
@@ -111,6 +113,7 @@ describe('影片／圖片片段右鍵選單', () => {
     expect(items[0]).toMatchObject({ heading: true, label: '🎬 master.mov' });
     expect(itemById(items, 'reveal_source')?.label).toBe('📂 在檔案管理器中顯示');
     expect(itemById(items, 'audio_routing')?.label).toBe('🎧 音訊配線…');
+    expect(itemById(items, 'edit_speed')?.label).toBe('⏩ 修改速度／反轉影片…');
     expect(itemById(items, 'remove_clip')?.label).toBe('🗑 從時間軸移除此片段');
     expectCleanSeparators(items);
   });

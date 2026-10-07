@@ -81,6 +81,9 @@ function planClipGesturePreview({
   const inPoint = Number(original.in) || 0;
   const outPoint = Number(original.out) || 0;
   const duration = Number(original.duration ?? original.dur) || outPoint;
+  const speed=Number(original.speed)>0?Number(original.speed):1;
+  const reverse=!!original.reverse&&original.type!=='image';
+  const clipLength=(outPoint-inPoint)/speed;
   const result = {
     offset,
     in: inPoint,
@@ -95,7 +98,7 @@ function planClipGesturePreview({
 
   if (mode === 'clip-move') {
     let nextOffset = offset + deltaTime;
-    const length = outPoint - inPoint;
+    const length = clipLength;
     const atStart = snapValue(nextOffset, snaps, snapThreshold);
     const atEnd = snapValue(nextOffset + length, snaps, snapThreshold);
     if (atStart !== nextOffset) {
@@ -113,8 +116,8 @@ function planClipGesturePreview({
   if (mode === 'clip-l') {
     const minDelta = original.type === 'image'
       ? leftLimit - offset
-      : Math.max(-inPoint, leftLimit - offset);
-    const maxDelta = (outPoint - minLength) - inPoint;
+      : Math.max(reverse?-(duration-outPoint)/speed:-inPoint/speed, leftLimit - offset);
+    const maxDelta = clipLength - minLength;
     let delta = clamp(deltaTime, minDelta, maxDelta);
     let left = offset + delta;
     const snapped = snapValue(left, snaps, snapThreshold);
@@ -133,15 +136,16 @@ function planClipGesturePreview({
     delta = left - offset;
     result.offset = left;
     if (original.type === 'image') result.out = outPoint - delta;
-    else result.in = Math.max(0, inPoint + delta);
+    else if(reverse) result.out=Math.min(duration,outPoint-delta*speed);
+    else result.in = Math.max(0, inPoint + delta*speed);
     // 原窗屬母段：保留內容的修剪須沿用原時間位置，影片與圖片都一樣。
     if (result.fadeSourceLength != null) result.fadeSourceOffset = Math.max(0, result.fadeSourceOffset + delta);
     return Object.freeze(result);
   }
 
   const minEdge = offset + minLength;
-  const maxEdge = Math.min(rightLimit, offset + (duration - inPoint));
-  let edge = clamp(offset + (outPoint + deltaTime - inPoint), minEdge, maxEdge);
+  const maxEdge = Math.min(rightLimit, offset + (reverse?outPoint:duration-inPoint)/speed);
+  let edge = clamp(offset + clipLength + deltaTime, minEdge, maxEdge);
   const snapped = snapValue(edge, snaps, snapThreshold);
   if (snapped !== edge && snapped >= minEdge - 1e-9 && snapped <= maxEdge + 1e-9) {
     edge = snapped;
@@ -149,7 +153,8 @@ function planClipGesturePreview({
   }
   edge = snapFrameWithin(edge, minEdge, maxEdge, frame, frameStep);
   if (edge == null) return Object.freeze(result);
-  result.out = clamp(inPoint + (edge - offset), inPoint + minLength, duration);
+  if(reverse) result.in=clamp(outPoint-(edge-offset)*speed,0,outPoint-minLength*speed);
+  else result.out = clamp(inPoint + (edge - offset)*speed, inPoint + minLength*speed, duration);
   return Object.freeze(result);
 }
 

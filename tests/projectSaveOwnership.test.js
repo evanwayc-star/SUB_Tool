@@ -68,6 +68,20 @@ describe('project save ownership',()=>{
     State.clips=[];State.duration=0;History.reset();
   });
 
+  it.each([false,true])('變速片段固定=%s 保存時間軸長度與來源幀，不保存 PNG 預覽快取',async frozen=>{
+    State.cues=[];
+    const clip={id:'speed',path:'C:/movie.mp4',dur:6,in:0,out:6,offset:2,vtrack:0,speed:2,reverse:true};
+    if(frozen) Object.assign(clip,{freezeTime:1,freezeWeb:{url:'subtool-local://frame'}});
+    State.clips=[clip];State.duration=5;History.reset();
+    await Project.saveAs();
+    const saved=decode(desk.saveProject.mock.calls[0][1]);
+    expect(saved.duration).toBe(5);
+    expect(saved.clips[0]).toMatchObject({path:'C:/movie.mp4',in:0,out:6,offset:2,speed:2,reverse:true});
+    expect(saved.clips[0]).not.toHaveProperty('freezeWeb');
+    if(frozen) expect(saved.clips[0].freezeTime).toBe(1);
+    else expect(saved.clips[0]).not.toHaveProperty('freezeTime');
+  });
+
   it('keeps edits made during disk IO dirty against the exact saved bytes',async()=>{
     const io=deferred();desk.saveProject.mockReturnValue(io.promise);
     const saving=Project.saveAs();

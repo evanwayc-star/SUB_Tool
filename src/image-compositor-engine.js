@@ -10,6 +10,7 @@
 
 import { imageBox, trackFrame } from '../shared/image-geometry.cjs';
 import { clipLength, fadeWindow } from '../shared/clip-fade.cjs';
+import { fixedFrameTime } from '../shared/clip-visual.cjs';
 
 export { imageBox, trackFrame, clipLength, fadeWindow };
 
@@ -18,6 +19,7 @@ const clamp01 = (v, d) => Math.max(0, Math.min(1, num(v, d)));
 const EPS = 0.001;
 
 export function imageSourceUrl(clip){
+  if(fixedFrameTime(clip)!=null) return clip.freezeWeb?.url||'';
   let url=clip?.web?.url||clip?.path||'';
   if(url&&!/^(https?|file|blob|data|subtool-local):/i.test(url)) url='file:///'+url.replace(/\\/g,'/');
   return url;
@@ -27,6 +29,7 @@ export function imageSourceUrl(clip){
    同一個 compositor 畫完整層序，不能把兩種素材拆成各自的 stack。 */
 export function visualStackPlan(activeClips,videoTracks){
   const clips=(activeClips||[]).filter(c=>videoTracks?.[c.vtrack||0]?.visible!==false)
+    .map(c=>fixedFrameTime(c)!=null?{...c,type:'image'}:c)
     .slice().sort((a,b)=>(a.vtrack||0)-(b.vtrack||0));
   const videos=clips.filter(c=>c.type!=='image');
   const images=clips.filter(c=>c.type==='image');

@@ -117,7 +117,18 @@ let _saveBaseName  = null;   // 基礎名稱（不含副檔名），自動備份
 let _autoSaveTimer = null;
 let _lastSavedDataStr = null; // 用於判斷專案是否被修改
 let _autoRelinkNeedsSave = false; // 載入時找到新素材路徑，但磁碟上的專案尚未寫入新路徑
-const _projectLoadSession = new ProjectLoadSession();
+const _projectLoadSession = new ProjectLoadSession({
+  media: Media,
+  desktop: IS_DESKTOP,
+  stat: DESK?.stat ? path => DESK.stat(path) : null,
+  normalizeExternalSources: _normalExternalAudioSources,
+  publishExternalSources: sources => {
+    State.externalAudioState = sources;
+    State.externalAudioEnd = _externalAudioEnd(sources);
+  },
+  finishProject: _finishProjectLoad,
+  report: (stage, error, path) => console.warn(stage, path || '', error || ''),
+});
 let _openRequestGeneration = 0;
 let _saveEpoch = 0;
 let _saveTail = Promise.resolve();
@@ -189,67 +200,6 @@ function _normalisedProjectData(rawData){
   return null;
 }
 
-async function _restorePendingExternalAudioSources(plan=_projectLoadSession.activePlan){
-  const ownsPlan=()=>_projectLoadSession.activePlan===plan&&(!plan?.owns||plan.owns());
-  const pending=_normalExternalAudioSources(plan?.pendingExternalAudioSources?.());
-  if(!pending.length){ plan?.replaceExternalAudioSources?.([]); return {restored:0,pending:0}; }
-  if(!IS_DESKTOP||typeof Media.restoreExternalAudioSource!=='function') return {restored:0,pending:pending.length};
-
-  const existing=new Set();
-  try{
-    for(const source of (Media.externalAudio?.list?.() || [])){
-      if(source?.audioSourceId) existing.add(String(source.audioSourceId));
-    }
-  }catch(e){}
-
-  const unresolved=[];
-  let restored=0;
-  for(const source of pending){
-    if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
-    if(existing.has(source.audioSourceId)){ restored++; continue; }
-    if(!source.path){ unresolved.push(source); continue; }
-    let exists=true;
-    if(typeof DESK?.stat==='function'){
-      try{ exists=!!(await DESK.stat(source.path))?.exists; }catch(e){ exists=false; }
-    }
-    if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
-    if(!exists){
-      console.warn('external audio source is unavailable:',source.path);
-      unresolved.push(source);
-      continue;
-    }
-    try{
-      // _restore 避免每支外部音檔重新載入時搶走主影片的目前音源選取。
-      const asset=await Media.restoreExternalAudioSource({...source,_restore:true},null,ownsPlan);
-      if(!ownsPlan()){
-        // Production restore returns the exact runtime object it inserted.  A
-        // test adapter may ignore the upstream lease, so only remove by id
-        // when object identity proves the stale asset is still registered.
-        if(asset&&Array.isArray(Media.externalAudioSources)&&Media.externalAudioSources.includes(asset)){
-          Media.removeExternalAudio?.(asset.id,{record:false});
-        }
-        return {restored:0,pending:pending.length,cancelled:true};
-      }
-      if(asset){ existing.add(source.audioSourceId); restored++; }
-      else unresolved.push(source);
-    }catch(e){
-      if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
-      console.warn('restore external audio source:',source.path,e);
-      unresolved.push(source);
-    }
-  }
-  if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
-  plan?.replaceExternalAudioSources?.(unresolved);
-  // 未找到檔案的來源仍要保留其可編輯 timeline metadata；否則一開專案就會被
-  // 影片長度截短，下一次另行重新連結音檔時位置也會看起來消失。
-  let live=[];
-  try{ live=Media.externalAudio?.list?.() || []; }catch(e){}
-  if(!ownsPlan()) return {restored:0,pending:pending.length,cancelled:true};
-  State.externalAudioState=[...(Array.isArray(live)?live:[]),...unresolved];
-  State.externalAudioEnd=_externalAudioEnd(State.externalAudioState);
-  return {restored,pending:unresolved.length};
-}
-
 function _buildProjectData(){
   // 先合併 pending 素材，再由 History 的同一 seam 排除尚未提交的預覽。
   // 輸入只含純 metadata；runtime Audio / File / waveform 不跨這個 interface。
@@ -257,8 +207,7 @@ function _buildProjectData(){
   const savedAudio=_savedExternalAudioSources();
   const committed=History.committedSnapshot({clips:savedClips,externalAudioState:savedAudio});
   const cueEnd=committed.cues.reduce((end,cue)=>cue.timed!==false?Math.max(end,Number(cue.end)||0):end,0);
-  const clipEnd=committed.clips.reduce((end,c)=>Math.max(end,Math.max(0,Number(c.offset)||0)
-    +Math.max(0,(Number(c.out)||0)-(Number(c.in)||0))),0);
+  const clipEnd=committed.clips.reduce((end,c)=>Math.max(end,Math.max(0,Number(c.offset)||0)+Seq.len(c)),0);
   const duration=savedClips.length||savedAudio.length
     ? Math.max(cueEnd,_externalAudioEnd(committed.externalAudioState),clipEnd)
     : State.duration;
@@ -498,20 +447,6 @@ function _finishProjectLoad(){
   setStatus('專案已載入','ok');
 }
 
-function _restorePendingPlayhead(plan=_projectLoadSession.activePlan){
-  const raw=plan?.peekPlayhead?.();
-  if(!Number.isFinite(raw)) return false;
-  const target=Math.max(0,raw);
-  try{
-    Media.seek(target);
-    plan?.clearPlayhead?.();
-    return true;
-  }catch(error){
-    console.warn('restore project playhead:',error);
-    return false;
-  }
-}
-
 /* ProjectLoadSession owns the latest-wins generation, serial runtime tail, and
    temporary restore material. Project and Media exchange the plan explicitly
    instead of smuggling it through State. */
@@ -682,13 +617,7 @@ const Project = {
      restore 後才還原播放點；不能再靠已移除的全域 media:projectReady 訂閱。 */
   async finishMediaRelink(generation,plan){
     if(!_isCurrentProjectLoad(generation)||_projectLoadSession.activePlan!==plan) return false;
-    try{ await Media.waitForPendingProjectRestore?.(); }catch(error){ console.warn('restore browser project clips:',error); }
-    if(!_isCurrentProjectLoad(generation)||_projectLoadSession.activePlan!==plan) return false;
-    await _restorePendingExternalAudioSources(plan);
-    if(!_isCurrentProjectLoad(generation)||_projectLoadSession.activePlan!==plan) return false;
-    _restorePendingPlayhead(plan);
-    _finishProjectLoad();
-    return true;
+    return _projectLoadSession.restoreMedia(generation,{kind:'ready'});
   },
   // 保留明確名稱給既有 browser 呼叫端；實際語意由同一個跨平台 completion 收斂。
   finishBrowserMediaRelink(generation,plan){ return this.finishMediaRelink(generation,plan); },
@@ -877,7 +806,7 @@ const Project = {
           if(_isCurrentProjectLoad(generation)) emit('project:relinkBrowserMedia',generation,plan);
         }},{label:'稍後',act:closeModal}]);
     }
-    if(_isCurrentProjectLoad(generation)) _finishProjectLoad();
+    await _projectLoadSession.restoreMedia(generation,{kind:'deferred'});
   },
   loadDesktop(r){
     return _queueProjectLoad(generation=>this._loadDesktop(r,generation));
@@ -907,14 +836,8 @@ const Project = {
     if(r.path){ _savePath=r.path; _saveBaseName=r.path.replace(/\\/g,'/').split('/').pop().replace(/\.subtool$/i,''); if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave,3*60*1000); }
     if(mp){
       if(mediaStat?.exists){
-        // 等主影片完成初始化後才掛外部音檔，避免 Media.loadDesktopMedia 的 reset 清掉剛重建的音源。
-        try{ await Media.loadDesktopMedia(mp,plan); }catch(e){ console.warn('load project media:',e); }
-        // _registerPrimary 會背景還原其餘影片／圖片；Undo 基準必須等它們全部完成。
-        try{ await Media.waitForPendingProjectRestore?.(); }catch(e){ console.warn('restore project clips:',e); }
-        if(!_isCurrentProjectLoad(generation)) return;
-        await _restorePendingExternalAudioSources(plan);
-        if(!_isCurrentProjectLoad(generation)) return;
-        _restorePendingPlayhead(plan);
+        await _projectLoadSession.restoreMedia(generation,{kind:'load',path:mp});
+        return;
       }
       else openModal('找不到原影片',
         `專案紀錄的影片路徑不存在：<br><br><b>${escapeHTML(mp)}</b><br><br>請手動重新匯入。字幕已還原。`,
@@ -926,33 +849,22 @@ const Project = {
           if(!_isCurrentProjectLoad(generation)) return;
           // 開啟影音現在可多選；這個「找回原主影片」流程只需要第一個檔案。
           const p=Array.isArray(picked)?picked[0]:picked;
-          if(p){
-            try{ await Media.loadDesktopMedia(p,plan); }catch(e){ console.warn('load replacement media:',e); }
-            try{ await Media.waitForPendingProjectRestore?.(); }catch(e){ console.warn('restore replacement clips:',e); }
-            if(!_isCurrentProjectLoad(generation)) return;
-          }
-          await _restorePendingExternalAudioSources(plan);
-          if(_isCurrentProjectLoad(generation)) _restorePendingPlayhead(plan);
+          await _projectLoadSession.restoreMedia(generation,p?{kind:'load',path:p}:{kind:'audio'});
           });
         }},{label:'稍後',act:()=>{
           if(!_isCurrentProjectLoad(generation)){ closeModal(); return Promise.resolve(); }
           return _appendProjectLoad(generation,async()=>{
             closeModal();
-            await _restorePendingExternalAudioSources(plan);
+            await _projectLoadSession.restoreMedia(generation,{kind:'audio'});
           });
         }}]);
     }else{
       // 純音訊專案沒有主影片可觸發 reset，因此先清舊媒體，再重建外部音檔。
       try{ Media.reset(); }catch(e){}
-      // 純圖片專案同樣沒有主影片可觸發 _registerPrimary；直接從 restore plan
-      // 資料重建圖片，否則重開後只剩空時間軸。
-      try{ await Media.restorePendingImageClips?.(plan); }catch(e){ console.warn('restore pending image clips:',e); }
-      if(!_isCurrentProjectLoad(generation)) return;
-      await _restorePendingExternalAudioSources(plan);
-      if(!_isCurrentProjectLoad(generation)) return;
-      _restorePendingPlayhead(plan);
+      await _projectLoadSession.restoreMedia(generation,{kind:'images'});
+      return;
     }
-    if(_isCurrentProjectLoad(generation)) _finishProjectLoad();
+    await _projectLoadSession.restoreMedia(generation,{kind:'deferred'});
   }
 };
 

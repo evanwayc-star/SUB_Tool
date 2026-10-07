@@ -83,6 +83,127 @@ describe('editor mutation ownership through public commands',()=>{
     State.clips.push(clip('background',{offset:3,out:2,dur:2}));click('套用');
     expect(c.offset+c.out).toBeLessThanOrEqual(State.clips.find(c=>c.id==='background').offset);
   });
+  it('片段降為半速後同軌後段右移，其他軌不動，且只記一次編輯',()=>{
+    const c=clip('speed',{out:4,dur:4});
+    const next=clip('next',{out:2,dur:2,offset:5});
+    const other=clip('other',{out:2,dur:2,offset:5,vtrack:1});
+    State.clips=[c,next,other];History.reset();
+    Menus.showClipSpeed(c);
+    document.getElementById('clipSpeedPercent').value='50';
+    click('套用');
+    expect(c.speed).toBe(0.5);
+    expect(next.offset).toBe(9);
+    expect(other.offset).toBe(5);
+    History.undo();
+    expect(State.clips.find(clip=>clip.id==='speed').speed).toBe(1);
+    expect(State.clips.find(clip=>clip.id==='next').offset).toBe(5);
+  });
+  it('變速與反轉片段在窄區塊仍保留兩個 SVG 標記，且標記不攔截修剪或拖曳',async()=>{
+    const c=clip('marked',{out:.1,dur:.1,speed:2,reverse:true});State.clips=[c];
+    const style=document.createElement('style');style.textContent=fs.readFileSync(path.join(ROOT,'src/styles.css'),'utf8');document.head.appendChild(style);
+    try{
+      const Timeline=await timeline();
+      const block=document.querySelector('.clip-block[data-clip-id="marked"]');
+      expect(block.style.width).toBe('6px');
+      expect(block.title).toContain('速度：200%');expect(block.title).toContain('反轉影片');
+      for(const effect of ['speed','reverse']){
+        const badge=block.querySelector(`[data-clip-effect="${effect}"]`);
+        expect(badge).not.toBeNull();expect(badge.querySelector('svg path')).not.toBeNull();
+        expect(getComputedStyle(badge).pointerEvents).toBe('none');
+      }
+      expect(getComputedStyle(block).overflow).toBe('visible');
+      expect(getComputedStyle(block.querySelector('.clip-effect-value')).display).toBe('none');
+      expect(block.querySelectorAll('.edge')).toHaveLength(2);
+      c.speed=1;c.reverse=false;Timeline.drawTimeline();
+      const restored=document.querySelector('.clip-block[data-clip-id="marked"]');
+      expect(restored.querySelector('[data-clip-effect]')).toBeNull();
+      expect(restored.hasAttribute('title')).toBe(false);
+    }finally{style.remove();}
+  });
+  it('反轉影片仍顯示原音區塊與變速後範圍，固定畫面與已分離原音維持排除',async()=>{
+    State.clips=[
+      clip('reverse-audio',{offset:1,speed:2,reverse:true,audioSourceId:'reverse-source'}),
+      clip('frozen-audio',{freezeTime:1,audioSourceId:'frozen-source'}),
+      clip('detached-audio',{audioDetached:true,audioSourceId:'detached-source'}),
+    ];
+    await timeline();
+    const block=document.querySelector('.audio-clip-block[data-clip-id="reverse-audio"]');
+    expect(block).not.toBeNull();
+    expect(block.dataset.audioStart).toBe('1');expect(block.dataset.audioEnd).toBe('3');
+    expect(block.style.width).toBe('160px');
+    expect(document.querySelector('.audio-clip-block[data-clip-id="frozen-audio"]')).toBeNull();
+    expect(document.querySelector('.audio-clip-block[data-clip-id="detached-audio"]')).toBeNull();
+  });
+  it('速度視窗說明反轉時原音同步反向播放',()=>{
+    const c=clip('reverse-hint');State.clips=[c];Menus.showClipSpeed(c);
+    const text=document.getElementById('modalBody').textContent;
+    expect(text).toContain('原音同步反向播放');
+    expect(text).not.toContain('原音會靜音');
+  });
+  it('片段變長仍留在空隙內時不移動後段；碰到鎖定後段則拒絕套用',()=>{
+    const c=clip('speed',{out:4,dur:4});
+    const next=clip('next',{out:2,dur:2,offset:10});
+    State.clips=[c,next];History.reset();
+    Menus.showClipSpeed(c);
+    document.getElementById('clipSpeedPercent').value='50';click('套用');
+    expect(c.speed).toBe(0.5);
+    expect(next.offset).toBe(10);
+    next.offset=9;next.locked=true;
+    Menus.showClipSpeed(c);
+    document.getElementById('clipSpeedPercent').value='25';click('套用');
+    expect(c.speed).toBe(0.5);
+    expect(next.offset).toBe(9);
+  });
+  it('速度視窗開啟後軌道被鎖定，舊草稿不得推動後續片段',()=>{
+    const c=clip('speed',{out:4,dur:4});
+    const next=clip('next',{out:2,dur:2,offset:5});
+    State.clips=[c,next];History.reset();
+    Menus.showClipSpeed(c);
+    document.getElementById('clipSpeedPercent').value='50';
+    State.videoTracks[0].locked=true;click('套用');
+    expect(c.speed).toBeUndefined();
+    expect(next.offset).toBe(5);
+  });
+  it('固定畫面保留長度、位置與來源，Undo 可解除，再從來源影格恢复',async()=>{
+    const c=clip('freeze',{in:1,out:5,dur:6,offset:2,speed:2});State.clips=[c];History.reset();
+    const prepared=vi.spyOn(Media,'prepareClipFreeze').mockResolvedValue({url:'blob:fixed-frame',time:3});
+    const restored=vi.spyOn(Media,'restoreSequenceEditState').mockResolvedValue([]);
+    try{
+      Menus.showClipFreeze(c);document.getElementById('clipFreezeFrame').value='76';click('固定畫面');
+      await Promise.resolve();await Promise.resolve();
+      expect(c).toMatchObject({freezeTime:3,path:'C:/freeze.mp4',in:1,out:5,offset:2,speed:2,freezeWeb:{url:'blob:fixed-frame'}});
+      expect(prepared).toHaveBeenCalledWith(c,3);
+      History.undo();expect(c.freezeTime).toBeUndefined();expect(c.freezeWeb).toBeUndefined();
+      History.redo();expect(c.freezeTime).toBe(3);
+    }finally{prepared.mockRestore();restored.mockRestore();}
+  });
+  it('來源幀尚未讀完時取消固定視窗，晚到影格不得修改片段',async()=>{
+    const c=clip('freeze');State.clips=[c];History.reset();
+    let finish;const prepared=vi.spyOn(Media,'prepareClipFreeze').mockReturnValue(new Promise(resolve=>{finish=resolve;}));
+    try{
+      Menus.showClipFreeze(c);click('固定畫面');UI.closeModal();
+      finish({url:'blob:late-frame',time:1});await Promise.resolve();await Promise.resolve();
+      expect(c.freezeTime).toBeUndefined();expect(c.freezeWeb).toBeUndefined();
+    }finally{prepared.mockRestore();}
+  });
+  it.each([[2.033333,61],[2.066667,62]])('最後一幀以來源 FPS 對齊，%s 秒的固定視窗只允許 %s 格',async(duration,frames)=>{
+    const {clipFreezeTarget}=await import(ROOT+'/src/clip-model.js');
+    const c=clip('partial',{out:duration,dur:duration,fps:30,reverse:true});State.clips=[c];
+    expect(clipFreezeTarget(c,0)).toBe((frames-1)/30);
+    Menus.showClipFreeze(c);
+    const input=document.getElementById('clipFreezeFrame');
+    expect(input.max).toBe(String(frames));expect(input.value).toBe(String(frames));
+  });
+  it('固定段與下層影片重疊時切割固定段，右段立即沿用同一來源幀',()=>{
+    const lower=clip('lower',{out:8,dur:8});
+    const fixed=clip('fixed',{out:8,dur:8,vtrack:1,freezeTime:1,freezeWeb:{url:'blob:fixed-frame',time:1}});
+    State.clips=[lower,fixed];History.reset();
+    expect(Media.splitClipAt(4)).toBe(true);
+    expect(lower.out).toBe(8);expect(fixed.out).toBe(4);
+    const right=State.clips.find(c=>c!==lower&&c!==fixed);
+    expect(right).toMatchObject({in:4,out:8,offset:4,freezeTime:1});
+    expect(right.freezeWeb).toBe(fixed.freezeWeb);
+  });
   it('clip fade confirmation respects a track locked since opening',()=>{
     const c=clip('fade');State.clips=[c];History.reset();
     Menus.showClipFade(c);document.getElementById('cfInV').value='00:00:01:00';
@@ -288,6 +409,23 @@ describe('editor mutation ownership through public commands',()=>{
     const size=document.getElementById('igS');size.value='200';size.dispatchEvent(new Event('input'));expect(c.scale).toBe(2);
     c.locked=true;c.name='background';State.notes.push({id:'background-note',time:2,text:'keep'});History.record('background');
     click('取消');expect(c.scale).toBe(1);expect(c.locked).toBe(true);expect(c.name).toBe('background');expect(State.notes).toHaveLength(1);
+  });
+  it('geometry modal cancellation preserves a newer scale and rolls back only its owned coordinates',()=>{
+    const c=clip('geometry',{scale:1,posX:.5,posY:.5});State.clips=[c];History.reset();
+    Menus.showImageGeom(c);vi.advanceTimersByTime(1);
+    const size=document.getElementById('igS');size.value='200';size.dispatchEvent(new Event('input'));
+    const position=document.getElementById('igX');position.value='60';position.dispatchEvent(new Event('input'));
+    c.scale=3;c.name='background';History.record('background geometry');
+    expect(History.committedSnapshot().clips[0]).toMatchObject({scale:3,posX:.5,name:'background'});
+    click('取消');expect(c).toMatchObject({scale:3,posX:.5,name:'background'});
+    History.undo();History.redo();expect(State.clips.find(item=>item.id===c.id)).toMatchObject({scale:3,posX:.5,name:'background'});
+  });
+  it('geometry modal cannot absorb a background edit made before its first input',()=>{
+    const c=clip('geometry',{scale:1});State.clips=[c];History.reset();
+    Menus.showImageGeom(c);vi.advanceTimersByTime(1);c.scale=3;History.record('background geometry');
+    const size=document.getElementById('igS');size.value='200';size.dispatchEvent(new Event('input'));
+    click('套用');expect(c.scale).toBe(3);click('取消');expect(c.scale).toBe(3);
+    expect(History.stack).toHaveLength(2);
   });
   it('a context-menu swap rejects same-ID replacement clips introduced while the menu is open',()=>{
     const previous=clip('previous'),c=clip('later',{offset:4});State.clips=[previous,c];History.reset();

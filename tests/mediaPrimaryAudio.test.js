@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import {vi,beforeAll,beforeEach,afterEach,it,expect} from 'vitest';
+import {vi,beforeAll,beforeEach,afterEach,it,expect,describe} from 'vitest';
 const dom=vi.hoisted(()=>{
  const video={style:{},src:'',readyState:1,duration:12,videoWidth:1920,videoHeight:1080,playbackRate:1,currentTime:0,muted:false,hasAttribute:()=>false,pause:vi.fn(),dispatchEvent:vi.fn()};
  const elements=new Map();return {video,$(id){if(!elements.has(id))elements.set(id,{style:{},textContent:'',innerHTML:'',value:'',addEventListener:vi.fn(),removeEventListener:vi.fn(),classList:{add:vi.fn(),remove:vi.fn()},querySelectorAll:()=>[],getBoundingClientRect:()=>({left:0,top:0,width:640,height:360})});return elements.get(id);}};
@@ -228,4 +228,100 @@ it('一般媒體入口 lazy import 尚未完成就換專案，不能再啟動舊
   expect(window.subtool.openMedia).not.toHaveBeenCalled();
   expect(add).not.toHaveBeenCalled();
  }finally{add.mockRestore();delete window.subtool.openMedia;}
+});
+
+describe('反向音訊來源準備與替換',()=>{
+ let timelineClock,sourceClock;
+ beforeEach(()=>{
+  globalThis.Audio.prototype.readyState=1;
+  window.subtool.reverseAudio=vi.fn(async({path,in:start,out:end})=>({path:path+'.reverse.wav',duration:end-start}));
+  timelineClock=vi.spyOn(Media,'tlTime').mockReturnValue(20.5);sourceClock=vi.spyOn(Media,'vTime').mockReturnValue(3);
+ });
+ afterEach(()=>{timelineClock.mockRestore();sourceClock.mockRestore();delete globalThis.Audio.prototype.readyState;delete window.subtool.reverseAudio;});
+ function reverseSource(){
+  Media.ensureCtx();
+  const clip=Seq.add({id:'reverse-preview',name:'reverse',primary:true,path:'C:/original.mov',dur:12,
+   in:1,out:4,offset:20,speed:2,reverse:true,audioSrc:'video',audioSourceId:'reverse-source'});
+  ensureAudioSourceMap(clip.audioSourceId,[{sourceStream:1,sourceChannel:0},{sourceStream:1,sourceChannel:1}]);
+  const track={kind:'element',source:'video',audioSourceId:clip.audioSourceId,sourceStream:1,sourceChannel:1,
+   file:'C:/mono-cache.wav',el:new Audio(),gain:AudioEngine.createGain(),analyser:AudioEngine.createAnalyser(),
+   volume:1,muted:false,solo:false,_srcHidden:false};
+  Media.tracks.push(track);Media.activeClipId=clip.id;dom.video.currentTime=3;
+  return {clip,track};
+ }
+ it('cached mono 以stream0/channel0讀取；反向來源時鐘、route M/S與gain保留',async()=>{
+  const {clip,track}=reverseSource();
+  expect(Media.audioSourcePlayback('video',20.5)).toEqual({clip,reverse:true,sourceTime:3,offset:1,rate:2});
+  expect(await Media.prepareClipReverseAudio(clip)).toBe(true);
+  expect(window.subtool.reverseAudio).toHaveBeenCalledWith({path:track.file,in:1,out:4,sourceStream:0});
+  const gain=track.gain;Media.applyGains();expect(Media.trackAudible(track)).toBe(true);expect(gain.gain.value).toBeGreaterThan(0);
+  track.muted=true;Media.applyGains();expect(gain.gain.value).toBe(0);
+  track.muted=false;Media.applyGains();expect(track.gain).toBe(gain);expect(gain.gain.value).toBeGreaterThan(0);
+ });
+ it('播放中安裝音效會準備新multichannel stream並沿用新聲道gain，不再靜音',async()=>{
+  const {clip,track}=reverseSource();
+  await Media.prepareClipReverseAudio(clip);Media.playing=true;Media.startElementSources(3,20.5);
+  const oldReverse=audioElements.find(el=>el.src==='file:///'+track.file+'.reverse.wav');
+  await vi.waitFor(()=>expect(oldReverse.play).toHaveBeenCalled());
+  const effectEl=new Audio();
+  const prepared={streams:[{sourceStream:1,outputPath:'C:/processed-stereo.wav',el:effectEl,
+   node:AudioEngine.createMediaElementSource(effectEl),descriptors:[{sourceStream:1,sourceChannel:0},{sourceStream:1,sourceChannel:1}]}],
+   outputPath:'C:/processed-stereo.wav',peaks:null};
+  Media._installAudioEffect(clip,prepared,{mode:'limiter'});
+  await vi.waitFor(()=>expect(window.subtool.reverseAudio).toHaveBeenCalledWith({path:'C:/processed-stereo.wav',in:1,out:4,sourceStream:0}));
+  await vi.waitFor(()=>{
+   const reverse=audioElements.filter(el=>el.src==='file:///C:/processed-stereo.wav.reverse.wav');expect(reverse).toHaveLength(2);
+   for(const el of reverse) expect(el.play).toHaveBeenCalled();
+  });
+  expect(Media.tracks.filter(t=>t._audioEffect)).toHaveLength(2);
+  for(const current of Media.tracks){expect(current.gain.gain.value).toBeGreaterThan(0);expect(current.el.play).not.toHaveBeenCalled();}
+  expect(oldReverse.src).toBe('');expect(oldReverse.pause).toHaveBeenCalled();
+ });
+ it('播放中晚到原音cache替換會重新準備反向音源，原正向element不播放',async()=>{
+  const {clip,track}=reverseSource();
+  await Media.prepareClipReverseAudio(clip);Media.playing=true;Media.startElementSources(3,20.5);
+  const oldReverse=audioElements.find(el=>el.src==='file:///'+track.file+'.reverse.wav');
+  await vi.waitFor(()=>expect(oldReverse.play).toHaveBeenCalled());
+  const incoming={...track,file:'C:/late-mono-cache.wav',el:new Audio(),gain:AudioEngine.createGain(),analyser:AudioEngine.createAnalyser()};
+  Media._commitOriginalAudioTracks(clip,[incoming],{replace:true});Media.syncMuteState();Media._restartElements();
+  await vi.waitFor(()=>expect(audioElements.find(el=>el.src==='file:///'+incoming.file+'.reverse.wav')?.play).toHaveBeenCalled());
+  expect(oldReverse.src).toBe('');expect(incoming.el.play).not.toHaveBeenCalled();expect(incoming.gain.gain.value).toBeGreaterThan(0);
+ });
+ it('同ID新片段取代後，晚到reverse cache不能安裝或啟動',async()=>{
+  const {clip}=reverseSource();let resolveCache;
+  window.subtool.reverseAudio.mockImplementationOnce(()=>new Promise(resolve=>{resolveCache=resolve;}));
+  const pending=Media.prepareClipReverseAudio(clip);State.clips=[{...clip}];
+  resolveCache({path:'C:/late-reverse.wav',duration:3});
+  expect(await pending).toBe(false);expect(audioElements.some(el=>el.src==='file:///C:/late-reverse.wav')).toBe(false);
+ });
+ it('native反向音源在late獨立cache接管時失去所有權，不會因新track靜音而漏聲',async()=>{
+  const {clip,track}=reverseSource();track.kind='native';delete track.file;
+  await Media.prepareClipReverseAudio(clip);Media.playing=true;Media.startElementSources(3,20.5);
+  const oldReverse=audioElements.find(el=>el.src==='file:///C:/original.mov.reverse.wav');
+  await vi.waitFor(()=>expect(oldReverse.play).toHaveBeenCalled());
+  const incoming={...track,kind:'element',file:'C:/late-native-cache.wav',el:new Audio(),
+   gain:AudioEngine.createGain(),analyser:AudioEngine.createAnalyser()};
+  Media._commitOriginalAudioTracks(clip,[incoming]);incoming.muted=true;Media.applyGains();
+  expect(track.gain.gain.value).toBeGreaterThan(0);expect(incoming.gain.gain.value).toBe(0);
+  expect(oldReverse.src).toBe('');expect(oldReverse.pause).toHaveBeenCalled();
+  const plays=oldReverse.play.mock.calls.length;
+  expect(await Media.prepareClipReverseAudio(clip)).toBe(true);Media.startElementSources(3,20.5);
+  await vi.waitFor(()=>expect(audioElements.find(el=>el.src==='file:///C:/late-native-cache.wav.reverse.wav')?.play).toHaveBeenCalled());
+  expect(oldReverse.play).toHaveBeenCalledTimes(plays);expect(incoming.el.play).not.toHaveBeenCalled();
+ });
+ it('同track graph被替換後晚到cache不會接到舊gain，下一次可重建',async()=>{
+  const {clip,track}=reverseSource();let resolveCache;
+  window.subtool.reverseAudio.mockImplementationOnce(()=>new Promise(resolve=>{resolveCache=resolve;}));
+  const pending=Media.prepareClipReverseAudio(clip);track.gain=AudioEngine.createGain();track.analyser=AudioEngine.createAnalyser();
+  resolveCache({path:'C:/old-graph-reverse.wav',duration:3});
+  expect(await pending).toBe(false);expect(audioElements.some(el=>el.src==='file:///C:/old-graph-reverse.wav')).toBe(false);
+  expect(await Media.prepareClipReverseAudio(clip)).toBe(true);
+ });
+ it('固定畫面与解除音訊連結不準備反向音源，也不提供source playback',async()=>{
+  const {clip}=reverseSource();clip.audioDetached=true;
+  expect(await Media.prepareClipReverseAudio(clip)).toBe(true);expect(Media.audioSourcePlayback('video',20.5)).toBeNull();
+  clip.audioDetached=false;clip.freezeTime=2;
+  expect(await Media.prepareClipReverseAudio(clip)).toBe(true);expect(Media.audioSourcePlayback('video',20.5)).toBeNull();
+  expect(window.subtool.reverseAudio).not.toHaveBeenCalled();
+ });
 });

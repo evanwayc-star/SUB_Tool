@@ -3,19 +3,20 @@ import { $ } from './dom.js';
 import { secToEncore, snapTimeToFrame, getExactFps, fmtClock } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { sortCues, trackLocked, cuesTrackLocked, burnedSubtitleTrackNames, subtitleTimeOnFrame, shiftCueTimes } from './subtitle-model.js';
+import { sortCues, trackLocked, cuesTrackLocked, subtitleTimeOnFrame, shiftCueTimes } from './subtitle-model.js';
 import { renderASS, SubFormats } from './formats.js';
 import { drawTimeline, layoutTimeline } from './timeline-renderer.js';
 import { emit } from './events.js';
 import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
 import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
-import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec, videoExportCapability } from './export-job-engine.js';
+import { applyDeliveryAudioSpec, createDeliveryAudioSpec, videoExportCapability } from './export-job-engine.js';
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
+import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission } from './delivery-submission.js';
 import { escapeHTML, encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
@@ -493,135 +494,50 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     });
   }
 
-  let conflictCheckGeneration = 0;
-  async function checkConflicts(isSubmitting = false, candidate = list) {
-    // A newer edit (or submission) owns the warning. Directory reads can finish out of order.
-    const generation = ++conflictCheckGeneration;
-    if (!session.isCurrent() || !ownsWorkspace()) return false;
-    const msg = $('evConflictMsg');
-    if (!msg) return true;
-    const isCurrentPreview = () => session.isCurrent() && ownsWorkspace() &&
-      (isSubmitting || (generation === conflictCheckGeneration && $('evConflictMsg') === msg));
-
-    const blocking = candidate.problems().filter(p => p.kind === 'blocking')[0];
-    if (blocking) {
-      msg.textContent = blocking.message;
-      msg.style.display = 'flex';
-      if (isSubmitting) alert(blocking.submitMessage || blocking.message);
-      return false;
-    }
-
-    if (IS_DESKTOP) {
-      try {
-        const conflicts = [];
-        for (const { dir, name } of candidate.outPaths()) {
-          if (!dir) continue;
-          const files = await DESK.listDir(dir);
-          if (!isCurrentPreview()) return false;
-          const existing = files.map(f => (typeof f === 'string' ? f : f.name).toLowerCase());
-          if (existing.includes(name.toLowerCase())) conflicts.push(name);
-        }
-        if (conflicts.length > 0) {
-          msg.textContent = `警告：硬碟上已存在同名檔案 (${conflicts.join(', ')})，匯出將會直接覆蓋。`;
-          msg.style.display = 'block';
-          if (isSubmitting) return confirm(`硬碟上已存在同名檔案：\n${conflicts.join(', ')}\n\n確定要直接覆蓋並繼續匯出嗎？`);
-          return true;
-        }
-      } catch(e){}
-    }
-
-    if (!isCurrentPreview()) return false;
-    msg.style.display = 'none';
-    return true;
-  }
-
-  function freezeCurrentDeliveryList(submission, rows = list.rows()) {
-    return createDeliveryList({
-      projectTag: projectTagFrom(submission.mediaName),
-      fps: submission.fps || 25,
-      canvasW: submission.canvasW || 1920,
-      canvasH: submission.canvasH || 1080,
-      audioOnly: !!submission.audioOnly,
-      defaultAudioLayout: submission.defaultAudioLayout || {},
-      desktop: IS_DESKTOP,
-      // rows() is a detached snapshot. Async conflict checks cannot let later
-      // UI edits alter the jobs built for this submission.
-      initial: rows,
-    });
-  }
+  const checkConflicts = () => submission.previewConflicts();
 
   const session = openModal('匯出影片', html, [
     { label: '取消', act: closeModal },
     { label: '加入匯出序列', id: 'evSubmitBtn', primary: true, act: async () => {
-      if (!session.isCurrent() || !ownsWorkspace()) return;
-      const submitButton = $('evSubmitBtn');
-      if (submitButton?.disabled) return;
-      if (submitButton) {
-        submitButton.disabled = true;
-        submitButton.textContent = '加入中…';
-        submitButton.setAttribute('aria-busy', 'true');
+      const result = await submission.submit();
+      if (session.isCurrent() && ownsWorkspace()) {
+        if (result.status === 'invalid') showToast(result.reason);
+        if (result.status === 'failed') {
+          showToast('送出失敗: ' + (result.error.message || result.error));
+          console.error(result.error);
+        }
+        if (result.complete) session.close({ committed: true });
       }
-      try {
-        const result = await runFrozenExportSubmission({
-          // D3: capture project data and editable delivery rows synchronously,
-          // before checkConflicts performs directory I/O.
-          capture: () => {
-            if (!session.isCurrent() || !ownsWorkspace()) return null;
-            const submission = _captureExportDraft();
-            const rowSubmission = list.captureSubmissionRows();
-            return submission ? { submission, submittedList: freezeCurrentDeliveryList(submission, rowSubmission.rows), rowSubmission } : null;
-          },
-          validate: ({ submission, submittedList }) => {
-            if (submission.audioOnly && !submission.audioPlan) return '純音訊 WAV 匯出需要專案音軌路由';
-            const unresolved = submission.audioPlan?.unresolvedSources || [];
-            if (unresolved.length) {
-              return `找不到可供匯出的音訊母素材：${unresolved.map(item=>item.name).join('、')}。請重新連結來源檔。`;
-            }
-            if (!!submission.audioOnly !== audioOnly) return '匯出素材在交付清單開啟後已變更，請重新開啟清單確認交付格式。';
-            if (submittedList.count() === 0) return '清單不能為空';
-            return null;
-          },
-          checkConflicts: ({ submittedList }) => checkConflicts(true, submittedList),
-          dispatch: async ({ submission, submittedList, rowSubmission }) => {
-            const ownsSubmission = () => session.isCurrent() && ownsWorkspace();
-            if (!ownsSubmission()) return 0;
-            const jobs = buildExportJobs(submission, submittedList);
-            let accepted = 0;
-            for (let index = 0; index < jobs.length; index++) {
-              if (!ownsSubmission()) break;
-              // Later edits belong to a new draft; do not send their captured predecessor.
-              if (!rowSubmission.matches(index)) continue;
-              const job = jobs[index];
-              const jobId = await DESK.exportVideo(job);
-              if (!jobId) break;
-              accepted++;
-              if (!ownsSubmission()) break;
-              rowSubmission.removeAccepted(index);
-              updateRows();
-              showToast(`排入佇列: ${job.defaultName}`);
-            }
-            if (ownsSubmission() && list.count() === 0) session.close({ committed: true });
-            if (accepted && typeof DESK.openQueueMonitor === 'function') {
-              setTimeout(() => { if (ownsWorkspace()) DESK.openQueueMonitor(); }, 150);
-            }
-            return accepted;
-          },
-        });
-        if (result.status === 'invalid') {
-          showToast(result.reason);
-        }
-      } catch (err) {
-        showToast('送出失敗: ' + (err.message || err));
-        console.error(err);
-      } finally {
-        if (submitButton) {
-          submitButton.disabled = false;
-          submitButton.textContent = '加入匯出序列';
-          submitButton.removeAttribute('aria-busy');
-        }
+      if (result.accepted && typeof DESK.openQueueMonitor === 'function') {
+        setTimeout(() => { if (ownsWorkspace()) DESK.openQueueMonitor(); }, 150);
       }
     }}
   ], { width: 'min(920px,96vw)' });
+
+  const submission = createDeliverySubmission({
+    list, initialProject: data, readProject: _captureExportDraft,
+    isCurrent: () => session.isCurrent() && ownsWorkspace(),
+    desktop: DESK,
+    confirmOverwrite: names => confirm(`硬碟上已存在同名檔案：\n${names.join(', ')}\n\n確定要直接覆蓋並繼續匯出嗎？`),
+    onChanged: ({ busy, warning, accepted }) => {
+      const button = $('evSubmitBtn');
+      if (button) {
+        button.disabled = busy;
+        button.textContent = busy ? '加入中…' : '加入匯出序列';
+        if (busy) button.setAttribute('aria-busy', 'true');
+        else button.removeAttribute('aria-busy');
+      }
+      const message = $('evConflictMsg');
+      if (message) {
+        message.textContent = warning?.message || '';
+        message.style.display = warning ? (warning.kind === 'blocking' ? 'flex' : 'block') : 'none';
+      }
+      if (accepted) {
+        updateRows();
+        showToast(`排入佇列: ${accepted.name}`);
+      }
+    },
+  });
 
   $('evAddRowBtn').onclick = () => {
     list.add(); updateRows(); checkConflicts();
@@ -1049,127 +965,5 @@ if (typeof document !== 'undefined') {
 
 
 
-
-/* ==============================================================================
-   匯出交付工作構建與事務邊界 (Export Delivery Engine)
-   ============================================================================== */
-
-/**
- * 凍結當前專案與匯出範圍快照。
- * 匯出的 DeliveryJob 絕不可往回讀取可變的 State。
- */
-export function freezeExportSubmission(snapshot, {
-  cues = [], tracks = [], fps = 25, dropFrame = false,
-  backgroundLayouts = {},
-  mediaName = '', canvasW = 1920, canvasH = 1080,
-  audioProject = null, defaultAudioLayout = {}, hasCustomRange = false,
-} = {}) {
-  if (!snapshot) return null;
-  return structuredClone({
-    ...snapshot,
-    cues,
-    tracks,
-    backgroundLayouts,
-    fps,
-    dropFrame,
-    mediaName,
-    canvasW,
-    canvasH,
-    audioProject,
-    defaultAudioLayout,
-    hasCustomRange,
-  });
-}
-
-/**
- * 依據匯出時間範圍切片並過濾出可見字幕軌。
- */
-export function subtitleCuesForSubmission(submission) {
-  if (submission?.audioOnly) return [];
-  const expIn = submission?.timelineStart != null ? submission.timelineStart : 0;
-  const duration = Number(submission?.duration);
-  const clipDuration = Number.isFinite(duration) && duration >= 0 ? duration : Infinity;
-  const expOut = expIn + clipDuration;
-  const tracks = Array.isArray(submission?.tracks) ? submission.tracks : [];
-  return (Array.isArray(submission?.cues) ? submission.cues : [])
-    .filter(cue => {
-      if (!cue || cue.timed === false) return false;
-      const trackIndex = Number.isInteger(cue.track) ? cue.track : 0;
-      if (tracks[trackIndex]?.visible === false) return false;
-      return Number(cue.end) > expIn && Number(cue.start) < expOut;
-    })
-    .map(cue => ({
-      ...cue,
-      start: Math.max(0, Number(cue.start) - expIn),
-      end: Math.min(clipDuration, Number(cue.end) - expIn),
-    }))
-    .filter(cue => Number.isFinite(cue.start) && Number.isFinite(cue.end) && cue.end > cue.start);
-}
-
-/**
- * 產出符合匯出範圍之 ASS 字串與字幕陣列。
- */
-export function subtitlePayloadForSubmission(submission) {
-  const cues = subtitleCuesForSubmission(submission);
-  if (!cues.length) return { assText: null, cues };
-  const assText = renderASS(cues, {
-    fps: submission?.fps,
-    tracks: submission?.tracks,
-    dropFrame: submission?.dropFrame,
-    backgroundLayouts: submission?.backgroundLayouts,
-  });
-  return { assText: /\nDialogue:/.test(assText) ? assText : null, cues };
-}
-
-/**
- * 依據凍結快照與 DeliveryList 編譯產出純淨的 ExportJob 清單。
- */
-export function buildExportJobs(submission, list) {
-  const expIn = submission.timelineStart != null ? submission.timelineStart : 0;
-  const subtitlePayload = subtitlePayloadForSubmission(submission);
-
-  return list.toJobs({
-    clips: submission.clips,
-    videoTracks: submission.videoTracks,
-    duration: submission.duration,
-    assText: subtitlePayload.assText,
-    subtitleTracks: burnedSubtitleTrackNames(submission.tracks, subtitlePayload.cues),
-    timelineStartTimecode: secToEncore(expIn, submission.fps, submission.dropFrame),
-    // FPS-SYNC：保留時間軸秒數，燒入 TC 以每份交付的影格率換算。
-    timecodeForFps: fps => secToEncore(expIn, fps, submission.dropFrame),
-    composeAudioPlan: composeDeliveryAudioPlan,
-    compiledAudioPlan: submission.audioPlan,
-  });
-}
-
-/**
- * 執行凍結狀態的匯出送交事務流程。
- */
-export async function runFrozenExportSubmission({
-  capture,
-  validate = () => null,
-  checkConflicts = () => true,
-  dispatch,
-} = {}) {
-  if (typeof capture !== 'function' || typeof dispatch !== 'function') {
-    throw new TypeError('capture and dispatch are required');
-  }
-
-  const frozen = capture();
-  if (!frozen) {
-    return { status: 'invalid', reason: '目前沒有可匯出的影片或外部音訊' };
-  }
-
-  const invalidReason = validate(frozen);
-  if (invalidReason) {
-    return { status: 'invalid', reason: invalidReason };
-  }
-
-  if (!(await checkConflicts(frozen))) {
-    return { status: 'cancelled' };
-  }
-
-  return { status: 'submitted', value: await dispatch(frozen) };
-}
 
 export { renderASS };

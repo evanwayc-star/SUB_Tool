@@ -215,8 +215,10 @@ describe('圖片疊層：結束拖曳', () => {
     const labels = [];
     const d = makeDrag({ recordHistory: m => labels.push(m) });
     d.startImageDrag({ id: 'i1', x: 0, y: 0 });
+    d.moveImageDrag(100, 50);
     d.finishImageDrag();
     d.startImageDrag({ id: 'i1', corner: 'se', x: 0, y: 0 });
+    d.moveImageDrag(100, 50);
     d.finishImageDrag();
     expect(labels).toEqual(['移動圖片位置', '調整圖片大小']);
   });
@@ -314,6 +316,22 @@ describe('圖片疊層：結束拖曳', () => {
     expect(Object.hasOwn(clip, 'posX')).toBe(false);
     expect(Object.hasOwn(clip, 'posY')).toBe(false);
     expect(labels).toEqual([]);
+  });
+  it.each(['image','frozen'])('%s 預覽同欄位被背景改寫時取消，只還原自己仍擁有的座標', kind => {
+    const clip=State.clips[0];
+    if(kind==='frozen'){delete clip.type;clip.freezeTime=0;}
+    const labels=[];const d=makeDrag({recordHistory:label=>labels.push(label)});
+    d.bind({imageLayer:document.getElementById('imageLayer')});
+    d.startImageDrag({id:clip.id,x:0,y:0});d.moveImageDrag(100,50);
+    clip.posX=.8;clip.name='背景名稱';d.moveImageDrag(200,100);
+    expect(clip).toMatchObject({posX:.8,posY:.5,name:'背景名稱'});
+    expect(labels).toEqual([]);
+  });
+  it('圖片開始拖曳後來源軌被替換，舊 pointer 不可修改該軌內容', () => {
+    const clip=State.clips[0];const d=makeDrag();
+    d.startImageDrag({id:clip.id,x:0,y:0});
+    State.videoTracks[0]={name:'替代軌',visible:true,locked:false};d.moveImageDrag(100,50);
+    expect(clip).toMatchObject({posX:.5,posY:.5});
   });
 });
 

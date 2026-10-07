@@ -56,7 +56,24 @@ contextBridge.exposeInMainWorld('subtool', {
   stopExport:   (jobId) => ipcRenderer.invoke('ffmpeg:stopExport', jobId),
   openQueueMonitor: () => ipcRenderer.invoke('queue:openMonitor'),
   probe:        (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffprobe', p); },
+  clipFrame:    (request) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少固定畫面參數');
+    const { path, time, fps } = request;
+    if (typeof path !== 'string' || !path.trim() || path.length > 32767 || path.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
+    if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) throw new RangeError('固定畫面來源時間必須是非負有限秒數');
+    if (typeof fps !== 'number' || !Number.isFinite(fps) || fps <= 0 || fps > 240) throw new RangeError('固定畫面 FPS 必須大於 0 且不超過 240');
+    return ipcRenderer.invoke('ffmpeg:clipFrame', { path, time, fps });
+  },
   makeProxy:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:proxy', { path: p, duration }); },
+  reverseAudio: (request) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少反向音訊參數');
+    const { path, in: start, out: end, sourceStream = 0 } = request;
+    if (typeof path !== 'string' || !path.trim() || path.length > 32767 || path.includes('\0')) throw new TypeError('缺少有效的來源路徑');
+    if (typeof start !== 'number' || !Number.isFinite(start) || start < 0
+      || typeof end !== 'number' || !Number.isFinite(end) || end <= start) throw new RangeError('反向音訊來源範圍必須是遞增的有限秒數');
+    if (!Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream > 255) throw new TypeError('無效的來源音訊串流');
+    return ipcRenderer.invoke('audio:reverse-clip', { path, in: start, out: end, sourceStream });
+  },
   extractAudio: (p, idx, duration, codec) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:extractAudio', { path: p, idx, duration, codec }); },
   waveAudio:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:waveAudio', { path: p, duration }); },
   vocalWaveFingerprint: (source) => {

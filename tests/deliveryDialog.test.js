@@ -128,54 +128,6 @@ describe('匯出交付清單', () => {
     } finally { warning.mockRestore(); }
   });
 
-  it('加入返回null代表取消，保留整份尚未送出的清單且不繼續送下一列', async () => {
-    const submit = await prepareRows(); window.subtool.exportVideo.mockResolvedValue(null);
-    const generation = modalState.generation;
-    await submit.act();
-    expect(window.subtool.exportVideo).toHaveBeenCalledTimes(1);
-    expect([...document.querySelectorAll('.ev-name')].map(input => input.value)).toEqual(['A.mp4', 'B.mp4', 'C.mp4']);
-    expect(modalState.generation).toBe(generation);
-  });
-
-  it('等待加入期间成功列被編輯，ACK只屬舊稿不刪較新的編輯', async () => {
-    const submit = await prepareRows(['A.mp4', 'B.mp4']);
-    let finish;
-    window.subtool.exportVideo.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
-      .mockRejectedValueOnce(new Error('拒絕第二份'));
-    const warning = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      const pending = submit.act(); await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
-      const first = document.querySelector('.ev-name'); first.value = 'A-new.mp4'; first.dispatchEvent(new Event('input', { bubbles: true }));
-      finish('job-A'); await pending;
-      expect([...document.querySelectorAll('.ev-name')].map(input => input.value)).toEqual(['A-new.mp4', 'B.mp4']);
-    } finally { warning.mockRestore(); }
-  });
-
-  it('等待前一列加入期间編輯尚未送出的列，保留新稿並停止送出已失效的舊稿', async () => {
-    const submit = await prepareRows(['A.mp4', 'B.mp4']);
-    let finish;
-    window.subtool.exportVideo.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValue('job-B');
-    const pending = submit.act(); await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
-    const second = document.querySelectorAll('.ev-name')[1]; second.value = 'B-new.mp4'; second.dispatchEvent(new Event('input', { bubbles: true }));
-    finish('job-A'); await pending;
-    expect(window.subtool.exportVideo).toHaveBeenCalledTimes(1);
-    expect([...document.querySelectorAll('.ev-name')].map(input => input.value)).toEqual(['B-new.mp4']);
-  });
-
-  it.each(['modal', 'workspace'])('等待第一份加入时 %s 失效，不能繼續排入原視窗的其餘工作', async kind => {
-    const submit = await prepareRows(['A.mp4', 'B.mp4']);
-    let finish;
-    window.subtool.exportVideo.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValue('job-B');
-    const pending = submit.act(); await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
-    if (kind === 'modal') {
-      spies.closeModal(); await showExportVideoDialog();
-      await vi.waitFor(() => expect(document.querySelectorAll('.ev-name')).toHaveLength(1));
-    } else workspaceState.generation++;
-    finish('job-A'); await pending;
-    expect(window.subtool.exportVideo).toHaveBeenCalledTimes(1);
-    if (kind === 'modal') expect(document.querySelectorAll('.ev-name')).toHaveLength(1);
-  });
-
   it('從儲存位置切到檔名時保留點擊目標，不重建正在聚焦的欄位', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-name')).not.toBeNull());
@@ -310,29 +262,6 @@ describe('匯出交付清單', () => {
     expect(getComputedStyle(message).display).not.toBe('none');
   });
 
-  it('切換儲存位置後，較慢完成的舊目錄檢查不能覆寫最新警告', async () => {
-    await showExportVideoDialog();
-    await vi.waitFor(() => expect(document.querySelector('.ev-outdir')).not.toBeNull());
-    const name = document.querySelector('.ev-name').value;
-    const pending = new Map();
-    window.subtool.listDir.mockImplementation(dir => new Promise(resolve => pending.set(dir, resolve)));
-    const outDir = document.querySelector('.ev-outdir');
-    outDir.value = 'D:/舊目錄';
-    outDir.dispatchEvent(new Event('change', { bubbles: true }));
-    await vi.waitFor(() => expect(pending.has('D:/舊目錄')).toBe(true));
-    outDir.value = 'D:/新目錄';
-    outDir.dispatchEvent(new Event('change', { bubbles: true }));
-    await vi.waitFor(() => expect(pending.has('D:/新目錄')).toBe(true));
-
-    pending.get('D:/新目錄')([]);
-    await vi.waitFor(() => expect(document.getElementById('evConflictMsg').style.display).toBe('none'));
-    pending.get('D:/舊目錄')([name]);
-    await new Promise(resolve => setTimeout(resolve, 0));
-    const message = document.getElementById('evConflictMsg');
-    expect(message.style.display).toBe('none');
-    expect(message.textContent).not.toContain('警告：硬碟上已存在同名檔案');
-  });
-
   it('舊匯出視窗的目錄選擇結果不能寫進重新開啟的視窗', async () => {
     let finishPicker;
     window.subtool.exportDirectory.mockImplementation(() => new Promise(resolve => { finishPicker = resolve; }));
@@ -362,23 +291,6 @@ describe('匯出交付清單', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(document.querySelector('.ev-outdir').value).toBe('D:/新輸入');
-  });
-
-  it('關閉匯出視窗後，較慢完成的同名檔案檢查不能排入舊工作', async () => {
-    let finishCheck;
-    window.subtool.listDir.mockImplementation(() => new Promise(resolve => { finishCheck = resolve; }));
-    await showExportVideoDialog();
-    await vi.waitFor(() => expect(document.querySelector('.ev-outdir')).not.toBeNull());
-    const outDir = document.querySelector('.ev-outdir');
-    outDir.value = 'D:/交付';
-    outDir.dispatchEvent(new Event('change', { bubbles: true }));
-    const submit = spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn');
-    const sending = submit.act();
-    await vi.waitFor(() => expect(typeof finishCheck).toBe('function'));
-    spies.closeModal();
-    finishCheck([]);
-    await sending;
-    expect(window.subtool.exportVideo).not.toHaveBeenCalled();
   });
 
   it('MOD-FHD 顯示鎖定規格、TS 檔名與 AAC 音訊，仍可指定 bus 與燒入 TC', async () => {

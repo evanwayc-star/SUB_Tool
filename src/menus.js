@@ -9,12 +9,13 @@ import { selectCue, refreshSelectionUI, filteredSubtitleCues, enterSwapMode, del
 import { addCue, addCueRelative, clearSelectedCuesTime, shiftTextsDown, shiftTextsUp, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitle-model.js';
 import { moveSelectedToTrack, trackFromY, tracksTop, drawTimeline } from './timeline-renderer.js';
 import { xToTime } from './timeline-interaction-engine.js';
-import { selectClip, fitClipToStage, crossfadeWithPrev, captureClipEdit, setClipDuration, setClipFade, resetClipTrim } from './clip-model.js';
+import { selectClip, fitClipToStage, crossfadeWithPrev, captureClipEdit, setClipDuration, setClipSpeed, clipFreezeTarget, setClipFreeze, setClipFade, resetClipTrim } from './clip-model.js';
 import { Seq } from './sequence.js';
 import { showToast, promptModal, openModal, closeModal } from './ui.js';
-import { secToEncore } from './time.js';
+import { secToEncore, getExactFps } from './time.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { History, recordHistory } from './history.js';
+import { beginGeometryEdit } from './timeline-edit-transaction.js';
 import { emit } from './events.js';
 import { AudioRouting } from './audio-routing.js';
 import { setManualPlaybackSpeed } from './keyboard.js';
@@ -23,6 +24,7 @@ import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './su
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
 import { openHardLimiterDialog } from './audio-normalizer-dialog.js';
 import { requestPointerSeek } from './timeline-interaction-engine.js';
+import { lastSourceFrameIndex } from '../shared/clip-visual.cjs';
 import {
   buildAudioClipMenu,
   buildAudioTrackMenu,
@@ -481,20 +483,24 @@ function tlContextMenuHandler(e){
       isImage:isImg,
       locked:isLocked,
       canReveal:IS_DESKTOP&&!!filePath,
-      canSplit:Seq.clipAt(pt)===c,
+      canSplit:Seq.editClipAt(pt)===c,
       trimmed,
       audioDetached:!!c.audioDetached,
       trackIndex:c.vtrack||0,
       hasPrevious:idx>0,
       hasNext:idx>=0&&idx<sorted.length-1,
       hasFade:c.fadeIn>0||c.fadeOut>0,
+      frozen:Seq.isFrozen(c),
       hasLimiter:Boolean(c.hasAudioLimiter),
       limiterLabel:c.audioLimiterLabel||'',
     },{
       revealSource:()=>revealSourceInFolder(filePath),
       seekStart:()=>{ requestPointerSeek(c.offset); emit('playhead:ensure'); },
-      splitAtPlayhead:()=>{ if(owns() && Seq.clipAt(pt)===c) Media.splitClipAt(pt); },
+      splitAtPlayhead:()=>{ if(owns() && Seq.editClipAt(pt)===c) Media.splitClipAt(pt); },
       editDuration:()=>showClipDuration(c),
+      editSpeed:()=>showClipSpeed(c),
+      freezeClip:()=>showClipFreeze(c),
+      unfreezeClip:()=>{if(owns()){if(Media.playing) Media.pause();setClipFreeze(c,null);}},
       editGeometry:()=>showImageGeom(c),
       resetTrim,
       detachAudio:()=>{ if(owns()) void Media.detachClipAudio?.(c.id); },
@@ -561,15 +567,10 @@ export function showImageGeom(c){
   const row=(id,label,val,min,max,unit)=>
     `<div>${label}：<input type="range" id="ig${id}R" min="${min}" max="${max}" step="1" value="${val}" style="width:180px;vertical-align:middle">`+
     ` <input type="number" id="ig${id}" min="${min}" max="${max}" step="1" value="${val}" style="width:64px">${unit}</div>`;
-  let snap, release;
-  const owns = canEdit.isCurrent;
-  const current = () => session.isCurrent() && canEdit() && release.isCurrent();
-  const restore=()=>{ const active=release?.isCurrent(); release?.(); if(!active || !owns() || !snap) return;
-    for(const [key,original] of Object.entries(snap)) {
-      if(original.present) c[key]=original.value; else delete c[key];
-    }
-    emit('media:timeline'); emit('render:videoSub'); };
-  const commit=label=>{ release(); session.close({committed:true}); emit('media:timeline'); emit('render:videoSub'); recordHistory(label); };
+  let edit;
+  const current = () => session.isCurrent() && canEdit() && edit?.isCurrent();
+  const restore=()=>{ if(edit?.cancel()){ emit('media:timeline'); emit('render:videoSub'); } };
+  const commit=(label,patch)=>{ if(!edit?.commit(label,patch)) return; session.close({committed:true}); emit('media:timeline'); emit('render:videoSub'); };
   const syncInputs=()=>{
     const set=(id,val)=>{ const r=$('ig'+id+'R'), n=$('ig'+id); if(r)r.value=val; if(n)n.value=val; };
     set('S',Math.round((c.scale??1)*100)); set('X',Math.round((c.posX??0.5)*100)); set('Y',Math.round((c.posY??0.5)*100));
@@ -582,29 +583,28 @@ export function showImageGeom(c){
     `${c.natW>0?`原始尺寸 ${c.natW}×${c.natH}。`:''}預覽與匯出使用同一組數值。<br>`+
     `<b>符合視窗</b>＝維持目前位置，等比例放大到上下左右最先碰到的那個邊界為止。</div>`+
     `</div>`,
-    [{label:'符合視窗',act:()=>{ if(!current()) return; fitClipToStage(c); syncInputs(); emit('render:videoSub'); }},
-     {label:'重設',act:()=>{ if(!current()) return; c.scale=1; c.posX=0.5; c.posY=0.5; commit('重設大小與位置：'+(c.name||'')); }},
+    [{label:'符合視窗',act:()=>{ if(!current()) return; edit.preview(()=>fitClipToStage(c)); syncInputs(); emit('render:videoSub'); }},
+     {label:'重設',act:()=>{ if(!current()) return; commit('重設大小與位置：'+(c.name||''),{scale:1,posX:0.5,posY:0.5}); }},
      {label:'取消',act:()=>session.close()},
      {label:'套用',primary:true,act:()=>{
         if(!current()) return;
         const v=(id,d)=>{ const n=+($(('ig'+id))?.value); return Number.isFinite(n)?n:d; };
-        c.scale=Math.max(0.02,Math.min(8, v('S',S)/100));
-        c.posX =Math.max(0,Math.min(1, v('X',X)/100));
-        c.posY =Math.max(0,Math.min(1, v('Y',Y)/100));
-        commit('大小與位置：'+(c.name||''));
+        commit('大小與位置：'+(c.name||''),{
+          scale:Math.max(0.02,Math.min(8, v('S',S)/100)),
+          posX:Math.max(0,Math.min(1, v('X',X)/100)),
+          posY:Math.max(0,Math.min(1, v('Y',Y)/100)),
+        });
      }}],
     { onDismiss:restore, onReplaced:restore });
-  snap=Object.fromEntries(['scale','posX','posY'].map(key=>[key,{present:Object.hasOwn(c,key),value:c[key]}]));
-  release=History.beginPreview([{target:c,fields:['scale','posX','posY']}],owns);
+  edit=beginGeometryEdit({target:c,owns:canEdit.isCurrent,beginPreview:History.beginPreview.bind(History),recordHistory});
   syncInputs();
   setTimeout(()=>{
     if(!current()) return;
     for(const id of ['S','X','Y']){
       const r=$('ig'+id+'R'), n=$('ig'+id); if(!r||!n) continue;
       const live=()=>{ if(!current()) return; const val=+n.value;
-        if(id==='S') c.scale=Math.max(0.02,Math.min(8,val/100));
-        else if(id==='X') c.posX=Math.max(0,Math.min(1,val/100));
-        else c.posY=Math.max(0,Math.min(1,val/100));
+        edit.preview(id==='S' ? {scale:Math.max(0.02,Math.min(8,val/100))}
+          : {[id==='X'?'posX':'posY']:Math.max(0,Math.min(1,val/100))});
         emit('render:videoSub'); };
       r.oninput=()=>{ n.value=r.value; live(); };
       n.oninput=()=>{ r.value=n.value; live(); };
@@ -659,6 +659,83 @@ export function showClipFade(c){
   },0);
 }
 
+export function showClipSpeed(c){
+  if(!c || c.type==='image') return;
+  const owns=captureClipEdit(c);
+  if(!owns()) return;
+  const sourceLength=c.out-c.in;
+  const currentRate=Number(c.speed)>0?Number(c.speed):1;
+  const session=openModal(`修改速度／反轉影片 — ${escapeHTML(c.name||'')}`,
+    `<div style="font-size:13px;line-height:2.4">`+
+    `<label>速度：<input id="clipSpeedPercent" type="number" min="25" max="400" step="0.01" value="${+(currentRate*100).toFixed(3)}" style="width:90px"> %</label><br>`+
+    `<label>持續時間：<input id="clipSpeedDuration" type="text" value="${secToEncore(Seq.len(c),State.fps,State.dropFrame)}" style="width:125px"></label><br>`+
+    `<label><input id="clipSpeedReverse" type="checkbox" ${c.reverse?'checked':''}> 反轉影片</label>`+
+    `<div style="color:var(--text-faint);font-size:12px;line-height:1.6;margin-top:8px">速度與持續時間連動，範圍 25–400%。變長時同軌後續片段會往右移。反轉影片時，未分離的原音同步反向播放；固定畫面仍不播放原音。</div></div>`,
+    [{label:'取消',act:()=>session.close()},
+     {label:'套用',primary:true,act:async()=>{
+       if(!session.isCurrent()||!owns()) return;
+       const rate=Number($('clipSpeedPercent')?.value)/100;
+       if(!Number.isFinite(rate)||rate<0.25||rate>4){ showToast('速度須介於 25% 至 400%'); return; }
+       const reverse=!!$('clipSpeedReverse')?.checked;
+       if(Media.playing) Media.pause();
+       if(reverse){
+         showToast('正在準備反轉預覽，完成後會套用設定');
+         if(!await Media.prepareClipReverse(c) || !session.isCurrent() || !owns()){
+           if(session.isCurrent()) showToast('無法準備反轉預覽，設定未套用');
+           return;
+         }
+         if(!await Media.activateClipReversePreview(c) || !session.isCurrent() || !owns()){
+           if(session.isCurrent()) showToast('無法啟動反轉預覽，設定未套用');
+           return;
+         }
+       }
+       if(setClipSpeed(c,rate,reverse)) session.close({committed:true});
+     }}]);
+  const speed=$('clipSpeedPercent'),duration=$('clipSpeedDuration');
+  speed?.addEventListener('input',()=>{
+    const rate=Number(speed.value)/100;
+    if(Number.isFinite(rate)&&rate>0) duration.value=secToEncore(sourceLength/rate,State.fps,State.dropFrame);
+  });
+  duration?.addEventListener('change',()=>{
+    let seconds=parseTimecodeInput(duration.value);
+    if(seconds===null) seconds=Number(duration.value);
+    if(Number.isFinite(seconds)&&seconds>0) speed.value=+(sourceLength/seconds*100).toFixed(3);
+  });
+  setTimeout(()=>{if(session.isCurrent()&&owns()) speed?.focus();},0);
+}
+
+export function showClipFreeze(c){
+  if(!c||c.type==='image') return;
+  const owns=captureClipEdit(c);
+  if(!owns()) return;
+  const fps=getExactFps(c.fps||State.fps||25);
+  const maximum=lastSourceFrameIndex(c.dur,fps)+1;
+  const initial=Seq.isFrozen(c)?c.freezeTime:clipFreezeTarget(c,Media.displayTime());
+  let preparing=false;
+  const session=openModal(`固定畫面 — ${escapeHTML(c.name||'')}`,
+    `<label>來源影格：<input id="clipFreezeFrame" type="number" min="1" max="${maximum}" step="1" value="${Math.round(initial*fps)+1}" style="width:120px"> / ${maximum}</label>`+
+    `<div id="clipFreezeTime" style="margin-top:8px"></div>`+
+    `<p style="color:var(--text-faint);font-size:12px">預設使用目前播放點對應的影格。整段保持此畫面，片段長度與位置保留；原音會靜音。可從右鍵選單解除固定。</p>`,
+    [{label:'取消',act:()=>session.close()},
+     {label:'固定畫面',primary:true,act:async()=>{
+       if(preparing||!session.isCurrent()||!owns()) return;
+       const index=Number($('clipFreezeFrame')?.value);
+       if(!Number.isInteger(index)||index<1||index>maximum){showToast('請輸入來源範圍內的影格');return;}
+       if(Media.playing) Media.pause();
+       preparing=true;
+       try{
+         const preview=await Media.prepareClipFreeze(c,(index-1)/fps);
+         if(!session.isCurrent()||!owns()) return;
+         if(!preview){showToast('無法取得來源影格，設定未套用');return;}
+         if(setClipFreeze(c,preview.time,preview)) session.close({committed:true});
+       }catch(error){if(session.isCurrent()) showToast('無法固定畫面：'+(error?.message||error));}
+       finally{preparing=false;}
+     }}]);
+  const input=$('clipFreezeFrame');
+  const update=()=>{$('clipFreezeTime').textContent=`來源時間：${Math.max(0,(Number(input.value)-1)/fps).toFixed(6)} 秒`;};
+  input.addEventListener('input',update);update();
+}
+
 export function showClipDuration(c){
   if(!c) return;
   const owns=captureClipEdit(c);
@@ -666,7 +743,7 @@ export function showClipDuration(c){
   const current=()=>session.isCurrent() && owns();
   const isImg = c.type === 'image';
   const cur = Seq.len(c);
-  const maxBySource = Math.max(0.001, (+c.dur || 0) - (+c.in || 0));
+  const maxBySource = Math.max(0.001, (c.reverse?(+c.out||0):((+c.dur||0)-(+c.in||0)))/(Number(c.speed)>0?Number(c.speed):1));
   const maxByNeighbor = Seq.maxLengthOnTrack(c);
   const maxLen = Math.min(maxBySource, maxByNeighbor);
   const limitNote = maxByNeighbor < maxBySource
