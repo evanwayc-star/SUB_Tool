@@ -957,17 +957,25 @@ const Project = {
 };
 
 async function openMedia({ relink: requestedRelink = null } = {}) {
+  const ownsWorkspace = Project.captureWorkspaceOwnership();
   const { pickMediaFiles, importDesktopMediaFiles, importBrowserMediaFiles } = await import('./media-loader.js');
+  if (!ownsWorkspace()) return;
   const relink = requestedRelink || Project.pendingMediaRelink?.() || null;
   if (relink) {
     await Project.continueLoad(relink.generation, async isCurrent => {
+      if (!ownsWorkspace() || !isCurrent()) return;
       const picked = IS_DESKTOP ? await DESK.openMedia() : await pickMediaFiles($('fileMedia'));
-      if (!isCurrent()) return;
-      if (IS_DESKTOP) await importDesktopMediaFiles(picked, relink);
-      else await importBrowserMediaFiles(picked, relink);
+      const owns = () => ownsWorkspace() && isCurrent();
+      if (!owns()) return;
+      if (IS_DESKTOP) await importDesktopMediaFiles(picked, relink, owns);
+      else await importBrowserMediaFiles(picked, relink, owns);
     });
-  } else if (IS_DESKTOP) await importDesktopMediaFiles(await DESK.openMedia());
-  else await importBrowserMediaFiles(await pickMediaFiles($('fileMedia')));
+  } else {
+    const picked = IS_DESKTOP ? await DESK.openMedia() : await pickMediaFiles($('fileMedia'));
+    if (!ownsWorkspace()) return;
+    if (IS_DESKTOP) await importDesktopMediaFiles(picked, null, ownsWorkspace);
+    else await importBrowserMediaFiles(picked, null, ownsWorkspace);
+  }
 }
 
 function openProject() {

@@ -1306,8 +1306,8 @@ const Media = {
     // that source in audioProject/Wave.
     const current=()=>this._bgVersion===myVer&&!!this._liveClipForSource(primary);
     setStatus(needsProxy
-      ? '正在轉檔 Proxy 與分析音訊（背景處理，不影響播放）…'
-      : '正在分析音訊（背景處理，不影響播放）…','busy');
+      ? '正在檢查 Proxy 與音訊快取（背景處理，不影響播放）…'
+      : '正在檢查音訊快取（背景處理，不影響播放）…','busy');
     let res;
     // 需要 Proxy 時同 pass 產 720p 短 GOP 預覽檔：多軌合成時交給 WebCodecs，
     // 持續倒帶時則暫時交給 mpv，避免母素材的長 GOP 造成反向預解碼停頓。

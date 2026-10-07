@@ -191,9 +191,30 @@ function createMediaIntakeRuntime(options = {}) {
     };
   }
 
+  function fileState(file) {
+    if (!file) return 'missing';
+    try { const stat = fs.statSync(file); return stat.isFile() && stat.size > 0 ? 'complete' : 'missing'; }
+    catch (error) { return ['ENOENT', 'ENOTDIR'].includes(error.code) ? 'missing' : 'unknown'; }
+  }
+
   function completeFile(file) {
-    try { const stat = fs.statSync(file); return stat.isFile() && stat.size > 0; }
-    catch (error) { return false; }
+    return fileState(file) === 'complete';
+  }
+
+  // 同一份檔案證據決定重用與清理；暫時 I/O 錯誤不能等同可刪除。
+  function inspectMeta(meta) {
+    const proxyState = fileState(meta.proxy);
+    const waveState = fileState(meta.wave);
+    const channelStates = meta.channels.map(channel => fileState(channel.file));
+    return {
+      retained: [proxyState, waveState, ...channelStates].some(state => state !== 'missing'),
+      meta: {
+        proxy: proxyState === 'complete' ? meta.proxy : null,
+        wave: waveState === 'complete' ? meta.wave : null,
+        channels: meta.channels.filter((_, index) => channelStates[index] === 'complete'),
+      },
+      audioLayout: meta.channels,
+    };
   }
 
   function coversAudioRequest(meta, audio) {
@@ -201,6 +222,8 @@ function createMediaIntakeRuntime(options = {}) {
     const expected = flattenSourceChannels(audio);
     return completeFile(meta.wave) && meta.channels.length === expected.length
       && expected.every((channel, index) =>
+        completeFile(meta.channels[index].file)
+        &&
         meta.channels[index].sourceStream === channel.sourceStream
         && meta.channels[index].sourceChannel === channel.sourceChannel);
   }
@@ -212,25 +235,33 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   function writeMeta(metaPath, meta) {
+    const temporaryPath = metaPath + '.tmp-' + crypto.randomBytes(12).toString('hex');
     try {
-      const temporaryPath = metaPath + '.tmp';
       fs.writeFileSync(temporaryPath, JSON.stringify(metaToStore(meta, path.dirname(metaPath))));
       fs.renameSync(temporaryPath, metaPath);
-    } catch (error) {}
+    } catch (error) {
+      try { fs.unlinkSync(temporaryPath); } catch (ignored) {}
+      throw error;
+    }
   }
 
-  function readCache(src) {
+  function readCache(src, audio, needsProxy) {
+    let partial = null;
     for (const dir of cacheCandidates(src)) {
       const metaPath = path.join(dir, 'meta.json');
       if (!fs.existsSync(metaPath)) continue;
       try {
-        const meta = resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir);
-        if (!metaValid(meta)) continue;
-        fileAuthority.grantManagedCacheDirectory(dir);
-        return { dir, meta };
+        const inspected = inspectMeta(resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir));
+        const hit = { dir, ...inspected };
+        if (coversAudioRequest(hit.meta, audio) && (!needsProxy || hit.meta.proxy)) {
+          fileAuthority.grantManagedCacheDirectory(dir);
+          return hit;
+        }
+        partial ||= hit;
       } catch (error) {}
     }
-    return null;
+    if (partial) fileAuthority.grantManagedCacheDirectory(partial.dir);
+    return partial;
   }
 
   function isDirWritable(dir) {
@@ -299,7 +330,7 @@ function createMediaIntakeRuntime(options = {}) {
         else {
           try {
             const meta = resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir);
-            if (!metaValid(meta)) remove = true;
+            if (!inspectMeta(meta).retained) remove = true;
           } catch (error) {
             remove = false;
           }
@@ -378,7 +409,8 @@ function createMediaIntakeRuntime(options = {}) {
     let resolved;
     try { resolved = path.resolve(file); } catch (error) { return false; }
     const basename = path.basename(resolved).toLowerCase();
-    if (basename !== 'proxy.mp4' && !/^ch\d+\.m4a$/i.test(basename)) return false;
+    // channelFileName() 產生 ch_01.m4a；舊版無底線聲道與混音波形也只供預覽。
+    if (basename !== 'proxy.mp4' && basename !== 'wave.wav' && !/^ch_?\d+\.m4a$/i.test(basename)) return false;
     const lower = resolved.toLowerCase();
     const inInternalRoot = [cacheRoot(), tempRoot].filter(Boolean).some(root => {
       try {
@@ -527,7 +559,7 @@ function createMediaIntakeRuntime(options = {}) {
   // cache coverage 與補建publication共用一個owner，batch/stream不能各自重抽已完成元件。
   function planIntake({ src, needsProxy, audio }, isStream) {
     const audioSources = Array.isArray(audio) ? audio : [];
-    let hit = readCache(src);
+    let hit = readCache(src, audioSources, needsProxy);
     if (hit
       && coversAudioRequest(hit.meta, audioSources)
       && (!needsProxy || hit.meta.proxy)) {
@@ -536,25 +568,40 @@ function createMediaIntakeRuntime(options = {}) {
     if (hit && !isDirWritable(hit.dir)) hit = null;
     const dir = hit ? hit.dir : writeCacheDir(src);
     const metaPath = path.join(dir, 'meta.json');
-    // 補建只寫新generation，直到完整成功才讓meta指向它；失敗不破壞舊cache。
-    const outputDir = hit ? path.join(dir, 'generation-' + crypto.randomBytes(12).toString('hex')) : dir;
+    // 初建也只寫私有 generation：不同程式共用 sidecar 時，失敗 writer
+    // 不能覆寫另一個已提交 writer 的檔案。
+    const outputDir = path.join(dir, 'generation-' + crypto.randomBytes(12).toString('hex'));
     fs.mkdirSync(outputDir, { recursive: true });
-    const reuseAudio = hit && coversAudioRequest(hit.meta, audioSources);
     const buildProxy = needsProxy && !hit?.meta.proxy;
+    const expected = flattenSourceChannels(audioSources);
+    const sameAudioLayout = hit && hit.audioLayout.length === expected.length
+      && expected.every((channel, index) => hit.audioLayout[index].sourceStream === channel.sourceStream
+        && hit.audioLayout[index].sourceChannel === channel.sourceChannel);
+    const reuseWave = !audioSources.length || (sameAudioLayout && hit.meta.wave);
+    const reuseChannels = expected.map((_, index) => sameAudioLayout && completeFile(hit.audioLayout[index].file));
+    const reuseAudio = reuseWave && reuseChannels.every(Boolean);
     const audioPlan = buildAudioIngestPlan(reuseAudio ? [] : audioSources);
-    const channels = reuseAudio ? hit.meta.channels
-      : audioPlan.channels.map(channel => ({ ...channel, file: path.join(outputDir, channel.file) }));
+    const channels = !audioSources.length ? (hit?.meta.channels || []) : expected.map((_, index) =>
+      reuseChannels[index] ? hit.audioLayout[index]
+        : { ...audioPlan.channels[index], file: path.join(outputDir, audioPlan.channels[index].file) });
+    const buildChannels = [];
+    const channelMaps = [];
+    audioPlan.channelMaps.forEach((pad, index) => {
+      if (reuseChannels[index]) audioPlan.filters.push(`${pad}anullsink`);
+      else { buildChannels.push(channels[index]); channelMaps.push(pad); }
+    });
+    if (reuseWave && audioPlan.waveLabel) audioPlan.filters.push(`${audioPlan.waveLabel}anullsink`);
     const proxy = hit?.meta.proxy || (buildProxy ? path.join(outputDir, 'proxy.mp4') : null);
-    const wave = reuseAudio ? hit.meta.wave : (audioPlan.waveLabel ? path.join(outputDir, 'wave.wav') : null);
+    const wave = reuseWave ? (hit?.meta.wave || null) : (audioPlan.waveLabel ? path.join(outputDir, 'wave.wav') : null);
     const meta = { proxy, channels, wave };
     const args = buildIngestArgs({
       src,
       needsProxy: buildProxy,
       proxyPath: proxy,
       fc: audioPlan.filters,
-      channels: reuseAudio ? [] : channels,
-      chMaps: audioPlan.channelMaps,
-      waveLabel: audioPlan.waveLabel,
+      channels: buildChannels,
+      chMaps: channelMaps,
+      waveLabel: reuseWave ? null : audioPlan.waveLabel,
       wavePath: wave,
       encoder: getEncoder(),
       isStream,
@@ -571,18 +618,27 @@ function createMediaIntakeRuntime(options = {}) {
         committed = true;
       },
       dispose() {
-        if (!committed && outputDir !== dir) fs.rmSync(outputDir, { recursive: true, force: true });
+        if (!committed) fs.rmSync(outputDir, { recursive: true, force: true });
       },
     };
   }
 
   function reportCacheHit(session) {
-    options.sendProgress?.(session.progressTarget, {
-      jobId: 'ingest', label: '使用既有快取', pct: 100, done: true, outcome: 'success',
-    });
+    reportCompletion(session, 'ingest', '使用既有快取');
+  }
+
+  function reportCompletion(session, jobId, label, error) {
+    if (cancelled(session)) return;
+    try {
+      options.sendProgress?.(session.progressTarget, {
+        jobId, label, done: true, outcome: error ? 'failed' : 'success',
+        ...(error ? { errorCode: error.code || 'MEDIA_CACHE_FAILED', errorMsg: error.message || String(error) } : { pct: 100 }),
+      });
+    } catch (ignored) {}
   }
 
   async function ingest(request, session = {}) {
+    if (cancelled(session)) throw new IngestSupersededError();
     const plan = planIntake(request, false);
     if (plan.cached) {
       reportCacheHit(session);
@@ -595,6 +651,7 @@ function createMediaIntakeRuntime(options = {}) {
       if (cancelled(session)) throw new Error('媒體轉檔已被較新的載入取代');
       await ffmpegExecution.execute(plan.args, {
         executionKind: 'direct',
+        deferTerminal: true,
         sender: session.progressTarget,
         duration: request.duration,
         jobId: 'ingest',
@@ -604,7 +661,11 @@ function createMediaIntakeRuntime(options = {}) {
       });
       if (cancelled(session)) throw new Error('媒體轉檔已被較新的載入取代');
       plan.commit();
+      reportCompletion(session, 'ingest', plan.label);
       return Object.assign({ cached: false }, plan.meta);
+    } catch (error) {
+      reportCompletion(session, 'ingest', plan.label, error);
+      throw error;
     } finally {
       try { plan.dispose(); } finally { unprotect(); }
     }
@@ -646,6 +707,7 @@ function createMediaIntakeRuntime(options = {}) {
     try {
       execution = ffmpegExecution.execute(plan.args, {
         executionKind: 'direct',
+        deferTerminal: true,
         sender: session.progressTarget,
         duration,
         jobId: id,
@@ -658,10 +720,14 @@ function createMediaIntakeRuntime(options = {}) {
     }
     const completion = Promise.resolve(execution).then(() => {
       job.done = true;
-      if (!cancelled(session)) plan.commit();
+      if (!cancelled(session)) {
+        plan.commit();
+        reportCompletion(session, id, plan.label);
+      }
     }).catch(error => {
       job.done = true;
       job.error = error.message;
+      reportCompletion(session, id, plan.label, error);
     }).finally(() => { try { plan.dispose(); } finally { unprotect(); } });
 
     const startedAt = Date.now();

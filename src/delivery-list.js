@@ -160,12 +160,35 @@ export function createDeliveryList({
   const refreshName = r => { if (!r.nameModified) r.customName = nameFor(r); };
 
   const at = i => rows[i] || null;
+  const rowRevisions = new WeakMap();
 
   const api = {
     rows() { return rows.map(copyRow); },
     count() { return rows.length; },
     get(i) { const r = at(i); return r ? copyRow(r) : null; },
     defaultNameFor(i) { const r = at(i); return r ? nameFor(r) : ''; },
+
+    /** Receipt ownership follows the actual row and captured fields, never a shifted index. */
+    captureSubmissionRows() {
+      const originals = rows.slice();
+      const snapshots = originals.map(copyRow);
+      const revisions = originals.map(row => rowRevisions.get(row) || 0);
+      const currentIndex = index => {
+        if (!Number.isInteger(index) || index < 0 || index >= originals.length) return -1;
+        const current = rows.indexOf(originals[index]);
+        return current >= 0 && (rowRevisions.get(rows[current]) || 0) === revisions[index]
+          && JSON.stringify(rows[current]) === JSON.stringify(snapshots[index]) ? current : -1;
+      };
+      return Object.freeze({
+        rows: snapshots.map(copyRow),
+        matches: index => currentIndex(index) >= 0,
+        removeAccepted(index) {
+          const current = currentIndex(index);
+          if (current < 0) return false;
+          rows.splice(current, 1); return true;
+        },
+      });
+    },
 
     add() {
       const last = rows[rows.length - 1];
@@ -360,6 +383,18 @@ export function createDeliveryList({
       });
     },
   };
+
+  // A later edit owns a new draft even when its fields subsequently return to
+  // the captured values. No-op blur/change events do not revoke ownership.
+  for (const method of ['setFormat', 'setTargetHeight', 'setTargetFps', 'setKbps', 'setBurnTimecode', 'setOutDir', 'setName']) {
+    const mutate = api[method];
+    api[method] = (index, ...args) => {
+      const row = at(index), before = row ? JSON.stringify(row) : null;
+      const result = mutate(index, ...args);
+      if (row && JSON.stringify(row) !== before) rowRevisions.set(row, (rowRevisions.get(row) || 0) + 1);
+      return result;
+    };
+  }
 
   // 初始列可能是空名字（新建或從音軌視窗折返）→ 補上預設名
   rows.forEach(r => { applyFormatPreset(r, fps); refreshName(r); });

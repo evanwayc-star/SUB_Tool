@@ -289,7 +289,7 @@ async function openCacheDialog() {
     `<div style="padding:4px 2px;line-height:1.9">` +
     `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>` +
     `<div style="font-size:11px;color:var(--muted);word-break:break-all;margin-top:2px">${esc(info.root || '')}</div>` +
-    `<div style="font-size:12px;color:var(--muted);margin-top:8px">說明：開啟影片時會把每個聲道與波形轉存到「影片同資料夾的 <code>.subtool_Cache</code>」內，其他電腦讀取同一個檔案時可直接沿用、不必重算。此處管理的是本機的中央快取。</div>` +
+    `<div style="font-size:12px;color:var(--muted);margin-top:8px">說明：Proxy、聲道與波形優先保存在「影片同資料夾的 <code>.subtool_Cache</code>」內，無法寫入時使用本機中央快取。同一來源識別可沿用已完成的檔案；搬移、改名、換電腦或素材變更可能需要重建。快取不會因放了幾天而過期；缺件只補建缺少部分。此處管理的是本機的中央快取。</div>` +
     `</div>`;
     
   const buttons = [

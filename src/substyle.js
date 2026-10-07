@@ -440,6 +440,8 @@ export const BUILTIN_PRESETS = [
 ];
 const LS_KEY = 'subtool.subPresets';
 let _presets = null; // [{name, style:{...軌道級欄位子集}}]（僅使用者自訂；內建的不存檔）
+let _presetsLoading = null;
+let _presetsRevision = 0;
 export function validPresetList(value){
   const record = entry => entry && typeof entry === 'object' && !Array.isArray(entry);
   return (Array.isArray(value) ? value : []).filter(p => record(p)
@@ -454,33 +456,39 @@ export function presetIdentity(preset){
 }
 export async function loadPresets(){
   if(_presets) return _presets;
-  try{
-    const DESK = window.subtool;
-    if(DESK && DESK.configLoad){ const conf = await DESK.configLoad(); _presets = Array.isArray(conf.subPresets) ? conf.subPresets : []; }
-    else _presets = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
-  }catch(e){ _presets = []; }
-  
-  // 設定檔與 localStorage 是不可信的持久化輸入；遷移前先驗證集合及各筆形狀。
-  _presets = validPresetList(_presets);
-  if (_presets.length) {
-    let migrated = false;
-    _presets.forEach(p => {
-      if (!p.group && p.name && p.name.indexOf('-') > 0) {
-        const idx = p.name.indexOf('-');
-        const group = p.name.substring(0, idx).trim();
-        const name = p.name.substring(idx + 1).trim();
-        // 新版允許名稱含連字號；只有完整的舊「資料夾-名稱」才可拆分。
-        if (!group || !name) return;
-        const key = presetIdentity({ ...p, group, name });
-        if (isBuiltinPresetName(name) || _presets.some(other => other !== p && presetIdentity(other) === key)) return;
-        p.group = group;
-        p.name = name;
-        migrated = true;
-      }
-    });
-    if (migrated) savePresets(_presets);
-  }
-  return _presets;
+  if(_presetsLoading) return _presetsLoading;
+  const revision = _presetsRevision;
+  _presetsLoading = (async()=>{
+    let loaded;
+    try{
+      const DESK = window.subtool;
+      if(DESK && DESK.configLoad){ const conf = await DESK.configLoad(); loaded = conf.subPresets; }
+      else loaded = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
+    }catch(e){ return getPresets(); } // 不把暫時讀取失敗記成已載入，可再次重試。
+    // 載入只擁有開始時的樣式庫；期間的新儲存也撤銷舊資料的遷移寫回。
+    if(revision !== _presetsRevision) return getPresets();
+    _presets = validPresetList(loaded);
+    if (_presets.length) {
+      let migrated = false;
+      _presets.forEach(p => {
+        if (!p.group && p.name && p.name.indexOf('-') > 0) {
+          const idx = p.name.indexOf('-');
+          const group = p.name.substring(0, idx).trim();
+          const name = p.name.substring(idx + 1).trim();
+          // 新版允許名稱含連字號；只有完整的舊「資料夾-名稱」才可拆分。
+          if (!group || !name) return;
+          const key = presetIdentity({ ...p, group, name });
+          if (isBuiltinPresetName(name) || _presets.some(other => other !== p && presetIdentity(other) === key)) return;
+          p.group = group;
+          p.name = name;
+          migrated = true;
+        }
+      });
+      if (migrated) savePresets(_presets);
+    }
+    return _presets;
+  })().finally(()=>{ _presetsLoading = null; });
+  return _presetsLoading;
 }
 export function getPresets(){ return _presets || []; }        // 僅使用者自訂（可改名／刪除／存檔）
 /* 給 UI 用的完整清單＝內建（永遠第一）＋使用者自訂。內建那筆帶 builtin:true，
@@ -488,6 +496,7 @@ export function getPresets(){ return _presets || []; }        // 僅使用者自
 export function getAllPresets(){ return [...BUILTIN_PRESETS, ...(_presets || [])]; }
 export function isBuiltinPresetName(name){ return BUILTIN_PRESETS.some(p => p.name === name); }
 export function savePresets(list){
+  _presetsRevision++;
   _presets = validPresetList(list).filter(p => !isBuiltinPresetName(p.name)); // 內建的永不寫進使用者清單
   try{
     const DESK = window.subtool;

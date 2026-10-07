@@ -55,19 +55,55 @@ it('取消讀取中的工作後不建立worker，讀取失敗仍可重新分析'
   expect(client.active).toBe(false);
 });
 
-it('拒絕重疊工作、不完整PCM與錯誤波形長度，避免污染來源快取',async()=>{
+it('拒絕不完整PCM與錯誤波形長度，失敗後繼續分析排隊來源',async()=>{
   const worker=new FakeWorker(),client=new VocalWaveformClient({createWorker:()=>worker});
   await expect(client.analyze({duration:10,readChunk:async()=>audio(1)})).rejects.toThrow('長度不足');
   const promise=client.analyze({duration:1,readChunk:async()=>audio(1)});
   const rejected=expect(promise).rejects.toThrow('波形長度');await tick();
-  await expect(client.analyze({duration:1,readChunk:async()=>audio(1)})).rejects.toThrow('已有');
+  const queuedRead=vi.fn(async()=>audio(1));
+  const queued=client.analyze({duration:1,readChunk:queuedRead});
+  expect(queuedRead).not.toHaveBeenCalled();
   worker.respond({type:'result',jobId:worker.requests[0].jobId,peaks:new Float32Array(2)});await rejected;
+  await tick();expect(queuedRead).toHaveBeenCalledTimes(1);
+  worker.respond({type:'result',jobId:worker.requests[1].jobId,peaks:new Float32Array(200).fill(2)});
+  expect((await queued)[0]).toBe(2);
+});
+
+it('取消正在推論的來源會先終止舊 Worker，再開始已排隊來源',async()=>{
+  const workers=[],client=new VocalWaveformClient({createWorker:()=>{const worker=new FakeWorker();workers.push(worker);return worker;}});
+  const controller=new AbortController();
+  const old=client.analyze({duration:1,readChunk:async()=>audio(1),signal:controller.signal});
+  const rejected=expect(old).rejects.toMatchObject({name:'AbortError'});
+  const queuedRead=vi.fn(async()=>audio(1));
+  const queued=client.analyze({duration:1,readChunk:queuedRead});
+  await tick();expect(queuedRead).not.toHaveBeenCalled();
+  controller.abort();await rejected;await tick();
+  expect(workers[0].terminated).toBe(1);
+  expect(queuedRead).toHaveBeenCalledTimes(1);
+  workers[0].respond({type:'result',jobId:1,peaks:new Float32Array(200).fill(9)});
+  workers[1].respond({type:'result',jobId:2,peaks:new Float32Array(200).fill(3)});
+  expect((await queued)[0]).toBe(3);
 });
 
 it('worker 載入失敗或逾時會釋放工作與GPU/WASM，可再次重試',async()=>{
   const worker=new FakeWorker(),client=new VocalWaveformClient({createWorker:()=>worker,timeoutMs:10});
   await expect(client.analyze({duration:1,readChunk:async()=>audio(1)})).rejects.toThrow('逾時');
   expect(worker.terminated).toBe(1);expect(client.active).toBe(false);
+});
+
+it('Worker 錯誤釋放舊推論後，自動讓排隊來源使用新的 Worker',async()=>{
+  const workers=[],client=new VocalWaveformClient({createWorker:()=>{const worker=new FakeWorker();workers.push(worker);return worker;}});
+  const first=client.analyze({duration:1,readChunk:async()=>audio(1)});
+  const rejected=expect(first).rejects.toThrow('load failed');
+  const queuedRead=vi.fn(async()=>audio(1));
+  const queued=client.analyze({duration:1,readChunk:queuedRead});
+  await tick();expect(queuedRead).not.toHaveBeenCalled();
+  workers[0].listeners.get('error')({message:'load failed'});
+  await rejected;await tick();
+  expect(workers[0].terminated).toBe(1);
+  expect(queuedRead).toHaveBeenCalledTimes(1);
+  workers[1].respond({type:'result',jobId:2,peaks:new Float32Array(200).fill(4)});
+  expect((await queued)[0]).toBe(4);
 });
 
 it('30.07 秒尾段使用整數 sample 桶計算，不因浮點誤差超出完整來源陣列',async()=>{

@@ -1,6 +1,6 @@
 import { State, IS_DESKTOP, DESK, setFps, snapFps, getFpsRevision, newTrack, syncTrackCount, newId, deselect } from './state.js';
 import { $ } from './dom.js';
-import { secToEncore, snapTimeToFrame, getExactFps } from './time.js';
+import { secToEncore, snapTimeToFrame, getExactFps, fmtClock } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
 import { sortCues, trackLocked, cuesTrackLocked, burnedSubtitleTrackNames, subtitleTimeOnFrame, shiftCueTimes } from './subtitle-model.js';
@@ -52,7 +52,7 @@ function showFpsConvertDialog() {
         if(!current()) return;
         const from = +$('fpsFrom').value, to = +$('fpsTo').value;
         if (from === to) { session.close(); return; }
-        const ratio = from / to;
+        const ratio = getExactFps(from) / getExactFps(to);
         const fr = 1 / getExactFps(State.fps || 25);
         const cues = targets;
         for (const c of cues) {
@@ -90,8 +90,9 @@ function showFpsConvertDialog() {
       const from = +fromSel?.value, to = +toSel?.value;
       const p = $('fpsPreview'); if (!p) return;
       if (from === to) { p.textContent = '來源與目標相同，無需轉換。'; return; }
-      const ratio = from / to;
-      p.innerHTML = `比例 <b>${from}/${to} = ${ratio.toFixed(6)}</b>　·　例：1:00:00 → ${new Date(3600 * ratio * 1000).toISOString().slice(11, 22)}`;
+      const ratio = getExactFps(from) / getExactFps(to);
+      const example = snapTimeToFrame(3600 * ratio, State.fps, State.dropFrame);
+      p.innerHTML = `比例 <b>${from} → ${to} fps：${ratio.toFixed(6)}</b>　·　例：1:00:00 → ${fmtClock(example)}`;
     };
     fromSel?.addEventListener('change', updatePreview);
     toSel?.addEventListener('change', updatePreview);
@@ -258,6 +259,8 @@ function _mixerSummary() {
 import { validateSubtitlesBeforeExport } from './subtitle-audit.js';
 
 async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
+  const ownsWorkspace = initialDraft?.ownsWorkspace || Project.captureWorkspaceOwnership();
+  if (!ownsWorkspace()) return;
   const capability = videoExportCapability(IS_DESKTOP);
   if (!capability.supported) { showToast(capability.message); return; }
   if (!skipValidation) {
@@ -275,7 +278,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         { label: '取消', act: closeModal },
         { label: '繼續匯出', primary: true, act: () => {
           closeModal();
-          showExportVideoDialog(initialDraft, true);
+          if (ownsWorkspace()) showExportVideoDialog({ ...initialDraft, ownsWorkspace }, true);
         }}
       ], { width: '700px' });
       return;
@@ -483,8 +486,9 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       closeModal();
       const deliveryFormat = list.get(idx).format;
       AudioRouting.openDeliveryOutputSettings(audioSpec, ({ saved, spec } = {}) => {
+        if (!ownsWorkspace()) return;
         if (saved && spec) list.applyRow(idx, applyDeliveryAudioSpec(list.get(idx), spec));
-        void showExportVideoDialog({ deliverables: list.rows(), draft: data });
+        void showExportVideoDialog({ deliverables: list.rows(), draft: data, ownsWorkspace });
       }, { deliveryFormat });
     });
   }
@@ -493,10 +497,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
   async function checkConflicts(isSubmitting = false, candidate = list) {
     // A newer edit (or submission) owns the warning. Directory reads can finish out of order.
     const generation = ++conflictCheckGeneration;
-    if (!session.isCurrent()) return false;
+    if (!session.isCurrent() || !ownsWorkspace()) return false;
     const msg = $('evConflictMsg');
     if (!msg) return true;
-    const isCurrentPreview = () => session.isCurrent() &&
+    const isCurrentPreview = () => session.isCurrent() && ownsWorkspace() &&
       (isSubmitting || (generation === conflictCheckGeneration && $('evConflictMsg') === msg));
 
     const blocking = candidate.problems().filter(p => p.kind === 'blocking')[0];
@@ -531,7 +535,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     return true;
   }
 
-  function freezeCurrentDeliveryList(submission) {
+  function freezeCurrentDeliveryList(submission, rows = list.rows()) {
     return createDeliveryList({
       projectTag: projectTagFrom(submission.mediaName),
       fps: submission.fps || 25,
@@ -542,14 +546,14 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       desktop: IS_DESKTOP,
       // rows() is a detached snapshot. Async conflict checks cannot let later
       // UI edits alter the jobs built for this submission.
-      initial: list.rows(),
+      initial: rows,
     });
   }
 
   const session = openModal('匯出影片', html, [
     { label: '取消', act: closeModal },
     { label: '加入匯出序列', id: 'evSubmitBtn', primary: true, act: async () => {
-      if (!session.isCurrent()) return;
+      if (!session.isCurrent() || !ownsWorkspace()) return;
       const submitButton = $('evSubmitBtn');
       if (submitButton?.disabled) return;
       if (submitButton) {
@@ -562,9 +566,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           // D3: capture project data and editable delivery rows synchronously,
           // before checkConflicts performs directory I/O.
           capture: () => {
-            if (!session.isCurrent()) return null;
+            if (!session.isCurrent() || !ownsWorkspace()) return null;
             const submission = _captureExportDraft();
-            return submission ? { submission, submittedList: freezeCurrentDeliveryList(submission) } : null;
+            const rowSubmission = list.captureSubmissionRows();
+            return submission ? { submission, submittedList: freezeCurrentDeliveryList(submission, rowSubmission.rows), rowSubmission } : null;
           },
           validate: ({ submission, submittedList }) => {
             if (submission.audioOnly && !submission.audioPlan) return '純音訊 WAV 匯出需要專案音軌路由';
@@ -577,18 +582,29 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
             return null;
           },
           checkConflicts: ({ submittedList }) => checkConflicts(true, submittedList),
-          dispatch: async ({ submission, submittedList }) => {
-            if (!session.isCurrent()) return 0;
+          dispatch: async ({ submission, submittedList, rowSubmission }) => {
+            const ownsSubmission = () => session.isCurrent() && ownsWorkspace();
+            if (!ownsSubmission()) return 0;
             const jobs = buildExportJobs(submission, submittedList);
-            for (const job of jobs) {
+            let accepted = 0;
+            for (let index = 0; index < jobs.length; index++) {
+              if (!ownsSubmission()) break;
+              // Later edits belong to a new draft; do not send their captured predecessor.
+              if (!rowSubmission.matches(index)) continue;
+              const job = jobs[index];
               const jobId = await DESK.exportVideo(job);
-              if (jobId) showToast(`排入佇列: ${job.defaultName}`);
+              if (!jobId) break;
+              accepted++;
+              if (!ownsSubmission()) break;
+              rowSubmission.removeAccepted(index);
+              updateRows();
+              showToast(`排入佇列: ${job.defaultName}`);
             }
-            session.close({ committed: true });
-            if (typeof DESK.openQueueMonitor === 'function') {
-              setTimeout(() => DESK.openQueueMonitor(), 150);
+            if (ownsSubmission() && list.count() === 0) session.close({ committed: true });
+            if (accepted && typeof DESK.openQueueMonitor === 'function') {
+              setTimeout(() => { if (ownsWorkspace()) DESK.openQueueMonitor(); }, 150);
             }
-            return jobs.length;
+            return accepted;
           },
         });
         if (result.status === 'invalid') {

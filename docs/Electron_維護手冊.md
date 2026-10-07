@@ -165,14 +165,14 @@ macOS arm64 封裝需要：
 6. 短 GOP 倒帶 Proxy
 7. 串流 lease 與清理
 
-快取只供預覽。交付 runner 會拒絕把 `.subtool_Cache`、Proxy 或 `ch_*.m4a` 當母素材。
+快取只供預覽。交付准入使用 intake runtime 的分類規則，拒絕管理快取或 `.subtool_Cache` 中的 `proxy.mp4`、`wave.wav`、`ch_01.m4a` 及舊版 `ch1.m4a`，也會檢查音訊路由計畫內的來源；快取外同名的合法母素材仍可交付。
 快取 key 結合完整來源路徑、檔案 metadata 與前／中／尾段取樣；轉檔後會再次核對來源。孤兒清理會略過 writer 或串流 reader 持有的中央快取；舊版 sidecar 無法安全判定歸屬，清除目前快取時不會擅自刪除。
 
 清除全部快取保留 writer 與串流 reader 各自持有的目錄，只計算確實刪除的容量。快取命中的串流同樣取得 reader lease；writer 完成只釋放自己的引用，不能讓仍在播放的 Proxy 被清除。呼叫端以 `releaseStream()` 結束串流，或由 runtime 關閉時統一釋放，最後一個引用結束後才可清除該目錄。
 
 快取診斷直接使用 runtime 的來源指紋函式。每個 growing MP4 HTTP request 持有自己的 reader 與輪詢 timer；客戶端斷線先收回該 request，串流 lease 仍由呼叫端持有。lease 釋放和 runtime 關閉會終止其全部 request；無效 URL／range 與讀取錯誤必須結束回應。mpv 載入只接受相同 client、世代與實際來源路徑的完成事件。
 
-`ingest` 與 `streamIngest` 共用當前請求的完整性判定：聲道數、來源 stream／channel 座標、波形與非空檔案均須符合。Proxy-only 快取不能滿足有音訊的請求。補建寫入私有 generation，只重建缺少部分，成功後原子提交 metadata；失敗保留先前完整素材。串流在可播放回應前失敗時自行釋放未交付 lease，回應後才由 caller 持有釋放責任。
+`ingest` 與 `streamIngest` 共用當前請求的完整性判定：聲道數、來源 stream／channel 座標、波形與非空檔案均須符合。Proxy-only 快取不能滿足有音訊的請求；素材旁部分快取不能遮住中央已完整的快取。相同來源聲道配置只補缺少的 Proxy、聲道或波形，保留其他已完成檔案；來源配置不同則重建音訊組。初建與補建都寫入各自私有 generation，metadata 也使用各自暫存檔，成功原子提交後才發布工作成功終態。索引寫入或 rename 失敗會回報失敗、刪除本次未提交 generation，並保留先前索引與素材。孤兒清理保留仍有任何可用檔案的快取；權限或暫時 I/O 錯誤屬於無法確認，也不能刪除。快取沒有按天過期規則。串流在可播放回應前失敗時自行釋放未交付 lease，回應後才由 caller 持有釋放責任。
 
 ### 執行進度與終態
 

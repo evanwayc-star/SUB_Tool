@@ -11,7 +11,7 @@ vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:
 vi.mock('../src/notes.js',()=>({renderNotes:vi.fn(),updateNoteActive:vi.fn()}));
 vi.mock('../src/subtitles.js',()=>({selectCueSingle:vi.fn(),commitCueTimeEdit:vi.fn()}));
 vi.mock('../src/subtitle-model.js',()=>({addCue:vi.fn(),cueTrackLocked:vi.fn()}));
-let Media,Wave,State,setFps,resetAudioProject,ensureAudioSourceMap,Project,resetProject,Seq,AudioEngine,pickMediaFiles;
+let Media,Wave,State,setFps,resetAudioProject,ensureAudioSourceMap,Project,resetProject,Seq,AudioEngine,pickMediaFiles,importDesktopMediaFiles,importBrowserMediaFiles,openMedia;
 const audioElements=[];
 beforeAll(async()=>{
  Object.defineProperty(window,'subtool',{configurable:true,value:{isDesktop:true,stat:vi.fn(async()=>({exists:true,size:1024})),probe:vi.fn(async()=>({duration:12,video:{codec:'vp9',fps:30,width:1920,height:1080},audio:[]})),fileURL:vi.fn(async path=>'file:///'+path)}});
@@ -19,10 +19,10 @@ beforeAll(async()=>{
  globalThis.Audio=class extends EventTarget {constructor(){super();this.src='';this.duration=12;this.currentTime=0;this.playbackRate=1;this.play=vi.fn(async()=>{});this.pause=vi.fn();audioElements.push(this);}removeAttribute(){}load(){}};
  ({Media,Wave}=await import('../src/media.js'));
  ({State,setFps,resetAudioProject,ensureAudioSourceMap}=await import('../src/state.js'));
- ({Project,resetProject}=await import('../src/project.js'));
+ ({Project,resetProject,openMedia}=await import('../src/project.js'));
  ({Seq}=await import('../src/sequence.js'));
  ({AudioEngine}=await import('../src/audio-engine.js'));
- ({pickMediaFiles}=await import('../src/media-loader.js'));
+ ({pickMediaFiles,importDesktopMediaFiles,importBrowserMediaFiles}=await import('../src/media-loader.js'));
  vi.spyOn(Project,'_checkMissingFonts').mockResolvedValue([]);
 });
 beforeEach(()=>{Media.reset();resetAudioProject();State.cues=[];State.clips=[];State.notes=[];dom.video.src='';dom.video.currentTime=0;audioElements.length=0;});
@@ -132,4 +132,100 @@ it('composition snapshot is immutable, retained only for its physical frame, and
  expect(snapshot.imageIds).toEqual(['image']);
  Media.setWebCodecsComposited(true);expect(Media.previewComposition()).toBe(snapshot);
  Media.reset();expect(Media.previewComposition()).toBeNull();
+});
+
+const pendingImport=()=>{
+ let resolve;
+ const promise=new Promise(done=>{resolve=done;});
+ return {promise,resolve};
+};
+
+it.each(['desktop','browser'])('%s 批次第一素材失去專案所有權後不把剩餘音檔加入新專案',async mode=>{
+ const pending=pendingImport(),applied=[];
+ const importer=mode==='desktop'?importDesktopMediaFiles:importBrowserMediaFiles;
+ const method=mode==='desktop'?'addAudioFileDesktop':'addAudioFile';
+ const files=mode==='desktop'?['C:/first.wav','C:/second.wav']:[{name:'first.wav'},{name:'second.wav'}];
+ const add=vi.spyOn(Media,method).mockImplementation(async item=>{
+  const owns=Project.captureWorkspaceOwnership();
+  if(item===files[0])await pending.promise;
+  if(!owns())return null;
+  applied.push(item);return item;
+ });
+ try{
+  const importing=importer(files);
+  await vi.waitFor(()=>expect(add).toHaveBeenCalledTimes(1));
+  await Project.startNewProject(()=>resetProject());
+  pending.resolve();await importing;
+  expect(add).toHaveBeenCalledTimes(1);
+  expect(applied).toEqual([]);
+ }finally{pending.resolve();add.mockRestore();}
+});
+
+it.each(['desktop','browser'])('%s 母影片載入等待期間換專案，不准入剩餘影片、音檔或圖片',async mode=>{
+ const pending=pendingImport();
+ const importer=mode==='desktop'?importDesktopMediaFiles:importBrowserMediaFiles;
+ const methods=mode==='desktop'?['loadDesktopMedia','addClipDesktop','addAudioFileDesktop','addImageDesktop']:
+  ['loadVideoFile','addClipWeb','addAudioFile','addImageWeb'];
+ const files=['first.webm','second.webm','voice.wav','image.png'].map(name=>mode==='desktop'?'C:/'+name:{name});
+ const spies=methods.map((method,index)=>vi.spyOn(Media,method).mockImplementation(()=>index===0?pending.promise:Promise.resolve()));
+ try{
+  const importing=importer(files);
+  await vi.waitFor(()=>expect(spies[0]).toHaveBeenCalledOnce());
+  await Project.startNewProject(()=>resetProject());
+  pending.resolve();await importing;
+  for(const spy of spies.slice(1))expect(spy).not.toHaveBeenCalled();
+ }finally{pending.resolve();spies.forEach(spy=>spy.mockRestore());}
+});
+
+it.each(['desktop','browser'])('%s 同一專案追加新批次時保留前一批已准入素材與後續合法項目',async mode=>{
+ const pending=pendingImport(),applied=[];
+ const importer=mode==='desktop'?importDesktopMediaFiles:importBrowserMediaFiles;
+ const method=mode==='desktop'?'addAudioFileDesktop':'addAudioFile';
+ const make=name=>mode==='desktop'?'C:/'+name:{name};
+ const first=make('first.wav'),second=make('second.wav'),next=make('next.wav');
+ const add=vi.spyOn(Media,method).mockImplementation(async item=>{
+  applied.push(item);
+  if(item===first)await pending.promise;
+  return item;
+ });
+ try{
+  const previous=importer([first,second]);
+  await vi.waitFor(()=>expect(add).toHaveBeenCalledOnce());
+  await importer([next]);
+  pending.resolve();await previous;
+  expect(applied).toEqual([first,next,second]);
+ }finally{pending.resolve();add.mockRestore();}
+});
+
+it('過期 restore plan 不准入批次第一筆素材，即使 workspace 本身未換代',async()=>{
+ const add=vi.spyOn(Media,'addAudioFileDesktop').mockResolvedValue(null);
+ try{
+  await importDesktopMediaFiles(['C:/old.wav'],{generation:0,plan:{owns:()=>false}});
+  expect(add).not.toHaveBeenCalled();
+ }finally{add.mockRestore();}
+});
+
+it('一般媒體 picker 晚返回時不把舊專案選的檔案加入目前專案',async()=>{
+ const pending=pendingImport();
+ window.subtool.openMedia=vi.fn(()=>pending.promise);
+ const add=vi.spyOn(Media,'addAudioFileDesktop').mockResolvedValue(null);
+ try{
+  const picking=openMedia();
+  await vi.waitFor(()=>expect(window.subtool.openMedia).toHaveBeenCalledOnce());
+  await Project.startNewProject(()=>resetProject());
+  pending.resolve(['C:/old.wav']);await picking;
+  expect(add).not.toHaveBeenCalled();
+ }finally{pending.resolve([]);add.mockRestore();delete window.subtool.openMedia;}
+});
+
+it('一般媒體入口 lazy import 尚未完成就換專案，不能再啟動舊 picker',async()=>{
+ window.subtool.openMedia=vi.fn(async()=>['C:/old.wav']);
+ const add=vi.spyOn(Media,'addAudioFileDesktop').mockResolvedValue(null);
+ try{
+  const picking=openMedia();
+  resetProject();
+  await picking;
+  expect(window.subtool.openMedia).not.toHaveBeenCalled();
+  expect(add).not.toHaveBeenCalled();
+ }finally{add.mockRestore();delete window.subtool.openMedia;}
 });

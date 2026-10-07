@@ -586,49 +586,59 @@ export function pickMediaFiles(input) {
   return pickFiles(input);
 }
 
-export async function importDesktopMediaFiles(value, explicitRelink = null) {
+async function importMediaBatch(files, explicitRelink, upstreamOwns, desktop) {
   const { Project } = await import('./project.js');
+  // The picker caller captures this before its first await. Direct importers
+  // can also join the current workspace without adding a static Project cycle.
+  const ownsWorkspace = upstreamOwns || Project.captureWorkspaceOwnership();
+  if (!ownsWorkspace()) return;
   const { Media } = await import('./media.js');
+  if (!ownsWorkspace()) return;
   const relink = explicitRelink || Project.pendingMediaRelink?.() || null;
   const projectRestore = relink?.plan || null;
-  const paths = (Array.isArray(value) ? value : (value ? [value] : [])).filter(path => typeof path === 'string' && path);
-  const videos = paths.filter(path => mediaFileKind(path) === 'video');
-  const audios = paths.filter(path => mediaFileKind(path) === 'audio');
-  const images = paths.filter(path => mediaFileKind(path) === 'image');
+  const owns = () => ownsWorkspace() && (!projectRestore?.owns || projectRestore.owns());
+  if (!owns()) return;
+  // Each Media call owns its own materialization and committed background work.
+  // The batch owns admission of the next file, across every asynchronous step.
+  const admit = async (method, file, ...args) => {
+    if (!owns()) return false;
+    await Media[method](file, ...args);
+    return owns();
+  };
+  const videos = files.filter(file => mediaFileKind(file) === 'video');
+  const audios = files.filter(file => mediaFileKind(file) === 'audio');
+  const images = files.filter(file => mediaFileKind(file) === 'image');
+  const loadPrimary = desktop ? 'loadDesktopMedia' : 'loadVideoFile';
+  const addVideo = desktop ? 'addClipDesktop' : 'addClipWeb';
+  const addAudio = desktop ? 'addAudioFileDesktop' : 'addAudioFile';
+  const addImage = desktop ? 'addImageDesktop' : 'addImageWeb';
   let primaryLoaded = false;
   if (videos.length > 1) {
-    if (!Media.seqOn()) { await Media.loadDesktopMedia(videos.shift(), projectRestore); primaryLoaded = true; }
-    for (const path of videos) await Media.addClipDesktop(path);
-  } else if (videos.length === 1) {
-    const path = videos[0];
-    if (Media.seqOn()) Media.openIncoming({ path });
-    else { await Media.loadDesktopMedia(path, projectRestore); primaryLoaded = true; }
-  }
-  for (const path of audios) await Media.addAudioFileDesktop(path);
-  for (const path of images) await Media.addImageDesktop(path);
-  if (primaryLoaded && relink) await Project.finishMediaRelink(relink.generation, projectRestore);
-}
-
-export async function importBrowserMediaFiles(files, explicitRelink = null) {
-  const { Project } = await import('./project.js');
-  const { Media } = await import('./media.js');
-  const relink = explicitRelink || Project.pendingMediaRelink?.() || null;
-  const projectRestore = relink?.plan || null;
-  const list = Array.isArray(files) ? files.filter(Boolean) : [];
-  const videos = list.filter(file => mediaFileKind(file) === 'video');
-  const audios = list.filter(file => mediaFileKind(file) === 'audio');
-  const images = list.filter(file => mediaFileKind(file) === 'image');
-  let primaryLoaded = false;
-  if (videos.length > 1) {
-    if (!Media.seqOn()) { await Media.loadVideoFile(videos.shift(), projectRestore); primaryLoaded = true; }
-    for (const file of videos) await Media.addClipWeb(file);
+    if (!Media.seqOn()) {
+      if (!await admit(loadPrimary, videos.shift(), projectRestore)) return;
+      primaryLoaded = true;
+    }
+    for (const file of videos) if (!await admit(addVideo, file)) return;
   } else if (videos.length === 1) {
     const file = videos[0];
-    if (Media.seqOn()) Media.openIncoming({ file });
-    else { await Media.loadVideoFile(file, projectRestore); primaryLoaded = true; }
+    if (Media.seqOn()) Media.openIncoming(desktop ? { path:file } : { file });
+    else {
+      if (!await admit(loadPrimary, file, projectRestore)) return;
+      primaryLoaded = true;
+    }
   }
-  for (const file of audios) await Media.addAudioFile(file);
-  for (const file of images) await Media.addImageWeb(file);
-  if (primaryLoaded && relink) await Project.finishMediaRelink(relink.generation, projectRestore);
+  for (const file of audios) if (!await admit(addAudio, file)) return;
+  for (const file of images) if (!await admit(addImage, file)) return;
+  if (primaryLoaded && relink && owns()) await Project.finishMediaRelink(relink.generation, projectRestore);
+}
+
+export function importDesktopMediaFiles(value, explicitRelink = null, upstreamOwns = null) {
+  const paths = (Array.isArray(value) ? value : (value ? [value] : [])).filter(path => typeof path === 'string' && path);
+  return importMediaBatch(paths, explicitRelink, upstreamOwns, true);
+}
+
+export function importBrowserMediaFiles(files, explicitRelink = null, upstreamOwns = null) {
+  const list = Array.isArray(files) ? files.filter(Boolean) : [];
+  return importMediaBatch(list, explicitRelink, upstreamOwns, false);
 }
 

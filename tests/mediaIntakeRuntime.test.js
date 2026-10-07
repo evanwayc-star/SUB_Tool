@@ -44,6 +44,11 @@ function writeIntakeOutputs(args) {
   }
 }
 
+function cacheDirectory(file) {
+  const parent = path.dirname(file);
+  return path.basename(parent).startsWith('generation-') ? path.dirname(parent) : parent;
+}
+
 function successfulProcess(onStart) {
   const child = new EventEmitter();
   child.stderr = new EventEmitter();
@@ -77,6 +82,124 @@ afterEach(() => {
 });
 
 describe('native media intake runtime', () => {
+  it.each(['ingest', 'stream'].flatMap(mode => ['wave', 'channel', 'proxy'].map(missing => [mode, missing])))
+  ('%s 只補缺少的 %s，重開與孤兒清理保留其他已完成檔案', async (mode, missing) => {
+    const fixture = repairFixture(async args => writeIntakeOutputs(args));
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [{ channels: 2 }] };
+    const first = await fixture.runtime.ingest(request);
+    await fixture.runtime.close();
+    const lost = missing === 'wave' ? first.wave : missing === 'proxy' ? first.proxy : first.channels[0].file;
+    const kept = [first.proxy, first.wave, ...first.channels.map(channel => channel.file)].filter(file => file !== lost);
+    const bytes = kept.map(file => fs.readFileSync(file));
+    fs.unlinkSync(lost);
+    const reopened = fixture.createRuntime();
+    try {
+      expect(reopened.cleanOrphans()).toEqual({ removed: 0, bytes: 0 });
+      const work = await reopened[mode](request);
+      const repaired = mode === 'stream' ? work.response : work;
+      await work.completion;
+      expect(repaired.cached).toBe(false);
+      expect(fixture.calls).toHaveLength(2);
+      const outputs = fixture.calls[1].filter(value => /\.(?:m4a|wav|mp4)$/.test(value));
+      expect(outputs).toHaveLength(1);
+      expect(outputs[0]).toMatch(missing === 'wave' ? /wave\.wav$/ : missing === 'proxy' ? /proxy\.mp4$/ : /ch_01\.m4a$/);
+      expect(kept.map(file => fs.readFileSync(file))).toEqual(bytes);
+      for (const file of kept) expect([repaired.proxy, repaired.wave, ...repaired.channels.map(channel => channel.file)]).toContain(file);
+      const persisted = await fixture.createRuntime().ingest(request);
+      expect(persisted).toEqual({ cached: true, proxy: repaired.proxy, wave: repaired.wave, channels: repaired.channels });
+      expect(fixture.calls).toHaveLength(2);
+    } finally { await reopened.close(); }
+  });
+
+  it.each(['ingest', 'stream'].flatMap(mode => ['write', 'rename'].map(failure => [mode, failure])))
+  ('%s 索引 %s 失敗必須回報失敗，保留舊索引與 Proxy 並清除未提交檔案', async (mode, failure) => {
+    const progress = [];
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), { sendProgress: (_, payload) => progress.push(payload) });
+    const first = await fixture.runtime.ingest({ src: fixture.source, duration: 1, needsProxy: true, audio: [] });
+    const cacheDir = cacheDirectory(first.proxy);
+    const metaPath = path.join(cacheDir, 'meta.json');
+    const before = fs.readFileSync(metaPath);
+    const method = failure === 'write' ? 'writeFileSync' : 'renameSync';
+    const original = fs[method];
+    const fault = vi.spyOn(fs, method).mockImplementation((file, ...args) => {
+      if (String(file).startsWith(metaPath + '.tmp')) throw new Error('metadata disk failure');
+      return original(file, ...args);
+    });
+    progress.length = 0;
+    try {
+      const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [{ channels: 2 }] };
+      if (mode === 'ingest') await expect(fixture.runtime.ingest(request, { progressTarget: {} })).rejects.toThrow('metadata disk failure');
+      else {
+        const work = await fixture.runtime.stream(request, { progressTarget: {} }).catch(error => error);
+        if (work instanceof Error) expect(work.message).toContain('metadata disk failure');
+        else {
+          await work.completion;
+          expect((await getRange(work.response.streamUrl, 'bytes=0-1')).status).toBe(500);
+        }
+      }
+      expect(fs.readFileSync(metaPath)).toEqual(before);
+      expect(fs.readdirSync(cacheDir).sort()).toEqual([path.basename(path.dirname(first.proxy)), 'meta.json'].sort());
+      expect(progress.filter(payload => payload.done)).toEqual([expect.objectContaining({ outcome: 'failed', errorMsg: expect.stringContaining('metadata disk failure') })]);
+    } finally { fault.mockRestore(); await fixture.runtime.close(); }
+    expect(await fixture.createRuntime().ingest({ src: fixture.source, duration: 1, needsProxy: true, audio: [] })).toEqual({ ...first, cached: true });
+    expect(fixture.calls).toHaveLength(2);
+  });
+
+  it.each([false, true])('原生編碼成功後，索引提交結果才發布唯一終態（索引失敗=%s）', async failCommit => {
+    const root = makeTempRoot();
+    const source = path.join(root, 'source.bin');
+    const cacheRoot = path.join(root, 'cache');
+    fs.writeFileSync(source, 'source');
+    const metaPath = path.join(cacheRoot, cacheKeyFor(source), 'meta.json');
+    const events = [];
+    const record = (_target, payload) => events.push({ payload, persisted: fs.existsSync(metaPath) });
+    const runtime = createMediaIntakeRuntime({
+      cacheRoot, allowSidecarCache: false, delay: async () => {},
+      fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot] }),
+      sendProgress: record,
+      ffmpegExecution: createFFmpegExecution({
+        getFFmpegPath: () => 'ffmpeg-test', getUserDataDir: () => root,
+        send: (target, _channel, payload) => record(target, payload),
+        spawnDirect: (_exe, args) => successfulProcess(() => writeIntakeOutputs(args)),
+      }),
+    });
+    const original = fs.renameSync;
+    const fault = vi.spyOn(fs, 'renameSync').mockImplementation((file, ...args) => {
+      if (failCommit && args[0] === metaPath) throw new Error('index publication failed');
+      return original(file, ...args);
+    });
+    try {
+      const work = runtime.ingest({ src: source, duration: 1, needsProxy: true, audio: [] }, { progressTarget: {} });
+      if (failCommit) await expect(work).rejects.toThrow('index publication failed');
+      else await expect(work).resolves.toMatchObject({ cached: false });
+      expect(events.some(({ payload }) => !payload.done && payload.pct > 0)).toBe(true);
+      expect(events.filter(({ payload }) => payload.done)).toEqual([{
+        persisted: !failCommit,
+        payload: expect.objectContaining({ done: true, outcome: failCommit ? 'failed' : 'success' }),
+      }]);
+    } finally { fault.mockRestore(); await runtime.close(); }
+  });
+
+  it('素材旁缺件時優先使用中央完整快取，不啟動補建', async () => {
+    const fixture = repairFixture(async args => writeIntakeOutputs(args));
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [{ channels: 2 }] };
+    const complete = await fixture.runtime.ingest(request);
+    await fixture.runtime.close();
+    const sidecar = path.join(path.dirname(fixture.source), '.subtool_Cache', cacheKeyFor(fixture.source));
+    fs.mkdirSync(sidecar, { recursive: true });
+    fs.writeFileSync(path.join(sidecar, 'proxy.mp4'), 'keep sidecar proxy');
+    fs.writeFileSync(path.join(sidecar, 'meta.json'), JSON.stringify({ proxy: 'proxy.mp4', channels: [], wave: 'missing.wav' }));
+    const reopened = createMediaIntakeRuntime({
+      cacheRoot: fixture.runtime.cacheInfo().root, allowSidecarCache: true,
+      fileAuthority: new FileAuthority({ internalDirectories: [fixture.runtime.cacheInfo().root] }),
+      ffmpegExecution: { execute: () => { throw new Error('unnecessary rebuild'); } },
+    });
+    try {
+      expect(await reopened.ingest(request)).toEqual({ ...complete, cached: true });
+      expect(fs.readFileSync(path.join(sidecar, 'proxy.mp4'), 'utf8')).toBe('keep sidecar proxy');
+    } finally { await reopened.close(); }
+  });
+
   it.each(['ingest', 'stream'])('%s proxy-only cache 必須補齊新請求的全部聲道，保留既有proxy並可跨runtime讀回', async mode => {
     const fixture = repairFixture(async args => writeIntakeOutputs(args));
     const { runtime, source, calls } = fixture;
@@ -120,7 +243,7 @@ describe('native media intake runtime', () => {
     try {
       const request = { src: source, duration: 1, needsProxy: false, audio: [{ channels: 2 }] };
       const first = await runtime.ingest(request);
-      const metaPath = path.join(path.dirname(first.wave), 'meta.json');
+      const metaPath = path.join(cacheDirectory(first.wave), 'meta.json');
       const metadata = fs.readFileSync(metaPath);
       const bytes = [...first.channels.map(channel => channel.file), first.wave].map(file => fs.readFileSync(file));
       await expect(runtime.stream(request)).rejects.toThrow('proxy repair failed');
@@ -166,11 +289,25 @@ describe('native media intake runtime', () => {
     const progressTarget = { id: 17 };
     try {
       await runtime.ingest(request, { progressTarget });
+      sendProgress.mockClear();
       await expect(runtime.ingest(request, { progressTarget })).resolves.toMatchObject({ cached: true });
       expect(calls).toHaveLength(1);
       expect(sendProgress).toHaveBeenCalledExactlyOnceWith(progressTarget, {
         jobId: 'ingest', label: '使用既有快取', pct: 100, done: true, outcome: 'success',
       });
+    } finally { await runtime.close(); }
+  });
+
+  it('已撤銷的 batch 請求不能命中快取或發布成功', async () => {
+    const sendProgress = vi.fn();
+    const { runtime, source, calls } = repairFixture(async args => writeIntakeOutputs(args), { sendProgress });
+    const request = { src: source, duration: 1, needsProxy: true, audio: [] };
+    try {
+      await runtime.ingest(request);
+      sendProgress.mockClear();
+      await expect(runtime.ingest(request, { isCancelled: () => true, progressTarget: {} })).rejects.toThrow('較新的載入取代');
+      expect(sendProgress).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
     } finally { await runtime.close(); }
   });
 
@@ -236,7 +373,7 @@ describe('native media intake runtime', () => {
     try {
       await runtime.ingest({ src: source, duration: 1, needsProxy: true, audio: [] });
       const stream = await runtime.stream({ src: source, duration: 1, audio: [] });
-      expect(path.basename(path.dirname(stream.proxy))).toBe(cacheKeyFor(source));
+      expect(path.basename(cacheDirectory(stream.proxy))).toBe(cacheKeyFor(source));
       expect((await getRange(new URL('/%', stream.streamUrl).href, 'bytes=0-1')).status).toBe(400);
       expect((await getRange(stream.streamUrl, 'bytes=5-2')).status).toBe(416);
       expect((await getRange(stream.streamUrl, 'bytes=0-1,3-4')).status).toBe(400);
@@ -421,9 +558,9 @@ describe('native media intake runtime', () => {
     }, session);
 
     expect(first).toMatchObject({ cached: false, channels: [], wave: null });
-    expect(first.proxy).toMatch(/[\\/]\.subtool_Cache[\\/][a-f0-9]{16}[\\/]proxy\.mp4$/);
-    expect(JSON.parse(fs.readFileSync(path.join(path.dirname(first.proxy), 'meta.json'), 'utf8')))
-      .toEqual({ proxy: 'proxy.mp4', wave: null, channels: [] });
+    expect(first.proxy).toMatch(/[\\/]\.subtool_Cache[\\/][a-f0-9]{16}[\\/]generation-[a-f0-9]{24}[\\/]proxy\.mp4$/);
+    expect(JSON.parse(fs.readFileSync(path.join(cacheDirectory(first.proxy), 'meta.json'), 'utf8')))
+      .toEqual({ proxy: path.relative(cacheDirectory(first.proxy), first.proxy).split(path.sep).join('/'), wave: null, channels: [] });
     expect(second).toEqual({ ...first, cached: true });
     expect(spawnCount).toBe(1);
     expect(authority.canRead(first.proxy)).toBe(true);
@@ -506,7 +643,7 @@ describe('native media intake runtime', () => {
       audio: [],
     }, { isCancelled: () => false, ownProcess() {} });
 
-    expect(path.dirname(path.dirname(result.proxy))).toBe(cacheRoot);
+    expect(path.dirname(cacheDirectory(result.proxy))).toBe(cacheRoot);
     expect(fs.existsSync(path.join(sourceDir, '.subtool_Cache'))).toBe(false);
   });
 
@@ -659,7 +796,7 @@ describe('native media intake runtime', () => {
     expect(fs.existsSync(proxy)).toBe(true);
     finish();
     await work.completion;
-    expect(fs.existsSync(path.join(path.dirname(proxy), 'meta.json'))).toBe(true);
+    expect(fs.existsSync(path.join(cacheDirectory(proxy), 'meta.json'))).toBe(true);
     await runtime.close();
   });
 
@@ -718,7 +855,7 @@ describe('native media intake runtime', () => {
     expect(fs.existsSync(activeProxy)).toBe(true);
     finish();
     const result = await work;
-    expect(fs.existsSync(path.join(path.dirname(result.proxy), 'meta.json'))).toBe(true);
+    expect(fs.existsSync(path.join(cacheDirectory(result.proxy), 'meta.json'))).toBe(true);
   });
 
   it('clearAll 只有在 FileAuthority 已授權母素材時才刪除素材旁 cache', async () => {

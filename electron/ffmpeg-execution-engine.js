@@ -375,6 +375,8 @@ function createFFmpegExecution(options = {}) {
       },
     });
     const terminal = (outcome, error) => {
+      // 媒體快取 owner 還須原子提交索引，由它發布整個工作終態。
+      if (executionOptions.deferTerminal) return;
       const payload = {
         jobId: executionOptions.jobId, label: executionOptions.label,
         pct: outcome === 'success' ? 100 : lastPct,

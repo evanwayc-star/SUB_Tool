@@ -3,10 +3,10 @@ import { VOCAL_SAMPLE_RATE, VOCAL_RESOLUTION } from './vocal-waveform-engine.js'
 
 export function vocalAbortError(){return new DOMException('人聲波形分析已取消','AbortError');}
 
-/** Keep the model warm after success; cancellation terminates inference itself. */
+/** One worker owns FIFO admission; keep its model warm after each success. */
 export class VocalWaveformClient{
   constructor({createWorker=()=>new VocalWorker({name:'subtool-vocal-waveform'}),timeoutMs=600000}={}){
-    this.createWorker=createWorker;this.timeoutMs=timeoutMs;this.worker=null;this.pending=null;this.active=false;this.nextId=1;
+    this.createWorker=createWorker;this.timeoutMs=timeoutMs;this.worker=null;this.pending=null;this.active=false;this.nextId=1;this.queue=[];
   }
   terminate(){this.worker?.terminate();this.worker=null;}
   chunk(channels,{signal,onProgress,offsetSamples,lengthSamples}){
@@ -39,36 +39,53 @@ export class VocalWaveformClient{
     });
   }
   async analyze({readChunk,duration,signal,onProgress=()=>{}}){
-    if(this.active)throw new Error('已有一項人聲分離工作正在執行，請先完成或取消');
     if(!Number.isFinite(duration)||duration<=0||duration>86400)throw new Error('素材時長不正確或超過 24 小時');
     if(signal?.aborted)throw vocalAbortError();
-    const owner={};
-    this.active=owner;
-    // Release admission synchronously. A cancelled read may settle after the retry.
-    const release=()=>{if(this.active===owner)this.active=false;};
-    signal?.addEventListener('abort',release,{once:true});
-    try{
-      const peaks=new Float32Array(Math.ceil(Math.round(duration*VOCAL_SAMPLE_RATE)/(VOCAL_SAMPLE_RATE/VOCAL_RESOLUTION))*2);
-      for(let start=0;start<duration;start+=30){
-        if(signal?.aborted)throw vocalAbortError();
-        const end=Math.min(duration,start+30),readStart=Math.max(0,start-2),readEnd=Math.min(duration,end+2);
-        onProgress({percent:start/duration*100,label:'讀取原素材音訊…'});
-        const channels=await readChunk({start:readStart,duration:readEnd-readStart,signal});
-        if(signal?.aborted)throw vocalAbortError();
-        const offsetSamples=Math.round((start-readStart)*VOCAL_SAMPLE_RATE),lengthSamples=Math.round((end-start)*VOCAL_SAMPLE_RATE);
-        if(!channels?.every(channel=>channel instanceof Float32Array)||channels.length!==2||
-          channels[0].length!==channels[1].length||channels[0].length<offsetSamples+lengthSamples)
-          throw new Error('原素材音訊長度不足，請重新載入素材後重試');
-        const result=await this.chunk(channels,{signal,offsetSamples,lengthSamples,onProgress:progress=>onProgress({
-          ...progress,percent:progress.fraction==null?start/duration*100:(start+(end-start)*progress.fraction*.95)/duration*100
-        })});
-        if(!(result instanceof Float32Array)||result.length!==Math.ceil(lengthSamples/(VOCAL_SAMPLE_RATE/VOCAL_RESOLUTION))*2)
-          throw new Error('人聲波形長度不正確');
-        peaks.set(result,Math.round(start*VOCAL_RESOLUTION)*2);
-        onProgress({percent:end/duration*100,label:end===duration?'人聲波形完成':'分離人聲…'});
-      }
-      return peaks;
-    }finally{signal?.removeEventListener('abort',release);release();}
+    return new Promise((resolve,reject)=>{
+      let settled=false;
+      const job={run:()=>this.#analyze({readChunk,duration,signal,onProgress}),finish:(error,result)=>{
+        if(settled)return;settled=true;
+        signal?.removeEventListener('abort',abort);
+        const index=this.queue.indexOf(job);
+        if(index!==-1)this.queue.splice(index,1);
+        // A cancelled native read can settle after a replacement job has started.
+        if(this.active===job)this.active=false;
+        if(error)reject(error);else resolve(result);
+        // Let every abort listener finish before admitting another source. Project
+        // replacement can cancel the entire lane without starting its queued reads.
+        queueMicrotask(()=>this.#startNext());
+      }};
+      const abort=()=>job.finish(vocalAbortError());
+      signal?.addEventListener('abort',abort,{once:true});
+      this.queue.push(job);this.#startNext();
+    });
+  }
+  #startNext(){
+    if(this.active||!this.queue.length)return;
+    const job=this.queue.shift();this.active=job;
+    job.run().then(result=>job.finish(null,result),error=>job.finish(error));
+  }
+  async #analyze({readChunk,duration,signal,onProgress}){
+    const peaks=new Float32Array(Math.ceil(Math.round(duration*VOCAL_SAMPLE_RATE)/(VOCAL_SAMPLE_RATE/VOCAL_RESOLUTION))*2);
+    for(let start=0;start<duration;start+=30){
+      if(signal?.aborted)throw vocalAbortError();
+      const end=Math.min(duration,start+30),readStart=Math.max(0,start-2),readEnd=Math.min(duration,end+2);
+      onProgress({percent:start/duration*100,label:'讀取原素材音訊…'});
+      const channels=await readChunk({start:readStart,duration:readEnd-readStart,signal});
+      if(signal?.aborted)throw vocalAbortError();
+      const offsetSamples=Math.round((start-readStart)*VOCAL_SAMPLE_RATE),lengthSamples=Math.round((end-start)*VOCAL_SAMPLE_RATE);
+      if(!channels?.every(channel=>channel instanceof Float32Array)||channels.length!==2||
+        channels[0].length!==channels[1].length||channels[0].length<offsetSamples+lengthSamples)
+        throw new Error('原素材音訊長度不足，請重新載入素材後重試');
+      const result=await this.chunk(channels,{signal,offsetSamples,lengthSamples,onProgress:progress=>onProgress({
+        ...progress,percent:progress.fraction==null?start/duration*100:(start+(end-start)*progress.fraction*.95)/duration*100
+      })});
+      if(!(result instanceof Float32Array)||result.length!==Math.ceil(lengthSamples/(VOCAL_SAMPLE_RATE/VOCAL_RESOLUTION))*2)
+        throw new Error('人聲波形長度不正確');
+      peaks.set(result,Math.round(start*VOCAL_RESOLUTION)*2);
+      onProgress({percent:end/duration*100,label:end===duration?'人聲波形完成':'分離人聲…'});
+    }
+    return peaks;
   }
 }
 

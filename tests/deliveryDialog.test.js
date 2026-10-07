@@ -2,6 +2,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const modalState = vi.hoisted(() => ({ generation: 0 }));
+const workspaceState = vi.hoisted(() => ({ generation: 0 }));
 const spies = vi.hoisted(() => ({
   openModal: vi.fn((title, html) => {
     const generation = ++modalState.generation;
@@ -38,7 +39,10 @@ vi.mock('../src/project-intake-engine.js', () => ({ buildSubtitleImportPlan: vi.
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));
-vi.mock('../src/project.js', () => ({ Project: {} }));
+vi.mock('../src/project.js', () => ({ Project: { captureWorkspaceOwnership: () => {
+  const generation = workspaceState.generation;
+  return () => generation === workspaceState.generation;
+} } }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn() }));
 vi.mock('../src/xlsx-export.js', () => ({ buildXLSX: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ getNotesGeneralFileData: vi.fn(), getNotesEdiusFileData: vi.fn() }));
@@ -90,13 +94,88 @@ beforeEach(() => {
   State.exportOut = 32;
   State.externalAudioState = [];
   mediaMock.tracks = [];
-  window.subtool.exportVideo.mockClear();
+  workspaceState.generation++;
+  window.subtool.exportVideo.mockReset();
   window.subtool.getStartupFile.mockResolvedValue(null);
   window.subtool.listDir.mockResolvedValue([]);
   window.subtool.exportDirectory.mockResolvedValue(null);
 });
 
 describe('匯出交付清單', () => {
+  async function prepareRows(names = ['A.mp4', 'B.mp4', 'C.mp4']) {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-name')).not.toBeNull());
+    for (let i = 1; i < names.length; i++) document.querySelector('#evAddRowBtn').click();
+    [...document.querySelectorAll('.ev-name')].forEach((input, index) => {
+      input.value = names[index]; input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    document.querySelectorAll('.ev-outdir').forEach(input => {
+      input.value = 'D:/交付'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    return spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn');
+  }
+
+  it('第二份加入失敗後只保留失敗及未送出列，重試不重送第一份成功工作', async () => {
+    const submit = await prepareRows();
+    const warning = vi.spyOn(console, 'error').mockImplementation(() => {});
+    window.subtool.exportVideo.mockResolvedValueOnce('job-A').mockRejectedValueOnce(new Error('磁碟寫入失敗'))
+      .mockResolvedValueOnce('job-B').mockResolvedValueOnce('job-C');
+    try {
+      await submit.act();
+      expect([...document.querySelectorAll('.ev-name')].map(input => input.value)).toEqual(['B.mp4', 'C.mp4']);
+      await submit.act();
+      expect(window.subtool.exportVideo.mock.calls.map(([job]) => job.defaultName)).toEqual(['A.mp4', 'B.mp4', 'B.mp4', 'C.mp4']);
+    } finally { warning.mockRestore(); }
+  });
+
+  it('加入返回null代表取消，保留整份尚未送出的清單且不繼續送下一列', async () => {
+    const submit = await prepareRows(); window.subtool.exportVideo.mockResolvedValue(null);
+    const generation = modalState.generation;
+    await submit.act();
+    expect(window.subtool.exportVideo).toHaveBeenCalledTimes(1);
+    expect([...document.querySelectorAll('.ev-name')].map(input => input.value)).toEqual(['A.mp4', 'B.mp4', 'C.mp4']);
+    expect(modalState.generation).toBe(generation);
+  });
+
+  it('等待加入期间成功列被編輯，ACK只屬舊稿不刪較新的編輯', async () => {
+    const submit = await prepareRows(['A.mp4', 'B.mp4']);
+    let finish;
+    window.subtool.exportVideo.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockRejectedValueOnce(new Error('拒絕第二份'));
+    const warning = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const pending = submit.act(); await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+      const first = document.querySelector('.ev-name'); first.value = 'A-new.mp4'; first.dispatchEvent(new Event('input', { bubbles: true }));
+      finish('job-A'); await pending;
+      expect([...document.querySelectorAll('.ev-name')].map(input => input.value)).toEqual(['A-new.mp4', 'B.mp4']);
+    } finally { warning.mockRestore(); }
+  });
+
+  it('等待前一列加入期间編輯尚未送出的列，保留新稿並停止送出已失效的舊稿', async () => {
+    const submit = await prepareRows(['A.mp4', 'B.mp4']);
+    let finish;
+    window.subtool.exportVideo.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValue('job-B');
+    const pending = submit.act(); await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    const second = document.querySelectorAll('.ev-name')[1]; second.value = 'B-new.mp4'; second.dispatchEvent(new Event('input', { bubbles: true }));
+    finish('job-A'); await pending;
+    expect(window.subtool.exportVideo).toHaveBeenCalledTimes(1);
+    expect([...document.querySelectorAll('.ev-name')].map(input => input.value)).toEqual(['B-new.mp4']);
+  });
+
+  it.each(['modal', 'workspace'])('等待第一份加入时 %s 失效，不能繼續排入原視窗的其餘工作', async kind => {
+    const submit = await prepareRows(['A.mp4', 'B.mp4']);
+    let finish;
+    window.subtool.exportVideo.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValue('job-B');
+    const pending = submit.act(); await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    if (kind === 'modal') {
+      spies.closeModal(); await showExportVideoDialog();
+      await vi.waitFor(() => expect(document.querySelectorAll('.ev-name')).toHaveLength(1));
+    } else workspaceState.generation++;
+    finish('job-A'); await pending;
+    expect(window.subtool.exportVideo).toHaveBeenCalledTimes(1);
+    if (kind === 'modal') expect(document.querySelectorAll('.ev-name')).toHaveLength(1);
+  });
+
   it('從儲存位置切到檔名時保留點擊目標，不重建正在聚焦的欄位', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-name')).not.toBeNull());

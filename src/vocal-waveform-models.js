@@ -8,21 +8,46 @@ export const VOCAL_MODELS=Object.freeze({
     url:'https://huggingface.co/onnx-community/silero-vad/resolve/e71cae966052b992a7eca6b17738916ce0eca4ec/onnx/model.onnx'}
 });
 
+const MODEL_CACHE_TIMEOUT_MS=1500;
+
+/** Storage is optional; a blocked cache must not consume the inference deadline. */
 async function modelCache(mode,key,value){
   if(typeof indexedDB==='undefined') return null;
-  const db=await new Promise((resolve,reject)=>{
-    const open=indexedDB.open('subtool-vocal-models',1);
-    open.onupgradeneeded=()=>open.result.createObjectStore('models');
-    open.onsuccess=()=>resolve(open.result); open.onerror=()=>reject(open.error);
+  return new Promise(resolve=>{
+    let db=null,tx=null,settled=false;
+    const finish=(result=null,abort=false)=>{
+      if(settled)return;
+      settled=true;clearTimeout(timer);
+      if(abort){try{tx?.abort();}catch(_){/* A completed transaction needs no cancellation. */}}
+      db?.close();resolve(result);
+    };
+    const timer=setTimeout(()=>finish(null,true),MODEL_CACHE_TIMEOUT_MS);
+    let open;
+    try{open=indexedDB.open('subtool-vocal-models',1);}
+    catch(_){finish();return;}
+    open.onblocked=open.onerror=()=>finish();
+    open.onupgradeneeded=()=>{
+      db=open.result;tx=open.transaction;
+      if(settled){
+        // IDBOpenDBRequest cannot be cancelled. Stop a late upgrade and release it.
+        try{tx.abort();}finally{db.close();}
+        return;
+      }
+      try{db.createObjectStore('models');}
+      catch(_){finish(null,true);}
+    };
+    open.onsuccess=()=>{
+      db=open.result;
+      if(settled){db.close();return;}
+      try{
+        tx=db.transaction('models',mode==='put'?'readwrite':'readonly');
+        const store=tx.objectStore('models');
+        const request=mode==='put'?store.put(value,key):store.get(key);
+        tx.oncomplete=()=>finish(request.result??null);
+        tx.onerror=tx.onabort=()=>finish();
+      }catch(_){finish(null,true);}
+    };
   });
-  try{
-    return await new Promise((resolve,reject)=>{
-      const tx=db.transaction('models',mode==='put'?'readwrite':'readonly');
-      const store=tx.objectStore('models');
-      const request=mode==='put'?store.put(value,key):store.get(key);
-      tx.oncomplete=()=>resolve(request.result??null); tx.onerror=()=>reject(tx.error); tx.onabort=()=>reject(tx.error);
-    });
-  }finally{db.close();}
 }
 
 export async function verifiedModel(model,onProgress=()=>{}){

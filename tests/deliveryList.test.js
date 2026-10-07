@@ -98,6 +98,36 @@ describe('交付解析度', () => {
   });
 });
 
+describe('交付列送出所有權', () => {
+  it('成功只移除仍未編輯的原列，不依已位移的index刪其他列', () => {
+    const list = base(); list.setName(0, 'A.mp4'); list.add(); list.setName(1, 'B.mp4');
+    const submission = list.captureSubmissionRows();
+    expect(submission.removeAccepted(0)).toBe(true);
+    expect(submission.matches(1)).toBe(true);
+    expect(submission.removeAccepted(1)).toBe(true); expect(list.count()).toBe(0);
+  });
+  it('同列新稿、替換及刪除後再新增同值列均不被遲到ACK刪除', () => {
+    const list = base(); list.setName(0, 'A.mp4');
+    let submission = list.captureSubmissionRows(); list.setName(0, 'new.mp4');
+    expect(submission.removeAccepted(0)).toBe(false); expect(list.get(0).customName).toBe('new.mp4');
+    submission = list.captureSubmissionRows(); list.applyRow(0, list.get(0));
+    expect(submission.removeAccepted(0)).toBe(false);
+    submission = list.captureSubmissionRows(); const original = list.get(0);
+    list.removeAt(0); list.add(); list.applyRow(0, original);
+    expect(submission.removeAccepted(0)).toBe(false); expect(list.count()).toBe(1);
+  });
+  it('編輯又返回舊值仍是較新草稿；無變更的blur不撤銷送出所有權', () => {
+    const list = base(); list.setName(0, 'A.mp4');
+    let submission = list.captureSubmissionRows();
+    list.setName(0, 'A.mp4'); expect(submission.matches(0)).toBe(true);
+    list.setName(0, 'new.mp4'); list.setName(0, 'A.mp4');
+    expect(submission.removeAccepted(0)).toBe(false); expect(list.count()).toBe(1);
+    submission = list.captureSubmissionRows();
+    submission.rows[0].customName = 'mutated-snapshot.mp4';
+    expect(submission.matches(0)).toBe(true); expect(list.get(0).customName).toBe('A.mp4');
+  });
+});
+
 describe('清單與佇列共用交付規格', () => {
   it('已入列的 H.264 換解析度會重算碼率，並保留凍結的 TC 起點', () => {
     expect(deriveDeliverySpec({ format: 'h264', canvasW: 1920, canvasH: 1080,

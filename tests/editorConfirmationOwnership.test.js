@@ -107,6 +107,49 @@ describe('editor confirmation ownership and invalidation',()=>{
     [...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent==='轉換').click();
     expect(State.cues[0].start).toBe(1);expect(State.cues[0].end).toBe(2);
   });
+  it.each([
+    {from:29.97,to:25,projectFps:25},
+    {from:23.976,to:24,projectFps:25},
+    {from:30,to:29.97,projectFps:29.97},
+    {from:24,to:23.976,projectFps:23.976},
+    {from:23.976,to:29.97,projectFps:29.97},
+    {from:25,to:29.97,projectFps:29.97},
+    {from:25,to:30,projectFps:30},
+  ])('FPS dialog uses exact rates for long $from → $to conversions on $projectFps grid',async({from,to,projectFps})=>{
+    const Subio=await import('../src/subio.js');
+    const {getExactFps,snapTimeToFrame}=await import('../src/time.js');
+    State.fps=projectFps;State.dropFrame=projectFps===29.97;
+    const cue=State.cues[0];cue.start=600001/getExactFps(from);cue.end=600051/getExactFps(from);
+    const expectedStart=snapTimeToFrame(600001/getExactFps(to),projectFps,State.dropFrame);
+    const expectedEnd=snapTimeToFrame(600051/getExactFps(to),projectFps,State.dropFrame);
+    Subio.showFpsConvertDialog();vi.advanceTimersByTime(31);
+    document.getElementById('fpsFrom').value=String(from);document.getElementById('fpsTo').value=String(to);
+    [...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent==='轉換').click();
+    expect(cue.start).toBeCloseTo(expectedStart,10);expect(cue.end).toBeCloseTo(expectedEnd,10);
+    expect(State.fps).toBe(projectFps);
+  });
+  it('FPS dialog preview shows the same snapped example time as its committed result',async()=>{
+    const Subio=await import('../src/subio.js');const {fmtClock}=await import('../src/time.js');
+    const cue=State.cues[0];cue.start=3600;cue.end=3602;
+    Subio.showFpsConvertDialog();vi.advanceTimersByTime(31);
+    const from=document.getElementById('fpsFrom'),to=document.getElementById('fpsTo');
+    from.value='23.976';to.value='25';from.dispatchEvent(new Event('change',{bubbles:true}));
+    const preview=document.getElementById('fpsPreview').textContent;
+    expect(preview).toContain('23.976');expect(preview).toContain('25');
+    const example=preview.match(/1:00:00 → (\d{2}:\d{2}:\d{2}\.\d{2,3})/);
+    expect(example).not.toBeNull();
+    [...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent==='轉換').click();
+    expect(example[1]).toBe(fmtClock(cue.start));
+  });
+  it('FPS dialog leaves equal rates unchanged without recording history',async()=>{
+    const Subio=await import('../src/subio.js');const before=structuredClone(State.cues),historyCount=History.stack.length;
+    Subio.showFpsConvertDialog();vi.advanceTimersByTime(31);
+    document.getElementById('fpsFrom').value='29.97';document.getElementById('fpsTo').value='29.97';
+    document.getElementById('fpsFrom').dispatchEvent(new Event('change',{bubbles:true}));
+    expect(document.getElementById('fpsPreview').textContent).toContain('無需轉換');
+    [...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent==='轉換').click();
+    expect(State.cues).toEqual(before);expect(History.stack).toHaveLength(historyCount);expect(State.fps).toBe(25);
+  });
   it('track delete confirmation preserves replacement track despite new lock',async()=>{
     const Timeline=await import('../src/timeline-renderer.js');
     Timeline.removeTrack(0);State.tracks=[{name:'new',locked:true},{name:'retained'}];State.trackCount=2;
