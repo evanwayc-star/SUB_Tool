@@ -18,6 +18,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const P = require(path.join(ROOT, 'electron/export-plan.js'));
 const { buildClipFrameArgs } = require('../electron/clip-frame-cache.js');
 const { privateSarasaFont } = require('./fixtures/private-font.cjs');
+const { createDeliveryRunner } = require('../electron/delivery-runner.js');
 const FFMPEG = process.env.FFMPEG_PATH || path.join(ROOT, 'electron/ffmpeg/ffmpeg.exe');
 
 describe.skipIf(!fs.existsSync(FFMPEG))('一般片段的來源影格交付', () => {
@@ -234,12 +235,12 @@ describe.skipIf(!fs.existsSync(FFMPEG))('來源首個 presentation 畫格之前�
 });
 
 describe.skipIf(!fs.existsSync(FFMPEG))('合法字型路徑的真 FFmpeg 內容驗證', () => {
-  it('ASS 與 TC 在逗號、引號、括號、分號、空白與 Unicode 路徑使用相同字型，逐 pixel 與正常路徑相同', () => {
+  it('ASS 與 TC 在逗號、引號、括號、分號、空白與 Unicode 路徑使用相同字型，逐 pixel 與正常路徑相同', async () => {
     const root = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-font-filter-path-'));
     const source = path.join(root, 'source.mov');
     const privateFont = privateSarasaFont(fs.readFileSync(path.join(ROOT, 'font/更紗黑體/sarasa-mono-tc-nerd-regular.ttf')));
-    const run = args => {
-      const result = spawnSync(FFMPEG, ['-hide_banner', '-nostdin', ...args], { cwd: root, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024 });
+    const run = (args, cwd = root) => {
+      const result = spawnSync(FFMPEG, ['-hide_banner', '-nostdin', ...args], { cwd, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024 });
       expect(result.error || result.status, result.stderr?.toString()).toBe(0);
       return result;
     };
@@ -253,7 +254,7 @@ describe.skipIf(!fs.existsSync(FFMPEG))('合法字型路徑的真 FFmpeg 內容�
         let baseline;
         // Keep leading/internal whitespace; a trailing-space directory requires
         // an NT namespace path and is not a normal Win32 font directory.
-        for (const name of ['plain', 'font,comma', "font'quote", 'font[brackets]', 'font;semicolon', " 字型 空白,'[;]"]) {
+        for (const name of ['plain', 'font,comma', "font'quote", 'font[brackets]', 'font;semicolon', " 字型 空白,'[;]", 'font-🚀']) {
           const directory = path.join(root, name); fs.mkdirSync(directory, { recursive: true });
           const font = path.join(directory, 'fixed.ttf'); fs.writeFileSync(font, privateFont.bytes);
           const outPath = path.join(root, 'delivery.mov');
@@ -262,7 +263,23 @@ describe.skipIf(!fs.existsSync(FFMPEG))('合法字型路徑的真 FFmpeg 內容�
             ...(mode === 'ASS' ? { assFileName: 'burn.ass' } : { timecodeWatermark: { start: '01:00:00:00' } }),
           }, { fontsDir: directory, timecodeFontFile: font, proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] });
           let encoded;
-          try { encoded = run(plan.args); }
+          try {
+            if (mode === 'ASS') encoded = run(plan.args);
+            else {
+              const progress=[];
+              const runner=createDeliveryRunner({
+                queue:{assertJobCapabilities(){},registerActiveJob(){},clearActiveJob(){},reportProgress(_id,data){progress.push(data);return true;}},
+                queueDir:()=>root,tempDir:directory,
+                fonts:{timecodeFile:()=>font},
+                mediaProbe:()=>({hasAudio:async()=>false,audioBitrates:async()=>[]}),
+                encoder:{proresArgs:()=>['-c:v','prores_ks','-c:a','pcm_s24le']},
+                runFfmpeg:async(args,options)=>{encoded=run(args,options.cwd);return{maps:[]};},
+              });
+              await runner.run({id:'native-timecode',payload:{format:'prores',clips:[{path:source,in:0,out:0.4,offset:0,audio:[]}],videoTracks:[{vt:0}],width:320,height:180,fps:25,duration:0.4,outPath,timecodeWatermark:{start:'01:00:00:00'}}});
+              expect(progress.at(-1),JSON.stringify(progress)).toMatchObject({done:true});
+              expect(fs.readdirSync(directory)).toEqual(['fixed.ttf']);
+            }
+          }
           catch (error) { throw new Error(`${mode}: ${name}\n${JSON.stringify(plan.args)}\n${error.message}`, { cause: error }); }
           if (mode === 'ASS') {
             const selections = encoded.stderr.toString().split(/\r?\n/).filter(line => line.includes('fontselect:'));

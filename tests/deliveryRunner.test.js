@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -50,7 +50,7 @@ function make(overrides = {}) {
       bitrateArgs: () => ['-c:v', 'libx264'],
       proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'],
     },
-    fonts: { root: () => null, timecodeFile: () => null },
+    fonts: { root: () => null, timecodeFile: () => null, ...overrides.fonts },
     events: {
       senderForId: id => id ? { id } : null,
       fallbackSender: () => ({ id: 'fallback' }),
@@ -80,6 +80,28 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it.each([false, true])('時間碼字型用 ASCII 相對路徑交付並在成功／失敗後清除（failure=%s）', async failure => {
+    let source, staged;
+    const bytes=Buffer.from('original font bytes');
+    const setup=make({fonts:{timecodeFile:()=>source},runFfmpeg:vi.fn(async (args, options)=>{
+      const graph=args[args.indexOf('-filter_complex')+1];
+      staged=/drawtext=fontfile=([^:]+):/.exec(graph)?.[1];
+      expect(staged).toMatch(/^[a-zA-Z0-9_.-]+$/);
+      expect(options.cwd).toBe(setup.tempDir);
+      expect(readFileSync(path.join(options.cwd,staged))).toEqual(bytes);
+      if(failure) throw new Error('native encoder failure');
+      return {maps:[]};
+    })});
+    const fontDir=path.join(path.dirname(setup.tempDir),'字型 🚀');mkdirSync(fontDir);
+    source=path.join(fontDir,'face.ttf');writeFileSync(source,bytes);
+    const job=videoJob();job.payload.timecodeWatermark={start:'01:00:00:00'};
+    await setup.runner.run(job);
+    expect(setup.runFfmpeg).toHaveBeenCalledOnce();
+    expect(staged).toMatch(/^[a-zA-Z0-9_.-]+$/);
+    expect(readFileSync(source)).toEqual(bytes);
+    expect(readdirSync(setup.tempDir)).toEqual([]);
+    expect(setup.sent.at(-1)?.payload).toMatchObject(failure?{error:true}:{done:true});
+  });
   it.each(['wav', 'h264', 'prores', 'mod-fhd', 'airline-exw', 'airline-dmpes', 'airline-dmpes-4m', 'dvd-iso', 'bd-iso'])
   ('%s 對 audioPlan 獨立母來源取得時鐘證據，交付不依賴來源出現在影片清單', async format => {
     const source = path.resolve('D:/external/delayed.mov');

@@ -81,6 +81,7 @@ function createDeliveryRunner(options = {}) {
     }
 
     let assName = null;
+    let timecodeFontName = null;
     const abort = new AbortController();
     let finish;
     const active = {
@@ -122,6 +123,16 @@ function createDeliveryRunner(options = {}) {
         assName = QueueStore.burnAssFileName(jobId);
         fs.writeFileSync(path.join(tempDir, assName), assText, 'utf8');
       }
+      if (!isWav && rawTimecodeWatermark) {
+        const fontFile = fonts.timecodeFile?.();
+        if (fontFile) {
+          // FreeType's fontfile opens via the Windows ANSI code page. Keep the
+          // supplied face, but pass an ASCII filename relative to ffmpeg's cwd;
+          // this also works when the user profile/temp directory is Unicode.
+          timecodeFontName = QueueStore.burnAssFileName(jobId) + '.timecode-font';
+          fs.copyFileSync(fontFile, path.join(tempDir, timecodeFontName));
+        }
+      }
 
       const probe = mediaProbe();
       const sourcePaths = QueueStore.collectSourcePaths({
@@ -158,7 +169,7 @@ function createDeliveryRunner(options = {}) {
           sourceStartOffsets.get(sourceKey(sourcePath))?.[streamIndex] ?? 0,
         sourceClock: probe.describe ? sourcePath => sourceClocks.get(sourceKey(sourcePath)) : null,
         fontsDir: fonts.root?.() || null,
-        timecodeFontFile: fonts.timecodeFile?.() || null,
+        timecodeFontFile: timecodeFontName,
       });
       const { args, label, duration: plannedDuration, kbps, audioBitrates } = plan;
       const startedAt = now();
@@ -220,8 +231,8 @@ function createDeliveryRunner(options = {}) {
       });
       if (progress) sendProgress({ jobId, ...progress });
     } finally {
-      if (assName) {
-        try { fs.unlinkSync(path.join(tempDir, assName)); } catch (error) {}
+      for (const file of [assName, timecodeFontName]) {
+        if (file) try { fs.unlinkSync(path.join(tempDir, file)); } catch (error) {}
       }
       queue.clearActiveJob(jobId);
       finish();
