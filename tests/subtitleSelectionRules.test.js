@@ -203,14 +203,16 @@ it('list Shift range stays in visible subtitle track rather than selecting inter
  subtitles.renderSubList();listPress('a');listPress('c',{shiftKey:true});
  expect(snapshot()).toEqual({primary:'a',ids:['a','c'],kind:'sub'});
 });
-it('list click on locked subtitle preserves existing video selection',()=>{
+it('list click can select a locked subtitle without changing its content',()=>{
  state.State.tracks[1].locked=true;state.State.listTrack=1;subtitles.renderSubList();state.setSelection({kind:'video',ids:'retained-video'});
- listPress('b');expect(state.State.selectedClipId).toBe('retained-video');expect(state.State.selectedIds).toEqual([]);
+ const before=JSON.stringify(state.State.cues);
+ listPress('b');expect(state.State.selectedClipId).toBeNull();expect(snapshot()).toEqual({primary:'b',ids:['b'],kind:'sub'});
+ expect(JSON.stringify(state.State.cues)).toBe(before);expect(state.State.tracks[1].locked).toBe(true);
 });
-it('locked list cue permits pointer positioning without becoming selected',async()=>{
+it('locked list cue permits pointer positioning and read-only selection',async()=>{
  const {Media}=await import('../src/media.js');
  state.State.tracks[1].locked=true;state.State.listTrack=1;subtitles.renderSubList();state.setSelection({kind:'video',ids:'retained-video'});
- listPress('b');expect(Media.seek).toHaveBeenCalledWith(3);expect(state.State.selectedClipId).toBe('retained-video');
+ listPress('b');expect(Media.seek).toHaveBeenCalledWith(3);expect(snapshot()).toEqual({primary:'b',ids:['b'],kind:'sub'});
 });
 it('timeline click on locked subtitle preserves existing video selection',()=>{
  state.State.tracks[1].locked=true;state.setSelection({kind:'video',ids:'retained-video'});
@@ -273,14 +275,14 @@ it('timeline rubber-band excludes locked subtitle track while selecting unlocked
  window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0,clientX:350,clientY:top+120}));
  expect(snapshot().ids).toEqual(['a']);
 });
-it('searchUpdate on locked track does not replace existing video selection',()=>{
+it('searchUpdate on locked track selects the matching subtitle',()=>{
  state.State.listTrack=1;state.State.tracks[1].locked=true;state.setSelection({kind:'video',ids:'retained-video'});
- subtitles.searchUpdate('B');expect(state.State.selectedClipId).toBe('retained-video');expect(state.State.selectedIds).toEqual([]);
+ subtitles.searchUpdate('B');expect(state.State.selectedClipId).toBeNull();expect(snapshot()).toEqual({primary:'b',ids:['b'],kind:'sub'});
 });
-it('searchSelectAll on locked track does not replace existing video selection',async()=>{
+it('searchSelectAll on locked track selects all matching subtitles',async()=>{
  state.State.listTrack=1;state.State.tracks[1].locked=true;state.setSelection({kind:'video',ids:'retained-video'});
  subtitles.searchUpdate('B');state.setSelection({kind:'video',ids:'retained-video'});const search=await import('../src/subtitle-search.js');
- search.searchSelectAll();expect(state.State.selectedClipId).toBe('retained-video');expect(state.State.selectedIds).toEqual([]);
+ search.searchSelectAll();expect(state.State.selectedClipId).toBeNull();expect(snapshot()).toEqual({primary:'b',ids:['b'],kind:'sub'});
 });
 it('public State selection keeps type exclusivity and pruning of deleted IDs',()=>{
  state.setSelection({kind:'video',ids:'retained-video'});state.setSelection({kind:'sub',ids:['a','deleted','b'],primary:'deleted'});state.pruneSelection();
