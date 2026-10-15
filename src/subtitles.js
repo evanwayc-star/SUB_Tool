@@ -483,14 +483,7 @@ function selectCue(id,opts){
   opts=opts||{};
   const target=State.cues.find(c=>c.id===id);
   if(id!=null && !target) return false;
-  if(target && State.tracks[target.track||0]?.locked){
-    const time=Media.displayTime();
-    if(opts.seek && target.timed!==false && (time<target.start || time>=target.end)){
-      seekCueFromSelection(snapTimeToFrame(target.start,State.fps,State.dropFrame),opts.pointer);
-      updatePlayhead();
-    }
-    return false;
-  }
+  // Selection/reveal is read-only. The edit transactions enforce track locks.
   finalizeProvisionalCueEnds(id);
 
   if(id==null){
@@ -600,10 +593,20 @@ function refreshSelectionUI(opts={}){
       }
     };
     reveal();
-    // 列表使用 content-visibility:auto；剛跨軌重建時，離屏列的第一輪
-    // scrollIntoView 可能只依 contain-intrinsic-size 估算。下一幀實際列高完成後
-    // 再揭示一次，否則大型列表會先短暫捲到目標，隨即讓該列掉出 viewport。
-    requestAnimationFrame(reveal);
+    // content-visibility:auto 會分批把離屏列的估計高度換成實際高度。
+    // 下一幀看似穩定後仍可能再重排。短暫追蹤實際 viewport，僅在目標
+    // 被推出可視範圍時重捲；較新的選取會取消舊工作，最多八幀便停止。
+    let remaining=8;
+    const reconcile=()=>{
+      if(_selectionRevealSeq!==revealSeq || State.selectedId!==selectedId)return;
+      const currentRow=sublist.querySelector(`.sub-row[data-id="${selectedId}"]`);
+      if(!currentRow)return;
+      const box=currentRow.getBoundingClientRect(), viewport=sublist.getBoundingClientRect();
+      const fits=box.top>=viewport.top-1 && (box.height>viewport.height || box.bottom<=viewport.bottom+1);
+      if(remaining===8 || !fits)reveal();
+      if(--remaining>0)requestAnimationFrame(reconcile);
+    };
+    requestAnimationFrame(reconcile);
   }
   renderCueBlocks();
   updateTlSel();

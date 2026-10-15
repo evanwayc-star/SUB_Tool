@@ -62,6 +62,41 @@ const filterScenario=()=>{
  Subtitles.renderSubList();document.getElementById('subStyleFilter').value='__non_default';Subtitles.renderSubList();
  expect([...document.querySelectorAll('.sub-row')].map(r=>r.dataset.id)).toEqual(['a','c','d']);
 };
+it('鎖定字幕可搜尋上下筆並捲到該句，文字、時間、樣式與取代仍被保護',async()=>{
+ const Search=await import('../src/subtitle-search.js');
+ const {setSelection}=await import('../src/state.js');
+ State.tracks[0].locked=true;State.subMode=false;State.duration=1000;
+ State.cues=Array.from({length:90},(_,i)=>({id:'locked-'+i,text:[3,43,83].includes(i)?'搜尋目標':'其他字幕',start:i*2,end:i*2+1,track:0,style:{fontSize:80}}));
+ const baseline=JSON.stringify(State.cues),history=History.stack.length;
+ setSelection({kind:'video',ids:'kept-video'});Subtitles.renderSubList();
+ Search.setSelectCueHandler(Subtitles.selectCue);Media.seek.mockClear();
+ const selected=id=>{
+   expect(State.selectedId).toBe(id);expect(State.selectedIds).toEqual([id]);
+   const row=document.querySelector(`.sub-row[data-id="${id}"]`);
+   expect(row.classList.contains('primary')).toBe(true);
+   expect(HTMLElement.prototype.scrollIntoView.mock.contexts).toContain(row);
+ };
+ try{
+   Search.searchUpdate('搜尋目標');selected('locked-3');expect(Media.seek).not.toHaveBeenCalled();
+   Search.searchNext();selected('locked-43');expect(Media.seek).toHaveBeenLastCalledWith(86);expect(Search.getSearchCountText()).toBe('2/3');
+   Search.searchNext();selected('locked-83');Search.searchNext();selected('locked-3');
+   Search.searchPrev();selected('locked-83');expect(Search.getSearchCountText()).toBe('3/3');
+   for(const [operation,value] of [['text','禁止'],['start',100],['end',200],['text-style',{text:'禁止',style:{fontSize:200}}]]){
+     expect(Model.editCue({cueId:State.selectedId,operation,value})).toMatchObject({ok:false,reason:'track-locked'});
+   }
+   Search.searchReplace(false,'禁止');Search.searchReplace(true,'禁止');
+   expect(JSON.stringify(State.cues)).toBe(baseline);expect(History.stack).toHaveLength(history);
+ }finally{Search.setSelectCueHandler(null);Search.searchClear();}
+});
+it('搜尋全選包含鎖定軌的符合字幕，其他軌不納入且不產生 History',async()=>{
+ const Search=await import('../src/subtitle-search.js');
+ const {setSelection}=await import('../src/state.js');setSelection({kind:'video',ids:'kept-video'});
+ State.tracks[0].locked=true;State.cues[0].text='match first';State.cues[1].text='match second';
+ State.cues.push({id:'foreign',text:'match other track',start:5,end:6,track:1});
+ const history=History.stack.length;
+ try{Search.searchUpdate('match');Search.searchSelectAll();expect(State.selectedIds).toEqual(['a','b']);expect(History.stack).toHaveLength(history);}
+ finally{Search.searchClear();}
+});
 it('keyboard Ctrl+A on locked subtitle track preserves original video selection',async()=>{
  const {setSelection}=await import('../src/state.js');State.tracks[0].locked=true;setSelection({kind:'video',ids:'kept-video'});const before=picked();
  ctrlA();expect(picked()).toEqual(before);

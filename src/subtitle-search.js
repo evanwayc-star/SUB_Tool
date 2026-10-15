@@ -79,7 +79,7 @@ export function searchUpdate(raw, selectCueCb){
   }
   emit('render:subList');
   const cb = (typeof selectCueCb === 'function' ? selectCueCb : _selectCueHandler);
-  if(_searchIdx>=0 && cb && !State.tracks[State.listTrack]?.locked) cb(_searchMatches[_searchIdx],{seek:false});
+  if(_searchIdx>=0 && cb) cb(_searchMatches[_searchIdx],{seek:false});
   emit('render:searchCount');
 }
 
@@ -94,7 +94,7 @@ export function searchNav(dir, selectCueCb){
   }
   _searchIdx=(_searchIdx+dir+_searchMatches.length)%_searchMatches.length;
   const cb = (typeof selectCueCb === 'function' ? selectCueCb : _selectCueHandler);
-  if(cb && !State.tracks[State.listTrack]?.locked) cb(_searchMatches[_searchIdx],{seek:true});
+  if(cb) cb(_searchMatches[_searchIdx],{seek:true});
   emit('render:searchCount');
 }
 
@@ -128,7 +128,7 @@ export function getSearchCountText(){
 
 export function searchSelectAll(){
   refreshSearch(true);
-  if(!_searchMatches.length || State.tracks[State.listTrack]?.locked) return;
+  if(!_searchMatches.length) return;
   setSelection({ kind:'sub', ids:_searchMatches.slice() });
   State.activeEdge='start';
   emit('render:selection');
