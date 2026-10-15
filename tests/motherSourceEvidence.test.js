@@ -52,8 +52,10 @@ describe.each(modes)('$name母素材證據', mode => {
     const source = process.platform === 'win32' ? 'C:/mother.bin' : '/mother.bin';
     const expected = process.platform === 'win32'
       ? ['a260e6c579333e3d', '267743e184025c642287896efc2c239598b61d65658f24def2499e11dc8db311']
-      : ['83e8fc9ca84b7fb55', '8ad8a77a1f3aadaa133d4ff0eab7546810f78a80f3c26bd29388e32b678a2316'];
-    expect(await fingerprint(mode, source, { fileSystem: files.fileSystem, namespace: 'source-v2', digestLength: 16 })).toBe(expected[0]);
+      : ['83e8fc9ca84b7fb5', '8ad8a77a1f3aadaa133d4ff0eab7546810f78a80f3c26bd29388e32b678a2316'];
+    const sourceDigest = await fingerprint(mode, source, { fileSystem: files.fileSystem, namespace: 'source-v2', digestLength: 16 });
+    expect(sourceDigest).toHaveLength(16);
+    expect(sourceDigest).toBe(expected[0]);
     expect(await fingerprint(mode, source, { fileSystem: files.fileSystem, namespace: 'vocal-source-v1' })).toBe(expected[1]);
     expect(files.read.mock.calls.map(call => call[3])).toEqual([0, 2, 0, 2]);
     expect(files.close).toHaveBeenCalledTimes(2);
