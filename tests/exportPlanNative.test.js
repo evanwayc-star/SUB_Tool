@@ -261,7 +261,9 @@ describe.skipIf(!fs.existsSync(FFMPEG))('合法字型路徑的真 FFmpeg 內容�
             videoTracks: [{ vt: 0 }], width: 320, height: 180, fps: 25, duration: 0.4, outPath,
             ...(mode === 'ASS' ? { assFileName: 'burn.ass' } : { timecodeWatermark: { start: '01:00:00:00' } }),
           }, { fontsDir: directory, timecodeFontFile: font, proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] });
-          const encoded = run(plan.args);
+          let encoded;
+          try { encoded = run(plan.args); }
+          catch (error) { throw new Error(`${mode}: ${name}\n${JSON.stringify(plan.args)}\n${error.message}`, { cause: error }); }
           if (mode === 'ASS') {
             const selections = encoded.stderr.toString().split(/\r?\n/).filter(line => line.includes('fontselect:'));
             expect(selections.length).toBeGreaterThan(0);
