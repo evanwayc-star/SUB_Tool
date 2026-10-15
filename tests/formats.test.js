@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { SubFormats, splitN, decodeLegacyLineBreaks } from '../src/formats.js';
-import { uiFontNameFromAss } from '../src/substyle.js';
+import { assFontName, uiFontNameFromAss } from '../src/substyle.js';
 
 describe('SRT round-trip', () => {
   it('cues -> toSRT -> parseSRT 還原 start/end/text', () => {
@@ -108,6 +108,13 @@ Dialogue: 0,0:00:07.00,0:00:08.00,Imported,,0,0,0,,{\\t(0,100,\\fs100)}不套動
 
     expect(uiFontNameFromAss('Taipei Sans TC Beta', fonts)).toBe('台北黑體');
     expect(uiFontNameFromAss('Arial', fonts)).toBe('Arial');
+  });
+
+  it('保留實際 Nerd 家族名，僅在讀入舊 ASS 時接受過去的錯誤別名', () => {
+    const fonts = [{ name: '更紗黑體', family: 'Sarasa Mono TC Nerd' }];
+    expect(assFontName('Sarasa Mono TC Nerd')).toBe('Sarasa Mono TC Nerd');
+    expect(uiFontNameFromAss('Sarasa Mono TC Nerd', fonts)).toBe('更紗黑體');
+    expect(uiFontNameFromAss('Sarasa Mono TC', fonts)).toBe('更紗黑體');
   });
 
   it('原生底框只套文字 shaping 覆寫，不讓文字框色污染背景色', () => {

@@ -17,6 +17,7 @@ const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const P = require(path.join(ROOT, 'electron/export-plan.js'));
 const { buildClipFrameArgs } = require('../electron/clip-frame-cache.js');
+const { privateSarasaFont } = require('./fixtures/private-font.cjs');
 const FFMPEG = process.env.FFMPEG_PATH || path.join(ROOT, 'electron/ffmpeg/ffmpeg.exe');
 
 describe.skipIf(!fs.existsSync(FFMPEG))('一般片段的來源影格交付', () => {
@@ -235,7 +236,8 @@ describe.skipIf(!fs.existsSync(FFMPEG))('來源首個 presentation 畫格之前�
 describe.skipIf(!fs.existsSync(FFMPEG))('合法字型路徑的真 FFmpeg 內容驗證', () => {
   it('ASS 與 TC 在逗號、引號、括號、分號、空白與 Unicode 路徑使用相同字型，逐 pixel 與正常路徑相同', () => {
     const root = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-font-filter-path-'));
-    const source = path.join(root, 'source.mov'), sourceFont = path.join(ROOT, 'font/更紗黑體/sarasa-mono-tc-nerd-regular.ttf');
+    const source = path.join(root, 'source.mov');
+    const privateFont = privateSarasaFont(fs.readFileSync(path.join(ROOT, 'font/更紗黑體/sarasa-mono-tc-nerd-regular.ttf')));
     const run = args => {
       const result = spawnSync(FFMPEG, ['-hide_banner', '-nostdin', ...args], { cwd: root, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024 });
       expect(result.error || result.status, result.stderr?.toString()).toBe(0);
@@ -245,20 +247,26 @@ describe.skipIf(!fs.existsSync(FFMPEG))('合法字型路徑的真 FFmpeg 內容�
       run(['-y', '-f', 'lavfi', '-i', 'color=black:s=320x180:r=25:d=0.4', '-c:v', 'libx264', '-an', source]);
       fs.writeFileSync(path.join(root, 'burn.ass'), '[Script Info]\nScriptType: v4.00+\nPlayResX: 320\nPlayResY: 180\n[V4+ Styles]\n'
         + 'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n'
-        + 'Style: Default,Sarasa Mono TC Nerd,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,0,0,20,1\n[Events]\n'
+        + `Style: Default,${privateFont.family},24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,0,0,20,1\n[Events]\n`
         + 'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\nDialogue: 0,0:00:00.00,0:00:00.40,Default,,0,0,0,,字幕 ０Ａ\n');
       for (const mode of ['ASS', 'TC']) {
         let baseline;
-        for (const name of ['plain', 'font,comma', "font'quote", 'font[brackets]', 'font;semicolon', " 字型 空白,'[;] "]) {
+        // Keep leading/internal whitespace; a trailing-space directory requires
+        // an NT namespace path and is not a normal Win32 font directory.
+        for (const name of ['plain', 'font,comma', "font'quote", 'font[brackets]', 'font;semicolon', " 字型 空白,'[;]"]) {
           const directory = path.join(root, name); fs.mkdirSync(directory, { recursive: true });
-          const font = path.join(directory, 'fixed.ttf'); fs.copyFileSync(sourceFont, font);
+          const font = path.join(directory, 'fixed.ttf'); fs.writeFileSync(font, privateFont.bytes);
           const outPath = path.join(root, 'delivery.mov');
           const plan = P.buildDeliveryArgv({ format: 'prores', clips: [{ path: source, in: 0, out: 0.4, offset: 0, audio: [] }],
             videoTracks: [{ vt: 0 }], width: 320, height: 180, fps: 25, duration: 0.4, outPath,
             ...(mode === 'ASS' ? { assFileName: 'burn.ass' } : { timecodeWatermark: { start: '01:00:00:00' } }),
           }, { fontsDir: directory, timecodeFontFile: font, proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] });
           const encoded = run(plan.args);
-          if (mode === 'ASS') expect(encoded.stderr.toString()).toMatch(/fontselect:.*Sarasa Mono TC Nerd.*SarasaMonoTCNerd-regular/i);
+          if (mode === 'ASS') {
+            const selections = encoded.stderr.toString().split(/\r?\n/).filter(line => line.includes('fontselect:'));
+            expect(selections.length).toBeGreaterThan(0);
+            expect(selections.every(line => line.includes(privateFont.postscript)), selections.join('\n')).toBe(true);
+          }
           const pixels = run(['-loglevel', 'error', '-i', outPath, '-map', '0:v:0', '-frames:v', '1', '-pix_fmt', 'gray', '-f', 'rawvideo', 'pipe:1']).stdout;
           expect(pixels.length).toBe(320 * 180);
           expect(pixels.some(value => value > 200)).toBe(true);

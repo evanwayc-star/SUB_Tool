@@ -520,9 +520,7 @@ export function getFonts(){ return _fonts || []; }
    不在自備清單者（使用者自填的系統字型名）原樣傳回。 */
 export function assFontName(name){
   const f = getFonts().find(x => x.name === name);
-  let fam = (f && f.family) || name;
-  if (fam === 'Sarasa Mono TC Nerd') fam = 'Sarasa Mono TC';
-  return fam;
+  return (f && f.family) || name;
 }
 /* ASS Fontname（檔內 family）→ UI/FontFace 使用的資料夾名。自產舊 ASS 沒有 round-trip
    metadata 時也必須走這條反向對照，否則 DOM 只註冊了「台北黑體」卻收到
@@ -533,6 +531,8 @@ export function uiFontNameFromAss(name, fonts=getFonts()){
   const wanted=source.toLocaleLowerCase();
   const found=fonts.find(font=>{
     const family=String(font?.family || '');
+    // Accept the old incorrect emitted alias on import, while new ASS always
+    // retains the actual family stored in the bundled font.
     const emitted=family === 'Sarasa Mono TC Nerd' ? 'Sarasa Mono TC' : family;
     return [font?.name, family, emitted].some(value=>String(value || '').trim().toLocaleLowerCase()===wanted);
   });

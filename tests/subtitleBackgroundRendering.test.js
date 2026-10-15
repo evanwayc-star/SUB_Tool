@@ -1,6 +1,6 @@
 // @subtool-ci windows
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,7 @@ import { renderASS } from '../src/formats.js';
 import { planSubtitleBackgroundLayouts } from '../src/subtitle-background-layout.js';
 import { STYLE_DEFAULTS, styleToCss, subtitleBackgroundCssMetrics } from '../src/substyle.js';
 import { nativeTestTools } from './fixtures/native-tools.cjs';
+import { privateSarasaFont } from './fixtures/private-font.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { ffmpeg: FFMPEG } = nativeTestTools();
@@ -44,7 +45,7 @@ function renderSubtitleFrame(assText, { sourceColor = 'white', fontPath = null }
   }
 }
 
-function measureChromiumLines(lines, track) {
+function measureChromiumLines(lines, track, fontPath = SARASA_FONT) {
   const dir = mkdtempSync(path.join(tmpdir(), 'subtool-chromium-measure-'));
   try {
     const metrics = subtitleBackgroundCssMetrics(track, 1);
@@ -53,7 +54,7 @@ function measureChromiumLines(lines, track) {
       lines,
       css: styleToCss({ ...track, bgBox: false, outline: 0, shadow: 0, angle: 0 }, 1),
       family: track.font,
-      fontPath: SARASA_FONT,
+      fontPath,
       fontSpec: `${track.bold ? '700 ' : '400 '}${metrics.fontSize}px "${track.font}"`,
     }), 'utf8');
     const result = spawnSync(ELECTRON, [MEASURE_FIXTURE, configPath, '--no-sandbox'], {
@@ -180,6 +181,11 @@ const describeWithBundledFfmpeg = process.platform === 'win32' && existsSync(FFM
 
 describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
   it('多行中英混排在九種錨點都先取整段文字邊界再向外擴張', () => {
+    const privateDirectory = mkdtempSync(path.join(tmpdir(), 'subtool-private-background-font-'));
+    const privateFont = privateSarasaFont(readFileSync(SARASA_FONT));
+    const privatePath = path.join(privateDirectory, 'private.ttf');
+    writeFileSync(privatePath, privateFont.bytes);
+    try {
     const lines = [
       '《Synners》',
       '(1992年亞瑟·克拉克獎)',
@@ -189,7 +195,7 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
     ];
     const baseTrack = {
       ...STYLE_DEFAULTS,
-      font: 'Sarasa Mono TC',
+      font: privateFont.family,
       fontSize: 60,
       outline: 2,
       shadow: 0,
@@ -197,7 +203,7 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
       bgColor: '#808080',
       bgAlpha: 1,
     };
-    const measured = measureChromiumLines(lines, baseTrack);
+    const measured = measureChromiumLines(lines, baseTrack, privatePath);
     expect(measured.fontLoaded).toBe(true);
 
     const placements = ['left', 'center', 'right'].flatMap(align =>
@@ -221,10 +227,10 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
       // 文字反鋸齒會產生灰階；同一張畫面量測會誤把它算成底色。
       // 分別燒錄底色與文字，才是兩個真實的 ink bounding box。
       const backgroundPixels = renderSubtitleFrame(dialogueLayer(ass, 'background'), {
-        sourceColor: '0x00FF00', fontPath: SARASA_FONT,
+        sourceColor: '0x00FF00', fontPath: privatePath,
       });
       const textPixels = renderSubtitleFrame(dialogueLayer(ass, 'text'), {
-        sourceColor: '0x00FF00', fontPath: SARASA_FONT,
+        sourceColor: '0x00FF00', fontPath: privatePath,
       });
       const background = measureRenderedBounds(backgroundPixels);
       const text = measureRenderedBounds(textPixels);
@@ -255,6 +261,9 @@ describeWithBundledFfmpeg('ASS 多行字幕底色', () => {
       const height = observation.background.bottom - observation.background.top;
       expect(Math.abs(width - baselineWidth), JSON.stringify(observation)).toBeLessThanOrEqual(2);
       expect(Math.abs(height - baselineHeight), JSON.stringify(observation)).toBeLessThanOrEqual(2);
+    }
+    } finally {
+      rmSync(privateDirectory, { recursive: true, force: true });
     }
   }, 30000);
 
