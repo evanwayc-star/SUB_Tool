@@ -136,7 +136,7 @@ describe('專業 DAW 調音台通道條 (Channel Strip) 介面與功能', () => 
   });
 
   it('applyDbStringToBus 正確處理絕對 dB、相對增減與靜音', () => {
-    const bus = { id: 'ab1', volume: 1.0 }; // 0 dB
+    const bus = State.audioProject.buses[0]; // 當前專案的 A1，0 dB
     // 絕對值 -12 dB
     applyDbStringToBus(bus, '-12 dB', 0);
     expect(20 * Math.log10(bus.volume)).toBeCloseTo(-12, 1);

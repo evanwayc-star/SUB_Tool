@@ -3,6 +3,7 @@ import {
   createMediaPresentationCore,
   createMediaPresentationSession,
 } from '../src/media-presentation-core.js';
+import { createNativePreviewRuntime } from '../src/media-player-adapter.js';
 
 function handoffSession(){
   const acknowledgements=[];
@@ -15,6 +16,18 @@ function handoffSession(){
 }
 
 describe('visible presenter may change during an acknowledged seek',()=>{
+  it('反向畫格使用左開右閉區間，拒絕相鄰舊畫格並保留片段起點的clamp',async()=>{
+    const {session,ack,commit}=handoffSession();session.setWebCodecsTakeover(true);
+    const pending=session.request(3.04);ack(3.04);
+    expect(session.reportWebCodecsPresentation([{time:3.2,start:3.04,end:3.2,reverse:true}])).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    expect(session.reportWebCodecsPresentation([{time:3.04,start:2.88,end:3.04,reverse:true}])).toBe(true);
+    await expect(pending).resolves.toMatchObject({status:'presented',presentedTime:3.04});
+    const initial=session.request(0);ack(0);
+    expect(session.reportWebCodecsPresentation([{time:0.16,start:0,end:0.16,reverse:true,startInclusive:true}])).toBe(true);
+    await expect(initial).resolves.toMatchObject({status:'presented',presentedTime:0});
+  });
+
   it('WC yields to native before ACK without waiting for an obsolete compositor',async()=>{
     const {session,ack}=handoffSession();session.setWebCodecsTakeover(true);
     const pending=session.request(4);session.setWebCodecsTakeover(false);ack(4);
@@ -499,10 +512,85 @@ describe('media presentation session', () => {
     });
     expect(adapter.present).toHaveBeenCalledWith(4, expect.objectContaining({
       exact: false,
-      tolerance: 0.05,
+      tolerance: expect.closeTo(0.05,12),
       signal: expect.any(Object),
     }));
     expect(calls).toEqual(['commit:103.99']);
+  });
+
+  it.each([false,true])('慢速frame覆蓋目標時保留TL意圖、容差轉來源只用同一clip（reverse=%s）',async reverse=>{
+    const slow={id:'slow',speed:.25,reverse,in:0,out:2,offset:0};
+    const sourceTime=vi.fn((t,c)=>c.reverse?c.out-t*c.speed:t*c.speed);
+    const target=4.04,source=reverse?.96:1;
+    const adapter={type:'mpv',present:vi.fn(async()=>({backend:'mpv',presentedSourceTime:source,presentedSourceDuration:.04}))};
+    const {session,commitPresented}=createSession({timeline:{clipAt:()=>slow,sourceTime,
+      timelineTime:s=>reverse?(2-s)/.25:s/.25},player:{adapter:()=>adapter,frameWindow:async()=>({start:source,end:source+.04})}});
+    await expect(session.request(target,{tolerance:.018})).resolves.toMatchObject({status:'presented',presentedTime:target});
+    expect(adapter.present.mock.calls[0][1].tolerance).toBeCloseTo(.0045,12);
+    expect(sourceTime.mock.calls.every(([,c])=>c===slow)).toBe(true);
+    expect(commitPresented).toHaveBeenCalledWith(target);
+  });
+
+  it('慢速來源的future frame不能靠來源秒數容差冒充目標',async()=>{
+    const adapter={type:'mpv',present:vi.fn(async()=>({backend:'mpv',presentedSourceTime:1.01,presentedSourceDuration:.04}))};
+    const {session,commitPresented}=createSession({timeline:{clipAt:()=>({speed:.25}),sourceTime:t=>t*.25,timelineTime:s=>s/.25},player:{adapter:()=>adapter,frameWindow:async()=>({start:1,end:1.04})}});
+    await expect(session.request(4,{tolerance:.018})).resolves.toMatchObject({status:'failed'});
+    expect(commitPresented).not.toHaveBeenCalled();
+  });
+
+  it('反轉片段首格使用來源末格coverage而不把播放頭推到後面',async()=>{
+    const clip={reverse:true,out:10,speed:.25};
+    const adapter={type:'mpv',present:vi.fn(async()=>({backend:'mpv',presentedSourceTime:9.96,presentedSourceDuration:.04}))};
+    const {session}=createSession({timeline:{clipAt:()=>clip,sourceTime:t=>10-t*.25,timelineTime:s=>(10-s)/.25},player:{adapter:()=>adapter,frameWindow:async()=>({start:9.96,end:10})}});
+    await expect(session.request(0,{tolerance:.018})).resolves.toMatchObject({status:'presented',presentedTime:0});
+  });
+
+  it('NTSC reverse trim-out drops only its half-open endpoint, not an internal exact PTS',async()=>{
+    const out=30/(30000/1001),clip={in:0,out,offset:0,reverse:true,speed:1};
+    const frameWindow=vi.fn(async target=>target>=.967633?{start:.967633,end:1.001}:{start:.934267,end:.967633});
+    const adapter={type:'mpv',present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time}))};
+    const {session}=createSession({timeline:{clipAt:()=>clip,sourceTime:t=>out-t,timelineTime:s=>out-s},player:{adapter:()=>adapter,frameWindow}});
+    await expect(session.request(0)).resolves.toMatchObject({status:'presented',presentedTime:0});
+    expect(frameWindow).toHaveBeenLastCalledWith(1.000999,clip);
+    await expect(session.request(out-.967633)).resolves.toMatchObject({status:'presented'});
+    expect(frameWindow).toHaveBeenLastCalledWith(.967633,clip);
+  });
+
+  it('VFR HTML畫格以實際區間定位，平均FPS不能使上一張紅格冒充藍格',async()=>{
+    const callbacks=[];
+    const video={currentTime:0,requestVideoFrameCallback:callback=>{callbacks.push(callback);return callbacks.length;},cancelVideoFrameCallback:vi.fn()};
+    const adapter=createNativePreviewRuntime({video});
+    const clip={speed:.25,fps:1250/49,in:0,out:1,offset:0};
+    const {session,commitPresented}=createSession({timeline:{clipAt:()=>clip,sourceTime:t=>t*.25,timelineTime:s=>s/.25},
+      player:{adapter:()=>adapter,frameWindow:async()=>({start:.02,end:.08})}});
+    const pending=session.request(.08,{tolerance:.018});
+    await Promise.resolve();
+    expect(video.currentTime).toBe(.02);
+    callbacks.shift()(0,{mediaTime:0});
+    expect(commitPresented).not.toHaveBeenCalled();
+    callbacks.shift()(0,{mediaTime:.02});
+    await expect(pending).resolves.toMatchObject({status:'presented',presentedTime:.08});
+    expect(commitPresented).toHaveBeenCalledExactlyOnceWith(.08);
+  });
+
+  it('無真實來源索引時不信任adapter附上的平均FPS格長',async()=>{
+    const adapter={type:'mpv',present:vi.fn(async()=>({backend:'mpv',presentedSourceTime:0,presentedSourceDuration:49/1250}))};
+    const {session,commitPresented}=createSession({timeline:{clipAt:()=>({speed:.25}),sourceTime:t=>t*.25,timelineTime:s=>s/.25},
+      player:{adapter:()=>adapter,frameWindow:async()=>null}});
+    await expect(session.request(.08,{tolerance:.018})).resolves.toMatchObject({status:'failed'});
+    expect(adapter.present).toHaveBeenCalledWith(.02,expect.not.objectContaining({frameDuration:expect.anything()}));
+    expect(commitPresented).not.toHaveBeenCalled();
+  });
+
+  it('等待來源索引時取消呈現，晚到索引不得再送出seek',async()=>{
+    let finishIndex;
+    const {session,adapter}=createSession({player:{frameWindow:()=>new Promise(resolve=>{finishIndex=resolve;})}});
+    const pending=session.request(104);
+    session.cancel('new-project');
+    finishIndex({start:4,end:4.04});
+    await expect(pending).resolves.toMatchObject({status:'cancelled'});
+    await Promise.resolve();
+    expect(adapter.present).not.toHaveBeenCalled();
   });
 
   it('單次請求可縮小呈現容差，逐格時不能把上一格當成目標格', async () => {
@@ -511,7 +599,7 @@ describe('media presentation session', () => {
     await session.request(104, { tolerance: 0.01 });
 
     expect(adapter.present).toHaveBeenCalledWith(4, expect.objectContaining({
-      tolerance: 0.01,
+      tolerance: expect.closeTo(0.01,12),
     }));
   });
 

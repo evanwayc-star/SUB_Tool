@@ -59,21 +59,21 @@ const tick = () => {
 
   /* 再讀一個真的檔案的開頭——檔案總管的屬性處理常式會做類似的事，
      而且它比列目錄更容易被大量循序讀取排擠。 */
-  let readMs = -1;
+  let readMs = -1, readError = '';
   const f = entries.find(e => e.isFile());
   if (f) {
     const b = process.hrtime.bigint();
     try {
       const fd = fs.openSync(path.join(DIR, f.name), 'r');
-      fs.readSync(fd, Buffer.alloc(65536), 0, 65536, 0);
-      fs.closeSync(fd);
-    } catch (e) {}
+      try { fs.readSync(fd, Buffer.alloc(65536), 0, 65536, 0); }
+      finally { fs.closeSync(fd); }
+    } catch (e) { readError = e.code || e.message; }
     readMs = Math.round(Number(process.hrtime.bigint() - b) / 1e6);
   }
 
   const mark = listMs > 3000 || readMs > 3000 ? '  ← 慢' : '';
   console.log(`  ${hhmmss()}  ${String(listMs).padStart(7)} ms  ${String(count).padStart(4)}` +
-    `   ${String(readMs).padStart(10)} ms   ${busyProcs()}${err ? '  ERR ' + err : ''}${mark}`);
+    `   ${String(readMs).padStart(10)} ms   ${busyProcs()}${err ? '  LIST ERR ' + err : ''}${readError ? '  READ ERR ' + readError : ''}${mark}`);
   if (++n % 30 === 0) console.log('');
 };
 

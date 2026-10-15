@@ -131,7 +131,7 @@ function planClipGesturePreview({
       delta = snapped - offset;
       result.snapTarget = snapped;
     }
-    left = snapFrameWithin(left, Math.max(0, leftLimit), offset + maxDelta, frame, frameStep);
+    left = snapFrameWithin(left, Math.max(0, leftLimit, offset + minDelta), offset + maxDelta, frame, frameStep);
     if (left == null) return Object.freeze(result);
     delta = left - offset;
     result.offset = left;
@@ -168,58 +168,16 @@ function planAudioGesturePreview({
   snapFrame,
   frameStep,
 } = {}) {
-  const frame = frameSnapper(snapFrame);
-  const offset = Number(original.offset) || 0;
   const inPoint = Number(original.in) || 0;
   const outPoint = Number(original.out) || 0;
-  const duration = Number(original.duration) || outPoint;
-  const minLength = Math.min(0.2, Math.max(0.02, (outPoint - inPoint) / 2));
-  const maxOut = Math.max(inPoint + minLength, duration);
-  const result = { offset, in: inPoint, out: outPoint, snapTarget: null };
-
-  if (mode === 'audio-move') {
-    let nextOffset = Math.max(0, offset + deltaTime);
-    const length = outPoint - inPoint;
-    const atStart = snapValue(nextOffset, snaps, snapThreshold);
-    const atEnd = snapValue(nextOffset + length, snaps, snapThreshold);
-    if (atStart !== nextOffset) {
-      nextOffset = atStart;
-      result.snapTarget = atStart;
-    } else if (atEnd !== nextOffset + length) {
-      nextOffset = atEnd - length;
-      result.snapTarget = atEnd;
-    }
-    result.offset = snapFrameWithin(nextOffset, 0, Infinity, frame, frameStep) ?? offset;
-    return Object.freeze(result);
-  }
-
-  if (mode === 'audio-l') {
-    const minLeft = Math.max(0, offset - inPoint);
-    const maxLeft = offset + (outPoint - inPoint - minLength);
-    let left = clamp(offset + deltaTime, minLeft, maxLeft);
-    const snapped = snapValue(left, snaps, snapThreshold);
-    if (snapped !== left && snapped >= minLeft - 1e-9 && snapped <= maxLeft + 1e-9) {
-      left = snapped;
-      result.snapTarget = snapped;
-    }
-    result.offset = snapFrameWithin(left, minLeft, maxLeft, frame, frameStep);
-    if (result.offset == null) return Object.freeze({ offset, in: inPoint, out: outPoint, snapTarget: null });
-    result.in = clamp(inPoint + (result.offset - offset), 0, outPoint - minLength);
-    return Object.freeze(result);
-  }
-
-  const minRight = offset + minLength;
-  const maxRight = offset + (maxOut - inPoint);
-  let right = clamp(offset + (outPoint - inPoint) + deltaTime, minRight, maxRight);
-  const snapped = snapValue(right, snaps, snapThreshold);
-  if (snapped !== right && snapped >= minRight - 1e-9 && snapped <= maxRight + 1e-9) {
-    right = snapped;
-    result.snapTarget = snapped;
-  }
-  right = snapFrameWithin(right, minRight, maxRight, frame, frameStep);
-  if (right == null) return Object.freeze(result);
-  result.out = clamp(inPoint + (right - offset), inPoint + minLength, maxOut);
-  return Object.freeze(result);
+  const speed=Number(original.speed)>0?Number(original.speed):1;
+  // 影片與外部音訊都沿用來源↔時間軸映射；外音只限制最短區間與輸出資料形狀。
+  const plan=planClipGesturePreview({
+    mode:mode==='audio-move'?'clip-move':mode==='audio-l'?'clip-l':'clip-r',
+    original:{...original,type:'audio'},deltaTime,snaps,snapThreshold,snapFrame,frameStep,
+    minLength:Math.min(0.2,Math.max(0.02,(outPoint-inPoint)/speed/2)),
+  });
+  return Object.freeze({offset:plan.offset,in:plan.in,out:plan.out,snapTarget:plan.snapTarget});
 }
 
 /** 純規則：字幕群組移動／單邊修剪，目的軌鎖定時保留原軌。 */
@@ -300,7 +258,7 @@ function planCueGesturePreview({
       if (start == null) return null;
       const end = snapFrameWithin(
         start + length,
-        start + minLength,
+        start + (frameStep || Math.min(minLength, length)),
         overwriteMode ? Infinity : item.nextStart,
         frame,
         frameStep,
@@ -472,7 +430,9 @@ function beginTimelineGestureLifecycle({ mode, targets = [], context = {}, effec
 
   function commit(commitEffect) {
     if (!active) return { committed: false, moved: false };
-    if (!owns() || !canEdit()) { cancel(); return { committed:false,moved:false }; }
+    if (!owns() || !canEdit() || effects.canCommit?.()===false) {
+      cancel(); return { committed:false,moved:false };
+    }
     endPreview?.();
     if (typeof commitEffect === 'function') commitEffect({ mode, moved: transaction.hasMoved() });
     const moved = transaction.commit();

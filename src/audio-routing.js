@@ -32,7 +32,7 @@ import { AudioPipeline } from './audio-routing-engine.js';
 import { drawTimeline } from './timeline-renderer.js';
 import { renderAudioTracks } from './mixer.js';
 import { escapeHTML } from './util.js';
-import { emit } from './events.js';
+import { emit, on } from './events.js';
 import { History } from './history.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-engine.js';
@@ -56,11 +56,19 @@ function updateViews(){
 }
 let activeProjectEditor=null;
 let activeRoutingModal=null;
+on('audio:sourceRegistered',({project,sourceId,channels,options})=>{
+  if(State.audioProject===project && activeProjectEditor?.isActive()){
+    const modal=activeRoutingModal;
+    activeProjectEditor.registerSource(sourceId,channels,options,project);
+    if(activeRoutingModal===modal && modal?.session?.isCurrent()) modal.rerender?.();
+  }
+});
 /* Routing 頁面的重畫與父子導航是同一次 editor handoff；其他 Modal 的 replacement
    才終止整段編輯。Modal lease 同時擋掉旧頁的延後綁定與 detached button。 */
 function openRoutingModal(editor,title,html,buttons,opts={}){
+  const {rerender,...modalOptions}=opts;
   activeRoutingModal?.session?.close?.({committed:true});
-  const owner={editor,session:null};
+  const owner={editor,session:null,rerender};
   const owns=()=>activeRoutingModal===owner&&(owner.session?.isCurrent?.()??true);
   const dismiss=()=>{
     if(activeRoutingModal===owner) activeRoutingModal=null;
@@ -69,15 +77,19 @@ function openRoutingModal(editor,title,html,buttons,opts={}){
   activeRoutingModal=owner;
   owner.session=openModal(title,html,buttons.map(button=>({...button,act:(...args)=>{
     if(owns()&&editor.isActive()) return button.act?.(...args);
-  }})),{...opts,onDismiss:dismiss,onReplaced:dismiss});
+  }})),{...modalOptions,onDismiss:dismiss,onReplaced:dismiss});
   return {isCurrent:owns};
 }
 function projectEditor({ output=false, label='設定輸出音訊聲道' }={}){
   activeProjectEditor?.dismiss();
   let owned=project();
   const owns=()=>State.audioProject===owned;
-  const finish=History.beginAudioPreview(owned,owns);
-  activeProjectEditor=AudioRoutingModel.editProject(owned,{
+  let editor;
+  const finish=History.beginAudioPreview(()=>editor.baseline(),owns,()=>{
+    if(activeProjectEditor===editor) activeRoutingModal?.session?.close();
+    editor.dismiss();
+  });
+  activeProjectEditor=editor=AudioRoutingModel.editProject(owned,{
     output,label,
     owns,
     preview:draft=>{ State.audioProject=draft; updateViews(); owned=State.audioProject; },
@@ -178,7 +190,7 @@ function openForRoutingSource(source, editor=null){
       const result=editor.commit();
       if(!result.saved){ showToast(result.error); return; }
       closeModal({committed:true});
-    }},{label:'取消',act:()=>closeModal()}],{width:'680px'});
+    }},{label:'取消',act:()=>closeModal()}],{width:'680px',rerender:()=>openForRoutingSource(source,editor)});
   setTimeout(()=>{
     if(!modalSession.isCurrent()||!editor.isActive()) return;
     const rerender=()=>openForRoutingSource(source,editor);
@@ -290,7 +302,7 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
     }},{label:onBack?'返回配線':'取消',act:()=>{
       if(onBack){ editor.cancel(); closeModal({committed:true}); onBack({saved:false}); }
       else closeModal();
-    }}],{width:'860px'});
+    }}],{width:'860px',rerender:()=>openOutputSettingsEditor(editor,onBack,{deliveryFormat})});
   setTimeout(()=>{
     if(!modalSession.isCurrent()||!editor.isActive()) return;
     const rerender=()=>{

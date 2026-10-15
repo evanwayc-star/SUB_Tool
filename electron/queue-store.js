@@ -11,7 +11,7 @@ const STORE_VERSION = 1;
 const JOURNAL_VERSION = 1;
 const TERMINAL_OUTCOME_JOURNAL = '.queue-terminal-outcomes';
 const PENDING_DELETE_JOURNAL = '.queue-pending-deletes';
-/* 分類的唯一來源在 export-job-status.js；這裡保留同名薄包裝，讓既有呼叫端與
+/* 分類的唯一來源在 export-queue.js；這裡保留同名薄包裝，讓既有呼叫端與
    模組匯出面不變（tests/queueStore.test.js 會 import 這兩個名字）。 */
 const RESTORABLE_STATUSES = { has: isRestorable };
 const TERMINAL_STATUSES = { has: isTerminal };
@@ -459,21 +459,26 @@ function toHistoryEntry(job) {
   };
 }
 
-function loadHistory(queueDir) {
-  if (!queueDir) return [];
+function readHistory(queueDir) {
+  if (!queueDir) return { entries: [], raw: null, corrupted: false };
   let raw;
   try {
-    raw = fs.readFileSync(historyPath(queueDir), 'utf8');
+    raw = fs.readFileSync(historyPath(queueDir));
   } catch (error) {
-    return [];
+    if (error.code === 'ENOENT') return { entries: [], raw: null, corrupted: false };
+    // A temporarily unreadable history is not an empty history. Propagate the
+    // failure so the queue retains its outcome journal instead of overwriting it.
+    throw error;
   }
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(raw.toString('utf8'));
   } catch (error) {
-    return [];
+    return { entries: [], raw, corrupted: true };
   }
-  if (!parsed || parsed.version !== HISTORY_VERSION || !Array.isArray(parsed.entries)) return [];
+  if (!parsed || parsed.version !== HISTORY_VERSION || !Array.isArray(parsed.entries)) {
+    return { entries: [], raw, corrupted: true };
+  }
   const seen = new Set();
   const entries = [];
   for (const candidate of parsed.entries) {
@@ -482,13 +487,23 @@ function loadHistory(queueDir) {
     seen.add(entry.id);
     entries.push(entry);
   }
-  return entries;
+  return { entries, raw, corrupted: false };
+}
+
+function loadHistory(queueDir) {
+  return readHistory(queueDir).entries;
 }
 
 function saveHistory(queueDir, entries) {
   if (!queueDir) return [];
   const trimmed = entries.slice(-MAX_ENTRIES);
+  const previous = readHistory(queueDir);
   fs.mkdirSync(queueDir, { recursive: true });
+  // 顯示可略過壞資料，但更新不能銷毀唯一原始證據；未知 schema 同樣保留原 bytes。
+  // 備份失敗時不寫新 history，讓 queue owner 保留 done outcome 供之後重試。
+  if (previous.corrupted) {
+    fs.writeFileSync(`${historyPath(queueDir)}.corrupt-${crypto.randomUUID()}`, previous.raw, { flag: 'wx' });
+  }
   writeAtomic(historyPath(queueDir), `${JSON.stringify({ version: HISTORY_VERSION, entries: trimmed }, null, 2)}\n`);
   return trimmed;
 }

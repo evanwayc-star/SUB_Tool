@@ -9,9 +9,10 @@ function reverseWindow(context, buffer, start, end, channel = null) {
   const reversed = context.createBuffer(channels, count, rate);
   const last = Math.round(end * rate) - 1;
   for (let ch = 0; ch < channels; ch++) {
-    const source = buffer.getChannelData(channel == null ? ch : channel);
+    const sourceChannel=channel == null ? ch : channel;
+    const source = sourceChannel<buffer.numberOfChannels?buffer.getChannelData(sourceChannel):null;
     const output = reversed.getChannelData(ch);
-    for (let i = 0; i < count; i++) output[i] = source[last - i] || 0;
+    for (let i = 0; i < count; i++) output[i] = source?.[last - i] || 0;
   }
   return reversed;
 }
@@ -44,13 +45,14 @@ export class ReverseAudioPlayback {
     this.entries = new Map();
   }
 
-  prepare(track, { key, clip, start, end, load, owns = () => true }) {
-    const previous = this.entries.get(track);
+  prepare(track, { key, clip, start, end, load, owns = () => true, outputGain = track.gain }) {
+    const previous = this.entries.get(track)?.get(clip);
     if (previous?.key === key && previous.clip === clip && previous.owns() && owns()) return previous.pending;
-    this.release(track);
+    this.release(track,clip);
     const entry = { key, clip, start, end, owns, controller: new AbortController(), ready: false };
-    this.entries.set(track, entry);
-    const current = () => this.entries.get(track) === entry && owns();
+    const entries=this.entries.get(track)||new Map();
+    entries.set(clip,entry); this.entries.set(track,entries);
+    const current = () => this.entries.get(track)?.get(clip) === entry && owns();
     entry.pending = (async () => {
       try {
         const loaded = track.kind === 'buffer' ? { buffer: track.buffer } : await load(entry.controller.signal);
@@ -68,14 +70,16 @@ export class ReverseAudioPlayback {
         entry.channel = channel;
         entry.splitter = this.context.createChannelSplitter(channel + 1);
         entry.node.connect(entry.splitter);
-        entry.splitter.connect(track.gain, channel);
+        entry.splitter.connect(outputGain, channel);
         if (track.analyser) entry.splitter.connect(track.analyser, channel);
         entry.ready = true;
         return true;
       } finally {
         if (!entry.ready || !current()) {
           this.dispose(entry);
-          if (this.entries.get(track) === entry) this.entries.delete(track);
+          if (this.entries.get(track)?.get(clip) === entry) {
+            entries.delete(clip); if(!entries.size) this.entries.delete(track);
+          }
         }
       }
     })();
@@ -83,17 +87,20 @@ export class ReverseAudioPlayback {
   }
 
   get(track, playback) {
-    const entry = this.entries.get(track);
-    if (entry && !entry.owns()) { this.release(track); return null; }
+    const entry = this.entries.get(track)?.get(playback?.clip);
+    if (entry && !entry.owns()) { this.release(track,playback.clip); return null; }
     return playback?.reverse && entry?.ready && entry.clip === playback.clip
       && entry.start === playback.clip.in && entry.end === playback.clip.out ? entry : null;
   }
 
-  stopTrack(track) { try { this.entries.get(track)?.el?.pause(); } catch (_) {} }
+  stopTrack(track) { for(const entry of this.entries.get(track)?.values()||[]) {try { entry.el?.pause(); } catch (_) {}} }
+  stopInactive(track,playbacks){
+    for(const [clip,entry] of this.entries.get(track)||[])if(!playbacks.some(playback=>playback?.reverse&&playback.clip===clip))try{entry.el?.pause();}catch(_){}
+  }
   stop() { for (const track of this.entries.keys()) this.stopTrack(track); }
   prune(tracks) {
     const live = new Set(tracks);
-    for (const [track, entry] of this.entries) if (!live.has(track) || !entry.owns()) this.release(track);
+    for (const [track, entries] of this.entries) for(const [clip,entry] of entries) if (!live.has(track) || !entry.owns()) this.release(track,clip);
   }
   dispose(entry) {
     entry.controller.abort();
@@ -103,6 +110,10 @@ export class ReverseAudioPlayback {
     if (entry.objectURL) { this.revokeURL(entry.objectURL); entry.objectURL = null; }
     entry.ready = false;
   }
-  release(track) { const entry = this.entries.get(track); if (entry) { this.entries.delete(track); this.dispose(entry); } }
+  release(track,clip) {
+    const entries=this.entries.get(track); if(!entries) return;
+    if(clip===undefined){ this.entries.delete(track); for(const entry of entries.values()) this.dispose(entry); }
+    else { const entry=entries.get(clip); if(entry){entries.delete(clip);this.dispose(entry);} if(!entries.size) this.entries.delete(track); }
+  }
   clear() { for (const track of [...this.entries.keys()]) this.release(track); }
 }

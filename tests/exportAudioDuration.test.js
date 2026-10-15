@@ -4,13 +4,17 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { buildDeliveryArgv } from '../electron/export-plan.js';
 import { ExternalAudioLibrary } from '../src/external-audio.js';
 import { buildProjectAudioPlan } from '../src/project-audio.js';
+import { nativeTestTools } from './fixtures/native-tools.cjs';
 
-const FFMPEG = process.env.FFMPEG_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../electron/ffmpeg/ffmpeg.exe');
+const { ffmpeg: FFMPEG, ffprobe: FFPROBE } = nativeTestTools();
 const nativeIt = existsSync(FFMPEG) ? it : it.skip;
+const require = createRequire(import.meta.url);
+const { createDeliveryRunner } = require('../electron/delivery-runner.js');
+const { createMediaProbe } = require('../electron/media-probe.js');
 const SAMPLE_RATE = 48000;
 const roots = [];
 
@@ -58,6 +62,58 @@ afterEach(() => {
 });
 
 describe('交付音訊完整時間範圍', () => {
+  nativeIt.each(['wav', 'routed', 'routed-case', 'legacy-channel', 'legacy-raw'].flatMap(mode => [0, 0.5, 1.75].map(inPoint => ({ mode, inPoint }))))
+  ('$mode 正向來源延後開聲，trim=$inPoint 的實際 runner/probe/FFmpeg 保留缺口且 seek 後不重加延遲', async ({ mode, inPoint }) => {
+    const directory = mkdtempSync(path.join(realpathSync(tmpdir()), 'subtool-export-audio-duration-')); roots.push(directory);
+    const source = path.join(directory, 'delayed.mov'), outPath = path.join(directory, mode === 'wav' ? 'delivery.wav' : 'delivery.mov');
+    runFfmpeg(['-f', 'lavfi', '-i', 'color=black:s=64x48:r=25:d=3', '-itsoffset', '1',
+      '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=2', '-map', '0:v:0', '-map', '1:a:0',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'pcm_s16le', source]);
+    const audioPlan = { buses: [{ id: 'mono', inputs: [{ file: mode === 'routed-case' ? source.toUpperCase() : source, sourceStream: 0, sourceChannel: 0,
+      trimStart: inPoint, trimEnd: 3, offset: 0.2 }] }], streams: [{ layout: 'mono', busIds: ['mono'] }] };
+    const clip = { path: source, type: 'video', in: inPoint, out: 3, offset: 0.2, vtrack: 0,
+      ...(mode === 'legacy-channel' ? { audio: [{ file: source, sourceStream: 0, sourceChannel: 0, volume: 1 }] } : {}) };
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const progress = [], active = new Map();
+    const queue = { assertJobCapabilities() {}, reportProgress: (_id, data) => { progress.push(data); return true; },
+      registerActiveJob: (id, session) => active.set(id, session), clearActiveJob: id => active.delete(id) };
+    const runner = createDeliveryRunner({ queue, queueDir: () => directory, tempDir: directory, mediaProbe: () => probe,
+      encoder: { proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] },
+      runFfmpeg: async args => { runFfmpeg(args); return { maps: [] }; } });
+    try {
+      await runner.run({ id: 'delayed-forward', payload: { format: mode === 'wav' ? 'wav' : 'prores',
+        duration: 3.2 - inPoint, outPath, clips: mode === 'wav' ? [] : [clip], videoTracks: [{ vt: 0 }], width: 64, height: 48, fps: 25,
+        audioPlan: mode === 'wav' || mode.startsWith('routed') ? audioPlan : null } });
+      expect(progress.find(record => record.error), JSON.stringify(progress)).toBeUndefined();
+      expect(progress.at(-1)).toMatchObject({ done: true, pct: 100 });
+      expect(active.size).toBe(0);
+      const pcm = runFfmpeg(['-i', outPath, '-map', '0:a:0', '-ac', '1', '-ar', '48000', '-c:a', 'pcm_f32le', '-f', 'f32le', 'pipe:1']);
+      expect(pcm.length / 4).toBe(Math.round((3.2 - inPoint) * SAMPLE_RATE));
+      const onset = 0.2 + Math.max(0, 1 - inPoint);
+      const rms = (start, end) => {
+        let sum = 0, count = 0;
+        for (let frame = Math.round(start * SAMPLE_RATE); frame < Math.round(end * SAMPLE_RATE); frame++) { sum += pcm.readFloatLE(frame * 4) ** 2; count++; }
+        return Math.sqrt(sum / count);
+      };
+      expect(rms(0.02, onset - 0.02)).toBeLessThan(0.000001);
+      expect(rms(onset + 0.08, onset + 0.25)).toBeGreaterThan(0.05);
+      expect(rms(3.2 - inPoint - 0.25, 3.2 - inPoint - 0.05)).toBeGreaterThan(0.05);
+    } finally { await probe.cancelAllAndWait(); }
+  }, 30000);
+
+  nativeIt('未提供 probe adapter 的公開 WAV plan 仍保留 FFmpeg 來源 PTS 缺口', () => {
+    const directory = mkdtempSync(path.join(realpathSync(tmpdir()), 'subtool-export-audio-duration-')); roots.push(directory);
+    const source = path.join(directory, 'delayed.mov'), outPath = path.join(directory, 'delivery.wav');
+    runFfmpeg(['-f', 'lavfi', '-i', 'color=black:s=64x48:r=25:d=3', '-itsoffset', '1',
+      '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=2', '-c:v', 'libx264', '-c:a', 'pcm_s16le', source]);
+    runFfmpeg(buildDeliveryArgv({ format: 'wav', duration: 3, outPath, audioPlan: {
+      buses: [{ id: 'mono', inputs: [{ file: source, trimStart: 0, trimEnd: 3, sourceStream: 0, sourceChannel: 0 }] }], streams: [],
+    } }).args);
+    const pcm = runFfmpeg(['-i', outPath, '-ac', '1', '-f', 'f32le', '-c:a', 'pcm_f32le', 'pipe:1']);
+    expect(pcm.subarray(0, SAMPLE_RATE * 4)).toEqual(Buffer.alloc(SAMPLE_RATE * 4));
+    expect(Math.abs(pcm.readFloatLE(Math.round(2.40025 * SAMPLE_RATE) * 4))).toBeGreaterThan(0.05);
+  });
+
   nativeIt.each([
     {label:'跨淡入淡出',fadeIn:2,fadeOut:1.5},
     {label:'沒有淡化',fadeIn:0,fadeOut:0},

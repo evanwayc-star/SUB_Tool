@@ -11,6 +11,7 @@ const {
   buildLimiterFilter,
   parseVolumeAnalysis,
 } = require('../shared/audio-loudness.cjs');
+const { sourceAudioClockFilter } = require('./media-source-clock.js');
 
 function extractLoudnormJson(stderrText) {
   if (typeof stderrText !== 'string') return null;
@@ -27,6 +28,7 @@ function createAudioNormalizationRuntime({
   createTempPath,
   execute,
   removeFile,
+  probe = null,
 } = {}) {
   if (typeof createTempPath !== 'function' || typeof execute !== 'function') {
     throw new TypeError('音訊平衡化 runtime 缺少必要 adapter');
@@ -84,6 +86,18 @@ function createAudioNormalizationRuntime({
         } finally { signal?.removeEventListener('abort', abort); }
       };
       try {
+        check();
+        const media = typeof probe === 'function' ? await probe(src, { signal }) : null;
+        check();
+        // WAV 沒有母素材的容器時間戳；先完成母素材整段的聲量處理，再把
+        // 輸出歸回影片來源第零秒，供原有片段 in/out 與 processed 預覽使用。
+        // 已對齊的 processed WAV 探測值為零，不會重複移動原點。
+        const clock = media?.video || media?.audio?.[sourceStream];
+        const sourceDuration = Number(media?.duration);
+        const outputClock = sourceAudioClockFilter(clock)
+          + (sourceDuration > 0 && Number.isFinite(sourceDuration)
+            ? `,apad=whole_dur=${sourceDuration.toFixed(6)},atrim=end=${sourceDuration.toFixed(6)}` : '');
+        const outputFilter = effect => effect ? `${effect},${outputClock}` : outputClock;
         // 1. True Peak 模式：兩遍分析 (Two-Pass) 確保 ITU-R BS.1770 精準度與無聲保護
         if (options.isTruePeak) {
           let pass1Stderr = '';
@@ -129,6 +143,7 @@ function createAudioNormalizationRuntime({
               '-i', src,
               '-map', `0:a:${sourceStream}`,
               '-vn',
+              '-af', outputFilter(null),
               '-c:a', 'pcm_s16le',
               outWav,
             ], {
@@ -163,7 +178,7 @@ function createAudioNormalizationRuntime({
             '-i', src,
               '-map', `0:a:${sourceStream}`,
               '-vn',
-            '-af', p2FilterObj.filter,
+            '-af', outputFilter(p2FilterObj.filter),
             '-c:a', 'pcm_s16le',
             outWav,
           ], {
@@ -198,7 +213,7 @@ function createAudioNormalizationRuntime({
           '-i', src,
               '-map', `0:a:${sourceStream}`,
               '-vn',
-          '-af', pFilterObj.filter,
+          '-af', outputFilter(pFilterObj.filter),
           '-c:a', 'pcm_s16le',
           outWav,
         ], {

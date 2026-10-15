@@ -80,6 +80,41 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it.each(['wav', 'h264', 'prores', 'mod-fhd', 'airline-exw', 'airline-dmpes', 'airline-dmpes-4m', 'dvd-iso', 'bd-iso'])
+  ('%s 對 audioPlan 獨立母來源取得時鐘證據，交付不依賴來源出現在影片清單', async format => {
+    const source = path.resolve('D:/external/delayed.mov');
+    const hasAudio = vi.fn(async () => true), audioVideoStartOffsets = vi.fn(async file => file === source ? [1] : [0]);
+    const f = make({ mediaProbe: () => ({ hasAudio, audioVideoStartOffsets, audioBitrates: vi.fn(async () => []) }) });
+    const job = videoJob();
+    job.payload = { ...job.payload, format, fps: 29.97, duration: 3,
+      clips: format === 'wav' ? [] : [{ ...job.payload.clips[0], out: 3 }],
+      outPath: 'D:/out/delivery.' + (format === 'wav' ? 'wav' : format === 'prores' ? 'mov' : /-iso$/.test(format) ? 'iso' : format === 'mod-fhd' ? 'ts' : format.startsWith('airline-') ? 'mpg' : 'mp4'),
+      audioPlan: { buses: ['left', 'right'].map(id => ({ id, inputs: [{ file: source, trimStart: 0, trimEnd: 3,
+        sourceStream: 0, sourceChannel: 0 }] })), streams: [{ layout: 'stereo', busIds: ['left', 'right'] }] },
+    };
+    await f.runner.run(job);
+    expect(audioVideoStartOffsets).toHaveBeenCalledWith(source, { signal: expect.any(AbortSignal) });
+    expect(f.runFfmpeg).toHaveBeenCalledOnce();
+    const args = f.runFfmpeg.mock.calls[0][0], graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('asetpts=PTS-STARTPTS+1.000000/TB,aresample=first_pts=0,atrim=');
+    expect(f.queue.reportProgress).toHaveBeenLastCalledWith(job.id, expect.objectContaining({ done: true }));
+  });
+  it.skipIf(process.platform !== 'win32')('Windows 同母檔的大小寫別名只探測一次，音訊路由仍使用同一份開聲時間', async () => {
+    const source = path.resolve('D:/source/Master.mov');
+    const hasAudio = vi.fn(async () => true), audioVideoStartOffsets = vi.fn(async () => [1]);
+    const setup = make({ mediaProbe: () => ({ hasAudio, audioVideoStartOffsets, audioBitrates: async () => [] }) });
+    const job = videoJob();
+    job.payload.clips = [{ ...job.payload.clips[0], path: source, out: 3 }];
+    job.payload.duration = 3;
+    job.payload.audioPlan = { buses: [{ id: 'mono', inputs: [{ file: source.toUpperCase(), trimStart: 0, trimEnd: 3,
+      sourceStream: 0, sourceChannel: 0 }] }], streams: [{ layout: 'mono', busIds: ['mono'] }] };
+    await setup.runner.run(job);
+    expect(hasAudio).toHaveBeenCalledOnce();
+    expect(audioVideoStartOffsets).toHaveBeenCalledOnce();
+    const args = setup.runFfmpeg.mock.calls[0][0];
+    expect(args[args.indexOf('-filter_complex') + 1]).toContain('asetpts=PTS-STARTPTS+1.000000/TB,aresample=first_pts=0,atrim=');
+    expect(setup.queue.reportProgress).toHaveBeenLastCalledWith(job.id, expect.objectContaining({ done: true }));
+  });
   it.each(['user-stop', 'shutdown'])('準備期 probe 可以 %s，未啟動 ffmpeg 前就完整取消', async reason => {
     let signal;
     const setup = make({ mediaProbe: () => ({
@@ -101,14 +136,51 @@ describe('delivery runner public interface', () => {
     else expect(setup.sent).toEqual([]);
   });
 
-  it('發佈成品後取消結果 probe，仍提交 done 而不把已交付檔案降成 stopped', async () => {
+  it.each(['user-stop', 'shutdown'])('發佈成品後 %s 取消結果 probe，仍提交 done 而不把已交付檔案降成 stopped', async reason => {
     let setup;
     setup = make({ mediaProbe: () => ({
       hasAudio: async () => false,
-      audioBitrates: async () => { setup.active.get('delivery-1').stop('shutdown'); throw new Error('probe aborted'); },
+      audioBitrates: async () => { setup.active.get('delivery-1').stop(reason); throw new Error('probe aborted'); },
     }) });
     await setup.runner.run(videoJob());
     expect(setup.sent.at(-1)?.payload).toMatchObject({ done: true, result: { audioActualBitrates: null } });
+    expect(setup.active.size).toBe(0);
+  });
+
+  it.each(['h264', 'mod-fhd', 'airline-exw'])('%s 成品成功後結果資訊 probe 失敗仍回報 done 並清除 active 工作', async format => {
+    const audioBitrates = vi.fn(async () => { throw new Error('結果資訊讀取失敗'); });
+    const setup = make({ mediaProbe: () => ({ hasAudio: async () => false, audioBitrates }) });
+    const job = videoJob();
+    job.payload.format = format;
+
+    await setup.runner.run(job);
+    await setup.queue.registerActiveJob.mock.calls[0][1].completion;
+
+    expect(setup.runFfmpeg).toHaveBeenCalledOnce();
+    expect(audioBitrates).toHaveBeenCalledOnce();
+    expect(setup.queue.reportProgress).toHaveBeenLastCalledWith('delivery-1',
+      expect.objectContaining({ done: true, result: expect.objectContaining({ audioActualBitrates: null }) }));
+    expect(setup.sent.at(-1)?.payload).toMatchObject({ done: true, result: { audioActualBitrates: null } });
+    expect(setup.sent.some(item => item.payload?.error || item.payload?.stopped)).toBe(false);
+    expect(setup.active.size).toBe(0);
+    expect(setup.queue.clearActiveJob).toHaveBeenCalledWith('delivery-1');
+  });
+
+  it.each(['FFMPEG_EXIT', 'INVALID_TRANSPORT', 'LEASE_RELEASE_FAILED'])('真正 execution 以 %s 拒絕時仍回報失敗，不執行結果資訊 probe', async code => {
+    const failure = Object.assign(new Error(`成品階段失敗：${code}`), { code });
+    const audioBitrates = vi.fn();
+    const setup = make({
+      mediaProbe: () => ({ hasAudio: async () => false, audioBitrates }),
+      runFfmpeg: vi.fn(async () => { throw failure; }),
+    });
+
+    await setup.runner.run(videoJob());
+
+    expect(audioBitrates).not.toHaveBeenCalled();
+    expect(setup.queue.reportProgress).toHaveBeenLastCalledWith('delivery-1',
+      expect.objectContaining({ error: true, errorMsg: failure.message }));
+    expect(setup.sent.some(item => item.payload?.done)).toBe(false);
+    expect(setup.active.size).toBe(0);
   });
 
   it('航空來源的音訊前導時間送入正式轉檔計畫', async () => {

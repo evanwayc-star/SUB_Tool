@@ -19,10 +19,11 @@
        都要存在，否則呼叫端會自己去戳 .context / .master（先前有 21 處）。
 
    測不到的：真正的聲音。那需要真機驗收（AGENTS.md §4）。 */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAudioEngineForTest, scheduleScrub, destroyScrubber } from '../src/audio-engine.js';
 import { createProjectAudioInterpretation } from '../src/project-audio.js';
 import { State } from '../src/state.js';
+import { getPlayerAdapter, resetPlayerAdapter } from '../src/media-player-adapter.js';
 
 /* 夠用就好的假 AudioContext——只實作被碰到的那幾個工廠與屬性。 */
 function fakeContext() {
@@ -79,6 +80,51 @@ const elementTrack = (over = {}) => ({
   kind: 'element', source: 'video', muted: false, solo: false,
   el: { currentTime: 0, duration: 100, playbackRate: 1, play: vi.fn(), pause: vi.fn() },
   ...over,
+});
+
+describe('element transport with a late absolute MOV duration',()=>{
+  let engine,element,env,track;
+  beforeEach(()=>{
+    element=new EventTarget();
+    Object.assign(element,{src:'subtool-local://source/origin-five.mov',duration:3.5,readyState:1,paused:true});
+    let current=0;
+    Object.defineProperty(element,'currentTime',{get:()=>current,set:value=>{current=Math.min(value,element.duration);}});
+    element.play=vi.fn(()=>{element.paused=false;return Promise.resolve();});
+    element.pause=vi.fn(()=>{element.paused=true;});
+    getPlayerAdapter().registerSourceClock(element.src,{timestampOffset:-.5,presentationTimestampOffset:-5.5});
+    track=elementTrack({el:element});env={tracks:[track],timelineTime:2.8};
+    ({engine}=engineWith(env));
+  });
+  afterEach(()=>{engine.stopElements();resetPlayerAdapter(null);});
+  const expand=async element=>{element.duration=8.5;element.dispatchEvent(new Event('durationchange'));await Promise.resolve();await Promise.resolve();};
+
+  it('waits for raw source 8.3 before starting source 2.8',async()=>{
+    engine.startElements(2.8,2.8);
+    expect(element.currentTime).toBe(3.5);expect(element.play).not.toHaveBeenCalled();
+    await expand(element);
+    expect(element.currentTime).toBe(8.3);expect(element.play).toHaveBeenCalledOnce();
+  });
+  it('a pending start follows the latest normalized source time',async()=>{
+    engine.startElements(0,0);env.timelineTime=2.8;engine.syncElements(2.8);
+    await expand(element);
+    expect(element.currentTime).toBe(8.3);expect(element.play).toHaveBeenCalledOnce();
+  });
+  it('a running carrier pauses while a drift correction is clipped',async()=>{
+    element.paused=false;engine.syncElements(2.8);
+    expect(element.paused).toBe(true);expect(element.play).not.toHaveBeenCalled();
+    await expand(element);
+    expect(element.currentTime).toBe(8.3);expect(element.paused).toBe(false);
+  });
+  it.each(['stop','replace','remove','hide'])('%s invalidates an unfinished start',async action=>{
+    engine.startElements(2.8,2.8);
+    if(action==='stop')engine.stopElements();
+    if(action==='replace')element.src='subtool-local://source/replaced.mov';
+    if(action==='remove')env.tracks=[];
+    if(action==='hide')track._srcHidden=true;
+    await expand(element);
+    expect(element.play).not.toHaveBeenCalled();
+    if(action==='stop'||action==='replace')expect(element.currentTime).toBe(3.5);
+  });
 });
 
 describe('ensureCtx', () => {

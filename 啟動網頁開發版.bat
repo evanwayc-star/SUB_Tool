@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 title SUB Tool - Web Dev Server
 
-where node >nul 2>nul
+where npm >nul 2>nul
 if errorlevel 1 (
   echo Node.js not found. Please install from https://nodejs.org
   pause & exit /b 1
@@ -11,6 +11,7 @@ if errorlevel 1 (
 if not exist "node_modules" (
   echo First run: installing dependencies...
   call npm install
+  if errorlevel 1 ( echo [ERROR] npm install failed. & pause & exit /b 1 )
 )
 
 echo.
@@ -23,4 +24,6 @@ echo 或將網址複製到瀏覽器中開啟，才能正常載入 ffmpeg.wasm。
 echo.
 
 call npm run dev
+if errorlevel 1 ( echo [ERROR] dev server failed - see messages above. & pause & exit /b 1 )
 pause
+exit /b 0

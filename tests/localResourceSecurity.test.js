@@ -1,6 +1,7 @@
 // @subtool-ci windows
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,6 +9,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const { CdpClient, getJSON, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 const ELECTRON = path.join(
   ROOT,
   'node_modules',
@@ -17,6 +20,7 @@ const ELECTRON = path.join(
 );
 
 const activeApps = new Set();
+const activeClients = new Set();
 const tempRoots = new Set();
 
 function delay(ms) {
@@ -47,52 +51,6 @@ function reservePort() {
   });
 }
 
-class CdpClient {
-  constructor(socketUrl) {
-    this.socketUrl = socketUrl;
-    this.nextId = 0;
-    this.pending = new Map();
-  }
-
-  async connect() {
-    this.socket = new WebSocket(this.socketUrl);
-    await new Promise((resolve, reject) => {
-      this.socket.addEventListener('open', resolve, { once: true });
-      this.socket.addEventListener('error', reject, { once: true });
-    });
-    this.socket.addEventListener('message', event => {
-      const message = JSON.parse(event.data);
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error.message));
-      else pending.resolve(message.result);
-    });
-  }
-
-  send(method, params = {}) {
-    const id = ++this.nextId;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  async evaluate(expression) {
-    const response = await this.send('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (response.exceptionDetails) {
-      throw new Error(response.exceptionDetails.exception?.description || 'renderer 執行失敗');
-    }
-    return response.result.value;
-  }
-
-  close() { this.socket?.close(); }
-}
-
 function wavBytes(sampleCount = 800) {
   const bytes = Buffer.alloc(44 + sampleCount, 128);
   bytes.write('RIFF', 0);
@@ -115,45 +73,41 @@ async function launchApp(projectFile, profileDir) {
   const isolatedTemp = path.join(profileDir, 'system-temp');
   mkdirSync(isolatedTemp, { recursive: true });
   const stderr = [];
-  const child = spawn(ELECTRON, [
-    '.', projectFile, `--remote-debugging-port=${port}`,
+  const child = trackElectron(spawn(ELECTRON, [
+    '.', '--subtool-transport-acceptance', projectFile, `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`, '--no-sandbox',
   ], {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['ignore', 'ignore', 'pipe'],
     env: { ...process.env, TEMP: isolatedTemp, TMP: isolatedTemp },
-  });
+  }));
   child.stderr.on('data', chunk => stderr.push(chunk.toString()));
   const closed = new Promise(resolve => child.once('close', resolve));
   const app = { child, closed, stderr };
   activeApps.add(app);
-  child.once('close', () => activeApps.delete(app));
-
   const target = await waitUntil(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-    if (!response.ok) return null;
-    return (await response.json()).find(item => item.type === 'page' && item.title === 'SUB TOOL');
+    return (await getJSON(`http://127.0.0.1:${port}/json/list`))
+      .find(item => item.type === 'page' && item.title === 'SUB TOOL');
   }, 'SUB Tool 主視窗');
-  const client = new CdpClient(target.webSocketDebuggerUrl);
+  const client = new CdpClient(target.webSocketDebuggerUrl, { timeoutMs: 15000 });
+  activeClients.add(client);
   await client.connect();
   return { app, client };
 }
 
 afterEach(async () => {
+  for (const client of activeClients) client.close();
+  activeClients.clear();
   for (const app of activeApps) {
-    if (app.child.exitCode == null) app.child.kill('SIGKILL');
-    await Promise.race([app.closed, delay(5000)]);
+    await stopElectron(app.child);
+    activeApps.delete(app);
   }
-  activeApps.clear();
   for (const root of tempRoots) {
-    try {
-      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-    } catch {}
+    verifiedCleanup(root, 'subtool-local-resource-', { maxRetries: 20, retryDelay: 100 });
+    tempRoots.delete(root);
   }
-  tempRoots.clear();
-
-});
+}, 20000);
 
 describe('本機媒體資源 capability URL', () => {
   it('renderer 只可透過 opaque 授權 URL 讀檔，literal file URL 無法繞過授權', async () => {
@@ -232,8 +186,9 @@ describe('本機媒體資源 capability URL', () => {
       expect(result.unauthorizedAudio).toBe('blocked');
     } finally {
       client.close();
-      if (app.child.exitCode == null) app.child.kill();
-      await Promise.race([app.closed, delay(5000)]);
+      activeClients.delete(client);
+      await stopElectron(app.child);
+      activeApps.delete(app);
     }
   }, 30000);
 });

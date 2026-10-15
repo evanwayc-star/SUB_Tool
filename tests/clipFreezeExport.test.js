@@ -5,13 +5,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { buildExportSnapshot } from '../src/delivery-job.js';
+import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const { buildDeliveryArgv } = createRequire(import.meta.url)('../electron/export-plan.js');
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const FFMPEG = path.join(ROOT, 'electron', 'ffmpeg', 'ffmpeg.exe');
-const FFPROBE = path.join(ROOT, 'electron', 'ffmpeg', 'ffprobe.exe');
+const { ffmpeg: FFMPEG, ffprobe: FFPROBE } = nativeTestTools();
 const fixedRedFrame = 29 / 30;
 
 function plan(clips, outPath = 'C:/output.mp4', duration = 2) {

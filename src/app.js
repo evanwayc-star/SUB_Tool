@@ -200,7 +200,7 @@ function styleChanged(){
       其餘不受影響（列表標 ✱ 自訂）。整軌的標準位置仍用面板的 X／Y。
    ── 換算基準是畫面實際顯示區 _stageRect()（非 videoWrap）：不同比例的片拖起來才等效。
    ── 旋轉支點取【錨點】而非方塊中心，與 ASS 的 \frz 繞 \org(=\pos) 同構（見 substyle.originOf）。 */
-// subtitle dragging logic extracted to pointer-interaction.js
+// subtitle dragging logic lives in timeline-interaction-engine.js createPreviewDrag()
 _videoSub?.addEventListener('contextmenu', e => {
   const subEl = e.target.closest('.vsub-track');
   if(!subEl) return;
@@ -317,10 +317,7 @@ $('seekBar').addEventListener('input',e=>{ renderSeekBar(e.target); const t=(+e.
 $('fpsSel').addEventListener('change',e=>{
   const prev=State.fps,prevDf=State.dropFrame;
   setFps(e.target.value);
-  State.cues.forEach(c => {
-    c.start = snapTimeToFrame(c.start, State.fps, State.dropFrame);
-    c.end = snapTimeToFrame(c.end, State.fps, State.dropFrame);
-  });
+  snapAllCuesToFrames();
   State.notes.forEach(n => {
     n.time = snapTimeToFrame(n.time, State.fps, State.dropFrame);
   });
@@ -410,9 +407,6 @@ function renderListTrackSel(){
 
 
 /* ===== 時間軸：雙擊字幕區塊內嵌編輯文字 ===== */
-
-
-let _covCleared=false; // 本次開窗有沒有按過「清除全部覆蓋」（決定要不要連座標／角度一起清）
 
 
 /* ===== UI 接線（區塊切換 / 樣式 / 分隔線 / 捲動同步 / 雙擊） ===== */
@@ -862,11 +856,18 @@ async function initDesktop(){
           msg = msg.replace(/\[LOG_PATH\].*?\[\/LOG_PATH\]/, '').trim();
         }
         setStatus(`匯出失敗`, '', 'unlock');
-        let modalBody = `<div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${msg.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`;
+        const modalBody = `<div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${msg.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`;
+        const session = openModal(`匯出失敗`, modalBody, [{ label: '關閉', primary: true, act: closeModal }]);
         if (logPath) {
-          modalBody += `<div style="margin-top:16px"><button onclick="subtool.openPath('${logPath.replace(/\\/g, '\\\\')}')" style="padding:4px 8px;cursor:pointer">開啟完整記錄</button></div>`;
+          const row = document.createElement('div');
+          row.style.marginTop = '16px';
+          const button = document.createElement('button');
+          button.textContent = '開啟完整記錄';
+          button.style.cssText = 'padding:4px 8px;cursor:pointer';
+          button.onclick = () => { if (session.isCurrent()) DESK.openPath(logPath); };
+          row.appendChild(button);
+          $('modalBody')?.appendChild(row);
         }
-        openModal(`匯出失敗`, modalBody, [{ label: '關閉', primary: true, act: closeModal }]);
         setTimeout(_updateQueueStatusUI, 100);
       } else if (d.stopped) {
         if ($('stStopBtn')) $('stStopBtn').style.display = 'none';

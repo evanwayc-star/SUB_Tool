@@ -47,22 +47,38 @@ function fpsOf(stream) {
  * @param {object} [document={}] ffprobe JSON 解析結果
  * @returns {{
  *   duration: number,
- *   video: {codec: string, width: number, height: number, fps: number|null}|null,
- *   audio: Array<{index: number, streamIndex: number, codec: string, channels: number, lang: string, title: string}>
+ *   video: {codec: string, width: number, height: number, fps: number|null, timestampOffset: number, presentationTimestampOffset: number}|null,
+ *   audio: Array<{index: number, streamIndex: number, codec: string, channels: number, lang: string, title: string, timestampOffset: number, presentationTimestampOffset: number}>
  * }} 標準化媒體描述
  */
 function descriptorOf(document = {}) {
   const streams = Array.isArray(document.streams) ? document.streams : [];
   const video = streams.find(stream => stream?.codec_type === 'video' && !stream?.disposition?.attached_pic) || null;
   const audio = streams.filter(stream => stream?.codec_type === 'audio');
+  const starts = streams.map(stream => Number(stream?.start_time)).filter(Number.isFinite);
+  const containerStart = finiteNumber(document.format?.start_time, starts.length ? Math.min(...starts) : 0);
+  // FFmpeg 在 input 層減去容器起點；預覽聲道再轉回影片來源第零秒。
+  // 保留實際 decoder PTS，不能 STARTPTS 後重加 stream header 的 primer。
+  const videoStart = finiteNumber(video?.start_time, containerStart);
+  // Matroska / WebM 的 format.duration 是絕對結束 PTS；MOV 等格式則是容器時長。
+  // 對外時長以影片第零秒為起點，同時保留比影片更晚結束的音訊尾端。
+  const matroska = String(document.format?.format_name || '').split(',').some(name => name === 'matroska' || name === 'webm');
+  const formatDuration = Number(document.format?.duration);
+  const duration = Number.isFinite(formatDuration)
+    ? Math.max(0, formatDuration + (matroska ? 0 : containerStart) - videoStart)
+    : finiteNumber(video?.duration, 0);
 
   return {
-    duration: finiteNumber(document.format?.duration, finiteNumber(video?.duration, 0)),
+    duration,
     video: video ? {
       codec: video.codec_name || '',
       width: Math.max(0, finiteNumber(video.width, 0)),
       height: Math.max(0, finiteNumber(video.height, 0)),
       fps: fpsOf(video),
+      timestampOffset: containerStart - videoStart,
+      // HTML 與 MP4 edit-list／WebCodecs 保留絕對呈現 PTS；FFmpeg／mpv
+      // 的 input 時鐘則已扣除容器起點。兩個 adapter 不能共用 raw epoch。
+      presentationTimestampOffset: -videoStart || 0,
     } : null,
     audio: audio.map((stream, index) => ({
       index,
@@ -71,6 +87,8 @@ function descriptorOf(document = {}) {
       channels: Math.max(1, Math.floor(finiteNumber(stream.channels, 1))),
       lang: stream.tags?.language || stream.tags?.LANGUAGE || '',
       title: stream.tags?.title || stream.tags?.TITLE || '',
+      timestampOffset: containerStart - videoStart,
+      presentationTimestampOffset: -videoStart || 0,
     })),
   };
 }
@@ -96,8 +114,20 @@ function createMediaProbe({
   const uncertainProcesses = new Set();
   const inFlight = new Map();
   const queue = [];
+  const jobs = new Set();
+  const pending = new Set();
+  const processes = new Map();
   const concurrency = Number.isFinite(maxConcurrent) ? Math.max(1, Math.floor(maxConcurrent)) : 2;
   let active = 0;
+  let shuttingDown = false, shutdownPromise = null, resumeWhenIdle = false;
+
+  function resumeIfIdle() {
+    if (!resumeWhenIdle || pending.size || processes.size) return false;
+    shuttingDown = false;
+    shutdownPromise = null;
+    resumeWhenIdle = false;
+    return true;
+  }
 
   function abortError() {
     const error = new Error('ffprobe 已取消');
@@ -106,7 +136,7 @@ function createMediaProbe({
   }
 
   function drain() {
-    while (active < concurrency && queue.length) {
+    while (!shuttingDown && active < concurrency && queue.length) {
       const job = queue.shift();
       job.signal?.removeEventListener('abort', job.onAbort);
       if (job.signal?.aborted) {
@@ -127,26 +157,42 @@ function createMediaProbe({
   }
 
   function schedule(args, signal) {
-    return new Promise((resolve, reject) => {
-      if (signal?.aborted) {
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort();
+    signal?.addEventListener('abort', forwardAbort, { once: true });
+    if (signal?.aborted) controller.abort();
+    let job;
+    const result = new Promise((resolve, reject) => {
+      if (shuttingDown || controller.signal.aborted) {
         reject(abortError());
         return;
       }
-      const job = { args, signal, resolve, reject, onAbort: null };
+      job = { args, signal: controller.signal, controller, resolve, reject, onAbort: null };
       job.onAbort = () => {
         const index = queue.indexOf(job);
         if (index < 0) return;
         queue.splice(index, 1);
-        signal.removeEventListener('abort', job.onAbort);
+        job.signal.removeEventListener('abort', job.onAbort);
         reject(abortError());
       };
-      signal?.addEventListener('abort', job.onAbort, { once: true });
+      job.signal.addEventListener('abort', job.onAbort, { once: true });
+      jobs.add(job);
       queue.push(job);
       drain();
     });
+    pending.add(result);
+    const forget = () => {
+      signal?.removeEventListener('abort', forwardAbort);
+      jobs.delete(job);
+      pending.delete(result);
+      resumeIfIdle();
+    };
+    result.then(forget, forget);
+    return result;
   }
 
   function run(args, { signal } = {}) {
+    if (shuttingDown) return Promise.reject(abortError());
     // 有取消所有者的工作各自保留 native lifecycle，避免一個 caller 中止其他 caller。
     if (signal) return schedule(args, signal);
     const key = JSON.stringify(args);
@@ -175,7 +221,7 @@ function createMediaProbe({
       error.code = 'PROBE_TERMINATION_PENDING';
       throw error;
     }
-    if (signal?.aborted) {
+    if (shuttingDown || signal?.aborted) {
       throw abortError();
     }
 
@@ -196,6 +242,8 @@ function createMediaProbe({
       let onAbort = null;
       let terminationError = null;
       let releaseTermination = null;
+      let resolveClosed;
+      const closed = new Promise(resolve => { resolveClosed = resolve; });
 
       const finish = (callback, value) => {
         if (settled) return;
@@ -224,16 +272,21 @@ function createMediaProbe({
           finish(reject, timeoutError);
         }, terminationGraceMs);
 
-        try { child.kill(); } catch (killError) {}
+        try { child.kill('SIGTERM'); } catch (killError) {}
       };
+
+      processes.set(child, { closed, terminate });
 
       child.stdout?.on('data', chunk => stdout.push(Buffer.from(chunk)));
       child.stderr?.on('data', chunk => stderr.push(Buffer.from(chunk)));
       child.once('error', error => {
-        if (!terminationError) finish(reject, error);
+        if (!terminationError) terminate(error);
       });
       child.once('close', status => {
+        processes.delete(child);
+        resolveClosed();
         uncertainProcesses.delete(child);
+        resumeIfIdle();
         if (terminationError) {
           finish(reject, terminationError);
           return;
@@ -295,7 +348,8 @@ function createMediaProbe({
       ], options);
       return !!stdout.trim();
     } catch (error) {
-      if (options?.signal?.aborted) throw error;
+      if (shuttingDown || options?.signal?.aborted || error.code === 'PROBE_ABORTED'
+        || error.cause?.code === 'PROBE_ABORTED') throw error;
       // 舊專案若無完整聲道規劃，不輕易丟棄音訊，交由 FFmpeg 實際 map 報錯
       return true;
     }
@@ -337,12 +391,39 @@ function createMediaProbe({
         kbps: Math.max(0, Math.round(finiteNumber(stream.bit_rate, 0) / 1000)),
       }));
     } catch (error) {
-      if (options?.signal?.aborted) throw error;
+      if (shuttingDown || options?.signal?.aborted || error.code === 'PROBE_ABORTED'
+        || error.cause?.code === 'PROBE_ABORTED') throw error;
       return [];
     }
   }
 
-  return Object.freeze({ describe, hasAudio, audioVideoStartOffsets, audioBitrates });
+  function cancelAllAndWait({ timeoutMs: closeTimeoutMs = 5000 } = {}) {
+    if (shutdownPromise) return shutdownPromise;
+    shuttingDown = true;
+    resumeWhenIdle = false;
+    for (const job of jobs) job.controller.abort();
+    // timeout/error 已讓 caller 收斂的 child 仍由此 owner 持有，直到實際 close。
+    for (const entry of processes.values()) entry.terminate(abortError());
+    let timer;
+    const drained = Promise.all([
+      Promise.allSettled([...pending]),
+      Promise.all([...processes.values()].map(entry => entry.closed)),
+    ]);
+    const attempt = Promise.race([drained, new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        for (const child of processes.keys()) { try { child.kill('SIGKILL'); } catch (_) {} }
+        const error = new Error('ffprobe 尚未確認全部關閉');
+        error.code = 'PROBE_TERMINATION_PENDING';
+        reject(error);
+      }, closeTimeoutMs);
+    })]).finally(() => clearTimeout(timer));
+    shutdownPromise = attempt;
+    attempt.catch(() => { if (shutdownPromise === attempt) shutdownPromise = null; });
+    return attempt;
+  }
+
+  return Object.freeze({ describe, hasAudio, audioVideoStartOffsets, audioBitrates, cancelAllAndWait,
+    resume() { resumeWhenIdle = true; return resumeIfIdle(); } });
 }
 
 module.exports = { createMediaProbe, descriptorOf };

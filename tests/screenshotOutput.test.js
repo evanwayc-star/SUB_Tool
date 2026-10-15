@@ -252,6 +252,39 @@ describe('截圖輸出 reservation', () => {
     expect(fs.readdirSync(directory)).toEqual([]);
   });
 
+  it('取消退出的 resume 等待已准入 writer 收尾，保留清理失敗的reservation以供重試', async () => {
+    let finish, started, locked = false;
+    const writing = new Promise(resolve => { started = resolve; });
+    const waiting = new Promise(resolve => { finish = resolve; });
+    const open = async (file, mode) => {
+      if (mode === 'wx') { started(); await waiting; }
+      return fs.promises.open(file, mode);
+    };
+    const unlink = async file => {
+      if (locked) throw Object.assign(new Error('temporarily locked'), { code: 'EACCES' });
+      return fs.promises.unlink(file);
+    };
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open, unlink } } });
+    const reserved = output.reserve(directory);
+    await writing;
+    locked = true;
+    const closing = output.close();
+    const rejection = expect(closing).rejects.toThrow('temporarily locked');
+    const resuming = output.resume();
+    try {
+      expect(await output.reserve(directory)).toBeNull();
+      expect(output.close()).toBe(closing);
+    } finally { finish(); }
+    const original = await reserved;
+    await rejection;
+    expect(await resuming).toBe(true);
+    locked = false;
+    const next = await output.reserve(directory);
+    expect(next.name).not.toBe(original.name);
+    await output.close();
+    expect(fs.readdirSync(directory)).toEqual([]);
+  });
+
   it.each(['reserve', 'stage', 'copy'])('%s 的 FileHandle.stat 暫時失敗仍以原 handle ownership 清理', async phase => {
     let reserved, failed = false;
     const open = async (file, mode) => {

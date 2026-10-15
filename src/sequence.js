@@ -19,10 +19,31 @@ import { emit } from './events.js';
 import { audioLimiterSnapshot, audioMotherPath, restoreAudioLimiterState } from '../shared/audio-loudness.cjs';
 import { fadeWindow } from '../shared/clip-fade.cjs';
 import { fixedFrameTime, isStillClip } from '../shared/clip-visual.cjs';
+import { sourceTime, timelineTime } from './sequence-time.js';
 
 let _clipSeq = 1;
 const EPS = 1e-6;
 const vt = c => c.vtrack || 0;
+
+/* 插入先計算整條同軌的連鎖位移；任何一段受鎖保護，就不可套用部分計畫。
+   gesture 與換軌 command 共用同一個准入，避免 caller 各自猜需要移動的鄰片。 */
+function overlapPlan(moved, v=moved?.vtrack||0){
+  if(!moved || !State.clips.includes(moved) || moved.locked
+    || State.videoTracks[vt(moved)]?.locked || State.videoTracks[v]?.locked) return null;
+  const sorted=State.clips.filter(c=>c===moved || vt(c)===v)
+    .sort((a,b)=>(a.offset-b.offset)||(a===moved?-1:b===moved?1:0));
+  const changes=[];
+  let prevEnd=-Infinity;
+  for(const c of sorted){
+    const offset=c.offset<prevEnd-EPS ? prevEnd : c.offset;
+    if(offset!==c.offset){
+      if(c.locked) return null;
+      changes.push({clip:c,offset});
+    }
+    prevEnd=Math.max(prevEnd,offset+Seq.len(c));
+  }
+  return changes;
+}
 
 const Seq = {
   /* ---- 查詢 ---- */
@@ -56,12 +77,10 @@ const Seq = {
   },
   /* ---- 時間映射 ---- */
   toSource(t, c){
-    const elapsed=(t-c.offset)*(Number(c.speed)>0?Number(c.speed):1);
-    return c.reverse ? c.out-elapsed : c.in+elapsed;
+    return sourceTime(t,c);
   },
   toTimeline(s, c){
-    const sourceElapsed=c.reverse ? c.out-s : s-c.in;
-    return c.offset+sourceElapsed/(Number(c.speed)>0?Number(c.speed):1);
+    return timelineTime(s,c);
   },
   // 反向音訊快取只含目前來源區間；播放器秒數仍由序列層轉換。
   toReverseAudio(t, c){ return c.out - this.toSource(t, c); },
@@ -195,22 +214,25 @@ const Seq = {
   /* 自由拖放後的重疊解算（插入語義）：只在【被拖 clip 所在軌】內處理。
      同軌依 offset 排序（同位時被拖段優先），由左至右掃描——真的重疊才把後面段推到前段結尾。
      不同軌可自由重疊（＝疊層），不受影響。 */
+  canResolveOverlaps(moved){ return overlapPlan(moved)!==null; },
   resolveOverlaps(moved){
-    const v = vt(moved);
-    const sorted = this.trackClips(v).sort((a, b) => (a.offset - b.offset) || (a === moved ? -1 : b === moved ? 1 : 0));
-    let prevEnd = -Infinity;
-    for(const c of sorted){
-      if(c.offset < prevEnd - EPS) c.offset = prevEnd;
-      prevEnd = Math.max(prevEnd, this.clipEnd(c));
-    }
+    const changes=overlapPlan(moved);
+    if(!changes) return false;
+    for(const {clip,offset} of changes) clip.offset=offset;
     this.sort(); this.recomputeDuration();
+    return true;
   },
   /* 把 clip 移到指定 vtrack（並在新軌解算重疊）；不足則補足視訊軌（只增不減） */
   moveToTrack(c, v){
+    if(!Number.isFinite(v)) return false;
     v = Math.max(0, Math.round(v));
+    const changes=overlapPlan(c,v);
+    if(!changes) return false;
     c.vtrack = v;
+    for(const {clip,offset} of changes) clip.offset=offset;
     ensureVideoTrackCount(v + 1);
-    this.resolveOverlaps(c);
+    this.sort(); this.recomputeDuration();
+    return true;
   },
   /* 補足視訊軌數以涵蓋現有 clip 的最高軌（只增不減；空軌由使用者手動刪除，比照字幕軌） */
   compact(){ let m = 0; for(const c of State.clips) m = Math.max(m, vt(c) + 1); ensureVideoTrackCount(m); },

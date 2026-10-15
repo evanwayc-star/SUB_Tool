@@ -97,24 +97,24 @@ describe('常用樣式公開操作的 identity 保全', () => {
     expect(State.cues[0].style.fontSize).toBe(120);
   });
 
-  it('公開存為常用操作的尾端連字號名稱，重新載入仍保留原樣式', async () => {
+  it.each(['字幕-','Title-Blue'])('公開存為常用操作的連字號名稱 %s，重新載入仍保留原樣式', async name => {
     document.getElementById('tsPresetSave').click();
-    document.getElementById('__presetName').value = '字幕-';
+    document.getElementById('__presetName').value = name;
     document.getElementById('__presetGroup').value = '';
     clickModal('儲存');
     await Promise.resolve();
     await Promise.resolve();
     const saved = structuredClone(Styles.getPresets());
-    expect(saved.map(item => item.name)).toEqual(['字幕-']);
+    expect(saved.map(item => item.name)).toEqual([name]);
 
     vi.resetModules();
     const restarted = await import('../src/substyle.js');
     expect(await restarted.loadPresets()).toEqual(saved);
-    expect(restarted.getAllPresets().map(item => item.name)).toEqual(['預設', '字幕-']);
+    expect(restarted.getAllPresets().map(item => item.name)).toEqual(['預設', name]);
     expect(JSON.parse(localStorage.getItem('subtool.subPresets'))).toEqual(saved);
   });
 
-  it.each([false, true])('舊名称遷移撞現有 identity 時保留兩筆原資料（desktop=%s）', async desktop => {
+  it.each([false, true])('連字號 literal 名稱與分群 identity 均保留原資料（desktop=%s）', async desktop => {
     const original = [
       { name: 'A-同名', style: { fontSize: 40 } },
       { name: '同名', group: 'A', style: { fontSize: 120 } },
@@ -129,14 +129,20 @@ describe('常用樣式公開操作的 identity 保全', () => {
     vi.resetModules();
     const restarted = await import('../src/substyle.js');
     const loaded = await restarted.loadPresets();
-    expect(loaded).toEqual([
-      original[0], original[1], { name: '合法', group: '舊版', style: { fontSize: 70 } },
-    ]);
+    expect(loaded).toEqual(original);
     expect(new Set(loaded.map(restarted.presetIdentity)).size).toBe(loaded.length);
     expect(desktop ? persisted : JSON.parse(localStorage.getItem('subtool.subPresets'))).toEqual(loaded);
   });
+  it('公開管理員改名成中間連字號後，重新啟動仍有相同identity與樣式',async()=>{
+    Styles.savePresets([{name:'original',style:{fontSize:120,color:'#112233'}}]);StylePanelController.renderTrackStyle();
+    document.getElementById('tsPresetMgr').click();document.querySelector('[data-pre-ren="0"]').click();
+    document.getElementById('__presetNameRen').value='Title-Blue';clickModal('儲存');
+    const saved=structuredClone(Styles.getPresets()),identity=Styles.presetIdentity(saved[0]);
+    expect(saved[0].name).toBe('Title-Blue');vi.resetModules();const restarted=await import('../src/substyle.js');
+    expect(await restarted.loadPresets()).toEqual(saved);expect(restarted.presetIdentity(restarted.getPresets()[0])).toBe(identity);
+  });
 
-  it.each([false, true])('舊名称遷移拆出內建保留名時保留原條目（desktop=%s）', async desktop => {
+  it.each([false, true])('連字號名稱含內建保留名時仍保留原條目（desktop=%s）', async desktop => {
     const original = [
       { name: '影片-預設', style: { fontSize: 40 } },
       { name: '舊版-合法', style: { fontSize: 70 } },
@@ -150,8 +156,8 @@ describe('常用樣式公開操作的 identity 保全', () => {
     vi.resetModules();
     const restarted = await import('../src/substyle.js');
     const loaded = await restarted.loadPresets();
-    expect(loaded).toEqual([original[0], { name: '合法', group: '舊版', style: { fontSize: 70 } }]);
-    expect(restarted.getAllPresets().map(item => item.name)).toEqual(['預設', '影片-預設', '合法']);
+    expect(loaded).toEqual(original);
+    expect(restarted.getAllPresets().map(item => item.name)).toEqual(['預設', '影片-預設', '舊版-合法']);
     expect(desktop ? persisted : JSON.parse(localStorage.getItem('subtool.subPresets'))).toEqual(loaded);
   });
 

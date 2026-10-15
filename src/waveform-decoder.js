@@ -4,10 +4,29 @@ import { readFile } from './util.js';
 import { AudioEngine } from './audio-engine.js';
 import { AudioPipeline } from './audio-routing-engine.js';
 import { Media } from './media.js';
-import { $, video } from './dom.js';
+import { Seq } from './sequence.js';
+import { $ } from './dom.js';
 import { setStatus } from './ui.js';
 
 export const WAVE_DECODE_MAX = 5e8;    // 超過此大小不整檔解碼波形，改即時擷取
+
+function wavePcm(arrayBuffer){
+  const view=new DataView(arrayBuffer);
+  if(view.byteLength<44||view.getUint32(0,false)!==0x52494646||view.getUint32(8,false)!==0x57415645)return null;
+  let channels=0,sampleRate=0,data=null;
+  for(let offset=12;offset+8<=view.byteLength;){
+    const id=view.getUint32(offset,false),size=view.getUint32(offset+4,true),start=offset+8;
+    if(start+size>view.byteLength)return null;
+    if(id===0x666d7420){
+      if(size<16||view.getUint16(start,true)!==1||view.getUint16(start+14,true)!==16)return null;
+      channels=view.getUint16(start+2,true);sampleRate=view.getUint32(start+4,true);
+    }else if(id===0x64617461)data={start,size};
+    offset=start+size+(size%2);
+  }
+  if(!channels||!sampleRate||!data||data.start%2||data.size%(channels*2))return null;
+  const samples=new Int16Array(arrayBuffer,data.start,data.size/2);
+  return {samples,channels,sampleRate,length:samples.length/channels};
+}
 
 let vocalSourceModule=null;
 function loadVocalSourceModule(){
@@ -102,11 +121,17 @@ export const Wave = {
     for(const track of Media.tracks||[]){
       if((track.audioSourceId&&String(track.audioSourceId)===key)||
         (!key&&runtime&&(track.source||'')===runtime)){
+        const mix=state.mix.path;
+        const pcmStream=Array.isArray(mix?.sourceStreams)?mix.sourceStreams.indexOf(track.sourceStream):track.sourceStream;
+        // Processed playback files retain their full sample rate. An opaque
+        // PCM mix descriptor also owns the low-rate members used on reload.
+        const file=track._audioEffect&&Array.isArray(mix?.paths)?mix.paths[pcmStream]:track.file;
         channels.push({
           sourceStream:track.sourceStream,
           sourceChannel:track.sourceChannel,
           label:track.name,
-          file:track.file,
+          file,
+          pcmChannel:track._audioEffect?track.sourceChannel:null,
           peaks:track.peaks
         });
       }
@@ -141,11 +166,13 @@ export const Wave = {
         const old=state.channels.get(desc.key);
         const nextPath=raw.file||raw.path||old?.path||null;
         const nextPeaks=raw.peaks||null;
-        if(!old||nextPath!==old.path||(nextPeaks&&nextPeaks!==old.peaks)){
+        const pcmChannel=raw.pcmChannel??old?.pcmChannel??null;
+        if(!old||nextPath!==old.path||pcmChannel!==old.pcmChannel||(nextPeaks&&nextPeaks!==old.peaks)){
           state.channels.set(desc.key,{
             ...desc,
             label:raw.label||old?.label||`Ch ${desc.sourceChannel+1}`,
             path:nextPath,
+            pcmChannel,
             peaks:nextPeaks||(nextPath===old?.path?old?.peaks:null)||null,
             loading:null
           });
@@ -165,18 +192,19 @@ export const Wave = {
   },
   setSourceBuffer(source,ab,{channels}={}){
     if(!ab) return null;
+    const buffers=Array.isArray(ab)?ab:[ab];
+    if(!buffers.length) return null;
     const mixPeaks=this.calcPeaks(ab,-1);
     const supplied=Array.isArray(channels)?channels:null;
     const channelInfo=[];
-    for(let index=0;index<ab.numberOfChannels;index++){
-      const raw=supplied?.[index]||{};
-      const desc=this._channelDescriptor(raw,index);
-      channelInfo.push({
-        ...raw,
-        ...desc,
-        label:raw.label||`Ch ${desc.sourceChannel+1}`,
-        peaks:this.calcPeaks(ab,index)
-      });
+    for(let stream=0;stream<buffers.length;stream++){
+      const buffer=buffers[stream];
+      for(let channel=0;channel<buffer.numberOfChannels;channel++){
+        const raw=supplied?.[channelInfo.length]||{sourceStream:stream,sourceChannel:channel};
+        const desc=this._channelDescriptor(raw,channel);
+        channelInfo.push({...raw,...desc,label:raw.label||`Ch ${desc.sourceChannel+1}`,
+          peaks:this.calcPeaks(buffer,channel)});
+      }
     }
     this.setSourceMixPeaks(source,mixPeaks,{channels:channelInfo});
     return mixPeaks;
@@ -302,18 +330,25 @@ export const Wave = {
       (key==='mix'?state.mix===entry:state.channels.get(key)===entry);
     const promise=(async()=>{
       try{
+        if(Array.isArray(entry.path.paths)){
+          const peaks=await this._loadPcmMix(entry.path,owns);
+          if(!owns())return null;
+          entry.peaks=peaks;
+          emit('media:timeline');
+          return peaks;
+        }
         const url=await DESK.fileURL(entry.path);
         if(!owns()) return null;
         const response=await fetch(url);
         if(!owns()) return null;
         const buffer=await response.arrayBuffer();
         if(!owns()) return null;
-        let peaks=this.calcFromWav(buffer);
+        let peaks=this.calcFromWav(buffer,0,entry.pcmChannel);
         if(!peaks){
           const ctx=Media.ensureCtx();
           const ab=await ctx.decodeAudioData(buffer.slice(0));
           if(!owns()) return null;
-          peaks=this.calcPeaks(ab,-1);
+          peaks=this.calcPeaks(ab,entry.pcmChannel??-1);
         }
         if(!owns()) return null;
         entry.peaks=peaks;
@@ -542,23 +577,6 @@ export const Wave = {
     this.srcIdx=0;
     emit('media:srcSel');
   },
-  setFromBuffer(ab, sourceId = 'video') {
-    this.sources = this.sources.filter(s => s.sourceId !== sourceId);
-    const mixPeaks = this.compute(ab, -1);
-    const sourceChannels=[];
-    this.sources.push({ label: '主混音', path: null, peaks: mixPeaks, sourceId,kind:'mix',sourceKey:sourceId });
-    for(let i=0; i<ab.numberOfChannels; i++){
-      const chPeaks = this.compute(ab, i);
-      sourceChannels.push({sourceStream:0,sourceChannel:i,label:'音軌 '+(i+1),peaks:chPeaks});
-      this.sources.push({ label: '音軌 ' + (i+1), path: null, peaks: chPeaks, sourceId,
-        kind:'channel',sourceKey:sourceId,sourceStream:0,sourceChannel:i });
-    }
-    this.registerSourceWaveforms(sourceId,{mixPeaks,channels:sourceChannels});
-    this.live = false;
-    this.peaks = mixPeaks;
-    this.srcIdx = this.sources.findIndex(s => s.sourceId === sourceId);
-    emit('media:srcSel');
-  },
   async selectSource(idx){
     if(idx<0||idx>=this.sources.length) return;
     this.srcIdx=idx;
@@ -607,7 +625,7 @@ export const Wave = {
     Media.ensureCtx();
     const buf=await readFile(file);
     if(!sourceIsCurrent()) return false;
-    const ab=await AudioEngine.decodeAudioData(buf.slice(0));
+    const ab=await AudioEngine.decodeSourceAudioData(buf.slice(0),{file,owns:sourceIsCurrent});
     if(!sourceIsCurrent()) return false;
     // 波形使用完整來源時間；時間軸長度由 trim/offset 的 owner 決定。
     if(source&&typeof source==='object') Media.recomputeTimelineDuration?.();
@@ -620,20 +638,19 @@ export const Wave = {
   async fromVideoElement(){ /* fallback：無法解碼時略過 */ },
   live:false,
   initLive(){ // 為長片配置空波形，播放時逐桶填入
-    const len=Math.ceil(Math.max(State.duration,1)*this.resolution);
+    const primary=Seq.primary();
+    const len=Math.ceil(Math.max(primary?.dur||State.duration,1)*this.resolution);
     this.peaks=new Float32Array(len*2); this.live=true;
     this.clearSources();
     emit('media:timeline');
-    if(!Media.audioPanelNotice) $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
+    if(!Media.audioPanelState().notice&&!Media.audioPanelState().extraction) $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
   },
   captureLive(){ // 由 rafLoop 於播放時呼叫
     if(!this.live||!this.peaks)return;
-    // 序列：Wave.peaks 屬主媒體來源（來源時間索引）；非主媒體片段播放中或間隙時不得寫入（會污染波形）。
-    // 主媒體切割出的片段（audioSrc==='video'）寫入是正確的——同一來源、同一索引域。
-    if(Media.seqOn()){ const c=Media._activeClip(); if(Media._gap || !c || (c.audioSrc||(c.primary?'video':''))!=='video') return; }
-    const buf=AudioEngine.readTimeDomain(); if(!buf) return;
+    const t=Media.liveWaveSourceTime(); if(t==null) return;
+    const buf=AudioEngine.readTimeDomain({source:'video'}); if(!buf) return;
     let mn=0,mx=0; for(let i=0;i<buf.length;i++){const v=buf[i]; if(v<mn)mn=v; if(v>mx)mx=v;}
-    const t=video.currentTime||0; const b=Math.floor(t*this.resolution);
+    const b=Math.floor(t*this.resolution);
     const n=this.peaks.length/2;
     // 寫入目前時間附近的桶（analyser 視窗約涵蓋數桶）
     for(let k=b;k<=b+2 && k<n;k++){
@@ -641,28 +658,28 @@ export const Wave = {
       if(mx>this.peaks[k*2+1])this.peaks[k*2+1]=mx;
     }
   },
-  fromTracks(){
-    const b=Media.tracks.find(t=>t.kind==='buffer'); 
-    if(b){ Wave.setFromBuffer(b.buffer, 'video'); emit('media:timeline'); }
-  },
   /* 純計算版（不改 this.peaks）：影片序列的每段 clip 各自持有 peaks 時使用 */
   calcPeaks(ab, chIdx = -1){
+    // A decoded source may contain several streams. Use their original PCM,
+    // not the first Mono runtime track, and keep shorter streams silent at tail.
+    const buffers=Array.isArray(ab)?ab:[ab];
     const res=this.resolution;
-    const len=Math.ceil(ab.duration*res);
+    const duration=Math.max(0,...buffers.map(buffer=>buffer.duration));
+    const sampleRate=Math.max(1,...buffers.map(buffer=>buffer.sampleRate));
+    const len=Math.ceil(duration*res);
     const peaks=new Float32Array(len*2);
     const chData = [];
-    if (chIdx === -1) {
-      for(let c=0; c<ab.numberOfChannels; c++) chData.push(ab.getChannelData(c));
-    } else {
-      chData.push(ab.getChannelData(chIdx));
+    for(const buffer of buffers){
+      const channels=chIdx===-1?Array.from({length:buffer.numberOfChannels},(_,index)=>index):[chIdx];
+      for(const channel of channels)chData.push({data:buffer.getChannelData(channel),ratio:buffer.sampleRate/sampleRate});
     }
-    const spb=ab.sampleRate/res; // samples per bucket
+    const spb=sampleRate/res; // samples per bucket
     for(let i=0;i<len;i++){
-      const s0=Math.floor(i*spb), s1=Math.min(chData[0].length,Math.floor((i+1)*spb));
+      const s0=Math.floor(i*spb), s1=Math.min(Math.ceil(duration*sampleRate),Math.floor((i+1)*spb));
       let mn=0,mx=0;
       for(let j=s0;j<s1;j++){
         let v=0;
-        for(let c=0; c<chData.length; c++) v += chData[c][j];
+        for(const channel of chData) v += channel.data[channel.ratio===1?j:Math.floor(j*channel.ratio)]||0;
         if (chData.length > 1) v /= chData.length;
         if(v<mn)mn=v; if(v>mx)mx=v;
       }
@@ -681,22 +698,16 @@ export const Wave = {
     return pk;
   },
   /* 純計算版（不改 this.peaks） */
-  calcFromWav(arrayBuffer){
-    const view = new DataView(arrayBuffer);
-    if(view.byteLength < 44 || view.getUint32(0, false) !== 0x52494646) return null;
-    const numChannels = view.getUint16(22, true);
-    const sampleRate = view.getUint32(24, true);
-    let offset = 12;
-    while(offset < view.byteLength) {
-      const chunkId = view.getUint32(offset, false);
-      const chunkSize = view.getUint32(offset + 4, true);
-      if(chunkId === 0x64617461) { offset += 8; break; }
-      offset += 8 + chunkSize;
-    }
-    const samples = new Int16Array(arrayBuffer, offset, Math.floor((arrayBuffer.byteLength - offset)/2));
-    const numSamples = samples.length / numChannels;
+  calcFromWav(arrayBuffer,duration=0,channel=null){
+    const streams=(Array.isArray(arrayBuffer)?arrayBuffer:[arrayBuffer]).map(wavePcm);
+    if(!streams.length||streams.some(stream=>!stream))return null;
+    if(channel!=null&&(streams.length!==1||!Number.isInteger(channel)||channel<0||channel>=streams[0].channels))return null;
+    const sampleRate=Math.max(...streams.map(stream=>stream.sampleRate));
+    const numChannels=channel==null?streams.reduce((count,stream)=>count+stream.channels,0):1;
+    const sourceDuration=Math.max(Number(duration)||0,...streams.map(stream=>stream.length/stream.sampleRate));
+    const numSamples=Math.ceil(sourceDuration*sampleRate);
     const res = this.resolution;
-    const len = Math.ceil((numSamples / sampleRate) * res);
+    const len = Math.ceil(sourceDuration * res);
     const peaks = new Float32Array(len * 2);
     const spb = sampleRate / res;
     for(let i=0; i<len; i++){
@@ -705,7 +716,12 @@ export const Wave = {
       let mn = 0, mx = 0;
       for(let j=s0; j<s1; j++){
         let v = 0;
-        for(let c=0; c<numChannels; c++) v += samples[j * numChannels + c];
+        for(const stream of streams){
+          const frame=Math.floor(j*stream.sampleRate/sampleRate);
+          if(frame>=stream.length)continue;
+          if(channel!=null)v+=stream.samples[frame*stream.channels+channel];
+          else for(let c=0;c<stream.channels;c++)v+=stream.samples[frame*stream.channels+c];
+        }
         v = (v / numChannels) / 32768.0;
         if(v < mn) mn = v;
         if(v > mx) mx = v;
@@ -713,6 +729,27 @@ export const Wave = {
       peaks[i*2] = mn; peaks[i*2+1] = mx;
     }
     return peaks;
+  },
+  async preparePcmMix(paths,{duration=0,owns=()=>true}={}){
+    // A reload descriptor represents original PCM members, never already
+    // reduced extrema. Copy/freeze it so callers cannot change an active mix.
+    const path=Object.freeze({paths:Object.freeze([...paths]),duration:Math.max(0,Number(duration)||0)});
+    const peaks=await this._loadPcmMix(path,owns);
+    return owns()?{path,peaks}:null;
+  },
+  async _loadPcmMix(descriptor,owns){
+    const buffers=[];
+    for(const path of descriptor.paths){
+      if(!owns())return null;
+      const url=await DESK.fileURL(path);
+      if(!owns())return null;
+      const response=await fetch(url);
+      if(!owns())return null;
+      const buffer=await response.arrayBuffer();
+      if(!owns())return null;
+      buffers.push(buffer);
+    }
+    return this.calcFromWav(buffers,descriptor.duration);
   }
 };
 

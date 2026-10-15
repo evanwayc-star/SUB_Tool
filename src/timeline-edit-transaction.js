@@ -14,7 +14,7 @@
 import { State, deselect } from './state.js';
 import { emit } from './events.js';
 
-const ALLOWED_FIELDS = new Set(['visible', 'name', 'locked', 'height']);
+const ALLOWED_FIELDS = new Set(['visible', 'name', 'locked', 'height', 'volume']);
 const KIND_LABEL = { subtitle: '字幕軌', video: '視訊軌', audio: '音訊軌' };
 const ABSENT = Symbol('absent');
 
@@ -48,6 +48,10 @@ function trackAt(kind, index, id){
 }
 
 function normalizedValue(kind, index, field, value){
+  if (field === 'volume') {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? Math.min(4, Math.max(0, numeric)) : ABSENT;
+  }
   if (field === 'visible' || field === 'locked') return !!value;
   if (field === 'name') {
     const fallback = kind === 'video' ? `視訊軌 ${index + 1}` : (kind === 'audio' ? `音訊軌 ${index + 1}` : `軌道 ${index + 1}`);
@@ -96,6 +100,7 @@ function notify(kind, index, field, phase, selectionChanged = false){
 
 function beginTimelineTrackEdit({ kind, index, id, field, label = null, target: providedTarget = null, expectedTarget = null, onApply = null, beginPreview = null } = {}){
   if (!KIND_LABEL[kind] || !ALLOWED_FIELDS.has(field)) return null;
+  if (field === 'volume' && kind !== 'audio') return null;
   const target = providedTarget || trackAt(kind, index, id);
   if (!target || (expectedTarget && target!==expectedTarget)) return null;
   const before = readValue(target, field);

@@ -51,7 +51,15 @@ import {
 } from './transport-controller.js';
 
 const _keysPressed = new Set();
+function exportBracketChord(e) {
+  if (!['[',']'].includes(e.key) || !_keysPressed.has('[') || !_keysPressed.has(']')) return false;
+  const { ctrlKey, metaKey, shiftKey, altKey } = e;
+  const modifiers = { ctrlKey, metaKey, shiftKey, altKey };
+  return matchAction(State.keymap, { ...modifiers, key:'[', code:'BracketLeft' }) === 'exp_in'
+    && matchAction(State.keymap, { ...modifiers, key:']', code:'BracketRight' }) === 'exp_out';
+}
 if (typeof window !== 'undefined') {
+  window.addEventListener('blur', () => _keysPressed.clear());
   window.addEventListener('keyup', e => {
     _keysPressed.delete(e.key.toLowerCase());
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -248,18 +256,12 @@ if (typeof window !== 'undefined') {
     case 'toggle_overwrite': e.preventDefault(); emit('action', 'toggle-overwrite'); break;
     case 'toggle_overwrite_keep': e.preventDefault(); emit('action', 'toggle-ow-keep'); break;
     case 'exp_in': 
-      e.preventDefault(); 
-      if (_keysPressed.has('[')) {
-        if (_keysPressed.has(']')) emit('action', 'exp-clear');
-        else emit('action', 'exp-in');
-      }
+      e.preventDefault();
+      emit('action', exportBracketChord(e) ? 'exp-clear' : 'exp-in');
       break;
     case 'exp_out': 
-      e.preventDefault(); 
-      if (_keysPressed.has(']')) {
-        if (_keysPressed.has('[')) emit('action', 'exp-clear');
-        else emit('action', 'exp-out');
-      }
+      e.preventDefault();
+      emit('action', exportBracketChord(e) ? 'exp-clear' : 'exp-out');
       break;
     case 'exp_clear': e.preventDefault(); emit('action', 'exp-clear'); break;
     case 'copy_cues': e.preventDefault(); copyCues(); break;

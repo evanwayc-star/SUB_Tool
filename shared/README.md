@@ -24,6 +24,7 @@ import { imageBox } from '../shared/image-geometry.cjs';
 | `delivery-formats.cjs` | 九種交付選項、固定規格與音訊編組限制 |
 | `delivery-resolution.cjs` | 交付解析度、碼率與 TC 浮水印的共用規格派生 |
 | `image-geometry.cjs` | 圖片／片段疊層幾何 |
+| `media-source-clock.cjs` | 容器／播放器秒數與影片來源第零秒之間的原點映射 |
 
 ## 加入條件
 

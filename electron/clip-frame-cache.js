@@ -4,8 +4,9 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { createHash, randomUUID } = require('crypto');
+const { motherSourceFingerprint } = require('./mother-source-evidence');
 const { exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
-const { lastSourceFrameIndex } = require('../shared/clip-visual.cjs');
+const { sourceVideoClockSeek, sourceFrameSelectionFilter } = require('./media-source-clock');
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
@@ -20,13 +21,14 @@ function validateClipFrameRequest(request) {
   return { path: source, time, fps: exactDeliveryFrameRate(fps) };
 }
 
-function buildClipFrameArgs(request, output) {
+function buildClipFrameArgs(request, output, clock = null) {
   const frame = validateClipFrameRequest(request);
-  // FFmpeg 的 -ss 只保留微秒；從本格前四分之一格定位，避免有理數 PTS
-  // 被時間字串的捨入推到下一格。accurate seek 仍會丟掉前一格。
-  const seek = Math.max(0, frame.time - 0.25 / frame.fps);
+  // 在目標附近 seek，但保留所需 GOP 的原 PTS。accurate seek 會丟掉
+  // PTS 早於 seek、卻仍覆蓋目標的長 VFR 格，不能用平均 FPS 補猜。
+  const { inputArgs, sourceStart } = sourceVideoClockSeek(Math.max(0, frame.time - 0.5), clock);
   return ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-    '-ss', seek.toFixed(9), '-i', frame.path, '-map', '0:v:0',
+    ...inputArgs, '-i', frame.path, '-map', '0:v:0',
+    '-vf', sourceFrameSelectionFilter(frame.time, sourceStart),
     '-frames:v', '1', '-an', '-sn', '-dn', '-c:v', 'png', '-f', 'image2', '-update', '1', output];
 }
 
@@ -52,6 +54,7 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
   if (!cacheRoot || !fileAuthority?.canRead || !fileAuthority?.grantTrustedFile
     || typeof probe !== 'function' || typeof execute !== 'function') throw new TypeError('固定畫面快取缺少必要 adapter');
   const inFlight = new Map();
+  const activeRequests = new Set();
   const root = () => path.resolve(typeof cacheRoot === 'function' ? cacheRoot() : cacheRoot);
   function isDerived(source) {
     const relative = path.relative(root(), path.resolve(source));
@@ -67,13 +70,20 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
     if (isClosing()) { const error = new Error('固定畫面工作已取消'); error.name = 'AbortError'; throw error; }
   }
   async function fingerprint(source) {
-    const [resolved, stat] = await Promise.all([fs.realpath(source), fs.stat(source)]);
-    if (!stat.isFile()) throw new TypeError('固定畫面來源必須是檔案');
-    return { resolved, size: stat.size, mtimeMs: stat.mtimeMs };
+    const resolved = await fs.realpath(source);
+    if (isDerived(resolved)) throw new Error('固定畫面必須讀取母素材，不能使用預覽快取');
+    return { resolved, fingerprint: await motherSourceFingerprint(source, { namespace: 'clip-frame-source-v1' }) };
   }
-  const sameSource = (left, right) => left.resolved === right.resolved && left.size === right.size && left.mtimeMs === right.mtimeMs;
+  const sameSource = (left, right) => left.resolved === right.resolved && left.fingerprint === right.fingerprint;
 
-  async function frame(request) {
+  function frame(request) {
+    const pending = frameRequest(request);
+    activeRequests.add(pending);
+    void pending.finally(() => activeRequests.delete(pending)).catch(() => {});
+    return pending;
+  }
+
+  async function frameRequest(request) {
     const input = validateClipFrameRequest(request);
     assertSource(input.path);
     const identity = await fingerprint(input.path);
@@ -84,13 +94,14 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
     const duration = Number(media?.duration);
     if (!media?.video || !Number.isFinite(duration) || duration <= 0) throw new Error('來源沒有可擷取的影片畫面或有效時長');
     if (input.time > duration + 1e-6) throw new RangeError('固定畫面來源時間超過素材結尾');
-    const lastFrame = lastSourceFrameIndex(duration, input.fps);
-    const frameIndex = Math.min(lastFrame, Math.max(0, Math.round(input.time * input.fps)));
-    const normalized = { ...input, time: frameIndex / input.fps };
-    const key = createHash('sha256').update(JSON.stringify({ version: 1, ...identity, fps: input.fps, frameIndex })).digest('hex');
+    // 來源秒數保留原精度。EOF 是半開邊界，只往內一微秒，不能依平均
+    // FPS 推算末格：VFR 的最後一格與 nominal 格網可能完全不同。
+    const normalized = { ...input, time: Math.min(input.time, Math.max(0, duration - 1e-6)) };
+    // v5 隔離舊 seek 重基準的 timebase 捨入；同一目標仍共享完整 PNG。
+    const key = createHash('sha256').update(JSON.stringify({ version: 5, ...identity, time: normalized.time })).digest('hex');
     let pending = inFlight.get(key);
     if (!pending) {
-      pending = generate(normalized, identity, key);
+      pending = generate(normalized, identity, key, media.video);
       inFlight.set(key, pending);
       void pending.finally(() => { if (inFlight.get(key) === pending) inFlight.delete(key); }).catch(() => {});
     }
@@ -99,7 +110,7 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
     return result;
   }
 
-  async function generate(request, identity, key) {
+  async function generate(request, identity, key, clock) {
     const directory = root(), output = path.join(directory, `${key}.png`);
     await fs.mkdir(directory, { recursive: true });
     assertSource(request.path);
@@ -113,7 +124,7 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
     let child = null, timer = null, killTimer = null, timedOut = false;
     try {
       assertSource(request.path);
-      await execute(buildClipFrameArgs(request, staging), {
+      await execute(buildClipFrameArgs(request, staging, clock), {
         executionKind: 'direct', deferTerminal: true,
         jobId: `clip-frame-${key.slice(0, 12)}`, label: '擷取固定畫面',
         onProcess: process => {
@@ -146,7 +157,13 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
       await fs.unlink(staging).catch(() => {});
     }
   }
-  return Object.freeze({ frame, activeCount: () => inFlight.size });
+  async function waitForIdle() {
+    // execution 先確認 native writer close，再等來源 fingerprint、驗證與私有 staging 清理。
+    while (activeRequests.size || inFlight.size) {
+      await Promise.allSettled([...activeRequests, ...inFlight.values()]);
+    }
+  }
+  return Object.freeze({ frame, waitForIdle, activeCount: () => inFlight.size });
 }
 
 module.exports = { createClipFrameCache, validateClipFrameRequest, buildClipFrameArgs };

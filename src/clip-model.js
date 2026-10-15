@@ -11,7 +11,7 @@ import { refreshTrackGutterActive } from './timeline-renderer.js';
 import { secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { escapeHTML } from './util.js';
-import { recordHistory } from './history.js';
+import { History, recordHistory } from './history.js';
 import { fitScale } from './image-compositor-engine.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { Project } from './project.js';
@@ -62,37 +62,125 @@ export function setClipDuration(c,seconds){
   return end-c.offset;
 }
 
-export function setClipSpeed(c,speed,reverse=false){
+const clipSpeedEdits=new WeakMap();
+
+function clipSpeedPlan(c,rate){
+  const oldEnd=Seq.clipEnd(c),nextEnd=c.offset+(c.out-c.in)/rate;
+  const shift=nextEnd-oldEnd;
+  const later=Seq.trackClips(c.vtrack||0).filter(other=>other!==c&&other.offset>=oldEnd-1e-6);
+  const ripple=shift>1e-9&&later.length>0&&nextEnd>later[0].offset+1e-9;
+  if(ripple&&later.some(other=>other.locked)){
+    showToast('後續片段已鎖定，無法自動往右推'); return null;
+  }
+  return {later:ripple?later:[],shift};
+}
+
+/* 一次套用擁有資格、未提交預覽、播放器完成與 History；UI 只提供草稿和取消訊號。
+   同片段的新套用先等待舊套用清理，不能讓舊 rollback 蓋掉新草稿。 */
+export function setClipSpeed(c,speed,reverse=false,{isCurrent=()=>true,signal}={}){
+  if(!c) return Promise.resolve(false);
+  const previous=clipSpeedEdits.get(c);
+  previous?.controller.abort();
+  const controller=new AbortController();
+  const cancel=()=>controller.abort();
+  signal?.addEventListener('abort',cancel,{once:true});
+  if(signal?.aborted) controller.abort();
+  const entry={controller,pending:null};
+  clipSpeedEdits.set(c,entry);
+  const apply=()=>applyClipSpeed(c,speed,reverse,{
+    isCurrent:()=>clipSpeedEdits.get(c)===entry&&isCurrent(),signal:controller.signal,cancel:()=>controller.abort(),
+  });
+  entry.pending=(previous?previous.pending.then(apply,apply):apply()).finally(()=>{
+    signal?.removeEventListener('abort',cancel);
+    if(clipSpeedEdits.get(c)===entry) clipSpeedEdits.delete(c);
+  });
+  return entry.pending;
+}
+
+async function applyClipSpeed(c,speed,reverse,{isCurrent,signal,cancel}){
+  if(signal.aborted||!isCurrent()) return false;
   if(!clipEditable(c) || c.type==='image') return false;
   if(reverse&&!IS_DESKTOP){ showToast('反轉影片預覽目前需要桌面版'); return false; }
   if(reverse&&!Media.supportsClipReverse()){ showToast('此素材目前未使用支援反向播放的 mpv 預覽'); return false; }
   const rate=Number(speed);
   if(!Number.isFinite(rate)||rate<0.25||rate>4) return false;
+  const plan=clipSpeedPlan(c,rate);
+  if(!plan) return false;
+  const canEdit=captureClipEdit(c),ownsWorkspace=Project.captureWorkspaceOwnership();
+  const track=State.videoTracks[c.vtrack||0];
+  const fps=State.fps,dropFrame=State.dropFrame;
+  const playbackOwner={};
+  const position=Media.displayTime(),ownsTarget=Media.capturePlaybackTargetOwnership(playbackOwner);
+  if(Media.playing) Media.pause({seekOnPause:false});
+  const fields=['speed','reverse','fadeSourceOffset','fadeSourceLength'];
+  const targets=[{target:c,fields},...plan.later.map(target=>({target,fields:['offset']}))];
+  const saved=targets.map(({target,fields:keys})=>({target,values:keys.map(field=>({
+    field,present:Object.hasOwn(target,field),value:target[field],draft:undefined,draftPresent:false,
+  }))}));
+  const members=Seq.trackClips(c.vtrack||0);
+  const guardKeys=['in','out','offset','dur','vtrack','speed','reverse','path','web','freezeTime','locked','audioDetached'];
+  let expected;
+  let rolledBack=false;
+  const stillHere=()=>ownsWorkspace()&&Seq.byId(c.id)===c&&State.videoTracks[c.vtrack||0]===track;
+  const owns=()=>!signal.aborted&&isCurrent()&&canEdit.isCurrent()&&!c.locked&&!track?.locked
+    &&State.fps===fps&&State.dropFrame===dropFrame
+    &&release.isCurrent()&&members.length===Seq.trackClips(c.vtrack||0).length
+    &&expected.every(({target,values})=>Seq.byId(target.id)===target
+      &&values.every(([key,value])=>target[key]===value));
+  // 背景紀錄與存檔只投影本次持有的欄位，不排除後來的字幕、音訊或其他片段編輯。
+  for(let index=0;index<targets.length;index++) targets[index].ownsField=field=>{
+    const value=saved[index].values.find(item=>item.field===field);
+    return saved[index].target[field]===value.draft&&Object.hasOwn(saved[index].target,field)===value.draftPresent;
+  };
+  const release=History.beginPreview(targets,stillHere,cancel);
   const oldRate=Number(c.speed)>0?Number(c.speed):1;
-  const oldEnd=Seq.clipEnd(c);
-  const nextEnd=c.offset+(c.out-c.in)/rate;
-  const shift=nextEnd-oldEnd;
-  const later=Seq.trackClips(c.vtrack||0).filter(other=>other!==c&&other.offset>=oldEnd-1e-6);
-  const ripple=shift>1e-9&&later.length>0&&nextEnd>later[0].offset+1e-9;
-  if(ripple&&later.some(other=>other.locked)){
-    showToast('後續片段已鎖定，無法自動往右推'); return false;
-  }
-  // 變長且碰到下一段時，才將同軌後段整組平移，保留原本間距。
   c.speed=rate;
   c.reverse=!!reverse;
   if(Math.abs(rate-oldRate)>1e-9){
     delete c.fadeSourceOffset; delete c.fadeSourceLength;
   }
-  if(ripple) for(const other of later) other.offset+=shift;
+  for(const other of plan.later) other.offset+=plan.shift;
+  for(const entry of saved) for(const value of entry.values){
+    value.draft=entry.target[value.field];value.draftPresent=Object.hasOwn(entry.target,value.field);
+  }
+  expected=members.map(target=>({target,values:guardKeys.map(key=>[key,target[key]])}));
   Seq.sort(); Seq.recomputeDuration();
-  recordHistory('修改片段速度／反轉：'+(c.name||''));
-  const position=Math.min(Media.displayTime(),State.duration||0);
-  Promise.resolve(Media.refreshClipPlayback(c)).then(ok=>{
-    if(ok===false){ showToast('影片播放方向切換失敗，請重新定位播放點'); return; }
-    if(Seq.byId(c.id)===c) Media.seek(position);
-  }).catch(error=>showToast('影片播放方向切換失敗：'+(error?.message||error)));
   refreshClipEdit();
-  return true;
+  const rollback=()=>{
+    if(rolledBack) return;
+    rolledBack=true;
+    if(stillHere()) for(const entry of saved){
+      if(Seq.byId(entry.target.id)!==entry.target) continue;
+      for(const {field,present,value,draft,draftPresent} of entry.values){
+        if(entry.target[field]!==draft||Object.hasOwn(entry.target,field)!==draftPresent) continue;
+        if(present) entry.target[field]=value; else delete entry.target[field];
+      }
+    }
+    release();
+    if(stillHere()){Seq.sort();Seq.recomputeDuration();refreshClipEdit();}
+  };
+  // 取消立即撤回資料預覽；已送出的原生 load 仍由 Media 等待後還原實際來源。
+  signal.addEventListener('abort',rollback,{once:true});
+  let committed=false;
+  try{
+    const ready=await Media.refreshClipPlayback(c,{owns,signal,playbackOwner,position:Math.min(position,State.duration||0)});
+    if(!ready||!owns()) return false;
+    release();
+    recordHistory('修改片段速度／反轉：'+(c.name||''));
+    committed=true;
+    return true;
+  }catch(error){
+    if(owns()) showToast('影片播放方向切換失敗：'+(error?.message||error));
+    return false;
+  }finally{
+    signal.removeEventListener('abort',rollback);
+    if(!committed){
+      rollback();
+      if(stillHere()) await Media.refreshClipPlayback(c,{
+        owns:stillHere,playbackOwner,position:ownsTarget()?position:null,
+      }).catch(()=>false);
+    }
+  }
 }
 
 export function clipFreezeTarget(c,timelineTime){
@@ -130,6 +218,7 @@ export function setClipFade(c,fadeIn,fadeOut){
   if(!clipEditable(c)) return false;
   writeNewClipFade(c,fadeIn,fadeOut);
   recordHistory('轉場：'+(c.name||'')); refreshClipEdit();
+  void Media.restoreSequenceEditState(Math.min(Media.displayTime(),State.duration||0));
   return true;
 }
 
@@ -147,7 +236,7 @@ export function resetClipTrim(c){
 
 
 
-/* 「符合視窗」：幾何計算在 image-geometry.js fitScale()（三路共用的唯一公式所在），
+/* 「符合視窗」：縮放倍率由 image-compositor-engine.js 的 fitScale() 計算，
    這裡只負責套用結果與回報。 */
 function fitClipToStage(c){
   if(!clipEditable(c)) return null;
@@ -201,7 +290,7 @@ function crossfadeWithPrev(c, T, expectedPrevious=null){
 /* ===== 影片段選取（點選高亮、上下鍵切換、Del 刪除；行為比照字幕列） ===== */
 function selectClip(id, opts={}){
   const c=Seq.byId(id); if(!c) return;
-  if(!opts.force && State.videoTracks[c.vtrack||0]?.locked) return; // 鎖定軌：不可選取中間的影像片段
+  if(!opts.force && (c.locked || State.videoTracks[c.vtrack||0]?.locked)) return; // 素材與軌道鎖定都保護選取。
   setSelection({ kind:'video', ids:id }); // 互斥（避免 Del/上下鍵語意衝突）由 setSelection 保證
   focusTrackKind('video', c.vtrack || 0);  // 焦點類別＋哪一軌是同一條不變量
   refreshSelectionUI(); // 清除字幕列高亮
@@ -233,7 +322,7 @@ function closeClipGapLeft(){
   Media.seek(Math.min(Media.displayTime(), State.duration||0)); // 幾何變了→重新解析映射
   emit('media:timeline'); emit('render:videoSub'); emit('mpv:refreshSubs');
 }
-/* 刪除選取的影片段（至少保留一段），並選取相鄰段方便連續刪除 */
+/* 刪除選取的影片段，並選取可編輯的相鄰段方便連續刪除。 */
 function deleteSelectedClip(){
   const id=State.selectedClipId; if(id==null) return;
   const sorted=[...State.clips].sort((a,b)=>a.offset-b.offset);
@@ -243,9 +332,10 @@ function deleteSelectedClip(){
   if(Media.removeClip(id)){
     recordHistory('刪除影片段：'+(c?c.name:''));
     const rest=[...State.clips].sort((a,b)=>a.offset-b.offset);
-    const next=rest[Math.min(idx, rest.length-1)];
-    if(next){ setSelection({ kind:'video', ids:next.id }); $('stSel').textContent='已選影片段：'+next.name; }
-    else deselect('video');
+    const next=[...rest.slice(idx),...rest.slice(0,idx).reverse()]
+      .find(clip=>!clip.locked && !State.videoTracks[clip.vtrack||0]?.locked);
+    if(next) selectClip(next.id);
+    else clearClipSelection();
     emit('media:timeline');
   }
 }

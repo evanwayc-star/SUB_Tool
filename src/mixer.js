@@ -12,7 +12,10 @@ import { escapeHTML } from './util.js';
 import { State, ensureAudioBusCount } from './state.js';
 import { Media } from './media.js';
 import { emit } from './events.js';
-import { showToast } from './ui.js';
+import { showToast, promptModal } from './ui.js';
+import { History } from './history.js';
+import { Project } from './project.js';
+import { beginTimelineTrackEdit } from './timeline-edit-transaction.js';
 
 function projectBuses(){
   let buses = Array.isArray(State.audioProject?.buses) ? State.audioProject.buses : [];
@@ -48,10 +51,9 @@ function levelToDbText(level) {
   return db.toFixed(1);
 }
 
-/* bus 的 M／S／音量變動後通知下游。live=true（拖曳推桿中）只套增益、不發事件——
-   每次 input 都重畫整條時間軸太貴。事件的訂閱端與來由見 docs/開發與驗證.md 的事件表。 */
-function notifyBusChange(bus,field,value,{live=false}={}){
-  if(live){ Media.applyGains(); return; }
+/* bus 提交後通知下游；音量預覽由 track edit 的 onApply 只套增益。
+   事件的訂閱端與來由見 docs/技術架構說明.md §5 的事件表。 */
+function notifyBusChange(bus,field,value){
   emit('audio:busChanged',{busId:bus?.id,bus,field,value});
 }
 function recordBusHistory(action,bus,index){ emit('history:record',`${action}：${busLabel(bus,index)}`); }
@@ -60,67 +62,124 @@ function refreshBusViews(){
   if($('mixerPanel')?.classList.contains('show')) renderMixer();
 }
 
+const volumeEdits = new Map();
+function captureBusOwnership(bus, element=null){
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  return ()=>ownsWorkspace() && State.audioProject?.buses?.includes(bus) && (!element || element.isConnected);
+}
+function beginBusVolumeEdit(bus,index,element=null,label='調整音訊軌音量'){
+  const owns=captureBusOwnership(bus,element);
+  if(!owns()) return null;
+  volumeEdits.get(bus)?.cancel();
+  const edit=beginTimelineTrackEdit({kind:'audio',index,target:bus,field:'volume',
+    label:`${label}：${busLabel(bus,index)}`,onApply:()=>Media.applyGains(),
+    beginPreview:targets=>History.beginPreview(targets,owns,()=>{session.cancel();refreshBusViews();})});
+  let active=true;
+  const finish=()=>{active=false;if(volumeEdits.get(bus)===session) volumeEdits.delete(bus);};
+  const session={element,
+    preview:value=>active && edit.preview(value),
+    commit(value){
+      if(!active) return false;
+      const changed=edit.commit(value);finish();
+      if(changed) notifyBusChange(bus,'volume',bus.volume);
+      return changed;
+    },
+    cancel(){if(!active) return;edit.cancel();finish();},
+  };
+  volumeEdits.set(bus,session);
+  return session;
+}
+function cancelVolumeEdits(container=null){
+  for(const edit of [...volumeEdits.values()]) if(!container || container.contains(edit.element)) edit.cancel();
+}
+if(typeof window!=='undefined') window.addEventListener('blur',()=>{
+  if(!volumeEdits.size) return;
+  const visible=[...volumeEdits.values()].some(edit=>edit.element?.isConnected);
+  cancelVolumeEdits();if(visible) refreshBusViews();
+});
+function bindVolumeRange(input,bus,index,display){
+  const owns=captureBusOwnership(bus,input);
+  let edit=null;
+  const begin=()=>{if(!edit && owns()) edit=beginBusVolumeEdit(bus,index,input);return edit;};
+  input.addEventListener('mousedown',event=>{event.stopPropagation();begin();});
+  input.addEventListener('focus',begin);
+  input.oninput=()=>{if(begin()?.preview(+input.value/100)) display();};
+  input.addEventListener('change',()=>{
+    const changed=begin()?.commit(+input.value/100);edit=null;
+    if(changed) refreshBusViews();
+  });
+  input.addEventListener('blur',()=>{if(edit){edit.cancel();edit=null;display();}});
+  input.addEventListener('keydown',event=>{
+    if(event.key!=='Escape') return;
+    event.preventDefault();edit?.cancel();edit=null;display();
+  });
+}
+
 function bindBusRow(row,bus,index){
+  const owns=captureBusOwnership(bus,row);
   const mute=row.querySelector('.mute');
   const solo=row.querySelector('.solo');
   const volume=row.querySelector('input[type=range]');
   mute.onclick=()=>{
+    if(!owns()) return;
     bus.muted=!bus.muted;
     notifyBusChange(bus,'muted',bus.muted);
     recordBusHistory(bus.muted?'靜音音訊軌':'取消靜音音訊軌',bus,index);
     refreshBusViews();
   };
   solo.onclick=()=>{
+    if(!owns()) return;
     bus.solo=!bus.solo;
     notifyBusChange(bus,'solo',bus.solo);
     recordBusHistory(bus.solo?'獨奏音訊軌':'取消獨奏音訊軌',bus,index);
     refreshBusViews();
   };
-  let committed=busVolume(bus);
-  volume.addEventListener('mousedown',event=>event.stopPropagation());
-  volume.oninput=()=>{
-    bus.volume=(+volume.value)/100;
+  bindVolumeRange(volume,bus,index,()=>{
+    volume.value=String(Math.round(busVolume(bus)*100));
     volume.title='音量 '+volume.value+'% ('+volumeToDbText(bus.volume)+')';
-    notifyBusChange(bus,'volume',bus.volume,{live:true});
-  };
-  volume.addEventListener('dblclick', () => {
-    const input = prompt(`請輸入 ${busLabel(bus,index)} 的音量 dB（例：-6、0、+2；或 +=1.5、-=2）：`, volumeToDbText(busVolume(bus)));
-    if (input !== null) {
-      applyDbStringToBus(bus, input, index);
-    }
   });
-  volume.addEventListener('change',()=>{
-    const next=busVolume(bus);
-    if(Math.abs(next-committed)<=0.00001) return;
-    notifyBusChange(bus,'volume',next);
-    recordBusHistory('調整音訊軌音量',bus,index);
-    committed=next;
-    refreshBusViews();
+  volume.addEventListener('dblclick', async () => {
+    if(!owns()) return;
+    const edit=beginBusVolumeEdit(bus,index,volume,'設定音訊軌音量');
+    const initial=volumeToDbText(busVolume(bus));
+    const input = await promptModal(`${busLabel(bus,index)} 音量`, '請輸入音量 dB（例：-6、0、+2；或 +=1.5、-=2）',initial);
+    if (input !== null && input!==initial) {
+      applyDbStringToBus(bus, input, index,edit);
+    }else edit?.cancel();
   });
 }
 
 function renderAudioTracks(){
   const list=$('atList'); if(!list)return;
+  cancelVolumeEdits(list);
   list.innerHTML='';
   const buses=projectBuses();
   const hint=$('atHint');
   const countInput=$('projectAudioTracksCount');
   if(countInput && document.activeElement !== countInput) countInput.value = buses.length;
-  if(hint && Media.audioPanelNotice){
-    hint.textContent=Media.audioPanelNotice;
-    hint.classList.add('audio-capability-notice');
-    hint.hidden=false;
-  }else if(hint){
-    hint.classList.remove('audio-capability-notice');
-    hint.hidden=true;
+  const panel=Media.audioPanelState?.() || {};
+  const panelVisible=!!(panel.notice || panel.extraction);
+  if(hint){
+    hint.replaceChildren();
+    hint.classList.toggle('audio-capability-notice',panelVisible);
+    hint.hidden=!panelVisible;
+    if(panel.notice) hint.append(document.createTextNode(panel.notice));
+    if(panel.extraction){
+      if(panel.notice) hint.append(document.createElement('br'));
+      hint.append(document.createTextNode(`含 ${panel.extraction.count} 條音軌 — `));
+      const link=document.createElement('a');link.id='extractLink';link.href='#';
+      link.textContent='抽取多軌混音';
+      link.onclick=event=>{event.preventDefault();if(link.isConnected) panel.extraction.run();};
+      hint.append(link);
+    }
   }
   if(!buses.length){
-    if(hint && !Media.audioPanelNotice) hint.textContent='尚未建立專案音訊軌';
+    if(hint && !panelVisible) hint.textContent='尚未建立專案音訊軌';
     renderAudioSources();
     if($('mixerPanel')?.classList.contains('show')) renderMixer();
     return;
   }
-  if(hint && !Media.audioPanelNotice) hint.textContent=`${buses.length} 條專案音訊軌`;
+  if(hint && !panelVisible) hint.textContent=`${buses.length} 條專案音訊軌`;
   buses.forEach((bus,index)=>{
     const label=busLabel(bus,index), name=busName(bus,index), volume=Math.round(busVolume(bus)*100);
     const row=document.createElement('div'); row.className='atrack project-bus';
@@ -164,6 +223,7 @@ function renderAudioSources(){
 let _meterStrips=[];
 function renderMixer(){
   const wrap=$('mixerStrips'); if(!wrap)return;
+  cancelVolumeEdits(wrap);
   _meterStrips=[];
   const buses=projectBuses();
   if(!buses.length){ wrap.innerHTML='<div class="empty" style="padding:18px 24px;text-align:center;color:#71717a;white-space:nowrap">尚未建立專案音訊軌</div>'; return; }
@@ -231,56 +291,39 @@ function renderMixer(){
     // 1. 綁定推子
     const fader=strip.querySelector('.mx-fader');
     const faderValEl=strip.querySelector('.mx-fader-val');
-    let committed=busVolume(bus);
-
-    fader.oninput=()=>{
-      const v = (+fader.value) / 100;
-      bus.volume = v;
+    const owns=captureBusOwnership(bus,strip);
+    bindVolumeRange(fader,bus,index,()=>{
+      const v = busVolume(bus);
+      fader.value=String(Math.round(v*100));
       const dbText = volumeToDbText(v);
       fader.title = `音量 ${fader.value}% (${dbText}，雙擊設為 0 dB)`;
       if (faderValEl) faderValEl.textContent = dbText;
-      notifyBusChange(bus,'volume',bus.volume,{live:true});
-    };
-    fader.addEventListener('mousedown',event=>event.stopPropagation());
-    fader.addEventListener('dblclick',()=>{
-      // 雙擊推子回歸 0.0 dB (100%)
-      fader.value = '100';
-      bus.volume = 1.0;
-      const dbText = '0.0 dB';
-      fader.title = `音量 100% (${dbText}，雙擊設為 0 dB)`;
-      if (faderValEl) faderValEl.textContent = dbText;
-      notifyBusChange(bus,'volume',1.0);
-      recordBusHistory('重設音訊軌音量為 0 dB',bus,index);
-      showToast(`${label} 音量已歸零 (0.0 dB)`);
-      committed = 1.0;
-      refreshBusViews();
     });
-    fader.addEventListener('change',()=>{
-      const next=busVolume(bus);
-      if(Math.abs(next-committed)<=0.00001) return;
-      notifyBusChange(bus,'volume',next);
-      recordBusHistory('調整音訊軌音量',bus,index);
-      committed=next;
-      refreshBusViews();
+    fader.addEventListener('dblclick',()=>{
+      if(!owns()) return;
+      // 雙擊推子回歸 0.0 dB (100%)
+      const edit=beginBusVolumeEdit(bus,index,fader,'重設音訊軌音量為 0 dB');
+      if(edit?.commit(1)){showToast(`${label} 音量已歸零 (0.0 dB)`);refreshBusViews();}
     });
 
     // 綁定推子讀數點擊輸入 dB、滾輪微調與雙擊回 0 dB
     if (faderValEl) {
       faderValEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (faderValEl.querySelector('input')) return;
+        if (!owns() || faderValEl.querySelector('input')) return;
         const curVol = busVolume(bus);
         const curDb = curVol <= 0.001 ? -60 : +(20 * Math.log10(curVol)).toFixed(1);
 
-        const origText = faderValEl.textContent;
         const inlineInput = document.createElement('input');
         inlineInput.type = 'text';
         inlineInput.className = 'mx-fader-inline-input';
         inlineInput.value = curDb > -59.9 ? (curDb > 0 ? `+${curDb}` : `${curDb}`) : '-inf';
+        const initialValue=inlineInput.value;
         inlineInput.title = '輸入目標 dB（例：-6、0、+2）或相對增減（例：+=1.5、-=2）';
 
         faderValEl.textContent = '';
         faderValEl.appendChild(inlineInput);
+        const edit=beginBusVolumeEdit(bus,index,inlineInput,'設定音訊軌音量');
         inlineInput.focus();
         inlineInput.select();
 
@@ -289,7 +332,8 @@ function renderMixer(){
           if (finished) return;
           finished = true;
           const val = inlineInput.value;
-          applyDbStringToBus(bus, val, index);
+          if(val===initialValue){edit?.cancel();faderValEl.textContent=volumeToDbText(busVolume(bus));return;}
+          applyDbStringToBus(bus, val, index,edit);
         };
 
         inlineInput.addEventListener('keydown', (ke) => {
@@ -299,7 +343,8 @@ function renderMixer(){
           } else if (ke.key === 'Escape') {
             ke.preventDefault();
             finished = true;
-            faderValEl.textContent = origText;
+            edit?.cancel();
+            faderValEl.textContent = volumeToDbText(busVolume(bus));
           }
         });
 
@@ -312,6 +357,7 @@ function renderMixer(){
       faderValEl.addEventListener('wheel', (we) => {
         we.preventDefault();
         we.stopPropagation();
+        if(!owns() || faderValEl.querySelector('input')) return;
         const step = we.deltaY < 0 ? 0.5 : -0.5;
         const curVol = busVolume(bus);
         const curDb = curVol <= 0.001 ? -60 : 20 * Math.log10(curVol);
@@ -319,20 +365,16 @@ function renderMixer(){
         const newVol = nextDb <= -59.5 ? 0 : Math.pow(10, nextDb / 20);
         const next = Number(newVol.toFixed(4));
         if (Math.abs(next - curVol) <= 0.00001) return;
-        bus.volume = next;
-        notifyBusChange(bus, 'volume', bus.volume);
-        recordBusHistory('調整音訊軌音量', bus, index);
-        refreshBusViews();
+        const edit=beginBusVolumeEdit(bus,index,faderValEl);
+        if(edit?.commit(next)) refreshBusViews();
       }, { passive: false });
 
       // 雙擊讀數快速回歸 0.0 dB
       faderValEl.addEventListener('dblclick', (de) => {
         de.stopPropagation();
-        bus.volume = 1.0;
-        notifyBusChange(bus, 'volume', 1.0);
-        recordBusHistory('重設音訊軌音量為 0 dB', bus, index);
-        showToast(`${label} 音量已歸零 (0.0 dB)`);
-        refreshBusViews();
+        if(!owns()) return;
+        const edit=beginBusVolumeEdit(bus,index,faderValEl,'重設音訊軌音量為 0 dB');
+        if(edit?.commit(1)){showToast(`${label} 音量已歸零 (0.0 dB)`);refreshBusViews();}
       });
     }
 
@@ -340,6 +382,7 @@ function renderMixer(){
     const muteBtn = strip.querySelector('.mx-mute');
     if (muteBtn) {
       muteBtn.onclick=()=>{
+        if(!owns()) return;
         bus.muted=!bus.muted;
         notifyBusChange(bus,'muted',bus.muted);
         recordBusHistory(bus.muted?'靜音音訊軌':'取消靜音音訊軌',bus,index);
@@ -351,6 +394,7 @@ function renderMixer(){
     const soloBtn = strip.querySelector('.mx-solo');
     if (soloBtn) {
       soloBtn.onclick=()=>{
+        if(!owns()) return;
         const curBuses = projectBuses();
         bus.solo=!bus.solo;
         notifyBusChange(bus,'solo',bus.solo);
@@ -476,10 +520,12 @@ function mixerCenterPans(){
  * @param {string} text 輸入的 dB 字串（例：-6、0、+2；或 +=1.5、-=2；或 -inf）
  * @param {number} [index] 軌道索引（記錄歷史用）
  */
-function applyDbStringToBus(bus, text, index = 0){
+function applyDbStringToBus(bus, text, index = 0, pendingEdit=null){
   if(!bus || text == null) return;
+  const edit=pendingEdit || beginBusVolumeEdit(bus,index,null,'設定音訊軌音量');
+  if(!edit) return;
   const raw = String(text).trim().toLowerCase().replace(/db|分貝/g, '').trim();
-  if(!raw){ refreshBusViews(); return; }
+  if(!raw){ edit.cancel();refreshBusViews(); return; }
 
   const currentVol = busVolume(bus);
   const currentDb = currentVol <= 0.001 ? -60 : 20 * Math.log10(currentVol);
@@ -499,18 +545,16 @@ function applyDbStringToBus(bus, text, index = 0){
     // 一般數值（例 -6 或 0 或 3）直接設為該目標 dB
     targetDb = parseFloat(raw);
   }else{
+    edit.cancel();
     refreshBusViews();
     return;
   }
 
   targetDb = Math.max(-60, Math.min(12, targetDb));
   const newVol = targetDb <= -59.5 ? 0 : Math.pow(10, targetDb / 20);
-  bus.volume = Number(newVol.toFixed(4));
-
+  const changed=edit.commit(Number(newVol.toFixed(4)));
   const dbText = volumeToDbText(bus.volume);
-  notifyBusChange(bus, 'volume', bus.volume);
-  recordBusHistory(`設定音訊軌音量為 ${dbText}`, bus, index);
-  showToast(`${busLabel(bus, index)} 音量已設為 ${dbText}`);
+  if(changed) showToast(`${busLabel(bus, index)} 音量已設為 ${dbText}`);
   refreshBusViews();
 }
 
@@ -518,13 +562,21 @@ function applyDbStringToBus(bus, text, index = 0){
  * 一次對所有專案音訊軌增加或減少音量 dB 數
  * @param {number|string} [deltaInput] 欲增減的 dB 數（例如 +2 增加 2 dB，-3 減少 3 dB）；若未傳入則跳出 prompt
  */
-function mixerAdjustAllDb(deltaInput){
+async function mixerAdjustAllDb(deltaInput){
+  cancelVolumeEdits();
   const buses = projectBuses();
   if(!buses.length){ showToast('尚未建立專案音訊軌'); return; }
 
   let delta = deltaInput;
   if(delta === undefined || delta === null){
-    const input = prompt('請輸入要對「所有音訊軌」增加或減少的 dB 數值：\n（例：+2 為全軌增加 2 dB，-3 為全軌減少 3 dB）', '+0.0');
+    const ownsWorkspace=Project.captureWorkspaceOwnership();
+    const before=buses.map(bus=>bus.volume);
+    const release=History.beginPreview(buses.map(target=>({target,fields:[]})),ownsWorkspace);
+    const input = await promptModal('全部音訊軌音量','輸入增減的 dB 數值（例：+2 為全軌增加 2 dB，-3 為全軌減少 3 dB）','+0.0');
+    const current=release.isCurrent() && State.audioProject?.buses?.length===buses.length
+      && buses.every((bus,index)=>State.audioProject.buses[index]===bus && Object.is(bus.volume,before[index]));
+    release();
+    if(!current) return;
     if(input === null) return;
     const clean = String(input).trim().toLowerCase().replace(/db|分貝/g, '').trim();
     if(!clean) return;

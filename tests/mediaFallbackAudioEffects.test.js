@@ -121,6 +121,86 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     delete window.subtool.streamIngest;
   });
 
+  it.each([
+    {name:'silent-first',values:[[0],[.8]],durations:[1,1],first:.4,tail:.4},
+    {name:'opposite-phase',values:[[.8],[-.8]],durations:[1,1],first:0,tail:0},
+    {name:'unequal-channels',values:[[.2,.4],[.9]],durations:[1,1],first:.5,tail:.5},
+    {name:'short-tail',values:[[.6,.6],[.9]],durations:[1,.5],first:.7,tail:.4},
+    {name:'non-contiguous-streams',sourceStreams:[1,3],values:[[.2,.4],[.9]],durations:[1,1],first:.5,tail:.5},
+    {name:'reordered-streams',sourceStreams:[3,1],values:[[.2,.4],[.9]],durations:[1,1],first:.5,tail:.5},
+  ])('public effect $name mixes all PCM channels before extrema and reloads the same mix',async({values,durations,first,tail,sourceStreams=values.map((unused,index)=>index)})=>{
+    class AudioAdapter{constructor(){this.readyState=1;this.duration=1;this.src='';}addEventListener(){}removeEventListener(){}pause(){}load(){}}
+    vi.stubGlobal('Audio',AudioAdapter);
+    const descriptors=values.flatMap((channels,index)=>channels.map((unused,sourceChannel)=>({sourceStream:sourceStreams[index],sourceChannel})));
+    const source={id:'effect-source',path:'C:/media/multistream.mov',audioSrc:'video',audioSourceId:'effect-source',in:0,out:1,dur:1,offset:0,vtrack:0,primary:true,descriptors};
+    State.clips=[source];
+    window.subtool.normalizeAudio=vi.fn(async(path,options)=>({outputPath:`C:/cache/effect-stream-${options.sourceStream}.wav`}));
+    deskMock.fileURL.mockImplementation(async path=>'file:///'+path);
+    deskMock.waveAudio.mockImplementation(async path=>path+'.wave.wav');
+    vi.stubGlobal('fetch',vi.fn(async url=>{const stream=sourceStreams.indexOf(Number(/stream-(\d+)/.exec(url)[1]));return {arrayBuffer:async()=>wav(values[stream],durations[stream])};}));
+    resetPlayerAdapter(window.subtool,domMock.video);
+    const registry=vi.spyOn(Wave,'setSourceMixPeaks');
+    expect(await Media.audioEffects.apply(source,{max:-6,min:-12})).toMatchObject({status:'completed'});
+    expect(Media.tracks.map(track=>[track.sourceStream,track.sourceChannel])).toEqual(descriptors.map(d=>[d.sourceStream,d.sourceChannel]));
+    expect(deskMock.waveAudio.mock.calls.map(([path])=>path)).toEqual(sourceStreams.map(stream=>`C:/cache/effect-stream-${stream}.wav`));
+    const peaks=Wave.getSourceWaveform(source).peaks;
+    expect(peaks).toHaveLength(200);expect(peaks[1]).toBeCloseTo(first,4);expect(peaks.at(-1)).toBeCloseTo(tail,4);
+    if(values[0].length>1){
+      const channel=`${sourceStreams[0]}:1`;
+      Wave.setSourceWaveSelection(source,channel);await Wave.loadSourceWaveform(source,channel);
+      expect(fetch.mock.lastCall[0]).toBe(`file:///C:/cache/effect-stream-${sourceStreams[0]}.wav.wave.wav`);
+      expect(Wave.getSourceWaveform(source).peaks[1]).toBeCloseTo(values[0][1],4);
+      Wave.setSourceWaveSelection(source,'mix');
+    }
+    const descriptor=registry.mock.calls.find(([,supplied])=>supplied===peaks)[2].mixPath;
+    expect(Object.isFrozen(descriptor)).toBe(true);expect(Object.isFrozen(descriptor.paths)).toBe(true);
+    expect(Object.isFrozen(descriptor.sourceStreams)).toBe(true);expect(descriptor.sourceStreams).toEqual(sourceStreams);
+    Wave.forgetSourceWaveforms(source);Wave.registerSourceWaveforms(source,{mixPath:descriptor});
+    expect(await Wave.loadSourceWaveform(source,'mix')).toEqual(peaks);
+    if(values[0].length>1){
+      // Runtime track iteration order must not change the member identity.
+      Media.tracks.reverse();Wave.forgetSourceWaveforms(source);Wave.registerSourceWaveforms(source,{mixPath:descriptor});
+      const channel=`${sourceStreams[0]}:1`;
+      await Wave.setSourceWaveSelection(source,channel);
+      await Wave.loadSourceWaveform(source,channel);
+      expect(fetch.mock.lastCall[0]).toBe(`file:///C:/cache/effect-stream-${sourceStreams[0]}.wav.wave.wav`);
+      expect(Wave.getSourceWaveform(source).peaks[1]).toBeCloseTo(values[0][1],4);
+    }
+    expect(fetch.mock.calls.every(([url])=>url.endsWith('.wave.wav'))).toBe(true);
+    expect(Media.tracks.every(track=>track.file===`C:/cache/effect-stream-${track.sourceStream}.wav`)).toBe(true);
+    if(values[0].length>1){
+      Wave.forgetSourceWaveforms(source);Wave.registerSourceWaveforms(source,{mixPath:descriptor});
+      const channel=`${sourceStreams[0]}:1`,late=deferred(),beforeFetch=fetch.mock.calls.length;
+      fetch.mockImplementationOnce(async()=>({arrayBuffer:()=>late.promise}));
+      Wave.setSourceWaveSelection(source,channel);const oldRead=Wave.loadSourceWaveform(source,channel);
+      await vi.waitFor(()=>expect(fetch.mock.calls).toHaveLength(beforeFetch+1));
+      expect(fetch.mock.lastCall[0]).toBe(`file:///C:/cache/effect-stream-${sourceStreams[0]}.wav.wave.wav`);
+      if(sourceStreams[0]===3)Media.reset();else{
+        Wave.forgetSourceWaveforms(source);Wave.registerSourceWaveforms(source,{mixPath:descriptor,mixPeaks:peaks});
+      }
+      late.resolve(wav([.95,.95]));
+      await expect(oldRead).resolves.toBeNull();
+      expect(Wave.getSourceWaveform(source).peaks).toBe(sourceStreams[0]===3?null:peaks);
+    }
+    registry.mockRestore();
+  });
+
+  it('reset during the second processed PCM read cannot publish the old mix or retain prepared elements',async()=>{
+    const delayed=deferred(),elements=[];
+    class AudioAdapter{constructor(){this.readyState=1;this.duration=1;this.src='';elements.push(this);}addEventListener(){}removeEventListener(){}pause(){}load(){}}
+    vi.stubGlobal('Audio',AudioAdapter);
+    const source={id:'old-effect',path:'C:/media/old.mov',audioSrc:'video',audioSourceId:'old-effect',in:0,out:1,dur:1,offset:0,vtrack:0,primary:true,descriptors:[{sourceStream:0,sourceChannel:0},{sourceStream:1,sourceChannel:0}]};
+    State.clips=[source];window.subtool.normalizeAudio=vi.fn(async(path,options)=>({outputPath:`C:/cache/stream-${options.sourceStream}.wav`}));
+    deskMock.fileURL.mockImplementation(async path=>'file:///'+path);deskMock.waveAudio.mockImplementation(async path=>path+'.wave.wav');
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:()=>String(url).includes('stream-1')?delayed.promise:Promise.resolve(wav(.6))})));
+    resetPlayerAdapter(window.subtool,domMock.video);
+    const work=Media.audioEffects.apply(source,{max:-6,min:-12});
+    await vi.waitFor(()=>expect(fetch).toHaveBeenCalledTimes(2));Media.reset();delayed.resolve(wav(.8));
+    expect(await work).toMatchObject({status:'replaced'});
+    expect(Media.tracks).toEqual([]);expect(Wave.getSourceWaveform(source).peaks).toBeNull();
+    expect(elements.every(element=>element.src==='')).toBe(true);
+  });
+
   it.each(['stream','ingest','native'])('late %s original audio does not replace an installed audio effect or waveform', async kind=>{
     const rawURL=deferred();
     const processedWave=wav(.25),originalWave=wav(.75);
@@ -207,10 +287,11 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
   });
 });
 
-function wav(amplitude){
-  const buffer=new ArrayBuffer(44+8000),view=new DataView(buffer);
+function wav(amplitude,duration=1){
+  const values=Array.isArray(amplitude)?amplitude:[amplitude],channels=values.length,frames=Math.round(4000*duration),bytes=frames*channels*2;
+  const buffer=new ArrayBuffer(44+bytes),view=new DataView(buffer);
   for(const [offset,text] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])for(let i=0;i<4;i++)view.setUint8(offset+i,text.charCodeAt(i));
-  view.setUint32(4,8036,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);view.setUint32(24,4000,true);view.setUint32(28,8000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,8000,true);
-  for(let i=0;i<4000;i++)view.setInt16(44+i*2,Math.round((i%2?amplitude:-amplitude)*32768),true);
+  view.setUint32(4,bytes+36,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,channels,true);view.setUint32(24,4000,true);view.setUint32(28,4000*channels*2,true);view.setUint16(32,channels*2,true);view.setUint16(34,16,true);view.setUint32(40,bytes,true);
+  for(let i=0;i<frames;i++)for(let ch=0;ch<channels;ch++)view.setInt16(44+(i*channels+ch)*2,Math.round((i%2?values[ch]:-values[ch])*32768),true);
   return buffer;
 }

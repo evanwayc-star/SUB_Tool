@@ -228,7 +228,17 @@ function createScreenshotOutput({ fileAuthority, fsModule = fs } = {}) {
     return closing;
   }
 
-  return Object.freeze({ reserve, write, release, close });
+  async function resume() {
+    const attempt = closing;
+    if (attempt) await attempt.catch(() => {});
+    // A newer close owns admission if one started while this drain was pending.
+    if (closing && closing !== attempt) return false;
+    closing = null;
+    closed = false;
+    return true;
+  }
+
+  return Object.freeze({ reserve, write, release, close, resume });
 }
 
 module.exports = { createScreenshotOutput };

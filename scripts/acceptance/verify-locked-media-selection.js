@@ -81,6 +81,19 @@ async function dispatchDrag(client, rect, deltaX) {
   return { middle, end };
 }
 
+function dismissInitialSavePrompt(page) {
+  const { document } = page;
+  const title = document.getElementById('modalTitle');
+  const modal = document.getElementById('modalBg');
+  if (title?.textContent !== '開始前先儲存專案' || !modal
+      || page.getComputedStyle(modal).display === 'none') return false;
+  const later = [...document.querySelectorAll('#modalFoot button')]
+    .find(button => button.textContent === '稍後再說');
+  if (!later) throw new Error('第一次編輯儲存提示缺少「稍後再說」');
+  later.click();
+  return true;
+}
+
 (async () => {
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('找不到 dist/index.html，請先執行 npm run build');
@@ -92,6 +105,7 @@ async function dispatchDrag(client, rect, deltaX) {
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
+    '--subtool-transport-acceptance',
     '--no-sandbox',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
@@ -129,6 +143,7 @@ async function dispatchDrag(client, rect, deltaX) {
           { name: 'V2', visible: true, locked: true },
         ],
         clips: [
+          { id: 'selectable-video', name: '可選影像', type: 'video', offset: 0.5, in: 0, out: 1.5, dur: 1.5, vtrack: 0, locked: false, audioDetached: true },
           { id: 'locked-video', name: '鎖定影像', type: 'video', offset: 0.5, in: 0, out: 1.5, dur: 1.5, vtrack: 1, audioDetached: true },
           { id: 'locked-linked-audio', name: '鎖定影片音訊', type: 'video', audioSourceId: 'locked-linked-source', offset: 3, in: 0, out: 1.5, dur: 1.5, vtrack: 0, locked: true, audioDetached: false },
         ],
@@ -168,12 +183,13 @@ async function dispatchDrag(client, rect, deltaX) {
       {
         name: '影片選取',
         prepare: async () => {
-          const rect = await elementRect(client, '.clip-block[data-clip-id="locked-linked-audio"]');
+          const rect = await elementRect(client, '.clip-block[data-clip-id="selectable-video"]');
           await dispatchClick(client, rect);
+          await client.evaluate('(' + dismissInitialSavePrompt.toString() + ')(window)');
         },
         expected: {
           selectedId: null, selectedIds: [],
-          selectedClipId: 'locked-linked-audio', selectedAudioClipId: null,
+          selectedClipId: 'selectable-video', selectedAudioClipId: null,
         },
       },
       {

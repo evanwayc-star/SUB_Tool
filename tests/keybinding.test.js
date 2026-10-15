@@ -1,6 +1,6 @@
 /* 快捷鍵綁定規則。重點在**錄製端與比對端用的是同一套理論**——
    v5.11.0 之前 settings.js 與 keyboard.js 各寫一份，NumpadEnter 因此永遠被
-   {key:'enter'} 蓋掉（見 src/keybinding.js 檔頭）。 */
+   {key:'enter'} 蓋掉（比對規則見 src/keybinding-engine.js）。 */
 import { describe, expect, it } from 'vitest';
 import {
   bindFromEvent, findConflict, formatBind, isNumpadCode,

@@ -3,7 +3,7 @@ import { $ } from './dom.js';
 import { secToEncore, snapTimeToFrame, getExactFps, fmtClock } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { recordHistory } from './history.js';
-import { sortCues, trackLocked, cuesTrackLocked, subtitleTimeOnFrame, shiftCueTimes } from './subtitle-model.js';
+import { sortCues, trackLocked, cuesTrackLocked, subtitleTimeOnFrame, shiftCueTimes, snapCueToFrames, snapAllCuesToFrames } from './subtitle-model.js';
 import { renderASS, SubFormats } from './formats.js';
 import { drawTimeline, layoutTimeline } from './timeline-renderer.js';
 import { emit } from './events.js';
@@ -329,7 +329,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     </div>
   `;
 
-  /* 軌道名稱判準只有 subtitle-track-names.js 一份——對話框、job payload 與佇列監控三個消費端
+  /* 軌道名稱判準只有 delivery-submission.js 的 burnedSubtitleTrackNames() 一份——對話框、job payload 與佇列監控三個消費端
      必須顯示同一份清單，否則「說會燒哪幾軌」與「實際燒了哪幾軌」會不一致。 */
   const activeSubs = burnedSubtitleTrackNames(data.tracks, subtitleCuesForSubmission(data));
 
@@ -706,6 +706,7 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
           return cue;
         });
         if (kind === 'txt') newCues.forEach(c => c.timed = false);
+        const previousFps=State.fps, previousDropFrame=State.dropFrame;
         if(draft?.choice!=null) setFps(draft.choice);
         if (append) { State.cues.push(...newCues); }
         else {
@@ -713,11 +714,9 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
           State.cues.push(...newCues);
         }
         
-        newCues.forEach(c => {
-          if (c.timed === false) return;
-          c.start = snapTimeToFrame(c.start, State.fps, State.dropFrame);
-          c.end = Math.max(c.start, snapTimeToFrame(c.end, State.fps, State.dropFrame));
-        });
+        // 匯入是一次提交；既有字幕也必須在記錄／儲存之前進入新的影格格網。
+        if(State.fps!==previousFps || State.dropFrame!==previousDropFrame) snapAllCuesToFrames();
+        else newCues.forEach(c=>snapCueToFrames(c));
         
         State.listTrack = targetTk;
         if (!append) deselect('sub');
@@ -903,7 +902,7 @@ export function toASSFromState(cues, options = {}) {
   });
 }
 
-export function executeBatchExport(files) {
+export async function executeBatchExport(files) {
   if (!files.length) return;
   if (!IS_DESKTOP) {
     files.forEach(f => downloadBytes(b64ToBytes(f.content), f.name, f.mime || 'application/octet-stream'));
@@ -911,15 +910,22 @@ export function executeBatchExport(files) {
     showToast(`已下載 ${files.length} 個檔案`);
     return;
   }
-  if (files.length === 1) {
-    const f = files[0];
-    DESK.exportSub(f.name, f.content, f.ext).then(pth => {
+  try {
+    if (files.length === 1) {
+      const f = files[0];
+      const pth = await DESK.exportSub(f.name, f.content, f.ext);
       if (pth) { setStatus(`已匯出：${pth}`, 'ok'); showToast(`已匯出 ${baseName(pth)}`); }
-    });
-  } else {
-    DESK.exportDirectory(files).then(dir => {
+      return pth;
+    } else {
+      const dir = await DESK.exportDirectory(files);
       if (dir) { setStatus(`已批次匯出 ${files.length} 個檔案至：${dir}`, 'ok'); showToast(`已批次匯出 ${files.length} 個檔案`); }
-    });
+      return dir;
+    }
+  } catch (error) {
+    const message = '匯出失敗：' + (error?.message || String(error));
+    setStatus(message, 'err');
+    showToast(message);
+    return null;
   }
 }
 
@@ -929,7 +935,7 @@ export function doExportXLSX(trackDataList) {
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
   const fname = `ST_${projName}_SUB.xlsx`;
   if (IS_DESKTOP) {
-    DESK.exportSub(fname, bytesToB64(bytes), 'xlsx').then(pth => { if (pth) { setStatus('已匯出：' + pth, 'ok'); showToast('已匯出 ' + baseName(pth)); } });
+    return executeBatchExport([{ name: fname, content: bytesToB64(bytes), ext: 'xlsx' }]);
   } else {
     downloadBytes(bytes, fname, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     setStatus('已匯出 XLSX（' + trackDataList.length + ' 個分頁）', 'ok');

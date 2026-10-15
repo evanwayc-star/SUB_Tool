@@ -7,7 +7,7 @@ import { State, isSel, setSelection, deselect, IS_DESKTOP } from './state.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, filteredSubtitleCues, enterSwapMode, deleteSelected } from './subtitles.js';
 import { addCue, addCueRelative, clearSelectedCuesTime, shiftTextsDown, shiftTextsUp, swapAdjacentCues, mergeAdjacentCues, copyCues, pasteCues } from './subtitle-model.js';
-import { moveSelectedToTrack, trackFromY, tracksTop, drawTimeline } from './timeline-renderer.js';
+import { moveSelectedToTrack, trackFromY, tracksTop, drawTimeline, selectExternalAudioClip } from './timeline-renderer.js';
 import { xToTime } from './timeline-interaction-engine.js';
 import { selectClip, fitClipToStage, crossfadeWithPrev, captureClipEdit, setClipDuration, setClipSpeed, clipFreezeTarget, setClipFreeze, setClipFade, resetClipTrim } from './clip-model.js';
 import { Seq } from './sequence.js';
@@ -226,12 +226,6 @@ function showCueMenu(x,y,contextCue=null){
 }
 /* 外部音訊素材的幾何與播放狀態都由 Media 持有。選單只負責意圖／重繪，
    以支援 split 的非同步載入流程，也不重複記錄 History。 */
-function selectExternalAudioForMenu(assetId,label){
-  if(!assetId) return;
-  setSelection({ kind:'audio', ids:assetId });
-  refreshSelectionUI();
-  const status=$('stSel'); if(status) status.textContent='已選音訊：'+(label||'音訊素材');
-}
 function runExternalAudioMenuAction(method,args=[],{clearSelection=false}={}){
   const fn=Media?.[method];
   if(typeof fn!=='function') { showToast('音訊素材編輯功能尚未準備完成'); return; }
@@ -343,7 +337,7 @@ function tlContextMenuHandler(e){
     e.preventDefault();
     const context=audioMenuContext(audioEl);
     const {source,external,assetId,sourceId,runtimeSourceId,sourceName,filePath,locked}=context;
-    if(external) selectExternalAudioForMenu(assetId,sourceName);
+    if(external) selectExternalAudioClip(assetId,{redraw:false});
     const recognitionTracks=typeof Media.sourceChannels==='function' ? Media.sourceChannels(runtimeSourceId) : [];
     const start=Math.max(0,Number(audioEl.dataset.audioStart)||0);
     const end=Math.max(start,Number(audioEl.dataset.audioEnd)||start);
@@ -406,12 +400,10 @@ function tlContextMenuHandler(e){
   if(audioRow && audioRow.dataset.audioSourceId){
     e.preventDefault();
     const context=audioMenuContext(audioRow);
-    const {sourceId,sourceName,filePath,external,locked}=context;
+    const {source,sourceId,sourceName,filePath,external,locked}=context;
     const waveSourceIds=sourceWaveLaneIds(audioRow,sourceId);
     const wave=sourceWaveMenuState(sourceId,waveSourceIds);
-    const resolvedTrackTarget = external
-      ? (Media.externalAudio?.find?.(sourceId) || (State.externalAudioState || []).find(a => a.id === sourceId))
-      : (State.clips?.find(c => c.primary || c.audioSrc === 'video' || c.id === sourceId) || State.clips?.[0]);
+    const resolvedTrackTarget=source;
     const hasLimiter = Boolean(resolvedTrackTarget?.hasAudioLimiter);
     const limiterLabel = resolvedTrackTarget?.audioLimiterLabel || '';
     const items=buildAudioTrackMenu({
@@ -470,7 +462,7 @@ function tlContextMenuHandler(e){
       if(!owns()) return;
       const tv=(c.vtrack||0)+dv;
       if(State.videoTracks[tv]?.locked){ showToast('目標視訊軌已鎖定，無法移入'); return; }
-      Seq.moveToTrack(c, tv);
+      if(!Seq.moveToTrack(c, tv)){ showToast('目標視訊軌包含鎖定素材，無法移入'); return; }
       recordHistory('影片段移到 V'+((c.vtrack||0)+1));
       Media.seek(Math.min(Media.displayTime(), State.duration||0));
       drawTimeline(); emit('render:videoSub'); emit('mpv:refreshSubs');
@@ -596,7 +588,8 @@ export function showImageGeom(c){
         });
      }}],
     { onDismiss:restore, onReplaced:restore });
-  edit=beginGeometryEdit({target:c,owns:canEdit.isCurrent,beginPreview:History.beginPreview.bind(History),recordHistory});
+  edit=beginGeometryEdit({target:c,owns:canEdit.isCurrent,
+    beginPreview:(targets,owns)=>History.beginPreview(targets,owns,()=>session.close()),recordHistory});
   syncInputs();
   setTimeout(()=>{
     if(!current()) return;
@@ -665,6 +658,8 @@ export function showClipSpeed(c){
   if(!owns()) return;
   const sourceLength=c.out-c.in;
   const currentRate=Number(c.speed)>0?Number(c.speed):1;
+  const controller=new AbortController();
+  let preparing=false;
   const session=openModal(`修改速度／反轉影片 — ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.4">`+
     `<label>速度：<input id="clipSpeedPercent" type="number" min="25" max="400" step="0.01" value="${+(currentRate*100).toFixed(3)}" style="width:90px"> %</label><br>`+
@@ -673,24 +668,21 @@ export function showClipSpeed(c){
     `<div style="color:var(--text-faint);font-size:12px;line-height:1.6;margin-top:8px">速度與持續時間連動，範圍 25–400%。變長時同軌後續片段會往右移。反轉影片時，未分離的原音同步反向播放；固定畫面仍不播放原音。</div></div>`,
     [{label:'取消',act:()=>session.close()},
      {label:'套用',primary:true,act:async()=>{
-       if(!session.isCurrent()||!owns()) return;
+       if(preparing||!session.isCurrent()||!owns()) return;
        const rate=Number($('clipSpeedPercent')?.value)/100;
        if(!Number.isFinite(rate)||rate<0.25||rate>4){ showToast('速度須介於 25% 至 400%'); return; }
        const reverse=!!$('clipSpeedReverse')?.checked;
-       if(Media.playing) Media.pause();
-       if(reverse){
-         showToast('正在準備反轉預覽，完成後會套用設定');
-         if(!await Media.prepareClipReverse(c) || !session.isCurrent() || !owns()){
-           if(session.isCurrent()) showToast('無法準備反轉預覽，設定未套用');
-           return;
-         }
-         if(!await Media.activateClipReversePreview(c) || !session.isCurrent() || !owns()){
-           if(session.isCurrent()) showToast('無法啟動反轉預覽，設定未套用');
-           return;
-         }
-       }
-       if(setClipSpeed(c,rate,reverse)) session.close({committed:true});
-     }}]);
+       preparing=true;
+       try{
+         if(reverse) showToast('正在準備反轉預覽，完成後會套用設定');
+         const applied=await setClipSpeed(c,rate,reverse,{
+           isCurrent:session.isCurrent,signal:controller.signal,
+         });
+         if(!session.isCurrent()) return;
+         if(applied) session.close({committed:true});
+         else if(owns()) showToast('未能完成影片預覽，設定未套用');
+       }finally{preparing=false;}
+     }}],{onDismiss:()=>controller.abort(),onReplaced:()=>controller.abort()});
   const speed=$('clipSpeedPercent'),duration=$('clipSpeedDuration');
   speed?.addEventListener('input',()=>{
     const rate=Number(speed.value)/100;

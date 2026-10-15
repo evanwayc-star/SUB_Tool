@@ -85,7 +85,7 @@ describe('常用字幕樣式的持久化邊界', () => {
     expect(save).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])('略過毀損項目並保留合法樣式與舊名稱遷移（desktop=%s）', async desktop => {
+  it.each([false, true])('略過毀損項目並保留合法樣式與完整名稱（desktop=%s）', async desktop => {
     const { presets, save } = await readPresets([
       null, 1, 'bad', [], { name: 23 }, { name: 'bad group', group: {} },
       { name: 'bad style', style: [] },
@@ -96,10 +96,10 @@ describe('常用字幕樣式的持久化邊界', () => {
     ], desktop);
     expect(presets).toEqual([
       { name: '英文', group: '影片', style: { fontSize: 44, posY: 82 } },
-      { name: '中文', group: '預告', style: { color: '#ffee00' } },
+      { name: '預告-中文', style: { color: '#ffee00' } },
       { name: '稀疏預設' },
       { name: '空樣式', style: null },
     ]);
-    expect(save).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
   });
 });

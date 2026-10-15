@@ -37,6 +37,28 @@ describe('audio-normalization-runtime.js', () => {
   });
 
   describe('createAudioNormalizationRuntime 執行管線', () => {
+    it.each([false, true])('probe 的來源原點只套於 %s 模式輸出，母素材量測保持完整', async isTruePeak => {
+      const report = { input_i: '-22', input_tp: '-2', input_lra: '0', input_thresh: '-32', target_offset: '0' };
+      const probe = vi.fn(async () => ({ duration: 3, video: { timestampOffset: -.5 } }));
+      const execute = vi.fn(async (args, options) => options.onStderr?.(JSON.stringify(report)));
+      const runtime = createAudioNormalizationRuntime({ createTempPath: () => '/temp/clock.wav', probe, execute });
+      await runtime.normalize('mother.mkv', { isTruePeak });
+      expect(probe).toHaveBeenCalledWith('mother.mkv', { signal: null });
+      const output = execute.mock.calls.at(-1)[0];
+      expect(output[output.indexOf('-af') + 1]).toMatch(/,asetpts=PTS-0\.500000\/TB,aresample=48000:async=1:first_pts=0,apad=whole_dur=3\.000000,atrim=end=3\.000000$/);
+      if (isTruePeak) expect(execute.mock.calls[0][0].join(' ')).not.toContain('asetpts');
+    });
+    it('probe 取消會等待 probe 結束、清除預定 WAV 且不啟動 ffmpeg', async () => {
+      const controller = new AbortController(); let finish;
+      const probe = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+      const removeFile = vi.fn(), execute = vi.fn();
+      const runtime = createAudioNormalizationRuntime({ createTempPath: () => '/temp/probe.wav', probe, execute, removeFile });
+      const pending = runtime.normalize('mother.mkv', {}, { signal: controller.signal });
+      controller.abort(); expect(execute).not.toHaveBeenCalled(); expect(removeFile).not.toHaveBeenCalled();
+      finish({ video: { timestampOffset: -.5 } });
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      expect(removeFile).toHaveBeenCalledWith('/temp/probe.wav'); expect(execute).not.toHaveBeenCalled();
+    });
     it('兩遍都明確選取指定來源stream，且原始report可供交付重建', async () => {
       const report={input_i:'-22',input_tp:'-2',input_lra:'0',input_thresh:'-32',target_offset:'0'};
       const execute=vi.fn(async (args,options)=>options.onStderr?.(JSON.stringify(report)));
@@ -129,8 +151,10 @@ describe('audio-normalization-runtime.js', () => {
 
       expect(calls.length).toBe(2);
       expect(calls[1].opts.jobId).toBe('loudnorm-p2-silence');
-      // 不帶 loudnorm 濾鏡，直接無失真 copy / pcm
-      expect(calls[1].args.join(' ')).not.toContain('-af');
+      // 無聲也需要來源時鐘，但不套聲量增益。
+      const filter = calls[1].args[calls[1].args.indexOf('-af') + 1];
+      expect(filter).toBe('aresample=48000:async=1:first_pts=0');
+      expect(filter).not.toMatch(/loudnorm|alimiter|volume/);
       expect(res.isSilence).toBe(true);
     });
 

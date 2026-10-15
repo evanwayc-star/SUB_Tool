@@ -133,7 +133,7 @@ describe('Apple Silicon 安裝檔設定', () => {
 
 /* shared/ 必須進安裝檔。
 
-   主程序在啟動時就 `require('../shared/*.cjs')`（electron/channel-layout.js、
+   主程序在啟動時就 `require('../shared/*.cjs')`（electron/media-intake-runtime.js、
    electron/export-plan.js）。這個資料夾若沒被打包，開發機上完全正常——
    `npm run electron` 讀的是原始碼樹——但**安裝版一開就死**，而且是在
    任何 UI 出現之前。這正是 §0.6「有產出不等於對」與 v4.27 那次

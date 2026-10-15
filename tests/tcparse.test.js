@@ -74,6 +74,15 @@ describe('時間碼輸入真實按鍵與影格格網', () => {
     expect(actualStep).toBe(before === after ? 0 : key === 'ArrowUp' ? 1 : -1);
   });
 
+  it.each(['oops:00:00:00','00:00:01:00garbage','00:00:1.5:00','00::01:00','1:2:3:4:5',
+    '00:00:-1:00','00:00:1e2:00','123456789','999999999999999999:00:00:00'])('非法時碼 %s 不可猜成可提交的時間', input => {
+    expect(parseTimecodeInput(input)).toBeNull();
+  });
+  it('合法短分段仍由右至左解讀',()=>{
+    expect(parseTimecodeInput('01:02')).toBeCloseTo(1+2/24,8);
+    expect(parseTimecodeInput('02:01:02')).toBeCloseTo(121+2/24,8);
+  });
+
   it.each([[29.97, '00:00:00;00', 4, '00:01:00;02'], [59.94, '+00:00:59;00', 8, '+00:01:00;04']])('秒或分微調也只產生有效 DF 標籤', (fps, before, cursor, expected) => {
     State.fps = fps; State.dropFrame = true;
     const input = document.createElement('input');

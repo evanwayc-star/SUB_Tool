@@ -11,7 +11,7 @@
 import { flattenSourceChannels, channelFileName } from '../shared/channel-layout.cjs';
 import { AudioEngine } from './audio-engine.js';
 import { Seq } from './sequence.js';
-import { normalizeAudioProject, pruneRemovedAudioBuses, ensureAudioSourceMap } from './state.js';
+import { normalizeAudioProject, pruneRemovedAudioBuses, ensureAudioSourceMap, registerAudioSource } from './state.js';
 import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './export-job-engine.js';
 import { sourceChannelDescriptors } from './external-audio.js';
 
@@ -116,7 +116,9 @@ export class MediaAudioRouter {
       clipSourceTimeFor: (t, c) => this.media._transport.sourceTime(t, c),
       interpretation:()=>this.media.projectAudioInterpretation(),
       sourcePlaybackFor:(source,t)=>this.media.audioSourcePlayback?.(source,t)||null,
+      sourcePlaybacksFor:(source,t)=>this.media.audioSourcePlaybacks?.(source,t)||null,
       transportMuted:()=>this.media.reverseShuttleMuted?.()||false,
+      placementExists:clip=>!!this.state.clips?.includes(clip)||!!this.media.externalAudio?.has(clip),
     });
   }
 
@@ -172,34 +174,12 @@ export class MediaAudioRouter {
     // 呈現切換期間，video/mpv 的來源時間仍可能停在舊畫格。若拿這個停止的
     // clock 校正元素／buffer 音訊，會把同一小段聲音反覆拉回播放。
     if (this.media.presenterClockMoving?.() === false) return;
+    this.bindEngine();
     AudioEngine.syncReverseSources(this.media.tlTime());
     if (this.media.tracks.some(t => t.kind === 'buffer' && !t._srcHidden)) {
       AudioEngine.syncBuffers(this.media.vTime(), { inGap: this.media.inGap() });
     }
-    for (const tr of this.media.tracks) {
-      if (tr.kind === 'element' && tr.el && !tr.el.paused) {
-        const s = tr.source || '';
-        let ref;
-        if (s.startsWith('ext-')) {
-          const st = this.media.externalAudio?.sourceTime?.(s, this.media.tlTime());
-          if (st == null) {
-            try { tr.el.pause(); } catch (e) {}
-            continue;
-          }
-          ref = st;
-        } else if (this.media.seqOn()) {
-          const lt = this.media.sourceLocalTime(s || 'video', this.media.tlTime());
-          if (lt == null) continue;
-          ref = lt;
-        } else {
-          ref = this.media.vTime();
-        }
-
-        if (Math.abs(tr.el.currentTime - ref) > 0.12) {
-          try { tr.el.currentTime = ref; } catch (e) {}
-        }
-      }
-    }
+    AudioEngine.syncElements(this.media.tlTime());
   }
 }
 
@@ -434,7 +414,7 @@ function createRoutingEdit(initialValue, makeAdapter, {
   label = '設定輸出音訊聲道', output = false, wav = false,
   parent = null,
 } = {}) {
-  const initial = structuredClone(initialValue);
+  let initial = structuredClone(initialValue);
   let model = makeAdapter(initial);
   let active = true;
   let child = null;
@@ -470,7 +450,16 @@ function createRoutingEdit(initialValue, makeAdapter, {
   const dismiss = () => active && parent ? parent.dismiss() : cancel();
   const edit = {
     current() { return structuredClone(model.current()); },
+    baseline() { return structuredClone(initial); },
     isActive: live,
+    registerSource(sourceId,channels,options={},allocation=null) {
+      if(!live()) return false;
+      initial=registerAudioSource(initial,sourceId,channels,options,allocation);
+      model=makeAdapter(registerAudioSource(snapshot(),sourceId,channels,options,allocation));
+      if(child) child.edit.registerSource(sourceId,channels,options,allocation);
+      else publish();
+      return true;
+    },
     setStreams: streams => change('setStreams', streams),
     setBusCount: count => change('setBusCount', count),
     allMono: () => change('applyAllMonoLayout'),

@@ -1,6 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { spawn } from 'node:child_process';
+import { parse } from 'acorn';
 import { describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -19,6 +24,150 @@ function completedProcess({ stdout = '', stderr = '', status = 0 } = {}) {
 }
 
 describe('媒體探測 interface', () => {
+  it('shutdown 拒絕 queued/shared 工作並等 active child close，重入共用屏障，resume 後可再探測', async () => {
+    const { createMediaProbe } = require('../electron/media-probe');
+    const children = [], spawnProcess = vi.fn(() => {
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
+      children.push(child); return child;
+    });
+    const probe = createMediaProbe({ executable: 'ffprobe', maxConcurrent: 1, spawnProcess });
+    const first = probe.describe('first.mov').catch(error => error);
+    const shared = probe.describe('first.mov').catch(error => error);
+    const queued = probe.describe('queued.mov').catch(error => error);
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    const closing = probe.cancelAllAndWait();
+    expect(probe.cancelAllAndWait()).toBe(closing);
+    expect(await queued).toMatchObject({ code: 'PROBE_ABORTED' });
+    let closed = false; void closing.then(() => { closed = true; });
+    await Promise.resolve(); expect(closed).toBe(false);
+    expect(children[0].kill).toHaveBeenCalledWith('SIGTERM');
+    for (const method of ['describe', 'hasAudio', 'audioVideoStartOffsets', 'audioBitrates']) {
+      await expect(probe[method]('blocked.mov')).rejects.toMatchObject({ code: 'PROBE_ABORTED' });
+    }
+    expect(spawnProcess).toHaveBeenCalledOnce();
+    children[0].emit('close', 0);
+    expect(await first).toMatchObject({ code: 'PROBE_ABORTED' });
+    expect(await shared).toMatchObject({ code: 'PROBE_ABORTED' }); await closing;
+    expect(probe.resume()).toBe(true);
+    const next = probe.describe('next.mov');
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    children[1].stdout.end('{"format":{"duration":"3"},"streams":[]}'); children[1].emit('close', 0);
+    await expect(next).resolves.toMatchObject({ duration: 3 });
+    await probe.cancelAllAndWait();
+  });
+
+  it('開始前即 shutdown 的已准入 request 不會晚到啟動 native process', async () => {
+    const { createMediaProbe } = require('../electron/media-probe');
+    const spawnProcess = vi.fn(() => completedProcess());
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const outcome = probe.describe('admitted.mov').catch(error => error);
+    await probe.cancelAllAndWait();
+    expect(await outcome).toMatchObject({ code: 'PROBE_ABORTED' });
+    expect(spawnProcess).not.toHaveBeenCalled();
+    expect(probe.resume()).toBe(true);
+  });
+
+  it('error 事件不能代替 native close；錯誤工作與 shutdown 都等 owner 確認關閉', async () => {
+    const { createMediaProbe } = require('../electron/media-probe');
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+    let settled = false;
+    const failure = new Error('native runtime error');
+    const outcome = probe.describe('error.mov').catch(error => { settled = true; return error; });
+    await vi.waitFor(() => expect(child.listenerCount('error')).toBe(1));
+    child.emit('error', failure);
+    const closing = probe.cancelAllAndWait();
+    await Promise.resolve(); expect(settled).toBe(false);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    child.emit('close', 1);
+    expect(await outcome).toBe(failure); await closing;
+  });
+
+  it('未確認 close 的 probe 保留 ownership；quit barrier 有界拒絕，late close 後才恢復准入', async () => {
+    vi.useFakeTimers();
+    const { createMediaProbe } = require('../electron/media-probe');
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
+    const spawnProcess = vi.fn().mockImplementationOnce(() => child)
+      .mockImplementation(() => completedProcess({ stdout: '{"streams":[]}' }));
+    const probe = createMediaProbe({ executable: 'ffprobe', terminationGraceMs: 10, spawnProcess });
+    const outcome = probe.describe('stuck.mov').catch(error => error);
+    await vi.advanceTimersByTimeAsync(0);
+    const closing = probe.cancelAllAndWait({ timeoutMs: 40 }).catch(error => error);
+    try {
+      await vi.advanceTimersByTimeAsync(40);
+      expect(await outcome).toMatchObject({ code: 'PROBE_TERMINATION_TIMEOUT' });
+      expect(await closing).toMatchObject({ code: 'PROBE_TERMINATION_PENDING' });
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(probe.resume()).toBe(false);
+      await expect(probe.describe('blocked.mov')).rejects.toMatchObject({ code: 'PROBE_ABORTED' });
+      expect(spawnProcess).toHaveBeenCalledOnce();
+      child.emit('close', null);
+      const next = probe.describe('resumed.mov');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawnProcess).toHaveBeenCalledTimes(2);
+      await next; await probe.cancelAllAndWait();
+    } finally { child.emit('close', null); vi.useRealTimers(); }
+  });
+
+  it.each(['hasAudio', 'audioBitrates'])('%s shutdown 終止超過緩衝期限時仍拒絕，不發布保守 fallback', async method => {
+    vi.useFakeTimers();
+    const { createMediaProbe } = require('../electron/media-probe');
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
+    const probe = createMediaProbe({ executable: 'ffprobe', terminationGraceMs: 10, spawnProcess: () => child });
+    const result = probe[method]('stuck.mov').catch(error => error);
+    await vi.advanceTimersByTimeAsync(0);
+    const closing = probe.cancelAllAndWait();
+    try {
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toMatchObject({ code: 'PROBE_TERMINATION_TIMEOUT', cause: { code: 'PROBE_ABORTED' } });
+    } finally { child.emit('close', null); await closing; vi.useRealTimers(); }
+  });
+
+  it('實際 ffprobe IPC→before-quit 等真 native child close 才退出；失敗退出會恢復 probe owner', async () => {
+    const { createMediaProbe } = require('../electron/media-probe');
+    let child, invoke, beforeQuit;
+    const probe = createMediaProbe({ executable: 'adapter', spawnProcess: () => {
+      child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      return child;
+    } });
+    const source = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
+    const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
+    const registration = (owner, method, key) => ast.body.map(node => node.expression).find(node =>
+      node?.callee?.object?.name === owner && node.callee.property?.name === method && node.arguments?.[0]?.value === key);
+    const done = vi.fn().mockResolvedValue(), owner = () => ({ cancelAllAndWait: done, resume: vi.fn() });
+    const quit = vi.fn(() => { expect(child.exitCode !== null || child.signalCode !== null).toBe(true); });
+    const context = { Promise, console: { error: vi.fn() }, mediaProbe: probe, requireReadablePath: vi.fn(),
+      ipcMain: { handle: (_, handler) => { invoke = handler; } }, app: { on: (_, handler) => { beforeQuit = handler; }, quit },
+      _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false, audioNormalizationJobs: new Map(),
+      ffmpegExecution: owner(), speechCompressionRuntime: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(),
+      QueueManager: { prepareForShutdown: done, cancelShutdown: done }, clipAudioCache: { waitForIdle: done },
+      clipFrameCache: { waitForIdle: done },
+      screenshotOutput: { close: done, resume: done }, mediaIntakeRuntime: { close: done }, mainWin: null,
+      dialog: { showMessageBox: done },
+    };
+    vm.createContext(context);
+    for (const call of [registration('ipcMain', 'handle', 'ffprobe'), registration('app', 'on', 'before-quit')]) {
+      vm.runInContext(source.slice(call.start, call.end), context);
+    }
+    let outcome;
+    try {
+      outcome = invoke({}, 'authorized.mov').catch(error => error);
+      await vi.waitFor(() => expect(child?.pid).toBeGreaterThan(0));
+      beforeQuit({ preventDefault() {} });
+      await vi.waitFor(() => expect(quit).toHaveBeenCalledOnce());
+      expect(await outcome).toMatchObject({ code: 'PROBE_ABORTED' });
+      expect(context._quitReady).toBe(true);
+    } finally { child?.kill(); await probe.cancelAllAndWait(); await outcome; }
+
+    // A later cleanup failure cancels quit and reopens this same public owner.
+    const resume = vi.fn(() => probe.resume());
+    context.mediaProbe = { ...probe, resume };
+    context._quitReady = false; context._quitSequenceStarted = false;
+    context.screenshotOutput.close = vi.fn().mockRejectedValue(new Error('cleanup locked'));
+    beforeQuit({ preventDefault() {} });
+    await vi.waitFor(() => expect(resume).toHaveBeenCalledOnce());
+    expect(context._isAppQuitting).toBe(false);
+  });
   it('有效素材在 16 秒後完成探測時，仍保留完整音視訊資訊', async () => {
     vi.useFakeTimers();
     try {
@@ -296,8 +445,8 @@ describe('媒體探測 interface', () => {
 
     await expect(probe.describe('D:/media/master.mov')).resolves.toEqual({
       duration: 12.5,
-      video: { codec: 'prores', width: 1920, height: 1080, fps: 30000 / 1001 },
-      audio: [{ index: 0, streamIndex: 2, codec: 'pcm_s24le', channels: 2, lang: 'zho', title: '20FM' }],
+      video: { codec: 'prores', width: 1920, height: 1080, fps: 30000 / 1001, timestampOffset: 0, presentationTimestampOffset: 0 },
+      audio: [{ index: 0, streamIndex: 2, codec: 'pcm_s24le', channels: 2, lang: 'zho', title: '20FM', timestampOffset: 0, presentationTimestampOffset: 0 }],
     });
     expect(spawnProcess).toHaveBeenCalledWith('ffprobe', [
       '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', 'D:/media/master.mov',

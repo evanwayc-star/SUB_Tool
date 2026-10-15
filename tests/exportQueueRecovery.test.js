@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -13,7 +14,7 @@ function makeQueue(queueDir, state, store = QueueStore, overrides = {}) {
     dir: () => queueDir,
     state,
     store,
-    history: { append: () => {}, remove: () => {}, load: () => [] },
+    history: overrides.history || { append: () => {}, remove: () => {}, load: () => [] },
     admission: {
       sourcePathsOf: job => job.sourcePaths || job.payload?.sources || [],
       assertMasterMedia: () => {},
@@ -48,6 +49,140 @@ function job(id, sourcePath, assRef) {
 }
 
 describe('匯出佇列 outcome 跨重啟復原', () => {
+  it.each([false, true])('取消已結束的 shutdown 釋放准入並保留原暫停意圖（paused=%s）', async initiallyPaused => {
+    const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-queue-cancel-shutdown-'));
+    try {
+      const sourcePath = path.join(queueDir, 'source.mxf');
+      writeFileSync(sourcePath, 'source');
+      const calls = [];
+      const state = new ExportQueueState();
+      const queue = makeQueue(queueDir, state, QueueStore, { runJob: async current => { calls.push(current.id); } });
+      queue.setPaused(initiallyPaused);
+      const closing = queue.prepareForShutdown();
+      await closing;
+      expect(queue.shuttingDown).toBe(true);
+      await expect(queue.cancelShutdown()).resolves.toBe(true);
+      expect(queue.shuttingDown).toBe(false);
+      expect(queue.shutdownPromise).toBeNull();
+      expect(queue.isPaused).toBe(initiallyPaused);
+      const fresh = { ...job('fresh-after-cancel', sourcePath, null), status: JOB_STATUS.QUEUED };
+      expect(() => queue.addJob(fresh)).not.toThrow();
+      expect(calls).toEqual(initiallyPaused ? [] : [fresh.id]);
+      const nextClose = queue.prepareForShutdown();
+      expect(nextClose).not.toBe(closing);
+      await nextClose;
+    } finally { rmSync(queueDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
+  });
+
+  it('取消仍在收尾的 shutdown 等 close barrier，不自行重新執行被中止的工作', async () => {
+    const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-queue-cancel-draining-'));
+    let finish;
+    const completion = new Promise(resolve => { finish = resolve; });
+    try {
+      const sourcePath = path.join(queueDir, 'source.mxf');
+      writeFileSync(sourcePath, 'source');
+      const interrupted = job('interrupted', sourcePath, null);
+      const state = new ExportQueueState([interrupted]);
+      const calls = [];
+      const queue = makeQueue(queueDir, state, QueueStore, { runJob: async current => { calls.push(current.id); } });
+      queue.registerActiveJob(interrupted.id, { stop() {}, completion });
+      const closing = queue.prepareForShutdown();
+      let reopened = false;
+      const reopening = queue.cancelShutdown().then(result => { reopened = result; });
+      await Promise.resolve();
+      expect(reopened).toBe(false);
+      const fresh = { ...job('fresh-while-draining', sourcePath, null), status: JOB_STATUS.QUEUED };
+      expect(() => queue.addJob(fresh)).toThrow(/正在關閉/);
+      finish();
+      await Promise.all([closing, reopening]);
+      expect(reopened).toBe(true);
+      expect(queue.isPaused).toBe(true);
+      expect(state.get(interrupted.id)).toMatchObject({ status: JOB_STATUS.QUEUED });
+      expect(JSON.parse(readFileSync(QueueStore.jobPath(queueDir, interrupted.id), 'utf8'))).toMatchObject({ status: JOB_STATUS.QUEUED });
+      expect(() => queue.addJob(fresh)).not.toThrow();
+      await queue.processQueue();
+      expect(calls).toEqual([]);
+    } finally { finish(); rmSync(queueDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
+  });
+
+  it('關閉期間較新的手動暫停不被取消退出時的舊暫停值覆蓋', async () => {
+    const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-queue-cancel-pause-'));
+    try {
+      const queue = makeQueue(queueDir, new ExportQueueState());
+      const closing = queue.prepareForShutdown();
+      queue.setPaused(true);
+      await closing;
+      await queue.cancelShutdown();
+      expect(queue.isPaused).toBe(true);
+    } finally { rmSync(queueDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
+  });
+
+  it('history 暫時讀不到時保留done journal，復原後合併舊紀錄而不重跑交付', () => {
+    const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-history-read-recovery-'));
+    try {
+      const sourcePath = path.join(queueDir, 'source.mxf');
+      writeFileSync(sourcePath, 'source');
+      const completed = { ...job('new-completed', sourcePath, null), status: JOB_STATUS.DONE };
+      QueueStore.QueueHistory.append(queueDir, { ...completed, id: 'old-completed' });
+      QueueStore.stageTerminalOutcome(queueDir, completed);
+      const historyPath = QueueStore.QueueHistory.historyPath(queueDir);
+      const before = readFileSync(historyPath);
+      const state = new ExportQueueState();
+      state.add(completed);
+      const queue = makeQueue(queueDir, state, QueueStore, { history: QueueStore.QueueHistory });
+      const original = fs.readFileSync;
+      fs.readFileSync = (file, ...args) => {
+        if (file === historyPath) throw Object.assign(new Error('history temporarily locked'), { code: 'EACCES' });
+        return original(file, ...args);
+      };
+      try { expect(queue.finalizeTerminalOutcome(completed)).toBe(false); }
+      finally { fs.readFileSync = original; }
+      expect(readFileSync(historyPath)).toEqual(before);
+      expect(QueueStore.loadTerminalOutcomes(queueDir).map(item => item.id)).toEqual(['new-completed']);
+      const restored = new ExportQueueState();
+      makeQueue(queueDir, restored, QueueStore, { history: QueueStore.QueueHistory }).restoreJobs();
+      expect(restored.jobs().map(item => [item.id, item.status])).toEqual(expect.arrayContaining([
+        ['new-completed', JOB_STATUS.DONE], ['old-completed', JOB_STATUS.DONE],
+      ]));
+      expect(restored.jobs()).toHaveLength(2);
+      expect(QueueStore.loadTerminalOutcomes(queueDir)).toEqual([]);
+      expect(QueueStore.QueueHistory.load(queueDir).map(item => item.id)).toEqual(['old-completed', 'new-completed']);
+    } finally { rmSync(queueDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
+  });
+
+  it.each(['malformed', 'unknown-schema'])('history %s 備份失敗保留 done journal，重啟後只補記而不重跑交付', mode => {
+    const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-history-backup-recovery-'));
+    try {
+      const sourcePath = path.join(queueDir, 'source.mxf'); writeFileSync(sourcePath, 'source');
+      const completed = { ...job('new-completed', sourcePath, null), status: JOB_STATUS.DONE };
+      const old = { ...completed, id: 'old-completed' };
+      QueueStore.QueueHistory.append(queueDir, old);
+      const file = QueueStore.QueueHistory.historyPath(queueDir), valid = readFileSync(file, 'utf8');
+      const raw = Buffer.from(mode === 'malformed' ? valid.trimEnd().slice(0, -1) : valid.replace('"version": 1', '"version": 999'));
+      writeFileSync(file, raw); QueueStore.stageTerminalOutcome(queueDir, completed);
+      const state = new ExportQueueState(); state.add(completed);
+      const queue = makeQueue(queueDir, state, QueueStore, { history: QueueStore.QueueHistory });
+      const original = fs.writeFileSync;
+      fs.writeFileSync = (target, ...args) => {
+        if (String(target).startsWith(file + '.corrupt-')) throw Object.assign(new Error('backup temporarily locked'), { code: 'EACCES' });
+        return original(target, ...args);
+      };
+      try { expect(queue.finalizeTerminalOutcome(completed)).toBe(false); }
+      finally { fs.writeFileSync = original; }
+      expect(readFileSync(file)).toEqual(raw);
+      expect(QueueStore.loadTerminalOutcomes(queueDir).map(entry => entry.id)).toEqual(['new-completed']);
+      let runs = 0;
+      const restored = new ExportQueueState();
+      makeQueue(queueDir, restored, QueueStore, { history: QueueStore.QueueHistory, runJob: async () => { runs++; } }).restoreJobs();
+      expect(runs).toBe(0);
+      expect(restored.jobs().map(entry => [entry.id, entry.status])).toEqual([['new-completed', JOB_STATUS.DONE]]);
+      expect(QueueStore.loadTerminalOutcomes(queueDir)).toEqual([]);
+      const backups = fs.readdirSync(queueDir).filter(name => name.startsWith('history.json.corrupt-'));
+      expect(backups).toHaveLength(1);
+      expect(readFileSync(path.join(queueDir, backups[0]))).toEqual(raw);
+    } finally { rmSync(queueDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
+  });
+
   it('stopping tombstone 無法安全寫回 queued snapshot 時，關機會被拒絕直到可跨重啟恢復', async () => {
     const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-queue-shutdown-snapshot-'));
     try {
@@ -118,6 +253,8 @@ describe('匯出佇列 outcome 跨重啟復原', () => {
 
       await expect(queue.prepareForShutdown()).rejects.toThrow(/終態.*journal|安全關閉/);
       expect(queue.shuttingDown).toBe(false);
+      await queue.cancelShutdown();
+      expect(queue.isPaused).toBe(true);
       expect(state.get(failedJob.id)).toMatchObject({ status: JOB_STATUS.RUNNING });
       expect(JSON.parse(readFileSync(QueueStore.jobPath(queueDir, failedJob.id), 'utf8'))).toMatchObject({
         status: JOB_STATUS.RUNNING,

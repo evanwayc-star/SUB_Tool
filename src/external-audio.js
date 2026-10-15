@@ -29,8 +29,10 @@
 
 import { audioLimiterSnapshot, audioMotherPath, restoreAudioLimiterState } from '../shared/audio-loudness.cjs';
 import { fadeWindow } from '../shared/clip-fade.cjs';
+import { sourceTime, timelineTime } from './sequence-time.js';
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const nonNeg = v => Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : 0;
+const assetSpeed = asset => Number.isFinite(Number(asset?.speed)) && Number(asset.speed)>0 ? Number(asset.speed) : 1;
 
 let _audioSourceSeq = 1;
 function makeAudioSourceId(){
@@ -58,14 +60,23 @@ function assetRange(asset){
   const rawOut = Number(asset?.out ?? asset?.trimEnd);
   let outPoint = Number.isFinite(rawOut) ? Math.max(inPoint, rawOut) : duration;
   if (duration > 0) outPoint = Math.min(outPoint, duration);
-  return { offset, in: inPoint, out: outPoint, length: Math.max(0, outPoint - inPoint), duration };
+  const speed=assetSpeed(asset);
+  return { offset, in: inPoint, out: outPoint, length: Math.max(0, outPoint - inPoint)/speed, duration, speed, reverse:!!asset?.reverse };
+}
+
+/* Source coordinates remain in mother-media seconds after unlinking a video. */
+function externalSourceTime(asset, timelineTime){
+  return sourceTime(Number(timelineTime)||0,assetRange(asset));
+}
+function externalTimelineTime(asset, sourceTime){
+  return timelineTime(Number(sourceTime),assetRange(asset));
 }
 
 /* 對 State / History 暴露的只會是純資料（不變量④）。 */
 function serializeAsset(asset){
   if (!asset) return null;
   const plain={};
-  for(const key of ['id','kind','name','audioSourceId','timelineLaneId','audioSrc','source','offset','in','out','duration','gain','fadeIn','fadeOut','fadeSourceOffset','fadeSourceLength','enabled','locked','height','preferCache']){
+  for(const key of ['id','kind','name','audioSourceId','timelineLaneId','audioSrc','source','offset','in','out','duration','speed','reverse','gain','fadeIn','fadeOut','fadeSourceOffset','fadeSourceLength','enabled','locked','height','preferCache']){
     if(asset[key]!==undefined) plain[key]=asset[key];
   }
   return { ...plain, path:audioMotherPath(asset), ...audioLimiterSnapshot(asset), descriptors: (asset.descriptors || []).map(channel => ({ ...channel })) };
@@ -84,6 +95,8 @@ export function normalizeExternalAudioData(details = {}){
     audioSourceId,
     timelineLaneId:(typeof details.timelineLaneId==='string'&&details.timelineLaneId.trim())||audioSourceId,
     offset:range.offset,in:range.in,out:range.out,duration:range.duration,
+    ...(range.speed!==1?{speed:range.speed}:{}),
+    ...(range.reverse?{reverse:true}:{}),
     gain:nonNeg(details.gain??1),
     fadeIn:Math.min(nonNeg(details.fadeIn),fadeLength),
     fadeOut:Math.min(nonNeg(details.fadeOut),fadeLength),
@@ -175,6 +188,8 @@ class ExternalAudioLibrary {
     asset.offset = range.offset;
     asset.in = range.in;
     asset.out = range.out;
+    if(range.speed!==1) asset.speed=range.speed; else delete asset.speed;
+    if(range.reverse) asset.reverse=true; else delete asset.reverse;
     asset.gain = Math.max(0, Number(asset.gain == null ? 1 : asset.gain) || 0);
     // 切片保存母段的淡化視窗，不能以較短的片段長度重新縮放曲線。
     const normalized=normalizeExternalAudioData(asset);
@@ -212,11 +227,13 @@ class ExternalAudioLibrary {
     const isStart = ['start', 'left', 'in', 'head'].includes(String(edge || '').toLowerCase());
     if (isStart) {
       const newOffset = clamp(t, 0, range.offset + range.length - MIN);
-      asset.in = clamp(range.in + (newOffset - range.offset), 0, range.out - MIN);
-      if(asset.fadeSourceLength!=null) asset.fadeSourceOffset=nonNeg(asset.fadeSourceOffset)+(asset.in-range.in);
+      if(range.reverse) asset.out=clamp(externalSourceTime(asset,newOffset),range.in+MIN*range.speed,range.duration||Infinity);
+      else asset.in = clamp(externalSourceTime(asset,newOffset), 0, range.out - MIN*range.speed);
+      if(asset.fadeSourceLength!=null) asset.fadeSourceOffset=nonNeg(asset.fadeSourceOffset)+(newOffset-range.offset);
       asset.offset = newOffset;
     } else {
-      asset.out = clamp(range.in + (t - range.offset), range.in + MIN, range.duration || Infinity);
+      if(range.reverse) asset.in=clamp(externalSourceTime(asset,t),0,range.out-MIN*range.speed);
+      else asset.out = clamp(externalSourceTime(asset,t), range.in + MIN*range.speed, range.duration || Infinity);
     }
     return asset;
   }
@@ -285,23 +302,25 @@ class ExternalAudioLibrary {
     const t = nonNeg(timelineTime);
     const MIN = this.minLength(range);
     if (range.length <= MIN || t <= range.offset + MIN || t >= range.offset + range.length - MIN) return null;
-    const cut = range.in + (t - range.offset);
+    const cut = externalSourceTime(asset,t);
     const fadeSourceOffset=nonNeg(asset.fadeSourceOffset);
     const fadeSourceLength=fadeWindow(asset).length;
     return {
       asset,
       cut,
       // 還原用：右段建立失敗時要能把左段原封不動放回去
-      previous: { out: asset.out, fadeOut: asset.fadeOut, fadeSourceOffset:asset.fadeSourceOffset, fadeSourceLength:asset.fadeSourceLength },
-      left: { out: cut, fadeOut:asset.fadeOut, fadeSourceOffset, fadeSourceLength },
+      previous: { in:asset.in, out: asset.out, fadeOut: asset.fadeOut, fadeSourceOffset:asset.fadeSourceOffset, fadeSourceLength:asset.fadeSourceLength },
+      left: { ...(range.reverse?{in:cut}:{out:cut}), fadeOut:asset.fadeOut, fadeSourceOffset, fadeSourceLength },
       right: {
         name: asset.name,
         timelineLaneId: asset.timelineLaneId || asset.audioSourceId,
         height: asset.height,
         duration: asset.duration,
         offset: t,
-        in: cut,
-        out: range.out,
+        in: range.reverse?range.in:cut,
+        out: range.reverse?cut:range.out,
+        ...(range.speed!==1?{speed:range.speed}:{}),
+        ...(range.reverse?{reverse:true}:{}),
         gain: asset.gain,
         ...audioLimiterSnapshot(asset),
         fadeIn: asset.fadeIn,
@@ -329,7 +348,7 @@ class ExternalAudioLibrary {
     const range = assetRange(asset);
     const t = nonNeg(timelineTime);
     if (t < range.offset || !(range.length > 0) || t >= range.offset + range.length) return null;
-    return range.in + (t - range.offset);
+    return externalSourceTime(asset,t);
   }
 
   /* 即使被靜音，素材仍佔著時間軸長度——輸出的黑畫面／總長不能因 Mute 縮短。 */
@@ -388,6 +407,8 @@ class ExternalAudioLibrary {
     asset.offset = source.offset;
     asset.in = source.in;
     asset.out = source.out;
+    if(source.speed!=null) asset.speed=source.speed; else delete asset.speed;
+    if(source.reverse) asset.reverse=true; else delete asset.reverse;
     asset.duration = Math.max(0, Number(source.duration) || asset.duration || 0);
     asset.gain = source.gain;
     asset.fadeIn = source.fadeIn;
@@ -403,4 +424,4 @@ class ExternalAudioLibrary {
   }
 }
 
-export { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset, assetRange };
+export { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset, assetRange, externalSourceTime, externalTimelineTime };

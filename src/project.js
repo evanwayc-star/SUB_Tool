@@ -28,6 +28,7 @@ import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { drawTimeline } from './timeline-renderer.js';
 import { History } from './history.js';
+import { snapAllCuesToFrames } from './subtitle-model.js';
 import { renderNotes } from './notes.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
@@ -35,7 +36,7 @@ import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinP
   presetIdentity, validPresetList, normalizeStyleRecord, normalizeStyleValue } from './substyle.js';
 import { ProjectLoadSession } from './project-intake-engine.js';
 import { clearAsrSession } from './speech-recognition-session.js';
-import { normalizeExternalAudioData } from './external-audio.js';
+import { normalizeExternalAudioData, assetRange } from './external-audio.js';
 import { audioLimiterSnapshot, audioMotherPath } from '../shared/audio-loudness.cjs';
 export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
 const PROJECT_APP = 'SUB Tool';
@@ -103,10 +104,44 @@ function validateProjectIntegrity(projectData) {
   if (projectData.fps !== undefined && (!Number.isFinite(Number(projectData.fps)) || Number(projectData.fps) <= 0)) {
     errors.push('專案 FPS 必須為大於 0 的數值');
   }
-  for (const key of ['tracks', 'cues', 'clips']) {
+  for (const key of ['tracks', 'cues', 'clips', 'videoTracks', 'notes']) {
+    if(projectData[key]===undefined && ['videoTracks','notes'].includes(key)) continue;
     if (!Array.isArray(projectData[key])) errors.push(`專案 ${key} 必須為陣列`);
+    else if(projectData[key].some(item=>!isRecord(item))) errors.push(`專案 ${key} 成員必須為 JSON 物件`);
+  }
+  // State stores tracks as dense Arrays: index + 1 must fit the maximum
+  // Array length. This is a representation limit, not a UI track-count cap.
+  const maxTrackCount=0xffffffff;
+  const fitsTrackDomain=(value,max)=>Number.isSafeInteger(Number(value))&&Number(value)<=max;
+  const maxCueTrack=Number(projectData.version)===1?maxTrackCount-1:maxTrackCount;
+  if(projectData.trackCount!=null && !fitsTrackDomain(projectData.trackCount,maxTrackCount)) errors.push('專案字幕軌數超出可表示的整數範圍');
+  if(projectData.videoTrackCount!=null && !fitsTrackDomain(projectData.videoTrackCount,maxTrackCount)) errors.push('專案視訊軌數超出可表示的整數範圍');
+  if(Array.isArray(projectData.cues) && projectData.cues.some(cue=>isRecord(cue) && cue.track!=null && !fitsTrackDomain(cue.track,maxCueTrack))) errors.push('字幕軌索引超出可表示的整數範圍');
+  if(Array.isArray(projectData.clips) && projectData.clips.some(clip=>isRecord(clip) && clip.vtrack!=null && !fitsTrackDomain(clip.vtrack,maxTrackCount-1))) errors.push('片段視訊軌索引超出可表示的整數範圍');
+  if(!errors.length){
+    const plan=_projectTrackExpansion(projectData);
+    if(plan.implicitCount>MAX_IMPLICIT_PROJECT_TRACKS)
+      errors.push(`專案需要補建 ${plan.implicitCount} 筆未宣告的空軌，超過 ${MAX_IMPLICIT_PROJECT_TRACKS} 筆載入額度；請在 tracks／videoTracks 提供完整軌道資料`);
   }
   return { valid: errors.length === 0, errors };
+}
+
+// Legacy projects can omit empty track records. Bound that implicit work rather
+// than all tracks: explicitly saved records remain linear in the input size and
+// are never truncated to the UI's suggested track count. This is an allocation
+// budget shared by subtitle and video restoration, not an Array or UI limit.
+const MAX_IMPLICIT_PROJECT_TRACKS=1024;
+function _restoredCueTrack(cue,version){
+  const track=Number(cue.track)||0;
+  return Number(version)===1?track:Math.max(0,track-1);
+}
+function _projectTrackExpansion(data){
+  const subtitleRecords=data.tracks.length,videoRecords=arrayOrEmpty(data.videoTracks).length;
+  let trackCount=Math.max(1,subtitleRecords,Number(data.trackCount)||0);
+  let videoTrackCount=Math.max(1,videoRecords,Number(data.videoTrackCount)||0);
+  for(const cue of data.cues) trackCount=Math.max(trackCount,_restoredCueTrack(cue,data.version)+1);
+  for(const clip of data.clips) videoTrackCount=Math.max(videoTrackCount,(Number(clip.vtrack)||0)+1);
+  return {trackCount,videoTrackCount,implicitCount:trackCount-subtitleRecords+videoTrackCount-videoRecords};
 }
 
 
@@ -165,11 +200,8 @@ function _normalExternalAudioSources(rawSources){
 }
 function _externalAudioEnd(sources){
   return (Array.isArray(sources)?sources:[]).reduce((end,source)=>{
-    const offset=Math.max(0,Number(source?.offset)||0);
-    const inPoint=Math.max(0,Number(source?.in??source?.trimStart)||0);
-    const rawOut=Number(source?.out??source?.trimEnd??source?.duration);
-    const out=Number.isFinite(rawOut)?Math.max(inPoint,rawOut):inPoint;
-    return Math.max(end,offset+Math.max(0,out-inPoint));
+    const range=assetRange(source);
+    return Math.max(end,range.offset+range.length);
   },0);
 }
 
@@ -194,9 +226,20 @@ function _savedClips(){
 function _normalisedProjectData(rawData){
   const data=migrateProjectSchema(rawData);
   const integrity=validateProjectIntegrity(data);
-  if(integrity.valid) return data;
+  if(integrity.valid){
+    // The same plan is idempotent when load* passes its document to apply again.
+    // All expansion is admitted before generation, font dialogs or live state.
+    const plan=_projectTrackExpansion(data);
+    data.trackCount=plan.trackCount;
+    data.videoTrackCount=plan.videoTrackCount;
+    // Persisted numeric strings are legal legacy input, but `vtrack + 1`
+    // must mean the next track, not string concatenation during restoration.
+    for(const clip of data.clips) if(clip.vtrack!=null) clip.vtrack=Number(clip.vtrack);
+    for(const cue of data.cues) if(cue.track!=null) cue.track=Number(cue.track);
+    return data;
+  }
   console.warn('invalid project document:',integrity.errors);
-  showToast('專案檔格式不完整，無法開啟');
+  showToast(integrity.errors.find(error=>error.includes('補建'))||'專案檔格式不完整，無法開啟');
   return null;
 }
 
@@ -692,8 +735,6 @@ const Project = {
     _saveEpoch++;
     _autoRelinkNeedsSave = false;
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
-    // Fix #19：明確排除 undefined/null，避免 version:0 被誤判為 v1（0 是 falsy）
-    const isV1 = data.version === undefined || data.version === null || data.version === 1;
     // Media.reset() 會釋放播放器資源，但不覆寫專案顯示名稱／路徑；讀取新專案時
     // 必須以檔案內 metadata 取代它，否則「純音訊」或主影片遺失的專案下次儲存
     // 可能錯把前一個專案的影片路徑寫回去。
@@ -703,17 +744,16 @@ const Project = {
     State.mediaPath=IS_DESKTOP&&typeof savedMedia.path==='string'&&savedMedia.path?savedMedia.path:null;
     const mediaRelink=!!(State.mediaPath||State.mediaName);
     State.cues=(data.cues||[]).map(c=>{
-      let tk = c.track||0;
-      if (!isV1 && c.track !== undefined) tk = Math.max(0, c.track - 1);
+      const tk=_restoredCueTrack(c,data.version);
       const style=normalizeStyleRecord(c.style);
       return {id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:tk,timed:c.timed!==false,
         ...(style&&Object.keys(style).length?{style}:{})}; // v4.23 逐句樣式覆蓋
     });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
-    const maxTk=State.cues.length > 0 ? State.cues.reduce((m,c)=>Math.max(m,c.track||0),0) : -1;
+    snapAllCuesToFrames();
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map(_restoreSubtitleTrack);
     else State.tracks=[];
-    ensureTrackCount(Math.max(data.trackCount!==undefined?data.trackCount:1, maxTk+1));
+    ensureTrackCount(data.trackCount);
     State.notes=(data.notes||[]).map(n=>({id:newId(),time:n.time||0,text:n.text||'',done:!!n.done}));
 
     // v3 專案音訊資料；v1/v2 沒有可可靠還原的來源聲道資訊，安全遷移為空的 auto 專案。
@@ -757,7 +797,8 @@ const Project = {
     if(Array.isArray(data.videoTracks) && data.videoTracks.length)
       State.videoTracks = data.videoTracks.map((t,i)=>({name:t.name||('視訊軌 '+(i+1)),visible:t.visible!==false,locked:!!t.locked,...trackHeight(t,24),
         ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})}));
-    else { resetVideoTracks(); ensureVideoTrackCount(Math.max(1, data.videoTrackCount || 1)); }
+    else resetVideoTracks();
+    ensureVideoTrackCount(data.videoTrackCount);
     // 視訊軌收合屬於專案工作區狀態；舊專案沒有此欄位時維持原本的展開預設。
     State.vtracksCollapsed=data.vtracksCollapsed===true;
     const pendingClips = (Array.isArray(data.clips) && data.clips.length) ? data.clips.map(raw=>{
@@ -777,15 +818,15 @@ const Project = {
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes();
     return true;
   },
-  load(file){
-    return _queueProjectLoad(generation=>this._load(file,generation));
-  },
-  async _load(file,generation){
+  async load(file){
+    const request=++_openRequestGeneration,generation=_projectLoadSession.generation;
     const buf=await readFile(file);
-    if(!_isCurrentProjectLoad(generation)) return;
-    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(buf))); }catch(e){ showToast('無法解析專案檔'); return; }
-    if(!data) return;
-    
+    if(request!==_openRequestGeneration || !_isCurrentProjectLoad(generation)) return false;
+    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(buf))); }catch(e){ showToast('無法解析專案檔'); return false; }
+    if(!data) return false;
+    return _queueProjectLoad(next=>this._load(data,next));
+  },
+  async _load(data,generation){
     if(!await _confirmProjectFonts(data,generation)) return;
 
     // 載入另一個專案必須先清掉舊的 runtime 媒體。尤其當新專案的主影片暫時
@@ -809,12 +850,11 @@ const Project = {
     await _projectLoadSession.restoreMedia(generation,{kind:'deferred'});
   },
   loadDesktop(r){
-    return _queueProjectLoad(generation=>this._loadDesktop(r,generation));
+    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(b64ToBytes(r.b64).buffer))); }catch(e){ showToast('無法解析專案檔'); return Promise.resolve(false); }
+    if(!data) return Promise.resolve(false);
+    return _queueProjectLoad(generation=>this._loadDesktop(r,data,generation));
   },
-  async _loadDesktop(r,generation){
-    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(b64ToBytes(r.b64).buffer))); }catch(e){ showToast('無法解析專案檔'); return; }
-    if(!data) return;
-    
+  async _loadDesktop(r,data,generation){
     if(!await _confirmProjectFonts(data,generation)) return;
 
     const autoRelinked = await _autoRelinkMissingMedia(data, r.path);

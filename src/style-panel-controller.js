@@ -1,6 +1,6 @@
 import { $, sublist } from './dom.js';
 import { State, cueSuffix } from './state.js';
-import { effStyle, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot, presetIdentity, capturePresetUpdate } from './substyle.js';
+import { effStyle, normalizeStyleValue, styleNumberBounds, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot, presetIdentity, capturePresetUpdate } from './substyle.js';
 import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from './subtitle-style-engine.js';
 import { applyCueStylePatch, applyTrackStylePlan } from './subtitles.js';
 import { History, recordHistory, syncCompareSnapshot } from './history.js';
@@ -175,7 +175,6 @@ async function openCueEditModal(c){
   if (request !== cueEditRequest || State.cues.find(item=>item.id===c.id)!==c || State.tracks[c.track||0]!==track) return;
   const owner=beginCueEdit(c);
   if(!owner) return;
-  let covCleared=false;
   const ownsCue = () => request===cueEditRequest && owner.isCurrent();
   const current = () => session.isCurrent() && ownsCue();
   const orig=c.text||'';
@@ -195,7 +194,7 @@ async function openCueEditModal(c){
   const mkBlock=(label,text,btnId)=>
     `<div style="margin-bottom:12px">`+
       `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">`+
-        `<span style="font-size:12px;color:var(--text-faint)">${label}</span>`+
+        `<span style="font-size:12px;color:var(--text-faint)">${escapeHTML(label)}</span>`+
         `<button id="${escapeHTML(btnId)}" style="font-size:11px;padding:1px 7px">複製</button>`+
       `</div>`+
       `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;min-height:2.2em">`+
@@ -205,47 +204,48 @@ async function openCueEditModal(c){
 
   const sibHtml=siblings.map(s=>mkBlock('軌道：'+s.trackName,s.text,'cueEditCopySib'+s.tkIdx)).join('');
 
-  // v4.23 逐句樣式覆蓋：欄位定義（key, 標籤, 類型）——bool 用 select(開/關)、其餘勾選＋輸入
-  const COV_FIELDS=[
+  // 直接編輯此句的生效樣式；未修改的欄位仍沿用原有設定。
+  const STYLE_FIELDS=[
     ['color','顏色','color'],['fontSize','字級','num'],['bold','粗體','bool'],['italic','斜體','bool'],
     ['outline','框線','num'],['outlineColor','框線色','color'],['shadow','陰影','num'],
     ['letterSpacing','字距','num'],['lineSpacing','行距','num'],['font','字型','text'],['vertical','直書','bool'],
   ];
   const effNow=effStyle(c, State.tracks[trackIdx]||null);
-  const covRow=([k,label,type])=>{
-    const has=!!(c.style&&c.style[k]!=null);
-    const v=has?c.style[k]:effNow[k];
+  const styleRow=([k,label,type])=>{
+    const v=effNow[k];
     let inp;
-    if(type==='color') inp=`<input type="color" id="covV_${k}" value="${v}" style="width:26px;height:20px;padding:0">`;
-    else if(type==='num') inp=`<input type="number" id="covV_${k}" value="${v}" step="${k==='lineSpacing'?0.1:0.5}" style="width:56px">`;
-    else if(type==='bool') inp=`<select id="covV_${k}"><option value="1"${v?' selected':''}>開</option><option value="0"${!v?' selected':''}>關</option></select>`;
-    else inp=`<input type="text" id="covV_${k}" value="${escapeHTML(String(v))}" style="width:90px">`;
-    return `<label style="display:flex;align-items:center;gap:4px;white-space:nowrap"><input type="checkbox" id="covK_${k}"${has?' checked':''}>${label}</label>${inp}`;
+    if(type==='color') inp=`<input type="color" id="cueStyle_${k}" value="${v}" style="width:26px;height:20px;padding:0">`;
+    else if(type==='num'){
+      const [min,max]=styleNumberBounds(k);
+      inp=`<input type="number" id="cueStyle_${k}" value="${v}" min="${min}" max="${max}" step="${k==='lineSpacing'?0.1:0.5}" style="width:56px">`;
+    }
+    else if(type==='bool') inp=`<select id="cueStyle_${k}"><option value="1"${v?' selected':''}>開</option><option value="0"${!v?' selected':''}>關</option></select>`;
+    else inp=`<input type="text" id="cueStyle_${k}" value="${escapeHTML(String(v))}" style="width:90px">`;
+    return `<label for="cueStyle_${k}" style="white-space:nowrap">${label}</label>${inp}`;
   };
-  const covHtml=
-    `<details id="cueStyleOv"${c.style?' open':''} style="margin-top:10px;border:1px solid var(--border);border-radius:4px;padding:6px 8px">`+
-    `<summary style="cursor:pointer;font-size:12px;color:var(--text-faint)">✱ 樣式覆蓋（僅此句；未勾選＝繼承軌道樣式）</summary>`+
+  const styleHtml=
+    `<details id="cueStyleEditor" open style="margin-top:10px;border:1px solid var(--border);border-radius:4px;padding:6px 8px">`+
+    `<summary style="cursor:pointer;font-size:12px;color:var(--text-faint)">修改樣式（此句）</summary>`+
     `<div style="display:grid;grid-template-columns:auto auto auto auto;gap:8px 14px;padding:10px 2px 4px;font-size:12px;align-items:center">`+
-    COV_FIELDS.map(covRow).join('')+
-    `</div><button id="covClear" style="font-size:11px;margin-top:6px">清除全部覆蓋</button></details>`;
+    STYLE_FIELDS.map(styleRow).join('')+
+    `</div></details>`;
   const doConfirm=()=>{
     if(!current()) return;
     const ta=$('cueEditTa');
     if(!ta) return;
     let val=ta.innerText;
     if(val.endsWith('\n') && !orig.endsWith('\n')) val=val.slice(0,-1);
-    // 收集樣式覆蓋（勾選的欄位）。
-    // ── 這裡是把 c.style【整個重建】，所以本視窗沒有控件的覆蓋欄位必須先原樣搬過來：
-    //    座標／角度是在預覽窗拖出來的，這裡沒有對應欄位，不保留的話「開一下視窗按確定」
-    //    就會把拖好的位置與角度默默清掉（angle 自 v4.27 起即有此問題）。
-    //    使用者若要清掉它們，走「清除全部覆蓋」（見下方 covClear，會連同這些一起清）。
-    const style={};
-    const managed=new Set(COV_FIELDS.map(f=>f[0]));
-    if(c.style && !covCleared) for(const k of CUE_STYLE_KEYS){ if(!managed.has(k) && c.style[k]!=null) style[k]=c.style[k]; }
-    for(const [k,,type] of COV_FIELDS){
-      const on=$('covK_'+k), vi=$('covV_'+k);
-      if(!on||!on.checked||!vi) continue;
-      style[k]= type==='num' ? +vi.value : type==='bool' ? (vi.value==='1') : vi.value;
+    // 以開窗時的原有樣式為草稿，只提交真正改動的欄位。
+    // 座標／角度等未提供控件的設定不重建；owner 逐欄合併期間的背景提交。
+    const style={...owner.baseline.style};
+    for(const [k,label,type] of STYLE_FIELDS){
+      const vi=$('cueStyle_'+k);
+      if(!vi) continue;
+      const raw=type==='num' ? (vi.value.trim()==='' ? NaN : +vi.value) : type==='bool' ? (vi.value==='1') : vi.value;
+      if(Object.is(raw,effNow[k])) continue;
+      const value=normalizeStyleValue(k,raw,true);
+      if(value==null){ showToast(label+'的樣式值無效'); return; }
+      style[k]=value;
     }
     const result=owner.commit({text:val,style});
     if(result.ok) session.close({committed:true});
@@ -257,7 +257,7 @@ async function openCueEditModal(c){
     mkBlock('原文',orig,'cueEditCopy')+
     `<div style="font-size:12px;color:var(--text-faint);margin-bottom:4px">修改 <span style="font-size:10px;opacity:.5">（Enter 確認 · Shift+Enter 換行）</span></div>`+
     `<div id="cueEditTa" contenteditable="true" style="width:100%;min-height:5em;border:1px solid var(--border);border-radius:4px;background:var(--bg);font-size:14px;font-family:inherit;padding:6px;box-sizing:border-box;color:var(--text);overflow-y:auto;outline:none"></div>`+
-    covHtml+
+    styleHtml+
     `</div>`,
     [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:()=>session.close()}],
     { keepVideo:true, onDismiss:owner.cancel, onReplaced:owner.cancel }); // 對話框靠右停、遮罩透明、不隱藏 mpv → 編輯時看得到後面的畫面
@@ -319,15 +319,8 @@ async function openCueEditModal(c){
     });
     const copyBtn=$('cueEditCopy');
     if(copyBtn) copyBtn.addEventListener('click',()=>{ navigator.clipboard.writeText(orig).then(()=>{copyBtn.textContent='已複製';setTimeout(()=>copyBtn.textContent='複製',1500);}); });
-    // 樣式覆蓋區：清除鈕＋鍵盤事件不外洩（避免觸發全域快捷鍵）
-    const ov=$('cueStyleOv');
-    if(ov){
-      ov.addEventListener('keydown',e=>e.stopPropagation());
-      const cl=$('covClear');
-      // 「清除全部覆蓋」也清掉本視窗沒有控件的座標／角度。
-      if(cl) cl.addEventListener('click',e=>{ e.preventDefault(); if(!current()) return; covCleared=true;
-        ov.querySelectorAll('input[type=checkbox]').forEach(x=>x.checked=false); });
-    }
+    // 樣式欄位的鍵盤事件不外洩，避免觸發全域快捷鍵。
+    $('cueStyleEditor')?.addEventListener('keydown',e=>e.stopPropagation());
   },30);
 }
 
@@ -362,8 +355,6 @@ let _tsSetTarget = null;
     clearTimeout(_tsSetTimer);
     _tsSetTimer = setTimeout(() => { _tsSetOwner = null; _tsSetTarget = null; }, 500);
   };
-  $('tsSize').addEventListener('input',e=>tsSet('fontSize', clamp(+e.target.value,10,300)));
-  $('tsSize').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   // 座標改為直接輸入百分比
   ['tsPosX','tsPosY'].forEach(id=>{
     const isX = id==='tsPosX', key = isX ? 'posX' : 'posY';
@@ -373,7 +364,9 @@ let _tsSetTarget = null;
     $(id).addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} });
   });
   $('tsColor').addEventListener('input',e=>tsSet('color', e.target.value));
-  const tsNum=(id,k,lo,hi)=>{ const el=$(id); if(!el)return;
+  const tsNum=(id,k)=>{ const el=$(id); if(!el)return;
+    const [lo,hi]=styleNumberBounds(k);
+    el.min=lo; el.max=hi;
     el.addEventListener('input',e=>tsSet(k, clamp(+e.target.value, lo, hi)));
     el.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();e.target.blur();} }); };
   const tsToggle=(id,k)=>{ const el=$(id); if(!el)return;
@@ -386,9 +379,9 @@ let _tsSetTarget = null;
         tsSet('bgAlpha', 0.5);
       }
     }); };
-  tsNum('tsOutline','outline',0,10); tsNum('tsShadow','shadow',0,10);
-  tsNum('tsAngle','angle',-180,180); // 旋轉角度（度，順時針為正；繞錨點）
-  tsNum('tsSpacing','letterSpacing',0,100); tsNum('tsLineSp','lineSpacing',1,100);
+  tsNum('tsSize','fontSize'); tsNum('tsOutline','outline'); tsNum('tsShadow','shadow');
+  tsNum('tsAngle','angle'); // 旋轉角度（度，順時針為正；繞錨點）
+  tsNum('tsSpacing','letterSpacing'); tsNum('tsLineSp','lineSpacing');
   $('tsOutlineColor').addEventListener('input',e=>tsSet('outlineColor',e.target.value));
   $('tsBgColor').addEventListener('input',e=>tsSet('bgColor',e.target.value));
   $('tsBgAlpha').addEventListener('input',e=>tsSet('bgAlpha', clamp(+e.target.value,0,100)/100));

@@ -121,7 +121,8 @@ export function createPreviewDrag(deps = {}) {
     const clip = Seq.byId(id);
     const rect = ctx.getStageRect();
     if(_imgDrag || !clip || !Seq.isStill(clip) || !rect?.w || !rect?.h) return false;
-    const edit=beginGeometryEdit({target:clip,beginPreview:ctx.beginPreview,recordHistory:ctx.recordHistory});
+    const edit=beginGeometryEdit({target:clip,
+      beginPreview:(targets,owns)=>ctx.beginPreview(targets,owns,cancelImageDrag),recordHistory:ctx.recordHistory});
     if(!edit) return false;
     _imgDrag = {
       clip, rect, x0:x, y0:y, pointerId, captureTarget,
@@ -301,7 +302,8 @@ export function createPreviewDrag(deps = {}) {
       const rotation=e.altKey || !!e.target.closest('.rot');
       const edit=beginGeometryEdit({kind:presetEdit?'draft':'cue',target:presetEdit? presetEdit.draft : cue,
         fields:rotation?['angle']:['posX','posY'],owns:()=>!presetEdit || ctx.getPresetEdit()===presetEdit,
-        beginPreview:ctx.beginPreview,recordHistory:ctx.recordHistory});
+        beginPreview:(targets,owns)=>ctx.beginPreview(targets,owns,()=>subDragEnd({pointerId:_subDrag?.pointerId},true)),
+        recordHistory:ctx.recordHistory});
       if(!edit) return;
       _subDrag = { cue, rect, rot:rotation, edit, x0: e.clientX, y0: e.clientY,
         pointerId: e.pointerId, presetEdit,

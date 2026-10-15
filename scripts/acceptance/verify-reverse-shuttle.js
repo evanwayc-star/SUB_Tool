@@ -136,6 +136,7 @@ async function samplePresentation(client) {
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
+    '--subtool-transport-acceptance',
     '--no-sandbox',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',

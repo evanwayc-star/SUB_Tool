@@ -1,4 +1,4 @@
-/* 已完成匯出的紀錄（electron/queue-history.js）。
+/* 已完成匯出的紀錄（electron/queue-store.js 的 QueueHistory）。
 
    使用者要的是「關掉軟體後，已完成的佇列紀錄還在，我要留著檢驗」。原本 done 工作
    在完成當下就被 removeArtifacts() 刪掉快照，loadJobs() 也會清掉殘留的 terminal
@@ -9,6 +9,7 @@
    （見 tests/queueStore.test.js）。history 記錄不含 payload.clips／audioPlan，
    本質上就不可執行，因此那條安全性質完全不受影響——下面有一條測試直接鎖住這件事。 */
 import { afterEach, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -41,6 +42,24 @@ const doneJob = (over = {}) => ({
 });
 
 describe('寫入與讀回', () => {
+  it.each(['EIO', 'EACCES'])('讀取 %s 不能把既有history當空並覆寫，解除後可合併新紀錄', code => {
+    const dir = makeDir();
+    QueueHistory.append(dir, doneJob({ id: 'old-completed' }));
+    const file = QueueHistory.historyPath(dir);
+    const before = readFileSync(file);
+    const original = fs.readFileSync;
+    fs.readFileSync = (target, ...args) => {
+      if (target === file) throw Object.assign(new Error('history temporarily unreadable'), { code });
+      return original(target, ...args);
+    };
+    try {
+      expect(() => QueueHistory.append(dir, doneJob({ id: 'new-completed' }))).toThrow('temporarily unreadable');
+    } finally { fs.readFileSync = original; }
+    expect(readFileSync(file)).toEqual(before);
+    QueueHistory.append(dir, doneJob({ id: 'new-completed' }));
+    expect(QueueHistory.load(dir).map(entry => entry.id)).toEqual(['old-completed', 'new-completed']);
+  });
+
   it('完成的工作寫進紀錄後讀得回來', () => {
     const dir = makeDir();
     QueueHistory.append(dir, doneJob());
@@ -151,8 +170,43 @@ describe('移除與清空', () => {
   });
 });
 
-/* 完成紀錄是稽核資料，壞掉時應該安靜地當作沒有，而不是讓整個程式起不來。 */
+/* 顯示壞資料不擋啟動；下一次更新必須先保留原始 bytes，不能視同首次建立。 */
 describe('壞資料一律回空，不擋啟動', () => {
+  it.each([
+    Buffer.from('{"entries":[{"id":"recoverable-completed"}]'),
+    Buffer.from(JSON.stringify({ version: 999, entries: [doneJob({ id: 'future-completed' })] })),
+    Buffer.from(JSON.stringify({ version: 1, entries: { id: 'wrong-shape' } })),
+    Buffer.from([0xff, 0xfe, 0x80, 0x00]),
+  ])('追加新完成紀錄前保存不認識的原始 bytes (%j)', raw => {
+    const dir = makeDir(), file = QueueHistory.historyPath(dir);
+    writeFileSync(file, raw);
+    expect(QueueHistory.load(dir)).toEqual([]);
+    expect(fs.readdirSync(dir)).toEqual(['history.json']);
+    QueueHistory.append(dir, doneJob({ id: 'new-completed' }));
+    const backups = fs.readdirSync(dir).filter(name => name.startsWith('history.json.corrupt-'));
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(path.join(dir, backups[0]))).toEqual(raw);
+    expect(QueueHistory.load(dir).map(entry => entry.id)).toEqual(['new-completed']);
+    QueueHistory.append(dir, doneJob({ id: 'next-completed' }));
+    expect(fs.readdirSync(dir).filter(name => name.startsWith('history.json.corrupt-'))).toEqual(backups);
+  });
+
+  it('原始資料備份寫入失敗時保留 history，解除後可重試', () => {
+    const dir = makeDir(), file = QueueHistory.historyPath(dir), raw = Buffer.from('{recoverable original');
+    writeFileSync(file, raw);
+    const original = fs.writeFileSync;
+    fs.writeFileSync = (target, ...args) => {
+      if (String(target).startsWith(file + '.corrupt-')) throw Object.assign(new Error('backup unavailable'), { code: 'EACCES' });
+      return original(target, ...args);
+    };
+    try { expect(() => QueueHistory.append(dir, doneJob())).toThrow('backup unavailable'); }
+    finally { fs.writeFileSync = original; }
+    expect(readFileSync(file)).toEqual(raw);
+    expect(fs.readdirSync(dir)).toEqual(['history.json']);
+    QueueHistory.append(dir, doneJob());
+    expect(QueueHistory.load(dir)).toHaveLength(1);
+  });
+
   it('沒有檔案時回空陣列', () => {
     expect(QueueHistory.load(makeDir())).toEqual([]);
   });

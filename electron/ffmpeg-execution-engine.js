@@ -307,7 +307,7 @@ function buildIngestArgs({
   if (fc && fc.length) args.push('-filter_complex', fc.join(';'));
 
   if (needsProxy && proxyPath) {
-    let vf = 'scale=-2:720,format=yuv420p';
+    let vf = 'setpts=PTS-STARTPTS,scale=-2:720,format=yuv420p';
     const vencArgs = previewVideoEncoderArgs(encoder);
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
 

@@ -35,7 +35,7 @@ const { createScreenshotOutput } = require('./screenshot-output');
 const { createIpcGuards, expectedExportExtension, mergeRendererConfig } = require('./ipc-guards');
 const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput } = require('./export-queue');
 const { createMpvHost } = require('./mpv-host');
-const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('./media-intake-runtime');
+const { createMediaIntakeRuntime, createMediaIngestCoordinator, sourceAudioClockFilter } = require('./media-intake-runtime');
 const { createCompareWindow } = require('./compare-window');
 const { createMediaProbe } = require('./media-probe');
 const { createClipFrameCache, validateClipFrameRequest } = require('./clip-frame-cache');
@@ -138,7 +138,7 @@ function detectVideoEncoder() {
 }
 /* 依選定編碼器回傳「轉檔預覽影片」用的視訊參數（品質導向、yuv420p 由呼叫端的 -vf 負責） */
 
-/* 鐵律 §0.8 的守門員。規則本身在 export-admission.js（可測），這裡只是轉呼叫，
+/* 鐵律 §0.8 的守門員。規則本身在 export-queue.js 的 createExportAdmission（可測），這裡只是轉呼叫，
    保留原名讓既有呼叫端不動。_admission 在下方建立；本函式的呼叫點都在那之後。 */
 function assertMasterExportMedia(file, kind) {
   return _admission.assertMasterMedia(file, kind);
@@ -332,6 +332,7 @@ app.on('before-quit', (event) => {
     .then(async () => {
       for (const controller of audioNormalizationJobs.values()) controller.abort();
       await Promise.all([
+        mediaProbe?.cancelAllAndWait(),
         ffmpegExecution.cancelAllAndWait(),
         speechCompressionRuntime.cancelAllAndWait(),
         vocalWaveformRuntime.cancelAllAndWait(),
@@ -339,23 +340,27 @@ app.on('before-quit', (event) => {
         QueueManager.prepareForShutdown(),
       ]);
       // execution 確認程序 close 後，快取 owner 還須完成來源核對與 staging 清理。
-      await clipAudioCache.waitForIdle();
-      await mediaIntakeRuntime.close();
+      await Promise.all([clipAudioCache.waitForIdle(), clipFrameCache.waitForIdle()]);
       await screenshotOutput.close();
+      // Keep active HTTP readers/URLs intact if a fallible cleanup aborts quit.
+      await mediaIntakeRuntime.close();
     })
     .then(() => {
       _quitReady = true;
       app.quit();
     })
-    .catch(e => {
+    .catch(async e => {
       /* outcome journal 尚未 durable 時不能「照樣退出」：那會遺失唯一知道 ffmpeg
          已結束的 intent，重啟後把舊 running snapshot 當 queued 重新以 -y 執行。 */
       console.error('[Shutdown] 原生工作或匯出狀態尚未安全結清，已取消退出：', e);
-      _quitSequenceStarted = false;
-      _isAppQuitting = false;
+      await screenshotOutput.resume();
+      mediaProbe?.resume();
       ffmpegExecution.resume();
       mediaIngestCoordinator.resume();
       vocalWaveformRuntime.resume();
+      await QueueManager.cancelShutdown();
+      _quitSequenceStarted = false;
+      _isAppQuitting = false;
       const options = {
         type: 'error',
         title: '尚未能安全關閉',
@@ -441,7 +446,7 @@ async function findFileRecursively(dir, targetName, maxDepth = 3) {
   try {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name === targetName) {
+      if (entry.isFile() && entry.name === targetName) {
         return path.join(dir, entry.name);
       }
     }
@@ -668,7 +673,7 @@ function _findExportTimecodeFont() {
 let EXPORT_QUEUE_DIR = null;
 let queueWin = null;
 let QueueManager = null;
-/* 分類的唯一來源在 export-job-status.js */
+/* 分類的唯一來源在 export-queue.js */
 const OUTPUT_RESERVED_STATUSES = { has: reservesOutput };
 
 function ensureExportQueueDir() {
@@ -706,6 +711,10 @@ const clipFrameCache = createClipFrameCache({
 const clipAudioCache = createClipAudioCache({
   cacheRoot: () => path.join(app.getPath('userData'), 'clip-audio'),
   fileAuthority,
+  probe: source => {
+    if (!mediaProbe) throw new Error('找不到 ffprobe');
+    return mediaProbe.describe(source);
+  },
   execute: runFF,
   isClosing: () => _isAppQuitting,
 });
@@ -780,10 +789,20 @@ const speechAudioCompressor = createSpeechAudioCompressor({
   execute: (args, options) => runFF(args, options)
 });
 const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
-const vocalWaveformRuntime = createVocalWaveformRuntime({ getFFmpegPath: () => FFMPEG });
+const vocalWaveformRuntime = createVocalWaveformRuntime({
+  getFFmpegPath: () => FFMPEG,
+  probe: (source, options) => {
+    if (!mediaProbe) throw new Error('找不到 ffprobe');
+    return mediaProbe.describe(source, options);
+  },
+});
 const audioNormalizationRuntime = createAudioNormalizationRuntime({
   createTempPath: tmpPath,
   execute: (args, options) => runFF(args, options),
+  probe: (source, options) => {
+    if (!mediaProbe) throw new Error('找不到 ffprobe');
+    return mediaProbe.describe(source, options);
+  },
   removeFile: async file => {
     try {
       await fs.promises.unlink(file);
@@ -794,7 +813,7 @@ const audioNormalizationRuntime = createAudioNormalizationRuntime({
   },
 });
 
-/* 准入政策（能不能進佇列、需要哪些檔案能力）住在 export-admission.js——
+/* 准入政策（能不能進佇列、需要哪些檔案能力）由 export-queue.js 的 createExportAdmission 擁有——
    那四條規則原本散在這裡，與 BrowserWindow／dialog／spawn 糾纏，因此一行測試都沒有，
    而其中一條正是鐵律 §0.8 的守門員（不可拿 proxy.mp4／chNN.m4a 匯出）。
    外部能力全部由這裡注入，本檔只留「接線」。 */
@@ -1204,8 +1223,9 @@ ipcMain.handle('ffmpeg:extractAudio', async (e, { path: src, idx, duration, code
 
 ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   requireReadablePath('ffmpeg:waveAudio', src);
+  const audio = mediaProbe ? (await mediaProbe.describe(src)).audio[0] : null;
   const out = tmpPath('wav');
-  await runFF(['-y', '-i', src, '-map', '0:a:0', '-ar', '4000', '-c:a', 'pcm_s16le', out],
+  await runFF(['-y', '-i', src, '-map', '0:a:0', '-af', sourceAudioClockFilter(audio), '-ar', '4000', '-c:a', 'pcm_s16le', out],
     { sender: e.sender, duration, jobId: 'wave', label: '產生波形' });
   return out;
 });
@@ -1646,6 +1666,10 @@ const mpvHost = createMpvHost({
   tempFiles,
   guideHtml: MPV_GUIDE_HTML,
   fontsDir: fontsRoot,
+  describeSource: source => {
+    if (!mediaProbe) throw new Error('找不到 ffprobe');
+    return mediaProbe.describe(source);
+  },
   onEvent: message => safeWinSend(mainWin, 'mpv:event', message),
   log: (...args) => console.error(...args),
 });
@@ -1690,6 +1714,9 @@ ipcMain.handle('mpv:seek', (event, time, options) => mpvHost.seek(time, { exact:
 ipcMain.handle('mpv:present', (event, time, options) => mpvHost.present(time, {
   exact: options?.exact === true,
   tolerance: Number.isFinite(Number(options?.tolerance)) ? Number(options.tolerance) : undefined,
+  frameTarget: Number.isFinite(Number(options?.frameTarget)) ? Number(options.frameTarget) : undefined,
+  frameStart: options?.frameStart!=null&&Number.isFinite(Number(options.frameStart)) ? Number(options.frameStart) : undefined,
+  frameDuration: Number.isFinite(Number(options?.frameDuration)) ? Number(options.frameDuration) : undefined,
 }));
 ipcMain.handle('mpv:cancelPresent', () => mpvHost.cancelPresent());
 ipcMain.handle('mpv:screenshot', (event, filePath) => {

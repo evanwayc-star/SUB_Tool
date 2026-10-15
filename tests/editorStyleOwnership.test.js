@@ -35,6 +35,78 @@ beforeEach(()=>{
 afterAll(()=>{ui.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('字幕樣式 public caller 與 snapshot ownership',()=>{
+  it.each([false,true])('外音 2x reverse=%s 時間軸區塊寬度及波形採來源映射',async reverse=>{
+    const {Media,Wave}=await import('../src/media.js');
+    const {drawTimeline}=await import('../src/timeline-renderer.js');
+    const asset=Media.externalAudio.add({audioSourceId:'speed-wave',offset:10,in:2,out:12,duration:16,speed:2,reverse});
+    const ctx=new Proxy({moveTo:vi.fn(),lineTo:vi.fn()}, {get:(target,key)=>target[key]||(()=>{}),set:(target,key,value)=>(target[key]=value,true)});
+    const originalContext=HTMLCanvasElement.prototype.getContext;
+    const resolution=Wave.resolution;
+    const scroll=document.getElementById('tlScroll');
+    const width=Object.getOwnPropertyDescriptor(scroll,'clientWidth');
+    const view={pxPerSec:State.pxPerSec,viewStart:State.viewStart};
+    asset.peaks=new Float32Array(34);asset.peaks[4]=-.2;asset.peaks[5]=.2;asset.peaks[24]=-1;asset.peaks[25]=1;
+    const wave=vi.spyOn(Wave,'getSourceWaveform').mockReturnValue({peaks:asset.peaks,selection:'mix',fallback:false});
+    HTMLCanvasElement.prototype.getContext=function(...args){return this.classList.contains('audio-clip-wave')?ctx:originalContext.apply(this,args);};
+    try{
+      Object.defineProperty(scroll,'clientWidth',{configurable:true,value:300});
+      Object.assign(State,{pxPerSec:10,viewStart:0});Wave.resolution=1;
+      drawTimeline();
+      const block=document.querySelector(`[data-audio-asset-id="${asset.id}"].external-audio-block`);
+      expect(block.dataset.audioStart).toBe('10');expect(block.dataset.audioEnd).toBe('15');
+      expect(block.style.width).toBe('50px');
+      const height=block.querySelector('canvas').height/devicePixelRatio;
+      expect(ctx.moveTo.mock.calls[0][0]).toBe(.5);
+      expect(ctx.moveTo.mock.calls[0][1]).toBeCloseTo(height/2-height*1.2*(reverse?1:.2),6);
+    }finally{
+      Media.externalAudio.remove(asset);wave.mockRestore();Wave.resolution=resolution;
+      HTMLCanvasElement.prototype.getContext=originalContext;Object.assign(State,view);
+      if(width) Object.defineProperty(scroll,'clientWidth',width);else delete scroll.clientWidth;
+    }
+  });
+  it('右鍵跨軌移動保留每句原有外觀，Undo/Redo 還原樣式與軌道',async()=>{
+    const {moveSelectedToTrack}=await import('../src/timeline-renderer.js');
+    State.trackCount=2;
+    State.cues.push({id:'second',start:3,end:4,text:'第二句',track:1,style:{color:'#00ff00',angle:15,bgBox:true}});
+    State.selectedIds=['cue','second'];
+    const before=State.cues.map(c=>({track:c.track,style:effective(c)}));
+    History.reset();
+    moveSelectedToTrack(1);
+    expect(State.cues.map(effective)).toEqual(before.map(c=>c.style));
+    expect(State.cues.map(c=>c.track)).toEqual([1,1]);
+    expect(State.cues[1].style).toEqual({color:'#00ff00',angle:15,bgBox:true});
+    History.undo();
+    expect(State.cues.map(c=>c.track)).toEqual([0,1]);
+    expect(State.cues.map(effective)).toEqual(before.map(c=>c.style));
+    History.redo();
+    expect(State.cues.map(c=>c.track)).toEqual([1,1]);
+    expect(State.cues.map(effective)).toEqual(before.map(c=>c.style));
+  });
+  it('同軌移動不改單句樣式或新增 Undo，跨鎖定軌移動整批拒絕',async()=>{
+    const {moveSelectedToTrack}=await import('../src/timeline-renderer.js');
+    State.trackCount=2;State.cues[0].style={fontSize:80};
+    const ownStyle=State.cues[0].style,steps=History.stack.length;
+    moveSelectedToTrack(0);
+    expect(State.cues[0].style).toBe(ownStyle);
+    expect(History.stack).toHaveLength(steps);
+    State.tracks[1].locked=true;
+    moveSelectedToTrack(1);
+    expect(State.cues[0].track).toBe(0);
+    expect(History.stack).toHaveLength(steps);
+  });
+  it.each([23.976,24,25,29.97,30])('FPS %s 的 timed 區間至少一格，未定時字幕保持原值',fps=>{
+    State.fps=fps;
+    State.cues=[{id:'one',start:2/30,end:3/30,text:'一格',track:0},
+      {id:'untimed',start:2/30,end:2/30,text:'未定時',track:0,timed:false}];
+    const untimed={...State.cues[1]};
+    Model.snapAllCuesToFrames();
+    const exact=fps===23.976?24000/1001:fps===29.97?30000/1001:fps;
+    const startFrame=Math.round(State.cues[0].start*exact),endFrame=Math.round(State.cues[0].end*exact);
+    expect(endFrame-startFrame).toBeGreaterThanOrEqual(1);
+    expect(State.cues[0].start*exact).toBeCloseTo(startFrame,8);
+    expect(State.cues[0].end*exact).toBeCloseTo(endFrame,8);
+    expect(State.cues[1]).toEqual(untimed);
+  });
   it('管理視窗套預設到非預設軌，仍達到完整目標外觀',()=>{
     State.tracks[0].fontSize=90;
     document.getElementById('tsPresetMgr').click();

@@ -67,6 +67,110 @@ async function timeline(){
 }
 const mouse=(target,type,y=100)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0,clientX:10,clientY:y}));
 let clickClock=1000;
+it.each(['text','move','height','geometry','image-pointer','image-modal'])('公開專案媒體復原完成前取消 %s 預覽，再建立初始基準',async kind=>{
+  const {on}=await import('../src/events.js');
+  let bridgeActive=true;
+  on('render:subList',()=>{if(bridgeActive) Subtitles.renderSubList();}); // 實際 app bootstrap 的 DOM bridge。
+  let ready,finish;
+  const entered=new Promise(resolve=>{ready=resolve;});
+  const pending=new Promise(resolve=>{finish=resolve;});
+  const fonts=vi.spyOn(Project,'_isFontAvailable').mockReturnValue(true); // jsdom 沒有 native 字型 metrics。
+  const {Seq}=await import('../src/sequence.js');
+  const restore=vi.spyOn(Media,'restorePendingImageClips').mockImplementation(async plan=>{
+    if(kind.startsWith('image-')) Seq.restore(plan.pendingClips());
+    ready();await pending;
+  });
+  const data={version:3,fps:25,duration:5,tracks:[{name:'字幕',height:40}],
+    cues:[{start:1,end:2,text:'原始字幕',track:1}],notes:[],clips:[],media:{}};
+  if(kind.startsWith('image-')) data.clips=[{id:'image',type:'image',name:'picture',path:'C:/picture.png',
+    dur:5,in:0,out:5,offset:0,vtrack:0,natW:100,natH:50,posX:.5,posY:.5,scale:1}];
+  const b64=Buffer.concat([Buffer.from([0xff,0xfe]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
+  const loading=Project.loadDesktop({b64});await entered;
+  const cue=State.cues[0];let before,live,head,end;
+  if(kind==='text'){
+    Subtitles.renderSubList();const txt=document.querySelector('.sub-row .txt');
+    txt.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    expect(txt.contentEditable).toBe('true');before=cue.text;
+    txt.innerText='未確認草稿';txt.dispatchEvent(new Event('input',{bubbles:true}));
+    live=()=>cue.text;head=()=>History.stack[0].snap.cues[0].text;
+    end=()=>txt.dispatchEvent(new FocusEvent('focusout',{bubbles:true}));
+  }else if(kind==='geometry' || kind.startsWith('image-')){
+    const Renderer=await import('../src/video-renderer.js'),wrap=document.getElementById('videoWrap');
+    Object.defineProperty(wrap,'clientWidth',{configurable:true,value:1000});
+    Object.defineProperty(wrap,'clientHeight',{configurable:true,value:500});
+    State.videoWidth=1000;State.videoHeight=500;vi.spyOn(Media,'displayTime').mockReturnValue(1.5);Renderer.renderVideoSub();
+    if(kind==='geometry'){
+      const parent=document.getElementById('videoSub'),el=parent.querySelector('.vsub-track.drag');expect(el).toBeTruthy();
+      el.getBoundingClientRect=()=>({left:400,top:400,width:200,height:50});before=cue.style?.posX;
+      el.dispatchEvent(new MouseEvent('pointerdown',{bubbles:true,button:0,clientX:100,clientY:100}));
+      parent.dispatchEvent(new MouseEvent('pointermove',{bubbles:true,clientX:150,clientY:120}));
+      Subtitles.applyCueStylePatch(cue,{color:'#0000ff'}); // 其他欄位的合法修改必須保留。
+      live=()=>cue.style?.posX;head=()=>History.stack[0].snap.cues[0].style?.posX;
+      end=()=>parent.dispatchEvent(new MouseEvent('pointerup',{bubbles:true}));
+    }else{
+      const clip=State.clips[0];before=clip.posX;
+      if(kind==='image-pointer'){
+        document.elementFromPoint=()=>null; // jsdom 的 native hit-test boundary。
+        const image=document.querySelector('#imageLayer .img-wrap');expect(image).toBeTruthy();
+        image.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0,clientX:100,clientY:100}));
+        document.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:150,clientY:120}));
+        end=()=>mouse(document,'mouseup',120);
+      }else{
+        Menus.showImageGeom(clip);vi.advanceTimersByTime(0);
+        const input=document.getElementById('igX');input.value='60';input.dispatchEvent(new Event('input'));
+        const confirm=document.querySelector('#modalFoot button.primary');end=()=>confirm.click();
+      }
+      clip.fadeIn=.5;
+      live=()=>clip.posX;head=()=>History.stack[0].snap.clipGeo[0].posX;
+    }
+  }else{
+    await timeline();
+    if(kind==='move'){
+      StateModule.setSelection({kind:'sub',ids:[cue.id]});before=cue.start;
+      const send=(target,type,x)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0,clientX:x,clientY:100}));
+      send(document.querySelector('.cue-block'),'mousedown',80);send(window,'mousemove',160);
+      live=()=>cue.start;head=()=>History.stack[0].snap.cues[0].start;
+      end=()=>send(window,'mouseup',160);
+    }else{
+      vi.spyOn(performance,'now').mockReturnValue(clickClock+=1000);before=State.tracks[0].height;
+      mouse(document.querySelector('#tlGutterTracks .tl-resize-handle'),'mousedown',100);mouse(document,'mousemove',120);
+      live=()=>State.tracks[0].height;head=()=>History.stack[0].snap.tracks[0].height;
+      end=()=>mouse(document,'mouseup',120);
+    }
+  }
+  expect(live()).not.toBe(before);finish();await loading;
+  expect(live()).toBe(before);expect(head()).toBe(before);expect(History.stack).toHaveLength(1);
+  if(kind==='text'){
+    expect(document.querySelector('.sub-row .txt').textContent).toBe('原始字幕');
+    expect(document.querySelector('.sub-row .txt').contentEditable).not.toBe('true');
+  }
+  if(kind==='height') expect(document.querySelector('#tlGutterTracks .tl-gtrack').style.height).toBe('40px');
+  if(kind==='geometry'){
+    expect(cue.style.color).toBe('#0000ff');expect(History.stack[0].snap.cues[0].style.color).toBe('#0000ff');
+    expect(document.getElementById('videoSub').classList.contains('dragging')).toBe(false);
+  }
+  if(kind.startsWith('image-')){
+    expect(State.clips[0].fadeIn).toBe(.5);expect(History.stack[0].snap.clipGeo[0].fadeIn).toBe(.5);
+    expect(document.getElementById('imageLayer').classList.contains('dragging')).toBe(false);
+    if(kind==='image-modal') expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+  }
+  end();expect(live()).toBe(before);expect(History.stack).toHaveLength(1);
+  let blob;
+  URL.createObjectURL.mockImplementation(value=>{blob=value;return 'blob:project-save';});
+  expect(await Project.save()).toBeTruthy();
+  vi.useRealTimers();
+  const bytes=await new Promise(resolve=>{
+    const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.readAsArrayBuffer(blob);
+  });
+  vi.useFakeTimers();
+  const saved=JSON.parse(new TextDecoder('utf-16le').decode(bytes));
+  if(kind==='text') expect(saved.cues[0].text).toBe(before);
+  else if(kind==='move') expect(saved.cues[0].start).toBe(before);
+  else if(kind==='height') expect(saved.tracks[0].height).toBe(before);
+  else if(kind==='geometry') expect(saved.cues[0].style).toEqual({color:'#0000ff'});
+  else expect(saved.clips[0]).toMatchObject({posX:before,fadeIn:.5});
+  bridgeActive=false;fonts.mockRestore();restore.mockRestore();
+});
 async function heightDrag(){
   vi.spyOn(performance,'now').mockReturnValue(clickClock+=1000);
   State.tracks[0].height=40;History.reset();await timeline();
@@ -92,6 +196,22 @@ it('gutter blur cancellation preserves newer height even without a History proje
 it('normal gutter resize still records one undoable commit',async()=>{
   await heightDrag();mouse(document,'mouseup',120);
   expect(State.tracks[0].height).toBe(60);expect(History.stack).toHaveLength(2);History.undo();expect(State.tracks[0].height).toBe(40);History.redo();expect(State.tracks[0].height).toBe(60);
+});
+it.each([24,25,29.97])('public grouped move and copy drag preserve one-frame cues at %s FPS',async fps=>{
+ const {getExactFps}=await import('../src/time.js');const rate=getExactFps(fps);State.fps=fps;State.snapOn=false;State.overwriteMode=true;
+ const initial=[{id:'a',start:Math.round(rate)/rate,end:(Math.round(rate)+1)/rate,text:'one',track:0},
+   {id:'b',start:Math.round(3*rate)/rate,end:(Math.round(3*rate)+1)/rate,text:'two',track:0}];
+ for(const copy of [false,true]){
+  State.cues=structuredClone(initial);StateModule.setSelection({kind:'sub',ids:['a','b'],primary:'a'});History.reset();await timeline();
+  const modifiers=copy?{altKey:true}:{};const start=initial[0].start*80;
+  const send=(target,type,x)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0,clientX:x,clientY:100,...modifiers}));
+  send(document.querySelector('.cue-block[data-id="a"]'),'mousedown',start);send(window,'mousemove',start+80);send(window,'mouseup',start+80);
+  expect(State.cues).toHaveLength(copy?4:2);expect(History.stack).toHaveLength(2);
+  for(const cue of State.cues){expect((cue.end-cue.start)*rate).toBeCloseTo(1,8);expect(cue.start*rate).toBeCloseTo(Math.round(cue.start*rate),8);}
+  const result=structuredClone(State.cues);expect(History.stack.at(-1).snap.cues).toEqual(result);
+  History.undo();expect(State.cues).toEqual(initial);History.redo();expect(State.cues).toEqual(result);
+ }
+ State.overwriteMode=false;State.snapOn=true;
 });
 it.each([23.976,29.97])('copy at %s FPS then paste at 25 FPS creates legal frame spans',sourceFps=>{
   StateModule.setFps(sourceFps);const exact=sourceFps===23.976?24000/1001:30000/1001;

@@ -595,7 +595,8 @@ function externalPlacementBoundaries(asset) {
     const duration = finiteTimelineTime(placement.duration ?? asset.duration);
     const rawOut = Number(placement.out ?? asset.out);
     const outPoint = Number.isFinite(rawOut) && rawOut >= inPoint ? rawOut : duration;
-    const end = start + Math.max(0, outPoint - inPoint);
+    const speed=Number(placement.speed??asset.speed)>0?Number(placement.speed??asset.speed):1;
+    const end = start + Math.max(0, outPoint - inPoint)/speed;
     points.push(start);
     if (end > start + MEDIA_BOUNDARY_EPS) points.push(end);
   }

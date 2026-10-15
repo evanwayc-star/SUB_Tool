@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { PlaybackSyncEngine } from '../src/media-presentation-core.js';
+import {getPlayerAdapter,resetPlayerAdapter} from '../src/media-player-adapter.js';
 
 function createHarness(overrides = {}) {
   const state = {
@@ -70,6 +71,29 @@ function createHarness(overrides = {}) {
 }
 
 describe('PlaybackSyncEngine', () => {
+  afterEach(()=>resetPlayerAdapter(null));
+  it('sequence seeking uses normalized source time through the shared delayed element transport',async()=>{
+    const element=new EventTarget();Object.assign(element,{src:'subtool-local://source/origin-five.mov',duration:3.5});
+    let current=0;Object.defineProperty(element,'currentTime',{get:()=>current,set:value=>{current=Math.min(value,element.duration);}});
+    getPlayerAdapter().registerSourceClock(element.src,{timestampOffset:-.5,presentationTimestampOffset:-5.5});
+    const track={kind:'element',source:'video',el:element};
+    const harness=createHarness({state:{tracks:[track]},audio:{sourceLocalTime:()=>2.8,
+      seekElement:(track,time)=>getPlayerAdapter().seekElement(track.el,time)}});
+    harness.engine.syncSequenceElements(2.8);expect(element.currentTime).toBe(3.5);
+    element.duration=8.5;element.dispatchEvent(new Event('durationchange'));await Promise.resolve();
+    expect(element.currentTime).toBe(8.3);
+  });
+  it.each(['hide','gap'])('sequence %s cancels its earlier deferred element seek',action=>{
+    const track={kind:'element',source:'video',el:{}};
+    const seekElement=vi.fn(),cancelElementSeek=vi.fn();let localTime=2.8;
+    const harness=createHarness({state:{tracks:[track]},audio:{sourceLocalTime:()=>localTime,seekElement,cancelElementSeek}});
+    harness.engine.syncSequenceElements(2.8);
+    if(action==='hide')track._srcHidden=true;else localTime=null;
+    harness.engine.syncSequenceElements(3);
+    expect(seekElement).toHaveBeenCalledExactlyOnceWith(track,2.8);
+    expect(cancelElementSeek).toHaveBeenCalledExactlyOnceWith(track);
+  });
+
   it('只由呼叫端 tick，不建立自己的 interval 排程器', () => {
     const interval = vi.spyOn(globalThis, 'setInterval');
     const { engine } = createHarness();
@@ -93,7 +117,10 @@ describe('PlaybackSyncEngine', () => {
       },
       sequence: { nextAfter: () => ({ id: 'later' }) },
       audio: { externalSourceTime: () => 2 },
-      actions: { enterGap: () => { harness.state.gap = true; audioElement.pause(); } },
+      actions: {
+        enterGap: () => { harness.state.gap = true; audioElement.pause(); },
+        startElementSources: () => audioElement.play(),
+      },
     });
 
     harness.engine.seqTick();
@@ -139,7 +166,10 @@ describe('PlaybackSyncEngine', () => {
         nextAfter: () => later,
       },
       audio: { externalSourceTime: () => 1 },
-      actions: { enterGap: () => { harness.state.gap = true; audioElement.pause(); } },
+      actions: {
+        enterGap: () => { harness.state.gap = true; audioElement.pause(); },
+        startElementSources: () => audioElement.play(),
+      },
     });
 
     harness.engine.seqTick();
@@ -156,5 +186,19 @@ describe('PlaybackSyncEngine', () => {
     harness.engine.seqTick();
 
     expect(timelineTime).not.toHaveBeenCalled();
+  });
+
+  it('外音活動切換只交給音源owner，不能自行啟動未反轉的母素材元素', () => {
+    const original={play:vi.fn(),pause:vi.fn(),currentTime:0};
+    const harness=createHarness({state:{audioOnly:true,time:1,tracks:[{kind:'element',source:'ext-reverse',el:original}]},
+      audio:{externalSourceTime:(_source,time)=>time<3?6-time*2:null}});
+    harness.engine.seqTick();
+    harness.state.time=2;harness.engine.seqTick();
+    expect(harness.actions.startElementSources).toHaveBeenCalledExactlyOnceWith(0,1);
+    expect(original.play).not.toHaveBeenCalled();
+    expect(original.currentTime).toBe(0);
+    harness.state.time=3;harness.engine.seqTick();
+    expect(harness.actions.startElementSources).toHaveBeenLastCalledWith(0,3);
+    expect(harness.actions.startElementSources).toHaveBeenCalledTimes(2);
   });
 });

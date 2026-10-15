@@ -3,8 +3,8 @@
    ⚠ v6.1.2 起兩側不再各有一份實作。規則收進 `shared/channel-layout.cjs`，
      renderer 與主程序都從那裡取用：
 
-     src/channel-layout.js       → 轉出 shared 的 flattenSourceChannels()
-     electron/channel-layout.js  → require 同一份
+     src/audio-routing-engine.js     → 轉出 shared 的 flattenSourceChannels()
+     electron/media-intake-runtime.js → require 同一份並規劃 ingest
 
      因此本檔的比對「兩邊輸出相同」現在是恆真的——它守的東西變了：
      從「兩份手抄副本有沒有漂掉」變成「兩側的取用路徑有沒有接對」
@@ -20,7 +20,7 @@
    CONTEXT.md：**來源聲道**＝母素材內可獨立讀取的一個聲道，以從 1 開始的號碼識別。
 
    【這支測得到什麼、測不到什麼】
-   測得到：兩側 flattenSourceChannels 的輸出逐項相同、扁平序號 → 檔名，以及 main.js
+   測得到：兩側 flattenSourceChannels 的輸出逐項相同、扁平序號 → 檔名，以及 media-intake-runtime.js
    實際使用的 buildAudioIngestPlan() 所產生之 channels[]／filtergraph 規劃。
    測不到：原生 ffmpeg binary 真正解碼特定母檔後的聲音內容；那一層仍需 §4 大檔真機驗收。 */
 import { describe, expect, it } from 'vitest';

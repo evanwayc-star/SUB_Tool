@@ -148,8 +148,22 @@ async function runSourceVocals(spec,resolved,{signal,onProgress,identity}){
       const original=(Media.tracks||[]).filter(track=>!track._audioEffect&&track.buffer&&
         keys(resolved).includes(String(track.audioSourceId||track.source))&&spec.streams.includes(Number(track.sourceStream??0)));
       const originalStreams=new Set(original.map(track=>Number(track.sourceStream??0)));
-      if(original.length&&spec.streams.every(stream=>originalStreams.has(stream)))
-        webBuffers=[...new Set(original.map(track=>track.buffer))];
+      if(original.length&&spec.streams.every(stream=>originalStreams.has(stream))){
+        // Playback exposes Mono controls, but separation still consumes each
+        // original stream's channel layout. Mixing the controls as separate
+        // streams would upmix both L and R to stereo and erase opposite phase.
+        webBuffers=(await Promise.all(spec.streams.map(async stream=>{
+          const tracks=original.filter(track=>Number(track.sourceStream??0)===stream);
+          const raw=[...new Set(tracks.map(track=>track.buffer))];
+          const buffers=await Promise.all(raw.map(buffer=>AudioEngine.normalizeSourceAudioBuffer(buffer,
+            {url:spec.url,file:spec.file,sourceStream:stream,owns,signal})));
+          if(buffers.some(buffer=>buffer.numberOfChannels!==1)) return buffers;
+          const first=buffers[0],channels=Math.max(...tracks.map(track=>Number(track.sourceChannel??0)))+1;
+          const buffer=AudioEngine.createBuffer(channels,first.length,first.sampleRate);
+          for(const track of tracks)buffer.getChannelData(Number(track.sourceChannel??0)).set(buffers[raw.indexOf(track.buffer)].getChannelData(0));
+          return [AudioEngine.markSourceAudioBuffer(buffer)];
+        }))).flat();
+      }
       else{
         if(spec.streams.length>1)throw new Error('尚未載入全部原始音軌，請先抽取多軌混音或使用桌面版');
         const file=resolved._file;
@@ -160,7 +174,7 @@ async function runSourceVocals(spec,resolved,{signal,onProgress,identity}){
         const blob=file||await response.blob();
         if(blob.size>100e6)throw new Error('瀏覽器人聲分離目前支援 100 MB 內素材；請使用桌面版');
         assertOwned();
-        webBuffers=[await AudioEngine.decodeAudioData(await blob.arrayBuffer())];
+        webBuffers=[await AudioEngine.decodeSourceAudioData(await blob.arrayBuffer(),{url:spec.url,file:blob,owns,signal})];
         assertOwned();
       }
     }

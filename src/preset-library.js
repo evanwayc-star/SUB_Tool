@@ -209,7 +209,7 @@ export function initPresetLibrary({ styleChanged }){
       if(!presets.length){ showToast('沒有自訂樣式可匯出'); return; }
       if (IS_DESKTOP && DESK.exportDirectory) {
         const files = presets.map(p => {
-          // 淨化規則在 export-name-safety.js（跨行程契約的一側，見該檔頭註解）。
+          // 淨化規則在 export-job-engine.js 的 presetExportRelativePath()；主程序另由 file-authority.js 圍堵路徑。
           // group 是匯入資料的顯示名稱，形狀驗證不會移除 "../.."；若把它直接
           // 傳給主程序的 path.join，正規化後可能跳出使用者
           // 選定的資料夾，把檔案寫到磁碟上任意位置。

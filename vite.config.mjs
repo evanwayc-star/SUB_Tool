@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
+import { fileURLToPath } from 'url';
 
 // B2：版本單一來源 — 從 package.json 注入 __APP_VERSION__，web 與桌面皆同源，發版只改 package.json
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
@@ -59,9 +60,25 @@ export default defineConfig({
   // STFT package and our adapter must share one ONNX runtime instance/backend.
   resolve: {
     conditions: ['onnxruntime-web-use-extern-wasm','module','browser','development|production'],
-    alias: [{ find: /^onnxruntime-web$/, replacement: 'onnxruntime-web/webgpu' }],
+    alias: [
+      { find: /^onnxruntime-web$/, replacement: 'onnxruntime-web/webgpu' },
+      {
+        find: /^(?:\.\.\/)+shared\/([^/]+\.cjs)$/,
+        replacement: '@subtool-shared/$1',
+        customResolver(source, importer, options) {
+          return this.resolve(source, importer, { ...options, skipSelf: false });
+        },
+      },
+      { find: /^@subtool-shared\//, replacement: fileURLToPath(new URL('./shared/', import.meta.url)) },
+    ],
   },
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
+  // shared 仍是 main/renderer 共用的零相依 CJS；dev 也必須經 Vite 預打包取得 ESM exports。
+  optimizeDeps: {
+    include: readdirSync(new URL('./shared/', import.meta.url))
+      .filter(name => name.endsWith('.cjs'))
+      .map(name => `@subtool-shared/${name}`),
+  },
   plugins: [injectCSP(), viteSingleFile(), crossOriginIsolation()],
   server: { 
     port: 8777, 

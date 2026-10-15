@@ -157,6 +157,11 @@ class CdpClient {
     return response.result.value;
   }
 
+  async waitForApp(timeoutMs = 15000) {
+    return waitFor(() => this.evaluate('Boolean(window.SUB?.State && window.SUB?.Media)'),
+      'SUB Tool renderer 初始化', timeoutMs);
+  }
+
   close() {
     this.ws?.close();
     this.rejectPending(new Error('CDP 連線已關閉'));
@@ -220,8 +225,15 @@ async function dispatchClick(client, rect, button = 'left') {
 }
 
 async function dispatchKey(client, key, code = key) {
-  await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code });
-  await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code });
+  const navigationCodes = { Home: 36, ArrowDown: 40, Enter: 13, ArrowLeft: 37, ArrowRight: 39 };
+  const nativeCode = process.platform === 'win32' ? navigationCodes[key] : undefined;
+  // Windows 原生 select 接管輸入時，需要非零 native_key_code 才會建立 OS event。
+  // https://github.com/chromium/chromium/blob/main/content/browser/devtools/protocol/input_handler.cc
+  const params = nativeCode === undefined ? { key, code } : {
+    key, code, windowsVirtualKeyCode: nativeCode, nativeVirtualKeyCode: nativeCode
+  };
+  await client.send('Input.dispatchKeyEvent', { type: nativeCode === undefined ? 'keyDown' : 'rawKeyDown', ...params });
+  await client.send('Input.dispatchKeyEvent', { type: 'keyUp', ...params });
 }
 
 function verifiedCleanup(profileDir, expectedPrefix, { maxRetries = 10, retryDelay = 100 } = {}) {
@@ -230,7 +242,23 @@ function verifiedCleanup(profileDir, expectedPrefix, { maxRetries = 10, retryDel
   if (path.dirname(resolved) !== tempRoot || !path.basename(resolved).startsWith(expectedPrefix)) {
     throw new Error(`拒絕清除未驗證的路徑：${resolved}`);
   }
-  fs.rmSync(resolved, { recursive: true, force: true, maxRetries, retryDelay });
+  if (!Number.isSafeInteger(maxRetries) || maxRetries < 0 || !Number.isSafeInteger(retryDelay) || retryDelay < 0) {
+    throw new RangeError('清理重試次數與等待毫秒必須是非負整數');
+  }
+  // Node 24.16.0 的同步刪除不重試 Windows permission_denied，且 Sleep 單位換算錯誤。
+  // https://github.com/nodejs/node/blob/v24.16.0/src/node_file.cc#L1534-L1627
+  // 由此處保留同步 caller 的有界重試；每次等待完整 retryDelay 毫秒。
+  const retryable = new Set(['EBUSY', 'EMFILE', 'ENFILE', 'ENOTEMPTY', 'EPERM']);
+  const waitView = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 0 });
+      return;
+    } catch (error) {
+      if (attempt >= maxRetries || !retryable.has(error?.code)) throw error;
+    }
+    if (retryDelay > 0) Atomics.wait(waitView, 0, 0, retryDelay);
+  }
 }
 
 module.exports = {

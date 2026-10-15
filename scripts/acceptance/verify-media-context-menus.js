@@ -239,7 +239,10 @@ function ids(items) {
     })()`);
     const speedResult=await waitFor(()=>client.evaluate(`(() => {
       const c=window.SUB.State.clips[0];
-      return c.speed===2&&c.reverse===true ? {
+      const committed=window.SUB.History.committedSnapshot().clips.find(clip=>clip.id===c.id);
+      const modalClosed=getComputedStyle(document.getElementById('modalBg')).display==='none';
+      return c.speed===2&&c.reverse===true&&committed?.speed===2&&committed?.reverse===true
+        &&modalClosed&&!window.SUB.Media.presentationPending() ? {
         speed:c.speed,reverse:c.reverse,duration:c.out/c.speed,
         mpvMode:window.SUB.Media.mpvMode,
       } : null;

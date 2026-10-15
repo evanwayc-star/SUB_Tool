@@ -1,6 +1,7 @@
 // media-player-adapter.js
 // NativePreviewRuntime 是 renderer 的單一預覽 owner；HTML5／mpv transport adapters
 // 留在模組內部，OS 視窗、guide 與 bounds 不會因 active transport 改變而掉進 no-op。
+import { timestampOffset, sourceClockTime, playerClockTime } from '../shared/media-source-clock.cjs';
 
 function presentationAbortError() {
   const error = new Error('media presentation aborted');
@@ -9,7 +10,55 @@ function presentationAbortError() {
 }
 
 class Html5Transport {
-  constructor(video) { this.video = video; }
+  constructor(video, clockFor = () => null) { this.video = video; this.clockFor = clockFor; }
+  clock() { return this.clockFor(this.video?.currentSrc || this.video?.src); }
+  sourceTime(value = this.video?.currentTime || 0) { return sourceClockTime(value, this.clock()); }
+  cancelPendingSeek() { this.pendingSeek?.cancel(); }
+  setRawTime(target, signal, owns) {
+    const video=this.video;
+    if(!video) return;
+    if(signal?.aborted||(owns&&!owns())) throw presentationAbortError();
+    this.cancelPendingSeek();
+    let attemptedDuration=video.duration;
+    video.currentTime=target;
+    // MOV 的首份 duration 可能只含 stream 長度，讀到實際 PTS 後才延長。
+    // currentTime setter 已被舊片尾截斷時，在 duration 更新後重送原目標。
+    if(!Number.isFinite(video.duration)||video.duration>=target
+      ||Math.abs(video.currentTime-target)<1e-6||typeof video.addEventListener!=='function') return;
+    const source=video.currentSrc||video.src;
+    return new Promise((resolve,reject)=>{
+      let settled=false,timer,ownershipTimer;
+      const cleanup=()=>{
+        clearTimeout(timer);
+        clearInterval(ownershipTimer);
+        for(const event of ['durationchange','loadeddata','seeked'])video.removeEventListener?.(event,retry);
+        for(const event of ['emptied','error'])video.removeEventListener?.(event,cancel);
+        signal?.removeEventListener?.('abort',cancel);
+        if(this.pendingSeek===pending)this.pendingSeek=null;
+      };
+      const finish=(error)=>{if(settled)return;settled=true;cleanup();error?reject(error):resolve();};
+      const cancel=()=>finish(presentationAbortError());
+      const retry=()=>{
+        if((video.currentSrc||video.src)!==source||signal?.aborted||(owns&&!owns())){cancel();return;}
+        const availableDuration=video.duration;
+        // 每次範圍真正擴大就重送：中間片尾也能促使 MOV 解碼後段 metadata。
+        // 同一 duration 的連發事件不能反覆打斷 seek，原始目標仍保留到可達。
+        if(availableDuration<target&&!(availableDuration>attemptedDuration))return;
+        attemptedDuration=availableDuration;
+        try{
+          video.currentTime=target;
+          if(availableDuration>=target||Math.abs(video.currentTime-target)<1e-6)finish();
+        }catch(error){finish(error);}
+      };
+      const pending={cancel};this.pendingSeek=pending;
+      for(const event of ['durationchange','loadeddata','seeked'])video.addEventListener(event,retry);
+      for(const event of ['emptied','error'])video.addEventListener(event,cancel,{once:true});
+      signal?.addEventListener?.('abort',cancel,{once:true});
+      timer=setTimeout(()=>finish(new Error('HTML media duration did not reach the requested source time')),10000);
+      if(owns)ownershipTimer=setInterval(()=>{if(!owns())cancel();},25);
+      retry();
+    });
+  }
   get type() { return 'html5'; }
   async play() {
     const result = this.video?.play?.();
@@ -17,19 +66,23 @@ class Html5Transport {
     return result;
   }
   async pause() { this.video?.pause?.(); }
-  async seek(time) { if (this.video) this.video.currentTime = time; }
-  async present(time, { signal, tolerance = 1.5 / 30 } = {}) {
+  async seek(time, {signal,owns}={}) { return this.setRawTime(Math.max(0,playerClockTime(time,this.clock())),signal,owns); }
+  async present(time, { signal, owns, tolerance = 1.5 / 30, frameTarget = time, frameStart = null, frameDuration = 0 } = {}) {
     if (!this.video) throw new Error('HTML5 video element is unavailable');
-    if (signal?.aborted) throw presentationAbortError();
+    if (signal?.aborted||(owns&&!owns())) throw presentationAbortError();
     const target = Math.max(0, Number(time) || 0);
     const allowedDrift = Math.max(0, Number(tolerance) || 0);
+    const knownFrame=frameStart!=null&&Number.isFinite(Number(frameStart))&&frameDuration>0
+      &&frameTarget>=Number(frameStart)-1e-9&&frameTarget<Number(frameStart)+frameDuration-1e-9;
     const video = this.video;
     return new Promise((resolve, reject) => {
       let settled = false;
       let frameCallbackId = null;
       let seekedHandler = null;
+      let rawSeek = null;
 
       const cleanup = () => {
+        rawSeek?.cancel();
         if (frameCallbackId != null) video.cancelVideoFrameCallback?.(frameCallbackId);
         frameCallbackId = null;
         if (seekedHandler) video.removeEventListener?.('seeked', seekedHandler);
@@ -40,7 +93,9 @@ class Html5Transport {
         if (settled) return;
         settled = true;
         cleanup();
-        resolve({ backend: 'html5', presentedSourceTime });
+        resolve({ backend: 'html5', presentedSourceTime,
+          ...(knownFrame?{presentedSourceDuration:frameDuration}:{}),
+        });
       };
       const abort = () => {
         if (settled) return;
@@ -49,8 +104,11 @@ class Html5Transport {
         reject(presentationAbortError());
       };
       const accept = value => {
-        const presented = Number(value);
-        if (!Number.isFinite(presented) || Math.abs(presented - target) > allowedDrift) return false;
+        if(owns&&!owns()){abort();return true;}
+        const presented = this.sourceTime(value);
+        if (!Number.isFinite(presented) || (knownFrame
+          ? Math.abs(presented-Number(frameStart))>2e-6
+          : Math.abs(presented-target)>allowedDrift)) return false;
         finish(presented);
         return true;
       };
@@ -69,7 +127,11 @@ class Html5Transport {
         seekedHandler = () => { accept(video.currentTime); };
         video.addEventListener('seeked', seekedHandler);
       }
-      try { video.currentTime = target; } catch (error) { cleanup(); reject(error); return; }
+      try {
+        const pending=this.setRawTime(Math.max(0,playerClockTime(target,this.clock())),signal,owns);
+        rawSeek=this.pendingSeek;
+        pending?.catch(error=>{if(settled)return;settled=true;cleanup();reject(error);});
+      } catch (error) { cleanup(); reject(error); return; }
       if (typeof video.requestVideoFrameCallback === 'function') {
         try { requestFrame(); } catch (error) { cleanup(); reject(error); }
       } else if (!seekedHandler) {
@@ -142,7 +204,16 @@ export function createNativePreviewRuntime({
 } = {}) {
   let bridge = mpv || null;
   let mode = 'html5';
-  let activeTransport = new Html5Transport(video);
+  const sourceClocks = new Map();
+  const elementTransports = new WeakMap();
+  const clockFor = url => sourceClocks.get(url) || null;
+  const html5For = element => {
+    if(!element) return new Html5Transport(element,clockFor);
+    let transport=elementTransports.get(element);
+    if(!transport){transport=new Html5Transport(element,clockFor);elementTransports.set(element,transport);}
+    return transport;
+  };
+  let activeTransport = html5For(video);
   let nativeVisible = true;
   let subtitleGuideActive = false;
   let imageGuideActive = false;
@@ -199,9 +270,11 @@ export function createNativePreviewRuntime({
   }
 
   function selectHtml5(nextVideo = video) {
+    activeTransport.cancelPendingSeek?.();
     generation += 1;
     mode = 'html5';
-    activeTransport = new Html5Transport(nextVideo);
+    activeTransport = html5For(nextVideo);
+    activeTransport.cancelPendingSeek();
     nativeVisible = false;
     stopBoundsFeeder();
     subtitleGuideActive = false;
@@ -221,8 +294,33 @@ export function createNativePreviewRuntime({
     get type() { return activeTransport.type; },
     get isAvailable() { return mode === 'html5' || !!bridge; },
     get mode() { return mode; },
+    registerSourceClock(url, clock) {
+      // 此 URL 時鐘供 HTML、WebCodecs 與原生音訊 element 使用；mpv
+      // 另由 main 注入容器相對時鐘。舊 descriptor 仍保留既有偏移語意。
+      const presentationOffset = clock?.presentationTimestampOffset;
+      if (url) sourceClocks.set(url, Object.freeze({ timestampOffset:
+        Number.isFinite(presentationOffset) ? presentationOffset : timestampOffset(clock) }));
+    },
+    sourceClock: clockFor,
+    seekElement(element, sourceTime, {signal,owns}={}) {
+      if(!element)return;
+      const transport=html5For(element);
+      return transport.setRawTime(Math.max(0,playerClockTime(sourceTime,transport.clock())),signal,owns);
+    },
+    presentElement(element, sourceTime, options) { return html5For(element).present(sourceTime,options); },
+    cancelElementSeek(element) { elementTransports.get(element)?.cancelPendingSeek(); },
+    sourceTime(value = video?.currentTime || 0, url = video?.currentSrc || video?.src) {
+      return sourceClockTime(value, clockFor(url));
+    },
+    playerTime(value, url = video?.currentSrc || video?.src) {
+      return playerClockTime(value, clockFor(url));
+    },
+    sourceDuration(value = video?.duration, url = video?.currentSrc || video?.src) {
+      return Math.max(0, sourceClockTime(value, clockFor(url))) || 0;
+    },
 
     async enterMpv({ src, bounds, audio, readBounds, boundsElement } = {}) {
+      activeTransport.cancelPendingSeek?.();
       const token = ++generation;
       if (!bridge?.launch) throw new Error('mpv preview bridge is unavailable');
       nativeRequested = true;

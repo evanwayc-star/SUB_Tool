@@ -2,6 +2,7 @@
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {AudioEngine,createAudioEngineForTest,destroyScrubber} from '../src/audio-engine.js';
 import {MediaAudioRouter} from '../src/audio-routing-engine.js';
+import {getPlayerAdapter,resetPlayerAdapter} from '../src/media-player-adapter.js';
 import {createMediaPresentationSession} from '../src/media-presentation-core.js';
 
 let source,clone,engine,completePlay;
@@ -12,9 +13,52 @@ beforeEach(()=>{
   engine=createAudioEngineForTest({createContext:()=>({})});
   engine.bind({tracks:()=>[{kind:'element',el:source}]});
 });
-afterEach(()=>{engine.stopScrubs();AudioEngine.stopScrubs();destroyScrubber(source);AudioEngine.bind();vi.restoreAllMocks();});
+afterEach(()=>{engine.stopScrubs();AudioEngine.stopScrubs();destroyScrubber(source);AudioEngine.bind();vi.restoreAllMocks();resetPlayerAdapter(null);});
 
 describe('audio transport owns detached scrub voices',()=>{
+  function lateMovClone(){
+    source.src='subtool-local://source/origin-five.mov';source.duration=8.5;
+    getPlayerAdapter().registerSourceClock(source.src,{timestampOffset:-.5,presentationTimestampOffset:-5.5});
+    const events=new EventTarget();
+    clone.addEventListener=events.addEventListener.bind(events);clone.removeEventListener=events.removeEventListener.bind(events);
+    clone.dispatchEvent=events.dispatchEvent.bind(events);clone.duration=3.5;
+    let current=0;Object.defineProperty(clone,'currentTime',{get:()=>current,set:value=>{current=Math.min(value,clone.duration);}});
+  }
+  async function expandClone(){clone.duration=8.5;clone.dispatchEvent(new Event('durationchange'));await Promise.resolve();await Promise.resolve();}
+
+  it('scrub duration starts only after the requested MOV position becomes available',async()=>{
+    vi.useFakeTimers();
+    try{
+      lateMovClone();engine.scrub(2.8,.08);clone.onloadedmetadata();clone.pause.mockClear();
+      expect(clone.currentTime).toBe(3.5);expect(clone.play).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(200);expect(clone.pause).not.toHaveBeenCalled();
+      await expandClone();expect(clone.currentTime).toBe(8.3);expect(clone.play).toHaveBeenCalledOnce();
+      completePlay();await Promise.resolve();await Promise.resolve();
+      vi.advanceTimersByTime(79);expect(clone.pause).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);expect(clone.pause).toHaveBeenCalledOnce();
+    }finally{vi.useRealTimers();}
+  });
+  it('a new scrub target supersedes the clipped target before playing',async()=>{
+    lateMovClone();engine.scrub(0);clone.onloadedmetadata();clone.readyState=1;
+    engine.scrub(2.8);await expandClone();
+    expect(clone.currentTime).toBe(8.3);expect(clone.play).toHaveBeenCalledOnce();
+  });
+  it.each(['stop','replace'])('%s prevents a late scrub from playing',async action=>{
+    lateMovClone();engine.scrub(2.8);clone.onloadedmetadata();
+    if(action==='stop')engine.stopElements();else source.src='subtool-local://source/replaced.mov';
+    await expandClone();
+    expect(clone.play).not.toHaveBeenCalled();
+    if(action==='stop')expect(clone.currentTime).toBe(3.5);
+  });
+
+  it('public native-video scrub converts source zero exactly once before the detached carrier',()=>{
+    source.tagName='VIDEO';source.playbackRate=1;
+    getPlayerAdapter().registerSourceClock(source.src,{timestampOffset:-.5});
+    const media={tracks:[],seqOn:()=>false,playing:false,activeSource:'video',tlTime:()=>0,applyGains:vi.fn(),projectAudioInterpretation:()=>({trackState:()=>({audible:true,gain:1})})};
+    const router=new MediaAudioRouter(media,source,{muted:false});router.bindEngine();router.scrubAudio(3);
+    clone.onloadedmetadata();expect(clone.currentTime).toBe(3.5);
+  });
+
   it.each(['stopElements','stopBuffers','startElements','startBuffers'])('%s取消尚未收到metadata的scrub',async action=>{
     engine.scrub(3);
     const lateMetadata=clone.onloadedmetadata;

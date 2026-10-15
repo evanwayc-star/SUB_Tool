@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 /* 專案音訊 bus（A1…An）的 M／S／音量變更如何通知下游。
-   來由與事件表見 docs/開發與驗證.md——那裡是唯一的完整說明，這裡只鎖行為。
+   來由與事件表見 docs/技術架構說明.md §5——那裡是唯一的完整說明，這裡只鎖行為。
 
    本檔【真的 import mixer.js 並點真實的 DOM 按鈕】，不是比對原始碼字串。
    上一版全部用 toMatch 掃原始碼，於是「測試全綠」只證明了字面沒被改掉，
    notifyBusChange 一次都沒被執行到——正是技術架構說明 §0.6
    「有產出不等於對」講的那種測了等於沒測。 */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,20 +16,27 @@ import { fileURLToPath } from 'node:url';
 const mediaMock = vi.hoisted(() => ({
   applyGains: vi.fn(),
   activeSource: null,
+  displayTime:()=>0,
+  externalAudio:{list:()=>[],get:()=>null},
   getSources: () => [],
   tracks: [],
+  panel: {},
+  audioPanelState(){return this.panel;},
 }));
 vi.mock('../src/media.js', () => ({ Media: mediaMock, Wave: {} }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), drawRuler: vi.fn() }));
 
 let on, State, renderAudioTracks, renderMixer, mixerMuteAll;
 let seen;
+afterEach(()=>vi.restoreAllMocks());
 
 beforeEach(async () => {
   vi.resetModules();
   mediaMock.applyGains.mockClear();
+  mediaMock.panel={};
   document.body.innerHTML =
-    '<div id="atList"></div>' +
+    '<style>'+fs.readFileSync(path.join(process.cwd(),'src/styles.css'),'utf8')+'</style><div id="ctxmenu"></div><div id="toast"></div>'+
+    '<div id="modalBg"><div class="modal"><div id="modalTitle"></div><div id="modalBody"></div><div id="modalFoot"></div></div></div><span id="atHint" hidden></span><div id="atList"></div>' +
     '<div id="mixerPanel" class="show"><div id="mixerStrips"></div></div>';
 
   ({ on } = await import('../src/events.js'));
@@ -127,6 +134,121 @@ describe('拖曳音量推桿的快路徑', () => {
     document.querySelector('#mixerStrips .mx-fader').dispatchEvent(new Event('change'));
 
     expect(seen).toHaveLength(0);
+  });
+});
+
+describe('bus 音量編輯的欄位與持久化 owner',()=>{
+  async function startHistory(){
+    const {History}=await import('../src/history.js');
+    on('history:record',label=>History.record(label));History.reset();return History;
+  }
+  it.each(['.mx-fader','#atList input[type=range]'])('%s 預覽不混入其他提交，放開仍只有一筆獨立 Undo',async selector=>{
+    const History=await startHistory();renderAudioTracks();const fader=document.querySelector(selector);
+    fader.value='40';fader.dispatchEvent(new Event('input'));
+    State.cues.push({id:'background',start:1,end:2,text:'new cue',track:0});State.audioProject.buses[0].muted=true;History.record('background');
+    expect(State.audioProject.buses[0].volume).toBe(.4);
+    expect(History.stack.at(-1).snap.audioProject.buses[0]).toMatchObject({volume:1,muted:true});
+    fader.dispatchEvent(new Event('change'));expect(History.stack).toHaveLength(3);
+    History.undo();expect(State.audioProject.buses[0]).toMatchObject({volume:1,muted:true});expect(State.cues).toHaveLength(1);
+    History.redo();expect(State.audioProject.buses[0].volume).toBe(.4);
+  });
+  it.each(['Escape','blur','redraw'])('%s 取消只還原自己的volume，保留其他bus欄位',async action=>{
+    const History=await startHistory();renderMixer();const fader=document.querySelector('.mx-fader');
+    fader.value='40';fader.dispatchEvent(new Event('input'));State.audioProject.buses[0].name='background name';History.record('name');
+    if(action==='Escape') fader.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',cancelable:true}));
+    else if(action==='blur') window.dispatchEvent(new Event('blur'));
+    else renderMixer();
+    expect(State.audioProject.buses[0]).toMatchObject({volume:1,name:'background name'});expect(History.stack).toHaveLength(2);
+    expect(History.committedSnapshot().audioProject.buses[0]).toMatchObject({volume:1,name:'background name'});
+  });
+  it.each(['field','reset','replacement','detached'])('晚到 inline blur 在 %s 後無修改資格',async reason=>{
+    const History=await startHistory();renderMixer();document.querySelector('.mx-fader-val').click();
+    const input=document.querySelector('.mx-fader-inline-input');input.value='-6';
+    if(reason==='field'){State.audioProject.buses[0].volume=.75;History.record('background volume');}
+    if(reason==='reset') History.reset();
+    if(reason==='replacement') State.audioProject.buses=[{...State.audioProject.buses[0],volume:.75}];
+    if(reason==='detached') input.remove();
+    const before=structuredClone(State.audioProject),steps=History.stack.length;input.dispatchEvent(new FocusEvent('blur'));
+    expect(State.audioProject).toEqual(before);expect(History.stack).toHaveLength(steps);
+  });
+  it('正常 inline 提交一次，Escape 與原值提交皆無空步驟',async()=>{
+    const History=await startHistory();renderMixer();document.querySelector('.mx-fader-val').click();
+    let input=document.querySelector('.mx-fader-inline-input');input.value='-6';input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));
+    const volume=State.audioProject.buses[0].volume;expect(volume).toBeCloseTo(.5012);expect(History.stack).toHaveLength(2);
+    History.undo();expect(State.audioProject.buses[0].volume).toBe(1);History.redo();expect(State.audioProject.buses[0].volume).toBe(volume);
+    renderMixer();document.querySelector('.mx-fader-val').click();input=document.querySelector('.mx-fader-inline-input');
+    input.value='-10';input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));input.dispatchEvent(new FocusEvent('blur'));
+    expect(State.audioProject.buses[0].volume).toBe(volume);expect(History.stack).toHaveLength(2);
+    renderMixer();document.querySelector('.mx-fader-val').click();input=document.querySelector('.mx-fader-inline-input');
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));expect(History.stack).toHaveLength(2);
+  });
+  it('未改動四捨五入的dB讀數不重算精確gain或建立History，Escape顯示目前欄位',async()=>{
+    State.audioProject.buses[0].volume=.75;const History=await startHistory();renderMixer();document.querySelector('.mx-fader-val').click();
+    let input=document.querySelector('.mx-fader-inline-input');expect(input.value).toBe('-2.5');input.dispatchEvent(new FocusEvent('blur'));
+    expect(State.audioProject.buses[0].volume).toBe(.75);expect(History.stack).toHaveLength(1);
+    document.querySelector('.mx-fader-val').click();input=document.querySelector('.mx-fader-inline-input');input.value='-10';
+    State.audioProject.buses[0].volume=.5;History.record('background');input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
+    expect(document.querySelector('.mx-fader-val').textContent).toBe('-6.0 dB');expect(State.audioProject.buses[0].volume).toBe(.5);
+  });
+  it('atList dblclick 使用HTML對話框，未改值保持gain，確認與取消保留一次提交契約',async()=>{
+    const nativePrompt=vi.spyOn(window,'prompt').mockImplementation(()=>{throw new Error('Electron prompt unavailable');});
+    State.audioProject.buses[0].volume=.75;const History=await startHistory();renderAudioTracks();
+    const open=()=>document.querySelector('#atList input').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    const click=label=>[...document.querySelectorAll('#modalFoot button')].find(button=>button.textContent===label).click();
+    open();expect(document.getElementById('__promptInput')).toBeTruthy();click('確定');await Promise.resolve();
+    expect(State.audioProject.buses[0].volume).toBe(.75);expect(History.stack).toHaveLength(1);
+    open();document.getElementById('__promptInput').value='-6';click('確定');await Promise.resolve();
+    expect(State.audioProject.buses[0].volume).toBeCloseTo(.5012);expect(History.stack).toHaveLength(2);
+    open();document.getElementById('__promptInput').value='-12';click('取消');await Promise.resolve();
+    expect(State.audioProject.buses[0].volume).toBeCloseTo(.5012);expect(History.stack).toHaveLength(2);expect(nativePrompt).not.toHaveBeenCalled();
+  });
+  it.each(['field','reset','replacement','modal-replacement'])('atList 音量對話框在 %s 後拒絕舊確認',async reason=>{
+    const History=await startHistory();renderAudioTracks();document.querySelector('#atList input').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    document.getElementById('__promptInput').value='-6';const confirm=document.querySelector('#modalFoot button.primary');
+    if(reason==='field'){State.audioProject.buses[0].volume=.75;History.record('background');}
+    if(reason==='reset') History.reset();
+    if(reason==='replacement') State.audioProject.buses=[{...State.audioProject.buses[0],volume:.75}];
+    if(reason==='modal-replacement'){const {openModal}=await import('../src/ui.js');openModal('new modal','<p>keep</p>');}
+    const before=structuredClone(State.audioProject),steps=History.stack.length;confirm.click();await Promise.resolve();
+    expect(State.audioProject).toEqual(before);expect(History.stack).toHaveLength(steps);
+    if(reason==='modal-replacement') expect(document.getElementById('modalTitle').textContent).toBe('new modal');
+  });
+  it('全軌dB同樣使用HTML對話框並以同一個Undo提交，等待期間新音軌撤銷旧scope',async()=>{
+    const nativePrompt=vi.spyOn(window,'prompt').mockImplementation(()=>{throw new Error('Electron prompt unavailable');});
+    State.audioProject.buses.push({id:'ab2',name:'A2',volume:.5,muted:false,solo:false});const History=await startHistory();
+    const {mixerAdjustAllDb}=await import('../src/mixer.js');let work=mixerAdjustAllDb();document.getElementById('__promptInput').value='+2';
+    document.querySelector('#modalFoot button.primary').click();await work;expect(History.stack).toHaveLength(2);
+    expect(State.audioProject.buses.map(bus=>bus.volume)).toEqual([1.2589,.6295]);History.undo();expect(State.audioProject.buses.map(bus=>bus.volume)).toEqual([1,.5]);
+    work=mixerAdjustAllDb();document.getElementById('__promptInput').value='+2';State.audioProject.buses=[...State.audioProject.buses,{id:'ab3',name:'A3',volume:1}];
+    const before=structuredClone(State.audioProject),steps=History.stack.length;document.querySelector('#modalFoot button.primary').click();await work;
+    expect(State.audioProject).toEqual(before);expect(History.stack).toHaveLength(steps);expect(nativePrompt).not.toHaveBeenCalled();
+  });
+  it('專案實際儲存位元組排除volume草稿，保留背景bus欄位',async()=>{
+    const History=await startHistory();State.clips=[];State.cues=[];State.notes=[];
+    renderMixer();const fader=document.querySelector('.mx-fader');fader.value='40';fader.dispatchEvent(new Event('input'));
+    State.audioProject.buses[0].name='background name';History.record('name');
+    let blob;Object.defineProperty(URL,'createObjectURL',{configurable:true,value:vi.fn(value=>{blob=value;return 'blob:save';})});
+    Object.defineProperty(URL,'revokeObjectURL',{configurable:true,value:vi.fn()});vi.spyOn(HTMLAnchorElement.prototype,'click').mockImplementation(()=>{});
+    const {Project}=await import('../src/project.js');expect(await Project.save()).toBeTruthy();
+    const bytes=await new Promise(resolve=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.readAsArrayBuffer(blob);});
+    const saved=JSON.parse(new TextDecoder('utf-16le').decode(bytes));expect(saved.audioProject.buses[0]).toMatchObject({volume:1,name:'background name'});
+  });
+});
+
+describe('音訊面板提示的單一 DOM owner',()=>{
+  it('可抽取多音軌時 computed style 可見，重繪後仍可執行當前動作',()=>{
+    const run=vi.fn();mediaMock.panel={extraction:{count:2,run}};renderAudioTracks();
+    const hint=document.getElementById('atHint'),old=document.getElementById('extractLink');
+    expect(getComputedStyle(hint).display).not.toBe('none');expect(hint.textContent).toContain('2 條音軌');
+    renderAudioTracks();expect(getComputedStyle(hint).display).not.toBe('none');
+    old.click();expect(run).not.toHaveBeenCalled();document.getElementById('extractLink').click();expect(run).toHaveBeenCalledOnce();
+    mediaMock.panel={};renderAudioTracks();expect(getComputedStyle(hint).display).toBe('none');expect(document.getElementById('extractLink')).toBeNull();
+  });
+  it('能力限制訊息與抽取連結可共同顯示，沒有HTML插入',()=>{
+    const run=vi.fn();mediaMock.panel={notice:'<b>限制</b>',extraction:{count:2,run}};renderAudioTracks();
+    const hint=document.getElementById('atHint');expect(getComputedStyle(hint).display).not.toBe('none');
+    expect(hint.textContent).toContain('<b>限制</b>');expect(hint.querySelector('b')).toBeNull();
+    mediaMock.panel={notice:'保留限制'};renderAudioTracks();expect(hint.textContent).toBe('保留限制');expect(document.getElementById('extractLink')).toBeNull();
   });
 });
 

@@ -106,6 +106,35 @@ it('normal list In edit on a legal frame preserves the supplied frame',async()=>
  const input=target.querySelector('input');input.value='00:00:01:01';key(input,'Enter');
  expect(State.cues[0].start).toBeCloseTo(1.04,10);expect(History.stack).toHaveLength(2);
 });
+it.each(['oops:00:00:00','00:00:01:00garbage','1:2:3:4:5'])('invalid timecode paste %s commits no subtitle timing or History',async value=>{
+ const before=structuredClone(State.cues);Subtitles.renderSubList();
+ const cell=document.querySelector('.sub-row[data-id="a"] .tin');
+ cell.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));await Promise.resolve();
+ const input=cell.querySelector('input');expect(input).toBeTruthy();input.value=value;key(input,'Enter');
+ expect(State.cues).toEqual(before);expect(History.stack).toHaveLength(1);
+});
+it.each(['24','29.97df'])('subtitle import at %s FPS commits existing cues on the chosen grid before History and save',async fps=>{
+ const SubIO=await import('../src/subio.js');const {getExactFps}=await import('../src/time.js');
+ State.mediaName=null;State.cues[0].start=1.04;State.cues[0].end=2.04;History.reset();
+ const original=structuredClone(State.cues);
+ const request=SubIO._prepareSubtitleImport('1\n00:00:03,000 --> 00:00:04,000\nImported\n','srt');
+ document.getElementById('importFpsSel').value=fps;click('確定');const parsed=await request;
+ SubIO._openImportModal('import',parsed,'srt');document.querySelector('#modalFoot button.primary').click();
+ const committed=structuredClone(State.cues),rate=getExactFps(State.fps);
+ for(const cue of committed) for(const field of ['start','end']) expect(cue[field]*rate).toBeCloseTo(Math.round(cue[field]*rate),8);
+ expect(History.stack).toHaveLength(2);expect(History.stack[1].snap.cues).toEqual(committed);
+ vi.advanceTimersByTime(0);expect(State.cues).toEqual(committed);
+ vi.useRealTimers();expect(await Project.save()).toBeTruthy();
+ const bytes=await new Promise(resolve=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.readAsArrayBuffer(savedBlob);});
+ const saved=JSON.parse(new TextDecoder('utf-16le').decode(bytes));
+ expect(saved.cues.map(({start,end,text,track})=>({start,end,text,track})))
+  .toEqual(committed.map(({start,end,text,track})=>({start,end,text,track:track+1})));
+ History.undo();expect(State.cues).toEqual(original);expect(State.fps).toBe(25);
+ History.redo();expect(State.cues).toEqual(committed);expect(State.fps).toBe(Number.parseFloat(fps));
+ expect(Project.apply(saved)).toBe(true);
+ expect(State.cues.map(({start,end,text,track})=>({start,end,text,track})))
+  .toEqual(committed.map(({start,end,text,track})=>({start,end,text,track})));
+});
 it('cancel at the import-target dialog must not change the existing project frame grid',async()=>{
  const SubIO=await import('../src/subio.js');State.mediaName=null;State.fps=25;
  State.cues[0].start=1.04;State.cues[0].end=2.04;History.reset();
@@ -134,7 +163,8 @@ it('background text survives late-lock cancellation, actual save bytes, Undo and
 it('History reset invalidates an existing list preview token before the next input',async()=>{
   const txt=await editText();txt.innerText='draft';txt.dispatchEvent(new Event('input',{bubbles:true}));
   History.reset();txt.innerText='stale input';txt.dispatchEvent(new Event('input',{bubbles:true}));
-  expect(State.cues[0].text).toBe('draft');expect(txt.contentEditable).toBe('false');
+  expect(State.cues[0].text).toBe('original');expect(txt.contentEditable).toBe('false');
+  expect(History.stack[0].snap.cues[0].text).toBe('original');
   expect(History.stack).toHaveLength(1);
 });
 
@@ -162,10 +192,98 @@ it('modal confirmation merges changed text with untouched background style field
   History.redo();expect(State.cues[0].text).toBe('modal text');
 });
 
+it('single-cue style controls directly replace saved values and preserve the track, other cues and presets',async()=>{
+  const cue=State.cues[0];
+  cue.style={fontSize:120,color:'#ffaaaa',posX:35,posY:60,angle:15,align:'left',valign:'top',bgBox:true,bgColor:'#101020',bgAlpha:0.6};
+  const originalStyle=structuredClone(cue.style);
+  Styles.savePresets([{name:'reference',group:'custom',style:{fontSize:80}}]);
+  const tracks=structuredClone(State.tracks),otherCue=structuredClone(State.cues[1]),presets=structuredClone(Styles.getAllPresets());
+  History.reset();
+  await Style.openCueEditModal(cue);vi.advanceTimersByTime(100);
+  expect(document.getElementById('cueStyle_fontSize').value).toBe('120');
+  expect(document.getElementById('cueStyle_color').value).toBe('#ffaaaa');
+  const edited={fontSize:100,color:'#112233',bold:false,italic:true,outline:4,outlineColor:'#334455',shadow:2,letterSpacing:3,lineSpacing:1.5,font:'Edited Font',vertical:true};
+  for(const [field,value] of Object.entries(edited)) document.getElementById('cueStyle_'+field).value=typeof value==='boolean' ? (value?'1':'0') : String(value);
+  click('確認');
+  expect(State.cues[0].style).toEqual({...originalStyle,...edited});
+  expect(State.tracks).toEqual(tracks);expect(State.cues[1]).toEqual(otherCue);expect(Styles.getAllPresets()).toEqual(presets);
+  expect(History.stack).toHaveLength(2);expect(History.stack[1].label).toContain('（含樣式）');
+  await Style.openCueEditModal(State.cues[0]);vi.advanceTimersByTime(100);
+  for(const [field,value] of Object.entries(edited)) expect(document.getElementById('cueStyle_'+field).value).toBe(typeof value==='boolean' ? (value?'1':'0') : String(value));
+  click('確認');expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.cues[0].style).toEqual(originalStyle);
+  History.redo();expect(State.cues[0].style).toEqual({...originalStyle,...edited});
+});
+
+it.each([undefined,{fontSize:400,lineSpacing:4,posX:-15,angle:720}])('opening and confirming unchanged styles preserves inherited and historical values %j',async style=>{
+  if(style) State.cues[0].style=structuredClone(style);
+  History.reset();const cues=structuredClone(State.cues);
+  await Style.openCueEditModal(State.cues[0]);vi.advanceTimersByTime(100);click('確認');
+  expect(State.cues).toEqual(cues);expect(History.stack).toHaveLength(1);
+  State.tracks[0].color='#334455';
+  expect(Styles.effStyle(State.cues[0],State.tracks[0]).color).toBe('#334455');
+  expect(State.cues[0].style?.color).toBeUndefined();
+});
+
+it('a direct style edit merges untouched background cue fields and does not pin unchanged inherited track fields',async()=>{
+  State.cues[0].style={fontSize:120,posX:35,angle:15};History.reset();
+  await Style.openCueEditModal(State.cues[0]);vi.advanceTimersByTime(100);
+  document.getElementById('cueStyle_fontSize').value='100';
+  Model.editCue({cueId:'a',operation:'text-style',value:{text:'background',style:{fontSize:120,posX:70,angle:15,bold:false}}});
+  State.tracks[0].outline=5;
+  click('確認');
+  expect(State.cues[0]).toMatchObject({text:'background',style:{fontSize:100,posX:70,angle:15,bold:false}});
+  expect(State.cues[0].style.outline).toBeUndefined();expect(Styles.effStyle(State.cues[0],State.tracks[0]).outline).toBe(5);
+  expect(History.stack).toHaveLength(3);History.undo();
+  expect(State.cues[0]).toMatchObject({text:'background',style:{fontSize:120,posX:70,angle:15,bold:false}});
+});
+
+it.each(['取消','replaced'])('unconfirmed single-cue style and text changes are discarded after %s',async action=>{
+  State.cues[0].style={fontSize:120,posX:35};History.reset();
+  const cues=structuredClone(State.cues);
+  await Style.openCueEditModal(State.cues[0]);vi.advanceTimersByTime(100);
+  document.getElementById('cueEditTa').innerText='draft text';document.getElementById('cueStyle_fontSize').value='100';
+  const oldConfirm=document.querySelector('#modalFoot button.primary');
+  if(action==='取消') click(action);
+  else UI.openModal('replacement','<p>new dialog</p>',[{label:'close',act:()=>UI.closeModal()}]);
+  oldConfirm.click();
+  expect(State.cues).toEqual(cues);expect(History.stack).toHaveLength(1);
+  if(action==='replaced') expect(document.getElementById('modalTitle').textContent).toBe('replacement');
+});
+
+it.each([{field:'fontSize',value:''},{field:'fontSize',value:'-1'},{field:'font',value:'bad\\font'}])('an invalid direct $field edit commits neither text nor style',async({field,value})=>{
+  State.cues[0].style={fontSize:120,posX:35};History.reset();const cues=structuredClone(State.cues);
+  await Style.openCueEditModal(State.cues[0]);vi.advanceTimersByTime(100);
+  document.getElementById('cueEditTa').innerText='draft text';document.getElementById('cueStyle_color').value='#112233';
+  document.getElementById('cueStyle_'+field).value=value;click('確認');
+  expect(State.cues).toEqual(cues);expect(History.stack).toHaveLength(1);
+  expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
+});
+
+it('confirmed direct style values persist in project save bytes and both CSS and ASS output',async()=>{
+  State.cues[0].style={fontSize:120,color:'#ffaaaa',posX:35,angle:15};History.reset();
+  await Style.openCueEditModal(State.cues[0]);vi.advanceTimersByTime(100);
+  document.getElementById('cueStyle_fontSize').value='100';document.getElementById('cueStyle_color').value='#112233';click('確認');
+  vi.useRealTimers();expect(await Project.save()).toBeTruthy();
+  const bytes=await new Promise(resolve=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.readAsArrayBuffer(savedBlob);});
+  const saved=JSON.parse(new TextDecoder('utf-16le').decode(bytes));
+  expect(saved.cues[0].style).toEqual({fontSize:100,color:'#112233',posX:35,angle:15});
+  expect(saved.tracks[0].fontSize).toBe(80);expect(saved.cues[1].style).toBeUndefined();
+  const effective=Styles.effStyle(saved.cues[0],saved.tracks[0]);
+  expect(Styles.styleToCss(effective,1)).toContain('font-size:75px');expect(Styles.styleToCss(effective,1)).toContain('color:#112233');
+  const {SubFormats}=await import('../src/formats.js');
+  const ass=SubFormats.toASS(saved.cues,saved.fps,saved.tracks,1920,1080,{includeMetadata:true});
+  const dialogue=ass.split(/\r?\n/).find(line=>line.startsWith('Dialogue:')&&line.endsWith('original'));
+  expect(dialogue).toContain('\\fs100');expect(dialogue).toContain('\\c&H00332211&');
+  const restored=SubFormats.parseASS(ass,saved.fps);
+  expect(restored[0].style).toMatchObject(saved.cues[0].style);
+  expect(restored.subtool.cues[0].style).toEqual(saved.cues[0].style);
+});
+
 it.each(['text','style'])('modal rejects a competing change to the same %s field without a new history entry',async field=>{
   await Style.openCueEditModal(State.cues[0]);vi.advanceTimersByTime(100);
   if(field==='text') document.getElementById('cueEditTa').innerText='modal draft';
-  else {document.getElementById('covK_fontSize').checked=true;document.getElementById('covV_fontSize').value='100';}
+  else {document.getElementById('cueEditTa').innerText='modal draft';document.getElementById('cueStyle_fontSize').value='100';}
   Model.editCue({cueId:'a',operation:'text-style',value:{text:field==='text'?'background':'original',style:{fontSize:120}}});
   click('確認');expect(State.cues[0]).toMatchObject({text:field==='text'?'background':'original',style:{fontSize:120}});
   expect(History.stack).toHaveLength(2);expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);

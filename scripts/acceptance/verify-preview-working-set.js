@@ -10,8 +10,9 @@ const {ROOT,ELECTRON,delay,reservePort,getJSON,waitFor,CdpClient, trackElectron,
 const PACKAGED_EXE=process.env.SUBTOOL_ACCEPTANCE_EXE ? path.resolve(process.env.SUBTOOL_ACCEPTANCE_EXE) : null;
 
 async function main(){
-  const mediaPath=path.resolve(process.argv[2]||'');
-  if(!fs.existsSync(mediaPath)) throw new Error('請提供一支可讀取的短 MP4');
+  if(!process.argv[2]) throw new Error('請提供一支可讀取的短 MP4');
+  const mediaPath=path.resolve(process.argv[2]);
+  if(!fs.existsSync(mediaPath)||!fs.statSync(mediaPath).isFile()) throw new Error('請提供一支可讀取的短 MP4');
   const profile=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-preview-cdp-'));
   const temp=path.join(profile,'temp'); fs.mkdirSync(temp);
   const project=path.join(profile,'preview-acceptance.subtool');

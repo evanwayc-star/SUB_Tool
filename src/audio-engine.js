@@ -3,6 +3,9 @@ import { clamp } from './util.js';
 import { Seq } from './sequence.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
 import { ReverseAudioPlayback } from './audio-reverse-playback.js';
+import { ElementPlacementPlayback,PlacementAudioGains } from './audio-placement-playback.js';
+import { getPlayerAdapter } from './media-player-adapter.js';
+import { sourcePresentationMetadata } from './decode/source-frame-index.js';
 
 /* AudioContext 的建立是這個模組唯一的外部相依，也是它長期【零測試】的原因：
    模組層直接 `new AudioContext()`，vitest 的 node 環境起不動它，jsdom 也沒有
@@ -31,11 +34,13 @@ const UNBOUND = Object.freeze({
   clipSourceTimeFor: () => 0,
   interpretation:()=>null,
   sourcePlaybackFor:()=>null,
+  sourcePlaybacksFor:()=>null,
   transportMuted:()=>false,
+  placementExists:()=>true,
 });
 
 class AudioEngineCore {
-  constructor({ createContext = defaultCreateContext, reverseOptions = {} } = {}) {
+  constructor({ createContext = defaultCreateContext, reverseOptions = {}, createAudio, sourceMetadata = sourcePresentationMetadata } = {}) {
     this._createContext = createContext;
     this._env = UNBOUND;
     this.ctx = null;
@@ -47,6 +52,14 @@ class AudioEngineCore {
     this._reverseOptions = reverseOptions;
     this._reversePlayback = null;
     this._bufferClocks = new Map();
+    this._bufferSources = new Set();
+    this._scrubNodes = new Set();
+    this._createAudio=createAudio;
+    this._elementPlacements=null;
+    this._placementGains=null;
+    this._elementSeeks=new Map();
+    this._sourceMetadata=sourceMetadata;
+    this._normalizedAudioBuffers=new WeakSet();
   }
 
   /* 接上播放狀態的來源。
@@ -79,8 +92,12 @@ class AudioEngineCore {
       this.master.connect(this.analyser);
       this._anBuf = new Float32Array(this.analyser.fftSize);
       this._reversePlayback = new ReverseAudioPlayback(this.ctx, { ...this._reverseOptions,
-        disposeElement: element => { this._scrubElements.delete(element); destroyScrubber(element); },
+        disposeElement: element => { this._cancelElementSeek(element);this._scrubElements.delete(element); destroyScrubber(element); },
       });
+      this._placementGains=new PlacementAudioGains(this.ctx);
+      this._elementPlacements=new ElementPlacementPlayback(this.ctx,{environment:()=>this._env,
+        playbacks:(track,time)=>this._playbacks(track,time),gainFor:(...args)=>this._placementGains.for(...args),
+        ...(this._createAudio?{createAudio:this._createAudio}:{})});
     }
     if (this.ctx.state === 'suspended') this.ctx.resume();
     return this.ctx;
@@ -90,16 +107,31 @@ class AudioEngineCore {
     return this.ctx;
   }
 
-  /* 讀 master analyser 的時域取樣。回傳內部緩衝區（呼叫端只讀不存）；
-     還沒有 AudioContext 時回傳 null。
+  /* 讀時域取樣。未指定來源時讀 master；來源波形則只讀原始 pre-gain
+     聲道 analyser，平均聲道且排除效果／buffer 的 post-gain 訊號。
+     回傳內部緩衝區（呼叫端只讀不存）；沒有原始來源訊號時回傳 null。
 
      【為什麼是這裡】ctx / analyser / _anBuf 原本住在 media.js，v5.11.8 的
      「深度解耦」把它們搬進本模組，但 Wave.captureLive() 的讀取端留在原地，
      繼續讀早已不存在的 Media.analyser / Media._anBuf——於是它的守衛
      `if(!Media.analyser) return;` 永遠成立，長檔的即時波形產生靜默失效。
      搬狀態就要一起搬讀取端；讀取端沒有入口可用時，就會像那次一樣留在原地爛掉。 */
-  readTimeDomain() {
+  readTimeDomain({source=null}={}) {
     if (!this.analyser || !this._anBuf) return null;
+    if(source!=null){
+      const candidates=this._env.tracks().filter(track=>(track.source||'video')===source&&!track._srcHidden);
+      if(candidates.some(track=>track.kind==='buffer'||track._audioEffect)) return null;
+      const elements=candidates.filter(track=>track.kind==='element');
+      const tracks=elements.length?elements:candidates.filter(track=>track.kind==='native');
+      if(!tracks.length||tracks.some(track=>!track.analyser)) return null;
+      this._anBuf.fill(0);
+      for(const track of tracks){
+        const data=track._mbuf?.length===track.analyser.fftSize?track._mbuf:new Float32Array(track.analyser.fftSize);
+        track.analyser.getFloatTimeDomainData(data);
+        for(let index=0;index<this._anBuf.length;index++)this._anBuf[index]+=(data[index]||0)/tracks.length;
+      }
+      return this._anBuf;
+    }
     this.analyser.getFloatTimeDomainData(this._anBuf);
     return this._anBuf;
   }
@@ -112,6 +144,72 @@ class AudioEngineCore {
   decodeAudioData(buffer) {
     this.ensureCtx();
     return this.ctx.decodeAudioData(buffer);
+  }
+
+  markSourceAudioBuffer(buffer) {
+    this._normalizedAudioBuffers.add(buffer);
+    return buffer;
+  }
+
+  inheritSourceAudioClock(original, copy) {
+    if(this._normalizedAudioBuffers.has(original)) this.markSourceAudioBuffer(copy);
+    return copy;
+  }
+
+  async readSourceAudioClock(file,{owns=()=>true,signal}={}) {
+    const current=()=>!signal?.aborted&&owns();
+    if(!current()) throw new DOMException('Audio source changed','AbortError');
+    const url=URL.createObjectURL(file);
+    try{
+      const metadata=await this._sourceMetadata(url,{owns:current});
+      if(!current()) throw new DOMException('Audio source changed','AbortError');
+      return metadata;
+    }finally{URL.revokeObjectURL(url);}
+  }
+
+  /* decodeAudioData starts at the decoded audio stream, while source seconds
+     start at video (or the selected audio-only stream). Only container evidence
+     permits moving PCM; processed WAVs already have source zero. */
+  async normalizeSourceAudioBuffer(buffer,{url=null,file=null,metadata=null,sourceStream=0,owns=()=>true,signal}={}) {
+    const current=()=>!signal?.aborted&&owns();
+    const assertCurrent=()=>{if(!current()) throw new DOMException('Audio source changed','AbortError');};
+    assertCurrent();
+    if(this._normalizedAudioBuffers.has(buffer)) return buffer;
+    {
+      if(!metadata){
+        if(file) metadata=await this.readSourceAudioClock(file,{owns:current});
+        else if(url) metadata=await this._sourceMetadata(url,{owns:current});
+        else return buffer;
+      }
+      assertCurrent();
+      const audioOffset=Array.isArray(metadata?.decoderAudioPresentationTimestampOffsets)
+        ?metadata.decoderAudioPresentationTimestampOffsets[sourceStream]
+        :metadata?.audioPresentationTimestampOffsets?.[sourceStream]
+          ??(sourceStream===0?metadata?.audioPresentationTimestampOffset:null);
+      if(!metadata||typeof audioOffset!=='number'||!Number.isFinite(audioOffset)
+        ||!Number.isFinite(metadata.presentationTimestampOffset)||!(metadata.duration>0)) return buffer;
+      const rate=buffer.sampleRate;
+      const shift=Math.round((audioOffset-metadata.presentationTimestampOffset)*rate);
+      const length=Math.max(1,Math.round(metadata.duration*rate));
+      if(shift===0&&length===buffer.length) return this.markSourceAudioBuffer(buffer);
+      const aligned=this.createBuffer(buffer.numberOfChannels,length,rate);
+      const from=Math.max(0,shift),to=Math.max(0,-shift),count=Math.max(0,Math.min(buffer.length-from,length-to));
+      for(let channel=0;count>0&&channel<buffer.numberOfChannels;channel++){
+        aligned.getChannelData(channel).set(buffer.getChannelData(channel).subarray(from,from+count),to);
+      }
+      return this.markSourceAudioBuffer(aligned);
+    }
+  }
+
+  async decodeSourceAudioData(bytes,options={}) {
+    if(options.signal?.aborted||options.owns?.()===false) throw new DOMException('Audio source changed','AbortError');
+    const buffer=await this.decodeAudioData(bytes);
+    return this.normalizeSourceAudioBuffer(buffer,options);
+  }
+
+  createBuffer(channels, length, sampleRate) {
+    this.ensureCtx();
+    return this.ctx.createBuffer(channels, length, sampleRate);
   }
 
   createMediaElementSource(el) {
@@ -159,21 +257,32 @@ class AudioEngineCore {
     this.master.gain.value = Math.max(0, Number(value) || 0);
   }
 
-  prepareReverseTrack(track, spec) { this.ensureCtx(); return this._reversePlayback.prepare(track, spec); }
-  clearReverseSources() { this._reversePlayback?.clear(); }
-  pruneReverseSources() { this._reversePlayback?.prune(this._env.tracks()); }
+  prepareReverseTrack(track, spec) { this.ensureCtx(); return this._reversePlayback.prepare(track, {...spec,
+    outputGain:this._placementGains.for(track,{clip:spec.clip},this._env.timelineTime())}); }
+  clearReverseSources() { this._reversePlayback?.clear(); this._elementPlacements?.clear();this._placementGains?.clear(); }
+  pruneReverseSources() { this._reversePlayback?.prune(this._env.tracks());this._placementGains?.prune(this._env.tracks(),this._env.placementExists); }
+
+  _playbacks(track,time){
+    const source=track.source||'video';
+    const all=this._env.sourcePlaybacksFor(source,time);
+    return Array.isArray(all)?all:[this._env.sourcePlaybackFor(source,time)];
+  }
 
   syncReverseSources(timelineTime) {
     this.pruneReverseSources();
     for (const track of this._env.tracks()) {
-      const playback = this._env.sourcePlaybackFor(track.source || 'video', timelineTime);
+      const playbacks=this._playbacks(track,timelineTime);
+      this._reversePlayback?.stopInactive(track,playbacks);
+      for(const playback of playbacks){
       const entry = this._reversePlayback?.get(track, playback);
-      if (!entry?.el) { this._reversePlayback?.stopTrack(track); continue; }
+      if (!entry?.el) continue;
       if (track._srcHidden || this._env.transportMuted() || !playback) { entry.el.pause(); continue; }
       if (entry.el.paused) continue;
+      this._placementGains.for(track,playback,timelineTime,{schedule:true});
       entry.el.playbackRate = playback.rate || 1;
       if ('preservesPitch' in entry.el) entry.el.preservesPitch = entry.el.playbackRate >= .25 && entry.el.playbackRate <= 4;
       if (Math.abs(entry.el.currentTime - playback.offset) > .12) entry.el.currentTime = playback.offset;
+      }
     }
   }
 
@@ -181,7 +290,7 @@ class AudioEngineCore {
      其餘（音軌、序列模式、播放速率、時間域轉換）由 bind() 注入的 env 提供。
      時間域見鐵律 §0.5：localT 是來源時間、tlT／at 是時間軸時間，不可互換。 */
   startBuffers(offset) {
-    this.stopScrubs();
+    this.stopBuffers();
     if (!this.ctx) return null;
     const env = this._env;
     const tracks = env.tracks();
@@ -198,7 +307,7 @@ class AudioEngineCore {
     for (const tr of tracks) {
       if (tr.kind !== 'buffer') continue;
       if (tr._srcHidden) continue;
-      const playback = env.sourcePlaybackFor(tr.source || 'video', env.timelineTime());
+      for(const playback of this._playbacks(tr,env.timelineTime())){
       const reversed = playback?.reverse ? this._reversePlayback?.get(tr, playback) : null;
       if (playback?.reverse && !reversed) continue;
       try {
@@ -206,12 +315,18 @@ class AudioEngineCore {
         src.buffer = reversed?.buffer || tr.buffer;
         const rate = playback?.rate || env.playbackRateFor(tr.source || 'video', env.timelineTime()) || playbackRate || 1;
         src.playbackRate.value = rate;
-        src.connect(tr.gain);
-        tr.srcNode = src;
+        src.connect(this._placementGains.for(tr,playback,env.timelineTime(),{schedule:true}));
+        if(!tr.srcNode) tr.srcNode = src;
+        this._bufferSources.add(src);
         const sourceTime = playback?.sourceTime ?? off;
-        src.start(0, clamp(reversed ? playback.offset : sourceTime, 0, src.buffer.duration));
-        this._bufferClocks.set(tr, { startCtxTime, sourceTime, rate, direction: reversed ? -1 : 1 });
+        const start=clamp(reversed ? playback.offset : sourceTime, 0, src.buffer.duration);
+        if(playback?.clip){
+          const remaining=playback.reverse?src.buffer.duration-start:Math.max(0,playback.clip.out-sourceTime);
+          src.start(0,start,Math.min(src.buffer.duration-start,remaining));
+        }else src.start(0,start);
+        this._bufferClocks.set({track:tr,clip:playback?.clip}, { startCtxTime, sourceTime, rate, direction: reversed ? -1 : 1 });
       } catch (e) {}
+      }
     }
     this._bufferClock = { startCtxTime, startMediaTime: off };
     return { ...this._bufferClock };
@@ -219,10 +334,10 @@ class AudioEngineCore {
 
   stopBuffers() {
     this.stopScrubs();
+    for(const node of this._bufferSources){try{node.stop();}catch(_){}try{node.disconnect();}catch(_){}}
+    this._bufferSources.clear();
     for (const tr of this._env.tracks()) {
       if (tr.srcNode) {
-        try { tr.srcNode.stop(); } catch (e) {}
-        try { tr.srcNode.disconnect(); } catch (e) {}
         tr.srcNode = null;
       }
     }
@@ -237,8 +352,10 @@ class AudioEngineCore {
     if (!this.ctx || !this._bufferClock || inGap) return false;
     const current = Number(currentMediaTime);
     if (!Number.isFinite(current)) return false;
-    const drift = [...this._bufferClocks].some(([track, clock]) => {
-      const playback = this._env.sourcePlaybackFor(track.source || 'video', this._env.timelineTime());
+    const drift = [...this._bufferClocks].some(([voice, clock]) => {
+      const playbacks=this._playbacks(voice.track,this._env.timelineTime());
+      const playback = playbacks.find(item=>item?.clip===voice.clip);
+      if(!playback&&voice.clip) return true;
       const reference = playback?.sourceTime ?? current;
       const rate = playback?.rate || this._env.playbackRate() || 1;
       const expected = clock.sourceTime + (this.ctx.currentTime - clock.startCtxTime) * clock.rate * clock.direction;
@@ -250,6 +367,34 @@ class AudioEngineCore {
     return true;
   }
 
+  _cancelElementSeek(element) {
+    const request=this._elementSeeks.get(element);
+    this._elementSeeks.delete(element);
+    request?.controller.abort();
+    getPlayerAdapter().cancelElementSeek(element);
+  }
+
+  _seekElement(element,time,{start=false,owns=()=>true}={}) {
+    const resume=start||!element.paused;
+    this._cancelElementSeek(element);
+    const controller=new AbortController(),source=element.currentSrc||element.src;
+    const request={controller,time};this._elementSeeks.set(element,request);
+    const current=()=>this._elementSeeks.get(element)===request&&!controller.signal.aborted
+      &&source===(element.currentSrc||element.src)&&owns();
+    const ready=()=>{
+      if(!current()){if(this._elementSeeks.get(element)===request)this._elementSeeks.delete(element);return;}
+      this._elementSeeks.delete(element);
+      if(resume)element.play()?.catch?.(()=>{});
+    };
+    try{
+      const pending=getPlayerAdapter().seekElement(element,time,{signal:controller.signal});
+      if(pending?.then){
+        element.pause();
+        pending.then(ready).catch(()=>{if(this._elementSeeks.get(element)===request)this._elementSeeks.delete(element);});
+      }else ready();
+    }catch(_){if(this._elementSeeks.get(element)===request)this._elementSeeks.delete(element);}
+  }
+
   /* localT＝目前 clip 的來源時間；tlT＝時間軸時間（ext-* 參考音用）。兩者不可互換，見 §0.5。 */
   startElements(localT, tlT) {
     this.stopScrubs();
@@ -257,12 +402,17 @@ class AudioEngineCore {
     const seqOn = env.seqOn();
     const playbackRate = env.playbackRate();
     if (tlT === undefined) tlT = seqOn ? env.timelineTime() : localT;
+    this.pruneReverseSources();this._reversePlayback?.stop();this._elementPlacements?.prune(tlT);
+    const started=new Set();
     for (const tr of env.tracks()) {
-      const playback = env.sourcePlaybackFor(tr.source || 'video', tlT);
+      const playbacks=this._playbacks(tr,tlT);
+      if(tr.el&&(tr._srcHidden||env.transportMuted()||!playbacks.some(item=>!item?.reverse)
+        ||playbacks.length>1||playbacks.some(item=>item?.clip?.fadeIn||item?.clip?.fadeOut))){this._cancelElementSeek(tr.el);try{tr.el.pause();}catch(_){}}
+      for(const playback of playbacks){
       if (playback?.reverse || env.transportMuted()) {
-        try { tr.el?.pause(); } catch (_) {}
         const entry = this._reversePlayback?.get(tr, playback);
         if (entry?.el && !tr._srcHidden && !env.transportMuted()) {
+          this._placementGains.for(tr,playback,tlT,{schedule:true});
           entry.el.currentTime = clamp(playback.offset, 0, entry.el.duration || playback.offset);
           entry.el.playbackRate = playback.rate || 1;
           if ('preservesPitch' in entry.el) entry.el.preservesPitch = entry.el.playbackRate >= .25 && entry.el.playbackRate <= 4;
@@ -270,15 +420,19 @@ class AudioEngineCore {
         } else entry?.el?.pause();
         continue;
       }
-      this._reversePlayback?.stopTrack(tr);
       if (tr.kind !== 'element' || !tr.el) continue;
       if (tr._srcHidden) {
         try { tr.el.pause(); } catch (e) {}
         continue;
       }
+      const element=this._elementPlacements?.element(tr,playback,playbacks)||tr.el;
+      if(started.has(element)) continue;
+      started.add(element);
+      if(this._elementPlacements?.start(element,tlT)) continue;
       const s = tr.source || 'video';
       let off;
-      if (s.startsWith('ext-')) {
+      if(playback) off=playback.sourceTime;
+      else if (s.startsWith('ext-')) {
         off = env.externalSourceTimeFor(s, tlT);
         if (off == null) {
           try { tr.el.pause(); } catch (e) {}
@@ -296,19 +450,42 @@ class AudioEngineCore {
       }
       
       try {
-        tr.el.currentTime = clamp(off, 0, tr.el.duration || off);
-        tr.el.playbackRate = env.playbackRateFor?.(s,tlT) || playbackRate || 1;
-        if ('preservesPitch' in tr.el) {
-          tr.el.preservesPitch = (tr.el.playbackRate >= 0.25 && tr.el.playbackRate <= 4);
+        element.playbackRate = playback?.rate || env.playbackRateFor?.(s,tlT) || playbackRate || 1;
+        if ('preservesPitch' in element) {
+          element.preservesPitch = (element.playbackRate >= 0.25 && element.playbackRate <= 4);
         }
-        tr.el.play();
+        this._seekElement(element,off,{start:true,owns:()=>env.tracks().includes(tr)&&!tr._srcHidden&&!env.transportMuted()});
       } catch (e) {}
+      }
+    }
+  }
+
+  syncElements(timelineTime){
+    this._elementPlacements?.sync(timelineTime);
+    const synced=new Set();
+    for(const track of this._env.tracks()){
+      const element=track.el;
+      if(track.kind!=='element'||!element||synced.has(element)) continue;
+      synced.add(element);
+      const playback=this._playbacks(track,timelineTime).find(item=>!item?.reverse);
+      const source=track.source||'video';
+      const reference=playback?.sourceTime??(source.startsWith('ext-')?this._env.externalSourceTimeFor(source,timelineTime):
+        this._env.seqOn()?this._env.sourceTimeFor(source,timelineTime):this._env.timelineTime());
+      if(track._srcHidden||this._env.transportMuted()||reference==null){this._cancelElementSeek(element);try{element.pause();}catch(_){}continue;}
+      const pending=this._elementSeeks.get(element);
+      const owns=()=>this._env.tracks().includes(track)&&!track._srcHidden&&!this._env.transportMuted();
+      if(pending){if(Math.abs(pending.time-reference)>.12)this._seekElement(element,reference,{start:true,owns});continue;}
+      if(element.paused)continue;
+      const playerTime=getPlayerAdapter().playerTime(reference,element.currentSrc||element.src);
+      if(Math.abs(element.currentTime-playerTime)>.12)this._seekElement(element,reference,{owns});
     }
   }
 
   stopElements() {
     this.stopScrubs();
+    for(const element of [...this._elementSeeks.keys()])this._cancelElementSeek(element);
     this._reversePlayback?.stop();
+    this._elementPlacements?.stop();
     for (const tr of this._env.tracks()) {
       if (tr.kind === 'element' && tr.el) {
         try { tr.el.pause(); } catch (e) {}
@@ -325,12 +502,16 @@ class AudioEngineCore {
   stopScrubs() {
     for(const element of this._scrubElements) schedulers.get(element)?.cancel();
     this._scrubElements.clear();
+    for(const node of this._scrubNodes){try{node.stop();node.disconnect();}catch(_){}}
     for(const track of this._env.tracks()) {
       if(!track._scrubNode) continue;
-      try{track._scrubNode.stop();}catch(_){}
-      try{track._scrubNode.disconnect();}catch(_){}
+      if(!this._scrubNodes.has(track._scrubNode)){
+        try{track._scrubNode.stop();}catch(_){}
+        try{track._scrubNode.disconnect();}catch(_){}
+      }
       track._scrubNode=null;
     }
+    this._scrubNodes.clear();
   }
 
   /* at＝【時間軸時間】（鐵律 §0.5）。序列模式下才轉成來源時間。
@@ -339,6 +520,7 @@ class AudioEngineCore {
   scrub(at, duration = 0.08) {
     const env = this._env;
     if (env.playing() || env.muted() || env.transportMuted()) return;
+    this.stopScrubs();
     const tracks = env.tracks();
     const playbackRate = env.playbackRate();
     const activeSource = env.activeSource();
@@ -351,12 +533,12 @@ class AudioEngineCore {
       mainReady=!!c;
       if(c) localT = env.clipSourceTimeFor(t, c);
     }
-    const playbackFor = tr => env.sourcePlaybackFor(tr.source || 'video', t);
-    const reversedFor = tr => this._reversePlayback?.get(tr, playbackFor(tr));
-    const timeFor = tr => {
+    const playbackFor = tr => this._playbacks(tr,t)[0];
+    const reversedFor = (tr,playback=playbackFor(tr)) => this._reversePlayback?.get(tr, playback);
+    const timeFor = (tr,playback=playbackFor(tr)) => {
       const source = tr.source || 'video';
-      const playback = playbackFor(tr);
-      if (playback?.reverse) return reversedFor(tr) ? playback.offset : null;
+      if (playback?.reverse) return reversedFor(tr,playback) ? playback.offset : null;
+      if(playback) return playback.sourceTime;
       if (source.startsWith('ext-')) return env.externalSourceTimeFor(source, t);
       return env.seqOn() ? env.sourceTimeFor(source, t) : localT;
     };
@@ -373,20 +555,23 @@ class AudioEngineCore {
       for (const tr of tracks) {
         if (tr._srcHidden) continue;
         if (tr.kind === 'buffer' && tr.buffer) {
+          if(tr._scrubNode){try{tr._scrubNode.stop();tr._scrubNode.disconnect();}catch(_){}tr._scrubNode=null;}
+          for(const playback of this._playbacks(tr,t)){
           const audible = stateFor(tr).audible;
-          const offset = timeFor(tr);
+          const offset = timeFor(tr,playback);
           if (audible && offset != null) {
             if(tr.gain?.gain) tr.gain.gain.value=stateFor(tr).gain;
-            if (tr._scrubNode) { try { tr._scrubNode.stop(); } catch (e) {} }
             try {
               const src = this.ctx.createBufferSource();
-              src.buffer = reversedFor(tr)?.buffer || tr.buffer;
-              src.playbackRate.value = playbackFor(tr)?.rate || env.playbackRateFor(tr.source || 'video', t) || playbackRate || 1;
-              src.connect(tr.gain);
+              src.buffer = reversedFor(tr,playback)?.buffer || tr.buffer;
+              src.playbackRate.value = playback?.rate || env.playbackRateFor(tr.source || 'video', t) || playbackRate || 1;
+              src.connect(this._placementGains.for(tr,playback,t,{schedule:true}));
               const maxDur = Math.max(0, (src.buffer.duration || 0) - 0.01);
               src.start(0, clamp(offset, 0, maxDur), duration);
-              tr._scrubNode = src;
+              if(!tr._scrubNode) tr._scrubNode = src;
+              this._scrubNodes.add(src);
             } catch (e) {}
+          }
           }
         }
       }
@@ -397,24 +582,28 @@ class AudioEngineCore {
       && (activeSource === 'video' || activeSource === null);
     
     const groups=new Map();
+    this._elementPlacements?.prune(t);
     for (const tr of tracks) {
       if (tr._srcHidden) continue;
-      const reversed = playbackFor(tr)?.reverse ? reversedFor(tr) : null;
-      const element = playbackFor(tr)?.reverse ? reversed?.el : tr.kind === 'element' ? tr.el : null;
+      const playbacks=this._playbacks(tr,t);
+      for(const playback of playbacks){
+      const reversed = playback?.reverse ? reversedFor(tr,playback) : null;
+      const element = playback?.reverse ? reversed?.el : tr.kind === 'element' ? this._elementPlacements?.element(tr,playback,playbacks)||tr.el : null;
       if (element) {
         const state=stateFor(tr);
         const audible = state.audible;
         if (audible) {
-          const off = timeFor(tr);
+          const off = timeFor(tr,playback);
           if (off != null) {
             if(tr.gain?.gain) tr.gain.gain.value=state.gain;
-            const siblings=tracks.filter(other=>other.kind==='element'&&other.el===element);
+            const siblings=tracks.filter(other=>other.kind==='element'&&other.el===tr.el);
             const group=groups.get(element)||{off,routes:[],channels:reversed ? reversed.channel + 1 : Math.max(1,siblings.length),
-              rate:playbackFor(tr)?.rate || env.playbackRateFor(tr.source || 'video',t) || playbackRate || 1};
-            group.routes.push({gain:tr.gain,channel:reversed ? reversed.channel : siblings.indexOf(tr)});
+              rate:playback?.rate || env.playbackRateFor(tr.source || 'video',t) || playbackRate || 1};
+            group.routes.push({gain:this._placementGains?.for(tr,playback,t,{schedule:true})||tr.gain,channel:reversed ? reversed.channel : siblings.indexOf(tr)});
             groups.set(element,group);
           }
         }
+      }
       }
     }
     for(const [element,group] of groups){
@@ -451,10 +640,12 @@ class ElementScrubber {
     this.generation=0;
     this.node=null;
     this.splitter=null;
+    this.seekController=null;
   }
   
   scrub(targetT, { rate = 1, preservesPitch = false, isMuted = false, durationMs = 150,context=null,routes=null,channels=1 }) {
     if (this.destroyed||!this.sourceEl.src) return;
+    if(this.seekController){this.seekController.abort();this.seekController=null;this.generation++;}
     
     this.pending = { targetT, rate, preservesPitch, isMuted, durationMs,context,routes,channels };
     
@@ -505,9 +696,21 @@ class ElementScrubber {
       this.scrubEl.preservesPitch = task.preservesPitch;
     }
     
-    this.scrubEl.currentTime = clamp(task.targetT, 0, this.sourceEl.duration || task.targetT);
     this.scrubEl.volume = task.isMuted ? 0 : 1;
-    
+
+    const source=this.sourceEl.src,controller=new AbortController();this.seekController=controller;
+    const ready=()=>{
+      if(this.destroyed||generation!==this.generation||controller.signal.aborted||source!==this.sourceEl.src)return;
+      this.seekController=null;this._play(task,generation);
+    };
+    try{
+      const pending=getPlayerAdapter().seekElement(this.scrubEl,task.targetT,{signal:controller.signal});
+      if(pending?.then)pending.then(ready).catch(()=>{if(this.seekController===controller)this.seekController=null;});
+      else ready();
+    }catch(_){if(this.seekController===controller)this.seekController=null;}
+  }
+
+  _play(task,generation) {
     const p = this.scrubEl.play();
     if (p !== undefined) {
       this.playPromise = p;
@@ -538,6 +741,7 @@ class ElementScrubber {
   }
   
   cancel() {
+    this.seekController?.abort();this.seekController=null;getPlayerAdapter().cancelElementSeek(this.scrubEl);
     this.pending=null;this.generation++;this.playPromise=null;
     clearTimeout(this.pauseTimer);
     this.scrubEl.onloadedmetadata=null;

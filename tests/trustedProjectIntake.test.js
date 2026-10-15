@@ -1,11 +1,56 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'acorn';
 
+const require = createRequire(import.meta.url);
 const { createTrustedProjectIntake } = require('../electron/project-file-authority-engine.js');
+const { FileAuthority } = require('../electron/file-authority.js');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const directories = [];
+
+function relinkFixture() {
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-relink-test-'));
+  directories.push(directory);
+  const projectPath = path.join(directory, 'edit.subtool');
+  const oldMediaPath = path.join(directory, 'missing', 'master.mxf');
+  const fileAuthority = new FileAuthority();
+  const projectWorkspace = createTrustedProjectIntake({
+    grantProjectFile: file => fileAuthority.grantProjectFile(file),
+    grantMediaFile: file => fileAuthority.grantTrustedFile(file, { read: true, write: false }),
+  });
+  const bytes = Buffer.from(JSON.stringify({ media: { path: oldMediaPath } }));
+  fs.writeFileSync(projectPath, bytes);
+  projectWorkspace.grant(projectPath, bytes);
+  const source = fs.readFileSync(path.join(ROOT, 'electron/main.js'), 'utf8');
+  const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
+  const search = ast.body.find(node => node.type === 'FunctionDeclaration' && node.id.name === 'findFileRecursively');
+  const registration = ast.body.find(node => node.type === 'ExpressionStatement'
+    && node.expression.type === 'CallExpression'
+    && node.expression.callee.object?.name === 'ipcMain'
+    && node.expression.callee.property?.name === 'handle'
+    && node.expression.arguments[0]?.value === 'fs:findRelinkTarget');
+  expect(search).toBeDefined();
+  expect(registration).toBeDefined();
+  let handler;
+  const context = { fs, path, fileAuthority, projectWorkspace, ipcMain: { handle: (_, fn) => { handler = fn; } } };
+  vm.runInNewContext(`${source.slice(search.start, search.end)}\n${source.slice(registration.start, registration.end)}`, context);
+  return { directory, projectPath, oldMediaPath, fileAuthority, handler };
+}
+
+afterEach(() => {
+  for (const directory of directories.splice(0)) {
+    const resolved = fs.realpathSync(directory);
+    if (path.dirname(resolved) !== fs.realpathSync(os.tmpdir()) || !path.basename(resolved).startsWith('subtool-relink-test-')) {
+      throw new Error('拒絕清除未驗證的重連測試路徑');
+    }
+    fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
 
 describe('trusted project intake', () => {
   it('uses the main-process bytes to grant exactly the project and its declared media', () => {
@@ -111,6 +156,31 @@ describe('trusted project intake', () => {
 
     intake.grantProjectOnly('C:\\Projects\\edit.subtool');
     expect(intake.canRelink('C:\\Projects\\edit.subtool', 'D:\\Media\\master.mxf')).toBe(false);
+  });
+
+  it.each([false, true])('實際 main 重連略過同名目錄，只授權找到的媒體檔案（有巢狀檔案=%s）', async hasFile => {
+    const { directory, projectPath, oldMediaPath, fileAuthority, handler } = relinkFixture();
+    const collision = path.join(directory, 'master.mxf');
+    fs.mkdirSync(collision);
+    const media = path.join(collision, 'master.mxf');
+    if (hasFile) fs.writeFileSync(media, 'relocated media content');
+    expect(fileAuthority.canRead(collision)).toBe(false);
+    expect(fileAuthority.canRead(media)).toBe(false);
+
+    await expect(handler({}, { projectPath, oldMediaPath })).resolves.toBe(hasFile ? media : null);
+
+    expect(fileAuthority.canRead(collision)).toBe(false);
+    expect(fileAuthority.canRead(media)).toBe(hasFile);
+    expect(fileAuthority.canWrite(media)).toBe(false);
+    expect(fs.readdirSync(collision)).toEqual(hasFile ? ['master.mxf'] : []);
+  });
+
+  it('實際 main 不以未宣告的 renderer 檔名搜尋並授權專案旁的檔案', async () => {
+    const { directory, projectPath, fileAuthority, handler } = relinkFixture();
+    const sibling = path.join(directory, 'private.wav');
+    fs.writeFileSync(sibling, 'private sibling');
+    await expect(handler({}, { projectPath, oldMediaPath: path.join(directory, 'missing', 'private.wav') })).resolves.toBeNull();
+    expect(fileAuthority.canRead(sibling)).toBe(false);
   });
 
   it('does not expose a renderer-controlled project authorization channel', () => {

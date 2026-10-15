@@ -1,3 +1,4 @@
+// @subtool-ci windows
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
@@ -8,6 +9,7 @@ import { State } from '../src/state.js';
 import { Seq } from '../src/sequence.js';
 import { planClipGesturePreview } from '../src/timeline-gesture-transaction.js';
 import { buildExportSnapshot } from '../src/delivery-job.js';
+import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const ExportPlan=createRequire(import.meta.url)('../electron/export-plan.js');
 
@@ -57,11 +59,13 @@ describe('片段速度與反轉共用時間域',()=>{
       assFileName:null,outPath:'C:/out.mp4',
     },{hasAudioStream:()=>false});
     const graph=plan.args[plan.args.indexOf('-filter_complex')+1];
-    expect(graph).toContain('reverse,setpts=(PTS-STARTPTS)/2.000000');
+    expect(graph).toContain(')/2.000000)-1');
+    expect(graph).toContain('trim=start_pts=0:end_pts=50,reverse');
+    expect(graph).toContain('[ov0]trim=end_frame=50[vdelivery]');
   });
 });
 
-const ffmpeg=path.join(process.cwd(),'electron/ffmpeg/ffmpeg.exe');
+const { ffmpeg } = nativeTestTools();
 describe.skipIf(!existsSync(ffmpeg))('變速反轉實際交付影格',()=>{
   it('2 倍速反轉使藍色片尾先於紅色片頭，長度縮成一半',()=>{
     const dir=mkdtempSync(path.join(tmpdir(),'subtool-speed-'));

@@ -44,6 +44,8 @@ seek、pause、滑鼠拖曳、逐格、字幕時間與手勢交易都用 `snapTi
 
 字幕 FPS 轉換的預覽與確認共用 `getExactFps(from) / getExactFps(to)`，再吸附到專案格網；下拉選單的 23.976／29.97 等顯示值不能直接作為換算比例。顯示小數在數小時字幕中會累積一格誤差，來源與目標皆須使用精確格率。
 
+新建定時字幕、正片長字幕匯入或變更專案 FPS 時，以 `subtitle-model.js` 的 `snapCueToFrames()` 保持至少一格，避免兩端各自吸附後變成零長度。`addCue()` 在建立 History 前處理端點，右鍵游標位置等 caller 不得留下非格網快照。無時間碼字幕不補造時間；辨識結果的嚴格時間有效性仍由原有提交規則裁定。
+
 ASS 只有百分秒；`secToASS()` 直接表達原秒數，不預先減半格。SUB Tool 自產 ASS 的精確 frame metadata 負責往返還原。
 
 ### I4. 靜止讀數同源於 Media.displayTime()
@@ -65,6 +67,22 @@ ASS 只有百分秒；`secToASS()` 直接表達原秒數，不預先減半格。
 - WebCodecs：所有可見層完成繪製後的來源 timestamp
 
 請求等待期間切換 mpv／WebCodecs 時，要重新判定目前可見 presenter 的完成證據；不能沿用送出當下的 takeover 布林值。mpv ack 不能代替尚未完成的可見 Canvas，已切回 mpv 時也不能繼續等待隱藏 Canvas。圖片須完成載入才繪製整個合成畫面，但不參與影片來源 timestamp 的格網比對。
+
+呈現容差使用時間軸秒數，交給來源 presenter 前由同一片段映射成來源容差。慢速播放可能有多個專案影格共用同一來源畫格：只有實際畫格的來源區間涵蓋目標時，才能提交該時間軸位置；不能把容差放大來接受未抵達的下一格。WebCodecs 使用實際 timestamp 與呈現索引的區間時長；HTML／mpv 由 `decode/source-frame-index.js` 取得目前可見來源的實際 CTS 區間，不能用平均 FPS 補造格長或定位。三路共用 `demux.js` 的 `presentationSamples()`，將 MP4 edit list 換算成播放器時間，並依相鄰呈現 PTS 計算區間；解碼順序的 sample duration 不代表 VFR／B 畫格的顯示時長。來源前置空白也不能以預解碼的未來首格提早確認。沒有可取得的索引時只接受實際 PTS 容差。來源區間左閉右開，反轉後時間軸區間左開右閉；裁切尾端的第一格另保留片段起點。
+
+相鄰片段的 offset 與格網秒數可能因浮點相減差一個 ULP。合成入口 `fadeAlphaAtTimeline()` 只將這種微小負本地時間視為起點零秒，避免已被序列接受的首格變成透明；真正的前置間隙、片段半開邊界與淡化原時鐘不變。
+
+母素材的影片起點可能晚於容器起點。Probe 的 `timestampOffset` 供已扣除容器起點的 FFmpeg／mpv 使用；`presentationTimestampOffset` 供保留絕對呈現 PTS 的 HTML／WebCodecs 使用。HTML transport 按目前來源 URL 保存對應時鐘，seek、讀數、畫格 callback 與 metadata duration 都經 `shared/media-source-clock.cjs` 換算為影片來源秒數；追加素材、重連與重疊音訊 voice 使用各自來源。已歸零的 Proxy／對齊音訊偏移為零，未歸零的轉檔結果仍須依其 metadata 登記來源時鐘。WebCodecs 與來源索引也將實際 CTS 換到同一來源原點，不能只修 seek 卻留下原始容器畫格回報。容器從 5 秒開始、影片從 5.5 秒開始時，來源 2.8 秒對應 HTML 原始 8.3 秒；不能套用容器相對的 3.3 秒。驗證同時核對容器從 0／5 秒開始的 MKV／MOV 真實像素與片長。mpv 的 native 換算見 [Electron 精準呈現](Electron_維護手冊.md#精準呈現)。
+
+網頁原始 File 的片長與來源原點共用 `decode/source-frame-index.js` 的 metadata／畫格索引快取。MP4／MOV 由 MP4Box 決定下一個容器 box 位置，跳過媒體與填充內容，讀取有界的 moov；檔尾索引也保留原 sample 位址，不得以整檔讀取換取定位。WebM adapter 由有界的 EBML metadata 與首批 block 取得來源原點；無有限片長或不支援的 edit list 保留既有退路，不補造來源證據。
+
+解碼後的 PCM 另有自己的起點。`AudioEngine.decodeSourceAudioData()`／`normalizeSourceAudioBuffer()` 依每條音軌的實際解碼原點換算整數 sample，裁去影片之前的音訊或補上真正的前置空白，再供波形、反向音訊、人聲分離與語音辨識使用。AAC active edit 已捨棄的前置編碼樣本、Opus 已消耗的 pre-skip 都不能再次移動；後者的解碼原點與 HTML 的 block／CodecDelay 時鐘分開保存。已對齊 PCM 與其 mono 副本保留原點標記，避免同一 buffer 重複換算。驗證以原始解碼樣本和原生 PCM 內容比較，不能只看 buffer 長度或是否有聲音。
+
+MOV 的 HTML metadata duration 可能在讀到實際 PTS 後延長。HTML adapter 保留被初期片尾截斷的 seek 目標；每當可達範圍真正擴大便重送，即使尚未到達原始目標，也讓解碼器繼續讀取後段 metadata。同值的連發事件不重複定位，仍以實際畫格 callback 確認呈現；換來源、換 transport 或取消請求即撤銷重試，逾時不得回報成功。原始音訊元素、重疊片段的獨立載體與逐格音訊預聽共用這個定位入口；延後定位完成前不能起播，預聽時長從定位與播放就緒後計算。網頁凍結畫面的獨立影片載體也經同一 adapter 的 `presentElement()` 確認實際來源畫格，再擷取像素。尚未加入專案的素材也須保留匯入工作的所有權，reset 後不得晚到起播。
+
+來源 CTS 與 MP4 edit offset 必須保留實際精度，再一次換算成整數微秒；分別捨入再相加會將畫格起點移動一 tick。裁切內的精確來源 PTS 屬於該 PTS 開始的畫格，反向播放也相同；只有半開的 Out 不得取到尾點畫格。HTML／WebCodecs 共用 `sourceFrameTargetUs()` 處理 In／Out，僅吸收浮點表示的 ULP 誤差，不能將每一個反向畫格邊界都退到前一格。
+
+WebCodecs 預取與繪製共用來源微秒目標，裁切尾端使用嚴格小於 `out` 的最大整數微秒，不能固定減 `1/120`，也不能讓捨入把 epsilon 消掉。來源 30 FPS、專案 25 FPS 裁到 1.04 秒時，末格是 1.033333 秒；固定尾端補償會跳過它。
 
 ### I5. 逐格以 displayTime() 為基準
 
@@ -92,12 +110,9 @@ mpv 暫停時可能持續回報偏離格網的 `time-pos`：
 
 ### I7. 片段邊界永遠是時間軸時間
 
-解除影音後，外部音訊有自己的 offset／in／out。鍵盤跳轉、切割、字幕、備註與匯出仍在時間軸域工作；只有音訊元素播放時轉成來源時間。
+解除影音後，外部音訊保留原片段的 offset／in／out、速度與反轉方向，擁有自己的時間軸長度。鍵盤跳轉、切割、字幕、備註與匯出仍在時間軸域工作；只有播放器及辨識來源片段的結果才轉換時間域。
 
-```text
-sourceTime   = in + (timelineTime - offset)
-timelineTime = offset + (sourceTime - in)
-```
+影片與外音共同使用序列層 `sequence-time.js` 的純映射；公式以 [技術架構說明 §0.5](技術架構說明.md#05-時間域外部是時間軸時間播放器是來源時間) 為準。ASR 的來源秒數先映射回時間軸，反轉後仍以升冪起訖建立字幕。
 
 ### I8. 監看 TC 與燒入 TC 分工
 
@@ -138,6 +153,8 @@ sequenceDiagram
 | 模組 | 責任 |
 |---|---|
 | `time.js` | 使用共用精確 FPS，擁有 DF／NDF、時碼與 frame snap |
+| `sequence-time.js`、`sequence.js` | 影片與外音共用的速度／反轉時間映射及序列片段查詢 |
+| `subtitle-model.js` 的 `snapCueToFrames()` | 正片長字幕吸附後至少保留一格 |
 | `tcparse.js` | 時碼輸入解析與分量上下鍵；DF 標籤仍交由 `time.js` 決定 |
 | `subio.js` 的批次時長調整 | 共用精確格率與 frame snap，先換算合法上下限再限制結束時間 |
 | `media-presentation-core.js` | in-flight／pending／取消／commit |

@@ -1,11 +1,16 @@
 // @subtool-ci windows
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
+import { createRequire } from 'node:module';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const { CdpClient, getJSON, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
 const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'compare-window-scroll.cjs');
 
@@ -37,64 +42,19 @@ async function waitUntil(fn, timeoutMs = 10000) {
   throw lastError || new Error('等待 Electron 比對視窗逾時');
 }
 
-class CdpClient {
-  constructor(url) {
-    this.url = url;
-    this.nextId = 0;
-    this.pending = new Map();
-    this.ws = null;
-  }
-
-  async connect() {
-    this.ws = new WebSocket(this.url);
-    await new Promise((resolve, reject) => {
-      this.ws.addEventListener('open', resolve, { once: true });
-      this.ws.addEventListener('error', reject, { once: true });
-    });
-    this.ws.addEventListener('message', event => {
-      const message = JSON.parse(event.data);
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error.message));
-      else pending.resolve(message.result);
-    });
-  }
-
-  send(method, params = {}) {
-    const id = ++this.nextId;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  async evaluate(expression) {
-    const response = await this.send('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (response.exceptionDetails) throw new Error('比對視窗 renderer 執行失敗');
-    return response.result.value;
-  }
-
-  close() { this.ws?.close(); }
-}
-
 async function runScrollFixture() {
   const port = await reservePort();
-  const child = spawn(ELECTRON, [FIXTURE, `--remote-debugging-port=${port}`, '--no-sandbox'], {
+  const profile = mkdtempSync(path.join(tmpdir(), 'subtool-compare-scroll-'));
+  const child = trackElectron(spawn(ELECTRON, [FIXTURE, `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--no-sandbox'], {
       cwd: ROOT,
       windowsHide: true,
       env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' },
       stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  }));
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', chunk => { stdout += chunk.toString(); });
   child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-  const closed = new Promise(resolve => child.once('close', resolve));
   let client;
   try {
     const before = await waitUntil(() => {
@@ -103,11 +63,10 @@ async function runScrollFixture() {
       return line ? JSON.parse(line.slice(marker.length)) : null;
     });
     const target = await waitUntil(async () => {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-      if (!response.ok) return null;
-      return (await response.json()).find(item => item.type === 'page' && item.title === '字幕比對');
+      return (await getJSON(`http://127.0.0.1:${port}/json/list`))
+        .find(item => item.type === 'page' && item.title === '字幕比對');
     });
-    client = new CdpClient(target.webSocketDebuggerUrl);
+    client = new CdpClient(target.webSocketDebuggerUrl, { timeoutMs: 10000 });
     await client.connect();
     let afterWheel = 0;
     for (let attempt = 0; attempt < 4 && afterWheel <= before.scrollTop; attempt++) {
@@ -126,12 +85,12 @@ async function runScrollFixture() {
     }
     client.close();
     client = null;
-    child.kill();
-    await closed;
+    await stopElectron(child);
     return { ...before, afterWheel };
   } finally {
     client?.close();
-    if (child.exitCode == null) child.kill('SIGKILL');
+    await stopElectron(child);
+    verifiedCleanup(profile, 'subtool-compare-scroll-');
   }
 }
 

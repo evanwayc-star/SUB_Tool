@@ -5,50 +5,14 @@ const fsp = require('fs/promises');
 const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
+const { motherSourceFingerprintSync } = require('./mother-source-evidence');
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
 const { buildIngestArgs } = require('./ffmpeg-execution-engine');
+const { sourceAudioClockFilter } = require('./media-source-clock');
 
 function cacheKeyFor(src) {
-  const resolved = path.resolve(src);
-  const stat = fs.statSync(resolved);
-  if (!stat.isFile()) throw new Error('快取來源不是檔案');
-  // v2 隔離舊 key：只看 basename、大小與前 1 MiB 會把同名素材或原地改寫
-  // 後段的素材誤認成同一份，直接播放舊 Proxy／聲道。
-  const sourcePath = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  const hash = crypto.createHash('sha256').update(JSON.stringify([
-    'source-v2', sourcePath, stat.size, stat.mtimeMs, stat.ctimeMs, stat.dev, stat.ino,
-  ]));
-  const sample = (fd, position, length) => {
-    const bytes = Buffer.alloc(length);
-    let read = 0;
-    while (read < length) {
-      const n = fs.readSync(fd, bytes, read, length - read, position + read);
-      if (!n) throw new Error('快取來源在讀取時變更');
-      read += n;
-    }
-    hash.update(String(position)).update(':').update(bytes);
-  };
-  if (stat.size > 0) {
-    const fd = fs.openSync(resolved, 'r');
-    try {
-      const firstLength = Math.min(1024 * 1024, stat.size);
-      sample(fd, 0, firstLength);
-      if (stat.size > firstLength) {
-        const window = Math.min(65536, stat.size - firstLength);
-        const middle = Math.floor((stat.size - window) / 2);
-        sample(fd, middle, window);
-        sample(fd, stat.size - window, window);
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
-  }
-  const after = fs.statSync(resolved);
-  if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs
-    || after.dev !== stat.dev || after.ino !== stat.ino) {
-    throw new Error('快取來源在讀取時變更');
-  }
-  return hash.digest('hex').slice(0, 16);
+  // v3 隔離未對齊影片來源 PTS 的舊音訊／Proxy；母素材取樣規則保持單一 owner。
+  return motherSourceFingerprintSync(src, { namespace: 'source-v3', digestLength: 16 });
 }
 
 /**
@@ -65,9 +29,12 @@ function buildAudioIngestPlan(audio) {
   audioArr.forEach((stream, streamIndex) => {
     const count = sourceChannelCount(stream);
     const base = (stream && (stream.title || stream.lang)) || `音軌 ${streamIndex + 1}`;
+    // 所有聲道／波形在 split、pan 或 mix 前共用來源秒數：正 PTS 補靜音，
+    // 負 PTS 去除來源起點以前的 samples，decoder 已裁掉的 primer 不重裁。
+    filters.push(`[0:a:${streamIndex}]${sourceAudioClockFilter(stream)}[at${streamIndex}]`);
 
     if (count === 1) {
-      filters.push(`[0:a:${streamIndex}]asplit=2[co${channelIndex}][wv${streamIndex}]`);
+      filters.push(`[at${streamIndex}]asplit=2[co${channelIndex}][wv${streamIndex}]`);
       channels.push({
         label: base,
         file: channelFileName(channelIndex),
@@ -82,7 +49,7 @@ function buildAudioIngestPlan(audio) {
 
     const splitPads = Array.from({ length: count }, (_, sourceChannel) => `sp${streamIndex}_${sourceChannel}`);
     filters.push(
-      `[0:a:${streamIndex}]asplit=${count + 1}${splitPads.map(pad => `[${pad}]`).join('')}[wv${streamIndex}]`,
+      `[at${streamIndex}]asplit=${count + 1}${splitPads.map(pad => `[${pad}]`).join('')}[wv${streamIndex}]`,
     );
     for (let sourceChannel = 0; sourceChannel < count; sourceChannel++) {
       filters.push(`[${splitPads[sourceChannel]}]pan=mono|c0=c${sourceChannel}[co${channelIndex}]`);
@@ -119,6 +86,7 @@ function createMediaIntakeRuntime(options = {}) {
   const allowSidecarCache = options.allowSidecarCache !== false;
   const getEncoder = options.getEncoder || (() => 'libx264');
   const delay = options.delay || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const now = options.now || (() => Date.now());
   const createStreamId = options.createStreamId
     || (prefix => prefix + crypto.randomBytes(12).toString('hex'));
   let streamServer = null;
@@ -207,6 +175,11 @@ function createMediaIntakeRuntime(options = {}) {
     const waveState = fileState(meta.wave);
     const channelStates = meta.channels.map(channel => fileState(channel.file));
     return {
+      files: [
+        { file: meta.proxy, state: proxyState },
+        { file: meta.wave, state: waveState },
+        ...meta.channels.map((channel, index) => ({ file: channel.file, state: channelStates[index] })),
+      ].filter(entry => entry.file),
       retained: [proxyState, waveState, ...channelStates].some(state => state !== 'missing'),
       meta: {
         proxy: proxyState === 'complete' ? meta.proxy : null,
@@ -245,20 +218,30 @@ function createMediaIntakeRuntime(options = {}) {
     }
   }
 
+  function inspectCacheDirectory(dir) {
+    const metaPath = path.join(dir, 'meta.json');
+    try {
+      const inspected = inspectMeta(resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir));
+      return { dir, ...inspected };
+    } catch (error) {
+      return { dir, files: [], error: error.code || error.message };
+    }
+  }
+
+  function inspectCache(src) {
+    return cacheCandidates(src).map(inspectCacheDirectory);
+  }
+
   function readCache(src, audio, needsProxy) {
     let partial = null;
     for (const dir of cacheCandidates(src)) {
-      const metaPath = path.join(dir, 'meta.json');
-      if (!fs.existsSync(metaPath)) continue;
-      try {
-        const inspected = inspectMeta(resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir));
-        const hit = { dir, ...inspected };
-        if (coversAudioRequest(hit.meta, audio) && (!needsProxy || hit.meta.proxy)) {
-          fileAuthority.grantManagedCacheDirectory(dir);
-          return hit;
-        }
-        partial ||= hit;
-      } catch (error) {}
+      const hit = inspectCacheDirectory(dir);
+      if (hit.error) continue;
+      if (coversAudioRequest(hit.meta, audio) && (!needsProxy || hit.meta.proxy)) {
+        fileAuthority.grantManagedCacheDirectory(dir);
+        return hit;
+      }
+      partial ||= hit;
     }
     if (partial) fileAuthority.grantManagedCacheDirectory(partial.dir);
     return partial;
@@ -704,6 +687,9 @@ function createMediaIntakeRuntime(options = {}) {
     }
     const unprotect = protectCacheDir(plan.dir);
     let execution;
+    let writer = null;
+    let readinessError = null;
+    const stopUnreadyWriter = () => { try { writer?.kill?.(); } catch (error) {} };
     try {
       execution = ffmpegExecution.execute(plan.args, {
         executionKind: 'direct',
@@ -712,7 +698,11 @@ function createMediaIntakeRuntime(options = {}) {
         duration,
         jobId: id,
         label: plan.label,
-        onProcess: process => session.ownProcess?.(process),
+        onProcess: process => {
+          writer = process;
+          session.ownProcess?.(process);
+          if (readinessError) stopUnreadyWriter();
+        },
         shouldSend: () => !cancelled(session),
       });
     } catch (error) {
@@ -720,32 +710,43 @@ function createMediaIntakeRuntime(options = {}) {
     }
     const completion = Promise.resolve(execution).then(() => {
       job.done = true;
-      if (!cancelled(session)) {
+      if (readinessError) {
+        reportCompletion(session, id, plan.label, readinessError);
+      } else if (!cancelled(session)) {
         plan.commit();
         reportCompletion(session, id, plan.label);
       }
     }).catch(error => {
       job.done = true;
-      job.error = error.message;
-      reportCompletion(session, id, plan.label, error);
+      const failure = readinessError || error;
+      job.error = failure.message;
+      reportCompletion(session, id, plan.label, failure);
     }).finally(() => { try { plan.dispose(); } finally { unprotect(); } });
 
-    const startedAt = Date.now();
+    const startedAt = now();
     let published = false;
+    let ready = false;
     try {
       /* 可播門檻的 300ms 輪詢也可能打到 SMB sidecar，因此只用 fsp.stat。 */
-      while (Date.now() - startedAt < 60000) {
+      while (now() - startedAt < 60000) {
         if (cancelled(session)) return { response: null, completion };
         if (job.error) throw new Error('轉檔失敗：' + job.error);
         let size = 0;
         try { size = (await fsp.stat(proxy)).size; } catch (error) {}
         if (cancelled(session)) return { response: null, completion };
         if (job.error) throw new Error('轉檔失敗：' + job.error);
-        if (size >= 131072 || (job.done && size > 0)) break;
+        if (size >= 131072 || (job.done && size > 0)) { ready = true; break; }
         await delay(300);
         if (cancelled(session)) return { response: null, completion };
       }
 
+      if (!ready) {
+        readinessError = new Error('媒體串流在 60 秒內尚未產生可播放的 Proxy，請重新載入');
+        readinessError.code = 'STREAM_READINESS_TIMEOUT';
+        job.error = readinessError.message;
+        stopUnreadyWriter();
+        throw readinessError;
+      }
       published = true;
       return {
         response: {
@@ -800,6 +801,7 @@ function createMediaIntakeRuntime(options = {}) {
     clearAll,
     close,
     ingest,
+    inspectCache,
     isPreviewCacheMedia,
     releaseStream,
     stream,
@@ -939,6 +941,7 @@ module.exports = {
   createMediaIngestCoordinator,
   IngestSupersededError,
   buildAudioIngestPlan,
+  sourceAudioClockFilter,
   flattenSourceChannels,
   channelFileName,
 };

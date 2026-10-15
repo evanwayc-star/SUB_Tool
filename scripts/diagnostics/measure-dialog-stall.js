@@ -25,6 +25,7 @@
 
 const { execFileSync } = require('child_process');
 const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
+const { rendererLagProbe } = require('./renderer-lag-probe.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -120,16 +121,7 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
       }, true);
       window.__clickArmed = true;
     }
-    if (window.__lagTimer_rend) clearInterval(window.__lagTimer_rend);
-    window.__lag_rend = [];
-    let last = Date.now();
-    window.__lagTimer_rend = setInterval(() => {
-      const now = Date.now();
-      const drift = now - last - 100;
-      if (drift > 200) window.__lag_rend.push({ t: now, blocked: drift });
-      last = now;
-    }, 100);
-    return true;
+    return ${rendererLagProbe({ timerKey: '__lagTimer_rend', recordsKey: '__lag_rend' })};
   })()`));
 
   console.log('\n量測已就緒。');
@@ -161,6 +153,7 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
   clk = JSON.parse(await main.evaluate(inPage(`JSON.stringify(window.__clickLog || [])`)));
   const lagMain = JSON.parse(await main.evaluate(`JSON.stringify(globalThis.__lag_main || [])`));
   const lagRend = JSON.parse(await main.evaluate(inPage(`JSON.stringify(window.__lag_rend || [])`)));
+  const droppedRend = Number(await main.evaluate(inPage('window.__lag_rendDropped || 0'))) || 0;
   const hhmmssms = t2 => new Date(t2).toTimeString().slice(0, 8) + '.' + String(t2 % 1000).padStart(3, '0');
 
   /* 配對【那一次】開啟影音的點擊與它之後的 showOpenDialog——不是第一次的。
@@ -178,7 +171,8 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
   console.log('\n主行程被擋住的時段（>200ms）：');
   if (!lagMain.length) console.log('  （沒有）');
   lagMain.forEach(l => console.log(`  ${hhmmssms(l.t)}  擋住 ${l.blocked} ms`));
-  console.log('\nrenderer 被擋住的時段（>200ms）：');
+  console.log('\nrenderer 可見區間的採樣延遲（>200ms，原因待查）：');
+  if (droppedRend) console.log(`  （只保留最近 600 筆；略過 ${droppedRend} 筆）`);
   if (!lagRend.length) console.log('  （沒有）');
   lagRend.forEach(l => console.log(`  ${hhmmssms(l.t)}  擋住 ${l.blocked} ms`));
 

@@ -8,9 +8,10 @@ import { describe, expect, it } from 'vitest';
 import { renderASS } from '../src/formats.js';
 import { planSubtitleBackgroundLayouts } from '../src/subtitle-background-layout.js';
 import { STYLE_DEFAULTS, styleToCss, subtitleBackgroundCssMetrics } from '../src/substyle.js';
+import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const FFMPEG = path.join(ROOT, 'electron', 'ffmpeg', 'ffmpeg.exe');
+const { ffmpeg: FFMPEG } = nativeTestTools();
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const MEASURE_FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'subtitle-background-measure.cjs');
 const SARASA_FONT = path.join(ROOT, 'font', '更紗黑體', 'sarasa-mono-tc-nerd-regular.ttf');

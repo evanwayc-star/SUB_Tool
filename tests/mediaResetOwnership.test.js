@@ -59,6 +59,87 @@ vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePla
 let Media, Wave, State, resetAudioProject, resetPlayerAdapter;
 
 describe('reset-scoped media ownership', () => {
+  it.each(['detach','cached-restore','desktop-restore','web-restore'])('%s 的真實載入入口保留反向二倍速音訊',async kind=>{
+    resetAudioProject();
+    class ReadyAudio {
+      constructor(){this.readyState=1;this.src='';this.duration=10;this.preload='';this._target=new EventTarget();this.pause=vi.fn();this.load=vi.fn();}
+      addEventListener(...args){this._target.addEventListener(...args);}
+      removeEventListener(...args){this._target.removeEventListener(...args);}
+      removeAttribute(name){if(name==='src')this.src='';}
+    }
+    const restore={_restore:true,duration:10,in:0,out:10,offset:0,speed:2,reverse:true};
+    const oldCreate=Object.getOwnPropertyDescriptor(URL,'createObjectURL');
+    const oldRevoke=Object.getOwnPropertyDescriptor(URL,'revokeObjectURL');
+    vi.stubGlobal('Audio',ReadyAudio);
+    Object.defineProperty(URL,'createObjectURL',{configurable:true,value:()=> 'blob:restored-audio'});
+    Object.defineProperty(URL,'revokeObjectURL',{configurable:true,value:vi.fn()});
+    desktopMock.fileURL.mockResolvedValue('file:///cache.wav');
+    desktopMock.ingest.mockResolvedValue({duration:10,channels:[{file:'C:/cache.wav',sourceStream:0,sourceChannel:0}]});
+    const wave=vi.spyOn(Wave,'fromFile').mockResolvedValue(false);
+    try{
+      let asset;
+      if(kind==='detach'){
+        State.clips=[{id:'reverse',path:'C:/A.mov',dur:10,in:0,out:10,offset:0,vtrack:0,speed:2,reverse:true,audioSrc:'video',audioSourceId:'mother'}];
+        [asset]=await Media.detachClipAudio('reverse');
+        expect(State.clips[0].audioDetached).toBe(true);
+      }else if(kind==='web-restore')asset=await Media.addAudioFile(new File(['test'],'A.wav'),restore);
+      else asset=await Media.addAudioFileDesktop('C:/A.mov',{...restore,preferCache:kind==='cached-restore'});
+      expect(asset).toMatchObject({speed:2,reverse:true});
+      expect(Media.externalAudio.timelineEnd()).toBe(5);
+      expect(Media.audioSourcePlayback(asset.audioSrc,1)).toMatchObject({reverse:true,sourceTime:8,offset:2,rate:2});
+      expect(State.duration).toBe(5);
+    }finally{
+      Media.reset();wave.mockRestore();vi.unstubAllGlobals();
+      if(oldCreate)Object.defineProperty(URL,'createObjectURL',oldCreate);else delete URL.createObjectURL;
+      if(oldRevoke)Object.defineProperty(URL,'revokeObjectURL',oldRevoke);else delete URL.revokeObjectURL;
+    }
+  });
+  it('解除連結保留2倍速反轉的長度與預覽來源映射',async()=>{
+    resetAudioProject();
+    const clip={id:'reverse',path:'C:/A.mov',dur:10,in:0,out:10,offset:0,vtrack:0,speed:2,reverse:true,audioSrc:'video',audioSourceId:'mother'};
+    State.clips=[clip];State.duration=5;
+    const cache=vi.spyOn(Media,'_addDesktopCachedAudio').mockImplementation(async(path,restore)=>Media.createExternalAudioSource({...restore,path,fallbackCount:1}));
+    try{
+      const [asset]=await Media.detachClipAudio(clip.id);
+      expect(asset).toMatchObject({speed:2,reverse:true});
+      expect(Media.externalAudio.timelineEnd()).toBe(5);
+      expect(Media.audioSourcePlayback(asset.audioSrc,1)).toMatchObject({clip:Media.externalAudio.find(asset.id),reverse:true,sourceTime:8,offset:2,rate:2});
+      expect(State.duration).toBe(5);
+    }finally{cache.mockRestore();}
+  });
+
+  it('切割等待期間鎖定同一音訊列，不能提交左段或留下右段',async()=>{
+    const asset=Media.createExternalAudioSource({path:'C:/A.wav',duration:8,in:0,out:8,offset:0,fallbackCount:1});
+    const gate=deferred();
+    const add=vi.spyOn(Media,'addAudioFileDesktop').mockImplementation(async(path,details)=>{await gate.promise;return Media.createExternalAudioSource({...details,path,fallbackCount:1});});
+    try{
+      const pending=Media.splitExternalAudio(asset.id,4);
+      Media.setExternalAudioLocked(asset.timelineLaneId,true);gate.resolve();
+      await expect(pending).resolves.toBeNull();
+      expect(asset.out).toBe(8);expect(Media.externalAudioSources).toEqual([asset]);
+    }finally{add.mockRestore();}
+  });
+
+  it('反轉片段的JKL倒帶改用來源正播，停止後還原片段來源倒播',async()=>{
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true}),direction:vi.fn().mockResolvedValue(true),mute:vi.fn().mockResolvedValue()};
+    desktopMock.mpv=bridge;const adapter=resetPlayerAdapter(desktopMock,domMock.video);await adapter.enterMpv({src:'A.mov'});
+    const clip={id:'reverse',path:'A.mov',in:0,out:10,dur:10,offset:0,reverse:true};State.clips=[clip];Media.activeClipId=clip.id;Media._gap=false;
+    await expect(Media.setPlaybackDirection('backward')).resolves.toBe(true);
+    expect(bridge.direction).toHaveBeenLastCalledWith('forward');
+    await Media.setPlaybackDirection('forward');expect(bridge.direction).toHaveBeenLastCalledWith('backward');
+  });
+
+  it('FFmpeg下載失敗後可重新嘗試，同時呼叫共用一個下載',async()=>{
+    const original=window.FFmpeg;Media.ffmpeg=null;Media.ffmpegLoading=null;
+    let online=false,requests=0;
+    const append=vi.spyOn(document.head,'appendChild').mockImplementation(script=>{requests++;queueMicrotask(()=>online?script.onload():script.onerror(new Error('offline')));return script;});
+    const ff={load:vi.fn().mockResolvedValue()};window.FFmpeg={createFFmpeg:()=>ff};
+    try{
+      await expect(Media.loadFFmpeg()).rejects.toThrow('offline');expect(requests).toBe(2);
+      online=true;const [a,b]=await Promise.all([Media.loadFFmpeg(),Media.loadFFmpeg()]);
+      expect(a).toBe(ff);expect(b).toBe(ff);expect(requests).toBe(3);expect(ff.load).toHaveBeenCalledOnce();
+    }finally{append.mockRestore();window.FFmpeg=original;Media.ffmpeg=null;Media.ffmpegLoading=null;}
+  });
   it('播放gap中改倍速不跳時間，後續時鐘才採用新斜率',()=>{
     let now=0;
     const clock=vi.spyOn(Media._transport,'_now').mockImplementation(()=>now);
@@ -230,7 +311,6 @@ describe('reset-scoped media ownership', () => {
     Media.master = null;
     Media.tracks = [];
     State.clips = [];
-    State.audioSources = [];
     desktopMock.fileURL.mockReset();
     desktopMock.ingest.mockReset();
     desktopMock.probe.mockReset();
@@ -271,7 +351,8 @@ describe('reset-scoped media ownership', () => {
       audios[0].dispatch('loadedmetadata');
 
       await expect(pending).resolves.toBeNull();
-      expect(State.audioSources).toEqual([]);
+      expect(State.externalAudioState).toEqual([]);
+      expect(Media.externalAudioSources).toEqual([]);
       expect(Media.tracks).toEqual([]);
       expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:late-audio');
     } finally {

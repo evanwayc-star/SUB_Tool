@@ -1,5 +1,13 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { VocalWaveformCache, vocalCacheDescriptor, vocalPeakLength } from '../src/vocal-waveform-cache.js';
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
+
+const require = createRequire(import.meta.url);
+const { motherSourceFingerprint } = require('../electron/mother-source-evidence.js');
+const { vocalSourceFingerprint } = require('../electron/vocal-waveform-fingerprint.js');
 
 const descriptor = (id = 1, duration = 1, streams = [0]) => vocalCacheDescriptor(id.toString(16).padStart(64, '0'), duration, streams);
 const peaks = (duration = 1) => {
@@ -54,6 +62,25 @@ it('完整峰值校驗後持久保存，重建cache instance及重新選擇不�
   expect(await cache.read(descriptor(), 1)).toHaveLength(200);
 });
 
+it('native 來源時鐘更新後，同一素材與時長不命中容器時鐘的舊持久峰值', async () => {
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-vocal-clock-cache-'));
+  try {
+    const source = path.join(directory, 'mother.mkv'); fs.writeFileSync(source, Buffer.alloc(100, 7));
+    const legacy = vocalCacheDescriptor(await motherSourceFingerprint(source, { namespace: 'vocal-source-v1' }), 1, [0]);
+    const current = vocalCacheDescriptor(await vocalSourceFingerprint(source), 1, [0]);
+    const { cache, records } = memoryCache();
+    await cache.write(legacy, 1, peaks()); await cache.select(legacy, true);
+    const reopened = memoryCache({}, records).cache;
+    expect(await reopened.read(current, 1, { selectedOnly: true })).toBeNull();
+    await reopened.write(current, 1, peaks()); await reopened.select(current, true);
+    expect(await reopened.read(current, 1, { selectedOnly: true })).toHaveLength(200);
+  } finally {
+    const resolved = fs.realpathSync(directory);
+    if (path.dirname(resolved) !== fs.realpathSync(tmpdir()) || !path.basename(resolved).startsWith('subtool-vocal-clock-cache-')) throw new Error('拒絕清除未核對的人聲快取測試目錄');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
+});
+
 it.each(['hash', 'nan', 'length', 'range', 'descriptor'])('毀損的 %s cache不能恢復有效人聲結果', async corruption => {
   const { cache, records } = memoryCache();
   await cache.write(descriptor(), 1, peaks()); await cache.select(descriptor(), true);
@@ -71,6 +98,14 @@ it('拒絕半成品、非有限、顛倒範圍與異常振幅，無cache不創�
   for (const bad of [new Float32Array(2), new Float32Array(200).fill(NaN), new Float32Array(200).fill(1), new Float32Array(200).fill(-99)])
     expect(await cache.write(descriptor(), 1, bad)).toBe(false);
   expect(await cache.select(descriptor(), true)).toBe(false); expect(records.size).toBe(0);
+});
+
+it('旧音訊epoch峰值快取不能在source-zero正規化後恢復',async()=>{
+  const {cache}=memoryCache(),current=descriptor(),old=JSON.parse(current);
+  expect(old[0]).toBe(2);old[0]=1;
+  const legacy=JSON.stringify(old);
+  await cache.write(legacy,1,peaks());await cache.select(legacy,true);
+  expect(await cache.read(current,1,{selectedOnly:true})).toBeNull();
 });
 
 it('模型算法時長與streams均在descriptor中；fractional seconds沿用實際sample格網', () => {

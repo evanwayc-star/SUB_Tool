@@ -43,7 +43,7 @@ describe('project image persistence',()=>{
     await expect(work.promise).resolves.toMatchObject({status:'cancelled'});
     expect(commit).not.toHaveBeenCalled();
   });
-  it('無效專案不撤銷目前專案的 ASR 工作或 preset draft',async()=>{
+  it.each([{fps:-1},{cues:[null]},{clips:[[]]}])('無效專案 %j 不撤銷目前專案的 ASR 工作或 preset draft',async invalid=>{
     const {startAsrWork}=await import('../src/speech-recognition-session.js');
     let complete,signal;
     const commit=vi.fn(()=>({count:1}));
@@ -53,7 +53,7 @@ describe('project image persistence',()=>{
     await vi.waitFor(()=>expect(transcribe).toHaveBeenCalledOnce());
     const draft={targetId:'current'};
     State.presetEdit=draft;
-    expect(Project.apply({fps:-1})).toBe(false);
+    expect(Project.apply(invalid)).toBe(false);
     expect(signal.aborted).toBe(false);
     expect(State.presetEdit).toBe(draft);
     complete([{start:0,end:1,text:'current'}]);
@@ -70,6 +70,20 @@ describe('project image persistence',()=>{
     await Project.saveAs();
     const reopened=JSON.parse(Buffer.from(saveProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
     expect(reopened.externalAudioSources[0]).toMatchObject({height:128,in:0,out:0});
+  });
+  it.each([false,true])('外部音訊 speed/reverse=%s 跨 save/apply/save 保留，專案尾端採時間軸長度',async reverse=>{
+    const source={audioSourceId:'fast',name:'voice',path:'C:/voice.wav',duration:16,in:2,out:12,offset:10,speed:2,reverse};
+    mediaMock.externalAudio.list.mockReturnValue([source]);
+    await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(saveProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.externalAudioSources[0]).toMatchObject({speed:2,in:2,out:12,offset:10});
+    expect(!!saved.externalAudioSources[0].reverse).toBe(reverse);
+    mediaMock.externalAudio.list.mockReturnValue([]);
+    expect(Project.apply(saved)).not.toBe(false);
+    expect(State.externalAudioEnd).toBe(15);
+    await Project.saveAs();
+    const reopened=JSON.parse(Buffer.from(saveProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+    expect(reopened.externalAudioSources).toEqual(saved.externalAudioSources);
   });
   it('音訊效果與母素材一起保存，重開後仍可保存，播放快取不進專案',async()=>{
     State.clips=[{id:'v',name:'master.mp4',path:'C:/master.mp4',dur:4,in:0,out:4,offset:0,primary:true,

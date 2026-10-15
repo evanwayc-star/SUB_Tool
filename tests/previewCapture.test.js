@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const adapters=vi.hoisted(()=>({
-  Media:{mpvMode:true,displayTime:vi.fn(),inGap:vi.fn(),mpvPresenting:vi.fn(),previewFadeDarkness:vi.fn(),previewComposition:vi.fn()},
+  Media:{mpvMode:true,displayTime:vi.fn(),inGap:vi.fn(),mpvPresenting:vi.fn(),previewFadeDarkness:vi.fn(),previewComposition:vi.fn(),captureMediaOwnership:vi.fn(()=>()=>true)},
   player:{screenshot:vi.fn(),setImageGuide:vi.fn()},
 }));
 vi.mock('../src/media.js',()=>({Media:adapters.Media,Wave:{sources:[]}}));
@@ -65,7 +65,7 @@ class CaptureImage{
   }
 }
 
-let State,capturePreviewFrame,renderImageOverlays,preview,video;
+let State,Seq,imageLayerPlan,capturePreviewFrame,renderImageOverlays,preview,video;
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return{promise,resolve};};
 const image=(overrides={})=>({id:'image',type:'image',path:'blob:green',in:0,out:4,offset:0,vtrack:0,natW:8,natH:4,scale:1,posX:0.5,posY:0.5,...overrides});
 const pixel=(result,x,y)=>contextFor(result.canvas).pixel(x,y);
@@ -76,6 +76,8 @@ beforeAll(async()=>{
   vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockImplementation(function(){return contextFor(this);});
   vi.stubGlobal('Image',CaptureImage);
   ({State}=await import('../src/state.js'));
+  ({Seq}=await import('../src/sequence.js'));
+  ({imageLayerPlan}=await import('../src/image-compositor-engine.js'));
   ({capturePreviewFrame,renderImageOverlays}=await import('../src/video-renderer.js'));
   preview=document.getElementById('previewCanvas');video=document.getElementById('video');
   Object.defineProperties(video,{readyState:{configurable:true,value:2},videoWidth:{configurable:true,value:8},videoHeight:{configurable:true,value:4}});
@@ -85,6 +87,7 @@ beforeAll(async()=>{
 });
 beforeEach(()=>{
   vi.clearAllMocks();
+  adapters.Media.captureMediaOwnership.mockReturnValue(()=>true);
   Object.assign(State,{videoWidth:8,videoHeight:4,fps:25,dropFrame:false,clips:[],videoTracks:[{visible:true}],soloVideoTrack:-1});
   adapters.Media.displayTime.mockReturnValue(1);
   adapters.Media.inGap.mockReturnValue(false);
@@ -100,7 +103,59 @@ beforeEach(()=>{
 });
 afterAll(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 
+it.each(['replacement','same-source-clone','reset'])('image metadata %s respects live source and media lifetime',reason=>{
+  const pending=[];
+  class DeferredImage{naturalWidth=1920;naturalHeight=1080;set src(value){this.source=value;pending.push(this);}}
+  vi.stubGlobal('Image',DeferredImage);
+  let owned=true;adapters.Media.captureMediaOwnership.mockReturnValue(()=>owned);
+  const url=`blob:metadata-${reason}`;
+  State.clips=[image({id:'same-image',path:url,natW:0,natH:0})];renderImageOverlays();
+  expect(pending).toHaveLength(1);
+  const replacement=image({id:'same-image',path:reason==='replacement'?'blob:new-portrait':url,natW:reason==='replacement'?600:0,natH:reason==='replacement'?1200:0});
+  State.clips=[replacement];
+  if(reason==='reset')owned=false;
+  pending[0].onload();
+  expect([replacement.natW,replacement.natH]).toEqual(reason==='replacement'?[600,1200]:reason==='same-source-clone'?[1920,1080]:[0,0]);
+  vi.stubGlobal('Image',CaptureImage);
+});
+
+it('a completed image dimension cache cannot cross a media epoch when a same URL is reloaded',()=>{
+  const pending=[];let generation=0;
+  class DeferredImage{naturalWidth=1920;naturalHeight=1080;set src(value){this.source=value;pending.push(this);}}
+  vi.stubGlobal('Image',DeferredImage);
+  adapters.Media.captureMediaOwnership.mockImplementation(()=>{const stamp=generation;return()=>stamp===generation;});
+  const clip=image({path:'blob:reloaded-image-dimensions',natW:0,natH:0});
+  State.clips=[clip];renderImageOverlays();pending[0].onload();
+  expect([clip.natW,clip.natH]).toEqual([1920,1080]);
+  generation++;
+  const replacement={...clip,natW:0,natH:0};State.clips=[replacement];renderImageOverlays();
+  expect([replacement.natW,replacement.natH]).toEqual([0,0]);expect(pending).toHaveLength(2);
+  pending[1].naturalWidth=600;pending[1].naturalHeight=1200;pending[1].onload();
+  expect([replacement.natW,replacement.natH]).toEqual([600,1200]);
+  vi.stubGlobal('Image',CaptureImage);
+});
+
 describe('capturePreviewFrame uses the visible presenter and frozen timeline image plan',()=>{
+  it.each(['layer plan','DOM overlay','captured pixels'])('adjacent frame arithmetic keeps the incoming image visible in %s',async caller=>{
+    const previous=image({id:'previous',path:'blob:red',in:29/30,out:33/30});
+    const incoming=image({id:'incoming',offset:Seq.clipEnd(previous)});
+    State.clips=[previous,incoming];
+    const time=4/30;
+    expect(time).toBeLessThan(incoming.offset);
+    expect(Seq.clipsAt(time)).toEqual([incoming]);
+    expect(Seq.clipsAt(Seq.clipEnd(incoming))).toEqual([]);
+    adapters.Media.displayTime.mockReturnValue(time);
+    if(caller==='layer plan'){
+      expect(imageLayerPlan({stageW:8,stageH:4,track:State.videoTracks[0],clip:Seq.clipsAt(time)[0],natW:8,natH:4,time}).alpha).toBe(1);
+    }else if(caller==='DOM overlay'){
+      renderImageOverlays();
+      expect(getComputedStyle(document.querySelector('#imageLayer .img-wrap[data-id="incoming"]')).opacity).toBe('1');
+    }else{
+      const result=await capturePreviewFrame();
+      expect(pixel(result,4,2)).toEqual([0,255,0]);
+    }
+  });
+
   it('captures the visible WebCodecs project rectangle while mpv is loaded but no longer presenting',async()=>{
     preview.style.display='block';
     const readBase64=vi.fn();

@@ -48,7 +48,7 @@ vi.mock('../src/sequence.js', () => ({
 vi.mock('../src/media-player-adapter.js', () => ({ getPlayerAdapter: () => ({}) }));
 vi.mock('../src/events.js', () => ({ emit: vi.fn() }));
 vi.mock('../src/ui.js', () => ({ showToast: vi.fn() }));
-vi.mock('../src/decode/demux.js', () => ({
+vi.mock('../src/decode/demux.js', async importOriginal => ({...await importOriginal(),
   demuxFile: vi.fn(), demuxIndex: vi.fn(), SampleReader: class {}, MemReader: class {},
 }));
 vi.mock('../src/decode/sample-index.js', () => ({ keyIndexBefore: vi.fn(() => 0) }));
@@ -87,7 +87,29 @@ describe('WebCodecs presentation acknowledgement', () => {
     WCPreview.tick();
 
     expect(contextMock.drawImage).toHaveBeenCalledTimes(2);
-    expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([104, 104]);
+    expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([
+      expect.objectContaining({time:104,start:104,reverse:false}),expect.objectContaining({time:104,start:104,reverse:false})
+    ]);
+  });
+
+  it('actual Seq admission at an adjacent frame boundary paints the incoming frame rather than a black acknowledgement',async()=>{
+    const {Seq:actualSequence}=await vi.importActual('../src/sequence.js');
+    const previous={...clipA,in:29/30,out:33/30,offset:0};
+    const incoming={...clipB,in:0,out:1,offset:actualSequence.clipEnd(previous),vtrack:0};
+    const time=4/30;
+    stateMock.State.clips=[previous,incoming];
+    Seq.clipsAt.mockImplementation(t=>actualSequence.clipsAt(t));
+    expect(Seq.clipsAt(time)).toEqual([incoming]);
+    mediaMock.tlTime.mockReturnValue(time);
+    const frame={timestamp:0,duration:33333,displayWidth:1920,displayHeight:1080};
+    WCPreview.sources.set('b.mp4#0',{state:'ready',request:vi.fn(()=>frame)});
+
+    WCPreview.tick();
+
+    expect(contextMock.drawImage.mock.calls.map(([source])=>source)).toEqual([frame]);
+    expect(publishContext.drawImage).toHaveBeenCalledOnce();
+    expect(WCPreview.mode).not.toBe('black');
+    expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([expect.objectContaining({time:incoming.offset,start:incoming.offset})]);
   });
 
   it('仍由 mpv 播單片段時，提前解出即將開始的疊層畫格', () => {
@@ -164,7 +186,7 @@ describe('WebCodecs presentation acknowledgement', () => {
 
     expect(contextMock.drawImage.mock.calls.map(([source])=>source)).toEqual([bitmap,videoFrame]);
     expect(publishContext.drawImage).toHaveBeenCalledOnce();
-    expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([104]);
+    expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([expect.objectContaining({time:104,start:104})]);
     expect(mediaMock.setWebCodecsComposited).toHaveBeenLastCalledWith(true,{time:104,imageIds:['img-low'],imagesComposited:true});
   });
 
@@ -211,6 +233,8 @@ describe('WebCodecs presentation acknowledgement', () => {
     WCPreview.sources.get('b.mp4#1').request.mockReturnValue({timestamp:1.99e6,displayWidth:1920,displayHeight:1080});
     WCPreview.tick();
     expect(mediaMock.setWebCodecsComposited).toHaveBeenLastCalledWith(true,{time:103.99,imageIds:[],imagesComposited:false});
-    expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([104,103.99]);
+    expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([
+      expect.objectContaining({time:104,start:104}),expect.objectContaining({time:103.99,start:103.99})
+    ]);
   });
 });

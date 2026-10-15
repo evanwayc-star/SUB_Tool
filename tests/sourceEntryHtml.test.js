@@ -23,7 +23,7 @@
    | 標記 | 原始碼 | 建置產物 |
    |------|--------|---------|
    | `<script type="module" src="/src/main.js">` | 有 | 無（已內嵌） |
-   | `Content-Security-Policy` meta | 無 | 有（vite.config.js 的 injectCSP，`apply: 'build'`） |
+   | `Content-Security-Policy` meta | 無 | 有（vite.config.mjs 的 injectCSP，`apply: 'build'`） |
    | 檔案大小 | ~32 KB | ~800 KB |
 
    要改這支測試前先想清楚：如果 index.html 真的多了一個 CSP meta，那多半代表
@@ -43,7 +43,7 @@ describe('根目錄 index.html 是原始碼入口', () => {
   });
 
   it('沒有建置期才注入的 CSP meta', () => {
-    /* vite.config.js 的 injectCSP() 是 `apply: 'build'`——原始碼裡出現它，
+    /* vite.config.mjs 的 injectCSP() 是 `apply: 'build'`——原始碼裡出現它，
        就代表這份檔案是被建置產物蓋掉的。 */
     expect(html).not.toContain('Content-Security-Policy');
   });

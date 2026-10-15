@@ -72,11 +72,13 @@ const ARM_DIALOG = `(() => {
    若 pointerdown 就已經遲到，代表事件在【送進頁面之前】就被延誤了；
    若 pointerdown 準時而 click 遲到，代表延誤發生在頁面內部。 */
 const ARM = `(() => {
-  window.__inp = [];
+  window.__inp = window.__inp || [];
+  window.__inpSeq = window.__inpSeq || 0;
   if (window.__inpArmed) return true;
   const rec = (kind, e) => {
     const el = e.target && e.target.closest && e.target.closest('[data-act]');
     window.__inp.push({
+      seq: ++window.__inpSeq,
       kind,
       act: el ? el.dataset.act : (e.target && e.target.id) || '(其他)',
       延遲ms: Math.round(performance.now() - e.timeStamp),
@@ -146,13 +148,16 @@ async function waitForPid(prev) {
       let list = [];
       try { list = JSON.parse(await main.evaluate(inPage('JSON.stringify(window.__inp || [])'))); }
       catch (e) { alive = false; break; }
-      for (let i = seen; i < list.length; i++) {
-        const r = list[i];
+      const unread = list.filter(r => r.seq > seen);
+      if (unread.length && unread[0].seq > seen + 1) {
+        console.warn(`輸入探針已捲動，略過 ${unread[0].seq - seen - 1} 筆；以下為仍保留的事件。`);
+      }
+      for (const r of unread) {
         const mark = r.延遲ms > 1000 ? '   ← 這一段就是使用者等的時間' : '';
         console.log(`  ${new Date(r.at).toTimeString().slice(0, 8)}  ${r.kind.padEnd(13)}` +
           `  ${String(r.延遲ms).padStart(6)} ms  ${r.vis.padEnd(9)}  ${r.act}${mark}`);
+        seen = r.seq;
       }
-      seen = list.length;
       await sleep(1000);
     }
     try { main.close(); } catch (e) {}

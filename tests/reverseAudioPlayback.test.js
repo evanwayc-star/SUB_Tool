@@ -48,6 +48,7 @@ function readBlob(blob) {
     reader.onerror = () => reject(reader.error); reader.readAsArrayBuffer(blob); });
 }
 
+function routedTrackGain(input){return input.connect.mock.calls[0][0].connect.mock.calls[0][0];}
 describe('反向預覽沿用音訊傳輸的公開接縫', () => {
   it('裁切的雙聲道 buffer 反向 PCM 正確，倍率與原 buffer 不變', async () => {
     const { engine, track, spec, buffers } = setup('buffer');
@@ -56,9 +57,9 @@ describe('反向預覽沿用音訊傳輸的公開接縫', () => {
     engine.startBuffers(3);
     expect([...buffers[0].buffer.getChannelData(0)]).toEqual([.8, .7, .6, .5, .4, .3].map(Math.fround));
     expect([...buffers[0].buffer.getChannelData(1)]).toEqual([-.8, -.7, -.6, -.5, -.4, -.3].map(Math.fround));
-    expect(buffers[0].start).toHaveBeenCalledWith(0, 1);
+    expect(buffers[0].start).toHaveBeenCalledWith(0, 1, 2);
     expect(buffers[0].playbackRate.value).toBe(2);
-    expect(buffers[0].connect).toHaveBeenCalledWith(track.gain);
+    expect(routedTrackGain(buffers[0].connect.mock.calls[0][0])).toBe(track.gain);
     expect([...track.buffer.getChannelData(0)]).toEqual(original);
   });
 
@@ -69,7 +70,7 @@ describe('反向預覽沿用音訊傳輸的公開接縫', () => {
     expect(engine.syncBuffers(2.2)).toBe(false); expect(buffers).toHaveLength(1);
     state.playback.sourceTime = 3.7; state.playback.offset = .3;
     expect(engine.syncBuffers(3.7)).toBe(true); expect(buffers[0].stop).toHaveBeenCalled();
-    expect(buffers[1].start).toHaveBeenCalledWith(0, .3);
+    expect(buffers[1].start).toHaveBeenCalledWith(0, .3, 2.7);
     state.playback.rate = .5; expect(engine.syncBuffers(3.7)).toBe(true);
     expect(buffers[2].playbackRate.value).toBe(.5);
   });
@@ -78,7 +79,8 @@ describe('反向預覽沿用音訊傳輸的公開接縫', () => {
     const { engine, track, spec, elements, splitters, state } = setup(kind);
     expect(await engine.prepareReverseTrack(track, spec())).toBe(true);
     expect(splitters[0].channels).toBe(2);
-    expect(splitters[0].connect).toHaveBeenCalledWith(track.gain, 1);
+    expect(splitters[0].connect.mock.calls[0][1]).toBe(1);
+    expect(routedTrackGain(splitters[0].connect.mock.calls[0][0])).toBe(track.gain);
     expect(splitters[0].connect).toHaveBeenCalledWith(track.analyser, 1);
     engine.startElements(3, 20.5);
     expect(track.el.play).not.toHaveBeenCalled(); expect(track.el.pause).toHaveBeenCalled();
@@ -90,6 +92,15 @@ describe('反向預覽沿用音訊傳輸的公開接縫', () => {
     engine.stopElements(); expect(elements[0].paused).toBe(true);
   });
 
+  it('mono母素材的右聲道路由反向保持靜音，不複製左聲道或拒絕整個來源',async()=>{
+    const {engine,track,spec,blobs,elements}=setup('native');
+    const buffer=pcm([[.1,.2,.3,.4,.5,.6]]);
+    expect(await engine.prepareReverseTrack(track,spec({load:async()=>({buffer,channel:1})}))).toBe(true);
+    const wav=new DataView(await readBlob(blobs[0]));
+    expect(Array.from({length:6},(_,index)=>wav.getInt16(44+index*2,true))).toEqual([0,0,0,0,0,0]);
+    engine.startElements(3,20.5);expect(elements[0].play).toHaveBeenCalledTimes(1);
+  });
+
   it('瀏覽器解碼的右聲道會裁切倒轉成 mono WAV，來源提早結束補靜音', async () => {
     const { engine, track, spec, blobs, splitters, elements } = setup('native');
     const buffer = pcm([[.1, .2, .3, .4, .5, .6], [.6, .5, .4, .3, .2, .1]]);
@@ -97,7 +108,8 @@ describe('反向預覽沿用音訊傳輸的公開接縫', () => {
     const wav = new DataView(await readBlob(blobs[0]));
     expect(wav.getUint16(22, true)).toBe(1); expect(wav.getUint32(24, true)).toBe(2);
     expect(Array.from({ length: 6 }, (_, i) => wav.getInt16(44 + i * 2, true))).toEqual([0, 0, 3277, 6553, 9830, 13107]);
-    expect(splitters[0].channels).toBe(1); expect(splitters[0].connect).toHaveBeenCalledWith(track.gain, 0);
+    expect(splitters[0].channels).toBe(1);expect(splitters[0].connect.mock.calls[0][1]).toBe(0);
+    expect(routedTrackGain(splitters[0].connect.mock.calls[0][0])).toBe(track.gain);
     expect(elements[0].src).toBe('blob:reverse-1');
   });
 
@@ -159,6 +171,7 @@ describe('反向預覽沿用音訊傳輸的公開接縫', () => {
     const scrub = vi.spyOn(engine, 'scrubElement').mockImplementation(() => {});
     expect(engine.scrub(20.5)).toEqual({ scrubMainVideo: false, localT: 20.5 });
     expect(scrub).toHaveBeenCalledWith(elements[0], 1, expect.objectContaining({ rate: 2, channels: 2,
-      routes: [{ gain: track.gain, channel: 1 }], preservesPitch: true }));
+      routes: [{ gain: expect.any(Object), channel: 1 }], preservesPitch: true }));
+    expect(routedTrackGain(scrub.mock.calls[0][2].routes[0].gain)).toBe(track.gain);
   });
 });

@@ -152,10 +152,44 @@ describe('片段淡入淡出跨行程契約：預覽規格 ↔ 匯出 filtergrap
   });
 });
 
-/* 預覽的三個呼叫端（app.js 圖片疊層、decode/player.js 合成、media.js 淡出入黑）
-   拿到的都是時間軸時間。轉換原本各自寫在呼叫端、而且寫法不一致（見 clip-fade.js
-   fadeAlphaAtTimeline 的檔頭）——鐵律 §0.5：時間域轉換不該散在呼叫端。 */
+/* 預覽的三個呼叫端（video-renderer.js 圖片疊層、decode/player.js 合成、media.js 淡出入黑）
+   拿到的都是時間軸時間。轉換原本各自寫在呼叫端、而且寫法不一致；目前共用
+   image-compositor-engine.js 的 fadeAlphaAtTimeline()——鐵律 §0.5：時間域轉換不該散在呼叫端。 */
 describe('時間軸時間入口', () => {
+  it.each([
+    [30,0,29,4],
+    [30000/1001,0,29,1],
+    [24000/1001,0,29,1],
+    [30000/1001,648000,1,16],
+  ])('adjacent arithmetic at %s FPS and frame %s preserves the first visible frame',(fps,baseFrame,inFrame,lengthFrames)=>{
+    const offset=baseFrame/fps+((inFrame+lengthFrames)/fps-inFrame/fps);
+    const time=(baseFrame+lengthFrames)/fps;
+    expect(time).toBeLessThan(offset);
+    expect(fadeAlphaAtTimeline(clip({offset,out:1}),time)).toBe(1);
+  });
+
+  it.each([0,4/30,648016/(30000/1001)])('a real leading gap at %s seconds remains transparent, including sub-microsecond gaps',offset=>{
+    const c=clip({offset,out:1});
+    expect(fadeAlphaAtTimeline(c,offset-1e-8)).toBe(0);
+    expect(fadeAlphaAtTimeline(c,offset+1+1e-8)).toBe(0);
+    expect(fadeAlphaAt(c,-Number.EPSILON)).toBe(0);
+  });
+
+  it('roundoff repair preserves the original fade clock and does not flatten positive fade time',()=>{
+    const time=4/30,offset=33/30-29/30;
+    const c={...clip({offset,out:1,fadeIn:8}),fadeSourceOffset:2,fadeSourceLength:10};
+    expect(fadeAlphaAtTimeline(c,time)).toBe(.25);
+    expect(fadeAlphaAtTimeline({...c,fadeSourceOffset:0},time)).toBe(0);
+    expect(fadeAlphaAtTimeline(clip({out:1,fadeIn:1}),Number.EPSILON/2)).toBe(Number.EPSILON/2);
+  });
+
+  it('non-finite timeline bounds are not mistaken for near-zero roundoff',()=>{
+    expect(fadeAlphaAtTimeline(clip({out:1}),-Infinity)).toBe(0);
+    expect(fadeAlphaAtTimeline(clip({out:1}),Infinity)).toBe(0);
+    expect(fadeAlphaAtTimeline(clip({out:1,offset:Infinity}),0)).toBe(0);
+    expect(fadeAlphaAtTimeline(clip({out:1,offset:-Infinity}),0)).toBe(0);
+  });
+
   it('等同於自己先減掉 offset', () => {
     const c = clip({ out: 10, offset: 30, fadeIn: 2, fadeOut: 2 });
     for (const local of [0, 0.5, 1, 2, 5, 8, 9.5, 10]) {

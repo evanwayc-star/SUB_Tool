@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { airlineEncoding, airlineMuxArgs } from '../electron/airline-encoding.js';
 import { finalizeAirlineOutput } from '../electron/airline-output.js';
 import { buildDeliveryArgv } from '../electron/export-plan.js';
+import { descriptorOf } from '../electron/media-probe.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FFMPEG = process.env.FFMPEG_PATH || path.join(ROOT, 'electron/ffmpeg/ffmpeg.exe');
@@ -26,7 +27,7 @@ function run(binary, args, { binaryOutput = false } = {}) {
 }
 
 function probe(file) {
-  return JSON.parse(run(FFPROBE, ['-v', 'error', '-show_streams', '-show_frames',
+  return JSON.parse(run(FFPROBE, ['-v', 'error', '-show_format', '-show_streams', '-show_frames',
     '-show_packets', '-of', 'json', file]).stdout);
 }
 
@@ -260,7 +261,7 @@ describe.skipIf(!nativeAvailable)('航空內建 MPEG transport 合成', () => {
       ...encoding.videoArgs,
       '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '128k', '-ar', '48000', '-ac', '2',
       ...airlineMuxArgs(format), source]);
-    const sourceStreams = probe(source).streams;
+    const sourceMetadata = probe(source), sourceStreams = sourceMetadata.streams;
     const sourceVideo = sourceStreams.find(stream => stream.codec_type === 'video');
     const sourceAudio = sourceStreams.find(stream => stream.codec_type === 'audio');
     const offset = Number(sourceAudio.start_time) - Number(sourceVideo.start_time);
@@ -276,6 +277,8 @@ describe.skipIf(!nativeAvailable)('航空內建 MPEG transport 合成', () => {
       fps: 30000 / 1001 }], videoTracks: [{ vt: 0 }], width: sourceVideo.width,
     height: sourceVideo.height, fps: 30000 / 1001, duration: 3, audioPlan, outPath: output }, {
       hasAudioStream: () => true, audioVideoStartOffset: () => offset,
+      // 真 runner 同時注入母素材影片／容器時鐘；只有聲畫 offset 不能定位 video PTS。
+      sourceClock: () => descriptorOf(sourceMetadata).video,
     });
     run(FFMPEG, ['-hide_banner', '-nostdin', '-loglevel', 'error', ...plan.args]);
     await finalizeAirlineOutput(format, output);

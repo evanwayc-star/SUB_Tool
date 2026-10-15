@@ -8,11 +8,11 @@
      1. 在測試檔裡**自己宣告一份 sanitize()**，然後測那份副本；
      2. 用正規表示式掃 src/app.js 與 electron/main.js 的**原始碼字面**。
    把字元類別改寬鬆、但保持同一個敘述形狀，兩者都照樣通過——等於沒有守衛。
-   （docs/開發與驗證.md §3 第三例記的就是這個反模式，只是那次發生在事件連線上。）
+   （驗證須看實際內容的原則見 docs/技術架構說明.md §0.6。）
 
    現在兩道防線各自成為可 import 的模組，測試直接執行它們：
-     src/export-name-safety.js        renderer 端淨化
-     electron/export-name-safety.js   主程序端圍堵 */
+     src/export-job-engine.js     renderer 端淨化
+     electron/file-authority.js   主程序端圍堵 */
 import { describe, it, expect } from 'vitest';
 import path from 'node:path';
 import { createRequire } from 'node:module';

@@ -9,13 +9,14 @@
 
      cacheKeyFor()   metadata + 前／中／尾段同步取樣——對象是 SMB 上的大檔
      isDirWritable() mkdir + 寫一個測試檔 + 刪掉——在 SMB 上是三次往返
-     metaValid()     對 meta 裡【每一個】聲道檔各做一次 existsSync
+     inspectCache()  依 runtime 的 generation 路徑與檔案證據檢查各元件
 
    重複取樣是成本比較；實際呼叫次數以當前 media-intake-runtime 的載入路徑為準。
 ============================================================================== */
 const fs = require('fs');
 const path = require('path');
-const { cacheKeyFor } = require('../../electron/media-intake-runtime.js');
+const os = require('os');
+const { cacheKeyFor, createMediaIntakeRuntime } = require('../../electron/media-intake-runtime.js');
 
 const SRC = process.argv[2];
 if (!SRC) {
@@ -65,14 +66,18 @@ time('isDirWritable', () => {
 
 const metaPath = path.join(sideDir, 'meta.json');
 if (fs.existsSync(metaPath)) {
-  console.log('\nmeta.json 的內容檢查（metaValid：每個聲道檔各一次 existsSync）：');
-  const raw = time('讀 meta.json', () => JSON.parse(fs.readFileSync(metaPath, 'utf8'))) || {};
-  const files = [raw.proxy, raw.wave, ...(raw.channels || []).map(c => c.file)].filter(Boolean);
-  console.log(`  meta 裡有 ${files.length} 個檔案要檢查`);
-  const a = process.hrtime.bigint();
-  let missing = 0;
-  for (const f of files) if (!fs.existsSync(path.join(sideDir, path.basename(f)))) missing++;
-  console.log(`  ${String(ms(a)).padStart(7)} ms  全部 existsSync（缺 ${missing} 個）`);
+  console.log('\nmeta.json 的內容檢查（runtime owner 保留 generation 相對路徑）：');
+  time('讀 meta.json', () => JSON.parse(fs.readFileSync(metaPath, 'utf8')));
+  const runtime = createMediaIntakeRuntime({ tempRoot: os.tmpdir() });
+  const inspected = time('runtime.inspectCache（路徑解析與檔案證據）', () =>
+    runtime.inspectCache(SRC).find(entry => entry.dir === sideDir));
+  if (inspected?.error) console.log(`  索引不可用：${inspected.error}`);
+  else {
+    const files = inspected?.files || [];
+    const missing = files.filter(entry => entry.state === 'missing').length;
+    const unknown = files.filter(entry => entry.state === 'unknown').length;
+    console.log(`  ${files.length} 個元件（缺 ${missing} 個，無法確認 ${unknown} 個）`);
+  }
 
   const b = process.hrtime.bigint();
   let bytes = 0, n = 0;

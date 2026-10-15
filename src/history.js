@@ -35,17 +35,24 @@ function previewLocation(target){
     const index = State[live]?.indexOf(target) ?? -1;
     if (index >= 0) return { live, saved, index };
   }
+  const index = State.audioProject?.buses?.indexOf(target) ?? -1;
+  if (index >= 0) return { live: 'audioProject', saved: 'audioProject', collection: 'buses', index };
   return null;
+}
+function previewCollection(source, location, key){
+  const value = source[key];
+  return location.collection ? value?.[location.collection] : value;
 }
 function projectEditPreviews(snapshot, collectionKeys={}){
   for (const preview of editPreviews) {
     if (!preview.current()) { editPreviews.delete(preview); continue; }
     for (const entry of preview.entries) {
-      const list = snapshot[collectionKeys[entry.location.saved] || entry.location.saved];
+      const list = previewCollection(snapshot, entry.location, collectionKeys[entry.location.saved] || entry.location.saved);
+      if (!list) continue;
       const liveTarget=entry.resolveTarget ? entry.resolveTarget() : entry.target;
       const index = liveTarget.audioSourceId && entry.location.live === 'externalAudioState'
         ? list.findIndex(item => item.audioSourceId === liveTarget.audioSourceId)
-        : liveTarget.id ? list.findIndex(item => item.id === liveTarget.id) : State[entry.location.live].indexOf(liveTarget);
+        : liveTarget.id ? list.findIndex(item => item.id === liveTarget.id) : previewCollection(State, entry.location, entry.location.live).indexOf(liveTarget);
       if (index < 0) continue;
       if (entry.added) { list.splice(index, 1); continue; }
       for (const { field, present, value } of entry.values) {
@@ -64,15 +71,15 @@ function projectEditPreviews(snapshot, collectionKeys={}){
 }
 function audioProjectForSnapshot(){
   if(audioPreview && !audioPreview.owns()) audioPreview=null;
-  return audioPreview ? audioPreview.initial : State.audioProject;
+  return audioPreview ? audioPreview.initial() : State.audioProject;
 }
 const History = {
   stack:[], hi:-1, max:120,
   // 即時手勢可改 State 供預覽；背景紀錄只投影被手勢擁有的欄位，保留其他已提交編輯。
   // 結束函式必須在本次 commit 的 record 之前呼叫；reset/restore 會撤銷所有舊擁有者。
-  beginPreview(targets, owns=()=>true){
-    const preview = { entries: [], current: () => editPreviews.has(preview) && owns()
-      && preview.entries.every(entry => State[entry.location.live]?.includes(entry.resolveTarget ? entry.resolveTarget() : entry.target)) };
+  beginPreview(targets, owns=()=>true, cancel=null){
+    const preview = { entries: [], cancel, current: () => editPreviews.has(preview) && owns()
+      && preview.entries.every(entry => previewCollection(State, entry.location, entry.location.live)?.includes(entry.resolveTarget ? entry.resolveTarget() : entry.target)) };
     const add = (target, fields=[], { added=false, resolveTarget=null, ownsField=null, projectField=null }={}) => {
       const location = previewLocation(target);
       if (!location) return;
@@ -89,8 +96,9 @@ const History = {
     release.addTarget = add;
     return release;
   },
-  beginAudioPreview(initial, owns=()=>true){
-    const token={initial:structuredClone(initial),owns};
+  beginAudioPreview(initial, owns=()=>true, cancel=null){
+    const saved=typeof initial==='function'?null:structuredClone(initial);
+    const token={initial:typeof initial==='function'?initial:()=>saved,owns,cancel};
     audioPreview=token;
     return ()=>{ if(audioPreview===token) audioPreview=null; };
   },
@@ -103,7 +111,13 @@ const History = {
       fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clips}), {clipGeo:'clips'});
   },
   snap(){ const {clips,...snapshot}=this.committedSnapshot(); return {...snapshot,clipGeo:clips}; },
-  reset(){ historyEpoch++; audioPreview=null; editPreviews.clear(); this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); syncCompareSnapshot(); },
+  reset(){
+    // 首次媒體復原完成可能仍有 live preview；先讓原 owner 取消自己的欄位及 runtime。
+    audioPreview?.cancel?.();
+    for(const preview of [...editPreviews]) preview.cancel?.();
+    historyEpoch++; audioPreview=null; editPreviews.clear();
+    this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); syncCompareSnapshot();
+  },
   /* 專案可先載入字幕、之後才重新連結媒體。媒體真正就緒時，把新出現的
      專案 clip 補進先前「尚無媒體」的歷史步驟，保留期間的字幕 Undo，
      同時避免任何一步復原後把剛重連的影片刪掉。 */

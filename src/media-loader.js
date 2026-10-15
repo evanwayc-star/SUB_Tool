@@ -35,6 +35,7 @@ import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
 import { sourceChannelLabels, AudioPipeline } from './audio-routing-engine.js';
 import { getExactFps } from './time.js';
 import { maxKnownSourceDuration, probeAudioChannelDescriptors, waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { sourcePresentationMetadata } from './decode/source-frame-index.js';
 import { autoBuildPreviewProxy, isLargeCanopusAvi } from './preview-proxy-policy.js';
 
 /* FPS-SYNC：網頁版在播放時量實際影格時間，不依檔名猜測；失去 intake ownership 後停止。 */
@@ -125,11 +126,18 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     if(canNative && audio.length<=1 && audioChannelCount<=2){
       const mediaUrl=frameAccurateSourceUrl||await DESK.fileURL(p);
       if(!owns()) return;
+      getPlayerAdapter().registerSourceClock(mediaUrl,info?.video);
       video.src=mediaUrl; await activateHtml5Transport(video);
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(!owns()||metadata==='cancelled') return;
       if(metadata!=='ready'){ showToast('無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
-      State.duration=maxKnownSourceDuration(dur,video.duration);
+      try{await getPlayerAdapter().seekElement(video,0,{owns});}
+      catch(error){
+        if(!owns()||error?.name==='AbortError')return;
+        showToast('無法定位影片，未載入');setStatus('讀取失敗','');return;
+      }
+      if(!owns()) return;
+      State.duration=maxKnownSourceDuration(dur,getPlayerAdapter().sourceDuration(video.duration,mediaUrl));
       const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
       const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
       AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio),audio.length?0:0);
@@ -204,6 +212,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
 
       let metadata;
       try{
+        getPlayerAdapter().registerSourceClock(res.streamUrl,null);
         video.src=res.streamUrl; await activateHtml5Transport(video);
         metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:15000});
       }catch(e){ stopListening(); throw e; }
@@ -306,11 +315,18 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
 
     const mediaUrl=await DESK.fileURL(res.proxy||p);
     if(!owns()) return;
+    getPlayerAdapter().registerSourceClock(mediaUrl,res.proxy?null:info?.video);
     video.src=mediaUrl; await activateHtml5Transport(video);
     const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
     if(!owns()||metadata==='cancelled') return;
     if(metadata!=='ready'){ showToast('轉檔結果無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
-    State.duration=maxKnownSourceDuration(dur,video.duration);
+    try{await getPlayerAdapter().seekElement(video,0,{owns});}
+    catch(error){
+      if(!owns()||error?.name==='AbortError')return;
+      showToast('轉檔結果無法定位影片，未載入');setStatus('讀取失敗','');return;
+    }
+    if(!owns()) return;
+    State.duration=maxKnownSourceDuration(dur,getPlayerAdapter().sourceDuration(video.duration,mediaUrl));
     video.muted=true;
     const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
     const ownsPrimary=()=>owns()&&ctx._sourceStillReferenced(primary);
@@ -453,6 +469,7 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
       dur:ctx._mpvDuration||0,
       fps:info?.video?.fps||0,
     },projectRestore);
+    if(sourceUrl) adapter.registerSourceClock(sourceUrl,info?.video);
     ctx._deferredPrimaryProxy=needsProxy?null:{path:p,duration:dur,audio,primary};
     AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
 
@@ -504,7 +521,17 @@ export async function loadVideoFile(ctx, file, projectRestore=null){
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(!owns()||metadata==='cancelled') return;
       if(metadata!=='ready'){ showToast('無法讀取此影片，未載入'); setStatus('讀取失敗',''); return; }
-      State.duration=video.duration||0;
+      const sourceInfo=await sourcePresentationMetadata(url,{owns});
+      if(!owns()) return;
+      const adapter=getPlayerAdapter();
+      adapter.registerSourceClock(url,sourceInfo);
+      try{ await adapter.seekElement(video,0,{owns}); }
+      catch(error){
+        if(!owns()) return;
+        showToast('無法定位影片來源起點，未載入');setStatus('讀取失敗','');return;
+      }
+      if(!owns()) return;
+      State.duration=maxKnownSourceDuration(sourceInfo?.duration,adapter.sourceDuration(video.duration,url));
       State.videoWidth=video.videoWidth||0;
       State.videoHeight=video.videoHeight||0;
       const primary=ctx._registerPrimary({ name:file.name, web:{url}, dur:State.duration||0 },projectRestore); // 登錄為序列第一段

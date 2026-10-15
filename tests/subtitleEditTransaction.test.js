@@ -697,8 +697,7 @@ describe('字幕一般編輯 UI adapters', () => {
     await vi.advanceTimersByTimeAsync(30);
     State.tracks[0].locked = true;
     document.getElementById('cueEditTa').innerText = '對話框不應寫入';
-    document.getElementById('covK_bold').checked = true;
-    document.getElementById('covV_bold').value = '1';
+    document.getElementById('cueStyle_bold').value = '0';
     document.querySelector('#modalFoot button.primary').click();
 
     expect({

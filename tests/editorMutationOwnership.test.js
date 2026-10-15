@@ -5,6 +5,7 @@ import path from 'node:path';
 
 const ROOT=process.cwd().replace(/\\/g,'/');
 let State,History,Model,Subtitles,Menus,UI,Media,Project,ProjectModule,Style,Styles;
+let recordMediaCommands=false;
 const click=label=>[...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent===label).click();
 const clip=(id,values={})=>({id,name:id,path:'C:/'+id+'.mp4',in:0,out:4,dur:4,offset:0,vtrack:0,...values});
 async function timeline(){
@@ -29,6 +30,9 @@ beforeAll(async()=>{
   HTMLCanvasElement.prototype.getContext=()=>new Proxy({measureText:()=>({width:1}),createLinearGradient:()=>({addColorStop(){}})}, {get:(target,key)=>target[key]||(()=>{}),set:(target,key,value)=>(target[key]=value,true)});
   ({State}=await import(ROOT+'/src/state.js'));
   ({History}=await import(ROOT+'/src/history.js'));
+  const {on}=await import(ROOT+'/src/events.js');
+  // The application composition root forwards Media commands to History.
+  on('history:record',label=>{if(recordMediaCommands)History.record(label);});
   Model=await import(ROOT+'/src/subtitle-model.js');
   Subtitles=await import(ROOT+'/src/subtitles.js');
   Menus=await import(ROOT+'/src/menus.js');
@@ -83,7 +87,7 @@ describe('editor mutation ownership through public commands',()=>{
     State.clips.push(clip('background',{offset:3,out:2,dur:2}));click('套用');
     expect(c.offset+c.out).toBeLessThanOrEqual(State.clips.find(c=>c.id==='background').offset);
   });
-  it('片段降為半速後同軌後段右移，其他軌不動，且只記一次編輯',()=>{
+  it('片段降為半速後同軌後段右移，其他軌不動，且只記一次編輯',async()=>{
     const c=clip('speed',{out:4,dur:4});
     const next=clip('next',{out:2,dur:2,offset:5});
     const other=clip('other',{out:2,dur:2,offset:5,vtrack:1});
@@ -94,6 +98,7 @@ describe('editor mutation ownership through public commands',()=>{
     expect(c.speed).toBe(0.5);
     expect(next.offset).toBe(9);
     expect(other.offset).toBe(5);
+    await vi.waitFor(()=>expect(document.getElementById('modalBg').classList.contains('show')).toBe(false));
     History.undo();
     expect(State.clips.find(clip=>clip.id==='speed').speed).toBe(1);
     expect(State.clips.find(clip=>clip.id==='next').offset).toBe(5);
@@ -134,13 +139,48 @@ describe('editor mutation ownership through public commands',()=>{
     expect(document.querySelector('.audio-clip-block[data-clip-id="frozen-audio"]')).toBeNull();
     expect(document.querySelector('.audio-clip-block[data-clip-id="detached-audio"]')).toBeNull();
   });
+  it.each([false,true])('2 倍速外音 reverse=%s 右側修剪放開後維持預覽範圍，且只需一次 Undo',async reverse=>{
+    Media.externalAudio.clear();
+    const asset=Media.createExternalAudioSource({name:'detached audio',path:'C:/mother.mov',
+      audioSourceId:'trim-source',offset:1,in:1,out:7,duration:8,speed:2,reverse,
+      descriptors:[{sourceStream:1,sourceChannel:0}]});
+    History.reset();
+    recordMediaCommands=true;
+    try{
+      await timeline();document.getElementById('tlScroll').scrollLeft=0;
+      const selector=`.external-audio-block[data-audio-asset-id="${asset.id}"]`;
+      const block=document.querySelector(selector);
+      expect(block.style.width).toBe('240px');expect(block.dataset.audioEnd).toBe('4');
+      mouse(block.querySelector('.edge.r'),'mousedown',320,200,{altKey:true});
+      mouse(window,'mousemove',240,200,{altKey:true});
+      expect(block.style.width).toBe('160px');
+      expect(Media.externalAudio.get(asset.id)).toMatchObject({offset:1,in:1,out:7,speed:2});
+      expect(History.stack).toHaveLength(1);
+      mouse(window,'mouseup',240,200,{altKey:true});
+      await Promise.resolve();
+      const trimmed=reverse?{in:3,out:7}:{in:1,out:5};
+      expect(Media.externalAudio.get(asset.id)).toMatchObject({offset:1,speed:2,...trimmed});
+      expect(State.externalAudioState[0]).toMatchObject(trimmed);
+      expect(document.querySelector(selector).style.width).toBe('160px');
+      expect(document.querySelector(selector).dataset.audioEnd).toBe('3');
+      expect(History.stack).toHaveLength(2);
+      History.undo();
+      expect(Media.externalAudio.get(asset.id)).toMatchObject({offset:1,in:1,out:7,speed:2});
+      expect(document.querySelector(selector).style.width).toBe('240px');
+      History.redo();
+      expect(Media.externalAudio.get(asset.id)).toMatchObject(trimmed);
+      expect(document.querySelector(selector).style.width).toBe('160px');
+    }finally{
+      recordMediaCommands=false;Media.externalAudio.clear();Media.recomputeTimelineDuration();
+    }
+  });
   it('速度視窗說明反轉時原音同步反向播放',()=>{
     const c=clip('reverse-hint');State.clips=[c];Menus.showClipSpeed(c);
     const text=document.getElementById('modalBody').textContent;
     expect(text).toContain('原音同步反向播放');
     expect(text).not.toContain('原音會靜音');
   });
-  it('片段變長仍留在空隙內時不移動後段；碰到鎖定後段則拒絕套用',()=>{
+  it('片段變長仍留在空隙內時不移動後段；碰到鎖定後段則拒絕套用',async()=>{
     const c=clip('speed',{out:4,dur:4});
     const next=clip('next',{out:2,dur:2,offset:10});
     State.clips=[c,next];History.reset();
@@ -148,6 +188,7 @@ describe('editor mutation ownership through public commands',()=>{
     document.getElementById('clipSpeedPercent').value='50';click('套用');
     expect(c.speed).toBe(0.5);
     expect(next.offset).toBe(10);
+    await vi.waitFor(()=>expect(document.getElementById('modalBg').classList.contains('show')).toBe(false));
     next.offset=9;next.locked=true;
     Menus.showClipSpeed(c);
     document.getElementById('clipSpeedPercent').value='25';click('套用');
@@ -163,6 +204,33 @@ describe('editor mutation ownership through public commands',()=>{
     State.videoTracks[0].locked=true;click('套用');
     expect(c.speed).toBeUndefined();
     expect(next.offset).toBe(5);
+  });
+  it('速度套用等待預覽完成才關窗與提交；重複套用不建立第二個工作',async()=>{
+    const c=clip('pending-speed');State.clips=[c];History.reset();
+    let finish;const refreshed=vi.spyOn(Media,'refreshClipPlayback').mockReturnValueOnce(new Promise(resolve=>{finish=resolve;}));
+    try{
+      Menus.showClipSpeed(c);document.getElementById('clipSpeedPercent').value='50';click('套用');click('套用');
+      expect(c.speed).toBe(.5);expect(refreshed).toHaveBeenCalledTimes(1);
+      expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
+      expect(History.committedSnapshot().clips[0]).not.toHaveProperty('speed');expect(History.stack).toHaveLength(1);
+      finish(true);await vi.waitFor(()=>expect(document.getElementById('modalBg').classList.contains('show')).toBe(false));
+      expect(History.stack).toHaveLength(2);expect(History.committedSnapshot().clips[0].speed).toBe(.5);
+    }finally{refreshed.mockRestore();}
+  });
+  it.each(['cancel','replace'])('速度套用未完成時%s視窗，晚到預覽不得提交或關閉新視窗',async reason=>{
+    const c=clip('cancel-speed');State.clips=[c];History.reset();
+    let finish;const refreshed=vi.spyOn(Media,'refreshClipPlayback').mockResolvedValue(true)
+      .mockReturnValueOnce(new Promise(resolve=>{finish=resolve;}));
+    try{
+      Menus.showClipSpeed(c);document.getElementById('clipSpeedPercent').value='50';click('套用');
+      if(reason==='cancel')click('取消');else UI.openModal('較新視窗','<p>保留新視窗</p>');
+      expect(c.speed).toBeUndefined();finish(true);await Promise.resolve();await Promise.resolve();await Promise.resolve();
+      expect(History.stack).toHaveLength(1);expect(c.speed).toBeUndefined();
+      if(reason==='replace'){
+        expect(document.getElementById('modalTitle').textContent).toBe('較新視窗');
+        expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
+      }
+    }finally{refreshed.mockRestore();}
   });
   it('固定畫面保留長度、位置與來源，Undo 可解除，再從來源影格恢复',async()=>{
     const c=clip('freeze',{in:1,out:5,dur:6,offset:2,speed:2});State.clips=[c];History.reset();

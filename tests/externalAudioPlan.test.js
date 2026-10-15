@@ -137,7 +137,7 @@ describe('external audio project export plan', () => {
     const { args } = ExportPlan.buildDeliveryArgv({ format: 'wav', duration: data.duration, audioPlan: plan, outPath: 'C:/out/test.wav' });
     const graph = args[args.indexOf('-filter_complex') + 1];
     expect(graph).toContain('[0:a:0]loudnorm=I=-12.0:TP=-6.0');
-    expect(graph).toMatch(/loudnorm=[^;]+,pan=mono\|c0=c1,asetpts=PTS-STARTPTS,atrim=start=3\.000000:end=8\.000000/);
+    expect(graph).toMatch(/loudnorm=[^;]+,pan=mono\|c0=c1,aresample=48000:async=1:first_pts=0,atrim=start=3\.000000:end=8\.000000/);
     expect(graph).not.toContain('[wavNorm]');
     expect(args.join(' ')).not.toContain('C:/cache');
   });
@@ -239,14 +239,14 @@ describe('external audio project export plan', () => {
     const opening = planFor(2, 8);
     expect(opening.data.clips[0]).toMatchObject({ fadeIn: 5, fadeOut: 0,
       fadeSourceOffset: 2, fadeSourceLength: 60 });
-    expect(opening.graph).toContain('setpts=PTS+2.000/TB,fade=t=in:st=0:d=5.000:alpha=1,setpts=PTS-2.000/TB');
-    expect(opening.graph).toContain('asetpts=PTS+2.000000/TB,afade=t=in:st=0:d=5.000000,asetpts=PTS-2.000000/TB');
+    expect(opening.graph).toMatch(/setpts=PTS\+2(?:\.0+)?\/TB,fade=t=in:st=0(?:\.0+)?:d=5(?:\.0+)?:alpha=1,setpts=PTS-2(?:\.0+)?\/TB/);
+    expect(opening.graph).toMatch(/asetpts=PTS\+2(?:\.0+)?\/TB,afade=t=in:st=0(?:\.0+)?:d=5(?:\.0+)?,asetpts=PTS-2(?:\.0+)?\/TB/);
 
     const ending = planFor(56, 58);
     expect(ending.data.clips[0]).toMatchObject({ fadeIn: 0, fadeOut: 5,
       fadeSourceOffset: 56, fadeSourceLength: 60 });
-    expect(ending.graph).toContain('setpts=PTS+56.000/TB,fade=t=out:st=55.000:d=5.000:alpha=1,setpts=PTS-56.000/TB');
-    expect(ending.graph).toContain('asetpts=PTS+56.000000/TB,afade=t=out:st=55.000000:d=5.000000,asetpts=PTS-56.000000/TB');
+    expect(ending.graph).toMatch(/setpts=PTS\+56(?:\.0+)?\/TB,fade=t=out:st=55(?:\.0+)?:d=5(?:\.0+)?:alpha=1,setpts=PTS-56(?:\.0+)?\/TB/);
+    expect(ending.graph).toMatch(/asetpts=PTS\+56(?:\.0+)?\/TB,afade=t=out:st=55(?:\.0+)?:d=5(?:\.0+)?,asetpts=PTS-56(?:\.0+)?\/TB/);
   });
 
   it('reports unresolved routed sources instead of silently exporting silence', () => {

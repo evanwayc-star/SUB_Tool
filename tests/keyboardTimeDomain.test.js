@@ -79,6 +79,7 @@ describe('JKL reverse shuttle time domain', () => {
     document.body.innerHTML = `
       <video id="video"></video>
       <div id="modalBg"></div>
+      <div id="ctxmenu"></div>
       <div id="speedIndicator"></div>
       <div id="tcCur"></div>
       <input id="seekBar" value="0">
@@ -320,5 +321,34 @@ describe('JKL reverse shuttle time domain', () => {
     jklReset();
     for(let i=0;i<20;i++) shuttleForward();
     expect(getJklSpeed()).toBe(5);
+  });
+  it('匯出 In/Out 接受重綁快捷鍵，預設括號組合仍清除範圍',async()=>{
+    const {on}=await import('../src/events.js');
+    const actions=[];on('action',action=>actions.push(action));
+    State.keymap={exp_in:[{key:'h'}],exp_out:[{key:'o'}]};
+    window.dispatchEvent(new Event('blur'));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'h',cancelable:true}));
+    window.dispatchEvent(new KeyboardEvent('keyup',{key:'h'}));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'o',cancelable:true}));
+    expect(actions).toEqual(['exp-in','exp-out']);
+    actions.length=0;window.dispatchEvent(new Event('blur'));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'['}));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:']'}));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'h'}));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'o'}));
+    expect(actions).toEqual(['exp-in','exp-out']);
+    State.keymap={exp_in:[{key:'h'}],exp_out:[{key:']'}]};
+    actions.length=0;window.dispatchEvent(new Event('blur'));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'['}));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:']'}));
+    expect(actions).toEqual(['exp-out']);
+    State.keymap={exp_in:[{key:'['}],exp_out:[{key:']'}]};
+    actions.length=0;window.dispatchEvent(new Event('blur'));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'['}));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:']'}));
+    expect(actions).toEqual(['exp-in','exp-clear']);
+    window.dispatchEvent(new Event('blur'));actions.length=0;
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:']'}));
+    expect(actions).toEqual(['exp-out']);
   });
 });

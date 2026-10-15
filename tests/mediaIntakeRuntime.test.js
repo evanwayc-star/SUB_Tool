@@ -29,9 +29,9 @@ function repairFixture(execute, overrides = {}) {
     cacheRoot, tempRoot: root, allowSidecarCache: false,
     fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot] }),
     createStreamId: prefix => `${prefix}fixed`, delay: async () => {},
-    ffmpegExecution: { execute(args) {
+    ffmpegExecution: { execute(args, executionOptions) {
       calls.push(args);
-      return execute(args, calls.length);
+      return execute(args, calls.length, executionOptions);
     } },
     ...overrides,
   };
@@ -346,6 +346,45 @@ describe('native media intake runtime', () => {
       await expect(queued).resolves.toMatchObject({ cached: true });
       expect(next).toHaveBeenCalledOnce();
       expect(runtime.releaseStream('l-fixed')).toBe(false);
+    } finally { finish(); await coordinator.cancelAllAndWait(); await runtime.close(); }
+  });
+
+  it.each(['immediate', 'late'])('可播期限到時取消 %s writer且等close，再拒絕假URL並准入下一工作', async admission => {
+    let finish, timeout, attach, clock = 0;
+    const writing = new Promise(resolve => { finish = resolve; });
+    const deadline = new Promise(resolve => { timeout = resolve; });
+    const child = { kill: vi.fn() };
+    const progress = [];
+    const { runtime, source, calls } = repairFixture(async (args, count, executionOptions) => {
+      attach = () => executionOptions.onProcess(child);
+      if (admission === 'immediate') attach();
+      await writing;
+      // Even a late code-0 close with complete bytes must not commit a timed-out request.
+      writeIntakeOutputs(args);
+    }, {
+      now: () => clock,
+      delay: async () => { clock += 30000; if (clock >= 60000) timeout(); },
+      sendProgress: (_, payload) => progress.push(payload),
+    });
+    const coordinator = createMediaIngestCoordinator();
+    const failed = coordinator.replace(lease => runtime.stream({ src: source, duration: 1, audio: [] }, {
+      ownProcess: lease.setProcess, isCancelled: lease.isCancelled,
+    })).catch(error => error);
+    try {
+      await deadline;
+      await new Promise(resolve => setImmediate(resolve));
+      if (admission === 'late') attach();
+      expect(child.kill).toHaveBeenCalledOnce();
+      const next = vi.fn(async () => 'next-source');
+      const queued = coordinator.enqueue(next);
+      await Promise.resolve();
+      expect(next).not.toHaveBeenCalled();
+      finish();
+      expect(await failed).toMatchObject({ code: 'STREAM_READINESS_TIMEOUT' });
+      expect(await queued).toBe('next-source');
+      expect(runtime.releaseStream('l-fixed')).toBe(false);
+      expect(fs.existsSync(calls[0].at(-1))).toBe(false);
+      expect(progress).toEqual([expect.objectContaining({ done: true, outcome: 'failed', errorCode: 'STREAM_READINESS_TIMEOUT' })]);
     } finally { finish(); await coordinator.cancelAllAndWait(); await runtime.close(); }
   });
 

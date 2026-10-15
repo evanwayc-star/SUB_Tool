@@ -4,7 +4,8 @@ const mocks=vi.hoisted(()=>({state:{clips:[],audioProject:{sourceMaps:{}}},media
   cache:{read:vi.fn(),write:vi.fn(),select:vi.fn(),rememberPreference:vi.fn()}}));
 vi.mock('../src/state.js',()=>({State:mocks.state,DESK:mocks.desktop}));
 vi.mock('../src/media.js',()=>({Media:mocks.media}));
-vi.mock('../src/audio-engine.js',()=>({AudioEngine:{decodeAudioData:vi.fn()}}));
+vi.mock('../src/audio-engine.js',()=>({AudioEngine:{decodeAudioData:vi.fn(),decodeSourceAudioData:vi.fn(),
+  normalizeSourceAudioBuffer:vi.fn(async buffer=>buffer),markSourceAudioBuffer:buffer=>buffer}}));
 vi.mock('../src/vocal-waveform-worker-client.js',()=>({vocalWaveformClient:{analyze:mocks.analyze},vocalAbortError:()=>new DOMException('cancelled','AbortError')}));
 vi.mock('../src/vocal-waveform-cache.js',async importOriginal=>({...await importOriginal(),vocalWaveformCache:mocks.cache}));
 import { analyzeSourceVocals, resolveVocalSource, restoreCachedSourceVocals, rememberSourceVocalSelection } from '../src/vocal-waveform-source.js';
@@ -98,6 +99,31 @@ it('瀏覽器保留第二 stream 的原音，不把效果音訊或重複 buffer 
     const [left]=await readChunk({start:0,duration:1});expect(left[0]).toBeCloseTo(.4);return new Float32Array(200);
   });
   await analyzeSourceVocals('audio');
+});
+
+it.each(['loaded','fallback'])('browser %s vocals consumes normalized original PCM before source-time chunking',async kind=>{
+  mocks.desktop.vocalWaveChunk=null;mocks.desktop.vocalWaveFingerprint=null;
+  mocks.state.clips[0].dur=1;mocks.state.clips[0].web={url:'blob:original'};
+  const {AudioEngine}=await import('../src/audio-engine.js');
+  const original={value:.2},normalized={value:.8};
+  AudioEngine.normalizeSourceAudioBuffer.mockResolvedValueOnce(normalized);
+  AudioEngine.decodeSourceAudioData.mockResolvedValueOnce(normalized);
+  if(kind==='loaded')mocks.media.tracks=[{audioSourceId:'audio',sourceStream:0,buffer:original}];
+  else mocks.state.clips[0]._file={size:1,arrayBuffer:async()=>new Uint8Array([1]).buffer};
+  vi.stubGlobal('OfflineAudioContext',class{
+    constructor(_channels,length){this.length=length;this.nodes=[];this.destination={};}
+    createGain(){return {gain:{value:1},connect(){}};}
+    createBufferSource(){const node={buffer:null,connect(){},start:vi.fn()};this.nodes.push(node);return node;}
+    async startRendering(){expect(this.nodes[0].start).toHaveBeenCalledWith(0,.25,.1);
+      return {getChannelData:()=>new Float32Array(this.length).fill(this.nodes[0].buffer.value)};}
+  });
+  mocks.analyze.mockImplementation(async({readChunk})=>{
+    const [left]=await readChunk({start:.25,duration:.1});expect(left[0]).toBeCloseTo(.8);return new Float32Array(200);
+  });
+  await analyzeSourceVocals('audio');
+  if(kind==='loaded')expect(AudioEngine.normalizeSourceAudioBuffer).toHaveBeenCalledWith(original,expect.objectContaining({url:'blob:original',sourceStream:0}));
+  else expect(AudioEngine.decodeSourceAudioData).toHaveBeenCalledWith(expect.any(ArrayBuffer),expect.objectContaining({file:mocks.state.clips[0]._file}));
+  expect(AudioEngine.decodeAudioData).not.toHaveBeenCalled();
 });
 
 it('完成後以可信母素材、模型、時長與來源 streams 記錄完整峰值，關閉重建可只讀恢復',async()=>{

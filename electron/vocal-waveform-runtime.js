@@ -2,6 +2,7 @@
 'use strict';
 
 const { spawn: nativeSpawn } = require('child_process');
+const { sourceClockSeek, sourceAudioClockFilter } = require('./media-source-clock');
 
 const SAMPLE_RATE = 44100;
 const CHANNELS = 2;
@@ -40,15 +41,16 @@ function validateChunkRequest(request) {
   return { path, start, duration, requestId, sourceStream, sourceChannel };
 }
 
-function buildChunkArgs(request) {
+function buildChunkArgs(request, clock = null) {
   const chunk = validateChunkRequest(request);
+  const seek = sourceClockSeek(chunk.start, clock);
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin',
-    '-ss', String(chunk.start), '-i', chunk.path, '-t', String(chunk.duration),
+    '-ss', String(seek.seek), '-i', chunk.path, '-t', String(chunk.duration),
     '-map', `0:a:${chunk.sourceStream}`, '-vn', '-sn', '-dn'];
   const filters = [];
   if (chunk.sourceChannel !== null) filters.push(`pan=stereo|c0=c${chunk.sourceChannel}|c1=c${chunk.sourceChannel}`);
   // 裸 PCM 不保存 PTS；以 seek 後的來源時鐘補出延後開聲／時間戳缺口。
-  filters.push(`aresample=${SAMPLE_RATE}:async=1:first_pts=0`);
+  filters.push(sourceAudioClockFilter(seek, SAMPLE_RATE));
   args.push('-af', filters.join(','));
   args.push('-ac', String(CHANNELS), '-ar', String(SAMPLE_RATE),
     '-c:a', 'pcm_f32le', '-f', 'f32le', 'pipe:1');
@@ -61,7 +63,7 @@ function abortError() {
   return error;
 }
 
-function createVocalWaveformRuntime({ getFFmpegPath, spawn = nativeSpawn, timeoutMs = 120000 } = {}) {
+function createVocalWaveformRuntime({ getFFmpegPath, probe = null, spawn = nativeSpawn, timeoutMs = 120000 } = {}) {
   if (typeof getFFmpegPath !== 'function' || typeof spawn !== 'function') {
     throw new TypeError('人聲波形 runtime 缺少必要 adapter');
   }
@@ -71,6 +73,7 @@ function createVocalWaveformRuntime({ getFFmpegPath, spawn = nativeSpawn, timeou
   const stop = (entry, error) => {
     if (entry.settled || entry.failure) return false;
     entry.failure = error;
+    entry.abort.abort();
     try { entry.child?.kill('SIGTERM'); } catch (_) {}
     entry.killTimer = setTimeout(() => {
       if (!entry.settled) { try { entry.child?.kill('SIGKILL'); } catch (_) {} }
@@ -93,7 +96,7 @@ function createVocalWaveformRuntime({ getFFmpegPath, spawn = nativeSpawn, timeou
     let jobs = active.get(sender);
     if (!jobs) { jobs = new Map(); active.set(sender, jobs); }
     if (jobs.has(chunk.requestId)) throw new Error('人聲波形 requestId 重複');
-    const entry = { child: null, settled: false, failure: null, killTimer: null, timer: null, finished: null };
+    const entry = { child: null, settled: false, failure: null, killTimer: null, timer: null, finished: null, abort: new AbortController() };
     jobs.set(chunk.requestId, entry);
     const destroyed = () => stop(entry, abortError());
     sender.once?.('destroyed', destroyed);
@@ -102,7 +105,7 @@ function createVocalWaveformRuntime({ getFFmpegPath, spawn = nativeSpawn, timeou
     let stderr = Buffer.alloc(0);
     // 每次只可交付本片段長度；最長片段的絕對上限約 12.7 MB。
     const maxBytes = Math.min(MAX_CHUNK_BYTES, Math.ceil(chunk.duration * SAMPLE_RATE) * CHANNELS * 4);
-    entry.finished = new Promise((resolve, reject) => {
+    const launch = clock => new Promise((resolve, reject) => {
       const finish = (error = null) => {
         if (entry.settled) return;
         entry.settled = true;
@@ -121,7 +124,7 @@ function createVocalWaveformRuntime({ getFFmpegPath, spawn = nativeSpawn, timeou
         resolve({ samples: Uint8Array.from(bytes).buffer, sampleRate: SAMPLE_RATE, channels: CHANNELS });
       };
       try {
-        entry.child = spawn(binary, buildChunkArgs(chunk), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        entry.child = spawn(binary, buildChunkArgs(chunk, clock), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
         entry.child.on('error', error => {
           if (entry.settled) return;
           // ChildProcess 的 error 也可能表示 kill 失敗；有存活 PID 時不能當作已關閉。
@@ -159,8 +162,17 @@ function createVocalWaveformRuntime({ getFFmpegPath, spawn = nativeSpawn, timeou
         }
       } catch (error) { finish(entry.failure || error); }
     });
+    entry.finished = probe ? (async () => {
+      try {
+        const media = await probe(chunk.path, { signal: entry.abort.signal });
+        if (entry.failure || closing || sender.isDestroyed?.()) throw entry.failure || abortError();
+        return await launch(media?.video || media?.audio?.[chunk.sourceStream]);
+      } catch (error) { throw entry.failure || error; }
+    })() : launch(null);
     try { return await entry.finished; }
     finally {
+      clearTimeout(entry.killTimer);
+      sender.removeListener?.('destroyed', destroyed);
       if (jobs.get(chunk.requestId) === entry) jobs.delete(chunk.requestId);
       if (!jobs.size && active.get(sender) === jobs) active.delete(sender);
     }

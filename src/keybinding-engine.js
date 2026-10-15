@@ -195,6 +195,7 @@ export function bindNumberInputWheel(root = (typeof document !== 'undefined' ? d
   const onWheel = e => {
     const input = e.target;
     if (!input || input.tagName !== 'INPUT' || (input.type !== 'number' && !input.classList?.contains?.('num-scrubber'))) return;
+    if (input.matches(':disabled') || input.readOnly) return;
     const next = nextWheelNumberValue(input, e);
     if (next == null) return;
     e.preventDefault();

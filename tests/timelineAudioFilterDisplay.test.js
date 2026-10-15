@@ -4,6 +4,13 @@ import { paintClipWave } from '../src/timeline-renderer.js';
 import { Wave } from '../src/waveform-decoder.js';
 
 describe('時間軸音訊濾鏡標記與波形圖繪製', () => {
+  it.each([[0,4],[4,0],[5,0],[-1,4]])('每像素涵蓋來源 %j 時聚合全部峰值，反向與零端點也一致', (first,last) => {
+    const ctx={save:vi.fn(),scale:vi.fn(),beginPath:vi.fn(),moveTo:vi.fn(),lineTo:vi.fn(),stroke:vi.fn(),restore:vi.fn()};
+    paintClipWave(ctx,{Hpx:10,cvw:1,res:1,n:5,
+      pk:new Float32Array([0,0,0,0,-1,1,0,0,0,0]),dpr:1,timeToXMap:[first,last],hasLimiter:false});
+    expect(ctx.moveTo).toHaveBeenCalledWith(0.5,-7);
+    expect(ctx.lineTo).toHaveBeenCalledWith(0.5,17);
+  });
   it('paintClipWave 在未套用濾鏡時使用標準色與寬度', () => {
     const strokeStyleHistory = [];
     const lineWidthHistory = [];
@@ -192,5 +199,4 @@ describe('時間軸音訊濾鏡標記與波形圖繪製', () => {
     expect(cssContent).toMatch(/\.audio-clip-block\.has-limiter\s*\{[^}]*border:\s*1\.5px\s+solid\s+#c084fc/);
   });
 });
-
 

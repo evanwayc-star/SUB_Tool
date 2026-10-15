@@ -202,6 +202,29 @@ describe('切割保留原始淡化視窗',()=>{
 });
 
 describe('時間軸換算', () => {
+  it.each([false,true])('解除連結後的2倍速來源映射與切割/trim/History保持方向（reverse=%s）',reverse=>{
+    const asset=add({duration:12,in:2,out:10,offset:20,speed:2,reverse,fadeIn:3,fadeOut:2});
+    expect(lib.timelineEnd()).toBe(24);
+    expect(lib.sourceTime(asset.audioSrc,21)).toBe(reverse?8:4);
+    const saved=lib.serialize();
+    const plan=lib.planSplit(asset.id,22);
+    Object.assign(asset,plan.left);const right=lib.add(plan.right);
+    expect(assetRange(asset).length).toBe(2);expect(assetRange(right).length).toBe(2);
+    expect(lib.sourceTime(asset.audioSrc,21)).toBe(reverse?8:4);
+    expect(lib.sourceTime(right.audioSrc,23)).toBe(reverse?4:8);
+    expect(right).toMatchObject({speed:2,fadeSourceOffset:2,fadeSourceLength:4});
+    lib.trim(right.id,'start',22.5);
+    expect(lib.sourceTime(right.audioSrc,23)).toBe(reverse?4:8);
+    expect(right.fadeSourceOffset).toBe(2.5);
+    lib.trim(right.id,'end',23.5);expect(assetRange(right).length).toBe(1);
+    lib.applyRestored(asset,saved[0]);
+    expect(assetRange(asset).length).toBe(4);
+    expect(asset.reverse).toBe(reverse?true:undefined);
+    const rebuilt=new ExternalAudioLibrary();rebuilt.add(saved[0]);
+    expect(rebuilt.sourceTime(rebuilt.assets[0].audioSrc,21)).toBe(reverse?8:4);
+    lib.applyRestored(asset,{...saved[0],speed:undefined,reverse:undefined});
+    expect(asset.speed).toBeUndefined();expect(asset.reverse).toBeUndefined();
+  });
   it('範圍內：時間軸時間 → 來源時間', () => {
     const asset = add({ offset: 10, in: 3, out: 8 });
     expect(lib.sourceTime(asset.audioSrc, 12)).toBe(5);
@@ -381,7 +404,10 @@ describe('模組本身保持純淨', () => {
 
     // 共用效果資料仍是零 I/O 純規則；不能重新引入 renderer runtime。
     expect([...code.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map(match=>match[1]))
-      .toEqual(['../shared/audio-loudness.cjs','../shared/clip-fade.cjs']);
+      .toEqual(['../shared/audio-loudness.cjs','../shared/clip-fade.cjs','./sequence-time.js']);
+    const mapping=fs.readFileSync(new URL('../src/sequence-time.js',import.meta.url),'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g,'').replace(/\/\/.*$/gm,'');
+    expect(mapping).not.toMatch(/\b(?:import|require|State|window|document)\b/);
     expect(code).not.toMatch(/\bdocument\b/);
     expect(code).not.toMatch(/\bState\b/);
   });

@@ -9,6 +9,7 @@
    ============================================================================== */
 import { State, newTrack, syncTrackCount, newId, setSelection, IS_DESKTOP } from './state.js';
 import { AudioEngine } from './audio-engine.js';
+import { Seq } from './sequence.js';
 import { snapTimeToFrame, secToEncore } from './time.js';
 import { sortCues } from './subtitle-model.js';
 import { recordHistory } from './history.js';
@@ -303,7 +304,7 @@ function monoChannelView(audioBuffer, sourceChannel) {
   const channelCount = Math.max(0, Math.floor(Number(audioBuffer.numberOfChannels) || 0));
   const channel = channelCount === 1 ? 0 : sourceChannel;
   if (channel < 0 || channel >= channelCount) return null;
-  return {
+  return AudioEngine.inheritSourceAudioClock(audioBuffer, {
     sampleRate: audioBuffer.sampleRate,
     numberOfChannels: 1,
     length: audioBuffer.length,
@@ -312,7 +313,7 @@ function monoChannelView(audioBuffer, sourceChannel) {
       if (requested !== 0) throw new RangeError('ASR 來源聲道只有一個聲道');
       return audioBuffer.getChannelData(channel);
     }
-  };
+  });
 }
 
 /**
@@ -322,28 +323,50 @@ export async function getClipAudioBuffer(clip, {
   decodeAudioData = data => AudioEngine.decodeAudioData(data),
   fetchImpl = (...args) => fetch(...args),
   signal = null,
+  owns = () => true,
   recognitionSelection = ALL_RECOGNITION_SOURCE_CHANNELS
 } = {}) {
   const throwIfAborted = () => {
-    if (!signal?.aborted) return;
-    if (typeof signal.throwIfAborted === 'function') signal.throwIfAborted();
+    if (!signal?.aborted && owns()) return;
+    if (typeof signal?.throwIfAborted === 'function') signal.throwIfAborted();
     const error = new Error('語音辨識已取消');
     error.name = 'AbortError';
     throw error;
   };
   throwIfAborted();
+  const file = clip.file || clip._file || clip.blob;
+  const sourceFile = typeof file?.slice === 'function' && typeof URL.createObjectURL === 'function' ? file : null;
+  const normalizeOriginal = async (buffer, { url = clip.web?.url || clip.audioElement?.src || clip.src,
+    sourceStream = 0, processed = false } = {}) => {
+    throwIfAborted();
+    url ||= clip.web?.url || clip.audioElement?.src || clip.src;
+    if (!processed && !url && !sourceFile && clip.path && typeof window !== 'undefined' && window.subtool?.fileURL) {
+      url = await window.subtool.fileURL(clip.path);
+      throwIfAborted();
+    }
+    // Native channel caches and effect WAVs already begin at source zero.
+    // Original decoded Mono tracks inherit the AudioEngine clock proof.
+    const normalized = processed ? AudioEngine.markSourceAudioBuffer(buffer)
+      : await AudioEngine.normalizeSourceAudioBuffer(buffer, { url, file: sourceFile, sourceStream,
+        signal, owns: () => !signal?.aborted && owns() });
+    throwIfAborted();
+    return normalized;
+  };
+  const processedTrack = track => clip.preferCache || track?._audioEffect
+    || (typeof track?.file === 'string' && track.file !== clip.path && track.file !== clip.web?.url);
   if (clip.audioBuffer) {
-    if (recognitionSelection?.mode !== 'source-channels') return clip.audioBuffer;
+    const buffer = await normalizeOriginal(clip.audioBuffer, { processed: clip.preferCache });
+    if (recognitionSelection?.mode !== 'source-channels') return buffer;
     const entries = selectedRecognitionEntries(recognitionAudioEntries(clip), recognitionSelection);
     const selectedBuffers = entries
-      .map(entry => monoChannelView(clip.audioBuffer, entry.sourceChannel))
+      .map(entry => monoChannelView(buffer, entry.sourceChannel))
       .filter(Boolean);
     const combined = combineRecognitionAudioBuffers(selectedBuffers);
     if (combined) return combined;
     throw new Error('選取的來源聲道不存在或尚未就緒');
   }
 
-  const decodeURL = async url => {
+  const decodeURL = async (url, options = {}) => {
     throwIfAborted();
     const response = signal ? await fetchImpl(url, { signal }) : await fetchImpl(url);
     if (response?.ok === false) throw new Error(`無法讀取素材音訊 (HTTP ${response.status})`);
@@ -351,7 +374,7 @@ export async function getClipAudioBuffer(clip, {
     throwIfAborted();
     const decoded = await decodeAudioData(data);
     throwIfAborted();
-    return decoded;
+    return normalizeOriginal(decoded, { url, ...options });
   };
 
   const recognitionTracks = Array.isArray(clip.recognitionTracks) ? clip.recognitionTracks : [];
@@ -366,23 +389,29 @@ export async function getClipAudioBuffer(clip, {
       throwIfAborted();
       const track = entry.track;
       const resourceKey = recognitionTrackResourceKey(track);
-      let sourceBuffer = resourceKey ? decodedByResource.get(resourceKey) : null;
-      if (!sourceBuffer && track?.buffer) sourceBuffer = track.buffer;
+      const processed = !!processedTrack(track);
+      const stream = processed ? 0 : entry.sourceStream;
+      let sourceBuffer = resourceKey ? decodedByResource.get(resourceKey)?.get(stream) : null;
       let url = track?.el?.src || track?.audioElement?.src || '';
       if (!url && track?.file && typeof window !== 'undefined' && window.subtool?.fileURL) {
         url = await window.subtool.fileURL(track.file);
         throwIfAborted();
       }
-      if (!sourceBuffer && url) sourceBuffer = await decodeURL(url);
+      if (!sourceBuffer && track?.buffer) sourceBuffer = await normalizeOriginal(track.buffer,
+        { url, sourceStream: stream, processed });
+      if (!sourceBuffer && url) sourceBuffer = await decodeURL(url, { sourceStream: stream, processed });
       if (!sourceBuffer) {
         if (selectingChannels || clip.preferCache) {
           throw new Error('辨識來源聲道快取仍在準備中，請稍後再辨識');
         }
         continue;
       }
-      if (resourceKey) decodedByResource.set(resourceKey, sourceBuffer);
+      if (resourceKey) {
+        if (!decodedByResource.has(resourceKey)) decodedByResource.set(resourceKey, new Map());
+        decodedByResource.get(resourceKey).set(stream, sourceBuffer);
+      }
       if (!selectingChannels) {
-        const mixedResourceKey = resourceKey || sourceBuffer;
+        const mixedResourceKey = sourceBuffer;
         if (mixedResources.has(mixedResourceKey)) continue;
         mixedResources.add(mixedResourceKey);
         const channelCount = Math.max(0, Math.floor(Number(sourceBuffer.numberOfChannels) || 0));
@@ -411,13 +440,12 @@ export async function getClipAudioBuffer(clip, {
     if (url) return decodeURL(url);
   }
 
-  const file = clip.file || clip._file || clip.blob;
   if (file && typeof file.arrayBuffer === 'function') {
     const data = await file.arrayBuffer();
     throwIfAborted();
     const decoded = await decodeAudioData(data);
     throwIfAborted();
-    return decoded;
+    return normalizeOriginal(decoded);
   }
 
   if (clip.web?.url) return decodeURL(clip.web.url);
@@ -471,6 +499,13 @@ export function insertAsrSubtitles(results, {
     const clip = item.clip;
     const segments = item.segments || [];
     const clipStartTimeline = (clip.offset != null ? Number(clip.offset) : Number(clip.start)) || 0;
+    const sourceStart = Number(clip.in ?? clip.trimStart) || 0;
+    const placement = {
+      ...clip,
+      offset: clipStartTimeline,
+      in: sourceStart,
+      out: Number(clip.out ?? clip.trimEnd ?? clip.duration ?? clip.dur) || sourceStart
+    };
 
     for (const seg of segments) {
       if (!seg.text || !seg.text.trim()) continue;
@@ -504,8 +539,11 @@ export function insertAsrSubtitles(results, {
       const segStart = Number.isFinite(rawStart) ? rawStart : 0;
       const segEnd = Number.isFinite(rawEnd) ? rawEnd : (segStart + 1.5);
 
-      const timelineStartRaw = clipStartTimeline + segStart;
-      const timelineEndRaw = clipStartTimeline + segEnd;
+      // FPS-SYNC: ASR 秒數相對於裁切後的母素材；時間域換算只交給序列層。
+      const first = Seq.toTimeline(sourceStart + segStart, placement);
+      const last = Seq.toTimeline(sourceStart + segEnd, placement);
+      const timelineStartRaw = Math.min(first, last);
+      const timelineEndRaw = Math.max(first, last);
 
       const start = Math.max(0, snapTimeToFrame(timelineStartRaw, fps, dropFrame));
       let end = snapTimeToFrame(timelineEndRaw, fps, dropFrame);
@@ -585,7 +623,8 @@ export function insertAsrSubtitles(results, {
 
   State.cues.push(...newCues);
   sortCues();
-  setSelection(newCues[0].id);
+  setSelection({ kind:'sub', ids:[newCues[0].id] });
+  State.activeEdge='start';
   syncTrackCount();
   recordHistory(historyLabel);
 

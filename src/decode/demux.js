@@ -6,11 +6,11 @@
 ============================================================================== */
 /* mp4box 封裝：把 MP4／proxy 容器 demux 成 WebCodecs 可解的素材。
    兩條路：
-   ① demuxIndex(url)：【串流式，v4.29 起的主路】只讀檔頭 moov 建「索引」（每 sample 的
+   ① demuxIndex(url)：【串流式，v4.29 起的主路】只讀 moov 建「索引」（每 sample 的
       offset/size/cts/is_sync 全在 stco/stsz/stts/ctts/stss 裡，不需要 mdat），位元組留在
       磁碟上、播到哪抓哪 → 記憶體與影片長度脫鉤。長片 proxy 實測 2.6–4.25Mbps，
       2 小時＝2.3–3.7GB，整檔路完全吃不下（舊上限 1.5GB）；索引則僅約 10MB。
-   ② demuxFile(arrayBuffer)：整檔抽出（PoC／小檔／moov 不在檔頭的退路）。
+   ② demuxFile(arrayBuffer)：整檔抽出（PoC／小檔的退路）。
    兩者都回 { config, index/chunks, info }；player.js 以 SampleReader 統一取位元組。 */
 import { createFile, DataStream, MP4BoxBuffer, Endianness } from 'mp4box';
 import { evictWindows, planWindow, sliceBounds, touchWindow, windowByteRange } from './sample-index.js';
@@ -43,6 +43,8 @@ export function demuxFile(arrayBuffer){
         width: vtrack.video.width, height: vtrack.video.height,
         codec: vtrack.codec, timescale: vtrack.timescale, nbSamples: vtrack.nb_samples,
         durationUs: Math.round((vtrack.movie_duration / (vtrack.movie_timescale||vtrack.timescale||1)) * 1e6),
+        presentationOffsetUs: presentationEdit(vtrack)?.offsetUs ?? null,
+        presentationOffsetExactUs: presentationEdit(vtrack)?.offsetExactUs ?? null,
       }});
     };
     file.onError = (msg)=>{ if(!done){ done=true; reject(new Error('mp4box：'+msg)); } };
@@ -64,6 +66,7 @@ export function demuxFile(arrayBuffer){
         chunks.push({
           type: s.is_sync ? 'key' : 'delta',
           timestamp: Math.round(s.cts / scale * 1e6),
+          timestampExactUs: s.cts / scale * 1e6,
           duration: Math.round((s.duration||0) / scale * 1e6),
           data: s.data,
         });
@@ -89,6 +92,9 @@ async function fetchRange(url, start, end, allowShort, signal){
   const want = end - start;
   const r = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` }, signal });
   if(!r.ok && r.status !== 206) throw new Error('取位元組失敗 HTTP ' + r.status);
+  if(Number(r.headers?.get?.('content-length'))>want){
+    await r.body?.cancel?.();throw new Error('Range 未生效（回傳完整來源）');
+  }
   const ab = await r.arrayBuffer();
   if(ab.byteLength !== want && !(allowShort && ab.byteLength < want))
     throw new Error(`Range 未生效（要 ${want} bytes、得 ${ab.byteLength}）`);
@@ -102,35 +108,157 @@ async function rangeWorks(url){
   catch(e){ return false; }
 }
 
-/* 檔頭嘗試值：moov 大小 ≈ 樣本數 ×~10B（stsz/stts/ctts/stco/stss）。實測 10 萬顆樣本
-   （67 分鐘）的 moov 在 4MB 內；24MB 可涵蓋約 8 小時。再大一律當「moov 不在檔頭」處理，
-   讓呼叫端退回整檔路——與其為罕見的外來檔多讀幾十 MB，不如早點認賠。 */
-const HEAD_TRY = [4 << 20, 24 << 20];
+/* Bound container IO before handing moov to MP4Box. Its stsz parser expands
+   even constant-size PCM tables, and appendBuffer builds every track's sample
+   list before onReady. Project the private header first; original source bytes
+   and absolute stco/co64 payload addresses never change. */
+const INDEX_BYTE_LIMIT = 24 << 20;
+const HEADER_BYTES = 64 << 10;
+const INDEX_BYTES = 4 << 20;
+const HEADER_REQUEST_LIMIT = 4096;
 
-/* 只讀檔頭建索引。回 { config, index:[{type,timestamp,duration,offset,size}], keyIdx:[], info, maxEnd }。
-   需要 moov 在檔頭（+faststart）——本專案產生的 proxy 必為 faststart；外來檔失敗則由呼叫端退回整檔路。 */
-export async function demuxIndex(url){
+async function readMovieHeader(url){
+  let position=0,readBytes=0,requests=0,brand=null;
+  const read=async(start,length)=>{
+    if(++requests>HEADER_REQUEST_LIMIT||length>INDEX_BYTE_LIMIT-readBytes)
+      throw new Error('moov 索引超出有界讀取範圍');
+    const bytes=await fetchRange(url,start,start+length,true);
+    readBytes+=bytes.byteLength;
+    return bytes;
+  };
+  while(readBytes<INDEX_BYTE_LIMIT){
+    const bytes=await read(position,Math.min(HEADER_BYTES,INDEX_BYTE_LIMIT-readBytes));
+    if(bytes.byteLength<8) throw new Error('找不到完整 moov header');
+    const box=movieBox(new DataView(bytes),0,bytes.byteLength,true);
+    if(box.type==='ftyp'||box.type==='moov'){
+      if(box.size>INDEX_BYTE_LIMIT)throw new Error('moov 索引超出有界讀取範圍');
+      const complete=new Uint8Array(box.size);
+      let copied=Math.min(box.size,bytes.byteLength);
+      complete.set(new Uint8Array(bytes,0,copied));
+      while(copied<box.size){
+        const part=await read(position+copied,Math.min(INDEX_BYTES,box.size-copied));
+        if(!part.byteLength)throw new Error('找不到完整 moov header');
+        complete.set(new Uint8Array(part),copied);copied+=part.byteLength;
+      }
+      if(box.type==='moov'){
+        if(!brand)throw new Error('找不到 ftyp');
+        return {brand,movie:complete.buffer};
+      }
+      brand=complete.buffer;
+    }
+    const next=position+box.size;
+    if(!Number.isSafeInteger(next)||next<=position)throw new Error('moov 索引解析沒有進展');
+    position=next;
+  }
+  throw new Error('moov 索引超出有界讀取範圍');
+}
+
+function movieBox(view,position,end,partial=false){
+  if(position+8>end)throw new Error('不完整的 moov box');
+  let size=view.getUint32(position),header=8;
+  if(size===1){
+    if(position+16>end)throw new Error('不完整的 moov extended box');
+    size=Number(view.getBigUint64(position+8));header=16;
+  }
+  const type=String.fromCharCode(...new Uint8Array(view.buffer,view.byteOffset+position+4,4));
+  if(!size&&!partial)size=end-position;
+  if(!Number.isSafeInteger(size)||size<header||(!partial&&position+size>end))
+    throw new Error('無效或超出範圍的 moov box');
+  return {type,position,size,body:position+header,end:position+size};
+}
+
+function movieChildren(view,box){
+  const result=[];
+  for(let position=box.body;position<box.end;){
+    const child=movieBox(view,position,box.end);result.push(child);position=child.end;
+  }
+  return result;
+}
+
+function movieSampleTables(movie){
+  const view=new DataView(movie),moov=movieBox(view,0,view.byteLength),tables=[];
+  for(const trak of movieChildren(view,moov).filter(box=>box.type==='trak')){
+    const children=movieChildren(view,trak),tkhd=children.find(box=>box.type==='tkhd');
+    const mdia=children.find(box=>box.type==='mdia');
+    if(!tkhd||!mdia)throw new Error('moov 軌道缺少 metadata');
+    const idPosition=tkhd.body+(view.getUint8(tkhd.body)===1?20:12);
+    if(idPosition+4>tkhd.end)throw new Error('不完整的 tkhd');
+    const minf=movieChildren(view,mdia).find(box=>box.type==='minf');
+    const stbl=minf&&movieChildren(view,minf).find(box=>box.type==='stbl');
+    if(!stbl)throw new Error('moov 軌道缺少 sample table');
+    const sizes=movieChildren(view,stbl).filter(box=>box.type==='stsz'||box.type==='stz2');
+    if(sizes.some(box=>box.body+12>box.end))throw new Error('不完整的 sample size table');
+    const sizeTable=sizes.find(box=>box.type==='stsz')||sizes[0];
+    tables.push({id:view.getUint32(idPosition),sizes,count:sizeTable?view.getUint32(sizeTable.body+8):0});
+  }
+  return tables;
+}
+
+function parseMovieHeader(brand,movie,tables,selectedId=null){
+  const projected=movie.slice(0),bytes=new Uint8Array(projected);
+  for(const track of tables){
+    if(track.id===selectedId)continue;
+    for(const box of track.sizes)bytes.set([102,114,101,101],box.position+4); // free: no index for this track
+  }
+  const file=createFile();let ready=null,ferr=null;
+  file.onReady=info=>{ready=info;};file.onError=message=>{ferr=message;};
+  file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(brand.slice(0),0),false);
+  file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(projected,brand.byteLength),false);
+  if(ferr)throw new Error('mp4box：'+ferr);
+  if(!ready)throw new Error('找不到完整 moov');
+  return {file,ready};
+}
+
+/* Find the first presented audio CTS in O(STTS runs + CTTS runs), without
+   allocating one PCM entry per sample. Within each intersection DTS increases,
+   so only its first CTS can lower the minimum. Keep integer container ticks. */
+function minimumCompositionTime(table,count){
+  const stts=table.stts,ctts=table.ctts;
+  if(!count||!stts||(ctts&&ctts.version!==0&&ctts.version!==1))return null;
+  let timingRun=0,compositionRun=0,timingLeft=0,compositionLeft=0;
+  let remaining=count,dts=0,minimum=Infinity;
+  while(remaining>0){
+    while(!timingLeft&&timingRun<stts.sample_counts.length)timingLeft=stts.sample_counts[timingRun++];
+    while(ctts&&!compositionLeft&&compositionRun<ctts.sample_counts.length)compositionLeft=ctts.sample_counts[compositionRun++];
+    if(!timingLeft||(ctts&&!compositionLeft))return null;
+    const delta=stts.sample_deltas[timingRun-1];
+    let offset=ctts?ctts.sample_offsets[compositionRun-1]:0;
+    // MP4Box reads v0 offsets as signed; ISO BMFF defines them as unsigned.
+    if(ctts?.version===0&&offset<0)offset+=0x100000000;
+    if(!Number.isSafeInteger(delta)||delta<0||!Number.isSafeInteger(offset))return null;
+    const length=Math.min(remaining,timingLeft,ctts?compositionLeft:remaining);
+    minimum=Math.min(minimum,dts+offset);dts+=length*delta;
+    if(!Number.isSafeInteger(dts)||!Number.isSafeInteger(minimum))return null;
+    remaining-=length;timingLeft-=length;if(ctts)compositionLeft-=length;
+  }
+  return minimum;
+}
+
+/* 只讀有界容器 header 建索引，moov 可位於檔頭或檔尾。
+   回 { config, index:[{type,timestamp,duration,offset,size}], keyIdx:[], info, maxEnd }。
+   metadataOnly 音訊來源只回真實 metadata；視訊仍建立實際逐格證據。 */
+export async function demuxIndex(url,{allowAudio=false,metadataOnly=false}={}){
   if(!await rangeWorks(url)) throw new Error('此來源不支援 Range（無法串流式讀取）');
-  let lastErr = null;
-  for(const head of HEAD_TRY){
-    const file = createFile();
-    let ready = null, ferr = null;
-    file.onError = m => { ferr = m; };
-    file.onReady = info => { ready = info; };
-    try{
-      // allowShort：檔案比 head 小＝直接拿到整個檔，一樣能解析（Range 已由探針證實有效）
-      const ab = await fetchRange(url, 0, head, true);
-      file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(ab, 0), false); // fileStart=0
-    }catch(e){ lastErr = e; continue; }
-    if(!ready){ lastErr = new Error(ferr || `檔頭 ${head >> 20}MB 內找不到 moov`); continue; }
+  const {brand,movie}=await readMovieHeader(url),tables=movieSampleTables(movie);
+  // First let the actual parser identify supported sample entries and edits,
+  // without materializing any samples. Restore only the selected decoder table.
+  const metadata=parseMovieHeader(brand,movie,tables);
+  const ready=metadata.ready;
 
-    const vt = ready.videoTracks && ready.videoTracks[0];
+    // MOV ProRes/PCM sample entries may be reported as otherTracks. Their
+    // actual media handler identifies the track even without a codec adapter.
+    // Native playback/probe uses the first visual source in container order.
+    // A later registered codec must not replace an earlier ProRes source.
+    const videoTrack = ready.tracks.find(track=>metadata.file.getTrackById(track.id)?.mdia?.hdlr?.handler==='vide')||ready.videoTracks?.[0];
+    const audioTracks=ready.tracks.filter(track=>metadata.file.getTrackById(track.id)?.mdia?.hdlr?.handler==='soun');
+    const audioTrack=audioTracks[0];
+    const vt = videoTrack || (allowAudio && audioTrack);
     if(!vt) throw new Error('demux：找不到視訊軌'); // 有 moov 卻無視訊軌＝加大檔頭也沒用
 
-    file.setExtractionOptions(vt.id, null, { nbSamples: 1 });
-    file.start(); // 觸發 buildSampleLists()：由 stco/stsz/stts/ctts/stss 算出每 sample 的 offset
-    const samples = file.getTrackSamplesInfo(vt.id);
-    if(!samples || !samples.length){ lastErr = new Error('取不到 sample 索引'); continue; }
+    const audioMetadataOnly=metadataOnly&&!videoTrack;
+    const {file}=audioMetadataOnly?metadata:parseMovieHeader(brand,movie,tables,vt.id);
+    const samples=audioMetadataOnly?[]:file.getTrackSamplesInfo(vt.id);
+    if(!audioMetadataOnly&&(!samples||!samples.length))throw new Error('取不到 sample 索引');
 
     const scale = vt.timescale || 1;
     const index = new Array(samples.length);
@@ -142,26 +270,83 @@ export async function demuxIndex(url){
       index[i] = {
         type: s.is_sync ? 'key' : 'delta',
         timestamp: Math.round(s.cts / scale * 1e6),
+        timestampExactUs: s.cts / scale * 1e6,
         duration: Math.round((s.duration || 0) / scale * 1e6),
         offset: s.offset, size: s.size,
       };
       const e = s.offset + s.size; if(e > maxEnd) maxEnd = e;
     }
-    if(!keyIdx.length) keyIdx.push(0); // 無 stss＝全部都是關鍵幀（罕見）；至少讓 0 可當起點
-    // 索引與 avcC 都已複製成獨立資料 → file（含最多 64MB 檔頭緩衝）就此不可達，交給 GC
+    if(samples.length&&!keyIdx.length) keyIdx.push(0); // 無 stss＝全部都是關鍵幀（罕見）；至少讓 0 可當起點
+    // 索引與 avcC 已複製成獨立資料，最多 24MB 的索引緩衝就此可回收。
     const description = extractDescription(file, vt.id);
+    const edit = presentationEdit(vt);
+    // Each decoder begins at its active edit, including an edit that cuts
+    // through an AAC priming packet. Do not move that origin to the next
+    // packet grid or retain encoded preroll that decodeAudioData discards.
+    const audioOffsets=audioTracks.map(track=>{
+      const active=presentationEdit(track),table=metadata.file.getTrackById(track.id)?.mdia?.minf?.stbl;
+      const cts=table?minimumCompositionTime(table,tables.find(item=>item.id===track.id)?.count):null;
+      if(!active||!Number.isFinite(cts)||!(track.timescale>0)) return null;
+      const origin=Math.max(active.startExactUs/1e6,cts/track.timescale+active.offsetExactUs/1e6);
+      return -origin||0;
+    });
 
     return {
-      config: { codec: vt.codec, codedWidth: vt.video.width, codedHeight: vt.video.height, description },
+      config: videoTrack ? { codec: vt.codec, codedWidth: vt.video?.width||vt.track_width, codedHeight: vt.video?.height||vt.track_height, description } : null,
       index, keyIdx, maxEnd,
       info: {
-        width: vt.video.width, height: vt.video.height, codec: vt.codec,
-        timescale: scale, nbSamples: samples.length,
+        width: videoTrack?(vt.video?.width||vt.track_width):0, height: videoTrack?(vt.video?.height||vt.track_height):0, codec: vt.codec, hasVideo:!!videoTrack,
+        timescale: scale, nbSamples: audioMetadataOnly?tables.find(track=>track.id===vt.id)?.count||0:samples.length,
         durationUs: Math.round((vt.movie_duration / (vt.movie_timescale || scale)) * 1e6),
+        containerDurationUs: Math.round(ready.duration / ready.timescale * 1e6),
+        // Container CTS includes decoder preroll. Native/HTML media time follows
+        // the edit list instead; only a single rate-1 media edit is supported.
+        presentationOffsetUs: edit?.offsetUs ?? null,
+        presentationOffsetExactUs: edit?.offsetExactUs ?? null,
+        presentationStartUs: edit?.startUs ?? null,
+        audioPresentationTimestampOffset: audioOffsets[0]??null,
+        audioPresentationTimestampOffsets: audioOffsets,
+        decoderAudioPresentationTimestampOffsets: audioOffsets,
       },
     };
+}
+
+function presentationEdit(track){
+  const edits=track.edits||[];
+  if(!edits.length) return {offsetUs:0,offsetExactUs:0,startUs:0,startExactUs:0};
+  let emptyDuration=0,media=null;
+  for(const edit of edits){
+    if(edit.media_rate_integer!==1||edit.media_rate_fraction!==0||
+      !Number.isSafeInteger(edit.media_time)||!Number.isSafeInteger(edit.segment_duration)||edit.segment_duration<0) return null;
+    if(edit.media_time<0){
+      if(media||edit.media_time!==-1) return null;
+      emptyDuration+=edit.segment_duration;if(!Number.isSafeInteger(emptyDuration))return null;
+    }
+    else {if(media) return null;media=edit;}
   }
-  throw lastErr || new Error('無法建立索引');
+  if(!media) return null;
+  const startExactUs=emptyDuration/(track.movie_timescale||track.timescale)*1e6;
+  const startUs=Math.round(startExactUs);
+  const offsetExactUs=(emptyDuration/(track.movie_timescale||track.timescale)-media.media_time/track.timescale)*1e6;
+  return {startUs,startExactUs,offsetExactUs,offsetUs:Math.round(offsetExactUs)};
+}
+
+/* CTS 是容器座標；decoder 與 HTML/mpv 都使用 edit-list 定義的來源呈現時間。
+   保留 decode 順序、位元組 offset 與 payload，只在這個 seam 換一次時間域。 */
+export function presentationSamples(samples,info){
+  const offset=info?.presentationOffsetUs;
+  if(!Number.isFinite(offset)) return null;
+  const exactOffset=info?.presentationOffsetExactUs??offset;
+  // CTS and edit-list ticks can each contain fractional microseconds. Rounding
+  // them separately moves CFR/NTSC boundaries by one tick before frame lookup.
+  const result=samples.map(sample=>({...sample,timestamp:Math.round((sample.timestampExactUs??sample.timestamp)+exactOffset)}));
+  // stts duration follows decode order. With VFR B-frames it is not the
+  // displayed frame's hold time; adjacent CTS define that interval.
+  const ordered=[...result].sort((a,b)=>a.timestamp-b.timestamp);
+  for(let index=0;index<ordered.length-1;index++){
+    ordered[index].duration=ordered[index+1].timestamp-ordered[index].timestamp;
+  }
+  return result;
 }
 
 /* 位元組視窗讀取器：一次抓「一段連續樣本」進記憶體，播過就丟。

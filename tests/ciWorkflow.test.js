@@ -49,12 +49,23 @@ describe('GitHub Actions 平台分流', () => {
       .filter(file => {
         const source = readFileSync(file, 'utf8');
         return /\bspawn(?:Sync)?\s*\(\s*ELECTRON\s*,/.test(source)
-          || /\bconst FFMPEG\s*=\s*[^;]*ffmpeg\.exe/.test(source);
+          || /\bconst FFMPEG\s*=\s*[^;]*ffmpeg\.exe/.test(source)
+          || (/\bnativeTestTools\(/.test(source) && /from ['"]node:child_process['"]/.test(source));
       })
       .filter(file => !isWindowsTest(readFileSync(file, 'utf8')))
       .map(file => path.relative(ROOT, file).replaceAll('\\', '/'));
 
     expect(unclassified).toEqual([]);
     expect(isWindowsTest(readFileSync(path.join(ROOT, 'tests', 'projectWorkspace.test.js'), 'utf8'))).toBe(true);
+  });
+
+  it('真內容測試的 FFmpeg/FFprobe 路徑不繞過 CI 工具入口或從彼此目錄推導', () => {
+    const bypasses = testFiles(path.join(ROOT, 'tests')).filter(file => {
+      const source = readFileSync(file, 'utf8');
+      if (!/from ['"]node:child_process['"]/.test(source)) return false;
+      return /\b(?:const|let)\s+(?:FFMPEG|FFPROBE|ffmpeg|ffprobe)\s*=\s*path\.(?:join|resolve)\([^;]*ff(?:mpeg|probe)\.exe/.test(source)
+        || /path\.join\(path\.dirname\(FFMPEG\),\s*['"]ffprobe\.exe['"]\)/.test(source);
+    }).map(file => path.relative(ROOT, file).replaceAll('\\', '/'));
+    expect(bypasses).toEqual([]);
   });
 });

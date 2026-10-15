@@ -4,8 +4,11 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { createHash, randomUUID } = require('crypto');
-const { vocalSourceFingerprint } = require('./vocal-waveform-fingerprint');
+const { motherSourceFingerprint } = require('./mother-source-evidence');
+const { sourceClockSeek, sourceAudioClockFilter } = require('./media-source-clock');
 const SAMPLE_RATE = 48000;
+// 沿用既有反向音訊 key 的指紋 namespace，既有完整 WAV 仍可重用。
+const FINGERPRINT_OPTIONS = Object.freeze({ namespace: 'vocal-source-v1' });
 
 function validateReverseAudioRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少反向音訊參數');
@@ -17,14 +20,15 @@ function validateReverseAudioRequest(request) {
   return { path: source, in: start, out: end, sourceStream };
 }
 
-function buildReverseAudioArgs(request, output) {
+function buildReverseAudioArgs(request, output, clock = null) {
   const input = validateReverseAudioRequest(request), duration = input.out - input.in;
+  const seek = sourceClockSeek(input.in, clock);
   // accurate seek 的時鐘由零開始；缺聲／較早 EOF 先補齊，再反轉完整片段。
   // 保留整個 stream，renderer 再按原來源聲道拆回既有 project bus。
   return ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-    '-ss', String(input.in), '-t', String(duration), '-i', input.path,
+    '-ss', String(seek.seek), '-t', String(duration), '-i', input.path,
     '-map', `0:a:${input.sourceStream}`, '-vn', '-sn', '-dn',
-    '-af', `aresample=${SAMPLE_RATE}:async=1:first_pts=0,apad=whole_dur=${duration},atrim=end=${duration},asetpts=PTS-STARTPTS,areverse`,
+    '-af', `${sourceAudioClockFilter(seek, SAMPLE_RATE)},apad=whole_dur=${duration},atrim=end=${duration},asetpts=PTS-STARTPTS,areverse`,
     '-ar', String(SAMPLE_RATE), '-c:a', 'pcm_s16le', '-rf64', 'auto', '-f', 'wav', output];
 }
 
@@ -69,7 +73,7 @@ async function completeWave(file, duration) {
   finally { await handle?.close().catch(() => {}); }
 }
 
-function createClipAudioCache({ cacheRoot, fileAuthority, execute, isClosing = () => false,
+function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null, isClosing = () => false,
   timeoutMs = 600000, terminationGraceMs = 1000 } = {}) {
   if (!cacheRoot || !fileAuthority?.canRead || !fileAuthority?.grantTrustedFile || typeof execute !== 'function') throw new TypeError('反向音訊快取缺少必要 adapter');
   const inFlight = new Map();
@@ -88,13 +92,16 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, isClosing = (
   async function reverseRequest(request) {
     const input = validateReverseAudioRequest(request);
     assertSource(input.path);
-    const identity = await vocalSourceFingerprint(input.path);
+    const identity = await motherSourceFingerprint(input.path, FINGERPRINT_OPTIONS);
     assertSource(input.path);
-    const key = createHash('sha256').update(JSON.stringify({ version: 1, identity, in: input.in,
+    const media = probe ? await probe(input.path) : null;
+    assertSource(input.path);
+    const clock = media?.video || media?.audio?.[input.sourceStream];
+    const key = createHash('sha256').update(JSON.stringify({ version: 2, identity, in: input.in,
       out: input.out, stream: input.sourceStream, sampleRate: SAMPLE_RATE })).digest('hex');
     let pending = inFlight.get(key);
     if (!pending) {
-      pending = generate(input, identity, key);
+      pending = generate(input, identity, key, clock);
       inFlight.set(key, pending);
       void pending.finally(() => { if (inFlight.get(key) === pending) inFlight.delete(key); }).catch(() => {});
     }
@@ -102,12 +109,12 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, isClosing = (
     assertSource(input.path);
     return result;
   }
-  async function generate(request, identity, key) {
+  async function generate(request, identity, key, clock) {
     const directory = root(), output = path.join(directory, `${key}.wav`), duration = request.out - request.in;
     await fs.mkdir(directory, { recursive: true });
     assertSource(request.path);
     if (await completeWave(output, duration)) {
-      if (await vocalSourceFingerprint(request.path) !== identity) throw new Error('音訊來源在建立快取期間已變更');
+      if (await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== identity) throw new Error('音訊來源在建立快取期間已變更');
       fileAuthority.grantTrustedFile(output, { read: true, write: false });
       return { path: output, duration };
     }
@@ -115,7 +122,7 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, isClosing = (
     let timer = null, killTimer = null, timedOut = false;
     try {
       assertSource(request.path);
-      await execute(buildReverseAudioArgs(request, staging), {
+      await execute(buildReverseAudioArgs(request, staging, clock), {
         executionKind: 'direct', deferTerminal: true, jobId: `clip-audio-${key.slice(0, 12)}`, label: '準備反向音訊',
         onProcess: child => {
           child.once?.('close', () => { clearTimeout(timer); clearTimeout(killTimer); });
@@ -131,7 +138,7 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, isClosing = (
       });
       if (timedOut) throw new Error('反向音訊準備逾時');
       assertSource(request.path);
-      if (await vocalSourceFingerprint(request.path) !== identity) throw new Error('音訊來源在建立快取期間已變更');
+      if (await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== identity) throw new Error('音訊來源在建立快取期間已變更');
       if (!await completeWave(staging, duration)) throw new Error('反向音訊未產生完整 PCM WAV');
       await fs.rename(staging, output);
       fileAuthority.grantTrustedFile(output, { read: true, write: false });

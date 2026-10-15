@@ -19,7 +19,9 @@
    - 佇列監控【視窗】的生命週期（BrowserWindow、關閉確認）留在 main.js：
      那是視窗管理，不是排程。本檔只在狀態變動時呼叫注入的 onChanged()。
    - 實際跑 ffmpeg 的 delivery runner 由 runJob adapter 注入。
-   - 准入政策在 export-admission.js。
+
+   准入政策由本檔的 createExportAdmission 提供，與正式狀態語彙及
+   ExportQueueState 共用同一個 module；外部能力由 main.js 注入。
 
    正式狀態語彙與 ExportQueueState 是本 module 的 implementation，不可由 caller
    置換；electron、filesystem、runner 等外部效果才透過 adapter 注入。
@@ -232,7 +234,7 @@ class ExportQueueState {
  * @param {object} [deps.state]                 僅供 recovery 測試注入正式 ExportQueueState
  * @param {object} deps.store                   QueueStore
  * @param {object} deps.history                 QueueHistory
- * @param {object} deps.admission               export-admission 實例
+ * @param {object} deps.admission               本 module 的 createExportAdmission 實例
  * @param {(job:object)=>void} deps.grantPersistedCapabilities  恢復時重新授予檔案能力
  * @param {(p:string)=>boolean} deps.canReadSource
  * @param {(p:string)=>boolean} deps.canWriteDelivery
@@ -259,6 +261,8 @@ function createExportQueue(deps) {
   let paused = false;
   let concurrency = 1;
   let activeCount = 0;
+  let pauseRevision = 0;
+  let shutdownAttempt = null;
   /* journal 已提交的終態等候 runner finally 清理；journal 寫失敗的終態則留在
      記憶體待重試。在後者成功前 scheduler 必須整體停住，不能讓下一份工作越過它。 */
   const persistedTerminalJobs = new Set();
@@ -389,6 +393,7 @@ function createExportQueue(deps) {
     assertJobCapabilities(job) { return admission.assertJobAdmissible(job); },
 
     setPaused(v) {
+      pauseRevision++;
       paused = !!v;
       onChanged();
       if (!paused) this.processQueue();
@@ -946,6 +951,12 @@ function createExportQueue(deps) {
         onChanged();
         return Promise.reject(unsafeShutdownError());
       }
+      const attempt = {
+        pausedBefore: paused, pauseRevision,
+        interrupted: state.jobs().some(job => isLiveWork(job.status)),
+        safe: false,
+      };
+      shutdownAttempt = attempt;
       this.shuttingDown = true;
       paused = true;
       const closingProcesses = [];
@@ -1025,6 +1036,7 @@ function createExportQueue(deps) {
           log('關閉前無法更新工作快照：', e);
           throw unsafeShutdownSnapshotError();
         }
+        attempt.safe = true;
       })();
       this.shutdownPromise = shutdown;
       shutdown.catch(() => {
@@ -1036,6 +1048,23 @@ function createExportQueue(deps) {
         onChanged();
       });
       return this.shutdownPromise;
+    },
+
+    async cancelShutdown() {
+      const attempt = shutdownAttempt;
+      if (!attempt) return false;
+      const closing = this.shutdownPromise;
+      if (closing) await closing.catch(() => {});
+      if (shutdownAttempt !== attempt) return false;
+      // 其他 owner 取消退出時，也撤銷已成功完成的 queue 關閉交易。
+      // 中止過的工作與未 durable 的終態仍保持暫停，不能自行重跑。
+      this.shutdownPromise = null;
+      this.shuttingDown = false;
+      if (!attempt.safe || attempt.interrupted) paused = true;
+      else if (pauseRevision === attempt.pauseRevision) paused = attempt.pausedBefore;
+      shutdownAttempt = null;
+      onChanged();
+      return true;
     },
 
     /* ── 入列與排程 ─────────────────────────────────────────────────── */
@@ -1193,8 +1222,8 @@ function createExportAdmission(deps) {
     return outputKeyFor(outPath);
   }
 
-  /* renderer 用一份 format→副檔名的表組出 outPath，主程序用另一份驗它。
-     兩份目前只靠人工維持一致；這裡是它們真正相遇的地方。 */
+  /* renderer 與主程序共用 shared/delivery-formats.cjs 的格式規格；
+     這裡以注入的 expectedExtensionFor 驗證輸出副檔名。 */
   function assertOutputFormat(job) {
     const outPath = job?.payload?.outPath;
     const expected = expectedExtensionFor(job?.payload?.format);

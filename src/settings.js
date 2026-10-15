@@ -148,7 +148,7 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
     'exp_clear': '[ + ]'
   };
 
-  /* 重複判準與比對規則同住 keybinding.js——兩者不一致的後果見該檔檔頭。 */
+  /* 重複判準與比對規則同住 keybinding-engine.js。 */
   function checkDuplicate(newBind) {
     const hit = findConflict(tempKeymap, newBind);
     return hit ? { ...hit, label: allLabels[hit.action] || hit.action } : null;
@@ -212,7 +212,7 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
             return;
           }
 
-          // 單獨的修飾鍵不算一個綁定（判斷同樣在 keybinding.js）
+          // 單獨的修飾鍵不算一個綁定（判斷同樣在 keybinding-engine.js）
           const bind = bindFromEvent(e);
           if (!bind) return;
 
@@ -334,7 +334,7 @@ export function showSettingsModal() {
     try {
       const obj = JSON.parse(decodeText(await readFile(f)));
       if (!ownsImport()) return;
-      // 只採用「本版本認得的動作」，其餘一律以預設補齊（規則見 keybinding.js）
+      // 只採用「本版本認得的動作」，其餘一律以預設補齊（規則見 keybinding-engine.js）
       const { keymap: merged, applied } = mergeImportedKeymap(State.defaultKeymap, obj);
       tempKeymap = merged;
       renderDraft();

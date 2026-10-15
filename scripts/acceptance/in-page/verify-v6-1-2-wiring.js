@@ -131,16 +131,25 @@
     if (!W.live) {
       ok('即時波形', null, '略過：目前不是即時波形模式（只有長檔／無法解碼整段時才會啟用）');
     } else {
-      const snapshot = W.peaks ? W.peaks.slice(0, 64) : null;
+      const peaks = W.peaks;
+      const snapshot = peaks ? peaks.slice() : null;
+      const startSourceTime = S.Media.vTime();
       ok('即時波形有緩衝區', !!snapshot);
       if (snapshot) {
         console.info('[提示] 請按播放約 2 秒後再執行：window.__vfyWave()');
         window.__vfyWave = () => {
-          const now = W.peaks.slice(0, 64);
-          const changed = now.some((v, i) => v !== snapshot[i]);
+          if (W.peaks !== peaks) {
+            console.log('❌ 波形來源已變更，請重新執行驗收');
+            return false;
+          }
+          const endSourceTime = S.Media.vTime();
+          const first = Math.max(0, Math.floor(Math.min(startSourceTime, endSourceTime) * W.resolution)) * 2;
+          const last = Math.min(peaks.length, (Math.floor(Math.max(startSourceTime, endSourceTime) * W.resolution) + 3) * 2);
+          const changed = peaks.slice(first, last).some((v, i) => v !== snapshot[first + i]);
           console.log(changed
-            ? '✅ 即時波形有在寫入（captureLive 已復活）'
-            : '❌ 即時波形沒有變化 —— captureLive 可能仍然沒有執行');
+            ? `✅ 即時波形有在來源 ${startSourceTime.toFixed(3)}–${endSourceTime.toFixed(3)} 秒寫入`
+            : '— 未觀察到新峰值，無法判定：相同峰值或靜音也可能持續寫入；請換未擷取區段重試');
+          return changed ? true : null;
         };
       }
     }

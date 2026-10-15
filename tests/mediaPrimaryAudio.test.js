@@ -10,7 +10,7 @@ vi.mock('../src/mixer.js',()=>({renderAudioTracks:vi.fn(),clearMeterStrips:vi.fn
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()}));
 vi.mock('../src/notes.js',()=>({renderNotes:vi.fn(),updateNoteActive:vi.fn()}));
 vi.mock('../src/subtitles.js',()=>({selectCueSingle:vi.fn(),commitCueTimeEdit:vi.fn()}));
-vi.mock('../src/subtitle-model.js',()=>({addCue:vi.fn(),cueTrackLocked:vi.fn()}));
+vi.mock('../src/subtitle-model.js',()=>({addCue:vi.fn(),cueTrackLocked:vi.fn(),snapAllCuesToFrames:vi.fn()}));
 let Media,Wave,State,setFps,resetAudioProject,ensureAudioSourceMap,Project,resetProject,Seq,AudioEngine,pickMediaFiles,importDesktopMediaFiles,importBrowserMediaFiles,openMedia;
 const audioElements=[];
 beforeAll(async()=>{
@@ -27,6 +27,25 @@ beforeAll(async()=>{
 });
 beforeEach(()=>{Media.reset();resetAudioProject();State.cues=[];State.clips=[];State.notes=[];dom.video.src='';dom.video.currentTime=0;audioElements.length=0;});
 afterEach(()=>{Media.reset();resetProject();});
+it('public native intake starts at source zero and appended HTML clips retain their own origins',async()=>{
+ const runtime=vi.spyOn(Media,'ensureClipRuntime').mockResolvedValue();
+ const proxy=vi.spyOn(Media,'ensurePrimaryPreviewProxy').mockResolvedValue();
+ const attribute=dom.video.hasAttribute;
+ try{
+  dom.video.hasAttribute=name=>name==='src'&&!!dom.video.src;
+  dom.video.duration=3.5;
+  window.subtool.probe.mockResolvedValueOnce({duration:3,video:{codec:'vp9',fps:30,width:64,height:48,timestampOffset:-.5},audio:[]});
+  await Media.loadDesktopMedia('C:/first.webm');
+  expect(dom.video.currentTime).toBe(.5);expect(Media.vTime()).toBe(0);
+  expect(State.clips[0]).toMatchObject({dur:3,in:0,out:3});expect(State.duration).toBe(3);
+  window.subtool.probe.mockResolvedValueOnce({duration:3,video:{codec:'vp9',fps:30,width:64,height:48,timestampOffset:-.25},audio:[]});
+  const second=await Media.addClipDesktop('C:/second.webm',{offset:3,vtrack:0,in:0,out:3});
+  dom.video.duration=3.25;
+  await expect(Media.requestPresentation(5.8)).resolves.toMatchObject({status:'presented',presentedTime:5.8,source:'html5'});
+  expect(dom.video.currentTime).toBeCloseTo(3.05,10);expect(Media.vTime()).toBeCloseTo(2.8,10);
+  expect(second.dur).toBe(3);expect(State.duration).toBe(6);
+ }finally{runtime.mockRestore();proxy.mockRestore();dom.video.duration=12;dom.video.hasAttribute=attribute;}
+});
 it('重開24fps專案保留專案格網，母素材仍記錄30fps',async()=>{
  const data={app:'SUB Tool',version:3,media:{name:'source.webm',path:'C:/source.webm',size:1024},fps:24,dropFrame:false,duration:12,tracks:[{name:'sub',visible:true}],cues:[],clips:[{id:'s',name:'source.webm',path:'C:/source.webm',primary:true,dur:12,in:0,out:12,offset:0}],notes:[]};
  const b64=Buffer.concat([Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
@@ -123,6 +142,23 @@ it.each([0,5])('a full ten-second waveform preserves a two-second external place
   const peaks=Wave.getSourceWaveform(asset).peaks;
   expect(peaks.length).toBe(10*Wave.resolution*2);expect(Math.max(...peaks)).toBe(0.25);
  }finally{decode.mockRestore();}
+});
+
+it('public original-file waveform commits source-zero PCM rather than the earlier audio epoch',async()=>{
+ const asset={id:'epoch-wave',audioSourceId:'epoch-wave-source',audioSrc:'ext-epoch',duration:1,in:0,out:1,offset:0};
+ Media.externalAudioSources=[asset];
+ const pcm=data=>({duration:data.length/1000,sampleRate:1000,length:data.length,numberOfChannels:1,getChannelData:()=>data});
+ const original=pcm(Float32Array.from([...Array(500).fill(.2),...Array(1000).fill(.8)]));
+ const decode=vi.spyOn(AudioEngine,'decodeAudioData').mockResolvedValueOnce(original);
+ const metadata=vi.spyOn(AudioEngine,'_sourceMetadata').mockResolvedValueOnce({
+  presentationTimestampOffset:-5.5,audioPresentationTimestampOffset:-5,decoderAudioPresentationTimestampOffsets:[-5],duration:1});
+ const create=vi.spyOn(AudioEngine,'createBuffer').mockImplementation((_channels,length)=>pcm(new Float32Array(length)));
+ try{
+  expect(await Wave.fromFile(new File([new Uint8Array(4)],'original.mov'),asset)).toBe(true);
+  const peaks=Wave.getSourceWaveform(asset).peaks;
+  expect(peaks.length).toBe(200);expect(peaks[1]).toBeCloseTo(.8,6);expect(Math.min(...peaks.filter((_,index)=>index%2))).toBeCloseTo(.8,6);
+  expect(State.duration).toBe(1);
+ }finally{decode.mockRestore();metadata.mockRestore();create.mockRestore();}
 });
 
 it('composition snapshot is immutable, retained only for its physical frame, and cleared on reset',()=>{

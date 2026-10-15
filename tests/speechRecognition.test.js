@@ -877,6 +877,42 @@ describe('語音辨識與字幕生成模組', () => {
   });
 
   describe('字幕時碼映射與軌道注入 (insertAsrSubtitles)', () => {
+    it.each([
+      { speed: 2, reverse: false, start: 12, end: 13.6 },
+      { speed: 0.25, reverse: false, start: 26, end: 38.8 },
+      { speed: 2, reverse: true, start: 11.4, end: 13 },
+      { speed: 0.25, reverse: true, start: 21.2, end: 34 },
+    ])('依速度 $speed 與反向 $reverse 放入正確時間軸區間', ({ speed, reverse, start, end }) => {
+      State.fps = 25;
+      const clip = { id: 'mapped-asr', offset: 10, in: 2, out: 12, speed, reverse };
+      const segment = { start: 4, end: 7.2, text: '母素材對白' };
+      const original = structuredClone({ clip, segment });
+      expect(insertAsrSubtitles([{ clip, segments: [segment] }], { requireValidTimes: true })).toBe(1);
+      expect(State.cues[0]).toMatchObject({ text: '母素材對白', timed: true, start, end });
+      expect({ clip, segment }).toEqual(original);
+    });
+
+    it('反向片段的句子依實際呈現時間排序且文字不變', () => {
+      State.fps = 25;
+      insertAsrSubtitles([{
+        clip: { offset: 10, in: 2, out: 12, speed: 2, reverse: true },
+        segments: [{ start: 0, end: 2, text: '來源前句' }, { start: 6, end: 8, text: '來源後句' }]
+      }]);
+      expect(State.cues.map(cue => ({ text: cue.text, start: cue.start, end: cue.end }))).toEqual([
+        { text: '來源後句', start: 11, end: 12 },
+        { text: '來源前句', start: 14, end: 15 }
+      ]);
+    });
+
+    it('相容舊音訊 placement 的 start 與 trim 座標', () => {
+      State.fps = 25;
+      insertAsrSubtitles([{
+        clip: { start: 10, trimStart: 2, trimEnd: 12, speed: 2, reverse: true },
+        segments: [{ start: 4, end: 7.2, text: '舊專案音訊' }]
+      }]);
+      expect(State.cues[0]).toMatchObject({ start: 11.4, end: 13, text: '舊專案音訊' });
+    });
+
     it('完成字幕軌注入後立即使時間軸失效，不必等待視窗 resize 才顯示', () => {
       const clip = { id: 'timeline-redraw', offset: 0, in: 0, out: 2 };
 

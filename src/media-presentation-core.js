@@ -5,6 +5,7 @@
    呈現回報作為提交點。它只容許一個 in-flight 請求，忙碌時只保留最新目標。
    ============================================================================== */
 import { clamp } from './util.js';
+import {sourceFrameTargetUs} from '../shared/media-source-clock.cjs';
 
 /**
  * 建立「要求位置」與「實際呈現位置」之間的單一協調核心。
@@ -233,8 +234,11 @@ export function createMediaPresentationSession(options = {}) {
       targetTime,tolerance,abort,dispose,
       acknowledge(value){native=value;notify();},
       report(times){
-        if(aborted||!webCodecsTakeover||!times.every(time=>Math.abs(time-targetTime)<=tolerance)) return false;
-        composited={source:'webcodecs',presentedTime:times[times.length-1]};notify();return true;
+        const covered=times.every(value=>typeof value==='object'&&(value.reverse
+          ? (value.startInclusive?targetTime>=value.start-1e-9:targetTime>value.start+1e-9)&&targetTime<=value.end+1e-9
+          : targetTime>=value.start-1e-9&&targetTime<value.end-1e-9));
+        if(aborted||!webCodecsTakeover||(!covered&&!times.every(value=>Math.abs((value.time??value)-targetTime)<=tolerance))) return false;
+        composited={source:'webcodecs',presentedTime:covered?targetTime:(times.at(-1).time??times.at(-1))};notify();return true;
       },
       handoff(){ if(webCodecsTakeover) composited=null;notify(); },
       next(){
@@ -251,8 +255,8 @@ export function createMediaPresentationSession(options = {}) {
 
   function reportWebCodecsPresentation(presentedTimelineTimes) {
     const times = (Array.isArray(presentedTimelineTimes) ? presentedTimelineTimes : [presentedTimelineTimes])
-      .map(Number)
-      .filter(Number.isFinite);
+      .map(value=>typeof value==='object'&&value ? {time:Number(value.time),start:Number(value.start),end:Number(value.end),reverse:!!value.reverse,startInclusive:!!value.startInclusive} : Number(value))
+      .filter(value=>typeof value==='object'?Number.isFinite(value.time)&&Number.isFinite(value.start)&&Number.isFinite(value.end):Number.isFinite(value));
     if (!times.length) return false;
     let completed = false;
     for (const waiter of [...compositeWaiters.values()]) {
@@ -288,8 +292,8 @@ export function createMediaPresentationSession(options = {}) {
       sourceTarget = timeline.sourceTime?.(targetTime, clip);
       if (!Number.isFinite(Number(sourceTarget))) throw new Error('timeline source mapping is unavailable');
       if (timeline.requiresClip?.(clip)) {
-        await timeline.ensureClip?.(clip, sourceTarget, false);
-        if (signal?.aborted) {
+        await timeline.ensureClip?.(clip, sourceTarget, false,{signal,owns:isLatestRequest});
+        if (signal?.aborted||(typeof isLatestRequest==='function'&&!isLatestRequest())) {
           throw Object.assign(new Error('media presentation aborted'), { name: 'AbortError' });
         }
       }
@@ -308,12 +312,24 @@ export function createMediaPresentationSession(options = {}) {
     // 每個請求從 native seek 開始便持有呈現工作，接管可在 ACK 前後改變。
     const waiter=presentationWaiter(targetTime,{signal,requestId,tolerance});
     try{
-    const presentationTarget = Number(player.presentationTarget?.(sourceTarget, clip) ?? sourceTarget);
+    const frameTarget=clip?.reverse?sourceFrameTargetUs(sourceTarget,clip)/1e6:sourceTarget;
+    const window=typeof player.frameWindow==='function'?await player.frameWindow(frameTarget,clip):null;
+    if(signal?.aborted||(typeof isLatestRequest==='function'&&!isLatestRequest())) throw Object.assign(new Error('media presentation aborted'),{name:'AbortError'});
+    const knownWindow=window&&Number.isFinite(window.start)&&Number.isFinite(window.end)
+      &&window.end>window.start&&frameTarget>=window.start-1e-9&&frameTarget<window.end-1e-9?window:null;
+    const seekSource=knownWindow?.start??frameTarget;
+    const presentationTarget = Number(player.presentationTarget?.(seekSource, clip) ?? seekSource);
     if (!Number.isFinite(presentationTarget)) throw new Error('player presentation target is unavailable');
+    // The timeline owns the mapping. Probe both sides using this exact clip;
+    // looking up the adjacent placement here can turn a tiny tolerance into a
+    // jump to a different mother source.
+    const sourceTolerance=clip?Math.max(...[-1,1].map(sign=>
+      Math.abs(Number(timeline.sourceTime?.(targetTime+sign*tolerance,clip))-sourceTarget))):tolerance;
     const result = await adapter.present(presentationTarget, {
       signal,
       exact: !!(player.isNative?.() && player.exactSeek?.()),
-      tolerance,
+      tolerance:sourceTolerance,
+      ...(knownWindow?{frameTarget,frameStart:knownWindow.start,frameDuration:knownWindow.end-knownWindow.start}:{}),
     });
     const actualSource = Number(result?.presentedSourceTime);
     if (!Number.isFinite(actualSource)) throw new Error('player did not acknowledge a presented frame');
@@ -321,7 +337,9 @@ export function createMediaPresentationSession(options = {}) {
       ? Number(timeline.timelineTime?.(actualSource, clip))
       : actualSource;
     if (!Number.isFinite(presentedTimeline)) throw new Error('timeline presentation mapping is unavailable');
-    waiter.acknowledge({presentedTime:presentedTimeline,source:result.backend||adapter.type});
+    const covered=!!knownWindow&&Math.abs(actualSource-knownWindow.start)<=2e-6;
+    if((knownWindow&&!covered)||(!covered&&Math.abs(presentedTimeline-targetTime)>tolerance+1e-9)) throw new Error('presented frame does not cover the timeline target');
+    waiter.acknowledge({presentedTime:covered?targetTime:presentedTimeline,source:result.backend||adapter.type});
     while(true){
       const shown=await waiter.next();
       // Promise 完成到 continuation 之間也可能換 presenter；只提交目前可見者。
@@ -503,10 +521,13 @@ export class PlaybackSyncEngine {
     const { audio } = this.port;
     for (const track of audio.tracks()) {
       if (track.kind !== 'element' || !track.el) continue;
-      if (track._srcHidden || (track.source || '').startsWith('ext-')) continue;
+      if (track._srcHidden) { audio.cancelElementSeek?.(track); continue; }
+      if ((track.source || '').startsWith('ext-')) continue;
       const localTime = audio.sourceLocalTime(track.source || 'video', t);
-      if (localTime == null) continue;
-      try { track.el.currentTime = clamp(localTime, 0, track.el.duration || localTime); } catch (error) {}
+      if (localTime == null) { audio.cancelElementSeek?.(track); continue; }
+      if(audio.seekElement){try{audio.seekElement(track,localTime)?.catch?.(()=>{});}catch(error){}continue;}
+      const playerTime = audio.playerTime?.(track,localTime) ?? localTime;
+      try { track.el.currentTime = clamp(playerTime, 0, track.el.duration || playerTime); } catch (error) {}
     }
   }
 
@@ -616,7 +637,7 @@ export class PlaybackSyncEngine {
   }
 
   _syncExternalElementActivity(time) {
-    const { clock, audio } = this.port;
+    const { clock, audio, actions } = this.port;
     const active = [];
     for (const track of audio.tracks()) {
       if (track.kind !== 'element' || !track.el) continue;
@@ -625,24 +646,14 @@ export class PlaybackSyncEngine {
       active.push(`${source}:${!track._srcHidden && audio.externalSourceTime(source, time) != null ? '1' : '0'}`);
     }
     const key = active.join('|');
+    if (!active.length && this._externalActivityKey == null) {
+      this._externalActivityKey = key;
+      return;
+    }
     if (key === this._externalActivityKey) return;
     this._externalActivityKey = key;
-
-    for (const track of audio.tracks()) {
-      if (track.kind !== 'element' || !track.el) continue;
-      const source = track.source || '';
-      if (!source.startsWith('ext-')) continue;
-      const offset = !track._srcHidden ? audio.externalSourceTime(source, time) : null;
-      try {
-        if (offset == null) { track.el.pause(); continue; }
-        track.el.currentTime = clamp(offset, 0, track.el.duration || offset);
-        track.el.playbackRate = clock.playbackRate();
-        if ('preservesPitch' in track.el) {
-          track.el.preservesPitch = track.el.playbackRate >= 0.25 && track.el.playbackRate <= 4;
-        }
-        const result = track.el.play();
-        if (result?.catch) result.catch(() => {});
-      } catch (error) {}
-    }
+    // The audio owner selects the original or reverse playback source and its
+    // placement rate. Starting an element here bypasses both decisions.
+    actions.startElementSources(clock.sourceTime(), time);
   }
 }

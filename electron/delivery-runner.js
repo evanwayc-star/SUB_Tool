@@ -30,6 +30,10 @@ function createDeliveryRunner(options = {}) {
   const fonts = options.fonts || {};
   const events = options.events || {};
   const now = typeof options.now === 'function' ? options.now : Date.now;
+  const sourceKey = source => {
+    const resolved = path.resolve(source);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
 
   if (!queue || typeof queue.reportProgress !== 'function') throw new TypeError('delivery runner 缺少 queue interface');
   if (typeof queueDir !== 'function') throw new TypeError('delivery runner 缺少 queueDir');
@@ -120,16 +124,24 @@ function createDeliveryRunner(options = {}) {
       }
 
       const probe = mediaProbe();
-      const sourcePaths = [...new Set((clips || [])
-        .filter(clip => clip?.path && clip.type !== 'image')
-        .map(clip => clip.path))];
+      const sourcePaths = QueueStore.collectSourcePaths({
+        clips: (clips || []).filter(clip => clip.type !== 'image'), audioPlan: rawAudioPlan,
+      });
       const audioPresence = new Map(await settleProbes(sourcePaths
-        .map(async sourcePath => [sourcePath, await probe.hasAudio(sourcePath, { signal: abort.signal })])));
+        .map(async sourcePath => [sourceKey(sourcePath), await probe.hasAudio(sourcePath, { signal: abort.signal })])));
       checkCancelled();
       const sourceStartOffsets = new Map();
-      if (getDeliveryFormatPreset(format)?.transport === 'airline' && probe.audioVideoStartOffsets) {
-        await settleProbes(sourcePaths.filter(sourcePath => audioPresence.get(sourcePath))
-          .map(async sourcePath => sourceStartOffsets.set(sourcePath,
+      const sourceClocks = new Map();
+      if (probe.describe) {
+        await settleProbes(sourcePaths.map(async sourcePath => {
+          const media = await probe.describe(sourcePath, { signal: abort.signal });
+          sourceClocks.set(sourceKey(sourcePath), media.video || media.audio?.[0] || null);
+        }));
+      }
+      checkCancelled();
+      if (probe.audioVideoStartOffsets) {
+        await settleProbes(sourcePaths.filter(sourcePath => audioPresence.get(sourceKey(sourcePath)))
+          .map(async sourcePath => sourceStartOffsets.set(sourceKey(sourcePath),
             await probe.audioVideoStartOffsets(sourcePath, { signal: abort.signal }))));
       }
       checkCancelled();
@@ -141,9 +153,10 @@ function createDeliveryRunner(options = {}) {
         vencArgsBitrate: encoder.bitrateArgs,
         proresArgs: encoder.proresArgs,
         encoderName: encoder.name?.() || null,
-        hasAudioStream: sourcePath => audioPresence.get(sourcePath) ?? true,
+        hasAudioStream: sourcePath => audioPresence.get(sourceKey(sourcePath)) ?? true,
         audioVideoStartOffset: (sourcePath, streamIndex = 0) =>
-          sourceStartOffsets.get(sourcePath)?.[streamIndex] ?? 0,
+          sourceStartOffsets.get(sourceKey(sourcePath))?.[streamIndex] ?? 0,
+        sourceClock: probe.describe ? sourcePath => sourceClocks.get(sourceKey(sourcePath)) : null,
         fontsDir: fonts.root?.() || null,
         timecodeFontFile: fonts.timecodeFile?.() || null,
       });
@@ -178,13 +191,13 @@ function createDeliveryRunner(options = {}) {
       const encoderMatch = videoMap && /->\s*[^(]*\(([^)]+)\)\s*$/.exec(videoMap.trim());
       if (encoderMatch) usedEncoder = encoderMatch[1].trim();
 
-      // watchdog 已發佈成品後，取消結果資訊 probe 只能略過 metadata，不能把成品降回失敗。
+      // watchdog 已發佈成品；結果資訊是選用 metadata，讀取失敗或取消都不能改變交付終態。
       active.controller = null;
       active.p = null;
       let audioActualBitrates = null;
       if (!isPro && !isDisc) {
         try { audioActualBitrates = await probe.audioBitrates(outPath, { signal: abort.signal }); }
-        catch (error) { if (!abort.signal.aborted) throw error; }
+        catch (error) { /* 保留 null；成品成功由 execution 裁定。 */ }
       }
       sendProgress({
         jobId, label, pct: 100, done: true,

@@ -22,15 +22,24 @@ import { getPlayerAdapter } from '../media-player-adapter.js';
 import { emit } from '../events.js';
 import { fadeAlphaAtTimeline, visualStackPlan, imageSourceUrl, stageBox } from '../image-compositor-engine.js';
 import { showToast } from '../ui.js';
-import { demuxFile, demuxIndex, SampleReader, MemReader } from './demux.js';
+import { demuxFile, demuxIndex, presentationSamples, SampleReader, MemReader } from './demux.js';
+
+import { timestampOffset, sourceFrameTargetUs } from '../../shared/media-source-clock.cjs';
 import { keyIndexBefore } from './sample-index.js';
 import { imageBoxOnStage, trackFrame } from '../image-compositor-engine.js'; // 預覽／mpv guide／匯出 三路共用的唯一幾何公式
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
+const MAX_BACKWARD_FRAMES = 45;
+const MAX_TOTAL_FRAMES = 75;
 // 整檔 demux 上限——【僅退路用】（moov 不在檔頭／不支援 Range 的來源）。
 // 主路 demuxIndex 只讀檔頭建索引、位元組按需抓，記憶體與影片長度脫鉤，不受此限。
 const SIZE_CAP = 1500 * 1024 * 1024;
+
+/* FPS-SYNC：量化後仍須落在來源 trim-out 之前；固定減一段秒數會跨到前一格。 */
+function clipSourceTargetUs(t, clip){
+  return sourceFrameTargetUs(Seq.toSource(t,clip),clip);
+}
 
 /* 來源解析快取（url → Promise<{config,index,keyIdx,reader}>）：同一來源疊在多條軌時，
    索引與位元組視窗共享、decoder 各自。 */
@@ -43,7 +52,7 @@ function demuxCached(url){
       try{
         const r = await demuxIndex(url);
         if(!r.index.length) throw new Error('無視訊樣本');
-        return { config:r.config, index:r.index, keyIdx:r.keyIdx, reader:new SampleReader(url, r.index, r.maxEnd), streaming:true };
+        return { config:r.config, index:presentationSamples(r.index,r.info), keyIdx:r.keyIdx, reader:new SampleReader(url, r.index, r.maxEnd), streaming:true };
       }catch(e){
         console.warn('[WC] 串流式索引失敗，退回整檔:', e && (e.message||e));
       }
@@ -58,7 +67,7 @@ function demuxCached(url){
       const keyIdx = [];
       r.chunks.forEach((c,i)=>{ if(c.type==='key') keyIdx.push(i); });
       if(!keyIdx.length) keyIdx.push(0);
-      return { config:r.config, index:r.chunks, keyIdx, reader:new MemReader(r.chunks), streaming:false };
+      return { config:r.config, index:presentationSamples(r.chunks,r.info), keyIdx, reader:new MemReader(r.chunks), streaming:false };
     })();
     p.catch(()=>{ if(_demuxCache.get(url)===p) _demuxCache.delete(url); }); // 失敗不留快取
     _demuxCache.set(url, p);
@@ -84,21 +93,28 @@ class SourceStream {
     if(this.state !== 'idle') return;
     this.state = 'loading';
     try{
-      const { config, index, keyIdx, reader } = await demuxCached(this.url);
+      const { config, index:rawIndex, keyIdx, reader } = await demuxCached(this.url);
+      const shift=Math.round(timestampOffset(getPlayerAdapter().sourceClock?.(this.url))*1e6);
+      const index=rawIndex&&rawIndex.map(sample=>({...sample,timestamp:sample.timestamp+shift}));
       if(this._disposed) return;
-      // 預設軟解（穩定優先，720p 軟解 >3000fps；部分環境硬解連續解碼會卡住——見 decoder.js 註記）
+      if(!index) throw new Error('不支援此影片的 edit-list 呈現時間');
+      // 預設軟解（穩定優先，720p 軟解 >3000fps；部分環境硬解連續解碼會卡住）
       const cfg = Object.assign({ optimizeForLatency: true, hardwareAcceleration: 'prefer-software' }, config);
       const sup = await VideoDecoder.isConfigSupported(cfg);
       if(this._disposed) return;
       if(!sup.supported) throw new Error('VideoDecoder 不支援 ' + config.codec);
+      this.clockShift=shift;
       this.cfg = cfg; this.chunks = index; this.keyIdx = keyIdx; this.reader = reader;
       this.frames = []; this.frameDurations = new Map(); this.fedIdx = -1; this._flushed = false;
       this.frameDurUs = index[0].duration || 33e3;
-      // 串流最早呈現時間：B-frames 編碼（如 nvenc proxy）首幀 cts 常 >0（reorder 延遲）。
+      // 串流最早呈現時間：edit-list 的起始空白可能使首幀晚於來源 0 秒。
       // 呈現目標須夾到此下界，否則 t=0 會被「後退」誤判 → 無限 reseek、decoder 永遠吐不出 frame。
       this.startUs = Math.min(...index.slice(0, 8).map(c => c.timestamp));
       this.dec = new VideoDecoder({
-        output: (f)=>{ if(this._disposed) f.close(); else this.frames.push(f); },
+        output: (f)=>{
+          if(this._disposed) f.close();
+          else { this.frames.push(f); this._trimFrames(this._targetUs); }
+        },
         error: (e)=>{ console.error('[WC] decoder error:', e && (e.message||e)); this.state = 'failed'; },
       });
       this.dec.configure(cfg);
@@ -126,12 +142,33 @@ class SourceStream {
     this._discarded = false;
   }
 
+  _trimFrames(tUs){
+    // Retain the covering frame and useful history. Future frames are still
+    // needed: dropping them after feeding their chunks creates a decode hole.
+    let bestIdx=-1;
+    for(let i=0;i<this.frames.length&&this.frames[i].timestamp<=tUs;i++) bestIdx=i;
+    const count=Math.max(0,bestIdx-MAX_BACKWARD_FRAMES);
+    for(let i=0;i<count;i++){
+      const frame=this.frames.shift();
+      this.frameDurations.delete(frame.timestamp);
+      try{frame.close();}catch(error){}
+      this._discarded=true;
+    }
+  }
+
   /* 每幀呼叫：推進解碼並回傳「最接近且不晚於 tUs」的 frame（無則 null）。 */
   request(tUs){
     if(this.state === 'idle'){ this.load(); return null; }
     if(this.state !== 'ready') return null;
+    const shift=Math.round(timestampOffset(getPlayerAdapter().sourceClock?.(this.url))*1e6);
+    if(shift!==this.clockShift){
+      const delta=shift-this.clockShift;this.clockShift=shift;
+      this.chunks=this.chunks.map(sample=>({...sample,timestamp:sample.timestamp+delta}));
+      this.startUs+=delta;this._reseek(tUs);
+    }
     const cs = this.chunks, half = this.frameDurUs/2;
     if(tUs < this.startUs) tUs = this.startUs; // 目標早於串流首幀 → 呈現首幀（勿誤判為後退）
+    this._targetUs=tUs;
 
     // 跳轉偵測（對長/短 GOP 皆最優）：
     //  ①尚未開始 ②後退：目標早於「本輪已解/可達」最早點（frames[0]，尚無輸出則用本輪起點 chunk）
@@ -145,10 +182,12 @@ class SourceStream {
     const seekBack = (this._fedFrom != null && ki < this._fedFrom) ||
                      (earliestTs != null && tUs < earliestTs - half && this._discarded);
     if(this.fedIdx < 0 || seekBack || ki > this.fedIdx) this._reseek(tUs);
+    this._trimFrames(tUs);
 
     // 餵：直到「最後已解 frame」涵蓋 t+lookahead、或 decoder 佇列滿、或檔尾、或位元組還沒到
     let starved = false;
-    while(this.fedIdx < cs.length && this.dec.decodeQueueSize < MAX_QUEUE){
+    while(this.fedIdx < cs.length && this.dec.decodeQueueSize < MAX_QUEUE
+      && this.frameDurations.size < MAX_TOTAL_FRAMES){
       const lastOutTs = this.frames.length ? this.frames[this.frames.length-1].timestamp : -1;
       if(lastOutTs >= tUs + LOOKAHEAD_US) break;
       // 串流式：位元組按需抓，尚未到位就這幀先不餵（下一幀再來；期間沿用上一張畫面）
@@ -162,34 +201,12 @@ class SourceStream {
     if(!starved) this.reader.ensure(this.fedIdx); // 預取下一個視窗（播放時永遠領先游標一格）
     if(this.fedIdx >= cs.length && !this._flushed){ this._flushed = true; this.dec.flush().catch(()=>{}); } // 檔尾 drain
 
-    // 挑 frame：最後一個 ts ≤ t＋半幀；都還沒解到但第一張已很近（<200ms）→ 先用它避免黑幀
+    // Only a frame at or before the source target can cover it. Choosing a
+    // future frame by half-frame rounding breaks slow timeline frame steps.
     let best = null;
-    for(const f of this.frames){ if(f.timestamp <= tUs + half) best = f; else break; }
+    for(const f of this.frames){ if(f.timestamp <= tUs) best = f; else break; }
     // 放寬對首幀的容忍度到 1000ms，避免某些 proxy mp4 的 pts 偏移過大導致完全無法接管
     if(!best && this.frames.length && this.frames[0].timestamp - tUs < 1000e3) best = this.frames[0];
-    if(best){
-      const bestIdx = this.frames.indexOf(best);
-      // 雙向影格快取視窗：保留 best 之前的歷史影格（最多 45 幀，約 1.5 秒）。
-      // 當使用者在同一小段左右鍵來回微調（← →）或短距離倒退時，直接從記憶體快取命中，
-      // 杜絕重新解碼整個 GOP 的 O(N^2) 效能黑洞，達成 0ms 瞬間響應。
-      const MAX_BACKWARD_FRAMES = 45;
-      const MAX_TOTAL_FRAMES = 75;
-      if(bestIdx > MAX_BACKWARD_FRAMES){
-        const trimCount = bestIdx - MAX_BACKWARD_FRAMES;
-        for(let i = 0; i < trimCount; i++){
-          const f = this.frames.shift();
-          this.frameDurations.delete(f.timestamp);
-          try{ f.close(); }catch(e){}
-          this._discarded = true;
-        }
-      }
-      while(this.frames.length > MAX_TOTAL_FRAMES){
-        const f = this.frames.shift();
-        this.frameDurations.delete(f.timestamp);
-        try{ f.close(); }catch(e){}
-        this._discarded = true;
-      }
-    }
     return best;
   }
 
@@ -284,7 +301,7 @@ export const WCPreview = {
       keep.add(key);
       if(activeKeys.has(key)) continue; // 目前層已沿播放時鐘解碼，勿提前 seek 後又退回。
       const ss=this._sourceFor(url,key);
-      const su=Math.round(clamp(Seq.toSource(next.at,layer),layer.in,Math.max(layer.in,layer.out-1/120))*1e6);
+      const su=clipSourceTargetUs(next.at,layer);
       ss.request(su);
     }
     return keep;
@@ -355,7 +372,7 @@ export const WCPreview = {
     // 單一、滿版、無淡變的片段不需要 WebCodecs 合成：讓 mpv 繼續呈現可避免切換影片軌眼睛後，
     // 字幕在 libass 與 DOM 兩個渲染器之間跳成不同視覺大小。多軌／子母畫面／淡變才接管。
     // (註：單純的圖片疊層已改交由 mpv-host 的透明 guide 在原生 MPV 上方顯示，不再強制 WebCodecs 接管，確保流暢度與字體大小不變)
-    // 判斷在 compositor-plan.js（純函式、可測）；這裡只依結果決定要不要讓回 mpv。
+    // 判斷在 image-compositor-engine.js 的 visualStackPlan()（純函式、可測）；這裡只依結果決定要不要讓回 mpv。
     const mustComposite=plan.needsComposite;
     if(mpv&&mustComposite) void Media.ensurePrimaryPreviewProxy?.();
     const activeKeys=new Set();
@@ -397,15 +414,17 @@ export const WCPreview = {
       const key = url + '#' + (c.vtrack||0);
       const ss=this._sourceFor(url,key);
       if(ss.state === 'failed') continue; // 不可解時不能發布半個 stack。
-      const su = Math.round(clamp(Seq.toSource(t, c), c.in, Math.max(c.in, c.out - 1/120)) * 1e6);
+      const su = clipSourceTargetUs(t,c);
       const f = ss.request(su);
       // FPS-SYNC（I4）：有快取 frame 不代表已解到目標。以來源畫格的有效時窗
       // 判定可否提交完整 canvas；低 FPS 一格可涵蓋多個專案格，不能硬比 PTS 相等。
       const duration=f ? Number(ss.frameDuration?.(f) || f.duration || ss.frameDurUs || 33e3) : 0;
-      const target=Math.max(su,ss.startUs??su);
+      // request may predecode the first sample before a leading empty edit
+      // ends. That future frame is not evidence for the original source target.
+      const target=su;
       if(f && Number.isFinite(f.timestamp) && Number.isFinite(duration) && duration>0 &&
-         target>=f.timestamp-duration/2 && target<f.timestamp+duration){
-        layers.push({ src:f, sw:f.displayWidth||f.codedWidth, sh:f.displayHeight||f.codedHeight, vt, clip:c, alpha, ts:f.timestamp, url });
+         target>=f.timestamp && target<f.timestamp+duration){
+        layers.push({ src:f, sw:f.displayWidth||f.codedWidth, sh:f.displayHeight||f.codedHeight, vt, clip:c, alpha, ts:f.timestamp, duration, url });
         if(alpha>0.003) readyLayers++;
       }
     }
@@ -462,7 +481,7 @@ export const WCPreview = {
         const pw = State.videoWidth || 1920, ph = State.videoHeight || 1080;
         base = stageBox({ canvasW: bw, canvasH: bh, projectW: pw, projectH: ph });
       }
-      /* 幾何一律走 image-geometry.imageBoxOnStage()：軌影格（available-space 定位）
+      /* 幾何一律走 image-compositor-engine.js 的 imageBoxOnStage()：軌影格（available-space 定位）
          → 片段方框＝scale×影格 → 素材 contain 進方框 → 方框【中心】對到 (posX,posY)。
          這正是匯出 filtergraph 的模型，兩邊共用同一份實作才談得上三路一致。
 
@@ -495,7 +514,14 @@ export const WCPreview = {
         if(L.ts != null){
           lastTs = L.ts; lastUrl = L.url;
           const presentedTimeline=Seq.toTimeline(L.ts/1e6,L.clip);
-          if(Number.isFinite(presentedTimeline)) presentedTimelineTimes.push(presentedTimeline);
+          const otherEdge=Seq.toTimeline((L.ts+L.duration)/1e6,L.clip);
+          if(Number.isFinite(presentedTimeline)&&Number.isFinite(otherEdge)) presentedTimelineTimes.push({
+            time:presentedTimeline,start:Math.min(presentedTimeline,otherEdge),end:Math.max(presentedTimeline,otherEdge),
+            reverse:!!L.clip.reverse,
+            // The clip's initial out point is clamped into its final source
+            // frame. Other reversed windows remain open at their left edge.
+            startInclusive:!!L.clip.reverse&&(L.ts+L.duration>=L.clip.out*1e6-1),
+          });
         }
       }catch(e){}
       ctx.globalAlpha = 1;
@@ -511,7 +537,8 @@ export const WCPreview = {
     this.ctx.drawImage(render,0,0);
     this.canvas.style.display='block';
     this._stageW=State.videoWidth||1920;this._stageH=State.videoHeight||1080;
-    const presentedTime=presentedTimelineTimes.at(-1)??t;
+    const transformed=acts.some(c=>c.reverse || (Number(c.speed)>0 && Number(c.speed)!==1));
+    const presentedTime=transformed ? t : (presentedTimelineTimes.at(-1)?.time??t);
     Media.setWebCodecsComposited(true,{time:presentedTime,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});
     this._setTakeover(true);
     if(painted && lastTs != null){
@@ -524,8 +551,8 @@ export const WCPreview = {
     }else{ this.mode = 'black'; this.lastPresentedUs = null; }
   },
 
-  /* 片段淡入/淡出在**時間軸時間** t 的可見度。公式與時間域轉換都只有
-     clip-fade.js 一份——這裡、app.js 的圖片疊層、media.js 的 previewFadeDarkness
+  /* 片段淡入/淡出在**時間軸時間** t 的可見度。image-compositor-engine.js 的
+     fadeAlphaAtTimeline() 共用 shared/clip-fade.cjs——這裡、app.js 的圖片疊層、media.js 的 previewFadeDarkness
      原本各自內聯了同一組算式（且對缺 offset 的片段結果不一致）。 */
   _clipFadeAlpha(c, t){ return fadeAlphaAtTimeline(c, t); },
 

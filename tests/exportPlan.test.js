@@ -38,7 +38,7 @@ describe('模組本身保持純淨', () => {
   };
 
   /* 純編碼決策是 main 專用，不能為了 import 限制塞進 renderer 共用的 shared。
-     允許明確列出的兩支純 helper，但遞移檢查整條依賴，不能藉此帶入 fs／spawn。 */
+     允許明確列出的純 helper，但遞移檢查整條依賴，不能藉此帶入 fs／spawn。 */
   it('編碼計畫的依賴遞移保持純淨，shared 仍零相依', () => {
     const visited = new Set();
     const visit = filename => {
@@ -51,7 +51,7 @@ describe('模組本身保持純淨', () => {
       }
       for (const spec of specs) {
         expect(spec, `${filename} 不可 require「${spec}」`)
-          .toMatch(/^(\.\.\/shared\/[\w-]+\.cjs|\.\/(airline|disc)-encoding)$/);
+          .toMatch(/^(\.\.\/shared\/[\w-]+\.cjs|\.\/(airline|disc)-encoding|\.\/media-source-clock)$/);
         const full = path.resolve(path.dirname(filename), spec.endsWith('.cjs') ? spec : `${spec}.js`);
         expect(fs.existsSync(full), `${spec} 不存在——安裝版將無法啟動`).toBe(true);
         visit(full);
@@ -85,14 +85,14 @@ describe('AAC 交付 bitrate 依聲道數給足', () => {
    只跳一層 → ffmpeg 把 ':' 當選項分隔符 → 整條 filterchain 解析失敗 → 匯出直接掛掉。 */
 describe('drawtext 值的跳脫（§0.4）', () => {
   it('冒號、分號、反斜線、引號、方括號都被跳脫', () => {
-    expect(P._drawtextValue('C:\\Users\\a')).toBe('C\\:/Users/a');
+    expect(P._drawtextValue('C:\\Users\\a')).toBe('C\\\\:/Users/a');
     expect(P._drawtextValue('a;b')).toBe('a\\;b');
-    expect(P._drawtextValue("it's")).toBe("it\\'s");
+    expect(P._drawtextValue("it's")).toBe("it\\\\\\'s");
     expect(P._drawtextValue('[x]')).toBe('\\[x\\]');
   });
 
   it('反斜線一律先轉成正斜線（Windows 路徑進 filtergraph 的前提）', () => {
-    expect(P._drawtextValue('C:\\a\\b\\c')).not.toContain('\\\\');
+    expect(P._drawtextValue('C:\\a\\b\\c')).toMatch(/\/a\/b\/c$/);
   });
 });
 
@@ -106,8 +106,8 @@ describe('時間碼浮水印濾鏡', () => {
 
   it('字型路徑與時間碼都經過跳脫後才進 filtergraph', () => {
     const out = P._buildExportTimecodeFilter('[v]', tc, 1920, 1080, '[o]', 'C:\\font\\a.ttf');
-    expect(out).toContain("fontfile='C\\:/font/a.ttf'");
-    expect(out).toContain("timecode='01\\:00\\:00\\:00'");
+    expect(out).toContain('fontfile=C\\\\:/font/a.ttf');
+    expect(out).toContain('timecode=01\\\\:00\\\\:00\\\\:00');
     expect(out.startsWith('[v]')).toBe(true);
     expect(out.endsWith('[o]')).toBe(true);
   });
@@ -240,7 +240,8 @@ describe('交付 argv：影像合成', () => {
     expect(graph).not.toContain('overlay=');
     expect(graph).not.toContain('[0:v]');
     expect(graph).toContain('[0:a]');
-    expect(args[args.indexOf('-map') + 1]).toBe('[base]');
+    expect(graph).toContain('[base]trim=end_frame=250[vdelivery]');
+    expect(args[args.indexOf('-map') + 1]).toBe('[vdelivery]');
     const visible = P.buildDeliveryArgv(spec(), env());
     expect(fcOf(visible.args)).toContain('overlay=');
   });
@@ -257,7 +258,7 @@ describe('交付 argv：影像合成', () => {
     }), env());
     expect(args.filter(a => a === 'C:/source/master.mxf')).toHaveLength(1);
     const i = args.indexOf('-ss');
-    expect(args[i + 2]).toBe('-i');
+    expect(args.slice(i + 2, i + 4)).toEqual(['-noaccurate_seek', '-i']);
     expect(+args[i + 1]).toBeCloseTo(9.5); // 最早用到的 in 再退 0.5 秒
   });
 
@@ -342,7 +343,7 @@ describe('交付 argv：燒錄字幕與時間碼（鐵律 §0.4 路徑跳脫）'
   });
 
   /* 時間碼是交付用 burn-in，必須接在 ASS 後面，才會永遠在字幕與所有影像之上。 */
-  it('時間碼濾鏡接在字幕之後，且最終 map 指向時間碼的輸出', () => {
+  it('時間碼濾鏡接在字幕之後，最終交付裁切保留時間碼輸出', () => {
     const { args } = P.buildDeliveryArgv({
       ...base, assFileName: 'job-1.ass',
       timecodeWatermark: P._normaliseExportTimecodeWatermark({ start: '10:00:00:00' }, 25),
@@ -350,12 +351,14 @@ describe('交付 argv：燒錄字幕與時間碼（鐵律 §0.4 路徑跳脫）'
     const fc = fcOf(args);
     expect(fc.indexOf('ass=job-1.ass')).toBeLessThan(fc.indexOf('drawtext='));
     expect(fc).toContain('[vout]drawtext=');
-    expect(args[args.indexOf('-map') + 1]).toBe('[vtimecode]');
+    expect(fc).toContain('[vtimecode]trim=end_frame=125[vdelivery]');
+    expect(args[args.indexOf('-map') + 1]).toBe('[vdelivery]');
   });
 
-  it('沒有字幕也沒有時間碼時，直接 map 疊層結果', () => {
+  it('沒有字幕也沒有時間碼時，最終交付裁切保留疊層結果', () => {
     const { args } = P.buildDeliveryArgv({ ...base, assFileName: null }, { hasAudioStream: () => false });
-    expect(args[args.indexOf('-map') + 1]).toBe('[ov0]');
+    expect(fcOf(args)).toContain('[ov0]trim=end_frame=125[vdelivery]');
+    expect(args[args.indexOf('-map') + 1]).toBe('[vdelivery]');
   });
 });
 
@@ -399,7 +402,7 @@ describe('交付 argv：WAV', () => {
     const graph = args[args.indexOf('-filter_complex') + 1];
     expect(graph).toContain('[0:a:1]loudnorm=I=-12.0:TP=-6.0');
     expect(graph).toContain('measured_I=-21.0');
-    expect(graph).toContain('[0:a:0]pan=mono|c0=c1,asetpts=PTS-STARTPTS,atrim=');
+    expect(graph).toContain('[0:a:0]pan=mono|c0=c1,aresample=48000:async=1:first_pts=0,atrim=');
     expect(graph.match(/loudnorm=/g)).toHaveLength(1);
     expect(graph).not.toContain('[wavNorm]');
   });

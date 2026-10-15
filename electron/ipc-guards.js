@@ -7,7 +7,7 @@
    
    【安全性與設計原因】
    Renderer 傳來的路徑僅代表「外部請求」，不可直接作為執行參數。
-   抽離成獨立模組使 `tests/fileAuthority.test.js` 與 `tests/ipcGuards.test.js`
+   抽離成獨立模組使 `tests/fileAuthority.test.js` 與 `tests/clipFrameCache.test.js`
    能對真實授權狀態進行單元驗證，而非僅靠靜態字面掃描。
    ============================================================================== */
 const { getDeliveryFormatOption } = require('../shared/delivery-formats.cjs');

@@ -5,17 +5,12 @@
      1) 先跑這支（app 可以還沒開，它會等）：
           node scripts/diagnostics/profile-renderer-stall.js
      2) 開啟 SUB Tool → 載入影音
-     3) 偵測到 renderer 開始被擋住就自動開始計時，卡住結束後印出最耗時的函式
+     3) 累積可見區間延遲，結束後印出 CPU 採樣中最耗時的函式
 
-   ── 為什麼是 renderer ──
-   實測（scripts/diagnostics/measure-dialog-stall.js）：
-
-     點擊「開啟影音」→ 主行程進入 dialog.showOpenDialog：1 ms
-     主行程被擋住：（沒有）
-     renderer 被擋住：09:20:57~09:21:32 每秒約 900ms，接著一次 39,943 ms
-
-   合計約 75 秒。使用者按下按鈕時 renderer 主執行緒卡死，click 事件根本沒被處理，
-   一直排到它恢復才送出去——所以看起來像「檔案對話框很慢」，其實對話框只花 1 ms。
+   ── renderer 採樣的限制 ──
+   舊量測曾錄到每秒約 900ms 與一次 39,943ms 延遲，但沒有同期可見性證據，
+   不能據此判定主執行緒卡死：Chromium 的背景計時器節流也會產生相同讀數。
+   現在只累積連續可見區間的延遲，並以 CPU profile 找出實際執行的函式。
 
    ── 為什麼用 webContents.debugger ──
    不需要 --remote-debugging-port：從主行程的 inspector 呼叫
@@ -27,6 +22,7 @@
 
 const { execFileSync } = require('child_process');
 const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
+const { rendererLagProbe } = require('./renderer-lag-probe.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -89,18 +85,9 @@ const STOP_PROFILE = `(async () => {
 const ARM_LAG = `(async () => {
   const B = require('electron').BrowserWindow;
   const w = B.getAllWindows().find(x => !x.getParentWindow());
-  return await w.webContents.executeJavaScript(\`(() => {
-    if (window.__lagTimer_p) clearInterval(window.__lagTimer_p);
-    window.__lagTotal_p = 0;
-    let last = Date.now();
-    window.__lagTimer_p = setInterval(() => {
-      const now = Date.now();
-      const drift = now - last - 100;
-      if (drift > 200) window.__lagTotal_p += drift;
-      last = now;
-    }, 100);
-    return true;
-  })()\`, true);
+  return await w.webContents.executeJavaScript(${JSON.stringify(rendererLagProbe({
+    timerKey: '__lagTimer_p', totalKey: '__lagTotal_p',
+  }))}, true);
 })()`;
 
 const READ_LAG = `(async () => {
@@ -131,14 +118,14 @@ const READ_LAG = `(async () => {
   const started = await main.evaluate(START_PROFILE);
   if (started !== 'ok') { console.error(started); process.exit(1); }
   console.log('\nCPU profiler 已啟動。');
-  console.log('★ 現在請【載入影音】。偵測到 renderer 開始卡住就會計時，結束後自動報告。\n');
+  console.log('★ 現在請【載入影音】。只量測可見區間的 renderer 延遲，結束後自動報告。\n');
 
-  /* 等到累積阻塞超過 8 秒，再等它安靜 8 秒，就停止採樣。 */
+  /* 等到可見區間累積延遲超過 8 秒，再等它安靜 8 秒，就停止採樣。 */
   const deadline = Date.now() + 60 * 60 * 1000;
   let seen = 0, quietSince = 0, sawBlock = false;
   while (Date.now() < deadline) {
     const total = Number(await main.evaluate(READ_LAG)) || 0;
-    if (total > seen) { seen = total; quietSince = 0; if (!sawBlock && total > 8000) { sawBlock = true; console.log(`偵測到 renderer 卡住（累計 ${Math.round(total / 1000)} 秒），繼續採樣…`); } }
+    if (total > seen) { seen = total; quietSince = 0; if (!sawBlock && total > 8000) { sawBlock = true; console.log(`renderer 可見區間延遲（累計 ${Math.round(total / 1000)} 秒），繼續採樣查明原因…`); } }
     else if (sawBlock) { if (!quietSince) quietSince = Date.now(); else if (Date.now() - quietSince > 8000) break; }
     process.stdout.write(sawBlock ? '#' : '.');
     await sleep(2000);
@@ -150,7 +137,7 @@ const READ_LAG = `(async () => {
   if (out.err) { console.error(out.err); process.exit(1); }
 
   console.log(`採樣總長 ${Math.round(out.取樣總長ms / 1000)} 秒，${out.取樣數} 個樣本`);
-  console.log(`renderer 累計被擋住 ${Math.round(seen / 1000)} 秒\n`);
+  console.log(`renderer 可見區間累計採樣延遲 ${Math.round(seen / 1000)} 秒（原因由 profile 與操作核對）\n`);
   console.log('  自身耗時最高的函式（ms）：');
   for (const r of out.前25名) {
     if (r.ms < 50) continue;

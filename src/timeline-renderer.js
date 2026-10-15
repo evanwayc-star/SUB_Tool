@@ -32,7 +32,7 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVid
 import { clamp, pad, escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow } from './subtitles.js';
-import { sortCues, sweepContainedCues, trackLocked, cueTrackLocked } from './subtitle-model.js';
+import { sortCues, sweepContainedCues, trackLocked, cueTrackLocked, moveCuesToTrack } from './subtitle-model.js';
 import { encoreParts, snapTimeToFrame, fmtClock, secToSRT, secToASS, secToEncore, getExactFps } from './time.js';
 import { emit } from './events.js';
 import { isProjectGuardDone, ensureProjectSaved, Project } from './project.js';
@@ -54,6 +54,7 @@ import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds, requestPoint
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { planCueStyleAssignment } from './subtitle-style-engine.js';
 import { effStyle } from './substyle.js';
+import { assetRange, externalSourceTime } from './external-audio.js';
 
 import { on as _onEvent } from './events.js';
 import { selectClip, clearClipSelection } from './clip-model.js';
@@ -316,7 +317,7 @@ function renderTrackRows(){
         }
         _lastHandleClick={tk,t:now};
         _rowResize={type:'track',tk,startY:e.clientY,startH:trackH(tk),
-          edit:beginTimelineTrackEdit({kind:'subtitle',index:State.tracks.indexOf(meta),expectedTarget:meta,field:'height',beginPreview:targets=>History.beginPreview(targets)})};
+          edit:beginTimelineTrackEdit({kind:'subtitle',index:State.tracks.indexOf(meta),expectedTarget:meta,field:'height',beginPreview:targets=>History.beginPreview(targets,()=>true,cancelRowResize)})};
         document.addEventListener('mousemove',_onRowResizeMove);
         document.addEventListener('mouseup',_onRowResizeUp,{once:true});
       });
@@ -510,12 +511,13 @@ function renderClipBlocks(){
 }
 /* 在片段區塊內畫該段音波：畫布覆蓋片段的【可視範圍】，x0abs＝畫布左緣的絕對時間軸 px；
    逐畫布像素以 xToTime 反推來源時間 → 取 peaks（縮放時畫布寬≤視窗，不會超過 canvas 上限）。 */
-function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs){
+function _drawClipWave(cv, c, pk, cvw, Hpx, x0abs, external=false){
   const hasLimiter = !!(c.hasAudioLimiter || c.asset?.hasAudioLimiter);
   const res = Wave.resolution, n = pk.length / 2;
   const timeToXMap = new Float64Array(cvw + 1);
   for (let cx = 0; cx <= cvw; cx++) {
-    timeToXMap[cx] = Seq.toSource(xToTime(x0abs + cx),c);
+    const timelineTime=xToTime(x0abs + cx);
+    timeToXMap[cx] = external ? externalSourceTime(c,timelineTime) : Seq.toSource(timelineTime,c);
   }
   
   const displayList = {
@@ -606,11 +608,8 @@ function externalAudioTimelineEntries(){
   const assets=Media.externalAudio?.list?.() || [];
   // 靜音只影響預覽／輸出，不能把素材從剪輯時間軸藏掉；否則使用者無法再開回來。
   return assets.filter(asset=>asset).map(asset=>{
-    const start=Math.max(0,Number(asset.offset)||0);
-    const inPoint=Math.max(0,Number(asset.in)||0);
-    const rawOut=Number(asset.out??asset.duration);
-    const outPoint=Number.isFinite(rawOut)?Math.max(inPoint,rawOut):inPoint;
-    return {source:asset,start,end:start+Math.max(0,outPoint-inPoint),external:true};
+    const range=assetRange(asset);
+    return {source:asset,start:range.offset,end:range.offset+range.length,external:true};
   }).filter(entry=>entry.end>entry.start);
 }
 function audioTimelineEntries(){
@@ -667,11 +666,12 @@ function sourceWaveLabel(source,selection){
 /* 外部音檔是可獨立剪輯的素材。selectedAudioClipId 只保存 runtime 選取狀態，
    不與影片 clip / 字幕選取混用，讓 Delete 與右鍵操作可明確知道目標。 */
 let _ignoreAudioClickUntil=0;
-function selectExternalAudioClip(assetId,{seek=false,redraw=true}={}){
+export function selectExternalAudioClip(assetId,{seek=false,redraw=true}={}){
   if(!assetId) return;
+  const asset=Media.externalAudio?.get?.(assetId) || null;
+  if(!asset || asset.locked) return;
   setSelection({ kind:'audio', ids:assetId });
   refreshSelectionUI();
-  const asset=Media.externalAudio?.get?.(assetId) || null;
   if(asset) focusTrackKind('audio', asset.audioSourceId || asset.audioSrc || asset.id);
   refreshTrackGutterActive();
   const label=asset?.name||'音訊素材';
@@ -728,15 +728,13 @@ function beginExternalAudioDrag(ev,asset,entry,block){
     ? (ev.target.classList.contains('l')?'audio-l':'audio-r') : 'audio-move';
   selectExternalAudioClip(assetId,{redraw:false});
   block.classList.add('selected');
-  const inPoint=Math.max(0,Number(asset.in)||0);
-  const rawOut=Number(asset.out??asset.duration);
-  const outPoint=Math.max(inPoint,Number.isFinite(rawOut)?rawOut:inPoint);
+  const range=assetRange(asset);
   drag={
     mode, audioAssetId:assetId, audioEl:block,
     pointerId:block._audioPointerId,
     startX:ev.clientX,startY:ev.clientY,startScroll:tlScroll.scrollLeft,
-    os:entry.start,oin:inPoint,oout:outPoint,duration:Math.max(outPoint,Number(asset.duration)||0),
-    preview:{offset:entry.start,in:inPoint,out:outPoint},
+    os:entry.start,oin:range.in,oout:range.out,duration:range.duration,speed:range.speed,reverse:range.reverse,
+    preview:{offset:entry.start,in:range.in,out:range.out},
     snaps:snapTargets(new Set()),
     gesture:beginRendererGesture(mode,{context:{
       startPoint:{x:ev.clientX,y:ev.clientY},
@@ -784,13 +782,9 @@ function renderAudioTrackRows(){
       const isLocked=!!c.locked;
       const isNormalizing = !!(c.audioNormalizing || c.asset?.audioNormalizing);
       const normalizeProgress = Math.max(0, Math.min(100, Math.round(Number(c.audioNormalizeProgress ?? c.asset?.audioNormalizeProgress ?? 0))));
-      const hasLimiter = !isNormalizing && !!(
-        c.hasAudioLimiter ||
-        c.asset?.hasAudioLimiter ||
-        (external && Media.externalAudio?.find?.(c.id)?.hasAudioLimiter) ||
-        (!external && State.clips?.some(clip => (clip.primary || clip.audioSrc === 'video') && clip.hasAudioLimiter))
-      );
-      const limiterRef = c.hasAudioLimiter ? c : (c.asset?.hasAudioLimiter ? c.asset : (!external ? State.clips?.find(clip => (clip.primary || clip.audioSrc === 'video') && clip.hasAudioLimiter) : null));
+      const limiterRef = [c,c.asset,external ? Media.externalAudio?.find?.(c.id) : null]
+        .find(source=>source?.hasAudioLimiter);
+      const hasLimiter = !isNormalizing && !!limiterRef;
       const limiterLabel = limiterRef?.audioLimiterLabel || c.audioLimiterLabel || c.asset?.audioLimiterLabel || '平衡化';
       const limiterSpec = limiterRef?.audioLimiterSpec || c.audioLimiterSpec || c.asset?.audioLimiterSpec;
       const limiterTooltip = limiterSpec
@@ -827,7 +821,7 @@ function renderAudioTrackRows(){
           const cv=document.createElement('canvas'); cv.className='audio-clip-wave';
           cv.width=Math.max(1,Math.round(cvw*devicePixelRatio)); cv.height=Math.max(1,Math.round(Hpx*devicePixelRatio));
           cv.style.left=(vx0-x1)+'px'; cv.style.width=cvw+'px';
-          _drawClipWave(cv,c,peak,cvw,Hpx,vx0);
+          _drawClipWave(cv,c,peak,cvw,Hpx,vx0,external);
           block.insertBefore(cv,block.firstChild);
         }
       }
@@ -940,7 +934,7 @@ function renderVtrackGutter(){
       }
       _lastHandleClick={tk:'v'+v,t:now};
       _rowResize={type:'vtrack',tk:v,startY:e.clientY,startH:vtrackH(v),
-        edit:beginTimelineTrackEdit({kind:'video',index:State.videoTracks.indexOf(meta),expectedTarget:meta,field:'height',beginPreview:targets=>History.beginPreview(targets)})};
+        edit:beginTimelineTrackEdit({kind:'video',index:State.videoTracks.indexOf(meta),expectedTarget:meta,field:'height',beginPreview:targets=>History.beginPreview(targets,()=>true,cancelRowResize)})};
       document.addEventListener('mousemove',_onRowResizeMove);
       document.addEventListener('mouseup',_onRowResizeUp,{once:true});
     });
@@ -960,6 +954,7 @@ function removeVideoTrack(v,expectedTrack=State.videoTracks[v]){
   if(!expectedTrack || State.videoTracks[v]!==expectedTrack || expectedTrack.locked) return;
   if(State.videoTracks.length<=1){ showToast('至少保留一條視訊軌'); return; }
   const clipsOn=State.clips.filter(c=>(c.vtrack||0)===v);
+  if(clipsOn.some(c=>c.locked)){ showToast('此視訊軌包含鎖定素材，無法刪除'); return; }
   const ownsWorkspace=Project.captureWorkspaceOwnership();
   const doRemove=()=>{
     if(!ownsWorkspace() || expectedTrack.locked) return false;
@@ -967,6 +962,7 @@ function removeVideoTrack(v,expectedTrack=State.videoTracks[v]){
     if(v<0 || State.videoTracks.length<=1) return false;
     const current=State.clips.filter(c=>(c.vtrack||0)===v);
     if(current.length!==clipsOn.length || !clipsOn.every(c=>current.includes(c))){showToast('軌道內容已變更，請重新確認刪除');return false;}
+    if(current.some(c=>c.locked)){showToast('此視訊軌包含鎖定素材，無法刪除');return false;}
     for(const c of clipsOn) Media.removeClip(c.id);         // removeClip 會處理 Seq 與音軌清理
     for(const c of State.clips){ if((c.vtrack||0)>v) c.vtrack=(c.vtrack||0)-1; } // 上方軌下移一軌
     State.videoTracks.splice(v,1);
@@ -1130,7 +1126,7 @@ function renderAtrackGutter(){
             target, fields:['height'],
             ownsField:targets[0].ownsField,
             ...(row.external ? {resolveTarget:()=>State.externalAudioState.find(item=>item.id===target.id)} : {}),
-          })),()=>row.external ? Media.externalAudio?.find?.(row.sourceId)===audioTarget : State.clips.includes(audioTarget))
+          })),()=>row.external ? Media.externalAudio?.find?.(row.sourceId)===audioTarget : State.clips.includes(audioTarget),cancelRowResize)
         })
       };
       document.addEventListener('mousemove',_onRowResizeMove);
@@ -1275,12 +1271,13 @@ function beginRendererGesture(mode,{targets=[],context={}}={}){
   return beginTimelineGestureLifecycle({
     mode,targets,context,
     effects:{
-      beginPreview:targets=>History.beginPreview(targets,owns),
+      beginPreview:targets=>History.beginPreview(targets,owns,cancelTimelineDrag),
       canEdit:()=>sourceTracks.every(({track})=>!track?.locked)
         && targets.every(({target})=>(!mode.startsWith('clip-') || !target.locked)
           && tracks[target[trackField]||0]===trackOwners[target[trackField]||0]
           && !tracks[target[trackField]||0]?.locked)
         && (!context.isCopyDrag || !drag?.grp?.some(({c})=>tracks[c.track||0]?.locked)),
+      canCommit:()=>mode!=='clip-move' || !drag?.gesture.hasMoved() || Seq.canResolveOverlaps(drag.clip),
       clearSnapGuide:()=>updateSnapGuide(null),
       stopAutoScroll:stopTimelineAutoScroll,
       hideRubberBand:()=>{ $('tlRubber').style.display='none'; },
@@ -1566,7 +1563,7 @@ const _handleDragUpdate = (e) => {
   if(drag.gesture.kind==='audio'){
     const plan=planAudioGesturePreview({
       mode:drag.mode,
-      original:{offset:drag.os,in:drag.oin,out:drag.oout,duration:drag.duration},
+      original:{offset:drag.os,in:drag.oin,out:drag.oout,duration:drag.duration,speed:drag.speed,reverse:drag.reverse},
       deltaTime:dt,
       snaps:drag.snaps,
       snapThreshold:currentThr,
@@ -1575,7 +1572,7 @@ const _handleDragUpdate = (e) => {
     });
     drag.preview={offset:plan.offset,in:plan.in,out:plan.out};
     updateSnapGuide(plan.snapTarget);
-    const x1=timeToX(plan.offset), x2=timeToX(plan.offset+Math.max(0,plan.out-plan.in));
+    const x1=timeToX(plan.offset), x2=timeToX(plan.offset+Math.max(0,plan.out-plan.in)/drag.speed);
     drag.audioEl.style.left=x1+'px';
     drag.audioEl.style.width=Math.max(6,x2-x1)+'px';
     drag.audioEl.classList.add('dragging');
@@ -1750,7 +1747,7 @@ window.addEventListener('mouseup',e=>{
     }else if(mode==='audio-l'){
       runExternalAudioAction('trimExternalAudio',[assetId,'start',preview.offset]);
     }else{
-      runExternalAudioAction('trimExternalAudio',[assetId,'end',preview.offset+Math.max(0,preview.out-preview.in)]);
+      runExternalAudioAction('trimExternalAudio',[assetId,'end',preview.offset+Math.max(0,preview.out-preview.in)/drag.speed]);
     }
   }else if(drag.mode!=='scrub'){
     const moved=drag.gesture.hasMoved(), m=drag.mode;
@@ -1836,12 +1833,8 @@ export function moveSelectedToTrack(target){
   const ids=State.selectedIds.length?State.selectedIds:[State.selectedId].filter(Boolean);
   if(!ids.length)return;
   const targetTk=clamp(target,0,State.trackCount-1);
-  if(trackLocked(targetTk, '移動至此軌道')) return;
   const cues=ids.map(id=>State.cues.find(x=>x.id===id)).filter(Boolean);
-  const fromLocked=cues.find(c=>State.tracks[c.track||0]?.locked);
-  if(fromLocked && cueTrackLocked(fromLocked, '移動字幕')) return;
-  for(const c of cues){ c.track=targetTk; }
-  emit('render:all'); drawTimeline(); recordHistory('移動至軌道');
+  if(moveCuesToTrack(cues,targetTk)) drawTimeline();
 }
 
 export function setZoom(px,centerTime){
@@ -1925,7 +1918,7 @@ export function toggleAllLock() {
   State.videoTracks.forEach(t => t.locked = anyUnlocked);
   buses.forEach(t => t.locked = anyUnlocked);
   State.clips.forEach(c => c.locked = anyUnlocked);
-  extAudio.forEach(a => a.locked = anyUnlocked);
+  extAudio.forEach(a => Media.setExternalAudioLocked(a.id,anyUnlocked));
   recordHistory(anyUnlocked ? '鎖定全部軌道' : '解鎖全部軌道');
   if (anyUnlocked) { clearSelection(); const el = document.getElementById('stSel'); if (el) el.textContent = ''; }
   drawTimeline();
@@ -2045,15 +2038,14 @@ export function paintClipWave(ctx, displayList) {
   
   for (let cx = 0; cx < cvw; cx++) {
     const t1 = timeToXMap[cx];
-    const b = Math.floor(t1 * res);
-    if (b < 0 || b >= n) continue;
-    
+    if(!Number.isFinite(t1) || n<=0) continue;
+    const t2 = Number.isFinite(timeToXMap[cx + 1]) ? timeToXMap[cx + 1] : t1;
+    const first=Math.floor(Math.min(t1,t2)*res),last=Math.floor(Math.max(t1,t2)*res);
+    if(last<0 || first>=n) continue;
+    const b=Math.max(0,first),b2=Math.min(n-1,last);
     let mn = pk[b * 2];
     let mx = pk[b * 2 + 1];
-    
-    const t2 = timeToXMap[cx + 1] || t1;
-    const b2 = Math.min(n - 1, Math.floor(t2 * res));
-    
+
     for (let k = b + 1; k <= b2; k++) {
       if (pk[k * 2] < mn) mn = pk[k * 2];
       if (pk[k * 2 + 1] > mx) mx = pk[k * 2 + 1];

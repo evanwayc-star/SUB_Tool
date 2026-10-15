@@ -1,6 +1,7 @@
 // @subtool-ci windows
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import os from 'node:os';
 import vm from 'node:vm';
@@ -13,6 +14,10 @@ const require = createRequire(import.meta.url);
 const { createVocalWaveformRuntime, validateChunkRequest, buildChunkArgs, SAMPLE_RATE, CHANNELS } = require('../electron/vocal-waveform-runtime.js');
 const { FileAuthority } = require('../electron/file-authority.js');
 const { createIpcGuards } = require('../electron/ipc-guards.js');
+const { createScreenshotOutput } = require('../electron/screenshot-output.js');
+const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('../electron/media-intake-runtime.js');
+const QueueStore = require('../electron/queue-store.js');
+const { createExportQueue } = require('../electron/export-queue.js');
 const ROOT = path.resolve('');
 const FFMPEG = process.env.FFMPEG_PATH || path.join(ROOT, 'electron/ffmpeg/ffmpeg.exe');
 const FFPROBE = process.env.FFPROBE_PATH || path.join(ROOT, 'electron/ffmpeg/ffprobe.exe');
@@ -81,7 +86,7 @@ function mainHandlers(runtime, authority) {
   return handlers;
 }
 
-function shutdownHandler(vocalRuntime) {
+function shutdownHandler(vocalRuntime, overrides = {}) {
   const source = fs.readFileSync(path.join(ROOT, 'electron/main.js'), 'utf8');
   const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
   const registration = ast.body.find(node => node.type === 'ExpressionStatement'
@@ -95,16 +100,51 @@ function shutdownHandler(vocalRuntime) {
   const context = {
     app: { on: (channel, listener) => { handler = listener; }, quit: vi.fn() },
     _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false,
-    audioNormalizationJobs: new Map(), ffmpegExecution: nativeOwner(),
+    audioNormalizationJobs: new Map(), mediaProbe: null, ffmpegExecution: nativeOwner(),
     clipAudioCache: { waitForIdle: vi.fn().mockResolvedValue() },
+    clipFrameCache: { waitForIdle: vi.fn().mockResolvedValue() },
     speechCompressionRuntime: nativeOwner(), mediaIngestCoordinator: nativeOwner(),
-    vocalWaveformRuntime: vocalRuntime, QueueManager: { prepareForShutdown: vi.fn().mockResolvedValue() },
-    mediaIntakeRuntime: { close: vi.fn().mockResolvedValue() }, screenshotOutput: { close: vi.fn().mockResolvedValue() },
+    vocalWaveformRuntime: vocalRuntime,
+    QueueManager: { prepareForShutdown: vi.fn().mockResolvedValue(), cancelShutdown: vi.fn().mockResolvedValue(true) },
+    mediaIntakeRuntime: { close: vi.fn().mockResolvedValue() },
+    screenshotOutput: { close: vi.fn().mockResolvedValue(), resume: vi.fn().mockResolvedValue(true) },
     mainWin: null, dialog: { showMessageBox: vi.fn().mockResolvedValue() },
-    console: { error: vi.fn() }, Promise,
+    console: { error: vi.fn() }, Promise, ...overrides,
   };
   vm.runInNewContext(source.slice(registration.start, registration.end), context);
   return { handler, context };
+}
+
+function mainMediaHandlers(context) {
+  const source = fs.readFileSync(path.join(ROOT, 'electron/main.js'), 'utf8');
+  const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
+  const channels = ['fs:reserveScreenshotPath', 'fs:writeScreenshot', 'ffmpeg:ingest', 'ffmpeg:streamIngest'];
+  const registrations = ast.body.filter(node => node.type === 'ExpressionStatement'
+    && node.expression.type === 'CallExpression'
+    && node.expression.callee.object?.name === 'ipcMain'
+    && node.expression.callee.property?.name === 'handle'
+    && channels.includes(node.expression.arguments[0]?.value));
+  const session = ast.body.find(node => node.type === 'FunctionDeclaration' && node.id.name === 'mediaIntakeSession');
+  expect(registrations).toHaveLength(channels.length);
+  expect(session).toBeDefined();
+  const handlers = new Map();
+  context.ipcMain = { handle: (channel, handler) => handlers.set(channel, handler) };
+  vm.runInNewContext(source.slice(session.start, session.end), context);
+  for (const registration of registrations) vm.runInNewContext(source.slice(registration.start, registration.end), context);
+  return handlers;
+}
+
+function readProxyRange(url) {
+  return new Promise((resolve, reject) => {
+    const request = http.get(url, { headers: { Range: 'bytes=0-4' } }, response => {
+      const chunks = [];
+      response.on('data', bytes => chunks.push(bytes));
+      response.on('error', reject);
+      response.on('aborted', () => reject(new Error('proxy response aborted')));
+      response.on('end', () => resolve({ status: response.statusCode, bytes: Buffer.concat(chunks) }));
+    });
+    request.on('error', reject);
+  });
 }
 
 afterEach(() => {
@@ -350,16 +390,16 @@ describe('人聲模型的受限母素材 PCM 邊界', () => {
     expect(context._quitReady).toBe(true);
   });
 
-  it('實際 main 先等 FFmpeg close，再等反向音訊 owner 清理才退出', async () => {
+  it.each(['clipAudioCache', 'clipFrameCache'])('實際 main 先等 FFmpeg close，再等 %s owner 清理才退出', async cacheOwner => {
     const { handler, context } = shutdownHandler({ cancelAllAndWait: vi.fn().mockResolvedValue(), resume: vi.fn() });
     let closeWriter, cleanCache;
     context.ffmpegExecution.cancelAllAndWait.mockImplementation(() => new Promise(resolve => { closeWriter = resolve; }));
-    context.clipAudioCache.waitForIdle.mockImplementation(() => new Promise(resolve => { cleanCache = resolve; }));
+    context[cacheOwner].waitForIdle.mockImplementation(() => new Promise(resolve => { cleanCache = resolve; }));
     handler({ preventDefault: vi.fn() });
     await vi.waitFor(() => expect(context.ffmpegExecution.cancelAllAndWait).toHaveBeenCalledOnce());
-    expect(context.clipAudioCache.waitForIdle).not.toHaveBeenCalled();
+    expect(context[cacheOwner].waitForIdle).not.toHaveBeenCalled();
     closeWriter();
-    await vi.waitFor(() => expect(context.clipAudioCache.waitForIdle).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(context[cacheOwner].waitForIdle).toHaveBeenCalledOnce());
     expect(context.mediaIntakeRuntime.close).not.toHaveBeenCalled();
     expect(context.app.quit).not.toHaveBeenCalled();
     cleanCache();
@@ -379,6 +419,113 @@ describe('人聲模型的受限母素材 PCM 邊界', () => {
     expect(context.dialog.showMessageBox).toHaveBeenCalledOnce();
     expect(context._quitSequenceStarted).toBe(false);
     expect(context._isAppQuitting).toBe(false);
+  });
+
+  it('main 截圖清理失敗後可再次截圖與轉檔，保留已發出的 HTTP Proxy 並可重新退出', async () => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-vocal-wave-test-'));
+    directories.push(directory);
+    const source = path.join(directory, 'mother.mov');
+    const cacheRoot = path.join(directory, 'cache');
+    fs.writeFileSync(source, 'unchanged mother bytes');
+    const authority = new FileAuthority({ internalDirectories: [cacheRoot] });
+    authority.grantTrustedFile(source, { read: true, write: false });
+    authority.grantScreenshotDirectory(directory);
+    const proxyBytes = Buffer.alloc(131072, 7);
+    const execute = vi.fn(async args => {
+      for (const output of args.filter(value => /\.(?:m4a|wav|mp4)$/.test(value))) {
+        fs.writeFileSync(output, output.endsWith('proxy.mp4') ? proxyBytes : Buffer.from('completed audio'));
+      }
+    });
+    const intake = createMediaIntakeRuntime({
+      fileAuthority: authority, cacheRoot, tempRoot: directory, allowSidecarCache: false,
+      delay: async () => {}, ffmpegExecution: { execute },
+    });
+    const coordinator = createMediaIngestCoordinator();
+    let finishExport;
+    const exportCompletion = new Promise(resolve => { finishExport = resolve; });
+    let queue;
+    const runJob = vi.fn(async current => {
+      await exportCompletion;
+      queue.reportProgress(current.id, { done: true, elapsedMs: 1 });
+    });
+    queue = createExportQueue({
+      dir: () => path.join(directory, 'export-queue'), store: QueueStore, history: QueueStore.QueueHistory,
+      admission: {
+        sourcePathsOf: current => current.sourcePaths || [],
+        assertMasterMedia() {}, assertOutputFormat() {}, assertOutputAvailable() {}, assertJobAdmissible() {},
+      },
+      grantPersistedCapabilities() {}, canReadSource: file => authority.canRead(file),
+      canWriteDelivery: () => true, isFile: file => fs.statSync(file).isFile(), runJob, onChanged() {},
+    });
+    let lockedReservation = null;
+    const output = createScreenshotOutput({ fileAuthority: authority, fsModule: {
+      promises: { ...fs.promises, unlink: async file => {
+        if (file === lockedReservation) throw Object.assign(new Error('screenshot reservation temporarily locked'), { code: 'EBUSY' });
+        return fs.promises.unlink(file);
+      } },
+    } });
+    const { handler, context } = shutdownHandler({ cancelAllAndWait: vi.fn().mockResolvedValue(), resume: vi.fn() }, {
+      fileAuthority: authority, requireReadablePath: createIpcGuards(authority).requireReadablePath,
+      mediaIngestCoordinator: coordinator, screenshotOutput: output,
+      QueueManager: queue,
+      mediaIntakeRuntime: { ...intake, close: vi.fn(() => intake.close()) },
+    });
+    const handlers = mainMediaHandlers(context);
+    const event = { sender: sender() };
+    const input = { path: source, duration: 1, needsProxy: true, audio: [] };
+    try {
+      await handlers.get('ffmpeg:ingest')(event, input);
+      const priorStream = await handlers.get('ffmpeg:streamIngest')(event, input);
+      expect(await readProxyRange(priorStream.streamUrl)).toEqual({ status: 206, bytes: proxyBytes.subarray(0, 5) });
+      const priorShot = await handlers.get('fs:reserveScreenshotPath')(event, { directory });
+      lockedReservation = priorShot.path;
+
+      handler({ preventDefault: vi.fn() });
+      await vi.waitFor(() => expect(context.dialog.showMessageBox).toHaveBeenCalledOnce());
+      expect(context.app.quit).not.toHaveBeenCalled();
+      expect(context._quitReady).toBe(false);
+      expect(context._quitSequenceStarted).toBe(false);
+      expect(context._isAppQuitting).toBe(false);
+      expect(context.mediaIntakeRuntime.close).not.toHaveBeenCalled();
+      expect(queue.shuttingDown).toBe(false);
+      expect(queue.shutdownPromise).toBeNull();
+      expect(await readProxyRange(priorStream.streamUrl)).toEqual({ status: 206, bytes: proxyBytes.subarray(0, 5) });
+
+      lockedReservation = null;
+      const freshShot = await handlers.get('fs:reserveScreenshotPath')(event, { directory });
+      expect(freshShot).not.toBeNull();
+      const shotBytes = Buffer.from('fresh captured frame bytes');
+      await expect(handlers.get('fs:writeScreenshot')(event, { path: freshShot.path, b64: shotBytes.toString('base64') })).resolves.toBe(freshShot.path);
+      expect(fs.readFileSync(freshShot.path)).toEqual(shotBytes);
+      await expect(handlers.get('ffmpeg:ingest')(event, { ...input, queue: true })).resolves.toMatchObject({ cached: true });
+      const freshStream = await handlers.get('ffmpeg:streamIngest')(event, input);
+      expect(await readProxyRange(freshStream.streamUrl)).toEqual({ status: 206, bytes: proxyBytes.subarray(0, 5) });
+      expect(execute).toHaveBeenCalledOnce();
+      expect(fs.readFileSync(source, 'utf8')).toBe('unchanged mother bytes');
+      const freshExport = {
+        id: 'after-cancelled-quit', status: 'queued', sourcePaths: [source],
+        payload: { outPath: path.join(directory, 'new-delivery.mp4'), clips: [{ path: source }] },
+      };
+      expect(() => queue.addJob(freshExport)).not.toThrow();
+      await vi.waitFor(() => expect(runJob).toHaveBeenCalledOnce());
+
+      handler({ preventDefault: vi.fn() });
+      await vi.waitFor(() => expect(queue.shuttingDown).toBe(true));
+      expect(context.app.quit).not.toHaveBeenCalled();
+      expect(context.mediaIntakeRuntime.close).not.toHaveBeenCalled();
+      finishExport();
+      await vi.waitFor(() => expect(context.app.quit).toHaveBeenCalledOnce());
+      expect(context.mediaIntakeRuntime.close).toHaveBeenCalledOnce();
+      expect(context._quitReady).toBe(true);
+      expect(fs.existsSync(priorShot.path)).toBe(false);
+      expect(fs.readFileSync(freshShot.path)).toEqual(shotBytes);
+    } finally {
+      lockedReservation = null;
+      finishExport();
+      await coordinator.cancelAllAndWait();
+      await output.close();
+      await intake.close();
+    }
   });
 
   nativeIt.each([.25, .3])('實際 FFmpeg 從 %s 秒依來源 sample 對齊，指定單聲道仍保持相同 source 時間', async start => {

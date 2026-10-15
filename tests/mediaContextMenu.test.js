@@ -121,7 +121,7 @@ vi.mock('../src/audio-routing.js', () => ({ AudioRouting: { openForSource: vi.fn
 vi.mock('../src/keyboard.js', () => ({ setManualPlaybackSpeed: vi.fn() }));
 
 vi.mock('../src/speech-recognition.js', () => ({ openSpeechRecognitionDialog: vi.fn() }));
-vi.mock('../src/timeline-renderer.js', () => ({ requestPointerSeek: vi.fn(), drawTimeline: vi.fn(), refreshTrackGutterActive: vi.fn() }));
+vi.mock('../src/timeline-renderer.js', () => ({ requestPointerSeek: vi.fn(), drawTimeline: vi.fn(), refreshTrackGutterActive: vi.fn(), selectExternalAudioClip: vi.fn() }));
 
 function resetState() {
   Object.assign(mocks.State, {

@@ -1,4 +1,4 @@
-/* 匯出工作的准入政策（electron/export-admission.js）。
+/* 匯出工作的准入政策（electron/export-queue.js 的 createExportAdmission）。
 
    這四條規則原本散在 electron/main.js 裡，與 BrowserWindow／dialog／
    ffmpeg spawn 糾纏，vitest 起不了 Electron，因此**一行測試都沒有**——

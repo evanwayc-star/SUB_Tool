@@ -35,6 +35,7 @@ const outputPath = path.resolve(process.argv[2] || path.join(ROOT, 'docs', 'imag
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
+    '--subtool-transport-acceptance',
     '--no-sandbox',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',

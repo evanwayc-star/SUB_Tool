@@ -4,7 +4,8 @@
    先執行 npm run build，再執行：
      node scripts/acceptance/verify-recognition-audio-source.js
 
-   使用獨立 user-data-dir 與假的 Groq fetch；不會連線、不碰正式設定。
+   使用獨立設定 profile 與假的 Groq fetch；不會外連 provider、不碰正式設定。
+   實際解碼上傳的 WAV／MP3，核對來源聲道、內容及完整稿件時間。
    ============================================================================ */
 const fs = require('fs');
 const os = require('os');
@@ -34,6 +35,7 @@ const {
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
+    '--subtool-transport-acceptance',
     '--no-sandbox',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
@@ -53,6 +55,7 @@ const {
     }, 'SUB Tool 主視窗啟動', 15000);
     client = new CdpClient(target.webSocketDebuggerUrl);
     await client.connect();
+    await client.waitForApp();
     await client.send('Runtime.enable');
     await client.send('Page.bringToFront');
 
@@ -79,25 +82,45 @@ const {
         buffer: {
           sampleRate: 16000,
           numberOfChannels: 1,
-          length: 2,
-          duration: 2 / 16000,
+          length: 2 * 16000,
+          duration: 2,
           getChannelData: channel => {
             if (channel !== 0) throw new RangeError('mono');
-            return new Float32Array(pattern);
+            const samples = new Float32Array(2 * 16000);
+            for (let index = 0; index < samples.length; index++) {
+              samples[index] = pattern[Math.floor(index / 16000)] * Math.sin(2 * Math.PI * 440 * index / 16000);
+            }
+            return samples;
           }
         }
       }));
       window.__asrOriginalFetch = window.fetch;
       window.__asrResponseMode = 'success';
-      window.__asrCapturedWav = null;
+      window.__asrCapturedAudio = null;
       window.fetch = async (url, options = {}) => {
         if (String(url).includes('api.groq.com/openai/v1/audio/transcriptions')) {
           const wav = options.body.get('file');
           const bytes = await wav.arrayBuffer();
-          const view = new DataView(bytes);
-          window.__asrCapturedWav = {
-            byteLength: bytes.byteLength,
-            firstPcmSamples: [view.getInt16(44, true), view.getInt16(46, true)]
+          const byteLength = bytes.byteLength;
+          const audioContext = new AudioContext({ sampleRate: 16000 });
+          let decoded;
+          try { decoded = await audioContext.decodeAudioData(bytes); }
+          finally { await audioContext.close(); }
+          const data = decoded.getChannelData(0);
+          const rms = (start, end) => {
+            const first = Math.floor(start * decoded.sampleRate);
+            const last = Math.min(data.length, Math.floor(end * decoded.sampleRate));
+            let energy = 0;
+            for (let index = first; index < last; index++) energy += data[index] * data[index];
+            return Math.sqrt(energy / Math.max(1, last - first));
+          };
+          window.__asrCapturedAudio = {
+            byteLength,
+            mimeType: wav.type,
+            decodedDuration: decoded.duration,
+            decodedChannels: decoded.numberOfChannels,
+            firstHalfRms: rms(0.2, 0.8),
+            secondHalfRms: rms(1.2, 1.8)
           };
           const mismatch = window.__asrResponseMode === 'mismatch';
           const recovered = window.__asrResponseMode === 'recovered';
@@ -155,7 +178,7 @@ const {
         if (!select || select.options.length !== 10) return null;
         return {
           options: [...select.options].map(option => option.textContent.trim()),
-          help: document.getElementById('asrRecognitionAudioSourceRow').textContent.replace(/\s+/gu, ' ').trim()
+          help: document.getElementById('asrRecognitionAudioSourceRow').textContent.replace(/\\s+/gu, ' ').trim()
         };
       })()`),
       '八軌辨識來源選單'
@@ -192,17 +215,17 @@ const {
 
     const result = await waitFor(
       () => client.evaluate(`(() => {
-        if (!window.__asrCapturedWav) return null;
+        if (!window.__asrCapturedAudio) return null;
         const cue = window.SUB.State.cues.find(item => item.text === '來源聲道三');
         if (!cue) return null;
         return {
-          ...window.__asrCapturedWav,
+          ...window.__asrCapturedAudio,
           cueText: cue.text,
           trackName: window.SUB.State.tracks[cue.track]?.name || '',
           fetchRestored: false
         };
       })()`),
-      '來源聲道 3 的 WAV 送到 provider 邊界'
+      '來源聲道 3 的音訊送到 provider 邊界'
     );
     await waitFor(
       () => client.evaluate("!document.getElementById('modalBg').classList.contains('show')"),
@@ -210,7 +233,7 @@ const {
     );
     await client.evaluate(`(() => {
       window.__asrResponseMode = 'mismatch';
-      window.__asrCapturedWav = null;
+      window.__asrCapturedAudio = null;
       return true;
     })()`);
     await openRecognitionDialog();
@@ -247,7 +270,9 @@ const {
           lines: lines.textContent.trim(),
           warning: panel.textContent.replace(/\\s+/gu, ' ').trim(),
           downloadVisible: rect.width > 0 && rect.height > 0,
-          cueCount: window.SUB.State.cues.length
+          cueCount: window.SUB.State.cues.length,
+          cues: window.SUB.State.cues.filter(cue => ['alpha beta', 'gamma delta'].includes(cue.text))
+            .map(cue => ({ text: cue.text, timed: cue.timed, start: cue.start, end: cue.end }))
         };
       })()`),
       '低覆蓋失敗行號與診斷面板'
@@ -357,7 +382,22 @@ const {
     );
     await client.evaluate(`(() => {
       window.__asrResponseMode = 'recovered';
-      window.__asrCapturedWav = null;
+      window.__asrCapturedAudio = null;
+      const duration = 40;
+      Object.assign(window.SUB.State.clips[0], { out: duration, dur: duration, duration });
+      window.SUB.State.duration = duration;
+      for (const track of window.SUB.Media.tracks) {
+        const samples = new Float32Array(duration * 16000);
+        samples.set(track.buffer.getChannelData(0));
+        track.buffer = {
+          sampleRate: 16000, numberOfChannels: 1, length: samples.length, duration,
+          getChannelData: channel => {
+            if (channel !== 0) throw new RangeError('mono');
+            return samples;
+          }
+        };
+      }
+      window.SUB.drawTimeline();
       return true;
     })()`);
     await openRecognitionDialog();
@@ -398,7 +438,10 @@ const {
         const cues = window.SUB.State.cues.filter(cue => expectedLines.includes(cue.text));
         if (cues.length !== 20 || !panel || getComputedStyle(panel).display === 'none') return null;
         return {
+          uploadByteLength: window.__asrCapturedAudio?.byteLength,
+          decodedDuration: window.__asrCapturedAudio?.decodedDuration,
           cueTexts: cues.map(cue => cue.text),
+          timings: cues.map(cue => ({ start: cue.start, end: cue.end, timed: cue.timed })),
           trackName: window.SUB.State.tracks[cues[0].track]?.name || '',
           status: status.textContent.trim(),
           lines: lines.textContent.trim(),
@@ -429,12 +472,18 @@ const {
       index === 10 ? 'missing phrase' : `anchor${index} a b c d e f g h i`
     ));
     if (JSON.stringify(result.options) !== JSON.stringify(expectedOptions) ||
-        JSON.stringify(result.firstPcmSamples) !== JSON.stringify([31128, 0]) ||
+        !['audio/wav', 'audio/mpeg'].includes(result.mimeType) ||
+        result.byteLength <= 0 || result.decodedChannels !== 1 ||
+        !Number.isFinite(result.decodedDuration) || Math.abs(result.decodedDuration - 2) > 0.15 ||
+        !Number.isFinite(result.firstHalfRms) || !Number.isFinite(result.secondHalfRms) ||
+        result.firstHalfRms < 0.5 || result.firstHalfRms > 0.8 || result.secondHalfRms > 0.02 ||
         result.cueText !== '來源聲道三' || result.trackName !== '語音辨識' ||
-        !result.help.includes('逐來源聲道等權平均') || !result.fetchRestored ||
+        !result.help.includes('來源聲道等權混合為 mono') || !result.fetchRestored ||
         !result.diagnostic.lines.includes('第 1、2 行') ||
         !result.diagnostic.warning.includes('完整稿件') || !result.diagnostic.downloadVisible ||
-        result.diagnostic.cueCount !== cueCountBeforeDiagnostic ||
+        result.diagnostic.cueCount !== cueCountBeforeDiagnostic + 2 ||
+        JSON.stringify(result.diagnostic.cues.map(cue => cue.text)) !== JSON.stringify(['alpha beta', 'gamma delta']) ||
+        !result.diagnostic.cues.every(cue => cue.timed === false) ||
         !/^SUBTool_文本匹配診斷_.*\.json$/u.test(result.diagnostic.download.name) ||
         result.diagnostic.download.type !== 'application/json' ||
         JSON.stringify(result.diagnostic.download.lineNumbers) !== JSON.stringify([1, 2]) ||
@@ -443,6 +492,9 @@ const {
         result.diagnostic.download.forbidden.length !== 0 ||
         !result.diagnostic.download.reasons.every(reasons => reasons.includes('low-coverage')) ||
         JSON.stringify(result.recovered.cueTexts) !== JSON.stringify(expectedRecoveredTexts) ||
+        result.recovered.uploadByteLength <= 0 || !Number.isFinite(result.recovered.decodedDuration) ||
+        Math.abs(result.recovered.decodedDuration - 40) > 0.15 ||
+        !result.recovered.timings.every(cue => cue.timed !== false && cue.start >= 0 && cue.end > cue.start && cue.end <= 40) ||
         result.recovered.trackName !== '文本匹配' ||
         !result.recovered.status.includes('1 行使用推估時間') ||
         !result.recovered.status.includes('共 20 行需人工校對') ||

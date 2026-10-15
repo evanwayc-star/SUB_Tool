@@ -9,7 +9,7 @@ const MAX_ENTRIES = 200;
 const PREFERENCE_KEY = 'subtool-vocal-waveform-choices-v1';
 const MAX_PREFERENCE_CHARS = 256 * 1024;
 // Increment when separation, speech gating, or waveform coordinate rules change.
-const ALGORITHM_VERSION = 1;
+const ALGORITHM_VERSION = 2; // Original decoded PCM now shares the video source epoch.
 const hash = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
   .map(value => value.toString(16).padStart(2, '0')).join('');
 

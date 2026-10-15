@@ -23,6 +23,26 @@ const {
   verifiedCleanup,
 } = require('./cdp-electron-harness.js');
 
+async function lockedSubtitleViewSnapshot(page) {
+  const { document } = page;
+  const selector = '.sub-row[data-id="locked-subtitle"] .txt';
+  document.querySelector(selector)?.scrollIntoView({ block: 'nearest' });
+  // content-visibility:auto and a list rebuild can invalidate the previous editor.
+  await new Promise(resolve => page.requestAnimationFrame(resolve));
+  await new Promise(resolve => page.requestAnimationFrame(resolve));
+  const txt = document.querySelector(selector);
+  const style = txt && page.getComputedStyle(txt);
+  const rect = txt?.getBoundingClientRect();
+  return {
+    displayedText: txt?.textContent ?? null,
+    textConnected: txt?.isConnected === true,
+    textReadonly: txt?.contentEditable === 'false',
+    textVisible: !!rect && rect.width > 0 && rect.height > 0
+      && style.display !== 'none' && style.visibility === 'visible',
+    styleDisabled: document.getElementById('tsSize')?.disabled === true,
+  };
+}
+
 (async () => {
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('找不到 dist/index.html，請先執行 npm run build');
@@ -34,6 +54,7 @@ const {
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
+    '--subtool-transport-acceptance',
     '--no-sandbox',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
@@ -121,16 +142,18 @@ const {
         cue: structuredClone(S.State.cues[0]),
         trackCount: S.State.tracks.length,
         historyLength: S.History.stack.length,
-        displayedText: txt.innerText,
-        styleDisabled: size.disabled,
         toast: document.getElementById('toast')?.textContent || '',
       };
     })()`);
 
+    Object.assign(after, await client.evaluate('(' + lockedSubtitleViewSnapshot.toString() + ')(window)'));
     assert.deepEqual(after.cue, before.cue, '鎖定字幕的內容、In/Out 或樣式被修改');
     assert.equal(after.trackCount, before.trackCount, '鎖定字幕軌被刪除');
     assert.equal(after.historyLength, before.historyLength, '被擋下的操作仍寫入 History');
     assert.equal(after.displayedText, '原始內容', '鎖定字幕列沒有恢復原內容');
+    assert.equal(after.textConnected, true, '鎖定字幕列不是目前 DOM 上的元素');
+    assert.equal(after.textReadonly, true, '鎖定字幕列沒有恢復唯讀');
+    assert.equal(after.textVisible, true, '鎖定字幕列沒有實際顯示');
     assert.equal(after.styleDisabled, true, '鎖定字幕樣式面板沒有保持唯讀');
     assert.match(after.toast, /已鎖定/u, '被擋下時沒有鎖定提示');
 

@@ -46,6 +46,9 @@ vi.mock('../src/ui.js', () => ({
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
+// These transport fixtures have no encoded bytes. Real source-window evidence
+// through original File intake is covered by webSourceClock.test.js.
+vi.mock('../src/decode/source-frame-index.js',()=>({sourceFrameWindow:vi.fn(()=>null),sourcePresentationMetadata:vi.fn(()=>null),clearSourceFrameIndexes:vi.fn()}));
 
 let Media;
 let State;
@@ -91,8 +94,23 @@ describe('Media presentation runtime', () => {
     Media._transport.seek(105, { duration: State.duration, fps: State.fps, dropFrame: State.dropFrame });
   });
 
+  it('public Media presentation and playing readouts use video zero after a mother clock is registered',async()=>{
+    const adapter=await import('../src/media-player-adapter.js');
+    adapter.getPlayerAdapter().registerSourceClock(domMock.video.src,{timestampOffset:-.5});
+    Object.assign(State.clips[0],{in:0,out:3,dur:3});State.duration=103;
+    domMock.video.currentTime=.5;
+    const pending=Media.requestPresentation(102.8);await Promise.resolve();
+    expect(domMock.video.currentTime).toBeCloseTo(3.3,10);
+    domMock.frameCallbacks.shift()(0,{mediaTime:3.3});
+    await expect(pending).resolves.toMatchObject({status:'presented',requestedTime:102.8,presentedTime:102.8,source:'html5'});
+    expect(Media.displayTime()).toBe(102.8);
+    Media.playing=true;expect(Media.vTime()).toBeCloseTo(2.8,10);expect(Media.displayTime()).toBe(102.8);
+    Media.playing=false;
+  });
+
   it('畫格完成前不提交播放頭，完成後才把來源時間映回時間軸', async () => {
     const pending = Media.requestPresentation(104);
+    await Promise.resolve();
 
     expect(domMock.video.currentTime).toBe(14);
     expect(Media.displayTime()).toBe(105);
@@ -118,6 +136,7 @@ describe('Media presentation runtime', () => {
   it('WebCodecs 接管時會等所有合成層的實際 PTS，再提交播放頭', async () => {
     Media.setWebCodecsTakeover(true);
     const pending = Media.requestPresentation(104);
+    await Promise.resolve();
     domMock.frameCallbacks.shift()(0, { mediaTime: 14 });
 
     let settled = false;
@@ -143,6 +162,7 @@ describe('Media presentation runtime', () => {
     expect(Media.presenterClockMoving()).toBe(false);
     expect(domMock.video.play).not.toHaveBeenCalled();
 
+    await Promise.resolve();
     domMock.frameCallbacks.shift()(0, { mediaTime: 14 });
     await pending;
 
@@ -156,6 +176,7 @@ describe('Media presentation runtime', () => {
     let settled = false;
     pending.then(() => { settled = true; });
 
+    await Promise.resolve();
     domMock.frameCallbacks.shift()(0, { mediaTime: 13.95 });
     await Promise.resolve();
     expect(settled).toBe(false);
@@ -172,6 +193,7 @@ describe('Media presentation runtime', () => {
 
     Media.play();
     Media.pause();
+    await Promise.resolve();
     domMock.frameCallbacks.shift()(0, { mediaTime: 14 });
     await pending;
 
@@ -202,5 +224,132 @@ describe('Media presentation runtime', () => {
     expect(Media.playing).toBe(false);
     expect(Media.displayTime()).toBe(105);
     expect(Media._transport.pausedTime).toBe(105);
+  });
+
+  it.each(['source &lt;original&gt; &amp; safe.mxf',"O'Brien & reference.mxf",'source <b>original.mxf'])('large-file warning preserves the literal File name %s',async name=>{
+    const {openModal}=await import('../src/ui.js');
+    // The first two names are legal Windows basenames. A File is public input
+    // on every web host; its synthetic size exercises the memory gate safely.
+    const file=new File(['media'],name,{type:'video/x-mxf'});
+    Object.defineProperty(file,'size',{value:9e9});
+    openModal.mockClear();
+    await expect(Media.transcodeAndExtract(file)).resolves.toBe(false);
+    expect(openModal).toHaveBeenCalledOnce();
+    expect(openModal.mock.lastCall[0]).toBe('檔案過大');
+    const body=document.createElement('div');body.innerHTML=openModal.mock.lastCall[1];
+    expect(body.firstElementChild.textContent).toBe(file.name);
+    expect(body.firstElementChild.children).toHaveLength(0);
+    expect(body.textContent).toContain('ffmpeg.wasm');
+  });
+
+  it.each(['complete','pause','pause-resume','pause-immediate-resume','pause-resume-new-seek','pause-resume-reset','pause-resume-source-replace','new-seek','seek-during-activation','reset'])('public clip-end growing-duration handoff respects %s before resuming',async action=>{
+    const adapterModule=await import('../src/media-player-adapter.js');
+    const events=new EventTarget(),properties=new Map(['currentSrc','currentTime','readyState','addEventListener','removeEventListener'].map(name=>[name,Object.getOwnPropertyDescriptor(domMock.video,name)]));
+    const previousSrc=domMock.video.src,writes=[];let raw=1;
+    Object.defineProperties(domMock.video,{
+      currentSrc:{configurable:true,get:()=>domMock.video.src},
+      currentTime:{configurable:true,get:()=>raw,set:target=>{writes.push(target);raw=Math.min(target,domMock.video.duration);}},
+      readyState:{configurable:true,value:1},
+    });
+    domMock.video.addEventListener=events.addEventListener.bind(events);domMock.video.removeEventListener=events.removeEventListener.bind(events);
+    try{
+      domMock.video.src='file:///first.mov';domMock.video.duration=3.5;
+      const first={id:'first',web:{url:domMock.video.src},dur:1,in:0,out:1,offset:0,vtrack:0,primary:true};
+      const next={id:'next',web:{url:'file:///origin-five.mov'},dur:3,in:2.8,out:3,offset:1,vtrack:0};
+      Object.assign(State,{fps:25,dropFrame:false,duration:1.2,clips:[first,next],videoTracks:[{visible:true}]});
+      Media.tracks=[];Media.externalAudioSources=[];Media.activeClipId='first';Media._gap=false;
+      adapterModule.resetPlayerAdapter(null,domMock.video);
+      adapterModule.getPlayerAdapter().registerSourceClock(next.web.url,{presentationTimestampOffset:-5.5});
+      Media.resetPresentationSession('handoff-test');Media._transport.seek(.96,{duration:1.2,fps:25});
+      Media.play();domMock.video.play.mockClear();raw=1;
+      const oldRequest=action==='seek-during-activation'?Media.seek(1):null;
+      if(!oldRequest)expect(Media.seqContinueAtEnd()).toBe(true);
+      await vi.waitFor(()=>expect(raw).toBe(3.5));
+      expect(Media.presenterClockMoving()).toBe(false);expect(Media.displayTime()).toBe(1);
+      expect(domMock.video.play).not.toHaveBeenCalled();
+      const expand=duration=>{domMock.video.duration=duration;events.dispatchEvent(new Event('durationchange'));};
+      if(action==='complete'){
+        expand(7.9);await Promise.resolve();expect(raw).toBe(7.9);expect(domMock.video.play).not.toHaveBeenCalled();
+        expand(8.5);await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledOnce());
+        expect(raw).toBe(8.3);expect(Media.activeClipId).toBe('next');expect(Media.presenterClockMoving()).toBe(true);
+      }else if(action.startsWith('pause-resume')||action==='pause-immediate-resume'){
+        Media.pause();
+        expect(Media.displayTime()).toBe(1);
+        const afterCancel=writes.length;
+        if(action==='pause-resume'){
+          expand(8.5);
+          await vi.waitFor(()=>expect(Media._seqSwitching).toBe(false));
+          expect(writes.slice(afterCancel)).not.toContain(8.3);
+        }
+        Media.play();
+        await vi.waitFor(()=>expect(writes.slice(afterCancel)).toContain(8.3));
+        expect(Media.playbackTransitionPending()).toBe(true);
+        expect(Media.presenterClockMoving()).toBe(false);
+        expect(Media.displayTime()).toBe(1);
+        expect(domMock.video.play).not.toHaveBeenCalled();
+        if(action==='pause-resume-new-seek'){
+          const afterPrevious=writes.length,pending=Media.seek(1.08,{presentationTolerance:.01});
+          expand(8.5);
+          await vi.waitFor(()=>expect(domMock.frameCallbacks).toHaveLength(1));
+          expect(writes.slice(afterPrevious)).not.toContain(8.3);
+          expect(raw).toBeCloseTo(8.38,12);
+          domMock.frameCallbacks.shift()(0,{mediaTime:raw});
+          await expect(pending).resolves.toMatchObject({status:'presented',presentedTime:expect.closeTo(1.08,12)});
+          expect(Media.displayTime()).toBeCloseTo(1.08,12);
+          return;
+        }
+        if(action==='pause-resume-reset'||action==='pause-resume-source-replace'){
+          Media.reset();
+          if(action==='pause-resume-source-replace'){
+            domMock.video.src='file:///replacement.mov';
+            raw=.12;
+            State.clips=[{...next,web:{url:domMock.video.src},in:0,out:3,offset:0}];
+          }
+          const afterPrevious=writes.length,stoppedRaw=raw;
+          expand(8.5);
+          await vi.waitFor(()=>expect(Media._seqSwitching).toBe(false));
+          expect(raw).toBe(stoppedRaw);
+          expect(writes.slice(afterPrevious)).not.toContain(8.3);
+          expect(domMock.video.play).not.toHaveBeenCalled();
+          return;
+        }
+        if(action==='pause-immediate-resume'){
+          expect(raw).toBe(3.5);
+          expand(7.9);await Promise.resolve();expect(raw).toBe(7.9);
+          expect(domMock.video.play).not.toHaveBeenCalled();
+          expand(8.5);await Promise.resolve();
+        }
+        await vi.waitFor(()=>expect(domMock.frameCallbacks).toHaveLength(1));
+        expect(raw).toBeCloseTo(8.3,12);
+        // The raw setter is only positioning. Resume still needs the actual
+        // target frame acknowledgement, just like an ordinary public seek.
+        expect(domMock.video.play).not.toHaveBeenCalled();
+        domMock.frameCallbacks.shift()(0,{mediaTime:raw});
+        await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledOnce());
+        expect(Media.displayTime()).toBeCloseTo(1,12);
+        expect(Media.presenterClockMoving()).toBe(true);
+      }else if(action==='new-seek'||action==='seek-during-activation'){
+        const afterOld=writes.length,pending=Media.seek(1.08,{presentationTolerance:.01});
+        await vi.waitFor(()=>expect(domMock.frameCallbacks).toHaveLength(1));
+        expand(8.5);await Promise.resolve();
+        expect(raw).toBeCloseTo(8.38,12);expect(writes.slice(afterOld)).not.toContain(8.3);
+        domMock.frameCallbacks.shift()(0,{mediaTime:raw});
+        const result=await pending;expect(result.status).toBe('presented');expect(result.presentedTime).toBeCloseTo(1.08,12);
+        expect(Media.displayTime()).toBeCloseTo(1.08,12);
+        if(oldRequest)expect(await oldRequest).toMatchObject({status:'failed',error:{name:'AbortError'}});
+      }else{
+        if(action==='pause')Media.pause();else Media.reset();
+        const stoppedRaw=raw,afterCancel=writes.length;
+        expand(8.5);await Promise.resolve();await vi.waitFor(()=>expect(Media._seqSwitching).toBe(false));
+        expect(raw).toBe(stoppedRaw);expect(writes.slice(afterCancel)).not.toContain(8.3);
+        expect(domMock.video.play).not.toHaveBeenCalled();expect(Media.playing).toBe(false);
+        if(action==='pause')expect(Media.displayTime()).toBe(1);
+      }
+    }finally{
+      Media.playing=false;adapterModule.getPlayerAdapter().cancelElementSeek(domMock.video);Media.resetPresentationSession('handoff-finished');
+      await Promise.resolve();await Promise.resolve();
+      for(const [name,descriptor]of properties){if(descriptor)Object.defineProperty(domMock.video,name,descriptor);else delete domMock.video[name];}
+      domMock.video.src=previousSrc;
+    }
   });
 });

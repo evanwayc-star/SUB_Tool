@@ -130,6 +130,57 @@ describe('desktop mother-source intake ownership', () => {
     delete window.subtool.streamIngest;
   });
 
+  it.each(['native','multichannel'].flatMap(branch=>['reset','grow','error'].map(outcome=>({branch,outcome}))))
+  ('桌面 $branch 影片初始定位保留匯入所有權：$outcome',async({branch,outcome})=>{
+    const properties=['currentTime','addEventListener','removeEventListener']
+      .map(name=>[name,Object.getOwnPropertyDescriptor(domMock.video,name)]);
+    const carrier=new EventTarget();
+    let rawTime=0,settled=false,load;
+    try{
+      domMock.video.addEventListener=(...args)=>carrier.addEventListener(...args);
+      domMock.video.removeEventListener=(...args)=>carrier.removeEventListener(...args);
+      Object.defineProperty(domMock.video,'currentTime',{configurable:true,
+        get:()=>rawTime,set:value=>{
+          if(outcome==='error'&&value>=5)throw new Error('source seek failed');
+          rawTime=Math.min(value,domMock.video.duration);
+        }});
+      domMock.video.duration=3.5;domMock.video.readyState=1;
+      resetPlayerAdapter(window.subtool,domMock.video);
+      deskMock.probe.mockResolvedValueOnce({duration:3,
+        video:{codec:'h264',fps:30,width:64,height:48,timestampOffset:-.5,presentationTimestampOffset:-5.5},
+        audio:branch==='native'?[]:[{channels:6,channelLayout:'5.1'}]});
+      deskMock.ingest.mockResolvedValueOnce({channels:[]});
+      load=Media.loadDesktopMedia('C:/media/origin-five.mov').then(()=>{settled=true;});
+      if(outcome==='error'){
+        await load;
+        expect(State.clips).toEqual([]);expect(State.duration).toBe(0);
+        expect(setStatus).toHaveBeenLastCalledWith('讀取失敗','');
+        expect(showToast).toHaveBeenLastCalledWith(expect.stringContaining('無法定位影片'));
+        return;
+      }
+      await vi.waitFor(()=>expect(rawTime).toBe(3.5));
+      expect(settled).toBe(false);
+      if(outcome==='reset'){
+        Media.reset();
+        await vi.waitFor(()=>expect(settled).toBe(true),{timeout:500,interval:10});
+        domMock.video.duration=8.5;carrier.dispatchEvent(new Event('durationchange'));
+        expect(rawTime).toBe(3.5);expect(State.clips).toEqual([]);expect(State.duration).toBe(0);
+      }else{
+        domMock.video.duration=8.5;carrier.dispatchEvent(new Event('durationchange'));await load;
+        expect(rawTime).toBe(5.5);expect(Media.vTime()).toBe(0);
+        expect(State.duration).toBe(3);expect(State.clips[0].dur).toBe(3);
+      }
+    }finally{
+      domMock.video.duration=8.5;carrier.dispatchEvent(new Event('durationchange'));
+      await load?.catch(()=>{});
+      Media.reset();
+      for(const [name,descriptor]of properties){
+        if(descriptor)Object.defineProperty(domMock.video,name,descriptor);
+        else delete domMock.video[name];
+      }
+    }
+  });
+
   it('原生預覽 metadata 較短時保留 ffprobe 母素材片長', async () => {
     deskMock.probe.mockResolvedValueOnce({
       duration: 120,

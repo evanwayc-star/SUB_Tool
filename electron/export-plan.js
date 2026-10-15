@@ -9,7 +9,7 @@
    與 dialog、ffprobe spawn 糾纏，vitest 起不了 Electron，於是一行測試都沒有。
 
    本檔只可 require `shared/` 的零相依純規則，以及 airline-encoding／disc-encoding
-   的純編碼規則。這兩支本機規則只依賴 shared；不把 native authoring 帶進來。
+   的純編碼規則、零相依 media-source-clock。這些 native 規則不帶入 I/O。
    **不可** require electron／fs／child_process，或間接載入有 I/O 的 runtime。
    需要副作用的部分（找字型、探測音軌、硬體編碼器）一律由呼叫端傳入。
    這條由 tests/exportPlan.test.js 守著，而且純淨是【遞移】的：被 require 的
@@ -32,6 +32,7 @@ const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAud
 const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter, HARD_LIMITER_PRESETS } = require('../shared/audio-loudness.cjs');
 const { airlineEncoding } = require('./airline-encoding');
 const { discEncoding } = require('./disc-encoding');
+const { sourceVideoClockSeek, sourceAudioClockFilter, sourceFrameSelectionFilter, timestampOffset } = require('./media-source-clock');
 const MOD_AUDIO_BALANCE = HARD_LIMITER_PRESETS.find(preset => preset.id === 'limit_minus_12db');
 
 const _EXPORT_LAYOUTS = Object.freeze({
@@ -57,6 +58,8 @@ function _finiteNumber(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 function _filterNumber(v, fallback = 0) { return _finiteNumber(v, fallback).toFixed(6); }
+// color duration 與 overlay 的 t 都使用 FFmpeg 微秒時基；向上捨入會跨過半開格界。
+function _videoBoundary(v) { return (Math.floor(_finiteNumber(v) * 1e6 + 1e-6) / 1e6).toFixed(6); }
 function _audioSpeedFilters(value){
   let speed=Math.max(0.25,Math.min(4,_finiteNumber(value,1)));
   const filters=[];
@@ -78,7 +81,7 @@ function _audioPlaybackFilters(input, sourceDuration = null) {
   }
   return `${direction},asetpts=PTS-STARTPTS${_audioSpeedFilters(input.speed)}`;
 }
-function _fadeFilters(input, duration, { audio = false, digits = 3 } = {}) {
+function _fadeFilters(input, duration, { audio = false, digits = 3, timeOffset = 0 } = {}) {
   const origin = Math.max(0, _finiteNumber(input.fadeSourceOffset, 0));
   const { fadeIn, fadeOut, fadeOutStart } = fadeWindow({ ...input, in: 0, out: duration, speed: 1 });
   if (!fadeIn && !fadeOut) return [];
@@ -90,16 +93,22 @@ function _fadeFilters(input, duration, { audio = false, digits = 3 } = {}) {
   // ffmpeg fade/afade cannot accept a negative start time. Temporarily move
   // cropped samples back to their original clip clock, then restore PTS.
   if (origin > 0) filters.push(`${pts}=PTS+${format(origin)}/TB`);
-  if (fadeIn > 0) filters.push(`${fade}=t=in:st=0:d=${format(fadeIn)}${alpha}`);
-  if (fadeOut > 0) filters.push(`${fade}=t=out:st=${format(fadeOutStart)}:d=${format(fadeOut)}${alpha}`);
+  if (fadeIn > 0) filters.push(`${fade}=t=in:st=${format(timeOffset)}:d=${format(fadeIn)}${alpha}`);
+  if (fadeOut > 0) filters.push(`${fade}=t=out:st=${format(timeOffset + fadeOutStart)}:d=${format(fadeOut)}${alpha}`);
   if (origin > 0) filters.push(`${pts}=PTS-${format(origin)}/TB`);
   return filters;
 }
-function _audioTimelineStart(file, streamIndex, startOffsetFor, reverse = false) {
+function _audioTimelineStart(file, streamIndex, startOffsetFor, reverse = false, seekStart = 0, clockFor = null, nativeSeek = 0) {
+  if (clockFor) return `${sourceAudioClockFilter({ timestampOffset: timestampOffset(clockFor(file)) + nativeSeek - seekStart })},`;
   // FFmpeg already rebases seeked inputs. Preserve the remaining first-PTS
   // gap before trim, so a delayed source's silence reverses with its samples.
   if (reverse) return 'aresample=48000:async=1:first_pts=0,';
-  const offset = Number(startOffsetFor?.(file, streamIndex ?? 0));
+  // 未提供 metadata adapter 時，仍保留 FFmpeg 已重基準的來源 PTS，不可抹掉延後開聲。
+  if (!startOffsetFor) return 'aresample=48000:async=1:first_pts=0,';
+  const sourceOffset = Number(startOffsetFor(file, streamIndex ?? 0));
+  // -ss 已越過 stream 開聲點後，不可再加完整來源 offset；剩餘靜音只計 seek 後的缺口。
+  const offset = sourceOffset > 0 ? Math.max(0, sourceOffset - seekStart)
+    : seekStart > 0 ? 0 : sourceOffset;
   if (!Number.isFinite(offset) || Math.abs(offset) < 0.000001) return 'asetpts=PTS-STARTPTS,';
   // Keep the source audio/video start relationship before trimming a clip.
   // A negative lead carries encoder priming; resampling removes those samples
@@ -198,7 +207,7 @@ function _joinFilter(inputLabels, channelLayout, channelNames, outputLabel) {
    來源 Stream/Channel；因此輸出不會碰到預覽用 proxy 或單聲道 AAC cache。
    若同一母素材已作為影片輸入開啟，reusableMasterInputs 會直接重用那個 input，避免影片＋音訊
    各自重讀一次大型 MXF/MOV，維持母素材品質的同時縮短匯出時間。 */
-function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMasterInputs = null, startOffsetFor = null) {
+function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMasterInputs = null, startOffsetFor = null, clockFor = null) {
   const busLabels = new Map();
   let ii = inputIndex;
   const audioInputMap = new Map();
@@ -215,10 +224,11 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
     const parts = [];
     bus.inputs.forEach((input, pi) => {
       const reusable = reusableMasterInputs?.get(input.file);
-      // 影片 input 已以 -ss=seekStart 打開；只有所需 audio 範圍在其後才可重用。
+      // 影片 input 已 seek 至 availableStart；copyts 的 clock origin 不等於
+      // 可讀範圍。只有所需 audio 範圍在讀取起點之後才可重用。
       // 否則另開同一母素材的 audio input，保證不會少掉時間軸較前面的外部音訊。
       const effect = normalizeAudioLimiterSpec(input.audioLimiterSpec);
-      const canReuse = !effect && reusable && input.trimStart >= reusable.seekStart - 0.000001;
+      const canReuse = !effect && reusable && input.trimStart >= reusable.availableStart - 0.000001;
       let mappedIdx, seekStart = 0;
       if (canReuse) {
         mappedIdx = reusable.index;
@@ -241,7 +251,7 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
       if (input.sourceChannel != null) chain += `pan=mono|c0=c${input.sourceChannel},`;
       const trimStart = Math.max(0, input.trimStart - seekStart);
       const trimEnd = input.trimEnd == null ? null : Math.max(trimStart, input.trimEnd - seekStart);
-      chain += `${_audioTimelineStart(input.file, input.sourceStream, startOffsetFor, input.reverse)}atrim=start=${_filterNumber(trimStart)}`;
+      chain += `${_audioTimelineStart(input.file, input.sourceStream, startOffsetFor, input.reverse, seekStart, clockFor, canReuse ? reusable.nativeSeek : 0)}atrim=start=${_filterNumber(trimStart)}`;
       if (trimEnd != null) chain += `:end=${_filterNumber(trimEnd)}`;
       const sourceDuration = input.trimEnd == null ? null : input.trimEnd - input.trimStart;
       chain += `${_audioPlaybackFilters(input, sourceDuration)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=mono`;
@@ -354,8 +364,11 @@ function _normaliseExportTimecodeWatermark(raw, fps) {
   return { start: dropFrame ? start.replace(';', '.') : start, rate: spec.rate };
 }
 function _drawtextValue(value) {
-  // filtergraph 仍會拆 : / ;，所以即使值有引號也必須逐一跳脫。
-  return String(value).replace(/\\/g, '/').replace(/([:\\;'\[\]])/g, '\\$1');
+  // 先序列化 option value，再穿過 filtergraph token parser；不要再在外面包引號，
+  // 否則合法路徑中的單引號會提早結束 graph 的 quoted token。
+  return String(value).replace(/\\/g, '/')
+    .replace(/([:'\s])/g, '\\$1')
+    .replace(/([\\'\[\],;])/g, '\\$1');
 }
 /* fontFile 由呼叫端提供（尋找字型要讀檔，是副作用，留在 main.js）。
    本模組刻意保持純函式：不 require 任何東西，才能在 vitest 裡直接測。 */
@@ -365,11 +378,11 @@ function _buildExportTimecodeFilter(inputLabel, timecode, width, height, outputL
   const fontSize = Math.max(18, Math.round(Math.min(width, height) * 0.032));
   const margin = Math.max(12, Math.round(Math.min(width, height) * 0.02));
   const padding = Math.max(5, Math.round(fontSize * 0.32));
-  return `${inputLabel}drawtext=fontfile='${_drawtextValue(font)}':timecode='${_drawtextValue(timecode.start)}':r=${timecode.rate}:tc24hmax=0:x=${margin}:y=${margin}:fontcolor=0xFFF2C5:fontsize=${fontSize}:box=1:boxcolor=0x080A0CE6:boxborderw=${padding}:borderw=1:bordercolor=0xF59E0B:fix_bounds=1${outputLabel}`;
+  return `${inputLabel}drawtext=fontfile=${_drawtextValue(font)}:timecode=${_drawtextValue(timecode.start)}:r=${timecode.rate}:tc24hmax=0:x=${margin}:y=${margin}:fontcolor=0xFFF2C5:fontsize=${fontSize}:box=1:boxcolor=0x080A0CE6:boxborderw=${padding}:borderw=1:bordercolor=0xF59E0B:fix_bounds=1${outputLabel}`;
 }
 
-/* 圖片在【軌影格】上的矩形。這是 src/image-geometry.js imageBox() 的主程序版本，
-   兩者必須逐位元等價——tests/imageGeomContract.test.js 以矩陣比對鎖住這件事。
+/* 圖片在【軌影格】上的矩形。主程序與 renderer 共用 shared/image-geometry.cjs 的 imageBox()，
+   tests/imageGeomContract.test.js 以矩陣驗證各自 adapter 使用同一份幾何規則。
 
    為什麼不是「renderer 算好最終矩形傳過來」（架構審查原本的提案）：
    圖片是先疊進軌影格、軌影格再帶著自己的透明度與疊層順序疊到畫布。
@@ -468,7 +481,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   if (isWav) {
     if (!audioPlan) _exportPlanError('WAV 匯出需要專案音軌路由資料。');
     const inputs = [], fc = [];
-    const planned = _buildPlannedAudio(audioPlan, inputs, fc, 0, D);
+    const planned = _buildPlannedAudio(audioPlan, inputs, fc, 0, D, null, env.audioVideoStartOffset, env.sourceClock);
     const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', wav.label,
@@ -496,14 +509,13 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   // 只標記 TFF 會把逐行畫面偽裝成隔行，並丟掉來源的場間運動。
   const R = isInterlaced ? deliveryFrameRateRatio(fps * 2) : outputRate;
   // ===== 多軌合成 filtergraph（v4.11.0）=====
-  //  影像：每視訊軌各自 concat 成整條時間軸（片段放 offset、間隙【透明】），再由下而上 overlay 疊到黑底；
+  //  影像：每視訊軌以來源 offset 疊在透明時間軸，再由下而上 overlay 疊到黑底；
   //        上層片段覆蓋下層（比照預覽 top-occludes），透明間隙讓下層透出。
   //  音訊：所有片段各自套混音器音量後 adelay 到自身 offset，再全部 amix（全軌混音）。
   //  單軌、無重疊的序列＝此法之特例，結果與舊版 concat 相同。
   const list = clips || [];
   if (!list.length) throw new Error('沒有可匯出的影片段');
   const inputs = [], fc = [];
-  const EPS = 0.01;
   // H264-MP4 must actually contain H.264 and end at the delivery duration.
   // A clip snapshot carries neither a verified codec nor packet/keyframe limits;
   // stream copy could silently deliver the source codec or an untrimmed tail.
@@ -524,25 +536,28 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       // 不必要的重複／丟格。
       inputs.push('-loop', '1', '-framerate', String(R), '-i', p);
     } else {
-      const hasFixedFrame = clipsForPath.some(c => fixedFrameTime(c) != null);
       const earliest = Math.min(...clipsForPath.map(c => fixedFrameTime(c) ?? c.in));
       // A delivery range may start after the chosen fixed frame. Seeking only
       // by its sliced in point would make that mother-source frame unreachable.
       const earliestSeek = Math.max(0, earliest - 0.5);
-      const seek = earliestSeek.toFixed(hasFixedFrame ? 6 : 3);
-      const minIn = hasFixedFrame ? Number(seek) : earliestSeek;
+      // 保留母素材原 PTS；input -ss 的 stream timebase 捨入不可重設片段
+      // 的來源原點，否則固定幀與跨格網裁切會借到尚未開始的下一格。
+      const clock = sourceVideoClockSeek(earliestSeek, env.sourceClock?.(p));
+      const minIn = clock.sourceStart;
       pathMinIn.set(p, minIn);
       // 這個 input 本身就是母素材；音訊 routing 可重用它，不必再多開一次同一個 MXF/MOV。
-      reusableMasterInputs.set(p, { index: inputIndex, seekStart: minIn });
+      reusableMasterInputs.set(p, { index: inputIndex, seekStart: minIn, nativeSeek: 0, availableStart: earliestSeek });
       const hw = preset ? [] : hwdecArgs(); // MOD 的場處理使用 CPU 影格
-      inputs.push(...hw, '-ss', seek, '-i', p);
+      // 保留解碼 GOP 的 pre-roll PTS；長 VFR 格可跨過 seek 點，accurate seek
+      // 會在我們取 containing frame 之前先將那格丟掉。
+      inputs.push(...hw, ...clock.inputArgs, '-i', p);
     }
   });
   const videoInputIndices = list.map(c => uniqueVideoPaths.indexOf(c.path));
   let ii = uniqueVideoPaths.length; // 之後的逐聲道音訊檔輸入從此接續編號
 
   // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
-  fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${D.toFixed(3)},format=yuv420p,setsar=1[base]`);
+  fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${_videoBoundary(D)},format=yuv420p,setsar=1[base]`);
   const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
   let baseLabel = '[base]';
   vtracks.forEach((T, ti) => {
@@ -556,10 +571,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     const SW = Math.max(2, Math.round(scale * W)), SH = Math.max(2, Math.round(scale * H)); // 此軌影格尺寸（PiP 時縮小）
     const trk = list.map((c, i) => ({ c, i, vIdx: videoInputIndices[i] })).filter(x => (x.c.vtrack || 0) === vt).sort((a, b) => a.c.offset - b.c.offset);
     if (!trk.length) return;
-    const segs = []; let cursor = 0, si = 0;
-    const gap = (gd) => { const L = `t${ti}s${si++}`; fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${(+gd).toFixed(3)},format=yuva420p,setsar=1[${L}]`); segs.push(`[${L}]`); };
+    let trkLabel = `[trkBase${ti}]`, si = 0;
+    fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${_videoBoundary(D)},format=yuva420p,setsar=1${trkLabel}`);
     for (const { c, vIdx } of trk) {
-      if (c.offset > cursor + EPS) gap(c.offset - cursor);
       const L = `t${ti}s${si++}`;
       const clen = clipLength(c);
       const minIn = pathMinIn.get(c.path);
@@ -568,7 +582,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
 
       let vchain = '';
       {
-        /* 片段幾何必須與預覽同一組公式（src/image-geometry.js）：
+        /* 片段幾何必須與預覽共用 shared/image-geometry.cjs 的 imageBox()：
              方框＝scale×軌影格 → 素材 contain 縮進方框 → 素材【中心】對到 (posX,posY)。
 
            v5.7.0 起【影片與圖片走同一條路】。在那之前影片是
@@ -589,8 +603,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
         const ch = Math.max(2, Math.round(clipScale * SH));
         const pxClip = Math.max(0, Math.min(1, c.posX == null ? 0.5 : +c.posX));
         const pyClip = Math.max(0, Math.min(1, c.posY == null ? 0.5 : +c.posY));
-        const BG = `t${ti}ib${si}`, IM = `t${ti}im${si}`;
-        fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${clen.toFixed(3)},format=yuva420p,setsar=1[${BG}]`);
+        const IM = `t${ti}im${si}`;
         /* 有原生尺寸時用【與預覽同一條公式】算出精確矩形（imageBoxForExport ≡ image-geometry.imageBox），
            contain 的邏輯就只有一份。舊專案沒帶 natW/natH 時退回讓 ffmpeg 自己算，
            結果相同，只是少了「兩邊同一份實作」的保證。 */
@@ -601,35 +614,56 @@ function buildDeliveryArgv(spec = {}, env = {}) {
         const fields = preset && c.type !== 'image'
           ? `bwdif=mode=${isInterlaced ? 'send_field' : 'send_frame'}:parity=auto:deint=interlaced,` : '';
         const freezeTime = c.type === 'image' ? null : fixedFrameTime(c);
-        const freezeStart = Math.max(0, (freezeTime ?? 0) - minIn - 0.25 / exactDeliveryFrameRate(c.fps, fps));
-        const videoTime = freezeTime != null
-          // Preserve the input seek's fractional first-frame PTS until the
-          // target is selected; STARTPTS first can advance the chosen frame.
-          // The quarter-frame guard matches preview extraction and absorbs
-          // the microsecond rounding in FFmpeg's seek / filter time options.
-          ? `trim=start=${_filterNumber(freezeStart)},trim=end_frame=1,setpts=PTS-STARTPTS,${fields}fps=${R},tpad=stop_mode=clone:stop_duration=${_filterNumber(clen)},trim=duration=${_filterNumber(clen)}`
-          : `setpts=PTS-STARTPTS,trim=start=${adjIn}:end=${adjOut},${c.reverse?'reverse,':''}setpts=(PTS-STARTPTS)/${_filterNumber(c.speed,1)},${fields}fps=${R}`;
+        let videoTime = freezeTime != null
+          ? `${sourceFrameSelectionFilter(freezeTime, minIn)},${fields}fps=${R},tpad=stop_mode=clone:stop_duration=${_filterNumber(clen)},trim=duration=${_filterNumber(clen)}`
+          // in 可以落在來源格中段。保留 pre-roll 的 containing frame 與相位，
+          // 不能先 trim start 再 STARTPTS，否則下一格會被提前到片段起點。
+          // 原 PTS 與 native seek 分別量化為微秒；一 tick guard 只吸收邊界
+          // 捨入，不改來源或專案的秒數，慢速播放也不能因此晚換一格。
+          : `trim=end=${adjOut},settb=AVTB,setpts=(PTS-${adjIn}/TB-1)/${_filterNumber(c.speed,1)}${fields ? `,${fields.slice(0, -1)}` : ''}`;
+        if (freezeTime == null && c.reverse) {
+          // reverse 只倒轉內容，保留原 PTS 次序；VFR 不等長影格因此不能直接反播。
+          // 先按此片段真正會被絕對交付格網取樣的來源秒數重建 cadence，再倒轉。
+          // 這個格網只用於 reverse，既不改 in/out，也不以平均 source FPS 猜格。
+          const sampleRate = exactDeliveryFrameRate(R);
+          const phase = Math.ceil(c.offset * sampleRate - 1e-6) / sampleRate - c.offset;
+          const samples = Math.max(1, Math.ceil((clen - phase) * sampleRate - 1e-6));
+          const sourceFirst = adjOut - (phase + (samples - 1) / sampleRate) * _finiteNumber(c.speed, 1);
+          // trim=end 已排除 out 畫格；內部 PTS 仍是來源區間的左閉邊界。
+          // AVTB 的 floor - 1 吸收 native 微秒量化，使 exact sample 包含
+          // 該 PTS 開始的畫格，不能將每一個反向邊界都推到前一格。
+          // 末端 clone 只補最後一次 sample。
+          // fps 不指定 start_time，保留來源尚未有畫格的 leading gap；只採
+          // [0,samples) 的整數格 PTS。反序後以透明尾段保留原缺口，不能借未來格。
+          videoTime = `trim=end=${adjOut},${fields}settb=AVTB,setpts=floor((PTS-${sourceFirst}/TB)/${_filterNumber(c.speed,1)})-1,tpad=stop_mode=clone:stop_duration=${1 / sampleRate},fps=${R}:round=up,trim=start_pts=0:end_pts=${samples},reverse,setpts=PTS-STARTPTS,settb=AVTB,setpts=PTS+${phase}/TB,format=yuva420p,tpad=stop_mode=add:color=black@0:stop_duration=${_filterNumber(clen)}`;
+        }
+        // 片段保留來源 cadence 與時間軸 offset；只有透明軌底使用交付格網。
+        // 逐段 fps / concat 會讓每個短段各自 ceil，跨 FPS 交付逐段累積漂移。
+        const fades = _fadeFilters(c, clen, { timeOffset: c.offset, digits: 6 });
+        const placement = `,setpts=PTS+${c.offset}/TB`;
+        const enabled = `enable='gte(t,${_videoBoundary(c.offset)})*lt(t,${_videoBoundary(c.offset + clen)})'`;
+        const separateFadeCanvas = fades.length && si > 1;
+        const clipBase = separateFadeCanvas ? `[t${ti}ib${si}]` : trkLabel;
+        if (separateFadeCanvas) fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${_videoBoundary(D)},format=yuva420p,setsar=1${clipBase}`);
         if (box) {
           const bw = Math.max(2, Math.round(box.w)), bh = Math.max(2, Math.round(box.h));
-          fc.push(`[${vIdx}:v]${videoTime},scale=${bw}:${bh},format=yuva420p,setsar=1[${IM}]`);
-          vchain = `[${BG}][${IM}]overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}:format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+          fc.push(`[${vIdx}:v]${videoTime},scale=${bw}:${bh},format=yuva420p,setsar=1${placement}[${IM}]`);
+          vchain = `${clipBase}[${IM}]overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}:${enabled}:format=auto:eof_action=repeat,format=yuva420p,setsar=1`;
         } else {
-          fc.push(`[${vIdx}:v]${videoTime},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1[${IM}]`);
-          vchain = `[${BG}][${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+          fc.push(`[${vIdx}:v]${videoTime},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1${placement}[${IM}]`);
+          vchain = `${clipBase}[${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):${enabled}:format=auto:eof_action=repeat,format=yuva420p,setsar=1`;
         }
+        // 淡入淡出在交付格網的透明片段上運算，不能跟著較低格率來源的 hold 量化。
+        if (separateFadeCanvas) {
+          const faded = `[t${ti}fade${si}]`;
+          fc.push(`${vchain},${fades.join(',')}${faded}`);
+          vchain = `${trkLabel}${faded}overlay=x=0:y=0:format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+        } else if (fades.length) vchain += `,${fades.join(',')}`;
       }
 
-      // 轉場：淡入/淡出（fade alpha＝淡到透明，讓下層/黑底露出→軌間溶接）
-      const fades = _fadeFilters(c, clen);
-      if (fades.length) vchain += `,${fades.join(',')}`;
       fc.push(`${vchain}[${L}]`);
-      segs.push(`[${L}]`);
-      cursor = c.offset + clipLength(c);
+      trkLabel = `[${L}]`;
     }
-    if (cursor < D - EPS) gap(D - cursor);
-    let trkLabel;
-    if (segs.length > 1) { trkLabel = `[trkV${ti}]`; fc.push(`${segs.join('')}concat=n=${segs.length}:v=1:a=0${trkLabel}`); }
-    else { trkLabel = segs[0]; }
     if (opacity < 0.999) { const ol = `[trkO${ti}]`; fc.push(`${trkLabel}format=yuva420p,colorchannelmixer=aa=${opacity.toFixed(3)}${ol}`); trkLabel = ol; } // 透明度
     const out = `[ov${ti}]`;
     // 位置：px/py 0..1 → 以 overlay 表達式對映（scale=1 時 W-w=0＝滿版；PiP 時定位縮小影格）
@@ -643,7 +677,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const audioInputMap = new Map();
   if (audioPlan) {
     plannedAudio = _buildPlannedAudio(audioPlan, inputs, fc, ii, D, reusableMasterInputs,
-      isAirline ? env.audioVideoStartOffset : null);
+      env.audioVideoStartOffset, env.sourceClock);
   } else {
     const aLabels = [];
     list.forEach((c, i) => {
@@ -655,7 +689,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
         c.audio.forEach((ch, j) => {
           const reusable = reusableMasterInputs.get(ch.file);
           const effect = normalizeAudioLimiterSpec(ch.audioLimiterSpec || c.audioLimiterSpec);
-          const canReuse = !effect && reusable && c.in >= reusable.seekStart - 0.000001;
+          const canReuse = !effect && reusable && c.in >= reusable.availableStart - 0.000001;
           let mappedIdx, seekStart = 0;
           if (canReuse) {
             mappedIdx = reusable.index;
@@ -671,7 +705,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           if (effect) chain += `${audioLimiterFilter(effect, ch.sourceStream ?? 0)},`;
           if (Number.isInteger(ch.sourceChannel) && ch.sourceChannel >= 0)
             chain += `pan=mono|c0=c${ch.sourceChannel},`;
-          chain += `${_audioTimelineStart(ch.file, ch.sourceStream, isAirline ? env.audioVideoStartOffset : null, c.reverse)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))}${_audioPlaybackFilters(c, c.out - c.in)},aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
+          chain += `${_audioTimelineStart(ch.file, ch.sourceStream, env.audioVideoStartOffset, c.reverse, seekStart, env.sourceClock, canReuse ? reusable.nativeSeek : 0)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))}${_audioPlaybackFilters(c, c.out - c.in)},aresample=48000,volume=${_filterNumber(ch.volume, 1)}[am${i}_${j}]`;
           fc.push(chain);
           mono.push(`[am${i}_${j}]`);
         });
@@ -690,7 +724,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           if (mappedIdx === undefined) { mappedIdx = ii++; inputs.push('-i', c.path); audioInputMap.set(c.path, mappedIdx); }
         }
         const effectFilter = effect ? `${audioLimiterFilter(effect, 0)},` : '';
-        fc.push(`[${mappedIdx}:a]${effectFilter}${_audioTimelineStart(c.path, 0, isAirline ? env.audioVideoStartOffset : null, c.reverse)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))}${_audioPlaybackFilters(c, c.out - c.in)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
+        fc.push(`[${mappedIdx}:a]${effectFilter}${_audioTimelineStart(c.path, 0, env.audioVideoStartOffset, c.reverse, seekStart, env.sourceClock, effect ? 0 : reusableMasterInputs.get(c.path)?.nativeSeek || 0)}atrim=start=${_filterNumber(Math.max(0, c.in - seekStart))}:end=${_filterNumber(Math.max(0, c.out - seekStart))}${_audioPlaybackFilters(c, c.out - c.in)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${al}`);
       } else return;
       const offMs = Math.max(0, Math.round((c.offset || 0) * 1000));
       // 轉場：音訊淡入/淡出（與影像同步）
@@ -702,8 +736,8 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       fc.push(`${asrc}adelay=${offMs}:all=1,asetpts=N/SR/TB[ad${i}]`);
       aLabels.push(`[ad${i}]`);
     });
-    if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${D.toFixed(3)},aresample=48000[ac]`);
-    else fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${D.toFixed(3)},asetpts=PTS-STARTPTS[ac]`);
+    if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${_filterNumber(D)},aresample=48000[ac]`);
+    else fc.push(`anullsrc=r=48000:cl=stereo,atrim=0:${_filterNumber(D)},asetpts=PTS-STARTPTS[ac]`);
   }
 
   // 燒錄字幕（可見軌）：ass 濾鏡讀取暫存 .ass；以 cwd=TMP + basename 引用避開路徑跳脫
@@ -714,12 +748,13 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     // ── 磁碟機冒號要跳【兩層】(v4.31.2 修)：filtergraph 先拆選項、選項值再拆一次，
     //    所以字面上得是 `C\\:/...`。只寫一個反斜線（舊版）→ ffmpeg 把 `:` 當成選項分隔符、
     //    整條 filterchain 解析失敗 → 匯出直接掛掉。此路徑僅在 font/ 存在時才加。
-    const fdirArg = fontsDir ? ':fontsdir=' + fontsDir.replace(/\\/g, '/').replace(/:/g, '\\\\:') : '';
-    fc.push(`${vc}ass=${assFileName}${fdirArg}[vout]`);
+    const fdirArg = fontsDir ? ':fontsdir=' + _drawtextValue(fontsDir) : '';
+    fc.push(`${vc}ass=${_drawtextValue(assFileName)}${fdirArg}[vout]`);
     vfinal = '[vout]';
   }
   if (isInterlaced) {
-    fc.push(`${vfinal}format=yuv420p,tinterlace=mode=interleave_top,setfield=tff[vmod]`);
+    // 半開交付範圍可剩單一末場；補 clone 完成最後一格，末端 trim 仍限制交付格數。
+    fc.push(`${vfinal}format=yuv420p,tpad=stop_mode=clone:stop=1,tinterlace=mode=interleave_top,setfield=tff[vmod]`);
     vfinal = '[vmod]';
   }
   // 時間碼在 ASS／場交織之後，按輸出幀率計數，避免 59.94 場合成時跑成兩倍速。
@@ -736,6 +771,11 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     fc.push(`${vfinal}scale=${encodedW}:${H}:flags=lanczos,setsar=${outputSar},format=yuv420p,setfield=${isInterlaced ? 'tff' : 'prog'}[vdisc]`);
     vfinal = '[vdisc]';
   }
+  // [0, D) 的交付格數由輸出格網決定。color/filter 的微秒捨入可能在
+  // NTSC 或 8/30 秒的 EOF 多生成一格，不能讓那格進入正式成品。
+  const outputFrames = Math.max(1, Math.ceil(D * exactDeliveryFrameRate(outputRate) - 1e-6));
+  fc.push(`${vfinal}trim=end_frame=${outputFrames}[vdelivery]`);
+  vfinal = '[vdelivery]';
 
   // MP4：影像使用使用者指定的目標位元率；每條 AAC stream 依聲道數給足交付 bitrate。
   // ProRes 則固定輸出 24-bit PCM，避免母素材音訊再經有損 AAC 編碼。

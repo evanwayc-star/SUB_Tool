@@ -165,5 +165,11 @@ export function fadeAlphaAt(clip, localTime) {
  */
 export function fadeAlphaAtTimeline(clip, timelineTime) {
   if (!clip) return 0;
-  return fadeAlphaAt(clip, (Number(timelineTime) || 0) - (Number(clip.offset) || 0));
+  const time = Number(timelineTime) || 0;
+  const offset = Number(clip.offset) || 0;
+  const local = time - offset;
+  // FPS-SYNC：相鄰格的 offset 與格網秒數可能相差一個浮點 ULP。
+  // 只修正相減後的微小負值；真正的前置空白及淡化原時鐘仍交給原規則。
+  const roundoff = Number.EPSILON * Math.max(1, Math.abs(time), Math.abs(offset));
+  return fadeAlphaAt(clip, Number.isFinite(roundoff) && local < 0 && local >= -roundoff ? 0 : local);
 }

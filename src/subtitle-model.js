@@ -8,19 +8,37 @@ import { planCueStyleAssignment } from './subtitle-style-engine.js';
 import { effStyle, trackStyleSnapshot, CUE_STYLE_KEYS } from './substyle.js';
 import { Project } from './project.js';
 
+// FPS-SYNC：定時字幕的兩個端點一起落格，至少保留一個可顯示的影格。
+export function snapCueToFrames(cue, {fps=State.fps,dropFrame=State.dropFrame}={}) {
+  if (!cue || cue.timed === false || !fps) return false;
+  const frame=1/getExactFps(fps);
+  const start=subtitleTimeOnFrame(cue.start,0,Infinity,{fps,dropFrame});
+  const end=subtitleTimeOnFrame(cue.end,start+frame,Infinity,{fps,dropFrame});
+  if (Math.abs(start-cue.start)<=1e-6 && Math.abs(end-cue.end)<=1e-6) return false;
+  cue.start=start; cue.end=end;
+  return true;
+}
+
 export function snapAllCuesToFrames() {
-  if (!State.fps) return false;
-  let changed = false;
-  for (const c of State.cues) {
-    if (c.timed === false) continue;
-    const ns = snapTimeToFrame(c.start, State.fps, State.dropFrame);
-    const ne = snapTimeToFrame(c.end, State.fps, State.dropFrame);
-    if (Math.abs(ns - c.start) > 1e-6 || Math.abs(ne - c.end) > 1e-6) {
-      c.start = ns; c.end = ne;
-      changed = true;
-    }
-  }
+  let changed=false;
+  for (const cue of State.cues) if(snapCueToFrames(cue)) changed=true;
   return changed;
+}
+
+export function moveCuesToTrack(cues,target) {
+  const targets=[...new Set(cues)].filter(cue=>State.cues.includes(cue));
+  if (!State.tracks[target] || !targets.length || trackLocked(target,'移動字幕') || cuesTrackLocked(targets,'移動字幕')) return false;
+  const moves=targets.filter(cue=>(cue.track||0)!==target);
+  if (!moves.length) return false;
+  const plans=moves.map(cue=>({cue,style:planCueStyleAssignment({
+    cue,targetTrack:State.tracks[target],desiredStyle:effStyle(cue,State.tracks[cue.track||0]),
+  }).style}));
+  for (const {cue,style} of plans) {
+    cue.track=target;
+    if(style) cue.style=style; else delete cue.style;
+  }
+  emit('render:all'); recordHistory('移動至軌道');
+  return true;
 }
 
 export function swapAdjacentCues(id, dir){
@@ -158,6 +176,8 @@ export function addCue(start, end, text, track, { historyLabel = '新增字幕' 
      不再替 drawTimeline 增加第三個別名。 */
   if(added){ emit('timeline:invalidate'); emit('render:listTrackSel'); }
   const c={id:newId(),start:start||0,end:end!=null?end:(start||0),text:text||'',track:targetTrack,timed:(start!=null&&end!=null)};
+  // FPS-SYNC：所有新增入口在發布與 History 前共用落格／至少一格的規則。
+  snapCueToFrames(c);
   State.cues.push(c);
   sortCues();
   setSelection({ kind:'sub', ids:[c.id] });
@@ -193,8 +213,12 @@ export function _doDeleteCues(ids){
   const idxs=ids.map(id=>State.cues.findIndex(c=>c.id===id)).filter(i=>i>=0);
   const firstIdx=idxs.length?Math.min(...idxs):0;
   State.cues=State.cues.filter(c=>!ids.includes(c.id));
-  const next=State.cues[Math.min(firstIdx,State.cues.length-1)]?.id||null;
-  setSelection({ kind:'sub', ids:next?[next]:[] }); State.activeEdge='start';
+  const next=[...State.cues.slice(firstIdx),...State.cues.slice(0,firstIdx).reverse()]
+    .find(c=>!State.tracks[c.track||0]?.locked);
+  setSelection({ kind:'sub', ids:next?[next.id]:[] }); State.activeEdge='start';
+  if(next && (next.track||0)!==State.listTrack){
+    State.listTrack=next.track||0; emit('render:listTrackSel');
+  }
   emit('render:all'); emit('render:selection'); recordHistory('刪除字幕');
 }
 
@@ -448,7 +472,7 @@ export function editCue({ cueId, operation, value, baseline }) {
     else delete cue.style;
     if (!textChanged && !styleChanged) return { ok: true, changed: false, cue };
     emit('render:all');
-    recordHistory('編輯字幕' + (styleChanged ? '（含樣式覆蓋）' : '文字') + cueSuffix(cue));
+    recordHistory('編輯字幕' + (styleChanged ? '（含樣式）' : '文字') + cueSuffix(cue));
     return { ok: true, changed: true, cue, styleChanged };
   }
 
@@ -504,7 +528,7 @@ export function beginCueEdit(cue, { preview = false } = {}) {
   const ownsText = () => isCurrent() && String(cue.text || '') === latestText;
   releasePreview = preview ? History.beginPreview([
     {target:cue, fields:['text'], ownsField:ownsText},
-  ], ownsIdentity) : null;
+  ], ownsIdentity,()=>{cancel();emit('render:subList');}) : null;
   const release = () => { releasePreview?.(); active=false; };
   const cancel = () => {
     if (preview && ownsText()) cue.text=baseline.text;

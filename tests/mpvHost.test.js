@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -40,12 +41,12 @@ function socketThatReportsDuration(duration = 123.5) {
     }
     if (typeof message.request_id !== 'number') return;
     const data = message.command?.[1] === 'path' ? loadedPath : duration;
-    queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data }) + '\n')));
+    queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data, error: 'success' }) + '\n')));
   });
   return socket;
 }
 
-function make({ duration = 123.5, guideLoad, setTimer = () => 0 } = {}) {
+function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spawnFailure, describeSource } = {}) {
   FakeWindow.instances = [];
   const parent = { isDestroyed: () => false, getContentBounds: () => ({ x: 100, y: 200 }) };
   const children = [];
@@ -60,9 +61,10 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0 } = {}) {
       }
     } : FakeWindow,
     spawn: vi.fn((exe, args) => {
+      if (spawnFailure) throw spawnFailure;
       const child = new EventEmitter();
       child.kill = vi.fn();
-      child.stderr = null;
+      child.stderr = createLog ? new PassThrough() : null;
       children.push({ child, exe, args });
       return child;
     }),
@@ -72,7 +74,7 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0 } = {}) {
       queueMicrotask(() => socket.emit('connect'));
       return socket;
     }),
-    fs: { writeFileSync: vi.fn(), createWriteStream: vi.fn(() => null) },
+    fs: { writeFileSync: vi.fn(), createWriteStream: createLog || vi.fn(() => null) },
     path: { join: (...parts) => parts.join('/') },
     url: { pathToFileURL: filePath => ({ href: 'file:///' + filePath }) },
     getMainWindow: () => parent,
@@ -82,6 +84,7 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0 } = {}) {
     tmpDir: 'C:/tmp',
     tempFiles: new Set(),
     guideHtml: '<!doctype html>',
+    describeSource,
     fontsDir: () => 'C:/fonts',
     onEvent: event => events.push(event),
     log: vi.fn(),
@@ -94,6 +97,242 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0 } = {}) {
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it.each([2, 8])('倒播暫停 %i 路 native 混音，正播精確恢復原圖並可再次倒播', async count => {
+    const {host,sockets,children}=make();
+    await host.launch({src:'D:/media/multi.mxf',audio:Array.from({length:count},()=>({}))});
+    const graph=children[0].args.find(arg=>arg.startsWith('--lavfi-complex=')).slice('--lavfi-complex='.length);
+    let liveGraph=graph;
+    const socket=sockets[0],write=socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw=>{
+      const command=JSON.parse(raw).command;
+      if(command[0]==='set_property'&&command[1]==='lavfi-complex')liveGraph=command[2];
+      write(raw);
+    });
+    try{
+      for(let round=0;round<3;round++){
+        await expect(host.direction('backward')).resolves.toBe(true);
+        expect(liveGraph).toBe('');
+        await expect(host.direction('forward')).resolves.toBe(true);
+        expect(liveGraph).toBe(graph);
+      }
+    }finally{host.quit();}
+  });
+
+  it('倒播期間換來源後，forward 不得恢復舊來源的 native 混音圖',async()=>{
+    const {host,sockets}=make();
+    await host.launch({src:'D:/media/multi.mxf',audio:[{},{},{}]});
+    await host.direction('backward');
+    await host.loadFile('D:/media/new-single.mov');
+    sockets[0].write.mockClear();
+    await host.direction('forward');
+    expect(sockets[0].write.mock.calls.map(([raw])=>JSON.parse(raw).command)
+      .filter(command=>command[1]==='lavfi-complex').every(command=>command[2]==='')).toBe(true);
+    host.quit();
+  });
+
+  it('loadFile probe 開始即撤銷舊方向；失敗後仍可還原尚未換掉的來源混音',async()=>{
+    let rejectProbe;
+    const probe=new Promise((resolve,reject)=>{rejectProbe=reject;});
+    const {host,sockets}=make({describeSource:file=>file.includes('bad')?probe:Promise.resolve(null)});
+    await host.launch({src:'D:/media/multi.mxf',audio:[{},{}]});
+    await host.direction('backward');
+    const changing=host.loadFile('D:/media/bad.mov');
+    const failed=expect(changing).rejects.toThrow('probe unavailable');
+    await expect(host.direction('forward')).resolves.toBe(false);
+    rejectProbe(new Error('probe unavailable'));await failed;
+    await expect(host.direction('forward')).resolves.toBe(true);
+    expect(sockets[0].write.mock.calls.map(([raw])=>JSON.parse(raw).command)).toContainEqual([
+      'set_property','lavfi-complex','[aid1][aid2]amix=inputs=2:normalize=0[ao]',
+    ]);
+    host.quit();
+  });
+
+  it('換來源撤銷尚未完成的 backward，不讓舊方向落到新素材',async()=>{
+    const {host,sockets}=make();await host.launch({src:'D:/media/multi.mxf',audio:[{},{}]});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let held;
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[1]==='hwdec'&&message.command[2]==='no'){held=message;return;}
+      write(raw);
+    });
+    const backward=host.direction('backward');
+    for(let index=0;index<10&&!held;index++)await Promise.resolve();
+    expect(held).toBeTruthy();
+    await host.loadFile('D:/media/new.mov');
+    socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,error:'success'})+'\n'));
+    await expect(backward).resolves.toBe(false);
+    expect(socket.write.mock.calls.map(([raw])=>JSON.parse(raw).command)).not.toContainEqual([
+      'set_property','play-direction','backward',
+    ]);
+    host.quit();
+  });
+
+  it('clear graph 晚到回覆不得覆寫更新的 forward；quit/relaunch 不可復活舊圖',async()=>{
+    const {host,sockets}=make();await host.launch({src:'D:/media/multi.mxf',audio:[{},{}]});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let held;
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[1]==='lavfi-complex'&&message.command[2]===''&&!held){held=message;return;}
+      write(raw);
+    });
+    const backward=host.direction('backward');
+    await Promise.resolve();
+    const forward=host.direction('forward');await forward;
+    expect(held).toBeTruthy();
+    socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,error:'success'})+'\n'));
+    await expect(backward).resolves.toBe(false);
+    host.quit();await host.launch({src:'D:/media/single.mov'});
+    sockets[1].write.mockClear();await host.direction('forward');
+    expect(sockets[1].write.mock.calls.map(([raw])=>JSON.parse(raw).command)
+      .filter(command=>command[1]==='lavfi-complex')).toEqual([]);
+    host.quit();
+  });
+
+  it.each(['clear','restore'])('native 混音 %s 命令失敗不可宣稱方向已安全就緒',async phase=>{
+    const {host,sockets}=make();await host.launch({src:'D:/media/multi.mxf',audio:[{},{}]});
+    if(phase==='restore')await host.direction('backward');
+    const socket=sockets[0],write=socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[1]==='lavfi-complex'&&(phase==='clear'?message.command[2]==='':message.command[2]!=='')){
+        queueMicrotask(()=>socket.emit('data',Buffer.from(JSON.stringify({request_id:message.request_id,error:'property-unavailable'})+'\n')));return;
+      }
+      write(raw);
+    });
+    await expect(host.direction(phase==='clear'?'backward':'forward')).rejects.toThrow('property-unavailable');
+    if(phase==='clear')expect(socket.write.mock.calls.map(([raw])=>JSON.parse(raw).command)).not.toContainEqual(['set_property','play-direction','backward']);
+    host.quit();
+  });
+
+  it('forward 的混音還原回覆晚到時，新 backward 仍會清除已送出的圖',async()=>{
+    const {host,sockets}=make();await host.launch({src:'D:/media/multi.mxf',audio:[{},{}]});
+    await host.direction('backward');
+    const socket=sockets[0],write=socket.write.getMockImplementation();let held,liveGraph='';
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[1]==='lavfi-complex'){
+        liveGraph=message.command[2];
+        if(liveGraph&&!held){held=message;return;}
+      }
+      write(raw);
+    });
+    const forward=host.direction('forward');
+    for(let index=0;index<10&&!held;index++)await Promise.resolve();
+    expect(held).toBeTruthy();
+    await expect(host.direction('backward')).resolves.toBe(true);
+    expect(liveGraph).toBe('');
+    socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,error:'success'})+'\n'));
+    await expect(forward).resolves.toBe(false);
+    expect(liveGraph).toBe('');host.quit();
+  });
+
+  it('倒播設定中途失敗會還原正向與原圖，不能只留下被清空的混音',async()=>{
+    const {host,sockets,children}=make();await host.launch({src:'D:/media/multi.mxf',audio:[{},{}]});
+    const graph=children[0].args.find(arg=>arg.startsWith('--lavfi-complex=')).slice('--lavfi-complex='.length);
+    const socket=sockets[0],write=socket.write.getMockImplementation();let liveGraph=graph;
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[1]==='lavfi-complex')liveGraph=message.command[2];
+      if(message.command[1]==='hwdec'&&message.command[2]==='no'){
+        queueMicrotask(()=>socket.emit('data',Buffer.from(JSON.stringify({request_id:message.request_id,error:'setting-failed'})+'\n')));return;
+      }
+      write(raw);
+    });
+    await expect(host.direction('backward')).rejects.toThrow('setting-failed');
+    expect(liveGraph).toBe(graph);
+    expect(socket.write.mock.calls.map(([raw])=>JSON.parse(raw).command)).toContainEqual(['set_property','play-direction','forward']);
+    host.quit();
+  });
+
+  it('quit 取消 graph 清除等待，晚到回覆不能在新播放器恢復舊圖',async()=>{
+    const {host,sockets}=make();await host.launch({src:'D:/media/multi.mxf',audio:[{},{}]});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let held;
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[1]==='lavfi-complex'&&message.command[2]===''){held=message;return;}
+      write(raw);
+    });
+    const backward=host.direction('backward');
+    const cancelled=backward.then(value=>({value}),error=>({error}));
+    await Promise.resolve();expect(held).toBeTruthy();
+    host.quit();expect((await cancelled).error).toBeInstanceOf(Error);
+    await host.launch({src:'D:/media/new-single.mov'});
+    const before=sockets[1].write.mock.calls.length;
+    socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,error:'success'})+'\n'));
+    await Promise.resolve();expect(sockets[1].write.mock.calls.length).toBe(before);
+    await host.direction('forward');
+    expect(sockets[1].write.mock.calls.map(([raw])=>JSON.parse(raw).command)
+      .filter(command=>command[1]==='lavfi-complex')).toEqual([]);host.quit();
+  });
+
+
+  it('mother clock owns duration, time-pos, seek acknowledgement and subtitle placement', async () => {
+    const describeSource=vi.fn(async()=>({video:{timestampOffset:-.5}}));
+    const {host,sockets,children,events}=make({duration:3.5,describeSource});
+    await expect(host.launch({src:'D:/mother.mkv'})).resolves.toEqual({ok:true,duration:3});
+    expect(describeSource).toHaveBeenCalledWith('D:/mother.mkv');
+    expect(children[0].args).toContain('--sub-delay=0.5');
+    const pending=host.present(2.8,{exact:true,tolerance:.000001});
+    await Promise.resolve();
+    const socket=sockets[0];
+    socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'time-pos',data:3.3})+'\n'));
+    await expect(pending).resolves.toEqual({backend:'mpv',presentedSourceTime:2.8});
+    socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:3.5})+'\n'));
+    expect(events).toContainEqual({event:'property-change',name:'time-pos',data:2.8});
+    expect(events).toContainEqual({event:'property-change',name:'duration',data:3});
+    expect(socket.write.mock.calls.map(([raw])=>JSON.parse(raw).command)).toContainEqual(['seek',3.3,'absolute+exact']);
+    host.quit();
+  });
+  it('loading a normalized Proxy and returning to the mother re-probes their actual clocks',async()=>{
+    const describeSource=vi.fn(async file=>({video:{timestampOffset:file.includes('proxy')?0:-.5}}));
+    const {host,sockets}=make({duration:3.5,describeSource});
+    await host.launch({src:'D:/mother.mkv'});
+    await host.loadFile('D:/proxy.mp4');await host.seek(2.8);
+    const commands=()=>sockets[0].write.mock.calls.map(([raw])=>JSON.parse(raw).command);
+    expect(commands()).toContainEqual(['set_property','sub-delay',0]);
+    expect(commands()).toContainEqual(['set_property','time-pos',2.8]);
+    await host.loadFile('D:/mother.mkv');await host.seek(2.8);
+    expect(commands()).toContainEqual(['set_property','sub-delay',.5]);
+    expect(commands()).toContainEqual(['set_property','time-pos',3.3]);
+    expect(describeSource.mock.calls.map(([file])=>file)).toEqual(['D:/mother.mkv','D:/proxy.mp4','D:/mother.mkv']);
+    host.quit();
+  });
+
+  it('非同步記錄失敗不能中斷播放器，且 stderr 繼續排空', async () => {
+    const output = new PassThrough();
+    const { host, children } = make({ createLog: () => output });
+    await host.launch({ src: 'D:/media/a.mxf' });
+    output.destroy(Object.assign(new Error('diagnostic disk full'), { code: 'ENOSPC' }));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(host.snapshot()).toMatchObject({ hasClient: true, hasProcess: true });
+    expect(children[0].child.kill).not.toHaveBeenCalled();
+    children[0].child.stderr.write(Buffer.alloc(65536));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(children[0].child.stderr.readableLength).toBe(0);
+    host.quit();
+  });
+
+  it('換片和退出關閉各自記錄，舊 child 晚到的 close 不能關閉新記錄', async () => {
+    const outputs = [new PassThrough(), new PassThrough()];
+    let next = 0;
+    const { host, children } = make({ createLog: () => outputs[next++] });
+    await host.launch({ src: 'D:/media/a.mxf' });
+    await host.launch({ src: 'D:/media/b.mxf' });
+    expect(outputs[0].destroyed).toBe(true);
+    children[0].child.emit('close', 0);
+    expect(outputs[1].destroyed).toBe(false);
+    host.quit();
+    expect(outputs[1].destroyed).toBe(true);
+  });
+
+  it('spawn 同步失敗也關閉已開啟的記錄', async () => {
+    const output = new PassThrough();
+    const { host } = make({ createLog: () => output, spawnFailure: new Error('spawn failed') });
+    await expect(host.launch({ src: 'D:/media/a.mxf' })).rejects.toThrow('spawn failed');
+    expect(output.destroyed).toBe(true);
+    expect(host.snapshot()).toMatchObject({ hasProcess: false, hasClient: false });
+  });
+
   it('截圖等待 matching acknowledgement，錯誤回覆不冒充成功', async () => {
     const { host, sockets } = make();
     await host.launch({ src: 'D:/media/a.mxf' });

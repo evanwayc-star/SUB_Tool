@@ -6,22 +6,22 @@
    ── 為什麼查到這裡 ──
    CPU profiler 的結果是：renderer 累計被擋住 22 秒，但 JS 有 97% 的時間是
    (idle)——V8 幾乎沒在執行任何東西。能讓「事件迴圈延遲很久、但 JS 沒在跑」
-   同時成立的只有兩類原因：
-
-     1. 同步 IPC（執行緒卡在等主行程）——已排除，全專案沒有任何 sendSync
-     2. 行程根本沒拿到 CPU
+   同時成立不能單獨證明 CPU 不足；背景計時器節流也會產生相同讀數。
+   目前探針只累積連續可見區間，焦點與 CPU 欄位另供對照，不能代替阻塞證據。
 
    而載入媒體會 spawn 一連串 ffmpeg：proxy 轉檔、逐聲道抽取（這支素材有 18 個
    聲道檔）、波形、單次讀取 ingest，對象是 107 GB 的來源。
 
    這支把三件事並排：總 CPU、各行程 CPU、renderer 的事件迴圈延遲。
-   如果 renderer 的延遲與 ffmpeg 的 CPU 佔用同進同退，那就是 CPU 被吃光，
-   修法是把 ingest 的優先權調低，而不是去改 renderer 的 JS。
+   如果 renderer 的可見區間延遲與 ffmpeg 的 CPU 佔用同進同退，
+   再配合 CPU profile 與實際操作查明原因，不直接由相關性推定修法。
 ============================================================================== */
 
 
 const { execFileSync } = require('child_process');
+const { performance } = require('perf_hooks');
 const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
+const { rendererLagProbe } = require('./renderer-lag-probe.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const CORES = require('os').cpus().length;
@@ -48,7 +48,7 @@ function cpuSnapshot() {
     if (!id) continue;
     out.set(Number(id), { name, cpu: Number(cpu) || 0 });
   }
-  return out;
+  return { processes: out, sampledAt: performance.now() };
 }
 
 /** 目前在跑的 ffmpeg 在做什麼（從命令列猜工作類型）。 */
@@ -73,18 +73,9 @@ function ffmpegJobs() {
 const ARM = `(async () => {
   const B = require('electron').BrowserWindow;
   const w = B.getAllWindows().find(x => !x.getParentWindow());
-  return await w.webContents.executeJavaScript(\`(() => {
-    if (window.__lagT) clearInterval(window.__lagT);
-    window.__lagSum = 0;
-    let last = Date.now();
-    window.__lagT = setInterval(() => {
-      const now = Date.now();
-      const d = now - last - 100;
-      if (d > 200) window.__lagSum += d;
-      last = now;
-    }, 100);
-    return true;
-  })()\`, true);
+  return await w.webContents.executeJavaScript(${JSON.stringify(rendererLagProbe({
+    timerKey: '__lagT', totalKey: '__lagSum',
+  }))}, true);
 })()`;
 
 /* 【一定要同時讀可見性與焦點】
@@ -130,23 +121,22 @@ const READ = `(async () => {
   setInterval(async () => {
     const now = cpuSnapshot();
     let ff = 0, appCpu = 0;
-    for (const [id, cur] of now) {
-      const before = prev.get(id);
+    for (const [id, cur] of now.processes) {
+      const before = prev.processes.get(id);
       const delta = cur.cpu - (before ? before.cpu : 0);
       if (delta <= 0) continue;
       if (/ffmpeg|ffprobe/i.test(cur.name)) ff += delta;
       else appCpu += delta;
     }
+    // 同步 PowerShell 與 host event loop 都可能延後 callback；使用相鄰實際採樣的單調時鐘。
+    const elapsed = (now.sampledAt - prev.sampledAt) / 1000;
     prev = now;
-    const pct = s => Math.round((s / (EVERY / 1000)) * 100 / CORES);
+    const pct = s => elapsed > 0 ? Math.round((s / elapsed) * 100 / CORES) : 0;
     let st = { lag: 0, vis: '?', focus: false, winMin: false };
     try { st = JSON.parse(await main.evaluate(READ)); } catch (e) {}
     const dLag = Math.max(0, st.lag - prevLag); prevLag = st.lag;
-    /* 延遲大但頁面 hidden／沒有焦點 → 是【背景節流】，不是被擋住。 */
-    const throttled = st.vis !== 'visible' || !st.focus;
-    const mark = dLag > 500
-      ? (throttled ? '  ← 延遲（視窗在背景＝節流，不是卡住）' : '  ← 真的卡住')
-      : '';
+    // 讀取當下的焦點不能解釋上一段區間；探針已排除 hidden 與切換區間。
+    const mark = dLag > 500 ? '  ← 可見區間採樣延遲（原因待查）' : '';
     const visCol = `${st.vis}/${st.focus ? '有焦點' : '無焦點'}${st.winMin ? '/最小化' : ''}`;
     console.log(`  ${new Date().toTimeString().slice(0, 8)}  ${String(dLag).padStart(5)} ms` +
       `  ${String(pct(ff + appCpu)).padStart(6)}%  ${String(pct(ff)).padStart(6)}%` +

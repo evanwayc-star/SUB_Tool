@@ -61,7 +61,7 @@ describe('反轉交付保留母素材音訊', () => {
       fps: 25, outPath: 'C:/delivery.mov' }, { hasAudioStream: () => true });
     const graph = graphOf(plan);
     expect(graph).toContain('aresample=48000:async=1:first_pts=0,atrim=start=0.500000:end=3.500000,asetpts=PTS-STARTPTS,apad=whole_dur=3.000000,atrim=duration=3.000000,areverse,asetpts=PTS-STARTPTS,atempo=2.000000');
-    expect(graph).toContain('afade=t=in:st=0:');
+    expect(graph).toMatch(/afade=t=in:st=0(?:\.0+)?:/);
     expect(graph).toContain('afade=t=out:st=1.000');
     expect(graph).toContain('adelay=250:all=1');
     expect(plan.args.join(' ')).not.toContain('preview-cache');
@@ -162,6 +162,127 @@ describe.skipIf(!existsSync(FFMPEG))('反轉交付實際 PCM 內容', () => {
     for (let frame = first; frame < last; frame++) energy += pcm.readFloatLE((frame * 2 + channel) * 4) ** 2;
     return Math.sqrt(energy / (last - first));
   }
+
+  function detachedSnapshot(range = {}, audioOnly = false) {
+    const routing = project();
+    routing.sourceMaps.detached = structuredClone(routing.sourceMaps.mother);
+    return buildExportSnapshot({ state: {
+      clips: audioOnly ? [] : [clip(source, { speed: 2, audioDetached: true })],
+      videoTracks: [{ visible: true }], audioProject: routing, ...range,
+      // This is the persisted placement after detach. The old video route is
+      // deliberately retained, as it is in a real project after unlinking.
+      externalAudioState: [{ id: 'external:detached', audioSourceId: 'detached',
+        audioSrc: 'ext-detached', kind: 'external-audio', path: source,
+        name: 'mother.mov · 原音', duration: 4, offset: 0.25, in: 0.5, out: 3.5,
+        speed: 2, reverse: true, gain: 1, enabled: true,
+        descriptors: [{ sourceStream: 1, sourceChannel: 0 }, { sourceStream: 1, sourceChannel: 1 }] }],
+    }, sequenceEnd: audioOnly ? 0 : 1.75,
+    mediaTracks: ['mother', 'detached'].flatMap(audioSourceId => [0, 1].map(sourceChannel => ({
+      audioSourceId, sourceStream: 1, sourceChannel, kind: 'element', volume: 1,
+      source: audioSourceId === 'mother' ? 'clip:clip' : 'ext-detached',
+      file: 'C:/preview-cache.m4a',
+    }))) });
+  }
+
+  function renderPrepared(data, format = 'prores', withPlan = true) {
+    const composed = composeDeliveryAudioPlan(data.audioPlan, { format });
+    const outPath = path.join(directory, `detached-${outputSeq++}.${format === 'wav' ? 'wav' : 'mov'}`);
+    const prepared = prepareDeliveryPayload({ ...data, audioPlan: withPlan ? composed : null,
+      format, width: 64, height: 64, fps: 25, outPath });
+    const plan = buildDeliveryArgv(prepared,
+      { hasAudioStream: () => true, proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] });
+    expect(plan.args.join(' ')).not.toContain('preview-cache');
+    execute(plan.args);
+    return { prepared, pcm: execute(['-i', outPath, '-map', '0:a:0', '-ar', String(RATE),
+      '-ac', '2', '-f', 'f32le', '-c:a', 'pcm_f32le', 'pipe:1']) };
+  }
+
+  function spedReverseReference(sourceChannel, start, end) {
+    // The independent oracle starts with known samples, rather than decoding
+    // the export's chosen mother stream or copying its filter graph. Only
+    // pitch-preserving tempo is delegated to FFmpeg; trim and direction are
+    // expressed directly in sample coordinates.
+    const frameCount = Math.round((end - start) * RATE);
+    const reversed = Buffer.alloc(frameCount * 2);
+    for (let frame = 0; frame < frameCount; frame++) {
+      const sourceFrame = Math.round(end * RATE) - 1 - frame;
+      reversed.writeInt16LE(sourceSamples[1].readInt16LE((sourceFrame * 2 + sourceChannel) * 2), frame * 2);
+    }
+    const rawPath = path.join(directory, `reference-${outputSeq++}.pcm`);
+    writeFileSync(rawPath, reversed);
+    return execute(['-f', 's16le', '-ar', String(RATE), '-ac', '1', '-i', rawPath,
+      '-af', 'atempo=2', '-f', 'f32le', '-c:a', 'pcm_f32le', 'pipe:1']);
+  }
+
+  it('an earlier external placement cannot reuse a mother input seeked to a later video range',()=>{
+    const routing=project();routing.sourceMaps.early=structuredClone(routing.sourceMaps.mother);
+    const data=buildExportSnapshot({state:{fps:25,videoTracks:[{visible:true}],audioProject:routing,
+      clips:[clip(source,{in:3,out:3.2,offset:0,reverse:false,audioDetached:true})],
+      externalAudioState:[{id:'external:early',audioSourceId:'early',audioSrc:'ext-early',kind:'external-audio',
+        path:source,name:'early mother audio',duration:4,in:.1,out:.3,offset:0,speed:1,reverse:false,gain:1,enabled:true,
+        descriptors:[{sourceStream:1,sourceChannel:0},{sourceStream:1,sourceChannel:1}]}],
+    },sequenceEnd:.2});
+    const {pcm}=renderPrepared(data);
+    expect(pcm.length/8).toBe(.2*RATE);
+    let difference=0;
+    for(let frame=0;frame<.2*RATE;frame++)for(let channel=0;channel<2;channel++){
+      const expected=sourceSamples[1].readInt16LE(((.1*RATE+frame)*2+1-channel)*2)/32768;
+      difference=Math.max(difference,Math.abs(pcm.readFloatLE((frame*2+channel)*4)-expected));
+    }
+    expect(difference).toBeLessThan(.000005);
+  });
+
+  it.each([
+    ['完整 placement', {}, 0.5, 3.5, 0.25, 1.75],
+    ['裁交付範圍', { exportIn: 0.5, exportOut: 1.5 }, 1, 3, 0, 1],
+  ])('解除影音後 2 倍速反轉外音 %s 穿過完整交付流程，保留母素材 stream/channel 且不重複出音',
+    (_label, range, start, end, offset, duration) => {
+      const data = detachedSnapshot(range);
+      expect(data.duration).toBe(duration);expect(data.externalAudioCount).toBe(1);
+      expect(data.clips[0].audio).toEqual([]);
+      for (const [channel, bus] of data.audioPlan.buses.entries()) {
+        expect(bus.inputs).toHaveLength(1);
+        expect(bus.inputs[0]).toMatchObject({file:source,sourceStream:1,sourceChannel:1-channel,
+          trimStart:start,trimEnd:end,offset,speed:2,reverse:true});
+      }
+      const { prepared, pcm } = renderPrepared(data);
+      expect(pcm.length / 8).toBe(duration * RATE);
+      for (const [channel, bus] of prepared.audioPlan.buses.entries()) {
+        expect(bus.inputs).toHaveLength(1);
+        expect(bus.inputs[0]).toMatchObject({file:source,sourceStream:1,sourceChannel:1-channel,
+          trimStart:start,trimEnd:end,offset,speed:2,reverse:true});
+        const reference = spedReverseReference(1-channel, start, end);
+        const comparedFrames = Math.min(reference.length / 4, (duration-offset)*RATE);
+        // atempo can emit a short overlapping tail; delivery must still end
+        // at the requested timeline boundary, already asserted above.
+        expect(comparedFrames).toBeGreaterThan((duration-offset-0.05)*RATE);
+        let maxDifference = 0;
+        for (let frame = 0; frame < comparedFrames; frame++) {
+          const actual = pcm.readFloatLE(((offset * RATE + frame) * 2 + channel) * 4);
+          maxDifference = Math.max(maxDifference, Math.abs(actual - reference.readFloatLE(frame * 4)));
+        }
+        // A repeated original-video input or wrong source stream/channel
+        // cannot pass this sample-level comparison merely by being audible.
+        expect(maxDifference).toBeLessThan(0.00001);
+        if (offset) expect(rms(pcm, channel, 0.05, 0.2)).toBeLessThan(0.000001);
+        expect(rms(pcm, channel, offset+0.1, offset+0.2)).toBeGreaterThan(0.05);
+        expect(rms(pcm, channel, offset+0.1, offset+0.2))
+          .toBeGreaterThan(rms(pcm, channel, duration-0.2, duration-0.1)*1.3);
+      }
+    });
+
+  it('移除畫面後的同一持久反轉外音仍依 2 倍速計算 WAV 長度；舊版 legacy fallback 不會恢復已解除的影片原音', () => {
+    const data = detachedSnapshot({}, true);
+    expect(data.audioOnly).toBe(true);expect(data.duration).toBe(1.75);
+    const { pcm } = renderPrepared(data, 'wav');
+    expect(pcm.length / 8).toBe(1.75 * RATE);
+    expect(rms(pcm, 0, 0.05, 0.2)).toBeLessThan(0.000001);
+    expect(rms(pcm, 0, 0.35, 0.45)).toBeGreaterThan(rms(pcm, 0, 1.5, 1.6)*1.7);
+    const legacy = renderPrepared(detachedSnapshot(), 'prores', false).pcm;
+    expect(legacy.length / 8).toBe(1.75 * RATE);
+    expect(rms(legacy, 0, 0.3, 1.6)).toBeLessThan(0.000001);
+    expect(rms(legacy, 1, 0.3, 1.6)).toBeLessThan(0.000001);
+  });
 
   it.each(['routed', 'legacy-channel', 'legacy-raw'])('%s 每個輸出 sample 倒放正確 stream/channel，保留開頭間隙', mode => {
     const pcm = render(mode);

@@ -238,8 +238,26 @@ function normalizeAudioProject(project){
     const streamIds=new Set();
     normalized.exportLayout.streams=buses.map(bus=>({id:_nextAudioStreamId(streamIds),layout:'mono',busIds:[bus.id]}));
   }
-  if(arguments.length===0){ State.audioProject=normalized; }
+  if(arguments.length===0) return normalizeStateAudioProject(normalized);
   return normalized;
+}
+
+/* 同專案的背景 descriptor／reader 正規化保留 project 與既有 bus identity。
+   匯入與 Undo 仍直接替換整份專案，舊 editor 因而照常失效。 */
+function normalizeStateAudioProject(value=State.audioProject){
+  const normalized=normalizeAudioProject(value),project=State.audioProject;
+  if(!project || typeof project!=='object' || Array.isArray(project)) return State.audioProject=normalized;
+  const existing=new Map((Array.isArray(project.buses)?project.buses:[])
+    .filter(bus=>bus && typeof bus==='object').map(bus=>[bus.id,bus]));
+  normalized.buses=normalized.buses.map(bus=>{
+    const target=existing.get(bus.id);
+    if(!target) return bus;
+    for(const key of Object.keys(target)) if(!Object.hasOwn(bus,key)) delete target[key];
+    return Object.assign(target,bus);
+  });
+  for(const key of Object.keys(project)) if(!Object.hasOwn(normalized,key)) delete project[key];
+  Object.assign(project,normalized);
+  return project;
 }
 
 function newAudioBus(name, id){
@@ -264,39 +282,41 @@ function _isDefaultMonoLayout(streams, buses){
 /* 補足專案單聲道 bus（只增不減）。若輸出仍是系統預設 mono 配置，新 bus 也會加入預設輸出；
    已被使用者改成 5.1/stereo 等配置時，則不覆寫其編組。 */
 function ensureAudioBusCount(count, options={}){
+  return appendAudioBuses(normalizeStateAudioProject(),count,options);
+}
+function appendAudioBuses(project,count,options={},allocation=null){
   const wanted=_nonNegativeInt(count,0);
-  State.audioProject=normalizeAudioProject(State.audioProject);
-  const project=State.audioProject;
   const before=project.buses.slice();
   const wasDefault=_isDefaultMonoLayout(project.exportLayout.streams,before);
   let added=false;
   while(project.buses.length<wanted){
     const used=new Set(project.buses.map(bus=>bus.id));
-    project.buses.push(_normalBus({},project.buses.length,used));
+    project.buses.push(_normalBus({},project.buses.length,used,undefined,allocation?.buses?.[project.buses.length]?.id));
     added=true;
   }
   if(added&&options.exportDefaults!==false&&(wasDefault||options.appendExportDefaults===true))
-    ensureAudioExportDefaults({appendMissing:true});
+    appendAudioExportDefaults(project,{appendMissing:true},allocation);
   return added;
 }
 
 /* 補足匯出預設：每個尚未被任何 stream 使用的 project bus 都會得到一條 mono stream。
    UI 在使用者建立自訂編組後可傳 {appendMissing:false}，僅確保空設定有可用預設。 */
 function ensureAudioExportDefaults(options={}){
-  State.audioProject=normalizeAudioProject(State.audioProject);
-  const project=State.audioProject;
+  return appendAudioExportDefaults(normalizeStateAudioProject(),options);
+}
+function appendAudioExportDefaults(project,options={},allocation=null){
   const streams=project.exportLayout.streams;
   const appendMissing=options.appendMissing!==false;
-  if(!streams.length){
-    const used=new Set();
-    project.exportLayout.streams=project.buses.map(bus=>({id:_nextAudioStreamId(used),layout:'mono',busIds:[bus.id]}));
-    return project.exportLayout;
-  }
-  if(appendMissing){
+  if(appendMissing || !streams.length){
     const assigned=new Set(streams.flatMap(stream=>stream.busIds));
     const used=new Set(streams.map(stream=>stream.id));
     for(const bus of project.buses){
-      if(!assigned.has(bus.id)) streams.push({id:_nextAudioStreamId(used),layout:'mono',busIds:[bus.id]});
+      if(!assigned.has(bus.id)){
+        const shared=allocation?.exportLayout?.streams?.find(stream=>stream.layout==='mono' && stream.busIds.length===1 && stream.busIds[0]===bus.id);
+        const id=shared && !used.has(shared.id) ? shared.id : _nextAudioStreamId(used);
+        used.add(id);
+        streams.push({id,layout:'mono',busIds:[bus.id]});
+      }
     }
   }
   return project.exportLayout;
@@ -336,14 +356,14 @@ function pruneRemovedAudioBuses(project, removedIds){
 
 /* 為指定音源建立不覆寫既有設定的一對一路由。channels 可為聲道數字或
    [{sourceStream,sourceChannel}]；兩個索引皆為 0-based。auto 模式會依聲道數自動補足 bus。 */
-function ensureAudioSourceMap(audioSourceId, channels, options={}){
+function registerAudioSource(rawProject,audioSourceId,channels,options={},allocation=null){
+  // 同次 runtime 註冊的 allocation 供編輯基準／草稿重播，不可各自重新產生 ID。
   const sourceId=_cleanId(audioSourceId);
-  if(!sourceId) return null;
+  const project=normalizeAudioProject(rawProject);
+  if(!sourceId) return project;
   const descriptors=_normalChannels(channels);
-  State.audioProject=normalizeAudioProject(State.audioProject);
-  if((State.audioProject.mode==='auto'||options.forceBusCount===true)&&options.ensureBuses!==false)
-    ensureAudioBusCount(descriptors.length,options);
-  const project=State.audioProject;
+  if((project.mode==='auto'||options.forceBusCount===true)&&options.ensureBuses!==false)
+    appendAudioBuses(project,descriptors.length,options,allocation);
   const existing=options.reset?[]:(project.sourceMaps[sourceId]?.channels||[]);
   const byKey=new Map(existing.map(route=>[route.sourceStream+':'+route.sourceChannel,route]));
   descriptors.forEach((channel,index)=>{
@@ -354,7 +374,13 @@ function ensureAudioSourceMap(audioSourceId, channels, options={}){
     }
   });
   project.sourceMaps[sourceId]={channels:[...byKey.values()].sort((a,b)=>a.sourceStream-b.sourceStream||a.sourceChannel-b.sourceChannel)};
-  State.audioProject=normalizeAudioProject(project);
+  return normalizeAudioProject(project);
+}
+function ensureAudioSourceMap(audioSourceId,channels,options={}){
+  const sourceId=_cleanId(audioSourceId);
+  if(!sourceId) return null;
+  const project=normalizeStateAudioProject(registerAudioSource(State.audioProject,sourceId,channels,options));
+  emit('audio:sourceRegistered',{project,sourceId,channels,options});
   return State.audioProject.sourceMaps[sourceId];
 }
 
@@ -362,10 +388,10 @@ function ensureAudioSourceMap(audioSourceId, channels, options={}){
 function routeForChannel(audioSourceId, sourceStream=0, sourceChannel=0){
   const sourceId=_cleanId(audioSourceId);
   if(!sourceId) return null;
-  State.audioProject=normalizeAudioProject(State.audioProject);
+  const project=normalizeStateAudioProject();
   const stream=_nonNegativeInt(sourceStream,0);
   const channel=_nonNegativeInt(sourceChannel,0);
-  return State.audioProject.sourceMaps[sourceId]?.channels.find(route=>
+  return project.sourceMaps[sourceId]?.channels.find(route=>
     route.sourceStream===stream&&route.sourceChannel===channel
   )||null;
 }
@@ -722,7 +748,7 @@ function cueSuffix(c){
 
 export { State, newTrack, syncTrackCount, newVideoTrack, ensureVideoTrackCount, videoTrackVisible, resetVideoTracks,
   newAudioBus, normalizeAudioProject, resetAudioProject, ensureAudioBusCount, ensureAudioExportDefaults,
-  ensureAudioSourceMap, routeForChannel, pruneRemovedAudioBuses,
+  ensureAudioSourceMap, registerAudioSource, routeForChannel, pruneRemovedAudioBuses,
   FPS_SET, snapFps, applyFps, setFps, getFpsRevision, ensureTrackCount, trackVisible, newId, DESK, IS_DESKTOP, isSel,
   setSelection, clearSelection, deselect, pruneSelection, focusTrackKind, cueSuffix,
   loadConfig, saveConfig, loadKeys, saveKeys };

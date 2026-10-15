@@ -235,4 +235,32 @@ describe('timeline gesture transaction', () => {
     expect(audioPlan).toMatchObject({ offset: 3, in: 1, out: 4.4, snapTarget: 6.4 });
     expect(audio).toEqual({ offset: 3, in: 1, out: 5, duration: 8 });
   });
+
+  it.each([false,true])('2x 外部音訊 reverse=%s 的移動磁吸使用時間軸長度，修剪依來源方向改邊界',reverse=>{
+    const original={offset:10,in:2,out:12,duration:16,speed:2,reverse};
+    const move=planAudioGesturePreview({mode:'audio-move',original,deltaTime:0.46,snaps:[15.5],snapThreshold:0.1});
+    expect(move).toEqual({offset:10.5,in:2,out:12,snapTarget:15.5});
+    const head=planAudioGesturePreview({mode:'audio-l',original,deltaTime:1});
+    expect(head).toMatchObject(reverse?{offset:11,in:2,out:10}:{offset:11,in:4,out:12});
+    const tail=planAudioGesturePreview({mode:'audio-r',original,deltaTime:-1});
+    expect(tail).toMatchObject(reverse?{offset:10,in:4,out:12}:{offset:10,in:2,out:10});
+    expect(original).toEqual({offset:10,in:2,out:12,duration:16,speed:2,reverse});
+  });
+  it.each([false,true])('2x 外部音訊 reverse=%s 向外修剪不超來源範圍，最短時長仍為時間軸秒',reverse=>{
+    const original={offset:10,in:2,out:12,duration:16,speed:2,reverse};
+    expect(planAudioGesturePreview({mode:'audio-l',original,deltaTime:-100})).toMatchObject(
+      reverse?{offset:8,in:2,out:16}:{offset:9,in:0,out:12});
+    expect(planAudioGesturePreview({mode:'audio-r',original,deltaTime:100})).toMatchObject(
+      reverse?{offset:10,in:0,out:12}:{offset:10,in:2,out:16});
+    const minimum=planAudioGesturePreview({mode:'audio-l',original,deltaTime:100});
+    expect((minimum.out-minimum.in)/2).toBeCloseTo(0.2,8);
+  });
+  it.each([planAudioGesturePreview,planClipGesturePreview])('來源開頭不是整格時，逐格修剪仍留在合法素材範圍',planner=>{
+    const plan=planner({mode:planner===planAudioGesturePreview?'audio-l':'clip-l',
+      original:{offset:10,in:1.96,out:12,duration:16,speed:2,type:'video'},deltaTime:-100,
+      snapFrame:value=>Math.round(value*24)/24,frameStep:1/24});
+    expect(plan.offset).toBeGreaterThanOrEqual(9.02);
+    expect(plan.offset*24).toBeCloseTo(Math.round(plan.offset*24),8);
+    expect(plan.in).toBeCloseTo(1.96+(plan.offset-10)*2,8);
+  });
 });

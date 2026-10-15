@@ -32,7 +32,10 @@ function parseTimecodeInput(str) {
   const fpsR = Math.round(State?.fps) || 24;
 
   if (s.includes(':') || s.includes(';')) {
-    const p = s.split(/[:;]/).map(x => parseInt(x, 10) || 0);
+    const tokens = s.split(/[:;]/);
+    if (tokens.length > 4 || tokens.some(token => !/^\d+$/.test(token))) return null;
+    const p = tokens.map(Number);
+    if (p.some(value => !Number.isSafeInteger(value))) return null;
     // 由右至左：格, 秒, 分, 時
     f = p[p.length - 1] || 0;
     sec = p[p.length - 2] || 0;
@@ -40,6 +43,7 @@ function parseTimecodeInput(str) {
     h = p[p.length - 4] || 0;
   } else {
     if (!/^\d+$/.test(s)) return null;
+    if (s.length > 8) return null;
     const g = [];
     let r = s;
     while (r.length > 2) {

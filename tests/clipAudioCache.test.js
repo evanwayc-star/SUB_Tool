@@ -10,13 +10,14 @@ import { EventEmitter } from 'node:events';
 import { parse } from 'acorn';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Seq } from '../src/sequence.js';
+import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const require = createRequire(import.meta.url);
 const { createClipAudioCache, validateReverseAudioRequest } = require('../electron/clip-audio-cache.js');
 const { FileAuthority } = require('../electron/file-authority.js');
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 const { createIpcGuards } = require('../electron/ipc-guards.js');
-const FFMPEG = path.resolve('electron/ffmpeg/ffmpeg.exe');
+const { ffmpeg: FFMPEG } = nativeTestTools();
 const directories = [];
 
 function wav(value = 0.3, duration = 1, channels = 2) {

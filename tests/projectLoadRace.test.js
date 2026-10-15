@@ -93,6 +93,108 @@ function request(label, mediaPath, playhead = null) {
 }
 
 describe('project load transactions', () => {
+  it.each(['apply','load','loadDesktop','open'])('毀損陣列成員在公有 %s 入口拒絕，既有工作區與 restore owner 不變',async entry=>{
+    Object.assign(State,{tracks:[{name:'目前軌',visible:true}],trackCount:1,cues:[{id:'current',start:1,end:2,text:'目前字幕',track:0}],
+      notes:[{id:'note',time:2,text:'目前備註'}],mediaName:'current.mov',mediaPath:'C:/current.mov',presetEdit:{targetId:'current'}});
+    History.reset();
+    const snapshot=()=>JSON.stringify({cues:State.cues,tracks:State.tracks,notes:State.notes,mediaName:State.mediaName,mediaPath:State.mediaPath,presetEdit:State.presetEdit,history:History.stack});
+    for(const key of ['tracks','cues','clips','videoTracks','notes']){
+      for(const value of [null,[],42]){
+        const owns=Project.captureWorkspaceOwnership(),before=snapshot(),dirty=isProjectDirty();
+        const data={...projectData('Bad',''),[key]:[value]};
+        const input={b64:projectB64(data),path:'C:/bad.subtool'};
+        const result=entry==='apply'?Project.apply(data):entry==='load'?await Project.load(projectFile(data)):
+          entry==='loadDesktop'?await Project.loadDesktop(input):await Project.open(async()=>input,{confirm:false});
+        expect(result).toBe(false);
+        expect(snapshot()).toBe(before);
+        expect(owns()).toBe(true);
+        expect(isProjectDirty()).toBe(dirty);
+        expect(mediaMock.reset).not.toHaveBeenCalled();
+        expect(mediaMock.loadDesktopMedia).not.toHaveBeenCalled();
+      }
+    }
+  });
+  it('拒絕毀損專案後，既有缺檔還原計畫與延後播放點仍有效',async()=>{
+    desk.stat.mockResolvedValue({exists:false});
+    await Project.loadDesktop(request('A','C:/media/missing-A.mov',13));
+    const pending=Project.pendingMediaRelink(),owns=Project.captureWorkspaceOwnership();
+    const data={...projectData('Bad',''),cues:[null]};
+    await expect(Project.loadDesktop({path:'C:/bad.subtool',b64:projectB64(data)})).resolves.toBe(false);
+    expect(Project.pendingMediaRelink()).toEqual(pending);
+    expect(pending.plan.peekPlayhead()).toBe(13);
+    expect(owns()).toBe(true);
+    expect(State.cues[0].text).toBe('A');
+  });
+  it.each(['apply','load','loadDesktop','open'])('非有限片段軌索引在 %s 入口拒絕，不清掉目前專案',async entry=>{
+    Object.assign(State,{tracks:[{name:'目前軌',visible:true}],trackCount:1,cues:[{id:'current',start:1,end:2,text:'目前字幕',track:0}],
+      notes:[{id:'note',time:2,text:'保留備註'}],mediaName:'current.mov',mediaPath:'C:/current.mov',presetEdit:{targetId:'current'}});
+    History.reset();
+    const snapshot=()=>JSON.stringify({cues:State.cues,tracks:State.tracks,notes:State.notes,mediaName:State.mediaName,mediaPath:State.mediaPath,presetEdit:State.presetEdit,history:History.stack});
+    for(const vtrack of ['1e309','Infinity','NaN','1e308',1.5]){
+      const owns=Project.captureWorkspaceOwnership(),before=snapshot(),dirty=isProjectDirty();
+      const data={...projectData('Bad',''),clips:[{type:'image',path:'C:/still.png',dur:5,in:0,out:5,offset:0,vtrack}]};
+      const input={b64:projectB64(data),path:'C:/bad.subtool'};
+      const result=entry==='apply'?Project.apply(data):entry==='load'?await Project.load(projectFile(data)):
+        entry==='loadDesktop'?await Project.loadDesktop(input):await Project.open(async()=>input,{confirm:false});
+      expect(result).toBe(false);expect(snapshot()).toBe(before);expect(owns()).toBe(true);expect(isProjectDirty()).toBe(dirty);
+      expect(mediaMock.reset).not.toHaveBeenCalled();expect(mediaMock.loadDesktopMedia).not.toHaveBeenCalled();expect(desk.stat).not.toHaveBeenCalled();
+    }
+  });
+  it('合法的舊數字字串軌索引還原成數字，不拼接額外軌數',()=>{
+    const clip={type:'image',path:'C:/still.png',dur:5,in:0,out:5,offset:0,vtrack:'1'};
+    const data={...projectData('Image',''),clips:[clip],videoTrackCount:'2'};
+    expect(Project.apply(data)).toBe(true);
+    const restored=Project.pendingMediaRelink().plan.pendingClips()[0];
+    expect(restored.vtrack).toBe(1);expect(restored.vtrack+1).toBe(2);
+    expect(State.videoTracks).toHaveLength(2);expect(clip.vtrack).toBe('1');
+  });
+  it.each(['apply','load','loadDesktop','open'])('超出 Array 軌數／索引範圍在 %s 入口拒絕，工作區與還原資格不變',async entry=>{
+    Object.assign(State,{tracks:[{name:'目前軌',visible:true}],trackCount:1,cues:[{id:'current',start:1,end:2,text:'目前字幕',track:0}],
+      notes:[{id:'note',time:2,text:'保留備註'}],mediaName:'current.mov',mediaPath:'C:/current.mov',presetEdit:{targetId:'current'}});
+    History.reset();
+    const snapshot=()=>JSON.stringify({cues:State.cues,tracks:State.tracks,videoTracks:State.videoTracks,notes:State.notes,
+      mediaName:State.mediaName,mediaPath:State.mediaPath,presetEdit:State.presetEdit,history:History.stack});
+    const fixtures=[{trackCount:2**32},{videoTrackCount:String(2**32)},
+      {clips:[{type:'image',vtrack:2**32-1}]},
+      {version:1,cues:[{track:String(2**32-1)}]},{version:3,cues:[{track:2**32}]}];
+    for(const invalid of fixtures){
+      const owns=Project.captureWorkspaceOwnership(),before=snapshot(),dirty=isProjectDirty();
+      const data={...projectData('Bad',''),...invalid},raw=JSON.stringify(data);
+      const input={b64:projectB64(data),path:'C:/bad.subtool'};
+      const result=entry==='apply'?Project.apply(data):entry==='load'?await Project.load(projectFile(data)):
+        entry==='loadDesktop'?await Project.loadDesktop(input):await Project.open(async()=>input,{confirm:false});
+      expect(result).toBe(false);expect(snapshot()).toBe(before);expect(owns()).toBe(true);expect(isProjectDirty()).toBe(dirty);
+      expect(JSON.stringify(data)).toBe(raw);
+      expect(mediaMock.reset).not.toHaveBeenCalled();expect(mediaMock.loadDesktopMedia).not.toHaveBeenCalled();expect(desk.stat).not.toHaveBeenCalled();
+    }
+  });
+  it.each([1,2,3])('v%s Array 表示範圍內的巨大隱含軌數仍拒絕，不視為可操作容量',async version=>{
+    const {validateProjectIntegrity,migrateProjectSchema}=await import('../src/project.js');
+    const maxTrackCount=0xffffffff;
+    const data={...projectData('Boundary',''),version,trackCount:String(maxTrackCount),videoTrackCount:maxTrackCount,
+      clips:[{vtrack:maxTrackCount-1}],cues:[{track:version===1?maxTrackCount-1:maxTrackCount}]};
+    const integrity=validateProjectIntegrity(migrateProjectSchema(data));
+    expect(integrity.valid).toBe(false);
+    expect(integrity.errors.join(' ')).toMatch(/補建.*空軌/);
+  });
+  it('既有負數字串軌數與新版字幕索引保留原本的向零修復相容性',()=>{
+    expect(Project.apply({...projectData('Legacy',''),trackCount:'-1',videoTrackCount:'-1',cues:[{track:'-1',text:'舊字幕'}]})).toBe(true);
+    expect(State.tracks).toHaveLength(1);expect(State.videoTracks).toHaveLength(1);expect(State.cues[0].track).toBe(0);
+  });
+  it.each([1,3])('v%s 數字字串字幕軌索引維持原本基準，實際字幕列表可見',async version=>{
+    const {filteredSubtitleCues}=await import('../src/subtitles.js');
+    const cue={start:1,end:2,text:'字串索引字幕',track:'1'};
+    expect(Project.apply({version,fps:25,tracks:[{name:'軌一'},{name:'軌二'}],cues:[cue],clips:[],notes:[]})).toBe(true);
+    State.listTrack=version===1?1:0;
+    expect(State.cues[0].track).toBe(State.listTrack);expect(filteredSubtitleCues().map(c=>c.text)).toEqual(['字串索引字幕']);
+    expect(cue.track).toBe('1');
+  });
+  it.each([{trackCount:'Infinity'},{videoTrackCount:'Infinity'},{videoTrackCount:'NaN'},{cues:[{track:'Infinity'}]},
+    {trackCount:'1e308'},{videoTrackCount:1e308},{cues:[{track:'1e308'}]}])('無效軌索引 %j 在套用前拒絕',data=>{
+    const owns=Project.captureWorkspaceOwnership();
+    expect(Project.apply(data)).toBe(false);
+    expect(owns()).toBe(true);
+  });
   beforeEach(async () => {
     vi.resetModules();
     document.body.innerHTML = '<div id="historyList"></div>';
@@ -127,6 +229,88 @@ describe('project load transactions', () => {
     uiMock.openModal.mockClear();
     uiMock.closeModal.mockClear();
     uiMock.setStatus.mockClear();
+  });
+
+  it.each([1,3])('v%s 專案載入先吸附保存的字幕秒數，再建立 History 與存檔基準',async version=>{
+    const data={version,fps:24,duration:5,media:{},clips:[],notes:[],
+      cues:[{start:1.04,end:2.04,text:'舊版字幕',track:version===1?0:1}]};
+    await Project.loadDesktop({b64:projectB64(data)});
+    const expected={start:25/24,end:49/24};
+    expect(State.cues[0]).toMatchObject(expected);
+    expect(History.stack[0].snap.cues[0]).toMatchObject(expected);
+    expect(isProjectDirty()).toBe(false);
+    desk.saveProject=vi.fn(async()=> 'C:/saved.subtool');
+    await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(desk.saveProject.mock.calls[0][1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.cues[0]).toMatchObject(expected);
+    State.cues[0].text='編輯後';History.record('編輯字幕');
+    History.undo();expect(State.cues[0]).toMatchObject({...expected,text:'舊版字幕'});
+    History.redo();expect(State.cues[0]).toMatchObject({...expected,text:'編輯後'});
+    resetProject();
+  });
+
+  it('首次媒體復原完成前取消推子草稿，History/live/save/DOM/gain 同步保留原音量',async()=>{
+    const loadingMedia=deferred();
+    desk.stat.mockResolvedValue({exists:true});
+    mediaMock.loadDesktopMedia.mockReturnValue(loadingMedia.promise);
+    mediaMock.tracks=[];mediaMock.getSources=()=>[];
+    const gains=[];mediaMock.applyGains=vi.fn(()=>gains.push(State.audioProject.buses[0]?.volume));
+    const data={...projectData('Fader','C:/media/Fader.mov'),
+      audioProject:{buses:[{id:'bus',name:'A1',volume:1,muted:false,solo:false}],sourceMaps:{}}};
+    const loading=Project.loadDesktop({b64:projectB64(data)});
+    await vi.waitFor(()=>expect(mediaMock.loadDesktopMedia).toHaveBeenCalled());
+    document.body.innerHTML+='<div id="atList"></div><div id="mixerPanel" class="show"><div id="mixerStrips"></div></div>';
+    const {renderMixer}=await import('../src/mixer.js');renderMixer();
+    const fader=document.querySelector('.mx-fader');fader.value='40';fader.dispatchEvent(new Event('input'));
+    State.audioProject.buses[0].name='背景名稱';
+    expect(State.audioProject.buses[0].volume).toBe(.4);
+    expect(History.committedSnapshot().audioProject.buses[0].volume).toBe(1);
+    loadingMedia.resolve();await loading;
+    expect(State.audioProject.buses[0]).toMatchObject({volume:1,name:'背景名稱'});
+    expect(History.stack[0].snap.audioProject.buses[0]).toMatchObject({volume:1,name:'背景名稱'});
+    expect(History.committedSnapshot().audioProject.buses[0].volume).toBe(1);
+    expect(document.querySelector('.mx-fader').value).toBe('100');
+    expect(document.querySelector('.mx-fader-val').textContent).toBe('0.0 dB');
+    expect(gains.at(-1)).toBe(1);
+    desk.saveProject=vi.fn(async()=> 'C:/saved.subtool');await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(desk.saveProject.mock.calls[0][1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.audioProject.buses[0]).toMatchObject({volume:1,name:'背景名稱'});
+    fader.dispatchEvent(new Event('change'));expect(History.stack).toHaveLength(1);
+    resetProject();
+  });
+
+  it('首次媒體復原完成前撤銷仍等預覽畫格的速度草稿，head/live/save 保持原速度與後續位置',async()=>{
+    const loadingMedia=deferred(),frame=deferred();
+    desk.stat.mockResolvedValue({exists:true});
+    const {Seq}=await import('../src/sequence.js');
+    mediaMock.loadDesktopMedia.mockImplementation((_path,plan)=>{
+      Seq.restore(plan.pendingClips());return loadingMedia.promise;
+    });
+    mediaMock.capturePlaybackTargetOwnership=()=>()=>true;
+    mediaMock.refreshClipPlayback=vi.fn().mockReturnValueOnce(frame.promise).mockResolvedValue(true);
+    const data=projectData('Speed','C:/media/Speed.mov');
+    data.clips[0].in=0;data.clips[0].out=8;data.clips[0].dur=8;
+    data.clips.push({id:'next',name:'next',path:'C:/media/next.mov',in:0,out:2,dur:2,offset:8,vtrack:0});
+    const loading=Project.loadDesktop({b64:projectB64(data)});
+    await vi.waitFor(()=>expect(mediaMock.loadDesktopMedia).toHaveBeenCalled());
+    const clip=State.clips[0],next=State.clips[1];
+    const {setClipSpeed}=await import('../src/clip-model.js');
+    const editing=setClipSpeed(clip,.5);
+    expect(clip.speed).toBe(.5);expect(next.offset).toBe(16);
+    next.name='背景名稱';
+    expect(History.committedSnapshot().clips[0]).not.toHaveProperty('speed');
+    loadingMedia.resolve();await loading;
+    expect(clip.speed).toBeUndefined();expect(next.offset).toBe(8);
+    expect(mediaMock.refreshClipPlayback.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(History.stack[0].snap.clipGeo[0].speed).toBe(1);
+    expect(History.stack[0].snap.clipGeo[1]).toMatchObject({offset:8,name:'背景名稱'});
+    desk.saveProject=vi.fn(async()=> 'C:/saved.subtool');await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(desk.saveProject.mock.calls[0][1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.clips[0].speed).toBe(1);expect(saved.clips[1]).toMatchObject({offset:8,name:'背景名稱'});
+    frame.resolve(true);expect(await editing).toBe(false);
+    expect(clip.speed).toBeUndefined();expect(next.offset).toBe(8);expect(History.stack).toHaveLength(1);
+    expect(mediaMock.refreshClipPlayback).toHaveBeenCalledTimes(2);
+    resetProject();
   });
 
   it('開啟入口依使用者請求順序，較早 picker 晚返回不得蓋掉最新專案', async () => {

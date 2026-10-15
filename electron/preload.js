@@ -166,6 +166,9 @@ contextBridge.exposeInMainWorld('subtool', {
     present:   (t, options) => ipcRenderer.invoke('mpv:present', t, {
       exact: options?.exact === true,
       tolerance: Number.isFinite(Number(options?.tolerance)) ? Number(options.tolerance) : undefined,
+      frameTarget: Number.isFinite(Number(options?.frameTarget)) ? Number(options.frameTarget) : undefined,
+      frameStart: options?.frameStart!=null&&Number.isFinite(Number(options.frameStart)) ? Number(options.frameStart) : undefined,
+      frameDuration: Number.isFinite(Number(options?.frameDuration)) ? Number(options.frameDuration) : undefined,
     }),
     cancelPresent: () => ipcRenderer.invoke('mpv:cancelPresent'),
     loadfile:  (p)     => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('mpv:loadfile', p); },

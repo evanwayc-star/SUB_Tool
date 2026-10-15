@@ -6,7 +6,7 @@
      - 縮放或位置的夾限沒了 → 圖片被拖到畫面外，或縮到肉眼看不見卻仍佔著資源；
      - 旋轉的 15° 吸附或角度正規化壞掉 → 角度變成 350°，匯出時 ASS 的 \frz 也跟著錯。
 
-   createPreviewDrag(deps) 是工廠（見 pointer-interaction.js 檔頭），
+   createPreviewDrag(deps) 是工廠（見 timeline-interaction-engine.js 的同名入口），
    依賴走建構參數、拖曳狀態是實例欄位——所以這裡可以建立互不干擾的實例直接測。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

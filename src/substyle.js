@@ -30,7 +30,7 @@ export const STYLE_DEFAULTS = {
   bold: true, italic: false,
   fontSize: 80, color: '#ffffff',
   letterSpacing: 1,     // px 字距（ASS Spacing / CSS letter-spacing）；直書時不適用（逐字換行）
-  lineSpacing: 1.0,     // 行高倍數 1.0~3.0（CSS line-height；ASS 行間墊高 hack）；直書時＝字與字的間隔
+  lineSpacing: 1.0,     // 行高倍數（UI/metadata 1.0~100）；CSS line-height、ASS 行間墊高；直書時＝字與字的間隔
   outline: 2,           // px 框線厚度（ASS Outline / CSS text-stroke）
   outlineColor: '#000000',
   shadow: 0,            // px 陰影（ASS Shadow / CSS text-shadow 右下偏移）
@@ -52,10 +52,13 @@ export const CUE_STYLE_KEYS = ['font','bold','italic','fontSize','color','letter
 
 const STYLE_BOOL_KEYS = new Set(['bold','italic','vertical','bgBox']);
 const STYLE_COLOR_KEYS = new Set(['color','outlineColor','bgColor']);
-const STYLE_NUMBER_LIMITS = {
-  fontSize:[10,300], letterSpacing:[0,30], lineSpacing:[1,3], outline:[0,10], shadow:[0,10],
+const STYLE_NUMBER_LIMITS = Object.freeze(Object.fromEntries(Object.entries({
+  fontSize:[10,300], letterSpacing:[0,100], lineSpacing:[1,100], outline:[0,10], shadow:[0,10],
   bgAlpha:[0,1], posX:[0,100], posY:[0,100], angle:[-180,180],
-};
+}).map(([key,limits])=>[key,Object.freeze(limits)])));
+
+// 控件與新修改的 metadata 共用這組範圍；舊專案數值未修改時仍原樣保留。
+export function styleNumberBounds(key){ return Object.hasOwn(STYLE_NUMBER_LIMITS,key) ? STYLE_NUMBER_LIMITS[key] : null; }
 
 // 持久化資料只能在這個入口取得 canonical style；metadata 可要求既有的嚴格範圍。
 // 一般專案／preset 不把較大字級、畫面外座標或多圈旋轉截成 UI slider 的範圍。
@@ -468,24 +471,7 @@ export async function loadPresets(){
     // 載入只擁有開始時的樣式庫；期間的新儲存也撤銷舊資料的遷移寫回。
     if(revision !== _presetsRevision) return getPresets();
     _presets = validPresetList(loaded);
-    if (_presets.length) {
-      let migrated = false;
-      _presets.forEach(p => {
-        if (!p.group && p.name && p.name.indexOf('-') > 0) {
-          const idx = p.name.indexOf('-');
-          const group = p.name.substring(0, idx).trim();
-          const name = p.name.substring(idx + 1).trim();
-          // 新版允許名稱含連字號；只有完整的舊「資料夾-名稱」才可拆分。
-          if (!group || !name) return;
-          const key = presetIdentity({ ...p, group, name });
-          if (isBuiltinPresetName(name) || _presets.some(other => other !== p && presetIdentity(other) === key)) return;
-          p.group = group;
-          p.name = name;
-          migrated = true;
-        }
-      });
-      if (migrated) savePresets(_presets);
-    }
+    // 缺少 group 的舊名稱與新版合法的連字號名稱同形，載入不可猜測並改寫 identity。
     return _presets;
   })().finally(()=>{ _presetsLoading = null; });
   return _presetsLoading;

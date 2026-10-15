@@ -473,13 +473,27 @@ const _imgNatCache = new Map();
 function _imageNat(c, src){
   if(c.natW > 0 && c.natH > 0) return { w:c.natW, h:c.natH };
   const hit = _imgNatCache.get(src);
-  if(hit){ if(hit.w > 0){ c.natW = hit.w; c.natH = hit.h; } return hit; }
-  _imgNatCache.set(src, { w:0, h:0 }); // 佔位：避免每一格都重新發一次請求
+  if(hit&&hit.ownsMedia()){
+    if(hit.w > 0){ c.natW = hit.w; c.natH = hit.h; }
+    return hit;
+  }
+  const ownsMedia=Media.captureMediaOwnership();
+  const entry={w:0,h:0,ownsMedia};
+  _imgNatCache.set(src,entry); // 佔位：避免每一格都重新發一次請求
   const probe = new Image();
   probe.onload = () => {
+    if(!ownsMedia()){
+      if(_imgNatCache.get(src)===entry) _imgNatCache.delete(src);
+      return;
+    }
     const w = probe.naturalWidth || 0, h = probe.naturalHeight || 0;
-    _imgNatCache.set(src, { w, h });
-    if(w > 0){ const live = Seq.byId(c.id); if(live){ live.natW = w; live.natH = h; } }
+    entry.w=w;entry.h=h;
+    if(w > 0){
+      const live=Seq.byId(c.id);
+      if(live&&imageSourceUrl(live)===src&&!(live.natW>0&&live.natH>0)){
+        live.natW=w;live.natH=h;
+      }
+    }
     renderImageOverlays();
   };
   probe.onerror = () => {};
@@ -537,15 +551,15 @@ export function renderImageOverlays(){
   // MPV 的原生畫面在主 DOM 上方，圖片外觀交給透明 guide 顯示；互動始終由
   // 這個主 renderer 的 #imageLayer 收到，不能另建第二條 native pointer 路徑。
   imageClips.forEach(c => {
-    // 幾何（scale／posX／posY／所在視訊軌的 PiP）一律走 _imageBoxOf → image-geometry.js
+    // 幾何（scale／posX／posY／所在視訊軌的 PiP）由 image-compositor-engine.js 的 imageLayerPlan() 共用 imageBoxOnStage()
     const opacity = (State.videoTracks[c.vtrack || 0]?.opacity ?? 1);
 
-    // 淡入淡出的長度、斜坡與時間域轉換只有 clip-fade.js 一份規格；匯出側套用同一組數字。
+    // image-compositor-engine.js 的 fadeAlphaAtTimeline() 共用 shared/clip-fade.cjs 淡入淡出規格；匯出側套用同一組數字。
     const alpha = Math.max(0, Math.min(1, opacity * fadeAlphaAtTimeline(c, t)));
 
     const imgSrc = _imageSrc(c);
 
-    /* 互動框＝圖片【實際被畫出來的那塊】（見 image-geometry.js）。
+    /* 互動框＝圖片【實際被畫出來的那塊】（見 image-compositor-engine.js 的 imageLayerPlan()）。
        舊版直接把「scale×畫框」當成 .img-wrap，非 16:9 的素材會讓虛線框與四角把手
        離圖片本體上百 px，下緣兩顆還會掉到播放列底下＝拉不到、也移不準。 */
     const nat=_imageNat(c,imgSrc);
@@ -627,7 +641,7 @@ export const previewDrag = createPreviewDrag({
   renderVideoSub,
   drawTimeline,
   recordHistory,
-  beginPreview:targets=>History.beginPreview(targets),
+  beginPreview:(targets,owns,cancel)=>History.beginPreview(targets,owns,cancel),
   imageBoxOf: _imageBoxOf,
   getPresetEdit: () => State.presetEdit,
   refreshMpvSubs,

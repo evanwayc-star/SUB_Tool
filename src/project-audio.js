@@ -69,6 +69,8 @@ function externalAudioPlacements(externalSources){
         offset: nonNeg(asset.offset),
         trimStart,
         trimEnd,
+        speed: Number(asset.speed)>0?Number(asset.speed):1,
+        reverse: !!asset.reverse,
         fadeIn: nonNeg(asset.fadeIn),
         fadeOut: nonNeg(asset.fadeOut),
         ...(asset.fadeSourceLength != null ? {
@@ -270,7 +272,7 @@ class ProjectAudioInterpretation {
            這正是過去交付端按母素材各算一次 Solo 時發生的漂移。 */
         const sourceState = sourceTrack
           ? this.sourceTrackState(sourceTrack, { respectHidden: false })
-          : { audible: !this.anySourceSolo, gain: this.anySourceSolo ? 0 : 1 };
+          : { audible: !this.anySourceSolo&&!source.muted, gain: this.anySourceSolo||source.muted ? 0 : 1 };
         if (!sourceState.audible) continue;
         const routeGain = gainValue(route.gain);
 

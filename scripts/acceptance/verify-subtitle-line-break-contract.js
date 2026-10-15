@@ -58,6 +58,7 @@ async function cleanupProfile(profileDir) {
     '.',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
+    '--subtool-transport-acceptance',
     '--no-sandbox',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
@@ -77,6 +78,7 @@ async function cleanupProfile(profileDir) {
     }, 'SUB Tool 主視窗啟動', 15000);
     client = new CdpClient(target.webSocketDebuggerUrl);
     await client.connect();
+    await client.waitForApp();
     await client.send('Runtime.enable');
     await client.send('Page.enable');
     await client.send('Page.bringToFront');

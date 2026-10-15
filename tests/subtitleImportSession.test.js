@@ -30,6 +30,18 @@ beforeEach(()=>{
 afterEach(()=>{ui.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('字幕匯入工作歸屬',()=>{
+  it('短 SRT 匯入較低 FPS 後仍保有一格，TXT 保留未定時',()=>{
+    State.fps=24;
+    const parsed=subio._parseSubtitleText('1\n00:00:00,067 --> 00:00:00,100\n一格\n','srt');
+    subio._openImportModal('短 SRT',parsed,'srt');
+    document.getElementById('importTkSel').value='0';
+    document.querySelector('#modalFoot button.primary').click();
+    expect(State.cues[0].end-State.cues[0].start).toBeCloseTo(1/24,8);
+    subio._openImportModal('未定時 TXT',subio._parseSubtitleText('未定時','txt'),'txt');
+    document.getElementById('importTkSel').value='0';
+    document.querySelector('#modalFoot button.primary').click();
+    expect(State.cues.at(-1)).toMatchObject({start:0,end:0,timed:false});
+  });
   it('同名不同folder在字幕匯入中套用指定identity',async()=>{
     const styles=await import('../src/substyle.js');
     styles.savePresets([{name:'same',group:'A',style:{fontSize:40}},{name:'same',group:'B',style:{fontSize:90}}]);

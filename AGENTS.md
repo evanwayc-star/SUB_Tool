@@ -255,7 +255,7 @@ grep -rn "from './app.js'" src   # 應為空——不可再引入對 app.js 的�
 | 圍籬 | 內容 | 例外 |
 |------|------|------|
 | **選取狀態** | 不可直接寫 `State.selectedId` / `selectedIds` / `selectedClipId` / `selectedAudioClipId` / `activeTrackKind`，改用 `setSelection` / `deselect` / `pruneSelection` / `focusTrackKind` | `src/state.js` |
-| **Media 內部** | 不可讀寫 `Media._*`，改用公開入口（`activeClip()` / `inGap()` / `sourceLocalTime()` / `mpvPresenting()` / `webCodecsTakeover()`…） | `src/media.js` |
+| **Media 內部** | 不可讀寫 `Media._*`，改用公開入口（`activeClip()` / `inGap()` / `sourceLocalTime()` / `mpvPresenting()` / `webCodecsTakeover()`…） | 內部實作清單以 [eslint.config.mjs](eslint.config.mjs) 的 `MEDIA_INTERNAL_FILES` 為準 |
 
 > `no-restricted-syntax` 在 flat config 裡是**整組取代**而非累加。兩條圍籬因此寫在
 > 同一份清單再依檔案拆 block；分開寫成兩個 block 會讓後者**無聲地**關掉前者。

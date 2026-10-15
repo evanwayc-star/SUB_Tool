@@ -1,33 +1,23 @@
 /* ==============================================================================
    SUB Tool — 媒體播放引擎與音訊路由模組 (Media Engine)
    ==============================================================================
-   
+
    【架構與職責總覽】
    本檔案 (media.js) 是本專案最核心、最龐大的模組，主要負責以下三大領域：
-   
+
    1. 雙重播放引擎 (Dual-Engine Playback)
       為了兼顧 Web 的輕量以及專業級編碼 (如 MXF, 10-bit ProRes) 的支援，
       本模組會動態決定使用底層 Chromium 的 HTMLMediaElement 或是透過 IPC
       喚起 `mpv` 作為原生子視窗進行渲染。兩者皆統一抽象為 Media API，對上層
       (如時間軸、字幕操作) 隱藏底層差異。
-      
+
    2. 時間同步機制 (Time Synchronization)
       因為音訊、影片、以及 mpv IPC 都有各自的時間來源，
-      本模組由 `app-ticker.js` 的單一 `requestAnimationFrame` 時鐘驅動，將這三者的時間軸
+      本模組由 `app.js` 的 `startAppTicker()`／`rafLoop()` 單一 `requestAnimationFrame` 時鐘驅動，將這三者的時間軸
       強制對齊；不得另開第二個同步 interval。所有的 `currentTime` 必須經由 `sequence.js` 轉換為
       「來源時間 (Source Time)」後，才能餵給底層播放器，以實現影片裁切
       (In/Out) 與偏移 (Offset) 的視覺連貫。
-      
-   3. 多軌音訊與匯流排 (Web Audio API Routing & Bus)
-      為了讓使用者能在一條時間軸上排列多支影片並對其音軌進行混音，
-      本檔案建立了一套 AudioContext 的連線圖 (Audio Graph)。
-      將不同的音訊來源 (AudioSourceNode) 映射至各匯流排 (AudioBusNode)，
-      並最終輸出。同時，這也為波形 (Waveform) 的繪製提供了 PCM 資料來源。
 
-   【維護鐵律】
-      「來源時間 (Source Time)」後，才能餵給底層播放器，以實現影片裁切
-      (In/Out) 與偏移 (Offset) 的視覺連貫。
-      
    3. 多軌音訊與匯流排 (Web Audio API Routing & Bus)
       為了讓使用者能在一條時間軸上排列多支影片並對其音軌進行混音，
       本檔案建立了一套 AudioContext 的連線圖 (Audio Graph)。
@@ -48,6 +38,7 @@ import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { Seq } from './sequence.js';
 import { createAudioEffects } from './audio-effects.js';
 import { createMpvSourceTransition } from './mpv-source-transition.js';
+import { sourceFrameWindow, sourcePresentationMetadata, clearSourceFrameIndexes } from './decode/source-frame-index.js';
 import { audioLimiterSnapshot, audioMotherPath, normalizeAudioLimiterSpec } from '../shared/audio-loudness.cjs';
 
 const _defaultNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -358,12 +349,18 @@ const Media = {
         entry.node=AudioEngine.createMediaElementSource(el);
       }
       // 波形只需低取樣率預覽，不能把數小時的高取樣率 PCM 整份載入 renderer。
-      const wavePath=DESK.waveAudio?await DESK.waveAudio(result.outputPath,source.dur||source.duration||0):result.outputPath;
+      const duration=source.dur||source.duration||0,wavePaths=[];
+      for(const stream of prepared.streams){
+        stream.wavePath=DESK.waveAudio?await DESK.waveAudio(stream.outputPath,duration):stream.outputPath;
+        wavePaths.push(stream.wavePath);
+        if(!owns()){ prepared.dispose(); return null; }
+      }
+      const waveform=await Wave.preparePcmMix(wavePaths,{duration,owns});
       if(!owns()){ prepared.dispose(); return null; }
-      const url=await DESK.fileURL(wavePath);
-      const data=await fetch(url).then(r=>r.arrayBuffer());
-      if(!owns()){ prepared.dispose(); return null; }
-      prepared.peaks=Wave.calcFromWav(data);
+      prepared.waveformPath=waveform?.path?Object.freeze({...waveform.path,
+        sourceStreams:Object.freeze(prepared.streams.map(stream=>stream.sourceStream)),
+      }):null;
+      prepared.peaks=waveform?.peaks;
       return prepared;
     }catch(error){ prepared.dispose(); throw error; }
   },
@@ -398,10 +395,13 @@ const Media = {
     }
     this.tracks=this.tracks.filter(t=>t.audioSourceId!==key).concat(replacement);
     const peaks=prepared?.peaks||this._effectOriginalPeaks.get(key)||null;
+    const waveformChannels=prepared?replacement.map(track=>({sourceStream:track.sourceStream,sourceChannel:track.sourceChannel,
+      label:track.name,file:prepared.streams.find(stream=>stream.sourceStream===track.sourceStream)?.wavePath,
+      pcmChannel:track.sourceChannel})):null;
     for(const target of this.audioEffects.targets(source)){
       target.peaks=peaks;
       Wave.forgetSourceWaveforms(target);
-      if(peaks) Wave.setSourceMixPeaks(target,peaks,{mixPath:prepared?.outputPath||audioMotherPath(target),channels:target.descriptors});
+      if(peaks) Wave.setSourceMixPeaks(target,peaks,{mixPath:prepared?.waveformPath||audioMotherPath(target),channels:waveformChannels||target.descriptors});
     }
     if(source.primary||source.audioSrc==='video') Wave.peaks=peaks;
     if(!spec){ this._effectOriginalTracks.delete(key);this._effectOriginalPeaks.delete(key); }
@@ -446,7 +446,7 @@ const Media = {
     this.tracks.push(...incoming);
   },
   _commitOriginalWave(source,wave,details){
-    const buffer=wave&&typeof wave.getChannelData==='function';
+    const buffer=wave&&(Array.isArray(wave)||typeof wave.getChannelData==='function');
     if(this.tracks.some(track=>track.audioSourceId===source.audioSourceId&&track._audioEffect)){
       this._effectOriginalPeaks.set(source.audioSourceId,buffer?Wave.calcPeaks(wave,-1):wave);
       return;
@@ -485,6 +485,9 @@ const Media = {
           tracks:()=>this.tracks,
           externalSourceTime:(source,t)=>this.externalAudio.sourceTime(source,t),
           sourceLocalTime:(source,t)=>this._srcLocalT(source,t),
+          playerTime:(track,time)=>getPlayerAdapter().playerTime(time,track.el?.currentSrc||track.el?.src),
+          seekElement:(track,time)=>getPlayerAdapter().seekElement(track.el,time),
+          cancelElementSeek:track=>getPlayerAdapter().cancelElementSeek(track.el),
         },
         actions: {
           pause:()=>this.pause(),
@@ -528,6 +531,7 @@ const Media = {
   _reverseProxyActive:false,
   _reverseRestorePromise:null,
   _seekIntentVersion:0,
+  _seekIntentOwner:null,
   _deferredInitialAudioIngest:null,
   _deferredInitialAudioTimer:null,
   _deferredPrimaryProxy:null,
@@ -548,6 +552,10 @@ const Media = {
     return operation || this._assetEpoch.capture(identity,upstreamOwns);
   },
   _ownsAssetOperation(operation){ return this._assetEpoch.owns(operation); },
+  captureMediaOwnership(){
+    const operation=this._assetOperation(null,'source-metadata');
+    return ()=>this._ownsAssetOperation(operation);
+  },
   _liveClipForSource(sourceClip){ return liveClipForSource(State.clips,sourceClip); },
   _sourceStillReferenced(sourceClip){ return !!this._liveClipForSource(sourceClip); },
   _beginExternalAssetEdit(asset){
@@ -558,7 +566,7 @@ const Media = {
   _ownsExternalAssetEdit(token){
     return !!token&&this._externalRestoreVersion===token.restoreVersion&&
       this._externalAssetEditVersions.get(token.asset)===token.version&&
-      this.externalAudioSources.includes(token.asset);
+      this.externalAudioSources.includes(token.asset)&&!token.asset.locked;
   },
   _invalidateExternalAssetEdit(asset){
     if(asset) this._externalAssetEditVersions.set(asset,(this._externalAssetEditVersions.get(asset)||0)+1);
@@ -569,6 +577,7 @@ const Media = {
     try{ URL.revokeObjectURL(url); }catch(error){}
   },
   _disposeMediaElement(element){
+    getPlayerAdapter().cancelElementSeek?.(element);
     if(!element) return;
     destroyScrubber(element);
     try{ element.pause?.(); }catch(error){}
@@ -577,6 +586,9 @@ const Media = {
   activeSource:null, // null=全部混音；'video'=影片原音；'ext-xxx'=外部檔案
   pendingChannels:[], // 背景抽取音軌時的「準備中」聲道（讓混音器立即顯示推桿，逐一就緒）
   audioPanelNotice:null, // 網頁版能力限制的持續提示；renderAudioTracks 不得用 bus 數覆蓋
+  _audioExtraction:null,
+  _audioProbeVersion:0,
+  audioPanelState(){ return {notice:this.audioPanelNotice,extraction:this._audioExtraction}; },
   // 外部音檔不是影片 clip，但仍是可路由／可輸出的專案音源。
   // 每筆都提供 clip 相容的 id/name/audioSourceId/audioSrc/offset/in/out，供路由 UI
   // 或匯出端以同一套資料模型讀取；真正的播放群組仍用 audioSrc（ext-*）。
@@ -596,8 +608,8 @@ const Media = {
       Promise.resolve(DESK.releaseStream(previous)).catch(()=>{});
     }
   },
-  /* 由 ffprobe 的 audio[] 推算出每個聲道的標籤。展開順序**必須**與 main.js ingest
-     一致（它依同一順序抽出 ch_01.m4a、ch_02.m4a…），規則在 channel-layout.js，
+   /* 由 ffprobe 的 audio[] 推算出每個聲道的標籤。展開順序**必須**與 media-intake-runtime.js ingest
+      一致（它依同一順序抽出 ch_01.m4a、ch_02.m4a…），規則在 shared/channel-layout.cjs，
      由 tests/channelLayoutContract.test.js 鎖住兩邊不漂掉。 */
   /* 將 ffprobe / ingest 的實體聲道資料登錄到可儲存的 project audio model。
      `sourceStream` / `sourceChannel` 一律採 0-based；UI 才加 1 顯示。 */
@@ -685,7 +697,7 @@ const Media = {
           const off = this.externalAudio.sourceTime(source, t);
           try {
             if(off == null) tr.el.pause();
-            else tr.el.currentTime = clamp(off, 0, tr.el.duration || off);
+            else {getPlayerAdapter().seekElement(tr.el,off)?.catch?.(()=>{});}
           } catch(e) {}
         }
       }
@@ -726,6 +738,10 @@ const Media = {
   setExternalAudioLocked(key, locked){
     const asset=this.externalAudio.setLocked(key, locked);
     if(!asset) return null;
+    const lane=asset.timelineLaneId||asset.audioSourceId;
+    for(const item of this.externalAudioSources){
+      if((item.timelineLaneId||item.audioSourceId)===lane) this._invalidateExternalAssetEdit(item);
+    }
     this._syncExternalAudioState();
     return asset;
   },
@@ -903,9 +919,11 @@ const Media = {
         audioSourceId:restoredSource?.audioSourceId,
         timelineLaneId:restoredSource?.timelineLaneId,
         duration,
-        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || State.audioSources.length > 0)) ? this.displayTime() : 0),
+        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || this.externalAudioSources.length > 0)) ? this.displayTime() : 0),
         in:restoredSource?.in,
         out:restoredSource?.out,
+        speed:restoredSource?.speed,
+        reverse:restoredSource?.reverse,
         gain:restoredSource?.gain,
         fadeIn:restoredSource?.fadeIn,
         fadeOut:restoredSource?.fadeOut,
@@ -1058,10 +1076,15 @@ const Media = {
   },
 
   async probeAndMaybeExtract(file,{owns=()=>true}={}){
+    const version=++this._audioProbeVersion;
+    const operation=this._assetOperation(null,{kind:'web-audio-probe',file},owns);
+    const current=()=>this._audioProbeVersion===version&&this._ownsAssetOperation(operation);
+    owns=current;
     if(!owns()) return false;
     // 大檔限制必須先於 audioTracks 早退判斷；即使瀏覽器列得出多個 stream，
     // HTMLMediaElement 仍只提供 Stereo 播放路徑，不能宣稱已載入全部來源聲道。
     this.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:true});
+    this._audioExtraction=null;
     // 嘗試以原生 audioTracks 偵測；多數瀏覽器不支援，故主要靠 ffmpeg
     try{
       const at=video.audioTracks;
@@ -1082,8 +1105,13 @@ const Media = {
         if(!owns()) return;
         if(streams && streams.aCount>1){
           showToast(`此檔含 ${streams.aCount} 條音軌，點音軌面板的「抽取多軌」以同時混音`);
-          $('atHint').innerHTML=`含 ${streams.aCount} 條音軌 · <a href="#" id="extractLink" style="color:var(--accent)">抽取多軌混音</a>`;
-          $('extractLink').onclick=(e)=>{e.preventDefault();this.extractAllAudio(file,streams.aCount,{owns});};
+          const extraction={count:streams.aCount,run:async()=>{
+            if(!owns()||this._audioExtraction!==extraction) return false;
+            const result=await this.extractAllAudio(file,streams.aCount,{owns});
+            if(result&&owns()&&this._audioExtraction===extraction){ this._audioExtraction=null; notifyAudioTracks(); }
+            return result;
+          }};
+          this._audioExtraction=extraction; notifyAudioTracks();
         }
       }).catch(()=>{});
     }else{
@@ -1107,16 +1135,25 @@ const Media = {
       const metadata=await waitForOwnedMediaMetadata(el,{owns,timeoutMs:10000});
       if(metadata==='cancelled'||!owns()){ this._disposeMediaElement(el); this._releaseObjectURL(url); return null; }
       if(metadata!=='ready') throw new Error('無法讀取此音訊檔 ('+file.name+')');
+      const sourceInfo=await sourcePresentationMetadata(url,{owns});
+      if(!owns()){ this._disposeMediaElement(el); this._releaseObjectURL(url); return null; }
+      const adapter=getPlayerAdapter();
+      adapter.registerSourceClock(url,sourceInfo);
+      await adapter.seekElement(el,0,{owns});
+      if(!owns()){ this._disposeMediaElement(el); this._releaseObjectURL(url); return null; }
+      const sourceDuration=maxKnownSourceDuration(sourceInfo?.duration,adapter.sourceDuration(el.duration,url));
       const node=AudioEngine.createMediaElementSource(el);
       const chCount=Math.max(1,node.channelCount||2);
       const asset=this.createExternalAudioSource({
         name:restoredSource?.name||file.name,
         audioSourceId:restoredSource?.audioSourceId,
         timelineLaneId:restoredSource?.timelineLaneId,
-        duration:el.duration||0,
-        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || State.audioSources.length > 0)) ? this.displayTime() : 0),
+        duration:sourceDuration,
+        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || this.externalAudioSources.length > 0)) ? this.displayTime() : 0),
         in:restoredSource?.in,
         out:restoredSource?.out,
+        speed:restoredSource?.speed,
+        reverse:restoredSource?.reverse,
         gain:restoredSource?.gain,
         fadeIn:restoredSource?.fadeIn,
         fadeOut:restoredSource?.fadeOut,
@@ -1130,7 +1167,7 @@ const Media = {
         fallbackCount:chCount,
         file
       });
-      this.updateExternalAudioSourceDuration(asset,el.duration||0);
+      this.updateExternalAudioSourceDuration(asset,sourceDuration);
       const newTracks=this._splitToChannelTracks(node,asset.audioSrc,el,chCount,asset,asset.descriptors);
       this.tracks.push(...newTracks);
       // 外部音檔是時間軸素材，不是「切換成唯一可聽音源」的播放器模式。
@@ -1187,9 +1224,14 @@ const Media = {
       const fileUrl=await DESK.fileURL(p);
       if(!owns()) return null;
       el=new Audio(); el.src=fileUrl; el.preload='auto';
+      const adapter=getPlayerAdapter();
+      adapter.registerSourceClock(fileUrl,info?.video||info?.audio?.[0]);
       const metadata=await waitForOwnedMediaMetadata(el,{owns,timeoutMs:10000});
       if(metadata==='cancelled'||!owns()){ this._disposeMediaElement(el); return null; }
       if(metadata!=='ready') throw new Error('音訊元素載入失敗：'+p);
+      await adapter.seekElement(el,0,{owns});
+      if(!owns()){ this._disposeMediaElement(el); return null; }
+      const sourceDuration=maxKnownSourceDuration(info?.duration,adapter.sourceDuration(el.duration,fileUrl));
       const node=AudioEngine.createMediaElementSource(el);
       const probedDescriptors=probeAudioChannelDescriptors(info?.audio);
       asset=this.createExternalAudioSource({
@@ -1197,10 +1239,12 @@ const Media = {
         path:p,
         audioSourceId:restoredSource?.audioSourceId,
         timelineLaneId:restoredSource?.timelineLaneId,
-        duration:el.duration||info?.duration||0,
-        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || State.audioSources.length > 0)) ? this.displayTime() : 0),
+        duration:sourceDuration,
+        offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || this.externalAudioSources.length > 0)) ? this.displayTime() : 0),
         in:restoredSource?.in,
         out:restoredSource?.out,
+        speed:restoredSource?.speed,
+        reverse:restoredSource?.reverse,
         gain:restoredSource?.gain,
         fadeIn:restoredSource?.fadeIn,
         fadeOut:restoredSource?.fadeOut,
@@ -1213,7 +1257,7 @@ const Media = {
         descriptors:probedDescriptors.length?probedDescriptors:restoredSource?.descriptors,
         fallbackCount:chCount
       });
-      this.updateExternalAudioSourceDuration(asset,el.duration||info?.duration||0);
+      this.updateExternalAudioSourceDuration(asset,sourceDuration);
       // <audio> 直接播放時通常只提供第一條 stream；先以它快速出聲，背景 cache 完成後
       // 會替換成所有來源聲道的獨立 mono element。
       const directCount=Math.max(1,Math.min(chCount,asset.descriptors.length||chCount));
@@ -1423,7 +1467,7 @@ const Media = {
   async loadFFmpeg(){
     if(this.ffmpeg)return this.ffmpeg;
     if(this.ffmpegLoading)return this.ffmpegLoading;
-    this.ffmpegLoading=(async()=>{
+    const loading=(async()=>{
       try{
         // Fix #3：優先使用 jsDelivr（更穩定），fallback unpkg
         const CDN_JSDELIVR='https://cdn.jsdelivr.net/npm/@ffmpeg';
@@ -1440,7 +1484,9 @@ const Media = {
         throw e;
       }
     })();
-    return this.ffmpegLoading;
+    this.ffmpegLoading=loading;
+    try{return await loading;}
+    finally{if(this.ffmpegLoading===loading) this.ffmpegLoading=null;}
   },
   /* Resource loading is shared, but an intake's status belongs to its lease.
      Keep loader UI out of loadFFmpeg(): a stale A can finish downloading the
@@ -1499,31 +1545,62 @@ const Media = {
   async extractAllAudio(file,count,{owns=()=>true}={}){
     return this.runWebFfmpeg(()=>this._extractAllAudio(file,count,{owns}),{owns});
   },
+  _commitDecodedAudioBuffers(sourceClip,decoded,file){
+    const incoming=[];
+    try{
+      const descriptors=decoded.flatMap((buffer,sourceStream)=>Array.from({length:buffer.numberOfChannels},(_,sourceChannel)=>({sourceStream,sourceChannel})));
+      for(let stream=0;stream<decoded.length;stream++){
+        const buffer=decoded[stream];
+        for(let channel=0;channel<buffer.numberOfChannels;channel++){
+          const mono=AudioEngine.createBuffer(1,buffer.length,buffer.sampleRate);
+          mono.getChannelData(0).set(buffer.getChannelData(channel));
+          AudioEngine.inheritSourceAudioClock(buffer,mono);
+          const gain=AudioEngine.createGain();AudioEngine.connectToMaster(gain);
+          const track=this.bindTrackRouting({id:`ex${stream}-${channel}`,name:`音軌 ${stream+1} · 聲道 ${channel+1}`,
+            kind:'buffer',source:'video',buffer:mono,gain,muted:false,solo:false,volume:1,file},sourceClip,{sourceStream:stream,sourceChannel:channel});
+          this.attachMeter(track,gain);incoming.push(track);
+        }
+      }
+      AudioPipeline.registerSource(sourceClip,descriptors);
+      this.stopBufferSources();this._commitOriginalAudioTracks(sourceClip,incoming,{replace:true});
+      if(decoded.length) this._commitOriginalWave(sourceClip,decoded);
+      emit('media:timeline');
+      return incoming;
+    }catch(error){
+      for(const track of incoming){try{track.gain?.disconnect();track.analyser?.disconnect?.();}catch(_){} }
+      throw error;
+    }
+  },
   async _extractAllAudio(file,count,{owns=()=>true}={}){
     let ff;
+    const primary=Seq.primary();
+    const decoded=[];
     try{
-      if(!owns()) return false;
+      if(!owns()||!primary) return false;
       ff=await this._loadFFmpegForIntake(owns);
       if(!owns()) return false;
       this.ensureCtx();
+      const audioClock=await AudioEngine.readSourceAudioClock(file,{owns});
+      if(!owns()) return false;
       const data=new Uint8Array(await readFile(file));
       if(!owns()) return false;
       ff.FS('writeFile','in.media',data);
       for(let i=0;i<count;i++){
         if(!owns()) return false;
         setStatus(`抽取音軌 ${i+1}/${count}…`,'busy');
-        await ff.run('-i','in.media','-map',`0:a:${i}`,'-ac','2','-ar','48000',`a${i}.wav`);
+        await ff.run('-i','in.media','-map',`0:a:${i}`,'-ar','48000',`a${i}.wav`);
         if(!owns()) return false;
         const wav=ff.FS('readFile',`a${i}.wav`);
-        const ab=await AudioEngine.decodeAudioData(wav.buffer.slice(0));
+        const ab=await AudioEngine.decodeSourceAudioData(wav.buffer.slice(0),{metadata:audioClock,file,sourceStream:i,owns});
         if(!owns()) return false;
-        const g=AudioEngine.createGain(); AudioEngine.connectToMaster(g);
-        this.tracks.push({id:'ex'+i,name:'抽取音軌 '+(i+1),kind:'buffer',buffer:ab,gain:g,muted:false,solo:false,volume:1});
+        decoded.push(ab);
       }
-      if(!owns()) return false;
+      const sourceClip=this._liveClipForSource(primary);
+      if(!owns()||!sourceClip) return false;
+      this._commitDecodedAudioBuffers(sourceClip,decoded,file);
       this.usingWebAudio=true; this.syncMuteState();
       setStatus('多音軌抽取完成','ok'); notifyAudioTracks();
-      if(this.playing){ this.stopBufferSources(); this.startBufferSources(video.currentTime); }
+      if(this.playing) this.startBufferSources(this.vTime());
       return true;
     }catch(e){
       if(!owns()) return false;
@@ -1545,7 +1622,7 @@ const Media = {
       notifyAudioTracks();
       setStatus('','');
       openModal('檔案過大',
-        `<b>${file.name}</b> 約 ${(file.size/1e9).toFixed(2)} GB。<br><br>`+
+        `<b>${escapeHTML(file.name)}</b> 約 ${(file.size/1e9).toFixed(2)} GB。<br><br>`+
         `瀏覽器內的 ffmpeg.wasm 受記憶體限制，無法處理數 GB 的 MXF/非原生影片。<br><br>`+
         `建議：<br>• 先用本機 ffmpeg 轉成 MP4(H.264/AAC) 後再匯入<br>`+
         `• 或改用 <b>Electron 桌面版</b>（可直接讀 MXF 與多音軌同時播放）<br><br>`+
@@ -1562,10 +1639,13 @@ const Media = {
     let ff=null;
     let ownsWork=owns;
     const tempAudioFiles=[];
+    const decoded=[];
     try{
       ff=await this._loadFFmpegForIntake(owns);
       if(!owns()) return false;
       this.ensureCtx();
+      const audioClock=await AudioEngine.readSourceAudioClock(file,{owns});
+      if(!owns()) return false;
       const data=new Uint8Array(await readFile(file));
       if(!owns()) return false;
       ff.FS('writeFile','in.media',data);
@@ -1581,31 +1661,35 @@ const Media = {
       const metadataOutcome=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(metadataOutcome==='cancelled'||!owns()) return false;
       if(metadataOutcome!=='ready') throw new Error(`轉檔預覽影片 metadata ${metadataOutcome}`);
+      const sourceInfo=await sourcePresentationMetadata(url,{owns});
+      if(!owns()) return false;
+      const adapter=getPlayerAdapter();
+      adapter.registerSourceClock(url,sourceInfo);
+      await adapter.seekElement(video,0,{owns});
+      if(!owns()) return false;
       $('noVideo').style.display='none';
-      State.duration=video.duration||0;
+      State.duration=audioClock?.duration>0?audioClock.duration:
+        maxKnownSourceDuration(sourceInfo?.duration,adapter.sourceDuration(video.duration,url));
       const primary=this._registerPrimary({ name:file.name, web:{url}, dur:State.duration||0 },projectRestore);
       ownsWork=()=>owns()&&this._sourceStillReferenced(primary);
-      AudioPipeline.registerSource(primary,Array.from({length:aCount},(_,sourceStream)=>({sourceStream,sourceChannel:0})));
       // 抽音軌
       for(let i=0;i<aCount;i++){
         if(!ownsWork()) return false;
         setStatus(`抽取音軌 ${i+1}/${aCount}…`,'busy');
         tempAudioFiles.push(`a${i}.wav`);
-        await ff.run('-i','in.media','-map',`0:a:${i}`,'-ac','2','-ar','48000',`a${i}.wav`);
+        await ff.run('-i','in.media','-map',`0:a:${i}`,'-ar','48000',`a${i}.wav`);
         if(!ownsWork()) return false;
         const wav=ff.FS('readFile',`a${i}.wav`);
-        const ab=await AudioEngine.decodeAudioData(wav.buffer.slice(0));
+        const ab=await AudioEngine.decodeSourceAudioData(wav.buffer.slice(0),{metadata:audioClock,file,sourceStream:i,owns:ownsWork});
         if(!ownsWork()) return false;
-        const g=AudioEngine.createGain(); AudioEngine.connectToMaster(g);
-        const sourceClip=this._liveClipForSource(primary);
-        if(!sourceClip) return false;
-        this.tracks.push(this.bindTrackRouting({id:'ex'+i,name:'音軌 '+(i+1),kind:'buffer',source:'video',buffer:ab,gain:g,muted:!!sourceClip.muted,solo:false,volume:1,file:file},sourceClip,{sourceStream:i,sourceChannel:0},i));
+        decoded.push(ab);
         try{ff.FS('unlink',`a${i}.wav`);}catch(e){}
       }
       if(!ownsWork()) return false;
+      const sourceClip=this._liveClipForSource(primary);if(!sourceClip)return false;
+      this._commitDecodedAudioBuffers(sourceClip,decoded,file);
       this.usingWebAudio=true; this.syncMuteState();
       setStatus('轉檔完成','ok'); notifyAudioTracks();
-      Wave.fromTracks();
       emit('duration:known');
       return true;
     }catch(e){
@@ -1707,7 +1791,7 @@ const Media = {
     const virtual=this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'));
     if(virtual) return this._transport.virtualTimeAt(video.playbackRate||1);
     if(this.mpvMode) return this._mpvTime;
-    return video.currentTime||0;
+    return getPlayerAdapter().sourceTime(video.currentTime||0,video.currentSrc||video.src);
   },
   // FPS-SYNC：播放點的【權威位置】。暫停時回傳已對齊影格的 _lastSeekTime，播放中才回傳原始
   // 時間。所有「靜止」讀數（播放器時碼 tcCur、時間軸播放點、seekBar）都【必須】以此為來源，
@@ -1726,7 +1810,8 @@ const Media = {
 
   /* ===== 影片序列層（多 clip；見 sequence.js） =====================================
      時間域約定：對外（seek/displayTime/字幕/播放頭/tcCur/seekBar）一律「時間軸時間」；
-     播放器內部（video.currentTime / mpv time-pos / _mpvTime / vTime()）一律「來源時間」，
+     Media 內部（_mpvTime / vTime()）使用影片「來源時間」；原始 video.currentTime／mpv time-pos
+     由 transport 邊界換算容器原點，再交給序列層。
      由本層透過 Seq.toSource/toTimeline 互轉。單一 clip 且 offset=0、in=0 時為恆等映射。
      「間隙」（時間軸上沒有影片的區段）：畫面黑、播放頭以虛擬時鐘（_gapT/_gapStart）續走。 */
   activeClipId:null,
@@ -1743,7 +1828,7 @@ const Media = {
   _activeClip(){ return Seq.byId(this.activeClipId); },
 
   /* ===== 播放呈現狀態的對外查詢 ===============================================
-     以下入口給 app.js／pointer-interaction.js／decode/player.js 使用。
+     以下入口給 app.js／timeline-interaction-engine.js／decode/player.js 使用。
      它們背後的 _gap / presentation session / _activeClip 以前是被【模組外直接讀】的底線
      名稱——呼叫端因此得知道 Media 的內部欄位長什麼樣，改名就會靜默壞掉。
 
@@ -1801,7 +1886,7 @@ const Media = {
         requiresClip:clip=>clip.id!==this.activeClipId||this._gap||
           (this.mpvMode?!!clip.path&&this._clipPreviewPath(clip)!==this._mpvPath:
             !!clip.web?.url&&clip.web.url!==video.src),
-        ensureClip:(clip,sourceTarget,resume)=>this._ensureClip(clip,sourceTarget,resume),
+        ensureClip:(clip,sourceTarget,resume,work)=>this._ensureClip(clip,sourceTarget,resume,work),
         isVirtual:()=>this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src')),
         seekVirtual:(targetTime,options)=>this._transport.seekVirtual(targetTime,options),
         timelineTime:(sourceTime,clip)=>this._transport.timelineTime({sourceTime,clip}),
@@ -1811,9 +1896,16 @@ const Media = {
         isNative:()=>this.mpvMode,
         configureNativeSeek:clip=>this._setMpvSeekProfile(clip),
         exactSeek:()=>this._mpvExactSeek,
-        presentationTarget:(sourceTime,clip)=>Math.max(0,Math.min(sourceTime,
-          clip?.reverse ? clip.out-0.5/getExactFps(clip.fps||State.fps||30) : sourceTime)
-          -(this.mpvMode?this._mpvSeekOffset:0)),
+        frameWindow:async(sourceTime,clip)=>{
+          if(!clip) return null;
+          // Index the actual visible source: a reverse proxy may have different
+          // timestamps from the mother. Average FPS is never frame evidence.
+          const url=this.mpvMode
+            ? (this._mpvPath&&DESK?.fileURL?await DESK.fileURL(this._mpvPath):null)
+            : (video.currentSrc||video.src);
+          return sourceFrameWindow(url,sourceTime,getPlayerAdapter().sourceClock(url));
+        },
+        presentationTarget:sourceTime=>Math.max(0,sourceTime-(this.mpvMode?this._mpvSeekOffset:0)),
         setPresentedSourceTime:sourceTime=>{ this._mpvTime=sourceTime; },
       },
       playback:{
@@ -1846,7 +1938,21 @@ const Media = {
     return !!this._presentationSession?.isPlaybackPending();
   },
   presenterClockMoving(){
-    return !!this.playing&&!this.playbackTransitionPending();
+    return !!this.playing&&!this._seqSwitching&&!this.playbackTransitionPending();
+  },
+  liveWaveSourceTime(){
+    if(!this.presenterClockMoving()||this._reverseShuttleMuted||State.muted) return null;
+    const time=this.tlTime();
+    if(this.seqOn()){
+      const clip=this._activeClip();
+      if(this.inGap()||!clip||(clip.audioSrc||(clip.primary?'video':''))!=='video') return null;
+      // 同源 placement 共用原始聲道 analyser；疊合時仍有不同的母素材時鐘，
+      // 不能把相加後的峰值寫進其中某一個來源桶。
+      if(Seq.clipsAt(time).filter(item=>!Seq.isStill(item)&&!item.audioDetached).length!==1) return null;
+    }
+    if(this.externalAudioSources.some(asset=>this.externalAudio.sourceTime(asset.audioSrc,time)!=null)) return null;
+    const sourceTime=this.vTime();
+    return Number.isFinite(sourceTime)&&sourceTime>=0?sourceTime:null;
   },
   observePresentedTimelineTime(time,source='unknown'){
     return this._ensurePresentationSession().observe(time,{source});
@@ -1936,7 +2042,7 @@ const Media = {
     if(!this.seqOn() || this._gap) return 0;
     const c = this._activeClip(); if(!c) return 0;
     const t = this.tlTime();
-    // 淡入淡出公式與時間域轉換只有 clip-fade.js 一份；這裡原本內聯了一份相同的算式。
+    // 時間域轉換由 image-compositor-engine.js 的 fadeAlphaAtTimeline() 共用 shared/clip-fade.cjs；這裡原本內聯了一份相同的算式。
     let vis = fadeAlphaAtTimeline(c, t);
     const vt = State.videoTracks[c.vtrack || 0];
     if(vt && vt.opacity != null && vt.opacity < 1) vis *= Math.max(0, vt.opacity);
@@ -1973,7 +2079,7 @@ const Media = {
     }
     return null;
   },
-  /* seek 時把各 clip 綁定 element 音軌同步到【自己音源】的來源時間（疊合時各段 offset 不同，不能一律用 active 的 local） */
+  /* seek 時把各 clip 綁定 element 音軌同步到【自己音源】的來源時間（疊合時各段 offset 不同，不能一律用 active 的 local） */
   /* 原生主影片（source 'video' 僅有 native 音軌、無獨立 element/buffer）疊合試聽用的獨立播放器：
      建一個 <audio> 載入主影片檔、接進混音圖。重疊時 native 會被其他片段 element 的 activeMix 抑制而消失，
      改用此獨立播放器播主影片聲音（見 _applyClipAudio 的 _srcHidden 判定；MXF 等已有獨立音軌者不建）。 */
@@ -2007,13 +2113,7 @@ const Media = {
       group.ready=()=>{
         if(this._altPrimaryAudio!==group||!this._ownsAssetOperation(operation)||!this._sourceStillReferenced(pri)) return;
         if(!this.playing||!group.tracks.some(track=>!track._srcHidden&&this.trackAudible(track))) return;
-        const lt=this._srcLocalT('video',this.tlTime());
-        if(lt==null) return;
-        try{
-          el.currentTime=clamp(lt,0,el.duration||lt); el.playbackRate=video.playbackRate||1;
-          if('preservesPitch' in el) el.preservesPitch=el.playbackRate>=0.25&&el.playbackRate<=4;
-          el.play()?.catch?.(()=>{});
-        }catch(error){}
+        this.startElementSources(this.vTime(),this.tlTime());
       };
       el.addEventListener('canplay',group.ready,{once:true});
       return group.tracks[0];
@@ -2043,7 +2143,8 @@ const Media = {
       if(!cl.audioDetached&&!Seq.isStill(cl)) audible.add(cl.audioSrc || (cl.primary ? 'video' : ('clip:' + cl.id)));
     }
     // 原生主影片處於重疊時 → 用獨立 <audio> 播其聲音（native 會被 activeMix 抑制）
-    const videoOverlap = audible.has('video') && act.filter(cl=>!cl.audioDetached&&!cl.reverse&&!Seq.isStill(cl)).length > 1;
+    const videoOverlap = audible.has('video') && (act.filter(cl=>!cl.audioDetached&&!Seq.isStill(cl)).length > 1
+      ||act.some(cl=>(cl.audioSrc||'video')==='video'&&(cl.fadeIn||cl.fadeOut)));
     if(videoOverlap) this._ensureAltPrimaryEl();
     for(const tr of this.tracks){
       if(tr._altPrimary){ tr._srcHidden = !videoOverlap; continue; }
@@ -2073,14 +2174,17 @@ const Media = {
     return this._reverseProxySourcePath===clip.path ? this._reverseProxyPath : null;
   },
   /* 把播放器對到指定 clip 的來源時間（必要時換檔）。resume=切換後是否續播 */
-  async _ensureClip(c, localT, resume){
+  async _ensureClip(c, localT, resume,work={}){
+    const seekVersion=work.seekVersion??this._seekIntentVersion;
+    const currentRequest=()=>seekVersion===this._seekIntentVersion&&!work.signal?.aborted&&(!work.owns||work.owns());
+    if(!currentRequest())return;
     if(this._seqSwitching){
       const switching=this._seqSwitchSettled;
       if(switching) await switching;
-      if(!State.clips.includes(c)) return;
-      return this._ensureClip(c,localT,resume);
+      if(!currentRequest()||!State.clips.includes(c)) return;
+      return this._ensureClip(c,localT,resume,{...work,seekVersion});
     }
-    if(!State.clips.includes(c)) return;
+    if(!currentRequest()||!State.clips.includes(c)) return;
     if(Seq.isStill(c)) return; // 靜態視覺由圖片疊層呈現，不經過播放引擎
     // 防禦自癒：若視訊片段 path 被誤寫為純音訊 wav，自 _originalPath 或 State.mediaPath 還原視訊路徑
     if(c.type !== 'audio' && typeof c.path === 'string' && c.path.toLowerCase().endsWith('.wav')){
@@ -2097,7 +2201,7 @@ const Media = {
       return;
     }
     if(c.reverse && !await this.prepareClipReverseAudio(c)) return;
-    if(!State.clips.includes(c)) return;
+    if(!currentRequest()||!State.clips.includes(c)) return;
     const previewPath=this.mpvMode?this._clipPreviewPath(c):null;
     this._setMpvSeekProfile(c);
     // 不保存開始載入那一刻的 play/pause；完成時必須重新讀最新意圖。
@@ -2110,11 +2214,20 @@ const Media = {
     if(this.activeClipId===c.id&&!this._gap&&activeSourceReady){
       this._applyClipRate(c);
       if(this.mpvMode) await getPlayerAdapter().direction(c.reverse?'backward':'forward').catch(()=>false);
-      this._playerSeekSource(localT); this.syncMuteState(); return;
+      if(!currentRequest()||!State.clips.includes(c))return;
+      if(this.mpvMode)this._playerSeekSource(localT);
+      else{
+        try{
+          const pending=getPlayerAdapter().seekElement(video,localT,{signal:work.signal,owns:currentRequest});
+          if(pending)await pending;
+        }
+        catch(error){if(error.name!=='AbortError')throw error;return;}
+      }
+      if(currentRequest())this.syncMuteState();return;
     }
     const projectOperation=this._assetOperation(null,{kind:'sequence-switch',id:c.id});
     const switchToken=Object.freeze({projectOperation,clip:c});
-    const owns=()=>this._seqSwitchToken===switchToken&&this._ownsAssetOperation(projectOperation)&&
+    const owns=()=>currentRequest()&&this._seqSwitchToken===switchToken&&this._ownsAssetOperation(projectOperation)&&
       State.clips.includes(c)&&this.activeClipId===c.id;
     this._seqSwitchToken=switchToken;
     this._seqSwitching = true;
@@ -2129,6 +2242,7 @@ const Media = {
       this._applyClipRate(c);
       this.stopBufferSources(); // buffer 音軌隸屬 primary：換段先停，resume 時依 _srcHidden 決定是否重啟
       const _tl = Seq.toTimeline(localT, c);
+      if(resume===true)this._transport.seek(_tl,{duration:State.duration,fps:State.fps,dropFrame:State.dropFrame});
       this._applyClipAudio(c, _tl);
       this._lastOverlapKey = Seq.clipsAt(_tl).filter(x=>x.type !== 'image').map(x=>x.id).join('|');
       if(this.mpvMode){
@@ -2154,11 +2268,8 @@ const Media = {
           await getPlayerAdapter().direction(c.reverse?'backward':'forward').catch(()=>false);
           if(!owns()) return;
           this._seekMpv(localT).catch(()=>{});
-          // mpv 靜音隨「當前段是否已有元素音軌」同步：有→靜音（元素接管），無→出聲
-          //（否則主媒體音軌就緒後 mute(true) 會讓沒有元素音軌的新段完全無聲）
-          const _srcKey = c.audioSrc || (c.primary ? 'video' : ('clip:' + c.id));
-          const _hasEls = this.tracks.some(tr => (tr.source||'video') === _srcKey && tr.kind === 'element');
-          getPlayerAdapter().mute(_hasEls || c.audioDetached || c.reverse || State.muted).catch(()=>{});
+          // 換檔也沿用來源控制與替代聲音的同一判準，不能覆寫已持久化的靜音。
+          this.syncMuteState();
           emit('mpv:refreshSubs'); // 換 clip 後字幕需以新映射重擠（app.js 會做 offset 位移）
           if(shouldResume()){ getPlayerAdapter().play().catch(()=>{}); this.startElementSources(localT, Seq.toTimeline(localT, c)); }
           else getPlayerAdapter().pause().catch(()=>{});
@@ -2180,10 +2291,24 @@ const Media = {
             this._enterGap(_tl);
             return;
           }
-          if(video.duration) Seq.updateSourceDur(c, maxKnownSourceDuration(c.dur,video.duration));
+          if(video.duration) Seq.updateSourceDur(c, maxKnownSourceDuration(c.dur,getPlayerAdapter().sourceDuration(video.duration,url)));
         }
         if(!owns()) return;
-        try{ video.currentTime = localT; }catch(e){}
+        const ownsSeek=()=>owns()&&(resume!==true||shouldResume());
+        try{
+          const pending=getPlayerAdapter().seekElement(video,localT,{signal:work.signal,owns:ownsSeek});
+          if(pending)await pending;
+        }
+        catch(error){
+          if(error.name!=='AbortError'&&owns()){
+            retryIfSuperseded=false;
+            setStatus(`無法定位影片段「${c.name}」`,'err');
+            showToast(`無法定位影片段「${c.name}」`);
+            this.pause({seekOnPause:false});
+          }
+          return;
+        }
+        if(!ownsSeek())return;
         if(shouldResume()){
           try{ video.play(); }catch(e){}
           this.startElementSources(localT, Seq.toTimeline(localT, c));
@@ -2194,7 +2319,7 @@ const Media = {
       if(owns()) emit('render:videoSub');
     } finally {
       if(this._seqSwitchToken===switchToken){
-        const retryCurrentTimeline=retryIfSuperseded&&!owns();
+        const retryCurrentTimeline=retryIfSuperseded&&!owns()&&currentRequest()&&this._ownsAssetOperation(projectOperation);
         const retryAt=this.displayTime();
         this._seqSwitchToken=null;
         this._seqSwitching=false;
@@ -2225,10 +2350,10 @@ const Media = {
   },
   _playerSeekSource(s){
     if(this.mpvMode){ this._mpvTime = s; this._seekMpv(s).catch(()=>{}); }
-    else if(video.hasAttribute('src')){ try{ video.currentTime = s; }catch(e){} }
+    else if(video.hasAttribute('src')){ void getPlayerAdapter().seek(s).catch(()=>{}); }
   },
-  /* 播放中的每幀檢查（rafLoop 呼叫）：段尾切換 / 間隙進出 / 序列結尾停止 */
-  /* video 'ended'（原生模式段尾）：序列還有後續 → 立即推進並回 true（呼叫端不 pause） */
+  /* 播放中的每幀檢查（rafLoop 呼叫）：段尾切換 / 間隙進出 / 序列結尾停止 */
+  /* video 'ended'（原生模式段尾）：序列還有後續 → 立即推進並回 true（呼叫端不 pause） */
   /* 第一支影片載入完成時登錄為 primary clip（reset() 已清空舊序列） */
   _registerPrimary(meta,projectRestore=null){
     // 已開啟的 v3 專案會在 ProjectLoadSession 的 restore plan 保留片段幾何；
@@ -2388,6 +2513,13 @@ const Media = {
   },
   restoreSequenceEditState(timelineTime){
     this._sequenceEditVersion+=1;
+    for(const track of this.tracks){
+      const source=track.source||'video';
+      if(source!=='video'&&!source.startsWith('clip:'))continue;
+      const clips=State.clips.filter(clip=>(clip.audioSrc||(clip.primary?'video':'clip:'+clip.id))===source
+        &&(!track.audioSourceId||!clip.audioSourceId||track.audioSourceId===clip.audioSourceId));
+      if(clips.length)track.muted=clips.some(clip=>clip.muted);
+    }
     const wanted=new Map();
     for(const clip of State.clips){
       if(!clip||clip.type==='image') continue;
@@ -2406,6 +2538,7 @@ const Media = {
       return false;
     });
     if(this.activeClipId&&!Seq.byId(this.activeClipId)) this.activeClipId=null;
+    this.applyGains();
 
     const pending=State.clips.filter(clip=>Seq.isFrozen(clip)).map(clip=>this.ensureClipFreezePreview(clip));
     for(const [sourceId,clip] of wanted){
@@ -2413,7 +2546,12 @@ const Media = {
       if(!hasTrack&&!this._clipRuntimeReadySources?.has(clipSourceFingerprint(clip))) pending.push(this.ensureClipRuntime(clip));
     }
     notifyAudioTracks();
-    if(this.seqOn()) this.seek(Math.max(0,Number(timelineTime)||0));
+    if(this.seqOn()){
+      this.seek(Math.max(0,Number(timelineTime)||0));
+      // The restored topology starts a new presentation, even at the same
+      // time as a removed source's gap. Preserve only the current play intent.
+      this._ensurePresentationSession().setPlaybackIntent(this.playing);
+    }
     else this._enterNoVideoTimeline(timelineTime,this.playing);
     const restorePromise=Promise.allSettled(pending);
     this._historySequenceRestorePromise=restorePromise;
@@ -2480,6 +2618,7 @@ const Media = {
     try{
       const fileUrl=await DESK.fileURL(p);
       if(!owns()) return null;
+      getPlayerAdapter().registerSourceClock(fileUrl,info?.video);
       meta.web={url:fileUrl};
     }catch(e){}
     if(!owns()) return null;
@@ -2502,12 +2641,16 @@ const Media = {
     return c;
   },
   ensureClipRuntime(c,knownInfo=null,operation=null){
-    if(!c||c.type==='image'||!c.path||!DESK) return Promise.resolve();
+    if(!c||c.type==='image') return Promise.resolve();
     const assetOperation=this._assetOperation(operation,{kind:'clip-runtime',id:c.id});
     const owns=()=>this._ownsAssetOperation(assetOperation)&&this._sourceStillReferenced(c);
     if(!owns()) return Promise.resolve();
     const sourceId=c.audioSrc||(c.primary?'video':('clip:'+c.id));
     if(sourceId==='video'||this.tracks.some(track=>(track.source||'video')===sourceId)) return Promise.resolve();
+    // History restores a browser clip's still-live object URL, not a desktop path.
+    // Rebuild its original audio through the same owner used by web import.
+    if(!DESK&&c.web?.url){ this._ensureWebClipAudio(c); return Promise.resolve(); }
+    if(!c.path||!DESK) return Promise.resolve();
     if(!this._clipRuntimePromises) this._clipRuntimePromises=new Map();
     const fingerprint=clipSourceFingerprint(c);
     const existing=this._clipRuntimePromises.get(sourceId);
@@ -2527,12 +2670,14 @@ const Media = {
           if(!owns()) return;
           liveClip=this._liveClipForSource(c);
           if(!liveClip) return;
+          getPlayerAdapter().registerSourceClock(fileUrl,info?.video);
           liveClip.web={url:fileUrl};
         }catch(error){}
       }
       if(!owns()) return;
       liveClip=this._liveClipForSource(c);
       if(!liveClip) return;
+      if(liveClip.web?.url) getPlayerAdapter().registerSourceClock(liveClip.web.url,info?.video);
       AudioPipeline.registerSource(liveClip,probeAudioChannelDescriptors(info?.audio));
       await this._clipIngest(liveClip,info,assetOperation);
       if(!owns()) return;
@@ -2736,7 +2881,36 @@ const Media = {
     setStatus(`已加入圖片：${c.name}`, 'ok');
     return c;
   },
-  /* 加入影片到序列（網頁版）：objectURL + metadata 取長度；小檔另算波形 */
+  _ensureWebClipAudio(clip,file=null){
+    const sourceClip=this._liveClipForSource(clip);
+    if(!sourceClip?.web?.url) return [];
+    const source=sourceClip.audioSrc||('clip:'+sourceClip.id);
+    const existing=this.tracks.filter(track=>(track.source||'video')===source);
+    if(existing.length) return existing;
+    this.ensureCtx();
+    let el=null,node=null;
+    try{
+      el=new Audio(); el.src=sourceClip.web.url; el.preload='auto';
+      node=AudioEngine.createMediaElementSource(el);
+      const count=Math.max(1,node.channelCount||2);
+      const descriptors=AudioPipeline.registerSource(sourceClip,[],count);
+      const incoming=this._splitToChannelTracks(node,source,el,count,sourceClip,descriptors);
+      for(const track of incoming){track.name=sourceClip.name+'·'+track.name;track.file=file;}
+      this._commitOriginalAudioTracks(sourceClip,incoming);
+      const active=this._activeClip();
+      if(active) this._applyClipAudio(active);
+      else {for(const track of incoming) track._srcHidden=true;this.applyGains();}
+      notifyAudioTracks();
+      if(this.playing) this._restartElements();
+      return incoming;
+    }catch(error){
+      this._disposeMediaElement(el);
+      try{node?.disconnect();}catch(_){}
+      console.warn('web clip audio',error);
+      return [];
+    }
+  },
+  /* 加入影片到序列（網頁版）：原音不依賴波形解碼；小檔另算波形。 */
   async addClipWeb(f, operation=null){
     const assetOperation=this._assetOperation(operation,{kind:'web-clip',name:f?.name});
     const owns=()=>this._ownsAssetOperation(assetOperation);
@@ -2746,7 +2920,10 @@ const Media = {
     const test=document.createElement('video');
     test.src=url;
     const metadata=await waitForOwnedMediaMetadata(test,{owns,timeoutMs:8000});
-    const dur=metadata==='ready'?(test.duration||0):0;
+    const sourceInfo=metadata==='ready'?await sourcePresentationMetadata(url,{owns}):null;
+    const adapter=getPlayerAdapter();
+    if(owns()) adapter.registerSourceClock(url,sourceInfo);
+    const dur=metadata==='ready'?maxKnownSourceDuration(sourceInfo?.duration,adapter.sourceDuration(test.duration,url)):0;
     this._disposeMediaElement(test);
     if(metadata==='cancelled'||!owns()){ this._releaseObjectURL(url); return null; }
     if(!dur){ showToast('無法讀取此影片，未加入'); setStatus('', ''); this._releaseObjectURL(url); return null; }
@@ -2758,31 +2935,14 @@ const Media = {
     }
     const c = Seq.add({ name: f.name, web: { url }, dur, audioSourceId: makeAudioSourceId(), ...overrides });
     c.audioSrc = 'clip:' + c.id;
+    this._ensureWebClipAudio(c,f);
     emit('media:timeline');
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}`, 'ok');
-    // 音訊（整檔混音一軌，經聲道分離）＋波形：僅小檔（記憶體考量）
+    // 原音已安裝；整檔 PCM 只供可選的波形，不可決定此段是否能出聲。
     if(f.size <= WAVE_DECODE_MAX){
-      try{
-        this.ensureCtx();
-        const buf = await readFile(f);
-        if(!owns()||!this._sourceStillReferenced(c)) return null;
-        const ab = await AudioEngine.decodeAudioData(buf.slice(0));
-        if(!owns()||!this._sourceStillReferenced(c)) return null;
-        const sourceClip=this._liveClipForSource(c);
-        if(!sourceClip) return null;
-        sourceClip.peaks = Wave.setSourceBuffer(sourceClip,ab);
-        const el = new Audio(); el.src = url; el.preload = 'auto';
-        const node = AudioEngine.createMediaElementSource(el);
-        const chN = Math.max(1, node.channelCount || 2);
-        AudioPipeline.registerSource(sourceClip,[],chN);
-        const runtimeSource=sourceClip.audioSrc||('clip:'+sourceClip.id);
-        const trs = this._splitToChannelTracks(node,runtimeSource,el,chN,sourceClip);
-        trs.forEach(tr => { tr.name = sourceClip.name + '·' + tr.name; tr.source = runtimeSource; });
-        this.tracks.push(...trs);
-        const ac = this._activeClip(); if(ac) this._applyClipAudio(ac);
-        notifyAudioTracks(); emit('media:timeline');
-      }catch(e){ console.warn('addClipWeb audio', e); }
+      const ownsWave=()=>owns()&&this._sourceStillReferenced(c);
+      void Wave.fromFile(f,c,{owns:ownsWave}).catch(()=>{});
     } else showToast('檔案較大：此段不產生波形（可另載入音訊檔）');
     return c;
   },
@@ -2821,9 +2981,11 @@ const Media = {
     const linked=State.clips.filter(item=>clipSourceFingerprint(item)===sourceFingerprint);
     const pending=linked.filter(item=>!item.audioDetached);
     if(!pending.length){ showToast('此影片的原音已解除連結'); return null; }
+    const unlocked=()=>pending.every(item=>!item.locked&&!State.videoTracks[item.vtrack||0]?.locked);
+    if(!unlocked()){showToast('影片軌已鎖定');return null;}
     const sourceOwns=()=>{
       const current=State.clips.filter(item=>clipSourceFingerprint(item)===sourceFingerprint);
-      return current.length===linked.length&&linked.every(item=>current.includes(item));
+      return unlocked()&&current.length===linked.length&&linked.every(item=>current.includes(item));
     };
     const assetOperation=this._assetOperation(null,{kind:'detach-clip-audio',id},sourceOwns);
     const owns=()=>this._ownsAssetOperation(assetOperation);
@@ -2860,6 +3022,7 @@ const Media = {
           // 下來，專案重開時即使 ffprobe 的 format duration 缺失仍可還原 trim。
           preferCache:true,
           duration:item.dur,
+          speed:item.speed, reverse:item.reverse,
           fadeIn:item.fadeIn, fadeOut:item.fadeOut,
           fadeSourceOffset:item.fadeSourceOffset, fadeSourceLength:item.fadeSourceLength,
           ...audioLimiterSnapshot(item),
@@ -2960,7 +3123,7 @@ const Media = {
   _commitObservedPlaybackState(running){
     if(running){
       this.ensureCtx();
-      const sourceTime=this.mpvMode?this._mpvTime:video.currentTime;
+      const sourceTime=this.vTime();
       const timelineTime=this.tlTime();
       if(this.tracks.some(track=>track.kind==='buffer')) this.startBufferSources(sourceTime);
       this.startElementSources(sourceTime,timelineTime);
@@ -3023,6 +3186,8 @@ const Media = {
         this._failPlaybackPresentation({status:'failed'});
         return;
       }
+      // 同一片段的重新呈現不需 activation，但提交的轉場可能改變音訊載體。
+      this._applyClipAudio(hit,requested);
     }
     // 影片片段已全部移除時仍可把外部音訊當成一條完整時間軸播放；保留黑畫面。
     if(this.audioOnlyTimeline()){
@@ -3042,7 +3207,7 @@ const Media = {
       this.startElementSources(requested,requested);
     }else{
       getPlayerAdapter().play().catch(()=>{});
-      const current=this.mpvMode?this._mpvTime:video.currentTime;
+      const current=this.vTime();
       if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(current);
       this.startElementSources(current,requested);
     }
@@ -3073,7 +3238,7 @@ const Media = {
     }
     session.setPlaybackIntent(true);
   },
-  pause(){
+  pause({seekOnPause=true}={}){
     if(this._nativeReverse){
       this._presentationSession?.setPlaybackIntent(false);
       const c=this.seqOn()?this._activeClip():null;
@@ -3090,18 +3255,28 @@ const Media = {
       // 但不得因此再送第二次 direction/loadfile。
       this.setPlaybackDirection('forward').catch(()=>{});
       adapter.rate(1).catch(()=>{});
-      if(!restoringProxy) this._seekMpv(sourceTime).catch(()=>{});
+      if(seekOnPause&&!restoringProxy) this._seekMpv(sourceTime).catch(()=>{});
       this.stopBufferSources(); this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶';
       this.syncMuteState();
       return;
     }
-    const transitionPending=this.playbackTransitionPending();
+    const transitionPending=this.playbackTransitionPending()||this._seqSwitching;
     this._presentationSession?.setPlaybackIntent(false);
     if(transitionPending){
       // 使用者在 seek 尚未呈現時又按暫停：保留目標播放點，讓晚到畫格只完成
       // 靜止呈現，不得拿舊 presenter clock 覆寫或重新啟動音訊。
       this._suspendPlaybackForPresentation();
+      // Automatic HTML handoff has no presentation waiter. Cancel its owned
+      // raw seek now so late duration metadata cannot overwrite this pause.
+      if(!this.mpvMode&&this._seqSwitching&&!this.playbackTransitionPending()){
+        // An automatic handoff has selected its next clip before that clip is
+        // ready. Revoke the unfinished activation as well as its raw seek so
+        // the next Play must present the preserved target through the session.
+        this._seekIntentVersion+=1;
+        this.activeClipId=null;
+        getPlayerAdapter().cancelElementSeek(video);
+      }
       this.playing=false;
       const playBtn=$('playBtn'); if(playBtn) playBtn.textContent='▶';
       video.dispatchEvent(new Event('pause'));
@@ -3131,8 +3306,8 @@ const Media = {
       this.stopBufferSources(); this.stopElementSources();
       this.playing=false; $('playBtn').textContent='▶'; return;
     }
-    
-    this._seekMpv(_ps).catch(()=>{});
+
+    if(seekOnPause) this._seekMpv(_ps).catch(()=>{});
     this.stopBufferSources(); this.stopElementSources(); this.playing=false; $('playBtn').textContent='▶';
   },
   toggle(){ this.playing?this.pause():this.play(); },
@@ -3148,7 +3323,7 @@ const Media = {
       const source=tr.source||'';
       if(!source.startsWith('ext-')) continue;
       const off=this.externalAudio.sourceTime(source,t);
-      try{ if(off==null) tr.el.pause(); else tr.el.currentTime=clamp(off,0,tr.el.duration||off); }catch(e){}
+      try{ if(off==null){getPlayerAdapter().cancelElementSeek(tr.el);tr.el.pause();} else {getPlayerAdapter().seekElement(tr.el,off)?.catch?.(()=>{});} }catch(e){}
     }
     // 保留 UI 對目標位置的即時回應；presentation session 稍後會用實際畫格再提交一次。
     window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:t}));
@@ -3157,29 +3332,39 @@ const Media = {
     const hasPresentationTolerance=options?.presentationTolerance!=null
       &&Number.isFinite(presentationTolerance);
     const seekVersion=++this._seekIntentVersion;
+    this._seekIntentOwner=options.playbackOwner||null;
     const request=()=>this._ensurePresentationSession().requestPlayback(t,{
       timeoutMs:10000,
       ...(hasPresentationTolerance
         ? {tolerance:Math.max(0,presentationTolerance)}
         : {}),
     });
-    const restoring=this._reverseRestorePromise;
-    if(!restoring) return request();
+    const restoringMother=this._reverseRestorePromise;
+    const restoring=restoringMother||this._reverseSourcePromise;
+    if(!restoring) return this._latestSeekPromise=request();
     // 播放目標與 UI 已同步更新；真正的 presenter 要等 Proxy 切回母素材。
     // restore 會 reset 舊 presentation session，若提前建立 request 會被取消。
-    return restoring.then(restored=>{
+    return this._latestSeekPromise=restoring.then(restored=>{
       if(seekVersion!==this._seekIntentVersion) return {status:'cancelled',reason:'newer-seek'};
-      if(restored===false) return {status:'failed',reason:'source-restore'};
+      if(restored===false&&restoringMother) return {status:'failed',reason:'source-restore'};
       return request();
     });
   },
+  // FPS-SYNC：編輯後重新呈現只能沿用仍有效的播放目標，不能覆寫較新的 seek。
+  capturePlaybackTargetOwnership(owner=null){
+    const version=this._seekIntentVersion;
+    const operation=this._assetOperation(null,'clip-edit-playback-target');
+    return ()=>this._ownsAssetOperation(operation)&&(this._seekIntentVersion===version
+      ||(owner!=null&&this._seekIntentOwner===owner));
+  },
   /* 外部音訊不隸屬影片 clip；在它自己的開始／結束邊界才一次性 seek/play 或 pause。
-     這可處理「影片已結束但音檔稍後才開始」與修剪後的音檔尾端，且不會每幀造成播放抖動。 */
+     這可處理「影片已結束但音檔稍後才開始」與修剪後的音檔尾端，且不會每幀造成播放抖動。 */
   // localT=當前 clip 的來源時間；tlT=時間軸時間（ext-* 參考音用；未給則同 localT）。
   // 序列模式：被 _srcHidden 的（其他 clip / 已切換音源）不播，避免多段音訊同時出聲。
   startElementSources(localT, tlT){
     const timeline=tlT??(this.seqOn()?this.tlTime():localT);
-    const reversed=Seq.clipsAt(timeline).filter(clip=>clip.reverse&&!clip.audioDetached&&!Seq.isStill(clip));
+    const reversed=[...Seq.clipsAt(timeline).filter(clip=>clip.reverse&&!clip.audioDetached&&!Seq.isStill(clip)),
+      ...this.externalAudioSources.filter(asset=>asset.reverse&&this.externalAudio.sourceTime(asset.audioSrc,timeline)!=null)];
     if(!reversed.length){ this._audioRouter.startElementSources(localT,tlT); return; }
     const version=this._reverseAudioStartVersion=(this._reverseAudioStartVersion||0)+1;
     Promise.all(reversed.map(clip=>this.prepareClipReverseAudio(clip))).then(ready=>{
@@ -3222,17 +3407,21 @@ const Media = {
   },
   reverseShuttleMuted(){ return this._reverseShuttleMuted; },
   syncMuteState(){
+    this.applyGains();
+  },
+  _syncCarrierMute(interpretation){
     const active=this._activeClip();
     const source=active ? (active.audioSrc || (active.primary ? 'video' : ('clip:' + active.id))) : 'video';
-    const mix=this.projectAudioInterpretation().sourceReplaced(source);
-    video.muted = this._reverseShuttleMuted||mix ? true : (State.muted || !!active?.audioDetached || !!active?.reverse);
+    const mix=interpretation.sourceReplaced(source);
+    const channels=this.sourceChannels(source);
+    const silent=this.sourceMuted(source)||(channels.length>0&&!channels.some(track=>interpretation.trackState(track).audible));
+    video.muted = this._reverseShuttleMuted||mix||silent ? true : (State.muted || !!active?.audioDetached || !!active?.reverse);
     if(this.mpvMode){
       const sourceHasElements=!!source&&this.tracks.some(track=>
         (track.kind==='buffer'||track.kind==='element')&&
         (track.source||'video')===source&&!track._srcHidden);
-      getPlayerAdapter().mute(this._reverseShuttleMuted||State.muted||!!active?.audioDetached||!!active?.reverse||sourceHasElements).catch(()=>{});
+      getPlayerAdapter().mute(this._reverseShuttleMuted||State.muted||silent||!!active?.audioDetached||!!active?.reverse||sourceHasElements).catch(()=>{});
     }
-    this.applyGains();
   },
   /* 專案 bus 的 M/S/音量套在每個來源聲道路由之後。
      預覽為立體聲監聽，複製到多個 bus 時取可聽 route 的最大有效增益，避免把同一個
@@ -3278,6 +3467,7 @@ const Media = {
       if(tr.gain) tr.gain.gain.value=state.audible?state.gain:0;
     }
     AudioEngine.setMasterGain(State.muted?0:1);
+    this._syncCarrierMute(interpretation);
   },
   getSources(){
     const seen=new Set(); const srcs=[];
@@ -3307,23 +3497,28 @@ const Media = {
   },
   /* 某音源的混音器聲道（Media.tracks 內 source 相符者）；音源層級的 靜音/獨奏/音量＝對其所有聲道聚合套用 */
   sourceChannels(srcId){ return this.tracks.filter(t=>(t.source||'video')===srcId && (t.kind==='buffer'||t.kind==='native'||t.kind==='element'||t.kind==='nativeTrack')); },
-  sourceMuted(srcId){ const ch=this.sourceChannels(srcId); return ch.length>0 && ch.every(t=>t.muted); },
-  toggleSourceMute(srcId){ 
-    const ch=this.sourceChannels(srcId); 
-    const m=!(ch.length>0&&ch.every(t=>t.muted)); 
-    for(const t of ch)t.muted=m; 
-    
-    // Persist clip mute state to State so it saves
-    let clip = null;
-    if (srcId === 'video' || srcId === 'altpri') {
-       clip = State.clips?.find(c=>c.primary);
-    } else if (srcId.startsWith('clip:')) {
-       clip = State.clips?.find(c=>c.id===srcId.substring(5));
-    }
-    if (clip) clip.muted = m;
+  sourceMuted(srcId){
+    const ch=this.sourceChannels(srcId);if(ch.length)return ch.every(track=>track.muted);
+    const clips=(State.clips||[]).filter(clip=>(clip.audioSrc||(clip.primary?'video':'clip:'+clip.id))===srcId);
+    return clips.length>0&&clips.every(clip=>clip.muted);
+  },
+  toggleSourceMute(srcId){
+    const ch=this.sourceChannels(srcId);
+    const m=!this.sourceMuted(srcId);
+    for(const t of ch)t.muted=m;
 
-    this.applyGains(); 
+    // Source controls belong to the mother asset, including every surviving split.
+    // Runtime group ids and source ids distinguish same-named independent files.
+    const runtimeSource=srcId==='altpri'?'video':srcId;
+    const sourceIds=new Set(ch.map(track=>track.audioSourceId).filter(Boolean));
+    for(const clip of State.clips||[]){
+      const source=clip.audioSrc||(clip.primary?'video':'clip:'+clip.id);
+      if(source===runtimeSource||sourceIds.has(clip.audioSourceId)) clip.muted=m;
+    }
+
+    this.applyGains();
     notifyAudioTracks();
+    emit('history:record',m?'靜音素材原音':'開啟素材原音');
   },
   sourceSolo(srcId){ const ch=this.sourceChannels(srcId); return ch.length>0 && ch.some(t=>t.solo); },
   toggleSourceSolo(srcId){ const ch=this.sourceChannels(srcId); const s=!(ch.length>0&&ch.some(t=>t.solo)); for(const t of ch)t.solo=s; this.applyGains(); notifyAudioTracks(); },
@@ -3360,15 +3555,17 @@ const Media = {
     source.preload='auto';source.muted=true;source.src=sourceUrl;
     try{
       if(await waitForOwnedMediaMetadata(source,{owns,timeoutMs:10000})!=='ready'||!owns()) return null;
-      await new Promise((resolve,reject)=>{
-        const done=error=>{clearTimeout(timer);source.removeEventListener('seeked',ready);source.removeEventListener('loadeddata',ready);source.removeEventListener('error',failed);error?reject(error):resolve();};
-        const ready=()=>{if(!source.seeking&&source.readyState>=2) done();};
-        const failed=()=>done(new Error('無法讀取來源影格'));
-        const timer=setTimeout(()=>done(new Error('讀取来源影格逾時')),10000);
-        source.addEventListener('seeked',ready);source.addEventListener('loadeddata',ready);source.addEventListener('error',failed,{once:true});
-        source.currentTime=time;
-        if(time===0&&source.readyState>=2) done();
-      });
+      const adapter=getPlayerAdapter();
+      const frame=await sourceFrameWindow(sourceUrl,time,adapter.sourceClock(sourceUrl));
+      if(!owns()) return null;
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),10000);
+      try{
+        await adapter.presentElement(source,time,{signal:controller.signal,owns,
+          tolerance:1.5/getExactFps(c.fps||State.fps||25),
+          ...(frame?{frameStart:frame.start,frameDuration:frame.end-frame.start,frameTarget:time}:{}),
+        });
+      }finally{clearTimeout(timer);controller.abort();}
       if(!owns()||source.readyState<2) return null;
       const canvas=document.createElement('canvas');canvas.width=source.videoWidth;canvas.height=source.videoHeight;
       canvas.getContext('2d').drawImage(source,0,0);
@@ -3387,10 +3584,11 @@ const Media = {
     }catch(error){console.warn('clip freeze frame:',error);return false;}
   },
   supportsClipReverse(){ return !!this.mpvMode&&!!getPlayerAdapter().supportsNativeReverse?.(); },
-  async prepareClipReverse(c){
+  async prepareClipReverse(c,{owns=()=>true}={}){
+    if(!owns()) return false;
     if(!this.supportsClipReverse()||!DESK?.ingest||!c?.path||Seq.byId(c.id)!==c) return false;
     if(this._reverseProxyPath&&this._reverseProxySourcePath===c.path) return true;
-    const operation=this._assetOperation(null,{kind:'clip-reverse-proxy',path:c.path},()=>Seq.byId(c.id)===c);
+    const operation=this._assetOperation(null,{kind:'clip-reverse-proxy',path:c.path},()=>Seq.byId(c.id)===c&&owns());
     try{
       const result=await DESK.ingest({path:c.path,duration:c.dur,needsProxy:true,audio:[],queue:true});
       if(!this._ownsAssetOperation(operation)||!result?.proxy) return false;
@@ -3402,39 +3600,52 @@ const Media = {
       return false;
     }
   },
-  async activateClipReversePreview(c){
+  async activateClipReversePreview(c,{owns=()=>true}={}){
+    if(!owns()) return false;
     if(this._activeClip()!==c) return true;
     if(!this.reverseShuttleProxyReady()) return false;
-    return this._activateReverseShuttleProxy();
+    return this._activateReverseShuttleProxy({owns});
   },
   audioSourceRate(source,t){
-    const clip=State.clips.find(c=>!Seq.isStill(c)&&Seq.isActiveAt(c,t)&&
+    const clip=this.externalAudio.bySource(source)||State.clips.find(c=>!Seq.isStill(c)&&Seq.isActiveAt(c,t)&&
       (c.audioSrc||(c.primary?'video':'clip:'+c.id))===source);
     return this._manualRate*(Number(clip?.speed)>0?Number(clip.speed):1);
   },
   audioSourcePlayback(source,t){
-    if(String(source).startsWith('ext-')) return null;
-    const clip=State.clips.find(c=>!c.audioDetached&&!Seq.isStill(c)&&Seq.isActiveAt(c,t)&&
+    return this.audioSourcePlaybacks(source,t)[0]||null;
+  },
+  audioSourcePlaybacks(source,t){
+    if(String(source).startsWith('ext-')){
+      const asset=this.externalAudio.bySource(source);
+      const sourceTime=this.externalAudio.sourceTime(source,t);
+      if(!asset) return [null];
+      if(sourceTime==null) return [];
+      return [{clip:asset,reverse:!!asset.reverse,sourceTime,
+        offset:asset.reverse?asset.out-sourceTime:sourceTime,rate:this.audioSourceRate(source,t)}];
+    }
+    const clips=State.clips.filter(c=>!c.audioDetached&&!Seq.isStill(c)&&Seq.isActiveAt(c,t)&&
       (c.audioSrc||(c.primary?'video':'clip:'+c.id))===source);
-    if(!clip) return null;
-    return {clip,reverse:!!clip.reverse,sourceTime:Seq.toSource(t,clip),
-      offset:clip.reverse?Seq.toReverseAudio(t,clip):Seq.toSource(t,clip),rate:this.audioSourceRate(source,t)};
+    return clips.map(clip=>({clip,reverse:!!clip.reverse,sourceTime:Seq.toSource(t,clip),
+      offset:clip.reverse?Seq.toReverseAudio(t,clip):Seq.toSource(t,clip),
+      rate:this._manualRate*(Number(clip.speed)>0?Number(clip.speed):1)}));
   },
   async prepareClipReverseAudio(c){
     if(!c?.reverse||c.audioDetached||Seq.isStill(c)) return true;
-    if(Seq.byId(c.id)!==c) return false;
+    const external=this.externalAudio.has(c);
+    const current=()=>external?this.externalAudio.has(c):Seq.byId(c.id)===c;
+    if(!current()) return false;
     this.ensureCtx();
     const source=c.audioSrc||(c.primary?'video':'clip:'+c.id);
-    let tracks=this.tracks.filter(track=>(track.source||'video')===source&&!track._altPrimary);
+    let tracks=this.tracks.filter(track=>(track.source||'video')===source&&(!track._altPrimary||!track._srcHidden));
     const independent=tracks.filter(track=>track.kind==='element'||track.kind==='buffer');
     if(independent.length) tracks=independent;
     const start=c.in,end=c.out,path=c.path,url=c.web?.url;
-    const operation=this._assetOperation(null,{kind:'clip-reverse-audio',id:c.id},()=>Seq.byId(c.id)===c);
+    const operation=this._assetOperation(null,{kind:'clip-reverse-audio',id:c.id},current);
     const decoded=new Map();
     try{
       const results=await Promise.all(tracks.map(track=>{
         const file=track.file,buffer=track.buffer,effect=!!track._audioEffect,gain=track.gain,analyser=track.analyser;
-        const owns=()=>this._ownsAssetOperation(operation)&&Seq.byId(c.id)===c&&c.reverse&&!c.audioDetached&&!Seq.isStill(c)
+        const owns=()=>this._ownsAssetOperation(operation)&&current()&&c.reverse&&!c.audioDetached&&!Seq.isStill(c)
           &&c.in===start&&c.out===end&&c.path===path&&c.web?.url===url&&this.tracks.includes(track)
           &&track.file===file&&track.buffer===buffer&&!!track._audioEffect===effect&&track.gain===gain&&track.analyser===analyser
           &&(track.kind==='element'||track.kind==='buffer'||!this.tracks.some(candidate=>!candidate._altPrimary
@@ -3455,27 +3666,64 @@ const Media = {
           if(!decoded.has(originalURL)) decoded.set(originalURL,(async()=>{
             const data=await fetch(originalURL,{signal}).then(response=>response.arrayBuffer());
             if(!owns()) return null;
-            return AudioEngine.decodeAudioData(data);
+            return AudioEngine.decodeSourceAudioData(data,{url:originalURL,owns,signal});
           })());
           const original=await decoded.get(originalURL);
           if(!original||!owns()) throw new Error('反向音訊載入已失效');
           return {buffer:original,channel};
         }});
       }));
-      return this._ownsAssetOperation(operation)&&Seq.byId(c.id)===c&&results.every(Boolean);
+      return this._ownsAssetOperation(operation)&&current()&&results.every(Boolean);
     }catch(error){
-      if(this._ownsAssetOperation(operation)&&Seq.byId(c.id)===c) console.warn('clip reverse audio:',error);
+      if(this._ownsAssetOperation(operation)&&current()) console.warn('clip reverse audio:',error);
       return false;
     }
   },
-  async refreshClipPlayback(c){
-    if(this._activeClip()!==c) return true;
-    if(!c.reverse&&this._reverseProxyActive && !await this._restoreReverseShuttleSource()) return false;
-    this._applyClipRate(c);
-    if(c.reverse&&!await this.prepareClipReverseAudio(c)) return false;
-    if(this.mpvMode && await getPlayerAdapter().direction(c.reverse?'backward':'forward').catch(()=>false)===false) return false;
-    this.syncMuteState();
-    return true;
+  async refreshClipPlayback(c,{owns=()=>true,signal,position=null,playbackOwner=null}={}){
+    const ownsTarget=this.capturePlaybackTargetOwnership(playbackOwner);
+    let requestedVersion=null;
+    const cancel=()=>{
+      if(requestedVersion!==null&&requestedVersion===this._seekIntentVersion) this.cancelPresentation('clip-edit-cancelled');
+    };
+    signal?.addEventListener('abort',cancel,{once:true});
+    try{
+      if(!owns()) return false;
+      if(c.reverse&&!Seq.isStill(c)){
+        if(!await this.prepareClipReverse(c,{owns})||!owns()) return false;
+        if(!await this.prepareClipReverseAudio(c)||!owns()) return false;
+      }
+      // 素材準備不要求片段仍是呈現層；較新 seek 可在等待期間換到別段。
+      if(this._activeClip()===c){
+        if(c.reverse&&!Seq.isStill(c)){
+          if(!await this.activateClipReversePreview(c,{owns})||!owns()) return false;
+        }else if(this._reverseProxyActive){
+          if(!await this._restoreReverseShuttleSource({owns})||!owns()) return false;
+        }
+        if(this._activeClip()===c){
+          this._applyClipRate(c);
+          if(this.mpvMode&&await getPlayerAdapter().direction(c.reverse?'backward':'forward').catch(()=>false)===false) return false;
+          if(!owns()) return false;
+          this.syncMuteState();
+        }
+      }
+      if(!owns()) return false;
+      if(position==null) return true;
+      if(ownsTarget()){
+        const pending=this.seek(position,{playbackOwner});
+        requestedVersion=this._seekIntentVersion;
+        const result=await pending;
+        if(requestedVersion===this._seekIntentVersion) return owns()&&(result===true||result?.status==='presented');
+        requestedVersion=null;
+      }
+      // FPS-SYNC：refresh 落後於新播放目標時，等待那次呈現，不再 seek 舊位置。
+      while(owns()){
+        const version=this._seekIntentVersion,pending=this._latestSeekPromise;
+        if(!pending) return true;
+        const result=await pending;
+        if(version===this._seekIntentVersion) return owns()&&(result===true||result?.status==='presented');
+      }
+      return false;
+    }finally{signal?.removeEventListener('abort',cancel);}
   },
   _applyClipRate(clip){
     const rate=this._manualRate*(Number(clip?.speed)>0?Number(clip.speed):1);
@@ -3520,48 +3768,70 @@ const Media = {
   acceptMpvSourceTime(sourceTime){
     return this._mpvSourceTransition?.observe(sourceTime,1.5/getExactFps(State.fps||30))??true;
   },
-  _switchReverseShuttleSource(path,proxy){
-    const switching=this._performReverseShuttleSourceSwitch(path,proxy);
+  _switchReverseShuttleSource(path,proxy,options){
+    const switching=this._performReverseShuttleSourceSwitch(path,proxy,options);
     this._reverseSourcePromise=switching;
     switching.then(()=>{if(this._reverseSourcePromise===switching) this._reverseSourcePromise=null;},()=>{if(this._reverseSourcePromise===switching) this._reverseSourcePromise=null;});
     return switching;
   },
-  async _performReverseShuttleSourceSwitch(path, proxy){
+  async _performReverseShuttleSourceSwitch(path, proxy,{owns:upstreamOwns=()=>true,reposition=true}={}){
     const adapter=getPlayerAdapter();
     const clip=this._activeClip();
+    const presenterOperation=this._assetOperation(null,'reverse-source-presenter',()=>getPlayerAdapter()===adapter);
+    const ownsPresenter=()=>this._ownsAssetOperation(presenterOperation);
     const operation=this._assetOperation(null,{kind:'reverse-source',path},()=>getPlayerAdapter()===adapter&&this._activeClip()===clip);
     const owns=()=>this._ownsAssetOperation(operation);
+    if(!owns()||!upstreamOwns()) return false;
+    const previousPath=this._mpvPath,previousProxy=this._reverseProxyActive;
+    const seekVersion=this._seekIntentVersion;
     const sourceTime=Math.max(0,Number(this._mpvTime)||0);
     const transition=this._ensureMpvSourceTransition();
     const token=transition.begin();
     this.resetPresentationSession('mpv-source-switch');
-    const loaded=await this._intakeSession.queueExclusive(()=>owns()?adapter.loadfile(path):null).catch(()=>null);
-    if(!owns()){ transition.fail(token); return false; }
+    const loaded=await this._intakeSession.queueExclusive(()=>owns()&&upstreamOwns()?adapter.loadfile(path):null).catch(()=>null);
+    if(!ownsPresenter()){ transition.fail(token); return false; }
     if(!loaded||loaded.ok===false){ transition.fail(token); return false; }
-    if(!transition.ready(token,sourceTime)) return false;
     // loadfile 成功後真實播放器已換檔，即使後續 seek 失敗也不能把路徑狀態說成舊檔。
     this._reverseProxyActive=proxy;
     this._mpvPath=path;
+    // 片段被同 ID 新物件取代時，仍須記錄 native 實際來源；舊片段不得再定位或清理新片段。
+    if(!owns()){ transition.fail(token); return false; }
+    if(!transition.ready(token,sourceTime)) return false;
     this._mpvTime=sourceTime;
+    if(!upstreamOwns()){
+      transition.fail(token);
+      // loadfile 已發生，不能只丟棄回覆。相同工作區與 presenter 才有資格還原。
+      if(previousPath&&owns()) await this._performReverseShuttleSourceSwitch(previousPath,previousProxy,{owns,reposition:false});
+      return false;
+    }
     if(!proxy){
       const clip=this.seqOn()?this._activeClip():null;
       this._setMpvSeekProfile(clip);
     }
+    if(!reposition||seekVersion!==this._seekIntentVersion){transition.fail(token);return true;}
     try{
       const result=await (proxy?adapter.seek(sourceTime):this._seekMpv(sourceTime));
-      if(!owns()) return false;
+      if(!owns()){transition.fail(token);return false;}
+      if(!upstreamOwns()){
+        transition.fail(token);
+        if(previousPath&&owns()) await this._performReverseShuttleSourceSwitch(previousPath,previousProxy,{owns,reposition:false});
+        return false;
+      }
       if(result===false) throw new Error('mpv seek failed');
+      // FPS-SYNC：command ack 尚未帶來 time-pos 時，新 seek 已擁有呈現目標；
+      // 舊來源 transition 不能繼續等待原目標，否則會封鎖新畫格直到假逾時。
+      if(seekVersion!==this._seekIntentVersion){transition.fail(token);return true;}
     }catch(_){ transition.fail(token); return false; }
     emit('mpv:refreshSubs');
     return true;
   },
-  async _activateReverseShuttleProxy(){
+  async _activateReverseShuttleProxy(options){
     if(this._reverseProxyActive||!this.reverseShuttleProxyReady()) return this._reverseProxyActive;
-    return this._switchReverseShuttleSource(this._reverseProxyPath,true);
+    return this._switchReverseShuttleSource(this._reverseProxyPath,true,options);
   },
-  async _restoreReverseShuttleSource(){
+  async _restoreReverseShuttleSource(options){
     if(!this._reverseProxyActive) return true;
-    return this._switchReverseShuttleSource(this._reverseProxySourcePath,false);
+    return this._switchReverseShuttleSource(this._reverseProxySourcePath,false,options);
   },
   supportsNativeReverse(){
     const adapter=getPlayerAdapter();
@@ -3608,7 +3878,7 @@ const Media = {
       if(!owns()) return false;
       await adapter.mute(true);
       if(!owns()) return false;
-      const enabled=await adapter.direction('backward');
+      const enabled=await adapter.direction(clip?.reverse?'forward':'backward');
       if(!owns()) return false;
       if(enabled===false){
         this._nativeReverse=false;
@@ -3625,7 +3895,7 @@ const Media = {
       // intent restores the mother source, even if the reverse intent expired.
       if(this._reverseSourcePromise) await this._reverseSourcePromise;
       if(!owns()) return false;
-      if(await adapter.direction('forward')===false) return false;
+      if(await adapter.direction(clip?.reverse?'backward':'forward')===false) return false;
       if(!owns()) return false;
       if(!await this._restoreReverseShuttleSource()) return false;
       if(!owns()) return false;
@@ -3650,6 +3920,8 @@ const Media = {
     this._effectOriginalTracks.clear();this._effectOriginalPeaks.clear();
     this.resetPresentationSession('media-reset');
     this._seekIntentVersion+=1;
+    this._seekIntentOwner=null;
+    this._latestSeekPromise=null;
     this._reverseRestorePromise=null;
     this._reverseSourcePromise=null;
     this._nativeReverse=false;
@@ -3676,8 +3948,11 @@ const Media = {
     this._mpvTime=0; this._mpvDuration=0; this._mpvExactSeek=false; this._mpvSeekOffset=0;
     this._bgVersion++; this.activeSource=null; // 讓進行中的 _bgAudioIngest 知道要放棄；清除音源選擇
     this._wcProxyUrl=null; this._wcProxyPath=null; // WC 接管狀態隨媒體卸載歸零
+    clearSourceFrameIndexes();
     this.pendingChannels=[];
     this.audioPanelNotice=null;
+    this._audioExtraction=null;
+    this._audioProbeVersion++;
     // 只清 runtime asset registry；State.audioProject 的 sourceMaps 由 project reset/load 負責，
     // 以便讀取專案時可在之後用 restoreExternalAudioSource 沿用相同 audioSourceId 重建。
     this.externalAudioSources=[];
@@ -3706,7 +3981,7 @@ const Media = {
     this.playing=false; this._transport.reset();
     this._manualRate=1; video.playbackRate=1;
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）
-    Seq.clear(); this.activeClipId=null; this._mpvPath=null; deselect('video'); deselect('audio'); 
+    Seq.clear(); this.activeClipId=null; this._mpvPath=null; deselect('video'); deselect('audio');
     if(!options.keepVideoTracks) resetVideoTracks();
     if(!options.keepObjectURLs) delete this._preservedImageTimeline;
     this._resolveSeqSwitch?.();
@@ -3744,6 +4019,7 @@ on('media:sequenceWillRestore',()=>{
   Media._audioEffects?.invalidate();
   try{ Media._historyRestoreTimelineTime=Media.displayTime(); }
   catch(error){ Media._historyRestoreTimelineTime=0; }
+  Media.cancelPresentation('history-sequence-restore');
 });
 on('media:sequenceRestored',()=>{
   scheduleAudioEffectSync();
@@ -3752,7 +4028,7 @@ on('media:sequenceRestored',()=>{
   try{ void Media.restoreSequenceEditState(time); }catch(error){ console.warn('restore media history:',error); }
 });
 /* 專案音訊 bus 的 M／S／音量變更 → 重新套用增益並重繪音軌列與時間軸。
-   走 events.js 而非 window CustomEvent，理由見 docs/開發與驗證.md 的事件表。 */
+   走 events.js 的訂閱端與責任見 docs/技術架構說明.md §5 的事件表。 */
 on('audio:busChanged',()=>{
   try{ Media.applyGains(); notifyAudioTracks(); emit('media:timeline'); }
   catch(error){ console.warn('bus changed:',error); }

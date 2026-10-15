@@ -131,6 +131,34 @@ describe('sandbox 佇列精確 FPS bridge', () => {
 });
 
 describe('Electron invoke interface', () => {
+  it('來源畫格覆蓋證據穿過 preload 與 main，仍交由 mpv owner 驗證', async () => {
+    const invoke=vi.fn().mockResolvedValue({backend:'mpv',presentedSourceTime:1,presentedSourceDuration:0.04});
+    let api;
+    vm.runInNewContext(fs.readFileSync(path.join(ROOT,'electron/preload.js'),'utf8'),{
+      require:()=>({contextBridge:{exposeInMainWorld:(name,exposed)=>{if(name==='subtool')api=exposed;}},
+        ipcRenderer:{invoke,on(){},send(){}},webUtils:{}}),
+      ArrayBuffer,Uint8Array,Promise,TypeError,RangeError,
+    });
+    const options={exact:true,tolerance:0.0045,frameTarget:1.01,frameStart:1,frameDuration:0.04};
+    expect(await api.mpv.present(1,options)).toMatchObject({presentedSourceTime:1,presentedSourceDuration:0.04});
+    const [channel,time,forwarded]=invoke.mock.calls[0];
+    expect([channel,time,forwarded]).toEqual(['mpv:present',1,options]);
+    const source=fs.readFileSync(path.join(ROOT,'electron/main.js'),'utf8');
+    const ast=parse(source,{ecmaVersion:'latest',sourceType:'script'});
+    const registration=ast.body.find(node=>node.type==='ExpressionStatement'
+      &&node.expression?.callee?.object?.name==='ipcMain'
+      &&node.expression?.callee?.property?.name==='handle'
+      &&node.expression.arguments[0]?.value==='mpv:present');
+    expect(registration).toBeTruthy();
+    let handler;
+    const present=vi.fn().mockResolvedValue({presentedSourceTime:1,presentedSourceDuration:0.04});
+    vm.runInNewContext(source.slice(registration.start,registration.end),{
+      ipcMain:{handle:(_name,value)=>{handler=value;}},mpvHost:{present},
+    });
+    await handler({},time,forwarded);
+    expect(present).toHaveBeenCalledWith(1,options);
+  });
+
   it('截圖reservation釋放只接受path字串並使用獨立main channel', async () => {
     const invoke = vi.fn().mockResolvedValue(true);
     let api;

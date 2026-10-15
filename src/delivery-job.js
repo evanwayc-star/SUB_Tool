@@ -76,7 +76,8 @@ function externalAudioTimelineEnd(externalSources){
   return (Array.isArray(externalSources) ? externalSources : []).reduce((end, asset) => {
     if (!asset) return end;
     const { trimStart, trimEnd } = trimRange(asset);
-    return Math.max(end, nonNeg(asset.offset) + Math.max(0, trimEnd - trimStart));
+    const speed=Number(asset.speed)>0?Number(asset.speed):1;
+    return Math.max(end, nonNeg(asset.offset) + Math.max(0, trimEnd - trimStart)/speed);
   }, 0);
 }
 
@@ -181,12 +182,13 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
       name: c.name, web: c.web,
       path: c.path, type: image ? 'image' : 'video',
       ...(!image && Number.isFinite(c.fps) ? { fps: c.fps } : {}),
-      in: +c.in.toFixed(3), out: +c.out.toFixed(3),
+      // 來源時間保留原精度；毫秒捨入能把 29/30 秒推到下一格。
+      in: c.in, out: c.out,
       speed: Number(c.speed)>0?Number(c.speed):1, reverse:!!c.reverse,
       // This is a mother-source frame timestamp, independent of delivery cuts.
       // Millisecond rounding can select the following frame at NTSC rates.
       ...(freezeTime != null ? { freezeTime } : {}),
-      offset: +c.offset.toFixed(3), vtrack: c.vtrack || 0,
+      offset: c.offset, vtrack: c.vtrack || 0,
       audio: c.audioDetached || freezeTime != null ? [] : clipAudioSpec(c, mediaTracks),
       ...audioLimiterSnapshot(c),
       fadeIn: +(c.fadeIn || 0).toFixed(3), fadeOut: +(c.fadeOut || 0).toFixed(3), // 轉場：淡入/淡出（秒）
@@ -221,7 +223,7 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
     // 匯出會把片段 offset 歸零；保留原始時間軸起點供 burn-in 時碼等交付資訊使用。
     // 不四捨五入：23.976／29.97 的單格不足 0.04 秒，保留完整值才不會讓第一格差一格。
     timelineStart: expIn,
-    duration: +(expOut - expIn).toFixed(3),
+    duration: expOut - expIn,
     audioPlan,
     audioOnly: list.length === 0,
     externalAudioCount: externalPlacements.length,

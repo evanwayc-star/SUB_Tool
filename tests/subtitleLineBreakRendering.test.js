@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { renderASS } from '../src/formats.js';
 import { STYLE_DEFAULTS } from '../src/substyle.js';
+import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const FFMPEG = path.join(ROOT, 'electron', 'ffmpeg', 'ffmpeg.exe');
+const { ffmpeg: FFMPEG } = nativeTestTools();
 const SARASA_FONT = path.join(ROOT, 'font', '更紗黑體', 'sarasa-mono-tc-nerd-regular.ttf');
 const WIDTH = 960;
 const HEIGHT = 540;

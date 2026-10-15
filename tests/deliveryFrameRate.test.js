@@ -72,7 +72,7 @@ describe('交付 FPS', () => {
     const converted = buildDeliveryArgv(spec, env);
     expect(converted.plannedEncoder).toBe('libx264');
     expect(converted.args[converted.args.indexOf('-r') + 1]).toBe('30000/1001');
-    expect(converted.args[converted.args.indexOf('-filter_complex') + 1]).toContain('fps=30000/1001');
+    expect(converted.args[converted.args.indexOf('-filter_complex') + 1]).toContain('color=c=black:s=320x180:r=30000/1001:');
     const matched = buildDeliveryArgv({ ...spec, fps: 25 }, env);
     expect(matched.plannedEncoder).toBe('libx264');
     expect(matched.args).not.toContain('copy');
@@ -85,6 +85,8 @@ describe('交付 FPS', () => {
     });
     const actual = buildDeliveryArgv({ ...snapshot, ...spec, fps: 25, clips: snapshot.clips }, env);
     expect(actual.plannedEncoder).toBe('libx264');
-    expect(actual.args[actual.args.indexOf('-filter_complex') + 1]).toContain('trim=start=0:end=2');
+    const graph = actual.args[actual.args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('trim=end=2');
+    expect(graph).toContain('setpts=(PTS-0/TB-1)/1.000000');
   });
 });
