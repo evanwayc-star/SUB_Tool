@@ -32,6 +32,28 @@ afterEach(() => {
 });
 
 describe('FFmpeg execution', () => {
+  it('連續 kill error 都由同一 native owner 接收，close 前不結束或釋放 shutdown', async () => {
+    const root = makeTempRoot(), child = new EventEmitter();
+    Object.assign(child, { pid: 123456, exitCode: null, signalCode: null,
+      stderr: new EventEmitter(), kill: vi.fn(() => false) });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg',
+      getUserDataDir: () => root, spawnDirect: () => child });
+    let settled = false;
+    const failure = Object.assign(new Error('kill EACCES'), { code: 'EACCES' });
+    const work = execution.execute(['output.wav'], { executionKind: 'direct' })
+      .catch(error => { settled = true; return error; });
+    try {
+      child.emit('error', failure);
+      expect(() => child.emit('error', new Error('second kill failed'))).not.toThrow();
+      await Promise.resolve(); expect(settled).toBe(false);
+      await expect(execution.cancelAllAndWait({ timeoutMs: 10 })).rejects
+        .toMatchObject({ code: 'FFMPEG_TERMINATION_PENDING' });
+      expect(execution.resume()).toBe(false);
+    } finally { child.exitCode = 1; child.emit('close', 1); await work; }
+    expect(await work).toBe(failure);
+    await execution.cancelAllAndWait(); expect(execution.resume()).toBe(true);
+  });
+
   it('關閉時取消音訊 Pass 1，即使 close 回傳成功也不能啟動 Pass 2', async () => {
     const root = makeTempRoot();
     const child = new EventEmitter();

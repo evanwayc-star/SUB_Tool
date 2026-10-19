@@ -41,4 +41,15 @@ describe('subtitle preview interval index',()=>{
     expect(index.visibleAtFrame(cues,fps,100)).toEqual(cues);
     expect(index.visibleAtFrame(cues,fps,102)).toEqual([]);
   });
+
+  it('active-row queries stay on the displayed track while frame rendering includes every track',()=>{
+    const cues=[
+      {id:'first-track',start:0,end:10,track:0},
+      {id:'current-track',start:0,end:4,track:1},
+    ];
+    const index=new SubtitlePreviewIndex();
+    expect(index.activeAtTime(cues,25,2,0,1)).toEqual({cue:cues[1],index:1});
+    expect(index.activeAtTime(cues,25,5,0,1)).toBe(null);
+    expect(index.visibleAtFrame(cues,25,50)).toEqual(cues);
+  });
 });

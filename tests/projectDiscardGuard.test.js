@@ -54,16 +54,17 @@ beforeEach(async () => {
   ({ State } = await import('../src/state.js'));
   ({ Project, confirmDiscardUnsaved, isProjectDirty, resetProject } = await import('../src/project.js'));
 
-  State.cues = [];
-  State.notes = [];
-  State.clips = [];
-  State.tracks = [];
+  await Project.startNewProject(() => {
+    State.cues = [];
+    State.notes = [];
+    State.clips = [];
+    State.tracks = [];
+  });
 });
 
 afterEach(() => resetProject?.());
 
-/* 讓專案變成「有內容且未存檔」——isProjectDirty() 的前提是至少有字幕／備註／
-   clip／音訊路由其中之一，否則空專案永遠不算 dirty。 */
+/* 從剛建立的新工作區增加持久內容。 */
 function makeDirty() {
   State.cues = [{ id: 'c1', start: 0, end: 1, text: 'hello', track: 0 }];
   expect(isProjectDirty(), '前置條件：專案應為未存檔狀態').toBe(true);
@@ -73,6 +74,39 @@ describe('沒有未存檔變更時不打擾', () => {
   it('乾淨的專案直接放行，不跳對話框', async () => {
     await expect(confirmDiscardUnsaved()).resolves.toBe(true);
     expect(ui.openModal).not.toHaveBeenCalled();
+  });
+});
+
+describe('空工作區的持久設定也受未儲存保護', () => {
+  it.each([
+    ['字幕軌名稱', () => { State.tracks[0].name = '自訂對白'; }],
+    ['字幕軌樣式', () => { State.tracks[0].fontSize = 111; }],
+    ['視訊軌設定', () => { State.videoTracks[0].opacity = 0.5; }],
+    ['格網', () => { State.fps = 25; }],
+    ['交付範圍', () => { State.exportIn = 1; State.exportOut = 5; }],
+  ])('%s 修改後先提示，取消開啟保留設定，Undo 回到乾淨基準', async (_name, edit) => {
+    const { History } = await import('../src/history.js');
+    await Project.startNewProject(() => {
+      resetProject();
+      Object.assign(State, {
+        tracks: [{ name: '字幕軌 1', visible: true }], trackCount: 1,
+        videoTracks: [{ name: '視訊軌 1', visible: true }], fps: 24,
+        cues: [], clips: [], notes: [], duration: 0, externalAudioState: [], externalAudioEnd: 0,
+      });
+      History.reset();
+    });
+    expect(isProjectDirty()).toBe(false);
+    edit();
+    History.record('編輯空專案設定');
+    expect(isProjectDirty()).toBe(true);
+    const pending = confirmDiscardUnsaved();
+    clickModalButton('取消');
+    await expect(pending).resolves.toBe(false);
+    expect(isProjectDirty()).toBe(true);
+    History.undo();
+    expect(isProjectDirty()).toBe(false);
+    History.redo();
+    expect(isProjectDirty()).toBe(true);
   });
 });
 

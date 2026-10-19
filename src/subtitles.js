@@ -386,8 +386,6 @@ function updateStyleFilterOptions(allList) {
 }
 
 function renderSubList(){
-  for(const txt of textEditors.keys()) endTextEditor(txt,true);
-  sublist.innerHTML='';
   clearPresetNameCache();
   
   const filterEl = $('subStyleFilter');
@@ -398,6 +396,13 @@ function renderSubList(){
   }
 
   const list = filteredSubtitleCues();
+  const editingRows = new Map();
+  for(const [txt, {cue, owner}] of textEditors){
+    const row=txt.closest('.sub-row');
+    if(owner.isCurrent() && !State.tracks[cue.track||0]?.locked && list.includes(cue) && row?.parentElement===sublist)
+      editingRows.set(cue.id,row);
+    else endTextEditor(txt,true);
+  }
 
   if(list.length===0){
     sublist.innerHTML='<div class="empty">'+(State.cues.length?'此軌道沒有符合篩選條件的字幕':'尚無字幕<br><br>· 匯入字幕檔，或<br>· 選一條字幕後按 <b>I</b>/<b>O</b> 設定起訖<br>· 或點 <b>⬆＋ / ⬇＋</b> 新增')+'</div>';
@@ -409,7 +414,25 @@ function renderSubList(){
   const overlaps=detectOverlaps(timed, 0.001);
   let html='';
   for(let i=0;i<list.length;i++) html+=_subRowHTML(list[i],allList.indexOf(list[i]),overlaps);
-  sublist.innerHTML=html;
+  if(!editingRows.size) sublist.innerHTML=html;
+  else {
+    // 背景提交只更新其他列及文字以外的欄位；仍有效的 editor 保留 DOM、游標與 preview owner。
+    const template=document.createElement('template');
+    template.innerHTML=html;
+    let cursor=sublist.firstChild;
+    for(const rendered of [...template.content.children]){
+      const existing=editingRows.get(rendered.dataset.id);
+      const row=existing || rendered;
+      if(existing){
+        row.className=rendered.className;
+        for(const selector of ['.idx','.times','.sub-sty','.sub-styname'])
+          row.querySelector(selector).innerHTML=rendered.querySelector(selector).innerHTML;
+      }
+      if(row===cursor) cursor=cursor.nextSibling;
+      else sublist.insertBefore(row,cursor);
+    }
+    while(cursor){ const next=cursor.nextSibling; cursor.remove(); cursor=next; }
+  }
   renderCheckPanel();
 }
 
@@ -843,6 +866,7 @@ sublist?.addEventListener?.('focusout', e => {
 });
 
 sublist?.addEventListener?.('keydown', e => {
+  if (e.isComposing || e.keyCode === 229) { e.stopPropagation(); return; }
   if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); return; }
   const txt = e.target.closest('.txt');
   if (!txt || txt.contentEditable !== 'true') return;

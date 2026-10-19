@@ -605,10 +605,12 @@ export const Wave = {
       emit('media:timeline');
     }catch(e){ if(owns()) console.warn('wave selectSource',e); }
   },
-  clearSources(){
-    this._generation+=1;
-    for(const state of new Set(this.sourceWaveforms.values())) this._cancelSourceVocals(state,{clear:true});
-    this.sources=[]; this.srcIdx=-1; this.sourceWaveforms.clear(); emit('media:srcSel');
+  clearSources({keep=[]}={}){
+    const retained=new Set(keep.map(source=>this._sourceState(source)).filter(Boolean));
+    if(!retained.size) this._generation+=1;
+    for(const state of new Set(this.sourceWaveforms.values())) if(!retained.has(state)) this._cancelSourceVocals(state,{clear:true});
+    for(const [key,state] of this.sourceWaveforms) if(!retained.has(state)) this.sourceWaveforms.delete(key);
+    this.sources=[]; this.srcIdx=-1; emit('media:srcSel');
   },
   async fromFile(file,source='video',{owns=()=>true}={}){
     const currentSource=()=>{
@@ -641,7 +643,8 @@ export const Wave = {
     const primary=Seq.primary();
     const len=Math.ceil(Math.max(primary?.dur||State.duration,1)*this.resolution);
     this.peaks=new Float32Array(len*2); this.live=true;
-    this.clearSources();
+    // 這裡只初始化主播放器的即時波形；其他仍在時間軸上的來源不隨之重設。
+    this.clearSources({keep:[...State.clips,...Media.externalAudioSources]});
     emit('media:timeline');
     if(!Media.audioPanelState().notice&&!Media.audioPanelState().extraction) $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
   },

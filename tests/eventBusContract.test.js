@@ -16,7 +16,7 @@
    那筆是靠人工發現的（見 app.js 該處註解）。
 
    【這支測得到什麼、測不到什麼】
-   測得到：emit 名與 on 名的集合相等、沒有名稱被訂閱兩次。
+   測得到：emit 名與 on 名的集合相等；除精確登記的來源註冊分派外，沒有名稱被訂閱兩次。
    測不到：handler 做的事對不對，也測不到「該發事件的地方忘了發」。 */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -86,12 +86,16 @@ describe('事件匯流排：不可留下半條邊', () => {
     expect(orphan, `這些訂閱永遠不會被觸發：\n${orphan.join('\n')}`).toEqual([]);
   });
 
-  it('同一個事件不可被訂閱兩次', () => {
+  it('同一個事件不可被重複訂閱；來源註冊只准入兩個明確 owner', () => {
     /* events.js 的 on() 是 push、不去重，所以重複訂閱＝handler 跑兩遍。
        app.js 曾把 on('render:trackStyle', renderTrackStyle) 註冊兩次，
        於是每次選取變更都把整個樣式面板（含 preset 的 <optgroup> DOM）重建兩遍。 */
+    // 同一次來源註冊同時更新配線草稿與專案復原快照，兩者是不同 owner。
+    // 只准入這個有文件記錄的精確分派；額外或重複的訂閱仍應失敗。
+    const sourceOwners=(subscribed.get('audio:sourceRegistered')||[]).map(site=>site.replace(/:\d+$/,'')).sort();
+    expect(sourceOwners).toEqual(['audio-routing.js','history.js']);
     const dupes = [...subscribed.entries()]
-      .filter(([, sites]) => sites.length > 1)
+      .filter(([name, sites]) => name!=='audio:sourceRegistered'&&sites.length > 1)
       .map(([name, sites]) => `${name}  ←  ${sites.join(', ')}`);
     expect(dupes, `重複訂閱會讓 handler 跑多次：\n${dupes.join('\n')}`).toEqual([]);
   });

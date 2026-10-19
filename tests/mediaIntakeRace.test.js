@@ -264,6 +264,81 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
+  it.each([
+    {name:'trimmed',offset:0,speed:1,cueEnd:0,audioEnd:0,expected:2},
+    {name:'offset and speed',offset:3,speed:2,cueEnd:0,audioEnd:0,expected:4},
+    {name:'subtitle tail',offset:0,speed:2,cueEnd:7,audioEnd:0,expected:7},
+    {name:'external audio tail',offset:0,speed:2,cueEnd:0,audioEnd:8,expected:8},
+    {name:'trim during analysis',offset:3,speed:2,cueEnd:0,audioEnd:0,expected:4,editDuringLoad:true},
+  ])('native waveform metadata preserves the $name timeline duration',async({offset,speed,cueEnd,audioEnd,expected,editDuringLoad})=>{
+    const {AudioEngine}=await import('../src/audio-engine.js');
+    const {Seq}=await import('../src/sequence.js');
+    const {ProjectRestorePlan}=await import('../src/project-intake-engine.js');
+    const pcm={duration:12,length:1200,sampleRate:100,numberOfChannels:2,getChannelData:()=>new Float32Array(1200)};
+    const decode=vi.spyOn(AudioEngine,'decodeAudioData').mockResolvedValue(pcm);
+    const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue({arrayBuffer:async()=>new ArrayBuffer(8)});
+    deskMock.probe.mockResolvedValueOnce({duration:12,video:{codec:'h264',fps:25,width:1920,height:1080},audio:[{channels:2}]});
+    deskMock.ingest.mockResolvedValueOnce({channels:[]});
+    State.cues=cueEnd?[{id:'tail',start:0,end:cueEnd,text:'tail',timed:true}]:[];
+    const plan=new ProjectRestorePlan({clips:[{name:'trimmed.mov',path:'C:/media/trimmed.mov',primary:true,
+      audioSourceId:'trimmed-source',in:editDuringLoad?0:2,out:editDuringLoad?12:4,
+      offset:editDuringLoad?0:offset,speed:editDuringLoad?1:speed}]});
+    const waveform=deferred();deskMock.waveAudio.mockReturnValueOnce(waveform.promise);
+    try{
+      const loading=Media.loadDesktopMedia('C:/media/trimmed.mov',plan);
+      await vi.waitFor(()=>expect(deskMock.waveAudio).toHaveBeenCalled());
+      if(editDuringLoad){Object.assign(Seq.primary(),{in:2,out:4,offset,speed});Seq.recomputeDuration();}
+      if(audioEnd)Media.createExternalAudioSource({name:'tail',path:'C:/tail.wav',duration:audioEnd,in:0,out:audioEnd});
+      waveform.resolve('C:/cache/wave.wav');await loading;await Media.waitForPendingProjectRestore();
+      expect(Seq.primary()).toMatchObject({in:2,out:4,offset,speed,dur:12});
+      expect(State.duration).toBe(expected);
+    }finally{decode.mockRestore();fetch.mockRestore();}
+  });
+
+  it.each(['URL','metadata','deferred metadata','stale'])('mpv background audio %s rejection is owned and settled',async failure=>{
+    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12})),
+      present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
+      quit:vi.fn(async()=>{}),onEvent:vi.fn(),setBounds:vi.fn(async()=>{})};
+    window.subtool.mpv=mpv;resetPlayerAdapter(window.subtool);
+    const deferredStart=failure==='deferred metadata';
+    if(deferredStart){
+      deskMock.stat.mockResolvedValueOnce({exists:true,size:9*1024**3});
+      deskMock.probe.mockResolvedValueOnce({duration:12,video:{codec:'hq_hqa',fps:25,width:1920,height:1080},audio:[{channels:2}]});
+    }
+    deskMock.ingest.mockResolvedValueOnce({channels:[{file:'C:/cache/bad.wav'}]});
+    const failed=deferred();
+    const materialize=failure==='URL'?null:vi.spyOn(Media._intakeSession,'materializeAudioElements').mockImplementationOnce(()=>failed.promise);
+    if(failure==='URL')deskMock.fileURL.mockRejectedValueOnce(new Error('cache URL unavailable'));
+    try{
+      await Media.loadDesktopMedia(deferredStart?'C:/media/background.avi':'C:/media/background.mxf');
+      if(deferredStart){
+        expect(deskMock.ingest).not.toHaveBeenCalled();
+        await expect(Media.requestPresentation(0)).resolves.toMatchObject({status:'presented'});
+      }
+      if(failure!=='URL'){
+        await vi.waitFor(()=>expect(materialize).toHaveBeenCalledOnce());
+        if(failure==='stale'){
+          Media.reset();State.mediaName='new project';setStatus('new project ready','ok');
+          Media.pendingChannels=[{label:'new source',ready:false}];
+        }
+        failed.reject(new Error('metadata unavailable'));
+      }
+      if(failure==='stale'){
+        await new Promise(resolve=>setTimeout(resolve,25));
+        expect(Media.pendingChannels).toEqual([{label:'new source',ready:false}]);
+        expect(setStatus).toHaveBeenLastCalledWith('new project ready','ok');
+        expect(showToast).not.toHaveBeenCalled();
+      }else{
+        await vi.waitFor(()=>expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗','err'));
+        expect(Media.pendingChannels).toEqual([]);expect(State.clips).toHaveLength(1);
+        expect(showToast).toHaveBeenCalledWith(expect.stringContaining(failure==='URL'?'cache URL unavailable':'metadata unavailable'));
+      }
+    }finally{
+      materialize?.mockRestore();Media.reset();delete window.subtool.mpv;resetPlayerAdapter(window.subtool);
+      deskMock.fileURL.mockImplementation(path=>Promise.resolve(`file:///${String(path).replaceAll('\\','/')}`));
+    }
+  });
+
   it('邊轉邊播音訊 metadata 失敗時顯示錯誤', async () => {
     deskMock.probe.mockResolvedValueOnce({
       duration: 12,

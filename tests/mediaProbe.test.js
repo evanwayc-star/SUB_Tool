@@ -24,6 +24,28 @@ function completedProcess({ stdout = '', stderr = '', status = 0 } = {}) {
 }
 
 describe('媒體探測 interface', () => {
+  it('取消與強制終止的連續 error 不會逃出 probe owner，仍等待 native close', async () => {
+    const { createMediaProbe } = require('../electron/media-probe');
+    const child = new EventEmitter();
+    Object.assign(child, { pid: 123456, exitCode: null, signalCode: null,
+      stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => false) });
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+    const failure = Object.assign(new Error('kill EACCES'), { code: 'EACCES' });
+    let settled = false;
+    const work = probe.describe('source.mov').catch(error => { settled = true; return error; });
+    await vi.waitFor(() => expect(child.listenerCount('error')).toBeGreaterThan(0));
+    try {
+      child.emit('error', failure);
+      expect(() => child.emit('error', new Error('second kill failed'))).not.toThrow();
+      await Promise.resolve(); expect(settled).toBe(false);
+      await expect(probe.cancelAllAndWait({ timeoutMs: 10 })).rejects
+        .toMatchObject({ code: 'PROBE_TERMINATION_PENDING' });
+      expect(probe.resume()).toBe(false);
+    } finally { child.exitCode = 1; child.emit('close', 1); await work; }
+    expect(await work).toBe(failure); await probe.cancelAllAndWait();
+    expect(probe.resume()).toBe(true);
+  });
+
   it('shutdown 拒絕 queued/shared 工作並等 active child close，重入共用屏障，resume 後可再探測', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
     const children = [], spawnProcess = vi.fn(() => {

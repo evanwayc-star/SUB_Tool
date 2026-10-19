@@ -35,6 +35,8 @@ export function createMediaPresentationCore({
   }
 
   function canSharePresentation(left, right) {
+    // A capture owns its callback and paused frame until the pixels are read.
+    if (left.options.whilePresented || right.options.whilePresented) return false;
     return Math.abs(left.requestedTime - right.requestedTime) < 1e-9
       && requestTolerance(left) === requestTolerance(right);
   }
@@ -73,6 +75,28 @@ export function createMediaPresentationCore({
     startNext();
   }
 
+  function completePresentation(request, observed, source) {
+    if (active !== request || request.settled || request.holding) return;
+    if (!pending) lastPresentedTime = observed;
+    const complete = fields => {
+      if (active !== request || request.settled) return;
+      if (request.holding && pending) {
+        releaseActive(request, { status: 'superseded', presentedTime: lastPresentedTime });
+        return;
+      }
+      releaseActive(request, { status: 'presented', presentedTime: observed,
+        ...(source ? { source } : {}), ...fields });
+    };
+    if (typeof request.options.whilePresented !== 'function') { complete(); return; }
+    request.holding = true;
+    if (pending) { complete(); return; }
+    const isCurrent = () => active === request && !request.settled && !pending
+      && !request.controller?.signal.aborted;
+    Promise.resolve().then(() => request.options.whilePresented({
+      presentedTime: observed, signal: request.controller?.signal || null, isCurrent,
+    })).then(value => complete({ value }), captureError => complete({ captureError }));
+  }
+
   function start(request) {
     active = request;
     const requestTimeout = Number(request.options.timeoutMs ?? timeoutMs);
@@ -91,6 +115,7 @@ export function createMediaPresentationCore({
         requestId: request.id,
         signal: request.controller?.signal || null,
         isLatestRequest: () => active === request && pending == null,
+        ...(request.options.whilePresented ? { waitForFrame: true } : {}),
         ...(hasRequestedTolerance
           ? { tolerance: Math.max(0, requestedTolerance) }
           : {}),
@@ -107,13 +132,8 @@ export function createMediaPresentationCore({
       const observed = Math.max(0, Number(presentedTime));
       // 舊請求仍可能交回畫格，但新的 pending 已是使用者權威意圖。
       // 只讓目前最新的請求更新暫停呈現位置。
-      if (!pending) lastPresentedTime = observed;
       const source = result?.source || result?.backend;
-      releaseActive(request, {
-        status: 'presented',
-        presentedTime: observed,
-        ...(source ? { source } : {}),
-      });
+      completePresentation(request, observed, source);
     }).catch(error => {
       releaseActive(request, { status: 'failed', error });
     });
@@ -146,6 +166,7 @@ export function createMediaPresentationCore({
     // 進行中的 request 只接受同一 id 的畫格。mpv 在快速 seek／方向切換時
     // 可能晚送前一次的 time-pos；它不能把目前的呈現權威值拉回舊位置。
     if (active && details?.requestId !== active.id) return false;
+    if (active?.holding) return false;
     if (!active || !pending) lastPresentedTime = Math.max(0, observed);
     if (!active) return false;
     const requestedTolerance = Number(active.options.tolerance);
@@ -154,11 +175,7 @@ export function createMediaPresentationCore({
       : Math.max(0, Number(getTolerance(active.requestedTime, details)) || 0);
     if (Math.abs(observed - active.requestedTime) > tolerance) return false;
     const source = details?.source;
-    releaseActive(active, {
-      status: 'presented',
-      presentedTime: Math.max(0, observed),
-      ...(source ? { source } : {}),
-    });
+    completePresentation(active, Math.max(0, observed), source);
     return true;
   }
 
@@ -270,6 +287,7 @@ export function createMediaPresentationSession(options = {}) {
     requestId,
     tolerance: requestedTolerance,
     isLatestRequest,
+    waitForFrame = false,
   } = {}) {
     if (signal?.aborted) {
       throw Object.assign(new Error('media presentation aborted'), { name: 'AbortError' });
@@ -296,6 +314,9 @@ export function createMediaPresentationSession(options = {}) {
         if (signal?.aborted||(typeof isLatestRequest==='function'&&!isLatestRequest())) {
           throw Object.assign(new Error('media presentation aborted'), { name: 'AbortError' });
         }
+        // Activation may keep the previous presenter alive after an I/O failure.
+        // Its frames cannot acknowledge a target in another mother source.
+        if (timeline.requiresClip?.(clip)) throw new Error('timeline clip activation did not complete');
       }
       if (player.isNative?.()) player.configureNativeSeek?.(clip);
     } else if (timeline.isVirtual?.()) {
@@ -329,6 +350,7 @@ export function createMediaPresentationSession(options = {}) {
       signal,
       exact: !!(player.isNative?.() && player.exactSeek?.()),
       tolerance:sourceTolerance,
+      ...(waitForFrame ? { waitForFrame: true } : {}),
       ...(knownWindow?{frameTarget,frameStart:knownWindow.start,frameDuration:knownWindow.end-knownWindow.start}:{}),
     });
     const actualSource = Number(result?.presentedSourceTime);
@@ -392,6 +414,30 @@ export function createMediaPresentationSession(options = {}) {
       }
     });
     return pending;
+  }
+
+  async function withPresentedFrame(targetTime, capture, requestOptions = {}) {
+    if (typeof capture !== 'function') throw new TypeError('frame capture must be a function');
+    // Even a paused/externally started presenter must acknowledge a stopped
+    // frame before capture. The session retains the user's playback intent.
+    invokePlayback('suspend');
+    playbackRunning = false;
+    let capturing = null;
+    const result = await requestPlayback(targetTime, {
+      ...requestOptions,
+      whilePresented: details => {
+        capturing = Promise.resolve().then(() => capture({ ...details, adapter: player.adapter() }));
+        return capturing;
+      },
+    });
+    // Reset/timeout can finish the presentation first. Drain the old native
+    // screenshot before commands may reuse its temporary output path.
+    if (capturing) await capturing.catch(() => {});
+    if (result.status !== 'presented') {
+      throw Object.assign(new Error('畫面擷取已取消或尚未呈現'), { name: 'AbortError' });
+    }
+    if (result.captureError) throw result.captureError;
+    return result.value;
   }
 
   function setPlaybackIntent(value) {
@@ -461,6 +507,7 @@ export function createMediaPresentationSession(options = {}) {
       return core.request(timeline.normalizeTarget(targetTime), requestOptions);
     },
     requestPlayback,
+    withPresentedFrame,
     setPlaybackIntent,
     observePlaybackState,
     isPlaybackPending() { return playbackPending; },

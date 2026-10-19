@@ -152,7 +152,11 @@ function handleTimecodeArrowKeys(e) {
  */
 function setupTimecodeInput(inp) {
   if (!inp) return;
-  inp.addEventListener('keydown', handleTimecodeArrowKeys);
+  inp.addEventListener('keydown', e=>{
+    // 組字的 Enter／方向鍵屬於輸入法；先於各 caller 的確認 handler 攔下，保留原生預設動作。
+    if(e.isComposing||e.keyCode===229){ e.stopImmediatePropagation();return; }
+    handleTimecodeArrowKeys(e);
+  },true);
   inp.addEventListener('contextmenu', e => {
     e.preventDefault();
     e.stopPropagation();

@@ -158,9 +158,10 @@ async function startInlineEdit(block,c){
     done=true;
     const value=ed.value;
     ed.remove();
-    if(save) owner.commit({text:value}); else owner.cancel();
+    if(!save || !owner.commit({text:value}).ok) owner.cancel();
   };
   ed.addEventListener('keydown',ev=>{ ev.stopPropagation();
+    if(ev.isComposing || ev.keyCode===229) return;
     if(ev.key==='Enter'&&!ev.shiftKey){ ev.preventDefault(); commit(true); }
     else if(ev.key==='Escape'){ ev.preventDefault(); commit(false); } });
   ed.addEventListener('blur',()=>commit(true));
@@ -274,6 +275,7 @@ async function openCueEditModal(c){
       
       ta.addEventListener('keydown',e=>{
       if(!current()) return;
+      if(e.isComposing || e.keyCode===229){ e.stopPropagation(); return; }
       // Enter 系列一律擋住冒泡：確認/切分會同步關閉 modal，若讓事件繼續傳到 window 的
       // 快捷鍵處理器，modal 已不在、同一下 Enter 會再觸發 toggle_play_pause 造成雙重動作
       if(e.key==='Enter') e.stopPropagation();

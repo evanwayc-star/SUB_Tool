@@ -93,6 +93,32 @@ it.each(['hash', 'nan', 'length', 'range', 'descriptor'])('毀損的 %s cache不
   expect(await cache.read(descriptor(), 1, { selectedOnly: true })).toBeNull();
 });
 
+it('舊毀損快取的延後校驗不能刪除其間新分析寫入的有效結果', async () => {
+  const { cache, records } = memoryCache();
+  await cache.write(descriptor(), 1, peaks());
+  new Float32Array([...records.values()][0].bytes)[0] = -.125;
+  const digest = crypto.subtle.digest.bind(crypto.subtle);
+  let releaseHash, announceHash;
+  const hashing = new Promise(resolve => { announceHash = resolve; });
+  const resume = new Promise(resolve => { releaseHash = resolve; });
+  let delayed = false;
+  vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (algorithm, bytes) => {
+    if (!delayed && bytes instanceof ArrayBuffer && bytes.byteLength === 800 && new Float32Array(bytes)[0] === -.125) {
+      delayed = true; announceHash(); await resume;
+    }
+    return digest(algorithm, bytes);
+  });
+  const staleRead = cache.read(descriptor(), 1);
+  try {
+    await hashing;
+    expect(await cache.write(descriptor(), 1, peaks())).toBe(true);
+  } finally { releaseHash(); }
+  expect(await staleRead).toBeNull();
+  const reopened = memoryCache({}, records).cache;
+  expect(await reopened.read(descriptor(), 1)).toEqual(peaks());
+  expect(records.size).toBe(1);
+});
+
 it('拒絕半成品、非有限、顛倒範圍與異常振幅，無cache不創造假偏好', async () => {
   const { cache, records } = memoryCache();
   for (const bad of [new Float32Array(2), new Float32Array(200).fill(NaN), new Float32Array(200).fill(1), new Float32Array(200).fill(-99)])

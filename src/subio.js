@@ -952,19 +952,24 @@ if (typeof document !== 'undefined') {
   document.addEventListener('drop', async e => {
     e.preventDefault(); $('videoWrap')?.classList.remove('dragover');
     const f = e.dataTransfer.files[0]; if (!f) return;
+    const ownsWorkspace=Project.captureWorkspaceOwnership();
     const ext = (f.name.split('.').pop() || '').toLowerCase();
     if (['subtool', 'json'].includes(ext)) {
       try{
+        // Project.open owns the reader across an older runtime finishing in the
+        // same load generation; a save epoch change alone must not revoke it.
         await Project.open(()=>IS_DESKTOP&&typeof DESK.openDroppedProject==='function'
           ? DESK.openDroppedProject(f) : f);
       }catch(error){ showToast('開啟專案失敗：'+error.message); }
     }
+    // Subtitle intake captures its own request/workspace owner before reading.
     else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
     else if (IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)) {
       const p = DESK.authorizeDroppedFile ? await DESK.authorizeDroppedFile(f) : DESK.getFilePath(f);
-      if (p) Media.openIncoming({ path: p }); else Media.openIncoming({ file: f });
+      if(!ownsWorkspace()) return;
+      Media.openIncoming(p?{path:p}:{file:f},{owns:ownsWorkspace});
     }
-    else Media.openIncoming({ file: f });
+    else Media.openIncoming({file:f},{owns:ownsWorkspace});
   });
 }
 

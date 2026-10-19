@@ -151,7 +151,18 @@ describe('release transaction', () => {
     });
 
     it('要求 Git HEAD 的已提交 manifest 較舊，不能用替換模式回改舊版', () => {
-      const { rootDir, options } = createPreparedGitFixture('6.3.29');
+      const { rootDir, options } = createPreparedGitFixture();
+      // Simulate a manually corrupted prepared state; normal prepare now rejects downgrades.
+      options.version = '6.3.29';
+      for (const file of ['package.json', 'package-lock.json']) {
+        const filename = path.join(rootDir, file);
+        const manifest = JSON.parse(readFileSync(filename, 'utf8'));
+        manifest.version = options.version;
+        if (manifest.packages?.['']) manifest.packages[''].version = options.version;
+        writeFileSync(filename, JSON.stringify(manifest));
+      }
+      const changelogFile = path.join(rootDir, 'CHANGELOG.md');
+      writeFileSync(changelogFile, readFileSync(changelogFile, 'utf8').replace('## [v6.3.31]', '## [v6.3.29]'));
       const before = releaseContents(rootDir);
       expect(() => prepareRelease({ ...options, replaceCurrent: true, body: replacementBody }))
         .toThrow(/older committed manifest version/i);
@@ -265,6 +276,62 @@ describe('release transaction', () => {
     expect(readFileSync(path.join(rootDir, 'package.json'), 'utf8')).toBe(packageBefore);
     expect(readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8')).toBe(lockBefore);
     expect(readFileSync(path.join(rootDir, 'CHANGELOG.md'), 'utf8')).toBe(changelogBefore);
+  });
+
+  it.each(['09.6.1', '9.06.1', '9.6.01', '9.9007199254740992.1', '9007199254740992.0.0', '9.0.9007199254740992',
+    '9.6.1\n','9.6.1\r\n','9.6.1 ',' 9.6.1'])('無法原樣打包的版號 %s 在寫檔前拒絕', version => {
+    const rootDir = createRepositoryFixture();
+    const before = releaseContents(rootDir);
+    expect(() => prepareRelease({
+      rootDir, changelogPath: 'CHANGELOG.md', version, date: '2026-10-18',
+      body: '### 修復\n\n- 合法修復。\n\n### 驗證\n\n- 測試通過。',
+      sourceFiles: ['src/runtime.js'],
+    })).toThrow(/invalid release version/i);
+    expect(releaseContents(rootDir)).toEqual(before);
+  });
+
+  it('verify 拒絕三檔一致但會被打包器改寫的版號',()=>{
+    const rootDir=createRepositoryFixture(),version='9.06.001';
+    for(const filename of ['package.json','package-lock.json']){
+      const file=path.join(rootDir,filename),data=JSON.parse(readFileSync(file,'utf8'));
+      data.version=version;if(data.packages?.[''])data.packages[''].version=version;
+      writeFileSync(file,JSON.stringify(data));
+    }
+    const changelog=path.join(rootDir,'CHANGELOG.md');
+    writeFileSync(changelog,readFileSync(changelog,'utf8').replace('## [v6.3.30] - 2026-08-20',`## [v${version}] - 2026-08-20`));
+    const before=releaseContents(rootDir);
+    expect(()=>verifyReleaseState({rootDir,changelogPath:'CHANGELOG.md',sourceFiles:['src/runtime.js']})).toThrow(/invalid release version/i);
+    expect(releaseContents(rootDir)).toEqual(before);
+  });
+
+  it.each(['6.3.29', '6.2.99', '5.99.99'])('拒絕降低版本至 %s，三檔內容保持原樣', version => {
+    const rootDir = createRepositoryFixture();
+    const before = releaseContents(rootDir);
+    expect(() => prepareRelease({
+      rootDir, changelogPath: 'CHANGELOG.md', version, date: '2026-10-16',
+      body: '### 修復\n\n- 合法修復。\n\n### 驗證\n\n- 測試通過。',
+      sourceFiles: ['src/runtime.js'],
+    })).toThrow(/newer.*version/i);
+    expect(releaseContents(rootDir)).toEqual(before);
+  });
+
+  it.each(['index.html', 'vite.config.mjs'])('根目錄正式來源 %s 可獨立提供 Git 發版證據', filename => {
+    const rootDir = createRepositoryFixture();
+    writeFileSync(path.join(rootDir, filename), 'original source\n');
+    execFileSync('git', ['init'], { cwd: rootDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'release-test@example.com'], { cwd: rootDir });
+    execFileSync('git', ['config', 'user.name', 'Release Test'], { cwd: rootDir });
+    execFileSync('git', ['add', '.'], { cwd: rootDir });
+    execFileSync('git', ['commit', '-m', 'fixture'], { cwd: rootDir, stdio: 'ignore' });
+    execFileSync('git', ['tag', 'v6.3.30'], { cwd: rootDir });
+    writeFileSync(path.join(rootDir, filename), 'fixed production source\n');
+    writeFileSync(path.join(rootDir, 'README.md'), 'documentation change\n');
+    const sourceFiles = collectProductionSourceFiles({ rootDir });
+    expect(sourceFiles).toEqual([filename]);
+    expect(prepareRelease({
+      rootDir, changelogPath: 'CHANGELOG.md', version: '6.3.31', date: '2026-10-16',
+      body: '### 修復\n\n- 修正根目錄正式來源。\n\n### 驗證\n\n- 根目錄來源與建置通過。', sourceFiles,
+    })).toMatchObject({ version: '6.3.31' });
   });
 
   it('驗證跨平台換行並拒絕目前版本重複', () => {

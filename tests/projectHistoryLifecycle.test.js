@@ -112,7 +112,7 @@ describe('project history lifecycle', () => {
     expect(State.clips[0].offset).toBe(7);
   });
 
-  it('waits for secondary clip restoration before establishing the undo baseline', async () => {
+  it('文件先有 Undo 基準，secondary clip 復原後補齊初始序列', async () => {
     let finishSecondary;
     mediaMock.waitForPendingProjectRestore.mockImplementation(() => new Promise(resolve => {
       finishSecondary = () => {
@@ -138,7 +138,8 @@ describe('project history lifecycle', () => {
     });
     await vi.waitFor(() => expect(mediaMock.loadDesktopMedia).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => expect(mediaMock.waitForPendingProjectRestore).toHaveBeenCalledTimes(1));
-    expect(History.stack).toEqual([]);
+    expect(History.stack).toHaveLength(1);
+    expect(History.stack[0].snap.clipGeo).toEqual([]);
 
     finishSecondary();
     await loading;

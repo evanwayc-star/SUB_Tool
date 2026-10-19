@@ -59,15 +59,27 @@ function getJSON(url, timeoutMs = 5000) {
 
 async function waitFor(read, label, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await read();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
+  const expired = Symbol('wait-for-deadline');
+  let lastError, timer;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve(expired), timeoutMs);
+  });
+  try {
+    while (Date.now() < deadline) {
+      try {
+        // 單次 CDP／HTTP 讀取也受同一期限限制；晚到 ready 不能讓逾時驗收通過。
+        const value = await Promise.race([Promise.resolve().then(() => read()), timeout]);
+        if (value === expired || Date.now() >= deadline) break;
+        if (value) return value;
+      } catch (error) {
+        lastError = error;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await Promise.race([delay(Math.min(50, remaining)), timeout]);
     }
-    await delay(50);
+  } finally {
+    clearTimeout(timer);
   }
   throw new Error(`等待逾時：${label}${lastError ? `；${lastError.message}` : ''}`);
 }

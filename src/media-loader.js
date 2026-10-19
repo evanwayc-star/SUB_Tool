@@ -161,7 +161,9 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
           const ab=await AudioEngine.decodeAudioData(buf); 
           if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
           try { DESK.cleanupAudio(wavPath); } catch(e) {}
-          if(ab.duration>State.duration)State.duration=ab.duration; 
+          // The waveform spans the mother source, not its trimmed placements.
+          // Sequence, external audio and cues remain the timeline duration owner.
+          ctx.recomputeTimelineDuration();
           ctx._commitOriginalWave(primary,ab); emit('media:timeline');
         }
         catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); } }
@@ -648,7 +650,10 @@ async function importMediaBatch(files, explicitRelink, upstreamOwns, desktop) {
     for (const file of videos) if (!await admit(addVideo, file)) return;
   } else if (videos.length === 1) {
     const file = videos[0];
-    if (Media.seqOn()) Media.openIncoming(desktop ? { path:file } : { file });
+    if (Media.seqOn()) {
+      const choice=await Media.openIncoming(desktop ? { path:file } : { file },{owns});
+      if(!choice||!owns()) return;
+    }
     else {
       if (!await admit(loadPrimary, file, projectRestore)) return;
       primaryLoaded = true;

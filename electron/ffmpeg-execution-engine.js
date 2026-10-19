@@ -627,7 +627,9 @@ function createFFmpegExecution(options = {}) {
       catch (error) { void finishProcess(1, null, error); return; }
       let processError = null;
       process.stderr?.on('data', consumeStderr);
-      process.once('error', error => { processError ||= error; });
+      // A later SIGKILL/shutdown can fail after the initial SIGTERM error.
+      // Keep observing this child until close; the first error remains its result.
+      process.on('error', error => { processError ||= error; });
       process.once('close', (code, signal) => { void finishProcess(code, null, processError, signal); });
       // listener 必須先裝好：取消可在 onProcess 内同步 kill，仍須等 close 才settle。
       try { onProcess?.(process); }

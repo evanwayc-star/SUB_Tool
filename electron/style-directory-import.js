@@ -13,7 +13,7 @@ function collectStyleDirectoryFiles(root, { fsModule = fs, pathModule = path } =
       // Junction／symlink 不屬於使用者選取的實體目錄；也不能藉此形成遞迴環。
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) scan(file);
-      else if (entry.isFile() && name.endsWith('.json')) {
+      else if (entry.isFile() && /\.json$/i.test(name)) {
         files.push({
           name: pathModule.relative(root, file).split(pathModule.sep).join('/'),
           b64: fsModule.readFileSync(file).toString('base64'),

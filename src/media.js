@@ -1055,7 +1055,9 @@ const Media = {
   },
   _resetForFirstVideo(options={}){
     const preserved=this._captureImageOnlyTimeline();
-    this.reset({keepObjectURLs:preserved?.objectURLs, ...options});
+    // 首次影片不取代已有的外部音訊；已存在影片時仍採完整取代語意。
+    const keepExternalAudio=!this.seqOn()&&this.externalAudioSources.length>0;
+    this.reset({keepObjectURLs:preserved?.objectURLs,keepExternalAudio, ...options});
     this._preservedImageTimeline=preserved;
     return !!preserved;
   },
@@ -1353,82 +1355,95 @@ const Media = {
       ? '正在檢查 Proxy 與音訊快取（背景處理，不影響播放）…'
       : '正在檢查音訊快取（背景處理，不影響播放）…','busy');
     let res;
+    let stagedElements=[],stagedTracks=[];
     // 需要 Proxy 時同 pass 產 720p 短 GOP 預覽檔：多軌合成時交給 WebCodecs，
     // 持續倒帶時則暫時交給 mpv，避免母素材的長 GOP 造成反向預解碼停頓。
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
-    try{ res=await DESK.ingest({path:p,duration:dur,needsProxy,audio,queue:true}); }
-    catch(e){ if(!current()) return; console.warn('bg audio ingest:',e); this.pendingChannels=[]; notifyAudioTracks(); setStatus('音軌抽取失敗：'+e.message,''); return; }
-    if(!current()) return; // 使用者已換另一個檔，丟棄結果
-    if(res.proxy){
-      try{
-        const u=await DESK.fileURL(res.proxy);
-        if(!current()) return;
-        this._wcProxyUrl=u;
-        this._wcProxyPath=p;
-        // 倒帶用同一支短 GOP preview cache；它只負責監看，匯出仍只讀母素材。
-        this._reverseProxyPath=res.proxy;
-        this._reverseProxySourcePath=p;
-        // WCPreview.tick 每幀（含暫停）讀取新 URL；不需重送同位置 seek。
-        // 播放中的 seek 會暫停 presenter 與音訊，造成快取完成瞬間的停頓。
-      }catch(e){ if(!current()) return; console.warn('proxy url:',e); }
-    }
-
-    if(!current()) return;
-    const chs=res.channels||[];
-    const livePrimary=this._liveClipForSource(primary);
-    if(!livePrimary) return;
-    const descriptors=AudioPipeline.registerSource(livePrimary,chs,chs.length);
-    if(chs.length){
-      // 並行載入所有聲道，大幅縮短多聲道（8ch MXF 等）的等待時間
-      const els=await this._intakeSession.materializeAudioElements(chs,{
-        owns:current,
-        resolveFileURL:file=>DESK.fileURL(file),
-        createAudio:()=>new Audio(),
-      });
-      if(!els||!current()) return;
-      const incoming=[];
-      for(let i=0;i<chs.length;i++){
-        const el=els[i]; if(!el) continue;
-        const node=AudioEngine.createMediaElementSource(el);
-        const g=AudioEngine.createGain(); node.connect(g); AudioEngine.connectToMaster(g);
-        const sourceClip=this._liveClipForSource(primary);
-        if(!sourceClip) return;
-        const tr=this.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:!!sourceClip.muted,solo:false,volume:1,file:chs[i].file},sourceClip,descriptors[i],i);
-        this.attachMeter(tr,node); incoming.push(tr);
-        if(this.pendingChannels[i]) this.pendingChannels[i].ready=true;
-      }
-      this._commitOriginalAudioTracks(livePrimary,incoming);
-    }
-    if(!current()) return;
-    this.pendingChannels=[];
-    this.usingWebAudio=true; this.syncMuteState();
-    // element tracks 接管後，mpv 靜音（避免雙重音訊）
-    if(chs.length>0) getPlayerAdapter().mute(true).catch(()=>{});
-    if(this.playing) this.startElementSources(this._mpvTime);
-    notifyAudioTracks();
-
-    if(res.wave){
-      try{
-        const wavUrl=await DESK.fileURL(res.wave);
-        if(!current()) return;
-        const r=await fetch(wavUrl);
-        if(!current()) return;
-        const buf=await r.arrayBuffer();
-        if(!current()) return;
-        let pk=Wave.calcFromWav(buf);
-        if(!pk){
-          const ab=await AudioEngine.decodeAudioData(buf);
+    try{
+      res=await DESK.ingest({path:p,duration:dur,needsProxy,audio,queue:true});
+      if(!current()) return; // 使用者已換另一個檔，丟棄結果
+      if(res.proxy){
+        try{
+          const u=await DESK.fileURL(res.proxy);
           if(!current()) return;
-          pk=Wave.calcPeaks(ab,-1);
+          this._wcProxyUrl=u;
+          this._wcProxyPath=p;
+          // 倒帶用同一支短 GOP preview cache；它只負責監看，匯出仍只讀母素材。
+          this._reverseProxyPath=res.proxy;
+          this._reverseProxySourcePath=p;
+          // WCPreview.tick 每幀（含暫停）讀取新 URL；不需重送同位置 seek。
+          // 播放中的 seek 會暫停 presenter 與音訊，造成快取完成瞬間的停頓。
+        }catch(e){ if(!current()) return; console.warn('proxy url:',e); }
+      }
+
+      if(!current()) return;
+      const chs=res.channels||[];
+      const livePrimary=this._liveClipForSource(primary);
+      if(!livePrimary) return;
+      const descriptors=AudioPipeline.registerSource(livePrimary,chs,chs.length);
+      if(chs.length){
+        // 並行載入所有聲道，大幅縮短多聲道（8ch MXF 等）的等待時間
+        const els=await this._intakeSession.materializeAudioElements(chs,{
+          owns:current,
+          resolveFileURL:file=>DESK.fileURL(file),
+          createAudio:()=>new Audio(),
+        });
+        if(!els||!current()) return;
+        stagedElements=els;
+        const incoming=stagedTracks;
+        for(let i=0;i<chs.length;i++){
+          const el=els[i]; if(!el) continue;
+          const node=AudioEngine.createMediaElementSource(el);
+          const g=AudioEngine.createGain(); node.connect(g); AudioEngine.connectToMaster(g);
+          const sourceClip=this._liveClipForSource(primary);
+          if(!sourceClip) return;
+          const tr=this.bindTrackRouting({id:'el'+i,name:chs[i].label||('音軌 '+(i+1)),kind:'element',source:'video',el,gain:g,muted:!!sourceClip.muted,solo:false,volume:1,file:chs[i].file},sourceClip,descriptors[i],i);
+          this.attachMeter(tr,node); incoming.push(tr);
+          if(this.pendingChannels[i]) this.pendingChannels[i].ready=true;
         }
-        if(!current()) return;
-        const sourceClip=this._liveClipForSource(primary);
-        if(!sourceClip) return;
-        this._commitOriginalWave(sourceClip,pk,{mixPath:res.wave,channels:chs}); emit('media:timeline');
-      }catch(e){ if(!current()) return; }
+        this._commitOriginalAudioTracks(livePrimary,incoming);
+        stagedElements=[];stagedTracks=[];
+      }
+      if(!current()) return;
+      this.pendingChannels=[];
+      this.usingWebAudio=true; this.syncMuteState();
+      // element tracks 接管後，mpv 靜音（避免雙重音訊）
+      if(chs.length>0) getPlayerAdapter().mute(true).catch(()=>{});
+      if(this.playing) this.startElementSources(this._mpvTime);
+      notifyAudioTracks();
+
+      if(res.wave){
+        try{
+          const wavUrl=await DESK.fileURL(res.wave);
+          if(!current()) return;
+          const r=await fetch(wavUrl);
+          if(!current()) return;
+          const buf=await r.arrayBuffer();
+          if(!current()) return;
+          let pk=Wave.calcFromWav(buf);
+          if(!pk){
+            const ab=await AudioEngine.decodeAudioData(buf);
+            if(!current()) return;
+            pk=Wave.calcPeaks(ab,-1);
+          }
+          if(!current()) return;
+          const sourceClip=this._liveClipForSource(primary);
+          if(!sourceClip) return;
+          this._commitOriginalWave(sourceClip,pk,{mixPath:res.wave,channels:chs}); emit('media:timeline');
+        }catch(e){ if(!current()) return; }
+      }
+      if(current()) setStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');
+    }catch(error){
+      for(const element of stagedElements) this._disposeMediaElement(element);
+      for(const track of stagedTracks){try{track.gain?.disconnect();track.analyser?.disconnect?.();}catch(_){} }
+      if(!current()) return;
+      console.warn('bg audio ingest:',error);
+      this.pendingChannels=[];
+      notifyAudioTracks();
+      showToast('音訊預覽載入失敗：'+(error?.message||String(error)));
+      setStatus('影片已載入，但音訊預覽載入失敗','err');
     }
-    if(current()) setStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');
   },
 
   ensurePrimaryPreviewProxy(){
@@ -1922,6 +1937,18 @@ const Media = {
   requestPresentation(targetTime){
     return this._ensurePresentationSession().request(targetTime);
   },
+  // FPS-SYNC：native pixels、TC 與圖片計畫共用已確認且持續暫停的呈現格。
+  withPresentedFrame(targetTime,capture){
+    const ownsTarget=this.capturePlaybackTargetOwnership();
+    const session=this._ensurePresentationSession();
+    const adapter=getPlayerAdapter();
+    return session.withPresentedFrame(targetTime,details=>{
+      const isCurrent=()=>details.isCurrent()&&ownsTarget()
+        &&this._presentationSession===session&&getPlayerAdapter()===adapter&&this.mpvPresenting();
+      if(!isCurrent()) throw Object.assign(new Error('截圖的媒體已變更'),{name:'AbortError'});
+      return capture({...details,adapter,isCurrent});
+    },{timeoutMs:10000,tolerance:.45/getExactFps(State.fps||30)});
+  },
   cancelPresentation(reason='cancelled'){
     this._presentationSession?.cancel(reason);
   },
@@ -2379,13 +2406,15 @@ const Media = {
     const pend = pending;
     const restoredProjectClips=[];
     const transactionClips=[];
-    const rememberTransactionClip=clip=>{
+    const rememberTransactionClip=(clip,saved)=>{
       if(clip){ transactionClips.push(clip); restoredProjectClips.push(clip); }
+      if(clip) projectRestore?.materializeClip?.(saved,clip);
+      if(clip&&restoreOwns()) emit('media:projectClipRestored',{clips:[Seq.persistentMetadata(clip)]});
       return clip;
     };
     const rollbackTransaction=()=>{
       for(const clip of transactionClips.splice(0).reverse()){
-        if(clip?.id&&Seq.byId(clip.id)===clip) this.removeClip(clip.id);
+        if(clip?.id&&Seq.byId(clip.id)===clip&&this.removeClip(clip.id)) projectRestore?.forgetMaterializedClip?.(clip);
       }
     };
     if(projectRelink) restoredProjectClips.push(c);
@@ -2400,6 +2429,10 @@ const Media = {
       c.audioDetached=!!pri.audioDetached; c.locked=!!pri.locked;
       Seq.restoreMetadata(c,{...c,...pri,in:c.in,out:c.out,offset:c.offset});
       Seq.sort(); Seq.recomputeDuration();
+    }
+    if(projectRestore&&restoreOwns()){
+      projectRestore.materializeClip?.(pri,c);
+      emit('media:projectClipRestored',{clips:[Seq.persistentMetadata(c)]});
     }
     if(DESK && Array.isArray(pend)){
       if(pri&&!restoredProjectClips.includes(c)) restoredProjectClips.push(c);
@@ -2427,7 +2460,7 @@ const Media = {
               rollbackTransaction();
               return;
             }
-            if(image) rememberTransactionClip(image); else remaining.push(pc);
+            if(image) rememberTransactionClip(image,pc); else remaining.push(pc);
             continue;
           }
           const key=resourceKey(pc);
@@ -2443,7 +2476,7 @@ const Media = {
               fadeIn: pc.fadeIn || 0, fadeOut: pc.fadeOut || 0,
               in: pc.in ?? 0, out: Math.min(pc.out ?? base.dur, base.dur), offset: pc.offset ?? undefined });
             if(pc.offset != null) piece.offset = pc.offset;
-            rememberTransactionClip(piece);
+            rememberTransactionClip(piece,pc);
           } else {
             const added = await this.addClipDesktop(pc.path, pc, restoreOperation).catch(()=>null);
             if(!restoreOwns()){
@@ -2451,7 +2484,7 @@ const Media = {
               rollbackTransaction();
               return;
             }
-            if(added){ made.set(key, added); rememberTransactionClip(added); }
+            if(added){ made.set(key, added); rememberTransactionClip(added,pc); }
             else remaining.push(pc);
           }
         }
@@ -2565,14 +2598,55 @@ const Media = {
     if(pending) await pending;
   },
   /* 已有影片時的新影片路由：詢問「加入序列」或「取代」 */
-  openIncoming({ path = null, file = null }){
-    if(!this.seqOn()){ path ? this.loadDesktopMedia(path) : this.loadVideoFile(file); return; }
+  openIncoming({ path = null, file = null },{owns=()=>true}={}){
+    const ownsMedia=this.captureMediaOwnership();
+    const canAdmit=()=>ownsMedia()&&owns();
+    const load=async action=>{
+      if(!canAdmit()) return false;
+      let ownsLoad=canAdmit;
+      try{
+        const pending=action==='add'
+          ? (path?this.addClipDesktop(path):this.addClipWeb(file))
+          : (path?this.loadDesktopMedia(path):this.loadVideoFile(file));
+        // Replace intentionally starts a new media epoch. Capture its owner
+        // after admission, while the caller's workspace lease stays unchanged.
+        ownsLoad=this.captureMediaOwnership();
+        await pending;
+        return owns()&&ownsLoad()?action:false;
+      }catch(error){
+        if(owns()&&ownsLoad()){
+          setStatus('媒體載入失敗：'+(error?.message||String(error)),'err');
+          showToast('媒體載入失敗：'+(error?.message||String(error)));
+        }
+        return false;
+      }
+    };
+    if(!this.seqOn()) return load('replace');
     const nm = baseName(path || (file && file.name) || '影片');
-    openModal('已載入影片',
-      `<p>要把 <b>${escapeHTML(nm)}</b> 加入時間軸序列（接在最後一段之後），還是取代目前影片？</p>`,
-      [{ label: '➕ 加入序列', primary: true, act: () => { closeModal(); path ? this.addClipDesktop(path) : this.addClipWeb(file); } },
-       { label: '取代目前影片', act: () => { closeModal(); path ? this.loadDesktopMedia(path) : this.loadVideoFile(file); } },
-       { label: '取消', act: closeModal }]);
+    // The caller waits through the choice and its load. Same-batch companions
+    // must not be installed before a later Replace resets the media workspace.
+    // Explicit video cancellation retains the other selected files; an expired
+    // modal/workspace cancels admission of the rest of that old batch.
+    return new Promise(resolve=>{
+      let done=false,choosing=false,session,poll;
+      const finish=value=>{if(done)return;done=true;clearInterval(poll);resolve(value);};
+      const current=()=>canAdmit()&&(session?.isCurrent?.()??true);
+      const close=()=>session?.close?session.close({committed:true}):closeModal({committed:true});
+      const choose=action=>{
+        if(done||choosing) return Promise.resolve(false);
+        if(!current()){finish(false);return Promise.resolve(false);}
+        choosing=true;clearInterval(poll);close();
+        if(action==='cancel'){finish(action);return Promise.resolve(action);}
+        return load(action).then(value=>{finish(value);return value;});
+      };
+      session=openModal('已載入影片',
+        `<p>要把 <b>${escapeHTML(nm)}</b> 加入時間軸序列，還是取代目前影片？</p>`,
+        [{label:'➕ 加入序列',primary:true,act:()=>choose('add')},
+         {label:'取代目前影片',act:()=>choose('replace')},
+         {label:'取消',act:()=>choose('cancel')}],
+        {onDismiss:()=>finish(canAdmit()?'cancel':false),onReplaced:()=>finish(false)});
+      poll=setInterval(()=>{if(!current()){finish(false);session?.close?.({committed:true});}},25);
+    });
   },
   async loadDesktopMedia(p, projectRestore=null) { return loadDesktopMedia(this, p, projectRestore); },
   async loadVideoFile(file, projectRestore=null) { return loadVideoFile(this, file, projectRestore); },
@@ -2831,7 +2905,7 @@ const Media = {
     const transactionClips=[];
     const rollback=()=>{
       for(const clip of transactionClips.splice(0).reverse()){
-        if(clip?.id&&Seq.byId(clip.id)===clip) this.removeClip(clip.id);
+        if(clip?.id&&Seq.byId(clip.id)===clip&&this.removeClip(clip.id)) projectRestore?.forgetMaterializedClip?.(clip);
       }
     };
     let restored=0;
@@ -2849,7 +2923,11 @@ const Media = {
         rollback();
         return {restored:0,pending:pending.length,cancelled:true};
       }
-      if(image){ transactionClips.push(image); restored++; }
+      if(image){
+        transactionClips.push(image); restored++;
+        projectRestore?.materializeClip?.(raw,image);
+        emit('media:projectClipRestored',{clips:[Seq.persistentMetadata(image)]});
+      }
       else remaining.push(raw);
     }
     projectRestore?.replaceClips?.(remaining);
@@ -3216,7 +3294,7 @@ const Media = {
   play(){
     // mpv 原生倒播只讓影像 transport 運作。Web Audio／外部音訊元素沒有可靠的
     // 反向播放能力，若沿用一般 play() 路徑會聽到「音訊正播、畫面倒播」。
-    if(this._nativeReverse){
+    if(this._nativeReverse&&!this.presentationPending()){
       this.ensureCtx();
       this.stopBufferSources(); this.stopElementSources();
       getPlayerAdapter().play().catch(()=>{});
@@ -3733,9 +3811,7 @@ const Media = {
     for(const tr of this.tracks){
       if(tr.kind==='element'&&tr.el){
         const source=tr.source||'video';
-        const own=State.clips.find(c=>!Seq.isStill(c)&&Seq.isActiveAt(c,this.displayTime()) &&
-          (c.audioSrc||(c.primary?'video':'clip:'+c.id))===source);
-        const elementRate=this._manualRate*(Number(own?.speed)>0?Number(own.speed):1);
+        const elementRate=this.audioSourceRate(source,this.displayTime());
         tr.el.playbackRate=elementRate;
         if('preservesPitch' in tr.el) tr.el.preservesPitch=elementRate>=0.25&&elementRate<=4;
       }
@@ -3909,15 +3985,27 @@ const Media = {
     return restoring;
   },
   reset(options={}){
+    const keptAudio=options.keepExternalAudio?[...this.externalAudioSources]:[];
+    const keptKeys=new Set(keptAudio.flatMap(asset=>[asset.audioSourceId,asset.audioSrc]).filter(Boolean));
+    const keepTrack=track=>keptKeys.has(track.audioSourceId)||keptKeys.has(track.source);
+    const keptTracks=this.tracks.filter(keepTrack);
+    const keepObjectURLs=new Set(options.keepObjectURLs instanceof Set?options.keepObjectURLs:[]);
+    for(const track of [...keptTracks,...[...this._effectOriginalTracks].filter(([key])=>keptKeys.has(key)).flatMap(([,tracks])=>tracks)]){
+      if(track.el?.src) keepObjectURLs.add(track.el.src);
+    }
     this.setWebCodecsComposited(false);
     this._disposeAltPrimaryAudio();
     this._cancelDeferredInitialAudioIngest();
-    this._audioEffects?.invalidate({clear:true});
-    for(const tracks of this._effectOriginalTracks.values()) for(const track of tracks){
-      this._disposeMediaElement(track.el);
-      try{track.gain?.disconnect();}catch(_){}
+    if(!keptAudio.length) this._audioEffects?.invalidate({clear:true});
+    for(const [key,tracks] of this._effectOriginalTracks){
+      if(keptKeys.has(key)) continue;
+      for(const track of tracks){
+        this._disposeMediaElement(track.el);
+        try{track.gain?.disconnect();}catch(_){}
+      }
+      this._effectOriginalTracks.delete(key);
     }
-    this._effectOriginalTracks.clear();this._effectOriginalPeaks.clear();
+    for(const key of this._effectOriginalPeaks.keys()) if(!keptKeys.has(key)) this._effectOriginalPeaks.delete(key);
     this.resetPresentationSession('media-reset');
     this._seekIntentVersion+=1;
     this._seekIntentOwner=null;
@@ -3934,7 +4022,7 @@ const Media = {
     this._deferredPrimaryProxyPromise=null;
     this._intakeSession.invalidate();
     this._setActiveStreamLease(null);
-    this._assetEpoch.invalidate();
+    if(!keptAudio.length) this._assetEpoch.invalidate();
     this._sequenceEditVersion+=1;
     if(this.mpvMode && getPlayerAdapter().isAvailable){
       const runtime=getPlayerAdapter();
@@ -3946,7 +4034,8 @@ const Media = {
       const vs=$('videoSub'); if(vs) vs.style.display='';
     }
     this._mpvTime=0; this._mpvDuration=0; this._mpvExactSeek=false; this._mpvSeekOffset=0;
-    this._bgVersion++; this.activeSource=null; // 讓進行中的 _bgAudioIngest 知道要放棄；清除音源選擇
+    if(!keptAudio.length) this._bgVersion++;
+    this.activeSource=null; // 保留的外部素材仍持有同一個背景工作資格。
     this._wcProxyUrl=null; this._wcProxyPath=null; // WC 接管狀態隨媒體卸載歸零
     clearSourceFrameIndexes();
     this.pendingChannels=[];
@@ -3955,13 +4044,13 @@ const Media = {
     this._audioProbeVersion++;
     // 只清 runtime asset registry；State.audioProject 的 sourceMaps 由 project reset/load 負責，
     // 以便讀取專案時可在之後用 restoreExternalAudioSource 沿用相同 audioSourceId 重建。
-    this.externalAudioSources=[];
-    State.externalAudioState=[];
-    State.externalAudioEnd=0;
+    this.externalAudioSources=keptAudio;
+    this._syncExternalAudioState();
     if(this._ingestDoneHandler){ window.removeEventListener('desk:ingest-done',this._ingestDoneHandler); this._ingestDoneHandler=null; }
     this.stopBufferSources(); this.stopElementSources();
     AudioEngine.clearReverseSources();
     for(const tr of this.tracks){
+      if(keepTrack(tr)) continue;
       if(tr.el){
         // Fix #4：清除 scrubAudio 建立的隱藏 video 元素，避免跨檔案累積記憶體洩漏
         try{ destroyScrubber(tr.el); }catch(e){}
@@ -3970,12 +4059,11 @@ const Media = {
     }
     // main video 也有可能建立 scrubber，需要一併清
     try{ destroyScrubber(video); }catch(e){}
-    this.tracks=[]; this.usingWebAudio=false;
+    this.tracks=keptTracks; this.usingWebAudio=false;
     this._clipRuntimeReadySources?.clear();
     this._clipRuntimePromises?.clear();
     emit('media:clearMeters'); // Fix #10：清除 mixer 的舊音軌參照，避免 rafLoop 讀取廢棄 analyser
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
-    const keepObjectURLs=options.keepObjectURLs instanceof Set?options.keepObjectURLs:new Set();
     this.objectURLs.forEach(u=>{ if(!keepObjectURLs.has(u)) try{URL.revokeObjectURL(u);}catch(e){} });
     this.objectURLs=this.objectURLs.filter(u=>keepObjectURLs.has(u));
     this.playing=false; this._transport.reset();
@@ -3992,7 +4080,7 @@ const Media = {
     video.style.visibility='';
     const pb=$('playBtn'); if(pb) pb.textContent='▶';
     State.duration=0;
-    Wave.live=false; Wave.peaks=null; Wave.clearSources();
+    Wave.live=false; Wave.peaks=null; Wave.clearSources({keep:keptAudio});
   }
 };
 // timeline 的 bus 控制以事件通知，讓 timeline 不需反向依賴 Media；在載入順序不同時也安全。

@@ -33,6 +33,32 @@ afterEach(async () => {
 });
 
 describe('CDP 驗收連線的失敗歸屬', () => {
+  it('renderer 單次讀取未回覆也遵守等待期限，不接受期限後才到的 ready', async () => {
+    let reply, received;
+    const requested = new Promise(resolve => { received = resolve; });
+    const url = await serve(socket => socket.on('message', raw => {
+      const { id } = JSON.parse(raw.toString());
+      reply = () => socket.send(JSON.stringify({ id, result: { result: { value: true } } }));
+      received();
+    }));
+    const client = new CdpClient(url, { timeoutMs: 1000 });
+    let observation, work;
+    try {
+      await client.connect();
+      work = client.waitForApp(30).then(
+        value => { observation = { ready: value }; },
+        error => { observation = { error: error.message }; },
+      );
+      await requested;
+      await new Promise(resolve => setTimeout(resolve, 80));
+      expect(observation).toEqual({ error: expect.stringContaining('等待逾時：SUB Tool renderer 初始化') });
+      reply(); await work;
+      expect(observation).not.toHaveProperty('ready');
+    } finally {
+      client.close(); await work;
+    }
+  });
+
   it('page 已存在仍等待 renderer 的公開 interface 初始化後才讓驗收繼續',async()=>{
     let reads=0;
     const url=await serve(socket=>{

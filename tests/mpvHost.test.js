@@ -522,6 +522,28 @@ describe('Windows mpv host lifecycle', () => {
     expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('absolute+exact'));
   });
 
+  it('capture waits for native restart and reads actual time after the seek, even while paused', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    const socket=sockets[0];let restarted=false;
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(typeof message.request_id!=='number')return;
+      queueMicrotask(()=>socket.emit('data',Buffer.from(JSON.stringify({
+        request_id:message.request_id,
+        data:message.command?.[0]==='get_property'?(restarted?10.001:10):null,
+      })+'\n')));
+    });
+    const pending=host.present(10,{tolerance:.015,waitForFrame:true});
+    let settled=false;pending.then(()=>{settled=true;});
+    socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'time-pos',data:10})+'\n'));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(settled).toBe(false);
+    restarted=true;
+    socket.emit('data',Buffer.from(JSON.stringify({event:'playback-restart'})+'\n'));
+    await expect(pending).resolves.toEqual({backend:'mpv',presentedSourceTime:10.001});
+  });
+
   it('暫停中定位到已在顯示的同一格時，主動查詢 time-pos，避免沒有 property-change 而卡住後續請求', async () => {
     const { host, sockets } = make();
     await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });

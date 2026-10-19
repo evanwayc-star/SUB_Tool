@@ -15,6 +15,50 @@ function handoffSession(){
   return {session,commit,ack:(time)=>acknowledgements.shift()({backend:'mpv',presentedSourceTime:time})};
 }
 
+describe('held presented-frame capture',()=>{
+  const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return{promise,resolve};};
+  function fixture(){
+    const adapter={type:'mpv',present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time}))};
+    const playback={suspend:vi.fn(),resume:vi.fn(),fail:vi.fn()};
+    const session=createMediaPresentationSession({getTolerance:()=>.01,timeoutMs:2000,
+      timeline:{normalizeTarget:t=>t,hasSequence:()=>false,isVirtual:()=>false},
+      player:{adapter:()=>adapter,isNative:()=>true},commitPresented:t=>t,playback});
+    session.setPlaybackIntent(true);playback.resume.mockClear();
+    return{session,adapter,playback};
+  }
+  it.each([false,true])('keeps the native frame paused through pixel capture and resumes only latest intent=%s',async wantsPlay=>{
+    const {session,playback,adapter}=fixture(),pixels=deferred(),started=deferred();
+    const capture=session.withPresentedFrame(4,async({isCurrent})=>{started.resolve();await pixels.promise;expect(isCurrent()).toBe(true);return'bitmap';});
+    await started.promise;
+    expect(adapter.present).toHaveBeenCalledWith(4,expect.objectContaining({waitForFrame:true}));
+    expect(session.isPlaybackPending()).toBe(true);expect(session.isPending()).toBe(true);
+    expect(playback.suspend).toHaveBeenCalledOnce();expect(playback.resume).not.toHaveBeenCalled();
+    session.setPlaybackIntent(false);if(wantsPlay)session.setPlaybackIntent(true);
+    expect(playback.resume).not.toHaveBeenCalled();pixels.resolve();
+    await expect(capture).resolves.toBe('bitmap');
+    expect(playback.resume).toHaveBeenCalledTimes(wantsPlay?1:0);
+    expect(session.isPending()).toBe(false);
+  });
+  it.each(['new-seek','reset'])('discards a captured frame after %s and never resumes its obsolete intent',async reason=>{
+    const {session,playback,adapter}=fixture(),pixels=deferred(),started=deferred();
+    let owns;
+    const capture=session.withPresentedFrame(4,async({isCurrent})=>{owns=isCurrent;started.resolve();await pixels.promise;return'obsolete bitmap';});
+    const rejected=expect(capture).rejects.toMatchObject({name:'AbortError'});
+    await started.promise;
+    const newer=reason==='new-seek'?session.requestPlayback(8):null;
+    if(reason==='reset')session.reset('new-workspace');
+    expect(owns()).toBe(false);pixels.resolve();await rejected;
+    if(newer){await newer;expect(adapter.present.mock.calls.at(-1)[0]).toBe(8);}
+    expect(playback.resume).toHaveBeenCalledTimes(newer?1:0);
+  });
+  it('capture I/O failure releases a valid frame and preserves the latest playback intent',async()=>{
+    const {session,playback}=fixture();
+    await expect(session.withPresentedFrame(4,async()=>{throw new Error('image read failed');})).rejects.toThrow('image read failed');
+    expect(playback.resume).toHaveBeenCalledOnce();expect(playback.fail).not.toHaveBeenCalled();
+    expect(session.isPlaybackPending()).toBe(false);
+  });
+});
+
 describe('visible presenter may change during an acknowledged seek',()=>{
   it('反向畫格使用左開右閉區間，拒絕相鄰舊畫格並保留片段起點的clamp',async()=>{
     const {session,ack,commit}=handoffSession();session.setWebCodecsTakeover(true);

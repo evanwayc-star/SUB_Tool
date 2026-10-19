@@ -4,22 +4,21 @@
    用法：node scripts/diagnostics/measure-input-latency.js   （app 可以還沒開，它會等）
 
    ── 為什麼查到這裡 ──
-   到目前為止量到的全部是「沒問題」：
+   這個工具源於一次開檔等待。當時已觀察到的樣本如下，並不代表每次操作都相同：
 
      點擊 → 主行程進入 dialog.showOpenDialog       1 ms
-     主行程事件迴圈被擋住                          從來沒有
+     主行程事件迴圈被擋住                          當時樣本未觀察到
      renderer CPU profile                          97% idle
      renderer「被擋住 75 秒」                      量錯了，那是背景視窗的計時器節流
      SMB 列目錄／快取的同步 I/O                    全部 < 0.1 秒
 
-   但使用者確實等了一分鐘。唯一還沒量過的區段，就是【按下滑鼠 → renderer 的
-   handler 真的跑起來】這一段。
+   這支探針補量【事件建立 → renderer 的 capture handler 真的跑起來】這一段。
 
-   `event.timeStamp` 是【事件實際發生的時間】（與 performance.now() 同一時間軸），
-   在 handler 裡減一下就是這一段的長度。這個數字不受計時器節流影響——
-   它不是用計時器量的。
+   `event.timeStamp` 與 performance.now() 使用同一時間軸；兩者的差是到 handler
+   執行前的總等待，可能包含 renderer JavaScript 排隊。探針不靠計時器估算這段
+   等待，但無法單憑數值區分作業系統、瀏覽器派送與頁面 JS，需搭配 long-task／trace。
 
-   同時記錄事件當下的 visibilityState，避免又把節流混進來。
+   同時記錄 handler 執行時的 visibilityState，供判讀背景排程影響；不是事件建立時的狀態。
 ============================================================================== */
 
 
@@ -45,10 +44,9 @@ const inPage = js => `(async () => {
 
 /* 主行程側：攔 dialog.showOpenDialog，記錄呼叫與回傳的時間。
 
-   已經量到我們這一側從按下到交棒不到 5 毫秒（輸入延遲 1–4ms ＋ 點擊到呼叫
-   showOpenDialog 1ms），所以那一分鐘只可能在【showOpenDialog 裡面】。
-   resolved - enter 含「Windows 畫出視窗」與「使用者操作」兩段——
-   請使用者一看到視窗就按取消，這個差值就近似於視窗出現所花的時間。
+   resolved - enter 是呼叫到回傳的總耗時，包含原生對話框、使用者操作與排程。
+   這裡沒有記錄視窗首次顯示的時刻；即使使用者見到視窗就取消，也不能排除
+   操作及排程時間，或把其他未記錄的等待全數歸給 showOpenDialog。
 
    這個 monkeypatch 掛在主行程上，只要 app 不重開就一直有效。 */
 const ARM_DIALOG = `(() => {
@@ -68,9 +66,9 @@ const ARM_DIALOG = `(() => {
   return true;
 })()`;
 
-/* 三種事件都攔：pointerdown（最早）、mousedown、click。
-   若 pointerdown 就已經遲到，代表事件在【送進頁面之前】就被延誤了；
-   若 pointerdown 準時而 click 遲到，代表延誤發生在頁面內部。 */
+/* 三種事件各自記錄：pointerdown、mousedown、click。
+   每個差值都可能包含 renderer JS 排隊；這些事件並未保存共同手勢身分，
+   不能只靠它們的差值判定延誤位置，也不代表使用者整段等待。 */
 const ARM = `(() => {
   window.__inp = window.__inp || [];
   window.__inpSeq = window.__inpSeq || 0;
@@ -133,9 +131,9 @@ async function waitForPid(prev) {
     }
 
     if (!printedHeader) {
-      console.log('\n量測已就緒（不使用計時器，所以不受背景節流影響）。');
-      console.log('★ 載入影音，然後按「開啟影音」。每一次輸入都會即時印出來。');
-      console.log('   延遲 = 事件實際發生 → renderer 的 handler 跑起來\n');
+      console.log('\n量測已就緒（記錄事件時間戳與 capture handler 時間）。');
+      console.log('★ 載入影音，然後按「開啟影音」。以下列出探針仍保留的輸入樣本。');
+      console.log('   延遲 = 事件建立 → renderer 的 handler 執行；可能包含 renderer JavaScript 排隊，需搭配 long-task／trace 判讀。\n');
       console.log('  時間      事件           延遲       可見性     目標');
       console.log('  --------  -------------  ---------  ---------  ----');
       printedHeader = true;
@@ -153,7 +151,7 @@ async function waitForPid(prev) {
         console.warn(`輸入探針已捲動，略過 ${unread[0].seq - seen - 1} 筆；以下為仍保留的事件。`);
       }
       for (const r of unread) {
-        const mark = r.延遲ms > 1000 ? '   ← 這一段就是使用者等的時間' : '';
+        const mark = r.延遲ms > 1000 ? '   ← 到 handler 前等待超過 1 秒' : '';
         console.log(`  ${new Date(r.at).toTimeString().slice(0, 8)}  ${r.kind.padEnd(13)}` +
           `  ${String(r.延遲ms).padStart(6)} ms  ${r.vis.padEnd(9)}  ${r.act}${mark}`);
         seen = r.seq;

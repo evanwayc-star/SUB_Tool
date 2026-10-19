@@ -1,36 +1,20 @@
 /* ==============================================================================
-   量測：Windows 檔案對話框要讀那個大檔的中繼資料時，會慢多久
+   量測：本輪開檔與指定位置讀取的耗時，供檔案對話框排查參考
    ==============================================================================
-   用法：node scripts/diagnostics/measure-shell-metadata-read.js "<影片完整路徑>"
-        （在 mpv 正在播那個檔的時候跑，才量得到真實情況）
-
-   ── 為什麼查到這裡 ──
-   已經量到：
-
-     按下滑鼠 → renderer 收到事件               1–4 ms
-     renderer → 主行程呼叫 showOpenDialog        1 ms
-     showOpenDialog 呼叫 → 關閉                 42,610 ms   ← 全部在這
-
-   而且那 42 秒只在 mpv 打開那個 106 GB 的 .mov 之後才發生。
-
-   ── 假設 ──
-   Windows 的檔案對話框要列出資料夾內容才畫得出視窗，而 shell 的屬性處理常式
-   會讀每個影片檔的中繼資料（長度、解析度）來填欄位。`.mov` 的中繼資料索引
-   （moov atom）除非做過 faststart，否則【放在檔案結尾】——也就是要跳到
-   106 GB 的尾端去讀，而那條 SMB 連線此刻正被 mpv 串流佔著。
-
-   先前量過「每檔讀開頭 64KB＝60ms」，但那只讀開頭、而且是資料夾裡的小檔，
-   完全沒有碰到這個情況。
+   用法：node scripts/diagnostics/measure-shell-metadata-read.js "<檔案完整路徑>"
+        （可在不同播放狀態下重複採樣，保留各輪結果比較）
 
    ── 這支量什麼 ──
-   開頭 1MB、【結尾 1MB】、以及中段各讀一次，分別計時。
-   結尾特別慢就證實了上面的假設。
+   openSync 及開頭、四分位、中段、結尾的 readSync 各計時一次，最多讀 1MB；
+   小檔案的取樣位置可能重疊或短讀。這些數字只提供本輪 I/O 的線索。
+   本工具不解析容器、不追蹤 shell 呼叫，也不量測 SMB／mpv 競爭或快取命中；
+   不能單憑某位置慢或本輪全部快，判定或排除檔案對話框等待的原因。
 ============================================================================== */
 const fs = require('fs');
 
 const SRC = process.argv[2];
 if (!SRC) {
-  console.error('用法：node scripts/diagnostics/measure-shell-metadata-read.js "<影片完整路徑>"');
+  console.error('用法：node scripts/diagnostics/measure-shell-metadata-read.js "<檔案完整路徑>"');
   process.exit(2);
 }
 
@@ -45,11 +29,11 @@ console.log(`大小：${(st.size / 1e9).toFixed(2)} GB\n`);
 
 const LEN = 1024 * 1024;
 const spots = [
-  ['開頭 1MB', 0],
-  ['1/4 處 1MB', Math.floor(st.size * 0.25)],
-  ['中段 1MB', Math.floor(st.size * 0.5)],
-  ['3/4 處 1MB', Math.floor(st.size * 0.75)],
-  ['結尾 1MB', Math.max(0, st.size - LEN)],
+  ['開頭（最多 1MB）', 0],
+  ['1/4 處（最多 1MB）', Math.floor(st.size * 0.25)],
+  ['中段（最多 1MB）', Math.floor(st.size * 0.5)],
+  ['3/4 處（最多 1MB）', Math.floor(st.size * 0.75)],
+  ['結尾（最多 1MB）', Math.max(0, st.size - LEN)],
 ];
 
 const buf = Buffer.alloc(LEN);
@@ -69,6 +53,7 @@ for (const [label, pos] of spots) {
 fs.closeSync(fd);
 
 console.log('\n讀法：');
-console.log('  結尾特別慢 → .mov 的 moov atom 在檔尾，shell 讀中繼資料時要跨 100GB 定位，');
-console.log('               而那條 SMB 連線正被 mpv 串流佔著。這就是對話框慢的原因。');
-console.log('  全部都快   → 不是這個機制，要再往別的方向查。');
+console.log('  上方數字只表示本輪 openSync 與各指定位置 readSync 的耗時。');
+console.log('  某位置較慢 → 可作為該次 I/O 的線索，不能據此推定 moov 位置、SMB 競爭或對話框原因。');
+console.log('  全部都快   → 只說明本輪讀取較快，不能排除 shell 其他讀取方式或快取／排程差異。');
+console.log('  容器索引位置、shell 實際呼叫與快取命中情況需另有證據。');

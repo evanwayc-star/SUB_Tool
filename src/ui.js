@@ -153,7 +153,7 @@ if (modalBg) {
       return;
     }
     if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !e.target.isContentEditable) {
-      if (e.isComposing) return;
+      if (e.isComposing || e.keyCode === 229) return;
       e.preventDefault();
       e.stopPropagation();
       $('modalFoot')?.querySelector('button.primary')?.click();

@@ -19,6 +19,31 @@ function find(node, predicate) {
 }
 const arm = find(ast, node => node.type === 'VariableDeclarator' && node.id.name === 'ARM');
 const polling = find(ast, node => node.type === 'WhileStatement' && node.test.name === 'alive');
+const readerSource = readFileSync(new URL('../scripts/diagnostics/read-input-probe.js', import.meta.url), 'utf8');
+
+async function readProbe(records) {
+  const lines = [], exits = [];
+  let read = 0;
+  class CdpClient {
+    async connect() {}
+    async evaluate() {
+      return [true, JSON.stringify(records), '[]'][read++];
+    }
+    close() {}
+  }
+  await vm.runInNewContext(readerSource, {
+    require: name => name === 'child_process' ? {} : {
+      CdpClient,
+      getJSON: async () => [{ webSocketDebuggerUrl: 'ws://test' }],
+    },
+    process: { argv: ['node', 'read-input-probe.js', '123'], _debugProcess() {}, exit: code => exits.push(code) },
+    console: { log: value => lines.push(value), error: value => lines.push(value) },
+    setTimeout: callback => { callback(); return 0; },
+    Date,
+  });
+  expect(exits).toEqual([0]);
+  return lines.join('\n');
+}
 
 function probe() {
   const handlers = new Map();
@@ -73,5 +98,43 @@ describe('輸入延遲探針的有界 ring', () => {
     const result = await poll(recorder);
     expect(result.lines).toHaveLength(60);
     expect(result.warnings).toEqual([expect.stringContaining('略過 40 筆')]);
+  });
+
+  it('常駐讀取的高延遲標記只描述到 handler 前等待，不代替使用者整段等待', async () => {
+    const recorder = probe();
+    recorder.emit(1);
+    recorder.context.window.__inp[0].延遲ms = 2133;
+    const result = await poll(recorder);
+    expect(result.lines[0]).toContain('到 handler 前等待超過 1 秒');
+    expect(result.lines[0]).not.toContain('這一段就是使用者等的時間');
+  });
+});
+
+describe('輸入延遲讀取 CLI 的證據限制', () => {
+  it('真實 reader 執行後保留高延遲資料，不能排除 renderer JavaScript 排隊', async () => {
+    const output = await readProbe([
+      { seq: 1, kind: 'pointerdown', act: 'busy-page', 延遲ms: 2133, vis: 'visible', at: 1700000000000 },
+      { seq: 2, kind: 'click', act: 'normal', 延遲ms: 3, vis: 'visible', at: 1700000002200 },
+    ]);
+    expect(output).toContain('2133 ms');
+    expect(output).toContain('busy-page');
+    expect(output).toContain('3 ms');
+    expect(output).toContain('normal');
+    expect(output).toContain('可能包含 renderer JavaScript 排隊');
+    expect(output).toContain('不能單靠這個數字判定原因');
+    expect(output).toContain('到 handler 前等待超過 1 秒');
+    expect(output).not.toContain('不是頁面裡的 JS');
+    expect(output).not.toContain('這一段就是使用者等的時間');
+  });
+
+  it('正常事件仍印出資料，只對本次保留樣本下結論', async () => {
+    const output = await readProbe([
+      { seq: 1, kind: 'pointerdown', act: 'open-media', 延遲ms: 4, vis: 'visible', at: 1700000000000 },
+    ]);
+    expect(output).toContain('open-media');
+    expect(output).toContain('4 ms');
+    expect(output).toContain('本次保留樣本');
+    expect(output).toContain('未記錄的時段');
+    expect(output).not.toContain('每一次輸入都是即時處理的');
   });
 });

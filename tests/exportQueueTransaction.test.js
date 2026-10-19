@@ -145,7 +145,7 @@ describe('匯出佇列 transaction seam', () => {
   it('停止中的狀態若未保存成功，不會先對仍在跑的 ffmpeg 發送停止訊號', () => {
     const stop = vi.fn();
     const activeJobs = new Map([['running-job', { p: { kill: vi.fn() }, stop }]]);
-    const { queue, state, onChanged } = make({ persistJob: () => { throw new Error('disk full'); }, activeJobs });
+    const { queue, state, onChanged } = make({ stageTerminalOutcome: () => { throw new Error('disk full'); }, activeJobs });
     state.add(job('running-job', JOB_STATUS.RUNNING));
 
     expect(queue.stopJob('running-job')).toBe(false);

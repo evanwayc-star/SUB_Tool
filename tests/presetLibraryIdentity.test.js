@@ -64,6 +64,54 @@ afterEach(() => {
 });
 
 describe('常用樣式公開操作的 identity 保全', () => {
+  it.each([30, 77])('完成草稿保留較新貼上的樣式欄位（貼上字級 %s）', async pastedSize => {
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => new Proxy({
+      measureText: () => ({ width: 1 }), createLinearGradient: () => ({ addColorStop() {} }),
+    }, { get: (target, key) => target[key] || (() => {}) }));
+    const { History } = await import('../src/history.js');
+    const { copySelectedStyle, pasteStyleToSelected } = await import('../src/subtitles.js');
+    const old = { ...Styles.STYLE_DEFAULTS, fontSize: 30, color: '#ff0000' };
+    State.tracks = [{ ...old, name: '對白', visible: true, locked: false }];
+    State.cues = [
+      { id: 'target', start: 0, end: 2, track: 0, text: '目標', style: { ...old } },
+      { id: 'clipboard', start: 3, end: 4, track: 0, text: '樣式來源', style: { fontSize: pastedSize, color: '#00ff00' } },
+    ];
+    Styles.savePresets([{ name: '共用', style: old }]);
+    History.reset();
+    setSelection({ kind: 'sub', ids: ['clipboard'] }); copySelectedStyle();
+    setSelection({ kind: 'sub', ids: ['target'] });
+    document.getElementById('tsPresetMgr').click();
+    document.querySelector('[data-pre-edit="0"]').click();
+    State.presetEdit.draft.fontSize = 48;
+    pasteStyleToSelected();
+    document.getElementById('tsEditDone').click();
+
+    expect(Styles.getPresets()[0].style.fontSize).toBe(48);
+    expect(State.tracks[0].fontSize).toBe(48);
+    expect(Styles.effStyle(State.cues[0], State.tracks[0])).toMatchObject({
+      fontSize: pastedSize === 30 ? 48 : 77, color: '#00ff00',
+    });
+    History.undo();
+    expect(Styles.effStyle(State.cues[0], State.tracks[0])).toMatchObject({ fontSize: pastedSize, color: '#00ff00' });
+    expect(State.tracks[0].fontSize).toBe(30);
+  });
+
+  it('網頁匯出以十四位時間戳命名實際下載', () => {
+    vi.setSystemTime(new Date('2026-10-16T08:07:09Z'));
+    vi.stubGlobal('URL', Object.assign(class extends URL {}, {
+      createObjectURL: vi.fn(() => 'blob:preset-export'), revokeObjectURL: vi.fn(),
+    }));
+    let downloaded;
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () { downloaded = this.download; });
+    try {
+      Styles.savePresets([{ name: '對白', style: { fontSize: 48 } }]);
+      document.getElementById('tsPresetMgr').click();
+      document.getElementById('preExportBtn').click();
+      expect(downloaded).toBe('presets_20261016080709.json');
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('資料夾改名不能讓兩筆同名樣式變成同一個選項識別', () => {
     const original = [
       { name: '同名', group: 'A', style: { fontSize: 40 } },

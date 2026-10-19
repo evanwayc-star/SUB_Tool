@@ -25,7 +25,7 @@ import { bindPlayerFullscreen } from './media-player-adapter.js';
 
    【維護鐵律】
    - 切勿在此檔案中直接修改底層的 State (應交由 state.js 或 subtitles.js 提供之 Action)。
-   - 新增功能時，繪圖進 `painters/` 或對應 renderer，資料規則進純領域模組；
+   - 新增功能時，繪圖進 `timeline-renderer.js` 或 `video-renderer.js`，資料規則進純領域模組；
      `subio.js` 只保留字幕 I/O 與匯出對話框協調。保持 app.js 單純負責「接線」。
 ============================================================================== */
 "use strict";
@@ -46,7 +46,7 @@ import { Media, Wave } from './media.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline-renderer.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, applyCueStylePatch } from './subtitles.js';
-import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames } from './subtitle-model.js';
+import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames, hasActiveCueEdit } from './subtitle-model.js';
 import { searchUpdate, searchNav, searchReplace, searchSelectAll, replaceOne, setSelectCueHandler } from './subtitle-search.js';
 import { initRecentProjects } from './recent-projects.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
@@ -436,8 +436,8 @@ function initUI(){
   $('cpContainsInput').addEventListener('keydown',e=>e.stopPropagation());
   // 搜尋浮動視窗
   $('searchInput').addEventListener('input',()=>searchUpdate($('searchInput').value));
-  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing) return; if(e.key==='Enter'){ searchNav(e.shiftKey ? -1 : 1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
-  $('replaceInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing) return; if(e.key==='Enter'){ replaceOne(); } });
+  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ searchNav(e.shiftKey ? -1 : 1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
+  $('replaceInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ replaceOne(); } });
   // 搜尋視窗可拖曳
   { const head=$('searchDialogHead'), dlg=$('searchDialog');
     if(head&&dlg){ let ox=0,oy=0,sx=0,sy=0;
@@ -548,6 +548,7 @@ function startTimeEdit(){
   const old=span.textContent;
   const inp=document.createElement('input'); inp.className='tc-edit'; inp.value=''; inp.placeholder=old;
   span.textContent=''; span.appendChild(inp); inp.focus();
+  setupTimecodeInput(inp);
   let done=false;
   const fin=(commit)=>{ if(done)return; done=true; inp.remove(); span.textContent=secToEncore(Media.displayTime(),State.fps,State.dropFrame);
     if(commit){
@@ -601,7 +602,7 @@ function initExtras(){
       });
     }
   });
-  $('durAdjPctInput')?.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();applyDurAdjPct();} });
+  $('durAdjPctInput')?.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();applyDurAdjPct();} });
   $('durAdjMode')?.addEventListener('keydown',e=>e.stopPropagation());
   $('waveSrcSel')?.addEventListener('change',e=>{ Wave.selectSource(+e.target.value); e.target.blur(); });
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
@@ -705,18 +706,19 @@ function rafLoop(renderVideoSubCallback) {
     renderVideoSubCallback(true);
     if (Wave.live) { Wave.captureLive(); if ((_rafFrame++ % 6) === 0) drawWave(); }
     
-    const active=subtitlePreviewIndex.activeAtTime(State.cues,getExactFps(State.fps||25),t+0.001,_rafLastIdx);
+    const active=subtitlePreviewIndex.activeAtTime(State.cues,getExactFps(State.fps||25),t+0.001,_rafLastIdx,State.listTrack);
     const act=active?.cue||null;
     _rafLastIdx=active?.index??-1;
-    if (act && act.id !== State.activeId) {
-      State.activeId = act.id;
-      if (window._markActiveRow) window._markActiveRow(act.id);
+    const activeId=act?.id??null;
+    if (activeId !== State.activeId) {
+      State.activeId = activeId;
+      if (window._markActiveRow) window._markActiveRow(activeId);
     }
 
     if (State.autoSelect) {
       const tk = State.listTrack || 0;
       if (act && (act.track || 0) === tk && act.id !== State.selectedId) {
-        const editing = document.activeElement && document.activeElement.classList.contains('txt') && document.activeElement.contentEditable === 'true';
+        const editing = hasActiveCueEdit();
         if (!editing) {
           selectCueSingle(act.id, false);
         }
@@ -766,16 +768,38 @@ async function init(){
     renderVideoSub(); StylePanelController.renderTrackStyle();
   }).catch(()=>{});
   History.reset();
+  Project.establishCleanBaseline();
   if(IS_DESKTOP) initDesktop();
   else setStatus('就緒 — 匯入影音或字幕開始','ok');
 }
 async function initDesktop(){
+  const desktopStatus = Promise.resolve().then(() => DESK.status());
+  // 啟動開檔的意圖先於引擎等待；Project.open 統一保護等待期間的新修改與較新開檔。
+  // reader 仍等狀態初始化完成才讀啟動檔，空啟動不會產生捨棄確認。
+  const handleStartupFile = async incoming => {
+    if (!incoming) return;
+    try {
+      await Project.open(async () => {
+        const file = await incoming;
+        if (!file) return null;
+        const opened = typeof file === 'object' && typeof file.path === 'string'
+          ? file
+          : { path: file, b64: await DESK.readB64(file) };
+        if (!opened.b64) throw new Error('無法讀取專案檔內容');
+        return opened;
+      });
+    } catch(e) { console.error(e); setStatus(e?.message || '無法讀取專案檔內容','err'); }
+  };
+  if (DESK.getStartupFile) {
+    void handleStartupFile(desktopStatus.catch(() => {}).then(() => DESK.getStartupFile()));
+  }
+  if (DESK.onOpenFile) DESK.onOpenFile(file => handleStartupFile(file));
   const brand=document.querySelector('.brand');
   if(brand && !brand.querySelector('small')){ const sm=document.createElement('small'); sm.style.cssText='opacity:.55;font-size:11px;margin-left:6px;vertical-align:middle'; sm.textContent='桌面版'; brand.appendChild(sm); }
   document.querySelectorAll('.desktop-only').forEach(el=>{ el.style.display=''; }); // 顯示桌面專屬功能（匯出影片等）
   const nv=$('noVideo'); if(nv) nv.innerHTML='<b>尚未載入影音</b>點 <kbd>🎬 影音</kbd> 匯入<br>桌面版支援 MP4 / MOV / <b>MXF</b> / MKV / 多音軌（ffmpeg）<br>多音軌可同時混音播放，每軌獨立音量／獨奏';
   try{
-    const s=await DESK.status();
+    const s=await desktopStatus;
     const eng=$('stEngine');
     if(eng){
       const hasGpu = !!(s.venc && s.venc !== 'libx264');
@@ -928,32 +952,6 @@ async function initDesktop(){
     }
   });
   
-  /* fromLaunch=true 是「這個程式就是為了開這個檔而啟動的」（雙擊 .subtool 冷啟動），
-     那時還沒有任何專案內容，不必問。fromLaunch=false 是程式已經開著時又收到一個
-     檔案（Explorer 再雙擊另一個 .subtool → second-instance → app:open-file），
-     這時目前的專案可能有未存檔的變更，必須先問過——原本這條路徑直接覆蓋掉，
-     使用者連一句提示都看不到。 */
-  const handleStartupFile = async (incoming, { fromLaunch = false } = {}) => {
-    if (!incoming) return;
-    try {
-      await Project.open(async () => {
-        const file = await incoming;
-        if (!file) return null;
-        const opened = typeof file === 'object' && typeof file.path === 'string'
-          ? file
-          : { path: file, b64: await DESK.readB64(file) };
-        if (!opened.b64) throw new Error('無法讀取專案檔內容');
-        return opened;
-      }, { confirm: !fromLaunch });
-    } catch(e) { console.error(e); setStatus(e?.message || '無法讀取專案檔內容','err'); }
-  };
-
-  if (DESK.getStartupFile) {
-    void handleStartupFile(DESK.getStartupFile(), { fromLaunch: true });
-  }
-  if (DESK.onOpenFile) {
-    DESK.onOpenFile(file => handleStartupFile(file));
-  }
   configureSubtitleCompareSession({
     port: {
       open: payload => DESK.openCompareWindow(payload),

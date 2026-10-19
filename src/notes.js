@@ -19,7 +19,7 @@ import { requestPointerSeek } from './timeline-interaction-engine.js';
 import { updatePlayhead, drawRuler } from './timeline-renderer.js';
 import { History, recordHistory } from './history.js';
 import { emit } from './events.js';
-import { parseTimecodeInput } from './tcparse.js';
+import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { showToast, setStatus, openModal, closeModal } from './ui.js';
 import { showCtx } from './menus.js';
 import { executeBatchExport } from './subio.js';
@@ -170,6 +170,7 @@ function renderNotes(){
       const inp=document.createElement('input');
       inp.className='nt-te'; inp.value=origText;
       timeEl.textContent=''; timeEl.appendChild(inp); inp.focus(); inp.select();
+      setupTimecodeInput(inp);
       let done=false;
       const fin=(commit)=>{
         if(done)return; done=true;
@@ -194,7 +195,7 @@ function renderNotes(){
       txt.innerText=n.text||'';
       txt.contentEditable='true'; txt.focus();
     });
-    txt.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();txt.blur();} else if(e.key==='Escape'){e.preventDefault();edit?.cancel();txt.contentEditable='false';txt.innerHTML=escapeHTML(n.text);txt.blur();} });
+    txt.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();txt.blur();} else if(e.key==='Escape'){e.preventDefault();edit?.cancel();txt.contentEditable='false';txt.innerHTML=escapeHTML(n.text);txt.blur();} });
     txt.addEventListener('blur',()=>{
       if(txt.contentEditable!=='true')return;
       const val=txt.innerText;

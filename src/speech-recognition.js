@@ -11,7 +11,7 @@ import { State, newTrack, syncTrackCount, newId, setSelection, IS_DESKTOP } from
 import { AudioEngine } from './audio-engine.js';
 import { Seq } from './sequence.js';
 import { snapTimeToFrame, secToEncore } from './time.js';
-import { sortCues } from './subtitle-model.js';
+import { sortCues, hasActiveCueEdit } from './subtitle-model.js';
 import { recordHistory } from './history.js';
 import { Project } from './project.js';
 import { openModal, closeModal, showToast } from './ui.js';
@@ -608,9 +608,10 @@ export function insertAsrSubtitles(results, {
   if (plannedCues.length === 0) return 0;
 
   const trackObj = newTrack(trackName);
+  const preserveEditing = hasActiveCueEdit();
   State.tracks.push(trackObj);
   const trackIdx = State.tracks.length - 1;
-  State.listTrack = trackIdx;
+  if (!preserveEditing) State.listTrack = trackIdx;
   const newCues = plannedCues.map(cue => ({
     start: cue.start,
     end: cue.end,
@@ -623,8 +624,10 @@ export function insertAsrSubtitles(results, {
 
   State.cues.push(...newCues);
   sortCues();
-  setSelection({ kind:'sub', ids:[newCues[0].id] });
-  State.activeEdge='start';
+  if (!preserveEditing) {
+    setSelection({ kind:'sub', ids:[newCues[0].id] });
+    State.activeEdge='start';
+  }
   syncTrackCount();
   recordHistory(historyLabel);
 

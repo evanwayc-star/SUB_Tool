@@ -67,6 +67,97 @@ async function timeline(){
 }
 const mouse=(target,type,y=100)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0,clientX:10,clientY:y}));
 let clickClock=1000;
+it.each([1,2])('非主鍵 %s 拖曳不重排字幕軌，也不改字幕索引或 History',async button=>{
+  await timeline();History.reset();
+  const before=History.snap(),names=State.tracks.map(track=>track.name);
+  const fire=(target,type,y)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,button,clientX:10,clientY:y}));
+  fire(document.querySelector('#tlGutterTracks .drag-handle'),'mousedown',5);
+  fire(document,'mousemove',70);fire(document,'mouseup',70);
+  expect(document.querySelector('.tl-dragging,.tl-drag-target')).toBeNull();
+  expect(State.tracks.map(track=>track.name)).toEqual(names);
+  expect(History.snap()).toEqual(before);expect(History.stack).toHaveLength(1);
+});
+
+it.each(['subtitle','video','audio'].flatMap(kind=>[0,1,2].map(button=>({kind,button}))))('$kind 軌列只接受主鍵高度手勢：button $button',async({kind,button})=>{
+  State.clips=[{id:'gutter-clip',in:0,out:5,dur:5,offset:0,vtrack:0,primary:true,audioSourceId:'video',height:40}];
+  State.tracks[0].height=40;State.videoTracks[0].height=40;
+  const target=kind==='subtitle'?State.tracks[0]:kind==='video'?State.videoTracks[0]:State.clips[0];
+  await timeline();History.reset();vi.spyOn(performance,'now').mockReturnValue(clickClock+=1000);
+  const parent=kind==='subtitle'?'tlGutterTracks':kind==='video'?'tlGutterVtracks':'tlGutterAtracks';
+  const selector=kind==='video'?'[data-vtrack="0"] .tl-resize-handle':'.tl-resize-handle';
+  const handle=document.querySelector(`#${parent} ${selector}`);expect(handle).toBeTruthy();
+  const fire=(element,type,y)=>element.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,button,clientX:10,clientY:y}));
+  fire(handle,'mousedown',100);fire(document,'mousemove',120);fire(document,'mouseup',120);
+  expect(target.height).toBe(button===0?60:40);expect(History.stack).toHaveLength(button===0?2:1);
+  if(button===0){
+    History.undo();const restored=kind==='subtitle'?State.tracks[0]:kind==='video'?State.videoTracks[0]:State.clips[0];
+    expect(restored.height).toBe(40);
+  }else{
+    // 右／中鍵連點也不得誤用左鍵雙擊的「重設高度」。
+    fire(handle,'mousedown',100);fire(document,'mouseup',100);
+    expect(target.height).toBe(40);expect(History.stack).toHaveLength(1);
+  }
+});
+
+it.each(['replace-project','reorder-track','lock-track'])('空白時間軸新增字幕命令在 %s 後不能沿用舊目標',async change=>{
+  await timeline();History.reset();
+  document.getElementById('tlLayer').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:400,clientY:200}));
+  const add=[...document.querySelectorAll('#ctxmenu .ci')].find(el=>el.textContent.includes('新增空白字幕'));expect(add).toBeTruthy();
+  if(change==='replace-project') Project.apply({version:3,fps:25,duration:30,tracks:[{name:'different'}],cues:[],clips:[],notes:[],media:{}});
+  else if(change==='reorder-track'){
+    const handle=document.querySelector('#tlGutterTracks .drag-handle');
+    mouse(handle,'mousedown',5);mouse(document,'mousemove',70);mouse(document,'mouseup',70);
+  }else State.tracks[1].locked=true;
+  const before=History.snap(),steps=History.stack.length;
+  add.click();expect(History.snap()).toEqual(before);expect(History.stack).toHaveLength(steps);
+});
+
+it('空白時間軸有效的新增字幕命令仍落格並只記錄一次，可 Undo',async()=>{
+  await timeline();History.reset();
+  document.getElementById('tlLayer').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:403,clientY:200}));
+  const add=[...document.querySelectorAll('#ctxmenu .ci')].find(el=>el.textContent.includes('新增空白字幕'));expect(add).toBeTruthy();
+  add.click();const added=State.cues.find(cue=>!['a','b'].includes(cue.id));
+  expect(added).toMatchObject({start:5.04,end:6.04,text:'',track:1});expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.cues.map(cue=>cue.id)).toEqual(['a','b']);
+});
+
+it('搜尋快捷鍵透過正式 command 接線同步開關與 mpv 讓位',async()=>{
+  const {createCommands}=await import('../src/commands.js'),{on}=await import('../src/events.js');
+  const commands=createCommands();let active=true;
+  const sync=vi.fn();on('mpv:sync',()=>{if(active)sync();});
+  on('action',action=>{if(active)commands.run(action);});
+  const previous=State.keymap;
+  try{
+    State.keymap={search:[{key:'f',ctrl:true}]};
+    document.getElementById('searchDialog').style.display='none';
+    const event=()=>window.dispatchEvent(new KeyboardEvent('keydown',{key:'f',ctrlKey:true,bubbles:true,cancelable:true}));
+    event();expect(document.getElementById('searchDialog').style.display).toBe('flex');
+    expect(document.activeElement).toBe(document.getElementById('searchInput'));expect(sync).toHaveBeenCalledTimes(1);
+    // 全域快捷鍵仍尊重文字輸入，回到非輸入區後同鍵關閉。
+    window.dispatchEvent(new Event('blur'));document.getElementById('searchInput').blur();event();
+    expect(document.getElementById('searchDialog').style.display).toBe('none');expect(sync).toHaveBeenCalledTimes(2);
+  }finally{active=false;State.keymap=previous;}
+});
+
+it.each(['blur','pointercancel'])('字幕軌重排收到 %s 後撤銷，遲到 mouseup 不提交',async type=>{
+  await timeline();History.reset();
+  const names=State.tracks.map(track=>track.name),tracks=State.cues.map(cue=>cue.track);
+  const handle=document.querySelector('#tlGutterTracks .drag-handle');
+  mouse(handle,'mousedown',5);mouse(document,'mousemove',70);
+  expect(document.querySelector('.tl-dragging')).toBeTruthy();
+  window.dispatchEvent(new Event(type));
+  expect(document.querySelector('.tl-dragging,.tl-drag-target')).toBeNull();
+  mouse(document,'mouseup',70);
+  expect(State.tracks.map(track=>track.name)).toEqual(names);
+  expect(State.cues.map(cue=>cue.track)).toEqual(tracks);expect(History.stack).toHaveLength(1);
+  // 下一次正常拖曳仍只提交一筆，字幕索引與列表一同重排。
+  mouse(handle,'mousedown',5);mouse(document,'mousemove',70);mouse(document,'mouseup',70);
+  expect(State.tracks.map(track=>track.name)).toEqual([...names].reverse());
+  expect(State.cues.map(cue=>cue.track)).toEqual([1,1]);expect(State.listTrack).toBe(1);
+  expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.tracks.map(track=>track.name)).toEqual(names);
+});
+
 it.each(['text','move','height','geometry','image-pointer','image-modal'])('公開專案媒體復原完成前取消 %s 預覽，再建立初始基準',async kind=>{
   const {on}=await import('../src/events.js');
   let bridgeActive=true;

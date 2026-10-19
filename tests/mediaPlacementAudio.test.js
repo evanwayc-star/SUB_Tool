@@ -66,6 +66,24 @@ function track(kind='buffer'){
   if(tr.el)tr.el.src='file:///source.mov';Media.tracks.push(tr);return tr;
 }
 describe('公開 sequence placement 到實際音訊節點',()=>{
+  it.each([false,true])('transport rate changes preserve a detached 2x source rate (video timeline=%s)',async withVideo=>{
+    if(withVideo) primary(); else video.removeAttribute('src');
+    const asset=Media.createExternalAudioSource({name:'2x original audio',path:'C:/source.mov',
+      duration:10,in:2,out:10,offset:1,speed:2,descriptors:[{sourceStream:0,sourceChannel:0}]});
+    const tr=track('element');tr.source=asset.audioSrc;tr.audioSourceId=asset.audioSourceId;
+    await Media.requestPresentation(2);
+    Media.startElementSources(Media.vTime(),2);
+    expect(tr.el.playbackRate).toBe(2);
+    Media.playing=true;
+    Media.setRate(1.5);
+    Media.syncAudioDrift();
+    expect(tr.el.playbackRate).toBe(3);
+    expect(tr.el.preservesPitch).toBe(true);
+    Media.setRate(3);
+    expect(tr.el.playbackRate).toBe(6);
+    expect(tr.el.preservesPitch).toBe(false);
+  });
+
   it.skipIf(!existsSync(nativeTestTools().ffmpeg)).each([false,true])('轉檔退路讀真proxy header歸零，取消%s不能安裝晚到素材',async cancelled=>{
     const {ffmpeg}=nativeTestTools();
     const directory=mkdtempSync(path.join(realpathSync(tmpdir()),'subtool-transcode-proxy-clock-'));

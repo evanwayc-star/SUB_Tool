@@ -279,7 +279,9 @@ function createMediaProbe({
 
       child.stdout?.on('data', chunk => stdout.push(Buffer.from(chunk)));
       child.stderr?.on('data', chunk => stderr.push(Buffer.from(chunk)));
-      child.once('error', error => {
+      // Repeated kill failures still belong to this native lifecycle. The
+      // termination intent is set before kill(), so another error cannot reenter it.
+      child.on('error', error => {
         if (!terminationError) terminate(error);
       });
       child.once('close', status => {

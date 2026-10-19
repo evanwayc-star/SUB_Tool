@@ -69,7 +69,9 @@ export function swapAdjacentCues(id, dir){
   
   const newStart2 = cue1.start;
   const newEnd2 = newStart2 + dur2;
-  const newStart1 = newEnd2 + gap;
+  // 重疊區間沒有可沿用的正間隙；交換原有起點並保留各自時長。
+  // 尤其包含關係的 signed gap 可能比短句還長，不能把它當作負間距回推。
+  const newStart1 = gap < 0 ? cue2.start : newEnd2 + gap;
   const newEnd1 = newStart1 + dur1;
   
   cue2.start = newStart2;
@@ -106,7 +108,8 @@ export function mergeAdjacentCues(id, dir){
   cue1.text = newText;
   
   if (cue1.timed !== false && cue2.timed !== false) {
-    cue1.end = cue2.end;
+    cue1.start = Math.min(cue1.start, cue2.start);
+    cue1.end = Math.max(cue1.end, cue2.end);
   }
   
   const idx2 = State.cues.findIndex(c => c.id === cue2.id);
@@ -202,7 +205,7 @@ export function addCueRelative(dir){
     recordHistory(historyLabel);
     return c;
   }
-  const tk=sel?(sel.track||0):0;
+  const tk=sel?(sel.track||0):(State.listTrack||0);
   let start,end;
   if(sel){ if(dir>0){ start=sel.end; end=snapTimeToFrame(sel.end+2, State.fps, State.dropFrame); } else { end=sel.start; start=Math.max(0,snapTimeToFrame(sel.start-2, State.fps, State.dropFrame)); } }
   else { start=snapTimeToFrame(Media.displayTime(), State.fps, State.dropFrame); end=snapTimeToFrame(start+2, State.fps, State.dropFrame); }
@@ -516,6 +519,15 @@ export function editCue({ cueId, operation, value, baseline }) {
 
 /* 文字草稿與 live preview 的 owner。回復與 History 投影都只認最後一次
    自己寫入的值；同物件上的背景合法提交不能被舊 editor 取消或確認蓋掉。 */
+const activeCueEditors = new Set();
+export function hasActiveCueEdit() {
+  for (const owns of activeCueEditors) {
+    if (owns()) return true;
+    activeCueEditors.delete(owns);
+  }
+  return false;
+}
+
 export function beginCueEdit(cue, { preview = false } = {}) {
   const track = State.tracks[cue?.track || 0];
   if (!cue || !State.cues.includes(cue) || cueTrackLocked(cue, '編輯字幕')) return null;
@@ -529,13 +541,13 @@ export function beginCueEdit(cue, { preview = false } = {}) {
   releasePreview = preview ? History.beginPreview([
     {target:cue, fields:['text'], ownsField:ownsText},
   ], ownsIdentity,()=>{cancel();emit('render:subList');}) : null;
-  const release = () => { releasePreview?.(); active=false; };
+  const release = () => { releasePreview?.(); active=false; activeCueEditors.delete(ownsEditing); };
   const cancel = () => {
     if (preview && ownsText()) cue.text=baseline.text;
     release();
   };
-  return Object.freeze({
-    baseline, isCurrent,
+  const editor = Object.freeze({
+    baseline, isCurrent: () => isCurrent() && (!preview || ownsText()),
     release, cancel,
     split({textBefore, textAfter, timelineTime, beforeCommit} = {}) {
       if (!isCurrent()) { release(); return {ok:false,reason:'stale-edit'}; }
@@ -587,6 +599,9 @@ export function beginCueEdit(cue, { preview = false } = {}) {
       });
     },
   });
+  const ownsEditing = () => editor.isCurrent() && !track?.locked;
+  activeCueEditors.add(ownsEditing);
+  return editor;
 }
 
 export function splitCue({ cueId, textBefore, textAfter, timelineTime, beforeCommit }) {

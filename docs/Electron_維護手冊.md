@@ -10,10 +10,13 @@ flowchart LR
   P -->|validated IPC| M[main.js]
   M --> F[file authority]
   M --> I[media intake]
+  M --> MP[media probe]
   M --> V[mpv host]
   M --> Q[export queue]
   Q --> D[delivery runner]
-  I --> N[ffprobe / ffmpeg]
+  I --> N[ffmpeg]
+  MP --> FP[ffprobe]
+  D --> MP
   D --> N
 ```
 
@@ -24,10 +27,11 @@ flowchart LR
 | `electron/local-resource.js` | `subtool-local:` capability URL 與應用視窗導航限制 |
 | `electron/file-authority.js` | 精確 read／write／project／screenshot／delivery 權限 |
 | `electron/project-file-authority-engine.js` | 可信專案讀取、媒體能力衍生、Save As／覆寫准入與近期清單 |
-| `electron/settings-file.js` | 設定、近期專案與對話框目錄共用的 settings.json 寫入交易 |
+| `electron/settings-file.js` | settings.json 與快捷鍵 key.json 共用的原子讀寫交易 |
 | `electron/screenshot-output.js` | 截圖編號、輸出保留、暫存寫入與發布，以及退出時等待和清理 |
 | `electron/directory-output.js` | 所選輸出目錄的實體路徑核對、私有暫存寫入與安全替換 |
-| `electron/media-intake-runtime.js` | probe、Proxy、波形、聲道快取與 lease |
+| `electron/media-probe.js` | metadata 探測、並行准入、取消與原生 close 屏障 |
+| `electron/media-intake-runtime.js` | Proxy、波形、聲道快取與串流 lease |
 | `electron/media-source-clock.js` | FFmpeg seek 捨入與音訊 PTS 對齊 filter；原點映射共用 shared 規則 |
 | `electron/mother-source-evidence.js` | 母素材 stat 與內容取樣證據，提供同步及非同步讀取 |
 | `electron/clip-frame-cache.js` | 已授權母素材的固定畫面 PNG、來源核對與私有 staging |
@@ -79,13 +83,13 @@ Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案
 
 ### 本機資源 URL
 
-`file://` 不作為一般資源通道。`local-resource.js` 發出不透明 `subtool-local:` URL，並在每次請求時核對：
+`file://` 不作為一般資源通道。`local-resource.js` 發出帶有 48 字元十六進位隨機 token 的不透明 `subtool-local:` URL。持有 URL 即可提出資源請求；每次讀取仍核對：
 
-- capability token
-- 精確資源
-- 允許的 range
-- 呼叫視窗
-- 失效與釋放狀態
+- token 格式與既有精確檔案映射
+- `FileAuthority.canExposeFileURL()` 的目前讀取資格
+- HTTP 方法、實際一般檔案與允許的 range
+
+token 保存在資源伺服器的映射中，有效性由該映射與當前檔案能力共同決定。視窗的應用頁導航限制由下方的 `protectApplicationWindow()` 另行負責。
 
 不要用關閉 `webSecurity` 解決本機字型或媒體載入。
 
@@ -93,7 +97,7 @@ Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案
 
 ### 設定檔持久化
 
-`settings-file.js` 統一 settings.json 的讀改寫：renderer 設定、近期專案與最近目錄都先寫相鄰暫存檔，再以 rename 替換。解析失敗時先保存 `.corrupt-*` 原始位元組副本，保存失敗則拒絕覆寫。寫入失敗會保留原檔，並向呼叫端回報失敗；renderer 的設定 adapter 不把明確的 false 轉成成功。
+`settings-file.js` 統一 settings.json 與快捷鍵 key.json 的讀改寫，兩檔各自持有實例：renderer 設定、近期專案、最近目錄與快捷鍵都先寫相鄰暫存檔，再以 rename 替換。解析失敗時先保存 `.corrupt-*` 原始位元組副本，保存失敗則拒絕覆寫。寫入失敗會保留原檔，並向呼叫端回報失敗；renderer 的設定 adapter 不把明確的 false 轉成成功。
 
 ## 3. Preload／IPC 介面
 
@@ -156,7 +160,7 @@ macOS arm64 封裝需要：
 - `electron/ffmpeg/darwin-arm64/ffmpeg`
 - `electron/ffmpeg/darwin-arm64/ffprobe`
 
-`scripts/release/verify-native-binaries.js` 在封裝前驗證存在、平台、架構與能力。
+`scripts/release/verify-native-binaries.js` 在封裝前依目標平台與架構選出必要檔案，檢查檔案存在、大小、執行權限及需求清單指定的 SHA-256；這一步不執行工具來檢查架構或編解碼能力。Apple Silicon 的 arm64、ASS filter、encoder 與 MXF demuxer 能力由 `scripts/release/prepare-macos-native-binaries.js` 在準備工具時實際執行驗證；準備流程見[開發與驗證](開發與驗證.md#apple-silicon-本機測試版)。
 
 `media-probe.js` 統一管理 metadata、音訊存在、起始偏移與 bitrate 探測，最多同時執行兩個 ffprobe。相同指令的無取消請求共用進行中的工作，完成或失敗後即移除，避免素材被替換後沿用舊資訊；帶 `AbortSignal` 的請求各自持有取消生命週期。排隊不計入逾時，原生行程啟動後的預設上限為 60 秒，容許慢速儲存的暫時延遲。逾時或取消時仍等待 native `close`；等待期間若有其他行程取消，繼續等待最新終止屏障。無法確認關閉的行程會阻止後續探測。
 
@@ -164,13 +168,14 @@ macOS arm64 封裝需要：
 
 `media-intake-runtime.js` 管理：
 
-1. ffprobe metadata
-2. 來源指紋
-3. 720p 預覽 Proxy
-4. 逐聲道音訊快取
-5. 低取樣波形
-6. 短 GOP 倒帶 Proxy
-7. 串流 lease 與清理
+1. 來源指紋
+2. 720p 預覽 Proxy
+3. 逐聲道音訊快取
+4. 低取樣波形
+5. 短 GOP 倒帶 Proxy
+6. 串流 lease 與清理
+
+intake 接受既有探測結果，metadata 的取得與探測程序生命週期由上節的 `media-probe.js` 持有。
 
 快取只供預覽。交付准入使用 intake runtime 的分類規則，拒絕管理快取或 `.subtool_Cache` 中的 `proxy.mp4`、`wave.wav`、`ch_01.m4a` 及舊版 `ch1.m4a`，也會檢查音訊路由計畫內的來源；快取外同名的合法母素材仍可交付。
 母素材證據由 `mother-source-evidence.js` 統一讀取：完整來源路徑、size／mtime／ctime／dev／ino，以及前 1 MiB、中／尾段內容取樣。先取得開啟檔案的 stat，再讀取樣本，最後核對路徑目前指向的 stat；讀取期間替換或截斷來源會拒絕產生指紋。同步介面供 intake 使用，非同步介面供固定畫面、人聲波形及反向音訊使用。各快取仍持有自己的 namespace、產物規格與 capability／realpath 檢查；指紋不授權路徑，也不是整檔 checksum。固定畫面 key 使用新版證據，不能再命中只靠 size／mtime 的舊 PNG；intake 的 `source-v3` namespace 隔離未按影片來源時鐘對齊的舊音訊快取。
@@ -236,6 +241,12 @@ Runner 對所有交付格式探測影片、獨立 audioPlan 與舊聲道來源�
 若退出屏障失敗，截圖 owner 在完成當次 close 後恢復准入，其他可恢復 owner 也恢復。佇列透過 `cancelShutdown()` 等待原收尾後撤銷關閉旗標及 Promise，恢復新工作准入；沒有中止工作的安全收尾會保留原暫停意圖，中止過工作或未安全結清時維持暫停，避免自行重跑。下一次退出使用新的佇列收尾交易。截圖清理先於不可逆的 media intake 關閉，避免退出失敗卻使既有串流 URL 或後續截圖永久失效。
 
 watchdog 取得輸出 lease 後，以 `export-artifact.js` 的成品階段準備編碼目的地，啟動 ffmpeg，等待格式封裝／驗證及私有素材清理，最後裁定完成與釋放 lease。MOD、航空與 ISO 的格式分支集中在成品階段；watchdog 保有唯一的取消、程序存活及輸出 owner 權威。每份新工作由輸出路徑與 lease token 派生同目錄的私有暫存成品路徑，FFmpeg 與格式封裝／驗證只寫入該路徑；全部成功後才以重新命名提交到正式路徑。失敗、取消與崩潰復原只刪除 owner 登記的私有暫存檔，不能刪除原有同名成品。舊 lease 仍按其原始清理規則復原。寫入 ISO 前必須先持久化 owner，新的原生程序須登記 PID；清理失敗保留 lease，復原流程確認程序停止後才能清理。
+
+使用者停止執行中的交付時，佇列先以既有 stopped journal 保存完整停止意圖、payload 與 ASS 參照，記憶體仍維持 stopping，直到 runner 結束才裁定最終結果。停止意圖寫入失敗就回復 running，不能先送出原生停止；重啟從 journal 恢復可重試的停止紀錄，不自動重跑。
+
+原生程序的 `error` 也可能表示終止失敗。已有 PID 時，watchdog 必須保留暫存成品與 lease，等待 `close` 後才收尾；`exit` 或重複的 `error` 都不能提前釋放。光碟合成的私有編碼輸入也保留至原生工具 `close`；只有尚未取得 PID 的啟動失敗可立即清理。direct FFmpeg 與 ffprobe 在整段原生生命週期持續觀察 `error`，保留首個錯誤，不能讓後續強制終止的錯誤成為未處理事件。
+
+watchdog controller 的 `ready` 失敗與 `completion` 是不同結果：FFmpeg 已啟動後，owner 寫入仍可能失敗。controller 立即拒絕 `ready`，但須等 standalone owner 回報收尾結果或該程序真正結束，才結束 `completion`；runner 在此之前仍持有 active 工作及 ASS／TC 私有輸入。程序沒有成功啟動、未取得 PID 時才可立即拒絕兩者。
 
 成品階段的測試 adapter 只從可信 Node 程式入口注入，renderer IPC 與持久化工作不能指定要載入的模組。測試透過同一成品 interface 控制準備、失敗與取消；真正跨程序的 watchdog 測試仍驗證停止、斷線與復原。
 
@@ -314,7 +325,7 @@ mpv stderr log stream 由每次 launch 持有。寫入錯誤只關閉該 log，�
 
 ### 截圖輸出
 
-Renderer 的 `capturePreviewFrame()` 選擇實際 presenter；原生路徑先等待 `mpv-host.js` 的 `screenshot-to-file` 成功回覆，再讀取圖片，不以固定延遲判定完成。命令錯誤、五秒逾時、斷線與寫入 IPC 失敗均拒絕該截圖。`commands.js` 將擷取、讀取原生暫存圖、疊入 TC 及保存整段序列化，避免並行操作共用暫存圖。
+Renderer 的 `capturePreviewFrame()` 選擇實際 presenter，先凍結時間、FPS 與圖片計畫。原生路徑透過既有 presentation session 的 `withPresentedFrame()` 暫停並確認同一畫格，持有該格直到 `mpv-host.js` 的 `screenshot-to-file` 成功回覆及像素讀入，再依最新播放意圖恢復。較新的 seek、換素材或 reset 撤銷舊截圖資格；失效後仍等待已送出的原生讀取結束，再允許共用暫存圖。命令錯誤、逾時、斷線與寫入 IPC 失敗均拒絕該截圖，不以固定延遲判定完成。`commands.js` 將擷取、讀取原生暫存圖、疊入 TC 及保存整段序列化，避免並行操作共用暫存圖。
 
 畫面擷取完成後，`fs:reserveScreenshotPath` 交給 `screenshot-output.js` 核對已授權目錄，以 `wx` 原子保留下一個 `Shot-` 空檔；編號可越過 999。`fs:writeScreenshot` 必須同時持有檔案能力與該 reservation，先將 JPEG 寫入同目錄的私有暫存檔，完成 write／sync／close 後再核對原空檔身分並以 exclusive hardlink 發布。目錄不支援 hardlink 時，改以 `wx` 複製完成的位元組，禁止覆寫晚到的外部檔案。
 
@@ -334,19 +345,23 @@ mpv 蓋住 HTML 時，`_syncMpvPanel()` 依操作需要暫時隱藏或讓 WebCod
 
 ## 6. 匯出佇列
 
-工作狀態：
+常見工作狀態轉移如下；完整狀態與合法轉移以 [`export-queue.js`](../electron/export-queue.js) 的 `JOB_STATUS`／`TRANSITIONS` 為準。佇列的 `paused` 是排程旗標，不是個別工作的狀態。
 
 ```mermaid
 stateDiagram-v2
+  state "missing-source" as missingSource
   [*] --> queued
   queued --> running
-  running --> completed
+  running --> done
   running --> stopping
-  stopping --> paused
+  stopping --> stopped
+  stopping --> done: 停止前已完成
+  stopping --> failed
   running --> failed
-  failed --> queued: retry
-  queued --> missing_source
-  missing_source --> queued: relink
+  failed --> queued: 重試
+  stopped --> queued: 重試
+  queued --> missingSource
+  missingSource --> queued: 重新連結
 ```
 
 主要保證：
@@ -356,7 +371,7 @@ stateDiagram-v2
 - `output-leases/*.lock/owner.json` 防止多程序寫同一檔案。
 - watchdog 在 owner 崩潰時停止 ffmpeg。
 - 重啟先復原 stale work、刪半成品、釋放 lease，再載入佇列。
-- 完成紀錄保存在 `history.json`，重開不重跑。
+- 完成紀錄保存在 `history.json`，重開不重跑；只恢復精確成品路徑的定位能力，不恢復讀寫或同目錄授權。
 - 有執行中工作時關閉主視窗，監控視窗接手；真正退出前再次確認。
 
 `queue-store.js` 擁有 live state 持久化及 `QueueHistory` 完成紀錄。重啟載入待執行工作時會略過同目錄的 `history.json`，由 `QueueHistory` 單獨讀取；完成歷史不應被報為損毀工作。UI 不是真相來源。

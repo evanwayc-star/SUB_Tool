@@ -248,7 +248,7 @@ class ExportQueueState {
 function createExportQueue(deps) {
   const {
     dir, store, history,
-    admission, grantPersistedCapabilities, canReadSource, canWriteDelivery,
+    admission, grantPersistedCapabilities, grantCompletedOutputReveal, canReadSource, canWriteDelivery,
     isFile, runJob, onChanged, onJobFailed, prepareDeliveryUpdate, shutdownRunnerTimeoutMs,
   } = deps;
   const state = deps.state || new ExportQueueState();
@@ -288,7 +288,7 @@ function createExportQueue(deps) {
     for (const key of Object.keys(job)) delete job[key];
     Object.assign(job, snapshot);
   };
-  const mutatePersistedJob = (jobId, mutate) => {
+  const mutatePersistedJob = (jobId, mutate, persist = current => queue.persistJob(current)) => {
     const job = state.get(jobId);
     if (!job) return { ok: false, job: null, error: null };
     const snapshot = cloneJob(job);
@@ -296,7 +296,7 @@ function createExportQueue(deps) {
     try { changed = mutate(job); } catch (error) { return { ok: false, job, error }; }
     if (!changed) return { ok: false, job, error: null };
     try {
-      queue.persistJob(job);
+      persist(job);
       return { ok: true, job, error: null };
     } catch (error) {
       restoreJob(job, snapshot);
@@ -711,7 +711,11 @@ function createExportQueue(deps) {
       if (job.status !== JOB_STATUS.RUNNING) return false;
       const active = activeJobs.get(jobId);
       if (!active || (!active.p && typeof active.stop !== 'function')) return false;
-      const committed = mutatePersistedJob(jobId, current => state.stop(current.id));
+      // RAM remains stopping until the runner closes. The durable stop intent
+      // uses the existing stopped journal to preserve payload/ASS on a crash;
+      // a stopping job JSON alone would be deleted as a terminal tombstone.
+      const committed = mutatePersistedJob(jobId, current => state.stop(current.id),
+        current => store.stageTerminalOutcome(dir(), { ...current, status: JOB_STATUS.STOPPED }));
       if (!committed.ok) {
         if (committed.error) log(`無法保存工作 ${jobId} 的停止狀態：`, committed.error);
         return false;
@@ -928,6 +932,7 @@ function createExportQueue(deps) {
         for (const entry of history.load(d)) {
           if (pendingDeleteIds.has(entry.id)) continue;
           if (state.get(entry.id)) continue;
+          grantCompletedOutputReveal?.(entry.payload.outPath);
           state.add({ ...entry, senderId: null, pct: 100, etaS: null, errorMsg: null });
         }
       } catch (e) { log('無法載入完成紀錄：', e); }

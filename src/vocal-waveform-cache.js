@@ -100,7 +100,9 @@ export class VocalWaveformCache {
       if (!record || record.descriptor !== descriptor || !(record.bytes instanceof ArrayBuffer) || typeof record.selected !== 'boolean') return null;
       const peaks = new Float32Array(record.bytes);
       if (!validPeaks(peaks, duration) || await hash(record.bytes) !== record.sha256) {
-        await this.transaction('readwrite', store => store.delete(key)); return null;
+        // 驗證等待期間另一個分析／視窗可能已覆寫同 key；舊讀取只回 miss，
+        // 不刪除現在的 record。後續 write 仍按既有 entries／bytes 限額淘汰。
+        return null;
       }
       await this.transaction('readwrite', store => {
         const request = store.get(key); request.onsuccess = () => {

@@ -33,6 +33,10 @@ function mountSystemDom() {
     get() { return this.getAttribute('contenteditable') === 'true'; },
   });
   HTMLElement.prototype.scrollIntoView = vi.fn();
+  HTMLMediaElement.prototype.pause = vi.fn();
+  HTMLCanvasElement.prototype.getContext = () => new Proxy({
+    measureText: () => ({ width: 1 }), createLinearGradient: () => ({ addColorStop() {} }),
+  }, { get: (target, key) => target[key] || (() => {}), set: (target, key, value) => (target[key] = value, true) });
 }
 
 beforeAll(async () => {
@@ -330,6 +334,57 @@ describe('字幕編輯交易：拆分字幕', () => {
 });
 
 describe('字幕編輯交易：相鄰交換與合併', () => {
+  it.each([
+    { fps: 23.976, exact: 24000 / 1001 },
+    { fps: 29.97, exact: 30000 / 1001 },
+  ])('重疊字幕在 $fps FPS 交換仍保留各自整格時長，合併保留完整範圍', ({ fps, exact }) => {
+    State.fps = fps; State.dropFrame = fps === 29.97;
+    State.cues = [
+      { id: 'long', start: 30 / exact, end: 330 / exact, text: 'long', track: 0 },
+      { id: 'short', start: 90 / exact, end: 120 / exact, text: 'short', track: 0 },
+    ];
+    History.reset();
+    swapAdjacentCues('long', 1);
+    const long = State.cues.find(cue => cue.id === 'long'), short = State.cues.find(cue => cue.id === 'short');
+    expect(long.start * exact).toBeCloseTo(90, 8); expect(long.end * exact).toBeCloseTo(390, 8);
+    expect(short.start * exact).toBeCloseTo(30, 8); expect(short.end * exact).toBeCloseTo(60, 8);
+    mergeAdjacentCues('long', -1);
+    expect(State.cues).toHaveLength(1);
+    expect(State.cues[0].start * exact).toBeCloseTo(30, 8); expect(State.cues[0].end * exact).toBeCloseTo(390, 8);
+  });
+
+  it.each([1, -1])('包含關係字幕相鄰換位方向 %s 保留合法起點、各自時長與一筆 Undo', dir => {
+    State.fps = 25; State.dropFrame = false;
+    State.cues = [
+      { id: 'long', start: 0, end: 10, text: 'long', track: 0, timed: true },
+      { id: 'short', start: 2, end: 3, text: 'short', track: 0, timed: true },
+    ];
+    const before = structuredClone(State.cues);
+    History.reset();
+    swapAdjacentCues(dir > 0 ? 'long' : 'short', dir);
+    expect(State.cues.map(({ id, start, end }) => ({ id, start, end }))).toEqual([
+      { id: 'short', start: 0, end: 1 },
+      { id: 'long', start: 2, end: 12 },
+    ]);
+    expect(History.stack).toHaveLength(2);
+    History.undo(); expect(State.cues).toEqual(before);
+    History.redo(); expect(State.cues.find(cue => cue.id === 'long').start).toBe(2);
+  });
+
+  it.each([1, -1])('包含關係字幕合併方向 %s 保留完整時間聯集並支援 Undo/Redo', dir => {
+    State.cues = [
+      { id: 'long', start: 0, end: 10, text: 'long', track: 0, timed: true },
+      { id: 'short', start: 2, end: 3, text: 'short', track: 0, timed: true },
+    ];
+    const before = structuredClone(State.cues);
+    History.reset();
+    mergeAdjacentCues(dir > 0 ? 'long' : 'short', dir);
+    expect(State.cues).toEqual([{ ...before[0], text: 'long short' }]);
+    expect(History.stack).toHaveLength(2);
+    History.undo(); expect(State.cues).toEqual(before);
+    History.redo(); expect(State.cues[0]).toMatchObject({ start: 0, end: 10, text: 'long short' });
+  });
+
   it('production interface 不再暴露未接線的影子純函式', () => {
     expect(['splitCueAtTime', 'mergeTwoCues', 'swapCueTexts'].filter(name => name in SubtitleModel))
       .toEqual([]);

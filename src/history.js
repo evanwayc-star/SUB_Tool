@@ -5,7 +5,7 @@
    所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
 ============================================================================== */
 /* SUB Tool — 動作紀錄（復原 / 重做） */
-import { State, syncTrackCount, setFps, normalizeAudioProject, pruneSelection } from './state.js';
+import { State, syncTrackCount, setFps, normalizeAudioProject, registerAudioSource, pruneSelection } from './state.js';
 import { Seq } from './sequence.js';
 import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
@@ -30,6 +30,17 @@ export function syncCompareSnapshot(){
 let audioPreview = null;
 const editPreviews = new Set();
 let historyEpoch = 0;
+let projectRestore = null;
+function cancelPreviews(){
+  audioPreview?.cancel?.();
+  for(const preview of [...editPreviews]) preview.cancel?.();
+  audioPreview=null;editPreviews.clear();
+}
+function rebaseRestoredAudio({sourceId,channels,options={},project=State.audioProject}){
+  if(!projectRestore?.sources.has(sourceId)) return;
+  for(const entry of new Set([projectRestore.entry,...History.stack]))
+    entry.snap.audioProject=registerAudioSource(entry.snap.audioProject,sourceId,channels,options,project);
+}
 function previewLocation(target){
   for (const [live, saved] of [['cues','cues'],['tracks','tracks'],['videoTracks','videoTracks'],['clips','clipGeo'],['externalAudioState','externalAudioState']]) {
     const index = State[live]?.indexOf(target) ?? -1;
@@ -112,22 +123,38 @@ const History = {
   },
   snap(){ const {clips,...snapshot}=this.committedSnapshot(); return {...snapshot,clipGeo:clips}; },
   reset(){
-    // 首次媒體復原完成可能仍有 live preview；先讓原 owner 取消自己的欄位及 runtime。
-    audioPreview?.cancel?.();
-    for(const preview of [...editPreviews]) preview.cancel?.();
-    historyEpoch++; audioPreview=null; editPreviews.clear();
+    // 切換基準前先讓原 owner 取消自己的欄位及 runtime；媒體 completion 不呼叫 reset。
+    cancelPreviews();
+    historyEpoch++; projectRestore=null;
     this.stack=[{label:'初始',snap:this.snap()}]; this.hi=0; renderHistory(); syncCompareSnapshot();
+  },
+  // 文件顯示後即提供 Undo；completion 清理未提交預覽，但不清除已提交歷史。
+  beginProjectRestore({sourceIds=[]}={}){
+    this.reset();
+    const token={entry:this.stack[0],sources:new Set(sourceIds.filter(Boolean))};projectRestore=token;
+    return ()=>{
+      if(projectRestore!==token) return null;
+      cancelPreviews();
+      const live=new Map((State.externalAudioState||[]).map(source=>[source.audioSourceId,source]));
+      for(const entry of new Set([token.entry,...this.stack])) for(const source of entry.snap.externalAudioState||[]){
+        const restored=live.get(source.audioSourceId);
+        if(restored){ source.duration=restored.duration;source.descriptors=structuredClone(restored.descriptors||[]); }
+      }
+      if(this.stack.length===1&&this.stack[0]===token.entry) token.entry.snap=this.snap();
+      projectRestore=null;
+      return structuredClone(token.entry.snap);
+    };
   },
   /* 專案可先載入字幕、之後才重新連結媒體。媒體真正就緒時，把新出現的
      專案 clip 補進先前「尚無媒體」的歷史步驟，保留期間的字幕 Undo，
      同時避免任何一步復原後把剛重連的影片刪掉。 */
   rebaseSequence(list){
     if(!Array.isArray(list)||!list.length) return;
-    for(const entry of this.stack){
+    for(const entry of new Set([...(projectRestore?[projectRestore.entry]:[]),...this.stack])){
       const existing=Array.isArray(entry?.snap?.clipGeo)?entry.snap.clipGeo:[];
       // 已經有影片的歷史屬於另一個完整 runtime，不可在「取代媒體」時把新舊主片合併。
       // rebase 只處理專案載入／第一支影片重連前尚無任何 video clip 的步驟。
-      if(existing.some(clip=>clip?.type!=='image')) continue;
+      if(!projectRestore&&existing.some(clip=>clip?.type!=='image')) continue;
       const ids=new Set(existing.map(clip=>clip?.id).filter(Boolean));
       const merged=[...existing];
       for(const clip of list){
@@ -236,5 +263,17 @@ function renderHistory(){
   el.querySelectorAll('.hist-item').forEach(d=>d.onclick=()=>History.restore(+d.dataset.hi));
 }
 on('media:projectReady',detail=>History.rebaseSequence(detail?.clips));
+on('media:projectClipRestored',detail=>{
+  if(!projectRestore) return;
+  History.rebaseSequence(detail?.clips);
+  for(const clip of detail?.clips||[]){
+    const sourceId=clip.audioSourceId;
+    if(!sourceId) continue;
+    projectRestore.sources.add(sourceId);
+    const map=State.audioProject?.sourceMaps?.[sourceId];
+    if(map) rebaseRestoredAudio({sourceId,channels:map.channels});
+  }
+});
+on('audio:sourceRegistered',rebaseRestoredAudio);
 
 export { History, recordHistory, renderHistory };

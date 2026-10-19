@@ -154,6 +154,7 @@ class FileAuthority {
     this._writeFiles = new Set();
     this._deliveryDirectories = new Set();
     this._deliveryFiles = new Set();
+    this._deliveryRevealFiles = new Set();
     this._screenshotDirectories = new Set();
     this._queueLogDirectories = new Set();
 
@@ -268,6 +269,14 @@ class FileAuthority {
     return true;
   }
 
+  /** 完成歷史只可定位精確成品，不會恢復寫入或同目錄能力。 */
+  grantDeliveryReveal(file) {
+    const resolved = this._resolve(file);
+    if (!resolved) return false;
+    this._deliveryRevealFiles.add(resolved);
+    return true;
+  }
+
   /** 授予截圖儲存目錄寫入能力。 */
   grantScreenshotDirectory(directory) {
     const resolved = this._resolve(directory);
@@ -312,7 +321,7 @@ class FileAuthority {
   /** 檢查檔案是否允許在檔案總管/Finder 定位顯示。 */
   canRevealDeliveryOutput(file) {
     const candidate = this._resolve(file);
-    return !!candidate && this._deliveryFiles.has(candidate);
+    return !!candidate && (this._deliveryFiles.has(candidate) || this._deliveryRevealFiles.has(candidate));
   }
 
   /** 檢查記錄檔是否允許使用系統 Shell 開啟。 */

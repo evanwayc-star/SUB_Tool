@@ -119,13 +119,23 @@ export function initPresetLibrary({ styleChanged }){
     if(!save || !draft){ styleChanged(); showToast('已取消編輯'); return; }
     const list=[...getPresets()]; const p=list[E.ui];
     if(p){ p.style=draft; savePresets(list); }
-    // 同步：進入前就符合舊樣式的，一起換成新樣式
+    // 只同步草稿改過、而目前仍保有原值的欄位；貼上樣式等較新提交保有權威。
+    const changed = Object.keys(STYLE_DEFAULTS).filter(key => draft[key] !== E.old[key]);
+    const ownedPatch = current => Object.fromEntries(changed
+      .filter(key => current[key] === E.old[key]).map(key => [key, draft[key]]));
     let n=0;
     for(const i of E.targets.tracks){
-      if(State.tracks[i] && !State.tracks[i].locked){ Object.assign(State.tracks[i],draft); n++; }
+      const track=State.tracks[i];
+      if(track && !track.locked){
+        const patch=ownedPatch(effStyle(null,track));
+        if(Object.keys(patch).length){ Object.assign(track,patch); n++; }
+      }
     }
     for(const c of E.targets.cues){
-      if(!State.tracks[c.track||0]?.locked && applyCueStylePatch(c, draft)) n++;
+      const track=State.tracks[c.track||0];
+      if(track?.locked) continue;
+      const patch=ownedPatch(effStyle(c,track));
+      if(Object.keys(patch).length && applyCueStylePatch(c,patch)) n++;
     }
     styleChanged(); recordHistory('編輯常用樣式：'+E.name);
     showToast(`已更新「${E.name}」` + (n?`，同步 ${n} 處`:'（目前沒有套用它的字幕）'));
@@ -223,7 +233,7 @@ export function initPresetLibrary({ styleChanged }){
       } else {
         const str = JSON.stringify(presets, null, 2);
         const bytes = new TextEncoder().encode(str);
-        const name = `presets_${new Date().toISOString().replace(/\\D/g,'').slice(0,14)}.json`;
+        const name = `presets_${new Date().toISOString().replace(/\D/g,'').slice(0,14)}.json`;
         downloadBytes(bytes, name, 'application/json'); showToast('已匯出樣式設定');
       }
       return;

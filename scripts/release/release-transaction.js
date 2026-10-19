@@ -39,7 +39,24 @@ function _productionSourceFiles(sourceFiles) {
   if (!Array.isArray(sourceFiles)) return [];
   return sourceFiles
     .map((file) => String(file).replaceAll('\\', '/'))
-    .filter((file) => /^(?:src|electron|shared|scripts)\//.test(file));
+    .filter((file) => /^(?:src|electron|shared|scripts)\//.test(file)
+      || /^(?:index\.html|vite\.config\.mjs)$/.test(file));
+}
+
+function _isNewerReleaseVersion(next, current) {
+  if (!/^\d+\.\d+\.\d+$/.test(String(current))) return false;
+  const nextParts = next.split('.').map(BigInt);
+  const currentParts = current.split('.').map(BigInt);
+  const difference = currentParts.findIndex((part, index) => part !== nextParts[index]);
+  return difference >= 0 && nextParts[difference] > currentParts[difference];
+}
+
+function _validReleaseVersion(version) {
+  // electron-builder 正規化前置零，且 node-semver 拒絕不安全整數。
+  // 交易只能准入可原樣打包的 X.Y.Z，避免三檔寫完後才變號或失敗。
+  return typeof version === 'string' && version.trim() === version
+    && /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(version)
+    && version.split('.').every(part => Number.isSafeInteger(Number(part)));
 }
 
 function _gitLines(rootDir, args) {
@@ -113,6 +130,10 @@ function collectProductionSourceFiles({ rootDir }) {
 function _inspectReleaseState({ packageJson, packageLock, changelog, sourceFiles }) {
   const normalizedChangelog = changelog.replace(/\r\n/g, '\n');
   const productionSourceFiles = _productionSourceFiles(sourceFiles);
+
+  if (!_validReleaseVersion(packageJson.version)) {
+    throw new Error(`Invalid release version: ${packageJson.version}`);
+  }
 
   if (!productionSourceFiles.length) {
     throw new Error('Release requires production source evidence');
@@ -192,10 +213,7 @@ function _replacePreparedNotes({ rootDir, version, date, body, packageJson, pack
   if (headVersion === version) {
     throw new Error(`Cannot replace notes for committed release v${version}`);
   }
-  const headParts = /^\d+\.\d+\.\d+$/.test(String(headVersion)) ? headVersion.split('.').map(Number) : null;
-  const nextParts = version.split('.').map(Number);
-  const firstDifference = headParts?.findIndex((part, index) => part !== nextParts[index]);
-  if (firstDifference == null || firstDifference < 0 || headParts[firstDifference] > nextParts[firstDifference]) {
+  if (!_isNewerReleaseVersion(version, headVersion)) {
     throw new Error(`Replace-current requires an older committed manifest version, found v${headVersion}`);
   }
   if (_gitLines(rootDir, ['tag', '--list', `v${version}`]).length) {
@@ -225,7 +243,7 @@ function prepareRelease({
   if (typeof replaceCurrent !== 'boolean') {
     throw new Error('replaceCurrent must be a boolean');
   }
-  if (!/^\d+\.\d+\.\d+$/.test(String(version || ''))) {
+  if (!_validReleaseVersion(version)) {
     throw new Error(`Invalid release version: ${version}`);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
@@ -258,6 +276,9 @@ function prepareRelease({
   }
   if (!replaceCurrent && new RegExp(`^ {0,3}## \\[v${version.replaceAll('.', '\\.')}\\]`, 'm').test(changelog)) {
     throw new Error(`Changelog already contains v${version}`);
+  }
+  if (!replaceCurrent && !_isNewerReleaseVersion(version, packageJson.version)) {
+    throw new Error(`Release requires a newer version than v${packageJson.version}, received v${version}`);
   }
 
   const normalizedBody = String(body).trim().replace(/\r?\n/g, newline);

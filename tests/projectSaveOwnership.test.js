@@ -186,6 +186,7 @@ describe('Project 與 History 共用已提交快照',()=>{
 
   it('預覽新增的字幕和影片不使空專案變 dirty，也不進存檔',async()=>{
     State.cues=[];State.clips=[];State.audioProject=null;State.duration=0;History.reset();
+    Project.establishCleanBaseline();
     const cue={id:'draft',text:'草稿',start:0,end:2,track:0};
     const clip={id:'draft-clip',name:'draft',dur:3,in:0,out:3,offset:0};
     State.cues.push(cue);State.clips.push(clip);State.duration=3;

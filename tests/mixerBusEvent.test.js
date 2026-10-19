@@ -171,6 +171,16 @@ describe('bus 音量編輯的欄位與持久化 owner',()=>{
     const before=structuredClone(State.audioProject),steps=History.stack.length;input.dispatchEvent(new FocusEvent('blur'));
     expect(State.audioProject).toEqual(before);expect(History.stack).toHaveLength(steps);
   });
+  it.each([{key:'Enter',isComposing:true},{key:'Escape',isComposing:true},{key:'Enter',keyCode:229}])('dB 組字 %j 不提早提交或取消，一般 Enter 仍能確認',async options=>{
+    const History=await startHistory();renderMixer();document.querySelector('.mx-fader-val').click();
+    const input=document.querySelector('.mx-fader-inline-input');input.value='-6';
+    const event=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,...options});input.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);expect(input.isConnected).toBe(true);
+    expect(State.audioProject.buses[0].volume).toBe(1);expect(History.stack).toHaveLength(1);
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+    expect(input.isConnected).toBe(false);expect(State.audioProject.buses[0].volume).toBeCloseTo(10**(-6/20));
+    expect(History.stack).toHaveLength(2);
+  });
   it('正常 inline 提交一次，Escape 與原值提交皆無空步驟',async()=>{
     const History=await startHistory();renderMixer();document.querySelector('.mx-fader-val').click();
     let input=document.querySelector('.mx-fader-inline-input');input.value='-6';input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));
@@ -249,6 +259,53 @@ describe('音訊面板提示的單一 DOM owner',()=>{
     const hint=document.getElementById('atHint');expect(getComputedStyle(hint).display).not.toBe('none');
     expect(hint.textContent).toContain('<b>限制</b>');expect(hint.querySelector('b')).toBeNull();
     mediaMock.panel={notice:'保留限制'};renderAudioTracks();expect(hint.textContent).toBe('保留限制');expect(document.getElementById('extractLink')).toBeNull();
+  });
+});
+
+describe('音訊軌初始化與呈現的所有權',()=>{
+  it('沒有來源聲道的圖片專案重繪不會建立音訊軌或改寫專案',()=>{
+    State.clips=[{id:'image-only',type:'image',in:0,out:5,offset:0,dur:5}];
+    State.audioProject={mode:'auto',buses:[],sourceMaps:{},exportLayout:{streams:[]}};
+    const initial=structuredClone(State.audioProject);
+    renderAudioTracks();renderMixer();
+    expect(State.audioProject).toEqual(initial);
+    expect(document.querySelectorAll('#atList .project-bus')).toHaveLength(0);
+    expect(document.querySelectorAll('#mixerStrips .project-bus')).toHaveLength(0);
+  });
+
+  it('來源註冊建立音軌；配線清為零的預覽、取消、提交與 Undo/Redo 不被真實 mixer 重建',async()=>{
+    const {resetAudioProject,ensureAudioSourceMap}=await import('../src/state.js');
+    const {History}=await import('../src/history.js');
+    const {AudioRouting}=await import('../src/audio-routing.js');
+    const {closeModal}=await import('../src/ui.js');
+    State.clips=[{id:'primary',primary:true,audioSourceId:'mother',audioSrc:'video',path:'C:/mother.mov',in:0,out:5,offset:0,dur:5}];
+    resetAudioProject();
+    ensureAudioSourceMap('mother',[{sourceStream:0,sourceChannel:0},{sourceStream:0,sourceChannel:1}]);
+    const initial=structuredClone(State.audioProject);
+    expect(initial.buses).toHaveLength(2);
+    renderAudioTracks();expect(document.querySelectorAll('#atList .project-bus')).toHaveLength(2);
+    on('history:record',label=>History.record(label));History.reset();
+    const zero=async()=>{
+      AudioRouting.openOutputSettings();
+      await new Promise(resolve=>setTimeout(resolve,0));
+      document.getElementById('audioOutputBusCount').value='0';
+      document.getElementById('audioOutputBusApply').click();
+      expect(document.getElementById('audioOutputBusCount').value).toBe('0');
+      expect(State.audioProject.buses).toHaveLength(0);
+      expect(document.querySelectorAll('#atList .project-bus')).toHaveLength(0);
+      expect(document.querySelectorAll('#mixerStrips .project-bus')).toHaveLength(0);
+    };
+    await zero();
+    expect(History.committedSnapshot().audioProject).toEqual(initial);
+    closeModal();expect(State.audioProject).toEqual(initial);
+    await zero();
+    document.querySelector('#modalFoot button.primary').click();
+    expect(History.stack).toHaveLength(2);
+    expect(History.committedSnapshot().audioProject.buses).toHaveLength(0);
+    renderAudioTracks();renderMixer();expect(State.audioProject.buses).toHaveLength(0);
+    History.undo();expect(State.audioProject).toEqual(initial);
+    History.redo();renderAudioTracks();renderMixer();
+    expect(State.audioProject.buses).toHaveLength(0);
   });
 });
 

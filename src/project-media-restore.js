@@ -3,14 +3,16 @@
    不等待一般背景 Proxy／人聲工作；只等待既有 pending placement/freeze 復原。 */
 export class ProjectMediaRestoration {
   #baselinedPlans = new WeakSet();
+  #begunPlans = new WeakMap();
 
   constructor({ media, desktop = false, stat = null, normalizeExternalSources = sources => sources,
-    publishExternalSources = () => {}, finishProject = () => {}, report = () => {} } = {}) {
+    publishExternalSources = () => {}, beginProject = () => null, finishProject = () => {}, report = () => {} } = {}) {
     this.media = media;
     this.desktop = desktop;
     this.stat = stat;
     this.normalizeExternalSources = normalizeExternalSources;
     this.publishExternalSources = publishExternalSources;
+    this.beginProject = beginProject;
     this.finishProject = finishProject;
     this.report = report;
   }
@@ -20,6 +22,8 @@ export class ProjectMediaRestoration {
     const { kind = 'images', path = null } = request;
     if (!['load', 'ready', 'images', 'deferred', 'audio'].includes(kind)) throw new TypeError('unknown project media restore kind');
     if (kind === 'load' && (typeof path !== 'string' || !path)) throw new TypeError('project primary media path is required');
+    // 文件已顯示，使用者從第一個 await 起就能編輯；初始基準必須先建立。
+    if (!this.#begunPlans.has(plan)) this.#begunPlans.set(plan, this.beginProject());
     const stage = async (name, work) => {
       if (!owns()) return false;
       try { await work(); }
@@ -52,7 +56,7 @@ export class ProjectMediaRestoration {
     // Media 的 projectReady/rebase 處理新增 placements；不能再次 reset History
     // 或把等待期間使用者的編輯標成已保存。browser File relink 也遵守同一政策。
     if (!this.#baselinedPlans.has(plan)) {
-      this.finishProject();
+      this.finishProject(this.#begunPlans.get(plan));
       this.#baselinedPlans.add(plan);
     }
     return true;

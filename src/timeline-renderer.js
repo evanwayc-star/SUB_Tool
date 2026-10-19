@@ -294,7 +294,7 @@ function renderTrackRows(){
           try{const r=document.createRange(),s=window.getSelection();r.selectNodeContents(nm);s.removeAllRanges();s.addRange(r);}catch(_){}
         }
       });
-      nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
+      nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
       nm.onblur=()=>{
         nm.contentEditable='false';
         update('name',nm.innerText);
@@ -308,6 +308,7 @@ function renderTrackRows(){
       const resH=document.createElement('div');
       resH.className='tl-resize-handle';
       resH.addEventListener('mousedown',e=>{
+        if(e.button!==0)return;
         e.preventDefault();e.stopPropagation();
         const now=performance.now();
         if(_lastHandleClick.tk===tk && now-_lastHandleClick.t<400){
@@ -324,7 +325,9 @@ function renderTrackRows(){
       g.appendChild(resH);
       // 拖曳重排
       g.querySelector('.drag-handle').addEventListener('mousedown',e=>{
+        if(e.button!==0)return;
         e.preventDefault(); e.stopPropagation();
+        cancelTrackDrag();
         _trackDrag={track:meta,owns:Project.captureWorkspaceOwnership(),g,gut:gut};
         g.classList.add('tl-dragging');
         document.addEventListener('mousemove',_onTrackDragMove);
@@ -365,6 +368,18 @@ function refreshTrackGutterActive(){
 
 /* 軌道拖曳重排 */
 let _trackDrag=null;
+function cancelTrackDrag(){
+  document.removeEventListener('mousemove',_onTrackDragMove);
+  document.removeEventListener('mouseup',_onTrackDragUp);
+  if(!_trackDrag)return;
+  _trackDrag.g.classList.remove('tl-dragging');
+  _trackDrag.gut.querySelectorAll('.tl-gtrack').forEach(g=>g.classList.remove('tl-drag-target'));
+  _trackDrag=null;
+}
+if(typeof window!=='undefined'){
+  window.addEventListener('blur',cancelTrackDrag);
+  window.addEventListener('pointercancel',cancelTrackDrag,true);
+}
 function _onTrackDragMove(e){
   if(!_trackDrag)return;
   const gut=_trackDrag.gut;
@@ -378,14 +393,10 @@ function _onTrackDragMove(e){
   _trackDrag.toTrack=State.tracks[targetTk];
 }
 function _onTrackDragUp(){
-  document.removeEventListener('mousemove',_onTrackDragMove);
   if(!_trackDrag)return;
   const {track,toTrack,owns}=_trackDrag;
   const fromTk=State.tracks.indexOf(track),toTk=State.tracks.indexOf(toTrack);
-  _trackDrag.g.classList.remove('tl-dragging');
-  const gut=_trackDrag.gut;
-  gut.querySelectorAll('.tl-gtrack').forEach(g=>g.classList.remove('tl-drag-target'));
-  _trackDrag=null;
+  cancelTrackDrag();
   if(owns() && fromTk>=0 && toTk>=0 && toTk!==fromTk){
     // 重排 tracks 陣列
     const [moved]=State.tracks.splice(fromTk,1);
@@ -911,7 +922,7 @@ function renderVtrackGutter(){
         try{const r=document.createRange(),s=window.getSelection();r.selectNodeContents(nm);s.removeAllRanges();s.addRange(r);}catch(_){}
       }
     });
-    nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
+    nm.onkeydown=(e)=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();nm.blur();} else if(e.key==='Escape'){e.preventDefault();nm.innerText=meta.name;nm.blur();} };
     nm.onblur=()=>{
       nm.contentEditable='false';
       update('name',nm.innerText);
@@ -925,6 +936,7 @@ function renderVtrackGutter(){
     const resH=document.createElement('div');
     resH.className='tl-resize-handle';
     resH.addEventListener('mousedown',e=>{
+      if(e.button!==0)return;
       e.preventDefault();e.stopPropagation();
       const now=performance.now();
       if(_lastHandleClick.tk==='v'+v && now-_lastHandleClick.t<400){
@@ -1079,6 +1091,7 @@ function renderAtrackGutter(){
     const resH=document.createElement('div');
     resH.className='tl-resize-handle';
     resH.addEventListener('mousedown',e=>{
+      if(e.button!==0)return;
       e.preventDefault(); e.stopPropagation();
       const now=performance.now();
       const applyAudioHeight = (val) => {

@@ -10,6 +10,14 @@ import { State } from '../src/state.js';
 import { parseTimecodeInput, setupTimecodeInput } from '../src/tcparse.js';
 import { encoreToSec, getExactFps } from '../src/time.js';
 
+it.each([{key:'Enter',isComposing:true},{key:'Escape',isComposing:true},{key:'ArrowUp',isComposing:true},
+  {key:'ArrowDown',isComposing:true},{key:'Enter',keyCode:229}])('組字 %j 保留原生行為且不進入時碼提交或步進',options=>{
+  const input=document.createElement('input');input.value='00:00:01:00';input.setSelectionRange(10,10);
+  setupTimecodeInput(input);const submit=vi.fn();input.addEventListener('keydown',submit);
+  const event=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,...options});input.dispatchEvent(event);
+  expect(submit).not.toHaveBeenCalled();expect(input.value).toBe('00:00:01:00');expect(event.defaultPrevented).toBe(false);
+});
+
 describe('parseTimecodeInput 絕對時碼（非 DF）', () => {
   beforeEach(() => { State.fps = 24; State.dropFrame = false; });
 

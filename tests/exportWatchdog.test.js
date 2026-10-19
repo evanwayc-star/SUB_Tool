@@ -3,6 +3,9 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -76,6 +79,7 @@ describe('export watchdog', () => {
   let fakeFfmpeg;
   let markerPath;
   let controllers;
+  let nativeRuntimes;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-watchdog-'));
@@ -83,6 +87,7 @@ describe('export watchdog', () => {
     fakeFfmpeg = path.join(tempDir, 'fake-ffmpeg.cjs');
     markerPath = path.join(tempDir, 'started.log');
     controllers = [];
+    nativeRuntimes = [];
 
     fs.writeFileSync(fakeFfmpeg, `
 'use strict';
@@ -108,6 +113,11 @@ if (mode === 'success') {
   });
 
   afterEach(async () => {
+    for (const runtime of nativeRuntimes) {
+      runtime.child.exitCode = 1;
+      runtime.child.emit('close', 1, null);
+    }
+    await Promise.all(nativeRuntimes.map(runtime => runtime.disconnected));
     for (const controller of controllers) {
       controller.stop('test-cleanup');
     }
@@ -148,6 +158,186 @@ if (mode === 'success') {
   function activeStage() {
     return listLeases(queueDir)[0]?.owner?.stagePath;
   }
+
+  async function launchNativeRuntime({ spawnFailure = false } = {}) {
+    // Exercise the public standalone owner with real leases, staging and pipe;
+    // only the native process adapter is replaced to hold close after an error.
+    const filename = path.resolve('electron/export-watchdog.js');
+    const runtimeRequire = createRequire(filename);
+    const events = new EventEmitter();
+    const messages = [];
+    const child = new EventEmitter();
+    Object.assign(child, {
+      pid: spawnFailure ? undefined : 123456,
+      exitCode: null,
+      signalCode: null,
+      stderr: new PassThrough(),
+      kill: () => {
+        child.emit('error', Object.assign(new Error('kill EACCES'), { code: 'EACCES' }));
+        return false;
+      },
+    });
+    let resolveDisconnected;
+    const disconnected = new Promise(resolve => { resolveDisconnected = resolve; });
+    const processAdapter = {
+      pid: process.pid,
+      platform: process.platform,
+      connected: true,
+      stderr: new PassThrough(),
+      send(message, callback) { messages.push(message); callback?.(); },
+      on: events.on.bind(events),
+      disconnect() { this.connected = false; resolveDisconnected(); },
+    };
+    const childProcess = { spawn(binary, args) {
+      if (binary === 'taskkill') {
+        const killer = new EventEmitter();
+        setTimeout(() => killer.emit('error', new Error('taskkill failed')), 0);
+        return killer;
+      }
+      if (!spawnFailure) fs.writeFileSync(args.at(-1), 'native writer still owns this');
+      setTimeout(() => {
+        if (spawnFailure) child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }));
+        else child.emit('spawn');
+      }, 0);
+      return child;
+    } };
+    const resultModule = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module: resultModule,
+      exports: resultModule.exports,
+      require: name => name === 'child_process' ? childProcess : runtimeRequire(name),
+      process: processAdapter,
+      __dirname: path.dirname(filename),
+      __filename: filename,
+      Buffer, setTimeout, clearTimeout, AbortController,
+    }, { filename });
+    await resultModule.exports.runStandalone();
+    const outPath = path.join(tempDir, 'held-native.mp4');
+    fs.writeFileSync(outPath, 'previous completed delivery');
+    const runtime = { child, messages, disconnected, outPath, events };
+    nativeRuntimes.push(runtime);
+    events.emit('message', {
+      type: 'start', ffmpegPath: 'fake-native-ffmpeg', args: [outPath],
+      outPath, jobId: 'held-native', queueDir,
+    });
+    await waitFor(() => messages.some(message => message.type === (spawnFailure ? 'exit' : 'ready')),
+      'standalone native adapter did not start or fail');
+    return runtime;
+  }
+
+  it.each([
+    { stopFirst: false, closeCode: 0 },
+    { stopFirst: false, closeCode: 1 },
+    { stopFirst: true, closeCode: 1 },
+    { stopFirst: false, closeCode: 0, exitBeforeError: true },
+  ])('native error waits for close before cleanup ($stopFirst / $closeCode / $exitBeforeError)', async ({ stopFirst, closeCode, exitBeforeError }) => {
+    const { child, messages, events, outPath, disconnected } = await launchNativeRuntime();
+    const stagePath = activeStage();
+    if (stopFirst) events.emit('message', { type: 'stop', reason: 'user-stop' });
+    if (exitBeforeError) child.exitCode = closeCode;
+    child.emit('error', Object.assign(new Error('native kill failed'), { code: 'EACCES' }));
+    // A second failed kill is another ChildProcess error, not a second close.
+    child.emit('error', Object.assign(new Error('native kill failed again'), { code: 'EACCES' }));
+    await wait(50);
+    expect(messages.filter(message => message.type === 'exit')).toEqual([]);
+    expect(listLeases(queueDir)).toHaveLength(1);
+    expect(fs.readFileSync(stagePath, 'utf8')).toBe('native writer still owns this');
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('previous completed delivery');
+    child.exitCode = closeCode;
+    child.emit('close', closeCode, null);
+    await disconnected;
+    expect(messages.filter(message => message.type === 'exit')).toEqual([
+      expect.objectContaining({ ok: false, cleanup: expect.objectContaining({
+        reason: stopFirst ? 'user-stop' : 'ffmpeg-error', released: true,
+      }) }),
+    ]);
+    expect(messages).toContainEqual(expect.objectContaining({ type: 'error', code: 'EACCES' }));
+    expect(fs.existsSync(stagePath)).toBe(false);
+    expect(listLeases(queueDir)).toEqual([]);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('previous completed delivery');
+  });
+
+  it('native spawn failure without a PID cleans up without waiting for close', async () => {
+    const { messages, disconnected, outPath } = await launchNativeRuntime({ spawnFailure: true });
+    await disconnected;
+    expect(messages).toContainEqual(expect.objectContaining({ type: 'error', code: 'ENOENT' }));
+    expect(messages).toContainEqual(expect.objectContaining({ type: 'exit', ok: false }));
+    expect(listLeases(queueDir)).toEqual([]);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('previous completed delivery');
+  });
+
+  it('ready 前 owner 寫入失敗不能讓 completion 在 native close 前結束', async () => {
+    // Keep the public controller and standalone owner, including real leases and
+    // IPC. Only the native adapter holds close, and owner persistence fails after spawn.
+    const adapterScript = path.join(tempDir, 'held-startup-native.cjs');
+    fs.writeFileSync(adapterScript, `
+      const fs = require('node:fs');
+      const { EventEmitter } = require('node:events');
+      const { PassThrough } = require('node:stream');
+      const childProcess = require('node:child_process');
+      const lease = require(${JSON.stringify(path.resolve('electron/export-lease.js'))});
+      const update = lease.updateLease;
+      let updates = 0;
+      lease.updateLease = options => {
+        if (++updates === 2) throw Object.assign(new Error('owner rename failed'), { code: 'EACCES' });
+        return update(options);
+      };
+      const child = new EventEmitter();
+      Object.assign(child, { pid: 123456, exitCode: null, signalCode: null,
+        stderr: new PassThrough(), kill: () => false });
+      childProcess.spawn = (binary, args) => {
+        if (binary === 'taskkill') {
+          const killer = new EventEmitter();
+          setImmediate(() => killer.emit('exit', 0));
+          return killer;
+        }
+        fs.writeFileSync(args.at(-1), 'native still owns stage');
+        setImmediate(() => child.emit('spawn'));
+        return child;
+      };
+      process.on('message', message => {
+        if (message.type === 'test-close-native') {
+          child.exitCode = 1;
+          child.emit('close', 1, null);
+        }
+      });
+      require(${JSON.stringify(path.resolve('electron/export-watchdog.js'))}).runStandalone();
+    `);
+    const outPath = path.join(tempDir, 'held-startup.mp4');
+    fs.writeFileSync(outPath, 'previous delivery');
+    const controller = spawnExportWatchdog({
+      ffmpegPath: 'held-native', args: [outPath], outPath,
+      jobId: 'held-startup', queueDir,
+    }, { scriptPath: adapterScript });
+    controllers.push(controller);
+    let completionSettled = false;
+    const completed = controller.completion.then(result => {
+      completionSettled = true;
+      return result;
+    }, error => {
+      completionSettled = true;
+      throw error;
+    });
+    completed.catch(() => {});
+    try {
+      await expect(controller.ready).rejects.toMatchObject({ code: 'EACCES' });
+      await wait(50);
+      expect(completionSettled).toBe(false);
+      expect(controller.child.exitCode).toBe(null);
+      expect(listLeases(queueDir)).toHaveLength(1);
+      expect(fs.readFileSync(activeStage(), 'utf8')).toBe('native still owns stage');
+      expect(fs.readFileSync(outPath, 'utf8')).toBe('previous delivery');
+    } finally {
+      controller.child.send({ type: 'test-close-native' });
+      await completed.catch(() => {});
+      await waitForExit(controller.child);
+    }
+    await expect(completed).resolves.toMatchObject({
+      ok: false, cleanup: { reason: 'lease-update-failed', released: true },
+    });
+    expect(listLeases(queueDir)).toEqual([]);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('previous delivery');
+  });
 
   function airlineScript(mode = 'success') {
     const outPath = path.join(tempDir, 'air.mpg');

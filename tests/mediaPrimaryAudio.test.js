@@ -27,6 +27,90 @@ beforeAll(async()=>{
 });
 beforeEach(()=>{Media.reset();resetAudioProject();State.cues=[];State.clips=[];State.notes=[];dom.video.src='';dom.video.currentTime=0;audioElements.length=0;});
 afterEach(()=>{Media.reset();resetProject();});
+it('真正媒體 loader 復原期間的字幕編輯，完成後可 Undo 回已載入序列及乾淨基準',async()=>{
+ const {History}=await import('../src/history.js');
+ const {isProjectDirty}=await import('../src/project.js');
+ let finishProbe,notify;const started=new Promise(resolve=>{notify=resolve;});
+ const gate=new Promise(resolve=>{finishProbe=resolve;});
+ window.subtool.probe.mockImplementationOnce(()=>{notify();return gate;});
+ const data={app:'SUB Tool',version:3,media:{name:'source.webm',path:'C:/source.webm',size:1024},fps:24,duration:12,
+  tracks:[{name:'S1',visible:true}],cues:[{start:1,end:2,text:'載入的字幕',track:1}],notes:[],
+  clips:[{name:'source.webm',path:'C:/source.webm',dur:12,in:0,out:12,offset:0,vtrack:0,primary:true}]};
+ const b64=Buffer.concat([Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
+ const loading=Project.loadDesktop({path:'C:/initial.subtool',b64});
+ await started;
+ State.cues[0].text='等待 probe 時已確認的修改';History.record('等待期間編輯');
+ finishProbe({duration:12,video:{codec:'vp9',fps:30,width:1920,height:1080},audio:[]});
+ await loading;
+ expect(State.cues[0].text).toBe('等待 probe 時已確認的修改');expect(isProjectDirty()).toBe(true);
+ const clipId=State.clips[0].id;
+ expect(History.stack[0].snap.clipGeo.map(c=>c.id)).toEqual([clipId]);
+ History.undo();expect(State.cues[0].text).toBe('載入的字幕');expect(State.clips[0].id).toBe(clipId);
+ expect(isProjectDirty()).toBe(false);
+ History.redo();expect(State.cues[0].text).toBe('等待 probe 時已確認的修改');expect(isProjectDirty()).toBe(true);
+});
+it.each([{split:false,remove:false},{split:true,remove:false},{split:true,remove:'cut'},{split:true,remove:'primary'}])('復原期間公開存檔只寫入各 placement 一次：%j',async({split,remove})=>{
+ let release,notify;const started=new Promise(resolve=>{notify=resolve;}),pending=new Promise(resolve=>{release=resolve;});
+ const info={duration:12,video:{codec:'vp9',fps:30,width:1920,height:1080},audio:[]};
+ const previousProbe=window.subtool.probe.getMockImplementation(),previousWrite=window.subtool.writeProject;
+ window.subtool.probe.mockImplementation(async path=>{if(path==='C:/second.webm'){notify();await pending;}return info;});
+ window.subtool.writeProject=vi.fn(async()=> 'C:/initial.subtool');
+ const clips=[{name:'first.webm',path:'C:/first.webm',audioSourceId:'first-source',dur:12,in:0,out:split?6:12,offset:0,vtrack:0,primary:true},
+  ...(split?[{name:'first.webm',path:'C:/first.webm',audioSourceId:'first-source',dur:12,in:6,out:12,offset:6,vtrack:0,primary:false}]:[]),
+  {name:'second.webm',path:'C:/second.webm',audioSourceId:'second-source',dur:12,in:0,out:12,offset:12,vtrack:0,primary:false}];
+ const data={app:'SUB Tool',version:3,media:{name:'first.webm',path:'C:/first.webm',size:1024},fps:24,duration:24,tracks:[],cues:[],notes:[],clips};
+ const b64=Buffer.concat([Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
+ const runtime=vi.spyOn(Media,'ensureClipRuntime').mockResolvedValue(),proxy=vi.spyOn(Media,'ensurePrimaryPreviewProxy').mockResolvedValue();
+ const loading=Project.loadDesktop({path:'C:/initial.subtool',b64});
+ const saved=()=>JSON.parse(Buffer.from(window.subtool.writeProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+ const placements=list=>list.map(({path,in:start,out,offset})=>({path,in:start,out,offset}));
+ try{
+  await started;expect(State.clips).toHaveLength(split?2:1);
+  await Project.save();expect(placements(saved().clips)).toEqual(placements(clips));
+  if(remove){
+    // 與刪除命令相同，Media 完成資源移除後，由 History 記錄已提交的刪除。
+    const {History}=await import('../src/history.js');
+    expect(Media.removeClip(State.clips.find(c=>remove==='primary'?c.primary:!c.primary).id)).toBe(true);History.record('刪除已復原片段');
+  }
+  release();await loading;
+  const expected=remove==='primary'?clips.filter(c=>!c.primary):remove==='cut'?clips.filter(c=>c.in!==6):clips;
+  await Project.save();expect(placements(saved().clips)).toEqual(placements(expected));
+  if(remove){
+    const {History}=await import('../src/history.js');History.undo();
+    await Project.save();expect(placements(saved().clips)).toEqual(placements(clips));
+  }
+ }finally{
+  release();await loading;runtime.mockRestore();proxy.mockRestore();window.subtool.probe.mockImplementation(previousProbe);
+  if(previousWrite)window.subtool.writeProject=previousWrite;else delete window.subtool.writeProject;
+ }
+});
+it.each([1,2])('首次公有匯入 %s 支影片保留既有外部音訊、播放資源、路由與波形',async count=>{
+ const asset=Media.createExternalAudioSource({name:'voice',path:'C:/voice.wav',audioSourceId:'voice-source',duration:20,in:2,out:12,offset:8,fallbackCount:2});
+ const before=structuredClone(State.externalAudioState),routing=structuredClone(State.audioProject.sourceMaps['voice-source']);
+ const element=new Audio();element.src='blob:keep-audio';
+ const gain=Media.ensureCtx().createGain();
+ const track={kind:'element',source:asset.audioSrc,audioSourceId:asset.audioSourceId,el:element,gain};
+ Media.tracks.push(track);Media.objectURLs.push(element.src);
+ const peaks=new Float32Array([-.25,.25]);
+ const wave=Wave.registerSourceWaveforms(asset,{mixPeaks:peaks});
+ const controller=new AbortController();wave.vocals.controller=controller;
+ const beforeRevoke=URL.revokeObjectURL;URL.revokeObjectURL=vi.fn();
+ const runtime=vi.spyOn(Media,'ensureClipRuntime').mockResolvedValue();
+ const proxy=vi.spyOn(Media,'ensurePrimaryPreviewProxy').mockResolvedValue();
+ try{
+  await importDesktopMediaFiles(Array.from({length:count},(_,i)=>'C:/first-'+i+'.webm'));
+  expect(State.clips.filter(c=>c.type!=='image')).toHaveLength(count);
+  expect(Media.externalAudioSources).toContain(asset);expect(Media.tracks).toContain(track);
+  expect(State.externalAudioState).toEqual(before);expect(element.src).toBe('blob:keep-audio');
+  expect(gain.disconnect).not.toHaveBeenCalled();expect(URL.revokeObjectURL).not.toHaveBeenCalledWith(element.src);
+  expect(Wave.getSourceWaveform(asset).peaks).toBe(peaks);expect(controller.signal.aborted).toBe(false);
+  Wave.initLive();expect(Wave.getSourceWaveform(asset).peaks).toBe(peaks);expect(controller.signal.aborted).toBe(false);
+  expect(State.audioProject.sourceMaps['voice-source']).toEqual(routing);expect(State.duration).toBeGreaterThanOrEqual(18);
+  // 真正的新工作區 reset 仍釋放所有資源，不能把保留政策擴張到取代操作。
+  Media.reset();expect(Media.externalAudioSources).toEqual([]);expect(element.src).toBe('');
+  expect(controller.signal.aborted).toBe(true);expect(Wave.sourceWaveforms.size).toBe(0);
+ }finally{runtime.mockRestore();proxy.mockRestore();URL.revokeObjectURL=beforeRevoke;}
+});
 it('public native intake starts at source zero and appended HTML clips retain their own origins',async()=>{
  const runtime=vi.spyOn(Media,'ensureClipRuntime').mockResolvedValue();
  const proxy=vi.spyOn(Media,'ensurePrimaryPreviewProxy').mockResolvedValue();
@@ -175,6 +259,121 @@ const pendingImport=()=>{
  const promise=new Promise(done=>{resolve=done;});
  return {promise,resolve};
 };
+
+async function incomingModal(){
+ const {openModal}=await import('../src/ui.js');
+ let modal;
+ openModal.mockImplementationOnce((title,html,buttons,options)=>{
+  let current=true;
+  const session={isCurrent:()=>current,close:vi.fn(()=>{current=false;})};
+  modal={buttons,options,session};return session;
+ });
+ return {wait:async()=>{await vi.waitFor(()=>expect(modal).toBeDefined());return modal;}};
+}
+
+it('單支影片取代完成後才匯入同批音檔與圖片，保留所有本次選取的素材',async()=>{
+ Seq.add({id:'old-primary',primary:true,path:'C:/old.webm',dur:12,in:0,out:12,offset:0});
+ const modal=await incomingModal();
+ const add=vi.spyOn(Media,'addAudioFileDesktop').mockImplementation(async path=>
+  Media.createExternalAudioSource({name:path,path,duration:12,in:0,out:12}));
+ const image=vi.spyOn(Media,'addImageDesktop').mockImplementation(async path=>
+  Seq.add({type:'image',name:path,path,dur:36000,in:0,out:10,offset:0}));
+ try{
+  const importing=importDesktopMediaFiles(['C:/new.webm','C:/voice.wav','C:/image.png']);
+  const dialog=await modal.wait();
+  expect(add).not.toHaveBeenCalled();expect(image).not.toHaveBeenCalled();
+  await dialog.buttons.find(button=>button.label==='取代目前影片').act();
+  await importing;
+  expect(State.clips.filter(clip=>clip.type!=='image').map(clip=>clip.path)).toEqual(['C:/new.webm']);
+  expect(Media.externalAudioSources.map(asset=>asset.path)).toEqual(['C:/voice.wav']);
+  expect(State.clips.filter(clip=>clip.type==='image').map(clip=>clip.path)).toEqual(['C:/image.png']);
+ }finally{add.mockRestore();image.mockRestore();}
+});
+
+it.each(['desktop','browser'])('%s 單影片選加入序列後仍等待影片完成，再准入同批其他素材',async mode=>{
+ Seq.add({id:'old-primary',primary:true,dur:12,in:0,out:12,offset:0});
+ const modal=await incomingModal(),pending=pendingImport(),order=[];
+ const importer=mode==='desktop'?importDesktopMediaFiles:importBrowserMediaFiles;
+ const make=name=>mode==='desktop'?'C:/'+name:{name};
+ const methods=mode==='desktop'?['addClipDesktop','addAudioFileDesktop','addImageDesktop']:['addClipWeb','addAudioFile','addImageWeb'];
+ const add=vi.spyOn(Media,methods[0]).mockImplementation(async()=>{order.push('video-start');await pending.promise;order.push('video-ready');});
+ const audio=vi.spyOn(Media,methods[1]).mockImplementation(async()=>{order.push('audio');});
+ const image=vi.spyOn(Media,methods[2]).mockImplementation(async()=>{order.push('image');});
+ try{
+  const importing=importer(['next.webm','voice.wav','image.png'].map(make));
+  const dialog=await modal.wait();expect(order).toEqual([]);
+  const choosing=dialog.buttons.find(button=>button.label.includes('加入序列')).act();
+  await vi.waitFor(()=>expect(add).toHaveBeenCalledOnce());expect(order).toEqual(['video-start']);
+  pending.resolve();await choosing;await importing;
+  expect(order).toEqual(['video-start','video-ready','audio','image']);
+ }finally{pending.resolve();add.mockRestore();audio.mockRestore();image.mockRestore();}
+});
+
+it.each(['desktop','browser'].flatMap(mode=>['button','dismiss'].map(cancel=>({mode,cancel}))))('$mode 以 $cancel 取消影片選擇仍匯入同批獨立音檔，維持既有取消語意',async({mode,cancel})=>{
+ Seq.add({id:'old-primary',primary:true,dur:12,in:0,out:12,offset:0});
+ const modal=await incomingModal(),importer=mode==='desktop'?importDesktopMediaFiles:importBrowserMediaFiles;
+ const make=name=>mode==='desktop'?'C:/'+name:{name};
+ const method=mode==='desktop'?'addAudioFileDesktop':'addAudioFile';
+ const load=vi.spyOn(Media,mode==='desktop'?'loadDesktopMedia':'loadVideoFile').mockResolvedValue();
+ const add=vi.spyOn(Media,method).mockResolvedValue(null);
+ try{
+  const importing=importer(['next.webm','voice.wav'].map(make));
+  const dialog=await modal.wait();expect(add).not.toHaveBeenCalled();
+  if(cancel==='button') await dialog.buttons.find(button=>button.label==='取消').act();
+  else dialog.options.onDismiss();
+  await importing;
+  expect(load).not.toHaveBeenCalled();expect(add).toHaveBeenCalledWith(make('voice.wav'));
+ }finally{load.mockRestore();add.mockRestore();}
+});
+
+it.each(['replaced','workspace'])('媒體選擇視窗 %s 失效後，舊按鈕與剩餘批次都不能改新工作區',async reason=>{
+ Seq.add({id:'old-primary',primary:true,dur:12,in:0,out:12,offset:0});
+ const modal=await incomingModal();
+ const load=vi.spyOn(Media,'loadDesktopMedia').mockResolvedValue();
+ const audio=vi.spyOn(Media,'addAudioFileDesktop').mockResolvedValue(null);
+ try{
+  const importing=importDesktopMediaFiles(['C:/next.webm','C:/voice.wav']);
+  const dialog=await modal.wait();
+  if(reason==='replaced')dialog.options?.onReplaced?.();
+  else await Project.startNewProject(()=>resetProject());
+  await importing;
+  await dialog.buttons.find(button=>button.label==='取代目前影片').act();
+  expect(load).not.toHaveBeenCalled();expect(audio).not.toHaveBeenCalled();
+ }finally{load.mockRestore();audio.mockRestore();}
+});
+
+it.each(['resolve','reject'])('取代影片等待 %s 期間換專案，晚到結果不准入同批音檔也不覆寫新狀態',async outcome=>{
+ Seq.add({id:'old-primary',primary:true,dur:12,in:0,out:12,offset:0});
+ const modal=await incomingModal();let settle;
+ const load=vi.spyOn(Media,'loadDesktopMedia').mockImplementation(()=>{
+  Media.reset();return new Promise((resolve,reject)=>{settle=()=>outcome==='reject'?reject(new Error('old intake failure')):resolve();});
+ });
+ const audio=vi.spyOn(Media,'addAudioFileDesktop').mockResolvedValue(null);
+ const {showToast}=await import('../src/ui.js');showToast.mockClear();
+ try{
+  const importing=importDesktopMediaFiles(['C:/next.webm','C:/voice.wav']);
+  const dialog=await modal.wait();
+  const choosing=dialog.buttons.find(button=>button.label==='取代目前影片').act();
+  await vi.waitFor(()=>expect(load).toHaveBeenCalledOnce());
+  await Project.startNewProject(()=>{resetProject();Media.reset();});
+  settle();await choosing;await importing;
+  expect(audio).not.toHaveBeenCalled();expect(showToast).not.toHaveBeenCalled();
+ }finally{settle?.();load.mockRestore();audio.mockRestore();}
+});
+
+it('單檔媒體選擇的非同步載入錯誤由入口回報，不留下未處理的拒絕',async()=>{
+ Seq.add({id:'old-primary',primary:true,dur:12,in:0,out:12,offset:0});
+ const modal=await incomingModal();
+ const load=vi.spyOn(Media,'loadDesktopMedia').mockRejectedValueOnce(new Error('disk disappeared'));
+ const {showToast}=await import('../src/ui.js');showToast.mockClear();
+ try{
+  const importing=Media.openIncoming({path:'C:/next.webm'});
+  const dialog=await modal.wait();
+  await expect(dialog.buttons.find(button=>button.label==='取代目前影片').act()).resolves.toBe(false);
+  await expect(importing).resolves.toBe(false);
+  expect(showToast).toHaveBeenCalledWith(expect.stringContaining('disk disappeared'));
+ }finally{load.mockRestore();}
+});
 
 it.each(['desktop','browser'])('%s 批次第一素材失去專案所有權後不把剩餘音檔加入新專案',async mode=>{
  const pending=pendingImport(),applied=[];

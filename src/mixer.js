@@ -9,7 +9,7 @@
 /* SUB Tool — 專案音訊軌混音器（A1…An bus；來源聲道只在配線中處理） */
 import { $ } from './dom.js';
 import { escapeHTML } from './util.js';
-import { State, ensureAudioBusCount } from './state.js';
+import { State } from './state.js';
 import { Media } from './media.js';
 import { emit } from './events.js';
 import { showToast, promptModal } from './ui.js';
@@ -18,13 +18,7 @@ import { Project } from './project.js';
 import { beginTimelineTrackEdit } from './timeline-edit-transaction.js';
 
 function projectBuses(){
-  let buses = Array.isArray(State.audioProject?.buses) ? State.audioProject.buses : [];
-  if (!buses.length && (Media.tracks?.length || State.clips?.length)) {
-    const chCount = Math.max(1, Media.tracks?.length || 1);
-    ensureAudioBusCount(chCount);
-    buses = State.audioProject?.buses || [];
-  }
-  return buses;
+  return Array.isArray(State.audioProject?.buses) ? State.audioProject.buses : [];
 }
 function busLabel(bus,index){ return `A${index+1}`; }
 function busName(bus,index){ return bus?.name||busLabel(bus,index); }
@@ -337,6 +331,7 @@ function renderMixer(){
         };
 
         inlineInput.addEventListener('keydown', (ke) => {
+          if(ke.isComposing||ke.keyCode===229){ ke.stopPropagation();return; }
           if (ke.key === 'Enter') {
             ke.preventDefault();
             commitEdit();

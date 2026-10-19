@@ -133,6 +133,72 @@ describe('Media presentation runtime', () => {
     expect(Media.displayTime()).toBe(50);
   });
 
+  it.each(['pause','new-seek','new-seek-reverse-play','reset','reverse-play'])('native capture holds the real Media presenter and respects %s',async action=>{
+    const {activateMpvTransport}=await import('../src/media-player-adapter.js');
+    const bridge={launch:vi.fn(async()=>({ok:true})),present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
+      play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),mute:vi.fn(async()=>{})};
+    const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
+    State.clips[0].path='C:/program.mov';Media._mpvPath='C:/program.mov';Media._nativeReverse=false;
+    let release,started,owns;
+    const ready=new Promise(resolve=>{started=resolve;});
+    const pixels=new Promise(resolve=>{release=resolve;});
+    try{
+      Media.play();bridge.play.mockClear();
+      const pending=Media.withPresentedFrame(105,async({isCurrent,adapter})=>{
+        owns=isCurrent;expect(adapter).toBe(runtime);started();await pixels;
+        if(!isCurrent())throw Object.assign(new Error('obsolete capture'),{name:'AbortError'});
+        return'pixels';
+      });
+      const outcome=pending.then(value=>({value}),error=>({error}));
+      await ready;expect(bridge.present.mock.lastCall[0]).toBe(15);expect(bridge.play).not.toHaveBeenCalled();
+      let newer;
+      if(action==='pause')Media.pause();
+      if(action==='reset')Media.resetPresentationSession('new-workspace');
+      if(action.startsWith('new-seek'))newer=Media.seek(106);
+      if(action==='reverse-play'||action==='new-seek-reverse-play'){Media._nativeReverse=true;Media.play();expect(bridge.play).not.toHaveBeenCalled();}
+      if(action==='reset'||action.startsWith('new-seek'))expect(owns()).toBe(false);
+      release();const result=await outcome;if(newer)await newer;
+      if(action==='reset'||action.startsWith('new-seek'))expect(result.error?.name).toBe('AbortError');else expect(result.value).toBe('pixels');
+      expect(bridge.play).toHaveBeenCalledTimes(action.startsWith('new-seek')||action==='reverse-play'?1:0);
+    }finally{release?.();Media._nativeReverse=false;Media.playing=false;runtime.stopBoundsFeeder();Media.resetPresentationSession('capture-test-finished');}
+  });
+
+  it.each(['negative acknowledgement','rejection','reverse preparation','success','superseded'])('native clip activation %s cannot acknowledge the previous mother source',async outcome=>{
+    const {activateMpvTransport}=await import('../src/media-player-adapter.js');
+    let release;
+    const bridge={launch:vi.fn(async()=>({ok:true})),loadfile:vi.fn(async()=>({ok:true})),
+      present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
+      pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),mute:vi.fn(async()=>{})};
+    if(outcome==='negative acknowledgement')bridge.loadfile.mockResolvedValueOnce({ok:false});
+    if(outcome==='rejection')bridge.loadfile.mockRejectedValueOnce(new Error('source unavailable'));
+    if(outcome==='superseded')bridge.loadfile.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve;}));
+    const reverse=outcome==='reverse preparation'?vi.spyOn(Media,'prepareClipReverse').mockResolvedValueOnce(false):null;
+    const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
+    State.clips[0].path='C:/program.mov';
+    State.clips.push({id:'clip-b',path:'C:/next.mov',in:0,out:10,dur:10,offset:110,vtrack:0,
+      ...(reverse?{reverse:true}:{})});
+    Media._mpvPath='C:/program.mov';
+    try{
+      const pending=Media.requestPresentation(112);
+      if(outcome==='superseded'){
+        await vi.waitFor(()=>expect(release).toBeTypeOf('function'));
+        const current=Media.requestPresentation(104);
+        release({ok:true});
+        await expect(pending).resolves.toMatchObject({status:'failed',error:{name:'AbortError'}});
+        await expect(current).resolves.toMatchObject({status:'presented',presentedTime:104});
+        expect(bridge.present).toHaveBeenCalledOnce();expect(bridge.present.mock.lastCall[0]).toBe(14);
+      }else if(outcome==='success'){
+        await expect(pending).resolves.toMatchObject({status:'presented',presentedTime:112});
+        expect(Media.activeClip()?.id).toBe('clip-b');expect(Media.inGap()).toBe(false);
+        expect(bridge.present).toHaveBeenCalledOnce();expect(bridge.present.mock.lastCall[0]).toBe(2);
+      }else{
+        await expect(pending).resolves.toMatchObject({status:'failed'});
+        expect(bridge.present).not.toHaveBeenCalled();
+        expect(Media.displayTime()).toBe(105);
+      }
+    }finally{reverse?.mockRestore();runtime.stopBoundsFeeder();Media.resetPresentationSession('activation-test-finished');}
+  });
+
   it('WebCodecs 接管時會等所有合成層的實際 PTS，再提交播放頭', async () => {
     Media.setWebCodecsTakeover(true);
     const pending = Media.requestPresentation(104);

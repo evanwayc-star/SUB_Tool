@@ -53,34 +53,45 @@ async function runNative(executable, args, { cwd, signal, onProgress, onProcess,
   abortIfNeeded(signal);
   const child = spawn(executable, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let detail = '';
-  const closed = new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code, childSignal) => resolve({ code, childSignal }));
-  });
+  let nativeError = null, stopping = null, resolveClosed, rejectSpawn;
+  const closed = new Promise(resolve => { resolveClosed = resolve; });
   const spawned = new Promise((resolve, reject) => {
     child.once('spawn', resolve);
-    child.once('error', reject);
+    rejectSpawn = reject;
   });
-  // Keep a rejection handler installed while the lease callback is pending.
-  void closed.catch(() => {});
+  // Kill/send failures are errors from a still-owned writer, not close evidence.
+  // Store the stop promise before killing: a failed kill may emit error again.
+  const stop = () => {
+    if (!stopping) stopping = Promise.resolve().then(() => stopNative(child));
+    return stopping;
+  };
+  child.on('error', error => {
+    nativeError ||= error;
+    rejectSpawn(nativeError);
+    if (!Number.isInteger(child.pid) || child.pid <= 0) {
+      resolveClosed({ code: null, childSignal: null });
+    } else void stop().catch(() => {});
+  });
+  child.once('close', (code, childSignal) => resolveClosed({ code, childSignal }));
   const receive = chunk => {
     const text = chunk.toString('utf8'); detail = (detail + text).slice(-16000);
     const match = /(?:^|\s)(\d+(?:\.\d+)?)%/.exec(text);
     if (match && onProgress) onProgress(Math.min(100, Number(match[1])));
   };
   child.stdout.on('data', receive); child.stderr.on('data', receive);
-  const abort = () => { void stopNative(child).catch(() => {}); };
+  const abort = () => { void stop().catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   try {
     if (signal?.aborted) abort();
     await spawned;
     await onProcess?.(child);
     const result = await closed;
+    if (nativeError) throw nativeError;
     abortIfNeeded(signal);
     if (result.code !== 0) throw fail('DISC_AUTHORING_FAILED', `${path.basename(executable)} 合成失敗（${result.code ?? result.childSignal}）：${detail.trim()}`);
   } catch (error) {
-    await stopNative(child);
-    await closed.catch(() => {});
+    await stop().catch(() => {});
+    await closed;
     throw error;
   } finally {
     signal?.removeEventListener('abort', abort);

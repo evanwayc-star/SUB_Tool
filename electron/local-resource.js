@@ -5,7 +5,7 @@
    提供渲染端（Renderer）透過安全 Capability Token 存取本機音視訊與圖檔資源。
    
    【安全鐵律】
-   1. 外部只看到不可猜測的 48 位元 Hex Token，絕不將本機絕對磁碟路徑暴露在 DOM/URL 中。
+   1. 資源 URL 使用隨機的 48 字元十六進位 Token（192 位元），不包含本機絕對磁碟路徑。
    2. 每次 HTTP 請求（包含 Range 串流讀取）均即時透過 `FileAuthority` 重新校驗讀取權限。
    3. 支援 HTTP 206 Partial Content (Range: bytes=start-end) 串流，確保 Web 播放器能快速 Seek。
    4. BrowserWindow 毋須關閉 `webSecurity` 即可安全載入媒體。

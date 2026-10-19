@@ -6,6 +6,10 @@ import fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import vm from 'node:vm';
 import { DVD_ISO, BD_ISO } from '../shared/delivery-formats.cjs';
 import { discEncoding, prepareDiscOutput, cleanupDiscOutput, nativeDiscPaths,
   finalizeDiscOutput, verifyDiscIso, dvdAuthorXml, blurayMeta } from '../electron/disc-authoring.js';
@@ -17,6 +21,67 @@ const NATIVE = nativeDiscPaths(process.env.SUBTOOL_DISC_NATIVE_DIR || path.join(
 const SEVENZIP = process.env.SEVENZIP_PATH || 'C:/Program Files/7-Zip/7z.exe';
 const nativeAvailable = [FFMPEG, FFPROBE, SEVENZIP, ...Object.values(NATIVE)].every(existsSync);
 const AUDIO = { streams: [{ layout: 'mono' }, { layout: 'stereoLtRt' }, { layout: '5.1' }] };
+
+describe('光碟原生 writer 結束屏障', () => {
+  it.each([{ abort: false, code: 0 }, { abort: false, code: 1 }, { abort: true, code: 1 },
+    { abort: false, code: 1, spawnFailure: true }])
+    ('原生 error 保留至 close、沒有 PID 才可立即失敗（abort=$abort, code=$code, spawnFailure=$spawnFailure）', async ({ abort, code, spawnFailure }) => {
+      const directory = mkdtempSync(path.join(tmpdir(), 'subtool-disc-close-'));
+      const filename = path.join(ROOT, 'electron/disc-authoring.js');
+      const require = createRequire(filename), loaded = { exports: {} };
+      const child = new EventEmitter();
+      Object.assign(child, { pid: spawnFailure ? undefined : 123456, exitCode: null, signalCode: null,
+        stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => {
+          child.emit('error', Object.assign(new Error('kill denied'), { code: 'EACCES' }));
+          return false;
+        }) });
+      vm.runInNewContext(readFileSync(filename, 'utf8'), {
+        module: loaded, exports: loaded.exports, __dirname: path.dirname(filename), process, Buffer,
+        require: name => name === 'fs/promises' ? { ...fs, access: async () => {} }
+          : name === 'child_process' ? { spawn(binary) {
+            if (binary === 'taskkill.exe') {
+              const killer = new EventEmitter(); queueMicrotask(() => killer.emit('close', 1)); return killer;
+            }
+            queueMicrotask(() => spawnFailure
+              ? child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }))
+              : child.emit('spawn')); return child;
+          } } : require(name),
+      }, { filename });
+      const { createExportArtifact } = require('./export-artifact');
+      const controller = new AbortController();
+      let started;
+      const ready = new Promise(resolve => { started = resolve; });
+      const artifact = createExportArtifact({ outputFormat: 'bd-iso', outPath: path.join(directory, 'out.iso'),
+        args: ['out.iso'], discVideoFps: 24 }, { signal: controller.signal, onProcess: started }, { disc: loaded.exports });
+      let result, settled = false;
+      try {
+        const args = await artifact.prepare({ tempDir: directory });
+        const input = args.at(-1); writeFileSync(input, 'private encoded mother');
+        result = artifact.settle({ encoded: true }).then(value => { settled = true; return value; });
+        if (spawnFailure) {
+          expect(await result).toMatchObject({ error: expect.objectContaining({ code: 'ENOENT' }), reason: 'disc-finalize-failed' });
+          expect(child.kill).not.toHaveBeenCalled();
+          expect(existsSync(path.dirname(input))).toBe(false);
+          return;
+        }
+        await ready;
+        if (abort) controller.abort();
+        const failure = Object.assign(new Error('native kill failed'), { code: 'EACCES' });
+        child.emit('error', failure);
+        expect(() => child.emit('error', new Error('another native kill failed'))).not.toThrow();
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(settled).toBe(false);
+        expect(readFileSync(input, 'utf8')).toBe('private encoded mother');
+        expect(child.kill.mock.calls.length).toBeLessThanOrEqual(1);
+        child.exitCode = code; child.emit('close', code, null);
+        expect(await result).toMatchObject({ error: expect.anything(), reason: 'disc-finalize-failed' });
+        expect(existsSync(path.dirname(input))).toBe(false);
+      } finally {
+        child.exitCode = 1; child.emit('close', 1, null); await result;
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    });
+});
 
 function run(executable, args) {
   const result = spawnSync(executable, args, { encoding: 'utf8', windowsHide: true,

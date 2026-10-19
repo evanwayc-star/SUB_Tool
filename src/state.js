@@ -77,8 +77,9 @@ import { mergeImportedKeymap } from './keybinding-engine.js';
    - exportLayout 是專案 bus -> 匯出音訊 stream 的編組。
    sourceStream / sourceChannel 均採 0-based，畫面顯示時再 +1。
    這些 helper 只操作可序列化的 State.audioProject，讓媒體載入、時間軸與匯出可共用同一份設定。 */
-let _audioBusSeq = 1;
-let _audioStreamSeq = 1;
+// 持久 ID 是字串；內部序號也必須精確遞增，不能被載入的大數 ID 卡住。
+let _audioBusSeq = 1n;
+let _audioStreamSeq = 1n;
 
 function _finiteNumber(v, fallback){ const n=Number(v); return Number.isFinite(n)?n:fallback; }
 function _nonNegativeInt(v, fallback){ return Math.max(0, Math.floor(_finiteNumber(v, fallback))); }
@@ -87,11 +88,11 @@ function _cleanName(v, fallback){ const s=typeof v==='string'?v.trim():''; retur
 
 function _reserveAudioBusId(id){
   const m=/^ab(\d+)$/i.exec(id||'');
-  if(m) _audioBusSeq=Math.max(_audioBusSeq,Number(m[1])+1);
+  if(m){ const next=BigInt(m[1])+1n; if(next>_audioBusSeq) _audioBusSeq=next; }
 }
 function _reserveAudioStreamId(id){
   const m=/^out(\d+)$/i.exec(id||'');
-  if(m) _audioStreamSeq=Math.max(_audioStreamSeq,Number(m[1])+1);
+  if(m){ const next=BigInt(m[1])+1n; if(next>_audioStreamSeq) _audioStreamSeq=next; }
 }
 function _nextAudioBusId(used){
   let id='';
@@ -266,7 +267,7 @@ function newAudioBus(name, id){
 }
 
 function resetAudioProject(){
-  _audioBusSeq=1; _audioStreamSeq=1;
+  _audioBusSeq=1n; _audioStreamSeq=1n;
   State.audioProject=_emptyAudioProject();
   return State.audioProject;
 }

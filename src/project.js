@@ -151,6 +151,7 @@ let _savePath      = null;   // 上次儲存的完整路徑（desktop only）
 let _saveBaseName  = null;   // 基礎名稱（不含副檔名），自動備份用
 let _autoSaveTimer = null;
 let _lastSavedDataStr = null; // 用於判斷專案是否被修改
+let _savedWriteRevision = 0; // 相同 bytes 的成功寫入，也是一份不能被載入 completion 取代的回覆。
 let _autoRelinkNeedsSave = false; // 載入時找到新素材路徑，但磁碟上的專案尚未寫入新路徑
 const _projectLoadSession = new ProjectLoadSession({
   media: Media,
@@ -162,6 +163,7 @@ const _projectLoadSession = new ProjectLoadSession({
     State.externalAudioEnd = _externalAudioEnd(sources);
   },
   finishProject: _finishProjectLoad,
+  beginProject: _beginProjectLoad,
   report: (stage, error, path) => console.warn(stage, path || '', error || ''),
 });
 let _openRequestGeneration = 0;
@@ -217,7 +219,8 @@ function _savedExternalAudioSources(){
    畫面前就被當成空專案覆寫。 */
 function _savedClips(){
   const live=Array.isArray(State.clips)?State.clips:[];
-  const pending=_projectLoadSession.activePlan?.pendingClips?.()||[];
+  const plan=_projectLoadSession.activePlan;
+  const pending=plan?.pendingClipsForSave?.(live)??plan?.pendingClips?.()??[];
   if(!pending.length) return live;
   const liveIds=new Set(live.map(clip=>clip?.id).filter(Boolean));
   return [...live,...pending.filter(clip=>!clip?.id||!liveIds.has(clip.id))];
@@ -243,17 +246,18 @@ function _normalisedProjectData(rawData){
   return null;
 }
 
-function _buildProjectData(){
+function _buildProjectData({snapshot=null,workspace=null}={}){
   // 先合併 pending 素材，再由 History 的同一 seam 排除尚未提交的預覽。
   // 輸入只含純 metadata；runtime Audio / File / waveform 不跨這個 interface。
   const savedClips=_savedClips().map(c=>Seq.persistentMetadata(c));
   const savedAudio=_savedExternalAudioSources();
-  const committed=History.committedSnapshot({clips:savedClips,externalAudioState:savedAudio});
+  const committed=snapshot||History.committedSnapshot({clips:savedClips,externalAudioState:savedAudio});
   const cueEnd=committed.cues.reduce((end,cue)=>cue.timed!==false?Math.max(end,Number(cue.end)||0):end,0);
   const clipEnd=committed.clips.reduce((end,c)=>Math.max(end,Math.max(0,Number(c.offset)||0)+Seq.len(c)),0);
-  const duration=savedClips.length||savedAudio.length
+  const hasAssets=snapshot ? committed.clips.length||committed.externalAudioState.length : savedClips.length||savedAudio.length;
+  const duration=hasAssets
     ? Math.max(cueEnd,_externalAudioEnd(committed.externalAudioState),clipEnd)
-    : State.duration;
+    : workspace?.duration??State.duration;
   const usedPresets = [];
   const allPresets = getAllPresets();
   const keys = Object.keys(STYLE_DEFAULTS);
@@ -324,6 +328,7 @@ function _onSaved(fullPath, webName, snapshot){
     setStatus('專案已儲存：'+webName,'ok');
   }
   _lastSavedDataStr = snapshot;
+  _savedWriteRevision++;
   _autoRelinkNeedsSave = false;
   if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave, 3*60*1000);
 }
@@ -453,18 +458,11 @@ function resetProject(){
   _projectLoadSession.clearPlan();
 }
 
-function _hasAudioProjectData(audioProject){
-  const ap=normalizeAudioProject(audioProject);
-  return ap.mode!=='auto'||ap.buses.length>0||Object.keys(ap.sourceMaps).length>0||ap.exportLayout.streams.length>0;
-}
-
 function isProjectDirty() {
   if (_autoRelinkNeedsSave) return true;
   const data=_buildProjectData();
-  // v3 的 bus / routing / export layout 是可獨立於字幕存在的專案內容，不能被舊的「無字幕＝未修改」捷徑忽略。
-  // 圖片／影片 clip 也是專案內容；尤其圖片大小或位置被調整後，不能因為沒有字幕
-  // 就讓關閉視窗流程誤判為未修改。
-  if (!_lastSavedDataStr && data.cues.length === 0 && data.notes.length === 0 && !_hasAudioProjectData(data.audioProject) && data.clips.length===0 && data.externalAudioSources.length===0) return false;
+  // 空軌道的名稱、樣式、格網與交付範圍也是持久內容，與有無字幕／片段無關。
+  // 新工作區和磁碟存檔都以同一份 committed snapshot 作為乾淨基準。
   if (!_lastSavedDataStr) return true;
   
   const currentStr = JSON.stringify(data);
@@ -482,11 +480,27 @@ function isProjectDirty() {
   }
 }
 
-function _finishProjectLoad(){
-  // Undo 的「初始」必須以媒體與所有 pending clip 都完成還原後的序列為準。
-  // 若在 apply() 當下建立，第一個影片編輯再 Undo 會回到空序列。
-  History.reset();
-  _lastSavedDataStr = JSON.stringify(_buildProjectData());
+function _beginProjectLoad(){
+  const sourceIds=[..._savedClips(),..._savedExternalAudioSources()].map(source=>source.audioSourceId);
+  const finishHistory=History.beginProjectRestore({sourceIds});
+  const workspace=_buildProjectData();
+  const saved=JSON.stringify(workspace);
+  _lastSavedDataStr=saved;
+  return {finishHistory,workspace,savedRevision:_savedWriteRevision};
+}
+function _finishProjectLoad(context){
+  const initial=context?.finishHistory();
+  if(!initial) return;
+  // 基準只取原始文件的編輯欄位；媒體在物件化時已補入 History。
+  // 期間若真正儲存過，保存回覆所持有的 bytes 才是新的乾淨基準。
+  if(_savedWriteRevision===context.savedRevision){
+    const {clipGeo,...snapshot}=initial;
+    const plan=_projectLoadSession.activePlan;
+    const pending=plan?.pendingClipsForSave?.(clipGeo||[])??plan?.pendingClips?.()??[];
+    snapshot.clips=[...(clipGeo||[]),...pending].map(clip=>Seq.persistentMetadata(clip));
+    snapshot.externalAudioState=_normalExternalAudioSources(snapshot.externalAudioState);
+    _lastSavedDataStr=JSON.stringify(_buildProjectData({snapshot,workspace:context.workspace}));
+  }
   setStatus('專案已載入','ok');
 }
 
@@ -667,7 +681,14 @@ const Project = {
   startNewProject(work){
     const generation=_projectLoadSession.begin();
     _cancelFontPrompt?.();
-    return _appendProjectLoad(generation,work);
+    return _appendProjectLoad(generation,async()=>{
+      const result=await work();
+      if(result!==false && _isCurrentProjectLoad(generation)) this.establishCleanBaseline();
+      return result;
+    });
+  },
+  establishCleanBaseline(){
+    _lastSavedDataStr=JSON.stringify(_buildProjectData());
   },
   async _checkMissingFonts(data) {
     await loadFonts();

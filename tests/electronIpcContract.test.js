@@ -139,7 +139,7 @@ describe('Electron invoke interface', () => {
         ipcRenderer:{invoke,on(){},send(){}},webUtils:{}}),
       ArrayBuffer,Uint8Array,Promise,TypeError,RangeError,
     });
-    const options={exact:true,tolerance:0.0045,frameTarget:1.01,frameStart:1,frameDuration:0.04};
+    const options={exact:true,waitForFrame:true,tolerance:0.0045,frameTarget:1.01,frameStart:1,frameDuration:0.04};
     expect(await api.mpv.present(1,options)).toMatchObject({presentedSourceTime:1,presentedSourceDuration:0.04});
     const [channel,time,forwarded]=invoke.mock.calls[0];
     expect([channel,time,forwarded]).toEqual(['mpv:present',1,options]);

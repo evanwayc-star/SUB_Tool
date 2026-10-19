@@ -15,6 +15,7 @@ import { showToast, promptModal, openModal, closeModal } from './ui.js';
 import { secToEncore, getExactFps } from './time.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { History, recordHistory } from './history.js';
+import { Project } from './project.js';
 import { beginGeometryEdit } from './timeline-edit-transaction.js';
 import { emit } from './events.js';
 import { AudioRouting } from './audio-routing.js';
@@ -112,6 +113,20 @@ function showCueMenu(x,y,contextCue=null){
     showCtx(x,y,[{note:true,label:'🔒 此字幕軌已鎖定',tone:'locked'}]);
     return;
   }
+  // A menu describes the selection at pointer-down. Playback, background ASR,
+  // Undo or a new workspace must not redirect one of its commands to new cues.
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const selectedIds=State.selectedIds.slice(),primary=State.selectedId;
+  const listTrack=State.listTrack,track=State.tracks[listTrack];
+  const targets=[...new Set([...selectedIds,primary].filter(Boolean))].map(id=>{
+    const cue=State.cues.find(item=>item.id===id);
+    return {cue,track:State.tracks[cue?.track||0]};
+  });
+  const ownsSelection=()=>ownsWorkspace()&&State.listTrack===listTrack&&State.tracks[listTrack]===track&&!track?.locked
+    &&State.selectedId===primary&&State.selectedIds.length===selectedIds.length
+    &&selectedIds.every((id,index)=>State.selectedIds[index]===id)
+    &&targets.every(({cue,track})=>cue&&State.cues.find(item=>item.id===cue.id)===cue
+      &&State.tracks[cue.track||0]===track&&!track?.locked);
   const n=State.selectedIds.length||(State.selectedId?1:0);
   const items=[{heading:true,label:`已選 ${n} 條字幕`}];
   items.push({label:`複製 ${n} 條字幕`,act:()=>copyCues()});
@@ -222,7 +237,13 @@ function showCueMenu(x,y,contextCue=null){
   items.push({label:'⏱ 清除字幕時間點',act:()=>clearSelectedCuesTime()});
   items.push({sep:true});
   items.push({label:'🗑 刪除字幕',act:()=>deleteSelected()});
-  showCtx(x,y,items);
+  showCtx(x,y,items.map(item=>typeof item.act==='function'?{...item,act:()=>{
+    if(!ownsSelection()){
+      showToast('字幕選取或軌道已變更，請重新開啟右鍵選單');
+      return;
+    }
+    return item.act();
+  }}:item));
 }
 /* 外部音訊素材的幾何與播放狀態都由 Media 持有。選單只負責意圖／重繪，
    以支援 split 的非同步載入流程，也不重複記錄 History。 */
@@ -528,7 +549,11 @@ function tlContextMenuHandler(e){
     const t=xToTime(e.clientX-rect.left);
     const tk=trackFromY(e.clientY);
     if(State.tracks[tk]?.locked){ showCtx(e.clientX,e.clientY,[{label:'🔒 此軌道已鎖定'}]); return; }
+    const track=State.tracks[tk],ownsWorkspace=Project.captureWorkspaceOwnership();
     showCtx(e.clientX,e.clientY,[{label:`＋ 新增空白字幕（1 秒）`,act:()=>{
+      if(!ownsWorkspace() || State.tracks[tk]!==track){
+        showToast('字幕軌或專案已變更，請重新開啟右鍵選單');return;
+      }
       addCue(t,t+1,'',tk,{ historyLabel:'右鍵新增字幕' });
     }}]);
     return;
@@ -771,11 +796,13 @@ export function showCrossfade(c){
   const current=()=>session.isCurrent() && owns();
   const prev=Seq.trackClips(c.vtrack||0).filter(x=>x!==c && x.offset < c.offset - 1e-4).sort((a,b)=>b.offset-a.offset)[0] || null;
   if(!prev){ showToast('前面沒有可溶接的片段（同一視訊軌）'); return; }
-  const maxT=Math.max(0.2, Math.min(Seq.len(c), Seq.len(prev)));
+  const maxT=Math.min(Seq.len(c),Seq.len(prev));
+  if(!Number.isFinite(maxT)||maxT<=0) return;
+  const minT=Math.min(0.001,maxT);
   const defT=Math.min(1, maxT);
   const session=openModal(`交叉溶接 — ${escapeHTML(prev.name||'')} → ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.1">`+
-    `<div>溶接時間：<input type="range" id="xfT" min="0.001" max="${maxT.toFixed(3)}" step="0.001" value="${defT}" style="width:180px;vertical-align:middle"> <input type="text" id="xfTV" value="${secToEncore(defT, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
+    `<div>溶接時間：<input type="range" id="xfT" min="${minT}" max="${maxT}" step="0.001" value="${defT}" style="width:180px;vertical-align:middle"> <input type="text" id="xfTV" value="${secToEncore(defT, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">會把此片段移到<b>上一層視訊軌</b>並提前與前一段尾端重疊，兩段在重疊處淡出／淡入＝交叉溶接（匯出時合成）。</div>`+
     `</div>`,
     [{label:'取消',act:()=>session.close()},
@@ -794,7 +821,7 @@ export function showCrossfade(c){
     if(sV) sV.onchange=()=>{
         let v = parseTimecodeInput(sV.value);
         if(v===null) v = parseFloat(sV.value);
-        if(!isNaN(v)) { s.value = Math.max(0.001, Math.min(maxT, v)); sV.value = secToEncore(+s.value, State.fps, State.dropFrame); }
+        if(!isNaN(v)) { s.value = Math.max(minT, Math.min(maxT, v)); sV.value = secToEncore(+s.value, State.fps, State.dropFrame); }
     };
   },0);
 }

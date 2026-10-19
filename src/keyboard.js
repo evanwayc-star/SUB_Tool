@@ -68,6 +68,7 @@ if (typeof window !== 'undefined') {
   });
 
   window.addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229) return;
     _keysPressed.add(e.key.toLowerCase());
     if (typeof $ === 'function' && $('modalBg')?.classList?.contains('show')) { if (e.key === 'Escape') closeModal(); return; }
     // 快捷鍵設定是獨立於 modalBg 的自訂對話框：開啟期間全域快捷鍵一律不作用（避免 Enter/Space 在背後觸發播放）
@@ -141,7 +142,7 @@ if (typeof window !== 'undefined') {
     case 'search':
       e.preventDefault();
       const sd = document.getElementById('searchDialog');
-      if (sd) { const show = sd.style.display === 'none' || !sd.style.display; sd.style.display = show ? 'flex' : 'none'; if (show) setTimeout(() => document.getElementById('searchInput')?.focus(), 20); }
+      if (sd) emit('action', sd.style.display === 'none' || !sd.style.display ? 'search-open' : 'search-close');
       break;
     case 'toggle_sub_mode': e.preventDefault(); emit('action', 'sub-mode'); break;
     case 'toggle_safe_frame': e.preventDefault(); emit('action', 'safe-frame'); break;

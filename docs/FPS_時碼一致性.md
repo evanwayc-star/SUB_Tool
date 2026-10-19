@@ -157,7 +157,7 @@ sequenceDiagram
 | `subtitle-model.js` 的 `snapCueToFrames()` | 正片長字幕吸附後至少保留一格 |
 | `tcparse.js` | 時碼輸入解析與分量上下鍵；DF 標籤仍交由 `time.js` 決定 |
 | `subio.js` 的批次時長調整 | 共用精確格率與 frame snap，先換算合法上下限再限制結束時間 |
-| `media-presentation-core.js` | in-flight／pending／取消／commit |
+| `media-presentation-core.js` | in-flight／pending／取消／commit，以及原生截圖的已呈現畫格 hold |
 | `media.js` | presenter 選擇、`displayTime()`、時間域轉換、seek 與 audio lifecycle |
 | `media-player-adapter.js` | HTML／mpv 共同操作 |
 | `transport-controller.js` | 左右逐格、JKL、播放意圖 |
@@ -211,13 +211,8 @@ npm test -- tests/timelineTransport.test.js
 npm test -- tests/transportController.test.js
 ```
 
-真機：
-
-```bash
-npm run build
-node scripts/acceptance/verify-transport-smoothness.js
-node scripts/acceptance/verify-reverse-shuttle.js
-```
+真機驗證的執行方式與必要素材參數，見[開發與驗證 §3](開發與驗證.md#3-真機驗證cdp)；
+依該處的播放驗收命令執行，再核對以下素材與時碼情境。
 
 實際素材：
 

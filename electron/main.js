@@ -946,6 +946,7 @@ QueueManager = createExportQueue({
   history: QueueHistory,
   admission: _admission,
   grantPersistedCapabilities: grantPersistedQueueJobCapabilities,
+  grantCompletedOutputReveal: file => fileAuthority.grantDeliveryReveal(file),
   canReadSource: file => fileAuthority.canRead(file),
   canWriteDelivery: file => fileAuthority.canWriteDelivery(file),
   isFile: p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } },
@@ -1501,18 +1502,18 @@ function getKeysPath() {
   return path.join(configDir, 'key.json');
 }
 
+const keysFile = createSettingsFile({ filePath: getKeysPath });
+
 ipcMain.handle('keys:load', () => {
   try {
-    const p = getKeysPath();
-    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    return keysFile.read();
   } catch(e) { console.error('[keys] load err', e); }
   return {};
 });
 
 ipcMain.handle('keys:save', (e, data) => {
   try {
-    const p = getKeysPath();
-    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
+    keysFile.update(() => data);
     return true;
   } catch(e) { console.error('[keys] save err', e); return false; }
 });
@@ -1713,6 +1714,7 @@ ipcMain.handle('mpv:loadfile', async (event, filePath) => {
 ipcMain.handle('mpv:seek', (event, time, options) => mpvHost.seek(time, { exact: options?.exact === true }));
 ipcMain.handle('mpv:present', (event, time, options) => mpvHost.present(time, {
   exact: options?.exact === true,
+  waitForFrame: options?.waitForFrame === true,
   tolerance: Number.isFinite(Number(options?.tolerance)) ? Number(options.tolerance) : undefined,
   frameTarget: Number.isFinite(Number(options?.frameTarget)) ? Number(options.frameTarget) : undefined,
   frameStart: options?.frameStart!=null&&Number.isFinite(Number(options.frameStart)) ? Number(options.frameStart) : undefined,

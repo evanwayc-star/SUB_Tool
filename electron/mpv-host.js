@@ -182,6 +182,25 @@ function createMpvHost(deps) {
 
   function maybeFinishPresentation(request) {
     if (!request || request !== pendingPresentation) return;
+    if (request.waitForFrame) {
+      if (!request.commandAcknowledged || !request.restarted) return;
+      if (!request.frameReady) {
+        if (request.readingFrame) return;
+        request.readingFrame = true;
+        // A paused seek ACK/time-pos can describe only the requested position
+        // while mpv is still seeking and the VO retains the previous frame.
+        // Capture waits for restart, then reads the actual stopped source PTS.
+        void send(['get_property', 'time-pos'], true).then(raw => {
+          if (request !== pendingPresentation) return;
+          const observed = typeof raw === 'number' ? sourceTime(raw) : raw;
+          if (!Number.isFinite(observed) || !presentationMatches(request, observed)) return;
+          request.presentedSourceTime = observed;
+          request.frameReady = true;
+          maybeFinishPresentation(request);
+        });
+        return;
+      }
+    }
     if (!request.commandAcknowledged || request.presentedSourceTime == null) return;
     if (!playerPaused && !request.restarted) return;
     settlePresentation(request, {
@@ -322,7 +341,7 @@ function createMpvHost(deps) {
       : Math.abs(presented-request.targetTime)<=request.tolerance;
   }
 
-  function present(time, { exact = false, tolerance = 1.5 / 30, frameTarget = time, frameStart = null, frameDuration = 0 } = {}) {
+  function present(time, { exact = false, tolerance = 1.5 / 30, frameTarget = time, frameStart = null, frameDuration = 0, waitForFrame = false } = {}) {
     cancelPresent();
     const startedAt = now();
     const targetTime = Math.max(0, Number(time) || 0);
@@ -335,6 +354,9 @@ function createMpvHost(deps) {
       knownFrame:frameStart!=null&&Number.isFinite(Number(frameStart))&&frameDuration>0
         &&frameTarget>=Number(frameStart)-1e-9&&frameTarget<Number(frameStart)+frameDuration-1e-9,
       commandAcknowledged: false,
+      waitForFrame,
+      frameReady: false,
+      readingFrame: false,
       restarted: false,
       presentedSourceTime: null,
       resolve: null,
@@ -348,6 +370,7 @@ function createMpvHost(deps) {
       if (request !== pendingPresentation) return;
       request.commandAcknowledged = true;
       maybeFinishPresentation(request);
+      if (request.waitForFrame) return;
       if (request !== pendingPresentation) return;
       // 定位到「已經正在顯示的同一格」時，mpv 可以只回覆 command 而不再送
       // property-change。向播放器讀回實際 time-pos，避免這種有效定位占住 session。

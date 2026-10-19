@@ -706,14 +706,24 @@ export async function capturePreviewFrame({nativePath,readBase64}={}){
   let presenter='black',sourceFrame=null;
   if(!hasCanvas&&!Media.inGap()&&Media.mpvPresenting()){
     if(!nativePath||!readBase64) throw new Error('原生播放器截圖沒有儲存目錄');
-    const result=await getPlayerAdapter().screenshot(nativePath);
-    if(!result||result.ok===false) throw new Error('原生播放器截圖失敗');
-    const b64=await readBase64(nativePath);
-    if(!b64) throw new Error('無法讀取原生播放器截圖');
-    const image=await loadCaptureImage('data:image/jpeg;base64,'+b64);
-    sourceFrame=image;
-    const rect=stageBox({canvasW:width,canvasH:height,projectW:image.naturalWidth||image.width,projectH:image.naturalHeight||image.height});
-    ctx.drawImage(image,rect.x,rect.y,rect.w,rect.h);presenter='mpv';
+    // FPS-SYNC：凍結的 TC／圖片計畫必須對應同一張 native 畫格。
+    // 呈現 owner 等該時間確認後才取圖，讀入像素前持續停住 presenter；
+    // 換來源或較新的 seek 會撤銷取圖資格，不得保存遲到的舊圖。
+    await Media.withPresentedFrame(time,async({adapter,isCurrent})=>{
+      const check=()=>{if(!isCurrent()) throw Object.assign(new Error('截圖已被較新的播放操作取代'),{name:'AbortError'});};
+      check();
+      const result=await adapter.screenshot(nativePath);
+      check();
+      if(!result||result.ok===false) throw new Error('原生播放器截圖失敗');
+      const b64=await readBase64(nativePath);
+      check();
+      if(!b64) throw new Error('無法讀取原生播放器截圖');
+      const image=await loadCaptureImage('data:image/jpeg;base64,'+b64);
+      check();
+      sourceFrame=image;
+      const rect=stageBox({canvasW:width,canvasH:height,projectW:image.naturalWidth||image.width,projectH:image.naturalHeight||image.height});
+      ctx.drawImage(image,rect.x,rect.y,rect.w,rect.h);presenter='mpv';
+    });
   }else if(hasCanvas||!Media.inGap()){
     if(hasCanvas){
       const rect=stageBox({canvasW:preview.width,canvasH:preview.height,projectW:width,projectH:height});

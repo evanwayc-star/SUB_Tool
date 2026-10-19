@@ -304,6 +304,8 @@ async function startWatchdogRuntime(config, options = {}) {
   let starting = true;
   let child = null;
   let childClosed = false;
+  let nativeChildError = null;
+  let terminationRequested = false;
   let cleanupReason = null;
   let finalizing = null;
   let finalResult = null;
@@ -456,7 +458,12 @@ async function startWatchdogRuntime(config, options = {}) {
     };
 
     if (child && !childClosed) {
-      terminateProcessTree(child);
+      if (!terminationRequested) {
+        // A failed kill can emit another error synchronously or asynchronously.
+        // Keep the writer's lease until close without recursively killing it.
+        terminationRequested = true;
+        terminateProcessTree(child);
+      }
     } else if (leasesAcquired && !starting) {
       void finalize(null, null);
     }
@@ -541,14 +548,21 @@ async function startWatchdogRuntime(config, options = {}) {
   });
   child.stderr.on('error', () => {});
 
-  child.once('error', error => {
+  child.on('error', error => {
+    nativeChildError ||= error;
+    // ChildProcess error also means kill/send failure. A spawned writer still
+    // owns its staging file and lease until close, even after its exit event.
+    if (Number.isInteger(child.pid) && child.pid > 0) {
+      void requestCleanup(cleanupReason || 'ffmpeg-error');
+      return;
+    }
     cleanupReason ||= 'ffmpeg-spawn-failed';
-    void finalize(null, null, error);
+    void finalize(null, null, nativeChildError);
   });
   child.once('close', (code, signal) => {
     childClosed = true;
     if (code !== 0 && !cleanupReason) cleanupReason = 'ffmpeg-nonzero';
-    void finalize(code, signal);
+    void finalize(code, signal, nativeChildError);
   });
 
   try {
@@ -826,6 +840,7 @@ function spawnExportWatchdog(config, options = {}) {
 
   let readySettled = false;
   let completionSettled = false;
+  let startupFailure = null;
   let resolveReady;
   let rejectReady;
   let resolveCompletion;
@@ -841,7 +856,7 @@ function spawnExportWatchdog(config, options = {}) {
   });
 
   const rejectStartup = message => {
-    const error = errorWithCode(
+    const error = startupFailure ||= errorWithCode(
       message?.code || 'WATCHDOG_START_FAILED',
       message?.message || '匯出 watchdog 啟動失敗',
     );
@@ -849,7 +864,10 @@ function spawnExportWatchdog(config, options = {}) {
       readySettled = true;
       rejectReady(error);
     }
-    if (!completionSettled) {
+    // Readiness may fail after FFmpeg has spawned. Its standalone owner still
+    // holds native close, staging and leases; callers must retain ASS/TC inputs
+    // and active-job ownership until the exit result or watchdog termination.
+    if (!completionSettled && (!Number.isInteger(child.pid) || child.pid <= 0)) {
       completionSettled = true;
       rejectCompletion(error);
     }
@@ -881,11 +899,10 @@ function spawnExportWatchdog(config, options = {}) {
         code: 'WATCHDOG_EXITED',
         message: `匯出 watchdog 尚未 ready 就結束 (${code ?? signal ?? 'unknown'})`,
       });
-      return;
     }
     if (!completionSettled) {
       completionSettled = true;
-      rejectCompletion(errorWithCode(
+      rejectCompletion(startupFailure || errorWithCode(
         'WATCHDOG_EXITED',
         `匯出 watchdog 未回傳結果就結束 (${code ?? signal ?? 'unknown'})`,
       ));

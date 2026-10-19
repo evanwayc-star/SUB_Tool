@@ -267,8 +267,10 @@ function crossfadeWithPrev(c, T, expectedPrevious=null){
   if(expectedPrevious && prev!==expectedPrevious) return false;
   const nv=(c.vtrack||0)+1;
   if(State.videoTracks[nv]?.locked){ showToast('目標視訊軌已鎖定，無法移入'); return false; }
-  if(!Number.isFinite(T)) return false;
-  T=Math.max(0.1, Math.min(T, Seq.len(c), Seq.len(prev)));
+  if(!Number.isFinite(T)||T<=0) return false;
+  const maxT=Math.min(Seq.len(c),Seq.len(prev));
+  if(!Number.isFinite(maxT)||maxT<=0) return false;
+  T=Math.min(T,maxT);
   const prevEnd=Seq.clipEnd(prev);
   const offset=Math.max(0,prevEnd-T);
   if(Seq.trackClips(nv).some(other=>other!==c && other.offset<offset+Seq.len(c)-1e-6 && Seq.clipEnd(other)>offset+1e-6)){

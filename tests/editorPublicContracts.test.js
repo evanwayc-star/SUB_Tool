@@ -71,6 +71,112 @@ beforeEach(() => {
 
 afterAll(() => { UI.closeModal(); vi.clearAllTimers(); vi.useRealTimers(); });
 
+it.each(['list', 'inline', 'modal'])('%s 文字編輯的組字按鍵不確認、取消或切分，一般 Enter 仍提交', async mode => {
+  const original=State.cues[0].text;
+  let editor,block;
+  if(mode==='list'){
+    Subtitles.renderSubList();
+    editor=document.querySelector('.sub-row[data-id="target"] .txt');
+    editor.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));
+    await Promise.resolve();
+  }else if(mode==='inline'){
+    block=document.createElement('div');document.getElementById('tlLayer').appendChild(block);
+    await StylePanelController.startInlineEdit(block,State.cues[0]);
+    editor=document.querySelector('.cue-inline-edit');
+  }else{
+    await StylePanelController.openCueEditModal(State.cues[0]);await vi.advanceTimersByTimeAsync(30);
+    editor=document.getElementById('cueEditTa');
+  }
+  const active=()=>mode==='inline'?editor.isConnected:mode==='list'?editor.contentEditable==='true':document.getElementById('modalBg').classList.contains('show');
+  for(const options of [{key:'Enter',isComposing:true},{key:'Enter',ctrlKey:true,isComposing:true},
+    {key:'Escape',isComposing:true},{key:'ArrowDown',isComposing:true},{key:'Enter',keyCode:229}]){
+    const event=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,...options});
+    editor.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(active()).toBe(true);expect(State.cues).toHaveLength(1);
+    expect(State.cues[0].text).toBe(original);expect(History.stack).toHaveLength(1);
+  }
+  if(mode==='inline')editor.value='組字完成';else editor.innerText='組字完成';
+  editor.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  expect(active()).toBe(false);expect(State.cues[0].text).toBe('組字完成');expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.cues[0].text).toBe(original);block?.remove();
+});
+
+it('時碼組字的 Enter 不提早改字幕時間，一般 Enter 才提交',async()=>{
+  Subtitles.renderSubList();
+  document.querySelector('.sub-row[data-id="target"] .tin').dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));
+  await Promise.resolve();const input=document.querySelector('.tc-edit');expect(input).toBeTruthy();
+  input.value='12';
+  const event=new KeyboardEvent('keydown',{key:'Enter',isComposing:true,bubbles:true,cancelable:true});
+  input.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);expect(input.isConnected).toBe(true);
+  expect(State.cues[0].start).toBe(10);expect(History.stack).toHaveLength(1);
+  input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  expect(input.isConnected).toBe(false);expect(State.cues[0].start).toBe(12/25);expect(History.stack).toHaveLength(2);
+});
+
+it('背景辨識提交保留列表文字草稿與選取，文字稍後確認成為獨立 Undo', async () => {
+  const cue = State.cues[0], original = cue.text;
+  Subtitles.renderSubList();
+  const editor = document.querySelector('.sub-row[data-id="target"] .txt');
+  editor.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+  await Promise.resolve();
+  editor.innerText = '正在輸入的草稿';
+  editor.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(cue.text).toBe('正在輸入的草稿');
+  deletionRenderBridge = true;
+  try {
+    insertAsrSubtitles([{ clip: { offset: 30, in: 0, out: 3 }, segments: [{ start: 0, end: 1, text: '辨識結果' }] }]);
+    expect(State.listTrack).toBe(0); expect(State.selectedId).toBe('target');
+    expect(document.querySelector('.sub-row[data-id="target"] .txt')).toBe(editor);
+    expect(editor.contentEditable).toBe('true'); expect(editor.innerText).toBe('正在輸入的草稿');
+    expect(document.activeElement).toBe(editor);
+    expect(History.stack).toHaveLength(2);
+    expect(History.stack[1].snap.cues.find(item => item.id === 'target').text).toBe(original);
+    editor.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    expect(State.cues.find(item => item.id === 'target').text).toBe('正在輸入的草稿');
+    expect(History.stack).toHaveLength(3);
+    History.undo();
+    expect(State.cues.find(item => item.id === 'target').text).toBe(original);
+    expect(State.cues.some(item => item.text === '辨識結果')).toBe(true);
+    History.undo(); expect(State.cues.some(item => item.text === '辨識結果')).toBe(false);
+    History.redo(); History.redo();
+    expect(State.cues.find(item => item.id === 'target').text).toBe('正在輸入的草稿');
+  } finally { deletionRenderBridge = false; }
+});
+
+it('沒有有效文字 editor 時背景辨識仍揭露新字幕軌並選取辨識結果', () => {
+  insertAsrSubtitles([{ clip: { offset: 30, in: 0, out: 3 }, segments: [{ start: 0, end: 1, text: '正常辨識結果' }] }]);
+  const result = State.cues.find(cue => cue.text === '正常辨識結果');
+  expect(State.listTrack).toBe(result.track); expect(State.selectedId).toBe(result.id);
+});
+
+it.each(['取消', '確認'])('字幕文字視窗開啟時背景辨識保留操作目標，%s後下一次辨識可正常揭露', async action => {
+  await StylePanelController.openCueEditModal(State.cues[0]); await vi.advanceTimersByTimeAsync(30);
+  const input = document.getElementById('cueEditTa'); input.innerText = '視窗草稿';
+  insertAsrSubtitles([{ clip: { offset: 30, in: 0, out: 3 }, segments: [{ start: 0, end: 1, text: '第一筆背景結果' }] }]);
+  expect(State.listTrack).toBe(0); expect(State.selectedId).toBe('target');
+  expect(document.getElementById('cueEditTa')).toBe(input); expect(input.innerText).toBe('視窗草稿');
+  [...document.querySelectorAll('#modalFoot button')].find(button => button.textContent === action).click();
+  insertAsrSubtitles([{ clip: { offset: 40, in: 0, out: 3 }, segments: [{ start: 0, end: 1, text: '第二筆背景結果' }] }]);
+  const result = State.cues.find(cue => cue.text === '第二筆背景結果');
+  expect(State.listTrack).toBe(result.track); expect(State.selectedId).toBe(result.id);
+});
+
+it('時間軸 inline 文字衝突關閉後釋放 editor，後續辨識可揭露結果', async () => {
+  const block = document.createElement('div'); document.getElementById('tlLayer').appendChild(block);
+  await StylePanelController.startInlineEdit(block, State.cues[0]);
+  const input = document.querySelector('.cue-inline-edit'); input.value = 'inline 草稿';
+  SubtitleModel.editCue({ cueId: 'target', operation: 'text', value: '較新的提交' });
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  expect(document.querySelector('.cue-inline-edit')).toBe(null);
+  expect(State.cues[0].text).toBe('較新的提交');
+  insertAsrSubtitles([{ clip: { offset: 30, in: 0, out: 3 }, segments: [{ start: 0, end: 1, text: '後續背景結果' }] }]);
+  const result = State.cues.find(cue => cue.text === '後續背景結果');
+  expect(State.listTrack).toBe(result.track); expect(State.selectedId).toBe(result.id);
+  block.remove();
+});
+
 it.each(['forward', 'backward', 'none'])('刪除字幕只選可編輯的 %s 相鄰句，並可一次 Undo/Redo', direction => {
   State.tracks = [
     { name: 'free', visible: true, locked: false },
@@ -326,4 +432,47 @@ it('巨型外來 metadata 不阻止標準 Dialogue fallback', () => {
   const parsed = SubFormats.parseASS(external);
   expect(parsed.subtool).toBeUndefined(); expect(parsed.length).toBeGreaterThan(0);
   expect(buildSubtitleImportPlan(parsed, { fps: 25, target: 'new' }).usedMetadata).toBe(false);
+});
+
+it.each([
+  { previousLength: 4, incomingSourceLength: 0.04, speed: 1, overlap: 0.04 },
+  { previousLength: 0.04, incomingSourceLength: 4, speed: 1, overlap: 0.04 },
+  { previousLength: 4, incomingSourceLength: 0.08, speed: 2, overlap: 0.04 },
+  { previousLength: 4, incomingSourceLength: 4, speed: 1, overlap: 1 },
+])('真溶接視窗以兩片段時間軸長度限制重疊並保持 Undo/Redo：%j', async spec => {
+  const { showCrossfade } = await import('../src/menus.js');
+  const { Media } = await import('../src/media.js');
+  const seek = vi.spyOn(Media, 'seek').mockResolvedValue(true);
+  const restore = vi.spyOn(Media, 'restoreSequenceEditState').mockResolvedValue([]);
+  const previous = { id: 'xf-previous', name: '前段', path: 'C:/previous.mp4', offset: 0,
+    in: 0, out: spec.previousLength, dur: 4, vtrack: 0 };
+  const incoming = { id: 'xf-incoming', name: '後段', path: 'C:/incoming.mp4', offset: spec.previousLength,
+    in: 0, out: spec.incomingSourceLength, dur: 4, vtrack: 0, speed: spec.speed };
+  State.clips = [previous, incoming]; History.reset();
+  try {
+    showCrossfade(incoming);
+    const limit = Math.min(spec.previousLength, spec.incomingSourceLength / spec.speed);
+    expect(Number(document.getElementById('xfT').max)).toBeCloseTo(limit, 9);
+    document.querySelector('#modalFoot button.primary').click();
+    expect(incoming.offset).toBeCloseTo(spec.previousLength - spec.overlap, 9);
+    expect(incoming.fadeIn).toBeCloseTo(spec.overlap, 9);
+    expect(incoming.offset + spec.incomingSourceLength / spec.speed).toBeGreaterThanOrEqual(spec.previousLength);
+    expect(incoming.vtrack).toBe(1); expect(History.stack).toHaveLength(2);
+    History.undo();
+    expect(State.clips.find(clip => clip.id === incoming.id)).toMatchObject({ offset: spec.previousLength, vtrack: 0, fadeIn: 0 });
+    History.redo();
+    const replay = State.clips.find(clip => clip.id === incoming.id);
+    expect(replay.offset).toBeCloseTo(spec.previousLength - spec.overlap, 9);
+    expect(replay.fadeIn).toBeCloseTo(spec.overlap, 9); expect(replay.vtrack).toBe(1);
+  } finally { seek.mockRestore(); restore.mockRestore(); }
+});
+
+it.each([0, -0.04, NaN, Infinity])('溶接模型拒絕無效時長 %s，不移軌、不改片段與 History', async duration => {
+  const { crossfadeWithPrev } = await import('../src/clip-model.js');
+  const previous = { id: 'xf-previous', name: '前段', offset: 0, in: 0, out: 4, dur: 4, vtrack: 0 };
+  const incoming = { id: 'xf-incoming', name: '後段', offset: 4, in: 0, out: 4, dur: 4, vtrack: 0 };
+  State.clips = [previous, incoming]; History.reset();
+  const before = structuredClone(State.clips), tracks = structuredClone(State.videoTracks);
+  expect(crossfadeWithPrev(incoming, duration)).toBe(false);
+  expect(State.clips).toEqual(before); expect(State.videoTracks).toEqual(tracks); expect(History.stack).toHaveLength(1);
 });

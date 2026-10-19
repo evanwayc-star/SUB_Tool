@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const adapters=vi.hoisted(()=>({
-  Media:{mpvMode:true,displayTime:vi.fn(),inGap:vi.fn(),mpvPresenting:vi.fn(),previewFadeDarkness:vi.fn(),previewComposition:vi.fn(),captureMediaOwnership:vi.fn(()=>()=>true)},
+  Media:{mpvMode:true,displayTime:vi.fn(),inGap:vi.fn(),mpvPresenting:vi.fn(),previewFadeDarkness:vi.fn(),previewComposition:vi.fn(),captureMediaOwnership:vi.fn(()=>()=>true),withPresentedFrame:vi.fn()},
   player:{screenshot:vi.fn(),setImageGuide:vi.fn()},
 }));
 vi.mock('../src/media.js',()=>({Media:adapters.Media,Wave:{sources:[]}}));
@@ -88,6 +88,7 @@ beforeAll(async()=>{
 beforeEach(()=>{
   vi.clearAllMocks();
   adapters.Media.captureMediaOwnership.mockReturnValue(()=>true);
+  adapters.Media.withPresentedFrame.mockImplementation(async (time, capture) => capture({ adapter: adapters.player, isCurrent: () => true }));
   Object.assign(State,{videoWidth:8,videoHeight:4,fps:25,dropFrame:false,clips:[],videoTracks:[{visible:true}],soloVideoTrack:-1});
   adapters.Media.displayTime.mockReturnValue(1);
   adapters.Media.inGap.mockReturnValue(false);
@@ -264,6 +265,36 @@ describe('capturePreviewFrame uses the visible presenter and frozen timeline ima
     else adapters.player.screenshot.mockResolvedValue({ok:false});
     const readBase64=vi.fn().mockResolvedValue('old-image');
     await expect(capturePreviewFrame({nativePath:'temp.jpg',readBase64})).rejects.toThrow();
+    expect(readBase64).not.toHaveBeenCalled();
+  });
+
+  it('captures native pixels only inside the held, confirmed timeline frame',async()=>{
+    adapters.Media.mpvPresenting.mockReturnValue(true);
+    const ready=deferred();
+    adapters.Media.withPresentedFrame.mockImplementation(async (time,capture)=>{
+      await ready.promise;
+      return capture({adapter:adapters.player,isCurrent:()=>true});
+    });
+    const readBase64=vi.fn().mockResolvedValue('native-red');
+    const pending=capturePreviewFrame({nativePath:'temp.jpg',readBase64});
+    expect(adapters.Media.withPresentedFrame).toHaveBeenCalledWith(1,expect.any(Function));
+    expect(adapters.player.screenshot).not.toHaveBeenCalled();
+    ready.resolve();
+    const snapshot=await pending;
+    expect(snapshot.time).toBe(1);
+    expect(pixel(snapshot,0,0)).toEqual([255,0,0]);
+  });
+
+  it('rejects native pixels after a newer seek or source owns the pending capture',async()=>{
+    adapters.Media.mpvPresenting.mockReturnValue(true);
+    const acknowledgement=deferred();
+    adapters.player.screenshot.mockReturnValue(acknowledgement.promise);
+    let owned=true;
+    adapters.Media.withPresentedFrame.mockImplementation((time,capture)=>capture({adapter:adapters.player,isCurrent:()=>owned}));
+    const readBase64=vi.fn().mockResolvedValue('native-red');
+    const pending=capturePreviewFrame({nativePath:'temp.jpg',readBase64});
+    owned=false;acknowledgement.resolve({ok:true});
+    await expect(pending).rejects.toMatchObject({name:'AbortError'});
     expect(readBase64).not.toHaveBeenCalled();
   });
 

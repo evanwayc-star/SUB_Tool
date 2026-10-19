@@ -59,12 +59,13 @@ export class SubtitlePreviewIndex {
     return overlapping(this._frames,frame,false).map(record=>record.cue);
   }
 
-  activeAtTime(cues,exactFps,time,preferredIndex=-1){
+  activeAtTime(cues,exactFps,time,preferredIndex=-1,track=null){
     this._ensure(cues,exactFps);
+    const matchesTrack = cue => track == null || (cue.track || 0) === track;
     const preferred=cues[preferredIndex];
-    if(preferred&&preferred.timed!==false&&time>=preferred.start&&time<=preferred.end)
+    if(preferred&&matchesTrack(preferred)&&preferred.timed!==false&&time>=preferred.start&&time<=preferred.end)
       return {cue:preferred,index:preferredIndex};
-    const first=overlapping(this._times,time,true)[0];
+    const first=overlapping(this._times,time,true).find(record=>matchesTrack(record.cue));
     return first ? {cue:first.cue,index:first.index} : null;
   }
 }

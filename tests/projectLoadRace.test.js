@@ -93,6 +93,57 @@ function request(label, mediaPath, playhead = null) {
 }
 
 describe('project load transactions', () => {
+  it.each(['primary','placements','images','audio'])('%s 首次復原等待期間的已提交編輯保留 Undo／Redo 與 dirty',async stage=>{
+    const hold=deferred(),started=deferred();desk.stat.mockResolvedValue({exists:true});
+    const data=projectData('Initial','C:/media/Initial.mov',3);
+    if(stage==='images'){
+      data.media={};data.clips=[{type:'image',path:'C:/still.png',dur:10,in:0,out:10,offset:0,vtrack:0}];
+    }
+    const method={primary:'loadDesktopMedia',placements:'waitForPendingProjectRestore',images:'restorePendingImageClips',audio:'restoreExternalAudioSource'}[stage];
+    const source={audioSourceId:'voice',path:'C:/voice.wav',duration:10,in:2,out:8,offset:3};
+    if(stage==='audio') data.externalAudioSources=[source];
+    mediaMock[method].mockImplementation(async()=>{
+      started.resolve();await hold.promise;
+      if(stage==='audio'){mediaMock.externalAudio.list.mockReturnValue([source]);return source;}
+    });
+    const loading=Project.loadDesktop({path:'C:/initial.subtool',b64:projectB64(data)});
+    await started.promise;
+    State.cues[0].text='載入期間已確認的編輯';History.record('載入期間編輯');
+    expect(isProjectDirty()).toBe(true);
+    hold.resolve();await loading;
+    expect(State.cues[0].text).toBe('載入期間已確認的編輯');
+    expect(History.stack.map(entry=>entry.label)).toContain('載入期間編輯');expect(isProjectDirty()).toBe(true);
+    History.undo();expect(State.cues[0].text).toBe('Initial');expect(isProjectDirty()).toBe(false);
+    History.redo();expect(State.cues[0].text).toBe('載入期間已確認的編輯');expect(isProjectDirty()).toBe(true);
+  });
+
+  it('復原期間儲存相同文件後，晚到的來源正規化仍以實際 bytes 判斷 dirty',async()=>{
+    const hold=deferred();desk.stat.mockResolvedValue({exists:true});
+    mediaMock.loadDesktopMedia.mockReturnValue(hold.promise);desk.writeProject=vi.fn(async()=> 'C:/initial.subtool');
+    const data=projectData('Initial','C:/media/Initial.mov');data.clips[0].audioSourceId='restored-source';
+    const loading=Project.loadDesktop({path:'C:/initial.subtool',b64:projectB64(data)});
+    await vi.waitFor(()=>expect(mediaMock.loadDesktopMedia).toHaveBeenCalled());
+    await Project.save();expect(isProjectDirty()).toBe(false);
+    const saved=JSON.parse(Buffer.from(desk.writeProject.mock.calls[0][1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.audioProject.buses).toEqual([]);
+    const {ensureAudioSourceMap}=await import('../src/state.js');
+    ensureAudioSourceMap('restored-source',2);
+    hold.resolve();await loading;
+    expect(State.audioProject.buses).toHaveLength(2);expect(isProjectDirty()).toBe(true);
+  });
+
+  it('首次復原期間正式儲存的 bytes 基準不會被 completion 覆寫',async()=>{
+    const hold=deferred();desk.stat.mockResolvedValue({exists:true});
+    mediaMock.loadDesktopMedia.mockReturnValue(hold.promise);
+    desk.writeProject=vi.fn(async()=> 'C:/initial.subtool');
+    const loading=Project.loadDesktop(request('Initial','C:/media/Initial.mov'));
+    await vi.waitFor(()=>expect(mediaMock.loadDesktopMedia).toHaveBeenCalled());
+    State.cues[0].text='等待期間已存檔';History.record('期間編輯');
+    await Project.save();expect(isProjectDirty()).toBe(false);
+    hold.resolve();await loading;expect(isProjectDirty()).toBe(false);
+    History.undo();expect(State.cues[0].text).toBe('Initial');expect(isProjectDirty()).toBe(true);
+  });
+
   it.each(['apply','load','loadDesktop','open'])('毀損陣列成員在公有 %s 入口拒絕，既有工作區與 restore owner 不變',async entry=>{
     Object.assign(State,{tracks:[{name:'目前軌',visible:true}],trackCount:1,cues:[{id:'current',start:1,end:2,text:'目前字幕',track:0}],
       notes:[{id:'note',time:2,text:'目前備註'}],mediaName:'current.mov',mediaPath:'C:/current.mov',presetEdit:{targetId:'current'}});
@@ -222,13 +273,16 @@ describe('project load transactions', () => {
     mediaMock.loadDesktopMedia.mockReset();
     mediaMock.removeExternalAudio.mockReset();
     mediaMock.restoreExternalAudioSource.mockReset();
+    mediaMock.externalAudio.list.mockReset().mockReturnValue([]);
     mediaMock.externalAudioSources.length = 0;
+    mediaMock.restorePendingImageClips.mockReset().mockResolvedValue({restored:0,pending:0});
     mediaMock.waitForPendingProjectRestore.mockReset();
     mediaMock.waitForPendingProjectRestore.mockResolvedValue();
     mediaMock.seek.mockClear();
     uiMock.openModal.mockClear();
     uiMock.closeModal.mockClear();
     uiMock.setStatus.mockClear();
+    Project.establishCleanBaseline();
   });
 
   it.each([1,3])('v%s 專案載入先吸附保存的字幕秒數，再建立 History 與存檔基準',async version=>{
@@ -563,7 +617,8 @@ describe('project load transactions', () => {
     expect(State.cues.map(cue => cue.text)).toEqual(['B']);
     expect(mediaMock.seek).toHaveBeenCalledTimes(1);
     expect(mediaMock.seek).toHaveBeenCalledWith(22);
-    expect(resetHistory).toHaveBeenCalledTimes(1);
+    // A 顯示文件時已建立基準；B 准入後建立自己的基準，只有 B 完成播放點復原。
+    expect(resetHistory).toHaveBeenCalledTimes(2);
   });
 
   it('invalidates a missing-media modal callback after another project wins', async () => {

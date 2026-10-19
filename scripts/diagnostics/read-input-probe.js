@@ -54,7 +54,7 @@ const inPage = js => `(async () => {
   console.log('  時間      事件           延遲       可見性     目標');
   console.log('  --------  -------------  ---------  ---------  ----');
   for (const r of list) {
-    const mark = r.延遲ms > 1000 ? '   ← 這一段就是使用者等的時間' : '';
+    const mark = r.延遲ms > 1000 ? '   ← 到 handler 前等待超過 1 秒' : '';
     console.log(`  ${new Date(r.at).toTimeString().slice(0, 8)}  ${String(r.kind).padEnd(13)}` +
       `  ${String(r.延遲ms).padStart(6)} ms  ${String(r.vis).padEnd(9)}  ${r.act}${mark}`);
   }
@@ -62,12 +62,12 @@ const inPage = js => `(async () => {
   const worst = list.reduce((a, b) => (b.延遲ms > a.延遲ms ? b : a));
   console.log(`\n最長的一筆：${worst.延遲ms} ms（${worst.kind} → ${worst.act}）`);
   console.log(worst.延遲ms > 1000
-    ? '→ 事件本身就晚到了。延誤發生在【事件送到 renderer 之前】，不是頁面裡的 JS。'
-    : '→ 每一次輸入都是即時處理的。那一分鐘不在這一段。');
+    ? '→ 到 handler 執行前的總等待超過 1 秒；可能包含 renderer JavaScript 排隊，不能單靠這個數字判定原因。請搭配 long-task／trace 記錄定位。'
+    : '→ 本次保留樣本未出現超過 1000 ms 的等待；未記錄的時段與 handler 之後的工作仍需另查。');
 
   /* 主行程側的對話框計時：把每一次點擊與它之後的 showOpenDialog 配對起來。
-     我們這一側已經確定不到 5 毫秒，所以 enter→resolved 幾乎就是
-     「Windows 畫出視窗」＋「使用者操作」。 */
+     enter→resolved 是呼叫到回傳的總耗時，包含原生對話框、使用者操作與排程；
+     這些欄位沒有記錄視窗首次顯示的時刻，不能據此細分。 */
   const dlg = JSON.parse(await main.evaluate('JSON.stringify(globalThis.__dlgLog || [])'));
   if (!dlg.length) {
     console.log('\n（主行程的對話框探針沒有記錄——這一輪沒開過檔案對話框，'
@@ -84,8 +84,8 @@ const inPage = js => `(async () => {
       console.log(`  ${new Date(en.t).toTimeString().slice(0, 8)}  ${(clickBefore?.act || '?').padEnd(13)}` +
         `  ${String(a == null ? '?' : a + ' ms').padStart(10)}  ${String(b == null ? '（還開著）' : b + ' ms').padStart(9)}`);
     }
-    console.log('\n  「呼叫→關閉」含 Windows 畫出視窗＋你的操作。');
-    console.log('  一看到視窗就按取消的話，這個數字就近似於【視窗出現所花的時間】。');
+    console.log('\n  「呼叫→關閉」是呼叫到回傳的總耗時，包含原生對話框、使用者操作與排程。');
+    console.log('  沒有視窗首次顯示的時間戳，不能單靠這個數字判定視窗出現花了多久。');
   }
 
   main.close();

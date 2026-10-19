@@ -165,6 +165,7 @@ contextBridge.exposeInMainWorld('subtool', {
     seek:      (t, options) => ipcRenderer.invoke('mpv:seek', t, options?.exact === true ? { exact: true } : undefined),
     present:   (t, options) => ipcRenderer.invoke('mpv:present', t, {
       exact: options?.exact === true,
+      waitForFrame: options?.waitForFrame === true,
       tolerance: Number.isFinite(Number(options?.tolerance)) ? Number(options.tolerance) : undefined,
       frameTarget: Number.isFinite(Number(options?.frameTarget)) ? Number(options.frameTarget) : undefined,
       frameStart: options?.frameStart!=null&&Number.isFinite(Number(options.frameStart)) ? Number(options.frameStart) : undefined,

@@ -106,6 +106,8 @@ export function buildSubtitleImportPlan(parsed, { fps, target = 'new' } = {}) {
 
 export class ProjectRestorePlan {
   #clips;
+  #materializedClips = new Map();
+  #handedOffClips = new Set();
   #externalAudioSources;
   #playhead;
   #mediaRelink;
@@ -122,7 +124,28 @@ export class ProjectRestorePlan {
   owns() { return this.#owns(); }
 
   pendingClips() { return this.#clips; }
-  replaceClips(clips) { this.#clips = Array.isArray(clips) ? clips : []; }
+  replaceClips(clips) {
+    this.#clips = Array.isArray(clips) ? clips : [];
+    const pending=new Set(this.#clips);
+    for(const clip of this.#materializedClips.keys()) if(!pending.has(clip)){
+      this.#materializedClips.delete(clip);this.#handedOffClips.delete(clip);
+    }
+  }
+  // 原交易仍保留原文供 rollback；存檔不能再把已交給 runtime 的 placement 算一次。
+  // 以原 record 身分交接，不能依 path 去重，因同一檔可有多個合法剪接片段。
+  materializeClip(saved, clip) {
+    if(this.#clips.includes(saved)&&clip?.id){
+      this.#materializedClips.set(saved,clip.id);this.#handedOffClips.add(saved);
+    }
+  }
+  forgetMaterializedClip(clip) {
+    for(const [saved,id] of this.#materializedClips) if(id===clip?.id) this.#handedOffClips.delete(saved);
+  }
+  pendingClipsForSave(representedClips=[]) {
+    // rollback 讓原文再次可存；Undo 快照若已還原該實體，仍須沿交接身分去重。
+    const represented=new Set(representedClips.map(clip=>clip?.id).filter(Boolean));
+    return this.#clips.filter(clip=>!this.#handedOffClips.has(clip)&&!represented.has(this.#materializedClips.get(clip)));
+  }
 
   pendingExternalAudioSources() { return this.#externalAudioSources; }
   replaceExternalAudioSources(sources) {
