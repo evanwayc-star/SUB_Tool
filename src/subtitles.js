@@ -19,6 +19,7 @@ import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal, setStatus } from './ui.js';
 import { recordHistory } from './history.js';
+import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx, styleMatchesPreset } from './substyle.js';
 import {
   planCueStyleAssignment,
@@ -36,7 +37,7 @@ import {
   snapAllCuesToFrames, swapAdjacentCues, mergeAdjacentCues, detectOverlaps, sweepContainedCues,
   addCue as _addCue, addCueRelative as _addCueRelative, deleteSelectedCues, deleteCue, clearSelectedCuesTime, 
   shiftTextsDown, shiftTextsUp, sortCues, copyCues, pasteCues as _pasteCues, trimTrackSpaces,
-  trackLocked, cueTrackLocked, cuesTrackLocked, editCue, captureCueDeletion, captureCueTextSwap, beginCueEdit, finalizeCueTimeEdit, finalizeProvisionalCueEnds
+  trackLocked, cueTrackLocked, cuesTrackLocked, editCue, planCueTimeEdit, planContainedCueRemovals, captureCueDeletion, captureCueTextSwap, beginCueEdit, finalizeCueTimeEdit, finalizeProvisionalCueEnds
 } from './subtitle-model.js';
 
 // Search imports
@@ -566,6 +567,14 @@ function selectCue(id,opts){
 
 function selectCueSingle(id,seek){ selectCue(id,{seek}); }
 
+function requestTimeEdit(cue,operation,value){
+  const plan=planCueTimeEdit(cue,operation,value);
+  if(!plan.ok) return plan;
+  return requestSubtitleRemoval({targets:plan.changed?planContainedCueRemovals([plan.next]):[],
+    title:'調整時間會覆蓋字幕',detail:'這次時間調整會完整覆蓋並移除其他字幕。',confirmLabel:'確認調整',
+    commit:()=>editCue({cueId:cue.id,operation,value})});
+}
+
 function commitCueTimeEdit(c, edge){
   const tk=c.track||0;
   const order=()=>State.cues.filter(x=>(x.track||0)===tk).map(x=>x.id).join(',');
@@ -776,11 +785,11 @@ sublist?.addEventListener?.('dblclick', async e => {
     if(!row.isConnected || State.cues.find(item=>item.id===c.id)!==c || State.tracks[c.track||0]!==track || cueTrackLocked(c,'編輯字幕時間')) return;
     if (tin) {
       openInlineTimeEdit(tin, c.start || 0, t => {
-        if(State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===track) editCue({ cueId: c.id, operation: 'start', value: t });
+        if(State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===track) requestTimeEdit(c,'start',t);
       });
     } else {
       openInlineTimeEdit(tout, c.end || 0, t => {
-        if(State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===track) editCue({ cueId: c.id, operation: 'end', value: t });
+        if(State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===track) requestTimeEdit(c,'end',t);
       });
     }
     return;
@@ -918,15 +927,8 @@ function deleteSelectedWithPrompt() {
   const onLocked = State.cues.find(c => ids.includes(c.id) && State.tracks[c.track||0]?.locked);
   if (onLocked && cueTrackLocked(onLocked, '刪除字幕')) return;
 
-  if (ids.length > 1) {
-    const commit=captureCueDeletion(ids);
-    const session=openModal(`刪除 ${ids.length} 條字幕`,
-      `<p>確定要刪除選取的 <b>${ids.length}</b> 條字幕嗎？</p>`,
-      [{label:'取消', act:()=>session.close()},
-       {label:'確定刪除', primary:true, act:()=>{ if(session.isCurrent() && commit()) session.close({committed:true}); }}]);
-    return;
-  }
-  deleteSelectedCues(ids);
+  const targets=ids.map(id=>State.cues.find(cue=>cue.id===id)).filter(Boolean);
+  return requestSubtitleRemoval({targets,title:`刪除 ${targets.length} 條字幕`,targetOnly:true,commit:captureCueDeletion(ids)});
 }
 
 function applyCueStylePatch(cue, desiredStyle, preserveKeys = []) {

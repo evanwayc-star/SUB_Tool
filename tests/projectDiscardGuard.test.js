@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ui = vi.hoisted(() => ({
-  openModal: vi.fn(),
+  openModal: vi.fn(() => ({ isCurrent: () => true, close: (...args) => ui.closeModal(...args) })),
   closeModal: vi.fn(),
   showToast: vi.fn(),
   setStatus: vi.fn(),

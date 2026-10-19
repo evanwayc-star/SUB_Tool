@@ -34,6 +34,7 @@ import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from '
 import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
 import { sourceChannelLabels, AudioPipeline } from './audio-routing-engine.js';
 import { getExactFps } from './time.js';
+import { MediaIntakeJobs } from './media-intake-jobs.js';
 import { maxKnownSourceDuration, probeAudioChannelDescriptors, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 import { sourcePresentationMetadata } from './decode/source-frame-index.js';
 import { autoBuildPreviewProxy, isLargeCanopusAvi } from './preview-proxy-policy.js';
@@ -198,7 +199,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       };
       ctx._ingestDoneHandler=handler;
       window.addEventListener('desk:ingest-done',handler);
-      try{ res=await DESK.streamIngest({ path:p, duration:dur, audio }); }
+      try{ res=await MediaIntakeJobs.streamIngest({ path:p, duration:dur, audio }); }
       catch(e){ stopListening(); if(!owns()) return; console.error(e); showToast('讀取失敗：'+e.message); setStatus('讀取失敗',''); return; }
       if(!owns()){
         stopListening();
@@ -310,7 +311,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     // (B2) 原生多音軌 或 無 streamIngest 時的原有路徑
     setStatus(canNative?'正在分析音訊與抽取多聲道…':'正在轉檔 Proxy 與分析音訊（大檔需數分鐘）…','busy');
     let res;
-    try{ res=await DESK.ingest({ path:p, duration:dur, needsProxy:!canNative, audio }); }
+    try{ res=await MediaIntakeJobs.ingest({ path:p, duration:dur, needsProxy:!canNative, audio }); }
     catch(e){ if(!owns()) return; console.error(e); showToast('讀取/轉檔失敗：'+e.message); setStatus('讀取/轉檔失敗',''); return; }
     if(!owns()) return;
     if(res.cached) setStatus('使用既有快取，秒開…','ok');
@@ -477,9 +478,11 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
 
     emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
 
-    // 只在本次 intake 仍有效時轉交 mpv 事件；來源時間與播放狀態由 Media 處理。
+    // 已提交的 transport 與背景 intake 分別持有資格。取消 Proxy 可撤銷
+    // metadata／聲道準備，但母素材繼續播放時仍須接收 mpv 的實際時鐘。
+    const ownsTransport=ctx.captureMediaOwnership();
     adapter.onEvent(e=>{
-      if(!owns()) return;
+      if(!ownsTransport()||getPlayerAdapter()!==adapter||!ctx.mpvMode||!ctx._sourceStillReferenced(primary)) return;
       ctx.observeMpvEvent(e);
     });
 

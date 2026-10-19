@@ -32,13 +32,14 @@ import { State, trackVisible, newTrack, syncTrackCount, isSel, cueSuffix, newVid
 import { clamp, pad, escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { Media, Wave } from './media.js';
 import { selectCue, refreshSelectionUI, renderSubRow } from './subtitles.js';
-import { sortCues, sweepContainedCues, trackLocked, cueTrackLocked, moveCuesToTrack } from './subtitle-model.js';
+import { sortCues, sweepContainedCues, planContainedCueRemovals, trackLocked, cueTrackLocked, moveCuesToTrack } from './subtitle-model.js';
 import { encoreParts, snapTimeToFrame, fmtClock, secToSRT, secToASS, secToEncore, getExactFps } from './time.js';
 import { emit } from './events.js';
 import { isProjectGuardDone, ensureProjectSaved, Project } from './project.js';
 import { showToast, openModal, closeModal } from './ui.js';
 import { jklReset, nudge } from './keyboard.js';
 import { History, recordHistory } from './history.js';
+import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 import { refreshMpvSubs } from './video-renderer.js';
 import { subtitlePreviewIndex } from './subtitle-preview-index.js';
 import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
@@ -1699,10 +1700,42 @@ window.addEventListener('mousemove',e=>{
   }
 });
 
+function confirmSubtitleDragRemoval(pending){
+  if(pending.gesture.kind!=='cue'||!pending.gesture.hasMoved()) return false;
+  const added=new Set(pending.isCopyDrag?pending.grp.map(item=>item.c):[]);
+  const removed=planContainedCueRemovals(pending.grp.map(item=>item.c)).filter(cue=>!added.has(cue));
+  if(!removed.length) return false;
+  const fields=['start','end','track','style'];
+  const patches=pending.grp.map(({c})=>({cue:c,values:new Map(fields.map(field=>[field,
+    {present:Object.hasOwn(c,field),value:structuredClone(c[field])}]))}));
+  const selection={ids:[...State.selectedIds],primary:State.selectedId,activeEdge:State.activeEdge};
+  const label=pending.isCopyDrag?'複製字幕':pending.mode==='move'
+    ?(pending.grp.length>1?`移動字幕 (${pending.grp.length}句)`:'移動字幕'+cueSuffix(pending.c))
+    :'調整字幕時間'+cueSuffix(pending.c);
+  // The completed pointer preview is a proposal. Restore it before showing the
+  // count, so cancellation and background History see the original document.
+  drag=null;
+  pending.gesture.cancel(pending);
+  requestSubtitleRemoval({targets:removed,title:'拖曳會覆蓋字幕',
+    detail:'這次拖曳會完整覆蓋並移除其他字幕。',confirmLabel:'確認套用',commit:()=>{
+      for(const {cue,values} of patches){
+        for(const [field,{present,value}] of values){
+          if(present) cue[field]=structuredClone(value);else delete cue[field];
+        }
+        if(added.has(cue)) State.cues.push(cue);
+      }
+      setSelection({kind:'sub',ids:selection.ids,primary:selection.primary});State.activeEdge=selection.activeEdge;
+      sweepContainedCues(patches.map(patch=>patch.cue));
+      sortCues();emit('render:all');recordHistory(label);
+    }});
+  return true;
+}
+
 window.addEventListener('mouseup',e=>{
   if(!drag)return;
   const pending=drag;
   try{
+  if(confirmSubtitleDragRemoval(pending)) return;
   pending.gesture.commit(()=>{
   updateSnapGuide(null);
   stopTimelineAutoScroll();
@@ -1835,10 +1868,8 @@ export function removeTrack(i,expectedTrack=State.tracks[i]){
     return true;
   };
   if(n>0){
-    const session=openModal(`刪除軌道「${escapeHTML(State.tracks[i].name)}」`,
-      `<p>此軌道有 <b>${n}</b> 條字幕，刪除後一併移除。確定繼續？</p>`,
-      [{label:'取消',act:()=>session.close()},
-       {label:'確定刪除',primary:true,act:()=>{ if(session.isCurrent() && doRemove()) session.close({committed:true}); }}]);
+    requestSubtitleRemoval({targets,title:`刪除軌道「${State.tracks[i].name}」`,
+      detail:'刪除這條軌道時會一併移除其中的所有字幕。',commit:doRemove});
   } else { doRemove(); }
 }
 

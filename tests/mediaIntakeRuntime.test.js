@@ -82,6 +82,115 @@ afterEach(() => {
 });
 
 describe('native media intake runtime', () => {
+  it.each(['ingest', 'stream'])('%s 的 native progress、commit 與 cache hit 都帶原 session/request', async mode => {
+    const root = makeTempRoot();
+    const source = path.join(root, 'source.mov');
+    const cacheRoot = path.join(root, 'cache');
+    fs.writeFileSync(source, 'mother');
+    const progress = [];
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg-test', getUserDataDir: () => root,
+      send: (target, channel, payload) => progress.push(payload),
+      spawnDirect: (executable, args) => successfulProcess(() => writeIntakeOutputs(args)),
+    });
+    const runtime = createMediaIntakeRuntime({ cacheRoot, tempRoot: root, allowSidecarCache: false,
+      fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot] }), ffmpegExecution: execution,
+      sendProgress: (target, payload) => progress.push(payload), delay: async () => {},
+    });
+    const owner = { sender: {}, sessionId: 'project', requestId: 'first' };
+    const request = { src: source, duration: 2, needsProxy: true, audio: [] };
+    try {
+      const work = await runtime[mode](request, { owner, progressTarget: owner.sender });
+      await work.completion;
+      expect(progress.some(payload => !payload.done)).toBe(true);
+      expect(progress.at(-1)).toMatchObject({ done: true, outcome: 'success' });
+      expect(progress.every(payload => payload.sessionId === 'project' && payload.requestId === 'first')).toBe(true);
+      progress.length = 0;
+      const cached = await runtime[mode](request, { owner: { ...owner, requestId: 'cached' }, progressTarget: owner.sender });
+      expect(cached.cached).toBe(true);
+      expect(progress).toEqual([expect.objectContaining({ sessionId: 'project', requestId: 'cached', done: true, outcome: 'success' })]);
+    } finally { await runtime.close(); }
+  });
+
+  it('已交付 stream 取消時釋放舊 reader，等 writer close 才重試，同一母素材快取不可並行寫', async () => {
+    const root = makeTempRoot();
+    const source = path.join(root, 'source.mov');
+    const cacheRoot = path.join(root, 'cache');
+    fs.writeFileSync(source, 'mother bytes');
+    const children = [];
+    const events = [];
+    const execution = createFFmpegExecution({
+      getFFmpegPath: () => 'ffmpeg-test', getUserDataDir: () => root,
+      spawnDirect(executable, args) {
+        const child = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.kill = vi.fn();
+        const index = children.push(child);
+        events.push(`spawn:${index}`);
+        writeIntakeOutputs(args);
+        if (index > 1) queueMicrotask(() => child.emit('close', 0));
+        return child;
+      },
+    });
+    const runtime = createMediaIntakeRuntime({
+      tempRoot: root, cacheRoot, allowSidecarCache: false, ffmpegExecution: execution,
+      fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot] }), delay: async () => {},
+    });
+    const coordinator = createMediaIngestCoordinator();
+    const old = { sender: {}, sessionId: 'old-project', requestId: 'old-stream' };
+    const request = { src: source, duration: 10, needsProxy: true, audio: [] };
+    const session = (owner, lease) => ({ owner, progressTarget: owner.sender,
+      isCancelled: lease.isCancelled, ownProcess: lease.setProcess });
+    try {
+      const response = await coordinator.enqueue(lease => runtime.stream(request, session(old, lease)), old);
+      expect((await getRange(response.streamUrl, 'bytes=0-4')).status).toBe(206);
+      let cancelled = false;
+      const cancellation = coordinator.cancel({ sender: old.sender, sessionId: old.sessionId }).then(() => { cancelled = true; });
+      runtime.cancel({ sender: old.sender, sessionId: old.sessionId });
+      const next = { ...old, sessionId: 'new-project', requestId: 'retry' };
+      const retry = coordinator.enqueue(lease => runtime.ingest(request, session(next, lease)), next);
+      expect(children[0].kill).toHaveBeenCalledOnce();
+      expect((await getRange(response.streamUrl, 'bytes=0-4')).status).toBe(404);
+      expect(events).toEqual(['spawn:1']);
+      expect(cancelled).toBe(false);
+      events.push('close:1');
+      children[0].emit('close', 1);
+      await cancellation;
+      const repaired = await retry;
+      expect(events).toEqual(['spawn:1', 'close:1', 'spawn:2']);
+      expect(fs.existsSync(response.proxy)).toBe(false);
+      expect(fs.existsSync(repaired.proxy)).toBe(true);
+      expect(fs.readFileSync(source, 'utf8')).toBe('mother bytes');
+      expect(await runtime.ingest(request)).toMatchObject({ cached: true, proxy: repaired.proxy });
+    } finally {
+      for (const child of children) child.emit('close', 1);
+      await coordinator.cancelAllAndWait();
+      await runtime.close();
+    }
+  });
+
+  it('取消已完成快取的舊 reader 只撤銷原 session，不刪母素材、快取或另一視窗的 reader', async () => {
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), {
+      createStreamId: (() => { let id = 0; return prefix => prefix + ++id; })(),
+    });
+    const { runtime, source } = fixture;
+    const request = { src: source, duration: 1, needsProxy: true, audio: [{ channels: 1 }] };
+    try {
+      const complete = await runtime.ingest(request);
+      const files = [source, complete.proxy, complete.wave, complete.channels[0].file,
+        path.join(cacheDirectory(complete.proxy), 'meta.json')];
+      const before = files.map(file => fs.readFileSync(file));
+      const owner = { sender: {}, sessionId: 'old', requestId: 'reader' };
+      const old = await runtime.stream(request, { owner });
+      const other = await runtime.stream(request, { owner: { ...owner, sender: {} } });
+      expect(runtime.cancel({ ...owner, requestId: 'late-other-request' })).toBe(0);
+      expect(runtime.cancel(owner)).toBe(1);
+      expect((await getRange(old.streamUrl, 'bytes=0-4')).status).toBe(404);
+      expect((await getRange(other.streamUrl, 'bytes=0-4')).status).toBe(206);
+      expect(files.map(file => fs.readFileSync(file))).toEqual(before);
+      expect(await runtime.ingest(request)).toMatchObject({ cached: true, proxy: complete.proxy });
+    } finally { await runtime.close(); }
+  });
+
   it.each(['ingest', 'stream'].flatMap(mode => ['wave', 'channel', 'proxy'].map(missing => [mode, missing])))
   ('%s 只補缺少的 %s，重開與孤兒清理保留其他已完成檔案', async (mode, missing) => {
     const fixture = repairFixture(async args => writeIntakeOutputs(args));

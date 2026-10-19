@@ -15,7 +15,7 @@ const mediaMock = vi.hoisted(() => ({
 }));
 
 const uiMock = vi.hoisted(() => ({
-  openModal: vi.fn(),
+  openModal: vi.fn(() => ({ isCurrent: () => true, close: (...args) => uiMock.closeModal(...args) })),
   closeModal: vi.fn(),
   showToast: vi.fn(),
   setStatus: vi.fn(),
@@ -422,6 +422,10 @@ describe('project load transactions', () => {
     await loadingA;
     expect(State.cues.map(c=>c.text)).toEqual(['A']);
     readB.resolve(request('B','C:/media/B.mov'));
+    await vi.waitFor(()=>expect(uiMock.openModal).toHaveBeenCalled());
+    const confirmation=uiMock.openModal.mock.calls.at(-1);
+    expect(confirmation[1]).toContain('<b>1</b>');
+    confirmation[2].find(button=>button.label==='確認開啟').act();
     await openingB;
     expect(State.cues.map(c=>c.text)).toEqual(['B']);
   });

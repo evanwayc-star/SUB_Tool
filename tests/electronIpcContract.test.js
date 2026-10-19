@@ -2,11 +2,40 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import os from 'node:os';
+import { EventEmitter } from 'node:events';
+import { createRequire } from 'node:module';
 import { parse } from 'acorn';
 import { describe, expect, it, vi } from 'vitest';
 import { DELIVERY_FRAME_RATES, exactDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const { FileAuthority } = require('../electron/file-authority.js');
+const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
+const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('../electron/media-intake-runtime.js');
+
+function intakeBridge(runtime, coordinator, sender) {
+  const source = fs.readFileSync(path.join(ROOT, 'electron/main.js'), 'utf8');
+  const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
+  const channels = ['ffmpeg:ingest', 'ffmpeg:streamIngest', 'ffmpeg:cancelIntake', 'ffmpeg:releaseStream'];
+  const handlers = new Map();
+  const context = { mediaIntakeRuntime: runtime, mediaIngestCoordinator: coordinator,
+    requireReadablePath() {}, TypeError,
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } };
+  const selected = ast.body.filter(node => (node.type === 'FunctionDeclaration'
+    && ['mediaIntakeOwner', 'mediaIntakeSession'].includes(node.id?.name))
+    || (node.type === 'ExpressionStatement' && node.expression?.callee?.object?.name === 'ipcMain'
+      && node.expression.callee.property?.name === 'handle' && channels.includes(node.expression.arguments[0]?.value)));
+  vm.runInNewContext(selected.map(node => source.slice(node.start, node.end)).join('\n'), context);
+  let api;
+  vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'electron/preload.js'), 'utf8'), {
+    require: () => ({ contextBridge: { exposeInMainWorld: (name, exposed) => { if (name === 'subtool') api = exposed; } },
+      ipcRenderer: { invoke: (channel, ...args) => Promise.resolve().then(() => handlers.get(channel)({ sender }, ...args)), on() {}, send() {} }, webUtils: {} }),
+    ArrayBuffer, Uint8Array, Promise, TypeError, RangeError,
+  });
+  return api;
+}
 
 function channelsIn(source, expression) {
   return [...source.matchAll(expression)].map(match => match[1]);
@@ -131,6 +160,58 @@ describe('sandbox 佇列精確 FPS bridge', () => {
 });
 
 describe('Electron invoke interface', () => {
+  it('Proxy 取消經真 preload/main/runtime，只停止同 sender 的原 session，native close 後才准入新工作', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-intake-ipc-'));
+    const source = path.join(root, 'mother.mov');
+    const cacheRoot = path.join(root, 'cache');
+    fs.writeFileSync(source, 'mother');
+    const children = [];
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg-test', getUserDataDir: () => root,
+      spawnDirect(executable, args) {
+        const child = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = vi.fn();
+        fs.writeFileSync(args.at(-1), Buffer.alloc(131072));
+        children.push(child);
+        if (children.length > 1) queueMicrotask(() => child.emit('close', 0));
+        return child;
+      } });
+    const runtime = createMediaIntakeRuntime({ tempRoot: root, cacheRoot, allowSidecarCache: false,
+      fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot] }), ffmpegExecution: execution, delay: async () => {} });
+    const coordinator = createMediaIngestCoordinator();
+    const sender = {};
+    const api = intakeBridge(runtime, coordinator, sender);
+    const foreign = intakeBridge(runtime, coordinator, {});
+    try {
+      const response = await api.streamIngest({ path: source, duration: 10, audio: [], sessionId: 'old', requestId: 'first' });
+      expect(typeof api.cancelMediaIntake).toBe('function');
+      await expect(foreign.cancelMediaIntake({ sessionId: 'old', sender })).resolves.toBe(0);
+      expect(children[0].kill).not.toHaveBeenCalled();
+      await expect(foreign.releaseStream(response.streamLeaseId)).resolves.toBe(false);
+      for (const sessionId of [undefined, null, 1, '', '   ', 's'.repeat(129), {}]) {
+        await expect(api.cancelMediaIntake({ sessionId })).rejects.toThrow(/sessionId/);
+      }
+      for (const requestId of [null, 1, '', '   ', 'r'.repeat(129), {}]) {
+        await expect(api.cancelMediaIntake({ sessionId: 'old', requestId })).rejects.toThrow(/requestId/);
+      }
+      await expect(api.ingest({ path: source, sessionId: 'old' })).rejects.toThrow(/requestId/);
+      expect(children[0].kill).not.toHaveBeenCalled();
+      const cancellation = api.cancelMediaIntake({ sessionId: 'old' });
+      const next = api.ingest({ path: source, duration: 10, needsProxy: true, audio: [], queue: true,
+        sessionId: 'new', requestId: 'retry' });
+      await vi.waitFor(() => expect(children[0].kill).toHaveBeenCalledOnce());
+      expect(children).toHaveLength(1);
+      children[0].emit('close', 1);
+      await cancellation;
+      await expect(next).resolves.toMatchObject({ cached: false });
+      expect(children).toHaveLength(2);
+      await expect(api.ingest({ path: source, queue: true, sessionId: 'old', requestId: 'late' }))
+        .rejects.toMatchObject({ code: 'INGEST_SUPERSEDED' });
+    } finally {
+      for (const child of children) child.emit('close', 1);
+      await coordinator.cancelAllAndWait(); await runtime.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('來源畫格覆蓋證據穿過 preload 與 main，仍交由 mpv owner 驗證', async () => {
     const invoke=vi.fn().mockResolvedValue({backend:'mpv',presentedSourceTime:1,presentedSourceDuration:0.04});
     let api;

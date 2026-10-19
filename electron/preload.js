@@ -125,6 +125,7 @@ contextBridge.exposeInMainWorld('subtool', {
   },
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
+  cancelMediaIntake: (opts) => ipcRenderer.invoke('ffmpeg:cancelIntake', opts),
   releaseStream: (streamLeaseId) => ipcRenderer.invoke('ffmpeg:releaseStream', streamLeaseId),
   readB64:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:readB64', p); },
   reserveScreenshotPath: (directory, suffix = '') => {

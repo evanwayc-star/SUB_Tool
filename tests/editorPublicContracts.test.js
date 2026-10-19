@@ -267,6 +267,9 @@ it.each(['forward', 'backward', 'none'])(
     };
     try {
       Subtitles.deleteSelectedWithPrompt();
+      expect(State.cues).toEqual(before);
+      expect(document.getElementById('modalBody').textContent).toContain('1');
+      document.querySelector('#modalFoot button.primary').click();
       expect(State.cues).toEqual(before.filter(cue => cue.id !== 'delete'));
       expect(trackChanges).toEqual(direction === 'none' ? [] : [2]);
       expect(History.stack).toHaveLength(2); assertVisibleSelection();

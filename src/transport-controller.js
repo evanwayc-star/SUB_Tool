@@ -14,7 +14,8 @@ import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { selectCueSingle, commitCueTimeEdit } from './subtitles.js';
-import { addCue, cueTrackLocked, subtitleTimeOnFrame, finalizeProvisionalCueEnds } from './subtitle-model.js';
+import { addCue, cueTrackLocked, subtitleTimeOnFrame, finalizeProvisionalCueEnds, planContainedCueRemovals } from './subtitle-model.js';
+import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 import { Project, ensureProjectSaved } from './project.js';
 import { updatePlayhead, drawTimeline } from './timeline-renderer.js';
 import { recordHistory } from './history.js';
@@ -712,6 +713,11 @@ async function setIn() {
   const provisionalLimit=(State.duration && State.duration>t) ? State.duration : t+3600;
   const provisionalEnd=State.subMode ? subtitleTimeOnFrame(provisionalLimit,t+frame,provisionalLimit) : null;
   if(State.subMode && provisionalEnd==null) { setStatus('起點之後沒有完整影格', 'err'); return; }
+  const next={...c,start:t,timed:true};
+  if(State.subMode) next.end=provisionalEnd;
+  else if(wasUntimed||c.end<=t) next.end=snapTimeToFrame(t+0.5,State.fps,State.dropFrame);
+  return requestSubtitleRemoval({targets:planContainedCueRemovals([next]),title:'設定起點會覆蓋字幕',
+    detail:'這次 In 點調整會完整覆蓋並移除其他字幕。',confirmLabel:'確認設定',isCurrent:intent.isCurrent,commit:()=>{
   c.start = t;
   if (State.subMode) {
     finalizeProvisionalCueEnds(c.id,{history:false});
@@ -723,6 +729,7 @@ async function setIn() {
   c.timed = true;
   commitCueTimeEdit(c, 'start');
   recordHistory('設定起點 I' + cueSuffix(c)); setStatus('起點 ' + fmtClock(t), 'ok');
+  }});
 }
 
 /**
@@ -742,6 +749,11 @@ async function setOut() {
   if (cueTrackLocked(c, '調整字幕終點')) return;
 
   const wasUntimed = c.timed === false;
+  if(!wasUntimed&&t<=c.start){setStatus('終點不得早於或等於起點','err');return;}
+  const next={...c,end:t,timed:true};
+  if(wasUntimed) next.start=snapTimeToFrame(Math.max(0,t-0.5),State.fps,State.dropFrame);
+  return requestSubtitleRemoval({targets:planContainedCueRemovals([next]),title:'設定終點會覆蓋字幕',
+    detail:'這次 Out 點調整會完整覆蓋並移除其他字幕。',confirmLabel:'確認設定',isCurrent:intent.isCurrent,commit:()=>{
   if (wasUntimed) {
     c.end = t;
     c.start = snapTimeToFrame(Math.max(0, t - 0.5), State.fps, State.dropFrame);
@@ -755,6 +767,7 @@ async function setOut() {
   commitCueTimeEdit(c, 'end');
   recordHistory('設定終點 O' + cueSuffix(c)); setStatus('終點 ' + fmtClock(c.end), 'ok');
   autoAdvanceSubMode();
+  }});
 }
 
 function autoAdvanceSubMode() {

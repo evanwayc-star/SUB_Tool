@@ -15,6 +15,12 @@ function cacheKeyFor(src) {
   return motherSourceFingerprintSync(src, { namespace: 'source-v3', digestLength: 16 });
 }
 
+function ownsMediaIntake(owner, scope) {
+  return !!owner && owner.sender === scope.sender
+    && (scope.sessionId === undefined || owner.sessionId === scope.sessionId)
+    && (scope.requestId === undefined || owner.requestId === scope.requestId);
+}
+
 /**
  * ffprobe audio[] → 單次 ffmpeg ingest 的跨平台音訊規劃。
  */
@@ -611,11 +617,20 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   function reportCompletion(session, jobId, label, error) {
+    reportProgress(session, {
+      jobId, label, done: true, outcome: error ? 'failed' : 'success',
+      ...(error ? { errorCode: error.code || 'MEDIA_CACHE_FAILED', errorMsg: error.message || String(error) } : { pct: 100 }),
+    });
+  }
+
+  function reportProgress(session, payload) {
     if (cancelled(session)) return;
     try {
       options.sendProgress?.(session.progressTarget, {
-        jobId, label, done: true, outcome: error ? 'failed' : 'success',
-        ...(error ? { errorCode: error.code || 'MEDIA_CACHE_FAILED', errorMsg: error.message || String(error) } : { pct: 100 }),
+        ...payload,
+        ...(session.owner?.sessionId !== undefined ? {
+          sessionId: session.owner.sessionId, requestId: session.owner.requestId,
+        } : {}),
       });
     } catch (ignored) {}
   }
@@ -631,18 +646,18 @@ function createMediaIntakeRuntime(options = {}) {
     const unprotect = protectCacheDir(plan.dir);
     try {
       await delay(1000);
-      if (cancelled(session)) throw new Error('媒體轉檔已被較新的載入取代');
+      if (cancelled(session)) throw new IngestSupersededError();
       await ffmpegExecution.execute(plan.args, {
         executionKind: 'direct',
         deferTerminal: true,
-        sender: session.progressTarget,
+        onProgress: payload => reportProgress(session, payload),
         duration: request.duration,
         jobId: 'ingest',
         label: plan.label,
         onProcess: process => session.ownProcess?.(process),
         shouldSend: () => !cancelled(session),
       });
-      if (cancelled(session)) throw new Error('媒體轉檔已被較新的載入取代');
+      if (cancelled(session)) throw new IngestSupersededError();
       plan.commit();
       reportCompletion(session, 'ingest', plan.label);
       return Object.assign({ cached: false }, plan.meta);
@@ -663,6 +678,7 @@ function createMediaIntakeRuntime(options = {}) {
       const id = createStreamId('c-');
       streamJobs.set(id, {
         filePath: plan.meta.proxy, done: true, error: null,
+        owner: session.owner,
         releaseCache: protectCacheDir(plan.dir),
       });
       return Object.assign({
@@ -676,7 +692,8 @@ function createMediaIntakeRuntime(options = {}) {
 
     const id = createStreamId('l-');
     // HTTP reader 與 writer 各自持有引用；writer 完成不代表播放端已釋放。
-    const job = { filePath: proxy, done: false, error: null, releaseCache: protectCacheDir(plan.dir) };
+    const job = { filePath: proxy, done: false, error: null, owner: session.owner,
+      releaseCache: protectCacheDir(plan.dir) };
     streamJobs.set(id, job);
     if (cancelled(session)) {
       job.done = true;
@@ -694,7 +711,7 @@ function createMediaIntakeRuntime(options = {}) {
       execution = ffmpegExecution.execute(plan.args, {
         executionKind: 'direct',
         deferTerminal: true,
-        sender: session.progressTarget,
+        onProgress: payload => reportProgress(session, payload),
         duration,
         jobId: id,
         label: plan.label,
@@ -785,17 +802,28 @@ function createMediaIntakeRuntime(options = {}) {
     });
   }
 
-  function releaseStream(streamLeaseId) {
+  function releaseStream(streamLeaseId, owner) {
     if (typeof streamLeaseId !== 'string') return false;
     const job = streamJobs.get(streamLeaseId);
     if (!job) return false;
+    if (owner && !ownsMediaIntake(job.owner, owner)) return false;
     for (const cancel of job.requests || []) cancel();
     job.releaseCache?.();
     return streamJobs.delete(streamLeaseId);
   }
 
+  function cancel(scope) {
+    // writer 由 coordinator 終止並等待 close；這裡收回已交付的 HTTP reader lease。
+    let count = 0;
+    for (const [id, job] of streamJobs) {
+      if (ownsMediaIntake(job.owner, scope) && releaseStream(id)) count++;
+    }
+    return count;
+  }
+
   return Object.freeze({
     cacheInfo,
+    cancel,
     cleanOrphans,
     cleanupGeneratedFile,
     clearAll,
@@ -831,6 +859,8 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
     : process => { try { process?.kill?.(); } catch (error) {} };
 
   const pending = [];
+  // sender 生命週期內保留撤銷資格，防止取消 IPC 先於遲到 ingest 到達。
+  const revoked = new WeakMap();
   let active = null;
   let draining = false;
   let closing = false;
@@ -841,6 +871,20 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
     if (!lease || lease.cancelled) return;
     lease.cancelled = true;
     if (lease.process) kill(lease.process);
+  };
+
+  const cancelMatching = matches => {
+    let count = 0;
+    for (let index = pending.length - 1; index >= 0; index--) {
+      if (!matches(pending[index].owner)) continue;
+      pending.splice(index, 1)[0].reject(new IngestSupersededError());
+      count++;
+    }
+    if (!active || !matches(active.owner)) return { count, completion: Promise.resolve() };
+    count++;
+    const completion = active.finished;
+    cancel(active);
+    return { count, completion };
   };
 
   const asWorkResult = value => {
@@ -860,7 +904,11 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
     try {
       while (pending.length) {
         const ticket = pending.shift();
-        const lease = { cancelled: false, process: null };
+        let finishLease;
+        const lease = {
+          owner: ticket.owner, cancelled: false, process: null,
+          finished: new Promise(resolve => { finishLease = resolve; }),
+        };
         active = lease;
         try {
           const value = await ticket.work({
@@ -884,9 +932,10 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
             await Promise.resolve(completion).catch(() => undefined);
           }
         } catch (error) {
-          ticket.reject(error);
+          ticket.reject(lease.cancelled ? new IngestSupersededError() : error);
         } finally {
           if (active === lease) active = null;
+          finishLease();
         }
       }
     } finally {
@@ -897,28 +946,43 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
     }
   };
 
-  const submit = (work, { replace = false } = {}) => new Promise((resolve, reject) => {
+  const submit = (work, owner, { replace = false } = {}) => new Promise((resolve, reject) => {
     if (closing) { reject(new IngestSupersededError()); return; }
+    const revokedSession = owner?.sender && revoked.get(owner.sender)?.get(owner.sessionId);
+    if (revokedSession && (revokedSession.all || revokedSession.requests.has(owner.requestId))) {
+      reject(new IngestSupersededError()); return;
+    }
     if (typeof work !== 'function') {
       reject(new TypeError('media ingest work must be a function'));
       return;
     }
     if (replace) {
-      const superseded = new IngestSupersededError();
-      while (pending.length) pending.shift().reject(superseded);
-      cancel(active);
+      cancelMatching(candidate => owner?.sender ? ownsMediaIntake(candidate, { sender: owner.sender }) : true);
     }
-    const ticket = { work, resolve, reject };
+    const ticket = { work, resolve, reject, owner: owner ? { ...owner } : null };
     if (replace) pending.unshift(ticket);
     else pending.push(ticket);
     void drain();
   });
 
   return Object.freeze({
-    /** 取代目前所有等待與執行中的轉檔工作，優先執行新任務 */
-    replace: work => submit(work, { replace: true }),
+    /** 有 owner 時只取代同 sender 的工作；內部無 owner 呼叫保留全域取代語意。 */
+    replace: (work, owner) => submit(work, owner, { replace: true }),
     /** 將新轉檔工作依序加入排隊佇列 */
-    enqueue: work => submit(work),
+    enqueue: (work, owner) => submit(work, owner),
+    /** 只取消原 sender／session／request；完成代表 native writer 與快取收尾已結束。 */
+    cancel(scope) {
+      if (scope.sender && scope.sessionId !== undefined) {
+        let sessions = revoked.get(scope.sender);
+        if (!sessions) { sessions = new Map(); revoked.set(scope.sender, sessions); }
+        let session = sessions.get(scope.sessionId);
+        if (!session) { session = { all: false, requests: new Set() }; sessions.set(scope.sessionId, session); }
+        if (scope.requestId === undefined) session.all = true;
+        else session.requests.add(scope.requestId);
+      }
+      const { count, completion } = cancelMatching(owner => ownsMediaIntake(owner, scope));
+      return completion.then(() => count);
+    },
     cancelAllAndWait() {
       closing = true;
       resumeWhenIdle = false;

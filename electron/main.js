@@ -1518,23 +1518,46 @@ ipcMain.handle('keys:save', (e, data) => {
   } catch(e) { console.error('[keys] save err', e); return false; }
 });
 
-function mediaIntakeSession(event, lease) {
+function mediaIntakeOwner(event, request, { cancel = false } = {}) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('媒體工作缺少 sessionId');
+  const { sessionId, requestId } = request;
+  const validId = value => typeof value === 'string' && !!value.trim() && value.length <= 128;
+  if (cancel || sessionId !== undefined || requestId !== undefined) {
+    if (!validId(sessionId)) throw new TypeError('媒體工作 sessionId 必須是非空且不超過 128 字元的字串');
+    if ((!cancel || requestId !== undefined) && !validId(requestId)) {
+      throw new TypeError('媒體工作 requestId 必須是非空且不超過 128 字元的字串');
+    }
+  }
+  return { sender: event.sender, sessionId, requestId };
+}
+
+function mediaIntakeSession(event, lease, owner) {
   return {
+    owner,
     progressTarget: event.sender,
     isCancelled: () => !!lease?.isCancelled?.(),
     ownProcess: process => lease?.setProcess?.(process),
   };
 }
 
-ipcMain.handle('ffmpeg:ingest', async (e, { path: src, duration, needsProxy, audio, queue }) => {
+ipcMain.handle('ffmpeg:ingest', async (e, request) => {
+  const owner = mediaIntakeOwner(e, request);
+  const { path: src, duration, needsProxy, audio, queue } = request;
   requireReadablePath('ffmpeg:ingest', src);
   const run = lease => mediaIntakeRuntime.ingest(
     { src, duration, needsProxy, audio },
-    mediaIntakeSession(e, lease),
+    mediaIntakeSession(e, lease, owner),
   );
-  /* queue=false 是新的主素材，會淘汰舊主素材及尚未開始的背景工作；queue=true
+  /* queue=false 是同視窗新的主素材，會淘汰其舊主素材及尚未開始的背景工作；queue=true
      則排在連 streamIngest 的完整 completion 後面，絕不與它同時寫 cache。 */
-  return queue ? mediaIngestCoordinator.enqueue(run) : mediaIngestCoordinator.replace(run);
+  return queue ? mediaIngestCoordinator.enqueue(run, owner) : mediaIngestCoordinator.replace(run, owner);
+});
+
+ipcMain.handle('ffmpeg:cancelIntake', async (e, request) => {
+  const owner = mediaIntakeOwner(e, request, { cancel: true });
+  const completion = mediaIngestCoordinator.cancel(owner);
+  mediaIntakeRuntime.cancel(owner);
+  return completion;
 });
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */
@@ -1556,15 +1579,17 @@ ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
 /* ---- 邊轉邊播 ingest（MXF 等非原生格式秒開）：fragmented MP4 + 本機 HTTP 伺服器 ----
    video 轉成 fragmented MP4（empty_moov），前幾秒輸出後就可播放；音軌/波形同一 pass 在背景繼續。
    快取命中時行為與 ffmpeg:ingest 相同（秒開）。 */
-ipcMain.handle('ffmpeg:streamIngest', async (e, { path: src, duration, audio }) => {
+ipcMain.handle('ffmpeg:streamIngest', async (e, request) => {
+  const owner = mediaIntakeOwner(e, request);
+  const { path: src, duration, audio } = request;
   requireReadablePath('ffmpeg:streamIngest', src);
   return mediaIngestCoordinator.replace(lease => mediaIntakeRuntime.stream(
     { src, duration, audio },
-    mediaIntakeSession(e, lease),
-  ));
+    mediaIntakeSession(e, lease, owner),
+  ), owner);
 });
 ipcMain.handle('ffmpeg:releaseStream', (e, streamLeaseId) =>
-  mediaIntakeRuntime.releaseStream(streamLeaseId));
+  mediaIntakeRuntime.releaseStream(streamLeaseId, { sender: e.sender }));
 
 /* ============ mpv 媒體播放器整合（秒開非原生格式，無需等待 ffmpeg proxy 轉檔） ============
    原生 child process、named pipe 與兩個透明宿主視窗均由 mpv-host 擁有；本檔只保留

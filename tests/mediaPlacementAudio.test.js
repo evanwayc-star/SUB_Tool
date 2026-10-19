@@ -66,6 +66,71 @@ function track(kind='buffer'){
   if(tr.el)tr.el.src='file:///source.mov';Media.tracks.push(tr);return tr;
 }
 describe('公開 sequence placement 到實際音訊節點',()=>{
+  it.each(['mute','solo','disabled','zero'])('聲道尚未就緒時，carrier 的 %s 配線靜音在 seek 後仍生效',async action=>{
+    const clip=primary(),bus=State.audioProject.buses[0];
+    expect(Media.sourceChannels('video')).toHaveLength(0);
+    if(action==='mute') Media.toggleProjectBusMute(bus.id);
+    if(action==='solo'){
+      const {ensureAudioBusCount}=await import('../src/state.js');ensureAudioBusCount(2);
+      Media.toggleProjectBusSolo(State.audioProject.buses.find(item=>item!==bus).id);
+    }
+    if(action==='disabled'){State.audioProject.sourceMaps[clip.audioSourceId].channels[0].enabled=false;Media.applyGains();}
+    if(action==='zero') Media.setProjectBusVolume(bus.id,0);
+    expect(video.muted).toBe(true);
+    await Media.seek(3);
+    Media.play();
+    expect(video.muted).toBe(true);
+    Media.pause({seekOnPause:false});
+    if(action==='mute') Media.toggleProjectBusMute(bus.id);
+    if(action==='solo') Media.toggleProjectBusSolo(State.audioProject.buses.find(item=>item!==bus).id);
+    if(action==='disabled'){State.audioProject.sourceMaps[clip.audioSourceId].channels[0].enabled=true;Media.applyGains();}
+    if(action==='zero') Media.setProjectBusVolume(bus.id,1);
+    expect(video.muted).toBe(false);
+  });
+
+  it.each(['element','buffer'])('公開播放與快速跳轉只保留 %s 的當前一份聲音，pause 後全部停止',async kind=>{
+    primary();const tr=track(kind);
+    await Media.requestPresentation(1);Media.play();
+    const playing=()=>kind==='element'?elements.filter(element=>!element.paused):buffers.filter(source=>source.stop.mock.calls.length===0);
+    await vi.waitFor(()=>expect(playing()).toHaveLength(1));
+    for(const target of [3,1.5,4,2]){
+      const first=Media.seek(target),latest=Media.seek(target+.2);
+      await Promise.all([first,latest]);
+      expect(playing()).toHaveLength(1);
+      if(kind==='element')expect(tr.el.currentTime).toBeCloseTo(target+.2);
+      else expect(playing()[0].start.mock.calls[0][1]).toBeCloseTo(target+.2);
+    }
+    Media.pause({seekOnPause:false});expect(playing()).toHaveLength(0);
+  });
+
+  it.each(['switch','element','buffer'].flatMap(action=>[false,true].map(pause=>({action,pause}))))('播放中 seek 等待新畫格時，$action 重啟不提前發聲且遵守最新 pause=$pause',async({action,pause})=>{
+    primary();const tr=track(action==='buffer'?'buffer':'element');
+    await Media.requestPresentation(1);Media.play();
+    const playing=()=>action==='buffer'?buffers.filter(source=>source.stop.mock.calls.length===0):elements.filter(element=>!element.paused);
+    await vi.waitFor(()=>expect(playing()).toHaveLength(1));
+    const frames=[];
+    const callback=video.requestVideoFrameCallback;
+    video.requestVideoFrameCallback=cb=>{frames.push(cb);return frames.length;};
+    try{
+      const seeking=Media.seek(3);
+      await vi.waitFor(()=>expect(Media.playbackTransitionPending()).toBe(true));
+      expect(playing()).toHaveLength(0);
+      if(action==='switch')Media.switchSource('video');
+      if(action==='element')Media.startElementSources(3,3);
+      if(action==='buffer')Media.startBufferSources(3);
+      expect(playing()).toHaveLength(0);
+      if(pause)Media.pause({seekOnPause:false});
+      await vi.waitFor(()=>expect(frames.length).toBeGreaterThan(0));
+      frames.shift()(0,{mediaTime:3});await seeking;
+      expect(playing()).toHaveLength(pause?0:1);
+      if(!pause){
+        if(action==='buffer')expect(playing()[0].start.mock.calls[0][1]).toBe(3);
+        else expect(tr.el.currentTime).toBe(3);
+      }
+      Media.pause({seekOnPause:false});expect(playing()).toHaveLength(0);
+    }finally{video.requestVideoFrameCallback=callback;}
+  });
+
   it.each([false,true])('transport rate changes preserve a detached 2x source rate (video timeline=%s)',async withVideo=>{
     if(withVideo) primary(); else video.removeAttribute('src');
     const asset=Media.createExternalAudioSource({name:'2x original audio',path:'C:/source.mov',

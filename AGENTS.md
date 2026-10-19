@@ -1,298 +1,156 @@
 # AGENTS.md — 給 AI 助理的專案規則
 
-> 本專案由**多個 AI 工具共同維護**（Antigravity IDE、Claude Code、OpenAI Codex）。
-> 這份檔案是所有工具共用的規則來源；`CLAUDE.md` 只是指向它的捷徑。
->
-> **動手改任何東西之前，先讀完這一頁。** 下面每一條都對應真實發生過的事故。
-
----
+動手前讀完本檔。Antigravity IDE、Claude Code 與 OpenAI Codex 共用這份規則；`CLAUDE.md` 只負責載入，不另存規則副本。
 
 ## 0. 最高優先：不要做這四件事
 
 ### 0.1 絕對不要對版號做全域字串取代
 
-升版時**只改 `package.json` 與 `package-lock.json`**，其他地方一律不要碰。
+版號只改 `package.json` 與 `package-lock.json`，統一經 §4 的 `release:prepare` 執行。文件標頭不加當前版號；套件 manifest 是唯一真相來源。
 
-> **真實事故**：`17aa365`「bump version to v5.1.0」對 `docs/版本變更紀錄.md` 做了全檔版號取代，
-> **95 筆歷史版號一次全毀**，變成 121 筆一模一樣的「v5.1.0」。內文交叉引用也跟著錯亂，
-> 出現「v5.2.0 曾把容差放寬造成漂移（v5.2.0 修復）」這種同一版既造成又修復的句子。
-> v5.2.0 升版時又重演了一次。已於 v5.2.2 從 git 還原。
+| 文件中的版號 | 處理方式 |
+|---|---|
+| 歷史標題、事故起始版、修復版與內文交叉引用 | 永遠保留歷史事實 |
+| 當前安裝檔檔名範例 | 確有需要才更新 |
 
-文件裡的版號有兩種，意義完全不同：
-
-| 型態 | 例子 | 可否修改 |
-|------|------|---------|
-| **歷史事實** | `## [v4.31.2]`、「v4.27 起的安裝版才開始壞」、「（v4.30 修）」 | **永遠不要動**。這是用來回答「這個坑是哪一版踩的」 |
-| **當前版本** | 安裝檔檔名範例 | 只有這種需要跟著升版更新 |
-
-各文件標頭**刻意不寫版號**——`package.json` 是唯一真相來源。不要「順手補上」。
+事故：`17aa365` 升版時全檔取代 changelog，95 筆歷史版號被毀，出現 121 筆同版標題與同版既造成又修復的敘述；v5.2.0 又重演，v5.2.2 才從 Git 還原。新增版本只插在導言分隔線後、現有最新版本前。
 
 ### 0.2 不要在沒讀懂上下文時貼上大段內容
 
-> **真實事故**：`README.md` 曾有第 54–88 行整段重複、bash code block 未閉合；
-> `使用說明.md` 曾把桌面版的安裝步驟插進「網頁版」段落中間，讀者會照著做錯。
-
-貼上前先確認插入點的前後文，貼上後**重讀一次該段落**。
+編輯前讀插入點前後文，編輯後重讀完整段落。README 曾整段重複並留下未閉合 code fence；桌面安裝步驟也曾被貼進網頁版段落。檢查內容位置、重複文字與 Markdown 邊界。
 
 ### 0.3 不要用「有產出」當成「做對了」
 
-驗證必須看**內容**，不是看有沒有報錯。詳見
-[`docs/技術架構說明.md`](docs/技術架構說明.md) §0.6，那裡有兩個「驗證方法本身出錯」的真實案例。
+驗證內容與語意，不能只看 exit code 或檔案存在。測試方法本身也可能出錯；實例與規則見[技術架構 §0.6](docs/技術架構說明.md#06-有產出不等於對驗證要看內容)。
 
 ### 0.4 絕對不要在專案根目錄跑 `asar extract-file`
 
-`asar extract-file` 是**依 basename 把檔案寫到 cwd**。所以在專案根目錄下
+此命令依 basename 寫入 cwd，取出封裝的 `dist/index.html` 會覆蓋根目錄 Vite 原始碼入口。若需解檔，先切到獨立暫存目錄；也可用 asar Buffer API 比較內容。
 
-```bash
-npx asar extract-file release/win-unpacked/resources/app.asar dist/index.html
-```
+已發生兩次：v6.1.7 的 `dbc047b` 覆蓋後又刪除入口，`074572d` 還原；v6.1.9 的 `9544570` 將產物當原碼提交，v6.1.10 還原。兩次 lint／test／build 均可能全綠，因為 Vite 仍能再次 bundle 產物。
 
-會把 796 KB 的**建置產物**寫成 `./index.html`，直接蓋掉 32 KB 的 **Vite 原始碼入口**。
-要驗 asar 內容，**先 `cd` 到一個暫存目錄再解**。
-
-> **真實事故（發生過兩次）**：
-> - v6.1.7（`dbc047b`）——蓋掉之後還跟了一行 `rm -f index.html`，檔案直接消失，
->   commit 裡留下 `delete mode 100644 index.html`。於 `074572d` 從 git 還原。
-> - v6.1.9（`9544570`）——**同一個指令、同一個錯誤，再犯一次**。這次沒有刪檔，
->   但被 `git add -A` 掃進了版本庫。於 v6.1.10 還原。
->
-> 兩次都是**靜默**的：`npm run lint`、`npm test`、`npm run build` **全綠**——
-> vite 會把「建置產物」當成一份合法的 HTML 入口再 bundle 一次，照樣 exit 0 並吐出
-> 一個看起來正常的 `dist`。真正會炸的時機在很久以後：某次有人改了 `index.html` 的
-> 版面卻發現改了沒效果，或整份工具列的原始標記已經找不回來了。
-
-現在有一道機械式的絆索：[`tests/sourceEntryHtml.test.js`](tests/sourceEntryHtml.test.js)
-會檢查根目錄的 `index.html` 仍是原始碼入口（有 `<script type="module" src="/src/main.js">`、
-沒有建置期才注入的 CSP meta、大小在原始碼的量級）。**這支測試紅了，先想「是不是又被
-產物蓋掉了」，而不是「測試過時了」。**
-
----
+[sourceEntryHtml.test.js](tests/sourceEntryHtml.test.js) 必須確認入口保有 `<script type="module" src="/src/main.js">`、沒有建置注入的 CSP meta，且大小仍是原碼量級。測試紅時，先查是否遭產物覆蓋，不改弱測試。
 
 ## 1. 專案是什麼
 
-Arctime 風格的多軌時間軸上字幕工具。**Vite + 原生 ES 模組（無框架）**，
-以 `vite-plugin-singlefile` 打包成**單一 `dist/index.html`**，
-同一份程式碼同時跑網頁版與 Electron 桌面版（以 `window.subtool` / `IS_DESKTOP` 分支）。
+Arctime 風格的多軌時間軸字幕工具。Vite、原生 ES 模組、無框架，以 `vite-plugin-singlefile` 建置單一 `dist/index.html`。同一 renderer 跑網頁與 Electron，透過 `window.subtool`／`IS_DESKTOP` 區分。
 
-```
-src/            renderer ES 模組與 WebCodecs 實作
-electron/       Electron 主行程、preload、mpv／ffmpeg adapters
-shared/         【兩個行程共用的領域規則】零相依純 CommonJS（見 shared/README.md）
-scripts/        acceptance／diagnostics／release 工具
-tests/          vitest 行為、契約與結構測試
-docs/           說明文件（見下方「文件職責」）
-font/<資料夾名>/ 自備字型；資料夾名＝UI 顯示名
-```
+| 位置 | 邊界 |
+|---|---|
+| `src/` | renderer ESM、播放與 WebCodecs |
+| `electron/` | 主行程、preload、ffmpeg／mpv adapters |
+| `shared/` | 兩行程共用、零相依的純 CommonJS 規則 |
+| `scripts/`、`tests/` | 驗收／診斷／發版工具與 Vitest |
+| `docs/`、`font/` | 文件與自備字型；字型資料夾名為 UI 顯示名 |
 
-新增、搬移或重新命名檔案時，先讀 [`docs/開發與驗證.md`](docs/開發與驗證.md#6-目錄結構與命名)
-§6；它是放置與命名規則的唯一來源。
-
-> `shared/` 存在的理由：renderer 是 ESM、主程序是 CJS，兩邊無法互相 import，
-> 於是「來源聲道展開順序」「片段疊層幾何」「淡入淡出視窗」長期各自維護一份手抄實作，
-> 靠契約測試比對兩份輸出是否相同。那些測試證明的是「兩份副本目前一致」，不是規則正確。
-> 一支零相依的 `.cjs` 兩邊都吃得下（Vite 會 bundle、主程序 require），規則因此只需要一份。
-> **加東西進去前先讀 `shared/README.md`**——那裡列了哪些看起來像一組、實際上
-> 【不可以】合併的東西（例如檔名淨化 vs 路徑圍堵是兩層防線，不是兩份副本）。
-
----
+新增、搬移或改名之前，先讀[開發文件 §6](docs/開發與驗證.md#6-目錄結構與命名)。加入 `shared/` 前，先讀 [shared/README.md](shared/README.md)：只有相同領域規則才合併；檔名淨化與路徑圍堵等分層防線不能因相似就合併。契約測試證明兩份副本一致，不代表規則正確。
 
 ## 2. 改程式碼前必讀：鐵律
 
-**[`docs/技術架構說明.md`](docs/技術架構說明.md) §0「鐵律」是本專案最重要的一節。**
-那些是「違反後會**靜默**壞掉」的不變量——畫面看起來正常、匯出卻是錯的。
-本專案絕大多數 bug 都出在那幾條上，每一條後面都附了真實踩雷紀錄。
+修改程式前讀完[技術架構說明 §0](docs/技術架構說明.md)。下表是索引，不能代替原文與案例。
 
-摘要（細節與案例請看原文，不要只讀這份摘要就動手）：
+| 節 | 不變量 |
+|---|---|
+| §0.1 | HTML、mpv/libass、燒錄三路都只吃 `substyle.js` 的 `effStyle()` 結果 |
+| §0.2 | 字級縮放基準為畫面高 ÷ PlayResY |
+| §0.3 | ASS Fontname 使用字型檔內部家族名 |
+| §0.4 | Windows filtergraph 路徑跳脫兩層（`C\\:/...`） |
+| §0.5 | 對外時間軸時間、播放器來源時間，僅在序列層轉換 |
+| §0.6 | 驗證實際內容，不能以有產出當正確 |
+| §0.7 | 顯示狀態看 computed style |
+| §0.8 | 音訊素材、專案 bus、交付聲道各有獨立意義 |
+| §0.9 | 靜態圖片也是時間軸片段 |
 
-| # | 鐵律 |
-|---|------|
-| §0.1 | **三路一致**：HTML 預覽 ＝ mpv(libass) ＝ 匯出燒錄，三路只准吃 `substyle.js effStyle()` 的結果 |
-| §0.2 | 字級縮放基準是**畫面高 ÷ PlayResY**，不是寬 |
-| §0.3 | ASS 的 Fontname 要用**字型檔內部家族名**，不是資料夾名 |
-| §0.4 | filtergraph 的 Windows 路徑要跳脫**兩層**（`C\\:/...`） |
-| §0.5 | **時間域**：對外一律「時間軸時間」，播放器內部一律「來源時間」；轉換只准在序列層 |
-| §0.6 | **「有產出」不等於「對」**——驗證要看內容 |
-| §0.7 | 「有沒有顯示」只能看 **computed style**，不能看屬性 |
-| §0.8 | 音訊素材／專案 bus／匯出聲道是三件事，不可混為一談 |
-| §0.9 | 靜態圖片也是時間軸片段，不是播放器的一格畫面 |
-
-另有 [`docs/FPS_時碼一致性.md`](docs/FPS_時碼一致性.md) 的 8 條時碼不變量——
-**改任何牽涉時碼顯示、播放點、seek、逐格的程式碼前必讀**。
-程式碼裡相關位置都標了可搜尋的 `FPS-SYNC`。
-
----
+修改時碼、播放點、seek、逐格、倒帶或 presenter 前，再讀 [FPS／時碼一致性](docs/FPS_時碼一致性.md)的八條不變量；相關程式可搜尋 `FPS-SYNC`。
 
 ## 3. 文件職責（不要把內容寫到錯的檔案）
 
-每份文件有**唯一且不重疊**的職責。要補內容時先確認該寫在哪一份，
-**不要在兩個地方各寫一份**——那正是內容互相漂移的起點。
+一件事只在唯一位置寫完整，其他文件放連結。新增文件類別必須更新本表及 README 入口。
 
-| 文件 | 職責 | 讀者 |
-|------|------|------|
-| `README.md` | 專案入口、快速開始、文件索引 | 所有人 |
-| `docs/使用說明.md` | 操作手冊、快捷鍵、字幕格式 | 使用者 |
-| `docs/開發與驗證.md` | 環境、npm 指令、發版流程、CDP 真機驗證、大檔人工驗證清單 | 開發者 |
-| `docs/技術架構說明.md` | **鐵律**、模組架構、資料流、字幕樣式、WebCodecs、demux | 維護者 |
-| `docs/Electron_維護手冊.md` | IPC 通道表、ffmpeg／mpv 整合、打包、排查表 | 維護者 |
-| `docs/FPS_時碼一致性.md` | FPS／時碼的 8 條不變量與踩雷案例 | 維護者 |
-| `docs/版本變更紀錄.md` | 版本歷史（只在導言分隔線下、現有最新版本前新增一節） | 所有人 |
-| [`docs/research/`](docs/research/) | **時效性研究**：供應商、API、模型或外部技術現況；標註研究日期並引用主要來源 | 維護者 |
-| [`CONTEXT.md`](CONTEXT.md) | **領域詞彙表**：這個詞指的是什麼（只放定義，不放實作） | 所有人 |
-| [`docs/adr/`](docs/adr/) | **架構決策紀錄**：為什麼這樣決定、代價是什麼、什麼情況才該推翻 | 維護者 |
+| 文件 | 唯一職責 | 讀者 |
+|---|---|---|
+| `README.md` | 專案入口、快速開始、文件導覽 | 所有人 |
+| `docs/使用說明.md` | 操作、快捷鍵、字幕格式 | 使用者 |
+| `docs/開發與驗證.md` | 環境、指令、發版、CDP、大檔驗收、目錄命名 | 開發者 |
+| `docs/技術架構說明.md` | 鐵律、模組、資料流、樣式、WebCodecs、demux | 維護者 |
+| `docs/Electron_維護手冊.md` | IPC、ffmpeg／mpv、封裝與排查 | 維護者 |
+| `docs/FPS_時碼一致性.md` | 八條時間不變量與踩雷案例 | 維護者 |
+| `docs/版本變更紀錄.md` | 版本歷史與驗證證據 | 所有人 |
+| [docs/research/](docs/research/) | 標註日期並引用主要來源的時效性研究 | 維護者 |
+| [CONTEXT.md](CONTEXT.md) | 領域定義，不放實作教學 | 所有人 |
+| [docs/adr/](docs/adr/) | 決策理由、代價與推翻條件 | 維護者 |
+| [shared/README.md](shared/README.md) | 共用純規則的加入與分層條件 | 維護者 |
+| `AGENTS.md`、`CLAUDE.md` | 共用維護規則與 Claude 載入轉接 | AI 維護工具 |
+| [docs/agents/](docs/agents/) | Issue tracker、triage 角色與領域文件設定 | 工程 skills |
 
-**規則**：同一件事只在一處寫完整，其他地方用連結指過去。
-
-> **這張表是文件職責的唯一規範；新增文件時必須回來加一列。** README 另提供面向人的導覽。
-> `CONTEXT.md`、`docs/adr/` 兩類是 `/setup-matt-pocock-skills` 那批
-> skill 帶進來的新類別，建立後有一段時間沒有被接進這張表也沒有進 README 的索引——
-> 結果是多份有內容的文件曾經**沒有任何入口能抵達**，
-> 只有 grep 找得到。文件沒有入口，等同於不存在。
-
----
+CONTEXT 與 ADR 曾因沒有文件入口而只有搜尋找得到；兩者建立後，舊規則還聲稱「尚未建立」。新增文件時同步修正索引與 §8，避免開場 context 主動誤導下一位維護者。
 
 ## 4. 發版流程
 
-```bash
-npm run lint && npm test && npm run build   # ① 三關全綠才繼續
-#                                            ② 桌面版真機驗證
-# ③ 將本版「為什麼／怎麼驗」寫入暫存 notes 檔，再執行下列 transaction：
-npm run release:prepare -- --version X.Y.Z --date YYYY-MM-DD --notes <notes檔路徑>
-#    → 只更新兩份 manifest 版號，並在 changelog 導言後插入單一版本區段
-npm run dist                                 # ⑤ → release/SUB Tool Setup X.Y.Z.exe
-# ⑥ 實際安裝並確認 app 內顯示的版號
-git add <本版確認的檔案> && git commit && git push origin main
-# ⑦ 建立 GitHub Release，附上同一支 .exe
-```
+Windows 正式發版依序完成：
 
-`release:prepare` 是版號與 changelog 的唯一 mutation 入口；它會從 Git 取得 production source
-evidence、拒絕當前版號重複／缺少驗證段落，任一檔案寫入失敗時回復整個 transaction。完整參數與
-發版驗收仍以 [`docs/開發與驗證.md`](docs/開發與驗證.md#2-建置與發版流程) 為單一細節來源。
+1. `npm run lint`、`npm test`、`npm run build` 全綠。
+2. 桌面真機驗證，檢查實際畫面、音訊與交付內容。
+3. 把「為什麼改／怎麼驗」寫入 UTF-8 暫存 notes，執行 `npm run release:prepare -- --version X.Y.Z --date YYYY-MM-DD --notes <notes檔路徑>`。
+4. `npm run dist` 產生 `release/SUB Tool Setup X.Y.Z.exe`。
+5. 實際安裝同一份 exe，確認 app 顯示版號、封裝來源與原生能力。
+6. 明確 stage 本版檔案，以繁體中文 commit，push `origin main`。
+7. 建立 GitHub Release，附上同一支已驗證 exe。
 
-上面是 Windows 正式發版流程。Apple Silicon 的本機 unsigned 驗證使用
-`npm run dist:mac:test`；它**不是正式發布**，不可直接上傳 Release。Mac 對外發布還必須完成
-Developer ID 簽署、hardened runtime、Apple notarization 與實體 Mac 驗收；完整分流與清單見
-[`docs/開發與驗證.md`](docs/開發與驗證.md#apple-silicon-本機測試版)。
+`release:prepare` 是版號與 changelog 的唯一 mutation 入口。它從 Git 建立 production source evidence，拒絕重複版號或缺少驗證段落，寫入任一檔失敗會回復 transaction。參數與詳細驗收以[開發文件 §2](docs/開發與驗證.md#2-建置與發版流程)為準。
 
-**變更紀錄請寫「為什麼」與「怎麼驗的」，不要只寫「修了 X」。**
-這份檔案是本專案最有價值的交接資產——很多坑（字型家族名、filtergraph 跳脫、
-CSS 蓋掉 `[hidden]`）都是靠它才沒有重踩。
+本專案直接由 main 發佈。工作樹混有別的工具或使用者修改時，不可 `git add -A`；先確認本版範圍。變更紀錄保留原因、內容驗證與限制，不能只列「修了 X」。
 
-> 本專案採 **main 直接發佈**。若工作樹混有其他工具或使用者未確認的修改，
-> **不可直接 `git add -A`**，必須先確認哪些檔案屬於這一版。
-> 多工具並行時這點特別重要——你看到的未提交變更可能不是你做的。
-
----
+Apple Silicon 的 `npm run dist:mac:test` 只供本機 unsigned 驗證，不能直接上傳 Release。正式 Mac 發佈仍需 Developer ID、hardened runtime、Apple notarization 與實體 Mac 驗收，見[平台分流](docs/開發與驗證.md#apple-silicon-本機測試版)。
 
 ## 5. 提交訊息
 
-**一律使用繁體中文撰寫 Git 提交訊息。**
-
-寫清楚「改了什麼、為什麼」，不要只寫「修正 bug」。
-
----
+一律用繁體中文，說明改了什麼與原因。不得只寫「修正 bug」。
 
 ## 6. 多工具協作注意事項
 
-- **檔案可能在你讀取後被其他工具改掉。** 做大範圍修改前先 `git status`；
-  編輯前若隔了一段時間，重新讀一次檔案內容。
-- **不要假設工作樹是乾淨的**，也不要假設未提交的變更是你自己做的。
-- **不要新增與既有規則牴觸的規則檔**（`.cursorrules`、`GEMINI.md` 等）。
-  規則只寫在這一份 `AGENTS.md`，其他工具的規則檔請做成指向它的捷徑。
+- 工作樹不一定乾淨，未提交內容不一定屬於你。大範圍修改前先 `git status`；讀取後隔一段時間才編輯，先重讀。
+- 不另建 `.cursorrules`、`GEMINI.md` 或 `.agent/rules/` 等重複規則。共用規則只在本檔，其他工具用入口轉接。
+- 派工時明確說「動手前先讀 `AGENTS.md`」。README 是人類入口，不能假設工具自動載入。
 
-### 各工具實際會自動載入什麼
+| 工具 | 本專案入口 | 全域規則 |
+|---|---|---|
+| Claude Code | `CLAUDE.md` 第一行 `@AGENTS.md` import | `~/.claude/CLAUDE.md` |
+| OpenAI Codex | 原生讀取 `AGENTS.md` | `~/.codex/AGENTS.md` |
+| Antigravity | 啟用 `chat.useAgentsMdFile: true` | `~/.gemini/GEMINI.md` |
 
-三個工具開場自動讀的檔案**完全不一樣**，但都已經接到這一份 `AGENTS.md`：
-
-| 工具 | 怎麼讀到 `AGENTS.md` | 全域規則 |
-|------|---------------------|---------|
-| **Claude Code** | `CLAUDE.md` 第一行的 `@AGENTS.md` **import** | `~/.claude/CLAUDE.md` |
-| **OpenAI Codex** | 原生就讀 `AGENTS.md` | `~/.codex/AGENTS.md` |
-| **Antigravity** | 設定 `chat.useAgentsMdFile: true`（已實測生效） | `~/.gemini/GEMINI.md` |
-
-**三者都不會自動讀 `README.md`。** 那是給人看的。
-
-Antigravity 那條是實測的：開啟設定後，它的 **Customizations → Rules** 面板會列出
-`Project · AGENTS.md`。要確認有沒有生效就去看那個面板。
-
-> 曾經一度為了保險同時建了 `.agent/rules/`（Antigravity 的原生規則目錄）。
-> 實測確認 Rules 面板只認 `AGENTS.md` 之後就刪掉了——留著等於同一件事有兩份說法，
-> 正是本節在防的事。**不要再加回來。**
-
-> **重要**：Claude Code **不讀 `AGENTS.md`**（官方原文：*Claude Code reads `CLAUDE.md`,
-> not `AGENTS.md`*）。它是靠 `CLAUDE.md` 第一行的 `@AGENTS.md` **import 語法**才載入的。
->
-> **真實事故**：`CLAUDE.md` 原本寫的是 Markdown 連結 ``[`AGENTS.md`](AGENTS.md)``，
-> 看起來像指過去了，實際上完全沒生效——import 解析還會刻意跳過反引號內的內容，
-> 雙重失效。這份 `AGENTS.md` 因此從未進入任何 Claude Code session 的 context。
-> 不要把那一行改回連結形式。
-
-**派工給任何 AI 時，直接說「動手前先讀 `AGENTS.md`」**——三個工具都能靠這句話找到正確入口。
-
----
+Claude Code 不自動讀 AGENTS，曾因入口只是 Markdown 連結而整份規則未載入；不可把 import 改回連結或反引號。Antigravity 已實測在 Customizations → Rules 顯示 `Project · AGENTS.md`；曾建的 `.agent/rules/` 已刪除，不加回。
 
 ## 7. 靜態安全網
 
 ```bash
-npm run lint    # eslint（src / electron / shared 三邊）：抓「用了沒 import 的名稱」＋兩道封裝圍籬
-npm run build   # rollup：抓「import 了某模組未 export 的名稱」（eslint 抓不到）
-npm test        # vitest：純函式與資料完整性
-grep -rn "from './app.js'" src   # 應為空——不可再引入對 app.js 的相依
+npm run lint
+npm test
+npm run build
+rg "from './app.js'" src
 ```
 
-> **新增頂層資料夾時，記得同時加進 `npm run lint` 的參數。**
-> `electron/` 曾經因為 eslint 設定的 `files` 只寫了 `src/**`，
-> 導致 2,268 行**完全沒有被檢查**；`shared/` 建立時差點重演同一件事
-> （設定裡的 block 有寫，但 `npm run lint` 的參數漏了就等於沒開）。
+最後一項應無結果。任何模組都不能 import `app.js`；低階模組用 `events.js` 的 `emit`，由 app 或專責上層 bridge／view 訂閱 `on`。lint 抓未定義名稱與封裝邊界；build 抓缺少 export 的 import；測試驗證行為與資料完整性。
 
-架構規則：**沒有任何模組可以 `import … from './app.js'`。**
-低階模組要觸發重繪／指令時用 `emit('事件名', …)`（`events.js`），
-由 `app.js` 或專責的上層 bridge／view 以 `on(...)` 訂閱。
+新增頂層程式資料夾時，同步加進 lint 指令及 ESLint 範圍。只有 config block、沒有 CLI 參數也不會檢查；electron 曾有 2,268 行因此漏檢，shared 建立時也差點重演。
 
 ### 兩道封裝圍籬（eslint `no-restricted-syntax`）
 
-違反這兩條的後果都是**靜默**的，所以用 lint 擋而不是靠自律：
+| 圍籬 | 必須使用的公開入口 | 唯一例外來源 |
+|---|---|---|
+| 禁止直接寫 `State.selectedId`／`selectedIds`／`selectedClipId`／`selectedAudioClipId`／`activeTrackKind` | `setSelection`、`deselect`、`pruneSelection`、`focusTrackKind` | `src/state.js` |
+| 禁止外部讀寫 `Media._*` | `activeClip()`、`inGap()`、`sourceLocalTime()`、`mpvPresenting()`、`webCodecsTakeover()` 等公開 API | [eslint.config.mjs](eslint.config.mjs) 的 `MEDIA_INTERNAL_FILES` |
 
-| 圍籬 | 內容 | 例外 |
-|------|------|------|
-| **選取狀態** | 不可直接寫 `State.selectedId` / `selectedIds` / `selectedClipId` / `selectedAudioClipId` / `activeTrackKind`，改用 `setSelection` / `deselect` / `pruneSelection` / `focusTrackKind` | `src/state.js` |
-| **Media 內部** | 不可讀寫 `Media._*`，改用公開入口（`activeClip()` / `inGap()` / `sourceLocalTime()` / `mpvPresenting()` / `webCodecsTakeover()`…） | 內部實作清單以 [eslint.config.mjs](eslint.config.mjs) 的 `MEDIA_INTERNAL_FILES` 為準 |
-
-> `no-restricted-syntax` 在 flat config 裡是**整組取代**而非累加。兩條圍籬因此寫在
-> 同一份清單再依檔案拆 block；分開寫成兩個 block 會讓後者**無聲地**關掉前者。
-
----
+Flat config 的 `no-restricted-syntax` 會整組取代，兩條圍籬要維持同一清單、再依檔案分 block；不可拆成互相覆蓋的兩組規則。
 
 ## 8. Agent skills 設定
 
-本 repo 已跑過 `/setup-matt-pocock-skills`。以下 skill 會讀取 `docs/agents/` 下的設定：
-`/to-tickets`、`/triage`、`/to-spec`、`/wayfinder`、`/implement`、
-`/improve-codebase-architecture`、`/diagnosing-bugs`、`/tdd`。
+已套用 `/setup-matt-pocock-skills`。`/to-tickets`、`/triage`、`/to-spec`、`/wayfinder`、`/implement`、`/improve-codebase-architecture`、`/diagnosing-bugs`、`/tdd` 使用下列設定：
 
-### Issue tracker
+| 設定 | 文件 |
+|---|---|
+| GitHub Issues、`gh`、繁體中文、外部 PR 不納入 triage | [issue-tracker.md](docs/agents/issue-tracker.md) |
+| 五個預設角色：needs-triage、needs-info、ready-for-agent、ready-for-human、wontfix；不新增重複標籤 | [triage-labels.md](docs/agents/triage-labels.md) |
+| 單一 CONTEXT 與根層 ADR，實際解決詞彙／決策時才用 domain-modeling 補充 | [domain.md](docs/agents/domain.md) |
 
-Issue 放在 **GitHub Issues**，用 `gh` CLI 操作；**外部 PR 不納入 triage**。
-Issue 內容用繁體中文撰寫（與 §5 提交訊息一致）。
-詳見 [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md)。
-
-### Triage 標籤
-
-五個角色使用**預設名稱**（`needs-triage` / `needs-info` / `ready-for-agent` /
-`ready-for-human` / `wontfix`）；`wontfix` 沿用 repo 既有標籤，未另建重複的。
-詳見 [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md)。
-
-### Domain docs
-
-**單一 context**：根目錄 [`CONTEXT.md`](CONTEXT.md) + [`docs/adr/`](docs/adr/)。
-兩者都由 `/domain-modeling` 在真的解決了某個詞彙或決策時順勢建立，
-**不要為了補齊而預先產生空殼**。
-詳見 [`docs/agents/domain.md`](docs/agents/domain.md)。
-
-> **這一段曾經寫著「兩者目前都尚未建立」，而那時它們早就存在了。**
-> `CONTEXT.md`（7/28）與兩份 ADR（7/25、7/28）建立之後，沒有人回來改這句話。
-> 由於 `AGENTS.md` 是三個 AI 工具的開場 context，那句過時的話等於**主動叫每一個
-> AI 跳過它們**——比文件沒有入口更糟。**新增這類文件時，回頭更新這一節與 §3 的
-> 文件職責表**，否則下一個人（或下一個 AI）看到的還是舊敘述。
-
-> **為什麼這一節在 `AGENTS.md` 而不是 `CLAUDE.md`**：skill 的預設規則是
-> 「`CLAUDE.md` 存在就寫進去」，但本專案的 `CLAUDE.md` 只是 `@AGENTS.md` 的轉接層，
-> Codex 與 Antigravity 都不讀它（見 §6）。這一節三個工具都需要看到。
+這些設定放在共用 AGENTS，不能移去只有 Claude 會載入的轉接檔。CONTEXT 與 ADR 已存在，不預建空殼；新增類別時回頭更新 §3 與本節。

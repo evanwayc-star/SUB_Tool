@@ -7,6 +7,9 @@ import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { parse } from 'acorn';
+const ui=vi.hoisted(()=>({setStatus:vi.fn(),showToast:vi.fn()}));
+vi.mock('../src/ui.js',()=>ui);
+vi.mock('../src/media.js',()=>({Media:{mpvMode:false}}));
 
 // Execute the actual registered IPC consumer without booting the app ticker/native UI.
 const source = fs.readFileSync(path.resolve('src/app.js'), 'utf8');
@@ -28,26 +31,36 @@ const require = createRequire(import.meta.url);
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 const roots = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
-let consume, setStatus, completed, listener;
-beforeEach(() => {
+let consume, setStatus, completed, listener, jobs, request;
+function streamOwner(){
+  void jobs.streamIngest({path:'mother.mxf'});
+  return {...request};
+}
+beforeEach(async () => {
+  vi.resetModules();
   if (listener) window.removeEventListener('desk:ingest-done', listener);
   document.body.innerHTML = '<span id="stMedia">master.mxf</span>';
-  setStatus = vi.fn(); completed = [];
+  setStatus=ui.setStatus;setStatus.mockClear();completed = [];
+  window.subtool={isDesktop:true,streamIngest:options=>{request=options;return Promise.resolve({cached:false});}};
+  ({MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js'));
+  const {handleMediaIntakeProgress,bindMediaIntakeView}=await import('../src/media-intake-view.js');
+  bindMediaIntakeView(()=>jobs.reset());
   listener = event => completed.push(event.detail);
   window.addEventListener('desk:ingest-done', listener);
   vm.runInNewContext(source.slice(registration.start, registration.end), {
     DESK: { onProgress: callback => { consume = callback; } },
-    _taskStarts: {}, setStatus, window, CustomEvent: window.CustomEvent,
+    handleMediaIntakeProgress,setStatus,window,CustomEvent:window.CustomEvent,
     $: id => document.getElementById(id),
   });
 });
 
 describe('registered native task-progress terminal consumer', () => {
-  it('failed terminal unlocks and restores the media label without announcing successful ingest', () => {
-    consume({ jobId: 'stream-1', label: '轉檔', pct: 10 });
+  it('failed terminal restores the media label without announcing successful ingest or unlocking exports', () => {
+    const owner=streamOwner();
+    consume({ ...owner,jobId: 'stream-1', label: '轉檔', pct: 10 });
     expect(document.getElementById('stMedia').style.display).toBe('none');
-    consume({ jobId: 'stream-1', label: '轉檔', done: true, outcome: 'failed', errorMsg: 'codec unsupported' });
-    expect(setStatus).toHaveBeenLastCalledWith('轉檔失敗', 'err', 'unlock');
+    consume({ ...owner,jobId: 'stream-1', label: '轉檔', done: true, outcome: 'failed', errorMsg: 'codec unsupported' });
+    expect(setStatus).toHaveBeenLastCalledWith('轉檔失敗', 'err');
     expect(document.getElementById('stMedia').style.display).toBe('');
     expect(completed).toEqual([]);
   });
@@ -59,18 +72,18 @@ describe('registered native task-progress terminal consumer', () => {
       rebuilt++; window.removeEventListener('desk:ingest-done', rebuild);
     };
     window.addEventListener('desk:ingest-done', rebuild);
-    consume({ jobId: 'stream-1', done: true, outcome: 'failed' });
+    consume({ ...streamOwner(),jobId: 'stream-1', done: true, outcome: 'failed' });
     expect(rebuilt).toBe(0);
-    consume({ jobId: 'stream-1', done: true, outcome: 'success', pct: 100 });
+    consume({ ...streamOwner(),jobId: 'stream-1', done: true, outcome: 'success', pct: 100 });
     expect(rebuilt).toBe(1);
     expect(completed).toEqual([expect.objectContaining({ jobId: 'stream-1', outcome: 'success' })]);
-    expect(setStatus).toHaveBeenLastCalledWith('轉檔完成', 'ok', 'unlock');
+    expect(setStatus).toHaveBeenLastCalledWith('轉檔完成', 'ok');
   });
 
   it('a terminal lacking a success outcome cannot announce successful ingest', () => {
-    consume({ jobId: 'ingest', done: true, pct: 100 });
+    consume({ ...streamOwner(),jobId: 'ingest', done: true, pct: 100 });
     expect(completed).toEqual([]);
-    expect(setStatus.mock.calls.at(-1)[2]).toBe('unlock');
+    expect(setStatus).toHaveBeenLastCalledWith('轉檔失敗','err');
   });
 
   it('actual extractAudio IPC copy/AAC fallback dispatches completion only for the successful attempt', async () => {
@@ -104,6 +117,6 @@ describe('registered native task-progress terminal consumer', () => {
     expect(stages).toEqual(['copy', 'aac']);
     expect(sent.filter(data => data.done).map(data => [data.jobId, data.outcome])).toEqual([['a0', 'failed'], ['a0', 'success']]);
     expect(completed).toEqual([expect.objectContaining({ jobId: 'a0', outcome: 'success' })]);
-    expect(setStatus).toHaveBeenLastCalledWith('抽取音軌 1完成', 'ok', 'unlock');
+    expect(setStatus).toHaveBeenLastCalledWith('抽取音軌 1完成', 'ok');
   });
 });

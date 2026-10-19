@@ -16,6 +16,7 @@ import { secToEncore, getExactFps } from './time.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { History, recordHistory } from './history.js';
 import { Project } from './project.js';
+import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 import { beginGeometryEdit } from './timeline-edit-transaction.js';
 import { emit } from './events.js';
 import { AudioRouting } from './audio-routing.js';
@@ -107,6 +108,15 @@ $('videoWrap')?.addEventListener('contextmenu',e=>{ e.preventDefault(); });
 $('speedIndicator')?.addEventListener('contextmenu',e=>{ e.preventDefault(); e.stopPropagation(); showPlayerMenu(e.clientX,e.clientY); });
 
 /* 字幕右鍵：移到軌道 / 上下新增 / 刪除 */
+function confirmMerge(cue,dir){
+  const list=State.cues.filter(item=>(item.track||0)===(cue.track||0));
+  const index=list.indexOf(cue),other=list[index+dir];
+  if(!other) return;
+  return requestSubtitleRemoval({targets:[dir<0?cue:other],title:'合併字幕',
+    detail:'兩句的文字與時間會合併到一條字幕，原有其中一條字幕會移除。',confirmLabel:'確認合併',
+    commit:()=>mergeAdjacentCues(cue.id,dir)});
+}
+
 function showCueMenu(x,y,contextCue=null){
   const target=contextCue || State.cues.find(c=>c.id===State.selectedId);
   if(target && State.tracks[target.track||0]?.locked){
@@ -202,10 +212,10 @@ function showCueMenu(x,y,contextCue=null){
       
       if (hasPrev || hasNext) {
         if (hasPrev) {
-          items.push({label:'↑ 與上句合併',act:()=>mergeAdjacentCues(selCue.id, -1)});
+          items.push({label:'↑ 與上句合併',act:()=>confirmMerge(selCue, -1)});
         }
         if (hasNext) {
-          items.push({label:'↓ 與下句合併',act:()=>mergeAdjacentCues(selCue.id, 1)});
+          items.push({label:'↓ 與下句合併',act:()=>confirmMerge(selCue, 1)});
         }
         items.push({sep:true});
       }

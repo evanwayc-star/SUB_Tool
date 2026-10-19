@@ -25,6 +25,7 @@ import { buildXLSX } from './xlsx-export.js';
 import { getAllPresets, loadFonts, presetIdentity } from './substyle.js';
 import { buildSubtitleImportPlan } from './project-intake-engine.js';
 import { Project } from './project.js';
+import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 
 function showFpsConvertDialog() {
   const tkIdx = State.listTrack;
@@ -683,16 +684,17 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
         const selectedPreset = presetVal ? getAllPresets().find(p => presetIdentity(p) === presetVal) : null;
         const importPlan = kind === 'ass'
           ? buildSubtitleImportPlan(parsed, { fps: grid.fps, target: selVal === 'new' ? 'new' : 'existing' }) : null;
+        const tkName=selVal==='new' ? ($('importNewTkName').value.trim() || importPlan?.trackPatch?.name || ('軌道 '+(State.tracks.length+1))) : null;
+        const append=selVal==='new'||$('importAppend').checked;
+        const commitImport=()=>{
         let targetTk;
         if (selVal === 'new') {
-          const tkName = ($('importNewTkName').value.trim()) || importPlan?.trackPatch?.name || ('軌道 ' + (State.tracks.length + 1));
           const trk = newTrack(tkName);
           if (importPlan?.trackPatch) { Object.assign(trk, importPlan.trackPatch); trk.name = tkName; }
           else if (selectedPreset && selectedPreset.style) Object.assign(trk, selectedPreset.style);
           State.tracks.push(trk); syncTrackCount();
           targetTk = State.tracks.length - 1;
         } else { targetTk = +selVal; }
-        const append = selVal === 'new' || $('importAppend').checked;
         session.close({committed:true});
         const sourceCues = importPlan?.cues || parsed;
         const newCues = sourceCues.map(p => {
@@ -732,6 +734,15 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
           : importPlan?.usedLegacyTiming
             ? `匯入 ${newCues.length} 條字幕（已修正舊版 ASS 的一格偏移）`
             : `匯入 ${newCues.length} 條字幕`);
+        };
+        const removed=append?[]:State.cues.filter(cue=>(cue.track||0)===+selVal);
+        if(removed.length){
+          session.close({committed:true});
+          subtitleImportModal=requestSubtitleRemoval({targets:removed,title:'覆蓋匯入字幕',
+            detail:'匯入的新稿會取代目的軌道原有的字幕。',confirmLabel:'確認覆蓋',
+            isCurrent:()=>owns()&&State.tracks[+selVal]===tracks[+selVal]&&!tracks[+selVal]?.locked&&(!draft||draft.isCurrent()),
+            commit:commitImport});
+        }else commitImport();
       }
     }, { label: '取消', act: ()=>session.close() }]);
   subtitleImportModal=session;

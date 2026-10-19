@@ -387,6 +387,8 @@ async function droppedImport(fpsValue='24',text='1\n00:00:01,000 --> 00:00:02,00
 it.each(['24','23.976','29.97df'])('import commits the staged %s grid once and Undo/Redo restores it with the cues',async value=>{
   await droppedImport(value);expect(State.fps).toBe(25);expect(State.dropFrame).toBe(false);expect(History.stack).toHaveLength(1);
   document.getElementById('importTkSel').value='0';click('匯入');
+  expect(State.cues.map(cue=>cue.text)).toEqual(['original','second']);expect(State.fps).toBe(25);
+  expect(document.getElementById('modalBody').textContent).toContain('2');click('確認覆蓋');
   expect(State.fps).toBe(parseFloat(value));expect(State.dropFrame).toBe(value.endsWith('df'));expect(State.cues.map(cue=>cue.text)).toEqual(['Imported']);
   expect(History.stack).toHaveLength(2);History.undo();expect(State.fps).toBe(25);expect(State.cues.map(cue=>cue.text)).toEqual(['original','second']);
   History.redo();expect(State.fps).toBe(parseFloat(value));expect(State.cues[0].text).toBe('Imported');
@@ -395,6 +397,8 @@ it.each(['24','23.976','29.97df'])('import commits the staged %s grid once and U
 it('Encore timecode is parsed with the staged DF grid before any project mutation',async()=>{
   await droppedImport('29.97df','00:01:00;02\t00:01:01;02\tEncore\n','incoming.txt');
   expect(State.fps).toBe(25);document.getElementById('importTkSel').value='0';click('匯入');
+  expect(State.cues.map(cue=>cue.text)).toEqual(['original','second']);expect(State.fps).toBe(25);
+  expect(document.getElementById('modalBody').textContent).toContain('2');click('確認覆蓋');
   expect(State.cues[0].start).toBeCloseTo(1800/(30000/1001),10);expect(State.cues[0].text).toBe('Encore');
 });
 

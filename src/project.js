@@ -36,6 +36,7 @@ import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinP
   presetIdentity, validPresetList, normalizeStyleRecord, normalizeStyleValue } from './substyle.js';
 import { ProjectLoadSession } from './project-intake-engine.js';
 import { clearAsrSession } from './speech-recognition-session.js';
+import { captureSubtitleRemovalOwnership } from './subtitle-removal-guard.js';
 import { normalizeExternalAudioData, assetRange } from './external-audio.js';
 import { audioLimiterSnapshot, audioMotherPath } from '../shared/audio-loudness.cjs';
 export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
@@ -418,14 +419,23 @@ function isProjectGuardDone(){ return _editGuardDone; }
    .subtool、瀏覽器版選檔）都直接 Project.load*()，未存檔的內容就這樣沒了，
    而且沒有任何提示。這裡把那個提示補上，並讓三條路徑共用同一份。 */
 function confirmDiscardUnsaved(title = '開啟另一個專案'){
-  if(!isProjectDirty()) return Promise.resolve(true);
+  const dirty=isProjectDirty(),count=State.cues.length;
+  if(!dirty&&!count) return Promise.resolve(true);
+  const owns=captureSubtitleRemovalOwnership();
   return new Promise(resolve=>{
     let done=false;
     const cancel=()=>{ done=true; resolve(false); };
-    const finish=value=>{ if(done) return; done=true; closeModal({committed:true}); resolve(value); };
-    openModal(title,
-      '<p>目前的專案有未儲存的變更，開啟另一個專案會失去這些變更。<br>要先儲存嗎？</p>',
-      [
+    const finish=value=>{
+      if(done || !session.isCurrent()) return;
+      done=true;
+      const accepted=value&&owns();
+      if(value&&!accepted) showToast('字幕或專案已變更，請重新確認開啟');
+      session.close({committed:true}); resolve(accepted);
+    };
+    const session=openModal(title,
+      `${dirty?'<p>目前的專案有未儲存的變更。要先儲存嗎？</p>':''}`+
+      `<p>開啟另一個專案會取代目前工作區，移除其中 <b>${count}</b> 條既有字幕。取消保留目前專案。</p>`,
+      [...(dirty?[
         // 等儲存真正完成（拿到路徑）才繼續；使用者取消存檔對話框則留在原專案，
         // 與關閉視窗時的處理一致，避免「以為存好了其實沒有」。
         {label:'儲存後開啟',primary:true,act:async()=>{
@@ -433,6 +443,7 @@ function confirmDiscardUnsaved(title = '開啟另一個專案'){
           finish(!!pth&&!isProjectDirty());
         }},
         {label:'不儲存直接開啟',act:()=>finish(true)},
+      ]:[{label:'確認開啟',primary:true,act:()=>finish(true)}]),
         {label:'取消',act:()=>finish(false)},
       ],{onDismiss:cancel,onReplaced:cancel});
   });
@@ -639,12 +650,17 @@ const Project = {
     if(confirm&&!await confirmDiscardUnsaved()) return false;
     if(!current()) return false;
     const consentSnapshot=JSON.stringify({..._buildProjectData(),playhead:0});
+    const consentCues=[...State.cues],consentTracks=[...State.tracks];
+    const consentSubtitles=JSON.stringify({cues:State.cues,tracks:State.tracks});
     let input;
     try{ input=await read(); }
     catch(error){ if(!current()) return false; throw error; }
     if(!current()||!input) return false;
     // picker／讀檔期間合法新增的修改不屬於先前的丟棄同意；播放點移動不算修改。
-    if(isProjectDirty()&&consentSnapshot!==JSON.stringify({..._buildProjectData(),playhead:0})){
+    const changedSubtitles=State.cues.length!==consentCues.length||consentCues.some((cue,i)=>State.cues[i]!==cue)
+      ||State.tracks.length!==consentTracks.length||consentTracks.some((track,i)=>State.tracks[i]!==track)
+      ||consentSubtitles!==JSON.stringify({cues:State.cues,tracks:State.tracks});
+    if(changedSubtitles||isProjectDirty()&&consentSnapshot!==JSON.stringify({..._buildProjectData(),playhead:0})){
       if(!await confirmDiscardUnsaved()||!current()) return false;
     }
     if(typeof input.b64==='string'){
@@ -964,18 +980,21 @@ function saveAsProject() { Project.saveAs(); }
 
 function startNewProject() {
   const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const ownsSubtitles=captureSubtitleRemovalOwnership(),count=State.cues.length;
   const session=openModal('開新專案',
-    '<p>確定清空目前專案？字幕、備註與已載入的影音都將清除（未存檔的話）。</p>',
+    `<p>確定清空目前專案？將移除 <b>${count}</b> 條既有字幕，以及備註和已載入的影音。</p>`,
     [{ label: '取消', act: () => session.close() },
      { label: '確定清空', primary: true, act: () => {
-       if(!session.isCurrent() || !ownsWorkspace()) return;
+       if(!session.isCurrent() || !ownsWorkspace() || !ownsSubtitles()) return;
        session.close({committed:true});
        return Project.startNewProject(async () => {
+         const ownsClear=captureSubtitleRemovalOwnership();
          const { clearSelection, ensureTrackCount: ensureTk } = await import('./state.js');
          const { video } = await import('./dom.js');
          const { setFirstLoad } = await import('./video-renderer.js');
          const { renderAudioTracks } = await import('./mixer.js');
          const { toggleSubMode } = await import('./subtitle-model.js');
+         if(!ownsClear()) return false;
          State.cues = []; State.notes = [];
          clearSelection();
          State.listTrack = 0; State.tracks = []; ensureTk(0);

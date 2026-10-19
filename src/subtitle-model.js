@@ -130,27 +130,27 @@ export function mergeAdjacentCues(id, dir){
 
 export { detectOverlaps } from './subtitle-audit.js';
 
-export function sweepContainedCues(changedCues) {
-  if (!State.overwriteMode || State.overwriteKeep) return false;
+function sweepCueList(changedCues,cues,splitId=newId) {
   let changed = false;
+  const removed=[];
   const snapF = (t) => snapTimeToFrame(t, State.fps, State.dropFrame);
   for (const c of changedCues) {
     if (!c || c.timed === false) continue;
     const tk = c.track || 0;
-    for (let i = State.cues.length - 1; i >= 0; i--) {
-      const b = State.cues[i];
+    for (let i = cues.length - 1; i >= 0; i--) {
+      const b = cues[i];
       if (b.id === c.id || (b.track || 0) !== tk || b.timed === false) continue;
       
       if (b.end > c.start + 0.001 && b.start < c.end - 0.001) {
         if (b.start >= c.start - 0.001 && b.end <= c.end + 0.001) {
-          State.cues.splice(i, 1);
+          removed.push(b);cues.splice(i, 1);
           changed = true;
         } else if (b.start < c.start - 0.001 && b.end > c.end + 0.001) {
           const newB = JSON.parse(JSON.stringify(b));
-          newB.id = newId();
+          newB.id = splitId();
           newB.start = snapF(c.end);
           b.end = snapF(c.start);
-          State.cues.splice(i + 1, 0, newB);
+          cues.splice(i + 1, 0, newB);
           changed = true;
         } else if (b.end > c.start + 0.001 && b.start <= c.start + 0.001) {
           b.end = snapF(c.start);
@@ -162,11 +162,30 @@ export function sweepContainedCues(changedCues) {
       }
     }
   }
-  if (changed) {
-    pruneSelection();
-    return true;
-  }
-  return false;
+  return {changed,removed};
+}
+
+// The same sweep plans consent against private copies; it must not allocate ids
+// or preview any user data before approval. Partial trims do not remove a cue.
+export function planContainedCueRemovals(changedCues,cues=State.cues){
+  if(!State.overwriteMode||State.overwriteKeep) return [];
+  const originals=new Map(cues.map(cue=>[cue.id,cue]));
+  const copies=new Map(cues.map(cue=>[cue.id,{...cue}]));
+  const changed=changedCues.filter(Boolean).map(cue=>{
+    const copy=copies.get(cue.id)||{...cue};Object.assign(copy,cue);return copy;
+  });
+  let sequence=0;
+  const result=sweepCueList(changed,[...copies.values()],()=>{
+    let id;do{id=`__removal-plan-${sequence++}`;}while(originals.has(id));return id;
+  });
+  return [...new Set(result.removed.map(cue=>originals.get(cue.id)).filter(Boolean))];
+}
+
+export function sweepContainedCues(changedCues) {
+  if (!State.overwriteMode || State.overwriteKeep) return false;
+  const {changed}=sweepCueList(changedCues,State.cues);
+  if(changed) pruneSelection();
+  return changed;
 }
 
 export function addCue(start, end, text, track, { historyLabel = '新增字幕' } = {}){
@@ -436,6 +455,24 @@ export function finalizeCueTimeEdit(cue, edge, {select=true,render=true}={}) {
   if(render) { emit('render:all'); emit('render:selection'); }
 }
 
+export function planCueTimeEdit(cue,operation,value){
+  const next={...cue},frame=1/getExactFps(State.fps||25);
+  let edge=operation;
+  if(value===null){next.timed=false;edge='both';}
+  else if(operation==='start'){
+    const start=subtitleTimeOnFrame(Number(value)||0,0,next.timed===false?Infinity:next.end-frame);
+    if(start==null) return {ok:false,reason:'no-frame-room'};
+    next.start=start;
+    if(next.timed===false){next.end=subtitleTimeOnFrame(next.start+1,next.start+frame);next.timed=true;}
+  }else if(operation==='end'){
+    next.end=subtitleTimeOnFrame(Number(value)||0,next.timed===false?frame:(next.start||0)+frame);
+    if(next.timed===false){next.start=subtitleTimeOnFrame(Math.max(0,next.end-1),0,next.end-frame);next.timed=true;edge='both';}
+  }else return {ok:false,reason:'unsupported-operation'};
+  const changed=next.start!==cue.start||next.end!==cue.end||(next.timed!==false)!==(cue.timed!==false)||!!cue._tempEnd;
+  delete next._tempEnd;
+  return {ok:true,next,edge,changed};
+}
+
 /* 一般字幕編輯的單一 public seam。UI adapter 只提供「要改什麼」；
    鎖軌、時間不變量、選取、History 與 invalidation 都在同一筆交易內完成。 */
 export function editCue({ cueId, operation, value, baseline }) {
@@ -482,33 +519,13 @@ export function editCue({ cueId, operation, value, baseline }) {
   if (operation === 'start' || operation === 'end') {
     const action = operation === 'start' ? '修改字幕起點' : '修改字幕終點';
     if (cueTrackLocked(cue, action)) return { ok: false, reason: 'track-locked' };
-    const before = { start: cue.start, end: cue.end, timed: cue.timed !== false, temporary:!!cue._tempEnd };
-    const frame=1/getExactFps(State.fps || 25);
-    let edge = operation;
-    if (value === null) {
-      cue.timed = false;
-      edge = 'both';
-    } else if (operation === 'start') {
-      const start=subtitleTimeOnFrame(Number(value)||0,0,cue.timed===false ? Infinity : cue.end-frame);
-      if(start==null) return {ok:false,reason:'no-frame-room'};
-      cue.start = start;
-      if (cue.timed === false) {
-        cue.end = subtitleTimeOnFrame(cue.start+1,cue.start+frame);
-        cue.timed = true;
-      }
-    } else {
-      cue.end = subtitleTimeOnFrame(Number(value)||0,cue.timed===false ? frame : (cue.start||0)+frame);
-      if (cue.timed === false) {
-        cue.start = subtitleTimeOnFrame(Math.max(0,cue.end-1),0,cue.end-frame);
-        cue.timed = true;
-        edge = 'both';
-      }
-    }
-    const changed = cue.start !== before.start || cue.end !== before.end || (cue.timed !== false) !== before.timed || before.temporary;
+    const plan=planCueTimeEdit(cue,operation,value);
+    if(!plan.ok) return plan;
+    Object.assign(cue,plan.next);
     // 明確編輯時間後，舊 In 的暫存終點不得在下次選取時重新收尾。
     delete cue._tempEnd;
-    if (!changed) return { ok: true, changed: false, cue };
-    finalizeCueTimeEdit(cue, edge);
+    if (!plan.changed) return { ok: true, changed: false, cue };
+    finalizeCueTimeEdit(cue, plan.edge);
     const label = value === null ? '清除時間碼' : operation === 'start' ? '修改起點' : '修改終點';
     recordHistory(label + cueSuffix(cue));
     return { ok: true, changed: true, cue };

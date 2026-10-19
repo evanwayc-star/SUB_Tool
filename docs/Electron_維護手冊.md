@@ -1,436 +1,421 @@
 # SUB Tool Electron 維護手冊
 
-這份文件只談桌面邊界：視窗、preload、IPC、檔案能力、ffmpeg、mpv、匯出佇列與封裝。Renderer 架構見 [技術架構說明](技術架構說明.md)。
+本文件說明桌面邊界、可呼叫 IPC、原生程序及故障排查。開發與發布步驟見[開發與驗證](開發與驗證.md)；renderer 資料流見[技術架構說明](技術架構說明.md)，時間契約見 [FPS／時碼一致性](FPS_時碼一致性.md)。
 
 ## 1. 系統總覽
 
 ```mermaid
 flowchart LR
-  R[Renderer] -->|window.subtool| P[preload.js]
-  P -->|validated IPC| M[main.js]
-  M --> F[file authority]
-  M --> I[media intake]
-  M --> MP[media probe]
+  R[Renderer] -->|window.subtool| P[preload]
+  P -->|受限 IPC| M[main adapters]
+  M --> F[檔案能力]
+  M --> I[媒體 intake]
   M --> V[mpv host]
-  M --> Q[export queue]
+  M --> Q[匯出佇列]
+  I --> E[FFmpeg execution]
   Q --> D[delivery runner]
-  I --> N[ffmpeg]
-  MP --> FP[ffprobe]
-  D --> MP
-  D --> N
+  D --> W[watchdog / artifact]
+  M --> B[media probe]
+  D --> B
 ```
 
-| 模組 | 唯一責任 |
-|---|---|
-| `electron/main.js` | BrowserWindow、IPC 註冊與 adapter 組裝 |
-| `electron/preload.js` | contextBridge 與 renderer 輸入型別守門 |
-| `electron/local-resource.js` | `subtool-local:` capability URL 與應用視窗導航限制 |
-| `electron/file-authority.js` | 精確 read／write／project／screenshot／delivery 權限 |
-| `electron/project-file-authority-engine.js` | 可信專案讀取、媒體能力衍生、Save As／覆寫准入與近期清單 |
-| `electron/settings-file.js` | settings.json 與快捷鍵 key.json 共用的原子讀寫交易 |
-| `electron/screenshot-output.js` | 截圖編號、輸出保留、暫存寫入與發布，以及退出時等待和清理 |
-| `electron/directory-output.js` | 所選輸出目錄的實體路徑核對、私有暫存寫入與安全替換 |
-| `electron/media-probe.js` | metadata 探測、並行准入、取消與原生 close 屏障 |
-| `electron/media-intake-runtime.js` | Proxy、波形、聲道快取與串流 lease |
-| `electron/media-source-clock.js` | FFmpeg seek 捨入與音訊 PTS 對齊 filter；原點映射共用 shared 規則 |
-| `electron/mother-source-evidence.js` | 母素材 stat 與內容取樣證據，提供同步及非同步讀取 |
-| `electron/clip-frame-cache.js` | 已授權母素材的固定畫面 PNG、來源核對與私有 staging |
-| `electron/clip-audio-cache.js` | 已授權來源的反向片段預覽 WAV、內容指紋、完整性檢查與私有 staging |
-| `electron/ffmpeg-execution-engine.js` | ffmpeg／ffprobe 路徑、encoder 能力與程序執行 |
-| `electron/audio-normalization-runtime.js` | 聲量量測、音量平衡階段與原生程序取消 |
-| `electron/vocal-waveform-runtime.js` | 人聲波形模型的母素材 PCM 分段讀取、大小限制與逐 sender 取消 |
-| `electron/vocal-waveform-fingerprint.js` | 人聲波形來源指紋的既有 namespace 介面 |
-| `electron/mpv-host.js` | Windows mpv 視窗、IPC 與精準畫格呈現 |
-| `electron/export-queue.js` | 背景排程、並行、停止、重試與持久化 |
-| `electron/delivery-runner.js` | 單一交付工作的 ffmpeg 交易 |
-| `electron/export-watchdog.js` | ffmpeg 子程序與 owner process 崩潰隔離 |
-| `electron/export-artifact.js` | watchdog 內部的成品準備、封裝驗證與私有素材清理 |
+先找到持有資料及生命週期的 owner，再修改 adapter。`main.js` 負責組裝，不重寫已由其他模組擁有的規則。
 
-`main.js` 可以組裝，不應重新實作各 owner 已擁有的規則。
+| Owner | 責任 |
+|---|---|
+| `main.js` | 視窗、IPC 註冊、平台設定及 owner 組裝 |
+| `preload.js` | 主頁面 contextBridge 及部分型別／大小檢查 |
+| `queue-preload.js`、`compare-preload.js` | 各獨立視窗的最小 bridge |
+| `local-resource.js` | 不透明本機資源 URL 與應用頁導航限制 |
+| `file-authority.js`、`ipc-guards.js` | 精確檔案能力及主程序准入 |
+| `project-file-authority-engine.js` | 可信專案讀寫、媒體能力、最近清單及重連 |
+| `settings-file.js` | 設定與快捷鍵的原子讀改寫 |
+| `directory-output.js`、`style-directory-import.js` | 所選目錄的安全輸出／樣式讀取 |
+| `screenshot-output.js` | 截圖路徑 reservation、寫入、發布及退出收尾 |
+| `media-probe.js` | metadata、音訊及 bitrate 探測、並行與 close 屏障 |
+| `mother-source-evidence.js` | 來源 stat 及內容取樣證據 |
+| `media-intake-runtime.js` | Proxy／音訊／波形快取、串流及 intake coordinator |
+| `media-source-clock.js` | FFmpeg seek 捨入及音訊 PTS filter；純原點映射使用 shared |
+| `clip-frame-cache.js`、`clip-audio-cache.js` | 固定畫面 PNG、反向片段 WAV 的私有 staging 及完整性 |
+| `ffmpeg-execution-engine.js` | 工具解析、encoder、stderr 解析及程序執行 |
+| `audio-normalization-runtime.js` | 聲量量測、平衡階段及原生取消 |
+| `vocal-waveform-runtime.js` | 人聲分析的受限 PCM 讀取與逐 sender 取消 |
+| `vocal-waveform-fingerprint.js` | 人聲波形來源指紋的 namespace adapter |
+| `speech-audio-compressor.js` | 辨識 WAV 的受限壓縮及取消 |
+| `mpv-host.js` | Windows mpv、named pipe、視窗及呈現證據 |
+| `compare-window.js` | 比較視窗身分、快照及 revision |
+| `export-queue.js`、`queue-store.js` | 排程、狀態、journal、歷史及復原 |
+| `delivery-runner.js`、`export-plan.js` | 交付准入／probe 與純交付計畫 |
+| `export-watchdog.js`、`export-lease.js` | 原生 owner、停止、跨程序輸出 lease 及最終裁定 |
+| `export-artifact.js` | 成品準備、封裝、驗證、發布及私有素材清理 |
+| `airline-*`、`mod-fhd-transport.js`、`disc-*` | 各交付格式的規格、封裝或結構驗證 |
 
 ## 2. 安全與檔案能力
 
-主視窗設定：
-
-```js
-contextIsolation: true
-nodeIntegration: false
-webSecurity: true
-```
-
-Renderer 沒有 Node.js，也不能用任意路徑字串要求 main 讀寫檔案。
+主視窗使用 `contextIsolation:true`、`nodeIntegration:false`、`webSecurity:true`。Preload 只暴露指定能力，不暴露 `ipcRenderer` 或任意 Node 呼叫。部分入口在 preload 檢查型別，主程序仍須自行驗證輸入與能力；不能假設每個 bridge 都已做完整驗證。
 
 ### 拖放
 
-- Preload 用 `webUtils.getPathForFile()` 從真實 File 取得路徑。
-- 一般媒體交給 `fs:authorizeDroppedFile`，只授權精確來源。
-- `.subtool`／`.json` 不走一般檔案授權，直接進 `project-file-authority-engine` 的可信專案讀取。
-- Renderer 自己提供的 path／base64 不可把能力擴張到其他檔案。
+Preload 以 `webUtils.getPathForFile()` 從真正的 File 取得路徑。一般媒體送 `fs:authorizeDroppedFile` 授予精確來源能力；`.subtool`／`.json` 走可信專案開啟入口，不使用一般拖放授權。Renderer 提供的 path 或 base64 不能擴張能力。
 
-樣式資料夾匯入由 `style-directory-import.js` 遞迴讀取所選目錄中的 JSON，保留相對路徑；遇到 junction／symlink 不追隨。IPC 直接回傳內容，不授予 renderer 整個目錄的檔案讀取能力。
-
-`dialog:exportDirectory` 的原生目錄選取及准入仍由 main 負責，字幕與樣式資料夾輸出共用 `directory-output.js`。它同時檢查相對路徑與實體父目錄，拒絕 junction／symlink 子路徑；先在所選根目錄以 `wx` 寫入私有暫存檔，完成同步與關閉後再核對目錄及檔案身分，最後以 rename 替換目標。既有 hardlink 只替換所選檔名，不截斷其他位置共用的檔案；失敗只清理本次持有的暫存檔。
+樣式資料夾匯入只讀所選根目錄內的 JSON，不追 junction／symlink，回傳內容而不授予整目錄讀取權。目錄輸出同時檢查相對名稱與實體父目錄，在所選根內以 `wx` 建私有暫存檔；完成 write／sync／close 後重核身分，再 rename 替換。遇既有 hardlink 只替換該檔名，不能截斷其他位置共用的檔案。
 
 ### 專案
 
-- 開啟專案：main 先讀可信 bytes，再授權專案內已宣告媒體。
-- 原生對話框、最近專案、啟動參數與 OS 開檔都經 `projectWorkspace.open()` 的同一個較新請求優先序列；舊讀取完成後不能再授權、寫入最近清單或交給 renderer。
-- Save As：每個 media path 必須已具 read capability。
-- 寫入成功後才更新 current project 與 relink 狀態。
-- 專案保存先以 `wx` 寫入同目錄的私有暫存檔、關閉後再 rename 提交；寫入或提交失敗保留原專案，能力與近期清單只在提交成功後更新。
-- 最近開啟清單回傳固定身分 token；開啟時只在目前可信清單解析該 token。確認存檔造成清單重排，也仍開啟原本點選的專案；已清除的項目失效，renderer 不能回傳任意路徑。
-- 自動重連只接受同名的一般檔案，不把同名目錄當成媒體；搜尋與 read capability 授予仍由 main 持有。
+可信 bytes 先由 main 讀取，再衍生專案宣告媒體的能力。原生選檔、最近清單、啟動參數與 OS 開檔共用 `projectWorkspace.open()` 的較新請求優先規則；過期讀取不得再授權、寫最近清單或交給 renderer。
+
+Save As 的媒體路徑必須已有讀權。專案寫入同目錄私有暫存檔，關閉後 rename；成功才更新目前專案、重連與近期清單。失敗保留原檔。最近項目以穩定 token 開啟，清單重排不改變原點選目標；清除後 token 失效。重連只接受同名一般檔案，不把目錄當媒體。
 
 ### 本機資源 URL
 
-`file://` 不作為一般資源通道。`local-resource.js` 發出帶有 48 字元十六進位隨機 token 的不透明 `subtool-local:` URL。持有 URL 即可提出資源請求；每次讀取仍核對：
+一般媒體與字型使用 `subtool-local:` capability URL。隨機 token 對應精確檔案；每次讀取仍核對 token、目前 `canExposeFileURL()`、方法、一般檔案及 Range。token 不是整目錄或永久授權，不以關閉 `webSecurity` 解決載入問題。
 
-- token 格式與既有精確檔案映射
-- `FileAuthority.canExposeFileURL()` 的目前讀取資格
-- HTTP 方法、實際一般檔案與允許的 range
-
-token 保存在資源伺服器的映射中，有效性由該映射與當前檔案能力共同決定。視窗的應用頁導航限制由下方的 `protectApplicationWindow()` 另行負責。
-
-不要用關閉 `webSecurity` 解決本機字型或媒體載入。
-
-主視窗、佇列與字幕比較視窗都由 `protectApplicationWindow()` 限制為自己的應用 HTML。只有明確以 `--dev` 啟動時，主視窗才允許指定開發 origin 與 pathname；禁止其他導航、重新導向及子視窗，主視窗的外部 HTTP(S) 連結交給系統瀏覽器。
+主頁面、佇列及比較視窗由 `protectApplicationWindow()` 限制在自己的 HTML；明確 `--dev` 才允許主頁面的指定開發 origin／pathname。其他導航、重新導向及子視窗受阻擋，允許的外部 HTTP(S) 連結交給系統瀏覽器。
 
 ### 設定檔持久化
 
-`settings-file.js` 統一 settings.json 與快捷鍵 key.json 的讀改寫，兩檔各自持有實例：renderer 設定、近期專案、最近目錄與快捷鍵都先寫相鄰暫存檔，再以 rename 替換。解析失敗時先保存 `.corrupt-*` 原始位元組副本，保存失敗則拒絕覆寫。寫入失敗會保留原檔，並向呼叫端回報失敗；renderer 的設定 adapter 不把明確的 false 轉成成功。
+`settings-file.js` 分別持有 settings.json 與 key.json。更新先寫相鄰暫存檔，再 rename；解析失敗須先保存 `.corrupt-*` 原始 bytes，無法備份就拒絕覆寫。失敗須傳回 caller，不能把 false 視為保存成功。設定位置與驗收隔離方式見[CDP 流程](開發與驗證.md#3-真機驗證cdp)。
 
 ## 3. Preload／IPC 介面
 
-完整可呼叫 API 以 `electron/preload.js` 為唯一真相來源；文件只列分組，避免手抄每個函式後漂移。
+以下逐條對應目前三份 preload。一般呼叫是 `invoke`／Promise；標為「事件」者是 main→renderer 訂閱，標為 `send` 者沒有 invoke 回覆。新增通道須同步更新 main 的准入、preload、契約／安全測試及本表。
 
-| `window.subtool` 分組 | 用途 |
-|---|---|
-| `status`、`minimizeApp`、`closeApp` | App 狀態與生命週期 |
-| `openMedia`、`openAudio`、`openProject` | 原生選檔 |
-| `saveProject`、`importSub`、`exportSub` | 專案與字幕對話框 |
-| `recentProjects*` | 最近專案 |
-| `authorizeDroppedFile`、`openDroppedProject` | 拖放准入 |
-| `fileURL`、`stat`、`listDir`、`readB64` | 受權檔案能力 |
-| `reserveScreenshotPath`、`writeScreenshot`、`releaseScreenshotPath` | 保留、消耗或釋放由截圖 owner 持有的輸出 |
-| `probe`、`ingest`、`streamIngest` | 媒體 probe／ingest |
-| `releaseStream` | 結束串流讀取及其快取目錄 lease |
-| `makeProxy`、`extractAudio`、`waveAudio` | 預覽快取 |
-| `clipFrame` | `ffmpeg:clipFrame`：從已授權母素材擷取指定來源影格，生成可重建的固定畫面預覽 PNG；交付仍讀原影片與固定來源時間 |
-| `reverseAudio` | `audio:reverse-clip`：從已授權來源的升冪 in／out 與音訊 stream 建立反向預覽 WAV，保持來源聲道；匯出仍從母素材編譯反向音訊 |
-| `vocalWaveChunk`、`cancelVocalWaveChunk` | `audio:vocal-wave-chunk`／`audio:vocal-wave-cancel`：讀取已授權母素材的來源時間片段，供人聲模型分析 |
-| `vocalWaveFingerprint` | `audio:vocal-wave-fingerprint`：核對已授權母素材的路徑、stat 與前／中／後段內容，回傳持久波形快取的來源指紋 |
-| `analyzeAudioLoudness` | 回傳有效聲量量測，失敗向 renderer 傳遞 |
-| `normalizeAudio`、`cancelAudioNormalization`、`onAudioNormalizeProgress` | 音訊平衡處理與逐工作進度／取消 |
-| `compressSpeechAudio` | 雲端辨識前的受限音訊壓縮 |
-| `exportVideo`、`stopExport` | 提交／停止交付 |
-| `openQueueMonitor`、`onQueueStatus` | 佇列監控 |
-| `config*`、`keys*` | 偏好與快捷鍵 |
-| `mpv.*` | Windows mpv adapter |
+### 主頁面：檔案、專案與應用
 
-Preload 原則：
+API 前綴皆為 `window.subtool`。`isDesktop` 是值；`getFilePath(file)` 只呼叫 `webUtils`，不走 IPC。
 
-- 所有 path、ArrayBuffer、request id 與選項先做型別／大小檢查。
-- Renderer callback 不直接取得 Electron event。
-- 事件訂閱需要清理舊 listener，避免重複通知。
-- 新 IPC 要同時補 main 白名單、preload guard、測試與本文件分組。
+| API | 通道 | 輸入或用途 |
+|---|---|---|
+| `status()` | `app:status` | 平台、架構、工具偵測與實際 encoder |
+| `authorizeDroppedFile(file)` | `fs:authorizeDroppedFile` | preload 自真實 File 取得路徑 |
+| `openDroppedProject(file)` | `project:openDroppedFile` | 真實專案 File 的可信開啟 |
+| `fileURL(path)` | `fs:fileURL` | 取得受控資源 URL |
+| `stat(path)` | `fs:stat` | 已授權路徑資訊 |
+| `listDir(path)` | `fs:listDir` | 受控目錄列舉 |
+| `findRelinkTarget(projectPath, oldMediaPath)` | `fs:findRelinkTarget` | 原專案的重連搜尋 |
+| `showSourceInFolder(path)` | `app:showSourceInFolder` | 定位已授權來源 |
+| `fontsList()` | `fonts:list` | 字型清單與內容 |
+| `openMedia()` | `dialog:openMedia` | 原生媒體選檔 |
+| `openAudio()` | `dialog:openAudio` | 原生音訊選檔 |
+| `openProject()` | `dialog:openProject` | 原生專案開啟 |
+| `recentProjects()` | `project:recentList` | 最近項目 token 清單 |
+| `openRecentProject(token)` | `project:openRecent` | 解析可信 token |
+| `clearRecentProjects()` | `project:clearRecent` | 清除最近清單 |
+| `saveProject(name, b64)` | `dialog:saveProject` | Save As 對話框及寫入 |
+| `importSub(kind)` | `dialog:importSub` | 字幕／文字匯入 |
+| `exportSub(name, b64, ext)` | `dialog:exportSub` | 字幕／文字輸出 |
+| `exportDirectory(files)` | `dialog:exportDirectory` | 所選目錄安全批次輸出 |
+| `importDirectory()` | `dialog:importDirectory` | 樣式目錄 JSON 讀取 |
+| `importFont()` | `dialog:importFont` | 自備字型匯入 |
+| `readB64(path)` | `fs:readB64` | 已授權單檔內容 |
+| `writeProject(path, b64)` | `fs:writeProject` | 已准入專案寫入 |
+| `reserveScreenshotPath(directory, suffix)` | `fs:reserveScreenshotPath` | 原子保留下一個 Shot 檔名 |
+| `releaseScreenshotPath(path)` | `fs:releaseScreenshotPath` | 釋放未消耗 reservation |
+| `writeScreenshot(path, b64)` | `fs:writeScreenshot` | 消耗 reservation 並發布 JPEG |
+| `openPath(path)` | `app:openPath` | 開啟允許的路徑 |
+| `openExternal(url)` | `app:openExternal` | 允許的外部 URL |
+| `cacheInfo()` | `cache:info` | 管理快取資訊 |
+| `cacheCleanOrphans()` | `cache:cleanOrphans` | 保守清除孤兒 |
+| `cacheClearAll(src)` | `cache:clearAll` | 保留 writer／reader 的快取清理 |
+| `configLoad()` | `config:load` | 讀設定 |
+| `configSave(data)` | `config:save` | 設定交易 |
+| `keysLoad()` | `keys:load` | 讀快捷鍵 |
+| `keysSave(data)` | `keys:save` | 快捷鍵交易 |
+| `getStartupFile()` | `app:getStartupFile` | 取得啟動時已接受的專案 |
+| `minimizeApp()` | `app:minimize` | 最小化主視窗 |
+| `closeApp()` | `app:close` | 請求主視窗關閉流程 |
+| `openCompareWindow(payload)` | `open-compare-window` | `send`，開比較視窗 |
+| `syncCompareWindow(payload)` | `sync-compare-window` | `send`，更新比較快照 |
+| `onCompareCommand(cb)` | `compare:command` | 事件，帶原 revision 的命令 |
+| `onCompareClosed(cb)` | `compare:closed` | 事件，比較視窗關閉 |
+| `onAppRequestClose(cb)` | `app:request-close` | 事件，renderer 執行關閉確認 |
+| `onOpenFile(cb)` | `app:open-file` | 事件，OS 接受的開檔 |
 
-獨立視窗：
+### 主頁面：媒體、音訊與交付
 
-- `queue-preload.js` 只暴露 queue monitor 需要的命令。
-- `compare-preload.js` 只暴露字幕比較同步命令。
-- 不要為方便直接重用整份主 preload。
+| API | 通道 | 輸入或用途 |
+|---|---|---|
+| `probe(path)` | `ffprobe` | 已授權來源 metadata |
+| `ingest(opts)` | `ffmpeg:ingest` | path／duration／needsProxy／audio／queue／sessionId／requestId |
+| `streamIngest(opts)` | `ffmpeg:streamIngest` | path／duration／audio／sessionId／requestId |
+| `cancelMediaIntake(scope)` | `ffmpeg:cancelIntake` | sessionId，及可選 requestId；sender 由 main 綁定 |
+| `releaseStream(streamLeaseId)` | `ffmpeg:releaseStream` | 只釋放同 sender 的串流 reader |
+| `makeProxy(path, duration)` | `ffmpeg:proxy` | 獨立預覽 Proxy |
+| `extractAudio(path, idx, duration, codec)` | `ffmpeg:extractAudio` | 來源音軌 stream 抽取及 copy／AAC fallback |
+| `waveAudio(path, duration)` | `ffmpeg:waveAudio` | 首條音軌波形 |
+| `clipFrame(request)` | `ffmpeg:clipFrame` | 已授權母素材 path、來源 time、fps |
+| `reverseAudio(request)` | `audio:reverse-clip` | path、遞增 in／out、sourceStream |
+| `vocalWaveFingerprint(path)` | `audio:vocal-wave-fingerprint` | 人聲波形來源指紋 |
+| `vocalWaveChunk(request)` | `audio:vocal-wave-chunk` | path、來源 start／duration、requestId、sourceStream／sourceChannel |
+| `cancelVocalWaveChunk(requestId)` | `audio:vocal-wave-cancel` | 同 sender 的 PCM 讀取取消 |
+| `normalizeAudio(path, options, duration, requestId)` | `audio:normalize` | 音量平衡工作 |
+| `cancelAudioNormalization(requestId)` | `audio:normalize-cancel` | 平衡工作取消 |
+| `analyzeAudioLoudness(path, duration)` | `audio:analyzeLoudness` | 有效聲量量測 |
+| `onAudioNormalizeProgress(cb)` | `audio:normalize-progress` | 事件；回傳該訂閱的解除函式 |
+| `cleanupAudio(path)` | `ffmpeg:cleanup` | 清理由主程序管理的產物 |
+| `compressSpeechAudio(bytes, requestId)` | `speech:compressAudio` | 44–20,000,000 bytes WAV／typed array |
+| `cancelSpeechAudioCompression(requestId)` | `speech:cancelCompression` | 同工作辨識壓縮取消 |
+| `exportVideo(opts)` | `ffmpeg:exportVideo` | 凍結交付快照的逐份准入 |
+| `stopExport(jobId)` | `ffmpeg:stopExport` | 停止指定交付，與 intake 取消分開 |
+| `openQueueMonitor()` | `queue:openMonitor` | 顯示佇列視窗 |
+| `queueResume()` | `queue:resume` | 恢復排程 |
+| `onQueueStatus(cb)` | `queue-status`、`queue:getStatus` | 訂閱事件並 invoke 取得初始狀態 |
+| `onProgress(cb)` | `task-progress` | 事件；須依工作歸屬及明確 outcome 處理 |
 
-佇列 preload 保持 sandbox 的 `require('electron')` 限制。`queueAPI.exactFrameRate()` 透過 `queue:exactFrameRate` 向 main 同步取得共用格率規則的純數值結果，並保留最多 64 筆快取；main 只接受存活佇列視窗送出的數字或字串。每條路徑只設定一次 `event.returnValue`，成功回覆精確格率、拒絕立即回覆 `null`；這個 setter 會立刻送出回應，不可先寫預設值再覆寫。這個 handler 不做 I/O；格率與時碼契約見 [FPS／時碼一致性](FPS_時碼一致性.md)。
+### 主頁面：mpv
 
-`compare-window.js` 持有視窗 identity 與最新快照；載入 HTML 期間收到的同步取代待送資料，`did-finish-load` 只送最新值。比較頁的右鍵選單保存開啟時的 revision，更新資料不能替舊字幕配對補上新 revision。
+API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。時間軸映射留在 renderer 序列層。
+
+| API | 通道 | 輸入或用途 |
+|---|---|---|
+| `detect()` | `mpv:detect` | 支援狀態及工具位置 |
+| `launch(opts)` | `mpv:launch` | 已授權來源與啟動選項 |
+| `seek(time, options)` | `mpv:seek` | 來源秒數、exact |
+| `present(time, options)` | `mpv:present` | exact、waitForFrame、tolerance、frameTarget／frameStart／frameDuration |
+| `cancelPresent()` | `mpv:cancelPresent` | 撤銷待完成呈現 |
+| `loadfile(path)` | `mpv:loadfile` | 已授權來源切換 |
+| `screenshot(path)` | `mpv:screenshot` | main 再驗輸出路徑，等待實際擷取 |
+| `play()` | `mpv:play` | 播放 |
+| `pause()` | `mpv:pause` | 暫停 |
+| `direction(value)` | `mpv:direction` | 播放方向 |
+| `mute(value)` | `mpv:mute` | 靜音 |
+| `rate(value)` | `mpv:rate` | 速度 |
+| `brightness(value)` | `mpv:brightness` | 亮度 |
+| `setBounds(bounds)` | `mpv:setBounds` | 視窗幾何 |
+| `show(value)` | `mpv:show` | 可見性 |
+| `setGuide(guide)` | `mpv:setGuide` | 字幕 guide |
+| `setImageGuide(data)` | `mpv:setImageGuide` | 圖片 guide |
+| `setTimecodeWatermark(data)` | `mpv:setTimecodeWatermark` | 受限 text／rect payload |
+| `clearTimecodeWatermark()` | `mpv:clearTimecodeWatermark` | 清監看 TC |
+| `subSet(ass)` | `mpv:subSet` | live ASS |
+| `subVisible(value)` | `mpv:subVisible` | 字幕可見性 |
+| `quit()` | `mpv:quit` | 關閉 mpv |
+| `onEvent(cb)` | `mpv:event` | 事件，替換原 mpv listener |
+
+### 獨立視窗
+
+佇列只使用 `window.queueAPI`，不重用主頁面 preload。`exactFrameRate()` 是同步純值查詢；sandbox preload 只 require Electron，由 main 呼叫 shared 規則，最多快取 64 筆。main 只接受存活佇列 sender 的數字或字串，每條路徑只設定一次 `event.returnValue`；拒絕立即回 null，不能先寫預設值再覆寫。
+
+| queueAPI | 通道 | 用途 |
+|---|---|---|
+| `exactFrameRate(value)` | `queue:exactFrameRate` | `sendSync`，精確格率純值 |
+| `getAll()` | `queue:getAll` | 工作及排程快照 |
+| `setPause(value)` | `queue:pause` | 排程暫停 |
+| `setConcurrency(value)` | `queue:setConcurrency` | 並行度 |
+| `stopJob(id)` | `queue:stopJob` | 停止 |
+| `retryJob(id)` | `queue:retryJob` | 重試 |
+| `clearJob(id)` | `queue:clearJob` | 移除可清工作 |
+| `clearCompleted()` | `queue:clearCompleted` | 清完成紀錄 |
+| `reorderJob(id, newIndex)` | `queue:reorderJob` | 排隊順序 |
+| `updateDelivery(id, patch)` | `queue:updateDelivery` | format／targetH／kbps，路徑與尺寸由 main 推導 |
+| `showMainWindow()` | `app:showMainWindow` | 回主視窗 |
+| `openPath(path)` | `app:openPath` | 開允許的成品 |
+| `showItemInFolder(path)` | `app:showItemInFolder` | 定位允許的成品 |
+| `onUpdate(cb)` | `queue:update` | 事件，替換原更新 listener |
+
+比較視窗的 `window.subtool` 只有兩項：
+
+| API | 通道 | 用途 |
+|---|---|---|
+| `onUpdateData(cb)` | `compare:update-data` | 事件，接收最新快照 |
+| `sendCommand(command)` | `compare:command` | `send`，保留建立時 revision |
+
+Callback 包裝不把 Electron event 交給頁面。部分 API 替換舊 listener，部分只追加；不能假定每項訂閱都回傳解除函式。`compare-window.js` 在載入期間只保留最新快照；舊選單命令不得改綁新 revision。
 
 ## 4. ffmpeg／ffprobe 整合
 
 ### Native tool 解析
 
-`ffmpeg-execution-engine.js` 依目前平台與架構選擇封裝工具；開發環境可回退到受控的專案／環境位置。正式安裝包不可依賴使用者 PATH。
+`ffmpeg-execution-engine.js` 依平台與架構尋找工具。開發可使用環境／專案 fallback，正式包不得依賴使用者 PATH。
 
-Windows 封裝需要：
+| 目標 | 封裝位置 |
+|---|---|
+| Windows x64 | `electron/ffmpeg/ffmpeg.exe`、`ffprobe.exe` |
+| macOS arm64 | `electron/ffmpeg/darwin-arm64/ffmpeg`、`ffprobe` |
 
-- `electron/ffmpeg/ffmpeg.exe`
-- `electron/ffmpeg/ffprobe.exe`
+`verify-native-binaries.js` 核對必要檔案、大小、執行權限及清單指定雜湊，不等於已執行工具驗架構或 codec。Mac 準備 helper 另實際驗 arm64、ASS filter、encoder 及 MXF demuxer。
 
-macOS arm64 封裝需要：
-
-- `electron/ffmpeg/darwin-arm64/ffmpeg`
-- `electron/ffmpeg/darwin-arm64/ffprobe`
-
-`scripts/release/verify-native-binaries.js` 在封裝前依目標平台與架構選出必要檔案，檢查檔案存在、大小、執行權限及需求清單指定的 SHA-256；這一步不執行工具來檢查架構或編解碼能力。Apple Silicon 的 arm64、ASS filter、encoder 與 MXF demuxer 能力由 `scripts/release/prepare-macos-native-binaries.js` 在準備工具時實際執行驗證；準備流程見[開發與驗證](開發與驗證.md#apple-silicon-本機測試版)。
-
-`media-probe.js` 統一管理 metadata、音訊存在、起始偏移與 bitrate 探測，最多同時執行兩個 ffprobe。相同指令的無取消請求共用進行中的工作，完成或失敗後即移除，避免素材被替換後沿用舊資訊；帶 `AbortSignal` 的請求各自持有取消生命週期。排隊不計入逾時，原生行程啟動後的預設上限為 60 秒，容許慢速儲存的暫時延遲。逾時或取消時仍等待 native `close`；等待期間若有其他行程取消，繼續等待最新終止屏障。無法確認關閉的行程會阻止後續探測。
+`media-probe.js` 最多同時執行兩個 ffprobe。相同指令的無取消請求共用進行中工作，結束即移除；帶 AbortSignal 的請求各自持有生命週期。排隊不計入預設 60 秒執行期限。取消或逾時仍等待真正 `close`；無法確認終止的行程會擋住後續准入，不能只因 caller Promise 已結束便釋放。
 
 ### 媒體 intake
 
-`media-intake-runtime.js` 管理：
+Runtime 接受 probe 結果，建立 720p 預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。
 
-1. 來源指紋
-2. 720p 預覽 Proxy
-3. 逐聲道音訊快取
-4. 低取樣波形
-5. 短 GOP 倒帶 Proxy
-6. 串流 lease 與清理
+來源證據包含完整路徑、size／mtime／ctime／dev／ino 及前／中／尾段取樣。讀取前後核對檔案身分，來源途中替換或截斷即拒絕。這不是整檔 checksum，也不授權路徑。各 owner 仍持有自己的 namespace、規格與 capability／realpath 檢查；`source-v3` 隔離未依影片時鐘對齊的舊 intake。
 
-intake 接受既有探測結果，metadata 的取得與探測程序生命週期由上節的 `media-probe.js` 持有。
+音訊計畫在 split／pan／mix 前保留實際 PTS，轉成影片來源時鐘，再補前置靜音或裁負時間。不能先將每個 stream STARTPTS 歸零後補猜測延遲，否則 AAC priming 可能重裁。Proxy 影片歸零；波形、固定畫面、人聲 PCM、反向音訊與交付也必須沿用來源時鐘。FFmpeg seek 與剩餘偏移交給 `media-source-clock.js`，不要複製換算。
 
-快取只供預覽。交付准入使用 intake runtime 的分類規則，拒絕管理快取或 `.subtool_Cache` 中的 `proxy.mp4`、`wave.wav`、`ch_01.m4a` 及舊版 `ch1.m4a`，也會檢查音訊路由計畫內的來源；快取外同名的合法母素材仍可交付。
-母素材證據由 `mother-source-evidence.js` 統一讀取：完整來源路徑、size／mtime／ctime／dev／ino，以及前 1 MiB、中／尾段內容取樣。先取得開啟檔案的 stat，再讀取樣本，最後核對路徑目前指向的 stat；讀取期間替換或截斷來源會拒絕產生指紋。同步介面供 intake 使用，非同步介面供固定畫面、人聲波形及反向音訊使用。各快取仍持有自己的 namespace、產物規格與 capability／realpath 檢查；指紋不授權路徑，也不是整檔 checksum。固定畫面 key 使用新版證據，不能再命中只靠 size／mtime 的舊 PNG；intake 的 `source-v3` namespace 隔離未按影片來源時鐘對齊的舊音訊快取。
+快取完整性須符合本次聲道數、stream／channel 座標及非空產物。Proxy-only 不能滿足有音訊的請求，部分 sidecar 不能遮住完整中央快取。只補缺件，寫本次私有 generation；來源重核及原子 metadata 提交成功後才發布成功。失敗或取消清本次未提交 generation，保留先前 metadata 及完成檔案。沒有按天過期規則；孤兒清理遇權限或暫時 I/O 錯誤，不能當作無效快取刪除。
 
-Probe 保留容器時鐘相對影片起點的 `timestampOffset`。批次與串流 intake 共用一份音訊計畫，在切聲道與混音之前保留實際 audio PTS、轉到影片來源時鐘，再用 resampler 補前置靜音或裁去負時間。單獨產生首條音軌波形的 `ffmpeg:waveAudio` 也讀同一 probe 描述，使用 `sourceAudioClockFilter()`；不能另以零起點解碼而丟掉前置靜音。不能先把每條 audio stream 重設 STARTPTS 再依 header 加回延遲，否則 AAC decoder 已去除的 priming 可能再被裁一次。Probe 的對外時長也以影片起點為零：Matroska／WebM 的容器 duration 表達結束 PTS，MOV 等格式表達容器時長，須按各自語意換算並保留較晚結束的音訊尾端。Proxy 的影片起點也歸零；驗證須比對實際 PCM 的開聲位置、首格內容與公開匯入後的序列時長。
+`ingest` 與 `streamIngest` 共用 coordinator，直到完整背景 completion 才允許下一個 writer。新 caller 必須提供每次工作區取代或整個 session 取消後唯一的 sessionId，以及每份工作唯一的 requestId；兩者都是非空且不超過 128 字元的字串。main 從 event 綁定 sender，不採信 payload 的 sender。同專案首次加影片、保留既有外音的 reset 沿用目前 session，避免取消合法的外音準備。
 
-固定畫面、反向音訊、人聲 PCM 與交付 runner 同樣讀取 probe 的來源時鐘。FFmpeg input `-ss` 使用容器相對時間；`media-source-clock.js` 的 `sourceClockSeek()` 統一將影片來源時間換成實際 seek，並回傳捨入後的來源位置與剩餘 PTS 偏移。音訊 filter 依實際 seek 對齊後再裁切，不把音訊 stream 的第一個 sample 當影片零秒。Runner 先取得每個母素材的時鐘，再傳給純交付計畫；固定畫面、反向音訊與人聲波形也更新快取 namespace，避免沿用舊時鐘產物。驗證使用容器從 0 或 5 秒開始、影片晚半秒開始的母素材，核對截格像素、PCM 頻率與成品尾格。
+| 操作 | 生命週期契約 |
+|---|---|
+| `ingest({…, queue:true})` | 排隊；不與仍在寫入的 stream 併行 |
+| `ingest({…, queue:false})`／`streamIngest()` | 取代同 sender 的 active／queued，不終止另一視窗工作 |
+| `cancelMediaIntake({sessionId, requestId})` | 撤銷指定原工作及遲到准入，其他 request 保留 |
+| `cancelMediaIntake({sessionId})` | 撤銷該 sender 的整個原 session，包括 queued 與已交付串流 reader |
+| 取消後重試 | request 使用新 id；整 session 取消後改用新 sessionId |
+| 換專案 | renderer 同步撤銷舊歸屬、切新 session，再取消舊 session |
 
-轉檔後會再次核對來源。孤兒清理會略過 writer 或串流 reader 持有的中央快取；舊版 sidecar 無法安全判定歸屬，清除目前快取時不會擅自刪除。
+取消會移除匹配 queued、標記 active lease、終止其 process 並收回 HTTP reader；Promise 要等 native `close` 與 cache 收尾。新工作可先入列，但不能越過此屏障。晚到舊 cancel 不能取消新 session／request，也不呼叫全域 FFmpeg 或 export 停止。拒絕錯誤為 `INGEST_SUPERSEDED`，訊息「媒體轉檔已被較新的載入取代」；Electron invoke 可能不保留自訂 code，renderer 也須以本地撤銷狀態判斷。
 
-清除全部快取保留 writer 與串流 reader 各自持有的目錄，只計算確實刪除的容量。快取命中的串流同樣取得 reader lease；writer 完成只釋放自己的引用，不能讓仍在播放的 Proxy 被清除。呼叫端以 `releaseStream()` 結束串流，或由 runtime 關閉時統一釋放，最後一個引用結束後才可清除該目錄。
+串流先交付 response／URL，writer 可繼續執行；可播不代表快取已提交。60 秒尚未可播則 `STREAM_READINESS_TIMEOUT`，停止 writer 並等 close，不接受晚到 code 0 或 process callback 補成成功。交付前失敗由 runtime 釋放 URL；交付後 caller 持有 streamLeaseId，明確 release 或 session 取消收尾。
 
-快取診斷使用 runtime 的 `inspectCache()`，共用 generation 路徑解析、圍堵及實際檔案完整性判定，不能自行取 basename 重組 sidecar 路徑。每個 growing MP4 HTTP request 持有自己的 reader 與輪詢 timer；客戶端斷線先收回該 request，串流 lease 仍由呼叫端持有。lease 釋放和 runtime 關閉會終止其全部 request；無效 URL／range 與讀取錯誤必須結束回應。mpv 載入只接受相同 client、世代與實際來源路徑的完成事件。
-
-`ingest` 與 `streamIngest` 共用當前請求的完整性判定：聲道數、來源 stream／channel 座標、波形與非空檔案均須符合。Proxy-only 快取不能滿足有音訊的請求；素材旁部分快取不能遮住中央已完整的快取。相同來源聲道配置只補缺少的 Proxy、聲道或波形，保留其他已完成檔案；來源配置不同則重建音訊組。初建與補建都寫入各自私有 generation，metadata 也使用各自暫存檔，成功原子提交後才發布工作成功終態。索引寫入或 rename 失敗會回報失敗、刪除本次未提交 generation，並保留先前索引與素材。孤兒清理保留仍有任何可用檔案的快取；權限或暫時 I/O 錯誤屬於無法確認，也不能刪除。快取沒有按天過期規則。串流在可播放回應前失敗時自行釋放未交付 lease，回應後才由 caller 持有釋放責任。
-
-串流在 60 秒內未達到可播放條件即回報 `STREAM_READINESS_TIMEOUT`，取消本次 writer，等待原生 close 後才釋放 lease。逾時後的 code 0 或晚到 process callback 不能發布成功或留下活 writer。
+Writer 與每個串流 reader 分別保護快取目錄；writer 完成不能讓仍在播放的快取被刪。每個 HTTP request 自有 reader／timer，斷線先結束該 request；release／cancel／runtime close 結束相關全部 request。清快取只計實際刪除 bytes，保留被引用目錄。診斷應呼叫 `inspectCache()` 共用完整性與圍堵規則，不自行取 basename 重組路徑。
 
 ### 執行進度與終態
 
-`ffmpeg-execution-engine.js` 將 stderr 視為增量文字串流：保留跨 chunk 的 UTF-8 與 CR／LF record，完整 record 才解析 stream map、進度與 ETA，程序結束時處理最後未換行的 record。單筆 carry 有上限；原始 log 保留完整 bytes，不因解析截斷而改寫。
+stderr 以增量 UTF-8、CR／LF record 解析，保留跨 chunk 文字，結束時處理最後 record；carry 有界，原始 log 保留 bytes。
 
-一般 `task-progress` 的 `done:true` 表示工作已結束，`outcome` 必須明確為 `success` 或 `failed`。Renderer 兩種終態都解除忙碌狀態，只有成功才發布 `desk:ingest-done`；快取命中也使用相同成功終態。程序失敗與 Promise rejection 不得同時送出成功完成事件。交付的 execution `onProgress` 只代表編碼階段；航空封裝、ISO 製作與成品發布完成仍由 delivery runner／watchdog 裁定。
+`done:true` 只表示結束，成功須有 `outcome:'success'`，失敗為 `failed`。有標記的 intake 由 runtime 統一附上 sessionId／requestId，包括 native 中間進度、cache hit、提交與 stream 終態；renderer 只接目前仍持有的工作。stream 的 ready Promise 不可提前清掉仍在執行的工作狀態。其他直接作業如 extractAudio 的 `a0` 進度有自己的 caller，不能被 intake 的 session 篩選誤吞。
+
+Execution 的編碼完成不等於交付完成；封裝、內容驗證、成品發布及 lease 清理仍由 artifact／watchdog 裁定。取消不發布假成功。
 
 ### 聲量量測
 
-`audio-normalization-runtime.js` 的 `analyze()` 等待 FFmpeg 成功，再由 `shared/audio-loudness.cjs` 解析有效峰值與平均值。程序失敗、空報告或缺少必要量測值均回報失敗；報告中的 `-inf` 必須來自實際量測，不能用來代替失敗。Renderer 保留既有快速預覽並標示「量測失敗」，不能把失敗 stderr 轉成綠色的「精準量測」。
+`audio-normalization-runtime.js` 等 FFmpeg 成功，再解析必要量測值。空報告、缺欄位或程序失敗均失敗；`-inf` 必須來自實際靜音量測，不能補造。Renderer 可保留快速預覽，但不得把量測失敗顯示成成功。
 
-音量平衡保持整份母素材的量測與效果處理語意；輸出沒有原容器 PTS 的 WAV 前，才依 probe 時鐘完成來源零點對齊、補靜音與時長裁切。Peak、True Peak 第二遍及無聲保護共用這個輸出步驟，已對齊的 processed WAV 再處理也不重複套用偏移。取消會同時傳給 probe 與原生處理，不能讓遲到的描述啟動已取消的工作。
+平衡以整份母素材量測及處理；輸出無容器 PTS 的 WAV 前才對齊來源零點、補靜音及裁長。Peak、True Peak 第二遍與無聲保護共用此步驟，已對齊結果不重套偏移。取消同時傳給 probe 與後續原生階段，遲到 probe 不得啟動新程序。
 
 ### 人聲波形 PCM
 
-`vocal-waveform-runtime.js` 只從已授權的母素材讀取來源時間 `start`／`duration`，每段最長 36 秒；可指定原始音訊 stream 與單一來源聲道。FFmpeg 透過 stdout 回傳 44.1 kHz、交錯立體聲 Float32 PCM，最長片段約 12.7 MB，不寫入音訊快取或交付檔。影片長於音訊時，成功的短片段／零 sample 是正常 EOF；renderer 以原來的來源時間補齊靜音，不能平移已有 sample。Renderer 的人聲模型另行產生顯示波形，不能把分析結果接到播放或匯出。
+`vocal-waveform-runtime.js` 只讀已授權母素材的來源 start／duration，每段最多 36 秒，可指定 stream 與單聲道。stdout 回傳 44.1 kHz 交錯 Stereo Float32 PCM，最大片段約 12.7 MB，不寫交付或音訊快取。成功的短片段／零 sample 可代表 EOF；renderer 依原時間補靜音，不能平移已有 sample 或把分析結果接到播放。
 
-持久波形快取的素材指紋由 `vocal-waveform-fingerprint.js` 保留既有 namespace，透過[共用母素材證據](#媒體-intake)非同步讀取；IPC 仍須有既有 read capability。模型、來源串流與時長由 renderer 快取描述補齊；恢復規則見 [技術架構說明](技術架構說明.md#人聲波形的顯示邊界)。
+PCM 取樣前按影片來源原點對齊，resampler 與指定聲道的 pan 在同一鏈中；seek 只補剩餘前置靜音。來源指紋沿用 `vocal-waveform-fingerprint.js` namespace 與共同取樣規則。
 
-裸 PCM 不保存容器 PTS，因此取樣前以 `aresample=44100:async=1:first_pts=0` 還原來源時鐘：音訊比影片晚開始時補前置靜音，seek 後只保留本段尚未經過的靜音。指定來源聲道時，`pan` 與此 resampler 在同一 filter chain 執行；輸出仍受本段時長與 36 秒大小上限約束。參數語義見 [FFmpeg Resampler 文件](https://ffmpeg.org/ffmpeg-resampler.html)。
-
-每個讀取工作由發送它的 WebContents 與 request id 共同持有；相同 id 的其他 sender 不能取消它。取消、視窗銷毀或 120 秒讀取逾時先停止 FFmpeg，必要時再強制終止，確認 `close` 才移除工作。App 退出會停止新准入並等待全部片段；十秒後仍未確認程序結束，會拒絕退出，保留追蹤供再次收尾。
+工作由 WebContents＋request id 持有，其他 sender 同 id 不可取消。取消、視窗銷毀或 120 秒期限會停止程序，必要時強制終止，確認 close 才移除。退出停止新准入並等待全部片段；十秒仍未確認終止則拒絕退出並保留追蹤。
 
 ### 交付
 
-Renderer 提交凍結工作；`delivery-runner.js` 核對檔案能力、probe 母素材，將完整工作交給 `export-plan.js` 決定 argv 與實際輸出資訊。計畫自行計算音訊尾端、光碟容量及格式設定，runner 不組裝 codec／mux 的配對。執行成功後才提交佇列完成資訊，最後清理其 ASS 暫存。
+`delivery-runner.js` 接凍結快照、核對能力、probe 母素材，再交 `export-plan.js` 產生 argv、實際片長、聲道及規格。純計畫自行決定 codec／mux、音訊尾端及光碟容量，runner 不另配一份設定。所有 execution 明確指定 `direct` 或 `queued-delivery`；交付缺少 queue dir／job id／outPath 直接拒絕，不得退回 direct 繞 watchdog。
 
-交付快照保留片段來源 In／Out、offset 與時長的數值精度；毫秒顯示格式不能寫回來源格網。一般影片保留 seek 所需 GOP 的原 PTS，以來源 Out 截尾，再將來源 In 映成片段的時間軸相位；先 trim In 再 STARTPTS 會丟掉涵蓋裁切點的來源格，讓下一格提前出現。各片段依絕對 offset 放入透明軌道，由整條交付格網取樣；逐段轉 FPS 再 concat 會讓短片段各自進位並累積段界漂移。反向影片先按同一絕對交付格網的來源取樣相位重建 cadence，再倒轉內容，不能直接反轉 VFR 內容卻保留正序的 PTS 間隔。取樣保留首個畫格之前的缺口，反序後以透明尾段讓下層穿透，不能借未來首格填補。固定畫面與 PNG 快取按實際來源時間取涵蓋目標的畫格，不能以平均 FPS 吸附來源時間；EOF 只延長最後已解出的畫格。交付尾端按 `[0, duration)` 的格數裁切，避免微秒捨入多出一格。驗證須比對每格的實際色格、合法跨 FPS 裁切、CFR／VFR、速度、間隙與上下層切換。
+交付保持 In／Out、offset 與速度精度。影片保留所需 GOP 的 PTS，再按絕對交付格網合成；不能逐段轉 FPS 後 concat，也不能以顯示用毫秒回寫來源。反向 VFR 按交付格網重建 cadence，保留首格前缺口及半開尾端；固定畫面按實際來源 PTS 取格，不由平均 FPS 補造。隔行在場格網合成，補末場再交織 TFF。驗證須逐格比像素、區間、CFR／VFR、速度與疊層；完整時間規則見 [FPS 文件](FPS_時碼一致性.md)。
 
-交付與固定畫面快取共用 `sourceVideoClockSeek()`。影片 input 以 `copyts`／`start_at_zero` 保留容器相對 PTS，仍在目標附近 seek 所需 GOP；不能讓 `-ss` 先按來源 timebase 重設原點，再以假定精確的 seek 值換回來源時間。原始音訊的 seek 規則仍由音訊入口處理。重用影片 input 的音訊計畫另外核對實際讀取範圍，早於該範圍的外部音訊須讀自己的來源。
+來源影片使用共用 `sourceVideoClockSeek()` 保留容器相對 PTS。音訊依來源時鐘及實際 seek 補剩餘靜音；已對齊或反向 adapter 不重複套偏移。各 bus 獨立混音，join 前補至交付片長，較長聲道尾音不可被短聲道截掉。重用 input 時核對其讀取範圍，較早音訊須用自己的來源 input。
 
-隔行交付在場格網完成合成後補齊最後一場，再交織成 TFF 並依同一半開區間格數裁切。未配對的末場不能直接交給 `tinterlace` 丟棄；MOD-FHD、DVD 與 BD 的短段測試同時核對實際格數、場序與尾格像素。
+從 probe 開始就登記同一 active owner，停止也會取消準備中探測。成品提交及 lease 釋放後，補充 audio bitrate 探測失敗只回 `audioActualBitrates:null`，不能倒改已完成交付；編碼、封裝與收尾失敗仍屬失敗。
 
-交付從 probe 準備開始就登記同一 active owner；停止會取消準備中的 probe，尚未啟動 FFmpeg 也能結束工作。probe 的一般失敗仍可使用既定 fallback，取消則必須向上傳遞。
+Watchdog 取得輸出 lease，artifact 在同目錄的本工作私有路徑準備／編碼／封裝／驗證，全部成功才 rename 正式成品。取消、失敗及崩潰只刪本 owner 登記的私有檔，不刪既有同名成品；舊 lease 按原規則復原。ISO 開始寫入前持久化 owner，每個新原生程序更新 PID；清理失敗保留 lease。
 
-watchdog 完成成品提交與 lease 釋放後，runner 的實際音訊 bitrate 探測只補充完成資訊。探測失敗、逾時或此時收到停止／退出要求，都保留交付成功並以 `audioActualBitrates:null` 回報；編碼、封裝驗證與 lease 收尾失敗仍屬交付失敗。
+有 PID 後的 `error` 可能是終止失敗，須持續等 close；`exit` 或重複 error 不得提早清檔／釋放 lease。只有未取得 PID 的啟動失敗可立即收尾。Controller `ready` 失敗與 `completion` 分開：程序已啟動時，即使 owner 寫入讓 ready 拒絕，completion 仍等 standalone 收尾或程序結束，runner 保留 active 與 ASS／TC 輸入。
 
-交付音訊以每條專案音軌分別混音，再編成輸出 stream；每條音軌在 `join` 前補靜音到交付時長。若左右聲道來源長度不同，較短聲道結束後，較長聲道的尾音仍須保留，整份交付的尾端才補靜音。
+停止先持久化完整 stopped journal，記憶體維持 stopping 到 runner 結束。寫停止意圖失敗要回 running，不能先停 native。測試 adapter 只由可信 Node 注入，不得由 renderer 或持久化工作指定可載入模組。
 
-Runner 對所有交付格式探測影片、獨立 audioPlan 與舊聲道來源的音訊起始時間；Windows 路徑大小寫別名共用同一 metadata key。`export-plan.js` 在來源尚未轉成對齊快取時保留原 PTS，按 seek 扣除已經過的延遲，再以 resampler 補齊剩餘前置靜音；已對齊或反向的 adapter 不重複套用來源延遲。WAV 與 ProRes 等格式同樣遵守此來源時鐘，驗證須解碼成品 PCM 核對開聲與尾音。
+真正退出依序封閉准入，等 direct FFmpeg、probe、intake、PCM、辨識壓縮、cache owner 及 queue 屏障，再清暫存。若屏障失敗，恢復可恢復 owner；queue 等原交易收尾後 `cancelShutdown()`，不安全中止過的工作維持暫停。截圖清理須先於不可逆的 intake close，避免退出失敗後已有 HTTP Proxy、截圖或轉檔入口永久失效。
 
-呼叫 `ffmpeg-execution-engine.js` 時必須明確指定 `executionKind`：交付為 `queued-delivery`，可重建的預覽／匯入工作為 `direct`。交付缺少佇列目錄、工作 ID 或輸出路徑會直接拒絕執行，不得因 ID 命名改變或佇列尚未就緒而退回 direct、繞過 watchdog。
-
-真正退出時，direct execution owner 關閉新工作准入，取消並等待原生程序收尾；ingest coordinator 同時撤銷尚未開始的工作。`media-probe.js` 的 `cancelAllAndWait()` 也關閉准入，取消排隊與執行中的探測，等待所有 ffprobe 的實際 `close`；不能只等呼叫端 Promise 結束。`before-quit` 等這些 barrier、人聲波形片段、辨識壓縮與佇列停止完成後才清暫存。音量平衡的下一階段不能在 shutdown 後重新啟動；退出失敗時可恢復 owner 才重新開放准入。
-
-若退出屏障失敗，截圖 owner 在完成當次 close 後恢復准入，其他可恢復 owner 也恢復。佇列透過 `cancelShutdown()` 等待原收尾後撤銷關閉旗標及 Promise，恢復新工作准入；沒有中止工作的安全收尾會保留原暫停意圖，中止過工作或未安全結清時維持暫停，避免自行重跑。下一次退出使用新的佇列收尾交易。截圖清理先於不可逆的 media intake 關閉，避免退出失敗卻使既有串流 URL 或後續截圖永久失效。
-
-watchdog 取得輸出 lease 後，以 `export-artifact.js` 的成品階段準備編碼目的地，啟動 ffmpeg，等待格式封裝／驗證及私有素材清理，最後裁定完成與釋放 lease。MOD、航空與 ISO 的格式分支集中在成品階段；watchdog 保有唯一的取消、程序存活及輸出 owner 權威。每份新工作由輸出路徑與 lease token 派生同目錄的私有暫存成品路徑，FFmpeg 與格式封裝／驗證只寫入該路徑；全部成功後才以重新命名提交到正式路徑。失敗、取消與崩潰復原只刪除 owner 登記的私有暫存檔，不能刪除原有同名成品。舊 lease 仍按其原始清理規則復原。寫入 ISO 前必須先持久化 owner，新的原生程序須登記 PID；清理失敗保留 lease，復原流程確認程序停止後才能清理。
-
-使用者停止執行中的交付時，佇列先以既有 stopped journal 保存完整停止意圖、payload 與 ASS 參照，記憶體仍維持 stopping，直到 runner 結束才裁定最終結果。停止意圖寫入失敗就回復 running，不能先送出原生停止；重啟從 journal 恢復可重試的停止紀錄，不自動重跑。
-
-原生程序的 `error` 也可能表示終止失敗。已有 PID 時，watchdog 必須保留暫存成品與 lease，等待 `close` 後才收尾；`exit` 或重複的 `error` 都不能提前釋放。光碟合成的私有編碼輸入也保留至原生工具 `close`；只有尚未取得 PID 的啟動失敗可立即清理。direct FFmpeg 與 ffprobe 在整段原生生命週期持續觀察 `error`，保留首個錯誤，不能讓後續強制終止的錯誤成為未處理事件。
-
-watchdog controller 的 `ready` 失敗與 `completion` 是不同結果：FFmpeg 已啟動後，owner 寫入仍可能失敗。controller 立即拒絕 `ready`，但須等 standalone owner 回報收尾結果或該程序真正結束，才結束 `completion`；runner 在此之前仍持有 active 工作及 ASS／TC 私有輸入。程序沒有成功啟動、未取得 PID 時才可立即拒絕兩者。
-
-成品階段的測試 adapter 只從可信 Node 程式入口注入，renderer IPC 與持久化工作不能指定要載入的模組。測試透過同一成品 interface 控制準備、失敗與取消；真正跨程序的 watchdog 測試仍驗證停止、斷線與復原。
-
-Windows filtergraph 路徑要跳脫兩層；`export-plan.js` 統一處理 filter 值與 filtergraph 的跳脫，包含合法路徑中的逗號、單引號及括號。ASS Fontname 必須是字型檔內部 family。
+Windows filtergraph 路徑由既有兩層跳脫處理，包含逗號、單引號與括號。ASS Fontname 使用字型內部 family；兩項都不能只以 exit 0 驗證。
 
 ### Encoder
 
-可用時優先硬體 H.264 encoder；實際採用者要出現在狀態與完成訊息。不能只因命令沒有報錯就宣稱使用 GPU。
+一般 H.264 可用硬體 encoder，狀態須回報實際採用者；不能以命令成功推定使用 GPU。固定交付採自己的規格。
 
-MOD-FHD 固定使用 CPU libx264，參照 `fdst_MOD-FHD.cpf` 與 Carbon 參數畫面：1920×1080、30000/1001 fps、TFF/MBAFF、High@4.1、CBR 7280 kbps、GOP 上限 32、2 B 幀、4 reference frames、CABAC、單 slice、AUD／HRD。合成先在 60000/1001 場時刻進行，隔行來源先以 bwdif 還原場，再交織為 TFF；TC 在交織後依輸出格率計數。
+| MOD-FHD 項目 | 對應規格 |
+|---|---|
+| 視訊 | CPU libx264、1920×1080、30000/1001、TFF／MBAFF、High@4.1、7280 kbps CBR |
+| 編碼 | GOP 上限 32、2 B、4 refs、CABAC、單 slice、AUD／HRD、一秒 VBV |
+| 合成 | 60000/1001 場時刻；隔行來源 bwdif，TC 交織後計數 |
+| TS | 7980 kbps、188 bytes、Video/PCR 4131、Audio 4130、PMT 1280、program／TS id 1 |
+| 時序 | PAT／PMT 100 ms、PCR 40 ms |
+| 音訊 | 單一 AAC-LC Stereo、48 kHz、256 kbps、ADTS／eng；關 PNS，結構核對後設 MPEG-2 ADTS ID |
 
-音訊在 `export-plan.js` 檢查實際選用的 bus／來源效果：若沒有專案音量平衡，對最終單一 Stereo 混音套用「−12 dB」預設（真峰值上限 −12 dBTP、非靜音整體目標 −18 LUFS）；若已有設定則沿用，不做第二次平衡。純靜音繞過可能產生無效量測值的正規化，維持無聲並完成 AAC 編碼。
-
-TS 固定 7980 kbps、188-byte packet、video/PCR PID 4131、audio PID 4130、PMT PID 1280、TS/program ID 1、PAT/PMT 100 ms、PCR 40 ms。音訊固定單一 AAC-LC stereo、48 kHz、256 kbps、ADTS／eng；關閉 MPEG-4 PNS，watchdog 在 lease 釋放前用 `mod-fhd-transport.js` 驗證 TS/PES/ADTS framing，再將 ADTS ID 設為 MPEG-2。收尾失敗或取消沿用半成品清理，不回報成功。封裝時該模組須與 watchdog 一起 asarUnpack。
-
-這是跨編碼器的參數對應：Carbon 的 VBV=0（自動）在 x264 明確採一秒 buffer；CBR 下停用的最大碼率 10000 不當作實際碼率。Carbon 的 adaptive deblocking、運動搜尋、量化策略與 sequence-end-code 開關沒有全部逐項等價的 x264 介面；目前不額外插入 end-of-sequence NAL，不宣稱位元流與 Carbon 完全一致。FFmpeg 參數依據見 [MPEG-TS／ADTS muxer 文件](https://ffmpeg.org/ffmpeg-formats.html)。
-
-`node scripts/acceptance/verify-mod-fhd.js` 以逐行與隔行合成素材跑正式計畫及 watchdog，檢查實際 TFF 像素、完整解碼、影音 codec／FPS／時長、ADTS MPEG-2 位元、PID、PCR 量測碼率與 PAT 間隔；證據留在系統 temp。
+未設定專案平衡時，最終 Stereo 套 −12 dBTP 上限與非靜音約 −18 LUFS；已有設定不重做，純靜音繞過無效正規化。Carbon 的自動 VBV、搜尋／量化及 sequence-end-code 不全有等價 x264 參數，不能宣稱位元流完全相同。`verify-mod-fhd.js` 以正式計畫／watchdog 核對場像素、解碼、codec、FPS、片長、ADTS、PID、PCR 及 PAT。
 
 ### 航空 MPG 自動合成
 
-`airline-encoding.js` 提供 Carbon CPF 對應的 CPU codec 與 transport profile，由純 `export-plan.js` 依同一格式選擇。計畫先用顯示比例合成、燒字幕與 TC，再縮為編碼尺寸並設定 SAR；航空來源若隔行則以 bwdif send_frame 轉逐行，不走 MOD-FHD 的場交織。
+三格式輸出 `.mpg`，實際以 `-f mpegts` 建立 188-byte TS；同一 FFmpeg 編碼合成，不從缺 PTS／DTS 的 raw H.264 重建 B 幀時鐘。舊 `.h264`／`.m1v` 工作須重新由交付清單送出。
 
-- exW：H.264 Main@3.0、640×360 正方形像素、30000/1001 逐行、VBR 目標 500 kbps／上限 2000 kbps、VBV 125000 bytes、固定 15 格 GOP、3 B 幀、2 reference frames、CABAC、單 slice、AUD；關閉 deblocking、weighted prediction、B pyramid 與 HRD，開啟逐格 pic timing SEI。依交付要求，每個 access unit 的 AUD 後加入 AFD 完整 16:9（T.35／DTG1，active_format=10）SEI。音訊為 AAC-LC／ADTS Stereo、48 kHz、64 kbps。
-- DMPES：H.264 Main@3.0、720×480、30000/1001、CBR 1500 或 4000 kbps、GOP 上限 15、3 B 幀、2 reference frames、CABAC、單 slice、AUD、關閉 deblocking／weighted prediction／B pyramid。依使用者確認的 **16:9 顯示比例，設定 SAR 32:27**；明確優先於 CPF 的 6:5 及參考成品的 40:33。其餘採參考成品 SPS 實測的 NAL HRD CBR、NTSC limited range；音訊輸出 MPEG-4 AAC-LC／ADTS Stereo、48 kHz、128 kbps。
+| 格式 | 視訊與音訊要點 |
+|---|---|
+| exW | Main@3.0、640×360、正方形像素／16:9、30000/1001p、VBR 500／max 2000 kbps、125000-byte VBV、GOP 15、3 B／2 refs；AAC Stereo 48 kHz／64 kbps |
+| DMPES 1.5M | Main@3.0、720×480、SAR 32:27／16:9、30000/1001p、1500 kbps CBR、GOP ≤15、3 B／2 refs；AAC Stereo 48 kHz／128 kbps |
+| DMPES 4M | 同上，視訊 4000 kbps CBR |
 
-上述是跨編碼器的參數對應。DMPES 1.5M 的 130202-byte VBV 傳入 1041616 bits，x264 內部取整，排程使用實際 HRD 容量 130124 bytes，4M 為 347124 bytes。exW 依 CPF 設定 125000-byte VBV。收尾在最後一個 video PES 加入 AVC end-of-sequence／end-of-stream，修正 TSA 報表缺少 EOS 的警告。Carbon 專用搜尋／量化策略不保證等價，不能宣稱位元流完全一致或已通過航空設備驗收。
+DMPES 16:9／SAR 32:27 是已確認取捨，優先於 CPF 6:5 與參考成品 40:33。兩類關 deblocking、weighted prediction、B pyramid；exW 關 HRD、加逐格 pic timing 與 AUD 後 AFD active_format 10；DMPES 用 NAL HRD CBR。1.5M VBV 傳入 1041616 bits，x264 取整後排程使用 130124 bytes，4M 使用 347124 bytes。最後 video PES 加 EOS／EOST。
 
-`delivery-formats.cjs` 統一定義單一 `.mpg` 輸出，容器由 `-f mpegts` 明確指定為 188-byte MPEG-TS。同一 ffmpeg 程序直接編碼與合成影音，不產生 ES／cfg，也不從缺少 PTS/DTS 的 raw H.264 重建 B 幀時間戳。admission 檢查成品的來源衝突、授權與佇列佔用；舊版 `.h264`／`.m1v` 工作因副檔名不符被拒絕，需從交付清單重新送出。
+Transport 採 program 1、PMT 0x3f、Video/PCR 0x30、Audio 0x31、TransportPriority。DMPES 1.5M 為 1855594 bps CBR，4M 為 4600000；exW VBR 不填空閒 null，排程上限 2.5 Mbps。依原 PTS／DTS、priming 及緩衝限制排 PES；影片 TB 目標 ≤400 bytes／上限 512，音訊提前 DMPES 約 0.1s、exW 約 0.35s，PCR 約 50ms、PAT／PMT 約 90ms。不能靠增 mux delay 掩蓋 TSA 溢位。
 
-合成沿用 Panasonic cfg 的 Program 1、PMT PID 0x3f、Video/PCR PID 0x30、Audio PID 0x31、TransportPriority yes。DMPES 1.5M 規格採參考成品 PCR 實測的 1855594 bps CBR；4M 使用 4600000 bps。exW 參照 MP2TSME 9 cfg 的 VBR=yes，空閒時不填入 null packet，保留最高 2.5 Mbps 的封包排程上限。`airline-transport.js` 依 DTS／PTS 重新排程 PES，影片 TB 目標不超過 400 bytes（上限 512），DMPES 音訊最多提前約 0.1 秒、exW 最多約 0.35 秒，並限制主緩衝；影片保留量依實際 VBV 限制，PCR 約 50 ms，PAT／PMT 約 90 ms。單純增大 mux delay 會讓主緩衝更容易溢位，因此不能作為 TSA 錯誤的修復。保留編碼器提供的 PTS／DTS 與音訊 priming 關係，不改影音播放速度。
+曾實測 exW 提早場景切換 IDR 讓 TSA6 判 reorder depth 4、逐格報 4-16e，TSA7 卻不報；因此停提前 IDR、保留 GOP 15 與 pic timing，並以黑場轉動態測試守住。112 秒二次編碼診斷檔曾在 TSA6／7 零錯誤警告，但它不是正式交付驗收；實際每片仍須 TSA 檢測。Carbon 搜尋／量化不保證等價，也不宣稱已通過航空設備。
 
-TSA 驗收另須確認每個標示 `random_access_indicator` 的視訊 TS 封包同時帶 PCR。exW 的 CPF 啟用場景變換偵測，但實測提前插入 IDR 會讓 TSA6 將 reorder depth 判成 4，對幾乎每格報 `4-16e`；TSA7 判成 2 且不報錯。為兼容兩版，exW 停用提前場景切換 IDR，保留每 15 格一組 GOP，並明確寫入 pic timing。以 3 格黑畫面後切到動態畫面的測試鎖定 IDR 間隔；使用者提供的 112 秒成品再編碼診斷檔在 TSA6 v6.0.0 與 TSA7 v7.0.69 均為 0 錯誤、0 警告。此診斷檔是二次編碼，不當作正式交付驗收；實際專案輸出仍須逐片 TSA 檢測 VBR 封裝與緩衝限制。
-
-watchdog 先以 `airline-output.js` 檢查 TS 結構，再將封包重排至 lease 目錄中的暫存 TS，重新產生 PCR／PSI；CBR 格式填入 null packet，exW 以 VBR 省略空閒封包。僅保留一個 PES 與固定大小讀寫區塊，不建立整片影片的封包索引；跨磁碟寫回成品可取消。取消或收尾失敗會清理半成品，清理失敗保留 lease。`airline-output.js`、`airline-transport.js`、`airline-encoding.js` 與共用格式模組須一併 asarUnpack。
-
-`tests/airlineEncoding.test.js` 驗證 sequence header／SPS／PPS／CRC 與 CBR；`tests/airlineTransport.test.js` 檢查內容、格序與每個 PES 最後封包的解碼期限；`tests/airlineBuffers.test.js` 使用獨立封包抵達模型先重現舊版溢位，再確認三種規格的 TB、影片及音訊緩衝限制。實際 Electron IPC 與取消清理另由 queue lifecycle／watchdog 測試涵蓋。
+Artifact 先驗 TS，再以單 PES 與固定 buffer 重排到 lease 暫存 TS、產生 PCR／PSI，不建立全片索引；取消或清理失敗保留復原資訊。`airlineEncoding`、`airlineTransport`、`airlineBuffers` 測試核對 header、CRC、內容、格序、期限與獨立抵達模型；原生取消／復原仍由 watchdog／queue 測試驗證。
 
 ### DVD／BD ISO 自動製作
 
-交付計畫透過純規格模組 `disc-encoding.js`，依共用格式及實際交付時長配置視訊碼率，扣除 AC-3 多串流、64 MiB 導覽資料與 8% 封裝預留；`disc-authoring.js` 執行原生封裝及驗證。DVD 使用 MPEG-2 720×480 TFF／29.97；BD 使用 Blu-ray compatible AVC High@4.1，依專案 FPS 選擇不低於來源、最高 29.97 FPS 的模式：23.976／24 FPS 為 1080p，25／29.97 FPS 為 1080i。字幕先以顯示比例燒錄，再轉成儲存尺寸。
+`disc-encoding.js` 依實際片長計算碼率，扣 AC-3 多串流、64 MiB 導覽與 8% 封裝預留；`disc-authoring.js` 負責工具及結構驗證。
 
-watchdog 將一次 FFmpeg 編碼結果保存在 lease 暫存目錄；DVD 由 dvdauthor 產生 VIDEO_TS，再由 mkisofs 建立 UDF 1.02、標籤 `DVD` 的 ISO，BD 由 tsMuxeR 建立 UDF 2.50、標籤 `BD` 的 ISO。無選單且首播 title 1。成品會驗證 UDF anchor／logical volume 的 tag checksum、descriptor CRC、標籤與容量上限，通過後才回報完成；影音解碼、FPS 與聲道仍須依真機驗收清單檢查。每次啟動原生合成程序都更新 lease PID，取消時先等待程序退出再清檔。尚未開始寫入 ISO 的失敗會保留原成品，復原時也讀取 `outputStarted`；清理失敗保留 owner 資訊供重試。
+| 成品 | 編碼與封裝 |
+|---|---|
+| DVD | MPEG-2 720×480 TFF／29.97，dvdauthor VIDEO_TS、mkisofs UDF 1.02，標籤 DVD |
+| BD | AVC High@4.1，23.976／24 為 1080p、25／29.97 為 1080i；tsMuxeR UDF 2.50，標籤 BD |
 
-`npm run native:prepare:disc` 依 `electron/disc-tools.json` 的固定來源及 SHA-256 下載工具、DLL 與授權文字，正式 Windows 包只收 manifest 所列檔案。Mac 測試包不帶這些 Windows 工具。`tests/discAuthoring.test.js` 以原生工具檢查 ISO 結構及多音軌解碼；`tests/discWatchdog.test.js` 驗證取消、復原與既有 ISO 保護。
+BD 選不低於來源且最高 29.97 的可用格率；字幕先依顯示比例燒錄再縮儲存尺寸。兩種均無選單、首播 title 1。驗 UDF anchor／logical volume、tag checksum、descriptor CRC、標籤及容量後才完成；影音解碼與聲道仍須內容驗收。取消先等 native close，開始寫入前的失敗保留原 ISO。
+
+工具與 DLL／授權文字由 `disc-tools.json` 固定來源及 SHA-256，正式包只收 manifest 所列檔案。`discAuthoring.test.js` 核對真工具 ISO／多音軌，`discWatchdog.test.js` 核對取消、復原及既有 ISO。
 
 ## 5. mpv 嵌入整合（Windows）
 
-反向片段音訊由 `clip-audio-cache.js` 經共用 FFmpeg execution owner 生成；IPC 只接受已有 read capability 的來源、in／out 與 stream，輸出路徑由主程序決定。來源可以是已授權的音量平衡結果；來源指紋包含 stat 與前／中／後段內容，來源、裁切或 stream 改變即建立另一份快取。先按來源時鐘補齊缺聲與 EOF、裁切，再反轉完整區間。PCM WAV 長度與 chunk 完整性通過後才發布並授予單檔讀取權；同一工作去重，失敗及逾時清理私有 staging，取消與 app shutdown 等原生程序 close。renderer 的反向音訊播放與配線所有權見 [技術架構說明](技術架構說明.md#音訊效果與背景工作)。
-
-mpv 不是 DOM 元素，而是獨立的 OS 子視窗。`mpv-host.js` 負責：
-
-- 啟動 `mpv.exe` 與 named pipe JSON IPC
-- 設定 bounds、可見度與 always-on-top 關係
-- 載入母素材或倒帶 Proxy
-- play、pause、rate、direction、mute
-- 精準 `time-pos` setter
-- 監聽 `time-pos`、`playback-restart` 與 property change
-- 載入 live ASS
-- 更新透明 guide 與監看 TC
+mpv 是 OS 子視窗，不是 DOM。Host 持有 launch／named pipe、bounds／可見性、來源、播放狀態、ASS、透明 guide 與監看 TC。每次 launch 使用獨有 pipe、ASS 暫存及 log；舊 close／error 不得處置新程序資源，log 失敗只停止寫 log，仍排空 stderr。
 
 ### 精準呈現
 
-`mpv:present` 接受來源時間與 tolerance。播放中的完成證據需要目標 `time-pos` 與同一請求的 `playback-restart` 配對；暫停精準定位則以 command ack 加命中目標的 `time-pos` 為準。
+`mpv:present` 接來源秒數。播放完成需目標 time-pos 與同請求 playback-restart 配對；暫停定位則 command ack 加命中 time-pos。逐格使用 time-pos setter，不連發 absolute seek 排隊。只保留最新 pending，loadfile 前撤銷舊呈現；來源完成事件須符合相同 client、世代及路徑。
 
-`mpv-host.js` 在 launch／loadfile 時由 main 注入的 probe 取得容器相對來源時鐘，將 seek、畫格回報、`time-pos` 事件與 duration 統一換成影片第零秒。原點映射規則由 `shared/media-source-clock.cjs` 共用；HTML／WebCodecs 的絕對原點由各自 adapter 選擇，詳細契約見 [FPS／時碼一致性](FPS_時碼一致性.md#i4-靜止讀數同源於-mediadisplaytime)。Proxy 已歸零，不能再套母素材偏移。母素材影片晚半秒開始時，公開來源 2.8 秒要定位到容器相對 3.3 秒，回報仍是來源 2.8 秒；驗證須同時核對母素材與 Proxy 的真實像素及片長。
-
-慢速逐格有實際來源索引時，另外轉送 `frameTarget`／`frameStart`／`frameDuration`，核對回報 PTS 是否為該畫格；平均 FPS 不是區間證據。時間域與區間端點契約見 [FPS／時碼一致性](FPS_時碼一致性.md#i4-靜止讀數同源於-mediadisplaytime)。
-
-逐格使用 `time-pos` setter，不使用連續 `seek absolute`。後者會排隊等待舊畫面，快速左右鍵時容易讓最新目標多等數百毫秒。
-
-只保留最新 pending 呈現；舊 request 完成後不可回寫播放點。
-每次重新啟動 mpv 使用獨有的 named pipe 與 ASS 暫存檔名；同一程序 `loadfile` 換來源前取消舊畫格請求，避免新素材的 `time-pos` 回報完成舊請求。
-
-mpv stderr log stream 由每次 launch 持有。寫入錯誤只關閉該 log，持續排空 stderr；舊行程的 close／error 不能銷毀新行程的 log，也不能因診斷寫入失敗終止播放。
+Launch／loadfile 透過 probe 取得容器相對來源原點，seek、回報與 duration 都轉成影片第零秒。例：影片比容器晚半秒，公開來源 2.8s 對應容器相對 3.3s；Proxy 已歸零不能再套偏移。慢速來源索引可提供 frameTarget／frameStart／frameDuration 作區間證據，平均 FPS 不能冒充。詳細區間及容差以 [FPS 文件](FPS_時碼一致性.md#i4-靜止讀數同源於-mediadisplaytime) 為準，驗證同時比真像素與片長。
 
 ### 截圖輸出
 
-Renderer 的 `capturePreviewFrame()` 選擇實際 presenter，先凍結時間、FPS 與圖片計畫。原生路徑透過既有 presentation session 的 `withPresentedFrame()` 暫停並確認同一畫格，持有該格直到 `mpv-host.js` 的 `screenshot-to-file` 成功回覆及像素讀入，再依最新播放意圖恢復。較新的 seek、換素材或 reset 撤銷舊截圖資格；失效後仍等待已送出的原生讀取結束，再允許共用暫存圖。命令錯誤、逾時、斷線與寫入 IPC 失敗均拒絕該截圖，不以固定延遲判定完成。`commands.js` 將擷取、讀取原生暫存圖、疊入 TC 及保存整段序列化，避免並行操作共用暫存圖。
+Renderer 凍結時間、FPS 及圖片計畫，透過既有 `withPresentedFrame()` 暫停並確認同格，持有至 screenshot-to-file 回覆及像素讀入，再依最新意圖恢復。新 seek／reset／換來源使舊請求失效，但已送 native 讀取仍須等待結束，才能共用暫存圖。錯誤、逾時、斷線與寫入失敗都拒絕，不以固定 delay 判定。擷取、讀圖、疊 TC 與保存整段序列化。
 
-畫面擷取完成後，`fs:reserveScreenshotPath` 交給 `screenshot-output.js` 核對已授權目錄，以 `wx` 原子保留下一個 `Shot-` 空檔；編號可越過 999。`fs:writeScreenshot` 必須同時持有檔案能力與該 reservation，先將 JPEG 寫入同目錄的私有暫存檔，完成 write／sync／close 後再核對原空檔身分並以 exclusive hardlink 發布。目錄不支援 hardlink 時，改以 `wx` 複製完成的位元組，禁止覆寫晚到的外部檔案。
-
-失敗只清除本 owner 的暫存檔、仍屬原 reservation 的空檔，以及身分與本 writer 位元組前綴均吻合的未完成複製。退出先封閉新請求，再等待已准入的 reserve／write 完成後清理；暫時清理失敗可重試 `close()`。Renderer 未完成保存時仍呼叫 `fs:releaseScreenshotPath`。
+`screenshot-output.js` 以 wx 保留下一個 Shot 編號，含超過 999；write 須同時具能力及 reservation。JPEG 先寫私有暫存檔並 sync／close，再核對原空檔身分，以 exclusive hardlink 發布；不支援 hardlink 才以 wx 複製，不能覆寫晚到外部檔。失敗只清本次仍持有的 reservation／私有檔及身分、前綴相符的部分複製。退出封閉准入，等 reserve／write 後清理；失敗可重試 close。未保存的 renderer 必須 release reservation。
 
 ### Guide 與互動
 
-透明 guide 視窗永久 `setIgnoreMouseEvents(true, { forward:true })`。字幕、圖片與播放點互動由主 renderer 的 DOM layer 處理。
-
-`setImages()` 重用同身分的圖片節點，同時更新圖片自身的裁切樣式與目前清單的 DOM 順序；幾何變動不重建節點或遺失 hover 狀態。
-
-mpv 蓋住 HTML 時，`_syncMpvPanel()` 依操作需要暫時隱藏或讓 WebCodecs 接管。不要新增第二套 guide pointer 命令。
+透明 guide 永久 ignoreMouseEvents／forward，滑鼠互動由主 renderer DOM layer 處理。圖片節點依身分重用，更新裁切及 DOM 順序，幾何變動不重建節點或丟 hover。需要 HTML 操作時沿用 `_syncMpvPanel()` 讓位／WebCodecs 接管，不新增第二套 guide pointer 命令。
 
 ### macOS
 
-目前 Apple Silicon 測試包不含 mpv；`mpv.detect()` 必須回傳不支援，並自動使用 ffmpeg ingest／HTML／WebCodecs 路徑。
+目前 Apple Silicon 測試包不含 mpv，detect 明確回報不支援，使用 ffmpeg intake、HTML／WebCodecs 路徑；不宣稱已完成 Windows mpv 的同等驗收。
 
 ## 6. 匯出佇列
 
-常見工作狀態轉移如下；完整狀態與合法轉移以 [`export-queue.js`](../electron/export-queue.js) 的 `JOB_STATUS`／`TRANSITIONS` 為準。佇列的 `paused` 是排程旗標，不是個別工作的狀態。
+狀態真相在 `export-queue.js` 的 JOB_STATUS／TRANSITIONS。常見路徑為 queued→running→done／failed，停止先到 stopping，再依實際結果裁定 stopped／done／failed；missing-source 需重連才可回 queued。`paused` 是排程旗標，不是個別工作狀態。
 
-```mermaid
-stateDiagram-v2
-  state "missing-source" as missingSource
-  [*] --> queued
-  queued --> running
-  running --> done
-  running --> stopping
-  stopping --> stopped
-  stopping --> done: 停止前已完成
-  stopping --> failed
-  running --> failed
-  failed --> queued: 重試
-  stopped --> queued: 重試
-  queued --> missingSource
-  missingSource --> queued: 重新連結
-```
+每份交付使用凍結快照、自己的 FFmpeg 程序；同輸出路徑只有一個 live job，跨程序由 `output-leases/*.lock/owner.json` 保護。決策與代價見 [ADR-0001](adr/0001-每份交付各自一個-ffmpeg-程序.md)。重啟先確認舊程序停止、復原 journal／lease、清本工作私有半成品，再恢復佇列。
 
-主要保證：
+`queue-store.js` 分別持有 live state 與 history.json；不能把 history 當待跑工作。完成歷史只恢復精確成品定位能力，不授予讀寫或整目錄能力。只有 ENOENT 是未建立；讀取失敗不能當空歷史覆寫。毀損 JSON／schema 更新前先保存完整 `.corrupt-<uuid>` bytes，備份失敗保留原檔及 outcome journal，待可提交再結清。
 
-- 一個工作使用送出當下的凍結快照。
-- 同一路徑同時只允許一個 live job。
-- `output-leases/*.lock/owner.json` 防止多程序寫同一檔案。
-- watchdog 在 owner 崩潰時停止 ffmpeg。
-- 重啟先復原 stale work、刪半成品、釋放 lease，再載入佇列。
-- 完成紀錄保存在 `history.json`，重開不重跑；只恢復精確成品路徑的定位能力，不恢復讀寫或同目錄授權。
-- 有執行中工作時關閉主視窗，監控視窗接手；真正退出前再次確認。
-
-`queue-store.js` 擁有 live state 持久化及 `QueueHistory` 完成紀錄。重啟載入待執行工作時會略過同目錄的 `history.json`，由 `QueueHistory` 單獨讀取；完成歷史不應被報為損毀工作。UI 不是真相來源。
-
-只有 `ENOENT` 表示完成歷史尚未建立；權限或暫時讀取失敗不能當成空歷史再覆寫。損壞 JSON 或未知 schema 可暫時顯示空清單，但更新前必須以 `history.json.corrupt-<uuid>` 保留完整原始 bytes；備份失敗不得覆寫歷史。佇列 outcome journal 保留待提交結果，下次讀取及備份成功才補記並結清。
+有執行中工作時關閉主視窗，由監控接手；真正退出須走前述 owner 屏障，不能因主頁面關閉就中止工作。
 
 ## 7. 打包與發布
 
-Windows：
+完整命令、順序及正式安裝驗收以[開發與驗證 §2](開發與驗證.md#2-建置與發版流程) 為唯一來源，本節只列 native 封裝檢查點。
 
-```bash
-npm run dist
-```
-
-`package.json` 重要設定：
-
-- `asarUnpack`：mpv、ffmpeg、watchdog、lease
-- `extraResources`：`font/`
-- `perMachine: true`
-- 桌面與開始功能表捷徑
-- `.subtool` file association
-
-正式驗收：
-
-1. `npm run release:verify-source`
-2. `verify-native-binaries.js`
-3. 產生 Setup
-4. 正常安裝到 Program Files
-5. `npm run release:verify-install`
-6. 驗證 App 內版本、捷徑、解除安裝與 file association
-7. 比對 GitHub asset SHA-256
-
-不要在專案根目錄跑 `asar extract-file`。需要檢查 asar 時，先建立獨立 temp 目錄，在該目錄解出並核對。
-
-Apple Silicon：
-
-```bash
-npm run dist:mac:test
-```
-
-unsigned DMG／ZIP 只供內部驗收，不可當正式 Mac Release。
+- 主程序及兩平台均包含 shared 規則；standalone watchdog、artifact、lease 與其格式依賴符合 `asarUnpack`。
+- Windows 包含 ffmpeg／ffprobe、mpv、`d3dcompiler_43.dll` 及 manifest 光碟工具；font 是 extraResources。
+- NSIS 為 perMachine，建立桌面／開始捷徑及 `.subtool` 關聯。正式驗收正常 Setup 到 Program Files，不能使用 `/D`，不能指向 repo。
+- 安裝後另核對實際 EXE／App 版本、metadata、捷徑、ASAR 及內容；repo 路徑安全腳本不能代替全部驗收。
+- ASAR 解檔先切獨立 temp，禁止在 repo cwd 執行 `asar extract-file`。
+- Mac unsigned DMG／ZIP 只供本機測試，簽署／notarization 與真 Mac 驗收前不得當正式 Release。
 
 ## 8. 排查
 
-| 現象 | 先檢查 |
-|---|---|
-| App 開不起來 | native binaries、`shared/**/*` 是否進包、main console |
-| 找不到 ffmpeg／mpv | `window.subtool.status()`、`mpv.detect()`、封裝路徑 |
-| 媒體每次重轉 | 來源路徑、檔案 metadata、前／中／尾段取樣、cache metadata；SMB 上 metadata 是否穩定 |
-| MXF 畫面黑 | mpv launch／loadfile、Proxy 狀態、視窗 bounds |
-| 左右鍵偶爾沒動 | present tolerance、舊 request 是否覆寫、mpv 是否仍用 seek command |
-| 字幕位置三路不同 | `effStyle()`、PlayResY 高度縮放、ASS alignment |
-| 字型 fallback | 內部 family、fontsdir 雙層跳脫、libass `fontselect` |
-| 圖片框可見但不能拖 | guide 是否誤接滑鼠、`#imageLayer` 是否存在 |
-| 鎖定軌會改掉選取 | pointer seek 與 selection 是否仍分離 |
-| 匯出音訊不對 | 母素材、source→bus、bus→stream、ffprobe 成品 |
-| 同路徑不能重試 | live job、stopping 狀態、stale output lease |
-| 關閉後留下半成品 | watchdog log、owner.json、啟動復原 |
-| 按鈕沒反應 | 是否誤用 `window.prompt()` |
-| 本機資源被擋 | 不要關 webSecurity；檢查 `subtool-local:` capability |
+先保留問題時間、source／job／session／request id、main log、renderer console、metadata 與可重現案例，再按 owner 查證。
 
-問題回報至少附 main log、renderer console、素材 metadata、工作 id、輸出路徑與可重現時間碼。
+| 現象 | 核對位置與證據 |
+|---|---|
+| App 無法啟動 | native 檔案、shared 封裝、main 啟動錯誤 |
+| 工具找不到 | status、mpv.detect、平台路徑及實際打包內容 |
+| 素材反覆重轉 | 指紋、前／中／尾取樣、cache 完整性與暫時 I/O 錯誤 |
+| 換專案仍等舊 Proxy | renderer 新 session／取消 IPC、coordinator owner、native close 及晚到准入 |
+| Proxy 取消誤報失敗 | 本地撤銷資格、INGEST_SUPERSEDED、progress session/request |
+| 串流黑畫面 | readiness、HTTP Range／lease、writer／reader、實際 presenter |
+| 逐格不動或回舊格 | tolerance、來源區間、pending、client／世代及 time-pos setter |
+| 字幕三路不同 | effStyle、PlayResY 高度縮放、ASS alignment／family／跳脫 |
+| 圖框可見不能拖 | guide 是否錯接滑鼠、renderer imageLayer 與讓位 |
+| 音訊或尾音不符 | 母素材、來源時鐘、source→bus→stream、成品 PCM |
+| 成品路徑無法重試 | live job、stopping journal、native PID、output lease |
+| 關閉後有半成品 | watchdog／artifact log、owner.json、close 及復原狀態 |
+| 本機資源被阻擋 | capability／token／Range，不關 webSecurity |
+| 按鈕無反應 | 原生對話框與 renderer handler，是否誤用 window.prompt |
+
+診斷工具的量測範圍與回報限制見[開發與驗證 §5](開發與驗證.md#5-問題回報)，不要由未量到的機制推論原因。

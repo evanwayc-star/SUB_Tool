@@ -130,6 +130,9 @@ it('較新的專案 drop 等待 native reader 時，同 generation 的舊 runtim
     fonts.resolve([]); await loadingA;
     expect(State.cues.map(cue => cue.text)).toEqual(['RUNTIME_A']);
     nativeRead.resolve(projectRequest('NEWER_DROP'));
+    await vi.waitFor(()=>expect(document.getElementById('modalBg').classList.contains('show')).toBe(true));
+    expect(document.getElementById('modalBody').textContent).toContain('1');
+    [...document.querySelectorAll('#modalFoot button')].find(button=>button.textContent==='確認開啟').click();
     await vi.waitFor(() => expect(State.cues.map(cue => cue.text)).toEqual(['NEWER_DROP']));
   } finally { checkFonts.mockRestore(); }
 });

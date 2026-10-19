@@ -31,6 +31,7 @@
 ============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { AudioEngine } from './audio-engine.js';
+import { MediaIntakeJobs } from './media-intake-jobs.js';
 import { MediaAudioRouter, AudioPipeline } from './audio-routing-engine.js';
 import { destroyScrubber } from './audio-engine.js';
 import { State, DESK, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
@@ -822,7 +823,7 @@ const Media = {
     const myVer=this._bgVersion;
     try{
       // 與解除影音／外部音檔共用 ingest 佇列，避免同一路徑同時寫入 cache。
-      const res=await DESK.ingest({path,duration,needsProxy:false,audio,queue:true});
+      const res=await MediaIntakeJobs.ingest({path,duration,needsProxy:false,audio,queue:true});
       const liveClip=this._liveClipForSource(clip);
       if(this._bgVersion!==myVer || !liveClip) return;
       const chs=res?.channels||[];
@@ -841,7 +842,7 @@ const Media = {
     if(!DESK?.ingest || !asset || !path || !(audio||[]).length) return null;
     const myVer=this._bgVersion;
     try{
-      const res=await DESK.ingest({path,duration,needsProxy:false,audio,queue:true});
+      const res=await MediaIntakeJobs.ingest({path,duration,needsProxy:false,audio,queue:true});
       if(this._bgVersion!==myVer || !this.externalAudioSources.includes(asset)) return null;
       const channels=res?.channels||[];
       const descriptors=AudioPipeline.registerSource(asset,channels,channels.length||(asset.descriptors||[]).length);
@@ -887,11 +888,12 @@ const Media = {
      單聲道 m4a 快取。這是「解除影音」與重開專案時的保底，不依賴原容器 codec。 */
   async _prepareDesktopAudioCache(path, durationHint=0, infoHint=null){
     if(!DESK?.ingest||!DESK?.probe) throw new Error('桌面版音訊快取工具不可用');
+    const intake=MediaIntakeJobs.capture();
     const info=infoHint||await DESK.probe(path);
     const audio=Array.isArray(info?.audio)?info.audio:[];
     if(!audio.length) throw new Error('此影片沒有可解除的音訊');
     const duration=Math.max(0,Number(info?.duration)||0,Number(durationHint)||0);
-    const result=await DESK.ingest({path,duration,needsProxy:false,audio,queue:true});
+    const result=await intake.ingest({path,duration,needsProxy:false,audio,queue:true});
     const channels=Array.isArray(result?.channels)?result.channels:[];
     if(!channels.length) throw new Error('無法抽取影片音訊聲道');
     return {info,duration,channels,wave:result?.wave||null};
@@ -1361,7 +1363,7 @@ const Media = {
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
     try{
-      res=await DESK.ingest({path:p,duration:dur,needsProxy,audio,queue:true});
+      res=await MediaIntakeJobs.ingest({path:p,duration:dur,needsProxy,audio,queue:true});
       if(!current()) return; // 使用者已換另一個檔，丟棄結果
       if(res.proxy){
         try{
@@ -1457,7 +1459,7 @@ const Media = {
       setStatus('正在為多影片疊層建立主影片 Proxy…','busy');
       // 初次匯入只抽音軌；此處在使用者加入第二支影片後才補做影像快取。
       // queue:true 避免與同一母素材的音訊快取同時寫入。
-      const res=await DESK.ingest({
+      const res=await MediaIntakeJobs.ingest({
         path:spec.path,duration:spec.duration,needsProxy:true,audio:spec.audio,queue:true,
       });
       if(!owns()||!res?.proxy) return;
@@ -2777,7 +2779,7 @@ const Media = {
     // needsProxy:true（v4.25）：加入的片段一律備 720p 短 GOP proxy——原檔可能非原生（ProRes/MXF）
     // 或過大（>600MB WebCodecs 讀不進來）；沒有 proxy 時預覽引擎解不了它 →【無法參與疊層合成】
     // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
-    let res; try{ res = await DESK.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
+    let res; try{ res = await MediaIntakeJobs.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
     catch(e){ if(owns()) setStatus('影片音訊抽取失敗：' + (e?.message||e), ''); return; }
     if(!res || !owns()) return;
     if(res.proxy){
@@ -3440,6 +3442,9 @@ const Media = {
   // localT=當前 clip 的來源時間；tlT=時間軸時間（ext-* 參考音用；未給則同 localT）。
   // 序列模式：被 _srcHidden 的（其他 clip / 已切換音源）不播，避免多段音訊同時出聲。
   startElementSources(localT, tlT){
+    // seek 尚未呈現時，背景聲道接管／來源切換不能搶先播放；只有
+    // presentation session 完成後的 resume 才能再次啟動 follower。
+    if(this.playbackTransitionPending()) return;
     const timeline=tlT??(this.seqOn()?this.tlTime():localT);
     const reversed=[...Seq.clipsAt(timeline).filter(clip=>clip.reverse&&!clip.audioDetached&&!Seq.isStill(clip)),
       ...this.externalAudioSources.filter(asset=>asset.reverse&&this.externalAudio.sourceTime(asset.audioSrc,timeline)!=null)];
@@ -3464,6 +3469,7 @@ const Media = {
     this._syncEngine?.invalidateExternalActivity();
   },
   startBufferSources(offset){
+    if(this.playbackTransitionPending()) return;
     this._audioRouter.startBufferSources(offset);
   },
   stopBufferSources(){
@@ -3492,7 +3498,12 @@ const Media = {
     const source=active ? (active.audioSrc || (active.primary ? 'video' : ('clip:' + active.id))) : 'video';
     const mix=interpretation.sourceReplaced(source);
     const channels=this.sourceChannels(source);
-    const silent=this.sourceMuted(source)||(channels.length>0&&!channels.some(track=>interpretation.trackState(track).audible));
+    // Proxy/聲道快取尚未就緒時，carrier 仍由已註冊的母素材配線控制。
+    // descriptor 只是同一可聽性規則的輸入，不在這裡另算 bus M/S。
+    const sourceId=active?.audioSourceId;
+    const routedChannels=channels.length?channels:(State.audioProject?.sourceMaps?.[sourceId]?.channels||[])
+      .map(channel=>({audioSourceId:sourceId,sourceStream:channel.sourceStream,sourceChannel:channel.sourceChannel}));
+    const silent=this.sourceMuted(source)||(routedChannels.length>0&&!routedChannels.some(track=>interpretation.trackState(track).audible));
     video.muted = this._reverseShuttleMuted||mix||silent ? true : (State.muted || !!active?.audioDetached || !!active?.reverse);
     if(this.mpvMode){
       const sourceHasElements=!!source&&this.tracks.some(track=>
@@ -3668,7 +3679,7 @@ const Media = {
     if(this._reverseProxyPath&&this._reverseProxySourcePath===c.path) return true;
     const operation=this._assetOperation(null,{kind:'clip-reverse-proxy',path:c.path},()=>Seq.byId(c.id)===c&&owns());
     try{
-      const result=await DESK.ingest({path:c.path,duration:c.dur,needsProxy:true,audio:[],queue:true});
+      const result=await MediaIntakeJobs.ingest({path:c.path,duration:c.dur,needsProxy:true,audio:[],queue:true});
       if(!this._ownsAssetOperation(operation)||!result?.proxy) return false;
       this._reverseProxyPath=result.proxy;
       this._reverseProxySourcePath=c.path;
@@ -3984,8 +3995,33 @@ const Media = {
     });
     return restoring;
   },
+  async cancelProxyJobs(){
+    if(!MediaIntakeJobs.snapshot().count) return false;
+    // Revoke work already past its IPC reply too (metadata, waveform fetches,
+    // and staged elements). Existing playable tracks and mother media survive.
+    this._bgVersion++;
+    this._cancelDeferredInitialAudioIngest();
+    this._intakeSession.invalidate();
+    this._deferredPrimaryProxy=null;
+    this._deferredPrimaryProxyPromise=null;
+    this.pendingChannels=[];
+    if(this._ingestDoneHandler){
+      window.removeEventListener('desk:ingest-done',this._ingestDoneHandler);
+      this._ingestDoneHandler=null;
+    }
+    const cancellation=MediaIntakeJobs.reset();
+    notifyAudioTracks();
+    const sessionId=MediaIntakeJobs.snapshot().sessionId;
+    await cancellation;
+    if(MediaIntakeJobs.snapshot().sessionId===sessionId&&!MediaIntakeJobs.snapshot().count)
+      setStatus('已取消 Proxy 與音訊背景處理','ok');
+    return true;
+  },
   reset(options={}){
     const keptAudio=options.keepExternalAudio?[...this.externalAudioSources]:[];
+    // 同專案首次影片沿用既有外音與其工作；真正的工作區替換才撤銷
+    // 原生 session，與下方 asset epoch／背景世代採相同保留語意。
+    if(!keptAudio.length) void MediaIntakeJobs.reset().catch(error=>console.warn('cancel previous media intake:',error));
     const keptKeys=new Set(keptAudio.flatMap(asset=>[asset.audioSourceId,asset.audioSrc]).filter(Boolean));
     const keepTrack=track=>keptKeys.has(track.audioSourceId)||keptKeys.has(track.source);
     const keptTracks=this.tracks.filter(keepTrack);

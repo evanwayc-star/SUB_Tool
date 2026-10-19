@@ -12,6 +12,91 @@ const deferred = () => {
 };
 
 describe('media ingest coordinator', () => {
+  it('取消舊專案的背景 Proxy 後等待 close，再啟動新專案，不執行舊排隊工作', async () => {
+    const coordinator = createMediaIngestCoordinator();
+    const owner = { sender: {}, sessionId: 'old-project', requestId: 'old-active' };
+    const closed = deferred();
+    const child = { kill: vi.fn() };
+    await coordinator.enqueue(({ setProcess }) => {
+      setProcess(child);
+      return { response: 'old playable', completion: closed.promise };
+    }, owner);
+    const obsoleteWork = vi.fn();
+    const obsolete = coordinator.enqueue(obsoleteWork, { ...owner, requestId: 'old-queued' }).catch(error => error);
+    let cancelled = false;
+    const cancellation = coordinator.cancel({ sender: owner.sender, sessionId: owner.sessionId })
+      .then(() => { cancelled = true; });
+    const nextWork = vi.fn(() => 'new playable');
+    const next = coordinator.enqueue(nextWork, { ...owner, sessionId: 'new-project', requestId: 'new-job' });
+    expect(child.kill).toHaveBeenCalledOnce();
+    await expect(obsolete).resolves.toBeInstanceOf(IngestSupersededError);
+    expect(obsoleteWork).not.toHaveBeenCalled();
+    expect(nextWork).not.toHaveBeenCalled();
+    expect(cancelled).toBe(false);
+    closed.resolve();
+    await cancellation;
+    await expect(next).resolves.toBe('new playable');
+    expect(nextWork).toHaveBeenCalledOnce();
+  });
+
+  it('已取消的 session 不再准入遲到工作；新 session 可立即重試', async () => {
+    const coordinator = createMediaIngestCoordinator();
+    const owner = { sender: {}, sessionId: 'old-project', requestId: 'late' };
+    await coordinator.cancel({ sender: owner.sender, sessionId: owner.sessionId });
+    const late = vi.fn();
+    await expect(coordinator.enqueue(late, owner)).rejects.toBeInstanceOf(IngestSupersededError);
+    expect(late).not.toHaveBeenCalled();
+    await expect(coordinator.enqueue(() => 'retry', { ...owner, sessionId: 'new-project' })).resolves.toBe('retry');
+  });
+
+  it('其他 sender 與晚到的舊 request cancel 不可取消同 session 的新工作', async () => {
+    const coordinator = createMediaIngestCoordinator();
+    const owner = { sender: {}, sessionId: 'project', requestId: 'retry' };
+    const closed = deferred();
+    const child = { kill: vi.fn() };
+    await coordinator.enqueue(({ setProcess }) => {
+      setProcess(child);
+      return { response: 'playable', completion: closed.promise };
+    }, owner);
+    await expect(coordinator.cancel({ ...owner, sender: {} })).resolves.toBe(0);
+    await expect(coordinator.cancel({ ...owner, sessionId: 'other-project' })).resolves.toBe(0);
+    await expect(coordinator.cancel({ ...owner, requestId: 'old-request' })).resolves.toBe(0);
+    expect(child.kill).not.toHaveBeenCalled();
+    closed.resolve();
+  });
+
+  it('單一 request 取消統一回覆取消錯誤，保留其他 request 與另一視窗的工作', async () => {
+    const coordinator = createMediaIngestCoordinator();
+    const closed = deferred();
+    const owner = { sender: {}, sessionId: 'project', requestId: 'cancelled' };
+    const child = { kill: vi.fn() };
+    const active = coordinator.enqueue(({ setProcess }) => { setProcess(child); return closed.promise; }, owner)
+      .catch(error => error);
+    const ownQueued = coordinator.enqueue(() => 'own kept', { ...owner, requestId: 'kept' });
+    const other = coordinator.enqueue(() => 'other kept', { ...owner, sender: {} });
+    const cancellation = coordinator.cancel(owner);
+    closed.reject(new Error('ffmpeg exited 1'));
+    await expect(active).resolves.toMatchObject({ code: 'INGEST_SUPERSEDED', message: '媒體轉檔已被較新的載入取代' });
+    await cancellation;
+    await expect(ownQueued).resolves.toBe('own kept');
+    await expect(other).resolves.toBe('other kept');
+    await expect(coordinator.enqueue(() => 'same session retry', { ...owner, requestId: 'retry' })).resolves.toBe('same session retry');
+  });
+
+  it('有 sender 的 replace 只取代自己工作，不能終止另一視窗的 active writer', async () => {
+    const coordinator = createMediaIngestCoordinator();
+    const closed = deferred();
+    const foreign = { sender: {}, sessionId: 'other-project', requestId: 'other' };
+    const child = { kill: vi.fn() };
+    await coordinator.enqueue(({ setProcess }) => {
+      setProcess(child); return { response: 'other ready', completion: closed.promise };
+    }, foreign);
+    const next = coordinator.replace(() => 'own ready', { sender: {}, sessionId: 'project', requestId: 'own' });
+    expect(child.kill).not.toHaveBeenCalled();
+    closed.resolve();
+    await expect(next).resolves.toBe('own ready');
+  });
+
   it('shutdown 取消 active、清 pending 並等完整背景 completion，不能再准入', async () => {
     const coordinator = createMediaIngestCoordinator();
     const completion = deferred();

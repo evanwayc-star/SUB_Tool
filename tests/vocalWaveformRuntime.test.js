@@ -124,12 +124,13 @@ function mainMediaHandlers(context) {
     && node.expression.callee.object?.name === 'ipcMain'
     && node.expression.callee.property?.name === 'handle'
     && channels.includes(node.expression.arguments[0]?.value));
-  const session = ast.body.find(node => node.type === 'FunctionDeclaration' && node.id.name === 'mediaIntakeSession');
+  const session = ast.body.filter(node => node.type === 'FunctionDeclaration'
+    && ['mediaIntakeOwner', 'mediaIntakeSession'].includes(node.id.name));
   expect(registrations).toHaveLength(channels.length);
-  expect(session).toBeDefined();
+  expect(session).toHaveLength(2);
   const handlers = new Map();
   context.ipcMain = { handle: (channel, handler) => handlers.set(channel, handler) };
-  vm.runInNewContext(source.slice(session.start, session.end), context);
+  vm.runInNewContext(session.map(node => source.slice(node.start, node.end)).join('\n'), context);
   for (const registration of registrations) vm.runInNewContext(source.slice(registration.start, registration.end), context);
   return handlers;
 }

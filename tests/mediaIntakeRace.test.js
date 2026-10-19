@@ -44,6 +44,7 @@ const deskMock = vi.hoisted(() => ({
   fileURL: vi.fn(async path => `file:///${String(path).replaceAll('\\', '/')}`),
   waveAudio: vi.fn(),
   cleanupAudio: vi.fn(),
+  cancelMediaIntake: vi.fn(async()=>1),
 }));
 
 vi.mock('../src/dom.js', () => domMock);
@@ -109,6 +110,7 @@ describe('desktop mother-source intake ownership', () => {
     deskMock.ingest.mockReset();
     deskMock.waveAudio.mockReset();
     deskMock.cleanupAudio.mockReset();
+    deskMock.cancelMediaIntake.mockClear();
     setStatus.mockClear();
     showToast.mockClear();
     deskMock.ingest.mockImplementation(({ path }) => {
@@ -378,6 +380,85 @@ describe('desktop mother-source intake ownership', () => {
     expect(domMock.video.src).toBe('file:///C:/media/B.mp4');
     expect(State.clips).toHaveLength(1);
     expect(State.clips[0]).toMatchObject({ path: 'C:/media/B.mp4', primary: true });
+  });
+
+  it('Proxy cancel revokes the actual background caller and preserves the loaded mother clip',async()=>{
+    const primary=Media._registerPrimary({name:'A.mxf',path:'C:/media/A.mxf',dur:12,audioSourceId:'source-a'});
+    Media.pendingChannels=[{label:'pending',ready:false}];
+    const work=Media._bgAudioIngest(primary.path,[{channels:1}],12,primary);
+    const request=deskMock.ingest.mock.calls.at(-1)[0];
+    expect(request).toMatchObject({sessionId:expect.any(String),requestId:expect.any(String)});
+    expect(await Media.cancelProxyJobs()).toBe(true);
+    await work;
+    expect(deskMock.cancelMediaIntake).toHaveBeenCalledWith({sessionId:request.sessionId});
+    expect(State.clips).toContain(primary);
+    expect(Media.pendingChannels).toEqual([]);
+    pending.get(primary.path).resolve({proxy:'stale.mp4',channels:[{file:'stale.wav'}]});
+    await Promise.resolve();await Promise.resolve();
+    expect(Media.tracks).toEqual([]);
+    expect(deskMock.fileURL).not.toHaveBeenCalledWith('stale.mp4');
+    expect(showToast).not.toHaveBeenCalled();
+    expect(setStatus).toHaveBeenLastCalledWith('已取消 Proxy 與音訊背景處理','ok');
+  });
+
+  it('取消背景 Proxy 保留已提交 mpv 的時間回報，reset 後才撤銷該 transport',async()=>{
+    const callbacks=[];
+    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12})),
+      pause:vi.fn(async()=>{}),play:vi.fn(async()=>{}),mute:vi.fn(async()=>{}),quit:vi.fn(async()=>{}),
+      onEvent:vi.fn(callback=>callbacks.push(callback)),setBounds:vi.fn(async()=>{})};
+    window.subtool.mpv=mpv;resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({duration:12,video:{codec:'prores',fps:25,width:1920,height:1080},audio:[{channels:1}]});
+    try{
+      await Media.loadDesktopMedia('C:/media/A.mov');
+      await vi.waitFor(()=>expect(pending.has('C:/media/A.mov')).toBe(true));
+      expect(callbacks).toHaveLength(1);
+      Media.playing=true;
+      callbacks[0]({event:'property-change',name:'time-pos',data:2});
+      expect(Media.displayTime()).toBe(2);
+      await expect(Media.cancelProxyJobs()).resolves.toBe(true);
+      callbacks[0]({event:'property-change',name:'time-pos',data:3});
+      expect(Media.displayTime()).toBe(3);
+      expect(State.clips[0].path).toBe('C:/media/A.mov');
+      expect(Media.pendingChannels).toEqual([]);
+      Media.reset();State.duration=0;
+      callbacks[0]({event:'property-change',name:'duration',data:99});
+      expect(State.duration).toBe(0);
+      pending.get('C:/media/A.mov').resolve({proxy:'stale.mp4',channels:[{file:'stale.wav'}]});
+      await Promise.resolve();await Promise.resolve();
+      expect(Media.tracks).toEqual([]);
+      expect(deskMock.fileURL).not.toHaveBeenCalledWith('stale.mp4');
+    }finally{Media.reset();delete window.subtool.mpv;resetPlayerAdapter(window.subtool);}
+  });
+
+  it('switching projects cancels old native work and starts the next intake without waiting for its reply',async()=>{
+    const loadA=Media.loadDesktopMedia('C:/media/A.mp4');
+    await vi.waitFor(()=>expect(pending.has('C:/media/A.mp4')).toBe(true));
+    const requestA=deskMock.ingest.mock.calls.at(-1)[0];
+    const loadB=Media.loadDesktopMedia('C:/media/B.mp4');
+    await vi.waitFor(()=>expect(pending.has('C:/media/B.mp4')).toBe(true));
+    await loadA;
+    const requestB=deskMock.ingest.mock.calls.at(-1)[0];
+    expect(requestB.sessionId).not.toBe(requestA.sessionId);
+    expect(deskMock.cancelMediaIntake).toHaveBeenCalledWith({sessionId:requestA.sessionId});
+    pending.get('C:/media/B.mp4').resolve({channels:[]});await loadB;
+    pending.get('C:/media/A.mp4').resolve({channels:[]});await Promise.resolve();
+    expect(State.mediaPath).toBe('C:/media/B.mp4');
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('同專案首次加入影片保留已接受外音的背景快取工作',async()=>{
+    const asset=Media.createExternalAudioSource({name:'voice.wav',path:'C:/media/voice.wav',duration:12,in:0,out:12,
+      offset:0,audioSourceId:'voice-source',descriptors:[{sourceStream:0,sourceChannel:0}]});
+    const cache=Media.cacheExternalRoutingAudio(asset,asset.path,12,[{channels:1}]);
+    const request=deskMock.ingest.mock.calls.at(-1)[0];
+    const loading=Media.loadDesktopMedia('C:/media/first.mp4');
+    try{
+      await vi.waitFor(()=>expect(pending.has('C:/media/first.mp4')).toBe(true));
+      pending.get(asset.path).resolve({channels:[]});
+      await expect(cache).resolves.toEqual({channels:[]});
+      expect(Media.externalAudioSources).toContain(asset);
+      expect(deskMock.cancelMediaIntake).not.toHaveBeenCalledWith({sessionId:request.sessionId});
+    }finally{pending.get('C:/media/first.mp4')?.resolve({channels:[]});await loading;}
   });
 
   it('does not attach stale background channels to the new primary after proxy URL lookup', async () => {

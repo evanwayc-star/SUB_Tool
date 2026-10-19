@@ -29,7 +29,7 @@ vi.mock('../src/timeline-renderer.js', () => ({
   refreshTrackGutterActive: vi.fn(),
 }));
 vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
-vi.mock('../src/history.js', () => ({ History: {}, recordHistory: vi.fn(), renderHistory: vi.fn() }));
+vi.mock('../src/history.js', () => ({ History: {stack:[],hi:-1}, recordHistory: vi.fn(), renderHistory: vi.fn() }));
 vi.mock('../src/project.js', () => ({ Project: {captureWorkspaceOwnership:()=>()=>true}, ensureProjectSaved: vi.fn().mockResolvedValue() }));
 vi.mock('../src/substyle.js', async orig => ({ ...(await orig()) }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));
@@ -303,6 +303,9 @@ describe('字幕匯入鎖定防護', () => {
 
     buttons[0].act();
 
+    expect(State.cues.map(c=>c.text)).toEqual(['x','y']);
+    expect(ui.openModal.mock.calls.at(-1)[1]).toContain('<b>1</b>');
+    ui.openModal.mock.calls.at(-1)[2].find(button=>button.label==='確認覆蓋').act();
     expect(State.cues.map(c => ({ text: c.text, track: c.track }))).toEqual([
       { text: 'y', track: 1 },
       { text: '取代內容', track: 0 },

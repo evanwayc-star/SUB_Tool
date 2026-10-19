@@ -43,6 +43,7 @@ import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.
 import { togglePanel, renderQueueMonitorIndicator, renderAsrIndicator } from './ui.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
+import { bindMediaIntakeView, handleMediaIntakeProgress } from './media-intake-view.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline-renderer.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, applyCueStylePatch } from './subtitles.js';
@@ -865,7 +866,7 @@ async function initDesktop(){
     }
   }
 
-  const _taskStarts = {};
+  bindMediaIntakeView(()=>Media.cancelProxyJobs());
   DESK.onProgress(d=>{
     if (d.jobId && String(d.jobId).startsWith('export-')) {
       if (!d.error && !d.stopped && !d.done) _visibleExportJobId = d.jobId;
@@ -929,27 +930,7 @@ async function initDesktop(){
       return;
     }
 
-    if (d.pct === 0 || !_taskStarts[d.jobId]) _taskStarts[d.jobId] = Date.now();
-    if(!d.done && d.pct<100) {
-      const elMs = Date.now() - _taskStarts[d.jobId];
-      let tStr = '';
-      if (d.pct > 0 && elMs > 1000) {
-        const total = elMs / (d.pct / 100);
-        const remS = Math.floor((total - elMs) / 1000);
-        const elS = Math.floor(elMs / 1000);
-        const fmt = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
-        tStr = ` [已用 ${fmt(elS)} / 剩餘 ${fmt(remS)}]`;
-      }
-      setStatus((d.label||'處理中')+'… '+d.pct+'%'+tStr,'busy','lock');
-      if ($('stMedia')) $('stMedia').style.display = 'none'; // 隱藏媒體名稱以騰出空間，避免擠壓進度文字
-    }
-    if(d.done) {
-      delete _taskStarts[d.jobId];
-      const succeeded = d.outcome === 'success';
-      setStatus((d.label||'轉檔')+(succeeded?'完成':'失敗'), succeeded?'ok':'err', 'unlock');
-      if ($('stMedia')) $('stMedia').style.display = ''; // 恢復顯示
-      if(succeeded) window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:d}));
-    }
+    handleMediaIntakeProgress(d);
   });
   
   configureSubtitleCompareSession({

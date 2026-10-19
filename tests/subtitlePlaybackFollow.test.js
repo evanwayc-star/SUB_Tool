@@ -146,6 +146,9 @@ it('仍持有選取的真字幕右鍵選單正常刪除目標，一次 Undo/Redo
   openCueMenu();
   const before = structuredClone(State.cues);
   clickCueMenu('刪除字幕');
+  expect(State.cues).toEqual(before);
+  expect(document.getElementById('modalBody').textContent).toContain('1');
+  document.querySelector('#modalFoot button.primary').click();
   expect(State.cues.map(cue => cue.id)).toEqual(['menu-b']);
   expect(window.SUB.History.stack).toHaveLength(2);
   window.SUB.History.undo(); expect(State.cues).toEqual(before);

@@ -6,7 +6,7 @@ vi.mock('../src/project.js',()=>({Project:{captureWorkspaceOwnership:()=>{const 
 vi.mock('../src/util.js',async original=>({...await original(),readFile:vi.fn(file=>new Promise(resolve=>workflow.reads.set(file.name,resolve)))}));
 vi.mock('../src/media.js',()=>({Media:{mpvMode:false,tracks:[],externalAudio:{list:()=>[]}},Wave:{}}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),layoutTimeline:vi.fn()}));
-vi.mock('../src/history.js',()=>({recordHistory:workflow.record}));
+vi.mock('../src/history.js',()=>({History:{stack:[],hi:-1},recordHistory:workflow.record}));
 vi.mock('../src/substyle.js',async original=>({...await original(),loadFonts:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../src/audio-routing.js',()=>({AudioRouting:{}}));
 vi.mock('../src/notes.js',()=>({getNotesGeneralFileData:vi.fn(),getNotesEdiusFileData:vi.fn()}));
@@ -40,6 +40,9 @@ describe('字幕匯入工作歸屬',()=>{
     subio._openImportModal('未定時 TXT',subio._parseSubtitleText('未定時','txt'),'txt');
     document.getElementById('importTkSel').value='0';
     document.querySelector('#modalFoot button.primary').click();
+    expect(State.cues[0].text).toBe('一格');
+    expect(document.getElementById('modalBody').textContent).toContain('1');
+    [...document.querySelectorAll('#modalFoot button')].find(button=>button.textContent==='確認覆蓋').click();
     expect(State.cues.at(-1)).toMatchObject({start:0,end:0,timed:false});
   });
   it('同名不同folder在字幕匯入中套用指定identity',async()=>{
