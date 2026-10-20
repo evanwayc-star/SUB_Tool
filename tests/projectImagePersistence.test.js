@@ -159,7 +159,7 @@ describe('project image persistence',()=>{
     expect(isProjectDirty()).toBe(false);
 
     State.vtracksCollapsed=false;
-    expect(isProjectDirty()).toBe(true);
+    expect(isProjectDirty()).toBe(false);
     Project.apply(data);
     expect(State.vtracksCollapsed).toBe(true);
 

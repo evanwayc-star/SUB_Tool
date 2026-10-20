@@ -419,8 +419,7 @@ function isProjectGuardDone(){ return _editGuardDone; }
    .subtool、瀏覽器版選檔）都直接 Project.load*()，未存檔的內容就這樣沒了，
    而且沒有任何提示。這裡把那個提示補上，並讓三條路徑共用同一份。 */
 function confirmDiscardUnsaved(title = '開啟另一個專案'){
-  const dirty=isProjectDirty(),count=State.cues.length;
-  if(!dirty&&!count) return Promise.resolve(true);
+  if(!isProjectDirty()) return Promise.resolve(true);
   const owns=captureSubtitleRemovalOwnership();
   return new Promise(resolve=>{
     let done=false;
@@ -429,13 +428,12 @@ function confirmDiscardUnsaved(title = '開啟另一個專案'){
       if(done || !session.isCurrent()) return;
       done=true;
       const accepted=value&&owns();
-      if(value&&!accepted) showToast('字幕或專案已變更，請重新確認開啟');
+      if(value&&!accepted) showToast('專案內容已變更，請重新確認開啟');
       session.close({committed:true}); resolve(accepted);
     };
     const session=openModal(title,
-      `${dirty?'<p>目前的專案有未儲存的變更。要先儲存嗎？</p>':''}`+
-      `<p>開啟另一個專案會取代目前工作區，移除其中 <b>${count}</b> 條既有字幕。取消保留目前專案。</p>`,
-      [...(dirty?[
+      '<p>目前的專案有未儲存的變更。要先儲存嗎？</p>',
+      [
         // 等儲存真正完成（拿到路徑）才繼續；使用者取消存檔對話框則留在原專案，
         // 與關閉視窗時的處理一致，避免「以為存好了其實沒有」。
         {label:'儲存後開啟',primary:true,act:async()=>{
@@ -443,7 +441,6 @@ function confirmDiscardUnsaved(title = '開啟另一個專案'){
           finish(!!pth&&!isProjectDirty());
         }},
         {label:'不儲存直接開啟',act:()=>finish(true)},
-      ]:[{label:'確認開啟',primary:true,act:()=>finish(true)}]),
         {label:'取消',act:()=>finish(false)},
       ],{onDismiss:cancel,onReplaced:cancel});
   });
@@ -469,6 +466,12 @@ function resetProject(){
   _projectLoadSession.clearPlan();
 }
 
+// 播放點、縮放與軌道收合仍隨專案保存，方便下次還原檢視；它們不是內容編輯。
+// 未儲存判斷與等待 picker 時的丟棄同意使用相同投影，避免兩處規則分歧。
+function _projectContentString(data){
+  return JSON.stringify({...data,playhead:0,pxPerSec:0,vtracksCollapsed:false});
+}
+
 function isProjectDirty() {
   if (_autoRelinkNeedsSave) return true;
   const data=_buildProjectData();
@@ -476,16 +479,8 @@ function isProjectDirty() {
   // 新工作區和磁碟存檔都以同一份 committed snapshot 作為乾淨基準。
   if (!_lastSavedDataStr) return true;
   
-  const currentStr = JSON.stringify(data);
-  if (currentStr === _lastSavedDataStr) return false;
-  
-  // 忽略 playhead 的差異（播放點改變不應視為專案已修改而阻擋關閉）
   try {
-    const current = JSON.parse(currentStr);
-    const last = JSON.parse(_lastSavedDataStr);
-    current.playhead = 0;
-    last.playhead = 0;
-    return JSON.stringify(current) !== JSON.stringify(last);
+    return _projectContentString(data) !== _projectContentString(JSON.parse(_lastSavedDataStr));
   } catch (e) {
     return true;
   }
@@ -649,18 +644,18 @@ const Project = {
     const current=()=>request===_openRequestGeneration&&_isCurrentProjectLoad(generation);
     if(confirm&&!await confirmDiscardUnsaved()) return false;
     if(!current()) return false;
-    const consentSnapshot=JSON.stringify({..._buildProjectData(),playhead:0});
+    const consentSnapshot=_projectContentString(_buildProjectData());
     const consentCues=[...State.cues],consentTracks=[...State.tracks];
     const consentSubtitles=JSON.stringify({cues:State.cues,tracks:State.tracks});
     let input;
     try{ input=await read(); }
     catch(error){ if(!current()) return false; throw error; }
     if(!current()||!input) return false;
-    // picker／讀檔期間合法新增的修改不屬於先前的丟棄同意；播放點移動不算修改。
+    // picker／讀檔期間新增的內容修改不屬於先前的丟棄同意；檢視變動不算修改。
     const changedSubtitles=State.cues.length!==consentCues.length||consentCues.some((cue,i)=>State.cues[i]!==cue)
       ||State.tracks.length!==consentTracks.length||consentTracks.some((track,i)=>State.tracks[i]!==track)
       ||consentSubtitles!==JSON.stringify({cues:State.cues,tracks:State.tracks});
-    if(changedSubtitles||isProjectDirty()&&consentSnapshot!==JSON.stringify({..._buildProjectData(),playhead:0})){
+    if(changedSubtitles||isProjectDirty()&&consentSnapshot!==_projectContentString(_buildProjectData())){
       if(!await confirmDiscardUnsaved()||!current()) return false;
     }
     if(typeof input.b64==='string'){

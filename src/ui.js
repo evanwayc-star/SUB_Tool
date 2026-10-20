@@ -154,6 +154,12 @@ if (modalBg) {
     }
     if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !e.target.isContentEditable) {
       if (e.isComposing || e.keyCode === 229) return;
+      // Enter belongs to the focused native control. In particular, focusing
+      // Cancel must never activate a destructive primary button instead.
+      if (e.target.closest('button, a[href], select, summary, :disabled, input[type="button"], input[type="submit"], input[type="reset"], input[type="checkbox"], input[type="radio"], input[type="range"], input[type="file"], input[type="color"]')) {
+        e.stopPropagation();
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       $('modalFoot')?.querySelector('button.primary')?.click();

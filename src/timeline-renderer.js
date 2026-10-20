@@ -1903,7 +1903,7 @@ export function zoomFit(){
     t0=0; t1=State.duration>0?State.duration:1;
   }
   const dur=t1-t0; if(dur<=0)return;
-  const MIN_PPS=Math.round(80*Math.pow(1.3,4));
+  const MIN_PPS=Math.round(80*Math.pow(1.3,3));
   const ideal=(vw-40)/dur;
   const pps=clamp(Math.max(ideal,MIN_PPS),4,800);
   const vt=Media.displayTime();

@@ -75,6 +75,36 @@ describe('沒有未存檔變更時不打擾', () => {
     await expect(confirmDiscardUnsaved()).resolves.toBe(true);
     expect(ui.openModal).not.toHaveBeenCalled();
   });
+
+  it('已儲存的專案即使有字幕也直接開啟，不顯示刪除字幕警告', async () => {
+    makeDirty();
+    await Project.save();
+    expect(isProjectDirty()).toBe(false);
+    const pending = confirmDiscardUnsaved();
+    try {
+      expect(ui.openModal).not.toHaveBeenCalled();
+    } finally {
+      ui.openModal.mock.calls.at(-1)?.[3]?.onDismiss();
+    }
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it.each([
+    ['時間軸縮放', () => { State.pxPerSec = 137; }],
+    ['視訊軌收合', () => { State.vtracksCollapsed = !State.vtracksCollapsed; }],
+  ])('%s 只改檢視，不觸發未儲存提醒，實際字幕編輯仍受保護', async (_name, view) => {
+    makeDirty();
+    await Project.save();
+    view();
+    expect(isProjectDirty()).toBe(false);
+    await expect(confirmDiscardUnsaved()).resolves.toBe(true);
+    expect(ui.openModal).not.toHaveBeenCalled();
+    State.cues[0].text = 'edited subtitle';
+    expect(isProjectDirty()).toBe(true);
+    const pending = confirmDiscardUnsaved();
+    clickModalButton('取消');
+    await expect(pending).resolves.toBe(false);
+  });
 });
 
 describe('空工作區的持久設定也受未儲存保護', () => {
@@ -120,6 +150,19 @@ describe('有未存檔變更時三個選項的行為', () => {
     expect(ui.openModal).toHaveBeenCalledTimes(1);
     expect(settled, '還沒選就放行等於沒問').toBe(false);
     clickModalButton('取消');
+    await expect(pending).resolves.toBe(false);
+  });
+
+  it('切換專案只說明未儲存變更，不把切換誤稱為刪除字幕', async () => {
+    const pending = confirmDiscardUnsaved();
+    try {
+      const [, content, buttons] = ui.openModal.mock.calls.at(-1);
+      expect(content).toContain('未儲存的變更');
+      expect(content).not.toMatch(/移除|既有字幕|刪除/);
+      expect(buttons.map(button => button.label)).toEqual(['儲存後開啟', '不儲存直接開啟', '取消']);
+    } finally {
+      clickModalButton('取消');
+    }
     await expect(pending).resolves.toBe(false);
   });
 

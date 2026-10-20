@@ -422,11 +422,8 @@ describe('project load transactions', () => {
     await loadingA;
     expect(State.cues.map(c=>c.text)).toEqual(['A']);
     readB.resolve(request('B','C:/media/B.mov'));
-    await vi.waitFor(()=>expect(uiMock.openModal).toHaveBeenCalled());
-    const confirmation=uiMock.openModal.mock.calls.at(-1);
-    expect(confirmation[1]).toContain('<b>1</b>');
-    confirmation[2].find(button=>button.label==='確認開啟').act();
     await openingB;
+    expect(uiMock.openModal).not.toHaveBeenCalled();
     expect(State.cues.map(c=>c.text)).toEqual(['B']);
   });
 
@@ -460,6 +457,21 @@ describe('project load transactions', () => {
     await expect(opening).resolves.toBe(false);
     expect(State.cues.map(c=>c.text)).toEqual(['讀取期間新增']);
     expect(mediaMock.reset).not.toHaveBeenCalled();
+  });
+
+  it.each(['zoom','collapse'])('同意不儲存後等待讀檔時只改 %s 不重複要求同意', async action => {
+    State.cues=[{id:'unsaved',track:0,start:0,end:1,text:'已同意不儲存的內容'}];
+    const input=deferred(),started=deferred();
+    const opening=Project.open(()=>{started.resolve();return input.promise;});
+    uiMock.openModal.mock.calls.at(-1)[2].find(button=>button.label==='不儲存直接開啟').act();
+    await started.promise;
+    if(action==='zoom') State.pxPerSec=137;
+    else State.vtracksCollapsed=!State.vtracksCollapsed;
+    desk.stat.mockResolvedValue({exists:true});
+    input.resolve(request('Next','C:/media/Next.mov'));
+    await expect(opening).resolves.not.toBe(false);
+    expect(uiMock.openModal).toHaveBeenCalledTimes(1);
+    expect(State.cues.map(c=>c.text)).toEqual(['Next']);
   });
 
   it('drop 專案也需確認未存內容，取消時不讀檔且不改字幕', async () => {

@@ -10,7 +10,7 @@ const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.j
 const roots = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
-function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend } = {}) {
+function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend, observers = {} } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-ffmpeg-stream-'));
   roots.push(root);
   const queueDir = path.join(root, 'queue');
@@ -22,7 +22,10 @@ function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend }
     getUserDataDir: () => root,
     getQueueDir: () => queueDir,
     ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
-    send: (sender, event, data) => sent.push({ sender, event, data }),
+    send: (sender, event, data) => {
+      sent.push({ sender, event, data });
+      return observers.send?.(data);
+    },
     spawnDirect() {
       if (stage === 'throw') throw failure;
       const child = new EventEmitter();
@@ -54,12 +57,57 @@ function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend }
     run: () => execution.execute(['-i', 'mother.mxf', path.join(root, 'out.mp4')], {
       executionKind: kind, duration: 10, jobId: 'ingest', label: '轉檔預覽影片',
       outPath: path.join(root, 'out.mp4'), sender: { id: 7 }, shouldSend,
-      onProgress: value => progress.push(value), onStderr: value => stderr.push(value),
+      onProgress: value => { progress.push(value); return observers.progress?.(value); },
+      onStderr: value => { stderr.push(value); return observers.stderr?.(value); },
     }),
   };
 }
 
 describe('public FFmpeg execution terminal and pipe records', () => {
+  it.each(['direct', 'queued-delivery'].flatMap(kind => ['data', 'EOF'].flatMap(phase =>
+    ['send', 'progress', 'stderr'].map(observer => [kind, phase, observer]))))(
+    '%s isolates throwing %s %s observers while retaining native success and parsed records',
+    async (kind, phase, observer) => {
+      const fixture = setup(kind, {
+        chunks: ['Stream #0:0 -> #0:0 (h264 (native) -> h264 (libx264))\n',
+          `time=00:00:05.00 speed=1.0x${phase === 'data' ? '\n' : ''}`],
+        observers: { [observer]: () => { throw new Error('observer failed'); } },
+      });
+      const result = await fixture.run();
+      expect(result.maps).toEqual(['h264 (native) -> h264 (libx264)']);
+      expect(result.tail).toContain('time=00:00:05.00');
+      expect(fixture.progress).toContainEqual(expect.objectContaining({ pct: 50 }));
+      expect(fixture.sent.filter(item => item.data.done).map(item => item.data.outcome)).toEqual(['success']);
+      expect(fixture.progress.filter(item => item.done)).toHaveLength(kind === 'direct' ? 1 : 0);
+    },
+  );
+
+  it.each(['direct', 'queued-delivery'])('%s observer rejections cannot become unhandled or replace a native failure', async kind => {
+    const rejectObserver = () => Promise.reject(new Error('async observer failed'));
+    const fixture = setup(kind, { code: 1, chunks: ['Unknown encoder\ntime=00:00:05.00'],
+      observers: { send: rejectObserver, progress: rejectObserver, stderr: rejectObserver } });
+    await expect(fixture.run()).rejects.toMatchObject({ code: 'FFMPEG_EXIT',
+      message: expect.stringContaining('Unknown encoder') });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(fixture.sent.filter(item => item.data.done).map(item => item.data.outcome)).toEqual(['failed']);
+  });
+
+  it('throwing observers cannot complete a direct writer or its shutdown before native close', async () => {
+    const fail = () => { throw new Error('observer failed'); };
+    const fixture = setup('direct', { stage: 'hold', observers: { send: fail, progress: fail, stderr: fail } });
+    let completed = false, closed = false;
+    const work = fixture.run().finally(() => { completed = true; }).catch(error => error);
+    expect(() => fixture.child.stderr.emit('data', Buffer.from('time=00:00:05.00\n'))).not.toThrow();
+    const closing = fixture.execution.cancelAllAndWait().then(() => { closed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(completed).toBe(false);
+    expect(closed).toBe(false);
+    fixture.child.emit('close', 0);
+    await expect(work).resolves.toMatchObject({ name: 'AbortError', code: 'ABORT_ERR' });
+    await closing;
+    expect(fixture.execution.resume()).toBe(true);
+  });
+
   it.each(['direct', 'queued-delivery'])('%s nonzero close emits one failed terminal, never success', async kind => {
     const fixture = setup(kind, { code: 1, chunks: ['Output container does not support this codec\n'] });
     await expect(fixture.run()).rejects.toMatchObject({ code: 'FFMPEG_EXIT' });

@@ -42,8 +42,8 @@ it('匯入覆蓋已有軌道先確認舊2句；取消不改任何既有資料',a
 it('刪軌確認後同物件字幕被改寫，舊確認不得刪軌',()=>{
  Timeline.removeTrack(0);expect(visible()).toBe(true);State.cues[0].text='新修訂';primary();expect(State.cues).toHaveLength(2);expect(State.tracks).toHaveLength(1);expect(History.stack).toHaveLength(1);
 });
-it('已保存專案換檔也先明示將取代2句，可取消且不呼叫reader',async()=>{
- Project.establishCleanBaseline();const read=vi.fn(async()=>null);const pending=Project.open(read);await Promise.resolve();expect(visible()).toBe(true);expect(document.getElementById('modalBody').textContent).toMatch(/2/);expect(read).not.toHaveBeenCalled();click('取消');await pending;expect(State.cues).toHaveLength(2);
+it('已保存且有字幕的專案換檔直接呼叫reader，不顯示移除字幕提示',async()=>{
+ Project.establishCleanBaseline();const read=vi.fn(async()=>null);await expect(Project.open(read)).resolves.toBe(false);expect(visible()).toBe(false);expect(read).toHaveBeenCalledOnce();expect(State.cues).toHaveLength(2);
 });
 
 it.each(['in','out'])('真正 %s 點完整覆蓋先確認，取消連原字幕時間也不改；確認一筆Undo',async edge=>{
@@ -81,10 +81,81 @@ it.each(['merge','import','track','new-project'])('%s 確認期間同物件改�
 it('附加與新增軌的匯入不移除既有字幕，無額外移除確認',async()=>{
  Subio._openImportModal('匯入字幕',[{start:5,end:6,text:'附加'}],'srt');await vi.advanceTimersByTimeAsync(35);document.getElementById('importTkSel').value='0';document.getElementById('importAppend').checked=true;primary();expect(State.cues.map(c=>c.text)).toEqual(['甲','乙','附加']);expect(visible()).toBe(false);expect(History.stack).toHaveLength(2);
 });
-it('讀檔等待期間新增並儲存的字幕仍需重新確認移除，取消保留新稿',async()=>{
- Project.establishCleanBaseline();let finishRead;const read=vi.fn(()=>new Promise(resolve=>{finishRead=resolve;}));const pending=Project.open(read);primary();await Promise.resolve();await Promise.resolve();expect(read).toHaveBeenCalledOnce();
- State.cues.push({id:'later',start:7,end:8,text:'已儲存的新句',track:0});History.record('新增');Project.establishCleanBaseline();finishRead(new File(['{}'],'new.subtool'));await Promise.resolve();await Promise.resolve();expect(visible()).toBe(true);expect(document.getElementById('modalBody').textContent).toMatch(/3/);click('取消');await pending;expect(State.cues).toHaveLength(3);expect(State.cues.at(-1).text).toBe('已儲存的新句');expect(History.stack).toHaveLength(2);
+it('讀檔等待期間新增並儲存的字幕不再觸發移除警告',async()=>{
+ Project.establishCleanBaseline();let finishRead;const read=vi.fn(()=>new Promise(resolve=>{finishRead=resolve;}));const pending=Project.open(read);await Promise.resolve();await Promise.resolve();expect(read).toHaveBeenCalledOnce();
+ State.cues.push({id:'later',start:7,end:8,text:'已儲存的新句',track:0});History.record('新增');Project.establishCleanBaseline();
+ const load=vi.spyOn(Project,'load').mockResolvedValueOnce(true);
+ try{const file=new File(['{}'],'new.subtool');finishRead(file);await expect(pending).resolves.toBe(true);expect(load).toHaveBeenCalledWith(file);expect(visible()).toBe(false);}finally{load.mockRestore();}
 });
 it('覆蓋計畫與model共用規則，預查不分配ID或改資料，部分裁切不要求整句移除確認',()=>{
  State.overwriteMode=true;State.overwriteKeep=false;const before=structuredClone(State.cues);expect(Model.planContainedCueRemovals([{...State.cues[0],end:3.5}])).toEqual([]);expect(State.cues).toEqual(before);expect(Model.planContainedCueRemovals([{...State.cues[0],end:5}])).toEqual([State.cues[1]]);expect(State.cues).toEqual(before);expect(History.stack).toHaveLength(1);
+});
+
+it.each(['取消','確定刪除'])('刪除確認的 Enter 尊重焦點「%s」，不搶先執行另一顆按鈕',label=>{
+ const before=structuredClone(State.cues);Subtitles.deleteSelected();
+ const button=[...document.querySelectorAll('#modalFoot button')].find(item=>item.textContent===label);
+ button.focus();expect(document.activeElement).toBe(button);
+ const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});button.dispatchEvent(event);
+ expect(event.defaultPrevented).toBe(false);expect(State.cues).toEqual(before);expect(History.stack).toHaveLength(1);
+ // jsdom does not perform the browser's native Enter activation of a button.
+ button.click();expect(visible()).toBe(false);
+ expect(State.cues).toEqual(label==='取消'?before:[before[1]]);
+ expect(History.stack).toHaveLength(label==='取消'?1:2);
+ if(label!=='取消'){History.undo();expect(State.cues).toEqual(before);}
+});
+
+it('對話框不儲存按鈕及其內層文字的 Enter 不改走主要儲存動作',()=>{
+ const save=vi.fn(),discard=vi.fn();let session;
+ session=UI.openModal('未儲存變更','<p>選擇後續動作</p>',[
+  {label:'儲存',primary:true,act:save},{label:'不儲存',act:()=>{discard();session.close({committed:true});}},
+ ]);
+ const button=document.querySelector('#modalFoot button:last-child');button.innerHTML='<span>不儲存</span>';button.focus();
+ const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});button.firstChild.dispatchEvent(event);
+ expect(event.defaultPrevented).toBe(false);expect(save).not.toHaveBeenCalled();expect(discard).not.toHaveBeenCalled();
+ button.click();expect(discard).toHaveBeenCalledOnce();expect(save).not.toHaveBeenCalled();expect(visible()).toBe(false);
+});
+
+it.each(['text','number'])('單行 %s 欄位的 Enter 保留主要確認，關窗後不外洩快捷鍵',type=>{
+ const confirm=vi.fn(),outer=vi.fn();let session;
+ session=UI.openModal('確認輸入',`<input id="modalKeyboardInput" type="${type}">`,[
+  {label:'確認',primary:true,act:()=>{confirm();session.close({committed:true});}},
+ ]);
+ window.addEventListener('keydown',outer);
+ try{
+  const input=document.getElementById('modalKeyboardInput');input.focus();
+  const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});input.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(true);expect(confirm).toHaveBeenCalledOnce();expect(outer).not.toHaveBeenCalled();expect(visible()).toBe(false);
+ }finally{window.removeEventListener('keydown',outer);}
+});
+
+it.each([
+ '<select><option>第一項</option></select>', '<a href="#modal-target">說明</a>', '<details><summary>選項</summary></details>',
+ ...['button','submit','reset','checkbox','radio','range','file','color'].map(type=>`<input type="${type}">`),
+ '<input type="text" disabled>', '<button disabled>停用</button>',
+])('原生控制項 Enter 保留自身行為，不觸發主要確認：%s',html=>{
+ const confirm=vi.fn(),outer=vi.fn();UI.openModal('原生控制項',html,[{label:'確認',primary:true,act:confirm}]);
+ const control=document.querySelector('#modalBody summary, #modalBody input, #modalBody select, #modalBody a, #modalBody button');
+ window.addEventListener('keydown',outer);
+ try{
+  const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});control.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);expect(confirm).not.toHaveBeenCalled();expect(outer).not.toHaveBeenCalled();expect(visible()).toBe(true);
+ }finally{window.removeEventListener('keydown',outer);}
+});
+
+it('多行欄位、組字 Enter、停用確認與 Escape 保留各自對話框語意',()=>{
+ const confirm=vi.fn();UI.openModal('輸入','<textarea></textarea><div contenteditable="true">文字</div><input>',[
+  {label:'確認',primary:true,act:confirm},
+ ]);
+ for(const control of document.querySelectorAll('#modalBody textarea, #modalBody [contenteditable]')){
+  const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});control.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);expect(confirm).not.toHaveBeenCalled();
+ }
+ const input=document.querySelector('#modalBody input');
+ for(const options of [{isComposing:true},{keyCode:229}]){
+  const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true,...options});input.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);expect(confirm).not.toHaveBeenCalled();expect(visible()).toBe(true);
+ }
+ document.querySelector('#modalFoot button.primary').disabled=true;
+ input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));expect(confirm).not.toHaveBeenCalled();
+ input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));expect(confirm).not.toHaveBeenCalled();expect(visible()).toBe(false);
 });

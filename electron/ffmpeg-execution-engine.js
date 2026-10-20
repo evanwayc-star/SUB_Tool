@@ -348,6 +348,15 @@ function createFFmpegExecution(options = {}) {
   let shuttingDown = false;
   let resumeWhenIdle = false;
 
+  // Observers cannot decide native completion or prevent the close barrier from
+  // settling. Isolate only their invocation; parser/native failures stay visible.
+  const observe = notify => {
+    try {
+      const result = notify();
+      if (result && typeof result.then === 'function') Promise.resolve(result).catch(() => {});
+    } catch (ignored) {}
+  };
+
   const shutdownError = () => {
     const error = new Error('FFmpeg 執行環境正在關閉');
     error.code = 'FFMPEG_SHUTTING_DOWN';
@@ -364,7 +373,7 @@ function createFFmpegExecution(options = {}) {
       isCancelled: () => Boolean(entry?.cancelled),
       onProgress: progress => {
         lastPct = progress.pct;
-        executionOptions.onProgress?.(progress);
+        return executionOptions.onProgress?.(progress);
       },
       onProcess: process => {
         if (entry) {
@@ -384,13 +393,13 @@ function createFFmpegExecution(options = {}) {
         ...(error ? { errorCode: error.code || 'FFMPEG_EXIT', errorMsg: error.message || String(error) } : {}),
       };
       // A progress observer cannot change the native result after it has settled.
-      try {
+      observe(() => {
         if (executionOptions.sender && (typeof executionOptions.shouldSend !== 'function' || executionOptions.shouldSend())) {
-          options.send?.(executionOptions.sender, 'task-progress', payload);
+          return options.send?.(executionOptions.sender, 'task-progress', payload);
         }
-      } catch (ignored) {}
+      });
       // Queued callbacks describe encoding/authoring; only the artifact owner completes them.
-      if (isDirect) { try { executionOptions.onProgress?.(payload); } catch (ignored) {} }
+      if (isDirect) observe(() => executionOptions.onProgress?.(payload));
     };
     const completion = work.then(result => {
       terminal('success');
@@ -529,17 +538,19 @@ function createFFmpegExecution(options = {}) {
       };
       const report = data => {
         const payload = { jobId, label, ...data, elapsedMs: now() - startedAt };
-        if (sender && maySend() && typeof options.send === 'function') {
-          options.send(sender, 'task-progress', payload);
-        }
-        if (onProgress) onProgress(payload);
+        observe(() => {
+          if (sender && maySend() && typeof options.send === 'function') {
+            return options.send(sender, 'task-progress', payload);
+          }
+        });
+        if (onProgress) observe(() => onProgress(payload));
       };
       const reportParsedProgress = progress => {
         if (progress && (sender || onProgress)) report({ ...progress, pct: artifactProgress(outputFormat, 'encode', progress.pct) });
       };
       const consumeText = text => {
         if (!text) return;
-        if (typeof onStderr === 'function') onStderr(text);
+        if (typeof onStderr === 'function') observe(() => onStderr(text));
         tail += text;
         if (tail.length > 8000) tail = tail.slice(-8000);
         reportParsedProgress(parser.parseChunk(text));
