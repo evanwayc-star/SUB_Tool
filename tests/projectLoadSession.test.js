@@ -75,7 +75,7 @@ function restorationFixture({ desktop = true, material = {}, ...adapters } = {})
     externalAudioSources: live,
     restoreExternalAudioSource: vi.fn(async source => { order.push('audio'); live.push(source); return source; }),
     removeExternalAudio: vi.fn(id => { const index = live.findIndex(source => source.id === id); if (index >= 0) live.splice(index, 1); }),
-    seek: vi.fn(() => { order.push('playhead'); }),
+    seek: vi.fn(async time => { order.push('playhead'); return {status:'presented',presentedTime:time}; }),
   };
   const publishExternalSources = vi.fn();
   const finishProject = vi.fn(() => { order.push('baseline'); });
@@ -87,6 +87,60 @@ function restorationFixture({ desktop = true, material = {}, ...adapters } = {})
 }
 
 describe('ProjectLoadSession media restoration completion', () => {
+  it.each(['load','ready','images'])('缺播放點的 %s 首次可呈現時定位 timeline 0，只發一次且不強制播放',async kind=>{
+    const f=restorationFixture({material:{playhead:null}});
+    f.media.seqOn=()=>kind!=='images';
+    f.media.restorePendingImageClips.mockResolvedValue({restored:1,pending:0});
+    f.media.play=vi.fn();
+    await f.session.restoreMedia(f.generation,{kind,...(kind==='load'?{path:'mother.mp4'}:{})});
+    expect(f.media.seek).toHaveBeenCalledExactlyOnceWith(0);
+    await f.session.restoreMedia(f.generation,{kind:'ready'});
+    expect(f.media.seek).toHaveBeenCalledTimes(1);expect(f.media.play).not.toHaveBeenCalled();
+  });
+
+  it('缺播放點的 deferred/audio 不定位，主素材恢復後才首次定位 0',async()=>{
+    const f=restorationFixture({material:{playhead:null,mediaRelink:true}});
+    f.media.seqOn=()=>true;
+    await f.session.restoreMedia(f.generation,{kind:'deferred'});
+    await f.session.restoreMedia(f.generation,{kind:'audio'});
+    expect(f.media.seek).not.toHaveBeenCalled();
+    await f.session.restoreMedia(f.generation,{kind:'ready'});
+    expect(f.media.seek).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
+  it.each(['load','placements','audio'])('等待 %s 期間較新 seek 撤銷保存播放點還原，後續 ready 不搶回',async stage=>{
+    const f=restorationFixture({material:{externalAudioSources:stage==='audio'?[{audioSourceId:'a',path:'a.wav'}]:[]}});
+    let revision=0;
+    f.media.capturePlaybackTargetOwnership=()=>{const captured=revision;return()=>captured===revision;};
+    f.media.seek.mockImplementation(()=>{revision++;});
+    const gate=deferred(),started=deferred();
+    const method={load:'loadDesktopMedia',placements:'waitForPendingProjectRestore',audio:'restoreExternalAudioSource'}[stage];
+    f.media[method].mockImplementation(async()=>{started.resolve();await gate.promise;return null;});
+    const work=f.session.restoreMedia(f.generation,{kind:'load',path:'mother.mp4'});
+    await started.promise;f.media.seek(8);gate.resolve();await work;
+    await f.session.restoreMedia(f.generation,{kind:'ready'});
+    expect(f.media.seek).toHaveBeenCalledExactlyOnceWith(8);
+  });
+
+  it.each(['presented','failed','new-seek','new-plan','void','null','ack-only'])('保存播放點只在實際呈現且仍持有 plan/seek 時消耗：%s',async outcome=>{
+    const f=restorationFixture(),pixels=deferred();let revision=0;
+    f.media.capturePlaybackTargetOwnership=()=>{const captured=revision;return()=>captured===revision;};
+    f.media.seek.mockImplementation(()=>{revision++;return pixels.promise;});
+    await f.session.restoreMedia(f.generation,{kind:'ready'});
+    expect(f.plan.peekPlayhead()).toBe(13); // 不等待畫格亦不先清掉尚未完成的保存位置。
+    if(outcome==='new-seek')f.media.seek(8);
+    if(outcome==='new-plan'){const next=f.session.begin();f.session.createRestorePlan(next,{playhead:22});}
+    pixels.resolve(outcome==='void'?undefined:outcome==='null'?null:outcome==='ack-only'?true:
+      {status:outcome==='failed'?'failed':'presented',presentedTime:13});
+    await Promise.resolve();await Promise.resolve();
+    expect(f.plan.peekPlayhead()).toBe(outcome==='presented'?null:13);
+    if(outcome!=='new-plan'){
+      const count=f.media.seek.mock.calls.length;
+      await f.session.restoreMedia(f.generation,{kind:'ready'});
+      expect(f.media.seek).toHaveBeenCalledTimes(count);
+    }
+  });
+
   it('waits for placements and the fixed-frame preview before restoring audio, playhead and Undo baseline', async () => {
     const f = restorationFixture({ material: {
       clips: [{ id: 'fixed', path: 'mother.mp4', freezeTime: 1 }, { id: 'missing', path: 'missing.mp4' }],

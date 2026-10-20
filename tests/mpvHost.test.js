@@ -29,7 +29,7 @@ class FakeWindow {
   getNativeWindowHandle() { return Buffer.from([0x34, 0x12, 0, 0, 0, 0, 0, 0]); }
 }
 
-function socketThatReportsDuration(duration = 123.5) {
+function socketThatReportsDuration(duration = 123.5, { loadEvents = true } = {}) {
   const socket = new EventEmitter();
   socket.destroy = vi.fn(() => socket.emit('close'));
   let loadedPath = null;
@@ -37,16 +37,20 @@ function socketThatReportsDuration(duration = 123.5) {
     const message = JSON.parse(raw);
     if (message.command?.[0] === 'loadfile') {
       loadedPath = message.command[1];
-      queueMicrotask(() => socket.emit('data', Buffer.from('{"event":"file-loaded"}\n')));
+      // Native loading can complete before the loadfile command reply arrives.
+      if (loadEvents) queueMicrotask(() => socket.emit('data', Buffer.from(
+        '{"event":"file-loaded"}\n{"event":"playback-restart"}\n',
+      )));
     }
     if (typeof message.request_id !== 'number') return;
-    const data = message.command?.[1] === 'path' ? loadedPath : duration;
+    const data = message.command?.[1] === 'path' ? loadedPath
+      : message.command?.[1] === 'time-pos' ? 0 : duration;
     queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data, error: 'success' }) + '\n')));
   });
   return socket;
 }
 
-function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spawnFailure, describeSource } = {}) {
+function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spawnFailure, describeSource, socketFactory } = {}) {
   FakeWindow.instances = [];
   const parent = { isDestroyed: () => false, getContentBounds: () => ({ x: 100, y: 200 }) };
   const children = [];
@@ -69,7 +73,7 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spaw
       return child;
     }),
     createConnection: vi.fn(() => {
-      const socket = socketThatReportsDuration(duration);
+      const socket = socketFactory ? socketFactory() : socketThatReportsDuration(duration);
       sockets.push(socket);
       queueMicrotask(() => socket.emit('connect'));
       return socket;
@@ -101,6 +105,9 @@ describe('Windows mpv host lifecycle', () => {
     const {host,sockets,children}=make();
     await host.launch({src:'D:/media/multi.mxf',audio:Array.from({length:count},()=>({}))});
     const graph=children[0].args.find(arg=>arg.startsWith('--lavfi-complex=')).slice('--lavfi-complex='.length);
+    const initialCommands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(initialCommands).toContainEqual(['loadfile', 'D:/media/multi.mxf', 'replace']);
+    expect(initialCommands).not.toContainEqual(['set_property', 'lavfi-complex', '']);
     let liveGraph=graph;
     const socket=sockets[0],write=socket.write.getMockImplementation();
     socket.write.mockImplementation(raw=>{
@@ -415,7 +422,8 @@ describe('Windows mpv host lifecycle', () => {
     await host.launch({ src: 'D:/media/latest.mxf' });
     await expect(old).resolves.toEqual({ ok: false, duration: 0 });
     const commands = sockets[1].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
-    expect(commands.some(command => command[0] === 'loadfile')).toBe(false);
+    expect(commands.filter(command => command[0] === 'loadfile'))
+      .toEqual([['loadfile', 'D:/media/latest.mxf', 'replace']]);
     host.quit();
   });
 
@@ -423,7 +431,7 @@ describe('Windows mpv host lifecycle', () => {
     let finishOldGuide;
     const oldGuide = new Promise(resolve => { finishOldGuide = resolve; });
     const guideLoad = vi.fn().mockReturnValueOnce(oldGuide).mockResolvedValue(undefined);
-    const { host, children } = make({ guideLoad });
+    const { host, children, sockets } = make({ guideLoad });
     const oldLaunch = host.launch({ src: 'D:/media/old.mxf' });
     const oldResult = expect(oldLaunch).rejects.toThrow('mpv 啟動已被新的媒體取代');
     await host.launch({ src: 'D:/media/new.mxf' });
@@ -431,7 +439,9 @@ describe('Windows mpv host lifecycle', () => {
     await oldResult;
 
     expect(children).toHaveLength(1);
-    expect(children[0].args.at(-1)).toBe('D:/media/new.mxf');
+    expect(sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command))
+      .toContainEqual(['loadfile', 'D:/media/new.mxf', 'replace']);
+    expect(children[0].args).not.toContain('D:/media/old.mxf');
     expect(children[0].child.kill).not.toHaveBeenCalled();
   });
 
@@ -449,6 +459,122 @@ describe('Windows mpv host lifecycle', () => {
       ['get_property', 'duration'],
     ]);
     expect(delays).toEqual([]);
+  });
+
+  it.each([
+    ['file-loaded 尚未到達', false],
+    ['file-loaded 已到達但首個 VO 畫格尚未就緒', true],
+  ])('launch 不可在 %s、native 仍拒絕 seek 時宣告成功', async (_stage, announceFileLoaded) => {
+    const socket = new EventEmitter();
+    const source = 'D:/media/startup.mxf';
+    const rejectedSeeks = [];
+    let frameReady = false;
+    let nativePosition = null;
+    const emit = message => socket.emit('data', Buffer.from(JSON.stringify(message) + '\n'));
+    socket.destroy = vi.fn(() => socket.emit('close'));
+    socket.write = vi.fn(raw => {
+      const { command, request_id } = JSON.parse(raw);
+      let data = null;
+      let error = 'success';
+      if (command[0] === 'seek' || (command[0] === 'set_property' && command[1] === 'time-pos')) {
+        if (!frameReady) {
+          rejectedSeeks.push(command);
+          error = 'property unavailable';
+        } else nativePosition = command[0] === 'seek' ? command[1] : command[2];
+      } else if (command[0] === 'get_property') {
+        if (command[1] === 'duration') data = 123.5;
+        if (command[1] === 'path') data = source;
+        if (command[1] === 'time-pos') data = nativePosition;
+      }
+      if (typeof request_id === 'number') queueMicrotask(() => emit({ request_id, data, error }));
+    });
+    const { host } = make({ socketFactory: () => socket });
+    let launchState = 'pending';
+    const launching = host.launch({ src: source }).then(
+      value => { launchState = 'ready'; return value; },
+      error => { launchState = 'failed'; throw error; },
+    );
+    // Observe failure immediately as well, so cleanup cannot leave an unhandled rejection.
+    void launching.catch(() => {});
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (announceFileLoaded) emit({ event: 'file-loaded' });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const prematurePresent = host.present(3, { exact: true, tolerance: 0.01 });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(rejectedSeeks).toContainEqual(['seek', 3, 'absolute+exact']);
+      expect(nativePosition).toBeNull();
+      expect(launchState).toBe('pending');
+
+      frameReady = true;
+      nativePosition = 0;
+      if (!announceFileLoaded) emit({ event: 'file-loaded' });
+      emit({ event: 'property-change', name: 'time-pos', data: 0 });
+      emit({ event: 'playback-restart' });
+      await expect(launching).resolves.toMatchObject({ ok: true });
+      host.cancelPresent();
+      await prematurePresent;
+    } finally {
+      host.quit();
+      await launching.catch(() => {});
+    }
+  });
+
+  it('初始首格期限到仍未就緒會失敗並清掉 child、pipe 與宿主', async () => {
+    const timers = [];
+    const { host, children, sockets } = make({
+      socketFactory: () => socketThatReportsDuration(123.5, { loadEvents: false }),
+      setTimer: (callback, ms) => { const timer = { callback, ms }; timers.push(timer); return timer; },
+    });
+    const launching = host.launch({ src: 'D:/media/never-ready.mxf' });
+    const failure = expect(launching).rejects.toThrow(/初始畫格.*就緒/);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const readinessTimeout = timers.find(timer => timer.ms === 15000);
+    expect(readinessTimeout).toBeDefined();
+    readinessTimeout.callback();
+    await failure;
+    expect(children[0].child.kill).toHaveBeenCalledOnce();
+    expect(sockets[0].destroy).toHaveBeenCalledOnce();
+    expect(FakeWindow.instances.every(window => window.destroyed)).toBe(true);
+    expect(host.snapshot()).toMatchObject({ hasClient: false, hasProcess: false, hasHostWindow: false });
+  });
+
+  it.each([
+    ['null clock', null, 'success'],
+    ['failed clock read', 7, 'property unavailable'],
+  ])('初始 restart 後仍須有效來源時鐘，%s 不可冒充首格', async (_name, data, error) => {
+    const socket = socketThatReportsDuration();
+    const write = socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command[0] !== 'get_property' || message.command[1] !== 'time-pos') return write(raw);
+      queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({
+        request_id: message.request_id, data, error,
+      }) + '\n')));
+    });
+    const { host, children } = make({ socketFactory: () => socket });
+    await expect(host.launch({ src: 'D:/media/bad-clock.mxf' })).rejects.toThrow(/初始畫格.*就緒/);
+    expect(children[0].child.kill).toHaveBeenCalledOnce();
+    expect(host.snapshot()).toMatchObject({ hasClient: false, hasProcess: false });
+  });
+
+  it.each(['quit', 'relaunch'])('初始首格等待可被 %s 撤銷，舊事件不能完成或破壞新宿主', async action => {
+    let connections = 0;
+    const { host, sockets, children } = make({ socketFactory: () =>
+      socketThatReportsDuration(123.5, { loadEvents: connections++ > 0 }),
+    });
+    const old = host.launch({ src: 'D:/media/old.mxf' });
+    const cancelled = expect(old).rejects.toThrow(/取代|中斷/);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    if (action === 'quit') host.quit();
+    else await expect(host.launch({ src: 'D:/media/new.mxf' })).resolves.toMatchObject({ ok: true });
+    await cancelled;
+    sockets[0].emit('data', Buffer.from('{"event":"file-loaded"}\n{"event":"playback-restart"}\n'));
+    if (action === 'relaunch') {
+      expect(children[1].child.kill).not.toHaveBeenCalled();
+      expect(host.snapshot()).toMatchObject({ hasClient: true, hasProcess: true, hasHostWindow: true });
+    }
+    host.quit();
   });
 
   it('原生倒播先切軟解與反向佇列，恢復正播時明確寫回 forward 與 auto hwdec', async () => {
@@ -522,6 +648,74 @@ describe('Windows mpv host lifecycle', () => {
     expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('absolute+exact'));
   });
 
+  it.each([
+    ['native error', false],
+    ['command timeout', false],
+    ['success with null data', true],
+  ])('present 的 %s 回覆須正確判定 ACK，即使舊 time-pos 已等於目標', async (reply, accepted) => {
+    const timers = [];
+    const { host, sockets } = make({ setTimer: (callback, ms) => {
+      const timer = { callback, ms };
+      timers.push(timer);
+      return timer;
+    } });
+    await host.launch({ src: 'D:/media/a.mxf' });
+    const socket = sockets[0];
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (typeof message.request_id !== 'number') return;
+      const isSeek = message.command[0] === 'seek';
+      if (isSeek && reply === 'command timeout') return;
+      // This is the unchanged native position, not a value copied from the rejected seek.
+      const data = message.command[0] === 'get_property' && message.command[1] === 'time-pos' ? 7 : null;
+      const error = isSeek && reply === 'native error' ? 'property unavailable' : 'success';
+      queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({
+        request_id: message.request_id, data, error,
+      }) + '\n')));
+    });
+    const timerStart = timers.length;
+    let result;
+    const pending = host.present(7, { exact: true, tolerance: 0.01 });
+    void pending.then(value => { result = value; }, () => {});
+    try {
+      if (reply === 'command timeout') {
+        const seekTimeout = timers.slice(timerStart).find(timer => timer.ms === 5000);
+        expect(seekTimeout).toBeDefined();
+        seekTimeout.callback();
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (accepted) expect(result).toEqual({ backend: 'mpv', presentedSourceTime: 7 });
+      else expect(result?.backend).not.toBe('mpv');
+    } finally {
+      host.cancelPresent();
+      host.quit();
+      await pending.catch(() => {});
+    }
+  });
+
+  it('null time-pos 事件與讀回都不代表第零格，直到 native 回報有效零秒才完成', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/a.mxf' });
+    const socket = sockets[0];
+    socket.write.mockImplementation(raw => {
+      const { request_id } = JSON.parse(raw);
+      if (typeof request_id !== 'number') return;
+      queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({
+        request_id, data: null, error: 'success',
+      }) + '\n')));
+    });
+    let result;
+    const pending = host.present(0, { exact: true, tolerance: 0.01 });
+    void pending.then(value => { result = value; });
+    try {
+      socket.emit('data', Buffer.from('{"event":"property-change","name":"time-pos","data":null}\n'));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(result).toBeUndefined();
+      socket.emit('data', Buffer.from('{"event":"property-change","name":"time-pos","data":0}\n'));
+      await expect(pending).resolves.toEqual({ backend: 'mpv', presentedSourceTime: 0 });
+    } finally { host.quit(); }
+  });
+
   it('capture waits for native restart and reads actual time after the seek, even while paused', async () => {
     const { host, sockets } = make();
     await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
@@ -532,6 +726,7 @@ describe('Windows mpv host lifecycle', () => {
       queueMicrotask(()=>socket.emit('data',Buffer.from(JSON.stringify({
         request_id:message.request_id,
         data:message.command?.[0]==='get_property'?(restarted?10.001:10):null,
+        error:'success',
       })+'\n')));
     });
     const pending=host.present(10,{tolerance:.015,waitForFrame:true});
@@ -556,6 +751,7 @@ describe('Windows mpv host lifecycle', () => {
       queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({
         request_id: message.request_id,
         data: isTimePositionQuery ? 10 : null,
+        error: 'success',
       }) + '\n')));
     });
 
@@ -620,12 +816,17 @@ describe('Windows mpv host lifecycle', () => {
     expect(guideWindow.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
     expect(children[0].exe).toBe('C:/bundle/mpv.exe');
     expect(children[0].args).toEqual(expect.arrayContaining([
-      '--wid=4660', '--sub-fonts-dir=C:/fonts', '--', 'D:/media/source.mxf',
+      '--wid=4660', '--sub-fonts-dir=C:/fonts', '--idle=yes', '--pause',
       '--lavfi-complex=[aid1][aid2]amix=inputs=2:normalize=0[ao]',
       '--cache=yes', '--vd-queue-enable=yes',
       '--demuxer-max-bytes=256MiB', '--demuxer-max-back-bytes=192MiB',
       '--demuxer-backward-playback-step=10',
     ]));
+    expect(children[0].args).not.toContain('D:/media/source.mxf');
+    expect(sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command))
+      .toContainEqual(['loadfile', 'D:/media/source.mxf', 'replace']);
+    expect(sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command))
+      .not.toContainEqual(['set_property', 'pause', false]);
     expect(sockets[0].write).toHaveBeenCalledWith(expect.stringContaining('observe_property'));
     expect(host.snapshot()).toMatchObject({ hasHostWindow: true, hasGuideWindow: true, hasClient: true, hasProcess: true });
 

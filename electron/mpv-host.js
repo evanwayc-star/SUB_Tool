@@ -143,7 +143,7 @@ function createMpvHost(deps) {
     for (const { resolve, reject, requireSuccess, timer } of callbacks.values()) {
       try {
         clearTimer(timer);
-        if (requireSuccess) reject(new Error('mpv 已中斷，截圖未完成'));
+        if (requireSuccess) reject(new Error('mpv 已中斷，命令未完成'));
         else resolve(value);
       } catch (error) {}
     }
@@ -169,14 +169,30 @@ function createMpvHost(deps) {
     waiter.resolve(ready);
   }
 
-  function waitForFileLoad(session) {
+  function waitForFileLoad(session, { firstFrame = false } = {}) {
     settleFileLoad(false);
     return new Promise(resolve => {
-      const waiter = { resolve, timer: null, session };
+      const waiter = { resolve, timer: null, session, firstFrame, loaded: false, restarted: false, reading: false };
       pendingFileLoad = waiter;
       waiter.timer = setTimer(() => {
         if (pendingFileLoad === waiter) settleFileLoad(false);
-      }, 8000);
+      }, firstFrame ? 15000 : 8000);
+    });
+  }
+
+  function maybeFinishFileLoad(waiter) {
+    if (waiter !== pendingFileLoad || !waiter.loaded) return;
+    if (!waiter.firstFrame) return settleFileLoad(true);
+    if (!waiter.restarted || waiter.reading) return;
+    waiter.reading = true;
+    // mpv 0.41 emits the initial playback-restart while paused too, after the
+    // decoders are ready. Read back its clock; null/error is not a first frame.
+    void send(['get_property', 'time-pos'], true, { requireSuccess: true }).then(time => {
+      if (waiter !== pendingFileLoad || waiter.session !== fileLoadSession
+        || waiter.session.client !== client || waiter.session.generation !== generation) return;
+      settleFileLoad(typeof time === 'number' && Number.isFinite(time));
+    }).catch(() => {
+      if (waiter === pendingFileLoad) settleFileLoad(false);
     });
   }
 
@@ -190,14 +206,14 @@ function createMpvHost(deps) {
         // A paused seek ACK/time-pos can describe only the requested position
         // while mpv is still seeking and the VO retains the previous frame.
         // Capture waits for restart, then reads the actual stopped source PTS.
-        void send(['get_property', 'time-pos'], true).then(raw => {
+        void send(['get_property', 'time-pos'], true, { requireSuccess: true }).then(raw => {
           if (request !== pendingPresentation) return;
           const observed = typeof raw === 'number' ? sourceTime(raw) : raw;
           if (!Number.isFinite(observed) || !presentationMatches(request, observed)) return;
           request.presentedSourceTime = observed;
           request.frameReady = true;
           maybeFinishPresentation(request);
-        });
+        }).catch(() => settlePresentation(request));
         return;
       }
     }
@@ -217,7 +233,7 @@ function createMpvHost(deps) {
     const request = pendingPresentation;
     if (!request) return;
     if (message.event === 'property-change' && message.name === 'time-pos') {
-      const presented = Number(message.data);
+      const presented = typeof message.data === 'number' ? message.data : NaN;
       if (Number.isFinite(presented) && presentationMatches(request,presented)) {
         request.presentedSourceTime = presented;
       }
@@ -312,7 +328,7 @@ function createMpvHost(deps) {
           const callback = callbacks.get(id);
           if (!callback) return;
           callbacks.delete(id);
-          if (requireSuccess) callback.reject(new Error('mpv 截圖逾時'));
+          if (requireSuccess) callback.reject(new Error('mpv 命令逾時'));
           else callback.resolve(null);
         }, 5000);
         callbacks.set(id, { resolve, reject, requireSuccess, timer });
@@ -366,7 +382,7 @@ function createMpvHost(deps) {
     const command = exact
       ? ['seek', playerTime(targetTime), 'absolute+exact']
       : ['set_property', 'time-pos', playerTime(targetTime)];
-    send(command, true).then(async () => {
+    send(command, true, { requireSuccess: true }).then(async () => {
       if (request !== pendingPresentation) return;
       request.commandAcknowledged = true;
       maybeFinishPresentation(request);
@@ -374,14 +390,14 @@ function createMpvHost(deps) {
       if (request !== pendingPresentation) return;
       // 定位到「已經正在顯示的同一格」時，mpv 可以只回覆 command 而不再送
       // property-change。向播放器讀回實際 time-pos，避免這種有效定位占住 session。
-      const raw = await send(['get_property', 'time-pos'], true);
+      const raw = await send(['get_property', 'time-pos'], true, { requireSuccess: true });
       const observed = typeof raw === 'number' ? sourceTime(raw) : raw;
       if (request !== pendingPresentation || !Number.isFinite(observed)) return;
       if (presentationMatches(request,observed)) {
         request.presentedSourceTime = observed;
       }
       maybeFinishPresentation(request);
-    });
+    }).catch(() => settlePresentation(request));
     return promise.then(result => {
       const elapsed = now() - startedAt;
       if (elapsed >= 1000) log('[mpv] slow present:', Math.round(elapsed) + 'ms', 'target=' + targetTime);
@@ -459,11 +475,21 @@ function createMpvHost(deps) {
               void send(['get_property', 'path'], true).then(loadedPath => {
                 if (waiter === pendingFileLoad && waiter.session === fileLoadSession
                   && waiter.session.client === client && waiter.session.generation === generation
-                  && canonical(loadedPath) === canonical(waiter.session.path)) settleFileLoad(true);
+                  && canonical(loadedPath) === canonical(waiter.session.path)) {
+                  waiter.loaded = true;
+                  maybeFinishFileLoad(waiter);
+                }
               });
             }
             sendEvent(message);
           } else if (message.event === 'property-change' || message.event === 'end-file' || message.event === 'playback-restart') {
+            const waiter = pendingFileLoad;
+            if (waiter?.firstFrame) {
+              if (message.event === 'playback-restart') {
+                waiter.restarted = true;
+                maybeFinishFileLoad(waiter);
+              } else if (message.event === 'end-file') settleFileLoad(false);
+            }
             if (message.event === 'property-change' && typeof message.data === 'number') {
               if (message.name === 'time-pos') message.data = sourceTime(message.data);
               else if (message.name === 'duration') message.data = sourceDuration(message.data);
@@ -565,6 +591,7 @@ function createMpvHost(deps) {
     const exe = detect();
     if (!exe) throw new Error('找不到 mpv，請安裝 mpv 或設定 MPV_PATH 環境變數（https://mpv.io）');
 
+    let startupSession = null;
     try {
       const info = describeSource ? await describeSource(src) : null;
       if (token !== generation) throw new Error('mpv 啟動已被新的媒體取代');
@@ -595,7 +622,7 @@ function createMpvHost(deps) {
         '--no-config', '--no-terminal', '--no-osc',
         '--no-input-default-bindings', '--input-vo-keyboard=no', '--cursor-autohide=no',
         '--vo=gpu', '--gpu-context=d3d11', '--hwdec=auto',
-        '--keep-open=always', '--pause', '--hr-seek=yes', '--hr-seek-framedrop=no',
+        '--keep-open=always', '--idle=yes', '--pause', '--hr-seek=yes', '--hr-seek-framedrop=no',
         '--sub-delay=' + playerTime(0),
         // 反向播放需要把 GOP 先正向解碼再倒序交給 VO。cache 與 decode queue
         // 若未明確開啟，長 GOP／廣播容器會在每一批之間反覆停住。
@@ -611,7 +638,6 @@ function createMpvHost(deps) {
         sourceAudioGraph = `${aids.join('')}amix=inputs=${audio.length}:normalize=0[ao]`;
         args.push('--lavfi-complex=' + sourceAudioGraph);
       }
-      args.push('--', src);
       const spawned = spawn(exe, args, { detached: false, stdio: ['ignore', 'ignore', logOwner ? 'pipe' : 'ignore'] });
       proc = spawned;
       if (logOwner && spawned.stderr) {
@@ -639,13 +665,22 @@ function createMpvHost(deps) {
       client.write(JSON.stringify({ command: ['observe_property', 1, 'time-pos'] }) + '\n');
       client.write(JSON.stringify({ command: ['observe_property', 2, 'pause'] }) + '\n');
       client.write(JSON.stringify({ command: ['observe_property', 3, 'duration'] }) + '\n');
-      // pipe 已連線即可查詢；等待固定 400ms 只會延後每次首畫格啟動。
-      // 來源 duration 尚未就緒時 renderer 會沿用先前 ffprobe 的值，後續再由 property-change 更新。
+      // Load only after attaching the pipe: CLI playback could finish its initial
+      // file-loaded/restart before a client connects. --pause stays in force, and
+      // the first load preserves the launch's multi-aid graph (unlike loadFile).
+      startupSession = { client, generation: token, path: src, loading: true };
+      fileLoadSession = startupSession;
+      const ready = waitForFileLoad(startupSession, { firstFrame: true });
+      await send(['loadfile', src, 'replace'], true, { requireSuccess: true });
+      const loaded = await ready;
+      if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
+      if (!loaded) throw new Error('mpv 初始畫格未在期限內就緒');
       const duration = await send(['get_property', 'duration'], true);
-      if (token !== generation) throw new Error('mpv 啟動已被新的媒體取代');
+      if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
+      startupSession.loading = false;
       return { ok: true, duration: typeof duration === 'number' ? sourceDuration(duration) : 0 };
     } catch (error) {
-      if (token === generation) quit();
+      if (token === generation && (!startupSession || fileLoadSession === startupSession)) quit();
       throw error;
     }
   }

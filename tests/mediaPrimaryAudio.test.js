@@ -137,6 +137,169 @@ it('重開24fps專案保留專案格網，母素材仍記錄30fps',async()=>{
  expect(State.fps).toBe(24);
  expect(State.clips[0].fps).toBe(30);
 });
+it.each(['cold','previous-gap','previous-html-gap','previous-mpv','new-project'].flatMap(previous=>[0,null].map(playhead=>({previous,playhead}))))
+  ('$previous 開啟 HTML 專案未播放，保存播放點=$playhead 的可見性與直接定位不沿用舊 owner',async({previous,playhead})=>{
+ const adapter=await import('../src/media-player-adapter.js');
+ const element=document.createElement('video');document.body.appendChild(element);
+ const keys=['style','hasAttribute','play','requestVideoFrameCallback','cancelVideoFrameCallback'];
+ const descriptors=new Map(keys.map(key=>[key,Object.getOwnPropertyDescriptor(dom.video,key)]));
+ const frames=new Map();let frameId=0;
+ const previousBridge=window.subtool.mpv,previousIngest=window.subtool.ingest;
+ Object.assign(dom.video,{style:element.style,hasAttribute:name=>name==='src'&&!!dom.video.src,
+  play:vi.fn(async()=>{}),
+  requestVideoFrameCallback:vi.fn(callback=>{const id=++frameId;frames.set(id,callback);return id;}),
+  cancelVideoFrameCallback:vi.fn(id=>frames.delete(id)),duration:12.5});
+ const frame=(mediaTime)=>{
+  const [id,callback]=frames.entries().next().value;frames.delete(id);callback(0,{mediaTime});
+ };
+ try{
+  adapter.resetPlayerAdapter(window.subtool,dom.video);
+  if(previous==='previous-gap'||previous==='new-project'){
+   Media.createExternalAudioSource({name:'voice',path:'C:/voice.wav',duration:20});
+   await Media.seek(7);
+   if(previous==='new-project')await Project.startNewProject(()=>{Media.reset();resetProject();});
+  }
+  if(previous==='previous-html-gap'){
+   await Media.loadDesktopMedia('C:/previous.webm');
+   Media.createExternalAudioSource({name:'voice',path:'C:/voice.wav',duration:20});
+   await Media.seek(15);
+   expect(getComputedStyle(element).visibility).toBe('hidden');
+  }
+  if(previous==='previous-mpv'){
+   window.subtool.mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({ok:true,duration:12})),
+    onEvent:vi.fn(),quit:vi.fn(async()=>{}),setBounds:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),
+    present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),mute:vi.fn(async()=>{})};
+   window.subtool.ingest=vi.fn(async()=>({channels:[]}));
+   window.subtool.probe.mockResolvedValueOnce({duration:12,video:{codec:'h264',fps:30,width:64,height:48},audio:[]});
+   await Media.loadDesktopMedia('C:/previous.mp4');
+   expect(Media.mpvMode).toBe(true);expect(getComputedStyle(element).display).toBe('none');
+  }
+  window.subtool.probe.mockResolvedValueOnce({duration:12,
+   video:{codec:'vp9',fps:30,width:64,height:48,presentationTimestampOffset:-.5},audio:[]});
+  const data={app:'SUB Tool',version:3,media:{name:'source.webm',path:'C:/source.webm',size:1024},
+   fps:24,duration:12,tracks:[],cues:[],notes:[],
+   clips:[{name:'source.webm',path:'C:/source.webm',dur:12,in:0,out:12,offset:0,vtrack:0,primary:true}],
+   ...(playhead==null?{}:{playhead})};
+  const b64=Buffer.concat([Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
+  await Project.loadDesktop({path:'C:/initial-paused.subtool',b64});
+  expect(Media.mpvMode).toBe(false);expect(Media.playing).toBe(false);
+  expect(getComputedStyle(element).display).not.toBe('none');
+  expect(getComputedStyle(element).visibility).not.toBe('hidden');
+  expect(dom.video.currentTime).toBe(.5);
+  if(playhead!=null){
+   const initial=Media.requestPresentation(playhead);
+   await vi.waitFor(()=>expect(frames.size).toBe(1));
+   expect(Media.presentedTime()).toBeNull();
+   frame(.5);
+   await expect(initial).resolves.toMatchObject({status:'presented',presentedTime:0,source:'html5'});
+  }
+  const pending=Media.seek(4);
+  await vi.waitFor(()=>expect(frames.size).toBe(1));
+  expect(dom.video.currentTime).toBe(4.5);expect(Media.presentationPending()).toBe(true);
+  frame(.5); // 前一格及舊來源時鐘不能為新跳轉作證。
+  expect(Media.presentationPending()).toBe(true);
+  frame(4.5);
+  await expect(pending).resolves.toMatchObject({status:'presented',presentedTime:4,source:'html5'});
+  expect(Media.playing).toBe(false);expect(dom.video.play).not.toHaveBeenCalled();
+  expect(Media.inGap()).toBe(false);expect(Media.activeClip()?.path).toBe('C:/source.webm');
+ }finally{
+  Media.reset();adapter.resetPlayerAdapter(null,dom.video);
+  if(previousBridge)window.subtool.mpv=previousBridge;else delete window.subtool.mpv;
+  if(previousIngest)window.subtool.ingest=previousIngest;else delete window.subtool.ingest;
+  for(const [key,descriptor]of descriptors){if(descriptor)Object.defineProperty(dom.video,key,descriptor);else delete dom.video[key];}
+  dom.video.duration=12;element.remove();
+ }
+});
+it.each([null,0].flatMap(playhead=>[0,.5].map(sourceOrigin=>({playhead,sourceOrigin}))))
+ ('裁切 HTML 專案播放點=$playhead、來源原點=$sourceOrigin 復原後先對到片段 In',async({playhead,sourceOrigin})=>{
+ const attribute=dom.video.hasAttribute;
+ try{
+  dom.video.hasAttribute=name=>name==='src'&&!!dom.video.src;
+  dom.video.duration=12+sourceOrigin;
+  window.subtool.probe.mockResolvedValueOnce({duration:12,
+   video:{codec:'vp9',fps:30,width:64,height:48,presentationTimestampOffset:-sourceOrigin},audio:[]});
+  const data={app:'SUB Tool',version:3,media:{name:'trimmed.webm',path:'C:/trimmed.webm',size:1024},
+   fps:24,duration:7,tracks:[],cues:[],notes:[],
+   clips:[{name:'trimmed.webm',path:'C:/trimmed.webm',dur:12,in:5,out:12,offset:0,vtrack:0,primary:true}],
+   ...(playhead==null?{}:{playhead})};
+  const b64=Buffer.concat([Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
+  await Project.loadDesktop({path:'C:/trimmed-no-playhead.subtool',b64});
+  await vi.waitFor(()=>expect(Media.presentationPending()).toBe(false));
+  expect(Media.playing).toBe(false);expect(Media.displayTime()).toBe(0);
+  expect(Media.sourceLocalTime('video',0)).toBe(5);
+  expect(dom.video.currentTime).toBe(5+sourceOrigin);
+ }finally{dom.video.hasAttribute=attribute;dom.video.duration=12;}
+});
+it.each(['placements','audio'].flatMap(stage=>[null,4].map(playhead=>({stage,playhead}))))
+ ('裁切專案等待 $stage，使用者新定位優先於保存播放點=$playhead，正式存檔保留新位置',async({stage,playhead})=>{
+ const attribute=dom.video.hasAttribute,previousWrite=window.subtool.writeProject;
+ let release,notify;
+ const gate=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{notify=resolve;});
+ const waiting=vi.spyOn(Media,stage==='placements'?'waitForPendingProjectRestore':'restoreExternalAudioSource')
+  .mockImplementationOnce(async()=>{notify();await gate;return null;});
+ try{
+  dom.video.hasAttribute=name=>name==='src'&&!!dom.video.src;
+  window.subtool.probe.mockResolvedValueOnce({duration:12,video:{codec:'vp9',fps:30,width:64,height:48},audio:[]});
+  window.subtool.writeProject=vi.fn(async()=> 'C:/new-target.subtool');
+  const data={app:'SUB Tool',version:3,media:{name:'trimmed.webm',path:'C:/trimmed.webm',size:1024},
+   fps:24,duration:7,tracks:[],cues:[],notes:[],
+   clips:[{name:'trimmed.webm',path:'C:/trimmed.webm',dur:12,in:5,out:12,offset:0,vtrack:0,primary:true}],
+   ...(playhead==null?{}:{playhead}),
+   ...(stage==='audio'?{externalAudioSources:[{name:'voice',path:'C:/voice.wav',audioSourceId:'voice',duration:7,in:0,out:7,offset:0}]}:{})};
+  const b64=Buffer.concat([Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
+  const loading=Project.loadDesktop({path:'C:/new-target.subtool',b64});
+  await started;
+  await expect(Media.seek(1)).resolves.toMatchObject({status:'presented',presentedTime:1});
+  release();await loading;
+  expect(Media.displayTime()).toBe(1);expect(dom.video.currentTime).toBe(6);
+  expect(Media.playing).toBe(false);
+  await Project.save();
+  const bytes=Buffer.from(window.subtool.writeProject.mock.calls.at(-1)[1],'base64');
+  expect(JSON.parse(bytes.subarray(2).toString('utf16le')).playhead).toBe(1);
+ }finally{
+  release();waiting.mockRestore();dom.video.hasAttribute=attribute;
+  if(previousWrite)window.subtool.writeProject=previousWrite;else delete window.subtool.writeProject;
+ }
+});
+it('缺保存播放點且首片段延後開始，首次定位交由時間軸 gap owner 留黑並保持暫停',async()=>{
+ const attribute=dom.video.hasAttribute;
+ try{
+  dom.video.hasAttribute=name=>name==='src'&&!!dom.video.src;
+  const data={app:'SUB Tool',version:3,media:{name:'delayed.webm',path:'C:/delayed.webm',size:1024},
+   fps:24,duration:16,tracks:[],cues:[],notes:[],
+   clips:[{name:'delayed.webm',path:'C:/delayed.webm',dur:12,in:0,out:12,offset:4,vtrack:0,primary:true}]};
+  const b64=Buffer.concat([Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
+  await Project.loadDesktop({path:'C:/delayed-no-playhead.subtool',b64});
+  await vi.waitFor(()=>expect(Media.presentationPending()).toBe(false));
+  expect(Media.displayTime()).toBe(0);expect(Media.inGap()).toBe(true);expect(Media.playing).toBe(false);
+ }finally{dom.video.hasAttribute=attribute;}
+});
+it('正式 loader 不等待 HTML 畫格才結束，保存播放點仍等來源畫格 callback 成功後才消耗',async()=>{
+ const keys=['hasAttribute','requestVideoFrameCallback','cancelVideoFrameCallback'];
+ const descriptors=new Map(keys.map(key=>[key,Object.getOwnPropertyDescriptor(dom.video,key)]));
+ const frames=new Map();let id=0;
+ const loader=vi.spyOn(Media,'loadDesktopMedia');
+ Object.assign(dom.video,{hasAttribute:name=>name==='src'&&!!dom.video.src,
+  requestVideoFrameCallback:callback=>{const key=++id;frames.set(key,callback);return key;},
+  cancelVideoFrameCallback:key=>frames.delete(key)});
+ try{
+  const data={app:'SUB Tool',version:3,media:{name:'trimmed.webm',path:'C:/trimmed.webm',size:1024},
+   fps:24,duration:7,tracks:[],cues:[],notes:[],playhead:1,
+   clips:[{name:'trimmed.webm',path:'C:/trimmed.webm',dur:12,in:5,out:12,offset:0,vtrack:0,primary:true}]};
+  const b64=Buffer.concat([Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le')]).toString('base64');
+  await Project.loadDesktop({path:'C:/held-initial.subtool',b64});
+  const plan=loader.mock.calls[0][1];
+  expect(plan.peekPlayhead()).toBe(1);
+  await vi.waitFor(()=>expect(frames.size).toBe(1));
+  const [key,callback]=frames.entries().next().value;frames.delete(key);callback(0,{mediaTime:6});
+  await vi.waitFor(()=>expect(Media.presentationPending()).toBe(false));
+  expect(plan.peekPlayhead()).toBeNull();
+  expect(Media.presentedTime()).toBe(1);expect(Media.playing).toBe(false);
+ }finally{
+  Media.cancelPresentation();loader.mockRestore();
+  for(const [key,descriptor]of descriptors){if(descriptor)Object.defineProperty(dom.video,key,descriptor);else delete dom.video[key];}
+ }
+});
 it('桌面來源probe等待期間明確選取同值DF格網，舊來源FPS不再覆寫',async()=>{
  setFps('29.97df');
  let resolveProbe,notifyStarted;

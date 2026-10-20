@@ -4,6 +4,7 @@
 export class ProjectMediaRestoration {
   #baselinedPlans = new WeakSet();
   #begunPlans = new WeakMap();
+  #positionedPlans = new WeakSet();
 
   constructor({ media, desktop = false, stat = null, normalizeExternalSources = sources => sources,
     publishExternalSources = () => {}, beginProject = () => null, finishProject = () => {}, report = () => {} } = {}) {
@@ -30,24 +31,49 @@ export class ProjectMediaRestoration {
       catch (error) { if (owns()) this.report(name, error); }
       return owns();
     };
+    let ownsInitialTarget = this.media.capturePlaybackTargetOwnership?.() || (() => true);
+    let restoredImages = 0;
 
     // 主素材載入會 reset runtime，必須先於所有外部音訊。load 完成不等於
     // placement 完成：pending restore 還包含圖片與可重建的固定幀 PNG。
-    if (kind === 'load' && !await stage('load project media', () => this.media.loadDesktopMedia(path, plan))) return false;
+    if (kind === 'load' && !await stage('load project media', () => {
+      const loading = this.media.loadDesktopMedia(path, plan);
+      // 真 loader 在第一個 await 前同步 reset。從 reset 後捕獲，才能區分
+      // 素材初始化與使用者在 probe／placement／音訊等待期間較新的定位。
+      ownsInitialTarget = this.media.capturePlaybackTargetOwnership?.() || (() => true);
+      return loading;
+    })) return false;
     if ((kind === 'load' || kind === 'ready')
       && !await stage('restore project clips', () => this.media.waitForPendingProjectRestore?.())) return false;
     if (kind === 'images'
-      && !await stage('restore pending image clips', () => this.media.restorePendingImageClips?.(plan))) return false;
+      && !await stage('restore pending image clips', async () => {
+        const result = await this.media.restorePendingImageClips?.(plan);
+        restoredImages = result?.restored || 0;
+      })) return false;
 
     // deferred 只建立已還原文件的基準；原媒體找不到或 browser 尚未選 File
     // 時，不消耗 playhead，也不搶先啟動將被後續 primary reset 清掉的音訊。
     if (kind !== 'deferred' && !await this.#restoreAudio(plan, owns)) return false;
     if (!owns()) return false;
-    if (kind !== 'deferred' && kind !== 'audio') {
+    if (kind !== 'deferred' && kind !== 'audio' && !this.#positionedPlans.has(plan)) {
       const playhead = plan.peekPlayhead();
-      if (Number.isFinite(playhead)) {
+      const hasVisual = this.media.seqOn?.() || restoredImages > 0;
+      if (!ownsInitialTarget()) {
+        // 使用者已選了更新的位置；後續 ready／重連不能再套回舊的初始位置。
+        this.#positionedPlans.add(plan);
+      } else if (Number.isFinite(playhead) || hasVisual) {
+        this.#positionedPlans.add(plan);
         // FPS-SYNC: 仍由 Media 的既有 presentation/seek owner 處理時間軸目標。
-        try { this.media.seek(Math.max(0, playhead)); plan.clearPlayhead(); }
+        // 未保存播放點時取時間軸 0，包含裁切、開頭間隙及圖片，不直接 seek 母素材 0。
+        // 保留非同步 completion policy；只有實際呈現且仍屬原 plan／seek 才消耗保存值。
+        try {
+          const presenting = this.media.seek(Number.isFinite(playhead) ? Math.max(0, playhead) : 0);
+          const ownsPresentation = this.media.capturePlaybackTargetOwnership?.() || (() => true);
+          Promise.resolve(presenting).then(result => {
+            if (!owns() || !ownsPresentation() || plan.peekPlayhead() !== playhead) return;
+            if (result?.status === 'presented') plan.clearPlayhead();
+          }).catch(error => { if (owns() && ownsPresentation()) this.report('restore project playhead', error); });
+        }
         catch (error) { this.report('restore project playhead', error); }
       }
     }

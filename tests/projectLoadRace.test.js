@@ -10,7 +10,7 @@ const mediaMock = vi.hoisted(() => ({
   reset: vi.fn(),
   restoreExternalAudioSource: vi.fn(),
   restorePendingImageClips: vi.fn().mockResolvedValue({ restored: 0, pending: 0 }),
-  seek: vi.fn(),
+  seek: vi.fn(async time=>({status:'presented',presentedTime:time})),
   waitForPendingProjectRestore: vi.fn().mockResolvedValue(),
 }));
 
