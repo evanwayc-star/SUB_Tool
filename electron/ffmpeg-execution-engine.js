@@ -295,6 +295,7 @@ function buildIngestArgs({
   waveLabel,
   wavePath,
   encoder,
+  video,
   isStream = false,
 }) {
   let hwdec = [];
@@ -308,6 +309,38 @@ function buildIngestArgs({
 
   if (needsProxy && proxyPath) {
     let vf = 'setpts=PTS-STARTPTS,scale=-2:720,format=yuv420p';
+    // Freeze the source interpretation before changing its dimensions. Chromium
+    // replaces incomplete H.264 color metadata as a whole using source height,
+    // even when a matrix alone was tagged; fully specified sources retain theirs.
+    // VP9 / AV1 use frame metadata instead of this resolution fallback.
+    const missingColor = value => !value || ['unknown', 'unspecified', 'reserved'].includes(value);
+    const usesFrameColor = ['vp9', 'av1'].includes(video?.codec);
+    const incompleteColor = video && [video.colorSpace, video.colorPrimaries, video.colorTransfer].some(missingColor);
+    const vp9FrameMatrix = { bt709: 'bt709', bt470bg: 'smpte170m', smpte170m: 'smpte170m', smpte240m: 'smpte240m' }[video?.colorSpace];
+    if (video && (video.colorSpace === 'gbr' || /^(gbr|rgb|bgr)/.test(video.pixelFormat || ''))) {
+      // RGB has no YCbCr input matrix. Convert its samples into an explicitly
+      // tagged 709 Proxy; relabeling an implicit 601 conversion would alter color.
+      const primaries = missingColor(video.colorPrimaries) ? 'bt709' : 'auto';
+      const transfer = missingColor(video.colorTransfer) ? 'bt709' : 'auto';
+      vf = `setpts=PTS-STARTPTS,scale=-2:720:out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=${primaries}:color_trc=${transfer}:range=limited`;
+    } else if (video?.codec === 'vp9' && vp9FrameMatrix && incompleteColor) {
+      // Chromium's VP9 decoder expands the bitstream's SDR color enum into a
+      // complete color space. H.264 would discard this partial tag after resize.
+      // Complete the tag after scaling so FFmpeg keeps the decoded sample values.
+      const range = missingColor(video.colorRange) ? 'limited' : 'auto';
+      vf = `setpts=PTS-STARTPTS,scale=-2:720,format=yuv420p,setparams=colorspace=${vp9FrameMatrix}:color_primaries=${vp9FrameMatrix}:color_trc=${vp9FrameMatrix}:range=${range}`;
+    } else if (video?.width > 0 && video?.height > 0
+      && (usesFrameColor ? missingColor(video.colorSpace) : incompleteColor)) {
+      // Chromium's natural size grows height for narrow pixels (SAR < 1).
+      const [sarWidth, sarHeight] = String(video.sampleAspectRatio || '1:1').split(':').map(Number);
+      const scaledHeight = sarWidth > 0 && sarHeight > sarWidth ? Math.round(video.height * sarHeight / sarWidth) : video.height;
+      const sourceHeight = scaledHeight > 0 && scaledHeight <= 2147483647 ? scaledHeight : video.height;
+      const matrix = sourceHeight >= 720 || usesFrameColor ? 'bt709' : 'smpte170m';
+      const primaries = usesFrameColor && !missingColor(video.colorPrimaries) ? 'auto' : matrix;
+      const transfer = usesFrameColor && !missingColor(video.colorTransfer) ? 'auto' : matrix;
+      const range = missingColor(video.colorRange) ? 'limited' : 'auto';
+      vf = `setpts=PTS-STARTPTS,setparams=colorspace=${matrix}:color_primaries=${primaries}:color_trc=${transfer}:range=${range},scale=-2:720,format=yuv420p`;
+    }
     const vencArgs = previewVideoEncoderArgs(encoder);
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
 

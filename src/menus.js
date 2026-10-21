@@ -323,6 +323,31 @@ function audioMenuContext(audioEl){
   };
 }
 
+/* 延遲選單只能操作開啟時的來源；Undo／重載可用相同 ID 建立不同物件。
+   將資格留在選單 module，Media 仍負責實際編輯與提交時的鎖定檢查。 */
+function ownedAudioMenuItems(context,items,sourceIds=[]){
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const resolve=id=>context.external
+    ? Media.getExternalAudioSource?.(id)||State.externalAudioState?.find(source=>sourceIdMatches(source,id))||null
+    : State.clips?.find(source=>sourceIdMatches(source,id))||null;
+  const identity=source=>JSON.stringify([
+    source?.id,source?.audioSourceId,source?.audioSrc,source?.timelineLaneId,clipSourcePath(source),
+    source?.name,source?.offset,source?.in,source?.out,source?.dur,source?.duration,
+    source?.speed,source?.reverse,source?.locked,source?.enabled,
+  ]);
+  const targets=[...new Set([context.assetId,context.sourceId,...sourceIds].filter(Boolean))]
+    .map(id=>{const source=resolve(id);return {id,source,identity:identity(source),file:source?._file||source?.blob};});
+  const fallback=[State.mediaPath,State.mediaName,State.mediaFile,State.mediaBlob];
+  const owns=()=>ownsWorkspace()
+    &&(!context.external||!!context.source)
+    &&targets.every(target=>{const source=resolve(target.id);return source===target.source&&identity(source)===target.identity&&(source?._file||source?.blob)===target.file;})
+    &&(!!context.source||fallback.every((value,i)=>value===[State.mediaPath,State.mediaName,State.mediaFile,State.mediaBlob][i]));
+  return items.map(item=>typeof item.act==='function'?{...item,act:()=>{
+    if(!owns()){showToast('音訊來源或專案已變更，請重新開啟右鍵選單');return;}
+    return item.act();
+  }}:item);
+}
+
 function sourceWaveLaneIds(row,sourceId){
   try{
     const ids=JSON.parse(row.dataset.audioWaveSourceIds||'null');
@@ -422,7 +447,7 @@ function tlContextMenuHandler(e){
       selectWave:selection=>selectSourceWave(sourceId,selection),
       removeAudio:()=>runExternalAudioMenuAction('removeExternalAudio',[assetId],{clearSelection:true}),
     });
-    showCtx(e.clientX,e.clientY,items);
+    showCtx(e.clientX,e.clientY,ownedAudioMenuItems(context,items));
     return;
   }
   
@@ -460,7 +485,7 @@ function tlContextMenuHandler(e){
       openAudioRouting:()=>AudioRouting.openForSource(sourceId),
       selectWave:selection=>selectSourceWave(sourceId,selection,waveSourceIds),
     });
-    showCtx(e.clientX,e.clientY,items);
+    showCtx(e.clientX,e.clientY,ownedAudioMenuItems(context,items,waveSourceIds));
     return;
   }
   /* 影片序列區塊右鍵 */

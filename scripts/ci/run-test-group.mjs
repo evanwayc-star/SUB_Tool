@@ -52,6 +52,9 @@ if (group === 'portable') {
 const vitest = path.join(ROOT, 'node_modules', 'vitest', 'vitest.mjs');
 const testEnv = { ...process.env };
 if (group === 'windows') {
+  // Electron 44 本身改由 require 延遲下載；專案 postinstall 會預先建立 dist。
+  // CI 即使略過 install scripts，也要在直接使用執行檔路徑前準備 runtime。
+  require('electron');
   const bundledFfmpeg = path.join(ROOT, 'electron', 'ffmpeg', 'ffmpeg.exe');
   const bundledFfprobe = path.join(ROOT, 'electron', 'ffmpeg', 'ffprobe.exe');
   testEnv.FFMPEG_PATH ||= existsSync(bundledFfmpeg) ? bundledFfmpeg : require('ffmpeg-static');

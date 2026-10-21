@@ -324,6 +324,82 @@ describe('reset-scoped media ownership', () => {
     resetPlayerAdapter(desktopMock);
   });
 
+  describe('secondary runtime completion and restoration retry', () => {
+    const clip = (overrides={}) => ({
+      id:'retry-runtime',name:'retry.mov',path:'C:/retry.mov',web:{url:'file:///retry.mov'},
+      dur:8,in:0,out:8,offset:0,vtrack:0,audioSrc:'clip:retry-runtime',audioSourceId:'retry-source',...overrides,
+    });
+    const result = {channels:[{file:'C:/cache/retry.m4a',sourceStream:0,sourceChannel:0}]};
+    function readyAudio(){
+      vi.stubGlobal('Audio',class {
+        constructor(){this.readyState=1;this.src='';this.duration=8;this.pause=vi.fn();this.load=vi.fn();this.events=new EventTarget();}
+        addEventListener(...args){this.events.addEventListener(...args);}
+        removeEventListener(...args){this.events.removeEventListener(...args);}
+        removeAttribute(name){if(name==='src')this.src='';}
+      });
+      desktopMock.fileURL.mockImplementation(async path=>'file:///'+path);
+    }
+
+    it('retries a failed shared source through sequence restoration and installs its audio',async()=>{
+      readyAudio();
+      const first=clip(),split=clip({id:'retry-split',offset:8});State.clips=[first,split];
+      const gate=deferred();desktopMock.ingest.mockReturnValueOnce(gate.promise).mockResolvedValue(result);
+      const seek=vi.spyOn(Media,'seek').mockResolvedValue({status:'presented'});
+      try{
+        const a=Media.ensureClipRuntime(first,{audio:[{channels:1}]}),b=Media.ensureClipRuntime(split,{audio:[{channels:1}]});
+        expect(a).toBe(b);expect(desktopMock.ingest).toHaveBeenCalledOnce();
+        gate.reject(new Error('temporary native encode failure'));await Promise.all([a,b]);
+        expect(Media.tracks).toHaveLength(0);
+        await Media.restoreSequenceEditState(0);
+        expect(desktopMock.ingest).toHaveBeenCalledTimes(2);
+        expect(Media.sourceChannels(first.audioSrc)).toEqual([expect.objectContaining({file:'C:/cache/retry.m4a',audioSourceId:first.audioSourceId})]);
+      }finally{seek.mockRestore();Media.reset();vi.unstubAllGlobals();}
+    });
+
+    it('keeps a successfully prepared silent source complete across repeated restorations',async()=>{
+      const source=clip();State.clips=[source];desktopMock.ingest.mockResolvedValue({channels:[]});
+      const seek=vi.spyOn(Media,'seek').mockResolvedValue({status:'presented'});
+      try{
+        await Media.ensureClipRuntime(source,{audio:[]});
+        await Media.restoreSequenceEditState(0);await Media.restoreSequenceEditState(0);
+        expect(desktopMock.ingest).toHaveBeenCalledOnce();expect(Media.tracks).toHaveLength(0);
+      }finally{seek.mockRestore();Media.reset();}
+    });
+
+    it('allows a cancelled source to retry while discarding the old native result',async()=>{
+      readyAudio();
+      const source=clip();State.clips=[source];
+      const gate=deferred();desktopMock.ingest.mockReturnValueOnce(gate.promise).mockResolvedValue(result);
+      const seek=vi.spyOn(Media,'seek').mockResolvedValue({status:'presented'});
+      const {setStatus}=await import('../src/ui.js');
+      setStatus.mockClear();
+      try{
+        const work=Media.ensureClipRuntime(source,{audio:[{channels:1}]});
+        expect(await Media.cancelProxyJobs()).toBe(true);await work;
+        gate.resolve({proxy:'C:/cache/stale.mp4',channels:result.channels});await Promise.resolve();
+        expect(source.proxyUrl).toBeUndefined();expect(Media.tracks).toHaveLength(0);
+        expect(setStatus.mock.calls.some(([message])=>String(message).startsWith('影片音訊抽取失敗'))).toBe(false);
+        await Media.restoreSequenceEditState(0);
+        expect(desktopMock.ingest).toHaveBeenCalledTimes(2);expect(Media.sourceChannels(source.audioSrc)).toHaveLength(1);
+      }finally{seek.mockRestore();Media.reset();vi.unstubAllGlobals();}
+    });
+
+    it('cannot install a previous project result into a recreated source with the same identity',async()=>{
+      readyAudio();
+      const old=clip();State.clips=[old];
+      const gate=deferred();desktopMock.probe.mockReturnValueOnce(gate.promise);
+      const seek=vi.spyOn(Media,'seek').mockResolvedValue({status:'presented'});
+      try{
+        const work=Media.ensureClipRuntime(old);Media.reset();
+        const current=clip();State.clips=[current];desktopMock.ingest.mockResolvedValue(result);
+        gate.resolve({audio:[{channels:1}]});await work;
+        expect(desktopMock.ingest).not.toHaveBeenCalled();expect(Media.tracks).toHaveLength(0);
+        await Media.restoreSequenceEditState(0);
+        expect(desktopMock.ingest).toHaveBeenCalledOnce();expect(Media.sourceChannels(current.audioSrc)).toHaveLength(1);
+      }finally{seek.mockRestore();Media.reset();vi.unstubAllGlobals();}
+    });
+  });
+
   it('drops a late external-audio metadata result after project reset', async () => {
     const audios = [];
     class PendingAudio {

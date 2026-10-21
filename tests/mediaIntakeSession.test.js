@@ -9,6 +9,19 @@ const deferred = () => {
 };
 
 describe('MediaIntakeSession resource ownership', () => {
+  it.each(['subtool-local://resource/channel-token', 'blob:browser-channel'])('sets CORS mode before materializing %s', async url => {
+    const assignments = [];
+    const element = { readyState: 1, pause: vi.fn() };
+    Object.defineProperty(element, 'src', {
+      get: () => url,
+      set: value => assignments.push({ value, crossOrigin: element.crossOrigin }),
+    });
+    const session = new MediaIntakeSession();
+    await expect(session.materializeAudioElements([{ file: 'channel.wav' }], {
+      resolveFileURL: async () => url, createAudio: () => element,
+    })).resolves.toEqual([element]);
+    expect(assignments).toEqual([{ value: url, crossOrigin: 'anonymous' }]);
+  });
   it.each(['replacement', 'failure'])('cancels ready siblings during unresolved URL IPC after %s', async cause => {
     vi.useFakeTimers();
     const secondURL = deferred();

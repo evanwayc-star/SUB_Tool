@@ -208,7 +208,7 @@ import { getExactFps, secToEncore, snapTimeToFrame } from './time.js';
 import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset } from './external-audio.js';
-import { MediaIntakeSession, maxKnownSourceDuration, probeAudioChannelDescriptors, waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { MediaIntakeSession, maxKnownSourceDuration, probeAudioChannelDescriptors, setMediaElementSource, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 import { ResetEpoch, PlaybackSyncEngine, createMediaPresentationSession } from './media-presentation-core.js';
 import { clipSourceFingerprint, liveClipForSource } from './media-intake-engine.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
@@ -342,7 +342,7 @@ const Media = {
       for(const stream of result.streams){
         const url=await DESK.fileURL(stream.outputPath);
         if(!owns()){ prepared.dispose(); return null; }
-        const el=new Audio(); el.src=url; el.preload='auto';
+        const el=new Audio(); setMediaElementSource(el,url); el.preload='auto';
         const entry={...stream,el}; prepared.streams.push(entry);
         const ready=await waitForOwnedMediaMetadata(el,{owns,timeoutMs:10000});
         if(!owns()){ prepared.dispose(); return null; }
@@ -1135,7 +1135,7 @@ const Media = {
     let url=null,el=null;
     try{
       url=URL.createObjectURL(file); this.objectURLs.push(url);
-      el=new Audio(); el.src=url; el.preload='auto';
+      el=new Audio(); setMediaElementSource(el,url); el.preload='auto';
       const metadata=await waitForOwnedMediaMetadata(el,{owns,timeoutMs:10000});
       if(metadata==='cancelled'||!owns()){ this._disposeMediaElement(el); this._releaseObjectURL(url); return null; }
       if(metadata!=='ready') throw new Error('無法讀取此音訊檔 ('+file.name+')');
@@ -1227,7 +1227,7 @@ const Media = {
       if(!owns()) return null;
       const fileUrl=await DESK.fileURL(p);
       if(!owns()) return null;
-      el=new Audio(); el.src=fileUrl; el.preload='auto';
+      el=new Audio(); setMediaElementSource(el,fileUrl); el.preload='auto';
       const adapter=getPlayerAdapter();
       adapter.registerSourceClock(fileUrl,info?.video||info?.audio?.[0]);
       const metadata=await waitForOwnedMediaMetadata(el,{owns,timeoutMs:10000});
@@ -1674,7 +1674,7 @@ const Media = {
       if(!owns()) return false;
       const mp4=ff.FS('readFile','prev.mp4');
       const url=URL.createObjectURL(new Blob([mp4.buffer],{type:'video/mp4'})); this.objectURLs.push(url);
-      video.src=url; video.muted=true; await activateHtml5Transport(video);
+      setMediaElementSource(video,url); video.muted=true; await activateHtml5Transport(video);
       const metadataOutcome=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(metadataOutcome==='cancelled'||!owns()) return false;
       if(metadataOutcome!=='ready') throw new Error(`轉檔預覽影片 metadata ${metadataOutcome}`);
@@ -2124,7 +2124,7 @@ const Media = {
     this._disposeAltPrimaryAudio();
     let group=null;
     try{
-      const el = new Audio(); el.src = url; el.preload='auto';
+      const el = new Audio(); setMediaElementSource(el,url); el.preload='auto';
       const operation=this._assetOperation(null,{kind:'primary-overlap',fingerprint});
       group={el,node:null,fingerprint,tracks:[],ready:null};
       this._altPrimaryAudio=group;
@@ -2309,7 +2309,7 @@ const Media = {
           this.stopElementSources();
           await activateHtml5Transport(video);
           if(!owns()) return;
-          video.src = url;
+          setMediaElementSource(video,url);
           const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:8000});
           if(!owns()) return;
           if(metadata!=='ready'){
@@ -2755,8 +2755,11 @@ const Media = {
       if(!liveClip) return;
       if(liveClip.web?.url) getPlayerAdapter().registerSourceClock(liveClip.web.url,info?.video);
       AudioPipeline.registerSource(liveClip,probeAudioChannelDescriptors(info?.audio));
-      await this._clipIngest(liveClip,info,assetOperation);
-      if(!owns()) return;
+      const completed=await this._clipIngest(liveClip,info,assetOperation);
+      // A failed/cancelled ingest resolves without installing runtime audio.
+      // Only real completion (including a source with no audio) can suppress
+      // the next History/sequence restoration retry.
+      if(completed!==true||!owns()) return;
       if(!this._clipRuntimeReadySources) this._clipRuntimeReadySources=new Set();
       this._clipRuntimeReadySources.add(fingerprint);
     })().catch(error=>console.warn('restore clip runtime:',error)).finally(()=>{
@@ -2835,7 +2838,9 @@ const Media = {
         }
       }catch(e){ console.warn('clip wave', e); }
     }
-    if(owns()) { notifyAudioTracks(); setStatus(`影片已加入序列：${this._liveClipForSource(c)?.name||c.name}`, 'ok'); }
+    if(!owns()) return;
+    notifyAudioTracks(); setStatus(`影片已加入序列：${this._liveClipForSource(c)?.name||c.name}`, 'ok');
+    return true;
   },
   /* v4.7：圖片原始像素尺寸。互動框（.img-wrap）要貼合「contain 之後的圖片」而非整個畫框，
      沒有 natW/natH 就只能退回舊的滿框行為，把手會離素材很遠。舊專案讀不到時 app.js 會補量。 */
@@ -2970,7 +2975,7 @@ const Media = {
     this.ensureCtx();
     let el=null,node=null;
     try{
-      el=new Audio(); el.src=sourceClip.web.url; el.preload='auto';
+      el=new Audio(); setMediaElementSource(el,sourceClip.web.url); el.preload='auto';
       node=AudioEngine.createMediaElementSource(el);
       const count=Math.max(1,node.channelCount||2);
       const descriptors=AudioPipeline.registerSource(sourceClip,[],count);
@@ -2998,7 +3003,7 @@ const Media = {
     setStatus('讀取影片資訊…', 'busy');
     const url = URL.createObjectURL(f); this.objectURLs.push(url);
     const test=document.createElement('video');
-    test.src=url;
+    setMediaElementSource(test,url);
     const metadata=await waitForOwnedMediaMetadata(test,{owns,timeoutMs:8000});
     const sourceInfo=metadata==='ready'?await sourcePresentationMetadata(url,{owns}):null;
     const adapter=getPlayerAdapter();
@@ -3641,7 +3646,7 @@ const Media = {
     const sourceUrl=c.web?.url;
     if(!sourceUrl) return null;
     const source=document.createElement('video');
-    source.preload='auto';source.muted=true;source.src=sourceUrl;
+    source.preload='auto';source.muted=true;setMediaElementSource(source,sourceUrl);
     try{
       if(await waitForOwnedMediaMetadata(source,{owns,timeoutMs:10000})!=='ready'||!owns()) return null;
       const adapter=getPlayerAdapter();

@@ -922,22 +922,23 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     .map(choice => `<option value="${escapeHTML(choice.value)}">${escapeHTML(choice.label)}</option>`)
     .join('');
 
-  const totalDur = clips.reduce((acc, c) => {
-    const inT = Number(c.in) || 0;
-    const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (State.duration || 0)));
-    return acc + Math.max(0, outT - inT);
-  }, 0);
-
-  const clipsSummary = clips.map((c, i) => {
-    const inT = Number(c.in) || 0;
-    const outT = (c.out && c.out > inT) ? c.out : (inT + (Number(c.dur ?? c.duration) || (State.duration || 0)));
-    const durStr = secToEncore(Math.max(0, outT - inT), State.fps, State.dropFrame);
-    const sourceName = escapeHTML(c.name || '音訊素材');
-    return `<div class="asr-source-item" role="listitem"><span class="asr-source-index">${i + 1}</span><span class="asr-source-name" title="${sourceName}">${sourceName}</span><span class="asr-source-duration">${durStr}</span></div>`;
-  }).join('');
-  const totalDurationSummary = clips.length > 1
-    ? `<span class="asr-duration-pill">總計約 ${secToEncore(totalDur, State.fps, State.dropFrame)}</span>`
-    : '';
+  function sourceSummary(){
+    let totalDur=0;
+    const items=clips.map((c,i)=>{
+      const inT=Number(c.in)||0;
+      const outT=(c.out&&c.out>inT)?c.out:(inT+(Number(c.dur??c.duration)||(State.duration||0)));
+      const duration=Math.max(0,outT-inT);
+      totalDur+=duration;
+      const sourceName=escapeHTML(c.name||'音訊素材');
+      return `<div class="asr-source-item" role="listitem"><span class="asr-source-index">${i+1}</span><span class="asr-source-name" title="${sourceName}">${sourceName}</span><span class="asr-source-duration">${secToEncore(duration,State.fps,State.dropFrame)}</span></div>`;
+    }).join('');
+    const total=clips.length>1?`<span class="asr-duration-pill">總計約 ${secToEncore(totalDur,State.fps,State.dropFrame)}</span>`:'';
+    return {
+      heading:`${asrIcon('source')}<div class="asr-heading-copy"><span class="asr-eyebrow">本次輸入</span><h4 id="asrSourceTitle">已選取 ${clips.length} 個音訊來源</h4></div>${total}`,
+      items,
+    };
+  }
+  const initialSourceSummary=sourceSummary();
 
   const allAvailableClips = [
     ...(Array.isArray(State.clips) ? State.clips : []),
@@ -954,14 +955,9 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     <div class="asr-form asr-workspace asr-config-workspace">
       <section class="asr-card asr-source-card" aria-labelledby="asrSourceTitle">
         <div class="asr-card-heading">
-          ${asrIcon('source')}
-          <div class="asr-heading-copy">
-            <span class="asr-eyebrow">本次輸入</span>
-            <h4 id="asrSourceTitle">已選取 ${clips.length} 個音訊來源</h4>
-          </div>
-          ${totalDurationSummary}
+          ${initialSourceSummary.heading}
         </div>
-        <div class="asr-source-list" role="list">${clipsSummary}</div>
+        <div class="asr-source-list" role="list">${initialSourceSummary.items}</div>
         <div id="asrClipSelectorRow" class="asr-field asr-source-selector" style="display:${allAvailableClips.length > 1 ? 'flex' : 'none'};">
           <label for="asrClipSelect">指定辨識素材（多軌／人聲分離軌）</label>
           <select id="asrClipSelect">${clipChoicesHtml}</select>
@@ -1790,11 +1786,18 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     const clipSelectEl = document.getElementById('asrClipSelect');
     if (clipSelectEl) {
       clipSelectEl.onchange = () => {
+        if(!ownsDialog()) return;
         const chosenId = clipSelectEl.value;
         const chosen = allAvailableClips.find(c => c.id === chosenId);
         if (chosen) {
           clips.length = 0;
           clips.push(chosen);
+          const summary=sourceSummary();
+          const card=clipSelectEl.closest('.asr-source-card');
+          if(card){
+            card.querySelector('.asr-card-heading').innerHTML=summary.heading;
+            card.querySelector('.asr-source-list').innerHTML=summary.items;
+          }
           const newChoices = getRecognitionAudioSourceChoices(chosen);
           const audioSourceSelect = document.getElementById('asrRecognitionAudioSource');
           const audioSourceRow = document.getElementById('asrRecognitionAudioSourceRow');

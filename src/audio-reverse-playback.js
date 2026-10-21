@@ -1,4 +1,4 @@
-import { waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { setMediaElementSource, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 
 /* 反轉的是片段範圍內的 PCM，不是播放器方向。音源準備只屬於 AudioEngine，
    每個聲道沿用原 gain／analyser；過期載入不得安裝到另一個專案或效果。 */
@@ -63,7 +63,7 @@ export class ReverseAudioPlayback {
           entry.objectURL = this.createURL(wavBlob(entry.buffer));
         }
         const el = this.createAudio(); entry.el = el;
-        el.preload = 'auto'; el.src = entry.objectURL || loaded.url;
+        el.preload = 'auto'; setMediaElementSource(el, entry.objectURL || loaded.url);
         if (await waitForOwnedMediaMetadata(el, { owns: current, signal: entry.controller.signal }) !== 'ready' || !current()) return false;
         entry.node = this.context.createMediaElementSource(el);
         const channel = loaded.buffer ? 0 : loaded.channel || 0;

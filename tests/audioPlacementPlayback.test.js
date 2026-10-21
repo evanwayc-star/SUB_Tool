@@ -27,6 +27,14 @@ describe('overlapping element placements with a late MOV duration',()=>{
     owner.start(element,0);expect(element.currentTime).toBe(3.5);expect(element.play).not.toHaveBeenCalled();
     await expand(element);expect(element.currentTime).toBe(8.3);expect(element.play).toHaveBeenCalledOnce();
   });
+  it('sets CORS before assigning the detached placement source',()=>{
+    owner.clear();
+    const assignments=[];
+    Object.defineProperty(element,'src',{configurable:true,get:()=>track.el.src,set:value=>assignments.push({value,crossOrigin:element.crossOrigin})});
+    element.crossOrigin=null;
+    expect(owner.element(track,playback,[playback])).toBe(element);
+    expect(assignments).toEqual([{value:track.el.src,crossOrigin:'anonymous'}]);
+  });
   it('keeps only the latest pending placement position',async()=>{
     playback.sourceTime=0;owner.start(element,0);playback.sourceTime=2.8;owner.sync(0);
     await expand(element);expect(element.currentTime).toBe(8.3);expect(element.play).toHaveBeenCalledOnce();

@@ -475,6 +475,14 @@ describe('媒體探測 interface', () => {
     ], expect.objectContaining({ windowsHide: true }));
   });
 
+  it('保留來源的 SAR、像素格式、色彩矩陣、primaries、transfer 與 range，不能在 Proxy 縮放後重新猜測', () => {
+    const { descriptorOf } = require('../electron/media-probe');
+    const result = descriptorOf({ streams: [{ codec_type: 'video', width: 720, height: 576, sample_aspect_ratio: '1:2', pix_fmt: 'yuv420p',
+      color_space: 'bt470bg', color_primaries: 'bt470bg', color_transfer: 'bt709', color_range: 'tv' }] });
+    expect(result.video).toMatchObject({ width: 720, height: 576, sampleAspectRatio: '1:2', pixelFormat: 'yuv420p',
+      colorSpace: 'bt470bg', colorPrimaries: 'bt470bg', colorTransfer: 'bt709', colorRange: 'tv' });
+  });
+
   it('stalled ffprobe 到期後先終止並等 close，下一次探測才可啟動', async () => {
     vi.useFakeTimers();
     try {

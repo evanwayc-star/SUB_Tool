@@ -2,6 +2,7 @@
    gain／analyser。clone、metadata 回呼與釋放全部由 AudioEngine 的此 owner 管理。 */
 import {fadeWindow} from '../shared/clip-fade.cjs';
 import {getPlayerAdapter} from './media-player-adapter.js';
+import {setMediaElementSource} from './media-intake-engine.js';
 
 export class PlacementAudioGains {
   constructor(context){this.context=context;this.entries=new Map();}
@@ -58,7 +59,7 @@ export class ElementPlacementPlayback {
     group={el,original,clip:playback.clip,tracks,url:original.currentSrc||original.src,node:null,splitter:null,running:false,pendingStart:false};
     entries.set(playback.clip,group);
     try{
-      el.preload='auto';el.src=group.url;
+      el.preload='auto';setMediaElementSource(el,group.url);
       group.node=this.context.createMediaElementSource(el);
       group.splitter=this.context.createChannelSplitter(Math.max(1,tracks.length));
       group.node.connect(group.splitter);

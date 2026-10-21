@@ -10,7 +10,9 @@ const node=()=>({connect:vi.fn(),disconnect:vi.fn()});
 const pcm=()=>({duration:12,sampleRate:1000,length:12000,numberOfChannels:2,
   getChannelData:()=>new Float32Array(12000).fill(.2)});
 class ReadyAudio extends EventTarget{
-  constructor(){super();this.src='';this.duration=12;this.readyState=1;this.currentTime=0;this.paused=true;this.playbackRate=1;elements.push(this);}
+  constructor(){super();this.sourceAssignments=[];this.duration=12;this.readyState=1;this.currentTime=0;this.paused=true;this.playbackRate=1;elements.push(this);}
+  get src(){return this.url||'';}
+  set src(value){if(value)this.sourceAssignments.push({value,crossOrigin:this.crossOrigin});this.url=value;}
   play=vi.fn(async()=>{this.paused=false;});pause=vi.fn(()=>{this.paused=true;});load=vi.fn();
   removeAttribute(key){if(key==='src')this.src='';}
 }
@@ -54,6 +56,20 @@ beforeEach(async()=>{
 afterEach(()=>{Media.reset();vi.restoreAllMocks();vi.unstubAllGlobals();});
 
 describe('web sequence original audio owns its lifecycle independently of waveform',()=>{
+  it('frozen canvas loads its video source in anonymous CORS mode before presentation',async()=>{
+    const assignments=[],source={readyState:2,videoWidth:64,videoHeight:48,pause:vi.fn(),load:vi.fn()};
+    Object.defineProperty(source,'src',{get:()=>source.url||'',set:value=>{source.url=value;if(value)assignments.push({value,crossOrigin:source.crossOrigin});}});
+    const drawImage=vi.fn(),canvas={getContext:()=>({drawImage}),toDataURL:()=> 'data:image/png;base64,frame'};
+    const create=document.createElement.getMockImplementation();
+    document.createElement.mockImplementation((tag,options)=>tag==='video'?source:tag==='canvas'?canvas:create(tag,options));
+    const {getPlayerAdapter}=await import('../src/media-player-adapter.js');
+    const present=vi.spyOn(getPlayerAdapter(),'presentElement').mockResolvedValue({presentedSourceTime:1});
+    const clip=State.clips[0];
+    expect(await Media.prepareClipFreeze(clip,1)).toMatchObject({url:'data:image/png;base64,frame',width:64,height:48,time:1});
+    expect(assignments).toEqual([{value:clip.web.url,crossOrigin:'anonymous'}]);
+    expect(present).toHaveBeenCalledWith(source,1,expect.any(Object));
+    expect(drawImage).toHaveBeenCalledWith(source,0,0);
+  });
   it.each(['large','decode-failure','pending-wave'])('%s 第二段仍有原音、原聲道配線與 source clock',async mode=>{
     let finish;
     if(mode==='decode-failure')decode.mockRejectedValue(new Error('optional waveform decode failed'));
@@ -70,6 +86,7 @@ describe('web sequence original audio owns its lifecycle independently of wavefo
     await vi.waitFor(()=>expect(channels[0].el.paused).toBe(false));
     expect(channels[0].el.currentTime).toBe(1);
     expect(channels[0].el).toBe(channels[1].el);
+    expect(channels[0].el.sourceAssignments).toEqual([{value:second.web.url,crossOrigin:'anonymous'}]);
     expect(channels.every(track=>Media.trackAudible(track)&&track.gain.gain.value>0)).toBe(true);
     expect(video.muted).toBe(true);
     expect(Media.sourceChannels('video').every(track=>track.gain.gain.value===0)).toBe(true);

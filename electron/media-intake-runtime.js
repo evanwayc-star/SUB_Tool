@@ -155,6 +155,7 @@ function createMediaIntakeRuntime(options = {}) {
     const relative = file => file ? path.relative(dir, file).split(path.sep).join('/') : file;
     return {
       proxy: relative(meta.proxy),
+      ...(meta.proxy && options.describeVideo ? { proxyColorVersion: 1 } : {}),
       wave: relative(meta.wave),
       channels: (meta.channels || []).map(channel => ({
         label: channel.label,
@@ -227,7 +228,11 @@ function createMediaIntakeRuntime(options = {}) {
   function inspectCacheDirectory(dir) {
     const metaPath = path.join(dir, 'meta.json');
     try {
-      const inspected = inspectMeta(resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir));
+      const raw = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      const inspected = inspectMeta(resolveMeta(raw, dir));
+      // Old Proxies can change color when resizing crosses the decoder's SD/HD
+      // guess. Keep their bytes and completed audio; rebuild only that component.
+      if (options.describeVideo && raw.proxyColorVersion !== 1) inspected.meta.proxy = null;
       return { dir, ...inspected };
     } catch (error) {
       return { dir, files: [], error: error.code || error.message };
@@ -416,6 +421,13 @@ function createMediaIntakeRuntime(options = {}) {
     return !!session?.isCancelled?.();
   }
 
+  async function describeMissingProxy(src, audio, required = false) {
+    if (!options.describeVideo || (!required && readCache(src, audio || [], true)?.meta.proxy)) return null;
+    const video = await options.describeVideo(src);
+    if (!(video?.width > 0 && video?.height > 0)) throw new Error('無法確認 Proxy 母素材的視訊尺寸與色彩');
+    return video;
+  }
+
   async function ensureStreamServer() {
     if (closed) throw new Error('媒體串流 runtime 已關閉');
     if (streamServerReady) return streamServerReady;
@@ -427,6 +439,26 @@ function createMediaIntakeRuntime(options = {}) {
         const job = streamJobs.get(id);
         if (!job?.filePath) {
           response.writeHead(404);
+          response.end();
+          return;
+        }
+        // URL lease 已授權後才提供 CORS；猜測或已釋放的 token 仍是無內容 404。
+        // renderer 以 anonymous 讀取，不能靠關閉 webSecurity 讓 Web Audio/canvas
+        // 取用 opaque 的 Proxy 回應。Range preflight 也只能跨同一份有效 lease。
+        response.setHeader('Access-Control-Allow-Origin', '*');
+        response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        response.setHeader('Access-Control-Allow-Headers', 'Range');
+        response.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+        const method = request.method;
+        const requestedMethod = request.headers['access-control-request-method'];
+        if (!['GET', 'HEAD', 'OPTIONS'].includes(method)
+          || (method === 'OPTIONS' && requestedMethod && !['GET', 'HEAD'].includes(requestedMethod))) {
+          response.writeHead(405, { Allow: 'GET, HEAD, OPTIONS' });
+          response.end();
+          return;
+        }
+        if (method === 'OPTIONS') {
+          response.writeHead(204);
           response.end();
           return;
         }
@@ -469,11 +501,23 @@ function createMediaIntakeRuntime(options = {}) {
         };
         const range = request.headers.range;
         if (!range) {
-          response.writeHead(200, {
+          const headers = {
             'Content-Type': 'video/mp4',
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'no-store',
-          });
+          };
+          if (method === 'HEAD') {
+            // 成長中的 Proxy 沒有最終長度；HEAD 不建立 reader、不等 writer。
+            void fsp.stat(job.filePath).then(stat => {
+              if (!live()) return;
+              if (job.error) { fail(new Error(job.error)); return; }
+              if (job.done) headers['Content-Length'] = stat.size;
+              response.writeHead(200, headers);
+              response.end();
+            }).catch(error => fail(error));
+            return;
+          }
+          response.writeHead(200, headers);
           let offset = 0;
           const pump = async () => {
             if (!live()) return;
@@ -532,7 +576,8 @@ function createMediaIntakeRuntime(options = {}) {
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'no-store',
           });
-          pipe({ start, end });
+          if (method === 'HEAD') response.end();
+          else pipe({ start, end });
         };
         void tryRange(0).catch(error => fail(error));
       });
@@ -546,7 +591,7 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   // cache coverage 與補建publication共用一個owner，batch/stream不能各自重抽已完成元件。
-  function planIntake({ src, needsProxy, audio }, isStream) {
+  function planIntake({ src, needsProxy, audio }, isStream, video = null) {
     const audioSources = Array.isArray(audio) ? audio : [];
     let hit = readCache(src, audioSources, needsProxy);
     if (hit
@@ -555,13 +600,16 @@ function createMediaIntakeRuntime(options = {}) {
       return { cached: true, dir: hit.dir, meta: hit.meta };
     }
     if (hit && !isDirWritable(hit.dir)) hit = null;
+    const buildProxy = needsProxy && !hit?.meta.proxy;
+    // A warm lookup can lose its files while awaiting admission. Do not create
+    // or certify a replacement until the caller has described that source.
+    if (buildProxy && options.describeVideo && !video) return { needsVideoDescription: true };
     const dir = hit ? hit.dir : writeCacheDir(src);
     const metaPath = path.join(dir, 'meta.json');
     // 初建也只寫私有 generation：不同程式共用 sidecar 時，失敗 writer
     // 不能覆寫另一個已提交 writer 的檔案。
     const outputDir = path.join(dir, 'generation-' + crypto.randomBytes(12).toString('hex'));
     fs.mkdirSync(outputDir, { recursive: true });
-    const buildProxy = needsProxy && !hit?.meta.proxy;
     const expected = flattenSourceChannels(audioSources);
     const sameAudioLayout = hit && hit.audioLayout.length === expected.length
       && expected.every((channel, index) => hit.audioLayout[index].sourceStream === channel.sourceStream
@@ -594,6 +642,7 @@ function createMediaIntakeRuntime(options = {}) {
       wavePath: wave,
       encoder: getEncoder(),
       isStream,
+      video,
     });
     let committed = false;
     return {
@@ -636,8 +685,15 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   async function ingest(request, session = {}) {
-    if (cancelled(session)) throw new IngestSupersededError();
-    const plan = planIntake(request, false);
+    if (closed || cancelled(session)) throw new IngestSupersededError();
+    const video = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
+    if (closed || cancelled(session)) throw new IngestSupersededError();
+    let plan = planIntake(request, false, video);
+    if (plan.needsVideoDescription) {
+      const replacementVideo = await describeMissingProxy(request.src, request.audio, true);
+      if (closed || cancelled(session)) throw new IngestSupersededError();
+      plan = planIntake(request, false, replacementVideo);
+    }
     if (plan.cached) {
       reportCacheHit(session);
       return Object.assign({ cached: true }, plan.meta);
@@ -671,10 +727,18 @@ function createMediaIntakeRuntime(options = {}) {
 
   async function stream({ src, duration, audio }, session = {}) {
     const port = await ensureStreamServer();
-    if (cancelled(session)) return { response: null, completion: null };
-    const plan = planIntake({ src, needsProxy: true, audio }, true);
+    if (closed || cancelled(session)) return { response: null, completion: null };
+    const video = options.describeVideo ? await describeMissingProxy(src, audio) : null;
+    if (closed || cancelled(session)) return { response: null, completion: null };
+    let plan = planIntake({ src, needsProxy: true, audio }, true, video);
+    if (plan.needsVideoDescription) {
+      const replacementVideo = await describeMissingProxy(src, audio, true);
+      if (closed || cancelled(session)) return { response: null, completion: null };
+      plan = planIntake({ src, needsProxy: true, audio }, true, replacementVideo);
+    }
     if (plan.cached) {
       reportCacheHit(session);
+      if (closed || cancelled(session)) return { response: null, completion: null };
       const id = createStreamId('c-');
       streamJobs.set(id, {
         filePath: plan.meta.proxy, done: true, error: null,
@@ -695,6 +759,9 @@ function createMediaIntakeRuntime(options = {}) {
     const job = { filePath: proxy, done: false, error: null, owner: session.owner,
       releaseCache: protectCacheDir(plan.dir) };
     streamJobs.set(id, job);
+    // close/cancel 也可在等待可播 bytes 期間收回 registry；URL 只有仍持有
+    // 同一 lease 才能交給 renderer，不能以 writer 後來完成重新取得資格。
+    const ownsStream = () => !closed && streamJobs.get(id) === job && !cancelled(session);
     if (cancelled(session)) {
       job.done = true;
       job.error = '媒體轉檔已被較新的載入取代';
@@ -746,15 +813,15 @@ function createMediaIntakeRuntime(options = {}) {
     try {
       /* 可播門檻的 300ms 輪詢也可能打到 SMB sidecar，因此只用 fsp.stat。 */
       while (now() - startedAt < 60000) {
-        if (cancelled(session)) return { response: null, completion };
+        if (!ownsStream()) return { response: null, completion };
         if (job.error) throw new Error('轉檔失敗：' + job.error);
         let size = 0;
         try { size = (await fsp.stat(proxy)).size; } catch (error) {}
-        if (cancelled(session)) return { response: null, completion };
+        if (!ownsStream()) return { response: null, completion };
         if (job.error) throw new Error('轉檔失敗：' + job.error);
         if (size >= 131072 || (job.done && size > 0)) { ready = true; break; }
         await delay(300);
-        if (cancelled(session)) return { response: null, completion };
+        if (!ownsStream()) return { response: null, completion };
       }
 
       if (!ready) {

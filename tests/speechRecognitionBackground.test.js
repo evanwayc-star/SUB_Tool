@@ -68,6 +68,46 @@ function renderModalFromMock() {
 }
 
 describe('語音辨識背景執行與進度視窗切換', () => {
+  it('切換素材後，摘要與實際接受的辨識範圍、字幕位置使用同一來源',async()=>{
+    State.fps=25;State.dropFrame=false;
+    const first={id:'first',name:'first.wav',in:0,out:2,dur:2,offset:0,audioBuffer:{duration:2}};
+    const second={id:'second',name:'second.wav',in:1,out:8,dur:10,offset:20,audioBuffer:{duration:10}};
+    State.clips=[first,second];
+    let finish;
+    engineMocks.transcribeAudioStream.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+    openSpeechRecognitionDialog(first);renderModalFromMock();
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const selector=document.getElementById('asrClipSelect');selector.value=second.id;
+    selector.dispatchEvent(new Event('change',{bubbles:true}));
+    expect(document.querySelector('.asr-source-name').textContent).toBe(second.name);
+    expect(document.querySelector('.asr-source-name').title).toBe(second.name);
+    expect(document.querySelector('.asr-source-duration').textContent).toBe('00:00:07:00');
+    const completion=uiMocks.openModal.mock.calls.at(-1)[2].find(button=>button.primary).act();
+    expect(getAsrSession().clips).toEqual([expect.objectContaining({id:second.id,in:1,out:8,offset:20})]);
+    await vi.waitFor(()=>expect(engineMocks.transcribeAudioStream).toHaveBeenCalledOnce());
+    expect(engineMocks.transcribeAudioStream.mock.calls[0][0]).toMatchObject({audioBuffer:second.audioBuffer,inT:1,outT:8});
+    finish([{start:0.5,end:1.5,text:'第二素材辨識結果'}]);await completion;
+    expect(State.cues).toEqual([expect.objectContaining({text:'第二素材辨識結果',start:20.52,end:21.52})]);
+  });
+
+  it('多來源切成單一來源時，數量、時長及總計摘要一併更新',async()=>{
+    State.fps=25;State.dropFrame=false;
+    const first={id:'multi-first',name:'first.wav',in:0,out:2,dur:2,audioBuffer:{duration:2}};
+    const second={id:'multi-second',name:'second.wav',in:0,out:7,dur:7,audioBuffer:{duration:7}};
+    State.clips=[first,second];
+    openSpeechRecognitionDialog([first,second]);renderModalFromMock();
+    await new Promise(resolve=>setTimeout(resolve,0));
+    expect(document.querySelector('.asr-source-card h4').textContent).toBe('已選取 2 個音訊來源');
+    expect(document.querySelector('.asr-duration-pill').textContent).toContain('00:00:09:00');
+    const selector=document.getElementById('asrClipSelect');selector.value=second.id;
+    selector.dispatchEvent(new Event('change',{bubbles:true}));
+    expect(document.querySelector('.asr-source-card h4').textContent).toBe('已選取 1 個音訊來源');
+    expect(document.querySelectorAll('.asr-source-item')).toHaveLength(1);
+    expect(document.querySelector('.asr-source-name').textContent).toBe(second.name);
+    expect(document.querySelector('.asr-source-duration').textContent).toBe('00:00:07:00');
+    expect(document.querySelector('.asr-duration-pill')).toBeNull();
+  });
+
   it('專案 reset 後尚未關閉的舊設定視窗不能再開始辨識舊素材',async()=>{
     const {resetProject}=await import('../src/project.js');
     openSpeechRecognitionDialog();renderModalFromMock();

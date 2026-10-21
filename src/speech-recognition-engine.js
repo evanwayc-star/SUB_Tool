@@ -481,51 +481,62 @@ export async function transcribeWithBuiltinModel({
   });
 }
 
-/**
- * 自動探索目前 API Key 支援的 Gemini 模型版本與名稱。
- * 
- * 優先順序策略：
- * 1. 優先探測並採用最新一代極速模型（gemini-2.5-flash / gemini-2.0-flash），
- *    兼具卓越的時間軸邊界理解力、超低延遲與穩定性。
- * 2. 次選經典 1.5 Flash / Pro 模型做為平滑備援。
- * 
- * @param {string} apiKey Google Gemini API 金鑰
- * @param {AbortSignal} [signal] 取消訊號
- * @returns {Promise<{ version: string, model: string }>} 探索到的版本與模型名稱
- */
-export async function resolveGeminiModel(apiKey, signal = null) {
-  const versions = ['v1', 'v1beta'];
-  for (const v of versions) {
-    throwIfRecognitionAborted(signal);
-    try {
-      const resp = await fetch(`https://generativelanguage.googleapis.com/${v}/models`, {
-        headers: { 'x-goog-api-key': apiKey },
-        signal
+// Models.list only declares generation methods, not input modalities. These exact
+// models have documented audio input + structured text output (checked 2026-10-21):
+// https://ai.google.dev/gemini-api/docs/models and /docs/audio.
+// Keep the existing 2.5 Flash preference; discovery must also list the candidate.
+const GEMINI_AUDIO_MODELS = Object.freeze([
+  'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro', 'gemini-3.8-flash'
+]);
+
+async function geminiResponseError(response, signal) {
+  const json = await response.json().catch(() => ({}));
+  throwIfRecognitionAborted(signal);
+  return new Error(json?.error?.message || `Google API 回傳錯誤 HTTP ${response.status}`);
+}
+
+async function* geminiModelCandidates(apiKey, signal) {
+  let admitted = false;
+  for (const version of ['v1', 'v1beta']) {
+    const models = new Set();
+    const seenTokens = new Set();
+    let pageToken = '';
+    do {
+      throwIfRecognitionAborted(signal);
+      const query = pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : '';
+      const response = await fetch(`https://generativelanguage.googleapis.com/${version}/models${query}`, {
+        headers: { 'x-goog-api-key': apiKey }, signal
       });
-      if (resp.ok) {
-        const json = await resp.json();
-        const models = (json.models || []).map(m => m.name.replace(/^models\//, ''));
-        const preferred = [
-          'gemini-2.5-flash',
-          'gemini-2.0-flash',
-          'gemini-1.5-flash-latest',
-          'gemini-1.5-flash',
-          'gemini-1.5-pro-latest',
-          'gemini-1.5-pro',
-          'gemini-2.0-flash-exp'
-        ];
-        for (const p of preferred) {
-          if (models.includes(p)) return { version: v, model: p };
-        }
-        const anyFlash = models.find(m => m.includes('flash'));
-        if (anyFlash) return { version: v, model: anyFlash };
-        if (models.length > 0) return { version: v, model: models[0] };
+      throwIfRecognitionAborted(signal);
+      if (!response.ok) {
+        const error = await geminiResponseError(response, signal);
+        if (response.status === 404 && !pageToken) break;
+        throw error;
       }
-    } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      const json = await response.json();
+      throwIfRecognitionAborted(signal);
+      if (json.models != null && !Array.isArray(json.models)) throw new Error('Google Gemini 模型列表格式無效');
+      for (const model of json.models || []) {
+        if (!model || typeof model.name !== 'string' || !Array.isArray(model.supportedGenerationMethods) ||
+          !model.supportedGenerationMethods.includes('generateContent')) continue;
+        models.add(model.name.replace(/^models\//, ''));
+      }
+      pageToken = typeof json.nextPageToken === 'string' ? json.nextPageToken : '';
+      if (pageToken && (seenTokens.has(pageToken) || seenTokens.size >= 100)) throw new Error('Google Gemini 模型列表分頁無效');
+      if (pageToken) seenTokens.add(pageToken);
+    } while (pageToken);
+    for (const model of GEMINI_AUDIO_MODELS) {
+      if (!models.has(model)) continue;
+      admitted = true;
+      yield { version, model };
     }
   }
-  return { version: 'v1beta', model: 'gemini-2.0-flash' };
+  if (!admitted) throw new Error('Google Gemini 沒有可用且支援音訊辨識的模型');
+}
+
+/** 探索金鑰可用的音訊模型；保留既有 { version, model } 公開介面。 */
+export async function resolveGeminiModel(apiKey, signal = null) {
+  for await (const candidate of geminiModelCandidates(apiKey, signal)) return candidate;
 }
 
 /**
@@ -579,62 +590,27 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
     }
   };
 
-  const detected = await resolveGeminiModel(apiKey.trim(), signal);
-  const candidateModels = [
-    detected.model,
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-flash',
-    'gemini-1.5-pro-latest',
-    'gemini-2.0-flash-exp'
-  ].filter((v, idx, arr) => arr.indexOf(v) === idx);
-
-  const versions = [detected.version, 'v1', 'v1beta'].filter((v, idx, arr) => arr.indexOf(v) === idx);
-
   let data = null;
   let lastError = null;
-
-  for (const ver of versions) {
-    if (data) break;
-    for (const m of candidateModels) {
+  for await (const { version, model } of geminiModelCandidates(apiKey.trim(), signal)) {
+    throwIfRecognitionAborted(signal);
+    const response = await fetch(`https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey.trim() },
+      body: JSON.stringify(payload), signal
+    });
+    throwIfRecognitionAborted(signal);
+    if (response.ok) {
+      data = await response.json();
       throwIfRecognitionAborted(signal);
-      const url = `https://generativelanguage.googleapis.com/${ver}/models/${m}:generateContent`;
-      try {
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': apiKey.trim()
-          },
-          body: JSON.stringify(payload),
-          signal
-        });
-
-        if (resp.ok) {
-          data = await resp.json();
-          break;
-        } else {
-          const errJson = await resp.json().catch(() => ({}));
-          lastError = new Error(errJson?.error?.message || `Google API 回傳錯誤 HTTP ${resp.status}`);
-          if (resp.status !== 404) {
-            throw lastError;
-          }
-        }
-      } catch (err) {
-        if (signal?.aborted || err?.name === 'AbortError') throw err;
-        lastError = err;
-        if (!err.message.includes('HTTP 404') && !err.message.includes('not found')) {
-          throw err;
-        }
-      }
+      break;
     }
+    lastError = await geminiResponseError(response, signal);
+    const unsupportedAudio = response.status === 400 && /audio (?:input|inputs|mime type).*not supported|(?:does not|doesn't) support audio/i.test(lastError.message);
+    if (response.status !== 404 && !unsupportedAudio) throw lastError;
   }
 
   if (!data) {
-    if (lastError && (lastError.message.includes('not found') || lastError.message.includes('not supported'))) {
-      throw new Error('Google 伺服器回報找不到模型。這通常是因為 Google Cloud 專案權限同步中（約需數分鐘），或請切換至「💻 程式內建本機 AI 引擎」或「⚡ Groq」模式。');
-    }
     throw lastError || new Error('Google Gemini 辨識失敗');
   }
 
@@ -663,10 +639,16 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
   }
 
   const validSegments = [];
+  let invalidTimes = false;
   for (const s of segments) {
     if (s && s.text && typeof s.text === 'string' && s.text.trim()) {
-      const start = Number(s.start) || 0;
-      const end = Number(s.end) || (start + 2);
+      const numericTime = value => typeof value === 'number' || (typeof value === 'string' && value.trim() !== '');
+      const start = numericTime(s.start) ? Number(s.start) : NaN;
+      const end = numericTime(s.end) ? Number(s.end) : NaN;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
+        invalidTimes = true;
+        continue;
+      }
       validSegments.push({
         start,
         end,
@@ -674,6 +656,7 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
       });
     }
   }
+  if (!validSegments.length && invalidTimes) throw new Error('Google Gemini 回傳無效字幕時間，未建立字幕軌');
 
   return { segments: validSegments };
 }

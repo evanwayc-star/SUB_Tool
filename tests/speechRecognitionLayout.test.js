@@ -27,11 +27,7 @@ describe('音訊辨識與文本匹配視窗版面', () => {
     );
   });
 
-  it('音訊素材名稱使用藍色，且只有多素材時才顯示總時長', () => {
+  it('音訊素材名稱使用藍色', () => {
     expect(css).toMatch(/\.asr-source-name\{[^}]*color:#93c5fd[^}]*\}/u);
-    expect(speechRecognition).toMatch(
-      /const totalDurationSummary = clips\.length > 1[\s\S]*?class="asr-duration-pill">總計約/u
-    );
-    expect(speechRecognition).toContain('${totalDurationSummary}');
   });
 });

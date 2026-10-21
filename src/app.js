@@ -208,26 +208,24 @@ _videoSub?.addEventListener('contextmenu', e => {
   e.preventDefault();
   e.stopPropagation();
   const cid = subEl.dataset.cue;
-  
+  const cue = State.cues.find(item => item.id === cid);
+  const track = State.tracks[cue?.track || 0];
+  const preset = State.presetEdit, draft = preset?.draft;
+  const ownsWorkspace = Project.captureWorkspaceOwnership();
+  const alignPreview = (patch, label) => {
+    if (!ownsWorkspace() || State.presetEdit !== preset
+      || (preset ? preset.draft !== draft
+        : !cue || State.cues.find(item => item.id === cid) !== cue || State.tracks[cue.track || 0] !== track)) {
+      showToast('字幕或樣式草稿已變更，請重新開啟右鍵選單');
+      return;
+    }
+    const changed = preset ? Object.assign(draft, patch) : applyCueStylePatch(cue, patch);
+    if (changed) { styleChanged(); recordHistory(label); }
+  };
+
   const items = [];
-  items.push({label:'↔ 水平置中', act:()=>{
-    const changed = State.presetEdit
-      ? Object.assign(State.presetEdit.draft, { posX:50, align:'center' })
-      : applyCueStylePatch(State.cues.find(cu=>cu.id===cid), { posX:50, align:'center' });
-    if(changed) {
-      styleChanged();
-      recordHistory('字幕水平置中');
-    }
-  }});
-  items.push({label:'↕ 垂直置中', act:()=>{
-    const changed = State.presetEdit
-      ? Object.assign(State.presetEdit.draft, { posY:50, valign:'middle' })
-      : applyCueStylePatch(State.cues.find(cu=>cu.id===cid), { posY:50, valign:'middle' });
-    if(changed) {
-      styleChanged();
-      recordHistory('字幕垂直置中');
-    }
-  }});
+  items.push({label:'↔ 水平置中', act:()=>alignPreview({ posX:50, align:'center' }, '字幕水平置中')});
+  items.push({label:'↕ 垂直置中', act:()=>alignPreview({ posY:50, valign:'middle' }, '字幕垂直置中')});
   
   showCtx(e.clientX, e.clientY, items);
 });

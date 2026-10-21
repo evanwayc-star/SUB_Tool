@@ -47,13 +47,18 @@ async function probe(file, name) {
     clearInterval: id => timers.delete(id),
   });
   page.globalThis = page.window;
+  const webContents = { executeJavaScript: code => vm.runInContext(code, page), isDestroyed: () => false };
   const host = vm.createContext({
-    rendererLagProbe,
+    rendererLagProbe, PROFILE_TOKEN: 'lag-fixture',
+    __subtoolDiagnosticProfile: { token: 'lag-fixture', ready: true, attached: true,
+      debugger: { isAttached: () => true }, webContents },
     require: () => ({ BrowserWindow: { getAllWindows: () => [{
       getParentWindow: () => null,
-      webContents: { executeJavaScript: code => vm.runInContext(code, page) },
+      webContents,
     }] } }),
   });
+  if (name === 'ARM_LAG') vm.runInContext(ast.body.filter(node => node.type === 'FunctionDeclaration')
+    .map(node => source.slice(node.start, node.end)).join('\n'), host);
   const code = vm.runInContext(source.slice(selected.start, selected.end), host);
   const arm = () => vm.runInContext(code, name ? host : page);
   await arm();
@@ -67,7 +72,7 @@ async function probe(file, name) {
     transition(ms, value) { now += ms; visibility(value); },
     visibility,
     moveWallClock: ms => { wallOffset += ms; },
-    count: () => page.window.__lagTotal_p ?? page.window.__lagSum
+    count: () => page.window.__lagTotal_p ?? page.window['__lagTotal_p_lag-fixture'] ?? page.window.__lagSum
       ?? (page.window.__lag_rend || []).reduce((total, row) => total + row.blocked, 0),
   };
 }

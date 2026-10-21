@@ -6,7 +6,16 @@
    1. 素材來源指紋與存續追蹤 (clipSourceFingerprint / liveClipForSource / clipSourceStillReferenced)
    2. 媒體工作階段與排他性執行緒控制 (MediaIntakeSession)
    3. 異步中繼資料就緒輪詢與競態取消 (waitForOwnedMediaMetadata)
+   4. 媒體元素來源指派與瀏覽器 CORS 模式 (setMediaElementSource)
    ============================================================================== */
+
+// CORS 模式屬於載入請求，必須先於 src；事後補設無法保證已載入內容可供
+// Web Audio / canvas 讀取。匿名模式沿用本機 capability URL 與網頁 blob URL，
+// 不傳送跨來源憑證，也不改變 protocol 的路徑授權或回應標頭。
+export function setMediaElementSource(element, url) {
+  element.crossOrigin = 'anonymous';
+  element.src = url;
+}
 
 /**
  * 根據素材片段計算穩定的來源指紋（Fingerprint）。
@@ -188,7 +197,7 @@ export class MediaIntakeSession {
         if (!stillOwns()) return { element: null, error: null };
         element = createAudio();
         created.push(element);
-        element.src = url;
+        setMediaElementSource(element, url);
         element.preload = 'auto';
         const outcome=await waitForOwnedMediaMetadata(element,{owns:stillOwns,timeoutMs,signal:controller.signal});
         if(outcome==='cancelled'){cancel();return {element:null,error:null};}

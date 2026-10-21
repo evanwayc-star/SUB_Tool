@@ -6,6 +6,7 @@ import { ReverseAudioPlayback } from './audio-reverse-playback.js';
 import { ElementPlacementPlayback,PlacementAudioGains } from './audio-placement-playback.js';
 import { getPlayerAdapter } from './media-player-adapter.js';
 import { sourcePresentationMetadata } from './decode/source-frame-index.js';
+import { setMediaElementSource } from './media-intake-engine.js';
 
 /* AudioContext 的建立是這個模組唯一的外部相依，也是它長期【零測試】的原因：
    模組層直接 `new AudioContext()`，vitest 的 node 環境起不動它，jsdom 也沒有
@@ -670,7 +671,7 @@ class ElementScrubber {
     };
     
     if (this.scrubEl.src !== this.sourceEl.src) {
-      this.scrubEl.src = this.sourceEl.src;
+      setMediaElementSource(this.scrubEl, this.sourceEl.src);
       this.scrubEl.onloadedmetadata = metadataReady;
     } else if (this.scrubEl.readyState >= 1) {
       this._execute(task);

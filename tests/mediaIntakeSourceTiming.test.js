@@ -51,6 +51,148 @@ afterEach(() => {
 });
 
 describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來源時間的音訊快取', () => {
+  it.each([
+    { name: 'SD 無色彩標籤', size: '320x180', matrix: null, expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0] },
+    { name: 'HD 無色彩標籤', size: '1920x1080', matrix: null, expectedMatrix: 'bt709', expectedRgb: [255, 23, 0] },
+    { name: '600h 無色彩標籤', size: '1024x600', matrix: null, expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0] },
+    { name: '寬短無色彩標籤', size: '1280x540', matrix: null, expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0] },
+    { name: '600h 窄像素自然高 1200 無色彩標籤', size: '1024x600', sar: '1/2', matrix: null, expectedMatrix: 'bt709', expectedRgb: [255, 23, 0] },
+    { name: 'SD 明示 709', size: '320x180', matrix: 'bt709', expectedMatrix: 'bt709', expectedRgb: [255, 23, 0] },
+    { name: 'HD 明示 601', size: '1920x1080', matrix: 'smpte170m', expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0] },
+    { name: 'SD 只有 709 矩陣', size: '320x180', matrix: 'bt709', omitted: ['colorPrimaries', 'colorTransfer'], expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0] },
+    { name: 'HD 只有 601 矩陣', size: '1920x1080', matrix: 'smpte170m', omitted: ['colorPrimaries', 'colorTransfer'], expectedMatrix: 'bt709', expectedRgb: [255, 23, 0] },
+    { name: 'SD 709 缺 primaries', size: '320x180', matrix: 'bt709', omitted: ['colorPrimaries'], expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0] },
+    { name: 'SD 709 缺 transfer', size: '320x180', matrix: 'bt709', omitted: ['colorTransfer'], expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0] },
+    { name: 'HD 601 缺矩陣', size: '1920x1080', matrix: 'smpte170m', omitted: ['colorSpace'], expectedMatrix: 'bt709', expectedRgb: [255, 23, 0] },
+    { name: 'SD 只有 709 矩陣邊轉邊播', size: '320x180', matrix: 'bt709', omitted: ['colorPrimaries', 'colorTransfer'], expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0], mode: 'stream' },
+    { name: 'SD 無標籤邊轉邊播', size: '320x180', matrix: null, expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0], mode: 'stream' },
+  ])('$name 母素材在 720p Proxy 保留來源觀感與實際 RGB', async ({ size, sar, matrix, omitted = [], expectedMatrix, expectedRgb, mode = 'ingest' }) => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-')); roots.push(directory);
+    const source = path.join(directory, 'sd-red.mp4'), cache = path.join(directory, 'cache');
+    const untagged = matrix ? path.join(directory, 'untagged.mp4') : source;
+    run(['-y', '-f', 'lavfi', '-i', `color=red:s=${size}:r=5:d=0.2`, ...(sar ? ['-vf', `setsar=${sar}`] : []), '-c:v', 'libx264', untagged]);
+    if (matrix) {
+      const id = matrix === 'bt709' ? 1 : 6;
+      const fields = [['colorSpace', 'matrix_coefficients', '-colorspace'],
+        ['colorPrimaries', 'colour_primaries', '-color_primaries'], ['colorTransfer', 'transfer_characteristics', '-color_trc']]
+        .filter(([field]) => !omitted.includes(field));
+      run(['-y', '-i', untagged, '-c:v', 'copy', '-bsf:v',
+        `h264_metadata=video_full_range_flag=0${fields.map(([, field]) => `:${field}=${id}`).join('')}`,
+        ...fields.flatMap(([, , option]) => [option, matrix]), source]);
+    }
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => directory });
+    const runtime = createMediaIntakeRuntime({
+      fileAuthority: new FileAuthority({ internalDirectories: [cache] }), ffmpegExecution: execution,
+      tempRoot: directory, cacheRoot: cache, allowSidecarCache: false, delay: async () => {},
+      describeVideo: async file => (await probe.describe(file)).video,
+    });
+    try {
+      const inputVideo = (await probe.describe(source)).video;
+      for (const field of omitted) expect(inputVideo[field]).toBeUndefined();
+      const work = await runtime[mode]({ src: source, duration: 0.2, needsProxy: true, audio: [] });
+      await work.completion;
+      const result = work.response || work;
+      const metadata = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'v:0', '-show_streams', '-of', 'json', result.proxy], { windowsHide: true });
+      expect(metadata.status).toBe(0);
+      const video = JSON.parse(metadata.stdout.toString()).streams[0];
+      // Actual Chromium RED: an untagged 720p frame falls back to 709 and turns
+      // Y81/U90/V240 red into RGB255/24/0. Decode using the output's interpretation.
+      const outputMatrix = video.color_space || 'bt709';
+      const pixel = run(['-i', result.proxy, '-vf', `crop=2:2:0:0,scale=in_color_matrix=${outputMatrix}:out_range=pc,format=rgb24`, '-frames:v', '1', '-f', 'rawvideo', 'pipe:1']);
+      expect([...pixel.subarray(0, 3)]).toEqual(expectedRgb);
+      expect(video.color_space).toBe(expectedMatrix);
+      expect(video.color_primaries).toBe(expectedMatrix);
+      expect(video.color_transfer).toBe(expectedMatrix);
+    } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
+  });
+
+  it.each([
+    { encoder: 'libvpx-vp9', matrix: 'smpte170m', expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0], complete: true },
+    // Retained source and pre-fix Proxy both decode as Y62/U102/V239 here:
+    // FFmpeg gives RGB251/0/0, while Chromium's converter gives RGB253/0/0.
+    { encoder: 'libvpx-vp9', matrix: 'bt709', expectedMatrix: 'bt709', expectedRgb: [251, 0, 0], complete: true },
+    { encoder: 'libvpx-vp9', matrix: null, expectedMatrix: 'bt709', expectedRgb: [255, 23, 0], complete: true },
+    { encoder: 'libaom-av1', matrix: 'smpte170m', expectedMatrix: 'smpte170m', expectedRgb: [255, 23, 0] },
+    { encoder: 'libaom-av1', matrix: null, expectedMatrix: 'bt709', expectedRgb: [255, 23, 0], complete: true },
+  ])('$encoder 矩陣 $matrix 的 Proxy 保留實測 Chromium 來源觀感', async ({ encoder, matrix, expectedMatrix, expectedRgb, complete }) => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-')); roots.push(directory);
+    const source = path.join(directory, `source.${encoder === 'libvpx-vp9' ? 'webm' : 'mp4'}`), cache = path.join(directory, 'cache');
+    run(['-y', '-f', 'lavfi', '-i', 'color=red:s=320x180:r=5:d=0.2', '-c:v', encoder, '-cpu-used', '8',
+      '-pix_fmt', 'yuv420p', ...(matrix ? ['-colorspace', matrix] : []), source]);
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => directory });
+    const runtime = createMediaIntakeRuntime({ fileAuthority: new FileAuthority({ internalDirectories: [cache] }), ffmpegExecution: execution,
+      tempRoot: directory, cacheRoot: cache, allowSidecarCache: false, delay: async () => {},
+      describeVideo: async file => (await probe.describe(file)).video });
+    try {
+      const input = (await probe.describe(source)).video;
+      expect(input.colorPrimaries).toBeUndefined(); expect(input.colorTransfer).toBeUndefined();
+      const result = await runtime.ingest({ src: source, duration: 0.2, needsProxy: true, audio: [] });
+      const output = (await probe.describe(result.proxy)).video;
+      // Chromium maps VP9 frame color enums, while incomplete AV1 color falls
+      // back to 709. The H.264 Proxy must keep each source's observed pixels.
+      const interpretedMatrix = output.colorPrimaries && output.colorTransfer && output.colorSpace ? output.colorSpace : 'bt709';
+      const pixel = run(['-i', result.proxy, '-vf', `crop=2:2:0:0,scale=in_color_matrix=${interpretedMatrix}:out_range=pc,format=rgb24`,
+        '-frames:v', '1', '-f', 'rawvideo', 'pipe:1']);
+      expect([...pixel.subarray(0, 3)]).toEqual(expectedRgb);
+      expect(output.colorSpace).toBe(expectedMatrix);
+      if (complete) { expect(output.colorPrimaries).toBe(expectedMatrix); expect(output.colorTransfer).toBe(expectedMatrix); }
+    } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
+  });
+
+  it.each(['RGB', 'RGB gbr', 'full-range YUV'])('%s 母素材轉成 Proxy 後保持實際 RGB，不能只改標籤', async kind => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-')); roots.push(directory);
+    const source = path.join(directory, 'source.mkv'), cache = path.join(directory, 'cache');
+    run(['-y', '-f', 'lavfi', '-i', 'color=red:s=320x180:r=5:d=0.2',
+      ...(kind.startsWith('RGB') ? ['-vf', 'format=bgr0', '-c:v', 'ffv1', ...(kind === 'RGB gbr' ? ['-colorspace', 'rgb'] : [])]
+        : ['-c:v', 'libx264', '-pix_fmt', 'yuvj420p', '-color_range', 'pc']), source]);
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => directory });
+    const runtime = createMediaIntakeRuntime({ fileAuthority: new FileAuthority({ internalDirectories: [cache] }), ffmpegExecution: execution,
+      tempRoot: directory, cacheRoot: cache, allowSidecarCache: false, delay: async () => {},
+      describeVideo: async file => (await probe.describe(file)).video });
+    const rgb = (file, matrix = null) => [...run(['-i', file, '-vf', `crop=2:2:0:0,${matrix ? `scale=in_color_matrix=${matrix}:out_range=pc,` : ''}format=rgb24`, '-frames:v', '1', '-f', 'rawvideo', 'pipe:1']).subarray(0, 3)];
+    try {
+      const before = rgb(source);
+      const result = await runtime.ingest({ src: source, duration: 0.2, needsProxy: true, audio: [] });
+      const output = (await probe.describe(result.proxy)).video;
+      const after = rgb(result.proxy, output.colorSpace || 'bt709');
+      for (let index = 0; index < 3; index++) expect(Math.abs(after[index] - before[index])).toBeLessThanOrEqual(3);
+      expect(['smpte170m', 'bt709']).toContain(output.colorSpace);
+    } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
+  });
+
+  it('舊色彩 Proxy 只補建影片，保留既有聲道與波形，重開後可命中新色彩快取', async () => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-')); roots.push(directory);
+    const source = path.join(directory, 'legacy-sd.mp4'), cache = path.join(directory, 'cache');
+    run(['-y', '-f', 'lavfi', '-i', 'color=red:s=320x180:r=5:d=0.2', '-f', 'lavfi', '-i', 'sine=duration=0.2',
+      '-c:v', 'libx264', '-c:a', 'aac', source]);
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => directory });
+    const options = { fileAuthority: new FileAuthority({ internalDirectories: [cache] }), ffmpegExecution: execution,
+      tempRoot: directory, cacheRoot: cache, allowSidecarCache: false, delay: async () => {} };
+    const legacy = createMediaIntakeRuntime(options);
+    let current;
+    try {
+      const request = { src: source, duration: 0.2, needsProxy: true, audio: [{ channels: 1 }] };
+      const old = await legacy.ingest(request);
+      await legacy.close();
+      const oldProxy = fs.readFileSync(old.proxy), oldWave = fs.readFileSync(old.wave), oldChannel = fs.readFileSync(old.channels[0].file);
+      current = createMediaIntakeRuntime({ ...options, describeVideo: async file => (await probe.describe(file)).video });
+      const repaired = await current.ingest(request);
+      expect(repaired.cached).toBe(false);
+      expect(repaired.proxy).not.toBe(old.proxy);
+      expect(repaired.wave).toBe(old.wave); expect(repaired.channels).toEqual(old.channels);
+      expect(fs.readFileSync(old.proxy)).toEqual(oldProxy);
+      expect(fs.readFileSync(old.wave)).toEqual(oldWave); expect(fs.readFileSync(old.channels[0].file)).toEqual(oldChannel);
+      expect((await probe.describe(repaired.proxy)).video.colorSpace).toBe('smpte170m');
+      await current.close();
+      current = createMediaIntakeRuntime({ ...options, describeVideo: async file => (await probe.describe(file)).video });
+      expect(await current.ingest(request)).toEqual({ ...repaired, cached: true });
+    } finally { await current?.close(); await legacy.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
+  });
+
   it.each([0, 5])('實際 waveAudio IPC 的容器起點 %s 保留來源第一秒靜音與完整波形', async origin => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-')); roots.push(directory);
     const source = path.join(directory, 'direct.mkv'), wave = path.join(directory, 'wave.wav');

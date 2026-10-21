@@ -762,6 +762,7 @@ const mediaIntakeRuntime = createMediaIntakeRuntime({
   fileAuthority,
   ffmpegExecution,
   getEncoder: () => VENC,
+  describeVideo: async src => (await mediaProbe.describe(src)).video,
   sendProgress: (target, payload) => safeSend(target, 'task-progress', payload),
   forgetTemporaryFile: file => tempFiles.delete(file),
   log: (message, ...args) => {
@@ -1203,7 +1204,8 @@ ipcMain.handle('audio:reverse-clip', (e, request) => {
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {
   requireReadablePath('ffmpeg:proxy', src);
   const out = tmpPath('mp4');
-  const args = buildIngestArgs({ src, needsProxy: true, proxyPath: out, encoder: VENC, isStream: false });
+  const video = (await mediaProbe.describe(src)).video;
+  const args = buildIngestArgs({ src, needsProxy: true, proxyPath: out, encoder: VENC, isStream: false, video });
   await runFF(args, { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片' });
   return out;
 });

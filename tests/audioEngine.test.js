@@ -506,6 +506,16 @@ describe('scrub：可聽性只有一份判準', () => {
       expect(clone.play).toHaveBeenCalledOnce();
     }finally{destroyScrubber(el);create.mockRestore();}
   });
+  it.each(['subtool-local://resource/scrub-token','blob:web-scrub'])('scrub sets CORS before assigning %s',url=>{
+    const source={tagName:'AUDIO',src:url};
+    const clone={readyState:0,pause:vi.fn()},assignments=[];
+    Object.defineProperty(clone,'src',{get:()=>assignments.at(-1)?.value||'',set:value=>assignments.push({value,crossOrigin:clone.crossOrigin})});
+    const create=vi.spyOn(document,'createElement').mockReturnValue(clone);
+    try{
+      scheduleScrub(source,1);
+      expect(assignments).toEqual([{value:url,crossOrigin:'anonymous'}]);
+    }finally{destroyScrubber(source);create.mockRestore();}
+  });
   it.each(['metadata','play'])('scrubber銷毀後晚到%s不重新播放pending要求',async stage=>{
     let finish;
     const promise=new Promise(resolve=>{finish=resolve;});

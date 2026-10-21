@@ -19,8 +19,10 @@ import {
   planWhisperCloudChunks,
   callElevenLabsSpeechTranscription,
   callAzureSpeechTranscription,
-  callGeminiAudioTranscription
+  callGeminiAudioTranscription,
+  resolveGeminiModel
 } from '../src/speech-recognition-engine.js';
+import { startAsrWork, clearAsrSession } from '../src/speech-recognition-session.js';
 import {
   CLOUD_PROVIDER_META,
   getAsrGuidanceMeta,
@@ -86,6 +88,12 @@ describe('語音辨識與字幕生成模組', () => {
     expect(html).toContain('總計約');
     expect(html.match(/asr-duration-pill/g)).toHaveLength(1);
     expect(html.match(/asr-source-duration/g)).toHaveLength(2);
+  });
+
+  it('沒有來源時不建立辨識視窗',()=>{
+    State.clips=[];State.externalAudioState=[];State.selectedClipId=null;State.selectedAudioClipId=null;
+    openSpeechRecognitionDialog();
+    expect(openModal).not.toHaveBeenCalled();
   });
 
   it('提供可鍵盤操作的現代化模式工作台、逐行統計與 API Key 顯示切換', async () => {
@@ -1159,10 +1167,164 @@ describe('語音辨識與字幕生成模組', () => {
     });
   });
 
-  describe('Google Gemini 1.5 語音辨識 (Google Gemini API)', () => {
+  describe('Google Gemini 語音辨識 (Google Gemini API)', () => {
+    const model = (name, methods = ['generateContent']) => ({ name: 'models/' + name, supportedGenerationMethods: methods });
+    const jsonResponse = data => ({ ok: true, json: async () => data });
+    const apiError = (status, message) => ({ ok: false, status, json: async () => ({ error: { message } }) });
+    const transcriptResponse = segments => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(segments) }] } }] });
+    const request = options => callGeminiAudioTranscription({ audioBlob: new Blob(['wav']), apiKey: 'test-google-key', ...options });
+    const validSegments = [{ start: 0, end: 1, text: '有效聲音證據' }];
+
+    it('保留 resolver 介面，分頁略過 image、embedding 與未宣告 generateContent 的候選', async () => {
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async url => {
+        const parsed = new URL(url);
+        if (!parsed.searchParams.has('pageToken')) return jsonResponse({ models: [
+          model('gemini-2.5-flash-image'), model('gemini-embedding-2', ['embedContent']),
+          model('gemini-2.5-flash', ['countTokens']),
+        ], nextPageToken: 'next/page+token' });
+        expect(parsed.searchParams.get('pageToken')).toBe('next/page+token');
+        return jsonResponse({ models: [model('gemini-3.8-flash')] });
+      });
+      await expect(resolveGeminiModel('test-google-key')).resolves.toEqual({ version: 'v1', model: 'gemini-3.8-flash' });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      [model('gemini-embedding-2', ['embedContent'])],
+      [model('gemini-2.5-flash-image')],
+      [model('gemini-2.0-flash'), model('gemini-1.5-flash')],
+      [{ name: 'models/gemini-2.5-flash' }],
+    ].map(models => ({ models })))('沒有准入音訊模型的列表不送推論或猜停用 fallback：%j', async ({ models }) => {
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ models }));
+      await expect(request()).rejects.toThrow(/音訊.*模型/);
+      expect(mockFetch.mock.calls.every(([, options]) => options.method !== 'POST')).toBe(true);
+    });
+
+    it('同頁 image Flash 排在前面仍只送已列出的 audio Flash', async () => {
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+        if (options.method !== 'POST') return jsonResponse({ models: [model('gemini-2.5-flash-image'), model('gemini-3.8-flash')] });
+        if (url.includes('/gemini-3.8-flash:')) return transcriptResponse(validSegments);
+        return apiError(400, 'Audio input is not supported for this model');
+      });
+      await expect(request()).resolves.toEqual({ segments: validSegments });
+      expect(mockFetch.mock.calls.filter(([, options]) => options.method === 'POST').map(([url]) => url))
+        .toEqual(['https://generativelanguage.googleapis.com/v1/models/gemini-3.8-flash:generateContent']);
+    });
+
+    it.each([404, 400])('已准入候選遇到模型不支援 HTTP %s 才依列表重試', async status => {
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+        if (options.method !== 'POST') return jsonResponse({ models: [model('gemini-2.5-flash'), model('gemini-2.5-flash-lite')] });
+        if (url.includes('/gemini-2.5-flash:')) return apiError(status, 'Audio input is not supported for this model');
+        return transcriptResponse(validSegments);
+      });
+      await expect(request()).resolves.toEqual({ segments: validSegments });
+      expect(mockFetch.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(2);
+    });
+
+    it.each([401, 403, 429, 500, 400])('推論 HTTP %s 非能力錯誤直接保留，不以其他候選掩蓋', async status => {
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => options.method !== 'POST'
+        ? jsonResponse({ models: [model('gemini-2.5-flash'), model('gemini-3.8-flash')] })
+        : apiError(status, 'original provider error'));
+      await expect(request()).rejects.toThrow('original provider error');
+      expect(mockFetch.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1);
+    });
+
+    it.each([401, 403, 429, 500])('Models HTTP %s 保留原錯誤，不改版繞過或直接送推論', async status => {
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(apiError(status, 'original listing error'));
+      await expect(request()).rejects.toThrow('original listing error');
+      expect(mockFetch).toHaveBeenCalledOnce();
+    });
+
+    it('v1 Models 404 可探測 v1beta，推論仍只用該版本列出的候選', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => options.method === 'POST'
+        ? transcriptResponse(validSegments)
+        : url.includes('/v1/') ? apiError(404, 'version not found') : jsonResponse({ models: [model('gemini-2.5-flash')] }));
+      await expect(resolveGeminiModel('test-google-key')).resolves.toEqual({ version: 'v1beta', model: 'gemini-2.5-flash' });
+      await expect(request()).resolves.toEqual({ segments: validSegments });
+    });
+
+    it('Models 分頁重複 token 會結束並報錯，不無限請求', async () => {
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ models: [], nextPageToken: 'repeat' }));
+      await expect(resolveGeminiModel('test-google-key')).rejects.toThrow(/分頁/);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(['listing', 'inference'])('%s 取消保持 AbortError，不重試其他候選', async phase => {
+      const controller = new AbortController();
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        expect(options.signal).toBe(controller.signal);
+        if (phase === 'listing' || options.method === 'POST') {
+          controller.abort(); throw new DOMException('已取消', 'AbortError');
+        }
+        return jsonResponse({ models: [model('gemini-2.5-flash'), model('gemini-3.8-flash')] });
+      });
+      await expect(request({ signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockFetch).toHaveBeenCalledTimes(phase === 'listing' ? 1 : 2);
+    });
+
+    it.each(['listing', 'inference'])('%s response body 晚到時重新核對取消，不發布結果', async phase => {
+      const controller = new AbortController();
+      let finish;
+      const body = new Promise(resolve => { finish = resolve; });
+      const mockFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        if ((phase === 'listing') === (options.method !== 'POST')) return { ok: true, json: () => body };
+        return jsonResponse({ models: [model('gemini-2.5-flash')] });
+      });
+      const pending = request({ signal: controller.signal });
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(phase === 'listing' ? 1 : 2));
+      controller.abort();
+      finish(phase === 'listing' ? { models: [model('gemini-2.5-flash')] } : { candidates: [{ content: { parts: [{ text: JSON.stringify(validSegments) }] } }] });
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockFetch).toHaveBeenCalledTimes(phase === 'listing' ? 1 : 2);
+    });
+
+    it('有效與壞時間混合時只接受真實時間，空白辨識仍回傳空結果', async () => {
+      let segments = [{ start: '0', end: '1', text: ' valid ' }, { text: 'missing' }, { start: 1, end: 0, text: 'inverted' }];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => options.method !== 'POST'
+        ? jsonResponse({ models: [model('gemini-2.5-flash')] }) : transcriptResponse(segments));
+      await expect(request()).resolves.toEqual({ segments: [{ start: 0, end: 1, text: 'valid' }] });
+      segments = [];
+      await expect(request()).resolves.toEqual({ segments: [] });
+    });
+
+    it('缺值、非有限、負值及倒置時間經真 provider/session/commit 不可產生假 timed 字幕', async () => {
+      clearAsrSession();
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => options.method !== 'POST'
+        ? jsonResponse({ models: [model('gemini-2.5-flash')] })
+        : transcriptResponse([
+          { text: 'missing timestamps' }, { start: 'NaN', end: 'Infinity', text: 'nonfinite' },
+          { start: -1, end: 1, text: 'negative' }, { start: 5, end: 1, text: 'inverted' },
+          { start: null, end: 1, text: 'null' }, { start: '', end: 1, text: 'blank' },
+          { start: false, end: 1, text: 'boolean' }, { start: 2, end: 2, text: 'zero span' },
+        ]));
+      const work = startAsrWork({ provider: 'google', timelineFps: 25, clips: [{ id: 'actual-source', in: 0, out: 10, dur: 10, offset: 20 }] }, {
+        extractAudio: async () => ({ duration: 10 }),
+        transcribe: async () => (await request()).segments,
+        commit: results => ({ count: insertAsrSubtitles(results) }),
+      });
+      await expect(work.promise).rejects.toThrow(/時間/);
+      expect(State.cues).toEqual([]); expect(State.tracks).toHaveLength(1);
+      clearAsrSession();
+    });
+
+    it('合法零及數字字串通過真 session，沿用原 offset 與逐格 commit', async () => {
+      clearAsrSession();
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => options.method !== 'POST'
+        ? jsonResponse({ models: [model('gemini-2.5-flash')] })
+        : transcriptResponse([{ start: '0', end: '1.2', text: '合法時間' }]));
+      const work = startAsrWork({ provider: 'google', timelineFps: 25, clips: [{ id: 'actual-source', in: 2, out: 8, dur: 10, offset: 20 }] }, {
+        extractAudio: async () => ({ duration: 10 }),
+        transcribe: async () => (await request()).segments,
+        commit: results => ({ count: insertAsrSubtitles(results, { timelineFps: 25 }) }),
+      });
+      await expect(work.promise).resolves.toMatchObject({ status: 'completed', count: 1 });
+      expect(State.cues).toEqual([expect.objectContaining({ start: 20, end: 21.2, text: '合法時間', timed: true })]);
+      clearAsrSession();
+    });
     it('成功呼叫 Gemini API 並解析回傳的字幕 JSON 陣列', async () => {
       const { callGeminiAudioTranscription } = await import('../src/speech-recognition-engine.js');
-      const mockFetch = vi.fn().mockResolvedValue({
+      const mockFetch = vi.fn().mockImplementation(async (_url, options) => options.method !== 'POST'
+        ? jsonResponse({ models: [model('gemini-2.5-flash')] }) : {
         ok: true,
         json: async () => ({
           candidates: [
@@ -1198,7 +1360,7 @@ describe('語音辨識與字幕生成模組', () => {
       expect(result.segments[1].text).toBe('Google 辨識第二句');
 
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('https://generativelanguage.googleapis.com/v1beta/models/'),
+        'https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent',
         expect.objectContaining({
           method: 'POST'
         })
@@ -1218,7 +1380,8 @@ describe('語音辨識與字幕生成模組', () => {
   describe('深層推論入口 (transcribeAudioStream)', () => {
     it('接收 AudioBuffer 並透過 Google Gemini 成功辨識串流', async () => {
       const { transcribeAudioStream } = await import('../src/speech-recognition-engine.js');
-      const mockFetch = vi.fn().mockResolvedValue({
+      const mockFetch = vi.fn().mockImplementation(async (_url, options) => options.method !== 'POST'
+        ? { ok: true, json: async () => ({ models: [{ name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] }] }) } : {
         ok: true,
         json: async () => ({
           candidates: [

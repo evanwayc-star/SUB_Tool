@@ -1,11 +1,12 @@
 {
   "name": "sub-tool",
-  "version": "8.6.6",
+  "version": "8.6.7",
   "description": "SUB Tool 上字幕工具",
   "author": "Evan",
   "repository": "evanwayc-star/SUB_Tool",
   "main": "electron/main.js",
   "scripts": {
+    "postinstall": "node node_modules/electron/install.js",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
@@ -20,6 +21,7 @@
     "release:verify-source": "node scripts/release/release-transaction.js verify",
     "release:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/verify-release-install.ps1",
     "lint": "eslint src electron shared scripts",
+    "pretest": "node node_modules/electron/install.js",
     "test": "vitest run",
     "test:ci:portable": "node scripts/ci/run-test-group.mjs portable",
     "test:ci:windows": "node scripts/ci/run-test-group.mjs windows",
@@ -175,15 +177,16 @@
     "@derhuerst/ffprobe-static": "5.3.0",
     "7zip-bin": "5.2.0",
     "acorn": "^8.18.0",
-    "electron": "^32.3.3",
-    "electron-builder": "^25.1.8",
+    "electron": "^44.9.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
     "eslint": "^10.5.0",
     "ffmpeg-static": "5.3.0",
     "globals": "^17.6.0",
     "jsdom": "^29.1.1",
-    "vite": "^5.4.10",
-    "vite-plugin-singlefile": "^2.0.3",
-    "vitest": "^4.1.9",
+    "vite": "^8.3.4",
+    "vite-plugin-singlefile": "^2.3.4",
+    "vitest": "^4.1.11",
     "ws": "^8.21.3"
   },
   "dependencies": {
@@ -191,5 +194,9 @@
     "onnxruntime-web": "1.30.0",
     "opencc-js": "1.4.2",
     "web-audio-separation": "0.3.1"
+  },
+  "overrides": {
+    "global-agent": "^4.1.3",
+    "brace-expansion@^5.0.0": "^5.0.12"
   }
 }

@@ -19,8 +19,10 @@ function setup(kind = 'element') {
     createBufferSource: () => { const source = { ...node(), playbackRate: { value: 1 }, start: vi.fn(), stop: vi.fn() }; buffers.push(source); return source; },
   };
   const makeElement = () => {
-    const el = new EventTarget(); Object.assign(el, { src: '', currentTime: 0, duration: 3,
+    const el = new EventTarget(); Object.assign(el, { currentTime: 0, duration: 3,
       readyState: 1, playbackRate: 1, preservesPitch: false, paused: true, tagName: 'AUDIO', load: vi.fn() });
+    let src='';el.sourceAssignments=[];
+    Object.defineProperty(el,'src',{get:()=>src,set:value=>{src=value;el.sourceAssignments.push({value,crossOrigin:el.crossOrigin});}});
     el.play = vi.fn(async () => { el.paused = false; }); el.pause = vi.fn(() => { el.paused = true; });
     return el;
   };
@@ -78,6 +80,7 @@ describe('反向預覽沿用音訊傳輸的公開接縫', () => {
   it.each(['element', 'native'])('%s 使用獨立反向元素、原 gain/analyser、指定聲道與保留音高', async kind => {
     const { engine, track, spec, elements, splitters, state } = setup(kind);
     expect(await engine.prepareReverseTrack(track, spec())).toBe(true);
+    expect(elements[0].sourceAssignments).toEqual([{value:'file:///reverse.wav',crossOrigin:'anonymous'}]);
     expect(splitters[0].channels).toBe(2);
     expect(splitters[0].connect.mock.calls[0][1]).toBe(1);
     expect(routedTrackGain(splitters[0].connect.mock.calls[0][0])).toBe(track.gain);
@@ -111,6 +114,7 @@ describe('反向預覽沿用音訊傳輸的公開接縫', () => {
     expect(splitters[0].channels).toBe(1);expect(splitters[0].connect.mock.calls[0][1]).toBe(0);
     expect(routedTrackGain(splitters[0].connect.mock.calls[0][0])).toBe(track.gain);
     expect(elements[0].src).toBe('blob:reverse-1');
+    expect(elements[0].sourceAssignments).toEqual([{value:'blob:reverse-1',crossOrigin:'anonymous'}]);
   });
 
   it('ready 後 J/K/L 倒帶仍靜音，回到正播與離開片段會停止反向聲音', async () => {

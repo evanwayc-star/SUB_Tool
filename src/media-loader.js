@@ -35,7 +35,7 @@ import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
 import { sourceChannelLabels, AudioPipeline } from './audio-routing-engine.js';
 import { getExactFps } from './time.js';
 import { MediaIntakeJobs } from './media-intake-jobs.js';
-import { maxKnownSourceDuration, probeAudioChannelDescriptors, waitForOwnedMediaMetadata } from './media-intake-engine.js';
+import { maxKnownSourceDuration, probeAudioChannelDescriptors, setMediaElementSource, waitForOwnedMediaMetadata } from './media-intake-engine.js';
 import { sourcePresentationMetadata } from './decode/source-frame-index.js';
 import { autoBuildPreviewProxy, isLargeCanopusAvi } from './preview-proxy-policy.js';
 
@@ -128,7 +128,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       const mediaUrl=frameAccurateSourceUrl||await DESK.fileURL(p);
       if(!owns()) return;
       getPlayerAdapter().registerSourceClock(mediaUrl,info?.video);
-      video.src=mediaUrl; await activateHtml5Transport(video);
+      setMediaElementSource(video,mediaUrl); await activateHtml5Transport(video);
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(!owns()||metadata==='cancelled') return;
       if(metadata!=='ready'){ showToast('無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
@@ -216,7 +216,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       let metadata;
       try{
         getPlayerAdapter().registerSourceClock(res.streamUrl,null);
-        video.src=res.streamUrl; await activateHtml5Transport(video);
+        setMediaElementSource(video,res.streamUrl); await activateHtml5Transport(video);
         metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:15000});
       }catch(e){ stopListening(); throw e; }
       if(!owns()||metadata==='cancelled'){ stopListening(); return; }
@@ -319,7 +319,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     const mediaUrl=await DESK.fileURL(res.proxy||p);
     if(!owns()) return;
     getPlayerAdapter().registerSourceClock(mediaUrl,res.proxy?null:info?.video);
-    video.src=mediaUrl; await activateHtml5Transport(video);
+    setMediaElementSource(video,mediaUrl); await activateHtml5Transport(video);
     const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
     if(!owns()||metadata==='cancelled') return;
     if(metadata!=='ready'){ showToast('轉檔結果無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
@@ -516,7 +516,7 @@ export async function loadVideoFile(ctx, file, projectRestore=null){
     emit('media:audioTracks');
     State.mediaName=file.name; State.mediaSize=file.size;
     const url=URL.createObjectURL(file); ctx.objectURLs.push(url);
-    video.src=url; await activateHtml5Transport(video);
+    setMediaElementSource(video,url); await activateHtml5Transport(video);
     const native = await canPlayNatively(file, video);
     if(!owns()) return;
     ctx.audioPanelNotice=webAudioCapabilityNotice(file,{nativePreview:native});
@@ -598,7 +598,7 @@ export async function canPlayNatively(file,vid){
     let done=false; const fin=(v)=>{if(done)return;done=true;URL.revokeObjectURL(url);res(v);};
     test.onloadedmetadata=()=>fin(true);
     test.onerror=()=>fin(false);
-    test.src=url; setTimeout(()=>fin(test.readyState>=1),4000);
+    setMediaElementSource(test,url); setTimeout(()=>fin(test.readyState>=1),4000);
   });
 }
 

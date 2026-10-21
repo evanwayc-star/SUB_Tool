@@ -44,6 +44,18 @@ function writeIntakeOutputs(args) {
   }
 }
 
+function clearAfterNextCacheRead(runtime, authority) {
+  const grant = authority.grantManagedCacheDirectory.bind(authority);
+  let pending = true;
+  return vi.spyOn(authority, 'grantManagedCacheDirectory').mockImplementation(dir => {
+    grant(dir);
+    if (pending) {
+      pending = false;
+      queueMicrotask(() => runtime.clearAll());
+    }
+  });
+}
+
 function cacheDirectory(file) {
   const parent = path.dirname(file);
   return path.basename(parent).startsWith('generation-') ? path.dirname(parent) : parent;
@@ -77,11 +89,218 @@ function getRange(url, range) {
   });
 }
 
+function corsRequest(url, { method = 'GET', range, preflightMethod, preflightHeaders } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = { Origin: 'null' };
+    if (range) headers.Range = range;
+    if (preflightMethod) headers['Access-Control-Request-Method'] = preflightMethod;
+    if (preflightHeaders) headers['Access-Control-Request-Headers'] = preflightHeaders;
+    const request = http.request(url, { method, headers }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('error', reject);
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) }));
+    });
+    request.setTimeout(1000, () => request.destroy(new Error('CORS request did not settle')));
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 afterEach(() => {
   for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe('native media intake runtime', () => {
+  it.each(['ingest', 'stream'].flatMap(mode => ['close', 'cancel'].map(action => [mode, action])))
+  ('%s 的來源色彩 probe 等待期間 %s 不得啟動 writer 或發布 URL', async (mode, action) => {
+    let release, entered, revoked = false;
+    const gate = new Promise(resolve => { release = resolve; });
+    const probing = new Promise(resolve => { entered = resolve; });
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), { describeVideo: async () => {
+      entered(); await gate; return { width: 320, height: 180 };
+    } });
+    const pending = fixture.runtime[mode]({ src: fixture.source, duration: 1, needsProxy: true, audio: [] }, { isCancelled: () => revoked });
+    try {
+      await probing;
+      if (action === 'close') await fixture.runtime.close(); else revoked = true;
+      release();
+      if (mode === 'ingest') await expect(pending).rejects.toThrow('較新的載入取代');
+      else expect((await pending).response).toBeNull();
+      expect(fixture.calls).toHaveLength(0);
+    } finally { release(); await pending.catch(() => {}); await fixture.runtime.close(); }
+  });
+
+  it('缺少來源視訊尺寸的色彩 probe 不得產生宣稱已修復的 Proxy cache', async () => {
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), { describeVideo: async () => null });
+    try {
+      await expect(fixture.runtime.ingest({ src: fixture.source, duration: 1, needsProxy: true, audio: [] })).rejects.toThrow('無法確認 Proxy');
+      expect(fixture.calls).toHaveLength(0);
+    } finally { await fixture.runtime.close(); }
+  });
+
+  it('已驗證色彩的 warm Proxy 與補建音訊不重複 probe 母素材', async () => {
+    const describeVideo = vi.fn(async () => ({ width: 320, height: 180 }));
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), { describeVideo });
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [] };
+    try {
+      const first = await fixture.runtime.ingest(request);
+      expect(describeVideo).toHaveBeenCalledTimes(1);
+      expect(await fixture.runtime.ingest(request)).toMatchObject({ cached: true, proxy: first.proxy });
+      expect(await fixture.runtime.stream(request)).toMatchObject({ cached: true, proxy: first.proxy });
+      expect(await fixture.runtime.ingest({ ...request, audio: [{ channels: 1 }] })).toMatchObject({ cached: false, proxy: first.proxy });
+      expect(describeVideo).toHaveBeenCalledTimes(1);
+    } finally { await fixture.runtime.close(); }
+  });
+
+  it.each(['ingest', 'stream'])('%s 在 warm 色彩檢查後清除快取，重建仍須重新取得母素材色彩', async mode => {
+    const describeVideo = vi.fn(async () => ({ width: 320, height: 180 }));
+    const authority = new FileAuthority();
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), { describeVideo, fileAuthority: authority });
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [] };
+    let observedGrant;
+    try {
+      await fixture.runtime.ingest(request);
+      observedGrant = clearAfterNextCacheRead(fixture.runtime, authority);
+      const work = await fixture.runtime[mode](request);
+      await work.completion;
+      const result = work.response || work;
+      expect(result.cached).toBe(false);
+      expect(describeVideo).toHaveBeenCalledTimes(2);
+      expect(fixture.calls).toHaveLength(2);
+      const args = fixture.calls.at(-1);
+      expect(args[args.indexOf('-vf') + 1]).toContain('setparams=colorspace=smpte170m');
+      expect(JSON.parse(fs.readFileSync(path.join(cacheDirectory(result.proxy), 'meta.json'), 'utf8')).proxyColorVersion).toBe(1);
+    } finally { observedGrant?.mockRestore(); await fixture.runtime.close(); }
+  });
+
+  it.each(['ingest', 'stream'].flatMap(mode => ['close', 'cancel', 'invalid'].map(action => [mode, action])))
+  ('%s 清除快取後重查色彩期間 %s 不得產生 writer、URL 或安全標記', async (mode, action) => {
+    let entered, release, revoked = false;
+    const probing = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const describeVideo = vi.fn(async () => ({ width: 320, height: 180 }));
+    const authority = new FileAuthority();
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), { describeVideo, fileAuthority: authority });
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [] };
+    let observedGrant, pending;
+    try {
+      const first = await fixture.runtime.ingest(request);
+      const metaPath = path.join(cacheDirectory(first.proxy), 'meta.json');
+      describeVideo.mockImplementationOnce(async () => {
+        entered(); await gate;
+        return action === 'invalid' ? null : { width: 320, height: 180 };
+      });
+      observedGrant = clearAfterNextCacheRead(fixture.runtime, authority);
+      pending = fixture.runtime[mode](request, { isCancelled: () => revoked });
+      await probing;
+      if (action === 'close') await fixture.runtime.close();
+      else if (action === 'cancel') revoked = true;
+      release();
+      if (action === 'invalid') await expect(pending).rejects.toThrow('無法確認 Proxy');
+      else if (mode === 'ingest') await expect(pending).rejects.toThrow('較新的載入取代');
+      else expect((await pending).response).toBeNull();
+      expect(describeVideo).toHaveBeenCalledTimes(2);
+      expect(fixture.calls).toHaveLength(1);
+      expect(fs.existsSync(metaPath)).toBe(false);
+    } finally {
+      release(); await pending?.catch(() => {});
+      observedGrant?.mockRestore(); await fixture.runtime.close();
+    }
+  });
+
+  it.each([false, true])('anonymous media can GET/Range/HEAD/preflight a live opaque stream URL, cached=%s', async cached => {
+    const fixture = repairFixture(args => { writeIntakeOutputs(args); return Promise.resolve(); }, { createStreamId: undefined });
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [] };
+    try {
+      if (cached) await fixture.runtime.ingest(request);
+      const work = await fixture.runtime.stream(request);
+      await work.completion;
+      const url = (work.response || work).streamUrl;
+      for (const method of ['GET', 'HEAD']) for (const range of [undefined, 'bytes=0-4']) {
+        const response = await corsRequest(url, { method, range });
+        expect(response.status).toBe(range ? 206 : 200);
+        expect(response.headers['access-control-allow-origin']).toBe('*');
+        expect(response.headers['access-control-expose-headers']).toContain('Content-Range');
+        expect(response.body.length).toBe(method === 'HEAD' ? 0 : range ? 5 : 131072);
+        if (range) expect(response.headers['content-range']).toBe('bytes 0-4/131072');
+        else if (method === 'HEAD') expect(response.headers['content-length']).toBe('131072');
+      }
+      const preflight = await corsRequest(url, { method: 'OPTIONS', preflightMethod: 'GET', preflightHeaders: 'range' });
+      expect(preflight.status).toBe(204);
+      expect(preflight.body.length).toBe(0);
+      expect(preflight.headers['access-control-allow-origin']).toBe('*');
+      expect(preflight.headers['access-control-allow-methods']).toBe('GET, HEAD, OPTIONS');
+      expect(preflight.headers['access-control-allow-headers']).toBe('Range');
+      const post = await corsRequest(url, { method: 'POST' });
+      expect(post.status).toBe(405);expect(post.body.length).toBe(0);
+      expect(post.headers.allow).toBe('GET, HEAD, OPTIONS');
+      expect((await corsRequest(url, { method: 'OPTIONS', preflightMethod: 'POST' })).status).toBe(405);
+      for (const method of ['GET', 'HEAD', 'OPTIONS']) {
+        const denied = await corsRequest(new URL('/not-a-live-token', url), { method });
+        expect(denied.status).toBe(404);expect(denied.body.length).toBe(0);
+        expect(denied.headers['access-control-allow-origin']).toBeUndefined();
+      }
+      expect(fixture.runtime.releaseStream((work.response || work).streamLeaseId)).toBe(true);
+      expect((await corsRequest(url, { method: 'OPTIONS' })).status).toBe(404);
+    } finally { await fixture.runtime.close(); }
+  });
+  it('HEAD on a growing Proxy does not start a body reader or wait for the writer to finish', async () => {
+    let finish;
+    const completion = new Promise(resolve => { finish = resolve; });
+    const fixture = repairFixture(args => { writeIntakeOutputs(args); return completion; });
+    const work = await fixture.runtime.stream({ src: fixture.source, duration: 1, audio: [] });
+    const readers = vi.spyOn(fs, 'createReadStream');
+    try {
+      const head = await corsRequest(work.response.streamUrl, { method: 'HEAD' });
+      expect(head.status).toBe(200);expect(head.body.length).toBe(0);
+      expect(head.headers['content-length']).toBeUndefined();
+      expect(head.headers['access-control-allow-origin']).toBe('*');
+      const range = await corsRequest(work.response.streamUrl, { method: 'HEAD', range: 'bytes=0-4' });
+      expect(range.status).toBe(206);expect(range.body.length).toBe(0);
+      expect(range.headers['content-range']).toBe('bytes 0-4/*');
+      expect(readers).not.toHaveBeenCalled();
+    } finally { readers.mockRestore();finish();await work.completion;await fixture.runtime.close(); }
+  });
+  it.each(['close', 'cancel'])('%s during Proxy readiness cannot publish a revoked stream URL', async action => {
+    let resume, polled, finish;
+    const gate = new Promise(resolve => { resume = resolve; });
+    const polling = new Promise(resolve => { polled = resolve; });
+    const writing = new Promise(resolve => { finish = resolve; });
+    const fixture = repairFixture(async args => {
+      fs.writeFileSync(args.at(-1), 'not ready');
+      await writing;
+      writeIntakeOutputs(args);
+    }, { delay: async () => { polled(); await gate; } });
+    const owner = { sender: {}, sessionId: 'closing', requestId: 'pending' };
+    const pending = fixture.runtime.stream({ src: fixture.source, duration: 1, audio: [] }, { owner });
+    try {
+      await polling;
+      if (action === 'close') await fixture.runtime.close();
+      else expect(fixture.runtime.cancel({ sender: owner.sender, sessionId: owner.sessionId })).toBe(1);
+      finish();
+      resume();
+      const work = await pending;
+      await work.completion;
+      expect(work.response).toBeNull();
+      expect(fixture.runtime.releaseStream('l-fixed')).toBe(false);
+    } finally { finish(); resume(); await pending.catch(() => {}); await fixture.runtime.close(); }
+  });
+  it('closing from the cache-hit progress observer cannot create a late URL lease', async () => {
+    let closing, closeOnProgress = false;
+    const fixture = repairFixture(args => { writeIntakeOutputs(args); return Promise.resolve(); }, {
+      sendProgress: () => { if (closeOnProgress) closing = fixture.runtime.close(); },
+    });
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [] };
+    try {
+      await fixture.runtime.ingest(request);
+      closeOnProgress = true;
+      const work = await fixture.runtime.stream(request);
+      await closing;
+      expect(work.response).toBeNull();
+      expect(fixture.runtime.releaseStream('c-fixed')).toBe(false);
+    } finally { await fixture.runtime.close(); }
+  });
   it.each(['ingest', 'stream'])('%s 的 native progress、commit 與 cache hit 都帶原 session/request', async mode => {
     const root = makeTempRoot();
     const source = path.join(root, 'source.mov');

@@ -129,7 +129,8 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     {name:'non-contiguous-streams',sourceStreams:[1,3],values:[[.2,.4],[.9]],durations:[1,1],first:.5,tail:.5},
     {name:'reordered-streams',sourceStreams:[3,1],values:[[.2,.4],[.9]],durations:[1,1],first:.5,tail:.5},
   ])('public effect $name mixes all PCM channels before extrema and reloads the same mix',async({values,durations,first,tail,sourceStreams=values.map((unused,index)=>index)})=>{
-    class AudioAdapter{constructor(){this.readyState=1;this.duration=1;this.src='';}addEventListener(){}removeEventListener(){}pause(){}load(){}}
+    const assignments=[];
+    class AudioAdapter{constructor(){this.readyState=1;this.duration=1;}set src(value){if(value)assignments.push({value,crossOrigin:this.crossOrigin});this.url=value;}get src(){return this.url||'';}addEventListener(){}removeEventListener(){}pause(){}load(){}}
     vi.stubGlobal('Audio',AudioAdapter);
     const descriptors=values.flatMap((channels,index)=>channels.map((unused,sourceChannel)=>({sourceStream:sourceStreams[index],sourceChannel})));
     const source={id:'effect-source',path:'C:/media/multistream.mov',audioSrc:'video',audioSourceId:'effect-source',in:0,out:1,dur:1,offset:0,vtrack:0,primary:true,descriptors};
@@ -141,6 +142,7 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     resetPlayerAdapter(window.subtool,domMock.video);
     const registry=vi.spyOn(Wave,'setSourceMixPeaks');
     expect(await Media.audioEffects.apply(source,{max:-6,min:-12})).toMatchObject({status:'completed'});
+    expect(assignments).toEqual(sourceStreams.map(stream=>({value:`file:///C:/cache/effect-stream-${stream}.wav`,crossOrigin:'anonymous'})));
     expect(Media.tracks.map(track=>[track.sourceStream,track.sourceChannel])).toEqual(descriptors.map(d=>[d.sourceStream,d.sourceChannel]));
     expect(deskMock.waveAudio.mock.calls.map(([path])=>path)).toEqual(sourceStreams.map(stream=>`C:/cache/effect-stream-${stream}.wav`));
     const peaks=Wave.getSourceWaveform(source).peaks;

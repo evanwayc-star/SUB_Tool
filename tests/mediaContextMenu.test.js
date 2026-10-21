@@ -32,6 +32,9 @@ const mocks = vi.hoisted(() => ({
   setSourceWaveSelection: vi.fn(),
   getSourceWaveLaneState: vi.fn(),
   setSourceWaveLaneSelection: vi.fn(),
+  ownsWorkspace: true,
+  openHardLimiterDialog: vi.fn(),
+  requestPointerSeek: vi.fn(),
 }));
 
 vi.mock('../src/state.js', () => ({
@@ -88,6 +91,7 @@ vi.mock('../src/subtitle-model.js', () => ({
 }));
 
 vi.mock('../src/timeline-interaction-engine.js', () => ({
+  requestPointerSeek: mocks.requestPointerSeek,
   moveSelectedToTrack: vi.fn(),
   xToTime: vi.fn(() => 0),
   trackFromY: vi.fn(() => 0),
@@ -119,6 +123,8 @@ vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/events.js', () => ({ emit: mocks.emit }));
 vi.mock('../src/audio-routing.js', () => ({ AudioRouting: { openForSource: vi.fn(), openForClip: vi.fn() } }));
 vi.mock('../src/keyboard.js', () => ({ setManualPlaybackSpeed: vi.fn() }));
+vi.mock('../src/project.js', () => ({ Project: { captureWorkspaceOwnership: () => () => mocks.ownsWorkspace } }));
+vi.mock('../src/audio-normalizer-dialog.js', () => ({ openHardLimiterDialog: mocks.openHardLimiterDialog }));
 
 vi.mock('../src/speech-recognition.js', () => ({ openSpeechRecognitionDialog: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ requestPointerSeek: vi.fn(), drawTimeline: vi.fn(), refreshTrackGutterActive: vi.fn(), selectExternalAudioClip: vi.fn() }));
@@ -177,6 +183,7 @@ beforeEach(() => {
   resetState();
   installTimelineDom();
   mocks.displayTime.mockReturnValue(5);
+  mocks.ownsWorkspace=true;
   mocks.getExternalAudioSource.mockReturnValue(null);
   mocks.sourceChannels.mockReturnValue([]);
   mocks.getSourceWaveOptions.mockReturnValue(['mix']);
@@ -184,6 +191,57 @@ beforeEach(() => {
   Object.defineProperty(window, 'subtool', {
     configurable: true,
     value: { showSourceInFolder: mocks.showSourceInFolder },
+  });
+});
+
+describe('延遲音訊選單的原來源資格',()=>{
+  function source(id='reused'){
+    return {id,audioSourceId:'route-'+id,audioSrc:'ext-'+id,kind:'external-audio',name:'old.wav',path:'C:/old.wav',offset:0,in:0,out:10,duration:10};
+  }
+  async function mountAudio(asset,{gutter=false,sourceIds=null,external=true}={}){
+    if(external) mocks.State.externalAudioState=[asset];else mocks.State.clips=[asset];
+    mocks.getExternalAudioSource.mockImplementation(id=>mocks.State.externalAudioState.find(item=>[item.id,item.audioSourceId,item.audioSrc].includes(id))||null);
+    const element=document.createElement('div');element.className=gutter?'agtrack':'audio-clip-block';
+    Object.assign(element.dataset,{audioKind:external?'external':'clip',audioSourceId:asset.audioSourceId,audioStart:'0',audioEnd:'10'});
+    if(external) element.dataset.audioAssetId=asset.id;else element.dataset.clipId=asset.id;
+    if(sourceIds) element.dataset.audioWaveSourceIds=JSON.stringify(sourceIds);
+    document.getElementById(gutter?'tlGutterAtracks':'tlAtracks').appendChild(element);
+    await loadMenus();openContextMenu(element);return element;
+  }
+  it.each(['remove_audio','toggle_audio','split_at_playhead','seek_audio_start','audio_routing','speech_recognition','wave:mix','reveal_source','hard_limiter'])('同ID新來源不能接受舊選單的 %s',async action=>{
+    const original=source();await mountAudio(original);
+    const replacement={...original,name:'replacement.wav',path:'C:/replacement.wav'};mocks.State.externalAudioState=[replacement];
+    const item=document.querySelector(`[data-menu-id="${action}"]`);expect(item).toBeTruthy();item.click();
+    expect(mocks.removeExternalAudio).not.toHaveBeenCalled();expect(mocks.toggleExternalAudioEnabled).not.toHaveBeenCalled();expect(mocks.splitExternalAudio).not.toHaveBeenCalled();
+    expect(mocks.showSourceInFolder).not.toHaveBeenCalled();expect(mocks.setSourceWaveSelection).not.toHaveBeenCalled();expect(mocks.openHardLimiterDialog).not.toHaveBeenCalled();
+    const {AudioRouting}=await import('../src/audio-routing.js');const {openSpeechRecognitionDialog}=await import('../src/speech-recognition.js');const {requestPointerSeek}=await import('../src/timeline-interaction-engine.js');
+    expect(AudioRouting.openForSource).not.toHaveBeenCalled();expect(openSpeechRecognitionDialog).not.toHaveBeenCalled();expect(requestPointerSeek).not.toHaveBeenCalled();
+    expect(mocks.State.externalAudioState).toEqual([replacement]);expect(mocks.showToast).toHaveBeenCalled();
+  });
+  it.each(['removed','path','workspace'])('%s 變動撤銷舊移除資格',async change=>{
+    const original=source();await mountAudio(original);
+    if(change==='removed') mocks.State.externalAudioState=[];
+    else if(change==='path') original.path='C:/relinked.wav';
+    else mocks.ownsWorkspace=false;
+    document.querySelector('[data-menu-id="remove_audio"]').click();expect(mocks.removeExternalAudio).not.toHaveBeenCalled();
+  });
+  it('改選其他素材不改變原本的移除目標',async()=>{
+    const original=source();await mountAudio(original);mocks.State.selectedAudioClipId='other';
+    document.querySelector('[data-menu-id="remove_audio"]').click();expect(mocks.removeExternalAudio).toHaveBeenCalledExactlyOnceWith(original.id);
+  });
+  it('影片原音也拒絕同ID替換後的舊辨識命令',async()=>{
+    const original={...source('video-1'),kind:'video',vtrack:0};await mountAudio(original,{external:false});
+    mocks.State.clips=[{...original,path:'C:/new-video.mov'}];document.querySelector('[data-menu-id="speech_recognition"]').click();
+    const {openSpeechRecognitionDialog}=await import('../src/speech-recognition.js');expect(openSpeechRecognitionDialog).not.toHaveBeenCalled();
+  });
+  it('整列波形的任何來源被同ID替換後，舊列頭選單不能修改新來源',async()=>{
+    const left=source('left'),right=source('right');mocks.getSourceWaveLaneState.mockReturnValue({options:['mix'],selection:'mix'});
+    const element=await mountAudio(left,{gutter:true,sourceIds:[left.audioSourceId,right.audioSourceId]});
+    mocks.State.externalAudioState=[left,right];openContextMenu(element);
+    mocks.State.externalAudioState=[left,{...right,path:'C:/new-right.wav'}];document.querySelector('[data-menu-id="wave:mix"]').click();
+    expect(mocks.setSourceWaveLaneSelection).not.toHaveBeenCalled();
+    openContextMenu(element);document.querySelector('[data-menu-id="wave:mix"]').click();
+    expect(mocks.setSourceWaveLaneSelection).toHaveBeenCalledExactlyOnceWith([left.audioSourceId,right.audioSourceId],'mix');
   });
 });
 

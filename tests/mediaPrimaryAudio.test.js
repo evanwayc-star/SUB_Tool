@@ -27,6 +27,19 @@ beforeAll(async()=>{
 });
 beforeEach(()=>{Media.reset();resetAudioProject();State.cues=[];State.clips=[];State.notes=[];dom.video.src='';dom.video.currentTime=0;audioElements.length=0;});
 afterEach(()=>{Media.reset();resetProject();});
+it('public native intake sets main video CORS before assigning its capability URL',async()=>{
+ const assignments=[],descriptor=Object.getOwnPropertyDescriptor(dom.video,'src');let src='';
+ Object.defineProperty(dom.video,'src',{configurable:true,get:()=>src,set:value=>{src=value;if(value)assignments.push({value,crossOrigin:dom.video.crossOrigin});}});
+ dom.video.crossOrigin=null;
+ const previous=window.subtool.fileURL.getMockImplementation();
+ window.subtool.fileURL.mockResolvedValue('subtool-local://resource/native-token');
+ const runtime=vi.spyOn(Media,'ensureClipRuntime').mockResolvedValue();
+ const proxy=vi.spyOn(Media,'ensurePrimaryPreviewProxy').mockResolvedValue();
+ try{
+  await Media.loadDesktopMedia('C:/cors.webm');
+  expect(assignments).toEqual([{value:'subtool-local://resource/native-token',crossOrigin:'anonymous'}]);
+ }finally{runtime.mockRestore();proxy.mockRestore();window.subtool.fileURL.mockImplementation(previous);Object.defineProperty(dom.video,'src',descriptor);}
+});
 it('真正媒體 loader 復原期間的字幕編輯，完成後可 Undo 回已載入序列及乾淨基準',async()=>{
  const {History}=await import('../src/history.js');
  const {isProjectDirty}=await import('../src/project.js');

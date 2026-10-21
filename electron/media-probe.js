@@ -47,7 +47,9 @@ function fpsOf(stream) {
  * @param {object} [document={}] ffprobe JSON 解析結果
  * @returns {{
  *   duration: number,
- *   video: {codec: string, width: number, height: number, fps: number|null, timestampOffset: number, presentationTimestampOffset: number}|null,
+ *   video: {codec: string, width: number, height: number, sampleAspectRatio?: string, pixelFormat?: string,
+ *     colorSpace?: string, colorPrimaries?: string, colorTransfer?: string, colorRange?: string,
+ *     fps: number|null, timestampOffset: number, presentationTimestampOffset: number}|null,
  *   audio: Array<{index: number, streamIndex: number, codec: string, channels: number, lang: string, title: string, timestampOffset: number, presentationTimestampOffset: number}>
  * }} 標準化媒體描述
  */
@@ -74,6 +76,12 @@ function descriptorOf(document = {}) {
       codec: video.codec_name || '',
       width: Math.max(0, finiteNumber(video.width, 0)),
       height: Math.max(0, finiteNumber(video.height, 0)),
+      ...(video.sample_aspect_ratio ? { sampleAspectRatio: video.sample_aspect_ratio } : {}),
+      ...(video.pix_fmt ? { pixelFormat: video.pix_fmt } : {}),
+      ...(video.color_space ? { colorSpace: video.color_space } : {}),
+      ...(video.color_primaries ? { colorPrimaries: video.color_primaries } : {}),
+      ...(video.color_transfer ? { colorTransfer: video.color_transfer } : {}),
+      ...(video.color_range ? { colorRange: video.color_range } : {}),
       fps: fpsOf(video),
       timestampOffset: containerStart - videoStart,
       // HTML 與 MP4 edit-list／WebCodecs 保留絕對呈現 PTS；FFmpeg／mpv

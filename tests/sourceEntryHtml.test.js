@@ -41,6 +41,10 @@ describe('根目錄 index.html 是原始碼入口', () => {
     /* 建置產物裡這一行會被換成內嵌的 <script>…整包 bundle…</script>。 */
     expect(html).toMatch(/<script\s+type="module"\s+src="\/src\/main\.js"><\/script>/);
   });
+  it('主影片在任何來源指派前宣告匿名 CORS，供 Web Audio 與 canvas 使用', () => {
+    const video=html.match(/<video\b[^>]*\bid="video"[^>]*>/)?.[0];
+    expect(video).toMatch(/\bcrossorigin="anonymous"/);
+  });
 
   it('沒有建置期才注入的 CSP meta', () => {
     /* vite.config.mjs 的 injectCSP() 是 `apply: 'build'`——原始碼裡出現它，
