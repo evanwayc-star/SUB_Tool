@@ -159,3 +159,28 @@ it.each([1, 2, 3])('schema %s 舊負數索引與軌數保持原有最小軌數�
   expect(State.cues[0].track).toBe(version === 1 ? -1 : 0);
   expect(Project.pendingMediaRelink().plan.pendingClips()[0].vtrack).toBe(-1);
 });
+
+it.each([1,2,3])('schema %s 載入格網上的數字字串後，相對新增、History 與 dirty 共用數值時間',async version=>{
+  const data={...baseDocument(),version,duration:2,tracks:[{name:'字幕'}],
+    cues:[{track:version===1?0:1,start:'1',end:'2',text:'原字幕'}]};
+  await Project.load(fileFor(data));
+  const {setSelection}=await import('../src/state.js');
+  const {addCueRelative}=await import('../src/subtitle-model.js');
+  expect(State.cues[0]).toMatchObject({start:1,end:2});
+  expect(History.stack[0].snap.cues[0]).toMatchObject({start:1,end:2});
+  expect(isProjectDirty()).toBe(false);
+  setSelection({kind:'sub',ids:[State.cues[0].id]});
+  expect(addCueRelative(1)).toMatchObject({start:2,end:4});
+  expect(History.stack).toHaveLength(2);
+  expect(History.stack[1].snap.cues[1]).toMatchObject({start:2,end:4});
+  expect(isProjectDirty()).toBe(true);
+  History.undo();
+  expect(State.cues).toHaveLength(1);
+  expect(State.cues[0]).toMatchObject({start:1,end:2});
+  expect(isProjectDirty()).toBe(false);
+  History.redo();
+  expect(State.cues).toHaveLength(2);
+  expect(State.cues[1]).toMatchObject({start:2,end:4});
+  expect(isProjectDirty()).toBe(true);
+  expect(data.cues[0]).toMatchObject({start:'1',end:'2'});
+});

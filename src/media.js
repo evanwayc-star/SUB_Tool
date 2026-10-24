@@ -820,10 +820,25 @@ const Media = {
       if(this._bgVersion!==myVer || !liveClip) return;
       const chs=res?.channels||[];
       const descriptors=AudioPipeline.registerSource(liveClip,chs,chs.length);
-      const tracks=this.tracks.filter(track=>(track.source||'video')==='video'&&track.audioSourceId===liveClip.audioSourceId);
-      for(let i=0;i<Math.min(tracks.length,chs.length);i++){
-        tracks[i].file=chs[i].file;
-        Object.assign(tracks[i],AudioPipeline.sourceDescriptorFor(liveClip,descriptors[i],i));
+      // The original graph may now be retained behind an installed effect.
+      // A late mother cache belongs to those originals, never the currently
+      // audible processed WAV (also used as the reverse-playback locator).
+      const originals=new Set([...this.tracks,...(this._effectOriginalTracks.get(liveClip.audioSourceId)||[])]);
+      const cached=descriptors.map((descriptor,index)=>({descriptor,file:chs[index]?.file}));
+      const byChannel=new Map(cached.map(entry=>[
+        `${entry.descriptor.sourceStream}:${entry.descriptor.sourceChannel}`,entry,
+      ]));
+      for(const track of originals){
+        if(track._audioEffect||(track.source||'video')!=='video'||track.audioSourceId!==liveClip.audioSourceId) continue;
+        // Native L/R are fixed browser splitter outputs, initially carrying
+        // provisional stream-0 coordinates. Ingest may reveal another stream;
+        // preserve their playback channel while adopting its source descriptor.
+        const entry=track.kind==='native'&&Number.isInteger(track._nativeChannel)
+          ?cached[track._nativeChannel]:byChannel.get(`${track.sourceStream}:${track.sourceChannel}`);
+        if(entry?.file){
+          track.file=entry.file;
+          Object.assign(track,AudioPipeline.sourceDescriptorFor(liveClip,entry.descriptor));
+        }
       }
       emit('media:timeline');
     }catch(e){ console.warn('native audio cache:',e); }
@@ -854,27 +869,6 @@ const Media = {
       }
       return null;
     }
-  },
-  /* 已抽取過的影片／音訊來源可直接複製成新的 AudioElement 群組。這比再次餵原始
-     影片容器給 <audio> 更可靠，也確保每個解除連結後的段落能各自 seek／同時播放。 */
-  _cachedDesktopChannelsForSource(source){
-    const wanted=String(source||'');
-    const byDescriptor=new Map();
-    for(const track of this.tracks){
-      if((track.source||'')!==wanted||!track.file) continue;
-      const sourceStream=Math.max(0,Math.floor(Number(track.sourceStream)||0));
-      const sourceChannel=Math.max(0,Math.floor(Number(track.sourceChannel)||0));
-      const key=sourceStream+':'+sourceChannel;
-      if(!byDescriptor.has(key)){
-        byDescriptor.set(key,{
-          file:track.file,
-          label:track.name||('音軌 '+(byDescriptor.size+1)),
-          sourceStream,
-          sourceChannel
-        });
-      }
-    }
-    return [...byDescriptor.values()].sort((a,b)=>a.sourceStream-b.sourceStream||a.sourceChannel-b.sourceChannel);
   },
   /* 任何桌面媒體（包含 MXF、ProRes MOV 等）都可由 ffmpeg 轉成 Chromium 可播放的
      單聲道 m4a 快取。這是「解除影音」與重開專案時的保底，不依賴原容器 codec。 */
@@ -1749,7 +1743,7 @@ const Media = {
     const anL=mkAn(), anR=mkAn();
     splitter.connect(anL,0); splitter.connect(anR,1);
     const mk=(id,nm,g,an,index)=>this.bindTrackRouting(
-      {id,name:nm,kind:'native',source:sourceName,gain:g,muted:!!clip?.muted,solo:false,volume:1,
+      {id,name:nm,kind:'native',source:sourceName,_nativeChannel:index,gain:g,muted:!!clip?.muted,solo:false,volume:1,
         analyser:an,_mbuf:new Float32Array(an.fftSize),level:0,peak:0,peakT:0},
       clip,null,index
     );

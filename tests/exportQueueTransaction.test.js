@@ -367,6 +367,153 @@ describe('匯出佇列 transaction seam', () => {
     expect(restored.state.get('queued-stop')).toMatchObject({ status: JOB_STATUS.QUEUED, attempt: 1 });
   });
 
+  it('停止終態暫存失敗後成功清除原工作，不堵住其他交付或安全關閉', async () => {
+    let writable = false, queue;
+    const runJob = vi.fn(async current => { queue.reportProgress(current.id, { done: true }); });
+    const fixture = make({
+      stageTerminalOutcome: () => { if (!writable) throw new Error('disk full'); },
+      runJob,
+    });
+    queue = fixture.queue;
+    queue.setPaused(true);
+    fixture.state.add(job('discarded-stop', JOB_STATUS.QUEUED));
+
+    expect(queue.stopJob('discarded-stop')).toBe(false);
+    writable = true;
+    expect(queue.clearJob('discarded-stop')).toBe(true);
+    expect(fixture.state.get('discarded-stop')).toBeNull();
+    queue.addJob(job('next-delivery', JOB_STATUS.QUEUED));
+    queue.setPaused(false);
+
+    await vi.waitFor(() => expect(runJob).toHaveBeenCalledTimes(1));
+    expect(fixture.state.get('next-delivery').status).toBe(JOB_STATUS.DONE);
+    await expect(queue.prepareForShutdown()).resolves.toBeUndefined();
+  });
+
+  it('清除 journal 寫入失敗時，仍保留先前停止工作的待提交意圖', () => {
+    let writable = false;
+    const { queue, state } = make({
+      stageTerminalOutcome: () => { if (!writable) throw new Error('disk full'); },
+      stagePendingDeletes: () => { throw new Error('delete journal locked'); },
+    });
+    queue.setPaused(true);
+    state.add(job('retained-stop', JOB_STATUS.QUEUED));
+
+    expect(queue.stopJob('retained-stop')).toBe(false);
+    expect(queue.clearJob('retained-stop')).toBe(false);
+    expect(state.get('retained-stop').status).toBe(JOB_STATUS.QUEUED);
+    writable = true;
+    expect(queue.retryPendingTerminalMutations()).toBe(true);
+    expect(state.get('retained-stop').status).toBe(JOB_STATUS.STOPPED);
+  });
+
+  it.each(['ready', 'paused', 'shutting-down'])('清除終態寫入失敗的阻擋工作後，既有排隊工作遵守 %s 排程狀態', async mode => {
+    let writable = false, queue;
+    const runJob = vi.fn(async current => { queue.reportProgress(current.id, { done: true }); });
+    const fixture = make({
+      stageTerminalOutcome: () => { if (!writable) throw new Error('disk full'); },
+      admissionOverrides: {
+        assertOutputFormat: current => { if (current.id === 'blocked') throw new Error('invalid format'); },
+      },
+      runJob,
+    });
+    queue = fixture.queue;
+    fixture.state.add(job('blocked', JOB_STATUS.QUEUED));
+    fixture.state.add(job('already-waiting', JOB_STATUS.QUEUED));
+    await queue.processQueue();
+    expect(runJob).not.toHaveBeenCalled();
+    expect(fixture.state.get('blocked').status).toBe(JOB_STATUS.QUEUED);
+    writable = true;
+    if (mode === 'paused') queue.setPaused(true);
+    if (mode === 'shutting-down') await queue.prepareForShutdown();
+
+    expect(queue.clearJob('blocked')).toBe(true);
+    expect(fixture.state.get('blocked')).toBeNull();
+    if (mode !== 'ready') {
+      await new Promise(resolve => setImmediate(resolve));
+      expect(runJob).not.toHaveBeenCalled();
+      expect(fixture.state.get('already-waiting').status).toBe(JOB_STATUS.QUEUED);
+      if (mode === 'paused') queue.setPaused(false);
+      else await queue.cancelShutdown();
+    }
+    await vi.waitFor(() => expect(runJob).toHaveBeenCalledTimes(1), { timeout: 150 });
+    expect(runJob.mock.calls[0][0].id).toBe('already-waiting');
+    expect(fixture.state.get('already-waiting').status).toBe(JOB_STATUS.DONE);
+    await expect(queue.prepareForShutdown()).resolves.toBeUndefined();
+  });
+
+  it('未曾啟動 runner 的停止終態恢復後，保留 frozen ASS 且可重試原工作', async () => {
+    let writable = false;
+    const removeAssFile = vi.fn(), removeJobFile = vi.fn();
+    const { queue, state } = make({
+      stageTerminalOutcome: () => { if (!writable) throw new Error('disk full'); },
+      removeAssFile, removeJobFile,
+    });
+    queue.setPaused(true);
+    state.add({ ...job('retry-restored-stop', JOB_STATUS.QUEUED), assRef: 'burn_restored_stop.ass' });
+
+    expect(queue.stopJob('retry-restored-stop')).toBe(false);
+    writable = true;
+    await expect(queue.prepareForShutdown()).resolves.toBeUndefined();
+    await queue.cancelShutdown();
+
+    expect(state.get('retry-restored-stop').status).toBe(JOB_STATUS.STOPPED);
+    expect(removeJobFile).toHaveBeenCalledWith('D:/queue', 'retry-restored-stop');
+    expect(removeAssFile).not.toHaveBeenCalled();
+    expect(queue.retryJob('retry-restored-stop')).toBe(true);
+    expect(state.get('retry-restored-stop')).toMatchObject({ status: JOB_STATUS.QUEUED, attempt: 1 });
+  });
+
+  it('執行前准入失敗的終態恢復也完成無 runner 收尾，修正規格後可以重試', async () => {
+    let writable = false, validFormat = false;
+    const runJob = vi.fn(), removeJobFile = vi.fn();
+    const { queue, state } = make({
+      stageTerminalOutcome: () => { if (!writable) throw new Error('disk full'); },
+      admissionOverrides: {
+        assertOutputFormat: () => { if (!validFormat) throw new Error('invalid output format'); },
+      },
+      runJob, removeJobFile,
+    });
+    state.add(job('preflight-failure', JOB_STATUS.QUEUED));
+    await queue.processQueue();
+    queue.setPaused(true);
+    expect(state.get('preflight-failure').status).toBe(JOB_STATUS.QUEUED);
+    expect(runJob).not.toHaveBeenCalled();
+
+    writable = true;
+    expect(queue.retryPendingTerminalMutations()).toBe(true);
+    expect(state.get('preflight-failure')).toMatchObject({ status: JOB_STATUS.FAILED, errorMsg: 'invalid output format' });
+    expect(removeJobFile).toHaveBeenCalledWith('D:/queue', 'preflight-failure');
+    validFormat = true;
+    expect(queue.retryJob('preflight-failure')).toBe(true);
+    expect(state.get('preflight-failure')).toMatchObject({ status: JOB_STATUS.QUEUED, attempt: 1 });
+  });
+
+  it('恢復終態時仍在收尾的 runner 保持重試圍籬，等 runner 結束才開放', async () => {
+    let writable = false, queue, release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const runJob = vi.fn(async current => {
+      queue.reportProgress(current.id, { error: true, errorMsg: 'native failed' });
+      await gate;
+    });
+    const fixture = make({
+      stageTerminalOutcome: () => { if (!writable) throw new Error('disk full'); },
+      runJob,
+    });
+    queue = fixture.queue;
+    fixture.state.add(job('finishing-runner', JOB_STATUS.QUEUED));
+    await queue.processQueue();
+    queue.setPaused(true);
+    try {
+      writable = true;
+      expect(queue.retryPendingTerminalMutations()).toBe(true);
+      expect(fixture.state.get('finishing-runner').status).toBe(JOB_STATUS.FAILED);
+      expect(queue.retryJob('finishing-runner')).toBe(false);
+    } finally { release(); }
+    await vi.waitFor(() => expect(queue.retryJob('finishing-runner')).toBe(true));
+    expect(fixture.state.get('finishing-runner').status).toBe(JOB_STATUS.QUEUED);
+  });
+
   it('runner 終態無法落盤時回復原狀，不通知半套結果', () => {
     const { queue, state, onChanged } = make({ stageTerminalOutcome: () => { throw new Error('disk full'); } });
     state.add(job('running-job', JOB_STATUS.RUNNING));

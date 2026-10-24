@@ -1,16 +1,13 @@
 /* ==============================================================================
-   SUB Tool — Subtitle Comparison & Text Engine ("src/subtitle-comparison-engine.js")
+   SUB Tool — Subtitle Comparison Engine ("src/subtitle-comparison-engine.js")
    ==============================================================================
-   深層字幕比對、全文檢索與文本檢查引擎 (Subtitle Comparison & Text Engine)。
-   提供文本比對 Diff、全文搜尋索引與多行排版字元品質驗證：
+   字幕比對計畫與比對工作階段；全文搜尋由 subtitle-search.js 負責。
    1. 字幕比對與配對計畫 (pairSubtitleCues / subtitleFrameIndex / buildSubtitleComparisonPlan)
    2. 比對工作階段所有權守衛 (createSubtitleCompareSession / configureSubtitleCompareSession / openSubtitleCompareSession / syncSubtitleCompareSession / closeSubtitleCompareSession / handleSubtitleCompareCommand)
-   3. 搜尋關鍵字高亮與正規表達式處理 (escRe / txtHTML / isSearchHit / getSearchCountText)
    ============================================================================== */
 
 import { STYLE_DEFAULTS, effStyle } from './substyle.js';
 import { getExactFps, secToEncore, snapTimeToFrame } from './time.js';
-import { escapeHTMLWithSpaces } from './util.js';
 
 export const SUBTITLE_COMPARE_TOLERANCE_SECONDS = 1;
 
@@ -302,36 +299,4 @@ export function closeSubtitleCompareSession() {
 
 export function handleSubtitleCompareCommand(command) {
   return activeSession?.handleCommand(command) || failed('unavailable');
-}
-
-export function escRe(s) { return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-
-export function txtHTML(text, searchTerms = []) {
-  const raw = text || '';
-  const terms = Array.isArray(searchTerms) ? searchTerms.filter(Boolean) : [];
-  if (!terms.length) return escapeHTMLWithSpaces(raw);
-  const ranges = [];
-  for (const term of terms) {
-    if (!term) continue;
-    const re = new RegExp(escRe(term), 'gi');
-    let m;
-    while ((m = re.exec(raw))) {
-      if (!m[0].length) { re.lastIndex++; continue; }
-      ranges.push([m.index, m.index + m[0].length]);
-    }
-  }
-  if (!ranges.length) return escapeHTMLWithSpaces(raw);
-  ranges.sort((a, b) => a[0] - b[0]);
-  const merged = [ranges[0].slice()];
-  for (let i = 1; i < ranges.length; i++) {
-    const last = merged[merged.length - 1];
-    if (ranges[i][0] <= last[1]) last[1] = Math.max(last[1], ranges[i][1]);
-    else merged.push(ranges[i].slice());
-  }
-  let out = '', pos = 0;
-  for (const [s, e] of merged) {
-    out += escapeHTMLWithSpaces(raw.slice(pos, s)) + `<span class="search-match">${escapeHTMLWithSpaces(raw.slice(s, e))}</span>`;
-    pos = e;
-  }
-  return out + escapeHTMLWithSpaces(raw.slice(pos));
 }

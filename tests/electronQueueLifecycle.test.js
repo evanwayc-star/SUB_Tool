@@ -83,7 +83,10 @@ async function launchApp(profileDir) {
   mkdirSync(isolatedTemp, { recursive: true });
   const child = spawn(
     ELECTRON,
-    ['.', '--subtool-transport-acceptance', `--remote-debugging-port=${port}`, `--user-data-dir=${profileDir}`, '--no-sandbox'],
+    // 無人值守桌面可把已 show 的原生視窗判成被遮擋；只在驗收關閉此最佳化，
+    // hide／minimize 仍改變真實 visibility，不能用遮擋造成的 hidden 判斷重新開窗失敗。
+    ['.', '--subtool-transport-acceptance', '--disable-features=CalculateNativeWinOcclusion',
+      `--remote-debugging-port=${port}`, `--user-data-dir=${profileDir}`, '--no-sandbox'],
     {
       cwd: ROOT,
       windowsHide: true,

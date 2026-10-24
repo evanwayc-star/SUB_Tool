@@ -298,7 +298,12 @@ describe('FFmpeg execution', () => {
       fs: {
         ...fs,
         createWriteStream() {
-          queueMicrotask(() => logStream.emit('error', new Error('disk is read-only')));
+          queueMicrotask(() => {
+            logStream.destroyed = true;
+            logStream.emit('error', new Error('disk is read-only'));
+            logStream.closed = true;
+            logStream.emit('close');
+          });
           return logStream;
         },
       },

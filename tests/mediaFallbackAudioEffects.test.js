@@ -75,7 +75,7 @@ let setStatus;
 let showToast;
 
 describe('HTML fallback mother audio follows the installed effect owner', () => {
-  afterEach(()=>{ Media.reset(); vi.unstubAllGlobals(); });
+  afterEach(()=>{ Media.reset(); delete window.subtool.reverseAudio; vi.unstubAllGlobals(); });
   beforeAll(async () => {
     Object.defineProperty(window, 'subtool', {
       configurable: true,
@@ -88,7 +88,12 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
       createMediaElementSource(){ return { channelCount: 2, connect: vi.fn(), disconnect: vi.fn() }; }
       createChannelSplitter(){ return { connect: vi.fn(), disconnect: vi.fn() }; }
       createChannelMerger(){ return { connect: vi.fn(), disconnect: vi.fn() }; }
-      decodeAudioData(buffer){const view=new DataView(buffer),samples=new Float32Array((buffer.byteLength-44)/2);for(let i=0;i<samples.length;i++)samples[i]=view.getInt16(44+i*2,true)/32768;return Promise.resolve({duration:1,numberOfChannels:1,sampleRate:4000,getChannelData:()=>samples});}
+      decodeAudioData(buffer){
+        const view=new DataView(buffer),numberOfChannels=view.getUint16(22,true),sampleRate=view.getUint32(24,true);
+        const length=(buffer.byteLength-44)/2/numberOfChannels;
+        const channels=Array.from({length:numberOfChannels},(_,channel)=>Float32Array.from({length},(_,index)=>view.getInt16(44+(index*numberOfChannels+channel)*2,true)/32768));
+        return Promise.resolve({duration:length/sampleRate,length,numberOfChannels,sampleRate,getChannelData:channel=>channels[channel]});
+      }
       resume(){}
     };
     ({ Media, Wave } = await import('../src/media.js'));
@@ -245,6 +250,54 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     expect(source.path).toBe(kind==='native'?'C:/media/native.webm':'C:/media/fallback.mov');
     expect(source.audioLimiterSpec).toBeUndefined();
     vi.unstubAllGlobals();
+  });
+
+  it.each([0,1])('原生雙聲道 Stream%s 快取晚到仍保留效果正播與反轉來源，還原才接回原音快取',async sourceStream=>{
+    const originalCache=deferred(),originalWave=deferred();
+    class AudioAdapter {
+      constructor(){this.readyState=1;this.duration=12;this.paused=true;this.src='';this.currentTime=0;this.volume=1;
+        this.play=vi.fn(()=>{this.paused=false;return Promise.resolve();});}
+      addEventListener(){} removeEventListener(){} pause(){this.paused=true;} load(){}
+    }
+    vi.stubGlobal('Audio',AudioAdapter);
+    const mother='C:/media/native-stereo.webm',processed='C:/cache/effect-stereo.wav';
+    const channels=[0,1].map(sourceChannel=>({file:`C:/cache/original-${sourceChannel}.m4a`,sourceStream,sourceChannel}));
+    deskMock.probe.mockResolvedValue({duration:12,video:{codec:'vp9',fps:25,width:1920,height:1080},audio:[{channels:2}]});
+    deskMock.ingest.mockReturnValue(originalCache.promise);
+    deskMock.fileURL.mockImplementation(async path=>'file:///'+path);
+    deskMock.waveAudio.mockImplementation(path=>path===mother?originalWave.promise:Promise.resolve('C:/cache/effect-wave.wav'));
+    window.subtool.normalizeAudio=vi.fn(async()=>({outputPath:processed}));
+    window.subtool.reverseAudio=vi.fn(async({path})=>({path:path+'.reverse.wav'}));
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>String(url).includes('original-wave')?wav([.7,.9]):wav([.25,.5])})));
+    resetPlayerAdapter(window.subtool,domMock.video);
+    const loading=Media.loadDesktopMedia(mother);
+    await vi.waitFor(()=>expect(State.clips).toHaveLength(1));
+    const source=State.clips[0];
+    expect(await Media.audioEffects.apply(source,{max:-6,min:-12})).toMatchObject({status:'completed'});
+    const effectTracks=[...Media.tracks],effectElement=effectTracks[0].el,effectPeaks=source.peaks;
+    expect(effectTracks.map(track=>track.file)).toEqual([processed,processed]);
+    Media.startElementSources(0,0);
+    await vi.waitFor(()=>expect(effectElement.play).toHaveBeenCalledOnce());
+
+    originalCache.resolve({channels});originalWave.resolve('C:/cache/original-wave.wav');
+    await loading;
+    expect(Media.tracks).toEqual(effectTracks);
+    expect(effectTracks.map(track=>track.file)).toEqual([processed,processed]);
+    expect(effectTracks.map(track=>[track.sourceStream,track.sourceChannel])).toEqual([[0,0],[0,1]]);
+    expect(effectElement.src).toBe('file:///'+processed);
+    expect(source.peaks).toBe(effectPeaks);
+    Media.startElementSources(0,0);
+    await vi.waitFor(()=>expect(effectElement.play).toHaveBeenCalledTimes(2));
+    Media.stopElementSources();
+    source.reverse=true;
+    expect(await Media.prepareClipReverseAudio(source)).toBe(true);
+    expect(window.subtool.reverseAudio.mock.calls.map(([request])=>request.path)).toEqual([processed,processed]);
+
+    expect(await Media.audioEffects.apply(source,null)).toMatchObject({status:'completed'});
+    expect(Media.tracks.map(track=>track.file)).toEqual(channels.map(channel=>channel.file));
+    expect(Media.tracks.map(track=>[track.sourceStream,track.sourceChannel])).toEqual([[sourceStream,0],[sourceStream,1]]);
+    expect(Media.tracks.every(track=>!track._audioEffect)).toBe(true);
+    expect(source.peaks[1]).toBeCloseTo(.8,4);
   });
 
   it.each(['before IPC reply','during video metadata'])('retains stream completion %s and installs original audio exactly once',async moment=>{

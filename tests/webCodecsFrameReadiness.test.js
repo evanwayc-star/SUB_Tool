@@ -9,7 +9,7 @@ const fixture=vi.hoisted(()=>{
   const ctx={fillRect:vi.fn(),drawImage:vi.fn(),save:vi.fn(),restore:vi.fn(),beginPath:vi.fn(),rect:vi.fn(),clip:vi.fn()};
   const publish={drawImage:vi.fn(),fillRect:vi.fn()};
   const canvas={style:{display:'none'},width:640,height:360,parentElement:{clientWidth:640,clientHeight:360},getContext:()=>publish};
-  return {clips,defaults:clips.map(clip=>({...clip})),ctx,publish,canvas,time:103,takeover:false,availableB:25,longHold:false,sourceFps:25,sourceOffsetUs:0,indexFailure:false,keyFrames:[0],decode:vi.fn(),session:null,snapshot:null,composition:vi.fn(),report:vi.fn()};
+  return {clips,defaults:clips.map(clip=>({...clip})),ctx,publish,canvas,time:103,takeover:false,availableB:25,longHold:false,sourceFps:25,sourceOffsetUs:0,indexFailure:false,keyFrames:[0],realReader:false,decode:vi.fn(),session:null,snapshot:null,composition:vi.fn(),report:vi.fn()};
 });
 vi.mock('../src/dom.js',()=>({$:id=>id==='previewCanvas'?fixture.canvas:null,video:{src:'',currentSrc:''}}));
 vi.mock('../src/state.js',()=>({State:{clips:fixture.clips,videoTracks:[{visible:true},{visible:true}],videoWidth:1920,videoHeight:1080,fps:25},ensureVideoTrackCount:vi.fn(),videoTrackVisible:()=>true}));
@@ -27,20 +27,23 @@ vi.mock('../src/decode/demux.js',async importOriginal=>{
     type:fixture.keyFrames.includes(i)?'key':'delta',
     timestamp:Math.round(i*1e6/fixture.sourceFps)+(fixture.sourceOffsetUs||0)+(url==='b.mp4'&&fixture.longHold&&i>25?460000:0),
     duration:url==='b.mp4'&&fixture.longHold&&i===25?500000:Math.round((i+1)*1e6/fixture.sourceFps)-Math.round(i*1e6/fixture.sourceFps),
+    offset:i,size:1,
   }));
   const info=()=>({presentationOffsetUs:fixture.sourceOffsetUs==null?null:-fixture.sourceOffsetUs});
   return {...actual,
-  demuxIndex:async url=>{
+  demuxIndex:vi.fn(async url=>{
     if(fixture.indexFailure) throw new Error('moov is not in the header');
     return {config:{codec:'test'},index:samples(url),keyIdx:fixture.keyFrames,maxEnd:500,info:info()};
-  },
+  }),
   demuxFile:vi.fn(async()=>({config:{codec:'test'},chunks:samples('a.mp4').map((sample,i)=>({...sample,data:new Uint8Array([i])})),info:info()})),
-  SampleReader:class {constructor(url){this.url=url;}data(i){return this.url==='b.mp4'&&i>fixture.availableB?null:new Uint8Array([i]);}ensure(){}dispose(){}},
+  SampleReader:class {constructor(url,index,maxEnd){if(fixture.realReader)return new actual.SampleReader(url,index,maxEnd);this.url=url;}data(i){return this.url==='b.mp4'&&i>fixture.availableB?null:new Uint8Array([i]);}ensure(){}dispose(){}},
   MemReader:class {constructor(chunks){this.chunks=chunks;}data(i){return this.chunks[i]?.data;}ensure(){}dispose(){}},
 };});
 import {WCPreview} from '../src/decode/player.js';
 import {createMediaPresentationSession} from '../src/media-presentation-core.js';
 import {Seq} from '../src/sequence.js';
+import {State} from '../src/state.js';
+import {demuxIndex} from '../src/decode/demux.js';
 
 async function loadFirstFrame(){
   WCPreview.tick();
@@ -49,11 +52,9 @@ async function loadFirstFrame(){
 }
 
 beforeEach(()=>{
-  fixture.time=103;fixture.takeover=false;fixture.availableB=25;fixture.longHold=false;fixture.sourceFps=25;fixture.sourceOffsetUs=0;fixture.indexFailure=false;fixture.keyFrames=[0];fixture.session=null;fixture.snapshot=null;
-  for(const [index,clip] of fixture.clips.entries()){
-    for(const key of Object.keys(clip)) delete clip[key];
-    Object.assign(clip,fixture.defaults[index]);
-  }
+  fixture.time=103;fixture.takeover=false;fixture.availableB=25;fixture.longHold=false;fixture.sourceFps=25;fixture.sourceOffsetUs=0;fixture.indexFailure=false;fixture.keyFrames=[0];fixture.realReader=false;fixture.session=null;fixture.snapshot=null;
+  fixture.clips.splice(0,fixture.clips.length,...fixture.defaults.map(clip=>({...clip})));
+  State.videoTracks=[{visible:true},{visible:true}];
   vi.clearAllMocks();
   fixture.composition.mockImplementation((on,snapshot)=>{if(on&&snapshot)fixture.snapshot=snapshot;});
   class Decoder {
@@ -69,6 +70,43 @@ beforeEach(()=>{
 afterEach(()=>{WCPreview.disposeAll();vi.unstubAllGlobals();vi.restoreAllMocks();});
 
 describe('WebCodecs public preview frame admission',()=>{
+  it('同母素材五層的慢速 Range 各自前進，共用索引且卸載取消所有讀取',async()=>{
+    vi.useFakeTimers();
+    try{
+      fixture.realReader=true;fixture.time=.2;
+      fixture.keyFrames=Array.from({length:500},(_,index)=>index);
+      fixture.clips.splice(0,fixture.clips.length,...[0,96,192,288,384].map((start,vtrack)=>({
+        id:'layer-'+vtrack,web:{url:'a.mp4'},in:start/25,out:start/25+1,offset:0,vtrack,
+      })));
+      State.videoTracks=fixture.clips.map(()=>({visible:true}));
+      const requests=[];
+      vi.stubGlobal('fetch',vi.fn((url,{headers,signal})=>new Promise((resolve,reject)=>{
+        const [,start,end]=/bytes=(\d+)-(\d+)/.exec(headers.Range).map(Number);
+        const request={signal,completed:false};requests.push(request);
+        const timer=setTimeout(()=>{
+          request.completed=true;
+          resolve({ok:true,headers:{get:()=>String(end-start+1)},arrayBuffer:async()=>Uint8Array.from({length:end-start+1},(_,index)=>(start+index)%256).buffer});
+        },50);
+        signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new DOMException('cancelled','AbortError'));},{once:true});
+      })));
+      for(let tick=0;tick<20;tick++){WCPreview.tick();await vi.advanceTimersByTimeAsync(10);}
+      expect(fixture.publish.drawImage).toHaveBeenCalled();
+      expect(fixture.report.mock.lastCall[0]).toHaveLength(5);
+      expect(fixture.report.mock.lastCall[0].every(window=>window.start<=fixture.time+1e-9&&window.end>fixture.time-1e-9)).toBe(true);
+      expect(demuxIndex).toHaveBeenCalledOnce();
+      expect(WCPreview.stats().sources.every(source=>source.frames<=75)).toBe(true);
+      // A cold new target leaves reads pending; releasing the preview owns
+      // those reads even though the immutable source index remains reusable.
+      for(const clip of fixture.clips){clip.in+=48/25;clip.out+=48/25;}
+      WCPreview.tick();
+      const pending=requests.filter(request=>!request.completed);
+      expect(pending).toHaveLength(5);
+      WCPreview.disposeAll();
+      expect(pending.every(request=>request.signal.aborted)).toBe(true);
+      expect(WCPreview.stats().sources).toEqual([]);
+    }finally{vi.useRealTimers();}
+  });
+
   it.each(['immediate','queued'])('240FPS %s decode keeps drawn frames alive and feeds later targets without holes',async delivery=>{
     const pending=[],allocated=[];
     class Decoder{

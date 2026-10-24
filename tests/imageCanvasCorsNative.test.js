@@ -25,7 +25,8 @@ it.skipIf(process.platform!=='win32'||!existsSync(ELECTRON)||!existsSync(FFMPEG)
       scale:1,posX:.5,posY:.5},{id:'video',type:'video',name:'green',path:video,in:0,out:2,dur:2,offset:3,
       vtrack:1,natW:64,natH:36,primary:true}]}));
   const port=await reservePort();
-  const child=trackElectron(spawn(ELECTRON,['.','--subtool-transport-acceptance',project,
+  // 驗收須持續產生真實畫格，不讓無人值守桌面的視窗遮擋暫停 rAF；不改產品設定。
+  const child=trackElectron(spawn(ELECTRON,['.','--subtool-transport-acceptance',project,'--disable-features=CalculateNativeWinOcclusion',
     `--remote-debugging-port=${port}`,`--user-data-dir=${path.join(directory,'profile')}`,'--no-sandbox'],
   {cwd:ROOT,windowsHide:true,stdio:'ignore'}));
   let client;

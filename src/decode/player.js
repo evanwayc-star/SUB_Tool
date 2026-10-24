@@ -8,8 +8,8 @@
    —— <video> 元素照舊負責【聲音＋時鐘】（media.js 完全不動）；本模組每幀（app.js rafLoop）
    依 tlTime → active clip 來源時間，用 WebCodecs 解出對應 frame 畫到 #previewCanvas
    （不透明、蓋在 video 上；previewFade 黑幕與 videoSub 字幕仍疊在 canvas 之上）。
-   —— 每個來源檔一個 SourceStream：demux 一次（mp4box）＋串流式解碼（向前餵、淺佇列、
-   frame 用完即 close）；seek/後退→從最近 keyframe 重解（decoder.reset+configure）。
+   —— 每個作用層自有 SourceStream、decoder 與 reader；同來源共用 demux 索引／整檔 payload。
+   串流式解碼向前餵、淺佇列、frame 用完即 close；seek/後退→從最近 keyframe 重解。
    —— 未就緒／失敗／檔案過大 → fallback 畫 <video> 當前畫面（與舊版行為一致、零風險）。
    —— mpv 模式（獨立 OS 視窗）／無序列 → 隱藏 canvas，不參與。
    階段2 起 tick() 將依 Seq.clipsAt(t) 擴充為多軌由下而上合成（opacity/PiP/fade/crossfade）。 */
@@ -42,8 +42,8 @@ function clipSourceTargetUs(t, clip){
   return sourceFrameTargetUs(Seq.toSource(t,clip),clip);
 }
 
-/* 來源解析快取（url → Promise<{config,index,keyIdx,reader}>）：同一來源疊在多條軌時，
-   索引與位元組視窗共享、decoder 各自。 */
+/* 來源解析快取：同一來源的不可變索引／整檔 payload 共用，decoder 各自持有
+   reader 與有界位元組視窗，避免不同來源游標互相淘汰仍在等待的讀取。 */
 const _demuxCache = new Map();
 function demuxCached(url){
   let p = _demuxCache.get(url);
@@ -53,7 +53,8 @@ function demuxCached(url){
       try{
         const r = await demuxIndex(url);
         if(!r.index.length) throw new Error('無視訊樣本');
-        return { config:r.config, index:presentationSamples(r.index,r.info), keyIdx:r.keyIdx, reader:new SampleReader(url, r.index, r.maxEnd), streaming:true };
+        return { config:r.config, index:presentationSamples(r.index,r.info), keyIdx:r.keyIdx,
+          createReader:()=>new SampleReader(url,r.index,r.maxEnd), streaming:true };
       }catch(e){
         console.warn('[WC] 串流式索引失敗，退回整檔:', e && (e.message||e));
       }
@@ -68,7 +69,8 @@ function demuxCached(url){
       const keyIdx = [];
       r.chunks.forEach((c,i)=>{ if(c.type==='key') keyIdx.push(i); });
       if(!keyIdx.length) keyIdx.push(0);
-      return { config:r.config, index:presentationSamples(r.chunks,r.info), keyIdx, reader:new MemReader(r.chunks), streaming:false };
+      return { config:r.config, index:presentationSamples(r.chunks,r.info), keyIdx,
+        createReader:()=>new MemReader(r.chunks), streaming:false };
     })();
     p.catch(()=>{ if(_demuxCache.get(url)===p) _demuxCache.delete(url); }); // 失敗不留快取
     _demuxCache.set(url, p);
@@ -77,11 +79,11 @@ function demuxCached(url){
 }
 
 function releaseUnusedDemux(liveUrls){
-  for(const [url,p] of _demuxCache){
+  for(const url of _demuxCache.keys()){
     if(liveUrls.has(url)) continue;
     _demuxCache.delete(url);
-    // 解析仍在進行也可能已被時間軸跳轉淘汰；完成後立即釋放位元組視窗。
-    p.then(result=>result.reader?.dispose?.()).catch(()=>{});
+    // Payload readers belong to their SourceStream; removing a cached index
+    // must never cancel another layer's current byte window.
   }
 }
 
@@ -94,7 +96,7 @@ class SourceStream {
     if(this.state !== 'idle') return;
     this.state = 'loading';
     try{
-      const { config, index:rawIndex, keyIdx, reader } = await demuxCached(this.url);
+      const { config, index:rawIndex, keyIdx, createReader } = await demuxCached(this.url);
       const shift=Math.round(timestampOffset(getPlayerAdapter().sourceClock?.(this.url))*1e6);
       const index=rawIndex&&rawIndex.map(sample=>({...sample,timestamp:sample.timestamp+shift}));
       if(this._disposed) return;
@@ -105,7 +107,7 @@ class SourceStream {
       if(this._disposed) return;
       if(!sup.supported) throw new Error('VideoDecoder 不支援 ' + config.codec);
       this.clockShift=shift;
-      this.cfg = cfg; this.chunks = index; this.keyIdx = keyIdx; this.reader = reader;
+      this.cfg = cfg; this.chunks = index; this.keyIdx = keyIdx; this.reader = createReader();
       this.frames = []; this.frameDurations = new Map(); this.fedIdx = -1; this._flushed = false;
       this.frameDurUs = index[0].duration || 33e3;
       // 串流最早呈現時間：edit-list 的起始空白可能使首幀晚於來源 0 秒。
@@ -122,6 +124,8 @@ class SourceStream {
       this.state = 'ready';
     }catch(e){
       if(this._disposed) return;
+      this.reader?.dispose?.(); this.reader=null;
+      try{this.dec?.close();}catch(_){}
       const msg = String(e && e.message || e);
       console.warn('[WC] 來源載入失敗（fallback 原樣顯示）:', msg);
       this.state = 'failed';
@@ -220,7 +224,7 @@ class SourceStream {
     try{ this.dec && this.dec.close(); }catch(e){}
     if(this.frames) for(const f of this.frames){ try{ f.close(); }catch(e){} }
     this.frames = []; this.frameDurations?.clear(); this.chunks = null; this.keyIdx = null;
-    this.reader = null; // 視窗位元組隨 reader 一起放掉（reader 由 _demuxCache 持有、同來源共用）
+    this.reader?.dispose?.(); this.reader = null;
     this.state = 'failed';
   }
 }

@@ -274,6 +274,12 @@ function createExportQueue(deps) {
   /* 關機開始時已存在的 runner 必須自行收尾，或由它的 finally 以 durable snapshot
      轉回 queued；在此集合清空前，scheduler 不能開新工作。 */
   const shutdownPendingRunners = new Set();
+  const forgetJobRecovery = jobId => {
+    persistedTerminalJobs.delete(jobId);
+    pendingTerminalMutations.delete(jobId);
+    pendingTerminalRunnerExited.delete(jobId);
+    shutdownPendingRunners.delete(jobId);
+  };
   const runnerShutdownTimeoutMs = Number.isFinite(Number(shutdownRunnerTimeoutMs))
     ? Math.max(1, Number(shutdownRunnerTimeoutMs))
     : 5000;
@@ -566,7 +572,12 @@ function createExportQueue(deps) {
         log('無法保存待刪除 journal：', error);
         return false;
       }
-      for (const job of jobs) state.remove(job.id);
+      for (const job of jobs) {
+        state.remove(job.id);
+        // durable deletion 撤銷這份工作的舊終態意圖；不能讓不存在的 owner
+        // 留在 recovery fence，堵住其餘交付與安全關閉。
+        forgetJobRecovery(job.id);
+      }
       try { this.recoverPendingDeletes(); } catch (error) {
         /* 清理可延後；stagePendingDeletes 已是對使用者可見的 durable commit。 */
         log('無法立即清理待刪除工作：', error);
@@ -754,6 +765,7 @@ function createExportQueue(deps) {
       if (!job || isLiveWork(job.status)) return false;
       if (!this.stageDeletion([job])) return false;
       onChanged();
+      this.processQueue();
       return true;
     },
 
@@ -761,6 +773,7 @@ function createExportQueue(deps) {
       const completed = state.jobs().filter(job => job.status === JOB_STATUS.DONE);
       if (!completed.length || !this.stageDeletion(completed)) return 0;
       onChanged();
+      this.processQueue();
       return completed.length;
     },
 
@@ -816,6 +829,10 @@ function createExportQueue(deps) {
         .filter(([, pending]) => !terminalOnly || journalledTerminal(pending.status));
       if (!pendingEntries.length) return true;
       for (const [jobId, pending] of pendingEntries) {
+        if (!state.get(jobId)) {
+          forgetJobRecovery(jobId);
+          continue;
+        }
         const runnerExited = pendingTerminalRunnerExited.delete(jobId);
         const committed = persistTerminalStatus(jobId, pending.status, pending.fields);
         if (!committed.ok) {
@@ -824,9 +841,10 @@ function createExportQueue(deps) {
           return false;
         }
         if (pending.status === JOB_STATUS.FAILED && onJobFailed) { try { onJobFailed(committed.job); } catch (error) {} }
-        if (journalledTerminal(pending.status) && runnerExited) {
-          /* 原 runner 的 finally 已提前退出；現在由這裡做收尾。無論 cleanup 是否暫時
-             失敗，都釋放 lifecycle marker，讓 retryJob 以 journal fence 再次嘗試。 */
+        if (journalledTerminal(pending.status) && (runnerExited || !activeQueueRunners.has(jobId))) {
+          /* queued 停止／准入失敗沒有 runner；既有 runner 的 finally 也可能已提前退出。
+             這兩種終態由 recovery 收尾，仍在執行的 runner 才保留原本的 finally 所有權。
+             cleanup 暫時失敗仍釋放 marker，讓 retryJob 以 durable journal fence 重試。 */
           this.finalizeTerminalOutcome(committed.job);
           persistedTerminalJobs.delete(jobId);
           shutdownPendingRunners.delete(jobId);
@@ -1069,6 +1087,8 @@ function createExportQueue(deps) {
       else if (pauseRevision === attempt.pauseRevision) paused = attempt.pausedBefore;
       shutdownAttempt = null;
       onChanged();
+      // 已還原為繼續排程時，也喚醒原本就在等待的工作；暫停與收尾圍籬仍由 scheduler 判斷。
+      this.processQueue();
       return true;
     },
 
@@ -1137,10 +1157,7 @@ function createExportQueue(deps) {
             /* reportProgress(done) 後 runner 仍可能在收尾；使用者此時已明確清除，
                pending-delete journal 優先，不能讓晚到 finally 再寫回 history。 */
             if (!state.get(job.id)) {
-              persistedTerminalJobs.delete(job.id);
-              pendingTerminalMutations.delete(job.id);
-              pendingTerminalRunnerExited.delete(job.id);
-              shutdownPendingRunners.delete(job.id);
+              forgetJobRecovery(job.id);
               if (!this.shuttingDown) this.processQueue();
               return;
             }

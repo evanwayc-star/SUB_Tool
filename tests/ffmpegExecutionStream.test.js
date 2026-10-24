@@ -10,7 +10,7 @@ const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.j
 const roots = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
-function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend, observers = {} } = {}) {
+function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend, observers = {}, fsModule = fs } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-ffmpeg-stream-'));
   roots.push(root);
   const queueDir = path.join(root, 'queue');
@@ -18,6 +18,7 @@ function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend, 
   let nativeChild;
   const failure = Object.assign(new Error('native startup failed'), { code: 'ENOENT' });
   const execution = createFFmpegExecution({
+    fs: fsModule,
     getFFmpegPath: () => stage === 'missing' ? null : 'fake-ffmpeg',
     getUserDataDir: () => root,
     getQueueDir: () => queueDir,
@@ -64,6 +65,81 @@ function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend, 
 }
 
 describe('public FFmpeg execution terminal and pipe records', () => {
+  it.each(['direct', 'queued-delivery'].flatMap(kind => [0, 1].map(code => [kind, code])))(
+    '%s native code %s cannot settle before the diagnostic log descriptor closes', async (kind, code) => {
+      let releaseClose, closed, requested;
+      const closeRequested = new Promise(resolve => { requested = resolve; });
+      const closeCompleted = new Promise(resolve => { closed = resolve; });
+      const fixture = setup(kind, { code, fsModule: {
+        ...fs,
+        createWriteStream(filename, options) {
+          return fs.createWriteStream(filename, { ...options, fs: {
+            open: fs.open, write: fs.write,
+            close(fd, callback) {
+              releaseClose = () => fs.close(fd, error => { callback(error); closed(); });
+              requested();
+            },
+          } });
+        },
+      } });
+      let settled = false;
+      const work = fixture.run().then(
+        value => { settled = true; return value; },
+        error => { settled = true; return error; },
+      );
+      try {
+        await closeRequested;
+        await new Promise(resolve => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(fixture.sent.some(item => item.data.done)).toBe(false);
+      } finally {
+        releaseClose();
+        await closeCompleted;
+        await work;
+      }
+      expect(settled).toBe(true);
+      expect(fixture.sent.at(-1).data.outcome).toBe(code === 0 ? 'success' : 'failed');
+    },
+  );
+
+  it.each(['direct', 'queued-delivery'])('%s waits for diagnostic log deletion before publishing completion', async kind => {
+    let releaseDelete, deleted, requested;
+    const deleteRequested = new Promise(resolve => { requested = resolve; });
+    const deleteCompleted = new Promise(resolve => { deleted = resolve; });
+    const fixture = setup(kind, { fsModule: {
+      ...fs,
+      unlink(filename, callback) {
+        releaseDelete = () => fs.unlink(filename, error => { callback(error); deleted(); });
+        requested();
+      },
+    } });
+    let settled = false;
+    const work = fixture.run().then(value => { settled = true; return value; });
+    try {
+      await deleteRequested;
+      await new Promise(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(fixture.sent.some(item => item.data.done)).toBe(false);
+    } finally {
+      releaseDelete();
+      await deleteCompleted;
+      await work;
+    }
+    expect(fs.readdirSync(fixture.root, { recursive: true }).filter(file => file.endsWith('.log'))).toEqual([]);
+    expect(fixture.sent.at(-1).data.outcome).toBe('success');
+  });
+
+  it('a real diagnostic stream open error closes safely and preserves native success', async () => {
+    const fixture = setup('direct', { fsModule: {
+      ...fs,
+      createWriteStream(filename, options) {
+        return fs.createWriteStream(path.join(filename, 'missing-parent', 'diagnostic.log'), options);
+      },
+    } });
+    await expect(fixture.run()).resolves.toMatchObject({ maps: [] });
+    expect(fixture.sent.at(-1).data.outcome).toBe('success');
+  });
+
   it.each(['direct', 'queued-delivery'].flatMap(kind => ['data', 'EOF'].flatMap(phase =>
     ['send', 'progress', 'stderr'].map(observer => [kind, phase, observer]))))(
     '%s isolates throwing %s %s observers while retaining native success and parsed records',

@@ -270,7 +270,7 @@ Writer 與每個串流 reader 分別保護快取目錄；writer 完成不能讓�
 
 ### 執行進度與終態
 
-stderr 以增量 UTF-8、CR／LF record 解析，保留跨 chunk 文字，結束時處理最後 record；carry 有界，原始 log 保留 bytes。
+stderr 以增量 UTF-8、CR／LF record 解析，保留跨 chunk 文字，結束時處理最後 record；carry 有界，原始 log 保留 bytes。執行 module 同時持有記錄檔收尾：等待串流 `close` 確認檔案已釋放，成功時再等刪除回呼，才完成工作及發布終態。寫入 `finish` 或等待期限不能代替 `close`；記錄寫入或刪除失敗仍保留原生執行結果。
 
 `done:true` 只表示結束，成功須有 `outcome:'success'`，失敗為 `failed`。有標記的 intake 由 runtime 統一附上 sessionId／requestId，包括 native 中間進度、cache hit、提交與 stream 終態；renderer 只接目前仍持有的工作。stream 的 ready Promise 不可提前清掉仍在執行的工作狀態。其他直接作業如 extractAudio 的 `a0` 進度有自己的 caller，不能被 intake 的 session 篩選誤吞。
 
@@ -395,6 +395,8 @@ Renderer 凍結時間、FPS 及圖片計畫，透過既有 `withPresentedFrame()
 每份交付使用凍結快照、自己的 FFmpeg 程序；同輸出路徑只有一個 live job，跨程序由 `output-leases/*.lock/owner.json` 保護。決策與代價見 [ADR-0001](adr/0001-每份交付各自一個-ffmpeg-程序.md)。重啟先確認舊程序停止、復原 journal／lease、清本工作私有半成品，再恢復佇列。
 
 `queue-store.js` 分別持有 live state 與 history.json；不能把 history 當待跑工作。完成歷史只恢復精確成品定位能力，不授予讀寫或整目錄能力。只有 ENOENT 是未建立；讀取失敗不能當空歷史覆寫。毀損 JSON／schema 更新前先保存完整 `.corrupt-<uuid>` bytes，備份失敗保留原檔及 outcome journal，待可提交再結清。
+
+停止或執行前准入失敗的終態若尚未落盤，恢復後由佇列判斷是否仍有 runner 持有收尾；未啟動 runner 的工作直接完成收尾，不能永久擋住重試。持久刪除成功時一併撤銷該工作的待提交終態及恢復標記，並喚醒既有排程，避免已刪除工作堵住後續交付或關閉；刪除 journal 失敗則保留原意圖。取消安全關閉而恢復原運行狀態時，也須重新排程已存在的 queued 工作；暫停、被中止工作及仍在收尾的 runner 仍由排程入口保護。
 
 有執行中工作時關閉主視窗，由監控接手；真正退出須走前述 owner 屏障，不能因主頁面關閉就中止工作。
 

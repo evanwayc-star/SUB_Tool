@@ -58,3 +58,21 @@ it('無時間碼新增保留 untimed，鎖軌拒絕不新增 History',()=>{
   expect(Model.addCue(1.2625,2.2625,'拒絕',0)).toBe(null);
   expect(State.cues).toEqual([cue]);expect(History.stack).toHaveLength(count);
 });
+
+it.each([['1','2'],['1',2],[1,'2']])('格網上的字幕時間 %j–%j 仍須正規化為數值，重複准入不改動',(start,end)=>{
+  const cue={id:'legacy',start,end,text:'原字幕',track:0,timed:true};
+  expect(Model.snapCueToFrames(cue)).toBe(true);
+  expect(cue).toMatchObject({start:1,end:2});
+  expect(Model.snapCueToFrames(cue)).toBe(false);
+  expect(cue).toMatchObject({start:1,end:2});
+});
+
+it('正常數值格網的准入為 no-op，無時間碼內容不補造或轉換時間',()=>{
+  const cue={id:'numeric',start:1,end:2,text:'原字幕',track:0,timed:true};
+  const before={...cue};
+  expect(Model.snapCueToFrames(cue)).toBe(false);
+  expect(cue).toEqual(before);
+  const untimed={id:'untimed',start:'1',end:'1',text:'無時間碼',track:0,timed:false};
+  expect(Model.snapCueToFrames(untimed)).toBe(false);
+  expect(untimed).toMatchObject({start:'1',end:'1',timed:false});
+});

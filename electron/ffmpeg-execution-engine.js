@@ -668,6 +668,11 @@ function createFFmpegExecution(options = {}) {
       const logStream = fs.createWriteStream(logPath, { flags: isQueueExport ? 'w' : 'a' });
       let logError = null;
       let logFinishPromise = null;
+      // finish 只代表寫入完成，close 才確認 fd 已釋放；錯誤也可能早於 native close。
+      const logClosed = new Promise(done => {
+        if (logStream.closed) done();
+        else logStream.once('close', done);
+      });
       let tail = '';
       let settled = false;
       let watchdogFailure = null;
@@ -685,23 +690,11 @@ function createFFmpegExecution(options = {}) {
       };
       const finishLog = () => {
         if (logFinishPromise) return logFinishPromise;
-        logFinishPromise = new Promise(done => {
-          if (logError || logStream.writableFinished || logStream.destroyed) {
-            done();
-            return;
-          }
-          let finished = false;
-          const settle = () => {
-            if (finished) return;
-            finished = true;
-            clearTimeout(timer);
-            done();
-          };
-          const timer = setTimeout(settle, 1000);
-          logStream.once('finish', settle);
-          logStream.once('error', settle);
-          try { logStream.end(); } catch (error) { settle(); }
-        });
+        logFinishPromise = logClosed;
+        if (!logStream.destroyed && !logStream.writableEnded) {
+          try { logStream.end(); }
+          catch (error) { logError ||= error; logStream.destroy(); }
+        }
         return logFinishPromise;
       };
       const report = data => {
@@ -743,7 +736,8 @@ function createFFmpegExecution(options = {}) {
           reject(error); return;
         }
         if (code === 0 && !signal && (!watchdogResult || watchdogResult.ok)) {
-          fs.unlink(logPath, () => {});
+          // 成功通知也不能早於本次記錄刪除的收尾；刪除失敗仍保留原生結果。
+          await new Promise(done => fs.unlink(logPath, done));
           resolve({ tail, maps: parser.maps });
           return;
         }

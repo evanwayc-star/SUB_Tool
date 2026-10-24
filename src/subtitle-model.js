@@ -8,13 +8,15 @@ import { planCueStyleAssignment } from './subtitle-style-engine.js';
 import { effStyle, trackStyleSnapshot, CUE_STYLE_KEYS } from './substyle.js';
 import { Project } from './project.js';
 
-// FPS-SYNC：定時字幕的兩個端點一起落格，至少保留一個可顯示的影格。
+// FPS-SYNC：定時字幕的兩個端點以數值一起落格，至少保留一個可顯示的影格。
 export function snapCueToFrames(cue, {fps=State.fps,dropFrame=State.dropFrame}={}) {
   if (!cue || cue.timed === false || !fps) return false;
   const frame=1/getExactFps(fps);
   const start=subtitleTimeOnFrame(cue.start,0,Infinity,{fps,dropFrame});
   const end=subtitleTimeOnFrame(cue.end,start+frame,Infinity,{fps,dropFrame});
-  if (Math.abs(start-cue.start)<=1e-6 && Math.abs(end-cue.end)<=1e-6) return false;
+  // 舊專案可有已在格網上的數字字串；相減會隱式轉型，不能據此略過數值准入。
+  if (typeof cue.start==='number' && typeof cue.end==='number'
+    && Math.abs(start-cue.start)<=1e-6 && Math.abs(end-cue.end)<=1e-6) return false;
   cue.start=start; cue.end=end;
   return true;
 }
