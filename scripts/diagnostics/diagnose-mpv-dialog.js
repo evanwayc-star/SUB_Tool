@@ -20,11 +20,11 @@
       `overflow:hidden` 裁掉的元素照樣回報完整高度、`display:block`、`opacity:1`。
       鐵律 §0.7 在這裡會給出錯誤答案。
 
-   有效的觀察點只有兩個，這支腳本用的就是它們：
+   這支腳本補充兩種觀察：
    - **主行程的 inspector**（`process._debugProcess` 開啟）→ `BrowserWindow.isVisible()`
-     才是視窗可見性的唯一真相。
+     提供視窗的顯示狀態，仍須核對實際畫面是否被遮擋。
    - **`document.elementFromPoint()`** → 它回答「這個座標上使用者實際點得到誰」，
-     會如實反映裁切。
+     可提供裁切或其他遮擋的線索；三個取樣點不能代表整份選單的可見範圍。
 ============================================================================== */
 
 
@@ -40,13 +40,13 @@ const inPage = js => `(async () => {
   return await w.webContents.executeJavaScript(${JSON.stringify(js)}, true);
 })()`;
 
-/** 視窗可見性的唯一真相。 */
+/** 主行程回報的視窗顯示狀態；不代表螢幕上的遮擋結果。 */
 const WINDOWS = `JSON.stringify(require('electron').BrowserWindow.getAllWindows().map(w => ({
   id: w.id, 可見: w.isVisible(), 是子視窗: !!w.getParentWindow(),
   url: (w.webContents && w.webContents.getURL() || '').slice(0, 42),
 })))`;
 
-/** 選單使用者「實際看得到多少」——elementFromPoint 會如實反映裁切。 */
+/** 選單三個座標的 DOM 命中結果，須搭配實際畫面核對裁切或遮擋。 */
 const VISIBLE_PART = `(() => {
   const box = document.querySelector('.menu.open .items');
   if (!box) return JSON.stringify({ 選單沒展開: true });
@@ -60,7 +60,7 @@ const VISIBLE_PART = `(() => {
   const bcs = bar && getComputedStyle(bar);
   return JSON.stringify({
     選單矩形: { top: Math.round(r.top), bottom: Math.round(r.bottom), 高: Math.round(r.height) },
-    使用者實際看得到: probes.filter(p => p.在選單內).length + '/3 個取樣點',
+    選單命中取樣: probes.filter(p => p.在選單內).length + '/3 個取樣點',
     探針: probes,
     menubar: bcs ? { overflow: bcs.overflow, backdropFilter: bcs.backdropFilter,
                      底緣: Math.round(bar.getBoundingClientRect().bottom) } : null,
@@ -118,13 +118,13 @@ function findMainPid() {
   console.log('  事件迴圈延遲（ms）:', lag);
 
   console.log('\n================ 怎麼讀 ================');
-  console.log('  A. 「使用者實際看得到」不是 3/3，但 mpv 子視窗【可見=false】');
-  console.log('     → mpv 已經讓位了，蓋住選單的是【HTML 這一層的裁切】。');
-  console.log('       看 menubar 的 overflow 與 backdropFilter：那兩個各自都會裁子孫，');
-  console.log('       而且拿掉任一個都不夠（見 tests/menubarClipping.test.js）。');
+  console.log('  A. 「選單命中取樣」不是 3/3，但 mpv 子視窗【可見=false】');
+  console.log('     → 請檢查 HTML 的裁切、其他遮擋與取樣座標，並核對實際畫面。');
+  console.log('       menubar 的 overflow 與 backdropFilter 是既有排查線索');
+  console.log('       （見 tests/menubarClipping.test.js），本輪仍須各自驗證。');
   console.log('  B. mpv 子視窗【可見=true】而選單與影片區重疊');
-  console.log('     → 讓位沒有生效，往 _syncMpvPanel → mpv:show 那條查。');
-  console.log('  C. 事件迴圈延遲 max 很大 → 卡頓是主行程被擋住；很小 → 不在主行程。');
+  console.log('     → 請沿 _syncMpvPanel → mpv:show 檢查讓位狀態；isVisible 不能單獨證明實際遮擋。');
+  console.log('  C. 事件迴圈延遲只提供採樣區間的排程線索；大值須核對 trace，小值不能排除未取樣時段的主行程等待。');
 
   main.close();
   process.exit(0);

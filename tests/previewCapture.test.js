@@ -320,6 +320,21 @@ describe('capturePreviewFrame uses the visible presenter and frozen timeline ima
 });
 
 describe('image preview DOM clipping',()=>{
+  it('uses anonymous CORS for both the image DOM and the independently loaded screenshot image',async()=>{
+    const loads=[];
+    class CorsImage extends CaptureImage{
+      set src(value){loads.push({url:value,crossOrigin:this.crossOrigin});super.src=value;}
+    }
+    vi.stubGlobal('Image',CorsImage);
+    try{
+      State.clips=[image({path:'subtool-local://resource/image-token'})];
+      renderImageOverlays();
+      expect(document.querySelector('#imageLayer img').crossOrigin).toBe('anonymous');
+      await capturePreviewFrame();
+      expect(loads).toContainEqual({url:'subtool-local://resource/image-token',crossOrigin:'anonymous'});
+    }finally{vi.stubGlobal('Image',CaptureImage);}
+  });
+
   it('clips an oversized image to its containing PiP track',()=>{
     State.videoTracks=[{visible:true,scale:0.5,posX:1,posY:0,opacity:0.5}];State.clips=[image({scale:2,fadeIn:2})];
     renderImageOverlays();

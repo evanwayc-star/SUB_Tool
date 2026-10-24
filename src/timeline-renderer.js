@@ -385,7 +385,7 @@ function _onTrackDragMove(e){
   if(!_trackDrag)return;
   const gut=_trackDrag.gut;
   const gutRect=gut.getBoundingClientRect();
-  const relY=e.clientY-gutRect.top;
+  const relY=e.clientY-gutRect.top+gut.scrollTop;
   let targetTk=clamp(yToTrack(relY),0,State.trackCount-1);
   const fromTk=State.tracks.indexOf(_trackDrag.track);
   gut.querySelectorAll('.tl-gtrack').forEach((g,i)=>{
@@ -1735,7 +1735,6 @@ window.addEventListener('mouseup',e=>{
   if(!drag)return;
   const pending=drag;
   try{
-  if(confirmSubtitleDragRemoval(pending)) return;
   pending.gesture.commit(()=>{
   updateSnapGuide(null);
   stopTimelineAutoScroll();
@@ -1807,7 +1806,7 @@ window.addEventListener('mouseup',e=>{
       recordHistory(drag.isCopyDrag ? `複製字幕` : (m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}句)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)));
     }
   }
-  });
+  },()=>!confirmSubtitleDragRemoval(pending));
   }finally{
     drag=null;
   }

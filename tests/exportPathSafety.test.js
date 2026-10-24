@@ -102,6 +102,22 @@ describe('主程序端圍堵（electron/export-name-safety.js）', () => {
     expect(isPathContained(root, '我的樣式/主標.json')).toBe(true);
   });
 
+  it('選取檔案系統根目錄時，仍放行同磁碟的子檔與樣式群組', () => {
+    const filesystemRoot = path.parse(root).root;
+    expect(isPathContained(filesystemRoot, '主標.json')).toBe(true);
+    expect(isPathContained(filesystemRoot, '我的樣式/主標.json')).toBe(true);
+    expect(isPathContained(filesystemRoot, path.join(filesystemRoot, '主標.json'))).toBe(true);
+    expect(isPathContained(filesystemRoot, filesystemRoot)).toBe(true);
+    if (process.platform === 'win32') {
+      const otherDrive = filesystemRoot[0].toUpperCase() === 'C' ? 'D:\\' : 'C:\\';
+      expect(isPathContained(filesystemRoot, path.join(otherDrive, '主標.json'))).toBe(false);
+    }
+  });
+
+  it('以點開頭的合法子資料夾不會被誤認為上一層', () => {
+    expect(isPathContained(root, '..presets/主標.json')).toBe(true);
+  });
+
   /* 前綴相同但不是子目錄的旁支必須擋掉：
      /tmp/export-target-evil 以 /tmp/export-target 為前綴，但不在它底下。 */
   it('相同前綴的旁支資料夾不算在內', () => {

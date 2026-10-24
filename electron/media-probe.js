@@ -10,11 +10,13 @@
       才允許發起下一次探測，避免殭屍行程耗盡系統資源。
    2. 有界探測與 AbortSignal 整合：預設 60 秒，容許慢速儲存，但不讓損壞媒體永久掛起。
    3. JSON 安全解析與後援計算：處理無有效 FPS 或時長為 0 的特殊邊界。
-   4. 最多兩個原生工作，同一指令的無取消請求共用進行中工作；完成後不保留 metadata。
+   4. 最多兩個原生工作，同一指令與母素材證據的無取消請求共用進行中工作。
+      完成前再核對來源，失檔／變更不得發布舊 metadata 或保守 fallback；完成後不保留 metadata。
    ============================================================================== */
 'use strict';
 
 const { spawn: nodeSpawn } = require('child_process');
+const { motherSourceFingerprint } = require('./mother-source-evidence');
 
 /**
  * 數值安全轉換函式。
@@ -110,6 +112,7 @@ function descriptorOf(document = {}) {
  * @param {number} [options.timeoutMs=60000] 行程啟動後的探測逾時上限（毫秒）
  * @param {number} [options.maxConcurrent=2] 原生工作並行上限
  * @param {number} [options.terminationGraceMs=1000] 行程終止緩衝等待時間（毫秒）
+ * @param {Function} [options.fingerprintSource=motherSourceFingerprint] 母素材證據讀取
  */
 function createMediaProbe({
   executable,
@@ -117,6 +120,7 @@ function createMediaProbe({
   timeoutMs = 60000,
   maxConcurrent = 2,
   terminationGraceMs = 1000,
+  fingerprintSource = motherSourceFingerprint,
 } = {}) {
   let terminationBarrier = Promise.resolve();
   const uncertainProcesses = new Set();
@@ -128,6 +132,7 @@ function createMediaProbe({
   const concurrency = Number.isFinite(maxConcurrent) ? Math.max(1, Math.floor(maxConcurrent)) : 2;
   let active = 0;
   let shuttingDown = false, shutdownPromise = null, resumeWhenIdle = false;
+  let requestGeneration = 0;
 
   function resumeIfIdle() {
     if (!resumeWhenIdle || pending.size || processes.size) return false;
@@ -201,14 +206,54 @@ function createMediaProbe({
 
   function run(args, { signal } = {}) {
     if (shuttingDown) return Promise.reject(abortError());
-    // 有取消所有者的工作各自保留 native lifecycle，避免一個 caller 中止其他 caller。
-    if (signal) return schedule(args, signal);
-    const key = JSON.stringify(args);
-    const existing = inFlight.get(key);
-    if (existing) return existing;
-    const result = schedule(args);
-    inFlight.set(key, result);
-    const forget = () => { if (inFlight.get(key) === result) inFlight.delete(key); };
+    const generation = requestGeneration;
+    const assertCurrent = () => {
+      if (shuttingDown || generation !== requestGeneration || signal?.aborted) throw abortError();
+    };
+    const fingerprint = async () => {
+      try {
+        const identity = await fingerprintSource(args.at(-1), { namespace: 'media-probe-source-v1' });
+        assertCurrent();
+        return identity;
+      } catch (cause) {
+        assertCurrent();
+        const error = new Error('無法確認 ffprobe 母素材證據');
+        error.code = 'PROBE_SOURCE_UNAVAILABLE'; error.cause = cause;
+        throw error;
+      }
+    };
+    const result = (async () => {
+      // 同路徑可在舊程序 close 前被替換；共享資格必須同時屬於同一份母素材。
+      // 使用既有前／中／尾取樣，非同步 I/O 不阻塞主程序，也不讀整支母帶。
+      const identity = await fingerprint();
+      const key = JSON.stringify([args, identity]);
+      const existing = !signal && inFlight.get(key);
+      if (existing) return existing;
+      const operation = (async () => {
+        let stdout, failure;
+        try { stdout = await schedule(args, signal); }
+        catch (error) { failure = error; }
+        // 原生終止錯誤仍由既有 close barrier 決定，不能改寫成來源錯誤。
+        if (failure && (shuttingDown || generation !== requestGeneration || signal?.aborted)) throw failure;
+        assertCurrent();
+        if (await fingerprint() !== identity) {
+          const error = new Error('母素材在 ffprobe 探測期間變更，請重新載入');
+          error.code = 'PROBE_SOURCE_CHANGED'; throw error;
+        }
+        if (failure) throw failure;
+        return stdout;
+      })();
+      // 有取消所有者的工作各自保留 native lifecycle，避免中止其他 caller。
+      if (!signal) {
+        inFlight.set(key, operation);
+        const forget = () => { if (inFlight.get(key) === operation) inFlight.delete(key); };
+        operation.then(forget, forget);
+      }
+      return operation;
+    })();
+    // 包含排程前後的取樣／handle 關閉；shutdown/resume 不能越過舊來源讀取。
+    pending.add(result);
+    const forget = () => { pending.delete(result); resumeIfIdle(); };
     result.then(forget, forget);
     return result;
   }
@@ -359,7 +404,7 @@ function createMediaProbe({
       return !!stdout.trim();
     } catch (error) {
       if (shuttingDown || options?.signal?.aborted || error.code === 'PROBE_ABORTED'
-        || error.cause?.code === 'PROBE_ABORTED') throw error;
+        || error.cause?.code === 'PROBE_ABORTED' || error.code?.startsWith('PROBE_SOURCE_')) throw error;
       // 舊專案若無完整聲道規劃，不輕易丟棄音訊，交由 FFmpeg 實際 map 報錯
       return true;
     }
@@ -402,7 +447,7 @@ function createMediaProbe({
       }));
     } catch (error) {
       if (shuttingDown || options?.signal?.aborted || error.code === 'PROBE_ABORTED'
-        || error.cause?.code === 'PROBE_ABORTED') throw error;
+        || error.cause?.code === 'PROBE_ABORTED' || error.code?.startsWith('PROBE_SOURCE_')) throw error;
       return [];
     }
   }
@@ -410,6 +455,7 @@ function createMediaProbe({
   function cancelAllAndWait({ timeoutMs: closeTimeoutMs = 5000 } = {}) {
     if (shutdownPromise) return shutdownPromise;
     shuttingDown = true;
+    requestGeneration += 1;
     resumeWhenIdle = false;
     for (const job of jobs) job.controller.abort();
     // timeout/error 已讓 caller 收斂的 child 仍由此 owner 持有，直到實際 close。

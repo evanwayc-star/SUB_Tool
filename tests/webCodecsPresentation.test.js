@@ -92,6 +92,23 @@ describe('WebCodecs presentation acknowledgement', () => {
     ]);
   });
 
+  it('loads compositor images with anonymous CORS before assigning their source',async()=>{
+    const loads=[];
+    class CorsImage{
+      naturalWidth=640;naturalHeight=360;
+      set src(url){loads.push({url,crossOrigin:this.crossOrigin});queueMicrotask(()=>this.onload?.());}
+    }
+    vi.stubGlobal('Image',CorsImage);
+    try{
+      const lower={id:'local-image',type:'image',web:{url:'subtool-local://resource/image-token'},in:0,out:20,offset:100,vtrack:0};
+      const upper={...clipA,vtrack:1};stateMock.State.clips=[lower,upper];Seq.clipsAt.mockReturnValue([lower,upper]);
+      WCPreview.sources=new Map([['a.mp4#1',{state:'ready',request:()=>({timestamp:14e6,displayWidth:640,displayHeight:360})}]]);
+      WCPreview.tick();await Promise.resolve();WCPreview.tick();
+      expect(loads).toContainEqual({url:'subtool-local://resource/image-token',crossOrigin:'anonymous'});
+      expect(contextMock.drawImage.mock.calls.some(([frame])=>frame instanceof CorsImage)).toBe(true);
+    }finally{vi.unstubAllGlobals();}
+  });
+
   it('actual Seq admission at an adjacent frame boundary paints the incoming frame rather than a black acknowledgement',async()=>{
     const {Seq:actualSequence}=await vi.importActual('../src/sequence.js');
     const previous={...clipA,in:29/30,out:33/30,offset:0};

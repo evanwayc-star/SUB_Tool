@@ -265,6 +265,7 @@ function createProjectWorkspace({
   readFile,
   writeFile,
   ensureDirectory,
+  saveMetadata,
   grantProjectFile,
   grantMediaFile,
   canReadMedia,
@@ -367,6 +368,21 @@ function createProjectWorkspace({
 
     const admission = inspectProjectWrite(buffer, { canRead: canReadMedia });
     if (!admission.allowed) return null;
+
+    // 檔案識別資訊由實際寫檔的電腦提供，不沿用開啟專案時的舊值。
+    // 只在持久化時加入，renderer 的 committed snapshot／dirty 基準不受影響。
+    if (typeof saveMetadata === 'function') {
+      const metadata = saveMetadata();
+      const document = parseProjectBuffer(buffer);
+      delete document['SUB Tool'];
+      delete document['User Name'];
+      const contents = {
+        'SUB Tool': metadata.appVersion,
+        'User Name': metadata.computerName,
+        ...document,
+      };
+      buffer = Buffer.from('\uFEFF' + JSON.stringify(contents, null, 1), 'utf16le');
+    }
 
     const saved = await commitAdmittedProjectWrite(projectFile, buffer, {
       ensureDirectory: ensureParent ? ensureDirectory : null,

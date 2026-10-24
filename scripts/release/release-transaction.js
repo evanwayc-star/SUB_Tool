@@ -246,7 +246,10 @@ function prepareRelease({
   if (!_validReleaseVersion(version)) {
     throw new Error(`Invalid release version: ${version}`);
   }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
+  const calendarDate = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
+    ? new Date(`${date}T00:00:00.000Z`) : null;
+  if (!calendarDate || !Number.isFinite(calendarDate.getTime())
+    || calendarDate.toISOString().slice(0, 10) !== date) {
     throw new Error(`Invalid release date: ${date}`);
   }
   if (!String(body || '').trim()) {

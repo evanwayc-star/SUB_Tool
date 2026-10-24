@@ -437,14 +437,18 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     tempProfiles.add(profile);
     const outPath = path.join(profile, 'mod-output.ts');
     const audioPath = path.join(profile, 'source.wav');
+    const imagePath = path.join(profile, 'one-pixel.png');
+    writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'));
     writeFileSync(audioPath, Buffer.from('paused queue audio source'));
-    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [audioPath], outPath, format: 'mod-fhd' });
+    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [audioPath, imagePath], outPath, format: 'mod-fhd' });
     const app = await launchApp(profile);
     const mainClient = await connectTarget(await waitForTarget(app.port,
       target => target.type === 'page' && target.title === 'SUB TOOL', 'MOD-FHD 測試主視窗'));
     const queueClient = await restoreSeededCapabilities(app, mainClient, [seedId], { resume: false });
     const payload = {
-      format: ' MOD-FHD ', outPath, clips: [], duration: 1,
+      format: ' MOD-FHD ', outPath, duration: 1,
+      clips: [{ type: 'image', path: imagePath, in: 0, out: 1, offset: 0, vtrack: 0, natW: 1, natH: 1 }],
+      videoTracks: [{ vt: 0 }],
       width: 640, height: 360, targetH: 360, fps: 29.97, videoKbps: 1000,
       timelineStartTimecode: '01:00:00;00', timecodeWatermark: { start: '01:00:00;00' },
       audioPlan: {
@@ -592,6 +596,83 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     queueClient.close();
   }, 30000);
 
+  test('父程序被 SIGKILL 後 watchdog 會自行完成清理，不依賴下次 recover', async () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'subtool-watchdog-parent-crash-'));
+    tempProfiles.add(profile);
+    const fs = require('node:fs');
+    const { listLeases } = require(path.join(ROOT, 'electron', 'export-lease.js'));
+    const queueDir = path.join(profile, 'export-queue');
+    const fakeFfmpeg = path.join(profile, 'noisy-ffmpeg.cjs');
+    const markerPath = path.join(profile, 'started.log');
+    writeFileSync(fakeFfmpeg, `
+      const fs = require('node:fs');
+      const [markerPath, outPath] = process.argv.slice(2);
+      fs.writeFileSync(outPath, 'partial');
+      fs.writeFileSync(markerPath, String(process.pid));
+      setInterval(() => process.stderr.write('still exporting\\n'), 10);
+    `);
+    const parentScript = path.join(profile, 'crash-parent.cjs');
+    const ownerScript = path.join(profile, 'observe-owner-exit.cjs');
+    const ownerExit = path.join(profile, 'owner-exit.json');
+    const outPath = path.join(profile, 'crash-output.mp4');
+    fs.writeFileSync(outPath, 'previous completed delivery');
+    fs.writeFileSync(ownerScript, `
+      const fs = require('node:fs');
+      process.once('exit', code => {
+        fs.writeFileSync(${JSON.stringify(ownerExit+'.tmp')}, JSON.stringify({ code, pid: process.pid }));
+        fs.renameSync(${JSON.stringify(ownerExit+'.tmp')}, ${JSON.stringify(ownerExit)});
+      });
+      require(${JSON.stringify(path.resolve('electron/export-watchdog.js'))}).runStandalone();
+    `);
+    fs.writeFileSync(parentScript, `
+      const { spawnExportWatchdog } = require(${JSON.stringify(path.resolve('electron/export-watchdog.js'))});
+      const { listLeases } = require(${JSON.stringify(path.resolve('electron/export-lease.js'))});
+      const controller = spawnExportWatchdog({
+        ffmpegPath: process.execPath,
+        args: ${JSON.stringify([fakeFfmpeg, markerPath, outPath])},
+        outPath: ${JSON.stringify(outPath)}, queueDir: ${JSON.stringify(queueDir)}, jobId: 'parent-crash',
+      }, {
+        nodePath: ${JSON.stringify(ELECTRON)}, scriptPath: ${JSON.stringify(ownerScript)}, onStderr() {},
+      });
+      controller.completion.catch(() => {});
+      controller.ready.then(() => {
+        const { watchdogPid, ffmpegPid, stagePath } = listLeases(${JSON.stringify(queueDir)})[0].owner;
+        process.send({ watchdogPid, ffmpegPid, stagePath });
+      }).catch(error => process.send({ error: error.message }));
+    `);
+    const parent = spawn(process.execPath, [parentScript], {
+      windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    });
+    const parentClosed = new Promise(resolve => parent.once('close', resolve));
+    try {
+      const owner = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('crash parent did not start the writer')), 6000);
+        parent.once('message', message => {
+          clearTimeout(timer);
+          if (message.error) reject(new Error(message.error));
+          else resolve(message);
+        });
+        parent.once('error', error => { clearTimeout(timer); reject(error); });
+      });
+      await waitUntil(() => fs.existsSync(owner.stagePath) && fs.existsSync(markerPath), 'writer did not create its private stage');
+      parent.kill('SIGKILL');
+      await parentClosed;
+      await waitUntil(() => {
+        try { process.kill(owner.ffmpegPid, 0); return false; }
+        catch (error) { return error.code === 'ESRCH'; }
+      }, 'ffmpeg survived its owner cleanup');
+      // No recovery call: the original owner must survive its parent and finish.
+      await waitUntil(() => fs.existsSync(ownerExit), 'watchdog died with its parent instead of completing its cleanup');
+      expect(JSON.parse(fs.readFileSync(ownerExit, 'utf8'))).toEqual({ code: 0, pid: owner.watchdogPid });
+      expect(fs.existsSync(owner.stagePath)).toBe(false);
+      expect(listLeases(queueDir)).toEqual([]);
+      expect(fs.readFileSync(outPath, 'utf8')).toBe('previous completed delivery');
+    } finally {
+      if (parent.exitCode == null && parent.signalCode == null) parent.kill('SIGKILL');
+      await parentClosed;
+    }
+  }, 30000);
+
   test('強制結束主程序後 watchdog 會停止 ffmpeg，重開只恢復等待工作', async () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'subtool-watchdog-crash-'));
     tempProfiles.add(profile);
@@ -673,8 +754,8 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       ? readdirSync(leaseDir).filter(name => name.endsWith('.lock'))
       : [];
     expect(existsSync(outPath)).toBe(false);
-    expect(existsSync(owner.stagePath)).toBe(false);
-    expect(locksAfterRecovery).toEqual([]);
+    expect(existsSync(owner.stagePath), secondApp.stderr.join('')).toBe(false);
+    expect(locksAfterRecovery, secondApp.stderr.join('')).toEqual([]);
     const restored = await secondQueueClient.evaluate('window.queueAPI.getAll()');
     expect(restored.isPaused).toBe(true);
     expect(restored.jobs).toHaveLength(1);
@@ -699,12 +780,14 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     tempProfiles.add(profile);
     const outPath = path.join(profile, 'queued-output.mp4');
     const audioPath = path.join(profile, 'queued-audio.wav');
+    const imagePath = path.join(profile, 'one-pixel.png');
+    writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'));
     writeFileSync(audioPath, Buffer.from('queued audio plan source'));
     const payload = {
       outPath,
       assText: '',
-      clips: [],
-      videoTracks: [],
+      clips: [{ type: 'image', path: imagePath, in: 0, out: 1, offset: 0, vtrack: 0, natW: 1, natH: 1 }],
+      videoTracks: [{ vt: 0 }],
       duration: 1,
       width: 1920,
       height: 1080,
@@ -719,7 +802,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
         streams: [{ id: 'stereo', layout: 'stereo', busIds: ['a1', 'a2'] }],
       },
     };
-    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [audioPath], outPath });
+    const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [audioPath, imagePath], outPath });
 
     const firstApp = await launchApp(profile);
     const firstMainTarget = await waitForTarget(

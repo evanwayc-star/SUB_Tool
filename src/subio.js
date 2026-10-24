@@ -665,7 +665,7 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
   const presets = getAllPresets();
   const presetOpts = '<option value="">— 不套用自訂樣式 —</option>' + presets.map(p => `<option value="${escapeHTML(presetIdentity(p))}">${escapeHTML(p.group ? p.group+' / '+p.name : p.name)}</option>`).join('');
   const styleControl = hasRoundTripMetadata
-    ? `<p style="margin:0 0 8px;font-size:13px;color:var(--text-faint)">偵測到 SUB Tool ASS：會還原原始軌道與逐句樣式。${assImportPreview.usedFrameTiming ? '' : '目前專案 FPS 不同，將依原始秒數匯入。'}</p>`
+    ? `<p style="margin:0 0 8px;font-size:13px;color:var(--text-faint)">${assImportPreview.sourceTrackCount > 1 ? '偵測到 SUB Tool ASS：會保留原始時間、文字與字幕外觀，合併到所選目的軌。' : '偵測到 SUB Tool ASS：會還原原始軌道與逐句樣式。'}${assImportPreview.usedFrameTiming ? '' : '目前專案 FPS 不同，將依原始秒數匯入。'}</p>`
     : `${assImportPreview?.usedLegacyTiming ? '<p style="margin:0 0 8px;font-size:13px;color:var(--text-faint)">偵測到舊版 SUB Tool ASS：會依目前 FPS 修正舊版百分秒造成的一格偏移。</p>' : ''}<label style="display:block;padding-bottom:8px">套用樣式：<select id="importPresetSel" style="margin-left:6px">${presetOpts}</select></label>`;
   
   const session=openModal(title,
@@ -975,12 +975,22 @@ if (typeof document !== 'undefined') {
     }
     // Subtitle intake captures its own request/workspace owner before reading.
     else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }
-    else if (IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)) {
-      const p = DESK.authorizeDroppedFile ? await DESK.authorizeDroppedFile(f) : DESK.getFilePath(f);
-      if(!ownsWorkspace()) return;
-      Media.openIncoming(p?{path:p}:{file:f},{owns:ownsWorkspace});
+    else {
+      const relink = Project.pendingMediaRelink();
+      const importMedia = async (isCurrent = () => true) => {
+        const owns = () => ownsWorkspace() && isCurrent();
+        if (!owns()) return;
+        const p = IS_DESKTOP && (DESK.authorizeDroppedFile || DESK.getFilePath)
+          ? (DESK.authorizeDroppedFile ? await DESK.authorizeDroppedFile(f) : DESK.getFilePath(f)) : null;
+        if (!owns()) return;
+        const { importDesktopMediaFiles, importBrowserMediaFiles } = await import('./media-loader.js');
+        if (!owns()) return;
+        if (p) await importDesktopMediaFiles(p, relink, owns);
+        else await importBrowserMediaFiles([f], relink, owns);
+      };
+      if (relink) await Project.continueLoad(relink.generation, importMedia);
+      else await importMedia();
     }
-    else Media.openIncoming({file:f},{owns:ownsWorkspace});
   });
 }
 

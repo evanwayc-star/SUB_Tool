@@ -70,6 +70,8 @@ Save As 的媒體路徑必須已有讀權。專案寫入同目錄私有暫存檔
 
 一般媒體與字型使用 `subtool-local:` capability URL。隨機 token 對應精確檔案；每次讀取仍核對 token、目前 `canExposeFileURL()`、方法、一般檔案及 Range。token 不是整目錄或永久授權，不以關閉 `webSecurity` 解決載入問題。
 
+需要 Web Audio 或 canvas 讀取的元素，須在指派 `src` 前設定匿名 CORS，程式載入共用 `setMediaElementSource()`；圖片疊層 markup 同樣帶 `crossorigin="anonymous"`。這包含固定畫面、截圖另外載入的圖片及 WebCodecs 圖片合成。協定已有允許來源標頭仍不足以補救已用無 CORS 模式載入的元素；驗收須讀實際像素及截圖內容。
+
 主頁面、佇列及比較視窗由 `protectApplicationWindow()` 限制在自己的 HTML；明確 `--dev` 才允許主頁面的指定開發 origin／pathname。其他導航、重新導向及子視窗受阻擋，允許的外部 HTTP(S) 連結交給系統瀏覽器。
 
 ### 設定檔持久化
@@ -235,13 +237,15 @@ Callback 包裝不把 Electron event 交給頁面。部分 API 替換舊 listene
 
 `verify-native-binaries.js` 核對必要檔案、大小、執行權限及清單指定雜湊，不等於已執行工具驗架構或 codec。Mac 準備 helper 另實際驗 arm64、ASS filter、encoder 及 MXF demuxer。
 
-`media-probe.js` 最多同時執行兩個 ffprobe。相同指令的無取消請求共用進行中工作，結束即移除；帶 AbortSignal 的請求各自持有生命週期。排隊不計入預設 60 秒執行期限。取消或逾時仍等待真正 `close`；無法確認終止的行程會擋住後續准入，不能只因 caller Promise 已結束便釋放。
+`media-probe.js` 最多同時執行兩個 ffprobe。相同指令且母素材證據一致的無取消請求共用進行中工作，結束後再核對來源並移除共用項目；同路徑換檔不能加入舊結果。帶 AbortSignal 的請求各自持有生命週期。排隊不計入預設 60 秒執行期限。取樣從第一個等待起納入取消及退出屏障；取消或逾時仍等待真正 `close`，無法確認終止的行程會擋住後續准入，不能只因 caller Promise 已結束便釋放。來源讀不到或已變更會明確拒絕，不能當成音訊探測的一般保守回退。
 
 ### 媒體 intake
 
 Runtime 接受 probe 結果，建立 720p 預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。
 
 來源證據包含完整路徑、size／mtime／ctime／dev／ino 及前／中／尾段取樣。讀取前後核對檔案身分，來源途中替換或截斷即拒絕。這不是整檔 checksum，也不授權路徑。各 owner 仍持有自己的 namespace、規格與 capability／realpath 檢查；`source-v3` 隔離未依影片時鐘對齊的舊 intake。
+
+Proxy 色彩探測前後核對同一來源 key，描述隨其證據一起進入快取准入，再和目標快取目錄核對；不能把探測等待前的尺寸或色彩用來認證同路徑的新影片。已完成且驗證有效的 warm Proxy 仍直接使用，不重做色彩探測。
 
 音訊計畫在 split／pan／mix 前保留實際 PTS，轉成影片來源時鐘，再補前置靜音或裁負時間。不能先將每個 stream STARTPTS 歸零後補猜測延遲，否則 AAC priming 可能重裁。Proxy 影片歸零；波形、固定畫面、人聲 PCM、反向音訊與交付也必須沿用來源時鐘。FFmpeg seek 與剩餘偏移交給 `media-source-clock.js`，不要複製換算。
 
@@ -290,6 +294,8 @@ PCM 取樣前按影片來源原點對齊，resampler 與指定聲道的 pan 在�
 
 `delivery-runner.js` 接凍結快照、核對能力、probe 母素材，再交 `export-plan.js` 產生 argv、實際片長、聲道及規格。純計畫自行決定 codec／mux、音訊尾端及光碟容量，runner 不另配一份設定。所有 execution 明確指定 `direct` 或 `queued-delivery`；交付缺少 queue dir／job id／outPath 直接拒絕，不得退回 direct 繞 watchdog。
 
+`ffmpeg-execution-engine.js` 的交付能力 owner 從同一純計畫取得實際 encoder，在送出及重跑準備前以短編碼核對可執行性，光碟另執行所需工具的版本探針。探針不讀母素材、不建成品；視訊看實際 frame 與完成標記，不能因短 GPU 編碼的 mux 時間為零而誤判失敗。成功不跨工作快取，避免相同執行檔的 DLL、系統 runtime 或 GPU 狀態變更後沿用舊結果。取消及退出等待原探針 close，失敗退出後才恢復准入。這只驗證能力，成品內容仍由原交付驗收負責。
+
 交付保持 In／Out、offset 與速度精度。影片保留所需 GOP 的 PTS，再按絕對交付格網合成；不能逐段轉 FPS 後 concat，也不能以顯示用毫秒回寫來源。反向 VFR 按交付格網重建 cadence，保留首格前缺口及半開尾端；固定畫面按實際來源 PTS 取格，不由平均 FPS 補造。隔行在場格網合成，補末場再交織 TFF。驗證須逐格比像素、區間、CFR／VFR、速度與疊層；完整時間規則見 [FPS 文件](FPS_時碼一致性.md)。
 
 來源影片使用共用 `sourceVideoClockSeek()` 保留容器相對 PTS。音訊依來源時鐘及實際 seek 補剩餘靜音；已對齊或反向 adapter 不重複套偏移。各 bus 獨立混音，join 前補至交付片長，較長聲道尾音不可被短聲道截掉。重用 input 時核對其讀取範圍，較早音訊須用自己的來源 input。
@@ -297,6 +303,10 @@ PCM 取樣前按影片來源原點對齊，resampler 與指定聲道的 pan 在�
 從 probe 開始就登記同一 active owner，停止也會取消準備中探測。成品提交及 lease 釋放後，補充 audio bitrate 探測失敗只回 `audioActualBitrates:null`，不能倒改已完成交付；編碼、封裝與收尾失敗仍屬失敗。
 
 Watchdog 取得輸出 lease，artifact 在同目錄的本工作私有路徑準備／編碼／封裝／驗證，全部成功才 rename 正式成品。取消、失敗及崩潰只刪本 owner 登記的私有檔，不刪既有同名成品；舊 lease 按原規則復原。ISO 開始寫入前持久化 owner，每個新原生程序更新 PID；清理失敗保留 lease。
+
+Windows 的 `spawnExportWatchdog()` 使用 `detached`，讓 watchdog 在主程序遭強制終止後仍可接收 IPC disconnect，停止 FFmpeg 並完成 stage／lease 清理。保留隱藏視窗、stderr pipe、IPC 與 ChildProcess 追蹤，正常退出仍等待 completion；依據見 [Node.js 的 detached 說明](https://nodejs.org/api/child_process.html#optionsdetached)。回歸測試真正終止父程序，確認未呼叫 recover 也會自行完成清理，避免把下次啟動的補救當成本次 owner 已完成。
+
+復原時，連線建立到回覆之間的 EPIPE、ECONNRESET 或提前關閉，會以原 pipe／token 有限重試。Peer 消失後仍須確認兩個已登記 PID 均不存在，才能沿原規則清理；逾時、無效回覆及 token 拒絕維持保留 stage／lease。
 
 有 PID 後的 `error` 可能是終止失敗，須持續等 close；`exit` 或重複 error 不得提早清檔／釋放 lease。只有未取得 PID 的啟動失敗可立即收尾。Controller `ready` 失敗與 `completion` 分開：程序已啟動時，即使 owner 寫入讓 ready 拒絕，completion 仍等 standalone 收尾或程序結束，runner 保留 active 與 ASS／TC 輸入。
 

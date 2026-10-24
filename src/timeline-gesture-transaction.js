@@ -428,10 +428,16 @@ function beginTimelineGestureLifecycle({ mode, targets = [], context = {}, effec
     return { accepted: startPreview(startEffect), started: true };
   }
 
-  function commit(commitEffect) {
+  function commit(commitEffect, prepareCommit = null) {
     if (!active) return { committed: false, moved: false };
     if (!owns() || !canEdit() || effects.canCommit?.()===false) {
       cancel(); return { committed:false,moved:false };
+    }
+    // 覆蓋確認也必須先通過原手勢的准入。adapter 可撤回預覽、交給確認 owner；
+    // 不能先以撤回後的文件建立新基準，讓已失效的手勢重新取得提交資格。
+    if (prepareCommit?.()===false) {
+      if (active) cancel();
+      return { committed:false,moved:false };
     }
     endPreview?.();
     if (typeof commitEffect === 'function') commitEffect({ mode, moved: transaction.hasMoved() });

@@ -68,6 +68,22 @@ describe('project save ownership',()=>{
     State.clips=[];State.duration=0;History.reset();
   });
 
+  it('網頁下載在 JSON 開頭寫入建置版本，明確標示無法取得電腦名稱且不影響 dirty',async()=>{
+    vi.resetModules();delete window.subtool;
+    vi.stubGlobal('__APP_VERSION__','8.6.7');
+    const util=await import('../src/util.js');
+    const downloaded=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{});
+    const browser=await import('../src/project.js');
+    try{
+      await browser.Project.saveAs();
+      const bytes=downloaded.mock.calls[0][0];
+      const text=Buffer.from(bytes).subarray(2).toString('utf16le');
+      expect(text).toMatch(/^\{\n "SUB Tool": "8\.6\.7",\n "User Name": "網頁版（無法取得電腦名稱）",/);
+      expect(JSON.parse(text).version).toBe(3);
+      expect(browser.isProjectDirty()).toBe(false);
+    }finally{browser.resetProject();downloaded.mockRestore();vi.unstubAllGlobals();}
+  });
+
   it.each([false,true])('變速片段固定=%s 保存時間軸長度與來源幀，不保存 PNG 預覽快取',async frozen=>{
     State.cues=[];
     const clip={id:'speed',path:'C:/movie.mp4',dur:6,in:0,out:6,offset:2,vtrack:0,speed:2,reverse:true};

@@ -185,9 +185,10 @@ async function applyClipSpeed(c,speed,reverse,{isCurrent,signal,cancel}){
 
 export function clipFreezeTarget(c,timelineTime){
   const fps=getExactFps(c.fps||State.fps||25);
-  const time=Math.max(c.offset,Math.min(Seq.clipEnd(c)-1/fps,timelineTime));
+  // FPS-SYNC：先映射來源，再限制半開 Out 與 EOF；時間軸先扣來源一格會選錯變速片尾。
+  const time=Math.max(c.offset,Math.min(Seq.clipEnd(c),timelineTime));
   const source=Seq.toSource(time,c);
-  const last=lastSourceFrameIndex(c.dur,fps);
+  const last=Math.min(lastSourceFrameIndex(c.out,fps),lastSourceFrameIndex(c.dur,fps));
   return Math.max(0,Math.min(last,Math.round(source*fps)))/fps;
 }
 

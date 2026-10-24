@@ -19,11 +19,12 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fixture({ files = {}, recent = [], writeFile } = {}) {
+function fixture({ files = {}, recent = [], writeFile, saveMetadata } = {}) {
   let storedRecent = recent.slice();
   const grants = [];
   const writes = [];
   const workspace = createProjectWorkspace({
+    saveMetadata,
     readFile: vi.fn(async file => {
       const value = files[file];
       if (value instanceof Error) throw value;
@@ -56,6 +57,36 @@ function fixture({ files = {}, recent = [], writeFile } = {}) {
 }
 
 describe('project workspace', () => {
+  it.each([{remember:true},{ensureParent:true}])('儲存與備份都以目前版本及電腦名稱作為 JSON 最前兩欄（%j）', async options => {
+    const project = { playhead: 12.145, cues: [{text:'字幕'}], media: {}, version: 3,
+      'SUB Tool':'舊版本', 'User Name':'另一台電腦' };
+    const fx = fixture({saveMetadata:()=>({appVersion:'8.6.7',computerName:'Evan-PC'})});
+    const file=path.resolve('metadata.subtool');
+    await expect(fx.workspace.writeRendererProject(file, bytes(project).toString('base64'), options)).resolves.toBe(file);
+    const written=fx.writes.find(([kind])=>kind==='write')[2];
+    expect([...written.subarray(0,2)]).toEqual([0xff,0xfe]);
+    const text=written.subarray(2).toString('utf16le');
+    expect(text).toMatch(/^\{\n "SUB Tool": "8\.6\.7",\n "User Name": "Evan-PC",/);
+    expect(JSON.parse(text)).toEqual({...project,'SUB Tool':'8.6.7','User Name':'Evan-PC'});
+  });
+
+  it('實際寫出的 UTF-16 專案仍可原樣開啟，中文電腦名稱與 JSON 字元不損毀', async () => {
+    const root=fs.mkdtempSync(path.join(os.tmpdir(),'subtool-project-metadata-'));
+    tempRoots.push(root);
+    const file=path.join(root,'專案.subtool');
+    const document={cues:[{text:'原字幕'}],version:3};
+    const computerName='剪輯室-電腦 "A"';
+    const workspace=createProjectWorkspace({readFile:fsp.readFile,writeFile:createAtomicProjectWriter(),
+      saveMetadata:()=>({appVersion:'8.6.7',computerName}),canReadMedia:()=>true});
+    await workspace.writeRendererProject(file,bytes(document).toString('base64'));
+    const opened=await workspace.open(file);
+    const buffer=Buffer.from(opened.b64,'base64');
+    expect(JSON.parse(buffer.subarray(2).toString('utf16le'))).toEqual({
+      'SUB Tool':'8.6.7','User Name':computerName,...document,
+    });
+    expect(fs.readFileSync(file)).toEqual(buffer);
+  });
+
   it('最近專案選取在存檔重新排序後仍開啟原目標', async () => {
     const a = path.resolve('recent-a.subtool'), b = path.resolve('recent-b.subtool'), c = path.resolve('current-c.subtool');
     const contents = bytes({ cues: [] });

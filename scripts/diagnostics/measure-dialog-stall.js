@@ -10,16 +10,18 @@
    不需要特定版本的 app：所有量測都是從主行程的 inspector 掛上去的
    （process._debugProcess），6.0.4 也適用。
 
-   ── 把等待切成三段 ──
+   ── 記錄的時間點與限制 ──
      t0  renderer 收到 click
-     t1  主行程進入 dialog.showOpenDialog（＝我們的 JS 做完了）
+     t1  主行程進入 dialog.showOpenDialog
      t2  使用者看到視窗（只能由人回報）
+     t3  showOpenDialog 的 Promise 回覆
 
-   t1-t0 大        → 卡在 renderer 或 IPC（我們的問題）
-   t1-t0 小而仍久等 → 卡在 Windows 畫視窗那一段（我們的 JS 已經交棒了）
+   t1-t0 包含事件處理、IPC 與主行程排程；差值大時仍須用 trace 判斷成因。
+   t1-t0 小只代表這段較短，不能排除呼叫後的 JavaScript 或其他排程等待。
+   t3-t1 包含原生對話框、使用者操作與排程，不能當成 t2-t1 的視窗顯示耗時。
 
-   同時在【主行程】與【renderer】各埋一個事件迴圈阻塞偵測（>200ms 才記錄），
-   所以「哪一條執行緒被卡住」也會直接寫在輸出裡。
+   主行程與 renderer 另記錄超過 200ms 的計時器漂移，renderer 只採連續可見區間。
+   漂移是排程延遲的線索，須與實際操作及 trace 核對，不能單憑數字斷定哪段 JS 阻塞。
 ============================================================================== */
 
 
@@ -126,7 +128,7 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
 
   console.log('\n量測已就緒。');
   console.log('★ 現在請在 SUB Tool 裡按「開啟影音」，等對話框真的出現後按【取消】。');
-  console.log('（最多等 5 分鐘，抓到就會自動印結果）\n');
+  console.log('（最多等 10 分鐘，抓到就會自動印結果）\n');
 
   /* 只認【開啟影音】那一輪。
 
@@ -168,23 +170,23 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
   dlg.forEach(x => console.log(`  ${hhmmssms(x.t)}  ${x.phase}` +
     (x.canceled !== undefined ? `  canceled=${x.canceled}` : '')));
 
-  console.log('\n主行程被擋住的時段（>200ms）：');
+  console.log('\n主行程採樣延遲（>200ms，原因待查）：');
   if (!lagMain.length) console.log('  （沒有）');
-  lagMain.forEach(l => console.log(`  ${hhmmssms(l.t)}  擋住 ${l.blocked} ms`));
+  lagMain.forEach(l => console.log(`  ${hhmmssms(l.t)}  採樣延遲 ${l.blocked} ms`));
   console.log('\nrenderer 可見區間的採樣延遲（>200ms，原因待查）：');
   if (droppedRend) console.log(`  （只保留最近 600 筆；略過 ${droppedRend} 筆）`);
   if (!lagRend.length) console.log('  （沒有）');
-  lagRend.forEach(l => console.log(`  ${hhmmssms(l.t)}  擋住 ${l.blocked} ms`));
+  lagRend.forEach(l => console.log(`  ${hhmmssms(l.t)}  採樣延遲 ${l.blocked} ms`));
 
-  console.log('\n================ 結論 ================');
+  console.log('\n================ 量測摘要 ================');
   if (c0 && d0) {
     const a = d0.t - c0.t;
-    console.log(`  點擊 → 主行程進入 showOpenDialog： ${a} ms   ← 這一段是我們的 JS`);
-    if (d1) console.log(`  進入 → 你按下取消：             ${d1.t - d0.t} ms   ← 含 Windows 畫視窗＋你操作`);
+    console.log(`  點擊 → 主行程進入 showOpenDialog： ${a} ms   ← 含事件處理、IPC 與排程`);
+    if (d1) console.log(`  呼叫 → Promise 回覆：             ${d1.t - d0.t} ms   ← 含原生對話框、使用者操作與排程`);
     console.log('');
     console.log(a > 3000
-      ? '  → 卡在我們的程式。看上面哪一條執行緒被擋住，時間對得起來的就是兇手。'
-      : '  → 我們的 JS 幾乎沒花時間就把控制權交給 Windows 了；等待發生在對話框自己那一段。');
+      ? '  → 呼叫前的等待較長；請對照上方採樣與 trace，查明事件處理、IPC 或排程的實際耗時。'
+      : '  → 本輪呼叫前的間隔較短；其他等待仍須另查，不能排除呼叫後的 JavaScript 或作業系統工作。');
   } else {
     console.log('  沒有抓到完整的一輪。有按到「開啟影音」嗎？');
     console.log(`  （clickLog ${clk.length} 筆、dlgLog ${dlg.length} 筆）`);

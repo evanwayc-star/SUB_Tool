@@ -30,6 +30,34 @@ beforeEach(()=>{
 afterEach(()=>{ui.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('字幕匯入工作歸屬',()=>{
+  it.each(['new','0'])('合併多軌 ASS 由匯入視窗提交到 %s 目的軌，保留全部原稿與外觀',async target=>{
+    const {SubFormats}=await import('../src/formats.js');
+    const {effStyle}=await import('../src/substyle.js');
+    const {getExactFps}=await import('../src/time.js');
+    State.fps=29.97;
+    const exact=getExactFps(State.fps);
+    const tracks=[{name:'主字幕',fontSize:70,lineSpacing:1.7},{name:'直書',vertical:true,color:'#ffee00'}];
+    const cues=[
+      {start:30/exact,end:60/exact,text:'主字幕',track:0},
+      {start:70/exact,end:100/exact,text:'直書\n原文',track:1,style:{fontSize:66}},
+      {start:0,end:0,text:'尚未定時',track:1,timed:false},
+    ];
+    const parsed=subio._parseSubtitleText(SubFormats.toASS(cues,State.fps,tracks,1920,1080,{includeMetadata:true}),'ass');
+    subio._openImportModal('合併 ASS',parsed,'ass');
+    expect(document.getElementById('modalBody').textContent).toContain('合併到所選目的軌');
+    expect(document.getElementById('importPresetSel')).toBeNull();
+    document.getElementById('importTkSel').value=target;
+    document.querySelector('#modalFoot button.primary').click();
+    expect(State.cues.map(cue=>({start:cue.start,end:cue.end,text:cue.text,timed:cue.timed})))
+      .toEqual(cues.map(cue=>({start:cue.start,end:cue.end,text:cue.text,timed:cue.timed!==false})));
+    for(let index=0;index<cues.length;index++){
+      const imported=State.cues[index];
+      expect(effStyle(imported,State.tracks[imported.track])).toEqual(effStyle(cues[index],tracks[cues[index].track]));
+    }
+    expect(new Set(State.cues.map(cue=>cue.track)).size).toBe(1);
+    expect(workflow.record).toHaveBeenCalledOnce();
+  });
+
   it('短 SRT 匯入較低 FPS 後仍保有一格，TXT 保留未定時',()=>{
     State.fps=24;
     const parsed=subio._parseSubtitleText('1\n00:00:00,067 --> 00:00:00,100\n一格\n','srt');

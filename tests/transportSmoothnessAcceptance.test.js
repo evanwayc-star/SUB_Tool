@@ -5,6 +5,33 @@ import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const { assertSmooth, killTree } = require('../scripts/acceptance/verify-transport-smoothness.js');
+const { evaluateReverseShuttle } = require('../scripts/acceptance/verify-reverse-shuttle.js');
+
+describe('倒帶驗收的完整觀察區間', () => {
+  const samples = position => Array.from({ length: 56 }, (_, index) => {
+    const time = index * 0.04;
+    return { wall: index * 40, presented: position(time), display: position(time),
+      reverseMuted: true, nativeReverse: true, reverseProxy: true };
+  });
+  const forward = () => samples(time => 8 + time);
+
+  it('接受全程往正確方向前進、沒有停頓的正播與倒帶', () => {
+    expect(evaluateReverseShuttle(forward(), samples(time => 16 - time)).ok).toBe(true);
+  });
+
+  it.each(['start', 'end'])('拒絕只在 %s 端停頓一秒的倒帶', edge => {
+    const reverse = samples(time => edge === 'start'
+      ? 16 - Math.max(0, time - 1) : 16 - Math.min(time, 1.2));
+    const result = evaluateReverseShuttle(forward(), reverse);
+    expect(result.ok).toBe(false);
+    expect(result.reverse.maxGapMs).toBeGreaterThanOrEqual(1000);
+  });
+
+  it('拒絕先倒帶再正播、整段反而向前的取樣', () => {
+    const reverse = samples(time => time <= 0.6 ? 16 - time : 15.4 + time - 0.6);
+    expect(evaluateReverseShuttle(forward(), reverse).ok).toBe(false);
+  });
+});
 
 function processExists(pid) {
   try {

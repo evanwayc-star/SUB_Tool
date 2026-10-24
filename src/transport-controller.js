@@ -895,6 +895,7 @@ export function getAdjacentCue({ cues, selectedId, listTrack, activeSubTrack, cu
       if (isPlaying) idx -= 1;
     } else {
       idx = list.findIndex(c => c.start > currentTime + 1e-4);
+      if (idx < 0) return null;
     }
   }
 
@@ -916,6 +917,7 @@ export function getCueInMinusFrames({ cues, selectedId, listTrack, currentTime, 
       idx = list.filter(c => c.start < currentTime - 1e-4).length - 1;
     } else {
       idx = list.findIndex(c => c.start > currentTime + 1e-4);
+      if (idx < 0) return null;
     }
   }
 

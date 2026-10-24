@@ -131,6 +131,10 @@ mpv 暫停仍可能持續回報非格網 `time-pos`。`TimelineTransport.observe
 
 影片與外音共用 `sequence-time.js` 的純映射，公式見[技術架構說明 §0.5](技術架構說明.md#05-時間域外部是時間軸時間播放器是來源時間)。辨識來源秒數先轉回時間軸；反轉後仍以升冪起訖建立字幕。辨識工作的凍結格網及提交政策由既有 session／commit 介面持有，不因視窗重開改變。
 
+固定畫面的預設來源格先由 `Seq.toSource()` 映射目前時間軸位置，再限制來源的半開 Out 與 EOF；不能先在時間軸尾端扣掉一個來源格，否則變速及反轉會選錯首末格。
+
+字幕導航在無選取時依目前時間軸位置尋找下一句；後方沒有字幕便保持原位，不循環跳回首句。提前五格的入口也須先找到目標，再依精確專案格網退回五格。
+
 ### I8. 監看 TC 與燒入 TC 分工
 
 | 類型 | 時間及格率來源 |
@@ -172,13 +176,14 @@ sequenceDiagram
 | `shared/delivery-frame-rate.cjs` | 精確 NTSC 有理數與交付格率對照 |
 | `state.js` | 專案 FPS／DF 及明確格網變更的 revision |
 | `sequence-time.js`、`sequence.js` | 影片及外音的速度／反轉時間映射與片段查詢 |
+| `clip-model.js` | 片段編輯交易及固定畫面預設來源格的 Out／EOF 限制 |
 | `subtitle-model.js` | 字幕端點的格網與至少一格准入 |
 | `tcparse.js` | 時碼輸入、分量上下鍵及組字按鍵保護 |
 | `subio.js` | FPS 轉換與批次時長，使用模型的合法上下限 |
 | `media-presentation-core.js` | 請求、取消、pending、播放意圖及畫格 hold |
 | `media.js` | `displayTime()`、presenter 選擇、來源切換與音訊生命週期 |
 | `media-player-adapter.js` | HTML／mpv 操作、來源時鐘及延後定位 |
-| `transport-controller.js` | 逐格、JKL、倒帶 session 與按鍵當下的 In／Out |
+| `transport-controller.js` | 逐格、JKL、倒帶 session、字幕導航及按鍵當下的 In／Out |
 | `timeline-interaction-engine.js` | jump／drag 意圖；不私建播放器時鐘 |
 | `media-loader.js` | 載入與 mpv listener 的工作資格 |
 | `media.js` 的 `observeMpvEvent()` | mpv 來源讀數、暫停抖動與播放狀態裁定 |

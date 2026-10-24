@@ -101,6 +101,56 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spaw
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it('pipe 的 UTF-8 字元跨 byte 分塊時，事件內容仍保持完整', async () => {
+    const { host, sockets, events } = make();
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    try {
+      const message = { event: 'property-change', name: 'media-title', data: '中文素材 🎬' };
+      const bytes = Buffer.from(JSON.stringify(message) + '\n');
+      for (const byte of bytes) sockets[0].emit('data', Buffer.from([byte]));
+      expect(events.at(-1)).toEqual(message);
+    } finally { host.quit(); }
+  });
+
+  it('中文來源的 path 回覆跨 UTF-8 分塊，仍能確認初始畫格已載入', async () => {
+    const { host } = make({ socketFactory: () => {
+      const socket = socketThatReportsDuration();
+      const emit = socket.emit.bind(socket);
+      socket.emit = (event, ...values) => {
+        if (event !== 'data') return emit(event, ...values);
+        for (const byte of values[0]) emit('data', Buffer.from([byte]));
+        return true;
+      };
+      return socket;
+    } });
+    let loaded = false;
+    const launch = host.launch({ src: 'D:/媒體/中文素材.mxf' }).then(result => {
+      loaded = true;
+      return result;
+    });
+    try {
+      for (let index = 0; index < 50; index++) await Promise.resolve();
+      expect(loaded).toBe(true);
+      await expect(launch).resolves.toEqual({ ok: true, duration: 123.5 });
+    } finally { host.quit(); await launch.catch(() => {}); }
+  });
+
+  it('換連線丟棄舊 JSON 與半個 UTF-8 字元，舊 pipe 尾段不能污染新來源', async () => {
+    const { host, sockets, events } = make();
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const oldMessage = Buffer.from(JSON.stringify({ event: 'property-change', name: 'media-title', data: '舊來源' }) + '\n');
+    const split = oldMessage.indexOf(Buffer.from('舊')) + 1;
+    sockets[0].emit('data', oldMessage.subarray(0, split));
+    await host.launch({ src: 'D:/media/latest.mxf' });
+    try {
+      sockets[0].emit('data', oldMessage.subarray(split));
+      const message = { event: 'property-change', name: 'media-title', data: '新來源' };
+      sockets[1].emit('data', Buffer.from(JSON.stringify(message) + '\n'));
+      expect(events.at(-1)).toEqual(message);
+      expect(events).not.toContainEqual({ event: 'property-change', name: 'media-title', data: '舊來源' });
+    } finally { host.quit(); }
+  });
+
   it.each([2, 8])('倒播暫停 %i 路 native 混音，正播精確恢復原圖並可再次倒播', async count => {
     const {host,sockets,children}=make();
     await host.launch({src:'D:/media/multi.mxf',audio:Array.from({length:count},()=>({}))});

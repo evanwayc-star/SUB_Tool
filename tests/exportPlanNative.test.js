@@ -270,6 +270,7 @@ describe.skipIf(!fs.existsSync(FFMPEG))('合法字型路徑的真 FFmpeg 內容�
               const runner=createDeliveryRunner({
                 queue:{assertJobCapabilities(){},registerActiveJob(){},clearActiveJob(){},reportProgress(_id,data){progress.push(data);return true;}},
                 queueDir:()=>root,tempDir:directory,
+                nativeCapabilities:{assertReady:async()=>{}},
                 fonts:{timecodeFile:()=>font},
                 mediaProbe:()=>({hasAudio:async()=>false,audioBitrates:async()=>[]}),
                 encoder:{proresArgs:()=>['-c:v','prores_ks','-c:a','pcm_s24le']},

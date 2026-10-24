@@ -296,10 +296,10 @@ export function initPresetLibrary({ styleChanged }){
 
       const session = openModal('編輯名稱與資料夾',
         `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">資料夾 (選填，可直接修改)</div>`+
-        `<input type="text" id="__presetGroupRen" list="__presetGroupListRen" value="${escapeHTML(p.group||'')}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`+
+        `<input type="text" id="__presetGroupRen" list="__presetGroupListRen" value="${escapeHTML(p.group||'')}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`+
         `<datalist id="__presetGroupListRen">${groupOpts}</datalist>`+
         `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">樣式名稱</div>`+
-        `<input type="text" id="__presetNameRen" value="${escapeHTML(p.name)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
+        `<input type="text" id="__presetNameRen" value="${escapeHTML(p.name)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
         [
           { label: '儲存', primary: true, act: () => {
             if (!session.isCurrent()) return;

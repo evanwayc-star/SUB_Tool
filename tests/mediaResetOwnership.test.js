@@ -61,13 +61,17 @@ let Media, Wave, State, resetAudioProject, resetPlayerAdapter;
 describe('reset-scoped media ownership', () => {
   it.each(['detach','cached-restore','desktop-restore','web-restore'])('%s 的真實載入入口保留反向二倍速音訊',async kind=>{
     resetAudioProject();
+    const {ensureAudioBusCount,ensureAudioSourceMap}=await import('../src/state.js');
+    ensureAudioBusCount(3);ensureAudioSourceMap('mother',[{sourceStream:0,sourceChannel:0}]);
+    const inheritedBus=State.audioProject.buses[2].id;
+    State.audioProject.sourceMaps.mother.channels[0].busIds=[inheritedBus];
     class ReadyAudio {
       constructor(){this.readyState=1;this.src='';this.duration=10;this.preload='';this._target=new EventTarget();this.pause=vi.fn();this.load=vi.fn();}
       addEventListener(...args){this._target.addEventListener(...args);}
       removeEventListener(...args){this._target.removeEventListener(...args);}
       removeAttribute(name){if(name==='src')this.src='';}
     }
-    const restore={_restore:true,duration:10,in:0,out:10,offset:0,speed:2,reverse:true};
+    const restore={_restore:true,_routingSourceId:'mother',duration:10,in:0,out:10,offset:0,speed:2,reverse:true};
     const oldCreate=Object.getOwnPropertyDescriptor(URL,'createObjectURL');
     const oldRevoke=Object.getOwnPropertyDescriptor(URL,'revokeObjectURL');
     vi.stubGlobal('Audio',ReadyAudio);
@@ -85,6 +89,8 @@ describe('reset-scoped media ownership', () => {
       }else if(kind==='web-restore')asset=await Media.addAudioFile(new File(['test'],'A.wav'),restore);
       else asset=await Media.addAudioFileDesktop('C:/A.mov',{...restore,preferCache:kind==='cached-restore'});
       expect(asset).toMatchObject({speed:2,reverse:true});
+      expect(State.audioProject.sourceMaps[asset.audioSourceId].channels[0].busIds).toEqual([inheritedBus]);
+      expect(State.externalAudioState[0]).not.toHaveProperty('_routingSourceId');
       expect(Media.externalAudio.timelineEnd()).toBe(5);
       expect(Media.audioSourcePlayback(asset.audioSrc,1)).toMatchObject({reverse:true,sourceTime:8,offset:2,rate:2});
       expect(State.duration).toBe(5);
@@ -654,6 +660,141 @@ describe('reset-scoped media ownership', () => {
     expect(State.clips).toHaveLength(2);
     expect(State.clips.every(item => item.audioDetached !== true)).toBe(true);
     cache.mockRestore();
+  });
+
+  it.each([
+    ['offset', clip => { clip.offset = 3; }],
+    ['trim', clip => { clip.in = 1; clip.out = 4; }],
+    ['speed', clip => { clip.speed = 2; }],
+    ['reverse', clip => { clip.reverse = true; }],
+    ['track', clip => { clip.vtrack = 1; }],
+    ['source', clip => { clip.audioSrc = 'clip:replacement'; }],
+    ['mother', clip => { clip._originalPath = 'C:/media/replacement.mov'; }],
+    ['fade', clip => { clip.fadeIn = 1; }],
+    ['effect', clip => { clip.hasAudioLimiter = true; clip.audioLimiterSpec = { max: -6, min: -12 }; }],
+    ['detached', clip => { clip.audioDetached = true; }],
+  ])('解除影音等待期間同一物件的 %s 被修改，只撤銷本次建立的外音', async (_name, change) => {
+    resetAudioProject();
+    const cacheGate = deferred();
+    const clip = {
+      id: 'detach-owned', name: 'A.mov', path: 'C:/media/A.mov', dur: 5,
+      in: 0, out: 5, offset: 0, vtrack: 0, primary: true,
+      audioSrc: 'video', audioSourceId: 'source-A', audioDetached: false,
+    };
+    State.clips = [clip];
+    State.videoTracks = [{ visible: true }, { visible: true }];
+    const existing = Media.createExternalAudioSource({ name: '背景原音', path: 'C:/media/background.wav', duration: 2 });
+    const cache = vi.spyOn(Media, '_addDesktopCachedAudio').mockImplementation(async (path, restore) => {
+      await cacheGate.promise;
+      return Media.createExternalAudioSource({ ...restore, path, fallbackCount: 1 });
+    });
+    try {
+      const detaching = Media.detachClipAudio(clip.id);
+      await vi.waitFor(() => expect(cache).toHaveBeenCalledTimes(1));
+      change(clip);
+      const expected = JSON.stringify(clip);
+      eventMock.emit.mockClear();
+      cacheGate.resolve();
+
+      await expect(detaching).resolves.toBeNull();
+      expect(JSON.stringify(clip)).toBe(expected);
+      expect(Media.externalAudioSources).toEqual([existing]);
+      expect(eventMock.emit.mock.calls.filter(([type]) => type === 'history:record')).toEqual([]);
+    } finally { cache.mockRestore(); }
+  });
+
+  it.each([1, 2])('解除影音第 %i 份音訊等待時提交來源配線，撤銷整批外音並保留新配線', async editAt => {
+    resetAudioProject();
+    const { AudioPipeline, AudioRoutingModel } = await import('../src/audio-routing-engine.js');
+    const first = { id: 'detach-routing-first', name: 'A.mov', path: 'C:/media/A.mov', dur: 10,
+      in: 0, out: 5, offset: 0, vtrack: 0, primary: true, audioSrc: 'video', audioSourceId: 'source-routing' };
+    const second = { ...first, id: 'detach-routing-second', primary: false, in: 5, out: 10, offset: 5 };
+    State.clips = [first, second]; State.videoTracks = [{ visible: true }];
+    AudioPipeline.registerSource(first, [{ sourceStream: 0, sourceChannel: 0 }, { sourceStream: 0, sourceChannel: 1 }], 2);
+    const gate = deferred(); let calls = 0;
+    const cache = vi.spyOn(Media, '_addDesktopCachedAudio').mockImplementation(async (path, restore) => {
+      if (++calls === editAt) await gate.promise;
+      return Media.createExternalAudioSource({ ...restore, path, fallbackCount: 2 });
+    });
+    try {
+      const work = Media.detachClipAudio(first.id);
+      await vi.waitFor(() => expect(cache).toHaveBeenCalledTimes(editAt));
+      const editor = AudioRoutingModel.editProject(State.audioProject, { preview: draft => { State.audioProject = draft; } });
+      const buses = State.audioProject.buses;
+      editor.setRoutes(first.audioSourceId, [
+        { sourceStream: 0, sourceChannel: 0, busId: buses[1].id },
+        { sourceStream: 0, sourceChannel: 1, busId: buses[0].id },
+      ]);
+      expect(editor.commit().saved).toBe(true);
+      const expected = structuredClone(State.audioProject.sourceMaps[first.audioSourceId]);
+      eventMock.emit.mockClear(); gate.resolve();
+
+      await expect(work).resolves.toBeNull();
+      expect(State.clips.every(clip => clip.audioDetached !== true)).toBe(true);
+      expect(Media.externalAudioSources).toEqual([]);
+      expect(State.audioProject.sourceMaps[first.audioSourceId]).toEqual(expected);
+      expect(eventMock.emit.mock.calls.filter(([type]) => type === 'history:record')).toEqual([]);
+    } finally { cache.mockRestore(); }
+  });
+
+  it('解除影音等待期間提交其他來源配線，仍以原來源配線完成整批外音', async () => {
+    resetAudioProject();
+    const { AudioPipeline, AudioRoutingModel } = await import('../src/audio-routing-engine.js');
+    const clip = { id: 'detach-other-route', name: 'A.mov', path: 'C:/media/A.mov', dur: 5,
+      in: 0, out: 5, offset: 0, vtrack: 0, primary: true, audioSrc: 'video', audioSourceId: 'source-unchanged' };
+    State.clips = [clip]; State.videoTracks = [{ visible: true }];
+    AudioPipeline.registerSource(clip, [{ sourceStream: 0, sourceChannel: 0 }, { sourceStream: 0, sourceChannel: 1 }], 2);
+    const expected = structuredClone(State.audioProject.sourceMaps[clip.audioSourceId]);
+    const background = Media.createExternalAudioSource({ name: 'B.wav', path: 'C:/media/B.wav', duration: 2, fallbackCount: 2 });
+    const gate = deferred();
+    const cache = vi.spyOn(Media, '_addDesktopCachedAudio').mockImplementation(async (path, restore) => {
+      await gate.promise;
+      return Media.createExternalAudioSource({ ...restore, path, fallbackCount: 2 });
+    });
+    try {
+      const work = Media.detachClipAudio(clip.id);
+      await vi.waitFor(() => expect(cache).toHaveBeenCalledOnce());
+      const editor = AudioRoutingModel.editProject(State.audioProject, { preview: draft => { State.audioProject = draft; } });
+      editor.setRoutes(background.audioSourceId, [{ sourceStream: 0, sourceChannel: 0, busId: State.audioProject.buses[1].id }]);
+      expect(editor.commit().saved).toBe(true);
+      const changed = structuredClone(State.audioProject.sourceMaps[background.audioSourceId]);
+      gate.resolve();
+
+      const [detached] = await work;
+      expect(clip.audioDetached).toBe(true);
+      expect(State.audioProject.sourceMaps[detached.audioSourceId]).toEqual(expected);
+      expect(State.audioProject.sourceMaps[background.audioSourceId]).toEqual(changed);
+      expect(Media.externalAudioSources).toContain(background);
+    } finally { cache.mockRestore(); }
+  });
+
+  it('解除影音等待期間無關字幕與視覺幾何編輯仍可保留並完成音訊', async () => {
+    resetAudioProject();
+    const cacheGate = deferred();
+    const clip = {
+      id: 'detach-unrelated', name: 'A.mov', path: 'C:/media/A.mov', dur: 5,
+      in: 0, out: 5, offset: 0, vtrack: 0, primary: true,
+      audioSrc: 'video', audioSourceId: 'source-A', audioDetached: false,
+    };
+    State.clips = [clip]; State.videoTracks = [{ visible: true }];
+    const cache = vi.spyOn(Media, '_addDesktopCachedAudio').mockImplementation(async (path, restore) => {
+      await cacheGate.promise;
+      return Media.createExternalAudioSource({ ...restore, path, fallbackCount: 1 });
+    });
+    try {
+      const detaching = Media.detachClipAudio(clip.id);
+      await vi.waitFor(() => expect(cache).toHaveBeenCalledTimes(1));
+      clip.scale = 0.5; clip.posX = 0.75;
+      const cue = { id: 'background-cue', start: 1, end: 2, text: '背景字幕' };
+      State.cues.push(cue);
+      cacheGate.resolve();
+
+      const result = await detaching;
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({ offset: 0, in: 0, out: 5 });
+      expect(clip).toMatchObject({ scale: 0.5, posX: 0.75, audioDetached: true });
+      expect(State.cues).toContain(cue);
+    } finally { cache.mockRestore(); }
   });
 
   it('does not register clip audio after proxy lookup loses reset ownership', async () => {

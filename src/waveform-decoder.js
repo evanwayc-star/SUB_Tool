@@ -96,6 +96,7 @@ export const Wave = {
         runtimeSourceId:runtime||key,
         mix:{peaks:null,path:null,loading:null},
         channels:new Map(),
+        channelsRegistered:false,
         vocals:{peaks:null,loading:null,controller:null,percent:0,label:'',error:null},
         vocalIntent:null,
         vocalRevision:0,
@@ -113,7 +114,7 @@ export const Wave = {
   },
   _ensureSourceWaveforms(source){
     const state=this._sourceState(source,true);
-    if(!state||state.channels.size) return state;
+    if(!state||state.channelsRegistered||state.channels.size) return state;
     const key=this._sourceKey(source);
     const runtime=this._runtimeSourceKey(source);
     const channels=[];
@@ -160,9 +161,11 @@ export const Wave = {
     }
     if(mixPeaks&&mixPeaks.length) state.mix.peaks=mixPeaks;
     if(Array.isArray(channels)){
+      const retained=new Set();
       for(let index=0;index<channels.length;index++){
         const raw=channels[index]||{};
         const desc=this._channelDescriptor(raw,index);
+        retained.add(desc.key);
         const old=state.channels.get(desc.key);
         const nextPath=raw.file||raw.path||old?.path||null;
         const nextPeaks=raw.peaks||null;
@@ -177,6 +180,13 @@ export const Wave = {
             loading:null
           });
         }else old.label=raw.label||old.label||`Ch ${desc.sourceChannel+1}`;
+      }
+      // An explicit list describes the complete source, including zero audio.
+      // Removing the entry also revokes any decode still waiting for its file.
+      for(const key of state.channels.keys()) if(!retained.has(key)) state.channels.delete(key);
+      state.channelsRegistered=true;
+      for(const field of ['selection','originalSelection']){
+        if(state[field]!=='mix'&&state[field]!=='vocals'&&!state.channels.has(state[field])) state[field]='mix';
       }
     }
     this._restoreSourceVocals(source,state);

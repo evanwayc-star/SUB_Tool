@@ -6,6 +6,7 @@
 
    對應 docs/技術架構說明.md 的桌面／網頁分支，以及架構審查候選項 6。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JSDOM } from 'jsdom';
 import { makeSettingsStore, SETTINGS_SLOTS } from '../src/settings-store.js';
 
 /* 假的 localStorage：只要有 getItem/setItem 就夠。 */
@@ -105,6 +106,27 @@ describe('桌面 adapter（IPC）', () => {
 });
 
 describe('防禦', () => {
+  it.each([false, true])('瀏覽器拒絕取得 localStorage 時仍可建立設定儲存，desktop=%s', async desktop => {
+    const opaque = new JSDOM('').window;
+    const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    const readStorage = vi.fn(() => opaque.localStorage);
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, get: readStorage });
+    const desk = desktop ? {
+      configLoad: vi.fn(async () => ({ autoSelect: false })),
+      configSave: vi.fn(async () => true),
+    } : null;
+    try {
+      const store = makeSettingsStore(desk);
+      expect(await store.load('config')).toEqual(desktop ? { autoSelect: false } : null);
+      expect(await store.save('config', { autoSelect: false })).toBe(desktop);
+      if (desktop) expect(readStorage).not.toHaveBeenCalled();
+    } finally {
+      if (previous) Object.defineProperty(globalThis, 'localStorage', previous);
+      else delete globalThis.localStorage;
+      opaque.close();
+    }
+  });
+
   it('未知的設定名回 null / false，不丟例外', async () => {
     const store = makeSettingsStore(null, fakeStorage());
     expect(await store.load('不存在')).toBeNull();

@@ -38,7 +38,7 @@ describe('桌面驗收的設定隔離契約', () => {
     }
     expect(launches.length).toBeGreaterThanOrEqual(17);
     expect(mainTestLaunches.sort()).toEqual([
-      'electronQueueLifecycle.test.js', 'electronQueueLifecycle.test.js', 'localResourceSecurity.test.js',
+      'electronQueueLifecycle.test.js', 'electronQueueLifecycle.test.js', 'imageCanvasCorsNative.test.js', 'localResourceSecurity.test.js',
       'previewSubtitleMenu.test.js',
     ]);
   });

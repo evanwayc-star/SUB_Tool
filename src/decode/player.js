@@ -27,6 +27,7 @@ import { demuxFile, demuxIndex, presentationSamples, SampleReader, MemReader } f
 import { timestampOffset, sourceFrameTargetUs } from '../../shared/media-source-clock.cjs';
 import { keyIndexBefore } from './sample-index.js';
 import { imageBoxOnStage, trackFrame } from '../image-compositor-engine.js'; // 預覽／mpv guide／匯出 三路共用的唯一幾何公式
+import { setMediaElementSource } from '../media-intake-engine.js';
 
 const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺佇列、省記憶體）
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
@@ -267,7 +268,7 @@ export const WCPreview = {
       const image=new Image();entry={image,state:'loading'};this._images.set(url,entry);
       image.onload=()=>{if(this._images.get(url)===entry) entry.state=image.naturalWidth>0?'ready':'failed';};
       image.onerror=()=>{if(this._images.get(url)===entry) entry.state='failed';};
-      image.src=url;
+      setMediaElementSource(image,url);
     }
     return entry;
   },

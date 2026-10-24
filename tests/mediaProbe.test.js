@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { spawn } from 'node:child_process';
@@ -9,6 +10,16 @@ import { parse } from 'acorn';
 import { describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
+
+function removeProbeTempRoot(root) {
+  const resolved = fs.realpathSync(root);
+  const temp = fs.realpathSync(os.tmpdir());
+  const key = value => process.platform === 'win32' ? value.toLowerCase() : value;
+  if (key(path.dirname(resolved)) !== key(temp) || !path.basename(resolved).startsWith('subtool-probe-')) {
+    throw new Error('拒絕清除不屬於 probe 測試的暫存目錄');
+  }
+  fs.rmSync(resolved, { recursive: true, force: true });
+}
 
 function completedProcess({ stdout = '', stderr = '', status = 0 } = {}) {
   const child = new EventEmitter();
@@ -29,7 +40,7 @@ describe('媒體探測 interface', () => {
     const child = new EventEmitter();
     Object.assign(child, { pid: 123456, exitCode: null, signalCode: null,
       stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => false) });
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess: () => child });
     const failure = Object.assign(new Error('kill EACCES'), { code: 'EACCES' });
     let settled = false;
     const work = probe.describe('source.mov').catch(error => { settled = true; return error; });
@@ -52,7 +63,7 @@ describe('媒體探測 interface', () => {
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
       children.push(child); return child;
     });
-    const probe = createMediaProbe({ executable: 'ffprobe', maxConcurrent: 1, spawnProcess });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', maxConcurrent: 1, spawnProcess });
     const first = probe.describe('first.mov').catch(error => error);
     const shared = probe.describe('first.mov').catch(error => error);
     const queued = probe.describe('queued.mov').catch(error => error);
@@ -81,7 +92,7 @@ describe('媒體探測 interface', () => {
   it('開始前即 shutdown 的已准入 request 不會晚到啟動 native process', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
     const spawnProcess = vi.fn(() => completedProcess());
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess });
     const outcome = probe.describe('admitted.mov').catch(error => error);
     await probe.cancelAllAndWait();
     expect(await outcome).toMatchObject({ code: 'PROBE_ABORTED' });
@@ -92,7 +103,7 @@ describe('媒體探測 interface', () => {
   it('error 事件不能代替 native close；錯誤工作與 shutdown 都等 owner 確認關閉', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess: () => child });
     let settled = false;
     const failure = new Error('native runtime error');
     const outcome = probe.describe('error.mov').catch(error => { settled = true; return error; });
@@ -111,7 +122,7 @@ describe('媒體探測 interface', () => {
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
     const spawnProcess = vi.fn().mockImplementationOnce(() => child)
       .mockImplementation(() => completedProcess({ stdout: '{"streams":[]}' }));
-    const probe = createMediaProbe({ executable: 'ffprobe', terminationGraceMs: 10, spawnProcess });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', terminationGraceMs: 10, spawnProcess });
     const outcome = probe.describe('stuck.mov').catch(error => error);
     await vi.advanceTimersByTimeAsync(0);
     const closing = probe.cancelAllAndWait({ timeoutMs: 40 }).catch(error => error);
@@ -135,7 +146,7 @@ describe('媒體探測 interface', () => {
     vi.useFakeTimers();
     const { createMediaProbe } = require('../electron/media-probe');
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
-    const probe = createMediaProbe({ executable: 'ffprobe', terminationGraceMs: 10, spawnProcess: () => child });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', terminationGraceMs: 10, spawnProcess: () => child });
     const result = probe[method]('stuck.mov').catch(error => error);
     await vi.advanceTimersByTimeAsync(0);
     const closing = probe.cancelAllAndWait();
@@ -148,7 +159,7 @@ describe('媒體探測 interface', () => {
   it('實際 ffprobe IPC→before-quit 等真 native child close 才退出；失敗退出會恢復 probe owner', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
     let child, invoke, beforeQuit;
-    const probe = createMediaProbe({ executable: 'adapter', spawnProcess: () => {
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'adapter', spawnProcess: () => {
       child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
       return child;
     } });
@@ -161,7 +172,7 @@ describe('媒體探測 interface', () => {
     const context = { Promise, console: { error: vi.fn() }, mediaProbe: probe, requireReadablePath: vi.fn(),
       ipcMain: { handle: (_, handler) => { invoke = handler; } }, app: { on: (_, handler) => { beforeQuit = handler; }, quit },
       _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false, audioNormalizationJobs: new Map(),
-      ffmpegExecution: owner(), speechCompressionRuntime: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(),
+      ffmpegExecution: owner(), deliveryCapabilities: owner(), speechCompressionRuntime: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(),
       QueueManager: { prepareForShutdown: done, cancelShutdown: done }, clipAudioCache: { waitForIdle: done },
       clipFrameCache: { waitForIdle: done },
       screenshotOutput: { close: done, resume: done }, mediaIntakeRuntime: { close: done }, mainWin: null,
@@ -211,7 +222,7 @@ describe('媒體探測 interface', () => {
         queueMicrotask(() => child.emit('close', null, 'SIGTERM'));
       });
       const { createMediaProbe } = require('../electron/media-probe');
-      const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+      const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess: () => child });
       const result = probe.describe('D:/media/slow-but-valid.mov').catch(error => error);
 
       await vi.advanceTimersByTimeAsync(16000);
@@ -234,10 +245,10 @@ describe('媒體探測 interface', () => {
     child.kill = vi.fn();
     const controller = new AbortController();
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess: () => child });
     let settled = false;
     const result = probe[method]('D:/media/slow.mxf', { signal: controller.signal }).catch(error => { settled = true; return error; });
-    await Promise.resolve();
+    await vi.waitFor(() => expect(child.listenerCount('close')).toBe(1));
     controller.abort();
     expect(child.kill).toHaveBeenCalledOnce();
     await Promise.resolve();
@@ -270,7 +281,7 @@ describe('媒體探測 interface', () => {
         return child;
       });
       const { createMediaProbe } = require('../electron/media-probe');
-      const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, timeoutMs: 15000 });
+      const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess, timeoutMs: 15000 });
       const results = Promise.all(['a.mov', 'b.mxf', 'c.mp4', 'd.mov'].map(file =>
         probe.describe(`D:/media/${file}`).catch(error => error)));
 
@@ -296,10 +307,10 @@ describe('媒體探測 interface', () => {
       return child;
     });
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess });
     const first = probe.describe('D:/media/master.mov');
     const second = probe.describe('D:/media/master.mov');
-    await Promise.resolve();
+    await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalledTimes(1));
     expect(spawnProcess).toHaveBeenCalledTimes(1);
     children[0].stdout.end(JSON.stringify({ format: { duration: '12' }, streams: [] }));
     children[0].emit('close', 0, null);
@@ -307,11 +318,124 @@ describe('媒體探測 interface', () => {
     await expect(second).resolves.toMatchObject({ duration: 12 });
 
     const next = probe.describe('D:/media/master.mov');
-    await Promise.resolve();
+    await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalledTimes(2));
     expect(spawnProcess).toHaveBeenCalledTimes(2);
     children[1].stdout.end(JSON.stringify({ format: { duration: '24' }, streams: [] }));
     children[1].emit('close', 0, null);
     await expect(next).resolves.toMatchObject({ duration: 24 });
+  });
+
+  it('同路徑母素材被替換後，新探測不共用舊 descriptor，舊工作也不發布過期資訊', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-probe-identity-'));
+    const source = path.join(root, 'source.mov');
+    fs.writeFileSync(source, 'old SD mother source');
+    const child = new EventEmitter();
+    child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
+    const spawnProcess = vi.fn().mockReturnValueOnce(child).mockImplementation(() => completedProcess({
+      stdout: JSON.stringify({ format: { duration: '1' }, streams: [{ codec_type: 'video', width: 1280, height: 720 }] }),
+    }));
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const old = probe.describe(source).catch(error => error);
+    let next;
+    try {
+      await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalledOnce());
+      fs.writeFileSync(source, 'replacement HD mother source');
+      next = probe.describe(source);
+      child.stdout.end(JSON.stringify({ format: { duration: '1' }, streams: [{ codec_type: 'video', width: 320, height: 180 }] }));
+      child.emit('close', 0);
+      await expect(next).resolves.toMatchObject({ video: { width: 1280, height: 720 } });
+      expect(await old).toMatchObject({ code: 'PROBE_SOURCE_CHANGED' });
+      expect(spawnProcess).toHaveBeenCalledTimes(2);
+    } finally {
+      child.emit('close', 0);
+      await Promise.allSettled([old, next]);
+      await probe.cancelAllAndWait();
+      removeProbeTempRoot(root);
+    }
+  });
+
+  it.each(['hasAudio', 'audioBitrates'])('%s 來源不存在時不得發布保守 fallback', async method => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-probe-missing-'));
+    const spawnProcess = vi.fn();
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    try {
+      await expect(probe[method](path.join(root, 'missing.mov'))).rejects.toMatchObject({
+        code: 'PROBE_SOURCE_UNAVAILABLE', cause: { code: 'ENOENT' },
+      });
+      expect(spawnProcess).not.toHaveBeenCalled();
+    } finally { await probe.cancelAllAndWait(); removeProbeTempRoot(root); }
+  });
+
+  it.each(['hasAudio', 'audioBitrates'].flatMap(method => ['replace', 'remove'].map(action => [method, action])))
+  ('%s 探測期間來源 %s，不得把舊資訊或 fallback 當成有效結果', async (method, action) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-probe-changed-'));
+    const source = path.join(root, 'source.mov');
+    fs.writeFileSync(source, 'old mother source');
+    const child = new EventEmitter();
+    child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn();
+    const spawnProcess = vi.fn(() => child);
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const pending = probe[method](source);
+    try {
+      await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalledOnce());
+      if (action === 'replace') fs.writeFileSync(source, 'replacement mother source');
+      else fs.unlinkSync(source);
+      child.stderr.end('old input failed'); child.emit('close', 1);
+      await expect(pending).rejects.toMatchObject({ code: action === 'replace' ? 'PROBE_SOURCE_CHANGED' : 'PROBE_SOURCE_UNAVAILABLE' });
+    } finally {
+      child.emit('close', 1); await pending.catch(() => {}); await probe.cancelAllAndWait();
+      removeProbeTempRoot(root);
+    }
+  });
+
+  it.each(['before', 'after'])('%s native 的母素材取樣也受 shutdown 屏障保護，resume 不會復活舊工作', async phase => {
+    let entered, release, reads = 0;
+    const sampling = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const fingerprintSource = vi.fn(() => {
+      reads++;
+      if (reads === (phase === 'before' ? 1 : 2)) { entered(); return gate; }
+      return 'stable mother source';
+    });
+    const spawnProcess = vi.fn(() => completedProcess({ stdout: '{"streams":[]}' }));
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, fingerprintSource });
+    const pending = probe.describe('mother.mov').catch(error => error);
+    await sampling;
+    let closed = false;
+    const closing = probe.cancelAllAndWait().then(() => { closed = true; });
+    expect(probe.resume()).toBe(false);
+    await Promise.resolve(); expect(closed).toBe(false);
+    release('stable mother source');
+    expect(await pending).toMatchObject({ code: 'PROBE_ABORTED' });
+    await closing;
+    expect(spawnProcess).toHaveBeenCalledTimes(phase === 'before' ? 0 : 1);
+    expect(probe.resume()).toBe(true);
+    await expect(probe.describe('mother.mov')).resolves.toMatchObject({ audio: [] });
+    await probe.cancelAllAndWait();
+  });
+
+  it('caller 在母素材取樣等待期間取消，不會遲到啟動程序或取消另一個 caller', async () => {
+    let entered, release;
+    const sampling = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const fingerprintSource = vi.fn().mockImplementationOnce(() => { entered(); return gate; })
+      .mockReturnValue('stable mother source');
+    const spawnProcess = vi.fn(() => completedProcess({ stdout: '{"streams":[]}' }));
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, fingerprintSource });
+    const controller = new AbortController();
+    const cancelled = probe.describe('mother.mov', { signal: controller.signal }).catch(error => error);
+    await sampling;
+    controller.abort();
+    await expect(probe.describe('mother.mov')).resolves.toMatchObject({ audio: [] });
+    release('stable mother source');
+    expect(await cancelled).toMatchObject({ code: 'PROBE_ABORTED' });
+    expect(spawnProcess).toHaveBeenCalledOnce();
+    await probe.cancelAllAndWait();
   });
 
   it('排隊期間取消不會啟動 ffprobe，後續素材仍可完成探測', async () => {
@@ -322,7 +446,7 @@ describe('媒體探測 interface', () => {
     const spawnProcess = vi.fn().mockReturnValueOnce(child)
       .mockImplementation(() => completedProcess({ stdout: JSON.stringify({ streams: [] }) }));
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, maxConcurrent: 1 });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess, maxConcurrent: 1 });
     const first = probe.describe('D:/media/first.mov');
     await Promise.resolve();
     const controller = new AbortController();
@@ -351,11 +475,11 @@ describe('媒體探測 interface', () => {
       return child;
     });
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess });
     const controller = new AbortController();
     const independent = probe.describe('D:/media/master.mov');
     const cancelled = probe.describe('D:/media/master.mov', { signal: controller.signal }).catch(error => error);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(children).toHaveLength(2));
     controller.abort();
     await expect(cancelled).resolves.toMatchObject({ code: 'PROBE_ABORTED' });
     expect(children[0].kill).not.toHaveBeenCalled();
@@ -368,7 +492,7 @@ describe('媒體探測 interface', () => {
     const spawnProcess = vi.fn().mockImplementationOnce(() => { throw new Error('process unavailable'); })
       .mockImplementation(() => completedProcess({ stdout: JSON.stringify({ format: { duration: '12' }, streams: [] }) }));
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, maxConcurrent: 1 });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess, maxConcurrent: 1 });
     const first = probe.describe('D:/media/master.mov').catch(error => error);
     const shared = probe.describe('D:/media/master.mov').catch(error => error);
     const next = probe.describe('D:/media/next.mov');
@@ -390,14 +514,14 @@ describe('媒體探測 interface', () => {
       return child;
     });
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, maxConcurrent: 3 });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess, maxConcurrent: 3 });
     const firstController = new AbortController();
     const secondController = new AbortController();
     const first = probe.describe('D:/media/a.mov', { signal: firstController.signal }).catch(error => error);
     const second = probe.describe('D:/media/b.mov', { signal: secondController.signal }).catch(error => error);
     const third = probe.describe('D:/media/c.mov');
     const next = probe.describe('D:/media/d.mov').catch(error => error);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(children).toHaveLength(3));
     firstController.abort();
     children[2].stdout.end(JSON.stringify({ streams: [] }));
     children[2].emit('close', 0, null);
@@ -422,7 +546,7 @@ describe('媒體探測 interface', () => {
       child.stderr = new PassThrough();
       child.kill = vi.fn();
       const { createMediaProbe } = require('../electron/media-probe');
-      const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+      const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess: () => child });
       let settled = false;
       const result = probe.describe('D:/media/stuck.mov').catch(error => { settled = true; return error; });
       await vi.advanceTimersByTimeAsync(16000);
@@ -439,7 +563,7 @@ describe('媒體探測 interface', () => {
 
   it('保留壓縮來源音訊相對影像的起始時間，供航空交付去除前導', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => completedProcess({
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess: () => completedProcess({
       stdout: JSON.stringify({ streams: [
         { codec_type: 'video', start_time: '0', disposition: { attached_pic: 1 } },
         { codec_type: 'video', start_time: '2.033367' },
@@ -463,7 +587,7 @@ describe('媒體探測 interface', () => {
         ],
       }),
     }));
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess });
 
     await expect(probe.describe('D:/media/master.mov')).resolves.toEqual({
       duration: 12.5,
@@ -494,7 +618,7 @@ describe('媒體探測 interface', () => {
         .mockReturnValueOnce(child)
         .mockImplementation(() => completedProcess({ stdout: JSON.stringify({ streams: [] }) }));
       const { createMediaProbe } = require('../electron/media-probe');
-      const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess, timeoutMs: 25 });
+      const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess, timeoutMs: 25 });
 
       let firstSettled = false;
       const result = probe.describe('//server/slow/master.mxf').catch(error => {
@@ -521,7 +645,7 @@ describe('媒體探測 interface', () => {
 
   it('音訊存在探測失敗時採保守策略，不會讓 legacy export 靜默漏音訊', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source',
       executable: 'ffprobe',
       spawnProcess: () => completedProcess({ status: 1, stderr: 'network input failed' }),
     });
@@ -531,7 +655,7 @@ describe('媒體探測 interface', () => {
 
   it('交付完成後回報檔案實際寫入的聲道數與 bitrate', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source',
       executable: 'ffprobe',
       spawnProcess: () => completedProcess({
         stdout: JSON.stringify({ streams: [
@@ -554,10 +678,10 @@ describe('媒體探測 interface', () => {
     child.kill = vi.fn(() => queueMicrotask(() => child.emit('close', null, 'SIGTERM')));
     const controller = new AbortController();
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({ executable: 'ffprobe', spawnProcess: () => child });
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess: () => child });
 
     const result = probe.describe('D:/media/slow.mxf', { signal: controller.signal }).catch(error => error);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(child.listenerCount('close')).toBe(1));
     controller.abort();
 
     expect(child.kill).toHaveBeenCalledTimes(1);
@@ -574,7 +698,7 @@ describe('媒體探測 interface', () => {
     try {
       const controller = new AbortController();
       const { createMediaProbe } = require('../electron/media-probe');
-      const probe = createMediaProbe({
+      const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source',
         executable: 'ffprobe',
         spawnProcess,
         terminationGraceMs: 50,
@@ -583,7 +707,7 @@ describe('媒體探測 interface', () => {
       const result = probe.describe('D:/media/stuck.mov', { signal: controller.signal })
         .catch(error => { outcome = error; return error; });
 
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
       expect(spawnProcess).toHaveBeenCalledTimes(1);
       controller.abort();
       await vi.advanceTimersByTimeAsync(50);
@@ -604,7 +728,7 @@ describe('媒體探測 interface', () => {
 
   it('malformed ffprobe JSON 以穩定錯誤碼拒絕', async () => {
     const { createMediaProbe } = require('../electron/media-probe');
-    const probe = createMediaProbe({
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source',
       executable: 'ffprobe',
       spawnProcess: () => completedProcess({ stdout: '{broken' }),
     });

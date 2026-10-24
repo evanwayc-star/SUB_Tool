@@ -392,15 +392,14 @@ function tlContextMenuHandler(e){
   if(audioEl){
     e.preventDefault();
     const context=audioMenuContext(audioEl);
-    const {source,external,assetId,sourceId,runtimeSourceId,sourceName,filePath,locked}=context;
+    const {source,external,assetId,sourceId,sourceName,filePath,locked}=context;
     if(external) selectExternalAudioClip(assetId,{redraw:false});
-    const recognitionTracks=typeof Media.sourceChannels==='function' ? Media.sourceChannels(runtimeSourceId) : [];
     const start=Math.max(0,Number(audioEl.dataset.audioStart)||0);
     const end=Math.max(start,Number(audioEl.dataset.audioEnd)||start);
     const playhead=Media.displayTime();
     const enabled=source?.enabled!==false&&audioEl.dataset.audioEnabled!=='false';
     const wave=sourceWaveMenuState(sourceId);
-    const recognitionSource=source ? {...source,recognitionTracks} : {
+    const recognitionSource=source || {
       id:external?assetId:'primary-audio',
       name:sourceName||State.mediaName||'主要音訊',
       in:external?start:0,
@@ -410,7 +409,6 @@ function tlContextMenuHandler(e){
       primary:!external,
       path:filePath||State.mediaPath||State.clips?.[0]?.path||null,
       blob:State.mediaFile||State.mediaBlob||State.clips?.[0]?.blob||null,
-      recognitionTracks,
     };
     const resolvedTarget = external
       ? (Media.externalAudio?.find?.(assetId) || (State.externalAudioState || []).find(a => a.id === assetId))

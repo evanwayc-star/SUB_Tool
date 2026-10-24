@@ -9,6 +9,7 @@
    ============================================================================== */
 import { State, newTrack, syncTrackCount, newId, setSelection, IS_DESKTOP } from './state.js';
 import { AudioEngine } from './audio-engine.js';
+import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { snapTimeToFrame, secToEncore } from './time.js';
 import { sortCues, hasActiveCueEdit } from './subtitle-model.js';
@@ -27,25 +28,8 @@ import {
   startAsrWork
 } from './speech-recognition-session.js';
 import {
-  BUILTIN_MODELS,
   DEFAULT_AZURE_SPEECH_REGION,
-  applyVocalEnhancementFilter,
-  blobToBase64,
-  extractClipFloat32Mono16k,
   combineRecognitionAudioBuffers,
-  encodeWav16kMono,
-  convertAsrSegmentsToTraditionalChinese,
-  loadTransformersPipeline,
-  transcribeWithBuiltinModel,
-  resolveGeminiModel,
-  callGeminiAudioTranscription,
-  parseAzureTranscriptionResponse,
-  callAzureSpeechTranscription,
-  parseElevenLabsTranscriptionResponse,
-  callElevenLabsSpeechTranscription,
-  callWhisperApi,
-  findSilenceSplitPoint,
-  planWhisperCloudChunks,
   transcribeAudioStream
 } from './speech-recognition-engine.js';
 
@@ -197,6 +181,24 @@ export function saveAsrConfig(conf) {
 }
 
 const ALL_RECOGNITION_SOURCE_CHANNELS = Object.freeze({ mode: 'all-source-channels' });
+
+// Every caller supplies a source, not playback-track knowledge. Resolve again
+// when accepting work so caches completed after opening the dialog are included.
+function captureRecognitionSource(source) {
+  const runtimeSource=source.audioSrc||source.source||(source.primary?'video':null);
+  const live=(Media.tracks||[]).filter(track=>source.audioSourceId
+    ? track.audioSourceId===source.audioSourceId
+    : runtimeSource&&(track.source||'video')===runtimeSource);
+  const tracks=live.length?live:(Array.isArray(source.recognitionTracks)?source.recognitionTracks:[]);
+  return {...source,recognitionTracks:tracks.map(track=>({
+    sourceStream:track.sourceStream,sourceChannel:track.sourceChannel,
+    buffer:track.buffer,file:track.file,_audioEffect:track._audioEffect,
+    // Playback may dispose or replace an element while another source in this
+    // accepted work is being analyzed. Its accepted URL remains source evidence.
+    ...(track.el?{el:{src:track.el.currentSrc||track.el.src||''}}:{}),
+    ...(track.audioElement?{audioElement:{src:track.audioElement.currentSrc||track.audioElement.src||''}}:{}),
+  }))};
+}
 
 function recognitionTrackEntries(clip) {
   return (Array.isArray(clip?.recognitionTracks) ? clip.recognitionTracks : [])
@@ -874,6 +876,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     clearAsrSession();
   }
 
+  // Keep live source references until Start. Background metadata completion may
+  // still update their bounds; display-only channel snapshots do not accept work.
   const clips = [];
   const requested = Array.isArray(preferredSource) ? preferredSource : (preferredSource ? [preferredSource] : []);
   for (const source of requested) {
@@ -900,8 +904,16 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     showToast('⚠️ 目前時間軸上無任何音訊或視訊素材可供辨識。', 3500);
     return;
   }
-
   const conf = getAsrConfig();
+  // Shared controls are a DOM adapter for this dialog's provider drafts.
+  // Switching providers never consults or mutates durable settings.
+  const providerDrafts=new Map();
+  for(const provider of Object.keys(ASR_PROVIDER_UI_META)){
+    const meta=CLOUD_PROVIDER_META[provider],guidance=getAsrGuidanceMeta(provider);
+    providerDrafts.set(provider,{apiKey:meta?(conf[meta.keyField]||''):'',
+      guidance:guidance?.kind==='phrases'?(conf.azurePhraseList||'')
+        :guidance?.kind==='keyterms'?(conf.elevenlabsKeyterms||''):(conf.prompt||'')});
+  }
   const initialProviderMeta = CLOUD_PROVIDER_META[conf.provider] || null;
   const initialTaskMode = conf.taskMode === 'align' ? 'align' : 'transcribe';
   const initialGuidanceMeta = getAsrGuidanceMeta(conf.provider);
@@ -913,7 +925,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
   const cloudProvider = !!initialProviderMeta;
   const selectedApiKey = initialProviderMeta ? (conf[initialProviderMeta.keyField] || '') : '';
   const recognitionAudioChoices = clips.length === 1
-    ? getRecognitionAudioSourceChoices(clips[0])
+    ? getRecognitionAudioSourceChoices(captureRecognitionSource(clips[0]))
     : [{ value: 'all', label: '全部來源聲道混音', selection: ALL_RECOGNITION_SOURCE_CHANNELS }];
   const recognitionAudioSelectionByValue = new Map(
     recognitionAudioChoices.map(choice => [choice.value, choice.selection])
@@ -1378,7 +1390,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           provider,
           builtinModel,
           language,
-          clips,
+          clips:clips.map(captureRecognitionSource),
           transcript,
           transcriptLines,
           recognitionSelection,
@@ -1719,9 +1731,14 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     }
 
     if (providerEl) {
+      let renderedProvider=null;
       const updateProviderUI = () => {
+        if(renderedProvider){
+          providerDrafts.set(renderedProvider,{apiKey:apiKeyEl?.value||'',guidance:promptEl?.value||''});
+        }
         const p = providerEl.value;
-        const c = getAsrConfig();
+        const draft=providerDrafts.get(p)||{apiKey:'',guidance:''};
+        renderedProvider=p;
         const meta = CLOUD_PROVIDER_META[p] || null;
         const uiMeta = ASR_PROVIDER_UI_META[p] || { badge: '', hint: '' };
 
@@ -1747,7 +1764,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         if (elevenLabsAudioEventsRow) elevenLabsAudioEventsRow.style.display = p === 'elevenlabs' ? 'flex' : 'none';
 
         if (meta) {
-          if (apiKeyEl) apiKeyEl.value = c[meta.keyField] || '';
+          if (apiKeyEl) apiKeyEl.value = draft.apiKey;
           if (keyLabelEl) keyLabelEl.textContent = meta.keyLabel;
           if (helpEl) {
             helpEl.textContent = meta.helpLabel;
@@ -1771,11 +1788,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         if (promptLabelEl) promptLabelEl.textContent = guidanceMeta?.label || '';
         if (promptEl) {
           promptEl.placeholder = guidanceMeta?.placeholder || '';
-          promptEl.value = guidanceMeta?.kind === 'phrases'
-            ? (c.azurePhraseList || '')
-            : (guidanceMeta?.kind === 'keyterms'
-              ? (c.elevenlabsKeyterms || '')
-              : (guidanceMeta ? (c.prompt || '') : ''));
+          promptEl.value = guidanceMeta ? draft.guidance : '';
         }
       };
 
@@ -1798,7 +1811,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             card.querySelector('.asr-card-heading').innerHTML=summary.heading;
             card.querySelector('.asr-source-list').innerHTML=summary.items;
           }
-          const newChoices = getRecognitionAudioSourceChoices(chosen);
+          const newChoices = getRecognitionAudioSourceChoices(captureRecognitionSource(chosen));
           const audioSourceSelect = document.getElementById('asrRecognitionAudioSource');
           const audioSourceRow = document.getElementById('asrRecognitionAudioSourceRow');
           if (audioSourceSelect && audioSourceRow) {

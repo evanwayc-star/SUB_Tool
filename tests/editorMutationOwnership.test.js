@@ -254,6 +254,22 @@ describe('editor mutation ownership through public commands',()=>{
       expect(c.freezeTime).toBeUndefined();expect(c.freezeWeb).toBeUndefined();
     }finally{prepared.mockRestore();}
   });
+  it.each([[false,50],[true,2]])('四倍速片尾的固定畫面依來源格長預設影格（反轉：%s）',async(reverse,frame)=>{
+    const c=clip('fast-freeze',{out:2,dur:2,fps:25,speed:4,reverse});State.clips=[c];
+    const display=vi.spyOn(Media,'displayTime').mockReturnValue(.49);
+    try{
+      Menus.showClipFreeze(c);
+      expect(document.getElementById('clipFreezeFrame').value).toBe(String(frame));
+    }finally{display.mockRestore();}
+  });
+  it.each([[true,7.96,1],[false,8,50]])('四分之一倍速片尾保留實際首末來源格（反轉：%s）',async(reverse,time,frame)=>{
+    const c=clip('slow-freeze',{out:2,dur:4,fps:25,speed:.25,reverse});State.clips=[c];
+    const display=vi.spyOn(Media,'displayTime').mockReturnValue(time);
+    try{
+      Menus.showClipFreeze(c);
+      expect(document.getElementById('clipFreezeFrame').value).toBe(String(frame));
+    }finally{display.mockRestore();}
+  });
   it.each([[2.033333,61],[2.066667,62]])('最後一幀以來源 FPS 對齊，%s 秒的固定視窗只允許 %s 格',async(duration,frames)=>{
     const {clipFreezeTarget}=await import(ROOT+'/src/clip-model.js');
     const c=clip('partial',{out:duration,dur:duration,fps:30,reverse:true});State.clips=[c];

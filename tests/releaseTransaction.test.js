@@ -90,6 +90,35 @@ afterEach(() => {
 });
 
 describe('release transaction', () => {
+  it.each([
+    '2026-02-30', '2026-04-31', '2026-02-29', '2100-02-29',
+    '2026-00-10', '2026-13-01', '2026-10-00', '2026-10-32',
+  ])('不存在的曆日 %s 在三檔寫入前拒絕', date => {
+    const rootDir = createRepositoryFixture();
+    const before = releaseContents(rootDir);
+
+    expect(() => prepareRelease({
+      rootDir, changelogPath: 'CHANGELOG.md', version: '6.3.31', date,
+      body: '### 修復\n\n- 修正發版日期驗證。\n\n### 驗證\n\n- 行為測試通過。',
+      sourceFiles: ['src/runtime.js'],
+    })).toThrow(/invalid release date/i);
+    expect(releaseContents(rootDir)).toEqual(before);
+  });
+
+  it.each(['2024-02-29', '2000-02-29', '2026-02-28'])('合法曆日 %s 原樣寫入新版本標題', date => {
+    const rootDir = createRepositoryFixture();
+
+    prepareRelease({
+      rootDir, changelogPath: 'CHANGELOG.md', version: '6.3.31', date,
+      body: '### 修復\n\n- 修正發版日期驗證。\n\n### 驗證\n\n- 行為測試通過。',
+      sourceFiles: ['src/runtime.js'],
+    });
+
+    expect(releaseContents(rootDir)[2]).toContain(`## [v6.3.31] - ${date}`);
+    expect(verifyReleaseState({ rootDir, changelogPath: 'CHANGELOG.md', sourceFiles: ['src/runtime.js'] }))
+      .toMatchObject({ version: '6.3.31', firstVersion: '6.3.31' });
+  });
+
   describe('replace-current prepared notes', () => {
     const replacementBody = '### 修復\n\n- 使用者追加永久快取需求。\n\n### 驗證\n\n- 重開後快取與原波形驗證通過。';
 

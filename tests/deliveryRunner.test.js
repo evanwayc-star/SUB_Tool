@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const { createDeliveryRunner } = require('../electron/delivery-runner.js');
+const { createExportQueue } = require('../electron/export-queue.js');
+const QueueStore = require('../electron/queue-store.js');
 
 const tempRoots = [];
 afterEach(() => {
@@ -44,6 +46,8 @@ function make(overrides = {}) {
       audioBitrates: vi.fn(async () => ['320k']),
     })),
     runFfmpeg,
+    nativeCapabilities: Object.hasOwn(overrides, 'nativeCapabilities')
+      ? overrides.nativeCapabilities : { assertReady: vi.fn(async () => {}) },
     encoder: {
       name: () => 'libx264',
       hwdecArgs: () => [],
@@ -80,6 +84,82 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it('佇列失敗後重試同一 frozen 工作會再核對 native 能力，修復前不啟動母素材 probe', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'subtool-delivery-capability-retry-')); tempRoots.push(root);
+    const queueDir = path.join(root, 'queue'), tempDir = path.join(root, 'work');
+    let available = false, runner;
+    const assertReady = vi.fn(async () => {
+      if (!available) throw Object.assign(new Error('aac_mf runtime unavailable'), { code: 'DELIVERY_ENCODER_UNAVAILABLE' });
+    });
+    const hasAudio = vi.fn(async () => false), runFfmpeg = vi.fn(async () => ({ maps: [] }));
+    const queue = createExportQueue({ dir: () => queueDir, store: QueueStore, history: QueueStore.QueueHistory,
+      admission: { sourcePathsOf: job => QueueStore.collectSourcePaths(job.payload),
+        assertJobAdmissible() {}, assertMasterMedia() {}, assertOutputAvailable() {}, assertOutputFormat() {} },
+      grantPersistedCapabilities() {}, canReadSource: () => true, canWriteDelivery: () => true,
+      isFile: () => true, runJob: job => runner.run(job), onChanged() {},
+    });
+    runner = createDeliveryRunner({ queue, queueDir: () => queueDir, tempDir,
+      nativeCapabilities: { assertReady }, mediaProbe: () => ({ hasAudio, audioBitrates: async () => [] }),
+      encoder: { bitrateArgs: () => ['-c:v', 'libx264'] }, runFfmpeg,
+    });
+    const job = videoJob({ status: 'queued', createdAt: Date.now() });
+    job.payload.format = 'airline-dmpes'; job.payload.outPath = path.join(root, 'air.mpg');
+    queue.addJob(job);
+    await vi.waitFor(() => expect(queue.get(job.id).status).toBe('failed'));
+    await vi.waitFor(() => expect(queue.activeJob(job.id)).toBeNull());
+    expect(hasAudio).not.toHaveBeenCalled();
+    expect(runFfmpeg).not.toHaveBeenCalled();
+    expect(existsSync(tempDir)).toBe(false);
+    available = true;
+    expect(queue.retryJob(job.id)).toBe(true);
+    await vi.waitFor(() => expect(queue.get(job.id).status).toBe('done'));
+    expect(assertReady).toHaveBeenCalledTimes(2);
+    expect(hasAudio).toHaveBeenCalledOnce();
+    expect(runFfmpeg).toHaveBeenCalledOnce();
+    const args = runFfmpeg.mock.calls[0][0];
+    expect(args[args.indexOf('-c:a') + 1]).toBe('aac_mf');
+  });
+
+  it('缺少 native 能力 adapter 時拒絕建立 runner，不能讓交付默默略過能力檢查', () => {
+    expect(() => make({ nativeCapabilities: null })).toThrow(/native.*能力/);
+  });
+
+  it.each(['airline-dmpes', 'airline-dmpes-4m', 'dvd-iso', 'bd-iso'])
+  ('%s 缺少實際 native 能力時，在母素材 probe、暫存與編碼前拒絕', async format => {
+    const failure = Object.assign(new Error('此交付缺少 native 能力'), { code: 'DELIVERY_ENCODER_UNAVAILABLE' });
+    const assertReady = vi.fn(async () => { throw failure; });
+    const hasAudio = vi.fn(async () => false);
+    const setup = make({ nativeCapabilities: { assertReady }, mediaProbe: () => ({ hasAudio }) });
+    const job = videoJob();
+    Object.assign(job.payload, { format, outPath: /-iso$/.test(format) ? 'D:/out/disc.iso' : 'D:/out/air.mpg' });
+    await setup.runner.run(job);
+    expect(assertReady).toHaveBeenCalledWith(job.payload, { signal: expect.any(AbortSignal) });
+    expect(hasAudio).not.toHaveBeenCalled();
+    expect(setup.runFfmpeg).not.toHaveBeenCalled();
+    expect(existsSync(setup.tempDir)).toBe(false);
+    expect(setup.sent.at(-1)?.payload).toMatchObject({ error: true, errorMsg: failure.message });
+    expect(setup.active.size).toBe(0);
+  });
+
+  it.each(['user-stop', 'shutdown'])('能力探針準備期間可 %s，取消後不讀母素材或建立暫存', async reason => {
+    let signal;
+    const assertReady = vi.fn((payload, options) => new Promise((resolve, reject) => {
+      signal = options.signal;
+      signal.addEventListener('abort', () => reject(new Error('native probe aborted')), { once: true });
+    }));
+    const hasAudio = vi.fn();
+    const setup = make({ nativeCapabilities: { assertReady }, mediaProbe: () => ({ hasAudio }) });
+    const pending = setup.runner.run(videoJob());
+    setup.active.get('delivery-1').stop(reason);
+    await pending;
+    expect(signal.aborted).toBe(true);
+    expect(hasAudio).not.toHaveBeenCalled();
+    expect(setup.runFfmpeg).not.toHaveBeenCalled();
+    expect(existsSync(setup.tempDir)).toBe(false);
+    expect(setup.active.size).toBe(0);
+    if (reason === 'shutdown') expect(setup.sent).toEqual([]);
+    else expect(setup.sent.at(-1)?.payload).toMatchObject({ stopped: true });
+  });
   it.each([false, true])('時間碼字型用 ASCII 相對路徑交付並在成功／失敗後清除（failure=%s）', async failure => {
     let source, staged;
     const bytes=Buffer.from('original font bytes');
@@ -148,6 +228,7 @@ describe('delivery runner public interface', () => {
     const run = setup.runner.run(videoJob());
     const active = setup.active.get('delivery-1');
     expect(active.p).toBeNull();
+    await vi.waitFor(() => expect(signal).toBeDefined());
     active.stop(reason);
     expect(signal.aborted).toBe(true);
     await run;

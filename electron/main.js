@@ -55,6 +55,7 @@ const { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPrese
 const {
   buildIngestArgs,
   createFFmpegExecution,
+  createDeliveryCapabilities,
   deliveryVideoEncoderArgs,
   detectNativeTool,
   mpvEmbeddingSupported,
@@ -95,6 +96,7 @@ const localResourceServer = createLocalResourceServer({
   sessionModule: session,
 });
 const projectWorkspace = createProjectWorkspace({
+  saveMetadata: () => ({ appVersion: app.getVersion(), computerName: os.hostname() }),
   readFile: projectFile => fs.promises.readFile(projectFile),
   writeFile: createAtomicProjectWriter(),
   ensureDirectory: projectFile => fs.promises.mkdir(path.dirname(projectFile), { recursive: true }),
@@ -334,6 +336,7 @@ app.on('before-quit', (event) => {
       await Promise.all([
         mediaProbe?.cancelAllAndWait(),
         ffmpegExecution.cancelAllAndWait(),
+        deliveryCapabilities.cancelAllAndWait(),
         speechCompressionRuntime.cancelAllAndWait(),
         vocalWaveformRuntime.cancelAllAndWait(),
         mediaIngestCoordinator.cancelAllAndWait(),
@@ -356,6 +359,7 @@ app.on('before-quit', (event) => {
       await screenshotOutput.resume();
       mediaProbe?.resume();
       ffmpegExecution.resume();
+      deliveryCapabilities.resume();
       mediaIngestCoordinator.resume();
       vocalWaveformRuntime.resume();
       await QueueManager.cancelShutdown();
@@ -697,6 +701,14 @@ const ffmpegExecution = createFFmpegExecution({
   },
 });
 const runFF = (args, options) => ffmpegExecution.execute(args, { ...options, executionKind: 'direct' });
+const deliveryEncoder = { name: () => VENC, hwdecArgs, bitrateArgs: vencArgsBitrate, proresArgs };
+const deliveryCapabilities = createDeliveryCapabilities({
+  getFFmpegPath: () => FFMPEG,
+  encoder: deliveryEncoder,
+  getDiscPaths: () => require('./disc-authoring').nativeDiscPaths(app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'disc')
+    : path.join(__dirname, 'disc')),
+});
 const clipFrameCache = createClipFrameCache({
   cacheRoot: () => path.join(app.getPath('userData'), 'clip-frames'),
   fileAuthority,
@@ -730,12 +742,8 @@ const deliveryRunner = createDeliveryRunner({
   tempDir: TMP,
   mediaProbe: () => mediaProbe,
   runFfmpeg: (args, options) => ffmpegExecution.execute(args, options),
-  encoder: {
-    name: () => VENC,
-    hwdecArgs,
-    bitrateArgs: vencArgsBitrate,
-    proresArgs,
-  },
+  nativeCapabilities: deliveryCapabilities,
+  encoder: deliveryEncoder,
   fonts: {
     root: fontsRoot,
     timecodeFile: _findExportTimecodeFont,
@@ -1118,6 +1126,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   // payload 取得任意寫檔能力。先驗證再寫 ASS 暫存，失敗不留下半份 queue artifact。
   const authorizationPayload = { ...payload, outPath };
   QueueManager.assertJobCapabilities({ payload: authorizationPayload });
+  await deliveryCapabilities.assertReady(authorizationPayload);
   // 交付目錄能力只代表「可建立候選檔」；工作通過格式、來源與路徑驗證後，
   // 才給這一個成品 shell reveal 的精確能力。
   fileAuthority.grantDeliveryFile(outPath);

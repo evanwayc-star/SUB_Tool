@@ -20,6 +20,7 @@ import { History, recordHistory } from './history.js';
 import { showToast, setMpvWindowVisible } from './ui.js';
 import { refreshSelectionUI, selectCueSingle } from './subtitles.js';
 import { subtitlePreviewIndex } from './subtitle-preview-index.js';
+import { setMediaElementSource } from './media-intake-engine.js';
 
 let _mpvSubT=null;
 let _lastMpvSubSend=0;
@@ -497,7 +498,7 @@ function _imageNat(c, src){
     renderImageOverlays();
   };
   probe.onerror = () => {};
-  probe.src = src;
+  setMediaElementSource(probe,src);
   return { w:0, h:0 };
 }
 
@@ -581,7 +582,7 @@ export function renderImageOverlays(){
     // 被選取的圖片留下操作框，讓使用者能一眼辨識目前可拖曳／縮放的素材。
     const selected = c.id === State.selectedClipId || previewDrag.imageDrag()?.clip?.id === c.id;
     html += `<div class="img-wrap${selected ? ' selected' : ''}" data-id="${c.id}" style="${contStyle}">
-      <img draggable="false" src="${escapeHTML(imgSrc)}" style="visibility:${bitmapInCanvas?'hidden':'visible'};clip-path:inset(${crop.map(v=>v.toFixed(2)+'px').join(' ')});" />
+      <img draggable="false" crossorigin="anonymous" src="${escapeHTML(imgSrc)}" style="visibility:${bitmapInCanvas?'hidden':'visible'};clip-path:inset(${crop.map(v=>v.toFixed(2)+'px').join(' ')});" />
       <div class="resize-handle rh-nw" data-corner="nw" style="${hPos('w','n')}"></div>
       <div class="resize-handle rh-ne" data-corner="ne" style="${hPos('e','n')}"></div>
       <div class="resize-handle rh-sw" data-corner="sw" style="${hPos('w','s')}"></div>
@@ -681,7 +682,7 @@ function loadCaptureImage(url){
     const image=new Image();
     image.onload=()=>resolve(image);
     image.onerror=()=>reject(new Error('無法載入截圖影像'));
-    image.src=url;
+    setMediaElementSource(image,url);
   });
 }
 

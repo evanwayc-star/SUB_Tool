@@ -1463,6 +1463,24 @@ describe('語音辨識與字幕生成模組', () => {
   });
 
   describe('人聲增強濾波器與高精度 Whisper 參數', () => {
+    it.each([44100, 48000])('%s Hz 音訊保留 1kHz 人聲並衰減 12kHz 雜訊', sampleRate => {
+      const length = Math.floor(sampleRate / 4);
+      const tone = frequency => Float32Array.from({ length }, (_, i) =>
+        0.1 * Math.sin(2 * Math.PI * frequency * i / sampleRate));
+      const rms = samples => {
+        const stableSamples = samples.subarray(Math.floor(sampleRate * 0.05));
+        return Math.sqrt(stableSamples.reduce((sum, value) => sum + value * value, 0) / stableSamples.length);
+      };
+      const voice = tone(1000);
+      const noise = tone(12000);
+      const voiceGain = rms(applyVocalEnhancementFilter(voice, sampleRate)) / rms(voice);
+      const noiseGain = rms(applyVocalEnhancementFilter(noise, sampleRate)) / rms(noise);
+
+      expect(voiceGain).toBeGreaterThan(0.9);
+      expect(voiceGain).toBeLessThan(1.1);
+      expect(noiseGain).toBeLessThan(0.45);
+    });
+
     it('濾除 50Hz 超低頻雜訊與高頻雜訊，並良好保留人聲頻段', () => {
       const sampleRate = 16000;
       const length = 1600; // 0.1s

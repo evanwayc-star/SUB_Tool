@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../src/timeline-renderer.js', () => ({
   updatePlayhead: vi.fn(),
@@ -24,10 +24,68 @@ vi.mock('../src/project.js', async importOriginal => ({
 
 import { State, setSelection } from '../src/state.js';
 import { getExactFps, snapTimeToFrame, secToEncore } from '../src/time.js';
-import { stepFrame, getJklSpeed, setJklSpeed, setExportIn, setExportOut, clearExport, getCueInMinusFrames, setIn, setOut } from '../src/transport-controller.js';
+import { stepFrame, getJklSpeed, setJklSpeed, setExportIn, setExportOut, clearExport, getCueInMinusFrames, setIn, setOut, jumpToAdjacentCue, jumpToCueInMinusFrames } from '../src/transport-controller.js';
 import { Media } from '../src/media.js';
 import { ensureProjectSaved } from '../src/project.js';
 import { recordHistory } from '../src/history.js';
+import { selectCueSingle } from '../src/subtitles.js';
+
+describe('下一句導航不意外回繞', () => {
+  afterEach(() => { Media.playing = false; });
+  beforeEach(() => {
+    vi.restoreAllMocks(); vi.clearAllMocks();
+    State.fps = 25; State.dropFrame = false;
+    State.listTrack = 0; State.activeSubTrack = 0;
+    State.tracks = [{ name: '字幕', locked: false }];
+    State.cues = [
+      { id: 'first', start: 1, end: 2, track: 0 },
+      { id: 'last', start: 5, end: 6, track: 0 },
+    ];
+    setSelection({ kind: 'sub', ids: [] });
+    Media.playing = false;
+    vi.spyOn(Media, 'seek').mockImplementation(() => {});
+  });
+
+  const next = withPreroll => withPreroll ? jumpToCueInMinusFrames(1, 5) : jumpToAdjacentCue(1);
+
+  it.each([false, true])('無選取且位於末句起點或之後，下一句不跳回首句（提前五格=%s）', withPreroll => {
+    const time = vi.spyOn(Media, 'displayTime');
+    for (const position of [5, 8]) {
+      time.mockReturnValue(position);
+      next(withPreroll);
+    }
+    expect(Media.seek).not.toHaveBeenCalled();
+    expect(selectCueSingle).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('無選取仍可前進到後方字幕（提前五格=%s）', withPreroll => {
+    vi.spyOn(Media, 'displayTime').mockReturnValue(2);
+    next(withPreroll);
+    expect(Media.seek).toHaveBeenCalledWith(withPreroll ? 4.8 : 5);
+    expect(selectCueSingle).toHaveBeenCalledWith('last', false);
+  });
+
+  it.each([false, true])('已選末句維持原有停在末句的規則（提前五格=%s）', withPreroll => {
+    setSelection({ kind: 'sub', ids: ['last'] });
+    vi.spyOn(Media, 'displayTime').mockReturnValue(5);
+    next(withPreroll);
+    expect(Media.seek).toHaveBeenCalledWith(withPreroll ? 4.8 : 5);
+    expect(selectCueSingle).toHaveBeenCalledWith('last', false);
+  });
+
+  it('播放中前進至末句取消選取後，再按下一句仍停在末句', () => {
+    Media.playing = true;
+    let time = 2;
+    vi.spyOn(Media, 'displayTime').mockImplementation(() => time);
+    Media.seek.mockImplementation(target => { time = target; });
+    jumpToAdjacentCue(1);
+    expect(State.selectedId).toBeNull();
+    jumpToAdjacentCue(1);
+    expect(Media.seek).toHaveBeenCalledTimes(1);
+    expect(time).toBe(5);
+    Media.playing = false;
+  });
+});
 
 describe('I/O 打點等待儲存提示的工作歸屬', () => {
   beforeEach(() => {

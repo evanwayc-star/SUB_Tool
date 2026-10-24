@@ -198,7 +198,7 @@ async function openCueEditModal(c){
         `<span style="font-size:12px;color:var(--text-faint)">${escapeHTML(label)}</span>`+
         `<button id="${escapeHTML(btnId)}" style="font-size:11px;padding:1px 7px">複製</button>`+
       `</div>`+
-      `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;min-height:2.2em">`+
+      `<div style="background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;min-height:2.2em">`+
         `<div id="${btnId==='cueEditCopy'?'cueEditOrig':''}" style="white-space:pre-wrap;font-size:14px;font-family:inherit;color:var(--text);user-select:text;cursor:text">${escapeHTML(text).replace(/\n/g, '<br>')}</div>`+
       `</div>`+
     `</div>`;
@@ -445,10 +445,10 @@ let _tsSetTarget = null;
         
         const session = openModal('存為常用樣式',
           `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">資料夾 (選填)</div>`+
-          `<input type="text" id="__presetGroup" list="__presetGroupList" value="${escapeHTML(defGroup)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`+
+          `<input type="text" id="__presetGroup" list="__presetGroupList" value="${escapeHTML(defGroup)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`+
           `<datalist id="__presetGroupList">${groupOpts}</datalist>`+
           `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">樣式名稱</div>`+
-          `<input type="text" id="__presetName" value="${escapeHTML(defName)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
+          `<input type="text" id="__presetName" value="${escapeHTML(defName)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
           [
             { label: '儲存', primary: true, act: () => {
               const grp = ($('__presetGroup')?.value || '').trim();

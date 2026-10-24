@@ -68,6 +68,41 @@ it.each([false,true])('真正時間軸覆蓋拖曳先撤回預覽再確認（複
  gesture();expect(State.cues).toEqual(before);expect(visible()).toBe(true);expect(History.stack).toHaveLength(1);click('取消');expect(State.cues).toEqual(before);gesture();primary();expect(State.cues.some(c=>c.id==='b')).toBe(false);expect(History.stack).toHaveLength(2);History.undo();expect(State.cues).toEqual(before);
 });
 
+it.each(['late-lock','undo','background-style'])('覆蓋拖曳在 %s 後失效，不能藉確認移除字幕或截斷 Redo',async change=>{
+ State.cues[0].end=3;State.cues[1].start=5;State.cues[1].end=6;State.overwriteMode=true;State.overwriteKeep=false;State.snapOn=false;State.pxPerSec=80;State.viewStart=0;State.vtracksCollapsed=false;
+ const layer=document.getElementById('tlLayer'),scroll=document.getElementById('tlScroll');for(const el of [layer,scroll]){el.getBoundingClientRect=()=>({left:0,top:0,right:800,bottom:500,width:800,height:500});Object.defineProperty(el,'clientWidth',{configurable:true,value:800});Object.defineProperty(el,'clientHeight',{configurable:true,value:500});}
+ Timeline.drawTimeline();History.reset();
+ if(change==='undo'){State.cues[0].text='較新文字';History.record('文字編輯');}
+ const y=Timeline.tracksTop()+10;
+ document.querySelector('.cue-block[data-id="a"]').dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0,clientX:90,clientY:y}));
+ window.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:410,clientY:y}));
+ expect(State.cues.find(c=>c.id==='a')).toMatchObject({start:5,end:7});
+ if(change==='late-lock'){
+  const {updateTimelineTrack}=await import('../src/timeline-edit-transaction.js');updateTimelineTrack({kind:'subtitle',index:0,field:'locked',value:true});
+ }else if(change==='undo') History.undo();
+ else{Subtitles.applyCueStylePatch(State.cues.find(c=>c.id==='a'),{color:'#ff0000'});History.record('背景樣式');}
+ const before=History.committedSnapshot(),head=History.hi,steps=History.stack.length;
+ window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:410,clientY:y}));
+ // 若舊路徑仍跳出確認，也確認不能接手失效手勢的刪除資格。
+ if(visible()) primary();
+ expect(State.cues).toEqual(before.cues);expect(State.tracks).toEqual(before.tracks);
+ expect(History.hi).toBe(head);expect(History.stack).toHaveLength(steps);expect(visible()).toBe(false);
+ if(change==='undo'){History.redo();expect(State.cues.find(c=>c.id==='a').text).toBe('較新文字');expect(State.cues).toHaveLength(2);}
+});
+
+it.each(['late-lock','undo'])('已准入的覆蓋確認在 %s 後也不能提交舊提案',async change=>{
+ State.cues[0].end=3;State.cues[1].start=5;State.cues[1].end=6;State.overwriteMode=true;State.overwriteKeep=false;State.snapOn=false;State.pxPerSec=80;State.viewStart=0;State.vtracksCollapsed=false;
+ const layer=document.getElementById('tlLayer'),scroll=document.getElementById('tlScroll');for(const el of [layer,scroll]){el.getBoundingClientRect=()=>({left:0,top:0,right:800,bottom:500,width:800,height:500});Object.defineProperty(el,'clientWidth',{configurable:true,value:800});Object.defineProperty(el,'clientHeight',{configurable:true,value:500});}
+ Timeline.drawTimeline();History.reset();State.cues[0].text='較新文字';History.record('文字編輯');const y=Timeline.tracksTop()+10;
+ document.querySelector('.cue-block[data-id="a"]').dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0,clientX:90,clientY:y}));
+ window.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:410,clientY:y}));window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:410,clientY:y}));expect(visible()).toBe(true);
+ if(change==='late-lock'){
+  const {updateTimelineTrack}=await import('../src/timeline-edit-transaction.js');updateTimelineTrack({kind:'subtitle',index:0,field:'locked',value:true});
+ }else History.undo();
+ const before=History.committedSnapshot(),head=History.hi,steps=History.stack.length;primary();
+ expect(State.cues).toEqual(before.cues);expect(State.tracks).toEqual(before.tracks);expect(History.hi).toBe(head);expect(History.stack).toHaveLength(steps);
+});
+
 it('多句刪除只顯示一次具體句數，取消零變更，確認可一次Undo',()=>{
  SM.setSelection({kind:'sub',ids:['a','b'],primary:'a'});const before=structuredClone(State.cues);Subtitles.deleteSelected();expect(State.cues).toEqual(before);expect(document.getElementById('modalBody').textContent).toMatch(/2/);click('取消');expect(History.stack).toHaveLength(1);Subtitles.deleteSelected();primary();expect(State.cues).toHaveLength(0);expect(visible()).toBe(false);expect(History.stack).toHaveLength(2);History.undo();expect(State.cues).toEqual(before);
 });

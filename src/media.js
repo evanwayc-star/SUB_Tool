@@ -622,19 +622,14 @@ const Media = {
     if(clip && clip.muted) track.muted = true;
     return track;
   },
-  /* 同一媒體來源被切開／解除影音連結時，保留使用者已設定的來源聲道→專案 bus 配線。 */
-  copyAudioSourceRouting(fromSourceId,toSourceId){
-    const from=String(fromSourceId||''),to=String(toSourceId||'');
-    const map=State.audioProject?.sourceMaps?.[from];
-    if(!from||!to||!map) return false;
-    try{ State.audioProject.sourceMaps[to]=structuredClone(map); return true; }catch(e){ return false; }
-  },
   /* 外部音檔的持久（本次專案工作階段）來源描述。audioSrc 是播放群組鍵，
      audioSourceId 則永遠不依檔名或 runtime track id 推導，避免同名檔彼此覆蓋路由。 */
   createExternalAudioSource(details={}){
     const asset=this.externalAudio.add(details);
     const fallbackCount=Math.max(0,Math.floor(Number(details.fallbackCount)||0));
-    AudioPipeline.registerSource(asset,asset.descriptors,fallbackCount);
+    // Inherit before sourceRegistered publishes the new asset to routing editors.
+    // The intent is runtime-only; the asset's serialized map holds the result.
+    AudioPipeline.registerSource(asset,asset.descriptors,fallbackCount,{copyFromSourceId:details._routingSourceId});
     this.recomputeTimelineDuration();
     return asset;
   },
@@ -645,8 +640,7 @@ const Media = {
     State.externalAudioEnd=this.externalAudio.timelineEnd();
     return State.externalAudioEnd;
   },
-  /* 給 audio-routing 的後續入口使用：回傳具 clip 相容欄位的 external source。 */
-  /* project.js 可直接儲存 getExternalAudioSources() 的回傳資料，並在讀檔後呼叫此函式。
+  /* project.js 保存 State.externalAudioState 的純資料，讀檔後由此入口還原外音。
      目前僅桌面版可依原始 path 重建實際 audio element / cache。 */
   async restoreExternalAudioSource(serialized, operation=null, upstreamOwns=null){
     if(!serialized||typeof serialized!=='object'||!serialized.path) return null;
@@ -759,6 +753,7 @@ const Media = {
       return null;
     }
     const { asset, left, right: cloneDetails }=plan;
+    cloneDetails._routingSourceId=asset.audioSourceId;
     const editToken=this._beginExternalAssetEdit(asset);
     const assetOperation=this._assetOperation(null,{kind:'split-external-audio',key},()=>this._ownsExternalAssetEdit(editToken));
     const owns=()=>this._ownsAssetOperation(assetOperation);
@@ -782,9 +777,6 @@ const Media = {
     // asset exists.  Otherwise a move/undo during the await records the
     // temporary half-clip in History and cancellation cannot safely restore it.
     Object.assign(asset,left);
-    // 切開的是同一份來源，不是重新匯入一個「不同語言／不同交付」；沿用原段已設定的
-    // project bus 對應，後續若 descriptor 在背景補齊，ensureAudioSourceMap 仍會保留它。
-    this.copyAudioSourceRouting(asset.audioSourceId,right.audioSourceId);
     this._commitExternalAudioEdit(right,'切割音訊：'+(asset.name||''));
     return right;
   },
@@ -919,6 +911,7 @@ const Media = {
         name:restoredSource?.name||baseName(path),
         path,
         audioSourceId:restoredSource?.audioSourceId,
+        _routingSourceId:restoredSource?._routingSourceId,
         timelineLaneId:restoredSource?.timelineLaneId,
         duration,
         offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || this.externalAudioSources.length > 0)) ? this.displayTime() : 0),
@@ -1151,6 +1144,7 @@ const Media = {
       const asset=this.createExternalAudioSource({
         name:restoredSource?.name||file.name,
         audioSourceId:restoredSource?.audioSourceId,
+        _routingSourceId:restoredSource?._routingSourceId,
         timelineLaneId:restoredSource?.timelineLaneId,
         duration:sourceDuration,
         offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || this.externalAudioSources.length > 0)) ? this.displayTime() : 0),
@@ -1242,6 +1236,7 @@ const Media = {
         name:restoredSource?.name||name,
         path:p,
         audioSourceId:restoredSource?.audioSourceId,
+        _routingSourceId:restoredSource?._routingSourceId,
         timelineLaneId:restoredSource?.timelineLaneId,
         duration:sourceDuration,
         offset:restoredSource?.offset ?? ((!restoredSource && (State.clips.length > 0 || this.externalAudioSources.length > 0)) ? this.displayTime() : 0),
@@ -2387,9 +2382,8 @@ const Media = {
   _registerPrimary(meta,projectRestore=null){
     // 已開啟的 v3 專案會在 ProjectLoadSession 的 restore plan 保留片段幾何；
     // 主片段需沿用其 audioSourceId，否則重新載入後原本設定的聲道路由會找不到來源。
-    // Keep restore material in the plan until this transaction commits. A
-    // destructive take here loses every remaining clip if History or a newer
-    // project supersedes one slow probe halfway through restoration.
+    // 尚未交接的原文留在 plan；每筆成功發布後即歸 runtime／History，
+    // 不能因後續慢 probe 被撤銷而移除使用者已編輯的片段。
     const pending=[...(projectRestore?.pendingClips?.()||[])];
     const pendingPrimary=pending.find(x=>x?.primary)||pending.find(x=>x?.path&&x.path===meta.path)||pending.find(x=>x?.name&&x.name===meta.name)||null;
     const projectRelink=projectRestore?.consumeMediaRelink?.()===true;
@@ -2407,17 +2401,16 @@ const Media = {
     // 開啟專案時還原其餘 clip（桌面：同一路徑且同 audioSourceId 的切割片段共用資源、只 ingest 一次）
     const pend = pending;
     const restoredProjectClips=[];
-    const transactionClips=[];
     const rememberTransactionClip=(clip,saved)=>{
-      if(clip){ transactionClips.push(clip); restoredProjectClips.push(clip); }
+      if(clip) restoredProjectClips.push(clip);
       if(clip) projectRestore?.materializeClip?.(saved,clip);
       if(clip&&restoreOwns()) emit('media:projectClipRestored',{clips:[Seq.persistentMetadata(clip)]});
       return clip;
     };
-    const rollbackTransaction=()=>{
-      for(const clip of transactionClips.splice(0).reverse()){
-        if(clip?.id&&Seq.byId(clip.id)===clip&&this.removeClip(clip.id)) projectRestore?.forgetMaterializedClip?.(clip);
-      }
+    // materializeClip 已把這筆 placement 交給 runtime／History，使用者可立即
+    // 編輯或刪除。失權只能清理本次 await 晚到、尚未交接的實體。
+    const discardUnpublishedClip=clip=>{
+      if(clip?.id&&Seq.byId(clip.id)===clip) this.removeClip(clip.id);
     };
     if(projectRelink) restoredProjectClips.push(c);
     let pendingRestore=Promise.resolve();
@@ -2449,7 +2442,7 @@ const Media = {
         const made = new Map(); if(c.path) made.set(resourceKey(pri||c), c);
         const remaining=[];
         for(const pc of pend){
-          if(!restoreOwns()){ rollbackTransaction(); return; }
+          if(!restoreOwns()) return;
           if(pc === pri) continue;
           if(!pc.path){ remaining.push(pc); continue; }
           // 圖片是靜態視覺疊層，不可走 addClipDesktop（它會以 ffprobe 當成
@@ -2458,8 +2451,7 @@ const Media = {
           if(pc.type==='image'){
             const image=await this.addImageDesktop(pc.path,{...pc,_restore:true},restoreOperation).catch(()=>null);
             if(!restoreOwns()){
-              if(image?.id&&Seq.byId(image.id)===image) transactionClips.push(image);
-              rollbackTransaction();
+              discardUnpublishedClip(image);
               return;
             }
             if(image) rememberTransactionClip(image,pc); else remaining.push(pc);
@@ -2482,8 +2474,7 @@ const Media = {
           } else {
             const added = await this.addClipDesktop(pc.path, pc, restoreOperation).catch(()=>null);
             if(!restoreOwns()){
-              if(added?.id&&Seq.byId(added.id)===added) transactionClips.push(added);
-              rollbackTransaction();
+              discardUnpublishedClip(added);
               return;
             }
             if(added){ made.set(key, added); rememberTransactionClip(added,pc); }
@@ -2493,7 +2484,7 @@ const Media = {
         if(restoreOwns()){
           projectRestore?.replaceClips?.(remaining);
           Seq.sort(); Seq.recomputeDuration(); emit('media:timeline');
-        }else rollbackTransaction();
+        }
       })();
     }else if(projectRestore&&Array.isArray(pend)){
       // Browser 不能憑路徑重開其他 File；保留未選回的 segment metadata，避免
@@ -2506,7 +2497,6 @@ const Media = {
     });
     this._pendingProjectRestorePromise=pendingRestore;
     void pendingRestore.catch(error=>{
-      rollbackTransaction();
       console.warn('restore pending project clips:',error);
     }).finally(()=>{
       if(this._pendingProjectRestorePromise===pendingRestore) this._pendingProjectRestorePromise=null;
@@ -2903,17 +2893,13 @@ const Media = {
       this._sequenceEditVersion===restoreSequenceVersion;
     const restoreOperation=this._assetOperation(null,'pending-image-restore',restoreBaseOwns);
     const owns=()=>this._ownsAssetOperation(restoreOperation);
-    // Keep restore material in the plan until this transaction commits. A
-    // destructive take here loses every remaining clip if History or a newer
-    // project supersedes one slow probe halfway through restoration.
+    // 未完成圖片仍保留原文；成功交接的圖片由 runtime／History 管理，
+    // 後續 stat／讀圖失權只能撤銷尚未發布的晚到實體。
     const pending=[...(projectRestore?.pendingClips?.()||[])];
     if(!pending.length) return {restored:0,pending:0};
     const remaining=[];
-    const transactionClips=[];
-    const rollback=()=>{
-      for(const clip of transactionClips.splice(0).reverse()){
-        if(clip?.id&&Seq.byId(clip.id)===clip&&this.removeClip(clip.id)) projectRestore?.forgetMaterializedClip?.(clip);
-      }
+    const discardUnpublishedClip=clip=>{
+      if(clip?.id&&Seq.byId(clip.id)===clip) this.removeClip(clip.id);
     };
     let restored=0;
     for(const raw of pending){
@@ -2922,16 +2908,15 @@ const Media = {
       if(typeof DESK?.stat==='function'){
         try{ exists=!!(await DESK.stat(raw.path))?.exists; }catch(e){ exists=false; }
       }
-      if(!owns()){ rollback(); return {restored:0,pending:pending.length,cancelled:true}; }
+      if(!owns()) return {restored,pending:pending.length,cancelled:true};
       if(!exists){ remaining.push(raw); continue; }
       const image=await this.addImageDesktop(raw.path,{...raw,_restore:true},restoreOperation).catch(()=>null);
       if(!owns()){
-        if(image?.id&&Seq.byId(image.id)===image) transactionClips.push(image);
-        rollback();
-        return {restored:0,pending:pending.length,cancelled:true};
+        discardUnpublishedClip(image);
+        return {restored,pending:pending.length,cancelled:true};
       }
       if(image){
-        transactionClips.push(image); restored++;
+        restored++;
         projectRestore?.materializeClip?.(raw,image);
         emit('media:projectClipRestored',{clips:[Seq.persistentMetadata(image)]});
       }
@@ -3068,9 +3053,24 @@ const Media = {
     if(!pending.length){ showToast('此影片的原音已解除連結'); return null; }
     const unlocked=()=>pending.every(item=>!item.locked&&!State.videoTracks[item.vtrack||0]?.locked);
     if(!unlocked()){showToast('影片軌已鎖定');return null;}
+    // The independent audio is prepared from these exact placements. Keeping
+    // the clip objects alive is insufficient when a drag, trim or effect edit
+    // changes the audio while its cache is still loading.
+    const audioStamp=item=>JSON.stringify([
+      item.audioSourceId,item.audioSrc,item.path,audioMotherPath(item),
+      item.path&&DESK?null:item.web?.url,item.dur,item.in,item.out,item.offset,item.vtrack,
+      item.speed,item.reverse,item.audioDetached,item.type,item.freezeTime,
+      item.fadeIn,item.fadeOut,item.fadeSourceOffset,item.fadeSourceLength,audioLimiterSnapshot(item),
+    ]);
+    const evidence=linked.map(item=>({item,stamp:audioStamp(item),track:State.videoTracks[item.vtrack||0]}));
+    const routingStamp=JSON.stringify(State.audioProject?.sourceMaps?.[sourceId]??null);
     const sourceOwns=()=>{
       const current=State.clips.filter(item=>clipSourceFingerprint(item)===sourceFingerprint);
-      return unlocked()&&current.length===linked.length&&linked.every(item=>current.includes(item));
+      // All detached placements must inherit the same source routing. A routing
+      // edit during cache work revokes the whole batch, preserving that edit.
+      return JSON.stringify(State.audioProject?.sourceMaps?.[sourceId]??null)===routingStamp&&
+        unlocked()&&current.length===linked.length&&evidence.every(({item,stamp,track})=>
+        current.includes(item)&&audioStamp(item)===stamp&&State.videoTracks[item.vtrack||0]===track);
     };
     const assetOperation=this._assetOperation(null,{kind:'detach-clip-audio',id},sourceOwns);
     const owns=()=>this._ownsAssetOperation(assetOperation);
@@ -3100,6 +3100,7 @@ const Media = {
         const restore={
           // _restore 只抑制「加入音訊」的中間 history；完成後改記錄一筆解除連結。
           _restore:true,
+          _routingSourceId:sourceId,
           name:pending.length>1?`${item.name||'影片'} · 原音 ${index+1}`:`${item.name||'影片'} · 原音`,
           timelineLaneId,
           // 解除的是影片本身的音訊，不可再把原容器交給 <audio> 嘗試解碼；交由
@@ -3126,7 +3127,6 @@ const Media = {
         if(asset) made.push(asset);
         if(!owns()) throw new Error('asset operation cancelled');
         if(!asset) throw new Error('無法建立獨立音訊');
-        this.copyAudioSourceRouting?.(sourceId,asset.audioSourceId);
       }
     }catch(error){
       for(const asset of made){ if(this.externalAudioSources.includes(asset)) this.removeExternalAudio(asset.id,{record:false}); }

@@ -139,6 +139,35 @@ describe('native media intake runtime', () => {
     } finally { await fixture.runtime.close(); }
   });
 
+  it.each(['ingest', 'stream'])('%s 色彩 probe 等待期間母素材被替換，不得替新來源發布舊色彩快取', async mode => {
+    let entered, release, height = 180;
+    const probing = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), {
+      describeVideo: async () => { const video = { width: 320, height }; entered(); await gate; return video; },
+    });
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [] };
+    const pending = fixture.runtime[mode](request);
+    try {
+      await probing;
+      fs.writeFileSync(fixture.source, 'replacement HD mother source');
+      height = 720;
+      release();
+      await expect(pending).rejects.toThrow('母素材在轉檔期間變更');
+      expect(fixture.calls).toHaveLength(0);
+      expect(fixture.runtime.inspectCache(fixture.source).every(hit => hit.error)).toBe(true);
+
+      const retry = await fixture.runtime[mode](request);
+      await retry.completion;
+      const result = retry.response || retry;
+      expect(result.cached).toBe(false);
+      const args = fixture.calls[0];
+      expect(args[args.indexOf('-vf') + 1]).toContain('setparams=colorspace=bt709');
+      expect(await fixture.runtime.ingest(request)).toMatchObject({ cached: true, proxy: result.proxy });
+      expect(fixture.calls).toHaveLength(1);
+    } finally { release(); await pending.catch(() => {}); await fixture.runtime.close(); }
+  });
+
   it('已驗證色彩的 warm Proxy 與補建音訊不重複 probe 母素材', async () => {
     const describeVideo = vi.fn(async () => ({ width: 320, height: 180 }));
     const fixture = repairFixture(async args => writeIntakeOutputs(args), { describeVideo });

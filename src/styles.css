@@ -1333,12 +1333,12 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 #cpConsecutiveIdentical .cp-num.cp-joined-identical{color:#1f7a3f}
 #cpBlank .cp-num:hover,#cpTwo .cp-num:hover,#cpConsecutiveIdentical .cp-num:hover{color:var(--accent)}
 #cpConsecutiveIdentical .cp-num.cp-joined-identical:hover{color:#2f9b55}
-#cpOverLen input[type="number"]{width:36px;margin:0 3px;padding:1px 3px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:11px;text-align:center;-moz-appearance:textfield}
+#cpOverLen input[type="number"]{width:36px;margin:0 3px;padding:1px 3px;background:var(--panel2);border:1px solid var(--border2);color:var(--text);border-radius:3px;font-size:11px;text-align:center;-moz-appearance:textfield}
 #cpOverLen input[type="number"]::-webkit-inner-spin-button{display:none}
 .sub-row .txt .over-len{color:var(--red);font-weight:bold;text-decoration:underline wavy var(--red)}
 /* 包含文字篩選行 */
 .cp-contains-row{flex-wrap:wrap;row-gap:2px}
-.cp-contains-row input{flex:1;min-width:100px;padding:2px 6px;background:var(--bg2);border:1px solid var(--border2);color:var(--fg);border-radius:3px;font-size:12px;font-family:inherit}
+.cp-contains-row input{flex:1;min-width:100px;padding:2px 6px;background:var(--panel2);border:1px solid var(--border2);color:var(--text);border-radius:3px;font-size:12px;font-family:inherit}
 .cp-contains-row .cp-nums{flex-basis:100%;padding-left:calc(8em + 12px)}
 /* 非繁中字元屬於提示性質、不是錯誤，用淺淡粉色與其他紅色警示區隔 */
 #cpNonTraditional .cp-label,#cpNonTraditional .cp-nums .cp-num{color:var(--pink-soft)}

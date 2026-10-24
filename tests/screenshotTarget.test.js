@@ -4,7 +4,12 @@
    全專案唯一不可被其他模組 import 的檔案，所以住在那裡的東西
    **結構上就測不到**——搬出來之後才有這支測試。 */
 import { describe, expect, it } from 'vitest';
+import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fallbackScreenshotName, screenshotDir, timecodeSuffix } from '../src/commands.js';
+
+const require = createRequire(import.meta.url);
+const { FileAuthority } = require('../electron/file-authority.js');
 
 describe('時間碼後綴', () => {
   it('冒號換成連字號（Windows 檔名不允許冒號）', () => {
@@ -41,6 +46,32 @@ describe('存放目錄', () => {
   it('結尾的分隔符一律去掉，避免接檔名時變成雙分隔符', () => {
     expect(screenshotDir({ projectDir: 'D:\\專案\\\\' })).toBe('D:\\專案');
     expect(screenshotDir({ projectDir: 'D:/專案///' })).toBe('D:/專案');
+  });
+
+  it.each([
+    ['C:\\', 'C:\\'], ['C:/', 'C:/'], ['/', '/'],
+    ['\\\\server\\share\\', '\\\\server\\share'],
+  ])('專案位於根目錄 %s 時仍保留可授權的絕對目錄', (projectDir, expected) => {
+    const dir = screenshotDir({ projectDir });
+    expect(dir).toBe(expected);
+    const pathModule = projectDir === '/' ? path.posix : path.win32;
+    const authority = new FileAuthority({ pathModule, caseInsensitive: pathModule === path.win32 });
+    authority.grantScreenshotDirectory(projectDir);
+    expect(authority.canUseScreenshotDirectory(dir)).toBe(true);
+    expect(pathModule.isAbsolute(dir)).toBe(true);
+  });
+
+  it.each([
+    ['C:\\clip.mp4', 'C:\\'], ['C:/clip.mp4', 'C:/'], ['/clip.mp4', '/'],
+    ['\\\\server\\share\\clip.mp4', '\\\\server\\share'],
+  ])('沒有專案時，根目錄素材 %s 的截圖仍寫回同一目錄', (mediaPath, expected) => {
+    expect(screenshotDir({ mediaPath })).toBe(expected);
+  });
+
+  it('不把磁碟相對目錄或一般相對資料夾升格成絕對根目錄', () => {
+    expect(screenshotDir({ projectDir: 'C:' })).toBe('C:');
+    expect(screenshotDir({ projectDir: '相對資料夾/' })).toBe('相對資料夾');
+    expect(screenshotDir({ mediaPath: '相對資料夾/clip.mp4' })).toBe('相對資料夾');
   });
 
   it('兩者都沒有時回 null（網頁版或未存檔的空白專案）', () => {

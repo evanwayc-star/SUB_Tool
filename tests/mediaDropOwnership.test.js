@@ -86,8 +86,8 @@ it.each(['C:/current.mov', null])('同一工作區仍接受正常授權結果 %s
   const file = new File(['video'], 'current.mov', { type: 'video/quicktime' });
   drop(file); authorization.resolve(authorizedPath);
   await vi.waitFor(() => expect(authorizedPath ? Media.loadDesktopMedia : Media.loadVideoFile).toHaveBeenCalledOnce());
-  if (authorizedPath) expect(Media.loadDesktopMedia).toHaveBeenCalledWith(authorizedPath);
-  else expect(Media.loadVideoFile).toHaveBeenCalledWith(file);
+  if (authorizedPath) expect(Media.loadDesktopMedia).toHaveBeenCalledWith(authorizedPath, null);
+  else expect(Media.loadVideoFile).toHaveBeenCalledWith(file, null);
 });
 
 it('原生授權完成後，已開啟的加入/取代選擇仍保有原 drop 的工作區資格', async () => {
@@ -105,7 +105,7 @@ it('沒有原生授權介面的舊桌面 bridge 仍可從 getFilePath 入載', a
   delete desktop.authorizeDroppedFile;
   try {
     drop(new File(['video'], 'legacy.mov'));
-    await vi.waitFor(() => expect(Media.loadDesktopMedia).toHaveBeenCalledWith('C:/legacy.mov'));
+    await vi.waitFor(() => expect(Media.loadDesktopMedia).toHaveBeenCalledWith('C:/legacy.mov', null));
   } finally { desktop.authorizeDroppedFile = authorizeDroppedFile; }
 });
 
@@ -133,4 +133,41 @@ it('較新的專案 drop 等待 native reader 時，同 generation 的舊 runtim
     await vi.waitFor(() => expect(State.cues.map(cue => cue.text)).toEqual(['NEWER_DROP']));
     expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
   } finally { checkFonts.mockRestore(); }
+});
+
+it.each(['C:/new/mother.mov', null])('缺主素材專案稍後拖回母素材 %s 時，沿同一 restore plan 完成重連', async authorizedPath => {
+  desktop.stat = vi.fn(async () => ({ exists: false }));
+  const data = { app: 'SUB Tool', version: 3, fps: 25, tracks: [], cues: [], notes: [], videoTracks: [],
+    media: { name: 'mother.mov', path: 'C:/old/mother.mov' }, playhead: 4,
+    clips: [{ id: 'saved-primary', name: 'mother.mov', path: 'C:/old/mother.mov', primary: true,
+      audioSourceId: 'saved-source', dur: 10, in: 2, out: 6, offset: 3, vtrack: 0 }] };
+  const finish = vi.spyOn(Project, 'finishMediaRelink');
+  try {
+    await Project.loadDesktop({ path: 'C:/edit.subtool', b64: Buffer.concat([
+      Buffer.from([255, 254]), Buffer.from(JSON.stringify(data), 'utf16le'),
+    ]).toString('base64') });
+    const relink = Project.pendingMediaRelink();
+    closeModal();
+    drop(new File(['video'], 'mother.mov', { type: 'video/quicktime' }));
+    authorization.resolve(authorizedPath);
+    await vi.waitFor(() => expect(authorizedPath ? Media.loadDesktopMedia : Media.loadVideoFile)
+      .toHaveBeenCalledWith(authorizedPath || expect.any(File), relink.plan));
+    await vi.waitFor(() => expect(finish).toHaveBeenCalledWith(relink.generation, relink.plan));
+  } finally { finish.mockRestore(); delete desktop.stat; }
+});
+
+it.each([
+  ['voice.wav', 'audio/wav', 'addAudioFileDesktop'],
+  ['still.png', 'image/png', 'addImageDesktop'],
+])('拖入 %s 使用對應素材入口，保留已載入影片', async (name, type, method) => {
+  const existing = { id: 'existing', name: 'existing.mov', in: 0, out: 1, offset: 0 };
+  State.clips = [existing];
+  const add = vi.spyOn(Media, method).mockResolvedValue(true);
+  try {
+    drop(new File(['media'], name, { type })); authorization.resolve('C:/' + name);
+    await vi.waitFor(() => expect(add).toHaveBeenCalledWith('C:/' + name));
+    expect(State.clips).toEqual([existing]);
+    expect(Media.loadDesktopMedia).not.toHaveBeenCalled();
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+  } finally { add.mockRestore(); }
 });

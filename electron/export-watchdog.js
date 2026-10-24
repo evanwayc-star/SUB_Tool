@@ -672,8 +672,10 @@ async function waitForLeaseRelease(lockPath, options = {}) {
   return !fs.existsSync(lockPath);
 }
 
-function isMissingPipeError(error) {
-  return ['ENOENT', 'ECONNREFUSED']
+function isClosedPipeError(error) {
+  // The owner can close between connect and reply. Retry only this transport
+  // race; stale cleanup still requires both recorded processes to be gone.
+  return ['ENOENT', 'ECONNREFUSED', 'EPIPE', 'ECONNRESET', 'CONTROL_PIPE_CLOSED']
     .includes(error?.code);
 }
 
@@ -725,7 +727,7 @@ async function recoverExportLeases(queueDir, options = {}) {
           break;
         } catch (error) {
           lastPipeError = error;
-          if (!isMissingPipeError(error)) {
+          if (!isClosedPipeError(error)) {
             missingPipe = false;
             break;
           }
@@ -830,6 +832,9 @@ function spawnExportWatchdog(config, options = {}) {
 
   const child = spawn(options.nodePath || process.execPath, [options.scriptPath || __filename], {
     windowsHide: true,
+    // Windows must let this owner survive a hard-killed parent, then handle
+    // IPC disconnect and finish native close, stage cleanup and lease release.
+    detached: process.platform === 'win32',
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     env: {
       ...process.env,

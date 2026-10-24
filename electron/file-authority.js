@@ -386,7 +386,10 @@ function isPathContained(root, name) {
   }
   const r = path.resolve(root);
   const full = path.resolve(r, name);
-  return full === r || full.startsWith(r + path.sep);
+  // 檔案系統根目錄本身已有分隔符；以相對位置判斷，避免 C:\\／/
+  // 再接一個分隔符後，把合法子檔誤認為越界。
+  const relative = path.relative(r, full);
+  return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
 }
 
 module.exports = {

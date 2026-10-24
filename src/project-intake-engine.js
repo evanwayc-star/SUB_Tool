@@ -67,16 +67,19 @@ export function buildSubtitleImportPlan(parsed, { fps, target = 'new' } = {}) {
   }
 
   const sourceTrackIndexes = [...new Set(metadata.cues.map(cue => cue?.track))];
-  if (sourceTrackIndexes.length !== 1 || !Number.isSafeInteger(sourceTrackIndexes[0]) ||
-      sourceTrackIndexes[0] < 0 || sourceTrackIndexes[0] >= metadata.tracks.length) {
+  if (sourceTrackIndexes.some(index => !Number.isSafeInteger(index) ||
+      index < 0 || index >= metadata.tracks.length)) {
     return standardPlan(parsed, fps);
   }
 
-  const sourceTrackIndex = sourceTrackIndexes[0];
-  const sourceTrack = copyTrack(metadata.tracks[sourceTrackIndex]);
+  const sourceTrackCount = sourceTrackIndexes.length;
+  const sourceTrackIndex = sourceTrackCount === 1 ? sourceTrackIndexes[0] : null;
+  const sourceTrack = sourceTrackIndex == null ? null : copyTrack(metadata.tracks[sourceTrackIndex]);
   const useFrameTiming = canUseFrameTiming(metadata, fps);
   const exactFps = useFrameTiming ? getExactFps(fps) : null;
-  const importIntoExistingTrack = target === 'existing';
+  // 合併檔仍匯入單一目的軌；各來源軌的繼承值須落到逐句覆蓋，不能因為
+  // 無法選出一份 trackPatch 就捨棄原稿、未定時字幕及精確影格中繼資料。
+  const preserveEffectiveStyle = target === 'existing' || sourceTrackCount > 1;
   const cues = metadata.cues.map(sourceCue => {
     const start = useFrameTiming ? sourceCue.startFrame / exactFps : sourceCue.start;
     const end = useFrameTiming ? sourceCue.endFrame / exactFps : sourceCue.end;
@@ -86,8 +89,8 @@ export function buildSubtitleImportPlan(parsed, { fps, target = 'new' } = {}) {
       text: sourceCue.text,
       timed: sourceCue.timed !== false,
     };
-    if (importIntoExistingTrack) {
-      cue.style = styleSnapshot(effStyle({ style: sourceCue.style || {} }, sourceTrack));
+    if (preserveEffectiveStyle) {
+      cue.style = styleSnapshot(effStyle({ style: sourceCue.style || {} }, metadata.tracks[sourceCue.track]));
     } else {
       const style = copyStyle(sourceCue.style);
       if (Object.keys(style).length) cue.style = style;
@@ -99,14 +102,14 @@ export function buildSubtitleImportPlan(parsed, { fps, target = 'new' } = {}) {
     usedMetadata: true,
     usedFrameTiming: useFrameTiming,
     sourceTrackIndex,
-    trackPatch: importIntoExistingTrack ? null : sourceTrack,
+    sourceTrackCount,
+    trackPatch: preserveEffectiveStyle ? null : sourceTrack,
     cues,
   };
 }
 
 export class ProjectRestorePlan {
   #clips;
-  #materializedClips = new Map();
   #handedOffClips = new Set();
   #externalAudioSources;
   #playhead;
@@ -127,24 +130,18 @@ export class ProjectRestorePlan {
   replaceClips(clips) {
     this.#clips = Array.isArray(clips) ? clips : [];
     const pending=new Set(this.#clips);
-    for(const clip of this.#materializedClips.keys()) if(!pending.has(clip)){
-      this.#materializedClips.delete(clip);this.#handedOffClips.delete(clip);
-    }
+    for(const clip of this.#handedOffClips) if(!pending.has(clip)) this.#handedOffClips.delete(clip);
   }
-  // 原交易仍保留原文供 rollback；存檔不能再把已交給 runtime 的 placement 算一次。
+  // 批次仍保留原文供後續復原；已交給 runtime 的 placement 由使用者與 History
+  // 管理，存檔不能再加入原文，否則分割或刪除後會把原 placement 補回。
   // 以原 record 身分交接，不能依 path 去重，因同一檔可有多個合法剪接片段。
   materializeClip(saved, clip) {
     if(this.#clips.includes(saved)&&clip?.id){
-      this.#materializedClips.set(saved,clip.id);this.#handedOffClips.add(saved);
+      this.#handedOffClips.add(saved);
     }
   }
-  forgetMaterializedClip(clip) {
-    for(const [saved,id] of this.#materializedClips) if(id===clip?.id) this.#handedOffClips.delete(saved);
-  }
-  pendingClipsForSave(representedClips=[]) {
-    // rollback 讓原文再次可存；Undo 快照若已還原該實體，仍須沿交接身分去重。
-    const represented=new Set(representedClips.map(clip=>clip?.id).filter(Boolean));
-    return this.#clips.filter(clip=>!this.#handedOffClips.has(clip)&&!represented.has(this.#materializedClips.get(clip)));
+  pendingClipsForSave() {
+    return this.#clips.filter(clip=>!this.#handedOffClips.has(clip));
   }
 
   pendingExternalAudioSources() { return this.#externalAudioSources; }

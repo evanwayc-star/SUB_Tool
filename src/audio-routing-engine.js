@@ -514,13 +514,14 @@ class AudioPipelineManager {
    * @param {object} clip 素材（需有 audioSourceId 或 audioSrc）
    * @param {Array} channels ffprobe／ingest 得到的聲道清單
    * @param {number} fallbackCount channels 為空時的聲道數推測值
+   * @param {object} options 來源登錄意圖；copyFromSourceId 在各自的草稿／基準繼承配線
    */
-  registerSource(clip, channels, fallbackCount = 0) {
+  registerSource(clip, channels, fallbackCount = 0, options = {}) {
     if (!clip) return [];
     const sourceId = clip.audioSourceId || clip.audioSrc || null;
     if (!sourceId) return [];
     const descriptors = sourceChannelDescriptors(channels, fallbackCount);
-    ensureAudioSourceMap(sourceId, descriptors);
+    ensureAudioSourceMap(sourceId, descriptors, options);
     return descriptors;
   }
 

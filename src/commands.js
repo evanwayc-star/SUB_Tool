@@ -268,9 +268,15 @@ function screenshotDir({ projectDir, mediaPath }) {
   if (!dir && mediaPath) {
     const norm = String(mediaPath).replace(/\\/g, '/');
     const sep = norm.lastIndexOf('/');
-    if (sep > 0) dir = String(mediaPath).substring(0, sep);
+    if (sep >= 0) dir = String(mediaPath).substring(0, sep + 1);
   }
-  return dir ? dir.replace(/[\\/]+$/, '') : null;
+  if (!dir) return null;
+  // 磁碟根的分隔符不能移除，否則 C:\\ 會變成目前磁碟目錄 C:；
+  // POSIX 根也必須保留，普通目錄與 UNC share 仍可移除結尾分隔符。
+  const driveRoot = /^([a-z]:)([\\/])[\\/]*$/i.exec(dir);
+  if (driveRoot) return driveRoot[1] + driveRoot[2];
+  if (/^[\\/]+$/.test(dir)) return dir[0];
+  return dir.replace(/[\\/]+$/, '');
 }
 
 function fallbackScreenshotName(displaySeconds, suffix = '') {

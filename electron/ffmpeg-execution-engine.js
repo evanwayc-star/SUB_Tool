@@ -16,8 +16,10 @@ const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require('child_process');
 const { StringDecoder } = require('string_decoder');
 const QueueStore = require('./queue-store');
 const ExportWatchdog = require('./export-watchdog');
-const { artifactProgress } = require('./export-artifact');
+const { artifactProgress, isDiscOutput } = require('./export-artifact');
 const discTools = require('./disc-tools.json');
+const { nativeDiscPaths } = require('./disc-authoring');
+const { buildDeliveryArgv } = require('./export-plan');
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
@@ -168,6 +170,139 @@ function deliveryVideoEncoderArgs(encoderName, kbps) {
 
 function mpvEmbeddingSupported(platform = process.platform) {
   return platform === 'win32';
+}
+
+/* 交付能力由實際純計畫決定，不再另存 format → codec 對照表。
+   探針只讀 lavfi、寫 null；不讀母素材、不建成品或工作暫存。同一計畫去重 codec，
+   不跨工作快取成功：執行檔沒變，其 DLL、系統 runtime 或 GPU 仍可能變更。
+   每個進行中的探針各有 owner，取消一份交付不會終止另一份的能力檢查。 */
+function createDeliveryCapabilities(options = {}) {
+  const spawn = options.spawn || nodeSpawn;
+  const getFFmpegPath = options.getFFmpegPath || (() => null);
+  const getDiscPaths = options.getDiscPaths || (() => nativeDiscPaths());
+  const encoder = options.encoder || {};
+  const timeoutMs = options.timeoutMs ?? 8000;
+  const active = new Set();
+  let shutdown = new AbortController();
+  let resumeWhenIdle = false;
+
+  const fail = (code, message, cause) => Object.assign(new Error(message), { code, ...(cause ? { cause } : {}) });
+
+  async function probe(executable, args, { signal, code, label, outputToken } = {}) {
+    signal?.throwIfAborted();
+    let child;
+    try {
+      child = spawn(executable, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (cause) {
+      throw fail(code, `${label}：${cause.message || cause}`, cause);
+    }
+    let processError = null, timedOut = false, output = '';
+    const receive = bytes => { output = (output + bytes.toString('utf8')).slice(-4000); };
+    child.stdout?.on('data', receive);
+    child.stderr?.on('data', receive);
+    const closed = new Promise(resolve => {
+      child.on('error', error => { processError ||= error; });
+      child.once('close', (exitCode, exitSignal) => resolve({ exitCode, exitSignal }));
+    });
+    const stop = () => { try { child.kill('SIGKILL'); } catch (error) { processError ||= error; } };
+    const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+    signal?.addEventListener('abort', stop, { once: true });
+    try {
+      if (signal?.aborted) stop();
+      const { exitCode, exitSignal } = await closed;
+      signal?.throwIfAborted();
+      if (processError || timedOut || exitCode !== 0 || exitSignal || (outputToken && !outputToken.test(output))) {
+        const detail = processError?.message || (timedOut ? '能力探針逾時' : output.trim() || `結束碼 ${exitCode ?? exitSignal}`);
+        throw fail(code, `${label}：${detail}`, processError);
+      }
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', stop);
+    }
+  }
+
+  async function checkReady(spec, { signal } = {}) {
+    signal?.throwIfAborted();
+    const ffmpeg = getFFmpegPath();
+    if (!ffmpeg) throw fail('DELIVERY_ENCODER_UNAVAILABLE', '找不到交付所需的 ffmpeg');
+    // Font staging belongs to the real delivery runner. This planning pass
+    // reads codec choices only; it must not require a staged drawtext font.
+    const plan = buildDeliveryArgv({ ...spec, timecodeWatermark: null }, {
+      hwdecArgs: encoder.hwdecArgs, vencArgsBitrate: encoder.bitrateArgs,
+      proresArgs: encoder.proresArgs, encoderName: encoder.name?.() || null,
+    });
+    const required = new Map();
+    for (let index = 0; index < plan.args.length - 1; index++) {
+      const type = /^-c:([av])(?::\d+)?$/.exec(plan.args[index]);
+      if (type) required.set(`${type[1]}:${plan.args[index + 1]}`, { type: type[1], name: plan.args[index + 1] });
+    }
+    if (!Array.from(required.values()).some(codec => codec.type === 'a')
+      || (spec.format !== 'wav' && !Array.from(required.values()).some(codec => codec.type === 'v'))) {
+      throw fail('DELIVERY_ENCODER_UNAVAILABLE', '交付計畫缺少明確的影音編碼器');
+    }
+    for (const { type, name } of required.values()) {
+      const video = type === 'v';
+      const args = ['-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1', '-f', 'lavfi', '-i',
+        video ? 'color=black:s=320x240:r=30:d=0.1' : 'anullsrc=r=48000:cl=stereo',
+        '-t', '0.1', `-c:${type}`, name,
+        ...(video ? ['-an', '-pix_fmt', /^prores/.test(name) ? 'yuv422p10le' : 'yuv420p'] : ['-vn']),
+        '-f', 'null', '-'];
+      await probe(ffmpeg, args, {
+        signal, code: 'DELIVERY_ENCODER_UNAVAILABLE', label: `此交付的編碼器不可用（${name}）`,
+        // Short GPU encodes can finish with a positive frame count and zero
+        // muxer time because of reordering delay. Audio has no frame counter.
+        outputToken: video ? /frame=[1-9]\d*[\s\S]*progress=end/ : /out_time_us=[1-9]\d*[\s\S]*progress=end/,
+      });
+    }
+    if (isDiscOutput(spec.format)) {
+      const paths = getDiscPaths();
+      const tools = spec.format === 'dvd-iso'
+        ? [['dvdauthor', ['--version']], ['mkisofs', ['-version']]] : [['tsmuxer', ['--version']]];
+      for (const [name, args] of tools) {
+        if (!paths?.[name]) throw fail('DISC_NATIVE_MISSING', `此交付缺少光碟合成工具：${name}`);
+        await probe(paths[name], args, {
+          signal, code: 'DISC_NATIVE_MISSING', label: `此交付的光碟合成工具不可用（${name}）`,
+          outputToken: new RegExp(name, 'i'),
+        });
+      }
+    }
+    signal?.throwIfAborted();
+  }
+
+  function resume() {
+    resumeWhenIdle = true;
+    if (active.size) return false;
+    shutdown = new AbortController();
+    resumeWhenIdle = false;
+    return true;
+  }
+
+  function assertReady(spec, { signal } = {}) {
+    const combined = signal ? AbortSignal.any([signal, shutdown.signal]) : shutdown.signal;
+    const work = checkReady(spec, { signal: combined });
+    active.add(work);
+    return work.finally(() => {
+      active.delete(work);
+      if (resumeWhenIdle && !active.size) resume();
+    });
+  }
+
+  async function cancelAllAndWait() {
+    resumeWhenIdle = false;
+    shutdown.abort();
+    let timer;
+    try {
+      await Promise.race([
+        Promise.allSettled(Array.from(active)),
+        new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(fail('NATIVE_CAPABILITY_TERMINATION_PENDING',
+            '交付能力探針尚未確認關閉')), options.shutdownTimeoutMs ?? 5000);
+        }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+
+  return Object.freeze({ assertReady, cancelAllAndWait, resume });
 }
 
 class FFmpegOutputParser {
@@ -698,6 +833,7 @@ module.exports = {
   buildIngestArgs,
   bundledNativeRequirements,
   createFFmpegExecution,
+  createDeliveryCapabilities,
   deliveryVideoEncoderArgs,
   detectNativeTool,
   FFmpegErrorAnalyzer,

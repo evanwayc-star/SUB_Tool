@@ -82,6 +82,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材影
       const runner = createDeliveryRunner({ queue: { assertJobCapabilities() {}, registerActiveJob() {}, clearActiveJob() {},
         reportProgress: (_, data) => { progress.push(data); return true; } }, queueDir: () => directory, tempDir: directory,
       mediaProbe: () => probe, encoder: { bitrateArgs: () => ['-c:v', 'libx264'] },
+      nativeCapabilities: { assertReady: async () => {} },
       runFfmpeg: async args => { run(args); return { maps: [] }; } });
       for (const mode of ['whole', 'trimmed', 'reverse', 'fixed']) {
         const start = mode === 'whole' ? 0 : 2.5, duration = 3 - start, output = path.join(directory, `${mode}.mp4`);

@@ -109,3 +109,33 @@ it.each([[4,'output'],[6,'output'],[4,'child'],[6,'child']])('公開背景補足
   const steps=History.stack.length;document.querySelector('#modalFoot button.primary').click();
   expect(History.stack).toHaveLength(steps);expect(State.audioProject).toEqual(committed);
 });
+
+it.each(['detach','split'].flatMap(operation=>['cancel','commit'].flatMap(ending=>[false,true].map(draft=>({operation,ending,draft})))))(
+  '配線視窗開啟時 $operation，$ending／草稿=$draft 保留新外音繼承的自訂來源配線',async({operation,ending,draft})=>{
+  const {AudioPipeline}=await import('../src/audio-routing-engine.js');
+  const clip={id:'detach-with-editor',name:'A.mov',path:'C:/A.mov',dur:5,in:0,out:5,offset:0,vtrack:0,primary:true,audioSrc:'video',audioSourceId:'editor-source'};
+  State.clips=[clip];State.videoTracks=[{visible:true}];
+  AudioPipeline.registerSource(clip,Array.from({length:3},(_,sourceChannel)=>({sourceStream:0,sourceChannel})),3);
+  const source=operation==='detach'?clip:Media.createExternalAudioSource({name:'B.wav',path:'C:/B.wav',duration:5,in:0,out:5,offset:0,fallbackCount:3});
+  State.audioProject.sourceMaps[source.audioSourceId].channels[0].busIds=[State.audioProject.buses[2].id];
+  const expected=structuredClone(State.audioProject.sourceMaps[source.audioSourceId]);
+  History.reset();
+  AudioRouting.openForSource(source.id);await new Promise(resolve=>setTimeout(resolve,0));
+  if(draft){
+    const select=document.querySelector('.audio-route-table tr[data-stream="0"][data-channel="0"] .audio-route-target');
+    select.value=State.audioProject.buses[1].id;select.dispatchEvent(new Event('change'));
+  }
+  const liveExpected=structuredClone(State.audioProject.sourceMaps[source.audioSourceId]);
+  const cache=vi.spyOn(Media,operation==='detach'?'_addDesktopCachedAudio':'addAudioFileDesktop').mockImplementation(async(path,restore)=>Media.createExternalAudioSource({...restore,path,fallbackCount:3}));
+  try{
+    const asset=operation==='detach'?(await Media.detachClipAudio(clip.id))[0]:await Media.splitExternalAudio(source.id,2.5);
+    // app 的 history:record bridge 未載入此 fixture，依相同公開入口記錄背景提交。
+    History.record('解除影音連結');
+    expect(State.audioProject.sourceMaps[asset.audioSourceId]).toEqual(liveExpected);
+    expect(History.committedSnapshot().audioProject.sourceMaps[asset.audioSourceId]).toEqual(expected);
+    expect(History.stack.at(-1).snap.audioProject.sourceMaps[asset.audioSourceId]).toEqual(expected);
+    if(ending==='cancel')closeModal();
+    else document.querySelector('#modalFoot button.primary').click();
+    expect(State.audioProject.sourceMaps[asset.audioSourceId]).toEqual(ending==='cancel'?expected:liveExpected);
+  }finally{cache.mockRestore();}
+});

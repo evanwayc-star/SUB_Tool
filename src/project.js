@@ -221,7 +221,7 @@ function _savedExternalAudioSources(){
 function _savedClips(){
   const live=Array.isArray(State.clips)?State.clips:[];
   const plan=_projectLoadSession.activePlan;
-  const pending=plan?.pendingClipsForSave?.(live)??plan?.pendingClips?.()??[];
+  const pending=plan?.pendingClipsForSave?.()??plan?.pendingClips?.()??[];
   if(!pending.length) return live;
   const liveIds=new Set(live.map(clip=>clip?.id).filter(Boolean));
   return [...live,...pending.filter(clip=>!clip?.id||!liveIds.has(clip.id))];
@@ -311,7 +311,15 @@ function _buildProjectData({snapshot=null,workspace=null}={}){
     usedPresets
   });
 }
-function _buildBytes(){ return encodeUTF16LE(JSON.stringify(_buildProjectData(),null,1)); }
+function _buildBytes(data=_buildProjectData()){
+  // 桌面資訊由主程序在寫檔時加入；瀏覽器無權讀取作業系統的電腦名稱。
+  const document=IS_DESKTOP?data:{
+    'SUB Tool':typeof __APP_VERSION__==='undefined'?'未知版本':__APP_VERSION__,
+    'User Name':'網頁版（無法取得電腦名稱）',
+    ...data,
+  };
+  return encodeUTF16LE(JSON.stringify(document,null,1));
+}
 
 function _timestamp(){
   const n=new Date();
@@ -338,7 +346,7 @@ function _saveProject(asNew){
   // Capture the bytes and dirty baseline together, before any picker or disk IO.
   const data=_buildProjectData();
   const snapshot=JSON.stringify(data);
-  const bytes=encodeUTF16LE(JSON.stringify(data,null,1));
+  const bytes=_buildBytes(data);
   const name=_defaultSaveName();
   const epoch=_saveEpoch, generation=_projectLoadSession.generation;
   const owns=()=>epoch===_saveEpoch&&_isCurrentProjectLoad(generation);
@@ -502,7 +510,7 @@ function _finishProjectLoad(context){
   if(_savedWriteRevision===context.savedRevision){
     const {clipGeo,...snapshot}=initial;
     const plan=_projectLoadSession.activePlan;
-    const pending=plan?.pendingClipsForSave?.(clipGeo||[])??plan?.pendingClips?.()??[];
+    const pending=plan?.pendingClipsForSave?.()??plan?.pendingClips?.()??[];
     snapshot.clips=[...(clipGeo||[]),...pending].map(clip=>Seq.persistentMetadata(clip));
     snapshot.externalAudioState=_normalExternalAudioSources(snapshot.externalAudioState);
     _lastSavedDataStr=JSON.stringify(_buildProjectData({snapshot,workspace:context.workspace}));

@@ -15,6 +15,7 @@ const {
 } = require('../electron/export-watchdog');
 const {
   acquireLease,
+  releaseLease,
   leaseRoot,
   listLeases,
   normalizeOutputPath,
@@ -157,6 +158,69 @@ if (mode === 'success') {
 
   function activeStage() {
     return listLeases(queueDir)[0]?.owner?.stagePath;
+  }
+
+  function recoveryWithTransport(outcomes, cleanup) {
+    // Keep the public recovery owner, real lease files and real PID guards.
+    // Only the named-pipe transport is controlled to hold a close/reconnect race.
+    const filename = path.resolve('electron/export-watchdog.js');
+    const runtimeRequire = createRequire(filename);
+    const connections = [];
+    const netAdapter = { createConnection(pipeName) {
+      const outcome = outcomes[connections.length];
+      const connection = { pipeName, request: null };
+      connections.push(connection);
+      const socket = new EventEmitter();
+      let timeout;
+      Object.assign(socket, {
+        destroyed: false,
+        setEncoding() {},
+        setTimeout(ms, callback) { if (outcome === 'timeout') timeout = setTimeout(callback, ms); },
+        destroy() { this.destroyed = true; clearTimeout(timeout); },
+        end() { clearTimeout(timeout); },
+        write(bytes) {
+          connection.request = JSON.parse(bytes);
+          setTimeout(() => {
+            if (outcome === 'close') socket.emit('end');
+            else if (outcome === 'invalid') socket.emit('data', 'not JSON\n');
+            else if (outcome === 'rejected') socket.emit('data', JSON.stringify({ ok: false, code: 'TOKEN_MISMATCH' })+'\n');
+            else if (outcome === 'cleanup') {
+              cleanup(connection.request);
+              socket.emit('data', JSON.stringify({ ok: true, released: true })+'\n');
+            } else if (outcome !== 'timeout') {
+              socket.emit('error', Object.assign(new Error('peer disconnected'), { code: outcome }));
+            }
+          }, 0);
+        },
+      });
+      setTimeout(() => {
+        if (outcome === 'ENOENT') socket.emit('error', Object.assign(new Error('peer disappeared'), { code: outcome }));
+        else socket.emit('connect');
+      }, 0);
+      return socket;
+    } };
+    const resultModule = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module: resultModule, exports: resultModule.exports,
+      require: name => name === 'net' ? netAdapter : runtimeRequire(name),
+      process, __dirname: path.dirname(filename), __filename: filename,
+      Buffer, setTimeout, clearTimeout, AbortController,
+    }, { filename });
+    return { recover: resultModule.exports.recoverExportLeases, connections };
+  }
+
+  function recoveryLease(pids = {}) {
+    const outPath = path.join(tempDir, 'recover-transport.mp4');
+    const token = 'recovery-transport-token';
+    const stagePath = stageOutputPath(outPath, token);
+    const pipeName = process.platform === 'win32'
+      ? '\\\\.\\pipe\\subtool-recovery-transport'
+      : path.join(tempDir, 'recovery-transport.sock');
+    fs.writeFileSync(outPath, 'previous completed delivery');
+    fs.writeFileSync(stagePath, 'partial');
+    const lease = acquireLease({ queueDir, outPath, token, stagePath, pipeName, jobId: 'recover-transport' });
+    fs.writeFileSync(path.join(lease.lockPath, 'owner.json'), JSON.stringify({ ...lease.owner, ...pids }));
+    return { outPath, token, stagePath, pipeName };
   }
 
   async function launchNativeRuntime({ spawnFailure = false } = {}) {
@@ -601,6 +665,7 @@ if (mode === 'success') {
     expect(listLeases(queueDir)).toEqual([]);
   });
 
+
   it('父程序的 stderr pipe 先斷線時不會讓 watchdog 在清理前崩潰', async () => {
     const { controller, outPath } = launch('noisy', undefined, 'broken-stderr');
 
@@ -722,6 +787,73 @@ if (mode === 'success') {
     ]);
     expect(fs.existsSync(outPath)).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it.each(['EPIPE', 'ECONNRESET', 'close'])('recover 在 %s 後以同一 pipe／token 重試並交由 live owner 清理', async interruption => {
+    const fixture = recoveryLease({ watchdogPid: process.pid });
+    const fx = recoveryWithTransport([interruption, 'cleanup'], request => {
+      expect(request.token).toBe(fixture.token);
+      fs.unlinkSync(fixture.stagePath);
+      releaseLease({ queueDir, outPath: fixture.outPath, token: fixture.token });
+    });
+    const result = await fx.recover(queueDir, { pipeAttempts: 2, pipeRetryMs: 0 });
+    expect(result.warnings).toEqual([]);
+    expect(result.recovered).toEqual([expect.objectContaining({ mode: 'live' })]);
+    expect(fx.connections).toHaveLength(2);
+    expect(fx.connections.every(connection => connection.pipeName === fixture.pipeName
+      && connection.request?.token === fixture.token)).toBe(true);
+    expect(fs.existsSync(fixture.stagePath)).toBe(false);
+    expect(fs.readFileSync(fixture.outPath, 'utf8')).toBe('previous completed delivery');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it.each(['EPIPE', 'ECONNRESET', 'close'])('recover 在 %s 後確認 peer 消失及 PID 結束，才清理本次 stage', async interruption => {
+    const fixture = recoveryLease();
+    const fx = recoveryWithTransport([interruption, 'ENOENT', 'ENOENT']);
+    const result = await fx.recover(queueDir, { pipeAttempts: 3, pipeRetryMs: 0 });
+    expect(result.warnings).toEqual([]);
+    expect(result.recovered).toEqual([expect.objectContaining({ mode: 'stale' })]);
+    expect(fx.connections).toHaveLength(3);
+    expect(fs.existsSync(fixture.stagePath)).toBe(false);
+    expect(fs.readFileSync(fixture.outPath, 'utf8')).toBe('previous completed delivery');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it.each(['EPIPE', 'ECONNRESET', 'close'].flatMap(interruption => ['watchdogPid', 'ffmpegPid']
+    .map(field => ({ interruption, field }))))('recover 在 $interruption 後仍保留 $field 存活時的 stage／lease', async ({ interruption, field }) => {
+    const fixture = recoveryLease({ [field]: process.pid });
+    const fx = recoveryWithTransport([interruption, 'ENOENT', 'ENOENT']);
+    const result = await fx.recover(queueDir, { pipeAttempts: 3, pipeRetryMs: 0 });
+    expect(result.recovered).toEqual([]);
+    expect(result.warnings).toEqual([expect.objectContaining({ code: 'EXPORT_PROCESS_RUNNING' })]);
+    expect(fx.connections).toHaveLength(3);
+    expect(fs.readFileSync(fixture.stagePath, 'utf8')).toBe('partial');
+    expect(fs.readFileSync(fixture.outPath, 'utf8')).toBe('previous completed delivery');
+    expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it.each([
+    ['invalid', 'INVALID_CONTROL_RESPONSE'], ['rejected', 'TOKEN_MISMATCH'], ['timeout', 'CONTROL_PIPE_TIMEOUT'],
+  ])('recover 重連後遇到 %s 仍停止並保留 stage／lease', async (outcome, code) => {
+    const fixture = recoveryLease();
+    const fx = recoveryWithTransport(['EPIPE', outcome, 'cleanup'], () => { throw new Error('unsafe cleanup'); });
+    const result = await fx.recover(queueDir, { pipeAttempts: 3, pipeRetryMs: 0, pipeTimeoutMs: 50 });
+    expect(result.recovered).toEqual([]);
+    expect(result.warnings).toEqual([expect.objectContaining({ code })]);
+    expect(fx.connections).toHaveLength(2);
+    expect(fs.readFileSync(fixture.stagePath, 'utf8')).toBe('partial');
+    expect(fs.readFileSync(fixture.outPath, 'utf8')).toBe('previous completed delivery');
+    expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('recover 的連續傳輸中斷重試有界，活著的 writer 不能因中斷被清理', async () => {
+    const fixture = recoveryLease({ ffmpegPid: process.pid });
+    const fx = recoveryWithTransport(['EPIPE', 'ECONNRESET', 'close', 'cleanup'], () => { throw new Error('unbounded cleanup'); });
+    const result = await fx.recover(queueDir, { pipeAttempts: 3, pipeRetryMs: 0 });
+    expect(result.warnings).toEqual([expect.objectContaining({ code: 'EXPORT_PROCESS_RUNNING' })]);
+    expect(fx.connections).toHaveLength(3);
+    expect(fs.readFileSync(fixture.stagePath, 'utf8')).toBe('partial');
+    expect(listLeases(queueDir)).toHaveLength(1);
   });
 
   it('staging lease 的 crash recovery 只清本次暫存檔，不碰既有成品', async () => {

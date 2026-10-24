@@ -423,9 +423,12 @@ function createMediaIntakeRuntime(options = {}) {
 
   async function describeMissingProxy(src, audio, required = false) {
     if (!options.describeVideo || (!required && readCache(src, audio || [], true)?.meta.proxy)) return null;
+    const sourceKey = cacheKeyFor(src);
     const video = await options.describeVideo(src);
+    // probe 的描述與後續快取准入必須屬於同一母素材，不能認證等待期間被替換的新檔。
+    if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
     if (!(video?.width > 0 && video?.height > 0)) throw new Error('無法確認 Proxy 母素材的視訊尺寸與色彩');
-    return video;
+    return { video, sourceKey };
   }
 
   async function ensureStreamServer() {
@@ -591,9 +594,13 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   // cache coverage 與補建publication共用一個owner，batch/stream不能各自重抽已完成元件。
-  function planIntake({ src, needsProxy, audio }, isStream, video = null) {
+  function planIntake({ src, needsProxy, audio }, isStream, description = null) {
+    const video = description?.video || null;
     const audioSources = Array.isArray(audio) ? audio : [];
     let hit = readCache(src, audioSources, needsProxy);
+    if (hit && description && path.basename(hit.dir) !== description.sourceKey) {
+      throw new Error('母素材在轉檔期間變更，請重新載入');
+    }
     if (hit
       && coversAudioRequest(hit.meta, audioSources)
       && (!needsProxy || hit.meta.proxy)) {
@@ -605,6 +612,9 @@ function createMediaIntakeRuntime(options = {}) {
     // or certify a replacement until the caller has described that source.
     if (buildProxy && options.describeVideo && !video) return { needsVideoDescription: true };
     const dir = hit ? hit.dir : writeCacheDir(src);
+    if (description && path.basename(dir) !== description.sourceKey) {
+      throw new Error('母素材在轉檔期間變更，請重新載入');
+    }
     const metaPath = path.join(dir, 'meta.json');
     // 初建也只寫私有 generation：不同程式共用 sidecar 時，失敗 writer
     // 不能覆寫另一個已提交 writer 的檔案。
@@ -686,13 +696,13 @@ function createMediaIntakeRuntime(options = {}) {
 
   async function ingest(request, session = {}) {
     if (closed || cancelled(session)) throw new IngestSupersededError();
-    const video = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
+    const description = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
     if (closed || cancelled(session)) throw new IngestSupersededError();
-    let plan = planIntake(request, false, video);
+    let plan = planIntake(request, false, description);
     if (plan.needsVideoDescription) {
-      const replacementVideo = await describeMissingProxy(request.src, request.audio, true);
+      const replacementDescription = await describeMissingProxy(request.src, request.audio, true);
       if (closed || cancelled(session)) throw new IngestSupersededError();
-      plan = planIntake(request, false, replacementVideo);
+      plan = planIntake(request, false, replacementDescription);
     }
     if (plan.cached) {
       reportCacheHit(session);
@@ -728,13 +738,13 @@ function createMediaIntakeRuntime(options = {}) {
   async function stream({ src, duration, audio }, session = {}) {
     const port = await ensureStreamServer();
     if (closed || cancelled(session)) return { response: null, completion: null };
-    const video = options.describeVideo ? await describeMissingProxy(src, audio) : null;
+    const description = options.describeVideo ? await describeMissingProxy(src, audio) : null;
     if (closed || cancelled(session)) return { response: null, completion: null };
-    let plan = planIntake({ src, needsProxy: true, audio }, true, video);
+    let plan = planIntake({ src, needsProxy: true, audio }, true, description);
     if (plan.needsVideoDescription) {
-      const replacementVideo = await describeMissingProxy(src, audio, true);
+      const replacementDescription = await describeMissingProxy(src, audio, true);
       if (closed || cancelled(session)) return { response: null, completion: null };
-      plan = planIntake({ src, needsProxy: true, audio }, true, replacementVideo);
+      plan = planIntake({ src, needsProxy: true, audio }, true, replacementDescription);
     }
     if (plan.cached) {
       reportCacheHit(session);

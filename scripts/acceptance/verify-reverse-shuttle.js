@@ -47,9 +47,16 @@ function cadence(samples, direction) {
     }
   }
   const gaps = progress.slice(1).map((sample, index) => sample.wall - progress[index].wall);
+  if (finite.length > 1) {
+    if (progress.length) {
+      gaps.unshift(progress[0].wall - finite[0].wall);
+      gaps.push(finite.at(-1).wall - progress.at(-1).wall);
+    } else gaps.push(finite.at(-1).wall - finite[0].wall);
+  }
   const first = finite[0]?.presented ?? 0;
   const last = finite.at(-1)?.presented ?? first;
-  const span = Math.abs(last - first);
+  const signedSpan = last - first;
+  const span = Math.abs(signedSpan);
   const elapsed = finite.length > 1 ? (finite.at(-1).wall - finite[0].wall) / 1000 : 0;
   const drifts = finite
     .filter(sample => Number.isFinite(sample.display))
@@ -59,10 +66,42 @@ function cadence(samples, direction) {
     progressFrames: progress.length,
     spanSeconds: Number(span.toFixed(3)),
     averageRate: Number((elapsed > 0 ? span / elapsed : 0).toFixed(3)),
+    signedAverageRate: Number((elapsed > 0 ? signedSpan / elapsed : 0).toFixed(3)),
     p95GapMs: Number(percentile(gaps, 0.95).toFixed(1)),
     maxGapMs: Number(Math.max(0, ...gaps).toFixed(1)),
     p95StepSeconds: Number(percentile(steps, 0.95).toFixed(3)),
     maxDisplayDriftSeconds: Number(Math.max(0, ...drifts).toFixed(3)),
+  };
+}
+
+// 正式驗收與測試共用同一個結果 interface，避免各自維護通過準則。
+function evaluateReverseShuttle(forwardSamples, reverseSamples) {
+  const forward = cadence(forwardSamples, 1);
+  const reverse = cadence(reverseSamples, -1);
+  const reverseStayedMuted = reverseSamples.every(sample => sample.reverseMuted === true);
+  const nativeRatio = reverseSamples.filter(sample => sample.nativeReverse).length / reverseSamples.length;
+  const proxyRatio = reverseSamples.filter(sample => sample.reverseProxy).length / reverseSamples.length;
+  const allowedGap = Math.max(160, forward.p95GapMs * 2.5);
+  const allowedStep = Math.max(4 / FPS, forward.p95StepSeconds * 2.5);
+  const failed = forward.spanSeconds < 1 || reverse.spanSeconds < 1
+    || !(forward.signedAverageRate > 0) || !(reverse.signedAverageRate < 0)
+    || reverse.progressFrames < 12
+    || reverse.p95GapMs > allowedGap
+    || reverse.maxGapMs >= 400
+    || reverse.p95StepSeconds > allowedStep
+    || reverse.maxDisplayDriftSeconds > 2 / FPS
+    || !reverseStayedMuted
+    || nativeRatio < 0.9
+    || proxyRatio < 0.9;
+  return {
+    ok: !failed, forward, reverse, reverseStayedMuted,
+    nativeRatio: Number(nativeRatio.toFixed(3)),
+    proxyRatio: Number(proxyRatio.toFixed(3)),
+    limits: {
+      reverseP95GapMs: Number(allowedGap.toFixed(1)),
+      reverseP95StepSeconds: Number(allowedStep.toFixed(3)),
+      maxDisplayDriftSeconds: Number((2 / FPS).toFixed(3)),
+    },
   };
 }
 
@@ -112,7 +151,7 @@ async function samplePresentation(client) {
   })()`);
 }
 
-(async () => {
+async function main() {
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('找不到 dist/index.html，請先執行 npm run build');
   }
@@ -168,7 +207,7 @@ async function samplePresentation(client) {
     );
     await waitFor(
       () => client.evaluate('window.SUB.Media.reverseShuttleProxyReady() === true'),
-      '0.5 秒 keyframe 倒帶 Proxy 就緒',
+      '短 GOP 倒帶 Proxy 就緒',
       30000
     );
     await client.evaluate(`(() => {
@@ -236,24 +275,13 @@ async function samplePresentation(client) {
       10000
     );
 
-    const forward = cadence(forwardSamples, 1);
-    const reverse = cadence(reverseSamples, -1);
-    const reverseStayedMuted = reverseSamples.every(sample => sample.reverseMuted === true);
-    const nativeRatio = reverseSamples.filter(sample => sample.nativeReverse).length / reverseSamples.length;
-    const proxyRatio = reverseSamples.filter(sample => sample.reverseProxy).length / reverseSamples.length;
-    const allowedGap = Math.max(160, forward.p95GapMs * 2.5);
-    const allowedStep = Math.max(4 / FPS, forward.p95StepSeconds * 2.5);
+    const evaluation = evaluateReverseShuttle(forwardSamples, reverseSamples);
     const result = {
       fixture: {
         codec: 'H.264', fps: FPS, gopFrames: 250, seconds: 20, audio: 'AAC',
-        reverseProxyKeyframeSeconds: 0.5,
       },
       immediatePlayState,
-      forward,
-      reverse,
-      reverseStayedMuted,
-      nativeRatio: Number(nativeRatio.toFixed(3)),
-      proxyRatio: Number(proxyRatio.toFixed(3)),
+      ...evaluation,
       reverseTrace: reverseSamples.filter((sample, index) => index % 5 === 0).map(sample => ({
         wall: Number((sample.wall - reverseSamples[0].wall).toFixed(0)),
         presented: Number.isFinite(sample.presented) ? Number(sample.presented.toFixed(3)) : null,
@@ -261,22 +289,9 @@ async function samplePresentation(client) {
         native: sample.nativeReverse,
         proxy: sample.reverseProxy,
       })),
-      limits: {
-        reverseP95GapMs: Number(allowedGap.toFixed(1)),
-        reverseP95StepSeconds: Number(allowedStep.toFixed(3)),
-        maxDisplayDriftSeconds: Number((2 / FPS).toFixed(3)),
-      },
     };
 
-    if (forward.spanSeconds < 1 || reverse.spanSeconds < 1
-      || reverse.progressFrames < 12
-      || reverse.p95GapMs > allowedGap
-      || reverse.maxGapMs >= 400
-      || reverse.p95StepSeconds > allowedStep
-      || reverse.maxDisplayDriftSeconds > 2 / FPS
-      || !reverseStayedMuted
-      || nativeRatio < 0.9
-      || proxyRatio < 0.9) {
+    if (!evaluation.ok) {
       throw new Error(`倒帶平滑度真機驗收失敗：${JSON.stringify(result, null, 2)}`);
     }
     console.log(JSON.stringify(result, null, 2));
@@ -288,7 +303,13 @@ async function samplePresentation(client) {
     await stopElectron(child);
     verifiedCleanup(profileDir, 'subtool-reverse-cdp-');
   }
-})().catch(error => {
-  console.error(error.stack || error.message || String(error));
-  process.exitCode = 1;
-});
+}
+
+if (require.main === module) {
+  main().catch(error => {
+    console.error(error.stack || error.message || String(error));
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { evaluateReverseShuttle };

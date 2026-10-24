@@ -26,6 +26,7 @@ function createDeliveryRunner(options = {}) {
   const tempDir = options.tempDir;
   const mediaProbe = options.mediaProbe;
   const runFfmpeg = options.runFfmpeg;
+  const nativeCapabilities = options.nativeCapabilities;
   const encoder = options.encoder || {};
   const fonts = options.fonts || {};
   const events = options.events || {};
@@ -40,6 +41,7 @@ function createDeliveryRunner(options = {}) {
   if (typeof tempDir !== 'string' || !tempDir) throw new TypeError('delivery runner 缺少 tempDir');
   if (typeof mediaProbe !== 'function') throw new TypeError('delivery runner 缺少 mediaProbe adapter');
   if (typeof runFfmpeg !== 'function') throw new TypeError('delivery runner 缺少 ffmpeg adapter');
+  if (typeof nativeCapabilities?.assertReady !== 'function') throw new TypeError('delivery runner 缺少 native 能力 adapter');
 
   function dispatch(target, jobId, event, data) {
     if (event === 'task-progress' && queue.reportProgress(jobId, data) === false) return false;
@@ -117,6 +119,8 @@ function createDeliveryRunner(options = {}) {
       if (abort.signal.aborted) controller.stop?.(active.stopped ? 'user-stop' : 'shutdown');
     };
     try {
+      checkCancelled();
+      await nativeCapabilities.assertReady(payload, { signal: abort.signal });
       checkCancelled();
       fs.mkdirSync(tempDir, { recursive: true });
       if (assText && assText.trim()) {

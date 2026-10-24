@@ -9,6 +9,7 @@ vi.mock('../src/ui.js',()=>({setStatus:vi.fn(),showToast:vi.fn(),showOsd:vi.fn()
 vi.mock('../src/mixer.js',()=>({renderAudioTracks:vi.fn(),clearMeterStrips:vi.fn()}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()}));
 vi.mock('../src/notes.js',()=>({renderNotes:vi.fn(),updateNoteActive:vi.fn()}));
+vi.mock('../src/menus.js',()=>({showCtx:vi.fn()}));
 vi.mock('../src/subtitles.js',()=>({selectCueSingle:vi.fn(),commitCueTimeEdit:vi.fn()}));
 vi.mock('../src/subtitle-model.js',()=>({addCue:vi.fn(),cueTrackLocked:vi.fn(),snapAllCuesToFrames:vi.fn()}));
 let Media,Wave,State,setFps,resetAudioProject,ensureAudioSourceMap,Project,resetProject,Seq,AudioEngine,pickMediaFiles,importDesktopMediaFiles,importBrowserMediaFiles,openMedia;
@@ -94,6 +95,75 @@ it.each([{split:false,remove:false},{split:true,remove:false},{split:true,remove
   }
  }finally{
   release();await loading;runtime.mockRestore();proxy.mockRestore();window.subtool.probe.mockImplementation(previousProbe);
+  if(previousWrite)window.subtool.writeProject=previousWrite;else delete window.subtool.writeProject;
+ }
+});
+it.each(['split','remove'])('專案第三素材等待期間 %s 已復原次片，晚到取消不刪已交接實體或補回原文',async action=>{
+ const {History}=await import('../src/history.js');
+ const pending=pendingImport(),started=pendingImport();
+ const previousProbe=window.subtool.probe.getMockImplementation(),previousWrite=window.subtool.writeProject;
+ window.subtool.probe.mockImplementation(async path=>{
+  if(path==='C:/third.webm'){started.resolve();await pending.promise;}
+  return {duration:12,video:{codec:'vp9',fps:30,width:1920,height:1080},audio:[]};
+ });
+ window.subtool.writeProject=vi.fn(async()=> 'C:/restore-edit.subtool');
+ const clips=['first','second','third'].map((name,index)=>({name:name+'.webm',path:'C:/'+name+'.webm',
+  audioSourceId:name+'-source',dur:12,in:0,out:12,offset:index*12,vtrack:0,primary:index===0}));
+ const data={app:'SUB Tool',version:3,media:{name:'first.webm',path:'C:/first.webm'},fps:24,tracks:[],cues:[],notes:[],clips};
+ const runtime=vi.spyOn(Media,'ensureClipRuntime').mockResolvedValue(),proxy=vi.spyOn(Media,'ensurePrimaryPreviewProxy').mockResolvedValue();
+ const loading=Project.loadDesktop({path:'C:/restore-edit.subtool',b64:Buffer.concat([
+  Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le'),
+ ]).toString('base64')});
+ try{
+  await started.promise;
+  if(action==='split') expect(Media.splitClipAt(15)).toBe(true);
+  else expect(Media.removeClip(State.clips.find(clip=>clip.path==='C:/second.webm').id)).toBe(true);
+  History.record('編輯已復原次片');
+  pending.resolve();await loading;
+  const pieces=()=>State.clips.filter(clip=>clip.path==='C:/second.webm').map(({in:start,out,offset})=>({in:start,out,offset}));
+  const expected=action==='split'?[{in:0,out:3,offset:12},{in:3,out:12,offset:15}]:[];
+  expect(pieces()).toEqual(expected);
+  await Project.save();
+  const saved=JSON.parse(Buffer.from(window.subtool.writeProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+  expect(saved.clips.filter(clip=>clip.path==='C:/second.webm').map(({in:start,out,offset})=>({in:start,out,offset})))
+   .toEqual(expected);
+  History.undo();expect(pieces()).toEqual([{in:0,out:12,offset:12}]);
+  History.redo();expect(pieces()).toEqual(expected);
+ }finally{
+  pending.resolve();await loading;runtime.mockRestore();proxy.mockRestore();window.subtool.probe.mockImplementation(previousProbe);
+  if(previousWrite)window.subtool.writeProject=previousWrite;else delete window.subtool.writeProject;
+ }
+});
+it.each(['fade','remove'])('純圖片專案等待第二張 stat 時 %s 第一張，取消復原保留已交接編輯及存檔去重',async action=>{
+ const {setClipFade}=await import('../src/clip-model.js'),{History}=await import('../src/history.js');
+ const pending=pendingImport(),started=pendingImport();
+ const previousStat=window.subtool.stat.getMockImplementation(),previousWrite=window.subtool.writeProject;
+ window.subtool.stat.mockImplementation(async path=>{
+  if(path==='C:/second.png'){started.resolve();await pending.promise;}
+  return {exists:true,size:1024};
+ });
+ window.subtool.writeProject=vi.fn(async()=> 'C:/image-edit.subtool');
+ const clips=['first','second'].map((name,index)=>({type:'image',name:name+'.png',path:'C:/'+name+'.png',
+  dur:36000,in:0,out:10,offset:index*10,vtrack:0,natW:640,natH:360}));
+ const data={app:'SUB Tool',version:3,media:{},fps:24,tracks:[],cues:[],notes:[],clips};
+ const loading=Project.loadDesktop({path:'C:/image-edit.subtool',b64:Buffer.concat([
+  Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le'),
+ ]).toString('base64')});
+ try{
+  await started.promise;
+  if(action==='fade') expect(setClipFade(State.clips[0],1,1)).toBe(true);
+  else{expect(Media.removeClip(State.clips[0].id)).toBe(true);History.record('刪除已復原圖片');}
+  pending.resolve();await loading;
+  const expected=action==='fade'?[expect.objectContaining({path:'C:/first.png',fadeIn:1,fadeOut:1})]:[];
+  expect(State.clips).toEqual(expected);
+  await Project.save();
+  const saved=JSON.parse(Buffer.from(window.subtool.writeProject.mock.calls.at(-1)[1],'base64').subarray(2).toString('utf16le'));
+  expect(saved.clips.map(clip=>clip.path)).toEqual(action==='fade'?['C:/first.png','C:/second.png']:['C:/second.png']);
+  if(action==='fade') expect(saved.clips[0]).toMatchObject({fadeIn:1,fadeOut:1});
+  History.undo();expect(State.clips[0]).toMatchObject({path:'C:/first.png',fadeIn:0,fadeOut:0});
+  History.redo();expect(State.clips).toEqual(expected);
+ }finally{
+  pending.resolve();await loading;window.subtool.stat.mockImplementation(previousStat);
   if(previousWrite)window.subtool.writeProject=previousWrite;else delete window.subtool.writeProject;
  }
 });

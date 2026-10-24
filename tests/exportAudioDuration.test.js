@@ -78,6 +78,7 @@ describe('交付音訊完整時間範圍', () => {
     const queue = { assertJobCapabilities() {}, reportProgress: (_id, data) => { progress.push(data); return true; },
       registerActiveJob: (id, session) => active.set(id, session), clearActiveJob: id => active.delete(id) };
     const runner = createDeliveryRunner({ queue, queueDir: () => directory, tempDir: directory, mediaProbe: () => probe,
+      nativeCapabilities: { assertReady: async () => {} },
       encoder: { proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] },
       runFfmpeg: async args => { runFfmpeg(args); return { maps: [] }; } });
     try {

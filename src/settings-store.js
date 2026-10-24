@@ -23,7 +23,11 @@ export const SETTINGS_SLOTS = {
 /* desk：Electron 橋接物件（桌面版），或 null（網頁版）。
    storage：localStorage 或相容物件；預設取全域的 localStorage，測試可注入假的。 */
 export function makeSettingsStore(desk, storage) {
-  const ls = storage || (typeof localStorage !== 'undefined' ? localStorage : null);
+  // 取得 localStorage 本身也可能被瀏覽器拒絕；只在網頁 adapter 真正需要時解析。
+  function browserStorage() {
+    try { return storage || globalThis.localStorage || null; }
+    catch (_) { return null; }
+  }
 
   /* 讀取設定。回傳存的物件，或 null（沒有、壞掉、或讀取失敗）。
      永遠不丟例外——設定讀不到時應回到預設值，而不是讓整個啟動流程崩掉。 */
@@ -39,6 +43,7 @@ export function makeSettingsStore(desk, storage) {
         return null;
       }
     }
+    const ls = browserStorage();
     if (!ls) return null;
     try {
       const raw = ls.getItem(slot.lsKey);
@@ -64,6 +69,7 @@ export function makeSettingsStore(desk, storage) {
         return false;
       }
     }
+    const ls = browserStorage();
     if (!ls) return false;
     try {
       ls.setItem(slot.lsKey, JSON.stringify(data));

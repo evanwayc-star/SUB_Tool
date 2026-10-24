@@ -365,7 +365,10 @@ function registerAudioSource(rawProject,audioSourceId,channels,options={},alloca
   const descriptors=_normalChannels(channels);
   if((project.mode==='auto'||options.forceBusCount===true)&&options.ensureBuses!==false)
     appendAudioBuses(project,descriptors.length,options,allocation);
-  const existing=options.reset?[]:(project.sourceMaps[sourceId]?.channels||[]);
+  // Replay the inheritance intent against each editor's own project, so a live
+  // routing draft cannot leak into its committed baseline or be lost on cancel.
+  const inherited=project.sourceMaps[_cleanId(options.copyFromSourceId)];
+  const existing=options.reset?[]:(inherited?.channels||project.sourceMaps[sourceId]?.channels||[]);
   const byKey=new Map(existing.map(route=>[route.sourceStream+':'+route.sourceChannel,route]));
   descriptors.forEach((channel,index)=>{
     const key=channel.sourceStream+':'+channel.sourceChannel;

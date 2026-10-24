@@ -176,7 +176,7 @@ function promptModal(title, label, defVal = '', { placeholder = '', okLabel = '�
     openModal(title,
       `<div style="font-size:13px;color:var(--text-dim);margin-bottom:8px">${esc(label)}</div>` +
       `<input type="text" id="__promptInput" value="${esc(defVal)}" placeholder="${esc(placeholder)}" ` +
-      `style="width:100%;box-sizing:border-box;font-size:14px;padding:7px 9px;background:var(--bg2);` +
+      `style="width:100%;box-sizing:border-box;font-size:14px;padding:7px 9px;background:var(--panel2);` +
       `border:1px solid var(--border2);border-radius:5px;color:var(--text)">`,
       [{ label: okLabel, primary: true, act: () => { const v = ($('__promptInput')?.value || '').trim(); finish(v || null); } },
        { label: '取消', act: () => finish(null) }], { onDismiss: cancel, onReplaced: cancel });

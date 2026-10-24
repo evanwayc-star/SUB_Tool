@@ -100,7 +100,7 @@ function shutdownHandler(vocalRuntime, overrides = {}) {
   const context = {
     app: { on: (channel, listener) => { handler = listener; }, quit: vi.fn() },
     _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false,
-    audioNormalizationJobs: new Map(), mediaProbe: null, ffmpegExecution: nativeOwner(),
+    audioNormalizationJobs: new Map(), mediaProbe: null, ffmpegExecution: nativeOwner(), deliveryCapabilities: nativeOwner(),
     clipAudioCache: { waitForIdle: vi.fn().mockResolvedValue() },
     clipFrameCache: { waitForIdle: vi.fn().mockResolvedValue() },
     speechCompressionRuntime: nativeOwner(), mediaIngestCoordinator: nativeOwner(),

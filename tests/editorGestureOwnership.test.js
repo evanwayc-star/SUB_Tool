@@ -78,6 +78,38 @@ it.each([1,2])('非主鍵 %s 拖曳不重排字幕軌，也不改字幕索引或
   expect(History.snap()).toEqual(before);expect(History.stack).toHaveLength(1);
 });
 
+it.each([
+  {scroll:0,from:2,y:340},
+  {scroll:100,from:2,y:240},
+  {scroll:100,from:3,y:170},
+])('字幕軌重排使用捲動後的內容座標（捲動 $scroll，來源 $from）',async({scroll,from,y})=>{
+  State.tracks=[
+    {name:'A',height:40},{name:'B',height:60},{name:'C',height:80},{name:'D',height:50},
+  ];
+  State.trackCount=4;State.listTrack=2;
+  State.cues=State.tracks.map((_,track)=>({id:'cue-'+track,start:track,end:track+1,text:String(track),track}));
+  await timeline();History.reset();
+  const gutter=document.getElementById('tlGutterTracks');
+  const originalRect=gutter.getBoundingClientRect;
+  const originalScroll=gutter.scrollTop,tracksScroll=document.getElementById('tlTracks').scrollTop;
+  try{
+  gutter.getBoundingClientRect=()=>({left:0,top:150,right:150,bottom:400,width:150,height:250});
+  gutter.scrollTop=scroll;document.getElementById('tlTracks').scrollTop=scroll;
+  mouse(gutter.querySelector(`[data-track="${from}"] .drag-handle`),'mousedown',170);
+  mouse(document,'mousemove',y);mouse(document,'mouseup',y);
+  expect(State.tracks.map(track=>track.name)).toEqual(['A','B','D','C']);
+  expect(State.cues.find(cue=>cue.id==='cue-2').track).toBe(3);
+  expect(State.cues.find(cue=>cue.id==='cue-3').track).toBe(2);
+  expect(State.listTrack).toBe(3);expect(History.stack).toHaveLength(2);
+  History.undo();
+  expect(State.tracks.map(track=>track.name)).toEqual(['A','B','C','D']);
+  expect(State.listTrack).toBe(3);
+  }finally{
+    gutter.getBoundingClientRect=originalRect;gutter.scrollTop=originalScroll;
+    document.getElementById('tlTracks').scrollTop=tracksScroll;
+  }
+});
+
 it.each(['subtitle','video','audio'].flatMap(kind=>[0,1,2].map(button=>({kind,button}))))('$kind 軌列只接受主鍵高度手勢：button $button',async({kind,button})=>{
   State.clips=[{id:'gutter-clip',in:0,out:5,dur:5,offset:0,vtrack:0,primary:true,audioSourceId:'video',height:40}];
   State.tracks[0].height=40;State.videoTracks[0].height=40;

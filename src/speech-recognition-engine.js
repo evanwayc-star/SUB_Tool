@@ -6,7 +6,6 @@
    （Google Gemini / Azure Speech / Groq Whisper / OpenAI Whisper）與本機 ONNX WebGPU/WASM 管線。
    ============================================================================== */
 import { transcribeBuiltinAudioInWorker } from './speech-recognition-worker-client.js';
-import { resolveBuiltinExecutionPlan } from './speech-recognition-worker-runtime.js';
 import { b64ToBytes } from './util.js';
 import OpenCC from 'opencc-js/cn2t';
 
@@ -242,7 +241,7 @@ export function applyVocalEnhancementFilter(samples, sampleRate = 16000) {
 
     // Low-pass filter
     const lp_y = lp_b0_n * hp_y + lp_d1;
-    lp_d1 = lp_b1_n * hp_y - lp_a1_n * hp_y + lp_d2;
+    lp_d1 = lp_b1_n * hp_y - lp_a1_n * lp_y + lp_d2;
     lp_d2 = lp_b2_n * hp_y - lp_a2_n * lp_y;
 
     output[i] = Math.max(-1, Math.min(1, lp_y));
@@ -383,70 +382,6 @@ async function compressWhisperUploadForDesktop(wavBlob, signal) {
     console.warn('辨識用 MP3 暫存壓縮失敗，改用安全 WAV 分段：', error);
     return wavBlob;
   }
-}
-
-/** 本機 pipeline 單例快取 */
-let cachedTranscriber = null;
-let cachedPipelineKey = null;
-
-/**
- * 載入或重用 Transformers.js 本機語音辨識 Pipeline
- */
-export async function loadTransformersPipeline(modelId = 'onnx-community/whisper-base', onProgress = null) {
-  const moduleUrl = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
-  const { pipeline, env } = await import(/* @vite-ignore */ moduleUrl);
-
-  env.allowLocalModels = false;
-  env.useBrowserCache = true;
-
-  const modelMeta = BUILTIN_MODELS[modelId] || BUILTIN_MODELS['onnx-community/whisper-base'];
-  const preferredPlan = resolveBuiltinExecutionPlan({
-    hasWebGpu: typeof navigator !== 'undefined' && Boolean(navigator.gpu),
-    webgpuDtype: modelMeta.webgpuDtype,
-    wasmDtype: modelMeta.wasmDtype
-  });
-  const fallbackPlan = resolveBuiltinExecutionPlan({
-    hasWebGpu: false,
-    webgpuDtype: modelMeta.webgpuDtype,
-    wasmDtype: modelMeta.wasmDtype
-  });
-  const keyFor = plan => JSON.stringify({ modelId: modelMeta.id, ...plan });
-  if (cachedTranscriber && (
-    cachedPipelineKey === keyFor(preferredPlan) || cachedPipelineKey === keyFor(fallbackPlan)
-  )) return cachedTranscriber;
-
-  if (onProgress) onProgress({ status: 'loading', message: `正在載入 ${modelMeta.name} 模型檔案…` });
-
-  if (cachedTranscriber?.dispose) await cachedTranscriber.dispose();
-  cachedTranscriber = null;
-  cachedPipelineKey = null;
-  let pipe = null;
-  let actualPlan = preferredPlan;
-  try {
-    pipe = await pipeline('automatic-speech-recognition', modelMeta.id, {
-      device: preferredPlan.device,
-      dtype: preferredPlan.dtype,
-      progress_callback: (p) => {
-        if (onProgress) onProgress(p);
-      }
-    });
-  } catch (err) {
-    if (preferredPlan.device === 'wasm') throw err;
-    console.warn('以 WebGPU 載入失敗，嘗試回退至 CPU (WASM) 模式:', err);
-    if (onProgress) onProgress({ status: 'fallback', message: 'WebGPU 無法啟動，切換至 CPU (WASM q8) 模式…' });
-    actualPlan = fallbackPlan;
-    pipe = await pipeline('automatic-speech-recognition', modelMeta.id, {
-      device: fallbackPlan.device,
-      dtype: fallbackPlan.dtype,
-      progress_callback: (p) => {
-        if (onProgress) onProgress(p);
-      }
-    });
-  }
-
-  cachedTranscriber = pipe;
-  cachedPipelineKey = keyFor(actualPlan);
-  return pipe;
 }
 
 /**

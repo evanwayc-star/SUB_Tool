@@ -15,6 +15,7 @@
 ============================================================================ */
 
 const MPV_TIMECODE_RE = /^\d{1,6}:[0-5]\d:[0-5]\d[:;]\d{2,3}$/;
+const { StringDecoder } = require('node:string_decoder');
 const { sourceClockTime, playerClockTime } = require('../shared/media-source-clock.cjs');
 
 function createMpvHost(deps) {
@@ -451,9 +452,12 @@ function createMpvHost(deps) {
   function attachClient(connected, token) {
     client = connected;
     buffer = '';
+    // Pipe chunk 不是 UTF-8 字元邊界；每條連線持有自己的半字元，
+    // 避免中文 path 損毀後無法確認 file-loaded，也不沿用舊連線殘留。
+    const decoder = new StringDecoder('utf8');
     connected.on('data', chunk => {
       if (connected !== client || token !== generation) return;
-      buffer += chunk.toString();
+      buffer += decoder.write(chunk);
       const lines = buffer.split('\n');
       buffer = lines.pop();
       for (const line of lines) {
