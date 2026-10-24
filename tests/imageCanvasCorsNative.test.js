@@ -46,6 +46,10 @@ it.skipIf(process.platform!=='win32'||!existsSync(ELECTRON)||!existsSync(FFMPEG)
     // limited to the visible DOM element would still leave this canvas tainted.
     await client.evaluate(`document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'t',bubbles:true,cancelable:true}));true`);
     const screenshot=await waitFor(()=>readdirSync(directory).find(file=>file.endsWith('.jpg')),'圖片截圖實際寫入',5000);
+    // Filename reservation creates an empty file before JPEG encoding. Wait for
+    // the public save acknowledgement before decoding the finished image.
+    await waitFor(()=>client.evaluate(`document.getElementById('stMsg')?.textContent===${JSON.stringify('截圖已儲存：'+screenshot)}`),
+      '圖片截圖儲存完成',5000);
     const pixel=execFileSync(FFMPEG,['-hide_banner','-loglevel','error','-i',path.join(directory,screenshot),
       '-vf','crop=2:2:iw/2:ih/2,scale=1:1','-frames:v','1','-pix_fmt','rgb24','-f','rawvideo','pipe:1'],{windowsHide:true});
     expect(pixel[0]).toBeGreaterThan(240);expect(pixel[1]).toBeLessThan(10);expect(pixel[2]).toBeLessThan(10);
