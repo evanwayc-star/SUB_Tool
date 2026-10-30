@@ -111,6 +111,7 @@ class FileAuthority {
     this._deliveryRevealFiles = new Set();
     this._screenshotDirectories = new Set();
     this._queueLogDirectories = new Set();
+    this._diagnosticLogFiles = new Set();
 
     for (const directory of internalDirectories) {
       this.grantInternalDirectory(directory);
@@ -247,6 +248,14 @@ class FileAuthority {
     return true;
   }
 
+  /** 主程序已保留的單份失敗診斷；不授予同目錄或一般讀寫能力。 */
+  grantDiagnosticLogFile(file) {
+    const resolved = this._resolve(file);
+    if (!resolved || !QUEUE_LOG_FILE.test(file)) return false;
+    this._diagnosticLogFiles.add(resolved);
+    return true;
+  }
+
   /** 授予受控暫存截圖檔之讀取能力。 */
   grantTemporaryScreenshotRead(file) {
     if (this._path.basename(file || '').toLowerCase() !== TEMP_SCREENSHOT_FILE) return false;
@@ -282,7 +291,7 @@ class FileAuthority {
   canOpenQueueLog(file) {
     const candidate = this._resolve(file);
     return !!candidate && QUEUE_LOG_FILE.test(file || '') &&
-      this._matchesDirectoryCapability(candidate, this._queueLogDirectories);
+      (this._diagnosticLogFiles.has(candidate) || this._matchesDirectoryCapability(candidate, this._queueLogDirectories));
   }
 
   /** 檢查目錄是否為授權之截圖目錄。 */

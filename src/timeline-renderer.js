@@ -1700,6 +1700,13 @@ window.addEventListener('mousemove',e=>{
   }
 });
 
+// 只有已接受的時間變更消耗 I 的暫存終點；preview／取消仍保留原收尾資格。
+function clearDraggedProvisionalEnds(pending){
+  for(const {c,os,oe} of pending.grp){
+    if(pending.isCopyDrag || c.start!==os || c.end!==oe) delete c._tempEnd;
+  }
+}
+
 function confirmSubtitleDragRemoval(pending){
   if(pending.gesture.kind!=='cue'||!pending.gesture.hasMoved()) return false;
   const added=new Set(pending.isCopyDrag?pending.grp.map(item=>item.c):[]);
@@ -1724,6 +1731,7 @@ function confirmSubtitleDragRemoval(pending){
         }
         if(added.has(cue)) State.cues.push(cue);
       }
+      clearDraggedProvisionalEnds(pending);
       setSelection({kind:'sub',ids:selection.ids,primary:selection.primary});State.activeEdge=selection.activeEdge;
       sweepContainedCues(patches.map(patch=>patch.cue));
       sortCues();emit('render:all');recordHistory(label);
@@ -1801,6 +1809,7 @@ window.addEventListener('mouseup',e=>{
     } else if (!moved && drag.isCtrl && m==='move') {
       selectCue(drag.c.id, {additive:true});
     } else if (moved) {
+      clearDraggedProvisionalEnds(drag);
       sweepContainedCues(drag.grp.map(x=>x.c));
       sortCues(); emit('render:all');
       recordHistory(drag.isCopyDrag ? `複製字幕` : (m==='move'?(drag.grp.length>1?`移動字幕 (${drag.grp.length}句)`:'移動字幕'+cueSuffix(drag.c)):'調整字幕時間'+cueSuffix(drag.c)));

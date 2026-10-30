@@ -9,7 +9,7 @@ const fixture=vi.hoisted(()=>{
   const ctx={fillRect:vi.fn(),drawImage:vi.fn(),save:vi.fn(),restore:vi.fn(),beginPath:vi.fn(),rect:vi.fn(),clip:vi.fn()};
   const publish={drawImage:vi.fn(),fillRect:vi.fn()};
   const canvas={style:{display:'none'},width:640,height:360,parentElement:{clientWidth:640,clientHeight:360},getContext:()=>publish};
-  return {clips,defaults:clips.map(clip=>({...clip})),ctx,publish,canvas,time:103,takeover:false,availableB:25,longHold:false,sourceFps:25,sourceOffsetUs:0,indexFailure:false,keyFrames:[0],realReader:false,decode:vi.fn(),session:null,snapshot:null,composition:vi.fn(),report:vi.fn()};
+  return {clips,defaults:clips.map(clip=>({...clip})),ctx,publish,canvas,time:103,takeover:false,availableB:25,longHold:false,sourceFps:25,sourceOffsetUs:0,indexFailure:false,keyFrames:[0],realReader:false,decode:vi.fn(),readerDispose:vi.fn(),session:null,snapshot:null,composition:vi.fn(),report:vi.fn()};
 });
 vi.mock('../src/dom.js',()=>({$:id=>id==='previewCanvas'?fixture.canvas:null,video:{src:'',currentSrc:''}}));
 vi.mock('../src/state.js',()=>({State:{clips:fixture.clips,videoTracks:[{visible:true},{visible:true}],videoWidth:1920,videoHeight:1080,fps:25},ensureVideoTrackCount:vi.fn(),videoTrackVisible:()=>true}));
@@ -36,14 +36,14 @@ vi.mock('../src/decode/demux.js',async importOriginal=>{
     return {config:{codec:'test'},index:samples(url),keyIdx:fixture.keyFrames,maxEnd:500,info:info()};
   }),
   demuxFile:vi.fn(async()=>({config:{codec:'test'},chunks:samples('a.mp4').map((sample,i)=>({...sample,data:new Uint8Array([i])})),info:info()})),
-  SampleReader:class {constructor(url,index,maxEnd){if(fixture.realReader)return new actual.SampleReader(url,index,maxEnd);this.url=url;}data(i){return this.url==='b.mp4'&&i>fixture.availableB?null:new Uint8Array([i]);}ensure(){}dispose(){}},
+  SampleReader:class {constructor(url,index,maxEnd){if(fixture.realReader)return new actual.SampleReader(url,index,maxEnd);this.url=url;}data(i){return this.url==='b.mp4'&&i>fixture.availableB?null:new Uint8Array([i]);}ensure(){}dispose(){fixture.readerDispose(this.url);}},
   MemReader:class {constructor(chunks){this.chunks=chunks;}data(i){return this.chunks[i]?.data;}ensure(){}dispose(){}},
 };});
 import {WCPreview} from '../src/decode/player.js';
 import {createMediaPresentationSession} from '../src/media-presentation-core.js';
 import {Seq} from '../src/sequence.js';
 import {State} from '../src/state.js';
-import {demuxIndex} from '../src/decode/demux.js';
+import {demuxIndex,demuxFile} from '../src/decode/demux.js';
 
 async function loadFirstFrame(){
   WCPreview.tick();
@@ -70,6 +70,64 @@ beforeEach(()=>{
 afterEach(()=>{WCPreview.disposeAll();vi.unstubAllGlobals();vi.restoreAllMocks();});
 
 describe('WebCodecs public preview frame admission',()=>{
+  it('整檔 payload 仍由同 URL 健康層共用，所有層終止失敗後不再持有舊 cache',async()=>{
+    const decoders=[],HealthyDecoder=globalThis.VideoDecoder;
+    class Decoder extends HealthyDecoder{
+      constructor(callbacks){super(callbacks);this.error=callbacks.error;decoders.push(this);}
+    }
+    vi.stubGlobal('VideoDecoder',Decoder);vi.spyOn(console,'error').mockImplementation(()=>{});vi.spyOn(console,'warn').mockImplementation(()=>{});
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(new Uint8Array([1]))));
+    fixture.indexFailure=true;fixture.time=0;
+    for(const clip of fixture.clips)Object.assign(clip,{web:{url:'a.mp4'},in:0,out:2,offset:0});
+    WCPreview.tick();await vi.waitFor(()=>expect(decoders).toHaveLength(2));WCPreview.tick();
+    expect(demuxFile).toHaveBeenCalledOnce();
+    decoders[0].error(new Error('first layer failed'));WCPreview.tick();
+    const addLayer=async index=>{
+      fixture.clips.push({id:'layer-'+index,web:{url:'a.mp4'},in:0,out:2,offset:0,vtrack:index});
+      State.videoTracks.push({visible:true});WCPreview.tick();
+      await vi.waitFor(()=>expect(decoders).toHaveLength(index+1));WCPreview.tick();
+    };
+    await addLayer(2);
+    expect(demuxFile).toHaveBeenCalledOnce(); // 另一個健康層仍持有同一份 payload。
+    decoders[1].error(new Error('second layer failed'));decoders[2].error(new Error('third layer failed'));
+    WCPreview.tick();
+    await addLayer(3);
+    expect(demuxFile).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['callback','decode','configure'])('終止的 decoder %s 失敗即釋放其畫格與 reader，保留其他層且不重建失敗來源',async failure=>{
+    const decoders=[],HealthyDecoder=globalThis.VideoDecoder;
+    class Decoder extends HealthyDecoder{
+      constructor(callbacks){
+        super({...callbacks,output:frame=>{this.allocated.push(frame);callbacks.output(frame);}});
+        this.allocated=[];this.error=callbacks.error;this.close=vi.fn();decoders.push(this);
+      }
+      configure(){if(this.failConfigure)throw new Error('decoder configure failed');}
+      decode(chunk){if(this.failDecode)throw new Error('decoder decode failed');super.decode(chunk);}
+    }
+    vi.stubGlobal('VideoDecoder',Decoder);vi.spyOn(console,'error').mockImplementation(()=>{});
+    fixture.keyFrames=[0,25];fixture.availableB=250;fixture.time=1;
+    for(const clip of fixture.clips)Object.assign(clip,{in:0,out:2,offset:0});
+    await loadFirstFrame();
+    expect(fixture.publish.drawImage).toHaveBeenCalled();
+    const failed=decoders[0],surviving=decoders[1];
+    expect(failed.allocated.length).toBeGreaterThan(0);
+    if(failure==='callback')failed.error(new Error('decoder failed'));
+    else{
+      failed[failure==='decode'?'failDecode':'failConfigure']=true;
+      fixture.time=failure==='decode'?1.5:0;
+    }
+    expect(()=>WCPreview.tick()).not.toThrow();
+    expect(failed.close).toHaveBeenCalledOnce();
+    expect(failed.allocated.every(frame=>frame.closed)).toBe(true);
+    expect(fixture.readerDispose.mock.calls).toEqual([['a.mp4']]);
+    expect(surviving.allocated.some(frame=>!frame.closed)).toBe(true);
+    expect(fixture.takeover).toBe(false);
+    const late={closed:false,close(){this.closed=true;}};failed.output(late);
+    expect(late.closed).toBe(true);
+    WCPreview.tick();WCPreview.tick();expect(decoders).toHaveLength(2);
+  });
+
   it('同母素材五層的慢速 Range 各自前進，共用索引且卸載取消所有讀取',async()=>{
     vi.useFakeTimers();
     try{

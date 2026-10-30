@@ -153,21 +153,25 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         let wavPath=null;
         try{
           wavPath=await DESK.waveAudio(p,dur);
-          if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
+          if(!ownsPrimary()) return;
           const wavUrl=await DESK.fileURL(wavPath);
-          if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
+          if(!ownsPrimary()) return;
           const res=await fetch(wavUrl);
           const buf=await res.arrayBuffer();
-          if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
+          if(!ownsPrimary()) return;
           const ab=await AudioEngine.decodeAudioData(buf); 
-          if(!ownsPrimary()){ try{ DESK.cleanupAudio(wavPath); }catch(e){} return; }
-          try { DESK.cleanupAudio(wavPath); } catch(e) {}
+          if(!ownsPrimary()) return;
           // The waveform spans the mother source, not its trimmed placements.
           // Sequence, external audio and cues remain the timeline duration owner.
           ctx.recomputeTimelineDuration();
           ctx._commitOriginalWave(primary,ab); emit('media:timeline');
         }
         catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); } }
+        finally{
+          // waveAudio 是本次請求的暫存檔；讀取/解碼失敗及失權也必須釋放。
+          // 不適用於其他分支由 ingest 持有、後續波形仍會讀取的 res.wave。
+          if(wavPath) try{ await DESK.cleanupAudio(wavPath); }catch(e){}
+        }
       }
       if(!ownsPrimary()) return;
       setStatus('媒體已載入（原生直讀，免轉 Proxy）','ok'); emit('duration:known'); return;

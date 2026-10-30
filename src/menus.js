@@ -41,7 +41,7 @@ function hideCtx(){
   ctx.classList.remove('show'); ctx.innerHTML='';
   if(was) { window._ctxOpen=false; emit('mpv:sync'); emit('render:videoSub'); } // 選單若曾讓 mpv 讓位，關閉時恢復（僅在真的有開過才發，避免每次 mousedown 都打 IPC）
 }
-function showCtx(x,y,items){
+function showCtx(x,y,items,{preserveFocus=false}={}){
   ctx.innerHTML='';
   for(const it of items){
     let d;
@@ -55,6 +55,8 @@ function showCtx(x,y,items){
     else { d=document.createElement('div'); d.className='ci'; d.setAttribute('role','menuitem');
       const { icon, text } = splitMenuLabel(it.label);
       d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`+(it.checked?'<span class="chk">✓</span>':'');
+      // 輸入框的複製／貼上選單需保留游標及 inline editor；其他選單維持原焦點行為。
+      if(preserveFocus) d.addEventListener('mousedown',e=>{if(e.button===0)e.preventDefault();});
       if(typeof it.act==='function') d.onclick=()=>{ hideCtx(); it.act(); };
       else { d.classList.add('disabled'); d.setAttribute('aria-disabled','true'); }
     }

@@ -152,7 +152,12 @@ function handleTimecodeArrowKeys(e) {
  */
 function setupTimecodeInput(inp) {
   if (!inp) return;
+  let pasteGeneration=0;
+  const cancelPaste=()=>{pasteGeneration++;};
+  inp.addEventListener('input',cancelPaste);
+  inp.addEventListener('blur',cancelPaste);
   inp.addEventListener('keydown', e=>{
+    cancelPaste();
     // 組字的 Enter／方向鍵屬於輸入法；先於各 caller 的確認 handler 攔下，保留原生預設動作。
     if(e.isComposing||e.keyCode===229){ e.stopImmediatePropagation();return; }
     handleTimecodeArrowKeys(e);
@@ -173,18 +178,20 @@ function setupTimecodeInput(inp) {
       {
         label: '貼上',
         act: async () => {
+          const generation=++pasteGeneration;
+          const value=inp.value, start=inp.selectionStart, end=inp.selectionEnd;
+          if(!inp.isConnected || inp.disabled || inp.readOnly) return;
           try {
             const txt = await navigator.clipboard.readText();
-            if (txt) {
-              const s = inp.selectionStart;
-              const end = inp.selectionEnd;
-              inp.value = inp.value.substring(0, s) + txt + inp.value.substring(end);
-              inp.setSelectionRange(s + txt.length, s + txt.length);
+            if (txt && generation===pasteGeneration && inp.isConnected && !inp.disabled && !inp.readOnly
+              && inp.value===value && inp.selectionStart===start && inp.selectionEnd===end) {
+              inp.setRangeText(txt,start,end,'end');
+              inp.dispatchEvent(new Event('input',{bubbles:true}));
             }
           } catch (err) {}
         },
       },
-    ]);
+    ],{preserveFocus:true});
   });
 }
 

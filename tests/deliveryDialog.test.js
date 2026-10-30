@@ -39,7 +39,7 @@ vi.mock('../src/project-intake-engine.js', () => ({ buildSubtitleImportPlan: vi.
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));
-vi.mock('../src/project.js', () => ({ Project: { captureWorkspaceOwnership: () => {
+vi.mock('../src/project.js', () => ({ Project: { unrestoredClips: () => [], captureWorkspaceOwnership: () => {
   const generation = workspaceState.generation;
   return () => generation === workspaceState.generation;
 } } }));

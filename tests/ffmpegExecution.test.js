@@ -319,7 +319,7 @@ describe('FFmpeg execution', () => {
     await execution.execute(['-version'], { executionKind: 'direct', jobId: 'probe' });
 
     expect(logErrors).toEqual([{
-      logPath: expect.stringMatching(/export-\d+-probe\.log$/),
+      logPath: expect.stringMatching(/export-\d+-[a-f0-9-]{36}-probe\.log$/),
       error: expect.objectContaining({ message: 'disk is read-only' }),
     }]);
   });

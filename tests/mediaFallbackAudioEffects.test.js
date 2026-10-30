@@ -147,6 +147,7 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     resetPlayerAdapter(window.subtool,domMock.video);
     const registry=vi.spyOn(Wave,'setSourceMixPeaks');
     expect(await Media.audioEffects.apply(source,{max:-6,min:-12})).toMatchObject({status:'completed'});
+    expect(deskMock.cleanupAudio).not.toHaveBeenCalled(); // 已發布的波形仍由 registry 用於後續切換。
     expect(assignments).toEqual(sourceStreams.map(stream=>({value:`file:///C:/cache/effect-stream-${stream}.wav`,crossOrigin:'anonymous'})));
     expect(Media.tracks.map(track=>[track.sourceStream,track.sourceChannel])).toEqual(descriptors.map(d=>[d.sourceStream,d.sourceChannel]));
     expect(deskMock.waveAudio.mock.calls.map(([path])=>path)).toEqual(sourceStreams.map(stream=>`C:/cache/effect-stream-${stream}.wav`));
@@ -192,20 +193,41 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     registry.mockRestore();
   });
 
-  it('reset during the second processed PCM read cannot publish the old mix or retain prepared elements',async()=>{
+  it.each([true,false])('reset during the second processed PCM read releases owned waves but preserves shared outputs (generated=%s)',async generated=>{
     const delayed=deferred(),elements=[];
     class AudioAdapter{constructor(){this.readyState=1;this.duration=1;this.src='';elements.push(this);}addEventListener(){}removeEventListener(){}pause(){}load(){}}
     vi.stubGlobal('Audio',AudioAdapter);
     const source={id:'old-effect',path:'C:/media/old.mov',audioSrc:'video',audioSourceId:'old-effect',in:0,out:1,dur:1,offset:0,vtrack:0,primary:true,descriptors:[{sourceStream:0,sourceChannel:0},{sourceStream:1,sourceChannel:0}]};
     State.clips=[source];window.subtool.normalizeAudio=vi.fn(async(path,options)=>({outputPath:`C:/cache/stream-${options.sourceStream}.wav`}));
     deskMock.fileURL.mockImplementation(async path=>'file:///'+path);deskMock.waveAudio.mockImplementation(async path=>path+'.wave.wav');
+    const waveAudio=window.subtool.waveAudio;
+    if(!generated)window.subtool.waveAudio=null;
     vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:()=>String(url).includes('stream-1')?delayed.promise:Promise.resolve(wav(.6))})));
     resetPlayerAdapter(window.subtool,domMock.video);
-    const work=Media.audioEffects.apply(source,{max:-6,min:-12});
-    await vi.waitFor(()=>expect(fetch).toHaveBeenCalledTimes(2));Media.reset();delayed.resolve(wav(.8));
-    expect(await work).toMatchObject({status:'replaced'});
-    expect(Media.tracks).toEqual([]);expect(Wave.getSourceWaveform(source).peaks).toBeNull();
-    expect(elements.every(element=>element.src==='')).toBe(true);
+    try{
+      const work=Media.audioEffects.apply(source,{max:-6,min:-12});
+      await vi.waitFor(()=>expect(fetch).toHaveBeenCalledTimes(2));Media.reset();delayed.resolve(wav(.8));
+      expect(await work).toMatchObject({status:'replaced'});
+      expect(Media.tracks).toEqual([]);expect(Wave.getSourceWaveform(source).peaks).toBeNull();
+      expect(elements.every(element=>element.src==='')).toBe(true);
+      expect(deskMock.cleanupAudio.mock.calls.map(([path])=>path)).toEqual(generated?[
+        'C:/cache/stream-0.wav.wave.wav','C:/cache/stream-1.wav.wave.wav',
+      ]:[]);
+    }finally{window.subtool.waveAudio=waveAudio;}
+  });
+
+  it('準備第二條效果波形失敗會清理已產生的第一條波形，保留可重用的處理音訊',async()=>{
+    class AudioAdapter{constructor(){this.readyState=1;this.duration=1;this.src='';}addEventListener(){}removeEventListener(){}pause(){}load(){}}
+    vi.stubGlobal('Audio',AudioAdapter);
+    const source={id:'failed-effect',path:'C:/media/multistream.mov',audioSrc:'video',audioSourceId:'failed-effect',in:0,out:1,dur:1,offset:0,vtrack:0,primary:true,
+      descriptors:[{sourceStream:0,sourceChannel:0},{sourceStream:1,sourceChannel:0}]};
+    State.clips=[source];window.subtool.normalizeAudio=vi.fn(async(path,options)=>({outputPath:`C:/cache/stream-${options.sourceStream}.wav`}));
+    deskMock.fileURL.mockImplementation(async path=>'file:///'+path);
+    deskMock.waveAudio.mockResolvedValueOnce('C:/cache/stream-0.wave.wav').mockRejectedValueOnce(new Error('wave encode failed'));
+    resetPlayerAdapter(window.subtool,domMock.video);
+    expect(await Media.audioEffects.apply(source,{max:-6,min:-12})).toMatchObject({status:'failed'});
+    expect(deskMock.cleanupAudio).toHaveBeenCalledExactlyOnceWith('C:/cache/stream-0.wave.wav');
+    expect(Media.tracks).toEqual([]);expect(source.audioLimiterSpec).toBeUndefined();
   });
 
   it.each(['stream','ingest','native'])('late %s original audio does not replace an installed audio effect or waveform', async kind=>{

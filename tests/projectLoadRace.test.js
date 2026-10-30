@@ -459,6 +459,107 @@ describe('project load transactions', () => {
     expect(mediaMock.reset).not.toHaveBeenCalled();
   });
 
+  it.each(['browser-read','fonts','relink','stat'])('選檔後等待 %s 期間的編輯，套用前仍須確認且取消保留 History', async stage => {
+    const hold=deferred(),started=deferred();
+    const data=projectData('Next','C:/media/Next.mov');
+    let fileReader;
+    desk.stat.mockResolvedValue({exists:true});
+    if(stage==='browser-read'){
+      data.media={};data.clips=[];
+      fileReader=globalThis.FileReader;
+      vi.stubGlobal('FileReader',class extends fileReader{
+        readAsArrayBuffer(file){started.resolve();void hold.promise.then(()=>super.readAsArrayBuffer(file));}
+      });
+    }else if(stage==='fonts'){
+      vi.spyOn(Project,'_checkMissingFonts').mockImplementationOnce(async()=>{started.resolve();await hold.promise;return [];});
+    }else if(stage==='relink'){
+      desk.stat.mockResolvedValue({exists:false});
+      desk.findRelinkTarget=vi.fn(async()=>{started.resolve();await hold.promise;return null;});
+    }else{
+      desk.stat.mockImplementationOnce(async()=>{started.resolve();await hold.promise;return {exists:true};});
+    }
+    try{
+      const input=stage==='browser-read'?projectFile(data):{path:'C:/projects/Next.subtool',b64:projectB64(data)};
+      const opening=Project.open(async()=>input);
+      await started.promise;
+      State.cues=[{id:'late-edit',track:0,start:0,end:1,text:'選檔後繼續編輯'}];
+      History.record('等待載入時編輯');
+      const history=structuredClone(History.stack);
+      hold.resolve();
+      await vi.waitFor(()=>expect(uiMock.openModal).toHaveBeenCalledWith('開啟另一個專案',expect.any(String),expect.any(Array),expect.any(Object)));
+      uiMock.openModal.mock.calls.at(-1)[2].find(button=>button.label==='取消').act();
+      await expect(opening).resolves.toBe(false);
+      expect(State.cues.map(cue=>cue.text)).toEqual(['選檔後繼續編輯']);
+      expect(History.stack).toEqual(history);
+      expect(isProjectDirty()).toBe(true);
+      expect(mediaMock.reset).not.toHaveBeenCalled();
+    }finally{
+      hold.resolve();
+      if(fileReader)vi.stubGlobal('FileReader',fileReader);
+    }
+  });
+
+  it('取消最後開啟確認後保留未連結素材，舊工作失權但新 continuation 可接續且不重設 History', async () => {
+    desk.stat.mockResolvedValue({exists:false});
+    await Project.loadDesktop(request('Offline','C:/media/offline.mov',7));
+    const previous=Project.pendingMediaRelink();
+    const hold=deferred(),started=deferred();
+    desk.stat.mockImplementationOnce(async()=>{started.resolve();await hold.promise;return {exists:true};});
+    uiMock.openModal.mockClear();
+    const opening=Project.open(async()=>request('Next','C:/media/Next.mov'));
+    await started.promise;
+    State.cues[0].text='保留離線專案新編輯';History.record('等待期間編輯');
+    hold.resolve();
+    await vi.waitFor(()=>expect(uiMock.openModal).toHaveBeenCalledWith('開啟另一個專案',expect.any(String),expect.any(Array),expect.any(Object)));
+    uiMock.openModal.mock.calls.at(-1)[2].find(button=>button.label==='取消').act();
+    await expect(opening).resolves.toBe(false);
+    const pending=Project.pendingMediaRelink();
+    expect(previous.plan.owns()).toBe(false);
+    expect(pending).not.toBeNull();
+    expect(pending.plan).not.toBe(previous.plan);
+    expect(pending.plan.owns()).toBe(true);
+    expect(pending.plan.pendingClipsForSave()).toEqual(previous.plan.pendingClipsForSave());
+    expect(pending.plan.peekPlayhead()).toBe(7);
+    const history=structuredClone(History.stack);
+    await expect(Project.continueLoad(pending.generation,()=>Project.finishMediaRelink(pending.generation,pending.plan))).resolves.toBe(true);
+    expect(History.stack).toEqual(history);
+    expect(isProjectDirty()).toBe(true);
+    desk.writeProject=vi.fn(async file=>file);
+    await Project.save();
+    const saved=JSON.parse(Buffer.from(desk.writeProject.mock.calls[0][1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.clips).toEqual([expect.objectContaining({path:'C:/media/offline.mov',in:0,out:20,offset:0})]);
+    expect(saved.cues[0].text).toBe('保留離線專案新編輯');
+    await expect(Project.continueLoad(pending.generation,()=>Project.finishMediaRelink(pending.generation,pending.plan))).resolves.toBe(true);
+    expect(History.stack).toEqual(history);
+    expect(isProjectDirty()).toBe(false);
+    History.undo();expect(State.cues[0].text).toBe('Offline');
+    History.redo();expect(State.cues[0].text).toBe('保留離線專案新編輯');
+    resetProject();
+  });
+
+  it.each(['edit','workspace'])('最後確認期間發生較新 %s，舊同意不能取代目前內容', async action => {
+    const hold=deferred(),started=deferred();
+    desk.stat.mockImplementationOnce(async()=>{started.resolve();await hold.promise;return {exists:true};});
+    const opening=Project.open(async()=>request('OldOpen','C:/media/old-open.mov'));
+    await started.promise;
+    State.cues=[{id:'late',track:0,start:0,end:1,text:'等待時的新字幕'}];History.record('等待時編輯');
+    hold.resolve();
+    await vi.waitFor(()=>expect(uiMock.openModal).toHaveBeenCalledWith('開啟另一個專案',expect.any(String),expect.any(Array),expect.any(Object)));
+    let newer;
+    if(action==='edit'){
+      State.cues[0].text='確認視窗中的較新編輯';History.record('確認期間編輯');
+    }else{
+      newer=Project.startNewProject(()=>{
+        resetProject();State.cues=[{id:'new',track:0,start:0,end:1,text:'全新工作區'}];History.reset();
+      });
+    }
+    uiMock.openModal.mock.calls.at(-1)[2].find(button=>button.label==='不儲存直接開啟').act();
+    await expect(opening).resolves.toBe(false);
+    await newer;
+    expect(State.cues.map(cue=>cue.text)).toEqual([action==='edit'?'確認視窗中的較新編輯':'全新工作區']);
+    expect(mediaMock.reset).not.toHaveBeenCalled();
+  });
+
   it.each(['zoom','collapse'])('同意不儲存後等待讀檔時只改 %s 不重複要求同意', async action => {
     State.cues=[{id:'unsaved',track:0,start:0,end:1,text:'已同意不儲存的內容'}];
     const input=deferred(),started=deferred();

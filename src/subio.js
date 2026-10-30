@@ -16,7 +16,7 @@ import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
-import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission } from './delivery-submission.js';
+import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission, exportSourceError } from './delivery-submission.js';
 import { escapeHTML, encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
@@ -106,6 +106,9 @@ function showFpsConvertDialog() {
 function showExportDialog() {
   if (!State.cues.length && !State.notes.length) { showToast('沒有字幕或備註可匯出'); return; }
   const ownsWorkspace = Project.captureWorkspaceOwnership();
+  // 選項屬於本次視窗；背景辨識新增軌道不能改變單／多軌分支，重排也不能換掉所選目標。
+  const tracks = [...State.tracks];
+  const showTrackChoices = State.cues.length > 0 && tracks.length > 1;
   const current = () => {
     if (!session.isCurrent()) return false;
     if (ownsWorkspace()) return true;
@@ -119,7 +122,7 @@ function showExportDialog() {
     [['encore', 'Adobe Encore (.txt)', true, false], ['srt', 'SRT (.srt)', false, true], ['ass', 'ASS (.ass)', false, true], ['txt', '純文字 (.txt)', false, false], ['xlsx', 'Excel (.xlsx)', false, false]]
       .map(([v, l, d, supportMerge]) => {
         let row = cb(`data-fmt="${v}"${d ? ' checked' : ''}`, escapeHTML(l));
-        if (supportMerge && State.cues.length && State.trackCount > 1) {
+        if (supportMerge && showTrackChoices) {
           row = `<div style="display:flex;align-items:center;gap:16px;">
             ${row}
             ${cb(`id="merge_${v}"`, '合成單一檔案')}
@@ -128,9 +131,9 @@ function showExportDialog() {
         return row;
       }).join(''));
 
-  if (State.cues.length && State.trackCount > 1)
+  if (showTrackChoices)
     html += sec('軌道',
-      State.tracks.map((tk, i) => cb(`data-tk="${i}" checked`, `${escapeHTML(tk.name)} <span style="color:var(--text-faint)">(${State.cues.filter(c => (c.track || 0) === i).length} 條)</span>`)).join('')
+      tracks.map((tk, i) => cb(`data-tk="${i}" checked`, `${escapeHTML(tk.name)} <span style="color:var(--text-faint)">(${State.cues.filter(c => (c.track || 0) === i).length} 條)</span>`)).join('')
       + `<div style="font-size:13px;color:var(--text-faint);margin-top:8px">Excel 會將所有勾選軌道合為一個檔案，每軌一個分頁</div>`);
 
   if (State.notes.length)
@@ -164,43 +167,43 @@ function showExportDialog() {
       label: '匯出', primary: true, act: () => {
       if (!current()) return;
       const fmts = [...document.querySelectorAll('[data-fmt]')].filter(b => b.checked).map(b => b.dataset.fmt);
-      const tks = State.cues.length && State.trackCount > 1 ? [...document.querySelectorAll('[data-tk]')].filter(b => b.checked).map(b => +b.dataset.tk) : null;
+      const selectedTracks = showTrackChoices
+        ? [...document.querySelectorAll('[data-tk]')].filter(b => b.checked).map(b => tracks[+b.dataset.tk])
+        : tracks;
+      const tks = selectedTracks.map(track => State.tracks.indexOf(track));
       const notesE = document.getElementById('expNotesEdius')?.checked;
       const notesG = document.getElementById('expNotesGeneral')?.checked;
       if (!fmts.length && !notesE && !notesG) { showToast('請至少勾選一個格式'); return; }
-      if (fmts.length && tks !== null && !tks.length) { showToast('請至少勾選一個軌道'); return; }
+      if (fmts.length && showTrackChoices && !tks.length) { showToast('請至少勾選一個軌道'); return; }
+      if (fmts.length && tks.some(index => index < 0)) { showToast('所選字幕軌已變更，請重新開啟匯出視窗'); return; }
       session.close();
       const filesToExport = [];
       for (const fmt of fmts) {
         if (fmt === 'xlsx') {
-          const list = tks ? tks.map(i => ({ name: State.tracks[i]?.name || ('軌道' + (i + 1)), cues: State.cues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length) : [{ name: State.tracks[0]?.name || '軌道 1', cues: State.cues }];
+          const list = tks.map(i => ({ name: State.tracks[i]?.name || ('軌道' + (i + 1)), cues: State.cues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length);
           const f = getXLSXFileData(list); if (f) filesToExport.push(f);
         } else {
-          if (tks) {
-            const shouldMerge = document.getElementById(`merge_${fmt}`)?.checked;
-            if (shouldMerge) {
-              const mergedCues = [];
-              const mergedNames = [];
-              for (const i of tks) {
-                const cues = State.cues.filter(c => (c.track || 0) === i);
-                if (cues.length) {
-                  mergedCues.push(...cues);
-                  mergedNames.push(State.tracks[i]?.name || ('軌道' + (i + 1)));
-                }
-              }
-              if (mergedCues.length) {
-                mergedCues.sort((a, b) => a.start - b.start);
-                const f = getFileData(fmt, mergedCues, mergedNames.join('+'));
-                if (f) filesToExport.push(f);
-              }
-            } else {
-              for (const i of tks) {
-                const cues = State.cues.filter(c => (c.track || 0) === i);
-                if (cues.length) { const f = getFileData(fmt, cues, State.tracks[i]?.name); if (f) filesToExport.push(f); }
+          const shouldMerge = document.getElementById(`merge_${fmt}`)?.checked;
+          if (shouldMerge) {
+            const mergedCues = [];
+            const mergedNames = [];
+            for (const i of tks) {
+              const cues = State.cues.filter(c => (c.track || 0) === i);
+              if (cues.length) {
+                mergedCues.push(...cues);
+                mergedNames.push(State.tracks[i]?.name || ('軌道' + (i + 1)));
               }
             }
+            if (mergedCues.length) {
+              mergedCues.sort((a, b) => a.start - b.start);
+              const f = getFileData(fmt, mergedCues, mergedNames.join('+'));
+              if (f) filesToExport.push(f);
+            }
           } else {
-            const f = getFileData(fmt, State.cues); if (f) filesToExport.push(f);
+            for (const i of tks) {
+              const cues = State.cues.filter(c => (c.track || 0) === i);
+              if (cues.length) { const f = getFileData(fmt, cues, showTrackChoices ? State.tracks[i]?.name : undefined); if (f) filesToExport.push(f); }
+            }
           }
         }
       }
@@ -223,6 +226,7 @@ function _captureExportDraft(){
     mediaTracks: Media.tracks || [],
     liveExternalSources,
     sequenceEnd: Seq.end(),
+    pendingClips: Project.unrestoredClips(),
   });
   return freezeExportSubmission(snapshot, {
     cues: State.cues,
@@ -299,9 +303,9 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
   if (!DESK.exportVideo) { showToast('桌面版匯出元件未就緒'); return; }
   const data = initialDraft?.draft || _captureExportDraft();
   if (!data) { showToast('沒有可匯出的影片或外部音訊'); return; }
-  const unresolved = data.audioPlan?.unresolvedSources || [];
-  if (IS_DESKTOP && unresolved.length) {
-    showToast(`找不到可供匯出的音訊母素材：${unresolved.map(item=>item.name).join('、')}。請重新連結來源檔。`);
+  const sourceError = exportSourceError(data);
+  if (sourceError) {
+    showToast(sourceError);
     return;
   }
   if (data.audioOnly && !data.audioPlan) { showToast('純音訊 WAV 匯出需要專案音軌路由'); return; }
@@ -846,7 +850,7 @@ export function applyDurAdjTc(sign) {
     if (delta > 0 && c.end > nextIn) { skipped++; continue; }
     const newEnd=durationEndOnFrame(c,c.end+delta,nextIn);
     if(newEnd===null){ skipped++;continue; }
-    if (newEnd !== c.end) { c.end = newEnd; adjusted++; }
+    if (newEnd !== c.end) { c.end = newEnd; delete c._tempEnd; adjusted++; }
   }
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('調整持續時間');
@@ -866,7 +870,7 @@ export function applyDurAdjPct() {
     if (ratio > 1 && c.end > nextIn) { skipped++; continue; }
     const newEnd=durationEndOnFrame(c,c.start+(c.end-c.start)*ratio,nextIn);
     if(newEnd===null){ skipped++;continue; }
-    if (newEnd !== c.end) { c.end = newEnd; adjusted++; }
+    if (newEnd !== c.end) { c.end = newEnd; delete c._tempEnd; adjusted++; }
   }
   sortCues(); emit('render:all'); drawTimeline();
   recordHistory('調整持續時間');

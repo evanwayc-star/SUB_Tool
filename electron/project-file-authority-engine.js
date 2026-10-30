@@ -384,7 +384,7 @@ function createProjectWorkspace({
     try {
       return RecentProjects.sanitize(readRecent());
     } catch (error) {
-      return [];
+      return null;
     }
   };
 
@@ -397,9 +397,11 @@ function createProjectWorkspace({
     }
   };
 
-  const remember = projectFile => saveRecent(
-    RecentProjects.addRecent(recentList(), projectFile, { now: now() }),
-  );
+  const remember = projectFile => {
+    const list = recentList();
+    // 顯示可暫時沒有項目，但不能以讀取失敗時的空值覆寫既有清單。
+    return list !== null && saveRecent(RecentProjects.addRecent(list, projectFile, { now: now() }));
+  };
   // 身分只用來在目前受信清單內定位，不能以 renderer 的路徑擴張授權。
   const recentToken = item => crypto.createHash('sha256').update(recentPathKey(item.path)).digest('hex');
 
@@ -503,7 +505,7 @@ function createProjectWorkspace({
   }
 
   async function listRecent() {
-    const list = recentList();
+    const list = recentList() || [];
     const missing = await Promise.all(list.map(item => missingProbe(item.path)));
     return list.map((item, index) => ({
       index,
@@ -516,12 +518,13 @@ function createProjectWorkspace({
   }
 
   async function openRecent(token) {
-    const list = recentList();
+    const list = recentList() || [];
     const item = typeof token === 'string' ? list.find(entry => recentToken(entry) === token) : null;
     if (!item) return null;
     const result = await open(item.path);
     if (!result && await missingProbe(item.path)) {
-      saveRecent(RecentProjects.removeRecent(recentList(), item.path));
+      const latest = recentList();
+      if (latest !== null) saveRecent(RecentProjects.removeRecent(latest, item.path));
     }
     return result;
   }

@@ -229,13 +229,15 @@ function _savedExternalAudioSources(){
 /* 開啟專案到主影片尚未重建的短暫期間，clip 會保存在 ProjectLoadSession 的 restore plan。
    儲存／dirty 判斷都必須把它們算進去，否則純圖片專案會在重開後尚未還原
    畫面前就被當成空專案覆寫。 */
-function _savedClips(){
+function _unrestoredClips(){
   const live=Array.isArray(State.clips)?State.clips:[];
   const plan=_projectLoadSession.activePlan;
   const pending=plan?.pendingClipsForSave?.()??plan?.pendingClips?.()??[];
-  if(!pending.length) return live;
   const liveIds=new Set(live.map(clip=>clip?.id).filter(Boolean));
-  return [...live,...pending.filter(clip=>!clip?.id||!liveIds.has(clip.id))];
+  return pending.filter(clip=>!clip?.id||!liveIds.has(clip.id));
+}
+function _savedClips(){
+  return [...(Array.isArray(State.clips)?State.clips:[]),..._unrestoredClips()];
 }
 
 function _normalisedProjectData(rawData){
@@ -497,6 +499,25 @@ function _projectContentString(data){
   return JSON.stringify({...data,playhead:0,pxPerSec:0,vtracksCollapsed:false});
 }
 
+// 開啟同意要涵蓋選檔後的 FileReader、字型與素材查詢，直到真正取代 State。
+// 只移動播放點等檢視變更不撤銷同意；Undo 重建的字幕物件仍須重新核對。
+function _captureProjectOpenConsent(){
+  const content=_projectContentString(_buildProjectData());
+  const cues=[...State.cues],tracks=[...State.tracks];
+  const subtitles=JSON.stringify({cues:State.cues,tracks:State.tracks});
+  return ()=>State.cues.length===cues.length&&cues.every((cue,i)=>State.cues[i]===cue)
+    &&State.tracks.length===tracks.length&&tracks.every((track,i)=>State.tracks[i]===track)
+    &&subtitles===JSON.stringify({cues:State.cues,tracks:State.tracks})
+    &&(!isProjectDirty()||content===_projectContentString(_buildProjectData()));
+}
+async function _confirmProjectReplacement(consent,generation){
+  const current=()=>_isCurrentProjectLoad(generation);
+  if(!current()) return null;
+  if(!consent||consent()) return ()=>current()&&(!consent||consent());
+  const unchanged=_captureProjectOpenConsent();
+  return await confirmDiscardUnsaved()?()=>current()&&unchanged():null;
+}
+
 function isProjectDirty() {
   if (_autoRelinkNeedsSave) return true;
   const data=_buildProjectData();
@@ -541,7 +562,7 @@ function _finishProjectLoad(context){
 function _isCurrentProjectLoad(generation){ return _projectLoadSession.isCurrent(generation); }
 function _appendProjectLoad(generation,work){ return _projectLoadSession.append(generation,work); }
 function _queueProjectLoad(work){
-  const generation=_projectLoadSession.begin();
+  const generation=_projectLoadSession.begin({preserveMaterial:true});
   _cancelFontPrompt?.();
   return _appendProjectLoad(generation,()=>work(generation));
 }
@@ -669,30 +690,23 @@ const Project = {
     const current=()=>request===_openRequestGeneration&&_isCurrentProjectLoad(generation);
     if(confirm&&!await confirmDiscardUnsaved()) return false;
     if(!current()) return false;
-    const consentSnapshot=_projectContentString(_buildProjectData());
-    const consentCues=[...State.cues],consentTracks=[...State.tracks];
-    const consentSubtitles=JSON.stringify({cues:State.cues,tracks:State.tracks});
+    const consent=_captureProjectOpenConsent();
     let input;
     try{ input=await read(); }
     catch(error){ if(!current()) return false; throw error; }
     if(!current()||!input) return false;
-    // picker／讀檔期間新增的內容修改不屬於先前的丟棄同意；檢視變動不算修改。
-    const changedSubtitles=State.cues.length!==consentCues.length||consentCues.some((cue,i)=>State.cues[i]!==cue)
-      ||State.tracks.length!==consentTracks.length||consentTracks.some((track,i)=>State.tracks[i]!==track)
-      ||consentSubtitles!==JSON.stringify({cues:State.cues,tracks:State.tracks});
-    if(changedSubtitles||isProjectDirty()&&consentSnapshot!==_projectContentString(_buildProjectData())){
-      if(!await confirmDiscardUnsaved()||!current()) return false;
-    }
     if(typeof input.b64==='string'){
       if(!input.b64) return false;
-      return this.loadDesktop(input);
+      return this.loadDesktop(input,consent);
     }
-    return this.load(input);
+    return this.load(input,consent);
   },
   captureWorkspaceOwnership(){
     const epoch=_saveEpoch,generation=_projectLoadSession.generation;
     return ()=>epoch===_saveEpoch&&_isCurrentProjectLoad(generation);
   },
+  // 交付准入也必須看見離線／尚未完成復原的 placement；不交出 restore plan owner。
+  unrestoredClips(){ return _unrestoredClips().map(clip=>Seq.persistentMetadata(clip)); },
   identity: _projectIdentity,
   // save/saveAs 回傳 Promise<路徑|名稱|null>：null=失敗或使用者取消。
   // 呼叫端（如關閉前儲存流程）可 await 確認真正寫入完成後再繼續。
@@ -874,16 +888,18 @@ const Project = {
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes();
     return true;
   },
-  async load(file){
+  async load(file,consent=null){
     const request=++_openRequestGeneration,generation=_projectLoadSession.generation;
     const buf=await readFile(file);
     if(request!==_openRequestGeneration || !_isCurrentProjectLoad(generation)) return false;
     let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(buf))); }catch(e){ showToast('無法解析專案檔'); return false; }
     if(!data) return false;
-    return _queueProjectLoad(next=>this._load(data,next,file.name));
+    return _queueProjectLoad(next=>this._load(data,next,file.name,consent));
   },
-  async _load(data,generation,fileName){
+  async _load(data,generation,fileName,consent=null){
     if(!await _confirmProjectFonts(data,generation)) return;
+    const canReplace=await _confirmProjectReplacement(consent,generation);
+    if(!canReplace?.()) return false;
 
     // 載入另一個專案必須先清掉舊的 runtime 媒體。尤其當新專案的主影片暫時
     // 找不到時，後續還原外部音檔不能和前一個專案殘留的 asset 混在一起。
@@ -907,12 +923,12 @@ const Project = {
     }
     await _projectLoadSession.restoreMedia(generation,{kind:'deferred'});
   },
-  loadDesktop(r){
+  loadDesktop(r,consent=null){
     let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(b64ToBytes(r.b64).buffer))); }catch(e){ showToast('無法解析專案檔'); return Promise.resolve(false); }
     if(!data) return Promise.resolve(false);
-    return _queueProjectLoad(generation=>this._loadDesktop(r,data,generation));
+    return _queueProjectLoad(generation=>this._loadDesktop(r,data,generation,consent));
   },
-  async _loadDesktop(r,data,generation){
+  async _loadDesktop(r,data,generation,consent=null){
     if(!await _confirmProjectFonts(data,generation)) return;
 
     const autoRelinked = await _autoRelinkMissingMedia(data, r.path);
@@ -924,6 +940,8 @@ const Project = {
       mediaStat=await DESK.stat(mp);
       if(!_isCurrentProjectLoad(generation)) return;
     }
+    const canReplace=await _confirmProjectReplacement(consent,generation);
+    if(!canReplace?.()) return false;
     // 同上：即使原主影片不存在或使用者選擇「稍後」，也不能讓舊專案的
     // externalAudioSources 留在目前專案、造成播放或匯出重複音訊。
     try{ Media.reset(); }catch(e){ console.warn('reset media before desktop project load:',e); }
@@ -958,8 +976,7 @@ const Project = {
           });
         }}]);
     }else{
-      // 純音訊專案沒有主影片可觸發 reset，因此先清舊媒體，再重建外部音檔。
-      try{ Media.reset(); }catch(e){}
+      // runtime 已在 apply 前清除；此時再 reset 會抹掉剛還原的視訊軌設定。
       await _projectLoadSession.restoreMedia(generation,{kind:'images'});
       return;
     }

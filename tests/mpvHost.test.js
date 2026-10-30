@@ -33,17 +33,21 @@ function socketThatReportsDuration(duration = 123.5, { loadEvents = true } = {})
   const socket = new EventEmitter();
   socket.destroy = vi.fn(() => socket.emit('close'));
   let loadedPath = null;
+  let entryId = 0;
   socket.write = vi.fn(raw => {
     const message = JSON.parse(raw);
     if (message.command?.[0] === 'loadfile') {
       loadedPath = message.command[1];
+      entryId++;
       // Native loading can complete before the loadfile command reply arrives.
       if (loadEvents) queueMicrotask(() => socket.emit('data', Buffer.from(
+        JSON.stringify({event:'start-file',playlist_entry_id:entryId})+'\n'+
         '{"event":"file-loaded"}\n{"event":"playback-restart"}\n',
       )));
     }
     if (typeof message.request_id !== 'number') return;
-    const data = message.command?.[1] === 'path' ? loadedPath
+    const data = message.command?.[0] === 'loadfile' ? {playlist_entry_id:entryId}
+      : message.command?.[1] === 'path' ? loadedPath
       : message.command?.[1] === 'time-pos' ? 0 : duration;
     queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data, error: 'success' }) + '\n')));
   });
@@ -101,6 +105,78 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spaw
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it('play 等到相符成功 ACK 才完成，其他 request 的回覆不能接受起播', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    try {
+      const socket = sockets[0];
+      socket.write.mockClear();
+      socket.write.mockImplementation(() => {});
+      let accepted = false;
+      const playing = host.play().then(() => { accepted = true; });
+      await Promise.resolve();
+      expect(accepted).toBe(false);
+      const message = JSON.parse(socket.write.mock.calls[0][0]);
+      expect(message).toMatchObject({ command: ['set_property', 'pause', false], request_id: expect.any(Number) });
+      socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id + 1, error: 'success' }) + '\n'));
+      await Promise.resolve();
+      expect(accepted).toBe(false);
+      socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'success' }) + '\n'));
+      await playing;
+      expect(accepted).toBe(true);
+    } finally { host.quit(); }
+  });
+
+  it('play 在尚未連線時拒絕，不能以 fulfilled null 假裝接受', async () => {
+    const { host } = make();
+    await expect(host.play()).rejects.toThrow('尚未連線');
+  });
+
+  it.each(['error', 'invalid', 'write', 'timeout', 'disconnect'])('play 的 %s 失敗會拒絕', async failure => {
+    const timers = [];
+    const { host, sockets } = make({ setTimer: fn => { timers.push(fn); return timers.length; } });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    try {
+      const socket = sockets[0];
+      socket.write.mockClear();
+      socket.write.mockImplementation(() => {
+        if (failure === 'write') throw new Error('play pipe write failed');
+      });
+      const playing = host.play();
+      const errors = { error: 'property unavailable', invalid: '無效的命令回覆', write: 'play pipe write failed', timeout: '逾時', disconnect: '中斷' };
+      const rejected = expect(playing).rejects.toThrow(errors[failure]);
+      const message = JSON.parse(socket.write.mock.calls[0][0]);
+      if (failure === 'error' || failure === 'invalid') socket.emit('data', Buffer.from(JSON.stringify({
+        request_id: message.request_id, ...(failure === 'error' ? { error: 'property unavailable' } : {}),
+      }) + '\n'));
+      else if (failure === 'timeout') timers.at(-1)();
+      else if (failure === 'disconnect') socket.emit('close');
+      await rejected;
+    } finally { host.quit(); }
+  });
+
+  it('pending play 後 pause，晚到的成功 ACK 不會把較新暫停改回播放呈現規則', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    try {
+      const socket = sockets[0], write = socket.write.getMockImplementation();
+      let playCommand;
+      socket.write.mockImplementation(raw => {
+        const message = JSON.parse(raw);
+        if (message.command?.[1] === 'pause' && message.command[2] === false) playCommand = message;
+        else write(raw);
+      });
+      const playing = host.play();
+      await host.pause();
+      socket.emit('data', Buffer.from(JSON.stringify({ request_id: playCommand.request_id, error: 'success' }) + '\n'));
+      await playing;
+      const presented = host.present(9.96, { exact: true, tolerance: 0.05 });
+      await Promise.resolve();
+      socket.emit('data', Buffer.from(JSON.stringify({ event: 'property-change', name: 'time-pos', data: 9.96 }) + '\n'));
+      await expect(presented).resolves.toEqual({ backend: 'mpv', presentedSourceTime: 9.96 });
+    } finally { host.quit(); }
+  });
+
   it('mute 等到原生 mpv 的成功回覆才完成，失敗回覆會拒絕', async () => {
     const { host, sockets } = make();
     await host.launch({ src: 'D:/media/initial.mxf' });
@@ -466,11 +542,14 @@ describe('Windows mpv host lifecycle', () => {
     await host.launch({ src: 'D:/media/initial.mxf' });
     const socket = sockets[0];
     let loadedPath = 'D:/media/a.mxf';
+    let entryId = 1;
     socket.write.mockImplementation(raw => {
       const message = JSON.parse(raw);
+      if (message.command[0] === 'loadfile') entryId++;
       if (typeof message.request_id !== 'number') return;
-      const data = message.command[1] === 'path' ? loadedPath : 200;
-      queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data }) + '\n')));
+      const data = message.command[0] === 'loadfile' ? { playlist_entry_id: entryId }
+        : message.command[1] === 'path' ? loadedPath : 200;
+      queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data, error: 'success' }) + '\n')));
     });
     const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
     const old = host.loadFile('D:/media/a.mxf');
@@ -480,13 +559,118 @@ describe('Windows mpv host lifecycle', () => {
     latest.then(() => { latestSettled = true; });
     await flush();
     await expect(old).resolves.toEqual({ ok: false, duration: 0 });
-    socket.emit('data', Buffer.from('{"event":"file-loaded"}\n'));
+    socket.emit('data', Buffer.from('{"event":"start-file","playlist_entry_id":2}\n{"event":"file-loaded"}\n'));
     await flush();
     expect(latestSettled).toBe(false);
     loadedPath = 'D:\\media\\b.mxf';
-    socket.emit('data', Buffer.from('{"event":"file-loaded"}\n'));
+    socket.emit('data', Buffer.from('{"event":"start-file","playlist_entry_id":3}\n{"event":"file-loaded"}\n'));
     await expect(latest).resolves.toEqual({ ok: true, duration: 200 });
     host.quit();
+  });
+
+  it.each([false,true])('較新來源不能拿舊 entry 排隊的 file-loaded 與較新 path 查詢當成載入完成（同路徑=%s）', async samePath => {
+    const {host,sockets}=make();await host.launch({src:'D:/media/initial.mxf'});
+    const socket=sockets[0];
+    const emit=messages=>socket.emit('data',Buffer.from(messages.map(message=>JSON.stringify(message)).join('\n')+'\n'));
+    const flush=async()=>{for(let index=0;index<20;index++)await Promise.resolve();};
+    let entryId=1,loadedPath='D:/media/a.mxf';
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[0]==='loadfile')entryId++;
+      const data=message.command[0]==='loadfile'?{playlist_entry_id:entryId}
+        :message.command[1]==='path'?loadedPath:message.command[1]==='time-pos'?0:200;
+      if(typeof message.request_id==='number')queueMicrotask(()=>emit([{
+        request_id:message.request_id,data,error:'success',
+      }]));
+    });
+    try{
+      const old=host.loadFile('D:/media/a.mxf');await flush();
+      const latestPath=samePath?'D:/media/a.mxf':'D:/media/b.mxf';
+      let settled=false;const latest=host.loadFile(latestPath).then(result=>{settled=true;return result;});
+      await flush();expect(await old).toEqual({ok:false,duration:0});
+      // 事件會排隊；當 A 的通知才交給 host，native 目前的 path 已是 B。
+      loadedPath=latestPath;
+      emit([{event:'start-file',playlist_entry_id:2},{event:'file-loaded'},
+        {event:'playback-restart'},{event:'end-file',playlist_entry_id:2,reason:'stop'},
+        {event:'start-file',playlist_entry_id:3}]);
+      await flush();expect.soft(settled).toBe(false);
+      emit([{event:'file-loaded'},{event:'playback-restart'}]);
+      expect(await latest).toEqual({ok:true,duration:200});
+    }finally{host.quit();}
+  });
+
+  it.each(['ACK-before-events','events-before-ACK'])('loadFile 以相符 command ACK 與 entry 的 file-loaded 完成（%s），不要求 restart',async order=>{
+    const {host,sockets}=make();await host.launch({src:'D:/media/initial.mxf'});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let command;
+    const emit=message=>socket.emit('data',Buffer.from(JSON.stringify(message)+'\n'));
+    const flush=async()=>{for(let index=0;index<20;index++)await Promise.resolve();};
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[0]==='loadfile'){command=message;return;}
+      if(message.command[0]==='get_property'&&message.command[1]==='path'){
+        queueMicrotask(()=>emit({request_id:message.request_id,data:'D:/media/new.mxf',error:'success'}));return;
+      }
+      write(raw);
+    });
+    try{
+      let settled=false;const loading=host.loadFile('D:/media/new.mxf').then(result=>{settled=true;return result;});
+      await flush();expect(command.request_id).toEqual(expect.any(Number));
+      emit({request_id:command.request_id+10000,data:{playlist_entry_id:2},error:'success'});
+      const ack=()=>emit({request_id:command.request_id,data:{playlist_entry_id:2},error:'success'});
+      const events=()=>{emit({event:'start-file',playlist_entry_id:2});emit({event:'file-loaded'});};
+      if(order==='ACK-before-events')ack();else events();
+      await flush();expect(settled).toBe(false);
+      if(order==='ACK-before-events')events();else ack();
+      expect(await loading).toEqual({ok:true,duration:123.5});
+    }finally{host.quit();}
+  });
+
+  it.each(['missing-entry','error','timeout','disconnect'])('loadFile 的 %s ACK 不得以載入事件冒充成功',async failure=>{
+    const timers=[];
+    const {host,sockets}=make({setTimer:callback=>{timers.push(callback);return timers.length;}});
+    await host.launch({src:'D:/media/initial.mxf'});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let command;
+    const emit=message=>socket.emit('data',Buffer.from(JSON.stringify(message)+'\n'));
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(message.command[0]==='loadfile'){command=message;return;}
+      write(raw);
+    });
+    try{
+      const loading=host.loadFile('D:/media/new.mxf');
+      const outcome=loading.then(value=>({value}),error=>({error}));
+      for(let index=0;index<20&&!command;index++)await Promise.resolve();
+      emit({event:'start-file',playlist_entry_id:2});emit({event:'file-loaded'});emit({event:'playback-restart'});
+      if(failure==='missing-entry')emit({request_id:command.request_id,data:null,error:'success'});
+      if(failure==='error')emit({request_id:command.request_id,error:'loading failed'});
+      if(failure==='timeout')timers.at(-1)();
+      if(failure==='disconnect')socket.emit('close');
+      const result=await outcome;
+      if(failure==='error'||failure==='timeout')expect(result.error?.message).toMatch(/loading failed|逾時/);
+      else expect(result.value).toEqual({ok:false,duration:0});
+    }finally{host.quit();}
+  });
+
+  it.each(['quit','disconnect','new-source'])('loadFile path 查詢期間 %s，晚到舊查詢不能交接或破壞新來源',async action=>{
+    const {host,sockets}=make();await host.launch({src:'D:/media/initial.mxf'});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let held;
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(!held&&message.command[0]==='get_property'&&message.command[1]==='path'){held=message;return;}
+      write(raw);
+    });
+    try{
+      const old=host.loadFile('D:/media/old.mxf');
+      for(let index=0;index<30&&!held;index++)await Promise.resolve();
+      expect(held).toBeTruthy();
+      let latest;
+      if(action==='quit')host.quit();
+      if(action==='disconnect')socket.emit('close');
+      if(action==='new-source')latest=host.loadFile('D:/media/latest.mxf');
+      socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,data:'D:/media/old.mxf',error:'success'})+'\n'));
+      expect(await old).toEqual({ok:false,duration:0});
+      if(latest)expect(await latest).toEqual({ok:true,duration:123.5});
+    }finally{host.quit();}
   });
 
   it('換檔 pause await 期間 quit/relaunch，舊 request 不會寫入新 pipe', async () => {
@@ -551,7 +735,8 @@ describe('Windows mpv host lifecycle', () => {
       const { command, request_id } = JSON.parse(raw);
       let data = null;
       let error = 'success';
-      if (command[0] === 'seek' || (command[0] === 'set_property' && command[1] === 'time-pos')) {
+      if (command[0] === 'loadfile') data = { playlist_entry_id: 1 };
+      else if (command[0] === 'seek' || (command[0] === 'set_property' && command[1] === 'time-pos')) {
         if (!frameReady) {
           rejectedSeeks.push(command);
           error = 'property unavailable';
@@ -573,6 +758,7 @@ describe('Windows mpv host lifecycle', () => {
     void launching.catch(() => {});
     try {
       await new Promise(resolve => setTimeout(resolve, 0));
+      emit({ event: 'start-file', playlist_entry_id: 1 });
       if (announceFileLoaded) emit({ event: 'file-loaded' });
       await new Promise(resolve => setTimeout(resolve, 0));
       const prematurePresent = host.present(3, { exact: true, tolerance: 0.01 });

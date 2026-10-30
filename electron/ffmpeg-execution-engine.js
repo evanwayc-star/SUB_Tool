@@ -12,6 +12,7 @@
 
 const path = require('path');
 const nodeFs = require('fs');
+const { randomUUID } = require('crypto');
 const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require('child_process');
 const { StringDecoder } = require('string_decoder');
 const QueueStore = require('./queue-store');
@@ -662,10 +663,14 @@ function createFFmpegExecution(options = {}) {
       if (isQueueExport) options.ensureQueueDir?.();
 
       const startedAt = now();
+      // 同類背景工作可同毫秒啟動；每份 direct 工作獨占記錄與刪除資格，
+      // 不能讓一份成功收尾刪掉另一份仍在寫入的失敗診斷。
       const logPath = isQueueExport
         ? QueueStore.logPath(queueDir, jobId)
-        : path.join(getUserDataDir(), `export-${startedAt}-${jobId || 'task'}.log`);
-      const logStream = fs.createWriteStream(logPath, { flags: isQueueExport ? 'w' : 'a' });
+        : path.join(getUserDataDir(), `export-${startedAt}-${randomUUID()}-${jobId || 'task'}.log`);
+      const logStream = fs.createWriteStream(logPath, { flags: isQueueExport ? 'w' : 'wx' });
+      let logOpened = false;
+      logStream.once('open', () => { logOpened = true; });
       let logError = null;
       let logFinishPromise = null;
       // finish 只代表寫入完成，close 才確認 fd 已釋放；錯誤也可能早於 native close。
@@ -737,15 +742,18 @@ function createFFmpegExecution(options = {}) {
         }
         if (code === 0 && !signal && (!watchdogResult || watchdogResult.ok)) {
           // 成功通知也不能早於本次記錄刪除的收尾；刪除失敗仍保留原生結果。
-          await new Promise(done => fs.unlink(logPath, done));
+          if (logOpened) await new Promise(done => fs.unlink(logPath, done));
           resolve({ tail, maps: parser.maps });
           return;
         }
 
         let fullLog = tail;
-        try { fullLog = fs.readFileSync(logPath, 'utf8'); } catch (error) {
-          if (logError) fullLog += `\n\n[無法寫入完整記錄：${logError.message || logError}]`;
+        // wx 可能因同名外來檔失敗；未取得記錄時只使用自己的 stderr，
+        // 不能讀取、刪除或以 LOG_PATH 發布那個不屬於本次執行的檔案。
+        if (logOpened) {
+          try { fullLog = fs.readFileSync(logPath, 'utf8'); } catch (error) {}
         }
+        if (logError) fullLog += `\n\n[無法寫入完整記錄：${logError.message || logError}]`;
         const { summary, errorCode } = FFmpegErrorAnalyzer.analyze(
           fullLog,
           code,
@@ -753,10 +761,14 @@ function createFFmpegExecution(options = {}) {
           watchdogResult,
           outPath,
         );
-        const failure = new Error(`[LOG_PATH]${logPath}[/LOG_PATH]ffmpeg 結束碼 ${code}\n${summary}`);
+        const logReference = logOpened ? `[LOG_PATH]${logPath}[/LOG_PATH]` : '';
+        const failure = new Error(`${logReference}ffmpeg 結束碼 ${code}\n${summary}`);
         failure.code = errorCode;
         failure.watchdogResult = watchdogResult;
         if (signal) failure.signal = signal;
+        // 成功會刪除記錄，從未授予其開啟能力；只讓已關檔且保留下來的
+        // 真實失敗診斷交給主程序授權，不能把整個 userData 開放給 shell。
+        if (logOpened) observe(() => options.onLogRetained?.(logPath));
         reject(failure);
       };
 

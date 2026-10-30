@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {beforeAll,beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
+import {setStatus} from '../src/ui.js';
 
 const dom=vi.hoisted(()=>{
   const video={style:{},src:'file:///source.mov',currentTime:2,playbackRate:1,muted:false,
@@ -177,6 +178,53 @@ describe('片段速度編輯的完整公開生命週期',()=>{
     expect(Media.displayTime()).toBe(3);expect(Media.mpvSourceTransitionPending()).toBe(false);
     expect(bridge.seek).toHaveBeenCalledTimes(1);expect(bridge.present).toHaveBeenCalledTimes(1);
     expect(History.stack).toHaveLength(2);
+  });
+  it('Proxy舊目標事件被合併後，以較新反轉實際呈現完成切換，不等待舊目標假逾時',async()=>{
+    clip.out=clip.dur=6;State.duration=6;
+    expect((await Media.seek(.08)).status).toBe('presented');History.reset();
+    const loaded=deferred(),frame=deferred();
+    bridge.loadfile.mockReturnValueOnce(loaded.promise);
+    bridge.seek.mockResolvedValue(true); // mpv 可合併中間 .08 的 property-change。
+    bridge.present.mockReturnValueOnce(frame.promise);
+    setStatus.mockClear();
+    const editing=setClipSpeed(clip,2,true);await flush();
+    expect(bridge.loadfile).toHaveBeenCalledWith('C:/source.proxy.mp4');
+    expect(Media.mpvSourceTransitionPending()).toBe(true);
+    Media.observeMpvEvent({event:'property-change',name:'time-pos',data:0});
+    expect(Media.vTime()).toBe(.08);
+    loaded.resolve({ok:true});await flush();
+    expect(bridge.seek).toHaveBeenCalledWith(.08,undefined);
+    expect(bridge.direction).toHaveBeenCalledWith('backward');
+    expect(bridge.present).toHaveBeenLastCalledWith(5.84,expect.any(Object));
+    Media.observeMpvEvent({event:'property-change',name:'time-pos',data:0});
+    Media.observeMpvEvent({event:'property-change',name:'time-pos',data:5.84});
+    expect(Media.vTime()).toBe(.08);expect(Media.mpvSourceTransitionPending()).toBe(true);
+    expect(History.committedSnapshot().clips[0]).not.toHaveProperty('reverse');
+    frame.resolve({backend:'mpv',presentedSourceTime:5.84});
+    expect(await editing).toBe(true);
+    expect(Media.vTime()).toBe(5.84);expect(Media.displayTime()).toBe(.08);
+    expect(History.committedSnapshot().clips[0]).toMatchObject({speed:2,reverse:true});
+    expect.soft(Media.mpvSourceTransitionPending()).toBe(false);
+    // 此等待只驗證不再出現錯誤提示；上方完成斷言不以逾時當畫格證據。
+    await new Promise(resolve=>setTimeout(resolve,5050));
+    expect(setStatus).not.toHaveBeenCalledWith('mpv 切換影片來源後未收到目標畫格','err');
+  },10000);
+  it('舊母素材的晚到呈現不能完成新Proxy載入中的來源切換',async()=>{
+    const oldFrame=deferred(),loaded=deferred();
+    bridge.present.mockReturnValueOnce(oldFrame.promise);
+    const oldSeek=Media.seek(1);await flush();
+    expect(bridge.present).toHaveBeenCalledWith(1,expect.any(Object));
+    bridge.loadfile.mockReturnValueOnce(loaded.promise);bridge.seek.mockResolvedValue(true);
+    const editing=setClipSpeed(clip,2,true);await flush();
+    expect(bridge.loadfile).toHaveBeenCalledWith('C:/source.proxy.mp4');
+    expect(Media.mpvSourceTransitionPending()).toBe(true);
+    oldFrame.resolve({backend:'mpv',presentedSourceTime:1});
+    expect((await oldSeek).status).not.toBe('presented');await flush();
+    expect(Media.mpvSourceTransitionPending()).toBe(true);expect(Media.vTime()).toBe(2);
+    loaded.resolve({ok:true});expect(await editing).toBe(true);
+    expect(bridge.present).toHaveBeenLastCalledWith(6,expect.any(Object));
+    expect(Media.vTime()).toBe(6);expect(Media.displayTime()).toBe(1);
+    expect(Media.mpvSourceTransitionPending()).toBe(false);
   });
   it('方向失敗只撤回自己的預览欄位；後來同軌offset及背景History不被吞掉',async()=>{
     const next=Seq.add({id:'next',in:0,out:2,dur:2,offset:8,vtrack:0});History.reset();

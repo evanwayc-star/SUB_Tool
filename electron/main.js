@@ -519,7 +519,7 @@ function lastDir(kind) {
   if (!_lastDirs) {
     try {
       _lastDirs = settingsFile.read().lastDirs || {};
-    } catch (e) { _lastDirs = {}; }
+    } catch (e) { return undefined; }
   }
   const d = _lastDirs[kind];
   /* 存在才用：資料夾被刪掉或磁碟沒接時給了不存在的 defaultPath，
@@ -531,10 +531,10 @@ function rememberDir(kind, filePath) {
   try {
     const dir = path.dirname(filePath);
     if (!_lastDirs) lastDir(kind);
-    if (_lastDirs[kind] === dir) return;
-    const lastDirs = { ..._lastDirs, [kind]: dir };
-    settingsFile.update(current => ({ ...current, lastDirs }));
-    _lastDirs = lastDirs;
+    if (_lastDirs?.[kind] === dir) return;
+    // 顯示快取可能尚未讀取成功；合併須使用這次交易實際讀到的完整設定。
+    const saved = settingsFile.update(current => ({ ...current, lastDirs: { ...current.lastDirs, [kind]: dir } }));
+    _lastDirs = saved.lastDirs;
   } catch (e) {}
 }
 
@@ -578,9 +578,8 @@ ipcMain.handle('dialog:openAudio', async () => {
    重開程式後舊路徑本來就不再被授權——正確的作法是主程序自己記得使用者
    確實開過哪些檔，並且只在從這份清單開啟時才重新授予那一個檔案。 */
 function loadRecentProjects() {
-  try {
-    return settingsFile.read().recentProjects || [];
-  } catch (e) { return []; }
+  // 讀取失敗不是空清單；交給 workspace 決定略過顯示或放棄本次合併。
+  return settingsFile.read().recentProjects || [];
 }
 
 function saveRecentProjects(list) {
@@ -700,6 +699,7 @@ const ffmpegExecution = createFFmpegExecution({
   isPackaged: () => app.isPackaged,
   getResourcesPath: () => process.resourcesPath,
   send: safeSend,
+  onLogRetained: logPath => fileAuthority.grantDiagnosticLogFile(logPath),
   onLogError: (logPath, error) => {
     console.error(`[Queue] 無法寫入 ffmpeg 記錄 ${logPath}：`, error);
   },
@@ -1220,34 +1220,33 @@ ipcMain.handle('audio:reverse-clip', (e, request) => {
 
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {
   requireReadablePath('ffmpeg:proxy', src);
-  const out = tmpPath('mp4');
-  const video = (await mediaProbe.describe(src)).video;
-  const args = buildIngestArgs({ src, needsProxy: true, proxyPath: out, encoder: VENC, isStream: false, video });
-  await runFF(args, { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片' });
-  return out;
+  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('mp4'), async out => {
+    const video = (await mediaProbe.describe(src)).video;
+    const args = buildIngestArgs({ src, needsProxy: true, proxyPath: out, encoder: VENC, isStream: false, video });
+    await runFF(args, { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片' });
+  });
 });
 
 ipcMain.handle('ffmpeg:extractAudio', async (e, { path: src, idx, duration, codec }) => {
   requireReadablePath('ffmpeg:extractAudio', src);
-  const out = tmpPath('m4a');
-  // PCM 無法 copy 進 m4a（一定失敗），直接編 AAC；其餘編碼先試無損 copy，失敗才編 AAC
-  if (!/^pcm/i.test(codec || '')) {
-    try {
-      await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'copy', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
-      return out;
-    } catch (err) { /* 退回 AAC */ }
-  }
-  await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'aac', '-b:a', '128k', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
-  return out;
+  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('m4a'), async out => {
+    // PCM 無法 copy 進 m4a（一定失敗），直接編 AAC；其餘編碼先試無損 copy，失敗才編 AAC
+    if (!/^pcm/i.test(codec || '')) {
+      try {
+        await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'copy', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
+        return;
+      } catch (err) { /* 退回 AAC */ }
+    }
+    await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'aac', '-b:a', '128k', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
+  });
 });
 
 ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   requireReadablePath('ffmpeg:waveAudio', src);
   const audio = mediaProbe ? (await mediaProbe.describe(src)).audio[0] : null;
-  const out = tmpPath('wav');
-  await runFF(['-y', '-i', src, '-map', '0:a:0', '-af', sourceAudioClockFilter(audio), '-ar', '4000', '-c:a', 'pcm_s16le', out],
-    { sender: e.sender, duration, jobId: 'wave', label: '產生波形' });
-  return out;
+  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('wav'), out =>
+    runFF(['-y', '-i', src, '-map', '0:a:0', '-af', sourceAudioClockFilter(audio), '-ar', '4000', '-c:a', 'pcm_s16le', out],
+      { sender: e.sender, duration, jobId: 'wave', label: '產生波形' }));
 });
 
 /* 人聲模型只讀母素材的一小段 PCM；主程序核對原有 read capability，不授權新路徑。 */

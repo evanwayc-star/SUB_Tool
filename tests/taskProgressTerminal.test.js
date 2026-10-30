@@ -29,6 +29,8 @@ function findProgressRegistration(node) {
 const registration = findProgressRegistration(tree);
 const require = createRequire(import.meta.url);
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
+const { createMediaIntakeRuntime } = require('../electron/media-intake-runtime.js');
+const { FileAuthority } = require('../electron/file-authority.js');
 const roots = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 let consume, setStatus, completed, listener, jobs, request;
@@ -103,7 +105,10 @@ describe('registered native task-progress terminal consumer', () => {
         const codec = args[args.indexOf('-c:a') + 1];
         stages.push(codec);
         const child = new EventEmitter(); child.stderr = new EventEmitter();
-        queueMicrotask(() => child.emit('close', codec === 'copy' ? 1 : 0));
+        queueMicrotask(() => {
+          fs.writeFileSync(out, codec === 'copy' ? 'partial copy' : 'complete AAC');
+          child.emit('close', codec === 'copy' ? 1 : 0);
+        });
         return child;
       },
     });
@@ -111,10 +116,13 @@ describe('registered native task-progress terminal consumer', () => {
     vm.runInNewContext(mainSource.slice(call.start, call.end), {
       ipcMain: { handle: (name, handler) => { extractAudio = handler; } },
       requireReadablePath() {}, tmpPath: () => out,
+      mediaIntakeRuntime: createMediaIntakeRuntime({ tempRoot: root,
+        fileAuthority: new FileAuthority({ internalDirectories: [root] }) }),
       runFF: (args, options) => execution.execute(args, { ...options, executionKind: 'direct' }),
     });
     await expect(extractAudio({ sender: {} }, { path: 'mother.flac', idx: 0, duration: 1, codec: 'flac' })).resolves.toBe(out);
     expect(stages).toEqual(['copy', 'aac']);
+    expect(fs.readFileSync(out, 'utf8')).toBe('complete AAC');
     expect(sent.filter(data => data.done).map(data => [data.jobId, data.outcome])).toEqual([['a0', 'failed'], ['a0', 'success']]);
     expect(completed).toEqual([expect.objectContaining({ jobId: 'a0', outcome: 'success' })]);
     expect(setStatus).toHaveBeenLastCalledWith('抽取音軌 1完成', 'ok');

@@ -82,3 +82,58 @@ it.each(['字幕', '備註'])('%s 在原專案仍有效時匯出使用者選擇�
   expect(ext).toBe(kind === '字幕' ? 'srt' : 'csv');
   expect(desktop.exportDirectory).not.toHaveBeenCalled();
 });
+
+it.each(['srt', 'ass', 'encore', 'txt', 'xlsx'])('單軌 %s 匯出等待背景辨識新增軌道後，仍輸出原本顯示的字幕軌', async format => {
+  const documentData = data('單軌');
+  documentData.tracks.length = 1; documentData.cues.length = 1; documentData.notes = [];
+  await Project.loadDesktop({path:'C:/projects/single.subtool',b64:Buffer.from(JSON.stringify(documentData)).toString('base64')});
+  showExportDialog();
+  for (const checkbox of document.querySelectorAll('[data-fmt]')) checkbox.checked = checkbox.dataset.fmt === format;
+  expect(document.querySelectorAll('[data-tk]')).toHaveLength(0);
+
+  const { insertAsrSubtitles } = await import('../src/speech-recognition.js');
+  insertAsrSubtitles([{clip:{in:0,out:2,offset:0},segments:[{start:0,end:1,text:'背景辨識新稿'}]}]);
+  expect(State.trackCount).toBe(2);
+  confirmButton().click();
+
+  expect(desktop.exportSub).toHaveBeenCalledOnce();
+  // XLSX 的 store-mode ZIP 內是 UTF-8 XML，其餘格式為 UTF-16LE 文字。
+  const contents = Buffer.from(desktop.exportSub.mock.calls[0][1], 'base64').toString(format === 'xlsx' ? 'utf8' : 'utf16le');
+  expect(contents).toContain('單軌第一句');
+  expect(contents).not.toContain('背景辨識新稿');
+  expect(desktop.exportDirectory).not.toHaveBeenCalled();
+});
+
+it('多軌合併依原本顯示的選項，不納入背景辨識新軌，內容則取確認時的最新文字', async () => {
+  showExportDialog();
+  for (const checkbox of document.querySelectorAll('[data-fmt]')) checkbox.checked = checkbox.dataset.fmt === 'srt';
+  document.getElementById('merge_srt').checked = true;
+  const { insertAsrSubtitles } = await import('../src/speech-recognition.js');
+  insertAsrSubtitles([{clip:{in:0,out:2,offset:0},segments:[{start:0,end:1,text:'未顯示的新辨識軌'}]}]);
+  State.cues.find(cue => cue.text === '原專案第一句').text = '確認時的新文字';
+  confirmButton().click();
+  expect(desktop.exportSub).toHaveBeenCalledOnce();
+  const contents = Buffer.from(desktop.exportSub.mock.calls[0][1], 'base64').toString('utf16le');
+  expect(contents).toContain('確認時的新文字');
+  expect(contents).toContain('原專案第二句');
+  expect(contents).not.toContain('未顯示的新辨識軌');
+});
+
+it('軌道重排後仍按原選項輸出同一軌；相同索引替換成另一軌則拒絕舊確認', () => {
+  openExport('字幕');
+  State.tracks.reverse();
+  for (const cue of State.cues) cue.track = 1 - cue.track;
+  confirmButton().click();
+  expect(desktop.exportSub).toHaveBeenCalledOnce();
+  const contents = Buffer.from(desktop.exportSub.mock.calls[0][1], 'base64').toString('utf16le');
+  expect(contents).toContain('原專案第一句');
+  expect(contents).not.toContain('原專案第二句');
+
+  desktop.exportSub.mockClear();
+  openExport('字幕');
+  State.tracks[0] = {...State.tracks[0]};
+  confirmButton().click();
+  expect(desktop.exportSub).not.toHaveBeenCalled();
+  expect(desktop.exportDirectory).not.toHaveBeenCalled();
+  expect(document.getElementById('toast').textContent).toContain('所選字幕軌已變更');
+});

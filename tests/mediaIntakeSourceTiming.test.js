@@ -209,6 +209,8 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
       ipcMain: { handle: (name, handler) => { waveAudio = handler; } },
       requireReadablePath(channel, file) { expect(channel).toBe('ffmpeg:waveAudio'); expect(file).toBe(source); },
       mediaProbe: probe, sourceAudioClockFilter, tmpPath: () => wave,
+      mediaIntakeRuntime: createMediaIntakeRuntime({ tempRoot: directory,
+        fileAuthority: new FileAuthority({ internalDirectories: [directory] }) }),
       runFF: (args, options) => execution.execute(args, { ...options, executionKind: 'direct' }),
     });
     try {

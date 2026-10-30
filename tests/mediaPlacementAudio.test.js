@@ -96,7 +96,7 @@ describe('公開 sequence placement 到實際音訊節點',()=>{
     for(const target of [3,1.5,4,2]){
       const first=Media.seek(target),latest=Media.seek(target+.2);
       await Promise.all([first,latest]);
-      expect(playing()).toHaveLength(1);
+      await vi.waitFor(()=>expect(playing()).toHaveLength(1));
       if(kind==='element')expect(tr.el.currentTime).toBeCloseTo(target+.2);
       else expect(playing()[0].start.mock.calls[0][1]).toBeCloseTo(target+.2);
     }
@@ -122,7 +122,7 @@ describe('公開 sequence placement 到實際音訊節點',()=>{
       if(pause)Media.pause({seekOnPause:false});
       await vi.waitFor(()=>expect(frames.length).toBeGreaterThan(0));
       frames.shift()(0,{mediaTime:3});await seeking;
-      expect(playing()).toHaveLength(pause?0:1);
+      await vi.waitFor(()=>expect(playing()).toHaveLength(pause?0:1));
       if(!pause){
         if(action==='buffer')expect(playing()[0].start.mock.calls[0][1]).toBe(3);
         else expect(tr.el.currentTime).toBe(3);
@@ -254,7 +254,7 @@ describe('公開 sequence placement 到實際音訊節點',()=>{
       expect(voices.map(element=>[element.currentTime,element.playbackRate,element.paused])).toEqual([[1.1,1,false],[7.2,2,false]]);
       expect(voices.map(element=>element.seeks.length)).toEqual([1,1]);
       expect(voices.map(element=>element.play.mock.calls.length)).toEqual([1,1]);
-      await Media.seek(2);settle();
+      await Media.seek(2);await vi.waitFor(()=>expect(Media.playbackTransitionPending()).toBe(false));settle();
       expect(voices.map(element=>element.currentTime)).toEqual([2,9]);
       expect(voices.map(element=>element.seeks.length)).toEqual([2,2]);
       Media.pause({seekOnPause:false});
@@ -275,7 +275,7 @@ describe('公開 sequence placement 到實際音訊節點',()=>{
     expect(previous.every(element=>element.paused&&element.src==='')).toBe(true);
     await Media.seek(3);
     expect(tr.el.paused).toBe(true);
-    expect(elements.filter(element=>!element.paused).map(element=>element.currentTime)).toEqual([3,6]);
+    await vi.waitFor(()=>expect(elements.filter(element=>!element.paused).map(element=>element.currentTime)).toEqual([3,6]));
   });
   it('兩個反向同源片段的PCM區間都被保留，而不互相取代',async()=>{
     const {left,right}=overlap();left.reverse=true;right.reverse=true;const tr=track();
@@ -325,7 +325,7 @@ describe('公開 sequence placement 到實際音訊節點',()=>{
     expect(buffers.slice(-2).map(source=>source.start.mock.calls[0][1])).toEqual([2.1,5.1]);
     expect(buffers.slice(-2).map(source=>source.start.mock.calls[0][2])).toEqual([2.9,4.9]);
     const previous=buffers.slice(-2);video.currentTime=5.01;context.currentTime=4.01;Media.seqTick();
-    await vi.waitFor(()=>expect(Media.activeClip()?.id).toBe(right.id));
+    await vi.waitFor(()=>{expect(Media.activeClip()?.id).toBe(right.id);expect(Media.presenterClockMoving()).toBe(true);});
     expect(previous.every(source=>source.stop.mock.calls.length>0)).toBe(true);
     expect(buffers.at(-1).start.mock.calls[0][1]).toBeCloseTo(8);expect(Media.activeClip()?.id).not.toBe(left.id);Media.pause();
   });

@@ -43,7 +43,7 @@ function createIpcGuards(fileAuthority) {
   }
 
   /**
-   * 驗證路徑是否允許由作業系統 Shell 開啟（限制僅限失敗佇列的 .log 記錄檔）。
+   * 驗證路徑是否允許由作業系統 Shell 開啟（受控佇列或主程序保留的精確 .log）。
    * 
    * @param {string} file 請求開啟的記錄檔路徑
    * @throws {Error} 若未獲授權

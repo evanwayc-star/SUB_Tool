@@ -765,6 +765,45 @@ function createMediaIntakeRuntime(options = {}) {
     return { bytes };
   }
 
+  // 舊式 proxy／音訊 IPC 尚未交接輸出路徑時，由同一交易持有暫存。
+  // produce 必須等待 native writer close；成功交接沿用既有 renderer cleanup。
+  async function produceTemporaryFile(file, produce) {
+    const target = path.resolve(file);
+    if (closed || !withinCachePath(tempRoot, target) || !fileAuthority.canManageInternalFile(target)
+      || typeof produce !== 'function') throw new Error('無法建立此媒體暫存工作');
+    const forget = () => { try { options.forgetTemporaryFile?.(target); } catch (ignored) {} };
+    let descriptor = null, owner = null;
+    try {
+      descriptor = fs.openSync(target, 'wx');
+      owner = fs.fstatSync(descriptor, { bigint: true });
+      fs.closeSync(descriptor); descriptor = null;
+      await produce(target);
+      return target;
+    } catch (error) {
+      if (descriptor !== null) {
+        try { owner ||= fs.fstatSync(descriptor, { bigint: true }); } catch (statError) {}
+        try { fs.closeSync(descriptor); } catch (closeError) {}
+      }
+      if (owner) {
+        try {
+          // 不讓出 JS 執行權後再用過去的 metadata 刪檔；這不是 OS atomic compare-delete。
+          const current = fs.lstatSync(target, { bigint: true });
+          if (current.isFile() && !current.isSymbolicLink() && current.dev === owner.dev && current.ino === owner.ino) {
+            fs.unlinkSync(target);
+            forget();
+          } else {
+            // 同名新物件不再屬於這份工作，也撤回這份工作的逐檔清理登記。
+            forget();
+          }
+        } catch (cleanupError) {
+          // 不掩蓋原生失敗；暫時無法回收的檔案仍保留 quit 時的清理登記。
+          if (cleanupError.code === 'ENOENT') forget();
+        }
+      } else if (error.code === 'EEXIST') forget();
+      throw error;
+    }
+  }
+
   function cleanupGeneratedFile(file) {
     let target;
     try { target = path.resolve(file); } catch (error) { return false; }
@@ -1409,6 +1448,7 @@ function createMediaIntakeRuntime(options = {}) {
     inspectCache,
     isDirWritable,
     isPreviewCacheMedia,
+    produceTemporaryFile,
     releaseStream,
     stream,
   });

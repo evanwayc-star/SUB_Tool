@@ -424,8 +424,10 @@ export function shiftCueTimes(cues, delta) {
   const frame=1/getExactFps(State.fps || 25);
   for(const c of cues) {
     if(c.timed===false) continue;
-    c.start=subtitleTimeOnFrame(Math.max(0,c.start+delta));
-    c.end=subtitleTimeOnFrame(c.end+delta,c.start+frame);
+    const start=subtitleTimeOnFrame(Math.max(0,c.start+delta));
+    const end=subtitleTimeOnFrame(c.end+delta,start+frame);
+    if(start!==c.start || end!==c.end) delete c._tempEnd;
+    c.start=start;c.end=end;
   }
   return true;
 }

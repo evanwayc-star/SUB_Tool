@@ -21,6 +21,12 @@ export function freezeExportSubmission(snapshot, {
   });
 }
 
+export function exportSourceError(project) {
+  if (project?.unresolvedClips?.length) return `尚有未完成復原的影片或圖片：${project.unresolvedClips.map(item => item.name).join('、')}。請等待復原完成或重新連結來源檔。`;
+  if (project?.audioPlan?.unresolvedSources?.length) return `找不到可供匯出的音訊母素材：${project.audioPlan.unresolvedSources.map(item => item.name).join('、')}。請重新連結來源檔。`;
+  return null;
+}
+
 export function subtitleCuesForSubmission(submission) {
   if (submission?.audioOnly) return [];
   const expIn = submission?.timelineStart != null ? submission.timelineStart : 0;
@@ -160,12 +166,12 @@ export function createDeliverySubmission({
       const source = readProject();
       const project = source ? structuredClone(source) : null;
       const receipt = list.captureSubmissionRows();
+      const sourceError = exportSourceError(project);
       let reason = null;
       if (!project) reason = '目前沒有可匯出的影片或外部音訊';
+      else if (sourceError) reason = sourceError;
       else if (project.audioOnly && !project.audioPlan) reason = '純音訊 WAV 匯出需要專案音軌路由';
-      else if (project.audioPlan?.unresolvedSources?.length) {
-        reason = `找不到可供匯出的音訊母素材：${project.audioPlan.unresolvedSources.map(item => item.name).join('、')}。請重新連結來源檔。`;
-      } else if (!!project.audioOnly !== audioOnly) {
+      else if (!!project.audioOnly !== audioOnly) {
         reason = '匯出素材在交付清單開啟後已變更，請重新開啟清單確認交付格式。';
       } else if (!receipt.rows.length) reason = '清單不能為空';
       if (reason) return { status: 'invalid', reason, accepted };

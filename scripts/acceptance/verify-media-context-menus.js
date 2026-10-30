@@ -93,7 +93,45 @@ function ids(items) {
   return items.map(item => item.id);
 }
 
-(async () => {
+// This six-second fixture has 880 Hz above source 3s and 330 Hz below it.
+// Sample inside each region only after the actual presenter has advanced;
+// play acceptance and an elapsed sleep are not evidence of audible progress.
+async function waitForReverseAudioProgress({ read, clipId, clipPath, timeoutMs = 10000 }) {
+  const startedAt = Date.now(), deadline = startedAt + timeoutMs;
+  let first = null, last = null, lastObserved = null, sawPlaying = false;
+  for (const stage of [{ name: '880Hz', min: 3.8, max: 4.6, hz: 880 }, { name: '330Hz', min: .6, max: 2.4, hz: 330 }]) {
+    while (Date.now() < deadline) {
+      let timer, sample;
+      try {
+        sample = await Promise.race([Promise.resolve().then(read), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('反轉音訊讀取超過共同期限')), Math.max(1, deadline - Date.now()));
+        })]);
+      } finally { clearTimeout(timer); }
+      lastObserved = sample;
+      if (Date.now() >= deadline) break;
+      if (sample.clipId !== clipId || sample.clipPath !== clipPath) throw new Error('反轉音訊來源已變更');
+      if (!sample.liveTrack || !sample.liveGain) throw new Error('反轉音訊探針已失去音軌或 gain 資格');
+      if (first && sample.probeIndex !== first.probeIndex) throw new Error('兩段頻率來自不同音軌探針');
+      if (sawPlaying && !sample.playing) throw new Error('兩段音訊完成前播放已停止');
+      sawPlaying ||= sample.playing;
+      if (sample.source < stage.min) throw new Error(`已離開 ${stage.name} 來源區間但內容未通過：${JSON.stringify(sample)}`);
+      const progressing = sample.playing && sample.audible && !sample.pending && !sample.presentation
+        && sample.source <= stage.max && sample.source >= stage.min;
+      if (progressing && sample.rms > .03 && Math.abs(sample.frequency - stage.hz) < 80) {
+        if (first && !(sample.source < first.source && sample.timeline > first.timeline)) throw new Error('反轉音訊時間方向未前進');
+        if (!first) first = sample; else last = sample;
+        break;
+      }
+      await delay(Math.min(25, Math.max(0, deadline - Date.now())));
+    }
+    if ((stage.name === '880Hz' && !first) || (stage.name === '330Hz' && !last)) {
+      throw new Error(`反轉音訊進度超過共同期限：${JSON.stringify({ timeoutMs, stage: stage.name, lastObserved })}`);
+    }
+  }
+  return { first, last, elapsedMs: Date.now() - startedAt, timeoutMs };
+}
+
+if (require.main === module) (async () => {
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('找不到 dist/index.html，請先執行 npm run build');
   }
@@ -259,37 +297,44 @@ function ids(items) {
     for(const indicator of clipIndicators) assert.ok(indicator.path&&indicator.visible&&indicator.pointerEvents==='none','片段標記應可見且不攔截手勢');
     assert.ok(await client.evaluate(`!!document.querySelector('.audio-clip-block')`),'反轉影片仍顯示原音區塊');
     await waitFor(()=>client.evaluate(`!window.SUB.Media.mpvSourceTransitionPending()`),'反轉 Proxy 畫格就緒',10000);
-    await client.evaluate(`window.SUB.Media.seek(0.5)`);
+    const reverseSeek = await client.evaluate(`window.SUB.Media.seek(0.5)`);
+    assert.equal(reverseSeek?.status, 'presented', '反轉定位必須真正呈現');
     await waitFor(()=>client.evaluate(`!window.SUB.Media.presentationPending() && !window.SUB.Media.mpvSourceTransitionPending()`),'反轉片段定位',10000);
-    const before=await client.evaluate(`({timeline:window.SUB.Media.displayTime(),source:window.SUB.Media.vTime(),playing:window.SUB.Media.playing,pending:window.SUB.Media.presentationPending(),native:window.SUB.Media.mpvMode,switching:window.SUB.Media._seqSwitching,transition:window.SUB.Media.mpvSourceTransitionPending(),active:window.SUB.Media.activeClipId,rate:document.querySelector('video')?.playbackRate,mpvPath:window.SUB.Media._mpvPath,proxyPath:window.SUB.Media._reverseProxyPath,proxyActive:window.SUB.Media._reverseProxyActive})`);
+    const before=await client.evaluate(`({timeline:window.SUB.Media.displayTime(),source:window.SUB.Media.vTime(),playing:window.SUB.Media.playing,pending:window.SUB.Media.presentationPending(),native:window.SUB.Media.mpvMode,switching:window.SUB.Media._seqSwitching,transition:window.SUB.Media.mpvSourceTransitionPending(),active:window.SUB.Media.activeClipId,rate:document.querySelector('video')?.playbackRate,mpvPath:window.SUB.Media._mpvPath,proxyPath:window.SUB.Media._reverseProxyPath,proxyActive:window.SUB.Media._reverseProxyActive,clipPath:window.SUB.Media.activeClip()?.path})`);
     assert.ok(before.proxyActive && before.mpvPath===before.proxyPath,'反轉片段應由短 GOP Proxy 預覽');
     await client.evaluate(`(() => {
       window.__acceptanceAudioProbes=window.SUB.Media.tracks.filter(track=>track.gain&&window.SUB.Media.trackAudible(track)).map(track=>{
-        const analyser=track.gain.context.createAnalyser();analyser.fftSize=4096;
-        track.gain.connect(analyser);return {track,analyser};
+        const gain=track.gain,analyser=gain.context.createAnalyser();analyser.fftSize=4096;
+        gain.connect(analyser);return {track,gain,analyser,source:track.source,audioSourceId:track.audioSourceId};
       });return true;
     })()`);
     const audioContent=()=>client.evaluate(`(() => {
-      return window.__acceptanceAudioProbes.map(({track,analyser})=>{
+      const media=window.SUB.Media;
+      const samplesByTrack=window.__acceptanceAudioProbes.map(({track,gain,analyser,source,audioSourceId},probeIndex)=>{
         const samples=new Float32Array(analyser.fftSize);analyser.getFloatTimeDomainData(samples);
         let power=0,crossings=0;for(let i=0;i<samples.length;i++){power+=samples[i]*samples[i];if(i&&samples[i-1]<0&&samples[i]>=0)crossings++;}
-        return {rms:Math.sqrt(power/samples.length),frequency:crossings*analyser.context.sampleRate/samples.length,audible:window.SUB.Media.trackAudible(track)};
-      }).filter(sample=>sample.audible).sort((a,b)=>b.rms-a.rms)[0]||{rms:0,frequency:0};
+        return {rms:Math.sqrt(power/samples.length),frequency:crossings*analyser.context.sampleRate/samples.length,
+          audible:media.trackAudible(track),probeIndex,liveTrack:media.tracks.includes(track),
+          liveGain:track.gain===gain&&track.source===source&&track.audioSourceId===audioSourceId};
+      });
+      const audible=samplesByTrack.filter(sample=>sample.audible);
+      const dominant=(audible.length?audible:samplesByTrack).sort((a,b)=>b.rms-a.rms)[0];
+      return {...dominant,clipId:media.activeClipId,clipPath:media.activeClip()?.path,
+        timeline:media.displayTime(),source:media.vTime(),playing:media.playing,
+        pending:media.playbackTransitionPending(),presentation:media.presentationPending(),samplesByTrack};
     })()`);
     await client.evaluate(`window.SUB.Media.play(); true`);
-    await delay(250);
-    const reverseAudioFirst=await audioContent();
+    const reverseAudioProgress=await waitForReverseAudioProgress({read:audioContent,clipId:before.active,clipPath:before.clipPath});
+    const reverseAudioFirst=reverseAudioProgress.first,reverseAudioLast=reverseAudioProgress.last;
     assert.ok(reverseAudioFirst.rms>0.03,`反轉音訊不應靜音：${JSON.stringify(reverseAudioFirst)}`);
     assert.ok(Math.abs(reverseAudioFirst.frequency-880)<80,`反向開頭應播放來源片尾880Hz且維持音高：${JSON.stringify(reverseAudioFirst)}`);
-    await delay(1600);
-    const reverseAudioLast=await audioContent();
     assert.ok(reverseAudioLast.rms>0.03,`反轉片尾仍应出聲：${JSON.stringify(reverseAudioLast)}`);
     assert.ok(Math.abs(reverseAudioLast.frequency-330)<80,`反向片尾應播放來源片頭330Hz且維持音高：${JSON.stringify(reverseAudioLast)}`);
     const after=await client.evaluate(`({timeline:window.SUB.Media.displayTime(),source:window.SUB.Media.vTime(),playing:window.SUB.Media.playing,pending:window.SUB.Media.presentationPending(),native:window.SUB.Media.mpvMode,switching:window.SUB.Media._seqSwitching,transition:window.SUB.Media.mpvSourceTransitionPending(),active:window.SUB.Media.activeClipId,rate:document.querySelector('video')?.playbackRate,mpvPath:window.SUB.Media._mpvPath,proxyPath:window.SUB.Media._reverseProxyPath,proxyActive:window.SUB.Media._reverseProxyActive})`);
     assert.ok(after.timeline>before.timeline+0.15,`反轉後播放頭未前進：${JSON.stringify({before,after})}`);
     assert.ok(after.source<before.source-0.3,`反轉後來源畫格未倒退：${JSON.stringify({before,after})}`);
     await client.evaluate(`window.SUB.Media.pause(); true`);
-    await client.evaluate(`(() => {for(const {track,analyser} of window.__acceptanceAudioProbes)track.gain.disconnect(analyser);delete window.__acceptanceAudioProbes;return true;})()`);
+    await client.evaluate(`(() => {for(const {gain,analyser} of window.__acceptanceAudioProbes)gain.disconnect(analyser);delete window.__acceptanceAudioProbes;return true;})()`);
 
     await openMenu(client,'.clip-block');
     await client.evaluate(`document.querySelector('#ctxmenu [data-menu-id="freeze_clip"]')?.click(); true`);
@@ -423,7 +468,7 @@ function ids(items) {
       gutterMenu: ids(gutterMenu),
       lockStyle,
       speedResult,
-      menuIcons,clipIndicators,reversePlayback:{before,after,audioFirst:reverseAudioFirst,audioLast:reverseAudioLast},
+      menuIcons,clipIndicators,reversePlayback:{before,after,audioFirst:reverseAudioFirst,audioLast:reverseAudioLast,elapsedMs:reverseAudioProgress.elapsedMs},
       freezePlayback:{before:{...freezeBefore,pixels:undefined},after:{...freezeAfter,pixels:undefined}},
       freezeProjectReopen:{savedFreezeTime:savedFixed.freezeTime,savedDuration:savedProject.duration,
         savedRuntimePreview:false,reopened:{...freezeReopened,pixels:undefined},...reopenedClip},
@@ -443,3 +488,5 @@ function ids(items) {
   console.error(error.stack || error.message || error);
   process.exitCode = 1;
 });
+
+module.exports = { waitForReverseAudioProgress };

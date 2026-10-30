@@ -28,6 +28,7 @@ const domMock = vi.hoisted(() => {
     },
     removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
     dispatch(type) { for (const listener of [...(listeners.get(type) || [])]) listener({ type }); },
+    dispatchEvent(event) { video.dispatch(event.type); return true; },
     resetEvents() { listeners.clear(); },
   };
   const elements = new Map();
@@ -967,6 +968,73 @@ describe('reset-scoped media ownership', () => {
     expect(sourceA.peaks).toBeNull();
     expect(sourceB.peaks).toBeNull();
     expect(Wave.sources[0]).toBe(sourceB);
+  });
+
+  it('公開自動跨段的 HTML 起播拒絕會停止播放與 follower，且可重新播放', async () => {
+    const first={id:'first',name:'first',web:{url:'blob:first'},dur:1,in:0,out:1,offset:0,vtrack:0};
+    const next={id:'next',name:'next',web:{url:'blob:next'},dur:5,in:0,out:5,offset:1,vtrack:0};
+    State.clips=[first,next];State.duration=6;
+    Media.activeClipId=first.id;Media.playing=true;
+    domMock.video.src=first.web.url;domMock.video.currentTime=1;domMock.video.readyState=1;
+    const playback=deferred(),start=vi.spyOn(Media,'startElementSources');
+    domMock.video.play.mockReturnValueOnce(playback.promise);
+    const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
+    try{
+      expect(Media.seqContinueAtEnd()).toBe(true);
+      await vi.waitFor(()=>expect(domMock.video.src).toBe(next.web.url));
+      await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalled());
+      playback.reject(new DOMException('source cannot start','NotSupportedError'));
+      await vi.waitFor(()=>expect(Media.playing).toBe(false));
+      expect(start).not.toHaveBeenCalled();
+      expect(domMock.$('playBtn').textContent).toBe('▶');
+      expect(setStatus).toHaveBeenCalledWith('無法播放影片段「next」','err');
+      domMock.video.play.mockResolvedValue(undefined);
+      Media.activeClipId=first.id;Media.playing=true;
+      expect(Media.seqContinueAtEnd()).toBe(true);
+      await vi.waitFor(()=>expect(start).toHaveBeenCalledOnce());
+      expect(Media.activeClipId).toBe(next.id);
+    }finally{
+      playback.promise.catch(()=>{});playback.resolve();
+      start.mockRestore();domMock.video.play.mockReset();Media.reset();
+    }
+  });
+
+  it.each(['pause-resolve','pause-reject','replace-resolve','replace-reject'])('公開跨段的 %s 晚到結果不啟動舊聲音或停止新工作', async action => {
+    const pair=prefix=>[
+      {id:prefix+'-a',name:'A',web:{url:'blob:'+prefix+'-a'},dur:1,in:0,out:1,offset:0,vtrack:0},
+      {id:prefix+'-b',name:'B',web:{url:'blob:'+prefix+'-b'},dur:5,in:0,out:5,offset:1,vtrack:0},
+    ];
+    const select=clips=>{
+      State.clips=clips;State.duration=6;Media.activeClipId=clips[0].id;Media.playing=true;
+      domMock.video.src=clips[0].web.url;domMock.video.currentTime=1;domMock.video.readyState=1;
+    };
+    const oldPlay=deferred(),newPlay=deferred(),start=vi.spyOn(Media,'startElementSources');
+    const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
+    domMock.video.play.mockReset();domMock.video.play.mockReturnValueOnce(oldPlay.promise).mockReturnValueOnce(newPlay.promise);
+    try{
+      select(pair('old'));expect(Media.seqContinueAtEnd()).toBe(true);
+      await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledOnce());
+      expect(start).not.toHaveBeenCalled();
+      if(action.startsWith('pause'))Media.pause({seekOnPause:false});
+      else{
+        Media.reset();select(pair('new'));expect(Media.seqContinueAtEnd()).toBe(true);
+        await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledTimes(2));
+      }
+      if(action.endsWith('reject'))oldPlay.reject(new DOMException('interrupted play','AbortError'));
+      else oldPlay.resolve();
+      await Promise.resolve();await Promise.resolve();
+      expect(start).not.toHaveBeenCalled();
+      expect(setStatus.mock.calls.some(([message])=>String(message).startsWith('無法播放影片段'))).toBe(false);
+      if(action.startsWith('pause'))expect(Media.playing).toBe(false);
+      else{
+        expect(Media.playing).toBe(true);expect(Media.activeClip()?.id).toBe('new-b');
+        newPlay.resolve();await vi.waitFor(()=>expect(start).toHaveBeenCalledExactlyOnceWith(0,1));
+        expect(Media.playing).toBe(true);expect(Media.activeClip()?.id).toBe('new-b');
+      }
+    }finally{
+      oldPlay.promise.catch(()=>{});oldPlay.resolve();newPlay.resolve();
+      start.mockRestore();domMock.video.play.mockReset();Media.reset();
+    }
   });
 
   it('keeps a newer clip switch lock when an older metadata wait is cancelled by reset', async () => {

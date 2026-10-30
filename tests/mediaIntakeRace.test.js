@@ -297,6 +297,53 @@ describe('desktop mother-source intake ownership', () => {
     }finally{decode.mockRestore();fetch.mockRestore();}
   });
 
+  it.each(['URL','read','decode'])('原生波形 %s 失敗仍釋放本次暫存 WAV，保留已載入影片',async failure=>{
+    const {AudioEngine}=await import('../src/audio-engine.js');
+    const wavePath='C:/cache/generated-wave.wav';
+    const resolveURL=deskMock.fileURL.getMockImplementation();
+    deskMock.probe.mockResolvedValueOnce({duration:12,video:{codec:'vp9',fps:25,width:1920,height:1080},audio:[{channels:2}]});
+    deskMock.ingest.mockResolvedValueOnce({channels:[]});
+    deskMock.waveAudio.mockResolvedValueOnce(wavePath);
+    deskMock.fileURL.mockImplementation(path=>path===wavePath&&failure==='URL'?Promise.reject(new Error('wave URL unavailable')):resolveURL(path));
+    const fetch=vi.spyOn(globalThis,'fetch').mockImplementation(async()=>{
+      if(failure==='read')throw new Error('wave read failed');
+      return {arrayBuffer:async()=>new ArrayBuffer(8)};
+    });
+    const decode=vi.spyOn(AudioEngine,'decodeAudioData').mockRejectedValue(new Error('invalid wave data'));
+    const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    try{
+      await Media.loadDesktopMedia('C:/media/native.webm');
+      expect(State.clips).toHaveLength(1);
+      expect(State.clips[0].path).toBe('C:/media/native.webm');
+      expect(deskMock.cleanupAudio).toHaveBeenCalledExactlyOnceWith(wavePath);
+    }finally{deskMock.fileURL.mockImplementation(resolveURL);fetch.mockRestore();decode.mockRestore();warn.mockRestore();}
+  });
+
+  it.each(['success','reset','cleanup-failure'])('原生波形 %s 恰好釋放一次暫存檔，清理拒絕不變成未處理錯誤',async outcome=>{
+    const {AudioEngine}=await import('../src/audio-engine.js');
+    const wavePath='C:/cache/generated-wave.wav',wave=deferred();
+    deskMock.probe.mockResolvedValueOnce({duration:12,video:{codec:'vp9',fps:25,width:1920,height:1080},audio:[{channels:2}]});
+    deskMock.ingest.mockResolvedValueOnce({channels:[]});deskMock.waveAudio.mockReturnValueOnce(wave.promise);
+    if(outcome==='cleanup-failure')deskMock.cleanupAudio.mockRejectedValueOnce(new Error('cleanup IPC unavailable'));
+    const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue({arrayBuffer:async()=>new ArrayBuffer(8)});
+    const decode=vi.spyOn(AudioEngine,'decodeAudioData').mockResolvedValue({duration:12,length:1200,sampleRate:100,numberOfChannels:1,
+      getChannelData:()=>new Float32Array(1200).fill(.5)});
+    try{
+      const loading=Media.loadDesktopMedia('C:/media/native.webm');
+      await vi.waitFor(()=>expect(deskMock.waveAudio).toHaveBeenCalledOnce());
+      if(outcome==='reset'){ Media.reset(); setStatus('新專案','ok'); }
+      wave.resolve(wavePath);await loading;
+      expect(deskMock.cleanupAudio).toHaveBeenCalledExactlyOnceWith(wavePath);
+      if(outcome==='reset'){
+        expect(State.clips).toEqual([]);expect(decode).not.toHaveBeenCalled();
+        expect(setStatus).toHaveBeenLastCalledWith('新專案','ok');
+      }else{
+        expect(State.clips[0].peaks.some(value=>value!==0)).toBe(true);
+        expect(setStatus).toHaveBeenLastCalledWith('媒體已載入（原生直讀，免轉 Proxy）','ok');
+      }
+    }finally{fetch.mockRestore();decode.mockRestore();}
+  });
+
   it.each(['URL','metadata','deferred metadata','stale'])('mpv background audio %s rejection is owned and settled',async failure=>{
     const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12})),
       present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
@@ -814,6 +861,9 @@ describe('desktop mother-source intake ownership', () => {
       setBounds: vi.fn(async () => {}),
       seek: vi.fn(async () => {}),
       mute: vi.fn(async () => {}),
+      // The real preload exposes direction acceptance and frame evidence.
+      direction: vi.fn(async () => true),
+      present: vi.fn(async time => ({ backend: 'mpv', presentedSourceTime: time })),
     };
     window.subtool.mpv = mpv;
     resetPlayerAdapter(window.subtool);
@@ -834,9 +884,11 @@ describe('desktop mother-source intake ownership', () => {
       const h264 = await Media.addClipDesktop('C:/media/following-h264.mp4');
       mpv.seek.mockClear();
 
-      Media.seek(h264.offset + 3.96);
-      await vi.waitFor(() => expect(mpv.seek).toHaveBeenCalled());
+      await expect(Media.seek(h264.offset + 3.96)).resolves.toMatchObject({
+        status:'presented',presentedTime:expect.closeTo(h264.offset+3.96,8),
+      });
 
+      expect(mpv.direction).toHaveBeenLastCalledWith('forward');
       expect(mpv.seek).toHaveBeenLastCalledWith(3.96, undefined);
       expect(h264.dur).toBe(12);
     } finally {

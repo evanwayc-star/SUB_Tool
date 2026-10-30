@@ -8,6 +8,9 @@ const require = createRequire(import.meta.url);
 const { createDeliveryRunner } = require('../electron/delivery-runner.js');
 const { createExportQueue } = require('../electron/export-queue.js');
 const QueueStore = require('../electron/queue-store.js');
+const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
+const { acquireLease, releaseLease, listLeases, stageOutputPath } = require('../electron/export-lease.js');
+const nativeFs = require('node:fs');
 
 const tempRoots = [];
 afterEach(() => {
@@ -284,6 +287,82 @@ describe('delivery runner public interface', () => {
       expect.objectContaining({ error: true, errorMsg: failure.message }));
     expect(setup.sent.some(item => item.payload?.done)).toBe(false);
     expect(setup.active.size).toBe(0);
+  });
+
+  it.each([false, true])('成品提交後停止仍依 lease 收尾結果保存終態（releaseFailure=%s）', async releaseFailure => {
+    const root = mkdtempSync(path.join(tmpdir(), 'subtool-delivery-release-')); tempRoots.push(root);
+    const queueDir = path.join(root, 'queue'), outPath = path.join(root, 'delivery.mp4');
+    const token = 'completed-delivery-token', stagePath = stageOutputPath(outPath, token);
+    const completedBytes = Buffer.from('completed delivery bytes preserved after commit');
+    const sent = [], stop = vi.fn(), releaseError = Object.assign(new Error('輸出鎖暫時無法移除'), { code: 'EPERM' });
+    let runner, lease, failedReleaseAttempts = 0;
+    const queue = createExportQueue({ dir: () => queueDir, store: QueueStore, history: QueueStore.QueueHistory,
+      admission: { sourcePathsOf: job => QueueStore.collectSourcePaths(job.payload),
+        assertJobAdmissible() {}, assertMasterMedia() {}, assertOutputAvailable() {}, assertOutputFormat() {} },
+      grantPersistedCapabilities() {}, canReadSource: () => true, canWriteDelivery: () => true,
+      isFile: () => true, runJob: job => runner.run(job), onChanged() {},
+    });
+    const rmdir = nativeFs.rmdirSync;
+    const removeLock = vi.spyOn(nativeFs, 'rmdirSync').mockImplementation((file, ...args) => {
+      if (releaseFailure && file === lease?.lockPath) { failedReleaseAttempts++; throw releaseError; }
+      return rmdir(file, ...args);
+    });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg', getQueueDir: () => queueDir,
+      spawnWatchdog(config, handlers) {
+        // 控制 watchdog 的跨程序通知時機；stage、commit 與 lease 收尾仍操作真實檔案。
+        const completion = Promise.resolve().then(() => {
+          lease = acquireLease({ queueDir, outPath, token, stagePath, jobId: config.jobId });
+          writeFileSync(stagePath, completedBytes);
+          nativeFs.renameSync(stagePath, outPath);
+          expect(queue.stopJob(config.jobId)).toBe(true);
+          let release;
+          try { release = releaseLease({ queueDir, outPath, token }); }
+          catch (error) {
+            release = { retainedLease: true, error: { code: error.code, message: error.message } };
+            handlers.onMessage({ type: 'error', code: 'LEASE_RELEASE_FAILED', message: error.message });
+          }
+          // 正式 watchdog 已 commit 的結果沒有 cleanup，殘留鎖在 release 中。
+          return { ok: !release?.error, code: 0, cleanup: null, release };
+        });
+        return { ready: Promise.resolve(), completion, stop };
+      },
+    });
+    const audioBitrates = vi.fn(async () => []);
+    const runFfmpeg = vi.fn((args, options) => execution.execute(args, options));
+    runner = createDeliveryRunner({ queue, queueDir: () => queueDir, tempDir: path.join(root, 'work'),
+      nativeCapabilities: { assertReady: async () => {} },
+      mediaProbe: () => ({ hasAudio: async () => false, audioBitrates }),
+      encoder: { bitrateArgs: () => ['-c:v', 'libx264'] }, runFfmpeg,
+      events: { senderForId: () => ({}), send: (target, event, data) => sent.push(data) },
+    });
+    const job = videoJob({ status: 'queued', createdAt: Date.now() });
+    job.payload.outPath = outPath;
+    try {
+      queue.addJob(job);
+      await vi.waitFor(() => {
+        expect(runFfmpeg).toHaveBeenCalledOnce();
+        expect(queue.activeJob(job.id)).toBeNull();
+      });
+      expect(stop).toHaveBeenCalledWith('user-stop');
+      expect(readFileSync(outPath)).toEqual(completedBytes);
+      expect(existsSync(stagePath)).toBe(false);
+      expect(failedReleaseAttempts).toBe(releaseFailure ? 1 : 0);
+      if (releaseFailure) {
+        expect(listLeases(queueDir)).toMatchObject([{ valid: true, owner: { token } }]);
+        expect(() => acquireLease({ queueDir, outPath, jobId: 'next', token: 'next' })).toThrow(/already leased/);
+        expect(queue.get(job.id)).toMatchObject({ status: 'failed', errorMsg: expect.stringContaining(releaseError.message) });
+        expect(QueueStore.loadTerminalOutcomes(queueDir)).toMatchObject([
+          { id: job.id, status: 'failed', errorMsg: expect.stringContaining(releaseError.message) },
+        ]);
+        expect(sent.at(-1)).toMatchObject({ error: true, errorMsg: expect.stringContaining(releaseError.message) });
+        expect(audioBitrates).not.toHaveBeenCalled();
+      } else {
+        expect(listLeases(queueDir)).toEqual([]);
+        expect(queue.get(job.id).status).toBe('done');
+        expect(sent.at(-1)).toMatchObject({ done: true });
+        expect(audioBitrates).toHaveBeenCalledOnce();
+      }
+    } finally { removeLock.mockRestore(); }
   });
 
   it('航空來源的音訊前導時間送入正式轉檔計畫', async () => {

@@ -118,17 +118,15 @@ class SourceStream {
           if(this._disposed) f.close();
           else { this.frames.push(f); this._trimFrames(this._targetUs); }
         },
-        error: (e)=>{ console.error('[WC] decoder error:', e && (e.message||e)); this.state = 'failed'; },
+        error: (e)=>{ if(this._disposed) return; console.error('[WC] decoder error:', e && (e.message||e)); this.dispose(); },
       });
       this.dec.configure(cfg);
       this.state = 'ready';
     }catch(e){
       if(this._disposed) return;
-      this.reader?.dispose?.(); this.reader=null;
-      try{this.dec?.close();}catch(_){}
+      this.dispose();
       const msg = String(e && e.message || e);
       console.warn('[WC] 來源載入失敗（fallback 原樣顯示）:', msg);
-      this.state = 'failed';
       // 讓使用者知道為什麼疊加/溶接沒有出現（每個來源只提示一次；匯出不受影響）
       try{ showToast('⚠ 此影片無法即時合成預覽（' + (/過大/.test(msg) ? '檔案過大' : '格式不支援') + '）——預覽顯示原樣，匯出不受影響'); }catch(e2){}
     }
@@ -139,12 +137,13 @@ class SourceStream {
 
   _reseek(tUs){
     try{ this.dec.reset(); }catch(e){}
-    try{ this.dec.configure(this.cfg); }catch(e){ this.state='failed'; return; }
+    try{ this.dec.configure(this.cfg); }catch(e){ this.dispose(); return false; }
     for(const f of this.frames){ try{ f.close(); }catch(e){} }
     this.frames = []; this.frameDurations.clear(); this._flushed = false;
     this.fedIdx = this._keyBefore(tUs);
     this._fedFrom = this.fedIdx; // 本輪解碼路徑起點（判斷「目標是否早於本輪可達範圍」用）
     this._discarded = false;
+    return true;
   }
 
   _trimFrames(tUs){
@@ -170,7 +169,7 @@ class SourceStream {
     if(shift!==this.clockShift){
       const delta=shift-this.clockShift;this.clockShift=shift;
       this.chunks=this.chunks.map(sample=>({...sample,timestamp:sample.timestamp+delta}));
-      this.startUs+=delta;this._reseek(tUs);
+      this.startUs+=delta;if(!this._reseek(tUs)) return null;
     }
     const cs = this.chunks, half = this.frameDurUs/2;
     if(tUs < this.startUs) tUs = this.startUs; // 目標早於串流首幀 → 呈現首幀（勿誤判為後退）
@@ -187,7 +186,7 @@ class SourceStream {
     // 否則在同一個 GOP 內，只有當我們已經開始丟棄舊影格，且目標時間早於目前可達的最早影格時，才算是後退。
     const seekBack = (this._fedFrom != null && ki < this._fedFrom) ||
                      (earliestTs != null && tUs < earliestTs - half && this._discarded);
-    if(this.fedIdx < 0 || seekBack || ki > this.fedIdx) this._reseek(tUs);
+    if((this.fedIdx < 0 || seekBack || ki > this.fedIdx) && !this._reseek(tUs)) return null;
     this._trimFrames(tUs);
 
     // 餵：直到「最後已解 frame」涵蓋 t+lookahead、或 decoder 佇列滿、或檔尾、或位元組還沒到
@@ -205,7 +204,8 @@ class SourceStream {
       const c = cs[this.fedIdx++];
       this.frameDurations.set(c.timestamp,c.duration||this.frameDurUs);
       try{ this.dec.decode(new EncodedVideoChunk({ type:c.type, timestamp:c.timestamp, duration:c.duration, data })); }
-      catch(e){ console.error('[WC] decode err:', e && (e.message||e)); this.state='failed'; return null; }
+      catch(e){ console.error('[WC] decode err:', e && (e.message||e)); this.dispose(); return null; }
+      if(this.state!=='ready') return null;
     }
     if(!starved) this.reader.ensure(this.fedIdx); // 預取下一個視窗（播放時永遠領先游標一格）
     if(this.fedIdx >= cs.length && !this._flushed){ this._flushed = true; this.dec.flush().catch(()=>{}); } // 檔尾 drain
@@ -224,6 +224,7 @@ class SourceStream {
   }
 
   dispose(){
+    if(this._disposed) return;
     this._disposed=true;
     try{ this.dec && this.dec.close(); }catch(e){}
     if(this.frames) for(const f of this.frames){ try{ f.close(); }catch(e){} }
@@ -329,7 +330,9 @@ export const WCPreview = {
     for(const {key} of idle.slice(1)){
       this.sources.get(key)?.dispose?.(); this.sources.delete(key); this._sourceUse.delete(key);
     }
-    releaseUnusedDemux(new Set([...this.sources.values()].map(ss=>ss.url)));
+    // failed 來源保留終態以免每幀重試，但不能繼續持有整檔 payload；
+    // 同 URL 的其他 idle/loading/ready 層仍共用其索引與媒體資料。
+    releaseUnusedDemux(new Set([...this.sources.values()].filter(ss=>ss.state!=='failed').map(ss=>ss.url)));
   },
 
   /* mpv 畫面接管開關：WC 能呈現時隱藏 mpv 視窗、改用 HTML 字幕；讓回時還原 libass。 */

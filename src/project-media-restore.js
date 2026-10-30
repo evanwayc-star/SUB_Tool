@@ -18,6 +18,14 @@ export class ProjectMediaRestoration {
     this.report = report;
   }
 
+  // 新開啟尚未取代目前文件時，保留其已建立的 History／定位進度。
+  // 只交接資料與完成紀錄；舊 restore 的 owns 與進行中的 I/O 不會被重用。
+  inheritPlanProgress(previous, next) {
+    if (this.#begunPlans.has(previous)) this.#begunPlans.set(next, this.#begunPlans.get(previous));
+    if (this.#baselinedPlans.has(previous)) this.#baselinedPlans.add(next);
+    if (this.#positionedPlans.has(previous)) this.#positionedPlans.add(next);
+  }
+
   async restore(plan, request, owns) {
     if (!owns()) return false;
     const { kind = 'images', path = null } = request;

@@ -70,13 +70,13 @@ function clipAudioSpec(clip, mediaTracks){
 }
 
 
-/* 即使來源被靜音，它仍是時間軸上的素材；輸出影片的黑畫面／總長不能因 Mute 縮短。
+/* 即使來源被靜音或尚未復原，它仍是時間軸上的素材；輸出總長不能因此縮短。
    所以這裡【不看 enabled】——音訊輸入的過濾由 externalAudioPlacements 負責。 */
-function externalAudioTimelineEnd(externalSources){
-  return (Array.isArray(externalSources) ? externalSources : []).reduce((end, asset) => {
+function sourceTimelineEnd(sources){
+  return (Array.isArray(sources) ? sources : []).reduce((end, asset) => {
     if (!asset) return end;
     const { trimStart, trimEnd } = trimRange(asset);
-    const speed=Number(asset.speed)>0?Number(asset.speed):1;
+    const speed=asset.type==='image'?1:(Number(asset.speed)>0?Number(asset.speed):1);
     return Math.max(end, nonNeg(asset.offset) + Math.max(0, trimEnd - trimStart)/speed);
   }, 0);
 }
@@ -110,15 +110,18 @@ function mergeExternalSources(persisted, live){
      mediaTracks           Media.tracks（只用來讀 M/S/音量與聲道座標）
      liveExternalSources   Media 目前實際持有的外部音檔素材
      sequenceEnd           影片序列結尾（Seq.end()）
+     pendingClips          Project 尚未交接給 runtime 的純資料片段
 
    回傳 null＝沒有任何可匯出的素材。 */
-function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = [], sequenceEnd = 0 } = {}){
+function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = [], sequenceEnd = 0, pendingClips = [] } = {}){
   if (!state) return null;
   const rawSourceClips = (Array.isArray(state.clips) ? state.clips : []).filter(c => c.path || c.name || c.web);
+  const pending = Array.isArray(pendingClips) ? pendingClips : [];
   const rawExternalSources = mergeExternalSources(state.externalAudioState, liveExternalSources);
 
   const expIn = state.exportIn != null ? state.exportIn : 0;
-  const rawDur = Math.max(Number(sequenceEnd) || 0, externalAudioTimelineEnd(rawExternalSources));
+  // 未復原的尾段仍是專案內容，不能讓 runtime 的較短結尾將它裁成範圍外。
+  const rawDur = Math.max(Number(sequenceEnd) || 0, sourceTimelineEnd(pending), sourceTimelineEnd(rawExternalSources));
   let expOut = state.exportOut != null ? state.exportOut : rawDur;
   if (expOut <= expIn) expOut = expIn + 0.1;
 
@@ -159,10 +162,19 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
 
   const sourceClips = rawSourceClips.map(slice).filter(Boolean);
   const externalSources = rawExternalSources.map(slice).filter(Boolean);
+  const unresolvedClips = pending.map(slice).filter(Boolean).filter(clip => {
+    if ((state.videoTracks || [])[clip.vtrack || 0]?.visible !== false) return true;
+    if (clip.type === 'image' || clip.audioDetached || fixedFrameTime(clip) != null) return false;
+    // 隱藏視訊軌不等於靜音；配線／Solo／Mute 沿既有音訊編譯結果判斷。
+    const audio = buildProjectAudioPlan({ audioProject: state.audioProject, mediaTracks, clips: [clip] });
+    if (audio) return audio.unresolvedSources.length > 0 || audio.buses.some(bus => bus.inputs.length > 0);
+    const fallback = clipAudioSpec(clip, mediaTracks);
+    return fallback == null || fallback.length > 0;
+  }).map(clip => ({ name: clip.name || clip.path || '未命名素材', path: clip.path, type: clip.type === 'image' ? 'image' : 'video' }));
 
   const audibleVideoClips = sourceClips.filter(c => !c.audioDetached && fixedFrameTime(c) == null);
   const externalPlacements = externalAudioPlacements(externalSources);
-  if (!sourceClips.length && !externalPlacements.length) return null;
+  if (!sourceClips.length && !externalPlacements.length && !unresolvedClips.length) return null;
 
   const audioPlan = buildProjectAudioPlan({
     audioProject: state.audioProject,
@@ -219,6 +231,7 @@ function buildExportSnapshot({ state, mediaTracks = [], liveExternalSources = []
 
   return {
     clips: list,
+    unresolvedClips,
     videoTracks,
     // 匯出會把片段 offset 歸零；保留原始時間軸起點供 burn-in 時碼等交付資訊使用。
     // 不四捨五入：23.976／29.97 的單格不足 0.04 秒，保留完整值才不會讓第一格差一格。

@@ -119,8 +119,15 @@ it('附加與新增軌的匯入不移除既有字幕，無額外移除確認',as
 it('讀檔等待期間新增並儲存的字幕不再觸發移除警告',async()=>{
  Project.establishCleanBaseline();let finishRead;const read=vi.fn(()=>new Promise(resolve=>{finishRead=resolve;}));const pending=Project.open(read);await Promise.resolve();await Promise.resolve();expect(read).toHaveBeenCalledOnce();
  State.cues.push({id:'later',start:7,end:8,text:'已儲存的新句',track:0});History.record('新增');Project.establishCleanBaseline();
- const load=vi.spyOn(Project,'load').mockResolvedValueOnce(true);
- try{const file=new File(['{}'],'new.subtool');finishRead(file);await expect(pending).resolves.toBe(true);expect(load).toHaveBeenCalledWith(file);expect(visible()).toBe(false);}finally{load.mockRestore();}
+ const fonts=vi.spyOn(Project,'_checkMissingFonts').mockResolvedValue([]);
+ try{
+  const data={version:3,fps:25,media:{},clips:[],tracks:[{name:'新軌'}],cues:[{start:0,end:1,text:'新專案內容',track:1}]};
+  finishRead(new File([JSON.stringify(data)],'new.subtool'));
+  let completed=false;const loaded=pending.then(result=>{completed=true;return result;});
+  await vi.waitFor(()=>expect(completed).toBe(true));await expect(loaded).resolves.not.toBe(false);
+  expect(State.cues.map(cue=>cue.text)).toEqual(['新專案內容']);expect(State.tracks[0].name).toBe('新軌');
+  expect(fonts).toHaveBeenCalledOnce();expect(visible()).toBe(false);
+ }finally{fonts.mockRestore();}
 });
 it('覆蓋計畫與model共用規則，預查不分配ID或改資料，部分裁切不要求整句移除確認',()=>{
  State.overwriteMode=true;State.overwriteKeep=false;const before=structuredClone(State.cues);expect(Model.planContainedCueRemovals([{...State.cues[0],end:3.5}])).toEqual([]);expect(State.cues).toEqual(before);expect(Model.planContainedCueRemovals([{...State.cues[0],end:5}])).toEqual([State.cues[1]]);expect(State.cues).toEqual(before);expect(History.stack).toHaveLength(1);

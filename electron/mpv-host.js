@@ -36,6 +36,7 @@ function createMpvHost(deps) {
   let pendingPresentation = null;
   let pendingFileLoad = null;
   let fileLoadSession = null;
+  let fileLoadPhase = null;
   // mpv 由 --pause 啟動。暫停中的 seek 會更新 time-pos／畫格，卻不保證在
   // unpause 前送 playback-restart；播放中的 seek 則仍要等 restart 才能視為呈現完成。
   let playerPaused = true;
@@ -173,7 +174,7 @@ function createMpvHost(deps) {
   function waitForFileLoad(session, { firstFrame = false } = {}) {
     settleFileLoad(false);
     return new Promise(resolve => {
-      const waiter = { resolve, timer: null, session, firstFrame, loaded: false, restarted: false, reading: false };
+      const waiter = { resolve, timer: null, session, firstFrame, entryId: null, reading: false };
       pendingFileLoad = waiter;
       waiter.timer = setTimer(() => {
         if (pendingFileLoad === waiter) settleFileLoad(false);
@@ -181,19 +182,40 @@ function createMpvHost(deps) {
     });
   }
 
+  function acknowledgeFileLoad(session, receipt) {
+    const waiter = pendingFileLoad;
+    if (!waiter || waiter.session !== session || session !== fileLoadSession) return;
+    const entryId = receipt?.playlist_entry_id;
+    if (!Number.isSafeInteger(entryId) || entryId < 0) return settleFileLoad(false);
+    waiter.entryId = entryId;
+    maybeFinishFileLoad(waiter);
+  }
+
   function maybeFinishFileLoad(waiter) {
-    if (waiter !== pendingFileLoad || !waiter.loaded) return;
-    if (!waiter.firstFrame) return settleFileLoad(true);
-    if (!waiter.restarted || waiter.reading) return;
+    if (!waiter) return;
+    const phase = fileLoadPhase;
+    const owns = () => waiter === pendingFileLoad && waiter?.session === fileLoadSession
+      && waiter.session.client === client && waiter.session.generation === generation
+      && phase === fileLoadPhase && waiter.entryId != null && waiter.entryId === phase?.entryId;
+    if (!owns()) return;
+    if (phase.ended) return settleFileLoad(false);
+    if (!phase.loaded || (waiter.firstFrame && !phase.restarted) || waiter.reading) return;
     waiter.reading = true;
-    // mpv 0.41 emits the initial playback-restart while paused too, after the
-    // decoders are ready. Read back its clock; null/error is not a first frame.
-    void send(['get_property', 'time-pos'], true, { requireSuccess: true }).then(time => {
-      if (waiter !== pendingFileLoad || waiter.session !== fileLoadSession
-        || waiter.session.client !== client || waiter.session.generation !== generation) return;
-      settleFileLoad(typeof time === 'number' && Number.isFinite(time));
+    // path 是查詢當下的來源，不能替排隊的舊 file-loaded 作證。先以 loadfile
+    // ACK 的 entry ID 配對 start-file 後的事件，再核對路徑；同路徑重載也分開。
+    const canonical = value => typeof value === 'string' ? value.replace(/\\/g, '/').toLowerCase() : null;
+    void send(['get_property', 'path'], true, { requireSuccess: true }).then(async loadedPath => {
+      if (!owns()) return;
+      if (canonical(loadedPath) !== canonical(waiter.session.path)) {
+        waiter.reading = false;
+        return;
+      }
+      if (!waiter.firstFrame) return settleFileLoad(true);
+      // launch 原有首幀契約：同 entry 的 restart 後才讀回有限來源時鐘。
+      const time = await send(['get_property', 'time-pos'], true, { requireSuccess: true });
+      if (owns()) settleFileLoad(typeof time === 'number' && Number.isFinite(time));
     }).catch(() => {
-      if (waiter === pendingFileLoad) settleFileLoad(false);
+      if (owns()) settleFileLoad(false);
     });
   }
 
@@ -255,6 +277,7 @@ function createMpvHost(deps) {
     cancelPresent();
     settleFileLoad(false);
     fileLoadSession = null;
+    fileLoadPhase = null;
     sourceClock = null;
     if (destroy && current) { try { current.destroy(); } catch (error) {} }
     if (emitDisconnected) sendEvent({ event: 'disconnected' });
@@ -471,28 +494,19 @@ function createMpvHost(deps) {
             if (callback.requireSuccess && message.error !== 'success') {
               callback.reject(new Error('mpv 命令失敗：' + (message.error || '無效的命令回覆')));
             } else callback.resolve(message.data ?? null);
+          } else if (message.event === 'start-file') {
+            fileLoadPhase = { entryId: message.playlist_entry_id, loaded: false, restarted: false, ended: false };
           } else if (message.event === 'file-loaded') {
-            const waiter = pendingFileLoad;
-            if (waiter) {
-              // file-loaded 沒有來源 path；舊 load 的晚到事件不可完成新來源的 waiter。
-              const canonical = value => typeof value === 'string' ? value.replace(/\\/g, '/').toLowerCase() : null;
-              void send(['get_property', 'path'], true).then(loadedPath => {
-                if (waiter === pendingFileLoad && waiter.session === fileLoadSession
-                  && waiter.session.client === client && waiter.session.generation === generation
-                  && canonical(loadedPath) === canonical(waiter.session.path)) {
-                  waiter.loaded = true;
-                  maybeFinishFileLoad(waiter);
-                }
-              });
-            }
+            if (fileLoadPhase) fileLoadPhase.loaded = true;
+            maybeFinishFileLoad(pendingFileLoad);
             sendEvent(message);
           } else if (message.event === 'property-change' || message.event === 'end-file' || message.event === 'playback-restart') {
-            const waiter = pendingFileLoad;
-            if (waiter?.firstFrame) {
-              if (message.event === 'playback-restart') {
-                waiter.restarted = true;
-                maybeFinishFileLoad(waiter);
-              } else if (message.event === 'end-file') settleFileLoad(false);
+            if (message.event === 'playback-restart' && fileLoadPhase?.loaded && !fileLoadPhase.ended) {
+              fileLoadPhase.restarted = true;
+              maybeFinishFileLoad(pendingFileLoad);
+            } else if (message.event === 'end-file' && fileLoadPhase && message.playlist_entry_id === fileLoadPhase.entryId) {
+              fileLoadPhase.ended = true;
+              maybeFinishFileLoad(pendingFileLoad);
             }
             if (message.event === 'property-change' && typeof message.data === 'number') {
               if (message.name === 'time-pos') message.data = sourceTime(message.data);
@@ -675,7 +689,8 @@ function createMpvHost(deps) {
       startupSession = { client, generation: token, path: src, loading: true };
       fileLoadSession = startupSession;
       const ready = waitForFileLoad(startupSession, { firstFrame: true });
-      await send(['loadfile', src, 'replace'], true, { requireSuccess: true });
+      const receipt = await send(['loadfile', src, 'replace'], true, { requireSuccess: true });
+      acknowledgeFileLoad(startupSession, receipt);
       const loaded = await ready;
       if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
       if (!loaded) throw new Error('mpv 初始畫格未在期限內就緒');
@@ -817,9 +832,16 @@ function createMpvHost(deps) {
     if (!current()) return superseded();
     // 建立 waiter 後才送命令，避免快速載入的 file-loaded 先於 command ack 到達。
     const ready = waitForFileLoad(session);
-    await send(['loadfile', filePath, 'replace']);
+    try {
+      const receipt = await send(['loadfile', filePath, 'replace'], true, { requireSuccess: true });
+      acknowledgeFileLoad(session, receipt);
+    } catch (error) {
+      if (!current()) return superseded();
+      settleFileLoad(false);
+      throw error;
+    }
     if (!await ready || !current()) {
-      log('[mpv] loadfile: file-loaded not received after 8s:', filePath);
+      log('[mpv] loadfile: matching source load did not complete:', filePath);
       return { ok: false, duration: 0 };
     }
     const duration = await send(['get_property', 'duration'], true);
@@ -855,8 +877,11 @@ function createMpvHost(deps) {
     screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles'], true, { requireSuccess: true })
       .then(() => ({ ok: true })),
     play: () => {
+      // Keep the ordered play/pause intent for presentation; a late ACK must
+      // not overwrite a newer pause. The Promise proves command acceptance,
+      // not frame presentation, and rejects pipe/command/timeout failures.
       playerPaused = false;
-      return send(['set_property', 'pause', false]);
+      return send(['set_property', 'pause', false], true, { requireSuccess: true });
     },
     pause: () => {
       playerPaused = true;

@@ -100,6 +100,19 @@ describe('FileAuthority', () => {
     expect(authority.canRead('E:\\Archive\\private-notes.txt')).toBe(false);
   });
 
+  it('主程序保留的診斷只授精確 log 開啟能力，不授同目錄、read 或 write', () => {
+    const authority = makeAuthority();
+    const file = 'C:\\SUB Tool\\profile\\export-owned.log';
+    expect(authority.grantDiagnosticLogFile(file)).toBe(true);
+    expect(authority.canOpenQueueLog(file)).toBe(true);
+    expect(authority.canOpenQueueLog('C:\\SUB Tool\\profile\\export-other.log')).toBe(false);
+    expect(authority.canRead(file)).toBe(false);
+    expect(authority.canWrite(file)).toBe(false);
+    expect(authority.grantDiagnosticLogFile('C:\\SUB Tool\\profile\\program.exe')).toBe(false);
+    expect(authority.grantDiagnosticLogFile(null)).toBe(false);
+    expect(authority.canOpenQueueLog('C:\\SUB Tool\\profile\\program.exe')).toBe(false);
+  });
+
   it('專案與截圖寫入同時需要副檔名和既有寫入授權', () => {
     const authority = makeAuthority();
     authority.grantTrustedDirectory('F:\\Deliverables');

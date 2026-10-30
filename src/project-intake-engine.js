@@ -175,9 +175,20 @@ export class ProjectLoadSession {
   get activePlan() { return this.#activePlan; }
   get generation() { return this.#generation; }
 
-  begin() {
+  begin({ preserveMaterial = false } = {}) {
+    const previous = preserveMaterial ? this.#activePlan : null;
     this.#generation += 1;
     this.#activePlan = null;
+    if (previous) {
+      // 撤銷舊工作，持久資料則交給新 plan；不得靠重啟舊 owner 恢復取消的 I/O。
+      const plan = this.createRestorePlan(this.#generation, structuredClone({
+        clips: previous.pendingClipsForSave(),
+        externalAudioSources: previous.pendingExternalAudioSources(),
+        playhead: previous.peekPlayhead(),
+        mediaRelink: previous.needsMediaRelink(),
+      }));
+      this.#mediaRestoration?.inheritPlanProgress(previous, plan);
+    }
     return this.#generation;
   }
 

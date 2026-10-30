@@ -535,6 +535,7 @@ export function capturePresetUpdate(preset){
    匯出（libass）由主程序以 fontsdir 指向同一資料夾 → 預覽＝燒錄同一份字型。 ---- */
 let _fonts = null; // [{name:資料夾名（UI／CSS 用）, file, family:檔案內部家族名（ASS 用）}]
 let _fontsLoading = null;
+let _fontFaces = new Map(); // 只持有本 module 註冊的 face，不能清除其他字型擁有者。
 export function getFonts(){ return _fonts || []; }
 
 /* 資料夾名 → ASS Fontname（v4.29.3 修）。
@@ -563,11 +564,11 @@ export function uiFontNameFromAss(name, fonts=getFonts()){
   return found?.name || source;
 }
 export async function loadFonts(force = false){
-  // The list is populated before FontFace finishes loading. Concurrent callers
-  // must await the same operation, especially the project's missing-font check.
+  // Concurrent callers await registration; synchronous ASS callers keep the
+  // last complete family mapping until the replacement has finished loading.
   if(_fontsLoading){
     await _fontsLoading;
-    return force ? loadFonts(true) : _fonts;
+    return force ? loadFonts(true) : getFonts();
   }
   if(_fonts && !force) return _fonts;
   _fontsLoading = _loadFontFaces();
@@ -576,28 +577,39 @@ export async function loadFonts(force = false){
 }
 
 async function _loadFontFaces(){
-  _fonts = [];
   try{
     const DESK = window.subtool;
-    if(!DESK || !DESK.fontsList) return _fonts;
+    if(!DESK || !DESK.fontsList) return (_fonts = []);
     const r = await DESK.fontsList();
     // 預設字型排第一（主行程給的是資料夾名字典序）；其餘維持原順序。
     const list = ((r && r.fonts) || []).slice()
       .sort((a, b) => (b.name === STYLE_DEFAULTS.font) - (a.name === STYLE_DEFAULTS.font));
+    const nextFaces = new Map();
     // 以 FontFace API 直接餵位元組註冊——CSS `@font-face{src:url('file://…')}` 會被
     // Chromium 擋下（"A network error occurred"），即使 webSecurity 關閉亦然。
     for(const f of list){
-      _fonts.push(f);
       try{
         const url = await DESK.fileURL(f.file);
         const buf = await (await fetch(url)).arrayBuffer();
         const face = new FontFace(f.name, buf);
         await face.load();
-        document.fonts.add(face);
-      }catch(e){ console.warn('[fonts] 預覽載入失敗（仍可匯出）：' + f.name, String(e && e.message || e)); }
+        nextFaces.set(f.name, face);
+      }catch(e){
+        // 暫時讀取失敗仍保留可用的舊 face；下次強制載入成功才取代。
+        if(_fontFaces.has(f.name)) nextFaces.set(f.name, _fontFaces.get(f.name));
+        console.warn('[fonts] 預覽載入失敗（仍可匯出）：' + f.name, String(e && e.message || e));
+      }
     }
+    // 整批載入後同步發布；反覆匯入字型不應累積所有舊字型的副本。
+    for(const face of nextFaces.values()) document.fonts.add(face);
+    for(const [name, face] of _fontFaces){
+      if(nextFaces.get(name) !== face) document.fonts.delete(face);
+    }
+    _fontFaces = nextFaces;
+    _fonts = list;
   }catch(e){ console.warn('[fonts] load', e); }
-  return _fonts;
+  // 掃描失敗保留既有清單；首次失敗保持未載入，下一次可重試。
+  return getFonts();
 }
 
 /* 從軌道取可存為 preset 的樣式子集（不含 name/visible/locked 等非樣式欄位） */

@@ -426,6 +426,109 @@ it('selection finalization commits one Undo and explicit timing edit consumes th
   expect(State.cues.find(c=>c.id==='a').end).toBe(3);expect(History.stack).toHaveLength(3);History.undo();expect(State.cues.find(c=>c.id==='a').end).toBe(10);
   Model.editCue({cueId:'a',operation:'end',value:4});Subtitles.selectCue('b');expect(State.cues.find(c=>c.id==='a').end).toBe(4);
 });
+async function provisionalCue(){
+  const Transport=await import('../src/transport-controller.js');
+  State.cues[1].track=1;State.duration=9;
+  StateModule.setSelection({kind:'sub',ids:['a'],primary:'a'});
+  Model.toggleSubMode();vi.spyOn(Media,'displayTime').mockReturnValue(1);await Transport.setIn();
+  expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true});
+}
+const dragCueEdge=(target,type,x)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0,clientX:x,clientY:100}));
+it.each(['timecode','percentage','right-edge'])('public %s duration edit after In survives selection, Undo and Redo',async method=>{
+  const SubIO=await import('../src/subio.js');await provisionalCue();
+  const steps=History.stack.length;
+  if(method==='right-edge'){
+    await timeline();
+    dragCueEdge(document.querySelector('.cue-block[data-id="a"] .edge.r'),'mousedown',720);
+    dragCueEdge(window,'mousemove',400);dragCueEdge(window,'mouseup',400);
+  }else{
+    document.getElementById('tcShiftSel').value='sel';
+    if(method==='timecode'){
+      document.getElementById('durAdjTcInput').value='00:00:04:00';SubIO.applyDurAdjTc(-1);
+    }else{
+      document.getElementById('durAdjPctInput').value='50';SubIO.applyDurAdjPct();
+    }
+  }
+  expect(State.cues.find(cue=>cue.id==='a').end).toBe(5);
+  Subtitles.selectCue('b');
+  expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1,end:5});
+  expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();
+  expect(History.stack).toHaveLength(steps+1);
+  History.undo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1,end:9,_tempEnd:true});
+  History.redo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1,end:5});
+  expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();
+});
+it.each(['timecode-shift','keyboard-shift'])('public %s after In preserves the accepted span across selection and Undo',async method=>{
+  const SubIO=await import('../src/subio.js');await import('../src/keyboard.js');await provisionalCue();
+  const steps=History.stack.length,keys=State.keymap;
+  try{
+    if(method==='timecode-shift'){
+      document.getElementById('tcShiftSel').value='sel';document.getElementById('tcShiftInput').value='00:00:01:00';SubIO.applyTcShift(1);
+    }else{
+      State.keymap={shift_timecode:[{key:'p'}]};Media.displayTime.mockReturnValue(2);
+      window.dispatchEvent(new KeyboardEvent('keydown',{key:'p',bubbles:true,cancelable:true}));
+      window.dispatchEvent(new KeyboardEvent('keyup',{key:'p',bubbles:true}));
+    }
+    expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:2,end:10});
+    Subtitles.selectCue('b');expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:2,end:10});
+    expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();expect(History.stack).toHaveLength(steps+1);
+    History.undo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1,end:9,_tempEnd:true});
+    History.redo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:2,end:10});
+    expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();
+  }finally{State.keymap=keys;}
+});
+it.each([false,true])('unchanged or locked P shift preserves provisional ownership (locked=%s)',async locked=>{
+  await import('../src/keyboard.js');await provisionalCue();
+  const steps=History.stack.length,keys=State.keymap;
+  try{
+    State.tracks[0].locked=locked;State.keymap={shift_timecode:[{key:'p'}]};
+    Media.displayTime.mockReturnValue(locked?2:1);
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'p',bubbles:true,cancelable:true}));
+    window.dispatchEvent(new KeyboardEvent('keyup',{key:'p',bubbles:true}));
+    expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true});expect(History.stack).toHaveLength(steps);
+  }finally{State.keymap=keys;}
+});
+it.each(['blur','pointercancel','unchanged'])('provisional duration survives %s drag without a committed timing change',async action=>{
+  await provisionalCue();await timeline();const steps=History.stack.length;
+  dragCueEdge(document.querySelector('.cue-block[data-id="a"] .edge.r'),'mousedown',720);
+  dragCueEdge(window,'mousemove',400);
+  expect(State.cues[0].end).toBe(5);
+  expect(History.committedSnapshot().cues[0]).toMatchObject({end:9,_tempEnd:true});
+  if(action==='unchanged') dragCueEdge(window,'mousemove',720);
+  else window.dispatchEvent(new Event(action));
+  dragCueEdge(window,'mouseup',720);
+  expect(State.cues[0]).toMatchObject({end:9,_tempEnd:true});expect(History.stack).toHaveLength(steps);
+  Subtitles.selectCue('b');expect(State.cues.find(cue=>cue.id==='a').end).toBe(3);
+});
+it('unchanged or locked batch duration leaves the provisional end available for later completion',async()=>{
+  const SubIO=await import('../src/subio.js');await provisionalCue();const steps=History.stack.length;
+  document.getElementById('tcShiftSel').value='sel';document.getElementById('durAdjPctInput').value='100';SubIO.applyDurAdjPct();
+  expect(State.cues[0]).toMatchObject({end:9,_tempEnd:true});expect(History.stack).toHaveLength(steps);
+  State.tracks[0].locked=true;document.getElementById('durAdjPctInput').value='50';SubIO.applyDurAdjPct();
+  expect(State.cues[0]).toMatchObject({end:9,_tempEnd:true});expect(History.stack).toHaveLength(steps);
+});
+it.each(['確認套用','取消'])('overwrite duration proposal consumes provisional ownership only after %s',async action=>{
+  await provisionalCue();
+  State.cues.push({id:'covered',start:3,end:4,text:'background subtitle',track:0});History.record('背景新增');
+  State.overwriteMode=true;State.overwriteKeep=false;
+  try{
+    await timeline();const steps=History.stack.length;
+    dragCueEdge(document.querySelector('.cue-block[data-id="a"] .edge.r'),'mousedown',720);
+    dragCueEdge(window,'mousemove',400);dragCueEdge(window,'mouseup',400);
+    expect(document.getElementById('modalTitle').textContent).toBe('拖曳會覆蓋字幕');
+    expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({end:9,_tempEnd:true});expect(History.stack).toHaveLength(steps);
+    click(action);
+    if(action==='取消'){
+      expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({end:9,_tempEnd:true});expect(State.cues.some(cue=>cue.id==='covered')).toBe(true);
+      expect(History.stack).toHaveLength(steps);
+    }else{
+      Subtitles.selectCue('b');expect(State.cues.find(cue=>cue.id==='a').end).toBe(5);
+      expect(State.cues.some(cue=>cue.id==='covered')).toBe(false);expect(History.stack).toHaveLength(steps+1);
+      History.undo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({end:9,_tempEnd:true});expect(State.cues.some(cue=>cue.id==='covered')).toBe(true);
+      History.redo();expect(State.cues.find(cue=>cue.id==='a').end).toBe(5);expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();
+    }
+  }finally{State.overwriteMode=false;State.overwriteKeep=false;}
+});
 it('normal preview drag excludes coordinates from snapshots and commits one undoable change',async()=>{
   const parent=await subtitleDrag();const before=History.committedSnapshot().cues[0].style;expect(before).toEqual({color:'#ff0000'});
   parent.dispatchEvent(new MouseEvent('pointerup',{bubbles:true}));expect(History.stack).toHaveLength(2);expect(State.cues[0].style.posX).toBe(60);

@@ -11,7 +11,9 @@ const { buildDeliveryArgv } = require('./export-plan');
 
 function failureProgress({ stopped = false, shutdown = false, error = null } = {}) {
   const partialCleanup = error?.code === 'PARTIAL_CLEANUP_FAILED'
-    || error?.watchdogResult?.cleanup?.retainedLease;
+    || error?.watchdogResult?.cleanup?.retainedLease
+    // 成品已 commit 時沒有 cleanup；lease 釋放失敗仍必須保留可見的失敗原因。
+    || error?.watchdogResult?.release?.retainedLease;
   if (stopped) {
     if (partialCleanup) return { error: true, errorMsg: error?.message || String(error) };
     return { stopped: true };

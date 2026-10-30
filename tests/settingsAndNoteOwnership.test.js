@@ -88,3 +88,102 @@ it('restoring defaults invalidates a pending shortcut import',async()=>{
 it('latest shortcut import still installs valid normalized keys',async()=>{
  Settings.showSettingsModal();const request=await beginRead('normal.json');await finishRead(request,'Q');await document.getElementById('settingsSaveBtn').onclick();expect(State.keymap.toggle_play_pause).toEqual([{key:'q'}]);
 });
+
+async function withNoteClipboard(work){
+ const previous=Object.getOwnPropertyDescriptor(navigator,'clipboard'),requests=[];
+ Object.defineProperty(navigator,'clipboard',{configurable:true,value:{readText:vi.fn(()=>new Promise((resolve,reject)=>requests.push({resolve,reject})))}});
+ Notes.renderNotes();document.querySelector('.nt-time').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+ const input=document.querySelector('.nt-te');
+ const paste=(pointer=false)=>{
+  input.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+  const item=[...document.querySelectorAll('#ctxmenu .ci')].find(item=>item.textContent==='貼上');
+  if(pointer){
+   const event=new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0});item.dispatchEvent(event);
+   // jsdom 不實作滑鼠預設焦點轉移；未防止時走 Chromium 的輸入框失焦路徑。
+   if(!event.defaultPrevented) input.blur();
+  }
+  item.click();
+ };
+ try{await work({input,paste,requests});}
+ finally{if(previous)Object.defineProperty(navigator,'clipboard',previous);else delete navigator.clipboard;}
+}
+it('timecode clipboard completion preserves a newer draft and its actual note History',async()=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste();input.value='00:00:03:00';input.setSelectionRange(11,11);input.dispatchEvent(new Event('input',{bubbles:true}));
+  requests[0].resolve('00:00:02:00');await Promise.resolve();
+  expect(input.value).toBe('00:00:03:00');key(input,'Enter');
+  expect(State.notes[0].time).toBe(3);expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.notes[0].time).toBe(1);History.redo();expect(State.notes[0].time).toBe(3);
+ });
+});
+it('timecode clipboard completion cannot redirect a paste to a newer selection',async()=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste();input.setSelectionRange(6,8);requests[0].resolve('00:00:02:00');await Promise.resolve();
+  expect(input.value).toBe('00:00:01:00');expect(input.selectionStart).toBe(6);expect(input.selectionEnd).toBe(8);
+  key(input,'Enter');expect(State.notes[0].time).toBe(1);expect(History.stack).toHaveLength(1);
+ });
+});
+it('latest timecode clipboard request wins when reads finish in reverse order',async()=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste();paste();requests[1].resolve('00:00:03:00');await Promise.resolve();
+  requests[0].resolve('00:00:02:00');await Promise.resolve();
+  expect(input.value).toBe('00:00:03:00');key(input,'Enter');expect(State.notes[0].time).toBe(3);expect(History.stack).toHaveLength(2);
+ });
+});
+it('timecode clipboard pointer selection preserves the inline editor until pasted time is accepted',async()=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste(true);expect(document.querySelector('.nt-te')).toBe(input);
+  requests[0].resolve('00:00:02:00');await Promise.resolve();key(input,'Enter');
+  expect(State.notes[0].time).toBe(2);expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.notes[0].time).toBe(1);
+ });
+});
+it.each(['replace','partial','same-value'])('accepted timecode clipboard %s keeps expected selection and note commit semantics',async mode=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  const changed=vi.fn();input.addEventListener('input',changed);
+  if(mode==='partial')input.setSelectionRange(6,8);
+  paste(true);requests[0].resolve(mode==='partial'?'02':mode==='same-value'?'00:00:01:00':'00:00:02:00');await Promise.resolve();
+  expect(input.value).toBe(mode==='same-value'?'00:00:01:00':'00:00:02:00');
+  expect(input.selectionStart).toBe(mode==='partial'?8:11);expect(input.selectionEnd).toBe(input.selectionStart);
+  expect(changed).toHaveBeenCalledOnce();key(input,'Enter');
+  expect(State.notes[0].time).toBe(mode==='same-value'?1:2);expect(History.stack).toHaveLength(mode==='same-value'?1:2);
+ });
+});
+it.each(['Escape','blur','replace'])('timecode clipboard completion after %s cannot edit the next inline session',async action=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste();
+  if(action==='Escape')key(input,'Escape');else if(action==='blur')input.blur();else Notes.renderNotes();
+  expect(input.isConnected).toBe(false);
+  document.querySelector('.nt-time').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));const current=document.querySelector('.nt-te');
+  current.value='00:00:03:00';requests[0].resolve('00:00:02:00');await Promise.resolve();
+  expect(input.value).toBe('00:00:01:00');expect(current.value).toBe('00:00:03:00');
+  key(current,'Enter');expect(State.notes[0].time).toBe(3);expect(History.stack).toHaveLength(2);
+ });
+});
+it('a later edit returning to the original timecode still cancels the old clipboard request',async()=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste();
+  for(const value of ['00:00:03:00','00:00:01:00']){input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));}
+  input.select();requests[0].resolve('00:00:02:00');await Promise.resolve();
+  expect(input.value).toBe('00:00:01:00');key(input,'Enter');expect(State.notes[0].time).toBe(1);expect(History.stack).toHaveLength(1);
+ });
+});
+it.each(['readOnly','disabled'])('timecode clipboard cannot write after the input becomes %s',async property=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste();input[property]=true;requests[0].resolve('00:00:02:00');await Promise.resolve();
+  expect(input.value).toBe('00:00:01:00');expect(History.stack).toHaveLength(1);
+ });
+});
+it('rejecting a newer timecode clipboard read does not revive the older paste and permits retry',async()=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste();paste();requests[1].reject(new Error('clipboard denied'));await Promise.resolve();
+  requests[0].resolve('00:00:02:00');await Promise.resolve();expect(input.value).toBe('00:00:01:00');
+  paste();requests[2].resolve('00:00:03:00');await Promise.resolve();key(input,'Enter');
+  expect(State.notes[0].time).toBe(3);expect(History.stack).toHaveLength(2);
+ });
+});
+it('ordinary context menus keep their existing pointer focus behavior',()=>{
+ Menus.showCtx(0,0,[{label:'普通選單',act:()=>{}}]);
+ const event=new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0});document.querySelector('#ctxmenu .ci').dispatchEvent(event);
+ expect(event.defaultPrevented).toBe(false);
+});

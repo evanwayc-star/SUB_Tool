@@ -26,6 +26,15 @@ function shortcutHandlers(root, fsModule = fs) {
   return { load: () => handlers.get('keys:load')(), save: data => handlers.get('keys:save')({}, data) };
 }
 
+function settingsConsumers(settingsFile, fsModule = fs) {
+  const source = fs.readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8');
+  const directories = source.slice(source.indexOf('let _lastDirs = null;'), source.indexOf("ipcMain.handle('dialog:openMedia'"));
+  const recent = source.slice(source.indexOf('function loadRecentProjects()'), source.indexOf("ipcMain.handle('project:recentList'"));
+  return vm.runInNewContext(`${directories}\n${recent}\n({ lastDir, rememberDir, loadRecentProjects, saveRecentProjects })`, {
+    settingsFile, fs: fsModule, path,
+  });
+}
+
 function fixture(contents, fsModule = fs) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-settings-file-'));
   roots.push(root);
@@ -44,6 +53,99 @@ afterEach(() => {
 });
 
 describe('settings.json 的同步寫入交易', () => {
+  it('最近專案暫時讀取失敗不能當空清單覆寫，之後開啟可重新加入', async () => {
+    const previous = [{ path: path.resolve('previous.subtool'), name: 'previous', at: 1 }];
+    let reads = 0, faults = 0;
+    const injected = { ...fs, readFileSync(...args) {
+      if (reads++ === 0) {
+        faults++;
+        throw Object.assign(new Error('settings temporarily locked'), { code: 'EACCES' });
+      }
+      return fs.readFileSync(...args);
+    } };
+    const { root, settings } = fixture(JSON.stringify({ recentProjects: previous, safeFrame: true }), injected);
+    const helpers = settingsConsumers(settings);
+    const file = path.join(root, 'fresh.subtool');
+    fs.writeFileSync(file, JSON.stringify({ cues: [] }));
+    const workspace = createProjectWorkspace({
+      readFile: value => fs.promises.readFile(value),
+      readRecent: helpers.loadRecentProjects,
+      writeRecent: helpers.saveRecentProjects,
+    });
+    await expect(workspace.open(file)).resolves.toMatchObject({ path: file });
+    expect(faults).toBe(1);
+    expect(settings.read()).toEqual({ recentProjects: previous, safeFrame: true });
+    await workspace.open(file);
+    expect(settings.read().recentProjects.map(entry => entry.path)).toEqual([file, previous[0].path]);
+  });
+
+  it('對話框目錄讀取失敗不快取空值，下一次開窗會重讀', () => {
+    let reads = 0, faults = 0;
+    const injected = { ...fs, readFileSync(...args) {
+      if (reads++ === 0) {
+        faults++;
+        throw Object.assign(new Error('settings temporarily locked'), { code: 'EACCES' });
+      }
+      return fs.readFileSync(...args);
+    } };
+    const { root, filePath, settings } = fixture(null, injected);
+    fs.writeFileSync(filePath, JSON.stringify({ lastDirs: { media: root } }));
+    const helpers = settingsConsumers(settings);
+    expect(helpers.lastDir('media')).toBeUndefined();
+    expect(faults).toBe(1);
+    expect(helpers.lastDir('media')).toBe(root);
+  });
+
+  it('移除不存在的最近專案前讀取失敗，保留完整清單供之後重試', async () => {
+    let reads = 0, faults = 0, armed = false;
+    const injected = { ...fs, readFileSync(...args) {
+      if (armed && ++reads === 2) {
+        faults++;
+        throw Object.assign(new Error('settings temporarily locked'), { code: 'EACCES' });
+      }
+      return fs.readFileSync(...args);
+    } };
+    const { root, filePath, settings } = fixture(null, injected);
+    const previous = ['missing', 'kept'].map(name => ({ path: path.join(root, `${name}.subtool`), name, at: 1 }));
+    fs.writeFileSync(filePath, JSON.stringify({ recentProjects: previous }));
+    fs.writeFileSync(previous[1].path, JSON.stringify({ cues: [] }));
+    const helpers = settingsConsumers(settings);
+    const workspace = createProjectWorkspace({
+      readFile: value => fs.promises.readFile(value),
+      stat: value => fs.promises.stat(value),
+      readRecent: helpers.loadRecentProjects,
+      writeRecent: helpers.saveRecentProjects,
+    });
+    const [missing] = await workspace.listRecent();
+    armed = true;
+    await expect(workspace.openRecent(missing.token)).resolves.toBeNull();
+    expect(faults).toBe(1);
+    expect(settings.read().recentProjects).toEqual(previous);
+    armed = false;
+    await workspace.openRecent(missing.token);
+    expect(settings.read().recentProjects).toEqual([previous[1]]);
+  });
+
+  it('記住新對話框目錄時從實際設定合併，保留暫時讀不到的其他種類', () => {
+    let reads = 0, faults = 0;
+    const injected = { ...fs, readFileSync(...args) {
+      if (reads++ === 0) {
+        faults++;
+        throw Object.assign(new Error('settings temporarily locked'), { code: 'EACCES' });
+      }
+      return fs.readFileSync(...args);
+    } };
+    const { root, filePath, settings } = fixture(null, injected);
+    const previous = { project: root, media: path.join(root, 'previous') };
+    fs.writeFileSync(filePath, JSON.stringify({ lastDirs: previous, safeFrame: true }));
+    const helpers = settingsConsumers(settings);
+    helpers.rememberDir('media', path.join(root, 'fresh.mp4'));
+    expect(faults).toBe(1);
+    expect(reads).toBeGreaterThan(1);
+    expect(settings.read()).toEqual({ lastDirs: { ...previous, media: root }, safeFrame: true });
+    expect(helpers.lastDir('project')).toBe(root);
+  });
+
   it.each(['partial-write', 'rename'])('快捷鍵 IPC 遇到 %s 失敗保留先前設定並可再次儲存', failure => {
     const { root } = fixture();
     const file = path.join(root, 'key.json');

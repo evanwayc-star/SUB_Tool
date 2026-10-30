@@ -82,6 +82,8 @@ Windows 的同步與非同步實體路徑核對都使用 native realpath，將 8
 
 `settings-file.js` 分別持有 settings.json 與 key.json。更新先寫相鄰暫存檔，再 rename；解析失敗須先保存 `.corrupt-*` 原始 bytes，無法備份就拒絕覆寫。失敗須傳回 caller，不能把 false 視為保存成功。設定位置與驗收隔離方式見[CDP 流程](開發與驗證.md#3-真機驗證cdp)。
 
+最近專案讀取失敗只允許暫時顯示空清單，不取得新增或移除項目的合併資格；之後讀取成功才更新，避免以空值覆寫已保存清單。對話框目錄讀錯不快取空物件，記住新目錄時從交易內的 `current.lastDirs` 合併，成功後才更新顯示快取，保留其他種類的開檔目錄。
+
 ## 3. Preload／IPC 介面
 
 以下逐條對應目前三份 preload。一般呼叫是 `invoke`／Promise；標為「事件」者是 main→renderer 訂閱，標為 `send` 者沒有 invoke 回覆。新增通道須同步更新 main 的准入、preload、契約／安全測試及本表。
@@ -179,9 +181,9 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `seek(time, options)` | `mpv:seek` | 來源秒數、exact |
 | `present(time, options)` | `mpv:present` | exact、waitForFrame、tolerance、frameTarget／frameStart／frameDuration |
 | `cancelPresent()` | `mpv:cancelPresent` | 撤銷待完成呈現 |
-| `loadfile(path)` | `mpv:loadfile` | 已授權來源切換 |
+| `loadfile(path)` | `mpv:loadfile` | 已授權來源切換；以命令回覆的 playlist entry ID 配對載入事件及路徑，舊來源事件不能完成新切換；回覆不代表首幀已呈現 |
 | `screenshot(path)` | `mpv:screenshot` | main 再驗輸出路徑，等待實際擷取 |
-| `play()` | `mpv:play` | 播放 |
+| `play()` | `mpv:play` | 等待播放命令成功 ACK；命令錯誤、逾時或斷線會拒絕，ACK 不代表畫格已呈現 |
 | `pause()` | `mpv:pause` | 暫停 |
 | `direction(value)` | `mpv:direction` | 播放方向 |
 | `mute(value)` | `mpv:mute` | 等待靜音命令成功 ACK；失敗／斷線不能宣稱聲音已交接 |
@@ -247,6 +249,8 @@ Callback 包裝不把 Electron event 交給頁面。部分 API 替換舊 listene
 
 Runtime 接受 probe 結果，建立 720p 預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。
 
+舊式 `ffmpeg:proxy`、`ffmpeg:extractAudio`、`ffmpeg:waveAudio` 的未交接輸出由 `produceTemporaryFile()` 持有：在私有暫存根以 `wx` 保留檔案，記錄 dev／ino，等待 writer 結束。整項工作失敗時只清除仍屬本次的檔案；extract 的 copy→AAC 退路屬同一交易，不在中間失敗時清檔。成功才交出路徑，沿用 renderer 清理；清理失敗保留原錯誤及既有退出保底，已確認同名外來檔則不延續本交易的逐檔清理登記。這不改變應用程式退出時回收自身私有暫存根的既有生命週期。
+
 來源證據包含完整路徑、size／mtime／ctime／dev／ino 及前／中／尾段取樣。讀取前後核對檔案身分，來源途中替換或截斷即拒絕。這不是整檔 checksum，也不授權路徑。各 owner 仍持有自己的 namespace、規格與 capability／realpath 檢查；`source-v3` 隔離未依影片時鐘對齊的舊 intake。
 
 跨電腦重用保留上述本機 key 與原快取目錄，完成紀錄保存可攜來源證據 `sourceContent`（`source-v3-sha256`、size、完整內容 SHA-256）及已驗證的 `sourceKeys`。`portableSourceFingerprint()` 以固定 1 MiB buffer 非同步讀完整母素材，讀前後核對 handle 與路徑身分，逐段檢查取消；不能把原本的取樣 key 改成只看檔名或部分內容。
@@ -289,6 +293,10 @@ Writer 與每個串流 reader 分別保護快取目錄；writer 完成不能讓�
 ### 執行進度與終態
 
 stderr 以增量 UTF-8、CR／LF record 解析，保留跨 chunk 文字，結束時處理最後 record；carry 有界，原始 log 保留 bytes。執行 module 同時持有記錄檔收尾：等待串流 `close` 確認檔案已釋放，成功時再等刪除回呼，才完成工作及發布終態。寫入 `finish` 或等待期限不能代替 `close`；記錄寫入或刪除失敗仍保留原生執行結果。
+
+Direct FFmpeg 的每次執行以獨立隨機名稱及 `wx` 建立記錄，避免同毫秒同類工作混寫或互刪。只有已實際開啟、關閉並保留的失敗記錄，才經 `onLogRetained` 授予該份 `.log` 的系統開啟資格；不授予整個 userData 或一般讀寫能力。成功工作不取得此資格，既有交付佇列的持久記錄路徑維持不變。
+
+記錄檔若未成功開啟，例如 `wx` 遇到同名外來檔，執行器不得讀取、刪除、授權或以 `LOG_PATH` 發布該路徑；診斷僅使用本次 stderr 與開檔錯誤。記錄失敗不改變原生工作的成功／失敗判定。
 
 `done:true` 只表示結束，成功須有 `outcome:'success'`，失敗為 `failed`。有標記的 intake 由 runtime 統一附上 sessionId／requestId，包括 native 中間進度、cache hit、提交與 stream 終態；renderer 只接目前仍持有的工作。stream 的 ready Promise 不可提前清掉仍在執行的工作狀態。其他直接作業如 extractAudio 的 `a0` 進度有自己的 caller，不能被 intake 的 session 篩選誤吞。
 
@@ -335,6 +343,8 @@ Windows 的 `spawnExportWatchdog()` 使用 `detached`，讓 watchdog 在主程�
 有 PID 後的 `error` 可能是終止失敗，須持續等 close；`exit` 或重複 error 不得提早清檔／釋放 lease。只有未取得 PID 的啟動失敗可立即收尾。Controller `ready` 失敗與 `completion` 分開：程序已啟動時，即使 owner 寫入讓 ready 拒絕，completion 仍等 standalone 收尾或程序結束，runner 保留 active 與 ASS／TC 輸入。
 
 停止先持久化完整 stopped journal，記憶體維持 stopping 到 runner 結束。寫停止意圖失敗要回 running，不能先停 native。測試 adapter 只由可信 Node 注入，不得由 renderer 或持久化工作指定可載入模組。
+
+停止不掩蓋未完成的檔案收尾：stage 清理或成品提交後 lease 釋放失敗，佇列都保留 failed 與原錯誤。即使正式成品已存在，也不能將仍持鎖的工作報成正常 stopped；只有提交及釋鎖均完成後，才依成功結果裁定 done。
 
 真正退出依序封閉准入，等 direct FFmpeg、probe、intake、PCM、辨識壓縮、cache owner 及 queue 屏障，再清暫存。若屏障失敗，恢復可恢復 owner；queue 等原交易收尾後 `cancelShutdown()`，不安全中止過的工作維持暫停。截圖清理須先於不可逆的 intake close，避免退出失敗後已有 HTTP Proxy、截圖或轉檔入口永久失效。
 

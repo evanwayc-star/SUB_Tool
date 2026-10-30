@@ -87,6 +87,26 @@ function restorationFixture({ desktop = true, material = {}, ...adapters } = {})
 }
 
 describe('ProjectLoadSession media restoration completion', () => {
+  it('保留持久資料不重用取消的舊還原；晚到資源清理只作用於舊實體', async () => {
+    const source={audioSourceId:'same-source',path:'audio.wav',in:1,out:3,offset:5};
+    const f=restorationFixture({material:{externalAudioSources:[source]}});
+    const oldResult=deferred(),oldStarted=deferred();
+    const oldAsset={...source,id:'old-asset'},newAsset={...source,id:'new-asset'};
+    f.media.restoreExternalAudioSource.mockImplementationOnce(async()=>{
+      oldStarted.resolve();await oldResult.promise;f.live.push(oldAsset);return oldAsset;
+    }).mockImplementationOnce(async()=>{f.live.push(newAsset);return newAsset;});
+    const old=f.session.restoreMedia(f.generation,{kind:'audio'});
+    await oldStarted.promise;
+    const generation=f.session.begin({preserveMaterial:true}),plan=f.session.activePlan;
+    expect(f.plan.owns()).toBe(false);expect(plan.owns()).toBe(true);
+    await expect(f.session.restoreMedia(generation,{kind:'audio'})).resolves.toBe(true);
+    oldResult.resolve();await expect(old).resolves.toBe(false);
+    expect(f.live).toEqual([newAsset]);
+    expect(f.media.removeExternalAudio).toHaveBeenCalledExactlyOnceWith('old-asset',{record:false});
+    expect(f.finishProject).toHaveBeenCalledOnce();
+    expect(f.publishExternalSources).toHaveBeenCalledExactlyOnceWith([newAsset]);
+  });
+
   it.each(['load','ready','images'])('缺播放點的 %s 首次可呈現時定位 timeline 0，只發一次且不強制播放',async kind=>{
     const f=restorationFixture({material:{playhead:null}});
     f.media.seqOn=()=>kind!=='images';
