@@ -19,14 +19,15 @@ function children(bytes,start=0,end=bytes.length){
 /* A sparse sample-table oracle: tiny moov, identifiable video byte ranges,
    and six long constant-size PCM streams. Codec decoding is not substituted
    or exercised here; only Range delivery varies from the public caller. */
-function fixture({video=true,audioCount=6,large=true,timing=null,unregisteredVideo=false,unsupportedStream=-1,tailMoov=false,secondVideo=false,audioCodec='twos'}={}){
+function fixture({video=true,audioCount=6,large=true,timing=null,unregisteredVideo=false,unsupportedStream=-1,tailMoov=false,secondVideo=false,audioCodec='twos',reorderedChunks=false}={}){
   const file=createFile();file.init({brands:['iso4'],timescale:1000,duration:7434833});
   let nextId=1;
   if(video){
     const id=file.addTrack({id:nextId++,type:'avc3',hdlr:'vide',width:64,height:36,timescale:2400,duration:167,media_duration:400});
     const table=file.getTrackById(id).mdia.minf.stbl;
-    table.stsz.sample_size=0;table.stsz.sample_sizes=[4,5,6,7];table.stco.chunk_offsets=[4096];
-    table.stsc.first_chunk=[1];table.stsc.samples_per_chunk=[4];table.stsc.sample_description_index=[1];
+    table.stsz.sample_size=0;table.stsz.sample_sizes=[4,5,6,7];
+    table.stco.chunk_offsets=reorderedChunks?[4101,4096,4112,4105]:[4096];
+    table.stsc.first_chunk=[1];table.stsc.samples_per_chunk=[reorderedChunks?1:4];table.stsc.sample_description_index=[1];
     table.stts.sample_counts=[4];table.stts.sample_deltas=[100];
   }
   if(secondVideo){
@@ -114,6 +115,22 @@ function fixture({video=true,audioCount=6,large=true,timing=null,unregisteredVid
 }
 
 describe('compact MOV metadata through actual MP4Box and public callers',()=>{
+  it('MP4 chunk 的檔案位置不同於解碼順序時，串流仍交出每顆完整樣本',async()=>{
+    const resource=fixture({reorderedChunks:true,audioCount:0});
+    const raw=await demuxIndex(resource.url);
+    expect(raw.index.map(sample=>sample.offset)).toEqual([4101,4096,4112,4105]);
+    expect(raw.index.map(sample=>sample.timestamp)).toEqual([0,41667,83333,125000]);
+    const reader=new SampleReader(resource.url,raw.index,raw.maxEnd);
+    try{
+      reader.ensure(0);
+      await vi.waitFor(()=>expect(reader.data(0)).not.toBeNull());
+      raw.index.forEach((sample,index)=>{
+        expect(Buffer.from(reader.data(index))).toEqual(resource.prefix.subarray(sample.offset,sample.offset+sample.size));
+      });
+      expect(resource.reads.at(-1)).toEqual({start:4096,end:4118});
+    }finally{reader.dispose();}
+  });
+
   it('a second registered video never replaces the first native ProRes source clock or frame',async()=>{
     const resource=fixture({unregisteredVideo:true,secondVideo:true,audioCount:0});
     const raw=await demuxIndex(resource.url);

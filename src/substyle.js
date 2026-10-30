@@ -22,6 +22,7 @@
 ============================================================================== */
 "use strict";
 import { State } from './state.js';
+import { emit } from './events.js';
 
 /* 樣式欄位與預設值（軌道級；逐句覆蓋為其子集）。
    舊專案/既有軌道缺欄位時由 effStyle 後援——newTrack 不需要加欄位、零遷移。 */
@@ -445,6 +446,7 @@ const LS_KEY = 'subtool.subPresets';
 let _presets = null; // [{name, style:{...軌道級欄位子集}}]（僅使用者自訂；內建的不存檔）
 let _presetsLoading = null;
 let _presetsRevision = 0;
+let _presetsSaveOwner = null;
 export function validPresetList(value){
   const record = entry => entry && typeof entry === 'object' && !Array.isArray(entry);
   return (Array.isArray(value) ? value : []).filter(p => record(p)
@@ -471,6 +473,7 @@ export async function loadPresets(){
     // 載入只擁有開始時的樣式庫；期間的新儲存也撤銷舊資料的遷移寫回。
     if(revision !== _presetsRevision) return getPresets();
     _presets = validPresetList(loaded);
+    _presetsSaveOwner = null;
     // 缺少 group 的舊名稱與新版合法的連字號名稱同形，載入不可猜測並改寫 identity。
     return _presets;
   })().finally(()=>{ _presetsLoading = null; });
@@ -481,21 +484,43 @@ export function getPresets(){ return _presets || []; }        // 僅使用者自
    呼叫端據此隱藏改名／刪除。 */
 export function getAllPresets(){ return [...BUILTIN_PRESETS, ...(_presets || [])]; }
 export function isBuiltinPresetName(name){ return BUILTIN_PRESETS.some(p => p.name === name); }
-export function savePresets(list){
-  _presetsRevision++;
-  _presets = validPresetList(list).filter(p => !isBuiltinPresetName(p.name)); // 內建的永不寫進使用者清單
+/* 已接受的樣式同步可見，後續新增及 Project.apply 才能保留它們。
+   互動保存失敗只撤回仍由自己擁有的快照；連續失敗須略過失敗的前手。
+   Project.apply 的同步合併不回滾。main 的 config:save 同步寫入，回覆可倒序；
+   modal 關閉只撤銷 UI 回覆，不撤回樣式庫已接受的保存。 */
+export async function savePresets(list, { rollbackOnFailure = false } = {}){
+  ++_presetsRevision;
+  const next = validPresetList(list).filter(p => !isBuiltinPresetName(p.name));
+  const previous = _presetsSaveOwner || {presets:_presets,status:'success'};
+  const owner = {presets:next,status:'pending',rollbackOnFailure,previous:rollbackOnFailure ? previous : null};
+  _presets = next; _presetsSaveOwner = owner;
+  emit('presets:changed');
+  const failed = () => {
+    owner.status = 'failed';
+    if(_presetsSaveOwner === owner){
+      let restore = owner;
+      while(restore.status === 'failed' && restore.rollbackOnFailure) restore = restore.previous;
+      _presets = restore.presets; _presetsSaveOwner = restore;
+      emit('presets:changed');
+    }
+    return {ok:false,reason:'save-failed'};
+  };
   try{
     const DESK = window.subtool;
-    if(DESK && DESK.configSave) DESK.configSave({ subPresets: _presets });
-    else localStorage.setItem(LS_KEY, JSON.stringify(_presets));
-  }catch(e){}
+    if(DESK && DESK.configSave) {
+      if (await DESK.configSave({ subPresets: next }) !== true) return failed();
+    } else localStorage.setItem(LS_KEY, JSON.stringify(next));
+  }catch(e){ return failed(); }
+  owner.status = 'success'; owner.previous = null;
+  if (_presetsSaveOwner !== owner) return {ok:false,reason:'changed'};
+  return {ok:true,presets:next};
 }
 
 /* 單筆確認只重寫它的 key；持久化會複製物件，所以用原始 key＋內容辨識，
    不把其他工作在確認期間新增的樣式庫內容回放成舊快照。 */
 export function capturePresetUpdate(preset){
   const key=presetIdentity(preset),original=JSON.stringify(preset);
-  return patch=>{
+  return async patch=>{
     const current=getPresets(),index=current.findIndex(p=>presetIdentity(p)===key);
     if(index<0 || JSON.stringify(current[index])!==original) return {ok:false,reason:'changed'};
     const replacement={...current[index],...patch};
@@ -503,8 +528,7 @@ export function capturePresetUpdate(preset){
     if(isBuiltinPresetName(replacement.name) || current.some((p,i)=>i!==index && presetIdentity(p)===presetIdentity(replacement)))
       return {ok:false,reason:'name-conflict'};
     const next=[...current]; next[index]=replacement;
-    savePresets(next);
-    return {ok:true};
+    return savePresets(next, {rollbackOnFailure:true});
   };
 }
 /* ---- 字幕字型（v4.25.4）：桌面版掃 <專案根>/font/，以 FontFace 註冊供預覽；

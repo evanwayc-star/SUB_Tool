@@ -68,6 +68,8 @@ Save As 的媒體路徑必須已有讀權。`createAtomicProjectWriter()` 同時
 
 路徑准入依呼叫順序非同步定位，再以實體父目錄與檔名排同目標 FIFO；別名與原路徑不能讓較舊內容晚到覆蓋。不同已准入目標仍可並行寫入。最後少量 metadata 核對、rename 及清理沒有 JavaScript await 缺口，內容寫入仍非同步；這是多次檔案系統呼叫的身分核對，不是 OS 級目錄 handle 的原子沙箱。成功才更新目前專案、重連與近期清單。最近項目以穩定 token 開啟，清單重排不改變原點選目標；清除後 token 失效。重連只接受同名一般檔案，不把目錄當媒體。
 
+Windows 的同步與非同步實體路徑核對都使用 native realpath，將 8.3 短檔名展開為相同表示，再比較目錄與檔案身分。短名與長名指向同一目錄時不能誤拒保存；也不能只為名稱相同就省略 dev／ino 或連結檢查。
+
 ### 本機資源 URL
 
 一般媒體與字型使用 `subtool-local:` capability URL。隨機 token 對應精確檔案；每次讀取仍核對 token、目前 `canExposeFileURL()`、方法、一般檔案及 Range。token 不是整目錄或永久授權，不以關閉 `webSecurity` 解決載入問題。

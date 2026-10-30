@@ -115,6 +115,23 @@ describe('格線起點', () => {
 });
 
 describe('視窗規劃', () => {
+  it('倒序或交錯位址的視窗仍涵蓋完整樣本，並依實際跨度切分', () => {
+    const index = [12, 4, 20, 0, 8, 16].map(offset => ({ offset, size: 4 }));
+    for (const winBytes of [4, 8, 12, 24]) {
+      for (let i = 0; i < index.length; i++) {
+        const { from, to } = planWindow(index, i, { winBytes });
+        const range = windowByteRange(index, from, to, 24);
+        expect(range.end - range.base).toBeLessThanOrEqual(winBytes);
+        for (const sample of index.slice(from, to)) {
+          expect(range.base).toBeLessThanOrEqual(sample.offset);
+          expect(range.end).toBeGreaterThanOrEqual(sample.offset + sample.size);
+        }
+        expect(i).toBeGreaterThanOrEqual(from);
+        expect(i).toBeLessThan(to);
+      }
+    }
+  });
+
   it('位元組寬鬆時就是整個格子，且相鄰游標共用同一個視窗', () => {
     const { index } = makeIndex({ n: 500, size: 1000 });
     expect(planWindow(index, 0)).toEqual({ from: 0, to: WIN_SAMPLES });
@@ -241,6 +258,13 @@ describe('視窗的位元組區間', () => {
 
 describe('樣本在視窗內的位移', () => {
   const win = { from: 10, to: 20, base: 15000 };
+
+  it('不完整範圍不能由 subarray 的負索引或截短規則冒充樣本', () => {
+    const bytes = new Uint8Array(8);
+    for (const sample of [{ offset: 96, size: 4 }, { offset: 104, size: 5 }]) {
+      expect(sliceBounds([sample], 0, { from: 0, to: 1, base: 100, bytes })).toBeNull();
+    }
+  });
 
   it('位移是 offset − base', () => {
     const { index } = makeIndex({ n: 100, size: 1000, offset0: 5000 });

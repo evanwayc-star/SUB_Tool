@@ -100,6 +100,114 @@ function presetImportPicker(channel) {
 }
 
 describe('常用樣式 module 的工作歸屬', () => {
+  it.each(['false','reject'])('匯入保存 %s 不假報成功，仍可重新匯入', async failure => {
+    const save = vi.fn().mockImplementationOnce(() => failure==='reject' ? Promise.reject(new Error('disk unavailable')) : Promise.resolve(false)).mockResolvedValue(true);
+    window.subtool = {configSave:save};
+    const begin = presetImportPicker('desktop');
+    click('#tsPresetMgr');
+    const data=JSON.stringify([{name:'匯入樣式',style:{fontSize:80}}]);
+    await begin().finish(data);
+    await vi.waitFor(()=>expect(document.getElementById('toast').textContent).toContain('儲存失敗'));
+    expect(styles.getPresets()).toEqual([]);
+    await begin().finish(data);
+    await vi.waitFor(()=>expect(document.getElementById('toast').textContent).toContain('已匯入 1'));
+    expect(styles.getPresets()[0].name).toBe('匯入樣式');
+  });
+
+  it.each(['rename','folder','delete','delete-folder'])('%s 保存失敗維持原資料與操作資格，重試才成功', async action => {
+    const original=[{name:'原名稱',group:'A',style:{fontSize:30}}];
+    styles.savePresets(original);
+    window.subtool = {configSave:vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true)};
+    vi.stubGlobal('confirm',()=>true);
+    click('#tsPresetMgr');
+    if(action==='rename') { click('[data-pre-ren]'); document.getElementById('__presetNameRen').value='新名稱'; }
+    if(action==='folder') { click('[data-pre-ren-grp]'); document.getElementById('__presetFolderRen').value='B'; }
+    const submit=()=>click(action==='delete' ? '[data-pre-del]' : action==='delete-folder' ? '[data-pre-del-grp]' : '#modalFoot .primary');
+    submit();
+    await vi.waitFor(()=>expect(document.getElementById('toast').textContent).toContain('儲存失敗'));
+    expect(styles.getPresets()).toEqual(original);
+    submit();
+    await vi.waitFor(()=>expect(window.subtool.configSave).toHaveBeenCalledTimes(2));
+    await vi.waitFor(()=>expect(styles.getPresets()).not.toEqual(original));
+    if(action==='rename') expect(styles.getPresets()[0].name).toBe('新名稱');
+    if(action==='folder') expect(styles.getPresets()[0].group).toBe('B');
+    if(action.startsWith('delete')) expect(styles.getPresets()).toEqual([]);
+  });
+
+  it('舊刪除失敗後已重開的管理清單同步還原索引，不誤套用別筆樣式', async () => {
+    styles.savePresets([{name:'A',style:{fontSize:30}},{name:'B',style:{fontSize:90}}]);
+    const pending=deferred(); window.subtool={configSave:()=>pending.promise};
+    click('#tsPresetMgr'); click('[data-pre-del="0"]');
+    ui.closeModal(); click('#tsPresetMgr');
+    expect(document.querySelector('[data-pre-edit="0"]').parentElement.textContent).toContain('B');
+    ui.showToast('新視窗'); pending.resolve(false);
+    await vi.waitFor(()=>expect(document.querySelector('[data-pre-edit="0"]').parentElement.textContent).toContain('A'));
+    expect(document.getElementById('toast').textContent).toBe('新視窗');
+    click('[data-pre-apply="1"]');
+    expect(state.tracks[0].fontSize).toBe(30);
+  });
+
+  it.each(['rename','folder'])('%s 保存期間的新輸入保留，舊完成不關閉而下一次可保存新名稱', async action => {
+    styles.savePresets([{name:'原名稱',group:'A',style:{fontSize:30}}]);
+    const pending=deferred(); window.subtool={configSave:vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(true)};
+    click('#tsPresetMgr'); click(action==='rename' ? '[data-pre-ren]' : '[data-pre-ren-grp]');
+    const input=document.getElementById(action==='rename' ? '__presetNameRen' : '__presetFolderRen');
+    input.value='第一次'; click('#modalFoot .primary');
+    input.value='第二次'; pending.resolve(true);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(input.isConnected).toBe(true); expect(input.value).toBe('第二次');
+    click('#modalFoot .primary');
+    await vi.waitFor(()=>expect(document.getElementById('modalTitle').textContent).toContain('常用樣式管理'));
+    expect(styles.getPresets()[0][action==='rename' ? 'name' : 'group']).toBe('第二次');
+  });
+
+  it('草稿保存期間的新編輯不被舊完成套用或關閉，下一次完成保存新草稿', async () => {
+    styles.savePresets([{name:'對白',style:{fontSize:30}}]); state.tracks=[{...styles.STYLE_DEFAULTS,fontSize:30}];
+    const pending=deferred();
+    window.subtool={configSave:vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(true)};
+    click('#tsPresetMgr'); click('[data-pre-edit]');
+    const draft=state.presetEdit; draft.draft.fontSize=48; click('#tsEditDone');
+    syncDraft(); expect(state.presetEdit).toBe(draft);
+    draft.draft.fontSize=66; pending.resolve(true);
+    await vi.waitFor(()=>expect(draft.saving).toBe(false));
+    expect(state.presetEdit).toBe(draft); expect(state.tracks[0].fontSize).toBe(30);
+    expect(styles.getPresets()[0].style.fontSize).toBe(48);
+    click('#tsEditDone'); await vi.waitFor(()=>expect(state.presetEdit).toBeNull());
+    expect(styles.getPresets()[0].style.fontSize).toBe(66); expect(state.tracks[0].fontSize).toBe(66);
+  });
+
+  it.each(['cancel','workspace'])('草稿保存已接受後 %s 不撤回庫保存，晚到完成不改新工作區或提示', async action => {
+    styles.savePresets([{name:'對白',style:{fontSize:30}}]); state.tracks=[{...styles.STYLE_DEFAULTS,fontSize:30}];
+    const pending=deferred(); window.subtool={configSave:()=>pending.promise};
+    click('#tsPresetMgr'); click('[data-pre-edit]');
+    state.presetEdit.draft.fontSize=48; click('#tsEditDone');
+    if(action==='cancel') click('#tsEditCancel');
+    else { state.tracks=[{fontSize:20}]; state.cues=[]; syncDraft(); }
+    ui.showToast('新工作'); pending.resolve(true);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(styles.getPresets()[0].style.fontSize).toBe(48);
+    expect(state.tracks[0].fontSize).toBe(action==='cancel' ? 30 : 20);
+    expect(document.getElementById('toast').textContent).toBe('新工作');
+  });
+
+  it('草稿持久化失敗不更新字幕、不假報成功，保留草稿供重試', async () => {
+    styles.savePresets([{name:'對白',style:{fontSize:30}}]);
+    state.tracks = [{...styles.STYLE_DEFAULTS,fontSize:30}];
+    window.subtool = {configSave:vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true)};
+    click('#tsPresetMgr'); click('[data-pre-edit]');
+    const draft = state.presetEdit;
+    draft.draft.fontSize = 48;
+    click('#tsEditDone');
+    await vi.waitFor(() => expect(document.getElementById('toast').textContent).toContain('儲存失敗'));
+    expect(styles.getPresets()[0].style.fontSize).toBe(30);
+    expect(state.tracks[0].fontSize).toBe(30);
+    expect(state.presetEdit).toBe(draft);
+    click('#tsEditDone');
+    await vi.waitFor(() => expect(state.presetEdit).toBeNull());
+    expect(styles.getPresets()[0].style.fontSize).toBe(48);
+    expect(state.tracks[0].fontSize).toBe(48);
+  });
+
   it.each(['web','desktop'])('同一樣式視窗 %s 較晚完成的舊匯入不能覆寫較新匯入', async channel => {
     const begin = presetImportPicker(channel);
     click('#tsPresetMgr');
@@ -292,12 +400,13 @@ describe('常用樣式 module 的工作歸屬', () => {
     expect(document.getElementById('tsEditBar').hidden).toBe(true);
   });
 
-  it('有效草稿仍能一次完成 preset 與其原有軌道', () => {
+  it('有效草稿仍能一次完成 preset 與其原有軌道', async () => {
     styles.savePresets([{name:'對白',style:{fontSize:30}}]);
     state.tracks = [{...styles.STYLE_DEFAULTS,fontSize:30}];
     click('#tsPresetMgr'); click('[data-pre-edit]');
     state.presetEdit.draft.fontSize=48;
     click('#tsEditDone');
+    await vi.waitFor(() => expect(state.presetEdit).toBeNull());
     expect(styles.getPresets()[0].style.fontSize).toBe(48);
     expect(state.tracks[0].fontSize).toBe(48);
   });

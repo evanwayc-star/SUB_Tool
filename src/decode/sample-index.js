@@ -58,12 +58,16 @@ export function gridStart(i, winSamples = WIN_SAMPLES) {
   return Math.floor(i / winSamples) * winSamples;
 }
 
-/** 從 `from` 起、不超過 `limit`、累計位元組不超過 `winBytes` 的終點（不含）。 */
+/** 從 `from` 起、不超過 `limit`、實際位元組跨度不超過 `winBytes` 的終點（不含）。 */
 function endWithin(index, from, limit, winBytes) {
   let to = limit;
-  const base = index[from].offset;
+  let base = index[from].offset, end = base + index[from].size;
   for (let i = from + 1; i < to; i++) {
-    if (index[i].offset + index[i].size - base > winBytes) { to = i; break; }
+    // 解碼順序不保證 chunk 的檔案位址遞增；向前及向後的跨度都計入預算。
+    const nextBase = Math.min(base, index[i].offset);
+    const nextEnd = Math.max(end, index[i].offset + index[i].size);
+    if (nextEnd - nextBase > winBytes) { to = i; break; }
+    base = nextBase; end = nextEnd;
   }
   /* 至少收一顆。兩個理由，第二個比較嚴重：
      ① 單顆樣本自己就超過 winBytes 時仍須抓得動，否則那顆永遠讀不到、播放停在該處；
@@ -74,7 +78,7 @@ function endWithin(index, from, limit, winBytes) {
 
 /**
  * 視窗終點（不含）。從**格線起點** `from` 起最多 `winSamples` 顆，
- * 且累計位元組不超過 `winBytes`。
+ * 且實際位元組跨度不超過 `winBytes`。
  */
 export function windowEnd(index, from, { winSamples = WIN_SAMPLES, winBytes = WIN_BYTES } = {}) {
   return endWithin(index, from, Math.min(from + winSamples, index.length), winBytes);
@@ -110,12 +114,16 @@ export function planWindow(index, i, { winSamples = WIN_SAMPLES, winBytes = WIN_
  * moov／free 之類的 box，多抓沒有意義，而且有些來源對超出檔尾的 Range 會回 416。
  */
 export function windowByteRange(index, from, to, maxEnd) {
-  const last = index[to - 1];
-  return { base: index[from].offset, end: Math.min(last.offset + last.size, maxEnd) };
+  let base = Infinity, end = 0;
+  for (let i = from; i < to; i++) {
+    base = Math.min(base, index[i].offset);
+    end = Math.max(end, index[i].offset + index[i].size);
+  }
+  return { base, end: Math.min(end, maxEnd) };
 }
 
 /**
- * 樣本 i 的位元組在視窗 `win`（含 from／to／base）內的位置；不在這個視窗裡回 null。
+ * 樣本 i 的位元組在視窗 `win`（含 from／to／base）內的位置；越界或已知 bytes 不完整時回 null。
  *
  * 位移是 `offset − base` 而不是把樣本大小累加起來——樣本在 mdat 裡未必連續
  * （交錯的音訊樣本就夾在中間），累加會整段偏掉。
@@ -124,7 +132,10 @@ export function sliceBounds(index, i, win) {
   if (!win || i < win.from || i >= win.to) return null;
   const s = index[i];
   const off = s.offset - win.base;
-  return { off, end: off + s.size };
+  const end = off + s.size;
+  if (!Number.isSafeInteger(off) || off < 0 || !Number.isSafeInteger(end) || end <= off
+    || (win.bytes && end > win.bytes.byteLength)) return null;
+  return { off, end };
 }
 
 /** LRU：把 from 移到最新。回傳新的順序陣列（原陣列不動）。 */

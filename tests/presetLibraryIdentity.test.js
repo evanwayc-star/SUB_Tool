@@ -64,6 +64,71 @@ afterEach(() => {
 });
 
 describe('常用樣式公開操作的 identity 保全', () => {
+  it.each(['false','reject'])('公開存為常用保存 %s 保留輸入，重試後才關閉並回報成功', async failure => {
+    window.subtool={configSave:vi.fn().mockImplementationOnce(()=>failure==='reject' ? Promise.reject(new Error('disk unavailable')) : Promise.resolve(false)).mockResolvedValue(true)};
+    document.getElementById('tsPresetSave').click();
+    document.getElementById('__presetName').value='新常用';
+    clickModal('儲存');
+    await vi.waitFor(()=>expect(document.getElementById('toast').textContent).toContain('儲存失敗'));
+    expect(Styles.getPresets()).toEqual([]);
+    expect(document.getElementById('__presetName').value).toBe('新常用');
+    clickModal('儲存');
+    await vi.waitFor(()=>expect(document.getElementById('toast').textContent).toContain('已儲存常用樣式'));
+    expect(Styles.getPresets()[0].name).toBe('新常用');
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+  });
+
+  it('兩次公開新增保存回覆倒序，第二次磁碟快照保留第一個已接受樣式', async () => {
+    const replies=[]; let disk=[];
+    window.subtool={configSave:vi.fn(patch=>{disk=structuredClone(patch.subPresets);return new Promise(resolve=>replies.push(resolve));})};
+    document.getElementById('tsPresetSave').click(); document.getElementById('__presetName').value='A'; clickModal('儲存');
+    clickModal('取消');
+    document.getElementById('tsPresetSave').click(); document.getElementById('__presetName').value='B'; clickModal('儲存');
+    expect(disk.map(p=>p.name)).toEqual(['A','B']);
+    replies[1](true);
+    await vi.waitFor(()=>expect(document.getElementById('toast').textContent).toContain('已儲存常用樣式：B'));
+    replies[0](true); await Promise.resolve(); await Promise.resolve();
+    expect(Styles.getPresets()).toEqual(disk);
+    expect(document.getElementById('toast').textContent).toContain('已儲存常用樣式：B');
+  });
+
+  it('覆蓋確認保存失敗保留原樣式與確認資格，重試只提交一次', async () => {
+    Styles.savePresets([{name:'已有樣式',style:{fontSize:30}}]);
+    window.subtool={configSave:vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true)};
+    document.getElementById('tsPresetSave').click(); document.getElementById('__presetName').value='已有樣式'; clickModal('儲存');
+    clickModal('覆蓋'); clickModal('覆蓋');
+    await vi.waitFor(()=>expect(document.getElementById('toast').textContent).toContain('儲存失敗'));
+    expect(window.subtool.configSave).toHaveBeenCalledOnce();
+    expect(Styles.getPresets()[0].style.fontSize).toBe(30);
+    expect(document.getElementById('modalTitle').textContent).toBe('名稱已存在');
+    clickModal('覆蓋'); await vi.waitFor(()=>expect(document.getElementById('modalBg').classList.contains('show')).toBe(false));
+    expect(Styles.getPresets()[0].style.fontSize).toBe(100);
+    expect(window.subtool.configSave).toHaveBeenCalledTimes(2);
+  });
+
+  it('已接受新增在舊視窗關閉後失敗，目前管理清單立即移除該樣式', async () => {
+    let finish; window.subtool={configSave:()=>new Promise(resolve=>{finish=resolve;})};
+    document.getElementById('tsPresetSave').click(); document.getElementById('__presetName').value='未保存'; clickModal('儲存');
+    document.getElementById('tsPresetMgr').click();
+    expect(document.querySelector('[data-pre-del="0"]')).not.toBeNull();
+    UI.showToast('目前管理視窗'); finish(false);
+    await vi.waitFor(()=>expect(document.querySelector('[data-pre-del="0"]')).toBeNull());
+    expect(Styles.getPresets()).toEqual([]);
+    expect(document.getElementById('modalTitle').textContent).toContain('常用樣式管理');
+    expect(document.getElementById('toast').textContent).toBe('目前管理視窗');
+  });
+
+  it('保存期間輸入新名稱不被舊完成關閉，第二次仍能新增新名稱', async () => {
+    let finish; window.subtool={configSave:vi.fn().mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;})).mockResolvedValue(true)};
+    document.getElementById('tsPresetSave').click(); document.getElementById('__presetName').value='A'; clickModal('儲存');
+    document.getElementById('__presetName').value='B'; finish(true);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
+    expect(document.getElementById('__presetName').value).toBe('B');
+    clickModal('儲存'); await vi.waitFor(()=>expect(document.getElementById('modalBg').classList.contains('show')).toBe(false));
+    expect(Styles.getPresets().map(p=>p.name)).toEqual(['A','B']);
+  });
+
   it.each([30, 77])('完成草稿保留較新貼上的樣式欄位（貼上字級 %s）', async pastedSize => {
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => new Proxy({
@@ -81,11 +146,13 @@ describe('常用樣式公開操作的 identity 保全', () => {
     History.reset();
     setSelection({ kind: 'sub', ids: ['clipboard'] }); copySelectedStyle();
     setSelection({ kind: 'sub', ids: ['target'] });
+    StylePanelController.renderTrackStyle();
     document.getElementById('tsPresetMgr').click();
     document.querySelector('[data-pre-edit="0"]').click();
     State.presetEdit.draft.fontSize = 48;
     pasteStyleToSelected();
     document.getElementById('tsEditDone').click();
+    await vi.waitFor(() => expect(State.presetEdit).toBeNull());
 
     expect(Styles.getPresets()[0].style.fontSize).toBe(48);
     expect(State.tracks[0].fontSize).toBe(48);
@@ -130,13 +197,14 @@ describe('常用樣式公開操作的 identity 保全', () => {
     expect(State.cues[0].style.fontSize).toBe(120);
   });
 
-  it('沒有同名衝突時仍可合併資料夾，兩筆選项各自套用正確樣式', () => {
+  it('沒有同名衝突時仍可合併資料夾，兩筆選项各自套用正確樣式', async () => {
     Styles.savePresets([
       { name: '中文', group: 'A', style: { fontSize: 40 } },
       { name: '英文', group: 'B', style: { fontSize: 120 } },
     ]);
     StylePanelController.renderTrackStyle();
     renameFolder('A', 'B');
+    await vi.waitFor(() => expect(document.getElementById('modalTitle').textContent).toContain('常用樣式管理'));
     expect(Styles.getPresets().map(item => [item.group, item.name])).toEqual([['B', '中文'], ['B', '英文']]);
     UI.closeModal({ committed: true });
     applyPreset('B', '中文');

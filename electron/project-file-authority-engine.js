@@ -254,7 +254,10 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
       }
     };
     const checkSync = () => {
-      if (canonical(fsModule.realpathSync(anchor)) !== canonical(root)) throw unsafe();
+      // promises.realpath 使用 native 解析；同步核對也須展開 Windows 8.3 短名，
+      // 不能把同一實體目錄的短／長拼法誤判成替換。下方身分與連結檢查仍保留。
+      const resolve = fsModule.realpathSync.native || fsModule.realpathSync;
+      if (canonical(resolve(anchor)) !== canonical(root)) throw unsafe();
       for (const parent of parents) {
         const current = statIfPresentSync(parent.file);
         if (!current?.isDirectory() || current.isSymbolicLink() || !sameFile(current, parent.owner)) throw unsafe();

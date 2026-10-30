@@ -431,7 +431,7 @@ let _tsSetTarget = null;
   });
   // 常用樣式庫：存 / 套用 / 管理（跨專案，存 config）
   // 正常模式只接受已選取字幕；編輯常用樣式時則寫入明確建立的 draft，不再默默回退到整軌。
-  $('tsPresetSave').addEventListener('click',async()=>{
+  $('tsPresetSave').addEventListener('click',()=>{
     const t=styleTarget(); if(!t)return;
     const curSt = effStyle(t.cue, t.trk);
     const isSameAsDefault = Object.keys(STYLE_DEFAULTS).every(k => 
@@ -442,12 +442,23 @@ let _tsSetTarget = null;
       return;
     }
     
+    let saving = false;
+    async function doSave(session, write, name, ownsInput = () => true) {
+      if(!session.isCurrent() || saving) return;
+      saving = true;
+      const result = await write();
+      saving = false;
+      if(!session.isCurrent()) return;
+      if(!result.ok || result.presets !== getPresets()) {
+        showToast(result.reason === 'save-failed' ? '常用樣式儲存失敗，請重試' : '樣式庫已變更，請重新確認儲存');
+        return;
+      }
+      renderTrackStyle(); refreshStyleSummaries();
+      if(!ownsInput()) return;
+      showToast('已儲存常用樣式：'+name);
+      session.close({committed:true});
+    }
     function promptSaveModal(defGroup, defName) {
-      return new Promise(resolve => {
-        let done = false;
-        const finish = (res) => { if(done)return; done = true; session.close({committed:res!==null}); resolve(res); };
-        const cancel = () => { if(done)return; done=true; resolve(null); };
-        
         const groups = [...new Set(getPresets().filter(p=>p.group).map(p=>p.group))];
         const groupOpts = groups.map(g => `<option value="${escapeHTML(g)}">`).join('');
         
@@ -459,52 +470,32 @@ let _tsSetTarget = null;
           `<input type="text" id="__presetName" value="${escapeHTML(defName)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
           [
             { label: '儲存', primary: true, act: () => {
+              if(!session.isCurrent() || saving) return;
               const grp = ($('__presetGroup')?.value || '').trim();
               const nm = ($('__presetName')?.value || '').trim();
               if(!nm) { showToast('名稱不可為空'); return; }
-              finish({ group: grp, name: nm });
+              if(isBuiltinPresetName(nm)){ showToast('這是內建樣式的保留名稱，請換一個'); return; }
+              const list=getPresets();
+              const existing=list.find(p=>p.name===nm && (p.group||'')===grp);
+              const style=styleSnapshot(curSt);
+              if(existing) {
+                const update=capturePresetUpdate(existing);
+                const confirmSession=openModal('名稱已存在', `<div style="padding:6px 2px">「${escapeHTML(nm)}」已經存在此資料夾中，您要覆蓋現有的樣式，還是換別的名字？</div>`, [
+                  {label:'覆蓋',primary:true,act:()=>doSave(confirmSession,()=>update({style}),nm)},
+                  {label:'換別的名字',act:()=>{if(confirmSession.isCurrent() && !saving) promptSaveModal(grp,nm);}},
+                  {label:'取消',act:()=>confirmSession.close()},
+                ]);
+              } else {
+                doSave(session,()=>savePresets([...getPresets(),{name:nm,group:grp,style}],{rollbackOnFailure:true}),nm,
+                  ()=>($('__presetName')?.value || '').trim()===nm && ($('__presetGroup')?.value || '').trim()===grp);
+              }
             }},
-            { label: '取消', act: () => finish(null) }
-          ], {onDismiss:cancel,onReplaced:cancel}
+            { label: '取消', act: () => session.close() }
+          ]
         );
         setTimeout(() => { if(!session.isCurrent()) return; const el = $('__presetName'); if(el){ el.focus(); el.select(); } }, 30);
-      });
     }
-
-    async function trySave(defGroup, defName) {
-      const res = await promptSaveModal(defGroup, defName);
-      if(!res) return;
-      const { group: grp, name: nm } = res;
-      if(isBuiltinPresetName(nm)){ showToast('這是內建樣式的保留名稱，請換一個'); return trySave(grp, defName); }
-      
-      const list=[...getPresets()];
-      const exIdx = list.findIndex(p => p.name === nm && (p.group||'') === grp);
-      const update=exIdx>=0 ? capturePresetUpdate(list[exIdx]) : null;
-      
-      const doSave = (finalGroup, finalName) => {
-        const style=styleSnapshot(curSt);
-        if(update) {
-          const result=update({name:finalName,group:finalGroup,style});
-          if(!result.ok){ showToast('樣式庫已變更，請重新確認儲存'); return false; }
-        } else {
-          savePresets([...getPresets(),{name:finalName,group:finalGroup,style}]);
-        }
-        renderTrackStyle(); refreshStyleSummaries(); showToast('已儲存常用樣式：'+finalName);
-        return true;
-      };
-
-      if(exIdx >= 0) {
-        const session=openModal('名稱已存在', `<div style="padding:6px 2px">「${escapeHTML(nm)}」已經存在此資料夾中，您要覆蓋現有的樣式，還是換別的名字？</div>`, [
-          { label: '覆蓋', primary: true, act: () => { if(session.isCurrent() && doSave(grp,nm)) session.close({committed:true}); } },
-          { label: '換別的名字', act: () => { if(!session.isCurrent()) return; session.close(); trySave(grp, nm); } },
-          { label: '取消', act: () => session.close() }
-        ]);
-      } else {
-        doSave(grp, nm);
-      }
-    }
-    
-    trySave('', t.trk.name+' 樣式');
+    promptSaveModal('', t.trk.name+' 樣式');
   });
   $('tsPresetSel').addEventListener('change',e=>{
     const t=styleTarget(), v=e.target.value; e.target.value='';

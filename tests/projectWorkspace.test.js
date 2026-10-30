@@ -5,14 +5,24 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const { createProjectWorkspace, createAtomicProjectWriter } = require('../electron/project-file-authority-engine.js');
 const tempRoots = [];
+const realpath = fs.realpathSync.native;
+
+function createTempRoot(kind = 'save') {
+  // Windows CI 的 TEMP 可含 RUNNER~1；fault injection 必須比對與 writer 相同的實體路徑。
+  const root = realpath(fs.mkdtempSync(path.join(os.tmpdir(), `subtool-project-${kind}-`)));
+  tempRoots.push(root);
+  return root;
+}
+
 afterEach(() => {
-  const parent = fs.realpathSync(os.tmpdir());
+  const parent = realpath(os.tmpdir());
   for (const root of tempRoots.splice(0)) {
-    const actual = fs.realpathSync(root);
+    const actual = realpath(root);
     if (path.dirname(actual) !== parent || !path.basename(actual).startsWith('subtool-project-')) {
       throw new Error('拒絕清除未驗證的專案測試目錄');
     }
@@ -79,8 +89,7 @@ describe('project workspace', () => {
   });
 
   it('實際寫出的 UTF-16 專案仍可原樣開啟，中文電腦名稱與 JSON 字元不損毀', async () => {
-    const root=fs.mkdtempSync(path.join(os.tmpdir(),'subtool-project-metadata-'));
-    tempRoots.push(root);
+    const root=createTempRoot('metadata');
     const file=path.join(root,'專案.subtool');
     const document={cues:[{text:'原字幕'}],version:3};
     const computerName='剪輯室-電腦 "A"';
@@ -95,9 +104,33 @@ describe('project workspace', () => {
     expect(fs.readFileSync(file)).toEqual(buffer);
   });
 
+  it.runIf(process.platform === 'win32').each([false, true])('實際 Windows 8.3 短名可保存完整專案，備份=%s', async (backup, context) => {
+    const root = createTempRoot('short-name');
+    const shortRoot = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
+      + '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:SUBTOOL_PROJECT_TEST_ROOT).ShortPath'], {
+      env: { ...process.env, SUBTOOL_PROJECT_TEST_ROOT: root },
+      encoding: 'utf8', windowsHide: true, timeout: 10000,
+    }).trim();
+    if (shortRoot.toLowerCase() === root.toLowerCase()) context.skip('此磁碟沒有提供 8.3 短檔名');
+    expect(realpath(shortRoot)).toBe(root);
+    expect(await fsp.realpath(shortRoot)).toBe(root);
+    const relative = backup ? path.join('.subtool_AutoSave', '備份.subtool') : '專案.subtool';
+    const selected = path.join(shortRoot, relative);
+    const document = { version: 3, cues: [{ text: '短名路徑的字幕𠮷😀' }] };
+    const workspace = createProjectWorkspace({ readFile: fsp.readFile,
+      writeFile: createAtomicProjectWriter(), canReadMedia: () => true });
+    await expect(workspace.writeRendererProject(selected, bytes(document).toString('base64'), { ensureParent: backup }))
+      .resolves.toBe(selected);
+    const saved = fs.readFileSync(path.join(root, relative));
+    expect([...saved.subarray(0, 2)]).toEqual([0xff, 0xfe]);
+    expect(JSON.parse(saved.subarray(2).toString('utf16le'))).toEqual(document);
+    expect(Buffer.from((await workspace.open(selected)).b64, 'base64')).toEqual(saved);
+    expect(fs.readdirSync(root)).toEqual([backup ? '.subtool_AutoSave' : '專案.subtool']);
+  });
+
   it.each(['utf8', 'utf16le', 'utf16be'])('舊 %s 專案儲存與備份一律寫 UTF-16LE BOM，沒有識別資訊 adapter 也保留內容', async encoding => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-encoding-'));
-    tempRoots.push(root);
+    const root = createTempRoot('encoding');
     const document = { app: 'SUB Tool', version: 3, tracks: [{ name: '字幕𠮷😀' }],
       cues: [{ text: '繁體中文\n罕字𠮷及 emoji 😀', start: 1, end: 2 }],
       media: { path: 'C:/素材/𠮷😀.mov' } };
@@ -142,8 +175,7 @@ describe('project workspace', () => {
   });
 
   it('temp 名稱已存在時不能刪掉其他工作擁有的檔案', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const file = path.join(root, 'edit.subtool');
     const temporary = file + '.collision.tmp';
     fs.writeFileSync(file, '原專案');
@@ -155,8 +187,7 @@ describe('project workspace', () => {
   });
 
   it('備份目錄含連結時拒絕寫入，保留連結另一端的既有資料', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const selected = path.join(root, 'selected');
     const other = path.join(root, 'other');
     fs.mkdirSync(selected); fs.mkdirSync(other);
@@ -173,8 +204,7 @@ describe('project workspace', () => {
   });
 
   it('寫入模組完整準備正常備份目錄，再以 UTF-16LE 原子發布專案', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const file = path.join(root, '.subtool_AutoSave', 'nested', '備份.subtool');
     const document = { cues: [{ text: '中文𠮷😀' }] };
     const workspace = createProjectWorkspace({ readFile: fsp.readFile,
@@ -188,8 +218,7 @@ describe('project workspace', () => {
   });
 
   it.each(['open', 'sync', 'close'])('備份父目錄在 %s 等待期間換成其他實體時拒絕發布，只回收自己的暫存', async stage => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const backup = path.join(root, '.subtool_AutoSave');
     const retained = path.join(root, 'retained-backup');
     fs.mkdirSync(backup);
@@ -229,8 +258,7 @@ describe('project workspace', () => {
   });
 
   it('私有暫存同名路徑被替換後，不發布也不清除其他檔案', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const file = path.join(root, 'edit.subtool');
     fs.writeFileSync(file, '原專案');
     const writer = createAtomicProjectWriter({ createToken: () => 'owned', fsModule: {
@@ -260,8 +288,7 @@ describe('project workspace', () => {
   });
 
   it('既有專案共用 hardlink 時只替換所選名稱，不改其他檔案內容', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const selected = path.join(root, 'selected.subtool');
     const other = path.join(root, 'other.subtool');
     fs.writeFileSync(other, '其他檔案的原始內容');
@@ -272,8 +299,7 @@ describe('project workspace', () => {
   });
 
   it.each(['write', 'rename'])('原子保存 %s 失敗保留原專案，不提交授權或最近記錄', async stage => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const file = path.join(root, 'edit.subtool');
     const original = bytes({ cues: [{ text: '原專案' }] });
     fs.writeFileSync(file, original);
@@ -302,8 +328,7 @@ describe('project workspace', () => {
   });
 
   it('同目標並行保存依提交順序發佈完整 bytes', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const file = path.join(root, 'edit.subtool');
     const first = deferred();
     const started = deferred();
@@ -326,8 +351,7 @@ describe('project workspace', () => {
   });
 
   it('實體目標與所選目錄別名指向同一檔案時，也依呼叫順序發布', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const real = path.join(root, 'real');
     const alias = path.join(root, 'alias');
     fs.mkdirSync(real);
@@ -355,8 +379,7 @@ describe('project workspace', () => {
   });
 
   it('最後非同步目錄查驗回覆後有變更時，不把備份發布到替換的資料夾', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
-    tempRoots.push(root);
+    const root = createTempRoot();
     const backup = path.join(root, '.subtool_AutoSave');
     const retained = path.join(root, 'retained-backup');
     fs.mkdirSync(backup);

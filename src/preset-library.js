@@ -9,10 +9,18 @@ import { recordHistory } from './history.js';
 import { renderVideoSub, refreshMpvSubs } from './video-renderer.js';
 import { escapeHTML, downloadBytes, bytesToB64, b64ToBytes, encodeUTF16LE, decodeText, readFile } from './util.js';
 import { presetExportRelativePath, allocateExportFileNames } from './export-job-engine.js';
+import { on } from './events.js';
 
 export function initPresetLibrary({ styleChanged }){
   let managerSession = null;
+  let managerPresets = null;
   let importRevision = 0;
+  let managerSaving = null;
+  const acceptSave = result => {
+    if (result.ok && result.presets === getPresets()) return true;
+    showToast(result.reason === 'save-failed' ? '常用樣式儲存失敗，請重試' : '樣式庫已變更，請重新確認');
+    return false;
+  };
   const ownsDraft = draft => draft.ownerTracks === State.tracks && draft.ownerCues === State.cues
     && getPresets()[draft.ui] === draft.preset
     && draft.targets.tracks.every(i => State.tracks[i] === draft.trackOwners[i])
@@ -30,6 +38,7 @@ export function initPresetLibrary({ styleChanged }){
     `border:1px solid rgba(255,255,255,.2);${st.outline>0?`text-shadow:0 0 2px ${escapeHTML(st.outlineColor)},0 0 2px ${escapeHTML(st.outlineColor)};`:''}">字</span>`;
   function _renderPresetMgr(session = managerSession){
     if (!session?.isCurrent()) return;
+    managerPresets = getPresets();
     // 清單＝內建（第一筆，不可改名／刪除）＋使用者自訂
     const list=getAllPresets();
     const body=$('modalBody'); if(!body)return;
@@ -88,6 +97,11 @@ export function initPresetLibrary({ styleChanged }){
       (getPresets().length?'':`<div style="color:var(--text-faint);font-size:12px;padding:10px 2px">尚未建立自訂樣式——在樣式面板調好後按「☆ 存為常用」即可新增。</div>`)+
       `</div>`;
   }
+  // 保存/回滾屬於樣式庫；即使舊 dialog 已關閉，目前清單也不能保留失效索引。
+  on('presets:changed', () => {
+    if(managerPresets !== getPresets()) _renderPresetMgr();
+    StylePanelController.renderTrackStyle(); refreshStyleSummaries();
+  });
   const openPresetMgr = () => {
     const session = openModal('⚙ 常用樣式管理','',[{label:'關閉',primary:true,act:()=>session.close()}]);
     managerSession = session;
@@ -112,14 +126,25 @@ export function initPresetLibrary({ styleChanged }){
     $('tsEditBar').hidden=false; $('tsEditName').textContent=p.name;
     styleChanged();
   }
-  function _presetEditEnd(save){
+  async function _presetEditEnd(save){
     const E=State.presetEdit; if(!E)return;
     if (!ownsDraft(E)) { revokeDraft(); styleChanged(); showToast('編輯對象已變更，已取消樣式草稿'); return; }
-    const draft = E.draft;
-    State.presetEdit=null; $('tsEditBar').hidden=true;      // 先清旗標，StylePanelController.styleTarget 才回正常行為
-    if(!save || !draft){ styleChanged(); showToast('已取消編輯'); return; }
-    const list=[...getPresets()]; const p=list[E.ui];
-    if(p){ p.style=draft; savePresets(list); }
+    if(!save || !E.draft){ revokeDraft(); styleChanged(); showToast('已取消編輯'); return; }
+    if(E.saving) return;
+    const draft = {...E.draft};
+    const originalPreset = E.preset;
+    E.saving = true;
+    const pending = capturePresetUpdate(E.preset)({style:draft});
+    E.preset = getPresets()[E.ui];
+    const result = await pending;
+    E.saving = false;
+    if(State.presetEdit !== E) return;
+    if(!result.ok && getPresets()[E.ui] === originalPreset) E.preset = originalPreset;
+    if(!ownsDraft(E)){ revokeDraft(); styleChanged(); showToast('編輯對象已變更，已取消樣式草稿'); return; }
+    if(!acceptSave(result)) return;
+    // 保存期間仍可調整預覽；舊快照完成不能結束或套用較新的草稿。
+    if(JSON.stringify(E.draft) !== JSON.stringify(draft)) return;
+    revokeDraft(); // 回到一般樣式目標後，才同步原本符合樣式的字幕。
     // 只同步草稿改過、而目前仍保有原值的欄位；貼上樣式等較新提交保有權威。
     const changed = Object.keys(STYLE_DEFAULTS).filter(key => draft[key] !== E.old[key]);
     const ownedPatch = current => Object.fromEntries(changed
@@ -162,9 +187,10 @@ export function initPresetLibrary({ styleChanged }){
     const impB=e.target.closest('#preImportBtn');
 
     if(renGrpB) {
-      const oldG = renGrpB.dataset.preRenGrp;
-      const finish = save => {
-        if (!session.isCurrent()) return;
+      let oldG = renGrpB.dataset.preRenGrp;
+      let saving = false;
+      const finish = async save => {
+        if (!session.isCurrent() || saving) return;
         const newG = ($('__presetFolderRen')?.value || '').trim();
         if (save && newG && newG !== oldG) {
           const current = getPresets();
@@ -174,7 +200,13 @@ export function initPresetLibrary({ styleChanged }){
             return;
           }
           const list = current.map(p => (p.group || '') === oldG ? { ...p, group:newG } : p);
-          savePresets(list); StylePanelController.renderTrackStyle(); refreshStyleSummaries();
+          saving = true;
+          const result = await savePresets(list, {rollbackOnFailure:true});
+          saving = false;
+          if(!session.isCurrent() || !acceptSave(result)) return;
+          oldG = newG;
+          StylePanelController.renderTrackStyle(); refreshStyleSummaries();
+          if(($('__presetFolderRen')?.value || '').trim() !== newG) return;
         }
         session.close({committed:true}); openPresetMgr();
       };
@@ -186,15 +218,20 @@ export function initPresetLibrary({ styleChanged }){
     }
 
     if(delGrpB){
+      if(managerSaving === owner) return;
       const grp = delGrpB.dataset.preDelGrp;
       if (confirm(`確定要刪除「${grp}」資料夾以及裡面所有的樣式嗎？\n\n（注意：刪除後無法復原）`)) {
         const l = getPresets().filter(p => p.group !== grp);
-        savePresets(l); StylePanelController.renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); showToast('已刪除資料夾：' + grp);
+        managerSaving = owner;
+        const result = await savePresets(l, {rollbackOnFailure:true});
+        if(managerSaving === owner) managerSaving = null;
+        if(!owner.isCurrent() || !acceptSave(result)) return;
+        StylePanelController.renderTrackStyle(); _renderPresetMgr(owner); refreshStyleSummaries(); showToast('已刪除資料夾：' + grp);
       }
       return;
     }
 
-    function _importPresets(j, ownsImport){
+    async function _importPresets(j, ownsImport){
       if (!ownsImport()) return;
       if(!Array.isArray(j)){ showToast('檔案格式不符：非樣式陣列'); return; }
       const list = [...getPresets()];
@@ -208,7 +245,9 @@ export function initPresetLibrary({ styleChanged }){
         }
       });
       if(count>0){
-        savePresets(list); _renderPresetMgr(); StylePanelController.renderTrackStyle(); refreshStyleSummaries();
+        const result = await savePresets(list, {rollbackOnFailure:true});
+        if(!ownsImport() || !acceptSave(result)) return;
+        _renderPresetMgr(owner); StylePanelController.renderTrackStyle(); refreshStyleSummaries();
         showToast(`已匯入 ${count} 組樣式`);
       }else{
         showToast('找不到可匯入的樣式');
@@ -267,7 +306,7 @@ export function initPresetLibrary({ styleChanged }){
               });
             } catch(e){}
           }
-          if (all.length) _importPresets(all, ownsImport);
+          if (all.length) return _importPresets(all, ownsImport);
         }).catch(error => { if(ownsImport()) showToast('匯入失敗：' + error.message); });
       }else{
         const fi=document.createElement('input'); fi.type='file'; fi.accept='.json'; fi.multiple=true;
@@ -279,7 +318,7 @@ export function initPresetLibrary({ styleChanged }){
             try { const j = JSON.parse(decodeText(await readFile(f))); if (Array.isArray(j)) all.push(...j); else all.push(j); } catch(e){}
             if (!ownsImport()) return;
           }
-          if (all.length) _importPresets(all, ownsImport);
+          if (all.length) await _importPresets(all, ownsImport);
         };
         fi.click();
       }
@@ -296,7 +335,7 @@ export function initPresetLibrary({ styleChanged }){
         styleChanged(); recordHistory('套用常用樣式：'+p.name); showToast('已套用：'+p.name); } return; }
     if(renB){
       const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;
-      const update=capturePresetUpdate(p);
+      let update=capturePresetUpdate(p), saving=false;
       const groups = [...new Set(l.filter(x=>x.group).map(x=>x.group))];
       const groupOpts = groups.map(g => `<option value="${escapeHTML(g)}">`).join('');
 
@@ -307,16 +346,22 @@ export function initPresetLibrary({ styleChanged }){
         `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">樣式名稱</div>`+
         `<input type="text" id="__presetNameRen" value="${escapeHTML(p.name)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
         [
-          { label: '儲存', primary: true, act: () => {
-            if (!session.isCurrent()) return;
+          { label: '儲存', primary: true, act: async () => {
+            if (!session.isCurrent() || saving) return;
             const nn = ($('__presetNameRen')?.value || '').trim();
             const ng = ($('__presetGroupRen')?.value || '').trim();
             if(!nn) { showToast('名稱不可為空'); return; }
             if(isBuiltinPresetName(nn)){ showToast('這是內建樣式的保留名稱，請換一個'); return; }
 
-            const result=update({name:nn,group:ng});
-            if(!result.ok){ showToast(result.reason==='name-conflict' ? '該資料夾中已有同名的樣式，請換一個名稱' : '樣式已變更，請重新開啟編輯'); return; }
+            saving=true;
+            const result=await update({name:nn,group:ng});
+            saving=false;
+            if(!session.isCurrent()) return;
+            if(result.reason==='name-conflict'){ showToast('該資料夾中已有同名的樣式，請換一個名稱'); return; }
+            if(!acceptSave(result)) return;
+            update=capturePresetUpdate(result.presets.find(item=>item.name===nn && (item.group||'')===ng));
             StylePanelController.renderTrackStyle(); refreshStyleSummaries();
+            if(($('__presetNameRen')?.value || '').trim()!==nn || ($('__presetGroupRen')?.value || '').trim()!==ng) return;
             openPresetMgr(); // 重新開啟管理視窗
           }},
           { label: '取消', act: () => { if(session.isCurrent()) openPresetMgr(); } }
@@ -325,7 +370,15 @@ export function initPresetLibrary({ styleChanged }){
       setTimeout(() => { if(!session.isCurrent())return; const el = $('__presetNameRen'); if(el){ el.focus(); el.select(); } }, 30);
       return;
     }
-    if(delB){ const l=[...getPresets()]; l.splice(+delB.dataset.preDel,1); savePresets(l); StylePanelController.renderTrackStyle(); _renderPresetMgr(); refreshStyleSummaries(); showToast('已刪除'); }
+    if(delB){
+      if(managerSaving === owner) return;
+      const l=[...getPresets()]; l.splice(+delB.dataset.preDel,1);
+      managerSaving = owner;
+      const result = await savePresets(l, {rollbackOnFailure:true});
+      if(managerSaving === owner) managerSaving = null;
+      if(!owner.isCurrent() || !acceptSave(result)) return;
+      StylePanelController.renderTrackStyle(); _renderPresetMgr(owner); refreshStyleSummaries(); showToast('已刪除');
+    }
   });
   return syncDraft;
 }

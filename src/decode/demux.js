@@ -382,7 +382,15 @@ export class SampleReader {
     w = { from, to, base, bytes: null, error:w?.error||null, controller: new AbortController() };
     this.wins.set(from, w); if(!this.order.includes(from)) this.order.push(from);
     w.promise = fetchRange(this.url, base, end, false, w.controller.signal)
-      .then(ab => { if(this.wins.get(from) === w){ w.bytes = new Uint8Array(ab);w.error=null; } })
+      .then(ab => {
+        if(this.wins.get(from) !== w) return;
+        const loaded = { ...w, bytes: new Uint8Array(ab) };
+        // Range 長度正確仍可能只覆蓋被 maxEnd 截短的樣本；完整准入後才發布。
+        for(let sample=from;sample<to;sample++){
+          if(!sliceBounds(this.index,sample,loaded)) throw new Error('樣本位元組不完整');
+        }
+        w.bytes=loaded.bytes;w.error=null;
+      })
       .catch(e => {
         // 同一位置可能已被淘汰再重抓；舊 IO 失敗不可污染新視窗。
         if(this.wins.get(from) !== w) return;

@@ -7,8 +7,9 @@ vi.mock('../src/ui.js', () => ({
 }));
 
 import { State } from '../src/state.js';
+import * as stateModule from '../src/state.js';
 import { showSettingsModal } from '../src/settings.js';
-import { showToast } from '../src/ui.js';
+import { showToast, setStatus } from '../src/ui.js';
 
 describe('快捷鍵設定視窗的匯入工作歸屬', () => {
   beforeEach(() => {
@@ -17,7 +18,77 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
     State.defaultKeymap = { toggle_play_pause: [{ key: ' ' }] };
     vi.clearAllMocks();
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    document.getElementById('settingsCancelBtn')?.click();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const recordKey = key => document.getElementById('settings-input-toggle_play_pause-0')
+    .dispatchEvent(new KeyboardEvent('keydown', { key, bubbles:true, cancelable:true }));
+
+  it('持久化失敗保留原快捷鍵與草稿，重試成功才套用及宣稱已儲存', async () => {
+    const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementationOnce(() => { throw new Error('QuotaExceeded'); });
+    showSettingsModal();
+    recordKey('q');
+    const modal = document.getElementById('settingsModal');
+    await document.getElementById('settingsSaveBtn').onclick();
+    expect(State.keymap.toggle_play_pause).toEqual([{key:' '}]);
+    expect(document.getElementById('settingsModal')).toBe(modal);
+    expect(document.getElementById('settings-input-toggle_play_pause-0').value).toBe('Q');
+    expect(document.getElementById('settingsSaveBtn').disabled).toBe(false);
+    expect(setStatus).not.toHaveBeenCalledWith('快捷鍵設定已儲存', 'ok');
+    expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('儲存失敗'), 'err');
+
+    await document.getElementById('settingsSaveBtn').onclick();
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(localStorage.getItem('subtool_keys')).toggle_play_pause).toEqual([{key:'q'}]);
+    expect(State.keymap.toggle_play_pause).toEqual([{key:'q'}]);
+    expect(document.getElementById('settingsModal')).toBeNull();
+    expect(setStatus).toHaveBeenCalledWith('快捷鍵設定已儲存', 'ok');
+  });
+
+  it.each([true, false])('送出後鎖住編輯、取消與重開，持久化結果為 %s 時保持儲存語意', async result => {
+    let resolveSave;
+    const save = vi.spyOn(stateModule, 'saveKeys').mockImplementation(() => new Promise(resolve => { resolveSave = resolve; }));
+    showSettingsModal(); recordKey('q');
+    const modal = document.getElementById('settingsModal');
+    const button = document.getElementById('settingsSaveBtn');
+    const pending = button.onclick();
+    expect(State.keymap.toggle_play_pause).toEqual([{key:' '}]);
+    expect([...modal.querySelectorAll('input, button')].every(control => control.disabled)).toBe(true);
+    expect(save).toHaveBeenCalledWith({toggle_play_pause:[{key:'q'}]});
+    await button.onclick();
+    recordKey('w');
+    document.getElementById('settingsRestoreBtn').onclick();
+    document.getElementById('settingsCancelBtn').onclick();
+    document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true}));
+    showSettingsModal();
+    expect(document.getElementById('settingsModal')).toBe(modal);
+    expect(save).toHaveBeenCalledOnce();
+    expect(document.getElementById('settings-input-toggle_play_pause-0').value).toBe('Q');
+    resolveSave(result); await pending;
+    expect(State.keymap.toggle_play_pause).toEqual([{key:result ? 'q' : ' '}]);
+    if (result) expect(document.getElementById('settingsModal')).toBeNull();
+    else {
+      expect(document.getElementById('settingsModal')).toBe(modal);
+      expect(document.getElementById('settingsSaveBtn').disabled).toBe(false);
+      expect(document.getElementById('settings-input-undo-0').disabled).toBe(true);
+      document.getElementById('settingsCancelBtn').click();
+      expect(document.getElementById('settingsModal')).toBeNull();
+    }
+  });
+
+  it('持久化意外reject也解鎖並保留草稿，不回報成功', async () => {
+    vi.spyOn(stateModule, 'saveKeys').mockRejectedValue(new Error('IPC closed'));
+    showSettingsModal(); recordKey('q');
+    await document.getElementById('settingsSaveBtn').onclick();
+    expect(State.keymap.toggle_play_pause).toEqual([{key:' '}]);
+    expect(document.getElementById('settings-input-toggle_play_pause-0').value).toBe('Q');
+    expect(document.getElementById('settingsSaveBtn').disabled).toBe(false);
+    expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('IPC closed'), 'err');
+    expect(setStatus).not.toHaveBeenCalledWith('快捷鍵設定已儲存', 'ok');
+  });
 
   it('快捷鍵 JSON 以 UTF-16LE BOM 下載，匯入後按儲存能保留中文快捷鍵', async () => {
     State.keymap = {toggle_play_pause:[{key:'中'}]};
@@ -46,7 +117,7 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
       Object.defineProperty(input, 'files', {configurable:true,value:[new File([bytes], 'keymap.json')]});
       input.dispatchEvent(new Event('change', {bubbles:true}));
       await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(expect.stringContaining('已匯入')));
-      document.getElementById('settingsSaveBtn').click();
+      await document.getElementById('settingsSaveBtn').onclick();
       expect(State.keymap.toggle_play_pause).toEqual([{key:'中'}]);
     } finally {
       anchorClick.mockRestore();
@@ -73,7 +144,7 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
     expect(document.getElementById('settings-input-toggle_play_pause-0').value).toBe('Space');
     expect(showToast).not.toHaveBeenCalledWith(expect.stringContaining('已匯入'));
 
-    document.getElementById('settingsSaveBtn').click();
+    await document.getElementById('settingsSaveBtn').onclick();
     expect(State.keymap.toggle_play_pause).toEqual([{ key: ' ' }]);
   });
 
@@ -106,7 +177,7 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
     await importing;
 
     expect(showToast).not.toHaveBeenCalledWith(expect.stringContaining('已匯入'));
-    document.getElementById('settingsSaveBtn').click();
+    await document.getElementById('settingsSaveBtn').onclick();
     expect(State.keymap.toggle_play_pause).toEqual([{ key: ' ' }]);
   });
 });

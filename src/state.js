@@ -635,8 +635,8 @@ function _migrateKeymap(km){
   delete km.confirm;
 }
 
-function saveKeys() {
-  return _settings.save('keys', State.keymap);
+function saveKeys(keymap = State.keymap) {
+  return _settings.save('keys', keymap);
 }
 
 function isSel(id){ return State.selectedIds.includes(id); }

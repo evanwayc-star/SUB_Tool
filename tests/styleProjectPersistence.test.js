@@ -163,6 +163,21 @@ describe('subtitle style project persistence', () => {
     expect(getPresets().map(p => p.style.fontSize)).toEqual([30, 44, 55]);
   });
 
+  it('Project.apply 同步合併保留尚待回覆的已接受新增，遲到保存不能抹掉專案樣式', async () => {
+    savePresets([]);
+    const replies=[]; let disk=[];
+    window.subtool.configSave=vi.fn(patch=>{disk=structuredClone(patch.subPresets);return new Promise(resolve=>replies.push(resolve));});
+    const pending=savePresets([{name:'使用者新增',style:{fontSize:30}}],{rollbackOnFailure:true});
+    const project=baseProject([{name:'Imported',fontSize:44}]);
+    project.usedPresets=[{name:'專案樣式',style:{fontSize:44}}];
+    expect(Project.apply(project)).toBe(true);
+    expect(getPresets().map(p=>p.name)).toEqual(['使用者新增','專案樣式']);
+    expect(disk).toEqual(getPresets());
+    replies[1](true); await Promise.resolve(); replies[0](true); await pending;
+    expect(getPresets()).toEqual(disk);
+    expect(effStyle(null,State.tracks[0]).fontSize).toBe(44);
+  });
+
   it('ignores malformed project preset entries while loading the valid project data', () => {
     const project = baseProject([{ name: 'Imported', fontSize: 44 }]);
     project.cues = [{ start: 0, end: 1, text: 'Kept subtitle', track: 1 }];

@@ -253,12 +253,13 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
 
 export function showSettingsModal() {
   // Closing a previous instance also releases its document-level Escape listener.
-  activeSettingsClose?.();
+  if (activeSettingsClose?.() === false) return;
   const existing = document.getElementById('settingsModal');
   if (existing) existing.remove();
 
   tempKeymap = JSON.parse(JSON.stringify(State.keymap));
   let draftRevision = 0;
+  let saving = false;
 
   const modal = document.createElement('div');
   modal.id = 'settingsModal';
@@ -292,20 +293,24 @@ export function showSettingsModal() {
   emit('mpv:sync'); // mpv 是 OS 層子視窗會蓋住本對話框，開啟期間讓 mpv 讓位
 
   const isCurrent = () => activeSettingsClose === close && document.getElementById('settingsModal') === modal;
+  const canEdit = () => isCurrent() && !saving;
   const close = () => {
+    // 已送出的儲存不能由關窗撤銷；等待結果才能丟棄草稿或開下一個視窗。
+    if (saving) return false;
     document.removeEventListener('keydown', onEsc, true);
     if (activeSettingsClose === close) activeSettingsClose = null;
     modal.remove();
     emit('mpv:sync');
+    return true;
   };
   activeSettingsClose = close;
 
   const tbody = document.getElementById('settingsTbody');
-  const renderDraft = () => renderSettingsTable(tbody, isCurrent, () => { draftRevision++; });
+  const renderDraft = () => renderSettingsTable(tbody, canEdit, () => { draftRevision++; });
   renderDraft();
 
   document.getElementById('settingsRestoreBtn').onclick = () => {
-    if (!isCurrent()) return;
+    if (!canEdit()) return;
     draftRevision++;
     tempKeymap = JSON.parse(JSON.stringify(State.defaultKeymap));
     renderDraft();
@@ -313,6 +318,7 @@ export function showSettingsModal() {
 
   // 匯出：把目前編輯中的這份 keymap 存成 json（桌面走原生存檔對話框、網頁走下載）
   document.getElementById('settingsExportBtn').onclick = async () => {
+    if (!canEdit()) return;
     const json = JSON.stringify({ _type: 'subtool-keymap', version: 1, keymap: tempKeymap }, null, 2);
     const bytes = encodeUTF16LE(json);
     const name = 'SUBTool_快捷鍵.json';
@@ -326,7 +332,7 @@ export function showSettingsModal() {
 
   // 匯入：讀 json → 驗證 → 併到預設 keymap（缺項用預設補、未知動作忽略）→ 重繪表格（需按「儲存」才寫入）
   document.getElementById('settingsImportBtn').onclick = async () => {
-    if (!isCurrent()) return;
+    if (!canEdit()) return;
     const revision = ++draftRevision;
     const ownsImport = () => isCurrent() && revision === draftRevision;
     const f = await pickFile(document.getElementById('settingsImportFile')); if (!f) return;
@@ -345,7 +351,7 @@ export function showSettingsModal() {
   /* 取消＝丟棄 tempKeymap 直接關掉（尚未寫進 State.keymap）。
      Esc 與「取消」走同一條路，不可各寫一份。 */
   const cancel = () => {
-    if (isCurrent()) close();
+    if (canEdit()) close();
   };
 
   /* 這個對話框是自己 createElement 出來的，不走 ui.js 的 openModal，
@@ -359,6 +365,7 @@ export function showSettingsModal() {
   const onEsc = (e) => {
     if (e.key !== 'Escape') return;
     if (!isCurrent()) { document.removeEventListener('keydown', onEsc, true); return; }
+    if (saving) { e.preventDefault(); e.stopPropagation(); return; }
     const t = e.target;
     if (t && t.tagName === 'INPUT' && t.closest('#settingsModal')) return; // 錄製中：讓輸入框自己 blur
     e.preventDefault();
@@ -369,11 +376,27 @@ export function showSettingsModal() {
 
   document.getElementById('settingsCancelBtn').onclick = cancel;
 
-  document.getElementById('settingsSaveBtn').onclick = () => {
-    if (!isCurrent()) return;
+  document.getElementById('settingsSaveBtn').onclick = async () => {
+    if (!canEdit()) return;
     draftRevision++;
-    State.keymap = stripEmptyBinds(tempKeymap);
-    saveKeys();
+    const keymap = stripEmptyBinds(structuredClone(tempKeymap));
+    const controls = [...modal.querySelectorAll('input, button')].map(control => ({ control, disabled:control.disabled }));
+    saving = true;
+    for (const { control } of controls) control.disabled = true;
+    setStatus('正在儲存快捷鍵…', 'busy');
+    let saved = false, error;
+    try { saved = await saveKeys(keymap); }
+    catch (failure) { error = failure; }
+    finally {
+      saving = false;
+      for (const { control, disabled } of controls) control.disabled = disabled;
+    }
+    if (!isCurrent()) return;
+    if (!saved) {
+      setStatus('快捷鍵設定儲存失敗，請重試' + (error ? '：' + (error.message || error) : ''), 'err');
+      return;
+    }
+    State.keymap = keymap;
     close();
     setStatus('快捷鍵設定已儲存', 'ok');
   };

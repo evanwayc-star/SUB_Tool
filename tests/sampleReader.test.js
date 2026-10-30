@@ -20,6 +20,38 @@ afterEach(() => {
 });
 
 describe('SampleReader byte-window ownership', () => {
+  it('非遞增樣本位址回傳各自完整 bytes，不以空陣列冒充已讀取', async () => {
+    const bytes = new Uint8Array(16).map((_, i) => i);
+    vi.stubGlobal('fetch', vi.fn(async (url, { headers }) => {
+      const [, start, last] = /^bytes=(\d+)-(\d+)$/.exec(headers.Range);
+      return new Response(bytes.slice(Number(start), Number(last) + 1), { status: 206 });
+    }));
+    const index = [4, 0, 12, 8].map(offset => ({ offset, size: 4 }));
+    const reader = new SampleReader('reordered.mp4', index, bytes.length);
+    try {
+      reader.ensure(0);
+      await vi.waitFor(() => expect(reader.data(0)).not.toBeNull());
+      for (let i = 0; i < index.length; i++) {
+        expect(reader.data(i)).toEqual(bytes.slice(index[i].offset, index[i].offset + 4));
+        expect(reader.failure(i)).toBeNull();
+      }
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { reader.dispose(); }
+  });
+
+  it('來源上限截斷最後樣本時明確回報失敗，不發布部分樣本', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Uint8Array(6), { status: 206 })));
+    const index = [{ offset: 0, size: 4 }, { offset: 4, size: 4 }];
+    const reader = new SampleReader('truncated.mp4', index, 6);
+    try {
+      reader.ensure(0);
+      await vi.waitFor(() => expect(reader.failure(1)).toBeInstanceOf(Error));
+      expect(reader.data(0)).toBeNull();
+      expect(reader.data(1)).toBeNull();
+    } finally { reader.dispose(); }
+  });
+
   it.each([null, '8'])('Range 回應長度為 %s 時，超出視窗便取消串流，不讀取後續來源', async contentLength => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     let pulls = 0;

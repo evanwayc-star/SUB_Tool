@@ -28,17 +28,17 @@ async function beginRead(name){
 async function finishRead(request,key){request.reader.result=new TextEncoder().encode(JSON.stringify({keymap:{toggle_play_pause:[{key}]}})).buffer;request.reader.onload();await request.work;}
 it('same settings dialog keeps latest import when readers finish in reverse order',async()=>{
  Settings.showSettingsModal();const old=await beginRead('A.json'),latest=await beginRead('B.json');
- await finishRead(latest,'b');await finishRead(old,'a');document.getElementById('settingsSaveBtn').click();
+ await finishRead(latest,'b');await finishRead(old,'a');await document.getElementById('settingsSaveBtn').onclick();
  expect(State.keymap.toggle_play_pause).toEqual([{key:'b'}]);
 });
 it('manual key recording invalidates a pending import of the same settings draft',async()=>{
  Settings.showSettingsModal();const old=await beginRead('A.json');key(document.getElementById('settings-input-toggle_play_pause-0'),'q');
- await finishRead(old,'a');document.getElementById('settingsSaveBtn').click();expect(State.keymap.toggle_play_pause).toEqual([{key:'q'}]);
+ await finishRead(old,'a');await document.getElementById('settingsSaveBtn').onclick();expect(State.keymap.toggle_play_pause).toEqual([{key:'q'}]);
 });
 it('canceling a later import invalidates the earlier read without changing the draft',async()=>{
  Settings.showSettingsModal();const old=await beginRead('A.json');const cancelled=document.getElementById('settingsImportBtn').onclick();
  document.getElementById('settingsImportFile').dispatchEvent(new Event('cancel'));await cancelled;await finishRead(old,'a');
- document.getElementById('settingsSaveBtn').click();expect(State.keymap.toggle_play_pause).toEqual([{key:' '}]);
+ await document.getElementById('settingsSaveBtn').onclick();expect(State.keymap.toggle_play_pause).toEqual([{key:' '}]);
 });
 it('Escape in inline note text cannot overwrite a newer committed note text',()=>{
  Notes.renderNotes();const el=document.querySelector('.nt-text');el.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));el.innerText='draft';
@@ -83,8 +83,8 @@ it('a changed FPS grid invalidates the note time editor',async()=>{
  const {setFps}=await import('../src/state.js');setFps('29.97df');key(input,'Enter');expect(State.notes[0].time).toBe(1);expect(History.stack).toHaveLength(1);
 });
 it('restoring defaults invalidates a pending shortcut import',async()=>{
- Settings.showSettingsModal();const old=await beginRead('A.json');document.getElementById('settingsRestoreBtn').click();await finishRead(old,'a');document.getElementById('settingsSaveBtn').click();expect(State.keymap.toggle_play_pause).toEqual([{key:' '}]);
+ Settings.showSettingsModal();const old=await beginRead('A.json');document.getElementById('settingsRestoreBtn').click();await finishRead(old,'a');await document.getElementById('settingsSaveBtn').onclick();expect(State.keymap.toggle_play_pause).toEqual([{key:' '}]);
 });
 it('latest shortcut import still installs valid normalized keys',async()=>{
- Settings.showSettingsModal();const request=await beginRead('normal.json');await finishRead(request,'Q');document.getElementById('settingsSaveBtn').click();expect(State.keymap.toggle_play_pause).toEqual([{key:'q'}]);
+ Settings.showSettingsModal();const request=await beginRead('normal.json');await finishRead(request,'Q');await document.getElementById('settingsSaveBtn').onclick();expect(State.keymap.toggle_play_pause).toEqual([{key:'q'}]);
 });

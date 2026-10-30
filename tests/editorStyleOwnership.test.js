@@ -114,13 +114,14 @@ describe('字幕樣式 public caller 與 snapshot ownership',()=>{
     expect(effective().fontSize).toBe(80);
     expect(effective().color).toBe('#ffffff');
   });
-  it('管理視窗的草稿同步也使用字幕真正所屬軌',()=>{
+  it('管理視窗的草稿同步也使用字幕真正所屬軌',async()=>{
     styles.savePresets([{name:'copy',style:{...styles.STYLE_DEFAULTS}}]);
     State.cues[0].style={...styles.STYLE_DEFAULTS};
     document.getElementById('tsPresetMgr').click();
     document.querySelector('[data-pre-edit="0"]').click();
     State.presetEdit.draft.color='#00ff00';
     document.getElementById('tsEditDone').click();
+    await vi.waitFor(()=>expect(State.presetEdit).toBeNull());
     expect(effective().fontSize).toBe(80);
     expect(effective().color).toBe('#00ff00');
   });
