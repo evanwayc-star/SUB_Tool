@@ -15,7 +15,7 @@ const checks=[];
  const child=H.trackElectron(spawn(H.ELECTRON,['.','--subtool-transport-acceptance',`--remote-debugging-port=${port}`,`--user-data-dir=${profile}`,'--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-backgrounding-occluded-windows'],{cwd:H.ROOT,windowsHide:true,stdio:['ignore','ignore','pipe']}));
  let client;const stderr=[];child.stderr.on('data',chunk=>stderr.push(String(chunk)));
  try{
-  const target=await H.waitFor(async()=> (await H.getJSON(`http://127.0.0.1:${port}/json/list`)).find(t=>t.type==='page'&&t.title==='SUB TOOL'),'SUB Tool',20000);
+  const target=await H.waitFor(async()=> (await H.getJSON(`http://127.0.0.1:${port}/json/list`)).find(H.isMainWindowTarget),'SUB Tool',20000);
   client=new H.CdpClient(target.webSocketDebuggerUrl);await client.connect();await client.send('Page.enable');await client.send('Page.bringToFront');
   await H.waitFor(()=>client.evaluate('Boolean(window.SUB?.SubStyle)'),'SUB public API',15000);
   // 開發模式預設讀 repo .config；acceptance flag 才將設定隔離到 profile。

@@ -97,6 +97,17 @@ function createSpeechCompressionRuntime({ compressor } = {}) {
     throw new TypeError('語音壓縮 runtime 缺少 compressor');
   }
   const active = new Map();
+  let closing = false, resumeWhenIdle = false;
+  const cancelledError = () => Object.assign(new Error('辨識壓縮已取消'), {
+    name: 'AbortError', code: 'ABORT_ERR',
+  });
+  const resume = () => {
+    resumeWhenIdle = true;
+    if (active.size) return false;
+    closing = false;
+    resumeWhenIdle = false;
+    return true;
+  };
 
   const requireRequestId = requestId => {
     if (typeof requestId !== 'string' || !SPEECH_COMPRESSION_REQUEST_ID.test(requestId)) {
@@ -118,37 +129,49 @@ function createSpeechCompressionRuntime({ compressor } = {}) {
 
   const compress = (wavBytes, requestId) => {
     const id = requireRequestId(requestId);
+    if (closing) return Promise.reject(cancelledError());
     if (active.has(id)) throw new Error('辨識壓縮 requestId 重複');
     let finish;
     const finished = new Promise(resolve => { finish = resolve; });
     const entry = { process: null, cancelled: false, finished };
     active.set(id, entry);
 
-    return Promise.resolve().then(() => compressor.compress(wavBytes, {
-      onProcess: process => {
-        entry.process = process;
-        if (entry.cancelled && typeof process?.kill === 'function' && !process.killed) {
-          try { process.kill(); } catch (error) {}
+    return Promise.resolve().then(async () => {
+      if (entry.cancelled) throw cancelledError();
+      const result = await compressor.compress(wavBytes, {
+        onProcess: process => {
+          entry.process = process;
+          if (entry.cancelled && typeof process?.kill === 'function' && !process.killed) {
+            try { process.kill(); } catch (error) {}
+          }
         }
-      }
-    })).finally(() => {
+      });
+      // Native close is only one stage: reading the MP3 and clearing private
+      // files still belong to this request, and cancellation revokes its result.
+      if (entry.cancelled) throw cancelledError();
+      return result;
+    }).finally(() => {
       active.delete(id);
       finish();
+      if (resumeWhenIdle && !active.size) resume();
     });
   };
 
   const cancelAllAndWait = async () => {
-    while (active.size) {
-      const entries = [...active.entries()];
-      for (const [requestId] of entries) cancel(requestId);
-      await Promise.allSettled(entries.map(([, entry]) => entry.finished));
-    }
+    closing = true;
+    resumeWhenIdle = false;
+    // Closed admission makes this a complete owner snapshot. A later explicit
+    // resume may admit a new generation; this shutdown must not cancel it.
+    const entries = [...active.entries()];
+    for (const [requestId] of entries) cancel(requestId);
+    await Promise.allSettled(entries.map(([, entry]) => entry.finished));
   };
 
   return Object.freeze({
     compress,
     cancel,
     cancelAllAndWait,
+    resume,
     activeCount: () => active.size
   });
 }

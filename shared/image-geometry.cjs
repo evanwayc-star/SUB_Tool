@@ -12,7 +12,7 @@
    
    三路渲染必須共用同一套數值輸出：
    - 預覽端 HTML DOM 疊層 (renderImageOverlays)
-   - MPV 透明 Guide 視窗的滑鼠互動命中區
+   - mpv 透明 guide 的畫面疊層（滑鼠互動由主視窗承接）
    - 匯出端 FFmpeg filtergraph (export-plan.js)
    
    若未依原生尺寸提供（例如舊專案或尚未取得圖片尺寸），安全退回方框尺寸。

@@ -53,6 +53,12 @@ describe('音訊聲量分析 (analyzePeaksLoudness & parseVolumeAnalysis)', () =
   });
 
   describe('parseVolumeAnalysis 純函式', () => {
+    it('短音有可聽峰值但 loudnorm 整體響度無法量測時，使用實測 RMS 而不顯示無聲', () => {
+      const output = 'mean_volume: -3.0 dB\nmax_volume: 0.0 dB\n'
+        + '{"input_i":"-inf","input_tp":"-0.00","input_lra":"0","input_thresh":"-70","target_offset":"inf"}';
+      expect(parseVolumeAnalysis(output)).toMatchObject({ maxDb: 0, meanDb: -3, isSilence: false, meanSource: 'volumedetect' });
+      expect(parseVolumeAnalysis('{"input_i":"-inf","input_tp":"-0.00","target_offset":"inf"}')).toBeNull();
+    });
     it('錯誤或缺測量值不會被當成靜音，真正負無窮静音維持有限report', () => {
       expect(parseVolumeAnalysis('source.wav: No such file or directory')).toBeNull();
       expect(parseVolumeAnalysis('max_volume: -3.0 dB')).toBeNull();

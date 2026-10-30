@@ -59,14 +59,14 @@ describe('renderer project write admission', () => {
 
     const writes = [];
     await expect(commitAdmittedProjectWrite(projectPath, projectBytes({ cues: [] }), {
-      ensureDirectory: file => { writes.push(['mkdir', file]); },
-      writeFile: (file, contents) => { writes.push(['write', file, contents]); },
+      ensureParent: true,
+      writeFile: (file, contents, options) => { writes.push(['write', file, contents, options]); },
       clearTrustedDeclarations: file => intake.grantProjectOnly(file),
     })).resolves.toBe(projectPath);
     expect(writes.map(call => call.slice(0, 2))).toEqual([
-      ['mkdir', projectPath],
       ['write', projectPath],
     ]);
+    expect(writes[0][3]).toEqual({ ensureParent: true });
     expect(intake.canRelink(projectPath, 'D:\\Media\\old.mxf')).toBe(false);
 
     intake.grant(projectPath, projectBytes({ media: { path: 'D:\\Media\\old.mxf' } }));

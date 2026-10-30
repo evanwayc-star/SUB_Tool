@@ -23,7 +23,7 @@ async function runCli(onCommand) {
   const httpServer = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
     response.end(JSON.stringify([{
-      type: 'page', title: 'SUB Tool', url: 'file:///fake/index.html',
+      type: 'page', title: '測試專案 — SUB TOOL', url: 'file:///fake/dist/index.html',
       webSocketDebuggerUrl: `ws://127.0.0.1:${port}`,
     }]));
   });
@@ -32,6 +32,10 @@ async function runCli(onCommand) {
   wsServer.on('connection', socket => {
     socket.on('message', raw => {
       const message = JSON.parse(raw.toString());
+      if (message.method === 'Runtime.evaluate' && message.params.expression === 'Boolean(window.SUB?.State && window.SUB?.Media)') {
+        socket.send(JSON.stringify({ id: message.id, result: { result: { value: true } } }));
+        return;
+      }
       onCommand(socket, message);
     });
   });

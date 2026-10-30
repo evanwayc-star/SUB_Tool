@@ -51,8 +51,8 @@ function writeDirectoryFiles(directory, files, { fsModule = fs, randomUUID = cry
 
   let written = 0, blocked = 0;
   for (const entry of Array.isArray(files) ? files : []) {
-    const data = entry && (entry.content || entry.b64);
-    if (!entry || typeof entry.name !== 'string' || !entry.name || typeof data !== 'string' || !data) continue;
+    const data = entry && (entry.content ?? entry.b64);
+    if (!entry || typeof entry.name !== 'string' || !entry.name || typeof data !== 'string') continue;
     const target = path.resolve(root, entry.name);
     if (target === root || !isPathContained(root, entry.name)
       || (process.platform === 'win32' && path.relative(root, target).includes(':'))) {

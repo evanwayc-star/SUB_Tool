@@ -79,11 +79,29 @@ describe('decodeText 編碼偵測', () => {
     const body = new TextEncoder().encode('plain ascii');
     expect(decodeText(body.buffer)).toBe('plain ascii');
   });
+  it('二進位 view 只解碼自己的 byteOffset 與 byteLength，保留中文、罕字及 emoji', () => {
+    const body = Buffer.from('\uFEFF字幕𠮷😀', 'utf16le');
+    const storage = Buffer.concat([Buffer.from([0x41, 0x42]), body, Buffer.from([0x43, 0x44])]);
+    const offset = storage.byteOffset + 2;
+    for (const view of [
+      storage.subarray(2, storage.length - 2),
+      new DataView(storage.buffer, offset, body.length),
+      new Uint16Array(storage.buffer, offset, body.length / 2),
+    ]) {
+      expect(decodeText(view)).toBe('字幕𠮷😀');
+    }
+  });
 });
 
 describe('encodeUTF16LE <-> decodeText round-trip', () => {
+  it('輸出已知 UTF-16LE BOM 與完整代理對位元組', () => {
+    expect([...encodeUTF16LE('A字𠮷😀')]).toEqual([
+      0xFF, 0xFE, 0x41, 0x00, 0x57, 0x5B, 0x42, 0xD8, 0xB7, 0xDF, 0x3D, 0xD8, 0x00, 0xDE,
+    ]);
+    expect([...encodeUTF16LE('')]).toEqual([0xFF, 0xFE]);
+  });
   it('含中文與一般字元', () => {
-    for (const s of ['hello', '字幕測試', 'Mixed 混合 123']) {
+    for (const s of ['hello', '字幕測試', 'Mixed 混合 123', '罕字𠮷與 emoji 😀']) {
       expect(decodeText(encodeUTF16LE(s).buffer)).toBe(s);
     }
   });

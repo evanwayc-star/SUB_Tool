@@ -133,6 +133,41 @@ describe('Media presentation runtime', () => {
     expect(Media.displayTime()).toBe(50);
   });
 
+  it('HTML capture waits for actual source-frame evidence before exposing the held frame',async()=>{
+    const capture=vi.fn(({isCurrent})=>{expect(isCurrent()).toBe(true);return 'confirmed pixels';});
+    const pending=Media.withPresentedFrame(104,capture);
+    const outcome=pending.then(value=>({value}),error=>({error}));
+    await vi.waitFor(()=>expect(domMock.frameCallbacks.length).toBeGreaterThan(0));
+    expect(domMock.video.currentTime).toBe(14);
+    expect(capture).not.toHaveBeenCalled();
+    domMock.frameCallbacks.shift()(0,{mediaTime:14});
+    expect(await outcome).toEqual({value:'confirmed pixels'});
+    expect(Media.displayTime()).toBe(104);
+  });
+
+  it.each(['reset','webcodecs'])('HTML capture discards its held frame after %s takes ownership',async reason=>{
+    let release,started;
+    const ready=new Promise(resolve=>{started=resolve;});
+    const pixels=new Promise(resolve=>{release=resolve;});
+    const pending=Media.withPresentedFrame(104,async({isCurrent})=>{
+      started();await pixels;
+      if(!isCurrent()) throw new DOMException('obsolete capture','AbortError');
+      return 'old pixels';
+    });
+    const outcome=pending.then(value=>({value}),error=>({error}));
+    try{
+      await vi.waitFor(()=>expect(domMock.frameCallbacks.length).toBeGreaterThan(0));
+      domMock.frameCallbacks.shift()(0,{mediaTime:14});
+      await ready;
+      if(reason==='reset') Media.resetPresentationSession('new-workspace');
+      else Media.setWebCodecsTakeover(true);
+      release();
+      expect((await outcome).error?.name).toBe('AbortError');
+    }finally{
+      release();Media.setWebCodecsTakeover(false);Media.resetPresentationSession('capture-finished');
+    }
+  });
+
   it.each(['pause','new-seek','new-seek-reverse-play','reset','reverse-play'])('native capture holds the real Media presenter and respects %s',async action=>{
     const {activateMpvTransport}=await import('../src/media-player-adapter.js');
     const bridge={launch:vi.fn(async()=>({ok:true})),present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),

@@ -122,6 +122,47 @@ describe('subtitle style project persistence', () => {
     ]);
   });
 
+  it('preserves occupied project aliases and reuses the matching import when reopening', () => {
+    const existing = [
+      { name: 'Shared', group: 'A', style: { fontSize: 30 } },
+      { name: 'Shared (專案)', group: 'A', style: { fontSize: 40 } },
+      { name: 'Shared (專案 2)', group: 'A', style: { fontSize: 50 } },
+      { name: 'Shared', group: 'B', style: { fontSize: 60 } },
+    ];
+    savePresets(existing);
+    const project = baseProject([{ name: 'Imported', fontSize: 44 }]);
+    project.usedPresets = [{ name: 'Shared', group: 'A', style: { fontSize: 44 } }];
+
+    expect(Project.apply(project)).toBe(true);
+    const imported = structuredClone(getPresets());
+    expect(imported.slice(0, existing.length)).toEqual(existing);
+    expect(imported).toHaveLength(existing.length + 1);
+    expect(imported.at(-1)).toMatchObject({ group: 'A', style: { fontSize: 44 } });
+    expect(new Set(imported.map(p => JSON.stringify([p.group, p.name]))).size).toBe(imported.length);
+    expect(JSON.parse(localStorage.getItem('subtool.subPresets'))).toEqual(imported);
+
+    expect(Project.apply(project)).toBe(true);
+    expect(getPresets()).toEqual(imported);
+    expect(effStyle(null, State.tracks[0]).fontSize).toBe(44);
+  });
+
+  it('keeps presets from successive projects with the same original identity', () => {
+    savePresets([{ name: 'Shared', style: { fontSize: 30 } }]);
+    const first = baseProject([{ name: 'First', fontSize: 44 }]);
+    first.usedPresets = [{ name: 'Shared', style: { fontSize: 44 } }];
+    const second = baseProject([{ name: 'Second', fontSize: 55 }]);
+    second.usedPresets = [{ name: 'Shared', style: { fontSize: 55 } }];
+
+    Project.apply(first);
+    const afterFirst = structuredClone(getPresets());
+    Project.apply(second);
+    expect(getPresets().slice(0, afterFirst.length)).toEqual(afterFirst);
+    expect(getPresets().map(p => p.style.fontSize)).toEqual([30, 44, 55]);
+    Project.apply(first);
+    Project.apply(second);
+    expect(getPresets().map(p => p.style.fontSize)).toEqual([30, 44, 55]);
+  });
+
   it('ignores malformed project preset entries while loading the valid project data', () => {
     const project = baseProject([{ name: 'Imported', fontSize: 44 }]);
     project.cues = [{ start: 0, end: 1, text: 'Kept subtitle', track: 1 }];

@@ -11,9 +11,11 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
 const fsp = require('fs/promises');
 const crypto = require('crypto');
 const { PROJECT_FILE, collectProjectMediaPaths, parseProjectBuffer } = require('./file-authority');
+const { encodeUTF16LE } = require('../shared/text-encoding.cjs');
 
 const RECENT_MAX_ENTRIES = 10;
 
@@ -211,50 +213,142 @@ function finalizeProjectWrite(projectFile, { clearTrustedDeclarations } = {}) {
   return projectFile;
 }
 
-// 保存只在完整 sibling 檔案關閉後才發佈，失敗不能先截斷上一份專案。
-// 同一目標依呼叫順序保存，避免 autosave／手動保存以較慢的旧寫入覆蓋新資料。
-function createAtomicProjectWriter({ fsModule = fsp, createToken = crypto.randomUUID } = {}) {
+// 保存只在所選實體根的私有檔案完整關閉後才發布，失敗不截斷上一份專案。
+// 同一實體目標依呼叫順序保存，避免 autosave／手動保存以較慢的舊寫入覆蓋新資料。
+function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken = crypto.randomUUID } = {}) {
   const pending = new Map();
-  return function writeProject(projectFile, contents) {
-    const target = path.resolve(projectFile);
-    const key = process.platform === 'win32' ? target.toLowerCase() : target;
-    const operation = (pending.get(key) || Promise.resolve()).then(async () => {
-      const temporary = `${target}.${createToken()}.tmp`;
-      let handle;
-      let ownsTemporary = false;
-      try {
-        handle = await fsModule.open(temporary, 'wx');
-        ownsTemporary = true;
-        await handle.writeFile(contents);
-        await handle.sync();
-        await handle.close();
-        handle = null;
-        await fsModule.rename(temporary, target);
-      } finally {
-        if (handle) { try { await handle.close(); } catch (error) {} }
-        if (ownsTemporary) { try { await fsModule.unlink(temporary); } catch (error) {} }
+  let admission = Promise.resolve();
+  const unsafe = () => Object.assign(new Error('專案寫入目錄已變更、包含連結或超出備份範圍'), { code: 'UNSAFE_PROJECT_OUTPUT' });
+  const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino;
+  const canonical = file => process.platform === 'win32' ? file.toLowerCase() : file;
+  const statIfPresent = async file => {
+    try { return await fsModule.lstat(file, { bigint: true }); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  };
+  const statIfPresentSync = file => {
+    try { return fsModule.lstatSync(file, { bigint: true }); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  };
+  async function prepareParents(target, ensureParent) {
+    // The selected project directory may itself be a mounted/linked location.
+    // Its private backup descendants must remain real directories inside it.
+    let anchor = path.dirname(target);
+    for (let current = anchor; path.dirname(current) !== current; current = path.dirname(current)) {
+      const name = path.basename(current);
+      if (name === '.subtool_AutoSave'
+        || (process.platform === 'win32' && name.toLowerCase() === '.subtool_autosave')) anchor = path.dirname(current);
+    }
+    const root = await fsModule.realpath(anchor);
+    const owner = await fsModule.lstat(root, { bigint: true });
+    if (!owner.isDirectory() || owner.isSymbolicLink()) throw unsafe();
+    const parents = [{ file: root, owner }];
+    const checkRootSync = () => {
+      const current = statIfPresentSync(root);
+      if (!current?.isDirectory() || current.isSymbolicLink() || !sameFile(current, owner)) throw unsafe();
+    };
+    const check = async () => {
+      if (canonical(await fsModule.realpath(anchor)) !== canonical(root)) throw unsafe();
+      for (const parent of parents) {
+        const current = await statIfPresent(parent.file);
+        if (!current?.isDirectory() || current.isSymbolicLink() || !sameFile(current, parent.owner)) throw unsafe();
       }
+    };
+    const checkSync = () => {
+      if (canonical(fsModule.realpathSync(anchor)) !== canonical(root)) throw unsafe();
+      for (const parent of parents) {
+        const current = statIfPresentSync(parent.file);
+        if (!current?.isDirectory() || current.isSymbolicLink() || !sameFile(current, parent.owner)) throw unsafe();
+      }
+    };
+    let current = root;
+    const relative = path.relative(anchor, path.dirname(target));
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith('..' + path.sep)) throw unsafe();
+    for (const segment of relative ? relative.split(path.sep) : []) {
+      await check();
+      current = path.join(current, segment);
+      let directory = await statIfPresent(current);
+      if (!directory && ensureParent) {
+        try { await fsModule.mkdir(current); }
+        catch (error) { if (error.code !== 'EEXIST') throw error; }
+        directory = await statIfPresent(current);
+      }
+      if (!directory?.isDirectory() || directory.isSymbolicLink()) throw unsafe();
+      parents.push({ file: current, owner: directory });
+    }
+    await check();
+    const name = path.basename(target);
+    if (process.platform === 'win32' && name.includes(':')) throw unsafe();
+    return { root, target: path.join(current, name), check, checkSync, checkRootSync };
+  }
+  const checkTarget = async target => {
+    const existing = await statIfPresent(target);
+    if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw unsafe();
+  };
+  const checkTargetSync = target => {
+    const existing = statIfPresentSync(target);
+    if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw unsafe();
+  };
+  return function writeProject(projectFile, contents, { ensureParent = false } = {}) {
+    const target = path.resolve(projectFile);
+    // Resolve aliases in call order without blocking main on synchronous path
+    // discovery. Different admitted files can still write concurrently.
+    const preparedResult = admission.then(() => prepareParents(target, ensureParent));
+    admission = preparedResult.catch(() => {});
+    return preparedResult.then(prepared => {
+      const key = canonical(prepared.target);
+      const operation = (pending.get(key) || Promise.resolve()).then(async () => {
+        await prepared.check();
+        await checkTarget(prepared.target);
+        // Stage at the selected root, so replacing a nested backup parent cannot
+        // redirect the temporary file or make its cleanup touch another owner.
+        const temporary = path.join(prepared.root, `${path.basename(target)}.${createToken()}.tmp`);
+        let handle;
+        let temporaryOwner;
+        try {
+          handle = await fsModule.open(temporary, 'wx');
+          temporaryOwner = await handle.stat({ bigint: true });
+          await prepared.check();
+          await handle.writeFile(contents);
+          await handle.sync();
+          await handle.close();
+          handle = null;
+          await prepared.check();
+          // No await between the final ownership checks and publication: an
+          // earlier async stat result cannot certify a later directory object.
+          prepared.checkSync();
+          checkTargetSync(prepared.target);
+          const current = statIfPresentSync(temporary);
+          if (!current?.isFile() || current.isSymbolicLink() || !sameFile(current, temporaryOwner)) throw unsafe();
+          fsModule.renameSync(temporary, prepared.target);
+        } finally {
+          if (handle) { try { await handle.close(); } catch (error) {} }
+          if (temporaryOwner) {
+            try {
+              prepared.checkRootSync();
+              const current = statIfPresentSync(temporary);
+              if (current?.isFile() && !current.isSymbolicLink() && sameFile(current, temporaryOwner)) fsModule.unlinkSync(temporary);
+            } catch (error) {}
+          }
+        }
+      });
+      const tail = operation.catch(() => {}).finally(() => {
+        if (pending.get(key) === tail) pending.delete(key);
+      });
+      pending.set(key, tail);
+      return operation;
     });
-    const tail = operation.catch(() => {}).finally(() => {
-      if (pending.get(key) === tail) pending.delete(key);
-    });
-    pending.set(key, tail);
-    return operation;
   };
 }
 
 async function commitAdmittedProjectWrite(projectFile, buffer, {
-  ensureDirectory,
+  ensureParent = false,
   writeFile,
   clearTrustedDeclarations,
 } = {}) {
   if (typeof projectFile !== 'string' || !projectFile || !Buffer.isBuffer(buffer) || typeof writeFile !== 'function') {
     return null;
   }
-  if (typeof ensureDirectory === 'function') {
-    await ensureDirectory(projectFile);
-  }
-  await writeFile(projectFile, buffer);
+  await writeFile(projectFile, buffer, { ensureParent });
   return finalizeProjectWrite(projectFile, { clearTrustedDeclarations });
 }
 
@@ -264,7 +358,6 @@ async function commitAdmittedProjectWrite(projectFile, buffer, {
 function createProjectWorkspace({
   readFile,
   writeFile,
-  ensureDirectory,
   saveMetadata,
   grantProjectFile,
   grantMediaFile,
@@ -371,21 +464,22 @@ function createProjectWorkspace({
 
     // 檔案識別資訊由實際寫檔的電腦提供，不沿用開啟專案時的舊值。
     // 只在持久化時加入，renderer 的 committed snapshot／dirty 基準不受影響。
+    let contents = parseProjectBuffer(buffer);
     if (typeof saveMetadata === 'function') {
       const metadata = saveMetadata();
-      const document = parseProjectBuffer(buffer);
-      delete document['SUB Tool'];
-      delete document['User Name'];
-      const contents = {
+      delete contents['SUB Tool'];
+      delete contents['User Name'];
+      contents = {
         'SUB Tool': metadata.appVersion,
         'User Name': metadata.computerName,
-        ...document,
+        ...contents,
       };
-      buffer = Buffer.from('\uFEFF' + JSON.stringify(contents, null, 1), 'utf16le');
     }
+    // 新寫入統一 UTF-16LE BOM；舊檔讀取仍相容 UTF-8 與兩種 UTF-16 位元序。
+    buffer = Buffer.from(encodeUTF16LE(JSON.stringify(contents, null, 1)));
 
     const saved = await commitAdmittedProjectWrite(projectFile, buffer, {
-      ensureDirectory: ensureParent ? ensureDirectory : null,
+      ensureParent,
       writeFile,
       clearTrustedDeclarations: file => intake.grantProjectOnly(file),
     });

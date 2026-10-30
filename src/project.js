@@ -33,7 +33,7 @@ import { renderNotes } from './notes.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { getAllPresets, effStyle, trackStyleSnapshot, STYLE_DEFAULTS, isBuiltinPresetName, savePresets, getPresets, loadFonts,
-  presetIdentity, validPresetList, normalizeStyleRecord, normalizeStyleValue } from './substyle.js';
+  presetIdentity, validPresetList, normalizeStyleRecord, normalizeStyleValue, styleMatchesPreset } from './substyle.js';
 import { ProjectLoadSession } from './project-intake-engine.js';
 import { clearAsrSession } from './speech-recognition-session.js';
 import { captureSubtitleRemovalOwnership } from './subtitle-removal-guard.js';
@@ -110,6 +110,14 @@ function validateProjectIntegrity(projectData) {
     if (!Array.isArray(projectData[key])) errors.push(`專案 ${key} 必須為陣列`);
     else if(projectData[key].some(item=>!isRecord(item))) errors.push(`專案 ${key} 成員必須為 JSON 物件`);
   }
+  // 列表文字與字幕檔名需要字串；不能套用後才讓列表或匯出失敗。
+  // 缺值與 null 仍沿舊檔規則還原成空文字／預設軌名。
+  for (const [key, field] of [['cues', 'text'], ['notes', 'text'], ['tracks', 'name']]) {
+    if (Array.isArray(projectData[key]) && projectData[key].some(item =>
+      isRecord(item) && item[field] != null && typeof item[field] !== 'string')) {
+      errors.push(`專案 ${key}.${field} 必須為字串`);
+    }
+  }
   // State stores tracks as dense Arrays: index + 1 must fit the maximum
   // Array length. This is a representation limit, not a UI track-count cap.
   const maxTrackCount=0xffffffff;
@@ -173,8 +181,11 @@ let _saveTail = Promise.resolve();
 let _cancelFontPrompt = null;
 
 function _defaultSaveName(){
-  return (State.mediaName ? State.mediaName.replace(/\.[^.]+$/,'') : 'project')+'.subtool';
+  return (_saveBaseName || (State.mediaName ? State.mediaName.replace(/\.[^.]+$/,'') : 'project'))+'.subtool';
 }
+
+function _projectIdentity(){ return {name:_saveBaseName||null,path:_savePath||null}; }
+function _publishProjectIdentity(){ emit('project:identity',_projectIdentity()); }
 
 export function getProjectDir() {
   if (!_savePath) return null;
@@ -340,6 +351,7 @@ function _onSaved(fullPath, webName, snapshot){
   _savedWriteRevision++;
   _autoRelinkNeedsSave = false;
   if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave, 3*60*1000);
+  _publishProjectIdentity();
 }
 
 function _saveProject(asNew){
@@ -378,19 +390,23 @@ function _saveProject(asNew){
 
 async function _autoSave(){
   if(!_saveBaseName) return;
-  const name=`${_saveBaseName}_${_timestamp()}.subtool`;
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const savePath=_savePath,saveBaseName=_saveBaseName;
+  const current=()=>ownsWorkspace()&&_savePath===savePath&&_saveBaseName===saveBaseName;
+  const name=`${saveBaseName}_${_timestamp()}.subtool`;
   const bytes=_buildBytes();
-  if(IS_DESKTOP && DESK.writeProject && _savePath){
-    const dir=_savePath.replace(/[^\\/]+$/,'');
+  if(IS_DESKTOP && DESK.writeProject && savePath){
+    const dir=savePath.replace(/[^\\/]+$/,'');
     const autoSaveDir=dir+'.subtool_AutoSave/';
     const res=await DESK.writeProject(autoSaveDir+name, bytesToB64(bytes)).catch(()=>null);
-    if(res) setStatus('自動備份：'+name,'ok');
+    // 已送出的舊備份安全完成；換專案或另存新路徑後不再回報到目前工作區。
+    if(res&&current()) setStatus('自動備份：'+name,'ok');
   } else {
     // Fix #2：瀏覽器版改用 localStorage 避免每 3 分鐘觸發下載干擾工作流
     try{
       localStorage.setItem('subtool_autosave_data', bytesToB64(bytes));
       localStorage.setItem('subtool_autosave_name', name);
-      setStatus('自動備份已存（瀏覽器本地）','ok');
+      if(current()) setStatus('自動備份已存（瀏覽器本地）','ok');
     }catch(e){
       // localStorage 額度已滿時靜默失敗，不干擾使用者
       console.warn('auto-save localStorage failed:', e);
@@ -464,6 +480,7 @@ function resetProject(){
   _editGuardDone=false;
   _savePath=null;
   _saveBaseName=null;
+  _publishProjectIdentity();
   _lastSavedDataStr=null;
   _autoRelinkNeedsSave=false;
   if(_autoSaveTimer){ clearInterval(_autoSaveTimer); _autoSaveTimer=null; }
@@ -676,6 +693,7 @@ const Project = {
     const epoch=_saveEpoch,generation=_projectLoadSession.generation;
     return ()=>epoch===_saveEpoch&&_isCurrentProjectLoad(generation);
   },
+  identity: _projectIdentity,
   // save/saveAs 回傳 Promise<路徑|名稱|null>：null=失敗或使用者取消。
   // 呼叫端（如關閉前儲存流程）可 await 確認真正寫入完成後再繼續。
   continueLoad(generation,work){
@@ -811,19 +829,17 @@ const Project = {
       let changed = false;
       for (const p of validPresetList(data.usedPresets)) {
         if (!isRecord(p.style) || isBuiltinPresetName(p.name)) continue;
-        const ex = list.findIndex(x => presetIdentity(x) === presetIdentity(p));
-        if (ex >= 0) {
-           const existingStyle = list[ex].style || {};
-           const isDiff = Object.keys(STYLE_DEFAULTS).some(k => (existingStyle[k]!=null?existingStyle[k]:STYLE_DEFAULTS[k]) !== (p.style[k]!=null?p.style[k]:STYLE_DEFAULTS[k]));
-           if (isDiff) {
-              p.name = p.name + ' (專案)';
-              const ex2 = list.findIndex(x => presetIdentity(x) === presetIdentity(p));
-              if (ex2 >= 0) list[ex2] = p; else list.push(p);
-              changed = true;
-           }
-        } else {
-           list.push(p);
-           changed = true;
+        const originalName = p.name, style = { ...STYLE_DEFAULTS, ...p.style };
+        let existing = list.find(x => presetIdentity(x) === presetIdentity(p)), suffix = 1;
+        // 載入專案只能補入樣式，不能覆寫既有常用樣式；重開時沿同一路徑重用相同內容。
+        while (existing && !styleMatchesPreset(style, existing)) {
+          p.name = `${originalName} (專案${suffix === 1 ? '' : ` ${suffix}`})`;
+          suffix++;
+          existing = list.find(x => presetIdentity(x) === presetIdentity(p));
+        }
+        if (!existing) {
+          list.push(p);
+          changed = true;
         }
       }
       if (changed) {
@@ -864,9 +880,9 @@ const Project = {
     if(request!==_openRequestGeneration || !_isCurrentProjectLoad(generation)) return false;
     let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(buf))); }catch(e){ showToast('無法解析專案檔'); return false; }
     if(!data) return false;
-    return _queueProjectLoad(next=>this._load(data,next));
+    return _queueProjectLoad(next=>this._load(data,next,file.name));
   },
-  async _load(data,generation){
+  async _load(data,generation,fileName){
     if(!await _confirmProjectFonts(data,generation)) return;
 
     // 載入另一個專案必須先清掉舊的 runtime 媒體。尤其當新專案的主影片暫時
@@ -874,6 +890,8 @@ const Project = {
     try{ Media.reset(); }catch(e){ console.warn('reset media before project load:',e); }
     if(!this.apply(data,generation)) return;
     if(!_isCurrentProjectLoad(generation)) return;
+    _saveBaseName=(fileName||'').replace(/\.subtool$/i,'')||null;
+    _publishProjectIdentity();
     if(data.media&&data.media.name){
       const plan=_projectLoadSession.activePlan;
       const extCount=plan?.pendingExternalAudioSources?.().length||0;
@@ -914,6 +932,7 @@ const Project = {
     const plan=_projectLoadSession.activePlan;
     // 載入既有專案時記錄儲存路徑，自動備份用
     if(r.path){ _savePath=r.path; _saveBaseName=r.path.replace(/\\/g,'/').split('/').pop().replace(/\.subtool$/i,''); if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave,3*60*1000); }
+    _publishProjectIdentity();
     if(mp){
       if(mediaStat?.exists){
         await _projectLoadSession.restoreMedia(generation,{kind:'load',path:mp});

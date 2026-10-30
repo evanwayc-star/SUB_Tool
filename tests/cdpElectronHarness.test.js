@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import WebSocket, { WebSocketServer } from 'ws';
 
 const require = createRequire(import.meta.url);
-const { CdpClient, getJSON, trackElectron, stopElectron, verifiedCleanup, dispatchKey } = require('../scripts/acceptance/cdp-electron-harness.js');
+const { CdpClient, getJSON, trackElectron, stopElectron, verifiedCleanup, dispatchKey, isMainWindowTarget } = require('../scripts/acceptance/cdp-electron-harness.js');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -33,6 +33,18 @@ afterEach(async () => {
 });
 
 describe('CDP 驗收連線的失敗歸屬', () => {
+  it('以正式或開發入口識別主視窗，專案標題變動及其他視窗不影響選擇', () => {
+    const main = { type: 'page', title: '電影 第三版 — SUB TOOL', url: 'file:///C:/Program%20Files/SUB%20Tool/resources/app.asar/dist/index.html' };
+    const queue = { type: 'page', title: 'SUB TOOL', url: 'file:///C:/Program%20Files/SUB%20Tool/resources/app.asar/electron/queue.html' };
+    const compare = { type: 'page', title: 'SUB TOOL', url: 'file:///C:/Program%20Files/SUB%20Tool/resources/app.asar/electron/compare.html' };
+    expect([queue, compare, main].find(isMainWindowTarget)).toBe(main);
+    expect(isMainWindowTarget({ ...main, url: 'file:///C:/work/SUB_Tool/dist/index.html' })).toBe(true);
+    expect(isMainWindowTarget({ ...main, url: 'http://localhost:8777/' })).toBe(true);
+    expect(isMainWindowTarget({ ...main, url: 'http://localhost:8778/' })).toBe(false);
+    expect(isMainWindowTarget({ ...main, url: 'https://example.com/dist/index.html' })).toBe(false);
+    expect(isMainWindowTarget({ ...main, type: 'worker' })).toBe(false);
+    expect(isMainWindowTarget({ ...main, url: 'not a url' })).toBe(false);
+  });
   it('renderer 單次讀取未回覆也遵守等待期限，不接受期限後才到的 ready', async () => {
     let reply, received;
     const requested = new Promise(resolve => { received = resolve; });

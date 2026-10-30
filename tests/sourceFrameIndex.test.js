@@ -31,7 +31,7 @@ function fixture(args,extension='mp4',{tailMoov=false}={}){
     const start=Number(match[1]),end=Math.min(fs.statSync(source).size,Number(match[2])+1);
     const bytes=Buffer.alloc(Math.max(0,end-start)),handle=fs.openSync(source,'r');
     try{fs.readSync(handle,bytes,0,bytes.length,start);}finally{fs.closeSync(handle);}
-    return {ok:true,status:200,arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)};
+    return new Response(bytes,{status:200});
   }));
   return file;
 }
@@ -225,7 +225,7 @@ describe('presenter source frame evidence',()=>{
     const pending=sourcePresentationMetadata('blob:old',{owns:()=>owns});
     owns=false;
     await expect(pending).resolves.toBeNull();
-    finish({ok:true,status:200,arrayBuffer:async()=>new ArrayBuffer(0)});
+    finish(new Response(new Uint8Array(0)));
     await Promise.resolve();
   });
 

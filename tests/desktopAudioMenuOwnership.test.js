@@ -66,3 +66,45 @@ it.each(['primary','secondary'])('只有 %s 套用效果時，各來源音訊區
     UI.closeModal();Menus.hideCtx();
   }
 });
+
+it.each([
+  ['套用','C:/new.wav'],['還原原音','C:/new.wav'],
+  ['套用','C:/old.wav'],['還原原音','C:/old.wav'],
+])('來源重新載入後，舊音訊效果面板的「%s」不作用於相同 ID 的新素材 %s',async(action,replacementPath)=>{
+  const details={name:'old voice',path:'C:/old.wav',audioSourceId:'voice-id',duration:4};
+  const original=Media.createExternalAudioSource(details);
+  Object.assign(original,{hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12}});
+  Timeline.drawTimeline();
+  context(document.querySelector('.agtrack[data-audio-source-id="voice-id"]'));
+  document.querySelector('[data-menu-id="hard_limiter"]').click();
+  // Project 的媒體重建會先 reset，再以持久 audioSourceId 載入另一個物件。
+  Media.reset();
+  const replacement=Media.createExternalAudioSource({...details,name:'new voice',path:replacementPath});
+  Object.assign(replacement,{hasAudioLimiter:true,audioLimiterSpec:{max:-12,min:-18}});
+  expect(replacement).not.toBe(original);
+  [...document.querySelectorAll('#modalFoot button')].find(button=>button.textContent===action).click();
+  await vi.waitFor(()=>{
+    expect(normalizeAudio).not.toHaveBeenCalled();
+    expect(replacement.audioLimiterSpec).toEqual({max:-12,min:-18});
+    expect(replacement.audioNormalizing).toBeUndefined();
+  });
+});
+
+it('仍存活的母素材在開窗後切分，還原原音仍作用於整組來源',async()=>{
+  const {Seq}=await import('../src/sequence.js');
+  const original=State.clips[0],other=State.clips[1];
+  Object.assign(original,{hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12}});
+  Timeline.drawTimeline();
+  context(document.querySelector('.agtrack[data-audio-source-id="primary-id"]'));
+  document.querySelector('[data-menu-id="hard_limiter"]').click();
+  const split=Seq.planSplit(original,2);
+  Object.assign(original,split.left);
+  const right=Seq.add(split.right);
+  [...document.querySelectorAll('#modalFoot button')].find(button=>button.textContent==='還原原音').click();
+  await vi.waitFor(()=>{
+    expect(original.audioLimiterSpec).toBeUndefined();
+    expect(right.audioLimiterSpec).toBeUndefined();
+  });
+  expect(other.audioLimiterSpec).toBeUndefined();
+  expect(normalizeAudio).not.toHaveBeenCalled();
+});

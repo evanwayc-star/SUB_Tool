@@ -98,7 +98,7 @@ beforeEach(()=>{
       part=Buffer.alloc(Math.max(0,end-start));
       try{readSync(handle,part,0,part.length,start);}finally{closeSync(handle);}
     }else part=source.bytes.subarray(Number(range[1]),Number(range[2])+1);
-    return {ok:true,status:206,arrayBuffer:async()=>part.buffer.slice(part.byteOffset,part.byteOffset+part.byteLength)};
+    return new Response(part,{status:206});
   }));
   vi.spyOn(Media,'probeAndMaybeExtract').mockResolvedValue(true);
 });

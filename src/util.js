@@ -3,8 +3,9 @@
    ==============================================================================
    【架構與職責】
    純計算與格式編碼輔助函式庫（數值裁切、補零、字元編碼偵測、Base64 轉碼、HTML 跳脫）。
-   零外部跨模組相依。
+   文字編碼由 shared/text-encoding.cjs 供 renderer 與主程序共用。
    ============================================================================== */
+import { decodeText, encodeUTF16LE } from '../shared/text-encoding.cjs';
 
 /**
  * 數值區間裁切。
@@ -22,68 +23,6 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
  * @returns {string} 補零後字串
  */
 const pad = (n, w = 2) => String(Math.floor(Number(n) || 0)).padStart(w, '0');
-
-/**
- * 偵測並解碼 ArrayBuffer 為 Unicode 字串（支援 UTF-8, UTF-16LE, UTF-16BE 及啟發式無 BOM 偵測）。
- * 
- * @param {ArrayBuffer} buf 輸入之二進位緩衝區
- * @returns {string} 解碼後之字串
- */
-function decodeText(buf) {
-  if (!buf) return '';
-  const b = new Uint8Array(buf);
-
-  // UTF-8 BOM
-  if (b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF) {
-    return new TextDecoder('utf-8').decode(b.subarray(3));
-  }
-  // UTF-16LE BOM
-  if (b.length >= 2 && b[0] === 0xFF && b[1] === 0xFE) {
-    return new TextDecoder('utf-16le').decode(b.subarray(2));
-  }
-  // UTF-16BE BOM
-  if (b.length >= 2 && b[0] === 0xFE && b[1] === 0xFF) {
-    return new TextDecoder('utf-16be').decode(b.subarray(2));
-  }
-
-  // 無 BOM：採樣前 4000 位元組的零位元分布偵測 UTF-16
-  let zEven = 0;
-  let zOdd = 0;
-  const n = Math.min(b.length, 4000);
-  for (let i = 0; i < n; i++) {
-    if (b[i] === 0) {
-      if (i % 2 === 0) zEven++;
-      else zOdd++;
-    }
-  }
-
-  if (zOdd > n * 0.15 && zOdd > zEven * 3) {
-    return new TextDecoder('utf-16le').decode(b);
-  }
-  if (zEven > n * 0.15 && zEven > zOdd * 3) {
-    return new TextDecoder('utf-16be').decode(b);
-  }
-  return new TextDecoder('utf-8').decode(b);
-}
-
-/**
- * 將字串編碼為包含 BOM 的 UTF-16LE 二進位位元組陣列。
- * 
- * @param {string} str 輸入字串
- * @returns {Uint8Array} UTF-16LE 位元組陣列
- */
-function encodeUTF16LE(str) {
-  const s = String(str || '');
-  const out = new Uint8Array(2 + s.length * 2);
-  out[0] = 0xFF;
-  out[1] = 0xFE;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    out[2 + i * 2] = c & 0xFF;
-    out[3 + i * 2] = (c >> 8) & 0xFF;
-  }
-  return out;
-}
 
 /**
  * 在瀏覽器端觸發二進位位元組下載。

@@ -1399,8 +1399,6 @@ const Media = {
       if(!current()) return;
       this.pendingChannels=[];
       this.usingWebAudio=true; this.syncMuteState();
-      // element tracks 接管後，mpv 靜音（避免雙重音訊）
-      if(chs.length>0) getPlayerAdapter().mute(true).catch(()=>{});
       if(this.playing) this.startElementSources(this._mpvTime);
       notifyAudioTracks();
 
@@ -1928,14 +1926,16 @@ const Media = {
   requestPresentation(targetTime){
     return this._ensurePresentationSession().request(targetTime);
   },
-  // FPS-SYNC：native pixels、TC 與圖片計畫共用已確認且持續暫停的呈現格。
+  // FPS-SYNC：HTML／native pixels、TC 與圖片計畫共用已確認且持續暫停的呈現格。
   withPresentedFrame(targetTime,capture){
     const ownsTarget=this.capturePlaybackTargetOwnership();
     const session=this._ensurePresentationSession();
     const adapter=getPlayerAdapter();
+    const native=this.mpvPresenting();
     return session.withPresentedFrame(targetTime,details=>{
       const isCurrent=()=>details.isCurrent()&&ownsTarget()
-        &&this._presentationSession===session&&getPlayerAdapter()===adapter&&this.mpvPresenting();
+        &&this._presentationSession===session&&getPlayerAdapter()===adapter
+        &&this.mpvPresenting()===native&&!this.webCodecsTakeover();
       if(!isCurrent()) throw Object.assign(new Error('截圖的媒體已變更'),{name:'AbortError'});
       return capture({...details,adapter,isCurrent});
     },{timeoutMs:10000,tolerance:.45/getExactFps(State.fps||30)});
@@ -2804,9 +2804,8 @@ const Media = {
       this._commitOriginalAudioTracks(sourceClip,incoming);
       // 依目前 active clip 重新套用可聽集合（新加入的預設隱藏，除非它正是 active）
       const ac = this._activeClip(); if(ac) this._applyClipAudio(ac);
-      // 若正在播這個新段：元素音軌接管 → mpv 靜音並啟動元素
+      // 若正在播這個新段：共同起播入口先確認 mpv 靜音，再啟動元素。
       if(this.mpvMode && ac && (ac.audioSrc || ('clip:'+ac.id)) === sourceId){
-        getPlayerAdapter().mute(true).catch(()=>{});
         if(this.playing) this._restartElements();
       }
     }
@@ -3440,10 +3439,30 @@ const Media = {
      這可處理「影片已結束但音檔稍後才開始」與修剪後的音檔尾端，且不會每幀造成播放抖動。 */
   // localT=當前 clip 的來源時間；tlT=時間軸時間（ext-* 參考音用；未給則同 localT）。
   // 序列模式：被 _srcHidden 的（其他 clip / 已切換音源）不播，避免多段音訊同時出聲。
+  _startAfterMpvMute(kind, start){
+    const versions=this._mpvAudioStartVersions||(this._mpvAudioStartVersions={element:0,buffer:0});
+    const version=++versions[kind];
+    const active=this._activeClip();
+    const source=active ? (active.audioSrc || (active.primary ? 'video' : ('clip:'+active.id))) : 'video';
+    const replacesCarrier=this.mpvMode&&!this._gap&&this.tracks.some(track=>
+      (track.kind==='element'||track.kind==='buffer')&&!track._srcHidden&&(track.source||'video')===source);
+    if(!replacesCarrier){ start(false); return; }
+    const adapter=getPlayerAdapter();
+    // 此 Promise 必須是 mpv 的命令回覆，而非 pipe write；失敗時不能啟動第二個聲源。
+    adapter.mute(true).then(()=>{
+      if(versions[kind]!==version||!this.playing||this.playbackTransitionPending()||this._reverseShuttleMuted||
+         !this.mpvMode||getPlayerAdapter()!==adapter||this._activeClip()!==active) return;
+      start(true);
+    }).catch(error=>console.warn('mpv 音訊接管失敗：',error));
+  },
   startElementSources(localT, tlT){
     // seek 尚未呈現時，背景聲道接管／來源切換不能搶先播放；只有
     // presentation session 完成後的 resume 才能再次啟動 follower。
     if(this.playbackTransitionPending()) return;
+    this._startAfterMpvMute('element',delayed=>this._startElementSourcesReady(
+      delayed?this.vTime():localT,delayed?this.tlTime():tlT));
+  },
+  _startElementSourcesReady(localT, tlT){
     const timeline=tlT??(this.seqOn()?this.tlTime():localT);
     const reversed=[...Seq.clipsAt(timeline).filter(clip=>clip.reverse&&!clip.audioDetached&&!Seq.isStill(clip)),
       ...this.externalAudioSources.filter(asset=>asset.reverse&&this.externalAudio.sourceTime(asset.audioSrc,timeline)!=null)];
@@ -3463,15 +3482,17 @@ const Media = {
     this._audioRouter.restartElements();
   },
   stopElementSources(){
+    if(this._mpvAudioStartVersions) this._mpvAudioStartVersions.element++;
     this._reverseAudioStartVersion=(this._reverseAudioStartVersion||0)+1;
     this._audioRouter.stopElementSources();
     this._syncEngine?.invalidateExternalActivity();
   },
   startBufferSources(offset){
     if(this.playbackTransitionPending()) return;
-    this._audioRouter.startBufferSources(offset);
+    this._startAfterMpvMute('buffer',delayed=>this._audioRouter.startBufferSources(delayed?this.vTime():offset));
   },
   stopBufferSources(){
+    if(this._mpvAudioStartVersions) this._mpvAudioStartVersions.buffer++;
     this._audioRouter.stopBufferSources();
   },
   syncAudioDrift(){

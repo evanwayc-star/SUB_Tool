@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const { rendererLagProbe } = require('../scripts/diagnostics/renderer-lag-probe.js');
+const { isMainWindowTarget } = require('../scripts/acceptance/cdp-electron-harness.js');
 const source = readFileSync(new URL('../scripts/diagnostics/profile-renderer-stall.js', import.meta.url), 'utf8');
 const ast = parse(source, { ecmaVersion: 'latest' });
 // Execute the actual injected implementation, with only the native debugger
@@ -15,7 +16,7 @@ const definitions = ast.body.filter(node => node.type === 'FunctionDeclaration'
   || node.type === 'VariableDeclaration' && node.declarations.some(declaration =>
     ['PROFILE_TOKEN', 'START_PROFILE', 'STOP_PROFILE'].includes(declaration.id.name)))
   .map(node => source.slice(node.start, node.end)).join('\n');
-const host = vm.createContext({ require, rendererLagProbe });
+const host = vm.createContext({ require, rendererLagProbe, isMainWindowTarget });
 vm.runInContext(definitions, host);
 const commands = vm.runInContext('({ start: START_PROFILE, stop: STOP_PROFILE })', host);
 const other = vm.runInContext("({ start: profileCommand('start', 'second'), stop: profileCommand('stop', 'second') })", host);
@@ -33,10 +34,11 @@ async function reached(native, command) {
   expect(native.calls).toContain(command);
 }
 
-function fixture({ attached = false, fail = null, hold = null, detachFailures = 0, holdRenderer = false } = {}) {
+function fixture({ attached = false, fail = null, hold = null, detachFailures = 0, holdRenderer = false,
+  cleanupFailures = 0, holdCleanup = false } = {}) {
   const calls = [];
   const debuggerAdapter = new EventEmitter();
-  const timers = new Map(), listeners = new Set(); let next = 0, releaseRenderer;
+  const timers = new Map(), listeners = new Set(); let next = 0, releaseRenderer, releaseCleanup;
   const page = vm.createContext({ window: {}, performance: { now: () => 0 }, Date,
     document: { visibilityState: 'visible', addEventListener: (_, handler) => listeners.add(handler),
       removeEventListener: (_, handler) => listeners.delete(handler) },
@@ -64,8 +66,14 @@ function fixture({ attached = false, fail = null, hold = null, detachFailures = 
   });
   let destroyed = false;
   const webContents = { debugger: debuggerAdapter, isDestroyed: () => destroyed,
+    getURL: () => 'file:///SUB_Tool/dist/index.html',
     async executeJavaScript(code) {
       if (destroyed) throw new Error('renderer destroyed');
+      if (code.includes('delete window[totalKey]') && cleanupFailures-- > 0) throw new Error('renderer cleanup failed');
+      if (code.includes('delete window[totalKey]') && holdCleanup) {
+        holdCleanup = false;
+        await new Promise((_, reject) => { releaseCleanup = () => reject(new Error('late renderer cleanup failure')); });
+      }
       const result = vm.runInContext(code, page);
       if (holdRenderer) { holdRenderer = false; await new Promise(resolve => { releaseRenderer = resolve; }); }
       return result;
@@ -73,11 +81,20 @@ function fixture({ attached = false, fail = null, hold = null, detachFailures = 
   };
   const window = { getParentWindow: () => null, webContents };
   const foreignCalls = [];
+  let foreignAttached = false;
+  const foreignDebugger = Object.assign(new EventEmitter(), {
+    isAttached: () => foreignAttached,
+    attach() { foreignAttached = true; foreignCalls.push('attach'); },
+    detach() { foreignAttached = false; foreignCalls.push('detach'); foreignDebugger.emit('detach'); },
+    async sendCommand(command) { foreignCalls.push(command); return {}; },
+  });
   const foreignWindow = { getParentWindow: () => null, webContents: {
+    getURL: () => 'file:///SUB_Tool/electron/queue.html',
+    debugger: foreignDebugger, isDestroyed: () => false,
     async executeJavaScript(code) { foreignCalls.push(code); return 999; },
   } };
   let windows = [window];
-  const remote = vm.createContext({ require: () => ({ BrowserWindow: { getAllWindows: () => windows } }) });
+  const remote = vm.createContext({ URL, require: () => ({ BrowserWindow: { getAllWindows: () => windows } }) });
   return {
     calls, debuggerAdapter, timers, listeners, foreignCalls,
     foreignWindowFirst: () => { windows = [foreignWindow, window]; },
@@ -86,10 +103,23 @@ function fixture({ attached = false, fail = null, hold = null, detachFailures = 
     run: code => vm.runInContext(code, remote),
     release: () => release?.(),
     releaseRenderer: () => releaseRenderer?.(),
+    releaseCleanup: () => releaseCleanup?.(),
+    cleanupIsWaiting: () => typeof releaseCleanup === 'function',
+    failedTokens: () => Array.from(remote.__subtoolDiagnosticProfileFailedProbes || []),
   };
 }
 
 describe('CPU diagnostic owns only its debugger session', () => {
+  it('starts on the main renderer even when the queue window is listed first', async () => {
+    const native = fixture();
+    native.foreignWindowFirst();
+    expect(await native.run(commands.start)).toBe('ok');
+    await native.run(lag.start);
+    expect(native.foreignCalls).toEqual([]);
+    expect(native.timers.size).toBe(1);
+    await native.run(lag.stop);
+    await native.run(commands.stop);
+  });
   it('rejects an existing attachment without starting or detaching another caller', async () => {
     const native = fixture({ attached: true });
     const result = await native.run(commands.start).catch(error => error);
@@ -181,6 +211,84 @@ describe('CPU diagnostic owns only its debugger session', () => {
     expect(native.calls.filter(value => value === 'detach')).toHaveLength(2);
   });
 
+  it('a later CLI can recover an already cancelled owner whose detach failed', async () => {
+    const native = fixture({ detachFailures: 1 });
+    const recover = vm.runInContext("profileCommand('recover', 'later')", host);
+    await native.run(commands.start);
+    await native.run(lag.start);
+    await expect(native.run(commands.stop)).rejects.toThrow('native detach failed');
+    expect(native.attached()).toBe(true);
+    expect(await native.run(recover)).toBe(true);
+    expect(native.attached()).toBe(false);
+    expect(native.timers.size).toBe(0);
+    expect(native.listeners.size).toBe(0);
+    expect(await native.run(other.start)).toBe('ok');
+    await native.run(other.stop);
+  });
+
+  it('a later CLI recovers a failed old renderer cleanup without touching a newer profiler', async () => {
+    const native = fixture({ cleanupFailures: 1 });
+    const recover = vm.runInContext("profileCommand('recover', 'later')", host);
+    await native.run(commands.start);
+    await native.run(lag.start);
+    await expect(native.run(lag.stop)).rejects.toThrow('renderer cleanup failed');
+    await native.run(commands.stop);
+    await native.run(other.start);
+    await native.run(otherLag.start);
+    expect(native.timers.size).toBe(2);
+    expect(await native.run(recover)).toBe(true);
+    expect(native.attached()).toBe(true);
+    expect(native.timers.size).toBe(1);
+    expect(await native.run(otherLag.read)).toBe(0);
+    await native.run(otherLag.stop);
+    await native.run(other.stop);
+    expect(native.timers.size).toBe(0);
+    expect(native.listeners.size).toBe(0);
+  });
+
+  it('a late failed cleanup cannot recreate a stale token after another recovery succeeds', async () => {
+    const native = fixture({ cleanupFailures: 1, holdCleanup: true });
+    const recover = vm.runInContext("profileCommand('recover', 'later')", host);
+    await native.run(commands.start);
+    await native.run(lag.start);
+    await expect(native.run(lag.stop)).rejects.toThrow('renderer cleanup failed');
+    await native.run(commands.stop);
+    const first = native.run(recover).catch(error => error);
+    for (let index = 0; index < 20 && !native.cleanupIsWaiting(); index++) await Promise.resolve();
+    expect(native.cleanupIsWaiting()).toBe(true);
+    expect(await native.run(recover)).toBe(true);
+    expect(native.timers.size).toBe(0);
+    expect(native.failedTokens()).toEqual([]);
+    native.releaseCleanup();
+    expect((await first).message).toBe('late renderer cleanup failure');
+    expect(native.failedTokens()).toEqual([]);
+    expect(await native.run(recover)).toBe(true);
+    expect(native.failedTokens()).toEqual([]);
+  });
+
+  it('recovery waits for a cancelled profiler startup before releasing its owner', async () => {
+    const native = fixture({ hold: 'Profiler.start' });
+    const recover = vm.runInContext("profileCommand('recover', 'later')", host);
+    const starting = native.run(commands.start).catch(error => error);
+    await reached(native, 'Profiler.start');
+    const stopping = native.run(commands.stop);
+    const recovering = native.run(recover);
+    await Promise.resolve();
+    expect(native.attached()).toBe(true);
+    expect(native.calls).not.toContain('detach');
+    native.release();
+    expect(await starting).toMatchObject({ message: '診斷 profile 已取消或被取代' });
+    await stopping;
+    expect(await recovering).toBe(true);
+    expect(native.attached()).toBe(false);
+    expect(native.calls.filter(value => value === 'detach')).toHaveLength(1);
+    const restarting = native.run(other.start);
+    for (let index = 0; index < 20 && native.calls.filter(value => value === 'Profiler.start').length < 2; index++) await Promise.resolve();
+    native.release();
+    expect(await restarting).toBe('ok');
+    await native.run(other.stop);
+  });
+
   it('external detach after failed release revokes the retained owner before a foreign reattachment', async () => {
     const native = fixture({ detachFailures: 1 });
     await native.run(commands.start);
@@ -201,6 +309,17 @@ describe('CPU diagnostic owns only its debugger session', () => {
     expect(native.attached()).toBe(false);
     expect(native.calls).not.toContain('Profiler.stop');
     expect(native.calls.filter(value => value === 'detach')).toHaveLength(2);
+  });
+
+  it('a later CLI recovers a failed startup whose first detach failed', async () => {
+    const native = fixture({ fail: 'Profiler.enable', detachFailures: 1 });
+    const recover = vm.runInContext("profileCommand('recover', 'later')", host);
+    await expect(native.run(commands.start)).rejects.toThrow('native command failed: Profiler.enable');
+    expect(native.attached()).toBe(true);
+    expect(await native.run(recover)).toBe(true);
+    expect(native.attached()).toBe(false);
+    expect(native.calls.filter(value => value === 'detach')).toHaveLength(2);
+    expect(native.calls).not.toContain('Profiler.stop');
   });
 
   it('a late stop reply cannot detach a foreign session attached while native stop was pending', async () => {
@@ -300,9 +419,10 @@ describe('CPU diagnostic owns only its debugger session', () => {
       setInterval: callback => { const id = ++next; timers.set(id, callback); return id; },
       clearInterval: id => timers.delete(id),
     });
-    const remote = vm.createContext({ require: () => ({ BrowserWindow: { getAllWindows: () => [{
+    const remote = vm.createContext({ URL, require: () => ({ BrowserWindow: { getAllWindows: () => [{
       getParentWindow: () => null, webContents: {
         debugger: { isAttached: () => true },
+        getURL: () => 'file:///SUB_Tool/dist/index.html',
         executeJavaScript: code => vm.runInContext(code, page),
       },
     }] } }) });
@@ -311,10 +431,11 @@ describe('CPU diagnostic owns only its debugger session', () => {
       evaluate(code) { return Promise.resolve().then(() => vm.runInContext(code, remote)); }
       close() {}
     }
-    const processAdapter = { argv: ['node', 'fixture', '123'], _debugProcess() {}, exitCode: 0 };
+    const processAdapter = Object.assign(new EventEmitter(), { argv: ['node', 'fixture', '123'], _debugProcess() {}, exitCode: 0 });
     await vm.runInNewContext(source, {
       require: name => name === 'child_process' ? {} : name === 'node:crypto' ? require(name)
-        : name.includes('cdp-electron-harness') ? { CdpClient, getJSON: async () => [{ webSocketDebuggerUrl: 'fixture' }] }
+        : name.includes('main-inspector') ? { connectMainInspector: async () => new CdpClient() }
+        : name.includes('cdp-electron-harness') ? { CdpClient, isMainWindowTarget, getJSON: async () => [{ webSocketDebuggerUrl: 'fixture' }] }
           : { rendererLagProbe },
       process: processAdapter, setTimeout: callback => { callback(); return 1; },
       console: { log() {}, error() {} },
@@ -323,4 +444,52 @@ describe('CPU diagnostic owns only its debugger session', () => {
     expect(timers.size).toBe(0);
     expect(listeners.size).toBe(0);
   });
+
+  it.each([
+    ['SIGINT', 'start', 130, null], ['SIGTERM', 'lag-read', 143, null],
+    ['SIGINT', 'start', 130, 'detach'], ['SIGTERM', 'lag-read', 143, 'lag'],
+  ])(
+    'the real CLI releases its profiler and lag probe on %s during %s (exit %s, cleanup fault: %s)', async (signal, phase, exitCode, fault) => {
+      const native = fixture({ detachFailures: fault === 'detach' ? 1 : 0 });
+      let now = 0, sent = false, closed = 0, cleanupFailed = false;
+      class Clock extends Date { static now() { return now; } }
+      const processAdapter = Object.assign(new EventEmitter(), {
+        argv: ['node', 'fixture', '123'], _debugProcess() {}, exitCode: 0, stdout: { write() {} },
+      });
+      class CdpClient {
+        async connect() {}
+        async evaluate(code) {
+          if (fault === 'lag' && !cleanupFailed && code.includes(')("lag-stop",')) {
+            cleanupFailed = true;
+            throw new Error('temporary renderer cleanup transport failure');
+          }
+          const value = await native.run(code);
+          if (!sent && code.includes(`)(${JSON.stringify(phase)},`)) {
+            sent = true;
+            processAdapter.emit(signal);
+          }
+          return value;
+        }
+        close() { closed++; }
+      }
+      await vm.runInNewContext(source, {
+        require: name => name === 'child_process' ? {} : name === 'node:crypto' ? require(name)
+          : name.includes('main-inspector') ? { connectMainInspector: async () => new CdpClient() }
+          : name.includes('cdp-electron-harness') ? { CdpClient, isMainWindowTarget, getJSON: async () => [{ webSocketDebuggerUrl: 'fixture' }] }
+            : { rendererLagProbe },
+        process: processAdapter, Date: Clock, setTimeout: callback => { now += 2000; callback(); return 1; },
+        console: { log() {}, error() {} },
+      });
+      expect(sent).toBe(true);
+      expect(processAdapter.exitCode).toBe(exitCode);
+      expect(now).toBeLessThan(10000);
+      expect(native.attached()).toBe(false);
+      expect(native.timers.size).toBe(0);
+      expect(native.listeners.size).toBe(0);
+      expect(processAdapter.eventNames()).toEqual([]);
+      expect(closed).toBe(1);
+      expect(await native.run(other.start)).toBe('ok');
+      await native.run(other.stop);
+    },
+  );
 });

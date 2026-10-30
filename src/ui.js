@@ -4,11 +4,17 @@
    狀態列 / Toast / OSD / 對話框 / 面板開合 / 快取管理對話框
    ============================================================================== */
 import { $ } from './dom.js';
+import { State } from './state.js';
 import { Media } from './media.js';
 import { emit } from './events.js';
 import { getNativePreviewRuntime } from './media-player-adapter.js';
 
 /* 狀態列 / toast / modal */
+export function renderProjectIdentity({name}={}) {
+  const label=name||'未命名專案';
+  document.title=label+' — SUB TOOL';
+}
+
 // X6：狀態點除顏色外提供文字等價（aria-label），供報讀器與非顏色辨識
 const _DOT_LABEL = { ok: '就緒', err: '錯誤', busy: '處理中', '': '閒置' };
 let _statusLocked = false;
@@ -311,18 +317,29 @@ async function openCacheDialog() {
       },
     },
     { label: '清除快取', act: () => {
-        const confirmation = openModal('確認清除', '<div style="padding:6px 2px">將刪除所有中央快取，以及目前影片在 .subtool_Cache 內對應的快取項目；其他素材與舊版留下的項目不受影響。<br>下次開啟同檔可能需要重新轉檔。確定？</div>', [
+        if (!session.isCurrent()) return;
+        // 清除資格屬於使用者看到的母素材，不能在確認後才讀取新專案的路徑。
+        const sourcePath = State.mediaPath || null;
+        const ownsSource = () => (State.mediaPath || null) === sourcePath;
+        let clearing = false;
+        const sourceLabel = sourcePath ? `<br><b style="word-break:break-all">${esc(sourcePath)}</b>` : '';
+        const confirmation = openModal('確認清除', '<div style="padding:6px 2px">將刪除所有中央快取，以及目前影片在 .subtool_Cache 內對應的快取項目；其他素材與舊版留下的項目不受影響。' + sourceLabel + '<br>下次開啟同檔可能需要重新轉檔。確定？</div>', [
           { label: '確定清除', primary: true, act: async () => {
+            if (!confirmation.isCurrent() || clearing) return;
+            if (!ownsSource()) {
+              confirmation.close();
+              showToast('目前影片已變更，請重新開啟快取管理並確認');
+              return;
+            }
+            clearing = true;
             try {
-              const State = (await import('./state.js')).State;
-              if (!confirmation.isCurrent()) return;
-              const r = await DESK.cacheClearAll(State.mediaPath || null);
-              if (!confirmation.isCurrent()) return;
+              const r = await DESK.cacheClearAll(sourcePath);
+              if (!confirmation.isCurrent() || !ownsSource()) return;
               showToast(`已清除快取，釋放 ${_fmtBytes(r.bytes)}`);
               confirmation.close();
             } catch (error) {
-              if (confirmation.isCurrent()) showToast('清除快取失敗：' + error.message);
-            }
+              if (confirmation.isCurrent() && ownsSource()) showToast('清除快取失敗：' + error.message);
+            } finally { clearing = false; }
             },
           },
           { label: '取消', act: openCacheDialog },

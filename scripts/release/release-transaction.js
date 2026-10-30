@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { isDeepStrictEqual } = require('node:util');
 
 function _readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -39,8 +40,8 @@ function _productionSourceFiles(sourceFiles) {
   if (!Array.isArray(sourceFiles)) return [];
   return sourceFiles
     .map((file) => String(file).replaceAll('\\', '/'))
-    .filter((file) => /^(?:src|electron|shared|scripts)\//.test(file)
-      || /^(?:index\.html|vite\.config\.mjs)$/.test(file));
+    .filter((file) => /^(?:src|electron|shared|scripts|font)\//.test(file)
+      || /^(?:index\.html|vite\.config\.mjs|package(?:-lock)?\.json)$/.test(file));
 }
 
 function _isNewerReleaseVersion(next, current) {
@@ -75,6 +76,19 @@ function _gitJson(rootDir, revision, filePath) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   return JSON.parse(output);
+}
+
+function _gitPaths(rootDir, args) {
+  // -z 保留中文字型資料夾及空白；逐行解析會把 Git quoted path 當成檔名。
+  return execFileSync('git', args, {
+    cwd: rootDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).split('\0').filter(Boolean);
+}
+
+function _withoutReleaseVersion(manifest) {
+  delete manifest.version;
+  if (manifest.packages?.['']) delete manifest.packages[''].version;
+  return manifest;
 }
 
 function _releaseEvidenceBase(rootDir) {
@@ -117,14 +131,28 @@ function _releaseEvidenceBase(rootDir) {
 
 function collectProductionSourceFiles({ rootDir }) {
   const evidenceBase = _releaseEvidenceBase(rootDir);
-  const tracked = _gitLines(rootDir, [
+  const tracked = _gitPaths(rootDir, [
     'diff',
-    '--name-only',
+    '--name-only', '-z',
     evidenceBase,
     '--',
   ]);
-  const untracked = _gitLines(rootDir, ['ls-files', '--others', '--exclude-standard']);
-  return [...new Set(_productionSourceFiles([...tracked, ...untracked]))].sort();
+  const untracked = _gitPaths(rootDir, ['ls-files', '-z', '--others', '--exclude-standard']);
+  const candidates = [...new Set(_productionSourceFiles([...tracked, ...untracked]))].sort();
+  const manifests = candidates.filter(file => /^package(?:-lock)?\.json$/.test(file));
+  if (!manifests.length) return candidates;
+  const existing = new Set(_gitPaths(rootDir, [
+    'ls-tree', '-r', '--name-only', '-z', evidenceBase, '--', ...manifests,
+  ]));
+  return candidates.filter(file => {
+    if (!manifests.includes(file)) return true;
+    if (!existing.has(file) || !fs.existsSync(path.join(rootDir, file))) return true;
+    // prepare 自己寫入的根版號不能成為下一次封裝的證據；依賴的版號仍須比對。
+    return !isDeepStrictEqual(
+      _withoutReleaseVersion(_gitJson(rootDir, evidenceBase, file)),
+      _withoutReleaseVersion(_readJson(path.join(rootDir, file))),
+    );
+  });
 }
 
 function _inspectReleaseState({ packageJson, packageLock, changelog, sourceFiles }) {

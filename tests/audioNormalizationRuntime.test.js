@@ -123,6 +123,48 @@ describe('audio-normalization-runtime.js', () => {
       expect(res.isSilence).toBe(false);
     });
 
+    it('短音訊有可聽峰值但整體響度不可測時，使用單遍處理而不是無聲 bypass', async () => {
+      const report = { input_i: '-inf', input_tp: '-0.00', input_lra: '0', input_thresh: '-70', target_offset: 'inf' };
+      const calls = [];
+      const runtime = createAudioNormalizationRuntime({ createTempPath: () => 'tmp/short.wav',
+        execute: async (args, opts) => { calls.push({ args, opts }); if (opts.jobId === 'loudnorm-p1') opts.onStderr(JSON.stringify(report)); },
+      });
+      const result = await runtime.normalize('short.wav', { maximumAmplitude: -6, targetLoudness: -12 });
+      expect(calls[1].opts.jobId).toBe('loudnorm-p2');
+      const filter = calls[1].args[calls[1].args.indexOf('-af') + 1];
+      expect(filter).toContain('loudnorm=');
+      expect(filter).not.toContain('measured_I=');
+      expect(result.isSilence).toBe(false);
+      expect(result.report).toBeNull();
+    });
+
+    it.each([
+      { input_i: '-18', input_tp: '-2', input_lra: '5', input_thresh: '-28', target_offset: '6' },
+      { input_i: '-inf', input_tp: '-inf', input_lra: '0', input_thresh: '-inf', target_offset: '0' },
+    ])('Pass 1 輸出報告後仍失敗時，丟棄量測並使用單遍濾鏡：%j', async report => {
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const calls = [];
+      try {
+        const runtime = createAudioNormalizationRuntime({
+          createTempPath: () => 'tmp/fallback.wav',
+          execute: async (args, opts) => {
+            calls.push({ args, opts });
+            if (opts.jobId === 'loudnorm-p1') {
+              opts.onStderr(JSON.stringify(report));
+              throw new Error('Pass 1 process failed after producing output');
+            }
+          },
+        });
+        const result = await runtime.normalize('master.wav', { maximumAmplitude: -6, targetLoudness: -12 });
+        const filter = calls[1].args[calls[1].args.indexOf('-af') + 1];
+        expect(calls[1].opts.jobId).toBe('loudnorm-p2');
+        expect(filter).toContain('loudnorm=');
+        expect(filter).not.toContain('measured_I=');
+        expect(result.report).toBeNull();
+        expect(result.isSilence).toBe(false);
+      } finally { warning.mockRestore(); }
+    });
+
     it('無聲保護：若 Pass 1 檢測到極弱無聲，Pass 2 維持 0 dB 不放大', async () => {
       const calls = [];
       const runtime = createAudioNormalizationRuntime({

@@ -17,7 +17,7 @@ import { recordHistory } from './history.js';
 import { Project } from './project.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { emit } from './events.js';
-import { decodeText, downloadBytes, escapeHTML, readFile } from './util.js';
+import { decodeText, downloadBytes, escapeHTML, readFile, encodeUTF16LE } from './util.js';
 import { alignTranscriptToEvidence, parseTranscriptLines, resolveRecognitionAlignment, buildTranscriptAlignmentDiagnostic } from './transcript-alignment.js';
 import {
   getAsrSession,
@@ -474,8 +474,8 @@ function downloadAlignmentDiagnostic(diagnostic) {
     .replace(/[:.]/gu, '-')
     .replace('T', '_')
     .replace(/Z$/u, '');
-  const bytes = new TextEncoder().encode(`${JSON.stringify(diagnostic, null, 2)}\n`);
-  downloadBytes(bytes, `SUBTool_文本匹配診斷_${timestamp}.json`, 'application/json');
+  const bytes = encodeUTF16LE(`${JSON.stringify(diagnostic, null, 2)}\n`);
+  downloadBytes(bytes, `SUBTool_文本匹配診斷_${timestamp}.json`, 'application/json;charset=utf-16le');
   return true;
 }
 

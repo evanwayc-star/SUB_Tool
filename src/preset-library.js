@@ -7,11 +7,12 @@ import { STYLE_DEFAULTS, BUILTIN_PRESETS, effStyle, getPresets, getAllPresets, i
 import { refreshStyleSummaries, applyCueStylePatch } from './subtitles.js';
 import { recordHistory } from './history.js';
 import { renderVideoSub, refreshMpvSubs } from './video-renderer.js';
-import { escapeHTML, downloadBytes, bytesToB64, b64ToBytes } from './util.js';
-import { presetExportRelativePath } from './export-job-engine.js';
+import { escapeHTML, downloadBytes, bytesToB64, b64ToBytes, encodeUTF16LE, decodeText, readFile } from './util.js';
+import { presetExportRelativePath, allocateExportFileNames } from './export-job-engine.js';
 
 export function initPresetLibrary({ styleChanged }){
   let managerSession = null;
+  let importRevision = 0;
   const ownsDraft = draft => draft.ownerTracks === State.tracks && draft.ownerCues === State.cues
     && getPresets()[draft.ui] === draft.preset
     && draft.targets.tracks.every(i => State.tracks[i] === draft.trackOwners[i])
@@ -193,8 +194,8 @@ export function initPresetLibrary({ styleChanged }){
       return;
     }
 
-    function _importPresets(j){
-      if (!owner.isCurrent()) return;
+    function _importPresets(j, ownsImport){
+      if (!ownsImport()) return;
       if(!Array.isArray(j)){ showToast('檔案格式不符：非樣式陣列'); return; }
       const list = [...getPresets()];
       let count = 0;
@@ -218,35 +219,38 @@ export function initPresetLibrary({ styleChanged }){
       const presets = getPresets(); // 只匯出自訂樣式
       if(!presets.length){ showToast('沒有自訂樣式可匯出'); return; }
       if (IS_DESKTOP && DESK.exportDirectory) {
-        const files = presets.map(p => {
+        const files = allocateExportFileNames(presets.map(p => {
           // 淨化規則在 export-job-engine.js 的 presetExportRelativePath()；主程序另由 file-authority.js 圍堵路徑。
           // group 是匯入資料的顯示名稱，形狀驗證不會移除 "../.."；若把它直接
           // 傳給主程序的 path.join，正規化後可能跳出使用者
           // 選定的資料夾，把檔案寫到磁碟上任意位置。
           const str = JSON.stringify([p], null, 2);
-          const bytes = new TextEncoder().encode(str);
+          const bytes = encodeUTF16LE(str);
           return { name: presetExportRelativePath(p), b64: bytesToB64(bytes) };
-        });
+        }));
         DESK.exportDirectory(files).then(dir => {
           if (owner.isCurrent() && dir) showToast('已匯出至：' + dir.split(/[\\/]/).pop());
         }).catch(error => { if(owner.isCurrent()) showToast('匯出失敗：' + error.message); });
       } else {
         const str = JSON.stringify(presets, null, 2);
-        const bytes = new TextEncoder().encode(str);
+        const bytes = encodeUTF16LE(str);
         const name = `presets_${new Date().toISOString().replace(/\D/g,'').slice(0,14)}.json`;
-        downloadBytes(bytes, name, 'application/json'); showToast('已匯出樣式設定');
+        downloadBytes(bytes, name, 'application/json;charset=utf-16le'); showToast('已匯出樣式設定');
       }
       return;
     }
     if(impB){
+      // 新的選檔意圖立即撤銷舊匯入；取消或失敗也不能讓舊讀取重新取得權威。
+      const revision = ++importRevision;
+      const ownsImport = () => owner.isCurrent() && revision === importRevision;
       if(IS_DESKTOP && DESK.importDirectory){
         DESK.importDirectory().then(files => {
-          if (!owner.isCurrent()) return;
+          if (!ownsImport()) return;
           if(!files || !files.length) return;
           const all = [];
           for (const f of files) {
             try {
-              const str = new TextDecoder().decode(b64ToBytes(f.b64));
+              const str = decodeText(b64ToBytes(f.b64));
               const j = JSON.parse(str);
 
               // Extract OS folder from path if it exists
@@ -256,24 +260,26 @@ export function initPresetLibrary({ styleChanged }){
 
               const items = validPresetList(Array.isArray(j) ? j : [j]);
               items.forEach(p => {
-                 if (osFolder) p.group = osFolder; // Map OS folder to UI folder
+                 // 匯出路徑可能經過淨化或去重；明示的群組才是原始 identity。
+                 // 舊檔未保存 group 時，仍沿資料夾結構還原。
+                 if (osFolder && !p.group) p.group = osFolder;
                  all.push(p);
               });
             } catch(e){}
           }
-          if (all.length) _importPresets(all);
-        }).catch(error => { if(owner.isCurrent()) showToast('匯入失敗：' + error.message); });
+          if (all.length) _importPresets(all, ownsImport);
+        }).catch(error => { if(ownsImport()) showToast('匯入失敗：' + error.message); });
       }else{
         const fi=document.createElement('input'); fi.type='file'; fi.accept='.json'; fi.multiple=true;
         fi.onchange=async()=>{
-          if (!owner.isCurrent()) return;
+          if (!ownsImport()) return;
           if(!fi.files.length)return;
           const all = [];
           for (const f of Array.from(fi.files)) {
-            try { const j = JSON.parse(await f.text()); if (Array.isArray(j)) all.push(...j); else all.push(j); } catch(e){}
-            if (!owner.isCurrent()) return;
+            try { const j = JSON.parse(decodeText(await readFile(f))); if (Array.isArray(j)) all.push(...j); else all.push(j); } catch(e){}
+            if (!ownsImport()) return;
           }
-          if (all.length) _importPresets(all);
+          if (all.length) _importPresets(all, ownsImport);
         };
         fi.click();
       }

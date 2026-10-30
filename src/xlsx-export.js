@@ -229,11 +229,17 @@ function sheetXml(headerLabel, cues, fps, dropFrame) {
     + `</worksheet>`;
 }
 
-/* ---- 分頁名稱清理（Excel 限制：≤31 字、不含 \/?*:[] 、不能空白）---- */
+/* ---- 分頁名稱清理（Excel 限制：≤31 個 UTF-16 單元、不含 \/?*:[] 、不能空白）---- */
+function truncateSheetName(name, limit) {
+  const prefix = name.substring(0, limit);
+  // emoji／罕字佔兩個單元；不能留下半個字元，否則 UTF-8 編碼會改成 U+FFFD。
+  return prefix.replace(/[\uD800-\uDBFF]$/, '');
+}
+
 function safeSheetName(raw) {
-  let s = String(raw ?? '').trim()
-    .replace(/[\\/?*:\[\]\u0000-\u001F\uFFFE\uFFFF]/g, '_')
-    .substring(0, 31).replace(/^[\s']+|[\s']+$/g, '');
+  let s = truncateSheetName(String(raw ?? '').trim()
+    .replace(/[\\/?*:\[\]\u0000-\u001F\uFFFE\uFFFF]/g, '_'), 31)
+    .replace(/^[\s']+|[\s']+$/g, '');
   if (s.toLowerCase() === 'history') s += '_';
   return s || '軌道';
 }
@@ -257,7 +263,7 @@ function buildXLSX(trackDataList, fps, dropFrame) {
     let counter = 2;
     while (usedNames.has(final.toLowerCase())) {
       const suffix = '_' + counter++;
-      final = name.substring(0, 31 - suffix.length) + suffix;
+      final = truncateSheetName(name, 31 - suffix.length) + suffix;
     }
     usedNames.add(final.toLowerCase());
     sheetNames.push(final);

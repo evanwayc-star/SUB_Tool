@@ -99,6 +99,8 @@ beforeEach(()=>{
   adapters.player.setImageGuide.mockResolvedValue(undefined);
   preview.width=8;preview.height=8;preview.style.display='none';preview.style.visibility='visible';preview.hidden=false;
   const ctx=contextFor(preview);ctx.fillStyle='#000';ctx.fillRect(0,0,8,8);ctx.fillStyle='#00f';ctx.fillRect(0,2,8,4);
+  video.src='blob:preview-video';
+  Object.defineProperty(video,'readyState',{configurable:true,value:2});
   video.style.visibility='visible';video.style.display='block';
   const layer=document.getElementById('imageLayer');layer.innerHTML='';layer._imageHtml='';
 });
@@ -137,6 +139,19 @@ it('a completed image dimension cache cannot cross a media epoch when a same URL
 });
 
 describe('capturePreviewFrame uses the visible presenter and frozen timeline image plan',()=>{
+  it.each(['image-only','audio-only','blank'].flatMap(kind=>['absent','empty'].map(source=>[kind,source])))('%s timeline with %s video src captures the synthetic background without waiting for a video frame',async(kind,source)=>{
+    if(source==='absent') video.removeAttribute('src');
+    else video.setAttribute('src','');
+    Object.defineProperty(video,'readyState',{configurable:true,value:0});
+    State.duration=kind==='blank'?0:4;
+    State.externalAudioEnd=kind==='audio-only'?4:0;
+    State.clips=kind==='image-only'?[image()]:[];
+    const result=await capturePreviewFrame();
+    expect(result).toMatchObject({presenter:'black',time:1});
+    expect(pixel(result,4,2)).toEqual(kind==='image-only'?[0,255,0]:[0,0,0]);
+    expect(adapters.Media.withPresentedFrame).not.toHaveBeenCalled();
+  });
+
   it.each(['layer plan','DOM overlay','captured pixels'])('adjacent frame arithmetic keeps the incoming image visible in %s',async caller=>{
     const previous=image({id:'previous',path:'blob:red',in:29/30,out:33/30});
     const incoming=image({id:'incoming',offset:Seq.clipEnd(previous)});
@@ -283,6 +298,29 @@ describe('capturePreviewFrame uses the visible presenter and frozen timeline ima
     const snapshot=await pending;
     expect(snapshot.time).toBe(1);
     expect(pixel(snapshot,0,0)).toEqual([255,0,0]);
+  });
+
+  it.each([1,2])('waits for the requested HTML frame with readyState=%s before pairing pixels with the frozen timecode',async readyState=>{
+    const ready=deferred();
+    Object.defineProperty(video,'readyState',{configurable:true,value:readyState});
+    adapters.Media.displayTime.mockReturnValue(3);
+    adapters.Media.withPresentedFrame.mockImplementation(async(time,capture)=>{
+      await ready.promise;
+      return capture({adapter:adapters.player,isCurrent:()=>true});
+    });
+    let completed=false;
+    const pending=capturePreviewFrame().then(result=>{completed=true;return result;});
+    await Promise.resolve();
+    const capturedBeforeFrame=completed;
+    video.testColor=[0,255,0];
+    Object.defineProperty(video,'readyState',{configurable:true,value:2});
+    ready.resolve();
+    try{
+      const result=await pending;
+      expect(result).toMatchObject({presenter:'html5',time:3});
+      expect(pixel(result,4,2)).toEqual([0,255,0]);
+      expect(capturedBeforeFrame).toBe(false);
+    }finally{video.testColor=[255,0,0];}
   });
 
   it('rejects native pixels after a newer seek or source owns the pending capture',async()=>{

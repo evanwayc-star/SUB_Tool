@@ -172,7 +172,7 @@ describe('公開 sequence placement 到實際音訊節點',()=>{
       vi.spyOn(globalThis,'fetch').mockImplementation(async(_url,{headers}={})=>{
         if(cancelled&&!release)await new Promise(resolve=>{release=resolve;});
         const match=/bytes=(\d+)-(\d+)/.exec(headers.Range),part=proxy.subarray(Number(match[1]),Number(match[2])+1);
-        return {ok:true,status:206,arrayBuffer:async()=>part.buffer.slice(part.byteOffset,part.byteOffset+part.length)};
+        return new Response(part,{status:206});
       });
       Object.defineProperty(video,'duration',{configurable:true,value:3.533});
       const pending=Media.loadVideoFile(new File([new Uint8Array(8)],'unsupported.mxf'));

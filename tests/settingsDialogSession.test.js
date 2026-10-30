@@ -19,6 +19,40 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  it('快捷鍵 JSON 以 UTF-16LE BOM 下載，匯入後按儲存能保留中文快捷鍵', async () => {
+    State.keymap = {toggle_play_pause:[{key:'中'}]};
+    let downloaded;
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL(blob) { downloaded = blob; return 'blob:keymap'; }
+      static revokeObjectURL() {}
+    });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    try {
+      showSettingsModal();
+      document.getElementById('settingsExportBtn').click();
+      const bytes = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(new Uint8Array(reader.result));
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(downloaded);
+      });
+      expect([...bytes.subarray(0, 2)]).toEqual([0xff, 0xfe]);
+      expect(downloaded.type).toBe('application/json;charset=utf-16le');
+      expect(JSON.parse(Buffer.from(bytes).toString('utf16le').slice(1))).toEqual({
+        _type:'subtool-keymap',version:1,keymap:{toggle_play_pause:[{key:'中'}]},
+      });
+      const input = document.getElementById('settingsImportFile');
+      document.getElementById('settingsImportBtn').click();
+      Object.defineProperty(input, 'files', {configurable:true,value:[new File([bytes], 'keymap.json')]});
+      input.dispatchEvent(new Event('change', {bubbles:true}));
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(expect.stringContaining('已匯入')));
+      document.getElementById('settingsSaveBtn').click();
+      expect(State.keymap.toggle_play_pause).toEqual([{key:'中'}]);
+    } finally {
+      anchorClick.mockRestore();
+    }
+  });
+
   it('已取消的舊視窗匯入完成時，不改寫新視窗的暫存設定', async () => {
     showSettingsModal();
     const oldInput = document.getElementById('settingsImportFile');

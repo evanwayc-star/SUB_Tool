@@ -230,12 +230,7 @@ async function openCueEditModal(c){
     `<div style="display:grid;grid-template-columns:auto auto auto auto;gap:8px 14px;padding:10px 2px 4px;font-size:12px;align-items:center">`+
     STYLE_FIELDS.map(styleRow).join('')+
     `</div></details>`;
-  const doConfirm=()=>{
-    if(!current()) return;
-    const ta=$('cueEditTa');
-    if(!ta) return;
-    let val=ta.innerText;
-    if(val.endsWith('\n') && !orig.endsWith('\n')) val=val.slice(0,-1);
+  const readStyleDraft=()=>{
     // 以開窗時的原有樣式為草稿，只提交真正改動的欄位。
     // 座標／角度等未提供控件的設定不重建；owner 逐欄合併期間的背景提交。
     const style={...owner.baseline.style};
@@ -245,9 +240,19 @@ async function openCueEditModal(c){
       const raw=type==='num' ? (vi.value.trim()==='' ? NaN : +vi.value) : type==='bool' ? (vi.value==='1') : vi.value;
       if(Object.is(raw,effNow[k])) continue;
       const value=normalizeStyleValue(k,raw,true);
-      if(value==null){ showToast(label+'的樣式值無效'); return; }
+      if(value==null){ showToast(label+'的樣式值無效'); return null; }
       style[k]=value;
     }
+    return style;
+  };
+  const doConfirm=()=>{
+    if(!current()) return;
+    const ta=$('cueEditTa');
+    if(!ta) return;
+    let val=ta.innerText;
+    if(val.endsWith('\n') && !orig.endsWith('\n')) val=val.slice(0,-1);
+    const style=readStyleDraft();
+    if(!style) return;
     const result=owner.commit({text:val,style});
     if(result.ok) session.close({committed:true});
   };
@@ -281,6 +286,8 @@ async function openCueEditModal(c){
       if(e.key==='Enter') e.stopPropagation();
       if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){
         e.preventDefault();
+        const style=readStyleDraft();
+        if(!style) return;
         const sel=window.getSelection();
         if(!sel.rangeCount)return;
         const range=sel.getRangeAt(0).cloneRange();
@@ -303,6 +310,7 @@ async function openCueEditModal(c){
           textBefore,
           textAfter,
           timelineTime:Media.displayTime(),
+          style,
         });
         if(!result.ok)return;
         const nc=result.cue;
@@ -310,7 +318,7 @@ async function openCueEditModal(c){
         setTimeout(()=>{
           if(request!==cueEditRequest || $('modalBg')?.classList.contains('show') || !State.cues.includes(nc)) return;
           const nr=sublist.querySelector(`.sub-row[data-id="${nc.id}"]`);
-          if(nr)nr.dispatchEvent(new MouseEvent('dblclick',{bubbles:false,cancelable:true,view:window}));
+          if(nr)nr.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,view:window}));
         },30);
       } else if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doConfirm();}
     });

@@ -8,7 +8,7 @@ import { expect, it } from 'vitest';
 import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const require=createRequire(import.meta.url);
-const { ROOT, ELECTRON, reservePort, getJSON, waitFor, CdpClient, trackElectron, stopElectron, verifiedCleanup }
+const { isMainWindowTarget, ROOT, ELECTRON, reservePort, getJSON, waitFor, CdpClient, trackElectron, stopElectron, verifiedCleanup }
   =require('../scripts/acceptance/cdp-electron-harness.js');
 const {ffmpeg:FFMPEG}=nativeTestTools();
 
@@ -32,7 +32,7 @@ it.skipIf(process.platform!=='win32'||!existsSync(ELECTRON)||!existsSync(FFMPEG)
   let client;
   try{
     const target=await waitFor(async()=>(await getJSON(`http://127.0.0.1:${port}/json/list`))
-      .find(item=>item.type==='page'&&item.title==='SUB TOOL'),'圖片預覽主視窗',10000);
+      .find(isMainWindowTarget),'圖片預覽主視窗',10000);
     client=new CdpClient(target.webSocketDebuggerUrl);await client.connect();
     await waitFor(()=>client.evaluate(`Boolean(document.querySelector('#imageLayer img')?.complete
       &&document.querySelector('#imageLayer img')?.naturalWidth)`),'實際圖片元素',10000);

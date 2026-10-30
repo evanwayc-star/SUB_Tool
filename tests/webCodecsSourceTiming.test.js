@@ -47,7 +47,7 @@ async function source(args){
   vi.stubGlobal('fetch',vi.fn(async(unused,{headers}={})=>{
     const range=/bytes=(\d+)-(\d+)/.exec(headers?.Range||'');
     const result=range?bytes.subarray(Number(range[1]),Number(range[2])+1):bytes;
-    return {ok:true,status:200,headers:{get:()=>null},arrayBuffer:async()=>result.buffer.slice(result.byteOffset,result.byteOffset+result.byteLength)};
+    return new Response(result,{status:200});
   }));
   const parsed=await demuxIndex(file);
   const physical=new Map(parsed.index.map(sample=>[hash(bytes.subarray(sample.offset,sample.offset+sample.size)),sample.timestamp]));

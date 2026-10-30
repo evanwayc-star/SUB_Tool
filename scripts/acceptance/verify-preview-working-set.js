@@ -6,7 +6,7 @@ const fs=require('fs');
 const os=require('os');
 const path=require('path');
 const {spawn}=require('child_process');
-const {ROOT,ELECTRON,delay,reservePort,getJSON,waitFor,CdpClient, trackElectron, stopElectron,verifiedCleanup}=require('./cdp-electron-harness.js');
+const { isMainWindowTarget, ROOT,ELECTRON,delay,reservePort,getJSON,waitFor,CdpClient, trackElectron, stopElectron,verifiedCleanup}=require('./cdp-electron-harness.js');
 const PACKAGED_EXE=process.env.SUBTOOL_ACCEPTANCE_EXE ? path.resolve(process.env.SUBTOOL_ACCEPTANCE_EXE) : null;
 
 async function main(){
@@ -31,7 +31,7 @@ async function main(){
     child.stderr.on('data',chunk=>errors.push(chunk.toString()));
     const target=await waitFor(async()=>{
       const targets=await getJSON(`http://127.0.0.1:${port}/json/list`);
-      return targets.find(item=>item.type==='page'&&item.title==='SUB TOOL');
+      return targets.find(isMainWindowTarget);
     },'主視窗啟動',30000);
     client=new CdpClient(target.webSocketDebuggerUrl);
     await client.connect(); await client.send('Runtime.enable');

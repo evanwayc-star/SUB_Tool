@@ -5,11 +5,44 @@ import {
   dbToLinear,
   linearToDb,
   normalizeLimiterOptions,
+  normalizeAudioLimiterSpec,
+  audioLimiterFilter,
   isAudioReportSilence,
   buildLimiterFilter,
 } from '../shared/audio-loudness.cjs';
 
 describe('audio-loudness.cjs — 限制器與 ITU-R BS.1770 純規則', () => {
+  it.each([null, '', '  ', true, false, [], {}].map(value => [value]))(
+    '缺失或錯型量測值 %j 不可轉成零後用於交付的雙遍濾鏡', value => {
+      const valid = { input_i: '-21', input_tp: '-8', input_lra: '3', input_thresh: '-31', target_offset: '0.4' };
+      const spec = { max: -6, min: -12, reports: { 0: { ...valid, input_i: value }, 1: valid } };
+      const normalized = normalizeAudioLimiterSpec(spec);
+      expect(normalized.reports['0']).toBeUndefined();
+      expect(normalized.reports['1'].input_i).toBe(-21);
+      expect(audioLimiterFilter(spec, 0)).not.toContain('measured_I=');
+      expect(audioLimiterFilter(spec, 1)).toContain('measured_I=-21.0');
+    },
+  );
+
+  it('實際靜音報告的 -inf 仍保留，並維持原音不放大', () => {
+    const spec = { max: -6, min: -12, reports: { 0: {
+      input_i: '-inf', input_tp: '-inf', input_lra: '0', input_thresh: '-inf', target_offset: '0',
+    } } };
+    expect(normalizeAudioLimiterSpec(spec).reports['0'].input_i).toBe('-inf');
+    expect(audioLimiterFilter(spec, 0)).toBe('anull');
+  });
+
+  it.each([
+    ['input_i', 20], ['input_tp', 100], ['input_lra', -1], ['input_lra', 100],
+    ['input_thresh', 1], ['target_offset', 1000],
+  ])('非靜音的 %s=%s 超出 FFmpeg 範圍時不能用於雙遍交付', (field, value) => {
+    const report = { input_i: -21, input_tp: -8, input_lra: 3, input_thresh: -31, target_offset: .4 };
+    const spec = { max: -6, min: -12, reports: { 0: { ...report, [field]: value }, 1: report } };
+    const normalized = normalizeAudioLimiterSpec(spec);
+    expect(normalized.reports['0']).toBeUndefined();
+    expect(audioLimiterFilter(spec, 0)).not.toContain('measured_I=');
+    expect(audioLimiterFilter(spec, 1)).toContain('measured_I=-21.0');
+  });
   describe('dbToLinear 與 linearToDb 數值換算', () => {
     it('0 dB 換算為線性振幅 1.0', () => {
       expect(dbToLinear(0)).toBeCloseTo(1.0, 5);
@@ -72,6 +105,22 @@ describe('audio-loudness.cjs — 限制器與 ITU-R BS.1770 純規則', () => {
   });
 
   describe('isAudioReportSilence 無聲門限判定', () => {
+    it('短音訊沒有整體響度但可聽峰值存在時，不得當成靜音', () => {
+      expect(isAudioReportSilence({ input_i: '-inf', input_tp: '-0.00', input_thresh: '-70.00' })).toBe(false);
+      expect(isAudioReportSilence({ input_i: '-inf', input_tp: '-95.00', input_thresh: '-70.00' })).toBe(true);
+      expect(isAudioReportSilence({ input_i: '-inf', input_tp: '-inf', input_thresh: '-70.00' })).toBe(true);
+    });
+    it.each([-70, -72, -80])('整體響度不可測且峰值僅 %s dB 時，保存無聲保護而不放大底噪', peak => {
+      const report = { input_i: '-inf', input_tp: peak, input_lra: 0, input_thresh: -70, target_offset: 'inf' };
+      const spec = { max: -6, min: -12, reports: { 0: report } };
+      expect(isAudioReportSilence(report)).toBe(true);
+      expect(normalizeAudioLimiterSpec(spec).reports[0]).toEqual(report);
+      expect(audioLimiterFilter(spec)).toBe('anull');
+    });
+    it('相對量測門檻低於 -70 不代表整體響度低於絕對門檻', () => {
+      expect(isAudioReportSilence({ input_i: '-60.05', input_tp: '-57.06', input_thresh: '-70.05' })).toBe(false);
+      expect(isAudioReportSilence({ input_i: '-65.05', input_tp: '-62.06', input_thresh: '-75.05' })).toBe(false);
+    });
     it('低於 -70 LKFS 絕對門限判定為無聲', () => {
       expect(isAudioReportSilence({ input_i: '-75.2', input_thresh: '-80.0' })).toBe(true);
       expect(isAudioReportSilence({ input_i: '-99.0', input_thresh: '-99.0' })).toBe(true);

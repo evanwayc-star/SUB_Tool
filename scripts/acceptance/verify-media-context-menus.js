@@ -17,6 +17,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 const {
+  isMainWindowTarget,
   ROOT,
   ELECTRON,
   delay,
@@ -133,7 +134,7 @@ function ids(items) {
   try {
     const target = await waitFor(async () => {
       const targets = await getJSON(`http://127.0.0.1:${port}/json/list`);
-      return targets.find(item => item.type === 'page' && item.title === 'SUB TOOL');
+      return targets.find(isMainWindowTarget);
     }, 'SUB Tool 主視窗啟動', 20000);
     client = new CdpClient(target.webSocketDebuggerUrl);
     await client.connect();

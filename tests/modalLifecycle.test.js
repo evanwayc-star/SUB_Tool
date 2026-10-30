@@ -19,6 +19,54 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers(); delete window.subtool; });
 
 describe('modal lifecycle ownership', () => {
+  it('does not clear a newly opened source through an older cache confirmation', async () => {
+    const { State } = await import('../src/state.js');
+    State.mediaPath = 'C:/media/original.mp4';
+    window.subtool = { cacheInfo: vi.fn().mockResolvedValue({ folders: 2 }),
+      cacheClearAll: vi.fn().mockResolvedValue({ bytes: 100 }) };
+    await ui.openCacheDialog();
+    document.querySelectorAll('#modalFoot button')[1].click();
+    const confirm = document.querySelector('#modalFoot .primary');
+    // An OS project-open intent can replace the source while this modal remains visible.
+    State.mediaPath = 'C:/media/new-project.mp4';
+    await confirm.onclick();
+    expect(window.subtool.cacheClearAll).not.toHaveBeenCalled();
+    expect(document.getElementById('toast').textContent).toContain('影片已變更');
+  });
+
+  it('clears only the displayed source and ignores its completion after the source changes', async () => {
+    const { State } = await import('../src/state.js');
+    State.mediaPath = 'C:/media/original.mp4';
+    const io = deferred();
+    window.subtool = { cacheInfo: vi.fn().mockResolvedValue({ folders: 2 }),
+      cacheClearAll: vi.fn(() => io.promise) };
+    await ui.openCacheDialog();
+    document.querySelectorAll('#modalFoot button')[1].click();
+    expect(document.getElementById('modalBody').textContent).toContain('C:/media/original.mp4');
+    const action = document.querySelector('#modalFoot .primary').onclick();
+    await document.querySelector('#modalFoot .primary').onclick();
+    await Promise.resolve();
+    expect(window.subtool.cacheClearAll).toHaveBeenCalledWith('C:/media/original.mp4');
+    expect(window.subtool.cacheClearAll).toHaveBeenCalledOnce();
+    State.mediaPath = 'C:/media/new-project.mp4';
+    io.resolve({ bytes: 100 });
+    await action;
+    expect(document.getElementById('toast').textContent).not.toContain('已清除快取');
+  });
+
+  it('reports successful cleanup for the confirmed source', async () => {
+    const { State } = await import('../src/state.js');
+    State.mediaPath = 'C:/media/original.mp4';
+    window.subtool = { cacheInfo: vi.fn().mockResolvedValue({ folders: 2 }),
+      cacheClearAll: vi.fn().mockResolvedValue({ bytes: 100 }) };
+    await ui.openCacheDialog();
+    document.querySelectorAll('#modalFoot button')[1].click();
+    await document.querySelector('#modalFoot .primary').onclick();
+    expect(window.subtool.cacheClearAll).toHaveBeenCalledExactlyOnceWith('C:/media/original.mp4');
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+    expect(document.getElementById('toast').textContent).toBe('已清除快取，釋放 100 B');
+  });
+
   it('resolves dismissed and replaced prompts as cancellation', async () => {
     const first = ui.promptModal('First', 'Name');
     document.getElementById('modalBg').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));

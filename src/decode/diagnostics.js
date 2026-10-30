@@ -9,6 +9,7 @@
    目的：確認目前環境的 H.264 解碼、seek、色彩與吞吐量。 */
 import { demuxFile } from './demux.js';
 import { keyIndexBefore } from './sample-index.js';
+import { readMediaBytes, WHOLE_MEDIA_BYTE_LIMIT } from './response-reader.js';
 
 export async function pocTest(url, opts = {}){
   const hasDom = typeof document !== 'undefined';
@@ -16,13 +17,14 @@ export async function pocTest(url, opts = {}){
   const src = url || (el && (el.currentSrc || el.src));
   if(!src) throw new Error('無來源；請傳入 url 或先載入影片');
 
-  const ab = await (await fetch(src)).arrayBuffer();
+  const ab = await readMediaBytes(await fetch(src), WHOLE_MEDIA_BYTE_LIMIT);
 
   const t0 = performance.now();
   const { config, chunks, info } = await demuxFile(ab);
   const tDemux = performance.now() - t0;
 
   const dec = new TrackDecoder();
+  try{
   const sup = await dec.init({ config, chunks }, opts);
 
   // 隨機存取：seek 到 3 秒
@@ -34,6 +36,7 @@ export async function pocTest(url, opts = {}){
   // 畫到右下角 PoC canvas，驗證色彩／正確性
   let painted = false;
   if(frame){
+    try{
     if(hasDom && !opts.noPreview){
       let cv = opts.canvas || document.getElementById('wcPocCanvas');
       if(!cv && document.body){
@@ -47,14 +50,13 @@ export async function pocTest(url, opts = {}){
         painted = true;
       }
     }
-    frame.close();
+    }finally{frame.close();}
   }
 
   // 順序解 60 幀量 fps
   const seq = await dec.decodeSeq(0, 60);
   const decodeFps = seq.frames>0 ? Math.round(seq.frames / (seq.ms/1000)) : 0;
 
-  dec.close();
   return {
     ok: true,
     codec: config.codec, hwSupported: !!sup.supported, hwUsed: sup.hardwareAcceleration,
@@ -65,6 +67,7 @@ export async function pocTest(url, opts = {}){
     tDemuxMs: Math.round(tDemux), tSeekMs: Math.round(tSeek), frameTsUs, painted,
     seqFrames: seq.frames, seqMs: Math.round(seq.ms), decodeFps,
   };
+  }finally{dec.close();}
 }
 
 class TrackDecoder {
@@ -87,7 +90,8 @@ class TrackDecoder {
       output: (frame)=>{ if(this._collect) this._collect.push(frame); else frame.close(); },
       error: (e)=>{ console.error('[WC] VideoDecoder error', e && (e.message||e)); },
     });
-    this.dec.configure(cfg);
+    try{this.dec.configure(cfg);}
+    catch(error){this.close();throw error;}
     this.hwUsed = cfg.hardwareAcceleration;
     return { supported:true, hardwareAcceleration:cfg.hardwareAcceleration };
   }
@@ -106,37 +110,43 @@ class TrackDecoder {
     const ki = this._keyframeIdxBefore(tUs);
     const ti = this._targetIdx(tUs, ki);
     const frames = []; this._collect = frames;
+    let best = null;
+    try{
     for(let i=ki;i<=ti;i++){
       const c = this.chunks[i];
       this.dec.decode(new EncodedVideoChunk({ type:c.type, timestamp:c.timestamp, duration:c.duration, data:c.data }));
     }
     await this.dec.flush();
-    this._collect = null;
-    let best = null;
     for(const f of frames){
-      if(!best){ best = f; continue; }
-      if(Math.abs(f.timestamp - tUs) < Math.abs(best.timestamp - tUs)){ best.close(); best = f; }
-      else f.close();
+      if(!best||Math.abs(f.timestamp-tUs)<Math.abs(best.timestamp-tUs)) best=f;
     }
     return best;
+    }finally{
+      this._collect=null;
+      // 成功只交出一張給 caller；decode／flush 失敗則全數由本 owner 釋放。
+      for(const frame of frames) if(frame!==best) frame.close();
+    }
   }
 
   async decodeSeq(startUs, count){
     if(!this.dec) throw new Error('decoder 未初始化');
     const ki = this._keyframeIdxBefore(startUs);
     const end = Math.min(this.chunks.length, ki + count);
-    let n = 0; const frames = [];
+    const frames = [];
     this._collect = frames;
     const t0 = performance.now();
+    try{
     for(let i=ki;i<end;i++){
       const c = this.chunks[i];
       this.dec.decode(new EncodedVideoChunk({ type:c.type, timestamp:c.timestamp, duration:c.duration, data:c.data }));
     }
     await this.dec.flush();
-    this._collect = null;
     const ms = performance.now() - t0;
-    for(const f of frames){ n++; f.close(); }
-    return { frames:n, ms };
+    return { frames:frames.length, ms };
+    }finally{
+      this._collect=null;
+      for(const frame of frames) frame.close();
+    }
   }
 
   close(){ try{ this.dec && this.dec.close(); }catch(e){} this.dec = null; }

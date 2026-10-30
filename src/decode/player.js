@@ -23,6 +23,7 @@ import { emit } from '../events.js';
 import { fadeAlphaAtTimeline, visualStackPlan, imageSourceUrl, stageBox } from '../image-compositor-engine.js';
 import { showToast } from '../ui.js';
 import { demuxFile, demuxIndex, presentationSamples, SampleReader, MemReader } from './demux.js';
+import { readMediaBytes, WHOLE_MEDIA_BYTE_LIMIT } from './response-reader.js';
 
 import { timestampOffset, sourceFrameTargetUs } from '../../shared/media-source-clock.cjs';
 import { keyIndexBefore } from './sample-index.js';
@@ -33,9 +34,6 @@ const LOOKAHEAD_US = 400e3;        // 播放時往前解到 t+0.4s 即停（淺�
 const MAX_QUEUE   = 10;            // decoder 未輸出佇列上限（decodeQueueSize）
 const MAX_BACKWARD_FRAMES = 45;
 const MAX_TOTAL_FRAMES = 75;
-// 整檔 demux 上限——【僅退路用】（moov 不在檔頭／不支援 Range 的來源）。
-// 主路 demuxIndex 只讀檔頭建索引、位元組按需抓，記憶體與影片長度脫鉤，不受此限。
-const SIZE_CAP = 1500 * 1024 * 1024;
 
 /* FPS-SYNC：量化後仍須落在來源 trim-out 之前；固定減一段秒數會跨到前一格。 */
 function clipSourceTargetUs(t, clip){
@@ -46,24 +44,24 @@ function clipSourceTargetUs(t, clip){
    reader 與有界位元組視窗，避免不同來源游標互相淘汰仍在等待的讀取。 */
 const _demuxCache = new Map();
 function demuxCached(url){
-  let p = _demuxCache.get(url);
-  if(!p){
-    p = (async()=>{
+  let entry = _demuxCache.get(url);
+  if(!entry){
+    const controller = new AbortController();
+    entry = { controller, promise: null };
+    entry.promise = (async()=>{
       // 主路：串流式（只讀檔頭 moov 建索引）——長片 proxy 動輒 2–4GB，整檔路吃不下
       try{
-        const r = await demuxIndex(url);
+        const r = await demuxIndex(url, { signal: controller.signal });
         if(!r.index.length) throw new Error('無視訊樣本');
         return { config:r.config, index:presentationSamples(r.index,r.info), keyIdx:r.keyIdx,
           createReader:()=>new SampleReader(url,r.index,r.maxEnd), streaming:true };
       }catch(e){
+        if(controller.signal.aborted) throw e;
         console.warn('[WC] 串流式索引失敗，退回整檔:', e && (e.message||e));
       }
       // 退路：整檔抽出（moov 不在檔頭的外來檔／不支援 Range 的來源）
-      const resp = await fetch(url);
-      const len = +resp.headers.get('content-length') || 0;
-      if(len > SIZE_CAP){ try{ resp.body && resp.body.cancel(); }catch(e){} throw new Error('檔案過大'); }
-      const ab = await resp.arrayBuffer();
-      if(ab.byteLength > SIZE_CAP) throw new Error('檔案過大');
+      const resp = await fetch(url, { signal: controller.signal });
+      const ab = await readMediaBytes(resp, WHOLE_MEDIA_BYTE_LIMIT);
       const r = await demuxFile(ab);
       if(!r.chunks.length) throw new Error('無視訊樣本');
       const keyIdx = [];
@@ -72,16 +70,18 @@ function demuxCached(url){
       return { config:r.config, index:presentationSamples(r.chunks,r.info), keyIdx,
         createReader:()=>new MemReader(r.chunks), streaming:false };
     })();
-    p.catch(()=>{ if(_demuxCache.get(url)===p) _demuxCache.delete(url); }); // 失敗不留快取
-    _demuxCache.set(url, p);
+    const owner = entry;
+    entry.promise.catch(()=>{ if(_demuxCache.get(url)===owner) _demuxCache.delete(url); }); // 失敗不留快取
+    _demuxCache.set(url, entry);
   }
-  return p;
+  return entry.promise;
 }
 
 function releaseUnusedDemux(liveUrls){
-  for(const url of _demuxCache.keys()){
+  for(const [url, entry] of _demuxCache){
     if(liveUrls.has(url)) continue;
     _demuxCache.delete(url);
+    entry.controller.abort();
     // Payload readers belong to their SourceStream; removing a cached index
     // must never cancel another layer's current byte window.
   }
@@ -163,6 +163,7 @@ class SourceStream {
 
   /* 每幀呼叫：推進解碼並回傳「最接近且不晚於 tUs」的 frame（無則 null）。 */
   request(tUs){
+    this.readFailure=null;
     if(this.state === 'idle'){ this.load(); return null; }
     if(this.state !== 'ready') return null;
     const shift=Math.round(timestampOffset(getPlayerAdapter().sourceClock?.(this.url))*1e6);
@@ -197,7 +198,10 @@ class SourceStream {
       if(lastOutTs >= tUs + LOOKAHEAD_US) break;
       // 串流式：位元組按需抓，尚未到位就這幀先不餵（下一幀再來；期間沿用上一張畫面）
       const data = this.reader.data(this.fedIdx);
-      if(!data){ this.reader.ensure(this.fedIdx); starved = true; break; }
+      if(!data){
+        this.readFailure=this.reader.failure?.(this.fedIdx)||null;
+        this.reader.ensure(this.fedIdx); starved = true; break;
+      }
       const c = cs[this.fedIdx++];
       this.frameDurations.set(c.timestamp,c.duration||this.frameDurUs);
       try{ this.dec.decode(new EncodedVideoChunk({ type:c.type, timestamp:c.timestamp, duration:c.duration, data })); }
@@ -398,7 +402,7 @@ export const WCPreview = {
 
     // 第一遍：逐層取得 frame（多軌合成；clipsAt 已由下而上排序）
     const layers = [];
-    let requiredLayers=0,readyLayers=0,requiredVideoLayers=0;
+    let requiredLayers=0,readyLayers=0,requiredVideoLayers=0,failedLayer=false;
     for(const c of acts){
       const isTop = (c === acts[acts.length-1]);
       const vt = State.videoTracks[c.vtrack||0] || {};
@@ -407,6 +411,7 @@ export const WCPreview = {
       if(c.type==='image'){
         if(alpha<=0.003) continue;
         const entry=this._imageFor(c);
+        if(entry?.state==='failed') failedLayer=true;
         if(entry?.state==='ready'){
           layers.push({src:entry.image,sw:entry.image.naturalWidth,sh:entry.image.naturalHeight,vt,clip:c,alpha});
           readyLayers++;
@@ -418,9 +423,13 @@ export const WCPreview = {
       if(!url) continue;
       const key = url + '#' + (c.vtrack||0);
       const ss=this._sourceFor(url,key);
-      if(ss.state === 'failed') continue; // 不可解時不能發布半個 stack。
+      if(ss.state === 'failed'){
+        if(alpha>0.003) failedLayer=true;
+        continue; // 不可解時不能發布半個 stack。
+      }
       const su = clipSourceTargetUs(t,c);
       const f = ss.request(su);
+      if(ss.state==='failed'&&alpha>0.003) failedLayer=true;
       // FPS-SYNC（I4）：有快取 frame 不代表已解到目標。以來源畫格的有效時窗
       // 判定可否提交完整 canvas；低 FPS 一格可涵蓋多個專案格，不能硬比 PTS 相等。
       const duration=f ? Number(ss.frameDuration?.(f) || f.duration || ss.frameDurUs || 33e3) : 0;
@@ -431,13 +440,18 @@ export const WCPreview = {
          target>=f.timestamp && target<f.timestamp+duration){
         layers.push({ src:f, sw:f.displayWidth||f.codedWidth, sh:f.displayHeight||f.codedHeight, vt, clip:c, alpha, ts:f.timestamp, duration, url });
         if(alpha>0.003) readyLayers++;
+      }else if(ss.readFailure&&alpha>0.003){
+        // 只有目標格尚缺且必要位元組已失敗才讓回；未來預取失敗不能撤下有效畫格。
+        failedLayer=true;
       }
     }
 
     // 所有作用層的畫格到齊才接管。冷 seek 時只畫下層會讓上層短暫消失；
     // 已接管且尺寸未變則保留上一張完整合成畫格，等缺的層解出後再更新。
     if(readyLayers<requiredLayers && !Media.inGap() && acts.length>0){
-      if(Media.webCodecsTakeover() && !resized){
+      // 尚在等 bytes／bitmap 可保留完整畫格；已失敗則讓回原 presenter，
+      // IO 仍能重試，只有完整新畫格到齊後才能重新接管。
+      if(!failedLayer && Media.webCodecsTakeover() && !resized){
         Media.setWebCodecsComposited(true); return;
       }
       this._setTakeover(false);

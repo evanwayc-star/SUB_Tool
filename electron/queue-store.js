@@ -93,8 +93,9 @@ function ensureDir(queueDir) {
 
 function writeAtomic(filePath, content) {
   const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tempPath, content, 'utf8');
   try {
+    // 寫入也可能在留下部分 bytes 後失敗；與發布共用同一私有檔收尾。
+    fs.writeFileSync(tempPath, content, 'utf8');
     fs.renameSync(tempPath, filePath);
   } catch (error) {
     try { fs.unlinkSync(tempPath); } catch (cleanupError) {}

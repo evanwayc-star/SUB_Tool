@@ -729,12 +729,20 @@ export async function capturePreviewFrame({nativePath,readBase64}={}){
     if(hasCanvas){
       const rect=stageBox({canvasW:preview.width,canvasH:preview.height,projectW:width,projectH:height});
       ctx.drawImage(preview,rect.x,rect.y,rect.w,rect.h,0,0,width,height);presenter='webcodecs';
-    }else if(video?.readyState>=2&&getComputedStyle(video).visibility!=='hidden'&&getComputedStyle(video).display!=='none'){
-      const rect=stageBox({canvasW:width,canvasH:height,projectW:video.videoWidth||width,projectH:video.videoHeight||height});
-      sourceFrame=document.createElement('canvas');sourceFrame.width=video.videoWidth||width;sourceFrame.height=video.videoHeight||height;
-      sourceFrame.getContext('2d').drawImage(video,0,0,sourceFrame.width,sourceFrame.height);
-      ctx.save();ctx.globalAlpha=stack.mixedImages?1:1-videoDarkness;
-      ctx.drawImage(sourceFrame,rect.x,rect.y,rect.w,rect.h);ctx.restore();presenter='html5';
+    }else if(video&&(video.currentSrc||video.getAttribute('src'))
+      &&getComputedStyle(video).visibility!=='hidden'&&getComputedStyle(video).display!=='none'){
+      // 無影片來源的圖片／純音訊時間軸保留黑底合成，不要求不存在的影片畫格。
+      // displayTime 可先反映尚在解碼的 seek；等可見 HTML presenter 證明目標格，
+      // 才能把實際像素與上方凍結的時間、圖片計畫配成同一張截圖。
+      await Media.withPresentedFrame(time,({isCurrent})=>{
+        if(!isCurrent()) throw Object.assign(new Error('截圖已被較新的播放操作取代'),{name:'AbortError'});
+        if(video.readyState<2) throw new Error('HTML 播放器尚未提供截圖畫格');
+        const rect=stageBox({canvasW:width,canvasH:height,projectW:video.videoWidth||width,projectH:video.videoHeight||height});
+        sourceFrame=document.createElement('canvas');sourceFrame.width=video.videoWidth||width;sourceFrame.height=video.videoHeight||height;
+        sourceFrame.getContext('2d').drawImage(video,0,0,sourceFrame.width,sourceFrame.height);
+        ctx.save();ctx.globalAlpha=stack.mixedImages?1:1-videoDarkness;
+        ctx.drawImage(sourceFrame,rect.x,rect.y,rect.w,rect.h);ctx.restore();presenter='html5';
+      });
     }
   }
   // 畫布與 ownership 在第一個 await 前一起凍結。held frame 的圖片與幾何已在

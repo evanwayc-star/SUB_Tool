@@ -133,4 +133,59 @@ describe('辨識專用 MP3 暫存壓縮', () => {
     expect(child.kill).toHaveBeenCalledTimes(1);
     expect(runtime.activeCount()).toBe(0);
   });
+
+  it('呼叫後立即取消，不啟動尚未開始的壓縮', async () => {
+    const compressor = { compress: vi.fn().mockResolvedValue({ b64: 'late' }) };
+    const runtime = createSpeechCompressionRuntime({ compressor });
+    const outcome = runtime.compress(createMono16kWav(), 'speech-before-start');
+
+    expect(runtime.cancel('speech-before-start')).toBe(true);
+
+    await expect(outcome).rejects.toMatchObject({ name: 'AbortError' });
+    expect(compressor.compress).not.toHaveBeenCalled();
+    expect(runtime.activeCount()).toBe(0);
+  });
+
+  it('native 完成後讀取 MP3 期間取消，也拒絕晚到結果並等待暫存清理', async () => {
+    let releaseRead, beginRead;
+    const readGate = new Promise(resolve => { releaseRead = resolve; });
+    const reading = new Promise(resolve => { beginRead = resolve; });
+    const removeFile = vi.fn().mockResolvedValue(undefined);
+    const runtime = createSpeechCompressionRuntime({ compressor: createSpeechAudioCompressor({
+      createTempPath: extension => `speech-cancel-output.${extension}`,
+      writeFile: vi.fn().mockResolvedValue(undefined),
+      execute: vi.fn().mockResolvedValue(undefined),
+      readFile: async () => { beginRead(); await readGate; return Buffer.from('encoded mp3'); },
+      removeFile,
+    }) });
+    const outcome = runtime.compress(createMono16kWav(), 'speech-during-read');
+    await reading;
+    expect(runtime.cancel('speech-during-read')).toBe(true);
+    expect(runtime.activeCount()).toBe(1);
+    expect(removeFile).not.toHaveBeenCalled();
+    releaseRead();
+
+    await expect(outcome).rejects.toMatchObject({ name: 'AbortError' });
+    expect(removeFile).toHaveBeenCalledTimes(2);
+    expect(runtime.activeCount()).toBe(0);
+  });
+
+  it('shutdown 封閉准入，取消退出也等舊工作清理後才恢復', async () => {
+    let finishCompression;
+    const compressor = { compress: vi.fn(() => new Promise(resolve => { finishCompression = resolve; })) };
+    const runtime = createSpeechCompressionRuntime({ compressor });
+    const outcome = runtime.compress(createMono16kWav(), 'speech-shutdown-owner').catch(error => error);
+    await vi.waitFor(() => expect(compressor.compress).toHaveBeenCalledOnce());
+    const closing = runtime.cancelAllAndWait();
+    await expect(runtime.compress(createMono16kWav(), 'speech-shutdown-new')).rejects.toMatchObject({ name: 'AbortError' });
+    expect(runtime.resume()).toBe(false);
+    await expect(runtime.compress(createMono16kWav(), 'speech-shutdown-resume')).rejects.toMatchObject({ name: 'AbortError' });
+    expect(compressor.compress).toHaveBeenCalledOnce();
+
+    finishCompression({ b64: 'late' });
+    expect(await outcome).toMatchObject({ name: 'AbortError' });
+    await closing;
+    compressor.compress.mockResolvedValueOnce({ b64: 'current' });
+    await expect(runtime.compress(createMono16kWav(), 'speech-after-resume')).resolves.toEqual({ b64: 'current' });
+  });
 });

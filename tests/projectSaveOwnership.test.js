@@ -119,6 +119,39 @@ describe('project save ownership',()=>{
     expect(getProjectDir()).toBeNull();expect(isProjectDirty()).toBe(true);
   });
 
+  it.each(['reset', 'open', 'saveAs', 'current'])('自動備份完成回報保留原工作區及儲存目標資格：%s', async change => {
+    const { setStatus } = await import('../src/ui.js');
+    vi.useFakeTimers();
+    await Project.saveAs();
+    const pending = deferred();
+    desk.writeProject.mockReturnValueOnce(pending.promise);
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+    expect(desk.writeProject).toHaveBeenCalledOnce();
+    const [backupPath, b64] = desk.writeProject.mock.calls[0];
+    expect(backupPath).toContain('C:/.subtool_AutoSave/project_');
+    expect([...Buffer.from(b64, 'base64').subarray(0, 2)]).toEqual([0xff, 0xfe]);
+    expect(decode(b64).cues[0].text).toBe('original');
+
+    if (change === 'reset') resetProject();
+    else if (change === 'open') await Project.loadDesktop({ path: 'C:/opened/new.subtool',
+      b64: Buffer.from(JSON.stringify({ app: 'SUB Tool', version: 3, fps: 24, media: {}, clips: [],
+        tracks: [{ name: '新專案' }], cues: [], notes: [] })).toString('base64') });
+    else if (change === 'saveAs') {
+      desk.saveProject.mockResolvedValueOnce('C:/renamed/new.subtool');
+      await Project.saveAs();
+    }
+    const directory = getProjectDir(), dirty = isProjectDirty();
+    setStatus('目前工作區就緒', 'ok');
+    pending.resolve(backupPath);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(setStatus.mock.calls.at(-1)).toEqual(change === 'current'
+      ? ['自動備份：' + backupPath.split('/').pop(), 'ok'] : ['目前工作區就緒', 'ok']);
+    expect(getProjectDir()).toBe(directory);
+    expect(isProjectDirty()).toBe(dirty);
+    expect(desk.writeProject).toHaveBeenCalledOnce();
+  });
+
   it('serializes saves and captures each requested snapshot before waiting',async()=>{
     await Project.saveAs();const io=deferred();desk.writeProject.mockReturnValueOnce(io.promise);
     State.cues[0].text='first';const first=Project.save();

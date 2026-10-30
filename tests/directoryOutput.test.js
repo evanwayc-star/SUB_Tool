@@ -41,7 +41,62 @@ function registeredExportDirectory(chosen, { canceled = false } = {}) {
   return { execute, grant };
 }
 
+function registeredExportSubtitle(target, { canceled = false, fsModule = fs } = {}) {
+  const source = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
+  const tree = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
+  const call = tree.body.map(node => node.expression).find(node =>
+    node?.callee?.object?.name === 'ipcMain' && node.callee.property?.name === 'handle'
+    && node.arguments?.[0]?.value === 'dialog:exportSub');
+  let execute;
+  vm.runInNewContext(source.slice(call.start, call.end), {
+    ipcMain: { handle: (name, handler) => { execute = handler; } },
+    dialog: { showSaveDialog: async () => ({ canceled, filePath: target }) },
+    fs: fsModule, Buffer, path,
+    writeDirectoryFiles: (directory, files) => writeDirectoryFiles(directory, files, { fsModule }),
+  });
+  return data => execute({}, { name: 'captions.srt', ext: 'srt', b64: Buffer.from(data).toString('base64') });
+}
+
 describe('native directory output public interface', () => {
+  it('actual single subtitle IPC preserves previous output after a partial write failure', async () => {
+    const { chosen } = fixture(); const target = path.join(chosen, 'captions.srt');
+    fs.writeFileSync(target, 'previous complete subtitles');
+    const faultFs = { ...fs, writeFileSync(destination, bytes, ...rest) {
+      fs.writeFileSync(destination, Buffer.from(bytes).subarray(0, 3), ...rest);
+      throw Object.assign(new Error('disk write failed'), { code: 'EIO' });
+    } };
+    const execute = registeredExportSubtitle(target, { fsModule: faultFs });
+    await expect(execute('new subtitles')).rejects.toMatchObject({ code: 'EIO' });
+    expect(fs.readFileSync(target, 'utf8')).toBe('previous complete subtitles');
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it('actual single subtitle IPC publishes complete bytes, including an intentionally empty file', async () => {
+    const { chosen } = fixture(); const target = path.join(chosen, 'captions.srt');
+    const execute = registeredExportSubtitle(target);
+    for (const bytes of [Buffer.from('完整字幕', 'utf16le'), Buffer.alloc(0)]) {
+      expect(await execute(bytes)).toBe(target);
+      expect(fs.readFileSync(target)).toEqual(bytes);
+    }
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it('single subtitle picker cancellation preserves the previous file', async () => {
+    const { chosen } = fixture(); const target = path.join(chosen, 'captions.srt');
+    fs.writeFileSync(target, 'previous');
+    expect(await registeredExportSubtitle(target, { canceled: true })('unused')).toBeNull();
+    expect(fs.readFileSync(target, 'utf8')).toBe('previous');
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it('single subtitle output blocked during publication reports failure instead of success or cancellation', async () => {
+    const { chosen } = fixture(); const target = path.join(chosen, 'captions.srt');
+    fs.mkdirSync(target);
+    await expect(registeredExportSubtitle(target)('subtitle')).rejects.toThrow();
+    expect(fs.statSync(target).isDirectory()).toBe(true);
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
   it('publishes nested style and subtitle bytes and safely replaces a normal file', () => {
     const { chosen } = fixture();
     fs.writeFileSync(path.join(chosen, 'old.srt'), 'old subtitle');
@@ -65,14 +120,38 @@ describe('native directory output public interface', () => {
     expect(fs.readFileSync(path.join(chosen, 'safe.srt'), 'utf8')).toBe('safe');
   });
 
-  it('actual exportDirectory IPC does not follow an existing directory junction outside picked root', async () => {
+  it('actual exportDirectory IPC reports partial output and does not follow an existing directory junction outside picked root', async () => {
     const { chosen, outside } = fixture();
     const sentinel = path.join(outside, 'preset.json'); fs.writeFileSync(sentinel, 'preserved');
     fs.symlinkSync(outside, path.join(chosen, 'group'), process.platform === 'win32' ? 'junction' : 'dir');
     const { execute, grant } = registeredExportDirectory(chosen);
-    expect(await execute({}, [file('group/preset.json', 'overwrite'), file('safe.json', 'safe')])).toBe(chosen);
+    await expect(execute({}, [file('group/preset.json', 'overwrite'), file('safe.json', 'safe')]))
+      .rejects.toThrow('匯出未完成：已寫入 1 個檔案，略過 1 個');
     expect(fs.readFileSync(sentinel, 'utf8')).toBe('preserved');
     expect(fs.readFileSync(path.join(chosen, 'safe.json'), 'utf8')).toBe('safe');
+    expect(grant).not.toHaveBeenCalled();
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it.each([
+    { name: '有效與無效混合', files: [file('safe.json', 'safe'), null], written: 1 },
+    { name: '全部無效', files: [null, { name: 'missing-content.json' }], written: 0 },
+  ])('$name 的非空匯出不會被當成成功或純選目錄', async ({ files, written }) => {
+    const { chosen } = fixture();
+    const { execute, grant } = registeredExportDirectory(chosen);
+    await expect(execute({}, files)).rejects.toThrow(`匯出未完成：已寫入 ${written} 個檔案，略過 ${files.length - written} 個`);
+    expect(fs.readdirSync(chosen)).toEqual(written ? ['safe.json'] : []);
+    if (written) expect(fs.readFileSync(path.join(chosen, 'safe.json'), 'utf8')).toBe('safe');
+    expect(grant).not.toHaveBeenCalled();
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it('全部被阻擋時回報零份輸出並保留既有目錄', async () => {
+    const { chosen } = fixture(); fs.mkdirSync(path.join(chosen, 'preset.json'));
+    const { execute, grant } = registeredExportDirectory(chosen);
+    await expect(execute({}, [file('preset.json', 'unsafe')]))
+      .rejects.toThrow('匯出未完成：已寫入 0 個檔案，略過 1 個');
+    expect(fs.statSync(path.join(chosen, 'preset.json')).isDirectory()).toBe(true);
     expect(grant).not.toHaveBeenCalled();
     expect(privateFiles(chosen)).toEqual([]);
   });
@@ -103,7 +182,7 @@ describe('native directory output public interface', () => {
     const original = path.join(outside, 'preset.json'); fs.writeFileSync(original, 'original');
     const target = path.join(chosen, 'preset.json'); fs.linkSync(original, target);
     const { execute } = registeredExportDirectory(chosen);
-    await execute({}, [file('preset.json', 'replacement')]);
+    expect(await execute({}, [file('preset.json', 'replacement')])).toBe(chosen);
     expect(fs.readFileSync(original, 'utf8')).toBe('original');
     expect(fs.readFileSync(target, 'utf8')).toBe('replacement');
     expect(fs.statSync(original).ino).not.toBe(fs.statSync(target).ino);

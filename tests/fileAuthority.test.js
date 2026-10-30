@@ -141,17 +141,21 @@ describe('FileAuthority', () => {
     })).toEqual(['D:\\Media\\master.mxf']);
   });
 
-  it('支援 SUB Tool UTF-16LE 與舊式 UTF-8 專案，讓可信開檔保留媒體重載流程', () => {
-    const project = { media: { path: 'D:\\Media\\master.mxf' } };
-    const utf16 = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(JSON.stringify(project), 'utf16le')]);
-    const utf16WithoutBom = Buffer.from(JSON.stringify(project), 'utf16le');
-    const utf8 = Buffer.from(JSON.stringify(project), 'utf8');
-
-    expect(collectProjectMediaPathsFromBuffer(utf16)).toEqual(['D:\\Media\\master.mxf']);
-    expect(collectProjectMediaPathsFromBuffer(utf16WithoutBom)).toEqual(['D:\\Media\\master.mxf']);
-    expect(collectProjectMediaPathsFromBuffer(utf8)).toEqual(['D:\\Media\\master.mxf']);
+  it('UTF-8 與兩種 UTF-16 位元序含／不含 BOM 都保留專案文字及精確媒體路徑', () => {
+    const project = { media: { path: 'D:\\素材\\𠮷😀.mxf' }, cues: [{ text: '繁體字幕𠮷😀' }] };
+    const json = JSON.stringify(project);
+    const utf16LE = Buffer.from(json, 'utf16le');
+    const utf16BE = Buffer.from(utf16LE).swap16();
+    const utf8 = Buffer.from(json, 'utf8');
+    for (const bytes of [utf8, Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), utf8]),
+      utf16LE, Buffer.concat([Buffer.from([0xFF, 0xFE]), utf16LE]),
+      utf16BE, Buffer.concat([Buffer.from([0xFE, 0xFF]), utf16BE])]) {
+      const storage = Buffer.concat([Buffer.from('before'), bytes, Buffer.from('after')]);
+      const view = storage.subarray(6, 6 + bytes.length);
+      expect(collectProjectMediaPathsFromBuffer(view)).toEqual(['D:\\素材\\𠮷😀.mxf']);
+      expect(parseProjectBuffer(view)).toEqual(project);
+    }
     expect(collectProjectMediaPathsFromBuffer(Buffer.from('{broken json'))).toEqual([]);
-    expect(parseProjectBuffer(utf16)).toEqual(project);
     expect(parseProjectBuffer(Buffer.from('{broken json'))).toBeNull();
   });
 

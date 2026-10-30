@@ -12,7 +12,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const QueueStore = require(path.join(ROOT, 'electron', 'queue-store.js'));
 const { DELIVERY_FRAME_RATES, exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
-const { CdpClient, getJSON, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
+const { isMainWindowTarget, CdpClient, getJSON, waitFor, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const activeApps = new Set();
 const activeClients = new Set();
@@ -43,27 +43,12 @@ async function reservePort() {
   });
 }
 
-async function waitUntil(fn, label, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await fn();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await delay(100);
-  }
-  throw new Error(`等待逾時：${label}${lastError ? `；${lastError.message}` : ''}`);
-}
-
 async function listTargets(port) {
   return getJSON(`http://127.0.0.1:${port}/json/list`);
 }
 
 async function waitForTarget(port, predicate, label) {
-  return waitUntil(
+  return waitFor(
     async () => (await listTargets(port)).find(predicate),
     label,
   );
@@ -73,6 +58,8 @@ async function connectTarget(target) {
   const client = new CdpClient(target.webSocketDebuggerUrl, { timeoutMs: 30000 });
   activeClients.add(client);
   await client.connect();
+  // URL 在 preload 及 renderer 初始化之前就可出現在 CDP 目標清單。
+  if (isMainWindowTarget(target)) await client.waitForApp();
   return client;
 }
 
@@ -100,7 +87,7 @@ async function launchApp(profileDir) {
   const app = { child, port, stderr, closed };
   activeApps.add(app);
   try {
-    await waitForTarget(port, target => target.type === 'page' && target.title === 'SUB TOOL', '主視窗啟動');
+    await waitForTarget(port, isMainWindowTarget, '主視窗啟動');
   } catch (error) {
     throw new Error(`${error.message}\n${stderr.join('')}`, { cause: error });
   }
@@ -175,7 +162,7 @@ function seedQueuedCapabilities(profileDir, entries) {
 
 async function restoreSeededCapabilities(app, mainClient, seedIds, { resume = true } = {}) {
   const queueClient = await openQueueMonitor(app, mainClient);
-  await waitUntil(
+  await waitFor(
     async () => {
       const snapshot = await queueClient.evaluate('window.queueAPI.getAll()');
       return snapshot.isPaused && seedIds.every(id => snapshot.jobs.some(job => job.id === id));
@@ -185,7 +172,7 @@ async function restoreSeededCapabilities(app, mainClient, seedIds, { resume = tr
   for (const id of seedIds) {
     await queueClient.evaluate(`window.queueAPI.clearJob(${JSON.stringify(id)})`);
   }
-  await waitUntil(
+  await waitFor(
     async () => {
       const snapshot = await queueClient.evaluate('window.queueAPI.getAll()');
       return seedIds.every(id => !snapshot.jobs.some(job => job.id === id));
@@ -279,33 +266,46 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const app = await launchApp(profile);
     const mainTarget = await waitForTarget(
       app.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得主視窗',
     );
     const mainClient = await connectTarget(mainTarget);
+    const projectPath = path.join(profile, '驗收專案.subtool');
+    const projectData = { app: 'SUB Tool', version: 3, fps: 25, media: {}, clips: [], tracks: [{ name: '字幕' }], cues: [], notes: [] };
+    const projectB64 = Buffer.from(JSON.stringify(projectData)).toString('base64');
+    await mainClient.evaluate(`window.SUB.Project.loadDesktop(${JSON.stringify({ path: projectPath, b64: projectB64 })})`);
+    const identity = await mainClient.evaluate(`({ title: document.title, extraBar: !!document.querySelector('.project-titlebar') })`);
+    expect(identity).toEqual({ title: '驗收專案 — SUB TOOL', extraBar: false });
+    // 驗收實際 Windows 原生標題，不能只靠 renderer 自己的 document.title。
+    await waitFor(() => {
+      const title = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; (Get-Process -Id ${app.child.pid}).MainWindowTitle`],
+      { encoding: 'utf8', windowsHide: true }).trim();
+      return title === identity.title;
+    }, '原生視窗標題與專案名稱一致');
     const queueClient = await openQueueMonitor(app, mainClient);
 
-    await waitUntil(() => queueClient.evaluate('typeof window.queueAPI?.exactFrameRate === "function"'), 'sandbox 佇列 preload 已提供格率規則');
+    await waitFor(() => queueClient.evaluate('typeof window.queueAPI?.exactFrameRate === "function"'), 'sandbox 佇列 preload 已提供格率規則');
     const standardRates = DELIVERY_FRAME_RATES.map(item => item.value);
     const actualRates = await queueClient.evaluate(`${JSON.stringify(standardRates)}.map(value => window.queueAPI.exactFrameRate(value))`);
     expect(actualRates).toEqual(standardRates.map(value => exactDeliveryFrameRate(value)));
 
     // 模擬 renderer 完成既有「是否儲存」確認後，要求主行程關閉主視窗。
     await mainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await mainClient.evaluate('document.visibilityState') === 'hidden',
       '主視窗隱藏且保留 renderer',
     );
 
     const secondInstanceError = await launchSecondInstance(profile);
     expect(secondInstanceError).not.toContain('Object has been destroyed');
-    await waitUntil(
+    await waitFor(
       async () => await mainClient.evaluate('document.visibilityState') === 'visible',
       '由第二執行個體重新顯示主視窗',
     );
 
     await mainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await mainClient.evaluate('document.visibilityState') === 'hidden',
       '再次隱藏主視窗',
     );
@@ -319,16 +319,16 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(clicked).toBe(true);
     await waitForTarget(
       app.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '主視窗重新開啟',
     );
-    await waitUntil(
+    await waitFor(
       async () => await mainClient.evaluate('document.visibilityState') === 'visible',
       '主視窗恢復顯示',
     );
 
     await mainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await mainClient.evaluate('document.visibilityState') === 'hidden',
       '測試結束前隱藏主視窗',
     );
@@ -344,7 +344,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const app = await launchApp(profile);
     const mainTarget = await waitForTarget(
       app.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得最小化測試主視窗',
     );
     const mainClient = await connectTarget(mainTarget);
@@ -357,7 +357,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(app.child.exitCode).toBeNull();
     await waitForTarget(
       app.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '最小化後主視窗仍存在',
     );
 
@@ -389,7 +389,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const app = await launchApp(profile);
     const mainTarget = await waitForTarget(
       app.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得 capability 拒絕測試主視窗',
     );
     const mainClient = await connectTarget(mainTarget);
@@ -425,7 +425,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(existsSync(unauthorizedOutPath)).toBe(false);
 
     await mainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await mainClient.evaluate('document.visibilityState') === 'hidden',
       'capability 拒絕測試主視窗隱藏',
     );
@@ -446,7 +446,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const [seedId] = seedQueuedCapabilities(profile, { sourcePaths: [audioPath, imagePath], outPath, format: 'mod-fhd' });
     const app = await launchApp(profile);
     const mainClient = await connectTarget(await waitForTarget(app.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL', 'MOD-FHD 測試主視窗'));
+      isMainWindowTarget, 'MOD-FHD 測試主視窗'));
     const queueClient = await restoreSeededCapabilities(app, mainClient, [seedId], { resume: false });
     const payload = {
       format: ' MOD-FHD ', outPath, duration: 1,
@@ -525,13 +525,13 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const app = await launchApp(profile);
     const mainTarget = await waitForTarget(
       app.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得 watchdog 匯出主視窗',
     );
     const mainClient = await connectTarget(mainTarget);
     const queueClient = await restoreSeededCapabilities(app, mainClient, [seedId]);
     await mainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
-    const finished = await waitUntil(
+    const finished = await waitFor(
       async () => {
         const snapshot = await queueClient.evaluate('window.queueAPI.getAll()');
         const job = snapshot.jobs[0];
@@ -589,7 +589,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       .toEqual([]);
 
     await mainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await mainClient.evaluate('document.visibilityState') === 'hidden',
       'watchdog 匯出後主視窗隱藏',
     );
@@ -657,15 +657,15 @@ describeElectron('Electron 匯出佇列生命週期', () => {
         });
         parent.once('error', error => { clearTimeout(timer); reject(error); });
       });
-      await waitUntil(() => fs.existsSync(owner.stagePath) && fs.existsSync(markerPath), 'writer did not create its private stage');
+      await waitFor(() => fs.existsSync(owner.stagePath) && fs.existsSync(markerPath), 'writer did not create its private stage');
       parent.kill('SIGKILL');
       await parentClosed;
-      await waitUntil(() => {
+      await waitFor(() => {
         try { process.kill(owner.ffmpegPid, 0); return false; }
         catch (error) { return error.code === 'ESRCH'; }
       }, 'ffmpeg survived its owner cleanup');
       // No recovery call: the original owner must survive its parent and finish.
-      await waitUntil(() => fs.existsSync(ownerExit), 'watchdog died with its parent instead of completing its cleanup');
+      await waitFor(() => fs.existsSync(ownerExit), 'watchdog died with its parent instead of completing its cleanup');
       expect(JSON.parse(fs.readFileSync(ownerExit, 'utf8'))).toEqual({ code: 0, pid: owner.watchdogPid });
       expect(fs.existsSync(owner.stagePath)).toBe(false);
       expect(listLeases(queueDir)).toEqual([]);
@@ -713,13 +713,13 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const firstApp = await launchApp(profile);
     const firstMainTarget = await waitForTarget(
       firstApp.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得 crash 測試主視窗',
     );
     const firstMainClient = await connectTarget(firstMainTarget);
     const firstQueueClient = await restoreSeededCapabilities(firstApp, firstMainClient, [seedId]);
     await firstMainClient.evaluate(`window.subtool.exportVideo(${JSON.stringify(payload)})`);
-    const owner = await waitUntil(
+    const owner = await waitFor(
       async () => {
         if (!existsSync(leaseDir)) return null;
         const lock = readdirSync(leaseDir).find(name => name.endsWith('.lock'));
@@ -739,7 +739,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     await waitForExit(firstApp);
     firstMainClient.close();
     firstQueueClient.close();
-    await waitUntil(
+    await waitFor(
       async () => !processIsRunning(owner.ffmpegPid),
       '主程序消失後 ffmpeg 已停止',
       10000,
@@ -748,7 +748,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const secondApp = await launchApp(profile);
     const secondMainTarget = await waitForTarget(
       secondApp.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得 crash 後重開主視窗',
     );
     const secondMainClient = await connectTarget(secondMainTarget);
@@ -768,7 +768,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     });
 
     await secondMainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await secondMainClient.evaluate('document.visibilityState') === 'hidden',
       'crash 重開後主視窗隱藏',
     );
@@ -810,7 +810,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const firstApp = await launchApp(profile);
     const firstMainTarget = await waitForTarget(
       firstApp.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得第一次主視窗',
     );
     const firstMainClient = await connectTarget(firstMainTarget);
@@ -832,7 +832,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(beforeRestart.jobs[0].payload.duration).toBe(5.5);
 
     await firstMainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await firstMainClient.evaluate('document.visibilityState') === 'hidden',
       '第一次主視窗隱藏',
     );
@@ -844,11 +844,11 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const secondApp = await launchApp(profile);
     const secondMainTarget = await waitForTarget(
       secondApp.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得重開後主視窗',
     );
     const secondMainClient = await connectTarget(secondMainTarget);
-    await waitUntil(
+    await waitFor(
       async () => (await secondMainClient.evaluate(
         'document.getElementById("stMsg")?.textContent || ""',
       )).includes('佇列已暫停'),
@@ -864,7 +864,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(afterRestart.jobs[0].payload.duration).toBe(5.5);
 
     await secondMainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await secondMainClient.evaluate('document.visibilityState') === 'hidden',
       '重開後主視窗隱藏',
     );
@@ -913,7 +913,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const firstApp = await launchApp(profile);
     const firstMainTarget = await waitForTarget(
       firstApp.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得重試排序測試主視窗',
     );
     const firstMainClient = await connectTarget(firstMainTarget);
@@ -926,7 +926,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
         `window.subtool.exportVideo(${JSON.stringify(payload)})`,
       ));
     }
-    await waitUntil(
+    await waitFor(
       async () => {
         const snapshot = await firstQueueClient.evaluate('window.queueAPI.getAll()');
         return snapshot.jobs.length === 3 && snapshot.jobs.every(job => job.status === 'queued');
@@ -937,7 +937,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(await firstQueueClient.evaluate(`window.queueAPI.stopJob(${JSON.stringify(jobIds[0])})`)).toBe(true);
     expect(await firstQueueClient.evaluate(`window.queueAPI.retryJob(${JSON.stringify(jobIds[0])})`)).toBe(true);
 
-    const retried = await waitUntil(
+    const retried = await waitFor(
       async () => {
         const snapshot = await firstQueueClient.evaluate('window.queueAPI.getAll()');
         return snapshot.jobs.length === 3 && snapshot.jobs.every(job => job.status === 'queued')
@@ -955,7 +955,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(persistedOrder).toEqual(jobIds);
 
     await firstQueueClient.evaluate('window.queueAPI.setPause(false)');
-    const started = await waitUntil(
+    const started = await waitFor(
       async () => {
         const snapshot = await firstQueueClient.evaluate('window.queueAPI.getAll()');
         return snapshot.jobs.find(job => job.status === 'running') || null;
@@ -966,7 +966,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(started.id).toBe(jobIds[0]);
 
     await firstMainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await firstMainClient.evaluate('document.visibilityState') === 'hidden',
       '重試排序測試主視窗隱藏',
     );
@@ -978,7 +978,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const secondApp = await launchApp(profile);
     const secondMainTarget = await waitForTarget(
       secondApp.port,
-      target => target.type === 'page' && target.title === 'SUB TOOL',
+      isMainWindowTarget,
       '取得重開後的重試排序主視窗',
     );
     const secondMainClient = await connectTarget(secondMainTarget);
@@ -990,7 +990,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(restored.jobs.every(job => job.status === 'queued')).toBe(true);
 
     await secondQueueClient.evaluate('window.queueAPI.setPause(false)');
-    const restarted = await waitUntil(
+    const restarted = await waitFor(
       async () => {
         const snapshot = await secondQueueClient.evaluate('window.queueAPI.getAll()');
         return snapshot.jobs.find(job => job.status === 'running') || null;
@@ -1001,7 +1001,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     expect(restarted.id).toBe(jobIds[0]);
 
     await secondMainClient.evaluate('window.subtool.closeApp(); true');
-    await waitUntil(
+    await waitFor(
       async () => await secondMainClient.evaluate('document.visibilityState') === 'hidden',
       '重開後的重試排序主視窗隱藏',
     );

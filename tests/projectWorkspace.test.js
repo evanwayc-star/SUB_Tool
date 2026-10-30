@@ -9,7 +9,16 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createProjectWorkspace, createAtomicProjectWriter } = require('../electron/project-file-authority-engine.js');
 const tempRoots = [];
-afterEach(() => { for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  const parent = fs.realpathSync(os.tmpdir());
+  for (const root of tempRoots.splice(0)) {
+    const actual = fs.realpathSync(root);
+    if (path.dirname(actual) !== parent || !path.basename(actual).startsWith('subtool-project-')) {
+      throw new Error('拒絕清除未驗證的專案測試目錄');
+    }
+    fs.rmSync(actual, { recursive: true, force: true });
+  }
+});
 
 const bytes = project => Buffer.from(JSON.stringify(project));
 
@@ -36,8 +45,7 @@ function fixture({ files = {}, recent = [], writeFile, saveMetadata } = {}) {
       }
       return value;
     }),
-    writeFile: writeFile || vi.fn(async (file, contents) => { writes.push(['write', file, contents]); }),
-    ensureDirectory: vi.fn(async file => { writes.push(['mkdir', file]); }),
+    writeFile: writeFile || vi.fn(async (file, contents, options) => { writes.push(['write', file, contents, options]); }),
     grantProjectFile: file => grants.push(['project', file]),
     grantMediaFile: file => grants.push(['media', file]),
     canReadMedia: () => true,
@@ -87,6 +95,32 @@ describe('project workspace', () => {
     expect(fs.readFileSync(file)).toEqual(buffer);
   });
 
+  it.each(['utf8', 'utf16le', 'utf16be'])('舊 %s 專案儲存與備份一律寫 UTF-16LE BOM，沒有識別資訊 adapter 也保留內容', async encoding => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-encoding-'));
+    tempRoots.push(root);
+    const document = { app: 'SUB Tool', version: 3, tracks: [{ name: '字幕𠮷😀' }],
+      cues: [{ text: '繁體中文\n罕字𠮷及 emoji 😀', start: 1, end: 2 }],
+      media: { path: 'C:/素材/𠮷😀.mov' } };
+    const text = JSON.stringify(document);
+    const original = Buffer.from(encoding === 'utf8' ? text : '\uFEFF' + text,
+      encoding === 'utf8' ? 'utf8' : 'utf16le');
+    if (encoding === 'utf16be') original.swap16();
+    const workspace = createProjectWorkspace({ readFile: fsp.readFile, writeFile: createAtomicProjectWriter(),
+      canReadMedia: () => true });
+    for (const options of [{}, { ensureParent: true }]) {
+      const file = path.join(root, options.ensureParent ? 'backup.subtool' : '專案.subtool');
+      fs.writeFileSync(file, original);
+      const old = await workspace.open(file);
+      expect(Buffer.from(old.b64, 'base64')).toEqual(original);
+      await expect(workspace.writeRendererProject(file, old.b64, options)).resolves.toBe(file);
+      const written = fs.readFileSync(file);
+      expect([...written.subarray(0, 2)]).toEqual([0xFF, 0xFE]);
+      expect(JSON.parse(written.subarray(2).toString('utf16le'))).toEqual(document);
+      const reopened = await workspace.open(file);
+      expect(Buffer.from(reopened.b64, 'base64')).toEqual(written);
+    }
+  });
+
   it('最近專案選取在存檔重新排序後仍開啟原目標', async () => {
     const a = path.resolve('recent-a.subtool'), b = path.resolve('recent-b.subtool'), c = path.resolve('current-c.subtool');
     const contents = bytes({ cues: [] });
@@ -120,6 +154,123 @@ describe('project workspace', () => {
     expect(fs.readFileSync(temporary, 'utf8')).toBe('另一個工作的資料');
   });
 
+  it('備份目錄含連結時拒絕寫入，保留連結另一端的既有資料', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
+    tempRoots.push(root);
+    const selected = path.join(root, 'selected');
+    const other = path.join(root, 'other');
+    fs.mkdirSync(selected); fs.mkdirSync(other);
+    fs.symlinkSync(other, path.join(selected, '.subtool_AutoSave'), process.platform === 'win32' ? 'junction' : 'dir');
+    const original = Buffer.from('另一個目錄的資料，不屬於備份');
+    fs.writeFileSync(path.join(other, 'backup.subtool'), original);
+    const workspace = createProjectWorkspace({ readFile: fsp.readFile,
+      writeFile: createAtomicProjectWriter(), canReadMedia: () => true });
+    await expect(workspace.writeRendererProject(path.join(selected, '.subtool_AutoSave', 'backup.subtool'),
+      bytes({ cues: [{ text: '新備份' }] }).toString('base64'), { ensureParent: true }))
+      .rejects.toMatchObject({ code: 'UNSAFE_PROJECT_OUTPUT' });
+    expect(fs.readFileSync(path.join(other, 'backup.subtool'))).toEqual(original);
+    expect(fs.readdirSync(other)).toEqual(['backup.subtool']);
+  });
+
+  it('寫入模組完整準備正常備份目錄，再以 UTF-16LE 原子發布專案', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
+    tempRoots.push(root);
+    const file = path.join(root, '.subtool_AutoSave', 'nested', '備份.subtool');
+    const document = { cues: [{ text: '中文𠮷😀' }] };
+    const workspace = createProjectWorkspace({ readFile: fsp.readFile,
+      writeFile: createAtomicProjectWriter(), canReadMedia: () => true });
+    await expect(workspace.writeRendererProject(file, bytes(document).toString('base64'), { ensureParent: true }))
+      .resolves.toBe(file);
+    const saved = fs.readFileSync(file);
+    expect([...saved.subarray(0, 2)]).toEqual([0xff, 0xfe]);
+    expect(JSON.parse(saved.subarray(2).toString('utf16le'))).toEqual(document);
+    expect(fs.readdirSync(root)).toEqual(['.subtool_AutoSave']);
+  });
+
+  it.each(['open', 'sync', 'close'])('備份父目錄在 %s 等待期間換成其他實體時拒絕發布，只回收自己的暫存', async stage => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
+    tempRoots.push(root);
+    const backup = path.join(root, '.subtool_AutoSave');
+    const retained = path.join(root, 'retained-backup');
+    fs.mkdirSync(backup);
+    const file = path.join(backup, 'backup.subtool');
+    const old = Buffer.from('原本的備份');
+    const other = Buffer.from('新的目錄內容，必須保留');
+    fs.writeFileSync(file, old);
+    let replaced = false;
+    const replace = () => {
+      if (replaced) return;
+      replaced = true;
+      // Both move targets are fixed children of this owned sandbox.
+      expect(path.dirname(backup)).toBe(root);
+      expect(path.dirname(retained)).toBe(root);
+      fs.renameSync(backup, retained);
+      fs.mkdirSync(backup);
+      fs.writeFileSync(file, other);
+    };
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async open(...args) {
+        if (stage === 'open') replace();
+        const handle = await fsp.open(...args);
+        return {
+          stat: options => handle.stat(options), writeFile: data => handle.writeFile(data),
+          async sync() { await handle.sync(); if (stage === 'sync') replace(); },
+          async close() { await handle.close(); if (stage === 'close') replace(); },
+        };
+      },
+    } });
+    await expect(writer(file, Buffer.from('本次新備份'), { ensureParent: true }))
+      .rejects.toMatchObject({ code: 'UNSAFE_PROJECT_OUTPUT' });
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(file)).toEqual(other);
+    expect(fs.readFileSync(path.join(retained, 'backup.subtool'))).toEqual(old);
+    expect(fs.readdirSync(root).sort()).toEqual(['.subtool_AutoSave', 'retained-backup']);
+  });
+
+  it('私有暫存同名路徑被替換後，不發布也不清除其他檔案', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
+    tempRoots.push(root);
+    const file = path.join(root, 'edit.subtool');
+    fs.writeFileSync(file, '原專案');
+    const writer = createAtomicProjectWriter({ createToken: () => 'owned', fsModule: {
+      ...fs, ...fsp,
+      async open(temporary, ...args) {
+        const handle = await fsp.open(temporary, ...args);
+        let closed = false;
+        return {
+          stat: options => handle.stat(options), writeFile: data => handle.writeFile(data), sync: () => handle.sync(),
+          async close() {
+            if (closed) return;
+            closed = true;
+            await handle.close();
+            expect(path.dirname(temporary)).toBe(root);
+            const retained = path.join(root, 'retained-stage');
+            expect(path.dirname(retained)).toBe(root);
+            fs.renameSync(temporary, retained);
+            fs.writeFileSync(temporary, '其他工作的檔案');
+          },
+        };
+      },
+    } });
+    await expect(writer(file, Buffer.from('新專案'))).rejects.toMatchObject({ code: 'UNSAFE_PROJECT_OUTPUT' });
+    expect(fs.readFileSync(file, 'utf8')).toBe('原專案');
+    expect(fs.readFileSync(file + '.owned.tmp', 'utf8')).toBe('其他工作的檔案');
+    expect(fs.readFileSync(path.join(root, 'retained-stage'), 'utf8')).toBe('新專案');
+  });
+
+  it('既有專案共用 hardlink 時只替換所選名稱，不改其他檔案內容', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
+    tempRoots.push(root);
+    const selected = path.join(root, 'selected.subtool');
+    const other = path.join(root, 'other.subtool');
+    fs.writeFileSync(other, '其他檔案的原始內容');
+    fs.linkSync(other, selected);
+    await createAtomicProjectWriter()(selected, Buffer.from('本次專案'));
+    expect(fs.readFileSync(selected, 'utf8')).toBe('本次專案');
+    expect(fs.readFileSync(other, 'utf8')).toBe('其他檔案的原始內容');
+  });
+
   it.each(['write', 'rename'])('原子保存 %s 失敗保留原專案，不提交授權或最近記錄', async stage => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
     tempRoots.push(root);
@@ -128,7 +279,7 @@ describe('project workspace', () => {
     fs.writeFileSync(file, original);
     const failure = new Error('disk/SMB write failed');
     const writer = createAtomicProjectWriter({ fsModule: {
-      ...fsp,
+      ...fs, ...fsp,
       async open(...args) {
         const handle = await fsp.open(...args);
         return {
@@ -136,10 +287,10 @@ describe('project workspace', () => {
             if (stage === 'write') { await handle.writeFile(contents.subarray(0, 3)); throw failure; }
             await handle.writeFile(contents);
           },
-          sync: () => handle.sync(), close: () => handle.close(),
+          stat: options => handle.stat(options), sync: () => handle.sync(), close: () => handle.close(),
         };
       },
-      async rename(...args) { if (stage === 'rename') throw failure; return fsp.rename(...args); },
+      renameSync(...args) { if (stage === 'rename') throw failure; return fs.renameSync(...args); },
     } });
     const fx = fixture({ writeFile: writer });
     await expect(fx.workspace.writeRendererProject(file, bytes({ cues: [] }).toString('base64'), { remember: true }))
@@ -158,7 +309,7 @@ describe('project workspace', () => {
     const started = deferred();
     let count = 0;
     const writer = createAtomicProjectWriter({ fsModule: {
-      ...fsp,
+      ...fs, ...fsp,
       async open(...args) {
         if (++count === 1) { started.resolve(); await first.promise; }
         return fsp.open(...args);
@@ -172,6 +323,74 @@ describe('project workspace', () => {
     await Promise.all([old, latest]);
     expect(fs.readFileSync(file, 'utf8')).toBe('完整第二份');
     expect(fs.readdirSync(root)).toEqual(['edit.subtool']);
+  });
+
+  it('實體目標與所選目錄別名指向同一檔案時，也依呼叫順序發布', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
+    tempRoots.push(root);
+    const real = path.join(root, 'real');
+    const alias = path.join(root, 'alias');
+    fs.mkdirSync(real);
+    fs.symlinkSync(real, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const gate = deferred(), started = deferred();
+    let opens = 0;
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async open(...args) {
+        if (++opens === 1) { started.resolve(); await gate.promise; }
+        return fsp.open(...args);
+      },
+    } });
+    const earlier = writer(path.join(alias, 'edit.subtool'), Buffer.from('較舊專案'));
+    await started.promise;
+    const latest = writer(path.join(real, 'edit.subtool'), Buffer.from('較新專案'));
+    let timer;
+    try {
+      // The old writer lets the later alias finish while the first is held.
+      // A correct writer keeps it queued; the deadline only releases the test gate.
+      await Promise.race([latest, new Promise(resolve => { timer = setTimeout(resolve, 500); })]);
+    } finally { clearTimeout(timer); gate.resolve(); }
+    await Promise.all([earlier, latest]);
+    expect(fs.readFileSync(path.join(real, 'edit.subtool'), 'utf8')).toBe('較新專案');
+  });
+
+  it('最後非同步目錄查驗回覆後有變更時，不把備份發布到替換的資料夾', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-project-save-'));
+    tempRoots.push(root);
+    const backup = path.join(root, '.subtool_AutoSave');
+    const retained = path.join(root, 'retained-backup');
+    fs.mkdirSync(backup);
+    const file = path.join(backup, 'backup.subtool');
+    fs.writeFileSync(file, '原備份');
+    let closed = false, replaced = false;
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async lstat(current, ...args) {
+        const result = await fsp.lstat(current, ...args);
+        if (closed && current === backup && !replaced) {
+          replaced = true;
+          expect(path.dirname(backup)).toBe(root);
+          expect(path.dirname(retained)).toBe(root);
+          fs.renameSync(backup, retained);
+          fs.mkdirSync(backup);
+          fs.writeFileSync(file, '替換目錄的既有資料');
+        }
+        return result;
+      },
+      async open(...args) {
+        const handle = await fsp.open(...args);
+        return {
+          stat: options => handle.stat(options), writeFile: data => handle.writeFile(data), sync: () => handle.sync(),
+          async close() { await handle.close(); closed = true; },
+        };
+      },
+    } });
+    await expect(writer(file, Buffer.from('本次新備份'), { ensureParent: true }))
+      .rejects.toMatchObject({ code: 'UNSAFE_PROJECT_OUTPUT' });
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(file, 'utf8')).toBe('替換目錄的既有資料');
+    expect(fs.readFileSync(path.join(retained, 'backup.subtool'), 'utf8')).toBe('原備份');
+    expect(fs.readdirSync(root).sort()).toEqual(['.subtool_AutoSave', 'retained-backup']);
   });
 
   it('dialog/drop、recent、OS live 與 startup 共用相同 parse-before-grant outcome', async () => {
@@ -267,9 +486,9 @@ describe('project workspace', () => {
       remember: true,
     })).resolves.toBe(projectPath);
     expect(fx.writes.map(call => call.slice(0, 2))).toEqual([
-      ['mkdir', projectPath],
       ['write', projectPath],
     ]);
+    expect(fx.writes[0][3]).toEqual({ ensureParent: true });
     expect(fx.recent().map(item => item.path)).toEqual([projectPath]);
   });
 

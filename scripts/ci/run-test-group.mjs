@@ -1,25 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { windowsTestFiles } from './test-groups.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const TEST_ROOT = path.join(ROOT, 'tests');
-const WINDOWS_MARKER = '// @subtool-ci windows';
 const require = createRequire(import.meta.url);
-
-function collectTestFiles(directory) {
-  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
-    const absolute = path.join(directory, entry.name);
-    if (entry.isDirectory()) return collectTestFiles(absolute);
-    return entry.name.endsWith('.test.js') ? [absolute] : [];
-  });
-}
-
-function relative(file) {
-  return path.relative(ROOT, file).replaceAll('\\', '/');
-}
 
 const group = process.argv[2];
 if (!['portable', 'windows'].includes(group)) {
@@ -27,10 +14,7 @@ if (!['portable', 'windows'].includes(group)) {
   process.exit(2);
 }
 
-const windowsTests = collectTestFiles(TEST_ROOT)
-  .filter(file => readFileSync(file, 'utf8').split(/\r?\n/, 1)[0] === WINDOWS_MARKER)
-  .map(relative)
-  .sort();
+const windowsTests = windowsTestFiles(ROOT);
 
 if (windowsTests.length === 0) {
   console.error('找不到標記為 Windows 的測試。');
@@ -42,10 +26,10 @@ if (group === 'windows' && process.platform !== 'win32') {
   process.exit(2);
 }
 
-const args = ['run'];
-if (group === 'portable') {
-  for (const file of windowsTests) args.push('--exclude', file);
-} else {
+// Select the actual project: root --exclude is not a project selector and can
+// leave a child's explicit include active after config inheritance.
+const args = ['run', '--project', group === 'portable' ? 'portable' : 'windows-native'];
+if (group === 'windows') {
   args.push(...windowsTests, '--maxWorkers=1');
 }
 

@@ -459,11 +459,16 @@ describe('人聲模型的受限母素材 PCM 邊界', () => {
       canWriteDelivery: () => true, isFile: file => fs.statSync(file).isFile(), runJob, onChanged() {},
     });
     let lockedReservation = null;
+    const cleanupFailures = [];
     const output = createScreenshotOutput({ fileAuthority: authority, fsModule: {
-      promises: { ...fs.promises, unlink: async file => {
-        if (file === lockedReservation) throw Object.assign(new Error('screenshot reservation temporarily locked'), { code: 'EBUSY' });
-        return fs.promises.unlink(file);
-      } },
+      promises: fs.promises,
+      unlinkSync: file => {
+        if (file === lockedReservation) {
+          cleanupFailures.push(file);
+          throw Object.assign(new Error('screenshot reservation temporarily locked'), { code: 'EBUSY' });
+        }
+        return fs.unlinkSync(file);
+      },
     } });
     const { handler, context } = shutdownHandler({ cancelAllAndWait: vi.fn().mockResolvedValue(), resume: vi.fn() }, {
       fileAuthority: authority, requireReadablePath: createIpcGuards(authority).requireReadablePath,
@@ -483,6 +488,8 @@ describe('人聲模型的受限母素材 PCM 邊界', () => {
 
       handler({ preventDefault: vi.fn() });
       await vi.waitFor(() => expect(context.dialog.showMessageBox).toHaveBeenCalledOnce());
+      expect(cleanupFailures).toEqual([priorShot.path]);
+      expect(fs.readFileSync(priorShot.path)).toEqual(Buffer.alloc(0));
       expect(context.app.quit).not.toHaveBeenCalled();
       expect(context._quitReady).toBe(false);
       expect(context._quitSequenceStarted).toBe(false);

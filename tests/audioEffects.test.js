@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createAudioEffects } from '../src/audio-effects.js';
+import { Seq } from '../src/sequence.js';
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const spec={max:-6,min:-12,inputBoost:0,isTruePeak:true};
-const clip=id=>({id,audioSourceId:id,path:`C:/${id}.mp4`});
+const clip=id=>({id,audioSourceId:id,path:`C:/${id}.mp4`,in:0,out:10,dur:10,offset:0});
+const splitClip=source=>({id:source.id+'-split',...Seq.planSplit(source,5).right});
 function fixture(){
   const live=[clip('a'),clip('b')];
   const pending=[];
@@ -42,6 +44,31 @@ describe('來源效果工作 interface',()=>{
     expect(f.live.map(c=>c.audioNormalizeProgress)).toEqual([31,72]);
     f.complete(0);f.complete(1);await Promise.all([a,b]);
     expect(f.record).toHaveBeenCalledTimes(2);
+  });
+  it('運算中切分的片段在完成後清除進度',async()=>{
+    const f=fixture();const pending=f.effects.apply(f.live[0],spec);
+    const split=splitClip(f.live[0]);f.live.push(split);
+    f.pending[0].work.progress({pct:61,label:'分析中'});
+    expect(split.audioNormalizing).toBe(true);
+    f.complete(0);expect(await pending).toEqual({status:'completed'});
+    for(const source of [f.live[0],split]){
+      expect(source.audioLimiterSpec.max).toBe(-6);
+      expect(source.audioNormalizing).toBeUndefined();
+      expect(source.audioNormalizeProgress).toBeUndefined();
+      expect(source.audioNormalizeLabel).toBeUndefined();
+    }
+    expect(f.record).toHaveBeenCalledTimes(1);
+  });
+  it('取消清除動態切片與已移除片段的進度，保留另一來源的進行中工作',async()=>{
+    const f=fixture(),original=f.live[0];
+    const first=f.effects.apply(original,spec),other=f.effects.apply(f.live[1],spec);
+    const split=splitClip(original);f.live.push(split);
+    f.pending[0].work.progress({pct:61});f.live.splice(f.live.indexOf(split),1);
+    await f.effects.apply(original,null);
+    expect(original.audioNormalizing).toBeUndefined();expect(split.audioNormalizing).toBeUndefined();
+    expect(f.live[1].audioNormalizing).toBe(true);
+    f.complete(0);f.complete(1);await Promise.all([first,other]);
+    expect(f.live[1].audioNormalizing).toBeUndefined();
   });
   it('還原會取消待處理效果，晚到結果不能再啟用',async()=>{
     const f=fixture();const pending=f.effects.apply(f.live[0],spec);

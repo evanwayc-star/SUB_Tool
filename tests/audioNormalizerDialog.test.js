@@ -29,6 +29,15 @@ beforeEach(() => {
   document.getElementById('modalBody').innerHTML = '';
 });
 
+it('短音訊的平均 RMS 不誤標為 ITU 精準量測', async () => {
+  openHardLimiterDialog({ id: 'a', path: 'C:/a.wav' });
+  requests[0].resolve({ maxDb: 0, meanDb: -3, minDb: -70, dynamicRangeDb: 0, meanSource: 'volumedetect' });
+  await Promise.resolve();
+  expect(document.getElementById('hlAnalysisStatus').textContent).toContain('RMS');
+  expect(document.getElementById('hlAnalysisStatus').textContent).not.toContain('ITU');
+  expect(document.getElementById('hlAnalyzedMean').textContent).toBe('-3 dB');
+});
+
 it('量測失敗保留快速預覽，不誤顯示精準綠色或無聲',async()=>{
   const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
   try{

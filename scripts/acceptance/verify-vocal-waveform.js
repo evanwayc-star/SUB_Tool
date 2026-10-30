@@ -6,7 +6,7 @@ const fs=require('fs');
 const path=require('path');
 const os=require('os');
 const {execFileSync,spawn}=require('child_process');
-const {ROOT,ELECTRON,delay,reservePort,getJSON,waitFor,CdpClient,trackElectron,stopElectron,dispatchClick}
+const { isMainWindowTarget, ROOT,ELECTRON,delay,reservePort,getJSON,waitFor,CdpClient,trackElectron,stopElectron,dispatchClick}
   =require('./cdp-electron-harness.js');
 const PACKAGED_EXE=process.env.SUBTOOL_ACCEPTANCE_EXE?path.resolve(process.env.SUBTOOL_ACCEPTANCE_EXE):null;
 
@@ -42,9 +42,9 @@ async function clickToggle(client){
 }
 
 async function connectWindow(port){
-  const target=await waitFor(async()=> (await getJSON(`http://127.0.0.1:${port}/json/list`)).find(item=>item.type==='page'&&item.title==='SUB TOOL'),'主視窗',30000);
+  const target=await waitFor(async()=> (await getJSON(`http://127.0.0.1:${port}/json/list`)).find(isMainWindowTarget),'主視窗',30000);
   const client=new CdpClient(target.webSocketDebuggerUrl,{timeoutMs:30000});
-  await client.connect();await client.send('Runtime.enable');await client.send('Page.bringToFront');
+  await client.connect();await client.waitForApp();await client.send('Runtime.enable');await client.send('Page.bringToFront');
   return client;
 }
 

@@ -34,6 +34,34 @@ export function presetExportRelativePath(preset) {
   return `${folder}${safeName}.json`;
 }
 
+// 名稱先由各領域淨化；此處只避免同一批次互相覆寫，不探測或改變磁碟上
+// 既有檔案的覆寫行為。先保留原始名稱及資料夾前綴，避免新序號搶走別份名稱，
+// 也避免 A.json 檔案擋住另一份 A.json/樣式.json 的資料夾。
+export function allocateExportFileNames(files) {
+  const key = name => name.replace(/\\/g, '/').toLowerCase();
+  const reserved = new Set(files.map(file => key(file.name)));
+  const directories = new Set();
+  for (const name of reserved) {
+    const parts = name.split('/');
+    while (parts.length > 1) { parts.pop(); directories.add(parts.join('/')); }
+  }
+  const used = new Set();
+  return files.map(file => {
+    let name = file.name;
+    if (used.has(key(name)) || directories.has(key(name))) {
+      const slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+      const dot = name.lastIndexOf('.');
+      const extension = dot > slash + 1 ? name.slice(dot) : '';
+      const stem = extension ? name.slice(0, dot) : name;
+      let number = 2;
+      do { name = `${stem} (${number++})${extension}`; }
+      while (used.has(key(name)) || reserved.has(key(name)) || directories.has(key(name)));
+    }
+    used.add(key(name));
+    return { ...file, name };
+  });
+}
+
 export const WEB_VIDEO_EXPORT_MESSAGE = '網頁版不支援影片／多聲道 WAV 交付，請使用 Electron 桌面版';
 
 /**

@@ -85,7 +85,7 @@ describe('WebCodecs public preview frame admission',()=>{
         const request={signal,completed:false};requests.push(request);
         const timer=setTimeout(()=>{
           request.completed=true;
-          resolve({ok:true,headers:{get:()=>String(end-start+1)},arrayBuffer:async()=>Uint8Array.from({length:end-start+1},(_,index)=>(start+index)%256).buffer});
+          resolve(new Response(Uint8Array.from({length:end-start+1},(_,index)=>(start+index)%256)));
         },50);
         signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new DOMException('cancelled','AbortError'));},{once:true});
       })));
@@ -170,10 +170,65 @@ describe('WebCodecs public preview frame admission',()=>{
     for(const clip of fixture.clips) Object.assign(clip,{in:0,out:1,offset:0,fps:25,speed:.25});
     fixture.sourceOffsetUs=80000;fixture.indexFailure=true;fixture.availableB=250;fixture.time=.16;
     vi.spyOn(console,'warn').mockImplementation(()=>{});
-    vi.stubGlobal('fetch',vi.fn(async()=>({headers:{get:()=>null},arrayBuffer:async()=>new ArrayBuffer(1024)})));
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(new Uint8Array(1024))));
     await loadFirstFrame();
     expect(fixture.ctx.drawImage.mock.calls.map(([frame])=>frame.timestamp)).toEqual([40000,40000]);
     expect(fixture.report.mock.lastCall[0].every(window=>Math.abs(window.time-.16)<1e-9)).toBe(true);
+  });
+
+  it('整檔退路逐段讀取合法內容，不再呼叫無界 arrayBuffer 聚合',async()=>{
+    fixture.indexFailure=true;fixture.availableB=250;
+    vi.spyOn(console,'warn').mockImplementation(()=>{});
+    const aggregate=[];
+    vi.stubGlobal('fetch',vi.fn(async()=>{
+      const response=new Response(new Uint8Array(1024));
+      aggregate.push(vi.spyOn(response,'arrayBuffer'));
+      return response;
+    }));
+    await loadFirstFrame();
+    expect(fixture.publish.drawImage).toHaveBeenCalled();
+    expect(aggregate).toHaveLength(2);
+    expect(aggregate.every(read=>read.mock.calls.length===0)).toBe(true);
+  });
+
+  it('整檔退路在未知長度串流越過上限時立即取消，不聚合也不解碼',async()=>{
+    fixture.indexFailure=true;
+    vi.spyOn(console,'warn').mockImplementation(()=>{});
+    const reads=[];
+    vi.stubGlobal('fetch',vi.fn(async()=>{
+      // 僅用 size-only adapter 表示超過 1.5 GiB 的首個 chunk；反例不配置巨量記憶體。
+      const reader={read:vi.fn(async()=>({done:false,value:{byteLength:1500*1024*1024+1}})),
+        cancel:vi.fn(async()=>{}),releaseLock:vi.fn()};
+      const aggregate=vi.fn(async()=>({byteLength:1500*1024*1024+1}));
+      reads.push({reader,aggregate});
+      return {ok:true,headers:new Headers(),body:{getReader:()=>reader},arrayBuffer:aggregate};
+    }));
+    WCPreview.tick();
+    await vi.waitFor(()=>expect(reads).toHaveLength(2));
+    await vi.waitFor(()=>expect(reads.every(({reader})=>reader.cancel.mock.calls.length===1)).toBe(true));
+    expect(reads.every(({reader,aggregate})=>reader.read.mock.calls.length===1&&aggregate.mock.calls.length===0)).toBe(true);
+    expect(fixture.decode).not.toHaveBeenCalled();
+    expect(fixture.takeover).toBe(false);
+  });
+
+  it('卸載預覽工作集會中止尚未完成的整檔退路，共用來源仍只讀一次',async()=>{
+    fixture.indexFailure=true;
+    fixture.clips[1].web={url:'a.mp4'};
+    vi.spyOn(console,'warn').mockImplementation(()=>{});
+    const cancelled=vi.fn(),controllers=[];
+    vi.stubGlobal('fetch',vi.fn(async(unused,{signal}={})=>{
+      const body=new ReadableStream({start(controller){controllers.push(controller);},cancel:cancelled});
+      signal?.addEventListener('abort',()=>controllers.at(-1).error(new DOMException('cancelled','AbortError')),{once:true});
+      return new Response(body);
+    }));
+    WCPreview.tick();
+    await vi.waitFor(()=>expect(fetch).toHaveBeenCalledOnce());
+    const signal=fetch.mock.calls[0][1]?.signal;
+    try{
+      WCPreview.disposeAll();
+      expect(signal?.aborted).toBe(true);
+      expect(fixture.decode).not.toHaveBeenCalled();
+    }finally{for(const controller of controllers)try{controller.close();}catch(_){} }
   });
 
   it('不支援的多段edit不猜來源時間，讓回原presenter',async()=>{
@@ -261,6 +316,129 @@ describe('WebCodecs public preview frame admission',()=>{
       expect.objectContaining({time:104,start:104,end:expect.closeTo(104.04,8)}),expect.objectContaining({time:104,start:104,end:expect.closeTo(104.04,8)})
     ]);
     expect(fixture.snapshot.time).toBe(104);
+  });
+  it.each(['decode','callback'])('已接管後的永久 %s 錯誤讓回原 presenter，不永久顯示故障前畫格',async failure=>{
+    let reportError;
+    if(failure==='callback'){
+      const Decoder=globalThis.VideoDecoder;
+      vi.stubGlobal('VideoDecoder',class extends Decoder{
+        constructor(options){super(options);reportError=options.error;}
+      });
+    }
+    vi.spyOn(console,'error').mockImplementation(()=>{});
+    await loadFirstFrame();
+    expect(fixture.takeover).toBe(true);
+    expect(fixture.snapshot.time).toBe(103);
+    fixture.publish.drawImage.mockClear();fixture.report.mockClear();
+    if(failure==='decode')fixture.decode.mockImplementationOnce(()=>{throw new Error('decoder closed');});
+    else reportError(new Error('corrupt sample'));
+    fixture.time=104;fixture.availableB=250;
+    WCPreview.tick();
+    WCPreview.tick();
+    expect(fixture.takeover).toBe(false);
+    expect(fixture.canvas.style.display).toBe('none');
+    expect(fixture.composition).toHaveBeenLastCalledWith(false);
+    expect(fixture.publish.drawImage).not.toHaveBeenCalled();
+    expect(fixture.report).not.toHaveBeenCalled();
+    // 故障層完全透明後不再是必要畫面；仍可由其餘有效層重新接管。
+    State.videoTracks[failure==='decode'?0:1].opacity=0;
+    WCPreview.tick();
+    expect(fixture.takeover).toBe(true);
+    expect(fixture.publish.drawImage).toHaveBeenCalledOnce();
+    expect(fixture.report.mock.lastCall[0]).toHaveLength(1);
+    expect(fixture.snapshot.time).toBe(104);
+  });
+  it.each(['http','network','short'])('目標 Range %s 失敗讓回已呈現的原生畫格，重新讀取成功後才接管新畫面',async failure=>{
+    fixture.realReader=true;fixture.time=.2;fixture.keyFrames=[0,48,96,144,192];
+    for(const clip of fixture.clips) Object.assign(clip,{in:0,out:10,offset:0});
+    let unavailable=false;
+    vi.stubGlobal('fetch',vi.fn(async(url,{headers})=>{
+      if(unavailable&&failure==='http') return {ok:false,status:404};
+      if(unavailable&&failure==='network') throw new Error('connection lost');
+      const [,start,end]=/bytes=(\d+)-(\d+)/.exec(headers.Range).map(Number);
+      return new Response(Uint8Array.from({length:unavailable?0:end-start+1},(_,index)=>(start+index)%256));
+    }));
+    const warning=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    await loadFirstFrame();
+    await vi.waitFor(()=>{WCPreview.tick();expect(fixture.takeover).toBe(true);});
+    expect(fixture.snapshot.time).toBe(.2);
+    const adapter={type:'mpv',present:vi.fn(async()=>({backend:'mpv',presentedSourceTime:4}))};
+    const commit=vi.fn(t=>t),clip=fixture.clips.at(-1);
+    const session=createMediaPresentationSession({getTolerance:()=>.018,timeoutMs:1000,
+      timeline:{normalizeTarget:t=>t,hasSequence:()=>true,clipAt:()=>clip,sourceTime:Seq.toSource,timelineTime:s=>Seq.toTimeline(s,clip)},
+      player:{adapter:()=>adapter,isNative:()=>true},commitPresented:commit});
+    fixture.session=session;session.setWebCodecsTakeover(true);
+    fixture.report.mockImplementation(windows=>session.reportWebCodecsPresentation(windows));
+    try{
+      unavailable=true;fixture.time=4;
+      fixture.publish.drawImage.mockClear();fixture.report.mockClear();
+      const pending=session.request(4,{tolerance:.018});
+      WCPreview.tick();
+      expect(fixture.takeover).toBe(true); // 尚未知道 IO 結果時保留完整舊畫格。
+      await vi.waitFor(()=>expect(warning).toHaveBeenCalledWith('[WC] 取位元組失敗:',expect.any(String)));
+      WCPreview.tick();
+      expect(fixture.takeover).toBe(false);
+      expect(fixture.canvas.style.display).toBe('none');
+      expect(fixture.composition).toHaveBeenLastCalledWith(false);
+      expect(fixture.publish.drawImage).not.toHaveBeenCalled();
+      expect(fixture.report).not.toHaveBeenCalled();
+      await expect(pending).resolves.toMatchObject({status:'presented',presentedTime:4,source:'mpv'});
+      expect(commit).toHaveBeenLastCalledWith(4);
+      unavailable=false;
+      await vi.waitFor(()=>{WCPreview.tick();expect(fixture.takeover).toBe(true);});
+      expect(fixture.snapshot.time).toBe(4);
+      expect(fixture.report.mock.lastCall[0].every(window=>window.start<=4&&window.end>4)).toBe(true);
+    }finally{session.reset();}
+  });
+  it('已接管後新疊層圖片載入失敗會讓回原 presenter',async()=>{
+    await loadFirstFrame();
+    expect(fixture.takeover).toBe(true);
+    vi.stubGlobal('Image',class{
+      set src(url){if(url)queueMicrotask(()=>this.onerror?.());}
+    });
+    fixture.clips[0]={id:'image',type:'image',web:{url:'broken.png'},in:0,out:20,offset:100,vtrack:0};
+    fixture.publish.drawImage.mockClear();fixture.report.mockClear();
+    WCPreview.tick();
+    expect(fixture.takeover).toBe(true); // 尚在載入時仍保留完整畫格。
+    await Promise.resolve();
+    WCPreview.tick();
+    expect(fixture.takeover).toBe(false);
+    expect(fixture.canvas.style.display).toBe('none');
+    expect(fixture.composition).toHaveBeenLastCalledWith(false);
+    expect(fixture.publish.drawImage).not.toHaveBeenCalled();
+    expect(fixture.report).not.toHaveBeenCalled();
+  });
+  it('未來預取失敗不撤下仍有效的來源格，也不發布另一層尚未就緒的畫面',async()=>{
+    fixture.realReader=true;fixture.time=.2;fixture.keyFrames=[0,48,96,144,192];
+    for(const clip of fixture.clips) Object.assign(clip,{in:0,out:10,offset:0});
+    let blockFuture=false,releaseLayer;
+    vi.stubGlobal('fetch',vi.fn((url,{headers,signal})=>{
+      const [,start,end]=/bytes=(\d+)-(\d+)/.exec(headers.Range).map(Number);
+      const response=()=>new Response(Uint8Array.from({length:end-start+1},(_,index)=>(start+index)%256));
+      if(!blockFuture||start<48) return Promise.resolve(response());
+      if(url==='a.mp4') return Promise.resolve({ok:false,status:404});
+      return new Promise((resolve,reject)=>{
+        releaseLayer=()=>resolve(response());
+        signal.addEventListener('abort',()=>reject(new DOMException('cancelled','AbortError')),{once:true});
+      });
+    }));
+    const warning=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    await loadFirstFrame();
+    await vi.waitFor(()=>{WCPreview.tick();expect(fixture.takeover).toBe(true);});
+    blockFuture=true;fixture.time=1.8;fixture.clips[1].in=2;
+    fixture.publish.drawImage.mockClear();fixture.report.mockClear();
+    WCPreview.tick();
+    await vi.waitFor(()=>expect(warning).toHaveBeenCalled());
+    WCPreview.tick();
+    expect(fixture.takeover).toBe(true);
+    expect(fixture.snapshot.time).toBe(.2);
+    expect(fixture.publish.drawImage).not.toHaveBeenCalled();
+    expect(fixture.report).not.toHaveBeenCalled();
+    releaseLayer();
+    await vi.waitFor(()=>{WCPreview.tick();expect(fixture.publish.drawImage).toHaveBeenCalled();});
+    expect(fixture.snapshot.time).toBeCloseTo(1.8,8);
+    expect(fixture.report.mock.lastCall[0]).toHaveLength(2);
+    expect(fixture.ctx.drawImage.mock.calls.slice(-2).map(([frame])=>frame.timestamp)).toEqual([1800000,3800000]);
   });
   it('冷seek遇到舊來源畫格時不以不完整時刻的canvas接管',async()=>{
     fixture.time=104;

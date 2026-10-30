@@ -101,6 +101,31 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spaw
 }
 
 describe('Windows mpv host lifecycle', () => {
+  it('mute 等到原生 mpv 的成功回覆才完成，失敗回覆會拒絕', async () => {
+    const { host, sockets } = make();
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    try {
+      const socket = sockets[0];
+      const originalWrite = socket.write;
+      const pending = [];
+      socket.write = vi.fn(raw => {
+        const message = JSON.parse(raw);
+        if (message.command?.[0] === 'set_property' && message.command?.[1] === 'mute') pending.push(message);
+        else originalWrite(raw);
+      });
+      let completed = false;
+      const muted = host.mute(true).then(() => { completed = true; });
+      await Promise.resolve();
+      expect(completed).toBe(false);
+      expect(pending[0]).toMatchObject({ command: ['set_property', 'mute', true], request_id: expect.any(Number) });
+      socket.emit('data', Buffer.from(JSON.stringify({ request_id: pending[0].request_id, error: 'success' }) + '\n'));
+      await muted;
+      expect(completed).toBe(true);
+      const rejected = host.mute(true);
+      socket.emit('data', Buffer.from(JSON.stringify({ request_id: pending[1].request_id, error: 'property unavailable' }) + '\n'));
+      await expect(rejected).rejects.toThrow('property unavailable');
+    } finally { host.quit(); }
+  });
   it('pipe 的 UTF-8 字元跨 byte 分塊時，事件內容仍保持完整', async () => {
     const { host, sockets, events } = make();
     await host.launch({ src: 'D:/media/initial.mxf' });

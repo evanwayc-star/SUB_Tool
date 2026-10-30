@@ -13,7 +13,7 @@
 import { $ } from './dom.js';
 import { State, newId, getFpsRevision } from './state.js';
 import { secToEncore } from './time.js';
-import { escapeHTML, downloadBytes, tcKeyAllowed, bytesToB64, b64ToBytes } from './util.js';
+import { escapeHTML, downloadBytes, tcKeyAllowed, bytesToB64, b64ToBytes, encodeUTF16LE } from './util.js';
 import { Media } from './media.js';
 import { requestPointerSeek } from './timeline-interaction-engine.js';
 import { updatePlayhead, drawRuler } from './timeline-renderer.js';
@@ -317,20 +317,18 @@ function _batchEditNotes(owner){
   }, 50);
 }
 
-const _makeBom=csv=>{const BOM=new Uint8Array([0xEF,0xBB,0xBF]),body=new TextEncoder().encode(csv),out=new Uint8Array(BOM.length+body.length);out.set(BOM);out.set(body,BOM.length);return out;};
-
 function getNotesGeneralFileData(){
   if(!State.notes.length)return null;
   const csvF=v=>{const s=String(v);return(s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s;};
   const lines=['狀態,時間,內容'];
   for(const n of State.notes){
     const time=secToEncore(n.time,State.fps,State.dropFrame);
-    const content=(n.text||'').replace(/\r?\n/g,' ');
+    const content=(n.text||'').replace(/\r\n?|\n/g,' ');
     lines.push(`${csvF(n.done?'V':'K')},${csvF(time)},${csvF(content)}`);
   }
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
-  const bytes = _makeBom(lines.join('\r\n'));
-  return { name: `ST_${projName}_notes.csv`, content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-8' };
+  const bytes = encodeUTF16LE(lines.join('\r\n'));
+  return { name: `ST_${projName}_notes.csv`, content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-16le' };
 }
 
 function doExportNotesGeneral(){
@@ -351,8 +349,8 @@ function getNotesEdiusFileData(){
     eLines.push(`${i+1},"${time}", ,"${(n.text||'').replace(/"/g,'""')}"`);
   });
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
-  const bytes = _makeBom(eLines.join('\r\n'));
-  return { name: `ST_${projName}_notes_Edius.csv`, content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-8' };
+  const bytes = encodeUTF16LE(eLines.join('\r\n'));
+  return { name: `ST_${projName}_notes_Edius.csv`, content: bytesToB64(bytes), ext: 'csv', mime: 'text/csv;charset=utf-16le' };
 }
 
 function doExportNotesEdius(){
@@ -364,14 +362,21 @@ function doExportNotesEdius(){
 
 function exportNotes(){
   if(!State.notes.length){ showToast('沒有備註可匯出'); return; }
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const current=()=>{
+    if(!session.isCurrent()) return false;
+    if(ownsWorkspace()) return true;
+    session.close();showToast('專案已變更，請重新開啟匯出視窗');return false;
+  };
   const cb=(id,label,chk)=>`<label style="display:block;padding:3px 0;cursor:pointer"><input type="checkbox" id="${id}"${chk?' checked':''}> ${label}</label>`;
-  openModal('匯出備註',
+  const session=openModal('匯出備註',
     cb('expNoteEdius','Edius 格式',true)+cb('expNoteGeneral','一般格式',false),
     [{label:'匯出',primary:true,act:()=>{
+      if(!current()) return;
       const e=document.getElementById('expNoteEdius')?.checked;
       const g=document.getElementById('expNoteGeneral')?.checked;
       if(!e&&!g){showToast('請至少勾選一種格式');return;}
-      closeModal();
+      session.close();
       
       const filesToExport = [];
       if(e) {
@@ -385,7 +390,7 @@ function exportNotes(){
       if(filesToExport.length > 0) {
         executeBatchExport(filesToExport);
       }
-    }},{label:'取消',act:closeModal}],{width:'240px'});
+    }},{label:'取消',act:()=>session.close()}],{width:'240px'});
 }
 
 export { addNote, renderNotes, exportNotes, doExportNotesGeneral, doExportNotesEdius, getNotesGeneralFileData, getNotesEdiusFileData, setNoteActive, updateNoteActive, clearAllNotes };

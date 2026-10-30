@@ -469,7 +469,7 @@ describe('native media intake runtime', () => {
   });
 
   it.each(['ingest', 'stream'].flatMap(mode => ['write', 'rename'].map(failure => [mode, failure])))
-  ('%s 索引 %s 失敗必須回報失敗，保留舊索引與 Proxy 並清除未提交檔案', async (mode, failure) => {
+  ('%s generation 完成紀錄 %s 失敗必須回報失敗，保留舊索引與 Proxy 並清除未提交檔案', async (mode, failure) => {
     const progress = [];
     const fixture = repairFixture(async args => writeIntakeOutputs(args), { sendProgress: (_, payload) => progress.push(payload) });
     const first = await fixture.runtime.ingest({ src: fixture.source, duration: 1, needsProxy: true, audio: [] });
@@ -479,7 +479,9 @@ describe('native media intake runtime', () => {
     const method = failure === 'write' ? 'writeFileSync' : 'renameSync';
     const original = fs[method];
     const fault = vi.spyOn(fs, method).mockImplementation((file, ...args) => {
-      if (String(file).startsWith(metaPath + '.tmp')) throw new Error('metadata disk failure');
+      if (String(file).startsWith(cacheDir + path.sep) && path.basename(String(file)).startsWith('cache-meta.json.tmp')) {
+        throw new Error('metadata disk failure');
+      }
       return original(file, ...args);
     });
     progress.length = 0;
@@ -502,7 +504,7 @@ describe('native media intake runtime', () => {
     expect(fixture.calls).toHaveLength(2);
   });
 
-  it.each([false, true])('原生編碼成功後，索引提交結果才發布唯一終態（索引失敗=%s）', async failCommit => {
+  it.each([false, true])('原生編碼成功後，generation 完成紀錄提交結果才發布唯一終態（發布失敗=%s）', async failCommit => {
     const root = makeTempRoot();
     const source = path.join(root, 'source.bin');
     const cacheRoot = path.join(root, 'cache');
@@ -522,7 +524,7 @@ describe('native media intake runtime', () => {
     });
     const original = fs.renameSync;
     const fault = vi.spyOn(fs, 'renameSync').mockImplementation((file, ...args) => {
-      if (failCommit && args[0] === metaPath) throw new Error('index publication failed');
+      if (failCommit && path.basename(String(args[0])) === 'cache-meta.json') throw new Error('index publication failed');
       return original(file, ...args);
     });
     try {
@@ -741,7 +743,8 @@ describe('native media intake runtime', () => {
       expect(await queued).toBe('next-source');
       expect(runtime.releaseStream('l-fixed')).toBe(false);
       expect(fs.existsSync(calls[0].at(-1))).toBe(false);
-      expect(progress).toEqual([expect.objectContaining({ done: true, outcome: 'failed', errorCode: 'STREAM_READINESS_TIMEOUT' })]);
+      expect(progress[0]).toMatchObject({ label: '驗證共用 Proxy 的母素材', pct: 0 });
+      expect(progress.filter(event => event.done)).toEqual([expect.objectContaining({ done: true, outcome: 'failed', errorCode: 'STREAM_READINESS_TIMEOUT' })]);
     } finally { finish(); await coordinator.cancelAllAndWait(); await runtime.close(); }
   });
 
@@ -956,7 +959,10 @@ describe('native media intake runtime', () => {
     expect(first).toMatchObject({ cached: false, channels: [], wave: null });
     expect(first.proxy).toMatch(/[\\/]\.subtool_Cache[\\/][a-f0-9]{16}[\\/]generation-[a-f0-9]{24}[\\/]proxy\.mp4$/);
     expect(JSON.parse(fs.readFileSync(path.join(cacheDirectory(first.proxy), 'meta.json'), 'utf8')))
-      .toEqual({ proxy: path.relative(cacheDirectory(first.proxy), first.proxy).split(path.sep).join('/'), wave: null, channels: [] });
+      .toEqual({ proxy: path.relative(cacheDirectory(first.proxy), first.proxy).split(path.sep).join('/'), wave: null, channels: [], publicationVersion: 1,
+        artifactSizes: { [path.relative(cacheDirectory(first.proxy), first.proxy).split(path.sep).join('/')]: Buffer.byteLength('proxy bytes') },
+        sourceContent: { format: 'source-v3-sha256', size: fs.statSync(source).size, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        sourceKeys: [cacheKeyFor(source)] });
     expect(second).toEqual({ ...first, cached: true });
     expect(spawnCount).toBe(1);
     expect(authority.canRead(first.proxy)).toBe(true);

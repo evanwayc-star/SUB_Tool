@@ -78,7 +78,9 @@ let FFMPEG_DETECTION = null, FFPROBE_DETECTION = null;
 let mediaProbe = null;
 let projectOpenReady = false;
 const IS_TRANSPORT_ACCEPTANCE = process.argv.includes('--subtool-transport-acceptance');
-const TMP = path.join(os.tmpdir(), 'subtool_cache');
+/* 每個主程序獨占暫存根；不同 userData（或尚未取得單例鎖的程序）仍共用 OS temp，
+   不能用共同目錄讓同毫秒檔名碰撞，或在退出時清掉另一個程序的中間檔。 */
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool_cache-'));
 const tempFiles = new Set();
 let tmpSeq = 0;
 /* proxy、聲道與波形都共用 per-source cache；streamIngest 回傳「可播放」後仍持有
@@ -99,7 +101,6 @@ const projectWorkspace = createProjectWorkspace({
   saveMetadata: () => ({ appVersion: app.getVersion(), computerName: os.hostname() }),
   readFile: projectFile => fs.promises.readFile(projectFile),
   writeFile: createAtomicProjectWriter(),
-  ensureDirectory: projectFile => fs.promises.mkdir(path.dirname(projectFile), { recursive: true }),
   grantProjectFile: projectFile => fileAuthority.grantProjectFile(projectFile),
   grantMediaFile: mediaPath => fileAuthority.grantTrustedFile(mediaPath, { read: true, write: false }),
   canReadMedia: mediaPath => fileAuthority.canRead(mediaPath),
@@ -360,6 +361,7 @@ app.on('before-quit', (event) => {
       mediaProbe?.resume();
       ffmpegExecution.resume();
       deliveryCapabilities.resume();
+      speechCompressionRuntime.resume();
       mediaIngestCoordinator.resume();
       vocalWaveformRuntime.resume();
       await QueueManager.cancelShutdown();
@@ -627,7 +629,9 @@ ipcMain.handle('dialog:importSub', async (e, kind) => {
 ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
   const r = await dialog.showSaveDialog({ title: '匯出字幕', defaultPath: name, filters: [{ name: (ext || 'txt').toUpperCase(), extensions: [ext || 'txt'] }] });
   if (r.canceled) return null;
-  fs.writeFileSync(r.filePath, Buffer.from(b64, 'base64'));
+  // 單檔與批次共用完整寫入後才發布的交易，失敗不可先截斷使用者的舊字幕。
+  const { written } = writeDirectoryFiles(path.dirname(r.filePath), [{ name: path.basename(r.filePath), b64 }]);
+  if (written !== 1) throw new Error('無法寫入所選字幕檔案');
   return r.filePath;
 });
 ipcMain.handle('dialog:importFont', async () => {
@@ -1184,6 +1188,10 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
   if (isDeliveryDirectory) fileAuthority.grantDeliveryDirectory(dir);
   const { written, blocked } = writeDirectoryFiles(dir, files);
   if (blocked) console.warn(`[sec] exportDirectory: ${blocked} 個檔案因路徑越界或連結被略過（已寫入 ${written} 個）`);
+  // renderer 以回傳目錄表示整批完成；無效內容也可能被 writer 略過，不能只查 blocked。
+  if (!isDeliveryDirectory && written !== files.length) {
+    throw new Error(`匯出未完成：已寫入 ${written} 個檔案，略過 ${files.length - written} 個；請檢查檔名、路徑與內容。`);
+  }
   return dir;
 });
 
@@ -1715,7 +1723,7 @@ ipcMain.handle('mpv:detect', () => {
   const supported = mpvEmbeddingSupported(process.platform);
   const exe = mpvHost.detect();
   console.error('[mpv] detect ->', exe || (supported ? '(not found)' : `(disabled on ${process.platform})`));
-  return { available: !!exe, supported, exe };
+  return { available: !!exe, supported, exe, logPath: path.join(TMP, 'mpv-last.log') };
 });
 
 ipcMain.handle('mpv:launch', async (event, request = {}) => {

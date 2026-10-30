@@ -18,6 +18,17 @@ function createScreenshotOutput({ fileAuthority, fsModule = fs } = {}) {
   };
 
   const sameFile = (stat, owner) => stat.dev === owner.dev && stat.ino === owner.ino;
+  const sameSnapshot = (current, observed) => current.isFile() && !current.isSymbolicLink()
+    && ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every(field => current[field] === observed[field]);
+  const unlinkSnapshot = (file, observed) => {
+    // 非同步 metadata 是過去的觀察，不能授權刪掉等待期間填入或替換的新檔。
+    // 最後少量 metadata 核對與 unlink 不讓出 JS 執行權；圖片內容仍非同步寫入。
+    // 這是多次檔案系統呼叫的身分核對，不是 OS 級 compare-and-delete。
+    const current = (fsModule.lstatSync || fs.lstatSync)(file);
+    if (!sameSnapshot(current, observed)) return false;
+    (fsModule.unlinkSync || fs.unlinkSync)(file);
+    return true;
+  };
   const track = operation => {
     // 在任何 I/O 開始前就記錄已准入工作，close 同樣等待尚未 open 的 reserve。
     const work = Promise.resolve().then(operation);
@@ -81,7 +92,7 @@ function createScreenshotOutput({ fileAuthority, fsModule = fs } = {}) {
     try {
       const stat = await fsModule.promises.lstat(reservation.path);
       if (stat.size === 0 && sameFile(stat, reservation)) {
-        await fsModule.promises.unlink(reservation.path);
+        unlinkSnapshot(reservation.path, stat);
       }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     reservations.delete(id);
@@ -103,7 +114,7 @@ function createScreenshotOutput({ fileAuthority, fsModule = fs } = {}) {
     if (!owner) return;
     try {
       const stat = await fsModule.promises.lstat(file);
-      if (sameFile(stat, owner)) await fsModule.promises.unlink(file);
+      if (sameFile(stat, owner)) unlinkSnapshot(file, stat);
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     staging.delete(file);
   }
@@ -119,7 +130,7 @@ function createScreenshotOutput({ fileAuthority, fsModule = fs } = {}) {
         // fallback 的正式路徑可能被外部 writer 填入；身份與本 writer prefix 都要吻合。
         if (sameFile(current, owner) && current.size === stat.size && current.mtimeMs === stat.mtimeMs
           && current.ctimeMs === stat.ctimeMs && bytes.equals(owner.bytes.subarray(0, stat.size))) {
-          await fsModule.promises.unlink(file);
+          unlinkSnapshot(file, current);
         }
       }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -136,7 +147,9 @@ function createScreenshotOutput({ fileAuthority, fsModule = fs } = {}) {
       incompletePublications.set(file, { dev: identity.dev, ino: identity.ino, bytes });
       await handle.writeFile(bytes);
       await handle.sync();
+      const completed = await handle.stat();
       await handle.close(); handle = null;
+      if (!sameSnapshot((fsModule.lstatSync || fs.lstatSync)(file), completed)) return false;
       incompletePublications.delete(file);
     } catch (failure) {
       error = failure;
@@ -167,15 +180,18 @@ function createScreenshotOutput({ fileAuthority, fsModule = fs } = {}) {
         const bytes = Buffer.from(b64, 'base64');
         await stageHandle.writeFile(bytes);
         await stageHandle.sync();
+        const completedStage = await stageHandle.stat();
         // close 也是 transaction 的一部分；失敗不能先發布再留下成功外觀。
         await stageHandle.close(); stageHandle = null;
         await handle.close(); handle = null;
         const current = await fsModule.promises.lstat(reservation.path);
-        if (current.size === 0 && sameFile(current, reservation)) {
-          await fsModule.promises.unlink(reservation.path);
+        if (!sameSnapshot((fsModule.lstatSync || fs.lstatSync)(stagePath), completedStage)) {
+          throw new Error('截圖暫存檔在發布前已變更');
+        }
+        if (current.size === 0 && sameFile(current, reservation) && unlinkSnapshot(reservation.path, current)) {
           // link 是 exclusive publication；晚到的外部檔案必須贏，不能 rename 覆蓋。
           try {
-            await fsModule.promises.link(stagePath, reservation.path);
+            (fsModule.linkSync || fs.linkSync)(stagePath, reservation.path);
             published = true;
           } catch (publishError) {
             if (['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV', 'ENOSYS'].includes(publishError.code)) {

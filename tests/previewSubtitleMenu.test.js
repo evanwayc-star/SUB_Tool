@@ -7,7 +7,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { ROOT, CdpClient, reservePort, getJSON, waitFor, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
+const { isMainWindowTarget, ROOT, CdpClient, reservePort, getJSON, waitFor, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 let child, client, profile;
 
 beforeAll(async () => {
@@ -18,7 +18,7 @@ beforeAll(async () => {
     `--user-data-dir=${profile}`, '--no-sandbox',
   ], { cwd: ROOT, windowsHide: true, stdio: 'ignore' }));
   const target = await waitFor(async () => (await getJSON(`http://127.0.0.1:${port}/json/list`))
-    .find(page => page.type === 'page' && page.title === 'SUB TOOL'), '字幕預覽主視窗');
+    .find(isMainWindowTarget), '字幕預覽主視窗');
   client = new CdpClient(target.webSocketDebuggerUrl, { timeoutMs: 5000 });
   await client.connect();
   await waitFor(() => client.evaluate('!!window.SUB?.History.stack.length'), '初始化文件基準');

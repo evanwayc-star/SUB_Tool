@@ -10,13 +10,9 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
-const { CdpClient, getJSON, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
+const { CdpClient, getJSON, waitFor, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
 const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'compare-window-scroll.cjs');
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 function reservePort() {
   return new Promise((resolve, reject) => {
@@ -27,19 +23,6 @@ function reservePort() {
       server.close(error => error ? reject(error) : resolve(port));
     });
   });
-}
-
-async function waitUntil(fn, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await fn();
-      if (value) return value;
-    } catch (error) { lastError = error; }
-    await delay(50);
-  }
-  throw lastError || new Error('等待 Electron 比對視窗逾時');
 }
 
 async function runScrollFixture() {
@@ -57,15 +40,15 @@ async function runScrollFixture() {
   child.stderr.on('data', chunk => { stderr += chunk.toString(); });
   let client;
   try {
-    const before = await waitUntil(() => {
+    const before = await waitFor(() => {
       const marker = 'COMPARE_SCROLL_READY:';
       const line = stdout.split(/\r?\n/).find(value => value.startsWith(marker));
       return line ? JSON.parse(line.slice(marker.length)) : null;
-    });
-    const target = await waitUntil(async () => {
+    }, '字幕比對視窗回報捲動區資訊');
+    const target = await waitFor(async () => {
       return (await getJSON(`http://127.0.0.1:${port}/json/list`))
         .find(item => item.type === 'page' && item.title === '字幕比對');
-    });
+    }, '字幕比對視窗的 CDP page target');
     client = new CdpClient(target.webSocketDebuggerUrl, { timeoutMs: 10000 });
     await client.connect();
     let afterWheel = 0;
@@ -78,10 +61,10 @@ async function runScrollFixture() {
         deltaX: 0,
         deltaY: 240,
       });
-      afterWheel = await waitUntil(async () => {
+      afterWheel = await waitFor(async () => {
         const value = await client.evaluate(`document.getElementById('container').scrollTop`);
         return value > before.scrollTop ? value : null;
-      }, 1000).catch(() => 0);
+      }, '滑鼠滾輪使字幕比對容器向下捲動', 1000).catch(() => 0);
     }
     client.close();
     client = null;

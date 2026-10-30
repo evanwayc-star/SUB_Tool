@@ -14,6 +14,7 @@
    兩者都回 { config, index/chunks, info }；player.js 以 SampleReader 統一取位元組。 */
 import { createFile, DataStream, MP4BoxBuffer, Endianness } from 'mp4box';
 import { evictWindows, planWindow, sliceBounds, touchWindow, windowByteRange } from './sample-index.js';
+import { readMediaBytes } from './response-reader.js';
 
 /* 從 trak 的 stsd entry 抽 avcC/hvcC 當 VideoDecoderConfig.description（去掉 8-byte box header）。
    av1/vp9 或 in-band（avc3）通常不需 description → 回 undefined。 */
@@ -91,11 +92,7 @@ export function demuxFile(arrayBuffer){
 async function fetchRange(url, start, end, allowShort, signal){
   const want = end - start;
   const r = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` }, signal });
-  if(!r.ok && r.status !== 206) throw new Error('取位元組失敗 HTTP ' + r.status);
-  if(Number(r.headers?.get?.('content-length'))>want){
-    await r.body?.cancel?.();throw new Error('Range 未生效（回傳完整來源）');
-  }
-  const ab = await r.arrayBuffer();
+  const ab = await readMediaBytes(r, want);
   if(ab.byteLength !== want && !(allowShort && ab.byteLength < want))
     throw new Error(`Range 未生效（要 ${want} bytes、得 ${ab.byteLength}）`);
   return ab;
@@ -103,9 +100,9 @@ async function fetchRange(url, start, end, allowShort, signal){
 
 /* 開場探針：先用 1KB 確認此 url 真的支援 Range，之後的取用才可信。
    （檔案必大於 1KB——不到 1KB 的不會是影片。） */
-async function rangeWorks(url){
-  try{ return (await fetchRange(url, 0, 1024, false)).byteLength === 1024; }
-  catch(e){ return false; }
+async function rangeWorks(url, signal){
+  try{ return (await fetchRange(url, 0, 1024, false, signal)).byteLength === 1024; }
+  catch(e){ if(signal?.aborted) throw e; return false; }
 }
 
 /* Bound container IO before handing moov to MP4Box. Its stsz parser expands
@@ -117,12 +114,12 @@ const HEADER_BYTES = 64 << 10;
 const INDEX_BYTES = 4 << 20;
 const HEADER_REQUEST_LIMIT = 4096;
 
-async function readMovieHeader(url){
+async function readMovieHeader(url, signal){
   let position=0,readBytes=0,requests=0,brand=null;
   const read=async(start,length)=>{
     if(++requests>HEADER_REQUEST_LIMIT||length>INDEX_BYTE_LIMIT-readBytes)
       throw new Error('moov 索引超出有界讀取範圍');
-    const bytes=await fetchRange(url,start,start+length,true);
+    const bytes=await fetchRange(url,start,start+length,true,signal);
     readBytes+=bytes.byteLength;
     return bytes;
   };
@@ -237,9 +234,9 @@ function minimumCompositionTime(table,count){
 /* 只讀有界容器 header 建索引，moov 可位於檔頭或檔尾。
    回 { config, index:[{type,timestamp,duration,offset,size}], keyIdx:[], info, maxEnd }。
    metadataOnly 音訊來源只回真實 metadata；視訊仍建立實際逐格證據。 */
-export async function demuxIndex(url,{allowAudio=false,metadataOnly=false}={}){
-  if(!await rangeWorks(url)) throw new Error('此來源不支援 Range（無法串流式讀取）');
-  const {brand,movie}=await readMovieHeader(url),tables=movieSampleTables(movie);
+export async function demuxIndex(url,{allowAudio=false,metadataOnly=false,signal}={}){
+  if(!await rangeWorks(url,signal)) throw new Error('此來源不支援 Range（無法串流式讀取）');
+  const {brand,movie}=await readMovieHeader(url,signal),tables=movieSampleTables(movie);
   // First let the actual parser identify supported sample entries and edits,
   // without materializing any samples. Restore only the selected decoder table.
   const metadata=parseMovieHeader(brand,movie,tables);
@@ -367,22 +364,31 @@ export class SampleReader {
     const b = sliceBounds(this.index, i, w);
     return b ? w.bytes.subarray(b.off, b.end) : null;
   }
+  // 失敗與尚未到達不同；重試期間保留證據，直到該視窗成功、淘汰或卸載。
+  failure(i){
+    if(this._disposed || i < 0 || i >= this.index.length) return null;
+    return this.wins.get(planWindow(this.index, i).from)?.error || null;
+  }
   /* 觸發抓取（非同步、不等待）。同一視窗重覆呼叫只會抓一次。 */
   ensure(i){
     if(this._disposed || i < 0 || i >= this.index.length) return;
     const { from, to } = planWindow(this.index, i);
     let w = this.wins.get(from);
-    if(w){ this.order = touchWindow(this.order, from); return; }
+    if(w){
+      this.order = touchWindow(this.order, from);
+      if(w.promise || w.bytes) return;
+    }
     const { base, end } = windowByteRange(this.index, from, to, this.maxEnd);
-    w = { from, to, base, bytes: null, controller: new AbortController() };
-    this.wins.set(from, w); this.order.push(from);
+    w = { from, to, base, bytes: null, error:w?.error||null, controller: new AbortController() };
+    this.wins.set(from, w); if(!this.order.includes(from)) this.order.push(from);
     w.promise = fetchRange(this.url, base, end, false, w.controller.signal)
-      .then(ab => { if(this.wins.get(from) === w) w.bytes = new Uint8Array(ab); })
+      .then(ab => { if(this.wins.get(from) === w){ w.bytes = new Uint8Array(ab);w.error=null; } })
       .catch(e => {
-        // 同一位置可能已被淘汰再重抓；舊 IO 失敗不可刪掉新視窗。
+        // 同一位置可能已被淘汰再重抓；舊 IO 失敗不可污染新視窗。
         if(this.wins.get(from) !== w) return;
-        this.wins.delete(from); const k = this.order.indexOf(from); if(k >= 0) this.order.splice(k, 1);
-        console.warn('[WC] 取位元組失敗:', e && (e.message || e)); });
+        w.error=e;
+        console.warn('[WC] 取位元組失敗:', e && (e.message || e)); })
+      .finally(()=>{ if(this.wins.get(from) === w) w.promise=null; });
     const { keep, drop } = evictWindows(this.order);
     for(const k of drop){
       const evicted = this.wins.get(k);
@@ -402,6 +408,7 @@ export class SampleReader {
 export class MemReader {
   constructor(chunks){ this.chunks = chunks; }
   data(i){ const c = this.chunks[i]; return c ? c.data : null; }
+  failure(){ return null; }
   ensure(){}
   dispose(){ this.chunks = null; }
 }

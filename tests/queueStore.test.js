@@ -5,6 +5,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const fs = require('node:fs');
 const {
   burnAssFileName,
   cleanupOrphanAssFiles,
@@ -57,6 +58,48 @@ afterEach(() => {
 });
 
 describe('匯出佇列持久化', () => {
+  test.each([
+    { name: '工作快照',
+      write: (dir, outPath) => persistJob(dir, makeJob({ payload: { ...makeJob().payload, outPath } })),
+      read: dir => loadJobs(dir).jobs[0].payload.outPath },
+    { name: '字幕暫存',
+      write: (dir, content) => writeAssFile(dir, 'delivery.ass', content),
+      read: dir => readFileSync(path.join(dir, 'delivery.ass'), 'utf8') },
+    { name: '終態紀錄',
+      write: (dir, outPath) => stageTerminalOutcome(dir, makeJob({ status: 'failed', payload: { ...makeJob().payload, outPath } })),
+      read: dir => loadTerminalOutcomes(dir)[0].payload.outPath },
+    { name: '完成歷史',
+      write: (dir, outPath) => QueueHistory.append(dir, makeJob({ status: 'done', payload: { ...makeJob().payload, outPath } })),
+      read: dir => QueueHistory.load(dir)[0].payload.outPath },
+  ])('$name 部分寫入失敗時保留舊內容、清除私有檔且可重試', ({ write, read }) => {
+    const dir = makeTempDir();
+    const originalValue = path.join(dir, 'original.mp4');
+    const replacementValue = path.join(dir, 'replacement.mp4');
+    write(dir, originalValue);
+    const names = fs.readdirSync(dir);
+    const published = path.join(dir, names[0]);
+    const originalBytes = readFileSync(published);
+    const originalWrite = fs.writeFileSync;
+    const failure = Object.assign(new Error('disk full after partial write'), { code: 'ENOSPC' });
+    let partialBytes;
+    fs.writeFileSync = (target, content, ...args) => {
+      if (!String(target).includes('.tmp-')) return originalWrite(target, content, ...args);
+      originalWrite(target, String(content).slice(0, 8), ...args);
+      partialBytes = readFileSync(target);
+      throw failure;
+    };
+    try { expect(() => write(dir, replacementValue)).toThrow(failure); }
+    finally { fs.writeFileSync = originalWrite; }
+
+    expect(partialBytes.length).toBeGreaterThan(0);
+    expect(readFileSync(published)).toEqual(originalBytes);
+    expect(read(dir)).toBe(originalValue);
+    expect(fs.readdirSync(dir)).toEqual(names);
+    write(dir, replacementValue);
+    expect(read(dir)).toBe(replacementValue);
+    expect(fs.readdirSync(dir)).toEqual(names);
+  });
+
   test('完成歷史與待執行工作共用目錄時，不把 history 當成損毀工作', () => {
     const dir = makeTempDir();
     persistJob(dir, makeJob({ id: 'pending' }));

@@ -20,31 +20,16 @@
 ============================================================================== */
 
 
-const { execFileSync } = require('child_process');
-const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
+const { isMainWindowTarget } = require('../acceptance/cdp-electron-harness.js');
+const { findMainPid, connectMainInspector } = require('./main-inspector.js');
 const { rendererLagProbe } = require('./renderer-lag-probe.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/* 找 Electron 的【主】行程（沒有 --type= 的那個）。
-
-   兩種啟動方式的行程名不一樣，兩個都要認：
-     - 安裝版：SUB Tool.exe
-     - 啟動桌面版.bat：node_modules\electron\dist\electron.exe
-   只寫前者的話，用 .bat 測試時腳本會一直「等不到 app」。 */
-function findMainPid() {
-  const ps = 'Get-CimInstance Win32_Process | '
-    + "Where-Object { ($_.Name -eq 'SUB Tool.exe' -or $_.Name -eq 'electron.exe') "
-    + "-and $_.CommandLine -notmatch '--type=' } | "
-    + 'Select-Object -First 1 -ExpandProperty ProcessId';
-  try {
-    return Number(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim());
-  } catch (e) { return NaN; }
-}
 
 /* 此函式整段送往主行程執行。取得、取消與釋放共用同一個 token owner；
    native detach 會撤銷資格，晚到回覆不能關閉之後別人重新 attach 的 session。 */
-async function rendererProfileSession(command, token, lagScript) {
+async function rendererProfileSession(command, token, lagScript, isMain) {
   const key = '__subtoolDiagnosticProfile';
   const owns = session => globalThis[key] === session && session.attached && session.debugger.isAttached();
   const cleanup = session => {
@@ -96,6 +81,9 @@ async function rendererProfileSession(command, token, lagScript) {
       if (renderers?.get(token) !== contents) return;
       renderers.delete(token);
       if (!renderers.size) delete globalThis[probeKey];
+      const failed = globalThis[key + 'FailedProbes'];
+      failed?.delete(token);
+      if (failed && !failed.size) delete globalThis[key + 'FailedProbes'];
     };
     const timerKey = '__lagTimer_p_' + token, totalKey = '__lagTotal_p_' + token;
     const release = `(() => {
@@ -106,7 +94,15 @@ async function rendererProfileSession(command, token, lagScript) {
     })()`;
     const releaseProbe = async () => {
       try { if (!contents.isDestroyed()) await contents.executeJavaScript(release, true); }
-      catch (error) { if (!contents.isDestroyed()) throw error; }
+      catch (error) {
+        if (!contents.isDestroyed()) {
+          // 另一個收尾可能已成功釋放這個 token；晚到錯誤不得重新登記舊資格。
+          if (globalThis[probeKey]?.get(token) === contents) {
+            (globalThis[key + 'FailedProbes'] ||= new Set()).add(token);
+          }
+          throw error;
+        }
+      }
       forget();
       return true;
     };
@@ -120,10 +116,26 @@ async function rendererProfileSession(command, token, lagScript) {
     return result;
   }
 
+  if (command === 'recover') {
+    // 只重試已開始收尾的 owner；其他仍在工作的 debugger 不可被接手。
+    const previous = globalThis[key];
+    if (previous?.cancelled) {
+      await rendererProfileSession('lag-stop', previous.token);
+      try { await previous.start; } catch { /* 原啟動工作已失敗，仍須收尾。 */ }
+      await cleanup(previous);
+    }
+    // renderer 清理可能失敗而 debugger 已正常 detach；依舊 token 重試。
+    for (const failedToken of [...(globalThis[key + 'FailedProbes'] || [])]) {
+      await rendererProfileSession('lag-stop', failedToken);
+    }
+    return true;
+  }
+
   if (command === 'start') {
     const B = require('electron').BrowserWindow;
-    const w = B.getAllWindows().find(x => !x.getParentWindow());
-    if (!w) throw new Error('找不到 renderer 視窗');
+    const w = B.getAllWindows().find(x => !x.getParentWindow()
+      && isMain({ type: 'page', url: x.webContents.getURL() }));
+    if (!w) throw new Error('找不到 SUB Tool 主 renderer 視窗');
     const d = w.webContents.debugger;
     if (globalThis[key] || d.isAttached()) throw new Error('debugger 已由其他工作持有，請先結束該工作');
     const session = { token, debugger: d, webContents: w.webContents, attached: false, cancelled: false, startSent: false };
@@ -151,6 +163,8 @@ async function rendererProfileSession(command, token, lagScript) {
         session.ready = true;
         return 'ok';
       } catch (error) {
+        // 失敗的啟動不再持有正常工作資格；若 detach 也失敗，下一輪可重試原 owner 收尾。
+        session.cancelled = true;
         try { await cleanup(session); } catch { /* 保留啟動失敗的原始錯誤。 */ }
         if (globalThis[key] === session && !session.attached) delete globalThis[key];
         throw error;
@@ -188,9 +202,10 @@ async function rendererProfileSession(command, token, lagScript) {
 }
 
 function profileCommand(command, token, lagScript) {
-  return `(${rendererProfileSession.toString()})(${JSON.stringify(command)}, ${JSON.stringify(token)}, ${JSON.stringify(lagScript)})`;
+  return `(${rendererProfileSession.toString()})(${JSON.stringify(command)}, ${JSON.stringify(token)}, ${JSON.stringify(lagScript)}, (${isMainWindowTarget.toString()}))`;
 }
 const PROFILE_TOKEN = require('node:crypto').randomUUID();
+const RECOVER_PROFILE = profileCommand('recover', PROFILE_TOKEN);
 const START_PROFILE = profileCommand('start', PROFILE_TOKEN);
 const STOP_PROFILE = profileCommand('stop', PROFILE_TOKEN);
 
@@ -209,19 +224,25 @@ const CLEANUP_LAG = profileCommand('lag-stop', PROFILE_TOKEN);
   }
   if (!pid) { console.error('等不到 SUB Tool。'); process.exit(1); }
   console.log(`主行程 PID = ${pid}`);
-  try { process._debugProcess(pid); } catch (e) { console.error('開 inspector 失敗：', e.message); }
-  await sleep(1200);
 
-  let t;
-  try { t = (await getJSON('http://127.0.0.1:9229/json/list'))[0]; }
-  catch (e) { console.error('連不上 9229：' + e.message); process.exit(1); }
-  const main = new CdpClient((t).webSocketDebuggerUrl);
-    await main.connect();
-
+  const main = await connectMainInspector(pid);
+  let interruption;
+  const signalHandlers = new Map([['SIGINT', 130], ['SIGTERM', 143]].map(([signal, exitCode]) => [signal, () => {
+    interruption ||= Object.assign(new Error(`量測已中止（${signal}）`), { exitCode });
+    process.exitCode = interruption.exitCode;
+  }]));
+  const checkInterrupted = () => { if (interruption) throw interruption; };
+  // 目前 CDP 命令完成後才清理，避免 profiler／renderer 的啟動與釋放交錯。
+  for (const [signal, handler] of signalHandlers) process.on(signal, handler);
   try {
+  checkInterrupted();
+  await main.evaluate(RECOVER_PROFILE);
+  checkInterrupted();
   const started = await main.evaluate(START_PROFILE);
+  checkInterrupted();
   if (started !== 'ok') throw new Error(started);
   await main.evaluate(ARM_LAG);
+  checkInterrupted();
   console.log('\nCPU profiler 已啟動。');
   console.log('★ 現在請【載入影音】。只量測可見區間的 renderer 延遲，結束後自動報告。\n');
 
@@ -229,7 +250,9 @@ const CLEANUP_LAG = profileCommand('lag-stop', PROFILE_TOKEN);
   const deadline = Date.now() + 60 * 60 * 1000;
   let seen = 0, quietSince = 0, sawBlock = false;
   while (Date.now() < deadline) {
+    checkInterrupted();
     const total = Number(await main.evaluate(READ_LAG)) || 0;
+    checkInterrupted();
     if (total > seen) { seen = total; quietSince = 0; if (!sawBlock && total > 8000) { sawBlock = true; console.log(`renderer 可見區間延遲（累計 ${Math.round(total / 1000)} 秒），繼續採樣查明原因…`); } }
     else if (sawBlock) { if (!quietSince) quietSince = Date.now(); else if (Date.now() - quietSince > 8000) break; }
     process.stdout.write(sawBlock ? '#' : '.');
@@ -238,6 +261,7 @@ const CLEANUP_LAG = profileCommand('lag-stop', PROFILE_TOKEN);
   console.log('\n');
 
   const raw = await main.evaluate(STOP_PROFILE);
+  checkInterrupted();
   const out = JSON.parse(raw);
   if (out.err) throw new Error(out.err);
 
@@ -250,8 +274,15 @@ const CLEANUP_LAG = profileCommand('lag-stop', PROFILE_TOKEN);
   }
 
   } finally {
-    try { await main.evaluate(CLEANUP_LAG); } catch { /* 只清本 token 的 renderer probe。 */ }
-    try { await main.evaluate(STOP_PROFILE); } catch { /* 斷線時不可影響其他 owner。 */ }
-    main.close();
+    // 一次暫時錯誤可立即重試；仍失敗時留下診斷與 owner，供下一次執行恢復。
+    for (const [command, label] of [[CLEANUP_LAG, 'renderer 探針'], [STOP_PROFILE, 'profiler']]) {
+      try { await main.evaluate(command); }
+      catch {
+        try { await main.evaluate(command); }
+        catch (error) { console.error(`清理 ${label} 失敗：${error.message}`); process.exitCode ||= 1; }
+      }
+    }
+    try { main.close(); }
+    finally { for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler); }
   }
-})().catch(e => { console.error('失敗:', e.message); process.exitCode = 1; });
+})().catch(e => { console.error('失敗:', e.message); process.exitCode ||= e.exitCode || 1; });

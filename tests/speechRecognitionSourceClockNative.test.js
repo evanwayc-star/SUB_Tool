@@ -74,8 +74,7 @@ describe.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('public ASR o
     const readBytes = vi.fn(async (_url, { headers } = {}) => {
       const range = /bytes=(\d+)-(\d+)/.exec(headers?.Range || '');
       const part = range ? bytes.subarray(Number(range[1]), Number(range[2]) + 1) : bytes;
-      return { ok: true, status: range ? 206 : 200,
-        arrayBuffer: async () => part.buffer.slice(part.byteOffset, part.byteOffset + part.length) };
+      return new Response(part, { status: range ? 206 : 200 });
     });
     vi.stubGlobal('fetch', readBytes);
     const metadata = await sourcePresentationMetadata(filePath);

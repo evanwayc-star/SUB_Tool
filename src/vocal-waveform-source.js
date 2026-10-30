@@ -4,6 +4,7 @@ import { AudioEngine } from './audio-engine.js';
 import { audioMotherPath } from '../shared/audio-loudness.cjs';
 import { vocalWaveformClient, vocalAbortError } from './vocal-waveform-worker-client.js';
 import { vocalWaveformCache, vocalCacheDescriptor } from './vocal-waveform-cache.js';
+import { readMediaBytes } from './decode/response-reader.js';
 
 function keys(source){
   return [source?.audioSourceId,source?.sourceId,source?.audioSrc,source?.source,source?.id].filter(value=>value!=null).map(String);
@@ -171,8 +172,14 @@ async function runSourceVocals(spec,resolved,{signal,onProgress,identity}){
         if(!file&&!spec.url)throw new Error('找不到原素材音訊，請重新載入檔案');
         const response=file?null:await fetch(spec.url,{signal});
         if(response&&!response.ok)throw new Error('無法讀取原素材音訊');
-        const blob=file||await response.blob();
-        if(blob.size>100e6)throw new Error('瀏覽器人聲分離目前支援 100 MB 內素材；請使用桌面版');
+        let blob=file;
+        if(!blob){
+          try{blob=new Blob([await readMediaBytes(response,100e6)]);}
+          catch(error){
+            if(error instanceof RangeError)throw new Error('瀏覽器人聲分離目前支援 100 MB 內素材；請使用桌面版');
+            throw error;
+          }
+        }
         assertOwned();
         webBuffers=[await AudioEngine.decodeSourceAudioData(await blob.arrayBuffer(),{url:spec.url,file:blob,owns,signal})];
         assertOwned();

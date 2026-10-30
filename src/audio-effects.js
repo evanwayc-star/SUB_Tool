@@ -29,7 +29,8 @@ export function createAudioEffects({ sources, process, prepare, install, isInsta
     if (!job) return;
     jobs.delete(key);
     job.controller.abort();
-    for (const target of job.targets) {
+    // 運算期間切分出的片段也會收到進度；即使隨後移除，仍由原工作清理。
+    for (const target of job.progressTargets) {
       delete target.audioNormalizing;
       delete target.audioNormalizeProgress;
       delete target.audioNormalizeLabel;
@@ -46,13 +47,14 @@ export function createAudioEffects({ sources, process, prepare, install, isInsta
     failures.delete(key);
     const spec = normalizeAudioLimiterSpec(options);
     const stamp = fingerprint(source, spec);
-    const job = { id: `audiofx-${Date.now()}-${++nextWorkId}`, controller: new AbortController(), targets: initial, epoch };
+    const job = { id: `audiofx-${Date.now()}-${++nextWorkId}`, controller: new AbortController(), progressTargets: new Set(initial), epoch };
     jobs.set(key, job);
     const owns = () => jobs.get(key) === job && job.epoch === epoch && !job.controller.signal.aborted
       && sources().some(s => initial.includes(s) && keyOf(s) === key && audioMotherPath(s) === motherPath);
     const progress = data => {
       if (!owns()) return;
       for (const target of targets(source)) {
+        job.progressTargets.add(target);
         target.audioNormalizing = true;
         target.audioNormalizeProgress = Math.max(0, Math.min(100, Number(data.pct) || 0));
         target.audioNormalizeLabel = String(data.label || '音訊平衡');

@@ -1,14 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
 import vm from 'node:vm';
 import { parse } from 'acorn';
 import { State } from '../src/state.js';
 import { buildXLSX } from '../src/xlsx-export.js';
-import { bytesToB64, baseName } from '../src/util.js';
+import { bytesToB64, baseName, encodeUTF16LE } from '../src/util.js';
+import { SubFormats } from '../src/formats.js';
+import { allocateExportFileNames } from '../src/export-job-engine.js';
+
+const { writeDirectoryFiles } = createRequire(import.meta.url)('../electron/directory-output.js');
 
 const source = fs.readFileSync(new URL('../src/subio.js', import.meta.url), 'utf8');
 const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
-const names = ['executeBatchExport', 'getXLSXFileData', 'doExportXLSX'];
+const names = ['executeBatchExport', 'getFileData', 'getXLSXFileData', 'doExportXLSX'];
 const functions = names.map(name => {
   const declaration = ast.body.find(node => node.type === 'ExportNamedDeclaration'
     && node.declaration?.type === 'FunctionDeclaration' && node.declaration.id.name === name)?.declaration;
@@ -32,7 +39,7 @@ class RejectedWriter {
 
 function publicExports(desk, desktop = true) {
   const setStatus = vi.fn(), showToast = vi.fn(), downloadBytes = vi.fn();
-  const context = vm.createContext({ State, IS_DESKTOP: desktop, DESK: desk, buildXLSX,
+  const context = vm.createContext({ State, IS_DESKTOP: desktop, DESK: desk, buildXLSX, SubFormats, encodeUTF16LE, allocateExportFileNames,
     bytesToB64, baseName, b64ToBytes: value => new Uint8Array(Buffer.from(value, 'base64')),
     downloadBytes, setStatus, showToast });
   vm.runInContext(`${functions}\n globalThis.exports = {${names.join(',')}};`, context);
@@ -44,6 +51,33 @@ const subtitle = { name: 'caption.srt', content: bytesToB64(new TextEncoder().en
 const tracks = [{ name: '軌道1', cues: [{ start: 0, end: 1, text: '字幕' }] }];
 
 describe('字幕檔案匯出的公開完成回報', () => {
+  it.each([
+    ['同名軌道', ['對白', '對白']],
+    ['淨化後碰撞', ['A/B', 'A:B']],
+    ['大小寫及既有序號', ['News', 'NEWS', 'News (2)']],
+  ])('%s 的同批次字幕各自保留完整內容', async (_label, trackNames) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-subtitle-batch-'));
+    try {
+      const desk = { exportDirectory: vi.fn(async files => {
+        expect(writeDirectoryFiles(directory, files)).toEqual({ written: files.length, blocked: 0 });
+        return directory;
+      }) };
+      const api = publicExports(desk);
+      const files = trackNames.map((name, index) => api.getFileData('srt', [
+        { start: index, end: index + 1, text: `第 ${index + 1} 軌完整內容` },
+      ], name));
+      const before = structuredClone(files);
+      await api.executeBatchExport(files);
+      const actual = fs.readdirSync(directory).map(name => fs.readFileSync(path.join(directory, name)).toString('base64'));
+      expect(actual.sort()).toEqual(files.map(file => file.content).sort());
+      expect(files).toEqual(before);
+      expect(api.setStatus).toHaveBeenCalledWith(`已批次匯出 ${files.length} 個檔案至：${directory}`, 'ok');
+    } finally {
+      expect(path.dirname(fs.realpathSync(directory))).toBe(fs.realpathSync(os.tmpdir()));
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each(['single', 'batch', 'xlsx'])('%s 寫入拒絕 EACCES 會接住錯誤並顯示失敗', async branch => {
     const before = JSON.stringify(State);
     const writer = new RejectedWriter(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }));
@@ -102,5 +136,14 @@ describe('字幕檔案匯出的公開完成回報', () => {
     await api.doExportXLSX(tracks);
     expect(api.downloadBytes).toHaveBeenCalledTimes(3);
     expect(api.setStatus).toHaveBeenLastCalledWith('已匯出 XLSX（1 個分頁）', 'ok');
+  });
+
+  it('網頁同批次重名保留每份 bytes 與原有序號檔名', async () => {
+    const api = publicExports(null, false);
+    const files = [subtitle, { ...subtitle, content:bytesToB64(new TextEncoder().encode('第二份字幕')) },
+      { ...subtitle, name:'caption (2).srt', content:bytesToB64(new TextEncoder().encode('第三份字幕')) }];
+    await api.executeBatchExport(files);
+    expect(api.downloadBytes.mock.calls.map(call=>call[1])).toEqual(['caption.srt','caption (3).srt','caption (2).srt']);
+    expect(api.downloadBytes.mock.calls.map(call=>Buffer.from(call[0]).toString('base64'))).toEqual(files.map(file=>file.content));
   });
 });

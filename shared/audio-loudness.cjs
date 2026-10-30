@@ -27,11 +27,21 @@ function normalizeAudioLimiterSpec(spec) {
     if (!/^\d+$/.test(stream) || Number(stream) > 255 || !report || typeof report !== 'object') continue;
     const safe = {};
     for (const key of ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset']) {
-      const value = Number(report[key]);
+      const raw = report[key];
+      // 缺值、空字串或布林不能以 Number() 轉成 0/1，否則會冒充雙遍量測證據。
+      if ((typeof raw !== 'number' && typeof raw !== 'string') || (typeof raw === 'string' && !raw.trim())) continue;
+      const value = Number(raw);
       if (Number.isFinite(value)) safe[key] = value;
-      else if (String(report[key]).toLowerCase() === '-inf') safe[key] = '-inf';
+      else if (typeof raw === 'string' && raw.trim().toLowerCase() === '-inf') safe[key] = '-inf';
+      // FFmpeg 在完全靜音時會輸出 target_offset="inf"；此報告只用於無聲 bypass。
+      else if (key === 'target_offset' && typeof raw === 'string' && raw.trim().toLowerCase() === 'inf') safe[key] = 'inf';
     }
-    if (Object.keys(safe).length === 5) reports[stream] = safe;
+    // 非靜音才送入 FFmpeg 的 measured_* 選項，須符合它實際允許的區間。
+    const inRange = (value, min, max) => Number.isFinite(value) && value >= min && value <= max;
+    const usable = inRange(safe.input_i, -99, 0) && inRange(safe.input_tp, -99, 99)
+      && inRange(safe.input_lra, 0, 99) && inRange(safe.input_thresh, -99, 0)
+      && inRange(safe.target_offset, -99, 99);
+    if (Object.keys(safe).length === 5 && (isAudioReportSilence(safe) || usable)) reports[stream] = safe;
   }
   return {
     max: options.maximumAmplitude, min: options.targetLoudness, inputBoost: options.inputBoost,
@@ -166,14 +176,17 @@ function normalizeLimiterOptions(raw = {}) {
  */
 function isAudioReportSilence(report) {
   if (!report || typeof report !== 'object') return false;
-  if (String(report.input_i).toLowerCase() === '-inf' || String(report.input_tp).toLowerCase() === '-inf') return true;
+  const missingIntegrated = String(report.input_i).toLowerCase() === '-inf';
+  const peak = Number(report.input_tp);
+  // 不足 400ms 的可聽片段可能沒有整體響度；峰值高於 -70 才繼續處理。
+  // 峰值也不超過 -70 時仍保護原音，不能因 -inf 將極低底噪放大到目標響度。
+  if (missingIntegrated && report.input_tp != null && report.input_tp !== '' && Number.isFinite(peak) && peak > -70) return false;
+  if (missingIntegrated || String(report.input_tp).toLowerCase() === '-inf') return true;
   const i = Number(report.input_i);
-  const thresh = Number(report.input_thresh);
   const tp = Number(report.input_tp);
 
-  // 若 input_i <= -70 或 input_thresh <= -70 或 input_tp <= -90，判定為無聲
+  // input_thresh 是量測的相對門檻，不能拿來與 -70 LKFS 的整體響度門檻比較。
   if (Number.isFinite(i) && i <= -70) return true;
-  if (Number.isFinite(thresh) && thresh <= -70) return true;
   if (Number.isFinite(tp) && tp <= -90) return true;
   return false;
 }
@@ -260,7 +273,8 @@ function buildLimiterFilter(opts, measuredReport = null) {
   if (postGain < 0 || Math.abs(inputGain) > 0.01) {
     filterParts.push(`volume=${inputGain.toFixed(gainDigits)}dB`);
   }
-  filterParts.push(`alimiter=limit=${nativeLimit.toFixed(6)}:attack=${norm.lookAheadTime}:release=${norm.releaseTime}:asc=0:level=false`);
+  // 預先讀取不改變來源秒數；補償延遲並沖出尾端，避免預覽與交付位移或掉樣本。
+  filterParts.push(`alimiter=limit=${nativeLimit.toFixed(6)}:attack=${norm.lookAheadTime}:release=${norm.releaseTime}:asc=0:level=false:latency=true`);
   if (postGain < 0) {
     filterParts.push(`volume=${postGain.toFixed(gainDigits)}dB`);
   }
@@ -364,7 +378,12 @@ function parseVolumeAnalysis(stderrText) {
 
   // 3. 整合最精確的指標
   const measuredMax = decibels(loudnormData?.input_tp) ?? maxVolume;
-  const measuredMean = decibels(loudnormData?.input_i) ?? meanVolume;
+  const integrated = decibels(loudnormData?.input_i);
+  // 短片的 -inf 可能只是整體響度量測窗不足；已有可聽峰值時改用實測 RMS。
+  const noIntegratedForAudible = typeof loudnormData?.input_i === 'string'
+    && /^-inf(?:inity)?$/i.test(loudnormData.input_i.trim()) && measuredMax != null && measuredMax > -90;
+  const useRms = noIntegratedForAudible || integrated == null;
+  const measuredMean = useRms ? meanVolume : integrated;
   // 失敗 stderr／半份 report 不是靜音；只有實際測得的 peak 與平均才能發布。
   if (measuredMax == null || measuredMean == null) return null;
   const maxDb = +measuredMax.toFixed(1);
@@ -394,6 +413,7 @@ function parseVolumeAnalysis(stderrText) {
     minDb,
     dynamicRangeDb,
     isSilence,
+    meanSource: useRms ? 'volumedetect' : 'loudnorm',
     rawLoudnorm: loudnormData,
   };
 }

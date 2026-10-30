@@ -7,7 +7,7 @@
 ============================================================================== */
 
 import { escapeHTML } from './util.js';
-import { openModal, closeModal, showToast } from './ui.js';
+import { openModal, showToast } from './ui.js';
 import { Media, Wave } from './media.js';
 import { IS_DESKTOP } from './state.js';
 import {
@@ -15,6 +15,7 @@ import {
   LIMITER_DB_RANGE,
   normalizeLimiterOptions,
   analyzePeaksLoudness,
+  audioMotherPath,
 } from '../shared/audio-loudness.cjs';
 
 const DESK = typeof window !== 'undefined' ? window.subtool : null;
@@ -45,6 +46,7 @@ export function openHardLimiterDialog(audioSource) {
   }
 
   const targets = resolveAudioTargets(audioSource);
+  const sourcePaths = new Map(targets.map(target => [target, audioMotherPath(target)]));
   const appliedTarget = targets.find(t => t.hasAudioLimiter || t._originalPath);
   const hasApplied = Boolean(appliedTarget);
   const sourceName = audioSource?.name || targets[0]?.name || '音訊素材';
@@ -231,20 +233,28 @@ export function openHardLimiterDialog(audioSource) {
     </div>
   `;
 
+  const applyEffect = async options => {
+    if (!session.isCurrent()) return;
+    // ID 可由另一個專案重新載入；提交只能沿用開窗時仍存活的母素材。
+    const target = Media.audioEffects.targets(audioSource).find(candidate =>
+      sourcePaths.has(candidate) && sourcePaths.get(candidate) === audioMotherPath(candidate));
+    session.close({ committed: true });
+    if (!target) { showToast('音訊來源已變更，請重新開啟效果面板'); return; }
+    const result = await Media.audioEffects.apply(target, options);
+    if (result.status === 'completed') showToast(options ? '已套用音訊平衡' : '已還原原始音訊');
+  };
+
   const buttons = [
     {
       label: '關閉',
-      act: closeModal,
+      act: () => session.close(),
     },
   ];
 
   if (hasApplied) {
     buttons.push({
       label: '還原原音',
-      act: () => {
-        closeModal({ committed: true });
-        revertAudioToOriginal(audioSource);
-      },
+      act: () => applyEffect(null),
     });
   }
 
@@ -252,26 +262,18 @@ export function openHardLimiterDialog(audioSource) {
     label: '套用',
     primary: true,
     act: () => {
+      if (!session.isCurrent()) return;
       // Enter 不會先觸發數字欄位的 change；提交前先同步仍在編輯的值。
       const active = document.activeElement;
       if (active?.id === 'hlMaxAmpNum' || active?.id === 'hlMinAmpNum') {
         active.dispatchEvent(new Event('change', { bubbles: true }));
       }
-      // 點擊「套用」立即關閉視窗，轉為背景非阻塞作業！
-      closeModal({ committed: true });
-
-      if (!isFilterEnabled) {
-        // 若使用者關閉了濾鏡，則直接還原原音
-        revertAudioToOriginal(audioSource);
-        return;
-      }
-
-      // 背景執行平衡化運算
-      runNormalizationInBackground(audioSource, currentOptions);
+      // 提交後關閉視窗，運算與還原共用同一條來源資格檢查。
+      void applyEffect(isFilterEnabled ? currentOptions : null);
     },
   });
 
-  openModal(`音訊效果 — 強限制器／平衡化 (ITU 1770) — ${escapeHTML(sourceName)}`, html, buttons, {
+  const session = openModal(`音訊效果 — 強限制器／平衡化 (ITU 1770) — ${escapeHTML(sourceName)}`, html, buttons, {
     width: '560px',
   });
   const analysisPanel = document.getElementById('hlAnalysisStatus')?.closest('.hard-limiter-panel');
@@ -413,7 +415,7 @@ export function openHardLimiterDialog(audioSource) {
       if (minEl) minEl.textContent = `${res.minDb > -90 ? res.minDb : '極小'} dB`;
       if (drEl) drEl.textContent = `${res.dynamicRangeDb} dB`;
       if (tagEl) {
-        tagEl.textContent = '🎯 精準量測 (ITU 1770)';
+        tagEl.textContent = res.meanSource === 'volumedetect' ? '🎯 平均聲量（RMS）' : '🎯 精準量測 (ITU 1770)';
         tagEl.style.color = '#34d399';
         tagEl.style.borderColor = 'rgba(52,211,153,0.4)';
         tagEl.style.background = 'rgba(52,211,153,0.1)';
@@ -430,17 +432,4 @@ export function openHardLimiterDialog(audioSource) {
       console.warn('[HardLimiter] 背景量測失敗：', err);
     });
   }
-}
-
-/**
- * 在背景執行音訊平衡化運算（完全不阻塞視窗，即時回報進度）
- */
-async function runNormalizationInBackground(audioSource, options) {
-  const result = await Media.audioEffects.apply(audioSource, options);
-  if (result.status === 'completed') showToast('已套用音訊平衡');
-}
-
-async function revertAudioToOriginal(audioSource) {
-  const result = await Media.audioEffects.apply(audioSource, null);
-  if (result.status === 'completed') showToast('已還原原始音訊');
 }

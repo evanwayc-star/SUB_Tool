@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { parse } from 'acorn';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { rendererLagProbe } = require('../scripts/diagnostics/renderer-lag-probe.js');
+const { isMainWindowTarget } = require('../scripts/acceptance/cdp-electron-harness.js');
 
 const source = readFileSync(new URL('../scripts/diagnostics/measure-input-latency.js', import.meta.url), 'utf8');
 const ast = parse(source, { ecmaVersion: 'latest' });
@@ -21,6 +26,40 @@ const arm = find(ast, node => node.type === 'VariableDeclarator' && node.id.name
 const polling = find(ast, node => node.type === 'WhileStatement' && node.test.name === 'alive');
 const readerSource = readFileSync(new URL('../scripts/diagnostics/read-input-probe.js', import.meta.url), 'utf8');
 
+describe('常駐診斷的真實主行程注入入口', () => {
+  it.each([
+    ['measure-input-latency.js', 'inPage'], ['read-input-probe.js', 'inPage'],
+    ['watch-cpu-and-lag.js', 'ARM'], ['watch-cpu-and-lag.js', 'READ'],
+  ])('%s %s 在 queue 先列出時只操作主 renderer', async (file, entry) => {
+    const script = readFileSync(new URL(`../scripts/diagnostics/${file}`, import.meta.url), 'utf8');
+    const tree = parse(script, { ecmaVersion: 'latest' });
+    const declaration = find(tree, node => node.type === 'VariableDeclarator' && node.id.name === entry);
+    const context = vm.createContext({ rendererLagProbe, isMainWindowTarget, CPU_TOKEN: 'cpu-fixture' });
+    vm.runInContext(tree.body.filter(node => node.type === 'FunctionDeclaration')
+      .map(node => script.slice(node.start, node.end)).join('\n'), context);
+    const injected = vm.runInContext(script.slice(declaration.init.start, declaration.init.end), context);
+    const mainCalls = [], queueCalls = [];
+    const main = { getParentWindow: () => null, isVisible: () => true, isMinimized: () => false, isFocused: () => true,
+      webContents: { getURL: () => 'file:///SUB_Tool/dist/index.html', isDestroyed: () => false, executeJavaScript: async code => {
+        mainCalls.push(code); return JSON.stringify({ lag: 77, vis: 'visible', focus: true });
+      } } };
+    const queue = { ...main, webContents: { getURL: () => 'file:///SUB_Tool/electron/queue.html',
+      executeJavaScript: async code => { queueCalls.push(code); return JSON.stringify({ lag: 0 }); } } };
+    const host = vm.createContext({ URL, require: () => ({ BrowserWindow: { getAllWindows: () => [queue, main] } }) });
+
+    if (file === 'watch-cpu-and-lag.js' && entry === 'READ') {
+      const start = find(tree, node => node.type === 'VariableDeclarator' && node.id.name === 'ARM').init;
+      await vm.runInContext(vm.runInContext(script.slice(start.start, start.end), context), host);
+      mainCalls.length = 0;
+    }
+
+    await vm.runInContext(entry === 'inPage' ? injected('true') : injected, host);
+
+    expect(mainCalls).toHaveLength(1);
+    expect(queueCalls).toEqual([]);
+  });
+});
+
 async function readProbe(records) {
   const lines = [], exits = [];
   let read = 0;
@@ -34,6 +73,8 @@ async function readProbe(records) {
   await vm.runInNewContext(readerSource, {
     require: name => name === 'child_process' ? {} : {
       CdpClient,
+      connectMainInspector: async () => new CdpClient(),
+      isMainWindowTarget,
       getJSON: async () => [{ webSocketDebuggerUrl: 'ws://test' }],
     },
     process: { argv: ['node', 'read-input-probe.js', '123'], _debugProcess() {}, exit: code => exits.push(code) },

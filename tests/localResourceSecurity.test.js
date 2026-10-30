@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
-const { CdpClient, getJSON, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
+const { isMainWindowTarget, CdpClient, getJSON, waitFor, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 const ELECTRON = path.join(
   ROOT,
   'node_modules',
@@ -22,23 +22,6 @@ const ELECTRON = path.join(
 const activeApps = new Set();
 const activeClients = new Set();
 const tempRoots = new Set();
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function waitUntil(read, label, timeoutMs = 15000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await read();
-      if (value) return value;
-    } catch (error) { lastError = error; }
-    await delay(75);
-  }
-  throw new Error(`等待逾時：${label}${lastError ? `；${lastError.message}` : ''}`);
-}
 
 function reservePort() {
   return new Promise((resolve, reject) => {
@@ -86,13 +69,14 @@ async function launchApp(projectFile, profileDir) {
   const closed = new Promise(resolve => child.once('close', resolve));
   const app = { child, closed, stderr };
   activeApps.add(app);
-  const target = await waitUntil(async () => {
+  const target = await waitFor(async () => {
     return (await getJSON(`http://127.0.0.1:${port}/json/list`))
-      .find(item => item.type === 'page' && item.title === 'SUB TOOL');
-  }, 'SUB Tool 主視窗');
+      .find(isMainWindowTarget);
+  }, 'SUB Tool 主視窗', 15000);
   const client = new CdpClient(target.webSocketDebuggerUrl, { timeoutMs: 15000 });
   activeClients.add(client);
   await client.connect();
+  await client.waitForApp();
   return { app, client };
 }
 

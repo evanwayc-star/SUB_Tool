@@ -470,13 +470,15 @@ describe('本機語音辨識進行中的回饋與取消', () => {
 
       downloadButton.click();
       expect(downloadedName).toMatch(/^SUBTool_文本匹配診斷_.*\.json$/u);
-      expect(downloadedBlob?.type).toBe('application/json');
-      const serialized = await new Promise((resolve, reject) => {
+      expect(downloadedBlob?.type).toBe('application/json;charset=utf-16le');
+      const bytes = await new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
+        reader.onload = () => resolve(new Uint8Array(reader.result));
         reader.onerror = () => reject(reader.error);
-        reader.readAsText(downloadedBlob);
+        reader.readAsArrayBuffer(downloadedBlob);
       });
+      expect([...bytes.subarray(0, 2)]).toEqual([0xff, 0xfe]);
+      const serialized = Buffer.from(bytes).toString('utf16le').slice(1);
       const diagnostic = JSON.parse(serialized);
       expect(diagnostic.unreliableLines.map(line => line.lineNumber)).toEqual([1, 2]);
       expect(diagnostic.audioSelection).toEqual({ mode: 'all-source-channels' });

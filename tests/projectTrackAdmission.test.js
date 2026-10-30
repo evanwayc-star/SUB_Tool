@@ -114,6 +114,59 @@ it.each([1, 2, 3])('schema %s 保留合法 sparse 字串索引與部分宣告的
   expect(data.clips[0].vtrack).toBe('5');
 });
 
+it.each(['apply', 'load', 'loadDesktop', 'open'].flatMap(entry => [
+  { field: 'cues', property: 'text' }, { field: 'notes', property: 'text' }, { field: 'tracks', property: 'name' },
+].map(target => ({ entry, ...target }))))(
+  'public $entry 拒絕錯型 $field 的 $property，既有專案仍可顯示與匯出', async ({ entry, field, property }) => {
+  const { renderSubList } = await import('../src/subtitles.js');
+  const { getNotesGeneralFileData } = await import('../src/notes.js');
+  const { getFileData } = await import('../src/subio.js');
+  State.notes = [{ id: 'kept-note', time: 2, text: '保留備註' }];
+  History.reset();
+  const originalExport = getNotesGeneralFileData();
+  const subtitleExport = () => getFileData('srt', State.cues, State.tracks[0].name);
+  const originalSubtitles = subtitleExport();
+  for (const text of [123, true, [], { value: '損壞欄位' }]) {
+    const data = { ...baseDocument(), cues: [{ track: 1, start: 0, end: 1, text: '新專案字幕' }],
+      [field]: [{ track: 1, start: 0, end: 1, time: 0, [property]: text }] };
+    const owns = Project.captureWorkspaceOwnership();
+    const snapshot = () => JSON.stringify({ committed: History.snap(), history: History.stack,
+      mediaName: State.mediaName, mediaPath: State.mediaPath, presetEdit: State.presetEdit });
+    const before = snapshot(), dirty = isProjectDirty();
+    const result = entry === 'apply' ? Project.apply(data) : entry === 'load' ? await Project.load(fileFor(data)) :
+      entry === 'loadDesktop' ? await Project.loadDesktop(desktopInput(data)) :
+        await Project.open(async () => desktopInput(data), { confirm: false });
+
+    expect(() => renderSubList()).not.toThrow();
+    expect(() => getNotesGeneralFileData()).not.toThrow();
+    expect(subtitleExport).not.toThrow();
+    expect(result).toBe(false);
+    expect(document.getElementById('sublist').textContent).toContain('目前專案');
+    expect(getNotesGeneralFileData()).toEqual(originalExport);
+    expect(subtitleExport()).toEqual(originalSubtitles);
+    expect(snapshot()).toBe(before);
+    expect(owns()).toBe(true);
+    expect(isProjectDirty()).toBe(dirty);
+    expect(resetMedia).not.toHaveBeenCalled();
+    expect(desktop.stat).not.toHaveBeenCalled();
+    expect(desktop.fontsList).not.toHaveBeenCalled();
+  }
+});
+
+it.each([1, 2, 3])('schema %s 的缺值、null 與空字串仍還原成空白文字和預設軌名', version => {
+  const entries = [{}, { text: null }, { text: '' }, { text: '123' }];
+  const data = { ...baseDocument(), version,
+    tracks: entries.map(item => item.text === undefined ? {} : { name: item.text }),
+    cues: entries.map(item => ({ ...item, track: version === 1 ? 0 : 1, start: 0, end: 1 })),
+    notes: entries.map(item => ({ ...item, time: 0 })) };
+  const raw = JSON.stringify(data);
+  expect(Project.apply(data)).toBe(true);
+  expect(State.cues.map(cue => cue.text)).toEqual(['', '', '', '123']);
+  expect(State.notes.map(note => note.text)).toEqual(['', '', '', '123']);
+  expect(State.tracks.map(track => track.name)).toEqual(['軌道 1', '軌道 2', '軌道 3', '123']);
+  expect(JSON.stringify(data)).toBe(raw);
+});
+
 it('允許超過補建預算的明確軌道，載入與 Undo 基準保留全部 records', async () => {
   const tracks = Array.from({ length: 2048 }, (_, i) => ({ name: '字幕 ' + i, locked: i % 2 === 1 }));
   const videoTracks = Array.from({ length: 1536 }, (_, i) => ({ name: '畫面 ' + i, opacity: i % 100 }));

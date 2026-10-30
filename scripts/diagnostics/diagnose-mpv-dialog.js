@@ -28,15 +28,18 @@
 ============================================================================== */
 
 
-const { execFileSync } = require('child_process');
-const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
+const { isMainWindowTarget } = require('../acceptance/cdp-electron-harness.js');
+const { findMainPid, connectMainInspector } = require('./main-inspector.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /** 在 renderer 裡執行一段 JS（透過主行程的 webContents，不需要另外連 renderer）。 */
 const inPage = js => `(async () => {
   const B = require('electron').BrowserWindow;
-  const w = B.getAllWindows().find(x => !x.getParentWindow());
+  const isMain = (${isMainWindowTarget.toString()});
+  const w = B.getAllWindows().find(x => !x.getParentWindow()
+    && isMain({ type: 'page', url: x.webContents.getURL() }));
+  if (!w) throw new Error('找不到 SUB Tool 主 renderer 視窗');
   return await w.webContents.executeJavaScript(${JSON.stringify(js)}, true);
 })()`;
 
@@ -67,65 +70,53 @@ const VISIBLE_PART = `(() => {
   }, null, 1);
 })()`;
 
-/* 只找沒有 --type= 的那個，就是 Electron 的主行程。
-   用 execFileSync 傳【參數陣列】而不是拼一整條命令列：這段 PowerShell 裡有巢狀
-   引號，交給 shell 拼字串在不同殼層（PowerShell vs Git Bash）會被吃掉不同的地方，
-   結果是 PID 變成 0 而錯誤訊息完全看不出原因。 */
-function findMainPid() {
-  const ps = 'Get-CimInstance Win32_Process | '
-    + "Where-Object { ($_.Name -eq 'SUB Tool.exe' -or $_.Name -eq 'electron.exe') "
-    + "-and $_.CommandLine -notmatch '--type=' } | "
-    + 'Select-Object -First 1 -ExpandProperty ProcessId';
-  try {
-    return Number(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim());
-  } catch (e) { return NaN; }
-}
 
 (async () => {
   const pid = Number(process.argv[2]) || findMainPid();
-  if (!Number.isFinite(pid)) { console.error('找不到 SUB Tool 的主行程，app 有開著嗎？'); process.exit(1); }
+  if (!Number.isInteger(pid) || pid <= 0) { console.error('找不到 SUB Tool 的主行程，app 有開著嗎？'); process.exit(1); }
   console.log(`主行程 PID = ${pid}`);
-  try { process._debugProcess(pid); } catch (e) { console.error('開啟 inspector 失敗：', e.message); }
-  await sleep(1200);
 
-  let t;
-  try { t = (await getJSON('http://127.0.0.1:9229/json/list'))[0]; }
-  catch (e) { console.error('連不上主行程的 inspector（9229）：' + e.message); process.exit(1); }
-  const main = new CdpClient((t).webSocketDebuggerUrl);
-    await main.connect();
+  const main = await connectMainInspector(pid);
+  try {
 
-  const dump = async label => {
-    console.log(`\n【${label}】`);
-    for (const w of JSON.parse(await main.evaluate(WINDOWS))) {
-      console.log(`  視窗 id=${String(w.id).padStart(2)}  可見=${String(w.可見).padEnd(5)}` +
-        `  ${w.是子視窗 ? '子' : '主'}  ${w.url}`);
+    const dump = async label => {
+      console.log(`\n【${label}】`);
+      for (const w of JSON.parse(await main.evaluate(WINDOWS))) {
+        console.log(`  視窗 id=${String(w.id).padStart(2)}  可見=${String(w.可見).padEnd(5)}` +
+          `  ${w.是子視窗 ? '子' : '主'}  ${w.url}`);
+      }
+    };
+
+    console.log('\n================ 1. 下拉選單看不看得到 ================');
+    await dump('打開選單前');
+    try {
+      // 從關閉狀態開始；開合都走正式 click handler，讓 mpv 讓位狀態一起更新。
+      await main.evaluate(inPage(`document.body.click(); document.getElementById('recentBtn').click(); true`));
+      await sleep(1000);
+      await dump('打開選單後');
+      console.log('  ' + (await main.evaluate(inPage(VISIBLE_PART))).split('\n').join('\n  '));
+    } finally {
+      await main.evaluate(inPage(`document.body.click(); true`));
     }
-  };
+    await sleep(400);
+    await dump('關閉選單後');
 
-  console.log('\n================ 1. 下拉選單看不看得到 ================');
-  await dump('打開選單前');
-  await main.evaluate(inPage(`document.getElementById('recentBtn').click(); true`));
-  await sleep(1000);
-  await dump('打開選單後');
-  console.log('  ' + (await main.evaluate(inPage(VISIBLE_PART))).split('\n').join('\n  '));
-  await main.evaluate(inPage(`document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open')); true`));
-  await sleep(400);
-  await dump('關閉選單後');
+    console.log('\n================ 2. 主行程有沒有被擋住 ================');
+    const lag = await main.evaluate(inPage(`window.subtool && window.subtool.mainLoopLag
+      ? window.subtool.mainLoopLag(false).then(x => JSON.stringify(x)) : '"（此版本沒有 mainLoopLag）"'`));
+    console.log('  事件迴圈延遲（ms）:', lag);
 
-  console.log('\n================ 2. 主行程有沒有被擋住 ================');
-  const lag = await main.evaluate(inPage(`window.subtool && window.subtool.mainLoopLag
-    ? window.subtool.mainLoopLag(false).then(x => JSON.stringify(x)) : '"（此版本沒有 mainLoopLag）"'`));
-  console.log('  事件迴圈延遲（ms）:', lag);
+    console.log('\n================ 怎麼讀 ================');
+    console.log('  A. 「選單命中取樣」不是 3/3，但 mpv 子視窗【可見=false】');
+    console.log('     → 請檢查 HTML 的裁切、其他遮擋與取樣座標，並核對實際畫面。');
+    console.log('       menubar 的 overflow 與 backdropFilter 是既有排查線索');
+    console.log('       （見 tests/menubarClipping.test.js），本輪仍須各自驗證。');
+    console.log('  B. mpv 子視窗【可見=true】而選單與影片區重疊');
+    console.log('     → 請沿 _syncMpvPanel → mpv:show 檢查讓位狀態；isVisible 不能單獨證明實際遮擋。');
+    console.log('  C. 事件迴圈延遲只提供採樣區間的排程線索；大值須核對 trace，小值不能排除未取樣時段的主行程等待。');
 
-  console.log('\n================ 怎麼讀 ================');
-  console.log('  A. 「選單命中取樣」不是 3/3，但 mpv 子視窗【可見=false】');
-  console.log('     → 請檢查 HTML 的裁切、其他遮擋與取樣座標，並核對實際畫面。');
-  console.log('       menubar 的 overflow 與 backdropFilter 是既有排查線索');
-  console.log('       （見 tests/menubarClipping.test.js），本輪仍須各自驗證。');
-  console.log('  B. mpv 子視窗【可見=true】而選單與影片區重疊');
-  console.log('     → 請沿 _syncMpvPanel → mpv:show 檢查讓位狀態；isVisible 不能單獨證明實際遮擋。');
-  console.log('  C. 事件迴圈延遲只提供採樣區間的排程線索；大值須核對 trace，小值不能排除未取樣時段的主行程等待。');
-
-  main.close();
+  } finally {
+    main.close();
+  }
   process.exit(0);
 })().catch(e => { console.error('失敗:', e.message); process.exit(1); });

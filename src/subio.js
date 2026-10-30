@@ -10,7 +10,7 @@ import { emit } from './events.js';
 import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
 import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
-import { applyDeliveryAudioSpec, createDeliveryAudioSpec, videoExportCapability } from './export-job-engine.js';
+import { applyDeliveryAudioSpec, createDeliveryAudioSpec, videoExportCapability, allocateExportFileNames } from './export-job-engine.js';
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
@@ -105,6 +105,12 @@ function showFpsConvertDialog() {
 
 function showExportDialog() {
   if (!State.cues.length && !State.notes.length) { showToast('沒有字幕或備註可匯出'); return; }
+  const ownsWorkspace = Project.captureWorkspaceOwnership();
+  const current = () => {
+    if (!session.isCurrent()) return false;
+    if (ownsWorkspace()) return true;
+    session.close(); showToast('專案已變更，請重新開啟匯出視窗'); return false;
+  };
 
   const sec = (title, body) => `<div style="margin-bottom:20px"><div style="font-size:14px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">${title}</div>${body}</div>`;
   const cb = (attrs, label) => `<label style="display:flex;align-items:center;padding:6px 0;cursor:pointer;font-size:15px;color:#e2e2e2;"><input type="checkbox" ${attrs} style="transform:scale(1.2);margin-right:8px;"> ${label}</label>`;
@@ -131,9 +137,10 @@ function showExportDialog() {
     html += sec(`備註（${State.notes.length} 條）`,
       cb('id="expNotesEdius"', 'Edius 格式') + cb('id="expNotesGeneral"', '一般格式'));
 
-  openModal('匯出', html, [
+  const session = openModal('匯出', html, [
     {
       label: '預設', act: () => {
+        if (!current()) return;
         const fmts = document.querySelectorAll('[data-fmt]');
         for (let i = 0; i < fmts.length; i++) fmts[i].checked = (fmts[i].getAttribute('data-fmt') === 'encore');
         const tks = document.querySelectorAll('[data-tk]');
@@ -144,6 +151,7 @@ function showExportDialog() {
     },
     {
       label: '全選', act: () => {
+        if (!current()) return;
         const fmts = document.querySelectorAll('[data-fmt]');
         for (let i = 0; i < fmts.length; i++) fmts[i].checked = true;
         const tks = document.querySelectorAll('[data-tk]');
@@ -154,13 +162,14 @@ function showExportDialog() {
     },
     {
       label: '匯出', primary: true, act: () => {
+      if (!current()) return;
       const fmts = [...document.querySelectorAll('[data-fmt]')].filter(b => b.checked).map(b => b.dataset.fmt);
       const tks = State.cues.length && State.trackCount > 1 ? [...document.querySelectorAll('[data-tk]')].filter(b => b.checked).map(b => +b.dataset.tk) : null;
       const notesE = document.getElementById('expNotesEdius')?.checked;
       const notesG = document.getElementById('expNotesGeneral')?.checked;
       if (!fmts.length && !notesE && !notesG) { showToast('請至少勾選一個格式'); return; }
       if (fmts.length && tks !== null && !tks.length) { showToast('請至少勾選一個軌道'); return; }
-      closeModal();
+      session.close();
       const filesToExport = [];
       for (const fmt of fmts) {
         if (fmt === 'xlsx') {
@@ -199,7 +208,7 @@ function showExportDialog() {
       if (notesG) { const f = getNotesGeneralFileData(); if (f) filesToExport.push(f); }
       executeBatchExport(filesToExport);
     }
-  }, { label: '取消', act: closeModal }]);
+  }, { label: '取消', act: () => session.close() }]);
 
 }
 
@@ -915,6 +924,7 @@ export function toASSFromState(cues, options = {}) {
 
 export async function executeBatchExport(files) {
   if (!files.length) return;
+  files = allocateExportFileNames(files);
   if (!IS_DESKTOP) {
     files.forEach(f => downloadBytes(b64ToBytes(f.content), f.name, f.mime || 'application/octet-stream'));
     setStatus(`已下載 ${files.length} 個檔案`, 'ok');

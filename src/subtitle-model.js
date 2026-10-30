@@ -565,10 +565,26 @@ export function beginCueEdit(cue, { preview = false } = {}) {
     if (preview && ownsText()) cue.text=baseline.text;
     release();
   };
+  // 一般確認與切句共用樣式草稿准入；未修改欄位保留期間的背景提交。
+  const resolveStyle = style => {
+    const currentStyle=structuredClone(cue.style || {}), resolvedStyle={...currentStyle};
+    if (style !== undefined) {
+      for (const key of CUE_STYLE_KEYS) {
+        const original=baseline.style[key], desired=style?.[key], current=currentStyle[key];
+        if (Object.is(desired,original)) continue;
+        if (!Object.is(current,original) && !Object.is(current,desired)) {
+          showToast('字幕樣式已被其他編輯更新，請重新開啟編輯');
+          return {ok:false,reason:'edit-conflict'};
+        }
+        if(desired==null) delete resolvedStyle[key]; else resolvedStyle[key]=desired;
+      }
+    }
+    return {ok:true,currentStyle,resolvedStyle};
+  };
   const editor = Object.freeze({
     baseline, isCurrent: () => isCurrent() && (!preview || ownsText()),
     release, cancel,
-    split({textBefore, textAfter, timelineTime, beforeCommit} = {}) {
+    split({textBefore, textAfter, timelineTime, style, beforeCommit} = {}) {
       if (!isCurrent()) { release(); return {ok:false,reason:'stale-edit'}; }
       if (cueTrackLocked(cue,'拆分字幕')) { cancel(); return {ok:false,reason:'track-locked'}; }
       const nextText=String(textBefore ?? '')+String(textAfter ?? '');
@@ -578,7 +594,16 @@ export function beginCueEdit(cue, { preview = false } = {}) {
         showToast('字幕已被其他編輯更新，請重新開啟編輯');
         return {ok:false,reason:'edit-conflict'};
       }
-      return splitCue({cueId:cue.id,textBefore,textAfter,timelineTime,beforeCommit:()=>{release();beforeCommit?.();}});
+      const resolved=resolveStyle(style);
+      if(!resolved.ok) return resolved;
+      return splitCue({cueId:cue.id,textBefore,textAfter,timelineTime,beforeCommit:()=>{
+        // splitCue 先檢查空白及時間範圍，通過後才一併提交樣式、文字與 History。
+        if(style!==undefined){
+          if(Object.keys(resolved.resolvedStyle).length) cue.style=resolved.resolvedStyle;
+          else delete cue.style;
+        }
+        release();beforeCommit?.();
+      }});
     },
     previewText(value) {
       if (!isCurrent()) return {ok:false,reason:'stale-edit'};
@@ -599,18 +624,9 @@ export function beginCueEdit(cue, { preview = false } = {}) {
         return {ok:false,reason:'edit-conflict'};
       }
       const resolvedText=preview || nextText!==baseline.text ? nextText : currentText;
-      const currentStyle=structuredClone(cue.style || {}), resolvedStyle={...currentStyle};
-      if (style !== undefined) {
-        for (const key of CUE_STYLE_KEYS) {
-          const original=baseline.style[key], desired=style?.[key], current=currentStyle[key];
-          if (Object.is(desired,original)) continue;
-          if (!Object.is(current,original) && !Object.is(current,desired)) {
-            showToast('字幕樣式已被其他編輯更新，請重新開啟編輯');
-            return {ok:false,reason:'edit-conflict'};
-          }
-          if(desired==null) delete resolvedStyle[key]; else resolvedStyle[key]=desired;
-        }
-      }
+      const resolved=resolveStyle(style);
+      if(!resolved.ok) return resolved;
+      const {currentStyle,resolvedStyle}=resolved;
       release();
       return editCue({cueId:cue.id, operation:style===undefined ? 'text' : 'text-style',
         value:style===undefined ? resolvedText : {text:resolvedText,style:resolvedStyle},

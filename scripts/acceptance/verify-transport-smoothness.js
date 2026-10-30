@@ -19,6 +19,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 const {
+  isMainWindowTarget,
   ROOT,
   ELECTRON,
   delay,
@@ -573,7 +574,7 @@ async function runMedia(mediaPath) {
     const target = await Promise.race([
       waitFor(async () => {
         const targets = await getJSON(`http://127.0.0.1:${port}/json/list`);
-        return targets.find(item => item.type === 'page' && item.title === 'SUB TOOL');
+        return targets.find(isMainWindowTarget);
       }, `${path.basename(mediaPath)} 主視窗啟動`, 30000),
       spawnError,
     ]);
@@ -650,10 +651,13 @@ async function runMedia(mediaPath) {
     };
     return result;
   } catch (error) {
-    const mpvLog = profileDir && path.join(profileDir, 'temp', 'subtool_cache', 'mpv-last.log');
-    if (mpvLog && fs.existsSync(mpvLog)) {
-      error.message += `\nmpv log:\n${fs.readFileSync(mpvLog, 'utf8').slice(-6000)}`;
-    }
+    try {
+      // 暫存根由主程序獨占；只讀當前 CDP instance 回報的記錄，不推測目錄名稱。
+      const mpvLog = await client?.evaluate('(async () => (await window.subtool?.mpv?.detect?.())?.logPath || null)()');
+      if (mpvLog && fs.existsSync(mpvLog)) {
+        error.message += `\nmpv log:\n${fs.readFileSync(mpvLog, 'utf8').slice(-6000)}`;
+      }
+    } catch { /* 診斷讀取失敗仍保留原本的驗收錯誤。 */ }
     if (errors.length) error.message += `\nElectron stderr:\n${errors.join('').slice(-6000)}`;
     throw error;
   } finally {

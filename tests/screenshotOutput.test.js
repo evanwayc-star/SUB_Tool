@@ -20,6 +20,76 @@ function fixture(options = {}) {
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe('截圖輸出 reservation', () => {
+  it.each(['release', 'write'].flatMap(operation => ['filled', 'replaced'].map(change => ({ operation, change }))))
+  ('$operation 的非同步空檔核對回覆過期時，不刪除或覆蓋外部新圖片 ($change)', async ({ operation, change }) => {
+    let reserved, changed = false;
+    const lstat = async file => {
+      const snapshot = await fs.promises.lstat(file);
+      if (file === reserved?.path && !changed) {
+        changed = true;
+        if (change === 'replaced') fs.renameSync(file, file + '.original-reservation');
+        fs.writeFileSync(file, 'new-external-image');
+      }
+      return snapshot;
+    };
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, lstat } } });
+    reserved = await output.reserve(directory);
+    const result = operation === 'release' ? await output.release(reserved.path)
+      : await output.write(reserved.path, Buffer.from('capture-image').toString('base64'));
+    expect(changed).toBe(true);
+    if (operation === 'write') expect(result).toBeNull();
+    await output.close();
+    expect(fs.readFileSync(reserved.path, 'utf8')).toBe('new-external-image');
+  });
+
+  it('staging 關閉後被取代，不得把另一份 bytes 發布成成功截圖', async () => {
+    let replaced;
+    const open = async (file, mode) => {
+      const handle = await fs.promises.open(file, mode);
+      if (file.includes('.screenshot-')) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          await close();
+          fs.renameSync(file, file + '.original');
+          fs.writeFileSync(file, 'foreign-staging-bytes');
+          replaced = file;
+        };
+      }
+      return handle;
+    };
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open } } });
+    const reserved = await output.reserve(directory);
+    await expect(output.write(reserved.path, Buffer.from('capture-image').toString('base64')))
+      .rejects.toThrow('截圖暫存檔在發布前已變更');
+    await output.close();
+    expect(fs.existsSync(reserved.path)).toBe(false);
+    expect(fs.readFileSync(replaced, 'utf8')).toBe('foreign-staging-bytes');
+  });
+
+  it('exclusive copy 關閉後被取代，保留對方圖片並拒絕宣稱本次截圖成功', async () => {
+    let reserved, replaced = false;
+    const open = async (file, mode) => {
+      const handle = await fs.promises.open(file, mode);
+      if (file === reserved?.path && mode === 'wx') {
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          await close();
+          fs.renameSync(file, file + '.original');
+          fs.writeFileSync(file, 'foreign-complete-image');
+          replaced = true;
+        };
+      }
+      return handle;
+    };
+    const linkSync = () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open }, linkSync } });
+    reserved = await output.reserve(directory);
+    expect(await output.write(reserved.path, Buffer.from('capture-image').toString('base64'))).toBeNull();
+    expect(replaced).toBe(true);
+    await output.close();
+    expect(fs.readFileSync(reserved.path, 'utf8')).toBe('foreign-complete-image');
+  });
+
   it('writeFile 已寫入部分 JPEG 再失敗時，不留下正式損毀檔', async () => {
     const open = async (file, mode) => {
       const handle = await fs.promises.open(file, mode);
@@ -121,11 +191,11 @@ describe('截圖輸出 reservation', () => {
   });
 
   it('正式路徑在發布時被搶先建立，exclusive publication 保留對方檔案', async () => {
-    const link = async (source, target) => {
+    const linkSync = (source, target) => {
       fs.writeFileSync(target, 'publication-race-image');
-      return fs.promises.link(source, target);
+      return fs.linkSync(source, target);
     };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, link } } });
+    const { directory, output } = fixture({ fsModule: { promises: fs.promises, linkSync } });
     const reserved = await output.reserve(directory);
     expect(await output.write(reserved.path, 'ZGF0YQ==')).toBeNull();
     await output.close();
@@ -174,21 +244,22 @@ describe('截圖輸出 reservation', () => {
 
   it('完成圖片的 staging 暫時刪不掉，close 重試清理且保持成功圖片', async () => {
     let reserved, failed = false;
-    const unlink = async file => {
+    const unlinkSync = file => {
       if (file !== reserved.path && !failed) { failed = true; throw new Error('staging locked'); }
-      return fs.promises.unlink(file);
+      return fs.unlinkSync(file);
     };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, unlink } } });
+    const { directory, output } = fixture({ fsModule: { promises: fs.promises, unlinkSync } });
     reserved = await output.reserve(directory);
     expect(await output.write(reserved.path, 'ZGF0YQ==')).toBe(reserved.path);
+    expect(failed).toBe(true);
     expect(fs.readFileSync(reserved.path, 'utf8')).toBe('data');
     await output.close();
     expect(fs.readdirSync(directory)).toEqual([reserved.name]);
   });
 
   it.each(['ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV'])('目錄不支援 link (%s) 時以 exclusive copy 完整發布', async code => {
-    const link = async () => { throw Object.assign(new Error('link unsupported'), { code }); };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, link } } });
+    const linkSync = () => { throw Object.assign(new Error('link unsupported'), { code }); };
+    const { directory, output } = fixture({ fsModule: { promises: fs.promises, linkSync } });
     const reserved = await output.reserve(directory);
     expect(await output.write(reserved.path, Buffer.from('complete-jpeg-frame').toString('base64'))).toBe(reserved.path);
     await output.close();
@@ -202,8 +273,8 @@ describe('截圖輸出 reservation', () => {
       if (reserved && file === reserved.path && mode === 'wx') fs.writeFileSync(file, 'foreign-complete-image');
       return fs.promises.open(file, mode);
     };
-    const link = async () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open, link } } });
+    const linkSync = () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open }, linkSync } });
     reserved = await output.reserve(directory);
     expect(await output.write(reserved.path, 'ZGF0YQ==')).toBeNull();
     await output.close();
@@ -226,8 +297,8 @@ describe('截圖輸出 reservation', () => {
       }
       return handle;
     };
-    const link = async () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open, link } } });
+    const linkSync = () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open }, linkSync } });
     reserved = await output.reserve(directory);
     await expect(output.write(reserved.path, Buffer.from('complete-jpeg-frame').toString('base64'))).rejects.toThrow('copy disk full');
     await output.close();
@@ -237,11 +308,11 @@ describe('截圖輸出 reservation', () => {
 
   it('close 清理暫時失敗可重試，關閉後仍拒絕新 capture', async () => {
     let failed = false;
-    const unlink = async file => {
+    const unlinkSync = file => {
       if (!failed) { failed = true; throw new Error('temporarily locked'); }
-      return fs.promises.unlink(file);
+      return fs.unlinkSync(file);
     };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, unlink } } });
+    const { directory, output } = fixture({ fsModule: { promises: fs.promises, unlinkSync } });
     await output.reserve(directory);
     const first = output.close();
     await expect(first).rejects.toThrow('temporarily locked');
@@ -260,11 +331,11 @@ describe('截圖輸出 reservation', () => {
       if (mode === 'wx') { started(); await waiting; }
       return fs.promises.open(file, mode);
     };
-    const unlink = async file => {
+    const unlinkSync = file => {
       if (locked) throw Object.assign(new Error('temporarily locked'), { code: 'EACCES' });
-      return fs.promises.unlink(file);
+      return fs.unlinkSync(file);
     };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open, unlink } } });
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open }, unlinkSync } });
     const reserved = output.reserve(directory);
     await writing;
     locked = true;
@@ -294,8 +365,8 @@ describe('截圖輸出 reservation', () => {
       handle.stat = async () => { if (selected && !failed) { failed = true; throw new Error('stat temporarily failed'); } return stat(); };
       return handle;
     };
-    const link = async () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open, link } } });
+    const linkSync = () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open }, linkSync } });
     if (phase === 'reserve') await expect(output.reserve(directory)).rejects.toThrow('stat temporarily failed');
     else {
       reserved = await output.reserve(directory);
@@ -324,8 +395,8 @@ describe('截圖輸出 reservation', () => {
       }
       return handle;
     };
-    const link = async () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
-    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open, link } } });
+    const linkSync = () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
+    const { directory, output } = fixture({ fsModule: { promises: { ...fs.promises, open }, linkSync } });
     reserved = await output.reserve(directory);
     await expect(output.write(reserved.path, Buffer.from('complete-jpeg-frame').toString('base64'))).rejects.toThrow('copy stat temporarily failed');
     await output.close();

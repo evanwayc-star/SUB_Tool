@@ -32,6 +32,49 @@ function readXstring(text) {
 }
 
 describe('XLSX 成品內容與 Excel 文字規格', () => {
+  it.each([
+    ['emoji 截斷', ['中'.repeat(30) + '😀尾'], ['中'.repeat(30)]],
+    ['罕字截斷', ['中'.repeat(30) + '𠮷尾'], ['中'.repeat(30)]],
+    ['emoji 去重', Array(2).fill('中'.repeat(28) + '😀'), ['中'.repeat(28) + '😀', '中'.repeat(28) + '_2']],
+    ['罕字去重', Array(2).fill('中'.repeat(28) + '𠮷'), ['中'.repeat(28) + '𠮷', '中'.repeat(28) + '_2']],
+    ['去重序號增位', Array(10).fill('中'.repeat(27) + '😀'), [
+      '中'.repeat(27) + '😀',
+      ...Array.from({length:8}, (_, i) => '中'.repeat(27) + '😀_' + (i + 2)),
+      '中'.repeat(27) + '_10',
+    ]],
+  ])('%s 不會在 31 個 UTF-16 單元邊界切斷字元', (_label, names, expected) => {
+    const entries = zipTexts(buildXLSX(names.map(name => ({name,cues:[]})), 25, false));
+    const workbook = parseXml(entries.get('xl/workbook.xml'));
+    const actual = [...workbook.querySelectorAll('sheet')].map(sheet => readXstring(sheet.getAttribute('name')));
+    expect(actual).toEqual(expected);
+    for (const name of actual) {
+      expect(name.length).toBeLessThanOrEqual(31);
+      expect(name).not.toContain('\uFFFD');
+    }
+  });
+
+  it('標準 XLSX ZIP/XML 保留繁體中文及 emoji 分頁、標頭與字幕備註內容', () => {
+    const bytes = buildXLSX([
+      {name:'片頭😀',cues:[{start:0,end:1,text:'字幕：𠮷野家😀，&<>"'}]},
+      {name:'備註🎬',cues:[{start:1,end:2,text:'備註：時間碼需校對🎬'}]},
+    ], 25, false);
+    expect([...bytes.subarray(0, 4)]).toEqual([0x50,0x4b,0x03,0x04]);
+    const entries = zipTexts(bytes);
+    for (const xml of entries.values()) {
+      expect(xml).toMatch(/^<\?xml version="1\.0" encoding="UTF-8"/);
+      expect(() => parseXml(xml)).not.toThrow();
+    }
+    const workbook = parseXml(entries.get('xl/workbook.xml'));
+    expect([...workbook.querySelectorAll('sheet')].map(sheet => readXstring(sheet.getAttribute('name'))))
+      .toEqual(['片頭😀','備註🎬']);
+    const first = parseXml(entries.get('xl/worksheets/sheet1.xml'));
+    const second = parseXml(entries.get('xl/worksheets/sheet2.xml'));
+    expect(first.querySelector('c[r="A1"] t').textContent).toBe('TimeCode_25-FPS');
+    expect(first.querySelector('c[r="B1"] t').textContent).toBe('字幕');
+    expect(readXstring(first.querySelector('c[r="B2"] t').textContent)).toBe('字幕：𠮷野家😀，&<>"');
+    expect(readXstring(second.querySelector('c[r="B2"] t').textContent)).toBe('備註：時間碼需校對🎬');
+  });
+
   it('工作表名稱合法、忽略大小寫去重，且截斷後不留下首尾引號', () => {
     const names = [" '字幕' ", 'History', 'history', 'A', 'a', "123456789012345678901234567890'尾", '', '特殊&<>"頁', ...Array(105).fill('很長的名稱'.repeat(8))];
     const entries = zipTexts(buildXLSX(names.map(name => ({ name, cues: [] })), 24, false));

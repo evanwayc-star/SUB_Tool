@@ -99,8 +99,7 @@ function fixture({video=true,audioCount=6,large=true,timing=null,unregisteredVid
       const from=Math.max(start,mediaEnd);tail.copy(bytes,from-start,from-mediaEnd,Math.min(tail.length,end-mediaEnd));
     }
     reads.push({start,end});
-    return {ok:true,status:206,headers:{get:key=>key==='content-length'?String(bytes.length):null},
-      arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)};
+    return new Response(bytes,{status:206,headers:{'content-length':String(bytes.length)}});
   }));
   // Stop the unfixed parser before its 356M-entry allocation; everything
   // beneath the public demux interface otherwise remains the actual parser.

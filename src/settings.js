@@ -8,7 +8,7 @@ import { $, sublist } from './dom.js';
 import { State, saveKeys, DESK, IS_DESKTOP } from './state.js';
 import { setStatus, showToast } from './ui.js';
 import { emit } from './events.js';
-import { downloadBytes, pickFile, readFile, decodeText, bytesToB64 } from './util.js';
+import { downloadBytes, pickFile, readFile, decodeText, bytesToB64, encodeUTF16LE } from './util.js';
 import { bindFromEvent, findConflict, formatBind, mergeImportedKeymap, stripEmptyBinds } from './keybinding-engine.js';
 
 const actionCategories = [
@@ -314,13 +314,13 @@ export function showSettingsModal() {
   // 匯出：把目前編輯中的這份 keymap 存成 json（桌面走原生存檔對話框、網頁走下載）
   document.getElementById('settingsExportBtn').onclick = async () => {
     const json = JSON.stringify({ _type: 'subtool-keymap', version: 1, keymap: tempKeymap }, null, 2);
-    const bytes = new TextEncoder().encode(json);
+    const bytes = encodeUTF16LE(json);
     const name = 'SUBTool_快捷鍵.json';
     try {
       if (IS_DESKTOP && DESK.exportSub) {
         const p = await DESK.exportSub(name, bytesToB64(bytes), 'json');
         if (p && isCurrent()) showToast('已匯出快捷鍵：' + p.split(/[\\/]/).pop());
-      } else { downloadBytes(bytes, name, 'application/json'); showToast('已匯出快捷鍵設定'); }
+      } else { downloadBytes(bytes, name, 'application/json;charset=utf-16le'); showToast('已匯出快捷鍵設定'); }
     } catch (e) { if (isCurrent()) setStatus('匯出失敗：' + (e?.message || e), 'err'); }
   };
 

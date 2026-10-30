@@ -7,6 +7,7 @@
 
 const {
   normalizeLimiterOptions,
+  normalizeAudioLimiterSpec,
   isAudioReportSilence,
   buildLimiterFilter,
   parseVolumeAnalysis,
@@ -101,6 +102,7 @@ function createAudioNormalizationRuntime({
         // 1. True Peak 模式：兩遍分析 (Two-Pass) 確保 ITU-R BS.1770 精準度與無聲保護
         if (options.isTruePeak) {
           let pass1Stderr = '';
+          let pass1Succeeded = false;
           const pass1Filter = buildLimiterFilter(options, null).filter;
 
           try {
@@ -127,13 +129,18 @@ function createAudioNormalizationRuntime({
                 }
               },
             });
+            pass1Succeeded = true;
           } catch (err) {
             check();
             // 若 Pass 1 執行失敗，記錄警告並嘗試單遍處理
             console.warn('[audio-norm] Pass 1 分析失敗，退回單遍模式：', err);
           }
 
-          const report = extractLoudnormJson(pass1Stderr);
+          // 不完整工作的 stderr 即使含有 JSON，也不能作為輸出或交付的量測證據。
+          let report = pass1Succeeded ? extractLoudnormJson(pass1Stderr) : null;
+          // 報告可能有短音訊無法量測的 -inf/inf，不能當成雙遍參數；單遍仍能處理。
+          if (report && !isAudioReportSilence(report) &&
+            !normalizeAudioLimiterSpec({ reports: { 0: report } }).reports?.[0]) report = null;
 
           // 無聲保護：若判定為純無聲或低於 -70 LKFS 門限，保持 0 dB 增益，不拉大底噪
           if (options.silenceProtection && report && isAudioReportSilence(report)) {

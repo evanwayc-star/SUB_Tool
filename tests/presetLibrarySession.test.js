@@ -1,11 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { writeDirectoryFiles } = require('../electron/directory-output.js');
+const { collectStyleDirectoryFiles } = require('../electron/style-directory-import.js');
 
 let api, styles, state, ui, styleChanged, syncDraft, directoryRead;
 function deferred() {
-  let resolve;
-  const promise = new Promise(done => { resolve = done; });
-  return { promise, resolve };
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 function click(selector) {
   const element = document.querySelector(selector);
@@ -18,7 +26,7 @@ beforeEach(async () => {
   localStorage.removeItem('subtool.subPresets');
   document.body.innerHTML = `<button id="tsPresetMgr"></button><div id="tsEditBar" hidden><span id="tsEditName"></span></div>
     <button id="tsEditDone"></button><button id="tsEditCancel"></button><input id="tsEditPreviewText">
-    <div id="modalBg"><div class="modal"><div id="modalTitle"></div><div id="modalBody"></div><div id="modalFoot"></div></div></div>`;
+    <div id="modalBg"><div class="modal"><div id="modalTitle"></div><div id="modalBody"></div><div id="modalFoot"></div></div></div><div id="toast"></div>`;
   directoryRead = deferred();
   api = { importDirectory:vi.fn(()=>directoryRead.promise), configLoad:async()=>({subPresets:[]}), configSave:vi.fn() };
   state = { tracks:[{}], cues:[], presetEdit:null };
@@ -43,9 +51,193 @@ beforeEach(async () => {
 afterEach(() => {
   delete window.subtool;
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
+function presetImportPicker(channel) {
+  const bytes = payload => Buffer.from('\uFEFF' + payload, 'utf16le');
+  const settle = async () => { await Promise.resolve(); await Promise.resolve(); };
+  if (channel === 'desktop') {
+    const requests = [];
+    api.importDirectory = vi.fn(() => {
+      const request = deferred(); requests.push(request); return request.promise;
+    });
+    return (cancelled = false) => {
+      click('#preImportBtn');
+      const request = requests.at(-1);
+      if (cancelled) request.resolve(null);
+      return {
+        async finish(payload) { request.resolve([{name:'preset.json',b64:bytes(payload).toString('base64')}]); await settle(); },
+        async fail() { request.reject(new Error('樣式讀取失敗')); await settle(); },
+      };
+    };
+  }
+  api.importDirectory = undefined;
+  let picker;
+  const readers = [];
+  vi.stubGlobal('FileReader', class { readAsArrayBuffer() { readers.push(this); } });
+  const create = document.createElement.bind(document);
+  vi.spyOn(document, 'createElement').mockImplementation((tag, ...options) => {
+    const element = create(tag, ...options);
+    if (tag === 'input') { picker = element; vi.spyOn(element, 'click').mockImplementation(() => {}); }
+    return element;
+  });
+  return (cancelled = false) => {
+    click('#preImportBtn');
+    Object.defineProperty(picker, 'files', {value:cancelled ? [] : [new File(['pending'], 'preset.json')], configurable:true});
+    if (cancelled) { picker.dispatchEvent(new Event('cancel')); return null; }
+    const work = picker.onchange();
+    const reader = readers.at(-1);
+    return {
+      async finish(payload) {
+        const data = bytes(payload);
+        reader.result = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        reader.onload(); await work;
+      },
+      async fail() { reader.onerror(); await work; },
+    };
+  };
+}
+
 describe('常用樣式 module 的工作歸屬', () => {
+  it.each(['web','desktop'])('同一樣式視窗 %s 較晚完成的舊匯入不能覆寫較新匯入', async channel => {
+    const begin = presetImportPicker(channel);
+    click('#tsPresetMgr');
+    const earlier = begin(), latest = begin();
+    await latest.finish(JSON.stringify([{name:'對白😀',group:'字幕',style:{fontSize:80}}]));
+    expect(styles.getPresets()[0].style.fontSize).toBe(80);
+    await earlier.finish(JSON.stringify([{name:'對白😀',group:'字幕',style:{fontSize:40}}]));
+    expect(styles.getPresets()[0].style.fontSize).toBe(80);
+  });
+
+  it.each(['web','desktop'].flatMap(channel => ['取消','空樣式清單','毀損JSON','讀取失敗']
+    .map(outcome => [channel,outcome])))('同一樣式視窗 %s 較新的%s仍撤銷舊匯入資格', async (channel, outcome) => {
+    const original = [{name:'保留樣式😀',style:{fontSize:60}}];
+    styles.savePresets(original);
+    const begin = presetImportPicker(channel);
+    click('#tsPresetMgr');
+    const earlier = begin(), latest = begin(outcome === '取消');
+    if (outcome === '空樣式清單') await latest.finish('[]');
+    else if (outcome === '毀損JSON') await latest.finish('{broken');
+    else if (outcome === '讀取失敗') await latest.fail();
+    const status = document.getElementById('toast').textContent;
+    await earlier.finish(JSON.stringify([{name:'遲到樣式',style:{fontSize:40}}]));
+    expect(styles.getPresets()).toEqual(original);
+    expect(document.getElementById('toast').textContent).toBe(status);
+  });
+
+  it.each(['web','desktop'])('同一樣式視窗 %s 已撤銷匯入的遲到錯誤不改寫較新成功回報', async channel => {
+    const begin = presetImportPicker(channel);
+    click('#tsPresetMgr');
+    const earlier = begin(), latest = begin();
+    await latest.finish(JSON.stringify([{name:'較新樣式😀',style:{fontSize:80}}]));
+    expect(document.getElementById('toast').textContent).toBe('已匯入 1 組樣式');
+    await earlier.fail();
+    expect(styles.getPresets()).toEqual([{name:'較新樣式😀',style:{fontSize:80}}]);
+    expect(document.getElementById('toast').textContent).toBe('已匯入 1 組樣式');
+  });
+
+  it('網頁匯出為 UTF-16LE BOM，重新匯入與舊 UTF-8 檔都保留繁體中文和 emoji', async () => {
+    const original = [{name:'片頭😀',group:'節目🎬',style:{font:'思源黑體',fontSize:60}}];
+    let downloaded;
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL(blob) { downloaded = blob; return 'blob:presets'; }
+      static revokeObjectURL() {}
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    styles.savePresets(original);
+    click('#tsPresetMgr'); click('#preExportBtn');
+    const bytes = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(new Uint8Array(reader.result));
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(downloaded);
+    });
+    expect([...bytes.subarray(0, 2)]).toEqual([0xff, 0xfe]);
+    expect(downloaded.type).toBe('application/json;charset=utf-16le');
+    expect(JSON.parse(Buffer.from(bytes).toString('utf16le').slice(1))).toEqual(original);
+
+    api.importDirectory = undefined;
+    let picker;
+    const create = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation((tag, ...options) => {
+      const element = create(tag, ...options);
+      if (tag === 'input') {
+        picker = element;
+        vi.spyOn(element, 'click').mockImplementation(() => {});
+      }
+      return element;
+    });
+    for (const payload of [bytes, new TextEncoder().encode(JSON.stringify(original))]) {
+      styles.savePresets([]);
+      click('#preImportBtn');
+      Object.defineProperty(picker, 'files', {value:[new File([payload], 'presets.json')], configurable:true});
+      await picker.onchange();
+      expect(styles.getPresets()).toEqual(original);
+    }
+  });
+
+  it.each([
+    ['淨化及大小寫', [
+      { name:'對白', group:'A/B', style:{fontSize:40} },
+      { name:'對白', group:'A:B', style:{fontSize:50} },
+      { name:'News', group:'組別', style:{fontSize:60} },
+      { name:'NEWS', group:'組別', style:{fontSize:70} },
+      { name:'News (2)', group:'組別', style:{fontSize:80} },
+      { name:'A/B', style:{fontSize:90} },
+      { name:'A:B', style:{fontSize:100} },
+    ]],
+    ['檔案與資料夾', [
+      { name:'A', style:{fontSize:40} },
+      { name:'子樣式', group:'A.json', style:{fontSize:50} },
+    ]],
+    ['資料夾尾點與空白別名', [
+      { name:'對白', group:'組別', style:{fontSize:40} },
+      { name:'對白', group:'組別.', style:{fontSize:50} },
+      { name:'對白', group:'組別 ', style:{fontSize:60} },
+    ]],
+    ['繁體中文與emoji', [
+      { name:'片頭😀', group:'節目🎬', style:{font:'思源黑體',fontSize:60} },
+    ]],
+  ])('%s 碰撞的樣式各自寫入，重新匯入保留每筆 identity 與完整樣式', async (_label, original) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-preset-batch-'));
+    try {
+      styles.savePresets(original);
+      api.exportDirectory = vi.fn(async files => {
+        expect(writeDirectoryFiles(directory, files)).toEqual({written:original.length,blocked:0});
+        return directory;
+      });
+      click('#tsPresetMgr'); click('#preExportBtn');
+      await vi.waitFor(()=>expect(api.exportDirectory).toHaveBeenCalledOnce());
+      const files = collectStyleDirectoryFiles(directory);
+      const sort = list => list.map(value=>JSON.stringify(value)).sort();
+      expect(sort(files.flatMap(file => {
+        const bytes = Buffer.from(file.b64, 'base64');
+        expect([...bytes.subarray(0, 2)]).toEqual([0xff, 0xfe]);
+        return JSON.parse(bytes.toString('utf16le').slice(1));
+      }))).toEqual(sort(original));
+      styles.savePresets([]);
+      click('#preImportBtn'); directoryRead.resolve(files);
+      await vi.waitFor(()=>expect(sort(styles.getPresets())).toEqual(sort(original)));
+    } finally {
+      expect(path.dirname(fs.realpathSync(directory))).toBe(fs.realpathSync(os.tmpdir()));
+      fs.rmSync(directory, {recursive:true,force:true});
+    }
+  });
+
+  it('樣式內明示的群組優先於淨化後資料夾；無群組的舊檔仍從資料夾還原', async () => {
+    click('#tsPresetMgr'); click('#preImportBtn');
+    directoryRead.resolve([
+      {name:'A_B/one.json',b64:Buffer.from(JSON.stringify({name:'同名',group:'A/B',style:{fontSize:40}})).toString('base64')},
+      {name:'A_B/two.json',b64:Buffer.from(JSON.stringify({name:'同名',group:'A:B',style:{fontSize:50}})).toString('base64')},
+      {name:'舊資料夾/legacy.json',b64:Buffer.from(JSON.stringify({name:'舊樣式',style:{fontSize:60}})).toString('base64')},
+    ]);
+    await vi.waitFor(()=>expect(styles.getPresets()).toHaveLength(3));
+    expect(styles.getPresets().map(p=>[p.group,p.name,p.style.fontSize])).toEqual([
+      ['A/B','同名',40],['A:B','同名',50],['舊資料夾','舊樣式',60],
+    ]);
+  });
+
   it('不同folder同名preset匯入保留兩筆，只更新相同identity',async()=>{
     styles.savePresets([{name:'same',group:'A',style:{fontSize:40}}]);
     click('#tsPresetMgr');click('#preImportBtn');

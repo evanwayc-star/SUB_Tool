@@ -19,6 +19,24 @@ afterEach(() => {
 });
 
 describe('快取診斷使用實際 runtime 的索引規則', () => {
+  it('CLI 的可寫性量測不改寫同名 hardlink 指向的既有檔案', () => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-cache-diagnostic-')); roots.push(directory);
+    const source = path.join(directory, 'mother.bin'), original = path.join(directory, 'keep.txt');
+    fs.writeFileSync(source, 'mother source'); fs.writeFileSync(original, 'PRESERVE ORIGINAL BYTES');
+    const setup = path.join(directory, 'prepare-probe.cjs');
+    fs.writeFileSync(setup, `const fs = require('fs'), path = require('path');
+const { cacheKeyFor } = require(${JSON.stringify(path.resolve('electron/media-intake-runtime.js'))});
+const directory = path.join(path.dirname(process.argv[2]), '.subtool_Cache', cacheKeyFor(process.argv[2]));
+fs.mkdirSync(directory, { recursive: true });
+fs.linkSync(${JSON.stringify(original)}, path.join(directory, '.wtest_' + process.pid));`);
+    const result = spawnSync(process.execPath, ['--require', setup,
+      path.resolve('scripts/diagnostics/measure-cache-key.js'), source],
+    { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('可寫入：true');
+    expect(fs.readFileSync(original, 'utf8')).toBe('PRESERVE ORIGINAL BYTES');
+  });
+
   it('public ingest 發布 generation 元件後，CLI 不誤報 missing；刪掉一個元件才報一個', async () => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-cache-diagnostic-')); roots.push(directory);
     const source = path.join(directory, 'mother.bin'); fs.writeFileSync(source, 'mother source');

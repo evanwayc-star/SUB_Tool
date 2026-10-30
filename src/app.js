@@ -40,7 +40,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.j
 import { createCommands } from './commands.js';
 import { renderPointerSeekControl, requestPointerSeek, timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction-engine.js';
 import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
-import { togglePanel, renderQueueMonitorIndicator, renderAsrIndicator } from './ui.js';
+import { togglePanel, renderQueueMonitorIndicator, renderAsrIndicator, renderProjectIdentity } from './ui.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { bindMediaIntakeView, handleMediaIntakeProgress } from './media-intake-view.js';
@@ -81,6 +81,8 @@ if (typeof __APP_VERSION__ !== 'undefined') {
    各模組只 emit、不再反向 import app.js，藉此切斷雙向相依。
    （函式宣告會被 hoist，於此處註冊安全；emit 為同步呼叫，語意不變。） */
 on('render:all', renderAll);
+on('project:identity', renderProjectIdentity);
+renderProjectIdentity(Project.identity());
 on('render:videoSub', renderVideoSub);
 on('render:listTrackSel', renderListTrackSel);
 on('render:trackStyle', StylePanelController.renderTrackStyle); // 換選取字幕 → 樣式面板換對象（v4.31）

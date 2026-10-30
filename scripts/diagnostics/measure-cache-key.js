@@ -8,7 +8,7 @@
    只要其中一段慢，「按下開啟影音 → 對話框出現」就會等那麼久。
 
      cacheKeyFor()   metadata + 前／中／尾段同步取樣——對象是 SMB 上的大檔
-     isDirWritable() mkdir + 寫一個測試檔 + 刪掉——在 SMB 上是三次往返
+     isDirWritable() 實際目錄核對 + 獨占探針 + 身分核對清理
      inspectCache()  依 runtime 的 generation 路徑與檔案證據檢查各元件
 
    重複取樣是成本比較；實際呼叫次數以當前 media-intake-runtime 的載入路徑為準。
@@ -55,20 +55,15 @@ const sideDir = path.join(path.dirname(SRC), '.subtool_Cache', key);
 console.log(`\n影片旁的快取目錄：${sideDir}`);
 console.log(`  存在：${fs.existsSync(sideDir)}`);
 
-console.log('\nisDirWritable（mkdir + 寫測試檔 + 刪除，SMB 上是三次往返）：');
-time('isDirWritable', () => {
-  fs.mkdirSync(sideDir, { recursive: true });
-  const t = path.join(sideDir, '.wtest_' + process.pid);
-  fs.writeFileSync(t, 'x');
-  fs.unlinkSync(t);
-  return true;
-});
+const runtime = createMediaIntakeRuntime({ tempRoot: os.tmpdir() });
+console.log('\nisDirWritable（使用 runtime 的實際目錄與探針所有權檢查）：');
+const writable = time('runtime.isDirWritable', () => runtime.isDirWritable(sideDir));
+console.log(`  可寫入：${writable === true}`);
 
 const metaPath = path.join(sideDir, 'meta.json');
 if (fs.existsSync(metaPath)) {
   console.log('\nmeta.json 的內容檢查（runtime owner 保留 generation 相對路徑）：');
   time('讀 meta.json', () => JSON.parse(fs.readFileSync(metaPath, 'utf8')));
-  const runtime = createMediaIntakeRuntime({ tempRoot: os.tmpdir() });
   const inspected = time('runtime.inspectCache（路徑解析與檔案證據）', () =>
     runtime.inspectCache(SRC).find(entry => entry.dir === sideDir));
   if (inspected?.error) console.log(`  索引不可用：${inspected.error}`);

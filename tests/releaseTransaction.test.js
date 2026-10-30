@@ -344,8 +344,9 @@ describe('release transaction', () => {
     expect(releaseContents(rootDir)).toEqual(before);
   });
 
-  it.each(['index.html', 'vite.config.mjs'])('根目錄正式來源 %s 可獨立提供 Git 發版證據', filename => {
+  it.each(['index.html', 'vite.config.mjs', 'font/測試字型/font.ttf'])('正式來源 %s 可獨立提供 Git 發版證據', filename => {
     const rootDir = createRepositoryFixture();
+    mkdirSync(path.dirname(path.join(rootDir, filename)), { recursive: true });
     writeFileSync(path.join(rootDir, filename), 'original source\n');
     execFileSync('git', ['init'], { cwd: rootDir, stdio: 'ignore' });
     execFileSync('git', ['config', 'user.email', 'release-test@example.com'], { cwd: rootDir });
@@ -361,6 +362,36 @@ describe('release transaction', () => {
       rootDir, changelogPath: 'CHANGELOG.md', version: '6.3.31', date: '2026-10-16',
       body: '### 修復\n\n- 修正根目錄正式來源。\n\n### 驗證\n\n- 根目錄來源與建置通過。', sourceFiles,
     })).toMatchObject({ version: '6.3.31' });
+  });
+
+  it.each(['dependencies', 'devDependencies', 'build', 'lockfile'])('只有 %s 變更也保留 prepare 前後的正式來源證據', change => {
+    const { rootDir, options } = createPreparedGitFixture();
+    // 先把既有來源修復提交成目前版本，下一版只改套件或封裝內容。
+    execFileSync('git', ['add', '.'], { cwd: rootDir });
+    execFileSync('git', ['commit', '-m', 'release fixture'], { cwd: rootDir, stdio: 'ignore' });
+    const filename = change === 'lockfile' ? 'package-lock.json' : 'package.json';
+    const file = path.join(rootDir, filename);
+    const manifest = JSON.parse(readFileSync(file, 'utf8'));
+    if (change === 'lockfile') manifest.packages['node_modules/example'] = { version: '2.0.0' };
+    else manifest[change] = change === 'build' ? { asarUnpack: ['electron/native.js'] } : { example: '2.0.0' };
+    writeFileSync(file, JSON.stringify(manifest));
+    expect(collectProductionSourceFiles({ rootDir })).toEqual([filename]);
+    prepareRelease({ ...options, version: '6.3.32', sourceFiles: collectProductionSourceFiles({ rootDir }) });
+    expect(collectProductionSourceFiles({ rootDir })).toEqual([filename]);
+    expect(verifyReleaseState({ rootDir, changelogPath: 'CHANGELOG.md', sourceFiles: collectProductionSourceFiles({ rootDir }) }))
+      .toMatchObject({ version: '6.3.32' });
+  });
+
+  it('只改版號及 JSON 排版不能自行製造正式來源證據', () => {
+    const { rootDir } = createPreparedGitFixture();
+    // 回復實作變動，只留下 prepare 寫入的版本與歷史紀錄。
+    writeFileSync(path.join(rootDir, 'src/runtime.js'), 'export const value = 1;\n');
+    for (const filename of ['package.json', 'package-lock.json']) {
+      const file = path.join(rootDir, filename);
+      const manifest = JSON.parse(readFileSync(file, 'utf8'));
+      writeFileSync(file, JSON.stringify(manifest));
+    }
+    expect(collectProductionSourceFiles({ rootDir })).toEqual([]);
   });
 
   it('驗證跨平台換行並拒絕目前版本重複', () => {

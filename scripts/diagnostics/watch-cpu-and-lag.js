@@ -20,23 +20,20 @@
 
 const { execFileSync } = require('child_process');
 const { performance } = require('perf_hooks');
-const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
+const { randomUUID } = require('node:crypto');
+const { isMainWindowTarget } = require('../acceptance/cdp-electron-harness.js');
+const { findMainPid, connectMainInspector } = require('./main-inspector.js');
 const { rendererLagProbe } = require('./renderer-lag-probe.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const CORES = require('os').cpus().length;
+const CPU_TOKEN = randomUUID();
 
 const ps = script => {
   try { return execFileSync('powershell', ['-NoProfile', '-Command', script], { encoding: 'utf8' }).trim(); }
   catch (e) { return ''; }
 };
 
-function findMainPid() {
-  return Number(ps("Get-CimInstance Win32_Process | "
-    + "Where-Object { ($_.Name -eq 'SUB Tool.exe' -or $_.Name -eq 'electron.exe') "
-    + "-and $_.CommandLine -notmatch '--type=' } | "
-    + 'Select-Object -First 1 -ExpandProperty ProcessId'));
-}
 
 /* 每個相關行程的累計 CPU 秒數；相鄰兩次取樣相減就是這段期間的 CPU%。 */
 function cpuSnapshot() {
@@ -70,13 +67,41 @@ function ffmpegJobs() {
   return Object.entries(tally).map(([k, v]) => `${k}x${v}`).join(' ') || '—';
 }
 
-const ARM = `(async () => {
-  const B = require('electron').BrowserWindow;
-  const w = B.getAllWindows().find(x => !x.getParentWindow());
-  return await w.webContents.executeJavaScript(${JSON.stringify(rendererLagProbe({
-    timerKey: '__lagT', totalKey: '__lagSum',
-  }))}, true);
-})()`;
+// 每次 CLI 只持有自己的 renderer 與探針；結束時不重新挑選另一個視窗。
+async function cpuDiagnosticProbe(command, token, script, isMain) {
+  const key = '__subtoolCpuDiagnostics';
+  const registry = globalThis[key] || (globalThis[key] = new Map());
+  if (command === 'start') {
+    const w = require('electron').BrowserWindow.getAllWindows().find(x => !x.getParentWindow()
+      && isMain({ type: 'page', url: x.webContents.getURL() }));
+    if (!w) throw new Error('找不到 SUB Tool 主 renderer 視窗');
+    // 先保存 owner，啟動回覆遺失時仍能收回實際已安裝的探針。
+    registry.set(token, w);
+    return await w.webContents.executeJavaScript(script, true);
+  }
+  const w = registry.get(token);
+  if (command === 'stop') {
+    if (w && !w.webContents.isDestroyed()) await w.webContents.executeJavaScript(`(() => {
+      const timerKey = ${JSON.stringify('__lagT_cpu_' + token)};
+      window[timerKey + '_cleanup']?.();
+      delete window[timerKey];
+      delete window[${JSON.stringify('__lagSum_cpu_' + token)}];
+    })()`, true);
+    registry.delete(token);
+    if (!registry.size && globalThis[key] === registry) delete globalThis[key];
+    return true;
+  }
+  if (!w || w.webContents.isDestroyed()) throw new Error('CPU 診斷的原 renderer 已關閉');
+  const r = await w.webContents.executeJavaScript(`JSON.stringify({
+    lag: window[${JSON.stringify('__lagSum_cpu_' + token)}],
+    vis: document.visibilityState, focus: document.hasFocus()
+  })`, true);
+  return JSON.stringify({ ...JSON.parse(r), winVisible: w.isVisible(), winMin: w.isMinimized(), winFocus: w.isFocused() });
+}
+
+const ARM = `(${cpuDiagnosticProbe.toString()})('start', ${JSON.stringify(CPU_TOKEN)},
+  ${JSON.stringify(rendererLagProbe({ timerKey: '__lagT_cpu_' + CPU_TOKEN, totalKey: '__lagSum_cpu_' + CPU_TOKEN }))},
+  (${isMainWindowTarget.toString()}))`;
 
 /* 【一定要同時讀可見性與焦點】
 
@@ -87,13 +112,8 @@ const ARM = `(async () => {
 
    （這個坑真的踩到了：先前量到「renderer 被擋 75 秒」，其中一次是 39,943 ms
    ——那正好是密集節流每分鐘才醒一次的長度。沒有這兩欄就會把節流誤判成阻塞。） */
-const READ = `(async () => {
-  const B = require('electron').BrowserWindow;
-  const w = B.getAllWindows().find(x => !x.getParentWindow());
-  const r = await w.webContents.executeJavaScript(
-    'JSON.stringify({ lag: window.__lagSum || 0, vis: document.visibilityState, focus: document.hasFocus() })', true);
-  return JSON.stringify({ ...JSON.parse(r), winVisible: w.isVisible(), winMin: w.isMinimized(), winFocus: w.isFocused() });
-})()`;
+const READ = `(${cpuDiagnosticProbe.toString()})('read', ${JSON.stringify(CPU_TOKEN)})`;
+const CLEANUP = `(${cpuDiagnosticProbe.toString()})('stop', ${JSON.stringify(CPU_TOKEN)})`;
 
 (async () => {
   let pid = Number(process.argv[2]) || findMainPid();
@@ -104,42 +124,76 @@ const READ = `(async () => {
   }
   if (!pid) { console.error('等不到 app。'); process.exit(1); }
   console.log(`主行程 PID = ${pid}（本機 ${CORES} 顆邏輯核心）`);
-  try { process._debugProcess(pid); } catch (e) {}
-  await sleep(1200);
 
-  const main = new CdpClient(((await getJSON('http://127.0.0.1:9229/json/list'))[0]).webSocketDebuggerUrl);
-    await main.connect();
-  await main.evaluate(ARM);
-
-  console.log('\n★ 請【載入影音】。Ctrl+C 結束。\n');
-  console.log('  時間      新增延遲   總CPU%  ffmpeg%   可見性/焦點          ffmpeg 工作');
-  console.log('  --------  --------  -------  -------  -------------------  -----------');
-
-  let prev = cpuSnapshot();
-  let prevLag = 0;
-  const EVERY = 2000;
-  setInterval(async () => {
-    const now = cpuSnapshot();
-    let ff = 0, appCpu = 0;
-    for (const [id, cur] of now.processes) {
-      const before = prev.processes.get(id);
-      const delta = cur.cpu - (before ? before.cpu : 0);
-      if (delta <= 0) continue;
-      if (/ffmpeg|ffprobe/i.test(cur.name)) ff += delta;
-      else appCpu += delta;
+  const main = await connectMainInspector(pid);
+  let interrupted = false, timer, sampling, failure, finish;
+  const stopped = new Promise(resolve => { finish = resolve; });
+  const onSignal = code => {
+    interrupted = true;
+    process.exitCode = code;
+    clearInterval(timer);
+    finish();
+  };
+  const onInt = () => onSignal(130), onTerm = () => onSignal(143);
+  process.on('SIGINT', onInt); process.on('SIGTERM', onTerm);
+  try {
+    await main.evaluate(ARM);
+    if (interrupted) return;
+    console.log('\n★ 請【載入影音】。Ctrl+C 結束。\n');
+    console.log('  時間      新增延遲   總CPU%  ffmpeg%   可見性/焦點          ffmpeg 工作');
+    console.log('  --------  --------  -------  -------  -------------------  -----------');
+    let prev = cpuSnapshot();
+    let prevLag = 0;
+    timer = setInterval(() => {
+      // renderer 停頓時不排入下一輪 CDP、CPU 或 ffmpeg 掃描。
+      if (interrupted || sampling) return;
+      sampling = (async () => {
+        const st = JSON.parse(await main.evaluate(READ));
+        if (interrupted) return;
+        if (!st || !Number.isFinite(st.lag) || st.lag < prevLag
+          || !['visible', 'hidden'].includes(st.vis) || typeof st.focus !== 'boolean') {
+          throw new Error('renderer 延遲回覆無效，未產生本輪採樣');
+        }
+        const now = cpuSnapshot();
+        let ff = 0, appCpu = 0;
+        for (const [id, cur] of now.processes) {
+          const before = prev.processes.get(id);
+          const delta = cur.cpu - (before ? before.cpu : 0);
+          if (delta <= 0) continue;
+          if (/ffmpeg|ffprobe/i.test(cur.name)) ff += delta;
+          else appCpu += delta;
+        }
+        // 成功讀取後才取 CPU，兩者涵蓋同一段等待，且分母是實際的單調時鐘區間。
+        const elapsed = (now.sampledAt - prev.sampledAt) / 1000;
+        prev = now;
+        const pct = s => elapsed > 0 ? Math.round((s / elapsed) * 100 / CORES) : 0;
+        const dLag = st.lag - prevLag; prevLag = st.lag;
+        const mark = dLag > 500 ? '  ← 可見區間採樣延遲（原因待查）' : '';
+        const visCol = `${st.vis}/${st.focus ? '有焦點' : '無焦點'}${st.winMin ? '/最小化' : ''}`;
+        console.log(`  ${new Date().toTimeString().slice(0, 8)}  ${String(dLag).padStart(5)} ms` +
+          `  ${String(pct(ff + appCpu)).padStart(6)}%  ${String(pct(ff)).padStart(6)}%` +
+          `  ${visCol.padEnd(19)}  ${ffmpegJobs()}${mark}`);
+      })().catch(error => {
+        failure = error;
+        clearInterval(timer);
+        finish();
+      }).finally(() => { sampling = null; });
+      return sampling;
+    }, 2000);
+    await stopped;
+    if (sampling) await sampling;
+    if (failure) throw failure;
+  } finally {
+    clearInterval(timer);
+    try {
+      try { await main.evaluate(CLEANUP); }
+      catch { await main.evaluate(CLEANUP); }
+    } catch (error) {
+      console.error('探針清理失敗:', error.message);
+      process.exitCode ||= 1;
+    } finally {
+      main.close();
+      process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm);
     }
-    // 同步 PowerShell 與 host event loop 都可能延後 callback；使用相鄰實際採樣的單調時鐘。
-    const elapsed = (now.sampledAt - prev.sampledAt) / 1000;
-    prev = now;
-    const pct = s => elapsed > 0 ? Math.round((s / elapsed) * 100 / CORES) : 0;
-    let st = { lag: 0, vis: '?', focus: false, winMin: false };
-    try { st = JSON.parse(await main.evaluate(READ)); } catch (e) {}
-    const dLag = Math.max(0, st.lag - prevLag); prevLag = st.lag;
-    // 讀取當下的焦點不能解釋上一段區間；探針已排除 hidden 與切換區間。
-    const mark = dLag > 500 ? '  ← 可見區間採樣延遲（原因待查）' : '';
-    const visCol = `${st.vis}/${st.focus ? '有焦點' : '無焦點'}${st.winMin ? '/最小化' : ''}`;
-    console.log(`  ${new Date().toTimeString().slice(0, 8)}  ${String(dLag).padStart(5)} ms` +
-      `  ${String(pct(ff + appCpu)).padStart(6)}%  ${String(pct(ff)).padStart(6)}%` +
-      `  ${visCol.padEnd(19)}  ${ffmpegJobs()}${mark}`);
-  }, EVERY);
-})().catch(e => { console.error('失敗:', e.message); process.exit(1); });
+  }
+})().catch(e => { console.error('失敗:', e.message); process.exitCode ||= 1; });

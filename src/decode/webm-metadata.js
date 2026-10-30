@@ -1,17 +1,13 @@
 /* Bounded WebM/Matroska header adapter. No decoder or media payload is retained.
    Element/timestamp rules: https://www.matroska.org/technical/elements.html */
+import { readMediaBytes } from './response-reader.js';
+
 const EBML=0x1a45dfa3,SEGMENT=0x18538067,INFO=0x1549a966,TRACKS=0x1654ae6b,CLUSTER=0x1f43b675;
 const HEAD_LIMITS=[1<<20,4<<20,24<<20];
 
 async function head(url,length){
   const response=await fetch(url,{headers:{Range:`bytes=0-${length-1}`}});
-  if(!response.ok&&response.status!==206) throw new Error('WebM header read failed');
-  if(Number(response.headers?.get?.('content-length'))>length){
-    await response.body?.cancel?.();throw new Error('WebM Range was ignored');
-  }
-  const bytes=new Uint8Array(await response.arrayBuffer());
-  if(bytes.length>length) throw new Error('WebM Range was ignored');
-  return bytes;
+  return new Uint8Array(await readMediaBytes(response,length));
 }
 
 function vint(bytes,start,id=false){

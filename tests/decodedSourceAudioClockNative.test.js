@@ -43,7 +43,7 @@ describe.skipIf(!fs.existsSync(ffmpeg))('original AAC/PCM decoded buffer source 
     const bytes=fs.readFileSync(file);
     vi.stubGlobal('fetch',vi.fn(async(_url,{headers}={})=>{
       const range=/bytes=(\d+)-(\d+)/.exec(headers.Range),part=bytes.subarray(Number(range[1]),Number(range[2])+1);
-      return {ok:true,status:206,arrayBuffer:async()=>part.buffer.slice(part.byteOffset,part.byteOffset+part.length)};
+      return new Response(part,{status:206});
     }));
     const metadata=await sourcePresentationMetadata(file);
     expect(metadata.presentationTimestampOffset).toBe(-(origin+.5));

@@ -16,7 +16,7 @@
 ============================================================================== */
 const fs = require('fs');
 const path = require('path');
-const { CdpClient, getJSON } = require('./cdp-electron-harness');
+const { CdpClient, getJSON, isMainWindowTarget } = require('./cdp-electron-harness');
 
 const file = process.argv[2];
 const port = Number(process.argv[3] || 9223);
@@ -33,7 +33,7 @@ const source = fs.readFileSync(path.resolve(file), 'utf8');
     throw new Error(`連不上 127.0.0.1:${port} —— app 有用 --remote-debugging-port=${port} 啟動嗎？${err.message}`);
   });
 
-  const page = targets.find(t => t.type === 'page' && /index\.html/.test(t.url || ''));
+  const page = targets.find(isMainWindowTarget);
   if (!page) {
     throw new Error(`找不到 SUB Tool 的主頁面。目前的目標：\n${targets.map(t => `  [${t.type}] ${t.url}`).join('\n')}`);
   }
@@ -42,6 +42,7 @@ const source = fs.readFileSync(path.resolve(file), 'utf8');
   const client = new CdpClient(page.webSocketDebuggerUrl);
   try {
     await client.connect();
+    await client.waitForApp();
     client.ws.on('message', raw => {
       const msg = JSON.parse(raw);
       if (msg.id) return; // 指令回覆由共用 CdpClient 配對；這裡只轉發頁面事件。

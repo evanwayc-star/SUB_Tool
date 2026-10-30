@@ -25,6 +25,7 @@ import { imageBox } from '../shared/image-geometry.cjs';
 | `delivery-resolution.cjs` | 交付尺寸、建議碼率及 TC 規格派生 |
 | `image-geometry.cjs` | 圖片與片段疊層幾何 |
 | `media-source-clock.cjs` | 播放器／來源秒數原點映射與裁切內來源微秒目標 |
+| `text-encoding.cjs` | 文字檔 UTF-16LE BOM 編碼及相容 UTF-8／UTF-16LE／UTF-16BE 解碼 |
 
 ## 加入條件
 

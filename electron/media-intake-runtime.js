@@ -5,14 +5,17 @@ const fsp = require('fs/promises');
 const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
-const { motherSourceFingerprintSync } = require('./mother-source-evidence');
+const { pipeline } = require('stream/promises');
+const { motherSourceFingerprintSync, portableSourceFingerprint } = require('./mother-source-evidence');
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
 const { buildIngestArgs } = require('./ffmpeg-execution-engine');
 const { sourceAudioClockFilter } = require('./media-source-clock');
+const SOURCE_CACHE_VERSION = 'source-v3';
+const PORTABLE_SOURCE_FORMAT = SOURCE_CACHE_VERSION + '-sha256';
 
 function cacheKeyFor(src) {
   // v3 隔離未對齊影片來源 PTS 的舊音訊／Proxy；母素材取樣規則保持單一 owner。
-  return motherSourceFingerprintSync(src, { namespace: 'source-v3', digestLength: 16 });
+  return motherSourceFingerprintSync(src, { namespace: SOURCE_CACHE_VERSION, digestLength: 16 });
 }
 
 function ownsMediaIntake(owner, scope) {
@@ -101,6 +104,9 @@ function createMediaIntakeRuntime(options = {}) {
   let closed = false;
   const streamJobs = new Map();
   const activeCacheDirs = new Map();
+  const portableHits = new Map();
+  const portableHashes = new Set();
+  const inspectedCacheOwners = new WeakMap();
   const cacheRoot = () => {
     const value = typeof options.cacheRoot === 'function' ? options.cacheRoot() : options.cacheRoot;
     return value || tempRoot;
@@ -115,8 +121,7 @@ function createMediaIntakeRuntime(options = {}) {
     };
   }
 
-  function cacheCandidates(src) {
-    const key = cacheKeyFor(src);
+  function cacheCandidates(src, key = cacheKeyFor(src)) {
     const candidates = [];
     if (allowSidecarCache) {
       try {
@@ -125,16 +130,106 @@ function createMediaIntakeRuntime(options = {}) {
       } catch (error) {}
     }
     candidates.push(path.join(cacheRoot(), key));
+    const portable = portableHits.get(key);
+    if (portable) {
+      // 共享目錄可被同步或搬移工作取代；先前驗證的路徑不能替新內容作證。
+      // 讀取、補建與清理都必須使用同一份仍有效的母素材證據。
+      const current = inspectCacheDirectory(portable.dir);
+      if (!current.error && sameSourceContent(current.sourceContent, portable.sourceContent)) {
+        if (!candidates.includes(portable.dir)) candidates.push(portable.dir);
+      } else if (!current.error) portableHits.delete(key);
+      // 暫時讀不到 metadata 不代表映射永久失效；保留它供稍後重試，本次不准入。
+    }
     return candidates;
   }
 
-  function resolveMeta(raw, dir) {
+  const canonicalCachePath = file => process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+  const withinCachePath = (root, file) => {
+    const directory = canonicalCachePath(root), target = canonicalCachePath(file);
+    return target === directory || target.startsWith(directory + path.sep);
+  };
+  function cachePathEscape() {
+    const error = new Error('快取元件超出實際目錄');
+    error.code = 'CACHE_PATH_ESCAPE';
+    return error;
+  }
+  function realCacheDirectory(dir) {
+    // 設定的 cache root 可以是掛載路徑；其下的來源 key 不得再導向其他目錄。
+    if (fs.lstatSync(dir).isSymbolicLink()) throw cachePathEscape();
+    const parent = fs.realpathSync(path.dirname(dir)), actual = fs.realpathSync(dir);
+    if (canonicalCachePath(actual) !== canonicalCachePath(path.join(parent, path.basename(dir)))) throw cachePathEscape();
+    return actual;
+  }
+  const sameCacheDirectory = (left, right) => left?.isDirectory() && !left.isSymbolicLink()
+    && right?.isDirectory() && !right.isSymbolicLink() && left.dev === right.dev && left.ino === right.ino;
+  function cacheDirectoryOwner(dir) {
+    const owner = fs.lstatSync(dir, { bigint: true });
+    if (!owner.isDirectory() || owner.isSymbolicLink()) throw cachePathEscape();
+    realCacheDirectory(dir);
+    if (!sameCacheDirectory(owner, fs.lstatSync(dir, { bigint: true }))) throw cacheDirectoryChanged();
+    return owner;
+  }
+  function cacheDirectoryChanged() {
+    const error = new Error('媒體快取目錄或母素材在補建期間變更');
+    error.code = 'CACHE_DIRECTORY_CHANGED';
+    return error;
+  }
+  function checkPublicationDirectory(dir, owner, sourceContent, sourceRequired) {
+    const before = cacheDirectoryOwner(dir);
+    if (owner && !sameCacheDirectory(owner, before)) throw cacheDirectoryChanged();
+    const current = inspectCacheDirectory(dir);
+    if (current.error === 'CACHE_PATH_ESCAPE') throw cachePathEscape();
+    if ((current.error && !current.metadataMissing)
+      || (current.sourceContent && !sameSourceContent(current.sourceContent, sourceContent))
+      || (sourceRequired && !sameSourceContent(current.sourceContent, sourceContent))
+      || !sameCacheDirectory(before, cacheDirectoryOwner(dir))) throw cacheDirectoryChanged();
+    return { owner: before, current };
+  }
+  async function openCacheComponent(cacheDirectory, filePath) {
+    const resolveCurrent = async () => {
+      if (!cacheDirectory || !filePath || !withinCachePath(cacheDirectory, filePath)
+        || (await fsp.lstat(cacheDirectory)).isSymbolicLink()) throw cachePathEscape();
+      const [parent, directory, file] = await Promise.all([
+        fsp.realpath(path.dirname(cacheDirectory)), fsp.realpath(cacheDirectory), fsp.realpath(filePath),
+      ]);
+      if (canonicalCachePath(directory) !== canonicalCachePath(path.join(parent, path.basename(cacheDirectory)))
+        || !withinCachePath(directory, file)) throw cachePathEscape();
+      return file;
+    };
+    const actual = await resolveCurrent(), file = await fsp.open(actual, 'r');
+    try {
+      const currentPath = await resolveCurrent();
+      const [opened, current] = await Promise.all([file.stat({ bigint: true }), fsp.stat(currentPath, { bigint: true })]);
+      if (canonicalCachePath(actual) !== canonicalCachePath(currentPath)
+        || opened.dev !== current.dev || opened.ino !== current.ino) throw cachePathEscape();
+      return file;
+    } catch (error) { await file.close(); throw error; }
+  }
+  function checkCacheComponent(root, file) {
+    let candidate = file;
+    for (;;) {
+      try {
+        if (!withinCachePath(root, fs.realpathSync(candidate))) throw cachePathEscape();
+        return;
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
+        // 缺件仍交原本 missing/unknown 規則處理，但其最近存在的父目錄不能越界。
+        const parent = path.dirname(candidate);
+        if (parent === candidate) throw cachePathEscape();
+        candidate = parent;
+      }
+    }
+  }
+
+  function resolveMeta(raw, dir, realDirectory) {
+    const root = realDirectory || realCacheDirectory(dir);
     const resolveFile = file => {
       if (!file) return file;
       // 舊 meta 只存 basename；補建的完整元件可位於同一 cache 的 generation。
       const relative = path.isAbsolute(file) ? path.basename(file) : file;
       const resolved = path.resolve(dir, relative);
       if (!resolved.startsWith(path.resolve(dir) + path.sep)) throw new Error('快取元件超出目錄');
+      checkCacheComponent(root, resolved);
       return resolved;
     };
     return {
@@ -166,9 +261,12 @@ function createMediaIntakeRuntime(options = {}) {
     };
   }
 
-  function fileState(file) {
+  function fileState(file, expectedSize) {
     if (!file) return 'missing';
-    try { const stat = fs.statSync(file); return stat.isFile() && stat.size > 0 ? 'complete' : 'missing'; }
+    try {
+      const stat = fs.statSync(file);
+      return stat.isFile() && stat.size > 0 && (expectedSize === undefined || expectedSize === stat.size) ? 'complete' : 'missing';
+    }
     catch (error) { return ['ENOENT', 'ENOTDIR'].includes(error.code) ? 'missing' : 'unknown'; }
   }
 
@@ -177,16 +275,17 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   // 同一份檔案證據決定重用與清理；暫時 I/O 錯誤不能等同可刪除。
-  function inspectMeta(meta) {
-    const proxyState = fileState(meta.proxy);
-    const waveState = fileState(meta.wave);
-    const channelStates = meta.channels.map(channel => fileState(channel.file));
+  function inspectMeta(meta, sizes = new Map()) {
+    const expected = file => file ? sizes.get(canonicalCachePath(file)) : undefined;
+    const proxyState = fileState(meta.proxy, expected(meta.proxy));
+    const waveState = fileState(meta.wave, expected(meta.wave));
+    const channelStates = meta.channels.map(channel => fileState(channel.file, expected(channel.file)));
     return {
       files: [
         { file: meta.proxy, state: proxyState },
         { file: meta.wave, state: waveState },
         ...meta.channels.map((channel, index) => ({ file: channel.file, state: channelStates[index] })),
-      ].filter(entry => entry.file),
+      ].filter(entry => entry.file).map(entry => ({ ...entry, expectedSize: expected(entry.file) })),
       retained: [proxyState, waveState, ...channelStates].some(state => state !== 'missing'),
       meta: {
         proxy: proxyState === 'complete' ? meta.proxy : null,
@@ -214,10 +313,12 @@ function createMediaIntakeRuntime(options = {}) {
       && (!meta.wave || completeFile(meta.wave));
   }
 
-  function writeMeta(metaPath, meta) {
+  function writeRawMeta(metaPath, raw, verify = () => {}) {
     const temporaryPath = metaPath + '.tmp-' + crypto.randomBytes(12).toString('hex');
     try {
-      fs.writeFileSync(temporaryPath, JSON.stringify(metaToStore(meta, path.dirname(metaPath))));
+      verify();
+      fs.writeFileSync(temporaryPath, JSON.stringify(raw));
+      verify();
       fs.renameSync(temporaryPath, metaPath);
     } catch (error) {
       try { fs.unlinkSync(temporaryPath); } catch (ignored) {}
@@ -225,28 +326,167 @@ function createMediaIntakeRuntime(options = {}) {
     }
   }
 
-  function inspectCacheDirectory(dir) {
-    const metaPath = path.join(dir, 'meta.json');
+  function validSourceContent(value) {
+    return value?.format === PORTABLE_SOURCE_FORMAT && Number.isSafeInteger(value.size) && value.size >= 0
+      && typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256);
+  }
+
+  const sameSourceContent = (left, right) => validSourceContent(left) && validSourceContent(right)
+    && left.sha256 === right.sha256 && left.size === right.size;
+  const sameAudioLayout = (left, right) => left.length === right.length && left.every((channel, index) =>
+    channel.sourceStream === right[index].sourceStream && channel.sourceChannel === right[index].sourceChannel);
+
+  function writeMeta(metaPath, publicationPath, meta, sourceContent, sourceKey, audio, verify) {
+    verify();
+    const current = inspectCacheDirectory(path.dirname(metaPath), audio);
+    if (current.sourceContent && !sameSourceContent(current.sourceContent, sourceContent)) throw cacheDirectoryChanged();
+    const keys = !current.error && sameSourceContent(current.sourceContent, sourceContent) ? current.sourceKeys : [];
+    if (!current.error && sameSourceContent(current.sourceContent, sourceContent)) {
+      meta.proxy ||= current.meta.proxy;
+      if (!audio.length) {
+        meta.wave = current.meta.wave || meta.wave;
+        if (current.meta.channels.length) meta.channels = current.meta.channels;
+      }
+    }
+    const dir = path.dirname(metaPath);
+    const artifactSizes = Object.fromEntries([...new Set([meta.proxy, meta.wave, ...meta.channels.map(channel => channel.file)].filter(Boolean))]
+      .map(file => [path.relative(dir, file).split(path.sep).join('/'), fs.statSync(file).size]));
+    const raw = { ...metaToStore(meta, dir), artifactSizes, publicationVersion: 1, sourceContent,
+      sourceKeys: [...new Set([...keys, sourceKey])] };
+    // 每個 writer 只發布自己的 generation；相容索引可被另一台電腦覆寫，
+    // 完成紀錄仍獨立存在，讀取端依母素材與聲道 layout 合併完整元件。
+    writeRawMeta(publicationPath, raw, verify);
+    try { writeRawMeta(metaPath, raw, verify); }
+    catch (error) {
+      if (error.code === 'CACHE_DIRECTORY_CHANGED' || error.code === 'CACHE_PATH_ESCAPE') throw error;
+      try { options.log?.('[cache] compatibility index not saved:', error.code || error.message); } catch (ignored) {}
+    }
+  }
+
+  // 身分 receipt 與產物 publication 分開；補記身分不能回寫過期的產物索引。
+  function bindPortableCache(dir, sourceContent, sourceKey) {
     try {
-      const raw = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-      const inspected = inspectMeta(resolveMeta(raw, dir));
-      // Old Proxies can change color when resizing crosses the decoder's SD/HD
-      // guess. Keep their bytes and completed audio; rebuild only that component.
-      if (options.describeVideo && raw.proxyColorVersion !== 1) inspected.meta.proxy = null;
-      return { dir, ...inspected };
+      const realDirectory = realCacheDirectory(dir);
+      const receipt = path.join(dir, 'source-' + sourceKey + '.json');
+      checkCacheComponent(realDirectory, receipt);
+      writeRawMeta(receipt, { sourceContent, sourceKey });
     } catch (error) {
-      return { dir, files: [], error: error.code || error.message };
+      // 唯讀的共享快取仍可直接播放；下次跨工作階段再驗證，不複製或重轉 Proxy。
+      try { options.log?.('[cache] portable binding not saved:', error.code || error.message); } catch (ignored) {}
+    }
+  }
+
+  function metadataEntries(entries) {
+    return [{ file: 'meta.json', kind: 'index' }, ...entries.flatMap(entry => {
+      if (entry.isSymbolicLink()) return [];
+      if (entry.isDirectory() && /^generation-[a-f0-9]{24}$/.test(entry.name)) {
+        return [{ file: path.join(entry.name, 'cache-meta.json'), kind: 'publication' }];
+      }
+      if (entry.isFile() && /^source-[a-f0-9]{16}\.json$/.test(entry.name)) {
+        return [{ file: entry.name, kind: 'binding', sourceKey: entry.name.slice(7, -5) }];
+      }
+      return [];
+    })];
+  }
+
+  function acceptedRecord(entry, raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+    if (entry.kind === 'index') return true;
+    if (!validSourceContent(raw.sourceContent)) return false;
+    return entry.kind === 'publication' ? raw.publicationVersion === 1 : raw.sourceKey === entry.sourceKey;
+  }
+
+  function inspectCacheDirectory(dir, audio = []) {
+    try {
+      const owner = cacheDirectoryOwner(dir);
+      const realDirectory = realCacheDirectory(dir);
+      const records = [];
+      let uncertain = false;
+      for (const entry of metadataEntries(fs.readdirSync(dir, { withFileTypes: true }))) {
+        const file = path.join(dir, entry.file);
+        try {
+          checkCacheComponent(realDirectory, file);
+          if (fs.statSync(file).size > 1024 * 1024) throw new Error('快取 metadata 過大');
+          const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (acceptedRecord(entry, raw)) records.push({ ...entry, raw });
+        } catch (error) {
+          if (!['ENOENT', 'ENOTDIR'].includes(error.code)) uncertain = true;
+          if (entry.kind === 'index' && error.code === 'CACHE_PATH_ESCAPE') throw error;
+        }
+      }
+      const sourceContent = records.map(record => record.raw.sourceContent).find(validSourceContent) || null;
+      const sourceKeys = [...new Set(records.filter(record => sameSourceContent(record.raw.sourceContent, sourceContent))
+        .flatMap(record => record.kind === 'binding' ? [record.raw.sourceKey]
+          : Array.isArray(record.raw.sourceKeys) ? record.raw.sourceKeys : [])
+        .filter(key => typeof key === 'string' && /^[a-f0-9]{16}$/.test(key)))];
+      const resolved = [], sizes = new Map();
+      for (const record of records) {
+        if (record.kind === 'binding' || (record.kind !== 'index' && !sameSourceContent(record.raw.sourceContent, sourceContent))) continue;
+        try {
+          const meta = resolveMeta(record.raw, dir, realDirectory);
+          resolved.push({ meta, raw: record.raw });
+          for (const file of [meta.proxy, meta.wave, ...meta.channels.map(channel => channel.file)].filter(Boolean)) {
+            const size = record.raw.artifactSizes?.[path.relative(dir, file).split(path.sep).join('/')];
+            if (!Number.isSafeInteger(size) || size <= 0) continue;
+            const key = canonicalCachePath(file);
+            // 同一路徑的任何已知完成長度都不能被缺少證據的舊索引繞過。
+            sizes.set(key, sizes.has(key) && sizes.get(key) !== size ? -1 : size);
+          }
+        } catch (error) { if (record.kind === 'index') throw error; uncertain = true; }
+      }
+      const variants = resolved.map(({ meta, raw }) => {
+        const inspected = inspectMeta(meta, sizes);
+        if (options.describeVideo && raw.proxyColorVersion !== 1) inspected.meta.proxy = null;
+        return inspected;
+      });
+      if (!variants.length) return { dir, files: [], error: 'CACHE_METADATA_MISSING', metadataMissing: !uncertain };
+      const expected = flattenSourceChannels(audio);
+      const chosen = (expected.length && variants.find(variant => sameAudioLayout(variant.audioLayout, expected)))
+        || variants.reduce((best, variant) => variant.audioLayout.length > best.audioLayout.length ? variant : best);
+      const matching = variants.filter(variant => sameAudioLayout(variant.audioLayout, chosen.audioLayout));
+      const audioLayout = chosen.audioLayout.map((channel, index) =>
+        matching.find(variant => variant.meta.channels.some(valid => valid.file === variant.audioLayout[index].file))?.audioLayout[index] || channel);
+      const validChannels = new Set(matching.flatMap(variant => variant.meta.channels.map(channel => channel.file)));
+      const files = [...new Map(variants.flatMap(variant => variant.files).map(entry => [entry.file, entry])).values()];
+      const result = { dir, files, retained: uncertain || variants.some(variant => variant.retained), audioLayout,
+        meta: { proxy: variants.find(variant => variant.meta.proxy)?.meta.proxy || null,
+          wave: matching.find(variant => variant.meta.wave)?.meta.wave || null,
+          channels: audioLayout.filter(channel => validChannels.has(channel.file)) }, sourceContent, sourceKeys };
+      if (!sameCacheDirectory(owner, cacheDirectoryOwner(dir))) throw cacheDirectoryChanged();
+      inspectedCacheOwners.set(result, owner);
+      return result;
+    } catch (error) {
+      return { dir, files: [], error: error.code || error.message, metadataMissing: ['ENOENT', 'ENOTDIR'].includes(error.code) };
     }
   }
 
   function inspectCache(src) {
-    return cacheCandidates(src).map(inspectCacheDirectory);
+    const key = cacheKeyFor(src), portable = portableHits.get(key);
+    return cacheCandidates(src, key).map(dir => inspectSourceCache(dir, [], key, portable));
+  }
+
+  function inspectSourceCache(dir, audio, key, portable) {
+    const hit = inspectCacheDirectory(dir, audio);
+    if (hit.error) return hit;
+    const mapped = portable && canonicalCachePath(dir) === canonicalCachePath(portable.dir);
+    if (mapped && !sameSourceContent(hit.sourceContent, portable.sourceContent)) {
+      if (portableHits.get(key) === portable) portableHits.delete(key);
+      return { dir, files: [], error: 'CACHE_SOURCE_MISMATCH' };
+    }
+    // 新格式已明示來源證據時，不能僅憑本機 key 的目錄名稱認領別的母素材。
+    // 沒有新證據的舊 metadata 保留 strict-key 相容；未綁定的新內容先全文驗證。
+    if (hit.sourceContent && !mapped && !hit.sourceKeys.includes(key)) {
+      return { dir, files: [], error: 'CACHE_SOURCE_UNVERIFIED' };
+    }
+    return hit;
   }
 
   function readCache(src, audio, needsProxy) {
+    const key = cacheKeyFor(src), portable = portableHits.get(key);
     let partial = null;
-    for (const dir of cacheCandidates(src)) {
-      const hit = inspectCacheDirectory(dir);
+    for (const dir of cacheCandidates(src, key)) {
+      // 候選只是路徑提示；實際讀到的這份 metadata 仍須符合當次來源證據。
+      const hit = inspectSourceCache(dir, audio, key, portable);
       if (hit.error) continue;
       if (coversAudioRequest(hit.meta, audio) && (!needsProxy || hit.meta.proxy)) {
         fileAuthority.grantManagedCacheDirectory(dir);
@@ -258,25 +498,141 @@ function createMediaIntakeRuntime(options = {}) {
     return partial;
   }
 
+  async function preparePortableCache({ src, audio = [], needsProxy }, session) {
+    const sourceKey = cacheKeyFor(src);
+    const current = () => !closed && !cancelled(session);
+    const ensureCurrent = () => { if (!current()) throw new IngestSupersededError(); };
+    const check = () => {
+      ensureCurrent();
+      if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
+    };
+    check();
+    const direct = readCache(src, audio, needsProxy);
+    const knownContent = direct?.sourceContent?.size === fs.statSync(src).size ? direct.sourceContent : null;
+    const directComplete = direct && coversAudioRequest(direct.meta, audio) && (!needsProxy || direct.meta.proxy);
+    if (directComplete && knownContent) return { sourceKey, sourceContent: knownContent };
+    const candidates = [];
+    if (!directComplete) {
+      const roots = [cacheRoot()];
+      if (allowSidecarCache) roots.unshift(path.join(path.dirname(src), '.subtool_Cache'));
+      const size = fs.statSync(src).size;
+      for (const root of new Set(roots)) {
+        let entries;
+        try { entries = await fsp.readdir(root, { withFileTypes: true }); } catch (error) { entries = []; }
+        ensureCurrent();
+        for (const entry of entries) {
+          // 不追逐 symlink 或任意 metadata 路徑，只查看原本位置的 cache key 目錄。
+          if (!entry.isDirectory() || !/^[a-f0-9]{16}$/.test(entry.name)) continue;
+          const dir = path.join(root, entry.name), records = [];
+          try {
+            for (const metadata of metadataEntries(await fsp.readdir(dir, { withFileTypes: true }))) {
+              ensureCurrent();
+              let file;
+              try {
+                file = await openCacheComponent(dir, path.join(dir, metadata.file));
+                ensureCurrent();
+                if ((await file.stat()).size > 1024 * 1024) continue;
+                const raw = JSON.parse(await file.readFile('utf8'));
+                if (acceptedRecord(metadata, raw)) records.push({ ...metadata, raw });
+              } catch (error) { ensureCurrent(); }
+              finally { if (file) await file.close(); }
+            }
+          } catch (error) { continue; }
+          ensureCurrent();
+          const sourceContent = records.map(record => record.raw.sourceContent).find(validSourceContent);
+          if (!sourceContent || sourceContent.size !== size) continue;
+          const sourceKeys = records.filter(record => sameSourceContent(record.raw.sourceContent, sourceContent))
+            .flatMap(record => record.kind === 'binding' ? [record.raw.sourceKey]
+              : Array.isArray(record.raw.sourceKeys) ? record.raw.sourceKeys : []);
+          candidates.push({ dir, sourceContent, sourceKeys });
+        }
+      }
+      check();
+      // 這台電腦已完整驗證過且來源 strict key 未變，免重讀整支大型素材。
+      for (const candidate of candidates) {
+        if (!Array.isArray(candidate.sourceKeys) || !candidate.sourceKeys.includes(sourceKey)) continue;
+        const hit = inspectCacheDirectory(candidate.dir, audio);
+        if (hit.error || !sameSourceContent(hit.sourceContent, candidate.sourceContent)
+          || !hit.sourceKeys.includes(sourceKey) || !coversAudioRequest(hit.meta, audio) || (needsProxy && !hit.meta.proxy)) continue;
+        portableHits.set(sourceKey, { dir: candidate.dir, sourceContent: candidate.sourceContent });
+        return { sourceKey, sourceContent: candidate.sourceContent };
+      }
+    }
+    let sha256 = knownContent?.sha256;
+    if (!sha256) {
+      reportProgress(session, { jobId: 'ingest', label: '驗證共用 Proxy 的母素材', pct: 0 });
+      const hash = portableSourceFingerprint(src, { shouldContinue: current });
+      portableHashes.add(hash);
+      try { sha256 = await hash; } finally { portableHashes.delete(hash); }
+    }
+    check();
+    const sourceContent = { format: PORTABLE_SOURCE_FORMAT, size: fs.statSync(src).size, sha256 };
+    if (direct && (!sameSourceContent(direct.sourceContent, sourceContent) || !direct.sourceKeys.includes(sourceKey))) {
+      bindPortableCache(direct.dir, sourceContent, sourceKey);
+    }
+    if (!directComplete) {
+      let partial = null;
+      for (const candidate of candidates) {
+        if (candidate.sourceContent.sha256 !== sha256) continue;
+        const hit = inspectCacheDirectory(candidate.dir, audio);
+        if (hit.error || !sameSourceContent(hit.sourceContent, sourceContent)) continue;
+        if (coversAudioRequest(hit.meta, audio) && (!needsProxy || hit.meta.proxy)) { partial = hit; break; }
+        partial ||= hit;
+      }
+      if (partial) {
+        portableHits.set(sourceKey, { dir: partial.dir, sourceContent });
+        if (!partial.sourceKeys.includes(sourceKey)) bindPortableCache(partial.dir, sourceContent, sourceKey);
+      }
+    }
+    return { sourceKey, sourceContent };
+  }
+
   function isDirWritable(dir) {
+    let testPath, descriptor, owner, directoryOwner;
     try {
+      try { if (fs.lstatSync(dir).isSymbolicLink()) return false; }
+      catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return false; }
       fs.mkdirSync(dir, { recursive: true });
-      const testPath = path.join(dir, '.wtest_' + process.pid);
-      fs.writeFileSync(testPath, 'x');
-      fs.unlinkSync(testPath);
+      directoryOwner = cacheDirectoryOwner(dir);
+      // 素材旁的共用快取不是私有目錄；固定 PID 探針可能是既有 hardlink，
+      // 預設 w 會截斷另一份檔案。以獨占 handle 寫入，只清理本次建立的身分。
+      testPath = path.join(dir, '.wtest_' + crypto.randomBytes(12).toString('hex'));
+      descriptor = fs.openSync(testPath, 'wx');
+      owner = fs.fstatSync(descriptor, { bigint: true });
+      fs.writeFileSync(descriptor, 'x');
       return true;
     } catch (error) {
       return false;
+    } finally {
+      if (descriptor !== undefined) {
+        try { fs.closeSync(descriptor); } catch (error) {}
+      }
+      if (owner) {
+        try {
+          const current = fs.lstatSync(testPath, { bigint: true });
+          if (sameCacheDirectory(directoryOwner, cacheDirectoryOwner(dir))
+            && current.isFile() && !current.isSymbolicLink()
+            && current.dev === owner.dev && current.ino === owner.ino) fs.unlinkSync(testPath);
+        } catch (error) {}
+      }
     }
   }
 
   function writeCacheDir(src) {
-    for (const dir of cacheCandidates(src)) {
-      if (!isDirWritable(dir)) continue;
+    const key = cacheKeyFor(src), portable = portableHits.get(key);
+    const admitted = dir => {
+      const hit = inspectSourceCache(dir, [], key, portable);
+      return !hit.error || hit.metadataMissing;
+    };
+    for (const dir of cacheCandidates(src, key)) {
+      if (!admitted(dir) || !isDirWritable(dir) || !admitted(dir)) continue;
       fileAuthority.grantManagedCacheDirectory(dir);
       return dir;
     }
-    const fallback = path.join(cacheRoot(), cacheKeyFor(src));
+    const fallback = path.join(cacheRoot(), key);
+    if (!admitted(fallback) || !isDirWritable(fallback) || !admitted(fallback)) {
+      throw new Error('無法建立媒體快取，請確認快取目錄權限與來源');
+    }
     fileAuthority.grantManagedCacheDirectory(fallback);
     return fallback;
   }
@@ -318,17 +674,8 @@ function createMediaIntakeRuntime(options = {}) {
         if (!entry.isDirectory()) continue;
         const dir = path.join(root, entry.name);
         if (activeCacheDirs.has(dir)) continue;
-        const metaPath = path.join(dir, 'meta.json');
-        let remove = false;
-        if (!fs.existsSync(metaPath)) remove = true;
-        else {
-          try {
-            const meta = resolveMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')), dir);
-            if (!inspectMeta(meta).retained) remove = true;
-          } catch (error) {
-            remove = false;
-          }
-        }
+        const inspected = inspectCacheDirectory(dir);
+        const remove = inspected.metadataMissing || (!inspected.error && !inspected.retained);
         if (!remove) continue;
         const size = dirSize(dir);
         try {
@@ -367,13 +714,49 @@ function createMediaIntakeRuntime(options = {}) {
     try { fs.mkdirSync(root, { recursive: true }); } catch (error) {}
     if (currentSrc && fileAuthority.canRead(currentSrc)) {
       try {
-        const sidecarDir = path.join(
-          path.dirname(currentSrc),
-          '.subtool_Cache',
-          cacheKeyFor(currentSrc),
-        );
-        if (fs.existsSync(sidecarDir)) {
-          bytes += removeUnleased(sidecarDir);
+        const sidecarRoot = canonical(path.join(path.dirname(currentSrc), '.subtool_Cache'));
+        const key = cacheKeyFor(currentSrc), portable = portableHits.get(key);
+        const removeSidecar = dir => {
+          const target = canonical(dir);
+          if ([...activeCacheDirs.keys()].some(active => {
+            const writer = canonical(active);
+            return writer === target || writer.startsWith(target + path.sep);
+          })) return 0;
+          const quarantine = path.join(path.dirname(dir), '.subtool-clear-' + crypto.randomBytes(12).toString('hex'));
+          if (canonical(path.dirname(quarantine)) !== sidecarRoot) return 0;
+          let moved = false;
+          const restore = () => {
+            if (!moved) return;
+            // 另一個 writer 已重建原路徑時保留私有隔離目錄，不能覆蓋它的新內容。
+            try { if (!fs.existsSync(dir)) { fs.renameSync(quarantine, dir); moved = false; } } catch (error) {}
+          };
+          const sameDirectory = (left, right) => left.isDirectory() && !left.isSymbolicLink()
+            && right.isDirectory() && !right.isSymbolicLink() && left.dev === right.dev && left.ino === right.ino;
+          try {
+            const before = fs.lstatSync(dir, { bigint: true });
+            if (!before.isDirectory() || before.isSymbolicLink()) return 0;
+            const accepted = inspectSourceCache(dir, [], key, portable);
+            if (accepted.error && !accepted.metadataMissing) return 0;
+            // 先原子取得將刪除的目錄物件，再核對身分與來源；不對先前候選路徑直接刪除。
+            fs.renameSync(dir, quarantine);
+            moved = true;
+            const claimed = fs.lstatSync(quarantine, { bigint: true });
+            const current = inspectCacheDirectory(quarantine);
+            if (!sameDirectory(before, claimed)
+              || (accepted.sourceContent && (current.error || !sameSourceContent(current.sourceContent, accepted.sourceContent)))
+              || (current.sourceContent && !accepted.sourceContent)
+              || (current.error && !current.metadataMissing)) { restore(); return 0; }
+            const size = dirSize(quarantine);
+            if (!sameDirectory(claimed, fs.lstatSync(quarantine, { bigint: true }))) { restore(); return 0; }
+            fs.rmSync(quarantine, { recursive: true, force: true });
+            moved = false;
+            return size;
+          } catch (error) { restore(); return 0; }
+        };
+        for (const dir of cacheCandidates(currentSrc, key)) {
+          // 可攜命中仍在原 key 目錄；清理只接受目前素材旁已驗證的 cache 目錄。
+          if (canonical(path.dirname(dir)) !== sidecarRoot || !/^[a-f0-9]{16}$/.test(path.basename(dir))) continue;
+          if (fs.existsSync(dir)) bytes += removeSidecar(dir);
         }
       } catch (error) {}
     } else if (currentSrc) {
@@ -489,11 +872,24 @@ function createMediaIntakeRuntime(options = {}) {
           if (!response.headersSent) { response.writeHead(status); response.end(); }
           else cancel();
         };
-        const pipe = (streamOptions, end = true) => {
+        const cacheDirectory = [...activeCacheDirs.keys()].filter(dir => withinCachePath(dir, job.filePath))
+          .sort((left, right) => right.length - left.length)[0];
+        const openStreamFile = () => openCacheComponent(cacheDirectory, job.filePath);
+        const streamStat = async () => {
+          const file = await openStreamFile();
+          try { return await file.stat(); } finally { await file.close(); }
+        };
+        const pipe = async (streamOptions, end = true) => {
           if (!live()) return;
-          reader = fs.createReadStream(job.filePath, streamOptions);
-          reader.once('error', error => fail(error));
-          reader.pipe(response, { end });
+          const file = await openStreamFile();
+          try {
+            if (!live()) { await file.close(); return; }
+            // 沿已驗證的 handle 讀取；准入後再換 junction 也不能把 reader 轉向外檔。
+            reader = fs.createReadStream(job.filePath, { ...streamOptions, fd: file, autoClose: true });
+            reader.once('error', error => fail(error));
+            reader.pipe(response, { end });
+            return reader;
+          } catch (error) { await file.close(); throw error; }
         };
         const schedule = (work, ms) => {
           if (!live()) return;
@@ -511,7 +907,7 @@ function createMediaIntakeRuntime(options = {}) {
           };
           if (method === 'HEAD') {
             // 成長中的 Proxy 沒有最終長度；HEAD 不建立 reader、不等 writer。
-            void fsp.stat(job.filePath).then(stat => {
+            void streamStat().then(stat => {
               if (!live()) return;
               if (job.error) { fail(new Error(job.error)); return; }
               if (job.done) headers['Content-Length'] = stat.size;
@@ -524,7 +920,7 @@ function createMediaIntakeRuntime(options = {}) {
           let offset = 0;
           const pump = async () => {
             if (!live()) return;
-            const size = (await fsp.stat(job.filePath)).size;
+            const size = (await streamStat()).size;
             if (!live()) return;
             if (job.error) { fail(new Error(job.error)); return; }
             if (size <= offset) {
@@ -534,9 +930,10 @@ function createMediaIntakeRuntime(options = {}) {
             }
             // 非 Range 請求也須供應後續增長的 bytes，不能只等 writer 完成後
             // 關閉最初的短回應，否則會交付截斷的 fragmented MP4。
-            pipe({ start: offset, end: size - 1 }, false);
-            reader.on('data', chunk => { offset += chunk.length; });
-            reader.once('end', () => { void pump().catch(error => fail(error)); });
+            const stream = await pipe({ start: offset, end: size - 1 }, false);
+            if (!stream) return;
+            stream.on('data', chunk => { offset += chunk.length; });
+            stream.once('end', () => { void pump().catch(error => fail(error)); });
           };
           void pump().catch(error => fail(error));
           return;
@@ -559,7 +956,8 @@ function createMediaIntakeRuntime(options = {}) {
         const tryRange = async attempt => {
           if (!live()) return;
           let size = 0;
-          try { size = (await fsp.stat(job.filePath)).size; } catch (error) {}
+          try { size = (await streamStat()).size; }
+          catch (error) { if (error.code === 'CACHE_PATH_ESCAPE') { fail(error, 403); return; } }
           if (!live()) return;
           if (job.error) { fail(new Error(job.error)); return; }
           if (size <= start && !job.done && attempt < 120) {
@@ -580,7 +978,7 @@ function createMediaIntakeRuntime(options = {}) {
             'Cache-Control': 'no-store',
           });
           if (method === 'HEAD') response.end();
-          else pipe({ start, end });
+          else await pipe({ start, end });
         };
         void tryRange(0).catch(error => fail(error));
       });
@@ -594,11 +992,12 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   // cache coverage 與補建publication共用一個owner，batch/stream不能各自重抽已完成元件。
-  function planIntake({ src, needsProxy, audio }, isStream, description = null) {
+  function planIntake({ src, needsProxy, audio }, isStream, description = null, portable = null) {
     const video = description?.video || null;
     const audioSources = Array.isArray(audio) ? audio : [];
-    let hit = readCache(src, audioSources, needsProxy);
-    if (hit && description && path.basename(hit.dir) !== description.sourceKey) {
+    const hit = readCache(src, audioSources, needsProxy);
+    const sourceKey = cacheKeyFor(src);
+    if ((description && sourceKey !== description.sourceKey) || (portable && sourceKey !== portable.sourceKey)) {
       throw new Error('母素材在轉檔期間變更，請重新載入');
     }
     if (hit
@@ -606,30 +1005,52 @@ function createMediaIntakeRuntime(options = {}) {
       && (!needsProxy || hit.meta.proxy)) {
       return { cached: true, dir: hit.dir, meta: hit.meta };
     }
-    if (hit && !isDirWritable(hit.dir)) hit = null;
+    const copyCompleted = hit && !isDirWritable(hit.dir);
+    const hitOwner = hit && inspectedCacheOwners.get(hit);
+    if (hit) checkPublicationDirectory(hit.dir, hitOwner, portable.sourceContent, !!hit.sourceContent);
     const buildProxy = needsProxy && !hit?.meta.proxy;
     // A warm lookup can lose its files while awaiting admission. Do not create
     // or certify a replacement until the caller has described that source.
     if (buildProxy && options.describeVideo && !video) return { needsVideoDescription: true };
-    const dir = hit ? hit.dir : writeCacheDir(src);
-    if (description && path.basename(dir) !== description.sourceKey) {
+    const dir = hit && !copyCompleted ? hit.dir : writeCacheDir(src);
+    if (description && cacheKeyFor(src) !== description.sourceKey) {
       throw new Error('母素材在轉檔期間變更，請重新載入');
     }
     const metaPath = path.join(dir, 'meta.json');
+    const accepted = checkPublicationDirectory(dir, hit && !copyCompleted ? hitOwner : null, portable.sourceContent,
+      hit && !copyCompleted && !!hit.sourceContent);
+    const directoryOwner = accepted.owner, sourceRequired = !!accepted.current.sourceContent;
     // 初建也只寫私有 generation：不同程式共用 sidecar 時，失敗 writer
     // 不能覆寫另一個已提交 writer 的檔案。
     const outputDir = path.join(dir, 'generation-' + crypto.randomBytes(12).toString('hex'));
-    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(outputDir);
+    const outputOwner = cacheDirectoryOwner(outputDir);
+    const verifyPublication = () => {
+      const current = checkPublicationDirectory(dir, directoryOwner, portable.sourceContent, sourceRequired);
+      if (!sameCacheDirectory(outputOwner, cacheDirectoryOwner(outputDir))) throw cacheDirectoryChanged();
+      return current;
+    };
+    verifyPublication();
+    const copies = new Map(), reusedSizes = new Map();
+    const reuseFile = file => {
+      if (!file) return file;
+      const expectedSize = hit.files.find(entry => entry.file === file)?.expectedSize ?? fs.statSync(file).size;
+      const target = copyCompleted ? path.join(outputDir, path.basename(file)) : file;
+      reusedSizes.set(target, expectedSize);
+      if (copyCompleted && !copies.has(file)) copies.set(file, target);
+      return target;
+    };
     const expected = flattenSourceChannels(audioSources);
     const sameAudioLayout = hit && hit.audioLayout.length === expected.length
       && expected.every((channel, index) => hit.audioLayout[index].sourceStream === channel.sourceStream
         && hit.audioLayout[index].sourceChannel === channel.sourceChannel);
     const reuseWave = !audioSources.length || (sameAudioLayout && hit.meta.wave);
-    const reuseChannels = expected.map((_, index) => sameAudioLayout && completeFile(hit.audioLayout[index].file));
+    const reuseChannels = expected.map((_, index) => sameAudioLayout
+      && hit.meta.channels.some(channel => channel.file === hit.audioLayout[index].file));
     const reuseAudio = reuseWave && reuseChannels.every(Boolean);
     const audioPlan = buildAudioIngestPlan(reuseAudio ? [] : audioSources);
-    const channels = !audioSources.length ? (hit?.meta.channels || []) : expected.map((_, index) =>
-      reuseChannels[index] ? hit.audioLayout[index]
+    const channels = !audioSources.length ? (hit?.meta.channels || []).map(channel => ({ ...channel, file: reuseFile(channel.file) })) : expected.map((_, index) =>
+      reuseChannels[index] ? { ...hit.audioLayout[index], file: reuseFile(hit.audioLayout[index].file) }
         : { ...audioPlan.channels[index], file: path.join(outputDir, audioPlan.channels[index].file) });
     const buildChannels = [];
     const channelMaps = [];
@@ -638,8 +1059,8 @@ function createMediaIntakeRuntime(options = {}) {
       else { buildChannels.push(channels[index]); channelMaps.push(pad); }
     });
     if (reuseWave && audioPlan.waveLabel) audioPlan.filters.push(`${audioPlan.waveLabel}anullsink`);
-    const proxy = hit?.meta.proxy || (buildProxy ? path.join(outputDir, 'proxy.mp4') : null);
-    const wave = reuseWave ? (hit?.meta.wave || null) : (audioPlan.waveLabel ? path.join(outputDir, 'wave.wav') : null);
+    const proxy = reuseFile(hit?.meta.proxy) || (buildProxy ? path.join(outputDir, 'proxy.mp4') : null);
+    const wave = reuseWave ? reuseFile(hit?.meta.wave || null) : (audioPlan.waveLabel ? path.join(outputDir, 'wave.wav') : null);
     const meta = { proxy, channels, wave };
     const args = buildIngestArgs({
       src,
@@ -657,18 +1078,81 @@ function createMediaIntakeRuntime(options = {}) {
     let committed = false;
     return {
       cached: false, dir, args, meta,
+      readDirs: copyCompleted ? [hit.dir] : [],
+      prepare: copies.size ? async (owns = () => true) => {
+        // 唯讀共享快取只缺部分元件時，非同步複用完成 bytes 到既有本機退路；
+        // 原 Proxy 不動，也不能因無法補寫音訊便重新編碼影片。
+        const verifySource = () => checkPublicationDirectory(hit.dir, hitOwner, portable.sourceContent, !!hit.sourceContent);
+        for (const [source, destination] of copies) {
+          if (closed || !owns()) throw new IngestSupersededError();
+          verifySource();
+          const file = await openCacheComponent(hit.dir, source);
+          const controller = new AbortController();
+          const timer = setInterval(() => { if (closed || !owns()) controller.abort(); }, 100);
+          timer.unref?.();
+          try {
+            if (closed || !owns()) throw new IngestSupersededError();
+            // 開檔可以讓出執行權；handle 自洽仍不足以替換入的另一份母素材作證。
+            verifySource();
+            const before = await file.stat();
+            if (before.size !== reusedSizes.get(destination)) throw new Error('既有媒體快取在補建期間變更');
+            await pipeline(file.createReadStream({ autoClose: true }),
+              fs.createWriteStream(destination, { flags: 'wx' }), { signal: controller.signal });
+            const current = await openCacheComponent(hit.dir, source);
+            try {
+              const after = await current.stat();
+              if (['size', 'mtimeMs', 'ctimeMs', 'dev', 'ino'].some(field => before[field] !== after[field])
+                || (await fsp.stat(destination)).size !== before.size) throw new Error('既有媒體快取在補建期間變更');
+            } finally { await current.close(); }
+            verifySource();
+          } catch (error) {
+            if (closed || !owns()) throw new IngestSupersededError();
+            throw error;
+          } finally { clearInterval(timer); await file.close(); }
+          if (closed || !owns()) throw new IngestSupersededError();
+        }
+        if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
+      } : null,
       label: buildProxy && audioPlan.channels.length ? '正在轉檔 Proxy 與分析音訊'
         : (buildProxy ? '正在轉檔 Proxy' : '正在分析音訊'),
       commit() {
-        if (cacheKeyFor(src) !== path.basename(dir)) throw new Error('母素材在轉檔期間變更，請重新載入');
+        if (closed) throw new IngestSupersededError();
+        if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
+        verifyPublication();
+        if ([...reusedSizes].some(([file, size]) => fileState(file, size) !== 'complete')) {
+          throw new Error('既有媒體快取在補建期間變更');
+        }
         if (!metaValid(meta)) throw new Error('媒體轉檔沒有產生完整快取');
-        writeMeta(metaPath, meta);
+        writeMeta(metaPath, path.join(outputDir, 'cache-meta.json'), meta, portable.sourceContent, sourceKey, audioSources, verifyPublication);
         committed = true;
       },
       dispose() {
-        if (!committed) fs.rmSync(outputDir, { recursive: true, force: true });
+        if (committed) return;
+        // 失敗只收回自己建立的實體 generation；同名路徑可已被另一個 writer 接手。
+        const quarantine = path.join(dir, '.subtool-discard-' + crypto.randomBytes(12).toString('hex'));
+        let moved = false;
+        try {
+          if (!sameCacheDirectory(directoryOwner, cacheDirectoryOwner(dir))
+            || !sameCacheDirectory(outputOwner, cacheDirectoryOwner(outputDir))) return;
+          fs.renameSync(outputDir, quarantine);
+          moved = true;
+          if (!sameCacheDirectory(directoryOwner, cacheDirectoryOwner(dir))
+            || !sameCacheDirectory(outputOwner, cacheDirectoryOwner(quarantine))) return;
+          fs.rmSync(quarantine, { recursive: true, force: true });
+          moved = false;
+        } catch (error) {}
+        finally {
+          if (moved) {
+            try { if (!fs.existsSync(outputDir)) fs.renameSync(quarantine, outputDir); } catch (error) {}
+          }
+        }
       },
     };
+  }
+
+  function protectPlan(plan) {
+    const releases = [...new Set([plan.dir, ...(plan.readDirs || [])])].map(protectCacheDir);
+    return () => { for (const release of releases) release(); };
   }
 
   function reportCacheHit(session) {
@@ -696,23 +1180,26 @@ function createMediaIntakeRuntime(options = {}) {
 
   async function ingest(request, session = {}) {
     if (closed || cancelled(session)) throw new IngestSupersededError();
+    const portable = await preparePortableCache(request, session);
     const description = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
     if (closed || cancelled(session)) throw new IngestSupersededError();
-    let plan = planIntake(request, false, description);
+    let plan = planIntake(request, false, description, portable);
     if (plan.needsVideoDescription) {
       const replacementDescription = await describeMissingProxy(request.src, request.audio, true);
       if (closed || cancelled(session)) throw new IngestSupersededError();
-      plan = planIntake(request, false, replacementDescription);
+      plan = planIntake(request, false, replacementDescription, portable);
     }
     if (plan.cached) {
       reportCacheHit(session);
       return Object.assign({ cached: true }, plan.meta);
     }
 
-    const unprotect = protectCacheDir(plan.dir);
+    const unprotect = protectPlan(plan);
     try {
       await delay(1000);
       if (cancelled(session)) throw new IngestSupersededError();
+      if (plan.prepare) await plan.prepare(() => !cancelled(session));
+      if (closed || cancelled(session)) throw new IngestSupersededError();
       await ffmpegExecution.execute(plan.args, {
         executionKind: 'direct',
         deferTerminal: true,
@@ -723,7 +1210,7 @@ function createMediaIntakeRuntime(options = {}) {
         onProcess: process => session.ownProcess?.(process),
         shouldSend: () => !cancelled(session),
       });
-      if (cancelled(session)) throw new IngestSupersededError();
+      if (closed || cancelled(session)) throw new IngestSupersededError();
       plan.commit();
       reportCompletion(session, 'ingest', plan.label);
       return Object.assign({ cached: false }, plan.meta);
@@ -738,13 +1225,19 @@ function createMediaIntakeRuntime(options = {}) {
   async function stream({ src, duration, audio }, session = {}) {
     const port = await ensureStreamServer();
     if (closed || cancelled(session)) return { response: null, completion: null };
+    let portable;
+    try { portable = await preparePortableCache({ src, duration, audio, needsProxy: true }, session); }
+    catch (error) {
+      if (closed || cancelled(session)) return { response: null, completion: null };
+      throw error;
+    }
     const description = options.describeVideo ? await describeMissingProxy(src, audio) : null;
     if (closed || cancelled(session)) return { response: null, completion: null };
-    let plan = planIntake({ src, needsProxy: true, audio }, true, description);
+    let plan = planIntake({ src, needsProxy: true, audio }, true, description, portable);
     if (plan.needsVideoDescription) {
       const replacementDescription = await describeMissingProxy(src, audio, true);
       if (closed || cancelled(session)) return { response: null, completion: null };
-      plan = planIntake({ src, needsProxy: true, audio }, true, replacementDescription);
+      plan = planIntake({ src, needsProxy: true, audio }, true, replacementDescription, portable);
     }
     if (plan.cached) {
       reportCacheHit(session);
@@ -779,13 +1272,14 @@ function createMediaIntakeRuntime(options = {}) {
       plan.dispose();
       return { response: null, completion: null };
     }
-    const unprotect = protectCacheDir(plan.dir);
+    const unprotect = protectPlan(plan);
     let execution;
     let writer = null;
     let readinessError = null;
+    let preparationReady = !plan.prepare;
     const stopUnreadyWriter = () => { try { writer?.kill?.(); } catch (error) {} };
     try {
-      execution = ffmpegExecution.execute(plan.args, {
+      const startWriter = () => ffmpegExecution.execute(plan.args, {
         executionKind: 'direct',
         deferTerminal: true,
         onProgress: payload => reportProgress(session, payload),
@@ -799,6 +1293,11 @@ function createMediaIntakeRuntime(options = {}) {
         },
         shouldSend: () => !cancelled(session),
       });
+      execution = plan.prepare ? plan.prepare(() => !cancelled(session)).then(() => {
+        if (closed || cancelled(session)) throw new IngestSupersededError();
+        preparationReady = true;
+        return startWriter();
+      }) : startWriter();
     } catch (error) {
       execution = Promise.reject(error);
     }
@@ -829,7 +1328,7 @@ function createMediaIntakeRuntime(options = {}) {
         try { size = (await fsp.stat(proxy)).size; } catch (error) {}
         if (!ownsStream()) return { response: null, completion };
         if (job.error) throw new Error('轉檔失敗：' + job.error);
-        if (size >= 131072 || (job.done && size > 0)) { ready = true; break; }
+        if (preparationReady && (size >= 131072 || (job.done && size > 0))) { ready = true; break; }
         await delay(300);
         if (!ownsStream()) return { response: null, completion };
       }
@@ -865,6 +1364,7 @@ function createMediaIntakeRuntime(options = {}) {
 
   async function close() {
     closed = true;
+    await Promise.allSettled([...portableHashes]);
     if (!streamServer) return;
     const server = streamServer;
     await streamServerReady.catch(() => {});
@@ -907,6 +1407,7 @@ function createMediaIntakeRuntime(options = {}) {
     close,
     ingest,
     inspectCache,
+    isDirWritable,
     isPreviewCacheMedia,
     releaseStream,
     stream,

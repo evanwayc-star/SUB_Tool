@@ -13,6 +13,18 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Electron 主視窗載入 dist/index.html；--dev 則載入固定的 Vite 位址。
+// title 是使用者可變的專案名稱，queue、compare 與 mpv guide 都不是主頁。
+function isMainWindowTarget(target) {
+  if (target?.type !== 'page' || typeof target.url !== 'string') return false;
+  try {
+    const url = new URL(target.url);
+    if (url.protocol === 'file:') return /(?:^|\/)dist\/index\.html$/i.test(url.pathname);
+    return url.protocol === 'http:' && url.hostname === 'localhost'
+      && url.port === '8777' && url.pathname === '/';
+  } catch { return false; }
+}
+
 async function reservePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -277,6 +289,7 @@ module.exports = {
   ROOT,
   ELECTRON,
   delay,
+  isMainWindowTarget,
   reservePort,
   getJSON,
   waitFor,

@@ -13,6 +13,7 @@
 'use strict';
 
 const path = require('path');
+const { decodeText } = require('../shared/text-encoding.cjs');
 
 /** 專案檔副檔名正規表達式 */
 const PROJECT_FILE = /\.(subtool|json)$/i;
@@ -68,55 +69,8 @@ function collectProjectMediaPaths(project) {
  */
 function parseProjectBuffer(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-  let text;
-
-  // UTF-16LE BOM
-  if (buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xFE) {
-    text = buffer.subarray(2).toString('utf16le');
-  } 
-  // UTF-16BE BOM
-  else if (buffer.length >= 2 && buffer[0] === 0xFE && buffer[1] === 0xFF) {
-    const body = Buffer.from(buffer.subarray(2));
-    for (let i = 0; i + 1 < body.length; i += 2) {
-      const byte = body[i];
-      body[i] = body[i + 1];
-      body[i + 1] = byte;
-    }
-    text = body.toString('utf16le');
-  } 
-  // UTF-8 BOM
-  else if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) {
-    text = buffer.subarray(3).toString('utf8');
-  } 
-  // 無 BOM 採樣啟發式偵測
-  else {
-    let zeroEven = 0;
-    let zeroOdd = 0;
-    const sampleLength = Math.min(buffer.length, 4000);
-    for (let i = 0; i < sampleLength; i++) {
-      if (buffer[i] === 0) {
-        if (i % 2 === 0) zeroEven++;
-        else zeroOdd++;
-      }
-    }
-
-    if (zeroOdd > sampleLength * 0.15 && zeroOdd > zeroEven * 3) {
-      text = buffer.toString('utf16le');
-    } else if (zeroEven > sampleLength * 0.15 && zeroEven > zeroOdd * 3) {
-      const body = Buffer.from(buffer);
-      for (let i = 0; i + 1 < body.length; i += 2) {
-        const byte = body[i];
-        body[i] = body[i + 1];
-        body[i + 1] = byte;
-      }
-      text = body.toString('utf16le');
-    } else {
-      text = buffer.toString('utf8');
-    }
-  }
-
   try {
-    const project = JSON.parse(text);
+    const project = JSON.parse(decodeText(buffer));
     return project && typeof project === 'object' && !Array.isArray(project) ? project : null;
   } catch (error) {
     return null;

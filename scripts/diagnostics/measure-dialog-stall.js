@@ -25,44 +25,113 @@
 ============================================================================== */
 
 
-const { execFileSync } = require('child_process');
-const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
+const { isMainWindowTarget } = require('../acceptance/cdp-electron-harness.js');
+const { findMainPid, connectMainInspector } = require('./main-inspector.js');
 const { rendererLagProbe } = require('./renderer-lag-probe.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const inPage = js => `(async () => {
-  const B = require('electron').BrowserWindow;
-  const w = B.getAllWindows().find(x => !x.getParentWindow());
-  return await w.webContents.executeJavaScript(${JSON.stringify(js)}, true);
-})()`;
+const TOKEN = require('node:crypto').randomUUID();
 
-/* 兩種啟動方式的行程名不一樣，兩個都要認：
-   安裝版是 SUB Tool.exe，啟動桌面版.bat 跑的是 electron.exe。 */
-function findMainPid() {
-  const ps = 'Get-CimInstance Win32_Process | '
-    + "Where-Object { ($_.Name -eq 'SUB Tool.exe' -or $_.Name -eq 'electron.exe') "
-    + "-and $_.CommandLine -notmatch '--type=' } | "
-    + 'Select-Object -First 1 -ExpandProperty ProcessId';
-  try {
-    return Number(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim());
-  } catch (e) { return NaN; }
+// 有限診斷工作持有自己的 hook、timer、renderer 與讀數；不改常駐輸入探針的全域資料。
+async function dialogDiagnosticSession(command, token, rendererScript, isMain) {
+  const key = '__subtoolDialogDiagnostic';
+  if (command === 'start') {
+    const previous = globalThis[key];
+    if (previous?.active) throw new Error('開檔診斷已在執行');
+    // 保留失敗收尾的資格，下一輪先重試；不能永久鎖住，也不能漏掉原 renderer。
+    if (previous) await dialogDiagnosticSession('stop', previous.token);
+    if (globalThis[key]) throw new Error('開檔診斷已在執行');
+    const { BrowserWindow, dialog } = require('electron');
+    const w = BrowserWindow.getAllWindows().find(x => !x.getParentWindow()
+      && isMain({ type: 'page', url: x.webContents.getURL() }));
+    if (!w) throw new Error('找不到 SUB Tool 主 renderer 視窗');
+    const session = { token, active: true, webContents: w.webContents, dialog,
+      original: dialog.showOpenDialog, dialogs: [], lag: [], nextId: 0 };
+    globalThis[key] = session;
+    session.wrapper = (...args) => {
+      if (!session.active) return session.original.apply(dialog, args);
+      const id = ++session.nextId;
+      session.dialogs.push({ id, phase: 'enter', t: Date.now() });
+      const record = details => {
+        if (session.active) session.dialogs.push({ id, t: Date.now(), ...details });
+      };
+      try {
+        return Promise.resolve(session.original.apply(dialog, args)).then(result => {
+          record({ phase: 'resolved', canceled: result.canceled });
+          return result;
+        }, error => { record({ phase: 'rejected' }); throw error; });
+      } catch (error) { record({ phase: 'rejected' }); throw error; }
+    };
+    dialog.showOpenDialog = session.wrapper;
+    let last = performance.now();
+    session.timer = setInterval(() => {
+      const now = performance.now(), drift = now - last - 100;
+      if (drift > 200) session.lag.push({ t: Date.now(), blocked: drift });
+      last = now;
+    }, 100);
+    // 先登記 owner：即使 renderer 已裝上探針但回覆失敗，finally 仍能釋放它。
+    await session.webContents.executeJavaScript(rendererScript, true);
+    return true;
+  }
+  const session = globalThis[key];
+  if (!session || session.token !== token) {
+    if (command === 'stop') return true;
+    throw new Error('開檔診斷已結束或被取代');
+  }
+  if (command === 'stop') {
+    session.active = false;
+    clearInterval(session.timer);
+    if (session.dialog.showOpenDialog === session.wrapper) session.dialog.showOpenDialog = session.original;
+    if (!session.webContents.isDestroyed()) {
+      try {
+        await session.webContents.executeJavaScript(`(() => {
+          const probe = window.__subtoolDialogProbe;
+          if (probe?.token === ${JSON.stringify(token)}) probe.cleanup();
+          return true;
+        })()`, true);
+      } catch (error) {
+        if (!session.webContents.isDestroyed()) throw error;
+      }
+    }
+    if (globalThis[key] === session) delete globalThis[key];
+    return true;
+  }
+  const page = await session.webContents.executeJavaScript(`(() => {
+    const probe = window.__subtoolDialogProbe;
+    if (probe?.token !== ${JSON.stringify(token)}) throw new Error('renderer 診斷已被取代');
+    return { clk: probe.clicks, lagRend: window.__dialogLag || [], droppedRend: window.__dialogLagDropped || 0 };
+  })()`, true);
+  return { ...page, dlg: session.dialogs, lagMain: session.lag };
 }
 
-/* 事件迴圈阻塞偵測：100ms 的計時器，只記錄漂移超過 200ms 的那幾次。
-   成本可忽略，而且不需要 app 內建任何東西。 */
-const LAG_PROBE = tag => `(() => {
-  if (globalThis.__lagTimer_${tag}) clearInterval(globalThis.__lagTimer_${tag});
-  globalThis.__lag_${tag} = [];
-  let last = Date.now();
-  globalThis.__lagTimer_${tag} = setInterval(() => {
-    const now = Date.now();
-    const drift = now - last - 100;
-    if (drift > 200) globalThis.__lag_${tag}.push({ t: now, blocked: drift });
-    last = now;
-  }, 100);
-  return true;
+const ARM_RENDERER = `(() => {
+  const token = ${JSON.stringify(TOKEN)};
+  if (window.__subtoolDialogProbe) {
+    if (window.__subtoolDialogProbe.token === token) return true;
+    throw new Error('renderer 開檔診斷已在執行');
+  }
+  const probe = { token, clicks: [] };
+  window.__subtoolDialogProbe = probe;
+  const click = e => {
+    const b = e.target.closest && e.target.closest('[data-act]');
+    if (b) probe.clicks.push({ act: b.dataset.act, t: Date.now() });
+  };
+  probe.cleanup = () => {
+    document.removeEventListener('click', click, true);
+    if (window.__subtoolDialogProbe !== probe) return;
+    window.__dialogLagTimer_cleanup?.();
+    delete window.__dialogLagTimer; delete window.__dialogLag; delete window.__dialogLagDropped;
+    delete window.__subtoolDialogProbe;
+  };
+  document.addEventListener('click', click, true);
+  return ${rendererLagProbe({ timerKey: '__dialogLagTimer', recordsKey: '__dialogLag' })};
 })()`;
+
+function sessionCommand(command) {
+  return `(${dialogDiagnosticSession.toString()})(${JSON.stringify(command)}, ${JSON.stringify(TOKEN)}, ${JSON.stringify(ARM_RENDERER)}, (${isMainWindowTarget.toString()}))`;
+}
+
 
 /* 等 app 出現。這樣可以【先】把量測跑起來，使用者再開 app——
    否則要求「先開 app 再跑腳本」很容易忘，而且錯過載入那一段就白跑一次。 */
@@ -85,113 +154,90 @@ async function waitForApp(maxMs = 10 * 60 * 1000) {
     process.exit(1);
   }
   console.log(`主行程 PID = ${pid}`);
-  try { process._debugProcess(pid); } catch (e) { console.error('開啟 inspector 失敗：', e.message); }
-  await sleep(1200);
 
-  let t;
-  try { t = (await getJSON('http://127.0.0.1:9229/json/list'))[0]; }
-  catch (e) { console.error('連不上主行程的 inspector（9229）：' + e.message); process.exit(1); }
-  const main = new CdpClient((t).webSocketDebuggerUrl);
-    await main.connect();
+  const main = await connectMainInspector(pid);
+  let interruption;
+  const signalHandlers = new Map([['SIGINT', 130], ['SIGTERM', 143]].map(([signal, exitCode]) => [signal, () => {
+    interruption ||= Object.assign(new Error(`量測已中止（${signal}）`), { exitCode });
+    process.exitCode = interruption.exitCode;
+  }]));
+  const checkInterrupted = () => { if (interruption) throw interruption; };
+  // 中止仍走同一個 finally；不能讓 CLI 先離開，留下 app 裡的 active owner。
+  // 等目前 CDP 呼叫完成後再收尾，避免 renderer 安裝與清除彼此超車。
+  for (const [signal, handler] of signalHandlers) process.on(signal, handler);
+  try {
+    checkInterrupted();
+    await main.evaluate(sessionCommand('start'));
+    checkInterrupted();
 
-  /* 主行程：攔 dialog.showOpenDialog，記錄進入／回傳的時間。 */
-  await main.evaluate(`(() => {
-    const d = require('electron').dialog;
-    if (!globalThis.__dlgArmed) {
-      const orig = d.showOpenDialog.bind(d);
-      d.showOpenDialog = (...a) => {
-        globalThis.__dlgLog.push({ phase: 'enter', t: Date.now() });
-        return orig(...a).then(r => {
-          globalThis.__dlgLog.push({ phase: 'resolved', t: Date.now(), canceled: r.canceled });
-          return r;
-        });
-      };
-      globalThis.__dlgArmed = true;
+    console.log('\n量測已就緒。');
+    console.log('★ 現在請在 SUB Tool 裡按「開啟影音」，等對話框真的出現後按【取消】。');
+    console.log('（最多等 10 分鐘，抓到就會自動印結果）\n');
+
+    /* 只認【開啟影音】那一輪。
+
+       先前這裡寫成「看到任何一次 resolved 就收工」，結果抓到的是使用者在載入影音
+       【之前】按的『開啟專案』——那一輪只花 2 ms，完全正常，白跑一趟。
+       現在要等到：出現一次 act 含 media 的點擊，而且它之後有一次 showOpenDialog。 */
+    const deadline = Date.now() + 10 * 60 * 1000;
+    let snapshot;
+    while (Date.now() < deadline) {
+      checkInterrupted();
+      snapshot = await main.evaluate(sessionCommand('read'));
+      checkInterrupted();
+      const { dlg, clk } = snapshot;
+      const media = clk.filter(c => /media/.test(c.act)).pop();
+      const entered = media && dlg.find(x => x.phase === 'enter' && x.t >= media.t);
+      // 必須等同一呼叫回覆；固定等 1.5 秒會在使用者尚未關閉對話框時提早結束。
+      if (entered && dlg.some(x => x.id === entered.id && x.phase !== 'enter')) break;
+      process.stdout.write('.');
+      await sleep(2000);
     }
-    globalThis.__dlgLog = [];
-    return true;
-  })()`);
-  await main.evaluate(LAG_PROBE('main'));
+    console.log('\n');
 
-  /* renderer：記錄按鈕點擊時間 + 自己的阻塞偵測。 */
-  await main.evaluate(inPage(`(() => {
-    window.__clickLog = [];
-    if (!window.__clickArmed) {
-      document.addEventListener('click', e => {
-        const b = e.target.closest && e.target.closest('[data-act]');
-        if (b) window.__clickLog.push({ act: b.dataset.act, t: Date.now() });
-      }, true);
-      window.__clickArmed = true;
+    const { dlg, clk, lagMain, lagRend, droppedRend } = await main.evaluate(sessionCommand('read'));
+    checkInterrupted();
+    const hhmmssms = t2 => new Date(t2).toTimeString().slice(0, 8) + '.' + String(t2 % 1000).padStart(3, '0');
+
+    /* 配對【那一次】開啟影音的點擊與它之後的 showOpenDialog——不是第一次的。
+       同一次執行裡通常還有先前開啟專案那一輪，取錯就會算成 2 ms 而誤判成正常。 */
+    const c0 = clk.filter(c => /media/.test(c.act)).pop();
+    const d0 = c0 ? dlg.find(x => x.phase === 'enter' && x.t >= c0.t) : null;
+    const d1 = d0 ? dlg.find(x => x.phase === 'resolved' && x.id === d0.id) : null;
+
+    console.log('renderer 收到的點擊：');
+    clk.forEach(c => console.log(`  ${hhmmssms(c.t)}  act=${c.act}`));
+    console.log('\n主行程的對話框事件：');
+    dlg.forEach(x => console.log(`  ${hhmmssms(x.t)}  ${x.phase}` +
+      (x.canceled !== undefined ? `  canceled=${x.canceled}` : '')));
+
+    console.log('\n主行程採樣延遲（>200ms，原因待查）：');
+    if (!lagMain.length) console.log('  （沒有）');
+    lagMain.forEach(l => console.log(`  ${hhmmssms(l.t)}  採樣延遲 ${l.blocked} ms`));
+    console.log('\nrenderer 可見區間的採樣延遲（>200ms，原因待查）：');
+    if (droppedRend) console.log(`  （只保留最近 600 筆；略過 ${droppedRend} 筆）`);
+    if (!lagRend.length) console.log('  （沒有）');
+    lagRend.forEach(l => console.log(`  ${hhmmssms(l.t)}  採樣延遲 ${l.blocked} ms`));
+
+    console.log('\n================ 量測摘要 ================');
+    if (c0 && d0) {
+      const a = d0.t - c0.t;
+      console.log(`  點擊 → 主行程進入 showOpenDialog： ${a} ms   ← 含事件處理、IPC 與排程`);
+      if (d1) console.log(`  呼叫 → Promise 回覆：             ${d1.t - d0.t} ms   ← 含原生對話框、使用者操作與排程`);
+      console.log('');
+      console.log(a > 3000
+        ? '  → 呼叫前的等待較長；請對照上方採樣與 trace，查明事件處理、IPC 或排程的實際耗時。'
+        : '  → 本輪呼叫前的間隔較短；其他等待仍須另查，不能排除呼叫後的 JavaScript 或作業系統工作。');
+    } else {
+      console.log('  沒有抓到完整的一輪。有按到「開啟影音」嗎？');
+      console.log(`  （clickLog ${clk.length} 筆、dlgLog ${dlg.length} 筆）`);
     }
-    return ${rendererLagProbe({ timerKey: '__lagTimer_rend', recordsKey: '__lag_rend' })};
-  })()`));
 
-  console.log('\n量測已就緒。');
-  console.log('★ 現在請在 SUB Tool 裡按「開啟影音」，等對話框真的出現後按【取消】。');
-  console.log('（最多等 10 分鐘，抓到就會自動印結果）\n');
-
-  /* 只認【開啟影音】那一輪。
-
-     先前這裡寫成「看到任何一次 resolved 就收工」，結果抓到的是使用者在載入影音
-     【之前】按的『開啟專案』——那一輪只花 2 ms，完全正常，白跑一趟。
-     現在要等到：出現一次 act 含 media 的點擊，而且它之後有一次 showOpenDialog。 */
-  const deadline = Date.now() + 10 * 60 * 1000;
-  let dlg = [], clk = [];
-  while (Date.now() < deadline) {
-    dlg = JSON.parse(await main.evaluate(`JSON.stringify(globalThis.__dlgLog || [])`));
-    clk = JSON.parse(await main.evaluate(inPage(`JSON.stringify(window.__clickLog || [])`)));
-    const media = clk.filter(c => /media/.test(c.act)).pop();
-    if (media && dlg.some(x => x.phase === 'enter' && x.t >= media.t)) {
-      /* 抓到了。再等一下把 resolved（使用者按取消／選檔）也收進來。 */
-      await sleep(1500);
-      dlg = JSON.parse(await main.evaluate(`JSON.stringify(globalThis.__dlgLog || [])`));
-      break;
+  } finally {
+    try { await main.evaluate(sessionCommand('stop')); }
+    finally {
+      main.close();
+      for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
     }
-    process.stdout.write('.');
-    await sleep(2000);
   }
-  console.log('\n');
-
-  clk = JSON.parse(await main.evaluate(inPage(`JSON.stringify(window.__clickLog || [])`)));
-  const lagMain = JSON.parse(await main.evaluate(`JSON.stringify(globalThis.__lag_main || [])`));
-  const lagRend = JSON.parse(await main.evaluate(inPage(`JSON.stringify(window.__lag_rend || [])`)));
-  const droppedRend = Number(await main.evaluate(inPage('window.__lag_rendDropped || 0'))) || 0;
-  const hhmmssms = t2 => new Date(t2).toTimeString().slice(0, 8) + '.' + String(t2 % 1000).padStart(3, '0');
-
-  /* 配對【那一次】開啟影音的點擊與它之後的 showOpenDialog——不是第一次的。
-     同一次執行裡通常還有先前開啟專案那一輪，取錯就會算成 2 ms 而誤判成正常。 */
-  const c0 = clk.filter(c => /media/.test(c.act)).pop();
-  const d0 = c0 ? dlg.find(x => x.phase === 'enter' && x.t >= c0.t) : null;
-  const d1 = d0 ? dlg.find(x => x.phase === 'resolved' && x.t >= d0.t) : null;
-
-  console.log('renderer 收到的點擊：');
-  clk.forEach(c => console.log(`  ${hhmmssms(c.t)}  act=${c.act}`));
-  console.log('\n主行程的對話框事件：');
-  dlg.forEach(x => console.log(`  ${hhmmssms(x.t)}  ${x.phase}` +
-    (x.canceled !== undefined ? `  canceled=${x.canceled}` : '')));
-
-  console.log('\n主行程採樣延遲（>200ms，原因待查）：');
-  if (!lagMain.length) console.log('  （沒有）');
-  lagMain.forEach(l => console.log(`  ${hhmmssms(l.t)}  採樣延遲 ${l.blocked} ms`));
-  console.log('\nrenderer 可見區間的採樣延遲（>200ms，原因待查）：');
-  if (droppedRend) console.log(`  （只保留最近 600 筆；略過 ${droppedRend} 筆）`);
-  if (!lagRend.length) console.log('  （沒有）');
-  lagRend.forEach(l => console.log(`  ${hhmmssms(l.t)}  採樣延遲 ${l.blocked} ms`));
-
-  console.log('\n================ 量測摘要 ================');
-  if (c0 && d0) {
-    const a = d0.t - c0.t;
-    console.log(`  點擊 → 主行程進入 showOpenDialog： ${a} ms   ← 含事件處理、IPC 與排程`);
-    if (d1) console.log(`  呼叫 → Promise 回覆：             ${d1.t - d0.t} ms   ← 含原生對話框、使用者操作與排程`);
-    console.log('');
-    console.log(a > 3000
-      ? '  → 呼叫前的等待較長；請對照上方採樣與 trace，查明事件處理、IPC 或排程的實際耗時。'
-      : '  → 本輪呼叫前的間隔較短；其他等待仍須另查，不能排除呼叫後的 JavaScript 或作業系統工作。');
-  } else {
-    console.log('  沒有抓到完整的一輪。有按到「開啟影音」嗎？');
-    console.log(`  （clickLog ${clk.length} 筆、dlgLog ${dlg.length} 筆）`);
-  }
-
-  main.close();
-  process.exit(0);
-})().catch(e => { console.error('失敗:', e.message); process.exit(1); });
+})().catch(e => { console.error('失敗:', e.message); process.exitCode ||= e.exitCode || 1; });

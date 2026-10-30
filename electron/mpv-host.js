@@ -863,7 +863,10 @@ function createMpvHost(deps) {
       return send(['set_property', 'pause', true]);
     },
     direction: setDirection,
-    mute: value => send(['set_property', 'mute', value]),
+    // The renderer uses this acknowledgment as the handoff boundary before
+    // starting another audio carrier. Pipe writes alone do not prove mpv has
+    // applied the mute, and a disconnected player must not report success.
+    mute: value => send(['set_property', 'mute', value], true, { requireSuccess: true }),
     rate: value => send(['set_property', 'speed', value]),
     brightness: value => send(['set_property', 'brightness', Math.max(-100, Math.min(0, Math.round(value)))]),
     isPresent: () => alive(hostWin),

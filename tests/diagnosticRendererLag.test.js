@@ -8,6 +8,7 @@ import { parse } from 'acorn';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(import.meta.dirname, '..');
 const { rendererLagProbe } = require('../scripts/diagnostics/renderer-lag-probe.js');
+const { isMainWindowTarget } = require('../scripts/acceptance/cdp-electron-harness.js');
 
 function find(node, predicate) {
   if (!node || typeof node !== 'object') return null;
@@ -25,10 +26,8 @@ function find(node, predicate) {
 async function probe(file, name) {
   const source = fs.readFileSync(path.join(ROOT, 'scripts/diagnostics', file), 'utf8');
   const ast = parse(source, { ecmaVersion: 'latest' });
-  const selected = name
-    ? find(ast, node => node.type === 'VariableDeclarator' && node.id.name === name)?.init
-    : find(ast, node => node.type === 'CallExpression' && node.callee.name === 'inPage'
-      && source.slice(node.start, node.end).includes('window.__clickLog'))?.arguments[0];
+  const selected = find(ast, node => node.type === 'VariableDeclarator'
+    && node.id.name === (name || 'ARM_RENDERER'))?.init;
   expect(selected).toBeTruthy();
   let now = 0, wallOffset = 0, nextTimer = 0;
   const listeners = new Map(), timers = new Map();
@@ -47,9 +46,11 @@ async function probe(file, name) {
     clearInterval: id => timers.delete(id),
   });
   page.globalThis = page.window;
-  const webContents = { executeJavaScript: code => vm.runInContext(code, page), isDestroyed: () => false };
+  const webContents = { getURL: () => 'file:///SUB_Tool/dist/index.html',
+    executeJavaScript: code => vm.runInContext(code, page), isDestroyed: () => false };
   const host = vm.createContext({
-    rendererLagProbe, PROFILE_TOKEN: 'lag-fixture',
+    URL,
+    rendererLagProbe, isMainWindowTarget, PROFILE_TOKEN: 'lag-fixture', TOKEN: 'dialog-fixture', CPU_TOKEN: 'cpu-fixture',
     __subtoolDiagnosticProfile: { token: 'lag-fixture', ready: true, attached: true,
       debugger: { isAttached: () => true }, webContents },
     require: () => ({ BrowserWindow: { getAllWindows: () => [{
@@ -57,7 +58,7 @@ async function probe(file, name) {
       webContents,
     }] } }),
   });
-  if (name === 'ARM_LAG') vm.runInContext(ast.body.filter(node => node.type === 'FunctionDeclaration')
+  if (name === 'ARM_LAG' || file === 'watch-cpu-and-lag.js') vm.runInContext(ast.body.filter(node => node.type === 'FunctionDeclaration')
     .map(node => source.slice(node.start, node.end)).join('\n'), host);
   const code = vm.runInContext(source.slice(selected.start, selected.end), host);
   const arm = () => vm.runInContext(code, name ? host : page);
@@ -73,7 +74,8 @@ async function probe(file, name) {
     visibility,
     moveWallClock: ms => { wallOffset += ms; },
     count: () => page.window.__lagTotal_p ?? page.window['__lagTotal_p_lag-fixture'] ?? page.window.__lagSum
-      ?? (page.window.__lag_rend || []).reduce((total, row) => total + row.blocked, 0),
+      ?? page.window['__lagSum_cpu_cpu-fixture']
+      ?? (page.window.__dialogLag || []).reduce((total, row) => total + row.blocked, 0),
   };
 }
 
@@ -116,8 +118,8 @@ describe('renderer 診斷的真實注入入口', () => {
   it('長時間對話框量測保留最近事件並記錄被丟棄的筆數', async () => {
     const recorder = await probe('measure-dialog-stall.js', null);
     for (let i = 0; i < 601; i++) recorder.advance(1000);
-    expect(recorder.page.window.__lag_rend).toHaveLength(600);
-    expect(recorder.page.window.__lag_rendDropped).toBe(1);
-    expect(recorder.page.window.__lag_rend[0]).toEqual({ t: 2000, blocked: 900 });
+    expect(recorder.page.window.__dialogLag).toHaveLength(600);
+    expect(recorder.page.window.__dialogLagDropped).toBe(1);
+    expect(recorder.page.window.__dialogLag[0]).toEqual({ t: 2000, blocked: 900 });
   });
 });

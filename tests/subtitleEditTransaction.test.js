@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -31,6 +31,12 @@ function mountSystemDom() {
   Object.defineProperty(HTMLElement.prototype, 'isContentEditable', {
     configurable: true,
     get() { return this.getAttribute('contenteditable') === 'true'; },
+  });
+  // Vitest's global Window proxy is not accepted by jsdom's UIEvent constructor.
+  // Keep the event and propagation real; this UI handler does not read view.
+  const BrowserMouseEvent = MouseEvent;
+  vi.stubGlobal('MouseEvent', class extends BrowserMouseEvent {
+    constructor(type, options = {}) { super(type, { ...options, view: null }); }
   });
   HTMLElement.prototype.scrollIntoView = vi.fn();
   HTMLMediaElement.prototype.pause = vi.fn();
@@ -99,6 +105,8 @@ beforeEach(() => {
   document.getElementById('toast').textContent = '';
   History.reset();
 });
+
+afterAll(() => { vi.unstubAllGlobals(); });
 
 describe('字幕複製保留獨立覆蓋',()=>{
   it('拆分、剪貼簿與軌道複製都保留逐句樣式且不共用物件',()=>{
@@ -533,6 +541,118 @@ describe('拆分字幕 UI adapters', () => {
     } finally {
       renderListSynchronously = false;
       rafSpy.mockRestore();
+    }
+  });
+
+  it('修改字幕 modal 拆分後接續編輯新句，文字提交與 Undo 仍由列表交易處理', async () => {
+    State.tracks[0].locked = false;
+    await StylePanelController.openCueEditModal(State.cues[0]);
+    await vi.advanceTimersByTimeAsync(30);
+    const editor = document.getElementById('cueEditTa');
+    placeCursor(editor, 2);
+    renderListSynchronously = true;
+
+    editor.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
+    }));
+    await vi.advanceTimersByTimeAsync(30);
+
+    const newCue = State.cues.find(cue => cue.id !== 'target');
+    const newField = document.querySelector(`.sub-row[data-id="${newCue.id}"] .txt`);
+    expect(State.cues.map(cue => cue.text)).toEqual(['前半', '後半']);
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+    expect(newField.contentEditable).toBe('true');
+    expect(document.activeElement).toBe(newField);
+    expect(History.stack.map(entry => entry.label)).toEqual(['初始', '拆分字幕']);
+
+    newField.innerText = '繼續修改後半';
+    newField.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    newField.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    expect(newCue.text).toBe('繼續修改後半');
+    expect(History.stack).toHaveLength(3);
+    History.undo();
+    expect(State.cues.map(cue => cue.text)).toEqual(['前半', '後半']);
+    History.undo();
+    expect(State.cues.map(cue => cue.text)).toEqual(['前半後半']);
+  });
+
+  it('修改字幕 modal 的 Ctrl+Enter 一次提交樣式草稿與拆分，保留背景樣式且可一次 Undo', async () => {
+    State.tracks[0].locked = false;
+    const cue = State.cues[0];
+    cue.style = { fontSize: 40, posX: 12 };
+    History.reset();
+    await StylePanelController.openCueEditModal(cue);
+    await vi.advanceTimersByTimeAsync(30);
+    document.getElementById('cueStyle_fontSize').value = '72';
+    cue.style.posY = 33;
+    History.record('背景樣式');
+    const editor = document.getElementById('cueEditTa');
+    placeCursor(editor, 2);
+
+    editor.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
+    }));
+
+    expect(State.cues.map(cue => ({ text: cue.text, style: cue.style }))).toEqual([
+      { text: '前半', style: { fontSize: 72, posX: 12, posY: 33 } },
+      { text: '後半', style: { fontSize: 72, posX: 12, posY: 33 } },
+    ]);
+    expect(History.stack.map(entry => entry.label)).toEqual(['初始', '背景樣式', '拆分字幕']);
+    History.undo();
+    expect(State.cues.map(cue => ({ text: cue.text, style: cue.style }))).toEqual([
+      { text: '前半後半', style: { fontSize: 40, posX: 12, posY: 33 } },
+    ]);
+  });
+
+  it.each(['invalid', 'conflict'])('修改字幕 modal 的 Ctrl+Enter 拒絕 %s 樣式且不先切分文字', async failure => {
+    State.tracks[0].locked = false;
+    const cue = State.cues[0];
+    cue.style = { fontSize: 40 };
+    History.reset();
+    await StylePanelController.openCueEditModal(cue);
+    await vi.advanceTimersByTimeAsync(30);
+    document.getElementById('cueStyle_fontSize').value = failure === 'invalid' ? '' : '72';
+    if (failure === 'conflict') {
+      cue.style.fontSize = 90;
+      History.record('背景樣式');
+    }
+    const editor = document.getElementById('cueEditTa');
+    placeCursor(editor, 2);
+    const before = structuredClone(State.cues), history = History.stack.length;
+
+    editor.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
+    }));
+
+    expect(State.cues).toEqual(before);
+    expect(History.stack).toHaveLength(history);
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
+    expect(document.getElementById('toast').textContent).toContain(failure === 'invalid' ? '字級的樣式值無效' : '字幕樣式已被其他編輯更新');
+    (await import('../src/ui.js')).closeModal();
+  });
+
+  it.each(['blank', 'time'])('修改字幕 modal 的 Ctrl+Enter 在 %s 切分被拒絕時也不先提交樣式', async failure => {
+    State.tracks[0].locked = false;
+    const cue = State.cues[0];
+    Object.assign(cue, { start: 10, end: 20, timed: true, style: { fontSize: 40 } });
+    History.reset();
+    await StylePanelController.openCueEditModal(cue);
+    await vi.advanceTimersByTimeAsync(30);
+    document.getElementById('cueStyle_fontSize').value = '72';
+    const editor = document.getElementById('cueEditTa');
+    placeCursor(editor, failure === 'blank' ? 0 : 2);
+    const clock = vi.spyOn(Media, 'displayTime').mockReturnValue(failure === 'blank' ? 15 : 10);
+    const before = structuredClone(State.cues);
+    try {
+      editor.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
+      }));
+      expect(State.cues).toEqual(before);
+      expect(History.stack).toHaveLength(1);
+      expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
+    } finally {
+      clock.mockRestore();
+      (await import('../src/ui.js')).closeModal();
     }
   });
 

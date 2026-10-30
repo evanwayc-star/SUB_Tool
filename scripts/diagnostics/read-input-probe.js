@@ -12,23 +12,18 @@
 ============================================================================== */
 
 
-const { execFileSync } = require('child_process');
-const { CdpClient, getJSON } = require('../acceptance/cdp-electron-harness.js');
+const { isMainWindowTarget } = require('../acceptance/cdp-electron-harness.js');
+const { findMainPid, connectMainInspector } = require('./main-inspector.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function findMainPid() {
-  const ps = 'Get-CimInstance Win32_Process | '
-    + "Where-Object { ($_.Name -eq 'SUB Tool.exe' -or $_.Name -eq 'electron.exe') "
-    + "-and $_.CommandLine -notmatch '--type=' } | "
-    + 'Select-Object -First 1 -ExpandProperty ProcessId';
-  try { return Number(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim()); }
-  catch (e) { return NaN; }
-}
 
 const inPage = js => `(async () => {
   const B = require('electron').BrowserWindow;
-  const w = B.getAllWindows().find(x => !x.getParentWindow());
+  const isMain = (${isMainWindowTarget.toString()});
+  const w = B.getAllWindows().find(x => !x.getParentWindow()
+    && isMain({ type: 'page', url: x.webContents.getURL() }));
+  if (!w) throw new Error('找不到 SUB Tool 主 renderer 視窗');
   return await w.webContents.executeJavaScript(${JSON.stringify(js)}, true);
 })()`;
 
@@ -36,11 +31,8 @@ const inPage = js => `(async () => {
   const pid = Number(process.argv[2]) || findMainPid();
   if (!pid) { console.error('app 沒有在跑。'); process.exit(1); }
   console.log(`主行程 PID = ${pid}`);
-  try { process._debugProcess(pid); } catch (e) {}
-  await sleep(1200);
 
-  const main = new CdpClient(((await getJSON('http://127.0.0.1:9229/json/list'))[0]).webSocketDebuggerUrl);
-    await main.connect();
+  const main = await connectMainInspector(pid);
   const armed = await main.evaluate(inPage('!!window.__inpArmed'));
   if (!armed) {
     console.error('頁面裡沒有探針。請先跑 scripts/diagnostics/measure-input-latency.js 裝上，');
