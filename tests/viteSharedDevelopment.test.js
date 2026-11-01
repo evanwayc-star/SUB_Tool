@@ -9,6 +9,13 @@ import { createLogger, createServer, resolveConfig } from 'vite';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
+function viteFsFileUrl(url, windows=process.platform==='win32') {
+  const parsed=new URL(url,'http://127.0.0.1');
+  const file=decodeURIComponent(parsed.pathname.slice('/@fs/'.length));
+  // Vite 的 /@fs/ 可能省略 POSIX 根目錄的斜線；磁碟代號保留原樣。
+  const absolute=file.startsWith('/')||/^[a-z]:/iu.test(file)?file:`/${file}`;
+  return `${pathToFileURL(absolute,{windows}).href}${parsed.search}`;
+}
 const callers = new Map();
 for (const name of readdirSync(join(root, 'src'), { recursive: true }).filter(name => name.endsWith('.js'))) {
   const code = readFileSync(join(root, 'src', name), 'utf8');
@@ -50,6 +57,13 @@ afterAll(async () => {
 });
 
 describe('真實 Vite 開發伺服器的共用 CJS 規則', () => {
+  it('將 Vite /@fs/ 網址還原為 POSIX 和 Windows 絕對檔案網址', () => {
+    expect(viteFsFileUrl('/@fs/tmp/cache%20name/%23clip.js?v=123',false))
+      .toBe('file:///tmp/cache%20name/%23clip.js?v=123');
+    expect(viteFsFileUrl('/@fs/C:/cache%20name/%23clip.js?v=123',true))
+      .toBe('file:///C:/cache%20name/%23clip.js?v=123');
+  });
+
   it('正式設定不使用 Vite 已棄用的 alias resolver', async () => {
     const warnings=[];
     const logger=createLogger('info');
@@ -64,10 +78,8 @@ describe('真實 Vite 開發伺服器的共用 CJS 規則', () => {
     const transformed=await response.text();
     const optimizedUrls=[];
     const executable=transformed.replace(/(from\s*["'])(\/@fs\/[^"']+)(["'])/gu,(_match,prefix,url,suffix)=>{
-      const parsed=new URL(url,origin);
-      const file=decodeURIComponent(parsed.pathname.slice('/@fs/'.length));
       optimizedUrls.push(url);
-      return `${prefix}${pathToFileURL(file).href}${parsed.search}${suffix}`;
+      return `${prefix}${viteFsFileUrl(url)}${suffix}`;
     });
     expect(optimizedUrls).toHaveLength(2);
     // optimizer 初次建立仍在背景進行；必須透過 Vite 等待輸出就緒後才交給 Node。
